@@ -11,68 +11,6 @@
 namespace lubancode::app_server {
 
 // ---------------------------------------------------------------------------
-// 镜像桥(agent <-> runtime,接线注意 1)
-// ---------------------------------------------------------------------------
-
-agent::ApprovalRequest MirrorApprovalRequest(const runtime::ApprovalRequest& request) {
-    agent::ApprovalRequest mirrored;
-    mirrored.tool_use_id = request.tool_use_id;
-    mirrored.tool_name = request.tool_name;
-    mirrored.input = request.input;
-    mirrored.reason = request.reason;
-    return mirrored;
-}
-
-runtime::ApprovalRequest MirrorApprovalRequest(const agent::ApprovalRequest& request) {
-    runtime::ApprovalRequest mirrored;
-    mirrored.tool_use_id = request.tool_use_id;
-    mirrored.tool_name = request.tool_name;
-    mirrored.input = request.input;
-    mirrored.reason = request.reason;
-    return mirrored;
-}
-
-agent::ApprovalResponse MirrorApprovalResponse(const runtime::ApprovalResponse& response) {
-    agent::ApprovalResponse mirrored;
-    switch (response.decision) {
-        case runtime::InteractionDecision::Accept:
-            mirrored.decision = agent::ApprovalDecision::Accept;
-            break;
-        case runtime::InteractionDecision::AcceptForSession:
-            mirrored.decision = agent::ApprovalDecision::AcceptForSession;
-            break;
-        case runtime::InteractionDecision::Decline:
-            mirrored.decision = agent::ApprovalDecision::Decline;
-            break;
-        case runtime::InteractionDecision::Cancel:
-            mirrored.decision = agent::ApprovalDecision::Cancel;
-            break;
-    }
-    mirrored.reason = response.reason;
-    return mirrored;
-}
-
-runtime::ApprovalResponse MirrorApprovalResponse(const agent::ApprovalResponse& response) {
-    runtime::ApprovalResponse mirrored;
-    switch (response.decision) {
-        case agent::ApprovalDecision::Accept:
-            mirrored.decision = runtime::InteractionDecision::Accept;
-            break;
-        case agent::ApprovalDecision::AcceptForSession:
-            mirrored.decision = runtime::InteractionDecision::AcceptForSession;
-            break;
-        case agent::ApprovalDecision::Decline:
-            mirrored.decision = runtime::InteractionDecision::Decline;
-            break;
-        case agent::ApprovalDecision::Cancel:
-            mirrored.decision = runtime::InteractionDecision::Cancel;
-            break;
-    }
-    mirrored.reason = response.reason;
-    return mirrored;
-}
-
-// ---------------------------------------------------------------------------
 // PendingFuture
 // ---------------------------------------------------------------------------
 
@@ -105,15 +43,7 @@ bool PendingFuture::PollFuture(std::future<std::optional<T>>& future, std::optio
     }
 }
 
-std::optional<agent::ApprovalResponse> PendingFuture::WaitApproval() {
-    const std::optional<runtime::ApprovalResponse> raw = WaitApprovalRuntime();
-    if (!raw.has_value()) {
-        return std::nullopt;
-    }
-    return MirrorApprovalResponse(*raw);
-}
-
-std::optional<runtime::ApprovalResponse> PendingFuture::WaitApprovalRuntime() {
+std::optional<runtime::ApprovalResponse> PendingFuture::WaitApproval() {
     if (approval_promise == nullptr) {
         return std::nullopt; // 形状不对(防御):按悬空收口
     }
@@ -211,7 +141,7 @@ nlohmann::json MakeUserAskParams(const std::string& thread_id, const std::string
 
 }  // namespace
 
-std::shared_ptr<agent::InteractionFuture> InteractionLedger::AskApproval(
+std::shared_ptr<runtime::InteractionFuture> InteractionLedger::AskApproval(
     const runtime::ApprovalRequest& request, const std::string& turn_id,
     const std::function<void(std::string_view method, const nlohmann::json& params)>& emit) {
     // request_id:P9 起统一走 runtime::ProcessIdAuthority(id_authority.hpp

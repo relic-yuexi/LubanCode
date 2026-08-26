@@ -14,6 +14,8 @@
 
 #include "agent/compact.hpp"
 #include "agent/context_budget.hpp"
+#include "agent/agent.hpp"  // Agent/AgentProfile(批四自立门户)
+#include "agent/context.hpp"  // EstimateHistory*:token 估算
 #include "agent/loop.hpp"
 #include "sessions/session_store.hpp"
 #include "sessions/session_lifecycle.hpp"

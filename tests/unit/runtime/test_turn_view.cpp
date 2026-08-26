@@ -23,6 +23,7 @@
 #include <string>
 #include <vector>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
@@ -114,7 +115,7 @@ TEST_CASE("loop 批次边界:三枚 tool_use 一批,start 带齐 id、串行推�
     };
     lubancode::tools::ToolRegistry registry;
     registry.Register(std::make_unique<EchoTool>("echo"));
-    lubancode::agent::Agent loop(backend, registry, "m", "sys");
+    lubancode::agent::Agent loop(backend, registry, lubancode::agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
 
     struct Log {
         std::vector<int> steps;
@@ -177,7 +178,7 @@ TEST_CASE("loop 批次边界:纯文本轮不发空 batch") {
     FakeBackend backend;
     backend.scripts = {TextScript("答")};
     lubancode::tools::ToolRegistry registry;
-    lubancode::agent::Agent loop(backend, registry, "m", "sys");
+    lubancode::agent::Agent loop(backend, registry, lubancode::agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
 
     int batches = 0;
     int steps = 0;
@@ -199,7 +200,7 @@ TEST_CASE("loop 批次边界:两批之间 step 换拍,批次序号跨 step 不�
     };
     lubancode::tools::ToolRegistry registry;
     registry.Register(std::make_unique<EchoTool>("echo"));
-    lubancode::agent::Agent loop(backend, registry, "m", "sys");
+    lubancode::agent::Agent loop(backend, registry, lubancode::agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
 
     std::vector<std::pair<int, int>> started;  // (step, batch)
     lubancode::agent::Callbacks cb;
@@ -241,7 +242,7 @@ TEST_CASE("loop 批次边界:ESC 中断时 finished 带 interrupted=true") {
     tool->flag = &cancel;
     lubancode::tools::ToolRegistry registry;
     registry.Register(std::move(tool));
-    lubancode::agent::Agent loop(backend, registry, "m", "sys");
+    lubancode::agent::Agent loop(backend, registry, lubancode::agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
 
     bool finished_interrupted = false;
     int finished_batch = -1;
@@ -855,7 +856,7 @@ TEST_CASE("RunTurn 集成:正文轮落恰一枚 Worked footer;管道模式统计
     RunBackend backend;
     backend.scripts = {TextScript("这是回答。")};
     lubancode::tools::ToolRegistry registry;
-    lubancode::agent::Agent loop(backend, registry, "m", "sys");
+    lubancode::agent::Agent loop(backend, registry, lubancode::agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
     lubancode::cli::ContextTracker tracker(1000);
     std::set<std::string> always_allowed;
     std::vector<lubancode::cli::TranscriptItem> transcript;
@@ -896,7 +897,7 @@ TEST_CASE("RunTurn 集成:错误轮落 Failed footer,下一只 composer 不粘�
     RunBackend backend;
     backend.scripts = {};  // 脚本空:第一次请求即失败
     lubancode::tools::ToolRegistry registry;
-    lubancode::agent::Agent loop(backend, registry, "m", "sys");
+    lubancode::agent::Agent loop(backend, registry, lubancode::agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
     lubancode::cli::ContextTracker tracker(1000);
     std::set<std::string> always_allowed;
     std::vector<lubancode::cli::TranscriptItem> transcript;
@@ -941,7 +942,7 @@ TEST_CASE("RunTurn 集成:同批三枚工具,start 后才进 transcript、终态
     };
     lubancode::tools::ToolRegistry registry;
     registry.Register(std::make_unique<ProbeTool>());
-    lubancode::agent::Agent loop(backend, registry, "m", "sys");
+    lubancode::agent::Agent loop(backend, registry, lubancode::agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
     lubancode::cli::ContextTracker tracker(1000);
     std::set<std::string> always_allowed;
     std::vector<lubancode::cli::TranscriptItem> transcript;

@@ -25,6 +25,7 @@
 #include <set>
 #include <vector>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "sessions/session_store.hpp"
 #include "agent/tool_trace.hpp"
@@ -306,7 +307,7 @@ TEST_CASE("五工具全成功: sequence 与 id 配对不乱") {
     auto* probe = new FakeTool("probe", tools::Tool::Result{"ok", false});
     registry.Register(std::unique_ptr<FakeTool>(probe));
 
-    agent::Agent loop(backend, registry, "m", "sys");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
     TraceCollector collector;
     agent::Callbacks callbacks;
     callbacks = collector.Decorate(callbacks);
@@ -386,7 +387,7 @@ TEST_CASE("第三枚 is_error: 最早明确失败是 #2,#3/#4 照跑") {
     };
     registry.Register(std::make_unique<FlakyTool>());
 
-    agent::Agent loop(backend, registry, "m", "sys");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
     TraceCollector collector;
     agent::Callbacks callbacks;
     callbacks = collector.Decorate(callbacks);
@@ -430,7 +431,7 @@ TEST_CASE("第三枚后 ESC: 三收口,四五记 cancelled_before_start") {
     auto* tool = new CancellingTool(cancel, 3);
     registry.Register(std::unique_ptr<CancellingTool>(tool));
 
-    agent::Agent loop(backend, registry, "m", "sys");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
     TraceCollector collector;
     agent::Callbacks callbacks;
     callbacks = collector.Decorate(callbacks);
@@ -464,7 +465,7 @@ TEST_CASE("五枚同名工具: 按 execution/tool_use id 配准") {
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("probe", tools::Tool::Result{"ok", false}));
 
-    agent::Agent loop(backend, registry, "m", "sys");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
     TraceCollector collector;
     agent::Callbacks callbacks;
     callbacks = collector.Decorate(callbacks);
@@ -703,7 +704,7 @@ TEST_CASE("消息落盘次序: assistant 先落、五结果一条 user message �
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("probe", tools::Tool::Result{"ok", false}));
 
-    agent::Agent loop(backend, registry, "m", "sys");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
     std::vector<std::string> persist_log;
     TraceCollector collector;
     agent::Callbacks callbacks;
@@ -783,9 +784,9 @@ TEST_CASE("RunOneTool: 来源/错误码随 trace 落账(unknown_tool/hook_denied
     TraceCollector deny_collector;
     agent::Callbacks deny_callbacks;
     deny_callbacks.on_pre_tool_use_hook = [](const std::string&, const std::string&,
-                                             const nlohmann::json&) -> agent::ToolHookDecision {
-        agent::ToolHookDecision decision;
-        decision.decision = agent::ToolHookDecision::Decision::Deny;
+                                             const nlohmann::json&) -> runtime::ToolHookDecision {
+        runtime::ToolHookDecision decision;
+        decision.decision = runtime::ToolHookDecision::Decision::Deny;
         decision.reason = "不许";
         return decision;
     };

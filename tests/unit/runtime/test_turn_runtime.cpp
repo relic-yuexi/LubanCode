@@ -19,6 +19,7 @@
 
 #include "api/backend.hpp"
 #include "api/types.hpp"
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "hooks/dispatcher.hpp"
 #include "runtime/id_authority.hpp"
@@ -91,7 +92,7 @@ TEST_CASE("权限:confirm 档下文件工具要问,选过 a 的放行") {
     std::set<std::string> always{"write_file"};
     rt::PermissionContext context = MakeContext(rt::PermissionMode::Confirm);
     context.always_allowed = &always;
-    const agent::ToolHookDecision no_hook;
+    const runtime::ToolHookDecision no_hook;
 
     auto verdict = rt::EvaluatePermission(context, no_hook, "write_file", nlohmann::json::object());
     CHECK(verdict.action == rt::PermissionVerdict::Action::Allow);  // 选过 a:本会话不再问
@@ -102,7 +103,7 @@ TEST_CASE("权限:confirm 档下文件工具要问,选过 a 的放行") {
 
 TEST_CASE("权限:yolo 与 --yes 全放,黑名单不拦") {
     const std::vector<std::string> deny{"rm "};
-    const agent::ToolHookDecision no_hook;
+    const runtime::ToolHookDecision no_hook;
 
     rt::PermissionContext yolo = MakeContext(rt::PermissionMode::Yolo);
     yolo.deny_commands = &deny;
@@ -119,7 +120,7 @@ TEST_CASE("权限:deny 前缀压过 allow、压过总是允许;auto+allow 前缀
     const std::vector<std::string> allow{"git status"};
     const std::vector<std::string> deny{"git push"};
     std::set<std::string> always{"run_command"};
-    const agent::ToolHookDecision no_hook;
+    const runtime::ToolHookDecision no_hook;
 
     SUBCASE("deny 命中,confirm 档:问(deny_hit)") {
         rt::PermissionContext context = MakeContext(rt::PermissionMode::Confirm);
@@ -152,8 +153,8 @@ TEST_CASE("权限:PreToolUse 表态参与——allow 跳问,ask 拉回,deny 规�
 
     SUBCASE("hook allow:跳过用户确认") {
         rt::PermissionContext context = MakeContext(rt::PermissionMode::Confirm);
-        agent::ToolHookDecision pre;
-        pre.decision = agent::ToolHookDecision::Decision::Allow;
+        runtime::ToolHookDecision pre;
+        pre.decision = runtime::ToolHookDecision::Decision::Allow;
         const auto verdict =
             rt::EvaluatePermission(context, pre, "run_command", RunCommandInput("git status"));
         CHECK(verdict.action == rt::PermissionVerdict::Action::Allow);
@@ -161,8 +162,8 @@ TEST_CASE("权限:PreToolUse 表态参与——allow 跳问,ask 拉回,deny 规�
 
     SUBCASE("hook ask:本来自动放行的也拉回确认") {
         rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
-        agent::ToolHookDecision pre;
-        pre.decision = agent::ToolHookDecision::Decision::Ask;
+        runtime::ToolHookDecision pre;
+        pre.decision = runtime::ToolHookDecision::Decision::Ask;
         const auto verdict =
             rt::EvaluatePermission(context, pre, "write_file", nlohmann::json::object());
         CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);  // auto 档文件工具本放行,ask 拉回
@@ -171,8 +172,8 @@ TEST_CASE("权限:PreToolUse 表态参与——allow 跳问,ask 拉回,deny 规�
     SUBCASE("deny 规则压过 hook allow:不许钩子越权") {
         rt::PermissionContext context = MakeContext(rt::PermissionMode::Confirm);
         context.deny_commands = &deny;
-        agent::ToolHookDecision pre;
-        pre.decision = agent::ToolHookDecision::Decision::Allow;
+        runtime::ToolHookDecision pre;
+        pre.decision = runtime::ToolHookDecision::Decision::Allow;
         const auto verdict =
             rt::EvaluatePermission(context, pre, "run_command", RunCommandInput("rm -rf x"));
         CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);
@@ -183,8 +184,8 @@ TEST_CASE("权限:PreToolUse 表态参与——allow 跳问,ask 拉回,deny 规�
         rt::PermissionContext context = MakeContext(rt::PermissionMode::Yolo);
         context.deny_commands = &deny;
         context.allow_commands = &allow;
-        agent::ToolHookDecision pre;
-        pre.decision = agent::ToolHookDecision::Decision::Allow;
+        runtime::ToolHookDecision pre;
+        pre.decision = runtime::ToolHookDecision::Decision::Allow;
         const auto verdict =
             rt::EvaluatePermission(context, pre, "run_command", RunCommandInput("rm -rf x"));
         CHECK(verdict.action == rt::PermissionVerdict::Action::Allow);
@@ -200,7 +201,7 @@ TEST_CASE("TurnRuntime::EvaluatePermission:options 携带的黑名单同纯函�
     options.deny_commands = deny;
     rt::TurnRuntime core(std::move(options));
 
-    const agent::ToolHookDecision no_hook;
+    const runtime::ToolHookDecision no_hook;
     auto verdict = core.EvaluatePermission(no_hook, "run_command", RunCommandInput("rm -rf x"));
     CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);
     CHECK(verdict.deny_hit);
@@ -216,7 +217,7 @@ TEST_CASE("TurnRuntime::EvaluatePermission:options 携带的黑名单同纯函�
 TEST_CASE("取消:另一线程 request_interrupt,Run 线程可见,loop 真打断") {
     HangUntilCancelBackend backend;
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "system");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
 
     rt::TurnRuntime core(rt::TurnRuntime::Options{});
     CHECK_FALSE(core.interrupted());
@@ -244,7 +245,7 @@ TEST_CASE("取消:另一线程 request_interrupt,Run 线程可见,loop 真打断
 TEST_CASE("取消:未置位时旗子恒假(正常轮不受影响)") {
     HangUntilCancelBackend backend;
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "system");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
     rt::TurnRuntime core(rt::TurnRuntime::Options{});
     // 直接打断后收口,验证旗子状态可读、复位语义明确(轮对象随轮生灭)。
     core.request_interrupt();
@@ -407,7 +408,7 @@ TEST_CASE("AgentLoop 回调带 tool_use_id:审批请求与终态都认得这次�
     ScriptBackend backend;
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("needs_ask", true));
-    agent::Agent loop(backend, registry, "test-model", "system");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
 
     std::vector<std::string> seen_ids;
     agent::Callbacks callbacks;

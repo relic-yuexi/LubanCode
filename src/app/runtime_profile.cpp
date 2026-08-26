@@ -7,8 +7,8 @@ namespace lubancode::app {
 agent::AgentRuntimeProfile BuildMainRuntimeProfile(const config::Config& config,
                                                     const config::ModelCatalog* catalog,
                                                     const std::string& current_model) {
+    (void)current_model;  // 只用于目录条目查询;model 本身归 RequestProfile(批四)
     agent::AgentRuntimeProfile profile;
-    profile.model = current_model;
     // 输出上限三级解析:config 显式 > provider 声明 > 模型目录。
     // unset(nullopt)是合法收场:chat/responses 请求不带字段交服务端默认,
     // anthropic 必填由 client 落公开兜底——不再有写死的 4096。

@@ -17,6 +17,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"

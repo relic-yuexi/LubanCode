@@ -27,6 +27,7 @@
 #include <string>
 #include <vector>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "agent/prefix.hpp"
 #include "api/backend.hpp"

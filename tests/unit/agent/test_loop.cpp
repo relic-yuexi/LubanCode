@@ -10,6 +10,7 @@
 #include <variant>
 #include <vector>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "sessions/session_store.hpp"
 #include "api/backend.hpp"
@@ -142,7 +143,7 @@ TEST_CASE("一轮纯文本直接结束:一次请求,历史里 user+assistant 两
     backend.scripts = {TextOnlyScript("你好呀")};
     tools::ToolRegistry registry;
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     std::string accumulated_text;
     agent::Callbacks callbacks;
@@ -169,7 +170,7 @@ TEST_CASE("输出上限 unset:请求里不带 max_tokens;声明了才带(规格�
 
     // 默认构造(兼容门不传值)= unset:api::Request::max_tokens 是 nullopt,
     // 不再有一枚写死的 4096——chat/responses 端整个不发字段,交服务端默认。
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     REQUIRE(loop.Run("问", callbacks).has_value());
     REQUIRE(backend.captured_requests.size() == 1);
     CHECK_FALSE(backend.captured_requests[0].max_tokens.has_value());
@@ -179,10 +180,9 @@ TEST_CASE("输出上限 unset:请求里不带 max_tokens;声明了才带(规格�
     FakeBackend backend2;
     backend2.scripts = {TextOnlyScript("好")};
     agent::AgentRuntimeProfile profile;
-    profile.model = "test-model";
     profile.max_output_tokens = 8192;
     profile.max_output_tokens_source = agent::OutputBudgetSource::ConfigFile;
-    agent::Agent loop2(backend2, registry, profile, "system prompt");
+    agent::Agent loop2(backend2, registry, [&] { agent::AgentProfile out; out.runtime = profile; out.request.model = "test-model"; out.system_prompt = "system prompt"; return out; }());
     REQUIRE(loop2.Run("问", callbacks).has_value());
     REQUIRE(backend2.captured_requests.size() == 1);
     REQUIRE(backend2.captured_requests[0].max_tokens.has_value());
@@ -211,7 +211,7 @@ TEST_CASE("finish_reason=length 且正文为空:续跑一次后仍空,结构化�
         },
     };
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     const auto result = loop.Run("说点什么", callbacks);
     REQUIRE(result.has_value());
@@ -255,7 +255,7 @@ TEST_CASE("finish_reason=length 且正文为空:续跑一次后仍空,结构化�
         api::ContentBlockDone{0},
         api::MessageDone{"max_tokens", api::Usage{0, 64, 0, 0}},
     }};
-    agent::Agent loop2(backend2, registry, "test-model", "system prompt");
+    agent::Agent loop2(backend2, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     const auto result2 = loop2.Run("说点什么", callbacks);
     REQUIRE(result2.has_value());
     CHECK(result2->length_empty_output == false);
@@ -270,7 +270,7 @@ TEST_CASE("finish_reason=length 且正文为空:续跑一次后仍空,结构化�
         api::ContentBlockDone{0},
         api::MessageDone{"end_turn", api::Usage{10, 2, 0, 0}},
     }};
-    agent::Agent loop3(backend3, registry, "test-model", "system prompt");
+    agent::Agent loop3(backend3, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     const auto result3 = loop3.Run("说点什么", callbacks);
     REQUIRE(result3.has_value());
     CHECK(result3->length_empty_output == false);
@@ -288,7 +288,7 @@ TEST_CASE("length 续跑救得回来:第一轮思考撞墙,标记后续轮交出
         TextOnlyScript("结论是 42"),
     };
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     const auto result = loop.Run("问个问题", callbacks);
     REQUIRE(result.has_value());
@@ -311,9 +311,8 @@ TEST_CASE("length 续跑次数为 0:撞墙即收场,不烧第二次") {
     }};
     tools::ToolRegistry registry;
     agent::AgentRuntimeProfile profile;
-    profile.model = "test-model";
     profile.length_continuations = 0;  // 显式关掉续跑
-    agent::Agent loop(backend, registry, profile, "system prompt");
+    agent::Agent loop(backend, registry, [&] { agent::AgentProfile out; out.runtime = profile; out.request.model = "test-model"; out.system_prompt = "system prompt"; return out; }());
     agent::Callbacks callbacks;
     const auto result = loop.Run("问", callbacks);
     REQUIRE(result.has_value());
@@ -338,7 +337,7 @@ TEST_CASE("max_tokens 撞墙但块里有完整 tool_use:信块不信帧,照常�
     };
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"工具结果", false}, false));
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     const auto result = loop.Run("查", callbacks);
     REQUIRE(result.has_value());
@@ -357,7 +356,7 @@ TEST_CASE("tool_use 一轮 -> 执行工具 -> 第二次请求历史带 tool_resu
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"工具结果", false}, false));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     std::vector<std::string> started_tools;
     agent::Callbacks callbacks;
@@ -399,7 +398,7 @@ TEST_CASE("计数语义:一次 assistant 并行叫三件工具,仍是一步;工�
     auto* fake_tool_ptr = new FakeTool("fake_tool", tools::Tool::Result{"工具结果", false}, false);
     registry.Register(std::unique_ptr<FakeTool>(fake_tool_ptr));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     agent::Callbacks callbacks;
     const auto result = loop.Run("把三件事都办了", callbacks);
@@ -428,7 +427,7 @@ TEST_CASE("用户拒绝确认:工具不执行,tool_result 是 is_error") {
     auto* fake_tool_ptr = new FakeTool("dangerous_tool", tools::Tool::Result{"不该被看到的结果", false}, true);
     registry.Register(std::unique_ptr<FakeTool>(fake_tool_ptr));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     bool confirm_asked = false;
     agent::Callbacks callbacks;
@@ -465,7 +464,7 @@ TEST_CASE("拒绝文案回调:设了 on_tool_denial_text 用回调的,没设用�
         registry.Register(
             std::make_unique<FakeTool>("dangerous_tool", tools::Tool::Result{"不该被看到的结果", false}, true));
 
-        agent::Agent loop(backend, registry, "test-model", "system prompt");
+        agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
         agent::Callbacks callbacks;
         callbacks.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) -> bool {
             return false;
@@ -493,7 +492,7 @@ TEST_CASE("拒绝文案回调:设了 on_tool_denial_text 用回调的,没设用�
         registry.Register(
             std::make_unique<FakeTool>("dangerous_tool", tools::Tool::Result{"不该被看到的结果", false}, true));
 
-        agent::Agent loop(backend, registry, "test-model", "system prompt");
+        agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
         agent::Callbacks callbacks;
         callbacks.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) -> bool {
             return false;
@@ -514,7 +513,7 @@ TEST_CASE("超过步数上限:预算耗尽不是错误,hit_step_limit 带 steps/
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt", 4096, /*max_steps_per_turn=*/3);
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 3}, .system_prompt = "system prompt"});
 
     agent::Callbacks callbacks;
     const auto result = loop.Run("死循环吧", callbacks);
@@ -541,7 +540,7 @@ TEST_CASE("max_steps_per_turn=0(无上限):来回步数不受硬顶限制,跑到
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt", 4096, /*max_steps_per_turn=*/0);
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 0}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     const auto result = loop.Run("跑很多轮", callbacks);
 
@@ -558,7 +557,7 @@ TEST_CASE("默认步数预算(不传参数)= 无上限:多步工具调用不报�
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");  // 不传步数预算,用默认值
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});  // 不传步数预算,用默认值
     agent::Callbacks callbacks;
     const auto result = loop.Run("跑几轮", callbacks);
 
@@ -589,7 +588,7 @@ TEST_CASE("on_usage: 一次 Run() 内多次请求(工具调用来回),每次 Mes
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"工具结果", false}, false));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     std::vector<api::UsageReport> reports;
     agent::Callbacks callbacks;
@@ -625,7 +624,7 @@ TEST_CASE("on_usage: 没设这个回调,不影响其余行为(可选回调,空�
     backend.scripts = {TextOnlyScript("没事")};
     tools::ToolRegistry registry;
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;  // on_usage 没设
 
     const auto result = loop.Run("你好", callbacks);
@@ -640,7 +639,7 @@ TEST_CASE("未知工具名:不崩,tool_result 里说明是未知工具") {
     };
     tools::ToolRegistry registry;  // 空注册表,什么工具都没有
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
 
     const auto result = loop.Run("用个不存在的工具", callbacks);
@@ -667,7 +666,7 @@ TEST_CASE("ESC 打断:流中途取消,半截文本入历史带打断标注,Run()
     backend.cancel_after_event_index = 1;  // TextDelta 之后就假装被取消,ContentBlockDone/MessageDone 永远不会来
     tools::ToolRegistry registry;
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     std::atomic<bool> cancel_flag{false};
     agent::Callbacks callbacks;
@@ -694,7 +693,7 @@ TEST_CASE("ESC 打断:什么都还没流出来就取消,assistant 消息只有�
     backend.cancel_after_event_index = 0;
     tools::ToolRegistry registry;
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     std::atomic<bool> cancel_flag{false};
     agent::Callbacks callbacks;
     const auto result = loop.Run("问点啥", callbacks, &cancel_flag);
@@ -726,7 +725,7 @@ TEST_CASE("ESC 打断:工具执行后才发现取消,正在跑的工具结果照
     auto* fake_tool_ptr = new FakeTool("fake_tool", tools::Tool::Result{"不该跑到", false}, false);
     registry.Register(std::unique_ptr<FakeTool>(fake_tool_ptr));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     const auto result = loop.Run("跑两个工具", callbacks, &cancel_flag);
 
@@ -756,7 +755,7 @@ TEST_CASE("没有取消:cancel 指针传了但没置位,行为跟不传一模一
     backend.scripts = {TextOnlyScript("正常聊天")};
     tools::ToolRegistry registry;
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     std::atomic<bool> cancel_flag{false};
     agent::Callbacks callbacks;
     const auto result = loop.Run("你好", callbacks, &cancel_flag);
@@ -785,7 +784,7 @@ TEST_CASE("防御:stop_reason 不是 tool_use(帧丢了/说成 end_turn)但消�
     auto* fake_tool_ptr = new FakeTool("fake_tool", tools::Tool::Result{"工具结果", false}, false);
     registry.Register(std::unique_ptr<FakeTool>(fake_tool_ptr));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     const auto result = loop.Run("用工具", callbacks);
 
@@ -806,8 +805,7 @@ TEST_CASE("上下文硬上限:裁剪与截断后仍超限(单条用户输入就�
 
     // max_context_chars 压到 200,用户输入 10 倍于此——裁不动也截不动
     // (截断只动 tool_result),该明确报错,不能把超大请求发出去。
-    agent::Agent loop(backend, registry, "test-model", "system prompt", 4096, 25,
-                          /*max_context_chars=*/200);
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 25, .max_context_chars = 200}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     const auto result = loop.Run(std::string(2000, 'x'), callbacks);
 
@@ -857,7 +855,7 @@ TEST_CASE("步数将尽提醒:剩 3 步那一步随尾部消息带一次固定�
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake_tool", tools::Tool::Result{"ok", false}, false));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt", 4096, /*max_steps_per_turn=*/4);
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 4}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     const auto result = loop.Run("跑吧", callbacks);
 
@@ -889,7 +887,7 @@ TEST_CASE("本轮动态上下文:随本轮 user 消息尾部进请求视图,发�
     backend.scripts = {ToolUseScript("tool-1", "fake"), TextOnlyScript("done")};
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>("fake", tools::Tool::Result{"ok", false}, false));
-    agent::Agent loop(backend, registry, "test-model", "stable system");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "stable system"});
     loop.SetTurnContext("project memory context");
 
     REQUIRE(loop.Run("go", agent::Callbacks{}).has_value());
@@ -923,7 +921,7 @@ TEST_CASE("图片用户消息入历史，下一轮请求仍带着") {
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("看到了"), TextOnlyScript("还在")};
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
 
     api::Message image_message;

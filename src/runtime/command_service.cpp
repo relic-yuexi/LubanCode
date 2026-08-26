@@ -7,6 +7,7 @@
 // cli/app,不碰标准流。
 
 #include "runtime/command_service.hpp"
+#include "agent/agent.hpp"  // Agent::ReplaceHistory:resume 换史(批四自立门户后的完整类型)
 
 #include <algorithm>
 #include <utility>

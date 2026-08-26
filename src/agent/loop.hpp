@@ -1,7 +1,14 @@
-// agent 核心循环:user 消息入历史 -> 带工具发请求 -> 流式转发给上层(打字机
-// 输出)同时喂给 assembler 攒消息 -> stop_reason 是 tool_use 就把模型要的
-// 工具都执行一遍、结果攒成一条 user 消息喂回去 -> 再发请求 -> 如此往复,
-// 直到 end_turn,或者达到步数上限。
+// agent 轮次推进器(骨架拆解批四:Agent 自立门户去了 agent/agent.hpp,
+// 这里只剩 loop 的家当):user 消息入历史 -> 带工具发请求 -> 流式转发给
+// 上层(打字机输出)同时喂给 assembler 攒消息 -> stop_reason 是 tool_use
+// 就把模型要的工具都执行一遍、结果攒成一条 user 消息喂回去 -> 再发请求,
+// 如此往复,直到 end_turn,或者达到步数上限。
+//
+// 住这头的:Callbacks(装配并行的回调笔)、RunOutcome/OutputBudgetReport
+//(收口判据)、AgentLoop、RunOneTool(工具执行的完整链)。审批四态与钩子
+// 表态在 runtime/interaction.hpp;ToolTraceContext 在 agent/tool_trace.hpp;
+// ContextPressure 在 agent/context.hpp;Agent/AgentProfile/AgentWiring 在
+// agent/agent.hpp。
 
 #pragma once
 
@@ -16,73 +23,15 @@
 
 #include <nlohmann/json.hpp>
 
-#include "agent/context.hpp"
-#include "agent/context_events.hpp"
-#include "agent/prefix.hpp"
-#include "agent/runtime_profile.hpp"
 #include "agent/tool_trace.hpp"
-#include "api/backend.hpp"
 #include "api/types.hpp"
-#include "tools/registry.hpp"
+#include "runtime/interaction.hpp"
 #include "tools/tool.hpp"
+#include "tools/registry.hpp"
 
 namespace lubancode::agent {
 
 class ContextArtifactStore;
-
-// ---- 异步审批(P2:显示系统剥离单)------------------------------------------
-// 审批请求与悬挂未来的中立形状。完整合同在 runtime/interaction_broker.hpp
-//(决定四态/悬空收口/迟到回答);agent/ 这边只认识这两枚类型,不 include
-// runtime/ 头——InteractionBroker 的装配在会话层,内核只管发请求、等
-// future、按四态收账。
-struct ApprovalRequest {
-    std::string tool_use_id;  // P4:这次审批钉在哪个条目上(ToolUseBlock.id)
-    std::string tool_name;
-    nlohmann::json input = nlohmann::json::object();
-    std::string reason;  // 触发这次问话的线索(hook ask 的理由/权限档说明),可空
-};
-
-// 决定四态。与 runtime::InteractionDecision 语义一一对应,这里不 enum
-// 别名(避免拖头),用独立枚举 + 会话层的映射。
-enum class ApprovalDecision {
-    Accept,             // 本次允许
-    AcceptForSession,   // 本会话内该工具不再问(只写本场权限账,不落盘)
-    Decline,            // 拒绝
-    Cancel,             // 悬空收口(打断/断开/超时)——等价拒绝,但拒绝文案
-                        // 须写"没人可答",不冒充用户拒绝
-};
-
-struct ApprovalResponse {
-    ApprovalDecision decision = ApprovalDecision::Decline;
-    std::string reason;  // decline 的理由(给模型的拒绝文案线索),可空
-};
-
-// 审批的未来。WaitApproval 阻塞到有结果或悬空收口;收口返回 nullopt。
-class InteractionFuture {
-public:
-    virtual ~InteractionFuture() = default;
-    virtual std::optional<ApprovalResponse> WaitApproval() = 0;
-};
-
-// hooks 框架第三步:工具生命周期相位(UI 状态机 requested -> checking_hook
-// -> waiting_permission -> running -> done,被拦时停在 blocked,不冒充"运行
-// 过又失败")。on_tool_start 算 requested;下面几个相位由 on_tool_phase 报。
-enum class ToolPhase {
-    CheckingHook,      // PreToolUse 钩子跑起来了(权限确认之前)
-    WaitingPermission, // 即将问用户确认(只有真要弹确认才报)
-    Running,           // 钩子与确认都过了,工具真开跑
-    Blocked,           // 被钩子拦下,不会执行
-};
-
-// PreToolUse 钩子的归并表态(deny > ask > allow;updatedInput 只与 allow
-// 同返,改写后须重过工具 schema、deny 规则与权限判断——不许借钩子越权)。
-struct ToolHookDecision {
-    enum class Decision { None, Allow, Ask, Deny };
-    Decision decision = Decision::None;
-    std::string reason;  // deny/ask 的理由,给用户与模型看
-    std::optional<nlohmann::json> updated_input;
-    std::vector<std::string> additional_context;  // 给模型的追加上下文
-};
 
 struct Callbacks {
     // 显示系统剥离单 P4(补稳定 id):工具生命周期的回调首参一律带
@@ -107,7 +56,7 @@ struct Callbacks {
     // 工具 needs_confirm() 为真时才会调用;返回 true 表示允许执行。
     // 没设这个回调、或者工具本来就不需要确认,都视为允许。
     // 显示系统剥离单 P2:这是同步问话通道。新代码优先用下面的
-    // on_tool_confirm_async(异步审批,等 InteractionFuture);两个都设时
+    // on_tool_confirm_async(异步审批,等 runtime::InteractionFuture);两个都设时
     // async 优先,只有 async 缺位才回落到这里——回落规则与 on_pre_tool_
     // hook 之于 on_pre_tool_use_hook 同款。既有消费方(子代理/PTC 转发、
     // 单测)不动,行为一字不变。
@@ -121,11 +70,11 @@ struct Callbacks {
     // 与今日一字不差);远端前端(app-server/Web/Tauri)的实现登记
     // request_id 悬起,前端从任何线程 ResolveApproval 回答——审批从此
     // 不再钉死在 stdin 上。
-    // 类型是 runtime/ 的中立合同(agent/ 不 include runtime/ 也行,但
-    // approval 的形状就是 InteractionBroker 那套四态;这里用前置声明 +
-    // shared_ptr,保持 agent 头不拖 runtime 头)。
+    // 合同在 runtime/interaction.hpp(骨架拆解批四:审批四态从 loop.hpp
+    // 归位 runtime,与 InteractionBroker 的那套合成一份,镜像层拆掉)。
     // P4:ApprovalRequest 带 tool_use_id,远端前端凭它把审批事件钉回条目。
-    std::function<std::shared_ptr<InteractionFuture>(const ApprovalRequest& request)> on_tool_confirm_async;
+    std::function<std::shared_ptr<runtime::InteractionFuture>(const runtime::ApprovalRequest& request)>
+        on_tool_confirm_async;
 
     // on_tool_confirm 返回 false(拒绝)后,给模型的 tool_result 文案从这里
     // 取;不设用缺省"用户拒绝执行该工具"。给后台子代理用——它没人可问,
@@ -174,17 +123,22 @@ struct Callbacks {
     // ask -> 即使确认档本来放行,也要问用户;allow -> 跳过用户确认,但
     // deny_commands/权限规则照走(在确认回调里,不许钩子越权);updatedInput
     // 只与 allow 同返,RunOneTool 会先过一遍工具 schema,改写打回即拦。
-    std::function<ToolHookDecision(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input)> on_pre_tool_use_hook;
+    std::function<runtime::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
+                                            const nlohmann::json& input)>
+        on_pre_tool_use_hook;
 
     // hooks 框架:PermissionRequest。只有宿主本来要问用户确认时才触发
     // (RunOneTool 在调 on_tool_confirm 前把这个相位交给确认回调那一层,
     // 由它判断"真要弹确认"再发射)。deny -> 拒绝执行;allow -> 不弹确认;
     // 不表态 -> 正常问用户。
-    std::function<ToolHookDecision(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input)> on_permission_request;
+    std::function<runtime::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
+                                            const nlohmann::json& input)>
+        on_permission_request;
 
     // hooks 框架:UI 工具状态机的相位通报。没配 hooks 的会话不设这个回调,
     // 展示行为与从前逐字节一致。
-    std::function<void(const std::string& tool_use_id, const std::string& name, ToolPhase phase)> on_tool_phase;
+    std::function<void(const std::string& tool_use_id, const std::string& name, runtime::ToolPhase phase)>
+        on_tool_phase;
 
     // M9:hooks.post_tool。工具真的执行完了(拿到 Result)才调用一次;不会
     // 影响返回给模型的结果,单纯给上层一个"跑一下 post_tool 命令"的机会。
@@ -322,53 +276,15 @@ constexpr int kStepLimitNudgeThreshold = 3;
 // "将尽"这回事)。
 bool ShouldNudgeStepLimit(int step_index, int max_steps_per_turn);
 
-// ---------------------------------------------------------------------------
-// mid-turn 上下文安全点(0.27.x 分层压缩第一期)
-//
-// 自动压缩旧账只看"上一回请求的 usage",且只在下一条外层用户消息发送前
-// 触发——工具循环中途回填了大结果后,下一次模型请求可能先撞墙。现在每次
-// 模型请求前(工具结果已攒完、请求尚未发出,正是不打断工具的那个缝)
-// 都先估一次 projected overflow,快撞窗口就把历史收一收。
-// ---------------------------------------------------------------------------
+class Agent;
 
-// projected 判定的默认参考线:估占窗口的百分比。80 与 ContextTracker 的
-// kAutoCompactThresholdPercent 同档——这是参考线,不是写死的唯一口径。
-constexpr int kProjectedOverflowPercent = 80;
-
-// 每次模型请求前的上下文压力通报。phase 区分两种调用:
-//   PreRequest    —— 请求拼装前。projected_overflow 为真时,上层可在这个
-//                     安全点同步做语义压缩(ReplaceHistory);回调返回后
-//                     Run() 用(可能已换短的)history 重新拼请求。
-//   AfterHardTrim —— TrimHistory 字符安全网这次真丢了东西(丢轮/截结果)。
-//                     纯通报:上层必须向用户显式告警"发生了有损硬裁",
-//                     不许静默降级;此时再压缩也救不回这一次的请求。
-struct ContextPressure {
-    enum class Phase { PreRequest, AfterHardTrim };
-    Phase phase = Phase::PreRequest;
-    bool projected_overflow = false;   // 预计(含输出预留)放不下
-    std::size_t projected_tokens = 0;  // 估算的下一请求 prompt + 输出预留
-    std::size_t window_tokens = 0;     // 有效窗口;0 = 未知
-    bool hard_trimmed_turns = false;   // 丢了中间整轮
-    std::size_t hard_dropped_messages = 0;
-    bool hard_truncated_results = false;  // 截了超大工具结果
-};
-
-using OnContextPressure = std::function<void(const ContextPressure&)>;
-
-// 逐枚追踪:一枚工具调用的执行上下文(execution_id 宿主发号、批次与
-// 序号、父执行/重试/补偿关系)。trace 缺席(单测/子代理旧路)时
-// RunOneTool 的栅栏发射全部空操作,行为与从前逐字节一致。
-struct ToolTraceContext {
-    std::string execution_id;   // 审计主键(IdAuthority 的 item id 同源)
-    std::string thread_id;      // 哪场会话
-    std::string turn_id;        // 哪一轮
-    std::string provider_request_id;  // MessageStart 的 request id;可空
-    std::string batch_id;       // 同一 assistant message 的五枚共用
-    int sequence_in_batch = -1; // 0..N-1
-    std::string parent_execution_id;   // 子代理/PTC 内层归属;可空
-    std::string retry_of;              // 显式重试关系;可空
-    std::string blocked_by;            // 宿主因前置失败明确跳过;可空
-    std::string compensates;           // 补偿哪枚调用;可空
+// 无状态的轮次推进器。Agent 握身份、模型、提示、工具与历史；Loop 只把
+// 一轮从“发请求”推到“工具收口”，不代表另一种代理。
+class AgentLoop {
+public:
+    static std::expected<RunOutcome, std::string> Run(Agent& agent, api::Message user_message,
+                                                       const Callbacks& callbacks,
+                                                       const std::atomic<bool>* cancel = nullptr);
 };
 
 // 执行一枚工具调用的完整链(公开导出;实现在 loop.cpp 顶部,注释在那头):
@@ -384,43 +300,6 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
                                 const std::function<bool(const tools::Tool&)>& tool_filter,
                                 const std::string& filter_denial = std::string(),
                                 const ToolTraceContext* trace = nullptr);
-
-// 跨会话传话(0.25.x)的安全收件点:Run() 的工具循环每次"下一次请求尚未
-// 发出"的边界(循环顶)会调一次 inbox;有信就注进 history,再发请求——
-// 工具跑着不打断,正文收口后才收。注入规则(纯函数,单测钉):
-//   - history 末条是 user(比如刚攒完的 tool_result 消息):把来信的文本块
-//     追加到那条消息的末尾(保持 user/assistant 交替,三种 wire 都安全);
-//   - 否则(末条是 assistant 等罕见边界):新起一条 user 消息。
-// 来信的"来历"由调用方在文本里带清来源标识(不装成用户手敲),这里只管
-// 结构;来信绝不会被当成确认、权限或命令——这条路由里根本没有那些口子。
-void InjectIncomingMessage(std::vector<api::Message>& history, api::Message incoming);
-
-using InboxPoll = std::function<std::optional<api::Message>()>;
-
-// 系统提示的段落开关(骨架拆解批三·病十裁决):mcp/web/lsp/platforms 四段
-// 从前只在主循环的 AssembleSystemPrompt 里按配置拼,子代理走 BuildSystemPrompt
-// 薄壳不传——子代理天生缺这四段,无文档说是设计还是疏漏。裁决:补,写明补
-// ——四段开关写进皮(显式声明),子代理默认与主代理同段;真要少的皮显式
-// 关。皮上写不出的差别,就是还没想清的差别。
-struct PromptSectionSwitches {
-    bool mcp = true;   // features/mcp.md 段
-    bool web = true;   // features/web.md 段
-    bool lsp = true;   // features/lsp.md 段
-    std::string wire;  // platforms/<wire>.md 段;空 = 不注平台段
-};
-
-// Agent 的完整装配档案。宿主只需换这份数据，便能得到 main、Explore、
-// general-purpose 或 workflow agent；不靠继承分叉实现。
-struct AgentProfile {
-    std::string provider;
-    api::RequestProfile request;
-    AgentRuntimeProfile runtime;
-    std::string system_prompt;
-    // 病十:四段开关随皮走。main 的皮按实际配置填(config.mcp_servers/
-    // search/lsp_servers/wire);子代理的皮从 main 派生时同段拷贝;旧调用
-    // 方不填就是缺省全开(裁决:补)。
-    PromptSectionSwitches prompt_sections;
-};
 
 // 装配并行的回调笔(骨架拆解批三,原语自 runtime 下沉 engine):把 events
 // 的显示回调并进 target——每个出水口先走 events(事件流,canonical 账)再
@@ -450,243 +329,5 @@ inline void ComposeDisplayCallbacks(Callbacks& target, const Callbacks& events) 
     compose(target.on_builtin_tool_done, events.on_builtin_tool_done);
     compose(target.on_usage, events.on_usage);
 }
-
-class Agent;
-
-// 无状态的轮次推进器。Agent 握身份、模型、提示、工具与历史；Loop 只把
-// 一轮从“发请求”推到“工具收口”，不代表另一种代理。
-class AgentLoop {
-public:
-    static std::expected<RunOutcome, std::string> Run(Agent& agent, api::Message user_message,
-                                                       const Callbacks& callbacks,
-                                                       const std::atomic<bool>* cancel = nullptr);
-};
-
-class Agent {
-public:
-    // 正门(规格根因一):吃一份不可变 AgentRuntimeProfile——输出预算、
-    // 上下文预算、窗口、步数、length 续跑次数全从这一份来。main、
-    // general-purpose 子代理、后台子代理、单发模式各自声明覆盖什么,其余
-    // 继承,不再一串易漏的裸参数。system_prompt 单独给(它随 /clear 等重建)。
-    Agent(api::Backend& backend, tools::ToolRegistry& registry, AgentProfile profile);
-
-    // 兼容门：旧调用方尚未声明 provider/effort 时，仍可只给运行策略与提示。
-    Agent(api::Backend& backend, tools::ToolRegistry& registry, AgentRuntimeProfile profile,
-          std::string system_prompt);
-
-    // 兼容门(单测与既有调用方):裸参数版,内部折成一份 profile。
-    // max_tokens 不再有 4096 默认——nullopt = unset(chat/responses 不发
-    // 字段交服务端默认;anthropic 由 client 落公开兜底),想给值显式传。
-    // max_steps_per_turn:一次 Run()(一个 turn)里最多跟模型来回几步(每步
-    // 一次模型请求;一步可含多枚工具调用)。
-    // <= 0 表示无上限——现在的模型常态是跑十几个小时的长程任务,任何硬闸
-    // 都是矮墙;默认不设上限,防跑飞靠用户 ESC/Ctrl+C 打断和成本可见性
-    // (跟 Claude Code 一个待遇)。想设闸的人显式配一个正整数,超过这个数
-    // 还没到 end_turn 就报错退出——闸只服务"我确实想要一个硬上限"这个场景
-    // (比如管道模式没有 ESC 可打断,想兜底防真死循环)。main.cpp 里这个值
-    // 改由 config.max_steps_per_turn 传入(可经配置文件/环境变量调整,旧名
-    // max_turns 兼容读入),这里的默认参数只服务不经过 main.cpp 配置流程的
-    // 调用方(单测、未来的其它入口)。
-    // max_context_chars:发给模型前 history 裁剪的阈值(字符数),默认读
-    // 环境变量 LUBANCODE_MAX_CONTEXT(没设置就是 kDefaultMaxContextChars)。
-    Agent(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
-          std::string system_prompt, std::optional<int> max_tokens = std::nullopt,
-          int max_steps_per_turn = 0, std::size_t max_context_chars = MaxContextCharsFromEnv());
-
-    const std::string& provider() const { return provider_; }
-    const api::RequestProfile& request_profile() const { return request_profile_; }
-    void SetProvider(std::string provider) { provider_ = std::move(provider); }
-    void SetRequestProfile(api::RequestProfile request_profile) {
-        request_profile_ = std::move(request_profile);
-        if (!request_profile_.model.empty()) {
-            profile_.model = request_profile_.model;
-        }
-    }
-
-    // 只读访问:运行期诊断(/context、agent 查看态)要展示"这份 loop 实际
-    // 吃到的预算与来源",不再让各处自己猜。
-    const AgentRuntimeProfile& runtime_profile() const { return profile_; }
-
-    // 发一轮用户输入。内部可能会跑好几个来回(工具调用),直到模型给出
-    // end_turn(或者别的非 tool_use 的 stop_reason)才返回。历史跨多次
-    // Run() 调用保留,下一句问话会带着之前的上下文。
-    // cancel 非空且流式/工具执行期间被外部(cli 层的 ESC 监听线程)置位:
-    // 半截 assistant 文本(如果已经流出来了)照常攒进历史,末尾附一段打断
-    // 标注;工具循环发现自己被打断,已经在执行的那个工具的结果照常入历史、
-    // 还没轮到的补一条"未执行"的合成 tool_result(保住 tool_use/tool_result
-    // 成对约束,不然下一轮重放历史会被 API 拒绝);两种情况都从 Run() 正常
-    // 返回(RunOutcome::cancelled = true),不是 std::unexpected——打断不是错误。
-    std::expected<RunOutcome, std::string> Run(const std::string& user_input, const Callbacks& callbacks,
-                                                const std::atomic<bool>* cancel = nullptr);
-
-    // 跟字符串入口同义，只是调用方已经把本地图片装进 user_message 了。图片
-    // 也须原样入 history，下一轮、重发、会话恢复才能带得上。
-    std::expected<RunOutcome, std::string> Run(api::Message user_message, const Callbacks& callbacks,
-                                                const std::atomic<bool>* cancel = nullptr);
-
-    const std::vector<api::Message>& history() const { return history_; }
-
-    // tool_search(延迟挂载):工具过滤谓词。设了之后,每轮请求的 tools
-    // 数组只拼"谓词放行"的工具;模型调用了"注册表里查得到、谓词却不放行"
-    // 的工具(延迟且未挂载)时,不执行,回一条友好错误让模型先走
-    // tool_search。谓词由 main.cpp 注入(按 loaded 集合过滤),AgentLoop
-    // 自己不懂什么叫"延迟"——不设(默认)行为跟从前完全一样。每轮现查
-    // 而不是构造时定死,是因为 tool_search 命中会在一次 Run() 中途改变
-    // loaded 集合,下一轮请求就得看到新挂载的工具。
-    void SetToolFilter(std::function<bool(const tools::Tool&)> filter) { tool_filter_ = std::move(filter); }
-
-    // 过滤谓词不放行时的说明文案(见 RunOneTool 的 filter_denial 注释)。
-    // 不设 = "尚未挂载,请先 tool_search"的默认说法;Explore 这类显式
-    // 只读角色设成"角色限制"的说法,模型与用户都看得出限制来自角色。
-    void SetToolFilterDenial(std::string message) { tool_filter_denial_ = std::move(message); }
-
-    // /worktree 切换目录后只换运行环境段，已有聊天史要照留。主循环在下一
-    // 次请求前换掉系统提示，文件工具则由进程 CWD 即刻接管。
-    void SetSystemPrompt(std::string system_prompt) { system_prompt_ = std::move(system_prompt); }
-
-    // 跨会话传话的安全收件点(见上 InjectIncomingMessage 注释):每次调
-    // 最多交出一封信;循环边界反复调到交空为止。回调只在主线程(Run 所在
-    // 线程)的工具往返边界被调,绝不与流式回调、确认回调并发——"卡在权限
-    // 确认时来信不能作答"由这一点天然保证。传空清除。
-    void SetInbox(InboxPoll inbox) { inbox_ = std::move(inbox); }
-
-    // 请求级动态上下文(项目记忆召回、运行中子代理名册)。前缀缓存守恒单
-    // 第五期起不再塞 system 尾巴——那会让分叉点落在全部旧历史之前,每条
-    // 外层用户消息都断一次前缀。现在它随本轮 user 消息进 request_history_
-    // 的尾部 TextBlock,发过即钉住,后续请求原样重放;持久 history_ 不收
-    // 这块,session/export/compact/记忆抽取都只见用户真输入。空串 = 不追加。
-    void SetTurnContext(std::string context) { turn_context_ = std::move(context); }
-
-    // M6.6:/compact 用。跟 history() 是同一份数据,单独起个大写名字是为了
-    // 跟任务规矩"只许新增两个方法,不许改现有的"对齐——不改名、不改签名、
-    // 不复用 history(),原样再加一份。
-    const std::vector<api::Message>& History() const { return history_; }
-
-    // M6.6:/compact 压缩完之后,把 AgentLoop 内部存的完整历史换成压缩后的
-    // 那份(archive 消息 + 最近一轮完整对话)。是本次任务里唯一允许写
-    // history_ 的新入口,agent/compact.cpp 里的 Compact() 本身不碰
-    // AgentLoop,只管算出新历史,真正替换由调用方(main.cpp)拿到新历史后
-    // 调这个方法完成。
-    // 前缀记账:这是有意改前缀,不装无事发生——显式开新 cache epoch
-    // (history_compacted),清掉上一份请求的指纹;压缩后第一份请求就是新
-    // epoch 的冷启动,后续再守追加律。
-    void ReplaceHistory(std::vector<api::Message> new_history) {
-        history_ = std::move(new_history);
-        request_history_ = history_;
-        // mid-turn compact 在 Run() 的请求安全点同步换史。本轮动态上下文
-        // 不该进 compact/session,却仍须给压缩后的下一次请求看；新 epoch
-        // 已经开了,补在最新消息尾部即可,不追改旧请求。
-        if (run_active_ && !active_turn_context_.empty() && !request_history_.empty()) {
-            request_history_.back().content.push_back(api::TextBlock{active_turn_context_});
-        }
-        ++cache_epoch_;
-        pending_epoch_break_reason_ = "history_compacted";
-        last_prefix_.reset();
-        // 新 epoch,压缩决策与 sticky 视图一并翻篇:compact 是唯一常规的
-        // 全量重写点,重写后的视图从头定形(前缀缓存守恒单第六期)。
-        result_view_memo_.decisions.clear();
-        sticky_view_.reset();
-        sticky_base_history_size_ = 0;
-    }
-
-    // 当前 cache epoch(前缀记账,agent/prefix.hpp):1 起,每次断前缀 +1。
-    // /context 与调试展示用;epoch 断不是失败,是给"命中跌了"点名的那根梁。
-    int cache_epoch() const { return cache_epoch_; }
-
-    // mid-turn 上下文安全点:有效上下文窗口(token)。0(默认)= 未知,
-    // Run() 不做 projected 评估,行为与从前完全一致。上层(交互会话)在
-    // 构造/重建 loop、/context 或 /model 改窗口后同步进来。
-    void SetContextWindowTokens(std::size_t window_tokens) { profile_.context_window_tokens = window_tokens; }
-
-    // mid-turn 上下文安全点:压力通报回调。只在"工具结果已攒完、请求尚未
-    // 发出"的轮次边界被调(PreRequest 阶段),以及 TrimHistory 这次真丢了
-    // 东西之后(AfterHardTrim 阶段,纯通报)。回调在同一线程同步执行,里
-    // 面可以安全地做一次语义压缩并 ReplaceHistory。不设 = 不通报,安全网
-    // 照旧只是没人听见。
-    void SetOnContextPressure(OnContextPressure hook) { on_context_pressure_ = std::move(hook); }
-
-    // 无损结构压缩(0.27.x 第二期):默认开。每次请求前把"发给模型的
-    // 视图"里的重复工具结果、被覆盖的旧版读取、超长结果换成引用与预览
-    // (agent/context_events.hpp);活历史 history_ 与 session JSONL 一字
-    // 不动,tool use/result 配对不破。关掉 = 视图与从前逐字节一致。
-    void SetStructuralCompressionEnabled(bool enabled) { structural_compression_enabled_ = enabled; }
-    void SetStructuralCompressionOptions(const StructuralCompressionOptions& options) {
-        structural_options_ = options;
-    }
-
-    // 可追回 artifact(渐进式上下文仓第二期):设了仓之后,结构压缩判成
-    // Artifact 的超长结果先原子落盘(blob -> chunks -> index),视图渲染带
-    // 稳定 artifact_id,模型凭 id 走 context_search/context_read 追回全文;
-    // 落盘失败保内存全文,行为退回没仓的样子。传空指针清除。仓的存活期
-    // 由调用方(会话层)保证。
-    void SetArtifactStore(ContextArtifactStore* store) { artifact_store_ = store; }
-
-    // 最近一次请求的结构压缩账(/context 与诊断用)。
-    const StructuralCompressionStats& structural_stats() const { return structural_stats_; }
-
-    // 决策台账只读口(/context 诊断用)。摘要走 context_read 的新工具结果,
-    // 不再回头改这本账。
-    const ResultViewMemo& result_view_memo() const { return result_view_memo_; }
-
-    // 逐枚追踪:execution_id 发号口。装配层(接了 Runtime 的会话)把它指
-    // 到 IdAuthority::NextItemId 上——execution_id 与 Runtime item id 同源,
-    // 不另开计数器。不设 = 旧路兜底 "exec-N"(仅单测/未接 Runtime 的会话)。
-    void SetExecutionIdIssuer(std::function<std::string()> issuer) { execution_id_issuer_ = std::move(issuer); }
-
-private:
-    friend class AgentLoop;
-
-    api::Backend& backend_;
-    tools::ToolRegistry& registry_;
-    std::string provider_;
-    api::RequestProfile request_profile_;
-    std::string system_prompt_;
-    std::string turn_context_;
-    std::string active_turn_context_;  // 只在 Run() 活着时给 mid-turn compact 重注入
-    bool run_active_ = false;
-    // 运行策略(输出/上下文预算、窗口、步数、length 续跑):构造时定死,
-    // 只有 context_window_tokens 有 setter(随 /context、/model 同步)。
-    AgentRuntimeProfile profile_;
-    bool structural_compression_enabled_ = true;  // 无损结构压缩(工作视图)
-    StructuralCompressionOptions structural_options_{};
-    StructuralCompressionStats structural_stats_{};  // 最近一次请求的结构压缩账(观测用)
-    ContextArtifactStore* artifact_store_ = nullptr;  // 可追回 artifact 的仓(空 = 没仓,退回旧行为)
-    std::vector<api::Message> history_;          // 可持久、可 compact 的真历史
-    std::vector<api::Message> request_history_;  // 模型视图；另含每轮动态上下文
-    // 前缀记账(agent/prefix.hpp):上一份实际发出的请求指纹(没有 = 本
-    // turn 第一份请求,无从比较,天然算追加)、cache epoch 序号、loop 自己
-    // 先知道的断因(compact/hard trim,报出后即清)。
-    std::optional<PrefixFingerprint> last_prefix_;
-    int cache_epoch_ = 1;
-    std::string pending_epoch_break_reason_;
-    // 结构压缩"首次定形"的决策台账(tool_use_id -> 决策),epoch 内跨请求
-    // 钉死;ReplaceHistory(开新 epoch)时清空(agent/context_events.hpp)。
-    ResultViewMemo result_view_memo_;
-    // hard trim 的 sticky 工作视图:第一次真动手裁(丢轮/截结果)后把裁过
-    // 的视图钉住,后续请求只往它尾部追加新消息——不再每请求拿全量 history
-    // 重算"第一轮 + 最近 N 轮",裁剪窗口一路滑。sticky_base_history_size_
-    // 记钉住那一刻全量视图的长度,追加时按它切尾。ReplaceHistory 时翻篇。
-    std::optional<std::vector<api::Message>> sticky_view_;
-    std::size_t sticky_base_history_size_ = 0;
-    OnContextPressure on_context_pressure_;
-    std::function<bool(const tools::Tool&)> tool_filter_;  // tool_search:空 = 不过滤,全量直挂
-    std::string tool_filter_denial_;  // 过滤不放行的说明(空 = 默认"尚未挂载"文案)
-    InboxPoll inbox_;  // 跨会话收件点:空 = 没有来信要收,行为跟从前一致
-
-    // 逐枚追踪:批次序号(execution_id 的兜底发号)。装配层接了 Runtime
-    // 的会话在 SetExecutionIdIssuer 里换成 IdAuthority 的号——单子明言
-    // 不可再造第二只计数器,这里只是没接 Runtime 的旧路(单测)兜底。
-    int batch_counter_ = 0;
-    std::uint64_t execution_counter_ = 0;
-    std::function<std::string()> execution_id_issuer_;
-    std::string issue_execution_id() {
-        if (execution_id_issuer_) {
-            return execution_id_issuer_();
-        }
-        return "exec-" + std::to_string(++execution_counter_);
-    }
-
-    std::vector<api::ToolDefinition> BuildToolDefinitions() const;
-};
 
 }  // namespace lubancode::agent

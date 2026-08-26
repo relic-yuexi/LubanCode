@@ -9,6 +9,8 @@
 
 #include "agent/compact.hpp"
 #include "agent/artifact_store.hpp"
+#include "agent/agent.hpp"  // Agent:ReplaceHistory/History(批四自立门户)
+#include "agent/context.hpp"
 #include "agent/context_events.hpp"
 #include "config/config.hpp"
 #include "cli/spinner.hpp"

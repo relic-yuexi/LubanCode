@@ -41,7 +41,8 @@
 #include <nlohmann/json.hpp>
 
 #include "api/backend.hpp"
-#include "agent/loop.hpp"  // ToolHookDecision/ToolPhase/Callbacks:hooks 与事件流转发的类型
+#include "agent/agent.hpp"  // Agent/AgentProfile/Callbacks:子代理的引擎与皮
+#include "agent/loop.hpp"      // RunOutcome/RunOneTool:轮次收口与工具执行链
 #include "agent/runtime_profile.hpp"
 #include "api/types.hpp"
 #include "cli/worktree.hpp"
@@ -119,13 +120,13 @@ public:
         // PermissionRequest、UI 相位、PostToolUse 反馈)。注意 on_pre_tool_
         // use_hook 捕获的"预决策槽"在父级闭包里,转发的是同一批 std::function,
         // 槽随行——子代理的确认回调读到的就是子代理当前那次工具调用的决策。
-        std::function<agent::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
+        std::function<runtime::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
                                               const nlohmann::json& input)>
             on_pre_tool_use_hook;
-        std::function<agent::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
+        std::function<runtime::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
                                               const nlohmann::json& input)>
             on_permission_request;
-        std::function<void(const std::string& tool_use_id, const std::string& name, agent::ToolPhase phase)>
+        std::function<void(const std::string& tool_use_id, const std::string& name, runtime::ToolPhase phase)>
             on_tool_phase;
         std::function<std::vector<std::string>(const std::string& tool_use_id, const std::string& name,
                                                const nlohmann::json& input, const Tool::Result& result)>

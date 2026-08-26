@@ -2,6 +2,8 @@
 
 #include "runtime/tool_trace_hub.hpp"
 
+#include "agent/agent.hpp"  // Agent:Install 要碰成员(批四自立门户后 loop.hpp 只剩前向声明)
+
 #include <algorithm>
 #include <sstream>
 #include <utility>
@@ -27,7 +29,11 @@ std::string ToolTraceHub::NextExecutionId() {
 void ToolTraceHub::Install(agent::Agent& loop, agent::Callbacks& callbacks, const std::string& thread_id,
                            const std::string& turn_id) {
     // execution 发号:与 Runtime item id 同源(单子:不可再造第二只计数器)。
-    loop.SetExecutionIdIssuer([this] { return NextExecutionId(); });
+    // 批四·病十二:发号口是接线,进 AgentWiring——其余接线(inbox/压力钩)
+    // 是装配层先灌好的,这里照原样带上,只换发号这一路。
+    agent::AgentWiring wiring = loop.wiring();
+    wiring.execution_id_issuer = [this] { return NextExecutionId(); };
+    loop.SetWiring(std::move(wiring));
     thread_id_ = thread_id;
     turn_id_ = turn_id;
     callbacks.on_tool_trace = [this](const agent::ToolTraceEvent& event) { OnTrace(event); };

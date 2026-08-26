@@ -276,4 +276,19 @@ std::vector<api::Message> TrimHistory(const std::vector<api::Message>& history, 
     return ShrinkOversizedToolResults(std::move(trimmed), max_chars, report);
 }
 
+void InjectIncomingMessage(std::vector<api::Message>& history, api::Message incoming) {
+    if (incoming.role != api::Role::User || incoming.content.empty()) {
+        return;
+    }
+    if (!history.empty() && history.back().role == api::Role::User) {
+        // 末条是 user(最常见:刚攒完的 tool_result 消息)——文本块追加进
+        // 去即可,不起第二条连排的 user 消息,三种 wire 协议都安全。
+        for (auto& block : incoming.content) {
+            history.back().content.push_back(std::move(block));
+        }
+        return;
+    }
+    history.push_back(std::move(incoming));
+}
+
 }  // namespace lubancode::agent

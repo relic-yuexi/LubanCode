@@ -154,19 +154,18 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
     if (request.node->step_limit > 0) {
         binding.profile.runtime.max_steps_per_turn = request.node->step_limit;
     }
-    if (binding.profile.request.model.empty()) {
-        binding.profile.request.model = binding.profile.runtime.model;
-    }
-
-    agent::Agent task_agent(*binding.backend, *options_.registry, std::move(binding.profile));
+    // 工具可见性(病十三的方向):allowed_tools 的白名单写进皮,不再走
+    // loop 级 setter。
     if (!request.node->allowed_tools.empty()) {
         const auto allowed = std::make_shared<const std::set<std::string>>(
             request.node->allowed_tools.begin(), request.node->allowed_tools.end());
-        task_agent.SetToolFilter([allowed](const tools::Tool& tool) {
+        binding.profile.tool_filter = [allowed](const tools::Tool& tool) {
             return allowed->contains(tool.name());
-        });
-        task_agent.SetToolFilterDenial("此工具不在 workflow agent 节点的 allowed_tools 里。");
+        };
+        binding.profile.tool_filter_denial = "此工具不在 workflow agent 节点的 allowed_tools 里。";
     }
+
+    agent::Agent task_agent(*binding.backend, *options_.registry, std::move(binding.profile));
 
     std::string text;
     std::int64_t tokens = 0;

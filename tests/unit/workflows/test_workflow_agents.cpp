@@ -317,7 +317,7 @@ TEST_CASE("agent 节点:同一 Agent 吃 profile、工具白名单并跑完整�
     options.default_binding.profile.request.model = "glm-5.3";
     options.default_binding.profile.request.reasoning_effort = "high";
     options.default_binding.profile.request.reasoning.supports_effort = true;
-    options.default_binding.profile.runtime.model = "glm-5.3";
+    options.default_binding.profile.request.model = "glm-5.3";
     options.registry = &registry;
     options.task_loader = [](const std::string& path) {
         CHECK(path == "prompts/explore.md");
@@ -368,7 +368,7 @@ TEST_CASE("agent 节点:装了 event_sink 的嵌套回合经 TurnEventAdapter �
     options.default_binding.backend = &backend;
     options.default_binding.profile.provider = "zai";
     options.default_binding.profile.request.model = "glm-5.3";
-    options.default_binding.profile.runtime.model = "glm-5.3";
+    options.default_binding.profile.request.model = "glm-5.3";
     options.registry = &registry;
     options.task_loader = [](const std::string&) { return std::string("只读探索"); };
     // 批二:sink 配置(没给 ids 落 ProcessIdAuthority——生产装配给会话的)。

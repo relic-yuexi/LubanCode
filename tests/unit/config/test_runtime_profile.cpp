@@ -125,7 +125,6 @@ TEST_CASE("main 与 general-purpose 子代理的有效输出上限相同(规格\
 
 TEST_CASE("InheritForSubagent:整份继承,不暗自缩小(规格\"产品不变量\")") {
     agent::AgentRuntimeProfile main_profile;
-    main_profile.model = "m";
     main_profile.max_output_tokens = 16384;
     main_profile.max_output_tokens_source = agent::OutputBudgetSource::ProviderDeclared;
     main_profile.max_steps_per_turn = 7;
@@ -134,7 +133,6 @@ TEST_CASE("InheritForSubagent:整份继承,不暗自缩小(规格\"产品不变�
     main_profile.length_continuations = 2;
 
     const agent::AgentRuntimeProfile sub = main_profile.InheritForSubagent();
-    CHECK(sub.model == main_profile.model);
     CHECK(sub.max_output_tokens == main_profile.max_output_tokens);
     CHECK(sub.max_output_tokens_source == main_profile.max_output_tokens_source);
     CHECK(sub.max_steps_per_turn == main_profile.max_steps_per_turn);

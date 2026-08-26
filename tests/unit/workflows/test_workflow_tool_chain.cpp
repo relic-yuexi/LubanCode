@@ -119,9 +119,9 @@ TEST_CASE("PreToolUse 钩子 deny:工具不执行,稳定码落账,trace 终态 H
         events.push_back(event);
     };
     options.callbacks.on_pre_tool_use_hook = [](const std::string&, const std::string&,
-                                               const nlohmann::json&) -> lubancode::agent::ToolHookDecision {
-        lubancode::agent::ToolHookDecision decision;
-        decision.decision = lubancode::agent::ToolHookDecision::Decision::Deny;
+                                               const nlohmann::json&) -> lubancode::runtime::ToolHookDecision {
+        lubancode::runtime::ToolHookDecision decision;
+        decision.decision = lubancode::runtime::ToolHookDecision::Decision::Deny;
         decision.reason = "钩子说不";
         return decision;
     };
@@ -152,9 +152,9 @@ TEST_CASE("PreToolUse allow + updatedInput:改参过 schema 复检,工具吃到�
     ToolExecutor::Options options;
     options.registry = &registry;
     options.callbacks.on_pre_tool_use_hook = [](const std::string&, const std::string&,
-                                               const nlohmann::json&) -> lubancode::agent::ToolHookDecision {
-        lubancode::agent::ToolHookDecision decision;
-        decision.decision = lubancode::agent::ToolHookDecision::Decision::Allow;
+                                               const nlohmann::json&) -> lubancode::runtime::ToolHookDecision {
+        lubancode::runtime::ToolHookDecision decision;
+        decision.decision = lubancode::runtime::ToolHookDecision::Decision::Allow;
         decision.updated_input = nlohmann::json{{"q", "改写后的词"}, {"limit", 3}};
         return decision;
     };

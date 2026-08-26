@@ -371,6 +371,10 @@ private:
     bool HandleTranscriptUi(lubancode::cli::UiKeyAction action);
     void PrintRecentItems(std::size_t count);
     void RebuildLoop(bool preserve_history = false);
+    // 会话级请求策略的同步口(批四·病十一其三:五层后端退役,/model、
+    // /think、/soul 改完会话状态后把皮上的 request 档案与叠层刷新一遍,
+    // 下一份请求即时生效——从前这活是传输层包装器在 send_stream 里干的)。
+    void SyncAgentRequestPolicy();
     void RefreshSkills();
     void RefreshProjectInstructions();
     void PersistNewMessages();
@@ -580,7 +584,11 @@ private:
     const std::filesystem::path global_skills_root;
     const std::filesystem::path project_skills_root;
 
-    // ---- 后端栈:包装次序即声明次序,析构反序拆 ----
+    // ---- 后端栈(骨架拆解批四:五层请求改写后端退役,归 RequestProfile
+    // 管道——model/effort 走皮上的 request 档案,模型指令/魂/延迟索引是皮
+    // 上的叠层字段,由 Agent 拼请求时就地生效;/model、/think、/soul 的
+    // 会话级同步走 SyncAgentRequestPolicy。栈里只剩真实 client 的稳定壳与
+    // spinner)----
     RebuildableBackend real_backend;
     std::shared_ptr<std::string> current_model;
     std::shared_ptr<std::string> current_think;
@@ -597,10 +605,6 @@ private:
     std::shared_ptr<std::string> current_model_instructions;
     std::string current_soul_name;
     std::shared_ptr<std::string> current_soul;
-    ModelOverrideBackend model_backend;
-    ThinkOverrideBackend think_backend;
-    SoulOverlayBackend soul_backend;
-    ModelInstructionsBackend instructions_backend;
     // UI 件住显示层(批二自 backend_stack 挪来):装配次序不变,只是门牌
     // 从传输层换到 cli。
     lubancode::cli::SpinnerBackend wrapped_backend;
@@ -615,7 +619,6 @@ private:
     bool main_deferral = false;
     bool sub_deferral = false;
     int tool_search_threshold = 0;
-    std::optional<DeferredIndexBackend> index_backend_;
 
     // ---- UI 状态 ----
     std::vector<lubancode::cli::TranscriptItem> transcript;
@@ -646,7 +649,7 @@ private:
     // ---- 主 AgentLoop 与轮次材料 ----
     lubancode::agent::PromptOptions prompt_options;
     std::function<void()> reapply_peer_inbox;  // loop 重建后重灌收件点
-    // loop 持 index_backend_/registry 引用,声明在后 = 先死,引用不悬垂。
+    // loop 持 registry 引用,声明在后 = 先死,引用不悬垂。
     std::optional<lubancode::agent::Agent> main_agent;
     // P6:本体在 SessionRuntime.always_allowed(),这里引用别名(按 a 落
     // 进来的同一本账,远端审批 accept_for_session 也写它)。
@@ -869,11 +872,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       current_model_instructions(std::make_shared<std::string>()),
       current_soul_name(config.soul.empty() ? "default" : config.soul),
       current_soul(std::make_shared<std::string>(LoadSoulContentByName(current_soul_name, /*warn=*/true))),
-      model_backend(real_backend, current_model),
-      think_backend(model_backend, current_think, current_model, &model_catalog, &active_provider),
-      soul_backend(think_backend, current_soul),
-      instructions_backend(soul_backend, current_model_instructions),
-      wrapped_backend(instructions_backend, theme, spinner_enabled),
+      wrapped_backend(real_backend, theme, spinner_enabled),
       context_tracker(config.context_window_tokens),
       config_file_path(config_result_.config_file_path),
       always_allowed_tools(session_runtime_.always_allowed()),
@@ -1035,12 +1034,6 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     if (main_deferral) {
         std::cout << theme.stats << trf("tool_search.enabled", tool_search_threshold) << theme.reset << "\n";
     }
-    // 主 AgentLoop 的索引段:发请求前现算现拼(见 DeferredIndexBackend 注释)。
-    // 未启用时 provider 恒给空串,这层包装纯透传。
-    index_backend_.emplace(wrapped_backend, [this]() {
-        return main_deferral ? lubancode::tools::BuildDeferredToolsIndexSegment(registry(), *loaded_tools())
-                             : std::string();
-    });
 
     // 后台子代理面板的数据源(缓存 + 修订号,面板每 100ms 拉一次)。列表走
     // 轻量全量(TaskSummaries,不截 8 只);查看态的长正文由视图切换钩子按
@@ -1297,7 +1290,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     //     tool_result 之后——tool result 在前、介入消息在后、下一 request 最后,
     //     钉死的正是这个次序。危险工具执行中途没有任何调用点,天然插不进话。
     reapply_peer_inbox = [this, peer_inbox_poll]() {
-        main_agent->SetInbox([this, peer_inbox_poll]() -> std::optional<lubancode::api::Message> {
+        // 批四·病十二:inbox 是接线,进 AgentWiring(其余接线照原样带上)。
+        lubancode::agent::AgentWiring wiring = main_agent->wiring();
+        wiring.inbox = [this, peer_inbox_poll]() -> std::optional<lubancode::api::Message> {
             PumpSteeringToSubagents();
             const auto queued = SessionSteeringQueue().TakeDeliverable(lubancode::cli::MessageTarget::Main());
             if (!queued.empty()) {
@@ -1322,7 +1317,8 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
                 return peer_inbox_poll();
             }
             return std::nullopt;
-        });
+        };
+        main_agent->SetWiring(std::move(wiring));
     };
     reapply_peer_inbox();
     // loop 已就位,把 worktree 工具 enter/exit 的善后接到这条 sync 上。
@@ -1350,7 +1346,9 @@ TerminalSessionController::~TerminalSessionController() {
     // closing、摘名片、停 pipe——此后递来的信连不上,发送方拿 unavailable。
     reapply_peer_inbox = nullptr;
     if (main_agent.has_value()) {
-        main_agent->SetInbox(nullptr);
+        lubancode::agent::AgentWiring wiring = main_agent->wiring();
+        wiring.inbox = nullptr;
+        main_agent->SetWiring(std::move(wiring));
     }
     if (peer_started) {
         peer_runtime->Stop();
@@ -2058,9 +2056,9 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     // 上下文、窗口、续跑次数同一份。子代理 tool 也在此处同步拿到派生份
     // (subagent 段的显式覆盖在 BuildSubagentRuntimeProfile 里算),main 与
     // 子代理同级吃同一套有效值。
-    // tool_search:backend 换成 index_backend(索引段包装,未启用时纯
-    // 透传);/clear 重建后过滤谓词要重新灌一遍——loaded 集合不清,
-    // 已挂载的工具跨 /clear 仍然可用。
+    // 批四·病十一其三:五层请求改写后端退役后,会话级请求策略(model/
+    // effort/模型指令/魂/延迟索引)全在皮上;tool_search 的过滤谓词随重建
+    // 重新灌——loaded 集合不清,已挂载的工具跨 /clear 仍然可用。
     const lubancode::agent::AgentRuntimeProfile main_profile =
         lubancode::app::BuildMainRuntimeProfile(config, &model_catalog, *current_model);
     lubancode::agent::AgentProfile main_agent_profile;
@@ -2073,13 +2071,40 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     }
     main_agent_profile.runtime = main_profile;
     main_agent_profile.system_prompt = lubancode::agent::AssembleSystemPrompt(prompt_options);
+    // 皮上的叠层(从前由传输层的 ModelInstructions/SoulOverlay/
+    // DeferredIndex 三只包装后端现拼,现在 Agent 拼请求时就地生效)。
+    main_agent_profile.model_instructions = *current_model_instructions;
+    main_agent_profile.soul = *current_soul;
+    main_agent_profile.deferred_index_provider = [this]() {
+        // 发请求前现查现拼:tool_search 命中后的下一份请求,新挂载的工具
+        // 自然从索引段里消失;未启用时恒给空串,等于不注。
+        return main_deferral ? lubancode::tools::BuildDeferredToolsIndexSegment(registry(), *loaded_tools())
+                             : std::string();
+    };
+    // 工具可见性(病十三的方向):goal/loop 窄工具的 turn 级放行(单子:
+    // goal_checkpoint 只在 goal execution turn 动态露面,loop_control 只在
+    // scheduled tick 的 turn 里;普通 turn 一概看不见)。goal_active_
+    // iteration_/loop_active_tick_id_ 是会话泵发 turn 前置、turn 收口清的
+    // 活跃账,恰是"这一轮是谁的轮"的真值。其余工具走 ToolRuntime 的主
+    // 过滤(延迟挂载/memory gate 原样)。
+    main_agent_profile.tool_filter = [this](const lubancode::tools::Tool& tool) {
+        if (tool.name() == "goal_checkpoint") {
+            return !goal_active_iteration_.empty();
+        }
+        if (tool.name() == "loop_control") {
+            return !loop_active_tick_id_.empty();
+        }
+        return main_tool_filter()(tool);
+    };
+    main_agent_profile.tool_filter_denial =
+        "这只工具只在对应的 goal 执行轮/loop 定时拍里可用,当前轮不是。";
     // 病十(批三):四段开关写进皮——与 prompt_options 同源(配置),子代理
     // 派生时同段拷贝,不再有"主代理有、子代理无"的隐性分叉。
     main_agent_profile.prompt_sections.mcp = prompt_options.mcp;
     main_agent_profile.prompt_sections.web = prompt_options.web;
     main_agent_profile.prompt_sections.lsp = prompt_options.lsp;
     main_agent_profile.prompt_sections.wire = prompt_options.wire;
-    main_agent.emplace(*index_backend_, registry(), main_agent_profile);
+    main_agent.emplace(wrapped_backend, registry(), main_agent_profile);
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry().Find("agent"));
         agent_tool != nullptr) {
         lubancode::agent::AgentProfile subagent_profile = main_agent_profile;
@@ -2096,37 +2121,44 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
                 });
         }
     }
-    main_agent->SetToolFilter([this](const lubancode::tools::Tool& tool) {
-        // goal/loop 窄工具的 turn 级放行(单子:goal_checkpoint 只在 goal
-        // execution turn 动态露面,loop_control 只在 scheduled tick 的 turn
-        // 里;普通 turn 一概看不见)。goal_active_iteration_/loop_active_
-        // tick_id_ 是会话泵发 turn 前置、turn 收口清的活跃账,恰是"这一轮
-        // 是谁的轮"的真值。其余工具走 ToolRuntime 的主过滤(延迟挂载/
-        // memory gate 原样)。
-        if (tool.name() == "goal_checkpoint") {
-            return !goal_active_iteration_.empty();
-        }
-        if (tool.name() == "loop_control") {
-            return !loop_active_tick_id_.empty();
-        }
-        return main_tool_filter()(tool);
-    });
-    main_agent->SetToolFilterDenial(
-        "这只工具只在对应的 goal 执行轮/loop 定时拍里可用,当前轮不是。");
     // 可追回 artifact(第二期):重建的 loop 也要接上仓(空仓安全退化)。
-    main_agent->SetArtifactStore(artifact_store.get());
+    main_agent->context().set_artifact_store(artifact_store.get());
     // mid-turn 上下文安全点(0.27.x):窗口与压力通报随 loop 重建重灌;窗口
     // 的后续变化(/context、/model)由 RunUserTurn 发轮前再同步。
     main_agent->SetContextWindowTokens(context_tracker.window_tokens());
-    main_agent->SetOnContextPressure([this](const lubancode::agent::ContextPressure& pressure) {
+    // 接线(批四·病十二):压力钩进 AgentWiring;inbox 由 peer 钩在底下重灌。
+    lubancode::agent::AgentWiring main_wiring;
+    main_wiring.on_context_pressure = [this](const lubancode::agent::ContextPressure& pressure) {
         HandleContextPressure(pressure);
-    });
+    };
+    main_agent->SetWiring(std::move(main_wiring));
     if (reapply_peer_inbox) {
         reapply_peer_inbox();  // 跨会话收件点:重建的 loop 也要能收信
     }
     if (preserve_history) {
         main_agent->ReplaceHistory(std::move(old_history));
     }
+}
+
+void TerminalSessionController::SyncAgentRequestPolicy() {
+    // /model、/think、/soul 只改会话状态(current_model/current_think/
+    // current_model_instructions/current_soul),loop 不重建——皮上的请求
+    // 档案与叠层由这里整份刷新,下一份请求即时生效。reasoning 档位照
+    // (provider, model) 从目录现查,与从前 ThinkOverrideBackend 在
+    // send_stream 里干的是同一笔账,只是挪进了正门、进了前缀指纹的视野。
+    if (!main_agent.has_value()) {
+        return;
+    }
+    lubancode::api::RequestProfile request;
+    request.model = *current_model;
+    request.reasoning_effort = *current_think;
+    if (const auto* entry = model_catalog.FindByProviderAndSlug(active_provider, *current_model);
+        entry != nullptr) {
+        request.reasoning = entry->reasoning;
+    }
+    main_agent->SetRequestProfile(std::move(request));
+    main_agent->SetModelInstructions(*current_model_instructions);
+    main_agent->SetSoul(*current_soul);
 }
 
 void TerminalSessionController::RefreshSkills() {
@@ -3373,6 +3405,11 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     std::cout << trf("cmd.model.fetch_failed", result.error) << "\n";
                     break;
                 }
+                // 五层后端退役(批四):/model 的即时生效改走皮上的 request
+                // 档案与叠层(model/effort/目录指令/魂一并刷新),下一份
+                // 请求带上新模型——前缀指纹从此看得见 model_changed,cache
+                // epoch 的账不再瞎(换模型那一份本来就是断前缀)。
+                SyncAgentRequestPolicy();
                 std::cout << trf("cmd.model.switched", result.model) << "\n";
                 if (result.think_from_catalog) {
                     std::cout << trf("catalog.apply_think", result.think) << "\n";
@@ -3620,6 +3657,9 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 HandleThinkCommand(parsed.args, current_think,
                                    model_catalog.FindByProviderAndSlug(active_provider, *current_model),
                                    config.provider_think_levels, config.think_param);
+                // 五层后端退役(批四):effort 的即时生效改走皮上的 request
+                // 档案,下一份请求带上新档位。
+                SyncAgentRequestPolicy();
                 break;
             case lubancode::cli::SlashCommand::Skills:
                 PrintSkillsCommand(skills, CurrentDirUtf8(), home_dir);
@@ -3958,6 +3998,8 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
             }
             case lubancode::cli::SlashCommand::Soul:
                 HandleSoulCommand(parsed.args, current_soul, current_soul_name, config_file_path);
+                // 五层后端退役(批四):魂的即时生效改走皮上的叠层字段。
+                SyncAgentRequestPolicy();
                 break;
             case lubancode::cli::SlashCommand::Prompt:
                 HandlePromptCommand(parsed.args, opts_.law_source, persona, prompts_dir);

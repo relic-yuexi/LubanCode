@@ -23,6 +23,7 @@
 #include <variant>
 #include <vector>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "agent/prefix.hpp"
 #include "api/backend.hpp"
@@ -206,7 +207,7 @@ TEST_CASE("前缀: 默认工具往返,后一份请求是前一份的原样追加
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FixedTool>("read_file", "正文"));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     std::vector<api::UsageReport> reports;
     callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
@@ -239,7 +240,7 @@ TEST_CASE("前缀: 按需 artifact 摘要只追加 tool result,不追改旧消�
     registry.Register(std::make_unique<FixedTool>(
         "context_read", "artifact a0001 按需摘要:构建通过。原文未改。"));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     std::vector<api::UsageReport> reports;
     callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
@@ -269,7 +270,7 @@ TEST_CASE("前缀: 轮间换动态上下文(记忆/名册)不改 system,旧前�
     backend.scripts = {TextScript("答一"), TextScript("答二"), TextScript("答三")};
     tools::ToolRegistry registry;
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
 
     loop.SetTurnContext("项目记忆召回(甲)");
@@ -310,8 +311,7 @@ TEST_CASE("前缀: 步数将尽提醒只随消息尾部追加一次,system 全�
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FixedTool>("read_file", "正文"));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt",
-                          /*max_tokens=*/4096, /*max_steps_per_turn=*/5);
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 5}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     std::vector<api::UsageReport> reports;
     callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
@@ -365,14 +365,18 @@ TEST_CASE("前缀: 工具表中途成批挂载只断一次,断因 tools_changed,
     registry.Register(std::make_unique<FixedTool>("mcp__srv__two", "二"));
     registry.Register(std::make_unique<FixedTool>("mcp__srv__three", "三"));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
-    agent::Callbacks callbacks;
-    std::vector<api::UsageReport> reports;
-    callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
-
     // 初始:延迟三只外挂工具不放行(tool_search 未挂载);probe_tool 执行时
     // 成批放行三只——等价于 tool_search 一次命中三只、只占一个请求边界。
     std::set<std::string> loaded;
+    agent::AgentProfile profile{.request{.model = "test-model"}, .system_prompt = "system prompt"};
+    profile.tool_filter = [&loaded](const tools::Tool& tool) {
+        const std::string prefix = "mcp__";
+        return tool.name().rfind(prefix, 0) != 0 || loaded.count(tool.name()) != 0;
+    };
+    agent::Agent loop(backend, registry, std::move(profile));
+    agent::Callbacks callbacks;
+    std::vector<api::UsageReport> reports;
+    callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
     class MountingTool : public tools::Tool {
     public:
         MountingTool(std::set<std::string>& loaded) : loaded_(loaded) {}
@@ -390,10 +394,6 @@ TEST_CASE("前缀: 工具表中途成批挂载只断一次,断因 tools_changed,
         std::set<std::string>& loaded_;
     };
     registry.Register(std::make_unique<MountingTool>(loaded));
-    loop.SetToolFilter([&loaded](const tools::Tool& tool) {
-        const std::string prefix = "mcp__";
-        return tool.name().rfind(prefix, 0) != 0 || loaded.count(tool.name()) != 0;
-    });
 
     REQUIRE(loop.Run("干活", callbacks).has_value());
     REQUIRE(backend.captured.size() == 3);
@@ -429,7 +429,7 @@ TEST_CASE("前缀: 长工具结果首次即预览,由热转冷不再追改旧消
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FixedTool>("read_file", big));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     std::vector<api::UsageReport> reports;
     callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };
@@ -471,8 +471,7 @@ TEST_CASE("前缀: hard trim 后 sticky view 钉住,后续请求不再滑窗") {
     // 7 轮每轮 ~1000 字符;上限 6000:第 6 轮起 TrimHistory 开始丢中间轮
     // (留第一轮 + 最近 3 轮,约 4000 字符,给后续追加留了余量——余量内
     // sticky 不再动手,余量耗尽再裁一次是新的明确 epoch break)。
-    agent::Agent loop(backend, registry, "test-model", "system prompt", /*max_tokens=*/4096,
-                          /*max_steps_per_turn=*/0, /*max_context_chars=*/6000);
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 0, .max_context_chars = 6000}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     std::vector<api::UsageReport> reports;
     callbacks.on_usage = [&](const api::UsageReport& report) { reports.push_back(report); };

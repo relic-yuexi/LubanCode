@@ -26,6 +26,7 @@
 #include <string>
 #include <vector>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
@@ -107,7 +108,7 @@ TEST_CASE("同一假 backend 脚本:Terminal 与 Json 两 sink 同流同账") {
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>());
     agent::AgentRuntimeProfile profile;
-    agent::Agent loop(backend, registry, std::move(profile), std::string("same-stream-test"));
+    agent::Agent loop(backend, registry, [&] { agent::AgentProfile out; out.runtime = profile; out.system_prompt = "same-stream-test"; return out; }());
 
     RecordingSink recorder;
     rt::TerminalEventSink terminal_sink;
@@ -340,7 +341,7 @@ TEST_CASE("批二·FanoutEventSink:一表事件多家齐收,次序与载荷一�
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>());
     agent::AgentRuntimeProfile profile;
-    agent::Agent loop(backend, registry, std::move(profile), std::string("fanout-test"));
+    agent::Agent loop(backend, registry, [&] { agent::AgentProfile out; out.runtime = profile; out.system_prompt = "fanout-test"; return out; }());
 
     rt::TurnEventAdapter adapter("th-fanout", rt::ProcessIdAuthority());
     adapter.Attach([&fanout](const rt::ServerEvent& event) { fanout.Emit(event); });

@@ -13,6 +13,7 @@
 
 #include "agent/compact.hpp"
 #include "agent/context.hpp"
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
@@ -535,7 +536,10 @@ TEST_CASE("守护:压缩前后 AgentLoop 发出的 system 逐字节不变") {
     FakeBackend loop_backend;
     loop_backend.script = SummaryScript("这一轮的普通回答,不短,凑够字数免得跟压缩门槛混为一谈。");
     tools::ToolRegistry registry;  // 空表:这轮不调工具
-    agent::Agent loop(loop_backend, registry, "test-model", system_prompt);
+    agent::AgentProfile loop_profile;
+    loop_profile.request.model = "test-model";
+    loop_profile.system_prompt = system_prompt;
+    agent::Agent loop(loop_backend, registry, std::move(loop_profile));
 
     REQUIRE(loop.Run("第一问 " + std::string(2400, 'x'), agent::Callbacks{}).has_value());
     REQUIRE_FALSE(loop_backend.captured_requests.empty());
@@ -574,9 +578,11 @@ TEST_CASE("AgentLoop: 窗口未知或没设回调时,请求前不做任何通报
     FakeBackend backend;
     backend.script = SummaryScript("普通回答,凑够字数,不触发任何压缩门槛。");
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "sys");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "sys"});
     int calls = 0;
-    loop.SetOnContextPressure([&calls](const agent::ContextPressure&) { ++calls; });
+    agent::AgentWiring wiring;
+    wiring.on_context_pressure = [&calls](const agent::ContextPressure&) { ++calls; };
+    loop.SetWiring(std::move(wiring));
     REQUIRE(loop.Run("第一问 " + std::string(2400, 'x'), agent::Callbacks{}).has_value());
     CHECK(calls == 0);  // 窗口 0 = 未知,不评估
 }
@@ -586,13 +592,14 @@ TEST_CASE("AgentLoop: projected overflow 在请求前通报,回调里压缩后�
     FakeBackend backend;
     backend.script = SummaryScript("回答正文,凑够字数,免得跟压缩门槛混淆。");
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "sys");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "sys"});
     loop.SetTurnContext("project memory context");
     loop.SetContextWindowTokens(1000);  // 极小窗口:第一请求必然 projected overflow
 
     std::vector<agent::ContextPressure> seen;
     bool compacted = false;
-    loop.SetOnContextPressure([&](const agent::ContextPressure& pressure) {
+    agent::AgentWiring wiring;
+    wiring.on_context_pressure = [&](const agent::ContextPressure& pressure) {
         seen.push_back(pressure);
         if (pressure.phase == agent::ContextPressure::Phase::PreRequest && pressure.projected_overflow &&
             !compacted) {
@@ -603,7 +610,8 @@ TEST_CASE("AgentLoop: projected overflow 在请求前通报,回调里压缩后�
             archive.content.push_back(api::TextBlock{"[对话存档,此前内容已压缩] 摘要正文,不短。"});
             loop.ReplaceHistory({archive});
         }
-    });
+    };
+    loop.SetWiring(std::move(wiring));
 
     REQUIRE(loop.Run(std::string(6000, 'a') + "的问题", agent::Callbacks{}).has_value());
 
@@ -639,12 +647,13 @@ TEST_CASE("AgentLoop: TrimHistory 兜底真丢东西时,AfterHardTrim 通报") {
     tools::ToolRegistry registry;
     // max_context_chars 设得很小:第五轮起(轮数盖过 keep_recent_turns+1)
     // 必触发轮级裁剪。
-    agent::Agent loop(backend, registry, "test-model", "sys", /*max_tokens=*/4096,
-                          /*max_steps_per_turn=*/0, /*max_context_chars=*/2600);
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 0, .max_context_chars = 2600}, .system_prompt = "sys"});
     loop.SetContextWindowTokens(0);  // 不做 projected 评估,单测硬裁线
 
     std::vector<agent::ContextPressure> seen;
-    loop.SetOnContextPressure([&seen](const agent::ContextPressure& pressure) { seen.push_back(pressure); });
+    agent::AgentWiring wiring;
+    wiring.on_context_pressure = [&seen](const agent::ContextPressure& pressure) { seen.push_back(pressure); };
+    loop.SetWiring(std::move(wiring));
 
     // 前四轮:轮数不够裁,没有通报。
     for (int i = 0; i < 4; ++i) {

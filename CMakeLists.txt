@@ -397,6 +397,10 @@ add_library(lubancode_engine STATIC
   src/tools/list_sessions_tool.cpp
   src/tools/send_session_message_tool.cpp
   src/agent/loop.cpp
+  # 骨架拆解批四·病六/病十二:Agent 自立门户(身份+皮+接线+历史句柄),
+  # 上下文管理拆进 ContextManager(双历史/前缀账/sticky/压缩台账/artifact)。
+  src/agent/agent.cpp
+  src/agent/context_manager.cpp
   # 骨架拆解批三·harness 合流:主回合与子代理共用的续投外环/取消链/
   # 收场分型/Stop 续跑环。
   src/agent/turn_harness.cpp

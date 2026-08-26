@@ -40,13 +40,13 @@ public:
                            const nlohmann::json& input)> on_tool_confirm;
         std::function<void(const std::string& tool_use_id, const std::string& name,
                            const tools::Tool::Result& result)> on_tool_done;
-        std::function<agent::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
+        std::function<runtime::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
                                               const nlohmann::json& input)>
             on_pre_tool_use_hook;
-        std::function<agent::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
+        std::function<runtime::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
                                               const nlohmann::json& input)>
             on_permission_request;
-        std::function<void(const std::string& tool_use_id, const std::string& name, agent::ToolPhase phase)>
+        std::function<void(const std::string& tool_use_id, const std::string& name, runtime::ToolPhase phase)>
             on_tool_phase;
         std::function<std::vector<std::string>(const std::string& tool_use_id, const std::string& name,
                                                const nlohmann::json& input, const tools::Tool::Result& result)>

@@ -416,7 +416,7 @@ TEST_CASE("RunTurn 静默档:正文与统计不上屏,归档成 assistant 条目
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("结论:方案可行。\n依据有三。", api::Usage{400, 60})};
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     cli::ContextTracker tracker(1000);
     std::set<std::string> always_allowed;
     std::vector<cli::TranscriptItem> transcript;
@@ -458,7 +458,7 @@ TEST_CASE("RunTurn 非静默对照:同一轮照常上屏,不因静默档的闸�
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("正常轮的正文", api::Usage{100, 10})};
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     cli::ContextTracker tracker(1000);
     std::set<std::string> always_allowed;
     std::vector<cli::TranscriptItem> transcript;
@@ -505,7 +505,7 @@ TEST_CASE("RunTurn 静默档:工具与思考只进台账,工具真执行、条�
     QuietProbeTool* probe = new QuietProbeTool();
     tools::ToolRegistry registry;
     registry.Register(std::unique_ptr<QuietProbeTool>(probe));
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     cli::ContextTracker tracker(1000);
     std::set<std::string> always_allowed;
     std::vector<cli::TranscriptItem> transcript;

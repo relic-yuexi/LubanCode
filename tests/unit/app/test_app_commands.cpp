@@ -16,6 +16,7 @@
 #include <string>
 #include <vector>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "sessions/session_store.hpp"
 #include "api/backend.hpp"
@@ -133,7 +134,7 @@ TEST_CASE("/title 状态账:建档前挂起,建档后补写,再设当场落事�
     lubancode::sessions::SessionStore store(dir.string());
     lubancode::tools::ToolRegistry registry;
     NullBackend backend;
-    lubancode::agent::Agent loop(backend, registry, "test-model", "system");
+    lubancode::agent::Agent loop(backend, registry, lubancode::agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
 
     std::string title;
     bool title_pending = false;
@@ -184,7 +185,7 @@ TEST_CASE("/clear 状态账:重建不带历史、存档翻篇、标题清空") {
     lubancode::sessions::SessionStore store(dir.string());
     lubancode::tools::ToolRegistry registry;
     NullBackend backend;
-    lubancode::agent::Agent loop(backend, registry, "test-model", "system");
+    lubancode::agent::Agent loop(backend, registry, lubancode::agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
     lubancode::sessions::SessionMeta begin_meta;
     REQUIRE(store.Begin(begin_meta, "sess-clear-test"));
     store.AppendTitleEvent("旧标题");

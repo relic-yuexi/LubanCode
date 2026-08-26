@@ -38,10 +38,9 @@
 
 #include <nlohmann/json.hpp>
 
-#include "agent/loop.hpp"  // agent::ApprovalRequest/ApprovalResponse/InteractionFuture
 #include "app_server/protocol.hpp"
 #include "app_server/schema.hpp"
-#include "runtime/interaction_broker.hpp"
+#include "runtime/interaction_broker.hpp"  // ApprovalRequest/ApprovalResponse/InteractionFuture(合同在 runtime/interaction.hpp)
 
 namespace lubancode::app_server {
 
@@ -68,27 +67,17 @@ struct InteractionResolution {
     runtime::QuestionResponse question;
 };
 
-// PendingFuture 是 agent::InteractionFuture 与 runtime::InteractionFuture
-// 的双重实现:agent 头与 runtime 头里的同名接口是刻意的镜像(各自的
-// 依赖边界),这里一并实现,装配处不用二次包装。
+// PendingFuture 是 runtime::InteractionFuture 的悬起实现(骨架拆解批四:
+// agent 侧与 runtime 侧的同名接口已合成一份合同,这里只实现一份)。
 //
 // Wait 是"阻塞到有结果或悬空收口"的合同语义;限时与打断轮询的实现:
 // promise 的 future 是真 std::future,Wait 外围分片轮询(poll_slice),
 // 每 25ms 醒一次查打断旗与超时线——审批是人工节奏,这个粒度毫无压力,
 // 且不造额外线程(审批悬停本来就该轻)。
-class PendingFuture final : public agent::InteractionFuture {
+class PendingFuture final : public runtime::InteractionFuture {
 public:
-    std::optional<agent::ApprovalResponse> WaitApproval() override;  // agent::InteractionFuture
-
-    // runtime::InteractionFuture 合同方向的两枚(AskQuestion 路径):与
-    // agent 侧同一份分片轮询,产出 runtime 合同的类型。两个基类的
-    // WaitApproval 同名但返回类型不同(同构镜像不是协变),没法多继承
-    // 一次实现两边,所以这里只继承 agent 侧,runtime 合同由
-    // InteractionLedger::AskQuestion 的返回类型(shared_ptr<
-    // runtime::InteractionFuture>)单独包一层(见 interaction.cpp 的
-    // RuntimeQuestionFuture 适配器)。
-    std::optional<runtime::ApprovalResponse> WaitApprovalRuntime();
-    std::optional<runtime::QuestionResponse> WaitQuestion();
+    std::optional<runtime::ApprovalResponse> WaitApproval() override;
+    std::optional<runtime::QuestionResponse> WaitQuestion() override;
 
     // 超时线(0 = 不限):Wait 里到了还没答复,按悬空收口返回 nullopt。
     void SetTimeout(std::chrono::milliseconds timeout) { timeout_ = timeout; }
@@ -110,23 +99,17 @@ private:
 };
 
 // 就绪 future(会话级放行免问路径用):构造时带答案,Wait 立即返回。
-class ReadyApprovalFuture final : public agent::InteractionFuture {
+class ReadyApprovalFuture final : public runtime::InteractionFuture {
 public:
-    explicit ReadyApprovalFuture(std::optional<agent::ApprovalResponse> response)
+    explicit ReadyApprovalFuture(std::optional<runtime::ApprovalResponse> response)
         : response_(std::move(response)) {}
-    std::optional<agent::ApprovalResponse> WaitApproval() override { return response_; }
+    std::optional<runtime::ApprovalResponse> WaitApproval() override { return response_; }
+    // 审批路用不到提问:空实现返回悬空收口(合同允许,实现窄)。
+    std::optional<runtime::QuestionResponse> WaitQuestion() override { return std::nullopt; }
 
 private:
-    std::optional<agent::ApprovalResponse> response_;
+    std::optional<runtime::ApprovalResponse> response_;
 };
-
-// agent::ApprovalRequest/ApprovalResponse 与 runtime:: 同构镜像的映射桥
-//(P2 工人接线注意 1:两边各漂就靠这一个函数钉住,不许散着抄)。agent/ 不
-// include runtime 头是刻意边界,桥放装配层(app_server)正合适。
-agent::ApprovalRequest MirrorApprovalRequest(const runtime::ApprovalRequest& request);
-runtime::ApprovalRequest MirrorApprovalRequest(const agent::ApprovalRequest& request);
-agent::ApprovalResponse MirrorApprovalResponse(const runtime::ApprovalResponse& response);
-runtime::ApprovalResponse MirrorApprovalResponse(const agent::ApprovalResponse& response);
 
 // 一场 thread 的交互悬起件:pending 表 + 会话级放行账。
 // 线程安全:读线程(登记/答复/收口)与工作线程(Wait)并发用。
@@ -142,7 +125,7 @@ public:
     // 发一枚审批请求:登记 request_id、emit 出站事件,返回可 Wait 的
     // future。emit 为出站口(server 装配:outbox 的 must_keep push)。
     // 返回的 future 由调用方在同一线程 Wait。
-    std::shared_ptr<agent::InteractionFuture> AskApproval(
+    std::shared_ptr<runtime::InteractionFuture> AskApproval(
         const runtime::ApprovalRequest& request, const std::string& turn_id,
         const std::function<void(std::string_view method, const nlohmann::json& params)>& emit);
 

@@ -117,8 +117,6 @@ using lubancode::app::RunTurn;
 using lubancode::app::MemoryOptionsFromConfig;
 using lubancode::app::BuildBaseToolRegistry;
 using lubancode::app::BuildBackend;
-using lubancode::app::ThinkOverrideBackend;
-using lubancode::app::DeferredIndexBackend;
 using lubancode::cli::SpinnerBackend;
 
 // 单发模式(位置参数):也走 agent loop,同样支持工具,只是只问这一句。
@@ -171,14 +169,10 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     }
 
     std::unique_ptr<lubancode::api::Backend> backend = BuildBackend(config);
-    // 单发模式没有 /think 命令,current_think 构造后不会再变,等价于直接
-    // 按配置里的 think 发一次。
-    auto current_think = std::make_shared<std::string>(config.think);
+    // 批四·病十一其三:五层请求改写后端退役。单发没有 /think,推理档位
+    // 由皮上的 request 档案直接带(与配置一字不差),不再经传输层包装。
     const lubancode::config::ModelCatalog once_catalog = lubancode::config::LoadModelCatalog();
-    auto once_model = std::make_shared<std::string>(config.model);
-    ThinkOverrideBackend think_backend(*backend, current_think, once_model, &once_catalog,
-                                       &config.active_provider);
-    SpinnerBackend wrapped_backend(think_backend, theme, spinner_enabled);
+    SpinnerBackend wrapped_backend(*backend, theme, spinner_enabled);
 
     // 工具全栈与 InteractiveLoop 共用一套 ToolRuntime 装配(差异收在
     // options 里:单发无 explore、无 ask_user、不挂 memory_save)。单发
@@ -224,11 +218,6 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
             });
         }
     }
-    DeferredIndexBackend index_backend(
-        wrapped_backend, [&registry, loaded_tools, main_deferral]() {
-            return main_deferral ? lubancode::tools::BuildDeferredToolsIndexSegment(registry, *loaded_tools)
-                                  : std::string();
-        });
 
     // 0.19.x 提示词模块化:跟 InteractiveLoop 同一套条件拼装(skills 有才注、
     // mcp/web/lsp 配了才注、平台段按 wire),发出去的结构两种模式一模一样。
@@ -267,10 +256,15 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         lubancode::agent::WithModelInstructions(
             lubancode::agent::AssembleSystemPrompt(prompt_options), model_instructions),
         soul_content);
-    lubancode::agent::Agent loop(index_backend, registry, std::move(once_agent_profile));
+    // tool_search 的索引段(从前由 DeferredIndexBackend 现拼):皮上的活口,
+    // Agent 拼请求时现查;单发只跑一轮,行为与从前逐字节一致。
     if (main_deferral) {
-        loop.SetToolFilter(tool_runtime.main_tool_filter());
+        once_agent_profile.deferred_index_provider = [&registry, loaded_tools]() {
+            return lubancode::tools::BuildDeferredToolsIndexSegment(registry, *loaded_tools);
+        };
+        once_agent_profile.tool_filter = tool_runtime.main_tool_filter();
     }
+    lubancode::agent::Agent loop(wrapped_backend, registry, std::move(once_agent_profile));
     std::string turn_context;
     if (project_memory != nullptr) {
         // 单发模式的问题就是用户提问,query_origin=user 才跑检索。

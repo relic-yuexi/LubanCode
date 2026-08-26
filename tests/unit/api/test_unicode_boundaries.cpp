@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
@@ -200,7 +201,7 @@ TEST_CASE("AgentLoop:劈半 emoji 的 delta 流,回调每段合法、history 自
     });
 
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "system", std::nullopt, 5, 200000);
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_steps_per_turn = 5, .max_context_chars = 200000}, .system_prompt = "system"});
 
     std::vector<std::string> shown;
     agent::Callbacks callbacks;
@@ -310,7 +311,7 @@ TEST_CASE("Utf8ToWide:坏字节尽力替换,不失败不抛") {
 TEST_CASE("RunTurn:后端抛 1113 异常,回合按失败收口,不掀进程") {
     ThrowingBackend backend;
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "system", std::nullopt, 5, 200000);
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_steps_per_turn = 5, .max_context_chars = 200000}, .system_prompt = "system"});
 
     lubancode::cli::Theme theme;  // plain,无 ANSI
     lubancode::cli::ContextTracker context_tracker(1000);

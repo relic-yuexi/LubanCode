@@ -18,6 +18,7 @@
 
 #include "api/backend.hpp"
 #include "api/types.hpp"
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "tools/registry.hpp"
 
@@ -237,7 +238,7 @@ TEST_CASE("AgentLoop 往返: on_pre_tool_hook 拦截后,模型在下一轮 tool_
     auto* write_tool = new FakeWriteTool();
     registry.Register(std::unique_ptr<FakeWriteTool>(write_tool));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     agent::Callbacks callbacks;
     callbacks.on_pre_tool_hook = [](const std::string&, const std::string& name,
@@ -274,7 +275,7 @@ TEST_CASE("AgentLoop 往返: on_pre_tool_hook 放行(nullopt)时工具正常执�
     auto* write_tool = new FakeWriteTool();
     registry.Register(std::unique_ptr<FakeWriteTool>(write_tool));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     agent::Callbacks callbacks;
     bool hook_called = false;
@@ -310,16 +311,16 @@ TEST_CASE("RunOneTool 状态机: 相位序列 requested->checking_hook->running-
     tools::ToolRegistry registry;
     auto* write_tool = new FakeWriteTool();
     registry.Register(std::unique_ptr<FakeWriteTool>(write_tool));
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
-    std::vector<agent::ToolPhase> phases;
+    std::vector<runtime::ToolPhase> phases;
     agent::Callbacks callbacks;
     callbacks.on_tool_phase = [&phases](const std::string&, const std::string&,
-                                        agent::ToolPhase phase) { phases.push_back(phase); };
+                                        runtime::ToolPhase phase) { phases.push_back(phase); };
     callbacks.on_pre_tool_use_hook = [](const std::string& /*tool_use_id*/, const std::string&,
-                                        const nlohmann::json&) -> agent::ToolHookDecision {
-        agent::ToolHookDecision decision;
-        decision.decision = agent::ToolHookDecision::Decision::Deny;
+                                        const nlohmann::json&) -> runtime::ToolHookDecision {
+        runtime::ToolHookDecision decision;
+        decision.decision = runtime::ToolHookDecision::Decision::Deny;
         decision.reason = "危险操作";
         decision.additional_context = {"换个目录再试"};
         return decision;
@@ -329,8 +330,8 @@ TEST_CASE("RunOneTool 状态机: 相位序列 requested->checking_hook->running-
     REQUIRE(result.has_value());
     CHECK(write_tool->call_count == 0);  // 没执行
     REQUIRE(phases.size() == 2);
-    CHECK(phases[0] == agent::ToolPhase::CheckingHook);
-    CHECK(phases[1] == agent::ToolPhase::Blocked);  // 停在 blocked,不冒充跑过
+    CHECK(phases[0] == runtime::ToolPhase::CheckingHook);
+    CHECK(phases[1] == runtime::ToolPhase::Blocked);  // 停在 blocked,不冒充跑过
 
     REQUIRE(backend.captured_requests.size() == 2);
     const auto& tool_result =
@@ -349,13 +350,13 @@ TEST_CASE("RunOneTool: updatedInput 合法时按改写后的入参执行") {
     tools::ToolRegistry registry;
     auto* write_tool = new FakeWriteTool();
     registry.Register(std::unique_ptr<FakeWriteTool>(write_tool));
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     agent::Callbacks callbacks;
     callbacks.on_pre_tool_use_hook = [](const std::string& /*tool_use_id*/, const std::string&,
-                                        const nlohmann::json& input) -> agent::ToolHookDecision {
-        agent::ToolHookDecision decision;
-        decision.decision = agent::ToolHookDecision::Decision::Allow;
+                                        const nlohmann::json& input) -> runtime::ToolHookDecision {
+        runtime::ToolHookDecision decision;
+        decision.decision = runtime::ToolHookDecision::Decision::Allow;
         nlohmann::json updated = input.is_null() ? nlohmann::json::object() : input;
         updated["path"] = "rewritten.txt";  // FakeWriteTool 的 schema 没约束,放行
         decision.updated_input = updated;
@@ -403,13 +404,13 @@ TEST_CASE("RunOneTool: updatedInput 不过工具 schema = 打回并拦截,不按
     tools::ToolRegistry registry;
     auto* strict_tool = new StrictSchemaTool();
     registry.Register(std::unique_ptr<StrictSchemaTool>(strict_tool));
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     agent::Callbacks callbacks;
     callbacks.on_pre_tool_use_hook = [](const std::string& /*tool_use_id*/, const std::string&,
-                                        const nlohmann::json&) -> agent::ToolHookDecision {
-        agent::ToolHookDecision decision;
-        decision.decision = agent::ToolHookDecision::Decision::Allow;
+                                        const nlohmann::json&) -> runtime::ToolHookDecision {
+        runtime::ToolHookDecision decision;
+        decision.decision = runtime::ToolHookDecision::Decision::Allow;
         decision.updated_input = nlohmann::json::object({{"path", 12345}});  // 类型错:string 槽塞数字
         return decision;
     };
@@ -433,7 +434,7 @@ TEST_CASE("RunOneTool: PostToolUse 反馈追加进模型所见 tool_result") {
     tools::ToolRegistry registry;
     auto* write_tool = new FakeWriteTool();
     registry.Register(std::unique_ptr<FakeWriteTool>(write_tool));
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     agent::Callbacks callbacks;
     bool post_hook_called = false;
@@ -473,14 +474,14 @@ TEST_CASE("RunOneTool: ask 决策时仍走确认回调(钩子不越过确认,确
     tools::ToolRegistry registry;
     auto* confirm_tool = new ConfirmTool();
     registry.Register(std::unique_ptr<ConfirmTool>(confirm_tool));
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     bool confirm_asked = false;
     agent::Callbacks callbacks;
     callbacks.on_pre_tool_use_hook =
-        [](const std::string&, const std::string&, const nlohmann::json&) -> agent::ToolHookDecision {
-        agent::ToolHookDecision decision;
-        decision.decision = agent::ToolHookDecision::Decision::Ask;
+        [](const std::string&, const std::string&, const nlohmann::json&) -> runtime::ToolHookDecision {
+        runtime::ToolHookDecision decision;
+        decision.decision = runtime::ToolHookDecision::Decision::Ask;
         decision.reason = "这命令得问问";
         return decision;
     };

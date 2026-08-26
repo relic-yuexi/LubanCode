@@ -319,14 +319,17 @@ std::expected<std::vector<std::string>, std::string> PromptAskUser(
 // ---------------------------------------------------------------------------
 namespace {
 
-class ReadyApprovalFuture final : public lubancode::agent::InteractionFuture {
+class ReadyApprovalFuture final : public lubancode::runtime::InteractionFuture {
 public:
-    explicit ReadyApprovalFuture(lubancode::agent::ApprovalResponse response) : response_(std::move(response)) {}
+    explicit ReadyApprovalFuture(lubancode::runtime::ApprovalResponse response) : response_(std::move(response)) {}
 
-    std::optional<lubancode::agent::ApprovalResponse> WaitApproval() override { return response_; }
+    std::optional<lubancode::runtime::ApprovalResponse> WaitApproval() override { return response_; }
+    // 审批路的 future 用不到提问(ask_user 走 Broker 的另一路):空实现
+    // 返回悬空收口,合同允许(实现窄)。
+    std::optional<lubancode::runtime::QuestionResponse> WaitQuestion() override { return std::nullopt; }
 
 private:
-    lubancode::agent::ApprovalResponse response_;
+    lubancode::runtime::ApprovalResponse response_;
 };
 
 }  // namespace
@@ -372,7 +375,7 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
                     std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                     lubancode::cli::ToolDisplay& display, const std::vector<std::string>& allow_commands,
                     const std::vector<std::string>& deny_commands,
-                    lubancode::hooks::HookDispatcher* hook_dispatcher, const lubancode::agent::ToolHookDecision& pre,
+                    lubancode::hooks::HookDispatcher* hook_dispatcher, const lubancode::runtime::ToolHookDecision& pre,
                     bool has_permission_hooks, const std::string& name, const nlohmann::json& input,
                     const std::function<void(bool asked, bool allowed)>& approval_observer = {}) {
     const bool file_tool = name == "write_file" || name == "edit_file";
@@ -594,12 +597,12 @@ lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) 
     // ask 强制问一句)——确认回调的签名不带它,靠这个共享槽传:RunOneTool
     // 先跑 PreToolUse 再问确认,槽里的决策就是当前这次工具调用的。子代理
     // 转发的是同一批 std::function(闭包随行),槽照常可用。
-    auto pre_decision_slot = std::make_shared<lubancode::agent::ToolHookDecision>();
+    auto pre_decision_slot = std::make_shared<lubancode::runtime::ToolHookDecision>();
     if (has_tool_hooks) {
         callbacks.on_pre_tool_use_hook = [hook_dispatcher, pre_decision_slot](
                                              const std::string& /*tool_use_id*/, const std::string& name,
-                                             const nlohmann::json& input) -> lubancode::agent::ToolHookDecision {
-            lubancode::agent::ToolHookDecision decision =
+                                             const nlohmann::json& input) -> lubancode::runtime::ToolHookDecision {
+            lubancode::runtime::ToolHookDecision decision =
                 lubancode::runtime::EmitPreToolUse(hook_dispatcher, name, input);
             *pre_decision_slot = decision;
             return decision;
@@ -617,16 +620,16 @@ lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) 
         // 对应条目(P4;子代理工具的 id 在转发链上随行);等权限/运行的过渡
         // 由既有 OnConfirmRequest/终态渲染覆盖,不重复画。
         callbacks.on_tool_phase = [&display](const std::string& tool_use_id, const std::string& /*name*/,
-                                            lubancode::agent::ToolPhase phase) {
+                                            lubancode::runtime::ToolPhase phase) {
             switch (phase) {
-                case lubancode::agent::ToolPhase::CheckingHook:
+                case lubancode::runtime::ToolPhase::CheckingHook:
                     display.OnHookCheckingText(tool_use_id);
                     break;
-                case lubancode::agent::ToolPhase::Blocked:
+                case lubancode::runtime::ToolPhase::Blocked:
                     display.OnHookMarkBlocked(tool_use_id);
                     break;
-                case lubancode::agent::ToolPhase::WaitingPermission:
-                case lubancode::agent::ToolPhase::Running:
+                case lubancode::runtime::ToolPhase::WaitingPermission:
+                case lubancode::runtime::ToolPhase::Running:
                     break;
             }
         };
@@ -699,15 +702,15 @@ lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) 
     // 路(子代理/PTC 转发、单测)不走这里,照旧同步、不许多线程化。
     callbacks.on_tool_confirm_async =
         [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands, &deny_commands, hook_dispatcher,
-         pre_decision_slot, has_permission_hooks, approval_observer](const lubancode::agent::ApprovalRequest& request)
-        -> std::shared_ptr<lubancode::agent::InteractionFuture> {
+         pre_decision_slot, has_permission_hooks, approval_observer](const lubancode::runtime::ApprovalRequest& request)
+        -> std::shared_ptr<lubancode::runtime::InteractionFuture> {
         const bool allowed =
             ConfirmToolUse(request.tool_use_id, auto_confirm, always_allowed_tools, theme, display, allow_commands,
                            deny_commands, hook_dispatcher, *pre_decision_slot, has_permission_hooks,
                            request.tool_name, request.input, approval_observer);
-        lubancode::agent::ApprovalResponse response;
-        response.decision = allowed ? lubancode::agent::ApprovalDecision::Accept
-                                    : lubancode::agent::ApprovalDecision::Decline;
+        lubancode::runtime::ApprovalResponse response;
+        response.decision = allowed ? lubancode::runtime::InteractionDecision::Accept
+                                    : lubancode::runtime::InteractionDecision::Decline;
         return std::make_shared<ReadyApprovalFuture>(std::move(response));
     };
 

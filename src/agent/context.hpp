@@ -77,4 +77,45 @@ std::vector<api::Message> TrimHistory(const std::vector<api::Message>& history,
                                        std::size_t keep_recent_turns = kDefaultKeepRecentTurns,
                                        TrimReport* report = nullptr);
 
+// ---------------------------------------------------------------------------
+// mid-turn 上下文安全点(0.27.x 分层压缩第一期;骨架拆解批四从 loop.hpp
+// 归位 context——压力是上下文的账)
+//
+// 自动压缩旧账只看"上一回请求的 usage",且只在下一条外层用户消息发送前
+// 触发——工具循环中途回填了大结果后,下一次模型请求可能先撞墙。现在每次
+// 模型请求前(工具结果已攒完、请求尚未发出,正是不打断工具的那个缝)
+// 都先估一次 projected overflow,快撞窗口就把历史收一收。
+// ---------------------------------------------------------------------------
+
+// projected 判定的默认参考线:估占窗口的百分比。80 与 ContextTracker 的
+// kAutoCompactThresholdPercent 同档——这是参考线,不是写死的唯一口径。
+constexpr int kProjectedOverflowPercent = 80;
+
+// 每次模型请求前的上下文压力通报。phase 区分两种调用:
+//   PreRequest    —— 请求拼装前。projected_overflow 为真时,上层可在这个
+//                     安全点同步做语义压缩(ReplaceHistory);回调返回后
+//                     Run() 用(可能已换短的)history 重新拼请求。
+//   AfterHardTrim —— TrimHistory 字符安全网这次真丢了东西(丢轮/截结果)。
+//                     纯通报:上层必须向用户显式告警"发生了有损硬裁",
+//                     不许静默降级;此时再压缩也救不回这一次的请求。
+struct ContextPressure {
+    enum class Phase { PreRequest, AfterHardTrim };
+    Phase phase = Phase::PreRequest;
+    bool projected_overflow = false;   // 预计(含输出预留)放不下
+    std::size_t projected_tokens = 0;  // 估算的下一请求 prompt + 输出预留
+    std::size_t window_tokens = 0;     // 有效窗口;0 = 未知
+    bool hard_trimmed_turns = false;   // 丢了中间整轮
+    std::size_t hard_dropped_messages = 0;
+    bool hard_truncated_results = false;  // 截了超大工具结果
+};
+
+// 跨会话传话(0.25.x)的来信注入规则(纯函数,单测钉):把一封来信按
+// user/assistant 交替的协议安全注进 history——
+//   - history 末条是 user(比如刚攒完的 tool_result 消息):把来信的文本块
+//     追加到那条消息的末尾(保持 user/assistant 交替,三种 wire 都安全);
+//   - 否则(末条是 assistant 等罕见边界):新起一条 user 消息。
+// 来信的"来历"由调用方在文本里带清来源标识(不装成用户手敲),这里只管
+// 结构;来信绝不会被当成确认、权限或命令——这条路由里根本没有那些口子。
+void InjectIncomingMessage(std::vector<api::Message>& history, api::Message incoming);
+
 }  // namespace lubancode::agent

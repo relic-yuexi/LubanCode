@@ -23,6 +23,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "app_server/connection.hpp"

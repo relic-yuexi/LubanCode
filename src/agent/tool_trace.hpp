@@ -9,7 +9,7 @@
 //     wire 配对)/ item_id(Runtime UI 条目)。execution_id 直接复用
 //     Runtime item id 的发号局(IdAuthority),不自造第二只计数器。
 //   - 持久账只落四类关键栅栏:scheduled / execution_started /
-//     execution_finished / result_committed。运行时细相位(ToolPhase)
+//     execution_finished / result_committed。运行时细相位(runtime::ToolPhase)
 //     走 Runtime 事件,不 fsync 每一拍。
 //   - 恢复只落四档:not_started / finished / result_recoverable /
 //     unknown_after_start。能重放的才重放,能补偿的才补偿,unknown 绝不
@@ -341,5 +341,22 @@ struct TraceBatchLine {
     std::string text;
 };
 std::string FormatExecutionSummaryLine(const ToolExecutionRecord& record, bool first_failure);
+
+// 逐枚追踪:一枚工具调用的执行上下文(execution_id 宿主发号、批次与
+// 序号、父执行/重试/补偿关系)。骨架拆解批四从 loop.hpp 归位到这头——
+// trace 缺席(单测/子代理旧路)时 RunOneTool 的栅栏发射全部空操作,行为
+// 与从前逐字节一致。
+struct ToolTraceContext {
+    std::string execution_id;   // 审计主键(IdAuthority 的 item id 同源)
+    std::string thread_id;      // 哪场会话
+    std::string turn_id;        // 哪一轮
+    std::string provider_request_id;  // MessageStart 的 request id;可空
+    std::string batch_id;       // 同一 assistant message 的五枚共用
+    int sequence_in_batch = -1; // 0..N-1
+    std::string parent_execution_id;   // 子代理/PTC 内层归属;可空
+    std::string retry_of;              // 显式重试关系;可空
+    std::string blocked_by;            // 宿主因前置失败明确跳过;可空
+    std::string compensates;           // 补偿哪枚调用;可空
+};
 
 }  // namespace lubancode::agent

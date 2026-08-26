@@ -20,6 +20,8 @@
 #include <utility>
 #include <vector>
 
+#include "agent/agent.hpp"  // Agent/AgentProfile/AgentWiring(批四自立门户)
+#include "agent/context.hpp"  // ContextPressure:压力通报的形状
 #include "sessions/session_catalog.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/session_command_service.hpp"
@@ -968,8 +970,10 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         turn_events.Attach([&bridge](const runtime::ServerEvent& event) { bridge.Emit(event); });
         turn_events.Start(turn_id);
         agent::Callbacks callbacks = turn_events.MakeCallbacks();
-        loop.SetOnContextPressure([this, &thread_id, &turn_id](
-                                      const agent::ContextPressure& pressure) {
+        // 接线(批四·病十二):压力钩进 AgentWiring。
+        agent::AgentWiring loop_wiring;
+        loop_wiring.on_context_pressure = [this, &thread_id, &turn_id](
+                                              const agent::ContextPressure& pressure) {
             // 上下文压力通报:PreRequest 评估与 hard trim 之后各来一次。
             nlohmann::json context;
             context["phase"] = pressure.phase == agent::ContextPressure::Phase::PreRequest
@@ -983,7 +987,8 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
             context["hardTruncatedResults"] = pressure.hard_truncated_results;
             connection_->EmitEvent(kEventTurnContext,
                                    MakeTurnContextParams(thread_id, turn_id, std::move(context)));
-        });
+        };
+        loop.SetWiring(std::move(loop_wiring));
 
         // ---- 审批接线(阶段 2 核心) ----
         // needs_confirm 的工具:先查会话级放行账(acceptForSession 记过
@@ -993,17 +998,16 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         //   - turn/interrupt 置旗 + CancelPending,future 按 cancel 醒;
         //   - 超时(选项给了时限)按"没人可答"悬空收口,不冒充用户拒绝。
         callbacks.on_tool_confirm_async =
-            [this, record, turn_id](const agent::ApprovalRequest& request)
-            -> std::shared_ptr<agent::InteractionFuture> {
+            [this, record, turn_id](const runtime::ApprovalRequest& request)
+            -> std::shared_ptr<runtime::InteractionFuture> {
                 // 会话级放行:免问直接放。
                 if (record->interactions->IsSessionAllowed(request.tool_name)) {
-                    agent::ApprovalResponse accepted;
-                    accepted.decision = agent::ApprovalDecision::Accept;
+                    runtime::ApprovalResponse accepted;
+                    accepted.decision = runtime::InteractionDecision::Accept;
                     return std::make_shared<ReadyApprovalFuture>(std::move(accepted));
                 }
-                const runtime::ApprovalRequest mirrored = MirrorApprovalRequest(request);
                 auto future = std::static_pointer_cast<PendingFuture>(record->interactions->AskApproval(
-                    mirrored, turn_id,
+                    request, turn_id,
                     [this](std::string_view method, const nlohmann::json& params) {
                         // must_keep:审批丢了客户端不知道要答。EmitEvent
                         // 统一盖 seq + 兜溢出通报。

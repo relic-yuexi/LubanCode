@@ -30,6 +30,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/agent.hpp"  // Agent/AgentProfile:agent 节点与 main/sub 共用引擎
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "runtime/event_sink.hpp"

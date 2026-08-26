@@ -20,7 +20,7 @@ constexpr const char* kPromptHookContextPrefix = "[UserPromptSubmit 钩子附加
 
 // ---- 权限裁定 --------------------------------------------------------------
 
-PermissionVerdict EvaluatePermission(const PermissionContext& context, const agent::ToolHookDecision& pre,
+PermissionVerdict EvaluatePermission(const PermissionContext& context, const runtime::ToolHookDecision& pre,
                                      const std::string& name, const nlohmann::json& input) {
     PermissionVerdict verdict;
 
@@ -60,8 +60,8 @@ PermissionVerdict EvaluatePermission(const PermissionContext& context, const age
     // PreToolUse 钩子的表态参与裁决:deny_hit(策略黑名单)最高;钩子
     // allow 只跳"问用户"这一步;钩子 ask 把"本来自动放行"拉回确认。
     const bool hook_allow_skip =
-        pre.decision == agent::ToolHookDecision::Decision::Allow && !deny_hit;
-    const bool hook_ask = pre.decision == agent::ToolHookDecision::Decision::Ask;
+        pre.decision == runtime::ToolHookDecision::Decision::Allow && !deny_hit;
+    const bool hook_ask = pre.decision == runtime::ToolHookDecision::Decision::Ask;
     const bool auto_pass = !deny_hit &&
                            (context.auto_confirm || context.mode == PermissionMode::Yolo ||
                             (context.mode == PermissionMode::Auto && (file_tool || safe_command)) ||
@@ -79,19 +79,19 @@ PermissionVerdict EvaluatePermission(const PermissionContext& context, const age
 
 // ---- hooks 决策 --------------------------------------------------------------
 
-agent::ToolHookDecision MapPreToolDecision(const hooks::HookEventResult& merged) {
-    agent::ToolHookDecision decision;
+runtime::ToolHookDecision MapPreToolDecision(const hooks::HookEventResult& merged) {
+    runtime::ToolHookDecision decision;
     switch (merged.permission) {
         case hooks::HookEventResult::Permission::Deny:
-            decision.decision = agent::ToolHookDecision::Decision::Deny;
+            decision.decision = runtime::ToolHookDecision::Decision::Deny;
             decision.reason = "被 PreToolUse 钩子拦截: " + merged.permission_reason;
             break;
         case hooks::HookEventResult::Permission::Ask:
-            decision.decision = agent::ToolHookDecision::Decision::Ask;
+            decision.decision = runtime::ToolHookDecision::Decision::Ask;
             decision.reason = merged.permission_reason;
             break;
         case hooks::HookEventResult::Permission::Allow:
-            decision.decision = agent::ToolHookDecision::Decision::Allow;
+            decision.decision = runtime::ToolHookDecision::Decision::Allow;
             decision.reason = merged.permission_reason;
             break;
         case hooks::HookEventResult::Permission::None:
@@ -102,10 +102,10 @@ agent::ToolHookDecision MapPreToolDecision(const hooks::HookEventResult& merged)
     return decision;
 }
 
-agent::ToolHookDecision EmitPreToolUse(hooks::HookDispatcher* dispatcher, const std::string& name,
+runtime::ToolHookDecision EmitPreToolUse(hooks::HookDispatcher* dispatcher, const std::string& name,
                                        const nlohmann::json& input, const std::string& tool_execution_id) {
     if (dispatcher == nullptr) {
-        return agent::ToolHookDecision{};
+        return runtime::ToolHookDecision{};
     }
     hooks::HookPayload payload;
     payload.event = hooks::HookEvent::PreToolUse;
@@ -221,7 +221,7 @@ TurnRuntime::TurnRuntime(Options options)
       deny_commands_(std::move(options.deny_commands)),
       hook_dispatcher_(options.hook_dispatcher) {}
 
-PermissionVerdict TurnRuntime::EvaluatePermission(const agent::ToolHookDecision& pre, const std::string& name,
+PermissionVerdict TurnRuntime::EvaluatePermission(const runtime::ToolHookDecision& pre, const std::string& name,
                                                   const nlohmann::json& input) const {
     PermissionContext context;
     context.auto_confirm = auto_confirm_;
@@ -232,7 +232,7 @@ PermissionVerdict TurnRuntime::EvaluatePermission(const agent::ToolHookDecision&
     return runtime::EvaluatePermission(context, pre, name, input);
 }
 
-agent::ToolHookDecision TurnRuntime::EmitPreToolUse(const std::string& name, const nlohmann::json& input) {
+runtime::ToolHookDecision TurnRuntime::EmitPreToolUse(const std::string& name, const nlohmann::json& input) {
     return runtime::EmitPreToolUse(hook_dispatcher_, name, input);
 }
 

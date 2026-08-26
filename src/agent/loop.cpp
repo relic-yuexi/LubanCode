@@ -1,14 +1,23 @@
+// AgentLoop 与 RunOneTool 的实现。Agent 本体在 agent/agent.cpp,上下文账
+// 在 agent/context_manager.cpp——这里只剩轮次推进:拼请求(皮上的叠层就
+// 地生效)、发流、工具循环、收口。
+
 #include "agent/loop.hpp"
 
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
+#include <memory>
 #include <type_traits>
 #include <utility>
 #include <variant>
 
+#include "agent/agent.hpp"
+#include "agent/context.hpp"
+#include "agent/context_events.hpp"
 #include "agent/prefix.hpp"
+#include "agent/prompts.hpp"
 #include "api/assembler.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:trace 的入参/结果摘要锚
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
@@ -59,7 +68,7 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     };
 
     // 工具状态机相位通报(没设回调 = 没配 hooks,行为与从前逐字节一致)。
-    const auto phase = [&callbacks, &call](ToolPhase p) {
+    const auto phase = [&callbacks, &call](runtime::ToolPhase p) {
         if (callbacks.on_tool_phase) {
             callbacks.on_tool_phase(call.id, call.name, p);
         }
@@ -184,7 +193,7 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     // additionalContext 一并塞进 tool_result 给模型看。
     const auto blocked = [&phase, &dispatch_done, &call](const std::string& reason,
                                                           const std::vector<std::string>& extra_context) {
-        phase(ToolPhase::Blocked);
+        phase(runtime::ToolPhase::Blocked);
         std::string content = reason;
         for (const auto& ctx : extra_context) {
             content += "\n[钩子附注] " + ctx;
@@ -272,7 +281,7 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     if (callbacks.on_mode_policy) {
         const std::string mode_denial = callbacks.on_mode_policy(call.name, call.input);
         if (!mode_denial.empty()) {
-            phase(ToolPhase::Blocked);
+            phase(runtime::ToolPhase::Blocked);
             // 回调交回的是"细码|人话"两截(细码给账,人话给模型与用户);
             // 只有一截就整段当人话,码退回通用 mode.denied。
             const std::size_t split = mode_denial.find('|');
@@ -295,21 +304,21 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     // ask -> 即使确认档放行也要问用户;allow -> 跳过用户确认(deny 规则
     // 与权限策略仍在确认回调里,钩子越不了权);updatedInput 只与 allow
     // 同返,先过一遍工具 schema,改写打回即拦。
-    phase(ToolPhase::CheckingHook);
-    ToolHookDecision pre;
+    phase(runtime::ToolPhase::CheckingHook);
+    runtime::ToolHookDecision pre;
     if (callbacks.on_pre_tool_use_hook) {
         pre = callbacks.on_pre_tool_use_hook(call.id, call.name, call.input);
     } else if (callbacks.on_pre_tool_hook) {
         // 旧回调兼容:非空 = deny。
         const std::optional<std::string> legacy_blocked = callbacks.on_pre_tool_hook(call.id, call.name, call.input);
         if (legacy_blocked.has_value()) {
-            pre.decision = ToolHookDecision::Decision::Deny;
+            pre.decision = runtime::ToolHookDecision::Decision::Deny;
             pre.reason = *legacy_blocked;
         }
     }
 
-    if (pre.decision == ToolHookDecision::Decision::Deny) {
-        phase(ToolPhase::Blocked);  // 停在 blocked,不冒充"运行过又失败"
+    if (pre.decision == runtime::ToolHookDecision::Decision::Deny) {
+        phase(runtime::ToolPhase::Blocked);  // 停在 blocked,不冒充"运行过又失败"
         tools::Tool::Result denied{pre.reason.empty() ? std::string("被 PreToolUse 钩子拦截") : pre.reason, true};
         denied.outcome = ToString(ToolOutcome::HookDenied);
         denied.error_code = kErrHookPreDenied;
@@ -328,7 +337,7 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         if (schema_error.has_value()) {
             // 钩子明确想改参,改出来的形状这工具不认——按拦截处理,不悄悄
             // 拿原参数跑出去(那是绕 schema 的路)。
-            phase(ToolPhase::Blocked);  // 改写打回也是拦,同样停在 blocked
+            phase(runtime::ToolPhase::Blocked);  // 改写打回也是拦,同样停在 blocked
             tools::Tool::Result rejected{"PreToolUse 钩子改写入参未通过工具 schema,已拦截: " + *schema_error, true};
             rejected.outcome = ToString(ToolOutcome::SchemaRejected);
             rejected.error_code = kErrHookUpdatedInputInvalid;
@@ -344,8 +353,8 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     }
 
     if (tool->needs_confirm()) {
-        phase(ToolPhase::WaitingPermission);
-        // P2(显示系统剥离单):异步审批通道优先——发 ApprovalRequest 拿
+        phase(runtime::ToolPhase::WaitingPermission);
+        // P2(显示系统剥离单):异步审批通道优先——发 runtime::ApprovalRequest 拿
         // future,原地 Wait。终端前端的 future 实现是"当场问完再给结果"
         // (Wait 立即返回,与今日同步 on_tool_confirm 一字不差);远端前端
         // 的实现悬起 request_id,这里阻塞等,事件泵/连接线程不跟堵。
@@ -353,10 +362,10 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         // 的短路都还在旧路上,不许变慢、不许多线程化)。
         bool allowed = true;
         if (callbacks.on_tool_confirm_async) {
-            const std::shared_ptr<InteractionFuture> future =
+            const std::shared_ptr<runtime::InteractionFuture> future =
                 callbacks.on_tool_confirm_async(
-                    ApprovalRequest{call.id, call.name, effective_input, std::string()});
-            const std::optional<ApprovalResponse> response =
+                    runtime::ApprovalRequest{call.id, call.name, effective_input, std::string()});
+            const std::optional<runtime::ApprovalResponse> response =
                 future != nullptr ? future->WaitApproval() : std::nullopt;
             if (!response.has_value()) {
                 // 悬空收口(cancel):等价拒绝,拒绝文案照"没人可答"写,
@@ -371,12 +380,12 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
                 return dispatch_done(call.id, call.name, std::move(cancelled));
             }
             switch (response->decision) {
-                case ApprovalDecision::Accept:
-                case ApprovalDecision::AcceptForSession:
+                case runtime::InteractionDecision::Accept:
+                case runtime::InteractionDecision::AcceptForSession:
                     allowed = true;
                     break;
-                case ApprovalDecision::Decline:
-                case ApprovalDecision::Cancel:
+                case runtime::InteractionDecision::Decline:
+                case runtime::InteractionDecision::Cancel:
                     allowed = false;
                     break;
             }
@@ -399,7 +408,7 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         }
     }
 
-    phase(ToolPhase::Running);
+    phase(runtime::ToolPhase::Running);
     // 逐枚追踪:durable started 在 Tool::execute 前发射(副作用边界之前)。
     // 落不落得住由 sink 决定(持久 sink append+flush;装配层对副作用工具
     // 会把"写不成就拦执行"的闸装在 sink 里);这里只保证事件先于 execute。
@@ -492,21 +501,6 @@ bool PrefixDebugEnabled() {
 
 }  // namespace
 
-void InjectIncomingMessage(std::vector<api::Message>& history, api::Message incoming) {
-    if (incoming.role != api::Role::User || incoming.content.empty()) {
-        return;
-    }
-    if (!history.empty() && history.back().role == api::Role::User) {
-        // 末条是 user(最常见:刚攒完的 tool_result 消息)——文本块追加进
-        // 去即可,不起第二条连排的 user 消息,三种 wire 协议都安全。
-        for (auto& block : incoming.content) {
-            history.back().content.push_back(std::move(block));
-        }
-        return;
-    }
-    history.push_back(std::move(incoming));
-}
-
 bool ShouldNudgeStepLimit(int step_index, int max_steps_per_turn) {
     // max_steps_per_turn <= 0 = 无上限,压根没有"步数将尽"这回事,永不触发。
     if (max_steps_per_turn <= 0) {
@@ -520,100 +514,21 @@ bool ShouldNudgeStepLimit(int step_index, int max_steps_per_turn) {
     return (max_steps_per_turn - step_index) == (std::min)(max_steps_per_turn, kStepLimitNudgeThreshold);
 }
 
-Agent::Agent(api::Backend& backend, tools::ToolRegistry& registry, AgentProfile agent_profile)
-    : backend_(backend),
-      registry_(registry),
-      provider_(std::move(agent_profile.provider)),
-      request_profile_(std::move(agent_profile.request)),
-      system_prompt_(std::move(agent_profile.system_prompt)),
-      profile_(std::move(agent_profile.runtime)) {
-    if (request_profile_.model.empty()) {
-        request_profile_.model = profile_.model;
-    } else {
-        profile_.model = request_profile_.model;
-    }
-}
-
-Agent::Agent(api::Backend& backend, tools::ToolRegistry& registry, AgentRuntimeProfile profile,
-             std::string system_prompt)
-    : Agent(backend, registry,
-            [&]() {
-                AgentProfile out;
-                out.request.model = profile.model;
-                out.runtime = std::move(profile);
-                out.system_prompt = std::move(system_prompt);
-                return out;
-            }()) {}
-
-Agent::Agent(api::Backend& backend, tools::ToolRegistry& registry, std::string model,
-             std::string system_prompt, std::optional<int> max_tokens, int max_steps_per_turn,
-             std::size_t max_context_chars)
-    : Agent(backend, registry,
-            [&]() {
-                AgentRuntimeProfile profile;
-                profile.model = std::move(model);
-                profile.max_output_tokens = std::move(max_tokens);
-                profile.max_steps_per_turn = max_steps_per_turn;
-                profile.max_context_chars = max_context_chars;
-                return profile;
-            }(),
-            std::move(system_prompt)) {}
-
-std::vector<api::ToolDefinition> Agent::BuildToolDefinitions() const {
-    std::vector<api::ToolDefinition> defs;
-    defs.reserve(registry_.All().size());
-    for (const auto& tool : registry_.All()) {
-        // tool_search(延迟挂载):谓词不放行的工具(延迟且未挂载)不进
-        // tools 数组。没设谓词就是全量,跟从前一样。
-        if (tool_filter_ && !tool_filter_(*tool)) {
-            continue;
-        }
-        defs.push_back(api::ToolDefinition{tool->name(), tool->description(), tool->input_schema()});
-    }
-    return defs;
-}
-
-std::expected<RunOutcome, std::string> Agent::Run(const std::string& user_input, const Callbacks& callbacks,
-                                                  const std::atomic<bool>* cancel) {
-    api::Message user_message;
-    user_message.role = api::Role::User;
-    user_message.content.push_back(api::TextBlock{user_input});
-    return AgentLoop::Run(*this, std::move(user_message), callbacks, cancel);
-}
-
-std::expected<RunOutcome, std::string> Agent::Run(api::Message user_message, const Callbacks& callbacks,
-                                                  const std::atomic<bool>* cancel) {
-    return AgentLoop::Run(*this, std::move(user_message), callbacks, cancel);
-}
-
 std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message user_message,
                                                        const Callbacks& callbacks,
                                                        const std::atomic<bool>* cancel) {
-    auto& backend_ = agent.backend_;
-    auto& registry_ = agent.registry_;
-    auto& model_ = agent.request_profile_.model;
-    auto& system_prompt_ = agent.system_prompt_;
-    auto& turn_context_ = agent.turn_context_;
-    auto& active_turn_context_ = agent.active_turn_context_;
-    auto& run_active_ = agent.run_active_;
-    auto& profile_ = agent.profile_;
-    auto& structural_compression_enabled_ = agent.structural_compression_enabled_;
-    auto& structural_options_ = agent.structural_options_;
-    auto& structural_stats_ = agent.structural_stats_;
-    auto& artifact_store_ = agent.artifact_store_;
-    auto& history_ = agent.history_;
-    auto& request_history_ = agent.request_history_;
-    auto& last_prefix_ = agent.last_prefix_;
-    auto& cache_epoch_ = agent.cache_epoch_;
-    auto& pending_epoch_break_reason_ = agent.pending_epoch_break_reason_;
-    auto& result_view_memo_ = agent.result_view_memo_;
-    auto& sticky_view_ = agent.sticky_view_;
-    auto& sticky_base_history_size_ = agent.sticky_base_history_size_;
-    auto& on_context_pressure_ = agent.on_context_pressure_;
-    auto& tool_filter_ = agent.tool_filter_;
-    auto& tool_filter_denial_ = agent.tool_filter_denial_;
-    auto& inbox_ = agent.inbox_;
-    auto& batch_counter_ = agent.batch_counter_;
+    api::Backend& backend_ = agent.backend_;
+    tools::ToolRegistry& registry_ = agent.registry_;
+    const std::string& model_ = agent.profile_.request.model;
+    std::string& system_prompt_ = agent.system_prompt_;
+    std::string& active_turn_context_ = agent.active_turn_context_;
+    bool& run_active_ = agent.run_active_;
+    const AgentRuntimeProfile& profile_ = agent.profile_.runtime;
+    ContextManager& context_ = agent.context_;
+    const std::function<bool(const tools::Tool&)>& tool_filter_ = agent.profile_.tool_filter;
+    const std::string& tool_filter_denial_ = agent.profile_.tool_filter_denial;
+    const AgentWiring& wiring_ = agent.wiring_;
+    int& batch_counter_ = agent.batch_counter_;
     const auto BuildToolDefinitions = [&agent]() { return agent.BuildToolDefinitions(); };
     const auto issue_execution_id = [&agent]() { return agent.issue_execution_id(); };
 
@@ -621,7 +536,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         return std::unexpected("用户消息为空，无法发送。");
     }
     run_active_ = true;
-    active_turn_context_ = turn_context_;
+    active_turn_context_ = agent.turn_context_;
     struct RunStateGuard {
         bool& active;
         std::string& context;
@@ -631,14 +546,15 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         }
     } run_state_guard{run_active_, active_turn_context_};
 
-    history_.push_back(user_message);
-    // 动态上下文(记忆召回/任务名册)随本轮 user 进请求视图:发过即钉住,
-    // 不再每回合改 system 制造分叉点。持久 history_ 只留真输入;动态块
-    // 只落 request_history_,故而 session/export/compact 都不会把它带走。
+    // 一轮用户输入落双账:durable 是真输入;动态上下文(记忆召回/任务
+    // 名册)只随本轮 user 进请求视图——发过即钉住,不再每回合改 system
+    // 制造分叉点。持久 history_ 不收这块,session/export/compact/记忆抽取
+    // 都只见用户真输入。
+    api::Message durable_user_message = user_message;
     if (!active_turn_context_.empty()) {
         user_message.content.push_back(api::TextBlock{active_turn_context_});
     }
-    request_history_.push_back(std::move(user_message));
+    context_.PushUserTurn(std::move(durable_user_message), std::move(user_message));
 
     // 步数与 stop reason 的活账:每次模型请求(每个 step)各记一笔,收场时随
     // RunOutcome 交出去——上层(子代理)按它分型 budget_exhausted/no_final_text
@@ -675,39 +591,49 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 纯文本轮的信该"先排住,本 turn 收口后再开一轮"(规格),不抢跑。
         // 回调只在主线程这里被调,流式/确认当口绝不会碰它,来信自然
         // 不可能替用户答确认。
-        if (inbox_ && step_index > 0) {
-            while (auto incoming = inbox_()) {
-                api::Message durable = *incoming;
-                InjectIncomingMessage(history_, std::move(durable));
-                InjectIncomingMessage(request_history_, std::move(*incoming));
+        if (wiring_.inbox && step_index > 0) {
+            while (auto incoming = wiring_.inbox()) {
+                context_.InjectIncoming(std::move(*incoming));
             }
         }
 
         api::Request request;
         request.model = model_;
         request.system = system_prompt_;
-        api::ApplyRequestProfile(request, agent.request_profile_);
+        // 皮上的会话级叠层就地生效(批四·病十一其三:五层请求改写后端
+        // 退役):延迟索引段 -> 模型目录指令 -> 魂,拼装次序与从前传输层
+        // 包装的次序一字不差(索引在前、指令居中、魂压轴)。从前这些改动
+        // 发生在指纹算完之后,前缀账看不见;现在进了指纹,model/system 一
+        // 动 epoch 如实断,账不再瞎。
+        if (agent.profile_.deferred_index_provider) {
+            request.system =
+                WithDeferredToolsIndex(request.system, agent.profile_.deferred_index_provider());
+        }
+        request.system = WithModelInstructions(request.system, agent.profile_.model_instructions);
+        request.system = WithSoul(request.system, agent.profile_.soul);
+        api::ApplyRequestProfile(request, agent.profile_.request);
         // 步数将尽提醒(第五期):固定文案,在"剩余步数第一次降到阈值"那一步
         // 追加进尚未发出的尾部消息(user 输入或刚攒完的 tool result),随
         // history 留住——不改 system,不撤旧提醒,追加律不破。ShouldNudge-
         // StepLimit 每次 Run 只真一次,天然只注一遍。
-        if (ShouldNudgeStepLimit(step_index, profile_.max_steps_per_turn) && !history_.empty()) {
+        if (ShouldNudgeStepLimit(step_index, profile_.max_steps_per_turn) &&
+            !context_.durable_history().empty()) {
             const api::TextBlock nudge{BuildStepLimitNudgeText()};
-            history_.back().content.push_back(nudge);
-            request_history_.back().content.push_back(nudge);
+            context_.AppendToLast(nudge);
         }
 
         // mid-turn 安全点:拼请求前先估 projected——system + 工具定义 + 全份
         // history + 输出预留,过参考线就把压力通报出去。上层回调里可以同步
-        // 做一次语义压缩(ReplaceHistory),返回后下面 TrimHistory 拿到的就
-        // 是(可能已换短的)request_history_。窗口未知(0)或没设回调时跳过,行为
+        // 做一次语义压缩(ReplaceHistory),返回后下面 BuildWorkingView 拿到
+        // 的就是(可能已换短的)请求视图。窗口未知(0)或没设回调时跳过,行为
         // 与从前一致——这一步不发出任何请求,估错了也不会误伤。
-        if (profile_.context_window_tokens > 0 && on_context_pressure_) {
+        if (profile_.context_window_tokens > 0 && wiring_.on_context_pressure) {
             // 输出上限纳入 projected 计算(规格根因一):声明了用声明值,
             // unset 用保守估计(kUnsetOutputReserveEstimateTokens)——服务端
             // 默认上限拿不到准数,宁可早压不撞墙。
             const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
-            std::size_t projected = EstimateUtf8Tokens(request.system) + EstimateHistoryTokens(request_history_) +
+            std::size_t projected = EstimateUtf8Tokens(request.system) +
+                                    EstimateHistoryTokens(context_.request_history()) +
                                     static_cast<std::size_t>(output_budget.reserve_for_estimate());
             for (const auto& tool : registry_.All()) {
                 if (tool_filter_ && !tool_filter_(*tool)) {
@@ -722,51 +648,14 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             pressure.window_tokens = profile_.context_window_tokens;
             pressure.projected_overflow =
                 projected >= profile_.context_window_tokens * static_cast<std::size_t>(kProjectedOverflowPercent) / 100;
-            on_context_pressure_(pressure);
+            wiring_.on_context_pressure(pressure);
         }
 
-        // 无损结构压缩(第六期"首次定形"):只改发给模型的视图——每枚
-        // tool result 第一次进请求视图时定形(短则全文、超长首次即 artifact
-        // 预览、重复自述指回、新版本自述替代),决策台账 epoch 内钉死,绝不
-        // 追改已经发过的表示。活历史与 session JSONL 一字不动,tool use/
-        // result 配对天然不破。压完的视图更小,后面字符安全网也更少真开刀。
-        // 第二期:带仓时 Artifact 决策先落盘,视图带稳定 artifact_id。
-        std::vector<api::Message> view_source;
-        if (structural_compression_enabled_) {
-            view_source = CompressWorkingView(request_history_, structural_options_, structural_stats_,
-                                              result_view_memo_, artifact_store_);
-        } else {
-            view_source = request_history_;
-        }
-
-        // 字符安全网 + sticky 视图:还没动手裁过,就按老规矩裁;真动手裁了
-        // (丢轮/截结果),把裁过的视图钉住,后续只往尾部追加新消息——不
-        // 再每请求重算"第一轮 + 最近 N 轮"让窗口一路滑(窗口滑就是追改
-        // 已发前缀)。全量 JSONL 照旧保留,sticky 只是模型眼下那本账。
-        TrimReport trim_report;
-        if (sticky_view_.has_value() && view_source.size() >= sticky_base_history_size_) {
-            std::vector<api::Message> pinned = *sticky_view_;
-            pinned.insert(pinned.end(), view_source.begin() + static_cast<std::ptrdiff_t>(sticky_base_history_size_),
-                          view_source.end());
-            if (EstimateHistoryBytes(pinned) > profile_.max_context_chars) {
-                // 钉住的视图也装不下了(长会话总会到这一步):重裁一次,
-                // 换一副新形状并重新钉住——这是一次明确的 epoch break,
-                // 下面 trim_report 会把它记上(hard_trim)。
-                pinned = TrimHistory(std::move(pinned), profile_.max_context_chars, kDefaultKeepRecentTurns, &trim_report);
-                sticky_view_ = pinned;
-                sticky_base_history_size_ = view_source.size();
-            }
-            request.messages = std::move(pinned);
-        } else {
-            std::vector<api::Message> trimmed =
-                TrimHistory(view_source, profile_.max_context_chars, kDefaultKeepRecentTurns, &trim_report);
-            if (trim_report.trimmed_turns || trim_report.truncated_results) {
-                // 第一次真动手裁:钉住,开新 epoch 的账由下面的 hard_trim 记。
-                sticky_view_ = trimmed;
-                sticky_base_history_size_ = view_source.size();
-            }
-            request.messages = std::move(trimmed);
-        }
+        // 工作视图(压缩 + 字符安全网 + sticky)全在 ContextManager;真丢了
+        // 东西(丢轮/截结果)的因它自己记进前缀账。
+        const ContextWorkingView working_view = context_.BuildWorkingView({profile_.max_context_chars});
+        request.messages = working_view.messages;
+        const TrimReport& trim_report = working_view.trim;
         // 编码关口(兜底前的主动闸):消息内容上 wire 前统一过一遍清洗,
         // 合法内容零成本原样返回。旧会话档/管道输入/外部文本带进来的
         // 坏串到这里就该被洗掉——四个 wire client 的 dump() 316 兜底
@@ -777,22 +666,20 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         }
         request.max_tokens = profile_.max_output_tokens;  // nullopt = unset,交服务端默认
         // 有损硬裁发生了(丢轮/截结果),显式通报——静默降级会让用户以为语
-        // 义压缩已成功,模型其实已经看不到那段原文。
-        if ((trim_report.trimmed_turns || trim_report.truncated_results) && on_context_pressure_) {
+        // 义压缩已成功,模型其实已经看不到那段原文了。
+        if ((trim_report.trimmed_turns || trim_report.truncated_results) && wiring_.on_context_pressure) {
             ContextPressure pressure;
             pressure.phase = ContextPressure::Phase::AfterHardTrim;
             pressure.hard_trimmed_turns = trim_report.trimmed_turns;
             pressure.hard_dropped_messages = trim_report.dropped_messages;
             pressure.hard_truncated_results = trim_report.truncated_results;
             pressure.window_tokens = profile_.context_window_tokens;
-            on_context_pressure_(pressure);
+            wiring_.on_context_pressure(pressure);
         }
         // 有损硬裁真出手了:下一份请求的工作视图换了裁剪形状,前缀记账给
         // 它点名(指纹 diff 只能报 old_message_changed,这里的因更准)。
         if (trim_report.trimmed_turns || trim_report.truncated_results) {
-            if (pending_epoch_break_reason_.empty()) {
-                pending_epoch_break_reason_ = "hard_trim";
-            }
+            context_.NotePendingEpochBreak("hard_trim");
         }
         // 每轮现拼,不在 Run() 开头拼一次复用:tool_search 命中会在一次
         // Run() 中途把工具加进 loaded 集合(谓词的判定依据),下一轮请求
@@ -812,34 +699,23 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 优先用它;没有显式因就按 diff 点名(model/system/tools/旧消息)。
         // epoch 断不是失败,无名无姓地断才是失败(agent/prefix.hpp)。
         {
-            const PrefixFingerprint fingerprint = FingerprintRequest(request);
-            step_prefix_append_only = true;
-            step_epoch_break_reason.clear();
-            if (last_prefix_.has_value()) {
-                const PrefixDiff diff = DiffFingerprints(*last_prefix_, fingerprint);
-                step_prefix_append_only = diff.append_only();
+            const ContextManager::PrefixAccount account = context_.AccountRequest(request);
+            step_prefix_append_only = account.append_only;
+            step_epoch_break_reason = account.break_reason;
+            if (account.had_previous && PrefixDebugEnabled()) {
+                // 诊断行:只带断因/位置/条数,不带任何正文与 hash 以外的东西。
+                std::string prefix_diag = "[prefix] epoch " + std::to_string(context_.cache_epoch()) +
+                                          " step " + std::to_string(step_index) + " append_only=" +
+                                          (step_prefix_append_only ? "true" : "false");
                 if (!step_prefix_append_only) {
-                    step_epoch_break_reason =
-                        pending_epoch_break_reason_.empty() ? diff.break_reason() : pending_epoch_break_reason_;
-                    ++cache_epoch_;
+                    prefix_diag += " reason=" + step_epoch_break_reason +
+                                   " old_message_changed_at=" + std::to_string(account.old_message_changed_at);
                 }
-                if (PrefixDebugEnabled()) {
-                    // 诊断行:只带断因/位置/条数,不带任何正文与 hash 以外的东西。
-                    std::string prefix_diag = "[prefix] epoch " + std::to_string(cache_epoch_) + " step " +
-                                              std::to_string(step_index) + " append_only=" +
-                                              (step_prefix_append_only ? "true" : "false");
-                    if (!step_prefix_append_only) {
-                        prefix_diag += " reason=" + step_epoch_break_reason + " old_message_changed_at=" +
-                                       std::to_string(diff.old_message_changed_at);
-                    }
-                    prefix_diag += " appended_messages=" + std::to_string(diff.appended_messages) +
-                                   " system_hash=" + fingerprint.system_hash.substr(0, 8) +
-                                   " tools_hash=" + fingerprint.tools_hash.substr(0, 8);
-                    platform::LogSink::Instance().Debug("loop", prefix_diag);
-                }
+                prefix_diag += " appended_messages=" + std::to_string(account.appended_messages) +
+                               " system_hash=" + account.system_hash.substr(0, 8) +
+                               " tools_hash=" + account.tools_hash.substr(0, 8);
+                platform::LogSink::Instance().Debug("loop", prefix_diag);
             }
-            pending_epoch_break_reason_.clear();
-            last_prefix_ = std::move(fingerprint);
         }
 
         api::MessageAssembler assembler;
@@ -936,8 +812,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 assembler.FinalizeOpenBlock();
                 api::Message assistant_message = assembler.BuildMessage();
                 assistant_message.content.push_back(api::TextBlock{"[用户按 ESC 打断了这条回答]"});
-                history_.push_back(assistant_message);
-                request_history_.push_back(assistant_message);
+                context_.PushMessage(std::move(assistant_message));
 
                 // 半截流里如果混进了没走完的 tool_use 块(硬收尾出来的,
                 // input 多半是空对象或者解析失败),必须给每一个都配一条
@@ -945,18 +820,18 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 // tool_use/tool_result 配对关系就破了,API 会直接拒绝整个
                 // 请求。
                 std::vector<api::ContentBlock> orphan_results;
-                for (const auto& block : assistant_message.content) {
+                for (const auto& block : context_.durable_history().back().content) {
                     if (std::holds_alternative<api::ToolUseBlock>(block)) {
                         const auto& call = std::get<api::ToolUseBlock>(block);
-                        orphan_results.push_back(api::ToolResultBlock{call.id, "用户按 ESC 打断,该工具未执行", true});
+                        orphan_results.push_back(
+                            api::ToolResultBlock{call.id, "用户按 ESC 打断,该工具未执行", true});
                     }
                 }
                 if (!orphan_results.empty()) {
                     api::Message orphan_message;
                     orphan_message.role = api::Role::User;
                     orphan_message.content = std::move(orphan_results);
-                    history_.push_back(orphan_message);
-                    request_history_.push_back(std::move(orphan_message));
+                    context_.PushMessage(std::move(orphan_message));
                 }
 
                 return RunOutcome{true, false, false, last_stop_reason, steps_used};
@@ -971,8 +846,6 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         const std::string stop_reason = assembler.stop_reason();
         ++steps_used;
         last_stop_reason = stop_reason;
-        history_.push_back(assistant_message);
-        request_history_.push_back(assistant_message);
         // 逐枚追踪:assistant 消息一入 history 就交装配层 append+flush 进
         // session(单子:provider assistant message 在执行工具前落盘)。
         // 老路(收口后 PersistNewMessages)照旧兜底——没装 trace 的会话
@@ -981,6 +854,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         if (callbacks.on_assistant_message_ready) {
             callbacks.on_assistant_message_ready(assistant_message);
         }
+        context_.PushMessage(std::move(assistant_message));
         // usage 是否报告(规格根因四):任一请求带回过非零 usage 就算报告过,
         // 之后失败页说"token 数未报告"只看这一位,不拿 0 糊。
         {
@@ -996,7 +870,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             report.step_index = step_index;
             report.request_id = stream_request_id;
             report.model = stream_model;
-            report.cache_epoch = cache_epoch_;
+            report.cache_epoch = context_.cache_epoch();
             report.epoch_break_reason = step_epoch_break_reason;
             report.prefix_append_only = step_prefix_append_only;
             callbacks.on_usage(report);
@@ -1006,8 +880,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 消息里却攒出了 tool_use 块。信块不信帧:照 tool_use 处理,把工具跑了、
         // 结果成对喂回去。不然历史里就留下一条没有 tool_result 配对的 tool_use,
         // 下一轮请求直接被 API 以 400 拒掉。
+        const api::Message& last_assistant = context_.durable_history().back();
         bool has_tool_use = false;
-        for (const auto& block : assistant_message.content) {
+        for (const auto& block : last_assistant.content) {
             if (std::holds_alternative<api::ToolUseBlock>(block)) {
                 has_tool_use = true;
                 break;
@@ -1023,7 +898,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // (那只是再烧一遍同样的思考)。续跑次数有显式账
             // (profile_.length_continuations,默认 1),烧完仍空才收场。
             bool has_text = false;
-            for (const auto& block : assistant_message.content) {
+            for (const auto& block : last_assistant.content) {
                 if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr && !text->text.empty()) {
                     has_text = true;
                     break;
@@ -1036,8 +911,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     api::Message marker;
                     marker.role = api::Role::User;
                     marker.content.push_back(api::TextBlock{BuildLengthContinuationText()});
-                    history_.push_back(marker);
-                    request_history_.push_back(std::move(marker));
+                    context_.PushMessage(std::move(marker));
                     ++budget_report.continuations_used;
                     continue;  // 下一步循环:不重发 prompt,只带标记续跑
                 }
@@ -1073,7 +947,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         std::vector<std::string> scheduled_tool_use_ids;
         std::vector<std::string> scheduled_names;
         if (trace_armed && callbacks.on_tool_trace) {
-            for (const auto& block : assistant_message.content) {
+            for (const auto& block : last_assistant.content) {
                 if (!std::holds_alternative<api::ToolUseBlock>(block)) {
                     continue;
                 }
@@ -1100,7 +974,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         int batch_index_for_this_step = -1;
         {
             std::vector<std::string> batch_ids;
-            for (const auto& block : assistant_message.content) {
+            for (const auto& block : last_assistant.content) {
                 if (std::holds_alternative<api::ToolUseBlock>(block)) {
                     batch_ids.push_back(std::get<api::ToolUseBlock>(block).id);
                 }
@@ -1116,7 +990,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         bool interrupted = false;
         int tool_index = -1;
         std::vector<api::ContentBlock> tool_results;
-        for (const auto& block : assistant_message.content) {
+        for (const auto& block : last_assistant.content) {
             if (!std::holds_alternative<api::ToolUseBlock>(block)) {
                 continue;
             }
@@ -1164,12 +1038,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         api::Message tool_result_message;
         tool_result_message.role = api::Role::User;
         tool_result_message.content = std::move(tool_results);
-        history_.push_back(tool_result_message);
-        // 批次尾回调要在 move 进 request_history_ 之前拿:回调里读的是
-        // 五枚结果齐的 user message(装配层此刻 append+flush 它)。
+        // 批次尾回调要在消息 move 进双账之前拿:回调里读的是五枚结果齐的
+        // user message(装配层此刻 append+flush 它)。
         const bool results_callback_armed = callbacks.on_tool_results_committed != nullptr;
         api::Message message_for_callback = results_callback_armed ? tool_result_message : api::Message{};
-        request_history_.push_back(std::move(tool_result_message));
+        context_.PushMessage(std::move(tool_result_message));
 
         if (batch_index_for_this_step >= 0 && callbacks.on_tool_batch_finished) {
             callbacks.on_tool_batch_finished(batch_index_for_this_step, interrupted);

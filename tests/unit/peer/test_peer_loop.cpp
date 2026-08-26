@@ -15,6 +15,7 @@
 #include <variant>
 #include <vector>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
@@ -135,16 +136,18 @@ TEST_CASE("收件点:工具轮回之间来信,注进 history 并出现在下一�
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>());
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     int inbox_calls = 0;
-    loop.SetInbox([&]() -> std::optional<api::Message> {
+    agent::AgentWiring wiring;
+    wiring.inbox = [&]() -> std::optional<api::Message> {
         ++inbox_calls;
         // 第一次(也是唯一一次)收件边界:工具结果攒完、下一请求未发。
         if (inbox_calls == 1) {
             return IncomingText("[来自另一场会话的字条] 前端可以跟进了");
         }
         return std::nullopt;
-    });
+    };
+    loop.SetWiring(std::move(wiring));
 
     REQUIRE(loop.Run("帮我用一下工具", agent::Callbacks{}).has_value());
 
@@ -180,17 +183,19 @@ TEST_CASE("收件点:权限确认当口来信不作答——信只在确认收�
     };
     registry.Register(std::make_unique<ConfirmTool>());
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     // 第一次边界(首个请求之前)就把信备着:即便信早就到了,第一个请求
     // (含权限确认那次工具往返)也不带它——注入只发生在工具结果攒完、
     // 下一请求尚未发出的边界,确认回调里根本没有看见它的路。
-    loop.SetInbox([first = true]() mutable -> std::optional<api::Message> {
+    agent::AgentWiring wiring;
+    wiring.inbox = [first = true]() mutable -> std::optional<api::Message> {
         if (first) {
             first = false;
             return IncomingText("[来自另一场会话的字条] 跟进");
         }
         return std::nullopt;
-    });
+    };
+    loop.SetWiring(std::move(wiring));
 
     bool confirm_asked = false;
     agent::Callbacks callbacks;
@@ -224,8 +229,10 @@ TEST_CASE("收件点:不设或交空,行为跟从前完全一致") {
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("好")};
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
-    loop.SetInbox([]() -> std::optional<api::Message> { return std::nullopt; });
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+    agent::AgentWiring wiring;
+    wiring.inbox = []() -> std::optional<api::Message> { return std::nullopt; };
+    loop.SetWiring(std::move(wiring));
     REQUIRE(loop.Run("问", agent::Callbacks{}).has_value());
     REQUIRE(loop.history().size() == 2);
 }
@@ -241,8 +248,9 @@ TEST_CASE("收件点:同一边界多条排队消息,按落队顺序一并注入�
     };
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>());
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
-    loop.SetInbox([&]() -> std::optional<api::Message> {
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+    agent::AgentWiring wiring;
+    wiring.inbox = [&]() -> std::optional<api::Message> {
         api::Message batch;
         batch.role = api::Role::User;
         batch.content.push_back(api::TextBlock{"[用户排队消息] 第一条:只看只读"});
@@ -254,7 +262,8 @@ TEST_CASE("收件点:同一边界多条排队消息,按落队顺序一并注入�
             return batch;
         }
         return std::nullopt;
-    });
+    };
+    loop.SetWiring(std::move(wiring));
 
     REQUIRE(loop.Run("去查", agent::Callbacks{}).has_value());
     REQUIRE(backend.captured_requests.size() == 2);
@@ -279,12 +288,14 @@ TEST_CASE("收件点:无工具自然收尾,本轮不注入——排队消息留�
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("答完了")};
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     int inbox_calls = 0;
-    loop.SetInbox([&]() -> std::optional<api::Message> {
+    agent::AgentWiring wiring;
+    wiring.inbox = [&]() -> std::optional<api::Message> {
         ++inbox_calls;
         return IncomingText("[用户排队消息] 不该出现在本轮");
-    });
+    };
+    loop.SetWiring(std::move(wiring));
 
     REQUIRE(loop.Run("普通一问", agent::Callbacks{}).has_value());
     CHECK(inbox_calls == 0);  // 没有工具边界,收件点压根没被调

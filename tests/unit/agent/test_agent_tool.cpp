@@ -294,7 +294,6 @@ TEST_CASE("agent 工具:输出预算耗尽——budget_exhausted 分型带结构
     tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
     // 子代理运行策略:声明了上限才在失败页报数;步数不限。
     agent::AgentRuntimeProfile profile;
-    profile.model = "test-model";
     profile.max_output_tokens = 4096;
     profile.max_output_tokens_source = agent::OutputBudgetSource::ConfigFile;
     agent_tool.SetRuntimeProfile(profile);

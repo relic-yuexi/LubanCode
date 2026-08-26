@@ -16,6 +16,7 @@
 #include <variant>
 #include <vector>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
@@ -91,14 +92,16 @@ std::vector<api::StreamEvent> ToolUseScript(const std::string& tool_id, const st
 
 // 就绪 future:构造时带答案,WaitApproval 立即返回(终端"当场问完"的实现
 // 形状)。
-class ReadyFuture final : public agent::InteractionFuture {
+class ReadyFuture final : public runtime::InteractionFuture {
 public:
-    explicit ReadyFuture(std::optional<agent::ApprovalResponse> response) : response_(std::move(response)) {}
+    explicit ReadyFuture(std::optional<runtime::ApprovalResponse> response) : response_(std::move(response)) {}
 
-    std::optional<agent::ApprovalResponse> WaitApproval() override { return response_; }
+    std::optional<runtime::ApprovalResponse> WaitApproval() override { return response_; }
+    // 审批路用不到提问:空实现返回悬空收口(合同允许,实现窄)。
+    std::optional<runtime::QuestionResponse> WaitQuestion() override { return std::nullopt; }
 
 private:
-    std::optional<agent::ApprovalResponse> response_;
+    std::optional<runtime::ApprovalResponse> response_;
 };
 
 }  // namespace
@@ -113,15 +116,15 @@ TEST_CASE("异步审批:Accept 放行,工具真执行") {
     auto* tool = new FakeTool("dangerous_tool", tools::Tool::Result{"结果", false}, true);
     registry.Register(std::unique_ptr<FakeTool>(tool));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     int async_asked = 0;
     int sync_asked = 0;
-    callbacks.on_tool_confirm_async = [&async_asked](const agent::ApprovalRequest& request) {
+    callbacks.on_tool_confirm_async = [&async_asked](const runtime::ApprovalRequest& request) {
         ++async_asked;
         REQUIRE(request.tool_name == "dangerous_tool");
-        agent::ApprovalResponse response;
-        response.decision = agent::ApprovalDecision::Accept;
+        runtime::ApprovalResponse response;
+        response.decision = runtime::InteractionDecision::Accept;
         return std::make_shared<ReadyFuture>(response);
     };
     callbacks.on_tool_confirm = [&sync_asked](const std::string&, const std::string&, const nlohmann::json&) {
@@ -145,11 +148,11 @@ TEST_CASE("异步审批:Decline 拒绝,tool_result 是 is_error 且用缺省拒�
     auto* tool = new FakeTool("dangerous_tool", tools::Tool::Result{"不该被看到的结果", false}, true);
     registry.Register(std::unique_ptr<FakeTool>(tool));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
-    callbacks.on_tool_confirm_async = [](const agent::ApprovalRequest&) {
-        agent::ApprovalResponse response;
-        response.decision = agent::ApprovalDecision::Decline;
+    callbacks.on_tool_confirm_async = [](const runtime::ApprovalRequest&) {
+        runtime::ApprovalResponse response;
+        response.decision = runtime::InteractionDecision::Decline;
         response.reason = "用户看过了,不让";
         return std::make_shared<ReadyFuture>(response);
     };
@@ -173,10 +176,10 @@ TEST_CASE("异步审批:悬空收口(nullopt)= 拒绝,缺省文案不冒充用�
     auto* tool = new FakeTool("dangerous_tool", tools::Tool::Result{"不该被看到的结果", false}, true);
     registry.Register(std::unique_ptr<FakeTool>(tool));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     // future 悬空收口:断开/打断/超时之后 Broker 统一按 cancel 收口的形状。
-    callbacks.on_tool_confirm_async = [](const agent::ApprovalRequest&) {
+    callbacks.on_tool_confirm_async = [](const runtime::ApprovalRequest&) {
         return std::make_shared<ReadyFuture>(std::nullopt);
     };
 
@@ -199,9 +202,9 @@ TEST_CASE("异步审批:悬空收口的文案可由 on_tool_denial_text 接管")
     registry.Register(
         std::make_unique<FakeTool>("dangerous_tool", tools::Tool::Result{"不该被看到的结果", false}, true));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
-    callbacks.on_tool_confirm_async = [](const agent::ApprovalRequest&) {
+    callbacks.on_tool_confirm_async = [](const runtime::ApprovalRequest&) {
         return std::make_shared<ReadyFuture>(std::nullopt);
     };
     callbacks.on_tool_denial_text = [](const std::string&, const std::string& name) {
@@ -221,11 +224,11 @@ TEST_CASE("异步审批:AcceptForSession 放行,Cancel 拒(四态各归各位)")
         tools::ToolRegistry registry;
         auto* tool = new FakeTool("dangerous_tool", tools::Tool::Result{"ok", false}, true);
         registry.Register(std::unique_ptr<FakeTool>(tool));
-        agent::Agent loop(backend, registry, "test-model", "system prompt");
+        agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
         agent::Callbacks callbacks;
-        callbacks.on_tool_confirm_async = [](const agent::ApprovalRequest&) {
-            agent::ApprovalResponse response;
-            response.decision = agent::ApprovalDecision::AcceptForSession;
+        callbacks.on_tool_confirm_async = [](const runtime::ApprovalRequest&) {
+            runtime::ApprovalResponse response;
+            response.decision = runtime::InteractionDecision::AcceptForSession;
             return std::make_shared<ReadyFuture>(response);
         };
         REQUIRE(loop.Run("去办", callbacks).has_value());
@@ -237,11 +240,11 @@ TEST_CASE("异步审批:AcceptForSession 放行,Cancel 拒(四态各归各位)")
         tools::ToolRegistry registry;
         auto* tool = new FakeTool("dangerous_tool", tools::Tool::Result{"ok", false}, true);
         registry.Register(std::unique_ptr<FakeTool>(tool));
-        agent::Agent loop(backend, registry, "test-model", "system prompt");
+        agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
         agent::Callbacks callbacks;
-        callbacks.on_tool_confirm_async = [](const agent::ApprovalRequest&) {
-            agent::ApprovalResponse response;
-            response.decision = agent::ApprovalDecision::Cancel;
+        callbacks.on_tool_confirm_async = [](const runtime::ApprovalRequest&) {
+            runtime::ApprovalResponse response;
+            response.decision = runtime::InteractionDecision::Cancel;
             return std::make_shared<ReadyFuture>(response);
         };
         REQUIRE(loop.Run("去办", callbacks).has_value());
@@ -257,9 +260,9 @@ TEST_CASE("异步审批:async 回调返回空 future = 悬空收口,不炸") {
     tools::ToolRegistry registry;
     auto* tool = new FakeTool("dangerous_tool", tools::Tool::Result{"ok", false}, true);
     registry.Register(std::unique_ptr<FakeTool>(tool));
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
-    callbacks.on_tool_confirm_async = [](const agent::ApprovalRequest&) { return nullptr; };
+    callbacks.on_tool_confirm_async = [](const runtime::ApprovalRequest&) { return nullptr; };
     REQUIRE(loop.Run("去办", callbacks).has_value());
     CHECK(tool->call_count == 0);
     const auto& tool_result = std::get<api::ToolResultBlock>(loop.history()[2].content[0]);
@@ -277,7 +280,7 @@ TEST_CASE("同步回落:不设 async 时旧 on_tool_confirm 路径一字不变")
     auto* tool = new FakeTool("dangerous_tool", tools::Tool::Result{"结果", false}, true);
     registry.Register(std::unique_ptr<FakeTool>(tool));
 
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
     bool sync_asked = false;
     callbacks.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) -> bool {
@@ -299,16 +302,16 @@ TEST_CASE("审批请求带工具名与入参(hook 改写后的 effective input)"
     tools::ToolRegistry registry;
     registry.Register(
         std::make_unique<FakeTool>("dangerous_tool", tools::Tool::Result{"ok", false}, true));
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     agent::Callbacks callbacks;
 
     std::string seen_name;
     nlohmann::json seen_input;
-    callbacks.on_tool_confirm_async = [&](const agent::ApprovalRequest& request) {
+    callbacks.on_tool_confirm_async = [&](const runtime::ApprovalRequest& request) {
         seen_name = request.tool_name;
         seen_input = request.input;
-        agent::ApprovalResponse response;
-        response.decision = agent::ApprovalDecision::Accept;
+        runtime::ApprovalResponse response;
+        response.decision = runtime::InteractionDecision::Accept;
         return std::make_shared<ReadyFuture>(response);
     };
     REQUIRE(loop.Run("去办", callbacks).has_value());

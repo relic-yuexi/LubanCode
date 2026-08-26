@@ -14,6 +14,7 @@
 #include <string>
 #include <vector>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "sessions/session_store.hpp"
 #include "api/backend.hpp"

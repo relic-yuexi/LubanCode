@@ -74,8 +74,10 @@ inline OutputBudget ResolveOutputBudget(std::optional<int> config_value,
 
 // 一份不可变运行策略。AgentLoop 与子代理(AgentTool::RunTask)从这里拿
 // 全部预算类参数;调用方各声明自己覆盖什么,其余继承 main 的有效值。
+// model 不在这里(骨架拆解批四·病十一其一):请求整形归
+// api::RequestProfile(AGENT 皮上那份),运行档案只管预算,不再两处各存
+// 一份靠手工 if 同步。
 struct AgentRuntimeProfile {
-    std::string model;
     // 输出上限(nullopt = unset,语义见 OutputBudget)。请求构造时透传给
     // api::Request::max_tokens;anthropic 必填,由 client 兜底。
     std::optional<int> max_output_tokens;

@@ -24,6 +24,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "agent/turn_harness.hpp"
 #include "api/backend.hpp"
@@ -133,7 +134,7 @@ TEST_CASE("DriveTurn:两步工具 + 一步正文,turn 数式对账——1 user +
     };
     tools::ToolRegistry registry;
     registry.Register(std::make_unique<FakeTool>());
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     agent::DriveOptions options;
     const agent::DriveReport report = agent::DriveTurn(loop, agent::Callbacks{}, UserText("干三步活"), options);
@@ -189,7 +190,7 @@ TEST_CASE("DriveTurn:报错轮 ok=false 带错误文案,步数不计") {
     FakeBackend backend;
     backend.scripts = {};  // 脚本空:第一次请求即失败
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
     const agent::DriveReport report = agent::DriveTurn(loop, agent::Callbacks{}, UserText("问一句"), agent::DriveOptions{});
     CHECK_FALSE(report.ok);
@@ -205,7 +206,7 @@ TEST_CASE("DriveTurn:续投源领批后再跑一轮,封账即收;失败轮按批
             TextScript("第二轮处理增量。"),
         };
         tools::ToolRegistry registry;
-        agent::Agent loop(backend, registry, "test-model", "system prompt");
+        agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
         int pulls = 0;
         agent::DriveOptions options;
@@ -245,7 +246,7 @@ TEST_CASE("DriveTurn:续投源领批后再跑一轮,封账即收;失败轮按批
             // 第二次请求:脚本用完 -> 报错,领批的那轮失败。
         };
         tools::ToolRegistry registry;
-        agent::Agent loop(backend, registry, "test-model", "system prompt");
+        agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
 
         bool restored = false;
         agent::DriveOptions options;
@@ -271,7 +272,7 @@ TEST_CASE("RunStopContinuation:拉闸一次续一轮,防咬尾最多一次;没�
         TextScript("续跑轮的结论。"),
     };
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, "test-model", "system prompt");
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
     REQUIRE(agent::AgentLoop::Run(loop, UserText("先收口一轮"), agent::Callbacks{}).has_value());
 
     agent::DriveReport report;

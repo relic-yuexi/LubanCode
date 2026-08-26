@@ -369,7 +369,6 @@ AgentTool::AgentTool(api::Backend& backend, ToolRegistry& sub_registry, std::str
       default_max_steps_per_turn_(default_max_steps_per_turn),
       skills_segment_(std::move(skills_segment)) {
     agent_profile_.request.model = model_;
-    agent_profile_.runtime.model = model_;
 }
 
 AgentTool::~AgentTool() {
@@ -845,9 +844,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                        ? detached->request_profile.model
                                        : model_;
     // 运行策略与 main 同一份(规格根因一):输出上限、字符安全网、续跑
-    // 次数从 runtime_profile_ 继承,模型换成这只任务的,步数用派出时的预算。
+    // 次数从 runtime_profile_ 继承,步数用派出时的预算。model 走皮上的
+    // request 档案(批四·病十一其一:运行档案不再另存一份)。
     agent::AgentRuntimeProfile task_profile = runtime_profile_;
-    task_profile.model = task_model;
     task_profile.max_steps_per_turn = max_steps_per_turn;
     if (context_window_tokens_ > 0) {
         task_profile.context_window_tokens = context_window_tokens_;
@@ -870,15 +869,29 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     if (task_agent_profile.request.model.empty()) {
         task_agent_profile.request.model = task_model;
     }
+    // 工具可见性(病十三的方向):谓词与拒绝文案写进皮。Explore 的只读
+    // 白名单是角色限制;其余角色沿用装配层灌进来的过滤(tool_search)。
+    if (agent_type == "Explore") {
+        task_agent_profile.tool_filter = [](const Tool& tool) { return ExploreAllows(tool); };
+        // 角色限制明说(规格:错误说明写"角色限制"):模型撞到这堵墙时,
+        // 文案写清限制来自只读角色,并给出角色内的替代去路。
+        task_agent_profile.tool_filter_denial =
+            "此工具不在 Explore 角色的只读白名单内(角色限制):请改用只读工具(read_file/search/web_fetch/"
+            "web_search/lsp)完成调查;确需写入,把改动建议写进结论交回主代理执行。";
+    } else if (detached == nullptr && tool_filter_) {
+        task_agent_profile.tool_filter = tool_filter_;
+    }
     agent::Agent sub_agent(loop_backend, effective_registry, std::move(task_agent_profile));
     // 子代理的项目记忆召回:按这只任务的 prompt 独立检索,同预算同安全
     // 声明;provider 没设(旧调用方)就不注入,行为不变。
     if (turn_context_provider_) {
         sub_agent.SetTurnContext(turn_context_provider_(prompt));
     }
+    // 接线(批四·病十二):压力钩与收件口整份进 AgentWiring。
+    agent::AgentWiring sub_wiring;
     if (context_window_tokens_ > 0) {
-        sub_agent.SetOnContextPressure([this, &sub_agent, &backend, &task_model, task](
-                                          const agent::ContextPressure& pressure) {
+        sub_wiring.on_context_pressure = [this, &sub_agent, &backend, &task_model, task](
+                                             const agent::ContextPressure& pressure) {
             if (pressure.phase != agent::ContextPressure::Phase::PreRequest || !pressure.projected_overflow) {
                 return;  // AfterHardTrim 是纯通报;安全网丢的东西压缩救不回
             }
@@ -904,17 +917,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 }
             }
             // 压缩失败:旧历史原样不动,字符安全网(TrimHistory)仍在,不硬塞。
-        });
-    }
-    if (agent_type == "Explore") {
-        sub_agent.SetToolFilter([](const Tool& tool) { return ExploreAllows(tool); });
-        // 角色限制明说(规格:错误说明写"角色限制"):模型撞到这堵墙时,
-        // 文案写清限制来自只读角色,并给出角色内的替代去路。
-        sub_agent.SetToolFilterDenial(
-            "此工具不在 Explore 角色的只读白名单内(角色限制):请改用只读工具(read_file/search/web_fetch/"
-            "web_search/lsp)完成调查;确需写入,把改动建议写进结论交回主代理执行。");
-    } else if (detached == nullptr && tool_filter_) {
-        sub_agent.SetToolFilter(tool_filter_);
+        };
     }
 
     // 定向介入收件口:这只任务自己的 inbox(前台后台同款)。AgentLoop 在
@@ -922,7 +925,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 出的 tool result 不丢。每只任务的 sub_agent 只接自己这只 TaskRecord,
     // 与主会话的 peer 收件点(跨会话传话)是两码事。
     if (task != nullptr) {
-        sub_agent.SetInbox([this, task]() -> std::optional<api::Message> {
+        sub_wiring.inbox = [this, task]() -> std::optional<api::Message> {
             std::string text;
             TaskMessageSource source = TaskMessageSource::User;
             {
@@ -956,8 +959,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             // 介入文本可能带坏串(跨会话传话/外部投递),进子代理历史前洗掉。
             message.content.push_back(api::TextBlock{FormatInboxDelivery(platform::SanitizeExternalText(text), source)});
             return message;
-        });
+        };
     }
+    sub_agent.SetWiring(std::move(sub_wiring));
 
     // 统一台账回调:进 TaskRecord 的任务(前台后台都是),工具次数/usage/
     // 实时输出全写快照;前台任务再把确认/打印/usage/pre/post 钩子原样转发
@@ -1185,8 +1189,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     // 归并映射归 runtime::MapPreToolDecision(与主路径同一颗
                     // 脑袋);后台特有的"ask 降级为拒"在这里叠加。
                     if (merged.permission == lubancode::hooks::HookEventResult::Permission::Ask) {
-                        lubancode::agent::ToolHookDecision decision;
-                        decision.decision = lubancode::agent::ToolHookDecision::Decision::Deny;
+                        lubancode::runtime::ToolHookDecision decision;
+                        decision.decision = lubancode::runtime::ToolHookDecision::Decision::Deny;
                         decision.reason = "后台任务没有终端可问,PreToolUse 钩子的 ask 已降级为拒绝: " +
                                           merged.permission_reason;
                         hooks_session->PostWarning("后台子代理 #" +

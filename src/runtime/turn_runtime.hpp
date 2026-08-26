@@ -69,13 +69,13 @@ struct PermissionVerdict {
 };
 
 // 纯函数,可单测:档位 + 钩子表态 + 工具名/入参 -> 放行还是问。
-PermissionVerdict EvaluatePermission(const PermissionContext& context, const agent::ToolHookDecision& pre,
+PermissionVerdict EvaluatePermission(const PermissionContext& context, const runtime::ToolHookDecision& pre,
                                      const std::string& name, const nlohmann::json& input);
 
 // ---------------------------------------------------------------------------
 // hooks 决策(发射 + 归并映射)
 //
-// payload 组装、HookEventResult -> agent::ToolHookDecision 的映射、
+// payload 组装、HookEventResult -> runtime::ToolHookDecision 的映射、
 // PostToolUse 反馈的提取,原先在 BuildCallbacks 的闭包与 agent_tool 的后台
 // 路径里各写一份,现在归一处。发射会真跑钩子进程(副作用),映射本身纯。
 // ---------------------------------------------------------------------------
@@ -83,7 +83,7 @@ PermissionVerdict EvaluatePermission(const PermissionContext& context, const age
 // PreToolUse:deny -> 拦;ask -> 强制问;allow -> 跳用户确认(deny 规则照
 // 走);updatedInput/additionalContext 随行。dispatcher 为空 = 没配 hooks,
 // 返回全默认决策(与"没有 hooks 系统"逐字节一致)。
-agent::ToolHookDecision EmitPreToolUse(hooks::HookDispatcher* dispatcher, const std::string& name,
+runtime::ToolHookDecision EmitPreToolUse(hooks::HookDispatcher* dispatcher, const std::string& name,
                                        const nlohmann::json& input,
                                        const std::string& tool_execution_id = std::string());
 
@@ -109,7 +109,7 @@ bool HasPermissionHooks(const hooks::HookDispatcher* dispatcher);
 
 // 纯映射:HookEventResult.permission -> ToolHookDecision(后台子代理的
 // DetachedHookSession 路径与主路径共用同一颗映射脑袋,deny 理由拼法一处定)。
-agent::ToolHookDecision MapPreToolDecision(const hooks::HookEventResult& merged);
+runtime::ToolHookDecision MapPreToolDecision(const hooks::HookEventResult& merged);
 
 // ---------------------------------------------------------------------------
 // usage 记账(原文自 app::UsageStats 搬来,语义一个字不改)
@@ -276,11 +276,11 @@ public:
 
     // ---- 权限 -------------------------------------------------------------
     // 档位裁定(纯);问话本身(菜单/[y/a/N]/悬起 future)在前端。
-    PermissionVerdict EvaluatePermission(const agent::ToolHookDecision& pre, const std::string& name,
+    PermissionVerdict EvaluatePermission(const runtime::ToolHookDecision& pre, const std::string& name,
                                          const nlohmann::json& input) const;
 
     // ---- hooks ------------------------------------------------------------
-    agent::ToolHookDecision EmitPreToolUse(const std::string& name, const nlohmann::json& input);
+    runtime::ToolHookDecision EmitPreToolUse(const std::string& name, const nlohmann::json& input);
     std::vector<std::string> EmitPostToolUse(const std::string& name, const nlohmann::json& input,
                                              const tools::Tool::Result& result);
     PermissionHookResult EmitPermissionRequest(const std::string& name, const nlohmann::json& input);

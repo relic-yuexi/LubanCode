@@ -12,6 +12,7 @@
 #include <fstream>
 #include <memory>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "platform/process.hpp"
 #include "ptc/ptc_tool.hpp"
@@ -213,8 +214,8 @@ TEST_CASE("PreToolUse deny: 脚本内调用被钩子拦下,ToolCallError 可收�
     ToolFixture fixture;
     PtcTool::Hooks denying = fixture.hooks;
     denying.on_pre_tool_use_hook = [](const std::string&, const std::string&, const nlohmann::json&) {
-        lubancode::agent::ToolHookDecision decision;
-        decision.decision = lubancode::agent::ToolHookDecision::Decision::Deny;
+        lubancode::runtime::ToolHookDecision decision;
+        decision.decision = lubancode::runtime::ToolHookDecision::Decision::Deny;
         decision.reason = "测试钩子:一律拒绝";
         return decision;
     };
@@ -275,8 +276,8 @@ TEST_CASE("updatedInput 改写: PreToolUse allow + 改参,脚本看到改后的�
     PtcTool::Hooks rewriting = fixture.hooks;
     rewriting.on_pre_tool_use_hook = [&workspace](const std::string&, const std::string& name,
                                                   const nlohmann::json& input) {
-        lubancode::agent::ToolHookDecision decision;
-        decision.decision = lubancode::agent::ToolHookDecision::Decision::Allow;
+        lubancode::runtime::ToolHookDecision decision;
+        decision.decision = lubancode::runtime::ToolHookDecision::Decision::Allow;
         if (name == "read_file") {
             // 钩子把要读的文件改写成 alpha.cpp(改写仍过 schema)。
             nlohmann::json updated = input;

@@ -22,6 +22,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/agent.hpp"
 #include "agent/loop.hpp"
 #include "sessions/session_store.hpp"
 #include "api/backend.hpp"
@@ -404,7 +405,7 @@ TEST_CASE("ResumeThread:序号、id、空串三条解析路,旧账接上") {
     NullBackend backend;
     tools::ToolRegistry registry;
     agent::AgentRuntimeProfile profile;
-    agent::Agent loop(backend, registry, std::move(profile), std::string("resume-test"));
+    agent::Agent loop(backend, registry, [&] { agent::AgentProfile out; out.runtime = profile; out.system_prompt = "resume-test"; return out; }());
     rt::SessionRuntime runtime({dir.path(), "anthropic", "20260823-130000"});
 
     rt::CommandService::Options options = BaseOptions();

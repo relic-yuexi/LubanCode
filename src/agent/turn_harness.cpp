@@ -3,6 +3,8 @@
 
 #include "agent/turn_harness.hpp"
 
+#include "agent/agent.hpp"  // Agent(harness 只在头里前向声明,实现要完整类型)
+
 #include <algorithm>
 #include <chrono>
 #include <utility>
