@@ -620,6 +620,77 @@ std::optional<std::string> RunProviderAddWizardInteractive(const std::string& na
 // /provider:添端只写全局配置；项目级若自行写了 providers，加载时仍按既有
 // "整段压过"规则优先。切端时换 client、提示词平台段与模型连接，旧历史
 // 保留不动；成功后把端名写回配置，下次启动照旧选中。
+bool ExecuteProviderSwitch(const std::string& switch_name, const std::string& switch_model,
+                           lubancode::config::Config& config, std::string& active_provider,
+                           RebuildableBackend& real_backend, std::string& session_wire,
+                           const std::shared_ptr<std::string>& current_model,
+                           const std::shared_ptr<std::string>& current_think,
+                           lubancode::cli::ContextTracker& context_tracker,
+                           const std::shared_ptr<std::string>& current_model_instructions,
+                           const lubancode::config::ModelCatalog& catalog,
+                           lubancode::agent::PromptOptions& prompt_options,
+                           const std::function<void(bool)>& rebuild_loop, bool is_console,
+                           const lubancode::cli::Theme& theme,
+                           const std::optional<std::string>& active_provider_write_path,
+                           lubancode::config::Source& active_provider_source) {
+    const lubancode::config::ProviderConfig* provider =
+        lubancode::config::FindProvider(config.providers, switch_name);
+    if (provider == nullptr) {
+        TermOut() << trf("cmd.provider.not_found", switch_name) << "\n";
+        return false;
+    }
+    // 项目配置显式写了 active_provider 就继续写回项目；其余场景
+    // 记到用户全局配置。只存名字，不复制密钥或 endpoint。
+    const auto remembered = [&]() -> std::expected<std::string, std::string> {
+        if (active_provider_write_path.has_value()) {
+            const auto written = lubancode::config::UpdateActiveProviderInConfigFile(
+                *active_provider_write_path, provider->name);
+            if (!written.has_value()) {
+                return std::unexpected(written.error());
+            }
+            return *active_provider_write_path;
+        }
+        return lubancode::config::SetActiveProviderInGlobalConfig(provider->name);
+    }();
+
+    lubancode::config::ApplyProviderToRuntimeConfig(config, *provider);
+    if (!switch_model.empty()) {
+        config.model = switch_model;
+    }
+    *current_model = config.model;
+    active_provider = provider->name;
+    session_wire = lubancode::config::ProviderWireName(config.wire);
+    real_backend.Rebuild(config);
+    prompt_options.wire = lubancode::config::ProviderWireName(config.wire);
+    context_tracker.set_window_tokens(config.context_window_tokens);
+    // 校验、取 key、重建后端都成功了才清。清完先按新配置重画横幅，
+    // 随后的目录应用与切换提示仍留在屏上；Agent 历史照旧保留。
+    if (is_console) {
+        ClearAndPrintBanner(config, theme);
+    }
+    ApplyModelCatalog(catalog, *current_model, /*think_explicit=*/false, /*window_explicit=*/true,
+                      current_think, context_tracker, current_model_instructions);
+    // provider 配了 model_reasoning_effort 就按 /think 同一套机制应用
+    // (直接改 current_think,下一次请求就带上);没配就不动——不管
+    // ApplyModelCatalog 刚才有没有按模型目录动过档位,都维持现状。
+    // 放在 ApplyModelCatalog 之后:provider 的显式配置该压过目录默认。
+    if (!provider->model_reasoning_effort.empty()) {
+        *current_think = provider->model_reasoning_effort;
+        TermOut() << trf("cmd.provider.effort_applied", provider->name, provider->model_reasoning_effort)
+                  << "\n";
+    }
+    rebuild_loop(/*preserve_history=*/true);
+    TermOut() << trf("cmd.provider.switched", provider->name, provider->base_url) << "\n";
+    if (remembered.has_value()) {
+        active_provider_source = active_provider_write_path.has_value()
+                                     ? lubancode::config::Source::ProjectConfigFile
+                                     : lubancode::config::Source::GlobalConfigFile;
+        TermOut() << trf("cmd.provider.remembered", provider->name) << "\n";
+    } else {
+        TermOut() << trf("cmd.provider.remember_failed", remembered.error()) << "\n";
+    }
+    return true;  // 切换本身成了;"记住"写盘失败只另打一行,不算切换失败
+}
 void HandleProviderCommand(const std::string& args, lubancode::config::Config& config,
                            std::string& active_provider, RebuildableBackend& real_backend,
                            std::string& session_wire,
@@ -638,62 +709,10 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
     // 切换的正式执行:预检过了才进来(鉴权齐备或显式给了 model 覆盖)。
     // Switch 快捷路径与 SwitchInteractive 选择器共用这一段,免得两处漂移。
     const auto execute_switch = [&](const std::string& switch_name, const std::string& switch_model) {
-        const lubancode::config::ProviderConfig* provider =
-            lubancode::config::FindProvider(config.providers, switch_name);
-        if (provider == nullptr) {
-            TermOut() << trf("cmd.provider.not_found", switch_name) << "\n";
-            return;
-        }
-        // 项目配置显式写了 active_provider 就继续写回项目；其余场景
-        // 记到用户全局配置。只存名字，不复制密钥或 endpoint。
-        const auto remembered = [&]() -> std::expected<std::string, std::string> {
-            if (active_provider_write_path.has_value()) {
-                const auto written = lubancode::config::UpdateActiveProviderInConfigFile(
-                    *active_provider_write_path, provider->name);
-                if (!written.has_value()) {
-                    return std::unexpected(written.error());
-                }
-                return *active_provider_write_path;
-            }
-            return lubancode::config::SetActiveProviderInGlobalConfig(provider->name);
-        }();
-
-        lubancode::config::ApplyProviderToRuntimeConfig(config, *provider);
-        if (!switch_model.empty()) {
-            config.model = switch_model;
-        }
-        *current_model = config.model;
-        active_provider = provider->name;
-        session_wire = lubancode::config::ProviderWireName(config.wire);
-        real_backend.Rebuild(config);
-        prompt_options.wire = lubancode::config::ProviderWireName(config.wire);
-        context_tracker.set_window_tokens(config.context_window_tokens);
-        // 校验、取 key、重建后端都成功了才清。清完先按新配置重画横幅，
-        // 随后的目录应用与切换提示仍留在屏上；Agent 历史照旧保留。
-        if (is_console) {
-            ClearAndPrintBanner(config, theme);
-        }
-        ApplyModelCatalog(catalog, *current_model, /*think_explicit=*/false, /*window_explicit=*/true,
-                          current_think, context_tracker, current_model_instructions);
-        // provider 配了 model_reasoning_effort 就按 /think 同一套机制应用
-        // (直接改 current_think,下一次请求就带上);没配就不动——不管
-        // ApplyModelCatalog 刚才有没有按模型目录动过档位,都维持现状。
-        // 放在 ApplyModelCatalog 之后:provider 的显式配置该压过目录默认。
-        if (!provider->model_reasoning_effort.empty()) {
-            *current_think = provider->model_reasoning_effort;
-            TermOut() << trf("cmd.provider.effort_applied", provider->name, provider->model_reasoning_effort)
-                      << "\n";
-        }
-        rebuild_loop(/*preserve_history=*/true);
-        TermOut() << trf("cmd.provider.switched", provider->name, provider->base_url) << "\n";
-        if (remembered.has_value()) {
-            active_provider_source = active_provider_write_path.has_value()
-                                         ? lubancode::config::Source::ProjectConfigFile
-                                         : lubancode::config::Source::GlobalConfigFile;
-            TermOut() << trf("cmd.provider.remembered", provider->name) << "\n";
-        } else {
-            TermOut() << trf("cmd.provider.remember_failed", remembered.error()) << "\n";
-        }
+        ExecuteProviderSwitch(switch_name, switch_model, config, active_provider, real_backend,
+                              session_wire, current_model, current_think, context_tracker,
+                              current_model_instructions, catalog, prompt_options, rebuild_loop,
+                              is_console, theme, active_provider_write_path, active_provider_source);
     };
 
     // 缺密钥的补救页(向导重排单):选中缺 key 的 provider 不退出选择器,
@@ -834,6 +853,29 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             return false;  // 返回 provider 列表
         }
     };
+    // /provider add 向导的收尾自动切:保存成功那一刻切过去(配完即用,
+    // 不再要用户手动 /provider switch 一道)。切不动就如实提示并保持旧
+    // 连接,不留半切换状态:新端没配默认模型、或缺密钥又在补救页退出,
+    // 都只报一行,原连接分毫不动。Add 命令与两处 switch 面板的"添加新
+    // provider"入口共用。
+    const auto add_via_wizard = [&](const std::string& name_prefill) {
+        const auto added = RunProviderAddWizardInteractive(name_prefill, config, theme);
+        if (!added.has_value()) {
+            return;  // 取消或写盘失败:不改连接
+        }
+        const lubancode::config::ProviderConfig* provider =
+            lubancode::config::FindProvider(config.providers, *added);
+        if (provider == nullptr || provider->model.empty()) {
+            TermOut() << trf("cmd.provider.add_kept_connection", *added) << "\n";
+            return;
+        }
+        if (lubancode::config::ResolveProviderAuth(*provider).status ==
+                lubancode::config::ProviderAuthResolution::Status::Missing &&
+            !remediate_missing_auth(*added)) {
+            return;  // 补救页退出:保持旧连接
+        }
+        execute_switch(*added, "");
+    };
     // /provider edit 的正式执行(容错单):进同一套向导面板改旧 provider,
     // 确认才写盘,取消不动配置。改的正好是当前活跃端时,整套重新应用——
     // 与 execute_switch 同一条路,不另立第二套字段镜像。
@@ -891,19 +933,9 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             if (command.wizard) {
                 // 裸敲 /provider add,或者 /provider add <名字>(名字先给上,
                 // 跳过向导第一问)——走分步向导,不进下面的一行式解析路径。
-                // 空配置会话里,添成后顺手切过去;已有连接时只添不抢。
-                const auto added = RunProviderAddWizardInteractive(command.name, config, theme);
-                if (added.has_value() && needs_connection) {
-                    const lubancode::config::ProviderConfig* provider =
-                        lubancode::config::FindProvider(config.providers, *added);
-                    if (provider != nullptr &&
-                        lubancode::config::ResolveProviderAuth(*provider).status ==
-                            lubancode::config::ProviderAuthResolution::Status::Missing &&
-                        !remediate_missing_auth(*added)) {
-                        return;
-                    }
-                    execute_switch(*added, "");
-                }
+                // 保存成功即切过去(向导收尾自动切):空配置会话与已有连接
+                // 一视同仁,切不动就保旧连接(add_via_wizard 里判定)。
+                add_via_wizard(command.name);
                 return;
             }
             const auto wire = lubancode::config::ParseProviderWire(command.wire);
@@ -985,7 +1017,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                         }
                         execute_switch(picked.name, "");
                     } else if (picked.pick == lubancode::cli::ProviderSwitchPick::AddNew) {
-                        RunProviderAddWizardInteractive("", config, theme);
+                        add_via_wizard("");
                     }
                     return;
                 }
@@ -1033,7 +1065,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     return;  // 取消不改当前 provider,不写配置
                 }
                 if (picked.pick == lubancode::cli::ProviderSwitchPick::AddNew) {
-                    RunProviderAddWizardInteractive("", config, theme);
+                    add_via_wizard("");
                     return;
                 }
                 if (picked.pick == lubancode::cli::ProviderSwitchPick::Edit) {
@@ -1281,7 +1313,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                         trf("cmd.provider.not_found", command.name), {}, theme,
                         /*edit_on_enter=*/true);
                     if (picked.pick == lubancode::cli::ProviderSwitchPick::AddNew) {
-                        RunProviderAddWizardInteractive("", config, theme);
+                        add_via_wizard("");
                     } else if (picked.pick == lubancode::cli::ProviderSwitchPick::Named ||
                                picked.pick == lubancode::cli::ProviderSwitchPick::Edit) {
                         run_edit(picked.name);
@@ -1306,7 +1338,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                 config.providers, active_provider, "", {}, {}, theme,
                 /*edit_on_enter=*/true);
             if (picked.pick == lubancode::cli::ProviderSwitchPick::AddNew) {
-                RunProviderAddWizardInteractive("", config, theme);
+                add_via_wizard("");
             } else if (picked.pick == lubancode::cli::ProviderSwitchPick::Named ||
                        picked.pick == lubancode::cli::ProviderSwitchPick::Edit) {
                 run_edit(picked.name);

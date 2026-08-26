@@ -138,6 +138,27 @@ std::optional<std::string> RunProviderAddWizardInteractive(const std::string& na
                                                             const lubancode::cli::Theme& theme);
 
 
+// provider 切换的正式执行(/provider switch 的 execute_switch 本体,与
+// provider add 向导收尾自动切、/model 跨家连切同一条路):config.providers
+// 里找名字、整套连接字段压进运行时 Config(wire/base_url/鉴权/model 一并
+// 换)、记住 active_provider、重建 backend、重画横幅、应用目录与档位、
+// rebuild_loop 重建皮。预检(鉴权齐备)由调用方做,这里不拦。找不到名字
+// 打一行 not_found 返回 false;切换成了、"记住"没写进文件,照旧返回 true
+// (与 /provider switch 同一口径:切换生效,记忆失败另说)。
+bool ExecuteProviderSwitch(const std::string& switch_name, const std::string& switch_model,
+                           lubancode::config::Config& config, std::string& active_provider,
+                           RebuildableBackend& real_backend, std::string& session_wire,
+                           const std::shared_ptr<std::string>& current_model,
+                           const std::shared_ptr<std::string>& current_think,
+                           lubancode::cli::ContextTracker& context_tracker,
+                           const std::shared_ptr<std::string>& current_model_instructions,
+                           const lubancode::config::ModelCatalog& catalog,
+                           lubancode::agent::PromptOptions& prompt_options,
+                           const std::function<void(bool)>& rebuild_loop, bool is_console,
+                           const lubancode::cli::Theme& theme,
+                           const std::optional<std::string>& active_provider_write_path,
+                           lubancode::config::Source& active_provider_source);
+
 // /provider:添端只写全局配置；项目级若自行写了 providers，加载时仍按既有
 // "整段压过"规则优先。切端时换 client、提示词平台段与模型连接，旧历史
 // 保留不动；成功后把端名写回配置，下次启动照旧选中。
