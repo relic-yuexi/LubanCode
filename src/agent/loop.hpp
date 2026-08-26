@@ -31,8 +31,6 @@
 
 namespace lubancode::agent {
 
-class ContextArtifactStore;
-
 struct Callbacks {
     // 显示系统剥离单 P4(补稳定 id):工具生命周期的回调首参一律带
     // tool_use_id(模型给的 ToolUseBlock.id;PTC stub 调用是宿主合成的
