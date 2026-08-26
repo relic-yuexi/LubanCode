@@ -6,6 +6,10 @@
 
 #include <doctest/doctest.h>
 
+#include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 #include "agent/prompts.hpp"
@@ -253,4 +257,93 @@ TEST_CASE("WithModelInstructions: 独立段追加在末尾,人格段/环境段�
 TEST_CASE("WithModelInstructions: base_instructions 为空,原样返回一个字符不多") {
     const std::string base = agent::BuildSystemPrompt("D:/work");
     CHECK(agent::WithModelInstructions(base, "") == base);
+}
+
+// ---------------------------------------------------------------------------
+// 活列表选择落痕(RememberModelChoiceInCatalog):唯一动真磁盘的用例,
+// 只碰临时目录。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseModelCatalogJson: 条目可带 provider_id(活列表落痕写的)") {
+    const auto catalog = config::ParseModelCatalogJson(
+        R"({"models": [
+            {"slug": "gpt-x", "provider_id": "local", "display_name": "GPT X"},
+            {"slug": "bare-one"}
+        ]})",
+        "models.json");
+    CHECK(catalog.warnings.empty());
+    REQUIRE(catalog.models.size() == 2);
+    CHECK(catalog.models[0].provider_id == "local");
+    CHECK(catalog.models[1].provider_id.empty());  // 留空 = 全局覆盖,照旧
+}
+
+TEST_CASE("RememberModelChoiceInCatalog: 新建、幂等、保字段、坏 JSON 拒写") {
+    std::error_code ec;
+    const auto dir = std::filesystem::temp_directory_path(ec) /
+                     ("lubancode_models_trace_" + std::to_string(::rand()));
+    std::filesystem::create_directories(dir, ec);
+    const std::string path = (dir / "models.json").string();
+    const std::string other = (dir / "other.json").string();
+
+    // 文件不存在:从头建,写入 slug/provider_id/display_name。
+    CHECK(config::RememberModelChoiceInCatalog(path, "local", "gpt-5.6-sol", "GPT 5.6 Sol").has_value());
+    {
+        std::ifstream in(path, std::ios::binary);
+        std::stringstream buffer;
+        buffer << in.rdbuf();
+        const auto catalog = config::ParseModelCatalogJson(buffer.str(), path);
+        REQUIRE(catalog.models.size() == 1);
+        CHECK(catalog.models[0].slug == "gpt-5.6-sol");
+        CHECK(catalog.models[0].provider_id == "local");
+        CHECK(catalog.models[0].display_name == "GPT 5.6 Sol");
+    }
+    // 幂等:同 slug 同 provider 再写,条目数不变,原字段一个不少。
+    CHECK(config::RememberModelChoiceInCatalog(path, "local", "gpt-5.6-sol", "换个名也不许改").has_value());
+    {
+        std::ifstream in(path, std::ios::binary);
+        std::stringstream buffer;
+        buffer << in.rdbuf();
+        const auto catalog = config::ParseModelCatalogJson(buffer.str(), path);
+        REQUIRE(catalog.models.size() == 1);
+        CHECK(catalog.models[0].display_name == "GPT 5.6 Sol");  // 幂等:别重写
+    }
+    // 保字段:同 slug 不同 provider 追加新条目,已有条目上手工配的字段
+    // (default_think 这类)不许冲掉。
+    CHECK(config::RememberModelChoiceInCatalog(path, "local", "glm-5", "GLM 5").has_value());
+    {
+        std::ofstream out(path, std::ios::binary | std::ios::trunc);
+        out << R"({"models": [{"slug": "glm-5", "provider_id": "local", "default_think": "high"}]})";
+    }
+    CHECK(config::RememberModelChoiceInCatalog(path, "local", "glm-5", "GLM 5").has_value());
+    {
+        std::ifstream in(path, std::ios::binary);
+        std::stringstream buffer;
+        buffer << in.rdbuf();
+        const auto catalog = config::ParseModelCatalogJson(buffer.str(), path);
+        REQUIRE(catalog.models.size() == 1);
+        CHECK(catalog.models[0].default_think == "high");  // 已有字段原样
+    }
+    // 同 slug 别家:追加,不覆盖本家的。
+    CHECK(config::RememberModelChoiceInCatalog(path, "ccmoon", "glm-5", "GLM 5").has_value());
+    {
+        std::ifstream in(path, std::ios::binary);
+        std::stringstream buffer;
+        buffer << in.rdbuf();
+        const auto catalog = config::ParseModelCatalogJson(buffer.str(), path);
+        REQUIRE(catalog.models.size() == 2);
+    }
+    // 坏 JSON:报错不写,原文件字节不动。
+    {
+        std::ofstream out(other, std::ios::binary | std::ios::trunc);
+        out << "{ not json";
+    }
+    CHECK_FALSE(config::RememberModelChoiceInCatalog(other, "local", "x", "X").has_value());
+    {
+        std::ifstream in(other, std::ios::binary);
+        std::stringstream buffer;
+        buffer << in.rdbuf();
+        CHECK(buffer.str() == "{ not json");
+    }
+
+    std::filesystem::remove_all(dir, ec);
 }

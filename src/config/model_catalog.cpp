@@ -1,6 +1,7 @@
 #include "config/model_catalog.hpp"
 
 #include <cctype>
+#include <expected>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -54,6 +55,13 @@ std::optional<ModelCatalogEntry> ParseEntry(const nlohmann::json& item, std::str
     ModelCatalogEntry entry;
     entry.slug = item["slug"].get<std::string>();
 
+    // provider_id 可选:内置条目声明归属;用户 models.json 手写的条目
+    // 留空 = 全局覆盖。活列表选择落痕(RememberModelChoiceInCatalog)写的
+    // 用户条目带这字段——"这家确实用过这模型"的凭据,跨家判定认它。
+    if (!ReadOptionalString(item, "provider_id", entry.provider_id)) {
+        error_out = "provider_id 字段必须是字符串";
+        return std::nullopt;
+    }
     if (!ReadOptionalString(item, "display_name", entry.display_name)) {
         error_out = "display_name 字段必须是字符串";
         return std::nullopt;
@@ -286,6 +294,75 @@ ModelCatalog LoadModelCatalog() {
     }
     user.warnings.insert(user.warnings.end(), builtin.warnings.begin(), builtin.warnings.end());
     return user;
+}
+
+std::expected<void, std::string> RememberModelChoiceInCatalog(const std::string& models_json_path,
+                                                              const std::string& provider_id,
+                                                              const std::string& slug,
+                                                              const std::string& display_name) {
+    // 活列表选择落痕(跨家判定第三轮返件):/model 切成的模型在当前家落
+    // 一条用户条目 {"slug","provider_id","display_name"} 进 models.json——
+    // "这家确实用过这模型"的真凭据,比任何目录猜测都硬。此后跨家判定
+    // 第一步(当前家条目)认它,零提示零动作。
+    //
+    // 直接在 json 树上读改写,不走 ModelCatalogEntry 往返:条目上已有的
+    // 别的字段(effort 声明、窗口、指令)一个都不许冲掉。幂等:同 slug
+    // 且同 provider_id 的条目已在,原样返回,一个字节不动。文件不存在
+    // 从头建;坏 JSON/形状不对报错不写,绝不覆盖用户手写的目录。
+    if (models_json_path.empty()) {
+        return std::unexpected("没有 models.json 路径(找不到用户主目录)");
+    }
+    nlohmann::json root = nlohmann::json::object();
+    root["models"] = nlohmann::json::array();
+    std::error_code ec;
+    const std::filesystem::path path(models_json_path);
+    if (std::filesystem::exists(path, ec) && !ec) {
+        std::ifstream in(path, std::ios::binary);
+        if (!in.is_open()) {
+            return std::unexpected("models.json 打不开(检查权限)");
+        }
+        std::ostringstream buffer;
+        buffer << in.rdbuf();
+        try {
+            root = nlohmann::json::parse(buffer.str());
+        } catch (const nlohmann::json::exception& e) {
+            return std::unexpected(std::string("models.json 不是合法 JSON,不落痕: ") + e.what());
+        }
+        if (!root.is_object() || !root.contains("models") || !root["models"].is_array()) {
+            return std::unexpected("models.json 形状不对(要 {\"models\":[...]}),不落痕");
+        }
+    }
+    for (const auto& item : root["models"]) {
+        if (!item.is_object()) {
+            continue;
+        }
+        const bool same_slug = item.contains("slug") && item["slug"].is_string() &&
+                               item["slug"].get<std::string>() == slug;
+        const bool same_provider = item.contains("provider_id") && item["provider_id"].is_string() &&
+                                   item["provider_id"].get<std::string>() == provider_id;
+        if (same_slug && same_provider) {
+            return {};  // 已有这条落痕:幂等,别冲已有字段
+        }
+    }
+    nlohmann::json entry = nlohmann::json::object();
+    entry["slug"] = slug;
+    entry["provider_id"] = provider_id;
+    if (!display_name.empty()) {
+        entry["display_name"] = display_name;
+    }
+    root["models"].push_back(std::move(entry));
+    std::error_code dir_ec;
+    std::filesystem::create_directories(path.parent_path(), dir_ec);  // 已存在不报错
+    std::ofstream out(path, std::ios::binary | std::ios::trunc);
+    if (!out.is_open()) {
+        return std::unexpected("models.json 写不进去(目录不存在或没权限)");
+    }
+    out << root.dump(2) << "\n";
+    out.flush();
+    if (!out) {
+        return std::unexpected("models.json 写入中断,落痕可能没保存");
+    }
+    return {};
 }
 
 std::vector<std::string> ThinkLevelHintLines(const ModelCatalogEntry* entry) {

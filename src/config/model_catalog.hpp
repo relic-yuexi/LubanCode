@@ -22,6 +22,7 @@
 #pragma once
 
 #include <cstddef>
+#include <expected>
 #include <optional>
 #include <string>
 #include <vector>
@@ -86,6 +87,17 @@ ModelCatalog ParseModelCatalogJson(const std::string& json_text, const std::stri
 // 真读盘:文件不存在 = 空目录(source_path 留空,不算错);存在但打不开
 // 或解析出坏东西,警告都在返回值的 warnings 里。
 ModelCatalog LoadModelCatalog();
+
+// 活列表选择落痕(跨家判定第三轮返件):/model 切成的模型在 provider_id
+// 家落一条用户条目 {"slug","provider_id","display_name"} 进
+// models_json_path(调用方传 <主目录>/.lubancode/models.json)。幂等:同
+// slug 且同 provider_id 的条目已在就原样返回,条目上已有字段(effort
+// 声明、窗口、指令)一个不许冲;文件不存在从头建,坏 JSON 报错不写,
+// 绝不覆盖用户手写的目录。条目字段见 ParseEntry:provider_id 自此可选。
+std::expected<void, std::string> RememberModelChoiceInCatalog(const std::string& models_json_path,
+                                                              const std::string& provider_id,
+                                                              const std::string& slug,
+                                                              const std::string& display_name);
 
 // /think(/effort)裸敲时列的档位行,一档一行("  - 档位  说明")。
 // entry 为空指针或没声明 supported_think_levels 时返回空 vector,调用方
