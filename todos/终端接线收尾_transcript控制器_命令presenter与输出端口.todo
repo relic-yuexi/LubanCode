@@ -1,0 +1,66 @@
+状态:待做(2026-08-26,用户以组件化视角查账定调:零件已拆成组件,
+整机接线还没彻底组件化。依赖方向已干净——cli 不反引 app,runtime/agent/
+tools 不引 cli,内核不知道终端怎么画。本单收最后一段:把接线从两尊大类
+搬出去。前置:骨架拆解批四余款落地后开工——批四正动 interactive_session
+的 namespace 改姓与 Agent 装配门,同文件两路大动合并必对撞)
+
+## 一句话
+
+组件都拆好了:中立视图模型(turn_view.hpp:102)、事件归集
+(turn_collector.hpp:34)、回合渲染纯函数(turn_renderer.hpp:55)、
+工具条目(transcript.hpp:50)、子代理面板(agent_panel.hpp:48)、
+Composer/底栏(bottom_chrome.hpp:90)、帧差分(terminal_frame.hpp:53)。
+剩的是两尊大类不肯撒手:interactive_session 6600 余行、约 290 处直接
+输出;turn_runner 约 60 处直接输出。把 transcript 控制器、命令
+presenter、终端输出端口从大类里搬出去,清掉手工投影与静态槽。
+
+## 已拆清单(不动,只作坐标)
+
+| 件 | 坐标 | 说明 |
+|---|---|---|
+| TurnItemView | src/runtime/turn_view.hpp:102 | 中立视图模型 |
+| TurnCollector | src/runtime/turn_collector.hpp:34 | 事件归集 |
+| RenderTurn* | src/cli/turn_renderer.hpp:55 | 纯函数,不碰终端 IO |
+| TranscriptItem | src/cli/transcript.hpp:50 | 工具条目+统一格式器 |
+| AgentPanel | src/cli/agent_panel.hpp:48 | 输入模型/动作合同/状态机 |
+| BottomChrome | src/cli/bottom_chrome.hpp:90 | Composer 与底栏共用,唯一布局入口 |
+| TerminalFrame | src/cli/terminal_frame.hpp:53 | 帧差分 |
+
+依赖方向铁律:cli 不反引 app;runtime/agent/tools 不引 cli。拆完不许破。
+
+## 病灶(按用户查账原文)
+
+1. **transcript 导航/查看态/模型转换住在大类里**——interactive_session.cpp:1693
+   一带。拆一只 transcript controller 出去(导航键、查看态进出、
+   TurnItemView→TranscriptItem 投影全归它)。
+2. **命令展示未拆**——slash 分派、memory、goal、loop、plan 由同一控制器
+   接线并打印。拆命令 presenter:命令产出数据行,presenter 负责怎么画;
+   控制器只留分派与状态。
+3. **终端输出出口未统一**——interactive_session 约 290 处、turn_runner
+   约 60 处直接输出。立一只输出端口(TerminalPort 之类),大类里的散打
+   全改走端口;turn_runner.cpp:1376 亲手构造 TurnItemView 也收掉。
+4. **手工投影残留**——TurnItemView→TranscriptItem 公共投影已有,别处
+   仍在手工拼。改状态映射时多处跟改。全仓清到只剩公共投影一处。
+5. **AgentPanel 静态槽**——provider/actions 挂 console_input.cpp 静态槽,
+   能用但不是实例注入。改成干净的实例注入。
+
+## 验收
+
+- 组件册测试全绿(八册:turn_view/turn_collector/turn_renderer/transcript/
+  agent_panel/bottom_chrome/terminal_frame/repaint 一带);
+- interactive_session 行数与直接输出处数显著下降(290 处的输出清到大类
+  里只剩装配与端口调用;行数目标:6600 → 4000 以下);
+- turn_runner 直接输出清零(60 处全走端口);
+- 手工投影零残留(grep 可验);AgentPanel 静态槽零残留;
+- 依赖方向不破(CMake target 链可验);
+- 真机抽验:斜杠命令照旧、transcript 导航照旧、查看态进出照旧、
+  子代理面板交互照旧(注意 agent_stream_driver 断言过时旧账未重钉,
+  面板断言红了先对基线,别当新账)。
+
+## 施工路数
+
+- 一件一件搬,搬一件绿一件:先输出端口(纯改道,行为零变),再 transcript
+  controller,再命令 presenter,最后静态槽清场。
+- presenter 化的命令先挑肥的(/model 152 行一案、/trace 166 行、memory
+  387 行单函数),一案一搬。
+- 别动组件本体的形状——它们已拆好,本单只动接线。
