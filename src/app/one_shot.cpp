@@ -196,11 +196,19 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     if (auto* agent_tool = tool_runtime.agent_tool(); agent_tool != nullptr) {
         agent_tool->SetPromptsDir(prompts_dir);  // 子代理系统提示同机制
         agent_tool->SetProjectInstructions(project_instructions);
+        // 病十(批三):四段开关随皮走——单发的子代理与 main 同段(mcp/web/
+        // lsp 按配置、platforms 按 wire),不再走"四段不传"的薄壳。
+        lubancode::agent::AgentProfile subagent_profile;
+        subagent_profile.prompt_sections.mcp = !config.mcp_servers.empty();
+        subagent_profile.prompt_sections.web = config.search.Configured();
+        subagent_profile.prompt_sections.lsp = !config.lsp_servers.empty();
+        subagent_profile.prompt_sections.wire = lubancode::config::ProviderWireName(config.wire);
         // 运行策略同级(规格根因一):单发模式的子代理也吃 main 的有效
         // profile 派生份——输出上限/字符安全网/续跑次数同一份,不落回
         // 环境默认。main 的 profile 在下面算,这里先建一份同源的。
-        agent_tool->SetRuntimeProfile(lubancode::app::BuildSubagentRuntimeProfile(
-            lubancode::app::BuildMainRuntimeProfile(config, &once_catalog, config.model), config));
+        subagent_profile.runtime = lubancode::app::BuildSubagentRuntimeProfile(
+            lubancode::app::BuildMainRuntimeProfile(config, &once_catalog, config.model), config);
+        agent_tool->SetAgentProfile(std::move(subagent_profile));
         // 单发模式的子代理记忆召回:按任务 prompt 独立检索(与 main 同一只
         // ProjectMemory;关着就不注)。
         if (project_memory != nullptr && config.memory.use) {
@@ -248,6 +256,12 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         entry != nullptr) {
         once_agent_profile.request.reasoning = entry->reasoning;
     }
+    // 病十(批三):四段开关写进皮——单发的 main 皮与拼 prompt_options 的
+    // 条件同源,子代理派生时同段拷贝(上面 SetAgentProfile 那笔)。
+    once_agent_profile.prompt_sections.mcp = prompt_options.mcp;
+    once_agent_profile.prompt_sections.web = prompt_options.web;
+    once_agent_profile.prompt_sections.lsp = prompt_options.lsp;
+    once_agent_profile.prompt_sections.wire = prompt_options.wire;
     once_agent_profile.runtime = main_profile;
     once_agent_profile.system_prompt = lubancode::agent::WithSoul(
         lubancode::agent::WithModelInstructions(
@@ -285,10 +299,22 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 的手测清单),这里只取 status,忽略 cancelled。管道/重定向下监听线程
     // 压根不起,会话层队列天然为空。
     std::vector<lubancode::cli::TranscriptItem> transcript;
-    return RunTurn(loop, question, auto_confirm, always_allowed_tools, theme, context_tracker, registry,
-                    lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state, /*transcript_expanded=*/nullptr,
-                    settings_local.allow_commands, settings_local.deny_commands)
-        .status;
+    // 批三:RunTurn 二十四参收成一只 TurnContext。
+    lubancode::app::TurnContext turn;
+    turn.loop = &loop;
+    turn.user_input = question;
+    turn.auto_confirm = auto_confirm;
+    turn.always_allowed_tools = &always_allowed_tools;
+    turn.theme = theme;
+    turn.context_tracker = &context_tracker;
+    turn.registry = &registry;
+    turn.hook_dispatcher = lubancode::app::HookRuntime();
+    turn.is_console = spinner_enabled;
+    turn.transcript = &transcript;
+    turn.todo_state = todo_state;
+    turn.allow_commands = settings_local.allow_commands;
+    turn.deny_commands = settings_local.deny_commands;
+    return RunTurn(std::move(turn)).status;
 }
 
 }  // namespace lubancode::app

@@ -236,9 +236,18 @@ TEST_CASE("BuildCallbacks::on_usage: 主请求 usage 更新 tracker 并发布状
     std::set<std::string> always_allowed;
     hooks::HookDispatcher hooks;  // 空 dispatcher:不挂 hook 回调,与"没配 hooks"同待遇
 
-    const agent::Callbacks callbacks =
-        app::BuildCallbacks(/*auto_confirm=*/false, always_allowed, theme, stats, tracker, registry, &hooks, display,
-                            body, /*allow_commands=*/{}, /*deny_commands=*/{});
+    app::TurnContext ctx;
+    ctx.auto_confirm = false;
+    ctx.always_allowed_tools = &always_allowed;
+    ctx.theme = theme;
+    ctx.context_tracker = &tracker;
+    ctx.registry = &registry;
+    ctx.hook_dispatcher = &hooks;
+    app::TurnWiring wiring;
+    wiring.usage_stats = &stats;
+    wiring.display = &display;
+    wiring.body_tracker = &body;
+    const agent::Callbacks callbacks = app::BuildCallbacks(ctx, wiring);
 
     callbacks.on_usage(api::UsageReport{api::Usage{300, 50}, 0, "msg_1", "test-model"});
     CHECK(tracker.current_tokens() == 350);
@@ -279,9 +288,18 @@ TEST_CASE("BuildCallbacks::on_usage: 第二次请求覆盖发布,不累加;缺 u
     tools::ToolRegistry registry;
     std::set<std::string> always_allowed;
     hooks::HookDispatcher hooks;  // 空 dispatcher:不挂 hook 回调,与"没配 hooks"同待遇
-    const agent::Callbacks callbacks =
-        app::BuildCallbacks(false, always_allowed, theme, stats, tracker, registry, &hooks, display, body,
-                            /*allow_commands=*/{}, /*deny_commands=*/{});
+    app::TurnContext ctx;
+    ctx.auto_confirm = false;
+    ctx.always_allowed_tools = &always_allowed;
+    ctx.theme = theme;
+    ctx.context_tracker = &tracker;
+    ctx.registry = &registry;
+    ctx.hook_dispatcher = &hooks;
+    app::TurnWiring wiring;
+    wiring.usage_stats = &stats;
+    wiring.display = &display;
+    wiring.body_tracker = &body;
+    const agent::Callbacks callbacks = app::BuildCallbacks(ctx, wiring);
 
     callbacks.on_usage(api::UsageReport{api::Usage{300, 50}, 0, "m1", "test-model"});
     callbacks.on_usage(api::UsageReport{api::Usage{100, 20}, 1, "m2", "test-model"});
@@ -319,9 +337,18 @@ TEST_CASE("BuildCallbacks::on_usage: 子代理 usage 只进累计花销,不碰 t
     registry.Register(std::make_unique<tools::AgentTool>(backend, sub_registry, "/work/dir"));
     std::set<std::string> always_allowed;
     hooks::HookDispatcher hooks;  // 空 dispatcher:不挂 hook 回调,与"没配 hooks"同待遇
-    const agent::Callbacks callbacks =
-        app::BuildCallbacks(false, always_allowed, theme, stats, tracker, registry, &hooks, display, body,
-                            /*allow_commands=*/{}, /*deny_commands=*/{});
+    app::TurnContext ctx;
+    ctx.auto_confirm = false;
+    ctx.always_allowed_tools = &always_allowed;
+    ctx.theme = theme;
+    ctx.context_tracker = &tracker;
+    ctx.registry = &registry;
+    ctx.hook_dispatcher = &hooks;
+    app::TurnWiring wiring;
+    wiring.usage_stats = &stats;
+    wiring.display = &display;
+    wiring.body_tracker = &body;
+    const agent::Callbacks callbacks = app::BuildCallbacks(ctx, wiring);
 
     // BuildCallbacks 内部给 agent 工具灌了转发钩子;跑一轮子代理(500+100
     // tokens),花销统计要吃到,主 context 与状态行数据都不能动。
@@ -397,11 +424,19 @@ TEST_CASE("RunTurn 静默档:正文与统计不上屏,归档成 assistant 条目
 
     std::ostringstream captured;
     std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
-    const app::RunTurnResult result =
-        app::RunTurn(loop, "后台子代理有新结果送达", /*auto_confirm=*/false, always_allowed, cli::Theme{}, tracker,
-                    registry, /*hook_dispatcher=*/nullptr, /*is_console=*/false, transcript,
-                    /*todo_state=*/nullptr, &expanded, /*allow_commands=*/{}, /*deny_commands=*/{},
-                    /*completion_agent=*/nullptr, /*recorder=*/nullptr, /*silent=*/true);
+    app::TurnContext turn;
+    turn.loop = &loop;
+    turn.user_input = "后台子代理有新结果送达";
+    turn.auto_confirm = false;
+    turn.always_allowed_tools = &always_allowed;
+    turn.theme = cli::Theme{};
+    turn.context_tracker = &tracker;
+    turn.registry = &registry;
+    turn.is_console = false;
+    turn.transcript = &transcript;
+    turn.transcript_expanded = &expanded;
+    turn.silent = true;
+    const app::RunTurnResult result = app::RunTurn(std::move(turn));
     std::cout.rdbuf(old_buf);
 
     CHECK(result.status == 0);
@@ -431,11 +466,19 @@ TEST_CASE("RunTurn 非静默对照:同一轮照常上屏,不因静默档的闸�
 
     std::ostringstream captured;
     std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
-    const app::RunTurnResult result =
-        app::RunTurn(loop, "用户的话", /*auto_confirm=*/false, always_allowed, cli::Theme{}, tracker, registry,
-                     /*hook_dispatcher=*/nullptr, /*is_console=*/false, transcript,
-                     /*todo_state=*/nullptr, &expanded, /*allow_commands=*/{}, /*deny_commands=*/{},
-                     /*completion_agent=*/nullptr, /*recorder=*/nullptr, /*silent=*/false);
+    app::TurnContext turn;
+    turn.loop = &loop;
+    turn.user_input = "用户的话";
+    turn.auto_confirm = false;
+    turn.always_allowed_tools = &always_allowed;
+    turn.theme = cli::Theme{};
+    turn.context_tracker = &tracker;
+    turn.registry = &registry;
+    turn.is_console = false;
+    turn.transcript = &transcript;
+    turn.transcript_expanded = &expanded;
+    turn.silent = false;
+    const app::RunTurnResult result = app::RunTurn(std::move(turn));
     std::cout.rdbuf(old_buf);
 
     CHECK(result.status == 0);
@@ -470,11 +513,19 @@ TEST_CASE("RunTurn 静默档:工具与思考只进台账,工具真执行、条�
 
     std::ostringstream captured;
     std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
-    const app::RunTurnResult result =
-        app::RunTurn(loop, "后台子代理有新结果送达", /*auto_confirm=*/true, always_allowed, cli::Theme{}, tracker,
-                    registry, /*hook_dispatcher=*/nullptr, /*is_console=*/false, transcript,
-                    /*todo_state=*/nullptr, &expanded, /*allow_commands=*/{}, /*deny_commands=*/{},
-                    /*completion_agent=*/nullptr, /*recorder=*/nullptr, /*silent=*/true);
+    app::TurnContext turn;
+    turn.loop = &loop;
+    turn.user_input = "后台子代理有新结果送达";
+    turn.auto_confirm = true;
+    turn.always_allowed_tools = &always_allowed;
+    turn.theme = cli::Theme{};
+    turn.context_tracker = &tracker;
+    turn.registry = &registry;
+    turn.is_console = false;
+    turn.transcript = &transcript;
+    turn.transcript_expanded = &expanded;
+    turn.silent = true;
+    const app::RunTurnResult result = app::RunTurn(std::move(turn));
     std::cout.rdbuf(old_buf);
 
     CHECK(result.status == 0);

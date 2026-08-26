@@ -2073,6 +2073,12 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     }
     main_agent_profile.runtime = main_profile;
     main_agent_profile.system_prompt = lubancode::agent::AssembleSystemPrompt(prompt_options);
+    // 病十(批三):四段开关写进皮——与 prompt_options 同源(配置),子代理
+    // 派生时同段拷贝,不再有"主代理有、子代理无"的隐性分叉。
+    main_agent_profile.prompt_sections.mcp = prompt_options.mcp;
+    main_agent_profile.prompt_sections.web = prompt_options.web;
+    main_agent_profile.prompt_sections.lsp = prompt_options.lsp;
+    main_agent_profile.prompt_sections.wire = prompt_options.wire;
     main_agent.emplace(*index_backend_, registry(), main_agent_profile);
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry().Find("agent"));
         agent_tool != nullptr) {
@@ -2286,13 +2292,29 @@ void TerminalSessionController::RunPeerTurn(const std::string& text, bool silent
     lubancode::runtime::TurnEventAdapter turn_events = session_runtime_.MakeTurnAdapter();
     // RunTurnResult 只剩 status/cancelled,peer 来信轮两边都不看;排队消息
     // 走会话层 SteeringQueue,不在这里收。直接调,不接没人用的返回值。
-    RunTurn(*main_agent, text, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
-            lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
-            settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
-            /*recorder=*/nullptr, silent, /*usage_out=*/nullptr, /*trace_hub=*/nullptr,
-            /*thread_id_for_trace=*/std::string(), /*turn_id_for_trace=*/std::string(),
-            /*turn_view_out=*/nullptr, /*mode_gate=*/{}, /*approval_observer=*/{},
-            /*turn_events=*/&turn_events);
+    // (批三:RunTurn 二十四参收成一只 TurnContext。)
+    {
+        lubancode::app::TurnContext turn;
+        turn.loop = &*main_agent;
+        turn.user_input = text;
+        turn.auto_confirm = auto_confirm;
+        turn.always_allowed_tools = &always_allowed_tools;
+        turn.theme = theme;
+        turn.context_tracker = &context_tracker;
+        turn.registry = &registry();
+        turn.hook_dispatcher = lubancode::app::HookRuntime();
+        turn.is_console = spinner_enabled;
+        turn.transcript = &transcript;
+        turn.todo_state = todo_state();
+        turn.transcript_expanded = &transcript_expanded;
+        turn.allow_commands = settings_local.allow_commands;
+        turn.deny_commands = settings_local.deny_commands;
+        turn.completion_agent = session_agent_tool();
+        turn.recorder = nullptr;
+        turn.silent = silent;
+        turn.turn_events = &turn_events;
+        RunTurn(std::move(turn));
+    }
     PersistNewMessages();
     PersistSteeringQueue();  // peer 轮里也可能进队/送走过(路径二,快照对齐)
     if (peer_started) {
@@ -5173,20 +5195,38 @@ CommandFlow TerminalSessionController::RunUserTurn(const std::string& content, b
     // 批二:这轮的事件适配器(sink 已在 SessionRuntime 上配好;turn_id 复
     // 用 trace 那枚,两本账对得上)。
     lubancode::runtime::TurnEventAdapter turn_events = session_runtime_.MakeTurnAdapter();
-    const lubancode::app::RunTurnResult turn_result =
-        RunTurn(*main_agent, content, auto_confirm, always_allowed_tools, theme, context_tracker, registry(),
-                lubancode::app::HookRuntime(), spinner_enabled, transcript, todo_state(), &transcript_expanded,
-                settings_local.allow_commands, settings_local.deny_commands, session_agent_tool(),
-                recorder.has_value() ? &*recorder : nullptr, /*silent=*/false, &turn_usage,
-                /*trace_hub=*/&*trace_hub_, session_runtime_.thread_id(), trace_turn_id,
-                /*turn_view_out=*/&turn_views_.back(),
-                /*mode_gate=*/[this](const std::string& tool_name, const nlohmann::json& input) {
-                    return EvaluatePlanGate(tool_name, input);
-                },
-                /*approval_observer=*/[this](bool asked, bool allowed) {
-                    NoteLoopPermissionWait(asked, allowed);
-                },
-                /*turn_events=*/&turn_events);
+    // 批三:RunTurn 二十四参收成一只 TurnContext。
+    lubancode::app::TurnContext turn;
+    turn.loop = &*main_agent;
+    turn.user_input = content;
+    turn.auto_confirm = auto_confirm;
+    turn.always_allowed_tools = &always_allowed_tools;
+    turn.theme = theme;
+    turn.context_tracker = &context_tracker;
+    turn.registry = &registry();
+    turn.hook_dispatcher = lubancode::app::HookRuntime();
+    turn.is_console = spinner_enabled;
+    turn.transcript = &transcript;
+    turn.todo_state = todo_state();
+    turn.transcript_expanded = &transcript_expanded;
+    turn.allow_commands = settings_local.allow_commands;
+    turn.deny_commands = settings_local.deny_commands;
+    turn.completion_agent = session_agent_tool();
+    turn.recorder = recorder.has_value() ? &*recorder : nullptr;
+    turn.silent = false;
+    turn.usage_out = &turn_usage;
+    turn.trace_hub = &*trace_hub_;
+    turn.thread_id_for_trace = session_runtime_.thread_id();
+    turn.turn_id_for_trace = trace_turn_id;
+    turn.turn_view_out = &turn_views_.back();
+    turn.mode_gate = [this](const std::string& tool_name, const nlohmann::json& input) {
+        return EvaluatePlanGate(tool_name, input);
+    };
+    turn.approval_observer = [this](bool asked, bool allowed) {
+        NoteLoopPermissionWait(asked, allowed);
+    };
+    turn.turn_events = &turn_events;
+    const lubancode::app::RunTurnResult turn_result = RunTurn(std::move(turn));
     // 轮次视图存档封顶(最近 N 轮,重铺够用;不无界攒)。
     if (turn_views_.size() > kMaxArchivedTurnViews) {
         turn_views_.erase(turn_views_.begin());

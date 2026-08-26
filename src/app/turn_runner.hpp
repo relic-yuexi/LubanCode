@@ -75,38 +75,79 @@ std::string TrimAscii(std::string value);
 std::expected<std::vector<std::string>, std::string> PromptAskUser(
     const lubancode::tools::AskUserQuestion& question, const lubancode::cli::Theme& theme);
 
-// 交互循环、单发模式共用的回调:文本打字机打印(正文保持原色,不着色),
-// 工具调用打一行提示,needs_confirm 的工具按 auto_confirm 决定是自动放行
-// 还是问用户一句(三选:y 本次允许 / a 本会话总是允许该工具 / N 拒绝)。
-// always_allowed_tools 由调用方持有,跨多轮 Run() 保留,选过 a 的工具本
-// 会话内不会再问。usage_stats 由调用方持有,只在这一次 Run() 范围内累计
-// (RunTurn() 每次都会传一份新的进来)。registry 是这一轮实际在用的工具表——
-// 如果里面注册了 "agent" 工具,这里顺带把这一轮现算好的确认/记账/打印
-// 逻辑通过 SetHooks 灌给它,子代理被调用时就能用上同一套(详见
-// tools/agent_tool.hpp 顶部注释)。
-// display:UI-B(0.12.0)新增,这一轮的工具条目展示总管(建条目、原地
-// 改写状态、管道模式的 [工具]/[工具完成] 稳定纯文本),todo_state 也归它
-// 持有。回调层只管把事件原样转进去。
-// event_callbacks(骨架拆解批二):TurnEventAdapter::MakeCallbacks 出的
-// 显示回调。给了就并进终端回调前头(一份事件先落事件流、再画屏,两轨
-// 并行),并把 agent/PTC 工具的转发钩子也喂上事件账;缺省 nullptr = 单发/
-// 单测不上事件流,行为与从前一致。
-lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::string>& always_allowed_tools,
-                                            const lubancode::cli::Theme& theme, lubancode::runtime::TurnUsageStats& usage_stats,
-                                            lubancode::cli::ContextTracker& context_tracker,
-                                            lubancode::tools::ToolRegistry& registry,
-                                            lubancode::hooks::HookDispatcher* hook_dispatcher,
-                                            ToolDisplay& display, StreamBodyTracker& body_tracker,
-                                            const std::vector<std::string>& allow_commands,
-                                            const std::vector<std::string>& deny_commands,
-                                            const std::atomic<bool>* cancel_flag = nullptr,
-                                            lubancode::agent::WorkflowRecorder* recorder = nullptr,
-                                            lubancode::runtime::ToolTraceHub* trace_hub = nullptr,
-                                            lubancode::runtime::TurnCollector* view_collector = nullptr,
-                                            std::function<std::string(const std::string&, const nlohmann::json&)>
-                                                mode_gate = {},
-                                            std::function<void(bool asked, bool allowed)> approval_observer = {},
-                                            const lubancode::agent::Callbacks* event_callbacks = nullptr);
+// ---------------------------------------------------------------------------
+// TurnContext(骨架拆解批三:harness 合流):RunTurn 二十四参 +
+// BuildCallbacks 十五参收成一只。三个装配点(交互会话、peer 轮、单发)从前
+// 各抱一串位置参数,漏一位就是静默错位;现在填字段,名字自带说明。
+// 渲染三档也在这只上表达:终端画(缺省)、静默(silent,查看态回流)、
+// 事件流(turn_events 非空,显示回调先落事件账再画屏)。
+// ---------------------------------------------------------------------------
+struct TurnContext {
+    // ---- 回合本体 ----
+    lubancode::agent::Agent* loop = nullptr;      // 谁的轮
+    std::string user_input;                       // 本轮用户输入(含图像附件语法)
+    bool auto_confirm = false;                    // --yes/管道档:确认回调自动放行
+    std::set<std::string>* always_allowed_tools = nullptr;  // 会话级"总是允许"账(调用方持有)
+    lubancode::cli::Theme theme{};                // 配色(plain 主题下着色为空串)
+    lubancode::cli::ContextTracker* context_tracker = nullptr;
+    lubancode::tools::ToolRegistry* registry = nullptr;     // 本轮实际在用的工具表
+    lubancode::hooks::HookDispatcher* hook_dispatcher = nullptr;
+
+    // ---- 终端档 ----
+    bool is_console = false;                      // 真控制台(管道/重定向恒假)
+    std::vector<lubancode::cli::TranscriptItem>* transcript = nullptr;  // 会话级条目存档
+    std::shared_ptr<lubancode::tools::TodoListState> todo_state;        // 本轮的 todo 板
+    std::atomic<bool>* transcript_expanded = nullptr;  // 紧凑/详细档(跨线程)
+
+    // ---- 确认叠加 ----
+    std::vector<std::string> allow_commands;      // run_command 前缀白名单
+    std::vector<std::string> deny_commands;       // run_command 前缀黑名单
+
+    // ---- 周边接线 ----
+    lubancode::tools::AgentTool* completion_agent = nullptr;  // 后台子代理结果回流口
+    lubancode::agent::WorkflowRecorder* recorder = nullptr;   // 生成技能录制(旁听)
+    // Plan 模式(只读研究硬闸):ModePolicy 闸,空 = 没装。
+    std::function<std::string(const std::string&, const nlohmann::json&)> mode_gate;
+    // 审批悬起旁听(loop 单遗留):真要问用户前 asked(true),答完 answered
+    //(allowed)——装配层拿它推 loop scheduler 的 WaitingPermission 账。
+    std::function<void(bool asked, bool allowed)> approval_observer;
+
+    // ---- 台账/追踪 ----
+    bool silent = false;                          // 静默档(查看态回流):装饰性输出不上屏
+    lubancode::runtime::TurnUsageStats* usage_out = nullptr;   // 整轮 usage 出账
+    lubancode::runtime::ToolTraceHub* trace_hub = nullptr;     // 逐枚追踪 hub
+    std::string thread_id_for_trace;              // trace 口径的会话号
+    std::string turn_id_for_trace;                // trace 口径的轮号(空 = 现发)
+    lubancode::runtime::TurnView* turn_view_out = nullptr;     // 轮视图存档(Ctrl+L/resume)
+
+    // ---- 事件流(骨架拆解批二)----
+    // SessionRuntime::MakeTurnAdapter() 造的那只。给了就 Start(复用 trace
+    // 口径的 turn_id)→ 显示回调并进终端回调 → 收口 Finish(三档 tone 映射
+    // 终态),Stop 钩子续跑轮并入同一 turn 的账;缺省 nullptr = 不上事件流。
+    lubancode::runtime::TurnEventAdapter* turn_events = nullptr;
+};
+
+// 回合内装配材料:RunTurn 造好递给 BuildCallbacks 的活物件(这一轮的
+// usage 账、显示总管、正文记账、取消旗、视图账、事件流回调存储)。单独调
+// BuildCallbacks 的测试自备一份。
+struct TurnWiring {
+    lubancode::runtime::TurnUsageStats* usage_stats = nullptr;
+    ToolDisplay* display = nullptr;
+    StreamBodyTracker* body_tracker = nullptr;
+    const std::atomic<bool>* cancel_flag = nullptr;
+    lubancode::runtime::TurnCollector* view_collector = nullptr;
+    const lubancode::agent::Callbacks* event_callbacks = nullptr;
+};
+
+// 交互循环、单发模式共用的回调装配(骨架拆解批三:参数收进 TurnContext/
+// TurnWiring):文本打字机打印(正文保持原色,不着色),工具调用打一行提示,
+// needs_confirm 的工具按确认档决定是自动放行还是问用户一句(三选:y 本次
+// 允许 / a 本会话总是允许该工具 / N 拒绝)。registry 里注册了 "agent" 工具
+// 的话,顺带把这一轮现算好的确认/记账/打印逻辑通过 SetHooks 灌给它,子代理
+// 被调用时就能用上同一套(详见 tools/agent_tool.hpp 顶部注释);批二尾巴
+// (批三)起,agent 工具的 hooks 还带上事件流回调(event_callbacks),子代理
+// 自己的 sub_callbacks 先过事件流再落台账。PTC 工具同链。
+lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring);
 
 // RunTurn() 的结果:status 沿用老语义(0 成功、非 0 出错);cancelled 标记
 // 这一轮是不是被 ESC 打断的(打断不算错误,status 照样是 0)。
@@ -120,68 +161,11 @@ struct RunTurnResult {
 
 std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error);
 
-// 发一轮用户输入,走 agent loop(可能会有若干次工具调用来回),流式打字机
-// 打印回复,结束后打一行 token 用量统计(暗色/淡色,plain 主题下就是空
-// 前后缀)。always_allowed_tools 由调用方持有,记录本会话内选过"总是允许"
-// 的工具。registry 是这一轮实际在用的工具表,传给 BuildCallbacks 好给里头
-// 的 agent 工具(如果有)灌这一轮的转发钩子。
-//
-// M10:这里起一条 TurnInputListener,存活区间正好是"发出请求到本轮 Run()
-// 结束"——ESC 打断、消息排队都靠它。真控制台之外(管道/重定向)监听器
-// 构造函数自己判断不起线程,行为跟 0.7.0 完全一致。
-// is_console:M11(0.10.0)新增,决定要不要打输入/输出分界线(管道/重定向
-// 模式恒为假,分界线完全不出现,不污染被重定向的输出)。todo_state 同样
-// M11 新增,转发给 BuildCallbacks 给 on_tool_done 用;留空指针表示这一轮
-// 的 registry 没注册 todo_write(目前两个调用点都注册了,这个默认值只是
-// 留个口子)。
-// transcript:UI-B(0.12.0)新增,会话级工具条目存档(交互循环/AskOnce
-// 各持有一份,跨多轮累积),UI-C/D 的 Ctrl+E 全文查看要用。
-// transcript_expanded:UI-D(0.16.0)紧凑/详细会话级开关(Ctrl+O 翻转,
-// 交互循环持有),详细态下新条目直接按展开版画;回合中切档还会
-// 从线程安全快照把现有条目整组重打。AskOnce 不传(nullptr),恒紧凑。
-// atomic<bool>:回合执行
-// 期间监听线程(另一个线程)会写、Run() 所在的这个线程会读,真机驱动器
-// 实测踩到过普通 bool 在这条跨线程路径上的可见性问题(写了但读的那一刻
-// 还没看见),换成 atomic<bool> 用 load/store 的 acquire/release 语义堵上。
-// allow_commands/deny_commands:settings.local.json 的 run_command 前缀白/黑
-// 名单,原样递给 BuildCallbacks 的确认回调叠加判定(缺省空表 = 无叠加)。
-// silent(查看态回流单):静默收货档——给"用户正查看别的子代理、main 在
-// 后台消化后台结果"的那一轮用。轮子照常跑(模型请求、工具执行、usage/
-// context 记账、Hooks、确认交互一个不少),但一切装饰性输出不上屏:分界
-// 线/统计行不打、流式 footer 不起、心跳不跳、正文与工具卡只进 transcript
-// 台账(StreamBodyTracker 攒正文,收口时归档成一条 assistant 条目),回
-// main 时重铺可见。错误路径的 std::cerr 照打——错要让人看见,不静默吞。
-RunTurnResult RunTurn(lubancode::agent::Agent& loop, const std::string& user_input, bool auto_confirm,
-                       std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
-                       lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
-                       lubancode::hooks::HookDispatcher* hook_dispatcher, bool is_console,
-                       std::vector<lubancode::cli::TranscriptItem>& transcript,
-                       std::shared_ptr<lubancode::tools::TodoListState> todo_state = nullptr,
-                       std::atomic<bool>* transcript_expanded = nullptr,
-                       const std::vector<std::string>& allow_commands = {},
-                       const std::vector<std::string>& deny_commands = {},
-                       lubancode::tools::AgentTool* completion_agent = nullptr,
-                       lubancode::agent::WorkflowRecorder* recorder = nullptr,
-                       bool silent = false,
-                       lubancode::runtime::TurnUsageStats* usage_out = nullptr,
-                       lubancode::runtime::ToolTraceHub* trace_hub = nullptr,
-                       std::string thread_id_for_trace = std::string(),
-                       std::string turn_id_for_trace = std::string(),
-                       lubancode::runtime::TurnView* turn_view_out = nullptr,
-                       std::function<std::string(const std::string&, const nlohmann::json&)>
-                           mode_gate = {},
-                       // loop 单遗留:审批悬起的旁听口(WaitingPermission 真接线)。
-                       // 每次真要问用户前 asked(true, 工具名先在另一参) 来,
-                       // 答完 answered(allowed) 后到——装配层拿它把 loop
-                       // scheduler 的 WaitingPermission 账推起来(单子:等
-                       // 审批不算无进展也不烧 iteration,悬起期间后续拍
-                       // coalesce)。可空 = 不旁听,行为不变。
-                       std::function<void(bool asked, bool allowed)> approval_observer = {},
-                       // 事件流出口(骨架拆解批二):SessionRuntime::MakeTurnAdapter()
-                       // 造的那只。给了就 Start(复用 trace 口径的 turn_id)→
-                       // 显示回调并进终端回调 → 收口 Finish(三档 tone 映射
-                       // 终态),Stop 钩子续跑轮并入同一 turn 的账;缺省
-                       // nullptr = 不上事件流,行为与从前一致。
-                       lubancode::runtime::TurnEventAdapter* turn_events = nullptr);
+// 发一轮用户输入(TurnContext 收参,批三):走 agent loop(可能会有若干次
+// 工具调用来回),流式打字机打印回复,结束后按档打统计行。监听线程
+//(TurnInputListener)、流式 footer、心跳、分界线的存废与从前同一套
+//(见 TurnContext 字段注释与 turn_runner.cpp 内注)。循环本体、Stop 钩子
+// 续跑环、取消链、收场分型在 agent::TurnHarness(与子代理同一份)。
+RunTurnResult RunTurn(TurnContext ctx);
 
 }  // namespace lubancode::app

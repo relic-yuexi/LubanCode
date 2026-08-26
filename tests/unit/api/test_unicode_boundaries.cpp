@@ -322,9 +322,17 @@ TEST_CASE("RunTurn:后端抛 1113 异常,回合按失败收口,不掀进程") {
     {
         StreamCapture stdout_capture(std::cout);
         StreamCapture stderr_capture(std::cerr);
-        out = lubancode::app::RunTurn(loop, "问 LIS 的 nlogn 做法", /*auto_confirm=*/true, always_allowed, theme,
-                                     context_tracker, registry, /*hook_dispatcher=*/nullptr,
-                                     /*is_console=*/false, transcript);
+        lubancode::app::TurnContext turn;
+        turn.loop = &loop;
+        turn.user_input = "问 LIS 的 nlogn 做法";
+        turn.auto_confirm = true;
+        turn.always_allowed_tools = &always_allowed;
+        turn.theme = theme;
+        turn.context_tracker = &context_tracker;
+        turn.registry = &registry;
+        turn.is_console = false;
+        turn.transcript = &transcript;
+        out = lubancode::app::RunTurn(std::move(turn));
         rendered = stdout_capture.str() + stderr_capture.str();
     }
     CHECK(out.status == 1);

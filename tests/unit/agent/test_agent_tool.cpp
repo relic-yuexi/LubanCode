@@ -1758,3 +1758,43 @@ TEST_CASE("agent 后台 hooks:没配 hooks 时后台路径不触发,行为与从
     REQUIRE(WaitTaskFinished(bg_tool));
     CHECK(fake_tool_ptr->call_count == 1);
 }
+
+// ---------------------------------------------------------------------------
+// 病十裁决(骨架拆解批三):四段开关进皮。
+// 子代理默认与主代理同段(mcp/web/lsp/platforms 全补);真要少的皮显式关。
+// 皮上写不出的差别,就是还没想清的差别——这条测试把裁决钉死。
+// ---------------------------------------------------------------------------
+TEST_CASE("agent 病十:四段开关随皮走——默认全补,显式关就真没有") {
+    SUBCASE("默认(不 SetAgentProfile):mcp/web/lsp 三段注入") {
+        FakeBackend backend;
+        backend.scripts = {TextOnlyScript("结论")};
+        tools::ToolRegistry sub_registry;
+        tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+        CHECK_FALSE(agent_tool.execute(nlohmann::json{{"title", "四段"}, {"prompt", "查"}}).is_error);
+        const std::string& system = backend.captured_requests[0].system;
+        // 三段的功能模块正文(锚点取各模块首行标题)。
+        CHECK(system.find("外接工具(MCP)") != std::string::npos);
+        CHECK(system.find("联网查证") != std::string::npos);
+        CHECK(system.find("语义查询(LSP)") != std::string::npos);
+    }
+
+    SUBCASE("皮上显式给段:wire 注平台段,关掉的段一个字不占") {
+        FakeBackend backend;
+        backend.scripts = {TextOnlyScript("结论")};
+        tools::ToolRegistry sub_registry;
+        tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+        agent::AgentProfile profile;
+        profile.prompt_sections.mcp = false;
+        profile.prompt_sections.web = false;
+        profile.prompt_sections.lsp = false;
+        profile.prompt_sections.wire = "anthropic-messages";
+        agent_tool.SetAgentProfile(std::move(profile));
+        CHECK_FALSE(agent_tool.execute(nlohmann::json{{"title", "四段"}, {"prompt", "查"}}).is_error);
+        const std::string& system = backend.captured_requests[0].system;
+        CHECK(system.find("外接工具(MCP)") == std::string::npos);
+        CHECK(system.find("联网查证") == std::string::npos);
+        CHECK(system.find("语义查询(LSP)") == std::string::npos);
+        // 平台段按 wire 注了 Anthropic 的协议说明。
+        CHECK(system.find("协议说明(Anthropic Messages)") != std::string::npos);
+    }
+}

@@ -1,0 +1,89 @@
+// subagent_isolation.hpp 的实现:0.27.x"模型侧 worktree 工具与子代理隔离"
+// 的房务三件,自 agent_tool.cpp 原样搬来(病十四拆分,行为一字不改)。
+#include "tools/subagent_isolation.hpp"
+
+#include <filesystem>
+#include <system_error>
+#include <utility>
+
+#include "tools/path_utils.hpp"
+
+namespace lubancode::tools {
+
+namespace {
+
+// base_dir 包装层:路径入参按房解析成绝对路径,run_command 注入房作为
+// 工作目录。
+class BaseDirTool : public Tool {
+public:
+    BaseDirTool(Tool& inner, IsolationScope scope) : inner_(inner), scope_(std::move(scope)) {}
+
+    std::string name() const override { return inner_.name(); }
+    std::string description() const override { return inner_.description(); }
+    nlohmann::json input_schema() const override { return inner_.input_schema(); }
+    bool needs_confirm() const override { return inner_.needs_confirm(); }
+    bool deferred() const override { return inner_.deferred(); }
+
+    Result execute(const nlohmann::json& input) override {
+        nlohmann::json patched = input;
+        const std::string inner_name = inner_.name();
+        if (inner_name == "read_file" || inner_name == "write_file" || inner_name == "edit_file" ||
+            inner_name == "search") {
+            const auto it = patched.find("path");
+            if (it != patched.end() && it->is_string()) {
+                const std::string path = it->get<std::string>();
+                if (!path.empty() && !Utf8ToPath(path).is_absolute()) {
+                    patched["path"] = scope_.base_dir + "/" + path;
+                }
+            }
+        } else if (inner_name == "run_command") {
+            if (patched.find("cwd") == patched.end()) {
+                patched["cwd"] = scope_.base_dir;
+            }
+        }
+        return inner_.execute(patched);
+    }
+
+private:
+    Tool& inner_;
+    IsolationScope scope_;
+};
+
+}  // namespace
+
+std::optional<lubancode::cli::AgentWorktree> SetupIsolationRoom(const std::string& cwd,
+                                                                const lubancode::cli::GitRunner& runner,
+                                                                Tool::Result& error_out) {
+    const std::filesystem::path cwd_path = Utf8ToPath(cwd);
+    const auto repo_root = lubancode::cli::FindRepositoryRoot(cwd_path, runner);
+    if (!repo_root.has_value()) {
+        error_out = {"isolation=worktree 需要在 git 仓库里给子代理建房,当前目录不是仓库: " + cwd, true};
+        return std::nullopt;
+    }
+    lubancode::cli::AgentWorktree room = lubancode::cli::CreateAgentWorktree(*repo_root, runner);
+    if (!room.ok) {
+        error_out = {"给隔离子代理建 worktree 失败: " + room.error, true};
+        // 半拉子房收拾掉,不留垃圾。
+        if (!room.room_path.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(room.room_path, ec);
+        }
+        return std::nullopt;
+    }
+    return room;
+}
+
+std::string FinishIsolationRoom(const lubancode::cli::AgentWorktree& room,
+                                const lubancode::cli::GitRunner& runner) {
+    return lubancode::cli::FinishAgentWorktree(room.repo_root, room.room_path, room.branch, runner).note;
+}
+
+std::unique_ptr<ToolRegistry> BuildIsolatedRegistry(ToolRegistry& source, const IsolationScope& scope) {
+    auto out = std::make_unique<ToolRegistry>();
+    for (const auto& tool : source.All()) {
+        out->Register(std::make_unique<BaseDirTool>(*tool, scope));
+    }
+    return out;
+}
+
+}  // namespace lubancode::tools

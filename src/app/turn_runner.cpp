@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "agent/compact.hpp"
+#include "agent/turn_harness.hpp"
 #include "app/hook_runtime.hpp"
 #include "cli/console_input.hpp"
 #include "cli/divider.hpp"
@@ -541,37 +542,36 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
     return allowed;
 }
 
-// 交互循环、单发模式共用的回调:文本打字机打印(正文保持原色,不着色),
-// 工具调用打一行提示,needs_confirm 的工具按 auto_confirm 决定是自动放行
-// 还是问用户一句(三选:y 本次允许 / a 本会话总是允许该工具 / N 拒绝)。
-// 确认逻辑本体在 ConfirmToolUse(见上),这里只接两条门:同步回落
-// (on_tool_confirm,子代理/PTC 转发与单测走的旧路)与异步审批
-// (on_tool_confirm_async,Broker 的终端实现)。
-// always_allowed_tools 由调用方持有,跨多轮 Run() 保留,选过 a 的工具本
-// 会话内不会再问。usage_stats 由调用方持有,只在这一次 Run() 范围内累计
-// (RunTurn() 每次都会传一份新的进来)。registry 是这一轮实际在用的工具表——
-// 如果里面注册了 "agent" 工具,这里顺带把这一轮现算好的确认/记账/打印
-// 逻辑通过 SetHooks 灌给它,子代理被调用时就能用上同一套(详见
-// tools/agent_tool.hpp 顶部注释)。
-// display:UI-B(0.12.0)新增,这一轮的工具条目展示总管(建条目、原地
-// 改写状态、管道模式的 [工具]/[工具完成] 稳定纯文本),todo_state 也归它
-// 持有。回调层只管把事件原样转进去。
-lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::string>& always_allowed_tools,
-                                            const lubancode::cli::Theme& theme, lubancode::runtime::TurnUsageStats& usage_stats,
-                                            lubancode::cli::ContextTracker& context_tracker,
-                                            lubancode::tools::ToolRegistry& registry,
-                                            lubancode::hooks::HookDispatcher* hook_dispatcher,
-                                            ToolDisplay& display, StreamBodyTracker& body_tracker,
-                                            const std::vector<std::string>& allow_commands,
-                                            const std::vector<std::string>& deny_commands,
-                                            const std::atomic<bool>* cancel_flag,
-                                            lubancode::agent::WorkflowRecorder* recorder,
-                                            lubancode::runtime::ToolTraceHub* trace_hub,
-                                            lubancode::runtime::TurnCollector* view_collector,
-                                            std::function<std::string(const std::string&, const nlohmann::json&)>
-                                                mode_gate,
-                                            std::function<void(bool asked, bool allowed)> approval_observer,
-                                            const lubancode::agent::Callbacks* event_callbacks) {
+// 交互循环、单发模式共用的回调装配(骨架拆解批三:参数收进 TurnContext/
+// TurnWiring,本体不变):文本打字机打印,工具调用打一行提示,needs_confirm
+// 的工具按确认档决定是自动放行还是问用户一句。确认逻辑本体在
+// ConfirmToolUse(见上),这里只接两条门:同步回落(on_tool_confirm,
+// 子代理/PTC 转发与单测走的旧路)与异步审批(on_tool_confirm_async,Broker
+// 的终端实现)。registry 里注册了 "agent" 工具的话,顺带把这一轮现算好的
+// 确认/记账/打印逻辑通过 SetHooks 灌给它,子代理被调用时就能用上同一套
+//(详见 tools/agent_tool.hpp 顶部注释);批二尾巴(批三)起 hooks 还带上
+// 事件流回调(event_callbacks),子代理自己的 sub_callbacks 先过事件流
+// 再落台账。PTC 工具同链。
+lubancode::agent::Callbacks BuildCallbacks(TurnContext& ctx, TurnWiring wiring) {
+    // 批三改名收参:字段别名对齐旧参数名,函数体与从前一字不差。
+    const bool auto_confirm = ctx.auto_confirm;
+    std::set<std::string>& always_allowed_tools = *ctx.always_allowed_tools;
+    const lubancode::cli::Theme& theme = ctx.theme;
+    lubancode::runtime::TurnUsageStats& usage_stats = *wiring.usage_stats;
+    lubancode::cli::ContextTracker& context_tracker = *ctx.context_tracker;
+    lubancode::tools::ToolRegistry& registry = *ctx.registry;
+    lubancode::hooks::HookDispatcher* hook_dispatcher = ctx.hook_dispatcher;
+    ToolDisplay& display = *wiring.display;
+    StreamBodyTracker& body_tracker = *wiring.body_tracker;
+    const std::vector<std::string>& allow_commands = ctx.allow_commands;
+    const std::vector<std::string>& deny_commands = ctx.deny_commands;
+    const std::atomic<bool>* cancel_flag = wiring.cancel_flag;
+    lubancode::agent::WorkflowRecorder* recorder = ctx.recorder;
+    lubancode::runtime::ToolTraceHub* trace_hub = ctx.trace_hub;
+    lubancode::runtime::TurnCollector* view_collector = wiring.view_collector;
+    const std::function<std::string(const std::string&, const nlohmann::json&)>& mode_gate = ctx.mode_gate;
+    const std::function<void(bool asked, bool allowed)>& approval_observer = ctx.approval_observer;
+    const lubancode::agent::Callbacks* event_callbacks = wiring.event_callbacks;
     lubancode::agent::Callbacks callbacks;
 
     // Plan 模式(只读研究硬闸单):ModePolicy 接到 RunOneTool 的
@@ -819,6 +819,12 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry.Find("agent"));
         agent_tool != nullptr) {
         lubancode::tools::AgentTool::Hooks hooks;
+        // 批二尾巴(批三):子代理自己的 sub_callbacks 并上事件流——装配提
+        // 到宿主侧这枚挂点(tools/ 住 engine 库不许 include runtime,适配器
+        // 的翻译在宿主侧做完,agent_tool 只收 agent::Callbacks 中立形状)。
+        // 给了之后子代理的正文/思考增量、工具起止、usage 都先落事件账
+        //(canonical)再进台账;没给(单发/单测/后台)零变化。
+        hooks.event_callbacks = event_callbacks;
         // P2(显示系统剥离单):确认转发走旧同步 on_tool_confirm——子代理
         // 的任务线程不该吃 async future(那要 Broker 悬起表配合,后台任务
         // "没人可问"的同步短路正是要保住的路径)。主轮回合有 async 就走
@@ -832,15 +838,11 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
         // 更新——启动靠 on_sub_tool_start,终态靠下面包了一层的 post_tool
         // 钩子(agent 工具没有单独的"子工具结束"回调,post_tool 正好在真
         // 执行完之后带着 Result 触发一次,借它回写;拒绝那条路在确认回调里
-        // 已经定格,pre_tool 拦截另包一层)。
-        hooks.on_sub_tool_start = [&display, event_callbacks](const std::string& tool_use_id,
-                                            const std::string& name,
-                                            const nlohmann::json& input) {
-            // 批二:前台子代理的内层工具先上事件流(宿主这轮的 adapter,同一
-            // 本 item 账),再画终端子条目;后台任务没人调这枚钩子,不涉。
-            if (event_callbacks != nullptr && event_callbacks->on_tool_start) {
-                event_callbacks->on_tool_start(tool_use_id, name, input);
-            }
+        // 已经定格,pre_tool 拦截另包一层)。批三起事件流的喂入改走
+        // hooks.event_callbacks(上面的并轨),这里只画终端子条目——同一条
+        // 生命周期事件不再两处喂,条目不重复开。
+        hooks.on_sub_tool_start = [&display](const std::string& tool_use_id, const std::string& name,
+                                             const nlohmann::json& input) {
             display.OnSubToolStart(tool_use_id, name, input);
         };
         hooks.on_usage = [&usage_stats, &display](const lubancode::api::UsageReport& report) {
@@ -894,19 +896,15 @@ lubancode::agent::Callbacks BuildCallbacks(bool auto_confirm, std::set<std::stri
                 return feedback;
             };
         }
-        hooks.on_post_tool_hook = [&display, base = callbacks.on_post_tool_hook, event_callbacks](
+        hooks.on_post_tool_hook = [&display, base = callbacks.on_post_tool_hook](
                                        const std::string& tool_use_id, const std::string& name,
                                        const nlohmann::json& input,
                                        const lubancode::tools::Tool::Result& result) {
             if (base) {
                 base(tool_use_id, name, input, result);
             }
-            // 批二:真执行完的内层工具在事件流上收口(与 on_sub_tool_start
-            // 开的条目成对;被拒/被拦的那批没有 post 钩子,条目在收口时按
-            // Cancelled 兜底,终态唯一不悬空)。
-            if (event_callbacks != nullptr && event_callbacks->on_tool_done) {
-                event_callbacks->on_tool_done(tool_use_id, name, result);
-            }
+            // 事件流的收口改走 hooks.event_callbacks 并轨(sub_callbacks 的
+            // on_tool_done 直接触发),这里只回写终端子条目终态。
             display.OnSubToolResult(tool_use_id, name, input, result);
         };
         agent_tool->SetHooks(std::move(hooks));
@@ -979,11 +977,11 @@ std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error) {
     return trf("error.image.read_failed", error.path);
 }
 
-// 发一轮用户输入,走 agent loop(可能会有若干次工具调用来回),流式打字机
-// 打印回复,结束后打一行 token 用量统计(暗色/淡色,plain 主题下就是空
-// 前后缀)。always_allowed_tools 由调用方持有,记录本会话内选过"总是允许"
-// 的工具。registry 是这一轮实际在用的工具表,传给 BuildCallbacks 好给里头
-// 的 agent 工具(如果有)灌这一轮的转发钩子。
+// 发一轮用户输入(TurnContext 收参,骨架拆解批三):走 agent loop(可能
+// 会有若干次工具调用来回),流式打字机打印回复,结束后按档打统计行。
+// 循环本体、Stop 钩子续跑环、取消链、收场分型在 agent::TurnHarness(与
+// 子代理 agent_tool 的 RunTask 同一份)——这一层只剩终端档的装饰:监听
+// 线程、流式 footer、心跳、分界线、静默档台账、事件流适配器的起收。
 //
 // M10:这里起一条 TurnInputListener,存活区间正好是"发出请求到本轮 Run()
 // 结束"——ESC 打断、消息排队都靠它。真控制台之外(管道/重定向)监听器
@@ -1004,24 +1002,34 @@ std::string ImageInputErrorText(const lubancode::cli::ImageInputError& error) {
 // 还没看见),换成 atomic<bool> 用 load/store 的 acquire/release 语义堵上。
 // allow_commands/deny_commands:settings.local.json 的 run_command 前缀白/黑
 // 名单,原样递给 BuildCallbacks 的确认回调叠加判定(缺省空表 = 无叠加)。
-RunTurnResult RunTurn(lubancode::agent::Agent& loop, const std::string& user_input, bool auto_confirm,
-                       std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
-                       lubancode::cli::ContextTracker& context_tracker, lubancode::tools::ToolRegistry& registry,
-                       lubancode::hooks::HookDispatcher* hook_dispatcher, bool is_console,
-                       std::vector<lubancode::cli::TranscriptItem>& transcript,
-                       std::shared_ptr<lubancode::tools::TodoListState> todo_state,
-                       std::atomic<bool>* transcript_expanded,
-                       const std::vector<std::string>& allow_commands,
-                       const std::vector<std::string>& deny_commands,
-                       lubancode::tools::AgentTool* completion_agent,
-                       lubancode::agent::WorkflowRecorder* recorder, bool silent,
-                       lubancode::runtime::TurnUsageStats* usage_out,
-                       lubancode::runtime::ToolTraceHub* turn_trace_hub,
-                       std::string thread_id_for_trace, std::string turn_id_for_trace,
-                       lubancode::runtime::TurnView* turn_view_out,
-                       std::function<std::string(const std::string&, const nlohmann::json&)> mode_gate,
-                       std::function<void(bool asked, bool allowed)> approval_observer,
-                       lubancode::runtime::TurnEventAdapter* turn_events) {
+RunTurnResult RunTurn(TurnContext ctx) {
+    // 批三收参后的字段别名:函数体与从前一字不差。
+    lubancode::agent::Agent& loop = *ctx.loop;
+    const std::string& user_input = ctx.user_input;
+    const bool auto_confirm = ctx.auto_confirm;
+    std::set<std::string>& always_allowed_tools = *ctx.always_allowed_tools;
+    const lubancode::cli::Theme& theme = ctx.theme;
+    lubancode::cli::ContextTracker& context_tracker = *ctx.context_tracker;
+    lubancode::tools::ToolRegistry& registry = *ctx.registry;
+    lubancode::hooks::HookDispatcher* hook_dispatcher = ctx.hook_dispatcher;
+    const bool is_console = ctx.is_console;
+    std::vector<lubancode::cli::TranscriptItem>& transcript = *ctx.transcript;
+    std::shared_ptr<lubancode::tools::TodoListState> todo_state = ctx.todo_state;
+    std::atomic<bool>* transcript_expanded = ctx.transcript_expanded;
+    const std::vector<std::string>& allow_commands = ctx.allow_commands;
+    const std::vector<std::string>& deny_commands = ctx.deny_commands;
+    lubancode::tools::AgentTool* completion_agent = ctx.completion_agent;
+    lubancode::agent::WorkflowRecorder* recorder = ctx.recorder;
+    const bool silent = ctx.silent;
+    lubancode::runtime::TurnUsageStats* usage_out = ctx.usage_out;
+    lubancode::runtime::ToolTraceHub* turn_trace_hub = ctx.trace_hub;
+    const std::string& thread_id_for_trace = ctx.thread_id_for_trace;
+    const std::string& turn_id_for_trace = ctx.turn_id_for_trace;
+    lubancode::runtime::TurnView* turn_view_out = ctx.turn_view_out;
+    const std::function<std::string(const std::string&, const nlohmann::json&)>& mode_gate = ctx.mode_gate;
+    const std::function<void(bool asked, bool allowed)>& approval_observer = ctx.approval_observer;
+    lubancode::runtime::TurnEventAdapter* turn_events = ctx.turn_events;
+
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
     if (!prepared_input.has_value()) {
         std::cerr << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
@@ -1109,11 +1117,14 @@ RunTurnResult RunTurn(lubancode::agent::Agent& loop, const std::string& user_inp
         turn_events->Start(turn_id_for_trace);
         event_callbacks_storage = turn_events->MakeCallbacks();
     }
-    lubancode::agent::Callbacks callbacks =
-        BuildCallbacks(auto_confirm, always_allowed_tools, theme, usage_stats, context_tracker, registry,
-                        hook_dispatcher, display, body_tracker, allow_commands, deny_commands, &cancel_flag,
-                        recorder, turn_trace_hub, &view_collector, mode_gate, approval_observer,
-                        turn_events != nullptr ? &event_callbacks_storage : nullptr);
+    TurnWiring wiring;
+    wiring.usage_stats = &usage_stats;
+    wiring.display = &display;
+    wiring.body_tracker = &body_tracker;
+    wiring.cancel_flag = &cancel_flag;
+    wiring.view_collector = &view_collector;
+    wiring.event_callbacks = turn_events != nullptr ? &event_callbacks_storage : nullptr;
+    lubancode::agent::Callbacks callbacks = BuildCallbacks(ctx, wiring);
     if (turn_trace_hub != nullptr) {
         if (recorder != nullptr) {
             turn_trace_hub->AttachProjection(
@@ -1298,9 +1309,30 @@ RunTurnResult RunTurn(lubancode::agent::Agent& loop, const std::string& user_inp
     // 回合的失败收口:走下面共用的错误路径(listener 停、footer 收、错误
     // 上屏),交回 status=1;外层会话继续跑,prompt 回得来,已入 history
     // 的部分(用户消息)照常落盘。异常类型一并打出来,真机再出事有姓有名。
+    // 循环本体走 TurnHarness(批三:与子代理同一份;主回合没有续投源,
+    // 单轮即收,Stop 续跑环在终端 chrome 收妥后再跑)。
     std::expected<lubancode::agent::RunOutcome, std::string> result;
+    lubancode::agent::DriveReport drive;
     try {
-        result = loop.Run(std::move(prepared_input->message), callbacks, &cancel_flag);
+        lubancode::agent::DriveOptions drive_options;
+        drive_options.cancel = &cancel_flag;
+        drive = lubancode::agent::DriveTurn(loop, callbacks, std::move(prepared_input->message), drive_options);
+        if (!drive.ok) {
+            result = std::unexpected(drive.error);
+        } else {
+            // 还原 RunOutcome 视图(下游的打断/步数/length_empty 读的还是
+            // 这只;末轮原始 outcome 存在 drive.final_round)。
+            lubancode::agent::RunOutcome outcome;
+            outcome.cancelled = drive.cancelled;
+            outcome.hit_step_limit = drive.hit_step_limit;
+            outcome.stop_reason = drive.stop_reason;
+            outcome.steps_used = drive.steps_used;
+            if (drive.final_round.has_value()) {
+                outcome.length_empty_output = drive.final_round->length_empty_output;
+                outcome.output_budget = drive.final_round->output_budget;
+            }
+            result = std::move(outcome);
+        }
     } catch (const std::exception& e) {
         result = std::unexpected(trf("error.unexpected", e.what()) + std::string(" [") + typeid(e).name() + "]");
     }
@@ -1491,9 +1523,12 @@ RunTurnResult RunTurn(lubancode::agent::Agent& loop, const std::string& user_inp
     // 钩子 continue=false = "还不能停,再续一轮":续跑理由作为带标识的
     // continuation prompt 入账,不伪装成用户输入;stop_hook_active 防咬尾,
     // 最多续一次。续跑轮没有输入监听(ESC 打断靠外层循环兜底),如实注明。
+    // 续跑环本体在 TurnHarness(批三:与子代理的 SubagentStop 环同一份)。
     if (hook_dispatcher != nullptr && !hook_dispatcher->Empty() &&
         hook_dispatcher->HasHandlersFor(lubancode::hooks::HookEvent::Stop) && !result->cancelled) {
-        const auto last_assistant_text = [&loop]() {
+        // 末条 assistant 文本冻结在环前(合流前主回合的语义:续跑轮不刷新
+        // 它;子代理那边每轮现取——差别写在 harness 的 StopOptions 注释里)。
+        const std::string last_assistant_text = [&loop]() {
             for (auto it = loop.history().rbegin(); it != loop.history().rend(); ++it) {
                 if (it->role != lubancode::api::Role::Assistant) {
                     continue;
@@ -1506,26 +1541,23 @@ RunTurnResult RunTurn(lubancode::agent::Agent& loop, const std::string& user_inp
             }
             return std::string();
         }();
-
-        bool stop_hook_active = false;
-        for (int round = 0; round < 2; ++round) {
+        lubancode::agent::StopOptions stop_options;
+        stop_options.cancel = &cancel_flag;  // 监听线程已停,无写入者,与旧
+                                             // 主路不传 cancel 等价
+        stop_options.label = "[stop 钩子续跑,非用户输入] ";
+        stop_options.final_text = [&last_assistant_text]() { return last_assistant_text; };
+        stop_options.on_continue_request = [&theme](const std::string& reason) {
+            std::cout << theme.stats << "[stop 钩子] 要求再收口一轮: " << reason << theme.reset << "\n";
+        };
+        stop_options.emit = [hook_dispatcher](bool stop_hook_active, const std::string& last_text) {
             lubancode::hooks::HookPayload payload;
             payload.event = lubancode::hooks::HookEvent::Stop;
             payload.fields["stop_hook_active"] = stop_hook_active;
-            payload.fields["last_assistant_message"] = last_assistant_text;
-            const auto merged = hook_dispatcher->Emit(lubancode::hooks::HookEvent::Stop, payload);
-            if (!merged.blocked || stop_hook_active) {
-                break;  // 没人拉闸,或已经续过一次(不许无限续)
-            }
-            std::cout << theme.stats << "[stop 钩子] 要求再收口一轮: " << merged.block_reason << theme.reset
-                      << "\n";
-            const auto continuation = loop.Run("[stop 钩子续跑,非用户输入] " + merged.block_reason, callbacks);
-            if (!continuation.has_value() || continuation->cancelled || continuation->hit_step_limit) {
-                break;  // 续跑轮报错/被打断/撞预算:如实停,不带病硬续
-            }
-            out.cancelled = out.cancelled || continuation->cancelled;
-            stop_hook_active = true;
-        }
+            payload.fields["last_assistant_message"] = last_text;
+            return hook_dispatcher->Emit(lubancode::hooks::HookEvent::Stop, payload);
+        };
+        lubancode::agent::RunStopContinuation(loop, callbacks, stop_options, drive);
+        out.cancelled = out.cancelled || drive.cancelled;
     }
 
     // 安全点(轮收):后台子代理这轮攒下的 hooks 记录归并落账,报信一行。
@@ -1585,12 +1617,24 @@ RunTurnResult RunTurn(lubancode::agent::Agent& loop, const std::string& user_inp
         *usage_out = usage_stats;
     }
     // turn 尾分界线(终端回合视觉收束单):Worked for X(正常)/ Stopped
-    // after X(ESC 打断)/ Failed after X(输出预算耗尽)。统计行在前、footer
-    // 在后,跟开头那条首尾呼应——但带上了总耗时,用户看得见这一轮到底
-    // 忙了多久。
-    finish_turn_chrome(turn_failed        ? lubancode::cli::TurnFooterTone::Failed
-                       : out.cancelled    ? lubancode::cli::TurnFooterTone::Stopped
-                                          : lubancode::cli::TurnFooterTone::Worked);
+    // after X(ESC 打断)/ Failed after X(输出预算耗尽)。tone 由 harness
+    // 的收场分型定(批三:与子代理同一份分型;主回合不要文本结论,模型只
+    // 回工具或空轮也按 Worked 收——差别写在 TurnEndgame.require_final_text)。
+    // 早退路径(报错/步数满)已直接按 Failed 收过,这里的分型只管走到头的。
+    lubancode::agent::TurnEndgame endgame;
+    endgame.cancelled = drive.cancelled;
+    endgame.hit_step_limit = drive.hit_step_limit;
+    endgame.error = drive.ok ? std::string() : drive.error;
+    endgame.history_empty = loop.history().empty();
+    if (drive.final_round.has_value()) {
+        endgame.output_budget_exhausted = drive.final_round->output_budget.exhausted;
+    }
+    endgame.require_final_text = false;
+    const lubancode::agent::TurnVerdict verdict = lubancode::agent::ClassifyTurnEnd(endgame);
+    finish_turn_chrome(turn_failed                        ? lubancode::cli::TurnFooterTone::Failed
+                       : verdict.status == lubancode::agent::TurnVerdict::Status::Stopped
+                           ? lubancode::cli::TurnFooterTone::Stopped
+                           : lubancode::cli::TurnFooterTone::Worked);
     return out;
 }
 

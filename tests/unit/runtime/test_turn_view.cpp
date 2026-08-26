@@ -863,11 +863,18 @@ TEST_CASE("RunTurn 集成:正文轮落恰一枚 Worked footer;管道模式统计
 
     std::ostringstream captured;
     std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
-    const lubancode::app::RunTurnResult result =
-        lubancode::app::RunTurn(loop, "问题", /*auto_confirm=*/true, always_allowed,
-                                lubancode::cli::BuiltinTheme("plain"), tracker, registry,
-                                /*hook_dispatcher=*/nullptr, /*is_console=*/false, transcript,
-                                /*todo_state=*/nullptr, &expanded);
+    lubancode::app::TurnContext turn;
+    turn.loop = &loop;
+    turn.user_input = "问题";
+    turn.auto_confirm = true;
+    turn.always_allowed_tools = &always_allowed;
+    turn.theme = lubancode::cli::BuiltinTheme("plain");
+    turn.context_tracker = &tracker;
+    turn.registry = &registry;
+    turn.is_console = false;
+    turn.transcript = &transcript;
+    turn.transcript_expanded = &expanded;
+    const lubancode::app::RunTurnResult result = lubancode::app::RunTurn(std::move(turn));
     std::cout.rdbuf(old_buf);
 
     REQUIRE(result.status == 0);
@@ -897,11 +904,18 @@ TEST_CASE("RunTurn 集成:错误轮落 Failed footer,下一只 composer 不粘�
 
     std::ostringstream captured;
     std::streambuf* const old_buf = std::cerr.rdbuf(captured.rdbuf());
-    const lubancode::app::RunTurnResult result =
-        lubancode::app::RunTurn(loop, "问题", /*auto_confirm=*/true, always_allowed,
-                                lubancode::cli::BuiltinTheme("plain"), tracker, registry,
-                                /*hook_dispatcher=*/nullptr, /*is_console=*/false, transcript,
-                                /*todo_state=*/nullptr, &expanded);
+    lubancode::app::TurnContext turn;
+    turn.loop = &loop;
+    turn.user_input = "问题";
+    turn.auto_confirm = true;
+    turn.always_allowed_tools = &always_allowed;
+    turn.theme = lubancode::cli::BuiltinTheme("plain");
+    turn.context_tracker = &tracker;
+    turn.registry = &registry;
+    turn.is_console = false;
+    turn.transcript = &transcript;
+    turn.transcript_expanded = &expanded;
+    const lubancode::app::RunTurnResult result = lubancode::app::RunTurn(std::move(turn));
     std::cerr.rdbuf(old_buf);
 
     CHECK(result.status == 1);
@@ -935,11 +949,18 @@ TEST_CASE("RunTurn 集成:同批三枚工具,start 后才进 transcript、终态
 
     std::ostringstream captured;
     std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
-    const lubancode::app::RunTurnResult result =
-        lubancode::app::RunTurn(loop, "跑三枚", /*auto_confirm=*/true, always_allowed,
-                                lubancode::cli::BuiltinTheme("plain"), tracker, registry,
-                                /*hook_dispatcher=*/nullptr, /*is_console=*/false, transcript,
-                                /*todo_state=*/nullptr, &expanded);
+    lubancode::app::TurnContext turn;
+    turn.loop = &loop;
+    turn.user_input = "跑三枚";
+    turn.auto_confirm = true;
+    turn.always_allowed_tools = &always_allowed;
+    turn.theme = lubancode::cli::BuiltinTheme("plain");
+    turn.context_tracker = &tracker;
+    turn.registry = &registry;
+    turn.is_console = false;
+    turn.transcript = &transcript;
+    turn.transcript_expanded = &expanded;
+    const lubancode::app::RunTurnResult result = lubancode::app::RunTurn(std::move(turn));
     std::cout.rdbuf(old_buf);
 
     REQUIRE(result.status == 0);
