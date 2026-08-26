@@ -46,6 +46,7 @@
 // 调 platform:: 的原语——同一套算法在 POSIX(ANSI 光标定位 + termios 逐
 // 键)上也能跑,windows.h 不再进这个文件。
 
+#include "cli/agent_panel_host.hpp"
 #include "cli/console_input.hpp"
 
 #include "cli/bottom_chrome.hpp"
@@ -125,21 +126,11 @@ TranscriptUiHandler& UiHandlerSlot() {
     return handler;
 }
 
-AgentPanelProvider& AgentPanelProviderSlot() {
-    static AgentPanelProvider provider;
-    return provider;
-}
-
 // 视图切换钩子的槽(viewed_task_id 变了才被调;tail_rows>0 = 实时流重铺拍,
 // 见 console_input.hpp)。
 std::function<void(int, int)>& AgentViewSwitchHookSlot() {
     static std::function<void(int, int)> hook;
     return hook;
-}
-
-AgentPanelActions& AgentPanelActionsSlot() {
-    static AgentPanelActions actions;
-    return actions;
 }
 
 std::vector<int> PanelEntryIds(const std::vector<AgentPanelEntry>& entries) {
@@ -916,10 +907,10 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     }
 
     auto panel_entries = [&]() -> std::vector<AgentPanelEntry> {
-        if (!composer || !AgentPanelProviderSlot()) {
+        if (!composer || !SessionAgentPanelHost().provider()) {
             return {};
         }
-        return AgentPanelProviderSlot()();
+        return SessionAgentPanelHost().provider()();
     };
     const auto panel_ids = [](const std::vector<AgentPanelEntry>& entries) {
         std::vector<int> ids;
@@ -2091,7 +2082,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 const auto outcome = panel_session.HandleKey(*panel_key, nav_ids_for(entries_before_key),
                                                              empty_now, std::chrono::steady_clock::now());
                 if (outcome.stop_all) {
-                    const AgentPanelActions& actions = AgentPanelActionsSlot();
+                    const AgentPanelActions& actions = SessionAgentPanelHost().actions();
                     if (actions.cancel_all) {
                         const int stopped = actions.cancel_all();
                         panel_notice = trf("agent_panel.stop_all_notice", stopped);
@@ -2109,7 +2100,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                             break;
                         }
                     }
-                    const AgentPanelActions& actions = AgentPanelActionsSlot();
+                    const AgentPanelActions& actions = SessionAgentPanelHost().actions();
                     if (selected_entry != nullptr) {
                         if (selected_entry->running && actions.cancel_task) {
                             actions.cancel_task(selected_entry->task_id);
@@ -2952,13 +2943,9 @@ void SetConfirmMode(ConfirmMode mode) { SharedEditor().set_confirm_mode(mode); }
 
 void SetTranscriptUiHandler(TranscriptUiHandler handler) { UiHandlerSlot() = std::move(handler); }
 
-void SetAgentPanelProvider(AgentPanelProvider provider) { AgentPanelProviderSlot() = std::move(provider); }
-
 void SetAgentViewSwitchHook(std::function<void(int viewed_task_id, int tail_rows)> hook) {
     AgentViewSwitchHookSlot() = std::move(hook);
 }
-
-void SetAgentPanelActions(AgentPanelActions actions) { AgentPanelActionsSlot() = std::move(actions); }
 
 void ResetAgentPanelSession() { PanelSessionSlot().Reset(); }
 
@@ -3298,8 +3285,8 @@ void RedrawStreamFooterLocked() {
     std::vector<std::string> dock_rows_text;
     std::string footer_rule_tag;
     int dock_selected_task_id = 0;
-    if (AgentPanelProviderSlot()) {
-        const std::vector<AgentPanelEntry> panel_entries = AgentPanelProviderSlot()();
+    if (SessionAgentPanelHost().provider()) {
+        const std::vector<AgentPanelEntry> panel_entries = SessionAgentPanelHost().provider()();
         const AgentPanelSession::Snapshot snap0 =
             PanelSessionSlot().SnapshotFor(PanelEntryIds(panel_entries));
         const std::vector<int> nav_ids =
@@ -3710,7 +3697,7 @@ void TurnInputListener::ThreadMain() {
         if (!FooterSlot().enabled) {
             return {};
         }
-        const AgentPanelProvider& provider = AgentPanelProviderSlot();
+        const AgentPanelProvider& provider = SessionAgentPanelHost().provider();
         if (!provider) {
             return {};
         }
@@ -3722,7 +3709,7 @@ void TurnInputListener::ThreadMain() {
     // 面板动作分派(x 停止/清除、两段确认停全部):按稳定 task id 找条目,
     // 绝不按列表下标。停全部的回执插打一行,正文行数账由 print hook 作废。
     auto dispatch_panel_outcome = [&](const AgentPanelController::Outcome& outcome) {
-        const AgentPanelActions& actions = AgentPanelActionsSlot();
+        const AgentPanelActions& actions = SessionAgentPanelHost().actions();
         if (outcome.stop_all && actions.cancel_all) {
             const int stopped = actions.cancel_all();
             std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
@@ -3734,7 +3721,7 @@ void TurnInputListener::ThreadMain() {
             }
         }
         if (outcome.stop_current && outcome.stop_current_task_id > 0) {
-            const AgentPanelProvider& provider = AgentPanelProviderSlot();
+            const AgentPanelProvider& provider = SessionAgentPanelHost().provider();
             const std::vector<AgentPanelEntry> entries = provider ? provider() : std::vector<AgentPanelEntry>{};
             for (const auto& entry : entries) {
                 if (entry.task_id != outcome.stop_current_task_id) {

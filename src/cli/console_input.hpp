@@ -233,7 +233,9 @@ void SetTranscriptUiHandler(TranscriptUiHandler handler);
 // (完整 prompt、工具调用流水、结论)走下面那只视图切换钩子,整块换进
 // 上方会话视口,不向坞下方生长。
 using AgentPanelProvider = std::function<std::vector<AgentPanelEntry>()>;
-void SetAgentPanelProvider(AgentPanelProvider provider);
+// provider/actions 的挂点(终端接线收尾单):从前是两枚 SetAgentPanel*
+// 静态槽,现在收进 AgentPanelHost 实例(cli/agent_panel_host.hpp 的
+// SessionAgentPanelHost())——挂/取/清都走实例,不再有裸函数指针槽。
 
 // 视图切换钩子:viewed_task_id 变了(Enter 切进某只子代理 / Esc 回 main)
 // 终端层调这个,应用层把"此刻该看的会话正文"铺出来——0 = 重铺 main 的
@@ -245,10 +247,6 @@ void SetAgentPanelProvider(AgentPanelProvider provider);
 // 流式监听)调钩子前都已按账擦净旧帧、把光标摆到帧顶;流式路钩子自己
 // (在 StdoutWriteMutex 内)先擦 footer 再铺、铺完画回。传空钩子即清除。
 void SetAgentViewSwitchHook(std::function<void(int viewed_task_id, int tail_rows)> hook);
-
-// 面板动作(x 停止/清除、两段确认停全部)的接线口。终端层不直接碰
-// AgentTool;停止必须走正式取消接口,等任务线程报终态再改灯。
-void SetAgentPanelActions(AgentPanelActions actions);
 
 // 会话收场(/clear、退出、切 worktree)用:把面板状态机(焦点/查看态/
 // composer 收件目标)整份收干净——查看态那只任务已经没了,目标不能悬着。

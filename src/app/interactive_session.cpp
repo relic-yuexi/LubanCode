@@ -95,6 +95,7 @@
 #include "runtime/loop_types.hpp"
 #include "runtime/session_work_scheduler.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:PlanDocument 内容锚
+#include "cli/agent_panel_host.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
@@ -915,7 +916,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // 后台子代理面板的数据源(缓存 + 修订号,面板每 100ms 拉一次)。列表走
     // 轻量全量(TaskSummaries,不截 8 只);查看态的长正文由视图切换钩子按
     // viewed_task_id 现取,整块换进上方会话视口——导航坞只放导航。
-    lubancode::cli::SetAgentPanelProvider(
+    lubancode::cli::SessionAgentPanelHost().SetProvider(
         [this]() { return agent_panel_presenter_.Entries(session_agent_tool()); });
     lubancode::cli::SetAgentViewSwitchHook(
         [this](int viewed_task_id, int tail_rows) {
@@ -934,7 +935,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     panel_actions.cancel_all = [this]() {
         return session_agent_tool() != nullptr ? session_agent_tool()->CancelAllTasks() : 0;
     };
-    lubancode::cli::SetAgentPanelActions(panel_actions);
+    lubancode::cli::SessionAgentPanelHost().SetActions(panel_actions);
 
     // 刮屏驱动器专用(tests/manual/agent_panel_driver.cpp,不进 ctest):设
     // LUBANCODE_AGENT_PANEL_DEMO=N 时面板显示 N 只假代理,便于真控制台断言
@@ -949,7 +950,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             idle.has_value() && !idle->empty()) {
             demo_idle = std::min(std::max(0, std::atoi(idle->c_str())), demo_count);
         }
-        lubancode::cli::SetAgentPanelProvider([demo_count, demo_idle]() {
+        lubancode::cli::SessionAgentPanelHost().SetProvider([demo_count, demo_idle]() {
             std::vector<lubancode::cli::AgentPanelEntry> fake;
             for (int i = 1; i <= demo_count; ++i) {
                 lubancode::cli::AgentPanelEntry entry;
@@ -1274,9 +1275,9 @@ TerminalSessionController::~TerminalSessionController() {
     // UI 回调清挂(原先的 UiHandlerGuard):回调抓着 this,析构前必须摘掉,
     // 异常退场也走这条。
     lubancode::cli::SetTranscriptUiHandler(nullptr);
-    lubancode::cli::SetAgentPanelProvider(nullptr);
+    // 面板接线宿主整体收清(provider/actions 双清;终端接线收尾单)。
+    lubancode::cli::SessionAgentPanelHost().Reset();
     lubancode::cli::SetAgentViewSwitchHook(nullptr);
-    lubancode::cli::SetAgentPanelActions(lubancode::cli::AgentPanelActions{});
     lubancode::cli::SetIdleWakeHook(nullptr);
     lubancode::cli::SetBackgroundNoticeHook(nullptr);
     lubancode::cli::SetPromptHistoryProvider(nullptr);
