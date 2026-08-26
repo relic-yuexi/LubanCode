@@ -1342,8 +1342,8 @@ int wmain(int argc, wchar_t** argv) {
           "第三幕:Esc 回 main");  // 已回主会话
     Sleep(500);
     Check(CountViewportRowsWith(kReflowText) == 1, "第三幕:回 main 重铺见回流正文恰好一次");
-    Check(CountViewportRowsWith("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe5\xae\x8c\xe6\x88\x90") == 1,
-          "第三幕:回 main 重铺见完成事件恰好一次");  // 后台子代理完成
+    Check(CountViewportRowsWith("\xe5\xbf\xab\xe6\x9f\xa5\xe7\x94\xb2\xe6\x8a\xa5\xe5\x91\x8a \xc2\xb7 \xe5\xae\x8c\xe6\x88\x90") == 1,
+          "第三幕:回 main 重铺见完成通知恰好一枚(点名快查甲的完成行;派发条目与旧任务台账不算)");
 
     // ---- 第四幕(查看态完成退场,2026-08-17):真盯一只后台任务从生到
     //      死——运行中切看、实时流每秒重铺喂帧、任务完成退场原子回 main。
