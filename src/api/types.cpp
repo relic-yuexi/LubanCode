@@ -19,12 +19,38 @@ bool ReasoningEffortIsOff(const std::string& effort) {
     return lower == "none" || lower == "minimal";
 }
 
+namespace {
+
+// 目录档案里有没有把某枚档位名声明成 supported_efforts 之一。
+bool DeclaresEffortLevel(const ReasoningConfig& config, const std::string& lowered) {
+    for (const auto& declared : config.supported_efforts) {
+        if (LowerReasoningEffort(declared) == lowered) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+bool ReasoningEffortIsOff(const std::string& effort, const ReasoningConfig& config) {
+    const std::string lower = LowerReasoningEffort(effort);
+    if (lower == "none") {
+        return true;  // 目录里 none 永远是关,没有第二种语义
+    }
+    if (lower != "minimal") {
+        return false;
+    }
+    // minimal:目录声明了它(与 none 并列)就是真档;没声明才沿用旧口径当关。
+    return !DeclaresEffortLevel(config, "minimal");
+}
+
 int ReasoningBudgetForEffort(const ReasoningConfig& config, const std::string& effort,
                              int max_tokens) {
     const std::string lower = LowerReasoningEffort(effort);
     if (!config.budget_min.has_value() && !config.budget_max.has_value()) {
         int legacy = 16384;
-        if (lower == "low") legacy = 1024;
+        if (lower == "low" || lower == "minimal") legacy = 1024;
         else if (lower == "medium" || lower == "auto") legacy = 4096;
         else if (lower == "xhigh" || lower == "extra") legacy = 32768;
         else if (lower == "max") legacy = 49152;
@@ -38,7 +64,7 @@ int ReasoningBudgetForEffort(const ReasoningConfig& config, const std::string& e
     const int minimum = std::max(1, configured_min);
     const int maximum = std::max(minimum, configured_max);
     int rank = 2;
-    if (lower == "low") rank = 0;
+    if (lower == "low" || lower == "minimal") rank = 0;
     else if (lower == "medium") rank = 1;
     else if (lower == "high") rank = 2;
     else if (lower == "xhigh" || lower == "extra") rank = 3;

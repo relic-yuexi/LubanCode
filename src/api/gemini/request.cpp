@@ -128,9 +128,10 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
     if (request.max_tokens.has_value()) {
         generation_config["maxOutputTokens"] = *request.max_tokens;
     }
-    // 推理档案决定写 thinkingLevel 还是 thinkingBudget；none/minimal 关。
+    // 推理档案决定写 thinkingLevel 还是 thinkingBudget；none 关(minimal 在
+    // 目录声明成档位的 Gemini 3 系上是一档真实的 thinkingLevel,不当关)。
     if (!request.reasoning_effort.empty()) {
-        const bool off = ReasoningEffortIsOff(request.reasoning_effort);
+        const bool off = ReasoningEffortIsOff(request.reasoning_effort, request.reasoning);
         json thinking_config{{"includeThoughts", !off}};
         if (off && request.reasoning.supports_toggle) {
             thinking_config["thinkingBudget"] = 0;
