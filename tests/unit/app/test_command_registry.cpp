@@ -12,6 +12,7 @@
 
 #include <set>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "app/commands/command_registry.hpp"
@@ -81,9 +82,9 @@ TEST_CASE("命令注册表:47 案齐整,枚举可对") {
         for (const lubancode::app::SlashCommandSpec& spec : table) {
             if (spec.handler == nullptr) {
                 ++dead;
-                CHECK_MESSAGE(spec.command == lubancode::cli::SlashCommand::Image ||
-                                  spec.command == lubancode::cli::SlashCommand::NotSlash,
-                              spec.name);
+                const bool is_dead_case = spec.command == lubancode::cli::SlashCommand::Image ||
+                                          spec.command == lubancode::cli::SlashCommand::NotSlash;
+                CHECK_MESSAGE(is_dead_case, spec.name);
             }
         }
         CHECK(dead == 2);
@@ -105,11 +106,14 @@ TEST_CASE("命令注册表:活案名字与帮助面对账") {
         if (spec.handler == nullptr) {
             continue;  // 死案
         }
+        // spec.name 是 const char*:按内容比,不比指针(链接器合并字面量与否
+        // 不该左右对账结果)。
+        const std::string_view bare_name = spec.name;
         const std::string full_name = std::string("/") + spec.name;
-        if (spec.name == "unknown") {
+        if (bare_name == "unknown") {
             continue;  // 兜底案,不是用户命令
         }
-        if (spec.name == "hooks" || spec.name == "trace") {
+        if (bare_name == "hooks" || bare_name == "trace") {
             CHECK_MESSAGE(help_names.count(full_name) == 0, full_name);
             continue;  // 帮助面缺口,如实记录
         }
@@ -124,7 +128,7 @@ TEST_CASE("命令注册表:活案名字与帮助面对账") {
         const std::string bare = name.substr(1);
         bool found = false;
         for (const lubancode::app::SlashCommandSpec& spec : table) {
-            if (spec.name == bare) {
+            if (std::string_view(spec.name) == bare) {
                 found = true;
                 break;
             }

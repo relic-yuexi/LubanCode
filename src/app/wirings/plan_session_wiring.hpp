@@ -51,7 +51,9 @@ public:
         std::function<void(const std::string&, bool*)> start_turn;   // 规划/执行轮
     };
 
+    PlanSessionWiring() = default;
     explicit PlanSessionWiring(Host host);
+    void AttachHost(Host host) { host_ = std::move(host); }
 
     // /plan 命令组:切入/带任务切入/status/off/review。只在空闲 composer
     // 生效;EnterWithTask 切档后把正文当规划请求发一轮。

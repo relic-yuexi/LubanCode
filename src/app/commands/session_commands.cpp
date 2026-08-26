@@ -1,9 +1,10 @@
 // session_commands.hpp 的实现:上下文/压缩/会话存档命令的函数体。
 #include "app/commands/session_commands.hpp"
 
-#include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
-#include "cli/record_command.hpp"             // /record 的 presenter(cli 层)
-#include "tools/agent_tool.hpp"               // 归档/删除的后台忙查
+#include "app/commands/command_registry.hpp"     // SlashDispatchContext(分派注册制)
+#include "app/wirings/record_session_wiring.hpp"  // 录制接线器(会话终章)
+#include "cli/record_command.hpp"                 // /record 的 presenter(cli 层)
+#include "tools/agent_tool.hpp"                   // 归档/删除的后台忙查
 
 #include <cstdlib>
 #include <ctime>
@@ -1637,12 +1638,9 @@ CommandFlow HandleSlashCompact(SlashDispatchContext& ctx, const lubancode::cli::
 }
 
 CommandFlow HandleSlashRecord(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
-    // 只做接线:解析/问话/起草/安装全在 cli/record_command.cpp。
-    lubancode::cli::RecordCommandContext record_ctx{*ctx.recorder,
-                                                    *ctx.recordings_root,
-                                                    *ctx.project_skills_root,
-                                                    *ctx.global_skills_root,
-                                                    ctx.refresh_skills};
+    // 只做接线:解析/问话/起草/安装全在 cli/record_command.cpp;材料包由
+    // 录制接线器装。
+    lubancode::cli::RecordCommandContext record_ctx = ctx.record_wiring->MakeCommandContext();
     lubancode::cli::HandleRecordCommand(parsed.args, record_ctx, *ctx.theme);
     return CommandFlow::Continue;
 }

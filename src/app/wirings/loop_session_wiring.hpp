@@ -51,7 +51,9 @@ public:
         std::function<void(const std::string&, bool*)> start_turn;
     };
 
+    LoopSessionWiring() = default;
     explicit LoopSessionWiring(Host host);
+    void AttachHost(Host host) { host_ = std::move(host); }
 
     // loop_control 窄工具的注册(装配期一次;tick turn 才放行)。
     void RegisterTools(lubancode::tools::ToolRegistry& registry);

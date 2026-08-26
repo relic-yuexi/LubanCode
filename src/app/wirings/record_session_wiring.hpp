@@ -26,7 +26,9 @@ public:
         std::function<void()> refresh_skills;  // install 后刷新本场技能清单
     };
 
+    RecordSessionWiring() = default;
     explicit RecordSessionWiring(Host host);
+    void AttachHost(Host host) { host_ = std::move(host); }
 
     // /record 的命令材料包(分派位递给 cli::HandleRecordCommand)。
     lubancode::cli::RecordCommandContext MakeCommandContext();
@@ -35,6 +37,8 @@ public:
     lubancode::skills::WorkflowRecorder* recorder() {
         return recorder_.has_value() ? &*recorder_ : nullptr;
     }
+    // 状态栏 REC 短标记的材料(没在录的 optional)。
+    const std::optional<lubancode::skills::WorkflowRecorder>& recorder_optional() const { return recorder_; }
 
 private:
     Host host_;

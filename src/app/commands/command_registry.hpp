@@ -49,7 +49,6 @@
 #include "runtime/session_runtime.hpp"
 #include "runtime/tool_trace_hub.hpp"
 #include "sessions/session_store.hpp"
-#include "skills/workflow_recorder.hpp"
 #include "workflow/host_executors.hpp"
 
 namespace lubancode::app {
@@ -142,12 +141,9 @@ struct SlashDispatchContext {
     lubancode::agent::PromptOptions* prompt_options = nullptr;
     lubancode::memory::ProjectMemory* project_memory = nullptr;  // /memory(可空)
 
-    // ---- 子系统状态(peer/录制;接线器接手后指针指进接线器) ----
-    std::optional<lubancode::peers::PeerRuntime>* peer_runtime = nullptr;
-    const bool* peer_started = nullptr;
-    std::vector<lubancode::peers::PeerEnvelope>* peer_ready_messages = nullptr;
-    std::vector<lubancode::peers::PeerEnvelope>* peer_held_stash = nullptr;
-    std::optional<lubancode::skills::WorkflowRecorder>* recorder = nullptr;
+    // ---- 子系统接线器(peer/录制;会话终章外迁后的窄口) ----
+    class PeerSessionWiring* peer_wiring = nullptr;    // /peers /send /peerperm
+    class RecordSessionWiring* record_wiring = nullptr;  // /record
 
     // ---- 会话回调(控制器递进来的活口) ----
     std::function<void(bool)> rebuild_loop;               // /provider 切换后的重建

@@ -24,6 +24,7 @@
 #include "app/commands/goal_commands.hpp"     // GoalWiring(命令材料包)
 #include "app/model_router.hpp"
 #include "cli/theme.hpp"
+#include "config/config.hpp"
 #include "runtime/goal_coordinator.hpp"
 #include "runtime/session_work_scheduler.hpp"  // GoalWorkSource/FairnessCounter
 #include "sessions/session_store.hpp"
@@ -47,9 +48,11 @@ namespace lubancode::app {
 
 class GoalSessionWiring {
 public:
-    // 会话借给接线器的材料(全借用,接线器不拥有)。
+    // 会话借给接线器的材料(全借用,接线器不拥有)。控制器先默认构造
+    // 接线器,装配尾经 AttachHost 配齐(晚绑定槽捕获控制器 this)。
     struct Host {
         const lubancode::cli::Theme* theme = nullptr;
+        const lubancode::config::Config* config = nullptr;      // Ensure 折 Options
         lubancode::sessions::SessionStore* session_store = nullptr;
         lubancode::runtime::ToolTraceHub* trace_hub = nullptr;   // 可空(采证)
         lubancode::app::ModelRouterService* model_router = nullptr;  // 可空
@@ -62,7 +65,9 @@ public:
         std::function<void(const std::string&, bool*)> start_turn;
     };
 
+    GoalSessionWiring() = default;
     explicit GoalSessionWiring(Host host);
+    void AttachHost(Host host) { host_ = std::move(host); }
 
     // goal_checkpoint 窄工具的注册(装配期一次;靠 turn 级过滤放行,普通轮
     // 不露面)。状态跟接线器走,工具只持 shared_ptr。
@@ -86,6 +91,8 @@ public:
     void RestoreFromArchive();
     // compact_v2 事件落盘前补 goal snapshot(有 goal 才带)。
     void AttachSnapshotToCompact(lubancode::sessions::CompactV2Event& event);
+    // 后台子代理回流喂 goal 的证据/usage 账(没有活跃 goal 零影响)。
+    void NoteSubagentCompletion();
 
     // ---- 查询口(控制器/状态栏用) ----
     lubancode::runtime::goal::GoalCoordinator* coordinator();  // ensure 前空

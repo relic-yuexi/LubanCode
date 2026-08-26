@@ -21,6 +21,9 @@
 namespace lubancode::cli {
 struct Theme;
 }
+namespace lubancode::tools {
+class ToolRegistry;
+}
 
 namespace lubancode::app {
 
@@ -37,7 +40,9 @@ public:
         std::function<int()> permission_mode;            // 来信权限档起手值
     };
 
+    PeerSessionWiring() = default;
     explicit PeerSessionWiring(Host host);
+    void AttachHost(Host host) { host_ = std::move(host); }
 
     // 装配:登记名册、起 pipe/socket 服务与心跳(Start 失败不拦会话,只打
     // 一行提示——这场不在名册上)。起了就把 peer 工具(ListSessions/
@@ -60,7 +65,11 @@ public:
 
     // ---- 名册状态 ----
     void SetStatus(const char* status);  // "busy"/"idle"(跑轮前后)
+    // /title 改名后同步名册上的名字(没起服务就是空操作)。
+    void SetName(const std::string& name);
     bool started() const { return started_; }
+    // 会话泵取信:ready 池队头一枚(空池给 nullopt)。
+    std::optional<lubancode::peers::PeerEnvelope> TakeReadyMessage();
 
     // 命令材料包(/peers /send /peerperm 共用)。
     lubancode::app::PeerCommandState MakeCommandState();

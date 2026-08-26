@@ -653,6 +653,12 @@ add_library(lubancode_app STATIC
   src/app/commands/model_commands.cpp
   # 会话终章:命令分派注册制(47 案 switch 换注册表,路由与门)。
   src/app/commands/command_registry.cpp
+  # 会话终章:子系统接线器(goal/loop/plan/peer/录制,状态+装配+泵+存档恢复)。
+  src/app/wirings/goal_session_wiring.cpp
+  src/app/wirings/loop_session_wiring.cpp
+  src/app/wirings/plan_session_wiring.cpp
+  src/app/wirings/peer_session_wiring.cpp
+  src/app/wirings/record_session_wiring.cpp
   src/app/interactive_session.cpp
   src/app/one_shot.cpp
   src/app/cli_options.cpp
