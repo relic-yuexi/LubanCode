@@ -290,6 +290,56 @@ std::optional<std::vector<unsigned char>> ReadClipboardImagePng(std::size_t max_
     return png;
 }
 
+bool ClipboardHasImage() {
+    std::lock_guard<std::mutex> lock(ClipboardMutex());
+    // 只查格式可用性,不搬数据:没图的日常粘贴(高频)这一下就完,不进
+    // WIC。锁被占就当没图,让文本路自己再试一遍。
+    ClipboardSession session;
+    if (!session.opened) {
+        return false;
+    }
+    const UINT png_format = RegisterClipboardFormatW(L"PNG");
+    return (png_format != 0 && IsClipboardFormatAvailable(png_format) != FALSE) ||
+           IsClipboardFormatAvailable(CF_DIB) != FALSE;
+}
+
+std::optional<std::string> ReadClipboardTextUtf8(std::string& error) {
+    // VS Code 这类编辑器刚把正文写进剪贴板时,别的进程偶尔还攥着锁(与
+    // console_win 的 ReadClipboardText 同一个坑),略试几次便走。
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        if (OpenClipboard(nullptr) != FALSE) {
+            const HANDLE data = GetClipboardData(CF_UNICODETEXT);
+            if (data == nullptr) {
+                CloseClipboard();
+                error = "剪贴板里没有文本";
+                return std::nullopt;
+            }
+            const auto* chars = static_cast<const wchar_t*>(GlobalLock(data));
+            if (chars == nullptr) {
+                CloseClipboard();
+                error = "GlobalLock 失败";
+                return std::nullopt;
+            }
+            const std::size_t capacity = GlobalSize(data) / sizeof(wchar_t);
+            std::size_t length = 0;
+            while (length < capacity && chars[length] != L'\0') {
+                ++length;
+            }
+            std::wstring text(chars, length);
+            GlobalUnlock(data);
+            CloseClipboard();
+            if (text.empty()) {
+                error = "剪贴板里没有文本";
+                return std::nullopt;
+            }
+            return WideToUtf8(text);
+        }
+        Sleep(5);
+    }
+    error = "OpenClipboard 失败(剪贴板被别的程序占着)";
+    return std::nullopt;
+}
+
 }  // namespace lubancode::platform
 
 #endif  // _WIN32

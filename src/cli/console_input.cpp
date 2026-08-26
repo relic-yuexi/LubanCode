@@ -1706,6 +1706,46 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         // 取消)与 ↑/↓ 选位都在这里消费;其余键(打字、退格、左右移)落到
         // 编辑器当查询输入,命中清单随重画自然刷新。
         if (composer) {
+            // Alt+V / Ctrl+V 共用的"PNG 在手,落盘插路径"段:PNG 落受限临时
+            // 文件,光标处插 @<路径>(提交时走既有视觉附件路,尺寸/超限校验
+            // 在那头还有一道),打一行回执再重画。落盘失败只报错,原草稿
+            // 不动。
+            const auto paste_clipboard_png = [&](const std::vector<unsigned char>& png) {
+                namespace fs = std::filesystem;
+                static unsigned paste_seq = 0;
+                fs::path file;
+                try {
+                    file = fs::temp_directory_path() /
+                           ("lubancode-paste-" + std::to_string(platform::CurrentProcessId()) +
+                            "-" + std::to_string(++paste_seq) + ".png");
+                } catch (const std::exception&) {
+                    TermOut() << theme.error << tr("editor.no_temp") << theme.reset << "\n";
+                    redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                    return;
+                }
+                {
+                    std::ofstream out(file, std::ios::binary | std::ios::trunc);
+                    if (!out) {
+                        TermOut() << theme.error << tr("editor.write_failed") << theme.reset << "\n";
+                        redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                        return;
+                    }
+                    out.write(reinterpret_cast<const char*>(png.data()),
+                              static_cast<std::streamsize>(png.size()));
+                }
+                // 光标处插 @<路径>(临时路径常带空格,一律角括号形)。
+                const RenderState before = editor.CurrentRenderState();
+                const std::string token = "@<" + lubancode::tools::PathToUtf8(file) + "> ";
+                std::string joined = Utf32ToUtf8(before.line);
+                const std::size_t at = (std::min)(before.cursor, joined.size());
+                joined.insert(at, token);
+                editor.LoadTextWithCursor(Utf8ToUtf32(joined), at + token.size());
+                TermOut() << theme.stats
+                          << trf("image.pasted", png.size() / 1024,
+                                 lubancode::tools::PathToUtf8(file))
+                          << theme.reset << "\n";
+                redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+            };
             const auto search_chord = keymap::ChordFromKeyInput(*raw_key);
             if (!history_search.active() && !queue_edit.has_value() && search_chord.has_value()) {
                 using keymap::ActionId;
@@ -1838,38 +1878,41 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                             redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
                             continue;
                         }
-                        namespace fs = std::filesystem;
-                        static unsigned paste_seq = 0;
-                        fs::path file;
-                        try {
-                            file = fs::temp_directory_path() /
-                                   ("lubancode-paste-" + std::to_string(platform::CurrentProcessId()) +
-                                    "-" + std::to_string(++paste_seq) + ".png");
-                        } catch (const std::exception&) {
-                            TermOut() << theme.error << tr("editor.no_temp") << theme.reset << "\n";
-                            continue;
-                        }
-                        {
-                            std::ofstream out(file, std::ios::binary | std::ios::trunc);
-                            if (!out) {
-                                TermOut() << theme.error << tr("editor.write_failed") << theme.reset << "\n";
+                        paste_clipboard_png(*png);
+                        continue;
+                    }
+                    case ActionId::ClipboardSmartPaste: {
+                        // Ctrl+V 智能粘贴:先探剪贴板位图——有图走 Alt+V 同
+                        // 一条直贴路;没图读剪贴板文本,交编辑器的 Paste 事件
+                        //(与终端 bracketed paste 同一条正文插入路,多行/大段
+                        // 折附件的手感分毫不差)。两头都读不了才如实报一行,
+                        // 不装作贴过。终端把 Ctrl+V 拦去自己粘贴(Windows
+                        // Terminal 等)的场合根本收不到这枚和弦,日常文本粘贴
+                        // 手感不变;Alt+V 保留不撤。
+                        if (platform::ClipboardHasImage()) {
+                            std::string paste_error;
+                            const auto png =
+                                platform::ReadClipboardImagePng(kMaxImageBytes, paste_error);
+                            if (!png.has_value()) {
+                                TermOut() << theme.error
+                                          << trf("image.paste_failed", paste_error)
+                                          << theme.reset << "\n";
+                                redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
                                 continue;
                             }
-                            out.write(reinterpret_cast<const char*>(png->data()),
-                                      static_cast<std::streamsize>(png->size()));
+                            paste_clipboard_png(*png);
+                            continue;
                         }
-                        // 光标处插 @<路径>(临时路径常带空格,一律角括号形)。
-                        const RenderState before = editor.CurrentRenderState();
-                        const std::string token =
-                            "@<" + lubancode::tools::PathToUtf8(file) + "> ";
-                        std::string joined = Utf32ToUtf8(before.line);
-                        const std::size_t at = (std::min)(before.cursor, joined.size());
-                        joined.insert(at, token);
-                        editor.LoadTextWithCursor(Utf8ToUtf32(joined), at + token.size());
-                        TermOut() << theme.stats
-                                  << trf("image.pasted", png->size() / 1024,
-                                         lubancode::tools::PathToUtf8(file))
-                                  << theme.reset << "\n";
+                        std::string text_error;
+                        const auto text = platform::ReadClipboardTextUtf8(text_error);
+                        if (!text.has_value()) {
+                            TermOut() << theme.error
+                                      << trf("clipboard.paste_text_failed", text_error)
+                                      << theme.reset << "\n";
+                            redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                            continue;
+                        }
+                        (void)editor.HandleKey(KeyEvent::Paste(*text, 0));
                         redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
                         continue;
                     }

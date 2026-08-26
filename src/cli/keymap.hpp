@@ -92,6 +92,7 @@ enum class ActionId : std::uint16_t {
     ChatExternalEditor,     // chat.external_editor:草稿交外部编辑器
     ComposerStash,          // composer.stash:收起/取回草稿
     ImagePasteClipboard,    // image.paste_clipboard:剪贴板图片直贴
+    ClipboardSmartPaste,    // clipboard.smart_paste:Ctrl+V 智能粘贴,图优先文本兜底
     HelpShow,               // help.show:当前场景按键帮助(空 composer 的 ?)
 
     // ---- 转录导航(空 composer 生效,不抢正文输入) ----

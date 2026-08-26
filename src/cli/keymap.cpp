@@ -220,6 +220,7 @@ constexpr ActionInfo kActionTable[] = {
     {ActionId::ChatExternalEditor, KeyScope::Composer, "chat.external_editor", "ctrl+g", true},
     {ActionId::ComposerStash, KeyScope::Composer, "composer.stash", nullptr, true},
     {ActionId::ImagePasteClipboard, KeyScope::Composer, "image.paste_clipboard", "alt+v", true},
+    {ActionId::ClipboardSmartPaste, KeyScope::Composer, "clipboard.smart_paste", "ctrl+v", true},
     {ActionId::HelpShow, KeyScope::Composer, "help.show", "?", true},
     {ActionId::TranscriptPrevUserTurn, KeyScope::Composer, "transcript.prev_user_turn", "{", true},
     {ActionId::TranscriptNextUserTurn, KeyScope::Composer, "transcript.next_user_turn", "}", true},

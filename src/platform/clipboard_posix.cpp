@@ -71,6 +71,16 @@ std::optional<std::vector<unsigned char>> ReadClipboardImagePng(std::size_t max_
     return std::nullopt;
 }
 
+bool ClipboardHasImage() {
+    // 读方向没有协议,自然也探不出图。
+    return false;
+}
+
+std::optional<std::string> ReadClipboardTextUtf8(std::string& error) {
+    error = "此平台读不了剪贴板文本(OSC 52 只写不读)";
+    return std::nullopt;
+}
+
 ClipboardResult CopyTextToClipboard(const std::string& utf8_text, std::string& error_detail) {
     if (!ClipboardLikelyAvailable()) {
         error_detail = "stdin 不是终端";
