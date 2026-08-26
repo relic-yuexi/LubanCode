@@ -476,6 +476,7 @@ int PanViewportDown(int rows) {
     if (!GetConsoleScreenBufferInfoEx(h_out, &info)) {
         return 0;
     }
+    const COORD size_before = info.dwSize;  // 平移前后缓冲高的对账底(见下)
     const int buffer_bottom = static_cast<int>(info.dwSize.Y) - 1;
     const int viewport_bottom = static_cast<int>(info.srWindow.Bottom);
     const int room = buffer_bottom - viewport_bottom;
@@ -483,12 +484,50 @@ int PanViewportDown(int rows) {
         return 0;  // 窗口已贴缓冲区底:没有可平移的余地,调用方退回滚内容
     }
     const int pan = (std::min)(rows, room);
+    // 平移路(2026-08-26 改道,Windows 11 新 conhost):老路 SetConsoleScreen
+    // BufferInfoEx 直接重锚窗口,新 conhost(实测 26300)那一拍会把窗口钳矮
+    // 一行、缓冲高收拢到窗口高(400 -> 29 -> 28 -> 27 一路螺旋)——窗口上方
+    // 的滚屏正文随收拢整段被丢,绝对锚点全漂(查看态回流簇的病根)。改走
+    // "光标带窗口":把光标拨到目标窗口底行,conhost 自会把可视窗滑下来
+    // 揭示它(经典 cursor-follow,不动缓冲尺寸);窗口真滑下来且缓冲没被动
+    // 就认账,光标拨回原位(原位已在新窗口之外就不拨——那一拨会把窗口又
+    // 滑回去,平移白做;调用方平移后本来就按绝对坐标重画,光标停在底行
+    // 无害)。没走成才退回老路,并加"收拢护栏":发现缓冲被收拢就按原高
+    // 撑回去,长缓冲不至于从此塌成窗口高。
+    const COORD cursor_before = info.dwCursorPosition;
+    const SHORT follow_row = static_cast<SHORT>(viewport_bottom + pan);
+    SetConsoleCursorPosition(h_out, COORD{0, follow_row});
+    {
+        CONSOLE_SCREEN_BUFFER_INFO after_follow{};
+        if (GetConsoleScreenBufferInfo(h_out, &after_follow) &&
+            after_follow.srWindow.Bottom >= follow_row && after_follow.dwSize.Y >= size_before.Y) {
+            // 光标拨回原位——但只在原位落在新窗口之内:落在窗外的话,这一拨
+            // 会触发反向滚动把窗口又滑回去,平移白做。留在底行无害:调用方
+            // 平移后本来就按绝对坐标重画(SetCursorPos 各自再拨)。
+            if (cursor_before.Y >= after_follow.srWindow.Top &&
+                cursor_before.Y <= after_follow.srWindow.Bottom) {
+                SetConsoleCursorPosition(h_out, cursor_before);
+            }
+            return pan;
+        }
+    }
+    // cursor-follow 没走成(窗口没滑到/缓冲被动了):拨回光标,走老路。
+    SetConsoleCursorPosition(h_out, cursor_before);
     info.srWindow.Top += static_cast<SHORT>(pan);
     info.srWindow.Bottom += static_cast<SHORT>(pan);
     // dwCursorPosition 原样带回(缓冲没滚,绝对坐标仍有效),光标一个不挪
     // ——挪了反而可能触发控制台"把光标带回视野"的反向滚动,平移白做。
     if (!SetConsoleScreenBufferInfoEx(h_out, &info)) {
         return 0;
+    }
+    // 缓冲收拢护栏:发现 conhost 把缓冲高收拢了(实测 26300 会),按原高撑
+    // 回去——窗口此刻高度不超过原缓冲,必然撑得回;丢掉的行救不回来,但
+    // 长缓冲 rig 不至于从此塌成窗口高、后续每一帧都顶穿缓冲底。
+    {
+        CONSOLE_SCREEN_BUFFER_INFO after{};
+        if (GetConsoleScreenBufferInfo(h_out, &after) && after.dwSize.Y < size_before.Y) {
+            SetConsoleScreenBufferSize(h_out, COORD{size_before.X, size_before.Y});
+        }
     }
     return pan;
 }

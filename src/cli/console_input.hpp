@@ -248,6 +248,12 @@ using AgentPanelProvider = std::function<std::vector<AgentPanelEntry>()>;
 // (在 StdoutWriteMutex 内)先擦 footer 再铺、铺完画回。传空钩子即清除。
 void SetAgentViewSwitchHook(std::function<void(int viewed_task_id, int tail_rows)> hook);
 
+// 作废查看帧的跨读取账(查看态回流零扰动单):非静默轮的正文会在屏上
+// 落笔、可能写进查看帧区,那之后帧的绝对行号不可信。RunTurn 在非静默轮
+// 起跑/收口时调这个;静默轮(查看态回流)不调——屏面零扰动,账要保住,
+// 重进 composer 时凭它"原处认账"不清屏。
+void InvalidateViewFrameLedger();
+
 // 会话收场(/clear、退出、切 worktree)用:把面板状态机(焦点/查看态/
 // composer 收件目标)整份收干净——查看态那只任务已经没了,目标不能悬着。
 // 管道/重定向模式下面板本来就不存在,调了也是空操作。

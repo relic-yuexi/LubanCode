@@ -134,6 +134,26 @@ std::function<void(int, int)>& AgentViewSwitchHookSlot() {
     return hook;
 }
 
+// 查看帧的跨读取账(回流单规格第一节"查看帧零扰动"):ReadLine 的帧锚
+// (view_body_top)是函数局部量,两段读取之间就丢了——重进 composer 时只好
+// 整块清屏重铺,把还稳稳在原处的查看帧连着上方主会话正文一起抹掉再挪到
+// 可视区顶(锚点漂移、收口正文从可视区消失)。这里补一本会话级账:铺查看
+// 帧那一拍记下"正文顶行 + 当时缓冲宽"。重进时凭三条判据原处认账、画面
+// 一个像素不动:窗浮在长缓冲里(窗底之下还有缓冲行——内容行不可能被滚,
+// 视口平移只挪窗不挪内容)、缓冲宽没变(宽变了 conhost 整屏重排,绝对行号
+// 全废)、期间没有非静默轮跑过(非静默轮的正文会在帧区落笔,RunTurn 起
+// 跑/收口时作废这本账——静默回流轮一个字不上屏,正是要保的形态)。三条
+// 任一不满足,照旧走整块清屏重铺的老规矩。主线程独占(铺帧与重进都在
+// ReadLine/监听线程的按键路径上,不并发)。
+struct ViewFrameLedger {
+    int body_top = -1;  // 查看帧正文顶行(缓冲绝对行号);-1 = 无账(main 帧作废)
+    int width = 0;      // 铺帧那一拍的缓冲宽(列)
+};
+ViewFrameLedger& ViewFrameLedgerSlot() {
+    static ViewFrameLedger ledger;
+    return ledger;
+}
+
 std::vector<int> PanelEntryIds(const std::vector<AgentPanelEntry>& entries) {
     std::vector<int> ids;
     ids.reserve(entries.size());
@@ -1398,6 +1418,16 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         if (before.has_value()) {
             view_body_top = before->cursor_y;
         }
+        // 跨读取账同步(见 ViewFrameLedgerSlot 注释):查看帧记"顶行+缓冲宽",
+        // main 帧(退场/回 main)作废——重进 composer 时凭它判断上一帧还在
+        // 不在原处。
+        ViewFrameLedger& view_ledger = ViewFrameLedgerSlot();
+        if (viewed_after != 0 && before.has_value()) {
+            view_ledger.body_top = before->cursor_y;
+            view_ledger.width = before->width;
+        } else {
+            view_ledger.body_top = -1;
+        }
     };
 
     if (box) {
@@ -1405,7 +1435,12 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         // 若在两段读取之间退场(后台回流轮置 delivered、x 清条目后重进),
         // viewed 在这一帧里翻 0——翻转发生在帧内,下面 100ms 拍的
         // viewed_before_tick 已经读不到旧值,原子回 main 得在这里补上。
+        // 窗顶/缓冲宽也在首帧重画之前先量一拍:首帧自己就会平移视口(比如
+        // 回流 toast 多出一行坞区)、把窗推向缓冲底,拿画完的屏面去对"跨
+        // 读取账"会把好好在原处的帧误判成漂移——账要对着进门那一刻的屏面
+        // 比(两段读取之间有没有人动过,与咱自己进门第一笔无关)。
         const int viewed_before_entry = panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id;
+        const std::optional<platform::ScreenInfo> entry_info = platform::GetScreenInfo();
         redraw_with_panel(editor.CurrentRenderState(), panel_entries());
         const int viewed_after_entry = panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id;
         if (viewed_before_entry != 0 && viewed_after_entry == 0) {
@@ -1428,13 +1463,25 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             reanchor_prompt_and_redraw();
         } else if (viewed_before_entry != 0 && viewed_after_entry != 0) {
             // 跨读取段仍是查看态(流式监听里切看后回合收口、查看态提交介入
-            // 消息后重进 composer……):上一段记的帧锚点在这段里不可信,而
-            // 本段的 view_body_top 还是空的——不重铺的话,下一拍实时流重铺
-            // 会在旧帧下方再铺一份,查看帧成双。进门就把可视区整块清掉、该
-            // 代理的查看帧整份重铺,帧账从这一帧重新起(与上面退场回 main
-            // 同一条"不认跨拍锚点"的规矩)。
+            // 消息后重进 composer……):本段的 view_body_top 还是空的——不设
+            // 账的话,下一拍实时流重铺会在旧帧下方再铺一份,查看帧成双。
+            // 先查跨读取账(ViewFrameLedgerSlot),三条判据全过就"原处认账"
+            // (回流单规格第一节"查看帧零扰动"):窗浮在长缓冲里(内容行不可
+            // 能被滚,平移只挪窗)、缓冲宽没变、期间没有非静默轮写屏(静默
+            // 回流轮一个字不上屏,正是这形态)——上一帧稳稳在原处,锚点直
+            // 接采纳,画面一个像素不动,上方主会话正文也不被抹。任一不满足
+            // 则绝对行号已失准,走原来的"不认跨拍锚点"规矩:可视区整块清
+            // 掉、该代理的查看帧整份重铺,帧账从这一帧重新起。
+            const ViewFrameLedger& view_ledger = ViewFrameLedgerSlot();
             const std::optional<platform::ScreenInfo> clear_info = platform::GetScreenInfo();
-            if (clear_info.has_value()) {
+            const bool window_floats =
+                entry_info.has_value() &&
+                entry_info->viewport_y + entry_info->viewport_height < entry_info->height;
+            if (view_ledger.body_top >= 0 && window_floats && entry_info.has_value() &&
+                view_ledger.width == entry_info->width &&
+                view_ledger.body_top >= entry_info->viewport_y) {
+                view_body_top = view_ledger.body_top;  // 上一帧原处认账,零扰动
+            } else if (clear_info.has_value()) {
                 const int vh =
                     clear_info->viewport_height > 0 ? clear_info->viewport_height : clear_info->height;
                 const int top = clear_info->viewport_y;
@@ -2207,6 +2254,15 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 if (handled) {
                     if (relay_frame_top.has_value()) {
                         view_body_top = relay_frame_top;  // 重铺帧的顶,下一次切换照账擦
+                        // 跨读取账同步:Ctrl+O 重铺挪了查看帧的顶,下一段
+                        // 读取的"原处认账"要认新顶(缓冲宽取当前值)。
+                        ViewFrameLedger& view_ledger = ViewFrameLedgerSlot();
+                        view_ledger.body_top = *relay_frame_top;
+                        if (const std::optional<platform::ScreenInfo> relay_ledger_info =
+                                platform::GetScreenInfo();
+                            relay_ledger_info.has_value()) {
+                            view_ledger.width = relay_ledger_info->width;
+                        }
                     }
                     // 回调铺完内容,重打提示符、重测锚点,整帧(含导航坞)重画。
                     reanchor_prompt_and_redraw();
@@ -2954,6 +3010,13 @@ ConfirmMode CurrentConfirmMode() { return SharedEditor().confirm_mode(); }
 void SetConfirmMode(ConfirmMode mode) { SharedEditor().set_confirm_mode(mode); }
 
 void SetTranscriptUiHandler(TranscriptUiHandler handler) { UiHandlerSlot() = std::move(handler); }
+
+// 非静默轮的"屏面可能被写"记账(见 ViewFrameLedgerSlot 注释):RunTurn 起
+// 跑/收口时调用,作废跨读取账——流式正文在自己的续写行落笔、可能与查看
+// 帧抢行,锚点从此不可信。静默轮不调(输出全进台账,屏面零扰动),账保住。
+void InvalidateViewFrameLedger() {
+    ViewFrameLedgerSlot().body_top = -1;
+}
 
 void SetAgentViewSwitchHook(std::function<void(int viewed_task_id, int tail_rows)> hook) {
     AgentViewSwitchHookSlot() = std::move(hook);
@@ -3790,6 +3853,17 @@ void TurnInputListener::ThreadMain() {
         }
         if (before.has_value()) {
             view_body_top = before->cursor_y;
+        }
+        // 跨读取账同步(见 ReadLineKeyByKey 里那本的同款注释):流式期间切看
+        // 的帧也记账——不过本轮流式正文还会继续写屏,RunTurn 收口(非静默)
+        // 会把账作废,这里的记录只在"切看后本轮再没写过屏"时才活得过收口;
+        // main 帧直接作废。
+        ViewFrameLedger& view_ledger = ViewFrameLedgerSlot();
+        if (viewed_after != 0 && before.has_value()) {
+            view_ledger.body_top = before->cursor_y;
+            view_ledger.width = before->width;
+        } else {
+            view_ledger.body_top = -1;
         }
     };
 

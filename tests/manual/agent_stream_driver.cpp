@@ -600,7 +600,9 @@ int StartFakeAnthropicServer() {
                 if (newest_has("\xe6\xb4\xbe\xe4\xb8\x80\xe5\x8f\xaa\xe5\x89\x8d\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3"
                                "\xe7\x90\x86")) {  // 派一只前台子代理
                     state->main_stage = 1;
-                } else if (newest_has("\xe5\x86\x8d\xe6\xb4\xbe\xe4\xb8\x80\xe5\x8f\xaa\xe5\x90\x8e\xe5\x8f\xb0")) {  // 再派一只后台
+                } else if (newest_has("\xe5\x86\x8d\xe6\xb4\xbe\xe4\xb8\x80\xe5\x8f\xaa\xe5\x90\x8e\xe5\x8f\xb0"
+                                     "\xe4\xbb\xa3\xe7\x90\x86")) {  // 再派一只后台代理(带"代理"二字,不
+                    // 误吞第五幕的"再派一只后台去写材料")
                     state->main_stage = 2;
                 } else if (newest_has(kAct3User)) {
                     state->main_stage = 3;
@@ -910,6 +912,13 @@ int wmain(int argc, wchar_t** argv) {
     SetConsoleScreenBufferSize(g_conout, COORD{120, 400});
     SMALL_RECT window{0, 0, 119, 29};
     SetConsoleWindowInfo(g_conout, TRUE, &window);
+    // 补一手缓冲重设(2026-08-26):本机 conhost 上 SetConsoleWindowInfo 会把
+    // 缓冲高收拢到窗口高(实测 400x120 设窗后变 30x120)——查看态重铺帧
+    // (头三行+尾部 ~23 行)加底栏就顶穿缓冲底,控制台被迫滚屏,主会话正文
+    // 被顶出缓冲、查看帧锚点全漂(第三幕回流簇的病根)。设窗后再把缓冲
+    // 撑回 400 行,长缓冲 rig(产品注释里"真控制台驱动器的 120×400")才
+    // 真正成立;设不回去(老 conhost)也不影响——那台机器本来就保持 400。
+    SetConsoleScreenBufferSize(g_conout, COORD{120, 400});
     FlushConsoleInputBuffer(g_conin);
 
     STARTUPINFOW si{};
@@ -1404,7 +1413,15 @@ int wmain(int argc, wchar_t** argv) {
         Check(CountDockRowsWith(kWatchTitle, rule5) == 0, "第四幕:Dock 无已完成行(#5 已退场)");
         // #4 已在幕首停下、#5 完成退场:导航表空了,整坞随之消失(既有规矩)。
         Check(CountDockRowsWith("general-purpose", rule5) == 0, "第四幕:退场后整坞清空(无代理行)");
-        Check(FindLastRow(kWatchDone) >= 0, "第四幕:慢工结论已回流(重铺可见,台账不丢)");
+        // 结论回流的口径(2026-08-26 裁定):重铺的画面只给摘要——完成通知行
+        // 与"#5 盯退场的慢工 · 完成 · N 次工具"摘要行;结论原文只进任务台账
+        // (查看帧从 TaskEvents 渲染,不随退场重铺上屏),这里断言摘要可见,
+        // 不再要求结论原文出现在重铺后的屏面上。
+        Check(CountViewportRowsWith("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe5\xae\x8c"
+                                    "\xe6\x88\x90") >= 1,
+              "第四幕:退场重铺见完成通知摘要(通知行可见)");  // 后台子代理完成
+        Check(CountViewportRowsWith(std::string(kWatchTitle) + " \xc2\xb7 \xe5\xae\x8c\xe6\x88\x90") >= 1,
+              "第四幕:退场重铺见 #5 完成摘要行(盯退场的慢工 · 完成)");
     }
     // 键入立即回显:退场后敲字,composer 输入行当拍看得见——画面空了、键
     // 无回显就是用户真机那种"卡死"。
