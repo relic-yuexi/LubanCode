@@ -934,6 +934,12 @@ RunTurnResult RunTurn(TurnContext ctx) {
     lubancode::runtime::TurnEventAdapter* turn_events = ctx.turn_events;
 
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);
+    if (!silent) {
+        // 查看帧跨读取账作废(查看态回流零扰动单):非静默轮的正文/工具画面
+        // 会在屏上落笔,查看帧区的绝对行号从此不可信——静默轮零输出,不
+        // 作废,重进 composer 时凭账"原处认账"。
+        lubancode::cli::InvalidateViewFrameLedger();
+    }
     if (!prepared_input.has_value()) {
         TermErr() << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
                   << theme.reset << "\n";
@@ -1265,6 +1271,11 @@ RunTurnResult RunTurn(TurnContext ctx) {
     const long long activity_seconds = lubancode::cli::EndTurnActivity();
     lubancode::cli::EndStreamFooter();
     lubancode::cli::SetStreamScreenScrollHook(nullptr);
+    if (!silent) {
+        // 查看帧跨读取账作废(收口侧,见开场侧同款注释):流式期间切看的帧
+        // 记过账,但本轮余下的正文/工具画面还会继续写屏,帧区行号不可信。
+        lubancode::cli::InvalidateViewFrameLedger();
+    }
 
     RunTurnResult out;
     // 0.28.x:流式期间排队的消息不在这里搬运了——监听线程直接写会话层
