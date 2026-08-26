@@ -14,12 +14,38 @@
 #include <string>
 #include <utility>
 
+#include <mutex>
+
 namespace lubancode::runtime {
 
 // 进程级发号局(第四步):static 局部,首次用到时构造,退出时自然收。
 IdAuthority& ProcessIdAuthority() {
     static IdAuthority authority;
     return authority;
+}
+
+// ---- 台账域号(骨架拆解批五先行半批) ----------------------------------------
+// 前缀档:一把 mutex 罩一张 map。台账号的节奏是每事件一两次,锁不沾热道。
+
+std::string IdAuthority::NextPrefixedId(const std::string& prefix) {
+    return prefix + "-" + std::to_string(NextPrefixedCounter(prefix));
+}
+
+std::uint64_t IdAuthority::NextPrefixedCounter(const std::string& prefix) {
+    std::lock_guard<std::mutex> lock(prefix_mutex_);
+    return ++prefix_counters_[prefix];
+}
+
+void IdAuthority::SeedPrefixedId(const std::string& prefix, std::uint64_t issued) {
+    std::lock_guard<std::mutex> lock(prefix_mutex_);
+    auto it = prefix_counters_.find(prefix);
+    if (it == prefix_counters_.end()) {
+        prefix_counters_.emplace(prefix, issued);
+        return;
+    }
+    if (issued > it->second) {
+        it->second = issued;
+    }
 }
 
 // ---- 小工具 ----------------------------------------------------------------

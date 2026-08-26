@@ -6,6 +6,8 @@
 #include <sstream>
 #include <utility>
 
+#include "platform/wall_clock.hpp"  // 统一墙钟(批五):trace ts 的钟同源五套台账
+
 namespace lubancode::runtime {
 
 ToolTraceHub::ToolTraceHub(IdAuthority& ids, agent::SessionStore* store)
@@ -65,9 +67,7 @@ void ToolTraceHub::Install(agent::Agent& loop, agent::Callbacks& callbacks, cons
             committed.result_ref = agent::ToolResultRef{};
             committed.undo = agent::ToolUndoToken{};
             committed.seq = ids_.NextSeq();
-            committed.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                         std::chrono::system_clock::now().time_since_epoch())
-                                         .count();
+            committed.timestamp_ms = platform::WallClockNowMs();
             if (store_ != nullptr && store_->active()) {
                 store_->AppendToolTraceEvent(committed);
             }

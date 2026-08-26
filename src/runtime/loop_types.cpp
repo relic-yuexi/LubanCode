@@ -8,6 +8,8 @@
 #include <cstdlib>
 #include <limits>
 
+#include "runtime/budget_gate.hpp"
+
 namespace lubancode::runtime::loop {
 
 namespace {
@@ -425,7 +427,13 @@ WallTimeMs ComputeResumeNextDue(WallTimeMs now_ms, std::chrono::seconds interval
 
 bool LoopExpired(WallTimeMs expires_at_ms, WallTimeMs now_ms) {
     // 边界恰等于 now 也算过("expiry 边界恰等于 now"是测试矩阵钉的)。
-    return now_ms >= expires_at_ms;
+    // 批五:时长尺走公共预算闸的 Headroom 口径(now >= deadline 即拦)。
+    // deadline 是绝对墙钟点,当"从 epoch 起的 elapsed"用——机制同型,
+    // 数值口径不变。
+    return runtime::BudgetGate(runtime::BudgetScales{
+                                   .elapsed_ms = expires_at_ms,
+                               })
+        .HeadroomElapsed(now_ms);
 }
 
 }  // namespace lubancode::runtime::loop

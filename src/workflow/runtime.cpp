@@ -19,18 +19,23 @@
 #include <utility>
 
 #include "platform/paths.hpp"
+#include "platform/wall_clock.hpp"
+#include "runtime/budget_gate.hpp"
+#include "runtime/id_authority.hpp"
+#include "runtime/retry_backoff.hpp"
 
 namespace lubancode::workflow {
 
 namespace {
 
 std::string DefaultRunId() {
-    const auto now = std::chrono::system_clock::now().time_since_epoch();
-    const std::int64_t ms = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    // run id 的形状不动(时间戳前缀是 ListRuns 倒序的排序键);钟批五起
+    // 读 platform 统一墙钟(口径不变,只收源)。
+    const std::int64_t ms = platform::WallClockNowMs();
     const std::int64_t secs = ms / 1000;
     const int millis = static_cast<int>(ms % 1000);
     std::tm tm_buf{};
-    const std::time_t tt = static_cast<std::time_t>(secs);
+    const std::time_t tt = platform::WallClockToTimeT(ms);
 #if defined(_WIN32)
     localtime_s(&tm_buf, &tt);
 #else
@@ -219,9 +224,13 @@ bool IsValidNodeTransition(NodeState from, NodeState to) {
 WorkflowRuntime::WorkflowRuntime(RuntimeOptions options) : options_(std::move(options)) {}
 
 bool WorkflowRuntime::WithinBudget(const WorkflowLimits& limits, const WorkflowRunSummary& account) const {
-    if (account.tool_calls > limits.tool_calls) return false;
-    if (account.tokens_used > limits.tokens) return false;
-    return true;
+    // 预算对账(批五):tool_calls/tokens 两尺声明进公共预算闸,Overrun
+    // 口径(已越帽才拦,严格 >)——与旧逐尺短路同序同文。
+    runtime::BudgetGate gate(runtime::BudgetScales{
+        .count = static_cast<std::int64_t>(limits.tool_calls),
+        .tokens = limits.tokens,
+    });
+    return !gate.OverrunCount(account.tool_calls) && !gate.OverrunTokens(account.tokens_used);
 }
 
 std::string WorkflowRuntime::NextNodeFor(const WorkflowDefinition& def, const std::string& node_id,
@@ -237,8 +246,11 @@ void WorkflowRuntime::EmitRunEvent(const WorkflowRunSummary& account, const char
     if (options_.event_sink == nullptr) return;
     runtime::ServerEvent event;
     event.envelope.thread_id = options_.thread_id.empty() ? "workflow" : options_.thread_id;
-    static std::atomic<std::uint64_t> seq_source{1};
-    event.envelope.seq = seq_source.fetch_add(1);
+    // 信封 seq(批五):发号局只此一家,本文件那只 static 计数器收编。
+    // 默认进程级(单调跨 runtime 实例);装配层可注入专属局。
+    runtime::IdAuthority& ids =
+        options_.id_authority != nullptr ? *options_.id_authority : runtime::ProcessIdAuthority();
+    event.envelope.seq = ids.NextSeq();
     event.envelope.timestamp_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
     event.kind = runtime::ServerEventKind::ItemDelta;
     event.item_kind = runtime::ItemKind::Command;
@@ -358,19 +370,21 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                                                    {"max_attempts", max_attempts}});
             }
             // backoff 等待:受取消打断。fake clock 下 wait 缩为 0(单测不
-            // 靠 sleep 赌时序)。
+            // 靠 sleep 赌时序)。批五:阶梯与等待走公共退避件;定义里的
+            // jitter 仍不启用(声明了未接线是现状,开了改节奏,另立一批)。
             if (node.retry.has_value()) {
-                std::int64_t wait_ms = node.retry->initial_ms;
-                if (node.retry->backoff == BackoffKind::Exponential) {
-                    std::int64_t factor = 1;
-                    for (int i = 1; i < attempt; ++i) factor *= 2;
-                    wait_ms = node.retry->initial_ms * factor;
-                }
-                wait_ms = std::min(wait_ms, node.retry->max_ms);
-                const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
-                while (std::chrono::steady_clock::now() < deadline) {
-                    if (ctx.cancel != nullptr && ctx.cancel->load()) break;
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                runtime::BackoffPolicy policy;
+                policy.kind = node.retry->backoff == BackoffKind::Exponential
+                                  ? runtime::BackoffPolicy::Kind::Exponential
+                                  : runtime::BackoffPolicy::Kind::Fixed;
+                policy.initial_ms = node.retry->initial_ms;
+                policy.max_ms = node.retry->max_ms;
+                policy.jitter = false;
+                const auto wait = runtime::BackoffWaitMs(policy, static_cast<std::uint32_t>(attempt));
+                if (wait.has_value()) {
+                    // 取消打断只截断等待;收口由下一轮 attempt 顶上的取消
+                    // 检查做(旧形状如此,不在这里提前 return)。
+                    (void)runtime::WaitBackoffCancellable(*wait, ctx.cancel);
                 }
             }
             record.state = NodeState::Ready;
@@ -967,7 +981,12 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
             account.error_message = "用户取消";
             break;
         }
-        if (++steps > definition.limits.max_steps) {
+        // 步数闸(批五):count 尺声明进公共预算闸,Overrun 口径(已越帽,
+        // 严格 >)——(++steps > max_steps) 逐字节同判。
+        if (++steps;
+            runtime::BudgetGate(runtime::BudgetScales{
+                .count = static_cast<std::int64_t>(definition.limits.max_steps),
+            }).OverrunCount(steps)) {
             account.state = RunState::BudgetExhausted;
             account.error_code = "max_steps";
             account.error_message =
@@ -1075,9 +1094,15 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
             account.error_message = "预算越帽(tool_calls/tokens)";
             break;
         }
-        // 时限。
+        // 时限(批五):elapsed 尺声明进公共预算闸,Overrun 口径(严格 >,
+        // 与旧判同线);timeout_secs <= 0 = 不设尺。
         const std::int64_t now_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
-        if (definition.limits.timeout_secs > 0 && now_ms - started_ms > definition.limits.timeout_secs * 1000) {
+        const runtime::BudgetGate timeout_gate(runtime::BudgetScales{
+            .elapsed_ms = definition.limits.timeout_secs > 0
+                              ? std::optional<std::int64_t>(definition.limits.timeout_secs * 1000)
+                              : std::nullopt,
+        });
+        if (timeout_gate.OverrunElapsed(now_ms - started_ms)) {
             account.state = RunState::BudgetExhausted;
             account.error_code = "timeout";
             account.error_message = "总时限越过 " + std::to_string(definition.limits.timeout_secs) + "s";

@@ -15,14 +15,15 @@
 #include "hooks/hash.hpp"
 #include "platform/json_safe.hpp"
 #include "platform/paths.hpp"
+#include "platform/wall_clock.hpp"
 
 namespace lubancode::workflow {
 
 namespace {
 
 std::string NowIsoLike() {
-    const auto now = std::chrono::system_clock::now();
-    const std::time_t tt = std::chrono::system_clock::to_time_t(now);
+    // 批五:统一墙钟(口径不变,只收源)。
+    const std::time_t tt = platform::WallClockToTimeT(platform::WallClockNowMs());
     std::tm tm_buf{};
 #if defined(_WIN32)
     localtime_s(&tm_buf, &tt);
@@ -58,8 +59,8 @@ std::string GetStr(const nlohmann::json& j, const char* key) {
 // ---- 时钟 -------------------------------------------------------------------
 
 std::int64_t JournalClock::NowMs() const {
-    const auto now = std::chrono::system_clock::now().time_since_epoch();
-    return std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+    // 批五:五套台账的真钟同读 platform 这一枚(口径不变,只收源)。
+    return platform::WallClockNowMs();
 }
 
 // ---- 脱敏(纯函数) ----------------------------------------------------------
@@ -199,7 +200,8 @@ RunJournal::RunJournal(std::filesystem::path dir, std::string run_id, std::ofstr
       run_id_(std::move(run_id)),
       out_(std::move(out)),
       clock_(clock),
-      start_manifest_(std::move(start_manifest)) {}
+      start_manifest_(std::move(start_manifest)),
+      seq_ids_(std::make_unique<runtime::IdAuthority>()) {}
 
 RunJournal::RunJournal(RunJournal&& other) noexcept
     : dir_(std::move(other.dir_)),
@@ -207,7 +209,7 @@ RunJournal::RunJournal(RunJournal&& other) noexcept
       out_(std::move(other.out_)),
       clock_(other.clock_),
       start_manifest_(std::move(other.start_manifest_)),
-      next_seq_(other.next_seq_),
+      seq_ids_(std::move(other.seq_ids_)),
       broken_(other.broken_),
       finish_called_(other.finish_called_) {
     other.finish_called_ = true;  // 析构不重复 Finish
@@ -220,7 +222,7 @@ RunJournal& RunJournal::operator=(RunJournal&& other) noexcept {
         out_ = std::move(other.out_);
         clock_ = other.clock_;
         start_manifest_ = std::move(other.start_manifest_);
-        next_seq_ = other.next_seq_;
+        seq_ids_ = std::move(other.seq_ids_);
         broken_ = other.broken_;
         finish_called_ = other.finish_called_;
         other.finish_called_ = true;
@@ -285,7 +287,9 @@ std::expected<RunJournal, std::string> RunJournal::Start(const std::filesystem::
 void RunJournal::Append(const std::string& type, const std::string& node_id, int attempt, nlohmann::json data) {
     if (broken_ || !out_.is_open()) return;
     JournalEvent event;
-    event.seq = next_seq_++;
+    // 事件 seq(批五):一场 run 一只发号局实例(1 起,run 内单调)——
+    // 台账 id 收编 IdAuthority,发号规矩(单调、不回收)同源。
+    event.seq = seq_ids_->NextSeq();
     event.ts_ms = clock_ != nullptr ? clock_->NowMs() : JournalClock().NowMs();
     event.run_id = run_id_;
     event.node_id = node_id;
