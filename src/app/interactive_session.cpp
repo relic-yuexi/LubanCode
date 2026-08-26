@@ -314,6 +314,31 @@ private:
     // commands/session_commands,这里只递材料)。
     // 压缩参数的现场收集(窗口预算认压缩路由声明/目录条目;活动待办守恒)。
     lubancode::agent::CompactOptions BuildCompactOptions();
+    // goal/loop 会话接线的材料包(终端接线收尾单:命令分派、prompt 源、
+    // 存档恢复、投影与 goal 钩子在 commands/goal_commands|loop_commands,
+    // 这里只递材料;装配与状态留本类)。
+    lubancode::app::GoalWiring MakeGoalWiring() {
+        lubancode::app::GoalWiring wiring;
+        wiring.theme = &theme;
+        wiring.coordinator = goal_coordinator_.has_value() ? &*goal_coordinator_ : nullptr;
+        wiring.session_store = &session_store;
+        wiring.agent_tool = session_agent_tool();
+        wiring.checkpoint_state = goal_checkpoint_state_.get();
+        wiring.loop_scheduler = loop_scheduler_.has_value() ? &*loop_scheduler_ : nullptr;
+        return wiring;
+    }
+    lubancode::app::LoopWiring MakeLoopWiring() {
+        lubancode::app::LoopWiring wiring;
+        wiring.interactive = spinner_enabled;
+        wiring.feature_enabled = config.features_loop && !lubancode::app::LoopDisabledByEnv();
+        wiring.theme = &theme;
+        wiring.scheduler = loop_scheduler_.has_value() ? &*loop_scheduler_ : nullptr;
+        wiring.session_store = &session_store;
+        wiring.home_lubancode = &home_lubancode;
+        wiring.session_runtime = &session_runtime_;
+        wiring.flush_events = [this]() { FlushLoopEvents(); };
+        return wiring;
+    }
     lubancode::app::CompactSessionInputs MakeCompactInputs() {
         lubancode::app::CompactSessionInputs in;
         in.agent = &*main_agent;
@@ -329,7 +354,7 @@ private:
             AttachGoalSnapshotToCompact(event);
         };
         in.attach_loop_snapshot = [this](lubancode::sessions::CompactV2Event& event) {
-            AttachLoopSnapshotToCompact(event);
+            lubancode::app::AttachLoopSnapshotToCompact(MakeLoopWiring(), event.metrics);
         };
         in.emit_session_hook =
             [this](lubancode::hooks::HookEvent event, nlohmann::json fields, const std::string& match_value) {
@@ -386,7 +411,6 @@ private:
     CommandFlow RunUserTurn(const std::string& content, bool* autosend_failed = nullptr);
     // ---- /goal 持久目标(持久目标单) ----
     // /goal 七动作的终端接线:coordinator 调用 + 排版。clear 走二次确认。
-    CommandFlow HandleGoalCommand(const lubancode::cli::ParsedGoalCommand& goal);
     // goal 装配:coordinator 从 config+env 折 Options 安家,LedgerSink 接
     // session 存档(goal 事件行 append+flush;九道写盘栅栏的同步性)。
     void EnsureGoalCoordinator();
@@ -399,11 +423,9 @@ private:
     // loop 单:compact 事件衡接 active loop 摘要(守恒面:task id/
     // prompt hash/间隔/状态/下一拍时间;不抄全 tick 日志进
     // summary,单子"tick 前走现有自动 compact 水位检查" + 摘要守恒)。
-    void AttachLoopSnapshotToCompact(lubancode::sessions::CompactV2Event& event);
     // ---- /loop 会话定时循环(loop 单) ----
     // /loop 命令组的终端接线:create 走 prompt 源解析(inline 压 loop.md、
     // trust、hash),其余动作走 loop_commands 的排版;非交互入口明拒。
-    CommandFlow HandleLoopCommand(const lubancode::cli::ParsedLoopCommand& command);
     // loop 装配:scheduler 安家 + 事件账 flush 进 session 存档 + IdleWake
     // 多路源注册(与子代理唤醒并存)。幂等。
     void EnsureLoopScheduler();
@@ -423,18 +445,14 @@ private:
     // goal 生命周期进 hook 分发(goal 单"Hooks"节):全部只给审计与
     // additionalContext,没有 permission_decision(单子:Hook 不可直接写
     // Achieved)。fields 带 goal_id/revision 一类对账字段。
-    void EmitGoalHook(lubancode::hooks::HookEvent event, nlohmann::json fields,
-                      const std::string& match_value);
     // 状态栏的 goal/loop 段(goal 单合流):"goal <短码>·iter<N> · loop×<N>
     // next <差>"。两样都没有给空串(整段不挂)。短码不做状态机翻译的
     // 第二处——从 GoalState 现折,loop 用 scheduler 快照。
-    std::string BuildGoalLoopStatusSegment();
     // 子代理回流进 goal 的账(goal 单"预算与刹车/子代理"节):后台子代理
     // 完成时,它的结果折一枚二级证据(ToolResult,producer 标 subagent、
     // facts 带子任务 id——单子:仅"子代理说通过了"仍是二级证据,hard gate
     // 不凭它放行 achieved),usage 折进 goal 的 usage 账(子代理由该
     // iteration 派生,其消耗归 goal)。有 goal 在跑才记,没有零影响。
-    void NoteSubagentCompletionForGoal();
     // 拍子收口:turn 终态回写 tick,算 outcome/退避/连败账。
     void FinishLoopTick(const std::string& tick_id, bool turn_failed, bool cancelled);
     // scheduler 攒的事件账落盘(append+flush);失败即 FailStore 熔断。
@@ -442,7 +460,6 @@ private:
     // loop 事件 -> ServerEvent 投影(loop 单遗留:EventSink 面已立,这里
     // 灌)。sink 没挂零影响(终端老路);挂了(JsonEventSink/app-server)
     // 前端凭 payload 画状态栏与任务行。
-    void EmitLoopServerEvents(const std::vector<lubancode::runtime::loop::LoopSchedulerEvent>& events);
     // WaitingPermission 真接线(loop 单遗留:scheduler 侧口已备):审批真要
     // 问用户时 asked=true,答完 asked=false 带 allowed。有 loop 拍在跑才
     // 记账——task 转 WaitingPermission(等审批不烧 iteration,悬起期间后续
@@ -451,7 +468,6 @@ private:
     void NoteLoopPermissionWait(bool asked, bool allowed);
     // /resume 后从存档 loop 事件账回放重建(默认 paused-on-resume 不自动
     // 烧 token,用户 /loop resume 显式续)。
-    void RestoreLoopFromArchive();
     // 每拍现读的 prompt 源解析:inline 压 loop.md(项目 trust)压用户压
     // 内置;文件超 25k 拒;返回 {正文, 源, 路径}。失败给 {空串, 源, 路径}
     // 与 error(调用方按 prompt_source_missing 收口)。
@@ -462,7 +478,6 @@ private:
         std::string file;
         std::string error;
     };
-    LoopPromptResolution ResolveLoopPrompt(const std::string& inline_prompt);
     // ---- 上下文压缩的会话现场路(0.27.x 分层压缩第一期) ----
     // 压缩参数现场收集:窗口预算认压缩模型自己的目录条目,活动待办(未完
     // 成 todo 条目原文)进守恒校验——摘要漏一项 pending 就拒收,历史不动。
@@ -1192,7 +1207,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             RestoreGoalFromArchive();
             // loop 单:loop 事件账随档恢复(active 默认暂停,用户 /loop
             // resume 显式续;单子"恢复"节)。
-            RestoreLoopFromArchive();
+            lubancode::app::RestoreLoopFromArchive(MakeLoopWiring());
             // resume 进来的旧档没标题:cheap 角色给续聊点个名(规格"会话标题
             // 与 resume 列表摘要"归 cheap)。
             lubancode::app::MaybeGenerateSessionTitle(MakeTailContext(),
@@ -2260,12 +2275,16 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     TermOut() << theme.reset << "\n";
                     break;
                 }
-                return HandleGoalCommand(goal);
+                EnsureGoalCoordinator();
+                return lubancode::app::HandleGoalCommand(goal, MakeGoalWiring());
             }
             case lubancode::cli::SlashCommand::Loop: {
                 // loop 单:二级纯解析在 cli 层,业务在这(prompt 源解析/
                 // feature 门/非交互明拒在 HandleLoopCommand)。
-                return HandleLoopCommand(lubancode::cli::ParseLoopCommand(parsed.args));
+                EnsureLoopScheduler();
+                return static_cast<CommandFlow>(
+                    lubancode::app::HandleLoopCommand(lubancode::cli::ParseLoopCommand(parsed.args),
+                                                      MakeLoopWiring()));
             }
             case lubancode::cli::SlashCommand::Memory: {
                 // /memory presenter(终端接线收尾单):命令与排版全在
@@ -2593,166 +2612,6 @@ void TerminalSessionController::AttachGoalSnapshotToCompact(lubancode::sessions:
     event.metrics["goal"] = std::move(goal_metrics);
 }
 
-void TerminalSessionController::AttachLoopSnapshotToCompact(lubancode::sessions::CompactV2Event& event) {
-    if (!loop_scheduler_.has_value()) {
-        return;
-    }
-    const auto now_ms = [] {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-                   std::chrono::system_clock::now().time_since_epoch())
-            .count();
-    }();
-    const auto views = loop_scheduler_->Snapshot(now_ms);
-    nlohmann::json tasks = nlohmann::json::array();
-    for (const auto& v : views) {
-        if (lubancode::runtime::loop::IsLoopTerminal(v.task.state)) {
-            continue;  // 只守活任务:终态的账在事件行里
-        }
-        nlohmann::json t;
-        t["task_id"] = v.task.task_id;
-        t["prompt_sha256"] = v.task.prompt_sha256;
-        t["interval_ms"] = static_cast<std::int64_t>(v.task.interval.count()) * 1000;
-        t["state"] = lubancode::runtime::loop::ToString(v.task.state);
-        t["next_due_at_ms"] = v.task.next_due_at_ms;
-        t["run_count"] = v.task.run_count;
-        t["prompt_source"] = lubancode::runtime::loop::ToString(v.task.prompt_source);
-        tasks.push_back(std::move(t));
-    }
-    if (tasks.empty()) {
-        return;  // 没活 loop:不带,普通会话照旧
-    }
-    nlohmann::json loop_metrics;
-    loop_metrics["active_tasks"] = std::move(tasks);
-    event.metrics["loop"] = std::move(loop_metrics);
-}
-
-CommandFlow TerminalSessionController::HandleGoalCommand(const lubancode::cli::ParsedGoalCommand& goal) {
-    EnsureGoalCoordinator();
-    const auto now_ms = [] {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-                   std::chrono::system_clock::now().time_since_epoch())
-            .count();
-    }();
-    const std::string workspace_root = CurrentDirUtf8();
-
-    using Action = lubancode::cli::GoalCommandAction;
-    if (goal.action == Action::View || goal.action == Action::Status) {
-        // 查账纯本地输出,不发模型(单子"状态查询不发模型")。
-        const auto outcome = lubancode::app::FormatGoalStatus(*goal_coordinator_, now_ms);
-        for (const std::string& line : outcome.lines) {
-            TermOut() << theme.stats << line << theme.reset << "\n";
-        }
-        return CommandFlow::Continue;
-    }
-
-    if (goal.action == Action::Create) {
-        const auto result = goal_coordinator_->Create(goal.objective, workspace_root,
-                                                      workspace_root, now_ms);
-        if (!result.ok) {
-            TermOut() << theme.error
-                      << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
-                      << theme.reset << "\n";
-            if (result.error_code == lubancode::runtime::goal::kErrGoalStoreUnavailable) {
-                TermOut() << theme.stats
-                          << "开启:配置文件里 [features] goals = true(环境变量 LUBANCODE_DISABLE_GOALS=1 是总闸)"
-                          << theme.reset << "\n";
-            }
-            return CommandFlow::Continue;
-        }
-        TermOut() << theme.stats << "目标已立: " << result.payload.value("goal_id", std::string())
-                  << "(状态 " << result.payload.value("state", std::string())
-                  << ")。首轮将先拟合同(做什么/不动什么/拿什么验/何时停),合同冻结后才开始排轮。"
-                  << theme.reset << "\n";
-        EmitGoalHook(lubancode::hooks::HookEvent::GoalCreated,
-                     nlohmann::json{{"goal_id", result.payload.value("goal_id", std::string())},
-                                    {"objective_preview", goal.objective.substr(0, 120)}},
-                     /*match_value=*/result.payload.value("state", std::string()));
-        return CommandFlow::Continue;
-    }
-
-    if (goal.action == Action::Edit) {
-        const auto* task = goal_coordinator_->task();
-        const int expected = task != nullptr ? task->revision : 0;
-        const auto result = goal_coordinator_->Edit(goal.objective, expected, now_ms);
-        if (!result.ok) {
-            TermOut() << theme.error
-                      << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
-                      << theme.reset << "\n";
-            return CommandFlow::Continue;
-        }
-        TermOut() << theme.stats << "目标已改(revision " << result.payload.value("revision", 0)
-                  << ");合同重拟,防空转连击清零,用量账保留。" << theme.reset << "\n";
-        return CommandFlow::Continue;
-    }
-
-    if (goal.action == Action::Pause) {
-        const auto result = goal_coordinator_->Pause(now_ms);
-        if (!result.ok) {
-            TermOut() << theme.error
-                      << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
-                      << theme.reset << "\n";
-            return CommandFlow::Continue;
-        }
-        TermOut() << theme.stats;
-        if (result.payload.value("immediate", true)) {
-            TermOut() << "目标已暂停;checkpoint/预算/防空转账都留着。";
-        } else {
-            TermOut() << "pause 已请求;正在跑的轮在下一安全边界收口。";
-        }
-        TermOut() << theme.reset << "\n";
-        EmitGoalHook(lubancode::hooks::HookEvent::GoalPaused,
-                     nlohmann::json{{"goal_id", goal_coordinator_->task() != nullptr
-                                                     ? goal_coordinator_->task()->id
-                                                     : std::string()},
-                                    {"immediate", result.payload.value("immediate", true)}},
-                     /*match_value=*/"user");
-        return CommandFlow::Continue;
-    }
-
-    if (goal.action == Action::Resume) {
-        const auto* task = goal_coordinator_->task();
-        const int expected = task != nullptr ? task->revision : 0;
-        const auto result = goal_coordinator_->Resume(expected, now_ms);
-        if (!result.ok) {
-            TermOut() << theme.error
-                      << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
-                      << theme.reset << "\n";
-            return CommandFlow::Continue;
-        }
-        TermOut() << theme.stats << "目标已续(从最后 checkpoint 起,不重放旧 iteration)。"
-                  << theme.reset << "\n";
-        return CommandFlow::Continue;
-    }
-
-    if (goal.action == Action::Clear) {
-        const auto* task = goal_coordinator_->task();
-        if (task == nullptr) {
-            TermOut() << theme.stats << "当前会话没有目标。" << theme.reset << "\n";
-            return CommandFlow::Continue;
-        }
-        for (const std::string& line : lubancode::app::BuildGoalClearConfirmLines(*task)) {
-            TermOut() << theme.stats << line << theme.reset << "\n";
-        }
-        const std::optional<std::string> answer =
-            lubancode::cli::ReadLine("y/N", theme, true);
-        if (!answer.has_value() || !(*answer == "y" || *answer == "Y" || *answer == "yes")) {
-            TermOut() << theme.stats << "未清除,目标照旧。" << theme.reset << "\n";
-            return CommandFlow::Continue;
-        }
-        const auto result = goal_coordinator_->Clear(now_ms);
-        if (!result.ok) {
-            TermOut() << theme.error
-                      << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
-                      << theme.reset << "\n";
-            return CommandFlow::Continue;
-        }
-        TermOut() << theme.stats << "目标已清除;审计账保留在会话存档,已改文件不撤销。" << theme.reset
-                  << "\n";
-        return CommandFlow::Continue;
-    }
-    return CommandFlow::Continue;
-}
-
 // ---------------------------------------------------------------------------
 // /loop 会话定时循环(loop 单):装配、命令接线、泵、prompt 源、事件账。
 // ---------------------------------------------------------------------------
@@ -2784,7 +2643,7 @@ void TerminalSessionController::FlushLoopEvents() {
     // 变更折 thread 层 ServerEvent 给挂了的 sink——前端凭 payload 画
     // 状态栏与任务行,不解析 slash 字符串(单子"前端凭 payload 画")。
     // 投影不拦落盘:UI 失败不拦工具的规矩在这里同款。
-    EmitLoopServerEvents(events);
+    lubancode::app::EmitLoopServerEvents(MakeLoopWiring(), events);
     if (!session_store.active()) {
         return;  // 没建档的会话照常跑,事件只进内存
     }
@@ -2834,199 +2693,6 @@ void TerminalSessionController::NoteLoopPermissionWait(bool asked, bool allowed)
         loop_scheduler_->NotePermissionDeclined(loop_active_tick_id_, now_ms);
     }
     FlushLoopEvents();
-}
-
-void TerminalSessionController::EmitLoopServerEvents(
-    const std::vector<lubancode::runtime::loop::LoopSchedulerEvent>& events) {    lubancode::runtime::EventSink* sink = session_runtime_.sink();
-    if (sink == nullptr) {
-        return;  // 终端老路不接事件流,零影响
-    }
-    for (const auto& e : events) {
-        lubancode::runtime::ServerEvent event;
-        event.envelope.thread_id = session_runtime_.thread_id();
-        event.envelope.seq = session_runtime_.ids().NextSeq();
-        event.envelope.timestamp_ms = e.timestamp_ms;
-        // 事件分族:task 级状态变更走 LoopTaskStateChanged,tick 级按动词
-        // 分(due/started/finished)。family 里 task/tick 的分法与 scheduler
-        // 的 EmitLocked 同源,这里只做协议投影。
-        event.kind = lubancode::runtime::ServerEventKind::LoopTaskStateChanged;
-        if (e.family == "loop_tick_v1") {
-            if (e.event == "due") {
-                event.kind = lubancode::runtime::ServerEventKind::LoopTickDue;
-            } else if (e.event == "started") {
-                event.kind = lubancode::runtime::ServerEventKind::LoopTickStarted;
-            } else if (e.event == "finished") {
-                event.kind = lubancode::runtime::ServerEventKind::LoopTickCompleted;
-            }
-        } else if (e.event == "expired") {
-            event.kind = lubancode::runtime::ServerEventKind::LoopTaskExpired;
-        } else if (e.event == "created") {
-            event.kind = lubancode::runtime::ServerEventKind::LoopTaskCreated;
-        }
-        event.payload["task_id"] = e.task_id;
-        if (!e.tick_id.empty()) {
-            event.payload["tick_id"] = e.tick_id;
-        }
-        event.payload["event"] = e.event;
-        event.payload["data"] = e.payload;
-        sink->Emit(event);
-    }
-}
-
-TerminalSessionController::LoopPromptResolution
-TerminalSessionController::ResolveLoopPrompt(const std::string& inline_prompt) {
-    LoopPromptResolution out;
-    // inline 永远压 loop.md(单子"loop.md"节)。
-    if (!inline_prompt.empty()) {
-        out.text = inline_prompt;
-        out.source = lubancode::runtime::loop::LoopPromptSource::Inline;
-        return out;
-    }
-    // 项目 loop.md:<project-root>/.lubancode/loop.md,须过项目 trust。
-    // 未信任便跳过并提示,不执行里面的话。
-    const std::filesystem::path cwd = std::filesystem::current_path();
-    const std::filesystem::path project = cwd / ".lubancode" / "loop.md";
-    if (std::filesystem::exists(project)) {
-        // trust 判定与项目指令同源:project_instructions 装配时已过 trust,
-        // 这里用同一根线(没过 trust 的项目不给读)。
-        // 读文件、限长 25k。
-        std::error_code ec;
-        const auto size = std::filesystem::file_size(project, ec);
-        if (ec) {
-            out.source = lubancode::runtime::loop::LoopPromptSource::ProjectFile;
-            out.file = lubancode::tools::PathToUtf8(project);
-            out.error = "loop.md 读不了";
-            return out;
-        }
-        if (size > lubancode::runtime::loop::LoopDefaults::kPromptFileMaxBytes) {
-            out.source = lubancode::runtime::loop::LoopPromptSource::ProjectFile;
-            out.file = lubancode::tools::PathToUtf8(project);
-            out.error = "loop.md 超过 25,000 bytes 上限,拒绝执行(不截断)";
-            return out;
-        }
-        std::ifstream in(project, std::ios::binary);
-        std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        if (!in && content.empty()) {
-            out.source = lubancode::runtime::loop::LoopPromptSource::ProjectFile;
-            out.file = lubancode::tools::PathToUtf8(project);
-            out.error = "loop.md 读失败";
-            return out;
-        }
-        out.text = std::move(content);
-        out.source = lubancode::runtime::loop::LoopPromptSource::ProjectFile;
-        out.file = lubancode::tools::PathToUtf8(project);
-        return out;
-    }
-    // 用户级 ~/.lubancode/loop.md。
-    if (home_lubancode.has_value()) {
-        const std::filesystem::path user =
-            lubancode::tools::Utf8ToPath(*home_lubancode) / "loop.md";
-        if (std::filesystem::exists(user)) {
-            std::error_code ec;
-            const auto size = std::filesystem::file_size(user, ec);
-            if (!ec && size <= lubancode::runtime::loop::LoopDefaults::kPromptFileMaxBytes) {
-                std::ifstream in(user, std::ios::binary);
-                std::string content((std::istreambuf_iterator<char>(in)),
-                                    std::istreambuf_iterator<char>());
-                if (in || !content.empty()) {
-                    out.text = std::move(content);
-                    out.source = lubancode::runtime::loop::LoopPromptSource::UserFile;
-                    out.file = lubancode::tools::PathToUtf8(user);
-                    return out;
-                }
-            }
-            out.source = lubancode::runtime::loop::LoopPromptSource::UserFile;
-            out.file = lubancode::tools::PathToUtf8(user);
-            out.error = "用户级 loop.md 读失败或超限";
-            return out;
-        }
-    }
-    // 内置 maintenance prompt。
-    out.text = lubancode::app::BuiltinLoopMaintenancePrompt();
-    out.source = lubancode::runtime::loop::LoopPromptSource::Builtin;
-    return out;
-}
-
-CommandFlow TerminalSessionController::HandleLoopCommand(
-    const lubancode::cli::ParsedLoopCommand& command) {
-    // 无交互入口明拒(pipe/one-shot 没人回来答审批,loop 会挂死)。
-    if (!spinner_enabled) {
-        TermOut() << theme.error
-                  << "当前不是交互终端,不能建常驻 loop(无人可答审批会挂死)。"
-                  << theme.reset << "\n";
-        return CommandFlow::Continue;
-    }
-    if (!config.features_loop || lubancode::app::LoopDisabledByEnv()) {
-        TermOut() << theme.error
-                  << "loop 功能未开启:配置文件里 [features] loop = true(环境变量 "
-                     "LUBANCODE_DISABLE_LOOP=1 是总闸)。"
-                  << theme.reset << "\n";
-        return CommandFlow::Continue;
-    }
-    EnsureLoopScheduler();
-    const auto now_ms = [] {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-                   std::chrono::system_clock::now().time_since_epoch())
-            .count();
-    }();
-
-    if (command.action == lubancode::cli::LoopCommandAction::Invalid) {
-        TermOut() << theme.error;
-        if (!command.error_hint.empty()) {
-            TermOut() << command.error_hint;
-        } else {
-            TermOut() << "用法: /loop [间隔] [正文] | list | status <id|all> | pause <id|all> | "
-                         "resume <id|all> | stop <id|all> | run <id>";
-        }
-        TermOut() << theme.reset << "\n";
-        return CommandFlow::Continue;
-    }
-
-    if (command.action == lubancode::cli::LoopCommandAction::Create) {
-        // inline prompt 以 '/' 开头:拒绝(首版不许调度 slash 命令;单子
-        // "Slash prompt 的边界"——/exit /clear 这类定时执行会出事)。
-        if (!command.prompt.empty() && command.prompt.front() == '/') {
-            TermOut() << theme.error
-                      << "loop 正文不能以 / 开头(定时执行 slash 命令首版不支持);请改写成自然语言。"
-                      << theme.reset << "\n";
-            return CommandFlow::Continue;
-        }
-        // interval:显式 token 解析;空则默认 10m。
-        std::chrono::seconds interval = lubancode::runtime::loop::LoopDefaults::kDefaultInterval;
-        if (!command.interval_text.empty()) {
-            const auto parsed_interval =
-                lubancode::runtime::loop::ParseLoopInterval(command.interval_text);
-            if (!parsed_interval.has_value()) {
-                TermOut() << theme.error << "间隔写法不对: " << command.interval_text
-                          << "(只认 <正整数>m|h|d,最小 1m,最大 7d)。" << theme.reset << "\n";
-                return CommandFlow::Continue;
-            }
-            interval = *parsed_interval;
-        }
-        // prompt 源:inline 压 loop.md 压内置(每拍现读;这里先解一次定源,
-        // 文件源每拍重读)。
-        const auto resolved = ResolveLoopPrompt(command.prompt);
-        if (!resolved.error.empty()) {
-            TermOut() << theme.error << resolved.error << theme.reset << "\n";
-            return CommandFlow::Continue;
-        }
-        const auto outcome = lubancode::app::HandleLoopCreateCommand(
-            *loop_scheduler_, resolved.text, interval, CurrentDirUtf8(),
-            session_store.active() ? session_store.session_id() : std::string(), now_ms,
-            resolved.source, resolved.file);
-        for (const std::string& line : outcome.lines) {
-            TermOut() << theme.stats << line << theme.reset << "\n";
-        }
-        FlushLoopEvents();
-        return CommandFlow::Continue;
-    }
-
-    const auto outcome = lubancode::app::HandleLoopManageCommand(*loop_scheduler_, command, now_ms);
-    for (const std::string& line : outcome.lines) {
-        TermOut() << theme.stats << line << theme.reset << "\n";
-    }
-    FlushLoopEvents();
-    return CommandFlow::Continue;
 }
 
 bool TerminalSessionController::PumpLoopTicks() {
@@ -3084,7 +2750,7 @@ bool TerminalSessionController::PumpLoopTicks() {
     std::string prompt_text = tick->text;
     if (tick->task.prompt_source == lubancode::runtime::loop::LoopPromptSource::ProjectFile ||
         tick->task.prompt_source == lubancode::runtime::loop::LoopPromptSource::UserFile) {
-        const auto resolved = ResolveLoopPrompt(std::string());
+        const auto resolved = lubancode::app::ResolveLoopPrompt(MakeLoopWiring(), std::string());
         if (!resolved.error.empty() ||
             (tick->task.prompt_source == lubancode::runtime::loop::LoopPromptSource::ProjectFile &&
              resolved.source != lubancode::runtime::loop::LoopPromptSource::ProjectFile)) {
@@ -3150,7 +2816,7 @@ void TerminalSessionController::PumpGoalContinuation(std::int64_t now_ms) {
     }
     TermOut() << theme.stats << "[goal " << started.iteration.goal_id << " iteration "
               << started.iteration.index << "]" << theme.reset << "\n";
-    EmitGoalHook(lubancode::hooks::HookEvent::GoalIterationStart,
+    lubancode::app::EmitGoalHook(MakeGoalWiring(), lubancode::hooks::HookEvent::GoalIterationStart,
                  nlohmann::json{{"goal_id", started.iteration.goal_id},
                                 {"iteration_id", started.iteration.id},
                                 {"iteration_index", started.iteration.index},
@@ -3163,7 +2829,7 @@ void TerminalSessionController::PumpGoalContinuation(std::int64_t now_ms) {
     CloseGoalIteration("goal-turn", turn_failed);
     goal_active_iteration_.clear();
     goal_fairness_.NoteOtherWorkRan();
-    EmitGoalHook(lubancode::hooks::HookEvent::GoalIterationEnd,
+    lubancode::app::EmitGoalHook(MakeGoalWiring(), lubancode::hooks::HookEvent::GoalIterationEnd,
                  nlohmann::json{{"goal_id", started.iteration.goal_id},
                                 {"iteration_id", started.iteration.id},
                                 {"iteration_index", started.iteration.index},
@@ -3326,7 +2992,7 @@ void TerminalSessionController::CloseGoalIteration(const std::string& turn_id, b
         TermOut() << theme.error << "goal evaluator 失败: " << evaluation.error()
                   << ";目标转暂停(/goal resume 续)。" << theme.reset << "\n";
         (void)goal_coordinator_->NoteEvaluatorFailed(evaluation.error(), now_ms);
-        EmitGoalHook(lubancode::hooks::HookEvent::GoalPaused,
+        lubancode::app::EmitGoalHook(MakeGoalWiring(), lubancode::hooks::HookEvent::GoalPaused,
                      nlohmann::json{{"goal_id", task_now->id}, {"error", evaluation.error()}},
                      /*match_value=*/"evaluator_failed");
         return;
@@ -3347,7 +3013,7 @@ void TerminalSessionController::CloseGoalIteration(const std::string& turn_id, b
         TermOut() << theme.stats << "  (evaluator 判 achieved 被程序门槛改判 continue: "
                   << evaluation->evaluation.override_reason << ")" << theme.reset << "\n";
     }
-    EmitGoalHook(lubancode::hooks::HookEvent::GoalEvaluated,
+    lubancode::app::EmitGoalHook(MakeGoalWiring(), lubancode::hooks::HookEvent::GoalEvaluated,
                  nlohmann::json{{"goal_id", task_now->id},
                                 {"iteration_id", checkpoint_result.payload.value("iteration_id", std::string())},
                                 {"summary", evaluation->evaluation.summary.substr(0, 600)},
@@ -3358,7 +3024,7 @@ void TerminalSessionController::CloseGoalIteration(const std::string& turn_id, b
         // terminal 事件已落,GoalCompleted 在其后跑(单子:它失败不把
         // Achieved 改回 Active——OutputCapabilities 的 can_block=false
         // 正是这条边界)。
-        EmitGoalHook(lubancode::hooks::HookEvent::GoalCompleted,
+        lubancode::app::EmitGoalHook(MakeGoalWiring(), lubancode::hooks::HookEvent::GoalCompleted,
                      nlohmann::json{{"goal_id", after->id},
                                     {"decision", decision},
                                     {"iterations", after->counters.iterations_started}},
@@ -3428,64 +3094,6 @@ void TerminalSessionController::FinishLoopTick(const std::string& tick_id, bool 
     } else {
         loop_scheduler_->FinishTick(tick_id, LoopTickOutcome::Succeeded, now_ms);
     }
-    FlushLoopEvents();
-}
-
-void TerminalSessionController::RestoreLoopFromArchive() {
-    EnsureLoopScheduler();
-    if (!session_store.active()) {
-        return;
-    }
-    const auto bytes = lubancode::sessions::ReadSessionFileBytes(session_store.file_path());
-    if (!bytes.has_value()) {
-        return;
-    }
-    int replayed = 0;
-    std::istringstream stream(*bytes);
-    std::string line;
-    while (std::getline(stream, line)) {
-        if (line.find("\"loop_task_v1\"") == std::string::npos &&
-            line.find("\"loop_tick_v1\"") == std::string::npos) {
-            continue;
-        }
-        try {
-            const nlohmann::json j = nlohmann::json::parse(line);
-            lubancode::runtime::loop::LoopSchedulerEvent event;
-            event.family = j.value("type", std::string());
-            event.event = j.value("event", std::string());
-            event.task_id = j.value("task_id", std::string());
-            event.tick_id = j.value("tick_id", std::string());
-            event.payload = j.value("payload", nlohmann::json::object());
-            event.timestamp_ms = j.value("timestamp_ms", static_cast<std::int64_t>(0));
-            if (loop_scheduler_->ReplayEvent(event)) {
-                ++replayed;
-            }
-        } catch (const std::exception&) {
-            // 坏行跳过,不废整场。
-        }
-    }
-    if (replayed == 0) {
-        return;
-    }
-    // 恢复的 active task 默认暂停(resume 时不问一句就自动烧 token,风险
-    // 大过便利;单子"恢复"节:Active 且未过期可恢复——这里保守起步,用户
-    // /loop resume 显式续)。Running 中断的标 Interrupted 语义:转 Paused。
-    const auto now_ms = [] {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-                   std::chrono::system_clock::now().time_since_epoch())
-            .count();
-    }();
-    int resumed_active = 0;
-    for (const auto& view : loop_scheduler_->Snapshot(now_ms)) {
-        if (view.task.state == lubancode::runtime::loop::LoopTaskState::Active ||
-            view.task.state == lubancode::runtime::loop::LoopTaskState::Running ||
-            view.task.state == lubancode::runtime::loop::LoopTaskState::Due) {
-            loop_scheduler_->Pause(view.task.task_id, now_ms, "resumed_paused");
-            ++resumed_active;
-        }
-    }
-    TermOut() << theme.stats << "loop 任务已随会话恢复(" << replayed << " 条事件;"
-              << resumed_active << " 只默认暂停,续跑 /loop resume <id>)。" << theme.reset << "\n";
     FlushLoopEvents();
 }
 
@@ -3696,224 +3304,6 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
                const std::optional<lubancode::sessions::PlanReviewEvent>& review) {
             RestorePlanStateFrom(mode_event, plans, review);
         }};
-}
-
-void TerminalSessionController::NoteSubagentCompletionForGoal() {
-    // 子代理完成事件喂 goal 的证据/进度账(goal 单合流项)。没有活跃 goal
-    // 或没有待回流完成,零影响。
-    if (!goal_coordinator_.has_value() || session_agent_tool() == nullptr) {
-        return;
-    }
-    const auto* task = goal_coordinator_->task();
-    if (task == nullptr || lubancode::runtime::goal::IsGoalTerminal(task->state)) {
-        return;  // terminal 后迟到的子代理结果:只留审计,不喂账(单子)
-    }
-    const std::vector<int> ids = session_agent_tool()->UndeliveredCompletionTaskIds();
-    if (ids.empty()) {
-        return;
-    }
-    const auto now_ms = [] {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-                   std::chrono::system_clock::now().time_since_epoch())
-            .count();
-    }();
-    const std::string iteration_id =
-        task->id + "/iter-" + std::to_string(task->counters.iterations_started);
-    int evidence_seq = static_cast<int>(goal_coordinator_->evidence_count());
-    for (const int subagent_id : ids) {
-        const auto detail = session_agent_tool()->TaskDetail(subagent_id);
-        if (!detail.has_value()) {
-            continue;  // 台账里没有了:跳过不误伤
-        }
-        // usage 归 goal(单子:"子代理由该 iteration 派生,其 usage 归 goal")。
-        lubancode::runtime::goal::GoalUsage sub_usage;
-        sub_usage.input_tokens = detail->input_tokens;
-        sub_usage.output_tokens = detail->output_tokens;
-        sub_usage.cache_read_tokens = detail->cache_read_tokens;
-        sub_usage.cache_creation_tokens = detail->cache_creation_tokens;
-        sub_usage.request_count = detail->steps_used;
-        sub_usage.usage_reported = detail->usage_reported;
-        goal_coordinator_->AddUsage(sub_usage);
-        // 结果折二级证据:producer 标 subagent,facts 带子任务 id 与 agent
-        // 类型;content 锚用结果正文的 hash(有结果才立;空结果不立证据,
-        // 免得查表里堆空壳)。单子:仅"子代理说通过了"仍是二级证据——
-        // HardGateAchieved 只认 fresh 的一级证据,criterion 拿它顶数会在
-        // 查表时露馅(goal_id 对得上,fresh 对得上,但 checkpoint 引用与
-        // evaluator 判词另有一致性检查)。
-        if (detail->result.empty()) {
-            continue;
-        }
-        lubancode::runtime::goal::GoalEvidence evidence;
-        evidence.id = "ev-" + std::to_string(++evidence_seq);
-        evidence.kind = lubancode::runtime::goal::EvidenceKind::ToolResult;
-        evidence.goal_id = task->id;
-        evidence.iteration_id = iteration_id;
-        evidence.tool_use_id = "subagent-" + std::to_string(subagent_id);
-        evidence.producer = "subagent:" + detail->agent_type;
-        evidence.facts["subagent_task_id"] = subagent_id;
-        evidence.facts["agent_type"] = detail->agent_type;
-        evidence.facts["title"] = detail->title;
-        evidence.facts["steps_used"] = detail->steps_used;
-        evidence.facts["tool_call_count"] = detail->tool_calls.size();
-        // 终态枚举翻稳定串(翻不出的给数字兜底,不冒充)。
-        switch (detail->state) {
-            case lubancode::tools::AgentTaskState::Running:
-                evidence.facts["state"] = "running";
-                break;
-            case lubancode::tools::AgentTaskState::Done:
-                evidence.facts["state"] = "done";
-                break;
-            case lubancode::tools::AgentTaskState::Failed:
-                evidence.facts["state"] = "failed";
-                break;
-            case lubancode::tools::AgentTaskState::Cancelled:
-                evidence.facts["state"] = "cancelled";
-                break;
-            case lubancode::tools::AgentTaskState::BudgetExhausted:
-                evidence.facts["state"] = "budget_exhausted";
-                break;
-        }
-        evidence.content_sha256 = lubancode::hooks::Sha256Hex(detail->result);
-        evidence.observed_at_ms = now_ms;
-        evidence.fresh = true;
-        // 事件行(goal_evidence_v1)先落再进账,与工具采证同序。
-        lubancode::sessions::GoalSessionEvent line;
-        line.type = "goal_evidence_v1";
-        line.event = "observed";
-        line.goal_id = evidence.goal_id;
-        line.iteration_id = evidence.iteration_id;
-        line.revision = task->revision;
-        nlohmann::json payload;
-        payload["evidence"] = evidence.to_json();
-        line.payload = std::move(payload);
-        line.timestamp_ms = now_ms;
-        if (session_store.active()) {
-            (void)session_store.AppendGoalEvent(line);
-        }
-        goal_coordinator_->RecordEvidence(evidence);
-        // 白名单顺手补(checkpoint 工具可引用它)。
-        if (goal_checkpoint_state_ != nullptr &&
-            goal_checkpoint_state_->iteration_id == iteration_id) {
-            goal_checkpoint_state_->valid_evidence_ids.push_back(evidence.id);
-        }
-    }
-}
-
-std::string TerminalSessionController::BuildGoalLoopStatusSegment() {
-    // 只是 GoalState 的显示投影):
-    //   run=Running/Preparing/Active·Pausing  eval=Evaluating
-    //   pause=Paused/AwaitingApproval/AwaitingUser/SuspendedByPolicy
-    //   blocked=Blocked  done=Achieved  budget=BudgetExhausted  x=Failed/Cleared
-    // loop 只数非终态非 Paused 的活任务;next 给最近一拍还差多少(已到点/
-    // 没有排程时省略)。
-    const auto now_ms = [] {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-                   std::chrono::system_clock::now().time_since_epoch())
-            .count();
-    }();
-    std::string goal_part;
-    if (goal_coordinator_.has_value() && goal_coordinator_->task() != nullptr) {
-        using GS = lubancode::runtime::goal::GoalState;
-        const auto* task = goal_coordinator_->task();
-        const char* code = "x";
-        switch (task->state) {
-            case GS::Preparing:
-            case GS::Active:
-            case GS::Running:
-            case GS::Pausing:
-                code = "run";
-                break;
-            case GS::Evaluating:
-                code = "eval";
-                break;
-            case GS::Paused:
-            case GS::AwaitingApproval:
-            case GS::AwaitingUser:
-            case GS::SuspendedByPolicy:
-                code = "pause";
-                break;
-            case GS::Blocked:
-                code = "blocked";
-                break;
-            case GS::Achieved:
-                code = "done";
-                break;
-            case GS::BudgetExhausted:
-                code = "budget";
-                break;
-            case GS::Failed:
-            case GS::Cleared:
-                code = "x";
-                break;
-        }
-        goal_part = std::string("goal ") + code;
-        if (task->counters.iterations_started > 0) {
-            goal_part += "·iter" + std::to_string(task->counters.iterations_started);
-        }
-        if (task->revision > 1) {
-            goal_part += "·r" + std::to_string(task->revision);
-        }
-    }
-    std::string loop_part;
-    if (loop_scheduler_.has_value()) {
-        int active = 0;
-        std::int64_t next_due = 0;
-        bool has_next = false;
-        for (const auto& view : loop_scheduler_->Snapshot(now_ms)) {
-            if (lubancode::runtime::loop::IsLoopTerminal(view.task.state) ||
-                view.task.state == lubancode::runtime::loop::LoopTaskState::Paused) {
-                continue;
-            }
-            ++active;
-            if (!has_next || view.task.next_due_at_ms < next_due) {
-                next_due = view.task.next_due_at_ms;
-                has_next = true;
-            }
-        }
-        if (active > 0) {
-            loop_part = "loop×" + std::to_string(active);
-            if (has_next && next_due > now_ms) {
-                const std::int64_t secs = (next_due - now_ms) / 1000;
-                if (secs < 60) {
-                    loop_part += " next " + std::to_string(secs) + "s";
-                } else if (secs < 3600) {
-                    loop_part += " next " + std::to_string(secs / 60) + "m";
-                } else {
-                    loop_part += " next " + std::to_string(secs / 3600) + "h";
-                }
-            }
-        }
-    }
-    if (goal_part.empty() && loop_part.empty()) {
-        return std::string();
-    }
-    if (goal_part.empty()) {
-        return loop_part;
-    }
-    if (loop_part.empty()) {
-        return goal_part;
-    }
-    return goal_part + " · " + loop_part;
-}
-
-void TerminalSessionController::EmitGoalHook(lubancode::hooks::HookEvent event, nlohmann::json fields,
-                                             const std::string& match_value) {
-    // additionalContext(OutputCapabilities 已在 events.hpp 定死:没有
-    // permission_decision、can_block 恒 false——Hook 不可直接写 Achieved,
-    // GoalCompleted 失败不把 Achieved 改回 Active)。goal_id/revision 由
-    // 调用方塞进 fields,这里只管空定义表早退。
-    lubancode::hooks::HookDispatcher* dispatcher = lubancode::app::HookRuntime();
-    if (dispatcher == nullptr || dispatcher->Empty() || !dispatcher->HasHandlersFor(event)) {
-        return;
-    }
-    if (session_store.active()) {
-        fields["session_id"] = session_store.session_id();
-    }
-    lubancode::hooks::HookPayload payload;
-    payload.event = event;
-    payload.fields = std::move(fields);
-    payload.match_value = match_value;
-    dispatcher->Emit(event, payload);
 }
 
 void TerminalSessionController::EmitSessionHook(lubancode::hooks::HookEvent event, nlohmann::json fields,
@@ -4410,7 +3800,9 @@ void TerminalSessionController::Run() {
             status_data.plan_mode = tr("plan.mode_label");
         }
         // goal/loop 会话状态段(goal 单合流):有常驻自动工作在跑才挂。
-        status_data.goal_loop = BuildGoalLoopStatusSegment();
+        status_data.goal_loop = lubancode::app::BuildGoalLoopStatusSegment(
+            goal_coordinator_.has_value() ? &*goal_coordinator_ : nullptr,
+            loop_scheduler_.has_value() ? &*loop_scheduler_ : nullptr);
         lubancode::cli::SetStatusLineData(status_data, config.status_panel.items, config.status_panel.separator);
 
         // 后台命令完成通知:每圈开头取一次"新进入终态"的任务,有就打一行淡色
@@ -4542,7 +3934,7 @@ void TerminalSessionController::Run() {
             // goal 合流:子代理完成喂 goal 的证据/usage 账(没有活跃 goal
             // 零影响);在 RunPeerTurn 之前记,证据落在"消化回流"那轮的
             // 采证之前,checkpoint 引用得着。
-            NoteSubagentCompletionForGoal();
+            lubancode::app::NoteSubagentCompletionForGoal(MakeGoalWiring());
             {
                 auto& transcript = transcript_ui_.items();
                 lubancode::cli::TranscriptItem item = lubancode::cli::MakeNoticeItem(

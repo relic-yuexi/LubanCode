@@ -17,13 +17,30 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <string>
 
 #include <nlohmann/json.hpp>
 
+#include "app/commands/command_flow.hpp"
+#include "cli/slash_commands.hpp"  // ParsedGoalCommand
+#include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "runtime/goal_coordinator.hpp"
 #include "runtime/goal_types.hpp"
+#include "runtime/loop_scheduler.hpp"
+
+#include "tools/goal_checkpoint_tool.hpp"  // GoalCheckpointState(白名单补账)
+
+namespace lubancode::cli {
+struct Theme;
+}
+namespace lubancode::sessions {
+class SessionStore;
+}
+namespace lubancode::tools {
+class AgentTool;
+}
 
 namespace lubancode::app {
 
@@ -54,5 +71,37 @@ GoalCommandOutcome FormatGoalStatus(const lubancode::runtime::goal::GoalCoordina
 // clear 的二次确认文案(objective preview + iteration + 已耗预算 + 提醒
 // clear 不是 rollback)。
 std::vector<std::string> BuildGoalClearConfirmLines(const lubancode::runtime::goal::GoalTask& task);
+
+// ---- /goal 会话接线(终端接线收尾单自大类搬出) ----------------------------
+//
+// 命令分派、goal 钩子发射、状态栏短段、子代理回流喂账原先住在大类里,搬
+// 到这里;材料经 GoalWiring 递入(装配与状态留会话)。
+struct GoalWiring {
+    const lubancode::cli::Theme* theme = nullptr;
+    lubancode::runtime::goal::GoalCoordinator* coordinator = nullptr;  // ensure 后非空
+    lubancode::sessions::SessionStore* session_store = nullptr;
+    lubancode::tools::AgentTool* agent_tool = nullptr;      // 子代理台账(可空)
+    lubancode::tools::GoalCheckpointState* checkpoint_state = nullptr;  // 可空
+    lubancode::runtime::loop::LoopScheduler* loop_scheduler = nullptr;  // 状态栏短段(可空)
+};
+
+// /goal 七动作的接线(view/status/create/edit/pause/resume/clear;clear 走
+// 二次确认)。coordinator 由调用方先 ensure。
+lubancode::app::CommandFlow HandleGoalCommand(const lubancode::cli::ParsedGoalCommand& goal,
+                                               const GoalWiring& wiring);
+
+// goal 生命周期进 hook 分发:全部只给审计与 additionalContext,没有
+// permission_decision(Hook 不可直接写 Achieved)。
+void EmitGoalHook(const GoalWiring& wiring, lubancode::hooks::HookEvent event, nlohmann::json fields,
+                  const std::string& match_value);
+
+// 状态栏的 goal/loop 段:"goal <短码>·iter<N> · loop×<N> next <差>"。两样
+// 都没有给空串(整段不挂)。goal 从 GoalState 现折,loop 用 scheduler 快照。
+std::string BuildGoalLoopStatusSegment(lubancode::runtime::goal::GoalCoordinator* goal,
+                                       lubancode::runtime::loop::LoopScheduler* loop);
+
+// 子代理回流进 goal 的账:后台子代理完成时,结果折一枚二级证据(producer
+// 标 subagent),usage 折进 goal 的 usage 账。有 goal 在跑才记,没有零影响。
+void NoteSubagentCompletionForGoal(const GoalWiring& wiring);
 
 }  // namespace lubancode::app

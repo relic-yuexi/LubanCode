@@ -2,6 +2,23 @@
 
 #include "app/commands/goal_commands.hpp"
 
+#include <chrono>
+#include <utility>
+
+#include <nlohmann/json.hpp>
+
+#include "app/hook_runtime.hpp"
+#include "cli/console_input.hpp"
+#include "cli/i18n.hpp"
+#include "cli/slash_commands.hpp"
+#include "cli/terminal_port.hpp"
+#include "cli/theme.hpp"
+#include "hooks/dispatcher.hpp"
+#include "hooks/hash.hpp"
+#include "platform/paths.hpp"
+#include "sessions/session_store.hpp"
+#include "tools/agent_tool.hpp"
+
 #include <cstdlib>
 #include <vector>
 
@@ -159,6 +176,356 @@ std::vector<std::string> BuildGoalClearConfirmLines(const lubancode::runtime::go
     lines.push_back("clear 不撤销已改过的文件;要回滚请用 git/undo 工具。");
     lines.push_back("确认清除? (y/N)");
     return lines;
+}
+
+// ---- /goal 会话接线(终端接线收尾单自大类搬出;原文随行,输出走 TerminalPort) ----
+
+lubancode::app::CommandFlow HandleGoalCommand(const lubancode::cli::ParsedGoalCommand& goal,
+                                               const GoalWiring& wiring) {
+    auto& out = lubancode::cli::TermOut();
+    const lubancode::cli::Theme& theme = *wiring.theme;
+    lubancode::runtime::goal::GoalCoordinator& coordinator = *wiring.coordinator;
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }();
+    const std::string workspace_root = lubancode::platform::CurrentDirUtf8();
+
+    using Action = lubancode::cli::GoalCommandAction;
+    if (goal.action == Action::View || goal.action == Action::Status) {
+        // 查账纯本地输出,不发模型(单子"状态查询不发模型")。
+        const auto outcome = lubancode::app::FormatGoalStatus(coordinator, now_ms);
+        for (const std::string& line : outcome.lines) {
+            out << theme.stats << line << theme.reset << "\n";
+        }
+        return lubancode::app::CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Create) {
+        const auto result = coordinator.Create(goal.objective, workspace_root, workspace_root, now_ms);
+        if (!result.ok) {
+            out << theme.error
+                << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
+                << theme.reset << "\n";
+            if (result.error_code == lubancode::runtime::goal::kErrGoalStoreUnavailable) {
+                out << theme.stats
+                    << "开启:配置文件里 [features] goals = true(环境变量 LUBANCODE_DISABLE_GOALS=1 是总闸)"
+                    << theme.reset << "\n";
+            }
+            return lubancode::app::CommandFlow::Continue;
+        }
+        out << theme.stats << "目标已立: " << result.payload.value("goal_id", std::string())
+            << "(状态 " << result.payload.value("state", std::string())
+            << ")。首轮将先拟合同(做什么/不动什么/拿什么验/何时停),合同冻结后才开始排轮。"
+            << theme.reset << "\n";
+        EmitGoalHook(wiring, lubancode::hooks::HookEvent::GoalCreated,
+                     nlohmann::json{{"goal_id", result.payload.value("goal_id", std::string())},
+                                    {"objective_preview", goal.objective.substr(0, 120)}},
+                     /*match_value=*/result.payload.value("state", std::string()));
+        return lubancode::app::CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Edit) {
+        const auto* task = coordinator.task();
+        const int expected = task != nullptr ? task->revision : 0;
+        const auto result = coordinator.Edit(goal.objective, expected, now_ms);
+        if (!result.ok) {
+            out << theme.error
+                << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
+                << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        out << theme.stats << "目标已改(revision " << result.payload.value("revision", 0)
+            << ");合同重拟,防空转连击清零,用量账保留。" << theme.reset << "\n";
+        return lubancode::app::CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Pause) {
+        const auto result = coordinator.Pause(now_ms);
+        if (!result.ok) {
+            out << theme.error
+                << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
+                << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        out << theme.stats;
+        if (result.payload.value("immediate", true)) {
+            out << "目标已暂停;checkpoint/预算/防空转账都留着。";
+        } else {
+            out << "pause 已请求;正在跑的轮在下一安全边界收口。";
+        }
+        out << theme.reset << "\n";
+        EmitGoalHook(wiring, lubancode::hooks::HookEvent::GoalPaused,
+                     nlohmann::json{{"goal_id", coordinator.task() != nullptr
+                                                     ? coordinator.task()->id
+                                                     : std::string()},
+                                    {"immediate", result.payload.value("immediate", true)}},
+                     /*match_value=*/"user");
+        return lubancode::app::CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Resume) {
+        const auto* task = coordinator.task();
+        const int expected = task != nullptr ? task->revision : 0;
+        const auto result = coordinator.Resume(expected, now_ms);
+        if (!result.ok) {
+            out << theme.error
+                << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
+                << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        out << theme.stats << "目标已续(从最后 checkpoint 起,不重放旧 iteration)。"
+            << theme.reset << "\n";
+        return lubancode::app::CommandFlow::Continue;
+    }
+
+    if (goal.action == Action::Clear) {
+        const auto* task = coordinator.task();
+        if (task == nullptr) {
+            out << theme.stats << "当前会话没有目标。" << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        for (const std::string& line : lubancode::app::BuildGoalClearConfirmLines(*task)) {
+            out << theme.stats << line << theme.reset << "\n";
+        }
+        const std::optional<std::string> answer = lubancode::cli::ReadLine("y/N", theme, true);
+        if (!answer.has_value() || !(*answer == "y" || *answer == "Y" || *answer == "yes")) {
+            out << theme.stats << "未清除,目标照旧。" << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        const auto result = coordinator.Clear(now_ms);
+        if (!result.ok) {
+            out << theme.error
+                << lubancode::app::DescribeGoalErrorCode(result.error_code, result.error_message)
+                << theme.reset << "\n";
+            return lubancode::app::CommandFlow::Continue;
+        }
+        out << theme.stats << "目标已清除;审计账保留在会话存档,已改文件不撤销。" << theme.reset
+            << "\n";
+        return lubancode::app::CommandFlow::Continue;
+    }
+    return lubancode::app::CommandFlow::Continue;
+}
+
+void EmitGoalHook(const GoalWiring& wiring, lubancode::hooks::HookEvent event, nlohmann::json fields,
+                  const std::string& match_value) {
+    // additionalContext(OutputCapabilities 已在 events.hpp 定死:没有
+    // permission_decision、can_block 恒 false——Hook 不可直接写 Achieved,
+    // GoalCompleted 失败不把 Achieved 改回 Active)。goal_id/revision 由
+    // 调用方塞进 fields,这里只管空定义表早退。
+    lubancode::hooks::HookDispatcher* dispatcher = lubancode::app::HookRuntime();
+    if (dispatcher == nullptr || dispatcher->Empty() || !dispatcher->HasHandlersFor(event)) {
+        return;
+    }
+    if (wiring.session_store != nullptr && wiring.session_store->active()) {
+        fields["session_id"] = wiring.session_store->session_id();
+    }
+    lubancode::hooks::HookPayload payload;
+    payload.event = event;
+    payload.fields = std::move(fields);
+    payload.match_value = match_value;
+    dispatcher->Emit(event, payload);
+}
+
+std::string BuildGoalLoopStatusSegment(lubancode::runtime::goal::GoalCoordinator* goal,
+                                       lubancode::runtime::loop::LoopScheduler* loop) {
+    // 只是 GoalState 的显示投影):
+    //   run=Running/Preparing/Active·Pausing  eval=Evaluating
+    //   pause=Paused/AwaitingApproval/AwaitingUser/SuspendedByPolicy
+    //   blocked=Blocked  done=Achieved  budget=BudgetExhausted  x=Failed/Cleared
+    // loop 只数非终态非 Paused 的活任务;next 给最近一拍还差多少(已到点/
+    // 没有排程时省略)。
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }();
+    std::string goal_part;
+    if (goal != nullptr && goal->task() != nullptr) {
+        using GS = lubancode::runtime::goal::GoalState;
+        const auto* task = goal->task();
+        const char* code = "x";
+        switch (task->state) {
+            case GS::Preparing:
+            case GS::Active:
+            case GS::Running:
+            case GS::Pausing:
+                code = "run";
+                break;
+            case GS::Evaluating:
+                code = "eval";
+                break;
+            case GS::Paused:
+            case GS::AwaitingApproval:
+            case GS::AwaitingUser:
+            case GS::SuspendedByPolicy:
+                code = "pause";
+                break;
+            case GS::Blocked:
+                code = "blocked";
+                break;
+            case GS::Achieved:
+                code = "done";
+                break;
+            case GS::BudgetExhausted:
+                code = "budget";
+                break;
+            case GS::Failed:
+            case GS::Cleared:
+                code = "x";
+                break;
+        }
+        goal_part = std::string("goal ") + code;
+        if (task->counters.iterations_started > 0) {
+            goal_part += "·iter" + std::to_string(task->counters.iterations_started);
+        }
+        if (task->revision > 1) {
+            goal_part += "·r" + std::to_string(task->revision);
+        }
+    }
+    std::string loop_part;
+    if (loop != nullptr) {
+        int active = 0;
+        std::int64_t next_due = 0;
+        bool has_next = false;
+        for (const auto& view : loop->Snapshot(now_ms)) {
+            if (lubancode::runtime::loop::IsLoopTerminal(view.task.state) ||
+                view.task.state == lubancode::runtime::loop::LoopTaskState::Paused) {
+                continue;
+            }
+            ++active;
+            if (!has_next || view.task.next_due_at_ms < next_due) {
+                next_due = view.task.next_due_at_ms;
+                has_next = true;
+            }
+        }
+        if (active > 0) {
+            loop_part = "loop×" + std::to_string(active);
+            if (has_next && next_due > now_ms) {
+                const std::int64_t secs = (next_due - now_ms) / 1000;
+                if (secs < 60) {
+                    loop_part += " next " + std::to_string(secs) + "s";
+                } else if (secs < 3600) {
+                    loop_part += " next " + std::to_string(secs / 60) + "m";
+                } else {
+                    loop_part += " next " + std::to_string(secs / 3600) + "h";
+                }
+            }
+        }
+    }
+    if (goal_part.empty() && loop_part.empty()) {
+        return std::string();
+    }
+    if (goal_part.empty()) {
+        return loop_part;
+    }
+    if (loop_part.empty()) {
+        return goal_part;
+    }
+    return goal_part + " · " + loop_part;
+}
+
+void NoteSubagentCompletionForGoal(const GoalWiring& wiring) {
+    // 子代理完成事件喂 goal 的证据/进度账(goal 单合流项)。没有活跃 goal
+    // 或没有待回流完成,零影响。
+    if (wiring.coordinator == nullptr || wiring.agent_tool == nullptr) {
+        return;
+    }
+    lubancode::runtime::goal::GoalCoordinator& coordinator = *wiring.coordinator;
+    const auto* task = coordinator.task();
+    if (task == nullptr || lubancode::runtime::goal::IsGoalTerminal(task->state)) {
+        return;  // terminal 后迟到的子代理结果:只留审计,不喂账(单子)
+    }
+    const std::vector<int> ids = wiring.agent_tool->UndeliveredCompletionTaskIds();
+    if (ids.empty()) {
+        return;
+    }
+    const auto now_ms = [] {
+        return std::chrono::duration_cast<std::chrono::milliseconds>(
+                   std::chrono::system_clock::now().time_since_epoch())
+            .count();
+    }();
+    const std::string iteration_id =
+        task->id + "/iter-" + std::to_string(task->counters.iterations_started);
+    int evidence_seq = static_cast<int>(coordinator.evidence_count());
+    for (const int subagent_id : ids) {
+        const auto detail = wiring.agent_tool->TaskDetail(subagent_id);
+        if (!detail.has_value()) {
+            continue;  // 台账里没有了:跳过不误伤
+        }
+        // usage 归 goal(单子:"子代理由该 iteration 派生,其 usage 归 goal")。
+        lubancode::runtime::goal::GoalUsage sub_usage;
+        sub_usage.input_tokens = detail->input_tokens;
+        sub_usage.output_tokens = detail->output_tokens;
+        sub_usage.cache_read_tokens = detail->cache_read_tokens;
+        sub_usage.cache_creation_tokens = detail->cache_creation_tokens;
+        sub_usage.request_count = detail->steps_used;
+        sub_usage.usage_reported = detail->usage_reported;
+        coordinator.AddUsage(sub_usage);
+        // 结果折二级证据:producer 标 subagent,facts 带子任务 id 与 agent
+        // 类型;content 锚用结果正文的 hash(有结果才立;空结果不立证据,
+        // 免得查表里堆空壳)。单子:仅"子代理说通过了"仍是二级证据——
+        // HardGateAchieved 只认 fresh 的一级证据,criterion 拿它顶数会在
+        // 查表时露馅(goal_id 对得上,fresh 对得上,但 checkpoint 引用与
+        // evaluator 判词另有一致性检查)。
+        if (detail->result.empty()) {
+            continue;
+        }
+        lubancode::runtime::goal::GoalEvidence evidence;
+        evidence.id = "ev-" + std::to_string(++evidence_seq);
+        evidence.kind = lubancode::runtime::goal::EvidenceKind::ToolResult;
+        evidence.goal_id = task->id;
+        evidence.iteration_id = iteration_id;
+        evidence.tool_use_id = "subagent-" + std::to_string(subagent_id);
+        evidence.producer = "subagent:" + detail->agent_type;
+        evidence.facts["subagent_task_id"] = subagent_id;
+        evidence.facts["agent_type"] = detail->agent_type;
+        evidence.facts["title"] = detail->title;
+        evidence.facts["steps_used"] = detail->steps_used;
+        evidence.facts["tool_call_count"] = detail->tool_calls.size();
+        // 终态枚举翻稳定串(翻不出的给数字兜底,不冒充)。
+        switch (detail->state) {
+            case lubancode::tools::AgentTaskState::Running:
+                evidence.facts["state"] = "running";
+                break;
+            case lubancode::tools::AgentTaskState::Done:
+                evidence.facts["state"] = "done";
+                break;
+            case lubancode::tools::AgentTaskState::Failed:
+                evidence.facts["state"] = "failed";
+                break;
+            case lubancode::tools::AgentTaskState::Cancelled:
+                evidence.facts["state"] = "cancelled";
+                break;
+            case lubancode::tools::AgentTaskState::BudgetExhausted:
+                evidence.facts["state"] = "budget_exhausted";
+                break;
+        }
+        evidence.content_sha256 = lubancode::hooks::Sha256Hex(detail->result);
+        evidence.observed_at_ms = now_ms;
+        evidence.fresh = true;
+        // 事件行(goal_evidence_v1)先落再进账,与工具采证同序。
+        lubancode::sessions::GoalSessionEvent line;
+        line.type = "goal_evidence_v1";
+        line.event = "observed";
+        line.goal_id = evidence.goal_id;
+        line.iteration_id = evidence.iteration_id;
+        line.revision = task->revision;
+        nlohmann::json payload;
+        payload["evidence"] = evidence.to_json();
+        line.payload = std::move(payload);
+        line.timestamp_ms = now_ms;
+        if (wiring.session_store != nullptr && wiring.session_store->active()) {
+            (void)wiring.session_store->AppendGoalEvent(line);
+        }
+        coordinator.RecordEvidence(evidence);
+        // 白名单顺手补(checkpoint 工具可引用它)。
+        if (wiring.checkpoint_state != nullptr &&
+            wiring.checkpoint_state->iteration_id == iteration_id) {
+            wiring.checkpoint_state->valid_evidence_ids.push_back(evidence.id);
+        }
+    }
 }
 
 }  // namespace lubancode::app
