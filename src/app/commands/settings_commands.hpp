@@ -171,4 +171,15 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
                              const lubancode::config::ModelCatalog* catalog = nullptr,
                              const lubancode::config::SettingsLocal* settings = nullptr);
 
+// /keymap(终端接线收尾单自大类搬出):列/set/reset 三路,落盘用户级
+// ~/.lubancode/keymap.json。home_lubancode 是用户级 .lubancode 目录
+//(空 = 没主目录,改绑只活本进程)。
+void HandleKeymapCommand(const std::string& raw_args, const std::optional<std::string>& home_lubancode,
+                         const lubancode::cli::Theme& theme);
+
+// /copy [plain](终端接线收尾单自大类搬出):复制上一段完整答话到剪贴板。
+// history 是活对话账,倒着找最近一条有正文的 assistant 消息。
+void HandleCopyCommand(const std::string& raw_args, const std::vector<lubancode::api::Message>& history,
+                       const lubancode::cli::Theme& theme);
+
 }  // namespace lubancode::app

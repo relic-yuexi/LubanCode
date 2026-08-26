@@ -610,6 +610,8 @@ add_library(lubancode_app STATIC
   src/app/backend_stack.cpp
   src/app/memory_extract.cpp
   src/app/model_router.cpp
+  # 终端接线收尾单:子代理面板 presenter(条目列表/查看态视口,自大类搬出)。
+  src/app/agent_panel_presenter.cpp
   src/app/session_title.cpp
   src/app/runtime_profile.cpp
   src/app/tool_runtime.cpp

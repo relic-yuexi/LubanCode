@@ -19,7 +19,12 @@
 #include <vector>
 
 #include "api/models.hpp"
+#include "api/types.hpp"
 #include "cli/console_input.hpp"
+#include "cli/keymap.hpp"
+#include "cli/markdown.hpp"
+#include "cli/terminal_port.hpp"
+#include "platform/clipboard.hpp"
 #include "platform/console.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/i18n.hpp"
@@ -1693,6 +1698,176 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
             std::cout << tr("config.session_model.note");
         }
         std::cout << "\n";
+    }
+}
+
+// ---- /keymap 与 /copy(终端接线收尾单自大类搬出;输出走 TerminalPort) ----
+
+// /keymap [set 动作 和弦 | reset [动作|all]]:列动作名/当前键/作用域/
+// 可否改绑;set 走 keymap 的冲突检查(同域撞车拒绝),落盘用户级
+// ~/.lubancode/keymap.json(项目配置不读不写,改键是全局的)。
+void HandleKeymapCommand(const std::string& raw_args, const std::optional<std::string>& home_lubancode,
+                         const lubancode::cli::Theme& theme) {
+    namespace keymap = lubancode::cli::keymap;
+    auto& out = lubancode::cli::TermOut();
+    std::vector<std::string> words;
+    std::string current;
+    for (const char c : raw_args) {
+        if (c == ' ' || c == '\t') {
+            if (!current.empty()) {
+                words.push_back(std::move(current));
+                current.clear();
+            }
+        } else {
+            current.push_back(c);
+        }
+    }
+    if (!current.empty()) {
+        words.push_back(std::move(current));
+    }
+
+    if (words.empty()) {
+        // 列全表:作用域分组,和弦右对齐,固定键/未绑键标明。
+        out << tr("keymap.list_header") << "\n";
+        for (const auto& record : keymap::ActiveKeymap().AllBindings()) {
+            const std::string chord = record.has_default ? keymap::FormatKeyChord(record.chord) : "-";
+            out << theme.stats << "  [" << keymap::ScopeName(record.scope) << "] " << chord;
+            for (int pad = static_cast<int>(chord.size()); pad < 12; ++pad) {
+                out << ' ';
+            }
+            out << keymap::ActionName(record.action)
+                << (!record.bindable ? tr("keymap.fixed_suffix")
+                     : !record.has_default ? tr("keymap.unbound_suffix") : "")
+                << theme.reset << "\n";
+        }
+        out << tr("keymap.usage") << "\n";
+        return;
+    }
+    if (words[0] == "set") {
+        if (words.size() != 3) {
+            out << theme.error << tr("keymap.usage") << theme.reset << "\n";
+            return;
+        }
+        const auto action = keymap::ActionFromName(words[1]);
+        if (!action.has_value()) {
+            out << theme.error << trf("keymap.unknown_action", words[1]) << theme.reset << "\n";
+            return;
+        }
+        const auto chord = keymap::ParseKeyChord(words[2]);
+        if (!chord.has_value()) {
+            out << theme.error << trf("keymap.bad_chord", words[2]) << theme.reset << "\n";
+            return;
+        }
+        std::string error;
+        if (!keymap::ActiveKeymap().SetBinding(*action, *chord, error)) {
+            out << theme.error << trf("keymap.bind_failed", error) << theme.reset << "\n";
+            return;
+        }
+        if (home_lubancode.has_value()) {
+            if (const auto save_error = keymap::SaveActiveKeymapOverrides(*home_lubancode);
+                save_error.has_value()) {
+                out << theme.error << trf("keymap.save_failed", *save_error) << theme.reset << "\n";
+            }
+        }
+        out << theme.stats
+            << trf("keymap.bound", keymap::ActionName(*action), keymap::FormatKeyChord(*chord))
+            << theme.reset << "\n";
+        return;
+    }
+    if (words[0] == "reset") {
+        std::string error;
+        if (words.size() == 2 && words[1] == "all") {
+            keymap::Keymap fresh;  // 出厂默认整份换血
+            for (const auto& record : fresh.AllBindings()) {
+                if (record.bindable) {
+                    (void)keymap::ActiveKeymap().ResetBinding(record.action, error);
+                }
+            }
+            out << theme.stats << tr("keymap.reset_all") << theme.reset << "\n";
+        } else if (words.size() == 2) {
+            const auto action = keymap::ActionFromName(words[1]);
+            if (!action.has_value() || !keymap::ActiveKeymap().ResetBinding(*action, error)) {
+                out << theme.error << trf("keymap.reset_failed", words[1]) << theme.reset << "\n";
+                return;
+            }
+            out << theme.stats << trf("keymap.reset_one", words[1]) << theme.reset << "\n";
+        } else {
+            out << theme.error << tr("keymap.usage") << theme.reset << "\n";
+            return;
+        }
+        if (home_lubancode.has_value()) {
+            if (const auto save_error = keymap::SaveActiveKeymapOverrides(*home_lubancode);
+                save_error.has_value()) {
+                out << theme.error << trf("keymap.save_failed", *save_error) << theme.reset << "\n";
+            }
+        }
+        return;
+    }
+    out << theme.error << tr("keymap.usage") << theme.reset << "\n";
+}
+
+// /copy [plain]:复制上一段完整答话。"已完成"由结构保证:交互循环单线程,
+// 这个命令只在回合收口、提示符回来之后才会被分派——不存在"流式中"的调
+// 用点。默认复制原始 Markdown(history 里的 TextBlock 本就无 ANSI、无
+// spinner、无 token 统计);plain 走 MarkdownToPlainText。
+void HandleCopyCommand(const std::string& raw_args, const std::vector<lubancode::api::Message>& history,
+                       const lubancode::cli::Theme& theme) {
+    auto& out = lubancode::cli::TermOut();
+    std::string args = raw_args;
+    while (!args.empty() && (args.front() == ' ' || args.front() == '\t')) {
+        args.erase(args.begin());
+    }
+    for (char& c : args) {
+        c = static_cast<char>(c >= 'A' && c <= 'Z' ? c - 'A' + 'a' : c);
+    }
+    if (!args.empty() && args != "plain") {
+        out << theme.stats << tr("cmd.copy.usage") << theme.reset << "\n";
+        return;
+    }
+
+    // 倒着找最近一条有正文的 assistant 消息(工具调用中间可能穿插空文本)。
+    std::string text;
+    for (auto it = history.rbegin(); it != history.rend(); ++it) {
+        if (it->role != lubancode::api::Role::Assistant) {
+            continue;
+        }
+        std::vector<std::string> parts;
+        for (const auto& block : it->content) {
+            if (const auto* block_text = std::get_if<lubancode::api::TextBlock>(&block);
+                block_text != nullptr && !block_text->text.empty()) {
+                parts.push_back(block_text->text);
+            }
+        }
+        if (parts.empty()) {
+            continue;
+        }
+        text = parts.front();
+        for (std::size_t i = 1; i < parts.size(); ++i) {
+            text += "\n\n";
+            text += parts[i];
+        }
+        break;
+    }
+    if (text.empty()) {
+        out << theme.error << tr("cmd.copy.no_assistant") << theme.reset << "\n";
+        return;
+    }
+    if (args == "plain") {
+        text = lubancode::cli::MarkdownToPlainText(text);
+    }
+
+    std::string detail;
+    switch (lubancode::platform::CopyTextToClipboard(text, detail)) {
+        case lubancode::platform::ClipboardResult::Ok:
+            out << theme.stats << trf("cmd.copy.done", text.size()) << theme.reset << "\n";
+            break;
+        case lubancode::platform::ClipboardResult::Unsupported:
+            out << theme.error << trf("cmd.copy.unsupported", detail) << theme.reset << "\n";
+            break;
+        case lubancode::platform::ClipboardResult::Failure:
+            // 失败必须报错,不得打印"已复制"后空着。
+            out << theme.error << trf("cmd.copy.failed", detail) << theme.reset << "\n";
+            break;
     }
 }
 
