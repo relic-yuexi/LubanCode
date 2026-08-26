@@ -566,6 +566,8 @@ add_library(lubancode_core STATIC
   # 条目措辞复用 FormatTranscriptItem,这里只管轮的骨架与 footer)。
   src/cli/turn_renderer.cpp
   src/cli/agent_panel.cpp
+  # 终端接线收尾单:面板接线宿主(provider/actions 实例化,静态槽退役)。
+  src/cli/agent_panel_host.cpp
   src/cli/bottom_chrome.cpp
   src/cli/keymap.cpp
   src/cli/terminal_caps.cpp
