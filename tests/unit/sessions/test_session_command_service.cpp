@@ -17,8 +17,8 @@
 
 #include <nlohmann/json.hpp>
 
-#include "agent/session_catalog.hpp"
-#include "agent/session_store.hpp"
+#include "sessions/session_catalog.hpp"
+#include "sessions/session_store.hpp"
 #include "runtime/command.hpp"
 #include "runtime/event.hpp"
 #include "runtime/session_command_service.hpp"

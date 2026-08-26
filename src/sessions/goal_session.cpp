@@ -1,6 +1,6 @@
 // goal 事件行实现(纯函数;测试钉 tests/test_goal_session.cpp)。
 
-#include "agent/goal_session.hpp"
+#include "sessions/goal_session.hpp"
 
 #include "platform/json_safe.hpp"  // DumpJsonSanitized:落档行的编码窄边界
 

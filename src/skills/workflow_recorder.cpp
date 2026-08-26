@@ -1,4 +1,4 @@
-#include "agent/workflow_recorder.hpp"
+#include "skills/workflow_recorder.hpp"
 
 #include "platform/json_safe.hpp"  // DumpJsonSanitized:事件行落盘的编码窄边界
 

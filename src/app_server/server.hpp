@@ -27,7 +27,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agent/loop.hpp"
-#include "agent/session_store.hpp"
+#include "sessions/session_store.hpp"
 #include "api/backend.hpp"
 #include "app_server/connection.hpp"
 #include "app_server/dispatcher.hpp"

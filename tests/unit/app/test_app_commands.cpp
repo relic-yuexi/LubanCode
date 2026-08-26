@@ -17,7 +17,7 @@
 #include <vector>
 
 #include "agent/loop.hpp"
-#include "agent/session_store.hpp"
+#include "sessions/session_store.hpp"
 #include "api/backend.hpp"
 #include "app/commands/command_flow.hpp"
 #include "app/commands/peer_commands.hpp"

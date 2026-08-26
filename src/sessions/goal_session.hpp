@@ -13,7 +13,7 @@
 // 在 runtime 侧的 GoalCoordinator::ReplayEvent。坏行跳过,不废整场(事件
 // 行通用约定);老版本读到 goal 行当坏行跳过,消息账无损。
 //
-// agent/ 不反向依赖 runtime/(老规矩):所以这一层只认 nlohmann + 标准库,
+// sessions/ 不反向依赖 runtime/(老规矩):所以这一层只认 nlohmann + 标准库,
 // 领域字段用中立的 nlohmann::json 载(payload 的 shape 由 runtime 侧的
 // GoalCoordinatorEvent 定,这里不复制 runtime 类型)。
 

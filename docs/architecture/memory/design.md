@@ -391,7 +391,7 @@ CLI 组装 `SaveRequest`，立即写一张 pending job，再拉起 worker。
   "summary": "会话按 JSONL 追加，meta 记录 cwd",
   "content": "SessionStore 将每条事件追加到独立 JSONL。恢复时按 meta.cwd 筛选。",
   "keywords": ["SessionStore", "meta.cwd"],
-  "paths": ["src/agent/session_store.cpp"]
+  "paths": ["src/sessions/session_store.cpp"]
 }
 ```
 

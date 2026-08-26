@@ -1,5 +1,5 @@
 // 会话类 slash 命令:/sessions 列档、/resume 恢复、/export 导出 Markdown。
-// 底层读写在 agent/session_store,这里只管选择交互与输出拼装。
+// 底层读写在 sessions/session_store,这里只管选择交互与输出拼装。
 //
 // 搬家自 main.cpp,行为一字未改;依赖只认 agent/cli/platform。
 
@@ -15,8 +15,8 @@
 #include "agent/compact.hpp"
 #include "agent/context_budget.hpp"
 #include "agent/loop.hpp"
-#include "agent/session_store.hpp"
-#include "agent/session_lifecycle.hpp"
+#include "sessions/session_store.hpp"
+#include "sessions/session_lifecycle.hpp"
 #include "api/backend.hpp"
 #include "app/commands/command_flow.hpp"
 #include "config/config.hpp"

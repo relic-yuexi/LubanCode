@@ -1,6 +1,6 @@
 // 会话名册实现。设计见 peer_registry.hpp 文件头。
 
-#include "agent/peer_registry.hpp"
+#include "peers/peer_registry.hpp"
 
 #include <atomic>
 #include <cstdio>

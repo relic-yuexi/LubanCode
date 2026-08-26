@@ -19,7 +19,7 @@ std::string PathToUtf8(const std::filesystem::path& path) {
 }
 
 // 归一化比较键:weakly_canonical(失败退 lexically_normal),反斜杠统一
-// 正斜杠,ASCII 折小写(Windows 习惯),尾斜杠剥掉。跟 agent/session_store
+// 正斜杠,ASCII 折小写(Windows 习惯),尾斜杠剥掉。跟 sessions/session_store
 // 的 NormalizePathForCompare 同一套思路;这里不引 agent 层,单备一份。
 std::string NormalizeKey(const std::filesystem::path& path) {
     std::error_code ec;

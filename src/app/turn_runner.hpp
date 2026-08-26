@@ -20,7 +20,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agent/loop.hpp"
-#include "agent/workflow_recorder.hpp"
+#include "skills/workflow_recorder.hpp"
 #include "api/types.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/format_utils.hpp"  // TurnFooterTone(Worked/Stopped/Failed)

@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <sstream>
 
-#include "agent/workflow_recorder.hpp"  // RedactSecrets:预览打码(纯函数,不带磁盘件)
+#include "skills/workflow_recorder.hpp"  // RedactSecrets:预览打码(纯函数,不带磁盘件)
 #include "hooks/hash.hpp"               // Sha256Hex:结果/入参摘要锚
 #include "platform/json_safe.hpp"       // DumpJsonSanitized:追踪 JSONL 的末道编码闸
 #include "platform/text_encoding.hpp"   // UTF-8 安全截头尾

@@ -13,7 +13,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "agent/session_store.hpp"
+#include "sessions/session_store.hpp"
 #include "api/types.hpp"
 #include "runtime/loop_scheduler.hpp"
 #include "runtime/loop_types.hpp"

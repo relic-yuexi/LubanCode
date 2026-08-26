@@ -29,8 +29,8 @@
 #include <unordered_set>
 #include <vector>
 
-#include "agent/peer_mailbox.hpp"
-#include "agent/peer_registry.hpp"
+#include "peers/peer_mailbox.hpp"
+#include "peers/peer_registry.hpp"
 #include "platform/peer_transport.hpp"
 
 namespace lubancode::agent {

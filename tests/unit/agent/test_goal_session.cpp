@@ -11,8 +11,8 @@
 #include <sstream>
 #include <string>
 
-#include "agent/goal_session.hpp"
-#include "agent/session_store.hpp"
+#include "sessions/goal_session.hpp"
+#include "sessions/session_store.hpp"
 #include "platform/text_encoding.hpp"  // IsValidUtf8:坏串落档行的出口校验
 
 using lubancode::agent::GoalEvidenceRecord;

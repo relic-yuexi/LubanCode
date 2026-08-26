@@ -8,7 +8,7 @@
 #include <utility>
 
 #include "agent/context_events.hpp"  // Fingerprint64:块局部指纹
-#include "agent/session_store.hpp"   // NowTimestamp
+#include "sessions/session_store.hpp"   // NowTimestamp
 #include "hooks/hash.hpp"            // Sha256Hex:真本的内容寻址
 #include "platform/paths.hpp"        // Utf8ToPath:仓路径不走 ACP 窄口
 #include "platform/text_encoding.hpp"

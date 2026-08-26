@@ -7,8 +7,8 @@
 #include <string>
 #include <vector>
 
-#include "agent/goal_session.hpp"
-#include "agent/session_store.hpp"
+#include "sessions/goal_session.hpp"
+#include "sessions/session_store.hpp"
 #include "runtime/goal_coordinator.hpp"
 #include "runtime/goal_types.hpp"
 #include "tools/goal_checkpoint_tool.hpp"

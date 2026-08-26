@@ -28,7 +28,7 @@
 #include <vector>
 
 #include "agent/loop.hpp"
-#include "agent/session_store.hpp"
+#include "sessions/session_store.hpp"
 #include "api/types.hpp"
 #include "runtime/event_sink.hpp"
 #include "runtime/id_authority.hpp"

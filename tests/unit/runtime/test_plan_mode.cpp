@@ -15,7 +15,7 @@
 #include <doctest/doctest.h>
 
 #include "agent/prompt_assembler.hpp"
-#include "agent/session_store.hpp"
+#include "sessions/session_store.hpp"
 #include "cli/slash_commands.hpp"
 #include "runtime/command.hpp"
 #include "runtime/event.hpp"

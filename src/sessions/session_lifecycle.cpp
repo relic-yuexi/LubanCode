@@ -9,7 +9,7 @@
 //   - 路径比较两边都过 weakly_canonical(error_code 形态),符号链接
 //     绕出根的在这里现形。
 
-#include "agent/session_lifecycle.hpp"
+#include "sessions/session_lifecycle.hpp"
 
 #include <algorithm>
 #include <system_error>

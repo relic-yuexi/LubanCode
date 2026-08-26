@@ -169,7 +169,7 @@ JSON manifest
 - `src/agent/compact.cpp`：单次压缩、episode 切分、map/reduce、manifest 校验。
 - `src/agent/loop.cpp`：回合中 projected 估算、结构压缩、硬裁与 cache epoch。
 - `src/agent/context.cpp`：轮级裁剪与工具结果截断。
-- `src/agent/session_store.cpp`：`compact` / `compact_v2` 的写入与回放。
+- `src/sessions/session_store.cpp`：`compact` / `compact_v2` 的写入与回放。
 - `src/agent/context_events.cpp`：L1 结构压缩、artifact/重复/版本视图。
 - `src/agent/microcompact.cpp`：L2 按需局部摘要、输入裁面与格式校验。
 

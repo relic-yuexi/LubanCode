@@ -23,8 +23,8 @@
 #include <nlohmann/json.hpp>
 
 #include "agent/loop.hpp"
-#include "agent/session_store.hpp"
-#include "agent/workflow_recorder.hpp"
+#include "sessions/session_store.hpp"
+#include "skills/workflow_recorder.hpp"
 #include "api/anthropic/client.hpp"
 #include "api/backend.hpp"
 #include "api/chat/request.hpp"

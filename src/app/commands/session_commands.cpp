@@ -20,8 +20,8 @@
 #include <string>
 
 #include "agent/loop.hpp"
-#include "agent/session_catalog.hpp"
-#include "agent/session_store.hpp"
+#include "sessions/session_catalog.hpp"
+#include "sessions/session_store.hpp"
 #include <nlohmann/json.hpp>
 #include "app/commands/settings_commands.hpp"
 #include "app/runtime_profile.hpp"

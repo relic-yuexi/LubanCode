@@ -1,6 +1,6 @@
 // session_catalog.hpp 的实现:摘要/纯函数/带指纹缓存的台账薄壳。
 
-#include "agent/session_catalog.hpp"
+#include "sessions/session_catalog.hpp"
 
 #include <algorithm>
 #include <chrono>
@@ -11,7 +11,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "agent/session_store.hpp"
+#include "sessions/session_store.hpp"
 
 namespace lubancode::agent {
 

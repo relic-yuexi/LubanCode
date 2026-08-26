@@ -1,4 +1,4 @@
-#include "agent/skill_drafter.hpp"
+#include "skills/skill_drafter.hpp"
 
 #include <algorithm>
 #include <cctype>

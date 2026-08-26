@@ -4,7 +4,7 @@
 //
 // 分层:序列化/反序列化/成对修补/Markdown 导出全是纯函数,只吃 api::Message
 // 这些中立类型,不碰 config/(sessions 目录的路径由调用方 main.cpp 算好传
-// 进来,agent/ 保持不反向依赖 config/ 的老规矩)。真正碰磁盘的只有
+// 进来,sessions/ 保持不反向依赖 config/ 的老规矩)。真正碰磁盘的只有
 // SessionStore(append+flush 的落盘句柄)、ListSessions/ReadSessionFile
 // (列目录/读文件)这几个薄壳。
 //
@@ -40,7 +40,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "agent/goal_session.hpp"
+#include "sessions/goal_session.hpp"
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 
@@ -155,7 +155,7 @@ std::optional<std::string> ParseCwdEvent(const std::string& line);
 // 追加时机(append-only 快照式):排队账一变(进队/送达出队/失败回还)就
 // 追加一份全量快照,回放取**最后一条**。已送达的条目不在快照里,天然出档。
 // 目标用 short_label 的写法("main" / "#3"):子代理任务号本就带 #,解析时
-// 按前缀分型;存档里不引 cli 层类型,agent/ 不反向依赖的老规矩不破。
+// 按前缀分型;存档里不引 cli 层类型,sessions/ 不反向依赖的老规矩不破。
 // 老版本读到 queue 行当坏行跳过,消息账无损(事件行的通用约定)。
 // ---------------------------------------------------------------------------
 

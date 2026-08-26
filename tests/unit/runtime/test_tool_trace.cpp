@@ -26,7 +26,7 @@
 #include <vector>
 
 #include "agent/loop.hpp"
-#include "agent/session_store.hpp"
+#include "sessions/session_store.hpp"
 #include "agent/tool_trace.hpp"
 #include "platform/text_encoding.hpp"
 #include "runtime/id_authority.hpp"

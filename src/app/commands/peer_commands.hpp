@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "agent/peer_session.hpp"
+#include "peers/peer_session.hpp"
 #include "app/commands/command_flow.hpp"
 #include "cli/theme.hpp"
 

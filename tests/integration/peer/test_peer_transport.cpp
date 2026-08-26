@@ -12,7 +12,7 @@
 #include <string>
 #include <vector>
 
-#include "agent/peer_session.hpp"
+#include "peers/peer_session.hpp"
 #include "platform/peer_transport.hpp"
 
 using namespace lubancode;

@@ -25,7 +25,7 @@ nlohmann::json 的 `dump()` 遇到树里混着的**非法 UTF-8 字符串**会�
 | 来源 | 路径 | 为什么会有坏字节 |
 | --- | --- | --- |
 | 管道/重定向 stdin | `cli/console_input.cpp` 的 `ReadLine` 非交互分支 | `std::getline` 不做编码处理,GBK/ANSI 原始字节直接进 |
-| 旧会话文件恢复 | `agent/session_store.cpp` 的 `ParseSessionFile` / `BlockFromJson` | JSONL 是 `nlohmann::json::parse` 读的,不校验;崩溃截断行、老版本写的档都可能带坏串 |
+| 旧会话文件恢复 | `sessions/session_store.cpp` 的 `ParseSessionFile` / `BlockFromJson` | JSONL 是 `nlohmann::json::parse` 读的,不校验;崩溃截断行、老版本写的档都可能带坏串 |
 | 模型流输出 | `api/assembler.cpp` 收块 | 服务端/中转把多字节序列劈在 delta 边界,或干脆吐坏字节 |
 | compact / microcompact 摘要 | `agent/compact.cpp`、`agent/microcompact.cpp` | 摘要文本来自模型输出,同上一行 |
 | 工具结果 / 工具输出 | `agent/loop.cpp`、`tools/run_command.cpp` 等 | PowerShell 5.1 解析期错误走系统 ANSI 代码页(国内是 GBK),原生程序绕开控制台编码直接写 |
@@ -53,7 +53,7 @@ nlohmann::json 的 `dump()` 遇到树里混着的**非法 UTF-8 字符串**会�
 ### 主动闸(治本,这次新加的)
 
 - **请求装配闸**:`agent/loop.cpp` 赋 `request.messages` 前,对每条消息过一遍 `api::SanitizeMessage`(定义在 `src/api/types.hpp` / `types.cpp`,递归清洗 TextBlock / ToolResultBlock / ThinkingBlock / ToolUseBlock.input 的 JSON 树)。合法内容零成本原样返回;坏串到这里就被洗掉,四个 wire client(chat / responses / anthropic / gemini)的 `dump()` 兜底变成"几乎不可达"。
-- **会话加载清洗**:`agent/session_store.cpp` 的 `BlockFromJson` 各字段加载即清洗——根治旧会话文件这条主源。
+- **会话加载清洗**:`sessions/session_store.cpp` 的 `BlockFromJson` 各字段加载即清洗——根治旧会话文件这条主源。
 - **模型输出进历史前清洗**:`api/assembler.cpp` 收块、`agent/compact.cpp` 摘要文本。
 - **输入边界**:管道 stdin(`SanitizeUtf8`,ACP 试转可救 GBK)、app-server 入站文本、子代理 inbox 投递。
 

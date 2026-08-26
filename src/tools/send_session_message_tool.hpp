@@ -1,7 +1,7 @@
 // 跨会话传话:模型侧的窄工具之二——给另一场会话递一张字条。
 //
 // 正文只认纯文本;对端收不收、什么时候读,由对端的安全收件点与权限档
-// 决定(见 agent/peer_session.hpp)。发送方拿回 delivered/held/refused/
+// 决定(见 peers/peer_session.hpp)。发送方拿回 delivered/held/refused/
 // expired/unavailable,如实转告模型。需要确认(给出去的是一次跨会话
 // 副作用,不该静默发送)。
 
@@ -11,8 +11,8 @@
 #include <string>
 #include <vector>
 
-#include "agent/peer_mailbox.hpp"  // PeerDelivery
-#include "agent/peer_registry.hpp"
+#include "peers/peer_mailbox.hpp"  // PeerDelivery
+#include "peers/peer_registry.hpp"
 #include "tools/tool.hpp"
 
 namespace lubancode::tools {

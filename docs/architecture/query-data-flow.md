@@ -697,4 +697,4 @@ system + history + tools -> assistant -> tool result -> assistant
 | Responses 请求与回包 | [`src/api/responses/request.cpp`](../../src/api/responses/request.cpp)、[`events.cpp`](../../src/api/responses/events.cpp) |
 | Anthropic 请求与回包 | [`src/api/anthropic/client.cpp`](../../src/api/anthropic/client.cpp)、[`events.cpp`](../../src/api/anthropic/events.cpp) |
 | 子代理与 Explore | [`src/tools/agent_tool.cpp`](../../src/tools/agent_tool.cpp) |
-| JSONL 会话 | [`src/agent/session_store.cpp`](../../src/agent/session_store.cpp) |
+| JSONL 会话 | [`src/sessions/session_store.cpp`](../../src/sessions/session_store.cpp) |

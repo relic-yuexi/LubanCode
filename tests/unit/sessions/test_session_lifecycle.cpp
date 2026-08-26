@@ -19,9 +19,9 @@
 #include <string>
 #include <vector>
 
-#include "agent/session_catalog.hpp"
-#include "agent/session_lifecycle.hpp"
-#include "agent/session_store.hpp"
+#include "sessions/session_catalog.hpp"
+#include "sessions/session_lifecycle.hpp"
+#include "sessions/session_store.hpp"
 
 using namespace lubancode;
 

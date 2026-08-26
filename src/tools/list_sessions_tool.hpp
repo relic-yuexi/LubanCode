@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "agent/peer_registry.hpp"
+#include "peers/peer_registry.hpp"
 #include "tools/tool.hpp"
 
 namespace lubancode::tools {

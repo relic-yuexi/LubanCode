@@ -12,8 +12,8 @@
 
 #include <nlohmann/json.hpp>
 
-#include "agent/skill_drafter.hpp"
-#include "agent/workflow_recorder.hpp"
+#include "skills/skill_drafter.hpp"
+#include "skills/workflow_recorder.hpp"
 #include "cli/slash_commands.hpp"
 #include "config/skill_store.hpp"
 

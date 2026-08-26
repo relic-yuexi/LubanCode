@@ -1,6 +1,6 @@
 // 信封与收件信箱实现。设计见 peer_mailbox.hpp 文件头。
 
-#include "agent/peer_mailbox.hpp"
+#include "peers/peer_mailbox.hpp"
 
 #include <algorithm>
 #include <mutex>

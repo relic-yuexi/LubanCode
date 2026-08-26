@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-#include "agent/peer_registry.hpp"
+#include "peers/peer_registry.hpp"
 #include "tools/list_sessions_tool.hpp"
 #include "tools/send_session_message_tool.hpp"
 

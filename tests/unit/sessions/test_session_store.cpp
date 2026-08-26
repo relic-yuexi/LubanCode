@@ -1,4 +1,4 @@
-// agent/session_store:会话存档的序列化/反序列化/事件回放/成对修补/slug/
+// sessions/session_store:会话存档的序列化/反序列化/事件回放/成对修补/slug/
 // 导出。多数是纯函数不碰磁盘(SessionStore 磁盘薄壳的行为靠集成验证);
 // ListSessions 的 cwd 过滤要真扫目录,用临时目录测。
 
@@ -11,7 +11,7 @@
 #include <vector>
 
 #include "agent/compact.hpp"
-#include "agent/session_store.hpp"
+#include "sessions/session_store.hpp"
 #include "api/types.hpp"
 #include "cli/slash_commands.hpp"
 

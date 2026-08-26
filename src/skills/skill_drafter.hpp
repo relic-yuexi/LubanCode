@@ -24,7 +24,7 @@
 #include <string>
 #include <vector>
 
-#include "agent/workflow_recorder.hpp"
+#include "skills/workflow_recorder.hpp"
 
 namespace lubancode::agent {
 

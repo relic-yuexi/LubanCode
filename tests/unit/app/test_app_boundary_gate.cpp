@@ -122,10 +122,12 @@ TEST_CASE("守门:engine 与 runtime 源码里搜不到终端件(单子验收原
 
     // runtime 全目录 + engine 的各目录(i18n/theme/worktree/line_editor 四
     // 叶子在 cli/ 目录,由第二组单独盯;platform 的 console_* 是终端原语层,
-    // 豁免——见文件头裁量)。
+    // 豁免——见文件头裁量)。sessions/peers/skills 是骨架拆解批七从 agent/
+    // 迁出的 engine 域目录,同入册。
     const std::vector<std::filesystem::path> gate_files = CollectSources({
         "src/runtime", "src/api", "src/agent", "src/tools", "src/config", "src/memory",
-        "src/hooks", "src/mcp", "src/lsp", "src/ptc",
+        "src/hooks", "src/mcp", "src/lsp", "src/ptc", "src/sessions", "src/peers",
+        "src/skills",
     });
     REQUIRE_FALSE(gate_files.empty());
 

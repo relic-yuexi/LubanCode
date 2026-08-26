@@ -19,7 +19,7 @@
 #include <vector>
 
 #include "agent/loop.hpp"
-#include "agent/session_store.hpp"
+#include "sessions/session_store.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "runtime/event.hpp"

@@ -393,9 +393,11 @@ add_library(lubancode_engine STATIC
   src/tools/list_sessions_tool.cpp
   src/tools/send_session_message_tool.cpp
   src/agent/loop.cpp
-  src/agent/peer_registry.cpp
-  src/agent/peer_mailbox.cpp
-  src/agent/peer_session.cpp
+  # 骨架拆解批七·病十五:peer 域/会话域/技能域物件迁出 agent/(目录归位,
+  # target 不动——engine 的 tool_trace/artifact_store 仍引它们的纯函数)。
+  src/peers/peer_registry.cpp
+  src/peers/peer_mailbox.cpp
+  src/peers/peer_session.cpp
   src/ptc/protocol.cpp
   src/ptc/stub_generator.cpp
   src/ptc/bootstrap_py.cpp
@@ -417,16 +419,16 @@ add_library(lubancode_engine STATIC
   src/agent/compact.cpp
   src/agent/context_budget.cpp
   src/agent/microcompact.cpp
-  src/agent/session_store.cpp
+  src/sessions/session_store.cpp
   # 持久目标单:goal 事件行(goal_v1 族)的 serialize/parse 纯函数。
-  src/agent/goal_session.cpp
+  src/sessions/goal_session.cpp
   # 逐枚追踪单:工具生命周期栅栏事件、恢复账本(纯函数)。
   src/agent/tool_trace.cpp
-  src/agent/session_catalog.cpp
+  src/sessions/session_catalog.cpp
   # 会话管理器单第四五步:SessionLifecycle 搬与删的唯一收口(纯磁盘薄壳)。
-  src/agent/session_lifecycle.cpp
-  src/agent/workflow_recorder.cpp
-  src/agent/skill_drafter.cpp
+  src/sessions/session_lifecycle.cpp
+  src/skills/workflow_recorder.cpp
+  src/skills/skill_drafter.cpp
   # engine 引用的四个 cli 叶子(零标准流、零终端依赖,tools/config 都吃):
   # i18n(字符串表)、theme(配色值)、worktree(git 房务原语)、line_editor
   # (纯逻辑编辑核,agent_tool 吃 DisplayWidthUtf8)。它们留在 src/cli/

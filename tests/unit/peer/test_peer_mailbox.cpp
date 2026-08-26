@@ -5,7 +5,7 @@
 
 #include <string>
 
-#include "agent/peer_mailbox.hpp"
+#include "peers/peer_mailbox.hpp"
 
 using namespace lubancode::agent;
 

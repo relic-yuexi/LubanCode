@@ -47,5 +47,5 @@ docs/
 | 配置字段与默认值 | `src/config/config.*`、`lubancode --config` | [配置手册](reference/configuration.md) |
 | Provider schema | `src/config/provider_catalog.*`、`catalog/providers.json` | [Provider 目录](features/providers/catalog.md) |
 | 工具名与 schema | `src/tools/*`、`ToolRegistry` | [工具参考](reference/tools.md) |
-| 会话与上下文 | `src/agent/session_store.*`、`src/agent/compact.*` | [会话](features/sessions/README.md) |
+| 会话与上下文 | `src/sessions/session_store.*`、`src/agent/compact.*` | [会话](features/sessions/README.md) |
 | 构建、测试与发行 | `CMakeLists.txt`、`.github/workflows/*` | [开发手册](development/README.md) |

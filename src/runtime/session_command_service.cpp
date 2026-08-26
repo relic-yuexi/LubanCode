@@ -4,8 +4,8 @@
 
 #include <utility>
 
-#include "agent/session_catalog.hpp"
-#include "agent/session_lifecycle.hpp"
+#include "sessions/session_catalog.hpp"
+#include "sessions/session_lifecycle.hpp"
 
 namespace lubancode::runtime {
 

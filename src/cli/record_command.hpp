@@ -2,7 +2,7 @@
 // agent::WorkflowRecorder 状态机、停止后起草/预览/确认安装。
 //
 // 纯逻辑(状态机、事件、脱敏、归纳起草、原子安装)分别在
-// agent/workflow_recorder、agent/skill_drafter、config/skill_store,这里只
+// skills/workflow_recorder、skills/skill_drafter、config/skill_store,这里只
 // 做 IO 接线——问话、打印、确认,不掺业务规矩。编进可执行文件(不进
 // lubancode_core),跟 console_input 一个待遇:它要横跨 cli/agent/config
 // 三层,单测钉的是那三层的纯函数,不钉这份壳。
@@ -14,7 +14,7 @@
 #include <optional>
 #include <string>
 
-#include "agent/workflow_recorder.hpp"
+#include "skills/workflow_recorder.hpp"
 #include "cli/theme.hpp"
 
 namespace lubancode::cli {

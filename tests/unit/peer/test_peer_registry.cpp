@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include "agent/peer_registry.hpp"
+#include "peers/peer_registry.hpp"
 
 using namespace lubancode::agent;
 

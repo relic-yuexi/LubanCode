@@ -8,7 +8,7 @@
 #include <sstream>
 #include <system_error>
 
-#include "agent/skill_drafter.hpp"
+#include "skills/skill_drafter.hpp"
 #include "cli/console_input.hpp"
 #include "cli/i18n.hpp"
 #include "cli/slash_commands.hpp"

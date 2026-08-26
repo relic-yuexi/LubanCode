@@ -20,7 +20,7 @@
 #include <utility>
 #include <vector>
 
-#include "agent/session_catalog.hpp"
+#include "sessions/session_catalog.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/session_command_service.hpp"
 #include "runtime/tool_trace_hub.hpp"

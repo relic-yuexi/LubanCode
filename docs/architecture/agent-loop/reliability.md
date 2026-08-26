@@ -334,7 +334,7 @@ compact 先在内存里验收并替换 history，后往 session 追加 `compact_
 | step 主循环 | `src/agent/loop.cpp`、`loop.hpp` | `tests/unit/agent/test_loop.cpp` |
 | turn 异常与 UI 收口 | `src/app/turn_runner.cpp` | `tests/unit/agent/test_loop.cpp` 与交互回归测试 |
 | 会话泵与落盘 | `src/app/interactive_session.cpp` | `tests/unit/sessions/test_session_store.cpp` |
-| JSONL 回放与配对修补 | `src/agent/session_store.cpp` | `tests/unit/sessions/test_session_store.cpp` |
+| JSONL 回放与配对修补 | `src/sessions/session_store.cpp` | `tests/unit/sessions/test_session_store.cpp` |
 | 三协议单 attempt | `src/api/chat/client.cpp`、`responses/client.cpp`、`anthropic/client.cpp` | 各 provider client/request 测试 |
 | MCP pending 与 timeout | `src/mcp/client.cpp`、`transport.cpp` | `tests/integration/protocols/test_mcp_client.cpp` |
 | memory durable jobs | `src/memory/project_memory.cpp` | `tests/unit/memory/test_project_memory.cpp` |

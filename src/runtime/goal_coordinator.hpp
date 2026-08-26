@@ -29,7 +29,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "agent/goal_session.hpp"
+#include "sessions/goal_session.hpp"
 #include "runtime/goal_types.hpp"
 
 namespace lubancode::runtime::goal {
