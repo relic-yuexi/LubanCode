@@ -181,10 +181,12 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
     // 统一提交:先跨家判定(/model 跨家收口)——所选模型目录条目声明了
     // 归属别家时,连 provider 一起切(base_url/鉴权/wire/目录声明全套,
     // 与 /provider switch 同一条 ExecuteProviderSwitch 路),再切换模型;
-    // 否则旧行为,只切模型不动连接。切不动(该家没配、缺密钥、没递切换
-    // 能力)如实提示;该家没配或缺 key 时连接未换,模型照旧切过去(用户
-    // 要在当前家硬试同名模型,不拦,但把话说在前头)。
+    // 否则旧行为,只切模型不动连接。该家没配时不切不拦,名字记下来等
+    // 切成后以备注口吻说一句(第三轮返件:从"连接未换可能不认"的警告
+    // 降为备注——中转家的模型进得了活列表、进不了本地目录,报警告就
+    // 是唬人);缺密钥或没递切换能力照样如实拦,不留半切换。
     bool switched_provider = false;
+    std::string unconfigured_provider;  // 非空 = 切成后补一句备注
     if (ctx.model_catalog != nullptr && ctx.active_provider != nullptr) {
         const std::vector<lubancode::config::ProviderConfig> no_providers;
         const std::vector<lubancode::config::ProviderConfig>& providers =
@@ -192,7 +194,7 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
         const auto hop = ModelProviderHopFor(*ctx.model_catalog, providers, *ctx.active_provider, chosen);
         if (hop.has_value()) {
             if (!hop->configured) {
-                TermOut() << trf("cmd.model.other_provider_unconfigured", chosen, hop->provider_id) << "\n";
+                unconfigured_provider = hop->provider_id;
             } else if (!ctx.switch_provider) {
                 TermOut() << trf("cmd.model.other_provider_unswitchable", chosen, hop->provider_id) << "\n";
             } else if (ctx.switch_provider(hop->provider_id)) {
@@ -214,6 +216,19 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
         TermOut() << trf("cmd.model.fetch_failed", result.error) << "\n";
         return;
     }
+    // 活列表选择落痕(第三轮返件):切成的模型在当前家写一条用户条目进
+    // models.json——"这家确实用过这模型"的真凭据,此后跨家判定第一步
+    // 认它,再切同名零提示。失败只报一行,不拦切换。
+    if (ctx.active_provider != nullptr && !ctx.active_provider->empty()) {
+        const auto models_path = lubancode::config::ModelCatalogPath();
+        if (models_path.has_value()) {
+            const auto remembered = lubancode::config::RememberModelChoiceInCatalog(
+                *models_path, *ctx.active_provider, result.model, result.model);
+            if (!remembered.has_value()) {
+                TermOut() << trf("cmd.model.remember_choice_failed", remembered.error()) << "\n";
+            }
+        }
+    }
     // 五层后端退役(批四):/model 的即时生效改走皮上的 request
     // 档案与叠层(model/effort/目录指令/魂一并刷新),下一份
     // 请求带上新模型——前缀指纹从此看得见 model_changed,cache
@@ -226,6 +241,9 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
         TermOut() << trf("cmd.model.switched_with_provider", result.model, *ctx.active_provider) << "\n";
     } else {
         TermOut() << trf("cmd.model.switched", result.model) << "\n";
+    }
+    if (!unconfigured_provider.empty()) {
+        TermOut() << trf("cmd.model.other_provider_note", result.model, unconfigured_provider) << "\n";
     }
     if (result.think_from_catalog) {
         TermOut() << trf("catalog.apply_think", result.think) << "\n";

@@ -501,7 +501,13 @@ TEST_CASE("ModelProviderHopFor:当前家有的模型不报跨家,归属只认配
     lubancode::config::ModelCatalogEntry other;
     other.provider_id = "gemini";
     other.slug = "solo-model";
-    catalog.models = {openai, cc, own, relay, mine, cc_lm_official, cc_lm, other};
+    // 活列表落痕写的用户条目:带归属的 models.json 条目,"这家确实用过这
+    // 模型"的凭据。当前家(local)目录条目没有、官方 openai 条目列着的
+    // 模型,凭它也命中本家。
+    lubancode::config::ModelCatalogEntry traced;
+    traced.provider_id = "local";
+    traced.slug = "relay-only";
+    catalog.models = {openai, cc, own, relay, mine, cc_lm_official, cc_lm, other, traced};
 
     lubancode::config::ProviderConfig p_cc{
         .name = "ccmoon",
@@ -520,6 +526,8 @@ TEST_CASE("ModelProviderHopFor:当前家有的模型不报跨家,归属只认配
     CHECK_FALSE(ModelProviderHopFor(catalog, providers, "local", "gpt-x").has_value());
     // 用户自写条目(归属不明)压过一切:本家,不猜。
     CHECK_FALSE(ModelProviderHopFor(catalog, providers, "local", "anonymous-model").has_value());
+    // 活列表落痕条目(带归属的用户条目):这家确实用过,本家,零提示。
+    CHECK_FALSE(ModelProviderHopFor(catalog, providers, "local", "relay-only").has_value());
     // 目录没有的模型(手敲的裸名):不猜归属。
     CHECK_FALSE(ModelProviderHopFor(catalog, providers, "local", "who-am-i").has_value());
     // 真跨家:当前家没有、别家条目列了、配置里有那家 → 切那家。没配的
