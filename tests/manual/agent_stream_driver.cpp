@@ -37,6 +37,7 @@ HANDLE g_conout = INVALID_HANDLE_VALUE;
 std::ofstream g_report;
 std::mutex g_log_mutex;
 int g_failures = 0;
+DWORD g_start_tick = 0;  // SERVER 日志的相对毫秒零点(wmain 里起表)
 
 void Log(const std::string& line) {
     std::lock_guard<std::mutex> lock(g_log_mutex);
@@ -125,6 +126,24 @@ int CountMainRows() {
     int count = 0;
     for (int row = 0; row < 400; ++row) {
         const std::string text = ReadRow(row);
+        if (text.find("\xe2\x97\x8f main") != std::string::npos ||
+            text.find("\xe2\x97\x89 main") != std::string::npos) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+// 可视区内 main 行计数:残帧判定只认用户看得见的行(整缓冲口径见上方
+// CountMainRows,留作对照)。
+int CountMainRowsViewport() {
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (!GetConsoleScreenBufferInfo(g_conout, &info)) {
+        return -1;
+    }
+    int count = 0;
+    for (int r = info.srWindow.Top; r <= info.srWindow.Bottom; ++r) {
+        const std::string text = ReadRow(r);
         if (text.find("\xe2\x97\x8f main") != std::string::npos ||
             text.find("\xe2\x97\x89 main") != std::string::npos) {
             ++count;
@@ -491,13 +510,13 @@ const char* kWatchDone =
     "\xe9\x98\xbb\xef\xbc\x8c\xe5\xa6\x82\xe5\xae\x9e\xe4\xba\xa4\xe5\x8d\xb7";  // 慢工完毕:写操作受阻,如实交卷
 const char* kDenyToast = "write_file \xe6\x9c\xaa\xe6\x94\xbe\xe8\xa1\x8c";  // write_file 未放行
 const char* kDenyPrompt =
-    "åå°è¦åä¸ä»½ææ"
-    "å»äº¤å·®";  // 后台要写一份材料去交差
+    "\xe5\x90\x8e\xe5\x8f\xb0\xe8\xa6\x81\xe5\x86\x99\xe4\xb8\x80\xe4\xbb\xbd\xe6\x9d\x90\xe6\x96\x99"
+    "\xe5\x8e\xbb\xe4\xba\xa4\xe5\xb7\xae";  // 后台要写一份材料去交差
 const char* kDenyUser =
-    "åæ´¾ä¸åªåå°å»å"
-    "ææ";  // 再派一只后台去写材料
+    "\xe5\x86\x8d\xe6\xb4\xbe\xe4\xb8\x80\xe5\x8f\xaa\xe5\x90\x8e\xe5\x8f\xb0\xe5\x8e\xbb\xe5\x86\x99"
+    "\xe6\x9d\x90\xe6\x96\x99";  // 再派一只后台去写材料
 const char* kDenyTitle =
-    "åææçåå°";  // 写材料的后台
+    "\xe5\x86\x99\xe6\x9d\x90\xe6\x96\x99\xe7\x9a\x84\xe5\x90\x8e\xe5\x8f\xb0";  // 写材料的后台
 const char* kDenyLedger =
     "\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe6\x9d\x83\xe9\x99\x90\xe6\x9c\xaa\xe6\x94\xbe"
     "\xe8\xa1\x8c";  // 后台子代理权限未放行
@@ -593,8 +612,9 @@ int StartFakeAnthropicServer() {
             }
             stage = state->main_stage;
         }
-        Log("SERVER request body_bytes=" + std::to_string(body.size()) +
-            " sub=" + (sub_agent_request ? "y" : "n") + " stage=" + std::to_string(stage) +
+        Log("SERVER t=" + std::to_string(GetTickCount() - g_start_tick) + "ms body_bytes=" +
+            std::to_string(body.size()) + " sub=" + (sub_agent_request ? "y" : "n") +
+            " stage=" + std::to_string(stage) +
             (sub_agent_request ? "" : " head=" + body.substr(0, 120)));
         // 已完成的读文件轮数(数 tool_use 入参里路径出现的次数):第三幕
         // 两只后台代理靠"每轮一秒"的读文件链拖时间——单条慢连接会把主
@@ -735,10 +755,10 @@ int StartFakeAnthropicServer() {
             }
         } else if (stage == 5) {
             // 第五幕:主回合派 #6(写材料)后收口,剩下的交给子代理自己撞墙。
-            if (has("åå°å­ä»£ç #6")) {  // 后台子代理 #6
+            if (has("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86 #6")) {
                 RespondSse(client_fd,
-                           TextTurn("ææå·²æ´¾å¦¥ï¼"
-                                    "ç­å®äº¤å·®"));  // 材料已派妥,等它交差
+                           TextTurn("\xe6\x9d\x90\xe6\x96\x99\xe5\xb7\xb2\xe6\xb4\xbe\xe5\xa6\xa5\xef\xbc\x8c"
+                                    "\xe7\xad\x89\xe5\xae\x83\xe4\xba\xa4\xe5\xb7\xae"));
             } else {
                 RespondSse(client_fd,
                            ToolUseTurn("toolu_deny", "agent",
@@ -830,6 +850,7 @@ int wmain(int argc, wchar_t** argv) {
     if (!g_report.is_open()) {
         return 2;
     }
+    g_start_tick = GetTickCount();
 
     // 假 anthropic 服务 + 子进程环境:全量指到本地,不碰真网络,也不被
     // 会话中转/代理截胡(NO_PROXY 盖掉 http_proxy)。
@@ -843,11 +864,13 @@ int wmain(int argc, wchar_t** argv) {
     // worker——每个后台子代理起跑都要现建一份注册表/技能段,真 HOME 的体
     // 量会让"新任务起跑"拖到十几秒甚至卡死,剧本时序全乱。给子进程一个
     // 空 HOME(配置全由 LUBANCODE_* 环境变量给,不会进向导),刮屏剧本才
-    // 只考验被测代码,不考验宿主机的家底。
+    // 只考验被测代码,不考验宿主机的家底。目录名带本进程 pid:同一工作目录
+    // 连跑多把也互不攒账(上把的记忆/同伴注册表绝不渗进这把的时序)。
     {
         wchar_t workdir_buf[MAX_PATH]{};
         GetCurrentDirectoryW(MAX_PATH, workdir_buf);
-        const std::wstring hermetic_home = std::wstring(workdir_buf) + L"\\drvhome";
+        const std::wstring hermetic_home =
+            std::wstring(workdir_buf) + L"\\drvhome_" + std::to_wstring(GetCurrentProcessId());
         CreateDirectoryW(hermetic_home.c_str(), nullptr);
         CreateDirectoryW((hermetic_home + L"\\.lubancode").c_str(), nullptr);
         SetEnv(L"USERPROFILE", hermetic_home);
@@ -949,24 +972,71 @@ int wmain(int argc, wchar_t** argv) {
           "流式:旧三行状态块(ctrl+o 展开明细)不再出现");
 
     // ---- 残帧计数:工具跑着、耗时/tokens 跳动,导航不复制 ----
-    Check(CountRowsWith("\xe2\x86\x91/\xe2\x86\x93") == 1, "流式:操作提示恰好一份");
-    Check(CountMainRows() == 1, "流式:main 行恰好一份");
+    // 口径重钉(终端接线批后):footer 随正文滚动,滚过去的旧帧行会在回滚
+    // 缓冲里短暂留影——用户看不见(可视区之外),整缓冲计数把这种瞬影也当
+    // 残帧,连跑三把两把误伤。判定改数可视区(残帧=用户看得见的重复),
+    // 整缓冲多出来的行照旧倒进报告(INFO 留档,不判定),真赖账的残帧一
+    // 眼可辨。
+    const auto dump_buffer_rows_with = [](const std::string& needle, const char* tag) {
+        if (CountRowsWith(needle) == CountViewportRowsWith(needle)) {
+            return;
+        }
+        CONSOLE_SCREEN_BUFFER_INFO info{};
+        if (!GetConsoleScreenBufferInfo(g_conout, &info)) {
+            return;
+        }
+        for (int row = 0; row < 400; ++row) {
+            if (ReadRow(row).find(needle) == std::string::npos) {
+                continue;
+            }
+            const bool in_view = row >= info.srWindow.Top && row <= info.srWindow.Bottom;
+            if (!in_view) {
+                Log(std::string("GHOST ") + tag + " row " + std::to_string(row) + ": " + ReadRow(row));
+            }
+        }
+    };
+    // 采样不过时把两本账(可视区/整缓冲)的计数与命中行全倒进报告:0 与 2
+    // 的病根不同,留档才好定罪。
+    const auto log_counts = [](const std::string& needle, const char* tag) {
+        CONSOLE_SCREEN_BUFFER_INFO info{};
+        GetConsoleScreenBufferInfo(g_conout, &info);
+        Log(std::string("SAMPLE ") + tag + " viewport=" + std::to_string(CountViewportRowsWith(needle)) +
+            " buffer=" + std::to_string(CountRowsWith(needle)) + " window=" +
+            std::to_string(info.srWindow.Top) + "-" + std::to_string(info.srWindow.Bottom));
+        for (int row = 0; row < 400; ++row) {
+            if (ReadRow(row).find(needle) != std::string::npos) {
+                const bool in_view = row >= info.srWindow.Top && row <= info.srWindow.Bottom;
+                Log(std::string("SAMPLE ") + tag + " row " + std::to_string(row) + (in_view ? " [view]" : " [hist]") +
+                    ": " + ReadRow(row));
+            }
+        }
+    };
+    const auto stable_viewport_count = [&log_counts](const std::string& needle, const char* tag) {
+        const int first = CountViewportRowsWith(needle);
+        if (first == 1) {
+            return first;
+        }
+        Sleep(300);
+        const int second = CountViewportRowsWith(needle);
+        if (second == 1) {
+            return second;
+        }
+        Log(std::string("SAMPLE unstable after retry: first=") + std::to_string(first) +
+            " second=" + std::to_string(second));
+        log_counts(needle, tag);
+        return second;
+    };
+    Check(stable_viewport_count("\xe2\x86\x91/\xe2\x86\x93", "hint") == 1,
+          "流式:操作提示恰好一份(可视区)");
+    Check(CountMainRowsViewport() == 1, "流式:main 行恰好一份(可视区)");
     for (int sample = 0; sample < 3; ++sample) {
         Sleep(1500);  // 耗时 ~1s 一跳,采样跨多拍
-        // 逐行刮屏不是原子快照,footer 重画可能恰好落在两行读数之间——
-        // 首数不过时隔 300ms 复读一次,两次都不过才算真残帧。
-        const auto stable_count = [](const std::string& needle) {
-            const int first = CountRowsWith(needle);
-            if (first == 1 || first == 0) {
-                return first;
-            }
-            Sleep(300);
-            return CountRowsWith(needle);
-        };
-        Check(stable_count("\xe2\x86\x91/\xe2\x86\x93") == 1,
+        Check(stable_viewport_count("\xe2\x86\x91/\xe2\x86\x93", "hint") == 1,
               "流式:耗时/token 刷新后操作提示仍恰好一份(第 " + std::to_string(sample + 1) + " 次采样)");
-        Check(CountRowsWith("general-purpose") <= 1,
+        Check(CountViewportRowsWith("general-purpose") <= 1,
               "流式:坞行不随刷新复制(第 " + std::to_string(sample + 1) + " 次采样)");
+        dump_buffer_rows_with("\xe2\x86\x91/\xe2\x86\x93", "hint");
+        dump_buffer_rows_with("general-purpose", "dock");
     }
 
     // ---- Up 进坞焦点:选中标记出现在状态栏之下 ----
@@ -1022,7 +1092,10 @@ int wmain(int argc, wchar_t** argv) {
     GetExitCodeProcess(pi.hProcess, &alive);
     Check(alive == STILL_ACTIVE, "流式 Ctrl+C 清字:进程仍活(没进双击退出)");
 
-    // ---- Esc 逐层退:先退查看态(标签摘掉),再退焦点;两下都不打断整轮 ----
+    // ---- Esc 一拍退净(规格"现场二"按键契约改版):查看、选择、焦点一次
+    //      收干净。旧断言按"两下 Esc 逐层退"钉的——那套两层契约已改,再按
+    //      第二下会把 Esc 送到流式监听当打断用;这里只按一下,断言一拍全退
+    //      且不打断整轮。----
     SendKey(VK_ESCAPE, 0, 0);
     {
         // 查看态退掉的标志:上横线右端的 title 标签摘掉(视口里铺过的
@@ -1037,30 +1110,54 @@ int wmain(int argc, wchar_t** argv) {
                   ReadRow(rule_after_view).find(kTitle) == std::string::npos,
               "流式:Esc 先退查看态(上横线 title 标签摘掉)");
     }
-    SendKey(VK_ESCAPE, 0, 0);
-    Check(WaitForTextGone("\xe2\x9d\xaf", 3000), "流式:再 Esc 退代理焦点");
-    Check(FindLastRow(kTitle) >= 0 && FindLastRow("\xe5\xb7\xb2\xe6\x89\x93\xe6\x96\xad") < 0,
-          "流式:两下 Esc 都没有打断整轮(坞还在)");
-    Check(CountDockRowsWith("general-purpose", ComposerTopRuleNow()) <= 1,
-          "流式:退查看态后坞行至多一份(标签已摘)");
+    Check(WaitForTextGone("\xe2\x9d\xaf", 3000), "流式:一拍 Esc 连代理焦点一并收干净(❯ 消失)");
+    Check(FindLastRow("\xe5\xb7\xb2\xe6\x89\x93\xe6\x96\xad") < 0,
+          "流式:一拍 Esc 退场不打断当前轮(没有'[已打断]')");
+    {
+        // 与残帧采样同款的重画空窗保险:首数 >1 隔 300ms 复读,两次都超
+        // 才算真复制。
+        int dock_after_esc = CountDockRowsWith("general-purpose", ComposerTopRuleNow());
+        if (dock_after_esc > 1) {
+            Sleep(300);
+            dock_after_esc = CountDockRowsWith("general-purpose", ComposerTopRuleNow());
+        }
+        Check(dock_after_esc <= 1, "流式:退查看态后坞行至多一份(标签已摘)");
+    }
 
-    // ---- 放开子代理:ping 跑完,Running 原地变完成,回合收场回空闲 ----
+    // ---- 放开子代理:ping 跑完,结果当拍交回主回合,回合收场回空闲 ----
     // 注:子代理结论文本只在工具结果里,屏上摘要行是"子代理 N 轮 · M 次工具";
     // 主代理收尾正文紧跟着被 footer 的整帧重画顶走——所以这两条按"终态与
     // 回合收口"断言,不赌瞬时正文。
     Check(WaitForText("\xe6\xac\xa1\xe5\xb7\xa5\xe5\x85\xb7", 30000),
           "收尾:agent 条目终态摘要出现");  // "次工具"(⎿ 子代理 N 轮 · M 次工具)
-    Check(WaitForText("\xe5\xae\x8c\xe6\x88\x90(", 15000), "收尾:坞 Running 原地变完成");
-    // 回到空闲后:坞还挂着这条任务的终态,title 不跳、不重复、仍在下方。
-    Check(WaitForText(kTitle, 10000), "空闲:坞保住终态任务的 title");
+    // 前台任务完成即投递(结果直接落回主回合的工具结果),"Running 原地变
+    // 完成"的过渡态只有一瞬,刮屏抓不住;断言重钉为投递后的新规矩——完成
+    // 任务的坞行退场,不赖在坞里(规格"现场一"退场账)。
+    {
+        const DWORD retire_deadline = GetTickCount() + 15000;
+        bool retired = false;
+        while (GetTickCount() < retire_deadline) {
+            if (CountDockRowsWith("general-purpose", ComposerTopRuleNow()) == 0) {
+                retired = true;
+                break;
+            }
+            Sleep(200);
+        }
+        Check(retired, "收尾:前台任务完成投递,坞行退场(不赖坞)");
+    }
+    // 回到空闲后:任务已 done+delivered 退场,台账与正文照查(● agent 条目
+    // 还挂着 title),坞区归零。
+    Check(WaitForText(kTitle, 10000), "空闲:终态任务的 title 仍可查(台账/正文在)");
     Check(WaitForIdleComposer(15000), "空闲:composer 真画出来再数账");
     Sleep(700);  // 等收尾的最后一帧整帧画稳(耗时/token 跳动的那一拍)
     {
         const int idle_input = FindFooterInputRow();
         const int idle_rule = idle_input > 0 ? FindRuleAboveInput(idle_input) : -1;
-        Check(CountDockRowsWith("general-purpose", idle_rule) == 1, "空闲:坞行恰好一份(残帧归零)");
-        Check(CountDockRowsWith("\xe2\x97\x8f main", idle_rule) == 1, "空闲:main 恰好一份");
-        Check(FindLastDockRow(kTitle, idle_rule) > idle_rule + 3, "空闲:终态 title 仍在状态栏之下贴底");
+        Check(CountDockRowsWith("general-purpose", idle_rule) == 0, "空闲:坞行归零(残帧归零)");
+        Check(CountDockRowsWith("\xe2\x97\x8f main", idle_rule) == 0,
+              "空闲:无在册代理时整坞不出场(0 只不画孤零零 main)");
+        Check(FindLastDockRow(kTitle, idle_rule) < 0, "空闲:title 不落坞区(退场无痕)");
+        Check(idle_rule > 0 && FindLastRow(kTitle) < idle_rule, "空闲:终态 title 归正文区(chrome 之上)");
     }
 
     // ---- 第二幕:后台子代理在空闲时完成 → 旧底栏正式退场,通知归 transcript ----
@@ -1141,9 +1238,12 @@ int wmain(int argc, wchar_t** argv) {
     // 与空闲 composer,拿它当空闲门闩会把导航键喂给监听线程。
     Check(WaitForText(kFastTitle, 15000), "第三幕:快代理 #3 入坞");
     Check(WaitForText(kSlowTitle, 15000), "第三幕:慢代理 #4 入坞");
-    Check(WaitForText("\xe8\xaf\xb7\xe6\xb1\x82 3 \xe6\xac\xa1", 15000),
-          "第三幕:主回合收口(请求 3 次统计行)");  // 请求 3 次
-    Check(WaitForIdleComposer(15000), "第三幕:空闲 composer 画出");
+    // 收口门闩整枚撤下(不再等收口再导航):SERVER 时戳实测,场上同时有两
+    // 只"每秒一轮"的轮询子代理时,主回合的收口请求要排到 #3 整条命跑完
+    // (~15s)才出得去——等收口正文,导航就永远赶不上 #3 交卷前。改为两枚
+    // title 入坞即在流式期间导航(流式监听同样吃 Up/Down/Enter,第一幕整
+    // 段已验);"回合真收口"改由后面的静默回流链事后背书(没收口+回空闲,
+    // 回流根本不会发生)。
     Sleep(700);
     {
         // 重画挪位的空窗:重测三次再定罪。
@@ -1206,6 +1306,11 @@ int wmain(int argc, wchar_t** argv) {
     // Ctrl+C 清草稿 -> 空闲唤醒 -> 查看态静默回流(输出全进台账,不上屏)。
     SendKey('C', 0, LEFT_CTRL_PRESSED);
     Check(WaitForText(kToastText, 25000), "第三幕:静默回流收口,导航坞 toast 出现");
+    // 事后核账:回流能走通,前提是主回合真收过口(收口正文"两只后台都
+    // 派好了"已在台账里)——导航不再等它,这里补上"它确实发生过"。
+    Check(FindLastRow("\xe4\xb8\xa4\xe5\x8f\xaa\xe5\x90\x8e\xe5\x8f\xb0\xe9\x83\xbd\xe6\xb4\xbe\xe5\xa5\xbd"
+                      "\xe4\xba\x86") >= 0,
+          "第三幕:主回合最终收口(回流链前置,事后核账)");  // 两只后台都派好了
     Sleep(400);
     {
         // 查看帧零扰动:头行/正文行号不漂、恰好一份;回流正文一个字不上屏。
@@ -1267,8 +1372,8 @@ int wmain(int argc, wchar_t** argv) {
     SendKey(VK_DOWN, 0, 0);
     Sleep(600);
     SendKey(VK_RETURN, L'', 0);
-    Check(WaitForText("æ¥ç general-purpose #5", 15000),
-          "第四幕:切看 #5(查看头行出现)");  // 查看 general-purpose #5
+    Check(WaitForText("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #5", 15000),
+          "第四幕:切看 #5(查看头行出现)");
     // 完成退场:#5 交卷 -> 查看态静默回流 -> 坞行退场 -> 查看目标消失 ->
     // 原子回 main。视口内"已回主会话"出现(第三幕那条在滚屏里,不数),
     // #5 查看头行从视口消失。
@@ -1276,8 +1381,8 @@ int wmain(int argc, wchar_t** argv) {
         const DWORD retire_deadline = GetTickCount() + 60000;
         bool retired = false;
         while (GetTickCount() < retire_deadline) {
-            if (CountViewportRowsWith("å·²åä¸»ä¼è¯") >= 1 &&
-                CountViewportRowsWith("æ¥ç general-purpose #5") == 0) {
+            if (CountViewportRowsWith("\xe5\xb7\xb2\xe5\x9b\x9e\xe4\xb8\xbb\xe4\xbc\x9a\xe8\xaf\x9d") >= 1 &&
+                CountViewportRowsWith("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #5") == 0) {
                 retired = true;
                 break;
             }
@@ -1334,8 +1439,8 @@ int wmain(int argc, wchar_t** argv) {
     SendKey(VK_DOWN, 0, 0);
     Sleep(600);
     SendKey(VK_RETURN, L'', 0);
-    Check(WaitForText("æ¥ç general-purpose #6", 15000),
-          "第五幕:切看 #6(查看头行出现)");  // 查看 general-purpose #6
+    Check(WaitForText("\xe6\x9f\xa5\xe7\x9c\x8b general-purpose #6", 15000),
+          "第五幕:切看 #6(查看头行出现)");
     // 拒权当场告知:#6 第二轮 write_file 被拒,toast 几秒自收,轮询抓现挂。
     Check(WaitForText(kDenyToast, 30000), "第五幕:拒权 toast 当场出现(不攒到报告)");
     Log("ACT5 done: 拒权已当场告知;后续(#6 交卷/退场)受既有'拒权后任务线程哑火'"
