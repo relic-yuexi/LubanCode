@@ -58,6 +58,9 @@
 #include "app/backend_stack.hpp"
 #include "app/runtime_profile.hpp"
 #include "app/tool_runtime.hpp"
+#include "app/commands/memory_commands.hpp"
+#include "app/commands/model_commands.hpp"
+#include "app/commands/trace_commands.hpp"
 #include "app/hook_runtime.hpp"
 #include "app/turn_runner.hpp"
 #include "app/commands/session_commands.hpp"
@@ -180,18 +183,6 @@ namespace {
 
 void PrintSlashHelp() {
     TermOut() << tr("slash_help.body");
-}
-
-// /model <role> <id> 的角色词归一:小写 + 去首尾空白(TrimAscii 是
-// turn_runner.hpp 里现成的,只去空白不动大小写——模型 id 走它,角色词
-// 走这里)。文件内自由函数,与 slash_commands.cpp 的 Trim/ToLower
-// 同一套规矩(ASCII 空白)。
-std::string NormalizeRoleWord(std::string word) {
-    std::string out = TrimAscii(std::move(word));
-    for (char& c : out) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
-    return out;
 }
 
 // 来信转成带来源标识的用户块:不装成用户手敲的字,模型一眼看得出来历;
@@ -420,8 +411,6 @@ private:
     // 提及账(空 = 没有)。
     std::pair<std::string, std::string> BuildMentionLedger(const std::string& content);
     void EnsureMemoryTool();
-    void PrintMemoryUsage() const;
-    void HandleMemoryCommand(const std::string& raw_args);
     // 回合收尾的记忆抽取:learn 档位不在 off 才跑;失败只打一行,不影响
     // 主会话(用户基调 1/3:分型总结 + 检索扩展词)。
     void ExtractTurnMemory(const std::string& user_text, std::size_t history_before);
@@ -2456,397 +2445,6 @@ void TerminalSessionController::EnsureMemoryTool() {
     }
 }
 
-void TerminalSessionController::PrintMemoryUsage() const {
-    TermOut() << tr("cmd.memory.usage");
-}
-
-void TerminalSessionController::HandleMemoryCommand(const std::string& raw_args) {
-    if (project_memory == nullptr) {
-        TermOut() << tr("cmd.memory.unavailable") << "\n";
-        return;
-    }
-
-    std::istringstream words(raw_args);
-    std::string action;
-    words >> action;
-    std::transform(action.begin(), action.end(), action.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (action.empty() || action == "status") {
-        const auto status = project_memory->Status();
-        const auto toggle_word = [](bool enabled) { return enabled ? tr("cmd.memory.on") : tr("cmd.memory.off"); };
-        TermOut() << trf("cmd.memory.global", toggle_word(status.global_allowed)) << "\n"
-                  << trf("cmd.memory.status", toggle_word(status.enabled), toggle_word(status.use),
-                          toggle_word(status.generate))
-                  << "\n"
-                  << trf("cmd.memory.learn_status", status.learn) << "\n"
-                  << trf("cmd.memory.project", status.project_key) << "\n"
-                  << trf("cmd.memory.directory", PathToUtf8(status.memory_dir)) << "\n"
-                  << trf("cmd.memory.counts", status.entry_count, status.pending_jobs) << "\n";
-        if (status.user_enabled) {
-            TermOut() << trf("cmd.memory.user_status", status.user_entry_count,
-                             PathToUtf8(status.user_memory_dir))
-                      << "\n";
-        }
-        TermOut() << trf("cmd.memory.candidates", status.pending_candidates) << "\n";
-        return;
-    }
-    if (action == "on" || action == "off") {
-        // 授权闸:全局未授权时 /memory on 只会得到"去哪改全局配置"的指引,
-        // 不能凭本场命令翻开能力(规格"授权与本场状态分开")。
-        const auto toggled = project_memory->set_enabled(action == "on");
-        if (!toggled.has_value()) {
-            TermOut() << tr("cmd.memory.denied") << "\n";
-            return;
-        }
-        if (action == "on") EnsureMemoryTool();
-        TermOut() << trf("cmd.memory.master", action == "on" ? tr("cmd.memory.on") : tr("cmd.memory.off"))
-                  << "\n";
-        return;
-    }
-    if (action == "use") {
-        std::string value;
-        words >> value;
-        std::transform(value.begin(), value.end(), value.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        if (value != "on" && value != "off") {
-            PrintMemoryUsage();
-            return;
-        }
-        const bool enabled = value == "on";
-        if (enabled && !project_memory->global_allowed()) {
-            TermOut() << tr("cmd.memory.denied") << "\n";
-            return;
-        }
-        project_memory->set_use(enabled);
-        TermOut() << trf("cmd.memory.toggle", tr("cmd.memory.retrieval"),
-                         enabled ? tr("cmd.memory.on") : tr("cmd.memory.off"))
-                  << "\n";
-        return;
-    }
-    if (action == "learn") {
-        std::string value;
-        words >> value;
-        std::transform(value.begin(), value.end(), value.begin(),
-                       [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-        // 兼容老写法:learn on = review,learn off = off。
-        if (value == "on") value = "review";
-        auto mode = lubancode::memory::ParseLearnMode(value);
-        if (!mode.has_value()) {
-            PrintMemoryUsage();
-            return;
-        }
-        const auto switched = project_memory->set_learn(*mode);
-        if (!switched.has_value()) {
-            // 全局未授权(auto 上限之外的降档仍允许),给出指引。
-            if (!project_memory->global_allowed()) {
-                TermOut() << tr("cmd.memory.denied") << "\n";
-            } else {
-                TermOut() << trf("cmd.memory.learn_denied", switched.error()) << "\n";
-            }
-            return;
-        }
-        EnsureMemoryTool();
-        TermOut() << trf("cmd.memory.learn_set", lubancode::memory::LearnModeName(*mode)) << "\n";
-        return;
-    }
-    if (action == "review") {
-        const auto candidates = project_memory->ListCandidates();
-        if (candidates.empty()) {
-            TermOut() << tr("cmd.memory.review.empty") << "\n";
-            return;
-        }
-        TermOut() << tr("cmd.memory.review.header") << "\n";
-        for (const auto& candidate : candidates) {
-            TermOut() << "- " << candidate.id << " [" << lubancode::memory::MemoryKindName(candidate.kind)
-                      << "/" << candidate.confidence << "] " << candidate.title;
-            if (!candidate.summary.empty() && candidate.summary != candidate.title) {
-                TermOut() << " - " << candidate.summary;
-            }
-            TermOut() << "\n";
-        }
-        TermOut() << tr("cmd.memory.review.hint") << "\n";
-        return;
-    }
-    if (action == "accept" || action == "reject") {
-        std::string id;
-        words >> id;
-        if (id.empty()) {
-            PrintMemoryUsage();
-            return;
-        }
-        std::string reason;
-        std::getline(words, reason);
-        reason = TrimAscii(std::move(reason));
-        if (action == "accept") {
-            const auto queued = project_memory->AcceptCandidate(id);
-            TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
-                                             : trf("cmd.memory.queue_failed", queued.error()))
-                      << "\n";
-        } else {
-            const auto rejected = project_memory->RejectCandidate(id, std::move(reason));
-            TermOut() << (rejected.has_value() ? tr("cmd.memory.reject.done")
-                                               : trf("cmd.memory.queue_failed", rejected.error()))
-                      << "\n";
-        }
-        return;
-    }
-    if (action == "edit") {
-        std::string id;
-        words >> id;
-        std::string remainder;
-        std::getline(words, remainder);
-        remainder = TrimAscii(std::move(remainder));
-        if (id.empty() || remainder.empty()) {
-            PrintMemoryUsage();
-            return;
-        }
-        const std::size_t separator = remainder.find("::");
-        std::string title = TrimAscii(remainder.substr(0, separator));
-        std::string content = separator == std::string::npos
-                                  ? std::string()
-                                  : TrimAscii(remainder.substr(separator + 2));
-        const auto edited = project_memory->EditCandidate(id, title, content);
-        TermOut() << (edited.has_value() ? tr("cmd.memory.edit.done")
-                                         : trf("cmd.memory.queue_failed", edited.error()))
-                  << "\n";
-        return;
-    }
-    if (action == "why") {
-        std::string id;
-        words >> id;
-        const auto trace = project_memory->LastTrace();
-        if (!trace.valid) {
-            TermOut() << tr("cmd.memory.why.none") << "\n";
-            return;
-        }
-        TermOut() << trf("cmd.memory.why.header", trace.at) << "\n";
-        TermOut() << trf("cmd.memory.why.origin", trace.query_origin) << "\n";
-        if (trace.skipped) {
-            TermOut() << tr("cmd.memory.why.skipped_turn") << "\n";
-            return;
-        }
-        // 检索词带词路与权重:word=整词/词典实体,gram=中文二元,虚词碎片
-        // 拿低权重——用户要看得出为何命中,不只见一把碎字。
-        std::ostringstream joined_terms;
-        for (std::size_t i = 0; i < trace.terms.size(); ++i) {
-            if (i != 0) joined_terms << " ";
-            joined_terms << trace.terms[i].text << "[" << trace.terms[i].kind << "/"
-                         << trace.terms[i].source << " ×" << trace.terms[i].weight << "]";
-        }
-        TermOut() << trf("cmd.memory.why.terms", joined_terms.str()) << "\n";
-        bool matched_id = id.empty();
-        for (const auto& entry : trace.entries) {
-            if (!id.empty() && entry.id != id) continue;
-            matched_id = true;
-            // 命中来自哪一层:用户层带标注,项目层不打扰(规格"/memory why
-            // 须写清命中来自 user 还是某个 project key")。
-            const std::string shown_id =
-                entry.layer == "user" ? entry.id + tr("cmd.memory.why.layer_user") : entry.id;
-            if (entry.injected) {
-                TermOut() << trf("cmd.memory.why.hit", shown_id, entry.score, entry.hard_hits,
-                                 entry.term_hits, entry.bytes)
-                          << "\n";
-                continue;
-            }
-            std::string reason;
-            if (entry.expired) reason = tr("cmd.memory.why.expired");
-            else if (entry.scope_blocked) reason = tr("cmd.memory.why.scope");
-            else if (entry.stale_blocked) reason = tr("cmd.memory.why.stale");
-            else if (entry.layer_superseded) reason = tr("cmd.memory.why.superseded");
-            else if (entry.duplicate_dropped) reason = tr("cmd.memory.why.duplicate");
-            else if (entry.below_threshold) reason = tr("cmd.memory.why.below_threshold");
-            else if (entry.budget_dropped) reason = tr("cmd.memory.why.budget");
-            else reason = tr("cmd.memory.why.skipped");
-            TermOut() << trf("cmd.memory.why.miss", shown_id, entry.score, entry.hard_hits,
-                             entry.term_hits, reason)
-                      << "\n";
-        }
-        if (!matched_id) {
-            TermOut() << trf("cmd.memory.why.missing", id) << "\n";
-        }
-        TermOut() << trf("cmd.memory.why.total", trace.injected_count, trace.injected_bytes) << "\n";
-        return;
-    }
-    if (action == "list") {
-        std::string error;
-        // 两层合并列:项目层在前,用户层带标注。
-        const auto entries = project_memory->ListEntries(&error);
-        if (!error.empty()) TermOut() << trf("cmd.memory.catalog_warning", error) << "\n";
-        const auto user_entries = project_memory->ListUserEntries(&error);
-        if (!error.empty()) TermOut() << trf("cmd.memory.catalog_warning", error) << "\n";
-        if (entries.empty() && user_entries.empty()) {
-            TermOut() << tr("cmd.memory.empty") << "\n";
-            return;
-        }
-        for (const auto& entry : entries) {
-            TermOut() << "- " << entry.id << " [" << lubancode::memory::MemoryKindName(entry.kind) << "] "
-                      << entry.title;
-            if (!entry.summary.empty() && entry.summary != entry.title) {
-                TermOut() << " - " << entry.summary;
-            }
-            TermOut() << "\n";
-        }
-        for (const auto& entry : user_entries) {
-            TermOut() << "- " << entry.id << " [" << lubancode::memory::MemoryKindName(entry.kind) << "] "
-                      << entry.title << " (" << tr("cmd.memory.user_layer") << ")";
-            if (!entry.summary.empty() && entry.summary != entry.title) {
-                TermOut() << " - " << entry.summary;
-            }
-            TermOut() << "\n";
-        }
-        return;
-    }
-    if (action == "remember") {
-        std::string kind_text;
-        words >> kind_text;
-        // 用户级写法:/memory remember user preference 标题 :: 正文。
-        // 授权另设全局 memory.user_enabled,项目配置无权开。
-        bool to_user = false;
-        if (kind_text == "user") {
-            to_user = true;
-            words >> kind_text;
-        }
-        auto kind = lubancode::memory::ParseMemoryKind(kind_text);
-        std::string remainder;
-        std::getline(words, remainder);
-        remainder = TrimAscii(std::move(remainder));
-        if (!kind.has_value() || remainder.empty()) {
-            PrintMemoryUsage();
-            return;
-        }
-        const std::size_t separator = remainder.find("::");
-        lubancode::memory::SaveRequest request;
-        request.kind = *kind;
-        if (to_user) {
-            request.scope.level = "user";
-            request.scope.kind = "user";
-        }
-        request.title = TrimAscii(remainder.substr(0, separator));
-        request.content = separator == std::string::npos
-                              ? request.title
-                              : TrimAscii(remainder.substr(separator + 2));
-        request.summary = request.content;
-        if (request.title.empty() || request.content.empty()) {
-            PrintMemoryUsage();
-            return;
-        }
-        const auto queued = project_memory->EnqueueSave(request);
-        TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
-                                         : trf("cmd.memory.queue_failed", queued.error()))
-                  << "\n";
-        return;
-    }
-    if (action == "forget") {
-        std::string id;
-        words >> id;
-        if (id.empty()) {
-            PrintMemoryUsage();
-            return;
-        }
-        const auto queued = project_memory->EnqueueForget(id);
-        TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
-                                         : trf("cmd.memory.queue_failed", queued.error()))
-                  << "\n";
-        return;
-    }
-    if (action == "rebuild") {
-        const auto queued = project_memory->EnqueueRebuild();
-        TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
-                                         : trf("cmd.memory.queue_failed", queued.error()))
-                  << "\n";
-        return;
-    }
-    if (action == "stale") {
-        const auto stale = project_memory->ListStaleEntries();
-        if (stale.empty()) {
-            TermOut() << tr("cmd.memory.stale.empty") << "\n";
-            return;
-        }
-        TermOut() << tr("cmd.memory.stale.header") << "\n";
-        for (const auto& item : stale) {
-            TermOut() << "- " << item.entry.id << " [" << item.reason << "] " << item.entry.title;
-            if (item.reason == "fingerprint") {
-                TermOut() << " (" << tr("cmd.memory.stale.fingerprint") << ")";
-            } else {
-                TermOut() << " (" << tr("cmd.memory.stale.expired") << ": " << item.entry.expires_at << ")";
-            }
-            TermOut() << "\n";
-        }
-        TermOut() << tr("cmd.memory.stale.hint") << "\n";
-        return;
-    }
-    if (action == "verify" || action == "refresh") {
-        std::string id;
-        words >> id;
-        if (id.empty()) {
-            PrintMemoryUsage();
-            return;
-        }
-        const auto queued = project_memory->EnqueueVerify(id, action == "refresh");
-        TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
-                                         : trf("cmd.memory.queue_failed", queued.error()))
-                  << "\n";
-        return;
-    }
-    if (action == "show") {
-        std::string id;
-        words >> id;
-        if (id.empty()) {
-            PrintMemoryUsage();
-            return;
-        }
-        const auto topic = project_memory->ReadTopicForShow(id);
-        if (!topic.has_value()) {
-            TermOut() << trf("cmd.memory.queue_failed", topic.error()) << "\n";
-            return;
-        }
-        const auto& [text, dir] = *topic;
-        TermOut() << trf("cmd.memory.show.header", id, PathToUtf8(dir)) << "\n" << text;
-        if (!text.empty() && text.back() != '\n') TermOut() << "\n";
-        return;
-    }
-    if (action == "open") {
-        std::string id;
-        words >> id;
-        const auto edited = id.empty() ? project_memory->OpenIndexInEditor()
-                                       : project_memory->EditTopicInEditor(id);
-        TermOut() << (edited.has_value() ? tr("cmd.memory.open.done")
-                                         : trf("cmd.memory.queue_failed", edited.error()))
-                  << "\n";
-        return;
-    }
-    if (action == "migrate") {
-        // 先列将改/跳过/警告几份,经确认才动盘;原件备进
-        // .state/migration-backup/<时间>/,全部写妥、重建成功才报完成。
-        const auto plan = project_memory->PlanMigration();
-        if (plan.to_migrate == 0) {
-            TermOut() << trf("cmd.memory.migrate.none", plan.to_skip, plan.warnings) << "\n";
-            return;
-        }
-        TermOut() << trf("cmd.memory.migrate.plan", plan.to_migrate, plan.to_skip, plan.warnings) << "\n";
-        for (const auto& item : plan.items) {
-            if (item.action == "migrate") {
-                TermOut() << "  - " << item.id << " (" << item.file << "; " << item.reason << ")\n";
-            } else if (item.action == "warn") {
-                TermOut() << "  [warn] " << item.reason << "\n";
-            }
-        }
-        const auto answer = lubancode::cli::ReadLine(theme.confirm + tr("cmd.memory.migrate.confirm") + theme.reset,
-                                                     theme, /*esc_rejects=*/true);
-        if (!answer.has_value() || (*answer != "y" && *answer != "Y")) {
-            TermOut() << tr("cmd.memory.migrate.cancelled") << "\n";
-            return;
-        }
-        const auto result = project_memory->RunMigration();
-        TermOut() << (result.has_value()
-                          ? trf("cmd.memory.migrate.done", result->migrated, result->backup_dir)
-                          : trf("cmd.memory.queue_failed", result.error()))
-                  << "\n";
-        return;
-    }
-    PrintMemoryUsage();
-}
-
 void TerminalSessionController::SyncWorktreeDirectory() {
     // 切 worktree 收面板:查看态目标跟着旧房的任务走,别把消息投去旧目标。
     lubancode::cli::ResetAgentPanelSession();
@@ -2925,39 +2523,25 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 PrintSlashHelp();
                 break;
             case lubancode::cli::SlashCommand::Model: {
-                // P7(显示系统剥离单):typed API 在 runtime::CommandService,
-                // 终端这条是薄翻译——roles 短表、清单菜单与写回问话留在终端
-                // 渲染层。带参直切与裸敲菜单选出的是同一个 id,选定后同走
-                // SetModel 提交,业务一处(两条输入路不许再分叉)。
-                if (parsed.args == "roles") {
-                    const std::optional<lubancode::agent::ModelRouteTable> roles_table =
-                        model_router != nullptr
-                            ? std::optional<lubancode::agent::ModelRouteTable>(model_router->Table())
-                            : std::nullopt;
-                    PrintModelRolesTable(roles_table.has_value() ? &*roles_table : nullptr);
-                    break;
-                }
-                lubancode::runtime::CommandService::Options command_options;
-                command_options.config = &config;
-                command_options.model_catalog = &model_catalog;
-                command_options.current_model = current_model;
-                command_options.current_think = current_think;
-                command_options.current_model_instructions = current_model_instructions;
-                // 目录窗口生效口:runtime 不认得 cli 的 ContextTracker,回调
-                // 里替它把会话窗口落账。
-                command_options.apply_context_window = [this](std::size_t tokens) {
+                // /model presenter(终端接线收尾单):roles 短表、直切/菜单、
+                // 写回问话全在 commands/model_commands,这里只递会话状态。
+                lubancode::app::ModelCommandContext model_ctx;
+                model_ctx.config = &config;
+                model_ctx.model_catalog = &model_catalog;
+                model_ctx.theme = &theme;
+                model_ctx.context_tracker = &context_tracker;
+                model_ctx.current_model = current_model;
+                model_ctx.current_think = current_think;
+                model_ctx.current_model_instructions = current_model_instructions;
+                model_ctx.model_router = model_router.get();
+                // 写回目标默认全局,没有全局文件退 merged 路径(只剩项目级)。
+                model_ctx.config_file_path = config_result_.global_config_file_path.has_value()
+                                                 ? config_result_.global_config_file_path
+                                                 : config_file_path;
+                model_ctx.apply_context_window = [this](std::size_t tokens) {
                     context_tracker.set_window_tokens(tokens);
                 };
-                // 写回目标默认全局(2026-08-25 改):模型跟人走,不跟项目走,
-                // 免得换个项目就冒出一份钉死的旧模型;项目级要钉,手编
-                // <项目>/.lubancode/config.json。没有全局文件时退 merged
-                // 路径(只剩项目级的情形)。
-                command_options.config_file_path = config_result_.global_config_file_path.has_value()
-                                                       ? config_result_.global_config_file_path
-                                                       : config_file_path;
-                // 问话/回显要与 service 实际写的同一份文件,先抄一份。
-                const std::optional<std::string> write_target = command_options.config_file_path;
-                command_options.fetch_models = [this]()
+                model_ctx.fetch_models = [this]()
                     -> std::expected<std::vector<std::pair<std::string, std::string>>, std::string> {
                     const auto headers = lubancode::config::ResolveProviderHeaderTemplates(
                         config.extra_headers, config.auth_token);
@@ -2973,112 +2557,8 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                     }
                     return out;
                 };
-                lubancode::runtime::CommandService command_service(std::move(command_options));
-                if (!parsed.args.empty()) {
-                    // 角色设置(/model <role> <id>):两段式一律走角色路,
-                    // 角色词是不是 normal/cheap/lao(plan 是 lao 的别名)由
-                    // SetRoleModel 认定,不认的如实报错——不然
-                    // "/model turbo x9" 会被当成模型名叫"turbo x9"的直切,
-                    // 垃圾名悄悄写进配置。单段(比如 /model cheap)仍当直切
-                    // 的模型名处理,不冒充角色命令。落盘与直切同一套:默认
-                    // 全局,问一句才写(write_target 见上),没有可写的就只
-                    // 活本会话。
-                    {
-                        const std::size_t space = parsed.args.find_first_of(" \t");
-                        if (space != std::string::npos) {
-                            // 角色词去空白转小写;模型名只去首尾空白,大小写
-                            // 原样保留——模型 id 区分大小写,MiniMax-M3 不许
-                            // 变 minimax-m3。
-                            const std::string role_word = NormalizeRoleWord(parsed.args.substr(0, space));
-                            const std::string rest = TrimAscii(parsed.args.substr(space + 1));
-                            if (!rest.empty()) {
-                                bool write_config = false;
-                                if (write_target.has_value()) {
-                                    const auto answer = lubancode::cli::ReadLine(
-                                        trf("cmd.write_config_prompt", *write_target));
-                                    write_config = answer.has_value() && (*answer == "y" || *answer == "Y");
-                                } else {
-                                    TermOut() << tr("cmd.session_only") << "\n";
-                                }
-                                const auto result = command_service.SetRoleModel(role_word, rest, write_config);
-                                if (result.switched) {
-                                    TermOut() << trf("cmd.model.role_switched", result.role, result.model)
-                                              << "\n";
-                                    if (write_config && result.config_written) {
-                                        TermOut() << trf("cmd.write_config.updated", *write_target) << "\n";
-                                    } else if (write_config && !result.error.empty()) {
-                                        TermOut() << trf("cmd.write_config.failed", result.error) << "\n";
-                                    }
-                                } else if (result.error == "unknown_role") {
-                                    TermOut() << trf("cmd.model.role_unknown", role_word) << "\n";
-                                } else {
-                                    TermOut() << trf("cmd.model.fetch_failed", result.error) << "\n";
-                                }
-                                break;
-                            }
-                        }
-                    }
-                }
-                // 选定模型 id:带参直切用参数;裸敲先拉清单,菜单(交互)或
-                // 编号(管道)选一项。到这里两条输入路合流。
-                std::string chosen = parsed.args;
-                if (chosen.empty()) {
-                    const auto query = command_service.QueryModels();
-                    if (query.fetch_failed) {
-                        TermOut() << trf("cmd.model.fetch_failed", query.fetch_error) << "\n";
-                        break;
-                    }
-                    if (query.models.empty()) {
-                        TermOut() << tr("cmd.model.list_empty") << "\n";
-                        break;
-                    }
-                    const std::optional<std::string> picked = ChooseModelId(query, model_catalog);
-                    if (!picked.has_value()) {
-                        break;  // 取消/编号作废,提示已就地打出。
-                    }
-                    chosen = *picked;
-                }
-                // 统一提交:先切换 + 应用目录条目(回执就地排版),随后问一
-                // 句是否写盘。写盘时 active_provider 在场,service 会把模型写
-                // 进 provider 条目(每个 provider 各记各的,切走再切回来还是
-                // 它);顶层 model 字段会被活跃端镜像压过,单写没用。落盘目标
-                // 默认全局(write_target 见上):模型跟人走,不跟项目走——
-                // 换个项目不该冒出一份钉死的旧模型,项目级要钉请手编
-                // <项目>/.lubancode/config.json。
-                const auto result = command_service.SetModel(chosen, /*write_config=*/false);
-                if (!result.switched) {
-                    TermOut() << trf("cmd.model.fetch_failed", result.error) << "\n";
-                    break;
-                }
-                // 五层后端退役(批四):/model 的即时生效改走皮上的 request
-                // 档案与叠层(model/effort/目录指令/魂一并刷新),下一份
-                // 请求带上新模型——前缀指纹从此看得见 model_changed,cache
-                // epoch 的账不再瞎(换模型那一份本来就是断前缀)。
-                SyncAgentRequestPolicy();
-                TermOut() << trf("cmd.model.switched", result.model) << "\n";
-                if (result.think_from_catalog) {
-                    TermOut() << trf("catalog.apply_think", result.think) << "\n";
-                }
-                if (result.applied_context_window.has_value()) {
-                    TermOut() << trf("catalog.apply_window", *result.applied_context_window) << "\n";
-                }
-                if (result.instructions_replaced) {
-                    TermOut() << trf("catalog.apply_instructions", result.model) << "\n";
-                }
-                if (write_target.has_value()) {
-                    const auto answer =
-                        lubancode::cli::ReadLine(trf("cmd.write_config_prompt", *write_target));
-                    if (answer.has_value() && (*answer == "y" || *answer == "Y")) {
-                        const auto written = command_service.WriteModelToConfig(result.model);
-                        if (written.has_value()) {
-                            TermOut() << trf("cmd.write_config.updated", *write_target) << "\n";
-                        } else {
-                            TermOut() << trf("cmd.write_config.failed", written.error()) << "\n";
-                        }
-                    }
-                } else {
-                    TermOut() << tr("cmd.session_only") << "\n";
-                }
+                model_ctx.sync_request_policy = [this]() { SyncAgentRequestPolicy(); };
+                HandleModelCommand(model_ctx, parsed.args);
                 break;
             }
             case lubancode::cli::SlashCommand::Provider:
@@ -3346,170 +2826,14 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
             case lubancode::cli::SlashCommand::Plan:
                 return HandlePlanCommand(parsed.args);
             case lubancode::cli::SlashCommand::Trace: {
-                    // 逐枚追踪单:只读诊断入口。batch(缺省)/errors 两档吃 hub 的
-                    // 进程内最近账;详细档(execution_id/toolu/turn)翻 session 存档
-                    // 的真本(重启后仍有账可查)。
-                    if (parsed.args.rfind("export", 0) == 0) {
-                        // /trace export <路径>(逐枚追踪单第 5 期):脱敏诊断包。
-                        // 内容 = meta + 全部 execution 的遮敏摘要(outcome/
-                        // error_code/来源/关系边/恢复结论/耗时/字节与 sha/
-                        // preview),不带 inline 原文、不带完整 stderr/env
-                        //(单子"隐私与脱敏")。默认遮敏;--raw 不放行——
-                        // 本会话虽是 TTY,导出件会离开本机,交互确认的
-                        // 语义没法带到文件上,一律脱敏(要比对的拿 preview
-                        // 与 sha 自己对)。
-                        std::string out_path = parsed.args.substr(6);
-                        while (!out_path.empty() && (out_path.front() == ' ' || out_path.front() == '\t')) {
-                            out_path.erase(out_path.begin());
-                        }
-                        if (out_path == "--raw" || out_path.rfind("--raw ", 0) == 0) {
-                            TermOut() << theme.error
-                                      << "导出件会离开本机,一律脱敏,没有 --raw 档。" << theme.reset << "\n";
-                            break;
-                        }
-                        if (out_path.empty()) {
-                            TermOut() << theme.error << "用法: /trace export <路径>" << theme.reset << "\n";
-                            break;
-                        }
-                        if (!session_store.active()) {
-                            TermOut() << theme.error << "本会话没有存档,没有可导出的追踪账。" << theme.reset
-                                      << "\n";
-                            break;
-                        }
-                        const auto bytes = lubancode::sessions::ReadSessionFileBytes(session_store.file_path());
-                        if (!bytes.has_value()) {
-                            TermOut() << theme.error << "会话档读不到: " << session_store.file_path() << theme.reset
-                                      << "\n";
-                            break;
-                        }
-                        const auto loaded = lubancode::sessions::ParseSessionFile(*bytes);
-                        if (!loaded.has_value()) {
-                            TermOut() << theme.error << "会话档解析失败。" << theme.reset << "\n";
-                            break;
-                        }
-                        const auto ledger =
-                            lubancode::runtime::ToolTraceHub::BuildLedger(loaded->tool_trace_events);
-                        nlohmann::json bundle;
-                        bundle["schema"] = "tool_trace_export_v1";
-                        bundle["session"] = session_store.session_id();
-                        bundle["exportedAt"] = lubancode::sessions::NowTimestamp();
-                        bundle["note"] = "脱敏诊断包:只有遮敏摘要,无正文原文";
-                        nlohmann::json items = nlohmann::json::array();
-                        for (const auto& record : ledger.executions()) {
-                            nlohmann::json item;
-                            item["executionId"] = record.execution_id;
-                            item["toolUseId"] = record.tool_use_id;
-                            item["toolName"] = record.tool_name;
-                            item["turnId"] = record.turn_id;
-                            item["batchId"] = record.batch_id;
-                            item["sequenceInBatch"] = record.sequence_in_batch;
-                            item["source"] = lubancode::agent::ToString(record.source_kind);
-                            item["sourceInstance"] = record.source_instance;
-                            item["parentExecutionId"] = record.parent_execution_id;
-                            item["retryOf"] = record.retry_of;
-                            item["blockedBy"] = record.blocked_by;
-                            item["compensates"] = record.compensates;
-                            item["outcome"] = lubancode::agent::ToString(record.outcome);
-                            item["errorCode"] = record.error_code;
-                            item["durationMs"] = record.duration_ms;
-                            item["recovery"] = lubancode::agent::ToString(record.Classify());
-                            item["corrupt"] = record.corrupt;
-                            item["resultBytes"] = record.result_ref.bytes;
-                            item["resultSha256"] = record.result_ref.sha256;
-                            item["resultPreview"] = record.result_ref.preview;  // BuildTracePreview 已过 RedactSecrets
-                            if (!record.result_ref.artifact_id.empty()) {
-                                item["resultArtifactId"] = record.result_ref.artifact_id;
-                            }
-                            items.push_back(std::move(item));
-                        }
-                        bundle["executions"] = std::move(items);
-                        bundle["verificationCount"] = ledger.verifications().size();
-                        bundle["corruptCount"] = ledger.corrupt_count();
-
-                        std::ofstream out_file(lubancode::platform::Utf8ToPath(out_path), std::ios::binary | std::ios::trunc);
-                        if (!out_file.is_open()) {
-                            TermOut() << theme.error << "导出文件打不开: " << out_path << theme.reset << "\n";
-                            break;
-                        }
-                        const std::string body = bundle.dump(2);
-                        out_file.write(body.data(), static_cast<std::streamsize>(body.size()));
-                        out_file.close();
-                        TermOut() << theme.stats << "已导出脱敏追踪账(" << ledger.executions().size()
-                                  << " 枚 execution): " << out_path << theme.reset << "\n";
-                        break;
-                    }
-                    if (parsed.args == "errors") {
-                        const auto lines = trace_hub_->ErrorLines();
-                        if (lines.empty()) {
-                            TermOut() << theme.stats << "本会话没有明确失败或 unknown 的工具调用。" << theme.reset << "\n";
-                        } else {
-                            for (const std::string& line : lines) {
-                                TermOut() << theme.stats << line << theme.reset << "\n";
-                            }
-                        }
-                        break;
-                    }
-                    const bool detail_query = parsed.args.rfind("toolu ", 0) == 0 || parsed.args.rfind("turn ", 0) == 0 ||
-                                              (!parsed.args.empty() && parsed.args != "errors" && parsed.args != "--raw" &&
-                                               parsed.args.find(' ') == std::string::npos);
-                    if (detail_query) {
-                        if (session_store.active()) {
-                            const auto bytes = lubancode::sessions::ReadSessionFileBytes(session_store.file_path());
-                            if (bytes.has_value()) {
-                                const auto loaded = lubancode::sessions::ParseSessionFile(*bytes);
-                                if (loaded.has_value()) {
-                                    const auto ledger =
-                                        lubancode::runtime::ToolTraceHub::BuildLedger(loaded->tool_trace_events);
-                                    if (parsed.args.rfind("toolu ", 0) == 0) {
-                                        const std::string id = parsed.args.substr(6);
-                                        for (const auto* record : ledger.FindByToolUse(id)) {
-                                            TermOut() << theme.stats
-                                                      << lubancode::agent::FormatExecutionSummaryLine(*record, false)
-                                                      << theme.reset << "\n";
-                                        }
-                                    } else if (parsed.args.rfind("turn ", 0) == 0) {
-                                        const std::string id = parsed.args.substr(5);
-                                        for (const auto& record : ledger.executions()) {
-                                            if (record.turn_id == id) {
-                                                TermOut() << theme.stats
-                                                          << lubancode::agent::FormatExecutionSummaryLine(record, false)
-                                                          << theme.reset << "\n";
-                                            }
-                                        }
-                                    } else {
-                                        const auto* record = ledger.FindByExecution(parsed.args);
-                                        if (record != nullptr) {
-                                            TermOut() << theme.stats
-                                                      << lubancode::agent::FormatExecutionSummaryLine(*record, false)
-                                                      << theme.reset << "\n";
-                                            if (!record->error_code.empty()) {
-                                                TermOut() << theme.stats << "  error_code: " << record->error_code
-                                                          << theme.reset << "\n";
-                                            }
-                                            if (!record->source_instance.empty()) {
-                                                TermOut() << theme.stats << "  source: " << record->source_instance
-                                                          << theme.reset << "\n";
-                                            }
-                                            TermOut() << theme.stats << "  recovery: "
-                                                      << lubancode::agent::ToString(record->Classify()) << theme.reset
-                                                      << "\n";
-                                        } else {
-                                            TermOut() << theme.stats << "没有这枚 execution 的账: " << parsed.args
-                                                      << theme.reset << "\n";
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                        break;
-                    }
-                    const std::string summary = trace_hub_->LastBatchSummary();
-                    if (summary.empty()) {
-                        TermOut() << theme.stats << "还没有工具调用的追踪账(本会话尚未跑过工具)。" << theme.reset << "\n";
-                    } else {
-                        TermOut() << theme.stats << summary << theme.reset;
-                    }
-                    break;
+                // /trace presenter(终端接线收尾单):四档诊断的命令与排版
+                // 全在 commands/trace_commands,这里只递 hub 与存档。
+                lubancode::app::TraceCommandContext trace_ctx;
+                trace_ctx.trace_hub = trace_hub_.has_value() ? &*trace_hub_ : nullptr;
+                trace_ctx.session_store = &session_store;
+                trace_ctx.theme = &theme;
+                HandleTraceCommand(trace_ctx, parsed.args);
+                break;
             }
                         case lubancode::cli::SlashCommand::Doctor: {
                 // 本地兼容端 Effort/前缀缓存诊断。探针自己建临时 backend,
@@ -3554,9 +2878,17 @@ CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli
                 // feature 门/非交互明拒在 HandleLoopCommand)。
                 return HandleLoopCommand(lubancode::cli::ParseLoopCommand(parsed.args));
             }
-            case lubancode::cli::SlashCommand::Memory:
-                HandleMemoryCommand(parsed.args);
+            case lubancode::cli::SlashCommand::Memory: {
+                // /memory presenter(终端接线收尾单):命令与排版全在
+                // commands/memory_commands,这里只递会话状态(工具补注册
+                // 走回调)。
+                lubancode::app::MemoryCommandContext memory_ctx;
+                memory_ctx.project_memory = project_memory.get();
+                memory_ctx.theme = &theme;
+                memory_ctx.ensure_tool = [this]() { EnsureMemoryTool(); };
+                HandleMemoryCommand(memory_ctx, parsed.args);
                 break;
+            }
             case lubancode::cli::SlashCommand::Record: {
                 // 只做接线:解析/问话/起草/安装全在 cli/record_command.cpp。
                 lubancode::cli::RecordCommandContext record_ctx{recorder,

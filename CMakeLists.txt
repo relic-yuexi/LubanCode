@@ -635,6 +635,12 @@ add_library(lubancode_app STATIC
   # /loop 会话定时循环单:slash 业务面(列表/状态/暂停/补拍的终端行)。
   src/app/commands/loop_commands.cpp
   src/app/commands/workflow_commands.cpp
+  # 终端接线收尾单:/memory 命令 presenter(自大类搬出)。
+  src/app/commands/memory_commands.cpp
+  # 终端接线收尾单:/trace 命令 presenter(自大类搬出)。
+  src/app/commands/trace_commands.cpp
+  # 终端接线收尾单:/model 命令 presenter(自大类搬出)。
+  src/app/commands/model_commands.cpp
   src/app/interactive_session.cpp
   src/app/one_shot.cpp
   src/app/cli_options.cpp
