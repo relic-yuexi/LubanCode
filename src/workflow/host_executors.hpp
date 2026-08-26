@@ -9,7 +9,9 @@
 // tool:经 agent::RunOneTool 正门调 ToolRegistry 已注册工具——PreToolUse/
 // PostToolUse 钩子、确认档、Plan 闸、逐枚 trace 与主回合同一条链(批一
 // 封暗道);旧 ConfirmGate 保留作确认缺省。llm:单次结构化模型调用,采样
-// 走 agent::SampleModel 原语(批一·病四),不开完整 agent loop。
+// 走 agent::SampleModel 原语(批一·病四),不开完整 agent loop。agent:
+// 与 main/subagent 共用 agent::Agent,turn 推进走 TurnHarness 的
+// DriveTurn(批五乙·三外壳降策略:怎么跑 turn 只 harness 一份)。
 // approval:经 InteractionBroker 悬起,等用户决定(accept/decline/cancel)。
 // ask_user:经 InteractionBroker 问一句,答案写进 output。
 // skill:把 Skill 的 SKILL.md 正文装进 llm 执行的上下文(同一只 llm 执行

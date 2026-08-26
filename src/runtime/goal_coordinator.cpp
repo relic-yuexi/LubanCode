@@ -10,6 +10,7 @@
 #include "hooks/hash.hpp"
 #include "platform/json_safe.hpp"  // DumpJsonSanitized:goal 事件落档的编码窄边界
 #include "runtime/budget_gate.hpp"  // 预算闸/连撞计数机制(批五:外壳横切件)
+#include "runtime/replay.hpp"  // 统一回放接口(批五乙):RestoreFromArchive 的次序/跳过/账面规矩
 
 namespace lubancode::runtime::goal {
 
@@ -1249,22 +1250,41 @@ void GoalCoordinator::ReplayEvent(const GoalCoordinatorEvent& event) {
 
 GoalCoordinator::ReplayStats GoalCoordinator::RestoreFromArchive(
     const std::vector<lubancode::sessions::GoalSessionEvent>& events) {
-    ReplayStats stats;
-    for (const auto& line : events) {
-        GoalCoordinatorEvent event;
-        event.event = line.event;
-        event.goal_id = line.goal_id;
-        event.iteration_id = line.iteration_id;
-        event.revision = line.revision;
-        event.payload = line.payload;
-        event.timestamp_ms = line.timestamp_ms;
-        try {
-            ReplayEvent(event);
-            stats.replayed += 1;
-        } catch (...) {
-            stats.skipped += 1;  // 坏事件跳过,不废整场
-        }
+    // 回放走统一恢复入口(批五乙·病十六后半):goal 行的中立解析在
+    // sessions 层(ParseGoalEvent,不反向依赖 runtime 的老规矩),这里
+    // 解析后的域事件折成信封、经同一条次序/坏行跳过/账面规矩交
+    // ReplayEvent。goal_id/iteration_id/revision 是域字段,进 payload
+    // 原样过境。
+    std::vector<replay::Envelope> envelopes;
+    envelopes.reserve(events.size());
+    for (const auto& row : events) {
+        replay::Envelope envelope;
+        envelope.family = row.type;
+        envelope.event = row.event;
+        envelope.timestamp_ms = row.timestamp_ms;
+        nlohmann::json payload = nlohmann::json::object();
+        payload["goal_id"] = row.goal_id;
+        payload["iteration_id"] = row.iteration_id;
+        payload["revision"] = row.revision;
+        payload["payload"] = row.payload;
+        envelope.payload = std::move(payload);
+        envelopes.push_back(std::move(envelope));
     }
+    const auto replayed = replay::ReplayEnvelopes(
+        std::move(envelopes), [this](const replay::Envelope& envelope) {
+            GoalCoordinatorEvent event;
+            event.event = envelope.event;
+            event.goal_id = envelope.payload.value("goal_id", std::string());
+            event.iteration_id = envelope.payload.value("iteration_id", std::string());
+            event.revision = envelope.payload.value("revision", 0);
+            event.payload = envelope.payload.value("payload", nlohmann::json::object());
+            event.timestamp_ms = envelope.timestamp_ms;
+            ReplayEvent(event);
+            return true;  // 坏载荷由 ReplayEvent 内部/折叠口兜底折成跳过
+        });
+    ReplayStats stats;
+    stats.replayed = replayed.replayed;
+    stats.skipped = replayed.skipped;
     // feature 关:resume 读到非终态 goal 落 SuspendedByPolicy(可查/导出/
     // clear,不自动续跑)。
     if (!options_.goals_enabled && task_.has_value() && !IsGoalTerminal(task_->state)) {

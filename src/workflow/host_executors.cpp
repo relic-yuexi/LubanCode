@@ -1,5 +1,6 @@
 // 宿主侧执行器实现(自然语言编排单第 4 批;批一封暗道:tool 走
-// agent::RunOneTool 正门,llm 走 agent::SampleModel 原语)。
+// agent::RunOneTool 正门,llm 走 agent::SampleModel 原语;批五乙降策略:
+// agent 节点的 turn 推进走 agent::DriveTurn,不再自家直调 Agent::Run)。
 
 #include "workflow/host_executors.hpp"
 
@@ -10,6 +11,8 @@
 
 #include "agent/sample_model.hpp"
 #include "agent/tool_trace.hpp"  // kErrPermissionDeclined:旧稳定码的映射锚
+#include "agent/turn_harness.hpp"  // DriveTurn:agent 节点的 turn 推进正门(批五乙)
+#include "platform/wall_clock.hpp"  // 统一墙钟(批五):trace 批头事件的钟同源
 #include "runtime/turn_event_adapter.hpp"
 
 namespace lubancode::workflow {
@@ -79,9 +82,8 @@ NodeExecResult ToolExecutor::Execute(const NodeExecRequest& request) {
         scheduled.sequence_in_batch = 0;
         scheduled.turn_id = trace_ctx.turn_id;
         scheduled.thread_id = trace_ctx.thread_id;
-        scheduled.timestamp_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                                     std::chrono::system_clock::now().time_since_epoch())
-                                     .count();
+        // 批五:统一墙钟(口径不变,只收源)。
+        scheduled.timestamp_ms = platform::WallClockNowMs();
         chain.on_tool_trace(scheduled);
     }
 
@@ -199,29 +201,39 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         };
     }
 
-    const auto outcome = task_agent.Run(request.resolved_input.dump(), callbacks, nullptr);
-    // 事件流收口:Run 一返回就按收场分型 Finish(后面的早退分支各走各的
-    // error_code,终态映射在这定死:报错/预算尽 = Failed,打断 = Cancelled,
-    // 其余 Succeeded)。
+    // turn 推进走 TurnHarness 的续投外环(批五乙:三外壳降策略——workflow
+    // 的 agent 节点不再自家直调 Agent::Run;run turn 的路全仓只 harness 一
+    // 份)。单轮即收:没续投源、没墙钟、没取消链(取消在 runtime 的节点
+    // 边界看,与从前一致)。
+    api::Message task_input;
+    task_input.role = api::Role::User;
+    task_input.content.push_back(api::TextBlock{request.resolved_input.dump()});
+    const agent::DriveReport drive =
+        agent::DriveTurn(task_agent, callbacks, std::move(task_input), agent::DriveOptions{});
+
+    // 事件流收口:DriveTurn 一返回就按收场分型 Finish(后面的早退分支各
+    // 走各的 error_code,终态映射在这定死:报错/预算尽 = Failed,打断 =
+    // Cancelled,其余 Succeeded)。
+    const bool empty_output = drive.final_round.has_value() && drive.final_round->length_empty_output;
     if (events.has_value()) {
-        events->Finish(!outcome.has_value() || outcome->hit_step_limit || outcome->length_empty_output
+        events->Finish(!drive.ok || drive.hit_step_limit || empty_output
                            ? runtime::Outcome::Failed
-                       : outcome->cancelled ? runtime::Outcome::Cancelled
-                                            : runtime::Outcome::Succeeded,
-                       outcome.has_value() ? std::string() : outcome.error());
+                       : drive.cancelled ? runtime::Outcome::Cancelled
+                                         : runtime::Outcome::Succeeded,
+                       drive.ok ? std::string() : drive.error);
     }
     result.tokens_used = tokens;
-    if (!outcome.has_value()) {
+    if (!drive.ok) {
         result.error_code = "agent_error";
-        result.error_message = outcome.error().substr(0, 500);
+        result.error_message = drive.error.substr(0, 500);
         return result;
     }
-    if (outcome->hit_step_limit) {
+    if (drive.hit_step_limit) {
         result.error_code = "budget_exhausted";
         result.error_message = "agent 节点达到 step_limit";
         return result;
     }
-    if (outcome->length_empty_output) {
+    if (empty_output) {
         result.error_code = "output_budget_exhausted";
         result.error_message = "agent 节点输出预算耗尽，未产出正文";
         return result;

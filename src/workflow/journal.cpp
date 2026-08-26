@@ -192,6 +192,46 @@ std::optional<JournalEvent> ParseJournalEvent(const std::string& line) {
     return event;
 }
 
+std::optional<runtime::replay::Envelope> ParseJournalEnvelopeLine(const std::string& line) {
+    auto event = ParseJournalEvent(line);
+    if (!event.has_value()) {
+        return std::nullopt;
+    }
+    runtime::replay::Envelope envelope;
+    envelope.family = event->type;  // journal 的 type 就是事件名(双帽同值)
+    envelope.event = event->type;
+    envelope.seq = event->seq;
+    envelope.timestamp_ms = event->ts_ms;
+    nlohmann::json payload = nlohmann::json::object();
+    payload["run_id"] = event->run_id;
+    payload["workflow_id"] = event->workflow_id;
+    payload["node_id"] = event->node_id;
+    payload["attempt"] = event->attempt;
+    payload["data"] = event->data;
+    envelope.payload = std::move(payload);
+    return envelope;
+}
+
+std::optional<JournalEvent> JournalEventFromEnvelope(const runtime::replay::Envelope& envelope) {
+    if (!envelope.payload.is_object()) {
+        return std::nullopt;
+    }
+    const auto data = envelope.payload.find("data");
+    if (data == envelope.payload.end() || !data->is_object()) {
+        return std::nullopt;
+    }
+    JournalEvent event;
+    event.seq = envelope.seq;
+    event.ts_ms = envelope.timestamp_ms;
+    event.run_id = envelope.payload.value("run_id", std::string());
+    event.workflow_id = envelope.payload.value("workflow_id", std::string());
+    event.node_id = envelope.payload.value("node_id", std::string());
+    event.attempt = envelope.payload.value("attempt", 0);
+    event.type = envelope.event;
+    event.data = *data;
+    return event;
+}
+
 // ---- RunJournal -------------------------------------------------------------
 
 RunJournal::RunJournal(std::filesystem::path dir, std::string run_id, std::ofstream out, const JournalClock* clock,
@@ -414,14 +454,24 @@ std::vector<JournalEvent> ReadJournalEvents(const std::filesystem::path& run_dir
     std::vector<JournalEvent> out;
     std::ifstream file(run_dir / "events.jsonl", std::ios::binary);
     if (!file) return out;
+    // 回放走统一恢复入口(批五乙·病十六后半):次序(seq 稳定排序)、
+    // 坏行跳过不废整场的规矩只在 runtime/replay 一份;journal 的域编解码
+    // 与折叠(收 JournalEvent)在这头。
+    std::vector<std::string> lines;
     std::string line;
     while (std::getline(file, line)) {
-        if (auto event = ParseJournalEvent(line)) {
-            out.push_back(std::move(*event));
-        }
+        lines.push_back(line);
     }
-    std::sort(out.begin(), out.end(),
-              [](const JournalEvent& a, const JournalEvent& b) { return a.seq < b.seq; });
+    runtime::replay::ReplayLedgerLines(
+        lines, ParseJournalEnvelopeLine,
+        [&out](const runtime::replay::Envelope& envelope) {
+            auto event = JournalEventFromEnvelope(envelope);
+            if (!event.has_value()) {
+                return false;
+            }
+            out.push_back(std::move(*event));
+            return true;
+        });
     return out;
 }
 

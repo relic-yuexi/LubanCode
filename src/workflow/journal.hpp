@@ -29,6 +29,7 @@
 #include <nlohmann/json.hpp>
 
 #include "runtime/id_authority.hpp"
+#include "runtime/replay.hpp"
 #include "workflow/definition.hpp"
 
 namespace lubancode::workflow {
@@ -61,6 +62,11 @@ struct JournalEvent {
 std::string SerializeJournalEvent(const JournalEvent& event);
 // 一行 -> 事件;坏行/半截行给 nullopt(跳过,不废整场)。
 std::optional<JournalEvent> ParseJournalEvent(const std::string& line);
+// journal 行 <-> 统一回放信封(批五乙:统一回放接口的 workflow 域编解码)。
+// 域字段 run_id/workflow_id/node_id/attempt/data 进 payload 原样过境;
+// seq 是 journal 独有的行内次序号,信封正位收下(回放按它稳定排序)。
+std::optional<runtime::replay::Envelope> ParseJournalEnvelopeLine(const std::string& line);
+std::optional<JournalEvent> JournalEventFromEnvelope(const runtime::replay::Envelope& envelope);
 
 // journal 载荷脱敏(纯函数):键名含 token/secret/password/passwd/
 // authorization/cookie/api_key 的字段值换 "[已打码]";字符串值再过一遍

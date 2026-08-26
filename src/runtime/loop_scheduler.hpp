@@ -31,6 +31,7 @@
 #include <vector>
 
 #include "runtime/loop_types.hpp"
+#include "runtime/replay.hpp"
 
 namespace lubancode::runtime::loop {
 
@@ -170,6 +171,16 @@ public:
     // 恢复口(第 3 期 LoopLedger 喂):回放一条事件行,重建内存账。
     // 坏事件跳过(返回 false),不废整场。
     bool ReplayEvent(const LoopSchedulerEvent& event);
+
+    // ---- 台账行编解码(批五乙:统一回放接口的 loop 域半边) ------------------
+    // 一行 session JSONL -> 统一回放信封。行形状与装配层 FlushLoopEvents
+    // 落盘的对齐({"type","event","task_id","tick_id"?,"payload",
+    // "timestamp_ms"});非 loop 族/坏行给 nullopt(跳过规矩在 replay.hpp,
+    // 这里只认行形状)。task_id/tick_id 是域字段,进 payload 原样过境。
+    static std::optional<runtime::replay::Envelope> ParseLoopLedgerLine(const std::string& line);
+    // 信封 -> 域事件(折叠口喂 ReplayEvent 前的还原)。payload 形状对不上
+    // 给 nullopt(折叠口按跳过收)。
+    static std::optional<LoopSchedulerEvent> EventFromEnvelope(const runtime::replay::Envelope& envelope);
 
     // timer 线程控制(真实现:轮询 due 并唤醒;测试不启)。
     void StartTimer();

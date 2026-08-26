@@ -16,6 +16,7 @@
 #include "cli/theme.hpp"
 #include "platform/paths.hpp"
 #include "runtime/event_sink.hpp"
+#include "runtime/replay.hpp"
 #include "runtime/session_runtime.hpp"
 #include "tools/path_utils.hpp"
 
@@ -434,30 +435,25 @@ void RestoreLoopFromArchive(const LoopWiring& wiring) {
     if (!bytes.has_value()) {
         return;
     }
-    int replayed = 0;
+    // 回放走统一恢复入口(批五乙·病十六后半):行进信封出、文件序喂
+    // 折叠口、坏行跳过不废整场——规矩只在 runtime/replay 一份;loop 的
+    // 域编解码(ParseLoopLedgerLine)与折叠(ReplayEvent)各归各。
+    std::vector<std::string> lines;
     std::istringstream stream(*bytes);
     std::string line;
     while (std::getline(stream, line)) {
-        if (line.find("\"loop_task_v1\"") == std::string::npos &&
-            line.find("\"loop_tick_v1\"") == std::string::npos) {
-            continue;
-        }
-        try {
-            const nlohmann::json j = nlohmann::json::parse(line);
-            lubancode::runtime::loop::LoopSchedulerEvent event;
-            event.family = j.value("type", std::string());
-            event.event = j.value("event", std::string());
-            event.task_id = j.value("task_id", std::string());
-            event.tick_id = j.value("tick_id", std::string());
-            event.payload = j.value("payload", nlohmann::json::object());
-            event.timestamp_ms = j.value("timestamp_ms", static_cast<std::int64_t>(0));
-            if (scheduler.ReplayEvent(event)) {
-                ++replayed;
-            }
-        } catch (const std::exception&) {
-            // 坏行跳过,不废整场。
-        }
+        lines.push_back(line);
     }
+    const auto replay_stats = lubancode::runtime::replay::ReplayLedgerLines(
+        lines,
+        [](const std::string& row) {
+            return LoopScheduler::ParseLoopLedgerLine(row);
+        },
+        [&scheduler](const lubancode::runtime::replay::Envelope& envelope) {
+            const auto event = LoopScheduler::EventFromEnvelope(envelope);
+            return event.has_value() && scheduler.ReplayEvent(*event);
+        });
+    const int replayed = replay_stats.replayed;
     if (replayed == 0) {
         return;
     }

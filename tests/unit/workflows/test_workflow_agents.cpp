@@ -122,6 +122,24 @@ public:
     }
 };
 
+// 假 backend:send_stream 直接报错(批五乙降策略的钉用——agent 节点走
+// TurnHarness 的 DriveTurn 收场,报错映射与从前一字不差)。
+class FailingBackend : public lubancode::api::Backend {
+public:
+    int calls = 0;
+
+    std::expected<void, lubancode::api::Error> send_stream(
+        const lubancode::api::Request& request,
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* cancel) override {
+        (void)request;
+        (void)on_event;
+        (void)cancel;
+        ++calls;
+        return std::unexpected(lubancode::api::Error{lubancode::api::ErrorKind::Api, "接口崩了"});
+    }
+};
+
 // 即时 broker:不等前端,当场给决定。
 class InstantBroker final : public lubancode::runtime::InteractionBroker {
 public:
@@ -354,6 +372,44 @@ nodes:
     CHECK(backend.requests[0].system == "只读探索");
     REQUIRE(backend.requests[0].tools.size() == 1);
     CHECK(backend.requests[0].tools[0].name == "reader");
+}
+
+TEST_CASE("agent 节点:backend 报错经 TurnHarness 收场,映射与从前一字不差") {
+    using namespace lubancode::workflow;
+    lubancode::tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("reader", R"({"read":true})", false, false));
+    FailingBackend backend;
+
+    AgentExecutor::Options options;
+    options.default_binding.backend = &backend;
+    options.default_binding.profile.provider = "zai";
+    options.default_binding.profile.request.model = "glm-5.3";
+    options.registry = &registry;
+    options.task_loader = [](const std::string&) { return std::string("干活"); };
+    AgentExecutor executor(std::move(options));
+
+    const WorkflowDefinition def = ParseOrDie(R"YAML(
+schema_version: 1
+id: agent-fail
+version: 1.0.0
+entry: work
+nodes:
+  work:
+    type: agent
+    task: prompts/work.md
+)YAML");
+    NodeExecRequest request;
+    request.definition = &def;
+    request.node = &def.node_map.at("work");
+    request.resolved_input = nlohmann::json{{"topic", "钉收场"}};
+
+    // 批五乙降策略:turn 推进走 DriveTurn(单轮即收,没续投源),报错
+    // 折 agent_error、错误文案带 backend 原话、不发第二次请求。
+    const NodeExecResult result = executor.Execute(request);
+    REQUIRE_FALSE(result.ok);
+    CHECK(result.error_code == "agent_error");
+    CHECK(result.error_message.find("接口崩了") != std::string::npos);
+    CHECK(backend.calls == 1);
 }
 
 TEST_CASE("agent 节点:装了 event_sink 的嵌套回合经 TurnEventAdapter 上事件流") {

@@ -827,6 +827,62 @@ std::vector<LoopSchedulerEvent> LoopScheduler::TakeEvents() {
 // 恢复(第 3 期喂):按事件行重建
 // ---------------------------------------------------------------------------
 
+std::optional<replay::Envelope> LoopScheduler::ParseLoopLedgerLine(const std::string& line) {
+    // 顶层粗筛省 JSON 解析(与收编前的手抄路同款快路径);真验在解析后。
+    if (line.find("\"loop_task_v1\"") == std::string::npos &&
+        line.find("\"loop_tick_v1\"") == std::string::npos) {
+        return std::nullopt;
+    }
+    nlohmann::json j;
+    try {
+        j = nlohmann::json::parse(line);
+    } catch (...) {
+        return std::nullopt;  // 坏行跳过,不废整场
+    }
+    if (!j.is_object()) {
+        return std::nullopt;
+    }
+    const std::string family = j.value("type", std::string());
+    if (family != "loop_task_v1" && family != "loop_tick_v1") {
+        return std::nullopt;
+    }
+    replay::Envelope envelope;
+    envelope.family = family;
+    envelope.event = j.value("event", std::string());
+    envelope.timestamp_ms = j.value("timestamp_ms", static_cast<std::int64_t>(0));
+    // 域字段进 payload 原样过境:task_id/tick_id 是 loop 的主体 id,域载荷
+    // 挂 "payload" 键下(与落盘行同名,信封侧不自造第二套键名)。
+    nlohmann::json payload = nlohmann::json::object();
+    payload["task_id"] = j.value("task_id", std::string());
+    payload["tick_id"] = j.value("tick_id", std::string());
+    payload["payload"] = j.value("payload", nlohmann::json::object());
+    envelope.payload = std::move(payload);
+    return envelope;
+}
+
+std::optional<LoopSchedulerEvent> LoopScheduler::EventFromEnvelope(const replay::Envelope& envelope) {
+    const auto str_field = [](const nlohmann::json& payload, const char* key) {
+        const auto it = payload.find(key);
+        return it != payload.end() && it->is_string() ? it->get<std::string>() : std::string();
+    };
+    if (!envelope.payload.is_object()) {
+        return std::nullopt;  // 信封侧自家写的,不是 object 属装配 bug
+    }
+    LoopSchedulerEvent event;
+    event.family = envelope.family;
+    event.event = envelope.event;
+    event.task_id = str_field(envelope.payload, "task_id");
+    event.tick_id = str_field(envelope.payload, "tick_id");
+    // 域载荷原样过境,不问形状——与收编前的 j.value("payload", object())
+    // 同口径:键在就照搬,不在落空对象。
+    if (const auto domain_payload = envelope.payload.find("payload");
+        domain_payload != envelope.payload.end()) {
+        event.payload = *domain_payload;
+    }
+    event.timestamp_ms = envelope.timestamp_ms;
+    return event;
+}
+
 bool LoopScheduler::ReplayEvent(const LoopSchedulerEvent& event) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     if (event.family == "loop_task_v1" && event.event == "created") {
