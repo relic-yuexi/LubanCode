@@ -1,0 +1,21 @@
+{
+  "fixture_id": "vllm_qwen_reasoning_delta",
+  "wire": "openai-chat-completions",
+  "provider": "vllm",
+  "model": "qwen3.8-27b",
+  "scenario": "reasoning_delta_field_stream_with_usage_only_chunk",
+  "source_document": "internal",
+  "captured_at": "2026-08-27",
+  "request_expectation": {},
+  "expected_events": [
+    "MessageStart",
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "TextDelta",
+    "MessageDone"
+  ],
+  "expected_replay": ["vLLM/Qwen 端 delta 叫 reasoning;回传字段由部署端声明(reasoning_replay_field)"],
+  "usage_expectation": {"input_tokens": 15, "output_tokens": 2, "cache_read_tokens": 0},
+  "stop_reason": "end_turn",
+  "notes": "vLLM 0.27.1 + qwen3.8-27b 真机实录缩样(自 tests/unit/api/test_chat_events.cpp inline 实录迁入,P0 行为不改)。usage-only chunk(choices=[]) 不丢 usage。"
+}

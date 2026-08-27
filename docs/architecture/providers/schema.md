@@ -283,6 +283,8 @@ agent.max_output_tokens
 
 推理档位直接写在模型条目里。不同模型各报各的档位；例如 GPT 5.6 可报六档，GLM 5.3 只报 `low/high/max`。运行时把这份档案带进中立 Request，各 wire 再翻成自己的正式字段。
 
+2026-08 起,模型条目之外还有一层**落线方言**(`reasoning_dialect`,provider 级声明,`models[].reasoning.dialect` 可逐字段覆写):它说"这套能力在具体 wire 上长什么形状"——开关是顶层 `enable_thinking` 布尔还是 `thinking.type` 枚举(MiniMax 的 on 值是 `adaptive`)、档位走 `reasoning.effort` 还是顶层 `reasoning_effort`、预算键名、思考增量字段、回传策略。`verified` 标记这套形状有没有实证(手册明文/真机实测/官方文档);聚合转发端一律 `verified=false`——形状对得上不等于服务端真认。`/think` 与 `/doctor effort` 会把这层方言亮给用户;没有方言的本地自配端走兼容形状,`/doctor` 报"无方言声明"。字段语义详见 `src/api/reasoning.hpp` 的 `ReasoningWireDialect`。
+
 请求体大致按这次序浅合并：
 
 ```text

@@ -1,0 +1,23 @@
+{
+  "fixture_id": "manual_enable_thinking_reasoning_content",
+  "wire": "openai-chat-completions",
+  "provider": "dashscope",
+  "model": "qwen3.6-plus",
+  "scenario": "enable_thinking_bool_on_reasoning_content_delta",
+  "source_document": "OpenAI兼容-Chat.md",
+  "source_section": "请求体(enable_thinking:开启后,思考内容将通过 reasoning_content 字段返回;HTTP 顶层参数,不走 extra_body)",
+  "captured_at": "2026-08-27",
+  "doc_snapshot_hash": "0a4ae02111e2f6fdca649f49b09ce09ea57e51122b38971cc8ee2df2e068fbab",
+  "request_expectation": {"enable_thinking": true},
+  "expected_events": [
+    "MessageStart",
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "TextDelta",
+    "MessageDone"
+  ],
+  "expected_replay": ["preserve_thinking=true 时历史 reasoning_content 拼回输入(模型支持名单见手册)"],
+  "usage_expectation": {"input_tokens": 11, "output_tokens": 5, "output_reasoning_tokens": 3, "cache_read_tokens": 0},
+  "stop_reason": "end_turn",
+  "notes": "事件字段(delta.reasoning_content)与请求开关(顶层 enable_thinking: bool)是手册明文;usage 形状取仓库已钉的 Qwen 风格(顶层 reasoning_tokens),正文为短合成字样。"
+}

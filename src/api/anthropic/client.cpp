@@ -67,6 +67,13 @@ json ContentBlockToJson(const ContentBlock& block) {
 // 的组合。映射表之外的档位名字(比如用户在 responses wire 下用惯了、后来
 // 切到 anthropic wire 的自定义字符串):不报错、不崩,只打一行警告到
 // stderr,当没设置处理(不发 thinking 字段),留给上层继续跑完这一轮。
+// 新式 Claude Messages 用 adaptive thinking + output_config.effort(P1 起
+// 由方言声明;旧目录的 wireDialect=="effort" 兼容折算)。
+bool UsesAdaptiveEffort(const Request& request) {
+    return request.reasoning.dialect.effort_path == "output_config.effort" ||
+           request.reasoning.wire_dialect == "effort";
+}
+
 std::optional<json> BuildThinkingJson(const Request& request) {
     if (request.reasoning_effort.empty()) {
         return std::nullopt;
@@ -76,9 +83,8 @@ std::optional<json> BuildThinkingJson(const Request& request) {
         return json{{"type", "disabled"}};
     }
 
-    // 新式 Claude Messages 用 adaptive thinking + output_config.effort。
     // output_config 在 BuildRequestJson 里写；这里先落 thinking 开关。
-    if (request.reasoning.wire_dialect == "effort") {
+    if (UsesAdaptiveEffort(request)) {
         return json{{"type", "adaptive"}};
     }
 
@@ -120,7 +126,7 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
     if (const auto thinking = BuildThinkingJson(request); thinking.has_value()) {
         body["thinking"] = *thinking;
     }
-    if (!request.reasoning_effort.empty() && request.reasoning.wire_dialect == "effort" &&
+    if (!request.reasoning_effort.empty() && UsesAdaptiveEffort(request) &&
         !ReasoningEffortIsOff(request.reasoning_effort, request.reasoning)) {
         std::string effort = LowerReasoningEffort(request.reasoning_effort);
         if (effort == "extra") effort = "xhigh";

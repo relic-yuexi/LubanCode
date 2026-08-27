@@ -1,0 +1,23 @@
+{
+  "fixture_id": "internal_thought_function_call_stream",
+  "wire": "google-generate-content",
+  "provider": "gemini",
+  "model": "gemini-3.1-flash",
+  "scenario": "thought_then_function_call_cross_frame",
+  "source_document": "internal",
+  "captured_at": "2026-08-27",
+  "request_expectation": {"generationConfig": {"thinkingConfig": {"includeThoughts": true, "thinkingLevel": "high"}}},
+  "expected_events": [
+    "MessageStart",
+    "ThinkingDelta",
+    "ContentBlockDone",
+    "ToolUseStart",
+    "ToolUseInputDelta",
+    "ContentBlockDone",
+    "MessageDone"
+  ],
+  "expected_replay": ["第二轮 contents 回传 functionCall(函数名对应)与 functionResponse;thought 一次性不重放"],
+  "usage_expectation": {"input_tokens": 25, "output_tokens": 16, "output_reasoning_tokens": 6, "cache_read_tokens": 0},
+  "stop_reason": "tool_use",
+  "notes": "Gemini v1beta:思考 part(thought:true)与 functionCall 跨帧分开发,finishReason=STOP 收尾,thoughtsTokenCount 另计一代(total=prompt+thoughts+candidates 对账)。自仓库既有 gemini 单测口径缩样;Gemini 手册不在三份本地手册内,来源记 internal。"
+}

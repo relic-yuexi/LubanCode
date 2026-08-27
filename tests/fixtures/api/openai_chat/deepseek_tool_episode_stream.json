@@ -1,0 +1,23 @@
+{
+  "fixture_id": "deepseek_tool_episode_stream",
+  "wire": "openai-chat-completions",
+  "provider": "deepseek",
+  "model": "deepseek-v4-pro",
+  "scenario": "thinking_then_tool_calls_with_cache_usage",
+  "source_document": "internal",
+  "captured_at": "2026-08-27",
+  "request_expectation": {"thinking": {"type": "enabled"}},
+  "expected_events": [
+    "MessageStart",
+    "ThinkingDelta",
+    "ContentBlockDone",
+    "ToolUseStart",
+    "ToolUseInputDelta",
+    "ContentBlockDone",
+    "MessageDone"
+  ],
+  "expected_replay": ["第二轮 assistant 消息按 tool_episode 回传 reasoning_content 原字节(DeepSeek 规矩),tool_calls 原样带 id"],
+  "usage_expectation": {"input_tokens": 40, "output_tokens": 45, "cache_read_tokens": 80},
+  "stop_reason": "tool_use",
+  "notes": "DeepSeek 风格第一轮流:reasoning_content 思考 -> tool_calls 入参增量拼装 -> finish_reason=tool_calls -> usage chunk(hit/miss 摊账) -> [DONE]。工具事件在 Finish 落锤(ContentBlockDone + Start/InputDelta/Done + MessageDone)。"
+}

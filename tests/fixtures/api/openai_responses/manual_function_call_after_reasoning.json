@@ -1,0 +1,23 @@
+{
+  "fixture_id": "manual_function_call_after_reasoning",
+  "wire": "openai-responses",
+  "provider": "dashscope-responses",
+  "model": "qwen3.7-max",
+  "scenario": "reasoning_then_function_call_first_round",
+  "source_document": "OpenAI兼容-Responses.md",
+  "source_section": "Response 响应 chunk 对象(流式输出)示例:文搜图第 7-13 步(function_call 输出项夹在 reasoning 与后续 message 之间;function_call_arguments.delta/done;call_id 关联回传)",
+  "captured_at": "2026-08-27",
+  "doc_snapshot_hash": "6917b0a1aad63824c585bfe0cb22c392795a3605c992f5886fb120765c37ad54",
+  "request_expectation": {"reasoning": {"effort": "high"}, "tools": [{"type": "function", "name": "get_weather"}]},
+  "expected_events": [
+    "ThinkingDelta",
+    "ToolUseStart",
+    "ToolUseInputDelta",
+    "ContentBlockDone",
+    "MessageDone"
+  ],
+  "expected_replay": ["第二轮 input 回传 function_call(call_id=call_1, arguments 原字节)与 function_call_output;reasoning 一次性不回传"],
+  "usage_expectation": {"input_tokens": 30, "output_tokens": 50, "output_reasoning_tokens": 12, "cache_read_tokens": 0},
+  "stop_reason": "tool_use",
+  "notes": "手册文搜图示例的 function_call 骨架(response.output_item.added(function_call) -> response.function_call_arguments.delta -> response.output_item.done(function_call) -> response.completed,completed 的 output 含 function_call 项时 stop_reason=tool_use),正文合成短字样。"
+}

@@ -67,12 +67,196 @@ std::expected<std::optional<std::size_t>, std::string> OptionalTokenCount(
     return std::optional<std::size_t>{*parsed};
 }
 
-std::expected<lubancode::api::ReasoningConfig, std::string> ParseReasoning(
+// 落线方言解析(模型协议兼容实录矩阵单 P1)。字段值域与
+// api::ReasoningWireDialect 的注释一致;拼错的枚举当场报错并带坐标。
+std::expected<lubancode::api::ReasoningWireDialect, std::string> ParseReasoningDialect(
     const json& value, const std::string& where) {
     if (!value.is_object()) return std::unexpected(where + " 必须是 object");
-    if (auto known = RejectUnknown(value, {"controls", "supportedEfforts", "thinkingTokenLimits",
-                                           "wireDialect"}, where);
+    if (auto known = RejectUnknown(value, {"toggle", "toggle_on", "toggle_off", "effort_path",
+                                           "effort_param", "budget_path", "delta", "replay",
+                                           "replay_field", "signature_required", "verified"},
+                                   where);
         !known.has_value()) return std::unexpected(known.error());
+
+    lubancode::api::ReasoningWireDialect out;
+    const auto read_enum = [&](const char* field, std::string* target,
+                               std::initializer_list<std::string_view> allowed)
+        -> std::expected<void, std::string> {
+        if (!value.contains(field)) return std::expected<void, std::string>{};
+        if (!value[field].is_string()) {
+            return std::unexpected(where + "." + field + " 必须是字符串");
+        }
+        const std::string parsed = value[field].get<std::string>();
+        if (std::find(allowed.begin(), allowed.end(), parsed) == allowed.end()) {
+            std::string choices;
+            for (auto choice : allowed) choices += std::string(choice) + "/";
+            return std::unexpected(where + "." + field + " 只认 " + choices + ": " + parsed);
+        }
+        *target = parsed;
+        return std::expected<void, std::string>{};
+    };
+    if (auto parsed = read_enum("toggle", &out.toggle,
+                                {"none", "enable_thinking_bool", "thinking_type", "include_thoughts"});
+        !parsed.has_value()) return std::unexpected(parsed.error());
+    if (out.toggle != "none") {
+        if (out.toggle == "enable_thinking_bool") {
+            if (auto parsed = read_enum("toggle_on", &out.toggle_on, {"true"}); !parsed.has_value())
+                return std::unexpected(parsed.error());
+            if (auto parsed = read_enum("toggle_off", &out.toggle_off, {"false"}); !parsed.has_value())
+                return std::unexpected(parsed.error());
+        } else {
+            if (auto parsed = read_enum("toggle_on", &out.toggle_on, {"enabled", "adaptive"});
+                !parsed.has_value()) return std::unexpected(parsed.error());
+            if (auto parsed = read_enum("toggle_off", &out.toggle_off, {"disabled"}); !parsed.has_value())
+                return std::unexpected(parsed.error());
+        }
+    }
+    if (auto parsed = read_enum("effort_path", &out.effort_path,
+                                {"none", "reasoning.effort", "reasoning_effort",
+                                 "output_config.effort", "thinkingLevel"});
+        !parsed.has_value()) return std::unexpected(parsed.error());
+    if (out.effort_path == "none") out.effort_path.clear();
+    if (value.contains("effort_param")) {
+        if (!value["effort_param"].is_string() || value["effort_param"].get<std::string>().empty()) {
+            return std::unexpected(where + ".effort_param 必须是非空字符串");
+        }
+        out.effort_param = value["effort_param"].get<std::string>();
+    }
+    if (auto parsed = read_enum("budget_path", &out.budget_path,
+                                {"none", "thinking_budget", "thinking.budget_tokens", "thinkingBudget"});
+        !parsed.has_value()) return std::unexpected(parsed.error());
+    if (out.budget_path == "none") out.budget_path.clear();
+    if (auto parsed = read_enum("delta", &out.delta,
+                                {"none", "reasoning_content", "reasoning", "reasoning_details",
+                                 "reasoning_summary", "anthropic_thinking_block",
+                                 "gemini_thought_part"});
+        !parsed.has_value()) return std::unexpected(parsed.error());
+    if (out.delta == "none") out.delta.clear();
+    if (auto parsed = read_enum("replay", &out.replay, {"never", "tool_episode", "always"});
+        !parsed.has_value()) return std::unexpected(parsed.error());
+    if (value.contains("replay_field")) {
+        if (!value["replay_field"].is_string() || value["replay_field"].get<std::string>().empty()) {
+            return std::unexpected(where + ".replay_field 必须是非空字符串");
+        }
+        out.replay_field = value["replay_field"].get<std::string>();
+    }
+    if (value.contains("signature_required")) {
+        if (!value["signature_required"].is_boolean()) {
+            return std::unexpected(where + ".signature_required 必须是布尔值");
+        }
+        out.signature_required = value["signature_required"].get<bool>();
+    }
+    if (value.contains("verified")) {
+        if (!value["verified"].is_boolean()) {
+            return std::unexpected(where + ".verified 必须是布尔值");
+        }
+        out.verified = value["verified"].get<bool>();
+    }
+    return out;
+}
+
+// 方言与 wire 家族的组合校验(L1):wire 不认的字段组合在 catalog parse
+// 阶段就报错,不留到运行时猜。
+std::expected<void, std::string> CheckDialectMatchesWire(const lubancode::api::ReasoningWireDialect& dialect,
+                                                         Wire wire, const std::string& where) {
+    if (dialect.empty()) return {};
+    const auto reject = [&](const std::string& what) {
+        return std::unexpected(where + " 的方言与 wire 不匹配: " + what);
+    };
+    const std::string wire_name = wire == Wire::ChatCompletions
+                                      ? "openai-chat-completions"
+                                      : wire == Wire::Responses
+                                            ? "openai-responses"
+                                            : wire == Wire::Anthropic
+                                                  ? "anthropic-messages"
+                                                  : "google-generate-content";
+    switch (wire) {
+    case Wire::ChatCompletions:
+        if (dialect.toggle == "include_thoughts") return reject("chat 家没有 include_thoughts 开关");
+        if (dialect.effort_path != "reasoning_effort" && !dialect.effort_path.empty()) {
+            return reject("chat 家的档位只认顶层参数(effort_path=reasoning_effort),不认 " +
+                          dialect.effort_path);
+        }
+        if (dialect.budget_path != "thinking_budget" && !dialect.budget_path.empty()) {
+            return reject("chat 家的预算只认顶层 thinking_budget,不认 " + dialect.budget_path);
+        }
+        if (dialect.delta == "anthropic_thinking_block" || dialect.delta == "gemini_thought_part" ||
+            dialect.delta == "reasoning_summary") {
+            return reject("chat 家的思考增量不是 " + dialect.delta);
+        }
+        break;
+    case Wire::Responses:
+        if (dialect.toggle == "thinking_type" || dialect.toggle == "include_thoughts") {
+            return reject("responses 家没有 " + dialect.toggle + " 开关(手册只有 enable_thinking 旧开关)");
+        }
+        if (dialect.effort_path != "reasoning.effort" && !dialect.effort_path.empty()) {
+            return reject("responses 家的档位只认 reasoning.effort,不认 " + dialect.effort_path);
+        }
+        if (!dialect.budget_path.empty()) {
+            return reject("responses 家没有思考预算参数,不认 " + dialect.budget_path);
+        }
+        if (!dialect.delta.empty() && dialect.delta != "reasoning_summary") {
+            return reject("responses 家的思考增量是 reasoning_summary_text.delta,不是 " + dialect.delta);
+        }
+        break;
+    case Wire::Anthropic:
+        if (dialect.toggle != "thinking_type" && dialect.toggle != "none") {
+            return reject("anthropic 家的开关只认 thinking.type,不认 " + dialect.toggle);
+        }
+        if (!dialect.effort_path.empty() && dialect.effort_path != "output_config.effort") {
+            return reject("anthropic 家的档位只认 output_config.effort,不认 " + dialect.effort_path);
+        }
+        if (!dialect.budget_path.empty() && dialect.budget_path != "thinking.budget_tokens") {
+            return reject("anthropic 家的预算只认 thinking.budget_tokens,不认 " + dialect.budget_path);
+        }
+        if (!dialect.delta.empty() && dialect.delta != "anthropic_thinking_block") {
+            return reject("anthropic 家的思考增量是 thinking 块,不是 " + dialect.delta);
+        }
+        break;
+    case Wire::GoogleGenerateContent:
+        if (dialect.toggle != "include_thoughts" && dialect.toggle != "none") {
+            return reject("gemini 家的开关只认 include_thoughts,不认 " + dialect.toggle);
+        }
+        if (!dialect.effort_path.empty() && dialect.effort_path != "thinkingLevel") {
+            return reject("gemini 家的档位只认 thinkingLevel,不认 " + dialect.effort_path);
+        }
+        if (!dialect.budget_path.empty() && dialect.budget_path != "thinkingBudget") {
+            return reject("gemini 家的预算只认 thinkingBudget,不认 " + dialect.budget_path);
+        }
+        if (!dialect.delta.empty() && dialect.delta != "gemini_thought_part") {
+            return reject("gemini 家的思考增量是 thought part,不是 " + dialect.delta);
+        }
+        break;
+    }
+    // 静默吞掉 switch 之外的组合(wire_name 留给错误信息;编译器不必再警告)
+    (void)wire_name;
+    return {};
+}
+
+std::expected<lubancode::api::ReasoningConfig, std::string> ParseReasoning(
+    const json& value, const std::string& where, const json& provider_dialect) {
+    if (!value.is_object()) return std::unexpected(where + " 必须是 object");
+    if (auto known = RejectUnknown(value, {"controls", "supportedEfforts", "thinkingTokenLimits",
+                                           "wireDialect", "dialect"}, where);
+        !known.has_value()) return std::unexpected(known.error());
+
+    // 模型级 dialect 逐字段覆写 provider 级(L1:不可拿 provider 默认抹平
+    // 模型特例,也不必整份抄)。
+    json merged_dialect = provider_dialect.is_object() ? provider_dialect : json::object();
+    if (value.contains("dialect")) {
+        if (!value["dialect"].is_object()) {
+            return std::unexpected(where + ".dialect 必须是 object");
+        }
+        for (auto it = value["dialect"].begin(); it != value["dialect"].end(); ++it) {
+            merged_dialect[it.key()] = it.value();
+        }
+    }
+    std::optional<lubancode::api::ReasoningWireDialect> dialect;
+    if (!merged_dialect.empty()) {
+        auto parsed = ParseReasoningDialect(merged_dialect, where + ".dialect");
+        if (!parsed.has_value()) return std::unexpected(parsed.error());
+        dialect = std::move(*parsed);
+    }
 
     lubancode::api::ReasoningConfig out;
     if (value.contains("supportedEfforts")) {
@@ -155,11 +339,14 @@ std::expected<lubancode::api::ReasoningConfig, std::string> ParseReasoning(
     if (out.budget_min.has_value() && out.budget_max.has_value() && *out.budget_min > *out.budget_max) {
         return std::unexpected(where + " 的 budget min 不能大于 max");
     }
+    if (dialect.has_value()) out.dialect = std::move(*dialect);
     return out;
 }
 
 std::expected<ProviderCatalogModel, std::string> ParseModel(const std::string& id, const json& value,
-                                                            const std::string& where) {
+                                                            const std::string& where,
+                                                            const json& provider_dialect,
+                                                            Wire wire) {
     if (!value.is_object()) return std::unexpected(where + " 必须是 JSON object");
     if (auto known = RejectUnknown(value, {"name", "description", "context_window", "max_output",
                                            "default_think", "capabilities", "reasoning"}, where);
@@ -193,8 +380,10 @@ std::expected<ProviderCatalogModel, std::string> ParseModel(const std::string& i
         }
     }
     if (value.contains("reasoning")) {
-        auto reasoning = ParseReasoning(value["reasoning"], where + ".reasoning");
+        auto reasoning = ParseReasoning(value["reasoning"], where + ".reasoning", provider_dialect);
         if (!reasoning.has_value()) return std::unexpected(reasoning.error());
+        if (auto matched = CheckDialectMatchesWire(reasoning->dialect, wire, where);
+            !matched.has_value()) return std::unexpected(matched.error());
         model.reasoning = std::move(*reasoning);
     }
     return model;
@@ -206,8 +395,8 @@ std::expected<ProviderPreset, std::string> ParseProvider(const std::string& id, 
     if (auto known = RejectUnknown(value, {"name", "description", "wire", "base_url", "key_env",
                                            "default_model", "model_reasoning_effort", "native_web_search",
                                            "stream_usage", "reasoning_replay", "reasoning_delta_field",
-                                           "reasoning_replay_field", "docs_url", "extra_body",
-                                           "extra_headers", "models"},
+                                           "reasoning_replay_field", "reasoning_dialect", "docs_url",
+                                           "extra_body", "extra_headers", "models"},
                                    where);
         !known.has_value()) return std::unexpected(known.error());
     ProviderPreset preset;
@@ -225,6 +414,17 @@ std::expected<ProviderPreset, std::string> ParseProvider(const std::string& id, 
     auto parsed_wire = ParseProviderWire(*wire);
     if (!parsed_wire.has_value()) return std::unexpected(where + ".wire: " + parsed_wire.error());
     preset.wire = *parsed_wire;
+
+    // provider 级落线方言(P1):models[].reasoning.dialect 可逐字段覆写。
+    json provider_dialect = json::object();
+    if (value.contains("reasoning_dialect")) {
+        auto dialect = ParseReasoningDialect(value["reasoning_dialect"], where + ".reasoning_dialect");
+        if (!dialect.has_value()) return std::unexpected(dialect.error());
+        if (auto matched = CheckDialectMatchesWire(*dialect, preset.wire, where + ".reasoning_dialect");
+            !matched.has_value()) return std::unexpected(matched.error());
+        preset.reasoning_dialect = *dialect;
+        provider_dialect = value["reasoning_dialect"];
+    }
     if (preset.base_url.rfind("https://", 0) != 0) return std::unexpected(where + ".base_url 必须以 https:// 开头");
     if (value.contains("description")) {
         if (!value["description"].is_string()) return std::unexpected(where + ".description 必须是字符串");
@@ -290,7 +490,8 @@ std::expected<ProviderPreset, std::string> ParseProvider(const std::string& id, 
         return std::unexpected(where + ".models 必须是非空 JSON object");
     }
     for (auto it = models->begin(); it != models->end(); ++it) {
-        auto model = ParseModel(it.key(), it.value(), where + ".models." + it.key());
+        auto model = ParseModel(it.key(), it.value(), where + ".models." + it.key(), provider_dialect,
+                                preset.wire);
         if (!model.has_value()) return std::unexpected(model.error());
         preset.models.push_back(std::move(*model));
     }
@@ -514,6 +715,31 @@ std::expected<ProviderCatalogRefresh, std::string> RefreshProviderCatalog(int co
     result.updated = true;
     result.revision = parsed->revision;
     return result;
+}
+
+std::string DescribeReasoningDialect(const lubancode::api::ReasoningWireDialect& dialect) {
+    if (dialect.empty()) return {};
+    std::vector<std::string> parts;
+    if (dialect.toggle == "enable_thinking_bool") {
+        parts.push_back("enable_thinking=" + dialect.toggle_on + "/" + dialect.toggle_off);
+    } else if (dialect.toggle == "thinking_type") {
+        parts.push_back("thinking.type=" + dialect.toggle_on + "/" + dialect.toggle_off);
+    } else if (dialect.toggle == "include_thoughts") {
+        parts.push_back("generationConfig.thinkingConfig.includeThoughts");
+    }
+    if (dialect.effort_path == "reasoning_effort" && !dialect.effort_param.empty()) {
+        parts.push_back(dialect.effort_param);
+    } else if (!dialect.effort_path.empty()) {
+        parts.push_back(dialect.effort_path);
+    }
+    if (!dialect.budget_path.empty()) parts.push_back(dialect.budget_path);
+    if (!dialect.delta.empty()) parts.push_back("delta:" + dialect.delta);
+    std::string out;
+    for (const auto& part : parts) {
+        if (!out.empty()) out += " · ";
+        out += part;
+    }
+    return out;
 }
 
 ProviderConfig ProviderConfigFromPreset(const ProviderPreset& preset) {

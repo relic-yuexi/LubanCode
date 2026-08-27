@@ -30,6 +30,7 @@
         "native_web_search": { "type": "boolean" },
         "stream_usage": { "type": "boolean" },
         "reasoning_replay": { "enum": ["never", "tool_episode"] },
+        "reasoning_dialect": { "$ref": "#/$defs/reasoning_dialect" },
         "docs_url": { "type": "string", "pattern": "^https://" },
         "extra_body": { "type": "object" },
         "extra_headers": { "type": "object", "additionalProperties": { "type": "string" } },
@@ -81,7 +82,26 @@
             "max": { "type": "integer", "minimum": 0 }
           }
         },
-        "wireDialect": { "enum": ["effort", "budget"] }
+        "wireDialect": { "enum": ["effort", "budget"] },
+        "dialect": { "$ref": "#/$defs/reasoning_dialect" }
+      }
+    },
+    "reasoning_dialect": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "落线方言:中立推理能力在具体 wire 上的精确形状。模型级出现的字段逐项覆写 provider 级;与所在 wire 不匹配的组合在 catalog parse 阶段报错。字段语义见 src/api/reasoning.hpp 的 ReasoningWireDialect。",
+      "properties": {
+        "toggle": { "enum": ["none", "enable_thinking_bool", "thinking_type", "include_thoughts"] },
+        "toggle_on": { "enum": ["true", "false", "enabled", "adaptive", "disabled"] },
+        "toggle_off": { "enum": ["true", "false", "enabled", "adaptive", "disabled"] },
+        "effort_path": { "enum": ["none", "reasoning.effort", "reasoning_effort", "output_config.effort", "thinkingLevel"] },
+        "effort_param": { "type": "string", "minLength": 1 },
+        "budget_path": { "enum": ["none", "thinking_budget", "thinking.budget_tokens", "thinkingBudget"] },
+        "delta": { "enum": ["none", "reasoning_content", "reasoning", "reasoning_details", "reasoning_summary", "anthropic_thinking_block", "gemini_thought_part"] },
+        "replay": { "enum": ["never", "tool_episode", "always"] },
+        "replay_field": { "type": "string", "minLength": 1 },
+        "signature_required": { "type": "boolean" },
+        "verified": { "type": "boolean" }
       }
     }
   }

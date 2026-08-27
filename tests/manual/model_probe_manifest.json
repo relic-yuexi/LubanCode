@@ -1,0 +1,116 @@
+{
+  "manifest_version": 1,
+  "note": "真机矩阵哨兵清单(模型协议兼容实录矩阵单 P3)。每只哨兵按 manifest 跑 on/off 或 low/high 成对探测,每组至少 repeats 次;没钥匙记 SKIP(unavailable),不算 PASS。模型退役只改这张单,不删历史证据。",
+  "sentinels": [
+    {
+      "id": "openai-responses-effort",
+      "provider": "openai",
+      "model": "gpt-5",
+      "category": "responses-effort",
+      "control": "effort",
+      "low": "low",
+      "high": "high",
+      "note": "reasoning.effort 透传;o 系/gpt-5 系官方档位"
+    },
+    {
+      "id": "dashscope-responses-toggle",
+      "provider": "dashscope-responses",
+      "model": "qwen3.6-plus",
+      "category": "responses-enable-thinking",
+      "control": "toggle",
+      "off": "none",
+      "on": "auto",
+      "note": "手册:enable_thinking 旧开关(将退役),reasoning.effort 优先;核二者优先级"
+    },
+    {
+      "id": "dashscope-chat-toggle",
+      "provider": "dashscope",
+      "model": "qwen3.6-plus",
+      "category": "chat-enable-thinking-bool",
+      "control": "toggle",
+      "off": "none",
+      "on": "auto",
+      "note": "手册:顶层 enable_thinking 布尔,思考走 reasoning_content"
+    },
+    {
+      "id": "minimax-chat-toggle",
+      "provider": "minimax",
+      "model": "minimax-m3",
+      "category": "chat-thinking-type",
+      "control": "toggle",
+      "off": "none",
+      "on": "auto",
+      "note": "手册:thinking.type=adaptive/disabled(不是 enabled)"
+    },
+    {
+      "id": "zai-chat-effort",
+      "provider": "zai",
+      "model": "glm-5.2",
+      "category": "chat-effort",
+      "control": "effort",
+      "low": "low",
+      "high": "max",
+      "note": "GLM 双开:reasoning_effort 管深度 + thinking.type 管开关"
+    },
+    {
+      "id": "dashscope-anthropic-budget",
+      "provider": "dashscope-anthropic",
+      "model": "qwen3.6-plus",
+      "category": "anthropic-budget",
+      "control": "toggle",
+      "off": "none",
+      "on": "high",
+      "note": "thinking.type=enabled+budget_tokens / disabled;signature 当前空串"
+    },
+    {
+      "id": "gemini-budget",
+      "provider": "gemini",
+      "model": "gemini-2.5-flash",
+      "category": "gemini-budget",
+      "control": "toggle",
+      "off": "none",
+      "on": "high",
+      "note": "thinkingBudget=0 关 / 区间预算开;auto=-1 动态"
+    },
+    {
+      "id": "gemini-level",
+      "provider": "gemini",
+      "model": "gemini-3.1-flash-lite",
+      "category": "gemini-level",
+      "control": "effort",
+      "low": "minimal",
+      "high": "high",
+      "note": "thinkingLevel 档位;minimal 是真档不是关"
+    },
+    {
+      "id": "deepseek-chat-effort",
+      "provider": "deepseek",
+      "model": "deepseek-v4-pro",
+      "category": "chat-effort",
+      "control": "toggle",
+      "off": "none",
+      "on": "high",
+      "note": "DeepSeek tool_episode:工具交互段回传 reasoning_content"
+    },
+    {
+      "id": "moonshot-always-think",
+      "provider": "moonshot",
+      "model": "kimi-k2.7-code",
+      "category": "always-think",
+      "control": "always",
+      "on": "high",
+      "note": "只思考/不可关哨兵:单档探测 emitted+accounted,effective_control 栏记 unverified(没有对照组)"
+    },
+    {
+      "id": "vllm-deploy-params",
+      "provider": "vllm-local",
+      "model": "-",
+      "category": "vllm-deploy",
+      "control": "none",
+      "note": "本地 vLLM 部署参数(chat_template_kwargs.enable_thinking)另列:它不是 HTTP body 顶层字段,须由部署端适配层明写,不能和百炼 enable_thinking 混为一谈。catalog 无此 provider,本哨兵恒 unavailable 占位记案。"
+    }
+  ],
+  "defaults": {
+    "repeats": 3
+  }
+}

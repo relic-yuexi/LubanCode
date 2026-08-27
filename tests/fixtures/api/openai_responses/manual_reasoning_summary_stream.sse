@@ -1,0 +1,16 @@
+data: {"sequence_number":0,"type":"response.created","response":{"id":"resp_xxx","output":[],"created_at":1769435906,"tool_choice":"auto","model":"qwen3.7-max","status":"queued"}}
+
+data: {"sequence_number":2,"item":{"summary":[],"type":"reasoning","id":"rs_xxx"},"output_index":0,"type":"response.output_item.added"}
+
+data: {"delta":"用户想要我：\n1. 搜索阿里云官网\n2. 提取官网首页的关键信息\n\n我需要先搜索阿里云官网的URL，然后使用web_extractor工具访问官网并提取关键信息。","sequence_number":3,"output_index":0,"type":"response.reasoning_summary_text.delta","item_id":"rs_xxx","summary_index":0}
+
+data: {"sequence_number":13,"text":"用户想要我：\n1. 搜索阿里云官网\n2. 提取官网首页的关键信息\n\n我需要先搜索阿里云官网的URL，然后使用web_extractor工具访问官网并提取关键信息。","output_index":0,"type":"response.reasoning_summary_text.done","item_id":"rs_xxx","summary_index":0}
+
+data: {"sequence_number":14,"item":{"summary":[{"type":"summary_text","text":"..."}],"type":"reasoning","id":"rs_xxx"},"output_index":1,"type":"response.output_item.done"}
+
+data: {"sequence_number":50,"item":{"content":[{"type":"text","text":""}],"type":"message","id":"msg_xxx","role":"assistant"},"output_index":5,"type":"response.output_item.added"}
+
+data: {"delta":"我已经找到阿里云官网并提取了首页的关键信息：\n\n","sequence_number":51,"output_index":5,"type":"response.output_text.delta"}
+
+data: {"type":"response.completed","response":{"id":"resp_xxx","status":"completed","usage":{"input_tokens":45,"output_tokens":320,"total_tokens":365}}}
+

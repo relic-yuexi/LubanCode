@@ -1,0 +1,17 @@
+{
+  "fixture_id": "manual_basic_message_stream",
+  "wire": "openai-responses",
+  "provider": "dashscope-responses",
+  "model": "qwen3.7-max",
+  "scenario": "basic_message_stream_no_reasoning",
+  "source_document": "OpenAI兼容-Responses.md",
+  "source_section": "Response 响应 chunk 对象(流式输出)示例:基础调用(response.created -> ... -> response.completed)",
+  "captured_at": "2026-08-27",
+  "doc_snapshot_hash": "6917b0a1aad63824c585bfe0cb22c392795a3605c992f5886fb120765c37ad54",
+  "request_expectation": {},
+  "expected_events": ["TextDelta", "TextDelta", "ContentBlockDone", "MessageDone"],
+  "expected_replay": ["responses wire 的 reasoning 是一次性的,思考块不回传 input"],
+  "usage_expectation": {"input_tokens": 37, "output_tokens": 243, "cache_read_tokens": 0, "cache_creation_tokens": 0},
+  "stop_reason": "end_turn",
+  "notes": "手册基础调用流式示例逐字节收录(id 已占位化),正文为文档示意文本。"
+}

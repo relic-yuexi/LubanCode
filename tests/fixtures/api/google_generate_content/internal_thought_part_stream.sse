@@ -1,0 +1,4 @@
+data: {"candidates":[{"content":{"role":"model","parts":[{"thought":true,"text":"想一想"},{"text":"答"}]}}],"modelVersion":"gemini-2.5-flash","usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":2,"thoughtsTokenCount":3,"totalTokenCount":15}}
+
+data: {"candidates":[{"content":{"role":"model","parts":[{"text":"。"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":10,"candidatesTokenCount":4,"thoughtsTokenCount":3,"totalTokenCount":17}}
+

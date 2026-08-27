@@ -55,6 +55,9 @@ struct ProviderPreset {
     // 两条都声明成 "reasoning"。
     std::string reasoning_delta_field;
     std::string reasoning_replay_field;
+    // 落线方言(provider 级声明,模型级 reasoning.dialect 可逐字段覆写;
+    // 语义见 api::ReasoningWireDialect)。空 = legacy 兼容路径(unverified)。
+    lubancode::api::ReasoningWireDialect reasoning_dialect;
     std::string docs_url;
     nlohmann::json extra_body = nlohmann::json::object();
     std::map<std::string, std::string> extra_headers;
@@ -91,6 +94,11 @@ struct ProviderCatalogRefresh {
 
 std::expected<ProviderCatalogRefresh, std::string> RefreshProviderCatalog(
     int connect_timeout_ms = 3000, int request_timeout_secs = 10);
+
+// 方言的人话形状(模型协议兼容实录矩阵单 P1):/think 与 /doctor effort
+// 都拿它打印"这个模型最终在 wire 上长什么样",不只报抽象档位。空方言
+// 返回空串(调用方自行打"兼容形状"那条)。
+std::string DescribeReasoningDialect(const lubancode::api::ReasoningWireDialect& dialect);
 
 // 从预设生一条本地 provider 配置。目录只给默认值，落盘后用户仍可自由改。
 ProviderConfig ProviderConfigFromPreset(const ProviderPreset& preset);

@@ -1,0 +1,28 @@
+{
+  "fixture_id": "manual_thinking_enabled_stream",
+  "wire": "anthropic-messages",
+  "provider": "dashscope-anthropic",
+  "model": "qwen3.7-plus",
+  "scenario": "thinking_enabled_budget_stream",
+  "source_document": "Anthropic兼容-Messages.md",
+  "source_section": "流式响应(示例:message_start -> thinking 块(thinking_delta/signature_delta) -> text 块 -> message_delta(usage) -> message_stop)",
+  "captured_at": "2026-08-27",
+  "doc_snapshot_hash": "7e35698415e8c7ff5dac8f3b49faedd1bf659bda7d1abd2fe2f401daf8118fcc",
+  "request_expectation": {
+    "thinking": {"type": "enabled", "budget_tokens": 1024},
+    "max_tokens": 2048
+  },
+  "expected_events": [
+    "MessageStart",
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "ContentBlockDone",
+    "TextDelta",
+    "ContentBlockDone",
+    "MessageDone"
+  ],
+  "expected_replay": ["thinking 块按原字节回传,signature(空串)随块带"],
+  "usage_expectation": {"input_tokens": 15, "output_tokens": 1078, "cache_read_tokens": 0, "cache_creation_tokens": 0},
+  "stop_reason": "end_turn",
+  "notes": "手册流式响应示例逐字节收录,正文为文档示意文本未改。signature 固定空串是手册明文(当前固定为空字符串)。"
+}

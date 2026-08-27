@@ -9,6 +9,15 @@
       "base_url": "https://api.openai.com/v1",
       "key_env": "OPENAI_API_KEY",
       "default_model": "gpt-5.4",
+      "reasoning_dialect": {
+        "toggle": "enable_thinking_bool",
+        "toggle_on": "true",
+        "toggle_off": "false",
+        "effort_path": "reasoning.effort",
+        "delta": "reasoning_summary",
+        "replay": "never",
+        "verified": true
+      },
       "docs_url": "https://platform.openai.com/docs",
       "models": {
         "chatgpt-image-latest": {
@@ -1595,6 +1604,16 @@
       "base_url": "https://api.anthropic.com",
       "key_env": "ANTHROPIC_API_KEY",
       "default_model": "claude-sonnet-5",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": true
+      },
       "docs_url": "https://docs.anthropic.com/en/docs",
       "extra_headers": {
         "Authorization": "",
@@ -1650,7 +1669,10 @@
               "xhigh",
               "max"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "claude-fable-latest": {
@@ -1681,7 +1703,10 @@
               "high",
               "max"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "claude-haiku-4-5": {
@@ -1749,7 +1774,10 @@
               "max",
               "none"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "claude-opus-4": {
@@ -1901,7 +1929,10 @@
               "max": 128000,
               "min": 1024
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "claude-opus-4-6-v1": {
@@ -1942,7 +1973,10 @@
               "max": 128000,
               "min": 1024
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "claude-opus-4-7": {
@@ -1989,7 +2023,10 @@
               "max": 128000,
               "min": 1024
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "claude-opus-4-7-fast": {
@@ -2033,7 +2070,10 @@
               "max": 128000,
               "min": 1024
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "claude-opus-4-8": {
@@ -2071,7 +2111,10 @@
               "max",
               "none"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "claude-opus-4-8-fast": {
@@ -2107,7 +2150,10 @@
               "xhigh",
               "none"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "claude-opus-5": {
@@ -2142,7 +2188,10 @@
               "xhigh",
               "max"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "claude-opus-5-fast": {
@@ -2176,7 +2225,10 @@
               "xhigh",
               "max"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "claude-opus-latest": {
@@ -2211,7 +2263,10 @@
               "max",
               "none"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "claude-sonnet-4": {
@@ -2321,7 +2376,10 @@
               "max": 64000,
               "min": 1024
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "claude-sonnet-5": {
@@ -2360,7 +2418,10 @@
               "max",
               "none"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "claude-sonnet-latest": {
@@ -2395,7 +2456,10 @@
               "max",
               "none"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         }
       }
@@ -2407,8 +2471,17 @@
       "base_url": "https://api.z.ai/api/paas/v4",
       "key_env": "ZAI_API_KEY",
       "default_model": "glm-5.2",
-      "docs_url": "https://docs.z.ai/",
       "model_reasoning_effort": "max",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": true
+      },
+      "docs_url": "https://docs.z.ai/",
       "extra_body": {
         "tool_stream": true
       },
@@ -3027,8 +3100,18 @@
       "base_url": "https://api.z.ai/api/anthropic",
       "key_env": "ZAI_API_KEY",
       "default_model": "glm-5.2",
-      "docs_url": "https://docs.z.ai/",
       "model_reasoning_effort": "max",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": true
+      },
+      "docs_url": "https://docs.z.ai/",
       "extra_body": {
         "tool_stream": true
       },
@@ -3652,8 +3735,17 @@
       "base_url": "https://api.z.ai/api/coding/paas/v4",
       "key_env": "ZAI_API_KEY",
       "default_model": "glm-5.2",
-      "docs_url": "https://z.ai",
       "model_reasoning_effort": "max",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": true
+      },
+      "docs_url": "https://z.ai",
       "extra_body": {
         "tool_stream": true
       },
@@ -4272,6 +4364,16 @@
       "base_url": "https://api.z.ai/api/coding/anthropic",
       "key_env": "ZAI_API_KEY",
       "default_model": "glm-5.2",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": true
+      },
       "docs_url": "https://z.ai",
       "extra_headers": {
         "Authorization": "",
@@ -4802,6 +4904,15 @@
       "base_url": "https://open.bigmodel.cn/api/paas/v4",
       "key_env": "ZHIPUAI_API_KEY",
       "default_model": "glm-5.2",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://docs.bigmodel.cn/",
       "extra_body": {
         "tool_stream": true
@@ -4884,6 +4995,16 @@
       "base_url": "https://open.bigmodel.cn/api/anthropic",
       "key_env": "ZHIPUAI_API_KEY",
       "default_model": "glm-5.2",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
       "docs_url": "https://docs.bigmodel.cn/",
       "extra_body": {
         "tool_stream": true
@@ -4971,6 +5092,15 @@
       "base_url": "https://open.bigmodel.cn/api/coding/paas/v4",
       "key_env": "ZHIPUAI_API_KEY",
       "default_model": "glm-5.2",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://open.bigmodel.cn",
       "extra_body": {
         "tool_stream": true
@@ -5053,6 +5183,16 @@
       "base_url": "https://open.bigmodel.cn/api/coding/anthropic",
       "key_env": "ZHIPUAI_API_KEY",
       "default_model": "glm-5.2",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
       "docs_url": "https://open.bigmodel.cn",
       "extra_headers": {
         "Authorization": "",
@@ -5137,8 +5277,18 @@
       "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
       "key_env": "DASHSCOPE_API_KEY",
       "default_model": "qwen3.7-plus",
-      "docs_url": "https://help.aliyun.com/zh/model-studio/getting-started/",
       "native_web_search": true,
+      "reasoning_dialect": {
+        "toggle": "enable_thinking_bool",
+        "toggle_on": "true",
+        "toggle_off": "false",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": true,
+        "budget_path": "thinking_budget"
+      },
+      "docs_url": "https://help.aliyun.com/zh/model-studio/getting-started/",
       "models": {
         "deepseek-r1": {
           "name": "DeepSeek R1",
@@ -7242,9 +7392,18 @@
       "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
       "key_env": "DASHSCOPE_API_KEY",
       "default_model": "qwen3.7-plus",
-      "docs_url": "https://help.aliyun.com/zh/model-studio/getting-started/",
       "model_reasoning_effort": "high",
       "native_web_search": true,
+      "reasoning_dialect": {
+        "toggle": "enable_thinking_bool",
+        "toggle_on": "true",
+        "toggle_off": "false",
+        "effort_path": "reasoning.effort",
+        "delta": "reasoning_summary",
+        "replay": "never",
+        "verified": true
+      },
+      "docs_url": "https://help.aliyun.com/zh/model-studio/getting-started/",
       "models": {
         "deepseek-r1": {
           "name": "DeepSeek R1",
@@ -9348,8 +9507,18 @@
       "base_url": "https://dashscope.aliyuncs.com/apps/anthropic",
       "key_env": "DASHSCOPE_API_KEY",
       "default_model": "qwen3.7-plus",
-      "docs_url": "https://help.aliyun.com/zh/model-studio/getting-started/",
       "native_web_search": true,
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": true
+      },
+      "docs_url": "https://help.aliyun.com/zh/model-studio/getting-started/",
       "extra_headers": {
         "Authorization": "",
         "x-api-key": "${LUBANCODE_API_KEY}",
@@ -11458,10 +11627,19 @@
       "base_url": "https://api.deepseek.com/v1",
       "key_env": "DEEPSEEK_API_KEY",
       "default_model": "deepseek-v4-pro",
-      "docs_url": "https://platform.deepseek.com/api-docs/",
       "model_reasoning_effort": "high",
       "stream_usage": true,
       "reasoning_replay": "tool_episode",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "tool_episode",
+        "verified": false
+      },
+      "docs_url": "https://platform.deepseek.com/api-docs/",
       "models": {
         "deepseek-chat": {
           "name": "DeepSeek Chat",
@@ -11925,9 +12103,18 @@
       "base_url": "https://api.deepseek.com/v1",
       "key_env": "DEEPSEEK_API_KEY",
       "default_model": "deepseek-v4-pro",
-      "docs_url": "https://platform.deepseek.com/api-docs/",
       "model_reasoning_effort": "high",
       "reasoning_replay": "tool_episode",
+      "reasoning_dialect": {
+        "toggle": "enable_thinking_bool",
+        "toggle_on": "true",
+        "toggle_off": "false",
+        "effort_path": "reasoning.effort",
+        "delta": "reasoning_summary",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://platform.deepseek.com/api-docs/",
       "models": {
         "deepseek-chat": {
           "name": "DeepSeek Chat",
@@ -12314,10 +12501,20 @@
       "base_url": "https://api.deepseek.com/anthropic",
       "key_env": "DEEPSEEK_API_KEY",
       "default_model": "deepseek-v4-pro",
-      "docs_url": "https://platform.deepseek.com/api-docs/",
       "model_reasoning_effort": "high",
       "stream_usage": true,
       "reasoning_replay": "tool_episode",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
+      "docs_url": "https://platform.deepseek.com/api-docs/",
       "extra_headers": {
         "Authorization": "",
         "x-api-key": "${LUBANCODE_API_KEY}",
@@ -12786,6 +12983,15 @@
       "base_url": "https://api.moonshot.cn/v1",
       "key_env": "MOONSHOT_API_KEY",
       "default_model": "kimi-k2.6",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://platform.moonshot.cn/docs/",
       "models": {
         "kimi-k2.6": {
@@ -13074,6 +13280,16 @@
       "base_url": "https://api.moonshot.cn/anthropic",
       "key_env": "MOONSHOT_API_KEY",
       "default_model": "kimi-k2.6",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
       "docs_url": "https://platform.moonshot.cn/docs/",
       "extra_headers": {
         "Authorization": "",
@@ -13367,9 +13583,18 @@
       "base_url": "https://api.x.ai/v1",
       "key_env": "XAI_API_KEY",
       "default_model": "grok-4.5",
-      "docs_url": "https://docs.x.ai/",
       "model_reasoning_effort": "high",
       "native_web_search": true,
+      "reasoning_dialect": {
+        "toggle": "enable_thinking_bool",
+        "toggle_on": "true",
+        "toggle_off": "false",
+        "effort_path": "reasoning.effort",
+        "delta": "reasoning_summary",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://docs.x.ai/",
       "models": {
         "grok-2": {
           "name": "Grok 2",
@@ -13732,8 +13957,16 @@
       "base_url": "https://api.minimaxi.com/v1",
       "key_env": "MINIMAX_API_KEY",
       "default_model": "minimax-m3",
-      "docs_url": "https://platform.minimaxi.com/docs/api-reference/text-openai-api",
       "model_reasoning_effort": "high",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "adaptive",
+        "toggle_off": "disabled",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": true
+      },
+      "docs_url": "https://platform.minimaxi.com/docs/api-reference/text-openai-api",
       "extra_body": {
         "reasoning_split": true
       },
@@ -13932,8 +14165,18 @@
       "base_url": "https://api.minimaxi.com/anthropic",
       "key_env": "MINIMAX_API_KEY",
       "default_model": "minimax-m3",
-      "docs_url": "https://platform.minimaxi.com/docs/api-reference/text-openai-api",
       "model_reasoning_effort": "high",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": true
+      },
+      "docs_url": "https://platform.minimaxi.com/docs/api-reference/text-openai-api",
       "extra_body": {
         "reasoning_split": true
       },
@@ -14137,8 +14380,16 @@
       "base_url": "https://api.minimax.io/v1",
       "key_env": "MINIMAX_API_KEY",
       "default_model": "minimax-m3",
-      "docs_url": "https://platform.minimax.io/docs/api-reference/text-openai-api",
       "model_reasoning_effort": "high",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "adaptive",
+        "toggle_off": "disabled",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": true
+      },
+      "docs_url": "https://platform.minimax.io/docs/api-reference/text-openai-api",
       "extra_body": {
         "reasoning_split": true
       },
@@ -14337,8 +14588,18 @@
       "base_url": "https://api.minimax.io/anthropic",
       "key_env": "MINIMAX_API_KEY",
       "default_model": "minimax-m3",
-      "docs_url": "https://platform.minimax.io/docs/api-reference/text-openai-api",
       "model_reasoning_effort": "high",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": true
+      },
+      "docs_url": "https://platform.minimax.io/docs/api-reference/text-openai-api",
       "extra_body": {
         "reasoning_split": true
       },
@@ -14542,6 +14803,14 @@
       "base_url": "https://generativelanguage.googleapis.com",
       "key_env": "GEMINI_API_KEY",
       "default_model": "gemini-3-flash",
+      "reasoning_dialect": {
+        "toggle": "include_thoughts",
+        "effort_path": "thinkingLevel",
+        "budget_path": "thinkingBudget",
+        "delta": "gemini_thought_part",
+        "replay": "never",
+        "verified": true
+      },
       "docs_url": "https://ai.google.dev/gemini-api/docs",
       "models": {
         "deep-research-max-preview-04-2026": {
@@ -15797,6 +16066,15 @@
       "base_url": "https://qianfan.baidubce.com/v2",
       "key_env": "BAIDU_CLOUD_API_KEY",
       "default_model": "ernie-3.5-128k",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://cloud.baidu.com/doc/index.html",
       "models": {
         "ernie-3.5-128k": {
@@ -15923,6 +16201,15 @@
       "base_url": "https://api.cerebras.ai/v1",
       "key_env": "CEREBRAS_API_KEY",
       "default_model": "gemma-4-31b",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://inference-docs.cerebras.ai/introduction",
       "models": {
         "gemma-4-31b": {
@@ -15964,6 +16251,15 @@
       "base_url": "https://www.dmxapi.cn/v1",
       "key_env": "DMXAPI_API_KEY",
       "default_model": "gemini-2.5-flash-image",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://doc.dmxapi.cn/",
       "models": {
         "gemini-2.5-flash-image": {
@@ -16094,6 +16390,16 @@
       "base_url": "https://www.dmxapi.cn",
       "key_env": "DMXAPI_API_KEY",
       "default_model": "gemini-2.5-flash-image",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
       "docs_url": "https://doc.dmxapi.cn/",
       "extra_headers": {
         "Authorization": "",
@@ -16165,7 +16471,10 @@
               "max": 24576,
               "min": 0
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "gpt-image-1.5": {
@@ -16217,7 +16526,10 @@
               "max": 24576,
               "min": 0
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         }
       }
@@ -16229,6 +16541,14 @@
       "base_url": "https://www.dmxapi.cn/v1beta",
       "key_env": "DMXAPI_API_KEY",
       "default_model": "gemini-2.5-flash-image",
+      "reasoning_dialect": {
+        "toggle": "include_thoughts",
+        "effort_path": "thinkingLevel",
+        "budget_path": "thinkingBudget",
+        "delta": "gemini_thought_part",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://doc.dmxapi.cn/",
       "models": {
         "gemini-2.5-flash-image": {
@@ -16359,6 +16679,15 @@
       "base_url": "https://ark.cn-beijing.volces.com/api/v3",
       "key_env": "DOUBAO_API_KEY",
       "default_model": "deepseek-v4-pro-260425",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://console.volcengine.com/ark/region:cn-beijing/docs/82379/1099455?lang=zh",
       "models": {
         "deepseek-r1": {
@@ -17242,6 +17571,15 @@
       "base_url": "https://ark.cn-beijing.volces.com/api/v3",
       "key_env": "DOUBAO_API_KEY",
       "default_model": "deepseek-v4-pro-260425",
+      "reasoning_dialect": {
+        "toggle": "enable_thinking_bool",
+        "toggle_on": "true",
+        "toggle_off": "false",
+        "effort_path": "reasoning.effort",
+        "delta": "reasoning_summary",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://console.volcengine.com/ark/region:cn-beijing/docs/82379/1099455?lang=zh",
       "models": {
         "deepseek-r1": {
@@ -18125,6 +18463,15 @@
       "base_url": "https://api.fireworks.ai/inference",
       "key_env": "FIREWORKS_API_KEY",
       "default_model": "accounts/fireworks/models/deepseek-v4-pro-0813",
+      "reasoning_dialect": {
+        "toggle": "enable_thinking_bool",
+        "toggle_on": "true",
+        "toggle_off": "false",
+        "effort_path": "reasoning.effort",
+        "delta": "reasoning_summary",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://docs.fireworks.ai/getting-started/introduction",
       "models": {
         "accounts/fireworks/models/deepseek-v4-flash": {
@@ -18708,6 +19055,16 @@
       "base_url": "https://api.fireworks.ai/inference",
       "key_env": "FIREWORKS_API_KEY",
       "default_model": "accounts/fireworks/models/deepseek-v4-pro-0813",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
       "docs_url": "https://docs.fireworks.ai/getting-started/introduction",
       "extra_headers": {
         "Authorization": "",
@@ -19296,6 +19653,15 @@
       "base_url": "https://api.fireworks.ai/inference",
       "key_env": "FIREWORKS_API_KEY",
       "default_model": "accounts/fireworks/models/deepseek-v4-pro-0813",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://docs.fireworks.ai/getting-started/introduction",
       "models": {
         "accounts/fireworks/models/deepseek-v4-flash": {
@@ -19879,6 +20245,15 @@
       "base_url": "https://ai-gateway.vercel.sh/v1/ai",
       "key_env": "GATEWAY_API_KEY",
       "default_model": "openai/gpt-5.4",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://vercel.com/docs/ai-gateway",
       "models": {
         "anthropic/claude-3-haiku": {
@@ -24798,9 +25173,18 @@
       "base_url": "https://api.x.ai/v1",
       "key_env": "XAI_API_KEY",
       "default_model": "grok-4.5",
-      "docs_url": "https://docs.x.ai/",
       "model_reasoning_effort": "high",
       "native_web_search": true,
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
+      "docs_url": "https://docs.x.ai/",
       "models": {
         "grok-2": {
           "name": "Grok 2",
@@ -25163,6 +25547,15 @@
       "base_url": "https://api.groq.com/openai",
       "key_env": "GROQ_API_KEY",
       "default_model": "meta-llama/llama-prompt-guard-2-22m",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://console.groq.com/docs/quickstart",
       "models": {
         "allam-2-7b": {
@@ -25288,6 +25681,15 @@
       "base_url": "https://router.huggingface.co/v1",
       "key_env": "HUGGINGFACE_API_KEY",
       "default_model": "openai/gpt-oss-120b",
+      "reasoning_dialect": {
+        "toggle": "enable_thinking_bool",
+        "toggle_on": "true",
+        "toggle_off": "false",
+        "effort_path": "reasoning.effort",
+        "delta": "reasoning_summary",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://huggingface.co/docs",
       "models": {
         "deepseek-ai/DeepSeek-R1": {
@@ -26665,6 +27067,15 @@
       "base_url": "https://maas-api.lanyun.net/v1",
       "key_env": "LANYUN_API_KEY",
       "default_model": "/maas/deepseek-ai/DeepSeek-V3.2",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://archive.lanyun.net/#/maas/",
       "models": {
         "deepseek-r1": {
@@ -26913,6 +27324,15 @@
       "base_url": "https://api.longcat.chat/openai",
       "key_env": "LONGCAT_API_KEY",
       "default_model": "LongCat-2.0",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://longcat.chat/platform/docs/zh/",
       "models": {
         "LongCat-2.0": {
@@ -26944,6 +27364,16 @@
       "base_url": "https://api.longcat.chat/anthropic",
       "key_env": "LONGCAT_API_KEY",
       "default_model": "LongCat-2.0",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
       "docs_url": "https://longcat.chat/platform/docs/zh/",
       "extra_headers": {
         "Authorization": "",
@@ -26980,6 +27410,15 @@
       "base_url": "https://api.xiaomimimo.com/v1",
       "key_env": "MIMO_API_KEY",
       "default_model": "mimo-v2-5-pro",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://mimo.mi.com/docs/zh-CN",
       "models": {
         "mimo-v2-5": {
@@ -27124,6 +27563,16 @@
       "base_url": "https://api.xiaomimimo.com/anthropic",
       "key_env": "MIMO_API_KEY",
       "default_model": "mimo-v2-5-pro",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
       "docs_url": "https://mimo.mi.com/docs/zh-CN",
       "extra_headers": {
         "Authorization": "",
@@ -27273,6 +27722,15 @@
       "base_url": "https://api.xiaomimimo.com/v1",
       "key_env": "MIMO_API_KEY",
       "default_model": "mimo-v2-5-pro",
+      "reasoning_dialect": {
+        "toggle": "enable_thinking_bool",
+        "toggle_on": "true",
+        "toggle_off": "false",
+        "effort_path": "reasoning.effort",
+        "delta": "reasoning_summary",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://mimo.mi.com/docs/zh-CN",
       "models": {
         "mimo-v2-5": {
@@ -27417,6 +27875,15 @@
       "base_url": "https://api.mistral.ai/v1",
       "key_env": "MISTRAL_API_KEY",
       "default_model": "mistral-large-latest",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://docs.mistral.ai",
       "models": {
         "codestral": {
@@ -28028,6 +28495,15 @@
       "base_url": "https://api-inference.modelscope.cn/v1",
       "key_env": "MODELSCOPE_API_KEY",
       "default_model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://modelscope.cn/docs/model-service/API-Inference/intro",
       "models": {
         "ZhipuAI/GLM-4.5": {
@@ -28179,6 +28655,16 @@
       "base_url": "https://api-inference.modelscope.cn",
       "key_env": "MODELSCOPE_API_KEY",
       "default_model": "Qwen/Qwen3-235B-A22B-Instruct-2507",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
       "docs_url": "https://modelscope.cn/docs/model-service/API-Inference/intro",
       "extra_headers": {
         "Authorization": "",
@@ -28335,6 +28821,15 @@
       "base_url": "https://integrate.api.nvidia.com/v1",
       "key_env": "NVIDIA_API_KEY",
       "default_model": "nvidia/llama-3.3-nemotron-super-49b-v1",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://docs.api.nvidia.com/nim/reference/llm-apis",
       "models": {
         "nvidia/cosmos-reason2-8b": {
@@ -29569,6 +30064,15 @@
       "base_url": "https://openrouter.ai/api/v1",
       "key_env": "OPENROUTER_API_KEY",
       "default_model": "openai/gpt-5.4",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://openrouter.ai/docs/quick-start",
       "models": {
         "aion-labs/aion-2.0": {
@@ -36018,6 +36522,16 @@
       "base_url": "https://openrouter.ai/api",
       "key_env": "OPENROUTER_API_KEY",
       "default_model": "openai/gpt-5.4",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
       "docs_url": "https://openrouter.ai/docs/quick-start",
       "extra_headers": {
         "Authorization": "",
@@ -36078,7 +36592,10 @@
               "xhigh",
               "max"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "~anthropic/claude-fable-latest": {
@@ -36109,7 +36626,10 @@
               "high",
               "max"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "anthropic/claude-haiku-4.5": {
@@ -36177,7 +36697,10 @@
               "max",
               "none"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "anthropic/claude-opus-4": {
@@ -36342,7 +36865,10 @@
               "max": 128000,
               "min": 1024
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "anthropic/claude-opus-4.7-fast": {
@@ -36386,7 +36912,10 @@
               "max": 128000,
               "min": 1024
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "anthropic/claude-opus-4.8": {
@@ -36424,7 +36953,10 @@
               "max",
               "none"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "anthropic/claude-opus-4.8-fast": {
@@ -36460,7 +36992,10 @@
               "xhigh",
               "none"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "anthropic/claude-opus-5": {
@@ -36494,7 +37029,10 @@
               "xhigh",
               "max"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "anthropic/claude-opus-5-fast": {
@@ -36528,7 +37066,10 @@
               "xhigh",
               "max"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "~anthropic/claude-opus-latest": {
@@ -36563,7 +37104,10 @@
               "max",
               "none"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "anthropic/claude-sonnet-4": {
@@ -36673,7 +37217,10 @@
               "max": 64000,
               "min": 1024
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "anthropic/claude-sonnet-5": {
@@ -36711,7 +37258,10 @@
               "max",
               "none"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "~anthropic/claude-sonnet-latest": {
@@ -36746,7 +37296,10 @@
               "max",
               "none"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "mistralai/codestral-2508": {
@@ -37292,7 +37845,10 @@
               "max": 24576,
               "min": 0
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "google/gemini-3.1-flash-image-preview": {
@@ -37328,7 +37884,10 @@
               "max": 24576,
               "min": 0
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "google/gemini-3.1-flash-lite": {
@@ -37372,7 +37931,10 @@
               "max": 24576,
               "min": 0
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "google/gemini-3.1-flash-lite-image": {
@@ -37410,7 +37972,10 @@
               "max": 24576,
               "min": 0
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "google/gemini-3.1-flash-lite-preview": {
@@ -37454,7 +38019,10 @@
               "max": 24576,
               "min": 0
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "google/gemini-3.1-pro-preview": {
@@ -37496,7 +38064,10 @@
               "max": 32768,
               "min": 128
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "google/gemini-3.1-pro-preview-customtools": {
@@ -37538,7 +38109,10 @@
               "max": 32768,
               "min": 128
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "google/gemini-3.5-flash": {
@@ -37582,7 +38156,10 @@
               "max": 24576,
               "min": 0
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "google/gemini-3.5-flash-lite": {
@@ -37626,7 +38203,10 @@
               "max": 24576,
               "min": 0
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "google/gemini-3.6-flash": {
@@ -37670,7 +38250,10 @@
               "max": 24576,
               "min": 0
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "google/gemini-3.7-flash": {
@@ -37712,7 +38295,10 @@
               "max": 24576,
               "min": 0
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "google/gemini-3-flash-preview": {
@@ -37756,7 +38342,10 @@
               "max": 24576,
               "min": 0
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "google/gemini-3-pro-image": {
@@ -37794,7 +38383,10 @@
               "max": 32768,
               "min": 128
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "google/gemini-3-pro-image-preview": {
@@ -37830,7 +38422,10 @@
               "max": 32768,
               "min": 128
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "~google/gemini-flash-latest": {
@@ -37874,7 +38469,10 @@
               "max": 24576,
               "min": 0
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "~google/gemini-pro-latest": {
@@ -37915,7 +38513,10 @@
               "max": 32768,
               "min": 128
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "google/gemma-2-27b-it": {
@@ -42472,6 +43073,15 @@
       "base_url": "https://api.perplexity.ai/v1",
       "key_env": "PERPLEXITY_API_KEY",
       "default_model": "sonar-pro",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://docs.perplexity.ai/home",
       "models": {
         "sonar": {
@@ -42561,6 +43171,15 @@
       "base_url": "https://api.poe.com/v1",
       "key_env": "POE_API_KEY",
       "default_model": "Claude-Fable-5",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://creator.poe.com/docs/external-applications/openai-compatible-api",
       "models": {
         "Claude-Fable-5": {
@@ -42894,6 +43513,16 @@
       "base_url": "https://api.poe.com",
       "key_env": "POE_API_KEY",
       "default_model": "Claude-Fable-5",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
       "docs_url": "https://creator.poe.com/docs/external-applications/openai-compatible-api",
       "extra_headers": {
         "Authorization": "",
@@ -42932,7 +43561,10 @@
               "xhigh",
               "max"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "Claude-Opus-4.6": {
@@ -42977,7 +43609,10 @@
               "max": 128000,
               "min": 1024
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "Claude-Opus-4.7": {
@@ -43024,7 +43659,10 @@
               "max": 128000,
               "min": 1024
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "Claude-Opus-4.8": {
@@ -43062,7 +43700,10 @@
               "max",
               "none"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "Claude-Sonnet-4.6": {
@@ -43107,7 +43748,10 @@
               "max": 64000,
               "min": 1024
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "Claude-Sonnet-5": {
@@ -43145,7 +43789,10 @@
               "max",
               "none"
             ],
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "Gemini-3.1-Pro": {
@@ -43187,7 +43834,10 @@
               "max": 32768,
               "min": 128
             },
-            "wireDialect": "effort"
+            "wireDialect": "effort",
+            "dialect": {
+              "effort_path": "output_config.effort"
+            }
           }
         },
         "GPT-5.4": {
@@ -43232,6 +43882,15 @@
       "base_url": "https://api.ppinfra.com/v3/openai",
       "key_env": "PPIO_API_KEY",
       "default_model": "qwen/qwen3.5-plus",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://docs.cherry-ai.com/pre-basic/providers/ppio",
       "models": {
         "zai-org/autoglm-phone-9b-multilingual": {
@@ -44080,6 +44739,15 @@
       "base_url": "https://api.qnaigc.com/v1",
       "key_env": "QINIU_API_KEY",
       "default_model": "mimo-v2-flash",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://developer.qiniu.com/aitokenapi",
       "models": {
         "mimo-v2-flash": {
@@ -44111,6 +44779,16 @@
       "base_url": "https://api.qnaigc.com",
       "key_env": "QINIU_API_KEY",
       "default_model": "mimo-v2-flash",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
       "docs_url": "https://developer.qiniu.com/aitokenapi",
       "extra_headers": {
         "Authorization": "",
@@ -44147,6 +44825,15 @@
       "base_url": "https://developer.amd.com.cn/radeon/v1",
       "key_env": "RADEON_CLOUD_API_KEY",
       "default_model": "DeepSeek-V4-Flash",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://developer.amd.com.cn/radeon/",
       "models": {
         "DeepSeek-V4-Flash": {
@@ -44397,6 +45084,15 @@
       "base_url": "https://api.siliconflow.cn/v1",
       "key_env": "SILICON_API_KEY",
       "default_model": "ByteDance-Seed/Seed-OSS-36B-Instruct",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://docs.siliconflow.cn/",
       "models": {
         "deepseek-ai/DeepSeek-R1": {
@@ -45451,6 +46147,16 @@
       "base_url": "https://api.siliconflow.cn",
       "key_env": "SILICON_API_KEY",
       "default_model": "ByteDance-Seed/Seed-OSS-36B-Instruct",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
       "docs_url": "https://docs.siliconflow.cn/",
       "extra_headers": {
         "Authorization": "",
@@ -46510,6 +47216,15 @@
       "base_url": "https://www.sophnet.com/api/open-apis/v1",
       "key_env": "SOPHNET_API_KEY",
       "default_model": "DeepSeek-R1-0528",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://sophnet.com/docs/component/introduce.html",
       "models": {
         "DeepSeek-R1-0528": {
@@ -46540,6 +47255,15 @@
       "base_url": "https://api.stepfun.com/v1",
       "key_env": "STEPFUN_API_KEY",
       "default_model": "step-3-7-flash",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://platform.stepfun.com/docs/overview/concept",
       "models": {
         "step-1-32k": {
@@ -46631,6 +47355,16 @@
       "base_url": "https://api.stepfun.com",
       "key_env": "STEPFUN_API_KEY",
       "default_model": "step-3-7-flash",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
       "docs_url": "https://platform.stepfun.com/docs/overview/concept",
       "extra_headers": {
         "Authorization": "",
@@ -46727,6 +47461,15 @@
       "base_url": "https://api.together.ai/v1",
       "key_env": "TOGETHER_API_KEY",
       "default_model": "MiniMaxAI/MiniMax-M2.7",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://docs.together.ai/intro",
       "models": {
         "deepseek-ai/DeepSeek-V4-Pro": {
@@ -46945,6 +47688,15 @@
       "base_url": "https://tokenhub.tencentmaas.com/v1",
       "key_env": "TOKENHUB_API_KEY",
       "default_model": "deepseek-v4-pro",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "effort_path": "reasoning_effort",
+        "delta": "reasoning_content",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://cloud.tencent.com/document/product/1823",
       "models": {
         "deepseek-v3.2": {
@@ -47472,6 +48224,16 @@
       "base_url": "https://tokenhub.tencentmaas.com",
       "key_env": "TOKENHUB_API_KEY",
       "default_model": "deepseek-v4-pro",
+      "reasoning_dialect": {
+        "toggle": "thinking_type",
+        "toggle_on": "enabled",
+        "toggle_off": "disabled",
+        "budget_path": "thinking.budget_tokens",
+        "delta": "anthropic_thinking_block",
+        "replay": "never",
+        "signature_required": true,
+        "verified": false
+      },
       "docs_url": "https://cloud.tencent.com/document/product/1823",
       "extra_headers": {
         "Authorization": "",
@@ -48004,6 +48766,15 @@
       "base_url": "https://tokenhub.tencentmaas.com/v1",
       "key_env": "TOKENHUB_API_KEY",
       "default_model": "deepseek-v4-pro",
+      "reasoning_dialect": {
+        "toggle": "enable_thinking_bool",
+        "toggle_on": "true",
+        "toggle_off": "false",
+        "effort_path": "reasoning.effort",
+        "delta": "reasoning_summary",
+        "replay": "never",
+        "verified": false
+      },
       "docs_url": "https://cloud.tencent.com/document/product/1823",
       "models": {
         "deepseek-v3.2": {

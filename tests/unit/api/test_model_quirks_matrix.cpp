@@ -144,16 +144,21 @@ TEST_CASE("矩阵 A0: ReasoningEffortIsOff 目录判定版——minimal 声明�
     CHECK_FALSE(api::ReasoningEffortIsOff("high"));
 }
 
-TEST_CASE("矩阵 A1: catalog 扫掠——每只有推理档案的模型按自家 wire 过翻译,不变式成立") {
+TEST_CASE("矩阵 A1: catalog 扫掠——每只有推理档案的模型按声明方言落精确字段路径") {
     const auto& catalog = EmbeddedCatalog();
     std::size_t swept_models = 0;
     std::size_t swept_cases = 0;
+    std::size_t verified_dialects = 0;
     for (const auto& provider : catalog.providers) {
         for (const auto& model : provider.models) {
             if (model.reasoning.empty()) {
                 continue;
             }
             ++swept_models;
+            // P1 迁移后的守门:catalog 里再无"只写 supports_toggle、serializer
+            // 自猜字段"的推理模型——每只档案都得带方言。
+            REQUIRE_FALSE(model.reasoning.dialect.empty());
+            if (model.reasoning.dialect.verified) ++verified_dialects;
             // 档位取声明值 ∪ {none}(去重,大小写不敏感)。
             std::vector<std::string> efforts;
             for (const auto& declared : model.reasoning.supported_efforts) {
@@ -175,36 +180,67 @@ TEST_CASE("矩阵 A1: catalog 扫掠——每只有推理档案的模型按自�
                 const api::Request request = SweepRequest(model, effort);
                 const std::string lowered = Lowered(effort);
                 const bool off = api::ReasoningEffortIsOff(effort, model.reasoning);
-                const bool effort_dialect =
-                    model.reasoning.wire_dialect == "effort" || model.reasoning.supports_effort;
+                const auto& dialect = model.reasoning.dialect;
                 const int effective_max = request.max_tokens.value_or(
                     api::kRequiredMaxOutputTokensFallback);
 
                 if (provider.wire == config::Wire::ChatCompletions) {
                     const auto body = api::chat::BuildRequestJson(request);
+                    // 档位:声明了 effort 档的模型,按方言路径精确落
+                    // (reasoning_effort 顶层参数);方言没声明路径就不发。
                     if (model.reasoning.supports_effort) {
-                        CHECK(body.value("reasoning_effort", std::string()) == effort);
+                        REQUIRE(dialect.effort_path == "reasoning_effort");
+                        CHECK(body.at("reasoning_effort") == effort);
                     } else {
                         CHECK_FALSE(body.contains("reasoning_effort"));
                     }
-                    if (model.reasoning.supports_toggle) {
+                    // 开关:方言形状精确断言——enable_thinking_bool 落顶层布尔
+                    // 且不得夹带 thinking 键;thinking_type 落声明的 on/off 枚举
+                    // (MiniMax 是 adaptive,不是一律 enabled)。
+                    if (model.reasoning.supports_toggle && dialect.toggle == "enable_thinking_bool") {
+                        CHECK(body.at("enable_thinking") == !off);
+                        CHECK_FALSE(body.contains("thinking"));
+                    } else if (model.reasoning.supports_toggle &&
+                               dialect.toggle == "thinking_type") {
                         REQUIRE(body.contains("thinking"));
-                        CHECK(body["thinking"].at("type") == (off ? "disabled" : "enabled"));
+                        CHECK(body["thinking"].at("type") ==
+                              (off ? dialect.toggle_off : dialect.toggle_on));
+                        CHECK_FALSE(body.contains("enable_thinking"));
                     } else {
                         CHECK_FALSE(body.contains("thinking"));
+                        CHECK_FALSE(body.contains("enable_thinking"));
+                    }
+                    // 预算:方言声明 thinking_budget 且模型声明了区间、档位
+                    // 非 auto(手册:不填即默认最大思维链长度)才落。
+                    if (!off && dialect.budget_path == "thinking_budget" &&
+                        (model.reasoning.budget_min.has_value() ||
+                         model.reasoning.budget_max.has_value()) && lowered != "auto") {
+                        REQUIRE(body.contains("thinking_budget"));
+                        const int budget = body.at("thinking_budget").get<int>();
+                        CHECK(budget >= 1);
+                        CHECK(budget == ExpectedBudget(model.reasoning, lowered,
+                                                       request.max_tokens.value_or(0)));
+                    } else {
+                        CHECK_FALSE(body.contains("thinking_budget"));
                     }
                 } else if (provider.wire == config::Wire::Responses) {
                     const auto body = api::responses::BuildRequestJson(request);
                     if (model.reasoning.supports_effort) {
+                        REQUIRE(dialect.effort_path == "reasoning.effort");
                         REQUIRE(body.contains("reasoning"));
                         CHECK(body["reasoning"].at("effort") == effort);
+                        CHECK_FALSE(body.contains("enable_thinking"));
+                        CHECK_FALSE(body.contains("thinking"));
+                    } else if (model.reasoning.supports_toggle &&
+                               dialect.toggle == "enable_thinking_bool") {
+                        // 只有开关形状的端:旧开关顶层布尔(手册:reasoning.effort
+                        // 优先,没有档位可落时才用 enable_thinking)。
+                        CHECK(body.at("enable_thinking") == !off);
+                        CHECK_FALSE(body.contains("reasoning"));
+                        CHECK_FALSE(body.contains("thinking"));
                     } else {
                         CHECK_FALSE(body.contains("reasoning"));
-                    }
-                    if (model.reasoning.supports_toggle) {
-                        REQUIRE(body.contains("thinking"));
-                        CHECK(body["thinking"].at("type") == (off ? "disabled" : "enabled"));
-                    } else {
+                        CHECK_FALSE(body.contains("enable_thinking"));
                         CHECK_FALSE(body.contains("thinking"));
                     }
                 } else if (provider.wire == config::Wire::Anthropic) {
@@ -214,7 +250,8 @@ TEST_CASE("矩阵 A1: catalog 扫掠——每只有推理档案的模型按自�
                         CHECK(body["thinking"].at("type") == "disabled");
                         CHECK_FALSE(body["thinking"].contains("budget_tokens"));
                         CHECK_FALSE(body.contains("output_config"));
-                    } else if (model.reasoning.wire_dialect == "effort") {
+                    } else if (dialect.effort_path == "output_config.effort" ||
+                               model.reasoning.wire_dialect == "effort") {
                         CHECK(body["thinking"].at("type") == "adaptive");
                         CHECK_FALSE(body["thinking"].contains("budget_tokens"));
                         REQUIRE(body.contains("output_config"));
@@ -242,7 +279,10 @@ TEST_CASE("矩阵 A1: catalog 扫掠——每只有推理档案的模型按自�
                             CHECK_FALSE(thinking.contains("thinkingBudget"));
                             CHECK_FALSE(thinking.contains("thinkingLevel"));
                         }
-                    } else if (effort_dialect) {
+                    } else if (model.reasoning.wire_dialect == "effort" ||
+                               model.reasoning.supports_effort) {
+                        // (gemini 家方言对 level/budget 都做了形状背书,选哪只
+                        // 仍由 wireDialect 走向 + 档案决定——两键并发吃 400。)
                         CHECK(thinking.at("thinkingLevel") == lowered);
                         CHECK_FALSE(thinking.contains("thinkingBudget"));  // 两键并发的 400
                     } else if (model.reasoning.wire_dialect == "budget" ||
@@ -883,6 +923,70 @@ TEST_CASE("矩阵 E: extra_body 三层序——内置 < provider < 请求级,四
             CHECK(body.contains("contents"));              // model 在 URL 不在体里)
         }
     }
+}
+
+// ===========================================================================
+// G. 阿里云百炼 toggle 方言(P0 时以 should_fail 先见红证缺口,P1 方言入
+//    catalog 后修绿转正——手册形状从此钉死在册)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("矩阵 G0: 阿里云百炼 Chat——手册方言是顶层 enable_thinking 布尔,不是 thinking.type") {
+    const auto* dashscope = EmbeddedCatalog().FindProvider("dashscope");
+    REQUIRE(dashscope != nullptr);
+    const auto* model = dashscope->FindModel("qwen3.6-plus");
+    REQUIRE(model != nullptr);
+    REQUIRE(model->reasoning.supports_toggle);
+    REQUIRE(model->reasoning.dialect.toggle == "enable_thinking_bool");
+    REQUIRE(model->reasoning.dialect.verified);
+
+    // 手册(OpenAI兼容-Chat.md):enable_thinking 适用 Qwen3.x 混合思考模型;
+    // HTTP 直调放请求体顶层。开启后思考走 reasoning_content。
+    const auto on_body = api::chat::BuildRequestJson(SweepRequest(*model, "auto"));
+    CHECK(on_body.value("enable_thinking", false) == true);
+    CHECK_FALSE(on_body.contains("thinking"));
+
+    const auto off_body = api::chat::BuildRequestJson(SweepRequest(*model, "none"));
+    CHECK(off_body.value("enable_thinking", true) == false);
+    CHECK_FALSE(off_body.contains("thinking"));
+}
+
+TEST_CASE("矩阵 G1: 阿里云百炼 Responses——手册只有 enable_thinking(旧)与 reasoning.effort,没有 thinking.type") {
+    const auto* dashscope = EmbeddedCatalog().FindProvider("dashscope-responses");
+    REQUIRE(dashscope != nullptr);
+    const auto* model = dashscope->FindModel("qwen3.6-plus");
+    REQUIRE(model != nullptr);
+    REQUIRE(model->reasoning.supports_toggle);
+    REQUIRE(model->reasoning.dialect.toggle == "enable_thinking_bool");
+
+    // 手册(OpenAI兼容-Responses.md):enable_thinking 顶层布尔(旧开关,
+    // 将退役);reasoning.effort 优先级高于 enable_thinking。没有 thinking.type。
+    // 模型没声明 effort 档(qwen 档案只有 none/auto),开关走旧键顶层布尔。
+    const auto on_body = api::responses::BuildRequestJson(SweepRequest(*model, "auto"));
+    CHECK(on_body.value("enable_thinking", false) == true);
+    CHECK_FALSE(on_body.contains("thinking"));
+
+    const auto off_body = api::responses::BuildRequestJson(SweepRequest(*model, "none"));
+    CHECK(off_body.value("enable_thinking", true) == false);
+    CHECK_FALSE(off_body.contains("thinking"));
+}
+
+TEST_CASE("矩阵 G2: dashscope Chat 思考预算——thinking_budget 顶层整数,auto 不发(默认即最大思维链)") {
+    const auto* dashscope = EmbeddedCatalog().FindProvider("dashscope");
+    REQUIRE(dashscope != nullptr);
+    const auto* model = dashscope->FindModel("qwen3.6-plus");
+    REQUIRE(model != nullptr);
+    REQUIRE(model->reasoning.budget_min.has_value());
+
+    // 手册:thinking_budget 是思考过程的最大 Token 数(顶层整数);不填即
+    // 默认模型最大思维链长度。auto 档不发。
+    const auto auto_body = api::chat::BuildRequestJson(SweepRequest(*model, "auto"));
+    CHECK(auto_body.value("enable_thinking", false) == true);
+    CHECK_FALSE(auto_body.contains("thinking_budget"));
+
+    // none:开关关掉,预算键也不发。
+    const auto off_body = api::chat::BuildRequestJson(SweepRequest(*model, "none"));
+    CHECK(off_body.value("enable_thinking", true) == false);
+    CHECK_FALSE(off_body.contains("thinking_budget"));
 }
 
 // ===========================================================================
