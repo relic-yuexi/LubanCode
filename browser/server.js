@@ -709,7 +709,7 @@ const TOOLS = [
         timeout_ms: { type: 'number', description: '总墙钟(默认 15s,上限 60s)' },
       },
     },
-    handler: async (input) => {
+    handler: async (input, token) => {
       await session.ensureLaunched();
       const target = input.page_id ? { id: input.page_id, entry: session.resolvePage(input.page_id) } : await session.activePage();
       const timeoutMs = callTimeout(input);
@@ -721,6 +721,9 @@ const TOOLS = [
       if (input.url_contains) {
         const started = Date.now();
         while (Date.now() - started < timeoutMs) {
+          if (token && token.cancelled) {
+            throw toolError('browser.cancelled', '等待已取消(页面未判死,URL 当前 ' + page.url() + ')。');
+          }
           if (page.url().includes(String(input.url_contains))) {
             return textResult('URL 已含 ' + input.url_contains + ': ' + page.url(), pageMeta(target.id, page, target.entry, { waited_for: 'url' }));
           }
@@ -730,7 +733,13 @@ const TOOLS = [
       }
       const ms = Math.min(Math.max(Number(input.ms) || 0, 0), MAX_ACTION_TIMEOUT_MS);
       if (ms > 0) {
-        await new Promise((resolve) => setTimeout(resolve, ms));
+        const sliceEnd = Date.now() + ms;
+        while (Date.now() < sliceEnd) {
+          if (token && token.cancelled) {
+            throw toolError('browser.cancelled', '等待已取消(页面未判死)。');
+          }
+          await new Promise((resolve) => setTimeout(resolve, Math.min(100, sliceEnd - Date.now())));
+        }
         return textResult('等了 ' + ms + 'ms', pageMeta(target.id, page, target.entry, { waited_for: 'fixed' }));
       }
       throw toolError('browser.schema', '给一个条件:for_text / url_contains / ms。');
@@ -882,6 +891,10 @@ function enqueue(job) {
 // ---------------------------------------------------------------------------
 
 const pendingCancellations = new Set();
+// 在飞调用账(P1.6):id -> { cancelled }。取消通知命中在飞请求就置旗;
+// 单发 Playwright 动作靠自身超时收口,轮询型动作(wait 的 url/固定等待)
+// 见旗即停,不硬等满。
+const activeCalls = new Map();
 
 async function handleInitialize(id, params) {
   const requested = params && typeof params.protocolVersion === 'string' ? params.protocolVersion : PROTOCOL_VERSION;
@@ -913,8 +926,11 @@ async function handleToolsCall(id, params) {
     return;
   }
   const input = (params && params.arguments) || {};
+  const state = { cancelled: false };
+  activeCalls.set(id, state);
+  const token = { get cancelled() { return state.cancelled; } };
   try {
-    const result = await enqueue(() => withDeadline(Promise.resolve(tool.handler(input)), callTimeout(input) + 5000, '工具 ' + name));
+    const result = await enqueue(() => withDeadline(Promise.resolve(tool.handler(input, token)), callTimeout(input) + 5000, '工具 ' + name));
     sendResult(id, result || { content: [], isError: false });
   } catch (error) {
     if (pendingCancellations.delete(id)) {
@@ -925,6 +941,8 @@ async function handleToolsCall(id, params) {
     const message = error instanceof BrowserError ? error.message : describeError(error);
     log('tool', name, 'failed:', code, message);
     sendResult(id, { content: [{ type: 'text', text: message }], isError: true, structuredContent: { code } });
+  } finally {
+    activeCalls.delete(id);
   }
 }
 
@@ -957,7 +975,9 @@ function handleMessage(message) {
   if (method === 'notifications/initialized' || method === 'notifications/cancelled') {
     if (method === 'notifications/cancelled' && message.params && Number.isFinite(message.params.requestId)) {
       pendingCancellations.add(message.params.requestId);
-      log('收到取消通知:requestId=', message.params.requestId, '(在飞动作按自身超时收口)');
+      const inflight = activeCalls.get(message.params.requestId);
+      if (inflight) inflight.cancelled = true;
+      log('收到取消通知:requestId=', message.params.requestId, inflight ? '(在飞轮询型动作见旗即停)' : '(无在飞调用,记账)');
     }
     return;
   }

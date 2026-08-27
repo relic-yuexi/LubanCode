@@ -375,6 +375,40 @@ async function runCrashMatrix(baseUrl) {
 }
 
 // ---------------------------------------------------------------------------
+// 取消矩阵:notifications/cancelled 打断在飞等待
+// ---------------------------------------------------------------------------
+
+async function runCancelMatrix(baseUrl) {
+  section('取消(engine=chromium)');
+  if (!playwrightAvailable) {
+    skip('取消链路', 'playwright 依赖未安装');
+    return;
+  }
+  const client = new BrowserMcpClient(['--engine', 'chromium', '--headless', '--profile', 'ephemeral']);
+  await client.start();
+  try {
+    const opened = await client.call('browser_open', { url: baseUrl + '/' });
+    const pageId = opened.structuredContent.page_id;
+    const started = Date.now();
+    const flying = client.requestAsync('tools/call', {
+      name: 'browser_wait',
+      arguments: { page_id: pageId, ms: 30000, timeout_ms: 40000 },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    client.notify('notifications/cancelled', { requestId: flying.id });
+    const response = await flying.promise;
+    const elapsed = Date.now() - started;
+    const result = response.result || {};
+    const code = (result.structuredContent || {}).code || JSON.stringify(response.error || {});
+    ok('取消后 1 秒内回终态', elapsed < 1000 + 400, String(elapsed) + 'ms');
+    ok('终态是 browser.cancelled', code === 'browser.cancelled', code);
+    ok('页面未判死:下一调用照常', Boolean((await client.call('browser_tabs', {})).structuredContent));
+  } finally {
+    await client.stop();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 主流程
 // ---------------------------------------------------------------------------
 
@@ -409,6 +443,13 @@ async function main() {
       ++failed;
       failures.push('profile 矩阵异常: ' + String(error.message || error));
       console.log('  FAIL profile 矩阵异常: ' + String(error.message || error));
+    }
+    try {
+      await runCancelMatrix(baseUrl);
+    } catch (error) {
+      ++failed;
+      failures.push('cancel 矩阵异常: ' + String(error.message || error));
+      console.log('  FAIL cancel 矩阵异常: ' + String(error.message || error));
     }
     try {
       await runCrashMatrix(baseUrl);

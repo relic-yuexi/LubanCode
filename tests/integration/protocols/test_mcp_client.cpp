@@ -311,6 +311,88 @@ TEST_CASE("Client: 未知 content type 留占位块与码;坏 base64 的图片�
     CHECK(bad_image.content.find("base64") != std::string::npos);
 }
 
+TEST_CASE("Client: 取消旗置位后发 notifications/cancelled,宽限期内没终态按取消收口(P1.6)") {
+    FakeTransport transport;
+    mcp::Client client("test");
+    // 缩短取消宽限的等价路:超时给 5000ms,取消旗在 100ms 置位,宽限
+    // 2s 内服务器不回应 -> 按"被取消"收口,总耗时 < 5s。
+    client.SetTimeoutsForTest(/*default_timeout_ms=*/5000, /*tool_call_timeout_ms=*/5000);
+    client.AttachTransportForTest(&transport);
+
+    std::vector<std::string> written_lines;
+    std::mutex lines_mutex;
+    transport.on_write = [&](const std::string& line) {
+        std::lock_guard<std::mutex> lock(lines_mutex);
+        written_lines.push_back(line);
+        // 不回应:等取消路收口。
+    };
+    // 取消旗:100ms 后置位,模拟用户按 ESC。
+    std::atomic<bool> cancel_flag{false};
+    std::thread([&cancel_flag] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        cancel_flag.store(true);
+    }).detach();
+
+    mcp::CallOptions options;
+    options.cancel = &cancel_flag;
+    const auto start = std::chrono::steady_clock::now();
+    const auto result = client.CallTool("slow_tool", nlohmann::json::object(), nullptr, options);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+
+    CHECK(result.is_error);
+    CHECK(result.error_code == "mcp.cancelled");
+    CHECK(result.outcome == "cancelled_during_run");
+    CHECK(result.content.find("被取消") != std::string::npos);
+    // 通知真的发出去了:写出的行里有一条 notifications/cancelled 且带本次 id。
+    bool saw_cancel_notification = false;
+    {
+        std::lock_guard<std::mutex> lock(lines_mutex);
+        for (const auto& line : written_lines) {
+            const auto message = nlohmann::json::parse(line);
+            if (message.value("method", std::string()) == "notifications/cancelled") {
+                saw_cancel_notification = true;
+                CHECK(message.at("params").at("requestId").is_number_integer());
+            }
+        }
+    }
+    CHECK(saw_cancel_notification);
+    CHECK(elapsed < std::chrono::seconds(5));
+}
+
+TEST_CASE("Client: 取消后宽限期内终态到了,正常吃结果不按取消收口") {
+    FakeTransport transport;
+    mcp::Client client("test");
+    client.SetTimeoutsForTest(5000, 5000);
+    client.AttachTransportForTest(&transport);
+
+    std::atomic<bool> cancel_flag{false};
+    transport.on_write = [&](const std::string& line) {
+        const auto request = nlohmann::json::parse(line);
+        // 只盯带 id 的请求;initialize 握手的通知行没有 id,跳过。
+        if (!request.contains("id")) {
+            return;
+        }
+        // 取消旗 100ms 置位;服务器 500ms 后回终态(宽限期内)。
+        std::thread([&cancel_flag] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            cancel_flag.store(true);
+        }).detach();
+        std::thread([&client, id = request.at("id").get<std::int64_t>()] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(500));
+            const nlohmann::json response = {
+                {"jsonrpc", "2.0"}, {"id", id},
+                {"result", {{"content", nlohmann::json::array({{{"type", "text"}, {"text", "赶上了"}}})}}}};
+            client.OnLine(response.dump());
+        }).detach();
+    };
+
+    mcp::CallOptions options;
+    options.cancel = &cancel_flag;
+    const auto result = client.CallTool("whatever", nlohmann::json::object(), nullptr, options);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content == "赶上了");
+}
+
 TEST_CASE("Client: Initialize 握手成功后会发一条 notifications/initialized 通知(无 id)") {
     FakeTransport transport;
     mcp::Client client("test");

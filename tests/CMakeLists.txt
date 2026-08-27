@@ -173,7 +173,10 @@ if(LUBANCODE_NODE_EXECUTABLE)
     COMMAND "${LUBANCODE_NODE_EXECUTABLE}" "browser/test/run-tests.js"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
   set_tests_properties(browser.mcp.selftest PROPERTIES
-    LABELS "browser;mcp" TIMEOUT 900)
+    LABELS "browser;mcp" TIMEOUT 900
+    # 真浏览器起落吃机器:并行 -j 下与其他重测抢资源会抖出假失败,
+    # 这条独跑(其余测试照旧并行)。
+    RUN_SERIAL TRUE)
 endif()
 set_tests_properties(manual.model_probe_stub PROPERTIES
   ENVIRONMENT "MODEL_PROBE_STUB=1;MODEL_PROBE_MANIFEST=${CMAKE_CURRENT_SOURCE_DIR}/manual/model_probe_manifest.json;MODEL_PROBE_REPORT_DIR=${CMAKE_BINARY_DIR}/test-evidence/model-probe-stub"

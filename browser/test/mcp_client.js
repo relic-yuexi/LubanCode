@@ -84,6 +84,16 @@ class BrowserMcpClient {
     return response.result;
   }
 
+  // 发请求不等答:测试取消链路用(拿 id 发 notifications/cancelled)。
+  requestAsync(method, params) {
+    const id = this.nextId++;
+    const promise = new Promise((resolve, reject) => {
+      this.pending.set(id, { resolve });
+      this.child.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params: params || {} }) + '\n');
+    });
+    return { id, promise };
+  }
+
   // 期待失败:回 { text, code }。
   async callExpectError(name, args) {
     const response = await this.request('tools/call', { name, arguments: args || {} });

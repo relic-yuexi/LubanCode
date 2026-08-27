@@ -13,6 +13,9 @@ namespace {
 constexpr int kDefaultTimeoutMs = 30000;
 constexpr int kToolCallTimeoutMs = 120000;
 constexpr char kClientVersion[] = "0.9.0";
+// 取消宽限:取消通知发出后还等这么久——server 肯停的话终态会在这段里到;
+// 没到就不再吊着调用方(迟到响应由 late_response_sink 留账)。
+constexpr int kCancelGraceMs = 2000;
 
 // 协议版本协商账(MCP 富结果单 P0.4):客户端认得的版本,降序;请求里
 // 永远发最高版,响应版本必须落在表内——不认识的未来版明败,不硬着头皮
@@ -105,7 +108,8 @@ void Client::OnLine(const std::string& line) {
 
 std::expected<nlohmann::json, std::string> Client::SendRequestAndWait(const std::string& method,
                                                                        const nlohmann::json& params, int timeout_ms,
-                                                                       std::int64_t* jsonrpc_request_id_out) {
+                                                                       std::int64_t* jsonrpc_request_id_out,
+                                                                       const std::atomic<bool>* cancel) {
     if (transport_ == nullptr) {
         return std::unexpected("MCP 服务器 " + server_name_ + " 传输层未就绪");
     }
@@ -128,6 +132,10 @@ std::expected<nlohmann::json, std::string> Client::SendRequestAndWait(const std:
     // 分段等待(每段 100ms)轮询进程死活:进程死了没人来 notify 这个 cv,
     // 一口气 wait_for 满 timeout_ms 的话,tools/call 会白等上 120s 才发现
     // 对面早就没了。分段醒来查一次 IsAlive,死进程几百毫秒内就能失败返回。
+    // 取消旗(P1.6)也在同一段轮询里查:置位先发 notifications/cancelled,
+    // 宽限期内等终态,过了宽限就按取消收口。
+    bool cancel_notified = false;
+    std::optional<std::chrono::steady_clock::time_point> cancel_deadline;
     std::unique_lock<std::mutex> lock(mutex_);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     while (!entry->done && transport_->IsAlive()) {
@@ -135,15 +143,36 @@ std::expected<nlohmann::json, std::string> Client::SendRequestAndWait(const std:
         if (now >= deadline) {
             break;
         }
-        const auto slice = std::min<std::chrono::steady_clock::duration>(deadline - now, std::chrono::milliseconds(100));
+        if (cancel != nullptr && cancel->load()) {
+            if (!cancel_notified) {
+                // 写通知不经持锁路径(WriteLine 自己管线程安全),先放锁再写。
+                lock.unlock();
+                SendNotification("notifications/cancelled", {{"requestId", id}});
+                lock.lock();
+                cancel_notified = true;
+                cancel_deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(kCancelGraceMs);
+            } else if (now >= *cancel_deadline) {
+                break;
+            }
+        }
+        auto wait_until = deadline;
+        if (cancel_deadline.has_value() && *cancel_deadline < wait_until) {
+            wait_until = *cancel_deadline;
+        }
+        const auto slice = std::min<std::chrono::steady_clock::duration>(wait_until - now, std::chrono::milliseconds(100));
         cv_.wait_for(lock, slice, [&entry]() { return entry->done; });
     }
+    const bool cancelled_out = !entry->done && cancel_notified;
     pending_.erase(id);
 
     if (!entry->done) {
         const std::string stderr_tail = transport_->StderrTail();
         std::string message = "MCP 服务器 " + server_name_ + " 在等待 " + method + " 响应时";
-        message += transport_->IsAlive() ? "超时" : "进程已退出";
+        if (cancelled_out) {
+            message += "被取消(notifications/cancelled 已发出,宽限期内未收到终态)";
+        } else {
+            message += transport_->IsAlive() ? "超时" : "进程已退出";
+        }
         if (!stderr_tail.empty()) {
             message += "(stderr: " + stderr_tail + ")";
         }
@@ -251,13 +280,17 @@ std::expected<std::vector<ToolInfo>, std::string> Client::ListTools() {
 tools::Tool::Result Client::CallTool(const std::string& tool_name, const nlohmann::json& arguments,
                                      std::int64_t* jsonrpc_request_id_out, const CallOptions& options) {
     const nlohmann::json params = {{"name", tool_name}, {"arguments", arguments}};
-    auto result = SendRequestAndWait("tools/call", params, tool_call_timeout_ms_, jsonrpc_request_id_out);
+    auto result =
+        SendRequestAndWait("tools/call", params, tool_call_timeout_ms_, jsonrpc_request_id_out, options.cancel);
     if (!result.has_value()) {
-        // 逐枚追踪单:server 进程退出/传输断、超时分开记,不靠中文正文
-        // 分辨。迟到响应的丢弃在 transport 读线程里(HookRunRecord 之外
-        // 另记 late_response_dropped,见 client.hpp 注释)。
+        // 逐枚追踪单:server 进程退出/传输断、超时、取消分开记,不靠中文
+        // 正文分辨。迟到响应的丢弃在 transport 读线程里(HookRunRecord
+        // 之外另记 late_response_dropped,见 client.hpp 注释)。
         tools::Tool::Result failed{result.error(), true};
-        if (result.error().find("超时") != std::string::npos) {
+        if (result.error().find("被取消") != std::string::npos) {
+            failed.outcome = "cancelled_during_run";
+            failed.error_code = "mcp.cancelled";
+        } else if (result.error().find("超时") != std::string::npos) {
             failed.outcome = "timed_out";
             failed.error_code = "mcp.timeout";
         } else {

@@ -38,6 +38,7 @@ tools::Tool::Result McpTool::execute(const nlohmann::json& input, const tools::T
     // 块先落 <会话>/mcp-artifacts 再入史;没有落盘地由解析层按稳定错收口。
     CallOptions options;
     options.artifact_dir = context.artifact_dir;
+    options.cancel = context.cancel;  // P1.6:ESC/父任务取消贯通到 MCP 取消通知
     if (info_.output_schema.has_value()) {
         options.output_schema = &*info_.output_schema;
     }

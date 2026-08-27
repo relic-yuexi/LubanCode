@@ -7,6 +7,7 @@
 // StartProcess() 在内部造一个真正的 StdioTransport。
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <cstdint>
 #include <functional>
@@ -73,10 +74,13 @@ struct ToolInfo {
 
 // tools/call 的富结果解析入参(MCP 富结果单 P0.4/P0.5):artifact_dir 是
 // 本轮会话的二进制落盘地(空 = 无落盘地,二进制块按稳定错收口);
-// output_schema 是 ToolInfo 声明的 outputSchema(可空指针)。
+// output_schema 是 ToolInfo 声明的 outputSchema(可空指针);cancel 是
+// 本次调用的取消旗(P1.6:ESC/父任务取消——置位后发 MCP
+// notifications/cancelled,宽限期内没等到终态就按取消收口)。
 struct CallOptions {
     std::string artifact_dir;
     const nlohmann::json* output_schema = nullptr;
+    const std::atomic<bool>* cancel = nullptr;
 };
 
 // 一个 MCP 服务器的客户端:管一条 stdio 连接的握手、请求配对、tools/list、
@@ -158,9 +162,13 @@ private:
     // jsonrpc_request_id_out(逐枚追踪单):非空时回填本次内层 JSON-RPC id,
     // 外层 tool execution 拿它挂账(超时删 pending 后迟到响应的丢弃也靠这
     // 个 id 关联,不投给新调用)。
+    // cancel(P1.6 取消贯通):置位后立即发 notifications/cancelled,再宽限
+    // kCancelGraceMs 等终态;仍没等到就按取消收口(错误文案带"已取消"),
+    // pending 删除,迟到响应走 late_response_sink 留账。
     std::expected<nlohmann::json, std::string> SendRequestAndWait(const std::string& method,
                                                                     const nlohmann::json& params, int timeout_ms,
-                                                                    std::int64_t* jsonrpc_request_id_out = nullptr);
+                                                                    std::int64_t* jsonrpc_request_id_out = nullptr,
+                                                                    const std::atomic<bool>* cancel = nullptr);
 
     // 发一个不带 id 的通知,不等回应。
     bool SendNotification(const std::string& method, const nlohmann::json& params);
