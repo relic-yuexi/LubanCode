@@ -371,6 +371,18 @@ int main(void) {
 
 `<项目>/.lubancode/plugins/` 也认（一插件一目录，格式同上）。项目目录里的插件是外来代码——首次见到按内容指纹（全部文件的 SHA-256）查信任账 `~/.lubancode/plugin-trust.json`，未信任的跳过并警告，改一个字节指纹即变、须重审。用户主目录的插件是亲手放的，不进这本账。
 
+### 6.6 完整案例：GUI Agent（Windows 桌面自动化）
+
+单工具示例见 [examples/plugins/](../../../examples/plugins/README.md)；要看的“多工具、有安全合同的完整插件”，见 **[examples/agents/gui-agent](../../../examples/agents/gui-agent/README.md)**——九件 GUI 工具（截图/枚举/聚焦/移动/点击/滚轮/输入/按键/状态），带：
+
+- 坐标合同：`virtual_screen` 物理像素与 `window_client` 两种口径，动作前换算、越界拒绝；
+- stale observation：截图时的窗口矩形进 observation，动作带 `expected_window_rect` 复查，窗口挪了即拒，不拿旧图坐标硬点；
+- dry-run（`LUBANCODE_GUI_DRY_RUN=1`）：动作只校验只报计划，一枚输入事件都不发；
+- 危险键闸（Win 组合、Alt+F4 默认禁）、文本/滚轮/截图上限、中文 Unicode 直注（不走剪贴板）；
+- 教学夹具（本地 tkinter 小窗）、离线自测（零真输入）、真桌面 E2E（默认 SKIP）。
+
+它示范的选型判断：**状态在桌面与目标程序手里的，用短命 process 插件；状态要住进你进程里的（DOM handle、连接池、事件订阅），才上 MCP。**
+
 ## 7. native 原生插件（三平台）
 
 三平台同一份纯 C ABI：Windows 加载 `.dll`、Linux 加载 `.so`、macOS 加载 `.dylib`。公共 ABI 头在 [include/luban_plugin.h](../../../include/luban_plugin.h)。插件导出同一枚符号：

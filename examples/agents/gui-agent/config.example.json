@@ -1,0 +1,25 @@
+{
+  "_comment": [
+    "GUI Agent 示例的配置样例。插件本体不用 config.json——装法就是把",
+    "gui-agent/ 整个目录拷进 ~/.lubancode/plugins/,重启 LubanCode 即挂上。",
+    "这份样例演示两件事:",
+    "  1) 项目级 .lubancode/settings.local.json 怎么给教学夹具开免确认",
+    "     (只点名单内工具,绝不开 plugin__gui-agent-example__* 通配全放);",
+    "  2) 环境开关怎么递给插件(manifest 的 permissions.env 已点名这三个,",
+    "     在启动 LubanCode 的终端里 set 才会传进去)。"
+  ],
+  "settings_local_example": {
+    "allow_tools": [
+      "plugin__gui-agent-example__gui_status",
+      "plugin__gui-agent-example__gui_list_windows",
+      "plugin__gui-agent-example__gui_focus_window",
+      "plugin__gui-agent-example__gui_screenshot"
+    ],
+    "_note": "观察类四件可免确认。click/type/key/move/scroll 属写动作,留着每次确认——教程不教'允许所有 gui_*'。"
+  },
+  "environment_switches": {
+    "LUBANCODE_GUI_DRY_RUN": "1 = 动作类工具只校验只报计划,不注入一枚输入事件。第一回照 README 先用它走全流程。",
+    "LUBANCODE_GUI_EVIDENCE_DIR": "截图落盘目录。缺省 %TEMP%\\lubancode-gui-agent,建议指到 build/test-evidence/agent-examples/ 这类不进仓的目录。",
+    "LUBANCODE_GUI_ALLOW_DANGEROUS_KEYS": "1 = 放行 Win 组合与 Alt+F4。默认禁;教程用不到,别开。"
+  }
+}
