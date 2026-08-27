@@ -180,7 +180,18 @@ std::size_t EstimateMessageTokens(const api::Message& message) {
                     return EstimateUtf8Tokens(b.name) + EstimateUtf8Tokens(b.id) +
                            EstimateUtf8Tokens(b.input.dump());
                 } else if constexpr (std::is_same_v<T, api::ToolResultBlock>) {
-                    return EstimateUtf8Tokens(b.tool_use_id) + EstimateUtf8Tokens(b.content);
+                    // 工具结果图片回喂单:重灌过的 wire_base64 会真上 wire,
+                    // 按体积粗折(与 ImageBlock 同口径);durable history 里
+                    // 恒空,老行为不变。
+                    std::size_t image_bytes = 0;
+                    for (const auto& rich : b.blocks) {
+                        if (const auto* image = std::get_if<tools::ImageContent>(&rich);
+                            image != nullptr) {
+                            image_bytes += image->wire_base64.size();
+                        }
+                    }
+                    return EstimateUtf8Tokens(b.tool_use_id) + EstimateUtf8Tokens(b.content) +
+                           image_bytes / 4;
                 } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
                     return EstimateUtf8Tokens(b.text) + EstimateUtf8Tokens(b.signature);
                 } else {

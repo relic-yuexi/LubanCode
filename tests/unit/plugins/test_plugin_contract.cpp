@@ -421,7 +421,8 @@ TEST_CASE("请求帧序列化:嵌套 object/中文/多行字符串原样进 JSON
     };
     request.context_cwd = "D:/项目 根";
     const nlohmann::json frame = plugin_protocol::SerializeRequest(request);
-    CHECK(frame["protocol"] == 1);
+    // v2 宿主通告(工具结果图片回喂单);v1 插件不读这个字段,照旧能跑。
+    CHECK(frame["protocol"] == 2);
     CHECK(frame["call_id"] == "call_1");
     CHECK(frame["context"]["cwd"] == "D:/项目 根");
     // 往返不变形
@@ -500,9 +501,89 @@ TEST_CASE("响应解析的终态矩阵:坏 UTF-8/坏 JSON/多帧/call_id 不合/
     const std::string no_content = R"({"protocol":1,"call_id":"c","ok":true})";
     CHECK(plugin_protocol::ParseResponse(no_content, "c").status == PluginErrorCode::BadJson);
 
-    // protocol 不合
-    const std::string wrong_protocol = R"({"protocol":2,"call_id":"c","ok":true,"content":[]})";
+    // protocol 不合(v2 已合法,再高的版本才拒)
+    const std::string wrong_protocol = R"({"protocol":3,"call_id":"c","ok":true,"content":[]})";
     CHECK(plugin_protocol::ParseResponse(wrong_protocol, "c").status == PluginErrorCode::BadJson);
+}
+
+// ---------------------------------------------------------------------------
+// 协议 v2:结果带图(工具结果图片回喂单)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("v2 响应解析:image 块的 data 与 path 两种来源都收") {
+    const std::string base64_frame = R"json({
+      "protocol": 2, "call_id": "c", "ok": true,
+      "content": [
+        {"type": "text", "text": "已截图"},
+        {"type": "image", "mime_type": "image/png", "data": "aGVsbG8="}
+      ]
+    })json";
+    {
+        const auto parsed = plugin_protocol::ParseResponse(base64_frame, "c");
+        REQUIRE(parsed.status == PluginErrorCode::Ok);
+        CHECK(parsed.response.ok);
+        CHECK(parsed.response.text == "已截图");
+        REQUIRE(parsed.response.images.size() == 1);
+        CHECK(parsed.response.images[0].mime_type == "image/png");
+        CHECK(parsed.response.images[0].data_base64 == "aGVsbG8=");
+        CHECK(parsed.response.images[0].path.empty());
+    }
+    const std::string path_frame = R"json({
+      "protocol": 2, "call_id": "c", "ok": true,
+      "content": [
+        {"type": "image", "mime_type": "image/png", "path": "C:/tmp/shot.png"}
+      ]
+    })json";
+    {
+        const auto parsed = plugin_protocol::ParseResponse(path_frame, "c");
+        REQUIRE(parsed.status == PluginErrorCode::Ok);
+        REQUIRE(parsed.response.images.size() == 1);
+        CHECK(parsed.response.images[0].path == "C:/tmp/shot.png");
+        CHECK(parsed.response.images[0].data_base64.empty());
+    }
+}
+
+TEST_CASE("v2 响应解析:image 块的形状错误按 BadJson 收口") {
+    // data 与 path 恰给其一:两个都给 / 两个都不给都坏
+    const std::string both = R"({"protocol":2,"call_id":"c","ok":true,
+      "content":[{"type":"image","mime_type":"image/png","data":"YQ==","path":"x.png"}]})";
+    CHECK(plugin_protocol::ParseResponse(both, "c").status == PluginErrorCode::BadJson);
+    const std::string neither = R"({"protocol":2,"call_id":"c","ok":true,
+      "content":[{"type":"image","mime_type":"image/png"}]})";
+    CHECK(plugin_protocol::ParseResponse(neither, "c").status == PluginErrorCode::BadJson);
+    // mime_type 缺失/非串
+    const std::string no_mime = R"({"protocol":2,"call_id":"c","ok":true,
+      "content":[{"type":"image","data":"YQ=="}]})";
+    CHECK(plugin_protocol::ParseResponse(no_mime, "c").status == PluginErrorCode::BadJson);
+    // data 非串
+    const std::string bad_data = R"({"protocol":2,"call_id":"c","ok":true,
+      "content":[{"type":"image","mime_type":"image/png","data":42}]})";
+    CHECK(plugin_protocol::ParseResponse(bad_data, "c").status == PluginErrorCode::BadJson);
+}
+
+TEST_CASE("v1 兼容:v1 响应照旧只认 text,image 块仍是 UnknownContent") {
+    const std::string v1_text = R"({"protocol":1,"call_id":"c","ok":true,
+      "content":[{"type":"text","text":"纯文本"}]})";
+    const auto parsed = plugin_protocol::ParseResponse(v1_text, "c");
+    REQUIRE(parsed.status == PluginErrorCode::Ok);
+    CHECK(parsed.response.text == "纯文本");
+    CHECK(parsed.response.images.empty());
+
+    // v1 帧里冒出 image:违反 v1 合同,老钉子不动
+    const std::string v1_image = R"({"protocol":1,"call_id":"c","ok":true,
+      "content":[{"type":"image","mime_type":"image/png","data":"YQ=="}]})";
+    CHECK(plugin_protocol::ParseResponse(v1_image, "c").status == PluginErrorCode::UnknownContent);
+}
+
+TEST_CASE("请求帧说 protocol=2(v2 宿主通告;v1 插件不读这个字段照旧能跑)") {
+    plugin_protocol::ProcessRequest request;
+    request.plugin = "p";
+    request.tool = "t";
+    request.entry = "t";
+    request.call_id = "c1";
+    request.arguments = nlohmann::json{{"x", 1}};
+    const nlohmann::json frame = plugin_protocol::SerializeRequest(request);
+    CHECK(frame["protocol"] == 2);
 }
 
 // ---------------------------------------------------------------------------

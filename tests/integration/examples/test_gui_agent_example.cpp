@@ -18,11 +18,13 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
 #include <string>
 
 #include "platform/process.hpp"
 #include "runtime/plugin_contract.hpp"
 #include "runtime/plugin_process.hpp"
+#include "runtime/plugin_tool.hpp"
 
 using namespace lubancode;
 using namespace lubancode::runtime;
@@ -152,6 +154,50 @@ TEST_CASE("gui-agent 示例:README/SKILL 提的工具名与 manifest 不两张�
 // ---------------------------------------------------------------------------
 // 真进程往返(缺 Python 的环境跳过;绝不碰真鼠标)
 // ---------------------------------------------------------------------------
+TEST_CASE("gui-agent 示例:gui_screenshot 真跑——v2 image 块随响应回,宿主落账成 ImageContent") {
+    const auto manifest = LoadExampleManifest();
+    if (!PythonAvailable(manifest.argv[0])) {
+        return;
+    }
+#ifdef _WIN32
+    // 纯观察链(不注入任何输入):先枚举窗口,再对第一枚可见窗口截图。
+    const auto listed = RunProcessToolCall(manifest, MakeRequest("gui_list_windows", nlohmann::json::object()),
+                                           "D:/not-a-real-dir", nullptr, ProcessCallLimits{});
+    if (listed.code != PluginErrorCode::Ok) {
+        return;  // 枚举不到窗口的极端环境(无桌面会话)按跳过收
+    }
+    const std::string window_id = listed.structured.value("windows", nlohmann::json::array())
+                                      .at(0)
+                                      .value("window_id", "");
+    if (window_id.empty()) {
+        return;
+    }
+
+    // 走 adapter 全链:宿主验身(魔数/帽)→ 落 artifact → payload 带图。
+    auto shared = std::make_shared<const PluginManifest>(std::move(manifest));
+    PluginToolAdapter adapter(shared, &shared->tools[0]);
+    const std::filesystem::path artifacts =
+        std::filesystem::temp_directory_path() / "lubancode_gui_shot_artifacts";
+    const auto result = adapter.execute(nlohmann::json{{"target", "window"}, {"window_id", window_id}},
+                                        tools::ToolExecutionContext{nullptr, artifacts.generic_string()});
+    if (result.is_error) {
+        // 目标窗口可能在两步之间关了/最小化了——那是真桌面的正常变数,
+        // 不算红;只拒真正落不了账的错。
+        const bool desktop_churn = result.error_code == "plugin.window_minimized" ||
+                                   result.error_code == "plugin.window_not_found";
+        INFO(result.content);
+        CHECK(desktop_churn);
+        return;
+    }
+    const auto* image = std::get_if<tools::ImageContent>(&result.payload.content.back());
+    REQUIRE(image != nullptr);
+    CHECK(image->artifact.stored);
+    CHECK(image->artifact.filename.rfind("art-", 0) == 0);
+    CHECK(std::filesystem::exists(artifacts / image->artifact.filename));
+    CHECK(image->bytes > 0);
+#endif
+}
+
 TEST_CASE("gui-agent 示例:gui_status 真跑,平台口径如实") {
     const auto manifest = LoadExampleManifest();
     if (!PythonAvailable(manifest.argv[0])) {
@@ -169,8 +215,9 @@ TEST_CASE("gui-agent 示例:gui_status 真跑,平台口径如实") {
     CHECK(outcome.structured.contains("dpi_awareness"));
     CHECK(outcome.structured.contains("virtual_screen"));
     CHECK(outcome.structured.contains("dry_run"));
-    // 诚实条款:observation 的"模型还没看见图"标记在 status 里也露脸。
+    // 协议 v2:回喂能力在 status 里翻真(rich_result=true)。
     CHECK(outcome.structured.contains("rich_result"));
+    CHECK(outcome.structured["rich_result"].value("rich_result", false) == true);
 #else
     // 非宿主平台不装能跑:插件自报 unsupported_platform。
     REQUIRE(outcome.code == PluginErrorCode::PluginReportedError);

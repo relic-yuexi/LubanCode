@@ -143,6 +143,94 @@ TEST_CASE("Gemini request: 富工具结果——structuredContent 走原生对�
     CHECK(response.dump().find("artifact=mcp-artifacts") == std::string::npos);
 }
 
+namespace {
+
+// 带重灌图片的工具结果消息(gemini 用例共用)。
+api::Message ImageResultMessage() {
+    api::Message result_message;
+    result_message.role = api::Role::User;
+    api::ToolResultBlock rich;
+    rich.tool_use_id = "c1";
+    rich.content = "已截图 640x480";
+    lubancode::tools::ImageContent image;
+    image.mime_type = "image/png";
+    image.width = 640;
+    image.height = 480;
+    image.bytes = 9;
+    image.wire_base64 = "iVBORw0KGgo=";
+    image.artifact.filename = "art-00112233.png";
+    image.artifact.path = "mcp-artifacts/art-00112233.png";
+    image.artifact.stored = true;
+    rich.blocks.push_back(std::move(image));
+    result_message.content.push_back(rich);
+    return result_message;
+}
+
+}  // namespace
+
+TEST_CASE("工具结果图片回喂: Gemini 3+ 上 functionResponse.parts 嵌 inlineData 真发(工具结果图片回喂单)") {
+    for (const char* model : {"gemini-3-pro-preview", "gemini-3.5-flash", "models/gemini-3.1-pro"}) {
+        api::Request request;
+        request.model = model;
+        api::Message assistant;
+        assistant.role = api::Role::Assistant;
+        assistant.content.push_back(api::ToolUseBlock{"c1", "browser_screenshot", nlohmann::json::object()});
+        request.messages.push_back(assistant);
+        request.messages.push_back(ImageResultMessage());
+
+        const auto body = api::gemini::BuildRequestJson(request);
+        const auto& response = body["contents"][1]["parts"][0]["functionResponse"];
+        // parts 数组:inlineData 带 displayName/mimeType/base64 data。
+        REQUIRE(response.contains("parts"));
+        REQUIRE(response["parts"].size() == 1);
+        const auto& inline_data = response["parts"][0]["inlineData"];
+        CHECK(inline_data["displayName"] == "art-00112233.png");
+        CHECK(inline_data["mimeType"] == "image/png");
+        CHECK(inline_data["data"] == "iVBORw0KGgo=");
+        // 投影文本照旧进 response.result,不带降级附注。
+        CHECK(response["response"]["result"] == "已截图 640x480");
+    }
+}
+
+TEST_CASE("工具结果图片回喂: Gemini 3 之前/认不出的模型名明降级,不带 parts") {
+    for (const char* model : {"gemini-2.5-pro", "gemini-flash-latest", "some-other-model"}) {
+        api::Request request;
+        request.model = model;
+        api::Message assistant;
+        assistant.role = api::Role::Assistant;
+        assistant.content.push_back(api::ToolUseBlock{"c1", "browser_screenshot", nlohmann::json::object()});
+        request.messages.push_back(assistant);
+        request.messages.push_back(ImageResultMessage());
+
+        const auto body = api::gemini::BuildRequestJson(request);
+        const auto& response = body["contents"][1]["parts"][0]["functionResponse"];
+        // 无 parts(多模态 functionResponse 是 Gemini 3+ 的事),字节不出门。
+        CHECK_FALSE(response.contains("parts"));
+        CHECK(body.dump().find("iVBORw0KGgo=") == std::string::npos);
+        // 投影后追明降级附注:点名张数与落盘文件名。
+        const std::string result_text = response["response"]["result"].get<std::string>();
+        CHECK(result_text.find("已截图 640x480") != std::string::npos);
+        CHECK(result_text.find("[wire 降级] 该 wire 不支持工具结果图片,1 张未随行,字节已存盘: art-00112233.png") !=
+              std::string::npos);
+    }
+}
+
+TEST_CASE("工具结果图片回喂: Gemini 多模态 MIME 表外(png/jpeg/webp 之外)的图不硬发") {
+    api::Request request;
+    request.model = "gemini-3-pro";
+    api::Message result_message = ImageResultMessage();
+    auto& rich = std::get<api::ToolResultBlock>(result_message.content[0]);
+    std::get<lubancode::tools::ImageContent>(rich.blocks[0]).mime_type = "image/gif";  // 文档表外
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ToolUseBlock{"c1", "shot", nlohmann::json::object()});
+    request.messages.push_back(assistant);
+    request.messages.push_back(result_message);
+
+    const auto body = api::gemini::BuildRequestJson(request);
+    CHECK(body.dump().find("inlineData") == std::string::npos);
+}
+
 TEST_CASE("Gemini request: 工具定义收进 functionDeclarations") {
     const auto body = api::gemini::BuildRequestJson(SampleConversation());
     REQUIRE(body["tools"].size() == 1);

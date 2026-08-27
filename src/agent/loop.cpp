@@ -19,6 +19,7 @@
 #include "agent/context_events.hpp"
 #include "agent/prefix.hpp"
 #include "agent/prompts.hpp"
+#include "agent/tool_result_images.hpp"  // 工具结果图片回喂:请求出门前的 base64 重灌
 #include "api/assembler.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:trace 的入参/结果摘要锚
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
@@ -70,12 +71,21 @@ std::size_t EstimateMessageTokensForPreflight(const api::Message& message) {
                     return EstimateTextTokensForPreflight(b.name) + EstimateTextTokensForPreflight(b.id) +
                            EstimateTextTokensForPreflight(b.input.dump());
                 } else if constexpr (std::is_same_v<T, api::ToolResultBlock>) {
-                    // MCP 富结果单 P0.3:富块的 base64 从不进这层——content
-                    // 是 TextProjection,图片/音频只剩 artifact 短句(文件
-                    // 名+尺寸+MIME+sha),按短文本估就是对的,不许拿 base64
-                    // 长度粗除四冒充视觉 token。
+                    // MCP 富结果单 P0.3:富块的 base64 从不进 durable history
+                    // ——content 是 TextProjection,图片/音频只剩 artifact
+                    // 短句,按短文本估。工具结果图片回喂单添的后账:请求副本
+                    // 上重灌过的 wire_base64 会真上 wire,按 base64 体积粗折
+                    // (与用户贴图 ImageBlock 同一口径 /4),不然窗口预检漏算
+                    // 这笔大账。
+                    std::size_t image_bytes = 0;
+                    for (const auto& rich : b.blocks) {
+                        if (const auto* image = std::get_if<tools::ImageContent>(&rich);
+                            image != nullptr) {
+                            image_bytes += image->wire_base64.size();
+                        }
+                    }
                     return EstimateTextTokensForPreflight(b.tool_use_id) +
-                           EstimateTextTokensForPreflight(b.content);
+                           EstimateTextTokensForPreflight(b.content) + image_bytes / 4;
                 } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
                     return EstimateTextTokensForPreflight(b.text) + EstimateTextTokensForPreflight(b.signature);
                 } else {
@@ -761,6 +771,21 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 治本的一刀。
         for (auto& message : request.messages) {
             api::SanitizeMessage(message);
+        }
+        // 工具结果图片回喂(工具结果图片回喂单):请求副本上把工具图从
+        // artifact 落盘重灌成 base64,四家 wire 据此上原生图块。位置有讲
+        // 究——必须在 sanitize(洗投影文本)之后、前缀记账(算请求指纹)
+        // 之前:同 artifact 灌出的 base64 逐轮一致,指纹不因重灌而断 epoch;
+        // durable history 不沾 base64(SanitizeMessage/存档都在副本之外),
+        // 会话档案不膨胀。超帽/文件丢了的图自动留在文本降级路,不报错。
+        if (!wiring.tool_artifact_dir.empty()) {
+            const std::size_t rehydrated_images =
+                RehydrateToolResultImages(request, wiring.tool_artifact_dir);
+            if (rehydrated_images > 0 && PrefixDebugEnabled()) {
+                platform::LogSink::Instance().Debug(
+                    "loop", "[tool-image] 重灌 " + std::to_string(rehydrated_images) +
+                                " 张工具图随请求上 wire");
+            }
         }
         request.max_tokens = profile_.max_output_tokens;  // nullopt = unset,交服务端默认
         // 有损硬裁发生了(丢轮/截结果),显式通报——静默降级会让用户以为语

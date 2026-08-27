@@ -49,6 +49,10 @@ enum class PluginErrorCode {
     UnknownContent,    // 响应 content 里有 v1 不认的 type(只认 text)
     PluginReportedError,  // 响应 ok=false:插件自己报的错(信插件的话)
     InternalError,    // 宿主侧兜底(不该发生;发生即 bug)
+    // 工具结果图片回喂单(v2):响应里的 image 块没能落账——坏 base64/
+    // 伪 MIME(魔数对不上)/超字节帽/没有 artifact 落盘地。枚举只增不改,
+    // 故追加在尾。
+    ImageRejected,
 };
 
 // 错误码的人读名字(稳定,诊断/测试断言用)。
@@ -84,6 +88,8 @@ inline std::string_view PluginErrorCodeName(PluginErrorCode code) {
             return "plugin_reported_error";
         case PluginErrorCode::InternalError:
             return "internal_error";
+        case PluginErrorCode::ImageRejected:
+            return "image_rejected";
     }
     return "internal_error";
 }
@@ -196,7 +202,14 @@ std::expected<std::string, std::string> ExpandPluginDirPlaceholder(std::string_v
 // ---------------------------------------------------------------------------
 namespace plugin_protocol {
 
-inline constexpr int kProtocolVersion = 1;
+// 协议 v2(工具结果图片回喂单):v1 之上加一枚 content 块 type=image——
+// 工具能把图直接回喂模型(截图、图表、渲染结果)。协商向后兼容:宿主请求
+// 帧说 2;插件看得懂就回 protocol=2 并许带 image 块,看不懂的 v1 旧插件
+// 照旧回 1(它们根本不读请求帧的 protocol 字段),宿主两侧都收。image 块
+// 只在响应 protocol=2 时合法;protocol=1 的响应里冒出 image 仍是
+// UnknownContent——v1 的铁律不动。
+inline constexpr int kProtocolVersionV1 = 1;
+inline constexpr int kProtocolVersion = 2;  // 宿主当前说的版本(请求帧用它)
 
 // 请求帧序列化。context 首版只有 cwd(项目根)与非敏感 call_id;会话历史、
 // system prompt、API key、全份环境变量一概不送。
@@ -212,6 +225,15 @@ struct ProcessRequest {
 
 nlohmann::json SerializeRequest(const ProcessRequest& request);
 
+// v2 的 image 块解析产物:来源二选一——data(base64 正文,不带前缀)或
+// path(插件自己落好的文件)。宿主侧统一过大小帽 + 魔数复核再落会话
+// artifact(规矩与 MCP 富结果同源),这里只管形状,不碰文件不碰解码。
+struct ResponseImage {
+    std::string mime_type;    // 声明的 MIME(image/png 等;宿主魔数复核)
+    std::string data_base64;  // data 来源:base64(与 path 二选一)
+    std::string path;         // path 来源:插件写的文件路径(UTF-8)
+};
+
 // 响应帧:stdout 收来的原始字节先过 UTF-8 校验,再整体 parse,再对
 // call_id;三关全过才轮到字段校验。任何一关失败都映射成稳定错误码,
 // 由 ParseResponse 带回,调用方据此落唯一终态。
@@ -220,6 +242,7 @@ struct ProcessResponse {
     std::string call_id;
     bool ok = false;
     std::string text;                  // content[] 里 type=text 的合并文本(v1 只认 text)
+    std::vector<ResponseImage> images; // v2 的 image 块(protocol=2 才收)
     nlohmann::json structured;         // 可选;送模型仍须有明确 text
     std::string error_code;            // ok=false 时插件自报的码(原样收,不当宿主码)
     std::string error_message;         // ok=false 时的人话

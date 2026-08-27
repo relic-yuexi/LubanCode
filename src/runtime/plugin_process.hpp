@@ -49,6 +49,10 @@ struct ProcessCallOutcome {
     PluginErrorCode code = PluginErrorCode::Ok;
     std::string text;        // code==Ok 时:响应文本(送模型)
     nlohmann::json structured;  // code==Ok 时:响应 structured(可选,前端用)
+    // v2(工具结果图片回喂):code==Ok 时响应里的 image 块原样待验——
+    // 验身(魔数/帽)与落盘在 PluginToolAdapter(知道 artifact 目录的
+    // 那层)做,process 层只管把字节源带出来。
+    std::vector<plugin_protocol::ResponseImage> images;
     std::string plugin_error_code;    // code==PluginReportedError 时:插件自报的码
     std::string detail;
     std::string stderr_tail;

@@ -1,5 +1,6 @@
 #include "api/gemini/request.hpp"
 
+#include <cctype>
 #include <map>
 #include <type_traits>
 #include <variant>
@@ -37,24 +38,74 @@ std::map<std::string, std::string> ToolNameByUseId(const std::vector<Message>& m
 // Google 官方 SDK 对非结构化结果就是这副形状。is_error 的结果换
 // {"error": ...} 让模型看得见这是失败回执。
 // MCP 富结果单 P0.6:structuredContent 有值时走原生对象(Gemini 的
-// functionResponse 本就吃对象),不绕投影一圈再 parse 回来;图片/音频块
-// 仍在 content 投影里以 artifact 短句降级,不假定 inlineData 可用。
-json FunctionResponseBody(const ToolResultBlock& result) {
+// functionResponse 本就吃对象),不绕投影一圈再 parse 回来。
+// content_text 由调用方给:默认 result.content;图片被降级时是投影加
+// 明降级附注后的文本。
+json FunctionResponseBody(const ToolResultBlock& result, const std::string& content_text) {
     if (result.is_error) {
-        return json{{"error", result.content}};
+        return json{{"error", content_text}};
     }
     if (result.structured_content.has_value() && result.structured_content->is_object()) {
         return *result.structured_content;
     }
     try {
-        const json parsed = json::parse(result.content);
+        const json parsed = json::parse(content_text);
         if (parsed.is_object()) {
             return parsed;
         }
     } catch (const json::exception&) {
         // 不是合法 JSON,走下面的兜底包装。
     }
-    return json{{"result", result.content}};
+    return json{{"result", content_text}};
+}
+
+// 工具结果图片回喂单:模型代次门。多模态 functionResponse(Gemini 官方
+// 文档 docs.cloud.google.com/gemini-enterprise-agent-platform/models/tools/
+// function-calling 的 "Multimodal function responses" 一节)明说"For
+// Gemini 3 and later models"——functionResponse.parts 里嵌 inlineData 只
+// 有 Gemini 3+ 认。模型名里解析 "gemini-<主版本>",3 起真发;认不出或
+// 老代次按明降级走(投影文本 + 降级附注),不硬造。
+int GeminiMajorVersion(const std::string& model) {
+    constexpr const char* kMarker = "gemini-";
+    std::size_t pos = model.rfind(kMarker);
+    if (pos == std::string::npos) {
+        return 0;
+    }
+    pos += std::char_traits<char>::length(kMarker);
+    if (pos >= model.size() || !std::isdigit(static_cast<unsigned char>(model[pos]))) {
+        return 0;  // gemini-flash 这类无代次名:按不认得处理,保守降级
+    }
+    int major = 0;
+    while (pos < model.size() && std::isdigit(static_cast<unsigned char>(model[pos]))) {
+        major = major * 10 + (model[pos] - '0');
+        ++pos;
+    }
+    return major;
+}
+
+// 工具结果里的图片块(重灌过的)翻成 functionResponse.parts 的 inlineData
+// 数组。形状出处同上:parts 嵌在 functionResponse 里,每块 inlineData 带
+// mimeType 与 base64 data,displayName 给模型一个可指认的名字(协议允许
+// response 里用 {"$ref": displayName} 引用;不引用也能处理,这里不添)。
+// 支持的图片 MIME:image/png、image/jpeg、image/webp(文档口径;GIF 不
+// 在列,不硬发)。没有可随行的图返回空数组。
+json ToolResultImageParts(const ToolResultBlock& result) {
+    json parts = json::array();
+    for (const auto& rich : result.blocks) {
+        const auto* image = std::get_if<tools::ImageContent>(&rich);
+        if (image == nullptr || image->wire_base64.empty()) {
+            continue;
+        }
+        if (image->mime_type != "image/png" && image->mime_type != "image/jpeg" &&
+            image->mime_type != "image/webp") {
+            continue;  // Gemini 多模态 functionResponse 只认这三种
+        }
+        parts.push_back(json{{"inlineData",
+                              json{{"displayName", image->artifact.filename},
+                                   {"mimeType", image->mime_type},
+                                   {"data", image->wire_base64}}}});
+    }
+    return parts;
 }
 
 }  // namespace
@@ -108,11 +159,24 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
                         const std::string name = tool_names.count(b.tool_use_id) != 0
                                                      ? tool_names.at(b.tool_use_id)
                                                      : b.tool_use_id;
-                        contents.push_back(
-                            json{{"role", "user"},
-                                 {"parts", json::array({json{{"functionResponse",
-                                                              json{{"name", name},
-                                                                   {"response", FunctionResponseBody(b)}}}}})}});
+                        // 工具结果图片回喂:Gemini 3+ 上 functionResponse.parts
+                        // 嵌 inlineData 真发;老代次/认不出的模型名按明降级
+                        // (投影文本 + 附注),投影短句里本就带着落盘路径。
+                        json function_response{{"name", name}};
+                        if (GeminiMajorVersion(request.model) >= 3) {
+                            json image_parts = ToolResultImageParts(b);
+                            if (!image_parts.empty()) {
+                                function_response["parts"] = std::move(image_parts);
+                            }
+                            function_response["response"] = FunctionResponseBody(b, b.content);
+                        } else {
+                            const std::string content = b.content + ToolResultImageDegradedNote(b);
+                            function_response["response"] = FunctionResponseBody(b, content);
+                        }
+                        contents.push_back(json{{"role", "user"},
+                                                {"parts", json::array(
+                                                              {json{{"functionResponse",
+                                                                     std::move(function_response)}}})}});
                     }
                 },
                 block);

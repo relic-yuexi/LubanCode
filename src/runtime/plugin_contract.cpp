@@ -514,12 +514,18 @@ ParsedResponse ParseResponse(std::string_view stdout_bytes, std::string_view exp
         out.detail = "响应 call_id 对不上(要 " + std::string(expected_call_id) + ",来的是 " + got_call_id + ")";
         return out;
     }
-    // protocol:认 1;不认的明说(后续版本协商是以后的批次)。
+    // protocol:v1=1、v2=2 都收(工具结果图片回喂单的版本协商:宿主请求
+    // 说 2,v1 旧插件照旧回 1,两边都是合法响应)。再高的版本明说不认。
     const auto protocol_it = root.find("protocol");
-    if (protocol_it == root.end() || !protocol_it->is_number_integer() ||
-        protocol_it->get<int>() != kProtocolVersion) {
+    if (protocol_it == root.end() || !protocol_it->is_number_integer()) {
         out.status = PluginErrorCode::BadJson;
-        out.detail = "响应 protocol 缺失或不是 1";
+        out.detail = "响应 protocol 缺失或不是整数";
+        return out;
+    }
+    const int protocol = protocol_it->get<int>();
+    if (protocol != plugin_protocol::kProtocolVersionV1 && protocol != plugin_protocol::kProtocolVersion) {
+        out.status = PluginErrorCode::BadJson;
+        out.detail = "响应 protocol 不认得(只收 1 或 2): " + std::to_string(protocol);
         return out;
     }
     // ok:必填布尔。
@@ -551,7 +557,8 @@ ParsedResponse ParseResponse(std::string_view stdout_bytes, std::string_view exp
         return out;  // status 保持 Ok:插件自报失败是合法响应,分型在调用方
     }
 
-    // content:必填数组;v1 只认 type=text,别的不静默转字符串。
+    // content:必填数组;v1 只认 type=text;v2 另收 type=image(工具结果
+    // 图片回喂)。别的不静默转字符串。
     const auto content_it = root.find("content");
     if (content_it == root.end() || !content_it->is_array()) {
         out.status = PluginErrorCode::BadJson;
@@ -559,6 +566,7 @@ ParsedResponse ParseResponse(std::string_view stdout_bytes, std::string_view exp
         return out;
     }
     std::string text;
+    std::vector<ResponseImage> images;
     for (const auto& item : *content_it) {
         if (!item.is_object()) {
             out.status = PluginErrorCode::BadJson;
@@ -572,6 +580,48 @@ ParsedResponse ParseResponse(std::string_view stdout_bytes, std::string_view exp
             return out;
         }
         const std::string type_name = type_it->get<std::string>();
+        if (type_name == "image") {
+            if (protocol != plugin_protocol::kProtocolVersion) {
+                // v1 响应冒出 image 块:违反 v1 合同,照旧 UnknownContent。
+                out.status = PluginErrorCode::UnknownContent;
+                out.detail = "content type 不认得(v1 只认 text): " + type_name;
+                return out;
+            }
+            ResponseImage image;
+            const auto mime_it = item.find("mime_type");
+            if (mime_it == item.end() || !mime_it->is_string()) {
+                out.status = PluginErrorCode::BadJson;
+                out.detail = "type=image 的元素缺 mime_type 或不是字符串";
+                return out;
+            }
+            image.mime_type = mime_it->get<std::string>();
+            const auto data_it = item.find("data");
+            const auto path_it = item.find("path");
+            const bool has_data = data_it != item.end() && !data_it->is_null();
+            const bool has_path = path_it != item.end() && !path_it->is_null();
+            if (has_data == has_path) {
+                out.status = PluginErrorCode::BadJson;
+                out.detail = "type=image 的元素须恰给 data(base64)或 path 之一";
+                return out;
+            }
+            if (has_data) {
+                if (!data_it->is_string()) {
+                    out.status = PluginErrorCode::BadJson;
+                    out.detail = "type=image 的 data 不是字符串";
+                    return out;
+                }
+                image.data_base64 = data_it->get<std::string>();
+            } else {
+                if (!path_it->is_string()) {
+                    out.status = PluginErrorCode::BadJson;
+                    out.detail = "type=image 的 path 不是字符串";
+                    return out;
+                }
+                image.path = path_it->get<std::string>();
+            }
+            images.push_back(std::move(image));
+            continue;
+        }
         if (type_name != "text") {
             out.status = PluginErrorCode::UnknownContent;
             out.detail = "content type 不认得(v1 只认 text): " + type_name;
@@ -589,6 +639,7 @@ ParsedResponse ParseResponse(std::string_view stdout_bytes, std::string_view exp
         text += text_it->get<std::string>();
     }
     out.response.text = std::move(text);
+    out.response.images = std::move(images);
     // structured:可选,原样收。
     const auto structured_it = root.find("structured");
     if (structured_it != root.end() && !structured_it->is_null()) {

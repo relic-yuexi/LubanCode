@@ -294,6 +294,7 @@ ProcessCallOutcome RunProcessToolCall(const PluginManifest& manifest,
     }
     outcome.code = PluginErrorCode::Ok;
     outcome.text = parsed.response.text;
+    outcome.images = std::move(parsed.response.images);
     outcome.structured = parsed.response.structured;
     return outcome;
 }

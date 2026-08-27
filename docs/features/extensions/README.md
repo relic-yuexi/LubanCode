@@ -274,27 +274,49 @@ Lua 与宿主同进程，风险用三道软墙兜底（`pure` 画像缺省生效
 
 生成脚手架最快：`lubancode plugin init python my-math` 生成 plugin.json + runner.py + test_runner.py 三件套，本地 `python test_runner.py` 先自测。
 
-### 6.2 协议 v1
+### 6.2 协议(v1 与 v2)
 
 请求（stdin，恰好一份 JSON，写完即关，脚本可 `json.load(sys.stdin)` 读到 EOF）：
 
 ```json
-{"protocol": 1, "call_id": "req-7", "plugin": "local-math", "tool": "add",
+{"protocol": 2, "call_id": "req-7", "plugin": "local-math", "tool": "add",
  "arguments": {"a": 1, "b": 2}, "context": {"cwd": "D:/project"}}
 ```
 
 响应（stdout，恰好一份 JSON）：
 
 ```json
-{"protocol": 1, "call_id": "req-7", "ok": true,
+{"protocol": 2, "call_id": "req-7", "ok": true,
  "content": [{"type": "text", "text": "3"}], "structured": 3}
 ```
+
+v2 在 v1 之上加一件事：**工具结果可以带图**。`content` 里许用 `type=image`
+块（仅当响应 `protocol` 为 2）：
+
+```json
+{"protocol": 2, "call_id": "req-9", "ok": true,
+ "content": [
+   {"type": "text", "text": "已截图 800x600"},
+   {"type": "image", "mime_type": "image/png", "path": "C:/.../shot.png"}
+ ]}
+```
+
+- 图片来源二选一：`data`（base64 正文，响应帧里自带）或 `path`（插件
+  自己落好的文件，宿主读）。两样恰给其一。
+- 宿主照 MCP 富结果的同一条规矩验身：魔数复核（声明 MIME 与字节对不上
+  整次拒，`image_rejected`）、单块 20MB 帽、单次调用 64MB 合计帽；落账成
+  会话 artifact（内容寻址），随后由四家 wire 原生回喂模型（anthropic 的
+  tool_result image 块 / OpenAI responses 的 input_image 数组 / Gemini 3+
+  的 inlineData；chat wire 明降级为路径附注）。
+- 版本协商向后兼容：宿主请求帧说 `protocol: 2`；v1 旧插件不读这个字段、
+  照旧回 `protocol: 1` 纯文本，宿主两侧都收。v1 响应里冒出 image 块仍按
+  协议错拒（UnknownContent），v1 的铁律不动。
 
 铁律：
 
 - stdout 是结果专线。日志只写 stderr；stdout 前后混任何字节，整次调用判协议错，不从字堆里猜 JSON。
-- `content` 首版只认 `type=text`；别的类型按协议错拒，不静默转字符串。
-- 非零退出、崩溃、超时、取消、坏 UTF-8、坏 JSON、call_id 不合、输出超限各有唯一宿主错误码，`/plugin doctor` 与错误文案对得上。
+- `content` 认 `type=text` 与（v2）`type=image`；别的类型按协议错拒，不静默转字符串。
+- 非零退出、崩溃、超时、取消、坏 UTF-8、坏 JSON、call_id 不合、输出超限、图片拒收各有唯一宿主错误码，`/plugin doctor` 与错误文案对得上。
 - 超时到点先温和终止，过宽限期杀整棵进程树（Windows Job Object / POSIX 进程组）；ESC 走同一条取消路。
 - 入参在发送前先过 manifest 声明的 JSON Schema 子集验证；缺字段、类型不对在宿主侧就报清，不用等脚本炸。
 

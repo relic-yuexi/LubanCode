@@ -109,6 +109,7 @@
 #include "platform/console.hpp"
 #include "platform/terminal_batch.hpp"
 #include "platform/paths.hpp"
+#include "platform/process.hpp"  // CurrentProcessId:单发 artifact 临时目录名
 
 namespace lubancode::app {
 
@@ -314,7 +315,20 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     turn.model_catalog = &once_catalog;
     turn.model_id = config.model;
     turn.active_provider = bound_provider;
-    return RunTurn(std::move(turn)).status;
+    // 工具结果图片回喂单:单发不落会话档,但工具(MCP/插件 v2)返回的图片
+    // 仍要有落账地——不落账,截图类工具在管道模式下整次被拒(与交互模式
+    // 的 <会话>/mcp-artifacts 同一待遇,这里给一只临时目录,进程收尾尽力
+    // 清掉;中途崩溃残留的由系统临时目录自理)。字节落了账,wire 才有得
+    // 重灌;会话不持久,所以不留长期档案。
+    const std::filesystem::path oneshot_artifacts =
+        std::filesystem::temp_directory_path() /
+        ("lubancode-oneshot-artifacts-" + std::to_string(platform::CurrentProcessId()));
+    std::error_code artifacts_ec;
+    std::filesystem::create_directories(oneshot_artifacts, artifacts_ec);
+    turn.tool_artifact_dir = oneshot_artifacts.generic_string();
+    const int status = RunTurn(std::move(turn)).status;
+    std::filesystem::remove_all(oneshot_artifacts, artifacts_ec);
+    return status;
 }
 
 }  // namespace lubancode::app

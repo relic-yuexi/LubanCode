@@ -467,3 +467,69 @@ TEST_CASE("declined 档案:responses 请求不发 reasoning/thinking;回来恢�
     REQUIRE(normal_body.contains("reasoning"));
     CHECK(normal_body["reasoning"]["effort"] == "high");
 }
+
+TEST_CASE("工具结果图片回喂: 重灌过的图上 input_image 数组,文本投影在首块(工具结果图片回喂单)") {
+    Request request;
+    request.model = "gpt-5.6-sol";
+    Message assistant;
+    assistant.role = Role::Assistant;
+    assistant.content.push_back(ToolUseBlock{"call_img", "gui_screenshot", nlohmann::json::object()});
+    Message result_message;
+    result_message.role = Role::User;
+    ToolResultBlock rich;
+    rich.tool_use_id = "call_img";
+    rich.content = "已截图 640x480,证据文件落 gui-obs-1.png";
+    lubancode::tools::ImageContent image;
+    image.mime_type = "image/png";
+    image.width = 640;
+    image.height = 480;
+    image.bytes = 9;
+    image.wire_base64 = "iVBORw0KGgo=";
+    image.artifact.filename = "art-00112233.png";
+    image.artifact.path = "mcp-artifacts/art-00112233.png";
+    image.artifact.stored = true;
+    rich.blocks.push_back(std::move(image));
+    result_message.content.push_back(rich);
+    request.messages.push_back(assistant);
+    request.messages.push_back(result_message);
+
+    const auto body = BuildRequestJson(request);
+    // function_call_output 是 input 数组里的末项(assistant 的 function_call
+    // 在前)。
+    const auto& output_item = body.at("input").back();
+    REQUIRE(output_item.at("type") == "function_call_output");
+    CHECK(output_item.at("call_id") == "call_img");
+    REQUIRE(output_item.at("output").is_array());
+    REQUIRE(output_item.at("output").size() == 2);
+    CHECK(output_item.at("output")[0].at("type") == "input_text");
+    CHECK(output_item.at("output")[0].at("text") == rich.content);
+    const auto& wire_image = output_item.at("output")[1];
+    CHECK(wire_image.at("type") == "input_image");
+    CHECK(wire_image.at("image_url") == "data:image/png;base64,iVBORw0KGgo=");
+}
+
+TEST_CASE("工具结果图片: 未重灌的图照旧字符串投影,不硬造数组") {
+    Request request;
+    request.model = "gpt-5.6-sol";
+    Message result_message;
+    result_message.role = Role::User;
+    ToolResultBlock rich;
+    rich.tool_use_id = "call_img";
+    rich.content = "[图片 art-00112233.png image/png 640x480 2048字节 artifact=mcp-artifacts/art-00112233.png]";
+    lubancode::tools::ImageContent image;
+    image.mime_type = "image/png";
+    image.width = 640;
+    image.height = 480;
+    image.bytes = 2048;  // 无 wire_base64:未重灌
+    image.artifact.filename = "art-00112233.png";
+    image.artifact.stored = true;
+    rich.blocks.push_back(std::move(image));
+    result_message.content.push_back(rich);
+    request.messages.push_back(result_message);
+
+    const auto body = BuildRequestJson(request);
+    const auto& output_item = body.at("input").back();
+    REQUIRE(output_item.at("type") == "function_call_output");
+    CHECK(output_item.at("output").is_string());
+    CHECK(output_item.at("output") == rich.content);
+}

@@ -103,6 +103,12 @@ inline std::string ModelImageReplayText(const ModelImageBlock& block) {
     return "[模型已生成图片: " + block.filename + size + "]";
 }
 
+// 工具结果图片的明降级附注(工具结果图片回喂单):wire 上带不动图片字节
+// 时(chat completions 的 tool 消息、Gemini 3 之前的模型),在投影文本后
+// 追加这一行——点名张数与落盘路径,不冒充发过、不静默吞图。没有图片块
+// 的结果返回空串,一个字节不多加。
+std::string ToolResultImageDegradedNote(const ToolResultBlock& result);
+
 // ---------------------------------------------------------------------------
 // 消息
 // ---------------------------------------------------------------------------

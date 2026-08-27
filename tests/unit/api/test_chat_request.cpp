@@ -65,8 +65,13 @@ TEST_CASE("Chat request: 富工具结果降级——tool 消息吃投影文本,�
     REQUIRE(body["messages"].size() == 1);
     const auto& tool_message = body["messages"][0];
     CHECK(tool_message["role"] == "tool");
-    // Chat wire 不先假定图片支持:文本投影(artifact 短句)即全部内容。
-    CHECK(tool_message["content"] == rich.content);
+    // Chat wire 不先假定图片支持:文本投影(artifact 短句)开头,后跟
+    // 明降级附注(工具结果图片回喂单:chat 的 tool 消息无图,一行指路
+    // 落盘路径)。字节本体(base64)不出门。
+    const std::string content = tool_message["content"].get<std::string>();
+    CHECK(content.rfind(rich.content, 0) == 0);  // 投影在前
+    CHECK(content.find("[wire 降级] 该 wire 不支持工具结果图片,1 张未随行,字节已存盘: art-00112233.png") !=
+          std::string::npos);
     CHECK(tool_message.dump().find("base64") == std::string::npos);
 }
 
@@ -424,4 +429,51 @@ TEST_CASE("ModelImageBlock 重放:assistant content 带短标记,不带 base64")
     CHECK(dumped.find("[模型已生成图片: img-abcd12.png (512x512)]") != std::string::npos);
     CHECK(dumped.find("images/img-abcd12.png") == std::string::npos);
     CHECK(dumped.find("image_url") == std::string::npos);
+}
+
+TEST_CASE("工具结果图片: chat wire 的 tool 消息明降级——附注指路,字节不出门(工具结果图片回喂单)") {
+    api::Request request;
+    request.model = "glm-5.2";
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ToolUseBlock{"call_img", "gui_screenshot", nlohmann::json::object()});
+    api::Message result_message;
+    result_message.role = api::Role::User;
+    api::ToolResultBlock rich;
+    rich.tool_use_id = "call_img";
+    rich.content = "[图片 art-00112233.png image/png 640x480 2048字节 artifact=mcp-artifacts/art-00112233.png]";
+    lubancode::tools::ImageContent image;
+    image.mime_type = "image/png";
+    image.width = 640;
+    image.height = 480;
+    image.bytes = 2048;
+    image.wire_base64 = "aGVsbG8=";  // 即便重灌过,chat wire 也不发——文档没有背书
+    image.artifact.filename = "art-00112233.png";
+    image.artifact.path = "mcp-artifacts/art-00112233.png";
+    image.artifact.stored = true;
+    rich.blocks.push_back(std::move(image));
+    result_message.content.push_back(rich);
+    request.messages.push_back(assistant);
+    request.messages.push_back(result_message);
+
+    const auto body = api::chat::BuildRequestJson(request);
+    const auto& tool_message = body["messages"][1];
+    REQUIRE(tool_message["role"] == "tool");
+    const std::string content = tool_message["content"].get<std::string>();
+    // 投影照旧在前,明降级附注点名张数与落盘文件名。
+    CHECK(content.find(rich.content) != std::string::npos);
+    CHECK(content.find("[wire 降级] 该 wire 不支持工具结果图片,1 张未随行,字节已存盘: art-00112233.png") !=
+          std::string::npos);
+    // 字节不出门:base64 不进请求体。
+    CHECK(body.dump().find("aGVsbG8=") == std::string::npos);
+
+    // 没有图片块的结果一个字节不加:纯文本结果的 content 原样。
+    api::Request plain;
+    plain.model = "glm-5.2";
+    api::Message plain_result;
+    plain_result.role = api::Role::User;
+    plain_result.content.push_back(api::ToolResultBlock{"c9", "正文", false});
+    plain.messages.push_back(plain_result);
+    const auto plain_body = api::chat::BuildRequestJson(plain);
+    CHECK(plain_body["messages"][0]["content"] == "正文");
 }

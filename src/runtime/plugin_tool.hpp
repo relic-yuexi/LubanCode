@@ -59,8 +59,10 @@ public:
     const std::string& cwd() const { return cwd_utf8_; }
 
 private:
-    // 公共实现:effective_cancel 是本调用真用的取消旗。
-    tools::Tool::Result Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel);
+    // 公共实现:effective_cancel 是本调用真用的取消旗;artifact_dir 是
+    // v2 图片块的落盘地(空 = 无落盘地,带回图的调用按 image_rejected 收口)。
+    tools::Tool::Result Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel,
+                            const std::string& artifact_dir);
 
     std::shared_ptr<const PluginManifest> manifest_;
     const PluginDefinition* definition_;

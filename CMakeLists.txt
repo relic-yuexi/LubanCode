@@ -428,6 +428,9 @@ add_library(lubancode_engine STATIC
   # ccmoon 真机巡检单 P0:模型输出图片(Responses image_generation_call)
   # 的解码/验身/原子落盘。
   src/agent/model_image_store.cpp
+  # 工具结果图片回喂单:请求出门前把工具图从 artifact 落盘重灌 base64,
+  # 四家 wire 据此上原生图块(护栏:魔数/字节/边长帽)。
+  src/agent/tool_result_images.cpp
   src/agent/model_router.cpp
   # 骨架拆解批一·病四:SampleModel 原语(六处单发采样的公共路)。
   src/agent/sample_model.cpp
