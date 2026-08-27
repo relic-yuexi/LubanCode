@@ -216,13 +216,13 @@ std::string DescribeRequestEffort(lubancode::config::Wire wire, const api::Reque
             described += "(" + request.reasoning_effort + tr("doctor.effort.mapped_suffix");
         }
     }
-    // 方言状态(请求里没带档案 = 本地自定义端,走兼容形状)。
+    // 方言状态(请求里没带档案 = 本地自定义端,走兼容形状)。诊断行直接
+    // 拼字(与上面的键值行同一风格)。
     if (request.reasoning.dialect.empty()) {
-        return described + "  " + tr("doctor.effort.dialect_legacy");
+        return described + "  [无方言声明,走兼容形状]";
     }
-    return described + "  " + (request.reasoning.dialect.verified
-                                   ? tr("doctor.effort.dialect_verified")
-                                   : tr("doctor.effort.dialect_unverified"));
+    return described + "  " +
+           (request.reasoning.dialect.verified ? "[方言已验证]" : "[方言未验证]");
 }
 
 PrefixCacheMetrics ParsePrefixCacheMetrics(const std::string& text) {
