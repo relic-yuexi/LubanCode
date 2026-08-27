@@ -109,9 +109,14 @@ void TerminalTurnSink::RenderEvent(const runtime::ServerEvent& event) {
         case runtime::ServerEventKind::ItemCompleted: {
             if (event.item_kind == runtime::ItemKind::Tool) {
                 OnToolCompleted(event);
+            } else if (event.item_kind == runtime::ItemKind::Thinking) {
+                // wire 明确收口的思考块(content_block_stop 一类):立刻自
+                // 折叠成一行。首枚 TextDelta/ToolStart/UsageUpdated 里的
+                // OnThinkingDone 是幂等兜底,补没收到显式收口的那几家 wire。
+                ingredients_.display->OnThinkingDone();
             }
-            // 正文/思考条目的收尾(ItemCompleted Succeeded)不画:老路上
-            // 没有这只回调,画面由下一枚 item 的开画或收口重画接管。
+            // 正文条目的收尾(ItemCompleted Succeeded)不画:老路上没有
+            // 这只回调,画面由下一枚 item 的开画或收口重画接管。
             break;
         }
         case runtime::ServerEventKind::UsageUpdated: {

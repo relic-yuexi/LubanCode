@@ -202,6 +202,11 @@ public:
         return Find(item_id) != nullptr;
     }
 
+    // 这台终端能不能原地改写条目(enabled 且平台支持 screen repaint)。
+    // 思考露尾预览只在这台子上开——改不动的(POSIX 老终端/重定向)明走
+    // plain 降级:不逐帧铺,收定时一行"思考 Xs",不画半只框。
+    bool CanRepaintInPlace() const { return enabled_ && screen_; }
+
     // 把条目末尾到当前光标之间的行全部擦掉、光标回到条目末尾——确认交互块
     // (参数详情 + [y/a/N] 提示)答完之后收尾用,让条目重新成为屏幕最后的
     // 内容,后续原地改写不受它牵连。
