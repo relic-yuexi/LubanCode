@@ -144,7 +144,7 @@ std::string BuildComposerDigest(const ComposerViewModel& composer) {
 }  // namespace
 
 BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const Theme& theme,
-                                            int terminal_width) {
+                                            int terminal_width, int height_budget) {
     const int width = (std::max)(1, terminal_width);
     const ComposerViewModel& composer = model.composer;
     // prompt 常带主题 ANSI 颜色码。这里只认屏上列宽；若拿原字符串量，
@@ -160,11 +160,81 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
         LayoutComposerRows(lines, composer.editor.cursor_row, composer.editor.cursor_col,
                            width - prompt_width - 1, width - kContinuationIndent - 1);
 
-    const int top_padding = model.framed ? (std::max)(0, composer.top_padding_rows) : 0;
-    const int bottom_padding =
+    int top_padding = model.framed ? (std::max)(0, composer.top_padding_rows) : 0;
+    int bottom_padding =
         model.framed
             ? (std::max)(0, composer.min_body_rows - top_padding - static_cast<int>(wrapped.rows.size()))
             : 0;
+
+    // ---- 高度预算钳制(终端画面隔网单·战术二):"输入行必画得下"的硬约束 ----
+    // 可选行(活动条/队列/坞/提示)按 transient -> dock -> queue -> activity
+    // 的次序舍(即保的优先级相反:活动条最保、提示最先舍);可选行全舍了
+    // 还装不下,composer 的物理行围光标开窗——窗口尾部贴光标,保底一行,
+    // 留白跟着免掉。0 = 不限(单测与无终端环境的老行为)。
+    std::size_t activity_count = model.activity_rows.size();
+    std::size_t queue_count = model.queue_rows.size();
+    std::size_t dock_count = model.agent_dock_rows.size();
+    std::size_t transient_count = model.transient_rows.size();
+    std::size_t window_first = 0;                          // composer 行窗(默认全量)
+    std::size_t window_count = wrapped.rows.size();
+    bool draw_rules = model.framed;
+    bool draw_status = model.framed;
+    int dropped_optional_rows = 0;
+    if (height_budget > 0) {
+        const int rules_rows = draw_rules ? 2 : 0;
+        const int status_rows_n =
+            draw_status ? (std::max)(1, static_cast<int>(model.status_rows.size())) : 0;
+        const int composer_phys =
+            top_padding + static_cast<int>(wrapped.rows.size()) + bottom_padding;
+        const int core = rules_rows + status_rows_n + composer_phys;
+        if (core <= height_budget) {
+            // 常态:核心(横线+输入+状态)装得下,余量从高到低分给可选行。
+            int room = height_budget - core;
+            const auto take = [&room](std::size_t total) {
+                const int granted = (std::min)((std::max)(0, room), static_cast<int>(total));
+                room -= granted;
+                return static_cast<std::size_t>(granted);
+            };
+            activity_count = take(model.activity_rows.size());
+            queue_count = take(model.queue_rows.size());
+            dock_count = take(model.agent_dock_rows.size());
+            transient_count = take(model.transient_rows.size());
+        } else {
+            // 绝境:可选行一行不剩,composer 围光标开窗。窗口保底一行;
+            // 连横线+状态行都容不下时它们也让位——"输入行必画得下"是底线,
+            // 别的一切都排它后头。
+            activity_count = 0;
+            queue_count = 0;
+            dock_count = 0;
+            transient_count = 0;
+            int keep = height_budget - rules_rows - status_rows_n;
+            if (keep < 1) {
+                draw_rules = false;
+                draw_status = false;
+                keep = height_budget;
+            }
+            keep = (std::max)(1, (std::min)(keep, static_cast<int>(wrapped.rows.size())));
+            int window_end = static_cast<int>(wrapped.cursor_row) + 1;  // 窗尾贴光标
+            int window_begin = window_end - keep;
+            if (window_begin < 0) {
+                window_begin = 0;
+                window_end = (std::min)(keep, static_cast<int>(wrapped.rows.size()));
+            } else if (window_end > static_cast<int>(wrapped.rows.size())) {
+                window_end = static_cast<int>(wrapped.rows.size());
+                window_begin = (std::max)(0, window_end - keep);
+            }
+            window_first = static_cast<std::size_t>(window_begin);
+            window_count = static_cast<std::size_t>(window_end - window_begin);
+            // 窗口化是缩不是补:上下留白一并免掉,格子全留给输入正文。
+            top_padding = 0;
+            bottom_padding = 0;
+        }
+        dropped_optional_rows =
+            static_cast<int>(model.activity_rows.size() - activity_count +
+                             model.queue_rows.size() - queue_count +
+                             model.agent_dock_rows.size() - dock_count +
+                             model.transient_rows.size() - transient_count);
+    }
 
     BottomChromeLayout layout;
     // 淡色行包装:plain 主题 stats/reset 都是空串,自动退化成纯文本,不用
@@ -177,13 +247,13 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
         layout.frame.rows.push_back(InlineFrameRow{0, width, hard, std::move(text)});
     };
 
-    for (const std::string& row : model.activity_rows) {
-        push(false, row);  // Working 行自带配色,布局只管摆位
+    for (std::size_t i = 0; i < activity_count; ++i) {
+        push(false, model.activity_rows[i]);  // Working 行自带配色,布局只管摆位
     }
-    for (const std::string& row : model.queue_rows) {
-        push(false, tinted(row));
+    for (std::size_t i = 0; i < queue_count; ++i) {
+        push(false, tinted(model.queue_rows[i]));
     }
-    if (model.framed) {
+    if (draw_rules) {
         const std::string rule =
             model.rule_tag.empty()
                 ? BoxRuleLine(theme, width)
@@ -195,11 +265,11 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     }
 
     layout.composer_first_row = static_cast<int>(layout.frame.rows.size());
-    layout.composer_row_count = static_cast<int>(wrapped.rows.size());
+    layout.composer_row_count = static_cast<int>(window_count);
     // placeholder 只在主草稿真空时显示:一行空串且无更多逻辑行才算真空。
     const bool show_placeholder =
         wrapped.rows.size() == 1 && wrapped.rows[0].text.empty() && !composer.placeholder.empty();
-    for (std::size_t i = 0; i < wrapped.rows.size(); ++i) {
+    for (std::size_t i = window_first; i < window_first + window_count; ++i) {
         std::string text = i == 0 ? composer.prompt + Utf32ToUtf8(wrapped.rows[i].text)
                                   : std::string(kContinuationIndent, ' ') +
                                         Utf32ToUtf8(wrapped.rows[i].text);
@@ -217,28 +287,28 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
         push(true, {});
     }
 
-    if (model.framed) {
+    if (draw_rules) {
         push(true, BoxRuleLine(theme, width));
+    }
+    if (draw_status) {
         for (const std::string& row : model.status_rows) {
-            push(true, ClampAnsiRowToWidth(row, width));
-        }
-    } else {
-        for (const std::string& row : model.status_rows) {
-            push(false, ClampAnsiRowToWidth(row, width));  // 无框读取常态没有状态行,防御性摆位
+            push(draw_rules, ClampAnsiRowToWidth(row, width));  // 无框读取常态没有状态行,防御性摆位
         }
     }
-    for (const std::string& row : model.agent_dock_rows) {
-        push(false, tinted(row));
+    for (std::size_t i = 0; i < dock_count; ++i) {
+        push(false, tinted(model.agent_dock_rows[i]));
     }
-    for (const std::string& row : model.transient_rows) {
+    for (std::size_t i = 0; i < transient_count; ++i) {
         // slash 提示与搜索/提及行:调用方拼好的短命 UI,按屏宽截断(与
         // 合流前两条路的 hint 画法一致),不包色。
-        push(false, TruncateUtf8ToDisplayWidth(row, width - 1));
+        push(false, TruncateUtf8ToDisplayWidth(model.transient_rows[i], width - 1));
     }
 
     // 光标来自软换行结果,不从 echo 字符串猜:首物理行在 prompt 之后,
-    // 续行在两格缩进之后。cursor_row 记帧内绝对下标。
-    layout.cursor_row = layout.composer_first_row + static_cast<int>(wrapped.cursor_row);
+    // 续行在两格缩进之后。cursor_row 记帧内绝对下标(行窗开着时按窗内
+    // 相对下标折算)。
+    const std::size_t cursor_in_window = static_cast<std::size_t>(wrapped.cursor_row) - window_first;
+    layout.cursor_row = layout.composer_first_row + static_cast<int>(cursor_in_window);
     layout.cursor_x = wrapped.cursor_row == 0 ? prompt_width + wrapped.cursor_col
                                               : kContinuationIndent + wrapped.cursor_col;
     layout.frame.cursor_x = layout.cursor_x;
@@ -250,17 +320,23 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     }
 
     BottomChromeFrame& chrome = layout.chrome;
-    chrome.activity_rows = model.activity_rows;
-    chrome.queue_rows = model.queue_rows;
-    chrome.agent_dock_rows = model.agent_dock_rows;
-    chrome.transient_rows = model.transient_rows;
-    chrome.composer_rows = top_padding + static_cast<int>(wrapped.rows.size()) + bottom_padding;
-    chrome.status_rows = model.framed ? (std::max)(1, static_cast<int>(model.status_rows.size())) : 0;
-    chrome.rule_rows = model.framed ? 2 : 0;
+    // 行数账记"真画出来的":预算钳掉的可选行不进账/指纹——同一窗口高下
+    // 画面相同即指纹相同,跳帧判断不被"画不出来的行"搅动。
+    chrome.activity_rows.assign(model.activity_rows.begin(), model.activity_rows.begin() + activity_count);
+    chrome.queue_rows.assign(model.queue_rows.begin(), model.queue_rows.begin() + queue_count);
+    chrome.agent_dock_rows.assign(model.agent_dock_rows.begin(),
+                                  model.agent_dock_rows.begin() + dock_count);
+    chrome.transient_rows.assign(model.transient_rows.begin(),
+                                 model.transient_rows.begin() + transient_count);
+    chrome.composer_rows = top_padding + static_cast<int>(window_count) + bottom_padding;
+    chrome.status_rows =
+            draw_status ? (std::max)(1, static_cast<int>(model.status_rows.size())) : 0;
+    chrome.rule_rows = draw_rules ? 2 : 0;
     chrome.composer_digest = BuildComposerDigest(composer);
     chrome.selected_task_id = model.selected_task_id;
     chrome.revision = BottomChromeRevision(chrome);
     layout.revision = chrome.revision;
+    layout.dropped_optional_rows = dropped_optional_rows;
     return layout;
 }
 
