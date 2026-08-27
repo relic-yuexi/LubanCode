@@ -1,0 +1,68 @@
+状态:待做(2026-08-27,用户核账定案:SSE 只保证事件流,不保证每片都小、
+到达均匀,UI 的生死不能押在 SSE 分片上。Claude Code/Codex 的高明不在
+另起进程,而在隔开数据与画面。前置:改宽停摆单与忙时提示单落地后开工
+——两单都在动 console_input/footer,三方同文件必对撞)
+
+## 一句话
+
+现状链路:SSE delta → TerminalTurnSink::Emit → 锁整个 stdout →
+擦输入框 → 输出正文/解析 Markdown → 重画输入框 → 解锁。
+(src/cli/live_transcript.hpp:491,OnDelta() 从 500 行攥输出锁到 546 行)
+病根两道:provider 塞大段文字进一枚 delta 时输入框消失较久;Markdown
+重排/长工具输出/终端吞吐慢时心跳线程拿不到锁补不了画。另有硬门:
+src/app/turn_runner.cpp:1115 SupportsScreenRepaint() 探测失败整轮
+不画输入框,直到模型收尾。
+
+## 修法(用户定案六条,照办)
+
+1. **SSE 回调只投 ServerEvent,不碰终端**——网络线程只投事件
+2. **UI 线程每 16~33ms 收一批 delta**——UI 队列合并 delta、更新状态
+3. **输入区常驻底部,正文只滚自己的区域**——不随正文擦画
+4. **Markdown 解析放在输出锁外**
+5. **一帧一次落屏**——不按每枚 SSE delta 擦画
+6. **能力探测失败时明报降级,别悄悄藏掉输入框**
+
+## 第一批(战术三件,正确性先行——探查报告行号证据)
+
+1. **重画失败不裸退**(console_input.cpp:3434、3566 两分支):失败降级画最小框(输入行+状态行)或置"待补画"标志;不再停在"框已擦没画回"。
+2. **footer 超高钳制**:footer 总高(坞+队列+多行输入+状态行)超窗口高时,钳制坞/队列预算,输入行永远画得下——把"输入行必画得下"立成硬约束传进布局(与 LayoutAgentDock 矮屏预算循环、BottomChrome 的 ClampAnsiRowToWidth 同族,别另起炉灶)。
+3. **忙路对齐空闲路**:行级 diff + TerminalBatch + 内容指纹跳帧(空闲路已有,TerminalFrame 现成);回显只画受影响行;减少每帧屏幕探测(POSIX 的 DSR 往返尤甚——验 POSIX 端用 build/wsl_repro.sh 的 WSL 复现场)。
+
+第一批落地即修"输入框消失(含框比屏高形态)与忙时卡顿"两症状;架构六条站其上。
+
+## 遗留核账(旧单"Composer 刷新闪失"并入)
+
+Enter 所有权交接与多行行尾光标两项旧单没验过落没落——工头核现状:
+已修则销账,未修随第一批一并修(同在 Composer 渲染域)。
+
+## 目标架构(对照)
+
+```text
+网络线程:只投事件
+    ↓
+UI 队列:合并 delta、更新状态
+    ↓
+唯一 UI 线程:按帧重画 transcript + 固定 composer
+```
+
+## 施工留神
+
+- TerminalTurnSink/terminal_turn_sink 是批二余款立的(显示闭包翻画面),
+  本单把它的"逐 delta 直写"改成"投队列、UI 线程按帧画"——闭包调用次序
+  逐一照旧的部分别丢(它们钉着行为不变)。
+- 与既有设施对齐:TerminalFrame(帧差分)、BottomChrome(布局)、
+  ViewFrameLedger(跨拍锚点账)都是现成的帧层件,别另起炉灶;
+  心跳线程(footer 补画)在新架构里归 UI 线程一路。
+- 探测失败降级路:明报一行(如"[此终端不支持忙时重绘,输入框暂停]"),
+  输入照收(键入排队),别黑箱。
+- 迁移两轨:先投队列+UI 线程双轨可配(环境变量或 feature 开关),
+  新路 driver 全绿后拆老路。
+
+## 验收
+
+- driver 九只全绿(agent_stream_driver 四幕含大 delta 剧本——自造一枚
+  500+ 字 delta 断言输入框不消失/画面不卡);
+- 吞吐压测:1000 枚小 delta 连发与 10 枚大 delta 两种剧本,帧率稳定、
+  输入框常驻、心跳补画不饿死;
+- SupportsScreenRepaint 失败路真机验明报降级;
+- ctest 全绿;交互手感(打字回显)不劣化。
