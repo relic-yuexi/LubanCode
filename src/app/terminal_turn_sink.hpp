@@ -16,7 +16,10 @@
 //     这类补账只进事件流,不碰显示闭包。
 //   - 服务端内置工具(payload 带 builtin 标)只画一张卡,不进视图账与
 //     录制——与老路 on_builtin_tool_* 闭包逐字节同画面。
-//   - 线程约定与老回调一致:Run() 所在线程被调,本类不加锁。
+//   - 线程约定(画面隔网先行批后):流内事件(SSE 回调产生的 delta/
+//     内置工具起止)只投 UiEventPump 的队列,画在泵的消费线程上;控制路
+//     事件(本地工具/usage/批次/收口)仍由产生事件的线程就地画,画前泵
+//     先排干 pending。一切渲染被泵的画笔锁串着,画面次序与老路一致。
 #pragma once
 
 #include <atomic>
@@ -26,6 +29,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "app/ui_event_pump.hpp"
 #include "runtime/event.hpp"
 #include "runtime/event_sink.hpp"
 
@@ -63,9 +67,26 @@ public:
         const std::atomic<bool>* cancel_flag = nullptr;
     };
 
-    explicit TerminalTurnSink(Ingredients ingredients) : ingredients_(std::move(ingredients)) {}
+    explicit TerminalTurnSink(Ingredients ingredients)
+        : ingredients_(std::move(ingredients)),
+          // 画面隔网先行批:渲染闭包挂上 UI 泵——流内事件(SSE 回调产生的
+          // 那几种)只投队列、由泵的消费线程画;控制路事件就地画(画前排
+          // 干)。泵成员声明在最后,析构最先收(StopAndDrain),渲染闭包
+          // 引用的 this 在此期间仍完整。
+          ui_pump_([this](const runtime::ServerEvent& event) { RenderEvent(event); }) {}
 
+    // 条 1(画面隔网):网络路只投事件,不碰终端——SSE 流内回调可能产生
+    // 的事件(正文/思考 delta、内置工具起止)从 Emit 进来后只进 UI 队列,
+    // 产生事件的线程一个终端字节都不写;其余事件(本地工具起止/usage/
+    // 批次边界/收口)仍由产生线程就地画——确认菜单等同步交互钉在那些
+    // 路上,画前泵先把 pending 的流式事件排干,次序与老路一致(正文永远
+    // 先于工具卡落笔)。从路(subordinate)照旧整枚跳过。
     void Emit(const runtime::ServerEvent& event) override;
+
+    // 关账(turn 收尾,listener 停下之后调):停泵的消费线程、排干余量。
+    // 此后的画面(收口 chrome、FinalizeRepaint、Stop 钩子续跑、统计行)
+    // 全回到调用线程,与老路一字不差。幂等;析构兜底再收一次。
+    void StopUiPump();
 
 private:
     // 工具条目对账:item_id -> (tool_use_id, name)。ItemCompleted 的载荷不带
@@ -75,10 +96,19 @@ private:
         std::string name;
     };
 
+    // 既有直写渲染路(原 Emit 正文):由泵的消费线程(流内事件)或产生
+    // 事件的线程(控制路,泵排干之后)调,两条路都被泵的画笔锁串着,
+    // 状态账(open_tools_/display/body_tracker)不劈腿。
+    void RenderEvent(const runtime::ServerEvent& event);
     void OnToolCompleted(const runtime::ServerEvent& event);
+
+    // SSE 流内回调(send_stream 的流内 lambda)产生的事件就这几种:正文/
+    // 思考的 ItemDelta、内置工具的 ItemStarted/ItemCompleted。全走投递路。
+    static bool IsStreamOrigin(const runtime::ServerEvent& event);
 
     Ingredients ingredients_;
     std::map<std::string, OpenTool> open_tools_;
+    UiEventPump ui_pump_;
 };
 
 }  // namespace lubancode::app

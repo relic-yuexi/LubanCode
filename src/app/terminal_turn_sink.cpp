@@ -23,9 +23,40 @@ namespace lubancode::app {
 
 void TerminalTurnSink::Emit(const runtime::ServerEvent& event) {
     // 从路(子代理/PTC stub)整枚跳过:主屏不刷嵌套回合,画面规矩不变。
+    // 从路事件可能来自子代理任务线程,跳过发生在投递之前,队列与画笔都不沾。
     if (event.payload.value("subordinate", false)) {
         return;
     }
+    // 条 1(画面隔网):流内事件只投队列(产生线程不碰终端),控制路
+    // 事件就地画(画前泵排干 pending,次序与老路一致)。分类见
+    // IsStreamOrigin——SSE 回调能产生的就那几种,后续批网络真分家时,
+    // 投递路的范围顺着那只口子扩。
+    if (IsStreamOrigin(event)) {
+        ui_pump_.PostDelta(event);
+        return;
+    }
+    ui_pump_.DispatchInline(event);
+}
+
+bool TerminalTurnSink::IsStreamOrigin(const runtime::ServerEvent& event) {
+    if (event.kind == runtime::ServerEventKind::ItemDelta) {
+        // 正文/思考 delta:SSE 洪峰的正主,只投不画。
+        return event.item_kind == runtime::ItemKind::Text || event.item_kind == runtime::ItemKind::Thinking;
+    }
+    if (event.kind == runtime::ServerEventKind::ItemStarted ||
+        event.kind == runtime::ServerEventKind::ItemCompleted) {
+        // 服务端内置工具(Responses 的 web_search 一类)的起止也在流内
+        // 回调里产生;没有同步交互钉在它们身后,照投不误。
+        return event.item_kind == runtime::ItemKind::Tool && event.payload.value("builtin", false);
+    }
+    return false;
+}
+
+void TerminalTurnSink::StopUiPump() { ui_pump_.StopAndDrain(); }
+
+// 既有直写渲染路(画面隔网前就是 Emit 的正文,水的来路换成"泵的消费
+// 线程或就地路",画法一字不改)。
+void TerminalTurnSink::RenderEvent(const runtime::ServerEvent& event) {
     switch (event.kind) {
         case runtime::ServerEventKind::ItemDelta: {
             const std::string& text = event.text;
