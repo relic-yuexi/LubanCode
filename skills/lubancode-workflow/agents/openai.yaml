@@ -1,0 +1,4 @@
+interface:
+  display_name: "LubanCode Workflow"
+  short_description: "设计、校验并安装 LubanCode Workflow"
+  default_prompt: "Use $lubancode-workflow to design a bounded, recoverable workflow for this task."

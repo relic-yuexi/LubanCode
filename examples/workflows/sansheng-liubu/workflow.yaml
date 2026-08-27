@@ -1,0 +1,175 @@
+# 三省六部:中书与门下动态往复 -> 三房齐动 -> 缴旨收尾。
+#
+# 设计注记(详见 examples/workflows/README.md):
+#   - 尚书省不设节点:workflow 图本身就是尚书省,确定性分发,不费模型。
+#   - fengbo 是有硬帽的条件 loop。门下放行便停;驳回则把本轮诏书与
+#     理由装进 previous,下一轮中书据此修订。
+#   - llm 节点只输出纯 JSON:执行器对输出做 json::parse,解析不成整段退成
+#     {content: 文本},switch 就没得读了。prompts 里已下死命令。
+schema_version: 1
+id: sansheng-liubu
+version: 1.0.0
+name: 三省六部
+alias: sansheng-liubu
+description: "中书与门下动态封驳,放行后三房并行干活;撞帽则带全账收口"
+enabled: true
+
+inputs:
+  type: object
+  required:
+    - requirement
+  properties:
+    requirement:
+      type: string
+    review_limit:
+      type: integer
+      minimum: 1
+      maximum: 20
+      default: 12
+
+entry: fengbo
+
+limits:
+  max_concurrency: 3
+  max_nodes: 16
+  max_steps: 32
+  timeout: 20m
+  tool_calls: 120
+  tokens: 200000
+
+nodes:
+  fengbo:
+    type: loop
+    label: "中书门下 往复封驳"
+    body:
+      - zhongshu
+      - menxia
+    until:
+      op: equals
+      path: "${nodes.menxia.output.approved}"
+      value: true
+    min_iterations: 1
+    max_iterations: "${inputs.review_limit}"
+    hard_limit: 20
+
+  zhongshu:
+    type: llm
+    label: "中书省 起草诏书"
+    prompt: prompts/zhongshu.md
+    output_schema:
+      type: object
+      required:
+        - summary
+        - tasks
+      properties:
+        summary:
+          type: string
+        tasks:
+          type: object
+          required:
+            - gongfang
+            - xingfang
+            - bingfang
+          properties:
+            gongfang:
+              type: string
+            xingfang:
+              type: string
+            bingfang:
+              type: string
+    input:
+      requirement: "${inputs.requirement}"
+      iteration: "${nodes.fengbo.output.iteration}"
+      previous: "${nodes.fengbo.output.previous}"
+
+  menxia:
+    type: llm
+    label: "门下省 审核封驳"
+    prompt: prompts/menxia.md
+    output_schema:
+      type: object
+      required:
+        - approved
+        - reasons
+      properties:
+        approved:
+          type: boolean
+        reasons:
+          type: array
+    input:
+      requirement: "${inputs.requirement}"
+      iteration: "${nodes.fengbo.output.iteration}"
+      edict: "${nodes.zhongshu.output}"
+
+  liubu:
+    type: parallel
+    label: "三房齐动"
+    branches:
+      - gongfang
+      - xingfang
+      - bingfang
+    join: all_settled
+    max_concurrency: 3
+
+  gongfang:
+    type: agent
+    label: "工房 营造(改代码)"
+    role: coder
+    task: prompts/gongfang.md
+    allowed_tools:
+      - read_file
+      - edit_file
+      - search
+    step_limit: 40
+    input:
+      task: "${nodes.zhongshu.output.tasks.gongfang}"
+
+  xingfang:
+    type: agent
+    label: "刑房 按验(测试)"
+    role: tester
+    task: prompts/xingfang.md
+    allowed_tools:
+      - run_command
+      - read_file
+      - search
+    step_limit: 40
+    input:
+      task: "${nodes.zhongshu.output.tasks.xingfang}"
+
+  bingfang:
+    type: agent
+    label: "兵房 演武(构建)"
+    role: builder
+    task: prompts/bingfang.md
+    allowed_tools:
+      - run_command
+      - read_file
+    step_limit: 20
+    input:
+      task: "${nodes.zhongshu.output.tasks.bingfang}"
+
+  shouwei:
+    type: end
+    label: "缴旨收尾"
+
+  weijue:
+    type: end
+    label: "封驳越帽 未决收口"
+
+edges:
+  - from: fengbo
+    on: success
+    to: liubu
+  - from: fengbo
+    on: exhausted
+    to: weijue
+  - from: liubu
+    on: joined
+    to: shouwei
+
+result:
+  edict: "${nodes.zhongshu.output}"
+  verdict: "${nodes.menxia.output}"
+  review_iterations: "${nodes.fengbo.output.completed_iterations}"
+  review_history: "${nodes.fengbo.output.history}"

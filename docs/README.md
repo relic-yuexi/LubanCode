@@ -19,6 +19,7 @@
 | 查命令、字段、工具参数 | [参考手册](reference/README.md) | [安全模型](development/security.md) |
 | 恢复、压缩或管理上下文 | [会话](features/sessions/README.md) | [压缩机制](features/context/compaction.md) |
 | 接 Provider、Skill、Hook、MCP、LSP 或插件 | [扩展指南](features/extensions/README.md) | [配置手册](reference/configuration.md) |
+| 设计、安装或排查 Workflow | [Workflow 指南](features/workflows/README.md) | [设计原语](features/workflows/designing-workflows.md) · [Schema](reference/workflow-schema.md) |
 | 看请求、工具、Agent 怎样运转 | [架构说明](architecture/README.md) | [会话编排](architecture/session-orchestration.md) · [Query 数据流](architecture/query-data-flow.md) |
 | 编译、测试、发版 | [开发手册](development/README.md) | [测试指南](development/testing.md) |
 

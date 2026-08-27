@@ -15,6 +15,8 @@ DOC features/providers/catalog.md
 DOC features/sessions/README.md
 DOC features/terminal/README.md
 DOC features/tools/ptc.md
+DOC features/workflows/README.md
+DOC features/workflows/designing-workflows.md
 
 # 参考手册
 DOC reference/README.md
@@ -22,6 +24,7 @@ DOC reference/commands.md
 DOC reference/configuration.md
 DOC reference/feature-index.md
 DOC reference/tools.md
+DOC reference/workflow-schema.md
 
 # 架构与内部机理
 DOC architecture/README.md
@@ -38,6 +41,7 @@ DOC architecture/query-data-flow.md
 DOC architecture/session-orchestration.md
 DOC architecture/tool-calling-flow.md
 DOC architecture/tools/file-commands.md
+DOC architecture/workflow-runtime.md
 
 # 开发手册
 DOC development/README.md

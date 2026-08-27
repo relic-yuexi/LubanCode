@@ -63,6 +63,7 @@
 | 项目指令 | 从 Git 根到 cwd 分层加载 `AGENTS.override.md` / `AGENTS.md`；主代理与子代理共用。 |
 | 隔离 worktree | 新建、列出、保留或移除工作树；会话切换到新 cwd 后重建项目上下文。 |
 | 项目记忆 | 默认关闭；本地召回；`off/review/auto` 三档学习；待审候选与正式写入分账。 |
+| Workflow | 强类型 YAML 图、Store、条件分支、Batch、Parallel、Loop、Async、Subflow、journal 与恢复；见 [Workflow 指南](../features/workflows/README.md)。 |
 
 无界面后台协议（app-server）的方法面、事件账与 SSH 承载见 [app-server 手册](../features/app-server/README.md)：审批/提问走反向请求，diff 走中立行表，`workflow/query` 查 run 快照与增量事件。
 
