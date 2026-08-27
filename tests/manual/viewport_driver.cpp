@@ -477,6 +477,41 @@ std::atomic<bool> g_thinking_scene{false};
 const char* kThinkingDone =
     "\xe6\x80\x9d\xe8\x80\x83\xe5\xae\x8c\xe6\xaf\x95\xe4\xba\xa4\xe5\x8d\xb7";  // 思考完毕交卷
 
+// ---- 幕七(思考流中预览单)的剧本锚:主回合自己慢慢吐思考 ---------------
+// 开关打开时主回合不派代理,直接按 300ms 一段吐 16 行思考(每段独立一行,
+// 预览的"露尾三行"得见滚动),再一小段正文收口。
+std::atomic<bool> g_main_thinking_scene{false};
+const char* kPreviewLinePrefix =
+    "\xe9\xa2\x84\xe8\xa7\x88\xe8\xa1\x8c";  // 预览行(锚:逐行文本前缀)
+const char* kPreviewDoneBody =
+    "\xe6\x80\x9d\xe8\x80\x83\xe9\xa2\x84\xe8\xa7\x88\xe6\x94\xb6\xe5\x8f\xa3\xe5\xae\x8c\xe6\xaf\x95";  // 思考预览收口完毕
+
+std::vector<std::string> MainThinkingPreviewTurn() {
+    std::vector<std::string> events;
+    events.push_back("{\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"model\":\"fake-model\"}}");
+    events.push_back(
+        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}");
+    for (int i = 1; i <= 16; ++i) {
+        // "预览行第N句:……慢慢想。\n" —— 每段一行,行号递增,刮屏好认。
+        // 换行必须以 JSON 转义(\\n)进帧:裸换行会让整帧解析失败,客户端
+        // 静默跳过,思考 delta 一枚都到不了显示(TextTurn 同款教训)。
+        std::string piece = std::string(kPreviewLinePrefix) + "\xe7\xac\xac" + std::to_string(i) +
+                            "\xe5\x8f\xa5\xef\xbc\x9a\xe6\x85\xa2\xe6\x85\xa2\xe6\x83\xb3\xe3\x80\x82\\n";
+        events.push_back("{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\","
+                         "\"thinking\":\"" +
+                         piece + "\"}}");
+    }
+    events.push_back("{\"type\":\"content_block_stop\",\"index\":0}");
+    events.push_back(
+        "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}");
+    events.push_back("{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"" +
+                     std::string(kPreviewDoneBody) + "\"}}");
+    events.push_back("{\"type\":\"content_block_stop\",\"index\":1}");
+    events.push_back("{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_"
+                     "tokens\":60,\"output_tokens\":30}}");
+    return events;
+}
+
 // 甲的慢思考流:40 段思考增量(每段 500ms,约 20 秒窗口),随后一小段正文
 // 收口——坞行/查看态在此期间应显示"思考中 · N 字"且 N 逐秒增长。
 std::vector<std::string> ThinkingStreamTurn() {
@@ -612,6 +647,12 @@ int StartFakeAnthropicServer() {
             }
         } else {
             // 主回合:没派过派甲(后台)-> 派过甲派乙(后台)-> 都派过长正文收口。
+            if (g_main_thinking_scene.load()) {
+                // 幕七:主回合自己慢慢吐思考(思考流中预览单的现场)。
+                Log("SERVER: route=main-thinking-preview");
+                RespondSseSlow(client_fd, MainThinkingPreviewTurn(), 300);
+                return;
+            }
             Log("SERVER: route=main(a=" + std::string(state->dispatched_a ? "1" : "0") +
                 " b=" + std::string(state->dispatched_b ? "1" : "0") + ")");
             std::lock_guard<std::mutex> lock(state->mutex);
@@ -1114,6 +1155,119 @@ void RunThinkingViewScene(const std::wstring& exe_path, const std::wstring& work
     g_thinking_scene.store(false);
 }
 
+// ---- 幕七(思考流中预览单):主回合思考流——露尾三行、完毕自折叠 --------
+// 剧本:主回合不派代理,自己按 300ms 一段吐 16 行思考,再一小段正文收口。
+// 断言:1) 运行中标题("思考中…")出现,底下"预览行第N句"露尾可见且任何
+// 一拍都不超过三行;2) 预览随内容推进(可见的最大行号在长);3) composer
+// 框在预览期间始终完整(在思考标题之下);4) 完毕后只剩一行"思考 …(Ctrl+O
+// 展开)",预览行一个不剩(原地收折,无重影);5) 干净退出。
+void RunMainThinkingPreviewScene(const std::wstring& exe_path, const std::wstring& workdir) {
+    Log("==== 幕:思考流中预览(主回合) ====");
+    g_reset_server_state();
+    g_main_thinking_scene.store(true);
+    ChildGuard guard;
+    if (!SpawnChild(exe_path, workdir, guard)) {
+        g_main_thinking_scene.store(false);
+        return;
+    }
+    Check(WaitForText("\xe9\x94\xae\xe5\x85\xa5\xe5\xb9\xb6\xe5\x9b\x9e\xe8\xbd\xa6", 30000) ||
+              FindComposerInputRow() > 0,
+          "思考预览: 开场空闲 composer 出现");  // 键入并回车
+    Sleep(400);
+    SendText(kUserPromptReal);
+    SendKey(VK_RETURN, L'\r', 0);
+
+    // 运行中标题:"思考中…"(带省略号,区别于 footer 的 "• 思考中 (Ns)")。
+    const std::string title_needle =
+        "\xe6\x80\x9d\xe8\x80\x83\xe4\xb8\xad\xe2\x80\xa6";  // 思考中…
+    Check(WaitForText(title_needle, 20000), "思考预览: 运行中标题出现");
+
+    // 露尾采样:标题存活期间,"预览行第N句"可见行数恒 ≤3,最大行号在长。
+    int max_preview_rows_seen = 0;
+    int max_line_no_seen = 0;
+    int first_line_no = -1;
+    bool composer_below_title = false;
+    const DWORD sample_deadline = GetTickCount() + 12000;
+    while (GetTickCount() < sample_deadline && FindLastRow(title_needle) >= 0) {
+        int rows_with_preview = 0;
+        for (int r = 0; r < BufferHeight(); ++r) {
+            const std::string text = ReadRow(r);
+            if (text.find(kPreviewLinePrefix) == std::string::npos) {
+                continue;
+            }
+            ++rows_with_preview;
+            const std::size_t at = text.find(kPreviewLinePrefix);
+            const std::size_t no_at = text.find("\xe7\xac\xac", at);  // 第
+            if (no_at != std::string::npos) {
+                std::string digits;
+                std::size_t d = no_at + 3;
+                while (d < text.size() && text[d] >= '0' && text[d] <= '9') {
+                    digits += text[d];
+                    ++d;
+                }
+                if (!digits.empty()) {
+                    const int line_no = atoi(digits.c_str());
+                    if (first_line_no < 0) {
+                        first_line_no = line_no;
+                    }
+                    max_line_no_seen = (std::max)(max_line_no_seen, line_no);
+                }
+            }
+        }
+        max_preview_rows_seen = (std::max)(max_preview_rows_seen, rows_with_preview);
+        const int title_row = FindLastRow(title_needle);
+        const int input_row = FindComposerInputRow();
+        if (title_row >= 0 && input_row > title_row) {
+            composer_below_title = true;
+        }
+        Sleep(120);
+    }
+    Check(max_preview_rows_seen >= 1, "思考预览: 露尾行可见(至少一行)");
+    Check(max_preview_rows_seen <= 3,
+          "思考预览: 露尾恒不超过三行(实得峰值 " + std::to_string(max_preview_rows_seen) + ")");
+    Check(max_line_no_seen > first_line_no,
+          "思考预览: 末尾行随内容推进(" + std::to_string(first_line_no) + " -> " +
+              std::to_string(max_line_no_seen) + ")");
+    Check(composer_below_title, "思考预览: composer 框在思考标题之下,始终可见");
+    DumpViewport("thinking-preview-running");
+
+    // 完毕自折叠:一行"思考 …(Ctrl+O 展开)",预览行一个不剩。锚带括号
+    // "(Ctrl+O 展开)",躲开 composer 帮助行"Ctrl+O 展开/收起"的误认。
+    const std::string expand_hint = "(Ctrl+O \xe5\xb1\x95\xe5\xbc\x80)";  // (Ctrl+O 展开)
+    Check(WaitForText(expand_hint, 30000), "思考预览: 完毕收折行出现(带 Ctrl+O 提示)");
+    Sleep(600);  // 收折帧落稳
+    int preview_left = 0;
+    for (int r = 0; r < BufferHeight(); ++r) {
+        if (ReadRow(r).find(kPreviewLinePrefix) != std::string::npos) {
+            ++preview_left;
+        }
+    }
+    Check(preview_left == 0,
+          "思考预览: 收折后预览行一个不剩(原地收折无重影,实得 " + std::to_string(preview_left) + ")");
+    Check(WaitForText(kPreviewDoneBody, 30000), "思考预览: 正文收口句出现");
+    DumpViewport("thinking-preview-collapsed");
+
+    // 干净退出。
+    {
+        const DWORD idle_deadline = GetTickCount() + 15000;
+        while (GetTickCount() < idle_deadline && CountBusyFooterRows() != 0) {
+            Sleep(150);
+        }
+    }
+    SendText("exit");
+    SendKey(VK_RETURN, L'\r', 0);
+    if (WaitForSingleObject(guard.pi.hProcess, 15000) == WAIT_OBJECT_0) {
+        DWORD code = 0;
+        GetExitCodeProcess(guard.pi.hProcess, &code);
+        Check(code == 0, "思考预览: 干净退出码 0(实得 " + std::to_string(code) + ")");
+        CloseHandle(guard.pi.hProcess);
+        guard.pi.hProcess = nullptr;
+    } else {
+        Check(false, "思考预览: 15 秒内没退出");
+    }
+    g_main_thinking_scene.store(false);
+}
+
 }  // namespace
 
 int wmain(int argc, wchar_t** argv) {
@@ -1230,6 +1384,10 @@ int wmain(int argc, wchar_t** argv) {
     // 坞行与视口的"思考中 · N 字"逐秒增长。
     SetSceneSize(120, 30, 400);
     RunThinkingViewScene(exe_path, workdir);
+
+    // 幕七(思考流中预览单):主回合思考流——露尾三行、完毕自折叠。
+    SetSceneSize(120, 30, 400);
+    RunMainThinkingPreviewScene(exe_path, workdir);
 
     Log(g_failures == 0 ? "ALL PASS" : ("FAILURES: " + std::to_string(g_failures)));
     FreeConsole();

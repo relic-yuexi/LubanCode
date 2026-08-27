@@ -93,6 +93,10 @@ lubancode::cli::TranscriptItem ProjectTurnItem(const lubancode::runtime::TurnIte
                 : 0.0;
         out.title = lubancode::cli::trf("transcript.thinking_done",
                                         lubancode::cli::FormatSeconds(seconds));
+        // 重放路不掺自动露尾(那是 live 流的画法),只标折叠档。
+        out.thinking_phase = out.status == lubancode::cli::TranscriptStatus::Running
+                                 ? lubancode::cli::ThinkingPhase::CollapsedRunning
+                                 : lubancode::cli::ThinkingPhase::CollapsedDone;
     } else if (item.kind == lubancode::runtime::TurnItemViewKind::Text) {
         out.tool_name = "assistant";
         out.title = item.result_text;

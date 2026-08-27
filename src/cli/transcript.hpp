@@ -42,10 +42,39 @@ enum class TranscriptKind { Tool, SubTool, Thinking };
 // 超大输出把会话内存吃穿。
 inline constexpr std::size_t kFullOutputCapBytes = 64 * 1024;
 
-// 思考进行中 Ctrl+O 展开的行数上限(约一屏)。思考收定后照工具条目的
-// 规矩全文铺,不设这个帽——帽只管"边流边看"的快门,免得一次展开把
-// 滚动历史刷飞。
-inline constexpr int kThinkingStreamExpandedMaxLines = 30;
+// ---- 思考流中预览(逐帧露尾与完毕自折叠单):视图状态机 + 数据状态 ----
+//
+// 每条 thinking item 的"画法"由这只状态机独占(数据状态另记,见下面
+// ProviderContentKind 与 TranscriptItem 的字节账):默认路自动露尾预览,
+// 完毕自折叠成一行;用户 Ctrl+O 伸手展开过的,尊重选择、不自动收折。
+//
+//   Hidden --首枚 delta--> AutoPreviewRunning --done--> CollapsedDone
+//                                |--Ctrl+O--> ExplicitExpandedRunning --done-->
+//                                ExplicitExpandedDone
+//   ExplicitExpandedRunning --Ctrl+O--> CollapsedRunning --Ctrl+O--> 回展开
+//   CollapsedDone --Ctrl+O--> ExplicitExpandedDone(整组重打路,全局开关管)
+enum class ThinkingPhase {
+    Hidden,                  // 一枚 delta 都没来过(item 还没建)
+    AutoPreviewRunning,      // 默认:标题带秒表,正文露尾三条视觉行
+    CollapsedRunning,        // 用户展开后又收起:只留标题,delta 照收存
+    ExplicitExpandedRunning, // 用户展开:正文全文随流续画,不再收折
+    CollapsedDone,           // 完毕自折叠:一行"思考 Xs(Ctrl+O 展开)"
+    ExplicitExpandedDone,    // 完毕且用户展开过:保持展开,不擅自关门
+};
+
+// 状态机吃的事件。Toggle* 只由用户按键产生;FirstDelta/Done 由数据流产生。
+enum class ThinkingSignal { FirstDelta, Done, ToggleExpand, ToggleCollapse };
+
+// 纯转移函数(单测主战场):非法转移原样返回(状态机不许有第二条隐路)。
+ThinkingPhase NextThinkingPhase(ThinkingPhase phase, ThinkingSignal signal);
+
+// provider 真交回来的思考是哪一路(数据状态,不与画法混)。redacted/
+// unavailable 没正文可露:报时长与"未提供摘要",不造内容。
+enum class ProviderContentKind { Thinking, ReasoningSummary, Redacted, Unavailable };
+
+// 自动预览露尾的最大视觉行数(单上"最多露三条视觉行";宽窄自适应在
+// ThinkingPreviewRows 里折行)。
+inline constexpr int kThinkingPreviewMaxRows = 3;
 
 struct TranscriptItem {
     int id = 0;
@@ -58,6 +87,15 @@ struct TranscriptItem {
     TranscriptStatus status = TranscriptStatus::Running;
     std::chrono::steady_clock::time_point start_time{};
     std::chrono::steady_clock::time_point end_time{};
+    // ---- 思考条目专用(其余 kind 不碰这些字段) ----
+    // 画法状态(单上五态机;Hidden 是"还没建条目"的兜底,渲染视同折叠)。
+    ThinkingPhase thinking_phase = ThinkingPhase::Hidden;
+    // 数据状态:provider 交的是哪一路正文(只记事实,不掺画法)。
+    ProviderContentKind provider_content_kind = ProviderContentKind::Thinking;
+    // 收到的正文/签名字节数(signature 只记协议账,不进预览、不计可见字数;
+    // 四家 wire 里只有 Anthropic 有,引擎尚未透传,先立字段记 0)。
+    int thinking_text_bytes = 0;
+    int thinking_signature_bytes = 0;
 };
 
 // 把一个条目渲染成完整的多行文本(每行以 \n 收尾)。width 是终端宽度,
@@ -73,11 +111,12 @@ struct TranscriptItem {
 //     重打走 TranscriptPainter 之外的裸打印也不许物理折行,免得铺屏乱套);
 //     width <= 0 不截(Ctrl+E 聚焦查看给 0,全文如实铺,终端自然折行/滚动)。
 //     夹 ANSI 的行照旧不截。
-//     思考条目(Thinking)两处特例:标题追加 "· N 字"(full_output 的
-//     码点数,紧凑档不加,保持一行「思考 Xs」);进行中(Running)的思考
-//     只铺前 kThinkingStreamExpandedMaxLines 行、末尾补一行「共 N 行,
-//     结束后 Ctrl+O 看全文」收口——正文一个字没到时连占位行也不铺。
-//     收定(非 Running)的思考跟工具一样全文铺,不限行。
+//     思考条目(Thinking)的档位由 thinking_phase 与 expanded 合成:
+//     展开(expanded 或 ExplicitExpandedRunning)→ 标题追加 "· N 字",
+//     正文全文随流续画(用户既伸手打开,不再设行帽,完毕也不自动收折);
+//     AutoPreviewRunning → 标题下露尾最多 kThinkingPreviewMaxRows 条视觉行
+//     (弱色、不跑 Markdown);其余(Hidden/Collapsed*)→ 只留标题一行。
+//     正文一个字没到时不铺占位行,不露空框。
 //   focused —— 焦点条目:首行行首加 "► " 醒目标记(占两列,宽度记账让位)。
 std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme, int width,
                                   bool expanded = false, bool focused = false);
@@ -89,6 +128,17 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
 std::string FormatTranscriptItems(const std::vector<TranscriptItem>& items, const Theme& theme,
                                   int width, bool expanded, int focus_index = -1,
                                   int expanded_index = -1);
+
+// 思考自动预览的露尾排版(纯函数):把思考正文按 \n 拆逻辑行、每行按
+// 显示宽折行,取末尾 max_rows 条视觉行。返回的行已剥 ANSI/控制字符
+// (provider 传来的转义不能改色挪光标)、已按宽度截好,渲染层只管加缩进
+// 与弱色。width <= 0 按 80 兜底;超长无空格串照折,不许撑破终端。尾部
+// 逐行从后往前取,单条巨长逻辑行只折够用的尾段,O(宽×行) 不 O(全文)。
+std::vector<std::string> ThinkingPreviewRows(const std::string& text, int width, int max_rows);
+
+// 思考正文里有没有可见内容(剥掉空白后还有东西吗)。空 thinking、纯
+// 空白、全控制字符的正文都算"没交内容"——不露空框、不算可见字数。
+bool ThinkingHasVisibleText(const std::string& text);
 
 // plain 主题下的状态文字([RUNNING]/[OK]/…),渲染和单测共用一份映射。
 std::string TranscriptStatusWord(TranscriptStatus status);

@@ -324,6 +324,11 @@ struct ToolDisplay {
     // 灌进 full_output 供 Ctrl+O 展开。
     int active_thinking = -1;
     std::string thinking_buffer;
+    // 当前思考块的用户档(思考流中预览单):0=没伸过手(自动预览),
+    // 1=用户收起,2=用户展开。Ctrl+O 的监听线程在
+    // FormatSnapshotForToggleLocked 里写;泵的消费线程每枚 delta/done 读,
+    // 下一帧按状态机走——用户展开过的,完毕不自动收折。每开新块归零。
+    std::atomic<int> thinking_user_mode_{0};
     // UI-C:确认前 diff 预览的记账。*_diff_full 存 plain 全量,终态并进
     // full_output;*_diff_final 是终态条目摘要里留存的 diff 行(git 那种
     // 效果,成功后 diff 挂在 ⎿ 块底下不消失)。自动放行不再铺一块马上
@@ -529,56 +534,71 @@ struct ToolDisplay {
         OnToolDone(tool_use_id, name, result);
     }
 
-    // ---- 思考折叠块 -------------------------------------------------------
-    // 首 delta 到来:建一条 Thinking 条目(title="思考中…", Running),PaintNew
-    // 画出来。后续 delta 攒进 thinking_buffer,不逐条刷屏(思考正文本身不往
-    // 屏幕上铺,只等结束时把耗时和时间放进标题)。body_tracker 的断开由
-    // BuildCallbacks 在调本方法之前做。
+    // ---- 思考折叠块(思考流中预览单:逐帧露尾与完毕自折叠) -----------------
+    // 首 delta 到来:Hidden -> AutoPreviewRunning,建一条 Thinking 条目
+    // (title="思考中… Xs",Running),正文同步进 full_output,PaintNew 一笔
+    // 画出标题+露尾三行。后续 delta 每枚(泵的消费线程按帧收批,一帧至多
+    // 一次)原地 Repaint:末尾三条视觉行跟着内容走,时长随帧跳。能原地
+    // 改写的终端才开预览;改不动的明走 plain 降级(收定时一行"思考 Xs",
+    // 不逐帧铺、不发光标伪刷新)。body_tracker 的断开由 sink 在调本方法
+    // 之前做。
     void OnThinkingDelta(const std::string& text) {
         if (active_thinking < 0) {
             thinking_buffer.clear();
+            thinking_user_mode_.store(0, std::memory_order_release);
             lubancode::cli::TranscriptItem item;
             item.id = static_cast<int>(transcript.size()) + 1;
             item.kind = lubancode::cli::TranscriptKind::Thinking;
             item.tool_name = "thinking";
             item.title = lubancode::cli::tr("transcript.thinking_running");
             item.status = lubancode::cli::TranscriptStatus::Running;
+            item.thinking_phase = lubancode::cli::ThinkingPhase::AutoPreviewRunning;
             item.start_time = std::chrono::steady_clock::now();
             transcript.push_back(std::move(item));
             active_thinking = static_cast<int>(transcript.size()) - 1;
-            UpdateSnapshotItem(active_thinking);
-            if (is_console) {
-                painter.PaintNew(transcript[static_cast<std::size_t>(active_thinking)]);
-            } else if (!silent_) {
-                std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-                TermOut() << "\n" << theme.tool_line
-                          << lubancode::cli::tr("transcript.thinking_running") << theme.reset << "\n";
-                TermOut().flush();
-            }
         }
         thinking_buffer += text;
         // 截断保护:别让超长思考把内存吃穿。
         if (thinking_buffer.size() > lubancode::cli::kFullOutputCapBytes) {
             thinking_buffer = lubancode::cli::TruncateUtf8Bytes(thinking_buffer, lubancode::cli::kFullOutputCapBytes);
         }
-        // 思考进行中 Ctrl+O 展开:已到的正文回填进 transcript_snapshot_ 这条
-        // 既有数据通道(锁内复制一份 full_output 副本),监听线程的
-        // FormatSnapshotForToggleLocked 原样读走——不开第二条数据路,也不让
-        // 它无锁直读 thinking_buffer。每笔 delta 都同步:buffer 有 64KB 上限,
-        // 单笔复制量封顶,流式期间这点拷贝不值一提。屏幕上那块折叠头不跟着
-        // 刷新,保持"不打断流式";展开态下看到的是按 Ctrl+O 那一刻的快门,
-        // 思考收定时 OnThinkingDone 的 Repaint 会按展开档铺全文。
-        {
-            std::lock_guard<std::mutex> lock(transcript_snapshot_mutex_);
-            if (transcript_snapshot_.size() > static_cast<std::size_t>(active_thinking)) {
-                transcript_snapshot_[static_cast<std::size_t>(active_thinking)].full_output = thinking_buffer;
+        auto& item = transcript[static_cast<std::size_t>(active_thinking)];
+        // 用户档(Ctrl+O 监听线程写):伸过手就按用户的选择走状态机,
+        // 没伸过手保持自动预览。读的是 atomic,跨线程即刻可见。
+        const int user_mode = thinking_user_mode_.load(std::memory_order_acquire);
+        if (user_mode == 2) {
+            item.thinking_phase = lubancode::cli::ThinkingPhase::ExplicitExpandedRunning;
+        } else if (user_mode == 1) {
+            item.thinking_phase = lubancode::cli::ThinkingPhase::CollapsedRunning;
+        }
+        // 单一数据源:正文与字节账全记在条目上,快照(Ctrl+O 的查看通道)
+        // 照抄整条——锁内整条复制,与老路 full_output 单字段复制同量级。
+        item.full_output = thinking_buffer;
+        item.thinking_text_bytes = static_cast<int>(thinking_buffer.size());
+        const double seconds =
+            std::chrono::duration<double>(std::chrono::steady_clock::now() - item.start_time).count();
+        item.title = lubancode::cli::trf("transcript.thinking_running_timed", lubancode::cli::FormatSeconds(seconds));
+        UpdateSnapshotItem(active_thinking);
+        // 逐帧露尾只在能原地改写的终端开;pipe/重定向一个字节不铺。
+        if (is_console && painter.CanRepaintInPlace()) {
+            const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
+            // Ctrl+O 翻档会 ForgetAnchors(整组重打后旧绝对坐标不可信)——
+            // 锚点没了就重新 PaintNew 落一枚新锚,后续 delta 继续原地刷;
+            // 不这么办,Repaint 的兜底追加分支会每帧追加一份整条。
+            if (painter.HasAnchor(item.id)) {
+                painter.Repaint(item);
+            } else {
+                painter.PaintNew(item);
             }
         }
     }
 
-    // 思考结束:算耗时,标题换成 "思考 Xs",full_output 灌入完整正文,Repaint。
-    // 幂等:没开着思考块时直接返回。首个 TextDelta / 工具开始 / on_usage
-    // 都会调它。body_tracker 的分隔由 BuildCallbacks 在调本方法之后做。
+    // 思考结束(显式收口或 TextDelta/工具开始/usage 的隐式补收,幂等):
+    // 算耗时,full_output 定格完整正文,按用户档收折——默认自动收成一行
+    // "思考 Xs(Ctrl+O 展开)";用户展开过的不收(ExplicitExpandedDone)。
+    // 无正文的(空 thinking/仅 signature/redacted)不露空框,时长+未提供
+    // 摘要。管道模式只落这一行稳定文本。body_tracker 的分隔由 sink 在调
+    // 本方法之后做。
     void OnThinkingDone() {
         if (active_thinking < 0) {
             return;
@@ -588,13 +608,38 @@ struct ToolDisplay {
         auto& item = transcript[static_cast<std::size_t>(idx)];
         item.end_time = std::chrono::steady_clock::now();
         const double seconds = std::chrono::duration<double>(item.end_time - item.start_time).count();
-        item.title = lubancode::cli::trf("transcript.thinking_done", lubancode::cli::FormatSeconds(seconds));
         item.full_output = std::move(thinking_buffer);
         thinking_buffer.clear();
+        item.thinking_text_bytes = static_cast<int>(item.full_output.size());
         item.status = lubancode::cli::TranscriptStatus::Ok;
+        const bool user_expanded = thinking_user_mode_.load(std::memory_order_acquire) == 2;
+        if (!lubancode::cli::ThinkingHasVisibleText(item.full_output)) {
+            // provider 没交正文(空 thinking/仅 signature/纯空白):一个字
+            // 不造,时长+未提供摘要,折叠一行。
+            item.thinking_phase = lubancode::cli::ThinkingPhase::CollapsedDone;
+            if (item.provider_content_kind == lubancode::cli::ProviderContentKind::Thinking) {
+                item.provider_content_kind = lubancode::cli::ProviderContentKind::Unavailable;
+            }
+            item.title = lubancode::cli::trf("transcript.thinking_no_summary", lubancode::cli::FormatSeconds(seconds));
+        } else {
+            item.thinking_phase = user_expanded ? lubancode::cli::ThinkingPhase::ExplicitExpandedDone
+                                                : lubancode::cli::ThinkingPhase::CollapsedDone;
+            item.title =
+                lubancode::cli::trf("transcript.thinking_done_expandable", lubancode::cli::FormatSeconds(seconds));
+        }
         UpdateSnapshotItem(idx);
         if (is_console) {
+            // 有锚点原地收折(标题行数变少,Repaint 自己擦净旧行);没重画
+            // 能力的终端由 Repaint 的追加分支落这一行。
+            const lubancode::cli::StreamFooterPaintScope footer_paint(is_console);
             painter.Repaint(item);
+        } else if (!silent_) {
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            TermOut() << "\n"
+                      << theme.tool_line
+                      << lubancode::cli::trf("transcript.thinking_done", lubancode::cli::FormatSeconds(seconds))
+                      << theme.reset << "\n";
+            TermOut().flush();
         }
     }
 
@@ -827,6 +872,12 @@ public:
     // 擦掉：先收状态块、废掉旧锚点，再从线程安全快照生成真正的详细/紧凑
     // 转录。这里只返回文本，落笔仍由 console_input 统一完成。
     std::string FormatSnapshotForToggleLocked(bool expanded) {
+        // 翻档正落在流中的思考块上:记下用户的选择(展开=2/收起=1),下一
+        // 帧 delta/done 按状态机走——用户展开过的思考,完毕不自动收折;
+        // 收起过的不再回自动预览。监听线程写 atomic,泵线程读,帧内见效。
+        if (active_thinking >= 0) {
+            thinking_user_mode_.store(expanded ? 2 : 1, std::memory_order_release);
+        }
         painter.ForgetAnchorsLocked();
 
         std::vector<lubancode::cli::TranscriptItem> snapshot;
@@ -836,6 +887,17 @@ public:
         }
         if (snapshot.empty()) {
             return tr("ui.no_items") + "\n";
+        }
+        // 流中思考块的快照副本当场按用户档定相位:刚按下的展开/收起立刻
+        // 在这份重打里生效,不等多下一枚 delta(那最多差一帧,但重打是
+        // 用户眼前这一帧)。只改副本,transcript 本尊仍由泵线程按同一映射
+        // 走(见 OnThinkingDelta)。
+        if (active_thinking >= 0 && static_cast<std::size_t>(active_thinking) < snapshot.size() &&
+            snapshot[static_cast<std::size_t>(active_thinking)].kind ==
+                lubancode::cli::TranscriptKind::Thinking) {
+            auto& live = snapshot[static_cast<std::size_t>(active_thinking)];
+            live.thinking_phase = expanded ? lubancode::cli::ThinkingPhase::ExplicitExpandedRunning
+                                           : lubancode::cli::ThinkingPhase::CollapsedRunning;
         }
 
         const int width = lubancode::cli::DetectConsoleWidth().value_or(80);

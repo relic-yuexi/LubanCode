@@ -641,24 +641,25 @@ TEST_CASE("FormatTranscriptItem 思考条目展开(进行中,空):正文没到,�
     CHECK(out.find("· ") == std::string::npos);
 }
 
-TEST_CASE("FormatTranscriptItem 思考条目展开(进行中,超长):截到一屏,补「共 N 行」收口") {
+TEST_CASE("FormatTranscriptItem 思考条目展开(进行中,超长):全文随流续画,不再设行帽") {
     const auto theme = BuiltinTheme("plain");
     TranscriptItem item = MakeItem(TranscriptStatus::Running, TranscriptKind::Thinking);
     item.tool_name = "thinking";
     item.title = "思考中…";
     item.summary_lines.clear();
+    item.thinking_phase = lubancode::cli::ThinkingPhase::ExplicitExpandedRunning;
     std::string body;
     for (int i = 1; i <= 40; ++i) {
         body += "L" + std::string(i < 10 ? "0" : "") + std::to_string(i) + "\n";
     }
     item.full_output = body;
-    const std::string out = FormatTranscriptItem(item, theme, 120, /*expanded=*/true);
+    const std::string out = FormatTranscriptItem(item, theme, 120, /*expanded=*/false);
     CHECK(out.find("完整输出(40 行)") != std::string::npos);
     CHECK(out.find("\n  L01\n") != std::string::npos);
-    CHECK(out.find("\n  L30\n") != std::string::npos);  // 帽是 30 行
-    CHECK(out.find("L31") == std::string::npos);        // 第 31 行起不铺
-    CHECK(out.find("共 40 行,思考结束后 Ctrl+O 看全文") != std::string::npos);
-    // 同一条目收定后再展开:全文铺,没有帽。
+    CHECK(out.find("\n  L31\n") != std::string::npos);  // 用户展开:不设帽,全文随流续画
+    CHECK(out.find("\n  L40\n") != std::string::npos);
+    CHECK(out.find("看全文") == std::string::npos);  // 快门收口行随行帽一并退役
+    // 同一条目收定后展开:照旧全文。
     item.status = TranscriptStatus::Ok;
     item.title = "思考 9.9s";
     const std::string done = FormatTranscriptItem(item, theme, 120, /*expanded=*/true);
