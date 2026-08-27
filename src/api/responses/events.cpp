@@ -40,10 +40,20 @@ std::optional<StreamEvent> HandleOutputItemAdded(const json& data) {
         }
         return event;
     }
+    if (type == "image_generation_call") {
+        // 服务端内置的图片生成:与 web_search 同款的"只展示、不本地执行"
+        // 条目。真正的正文在 output_item.done 的 result(base64)里,由
+        // ImageOutput 事件另走;这里先开一张卡,让终端看得到"正在生成"。
+        BuiltinToolStart event;
+        event.id = it->value("id", "");
+        event.name = "image_generation";
+        return event;
+    }
     if (type != "function_call") {
         // message 类型的起始不单独发事件,文本内容靠后续
         // response.output_text.delta 一段段拼出来；reasoning 与尚未接线的
-        // 其它内置工具静默跳过。web_search_call 已在上面单独发展示事件。
+        // 其它内置工具静默跳过。web_search_call/image_generation_call 已在
+        // 上面单独发展示事件。
         return std::nullopt;
     }
     ToolUseStart event;
@@ -81,6 +91,17 @@ std::optional<StreamEvent> HandleOutputItemDone(const json& data) {
         }
         return event;
     }
+    if (type == "image_generation_call") {
+        // 图片正文到站:整个 result(base64)随这一帧到齐。翻成 ImageOutput
+        // 交给宿主解码落盘;这里不发 BuiltinToolDone——卡片的收尾(带落盘
+        // 路径与尺寸)由宿主落完盘自己发,落不了盘就以错误收尾,不冒充成功。
+        // result 为空(status=failed 或被掐)时不发事件:没有正文可救。
+        if (auto result = it->find("result"); result != it->end() && result->is_string() &&
+                                             !result->get_ref<const std::string&>().empty()) {
+            return ImageOutput{it->value("id", ""), result->get<std::string>()};
+        }
+        return std::nullopt;
+    }
     if (type != "message" && type != "function_call") {
         // 没有对应的 ToolUseStart/文本块起始(reasoning、内置工具调用……),
         // 没什么可收尾的,跳过。
@@ -99,27 +120,23 @@ std::optional<StreamEvent> HandleCompleted(const json& data) {
     const json& response = *it;
 
     bool has_pending_function_call = false;
-    bool has_image_output = false;
     if (auto output_it = response.find("output"); output_it != response.end() && output_it->is_array()) {
         for (const auto& item : *output_it) {
             if (!item.is_object()) {
                 continue;
             }
-            const std::string item_type = item.value("type", "");
-            if (item_type == "image_generation_call") {
-                has_image_output = true;
-            } else if (item_type == "function_call") {
+            if (item.value("type", "") == "function_call") {
                 has_pending_function_call = true;
             }
         }
     }
 
-    // 图片结果住在 image_generation_call.result(base64) 里。中立事件、
-    // artifact 落盘与终端展示尚未接线时，绝不能把它吞掉后冒充成功；错误里
-    // 也不带 result，免得几十万字符的图片正文漏进终端、日志或 session。
-    if (has_image_output) {
-        return StreamError{"服务端返回了图片，但当前版本尚未接入图片输出；结果未保存"};
-    }
+    // 图片正文只认 output_item.done 那一路——本函数单一返回值,发不出
+    // "ImageOutput + MessageDone" 两枚,completed 里的 image_generation_call
+    // 条目在收尾判定里当普通非工具条目看(不带 stop_reason 变化)。吞图
+    // 冒充成功的防线在宿主端:ImageOutput 事件没人接、解码或落盘失败,
+    // agent 层都会把回合明败,见 agent/loop.cpp 的 on_model_image 口。
+    // 重复终帧(同一 completed 到两遍)也由宿主按 item id 去重。
 
     MessageDone event;
     const std::string status = response.value("status", "");
@@ -157,11 +174,31 @@ std::optional<StreamEvent> HandleCompleted(const json& data) {
     return event;
 }
 
+// 错误体的人话拼装(ccmoon 真机巡检单 P1):message 为主,type/code 有就
+// 带上——只回一句 "Upstream request failed" 的中转,把 type 拼进去才指得
+// 上路。正文本体不进消息(防泄漏),这里只动 error 对象自己的短字段。
+std::string ComposeErrorMessage(const json& error) {
+    const std::string message = error.value("message", std::string());
+    const std::string type = error.value("type", std::string());
+    const std::string code = error.value("code", std::string());
+    std::string out = message.empty() ? std::string("未知错误") : message;
+    if (!type.empty()) {
+        out += " (type=" + type;
+        if (!code.empty()) {
+            out += ", code=" + code;
+        }
+        out += ")";
+    } else if (!code.empty()) {
+        out += " (code=" + code + ")";
+    }
+    return out;
+}
+
 std::optional<StreamEvent> HandleFailed(const json& data) {
     StreamError event;
     if (auto response_it = data.find("response"); response_it != data.end() && response_it->is_object()) {
         if (auto error_it = response_it->find("error"); error_it != response_it->end() && error_it->is_object()) {
-            event.message = error_it->value("message", "未知错误");
+            event.message = ComposeErrorMessage(*error_it);
             return event;
         }
     }
@@ -172,7 +209,7 @@ std::optional<StreamEvent> HandleFailed(const json& data) {
 std::optional<StreamEvent> HandleError(const json& data) {
     StreamError event;
     if (auto it = data.find("error"); it != data.end() && it->is_object()) {
-        event.message = it->value("message", "未知错误");
+        event.message = ComposeErrorMessage(*it);
     } else {
         event.message = data.value("message", "未知错误");
     }

@@ -76,14 +76,21 @@ struct ModelCommandContext {
 //      覆盖)→ 返回 nullopt:本家切换,零提示零动作。中转家的常态——
 //      目录里中转家也摆着官方家的模型名,那是本家的模型,不拿别家
 //      条目的归属说事(FindBySlug 的"重名取先出现"在这里独断就是误报)。
-//   2. 当前家没有 → 列了这名的各家条目里挑配置里真有的那家返回
-//      (configured=true,多家都配取目录序第一);没配的条目排前不拦。
+//   2. 当前家没有 → 列了这名的各家条目里挑配置里真有的那家:只有一家
+//      真配了才算权威且唯一的映射,返回 configured=true(自动跳家只吃
+//      这种映射,ccmoon 巡检单 P1);多家都配了返回 ambiguous=true,
+//      provider_id 拼着各家名,调用方提示并留在本家,不拿目录序独断。
 //   3. 同名条目全是没配的家 → 返回第一家 (configured=false),调用方
-//      提示"属 X 家未配置"并保持本家连接。
+//      以"某家目录也收录"的口吻提示并保持本家连接——不可断言中转站
+//      不认这名字(中转家活列表常常正列着它)。
 // 目录压根没这名的 → nullopt(手敲的裸名,不猜归属)。
+// 活列表证据(裸 /model 从当前家真机列表选出的项)不走这只函数——
+// 调用方先落痕(RememberModelChoiceInCatalog)再判定,第 1 条自然接住,
+// 本轮零跨家提示(巡检单 P1:先认活证据,再判静态归属)。
 struct ModelProviderHop {
     std::string provider_id;
     bool configured = false;
+    bool ambiguous = false;  // 多家已配目录都列这名:不自动跳,只提示
 };
 std::optional<ModelProviderHop> ModelProviderHopFor(const lubancode::config::ModelCatalog& catalog,
                                                     const std::vector<lubancode::config::ProviderConfig>& providers,

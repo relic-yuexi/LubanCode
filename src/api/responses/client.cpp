@@ -42,10 +42,14 @@ std::expected<void, Error> ResponsesBackend::send_stream(
     const json body = BuildRequestJson(sanitized_request, native_web_search_, extra_body_);
     const std::string body_str = DumpRequestBody("responses", body);
 
-    // 2xx 响应体 -> 分帧 -> 事件。终止事件/流错误两枚标志给收尾那段检查。
+    // 2xx 响应体 -> 分帧 -> 事件。终止事件/流错误/图片在途三枚标志给收尾
+    // 那段检查(图片在途:单帧超限时报错要指名是图片帧超限,不甩含混的
+    // 传输错——gpt-image 的 base64 result 一帧就几 MB,是最容易撞
+    // SseFramer::kMaxFrameBytes 的载荷)。
     SseFramer framer;
     bool saw_message_done = false;
     bool saw_stream_error = false;
+    bool saw_image_generation = false;
     const StreamDataSink sink = [&](std::string_view data) -> bool {
         for (const SseFrame& frame : framer.feed(data)) {
             if (auto event = parse_event(frame); event.has_value()) {
@@ -53,6 +57,11 @@ std::expected<void, Error> ResponsesBackend::send_stream(
                     saw_message_done = true;
                 } else if (std::holds_alternative<StreamError>(*event)) {
                     saw_stream_error = true;
+                } else if (const auto* builtin = std::get_if<BuiltinToolStart>(&*event);
+                           builtin != nullptr && builtin->name == "image_generation") {
+                    saw_image_generation = true;
+                } else if (std::holds_alternative<ImageOutput>(*event)) {
+                    saw_image_generation = true;
                 }
                 on_event(*event);
             }
@@ -73,7 +82,19 @@ std::expected<void, Error> ResponsesBackend::send_stream(
 
     auto streamed = PostSseStream(call, sink, cancel);
     if (!streamed.has_value()) {
-        return std::unexpected(std::move(streamed.error()));
+        api::Error error = std::move(streamed.error());
+        // 图片帧超限的定名(工单 P0):流里已经见过 image_generation_call
+        // 却报"SSE 单帧超过大小上限",这只载荷几乎必是图片的 base64 result
+        // ——把话说清(图过大、流式收不下),并指路(可换更小尺寸/质量档
+        // 重试)。这里不改 8 MiB 的通用帧上限,也不做分段收图:HTTP chunk
+        // 里没有可靠的"图片帧边界"约定,分段拼帧等于自己造协议;非流式
+        // 下载另开端点改造,不在这一刀。
+        if (error.kind == ErrorKind::Parse && saw_image_generation &&
+            error.message.find("单帧超过大小上限") != std::string::npos) {
+            error.message =
+                "图片帧超过 SSE 单帧上限(8 MiB),已断开;这张图过大,流式收不下,可试更小的尺寸或更低的质量档";
+        }
+        return std::unexpected(std::move(error));
     }
 
     // 流"正常"走完却没等到 response.completed 翻出来的 MessageDone:响应不

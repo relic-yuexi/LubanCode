@@ -1325,6 +1325,13 @@ const Entry kZhCN[] = {
     {"cmd.model.switched", "已切换到模型: {0}(本会话生效)"},
     {"cmd.model.switched_with_provider", "已切换到模型: {0}(provider {1},本会话生效)"},
     {"cmd.model.other_provider_note", "备注:目录里 {0} 这名字属 {1} 家(未配置);当前家若不认它,可用 /provider 切换。"},
+    // ccmoon 真机巡检单 P1(归属误报与端点能力):键名带 model. 前缀,与
+    // 思考流一族的键不沾边,单独一笔提交,冲突上游手解。
+    {"cmd.model.catalog_also_lists", "备注:{0} 家目录也收录 {1};当前家认不认以实测为准,不行再用 /provider 切换。"},
+    {"cmd.model.hop_ambiguous", "备注:{0} 在多家已配目录里都有({1}),已留在当前家,不自动跳。"},
+    {"cmd.model.live_list_header", "以下 {0} 项由 {1} 真机列出;从这张单选出的模型按 {1} 本家切换。"},
+    {"cmd.model.static_list_header", "真机列表拉取失败({0});改列本地目录(静态缓存,可能与真机不一致):"},
+    {"cmd.model.realtime_hint", "提醒:{0} 是 Realtime 端点模型,当前连接走 {1},选下去大概率报错;这只说明这家中转的 {1} 路由多半不通,不判模型死刑。"},
     {"cmd.model.remember_choice_failed", "本次选择没落痕: {0}(不影响切换)"},
     {"cmd.model.other_provider_unswitchable", "{0} 属 {1} 家;此处切不动 provider,连接未换。"},
     {"cmd.model.provider_key_missing", "{0} 家缺 API key,连接未换;可用 /provider switch {0} 先补齐密钥。"},

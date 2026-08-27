@@ -36,6 +36,13 @@ std::string JoinedText(const Message& message) {
     for (const auto& block : message.content) {
         if (const auto* part = std::get_if<TextBlock>(&block)) {
             text += part->text;
+        } else if (const auto* image = std::get_if<ModelImageBlock>(&block)) {
+            // 模型输出图片的替身:引用翻短文本标记(base64 不回传)。assistant
+            // 消息的 content 只有这一处出口,不接的话续聊会把图片痕迹整个丢掉。
+            if (!text.empty()) {
+                text += "\n";
+            }
+            text += ModelImageReplayText(*image);
         }
     }
     return text;

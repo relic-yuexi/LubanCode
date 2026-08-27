@@ -1,8 +1,10 @@
 # ccmoon 多模型真机巡检：图片丢失、归属误报与端点能力
 
-状态：待做（2026-08-27 真机巡检。已先补一层止损：Responses 终帧若含
-`image_generation_call`，明确报“图片输出尚未接入，结果未保存”，不再把空
-回复当成功。完整图片链路、模型归属与端点筛选仍欠账）
+状态：已修（2026-08-27 真机复跑全过。图片全链路落地：ImageOutput 事件 →
+agent 落盘口解码验身 → <会话>/images/ 内容寻址文件 → model_image 引用
+块入史（base64 不进 JSONL、不回传）；归属判定次序倒转（先落痕再判，
+活列表首选零误报）；端点能力 ClassifyModelEndpoint + [Realtime] 挂标与
+确认前提示；错误行带 HTTP 状态与上游 type/code。P2 查证结论见文末。）
 
 ## 一句话
 
@@ -82,17 +84,26 @@ Release 重编后又跑一趟 `gpt-image-2`。约 24 秒收到终帧，终端先
 
 ### 完整修复
 
-- [ ] 给统一输出协议添图片结果。须分清用户输入 `ImageBlock` 与模型输出，
-  不要拿一只类型混过去。
-- [ ] base64 边收边解或限额解码，校验 MIME、魔数、尺寸与最大字节数。
-- [ ] 原子落到会话 artifact 目录，失败便清临时文件；文件名不得信模型正文。
-- [ ] 终端显示缩略信息与可打开路径。无图形终端也得给清楚路径。
-- [ ] session/export/resume 留 artifact 引用，不把 base64 塞进 JSONL。
-- [ ] 多图、图片加文字、只有图片、生成中断、重复终帧，各钉一册测试。
-- [ ] 图片超过 `SseFramer::kMaxFrameBytes`（现为 8 MiB）时，给出“图片帧
-  超限”而非含混传输错；决定是提高上限、分段收图，还是转非流式下载。
-- [ ] 真机验收 `gpt-image-1/1.5/2`：文件存在、可解码、尺寸可读，且续聊
-  不重放 base64。
+- [x] 给统一输出协议添图片结果。须分清用户输入 `ImageBlock` 与模型输出，
+  不要拿一只类型混过去。（ImageOutput 事件 + ModelImageBlock 引用块）
+- [x] base64 边收边解或限额解码，校验 MIME、魔数、尺寸与最大字节数。
+  （model_image_store：严格解码 20MiB 顶，PNG/JPEG/GIF/WebP 魔数验身，
+  宽高直读字节）
+- [x] 原子落到会话 artifact 目录，失败便清临时文件；文件名不得信模型正文。
+  （tmp+rename，img-<sha8>.<ext> 内容寻址，同图幂等）
+- [x] 终端显示缩略信息与可打开路径。无图形终端也得给清楚路径。
+  （image_generation 内置工具卡收尾："已保存 <绝对路径> 宽x高"）
+- [x] session/export/resume 留 artifact 引用，不把 base64 塞进 JSONL。
+  （model_image 引用块；导出 markdown 给 "[模型图片] 路径 (宽x高, 字节)"）
+- [x] 多图、图片加文字、只有图片、生成中断、重复终帧，各钉一册测试。
+  （test_loop 五册 + test_responses_events 多图册 + 落盘模块六册）
+- [x] 图片帧超限定名：responses client 见图片在途 + 单帧超限时报
+  “图片帧超过 SSE 单帧上限(8 MiB)”并指路；决定：8MiB 通用帧上限
+  不动，不做分段收图（HTTP chunk 无可靠图片帧边界约定，分段等于
+  自造协议），非流式下载另立单。
+- [x] 真机验收 `gpt-image-1/1.5/2`：文件存在、可解码、尺寸可读，且续聊
+  不重放 base64。（三只各一张 PNG 全可解；续聊输入 8.2k tokens——
+  若重放 base64 会是数十万 tokens；JSONL 无 base64）
 
 ## P1：当前 provider 的真机目录被静态归属压过
 
@@ -115,13 +126,13 @@ Release 重编后又跑一趟 `gpt-image-2`。约 24 秒收到终帧，终端先
 
 ### 验收
 
-- [ ] 裸 `/model` 的成功列表要带本次 provider 证据；从这张列表选出的项，
-  本轮不再报“属别家”。
-- [ ] 直输 `/model NAME` 时，静态归属只能说“某家目录也收录”，不可断言
-  中转站不认；自动跳家只吃权威且唯一的映射。
-- [ ] 真机列表失败时才退回静态 catalog，并把“缓存/静态”明写出来。
-- [ ] 单测钉住“当前 provider 实时列出，但静态 catalog 指向别家”的首选
-  场景；不许靠选第二回才自愈。
+- [x] 裸 `/model` 的成功列表头一行“以下 N 项由 X 真机列出”；选出的项
+  先落痕再判定，本轮零跨家提示（真机：luna/terra/mini 首选全零误报）。
+- [x] 直输只说“X 家目录也收录”（真机 gpt-image-1.5 实见）；跳家只吃
+  唯一已配映射，多家已配（ambiguous）留在本家提示（单测钉）。
+- [x] 真机列表失败退静态清单，头一行明写“静态缓存，可能与真机不一致”。
+- [x] 单测钉住（test_app_commands：静态指向 openai 未配置 + 先落痕的
+  ccmoon 用户条目 → 判定 nullopt，首选即愈）。
 
 ## P1：模型可见，却未标明端点能力
 
@@ -135,14 +146,17 @@ Release 重编后又跑一趟 `gpt-image-2`。约 24 秒收到终帧，终端先
 这只能证明本次 ccmoon Responses 路由不通。它不能证明模型本身坏，也不能
 证明 Realtime API 不通。
 
-- [ ] provider catalog / live model trace 能记 endpoint 或 capability：
-  `responses`、`chat`、`realtime`、`audio`、`image`。
-- [ ] `/model` 在当前 wire 下过滤不相干项，或至少挂一枚醒目标记并在确认前
-  说清“这模型多半不走 Responses”。
-- [ ] 错误保留安全可见的 HTTP 状态、上游错误 type/code、request id（打码
-  或截短）；不要只剩 `Upstream request failed`。
-- [ ] 补一册列表含 Realtime、当前 wire 为 Responses 的命令层测试。
-- [ ] 另跑 Audio 真机后再立结论。
+- [x] ModelCatalogEntry 添 capabilities（provider catalog 抄来/用户自写），
+  catalog/providers.json 给 openai 家 gpt-realtime-* 挂 realtime 键。
+- [x] 菜单挂 [Realtime] 标（真机实见 gpt-4o-realtime-preview），确认前
+  一行提醒并注明不判模型死刑、不判中转 Realtime 路由。
+- [x] 错误行带 HTTP 状态与 type/code（真机：HTTP 503: ... type=api_error）；
+  密钥打码、240 字节截短；本例中转未回 request id，若在错误体里会随
+  摘要带出。
+- [x] ClassifyModelEndpoint 三册（名字兜底/能力键/音频不误伤）+
+  capabilities 解析一册 + 落盘模块与 loop 册。
+- [ ] 另跑 Audio 真机后再立结论。（未跑，保持悬账；分类器对音频模型
+  刻意不判 Realtime）
 
 ## P2：推理档位随模型切换的边界未说明
 
@@ -150,10 +164,17 @@ Release 重编后又跑一趟 `gpt-image-2`。约 24 秒收到终帧，终端先
 接受，眼下不知是 ccmoon 忽略、转译，还是上游真认。此项只算疑点，不算
 bug。
 
-- [ ] 脱敏抓取各模型实际请求体，确认 `reasoning.effort` 是否仍发。
-- [ ] catalog 若声明模型不吃 reasoning，切换时停发该字段；回到推理模型后
-  恢复用户档位，莫把偏好抹掉。
-- [ ] 测试区分“HTTP 接受”与“档位真的改变行为/usage”。
+- [x] 查证：ccmoon 是用户自建 provider（不在内置 provider catalog），其
+  模型 reasoning 档案为空 → legacy 路径 reasoning.effort 照发（单测
+  test_responses_request 既有档位用例钉着形状）；真机带 high 档打
+  gpt-image-1.5 仍 HTTP 200——服务端容忍，非档位生效。
+- [x] ReasoningConfig.declined：内置条目按 image-generation 且无
+  reasoning 能力自动推导（或 JSON 直写），四家 wire 停发；回来恢复，
+  current_think 不动（builder 单测钉）。边界：落痕的用户条目会遮蔽
+  内置档案（0.26.64 既有语义，方言/档位表同理），被落痕过的模型
+  需在 models.json 手写 capabilities 才吃 declined——记档后续单。
+- [x] 测试钉的是请求体形状（declined → reasoning/thinking 键整个缺席）；
+  图像模型无 usage 拆账可观察，行为差异不可远程区分，如实记档。
 
 ## 证据与复跑
 
@@ -165,8 +186,9 @@ Realtime 错误、直连 SSE 事件账。截图先查密钥、路径、业务正
 
 ## 完成定义
 
-- [ ] 三只图像模型至少各出一张可打开图片；终端、session、resume 三账相合。
-- [ ] 当前 provider 真列出的文本模型，首选时不再挨错误跨家提示。
-- [ ] 非 Responses 模型不再混作普通可用项；失败时错误能指路。
-- [ ] 所有新增 fixture 无密钥、无 request id、无整段 base64。
-- [ ] 定向单测、fixture 四切回放、全量测试与一轮真机回归全绿。
+- [x] 三只各一张可打开 PNG（1254x1254 三张 + 一张 1536x1024）；终端卡、
+  JSONL 引用块、磁盘文件三账相合。
+- [x] 真机 luna/terra/mini 首选零误报。
+- [x] Realtime 挂标 + 确认前提醒；失败行带 HTTP 状态与 type。
+- [x] fixture 只更新事件账（占位 base64 短串，非合法解码输入）。
+- [x] ctest 201 册全绿（基线 200 + 新册 1）；真机回归见上。

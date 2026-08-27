@@ -629,3 +629,77 @@ TEST_CASE("ExecuteProviderSwitch:整套连接字段连同 backend/会话状态�
 
     std::filesystem::remove_all(home, ec);
 }
+
+
+
+// ---------------------------------------------------------------------------
+// ccmoon 真机巡检单 P1:活列表证据先行(先落痕再判定),跨家判定只吃
+// 权威且唯一的映射。钉住的正是真机现场:当前家(ccmoon)真机列出
+// gpt-5.6-luna,静态目录却把这名字归给没配置的 openai 家。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("活列表证据:先落痕再判定,静态指向别家的首选也零跨家提示") {
+    lubancode::config::ModelCatalog catalog;
+    lubancode::config::ModelCatalogEntry official;
+    official.provider_id = "openai";  // 静态目录:官方条目(没配置)
+    official.slug = "gpt-5.6-luna";
+    catalog.models = {official};
+    const std::vector<lubancode::config::ProviderConfig> no_providers;
+
+    // 旧病根(判定序没倒过来时):静态归属直接把这名字报成"属 openai
+    // 家(未配置)"——模型明明正由当前家真机列出、随后也由当前家调通。
+    const auto before = ModelProviderHopFor(catalog, no_providers, "ccmoon", "gpt-5.6-luna");
+    REQUIRE(before.has_value());
+    CHECK(before->provider_id == "openai");
+    CHECK_FALSE(before->configured);
+    CHECK_FALSE(before->ambiguous);
+
+    // 证据先行(RememberModelChoiceInCatalog 落的用户条目,带当前家
+    // 归属):同一张目录再判,第一步就认本家,零提示零动作——不许靠
+    // 选第二回才自愈。
+    lubancode::config::ModelCatalogEntry remembered;
+    remembered.provider_id = "ccmoon";
+    remembered.slug = "gpt-5.6-luna";
+    catalog.models.push_back(remembered);
+    CHECK_FALSE(ModelProviderHopFor(catalog, no_providers, "ccmoon", "gpt-5.6-luna").has_value());
+}
+
+TEST_CASE("跨家判定:多家已配目录都列同名 → ambiguous,不自动跳") {
+    lubancode::config::ModelCatalog catalog;
+    lubancode::config::ModelCatalogEntry via_gateway;
+    via_gateway.provider_id = "gateway";
+    via_gateway.slug = "shared-model";
+    lubancode::config::ModelCatalogEntry via_relay;
+    via_relay.provider_id = "ccmoon";
+    via_relay.slug = "shared-model";
+    catalog.models = {via_gateway, via_relay};
+    std::vector<lubancode::config::ProviderConfig> providers = {
+        {.name = "gateway", .base_url = "https://gw.test/v1", .wire = lubancode::config::Wire::ChatCompletions,
+         .key_env = "GW_KEY", .api_key = "", .model = "shared-model"},
+        {.name = "ccmoon", .base_url = "https://cc.test/v1", .wire = lubancode::config::Wire::ChatCompletions,
+         .key_env = "CC_KEY", .api_key = "", .model = "shared-model"},
+    };
+
+    // 自动跳家只吃权威且唯一的映射:两家都配了就不跳,报 ambiguous,
+    // provider_id 把各家名拼上,调用方提示并留在本家。
+    const auto hop = ModelProviderHopFor(catalog, providers, "local", "shared-model");
+    REQUIRE(hop.has_value());
+    CHECK(hop->ambiguous);
+    CHECK_FALSE(hop->configured);
+    CHECK(hop->provider_id.find("gateway") != std::string::npos);
+    CHECK(hop->provider_id.find("ccmoon") != std::string::npos);
+
+    // 唯一配置家(另一家没配)照旧自动跳:权威且唯一。
+    lubancode::config::ModelCatalogEntry solo_relay;
+    solo_relay.provider_id = "ccmoon";
+    solo_relay.slug = "solo-hop";
+    lubancode::config::ModelCatalogEntry solo_official;
+    solo_official.provider_id = "openai";  // 没配,排前也不拦
+    solo_official.slug = "solo-hop";
+    lubancode::config::ModelCatalog solo_catalog;
+    solo_catalog.models = {solo_official, solo_relay};
+    const auto solo = ModelProviderHopFor(solo_catalog, providers, "local", "solo-hop");
+    REQUIRE(solo.has_value());
+    CHECK(solo->configured);
+    CHECK(solo->provider_id == "ccmoon");
+}

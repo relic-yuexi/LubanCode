@@ -87,6 +87,9 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
                         parts.push_back(json{{"inlineData", json{{"mimeType", b.media_type}, {"data", b.data}}}});
                     } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
                         // 思考不回传:Gemini 的 thought 一次性,续会话不重放。
+                    } else if constexpr (std::is_same_v<T, ModelImageBlock>) {
+                        // 模型输出图片的替身:引用翻短文本标记,base64 不回传。
+                        parts.push_back(json{{"text", ModelImageReplayText(b)}});
                     } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
                         flush_parts();
                         contents.push_back(
@@ -133,7 +136,9 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
     // P1 方言对 gemini 家只做账面(verified/delta/replay):level 与 budget
     // 的选择仍由 wireDialect 走向 + 模型档案决定——两键并发服务端吃 400,
     // 方言不会同时把两只键点亮,选择逻辑与改前一致。
-    if (!request.reasoning_effort.empty()) {
+    // 巡检单 P2:目录明说不吃推理的模型(纯生成类)整个 thinkingConfig
+    // 不写——includeThoughts 也不发。
+    if (!request.reasoning_effort.empty() && !request.reasoning.declined) {
         const bool off = ReasoningEffortIsOff(request.reasoning_effort, request.reasoning);
         json thinking_config{{"includeThoughts", !off}};
         if (off && request.reasoning.supports_toggle) {

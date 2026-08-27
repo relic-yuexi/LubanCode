@@ -237,7 +237,7 @@ std::expected<lubancode::api::ReasoningConfig, std::string> ParseReasoning(
     const json& value, const std::string& where, const json& provider_dialect) {
     if (!value.is_object()) return std::unexpected(where + " 必须是 object");
     if (auto known = RejectUnknown(value, {"controls", "supportedEfforts", "thinkingTokenLimits",
-                                           "wireDialect", "dialect"}, where);
+                                           "wireDialect", "dialect", "declined"}, where);
         !known.has_value()) return std::unexpected(known.error());
 
     // 模型级 dialect 逐字段覆写 provider 级(L1:不可拿 provider 默认抹平
@@ -259,6 +259,14 @@ std::expected<lubancode::api::ReasoningConfig, std::string> ParseReasoning(
     }
 
     lubancode::api::ReasoningConfig out;
+    // 巡检单 P2:目录明说"这模型不吃推理"(纯生成类)。true 时四家 wire
+    // 停发推理参数;缺省 false(不声明 = 不猜)。
+    if (value.contains("declined")) {
+        if (!value["declined"].is_boolean()) {
+            return std::unexpected(where + ".declined 必须是布尔值");
+        }
+        out.declined = value["declined"].get<bool>();
+    }
     if (value.contains("supportedEfforts")) {
         if (!value["supportedEfforts"].is_array()) {
             return std::unexpected(where + ".supportedEfforts 必须是字符串数组");

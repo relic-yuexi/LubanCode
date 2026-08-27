@@ -707,6 +707,11 @@ void TerminalSessionController::RunSessionTurn(const std::string& content, TurnS
     turn.recorder = is_user_turn ? record_wiring_.recorder() : nullptr;
     turn.silent = silent;
     turn.turn_events = &turn_events;
+    // 模型输出图片的落盘口(ccmoon 巡检单 P0):会话开了档才有目录;
+    // 没开(还没建档)就不挂,引擎遇图片明败,不吞图。
+    if (sessions_dir.empty() == false && session_store.active()) {
+        turn.model_images_dir = sessions_dir + "/" + session_store.session_id() + "/images";
+    }
     if (is_user_turn) {
         turn.usage_out = &turn_usage;
         turn.trace_hub = &*trace_hub_;

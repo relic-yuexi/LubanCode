@@ -217,3 +217,25 @@ TEST_CASE("Gemini request: 工具空 schema 兑成 type=object,合规的原样�
     CHECK(decls[0]["parameters"]["properties"].is_object());
     CHECK(decls[1]["parameters"] == good);
 }
+
+
+TEST_CASE("ModelImageBlock 重放:翻 text part 短标记,不带 base64") {
+    api::Request request;
+    request.model = "gemini-2.5-pro";
+    api::ModelImageBlock ref;
+    ref.id = "ig_1";
+    ref.filename = "img-abcd12.png";
+    ref.path = "images/img-abcd12.png";
+    ref.width = 512;
+    ref.height = 512;
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(ref);
+    request.messages.push_back(assistant);
+
+    const auto body = api::gemini::BuildRequestJson(request, nlohmann::json::object());
+    const std::string dumped = body.dump();
+    CHECK(dumped.find("[模型已生成图片: img-abcd12.png (512x512)]") != std::string::npos);
+    CHECK(dumped.find("images/img-abcd12.png") == std::string::npos);
+    CHECK(dumped.find("inlineData") == std::string::npos);
+}

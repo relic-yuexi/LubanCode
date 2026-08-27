@@ -372,3 +372,26 @@ TEST_CASE("Chat request: 已合规的 schema 原样放行,不动 required 与嵌
     const auto body = api::chat::BuildRequestJson(request);
     CHECK(body["tools"][0]["function"]["parameters"] == schema);
 }
+
+
+TEST_CASE("ModelImageBlock 重放:assistant content 带短标记,不带 base64") {
+    api::Request request;
+    request.model = "glm-5.2";
+    api::ModelImageBlock ref;
+    ref.id = "ig_1";
+    ref.filename = "img-abcd12.png";
+    ref.path = "images/img-abcd12.png";
+    ref.width = 512;
+    ref.height = 512;
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::TextBlock{"图好了"});
+    assistant.content.push_back(ref);
+    request.messages.push_back(assistant);
+
+    const auto body = api::chat::BuildRequestJson(request, nlohmann::json::object(), api::chat::ChatRequestOptions{});
+    const std::string dumped = body.dump();
+    CHECK(dumped.find("[模型已生成图片: img-abcd12.png (512x512)]") != std::string::npos);
+    CHECK(dumped.find("images/img-abcd12.png") == std::string::npos);
+    CHECK(dumped.find("image_url") == std::string::npos);
+}

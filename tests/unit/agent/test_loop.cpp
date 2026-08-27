@@ -989,3 +989,171 @@ TEST_CASE("图片用户消息入历史，下一轮请求仍带着") {
     CHECK(image->filename == "error.png");
     CHECK(image->data == "aW1hZ2U=");
 }
+
+
+// ---------------------------------------------------------------------------
+// 模型输出图片(ccmoon 真机巡检单 P0):ImageOutput -> on_model_image 落盘口
+// -> 引用块入历史;未接线/落盘失败明败;重复终帧去重;打断不落半张图。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 落盘口的假实现:不碰磁盘,还一只造好的引用块。
+agent::ModelImageLanding FakeLanding(const api::ImageOutput& image) {
+    agent::ModelImageLanding landing;
+    landing.block.id = image.id;
+    landing.block.filename = "img-" + image.id + ".png";
+    landing.block.path = "images/img-" + image.id + ".png";
+    landing.block.mime_type = "image/png";
+    landing.block.width = 16;
+    landing.block.height = 16;
+    landing.block.bytes = 68;
+    landing.block.sha256 = std::string(64, 'a');
+    landing.display_path = "/tmp/session/images/img-" + image.id + ".png";
+    return landing;
+}
+
+std::vector<api::StreamEvent> ImageTurnScript(const std::string& text) {
+    return {
+        api::MessageStart{"msg", "model"},
+        api::BuiltinToolStart{"ig_1", "image_generation", nlohmann::json::object()},
+        api::ImageOutput{"ig_1", "aVBBTk8="},
+        api::TextDelta{text},
+        api::ContentBlockDone{1},
+        api::MessageDone{"end_turn", api::Usage{}},
+    };
+}
+
+}  // namespace
+
+TEST_CASE("图片+文字:落盘口还引用,历史带 ModelImageBlock,续聊不重放 base64") {
+    FakeBackend backend;
+    backend.scripts = {ImageTurnScript("图好了"), TextOnlyScript("好")};
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+
+    RecordedTurn turn;
+    agent::TurnWiring callbacks;
+    callbacks.events = &turn.adapter;
+    callbacks.on_model_image = [](const api::ImageOutput& image) { return FakeLanding(image); };
+
+    REQUIRE(loop.Run("画一张", callbacks).has_value());
+    REQUIRE(loop.history().size() == 2);
+    const api::Message& assistant = loop.history()[1];
+    REQUIRE(assistant.role == api::Role::Assistant);
+    REQUIRE(assistant.content.size() == 2);  // 文本块 + 图片引用块
+    const auto* text = std::get_if<api::TextBlock>(&assistant.content[0]);
+    REQUIRE(text != nullptr);
+    CHECK(text->text == "图好了");
+    const auto* image = std::get_if<api::ModelImageBlock>(&assistant.content[1]);
+    REQUIRE(image != nullptr);
+    CHECK(image->id == "ig_1");
+    CHECK(image->path == "images/img-ig_1.png");
+
+    // 续聊:第二份请求的历史里图片仍是引用块(base64 不入请求);引用块
+    // 翻短文本标记的活在各家 wire builder(见 test_responses_request),这
+    // 层只管"正文一个字节都不带走"。
+    REQUIRE(loop.Run("再来一句", callbacks).has_value());
+    REQUIRE(backend.captured_requests.size() == 2);
+    bool saw_reference = false;
+    for (const auto& message : backend.captured_requests[1].messages) {
+        for (const auto& block : message.content) {
+            if (const auto* ref = std::get_if<api::ModelImageBlock>(&block); ref != nullptr) {
+                saw_reference = true;
+                CHECK(ref->path == "images/img-ig_1.png");
+                CHECK(ref->sha256.find("aVBBTk8=") == std::string::npos);
+            }
+            if (const auto* user_image = std::get_if<api::ImageBlock>(&block); user_image != nullptr) {
+                CHECK(user_image->data.find("aVBBTk8=") == std::string::npos);
+            }
+        }
+    }
+    CHECK(saw_reference);
+}
+
+TEST_CASE("未接线落盘口:图片来了明败,不吞图冒充成功") {
+    FakeBackend backend;
+    backend.scripts = {ImageTurnScript("图好了")};
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+    agent::TurnWiring callbacks;  // 不设 on_model_image
+
+    const auto result = loop.Run("画一张", callbacks);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("未接线图片落盘") != std::string::npos);
+    CHECK(result.error().find("未保存") != std::string::npos);
+    // 失败的回合不入半截图:历史只有 user 那条。
+    REQUIRE(loop.history().size() == 1);
+}
+
+TEST_CASE("落盘失败:回合明败,错误带落盘原因") {
+    FakeBackend backend;
+    backend.scripts = {ImageTurnScript("图好了")};
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+    agent::TurnWiring callbacks;
+    callbacks.on_model_image = [](const api::ImageOutput&) -> std::expected<agent::ModelImageLanding, std::string> {
+        return std::unexpected(std::string("图片解码后超过上限"));
+    };
+    const auto result = loop.Run("画一张", callbacks);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("图片未保存") != std::string::npos);
+    CHECK(result.error().find("图片解码后超过上限") != std::string::npos);
+}
+
+TEST_CASE("重复终帧:同一 id 的 ImageOutput 到两遍,只落一回、只入一次历史") {
+    FakeBackend backend;
+    backend.scripts = {{
+        api::MessageStart{"msg", "model"},
+        api::BuiltinToolStart{"ig_dup", "image_generation", nlohmann::json::object()},
+        api::ImageOutput{"ig_dup", "QUFBQQ=="},
+        api::TextDelta{"一张"},
+        api::ContentBlockDone{1},
+        api::ImageOutput{"ig_dup", "QUFBQQ=="},
+        api::MessageDone{"end_turn", api::Usage{}},
+    }};
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+    agent::TurnWiring callbacks;
+    int landings = 0;
+    callbacks.on_model_image = [&landings](const api::ImageOutput& image) {
+        ++landings;
+        return FakeLanding(image);
+    };
+    REQUIRE(loop.Run("画一张", callbacks).has_value());
+    CHECK(landings == 1);
+    int image_blocks = 0;
+    for (const auto& block : loop.history()[1].content) {
+        if (std::holds_alternative<api::ModelImageBlock>(block)) {
+            ++image_blocks;
+        }
+    }
+    CHECK(image_blocks == 1);
+}
+
+TEST_CASE("生成中断:ESC 掐在正文之前,没到 ImageOutput 就没有图,历史干净收场") {
+    FakeBackend backend;
+    // 脚本:开卡(BuiltinToolStart)后立刻掐断——result 还没到。
+    backend.scripts = {{
+        api::MessageStart{"msg", "model"},
+        api::BuiltinToolStart{"ig_cut", "image_generation", nlohmann::json::object()},
+    }};
+    backend.cancel_after_event_index = 1;
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system prompt"});
+    agent::TurnWiring callbacks;
+    bool landed = false;
+    callbacks.on_model_image = [&landed](const api::ImageOutput& image) {
+        landed = true;
+        return FakeLanding(image);
+    };
+    const auto result = loop.Run("画一张", callbacks);
+    REQUIRE(result.has_value());
+    CHECK(result->cancelled);
+    CHECK_FALSE(landed);
+    bool has_image = false;
+    for (const auto& block : loop.history()[1].content) {
+        has_image = has_image || std::holds_alternative<api::ModelImageBlock>(block);
+    }
+    CHECK_FALSE(has_image);
+}

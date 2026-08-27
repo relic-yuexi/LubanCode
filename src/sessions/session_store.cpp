@@ -97,6 +97,19 @@ nlohmann::json BlockToJson(const api::ContentBlock& block) {
                 j["type"] = "thinking";
                 j["text"] = b.text;
                 j["signature"] = b.signature;
+            } else if constexpr (std::is_same_v<T, api::ModelImageBlock>) {
+                // 模型输出图片的引用块:只有路径/尺寸/sha,没有 base64——
+                // 正文落在会话 images/ 目录里,JSONL 只记引用(ccmoon 巡检
+                // 单 P0:session/export/resume 留引用,不塞正文)。
+                j["type"] = "model_image";
+                j["id"] = b.id;
+                j["filename"] = b.filename;
+                j["path"] = b.path;
+                j["mime_type"] = b.mime_type;
+                j["width"] = b.width;
+                j["height"] = b.height;
+                j["bytes"] = b.bytes;
+                j["sha256"] = b.sha256;
             }
         },
         block);
@@ -148,6 +161,23 @@ std::optional<api::ContentBlock> BlockFromJson(const nlohmann::json& j) {
         api::ThinkingBlock b;
         b.text = platform::SanitizeExternalText(j.value("text", std::string()));
         b.signature = platform::SanitizeExternalText(j.value("signature", std::string()));
+        return api::ContentBlock{std::move(b)};
+    }
+    if (type == "model_image") {
+        api::ModelImageBlock b;
+        b.id = platform::SanitizeExternalText(j.value("id", std::string()));
+        b.filename = platform::SanitizeExternalText(j.value("filename", std::string()));
+        b.path = platform::SanitizeExternalText(j.value("path", std::string()));
+        b.mime_type = platform::SanitizeExternalText(j.value("mime_type", std::string()));
+        b.width = j.value("width", 0U);
+        b.height = j.value("height", 0U);
+        if (j.contains("bytes") && j["bytes"].is_number_unsigned()) {
+            b.bytes = j["bytes"].get<std::size_t>();
+        }
+        b.sha256 = platform::SanitizeExternalText(j.value("sha256", std::string()));
+        if (b.filename.empty() || b.path.empty()) {
+            return std::nullopt;  // 引用块没了落点就是坏块
+        }
         return api::ContentBlock{std::move(b)};
     }
     return std::nullopt;  // 认不得的块类型
@@ -1148,6 +1178,14 @@ std::string ExportSessionMarkdown(const SessionMeta& meta, const std::vector<api
                 }
                 text += "[图片] " + image->filename + " (" + std::to_string(image->width) + "x" +
                         std::to_string(image->height) + ")";
+            } else if (const auto* generated = std::get_if<api::ModelImageBlock>(&block)) {
+                // 模型输出图片:导出里给引用(文件在会话 images/ 目录),
+                // 不嵌 base64。
+                if (!text.empty()) {
+                    text += "\n";
+                }
+                text += "[模型图片] " + generated->path + " (" + std::to_string(generated->width) + "x" +
+                        std::to_string(generated->height) + ", " + std::to_string(generated->bytes) + " 字节)";
             }
         }
         const bool assistant = message.role == api::Role::Assistant;

@@ -1346,6 +1346,7 @@
         "gpt-realtime-1-5": {
           "name": "GPT-Realtime-1.5",
           "capabilities": {
+            "realtime": true,
             "audio-recognition": true,
             "audio-generation": true
           }
@@ -1353,6 +1354,7 @@
         "gpt-realtime-2": {
           "name": "GPT-REALTIME-2",
           "capabilities": {
+            "realtime": true,
             "audio-recognition": true,
             "audio-generation": true
           }
@@ -1362,6 +1364,7 @@
           "context_window": 128000,
           "max_output": 32000,
           "capabilities": {
+            "realtime": true,
             "tools": true,
             "reasoning": true,
             "image": true,
@@ -1394,6 +1397,7 @@
         "gpt-realtime-mini": {
           "name": "GPT-Realtime mini",
           "capabilities": {
+            "realtime": true,
             "audio-recognition": true,
             "audio-generation": true
           }

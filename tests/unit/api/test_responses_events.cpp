@@ -167,17 +167,95 @@ TEST_CASE("response.completed:output 里带 function_call,stop_reason 相当于 
     CHECK(std::get<MessageDone>(*event).stop_reason == "tool_use");
 }
 
-TEST_CASE("response.completed:图片结果尚未接线时明示报错,不泄漏 base64") {
-    const std::string image_sentinel = "iVBORw0KGgoAAA_TEST_SENTINEL";
+TEST_CASE("response.completed:output 里的 image_generation_call 不再当错误,照常 MessageDone") {
+    // 巡检单 P0 起图片接线:completed 里的图片条目不是失败信号,收尾判定
+    // 里当普通非工具条目看(stop_reason 仍 end_turn);正文的唯一来路是
+    // output_item.done(见下),宿主按 item id 去重。
     auto event = parse_event(Frame(
         R"({"type":"response.completed","response":{"id":"resp_image","status":"completed","output":[{"type":"image_generation_call","id":"ig_1","status":"completed","output_format":"png","result":"iVBORw0KGgoAAA_TEST_SENTINEL"},{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"图片已生成"}]}],"usage":{"input_tokens":25,"output_tokens":3,"total_tokens":28}},"sequence_number":17})"));
 
     REQUIRE(event.has_value());
-    REQUIRE(std::holds_alternative<StreamError>(*event));
-    const auto& error = std::get<StreamError>(*event);
-    CHECK(error.message.find("尚未接入图片输出") != std::string::npos);
-    CHECK(error.message.find("未保存") != std::string::npos);
-    CHECK(error.message.find(image_sentinel) == std::string::npos);
+    REQUIRE(std::holds_alternative<MessageDone>(*event));
+    CHECK(std::get<MessageDone>(*event).stop_reason == "end_turn");
+}
+
+TEST_CASE("response.output_item.added/done 类型是 image_generation_call:开卡 + ImageOutput") {
+    const auto start = parse_event(Frame(
+        R"({"type":"response.output_item.added","item":{"id":"ig_1","type":"image_generation_call","status":"in_progress"},"output_index":0,"sequence_number":2})"));
+    REQUIRE(start.has_value());
+    REQUIRE(std::holds_alternative<BuiltinToolStart>(*start));
+    CHECK(std::get<BuiltinToolStart>(*start).id == "ig_1");
+    CHECK(std::get<BuiltinToolStart>(*start).name == "image_generation");
+
+    const auto done = parse_event(Frame(
+        R"({"type":"response.output_item.done","item":{"id":"ig_1","type":"image_generation_call","status":"completed","action":"generate","output_format":"png","result":"iVBORw0KGgoAAA_TEST_SENTINEL","size":"1024x1024"},"output_index":0,"sequence_number":6})"));
+    REQUIRE(done.has_value());
+    REQUIRE(std::holds_alternative<ImageOutput>(*done));
+    CHECK(std::get<ImageOutput>(*done).id == "ig_1");
+    CHECK(std::get<ImageOutput>(*done).base64 == "iVBORw0KGgoAAA_TEST_SENTINEL");
+}
+
+TEST_CASE("response.output_item.done 类型是 image_generation_call 但 result 为空:不发 ImageOutput") {
+    // 服务端生成失败(status=failed / result 缺席)或被掐:没有正文可救,
+    // 不发事件,不造半张图。
+    auto failed = parse_event(Frame(
+        R"({"type":"response.output_item.done","item":{"id":"ig_bad","type":"image_generation_call","status":"failed"},"output_index":0,"sequence_number":6})"));
+    CHECK_FALSE(failed.has_value());
+
+    auto empty = parse_event(Frame(
+        R"({"type":"response.output_item.done","item":{"id":"ig_empty","type":"image_generation_call","status":"completed","result":""},"output_index":0,"sequence_number":7})"));
+    CHECK_FALSE(empty.has_value());
+}
+
+TEST_CASE("多图流:两张 image_generation_call 各自开卡、各带一份正文,文本夹在中间不乱") {
+    SseFramer framer;
+    const std::string raw =
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"ig_a\",\"type\":\"image_generation_call\",\"status\":\"in_progress\"},\"output_index\":0,\"sequence_number\":1}\n\n"
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"ig_a\",\"type\":\"image_generation_call\",\"status\":\"completed\",\"result\":\"AAAA_aaaa\"},\"output_index\":0,\"sequence_number\":2}\n\n"
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"in_progress\",\"content\":[]},\"output_index\":1,\"sequence_number\":3}\n\n"
+        "data: {\"type\":\"response.output_text.delta\",\"item_id\":\"msg_1\",\"output_index\":1,\"content_index\":0,\"delta\":\"两张图\",\"sequence_number\":4}\n\n"
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"msg_1\",\"type\":\"message\",\"role\":\"assistant\",\"status\":\"completed\",\"content\":[{\"type\":\"output_text\",\"text\":\"两张图\"}]},\"output_index\":1,\"sequence_number\":5}\n\n"
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"id\":\"ig_b\",\"type\":\"image_generation_call\",\"status\":\"in_progress\"},\"output_index\":2,\"sequence_number\":6}\n\n"
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"id\":\"ig_b\",\"type\":\"image_generation_call\",\"status\":\"completed\",\"result\":\"BBBB_bbbb\"},\"output_index\":2,\"sequence_number\":7}\n\n"
+        "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_multi\",\"status\":\"completed\",\"output\":[{\"type\":\"image_generation_call\",\"id\":\"ig_a\",\"result\":\"AAAA_aaaa\"},{\"type\":\"message\",\"id\":\"msg_1\",\"content\":[{\"type\":\"output_text\",\"text\":\"两张图\"}]},{\"type\":\"image_generation_call\",\"id\":\"ig_b\",\"result\":\"BBBB_bbbb\"}],\"usage\":{\"input_tokens\":30,\"output_tokens\":5}},\"sequence_number\":8}\n\n";
+
+    std::vector<StreamEvent> events;
+    for (const SseFrame& frame : framer.feed(raw)) {
+        if (auto event = parse_event(frame); event.has_value()) {
+            events.push_back(*event);
+        }
+    }
+    REQUIRE(events.size() == 7);
+    REQUIRE(std::holds_alternative<BuiltinToolStart>(events[0]));
+    CHECK(std::get<BuiltinToolStart>(events[0]).id == "ig_a");
+    REQUIRE(std::holds_alternative<ImageOutput>(events[1]));
+    CHECK(std::get<ImageOutput>(events[1]).id == "ig_a");
+    CHECK(std::get<ImageOutput>(events[1]).base64 == "AAAA_aaaa");
+    REQUIRE(std::holds_alternative<TextDelta>(events[2]));
+    REQUIRE(std::holds_alternative<ContentBlockDone>(events[3]));
+    REQUIRE(std::holds_alternative<BuiltinToolStart>(events[4]));
+    CHECK(std::get<BuiltinToolStart>(events[4]).id == "ig_b");
+    REQUIRE(std::holds_alternative<ImageOutput>(events[5]));
+    CHECK(std::get<ImageOutput>(events[5]).id == "ig_b");
+    CHECK(std::get<ImageOutput>(events[5]).base64 == "BBBB_bbbb");
+    REQUIRE(std::holds_alternative<MessageDone>(events[6]));
+}
+
+TEST_CASE("response.failed / error 事件:type 与 code 随 message 带上,指得上路") {
+    auto failed = parse_event(Frame(
+        R"({"type":"response.failed","response":{"id":"resp_f","status":"failed","error":{"message":"Upstream request failed","type":"upstream_error","code":"route_miss"}}})"));
+    REQUIRE(failed.has_value());
+    REQUIRE(std::holds_alternative<StreamError>(*failed));
+    const std::string& message = std::get<StreamError>(*failed).message;
+    CHECK(message.find("Upstream request failed") != std::string::npos);
+    CHECK(message.find("type=upstream_error") != std::string::npos);
+    CHECK(message.find("code=route_miss") != std::string::npos);
+
+    auto errored = parse_event(Frame(
+        R"({"type":"error","error":{"message":"参数不合法","code":"invalid_request"}})"));
+    REQUIRE(errored.has_value());
+    REQUIRE(std::holds_alternative<StreamError>(*errored));
+    CHECK(std::get<StreamError>(*errored).message.find("code=invalid_request") != std::string::npos);
 }
 
 TEST_CASE("response.completed:status 是 incomplete 时 stop_reason 是 max_tokens") {
@@ -268,6 +346,21 @@ TEST_CASE("完整的原生 web_search 流式响应:web_search_call 条目穿插�
     CHECK(done.stop_reason == "end_turn");  // output 里 web_search_call 不是 function_call,不当 tool_use
     CHECK(done.usage.input_tokens == 30);
     CHECK(done.usage.output_tokens == 8);
+}
+
+TEST_CASE("SummarizeErrorBodyForUser:抽 message/type/code、打码密钥、截短长文") {
+    // 标准 JSON 错误体:三字段拼一行。
+    CHECK(SummarizeErrorBodyForUser(R"({"error":{"message":"Upstream request failed","type":"upstream_error"}})") ==
+          "Upstream request failed (type=upstream_error)");
+    // 非 JSON 原文走同一道打码截短。
+    const std::string masked = SummarizeErrorBodyForUser("key sk-abcdef1234567890abcdef rejected");
+    CHECK(masked.find("sk-abcdef1234567890") == std::string::npos);
+    CHECK(masked.find("sk-abcdef...") != std::string::npos);
+    // 超长文本截短并标省略。
+    const std::string long_text(600, 'x');
+    const std::string truncated = SummarizeErrorBodyForUser(long_text);
+    CHECK(truncated.size() < long_text.size());
+    CHECK(truncated.find("截短") != std::string::npos);
 }
 
 TEST_CASE("坏掉的 JSON 不会崩,只是跳过") {
