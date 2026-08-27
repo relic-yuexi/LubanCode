@@ -890,7 +890,20 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
 
                 return RunOutcome{true, false, false, last_stop_reason, steps_used};
             }
-            return std::unexpected("请求失败: " + err.message);
+            // 错误的人话收口(ccmoon 巡检单 P1):HTTP 非 2xx 把状态码与
+            // 摘要后的错误体带上(抽 message/type/code、打码密钥、截短),
+            // 不再把整段 JSON 原样糊脸;网络类人话(连接超时一类)过一遍
+            // 同一道打码截短,原文不丢。
+            {
+                std::string message = err.message;
+                if (err.kind == api::ErrorKind::HttpStatus && err.http_status != 0) {
+                    message = "HTTP " + std::to_string(err.http_status) + ": " +
+                              api::SummarizeErrorBodyForUser(message);
+                } else {
+                    message = api::SummarizeErrorBodyForUser(message);
+                }
+                return std::unexpected("请求失败: " + message);
+            }
         }
         if (stream_error) {
             return std::unexpected("模型返回错误: " + stream_error_message);
