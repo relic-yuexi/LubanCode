@@ -815,6 +815,43 @@ TEST_CASE("黄金画面:审批等待的详细态附注,缺省不写") {
     CHECK(text2.find("waited") == std::string::npos);
 }
 
+TEST_CASE("黄金画面:include_text 缺省不画正文,整屏重建路重铺正文") {
+    // 改宽瞬间正文凭空消失单:整屏重建(resize 改宽/Ctrl+L)会把屏上正文连
+    // 根擦掉,重建的唯一来路就是这枚行组——include_text 置真时 Text 条目
+    // 原文重铺,缺省(实时画面)保持不画的老规矩。
+    lubancode::runtime::IdAuthority ids;
+    lubancode::runtime::TurnCollector collector(ids, "turn-t");
+    collector.StartTurn("查一下", 0);
+    collector.OnModelStepStarted(0);
+    collector.OnTextDelta("答案在第一行\n第二行收口", /*thinking=*/false);
+    collector.CloseTextItems();
+    collector.FinishTurn(lubancode::runtime::TurnItemViewState::Succeeded, 2600, 0);
+
+    lubancode::cli::Theme theme = lubancode::cli::BuiltinTheme("plain");
+    lubancode::cli::TurnRenderOptions options;
+    options.width = 80;
+    options.plain = true;
+
+    // 缺省:正文不画(实时路由 markdown 正文流负责,不双打)。
+    const std::vector<std::string> live = lubancode::cli::RenderTurnView(collector.view(), theme, options);
+    CHECK(JoinLines(live).find("答案在第一行") == std::string::npos);
+
+    // 重建路:正文原文铺回,顺序在用户块之后、footer 之前,多行按原文拆行。
+    options.include_text = true;
+    const std::vector<std::string> rebuilt = lubancode::cli::RenderTurnView(collector.view(), theme, options);
+    const std::string text = JoinLines(rebuilt);
+    const std::size_t user_at = text.find("> 查一下");
+    const std::size_t body_at = text.find("答案在第一行");
+    const std::size_t body2_at = text.find("第二行收口");
+    const std::size_t footer_at = text.find("Worked for");
+    REQUIRE(user_at != std::string::npos);
+    REQUIRE(body_at != std::string::npos);
+    REQUIRE(footer_at != std::string::npos);
+    CHECK(body2_at != std::string::npos);  // 换行保留,不折成一行
+    CHECK(user_at < body_at);
+    CHECK(body_at < footer_at);
+}
+
 TEST_CASE("黄金画面:include_footer=false 时实时画面不重复画 footer") {
     const lubancode::runtime::TurnView view = BuildTurnForRender();
     lubancode::cli::Theme theme = lubancode::cli::BuiltinTheme("plain");

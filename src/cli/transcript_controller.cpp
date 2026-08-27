@@ -212,6 +212,9 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
                 render_options.width = repaint_width;
                 render_options.plain = theme_.reset.empty();
                 render_options.expanded = expanded_;
+                // 整屏重建(resize 改宽/Ctrl+L)重铺助手正文:屏上正文刚被
+                // 连根擦掉,不重铺的话答案整段凭空消失(改宽瞬间正文丢失单)。
+                render_options.include_text = true;
                 // 轮界横线(用户输入背景块单):从第二轮起,用户块之前画
                 // 一道克制横线把 turn 分开——"上面有没有前一轮"是这里的账
                 // (多轮循环),renderer 只照 leading_turn_divider 办事。

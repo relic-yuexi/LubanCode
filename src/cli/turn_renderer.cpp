@@ -137,7 +137,28 @@ std::vector<std::string> RenderTurnView(const lubancode::runtime::TurnView& view
             continue;
         }
         if (item.kind == lubancode::runtime::TurnItemViewKind::Text) {
-            continue;  // 正文走 markdown 正文流(实时 painter);重放另拼
+            if (!options.include_text) {
+                continue;  // 正文走 markdown 正文流(实时 painter);重放另拼
+            }
+            // 整屏重建路(resize 改宽/Ctrl+L):屏上正文已被连根擦掉,这里
+            // 把 Text 条目原文重铺回来。不走 markdown 收束重画——那套锚点
+            // 账归实时 painter,重建场合只有行组可依;原文直铺,长行交给
+            // 终端自然折行。
+            if (first_printed) {
+                lines.push_back(std::string());
+            }
+            std::size_t pos = 0;
+            while (pos < item.result_text.size()) {
+                const std::size_t nl = item.result_text.find('\n', pos);
+                const std::size_t end = nl == std::string::npos ? item.result_text.size() : nl;
+                lines.push_back(item.result_text.substr(pos, end - pos));
+                if (nl == std::string::npos) {
+                    break;
+                }
+                pos = nl + 1;
+            }
+            first_printed = true;
+            continue;
         }
         // 用户条目:背景块(与 live 提交、resume 重放同一颗 formatter),不再
         // 折成工具条目样。块前按间距表垫一口气,块后再垫一口(UserPrompt ->

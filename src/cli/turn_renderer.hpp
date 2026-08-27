@@ -43,6 +43,12 @@ struct TurnRenderOptions {
     // 状态带不过轮;首轮(会话开头)不画,实时画面那道由 RunTurn 的
     // PrintDivider 自己落,不双打。
     bool leading_turn_divider = false;
+    // 画不画 Text 条目(助手正文)。实时流里正文由 markdown 正文流当场铺,
+    // 默认不画免得双打;但"整屏重建"(resize 改宽/Ctrl+L)会把屏上正文连
+    // 根擦掉——那种场合没有第二条路把正文带回屏上,必须由 renderer 重铺
+    // (改宽瞬间正文凭空消失单:Resize 后只见 user 块与 Worked 线,答案
+    // 整段不见了)。默认 false,老调用点一字不变;重建路的 caller 置真。
+    bool include_text = false;
 };
 
 // TurnView -> 行组(每行已含 ANSI 或纯文本,不含行尾换行)。

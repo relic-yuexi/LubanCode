@@ -1584,6 +1584,19 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         previous_frame.reset();
                         prev_frame_origin = -1;
                         redraw_with_panel(editor.CurrentRenderState(), panel_entries());
+                    } else if (prev_frame_origin >= 0) {
+                        // 帧整体漂出可视区(改宽连动滚屏/窗口被外部强拉,宽高
+                        // 都没再变的那拍):绝对锚点画帧全都落在窗外,屏上空白、
+                        // 键入无回显——像死了,其实活着。锚点在窗外就整屏重建,
+                        // 把帧拉回可视区(改宽瞬间流式疑停摆单:改宽锤击下屏面
+                        // 全空、composer 不见,进程与输入全健在)。
+                        const int frame_bottom = prev_frame_origin + prev_body_row_count + 1;
+                        const int vp_height =
+                            size_info->viewport_height > 0 ? size_info->viewport_height : size_info->height;
+                        if (frame_bottom < size_info->viewport_y ||
+                            prev_frame_origin > size_info->viewport_y + vp_height - 1) {
+                            rebuild_screen();
+                        }
                     }
                 }
                 last_screen_width = size_info->width;
@@ -3397,6 +3410,38 @@ bool EnsureStreamScreenRowsLocked(int rows_needed) {
     return true;
 }
 
+// 改宽残帧的收尾清扫(改宽瞬间流式疑停摆单)。conhost 改宽会把屏上旧行
+// 整块重排,ComputeFooterResizeRecovery 靠"光标行反推"猜旧帧新落点——猜
+// 准了万事大吉,猜偏了(光标被改宽联动滚屏挪走、窗口被外部强拉等)旧帧
+// 就有一部分留在屏上没人认领,最典型是冻结的"• 思考中 (Ns)"活动行:回合
+// 早就收口了,这行残影让驱动器/用户都以为"流还在读、回合拖了十倍"。
+//
+// 这里现读可视区各行,凡以当前活动行签名("• " + 活动标签)起头的,一律
+// 清掉。活动行文案是我们自己拼的、签名唯一(转录的思考条目是"• 思考 Ns",
+// 差一个字,不会误伤),现读现比对模型猜的落点可靠——猜偏到哪儿都逃不出
+// 这枚签名。只在改宽那一拍调用(读屏是控制台往返,不进每帧热路);POSIX
+// 读不到屏,读一行失败即收手,退化为纯模型路。
+void SweepStaleWorkingRowsLocked(const StreamFooterState& f, const platform::ScreenInfo& info) {
+    const std::string label =
+        f.turn_working && f.turn_interrupt_requested ? tr("spinner.stopping") : f.working_label;
+    if (label.empty()) {
+        return;
+    }
+    const std::string prefix = "• " + label;
+    const int viewport_height = info.viewport_height > 0 ? info.viewport_height : info.height;
+    const int top = (std::max)(0, info.viewport_y);
+    const int bottom = (std::min)(info.height, top + viewport_height);
+    for (int y = top; y < bottom; ++y) {
+        const std::optional<std::string> row = platform::ReadRowText(y);
+        if (!row.has_value()) {
+            break;  // 读不了屏:退化为模型路,别硬扫
+        }
+        if (row->rfind(prefix, 0) == 0) {
+            platform::ClearRowHardFrom(0, y, info.width);
+        }
+    }
+}
+
 void EraseStreamFooterLocked() {
     StreamFooterState& f = FooterSlot();
     if (f.row < 0) {
@@ -3417,6 +3462,7 @@ void EraseStreamFooterLocked() {
                 f.input_row_index, f.input_cursor_column, info->width);
             ClearStreamFooterRowsAt(recovery.top_row, recovery.rows_to_clear,
                                     info->width, info->height);
+            SweepStaleWorkingRowsLocked(f, *info);
             if (recovery.cursor_reflowed) {
                 bx = 0;
                 by = recovery.top_row;
@@ -3452,12 +3498,15 @@ void RedrawStreamFooterLocked() {
         f.input_row >= 0 && !f.painted_row_widths.empty()) {
         // Windows Terminal 改宽会把屏上旧行重排。旧 top_row 失效，却能借
         // 仍停在输入框里的物理光标反推新 top_row。先擦 reflow 后的整块旧
-        // 帧，再从那里续画；不再把旧帧丢在历史里。
+        // 帧，再从那里续画；不再把旧帧丢在历史里。反推失准的兜底见
+        // SweepStaleWorkingRowsLocked 头注释——改宽残影会让"已收口的
+        // 回合"看起来还在跑。
         const FooterResizeRecoveryPlan recovery = ComputeFooterResizeRecovery(
             f.row, f.input_row, info->cursor_y, f.painted_row_widths,
             f.input_row_index, f.input_cursor_column, info->width);
         ClearStreamFooterRowsAt(recovery.top_row, recovery.rows_to_clear,
                                 info->width, info->height);
+        SweepStaleWorkingRowsLocked(f, *info);
         if (recovery.cursor_reflowed) {
             bx = 0;
             by = recovery.top_row;

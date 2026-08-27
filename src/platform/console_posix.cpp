@@ -363,6 +363,14 @@ int PanViewportDown(int rows) {
     return 0;
 }
 
+std::optional<std::string> ReadRowText(int row) {
+    // POSIX 终端没有"读回屏幕一行"的可移植原语(大抵要靠 alt screen 自管
+    // 帧缓冲才做得到),恒 nullopt:改宽残帧的清扫在 POSIX 退化为纯模型路
+    // (窗口即缓冲,改宽重排的失配面也比 conhost 小得多),行为不劣化。
+    (void)row;
+    return std::nullopt;
+}
+
 RawInputScope::RawInputScope() {
     ok_ = EnterRawTermios(&original_termios_);
 }
