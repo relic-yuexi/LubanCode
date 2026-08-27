@@ -4,12 +4,17 @@
 #include <algorithm>
 #include <algorithm>
 #include <atomic>
+#include <cstdint>
+#include <expected>
 #include <fstream>
 #include <iterator>
 #include <set>
+#include <utility>
 #include <vector>
 
+#include "agent/model_image_store.hpp"  // DecodeBase64Strict/SniffImageFormat/ReadImageDimensions
 #include "hooks/hash.hpp"
+#include "mcp/rich_result.hpp"          // kMaxImageBlockBytes/kMaxCallBinaryBytes/LandToolArtifact
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"
 #include "runtime/id_authority.hpp"
@@ -40,6 +45,70 @@ std::string BuildResultText(const ProcessCallOutcome& outcome) {
     return text;
 }
 
+// v2(工具结果图片回喂)的 image 块落账:与 MCP 富结果同一条规矩——
+// 大小帽(mcp::kMaxImageBlockBytes 同源)、魔数复核(声明与字节对不上
+// 即拒)、内容寻址落会话 artifact(mcp::LandToolArtifact,同图去重)。
+// 来源两样:base64(协议帧里自带)或插件落好的文件(path,宿主读)。
+// 失败给人话,调用方按 ImageRejected 整次收口——不拿半张图冒充成功。
+std::expected<tools::ImageContent, std::string> LandResponseImage(
+    const plugin_protocol::ResponseImage& source, const std::string& artifact_dir) {
+    if (artifact_dir.empty()) {
+        return std::unexpected("插件返回了图片,但本次调用没有 artifact 落盘地(未开会话/单发路)");
+    }
+    std::string bytes;
+    if (!source.data_base64.empty()) {
+        const auto decoded = agent::DecodeBase64Strict(source.data_base64, mcp::kMaxImageBlockBytes);
+        if (!decoded.has_value()) {
+            return std::unexpected("图片 base64 解码失败: " + decoded.error());
+        }
+        bytes = std::move(*decoded);
+    } else {
+        std::ifstream in(platform::Utf8ToPath(source.path), std::ios::binary);
+        if (!in.is_open()) {
+            return std::unexpected("图片文件读不到: " + source.path);
+        }
+        in.seekg(0, std::ios::end);
+        const std::streamoff size = in.tellg();
+        if (size < 0 || static_cast<std::uint64_t>(size) > mcp::kMaxImageBlockBytes) {
+            return std::unexpected("图片文件超字节帽或读不出尺寸: " + source.path);
+        }
+        in.seekg(0, std::ios::beg);
+        bytes.resize(static_cast<std::size_t>(size));
+        if (size > 0) {
+            in.read(bytes.data(), size);
+        }
+    }
+    if (bytes.empty()) {
+        return std::unexpected("图片字节为空");
+    }
+    // 魔数复核:认不出的格式(空 MIME)或与声明对不上的都是伪 MIME,拒。
+    const agent::ImageFormat format = agent::SniffImageFormat(bytes);
+    if (format.mime_type.empty() || format.mime_type != source.mime_type) {
+        return std::unexpected("图片声明 " + source.mime_type + ",字节魔数认成 " +
+                               (format.mime_type.empty() ? std::string("认不出") : format.mime_type));
+    }
+    const std::string sha = hooks::Sha256Hex(bytes);
+    const std::string relative = mcp::LandToolArtifact(artifact_dir, bytes, format.extension);
+    if (relative.empty()) {
+        return std::unexpected("图片落盘失败: " + artifact_dir);
+    }
+    const agent::ImageDimensions dims = agent::ReadImageDimensions(bytes, format.mime_type);
+    tools::ImageContent image;
+    image.mime_type = format.mime_type;
+    image.width = dims.width;
+    image.height = dims.height;
+    image.bytes = bytes.size();
+    image.sha256 = sha;
+    image.artifact.id = "art-" + sha.substr(0, 8);
+    image.artifact.filename = "art-" + sha.substr(0, 8) + "." + format.extension;
+    image.artifact.path = relative;
+    image.artifact.mime_type = format.mime_type;
+    image.artifact.bytes = bytes.size();
+    image.artifact.sha256 = sha;
+    image.artifact.stored = true;
+    return image;
+}
+
 }  // namespace
 
 PluginToolAdapter::PluginToolAdapter(std::shared_ptr<const PluginManifest> manifest,
@@ -57,18 +126,20 @@ std::string PluginToolAdapter::description() const {
 nlohmann::json PluginToolAdapter::input_schema() const { return definition_->input_schema; }
 
 tools::Tool::Result PluginToolAdapter::execute(const nlohmann::json& input) {
-    return Run(input, cancel_);
+    return Run(input, cancel_, std::string());
 }
 
 tools::Tool::Result PluginToolAdapter::execute(const nlohmann::json& input,
                                                const tools::ToolExecutionContext& context) {
     // context 的取消旗优先(本次调用那根:主回合 ESC / 子代理 CancelChain
-    // 合并旗);没递进来退回 SetCancel 灌的。
-    return Run(input, context.cancel != nullptr ? context.cancel : cancel_);
+    // 合并旗);没递进来退回 SetCancel 灌的。artifact 目录同路递进(v2
+    // 图片块的落盘地)。
+    return Run(input, context.cancel != nullptr ? context.cancel : cancel_, context.artifact_dir);
 }
 
 tools::Tool::Result PluginToolAdapter::Run(const nlohmann::json& input,
-                                           const std::atomic<bool>* effective_cancel) {
+                                           const std::atomic<bool>* effective_cancel,
+                                           const std::string& artifact_dir) {
     // 调用前统一验参(manifest 是合同)。实现层(process 协议)仍各自
     // 防御——Schema 不是内存安全。
     if (auto problem = ValidateArgumentsAgainstSchema(input, definition_->input_schema); problem.has_value()) {
@@ -97,7 +168,36 @@ tools::Tool::Result PluginToolAdapter::Run(const nlohmann::json& input,
 
     ProcessCallLimits limits;
     limits.timeout_ms = manifest_->timeout_ms;
-    const auto outcome = RunProcessToolCall(*manifest_, request, cwd_utf8_, effective_cancel, limits);
+    ProcessCallOutcome outcome = RunProcessToolCall(*manifest_, request, cwd_utf8_, effective_cancel, limits);
+
+    // v2(工具结果图片回喂):image 块先落账(帽/魔数/artifact,与 MCP
+    // 富结果同一条规矩),落成了再谈成功——坏一块整次按 ImageRejected
+    // 收口,不拿半张图冒充。落成的图翻成 ImageContent 进 payload,四家
+    // wire 的原生图块路自动接上;投影文本里自带 artifact 路径短句。
+    tools::ToolResultPayload rich_payload;
+    bool has_rich_images = false;
+    if (outcome.code == PluginErrorCode::Ok && !outcome.images.empty()) {
+        std::size_t binary_total = 0;
+        for (auto& source : outcome.images) {
+            auto landed = LandResponseImage(source, artifact_dir);
+            if (!landed.has_value()) {
+                outcome.code = PluginErrorCode::ImageRejected;
+                outcome.detail = landed.error();
+                outcome.images.clear();
+                break;
+            }
+            binary_total += landed->bytes;
+            if (binary_total > mcp::kMaxCallBinaryBytes) {
+                outcome.code = PluginErrorCode::ImageRejected;
+                outcome.detail = "图片字节合计超帽(" + std::to_string(binary_total) + "B)";
+                outcome.images.clear();
+                break;
+            }
+            rich_payload.content.push_back(std::move(*landed));
+            has_rich_images = true;
+        }
+    }
+
     // 日志分流:插件的 stderr 尾巴进 LogSink(终端/事件流各画各的),不进
     // 模型结果;模型只看 BuildResultText 的正文。
     if (log_sink_ && !outcome.stderr_tail.empty()) {
@@ -115,9 +215,22 @@ tools::Tool::Result PluginToolAdapter::Run(const nlohmann::json& input,
     } else if (outcome.code != PluginErrorCode::Ok) {
         result.outcome = "plugin_exception";
         result.error_code = "plugin.process_error";
-        if (!outcome.plugin_error_code.empty()) {
+        if (outcome.code == PluginErrorCode::ImageRejected) {
+            result.error_code = "plugin.image_rejected";
+        } else if (!outcome.plugin_error_code.empty()) {
             result.error_code = "plugin." + outcome.plugin_error_code;
         }
+    } else if (has_rich_images) {
+        // 富路:文本块(插件给的正文)在前,图片块按到达序在后;structured
+        // (若有且是 object)原样随行。content 投影由 SetPayload 统一重算,
+        // 图片以 artifact 短句露面。
+        rich_payload.content.insert(rich_payload.content.begin(),
+                                    tools::TextContent{outcome.text});
+        if (outcome.structured.is_object()) {
+            rich_payload.structured_content = outcome.structured;
+        }
+        result.SetPayload(std::move(rich_payload));
+        result.outcome = "succeeded";
     } else {
         result.outcome = "succeeded";
     }

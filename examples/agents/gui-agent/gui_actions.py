@@ -19,6 +19,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import random
 import time
@@ -27,14 +28,14 @@ from typing import Optional
 
 import png as png_codec
 
-PLUGIN_VERSION = "1.0.0"
+PLUGIN_VERSION = "1.1.0"
 
-# 工单口径:过渡期协议 v1 只认 text,截图只能落 artifact 给人看。
-RICH_RESULT_NOTE = {
-    "rich_result": False,
-    "blocked_by": "MCP富结果与专属浏览器/P0",
-    "note": "路径不是图片:当前协议 v1 只回文本,模型尚未自动看见截图;"
-            "人工核对文件或用 /image 送图,富结果落地后此字段翻真。",
+# 协议 v2 起截图随结果回喂模型(image 块),宿主验身落账后上 wire;
+# 证据文件照旧落盘(路径作附账,artifact 可追)。
+MODEL_FEED_NOTE = {
+    "rich_result": True,
+    "protocol": 2,
+    "note": "截图经协议 v2 image 块回喂模型,模型已看见;证据文件照旧落盘。",
 }
 
 TEXT_MAX_CHARS = 4096
@@ -191,11 +192,12 @@ def gui_status(backend, arguments: dict, settings: Settings) -> tuple[str, dict]
         "dry_run": settings.dry_run,
         "dangerous_keys_allowed": settings.allow_dangerous_keys,
         "plugin_version": PLUGIN_VERSION,
-        "rich_result": RICH_RESULT_NOTE,
+        "rich_result": MODEL_FEED_NOTE,
     }
     text = (f"平台 {state['platform']}(承诺范围 Windows 10/11),Python {state['python_version']},"
             f"DPI 感知 {state['dpi_awareness']},显示器 {state['monitors']} 台,"
-            f"虚拟屏 {state['virtual_screen']},dry-run {'开' if state['dry_run'] else '关'}。")
+            f"虚拟屏 {state['virtual_screen']},dry-run {'开' if state['dry_run'] else '关'},"
+            "截图经协议 v2 回喂模型。")
     return text, state
 
 
@@ -207,7 +209,14 @@ def gui_list_windows(backend, arguments: dict, settings: Settings) -> tuple[str,
         windows = [w for w in windows if needle in w["title"].lower()]
     for window in windows:
         window["title"] = _sanitize_text(window["title"])[:TITLE_MAX_CHARS]
-    text = f"共 {len(windows)} 个可见顶层窗口。窗口 id 只在当前桌面现场有效。"
+    # 窗口清单直接进文本(模型看得见 window_id 才截得了图);structured 留
+    # 给宿主/前端同一份真账。协议 v1 起文本就是模型侧唯一通道,v2 带图也
+    # 不改这条:枚举是文本的事,截图才是图的事。
+    compact = [{"window_id": w["id"], "title": w["title"], "rect": w["rect"],
+                "minimized": w.get("minimized", False), "foreground": w.get("foreground", False)}
+               for w in windows]
+    text = (f"共 {len(windows)} 个可见顶层窗口。窗口 id 只在当前桌面现场有效。\n"
+            + json.dumps(compact, ensure_ascii=False))
     return text, {"count": len(windows), "windows": windows,
                   "note": "window_id 仅本次桌面现场有效,不跨会话"}
 
@@ -284,12 +293,14 @@ def gui_screenshot(backend, arguments: dict, settings: Settings) -> tuple[str, d
         "image": {"artifact_id": f"sha256:{digest}", "path": str(path),
                   "width": width, "height": height, "mime_type": "image/png",
                   "bytes": len(encoded)},
-        "model_visibility": RICH_RESULT_NOTE,
+        "model_visibility": MODEL_FEED_NOTE,
     }
-    text = (f"已截图 {what},{width}x{height},落 {path}(sha256 前 8 位 {digest[:8]})。"
-            "注意:当前协议只回文本,模型尚未自动看见此图;请人工查看文件,"
-            "或等富结果落地后自动闭环。动作时请带 expected_window_rect 防坐标过期。")
-    return text, observation
+    text = (f"已截图 {what},{width}x{height},图已随结果回喂(直接描述画面即可),"
+            f"证据文件落 {path}(sha256 前 8 位 {digest[:8]})。"
+            "动作时请带 expected_window_rect 防坐标过期。")
+    # 协议 v2:图随结果回喂(path 模式——宿主读文件、验魔数、落会话
+    # artifact 后上 wire;这里不塞 base64,响应帧保持轻)。
+    return text, observation, [{"mime_type": "image/png", "path": str(path)}]
 
 
 def _evidence_root(arguments: dict, settings: Settings) -> Path:

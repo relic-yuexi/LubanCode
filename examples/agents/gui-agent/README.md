@@ -188,20 +188,33 @@ Skill 的死规矩:一次一项动作,动作后必截图;不许连续盲点五�
   不是权限——observation 不是授权凭据。窗口换进程、换标题、换矩形,
   默认都拒。
 
-## 7. 路径不是图片(诚实条款)
+## 7. 图随结果回喂(协议 v2)
 
-当前 process 插件协议 v1 只回文本。`gui_screenshot` 把 PNG 落盘,回路径
-与元数据,observation 里明确标:
+process 插件协议 v2 起,`content` 里可以带 `type=image` 块。
+`gui_screenshot` 在文本与 observation 之外,把 PNG 以 path 模式随响应帧
+回给宿主:
 
 ```json
-"model_visibility": {"rich_result": false,
-                     "blocked_by": "MCP富结果与专属浏览器/P0",
-                     "note": "路径不是图片:模型尚未自动看见截图..."}
+"content": [
+  {"type": "text", "text": "已截图 窗口 'x' ... 图已随结果回喂 ..."},
+  {"type": "image", "mime_type": "image/png", "path": "C:\\...\\gui-obs-....png"}
+]
 ```
 
-也就是说:**截图保存成功 ≠ 模型看见截图。** 需要视觉判断的环节,把路径
-报给用户人工核对(或用宿主的图片输入通道)。等富工具结果落地,这条自动
-闭环,插件无需改动——observation 元数据早已按那时的形状备好。
+宿主收到后照 MCP 富结果的同一条规矩验身(魔数复核、大小帽 20MB、内容
+寻址落会话 artifact),再由四家 wire 原生上协议(anthropic 的 tool_result
+image 块 / responses 的 input_image 数组 / Gemini 3+ 的 inlineData;chat
+wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看见截图**,
+视觉判断不再需要人工核对文件。证据文件照旧落盘——路径作附账,artifact
+可追。observation 里的标记同步翻真:
+
+```json
+"model_visibility": {"rich_result": true, "protocol": 2,
+                     "note": "截图经协议 v2 image 块回喂模型,模型已看见;证据文件照旧落盘。"}
+```
+
+老宿主(只认 v1)收到 protocol=2 的响应会按 UnknownContent 整帧拒——
+本插件随宿主 v2 一起交付,不做双协议回退。
 
 ## 8. 安全模型
 

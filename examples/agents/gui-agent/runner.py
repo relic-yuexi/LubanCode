@@ -1,9 +1,14 @@
 # -*- coding: utf-8 -*-
-"""gui-agent process 插件 runner(协议 v1)。
+"""gui-agent process 插件 runner(协议 v2)。
 
 协议铁律与 examples/plugins/local_math 同源:
   stdin 恰好一份 JSON 请求,写完即关;stdout 恰好一份 JSON 响应,前后混
   任何字节都判协议错;日志只写 stderr。
+
+v2 新事:响应 content 里可以带 type=image 块(截图回喂模型)。宿主(支持
+协议 v2)验身落账后把图直接上 wire;旧宿主只认 v1,收到 protocol=2 的
+响应按 UnknownContent 拒——所以本插件要求宿主 >= v2(请求帧说 2 才是真
+支持)。
 
 本插件的教学主张在这份文件里看得分明:九件工具,件件短命——进程起来,
 干一件事,退场。窗口、光标、前台、输入焦点,全保存在 Windows 桌面手里;
@@ -45,25 +50,37 @@ def build_response(request: dict, backend=None, settings=None) -> dict:
             return _error_frame(call_id, "unsupported_platform", str(error))
 
     try:
-        text, structured = handler(backend, arguments, settings if settings is not None else Settings())
+        outcome = handler(backend, arguments, settings if settings is not None else Settings())
+        # 协议 v2:handler 可以回 (text, structured) 或 (text, structured, images)。
+        # images 是要回喂模型的图:[{"mime_type": ..., "path": ...}],宿主验
+        # 身(魔数/大小帽)后落会话 artifact 再上 wire。
+        if len(outcome) == 3:
+            text, structured, images = outcome
+        else:
+            text, structured = outcome
+            images = []
     except ToolError as error:
         return _error_frame(call_id, error.code, error.message)
     except Exception as error:  # noqa: BLE001 - 协议要求任何业务失败都回失败帧
         print(f"[gui-agent] 未预期异常 tool={tool}: {error!r}", file=sys.stderr)
         return _error_frame(call_id, "execution_failed",
                             f"{type(error).__name__}: {error}")
+    content = [{"type": "text", "text": text}]
+    for image in images:
+        content.append({"type": "image", "mime_type": image["mime_type"],
+                        "path": image["path"]})
     return {
-        "protocol": 1,
+        "protocol": 2,
         "call_id": call_id,
         "ok": True,
-        "content": [{"type": "text", "text": text}],
+        "content": content,
         "structured": structured,
     }
 
 
 def _error_frame(call_id: str, code: str, message: str) -> dict:
     return {
-        "protocol": 1,
+        "protocol": 2,
         "call_id": call_id,
         "ok": False,
         "error": {"code": code, "message": message},

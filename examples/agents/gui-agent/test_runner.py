@@ -76,9 +76,26 @@ class ProtocolTest(unittest.TestCase):
         response = call(make_backend(), "gui_status", {})
         self.assertTrue(response["ok"])
         self.assertEqual(response["call_id"], "t1")
-        self.assertEqual(response["protocol"], 1)
+        self.assertEqual(response["protocol"], 2)
         self.assertEqual(response["content"][0]["type"], "text")
         self.assertIn("structured", response)
+
+    def test_screenshot_frame_carries_image_block(self):
+        """协议 v2:截图响应的 content 里带 type=image 块(path 模式)。"""
+        import tempfile
+        with tempfile.TemporaryDirectory() as temp:
+            response = call(make_backend(), "gui_screenshot",
+                            {"target": "window", "window_id": WINDOW,
+                             "artifact_dir": temp})
+            self.assertTrue(response["ok"])
+            blocks = response["content"]
+            self.assertEqual(blocks[0]["type"], "text")
+            images = [block for block in blocks if block["type"] == "image"]
+            self.assertEqual(len(images), 1)
+            self.assertEqual(images[0]["mime_type"], "image/png")
+            self.assertTrue(os.path.isfile(images[0]["path"]))
+            # data/path 恰给其一(path 模式不塞 base64)
+            self.assertNotIn("data", images[0])
 
     def test_unknown_tool(self):
         self.assertEqual(error_code(call(make_backend(), "gui_nope", {})), "unknown_tool")
@@ -263,10 +280,10 @@ class ScreenshotTest(unittest.TestCase):
                 data = handle.read()
             self.assertTrue(png.is_png(data))
             self.assertEqual(len(data), image["bytes"])
-            # observation 必须自带"模型还没看见图"的诚实标记
+            # 协议 v2:图随结果回喂,observation 的可见性标记翻真
             visibility = observation["model_visibility"]
-            self.assertFalse(visibility["rich_result"])
-            self.assertIn("MCP富结果与专属浏览器", visibility["blocked_by"])
+            self.assertTrue(visibility["rich_result"])
+            self.assertEqual(visibility["protocol"], 2)
 
     def test_screen_target_rejects_window_id(self):
         self.assertEqual(error_code(call(make_backend(), "gui_screenshot",

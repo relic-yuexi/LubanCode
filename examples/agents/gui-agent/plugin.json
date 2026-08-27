@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "id": "gui-agent-example",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "language": "python",
   "runtime": {
     "kind": "process",
@@ -47,7 +47,7 @@
     },
     {
       "name": "gui_screenshot",
-      "description": "截图并落 PNG 工件,返回 observation(窗口矩形、客户区尺寸、DPI、虚拟原点、图片 sha256 与路径)。默认 target=window 只拍目标窗口,少碰无关隐私;target=screen 拍全部显示器。最小化窗口拒绝。注意:当前协议只回文本,模型尚未自动看见图;动作工具带 expected_window_rect 引用本次 observation 的矩形可防坐标过期。",
+      "description": "截图并把 PNG 随结果回喂模型(协议 v2 image 块,模型直接看见画面),同时落证据文件、返回 observation(窗口矩形、客户区尺寸、DPI、虚拟原点、图片 sha256 与路径)。默认 target=window 只拍目标窗口,少碰无关隐私;target=screen 拍全部显示器。最小化窗口拒绝。动作工具带 expected_window_rect 引用本次 observation 的矩形可防坐标过期。",
       "input_schema": {
         "type": "object",
         "properties": {
