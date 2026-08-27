@@ -1,0 +1,34 @@
+{
+  "fixture_id": "live_vllm_minicpm5_post_tool_raw_think",
+  "wire": "anthropic-messages",
+  "provider": "vllm-local",
+  "model": "MiniCPM5-1B",
+  "scenario": "post_tool_raw_think_tags_in_text_delta",
+  "source_document": "internal",
+  "captured_at": "2026-08-27",
+  "request_expectation": {
+    "messages": ["user", "assistant(thinking+tool_use)", "user(tool_result)"],
+    "thinking": {"type": "enabled"},
+    "stream": true
+  },
+  "expected_events": [
+    "MessageStart",
+    "TextDelta",
+    "TextDelta",
+    "TextDelta",
+    "TextDelta",
+    "ContentBlockDone",
+    "MessageDone"
+  ],
+  "expected_replay": [
+    "known issue: raw think tags are currently delivered as ordinary TextDelta"
+  ],
+  "usage_expectation": {
+    "input_tokens": 5596,
+    "output_tokens": 64,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0
+  },
+  "stop_reason": "end_turn",
+  "notes": "Sanitized from a live vLLM MiniCPM5-1B post-tool continuation. Event kinds, block type, delta type, tag placement and order are retained; ids, signature, reasoning body and tool result are replaced. See the MiniCPM5-1B live-smoke todo before changing the expected TextDelta behavior."
+}

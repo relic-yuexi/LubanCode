@@ -44,3 +44,14 @@ build/tests/lubancode_tests --source-file='*test_run_command_process.cpp'
 写新测试时，先挑种类与领域，再落文件。真机依赖若缺，须明确 `SKIP` 并写出缘故；
 断言前用 `CAPTURE` 留下关键路径、退出码与原始输出。莫把 60 秒超时当同步手段，
 轮询须有短间隔、硬期限，还要在失败时把现场亮出来。
+
+MiniCPM5-1B 的 vLLM Anthropic Messages 真机探针在 `manual/`。它不进 CTest，
+只写脱敏统计；须用 PowerShell 7：
+
+```powershell
+pwsh -File tests/manual/minicpm5_messages_probe.ps1 `
+  -BaseUrl http://localhost:8001 -Model MiniCPM5-1B -ApiKey unused -Repeats 3
+```
+
+报告默认落 `build/test-evidence/minicpm5-messages-probe/report.json`。探针不记
+key、request id、thinking 正文、signature、图片字节或工具结果正文。

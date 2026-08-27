@@ -1,0 +1,216 @@
+# MiniCPM5-1B 真机巡检：Messages 思考、工具、取消与上下文
+
+状态：待做（2026-08-27，LubanCode `0.26.67`，vLLM 本地兼容端
+`http://localhost:8001`，模型 `MiniCPM5-1B`，窗口 32768）
+
+## 一句话
+
+纯文本、连续对话、工具调用都能走通。四道边界却还漏风：`none` 关不掉思考；
+工具结果回来后，`<think>` 会混进正文；超窗请求发出去才撞 500，自动压缩也跟着
+撞墙；`Esc` 虽能停，真机一回拖了 8.4 秒才收口。
+
+图片这条路不通。服务端明说此模型不是多模态，却也报作 HTTP 500。模型不听话、
+工具后答错行号，另算 1B 模型能力，不算 LubanCode 的 bug。
+
+## 现场配置
+
+本轮不改用户全局配置，只用进程环境变量隔开：
+
+```text
+LUBANCODE_WIRE=anthropic
+LUBANCODE_BASE_URL=http://localhost:8001
+LUBANCODE_API_KEY=unused
+LUBANCODE_MODEL=MiniCPM5-1B
+LUBANCODE_CONTEXT_WINDOW=32768
+LUBANCODE_THEME=plain
+NO_PROXY=localhost,127.0.0.1
+```
+
+Anthropic 客户端会自行添 `/v1/messages`，故 `BASE_URL` 只能写站根，不能再带
+`/v1`。写成 `http://localhost:8001/v1` 会请求 `/v1/v1/messages`，得 404；
+这属配置写错，不列 bug。
+
+`GET /v1/models` 真回 `MiniCPM5-1B`，`owned_by=vllm`，
+`max_model_len=32768`。`/docs` 也列出 `POST /v1/messages` 与
+`POST /v1/messages/count_tokens`。
+
+## 已跑矩阵
+
+| 场景 | 结果 | 归属 |
+|---|---|---|
+| 单轮文本，`high` | 正文可见，退出码 0 | 通过 |
+| 单轮文本，`none` | 正文可见，仍显示“思考中” | 方言不生效 |
+| 连续两轮记暗号 | 第二轮能复述，thinking signature 可回放 | 通过 |
+| 强制 `read_file` | 工具真执行，结果也回了模型 | 主链通过；模型末答错属能力 |
+| 工具后续正文 | 原样露出 `<think>...</think>` | P0 |
+| `/doctor effort unset/none/high` | 三档都收 HTTP 2xx；前两档 64 token 全耗在 thinking | P1 诊断盲区 |
+| `Esc` 打断长答 | 约 1 秒按下，8.4 秒才停；下一轮 `CANCEL_RECOVER_OK` 正常 | P1 |
+| 3 万枚 `a ` 的单条输入 | 服务端报输入至少 24577 + 输出 8192 超 32768；自动压缩也超窗 | P1 |
+| `/image` PNG | 服务端 500：`MiniCPM5-1B is not a multimodal model` | 端点分型 + 客户端能力提示 |
+| 超窗 `count_tokens` | 服务端 500 `internal_error`，不回 token 数 | vLLM 端 |
+
+## 环境插曲：连续矩阵后短时失联，已确认是网络波动
+
+完整探针刚跑完时，最后两笔图片与 `count_tokens` 仍有响应。紧接着再跑快速自检，
+第一步 `GET /v1/models` 等满 30 秒超时。随后分别探 `/health`、`/v1/models`，
+两次 8 秒与一次 10 秒都收不到一个字节，HTTP 状态为 000。
+
+Windows 侧 `127.0.0.1:8001` 当时仍在 Listen，持有者是 VS Code Insiders 的
+端口转发进程。用户随后说明网络有波动并已恢复。复探 `/health`、`/v1/models`
+都在 0.46 秒内回 200；一轮快速真机探针也跑完。
+
+故此不列 LubanCode、vLLM 或 VS Code bug。只保留探针的失联收口：入口超时时
+仍落脱敏报告，写 `endpoint_unavailable/models`，退出码 2，不只甩异常栈。
+
+## P0：工具结果之后，原始 `<think>` 当正文上屏
+
+### 真机证据
+
+首轮用 Anthropic `tool_choice` 强制 `read_file`，服务端回
+`thinking + tool_use`，thinking block 带 signature。LubanCode 执行工具，把
+`tool_result` 送回。第二份 SSE 却变了样：
+
+```text
+content_block_start.type = text
+content_block_delta.delta.type = text_delta
+text 开头 = <think>
+thinking_delta 字符数 = 0
+```
+
+一次脱敏直抓得：正文 1980 字符，含 `<think>`，没有一枚
+`thinking_delta`。终端于是把模型推理逐行画出来。这个错先发生在 vLLM 的
+Anthropic 适配层；LubanCode 又没有兼容止损，用户照样看见内情。
+
+已沉淀：
+
+- `tests/fixtures/api/anthropic_messages/live_vllm_minicpm5_post_tool_raw_think.*`
+  留住事件形状，正文缩成短样，不留 signature、request id、工具原文；
+- `tests/manual/minicpm5_messages_probe.ps1` 能重跑首轮工具与第二轮 SSE，只记
+  block/delta 种类、字符数和标签命中。
+
+### 验收
+
+- [ ] 先在 vLLM 端核 chat template 与 reasoning parser。工具回合前后须同走
+  `thinking_delta`，不可忽然退成带标签的 `text_delta`。
+- [ ] LubanCode 对兼容端给止损。若正文首段命中完整原始思考包裹，须明报
+  provider 协议异常，不可悄悄把思考当普通答话存档、复制、导出。
+- [ ] 不可见着任意 `<think>` 就剥。用户让模型讲 XML、Markdown 或代码时，
+  这串字本可合法出现。判定须吃块位置、回合阶段、首段边界与闭合状态。
+- [ ] 工具后续有闭合标签、无闭合标签、标签跨 delta、正文合法引用标签，各钉
+  一册测试。
+- [ ] session/export/resume 不得把误判的原始思考泄到正文账里。
+
+## P1：`/think none` 看似可选，实则关不掉
+
+直连跑三组 `thinking={"type":"disabled"}`。三组全回非空 thinking，长度分别
+136、159、203 字符。`high` 三组为 291、285、142 字符；两组范围交叠，单凭
+一回 HTTP 2xx 压根儿不能说档位有效。
+
+又试 vLLM 私有形状 `chat_template_kwargs.enable_thinking=false`。三回全无正文，
+只回 2 至 5 个 thinking 字符。也就是说，眼下不是“换个开关便好”：Anthropic
+disabled 被忽略，模板开关 false 又把可见回答一并抹了。
+
+`/doctor effort` 没误报“已支持”，这点守住了。可它每档只发一回，
+`max_tokens=64`。unset/none 恰好都以 `max_tokens` 收场，正文 0；人还得自己猜。
+
+- [ ] provider/model 能声明 `always_think` 或 `off_unsupported`。`/think none`
+  切换前后都要明说“此端点未证实可关”，别让状态栏只挂一枚 `none` 便算数。
+- [ ] `/doctor effort` 每档至少重复三回；报告 HTTP 接受、thinking 是否产出、
+  正文是否产出、终止原因与分布，四账分开。
+- [ ] 探针给推理优先模型留足正文预算。若预算耗尽，只判 inconclusive，不把
+  `text=0` 当支持或不支持。
+- [ ] vLLM 部署侧若修好私有模板开关，再把准确参数写进 provider profile；
+  修好前不在 LubanCode 里硬塞 `enable_thinking=false`。
+
+## P1：上下文预算没挡住必超窗口的单条输入
+
+把 3 万枚短词经管道交给 LubanCode。客户端仍发请求，并预留 8192 输出 token。
+服务端报：输入至少 24577，加输出 8192，合计已过 32768。随后客户端尝试自动
+压缩；压缩请求又预留 4096，仍撞同一面墙，最终失败。
+
+这不是旧历史裁不动。用户新来的一条消息本身就太大。字符估算低估了短 ASCII
+token 密度，又没在发前用“输入预算 + 最大输出预算”做硬门。
+
+- [ ] 上下文门先扣输出预算，再算输入可用量；主答 8192、compact 4096 分别记。
+- [ ] 单条新输入若已装不下，发送前拒绝。文案列出窗口、预留输出与估算输入，
+  不要先发一次，再拿 500 当压缩信号。
+- [ ] 有 token count 端点时可选精算；端点坏或回 500 时，退到保守估算，不得
+  把精算失败本身又送进自动压缩循环。
+- [ ] 测试短 ASCII、CJK、代码、base64、超长单词。重点钉住 32768 窗口下
+  “单条输入 + 8192 输出”这道线。
+- [ ] 自动压缩须先判断“可压的是历史，还是不可压的当前用户消息”；后一种不跑
+  compact。
+
+## P1：`Esc` 已置位，网络回合仍拖 8.4 秒
+
+长答刚起便按 `Esc`。UI 收到了键，最后也显示 `[已打断]`；可时钟仍从 1 秒走到
+8 秒，才退回输入框。下一轮答出 `CANCEL_RECOVER_OK`，会话没砖死。
+
+`PostSseStream` 已挂 `ProgressCallback`，也在 `WriteCallback` 查取消旗。真机
+表明 Windows + 本端点无新字节时，回调醒得不够勤，取消时延仍可到数秒。
+
+- [ ] 给无响应头、已有响应头但无 body、thinking 长算但迟迟无 SSE 三种假服务
+  各钉取消时延测试。
+- [ ] 目标：按下 `Esc` 后 1 秒内断开并回输入态；测试量按 P50/P95 记，不拿一次
+  偶然快当通过。
+- [ ] 若 cpr easy 接口不能及时唤醒，改可唤醒 transport 或独立连接句柄；不可
+  用 1 秒 LowSpeed 粗暴代替，那会误杀正常长思考。
+- [ ] 取消仍要守住现有语义：半截正文保留，工具账配对，下一轮可续。
+
+## P2：能力与错误分型太晚
+
+`/image` 能把 PNG 发出去，服务端才说模型非多模态；HTTP 状态还是 500。
+`count_tokens` 超窗也报 500 `internal_error`。LubanCode 能把原始 JSON 亮出来，
+却没给“模型不支持图片”“上下文超限”两种稳定分型。
+
+- [ ] live model/catalog 能记 `text/image/audio` 能力。已知纯文本模型在 `/image`
+  发送前拦住；未知才允许试探。
+- [ ] 服务端虽错报 500，客户端仍可按安全字段识别常见 capability/context 错，
+  给人话与下一步；原始 detail 只作附账。
+- [ ] 不能凭这回 MiniCPM 结论断言整个 provider 都不认图片。
+
+## P2：环境变量已换全套端点，provider 名仍挂 `ccmoon`
+
+`LUBANCODE_WIRE/BASE_URL/API_KEY/MODEL/CONTEXT_WINDOW` 都来自环境变量，
+`--config` 与状态栏却仍沿用全局 `active_provider=ccmoon`；全局 `think=high` 也按
+逐字段优先级带进新模型。规矩虽写在帮助里，现场仍容易把本地请求误归到 ccmoon。
+
+- [ ] 当运行字段已与 active provider 脱钩，显示 `env override / unbound`，不要只
+  挂旧 provider 名。
+- [ ] provider profile 只在端点、wire、model 归属能对上时套用；不相干的
+  metrics/capability/default_think 不可暗带。
+- [ ] `--config` 加一段“组合来源风险”，列出跨 provider 混配字段。
+
+## 不算 LubanCode bug 的项目
+
+- 模型读到 `CMakeLists.txt` 后仍答错版本行；工具结果确实送达，属模型质量。
+- 指令要求只回固定短串，偶有多字、少字；属 1B 模型服从度。
+- 模型声明非多模态。不能因 API 收 image 字段便说模型该会看图。
+- 端点把 unsupported/context overflow 错报 HTTP 500，根因在 vLLM 适配层；
+  LubanCode 只欠更好的客户端分型。
+
+## 证据与复跑
+
+脱敏截图在 `build/test-evidence/minicpm5-smoke/`，不进仓。探针报告默认落
+`build/test-evidence/minicpm5-messages-probe/`，也不进仓。
+
+```powershell
+pwsh -File tests/manual/minicpm5_messages_probe.ps1 `
+  -BaseUrl http://localhost:8001 `
+  -Model MiniCPM5-1B `
+  -ApiKey unused `
+  -Repeats 3
+```
+
+报告不记 API key、thinking 正文、signature、request id、图片 base64 或完整工具
+结果。它只留状态码、事件种类、字符数、终止原因与标签命中。
+
+## 完成定义
+
+- [ ] 工具后续不再把原始思考标签当正文显示、存档、复制或导出。
+- [ ] `none` 无效时明说 unsupported；doctor 三回对照，不拿 2xx 当行为支持。
+- [ ] 32768 窗口下，必超请求发送前收住；不可压的单条输入不触发 compact。
+- [ ] `Esc` 真机 P95 在 1 秒内收口，下一轮仍可续。
+- [ ] 图片与上下文错误分型清楚，服务端 500 不再只剩一团原始 JSON。
+- [ ] 脱敏 fixture 四种切法回放、定向测试、Release 全量 ctest 与一轮真机复跑
+  全绿。

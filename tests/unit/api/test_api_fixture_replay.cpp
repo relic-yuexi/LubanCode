@@ -244,3 +244,27 @@ TEST_CASE("fixture 回放:每册事件类型序列/usage/stop_reason 与 manifes
         }
     }
 }
+
+TEST_CASE("vLLM MiniCPM5 工具后续实录:原始 think 标签确在 TextDelta,没有 ThinkingDelta") {
+    // 这是已知异常的 characterization test,不是把泄漏立成产品合同。修
+    // todos/MiniCPM5-1B真机巡检_Messages思考工具取消与上下文.todo 时,
+    // 须连同 fixture 的期望一道改成正确的 ThinkingDelta/正文边界。
+    const auto fixture =
+        lubancode_test::LoadApiFixture("anthropic_messages", "live_vllm_minicpm5_post_tool_raw_think");
+    REQUIRE(fixture.has_value());
+
+    const auto events = Replay(*fixture, ChunkMode::Whole);
+    std::string text;
+    bool saw_thinking = false;
+    for (const auto& event : events) {
+        if (const auto* delta = std::get_if<api::TextDelta>(&event); delta != nullptr) {
+            text += delta->text;
+        }
+        saw_thinking = saw_thinking || std::holds_alternative<api::ThinkingDelta>(event);
+    }
+
+    CHECK_FALSE(saw_thinking);
+    CHECK(text.starts_with("<think>"));
+    CHECK(text.find("</think>") != std::string::npos);
+    CHECK(text.find("project(lubancode VERSION") != std::string::npos);
+}
