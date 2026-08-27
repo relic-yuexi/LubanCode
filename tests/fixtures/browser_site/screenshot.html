@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" /><title>验收站 - 截图页</title>
+  <style>
+    body { margin: 0; }
+    .corner { position: fixed; width: 32px; height: 32px; }
+    .tl { top: 0; left: 0; background: #ff0000; }
+    .tr { top: 0; right: 0; background: #00ff00; }
+    .bl { bottom: 0; left: 0; background: #0000ff; }
+    .br { bottom: 0; right: 0; background: #ffff00; }
+    .center { width: 200px; height: 100px; background: #6666ff; margin: 25vh auto; }
+  </style>
+</head>
+<body>
+  <div class="corner tl"></div><div class="corner tr"></div>
+  <div class="corner bl"></div><div class="corner br"></div>
+  <div class="center" id="center-block"></div>
+  <p>四角标记与中央色块:像素校验"非空、没裁歪"用。</p>
+</body>
+</html>

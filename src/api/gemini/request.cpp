@@ -36,9 +36,15 @@ std::map<std::string, std::string> ToolNameByUseId(const std::vector<Message>& m
 // object):内容本身是 JSON object 就原样用;否则包一层 {"result": ...}——
 // Google 官方 SDK 对非结构化结果就是这副形状。is_error 的结果换
 // {"error": ...} 让模型看得见这是失败回执。
+// MCP 富结果单 P0.6:structuredContent 有值时走原生对象(Gemini 的
+// functionResponse 本就吃对象),不绕投影一圈再 parse 回来;图片/音频块
+// 仍在 content 投影里以 artifact 短句降级,不假定 inlineData 可用。
 json FunctionResponseBody(const ToolResultBlock& result) {
     if (result.is_error) {
         return json{{"error", result.content}};
+    }
+    if (result.structured_content.has_value() && result.structured_content->is_object()) {
+        return *result.structured_content;
     }
     try {
         const json parsed = json::parse(result.content);

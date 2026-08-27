@@ -1,0 +1,21 @@
+{
+  "name": "@lubancode/browser-mcp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "LubanCode 专属 Browser MCP:Playwright 驾驭的常驻浏览器(stdio JSON-RPC)",
+  "license": "MIT",
+  "main": "server.js",
+  "bin": {
+    "lubancode-browser-mcp": "server.js"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/run-tests.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "playwright": "^1.49.0"
+  }
+}

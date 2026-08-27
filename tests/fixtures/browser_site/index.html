@@ -1,0 +1,74 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>LubanCode 验收站 - 首页</title>
+  <style>
+    body { font-family: sans-serif; margin: 2rem; }
+    .corner { position: fixed; width: 24px; height: 24px; background: #d33; }
+    .tl { top: 0; left: 0; } .tr { top: 0; right: 0; }
+    .bl { bottom: 0; left: 0; } .br { bottom: 0; right: 0; }
+    #dynamic { margin-top: 1rem; padding: .5rem; border: 1px solid #888; }
+    iframe { width: 320px; height: 120px; border: 1px dashed #888; }
+  </style>
+</head>
+<body>
+  <div class="corner tl"></div><div class="corner tr"></div>
+  <div class="corner bl"></div><div class="corner br"></div>
+  <h1>验收站首页</h1>
+
+  <nav aria-label="主导航">
+    <a href="/login.html" id="link-login">登录页</a> |
+    <a href="/screenshot.html" id="link-shot">截图页</a> |
+    <a href="/slow.html" id="link-slow">慢页面</a>
+  </nav>
+
+  <section>
+    <h2>表单</h2>
+    <form id="the-form" action="/submitted.html" method="get">
+      <label>名字 <input type="text" id="name-input" name="name" value="" /></label><br />
+      <label>暗语 <input type="password" id="secret-input" name="secret" value="" /></label><br />
+      <label>颜色
+        <select id="color-select" name="color">
+          <option value="red">红</option>
+          <option value="green">绿</option>
+          <option value="blue">蓝</option>
+        </select>
+      </label><br />
+      <button type="button" id="btn-dialog">弹个对话框</button>
+      <button type="submit" id="btn-submit">提交</button>
+    </form>
+    <p id="form-note">表单尚未提交。</p>
+  </section>
+
+  <section>
+    <h2>动态 DOM</h2>
+    <button type="button" id="btn-add-row">加一行</button>
+    <div id="dynamic" aria-label="动态区">初始一行</div>
+    <a href="/downloads/text" id="dl-text">下载文本</a> |
+    <a href="/downloads/png" id="dl-png">下载图片</a> |
+    <a href="/downloads/zip" id="dl-zip">下载压缩包</a>
+  </section>
+
+  <section>
+    <h2>内嵌框架</h2>
+    <iframe src="/frame.html" title="内嵌框架" id="the-frame"></iframe>
+  </section>
+
+  <script>
+    let rows = 0;
+    document.getElementById('btn-add-row').addEventListener('click', () => {
+      rows += 1;
+      const line = document.createElement('p');
+      line.textContent = '第 ' + rows + ' 行(动态添加)';
+      line.setAttribute('data-row', String(rows));
+      document.getElementById('dynamic').appendChild(line);
+    });
+    document.getElementById('btn-dialog').addEventListener('click', () => {
+      // 对话框由测试经 page.on('dialog') 处理;服务端不弹真窗口。
+      window.dispatchEvent(new CustomEvent('site-dialog', { detail: '对话框事件' }));
+      document.getElementById('form-note').textContent = '对话框按钮按过。';
+    });
+  </script>
+</body>
+</html>

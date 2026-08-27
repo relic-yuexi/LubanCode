@@ -119,6 +119,36 @@ TEST_CASE("user 的 tool_result 块映射成 function_call_output item,call_id �
     CHECK(item.at("output") == "依赖: fmt, cpr");
 }
 
+TEST_CASE("富工具结果降级:function_call_output 吃投影文本,artifact 短句明报降级(MCP 富结果单 P0.6)") {
+    Request request;
+    Message user_msg;
+    user_msg.role = Role::User;
+    ToolResultBlock rich;
+    rich.tool_use_id = "call_shot";
+    rich.content = "[图片 art-00112233.png image/png 640x480 2048字节 artifact=mcp-artifacts/art-00112233.png]";
+    lubancode::tools::ImageContent image;
+    image.mime_type = "image/png";
+    image.width = 640;
+    image.height = 480;
+    image.bytes = 2048;
+    image.artifact.filename = "art-00112233.png";
+    image.artifact.path = "mcp-artifacts/art-00112233.png";
+    image.artifact.stored = true;
+    rich.blocks.push_back(std::move(image));
+    rich.structured_content = nlohmann::json{{"sha256", "ab"}};
+    user_msg.content.push_back(rich);
+    request.messages.push_back(user_msg);
+
+    const auto body = BuildRequestJson(request);
+    REQUIRE(body.at("input").size() == 1);
+    const auto& item = body.at("input")[0];
+    CHECK(item.at("type") == "function_call_output");
+    CHECK(item.at("call_id") == "call_shot");
+    // 不假定原生图片输出:投影文本(带 artifact 引用的短句)就是降级口径。
+    CHECK(item.at("output") == rich.content);
+    CHECK(item.dump().find("base64") == std::string::npos);
+}
+
 TEST_CASE("一条 assistant 消息里 text + tool_use 混合,拆成两个 input item") {
     Request request;
     Message assistant_msg;

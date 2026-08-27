@@ -342,6 +342,7 @@ add_library(lubancode_engine STATIC
   src/config/skill_store.cpp
   src/config/plugin_trust.cpp
   src/tools/registry.cpp
+  src/tools/tool_content.cpp  # MCP 富结果:中立内容块/投影/序列化
   src/tools/tool_text.cpp
   src/tools/read_file.cpp
   src/tools/run_command.cpp
@@ -389,6 +390,7 @@ add_library(lubancode_engine STATIC
   src/memory/memory_tool.cpp
   src/mcp/transport.cpp
   src/mcp/client.cpp
+  src/mcp/rich_result.cpp  # MCP 富结果:tools/call 全块型解析与 artifact 落盘
   src/mcp/mcp_tool.cpp
   src/lsp/transport.cpp
   src/lsp/client.cpp

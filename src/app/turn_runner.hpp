@@ -135,6 +135,13 @@ struct TurnContext {
     // 开会话)= 不挂,图片真来了由引擎明败("未接线图片落盘"),不吞图。
     std::string model_images_dir;
 
+    // ---- MCP 富结果单 P0.5:工具二进制 artifact 目录 ----
+    // 会话 artifact 目录(<sessions_dir>/<session-id>/mcp-artifacts)。非空
+    // = 经 TurnWiring.tool_artifact_dir 递给每次工具调用,MCP 返回的图片/
+    // 音频/blob 字节先落这里再入史;空(单发/没开会话)= 富二进制块按稳定
+    // 错误收口,文本结果不受影响。
+    std::string tool_artifact_dir;
+
     // ---- 输入图片前置拦截(MiniCPM5 真机巡检单 P2)----
     // 模型目录与当前模型身份:目录声明纯文本(capabilities.image=false 或
     // input_modalities 只列 text)的模型,带附件(/image、@路径)的输入在

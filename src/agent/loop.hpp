@@ -152,6 +152,13 @@ struct TurnWiring {
     // 同一 item id 只落一回(重复终帧去重),引擎侧管,宿主不用管。
     std::function<std::expected<ModelImageLanding, std::string>(const api::ImageOutput&)> on_model_image;
 
+    // ---- MCP 富结果单 P0.5:工具二进制 artifact 的落盘目录 -----------------
+    // 本轮工具调用共用的会话 artifact 目录(<会话目录>/mcp-artifacts)。
+    // RunOneTool 把它递进 ToolExecutionContext::artifact_dir;MCP 工具返回
+    // 的图片/音频/blob 字节先落这里,history 只留 ArtifactRef。空 = 本轮
+    // 没开落盘地(单测/单发路),富二进制块按稳定错误收口,文本不受影响。
+    std::string tool_artifact_dir;
+
     // ---- Plan 模式(只读研究硬闸单):ModePolicy 硬闸 ------------------------
     // RunOneTool 在 deferred/tool_search 可见性之后、PreToolUse Hook 之前
     // 调它(单子"调用次序":registry find -> deferred visibility -> ModePolicy

@@ -17,6 +17,7 @@
 #include "api/reasoning.hpp"
 
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:消息内容上 wire 前的编码关口
+#include "tools/tool_content.hpp"      // ToolContentBlock:工具结果的富内容块(MCP 富结果单)
 
 namespace lubancode::api {
 
@@ -69,11 +70,17 @@ struct ToolUseBlock {
     nlohmann::json input;  // 工具入参,一个 JSON 对象
 };
 
-// 工具执行完,把结果回传给模型。
+// 工具执行完,把结果回传给模型。MCP 富结果单起 blocks/structured_content
+// 与 payload 同构:blocks 为空 = 旧文本路(一切行为与从前一致);非空 =
+// 富结果,content 是它的 TextProjection(四家 wire 的文本降级、终端显示、
+// token 估算都吃这份投影)。base64 不进这层——图片/音频/资源字节先落
+// 会话 artifact,块里只有 ArtifactRef。
 struct ToolResultBlock {
     std::string tool_use_id;
-    std::string content;
+    std::string content;  // 富结果的文本投影;文本结果就是原文
     bool is_error = false;
+    std::vector<tools::ToolContentBlock> blocks;              // 空 = 纯文本结果
+    std::optional<nlohmann::json> structured_content;  // MCP structuredContent;nullopt = 没给
 };
 
 // 模型的思考过程(extended thinking / reasoning)。text 是思考正文,

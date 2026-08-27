@@ -491,37 +491,37 @@ Tool::Result LuaTool::Run(const nlohmann::json& input, const std::atomic<bool>* 
         case LUA_TSTRING: {
             std::size_t len = 0;
             const char* s = lua_tolstring(lua_, -1, &len);
-            out.content.assign(s, len);
+            out.SetText(std::string(s, len));
             break;
         }
         case LUA_TNUMBER:
             if (lua_isinteger(lua_, -1) != 0) {
-                out.content = std::to_string(static_cast<std::int64_t>(lua_tointeger(lua_, -1)));
+                out.SetText(std::to_string(static_cast<std::int64_t>(lua_tointeger(lua_, -1))));
             } else {
-                out.content = std::to_string(static_cast<double>(lua_tonumber(lua_, -1)));
+                out.SetText(std::to_string(static_cast<double>(lua_tonumber(lua_, -1))));
             }
             break;
         case LUA_TBOOLEAN:
-            out.content = lua_toboolean(lua_, -1) != 0 ? "true" : "false";
+            out.SetText(lua_toboolean(lua_, -1) != 0 ? "true" : "false");
             break;
         case LUA_TTABLE: {
             std::string conv_error;
             const nlohmann::json converted = LuaValueToJson(lua_, -1, 0, conv_error);
             if (!conv_error.empty()) {
-                out.content = "lua 返回的表转不成 JSON: " + conv_error;
+                out.SetText("lua 返回的表转不成 JSON: " + conv_error);
                 out.is_error = true;
             } else {
-                out.content = converted.dump();
+                out.SetText(converted.dump());
             }
             break;
         }
         case LUA_TNIL:
-            out.content = "lua 的 execute 没有返回值(要 return 一个字符串)";
+            out.SetText("lua 的 execute 没有返回值(要 return 一个字符串)");
             out.is_error = true;
             break;
         default:
-            out.content = std::string("lua 的 execute 返回了没法字符串化的类型: ") +
-                          lua_typename(lua_, lua_type(lua_, -1));
+            out.SetText(std::string("lua 的 execute 返回了没法字符串化的类型: ") +
+                        lua_typename(lua_, lua_type(lua_, -1)));
             out.is_error = true;
             break;
     }

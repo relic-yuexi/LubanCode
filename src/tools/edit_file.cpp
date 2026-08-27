@@ -449,7 +449,7 @@ Tool::Result EditFileTool::execute(const nlohmann::json& input) {
     // 逐枚追踪单:undo token(original 是 preimage,updated 是 postimage;
     // 条件式撤销按这对哈希判"其后没人再改")。
     Tool::Result result;
-    result.content = match_mode + "匹配,替换了 " + std::to_string(replaced_count) + " 处: " + path_str;
+    result.SetText(match_mode + "匹配,替换了 " + std::to_string(replaced_count) + " 处: " + path_str);
     result.undo_path = path_str;
     result.undo_preimage_sha256 = hooks::Sha256Hex(original);
     result.undo_postimage_sha256 = hooks::Sha256Hex(updated);

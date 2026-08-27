@@ -749,6 +749,11 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
         };
     }
 
+    // MCP 富结果单 P0.5:工具二进制 artifact 目录——MCP 工具返回的图片/
+    // 音频/blob 字节的落盘地。没开会话就不给,富二进制块由客户端按稳定
+    // 错误收口(明败),不吞字节也不冒充落盘。
+    wiring.tool_artifact_dir = ctx.tool_artifact_dir;
+
     // agent 工具(注册了的话)需要这一轮现算好的转发逻辑:确认回调直接
     // 转发父级那份(三档确认模式照管子代理);usage 累进 usage_stats(统计
     // 行的请求次数、输入输出 token 都要算上子代理那几次请求)但不动
@@ -772,6 +777,9 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
         // nullptr,顶层怎么置位 cancel_flag 都传不进去——子代理会一路跑到
         // 自己的步数上限(max_steps_per_turn)或任务自然完成才停,ESC/Ctrl+C 对它形同虚设。
         hooks.cancel = cancel_flag_ptr;
+        // MCP 富结果单:artifact 目录随派工下发,子代理与主回合落同一份
+        // 会话 artifact 目录。
+        hooks.tool_artifact_dir = wiring.tool_artifact_dir;
         // UI-B:子代理内层工具也走条目样式(前缀缩进四空格),状态同样原地
         // 更新——启动靠 on_sub_tool_start(台账 sink 在事件侧喂),终态靠
         // 下面包了一层的 post_tool 钩子(agent 工具没有单独的"子工具结束"

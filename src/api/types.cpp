@@ -218,6 +218,20 @@ void SanitizeContentBlock(ContentBlock& block) {
             } else if constexpr (std::is_same_v<T, ToolResultBlock>) {
                 b.tool_use_id = platform::SanitizeExternalText(b.tool_use_id);
                 b.content = platform::SanitizeExternalText(b.content);
+                // 富结果(MCP 富结果单 P0.3):块文本与 structuredContent
+                // 同过编码关——server 塞进来的坏串不洗,dump() 当场 316。
+                if (!b.blocks.empty() || b.structured_content.has_value()) {
+                    tools::ToolResultPayload payload;
+                    payload.content = std::move(b.blocks);
+                    payload.structured_content = std::move(b.structured_content);
+                    tools::SanitizePayloadTextInPlace(payload);
+                    // 投影先算再搬走:payload.content move 走之后投影就只剩
+                    // 空壳,缓存会被清成空串。
+                    const std::string projection = tools::TextProjection(payload);
+                    b.blocks = std::move(payload.content);
+                    b.structured_content = std::move(payload.structured_content);
+                    b.content = std::move(projection);
+                }
             } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
                 b.text = platform::SanitizeExternalText(b.text);
                 b.signature = platform::SanitizeExternalText(b.signature);

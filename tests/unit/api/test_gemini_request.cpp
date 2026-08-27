@@ -106,6 +106,43 @@ TEST_CASE("Gemini request: 工具结果正文是 JSON object 就原样用,is_err
     CHECK(failed["response"]["error"] == "炸了");
 }
 
+TEST_CASE("Gemini request: 富工具结果——structuredContent 走原生对象,图片块降级投影文本(MCP 富结果单 P0.6)") {
+    api::Request request;
+    request.model = "m";
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ToolUseBlock{"c1", "browser_screenshot", nlohmann::json::object()});
+    request.messages.push_back(assistant);
+
+    api::Message result_message;
+    result_message.role = api::Role::User;
+    api::ToolResultBlock rich;
+    rich.tool_use_id = "c1";
+    rich.is_error = false;
+    rich.content = "[图片 art-00112233.png image/png 640x480 2048字节 artifact=mcp-artifacts/art-00112233.png]";
+    lubancode::tools::ImageContent image;
+    image.mime_type = "image/png";
+    image.width = 640;
+    image.height = 480;
+    image.bytes = 2048;
+    image.artifact.filename = "art-00112233.png";
+    image.artifact.path = "mcp-artifacts/art-00112233.png";
+    image.artifact.stored = true;
+    rich.blocks.push_back(std::move(image));
+    rich.structured_content = nlohmann::json{{"sha256", "ab"}, {"full_page", false}};
+    result_message.content.push_back(rich);
+    request.messages.push_back(result_message);
+
+    const auto body = api::gemini::BuildRequestJson(request);
+    REQUIRE(body["contents"].size() == 2);
+    const auto& response = body["contents"][1]["parts"][0]["functionResponse"];
+    // structuredContent 原生对象,不绕投影再 parse 一圈。
+    CHECK(response["response"]["sha256"] == "ab");
+    CHECK(response["response"]["full_page"] == false);
+    // 图片本体不假定 inlineData:投影文本里是 artifact 短句(明确降级)。
+    CHECK(response.dump().find("artifact=mcp-artifacts") == std::string::npos);
+}
+
 TEST_CASE("Gemini request: 工具定义收进 functionDeclarations") {
     const auto body = api::gemini::BuildRequestJson(SampleConversation());
     REQUIRE(body["tools"].size() == 1);

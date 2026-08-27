@@ -70,6 +70,10 @@ std::size_t EstimateMessageTokensForPreflight(const api::Message& message) {
                     return EstimateTextTokensForPreflight(b.name) + EstimateTextTokensForPreflight(b.id) +
                            EstimateTextTokensForPreflight(b.input.dump());
                 } else if constexpr (std::is_same_v<T, api::ToolResultBlock>) {
+                    // MCP 富结果单 P0.3:富块的 base64 从不进这层——content
+                    // 是 TextProjection,图片/音频只剩 artifact 短句(文件
+                    // 名+尺寸+MIME+sha),按短文本估就是对的,不许拿 base64
+                    // 长度粗除四冒充视觉 token。
                     return EstimateTextTokensForPreflight(b.tool_use_id) +
                            EstimateTextTokensForPreflight(b.content);
                 } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
@@ -128,7 +132,10 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         if (!platform::IsValidUtf8(result.content)) {
             platform::LogSink::Instance().Warn(
                 "loop", platform::DescribeUtf8Issue("tool_result:" + name, result.content));
-            result.content = platform::SanitizeExternalText(result.content);
+            // 富结果单:payload 的全部文本字段(含 structured JSON)一起洗,
+            // content 投影随之重算——不洗块里的坏串,块进 history 后 dump()
+            // 照样 316。
+            result.SanitizeInPlace();
         }
         if (wiring.events != nullptr) {
             wiring.events->OnToolDone(tool_use_id, name, result, wiring.subordinate_stream);
@@ -392,11 +399,9 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         denied.outcome = ToString(ToolOutcome::HookDenied);
         denied.error_code = kErrHookPreDenied;
         finish(denied, source_kind, source_instance, effect_class);
-        std::string content = denied.content;
         for (const auto& ctx : pre.additional_context) {
-            content += "\n[钩子附注] " + ctx;
+            denied.AppendText("\n[钩子附注] " + ctx);
         }
-        denied.content = std::move(content);
         return dispatch_done(call.id, call.name, std::move(denied));
     }
 
@@ -411,11 +416,9 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
             rejected.outcome = ToString(ToolOutcome::SchemaRejected);
             rejected.error_code = kErrHookUpdatedInputInvalid;
             finish(rejected, source_kind, source_instance, effect_class);
-            std::string content = rejected.content;
             for (const auto& ctx : pre.additional_context) {
-                content += "\n[钩子附注] " + ctx;
+                rejected.AppendText("\n[钩子附注] " + ctx);
             }
-            rejected.content = std::move(content);
             return dispatch_done(call.id, call.name, std::move(rejected));
         }
         effective_input = *pre.updated_input;
@@ -506,12 +509,12 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     // 次"的取消源——SetCancel 灌的是装配层那根(主回合 ESC),子代理的
     // CancelChain 合并旗到不了那里。不肯合作取消的工具无视 context、行为
     // 不变;肯合作的(run_command/Lua/插件)置位即收,不再等到超时。
-    tools::Tool::Result result = tool->execute(effective_input, tools::ToolExecutionContext{cancel});
+    tools::Tool::Result result = tool->execute(effective_input, tools::ToolExecutionContext{cancel, wiring.tool_artifact_dir});
     // PostToolUse(新):结果先清洗成合法 UTF-8 再给钩子;钩子的反馈追加进
     // 模型所见 tool_result,原始结果照旧进审计(副作用已发生,不能撤销,
     // 也不冒充撤销)。旧回调照旧吃它一贯拿到的结果。
     if (!platform::IsValidUtf8(result.content)) {
-        result.content = platform::SanitizeExternalText(result.content);
+        result.SanitizeInPlace();
     }
     // finished 栅栏在 PostToolUse 之前:原始 outcome 与结果正文先落账,
     // Hook 崩溃抹不掉"工具已完成"的事实;钩子追加的文本只进模型所见,
@@ -522,7 +525,7 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         const std::vector<std::string> feedback =
             wiring.on_post_tool_use_hook(call.id, call.name, effective_input, result);
         for (const auto& line : feedback) {
-            result.content += "\n[post-tool-use hook 追加] " + line;
+            result.AppendText("\n[post-tool-use hook 追加] " + line);
         }
     }
     if (wiring.on_post_tool_hook) {
@@ -1213,8 +1216,20 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // 断言式兜底:RunOneTool 出口已经规范化过(见它文件头的信任边界
             // 注释),这里再过一遍 SanitizeUtf8 只为防将来有人在 Run() 之外
             // 绕路改历史——已经合法的内容是原样穿透的空操作。
-            tool_results.push_back(
-                api::ToolResultBlock{call.id, platform::SanitizeUtf8(result.content), result.is_error});
+            // MCP 富结果单:payload 富块与 structuredContent 随投影一起入史
+            // (文本结果 blocks 为空,行为与从前一字不差);投影里图片/音频
+            // 是 artifact 短句,四家 wire 吃它作文本降级。
+            {
+                api::ToolResultBlock block;
+                block.tool_use_id = call.id;
+                block.content = platform::SanitizeUtf8(result.content);
+                block.is_error = result.is_error;
+                if (!result.payload.empty()) {
+                    block.blocks = result.payload.content;
+                    block.structured_content = result.payload.structured_content;
+                }
+                tool_results.push_back(std::move(block));
+            }
             if (cancel != nullptr && cancel->load()) {
                 interrupted = true;
             }

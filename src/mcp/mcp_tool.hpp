@@ -28,6 +28,10 @@ public:
     // idempotent/compensatable,须在装配层显式改,不默认放宽。
     tools::EffectClass effect_class() const override { return tools::EffectClass::RemoteIrreversible; }
     tools::Tool::Result execute(const nlohmann::json& input) override;
+    // MCP 富结果单 P0.5:接 ToolExecutionContext——本轮会话的 artifact 落盘
+    // 目录从这里递给 Client::CallTool(图片/音频/blob 先落盘再入史)。
+    tools::Tool::Result execute(const nlohmann::json& input,
+                                const tools::ToolExecutionContext& context) override;
 
 private:
     Client& client_;

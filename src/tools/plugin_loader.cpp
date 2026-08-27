@@ -80,7 +80,7 @@ Tool::Result PluginTool::execute(const nlohmann::json& input) {
     // 先拷进自己的堆,再立刻交还插件释放——content 是插件那边的堆分配的,
     // 这边绝不 free,也绝不留着指针慢慢用。
     Result out;
-    out.content = raw.content != nullptr ? std::string(raw.content) : std::string();
+    out.SetText(raw.content != nullptr ? std::string(raw.content) : std::string());
     out.is_error = raw.is_error != 0;
     if (def_->free_result != nullptr) {
         def_->free_result(&raw);
