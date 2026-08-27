@@ -416,6 +416,95 @@ TEST_CASE("agent 工具:title 必填——缺失、空白、多行、超宽一�
     CHECK(missing.content.find("title") != std::string::npos);
 }
 
+// ---------------------------------------------------------------------------
+// 缺参明说 + 连败保险(缺 title 无限重试拖死主循环单):必填参数缺失时
+// 错误文案写明哪个字段、示例什么样,模型一遍就能补上;同一回合内同因
+// 参数错连败 3 次明拒收场;新回合(SetHooks 重灌)计数清零,不跨回合记仇。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("agent 工具:缺 title / 缺 prompt 的错误文案写明字段名与示例") {
+    FakeBackend backend;
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    const auto missing_title = agent_tool.execute(nlohmann::json{{"prompt", "查调用链"}});
+    CHECK(missing_title.is_error);
+    CHECK(missing_title.content.find("title") != std::string::npos);        // 字段名
+    CHECK(missing_title.content.find("必填") != std::string::npos);
+    CHECK(missing_title.content.find("示例") != std::string::npos);         // 有示例
+    CHECK(missing_title.content.find("检索构建配置") != std::string::npos);  // 示例内容一眼能抄
+
+    const auto missing_prompt = agent_tool.execute(nlohmann::json{{"title", "查调用链"}});
+    CHECK(missing_prompt.is_error);
+    CHECK(missing_prompt.content.find("prompt") != std::string::npos);
+    CHECK(missing_prompt.content.find("必填") != std::string::npos);
+    CHECK(missing_prompt.content.find("示例") != std::string::npos);
+
+    CHECK(backend.captured_requests.empty());  // 拒在门外,一次请求都没发
+}
+
+TEST_CASE("agent 工具:连败保险——同因参数错第 3 次起明拒,改对后照常受理") {
+    FakeBackend backend;
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    // 前两次缺 title:引导文案(字段 + 示例),不带连败字样。
+    for (int i = 0; i < 2; ++i) {
+        const auto result = agent_tool.execute(nlohmann::json{{"prompt", "查调用链"}});
+        CHECK(result.is_error);
+        CHECK(result.content.find("示例") != std::string::npos);
+        CHECK(result.content.find("连败") == std::string::npos);
+    }
+    // 第三次同样的错:明拒收场——写清重试不会成功与两条出路,但拒绝里仍
+    // 带参数要求(字段 + 示例),不是死胡同。
+    const auto refused = agent_tool.execute(nlohmann::json{{"prompt", "查调用链"}});
+    CHECK(refused.is_error);
+    CHECK(refused.content.find("连败保险") != std::string::npos);
+    CHECK(refused.content.find("重试也不会成功") != std::string::npos);
+    CHECK(refused.content.find("title") != std::string::npos);
+    CHECK(refused.content.find("示例") != std::string::npos);
+    CHECK(backend.captured_requests.empty());  // 三次全拒在门外,模型没被放进去
+
+    // 连败后把 title 补上:照常受理(过检即清账),不祸害后续调用。
+    backend.scripts = {TextOnlyScript("结论")};
+    const auto ok = agent_tool.execute(nlohmann::json{{"title", "查调用链"}, {"prompt", "查"}});
+    CHECK_FALSE(ok.is_error);
+    REQUIRE(backend.captured_requests.size() == 1);
+
+    // 清账后再犯:重新从引导起(第一次不是直接明拒)。
+    const auto fresh = agent_tool.execute(nlohmann::json{{"prompt", "查调用链"}});
+    CHECK(fresh.is_error);
+    CHECK(fresh.content.find("连败") == std::string::npos);
+
+    // 不同原因各自起算:缺 title 连败两次后换成坏 title,拿的仍是引导。
+    const auto bad_title = agent_tool.execute(nlohmann::json{{"title", "两行\n标题"}, {"prompt", "查"}});
+    CHECK(bad_title.is_error);
+    CHECK(bad_title.content.find("连败") == std::string::npos);
+    CHECK(bad_title.content.find("示例") != std::string::npos);
+}
+
+TEST_CASE("agent 工具:连败不跨回合记仇——SetHooks 重灌(新回合)后计数清零") {
+    FakeBackend backend;
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    // 回合一内连败两次(未到明拒线)。
+    (void)agent_tool.execute(nlohmann::json{{"prompt", "查"}});
+    (void)agent_tool.execute(nlohmann::json{{"prompt", "查"}});
+
+    // 新回合:宿主每轮 RunTurn 都重灌 Hooks,连败账随之清零。
+    tools::AgentTool::Hooks fresh_hooks;
+    fresh_hooks.on_sub_tool_start = [](const std::string&, const std::string&, const nlohmann::json&) {};
+    agent_tool.SetHooks(std::move(fresh_hooks));
+
+    // 同样的错误第三次发生:拿的是引导文案(计数从头起),不是明拒。
+    const auto after_new_turn = agent_tool.execute(nlohmann::json{{"prompt", "查"}});
+    CHECK(after_new_turn.is_error);
+    CHECK(after_new_turn.content.find("示例") != std::string::npos);
+    CHECK(after_new_turn.content.find("连败") == std::string::npos);
+    CHECK(backend.captured_requests.empty());
+}
+
 TEST_CASE("agent 工具:title 与 prompt 各司其职——快照只存原样 title,prompt 不上显示名") {
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("结论")};
