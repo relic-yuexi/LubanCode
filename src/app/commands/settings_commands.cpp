@@ -368,6 +368,30 @@ void HandleThinkCommand(const std::string& args, const std::shared_ptr<std::stri
                          const std::vector<std::string>& provider_levels, const std::string& think_param) {
     const std::vector<std::string> hint_lines = lubancode::config::ThinkLevelHintLines(entry);
     const std::string param_name = think_param.empty() ? std::string("reasoning_effort") : think_param;
+    // 思考关不掉的明说(MiniCPM5 真机巡检单 P1):目录声明 always_think/
+    // off_unsupported 的模型,none 档照旧把关闭请求发出去(不硬塞私有模板
+    // 参数),但切换前后都要亮这句——别让状态栏只挂一枚 none 便算数。
+    // 诊断行直接拼字,与落线形状行同一风格,不走 i18n 键。
+    const auto note_off_unsupported = [&entry]() {
+        if (lubancode::config::ClassifyThinkOffDeclaration(entry) !=
+            lubancode::config::ThinkOffDeclaration::DeclaredUnsupported) {
+            return;
+        }
+        TermOut() << "目录声明:此模型思考关不掉(always_think/off_unsupported)。none 档仍会发送关闭请求,"
+                     "但此端点未证实可关,生效与否以 /doctor effort 三回对照为准。\n";
+    };
+    const auto is_none_level = [](const std::string& level) {
+        if (level.size() != std::string("none").size()) {
+            return false;
+        }
+        for (std::size_t i = 0; i < level.size(); ++i) {
+            const char c = static_cast<char>(std::tolower(static_cast<unsigned char>(level[i])));
+            if (c != "none"[i]) {
+                return false;
+            }
+        }
+        return true;
+    };
     if (args.empty()) {
         TermOut() << trf("cmd.think.current",
                          current_think->empty() ? std::string(tr("config.think.unset")) : *current_think)
@@ -386,6 +410,9 @@ void HandleThinkCommand(const std::string& args, const std::shared_ptr<std::stri
             }
         } else {
             TermOut() << tr("cmd.think.unverified") << "\n";
+        }
+        if (is_none_level(*current_think)) {
+            note_off_unsupported();  // "切换前"也明说:当前就挂在 none 上
         }
         TermOut() << tr("cmd.think.doctor_hint") << "\n";
         return;
@@ -419,6 +446,9 @@ void HandleThinkCommand(const std::string& args, const std::shared_ptr<std::stri
                   << "\n";
     } else {
         TermOut() << tr("cmd.think.unverified_send") << "\n";
+    }
+    if (is_none_level(args)) {
+        note_off_unsupported();  // "切换后"明说:切上去这一下就说清
     }
 }
 

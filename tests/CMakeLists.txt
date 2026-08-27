@@ -210,6 +210,14 @@ if(WIN32)
   add_executable(busy_tab_driver EXCLUDE_FROM_ALL manual/busy_tab_driver.cpp)
   target_compile_features(busy_tab_driver PRIVATE cxx_std_23)
 
+  # Esc 取消真机 P50/P95(MiniCPM5-1B 真机巡检单 P1):真 vLLM 长答流式
+  # 期间按 Esc,量 Esc→"[已打断]"与 Esc→"Stopped after"两笔时延,轮末
+  # 验下一轮可续与半截正文保留。端点用环境变量喂(巡检单"现场配置"节),
+  # 不进 ctest,手动跑:
+  #   esc_cancel_driver <lubancode.exe> <子进程工作目录> <报告文件> [轮数 1-5]
+  add_executable(esc_cancel_driver EXCLUDE_FROM_ALL manual/esc_cancel_driver.cpp)
+  target_compile_features(esc_cancel_driver PRIVATE cxx_std_23)
+
   # /clear、provider 切换清屏、ask_user、diff 残色 + 子代理内层工具展示
   # (重复行/紧凑折叠)专用刮屏驱动器,同样不进 ctest,集成验证时手动跑:
   #   fold_dup_clear_driver <lubancode.exe> <工作目录> <报告文件>

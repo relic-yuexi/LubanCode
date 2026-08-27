@@ -255,6 +255,52 @@ ModelEndpointKind ClassifyModelEndpoint(const ModelCatalogEntry* entry, const st
     return ModelEndpointKind::Standard;
 }
 
+ThinkOffDeclaration ClassifyThinkOffDeclaration(const ModelCatalogEntry* entry) {
+    if (entry == nullptr) {
+        return ThinkOffDeclaration::Unknown;
+    }
+    const auto declared_true = [entry](const char* key) {
+        const auto it = entry->capabilities.find(key);
+        return it != entry->capabilities.end() && it->second;
+    };
+    if (declared_true("always_think") || declared_true("off_unsupported")) {
+        return ThinkOffDeclaration::DeclaredUnsupported;
+    }
+    return ThinkOffDeclaration::Unknown;
+}
+
+ImageInputSupport ClassifyImageInputSupport(const ModelCatalogEntry* entry) {
+    if (entry == nullptr) {
+        return ImageInputSupport::Unknown;
+    }
+    // input_modalities 优先:声明了就按它判("text"/["text","image"] 这类)。
+    if (!entry->input_modalities.empty()) {
+        bool has_image = false;
+        bool has_text = false;
+        for (const std::string& modality : entry->input_modalities) {
+            const std::string lowered = ToLowerAscii(modality);
+            if (lowered == "image") {
+                has_image = true;
+            } else if (lowered == "text") {
+                has_text = true;
+            }
+        }
+        if (has_image) {
+            return ImageInputSupport::Multimodal;
+        }
+        if (has_text) {
+            return ImageInputSupport::TextOnly;
+        }
+        return ImageInputSupport::Unknown;  // 列了别的(音频一类),图片算没声明
+    }
+    // capabilities.image:写没写、写真写假,都算明声明;没写 = 不猜。
+    const auto it = entry->capabilities.find("image");
+    if (it == entry->capabilities.end()) {
+        return ImageInputSupport::Unknown;
+    }
+    return it->second ? ImageInputSupport::Multimodal : ImageInputSupport::TextOnly;
+}
+
 const ModelCatalogEntry* ModelCatalog::FindBySlug(const std::string& slug) const {
     for (const auto& entry : models) {
         if (entry.slug == slug) {

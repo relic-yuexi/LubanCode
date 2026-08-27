@@ -310,6 +310,10 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     turn.todo_state = todo_state;
     turn.allow_commands = settings_local.allow_commands;
     turn.deny_commands = settings_local.deny_commands;
+    // 输入图片前置拦截(MiniCPM5 真机巡检单 P2):与交互会话同一道闸。
+    turn.model_catalog = &once_catalog;
+    turn.model_id = config.model;
+    turn.active_provider = bound_provider;
     return RunTurn(std::move(turn)).status;
 }
 

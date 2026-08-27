@@ -147,11 +147,11 @@ foreach ($mode in @('none', 'high')) {
         $thinking = if ($mode -eq 'none') {
             @{type = 'disabled'}
         } else {
-            @{type = 'enabled'; budget_tokens = 64}
+            @{type = 'enabled'; budget_tokens = 256}
         }
         $response = Invoke-JsonPost '/v1/messages' @{
             model = $Model
-            max_tokens = 160
+            max_tokens = 1024
             thinking = $thinking
             messages = @(@{role = 'user'; content = 'Reply only CONTROL_OK.'})
         }
@@ -174,7 +174,7 @@ foreach ($enabled in @($false, $true)) {
     foreach ($run in 1..$Repeats) {
         $response = Invoke-JsonPost '/v1/messages' @{
             model = $Model
-            max_tokens = 160
+            max_tokens = 1024
             chat_template_kwargs = @{enable_thinking = $enabled}
             messages = @(@{role = 'user'; content = 'Reply only TEMPLATE_OK.'})
         }
@@ -277,6 +277,15 @@ $imageResponse = Invoke-JsonPost '/v1/messages' @{
 $findings = @()
 if (@($dialectRows | Where-Object {$_.mode -eq 'none' -and $_.thinking_chars -gt 0}).Count -gt 0) {
     $findings += 'thinking_disabled_ignored'
+}
+# 预算耗尽只判 inconclusive(MiniCPM5 巡检单 P1):stop=max_tokens 且正文 0
+# 的回没有"正文是否产出"的发言权,不得当支持或不支持的证据。
+foreach ($mode in @('none', 'high')) {
+    $modeRows = @($dialectRows | Where-Object {$_.mode -eq $mode})
+    $exhausted = @($modeRows | Where-Object {$_.stop_reason -eq 'max_tokens' -and $_.text_chars -eq 0})
+    if ($modeRows.Count -gt 0 -and $exhausted.Count -eq $modeRows.Count) {
+        $findings += "probe_budget_exhausted_$mode`_inconclusive"
+    }
 }
 if (@($templateRows | Where-Object {$_.enable_thinking -eq $false -and $_.text_chars -eq 0}).Count -eq $Repeats) {
     $findings += 'template_off_returns_no_text'

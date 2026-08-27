@@ -39,6 +39,77 @@ TEST_CASE("BuildEffortProbeRequest: 档位进请求,空串留空,max_tokens 极�
 
     const api::Request unset = app::BuildEffortProbeRequest("qwen-test", "");
     CHECK(unset.reasoning_effort.empty());  // "不填"是正式状态:字段缺席
+
+    // 巡检单 P1:effort 诊断可覆写预算——推理优先模型的思考会先吃满小预算,
+    // 正文压根儿没机会产出,得留足。
+    const api::Request budgeted = app::BuildEffortProbeRequest("qwen-test", "none", app::kEffortProbeBudgetTokens);
+    CHECK(*budgeted.max_tokens == app::kEffortProbeBudgetTokens);
+    CHECK(app::kEffortProbeRepeats >= 3);
+}
+
+TEST_CASE("SummarizeEffortProbeRounds: 四账分开,预算耗尽只判 inconclusive") {
+    SUBCASE("空表:明说未发出") {
+        const auto lines = app::SummarizeEffortProbeRounds({});
+        REQUIRE(lines.size() == 1);
+        CHECK(lines[0].find("未发出") != std::string::npos);
+    }
+    SUBCASE("none 档三回仍产出思考:判词点破关闭未被证实") {
+        std::vector<app::EffortProbeRoundResult> rounds(3);
+        for (auto& r : rounds) {
+            r.http_ok = true;
+            r.thinking_chars = 150;
+            r.text_chars = 40;
+            r.stop_reason = "end_turn";
+        }
+        const auto lines = app::SummarizeEffortProbeRounds(rounds);
+        REQUIRE(lines.size() >= 5);
+        CHECK(lines[0].find("HTTP 接受:3/3") != std::string::npos);
+        CHECK(lines[1].find("thinking 产出:3/3") != std::string::npos);
+        CHECK(lines[2].find("正文产出:3/3") != std::string::npos);
+        CHECK(lines[3].find("end_turn ×3") != std::string::npos);
+        CHECK(lines[4].find("关闭未被端点证实") != std::string::npos);
+    }
+    SUBCASE("预算耗尽(stop=max_tokens 且正文 0)的回不判支持或不支持") {
+        std::vector<app::EffortProbeRoundResult> rounds(3);
+        for (auto& r : rounds) {
+            r.http_ok = true;
+            r.thinking_chars = 64;
+            r.text_chars = 0;
+            r.stop_reason = "max_tokens";
+        }
+        const auto lines = app::SummarizeEffortProbeRounds(rounds);
+        bool saw_exhausted_note = false;
+        bool saw_inconclusive = false;
+        for (const auto& line : lines) {
+            saw_exhausted_note = saw_exhausted_note || line.find("预算耗尽") != std::string::npos;
+            saw_inconclusive = saw_inconclusive || line.find("inconclusive") != std::string::npos;
+        }
+        CHECK(saw_exhausted_note);
+        CHECK(saw_inconclusive);
+    }
+    SUBCASE("部分耗尽:有效回照判,分布把两因都列出来") {
+        std::vector<app::EffortProbeRoundResult> rounds(3);
+        rounds[0] = {true, 200, 0, "max_tokens"};
+        rounds[1] = {true, 0, 60, "end_turn"};
+        rounds[2] = {true, 0, 55, "end_turn"};
+        const auto lines = app::SummarizeEffortProbeRounds(rounds);
+        std::string joined;
+        for (const auto& line : lines) {
+            joined += line + "\n";
+        }
+        CHECK(joined.find("max_tokens ×1") != std::string::npos);
+        CHECK(joined.find("end_turn ×2") != std::string::npos);
+        CHECK(joined.find("有效 2 回") != std::string::npos);
+        CHECK(joined.find("inconclusive") == std::string::npos);  // 有有效回,不整单判挂起
+    }
+    SUBCASE("非 2xx 的回不算 HTTP 接受,终止原因未回单独记账") {
+        std::vector<app::EffortProbeRoundResult> rounds(2);
+        rounds[0] = {true, 0, 30, "end_turn"};
+        rounds[1] = {false, 0, 0, ""};
+        const auto lines = app::SummarizeEffortProbeRounds(rounds);
+        CHECK(lines[0].find("HTTP 接受:1/2") != std::string::npos);
+        CHECK(lines[3].find("(未回) ×1") != std::string::npos);
+    }
 }
 
 TEST_CASE("DescribeRequestEffort: chat wire 四种档位与不填,实际发送值如实报") {
@@ -265,4 +336,40 @@ TEST_CASE("/think 模型目录声明优先于 provider 声明") {
     CHECK(text.find("模型目录声明的档位") != std::string::npos);
     CHECK(text.find("认真想") != std::string::npos);
     CHECK(text.find("provider 声明的档位") == std::string::npos);
+}
+
+TEST_CASE("/think none: 目录声明关不掉时,切换前后都明说未证实可关") {
+    // MiniCPM5 真机巡检单 P1:vLLM 现场三组 disabled 全回非空 thinking——
+    // none 看似可选实则关不掉。目录声明 always_think/off_unsupported 的
+    // 模型,切档与裸敲都要亮"此端点未证实可关",别让状态栏白挂一枚 none。
+    cli::SetLanguage("zh-CN");
+    config::ModelCatalogEntry entry;
+    entry.slug = "MiniCPM5-1B";
+    entry.capabilities["off_unsupported"] = true;
+    auto current_think = std::make_shared<std::string>("high");
+
+    SUBCASE("切换到 none:切上去这一下就说清") {
+        CoutCapture capture;
+        app::HandleThinkCommand("none", current_think, &entry, {}, "");
+        CHECK(capture.text().find("此端点未证实可关") != std::string::npos);
+        CHECK(*current_think == "none");  // 档照切、请求照发,只加明说
+    }
+    SUBCASE("裸敲时已挂在 none:也明说") {
+        *current_think = "none";
+        CoutCapture capture;
+        app::HandleThinkCommand("", current_think, &entry, {}, "");
+        CHECK(capture.text().find("此端点未证实可关") != std::string::npos);
+    }
+    SUBCASE("没声明的模型不啰嗦") {
+        config::ModelCatalogEntry plain;
+        plain.slug = "plain";
+        CoutCapture capture;
+        app::HandleThinkCommand("none", current_think, &plain, {}, "");
+        CHECK(capture.text().find("此端点未证实可关") == std::string::npos);
+    }
+    SUBCASE("非 none 档不提这句") {
+        CoutCapture capture;
+        app::HandleThinkCommand("high", current_think, &entry, {}, "");
+        CHECK(capture.text().find("此端点未证实可关") == std::string::npos);
+    }
 }

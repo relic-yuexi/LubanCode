@@ -25,6 +25,7 @@
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
 #include "cli/terminal_port.hpp"
+#include "config/model_catalog.hpp"
 #include "platform/console.hpp"
 #include "ptc/ptc_tool.hpp"
 #include "runtime/plugin_tool.hpp"
@@ -955,6 +956,21 @@ RunTurnResult RunTurn(TurnContext ctx) {
         TermErr() << theme.error << tr("error.prefix") << ImageInputErrorText(prepared_input.error())
                   << theme.reset << "\n";
         return RunTurnResult{1};
+    }
+    // 能力前置拦截(MiniCPM5 真机巡检单 P2):目录声明纯文本的模型,图片
+    // 附件在发送前拦住——服务端要等到回 500 才说"不是多模态模型",那已经
+    // 晚了。目录没声明 = 未知,允许试探,错误分型那条路照旧兜底。/image
+    // 与 @路径的附件都走这道闸;整轮不发,也不算半截错误轮。
+    if (!prepared_input->attachments.empty() && ctx.model_catalog != nullptr && !ctx.model_id.empty()) {
+        const auto* entry = ctx.model_catalog->FindByProviderAndSlug(ctx.active_provider, ctx.model_id);
+        if (lubancode::config::ClassifyImageInputSupport(entry) ==
+            lubancode::config::ImageInputSupport::TextOnly) {
+            TermErr() << theme.error << tr("error.prefix") << "模型 " << ctx.model_id
+                      << " 在目录里声明为纯文本,不吃图片输入,本轮未发送。"
+                         "要改声明,编辑 ~/.lubancode/models.json 里该条目的 capabilities.image。"
+                      << theme.reset << "\n";
+            return RunTurnResult{1};
+        }
     }
     for (const auto& image : prepared_input->attachments) {
         if (!silent) {

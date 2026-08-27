@@ -38,7 +38,32 @@ namespace lubancode::app {
 
 // Effort 探针请求:极小 max_tokens、固定一句 system、一句要"ok"的 user,
 // reasoning_effort = level(空串 = 探"不发参数"那条路,字段整个缺席)。
-api::Request BuildEffortProbeRequest(const std::string& model, const std::string& level);
+// max_tokens 可覆写:effort 诊断给推理优先模型留足正文预算
+//(kEffortProbeBudgetTokens),64 那档只留给不在乎思考的极小探针。
+api::Request BuildEffortProbeRequest(const std::string& model, const std::string& level,
+                                     std::optional<int> max_tokens = std::nullopt);
+
+// effort 诊断的三回对照(MiniCPM5 真机巡检单 P1):单回 HTTP 2xx 压根儿
+// 不能说档位有效——unset/none/high 三档范围交叠的现场就是明证。每档至少
+// 重复 kEffortProbeRepeats 回,四账分开:HTTP 接受、thinking 是否产出、
+// 正文是否产出、终止原因与分布。探针预算被思考耗尽(stop = max_tokens
+// 且正文 0)只判 inconclusive,不把 text=0 当支持或不支持。
+inline constexpr int kEffortProbeRepeats = 3;
+inline constexpr int kEffortProbeBudgetTokens = 1024;
+
+// 一回探针的收账(纯函数的输入侧):http_ok = HTTP 2xx 且无传输错误。
+struct EffortProbeRoundResult {
+    bool http_ok = false;
+    std::int64_t thinking_chars = 0;
+    std::int64_t text_chars = 0;
+    std::string stop_reason;
+};
+
+// 三回对照的聚合报告(纯函数,单测直接钉):返回若干行人话,依次是
+// HTTP 接受、thinking 产出、正文产出、终止原因分布,末尾跟判词
+//(inconclusive / none 档仍产出思考 / 观察到的事实陈述)。空表 = 调用方
+// 没发探针,返回一行"未发出"。
+std::vector<std::string> SummarizeEffortProbeRounds(const std::vector<EffortProbeRoundResult>& rounds);
 
 // 按当前 wire 把请求体翻出来,报告"实际发送值"一行。chat wire 的参数名听
 // provider 声明(think_param,空 = reasoning_effort);responses 报

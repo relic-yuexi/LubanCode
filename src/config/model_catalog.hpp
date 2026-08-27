@@ -81,6 +81,23 @@ enum class ModelEndpointKind {
 };
 ModelEndpointKind ClassifyModelEndpoint(const ModelCatalogEntry* entry, const std::string& model_id);
 
+// 思考关闭声明(MiniCPM5 真机巡检单 P1):目录条目 capabilities 里的
+// `always_think` 或 `off_unsupported` 任一为真,就声明"这个模型的思考关
+// 不掉"。/think none 照旧把关闭请求发出去(不硬塞私有模板参数),但切换
+// 前后都要明说"此端点未证实可关",别让状态栏只挂一枚 none 便算数。
+// 目录没写这两键 = Unknown,不猜。
+enum class ThinkOffDeclaration { Unknown, DeclaredUnsupported };
+ThinkOffDeclaration ClassifyThinkOffDeclaration(const ModelCatalogEntry* entry);
+
+// 图片输入能力(MiniCPM5 真机巡检单 P2):input_modalities 与 capabilities
+// 合判。声明了吃图(text/image 列表含 image,或 capabilities.image = true)
+// = Multimodal;声明了纯文本(input_modalities 只有 text,或
+// capabilities.image = false)= TextOnly——/image 与 @路径的附件在发送前
+// 拦住,等服务端回 500 就晚了。目录没声明 = Unknown,允许试探(发送后
+// 由服务端错误分型兜底)。audio 键同法可查,留给音频路接线时用。
+enum class ImageInputSupport { Unknown, TextOnly, Multimodal };
+ImageInputSupport ClassifyImageInputSupport(const ModelCatalogEntry* entry);
+
 // 整份目录。source_path 空串 = 磁盘上没有这份文件(空目录,不算错)。
 // warnings 是解析时跳过的坏东西,一条一句人话,启动时打给用户看。
 struct ModelCatalog {
