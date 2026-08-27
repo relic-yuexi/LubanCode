@@ -52,6 +52,11 @@ public:
     RecoveryCapability recovery_capability() const override { return inner_->recovery_capability(); }
     std::string version_or_digest() const override { return inner_->version_or_digest(); }
     Result execute(const nlohmann::json& input) override { return inner_->execute(input); }
+    // 取消旗透传内层(子代理 x 停止失效单):包装不许把 context 洗掉——
+    // 延迟挂载只是工具表策略,取消源仍要跟到真执行的那枚工具。
+    Result execute(const nlohmann::json& input, const ToolExecutionContext& context) override {
+        return inner_->execute(input, context);
+    }
 
 private:
     std::unique_ptr<Tool> inner_;

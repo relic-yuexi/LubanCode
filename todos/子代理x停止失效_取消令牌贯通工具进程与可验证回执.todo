@@ -1,6 +1,21 @@
 # 子代理 `x` 停止失效：取消令牌贯通工具、进程与可验证回执
 
-状态：待做（2026-08-23，用户真机反馈：代理坞写着 `x 停止/清除`，实际按下后
+状态：主体已落（2026-08-27，取消贯通＋回执批次）。骨架拆解批三把 CancelChain
+收成一根后重核：按键→置旗→轮间查旗→backend 这几环原本就通，真断点在
+RunOneTool 不收 cancel、Tool::execute 无取消口；run_command 的取消只认装配层
+灌的共享实例指针（子代理的合并旗到不了，多只后台并跑还会互相踩），Windows
+前台 PowerShell 路径更写死 cancel=nullptr（主回合 ESC 都杀不掉默认 shell 的
+命令）。本批修：ToolExecutionContext（带 cancel）接进 RunOneTool，
+run_command/Lua/插件与四枚转发壳（DeferredTool/私有 todo 壳/AgentDispatchTool/
+BaseDirTool）全接通；按下 x 即有 toast 回执，行显"停止中"，收口后
+"停下 · 用户中止"（单测 test_tool_cancel_context＋集成真进程收树＋
+agent_panel_driver x 幕钉死）。剩余未做：按键提示条件化（P0 第一条）、
+CancellationToken/Reason 原语（P1，现仍裸 atomic 指针）、工具 cancel
+capability 分档公开、ask_user broker 取消、MCP 协议级取消、/agent 详情的
+停止链时间戳、后台命令 ownership 裁决（现维持：后台命令归会话台账，子代理
+停止不连坐）。
+
+原始反馈（2026-08-23，用户真机：代理坞写着 `x 停止/清除`，实际按下后
 子代理停不住，看着像摆设）
 
 ## 一句话

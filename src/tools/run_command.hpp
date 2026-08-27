@@ -29,6 +29,10 @@ public:
     nlohmann::json input_schema() const override;
     bool needs_confirm() const override { return true; }
     Result execute(const nlohmann::json& input) override;
+    // 子代理 x 停止失效单:取消旗随调用递进——共享实例上的 cancel_ 只认
+    // 装配层那根(主回合 ESC),子代理的 CancelChain 合并旗(面板 x/墙钟)
+    // 从 context 走。两根都在时 context 优先,SetCancel 兜底(单测直调)。
+    Result execute(const nlohmann::json& input, const ToolExecutionContext& context) override;
 
     // 进程生命线单(P1:前台取消通道):ESC 取消链。turn_runner 每轮灌
     //(与插件的 SetPluginCancel 同一条链)。置位后前台命令的等待循环每拍
@@ -37,6 +41,10 @@ public:
     void SetCancel(const std::atomic<bool>* cancel) { cancel_ = cancel; }
 
 private:
+    // 公共实现:effective_cancel 是本调用真用的取消旗(execute 两个口各算
+    // 各的)。置位即收整棵进程树,结果分型 cancelled(与超时分开记账)。
+    Result Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel);
+
     const std::atomic<bool>* cancel_ = nullptr;
 };
 

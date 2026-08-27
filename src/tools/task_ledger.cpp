@@ -199,6 +199,7 @@ std::vector<AgentTaskSnapshot> TaskLedger::Snapshots(std::size_t max_entries) co
         snapshot.activity.reasoning_chars = tools::CountUtf8Codepoints(task->pending_reasoning);
         snapshot.activity.text_chars = tools::CountUtf8Codepoints(task->pending_text);
         snapshot.content_revision = task->content_revision;
+        snapshot.stop_requested = task->cancel.load(std::memory_order_acquire);
         return snapshot;
     };
     if (max_entries == 0 || tasks_.size() <= max_entries) {
@@ -247,6 +248,9 @@ std::vector<AgentTaskSummary> TaskLedger::Summaries() const {
         summary.prompt = task->snapshot.prompt;
         summary.foreground = task->snapshot.foreground;
         summary.state = task->snapshot.state;
+        // 停止回执(子代理 x 停止失效单):x 已置 cancel 而 state 还在
+        // Running——面板行据此显"停止中",不冒充也没静默。终态后不再置位。
+        summary.stop_requested = task->cancel.load(std::memory_order_acquire);
         summary.step_limit = task->snapshot.step_limit;
         summary.steps_used = task->snapshot.steps_used;
         summary.outcome_reason = task->snapshot.outcome.reason;
@@ -283,6 +287,7 @@ std::optional<AgentTaskSnapshot> TaskLedger::Detail(int task_id) const {
             snapshot.activity.reasoning_chars = tools::CountUtf8Codepoints(task->pending_reasoning);
             snapshot.activity.text_chars = tools::CountUtf8Codepoints(task->pending_text);
             snapshot.content_revision = task->content_revision;
+            snapshot.stop_requested = task->cancel.load(std::memory_order_acquire);
             return snapshot;
         }
     }

@@ -98,6 +98,7 @@ public:
     nlohmann::json input_schema() const override;
     bool needs_confirm() const override { return false; }
     Result execute(const nlohmann::json& input) override;
+    Result execute(const nlohmann::json& input, const ToolExecutionContext& context) override;
 
 private:
     AgentTool& target_;
@@ -335,6 +336,10 @@ public:
     nlohmann::json input_schema() const override;
     bool needs_confirm() const override { return false; }  // 子代理内部的危险工具各自有确认关
     Result execute(const nlohmann::json& input) override;
+    // 子代理自带 CancelChain(面板 x/父轮 ESC/墙钟在 RunTask 里并根),外层
+    // 递进来的取消旗不另开旁路——using 把基类的 context 口带进重载集,
+    // AgentDispatchTool 等转发壳递 (input, context) 时走基类默认适配。
+    using Tool::execute;
 
 private:
     // background_hooks:后台任务的只读 hooks 会话(LaunchBackground 在主线程

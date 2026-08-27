@@ -109,6 +109,10 @@ public:
     // tool_search 的账就错了)。
     bool deferred() const override { return target_.deferred(); }
     Result execute(const nlohmann::json& input) override { return target_.execute(input); }
+    // 取消旗透传(子代理 x 停止失效单):包装不许洗掉 context。
+    Result execute(const nlohmann::json& input, const ToolExecutionContext& context) override {
+        return target_.execute(input, context);
+    }
 
 private:
     Tool& target_;
@@ -1826,5 +1830,10 @@ std::string AgentDispatchTool::name() const { return "agent"; }
 std::string AgentDispatchTool::description() const { return target_.description(); }
 nlohmann::json AgentDispatchTool::input_schema() const { return target_.input_schema(); }
 tools::Tool::Result AgentDispatchTool::execute(const nlohmann::json& input) { return target_.execute(input); }
+// 取消旗透传:壳不许洗 context(AgentTool 侧另有自己的 CancelChain,外层
+// 旗照旧经 Hooks.cancel 汇进去,这里只是不让链路在壳上断)。
+tools::Tool::Result AgentDispatchTool::execute(const nlohmann::json& input, const ToolExecutionContext& context) {
+    return target_.execute(input, context);
+}
 
 }  // namespace lubancode::tools

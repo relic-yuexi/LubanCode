@@ -24,7 +24,19 @@ public:
     bool needs_confirm() const override { return inner_.needs_confirm(); }
     bool deferred() const override { return inner_.deferred(); }
 
-    Result execute(const nlohmann::json& input) override {
+    Result execute(const nlohmann::json& input) override { return inner_.execute(PatchPaths(input)); }
+
+    // 取消旗透传(子代理 x 停止失效单):隔离房里的 run_command 就是靠这层
+    // 壳挂进子代理工具表的——壳不透传 context,房内命令的进程树就收不到
+    // 停止信号。改写后的入参与旧口同一份(PatchPaths),只多递一根旗。
+    Result execute(const nlohmann::json& input, const ToolExecutionContext& context) override {
+        return inner_.execute(PatchPaths(input), context);
+    }
+
+private:
+    // 相对路径按房解析、run_command 缺 cwd 注入房目录:两个执行口共用的
+    // 改写半边(原先内联在 execute 里)。
+    nlohmann::json PatchPaths(const nlohmann::json& input) const {
         nlohmann::json patched = input;
         const std::string inner_name = inner_.name();
         if (inner_name == "read_file" || inner_name == "write_file" || inner_name == "edit_file" ||
@@ -41,10 +53,9 @@ public:
                 patched["cwd"] = scope_.base_dir;
             }
         }
-        return inner_.execute(patched);
+        return patched;
     }
 
-private:
     Tool& inner_;
     IsolationScope scope_;
 };

@@ -83,6 +83,10 @@ public:
     bool needs_confirm() const override { return true; }
     bool deferred() const override { return true; }  // tool_search:外挂工具走延迟挂载
     Result execute(const nlohmann::json& input) override;
+    // 子代理 x 停止失效单:取消旗随调用递进(context 优先,SetCancel 兜底)
+    // ——共享注册表里的 Lua 工具会被多只并跑的子代理同时调,取消源必须跟
+    // 着调用走,不能存成实例态互相踩。
+    Result execute(const nlohmann::json& input, const ToolExecutionContext& context) override;
 
     const std::string& stem() const { return stem_; }
     const LuaProfile& profile() const { return profile_; }
@@ -93,6 +97,9 @@ public:
 
 private:
     LuaTool() = default;
+
+    // 公共实现:effective_cancel 是本调用真用的取消旗(灌进 guard 的就是它)。
+    Result Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel);
 
     lua_State* lua_ = nullptr;
     int execute_ref_ = -1;  // execute 函数在 lua 注册表里的引用

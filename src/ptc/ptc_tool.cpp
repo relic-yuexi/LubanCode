@@ -244,12 +244,15 @@ tools::Tool::Result PtcTool::execute(const nlohmann::json& input) {
     options.limits = config_.limits;
     options.cancel = hooks.cancel;
     options.restricted_token = config_.restricted_token;
-    options.executor = [this, &chain](const std::string& tool_name, const nlohmann::json& tool_input) {
+    options.executor = [this, &chain, cancel = hooks.cancel](const std::string& tool_name,
+                                                            const nlohmann::json& tool_input) {
         api::ToolUseBlock call;
         call.id = "ptc-" + std::to_string(++call_seq_);
         call.name = tool_name;
         call.input = tool_input;
-        return agent::RunOneTool(registry_, call, chain, tool_filter_);
+        // 取消旗递进 stub 调用(子代理 x 停止失效单):runner 收 python 树的
+        // 同时,内层 run_command/插件也拿到同一根,各自收子进程。
+        return agent::RunOneTool(registry_, call, chain, tool_filter_, std::string(), nullptr, cancel);
     };
 
     const auto result = PtcRunner::Run(script, stub.python_source, std::move(options));

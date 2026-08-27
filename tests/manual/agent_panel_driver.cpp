@@ -503,6 +503,36 @@ int wmain(int argc, wchar_t** argv) {
     SendKey(VK_ESCAPE, 0, 0);
     WaitForTextGone("\xe2\x9d\xaf", 3000);
 
+    // ---- x 停止回执(子代理 x 停止失效单):按键不再像死键 ----
+    // 选到一只运行中的演示代理(❯ 与"运行中"同行),按 x:演示代理不在真
+    // 台账里,如实回"#N 已不在运行,未发停止信号";回执行挂在提示行下,
+    // 两秒窗口过后自收,残帧账不脏。真任务的"停止中/已停止"回执由
+    // test_tool_cancel_context 单测钉,这里钉的是真控制台上的可见回执。
+    {
+        bool focused_running = false;
+        for (int i = 0; i < 10 && !focused_running; ++i) {
+            SendKey(VK_DOWN, 0, 0);
+            Sleep(150);
+            const int mark_row = FindLastRow("\xe2\x9d\xaf");  // ❯
+            if (mark_row >= 0 &&
+                ReadRow(mark_row).find("\xe8\xbf\x90\xe8\xa1\x8c\xe4\xb8\xad") != std::string::npos) {  // 运行中
+                focused_running = true;
+            }
+        }
+        Check(focused_running, "x 回执:焦点落在一只运行中的演示代理上");
+        if (focused_running) {
+            SendText("x");
+            Check(WaitForText("\xe5\xb7\xb2\xe4\xb8\x8d\xe5\x9c\xa8\xe8\xbf\x90\xe8\xa1\x8c", 3000),
+                  "x 回执:提示行下挂出'#N 已不在运行'回执行");  // 已不在运行
+            Check(WaitForTextGone("\xe5\xb7\xb2\xe4\xb8\x8d\xe5\x9c\xa8\xe8\xbf\x90\xe8\xa1\x8c", 6000),
+                  "x 回执:两秒窗口过后自收");  // 已不在运行
+            Check(DockLedgerClean(ComposerTopRuleNow()), "x 回执后:残帧账干净");
+        }
+        SendKey(VK_ESCAPE, 0, 0);
+        WaitForTextGone("\xe2\x9d\xaf", 3000);
+    }
+
+
     // ---- Ctrl+L:草稿/选择保住,重复行归零 ----
     SendKey(VK_DOWN, 0, 0);
     WaitForText("\xe2\x9d\xaf", 3000);

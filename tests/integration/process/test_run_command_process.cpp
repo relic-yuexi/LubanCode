@@ -834,3 +834,91 @@ TEST_CASE("run_command(Windows): shell=pwsh 装了就真用 pwsh 7") {
 }
 
 #endif  // _WIN32
+
+// ---------------------------------------------------------------------------
+// 子代理 x 停止失效单:取消令牌贯通工具进程的真进程钉子。
+// ---------------------------------------------------------------------------
+
+#ifdef _WIN32
+TEST_CASE("run_command(Windows): 默认 shell(powershell)前台命令带 cancel 旗,置位即收树") {
+    RunCommandTool tool;
+    std::atomic<bool> cancel_flag{false};
+    tool.SetCancel(&cancel_flag);
+
+    // 1 秒后另一线程置取消旗;命令本身要跑 30 秒。这条路径从前写死
+    // /*cancel=*/nullptr(单子逮出的断点):ESC/面板 x 都只能等超时。
+    std::thread setter([&cancel_flag] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        cancel_flag.store(true);
+    });
+
+    nlohmann::json input;
+    input["command"] = "Start-Sleep -Seconds 30";
+    input["timeout_ms"] = 60000;
+    const auto started = std::chrono::steady_clock::now();
+    const Tool::Result result = tool.execute(input);
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    setter.join();
+
+    CHECK(result.is_error);
+    CHECK(result.content.find("取消") != std::string::npos);
+    CHECK(result.outcome == "cancelled_during_run");
+    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 15000);
+}
+#endif  // _WIN32
+
+TEST_CASE("run_command: 取消旗从 ToolExecutionContext 递进(SetCancel 没灌也收得到)") {
+    // 子代理的取消源(CancelChain 合并旗)随调用走 context,不落共享实例
+    // ——实例上没灌 SetCancel 时,context.cancel 就是唯一的旗。
+    RunCommandTool tool;  // 不 SetCancel:实例指针空
+    std::atomic<bool> cancel_flag{false};
+
+    std::thread setter([&cancel_flag] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1000));
+        cancel_flag.store(true);
+    });
+
+    nlohmann::json input;
+#ifdef _WIN32
+    input["command"] = "ping -n 30 127.0.0.1 > NUL";
+    input["shell"] = "cmd";
+#else
+    input["command"] = "sleep 30";
+#endif
+    input["timeout_ms"] = 60000;
+    const auto started = std::chrono::steady_clock::now();
+    const Tool::Result result = tool.execute(input, lubancode::tools::ToolExecutionContext{&cancel_flag});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+    setter.join();
+
+    CHECK(result.is_error);
+    CHECK(result.content.find("取消") != std::string::npos);
+    CHECK(result.outcome == "cancelled_during_run");
+    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 15000);
+}
+
+TEST_CASE("run_command: context 的取消旗置位时压过实例那根(context 优先)和超时墙") {
+    // 两根都在时 context 优先:实例旗(主回合 ESC)没置、context 旗(子代理
+    // 合并旗)置位,按 context 收——共享实例不该把子代理的停止信号顶掉。
+    std::atomic<bool> instance_flag{false};
+    std::atomic<bool> context_flag{true};  // 进工具前就已置位
+    RunCommandTool tool;
+    tool.SetCancel(&instance_flag);
+
+    nlohmann::json input;
+#ifdef _WIN32
+    input["command"] = "ping -n 30 127.0.0.1 > NUL";
+    input["shell"] = "cmd";
+#else
+    input["command"] = "sleep 30";
+#endif
+    input["timeout_ms"] = 60000;  // 超时墙足够远
+    const auto started = std::chrono::steady_clock::now();
+    const Tool::Result result = tool.execute(input, lubancode::tools::ToolExecutionContext{&context_flag});
+    const auto elapsed = std::chrono::steady_clock::now() - started;
+
+    CHECK(result.is_error);
+    CHECK(result.outcome == "cancelled_during_run");
+    CHECK(std::chrono::duration_cast<std::chrono::milliseconds>(elapsed).count() < 15000);
+}
+

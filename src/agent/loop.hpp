@@ -252,9 +252,14 @@ public:
 // "尚未挂载"说法;Explore 这类角色限制的调用方另给一句写明"角色限制"
 // 的文案——限制须来自角色并看得见,不许含糊成"子代理无权限"(规格)。
 // trace:逐枚追踪的执行上下文;nullptr = 不追踪(旧行为)。
+// cancel:本次调用的取消旗(子代理 x 停止失效单:贯通到工具进程)。经
+// ToolExecutionContext 递进 execute;肯合作取消的工具(run_command 收进程
+// 树、Lua 掐指令钩子)置位即收,不肯的照旧等它跑完——不硬杀线程。null =
+// 没有取消源(旧调用方),行为与从前一字不差。
 tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const TurnWiring& wiring,
                                 const std::function<bool(const tools::Tool&)>& tool_filter,
                                 const std::string& filter_denial = std::string(),
-                                const ToolTraceContext* trace = nullptr);
+                                const ToolTraceContext* trace = nullptr,
+                                const std::atomic<bool>* cancel = nullptr);
 
 }  // namespace lubancode::agent
