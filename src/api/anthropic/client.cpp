@@ -36,7 +36,35 @@ json ContentBlockToJson(const ContentBlock& block) {
             } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
                 return json{{"type", "tool_use"}, {"id", b.id}, {"name", b.name}, {"input", b.input}};
             } else if constexpr (std::is_same_v<T, ToolResultBlock>) {
-                json j{{"type", "tool_result"}, {"tool_use_id", b.tool_use_id}, {"content", b.content}};
+                // 工具结果图片回喂(协议原生):tool_result 的 content 可以是
+                // 块数组,内嵌 image 块——出处 platform.claude.com/docs/en/
+                // agents-and-tools/tool-use/implement-tool-use("content ...
+                // a list of nested content blocks ... can use the text, image,
+                // or document types");computer use 的截图回喂就是走这条路。
+                // 上限(vision 文档):单图 10MB base64、8000x8000、四 MIME,
+                // 重灌侧的帽(5MiB/8000px)比它更紧,这里不再复查。
+                // wire_base64 非空(重灌成功)才上数组,文本投影放第一块;
+                // 空则走旧字符串投影——与未重灌的从前逐字节一致,老钉子不红。
+                json images = json::array();
+                for (const auto& rich : b.blocks) {
+                    if (const auto* image = std::get_if<tools::ImageContent>(&rich);
+                        image != nullptr && !image->wire_base64.empty()) {
+                        images.push_back(json{
+                            {"type", "image"},
+                            {"source", json{{"type", "base64"},
+                                             {"media_type", image->mime_type},
+                                             {"data", image->wire_base64}}}});
+                    }
+                }
+                json j{{"type", "tool_result"}, {"tool_use_id", b.tool_use_id}};
+                if (images.empty()) {
+                    j["content"] = b.content;
+                } else {
+                    json content = json::array();
+                    content.push_back(json{{"type", "text"}, {"text", b.content}});
+                    content.insert(content.end(), images.begin(), images.end());
+                    j["content"] = std::move(content);
+                }
                 if (b.is_error) {
                     j["is_error"] = true;
                 }

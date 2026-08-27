@@ -51,6 +51,47 @@ TEST_CASE("富工具结果降级: tool_result 的 content 走投影文本,base64
     CHECK(wire_result.dump().find("base64") == std::string::npos);
 }
 
+TEST_CASE("工具结果图片回喂: 重灌过的图上原生 image 块,content 变块数组(工具结果图片回喂单)") {
+    api::Request request;
+    request.model = "m";
+    request.max_tokens = 100;
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ToolUseBlock{"toolu_shot", "gui_screenshot", nlohmann::json::object()});
+    api::Message user_msg;
+    user_msg.role = api::Role::User;
+    api::ToolResultBlock rich;
+    rich.tool_use_id = "toolu_shot";
+    rich.content = "已截图 640x480,证据文件落 gui-obs-1.png";
+    lubancode::tools::ImageContent image;
+    image.mime_type = "image/png";
+    image.width = 640;
+    image.height = 480;
+    image.bytes = 9;
+    image.wire_base64 = "iVBORw0KGgo=";  // 重灌产物(恳求态)
+    image.artifact.filename = "art-00112233.png";
+    image.artifact.path = "mcp-artifacts/art-00112233.png";
+    image.artifact.stored = true;
+    rich.blocks.push_back(std::move(image));
+    user_msg.content.push_back(rich);
+    request.messages.push_back(assistant);
+    request.messages.push_back(user_msg);
+
+    const auto body = lubancode::api::anthropic::BuildRequestJson(request);
+    const auto& wire_result = body.at("messages")[1].at("content")[0];
+    CHECK(wire_result.at("type") == "tool_result");
+    // content 是块数组:第一块文本投影,第二块原生 image(base64 source)。
+    REQUIRE(wire_result.at("content").is_array());
+    REQUIRE(wire_result.at("content").size() == 2);
+    CHECK(wire_result.at("content")[0].at("type") == "text");
+    CHECK(wire_result.at("content")[0].at("text") == rich.content);
+    const auto& wire_image = wire_result.at("content")[1];
+    CHECK(wire_image.at("type") == "image");
+    CHECK(wire_image.at("source").at("type") == "base64");
+    CHECK(wire_image.at("source").at("media_type") == "image/png");
+    CHECK(wire_image.at("source").at("data") == "iVBORw0KGgo=");
+}
+
 TEST_CASE("原始 think 兼容门只认 thinking+tool_use 紧接 tool_result") {
     api::Request request;
     request.messages = {

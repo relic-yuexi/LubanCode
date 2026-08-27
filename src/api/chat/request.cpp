@@ -146,9 +146,18 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
             }
             for (const auto& block : message.content) {
                 if (const auto* result = std::get_if<ToolResultBlock>(&block)) {
+                    // 工具结果图片:chat completions 的 tool 消息 content 只有
+                    // 字符串一档(image_url 部件只在 user 消息有文档背书,
+                    // 见 developers.openai.com/api/reference/resources/chat/
+                    // subresources/completions/methods/create 的 role:tool 条
+                    // 目;社区同口径 community.openai.com/t/gpt4-o-support-
+                    // for-image-urls-as-tool-responses/907546)。不硬造数组
+                    // 协议——图片字节不出门,追加一行明降级附注指路落盘
+                    // 路径;没有图片块的结果一个字节不加,老钉子不红。
+                    std::string content = result->content + ToolResultImageDegradedNote(*result);
                     messages.push_back(json{{"role", "tool"},
                                             {"tool_call_id", result->tool_use_id},
-                                            {"content", result->content}});
+                                            {"content", std::move(content)}});
                 }
             }
             continue;

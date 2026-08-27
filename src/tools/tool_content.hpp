@@ -45,7 +45,7 @@ struct TextContent {
 };
 
 // 工具返回的图片(MCP type=image)。字节已验身(魔数)落 artifact,这里
-// 只有元数据与引用;不存 base64。
+// 只有元数据与引用;durable history 不存 base64。
 struct ImageContent {
     std::string mime_type;  // 魔数复核后的 MIME(image/png 等)
     std::uint32_t width = 0;
@@ -53,6 +53,14 @@ struct ImageContent {
     std::size_t bytes = 0;
     std::string sha256;
     ArtifactRef artifact;
+
+    // 恳求态(transient):工具结果图片回喂单立的字段——发请求前由
+    // agent::RehydrateToolResultImages 从 artifact 落盘把字节读回来、
+    // 编成 base64(不带 data: 前缀)填在这里,四家 wire 据此上原生图块。
+    // 只活在请求副本上:durable history、会话存档(BlockToJson)、
+    // resume 重放一概不落这个字段——历史里永远是引用,字节每轮现灌。
+    // 空串 = 字节没随行(未重灌/超帽/文件丢了),wire 走文本投影降级。
+    std::string wire_base64;
 
     bool operator==(const ImageContent&) const = default;
 };

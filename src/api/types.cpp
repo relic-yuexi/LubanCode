@@ -14,6 +14,25 @@ std::string LowerReasoningEffort(std::string effort) {
     return effort;
 }
 
+std::string ToolResultImageDegradedNote(const ToolResultBlock& result) {
+    std::size_t count = 0;
+    std::string names;
+    for (const auto& block : result.blocks) {
+        if (const auto* image = std::get_if<tools::ImageContent>(&block); image != nullptr) {
+            ++count;
+            if (!names.empty()) {
+                names += "、";
+            }
+            names += image->artifact.filename;
+        }
+    }
+    if (count == 0) {
+        return std::string();
+    }
+    return "[wire 降级] 该 wire 不支持工具结果图片," + std::to_string(count) +
+           " 张未随行,字节已存盘: " + names;
+}
+
 bool ReasoningEffortIsOff(const std::string& effort) {
     const std::string lower = LowerReasoningEffort(effort);
     return lower == "none" || lower == "minimal";

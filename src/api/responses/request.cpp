@@ -48,9 +48,32 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
                                                                                        : "output_text"},
                                                        {"text", ModelImageReplayText(b)}}})}};
             } else {
-                return json{{"type", "function_call_output"},
-                            {"call_id", b.tool_use_id},
-                            {"output", b.content}};
+                // 工具结果图片回喂(协议原生):function_call_output.output
+                // 可为 "an array of image or file objects instead of a
+                // string"——出处 platform.openai.com/docs/guides/
+                // function-calling("Formatting results");数组元素与 user
+                // 消息的输入部件同形(input_text 在前、input_image 的
+                // image_url 吃 data: URL)。wire_base64 非空才上数组;
+                // 空则照旧字符串投影,老钉子不红。
+                json images = json::array();
+                for (const auto& rich : b.blocks) {
+                    if (const auto* image = std::get_if<tools::ImageContent>(&rich);
+                        image != nullptr && !image->wire_base64.empty()) {
+                        images.push_back(json{{"type", "input_image"},
+                                              {"image_url", "data:" + image->mime_type + ";base64," +
+                                                                image->wire_base64}});
+                    }
+                }
+                json item{{"type", "function_call_output"}, {"call_id", b.tool_use_id}};
+                if (images.empty()) {
+                    item["output"] = b.content;
+                } else {
+                    json output = json::array();
+                    output.push_back(json{{"type", "input_text"}, {"text", b.content}});
+                    output.insert(output.end(), images.begin(), images.end());
+                    item["output"] = std::move(output);
+                }
+                return item;
             }
         },
         block);
