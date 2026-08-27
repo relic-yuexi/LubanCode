@@ -715,7 +715,17 @@ const TOOLS = [
       const timeoutMs = callTimeout(input);
       const page = target.entry.page;
       if (input.for_text) {
-        await withDeadline(page.waitForSelector('text=' + JSON.stringify(String(input.for_text)), { timeout: timeoutMs }), timeoutMs, '等文本 "' + input.for_text + '"');
+        // waitForSelector 自身的超时给宽一拍(墙钟先到先收口);它偶发的
+        // 非超时错(页面忙/上下文换新)也按等待未成口径收口,不抖成
+        // internal_error——等待失败对调用方就是一个语义:没等到。
+        try {
+          await withDeadline(
+            page.waitForSelector('text=' + JSON.stringify(String(input.for_text)), { timeout: timeoutMs + 5000 }),
+            timeoutMs, '等文本 "' + input.for_text + '"');
+        } catch (error) {
+          if (error instanceof BrowserError) throw error;
+          throw toolError('browser.timeout', '等文本 "' + input.for_text + '" 在 ' + timeoutMs + 'ms 内没等到(' + describeError(error) + '),当前 ' + page.url());
+        }
         return textResult('文本已出现: ' + input.for_text, pageMeta(target.id, page, target.entry, { waited_for: 'text' }));
       }
       if (input.url_contains) {
