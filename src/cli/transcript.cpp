@@ -88,7 +88,135 @@ std::string TruncateWithEllipsis(const std::string& utf8, int max_width) {
     return TruncateUtf8ToDisplayWidth(utf8, max_width - 3) + "...";
 }
 
+// 思考露尾排版的家伙什(见 ThinkingPreviewRows)。
+// 预览正文的一个码点要不要留:C0 控制字符(含 ESC)与 DEL 全剔——
+// provider 传来的转义不能改色、挪光标、清屏;TAB 折成一空格,其余可见
+// 码点照留。ESC 序列整段跳过由 SanitizePreviewLine 管(这里只看单点)。
+inline bool PreviewKeepsCodepoint(char32_t cp) {
+    if (cp == U'\t') {
+        return true;
+    }
+    return cp >= 0x20 && cp != 0x7F;
+}
+
+// 剥 ANSI/控制字符:ESC 起的转义序列(CSI 参数串到终结字节为止)整段丢,
+// 其余控制码点剔除、TAB 折空格。产出可直接折行的纯可见文本。
+inline std::u32string SanitizePreviewLine(const std::u32string& line) {
+    std::u32string out;
+    out.reserve(line.size());
+    bool in_escape = false;
+    for (const char32_t cp : line) {
+        if (in_escape) {
+            // CSI/简单转义的终结字节是 0x40~0x7E(@..~);到了就收班。
+            if (cp >= 0x40 && cp <= 0x7E) {
+                in_escape = false;
+            }
+            continue;
+        }
+        if (cp == 0x1B) {
+            in_escape = true;
+            continue;
+        }
+        if (!PreviewKeepsCodepoint(cp)) {
+            continue;
+        }
+        out.push_back(cp == U'\t' ? U' ' : cp);
+    }
+    return out;
+}
+
+// 一条(已清洗的)逻辑行折成视觉行;巨长行先掐头(露尾只要末几行,头
+// 部折了也是白折):显示宽超过 reserve_cols 就从头上削到剩余约
+// reserve_cols 列。削在码点边界(u32string 天然安全),O(行长) 一次。
+inline std::vector<std::u32string> WrapPreviewLine(const std::u32string& line, int wrap_width, int reserve_cols) {
+    if (static_cast<int>(DisplayWidth(line)) <= reserve_cols) {
+        return WrapToDisplayWidth(line, wrap_width);
+    }
+    const std::size_t total = DisplayWidth(line);
+    const std::size_t keep = static_cast<std::size_t>(reserve_cols);
+    std::size_t seen = 0;
+    std::size_t cut = 0;
+    while (cut < line.size() && seen + keep < total) {
+        seen += static_cast<std::size_t>(CharDisplayWidth(line[cut]));
+        ++cut;
+    }
+    return WrapToDisplayWidth(line.substr(cut), wrap_width);
+}
+
 }  // namespace
+
+// ---- 思考流中预览:状态机转移(纯函数,单测主战场) ----------------------
+//
+// 转移表照单上"状态机"一节逐条落;表外的组合原样返回——状态机不许有
+// 第二条隐路,画错了宁可停在原地让人看见。
+ThinkingPhase NextThinkingPhase(ThinkingPhase phase, ThinkingSignal signal) {
+    switch (phase) {
+        case ThinkingPhase::Hidden:
+            return signal == ThinkingSignal::FirstDelta ? ThinkingPhase::AutoPreviewRunning : phase;
+        case ThinkingPhase::AutoPreviewRunning:
+            switch (signal) {
+                case ThinkingSignal::Done:
+                    return ThinkingPhase::CollapsedDone;
+                case ThinkingSignal::ToggleExpand:
+                    return ThinkingPhase::ExplicitExpandedRunning;
+                default:
+                    return phase;
+            }
+        case ThinkingPhase::ExplicitExpandedRunning:
+            switch (signal) {
+                case ThinkingSignal::Done:
+                    return ThinkingPhase::ExplicitExpandedDone;
+                case ThinkingSignal::ToggleCollapse:
+                    return ThinkingPhase::CollapsedRunning;
+                default:
+                    return phase;
+            }
+        case ThinkingPhase::CollapsedRunning:
+            return signal == ThinkingSignal::ToggleExpand ? ThinkingPhase::ExplicitExpandedRunning : phase;
+        case ThinkingPhase::CollapsedDone:
+            return signal == ThinkingSignal::ToggleExpand ? ThinkingPhase::ExplicitExpandedDone : phase;
+        case ThinkingPhase::ExplicitExpandedDone:
+            return signal == ThinkingSignal::ToggleCollapse ? ThinkingPhase::CollapsedDone : phase;
+    }
+    return phase;
+}
+
+bool ThinkingHasVisibleText(const std::string& text) {
+    for (const char c : text) {
+        if (c != ' ' && c != '\t' && c != '\n' && c != '\r') {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::string> ThinkingPreviewRows(const std::string& text, int width, int max_rows) {
+    std::vector<std::string> rows;
+    if (text.empty() || max_rows <= 0) {
+        return rows;
+    }
+    const int safe_width = width > 0 ? width : 80;
+    // 正文挂两空格缩进,预览行自己的宽度让出这两列,再留末列一格防隐式折行。
+    const int wrap_width = (std::max)(8, safe_width - 2 - 1);
+    const int reserve_cols = (max_rows + 2) * wrap_width;
+
+    const std::vector<std::string> logical = SplitLines(text);
+    // 从最后一条逻辑行往前收,收满 max_rows 条视觉行就停——"取末尾,
+    // 不取开头"。
+    std::vector<std::string> tail;
+    for (auto it = logical.rbegin(); it != logical.rend() && static_cast<int>(tail.size()) < max_rows; ++it) {
+        const std::u32string clean = SanitizePreviewLine(Utf8ToUtf32(*it));
+        if (clean.empty()) {
+            tail.insert(tail.begin(), std::string());
+            continue;
+        }
+        const std::vector<std::u32string> wrapped = WrapPreviewLine(clean, wrap_width, reserve_cols);
+        for (auto w = wrapped.rbegin(); w != wrapped.rend() && static_cast<int>(tail.size()) < max_rows; ++w) {
+            tail.insert(tail.begin(), Utf32ToUtf8(*w));
+        }
+    }
+    return tail;
+}
 
 std::string FormatSeconds(double seconds) {
     if (seconds < 0.0) {
@@ -128,6 +256,12 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
     // 占一列,加空格共两列),只加在首行行首、缩进之前,一眼扫得到。
     const std::string focus_mark = focused ? "\xE2\x96\xBA " : "";
     const int focus_cols = focused ? 2 : 0;
+    // 思考条目的有效档:全局展开开关,或本条自己的用户展开态(运行中
+    // ExplicitExpandedRunning 优先于全局紧凑——用户刚伸手打开,不能等
+    // 下一帧全局重打才看见)。收定后的展开交给全局开关(整组重打路)。
+    const bool thinking_explicit_expanded = item.kind == TranscriptKind::Thinking &&
+                                            item.thinking_phase == ThinkingPhase::ExplicitExpandedRunning;
+    const bool effective_expanded = expanded || thinking_explicit_expanded;
 
     std::string out;
 
@@ -146,7 +280,7 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
         std::string title = item.title;
         // 思考条目展开档:标题补「· N 字」,正文多长一眼有数。紧凑档不
         // 加,收定时保持一行「思考 Xs」。
-        if (expanded && item.kind == TranscriptKind::Thinking && !item.full_output.empty()) {
+        if (effective_expanded && item.kind == TranscriptKind::Thinking && !item.full_output.empty()) {
             title += trf("transcript.thinking_chars", CountUtf8Codepoints(item.full_output));
         }
         if (width > 0) {
@@ -168,10 +302,24 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
         out += prefix + line + "\n";
     }
 
+    // 思考自动预览(逐帧露尾):默认档运行中,标题底下露正文末尾最多
+    // kThinkingPreviewMaxRows 条视觉行,弱色、不抢正文层级、不跑
+    // Markdown。正文没有可见内容(空/纯空白/全控制字符)时一行也不铺,
+    // 不露空框。宽度/清洗都在 ThinkingPreviewRows 里办好,这里只加缩进
+    // 与弱色。
+    if (item.kind == TranscriptKind::Thinking && item.thinking_phase == ThinkingPhase::AutoPreviewRunning &&
+        !effective_expanded && item.status == TranscriptStatus::Running &&
+        ThinkingHasVisibleText(item.full_output)) {
+        const std::vector<std::string> rows = ThinkingPreviewRows(item.full_output, width, kThinkingPreviewMaxRows);
+        for (const std::string& row : rows) {
+            out += indent + "  " + theme.stats + row + theme.reset + "\n";
+        }
+    }
+
     // UI-D 展开版:完整入参 JSON 一行 + full_output 全文(标题行 + 每行缩进)。
     // 截断规则跟摘要行一致:width > 0 且不夹 ANSI 才截——展开版可能被
     // TranscriptPainter 原地重画,物理折行同样会毁掉行数记账。
-    if (expanded) {
+    if (effective_expanded) {
         const std::string body_indent = indent + "  ";
         const int body_cols = indent_cols + 2;
         if (!item.input_json.empty()) {
@@ -181,34 +329,24 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
             }
             out += body_indent + param_line + "\n";
         }
-        // 思考进行中(Running):已到正文随 Ctrl+O 快照摊开,但只铺约一屏,
-        // 超了截断收口「共 N 行,结束后 Ctrl+O 看全文」——思考收定后条目
-        // 变非 Running,再 Ctrl+O 就是全文。正文一个字没到时连占位行都
-        // 不铺,免得刚起头的思考块顶着一行"(无完整输出)"。
-        const bool thinking_live =
-            item.kind == TranscriptKind::Thinking && item.status == TranscriptStatus::Running;
-        if (thinking_live && item.full_output.empty()) {
-            // 什么都不铺:标题行("思考中…")就是这块的全部。
+        // 思考条目正文一个字没到(空 thinking/仅 signature/redacted):连
+        // 占位行都不铺,不露空框——运行中如此,收定后展开档也如此。正文
+        // 到了就全文随流续画(用户展开不设行帽,完毕也不自动收折);收定
+        // 的思考同工具规矩全文铺。
+        const bool thinking_item = item.kind == TranscriptKind::Thinking;
+        if (thinking_item && !ThinkingHasVisibleText(item.full_output)) {
+            // 什么都不铺:标题行("思考 Xs(未提供摘要)")就是这块的全部。
         } else if (item.full_output.empty()) {
             out += body_indent + tr("transcript.no_full_output") + "\n";
         } else {
             const std::vector<std::string> lines = SplitLines(item.full_output);
-            const bool truncated =
-                thinking_live && static_cast<int>(lines.size()) > kThinkingStreamExpandedMaxLines;
-            const std::size_t print_upto =
-                truncated ? static_cast<std::size_t>(kThinkingStreamExpandedMaxLines) : lines.size();
             out += body_indent + trf("transcript.full_output_header", CountLines(item.full_output)) + "\n";
-            for (std::size_t i = 0; i < print_upto; ++i) {
+            for (std::size_t i = 0; i < lines.size(); ++i) {
                 std::string line = lines[i];
                 if (width > 0 && line.find('\x1b') == std::string::npos) {
                     line = TruncateWithEllipsis(line, width - body_cols - 1);
                 }
                 out += body_indent + line + "\n";
-            }
-            if (truncated) {
-                out += body_indent + trf("transcript.thinking_stream_more",
-                                         static_cast<int>(lines.size())) +
-                       "\n";
             }
         }
     }
@@ -762,13 +900,18 @@ TranscriptItem MakeAgentTaskThinkingItem(int id, const std::string& text, bool s
     item.kind = TranscriptKind::Thinking;
     item.tool_name = "thinking";
     item.full_output = text;
+    item.thinking_text_bytes = static_cast<int>(text.size());
+    // 查看态(代理面板)的思考卡不掺 main 流的自动露尾——保持"标题一行,
+    // 展开看全文"的老档位;这里 Collapsed* 只表画法,数据照全量持有。
     if (streaming) {
+        item.status = TranscriptStatus::Running;
+        item.thinking_phase = ThinkingPhase::CollapsedRunning;
         // 流式思考尾巴:与 main 流式思考同款折叠规矩——Running 条目,头行
         // 「思考中 · N 字」随重铺拍跳动;Ctrl+O 展开看长文。
-        item.status = TranscriptStatus::Running;
         item.title = trf("agent_activity.thinking", CountUtf8Codepoints(text));
     } else {
         item.status = TranscriptStatus::Ok;
+        item.thinking_phase = ThinkingPhase::CollapsedDone;
         item.title = tr("agent_panel.event_thinking");
     }
     item.start_time = std::chrono::steady_clock::now();
