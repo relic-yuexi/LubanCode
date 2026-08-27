@@ -95,13 +95,19 @@ TEST_CASE("StatusLineInfoSegment: 模型名为空就跳过那一节") {
     CHECK(seg.find("context 3%") != std::string::npos);
 }
 
-TEST_CASE("StreamHintText: 输入行占位只提排队,不再捎带打断说明") {
+TEST_CASE("StreamHintText: 忙时占位写明排队与 Esc 打断") {
+    // 旧状态行尾巴"⎋ 打断"撤了以后,空队列时全屏没有打断提示(可发现性
+    // 丢了);如今提示回到占位本身——草稿空才显示,恰好是 Esc 真打断的
+    // 那个状态。措辞与队列标题对齐(键名拼 Esc,不用 ⎋ 字形)。
     const std::string rich = StreamHintText(/*plain=*/false);
     CHECK(rich.find("排队") != std::string::npos);
-    CHECK(rich.find("\xe2\x8e\x8b") == std::string::npos);  // ⎋ 挪去了状态行
+    CHECK(rich.find("Esc") != std::string::npos);
+    CHECK(rich.find("打断") != std::string::npos);
+    CHECK(rich.find("\xe2\x8e\x8b") == std::string::npos);  // 键名拼 Esc,不用 ⎋
     const std::string plain = StreamHintText(/*plain=*/true);
     CHECK(plain.find("排队") != std::string::npos);
-    CHECK(plain.find("\xe2\x8e\x8b") == std::string::npos);
+    CHECK(plain.find("Esc") != std::string::npos);
+    CHECK(plain.find("打断") != std::string::npos);
 }
 
 TEST_CASE("BuildStatusLineText: 整行 = 模式段 + 信息段") {
