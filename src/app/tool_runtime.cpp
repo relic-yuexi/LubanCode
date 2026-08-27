@@ -345,7 +345,10 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     // (plugin.json)的 adapter 挂进各表后灌项目根(第 7 步:进程 cwd 缺省
     // 项目根);取消链/LogSink 由 turn_runner 每轮灌(SetPluginCancel 等)。
     // 项目插件信任账(plugins 单第 8 步):启动装载一次;读不动的警告当
-    // 空账(全部项目插件按未信任跳过,不带着一本读不动的账放行)。
+    // 空账(全部项目插件按未信任跳过,不带着一本读不动的账放行)。项目根
+    // 一并存下(信任流 UI 的 /plugin trust|untrust 要按同一份路径口径重扫
+    // 才算得出对得上的账本键)。
+    project_root_utf8_ = cwd_utf8;
     if (const auto path = lubancode::config::PluginTrustStore::DefaultStorePath(); path.has_value()) {
         auto [store, load_error] = lubancode::config::PluginTrustStore::Load(path);
         if (load_error.has_value()) {

@@ -26,6 +26,7 @@ using lubancode::cli::TermErr;
 #include "platform/process.hpp"
 #include "platform/text_encoding.hpp"
 #include "runtime/plugin_contract.hpp"
+#include "runtime/plugin_tool.hpp"  // 信任流 UI 的账务动作(TrustProjectPluginById 一族)
 #include "tools/path_utils.hpp"
 #include "tools/registry.hpp"
 
@@ -187,9 +188,13 @@ void PrintPluginsCommand(const std::vector<PluginMountInfo>& mounted, const std:
 // 得上插件 id)。doctor 只探环境不执行 tool;test 走与模型调用同一条
 // 执行链(这里给 v1 的最短版:经 ToolRuntime 的 registry 由调用方真跑,
 // 命令层只出说明——真跑要确认流,硬造一条免确认的捷径正是单子禁的)。
+// trust/untrust(信任流)另收项目根与信任账:账务与概要在 runtime 侧
+// (TrustProjectPluginById 一族),这里只递材料、打回执。
 void HandlePluginCommand(const std::string& args,
                          const std::vector<PluginMountInfo>& mounted,
-                         const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& manifests) {
+                         const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& manifests,
+                         const std::string& project_root_utf8,
+                         lubancode::config::PluginTrustStore* project_trust) {
     // 拆子命令与目标 id。
     std::string sub = args;
     std::string rest;
@@ -208,13 +213,15 @@ void HandlePluginCommand(const std::string& args,
 
     if (sub.empty()) {
         TermOut() << tr("cmd.plugin.usage") << "\n";
+        TermOut() << "另有信任流:/plugin trust <id>(批准项目级插件,重启后挂载)| "
+                     "/plugin untrust <id>(销账)。\n";
         return;
     }
 
     // 形态一:/plugin inspect <id>(sub 是子动词,target 在 rest)。
     // 形态二:/plugin <id>(裸 id,视同 inspect)。
-    const bool sub_is_verb =
-        sub == "inspect" || sub == "doctor" || sub == "reload" || sub == "enable" || sub == "disable" || sub == "test";
+    const bool sub_is_verb = sub == "inspect" || sub == "doctor" || sub == "reload" || sub == "enable" ||
+                             sub == "disable" || sub == "test" || sub == "trust" || sub == "untrust";
     const std::string target_id = sub_is_verb ? rest : sub;
     const std::string action = sub_is_verb ? sub : std::string("inspect");
     const lubancode::runtime::PluginManifest* manifest = nullptr;
@@ -310,6 +317,32 @@ void HandlePluginCommand(const std::string& args,
         // 确认流在交互层,命令层不另开无防护捷径——这里指路,真跑让模型
         // 调(或用 scaffold 生成的 test_runner.py 离线自测)。
         TermOut() << tr("cmd.plugin.test.hint") << "\n";
+        return;
+    }
+
+    if (action == "trust" || action == "untrust") {
+        // 信任流 UI(plugins 单第 8 步收口):账务动作在 runtime 侧,这里只
+        // 拆参数、打回执。子命令式,不在启动路径加 y/n 问询——管道模式
+        // 没法答。
+        if (target_id.empty()) {
+            TermOut() << "用法:/plugin " << action << " <id>(id 看启动警告或 /plugins)\n";
+            return;
+        }
+        if (project_trust == nullptr || project_root_utf8.empty()) {
+            TermOut() << "信任账不可用(找不到用户主目录或会话没有项目根),这条子命令记不了账。\n";
+            return;
+        }
+        const std::filesystem::path project_root = lubancode::tools::Utf8ToPath(project_root_utf8);
+        const auto report = action == "trust"
+                                ? lubancode::runtime::TrustProjectPluginById(project_root, project_trust, target_id)
+                                : lubancode::runtime::UntrustProjectPluginById(project_root, project_trust, target_id);
+        if (!report.ok) {
+            TermOut() << report.error << "\n";
+            return;
+        }
+        for (const auto& line : report.lines) {
+            TermOut() << line << "\n";
+        }
         return;
     }
 
@@ -542,7 +575,9 @@ CommandFlow HandleSlashPlugin(SlashDispatchContext& ctx, const lubancode::cli::P
     HandlePluginCommand(parsed.args, *ctx.plugin_mounted,
                         ctx.tool_runtime != nullptr
                             ? ctx.tool_runtime->process_manifests()
-                            : std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>{});
+                            : std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>{},
+                        ctx.tool_runtime != nullptr ? ctx.tool_runtime->project_root_utf8() : std::string(),
+                        ctx.tool_runtime != nullptr ? ctx.tool_runtime->project_plugin_trust() : nullptr);
     return CommandFlow::Continue;
 }
 

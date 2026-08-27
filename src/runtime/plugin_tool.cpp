@@ -193,13 +193,17 @@ PluginScanResult ScanPluginDirectories(const std::filesystem::path& dir) {
 // 项目插件:内容指纹 + 信任门(plugins 单第 8 步)
 // ---------------------------------------------------------------------------
 
-std::expected<std::string, std::string> ComputePluginContentHash(const std::filesystem::path& plugin_dir) {
+namespace {
+
+// 插件目录里的全部常规文件(相对路径,排序钉死顺序——枚举次序随文件系统
+// 心情,指纹与文件数都要跨进程稳定)。指纹材料与概要的文件数共用这一次
+// 收账,不各走各的。
+std::expected<std::vector<std::filesystem::path>, std::string> CollectPluginFiles(
+    const std::filesystem::path& plugin_dir) {
     std::error_code ec;
     if (!std::filesystem::is_directory(plugin_dir, ec)) {
         return std::unexpected("插件目录不存在: " + platform::PathToUtf8(plugin_dir));
     }
-    // 先收全部常规文件的相对路径,排序钉死顺序(枚举次序随文件系统心情,
-    // 指纹要跨进程稳定)。
     std::vector<std::filesystem::path> files;
     for (const auto& entry : std::filesystem::recursive_directory_iterator(plugin_dir, ec)) {
         if (ec) {
@@ -214,10 +218,19 @@ std::expected<std::string, std::string> ComputePluginContentHash(const std::file
     std::sort(files.begin(), files.end(), [](const auto& left, const auto& right) {
         return platform::PathToUtf8(left) < platform::PathToUtf8(right);
     });
+    return files;
+}
 
+}  // namespace
+
+std::expected<std::string, std::string> ComputePluginContentHash(const std::filesystem::path& plugin_dir) {
+    const auto files = CollectPluginFiles(plugin_dir);
+    if (!files.has_value()) {
+        return std::unexpected(files.error());
+    }
     // 相对路径 + 字节全部喂进同一口锅:改名/改内容/添删文件都变指纹。
     std::string material;
-    for (const auto& file : files) {
+    for (const auto& file : *files) {
         material += platform::PathToUtf8(file);
         material += '\0';
         std::ifstream in(plugin_dir / file, std::ios::binary);
@@ -255,14 +268,150 @@ PluginScanResult ScanProjectPluginDirectories(const std::filesystem::path& proje
             result.warnings.push_back("[plugin] " + manifest->id + ": 项目插件未经信任(内容指纹 " +
                                       hooks::DefinitionHashShort(*content_hash) +
                                       "),跳过——项目目录里的插件是外来代码,放进目录就是执行代码;"
-                                      "批准后重载才挂(/plugin 的信任流后续批次接 UI,先手改 "
-                                      "~/.lubancode/plugin-trust.json)");
+                                      "批准:/plugin trust " + manifest->id +
+                                      "(回执亮工具清单与完整指纹,重启后挂载)");
             continue;
         }
         result.manifests.push_back(manifest);
     }
     // 解析期警告照传。
     result.warnings.insert(result.warnings.end(), scanned.warnings.begin(), scanned.warnings.end());
+    return result;
+}
+
+// ---------------------------------------------------------------------------
+// 信任流 UI(plugins 单第 8 步收口):材料收集 + trust/untrust 的账务动作
+// ---------------------------------------------------------------------------
+
+std::vector<ProjectPluginTrustInfo> CollectProjectPluginTrustInfo(
+    const std::filesystem::path& project_dir, const config::PluginTrustStore* trust) {
+    std::vector<ProjectPluginTrustInfo> out;
+    std::error_code ec;
+    const std::filesystem::path plugins_dir = project_dir / ".lubancode" / "plugins";
+    if (!std::filesystem::is_directory(plugins_dir, ec)) {
+        return out;  // 项目没配项目级插件是常态
+    }
+    // 复用主扫描(解析 + 强校验 + 跨插件查重):manifest 坏的插件进不了这份
+    // 材料,trust 侧的"找不到"错误里另案说明。
+    for (const auto& manifest : ScanPluginDirectories(plugins_dir).manifests) {
+        ProjectPluginTrustInfo info;
+        info.manifest = manifest;
+        info.dir_utf8 = platform::PathToUtf8(manifest->plugin_dir);
+        const auto files = CollectPluginFiles(manifest->plugin_dir);
+        const auto content_hash = ComputePluginContentHash(manifest->plugin_dir);
+        if (!files.has_value() || !content_hash.has_value()) {
+            continue;  // 指纹算不出(目录刚被删/文件读不到):材料不全,不进账
+        }
+        info.file_count = files->size();
+        info.content_hash = *content_hash;
+        if (trust != nullptr) {
+            info.trusted = trust->IsTrusted(info.dir_utf8, info.content_hash);
+            info.disabled = trust->IsDisabled(info.dir_utf8, info.content_hash);
+        }
+        out.push_back(std::move(info));
+    }
+    return out;
+}
+
+namespace {
+
+// 按 id 找审批材料;找不到给人话(指路 /plugins 与启动警告)。
+std::expected<ProjectPluginTrustInfo, std::string> FindTrustCandidate(
+    const std::filesystem::path& project_dir, const config::PluginTrustStore* trust,
+    const std::string& plugin_id) {
+    for (auto& info : CollectProjectPluginTrustInfo(project_dir, trust)) {
+        if (info.manifest->id == plugin_id) {
+            return info;
+        }
+    }
+    return std::unexpected("项目插件目录(.lubancode/plugins/)里没有 " + plugin_id +
+                           ":trust/untrust 只管项目级插件,用户级 ~/.lubancode/plugins/ 不经"
+                           "信任门。若启动警告点名过它(manifest 坏/读不到),先修插件本身,"
+                           "审批材料出不来就批不了。");
+}
+
+// 概要行:id、版本、runtime、目录、工具清单、文件数、完整指纹。用户批的
+// 是看得见的东西——指纹全量打出,不拿 12 位短码让人抄。
+void AppendTrustSummaryLines(const ProjectPluginTrustInfo& info, std::vector<std::string>& lines) {
+    const PluginManifest& manifest = *info.manifest;
+    lines.push_back("插件 " + manifest.id + " v" + manifest.version + "(" +
+                    std::string(RuntimeKindName(manifest.kind)) + ", " +
+                    (manifest.language.empty() ? std::string("-") : manifest.language) + ")");
+    lines.push_back("目录: " + info.dir_utf8);
+    std::string tools;
+    for (const auto& tool : manifest.tools) {
+        tools += tools.empty() ? tool.full_name : ("、" + tool.full_name);
+    }
+    lines.push_back("工具 " + std::to_string(manifest.tools.size()) + " 件:" + tools);
+    lines.push_back("文件 " + std::to_string(info.file_count) + " 个,完整内容指纹:");
+    lines.push_back("  " + info.content_hash);
+}
+
+}  // namespace
+
+PluginTrustActionResult TrustProjectPluginById(const std::filesystem::path& project_dir,
+                                               config::PluginTrustStore* trust,
+                                               const std::string& plugin_id) {
+    PluginTrustActionResult result;
+    if (trust == nullptr) {
+        result.error = "信任账不可用(找不到用户主目录),记不了账。";
+        return result;
+    }
+    const auto found = FindTrustCandidate(project_dir, trust, plugin_id);
+    if (!found.has_value()) {
+        result.error = found.error();
+        return result;
+    }
+    result.ok = true;
+    AppendTrustSummaryLines(*found, result.lines);
+    if (found->trusted) {
+        result.lines.push_back("这份指纹已在信任账上,不用重批;重启后挂载。");
+        return result;
+    }
+    trust->SetTrusted(found->dir_utf8, found->content_hash, plugin_id);
+    result.lines.push_back("已信任,重启后挂载(插件文件改一个字节指纹就变,须重批)。");
+    if (found->disabled) {
+        result.lines.push_back("注意:信任账里这份指纹还标着 disable,挂载照旧跳过——先销掉 "
+                               "disable 标记再重启。");
+    }
+    // 同名让位:用户主目录(~/.lubancode/plugins/)有同 id 的 process 插件时,
+    // 挂载扫描让主目录优先,这份批了也不挂——如实说,别让用户批完还疑惑。
+    if (const auto home = platform::HomeDir(); home.has_value()) {
+        const std::filesystem::path home_plugins = platform::Utf8ToPath(*home) / "plugins";
+        for (const auto& manifest : ScanPluginDirectories(home_plugins).manifests) {
+            if (manifest->id == plugin_id) {
+                result.lines.push_back("注意:用户主目录里有同名插件 " + plugin_id +
+                                       ",项目级让位——重启后挂载的还是主目录那份。");
+                break;
+            }
+        }
+    }
+    return result;
+}
+
+PluginTrustActionResult UntrustProjectPluginById(const std::filesystem::path& project_dir,
+                                                 config::PluginTrustStore* trust,
+                                                 const std::string& plugin_id) {
+    PluginTrustActionResult result;
+    if (trust == nullptr) {
+        result.error = "信任账不可用(找不到用户主目录),记不了账。";
+        return result;
+    }
+    const auto found = FindTrustCandidate(project_dir, trust, plugin_id);
+    if (!found.has_value()) {
+        result.error = found.error();
+        return result;
+    }
+    result.ok = true;
+    if (!found->trusted) {
+        result.lines.push_back("插件 " + plugin_id + " 的当前指纹本就不在信任账上(可能改过文件已"
+                               "失效),没有可销的账。");
+        return result;
+    }
+    trust->Untrust(found->dir_utf8, found->content_hash);
+    result.lines.push_back("插件 " + plugin_id + " 已销信任(完整指纹 " + found->content_hash + ")。");
+    result.lines.push_back("重启后不再挂载;插件文件未动,要再挂 /plugin trust " + plugin_id +
+                           " 重批即可。disable 标记(如有)照旧不动。");
     return result;
 }
 

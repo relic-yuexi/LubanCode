@@ -53,6 +53,39 @@ lubancode
 
 dry-run 关掉(去掉环境变量重启)后才真点鼠标。教程第一课建议一直开着。
 
+### 装到哪:用户级与项目级(信任门)
+
+上面那条 xcopy 装的是**用户级**——`%USERPROFILE%\.lubancode\plugins\`。你
+亲手放进去的,免信任门,拿来即用。
+
+另一路是**项目级**:拷进仓库里的 `<项目>\.lubancode\plugins\gui-agent\`,
+随 git 分发,团队人人 clone 即得:
+
+```bat
+xcopy /E /I examples\agents\gui-agent <项目>\.lubancode\plugins\gui-agent
+```
+
+项目目录里的插件是外来代码,放进目录就是执行代码。LubanCode 启动时按
+"插件目录 + 全部文件内容的指纹"过**信任门**,未经信任只警告、不挂载:
+
+```text
+[plugin] gui-agent-example: 项目插件未经信任(内容指纹 a1b2c3d4e5f6),跳过——
+  ……批准:/plugin trust gui-agent-example(回执亮工具清单与完整指纹,重启后挂载)
+```
+
+批准是一条命令的事,不用手改任何 JSON:
+
+```text
+/plugin trust gui-agent-example
+```
+
+回执先把插件概要亮出来(工具清单、文件数、完整 64 位指纹),再落账:
+**已信任,重启后挂载**。插件文件改一个字节,指纹就变,信任失效,须重批
+——团队仓里升级插件后,各成员重跑一次 trust 即可。撤销用
+`/plugin untrust gui-agent-example`(只销账,不动插件文件)。
+
+怎么选:团队仓里带插件共用走项目级;个人自用装用户级,省一道门。
+
 ## 3. 教学夹具与第一课
 
 不拿真实微信、银行、邮箱练手。仓里带一只本地夹具:

@@ -23,7 +23,10 @@
 ## 最短启动路径
 
 **GUI(Windows,十分钟):** 见 [gui-agent/README.md](gui-agent/README.md)
-第 2-3 节——拷目录、开 dry-run、起夹具、跑七步链。
+第 2-3 节——拷目录、开 dry-run、起夹具、跑七步链。装法有两路:用户级
+(`%USERPROFILE%\.lubancode\plugins\`)免信任门;装进仓库的项目级
+(`<项目>\.lubancode\plugins\`)要过信任门,`/plugin trust <id>` 一条命令
+批准(详见 gui-agent README 第 2 节"装到哪")。
 
 **Browser(另单在建):** 常驻 MCP + Playwright,DOM/ref 路线,依赖
 `todos/MCP富结果与专属浏览器.todo` 的底层能力。目录落地后此处补链接。
