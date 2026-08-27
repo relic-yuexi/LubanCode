@@ -1,0 +1,17 @@
+{
+  "fixture_id": "manual_ping_keepalive",
+  "wire": "anthropic-messages",
+  "provider": "dashscope-anthropic",
+  "model": "qwen3.7-plus",
+  "scenario": "ping_keepalive_between_events",
+  "source_document": "Anthropic兼容-Messages.md",
+  "source_section": "流式响应(message_stop 段:此外,流式响应还会定期发送 ping 事件({\"type\":\"ping\"})用于保持连接活跃,客户端可忽略)",
+  "captured_at": "2026-08-27",
+  "doc_snapshot_hash": "7e35698415e8c7ff5dac8f3b49faedd1bf659bda7d1abd2fe2f401daf8118fcc",
+  "request_expectation": {},
+  "expected_events": ["MessageStart", "TextDelta", "ContentBlockDone", "MessageDone"],
+  "expected_replay": [],
+  "usage_expectation": {"input_tokens": 8, "output_tokens": 1, "cache_read_tokens": 0, "cache_creation_tokens": 0},
+  "stop_reason": "end_turn",
+  "notes": "ping 事件类型与字段是手册明文;正文为短合成字样,事件种类/次序/usage 形状按手册。"
+}

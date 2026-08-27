@@ -1,0 +1,15 @@
+{
+  "fixture_id": "internal_thought_part_stream",
+  "wire": "google-generate-content",
+  "provider": "gemini",
+  "model": "gemini-2.5-flash",
+  "scenario": "thought_part_stream_thoughts_billed_separately",
+  "source_document": "internal",
+  "captured_at": "2026-08-27",
+  "request_expectation": {"generationConfig": {"thinkingConfig": {"includeThoughts": true, "thinkingBudget": -1}}},
+  "expected_events": ["MessageStart", "ThinkingDelta", "TextDelta", "TextDelta", "MessageDone"],
+  "expected_replay": ["Gemini 的 thought 一次性,续会话不重放"],
+  "usage_expectation": {"input_tokens": 10, "output_tokens": 7, "output_reasoning_tokens": 3, "cache_read_tokens": 0},
+  "stop_reason": "end_turn",
+  "notes": "Gemini v1beta 口径(thought:true part、thoughtsTokenCount 另计一代),自仓库既有 gemini 单测缩样;Gemini 手册不在三份本地手册内,来源记 internal,hash 不记。"
+}

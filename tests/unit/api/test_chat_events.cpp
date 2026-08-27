@@ -3,6 +3,7 @@
 #include <variant>
 
 #include "api/chat/events.hpp"
+#include "api_fixture.hpp"
 
 using namespace lubancode;
 
@@ -173,43 +174,44 @@ TEST_CASE("Chat events: 顶层 reasoning_tokens 也认,没拆账就是 0") {
 // 不是 LubanCode 原先只认的 reasoning_content。六组流:真机实录、
 // reasoning_content 对照、两字段同现去重、reasoning-only + length、
 // usage 缺席、provider 声明字段。
+// 实录字节已迁 tests/fixtures/api/openai_chat/vllm_qwen_reasoning_delta
+// (P0 行为不改):这里经 loader 取帧,断言原样。
 // ---------------------------------------------------------------------------
 
 TEST_CASE("Chat events: vLLM 真机实录——delta.reasoning 走 ThinkingDelta,usage-only chunk 的空 choices 不丢 usage") {
+    const auto loaded = lubancode_test::LoadApiFixture("openai_chat", "vllm_qwen_reasoning_delta");
+    REQUIRE(loaded.has_value());
+    const auto frames = loaded->SseFrames();
+    REQUIRE(frames.size() == 7);  // 开场 + reasoning×2 + 正文 + stop + usage-only + [DONE]
+
     api::chat::EventParser parser;
     // 1) delta.role 开场帧:只有 role,没有内容——MessageStart 有,无增量。
-    auto events = parser.Consume(Frame(
-        R"({"id":"chatcmpl_vllm","object":"chat.completion.chunk","model":"qwen3.8-27b","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]})"));
+    auto events = parser.Consume(Frame(frames[0].second));
     REQUIRE(events.size() == 1);
     CHECK(std::holds_alternative<api::MessageStart>(events[0]));
 
     // 2) delta.reasoning × N:思考逐块流出,每块立即成 ThinkingDelta。
-    events = parser.Consume(Frame(
-        R"({"id":"chatcmpl_vllm","choices":[{"index":0,"delta":{"reasoning":"We"},"finish_reason":null}]})"));
+    events = parser.Consume(Frame(frames[1].second));
     REQUIRE(events.size() == 1);
     CHECK(std::get<api::ThinkingDelta>(events[0]).text == "We");
-    events = parser.Consume(Frame(
-        R"({"id":"chatcmpl_vllm","choices":[{"index":0,"delta":{"reasoning":" need"},"finish_reason":null}]})"));
+    events = parser.Consume(Frame(frames[2].second));
     REQUIRE(events.size() == 1);
     CHECK(std::get<api::ThinkingDelta>(events[0]).text == " need");
 
     // 3) 正文 delta.content。
-    events = parser.Consume(Frame(
-        R"({"id":"chatcmpl_vllm","choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":null}]})"));
+    events = parser.Consume(Frame(frames[3].second));
     REQUIRE(events.size() == 1);
     CHECK(std::get<api::TextDelta>(events[0]).text == "OK");
 
     // 4) finish_reason=stop 收口帧。
-    parser.Consume(Frame(
-        R"({"id":"chatcmpl_vllm","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]})"));
+    parser.Consume(Frame(frames[4].second));
 
     // 5) usage-only chunk:choices 是空数组——usage 必须照收,不能因没有
     //    choices 便丢掉(根因三的现场:include_usage 开了才有这只帧)。
-    parser.Consume(Frame(
-        R"({"id":"chatcmpl_vllm","choices":[],"usage":{"prompt_tokens":15,"completion_tokens":2,"total_tokens":17}})"));
+    parser.Consume(Frame(frames[5].second));
 
     // 6) [DONE]。
-    const auto done = parser.Consume(Frame("[DONE]"));
+    const auto done = parser.Consume(Frame(frames[6].second));
     REQUIRE(done.size() == 1);
     const auto& event = std::get<api::MessageDone>(done[0]);
     CHECK(event.stop_reason == "end_turn");

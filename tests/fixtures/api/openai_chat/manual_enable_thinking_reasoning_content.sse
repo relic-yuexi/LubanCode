@@ -1,0 +1,8 @@
+data: {"id":"chatcmpl_qwen","object":"chat.completion.chunk","model":"qwen3.6-plus","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"先想"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_qwen","choices":[{"index":0,"delta":{"reasoning_content":"再想"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_qwen","choices":[{"index":0,"delta":{"content":"答"},"finish_reason":"stop"}],"usage":{"prompt_tokens":11,"completion_tokens":5,"reasoning_tokens":3}}
+
+data: [DONE]
+

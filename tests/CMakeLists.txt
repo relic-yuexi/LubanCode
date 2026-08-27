@@ -50,6 +50,7 @@ message(STATUS "lubancode: 收录 ${LUBANCODE_TEST_SOURCE_COUNT} 册测试")
 
 add_executable(lubancode_tests
   support/main.cpp
+  support/api_fixture.cpp
   ${LUBANCODE_TEST_SOURCES}
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
@@ -152,6 +153,16 @@ target_compile_features(deepseek_e2e PRIVATE cxx_std_23)
 add_executable(model_probe_e2e EXCLUDE_FROM_ALL manual/model_probe_e2e.cpp)
 target_link_libraries(model_probe_e2e PRIVATE lubancode_core)
 target_compile_features(model_probe_e2e PRIVATE cxx_std_23)
+
+# 手工靶子也得有人守门(模型协议兼容实录矩阵单 P0):stub 模式离线自测
+# (MODEL_PROBE_STUB=1,进程内假后端,不发一个网络包)进 ctest——模板年久
+# 失修(编译断链/事件序坏/usage 落账丢)当场红。真机跑法仍是手动 opt-in。
+add_dependencies(lubancode_tests model_probe_e2e)
+add_test(NAME manual.model_probe_stub COMMAND model_probe_e2e)
+set_tests_properties(manual.model_probe_stub PROPERTIES
+  ENVIRONMENT "MODEL_PROBE_STUB=1;MODEL_PROBE_PROVIDER=zai"
+  LABELS "manual;api;manual.api"
+  TIMEOUT 120)
 
 # 多行字符公式的视觉小样：直连正式渲染器，不进 ctest。
 add_executable(latex_box_experiment EXCLUDE_FROM_ALL manual/latex_box_experiment.cpp)

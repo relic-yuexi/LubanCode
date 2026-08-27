@@ -1,0 +1,29 @@
+{
+  "fixture_id": "manual_thinking_then_tool_use",
+  "wire": "anthropic-messages",
+  "provider": "dashscope-anthropic",
+  "model": "qwen3.7-plus",
+  "scenario": "thinking_then_tool_use",
+  "source_document": "Anthropic兼容-Messages.md",
+  "source_section": "流式响应(content_block_delta 段:delta.type 取值 text_delta/thinking_delta/signature_delta/input_json_delta;stop_reason=tool_use)",
+  "captured_at": "2026-08-27",
+  "doc_snapshot_hash": "7e35698415e8c7ff5dac8f3b49faedd1bf659bda7d1abd2fe2f401daf8118fcc",
+  "request_expectation": {
+    "thinking": {"type": "enabled", "budget_tokens": 1024},
+    "tools": [{"name": "get_weather"}]
+  },
+  "expected_events": [
+    "MessageStart",
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "ContentBlockDone",
+    "ToolUseStart",
+    "ToolUseInputDelta",
+    "ContentBlockDone",
+    "MessageDone"
+  ],
+  "expected_replay": ["第二轮回传 thinking 块(带 signature)+ tool_use 块 + tool_result 块"],
+  "usage_expectation": {"input_tokens": 20, "output_tokens": 88, "cache_read_tokens": 0, "cache_creation_tokens": 0},
+  "stop_reason": "tool_use",
+  "notes": "事件种类/字段/次序按手册(tool_use 块、input_json_delta、stop_reason=tool_use 皆手册明文);正文为短合成字样。"
+}

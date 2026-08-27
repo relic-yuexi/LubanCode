@@ -1,0 +1,20 @@
+data: {"response":{"id":"resp_xxx","created_at":1769082930,"object":"response","status":"queued"},"sequence_number":0,"type":"response.created"}
+
+data: {"response":{"id":"resp_xxx","status":"in_progress"},"sequence_number":1,"type":"response.in_progress"}
+
+data: {"item":{"id":"msg_xxx","content":[],"role":"assistant","status":"in_progress","type":"message"},"output_index":0,"sequence_number":2,"type":"response.output_item.added"}
+
+data: {"content_index":0,"item_id":"msg_xxx","output_index":0,"part":{"annotations":[],"text":"","type":"output_text","logprobs":null},"sequence_number":3,"type":"response.content_part.added"}
+
+data: {"content_index":0,"delta":"人工智能","item_id":"msg_xxx","logprobs":[],"output_index":0,"sequence_number":4,"type":"response.output_text.delta"}
+
+data: {"content_index":0,"delta":"（Artificial Intelligence，","item_id":"msg_xxx","logprobs":[],"output_index":0,"sequence_number":6,"type":"response.output_text.delta"}
+
+data: {"content_index":0,"item_id":"msg_xxx","logprobs":[],"output_index":0,"sequence_number":53,"text":"人工智能（Artificial Intelligence，简称 AI）是指由计算机系统模拟人类智能行为的技术和科学...","type":"response.output_text.done"}
+
+data: {"content_index":0,"item_id":"msg_xxx","output_index":0,"part":{"annotations":[],"text":"...完整文本...","type":"output_text","logprobs":null},"sequence_number":54,"type":"response.content_part.done"}
+
+data: {"item":{"id":"msg_xxx","content":[{"annotations":[],"text":"...完整文本...","type":"output_text","logprobs":null}],"role":"assistant","status":"completed","type":"message"},"output_index":0,"sequence_number":55,"type":"response.output_item.done"}
+
+data: {"response":{"id":"resp_xxx","created_at":1769082930,"model":"qwen3.7-max","object":"response","output":[],"status":"completed","usage":{"input_tokens":37,"output_tokens":243,"total_tokens":280}},"sequence_number":56,"type":"response.completed"}
+

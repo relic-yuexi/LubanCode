@@ -1,0 +1,14 @@
+data: {"id":"chatcmpl_vllm","object":"chat.completion.chunk","model":"qwen3.8-27b","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_vllm","choices":[{"index":0,"delta":{"reasoning":"We"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_vllm","choices":[{"index":0,"delta":{"reasoning":" need"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_vllm","choices":[{"index":0,"delta":{"content":"OK"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_vllm","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: {"id":"chatcmpl_vllm","choices":[],"usage":{"prompt_tokens":15,"completion_tokens":2,"total_tokens":17}}
+
+data: [DONE]
+
