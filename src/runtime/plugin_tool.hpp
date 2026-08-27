@@ -95,4 +95,46 @@ std::expected<std::string, std::string> ComputePluginContentHash(const std::file
 PluginScanResult ScanProjectPluginDirectories(const std::filesystem::path& project_dir,
                                               const config::PluginTrustStore* trust);
 
+// ---------------------------------------------------------------------------
+// 信任流 UI(/plugin trust|untrust 的材料与账务,plugins 单第 8 步收口)
+// ---------------------------------------------------------------------------
+
+// 一枚项目插件的审批材料:manifest 加账本要的两样键料(目录、完整指纹)。
+// 警告里的 12 位短指纹只是给人看的引子;真账本键是"完整目录路径 +
+// 完整 sha256",全在这份材料里——手改 plugin-trust.json 凑不齐的路不必走。
+struct ProjectPluginTrustInfo {
+    std::shared_ptr<const PluginManifest> manifest;
+    std::string dir_utf8;        // 账本键前半(canonical 后的插件目录)
+    std::string content_hash;    // 完整 sha256(64 位十六进制)
+    std::size_t file_count = 0;  // 插件目录里的常规文件数(概要亮给用户)
+    bool trusted = false;        // 当前指纹是否已在信任账上
+    bool disabled = false;       // 信任账里是否标了 disable
+};
+
+// 重扫 <project>/.lubancode/plugins/,逐插件算指纹、查账(只读,不改账)。
+// 目录不存在 = 空。启动警告里被跳过的插件在这里拿得全材料。
+std::vector<ProjectPluginTrustInfo> CollectProjectPluginTrustInfo(
+    const std::filesystem::path& project_dir, const config::PluginTrustStore* trust);
+
+// 账务动作的回执:结论逐行带出,命令层只管打印(不在启动路径加 y/n 问询
+// ——管道模式没法答)。ok=false 时 error 有话,lines 为空。
+struct PluginTrustActionResult {
+    bool ok = false;
+    std::string error;
+    std::vector<std::string> lines;
+};
+
+// /plugin trust <id> 的执行侧:亮概要(id、工具清单、文件数、完整指纹)
+// 后落 PluginTrustStore(SetTrusted,内部自 Save)。指纹没变的重复批照旧
+// 回执,幂等。v1 挂载口径与 reload 一致:重启后生效,不当场热挂。
+PluginTrustActionResult TrustProjectPluginById(const std::filesystem::path& project_dir,
+                                               config::PluginTrustStore* trust,
+                                               const std::string& plugin_id);
+
+// /plugin untrust <id> 的执行侧:按当前指纹从 trusted 销账(disabled 那套
+// 既有标记照旧不动)。
+PluginTrustActionResult UntrustProjectPluginById(const std::filesystem::path& project_dir,
+                                                 config::PluginTrustStore* trust,
+                                                 const std::string& plugin_id);
+
 }  // namespace lubancode::runtime

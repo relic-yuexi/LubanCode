@@ -195,6 +195,13 @@ public:
     const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& process_manifests() const {
         return process_manifests_;
     }
+    // /plugin trust|untrust(信任流 UI)的执行材料:项目根(挂载扫描用的
+    // 那份,会话期不动)与信任账本体。账可能没有(主目录拿不到),命令层
+    // 判空降级。
+    const std::string& project_root_utf8() const { return project_root_utf8_; }
+    lubancode::config::PluginTrustStore* project_plugin_trust() {
+        return project_plugin_trust_.has_value() ? &*project_plugin_trust_ : nullptr;
+    }
     // ESC 取消链与项目根:每轮由 turn_runner 灌(plugins 单第 7 步)。
     void SetPluginCancel(const std::atomic<bool>* cancel);
     void SetPluginCwd(std::string cwd_utf8);
@@ -227,6 +234,9 @@ private:
     std::vector<std::unique_ptr<lubancode::runtime::PluginToolAdapter>> process_adapters_;
     std::vector<std::string> process_plugin_warnings_;
     // 项目插件的信任账(plugins 单第 8 步):启动装载一次,挂在拥有者区。
+    // project_root_utf8_:构造时的项目根(挂载扫描与信任流共用同一份路径
+    // 口径,账本键才对得上)。
+    std::string project_root_utf8_;
     std::optional<lubancode::config::PluginTrustStore> project_plugin_trust_;
     std::optional<lubancode::lsp::Manager> lsp_manager_;
     // ---- 用户表:后声明,先析构 ----

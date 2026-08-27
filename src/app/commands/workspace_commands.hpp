@@ -55,13 +55,18 @@ bool SameFilesystemPath(const std::filesystem::path& left, const std::filesystem
 void PrintPluginsCommand(const std::vector<PluginMountInfo>& mounted, const std::vector<std::string>& warnings);
 
 // /plugin 子命令(plugins 单第 8 步):inspect <id> / doctor <id> /
-// test <id> <tool> <json> / reload <id> / enable|disable <id>。args 是
-// 命令词后面的整段。manifests 给 process 插件的清单;mounted 给
-// native/Lua 的挂载账。reload/enable/disable 的运行时换装(v1)以
-// "提示重启"为口径:Lua/process 可热重载的钩子另立批次,不在这硬造。
+// test <id> <tool> <json> / reload <id> / enable|disable <id> /
+// trust|untrust <id>(项目插件信任流)。args 是命令词后面的整段。manifests
+// 给 process 插件的清单;mounted 给 native/Lua 的挂载账。
+// reload/enable/disable 的运行时换装(v1)以"提示重启"为口径:Lua/process
+// 可热重载的钩子另立批次,不在这硬造。trust/untrust 走 runtime 侧的账务
+// 动作(概要 + 落账),project_root_utf8/project_trust 由会话的 ToolRuntime
+// 递入(缺省空 = 信任流不可用,打一句人话,不硬造)。
 void HandlePluginCommand(const std::string& args,
                          const std::vector<PluginMountInfo>& mounted,
-                         const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& manifests);
+                         const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& manifests,
+                         const std::string& project_root_utf8 = std::string(),
+                         lubancode::config::PluginTrustStore* project_trust = nullptr);
 
 
 // /mcp 命令:每个服务器一行状态(运行中/已退出)+ 工具数,底下缩进列出
