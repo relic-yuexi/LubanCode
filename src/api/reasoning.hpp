@@ -63,10 +63,15 @@ struct ReasoningConfig {
     // 落线方言(catalog provider 级声明,模型级可逐字段覆写)。空 =
     // legacy 兼容路径(视为 unverified)。
     ReasoningWireDialect dialect;
+    // 目录明说这模型不吃推理参数(ccmoon 巡检单 P2:只出图的模型,
+    // image-generation 且无 reasoning 能力):true 时四家 wire 一律停发
+    // 推理档位/开关——用户的档位偏好(current_think)不动,切回推理模型
+    // 照旧生效。与 empty()(未声明,legacy 照发)分家:不猜没声明的模型。
+    bool declined = false;
 
     bool empty() const {
         return supported_efforts.empty() && !supports_effort && !supports_toggle && !budget_min.has_value() &&
-               !budget_max.has_value() && wire_dialect.empty() && dialect.empty();
+               !budget_max.has_value() && wire_dialect.empty() && dialect.empty() && !declined;
     }
 };
 

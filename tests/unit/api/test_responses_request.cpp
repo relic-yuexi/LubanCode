@@ -406,3 +406,34 @@ TEST_CASE("ModelImageBlock 重放:翻 output_text 短标记,不带 base64") {
     CHECK(dumped.find("images/img-abcd12.png") == std::string::npos);
     CHECK(dumped.find("input_image") == std::string::npos);
 }
+
+
+
+// ---------------------------------------------------------------------------
+// ccmoon 巡检单 P2(推理档位边界):目录声明不吃推理(declined)的模型
+// 停发推理参数;回到推理模型(档案不带 declined)照旧发。真机观察:
+// ccmoon 家 gpt-image-1.5 的请求仍带 reasoning.effort=high 且 HTTP 200
+// 被收下——那是"服务端容忍",不是"档位生效";目录声明 declined 后
+// 这类模型的请求体里推理键整个缺席。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("declined 档案:responses 请求不发 reasoning/thinking;回来恢复") {
+    Request declined_request;
+    declined_request.model = "gpt-image-1-5";
+    declined_request.reasoning_effort = "high";
+    declined_request.reasoning.declined = true;
+
+    const auto declined_body = BuildRequestJson(declined_request);
+    CHECK_FALSE(declined_body.contains("reasoning"));
+    CHECK_FALSE(declined_body.contains("thinking"));
+    CHECK_FALSE(declined_body.contains("enable_thinking"));
+
+    // 同一用户档位切回推理模型(档案未声明 declined,legacy 路径):
+    // 照旧落 reasoning.effort——偏好没被抹掉。
+    Request normal_request;
+    normal_request.model = "gpt-5.6-sol";
+    normal_request.reasoning_effort = "high";
+    const auto normal_body = BuildRequestJson(normal_request);
+    REQUIRE(normal_body.contains("reasoning"));
+    CHECK(normal_body["reasoning"]["effort"] == "high");
+}

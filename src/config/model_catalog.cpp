@@ -172,6 +172,23 @@ std::optional<ModelCatalogEntry> ParseEntry(const nlohmann::json& item, std::str
         }
     }
 
+    // capabilities(端点能力,ccmoon 巡检单 P1):object,键任意、值必须
+    // 布尔。与 provider catalog 的 capabilities 同一形状,/model 的端点
+    // 相性提示(ClassifyModelEndpoint)吃它。
+    if (item.contains("capabilities")) {
+        if (!item["capabilities"].is_object()) {
+            error_out = "capabilities 字段必须是 object";
+            return std::nullopt;
+        }
+        for (auto cap = item["capabilities"].begin(); cap != item["capabilities"].end(); ++cap) {
+            if (!cap.value().is_boolean()) {
+                error_out = "capabilities." + cap.key() + " 必须是布尔值";
+                return std::nullopt;
+            }
+            entry.capabilities[cap.key()] = cap.value().get<bool>();
+        }
+    }
+
     return entry;
 }
 
@@ -191,6 +208,21 @@ ModelCatalog BuiltinModelsFromProviderCatalog() {
             entry.context_window_tokens = model.context_window_tokens;
             entry.max_output_tokens = model.max_output_tokens;
             entry.reasoning = model.reasoning;
+            entry.capabilities = model.capabilities;
+            // 巡检单 P2(推理档位边界):目录声明"只出图、不吃推理"的模型
+            //(image-generation=true 且 reasoning 不在能力表),推理档案
+            // 显式落 declined——四家 wire 一律停发推理参数;用户档位
+            //(current_think)不动,切回推理模型照旧生效。目录没写
+            // capabilities 的照旧走 legacy(不猜)。
+            if (model.reasoning.empty() && !model.capabilities.empty()) {
+                const auto cap = [&model](const char* key) {
+                    const auto it = model.capabilities.find(key);
+                    return it != model.capabilities.end() && it->second;
+                };
+                if (cap("image-generation") && !cap("reasoning")) {
+                    entry.reasoning.declined = true;
+                }
+            }
             for (const auto& effort : model.reasoning.supported_efforts) {
                 entry.supported_think_levels.push_back(ThinkLevel{effort, {}});
             }
@@ -201,6 +233,27 @@ ModelCatalog BuiltinModelsFromProviderCatalog() {
 }
 
 }  // namespace
+
+ModelEndpointKind ClassifyModelEndpoint(const ModelCatalogEntry* entry, const std::string& model_id) {
+    const auto cap = [entry](const char* key) {
+        if (entry == nullptr) {
+            return false;
+        }
+        const auto it = entry->capabilities.find(key);
+        return it != entry->capabilities.end() && it->second;
+    };
+    // 名字兜底:中转家的活列表常有目录没收的名字(ccmoon 的
+    // gpt-4o-realtime-preview 就不在内置目录里),"realtime" 字样是行业
+    // 通名,认它不至于误伤普通模型。
+    const std::string lowered = ToLowerAscii(model_id);
+    if (cap("realtime") || lowered.find("realtime") != std::string::npos) {
+        return ModelEndpointKind::Realtime;
+    }
+    if (cap("image-generation") && !cap("reasoning")) {
+        return ModelEndpointKind::ImageGen;
+    }
+    return ModelEndpointKind::Standard;
+}
 
 const ModelCatalogEntry* ModelCatalog::FindBySlug(const std::string& slug) const {
     for (const auto& entry : models) {

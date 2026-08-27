@@ -347,3 +347,71 @@ TEST_CASE("RememberModelChoiceInCatalog: 新建、幂等、保字段、坏 JSON 
 
     std::filesystem::remove_all(dir, ec);
 }
+
+
+
+// ---------------------------------------------------------------------------
+// ccmoon 真机巡检单 P1:端点能力分类(ClassifyModelEndpoint)与
+// capabilities 解析。判词边界:只说"当前 wire 大概率不通",不判模型死刑,
+// 也不判中转的 Realtime 路由通不通。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ClassifyModelEndpoint:Realtime 三路认得出,音频与普通模型不误伤") {
+    // 名字兜底:中转活列表里的名字(ccmoon 的 gpt-4o-realtime-preview
+    // 不在内置目录)靠 "realtime" 通名认。
+    CHECK(config::ClassifyModelEndpoint(nullptr, "gpt-4o-realtime-preview") ==
+          config::ModelEndpointKind::Realtime);
+    CHECK(config::ClassifyModelEndpoint(nullptr, "gpt-realtime-2") == config::ModelEndpointKind::Realtime);
+
+    // 目录能力键:realtime=true(内置目录给 gpt-realtime-* 挂的凭据)。
+    config::ModelCatalogEntry realtime_entry;
+    realtime_entry.slug = "some-rt";
+    realtime_entry.capabilities["realtime"] = true;
+    CHECK(config::ClassifyModelEndpoint(&realtime_entry, "some-rt") == config::ModelEndpointKind::Realtime);
+
+    // 音频模型不吃"realtime"判词(巡检单:Audio 没实跑,不判死刑)。
+    CHECK(config::ClassifyModelEndpoint(nullptr, "gpt-4o-audio-preview") == config::ModelEndpointKind::Standard);
+    config::ModelCatalogEntry audio_entry;
+    audio_entry.slug = "gpt-audio";
+    audio_entry.capabilities["audio-recognition"] = true;
+    audio_entry.capabilities["audio-generation"] = true;
+    CHECK(config::ClassifyModelEndpoint(&audio_entry, "gpt-audio") == config::ModelEndpointKind::Standard);
+
+    // 普通文本/工具模型零误伤。
+    CHECK(config::ClassifyModelEndpoint(nullptr, "gpt-5.6-luna") == config::ModelEndpointKind::Standard);
+    CHECK(config::ClassifyModelEndpoint(nullptr, "minimax-m3") == config::ModelEndpointKind::Standard);
+
+    // 只出图的模型(catalog image-generation 且不吃 reasoning)。
+    config::ModelCatalogEntry image_entry;
+    image_entry.slug = "gpt-image-1-5";
+    image_entry.capabilities["image-generation"] = true;
+    image_entry.capabilities["image"] = true;
+    CHECK(config::ClassifyModelEndpoint(&image_entry, "gpt-image-1-5") == config::ModelEndpointKind::ImageGen);
+}
+
+TEST_CASE("models.json 条目可写 capabilities(布尔键值,坏值按坏条目拒)") {
+    const auto parsed = config::ParseModelCatalogJson(
+        R"({"models":[)"
+        R"({"slug":"rt-x","capabilities":{"realtime":true}},)"
+        R"({"slug":"plain-y"})"
+        R"(]})",
+        "test-models.json");
+    REQUIRE(parsed.models.size() == 2);
+    CHECK(parsed.models[0].capabilities.at("realtime") == true);
+    CHECK(parsed.models[1].capabilities.empty());
+    CHECK(config::ClassifyModelEndpoint(&parsed.models[0], "rt-x") == config::ModelEndpointKind::Realtime);
+
+    const auto bad = config::ParseModelCatalogJson(
+        R"({"models":[{"slug":"bad","capabilities":{"realtime":"yes"}}]})", "test-models.json");
+    CHECK(bad.models.empty());
+    CHECK(bad.warnings.size() == 1);
+}
+
+TEST_CASE("目录声明不吃推理(declined):出图模型停发档位,回来恢复") {
+    // 巡检单 P2:catalog 的 image-generation 且无 reasoning 能力 → 推理
+    // 档案 declined,四家 wire 停发推理参数;普通模型档案不动(legacy
+    // 照发,不猜)。reasoning.effort 是否仍发由各家 request 单测对账。
+    config::ModelCatalogEntry image_gen;
+    image_gen.capabilities["image-generation"] = true;
+    CHECK(config::ClassifyModelEndpoint(&image_gen, "img-x") == config::ModelEndpointKind::ImageGen);
+}

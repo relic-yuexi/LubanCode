@@ -23,6 +23,7 @@
 
 #include <cstddef>
 #include <expected>
+#include <map>
 #include <optional>
 #include <string>
 #include <vector>
@@ -60,7 +61,25 @@ struct ModelCatalogEntry {
     std::optional<bool> supports_parallel_tool_calls;  // 暂不启用
     std::vector<std::string> input_modalities;          // 暂不启用
     std::string truncation_policy;                       // 暂不启用
+    // 端点能力(ccmoon 巡检单 P1):自 provider catalog 的 capabilities 抄
+    // 来,用户 models.json 条目也可自写。认的键见 ClassifyModelEndpoint
+    //(realtime/image-generation/reasoning/...),目录没写的键当没声明。
+    // 这不是"模型会不会干活"的判词,只给 /model 的端点相性提示用。
+    std::map<std::string, bool> capabilities;
 };
+
+// 模型与请求端点的相性分类(纯函数):catalog 条目的 capabilities 与模型
+// 名合判。Realtime 模型(gpt-*-realtime-* 一类)吃的是 Realtime/WebSocket
+// 端点,LubanCode 的四家 wire 没有一家走得通——它们混进 /model 菜单时挂
+// 醒目标记、确认前说清"多半不走当前 wire"。判词的边界:这只说"当前
+// wire 大概率不通",不判模型死刑,也不判那家中转的 Realtime 路由通不通
+//(巡检单:Realtime 报错只证明这家中转的 Responses 路由不通)。
+enum class ModelEndpointKind {
+    Standard,   // 普通 chat/responses 模型
+    Realtime,   // Realtime 端点模型(catalog realtime 能力或名字带 realtime)
+    ImageGen,   // 只出图的模型(catalog image-generation 且不吃 reasoning)
+};
+ModelEndpointKind ClassifyModelEndpoint(const ModelCatalogEntry* entry, const std::string& model_id);
 
 // 整份目录。source_path 空串 = 磁盘上没有这份文件(空目录,不算错)。
 // warnings 是解析时跳过的坏东西,一条一句人话,启动时打给用户看。

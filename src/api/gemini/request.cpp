@@ -136,7 +136,9 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
     // P1 方言对 gemini 家只做账面(verified/delta/replay):level 与 budget
     // 的选择仍由 wireDialect 走向 + 模型档案决定——两键并发服务端吃 400,
     // 方言不会同时把两只键点亮,选择逻辑与改前一致。
-    if (!request.reasoning_effort.empty()) {
+    // 巡检单 P2:目录明说不吃推理的模型(纯生成类)整个 thinkingConfig
+    // 不写——includeThoughts 也不发。
+    if (!request.reasoning_effort.empty() && !request.reasoning.declined) {
         const bool off = ReasoningEffortIsOff(request.reasoning_effort, request.reasoning);
         json thinking_config{{"includeThoughts", !off}};
         if (off && request.reasoning.supports_toggle) {

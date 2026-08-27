@@ -487,6 +487,12 @@ std::optional<std::string> ChooseModelId(const lubancode::runtime::ModelQueryRes
         } else {
             label = m.display_name.empty() ? m.id : m.display_name;
         }
+        // 端点相性标记(ccmoon 巡检单 P1):Realtime 模型混进菜单时挂
+        // 醒目标记,不当普通可用项。判词边界见 ClassifyModelEndpoint。
+        if (lubancode::config::ClassifyModelEndpoint(entry, m.id) ==
+            lubancode::config::ModelEndpointKind::Realtime) {
+            label += " [Realtime]";
+        }
         ids.push_back(m.id);
         items.push_back({label, current ? tr("cmd.model.current") : std::string{}});
     }

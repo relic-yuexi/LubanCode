@@ -81,6 +81,11 @@ std::optional<json> BuildThinkingJson(const Request& request) {
     if (request.reasoning_effort.empty()) {
         return std::nullopt;
     }
+    // 巡检单 P2:目录明说不吃推理的模型(纯生成类)不发 thinking——
+    // legacy 路径(档案空)照旧,显式 declined 的整个字段缺席。
+    if (request.reasoning.declined) {
+        return std::nullopt;
+    }
     const std::string lower = LowerReasoningEffort(request.reasoning_effort);
     if (ReasoningEffortIsOff(lower, request.reasoning)) {
         return json{{"type", "disabled"}};

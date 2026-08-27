@@ -68,20 +68,41 @@ std::optional<ModelProviderHop> ModelProviderHopFor(const lubancode::config::Mod
             return std::nullopt;
         }
     }
-    // 当前家没有:遍历列了这个模型名的各家条目,归属只认配置里真有的
-    // 那家(多家都配了取目录序第一);全是没配的家(比如只列在官方
-    // openai 条目下)才提示属谁未配置,模型照旧本家切,由调用方提示。
+    // 当前家没有:遍历列了这个模型名的各家条目。自动跳家只吃"权威且
+    // 唯一"的映射(巡检单 P1)——配置里真有的那家恰只一家才切;多家都
+    // 配了(中转常态:gateway 家与官方家都摆着同名模型)返回 ambiguous,
+    // 由调用方提示并留在本家,不拿目录序独断。全是没配的家(比如只列在
+    // 官方 openai 条目下)提示属谁未配置,模型照旧本家切,由调用方提示。
     const std::string* unconfigured = nullptr;
+    std::vector<const std::string*> configured_ids;
     for (const auto& entry : catalog.models) {
         if (entry.slug != model_id || entry.provider_id.empty()) {
             continue;  // 用户条目上面已按本家接住,这里只看各家归属
         }
         if (lubancode::config::FindProvider(providers, entry.provider_id) != nullptr) {
-            return ModelProviderHop{entry.provider_id, /*configured=*/true};
-        }
-        if (unconfigured == nullptr) {
+            bool seen = false;
+            for (const auto* id : configured_ids) {
+                seen = seen || *id == entry.provider_id;
+            }
+            if (!seen) {
+                configured_ids.push_back(&entry.provider_id);
+            }
+        } else if (unconfigured == nullptr) {
             unconfigured = &entry.provider_id;
         }
+    }
+    if (configured_ids.size() == 1) {
+        return ModelProviderHop{*configured_ids.front(), /*configured=*/true};
+    }
+    if (configured_ids.size() > 1) {
+        std::string joined;
+        for (const auto* id : configured_ids) {
+            if (!joined.empty()) {
+                joined += "/";
+            }
+            joined += *id;
+        }
+        return ModelProviderHop{joined, /*configured=*/false, /*ambiguous=*/true};
     }
     if (unconfigured != nullptr) {
         return ModelProviderHop{*unconfigured, /*configured=*/false};
@@ -162,38 +183,115 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
     // 选定模型 id:带参直切用参数;裸敲先拉清单,菜单(交互)或
     // 编号(管道)选一项。到这里两条输入路合流。
     std::string chosen = args;
+    // 活列表证据(ccmoon 巡检单 P1):chosen 选自当前家真机 /models 的
+    // 清单时为真——本轮不查跨家目录,先落痕再切,首选零误报。
+    bool from_live_list = false;
     if (chosen.empty()) {
         const auto query = command_service.QueryModels();
         if (query.fetch_failed) {
-            TermOut() << trf("cmd.model.fetch_failed", query.fetch_error) << "\n";
-            return;
+            // 真机列表失败才退静态,并把"静态"明写出来(验收:不可装作
+            // 真机单)。静态清单只列本家条目与用户条目,选中后照走静态
+            // 跨家判定(有提示,口径软)。
+            const auto static_query = [&]() -> std::optional<lubancode::runtime::ModelQueryResult> {
+                lubancode::runtime::ModelQueryResult out;
+                out.current_model = ctx.current_model ? *ctx.current_model : std::string();
+                const std::string active = ctx.active_provider != nullptr ? *ctx.active_provider : std::string();
+                for (const auto& entry : model_catalog.models) {
+                    if (!entry.provider_id.empty() && entry.provider_id != active) {
+                        continue;
+                    }
+                    bool duplicate = false;
+                    for (const auto& listed : out.models) {
+                        duplicate = duplicate || listed.id == entry.slug;
+                    }
+                    if (duplicate) {
+                        continue;
+                    }
+                    lubancode::runtime::ModelListEntry item;
+                    item.id = entry.slug;
+                    item.display_name = entry.display_name.empty() ? entry.slug : entry.display_name;
+                    item.current = item.id == out.current_model;
+                    out.models.push_back(std::move(item));
+                }
+                return out;
+            }();
+            if (!static_query.has_value() || static_query->models.empty()) {
+                TermOut() << trf("cmd.model.fetch_failed", query.fetch_error) << "\n";
+                return;
+            }
+            TermOut() << trf("cmd.model.static_list_header", query.fetch_error) << "\n";
+            const std::optional<std::string> picked = ChooseModelId(*static_query, model_catalog);
+            if (!picked.has_value()) {
+                return;
+            }
+            chosen = *picked;
+        } else {
+            if (query.models.empty()) {
+                TermOut() << tr("cmd.model.list_empty") << "\n";
+                return;
+            }
+            // 成功的真机清单自带 provider 证据:先说清这一单是谁家的,
+            // 从这张单选出的项本轮按本家算(下面先落痕再切,不查跨家)。
+            if (ctx.active_provider != nullptr && !ctx.active_provider->empty()) {
+                TermOut() << trf("cmd.model.live_list_header", query.models.size(), *ctx.active_provider) << "\n";
+            }
+            const std::optional<std::string> picked = ChooseModelId(query, model_catalog);
+            if (!picked.has_value()) {
+                return;  // 取消/编号作废,提示已就地打出。
+            }
+            chosen = *picked;
+            from_live_list = true;
         }
-        if (query.models.empty()) {
-            TermOut() << tr("cmd.model.list_empty") << "\n";
-            return;
+    }
+    // 端点相性(ccmoon 巡检单 P1):Realtime 模型混进菜单时,确认前说清
+    // "多半不走当前 wire"。只提示不拦——真机证明的只是这家中转的
+    // Responses 路由不通,不判模型死刑(音频模型同理,另跑真机再立结论)。
+    if (ctx.config != nullptr && ctx.model_catalog != nullptr) {
+        const auto* entry = model_catalog.FindBySlug(chosen);
+        if (lubancode::config::ClassifyModelEndpoint(entry, chosen) ==
+            lubancode::config::ModelEndpointKind::Realtime) {
+            TermOut() << trf("cmd.model.realtime_hint", chosen,
+                             lubancode::config::ProviderWireName(ctx.config->wire))
+                      << "\n";
         }
-        const std::optional<std::string> picked = ChooseModelId(query, model_catalog);
-        if (!picked.has_value()) {
-            return;  // 取消/编号作废,提示已就地打出。
+    }
+    // 活列表证据先行:选自本家真机清单的项,先把"这家确实用过这模型"
+    // 的凭据落进 models.json(0.26.64 的落痕机制,次序倒过来:先落痕,
+    // 再判定——落成了静态判定第一步自然认本家)。落不成也不碍事:
+    // 本轮照样按本家切,不走跨家判定,首选零误报(不许靠选第二回
+    // 自愈)。
+    if (from_live_list && ctx.active_provider != nullptr && !ctx.active_provider->empty()) {
+        const auto models_path = lubancode::config::ModelCatalogPath();
+        if (models_path.has_value()) {
+            const auto remembered = lubancode::config::RememberModelChoiceInCatalog(*models_path, *ctx.active_provider,
+                                                                                    chosen, chosen);
+            if (!remembered.has_value()) {
+                TermOut() << trf("cmd.model.remember_choice_failed", remembered.error()) << "\n";
+            }
         }
-        chosen = *picked;
     }
     // 统一提交:先跨家判定(/model 跨家收口)——所选模型目录条目声明了
     // 归属别家时,连 provider 一起切(base_url/鉴权/wire/目录声明全套,
     // 与 /provider switch 同一条 ExecuteProviderSwitch 路),再切换模型;
-    // 否则旧行为,只切模型不动连接。该家没配时不切不拦,名字记下来等
-    // 切成后以备注口吻说一句(第三轮返件:从"连接未换可能不认"的警告
-    // 降为备注——中转家的模型进得了活列表、进不了本地目录,报警告就
-    // 是唬人);缺密钥或没递切换能力照样如实拦,不留半切换。
+    // 否则旧行为,只切模型不动连接。活列表选出的项(from_live_list)整段
+    // 跳过:那是最硬的证据,本轮按本家切(巡检单 P1)。
+    // 该家没配时不切不拦,名字记下来等切成后以"某家目录也收录"的口吻
+    // 说一句——不可断言中转站不认(中转家活列表常常正列着它);多家
+    // 已配目录都列这名(ambiguous)留在本家,提示一句;缺密钥或没递
+    // 切换能力照样如实拦,不留半切换。
     bool switched_provider = false;
     std::string unconfigured_provider;  // 非空 = 切成后补一句备注
-    if (ctx.model_catalog != nullptr && ctx.active_provider != nullptr) {
+    if (!from_live_list && ctx.model_catalog != nullptr && ctx.active_provider != nullptr) {
         const std::vector<lubancode::config::ProviderConfig> no_providers;
         const std::vector<lubancode::config::ProviderConfig>& providers =
             ctx.providers != nullptr ? *ctx.providers : no_providers;
         const auto hop = ModelProviderHopFor(*ctx.model_catalog, providers, *ctx.active_provider, chosen);
         if (hop.has_value()) {
-            if (!hop->configured) {
+            if (hop->ambiguous) {
+                // 多家已配目录都列这名:不自动跳(只吃权威且唯一的映射),
+                // 留在本家切,提示一句。
+                TermOut() << trf("cmd.model.hop_ambiguous", chosen, hop->provider_id) << "\n";
+            } else if (!hop->configured) {
                 unconfigured_provider = hop->provider_id;
             } else if (!ctx.switch_provider) {
                 TermOut() << trf("cmd.model.other_provider_unswitchable", chosen, hop->provider_id) << "\n";
@@ -218,8 +316,9 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
     }
     // 活列表选择落痕(第三轮返件):切成的模型在当前家写一条用户条目进
     // models.json——"这家确实用过这模型"的真凭据,此后跨家判定第一步
-    // 认它,再切同名零提示。失败只报一行,不拦切换。
-    if (ctx.active_provider != nullptr && !ctx.active_provider->empty()) {
+    // 认它,再切同名零提示。失败只报一行,不拦切换。活列表路在判定前
+    // 已落过一回(证据先行),这里只补直输路的。
+    if (!from_live_list && ctx.active_provider != nullptr && !ctx.active_provider->empty()) {
         const auto models_path = lubancode::config::ModelCatalogPath();
         if (models_path.has_value()) {
             const auto remembered = lubancode::config::RememberModelChoiceInCatalog(
@@ -243,7 +342,9 @@ void HandleModelCommand(const ModelCommandContext& ctx, const std::string& args)
         TermOut() << trf("cmd.model.switched", result.model) << "\n";
     }
     if (!unconfigured_provider.empty()) {
-        TermOut() << trf("cmd.model.other_provider_note", result.model, unconfigured_provider) << "\n";
+        // 直输路径的静态归属只说"某家目录也收录",不断言中转站不认
+        //(巡检单 P1:自动跳家只吃权威且唯一的映射,提示口径同步放软)。
+        TermOut() << trf("cmd.model.catalog_also_lists", unconfigured_provider, result.model) << "\n";
     }
     if (result.think_from_catalog) {
         TermOut() << trf("catalog.apply_think", result.think) << "\n";
