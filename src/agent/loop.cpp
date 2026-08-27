@@ -5,6 +5,7 @@
 #include "agent/loop.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -29,11 +30,78 @@
 namespace lubancode::agent {
 
 namespace {
+constexpr std::size_t kContextPreflightHeadroomTokens = 512;
+
 // Unix epoch 毫秒(chrono 跨 clock 铁律:两枚 now 差只在这类帮手里出现,
 // 全文件统一走它)。批五乙收进统一墙钟:五套台账的真钟只 platform 一枚
 // 落点,口径不变。
 std::int64_t NowMsEpoch() {
     return platform::WallClockNowMs();
+}
+
+// 发送前的保守尺。日常预算仍用全库统一的 EstimateUtf8Tokens；临出门再
+// 给“空白隔开的短词”逐枚托底。`a a a ...` 在常见 tokenizer 里几乎一词
+// 一 token，旧尺只按 4 ASCII/ token 会少算一半，正是 MiniCPM 真机越窗
+// 的那副形状。取 max，不把普通长英文按一字一 token 粗暴拦掉。
+std::size_t EstimateTextTokensForPreflight(const std::string& text) {
+    std::size_t whitespace_terms = 0;
+    bool in_term = false;
+    for (const unsigned char ch : text) {
+        const bool separator = std::isspace(ch) != 0;
+        if (!separator && !in_term) {
+            ++whitespace_terms;
+        }
+        in_term = !separator;
+    }
+    return std::max(EstimateUtf8Tokens(text), whitespace_terms);
+}
+
+std::size_t EstimateMessageTokensForPreflight(const api::Message& message) {
+    std::size_t total = 0;
+    for (const auto& block : message.content) {
+        total += std::visit(
+            [](const auto& b) -> std::size_t {
+                using T = std::decay_t<decltype(b)>;
+                if constexpr (std::is_same_v<T, api::TextBlock>) {
+                    return EstimateTextTokensForPreflight(b.text);
+                } else if constexpr (std::is_same_v<T, api::ImageBlock>) {
+                    return (b.media_type.size() + b.data.size() + b.filename.size()) / 4;
+                } else if constexpr (std::is_same_v<T, api::ToolUseBlock>) {
+                    return EstimateTextTokensForPreflight(b.name) + EstimateTextTokensForPreflight(b.id) +
+                           EstimateTextTokensForPreflight(b.input.dump());
+                } else if constexpr (std::is_same_v<T, api::ToolResultBlock>) {
+                    return EstimateTextTokensForPreflight(b.tool_use_id) +
+                           EstimateTextTokensForPreflight(b.content);
+                } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
+                    return EstimateTextTokensForPreflight(b.text) + EstimateTextTokensForPreflight(b.signature);
+                } else {
+                    return 0;
+                }
+            },
+            block);
+    }
+    return total;
+}
+
+std::size_t EstimateRequestInputTokensForPreflight(const api::Request& request) {
+    std::size_t total = EstimateTextTokensForPreflight(request.system);
+    for (const auto& message : request.messages) total += EstimateMessageTokensForPreflight(message);
+    for (const auto& tool : request.tools) {
+        total += EstimateTextTokensForPreflight(tool.name) + EstimateTextTokensForPreflight(tool.description) +
+                 EstimateTextTokensForPreflight(tool.input_schema.dump());
+    }
+    return total;
+}
+
+std::size_t EstimateHistoryTokensForPreflight(const std::vector<api::Message>& messages) {
+    std::size_t total = 0;
+    for (const auto& message : messages) total += EstimateMessageTokensForPreflight(message);
+    return total;
+}
+
+bool ExceedsContextWindow(std::size_t input_tokens, std::size_t output_tokens, std::size_t window_tokens) {
+    return input_tokens >= window_tokens || output_tokens >= window_tokens - input_tokens ||
+           kContextPreflightHeadroomTokens >= window_tokens - input_tokens - output_tokens;
 }
 }  // namespace
 
@@ -617,6 +685,30 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         request.system = WithModelInstructions(request.system, agent.profile_.model_instructions);
         request.system = WithSoul(request.system, agent.profile_.soul);
         api::ApplyRequestProfile(request, agent.profile_.request);
+        // 每轮现拼:tool_search 可能刚在上一拍挂载新工具。压力预估与最终
+        // 发送必须吃同一份定义，免得先估旧表、后发新表。
+        request.tools = BuildToolDefinitions();
+        // 第一拍的新消息不可压。system、工具表与它自己已加输出预留越窗时，
+        // 先报错，连自动 compact 回调都不叫；压旧历史救不了这笔固定账。
+        if (step_index == 0 && profile_.context_window_tokens > 0 && !context_.request_history().empty()) {
+            std::size_t fixed_input_tokens = EstimateTextTokensForPreflight(request.system) +
+                                             EstimateMessageTokensForPreflight(context_.request_history().back());
+            for (const auto& tool : request.tools) {
+                fixed_input_tokens += EstimateTextTokensForPreflight(tool.name) +
+                                      EstimateTextTokensForPreflight(tool.description) +
+                                      EstimateTextTokensForPreflight(tool.input_schema.dump());
+            }
+            const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
+            const std::size_t output_tokens = static_cast<std::size_t>(output_budget.reserve_for_estimate());
+            if (ExceedsContextWindow(fixed_input_tokens, output_tokens, profile_.context_window_tokens)) {
+                return std::unexpected(
+                    "上下文预检未通过:当前消息与固定提示约 " + std::to_string(fixed_input_tokens) +
+                    " token + 输出预留 " + std::to_string(output_tokens) + " + 协议余量 " +
+                    std::to_string(kContextPreflightHeadroomTokens) + "，超过窗口 " +
+                    std::to_string(profile_.context_window_tokens) +
+                    "。当前消息本身已装不下，压缩旧历史也无济于事；请缩短输入或调低输出上限。");
+            }
+        }
         // 步数将尽提醒(第五期):固定文案,在"剩余步数第一次降到阈值"那一步
         // 追加进尚未发出的尾部消息(user 输入或刚攒完的 tool result),随
         // history 留住——不改 system,不撤旧提醒,追加律不破。ShouldNudge-
@@ -637,15 +729,13 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // unset 用保守估计(kUnsetOutputReserveEstimateTokens)——服务端
             // 默认上限拿不到准数,宁可早压不撞墙。
             const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
-            std::size_t projected = EstimateUtf8Tokens(request.system) +
-                                    EstimateHistoryTokens(context_.request_history()) +
+            std::size_t projected = EstimateTextTokensForPreflight(request.system) +
+                                    EstimateHistoryTokensForPreflight(context_.request_history()) +
                                     static_cast<std::size_t>(output_budget.reserve_for_estimate());
-            for (const auto& tool : registry_.All()) {
-                if (tool_filter_ && !tool_filter_(*tool)) {
-                    continue;
-                }
-                projected += EstimateUtf8Tokens(tool->name()) + EstimateUtf8Tokens(tool->description()) +
-                             EstimateUtf8Tokens(tool->input_schema().dump());
+            for (const auto& tool : request.tools) {
+                projected += EstimateTextTokensForPreflight(tool.name) +
+                             EstimateTextTokensForPreflight(tool.description) +
+                             EstimateTextTokensForPreflight(tool.input_schema.dump());
             }
             ContextPressure pressure;
             pressure.phase = ContextPressure::Phase::PreRequest;
@@ -686,17 +776,37 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         if (trim_report.trimmed_turns || trim_report.truncated_results) {
             context_.NotePendingEpochBreak("hard_trim");
         }
-        // 每轮现拼,不在 Run() 开头拼一次复用:tool_search 命中会在一次
-        // Run() 中途把工具加进 loaded 集合(谓词的判定依据),下一轮请求
-        // 就得带上新挂载工具的完整定义。没设谓词时,重拼出来的内容每轮
-        // 一样,行为不变,只多花一点拼 JSON 的工夫。
-        request.tools = BuildToolDefinitions();
-
         // 硬上限:轮级裁剪 + 工具结果截断都做完还是装不下(比如单条用户输入
         // 就超大),明确报错,不把一份注定被拒的超大请求发出去。
         if (EstimateHistoryBytes(request.messages) > profile_.max_context_chars) {
             return std::unexpected("上下文超过上限(" + std::to_string(profile_.max_context_chars) +
                                     " 字符),裁剪与截断后仍装不下,无法发送。请用 /compact 压缩历史,或开新会话。");
+        }
+
+        // token 窗口的最后一道硬闸。上面的压力回调已经有机会压缩；回来后
+        // 仍是“输入估算 + 输出预留 + 协议余量 > 窗口”，就地报错。尤其是
+        // 当前单条用户消息本身过大时，摘要压多少遍也救不了，不能再把同一
+        // 份请求发给 provider 撞 500。
+        if (profile_.context_window_tokens > 0) {
+            const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
+            const std::size_t input_tokens = EstimateRequestInputTokensForPreflight(request);
+            const std::size_t output_tokens = static_cast<std::size_t>(output_budget.reserve_for_estimate());
+            const std::size_t window_tokens = profile_.context_window_tokens;
+            const bool overflow = ExceedsContextWindow(input_tokens, output_tokens, window_tokens);
+            if (overflow) {
+                const std::size_t current_turn_tokens =
+                    request.messages.empty() ? 0 : EstimateMessageTokensForPreflight(request.messages.back());
+                const bool current_turn_alone_overflows =
+                    ExceedsContextWindow(current_turn_tokens, output_tokens, window_tokens);
+                return std::unexpected(
+                    "上下文预检未通过:输入约 " + std::to_string(input_tokens) + " token + 输出预留 " +
+                    std::to_string(output_tokens) + " + 协议余量 " +
+                    std::to_string(kContextPreflightHeadroomTokens) +
+                    "，超过窗口 " + std::to_string(window_tokens) +
+                    (current_turn_alone_overflows
+                         ? "。当前消息本身已装不下，压缩旧历史也无济于事；请缩短输入或调低输出上限。"
+                         : "。自动压缩后仍装不下；请开新会话、缩短输入，或调低输出上限。"));
+            }
         }
 
         // 前缀记账:与上一份请求比追加律。断了就开新 cache epoch,并点名

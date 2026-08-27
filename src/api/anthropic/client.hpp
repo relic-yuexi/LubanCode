@@ -34,6 +34,10 @@ namespace lubancode::api::anthropic {
 nlohmann::json BuildRequestJson(const Request& request, bool native_web_search = false,
                                  const nlohmann::json& extra_body = nlohmann::json::object());
 
+// 仅在“assistant(thinking + tool_use) -> user(tool_result)”这条续轮形状下
+// 开原始 think 标签兼容门。纯函数，给单测钉住，免得兼容范围日后悄悄放宽。
+bool ShouldRecoverTaggedThinking(const Request& request);
+
 // 纯函数:把 extra_headers 覆盖/追加到一份基础 HTTP 头表里(key 精确匹配
 // 大小写;真正发送时 cpr::Header 自身还会再做一层大小写不敏感的去重,这
 // 里只管"配置里写的头名对不对得上基础头哪一条"这一步)。单独拆出来给

@@ -866,6 +866,95 @@ TEST_CASE("上下文硬上限:裁剪与截断后仍超限(单条用户输入就�
     CHECK(backend.captured_requests.empty());  // 一次请求都没发出去
 }
 
+TEST_CASE("token 窗口预检:短词长串加输出预留越窗,本机拦下且不发请求") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("不该走到这里")};
+    tools::ToolRegistry registry;
+    agent::Agent loop(
+        backend, registry,
+        agent::AgentProfile{.request{.model = "test-model"},
+                            .runtime{.max_output_tokens = 8192,
+                                     .max_steps_per_turn = 25,
+                                     .max_context_chars = 200000,
+                                     .context_window_tokens = 32768},
+                            .system_prompt = "sys"});
+
+    std::string input;
+    input.reserve(60000);
+    for (int i = 0; i < 30000; ++i) input += "a ";
+    int pressure_calls = 0;
+    agent::AgentWiring wiring;
+    wiring.on_context_pressure = [&pressure_calls](const agent::ContextPressure&) { ++pressure_calls; };
+    loop.SetWiring(std::move(wiring));
+    const auto result = loop.Run(input, agent::TurnWiring{});
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("上下文预检未通过") != std::string::npos);
+    CHECK(result.error().find("当前消息本身已装不下") != std::string::npos);
+    CHECK(backend.captured_requests.empty());
+    CHECK(pressure_calls == 0);  // 不可压的新消息不白跑 compact
+}
+
+TEST_CASE("token 窗口预检:短词输入在线内不过度拦截") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("收到")};
+    tools::ToolRegistry registry;
+    agent::Agent loop(
+        backend, registry,
+        agent::AgentProfile{.request{.model = "test-model"},
+                            .runtime{.max_output_tokens = 8192,
+                                     .max_steps_per_turn = 25,
+                                     .max_context_chars = 200000,
+                                     .context_window_tokens = 32768},
+                            .system_prompt = "sys"});
+    std::string input;
+    for (int i = 0; i < 20000; ++i) input += "a ";
+
+    const auto result = loop.Run(input, agent::TurnWiring{});
+    REQUIRE(result.has_value());
+    CHECK(backend.captured_requests.size() == 1);
+}
+
+TEST_CASE("token 窗口预检:CJK、代码长串与 base64 图片都计入固定输入") {
+    const auto rejected_without_request = [](const char* shape, api::Message message) {
+        const std::string shape_name(shape);
+        CAPTURE(shape_name);
+        FakeBackend backend;
+        backend.scripts = {TextOnlyScript("不该发送")};
+        tools::ToolRegistry registry;
+        agent::Agent loop(
+            backend, registry,
+            agent::AgentProfile{.request{.model = "test-model"},
+                                .runtime{.max_output_tokens = 8192,
+                                         .max_steps_per_turn = 25,
+                                         .max_context_chars = 300000,
+                                         .context_window_tokens = 32768},
+                                .system_prompt = "sys"});
+        const auto result = loop.Run(std::move(message), agent::TurnWiring{});
+        CHECK_FALSE(result.has_value());
+        CHECK(backend.captured_requests.empty());
+    };
+
+    api::Message cjk;
+    cjk.role = api::Role::User;
+    std::string cjk_text;
+    for (int i = 0; i < 17000; ++i) cjk_text += "汉";
+    cjk.content.push_back(api::TextBlock{std::move(cjk_text)});
+    rejected_without_request("CJK", std::move(cjk));
+
+    api::Message code;
+    code.role = api::Role::User;
+    std::string code_text;
+    for (int i = 0; i < 30000; ++i) code_text += "x();";
+    code.content.push_back(api::TextBlock{std::move(code_text)});
+    rejected_without_request("code", std::move(code));
+
+    api::Message image;
+    image.role = api::Role::User;
+    image.content.push_back(api::ImageBlock{"image/png", std::string(120000, 'A'), "large.png"});
+    rejected_without_request("base64", std::move(image));
+}
+
 // ---------------------------------------------------------------------------
 // 步数将尽提醒:ShouldNudgeStepLimit 是纯函数,直接测触发时机;再用一个真跑
 // AgentLoop 的用例确认提醒文本真的附到了发出去的末条消息尾部。

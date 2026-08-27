@@ -37,6 +37,7 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
 #include <functional>
@@ -185,6 +186,70 @@ TEST_CASE("anthropic: SSE 半路断流(收到部分数据后服务器挂起不�
     CHECK(result.error().message == lubancode::cli::trf("error.network.stream_idle_timeout", kIdleTimeoutSecs));
     // 真的是空闲超时提前掐断的,不是傻等了服务器那 30 秒挂起。
     CHECK(elapsed < std::chrono::seconds(kIdleTimeoutSecs + 8));
+}
+
+TEST_CASE("anthropic: SSE 半路停住时 cancel 在 2s 内掐断,不等下一枚响应字节") {
+    const int port = StartFakeServer([](socket_t client) {
+        DrainRequest(client);
+        SendAll(client,
+                "HTTP/1.1 200 OK\r\n"
+                "Content-Type: text/event-stream\r\n"
+                "\r\n"
+                "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"test\"}}\n"
+                "\n");
+        std::this_thread::sleep_for(std::chrono::seconds(30));
+    });
+
+    lubancode::api::anthropic::AnthropicBackend backend(
+        "http://127.0.0.1:" + std::to_string(port), "test-token",
+        /*connect_timeout_ms=*/3000,
+        /*stream_idle_timeout_secs=*/25,
+        /*native_web_search=*/false, /*extra_body=*/{},
+        /*extra_headers=*/{},
+        /*request_hard_timeout_secs=*/0);
+    std::atomic<bool> cancel{false};
+    std::thread cancel_thread([&cancel]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        cancel.store(true);
+    });
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto result =
+        backend.send_stream(MakeMinimalRequest(), [](const lubancode::api::StreamEvent&) {}, &cancel);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    cancel_thread.join();
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().kind == lubancode::api::ErrorKind::Cancelled);
+    CHECK(elapsed < std::chrono::seconds(2));
+}
+
+TEST_CASE("anthropic: 服务端连响应头也不回时 cancel 在 2s 内掐断") {
+    const int port = StartFakeServer([](socket_t) {
+        std::this_thread::sleep_for(std::chrono::seconds(30));
+    });
+    lubancode::api::anthropic::AnthropicBackend backend(
+        "http://127.0.0.1:" + std::to_string(port), "test-token",
+        /*connect_timeout_ms=*/3000,
+        /*stream_idle_timeout_secs=*/25,
+        /*native_web_search=*/false, /*extra_body=*/{},
+        /*extra_headers=*/{},
+        /*request_hard_timeout_secs=*/0);
+    std::atomic<bool> cancel{false};
+    std::thread cancel_thread([&cancel]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(150));
+        cancel.store(true);
+    });
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto result =
+        backend.send_stream(MakeMinimalRequest(), [](const lubancode::api::StreamEvent&) {}, &cancel);
+    const auto elapsed = std::chrono::steady_clock::now() - start;
+    cancel_thread.join();
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().kind == lubancode::api::ErrorKind::Cancelled);
+    CHECK(elapsed < std::chrono::seconds(2));
 }
 
 TEST_CASE("responses: SSE 半路断流(收到部分数据后服务器挂起不再吭声)触发空闲读超时") {

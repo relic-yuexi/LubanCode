@@ -1494,6 +1494,9 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     TermOut() << "  active_provider    = "
               << (config.active_provider.empty() ? tr("config.not_set") : config.active_provider) << "  ["
               << lubancode::config::ToString(sources.active_provider) << "]\n";
+    if (lubancode::config::EnvironmentOverridesActiveProvider(config, sources, config.active_provider)) {
+        TermOut() << "  provider_binding   = env override / unbound\n";
+    }
     TermOut() << "  max_context_chars  = " << config.max_context_chars << "  ["
               << lubancode::config::ToString(sources.max_context_chars) << "]\n";
     TermOut() << "  max_steps_per_turn = " << config.max_steps_per_turn

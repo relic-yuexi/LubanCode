@@ -111,11 +111,13 @@ std::vector<api::StreamEvent> Replay(const ApiFixture& fixture, ChunkMode mode) 
         return raw;
     }();
     if (fixture.wire == "anthropic-messages") {
+        api::anthropic::EventParser parser(fixture.scenario == "post_tool_raw_think_tags_in_text_delta");
         for (const auto& raw : raw_frames) {
-            if (auto event = api::anthropic::parse_event(Frame(raw)); event.has_value()) {
-                events.push_back(*event);
+            for (auto& event : parser.Consume(Frame(raw))) {
+                events.push_back(std::move(event));
             }
         }
+        for (auto& event : parser.Finish()) events.push_back(std::move(event));
     } else if (fixture.wire == "openai-responses") {
         for (const auto& raw : raw_frames) {
             if (auto event = api::responses::parse_event(Frame(raw)); event.has_value()) {
@@ -246,26 +248,25 @@ TEST_CASE("fixture 回放:每册事件类型序列/usage/stop_reason 与 manifes
     }
 }
 
-TEST_CASE("vLLM MiniCPM5 工具后续实录:原始 think 标签确在 TextDelta,没有 ThinkingDelta") {
-    // 这是已知异常的 characterization test,不是把泄漏立成产品合同。修
-    // todos/MiniCPM5-1B真机巡检_Messages思考工具取消与上下文.todo 时,
-    // 须连同 fixture 的期望一道改成正确的 ThinkingDelta/正文边界。
+TEST_CASE("vLLM MiniCPM5 工具后续实录:原始 think 段隔离,不漏进正文与思考历史") {
     const auto fixture =
         lubancode_test::LoadApiFixture("anthropic_messages", "live_vllm_minicpm5_post_tool_raw_think");
     REQUIRE(fixture.has_value());
 
     const auto events = Replay(*fixture, ChunkMode::Whole);
     std::string text;
-    bool saw_thinking = false;
+    std::string thinking;
     for (const auto& event : events) {
         if (const auto* delta = std::get_if<api::TextDelta>(&event); delta != nullptr) {
             text += delta->text;
         }
-        saw_thinking = saw_thinking || std::holds_alternative<api::ThinkingDelta>(event);
+        if (const auto* delta = std::get_if<api::ThinkingDelta>(&event); delta != nullptr) {
+            thinking += delta->text;
+        }
     }
 
-    CHECK_FALSE(saw_thinking);
-    CHECK(text.starts_with("<think>"));
-    CHECK(text.find("</think>") != std::string::npos);
+    CHECK(thinking.empty());
+    CHECK(text.find("<think>") == std::string::npos);
+    CHECK(text.find("</think>") == std::string::npos);
     CHECK(text.find("project(lubancode VERSION") != std::string::npos);
 }

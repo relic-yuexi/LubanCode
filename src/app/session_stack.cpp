@@ -135,8 +135,12 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
 
     // 旧单端字段和某条 provider 完全对上时,起手就把它认作当前端。这样
     // /provider list 的标记和"当前端不能删"都不留空档。
-    stack->active_provider = config.active_provider;
-    if (stack->active_provider.empty()) {
+    const bool environment_unbound = lubancode::config::EnvironmentOverridesActiveProvider(
+        config, stack->config_result.sources, config.active_provider);
+    stack->active_provider = environment_unbound
+                                 ? std::string()
+                                 : lubancode::config::BoundProviderName(config, config.active_provider);
+    if (stack->active_provider.empty() && !environment_unbound) {
         for (const auto& provider : config.providers) {
             if (provider.wire == config.wire && provider.base_url == config.base_url &&
                 provider.model == config.model) {

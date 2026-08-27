@@ -860,7 +860,11 @@ void TerminalSessionController::Run() {
         status_data.cwd = CurrentDirUtf8();
         status_data.git_branch = lubancode::cli::CurrentGitBranch(std::filesystem::current_path());
         status_data.worktree = worktree_session.active_name();
-        status_data.provider = active_provider;
+        status_data.provider = lubancode::config::EnvironmentOverridesActiveProvider(
+                                   config_result.config, config_result.sources,
+                                   config_result.config.active_provider)
+                                   ? "env override / unbound"
+                                   : active_provider;
         status_data.effort = *current_think;
         status_data.context_percent = context_tracker.UsagePercent();
         status_data.used_tokens = static_cast<long long>(context_tracker.current_tokens());

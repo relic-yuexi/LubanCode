@@ -1367,6 +1367,32 @@ TEST_CASE("ToString(Source): 每种来源都有非空的中文说法,项目级/�
           config::ToString(config::Source::GlobalConfigFile));
 }
 
+TEST_CASE("环境变量把端点换离 active provider 时标作 unbound") {
+    config::Config cfg;
+    config::ProviderConfig provider;
+    provider.name = "preset-a";
+    provider.wire = config::Wire::Responses;
+    provider.base_url = "https://preset-a.example/v1";
+    provider.model = "gpt-5.6";
+    cfg.providers.push_back(provider);
+    cfg.active_provider = "preset-a";
+    cfg.wire = config::Wire::Anthropic;
+    cfg.base_url = "http://localhost:8001";
+    cfg.model = "MiniCPM5-1B";
+    config::ConfigSources sources;
+    sources.wire = config::Source::LubancodeEnv;
+    sources.base_url = config::Source::LubancodeEnv;
+    sources.model = config::Source::LubancodeEnv;
+
+    CHECK(config::EnvironmentOverridesActiveProvider(cfg, sources, "preset-a"));
+    CHECK(config::BoundProviderName(cfg, "preset-a").empty());
+    cfg.wire = provider.wire;
+    cfg.base_url = provider.base_url;
+    cfg.model = provider.model;
+    CHECK_FALSE(config::EnvironmentOverridesActiveProvider(cfg, sources, "preset-a"));
+    CHECK(config::BoundProviderName(cfg, "preset-a") == "preset-a");
+}
+
 // ---------------------------------------------------------------------------
 // RequireConfigured:base_url/api_key/model 三个字段都不许空,非交互路径
 // (单发模式/管道模式)用这个,跟只管 api_key 一个字段的 RequireApiKey 分开。
@@ -2550,12 +2576,20 @@ TEST_CASE("active_provider: LUBANCODE 专属环境变量仍压过 provider,旧�
     config::FileConfig global;
     global.source_path = "/global/config.json";
     global.active_provider = "sub";
+    global.think = "medium";  // 顶层明配，不算 provider 私货，须照旧保留。
     global.providers = std::vector<config::ProviderConfig>{{
         .name = "sub",
         .base_url = "https://provider.test",
         .wire = config::Wire::Responses,
         .api_key = "provider-key",
         .model = "provider-model",
+        .model_reasoning_effort = "xhigh",
+        .context_window_tokens = 12345,
+        .native_web_search = true,
+        .stream_usage = true,
+        .reasoning_replay = "tool_episode",
+        .supported_think_levels = {"low", "xhigh"},
+        .metrics_url = "https://provider.test/metrics",
     }};
     config::LubancodeEnvValues env;
     env.base_url = "https://env.test";
@@ -2567,6 +2601,14 @@ TEST_CASE("active_provider: LUBANCODE 专属环境变量仍压过 provider,旧�
     CHECK(merged->config.base_url == "https://env.test");
     CHECK(merged->config.auth_token == "env-key");
     CHECK(merged->config.model == "env-model");
+    CHECK(merged->config.context_window_tokens != 12345);
+    CHECK(merged->config.think == "medium");
+    CHECK_FALSE(merged->config.native_web_search);
+    CHECK_FALSE(merged->config.stream_usage);
+    CHECK(merged->config.reasoning_replay.empty());
+    CHECK(merged->config.provider_think_levels.empty());
+    CHECK(merged->config.metrics_url.empty());
+    CHECK(config::EnvironmentOverridesActiveProvider(merged->config, merged->sources, "sub"));
 
     merged->config.active_provider = "removed";
     CHECK_FALSE(config::ApplyConfiguredActiveProvider(*merged));

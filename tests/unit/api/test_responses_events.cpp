@@ -363,6 +363,18 @@ TEST_CASE("SummarizeErrorBodyForUser:抽 message/type/code、打码密钥、截�
     CHECK(truncated.find("截短") != std::string::npos);
 }
 
+TEST_CASE("SummarizeErrorBodyForUser:provider 错报 500 时仍分清上下文与图片能力") {
+    const std::string context = SummarizeErrorBodyForUser(
+        R"({"error":{"message":"maximum context length is 32768: input 24577 + output 8192","type":"internal_error"}})");
+    CHECK(context.find("上下文超出模型窗口") != std::string::npos);
+    CHECK(context.find("internal_error") != std::string::npos);
+
+    const std::string image = SummarizeErrorBodyForUser(
+        R"({"error":{"message":"MiniCPM5-1B is not a multimodal model","type":"internal_error"}})");
+    CHECK(image.find("当前模型不支持图片输入") != std::string::npos);
+    CHECK(image.find("MiniCPM5-1B") != std::string::npos);
+}
+
 TEST_CASE("坏掉的 JSON 不会崩,只是跳过") {
     auto event = parse_event(Frame("{not valid json"));
     CHECK_FALSE(event.has_value());

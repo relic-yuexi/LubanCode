@@ -237,11 +237,13 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 函数,单发不再单写一枚 4096。
     const lubancode::agent::AgentRuntimeProfile main_profile =
         lubancode::app::BuildMainRuntimeProfile(config, &once_catalog, config.model);
+    const std::string bound_provider =
+        lubancode::config::BoundProviderName(config, config.active_provider);
     lubancode::agent::AgentProfile once_agent_profile;
-    once_agent_profile.provider = config.active_provider;
+    once_agent_profile.provider = bound_provider;
     once_agent_profile.request.model = config.model;
     once_agent_profile.request.reasoning_effort = config.think;
-    if (const auto* entry = once_catalog.FindByProviderAndSlug(config.active_provider, config.model);
+    if (const auto* entry = once_catalog.FindByProviderAndSlug(bound_provider, config.model);
         entry != nullptr) {
         once_agent_profile.request.reasoning = entry->reasoning;
     }

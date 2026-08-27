@@ -443,7 +443,7 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         lubancode::ptc::PtcStatus profile_status = lubancode::ptc::PtcStatus::Unknown;
         if (!store_path.empty()) {
             const std::string fingerprint = lubancode::ptc::BuildPtcFingerprint(
-                config.active_provider, config.base_url, config.model,
+                lubancode::config::BoundProviderName(config, config.active_provider), config.base_url, config.model,
                 lubancode::config::ProviderWireName(config.wire), tool->available() ? "py" : "",
                 lubancode::ptc::kPtcHarnessRevision);
             lubancode::ptc::PtcProfileStore store(store_path);

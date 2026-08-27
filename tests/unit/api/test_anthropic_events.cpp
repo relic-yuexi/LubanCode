@@ -4,7 +4,9 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <variant>
+#include <vector>
 
 #include "api/anthropic/events.hpp"
 #include "api/sse_framing.hpp"
@@ -294,4 +296,75 @@ TEST_CASE("字段类型不对(type_error 一族)不抛异常、不崩,当坏帧�
     // 坏帧的结果是"跳过",不是半个歪事件。
     auto bad = parse_event(Frame(R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":42}})"));
     CHECK_FALSE(bad.has_value());
+}
+
+TEST_CASE("工具续轮兼容:think 开闭标签横跨 delta 时隔离思考,只留正文") {
+    anthropic::EventParser parser(/*recover_tagged_thinking=*/true);
+    std::vector<StreamEvent> events;
+    const std::vector<std::string> frames = {
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<thi"}})",
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"nk>先查"}})",
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"清楚</thi"}})",
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"nk>\n\n答案"}})",
+        R"({"type":"content_block_stop","index":0})",
+    };
+    for (const auto& raw : frames) {
+        for (auto& event : parser.Consume(Frame(raw))) events.push_back(std::move(event));
+    }
+
+    std::string thinking;
+    std::string text;
+    for (const auto& event : events) {
+        if (const auto* delta = std::get_if<ThinkingDelta>(&event)) thinking += delta->text;
+        if (const auto* delta = std::get_if<TextDelta>(&event)) text += delta->text;
+    }
+    CHECK(thinking.empty());
+    CHECK(text == "\n\n答案");
+    CHECK(parser.recovered_tagged_thinking());
+}
+
+TEST_CASE("工具续轮兼容:普通正文与正文中间的 think 标签一字不改") {
+    anthropic::EventParser parser(/*recover_tagged_thinking=*/true);
+    const auto first = parser.Consume(Frame(
+        R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"XML 示例: <think>保留</think>"}})"));
+    REQUIRE(first.size() == 1);
+    REQUIRE(std::holds_alternative<TextDelta>(first[0]));
+    CHECK(std::get<TextDelta>(first[0]).text == "XML 示例: <think>保留</think>");
+}
+
+TEST_CASE("工具续轮兼容:正文从 think 标签开头但没有空行后续时原样保留") {
+    anthropic::EventParser parser(/*recover_tagged_thinking=*/true);
+    std::vector<StreamEvent> events;
+    for (auto& event : parser.Consume(Frame(
+             R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<think>XML 字面量</think>直接说明"}})"))) {
+        events.push_back(std::move(event));
+    }
+    for (auto& event : parser.Consume(Frame(R"({"type":"content_block_stop","index":0})"))) {
+        events.push_back(std::move(event));
+    }
+    std::string text;
+    for (const auto& event : events) {
+        if (const auto* delta = std::get_if<TextDelta>(&event)) text += delta->text;
+    }
+    CHECK(text == "<think>XML 字面量</think>直接说明");
+    CHECK_FALSE(parser.recovered_tagged_thinking());
+}
+
+TEST_CASE("工具续轮兼容:think 标签没闭合时报协议错,不漏进正文") {
+    anthropic::EventParser parser(/*recover_tagged_thinking=*/true);
+    std::vector<StreamEvent> events;
+    for (auto& event : parser.Consume(Frame(
+             R"({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"<think>半截思考"}})"))) {
+        events.push_back(std::move(event));
+    }
+    for (auto& event : parser.Consume(Frame(R"({"type":"content_block_stop","index":0})"))) {
+        events.push_back(std::move(event));
+    }
+
+    CHECK(std::none_of(events.begin(), events.end(), [](const StreamEvent& event) {
+        const auto* text = std::get_if<TextDelta>(&event);
+        return text != nullptr && text->text.find("<think>") != std::string::npos;
+    }));
+    CHECK(std::any_of(events.begin(), events.end(),
+                      [](const StreamEvent& event) { return std::holds_alternative<StreamError>(event); }));
 }

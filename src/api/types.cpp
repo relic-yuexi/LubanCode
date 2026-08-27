@@ -64,6 +64,22 @@ std::string TruncateForUser(std::string text) {
     return text;
 }
 
+std::string HumanizeKnownProviderError(std::string text) {
+    std::string lower = text;
+    std::transform(lower.begin(), lower.end(), lower.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (lower.find("maximum context length") != std::string::npos ||
+        lower.find("context length exceeded") != std::string::npos ||
+        (lower.find("context window") != std::string::npos && lower.find("exceed") != std::string::npos)) {
+        return "上下文超出模型窗口；请缩短输入、开新会话，或调低输出上限。服务端原话: " + text;
+    }
+    if (lower.find("not a multimodal model") != std::string::npos ||
+        (lower.find("image input") != std::string::npos && lower.find("not support") != std::string::npos)) {
+        return "当前模型不支持图片输入；请换多模态模型。服务端原话: " + text;
+    }
+    return text;
+}
+
 }  // namespace
 
 std::string SummarizeErrorBodyForUser(const std::string& body) {
@@ -95,7 +111,7 @@ std::string SummarizeErrorBodyForUser(const std::string& body) {
     } catch (const nlohmann::json::exception&) {
         // 不是 JSON:原文走同一道打码截短。
     }
-    return TruncateForUser(MaskSecrets(std::move(flat)));
+    return TruncateForUser(MaskSecrets(HumanizeKnownProviderError(std::move(flat))));
 }
 
 namespace {

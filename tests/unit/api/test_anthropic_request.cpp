@@ -17,7 +17,27 @@
 
 using namespace lubancode::api;
 namespace platform = lubancode::platform;
+namespace api = lubancode::api;
 using lubancode::api::anthropic::BuildRequestJson;
+
+TEST_CASE("原始 think 兼容门只认 thinking+tool_use 紧接 tool_result") {
+    api::Request request;
+    request.messages = {
+        api::Message{api::Role::User, {api::TextBlock{"读文件"}}},
+        api::Message{api::Role::Assistant,
+                     {api::ThinkingBlock{"先读", "sig"},
+                      api::ToolUseBlock{"toolu_1", "read_file", nlohmann::json::object()}}},
+        api::Message{api::Role::User, {api::ToolResultBlock{"toolu_1", "内容", false}}},
+    };
+    CHECK(api::anthropic::ShouldRecoverTaggedThinking(request));
+
+    request.messages[1].content.erase(request.messages[1].content.begin());
+    CHECK_FALSE(api::anthropic::ShouldRecoverTaggedThinking(request));
+
+    request.messages[1].content.insert(request.messages[1].content.begin(), api::ThinkingBlock{"先读", "sig"});
+    request.messages.back() = api::Message{api::Role::User, {api::TextBlock{"普通追问"}}};
+    CHECK_FALSE(api::anthropic::ShouldRecoverTaggedThinking(request));
+}
 
 TEST_CASE("reasoning_effort 为空串时不写 thinking 字段") {
     Request request;

@@ -70,6 +70,19 @@ enum class Source {
 // 中文说法,--config 打印用。
 std::string ToString(Source source);
 
+struct Config;
+struct ConfigSources;
+
+// active_provider 仍是一枚配置指针；若环境变量把 wire/base_url/model 中
+// 任一项换成了该 provider 之外的值，运行连接便已脱钩。状态栏与 /config
+// 共用这只判定，免得一边冒认旧 provider，一边又说字段来自 env。
+bool EnvironmentOverridesActiveProvider(const Config& config, const ConfigSources& sources,
+                                         const std::string& active_provider);
+
+// 返回真正与当前 wire/base_url/model 三件套对得上的 provider 名；旧选择名
+// 只要有一件对不上就不冒认。请求画像、模型目录与会话路由共用。
+std::string BoundProviderName(const Config& config, const std::string& active_provider);
+
 // max_context_chars 的内置默认值(字符数)。跟 agent::kDefaultMaxContextChars
 // 数值上保持一致,但 config 层不依赖 agent 层(依赖只许单向,cli -> agent ->
 // api/tools;config 不该反过来牵扯 agent),所以这里单独定义一份。

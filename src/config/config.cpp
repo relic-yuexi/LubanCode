@@ -278,6 +278,21 @@ const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers,
     return nullptr;
 }
 
+namespace {
+
+bool IsEnvironmentSource(Source source) {
+    return source == Source::LubancodeEnv || source == Source::GenericEnv;
+}
+
+bool EnvironmentOverridesProviderBinding(const Config& config, const ConfigSources& sources,
+                                         const ProviderConfig& provider) {
+    return (IsEnvironmentSource(sources.wire) && config.wire != provider.wire) ||
+           (IsEnvironmentSource(sources.base_url) && config.base_url != provider.base_url) ||
+           (IsEnvironmentSource(sources.model) && !provider.model.empty() && config.model != provider.model);
+}
+
+}  // namespace
+
 void ApplyProviderToRuntimeConfig(Config& config, const ProviderConfig& provider) {
     const ProviderAuthResolution auth = ResolveProviderAuth(provider);
     config.wire = provider.wire;
@@ -312,6 +327,8 @@ bool ApplyConfiguredActiveProvider(ConfigResult& result) {
         result.sources.active_provider = Source::Default;
         return false;
     }
+    const bool environment_unbound =
+        EnvironmentOverridesProviderBinding(result.config, result.sources, *provider);
 
     // Source 枚举按优先级从高到低排列。选择名与 provider 条目两者谁
     // 层级更高就按谁算；只覆盖同级或更低字段。
@@ -330,7 +347,7 @@ bool ApplyConfiguredActiveProvider(ConfigResult& result) {
         result.config.base_url = provider->base_url;
         result.sources.base_url = source;
     }
-    if (can_override(result.sources.auth_token)) {
+    if (!environment_unbound && can_override(result.sources.auth_token)) {
         // 鉴权三态:auth=none 时 auth_token 就是空,但那是合法状态——把模式
         // 一并镜像过去,RequireApiKey 靠它分"无需鉴权"与"缺 key"。
         result.config.auth_token = ProviderApiKey(*provider).value_or(std::string());
@@ -341,35 +358,51 @@ bool ApplyConfiguredActiveProvider(ConfigResult& result) {
         result.config.model = provider->model;
         result.sources.model = source;
     }
-    if (can_override(result.sources.context_window_tokens)) {
+    if (!environment_unbound && can_override(result.sources.context_window_tokens)) {
         result.config.context_window_tokens = provider->context_window_tokens;
         result.sources.context_window_tokens = source;
     }
-    if (!provider->model_reasoning_effort.empty() && can_override(result.sources.think)) {
+    if (!environment_unbound && !provider->model_reasoning_effort.empty() && can_override(result.sources.think)) {
         result.config.think = provider->model_reasoning_effort;
         result.sources.think = source;
     }
-    if (can_override(result.sources.extra_body)) {
+    if (!environment_unbound && can_override(result.sources.extra_body)) {
         result.config.extra_body = provider->extra_body;
         result.sources.extra_body = source;
     }
-    if (can_override(result.sources.extra_headers)) {
+    if (!environment_unbound && can_override(result.sources.extra_headers)) {
         result.config.extra_headers = provider->extra_headers;
         result.sources.extra_headers = source;
     }
-    result.config.native_web_search = provider->native_web_search;
-    result.config.stream_usage = provider->stream_usage;
-    result.config.reasoning_replay = provider->reasoning_replay;
-    result.config.reasoning_delta_field = provider->reasoning_delta_field;
-    result.config.reasoning_replay_field = provider->reasoning_replay_field;
-    // Effort/缓存诊断声明镜像(本地兼容端诊断单):provider 是唯一来源,
-    // 切过去就带上;单 provider 顶层写法没有条目,镜像字段保持默认(未声明)。
-    result.config.provider_think_levels = provider->supported_think_levels;
-    result.config.think_param = provider->think_param;
-    result.config.think_passthrough = provider->think_passthrough;
-    result.config.metrics_url = provider->metrics_url;
-    result.config.provider_max_output_tokens = provider->max_output_tokens;
-    result.config.stream_usage_declared = provider->stream_usage_declared;
+    if (!environment_unbound) {
+        result.config.native_web_search = provider->native_web_search;
+        result.config.stream_usage = provider->stream_usage;
+        result.config.reasoning_replay = provider->reasoning_replay;
+        result.config.reasoning_delta_field = provider->reasoning_delta_field;
+        result.config.reasoning_replay_field = provider->reasoning_replay_field;
+        // Effort/缓存诊断声明镜像(本地兼容端诊断单):provider 是唯一来源,
+        // 切过去就带上;单 provider 顶层写法没有条目,镜像字段保持默认(未声明)。
+        result.config.provider_think_levels = provider->supported_think_levels;
+        result.config.think_param = provider->think_param;
+        result.config.think_passthrough = provider->think_passthrough;
+        result.config.metrics_url = provider->metrics_url;
+        result.config.provider_max_output_tokens = provider->max_output_tokens;
+        result.config.stream_usage_declared = provider->stream_usage_declared;
+    } else {
+        // 这枚 ConfigResult 也可能被调用方重复套用。既已脱钩，旧 provider
+        // 的镜像值须当场倒干净，不能仗着“启动时多半是默认值”碰运气。
+        result.config.native_web_search = false;
+        result.config.stream_usage = false;
+        result.config.reasoning_replay.clear();
+        result.config.reasoning_delta_field.clear();
+        result.config.reasoning_replay_field.clear();
+        result.config.provider_think_levels.clear();
+        result.config.think_param.clear();
+        result.config.think_passthrough = true;
+        result.config.metrics_url.clear();
+        result.config.provider_max_output_tokens.reset();
+        result.config.stream_usage_declared = false;
+    }
     return true;
 }
 
@@ -462,6 +495,27 @@ std::string ToString(Source source) {
             return cli::tr("config.source.default");
     }
     return cli::tr("config.source.unknown");
+}
+
+bool EnvironmentOverridesActiveProvider(const Config& config, const ConfigSources& sources,
+                                        const std::string& active_provider) {
+    if (active_provider.empty()) {
+        return false;
+    }
+    const ProviderConfig* provider = FindProvider(config.providers, active_provider);
+    if (provider == nullptr) {
+        return false;
+    }
+    return EnvironmentOverridesProviderBinding(config, sources, *provider);
+}
+
+std::string BoundProviderName(const Config& config, const std::string& active_provider) {
+    const ProviderConfig* provider = FindProvider(config.providers, active_provider);
+    if (provider == nullptr || config.wire != provider->wire || config.base_url != provider->base_url ||
+        (!provider->model.empty() && config.model != provider->model)) {
+        return {};
+    }
+    return active_provider;
 }
 
 std::string ToString(ToolCallingMode mode) {

@@ -1,5 +1,9 @@
 #include "api/anthropic/events.hpp"
 
+#include <cctype>
+#include <string_view>
+#include <utility>
+
 #include <nlohmann/json.hpp>
 
 namespace lubancode::api::anthropic {
@@ -154,6 +158,131 @@ std::optional<StreamEvent> parse_event(const SseFrame& frame) try {
     // 就是未定义行为/进程崩溃。坏帧一律当没看见;整条流缺了 MessageDone
     // 的兜底在 client 层(send_stream 末尾检查)。
     return std::nullopt;
+}
+
+std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
+    auto event = parse_event(frame);
+    if (!event.has_value()) {
+        return {};
+    }
+    return ConsumeParsed(std::move(*event));
+}
+
+std::vector<StreamEvent> EventParser::ConsumeParsed(StreamEvent event) {
+    if (!recover_tagged_thinking_) {
+        return {std::move(event)};
+    }
+    if (auto* text = std::get_if<TextDelta>(&event); text != nullptr) {
+        return ConsumeText(std::move(text->text));
+    }
+
+    // 正规 thinking_delta 已经到了，说明端点这轮守协议。其后的正文即使
+    // 恰从 `<think>` 开头，也该按正文保留。
+    if (std::holds_alternative<ThinkingDelta>(event) && tagged_state_ == TaggedThinkingState::Probe &&
+        pending_.empty()) {
+        tagged_state_ = TaggedThinkingState::Passthrough;
+    }
+
+    std::vector<StreamEvent> out;
+    if ((std::holds_alternative<ContentBlockDone>(event) || std::holds_alternative<MessageDone>(event)) &&
+        (tagged_state_ == TaggedThinkingState::Probe || tagged_state_ == TaggedThinkingState::Thinking ||
+         tagged_state_ == TaggedThinkingState::AwaitingAnswer)) {
+        out = CloseOpenProbe();
+    }
+    out.push_back(std::move(event));
+    return out;
+}
+
+std::vector<StreamEvent> EventParser::ConsumeText(std::string text) {
+    static constexpr std::string_view kOpen = "<think>";
+    static constexpr std::string_view kClose = "</think>";
+
+    if (tagged_state_ == TaggedThinkingState::Passthrough ||
+        tagged_state_ == TaggedThinkingState::AfterThinking ||
+        tagged_state_ == TaggedThinkingState::Failed) {
+        return {TextDelta{std::move(text)}};
+    }
+
+    std::vector<StreamEvent> out;
+    pending_ += text;
+    if (tagged_state_ == TaggedThinkingState::AwaitingAnswer) {
+        const std::size_t close_at = pending_.find(kClose);
+        const std::size_t after_close = close_at + kClose.size();
+        const std::string_view suffix(pending_.data() + after_close, pending_.size() - after_close);
+        std::size_t first_text = 0;
+        std::size_t newlines = 0;
+        while (first_text < suffix.size() &&
+               std::isspace(static_cast<unsigned char>(suffix[first_text])) != 0) {
+            if (suffix[first_text] == '\n') ++newlines;
+            ++first_text;
+        }
+        if (first_text == suffix.size()) {
+            return out;  // 眼下只有分隔空白，等下一枚 delta 再定。
+        }
+        if (newlines < 2) {
+            tagged_state_ = TaggedThinkingState::Passthrough;
+            out.push_back(TextDelta{std::exchange(pending_, {})});
+            return out;
+        }
+        recovered_tagged_thinking_ = true;
+        out.push_back(TextDelta{pending_.substr(after_close)});
+        pending_.clear();
+        tagged_state_ = TaggedThinkingState::AfterThinking;
+        return out;
+    }
+
+    if (tagged_state_ == TaggedThinkingState::Probe) {
+        if (kOpen.starts_with(pending_)) {
+            return out;  // 开标签可能横跨多个 text_delta，先扣住。
+        }
+        if (!pending_.starts_with(kOpen)) {
+            tagged_state_ = TaggedThinkingState::Passthrough;
+            out.push_back(TextDelta{std::exchange(pending_, {})});
+            return out;
+        }
+        pending_.erase(0, kOpen.size());
+        tagged_state_ = TaggedThinkingState::Thinking;
+    }
+
+    const std::size_t close_at = pending_.find(kClose);
+    if (close_at != std::string::npos) {
+        pending_.insert(0, kOpen);
+        tagged_state_ = TaggedThinkingState::AwaitingAnswer;
+        return ConsumeText({});
+    }
+
+    // 原始标签里的字没有可信 signature，不能伪装成 ThinkingBlock 入历史：
+    // 下一轮按 Anthropic wire 重放会拿空签名撞 400。整段扣到闭标签再丢，
+    // 只放行后面的真正正文。
+    return out;
+}
+
+std::vector<StreamEvent> EventParser::CloseOpenProbe() {
+    std::vector<StreamEvent> out;
+    if (tagged_state_ == TaggedThinkingState::Probe) {
+        if (!pending_.empty()) {
+            out.push_back(TextDelta{std::exchange(pending_, {})});
+        }
+        tagged_state_ = TaggedThinkingState::Passthrough;
+    } else if (tagged_state_ == TaggedThinkingState::Thinking) {
+        pending_.clear();
+        tagged_state_ = TaggedThinkingState::Failed;
+        out.push_back(StreamError{"Messages 兼容端返回了未闭合的 <think> 标签，已拦下这段异常输出"});
+    } else if (tagged_state_ == TaggedThinkingState::AwaitingAnswer) {
+        // 没等到“空行 + 正文”，证据不足，按用户真要输出的 XML 原样放行。
+        out.push_back(TextDelta{std::exchange(pending_, {})});
+        tagged_state_ = TaggedThinkingState::Passthrough;
+    }
+    return out;
+}
+
+std::vector<StreamEvent> EventParser::Finish() {
+    if (!recover_tagged_thinking_ ||
+        (tagged_state_ != TaggedThinkingState::Probe && tagged_state_ != TaggedThinkingState::Thinking &&
+         tagged_state_ != TaggedThinkingState::AwaitingAnswer)) {
+        return {};
+    }
+    return CloseOpenProbe();
 }
 
 }  // namespace lubancode::api::anthropic

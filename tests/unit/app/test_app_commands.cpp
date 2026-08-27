@@ -130,6 +130,29 @@ TEST_CASE("/config hooks 摘要:什么都没配时仍说未配置") {
     CHECK(tail.find("未配置") != std::string::npos);
 }
 
+TEST_CASE("/config:env 把运行端点换走时明说 provider unbound") {
+    lubancode::config::ConfigResult result;
+    lubancode::config::ProviderConfig provider;
+    provider.name = "preset-a";
+    provider.wire = lubancode::config::Wire::Responses;
+    provider.base_url = "https://preset-a.example/v1";
+    provider.model = "gpt-5.6";
+    result.config.providers.push_back(provider);
+    result.config.active_provider = "preset-a";
+    result.config.wire = lubancode::config::Wire::Anthropic;
+    result.config.base_url = "http://localhost:8001";
+    result.config.model = "MiniCPM5-1B";
+    result.sources.wire = lubancode::config::Source::LubancodeEnv;
+    result.sources.base_url = lubancode::config::Source::LubancodeEnv;
+    result.sources.model = lubancode::config::Source::LubancodeEnv;
+
+    std::ostringstream captured;
+    std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
+    PrintConfigDiagnostics(result, std::nullopt, nullptr, nullptr);
+    std::cout.rdbuf(old_buf);
+    CHECK(captured.str().find("provider_binding   = env override / unbound") != std::string::npos);
+}
+
 TEST_CASE("/title 状态账:建档前挂起,建档后补写,再设当场落事件行") {
     const auto dir = TempDir("title");
     lubancode::sessions::SessionStore store(dir.string());

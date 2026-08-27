@@ -592,9 +592,23 @@ TEST_CASE("AgentLoop: projected overflow 在请求前通报,回调里压缩后�
     FakeBackend backend;
     backend.script = SummaryScript("回答正文,凑够字数,免得跟压缩门槛混淆。");
     tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "sys"});
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"},
+                                          .runtime{.max_output_tokens = 8192,
+                                                   .max_context_chars = 200000},
+                                          .system_prompt = "sys"});
+    api::Message old_user;
+    old_user.role = api::Role::User;
+    std::string short_terms;
+    short_terms.reserve(50000);
+    for (int i = 0; i < 25000; ++i) short_terms += "a ";
+    old_user.content.push_back(api::TextBlock{std::move(short_terms)});
+    api::Message old_assistant;
+    old_assistant.role = api::Role::Assistant;
+    old_assistant.content.push_back(api::TextBlock{"旧回答"});
+    loop.ReplaceHistory({std::move(old_user), std::move(old_assistant)});
     loop.SetTurnContext("project memory context");
-    loop.SetContextWindowTokens(1000);  // 极小窗口:第一请求必然 projected overflow
+    loop.SetContextWindowTokens(32768);  // 旧 ASCII 尺会漏算，保守预检须先唤醒压缩
 
     std::vector<agent::ContextPressure> seen;
     bool compacted = false;
@@ -613,12 +627,12 @@ TEST_CASE("AgentLoop: projected overflow 在请求前通报,回调里压缩后�
     };
     loop.SetWiring(std::move(wiring));
 
-    REQUIRE(loop.Run(std::string(6000, 'a') + "的问题", agent::TurnWiring{}).has_value());
+    REQUIRE(loop.Run("新问题", agent::TurnWiring{}).has_value());
 
     REQUIRE_FALSE(seen.empty());
     CHECK(seen.front().phase == agent::ContextPressure::Phase::PreRequest);
     CHECK(seen.front().projected_overflow);
-    CHECK(seen.front().window_tokens == 1000);
+    CHECK(seen.front().window_tokens == 32768);
     CHECK(compacted);
     // 请求确实是用换短后的历史发的:只有一条 archive 消息。
     REQUIRE(backend.captured_requests.size() == 1);

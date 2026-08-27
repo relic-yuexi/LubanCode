@@ -14,14 +14,11 @@
   "expected_events": [
     "MessageStart",
     "TextDelta",
-    "TextDelta",
-    "TextDelta",
-    "TextDelta",
     "ContentBlockDone",
     "MessageDone"
   ],
   "expected_replay": [
-    "known issue: raw think tags are currently delivered as ordinary TextDelta"
+    "guarded post-tool compatibility quarantines unsigned raw thinking and keeps answer text"
   ],
   "usage_expectation": {
     "input_tokens": 5596,
@@ -30,5 +27,5 @@
     "cache_creation_tokens": 0
   },
   "stop_reason": "end_turn",
-  "notes": "Sanitized from a live vLLM MiniCPM5-1B post-tool continuation. Event kinds, block type, delta type, tag placement and order are retained; ids, signature, reasoning body and tool result are replaced. See the MiniCPM5-1B live-smoke todo before changing the expected TextDelta behavior."
+  "notes": "Sanitized from a live vLLM MiniCPM5-1B post-tool continuation. Wire event kinds, block type, delta type, tag placement and order are retained; ids, signature, reasoning body and tool result are replaced. The guarded parser quarantines unsigned tagged reasoning and only emits the answer text."
 }

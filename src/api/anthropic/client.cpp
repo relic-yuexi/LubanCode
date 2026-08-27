@@ -1,5 +1,6 @@
 #include "api/anthropic/client.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <cctype>
 #include <optional>
@@ -197,6 +198,30 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
     return body;
 }
 
+bool ShouldRecoverTaggedThinking(const Request& request) {
+    if (request.messages.size() < 2) {
+        return false;
+    }
+    const Message& tool_result_message = request.messages.back();
+    if (tool_result_message.role != Role::User ||
+        std::none_of(tool_result_message.content.begin(), tool_result_message.content.end(),
+                     [](const ContentBlock& block) { return std::holds_alternative<ToolResultBlock>(block); })) {
+        return false;
+    }
+
+    const Message& assistant = request.messages[request.messages.size() - 2];
+    if (assistant.role != Role::Assistant) {
+        return false;
+    }
+    const bool has_thinking =
+        std::any_of(assistant.content.begin(), assistant.content.end(),
+                    [](const ContentBlock& block) { return std::holds_alternative<ThinkingBlock>(block); });
+    const bool has_tool_use =
+        std::any_of(assistant.content.begin(), assistant.content.end(),
+                    [](const ContentBlock& block) { return std::holds_alternative<ToolUseBlock>(block); });
+    return has_thinking && has_tool_use;
+}
+
 std::map<std::string, std::string> ApplyExtraHeaders(std::map<std::string, std::string> base,
                                                         const std::map<std::string, std::string>& extra_headers) {
     for (const auto& [name, value] : extra_headers) {
@@ -231,17 +256,25 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     // 2xx 响应体 -> 分帧 -> 事件。终止事件/流错误两枚标志给收尾那段检查:
     // 流走完却一枚没见着,按协议错误报(见函数尾注释)。
     SseFramer framer;
+    EventParser parser(ShouldRecoverTaggedThinking(sanitized_request));
     bool saw_message_done = false;
     bool saw_stream_error = false;
+    bool tagged_thinking_warning_logged = false;
     const StreamDataSink sink = [&](std::string_view data) -> bool {
         for (const SseFrame& frame : framer.feed(data)) {
-            if (auto event = parse_event(frame); event.has_value()) {
-                if (std::holds_alternative<MessageDone>(*event)) {
+            for (auto& event : parser.Consume(frame)) {
+                if (std::holds_alternative<MessageDone>(event)) {
                     saw_message_done = true;
-                } else if (std::holds_alternative<StreamError>(*event)) {
+                } else if (std::holds_alternative<StreamError>(event)) {
                     saw_stream_error = true;
                 }
-                on_event(*event);
+                on_event(event);
+            }
+            if (parser.recovered_tagged_thinking() && !tagged_thinking_warning_logged) {
+                tagged_thinking_warning_logged = true;
+                platform::LogSink::Instance().Warn(
+                    "anthropic",
+                    "兼容端把工具续轮思考塞进了 text_delta；已隔离原始 <think> 段，只保留正文");
             }
         }
         // 单帧超过上限,协议已不可信:返回 false 让传输层掐断。
@@ -263,6 +296,13 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     auto streamed = PostSseStream(call, sink, cancel);
     if (!streamed.has_value()) {
         return std::unexpected(std::move(streamed.error()));
+    }
+
+    for (auto& event : parser.Finish()) {
+        if (std::holds_alternative<StreamError>(event)) {
+            saw_stream_error = true;
+        }
+        on_event(event);
     }
 
     // 流"正常"走完却没等到 MessageDone(message_delta):终止帧丢了或被当坏帧

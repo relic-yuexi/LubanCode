@@ -45,8 +45,9 @@ build/tests/lubancode_tests --source-file='*test_run_command_process.cpp'
 断言前用 `CAPTURE` 留下关键路径、退出码与原始输出。莫把 60 秒超时当同步手段，
 轮询须有短间隔、硬期限，还要在失败时把现场亮出来。
 
-MiniCPM5-1B 的 vLLM Anthropic Messages 真机探针在 `manual/`。它不进 CTest，
-只写脱敏统计；须用 PowerShell 7：
+MiniCPM5-1B 的产品回归不靠部署：脱敏 SSE fixture、上下文预检、错误分型与卡住的
+假服务都进 CTest。`manual/` 只放 vLLM Anthropic Messages 真机探针，用来核模型
+方言与真机时延；它不进 CTest，只写脱敏统计。复跑须用 PowerShell 7：
 
 ```powershell
 pwsh -File tests/manual/minicpm5_messages_probe.ps1 `
