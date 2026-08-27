@@ -435,8 +435,8 @@ int wmain(int argc, wchar_t** argv) {
         SendKey(VK_RETURN, L'\r', 0);
         Check(WaitForText("恢复哪一场会话", 10000, height),
               "#十 /resume:裸敲出现会话方向键菜单");
-        // 全屏台账的页脚提示改了版式(picker.footer:enter resume · …)。
-        Check(WaitForText("enter resume", 5000, height),
+        // 全屏台账的页脚提示(picker.footer 已补中文:enter 接回 · esc 退出 · …)。
+        Check(WaitForText("esc 退出", 5000, height),
               "#十 /resume:菜单给出方向键与 Enter 提示");
         // 本机最新一场可能是几十行长回答，40 行控制台会把历史开头卷走。
         // 往下挑第三场短会话，才能在同一帧里同时验头、角色与收尾。

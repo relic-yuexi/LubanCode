@@ -291,13 +291,13 @@ int CountHintRowsBelow(int input_row) {
     return count;
 }
 
-// 流式 footer 还挂着吗:状态行带"打断"提示是流式 footer 独有的(空闲
-// composer 的状态行没有它)。轮末/出错后键就归空闲 composer,再按回车会把
-// 草稿真发给模型——落队前的硬前提。
+// 流式 footer 还挂着吗:turn 级活动条("• 思考中 (Ns)",整轮不熄)是流式
+// footer 独有的。轮末/出错后键就归空闲 composer,再按回车会把草稿真发给
+// 模型——落队前的硬前提。
 bool StreamFooterAlive() {
-    // 流式 footer 活着 = 输入行在 + turn 级活动条("• 思考中 (Ns)",整轮不
-    // 熄)还在。旧锚"状态行带'打断'"已失效:Esc 打断提示如今只写在队列
-    // 标题里,空队列时全屏没有"打断"字样。
+    // 流式 footer 活着 = 输入行在 + turn 级活动条还在。占位提示里的
+    // "Esc 打断"只在草稿空时可见(T5 后正文非空会盖掉),当不了活着判据;
+    // 它的可发现性由 T3 单独钉。
     const int row = FindFooterInputRow();
     return row >= 0 && FindLastRow("\xE6\x80\x9D\xE8\x80\x83\xE4\xB8\xAD") >= 0;  // "思考中"
 }
@@ -408,8 +408,12 @@ int wmain(int argc, wchar_t** argv) {
         Check(row >= 0, "T3 空正文 Tab no-op:footer 框还在,没有暗状态把画面弄丢");
         if (row >= 0) {
             const std::string t = ReadRow(row);
-            // 占位提示文案自带 "/help" 字样,判据只能卡"不得以 '> /' 起头"
-            // (打进去的 slash 草稿才这个样子),不能要求整行无 '/'。
+            // 空草稿占位提示自带 "Esc 打断"(忙时可发现性的新家,空队列时
+            // 全屏只有这里写)。Tab 不得把它挤掉、也不得留下暗状态。
+            Check(t.find("Esc") != std::string::npos && t.find("打断") != std::string::npos,
+                  "T3 空正文占位提示:写明 Esc 打断");
+            // 判据卡"不得以 '> /' 起头"(打进去的 slash 草稿才这个样子),
+            // 不能要求整行无 '/'——底下 slash 提示区有自己的行。
             Check(t.rfind("> /", 0) != 0, "T3 空正文 Tab no-op:输入行没有冒出 slash 草稿");
             Check(FindMarkedHintBelow(row).empty(), "T3 空正文 Tab no-op:没有选中标记行");
         }

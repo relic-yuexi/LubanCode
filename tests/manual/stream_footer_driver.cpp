@@ -416,6 +416,10 @@ int wmain(int argc, wchar_t** argv) {
         Check(IsRuleRow(bottom_rule_row), "G1 下横线在输入行下一行(状态行上一行)");
         const std::string input_text = ReadRow(input_row);
         Check(!input_text.empty() && input_text[0] == '>', "G1 输入行以 '> ' 开头(跟 composer 一个样式)");
+        // 忙时空草稿的占位提示自带 Esc 打断(旧状态行尾巴撤了之后,"打断"
+        // 可发现性的新家;空队列时全屏只有这里写)。
+        Check(input_text.find("Esc") != std::string::npos && input_text.find("打断") != std::string::npos,
+              "G1 忙时空草稿:占位提示写明 Esc 打断");
         Check(ReadRow(status_row).find("shift+tab") != std::string::npos, "G1 状态行有 shift+tab 提示(复用 PrintStatusLine)");
         Check(CursorRow() == input_row && CursorColumn() >= 2,
               "G1 物理光标停在输入行 '> ' 后面,不再钉在正文末尾");
@@ -542,6 +546,10 @@ int wmain(int argc, wchar_t** argv) {
             Check(IsRuleRow(status_row2 - 1), "G2 落队后:下横线还在状态行上一行");
             Check(!IsRuleRow(status_row2 - 2), "G2 落队后:下横线正上方是输入行(非横线)");
             Check(IsRuleRow(status_row2 - 3), "G2 落队后:上横线还在(框结构完整,没有残影/错位)");
+            // 占位提示复位:落队清空正文后,"Esc 打断"提示跟着回到输入行
+            // (打的是输入行这一行,队列标题那处"打断"不算数)。
+            Check(ReadRow(status_row2 - 2).find("打断") != std::string::npos,
+                  "G2 落队后:占位提示复位,输入行重新带 Esc 打断");
         }
     }
 

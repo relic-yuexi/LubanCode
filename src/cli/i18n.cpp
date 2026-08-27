@@ -259,8 +259,8 @@ const Entry kZhCN[] = {
     {"queue.autosend_returned", "你排队的消息没送达,已回队(不再自动重发):{0}"},
     {"input.pasted_content", "[粘贴内容 {0} 字符]"},
     {"input.ctrlc_exit", "[已退出]"},
-    {"stream.hint", "键入并回车 排队下一条"},
-    {"stream.hint.plain", "键入并回车排队"},
+    {"stream.hint", "键入并回车 排队下一条 · Esc 打断"},
+    {"stream.hint.plain", "键入并回车排队 · Esc 打断"},
     {"spinner.thinking", "思考中"},
     {"spinner.stopping", "正在停…"},
 
@@ -1626,8 +1626,8 @@ const Entry kZhCN[] = {
     {"picker.transcript.footer",
      "esc/ctrl+t 收起回列表 · enter resume · 上下不动选中,看完回原行"},
     {"picker.footer",
-     "enter resume · esc exit · tab focus · </> change option · up/down browse · pgup/pgdn page · "
-     "home/end jump · ctrl+o comfortable · ctrl+t transcript · ctrl+e expand"},
+     "enter 接回 · esc 退出 · tab 换焦点 · </> 改选项 · ↑↓ 浏览 · pgup/pgdn 翻页 · "
+     "home/end 跳首尾 · ctrl+o 详细/紧凑 · ctrl+t 看转录 · ctrl+e 看全文"},
     {"picker.status", "{0} / {1} · {2}%"},
     {"picker.status.empty", "0 / 0 · 0%"},
     {"picker.ago.now", "just now"},
@@ -1898,8 +1898,8 @@ const Entry kEn[] = {
     {"queue.autosend_returned", "Your queued message was not delivered; returned to queue (no auto-retry): {0}"},
     {"input.pasted_content", "[Pasted Content {0} chars]"},
     {"input.ctrlc_exit", "[exited]"},
-    {"stream.hint", "type + Enter to queue next"},
-    {"stream.hint.plain", "type + Enter to queue next"},
+    {"stream.hint", "type + Enter to queue next · Esc to interrupt"},
+    {"stream.hint.plain", "type + Enter to queue next · Esc to interrupt"},
     {"spinner.thinking", "Working"},
     {"spinner.stopping", "Stopping..."},
     {"ask_user.other", "Other (type your own answer)"},

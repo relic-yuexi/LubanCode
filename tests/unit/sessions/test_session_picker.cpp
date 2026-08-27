@@ -266,10 +266,10 @@ TEST_CASE("渲染帧: 标题/搜索/筛选行/列表/底栏,行序与 match 下�
     // 底栏:序号 1/2 · 0%。
     CHECK(frame.lines.back().find("1 / 2") != std::string::npos);
     CHECK(frame.lines.back().find("0%") != std::string::npos);
-    // 键位行常驻。
+    // 键位行常驻(zh-CN footer 已补中文,锚跟着换;键名仍按惯例留英文)。
     bool has_footer = false;
     for (const auto& line : frame.lines) {
-        if (line.find("enter resume") != std::string::npos) {
+        if (line.find("esc 退出") != std::string::npos) {
             has_footer = true;
         }
     }
