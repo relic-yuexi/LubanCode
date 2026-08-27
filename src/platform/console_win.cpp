@@ -532,6 +532,39 @@ int PanViewportDown(int rows) {
     return pan;
 }
 
+std::optional<std::string> ReadRowText(int row) {
+    const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (h_out == nullptr || h_out == INVALID_HANDLE_VALUE) {
+        return std::nullopt;
+    }
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+        return std::nullopt;
+    }
+    const int width = static_cast<int>(info.dwSize.X);
+    const int height = static_cast<int>(info.dwSize.Y);
+    if (width <= 0 || row < 0 || row >= height) {
+        return std::nullopt;
+    }
+    std::vector<CHAR_INFO> cells(static_cast<std::size_t>(width));
+    SMALL_RECT region{0, static_cast<SHORT>(row), static_cast<SHORT>(width - 1), static_cast<SHORT>(row)};
+    if (!ReadConsoleOutputW(h_out, cells.data(), COORD{static_cast<SHORT>(width), 1}, COORD{0, 0}, &region)) {
+        return std::nullopt;
+    }
+    std::wstring text;
+    text.reserve(static_cast<std::size_t>(width));
+    for (const CHAR_INFO& cell : cells) {
+        if (cell.Attributes & COMMON_LVB_TRAILING_BYTE) {
+            continue;  // 宽字符的后半格:值并入前半格,不重复计
+        }
+        text.push_back(cell.Char.UnicodeChar);
+    }
+    while (!text.empty() && (text.back() == L' ' || text.back() == L'\0')) {
+        text.pop_back();
+    }
+    return WideToUtf8(text);
+}
+
 RawInputScope::RawInputScope() {
     const HANDLE h_in = GetStdHandle(STD_INPUT_HANDLE);
     DWORD original_mode = 0;

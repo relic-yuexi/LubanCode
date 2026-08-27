@@ -55,7 +55,7 @@ std::function<void()> g_reset_server_state;
 std::atomic<int> g_reflow_served{0};
 
 void Log(const std::string& line) {
-    g_report << line << "\n";
+    g_report << "[" << GetTickCount() << "] " << line << "\n";
     g_report.flush();
 }
 void Check(bool ok, const std::string& what) {
@@ -694,6 +694,23 @@ bool WaitForSingleBusyFooter(int timeout_ms) {
     return CountBusyFooterRows() == 1;
 }
 
+// 改宽后的活动栏计数:窗口内连续采样,任一拍数到恰一条即过。单拍计数会
+// 撞上子进程的恢复半程(conhost 重排完成 -> 下一拍 200ms heartbeat 重画
+// 之间有一小段空窗),把健康的回合误报成"活动栏丢了";真丢/真重影都撑得
+// 过整个窗口,照样现形。
+bool BusyFooterHoldsSingle(int window_ms, int* last_count = nullptr) {
+    const DWORD deadline = GetTickCount() + static_cast<DWORD>(window_ms);
+    int count = CountBusyFooterRows();
+    while (count != 1 && GetTickCount() < deadline) {
+        Sleep(100);
+        count = CountBusyFooterRows();
+    }
+    if (last_count != nullptr) {
+        *last_count = count;
+    }
+    return count == 1;
+}
+
 // 十轮改字号(疑案复现尝试):原字号与大小字号来回切,末了还原。
 void FontHammer(int rounds, const char* tag) {
     CONSOLE_FONT_INFOEX original{};
@@ -858,7 +875,16 @@ void RunScenario(const std::string& name, const std::wstring& exe_path, const st
         Check(FindComposerInputRow() > 0, name + ": 改字号后 main 仍可回(composer 应答)");
     }
 
-    // 干净退出:exit 一行,等退出码 0(疑案"code 1"的自动对账)。
+    // 干净退出:exit 一行,等退出码 0(疑案"code 1"的自动对账)。发 exit
+    // 前先等空闲——回流轮/记忆抽取轮还亮着活动栏时敲字会进忙时队列被当
+    // 正文发给模型,回合再滚一轮,15 秒等不到退出码(改宽瞬间流式疑停摆
+    // 单连带:拖长误报里最长的那几笔就是这条链)。
+    {
+        const DWORD idle_deadline = GetTickCount() + 15000;
+        while (GetTickCount() < idle_deadline && CountBusyFooterRows() != 0) {
+            Sleep(150);
+        }
+    }
     SendText("exit");
     SendKey(VK_RETURN, L'\r', 0);
     if (WaitForSingleObject(guard.pi.hProcess, 15000) == WAIT_OBJECT_0) {
@@ -872,8 +898,17 @@ void RunScenario(const std::string& name, const std::wstring& exe_path, const st
     }
 }
 
-void RunWidthResizeScene(const std::wstring& exe_path, const std::wstring& workdir) {
+// 拖长账:改宽幕的回合用时测量(改宽瞬间流式疑停摆单)。慢流 5 事件 ×
+// 500ms ≈ 2.5s,健康回合从活动栏亮起到收走 3~5s;拖长 = 活动栏亮起后
+// 十秒往上才收。每次进幕归零,收口后把实测毫秒写进报告的 INFO 行,连跑
+// 统计拖长率用。
+DWORD g_width_turn_ms = 0;
+DWORD g_width_body_ms = 0;
+
+void RunWidthResizeScene(const std::wstring& exe_path, const std::wstring& workdir, int hammer_cycles = 1) {
     Log("==== 幕:忙碌栏运行中改宽 ====");
+    g_width_turn_ms = 0;
+    g_width_body_ms = 0;
     if (g_reset_server_state) {
         g_reset_server_state();
     }
@@ -885,29 +920,68 @@ void RunWidthResizeScene(const std::wstring& exe_path, const std::wstring& workd
               FindComposerInputRow() > 0,
           "改宽: 开场空闲 composer 出现");  // 键入并回车
     SendText(kWidthPrompt);
+    const DWORD turn_enter_tick = GetTickCount();
     SendKey(VK_RETURN, L'\r', 0);
 
     Check(WaitForSingleBusyFooter(10000), "改宽前恰有一条忙碌活动栏");
-    SetSceneSize(80, 30, 400);
-    Sleep(800);  // 至少跨过四拍 200ms heartbeat，让改宽路径确实落笔。
-    const int narrow_count = CountBusyFooterRows();
-    Check(narrow_count == 1,
-          "拉窄后忙碌活动栏仍只有一条(实得 " + std::to_string(narrow_count) + ")");
-    SetSceneSize(120, 30, 400);
-    Sleep(800);
-    const int wide_count = CountBusyFooterRows();
-    Check(wide_count == 1,
-          "拉宽后忙碌活动栏仍只有一条(实得 " + std::to_string(wide_count) + ")");
+    const DWORD busy_seen_tick = GetTickCount();
+    for (int cycle = 0; cycle < hammer_cycles; ++cycle) {
+        SetSceneSize(80, 30, 400);
+        Sleep(800);  // 至少跨过四拍 200ms heartbeat，让改宽路径确实落笔。
+        if (cycle == 0) {
+            int narrow_count = 0;
+            if (!BusyFooterHoldsSingle(2000, &narrow_count)) {
+                DumpViewport("narrow-count-fail");
+                Check(false,
+                      "拉窄后忙碌活动栏仍只有一条(实得 " + std::to_string(narrow_count) + ")");
+            } else {
+                Check(true, "拉窄后忙碌活动栏仍只有一条");
+            }
+        }
+        SetSceneSize(120, 30, 400);
+        Sleep(800);
+        if (cycle == 0) {
+            int wide_count = 0;
+            if (!BusyFooterHoldsSingle(2000, &wide_count)) {
+                DumpViewport("wide-count-fail");
+                Check(false,
+                      "拉宽后忙碌活动栏仍只有一条(实得 " + std::to_string(wide_count) + ")");
+            } else {
+                Check(true, "拉宽后忙碌活动栏仍只有一条");
+            }
+        }
+    }
     DumpViewport("width-running");
 
-    Check(WaitForText(kBodyTail, 10000), "改宽后当前回合仍能收口");
-    // 窗口给宽(20s):改宽瞬间偶发流式读停摆、回合比 2.5s 的慢流拖长得
-    // 多(app 层嫌疑,另行记账),收栏以"最终确实收走"为准。
-    const DWORD idle_deadline = GetTickCount() + 20000;
-    while (GetTickCount() < idle_deadline && CountBusyFooterRows() != 0) {
+    const DWORD body_deadline = GetTickCount() + 10000;
+    bool body_seen = false;
+    while (GetTickCount() < body_deadline) {
+        if (FindLastRow(kBodyTail) >= 0) {
+            body_seen = true;
+            break;
+        }
         Sleep(100);
     }
-    Check(CountBusyFooterRows() == 0, "改宽回合活动栏按时收走");
+    g_width_body_ms = GetTickCount() - busy_seen_tick;
+    Check(body_seen, "改宽后当前回合仍能收口");
+    // 窗口给宽(20s):改宽瞬间偶发流式读停摆、回合比 2.5s 的慢流拖长得
+    // 多(app 层嫌疑,另行记账),收栏以"最终确实收走"为准。判定认循环
+    // 自己的出口,不再复查一遍——主回合收口与记忆抽取轮起跑只差两三百
+    // 毫秒,循环里数到 0、复查那一眼撞上新轮刚点亮的活动栏,好回合会被
+    // 误报"没收走"。
+    bool bar_cleared = false;
+    const DWORD idle_deadline = GetTickCount() + 20000;
+    while (GetTickCount() < idle_deadline) {
+        if (CountBusyFooterRows() == 0) {
+            bar_cleared = true;
+            break;
+        }
+        Sleep(100);
+    }
+    Check(bar_cleared, "改宽回合活动栏按时收走");
+    g_width_turn_ms = GetTickCount() - turn_enter_tick;
+    Log("INFO: 改宽幕回合用时 " + std::to_string(g_width_turn_ms) + "ms(正文落地 " +
+        std::to_string(g_width_body_ms) + "ms;慢流 2.5s)");
     // 退出前确保回合真收了口:万一活动栏还亮着(上一条 FAIL 的现场),先
     // Esc 打断再退——不然 "exit" 落进忙时队列被当正文发给模型,进程永远
     // 退不了,把下一幕的场地也堵死。
@@ -1090,6 +1164,15 @@ int wmain(int argc, wchar_t** argv) {
         FreeConsole();
         return g_failures == 0 ? 0 : 1;
     }
+    // 改宽疑停摆复现场(本单):流式中段连发改宽键序(窄/宽来回多轮),
+    // 把偶发拖长顶成大概率;只计时不额外断言拖长本身(收口断言照旧)。
+    if (argc >= 5 && std::wstring(argv[4]) == L"--width-hammer") {
+        SetSceneSize(120, 30, 400);
+        RunWidthResizeScene(exe_path, workdir, /*hammer_cycles=*/6);
+        Log(g_failures == 0 ? "ALL PASS" : ("FAILURES: " + std::to_string(g_failures)));
+        FreeConsole();
+        return g_failures == 0 ? 0 : 1;
+    }
 
     // 幕一:80×24 窄矮窗(缓冲 80×400,长缓冲 + 绝对定位画帧的老病灶现场)。
     SetSceneSize(80, 24, 400);
@@ -1141,7 +1224,7 @@ int wmain(int argc, wchar_t** argv) {
 
     // 追加幕:主回合活动栏亮着时收窄再放宽，旧帧不能留在历史区。
     SetSceneSize(120, 30, 400);
-    RunWidthResizeScene(exe_path, workdir);
+    RunWidthResizeScene(exe_path, workdir, /*hammer_cycles=*/1);
 
     // 幕六(追加需求"查看态实时思考流"):子代理慢思考流期间进查看态,
     // 坞行与视口的"思考中 · N 字"逐秒增长。
