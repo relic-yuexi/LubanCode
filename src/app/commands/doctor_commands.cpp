@@ -151,49 +151,78 @@ api::Request BuildEffortProbeRequest(const std::string& model, const std::string
 
 std::string DescribeRequestEffort(lubancode::config::Wire wire, const api::Request& request,
                                   const nlohmann::json& extra_body, const std::string& think_param) {
+    // 模型协议兼容实录矩阵单 P1:报告"最终 wire 形状"——请求体里所有
+    // reasoning 相关键的键名与值一并列出(extra_body 压过的如实报),
+    // 不再只挑一只键。方言状态跟在尾巴上:没声明/没验证不冒充。
+    const auto collect = [](const nlohmann::json& body, const std::string& fallback_key,
+                            const std::string& extra_key) {
+        std::vector<std::string> parts;
+        // chat 家的档位参数名听 provider 声明(think_param),先看它。
+        if (!extra_key.empty()) {
+            if (auto it = body.find(extra_key); it != body.end()) {
+                parts.push_back(extra_key + " = " + it->dump());
+            }
+        }
+        for (const char* key : {"enable_thinking", "reasoning", "thinking", "thinking_budget",
+                                "output_config"}) {
+            auto it = body.find(key);
+            if (it == body.end()) continue;
+            // 常见组合拆成人话路径,与其让用户读整只对象,不如直接给字段级
+            // 形状(与手册段落名对得上)。
+            if (std::string(key) == "reasoning" && it->is_object() && it->contains("effort") &&
+                it->size() == 1) {
+                parts.push_back("reasoning.effort = " + (*it)["effort"].dump());
+            } else if (std::string(key) == "thinking" && it->is_object() &&
+                       it->contains("budget_tokens")) {
+                parts.push_back("thinking.type = " + it->value("type", std::string()) +
+                                "  thinking.budget_tokens = " + (*it)["budget_tokens"].dump());
+            } else {
+                parts.push_back(std::string(key) + " = " + it->dump());
+            }
+        }
+        if (auto it = body.find("generationConfig"); it != body.end() && it->is_object()) {
+            if (auto thinking = it->find("thinkingConfig");
+                thinking != it->end() && !thinking->is_null()) {
+                parts.push_back("generationConfig.thinkingConfig = " + thinking->dump());
+            }
+        }
+        if (parts.empty()) {
+            return trf("doctor.effort.field_absent", fallback_key);
+        }
+        std::string out;
+        for (const auto& part : parts) {
+            if (!out.empty()) out += "  ";
+            out += part;
+        }
+        return out;
+    };
+    std::string described;
     if (wire == lubancode::config::Wire::ChatCompletions) {
         lubancode::api::chat::ChatRequestOptions options;
         options.reasoning_param = think_param;
         const nlohmann::json body = lubancode::api::chat::BuildRequestJson(request, extra_body, options);
         const std::string param = think_param.empty() ? std::string("reasoning_effort") : think_param;
-        if (auto it = body.find(param); it != body.end()) {
-            // 值被 extra_body 压成什么就报什么(字符串/对象都如实 dump)。
-            return param + " = " + it->dump();
-        }
-        return trf("doctor.effort.field_absent", param);
-    }
-    if (wire == lubancode::config::Wire::Responses) {
+        described = collect(body, param, param);
+    } else if (wire == lubancode::config::Wire::Responses) {
         const nlohmann::json body = lubancode::api::responses::BuildRequestJson(request);
-        if (auto it = body.find("reasoning"); it != body.end() && it->is_object() && it->contains("effort")) {
-            return "reasoning.effort = " + (*it)["effort"].dump();
-        }
-        return trf("doctor.effort.field_absent", std::string("reasoning.effort"));
-    }
-    if (wire == lubancode::config::Wire::GoogleGenerateContent) {
-        // Gemini:思考开关/档位都在 generationConfig.thinkingConfig 里,如实
-        // dump 整只(includeThoughts、目录 extra_body 透传的 thinkingBudget
-        // 之类一并列出)。
+        described = collect(body, "reasoning.effort", "");
+    } else if (wire == lubancode::config::Wire::GoogleGenerateContent) {
         const nlohmann::json body = lubancode::api::gemini::BuildRequestJson(request, extra_body);
-        if (auto it = body.find("generationConfig"); it != body.end() && it->is_object()) {
-            if (auto thinking = it->find("thinkingConfig"); thinking != it->end() && thinking->is_object()) {
-                return "generationConfig.thinkingConfig = " + thinking->dump();
-            }
+        described = collect(body, "generationConfig.thinkingConfig", "");
+    } else {
+        const nlohmann::json body = lubancode::api::anthropic::BuildRequestJson(request, false, extra_body);
+        described = collect(body, "thinking", "");
+        if (!request.reasoning_effort.empty()) {
+            described += "(" + request.reasoning_effort + tr("doctor.effort.mapped_suffix");
         }
-        return trf("doctor.effort.field_absent", std::string("generationConfig.thinkingConfig"));
     }
-    const nlohmann::json body = lubancode::api::anthropic::BuildRequestJson(request, false, extra_body);
-    if (auto it = body.find("thinking"); it != body.end() && it->is_object()) {
-        const std::string type = it->value("type", std::string());
-        if (type == "disabled") {
-            return "thinking.type = disabled(none 档)";
-        }
-        if (it->contains("budget_tokens")) {
-            return "thinking.budget_tokens = " + (*it)["budget_tokens"].dump() + "(" +
-                   request.reasoning_effort + tr("doctor.effort.mapped_suffix");
-        }
-        return "thinking = " + it->dump();
+    // 方言状态(请求里没带档案 = 本地自定义端,走兼容形状)。
+    if (request.reasoning.dialect.empty()) {
+        return described + "  " + tr("doctor.effort.dialect_legacy");
     }
-    return trf("doctor.effort.field_absent", std::string("thinking"));
+    return described + "  " + (request.reasoning.dialect.verified
+                                   ? tr("doctor.effort.dialect_verified")
+                                   : tr("doctor.effort.dialect_unverified"));
 }
 
 PrefixCacheMetrics ParsePrefixCacheMetrics(const std::string& text) {
@@ -357,7 +386,15 @@ namespace {
 // /doctor effort:<level> 已经剥好(空串 = 探"不发参数")。
 void RunEffortProbe(const std::string& level, const DoctorContext& context) {
     const lubancode::config::Config& config = context.config;
-    const api::Request probe = BuildEffortProbeRequest(context.current_model, level);
+    api::Request probe = BuildEffortProbeRequest(context.current_model, level);
+    // 模型档案(目录里有就带上,模型协议兼容实录矩阵单 P1):方言决定请求
+    // 落线形状。目录查不到 = 本地自定义端,走兼容形状,诊断行自己会标。
+    const auto catalog = lubancode::config::LoadProviderCatalog();
+    if (const auto* preset = catalog.FindProvider(context.active_provider); preset != nullptr) {
+        if (const auto* model = preset->FindModel(context.current_model); model != nullptr) {
+            probe.reasoning = model->reasoning;
+        }
+    }
 
     TermOut() << trf("doctor.effort.probe_header", context.current_model,
                      level.empty() ? tr("doctor.level.unset") : level)

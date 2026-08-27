@@ -130,6 +130,9 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
     }
     // 推理档案决定写 thinkingLevel 还是 thinkingBudget；none 关(minimal 在
     // 目录声明成档位的 Gemini 3 系上是一档真实的 thinkingLevel,不当关)。
+    // P1 方言对 gemini 家只做账面(verified/delta/replay):level 与 budget
+    // 的选择仍由 wireDialect 走向 + 模型档案决定——两键并发服务端吃 400,
+    // 方言不会同时把两只键点亮,选择逻辑与改前一致。
     if (!request.reasoning_effort.empty()) {
         const bool off = ReasoningEffortIsOff(request.reasoning_effort, request.reasoning);
         json thinking_config{{"includeThoughts", !off}};

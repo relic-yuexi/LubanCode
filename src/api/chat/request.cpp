@@ -188,18 +188,54 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
         body["stream_options"] = json{{"include_usage", true}};
     }
 
-    if (!request.reasoning_effort.empty() &&
-        (request.reasoning.empty() || request.reasoning.supports_effort)) {
-        // 参数名按 provider 声明走(默认 reasoning_effort);空档位仍然整个
-        // 缺席字段——"不填"就是真的不发,不偷偷塞默认档。
-        const std::string param = options.reasoning_param.empty() ? std::string("reasoning_effort")
-                                                                  : options.reasoning_param;
-        body[param] = request.reasoning_effort;
-    }
-    if (!request.reasoning_effort.empty() && request.reasoning.supports_toggle) {
-        body["thinking"] = json{{"type", ReasoningEffortIsOff(request.reasoning_effort,
-                                                              request.reasoning)
-                                             ? "disabled" : "enabled"}};
+    if (!request.reasoning_effort.empty()) {
+        const bool off = ReasoningEffortIsOff(request.reasoning_effort, request.reasoning);
+        const auto& dialect = request.reasoning.dialect;
+        const bool dialect_toggle = dialect.toggle == "enable_thinking_bool" ||
+                                    dialect.toggle == "thinking_type";
+
+        // 档位:方言声明了 effort_path 才按形状落,落不落仍看模型声明没声明
+        // effort 档;没方言走 legacy(参数名按 provider 本地声明)。
+        if (dialect.effort_path == "reasoning_effort") {
+            if (request.reasoning.empty() || request.reasoning.supports_effort) {
+                const std::string param = dialect.effort_param.empty()
+                                              ? (options.reasoning_param.empty()
+                                                     ? std::string("reasoning_effort")
+                                                     : options.reasoning_param)
+                                              : dialect.effort_param;
+                body[param] = request.reasoning_effort;
+            }
+        } else if (dialect.empty() &&
+                   (request.reasoning.empty() || request.reasoning.supports_effort)) {
+            // 参数名按 provider 声明走(默认 reasoning_effort);空档位仍然整个
+            // 缺席字段——"不填"就是真的不发,不偷偷塞默认档。
+            const std::string param = options.reasoning_param.empty() ? std::string("reasoning_effort")
+                                                                      : options.reasoning_param;
+            body[param] = request.reasoning_effort;
+        }
+
+        // 开关:方言给了形状按形状;没方言维持 generic thinking.type(兼容
+        // 旧目录,视为 unverified)。GLM 这类"档位+开关两键并开"由手册背书
+        // (zai 实测),两键各自独立。
+        if (dialect_toggle && request.reasoning.supports_toggle) {
+            if (dialect.toggle == "enable_thinking_bool") {
+                body["enable_thinking"] = !off;
+            } else {
+                body["thinking"] = json{{"type", off ? dialect.toggle_off : dialect.toggle_on}};
+            }
+        } else if (dialect.empty() && request.reasoning.supports_toggle) {
+            body["thinking"] = json{{"type", off ? "disabled" : "enabled"}};
+        }
+
+        // 预算:方言声明了 thinking_budget 且模型声明了 budget 区间才落。
+        // auto 档不发(手册:默认值为模型最大思维链长度,不填即默认)。
+        if (!off && dialect.budget_path == "thinking_budget" &&
+            (request.reasoning.budget_min.has_value() || request.reasoning.budget_max.has_value()) &&
+            LowerReasoningEffort(request.reasoning_effort) != "auto") {
+            body["thinking_budget"] =
+                ReasoningBudgetForEffort(request.reasoning, request.reasoning_effort,
+                                          request.max_tokens.value_or(0));
+        }
     }
 
     if (!request.tools.empty()) {

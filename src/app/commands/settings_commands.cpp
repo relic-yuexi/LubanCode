@@ -1944,6 +1944,24 @@ CommandFlow HandleSlashThink(SlashDispatchContext& ctx, const lubancode::cli::Pa
     HandleThinkCommand(parsed.args, ctx.current_think,
                        ctx.model_catalog->FindByProviderAndSlug(*ctx.active_provider, *ctx.current_model),
                        ctx.config->provider_think_levels, ctx.config->think_param);
+    // 模型协议兼容实录矩阵单 P1:落线方言一并亮出来——档位只是抽象值,
+    // 用户该看见"这个模型最终在 wire 上长什么样"。目录没声明(本地自配
+    // 端)打兼容形状那条,不冒充已验证。
+    if (parsed.args.empty()) {
+        const auto catalog = lubancode::config::LoadProviderCatalog();
+        const config::ProviderPreset* preset = catalog.FindProvider(*ctx.active_provider);
+        const config::ProviderCatalogModel* model =
+            preset != nullptr ? preset->FindModel(*ctx.current_model) : nullptr;
+        if (model != nullptr && !model->reasoning.dialect.empty()) {
+            TermOut() << trf("cmd.think.wire_shape",
+                             lubancode::config::DescribeReasoningDialect(model->reasoning.dialect),
+                             model->reasoning.dialect.verified ? tr("cmd.think.wire_verified")
+                                                               : tr("cmd.think.wire_unverified"))
+                      << "\n";
+        } else {
+            TermOut() << tr("cmd.think.wire_legacy") << "\n";
+        }
+    }
     // 五层后端退役(批四):effort 的即时生效改走皮上的 request 档案,
     // 下一份请求带上新档位。
     ctx.sync_request_policy();

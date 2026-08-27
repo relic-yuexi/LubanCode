@@ -65,17 +65,38 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
         body["instructions"] = request.system;
     }
 
-    // M6.6:推理强度。实测(MiniMax-M3 真实 responses 端点)none/low/medium/
-    // high 四档都能用,HTTP 200、reasoning_tokens 随档位递增,没有任何一档
-    // 报 400——所以这里不做档位限制/回退,原样透传配置里写的那个字符串。
-    if (!request.reasoning_effort.empty() &&
-        (request.reasoning.empty() || request.reasoning.supports_effort)) {
-        body["reasoning"] = json{{"effort", request.reasoning_effort}};
-    }
-    if (!request.reasoning_effort.empty() && request.reasoning.supports_toggle) {
-        body["thinking"] = json{{"type", ReasoningEffortIsOff(request.reasoning_effort,
-                                                              request.reasoning)
-                                             ? "disabled" : "enabled"}};
+    // 推理参数(模型协议兼容实录矩阵单 P1 起按方言落线):
+    //   - 方言声明 effort_path=reasoning.effort:档位按模型声明落 effort;
+    //     手册明文 reasoning.effort 优先于旧开关 enable_thinking——effort
+    //     落了线,旧开关就不发(退役键,少一个是一个);off 档走
+    //     reasoning.effort="none"(手册:枚举里有 none=关闭思考)。
+    //   - 方言声明 toggle=enable_thinking_bool 且模型声明了 toggle、又没
+    //     有 effort 档可落:落顶层布尔(旧开关路径)。
+    //   - 没方言:legacy(实测 MiniMax-M3 responses 端点四档全透传,
+    //     HTTP 200、reasoning_tokens 随档位递增,不做档位限制/回退)。
+    if (!request.reasoning_effort.empty()) {
+        const auto& dialect = request.reasoning.dialect;
+        const bool off = ReasoningEffortIsOff(request.reasoning_effort, request.reasoning);
+        const bool effort_ok = request.reasoning.empty() || request.reasoning.supports_effort;
+
+        bool effort_written = false;
+        if (dialect.effort_path == "reasoning.effort" && effort_ok) {
+            body["reasoning"] = json{{"effort", request.reasoning_effort}};
+            effort_written = true;
+        } else if (dialect.empty() && effort_ok) {
+            body["reasoning"] = json{{"effort", request.reasoning_effort}};
+            effort_written = true;
+        }
+        if (!effort_written && dialect.toggle == "enable_thinking_bool" &&
+            request.reasoning.supports_toggle) {
+            // 没有档位形状只有开关形状的端:旧开关顶层布尔。
+            body["enable_thinking"] = !off;
+        }
+        if (dialect.empty() && request.reasoning.supports_toggle) {
+            // legacy 兼容路径:改动前的行为不动(effort 与 thinking.type
+            // 双键,哪怕 effort 档没被模型声明)。
+            body["thinking"] = json{{"type", off ? "disabled" : "enabled"}};
+        }
     }
 
     json input = json::array();
