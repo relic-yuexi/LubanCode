@@ -32,3 +32,6 @@ build-msvc/
 # Python 字节码缓存不进仓
 __pycache__/
 *.pyc
+
+# GUI Agent 真机证据目录(桌面截图,绝不入库)
+.gui-evidence/
