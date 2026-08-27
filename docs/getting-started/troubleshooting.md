@@ -186,6 +186,15 @@ git status --short
 - Lua/DLL 崩宿主时先移出插件目录再复现；不要在原现场反复启动。
 - 原生插件核 ABI、架构、runtime 与依赖 DLL。
 
+### GUI 插件（gui-agent 一类桌面自动化）
+
+- **点击总落错位置**：先 `gui_status` 看 `dpi_awareness`。见 `unaware` 说明系统拒了 DPI 感知调用，坐标被虚拟化——截图物理像素与注入坐标对不上，先解决它再干活。
+- **多屏副屏点不中**：副屏在主屏左侧时坐标是负的（`virtual_screen` 报得出范围），别把它当非法值修掉。
+- **`focus_failed` 反复出现**：Windows 限制后台进程抢前台。人工点一下目标窗口，或让用户先激活它；不是插件坏了。
+- **`stale_observation` 接连报**：窗口在被挪或自适应布局在抖。重新 `gui_screenshot` 拿新矩形，动作带最新的 `expected_window_rect`；连报就说明窗口不稳定，换 `window_client` 坐标口径。
+- **截图黑屏/空白**：目标窗口最小化了（被拒是预期）；GPU 合成窗口一般 PrintWindow 抓得住，仍黑就换 `target=screen`，先想清楚会拍下哪些显示器。
+- **中文没输进去**：查 `ensured_foreground` 是否为真——窗口不在前台，键进了别的程序。本插件走 Unicode 键盘事件，与输入法状态无关。
+
 ## 10. 构建与测试
 
 | 现象 | 先查 |

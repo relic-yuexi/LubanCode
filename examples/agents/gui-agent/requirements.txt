@@ -1,0 +1,16 @@
+# gui-agent-example:零第三方依赖。
+#
+# 全链路只用 Python 3.10+ 标准库:
+#   ctypes     — Win32(user32/kernel32/gdi32):窗口枚举、DPI、SendInput、BitBlt
+#   zlib       — PNG 编码(见 png.py,IDAT 压缩与 CRC32)
+#   tkinter    — 仅教学夹具 fixtures/fixture_app.py 用
+#
+# 为什么不用 mss / pyautogui / Pillow:
+#   - pyautogui 在 DPI unaware 进程里拿虚拟化坐标,多屏负原点会错位;
+#     本插件先 SetProcessDpiAwarenessContext,全链路物理像素,口径唯一。
+#   - 截图 BitBlt + 手写 PNG 共百余行,权限、坐标合同、字节帽全在
+#     本仓源码里,不交第三方猜。
+#
+# 因此本文件没有版本要锁。装好 Python 3.10+(Windows 官方安装包默认带
+# tkinter 与 ctypes)即可:
+#   python --version

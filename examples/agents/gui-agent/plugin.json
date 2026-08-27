@@ -1,0 +1,195 @@
+{
+  "manifest_version": 1,
+  "id": "gui-agent-example",
+  "version": "1.0.0",
+  "language": "python",
+  "runtime": {
+    "kind": "process",
+    "command": "python",
+    "args": ["${plugin_dir}/runner.py"],
+    "timeout_ms": 20000
+  },
+  "tools": [
+    {
+      "name": "gui_status",
+      "description": "查 GUI 环境底账:平台、Python 版本、DPI 感知、显示器数、虚拟屏范围、dry-run 状态。任何 GUI 任务先调它,再 gui_list_windows。无副作用。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "gui_list_windows",
+      "description": "枚举可见顶层窗口:id、标题、进程名、矩形、最小化/前台状态。窗口 id 只在当前桌面现场有效,不跨会话;挪动窗口后旧 id 仍可用但矩形会变。观察类,无副作用。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "title_filter": {
+            "type": "string",
+            "description": "可选;按标题子串过滤(不分大小写),如 LubanCode GUI Fixture"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "gui_focus_window",
+      "description": "把窗口切到前台并复查成功。收 gui_list_windows 给的 window_id。系统拒绝前台切换会如实报错。动作类:改变前台焦点。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "window_id": {"type": "string", "description": "形如 0x0012049A 的十六进制窗口 id"}
+        },
+        "required": ["window_id"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "gui_screenshot",
+      "description": "截图并落 PNG 工件,返回 observation(窗口矩形、客户区尺寸、DPI、虚拟原点、图片 sha256 与路径)。默认 target=window 只拍目标窗口,少碰无关隐私;target=screen 拍全部显示器。最小化窗口拒绝。注意:当前协议只回文本,模型尚未自动看见图;动作工具带 expected_window_rect 引用本次 observation 的矩形可防坐标过期。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "target": {
+            "type": "string",
+            "enum": ["window", "screen"],
+            "description": "window=离屏抓目标窗口(默认,遮挡也能抓);screen=拍整块虚拟屏(注意隐私)"
+          },
+          "window_id": {"type": "string", "description": "target=window 必填"},
+          "artifact_dir": {"type": "string", "description": "可选;截图落盘目录,缺省走 LUBANCODE_GUI_EVIDENCE_DIR 或系统临时目录"}
+        },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "gui_move_mouse",
+      "description": "只移动鼠标,不点击。坐标口径 coordinate_space:virtual_screen=全桌面物理像素(多屏联合,可含负坐标,默认);window_client=目标窗口客户区坐标,执行前换算。越界拒绝。低风险动作。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "x": {"type": "integer", "description": "物理像素横坐标"},
+          "y": {"type": "integer", "description": "物理像素纵坐标"},
+          "coordinate_space": {
+            "type": "string",
+            "enum": ["virtual_screen", "window_client"],
+            "description": "坐标口径,默认 virtual_screen"
+          },
+          "window_id": {"type": "string", "description": "coordinate_space=window_client 时必填"},
+          "duration_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 1000,
+            "description": "可选;匀速移动时长,0=瞬移(默认)"
+          },
+          "expected_window_rect": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": "可选;截图时的窗口矩形 [l,t,r,b],不合即拒(stale_observation)"
+          }
+        },
+        "required": ["x", "y"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "gui_click",
+      "description": "移动并点击。默认左键单击;右键、双击须显式传 button/clicks。执行前复查:窗口在、矩形合(expected_window_rect)、必要时先聚焦。点击只报动作事实,界面是否真变须下一步 gui_screenshot 复验。写动作。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "x": {"type": "integer"},
+          "y": {"type": "integer"},
+          "coordinate_space": {
+            "type": "string",
+            "enum": ["virtual_screen", "window_client"]
+          },
+          "window_id": {"type": "string"},
+          "expected_window_rect": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "description": "截图时的窗口矩形,不合即拒,不拿旧图坐标硬点"
+          },
+          "button": {"type": "string", "enum": ["left", "right", "middle"]},
+          "clicks": {"type": "integer", "minimum": 1, "maximum": 3}
+        },
+        "required": ["x", "y"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "gui_scroll",
+      "description": "滚轮。ticks 上限 50,一次滚不出几万格。给 x/y 则先移过去再滚,不给就在光标处滚。写动作。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "direction": {"type": "string", "enum": ["up", "down"]},
+          "ticks": {"type": "integer", "minimum": 1, "maximum": 50},
+          "x": {"type": "integer"},
+          "y": {"type": "integer"},
+          "coordinate_space": {
+            "type": "string",
+            "enum": ["virtual_screen", "window_client"]
+          },
+          "window_id": {"type": "string"}
+        },
+        "required": ["direction"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "gui_type_text",
+      "description": "向目标窗口注入文字,逐字符 Unicode 键盘事件——中文不走输入法、不碰剪贴板。结果只报字符数与去向,不回显全文。密码、OTP、验证码一律不得经此工具输入。写动作。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {"type": "string", "minLength": 1, "maxLength": 4096},
+          "window_id": {"type": "string", "description": "可选;不给则注入到当前前台窗口"},
+          "interval_ms": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 200,
+            "description": "字符间隔,慢速程序可调大"
+          },
+          "expected_window_rect": {
+            "type": "array",
+            "items": {"type": "integer"}
+          }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "gui_key",
+      "description": "发送键或组合键,如 [\"enter\"]、[\"ctrl\",\"s\"]。只收枚举键名,不收任意脚本。Win 组合与 Alt+F4 属高风险,默认禁(须 LUBANCODE_GUI_ALLOW_DANGEROUS_KEYS=1)。Esc 可作普通目标键——LubanCode 自己的取消键是另一回事。写动作。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "keys": {
+            "type": "array",
+            "items": {"type": "string"},
+            "minItems": 1,
+            "maxItems": 4,
+            "description": "1-4 个枚举键名,修饰键在前,如 [\"ctrl\",\"shift\",\"s\"]"
+          },
+          "window_id": {"type": "string"},
+          "expected_window_rect": {
+            "type": "array",
+            "items": {"type": "integer"}
+          }
+        },
+        "required": ["keys"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": {
+    "network": false,
+    "env": [
+      "LUBANCODE_GUI_DRY_RUN",
+      "LUBANCODE_GUI_EVIDENCE_DIR",
+      "LUBANCODE_GUI_ALLOW_DANGEROUS_KEYS"
+    ]
+  }
+}

@@ -28,3 +28,7 @@ vcpkg_installed/
 
 # worktree 内的本地构建树(MSVC 临时编验用)
 build-msvc/
+
+# Python 字节码缓存不进仓
+__pycache__/
+*.pyc
