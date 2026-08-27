@@ -415,3 +415,77 @@ TEST_CASE("目录声明不吃推理(declined):出图模型停发档位,回来恢
     image_gen.capabilities["image-generation"] = true;
     CHECK(config::ClassifyModelEndpoint(&image_gen, "img-x") == config::ModelEndpointKind::ImageGen);
 }
+
+TEST_CASE("ClassifyThinkOffDeclaration:always_think/off_unsupported 两键认得出,没写不猜") {
+    // MiniCPM5 巡检单 P1:目录声明"思考关不掉"的两枚键,/think none 与
+    // /doctor effort 都拿它亮"此端点未证实可关"。没写 = Unknown,不猜。
+    CHECK(config::ClassifyThinkOffDeclaration(nullptr) == config::ThinkOffDeclaration::Unknown);
+
+    config::ModelCatalogEntry plain;
+    plain.slug = "plain";
+    CHECK(config::ClassifyThinkOffDeclaration(&plain) == config::ThinkOffDeclaration::Unknown);
+
+    config::ModelCatalogEntry always;
+    always.capabilities["always_think"] = true;
+    CHECK(config::ClassifyThinkOffDeclaration(&always) == config::ThinkOffDeclaration::DeclaredUnsupported);
+
+    config::ModelCatalogEntry off_unsupported;
+    off_unsupported.capabilities["off_unsupported"] = true;
+    CHECK(config::ClassifyThinkOffDeclaration(&off_unsupported) ==
+          config::ThinkOffDeclaration::DeclaredUnsupported);
+
+    // 写了但为假 = 没声明(目录明说"能关"不在此键的语义里,留 Unknown)。
+    config::ModelCatalogEntry falsy;
+    falsy.capabilities["always_think"] = false;
+    CHECK(config::ClassifyThinkOffDeclaration(&falsy) == config::ThinkOffDeclaration::Unknown);
+
+    // models.json 手写与内置目录同形状,一条 JSON 就能落声明(真机巡检的
+    // 本地端就走这条路:MiniCPM5-1B 不在内置目录,用户条目自写)。
+    const auto parsed = config::ParseModelCatalogJson(
+        R"({"models":[{"slug":"MiniCPM5-1B","capabilities":{"off_unsupported":true,"image":false}}]})",
+        "test-models.json");
+    REQUIRE(parsed.models.size() == 1);
+    CHECK(config::ClassifyThinkOffDeclaration(&parsed.models[0]) ==
+          config::ThinkOffDeclaration::DeclaredUnsupported);
+    CHECK(config::ClassifyImageInputSupport(&parsed.models[0]) == config::ImageInputSupport::TextOnly);
+}
+
+TEST_CASE("ClassifyImageInputSupport:input_modalities 与 capabilities 合判,未知放行") {
+    // MiniCPM5 巡检单 P2:已知纯文本模型在 /image 发送前拦住,未知才允许
+    // 试探。三条判据各钉一册:modalities 列表、capabilities.image 真假、
+    // 都没写 = Unknown。
+    CHECK(config::ClassifyImageInputSupport(nullptr) == config::ImageInputSupport::Unknown);
+
+    config::ModelCatalogEntry bare;
+    CHECK(config::ClassifyImageInputSupport(&bare) == config::ImageInputSupport::Unknown);
+
+    config::ModelCatalogEntry declared_text;
+    declared_text.input_modalities = {"text"};
+    CHECK(config::ClassifyImageInputSupport(&declared_text) == config::ImageInputSupport::TextOnly);
+
+    config::ModelCatalogEntry declared_multi;
+    declared_multi.input_modalities = {"text", "image"};
+    CHECK(config::ClassifyImageInputSupport(&declared_multi) == config::ImageInputSupport::Multimodal);
+
+    // 大小写不敏感;只列了别的模态(音频一类)算图片未声明。
+    config::ModelCatalogEntry upper;
+    upper.input_modalities = {"Text", "IMAGE"};
+    CHECK(config::ClassifyImageInputSupport(&upper) == config::ImageInputSupport::Multimodal);
+    config::ModelCatalogEntry audio_only;
+    audio_only.input_modalities = {"audio"};
+    CHECK(config::ClassifyImageInputSupport(&audio_only) == config::ImageInputSupport::Unknown);
+
+    // capabilities.image:写没写都算明声明,真假分家。
+    config::ModelCatalogEntry cap_false;
+    cap_false.capabilities["image"] = false;
+    CHECK(config::ClassifyImageInputSupport(&cap_false) == config::ImageInputSupport::TextOnly);
+    config::ModelCatalogEntry cap_true;
+    cap_true.capabilities["image"] = true;
+    CHECK(config::ClassifyImageInputSupport(&cap_true) == config::ImageInputSupport::Multimodal);
+
+    // modalities 优先于 capabilities:两边打架听 modalities。
+    config::ModelCatalogEntry conflict;
+    conflict.input_modalities = {"text"};
+    conflict.capabilities["image"] = true;
+    CHECK(config::ClassifyImageInputSupport(&conflict) == config::ImageInputSupport::TextOnly);
+}

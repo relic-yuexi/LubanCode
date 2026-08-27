@@ -712,6 +712,11 @@ void TerminalSessionController::RunSessionTurn(const std::string& content, TurnS
     if (sessions_dir.empty() == false && session_store.active()) {
         turn.model_images_dir = sessions_dir + "/" + session_store.session_id() + "/images";
     }
+    // 输入图片前置拦截(MiniCPM5 真机巡检单 P2):目录与当前模型身份递给
+    // RunTurn,纯文本模型的图片附件发送前就拦住。
+    turn.model_catalog = &model_catalog;
+    turn.model_id = *current_model;
+    turn.active_provider = active_provider;
     if (is_user_turn) {
         turn.usage_out = &turn_usage;
         turn.trace_hub = &*trace_hub_;

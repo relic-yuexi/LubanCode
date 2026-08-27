@@ -16,6 +16,7 @@ using lubancode::cli::TermErr;
 #include <cstdlib>
 #include <expected>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
@@ -34,6 +35,7 @@ using lubancode::cli::TermErr;
 #include "app/backend_stack.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
+#include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
 #include "tools/shell_info.hpp"
 
@@ -136,7 +138,8 @@ std::optional<std::int64_t> MetricValueFromLine(const std::string& line, std::si
 
 // ---------------- 纯函数 ----------------
 
-api::Request BuildEffortProbeRequest(const std::string& model, const std::string& level) {
+api::Request BuildEffortProbeRequest(const std::string& model, const std::string& level,
+                                     std::optional<int> max_tokens) {
     api::Request probe;
     probe.model = model;
     probe.system = "You are a diagnostic probe. Answer with exactly: ok";
@@ -144,7 +147,7 @@ api::Request BuildEffortProbeRequest(const std::string& model, const std::string
     user.role = api::Role::User;
     user.content.push_back(api::TextBlock{"Reply with exactly: ok"});
     probe.messages.push_back(std::move(user));
-    probe.max_tokens = 64;
+    probe.max_tokens = max_tokens.value_or(64);
     probe.reasoning_effort = level;  // 空串 = 不发参数,字段整个缺席
     return probe;
 }
@@ -290,8 +293,78 @@ CacheObservation ClassifyCacheObservation(bool usage_reported, std::int64_t cach
     return CacheObservation::EnabledNoHit;
 }
 
-FixedPrefixProbePair BuildFixedPrefixProbePair(const std::string& model, std::size_t prefix_fill_bytes) {
-    // 填充段是一段无信息量的固定文字:诊断信号在前缀字节稳不稳,不在内容。
+std::vector<std::string> SummarizeEffortProbeRounds(const std::vector<EffortProbeRoundResult>& rounds) {
+    // 四账分开(MiniCPM5 真机巡检单 P1):HTTP 接受、thinking 产出、正文
+    // 产出、终止原因分布——一眼能看出"2xx 收了但思考照发"这种方言不生效。
+    // 判词只陈述观察,不拿 2xx 当行为支持;预算被思考耗尽的回只进
+    // inconclusive 账,不拿 text=0 说事。
+    std::vector<std::string> lines;
+    if (rounds.empty()) {
+        lines.push_back("未发出任何探针。");
+        return lines;
+    }
+    const std::size_t total = rounds.size();
+    const std::size_t http_ok = std::count_if(rounds.begin(), rounds.end(),
+                                              [](const EffortProbeRoundResult& r) { return r.http_ok; });
+    const std::size_t thinking_rounds =
+        std::count_if(rounds.begin(), rounds.end(),
+                      [](const EffortProbeRoundResult& r) { return r.thinking_chars > 0; });
+    const std::size_t text_rounds = std::count_if(rounds.begin(), rounds.end(),
+                                                  [](const EffortProbeRoundResult& r) { return r.text_chars > 0; });
+    lines.push_back("HTTP 接受:" + std::to_string(http_ok) + "/" + std::to_string(total) + " 回收到 2xx");
+    lines.push_back("thinking 产出:" + std::to_string(thinking_rounds) + "/" + std::to_string(total) +
+                    " 回有思考增量");
+    lines.push_back("正文产出:" + std::to_string(text_rounds) + "/" + std::to_string(total) +
+                    " 回有正文增量");
+    // 终止原因分布:同因聚合计数,空 stop_reason 单独记"未回"。
+    std::map<std::string, std::size_t> stop_counts;
+    for (const EffortProbeRoundResult& r : rounds) {
+        const std::string key = r.stop_reason.empty() ? "(未回)" : r.stop_reason;
+        ++stop_counts[key];
+    }
+    std::string distribution;
+    for (const auto& [reason, count] : stop_counts) {
+        if (!distribution.empty()) {
+            distribution += " · ";
+        }
+        distribution += reason + " ×" + std::to_string(count);
+    }
+    lines.push_back("终止原因分布:" + distribution);
+
+    // 判词:先看有没有"预算耗尽"(stop=max_tokens 且正文 0)的回——这类回
+    // 对"正文是否产出"没有发言权。全部回都耗尽 = 只判 inconclusive;部分
+    // 耗尽,判词按有效回说,但附一句提醒。
+    const auto budget_exhausted = [](const EffortProbeRoundResult& r) {
+        return r.http_ok && r.stop_reason == "max_tokens" && r.text_chars == 0;
+    };
+    const std::size_t exhausted =
+        std::count_if(rounds.begin(), rounds.end(), budget_exhausted);
+    const std::size_t effective = http_ok - exhausted;
+    if (exhausted > 0) {
+        lines.push_back("探针预算耗尽(思考吃满 max_tokens、正文 0):" + std::to_string(exhausted) +
+                        "/" + std::to_string(total) + " 回,这些回不判支持或不支持。");
+    }
+    if (effective == 0) {
+        lines.push_back("判词:inconclusive——有效回为 0(探针预算全被思考耗尽或全非 2xx),"
+                        "换更大预算或先看 HTTP 账,别拿这轮回当档位证据。");
+        return lines;
+    }
+    const std::size_t effective_thinking = std::count_if(
+        rounds.begin(), rounds.end(), [&](const EffortProbeRoundResult& r) {
+            return r.http_ok && !budget_exhausted(r) && r.thinking_chars > 0;
+        });
+    const std::size_t effective_text = std::count_if(
+        rounds.begin(), rounds.end(), [&](const EffortProbeRoundResult& r) {
+            return r.http_ok && !budget_exhausted(r) && r.text_chars > 0;
+        });
+    lines.push_back("判词:有效 " + std::to_string(effective) + " 回里 " + std::to_string(effective_thinking) +
+                    " 回产出思考、" + std::to_string(effective_text) +
+                    " 回产出正文。这是行为观察,不替服务端背书档位语义;"
+                    "/think none 档若仍见思考产出,即关闭未被端点证实。");
+    return lines;
+}
+
+FixedPrefixProbePair BuildFixedPrefixProbePair(const std::string& model, std::size_t prefix_fill_bytes) {    // 填充段是一段无信息量的固定文字:诊断信号在前缀字节稳不稳,不在内容。
     const std::string filler = "prefix-cache probe filler segment 0123456789. ";
     std::string fixed;
     fixed.reserve(prefix_fill_bytes + filler.size());
@@ -386,7 +459,9 @@ namespace {
 // /doctor effort:<level> 已经剥好(空串 = 探"不发参数")。
 void RunEffortProbe(const std::string& level, const DoctorContext& context) {
     const lubancode::config::Config& config = context.config;
-    api::Request probe = BuildEffortProbeRequest(context.current_model, level);
+    // 探针预算给推理优先模型留足(MiniCPM5 真机巡检单 P1):64 token 全耗在
+    // thinking 的现场,正文压根儿没机会产出——预算耗尽的回只判 inconclusive。
+    api::Request probe = BuildEffortProbeRequest(context.current_model, level, kEffortProbeBudgetTokens);
     // 模型档案(目录里有就带上,模型协议兼容实录矩阵单 P1):方言决定请求
     // 落线形状。目录查不到 = 本地自定义端,走兼容形状,诊断行自己会标。
     const auto catalog = lubancode::config::LoadProviderCatalog();
@@ -395,45 +470,55 @@ void RunEffortProbe(const std::string& level, const DoctorContext& context) {
             probe.reasoning = model->reasoning;
         }
     }
+    // 目录侧声明(模型目录条目,含用户 models.json):思考关不掉的模型在
+    // 这儿明说,none 档的行为预期先立住,再让三回对照去验证。
+    const lubancode::config::ModelCatalog model_catalog = lubancode::config::LoadModelCatalog();
+    const lubancode::config::ModelCatalogEntry* entry =
+        model_catalog.FindByProviderAndSlug(context.active_provider, context.current_model);
 
     TermOut() << trf("doctor.effort.probe_header", context.current_model,
                      level.empty() ? tr("doctor.level.unset") : level)
               << "\n";
+    if (lubancode::config::ClassifyThinkOffDeclaration(entry) ==
+        lubancode::config::ThinkOffDeclaration::DeclaredUnsupported) {
+        TermOut() << "目录声明:此模型思考关不掉(always_think/off_unsupported)。none 档发出关闭请求后,"
+                     "仍以三回对照的 thinking 产出账为准。\n";
+    }
     // 请求侧:先看"实际发送值"——按当前 wire 把请求体翻出来,字段在不在、
     // 值是什么,如实报告(不发送任何正文,只报参数名与档位值)。
     TermOut() << tr("doctor.effort.request_field") << " "
               << DescribeRequestEffort(config.wire, probe, config.extra_body, config.think_param) << "\n";
+    TermOut() << "每档重复 " << kEffortProbeRepeats
+              << " 回对照(单回 2xx 不当行为支持;探针预算 " << kEffortProbeBudgetTokens
+              << " token,被思考耗尽的回只判 inconclusive)。\n";
     TermOut() << tr("doctor.probe.sending") << "\n";
     TermOut().flush();
 
     auto backend = BuildBackend(config);
-    const ProbeOutcome outcome = RunProbe(*backend, probe);
-
-    if (!outcome.error.empty()) {
-        TermOut() << trf("doctor.effort.http_error",
-                         outcome.http_status > 0 ? std::to_string(outcome.http_status) : std::string("-"))
-                  << "\n"
-                  << "  " << SanitizeProbeError(outcome.error) << "\n";
-    } else {
-        TermOut() << tr("doctor.effort.http_ok") << "\n";
-    }
-    TermOut() << tr("doctor.effort.finish") << " "
-              << (outcome.stop_reason.empty() ? tr("doctor.value.absent") : outcome.stop_reason) << "\n";
-    TermOut() << trf("doctor.effort.body", outcome.text_chars, outcome.thinking_chars) << "\n";
-    if (!outcome.usage_reported) {
-        TermOut() << tr("doctor.effort.usage_not_reported") << "\n";
-    } else {
-        TermOut() << trf("doctor.effort.usage", lubancode::cli::FormatTokenCount(outcome.usage.input_tokens),
-                         lubancode::cli::FormatTokenCount(outcome.usage.output_tokens),
-                         lubancode::cli::FormatTokenCount(outcome.usage.cache_read_tokens))
-                  << "\n";
-        if (outcome.usage.output_tokens > 0) {
-            TermOut() << (outcome.usage.output_reasoning_tokens > 0
-                              ? trf("doctor.effort.usage_reasoning",
-                                    lubancode::cli::FormatTokenCount(outcome.usage.output_reasoning_tokens))
-                              : tr("doctor.effort.usage_no_split"))
-                      << "\n";
+    std::vector<EffortProbeRoundResult> rounds;
+    for (int round = 1; round <= kEffortProbeRepeats; ++round) {
+        const ProbeOutcome outcome = RunProbe(*backend, probe);
+        EffortProbeRoundResult result;
+        result.http_ok = outcome.error.empty();
+        result.thinking_chars = outcome.thinking_chars;
+        result.text_chars = outcome.text_chars;
+        result.stop_reason = outcome.stop_reason;
+        rounds.push_back(result);
+        TermOut() << "  第 " << round << "/" << kEffortProbeRepeats << " 回: ";
+        if (!outcome.error.empty()) {
+            TermOut() << trf("doctor.effort.http_error",
+                             outcome.http_status > 0 ? std::to_string(outcome.http_status) : std::string("-"))
+                      << "  " << SanitizeProbeError(outcome.error) << "\n";
+            continue;
         }
+        TermOut() << tr("doctor.effort.http_ok") << "  " << tr("doctor.effort.finish") << " "
+                  << (outcome.stop_reason.empty() ? std::string(tr("doctor.value.absent")) : outcome.stop_reason)
+                  << "  " << trf("doctor.effort.body", outcome.text_chars, outcome.thinking_chars) << "\n";
+        TermOut().flush();
+    }
+
+    for (const std::string& line : SummarizeEffortProbeRounds(rounds)) {
+        TermOut() << line << "\n";
     }
     TermOut().flush();
 }

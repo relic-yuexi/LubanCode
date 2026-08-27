@@ -145,7 +145,7 @@ ETag 另存一份。下次刷新发送条件请求；远端没变，便不重写
 | `context_window` | 正整数，或 `256k`、`1m` 这类写法 |
 | `max_output` | 最大输出 token |
 | `default_think` | 默认推理档 |
-| `capabilities` | 能力名到布尔值；供展示和选择使用 |
+| `capabilities` | 能力名到布尔值；供展示和选择使用。几枚有行为的键:`image`/`input_modalities` 声明纯文本的模型,带图片附件的输入在发送前拦住;`always_think` 或 `off_unsupported` 声明思考关不掉的模型,`/think none` 切换前后明说"此端点未证实可关" |
 | `reasoning` | 该模型支持的 effort、toggle、budget 与 wire 方言 |
 
 推理控制按模型直写。`/think` 只展示当前模型声明的档位，请求层也读同一份档案。

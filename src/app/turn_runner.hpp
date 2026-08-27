@@ -45,6 +45,10 @@
 #include "tools/registry.hpp"
 #include "tools/todo_tool.hpp"
 
+namespace lubancode::config {
+struct ModelCatalog;
+}
+
 namespace lubancode::app {
 
 // main.cpp 原文里这些名字是不限定引用的;搬进 app 命名空间后对齐一下。
@@ -130,6 +134,15 @@ struct TurnContext {
     // on_model_image 落盘口,模型出的图解码落盘、引用入史;空(单发/没
     // 开会话)= 不挂,图片真来了由引擎明败("未接线图片落盘"),不吞图。
     std::string model_images_dir;
+
+    // ---- 输入图片前置拦截(MiniCPM5 真机巡检单 P2)----
+    // 模型目录与当前模型身份:目录声明纯文本(capabilities.image=false 或
+    // input_modalities 只列 text)的模型,带附件(/image、@路径)的输入在
+    // 发送前拦住,不等服务端回 500。目录没声明 = 允许试探。catalog 可空
+    //(调用方没接,行为回退现状);model_id 空 = 不查。
+    const lubancode::config::ModelCatalog* model_catalog = nullptr;
+    std::string model_id;
+    std::string active_provider;
 
     // ---- 事件流(骨架拆解批二;批二余款升唯一出水口)----
     // SessionRuntime::MakeTurnAdapter() 造的那只(落点已挂会话事件链)。
