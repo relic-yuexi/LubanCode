@@ -1256,6 +1256,11 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 快照；也保证下一次 ReadLine() 前不再抢控制台输入。心跳线程随后收。
     listener.Stop();
     lubancode::cli::SetStreamScreenPrintHook(nullptr);  // 线程已 join,摘钩,别让它抓着局部引用过夜
+    // 画面隔网先行批:收 UI 泵——停消费线程、把余下的流式事件在本线程排
+    // 干。此后(收口 chrome、FinalizeRepaint、Stop 钩子续跑、统计行)的
+    // 画面全回到本线程,与老路一字不差;续跑轮迟到的流式事件在停表之后,
+    // 泵自动退化成就地画。收口事件(usage/Finish)本就只走就地路,不丢。
+    terminal_sink.StopUiPump();
     // streaming→idle 的交接是一笔事务,次序钉死不许倒:
     //   1) 收 streaming footer(EndStreamFooter 里的 EraseStreamFooterLocked,
     //      按上一帧的账整框擦净、光标拨回正文续写位);

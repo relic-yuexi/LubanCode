@@ -624,6 +624,8 @@ add_library(lubancode_app STATIC
   # 骨架拆解批二余款:终端画屏的事件流 sink(Callbacks 老路拔除后,显示
   # 出水全走 TurnEventAdapter,这只在 sink 侧翻画面)。
   src/app/terminal_turn_sink.cpp
+  # 终端画面隔网先行批:流式事件与终端之间的 UI 队列 + 过渡消费侧。
+  src/app/ui_event_pump.cpp
   src/app/hook_runtime.cpp
   src/app_server/protocol.hpp
   src/app_server/schema.cpp
