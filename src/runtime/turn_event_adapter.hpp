@@ -58,7 +58,9 @@ public:
     // 拷贝禁着,移动是唯一路)。移动后的旧壳不许再用——闭包里的 this 已
     // 指向新家,旧壳只待析构。
     TurnEventAdapter(TurnEventAdapter&&) = default;
-    TurnEventAdapter& operator=(TurnEventAdapter&&) = default;
+    // move 赋值全仓无调用,引用成员 ids_ 也令 default 隐式删除——按 Clang
+    // 提示显式化(-Wdefaulted-function-deleted);"唯一路"说的是移动构造。
+    TurnEventAdapter& operator=(TurnEventAdapter&&) = delete;
 
     // 挂事件落点(可换;每次开轮之前挂好)。
     void Attach(std::function<void(const ServerEvent&)> sink) { sink_ = std::move(sink); }

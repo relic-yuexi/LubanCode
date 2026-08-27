@@ -179,7 +179,7 @@ std::string LogTimestamp() {
 #ifdef _WIN32
     localtime_s(&tm_buffer, &seconds);
 #else
-    localtime_r(&tm_buffer, &seconds);
+    localtime_r(&seconds, &tm_buffer);
 #endif
     char buffer[32];
     std::snprintf(buffer, sizeof(buffer), "%02d:%02d:%02d.%03d", tm_buffer.tm_hour, tm_buffer.tm_min,

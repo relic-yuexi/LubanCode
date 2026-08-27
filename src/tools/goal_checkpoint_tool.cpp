@@ -154,7 +154,6 @@ tools::Tool::Result GoalCheckpointTool::execute(const nlohmann::json& input) {
 
     // 一轮可多次 checkpoint;最后一枚为候选,每枚都留(state_ 落 trace 由装配层)。
     state_->entries.push_back(entry);
-    state_->entries.back();  // 稳定引用(防移动迭代器)
 
     R r;
     std::string ack = "检查点已记(";

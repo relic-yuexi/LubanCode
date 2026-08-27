@@ -2293,7 +2293,7 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
 
     // ---- 三角色 shorthand(模型分工第一期):待遇同 compact_model,
     // env > 项目级 > 全局 > 默认(未配置)。读入时已归一(空串/null 当没写)。
-    const auto merge_role_shorthand = [&pick, &lubancode_env, &result](
+    const auto merge_role_shorthand = [&pick](
                                           const std::optional<std::string>& env_value,
                                           std::optional<std::string> FileConfig::*field, std::string& out,
                                           Source& out_source) {

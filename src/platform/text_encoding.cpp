@@ -113,6 +113,7 @@ std::string SanitizeUtf8(const std::string& text) {
     return ReplaceInvalidWithFFFD(text);
 }
 
+#ifdef _WIN32
 namespace {
 
 // 一段文本的成分清点:合法多字节序列几处、非法首字节几个。判定跟
@@ -141,6 +142,7 @@ Utf8ScanStats ScanUtf8Stats(const std::string& text) {
 }
 
 }  // namespace
+#endif  // _WIN32
 
 std::size_t Utf8PrefixBoundary(const std::string& text, std::size_t offset) {
     if (text.empty()) {

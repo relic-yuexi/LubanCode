@@ -203,8 +203,12 @@ public:
 private:
     std::optional<char32_t> pending_high_surrogate_;  // 仅 Windows 用;POSIX 下闲置无害
     std::wstring rapid_text_run_;                     // Windows:高速到达、尚未遇到编辑键的正文
+#ifdef _WIN32
+    // 仅 console_win.cpp 用;POSIX 下编译掉——平凡类型闲置会报
+    // -Wunused-private-field(rapid_text_run_ 非平凡,构造/析构即"使用",不报)。
     std::size_t rapid_char_count_ = 0;
     std::uint64_t last_text_tick_ = 0;
+#endif
 };
 
 // 监听线程探测:timeout_ms 内 stdin 有没有输入事件可读(只问不消费)。
