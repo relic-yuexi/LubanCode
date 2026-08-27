@@ -454,3 +454,101 @@ TEST_CASE("同源布局:无框读取退化——不画横线、不留白、光�
     CHECK(layout.cursor_x == 2 + 8);  // 四个汉字 8 列
     CHECK(layout.cursor_row == 0);
 }
+
+// ---------------------------------------------------------------------------
+// 高度预算(终端画面隔网单·战术二):"输入行必画得下"的硬约束。可选行按
+// transient -> dock -> queue -> activity 的次序舍;可选行全舍了还不够,
+// composer 围光标开窗。预算 0 = 不限(老行为)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("高度预算:0 不限,整帧照旧(老行为不受扰)") {
+    const Theme plain;
+    BottomChromeModel model = FramedModel(ComposerState({U"一行"}, 0, 2), ComposerMode::BusyQueue);
+    model.queue_rows = {"队列标题", "> 条目"};
+    model.agent_dock_rows = {"↑/↓ 选择", "● main"};
+    model.transient_rows = {"  /help"};
+    model.activity_rows = {"• Working (3s)"};
+    const auto unlimited = BuildBottomChromeLayout(model, plain, 40, 0);
+    const auto legacy = BuildBottomChromeLayout(model, plain, 40);
+    CHECK(unlimited.frame.rows.size() == legacy.frame.rows.size());
+    CHECK(unlimited.dropped_optional_rows == 0);
+}
+
+TEST_CASE("高度预算:超窗先舍提示/坞,队列次之,输入行永远画得下") {
+    const Theme plain;
+    BottomChromeModel model = FramedModel(ComposerState({U"一行"}, 0, 2), ComposerMode::BusyQueue);
+    model.queue_rows = {"队列标题", "> 条目"};
+    model.agent_dock_rows = {"↑/↓ 选择", "● main"};
+    model.transient_rows = {"  /help"};
+    model.activity_rows = {"• Working (3s)"};
+    // 整帧不限时 = 活动1 + 队列2 + 横线2 + 输入1 + 状态1 + 坞2 + 提示1 = 10 行。
+    REQUIRE(BuildBottomChromeLayout(model, plain, 40).frame.rows.size() == 10);
+
+    // 预算 7:先舍提示(1),再舍坞(2)——队列/活动条/输入全套保住。
+    const auto tight = BuildBottomChromeLayout(model, plain, 40, 7);
+    CHECK(tight.frame.rows.size() == 7);
+    CHECK(tight.dropped_optional_rows == 3);
+    bool has_dock = false;
+    bool has_hint = false;
+    bool has_queue = false;
+    bool has_input = false;
+    for (const auto& row : tight.frame.rows) {
+        has_dock = has_dock || Contains(row.text, "main");
+        has_hint = has_hint || Contains(row.text, "/help");
+        has_queue = has_queue || Contains(row.text, "队列标题");
+        has_input = has_input || (!row.text.empty() && row.text[0] == '>');
+    }
+    CHECK_FALSE(has_dock);
+    CHECK_FALSE(has_hint);
+    CHECK(has_queue);
+    CHECK(has_input);
+    // 行账与指纹记"真画出来的"(被钳的行不进指纹)。
+    CHECK(tight.chrome.agent_dock_rows.empty());
+    CHECK(tight.chrome.transient_rows.empty());
+    CHECK(tight.chrome.queue_rows.size() == 2);
+}
+
+TEST_CASE("高度预算:绝境开窗——输入行比窗高也围光标画得下") {
+    const Theme plain;
+    // 十条逻辑行,光标在末行行尾。
+    std::vector<std::u32string> lines;
+    for (int i = 1; i <= 10; ++i) {
+        lines.push_back(i == 10 ? U"第十行" : U"第" + std::u32string(1, U'0' + i) + U"行");
+    }
+    BottomChromeModel model =
+        FramedModel(ComposerState(std::move(lines), 9, 3), ComposerMode::BusyQueue);
+    model.queue_rows = {"队列标题"};
+    model.agent_dock_rows = {"↑/↓ 选择", "● main"};
+    // 预算 5:横线 2 + 状态 1 只剩 2 行给输入——十条逻辑行须开窗到 2 行,
+    // 窗尾贴光标(第九/第十行),窗口之外一行不画。
+    const auto windowed = BuildBottomChromeLayout(model, plain, 40, 5);
+    CHECK(windowed.frame.rows.size() == 5);
+    CHECK(windowed.composer_row_count == 2);
+    CHECK(windowed.chrome.composer_rows == 2);
+    CHECK(Contains(windowed.frame.rows[1].text, "第9行"));
+    CHECK(Contains(windowed.frame.rows[2].text, "第十行"));
+    CHECK(windowed.cursor_row == windowed.composer_first_row + 1);
+    CHECK(windowed.frame.cursor_row == windowed.cursor_row);
+    // 预算 1:横线/状态全让位,只剩光标那一行——硬约束的底线。
+    const auto one_row = BuildBottomChromeLayout(model, plain, 40, 1);
+    CHECK(one_row.frame.rows.size() == 1);
+    CHECK(Contains(one_row.frame.rows[0].text, "第十行"));
+    CHECK(one_row.cursor_row == 0);
+    CHECK(one_row.cursor_x == 2 + 6);  // 缩进 2 + "第十行" 三字 6 列(光标在行尾)
+}
+
+TEST_CASE("高度预算:刚好装下不多舍,差一行才舍") {
+    const Theme plain;
+    BottomChromeModel model = FramedModel(ComposerState({U"一行"}, 0, 2), ComposerMode::BusyQueue);
+    model.agent_dock_rows = {"↑/↓ 选择", "● main"};
+    model.transient_rows = {"  /help"};
+    // 不限 = 横线2+输入1+状态1+坞2+提示1 = 7 行;预算 7 一行不少。
+    REQUIRE(BuildBottomChromeLayout(model, plain, 40).frame.rows.size() == 7);
+    const auto exact = BuildBottomChromeLayout(model, plain, 40, 7);
+    CHECK(exact.frame.rows.size() == 7);
+    CHECK(exact.dropped_optional_rows == 0);
+    // 预算 6 舍提示一行。
+    const auto one_less = BuildBottomChromeLayout(model, plain, 40, 6);
+    CHECK(one_less.frame.rows.size() == 6);
+    CHECK(one_less.dropped_optional_rows == 1);
+}

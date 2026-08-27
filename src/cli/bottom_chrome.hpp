@@ -103,6 +103,9 @@ struct BottomChromeModel {
 // cursor_row 相对帧顶;composer_first_row 是首个输入物理行在帧里的下标。
 // painted_row_widths 是每行"纯文本显示宽"(剥掉 ANSI 后按显示宽算),
 // footer 的 resize 旧帧追踪(ComputeFooterResizeRecovery)靠它反推 reflow。
+// dropped_optional_rows:高度预算钳制(见 BuildBottomChromeLayout 的
+// height_budget)舍掉了多少行可选内容(活动条/队列/坞/提示)。输入区本体
+// 不在可舍之列,不算进这个数。
 struct BottomChromeLayout {
     InlineFrame frame;         // 逐行内容(x/清宽/文本)与帧内光标
     BottomChromeFrame chrome;  // 行数账 + 指纹(含 composer 摘要)
@@ -112,14 +115,23 @@ struct BottomChromeLayout {
     int cursor_row = 0;
     std::vector<int> painted_row_widths;
     std::uint64_t revision = 0;
+    int dropped_optional_rows = 0;
 };
 
 // 全程序唯一的 Composer 布局入口:软换行(LayoutComposerRows)、首行
 // prompt 与续行两格缩进、CJK/emoji 显示宽、上下留白与最小正文高度、
 // 上下横线与 rule tag、queue/activity/status/dock/transient 的固定行序、
 // placeholder、真实物理光标、行数账与指纹,全在这一个纯函数里。
+//
+// height_budget(终端画面隔网单·战术二,0 = 不限):整帧最多占的行数
+// (调用方传可视窗口高)。"输入行必画得下"在这里立成硬约束——超预算时
+// 按 transient(提示)→ dock(坞)→ queue(队列)→ activity(活动条)
+// 的次序舍可选行;可选行全舍了还不够(多行输入比窗还高),再把 composer
+// 的物理行围光标开窗,横线/状态行跟着让位。与 LayoutAgentDock 的矮屏
+// 预算、ClampAnsiRowToWidth 的窄窗截断同族,都是"布局层兜底,不让画面
+// 撑爆终端"的一环,别另起炉灶。
 BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const Theme& theme,
-                                            int terminal_width);
+                                            int terminal_width, int height_budget = 0);
 
 // 一根框线(带主题淡色;plain 主题 theme.stats/reset 都是空串,自动退化成
 // 无色 '-' 线)。从 console_input.cpp 挪来:布局函数要画横线,不能反过来

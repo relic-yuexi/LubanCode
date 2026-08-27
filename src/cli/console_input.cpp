@@ -331,6 +331,20 @@ struct StreamFooterState {
     std::size_t input_row_index = 0;
     int input_cursor_column = 0;
     std::vector<int> painted_row_widths;  // 上一帧各逻辑行的纯文本显示宽
+    // ---- 忙路对齐空闲路(终端画面隔网单·战术三):行级双缓冲 + 指纹跳帧 ----
+    // last_frame 是上一帧真画出去的 InlineFrame;last_frame_origin 是它落笔
+    // 的绝对行号。重画时原点没挪就做行级 diff(没变的行一字不写),挪了才
+    // 整帧重画。last_fingerprint 配它做"内容没变就一个字节都不写"的跳帧
+    // (心跳 200ms 一拍,闲拍零输出,POSIX 端连屏幕探测后的整帧往返都省了)。
+    // needs_repaint 是战术一的"待补画":腾位失败/探测失败的帧置上,下一拍
+    // (心跳或下一笔正文)先强制整帧,不叫"框已擦、没画回"过夜。
+    std::optional<InlineFrame> last_frame;
+    int last_frame_origin = -1;
+    std::string last_fingerprint;
+    bool needs_repaint = false;
+    // VT 批量序列(TerminalBatch)这一场能不能用:BeginStreamFooter 探一次
+    // 存住(探测带 SetConsoleMode,不该每帧来一遍)。
+    bool vt_batch = false;
     // 两枚深度都只在 StdoutWriteMutex 内改。确认/ask_user 可嵌套挂起；
     // 工具条目重画也可套着状态块重画。任何一层尚未退完，Redraw 都只记
     // 状态不落笔，最外层析构负责补回完整帧。
@@ -351,6 +365,9 @@ void ForgetStreamFooterFrame(StreamFooterState& f) {
     f.input_row_index = 0;
     f.input_cursor_column = 0;
     f.painted_row_widths.clear();
+    f.last_frame.reset();
+    f.last_frame_origin = -1;
+    f.last_fingerprint.clear();
 }
 
 // 0.22.x 流式脚注框化:跟 composer 视觉一致的完整框——上横线 + 输入行
@@ -710,7 +727,11 @@ void RedrawEditArea(int& start_row, const BottomChromeModel& model, const Theme&
         frame_top = 0;  // 理论到不了(box 模式提示符行上方至少有一行),防越界
     }
 
-    const BottomChromeLayout layout = BuildBottomChromeLayout(effective, theme, buffer_width);
+    // 高度预算(终端画面隔网单·战术二)传可视窗口高:空闲帧(多行输入 +
+    // 队列 + 坞)超过窗口时在布局里钳制,输入行必画得下。
+    const int viewport_rows =
+            info->viewport_height > 0 ? info->viewport_height : buffer_height;
+    const BottomChromeLayout layout = BuildBottomChromeLayout(effective, theme, buffer_width, viewport_rows);
     const InlineFrame& next = layout.frame;
 
     // 锚点(提示符行)之下、帧顶之上还有队列行与横线留白;body_rows 记
@@ -1109,10 +1130,15 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     };
     // 只算行数账不落笔(100ms 拍的指纹比较用);与真画那一帧出自同一颗
     // 布局函数,指纹才与画面一致。状态行文本不进指纹,宽一点窄一点无妨。
+    // 高度预算与真画那一帧同一本账(战术二)。
     const auto build_frame = [&](const BottomChromeModel& model) {
         const std::optional<platform::ScreenInfo> info_now = platform::GetScreenInfo();
         const int width = info_now.has_value() ? info_now->width : 80;
-        return BuildBottomChromeLayout(model, theme, width).chrome;
+        const int budget_rows =
+                info_now.has_value()
+                    ? (info_now->viewport_height > 0 ? info_now->viewport_height : info_now->height)
+                    : 0;
+        return BuildBottomChromeLayout(model, theme, width, budget_rows).chrome;
     };
 
     // 搜索开着时把 RenderState 的提示行换成命中清单;查询变化就地重跑
@@ -3478,6 +3504,13 @@ void EraseStreamFooterLocked() {
     ForgetStreamFooterFrame(f);
 }
 
+// 忙路重画(终端画面隔网单·战术三重写,对齐空闲路 RedrawEditArea 的帧账):
+//   1. 指纹跳帧:内容没变、帧没挪,一个字节都不写(心跳闲拍零输出);
+//   2. 行级 diff:原点没挪时走 QueueInlineFrameDiff/PaintInlineFrameLegacy,
+//      没变的行一字不写,回显只画受影响行;
+//   3. 屏幕探测收敛到每帧一次,只有真滚了屏才重探(POSIX 的 DSR 往返尤贵)。
+// 战术一:腾位失败的帧不裸退——降级画最小框(横线+输入行+横线+状态行),
+// 再失败置 needs_repaint 待补画,光标拨回正文位,旧框清账,不留"擦了没画回"。
 void RedrawStreamFooterLocked() {
     StreamFooterState& f = FooterSlot();
     if (!f.enabled || f.suspend_depth > 0 || f.paint_depth > 0) {
@@ -3485,14 +3518,13 @@ void RedrawStreamFooterLocked() {
     }
     const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
     if (!info.has_value()) {
-        return;  // 拿不到屏幕信息这一笔就不画,下一笔再来
+        f.needs_repaint = true;  // 战术一:待补画,心跳/下一笔正文再来,不裸退
+        return;
     }
     // footer 已在屏上时，物理光标位于输入行；正文落笔位要从 state 取。
     // 第一次画才从当前光标认领正文位置。
     int bx = f.row >= 0 && f.body_x >= 0 ? f.body_x : info->cursor_x;
     int by = f.row >= 0 && f.body_y >= 0 ? f.body_y : info->cursor_y;
-
-    TermOut() << kSyncOutputBegin;  // 擦旧框 + 画新框整个当一帧提交,别让半路的画面露出来
 
     if (f.last_width != -1 && f.last_width != info->width && f.row >= 0 &&
         f.input_row >= 0 && !f.painted_row_widths.empty()) {
@@ -3504,9 +3536,12 @@ void RedrawStreamFooterLocked() {
         const FooterResizeRecoveryPlan recovery = ComputeFooterResizeRecovery(
             f.row, f.input_row, info->cursor_y, f.painted_row_widths,
             f.input_row_index, f.input_cursor_column, info->width);
+        TermOut() << kSyncOutputBegin;
         ClearStreamFooterRowsAt(recovery.top_row, recovery.rows_to_clear,
                                 info->width, info->height);
         SweepStaleWorkingRowsLocked(f, *info);
+        TermOut() << kSyncOutputEnd;
+        TermOut().flush();
         if (recovery.cursor_reflowed) {
             bx = 0;
             by = recovery.top_row;
@@ -3514,20 +3549,6 @@ void RedrawStreamFooterLocked() {
         ForgetStreamFooterFrame(f);
     }
     f.last_width = info->width;
-
-    // 先擦掉旧框(正文可能已把它顶走 / 输入行内容变了)。
-    if (f.row >= 0) {
-        ClearStreamFooterRowsAt(f.row, f.rows, info->width, info->height);
-        ForgetStreamFooterFrame(f);
-    }
-
-    if (f.hint.empty() && f.composer.line.empty() && f.composer.hint_lines.empty()) {
-        // 没启用 / 还没准备好文案:跟老逻辑一样,这一笔不画。
-        TermOut() << kSyncOutputEnd;
-        TermOut().flush();
-        platform::SetCursorPos(bx, by);
-        return;
-    }
 
     // 代理导航坞(0.29.x 层级反转):正文/Working > 待发队列 > 上横线(右端挂
     // 当前代理 title)> composer > 下横线 > 状态栏 > 导航坞 > slash 提示。
@@ -3591,7 +3612,10 @@ void RedrawStreamFooterLocked() {
     // 调唯一的 BuildBottomChromeLayout。输入区不再单行会计——完整 RenderState
     // (全部逻辑行、软换行、真实光标)进布局,placeholder 沿用 f.hint;状态
     // 行尾部照旧多一段 Esc 打断提示,由这里拼好递给布局摆位。
+    // 高度预算(战术二)传可视窗口高:"输入行必画得下"在布局里立成硬约束,
+    // 坞/队列/提示按次序舍,整帧不再撑爆窗口。
     const int width = info->width;
+    const int viewport_rows = info->viewport_height > 0 ? info->viewport_height : info->height;
     const BoxChrome chrome{true, &f.theme, SharedEditor().confirm_mode()};
     BottomChromeModel model;
     if (f.working) {
@@ -3608,8 +3632,40 @@ void RedrawStreamFooterLocked() {
     model.composer.mode = ComposerMode::BusyQueue;
     model.composer.confirm_mode = chrome.mode;
     model.status_rows = {BuildStatusLine(chrome, (std::max)(20, width - 1))};
-    const BottomChromeLayout layout = BuildBottomChromeLayout(model, f.theme, width);
-    const int total_rows = static_cast<int>(layout.frame.rows.size());
+    const BottomChromeLayout layout = BuildBottomChromeLayout(model, f.theme, width, viewport_rows);
+
+    if (f.hint.empty() && f.composer.line.empty() && f.composer.hint_lines.empty()) {
+        // 没启用 / 还没准备好文案:这一帧不画新框;旧框(若在)整块擦净
+        // 再走,不留半帧残影。
+        if (f.row >= 0) {
+            TermOut() << kSyncOutputBegin;
+            ClearStreamFooterRowsAt(f.row, f.rows, info->width, info->height);
+            TermOut() << kSyncOutputEnd;
+            TermOut().flush();
+            platform::SetCursorPos(bx, by);
+            ForgetStreamFooterFrame(f);
+        }
+        return;
+    }
+
+    // 指纹跳帧(战术三):内容指纹(含状态行文本、上横线标签、列宽/窗高)
+    // 没变、帧还在原处、也不欠补画——这一拍零输出。心跳 200ms 的闲拍从
+    // "整框擦画"变成一笔不写;光标仍钉回输入行(老路每拍重画完都落在那,
+    // 跳帧不能把这笔账丢了)。
+    const auto fingerprint_of = [&](const BottomChromeLayout& frame_layout) {
+        std::string value = BottomChromeFingerprint(frame_layout.chrome);
+        for (const std::string& row : model.status_rows) {
+            value += "s:" + row + "\n";
+        }
+        value += "r:" + model.rule_tag + "\n";
+        value += "w" + std::to_string(width) + "h" + std::to_string(viewport_rows);
+        return value;
+    };
+    if (!f.needs_repaint && f.row >= 0 && f.last_frame.has_value() &&
+        f.last_frame_origin == f.row && fingerprint_of(layout) == f.last_fingerprint) {
+        platform::SetCursorPos(f.input_cursor_column, f.input_row);
+        return;
+    }
 
     // 框落在正文光标的下一行:正文停在行中(bx>0)就 by+1,正文刚换行
     // 停在行首(bx==0)就落在 by 这空行上——两种都是"正文当前底部的下一行"。
@@ -3618,40 +3674,88 @@ void RedrawStreamFooterLocked() {
     // 主动滚够行数，再由 scroll hook 把正文/工具锚点一同上移。
     platform::SetCursorPos(bx, by);
     const int body_offset = bx > 0 ? 1 : 0;
-    if (!EnsureStreamScreenRowsLocked(body_offset + total_rows)) {
-        TermOut() << kSyncOutputEnd;
-        TermOut().flush();
-        platform::SetCursorPos(bx, by);
-        return;
+    const BottomChromeLayout* paint = &layout;
+    BottomChromeLayout degraded;  // 战术一的降级帧(横线+输入行+横线+状态行)
+    if (!EnsureStreamScreenRowsLocked(body_offset + static_cast<int>(layout.frame.rows.size()))) {
+        // 腾位失败不裸退:舍掉坞/队列/活动条/提示,只保输入框与状态行。
+        // 高度预算已把整帧钳进窗口,走到这条的多半是锚点护栏的绝境
+        // (要滚的比锚点上方还多);最小框还画不下才置待补画收场。
+        BottomChromeModel shrunk = model;
+        shrunk.agent_dock_rows.clear();
+        shrunk.queue_rows.clear();
+        shrunk.activity_rows.clear();
+        shrunk.transient_rows.clear();
+        degraded = BuildBottomChromeLayout(shrunk, f.theme, width, /*height_budget=*/0);
+        if (EnsureStreamScreenRowsLocked(body_offset + static_cast<int>(degraded.frame.rows.size()))) {
+            paint = &degraded;
+        } else {
+            f.needs_repaint = true;  // 待补画:下一拍强制整帧,不叫"擦了没画回"过夜
+            platform::SetCursorPos(bx, by);
+            ForgetStreamFooterFrame(f);
+            return;
+        }
     }
-    if (const std::optional<platform::ScreenInfo> after_scroll = platform::GetScreenInfo(); after_scroll.has_value()) {
+    // Ensure 之后一律重探一次:平移视口(pan,内容与锚点不动、overflow 报 0)
+    // 也会挪 viewport 原点,VT 批的 CUP 坐标按 viewport 相对定位——拿旧原点
+    // 画帧会整体错位(压测驱动器实锤:活动行重影、框画出窗口外)。滚屏
+    // (scroll)另会挪光标,同一次重探一并收账。
+    int viewport_x = info->viewport_x;
+    int viewport_y = info->viewport_y;
+    if (const std::optional<platform::ScreenInfo> after_scroll = platform::GetScreenInfo();
+        after_scroll.has_value()) {
         bx = after_scroll->cursor_x;
         by = after_scroll->cursor_y;
+        viewport_x = after_scroll->viewport_x;
+        viewport_y = after_scroll->viewport_y;
     }
     const int target = by + (bx > 0 ? 1 : 0);
 
-    for (std::size_t i = 0; i < layout.frame.rows.size(); ++i) {
-        platform::SetCursorPos(0, target + static_cast<int>(i));
-        TermOut() << layout.frame.rows[i].text;
+    // 行级双缓冲(战术三):原点没挪就 diff——没变的行一字不写,回显只画
+    // 受影响行;挪了(或首帧)先整块清掉旧帧,再整帧落笔。两条路与空闲路
+    // RedrawEditArea 的 QueueInlineFrameDiff/PaintInlineFrameLegacy 同一套账。
+    const InlineFrame* previous = nullptr;
+    if (f.last_frame.has_value() && f.last_frame_origin == target) {
+        previous = &*f.last_frame;
     }
-
-    TermOut() << kSyncOutputEnd;
-    TermOut().flush();
-    // 正文位置藏起来，肉眼所见的光标留在输入框。下一笔正文来时
-    // EraseStreamFooterLocked 会先拨回 bx/by。光标来自布局(真实软换行位置),
-    // 不再按首行回显宽度猜;resize 追踪跟着光标行走(ComputeFooterResize
-    // Recovery 的"input row"语义即"光标所在行",多行输入也成立)。
-    const int cursor_row = layout.cursor_row;
-    const int cursor_column = layout.cursor_x;
+    if (previous == nullptr && f.row >= 0) {
+        // 旧帧还挂在屏上但原点对不上:整块清净再画,别让旧框垫在新帧底下。
+        if (f.vt_batch) {
+            platform::TerminalBatch sweep(viewport_x, viewport_y);
+            for (int i = 0; i < f.rows; ++i) {
+                sweep.ClearRowHardFrom(0, f.row + i, width);
+            }
+            sweep.Flush();
+        } else {
+            ClearStreamFooterRowsAt(f.row, f.rows, width, info->height);
+        }
+    }
+    if (f.vt_batch) {
+        platform::TerminalBatch batch(viewport_x, viewport_y);
+        QueueInlineFrameDiff(batch, previous, paint->frame, target);
+        batch.Flush();
+    } else {
+        PaintInlineFrameLegacy(previous, paint->frame, target);
+    }
+    // 光标落在输入行(布局算出的真实软换行位置;resize 追踪跟着光标走,
+    // ComputeFooterResizeRecovery 的"input row"语义即"光标所在行")。diff
+    // 帧没发命令时也补这一笔——物理光标被别人挪过的账就地钉回。
+    const int cursor_row = paint->cursor_row;
+    const int cursor_column = paint->cursor_x;
     platform::SetCursorPos(cursor_column, target + cursor_row);
     f.row = target;
-    f.rows = total_rows;
+    f.rows = static_cast<int>(paint->frame.rows.size());
     f.body_x = bx;
     f.body_y = by;
     f.input_row = target + cursor_row;
     f.input_row_index = static_cast<std::size_t>(cursor_row);
     f.input_cursor_column = cursor_column;
-    f.painted_row_widths = layout.painted_row_widths;
+    f.painted_row_widths = paint->painted_row_widths;
+    f.last_frame = paint->frame;
+    f.last_frame_origin = target;
+    // 指纹记"真画出去的那帧"——降级帧也记它自己的指纹,下一拍全量帧
+    // 对不上便老实重画,不会拿全量指纹误判"已在屏上"。
+    f.last_fingerprint = fingerprint_of(*paint);
+    f.needs_repaint = false;
 }
 
 void BeginStreamFooter(const Theme& theme, bool enabled) {
@@ -3660,6 +3764,8 @@ void BeginStreamFooter(const Theme& theme, bool enabled) {
     f.enabled = enabled;
     ForgetStreamFooterFrame(f);
     f.last_width = -1;
+    f.needs_repaint = false;
+    f.vt_batch = platform::ProbeStdoutConsole().vt_enabled;
     f.composer = RenderState{};  // 忙时草稿从空开始(取回编辑除外,那由取回方写)
     f.echo.clear();   // 废弃镜像(见 StreamFooterState 迁移注记),归零防旧值漏读
     f.hints.clear();
