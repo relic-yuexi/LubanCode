@@ -44,6 +44,9 @@ json ContentBlockToJson(const ContentBlock& block) {
                 // 续会话重放历史时 thinking 块必须带 signature,否则第二轮
                 // 会被服务端以 400 拒掉。
                 return json{{"type", "thinking"}, {"thinking", b.text}, {"signature", b.signature}};
+            } else if constexpr (std::is_same_v<T, ModelImageBlock>) {
+                // 模型输出图片的替身:引用翻短文本标记,base64 不回传。
+                return json{{"type", "text"}, {"text", ModelImageReplayText(b)}};
             }
         },
         block);

@@ -37,6 +37,8 @@
 #include "tools/tool.hpp"
 #include "tools/registry.hpp"
 
+#include "agent/model_image_store.hpp"  // ModelImageLanding:on_model_image 的回执形状
+
 namespace lubancode::agent {
 
 // 一轮的引擎接线(骨架拆解批二余款:Callbacks 肥结构退役)。控制半在这
@@ -141,6 +143,14 @@ struct TurnWiring {
     // 失败不得回头覆盖原调用",原调用的账不动,只在这里加边)。不设 =
     // 没有补偿类工具,行为不变。
     std::function<std::string(const std::string& execution_id, const std::string& tool_name)> on_tool_compensates;
+
+    // ---- 模型输出图片(ccmoon 真机巡检单 P0)--------------------------------
+    // 引擎问宿主的落盘口:ImageOutput(base64)进来,宿主解码、验身、原子
+    // 落进会话图片目录,还 ModelImageLanding(引用块 + 可打开的绝对路径)。
+    // 失败回 error,引擎把回合明败——绝不吞图冒充成功。没设这枚(宿主没
+    // 开会话/单发路)而图片真来了:同样明败,口径与落盘失败一致。
+    // 同一 item id 只落一回(重复终帧去重),引擎侧管,宿主不用管。
+    std::function<std::expected<ModelImageLanding, std::string>(const api::ImageOutput&)> on_model_image;
 
     // ---- Plan 模式(只读研究硬闸单):ModePolicy 硬闸 ------------------------
     // RunOneTool 在 deferred/tool_search 可见性之后、PreToolUse Hook 之前

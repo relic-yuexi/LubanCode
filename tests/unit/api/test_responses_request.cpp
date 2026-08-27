@@ -374,3 +374,35 @@ TEST_CASE("工具空 schema 兑成 type=object,合规的原样放行") {
     CHECK(body.at("tools").at(0).at("parameters").at("properties").is_object());
     CHECK(body.at("tools").at(1).at("parameters") == good);
 }
+
+
+// ---------------------------------------------------------------------------
+// 模型输出图片的引用块(ModelImageBlock)重放:四家 wire 一律翻短文本标记,
+// base64 绝不回传(ccmoon 巡检单 P0 的"续聊不重放"账)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ModelImageBlock 重放:翻 output_text 短标记,不带 base64") {
+    Request request;
+    request.model = "gpt-image-2";
+    ModelImageBlock ref;
+    ref.id = "ig_1";
+    ref.filename = "img-abcd12.png";
+    ref.path = "images/img-abcd12.png";
+    ref.mime_type = "image/png";
+    ref.width = 1024;
+    ref.height = 1024;
+    ref.bytes = 251596;
+    ref.sha256 = std::string(64, '0');
+    Message assistant;
+    assistant.role = Role::Assistant;
+    assistant.content.push_back(TextBlock{"图好了"});
+    assistant.content.push_back(ref);
+    request.messages.push_back(assistant);
+
+    const auto body = BuildRequestJson(request);
+    const std::string dumped = body.dump();
+    CHECK(dumped.find("[模型已生成图片: img-abcd12.png (1024x1024)]") != std::string::npos);
+    // 引用块自身与 base64 都不许出现在请求体里。
+    CHECK(dumped.find("images/img-abcd12.png") == std::string::npos);
+    CHECK(dumped.find("input_image") == std::string::npos);
+}

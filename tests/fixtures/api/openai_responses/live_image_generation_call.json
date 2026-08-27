@@ -3,12 +3,12 @@
   "wire": "openai-responses",
   "provider": "responses-compatible-relay",
   "model": "gpt-image-2",
-  "scenario": "image_generation_call_result_is_not_silently_dropped",
+  "scenario": "image_generation_call_result_becomes_image_output_event",
   "source_document": "internal",
   "captured_at": "2026-08-27",
   "request_expectation": {"stream": true},
-  "expected_events": ["TextDelta", "ContentBlockDone", "StreamError"],
-  "expected_replay": ["image_generation_call.result 未接线时必须明示失败，不得冒充成功", "错误消息不得夹带 base64 图片正文"],
-  "usage_expectation": {},
-  "notes": "取自 ccmoon Responses 真机流的脱敏缩样。保留事件次序、item 类型与 result 字段；图片正文换成短占位串，request id 与提示正文已改写。"
+  "expected_events": ["BuiltinToolStart", "ImageOutput", "TextDelta", "ContentBlockDone", "MessageDone"],
+  "expected_replay": ["output_item.added(image_generation_call) 翻成 BuiltinToolStart 开卡", "output_item.done 的 result 翻成 ImageOutput(base64 只在事件里流转,宿主落盘换引用)", "completed 里的 image_generation_call 不再当错误:图片正文的唯一来路是 output_item.done,宿主按 item id 去重"],
+  "usage_expectation": {"input_tokens": 25, "output_tokens": 3},
+  "notes": "取自 ccmoon Responses 真机流的脱敏缩样。保留事件次序、item 类型与 result 字段;图片正文换成短占位串(非合法 base64,解码与落盘在 agent 层单测用真字节另测),request id 与提示正文已改写。"
 }

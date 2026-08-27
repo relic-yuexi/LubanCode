@@ -16,6 +16,7 @@
 #include <utility>
 
 #include "agent/compact.hpp"
+#include "agent/model_image_store.hpp"  // LandModelImage:on_model_image 落盘口的实现
 #include "agent/turn_harness.hpp"
 #include "app/hook_runtime.hpp"
 #include "app/terminal_turn_sink.hpp"
@@ -736,6 +737,16 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
     // 显示出水口(唯一):主轮回合直连这只适配器;终端画屏(TerminalTurnSink,
     // 见 RunTurn 的装配)与会话事件链都在 sink 侧。
     wiring.events = &events;
+
+    // 模型输出图片的落盘口(ccmoon 巡检单 P0):目录给了才挂——引擎拿到
+    // ImageOutput 就解码验身、原子落 <会话目录>/images/,还引用入史;没给
+    // 目录(单发路)不挂,图片来了引擎明败,不吞图。
+    if (!ctx.model_images_dir.empty()) {
+        const std::string images_dir = ctx.model_images_dir;
+        wiring.on_model_image = [images_dir](const lubancode::api::ImageOutput& image) {
+            return lubancode::agent::LandModelImage(images_dir, image);
+        };
+    }
 
     // agent 工具(注册了的话)需要这一轮现算好的转发逻辑:确认回调直接
     // 转发父级那份(三档确认模式照管子代理);usage 累进 usage_stats(统计

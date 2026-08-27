@@ -21,6 +21,85 @@ bool ReasoningEffortIsOff(const std::string& effort) {
 
 namespace {
 
+// 疑似密钥的串打码:sk- 起、Bearer 后面的长 token——各留前 6 位加 "...",
+// 够对账不够复用。
+std::string MaskSecrets(std::string text) {
+    static const std::string_view triggers[] = {"sk-", "Bearer "};
+    for (std::size_t from = 0;;) {
+        std::size_t best = std::string::npos;
+        std::string_view picked;
+        for (const std::string_view trigger : triggers) {
+            const std::size_t at = text.find(trigger, from);
+            if (at != std::string::npos && (best == std::string::npos || at < best)) {
+                best = at;
+                picked = trigger;
+            }
+        }
+        if (best == std::string::npos) {
+            break;
+        }
+        const std::size_t tail = best + picked.size();
+        const std::size_t run_end = text.find_first_of(" \"'\n\r,}", tail);
+        const std::size_t len = (run_end == std::string::npos ? text.size() : run_end) - tail;
+        if (len > 12) {
+            text.replace(tail, len, text.substr(tail, 6) + "...");
+        }
+        from = tail + 9;
+    }
+    return text;
+}
+
+// 截短到约 240 字节(退到 UTF-8 码点边界),尾巴标 "...(截短)"。
+std::string TruncateForUser(std::string text) {
+    constexpr std::size_t kCap = 240;
+    if (text.size() <= kCap) {
+        return text;
+    }
+    std::size_t cut = kCap;
+    while (cut > 0 && (static_cast<unsigned char>(text[cut]) & 0xC0) == 0x80) {
+        --cut;  // 退到码点起点
+    }
+    text.resize(cut);
+    text += "...(截短)";
+    return text;
+}
+
+}  // namespace
+
+std::string SummarizeErrorBodyForUser(const std::string& body) {
+    std::string flat = body;
+    try {
+        const nlohmann::json parsed = nlohmann::json::parse(body);
+        const nlohmann::json* error = nullptr;
+        if (parsed.is_object() && parsed.contains("error") && parsed["error"].is_object()) {
+            error = &parsed["error"];
+        } else if (parsed.is_object()) {
+            error = &parsed;
+        }
+        if (error != nullptr) {
+            const std::string message = error->value("message", std::string());
+            const std::string type = error->value("type", std::string());
+            const std::string code = error->value("code", std::string());
+            std::string out = message.empty() ? std::string("服务端回了错误体,没有 message 字段") : message;
+            if (!type.empty()) {
+                out += " (type=" + type;
+                if (!code.empty()) {
+                    out += ", code=" + code;
+                }
+                out += ")";
+            } else if (!code.empty()) {
+                out += " (code=" + code + ")";
+            }
+            flat = out;
+        }
+    } catch (const nlohmann::json::exception&) {
+        // 不是 JSON:原文走同一道打码截短。
+    }
+    return TruncateForUser(MaskSecrets(std::move(flat)));
+}
+
+namespace {
+
 // 目录档案里有没有把某枚档位名声明成 supported_efforts 之一。
 bool DeclaresEffortLevel(const ReasoningConfig& config, const std::string& lowered) {
     for (const auto& declared : config.supported_efforts) {
@@ -126,6 +205,14 @@ void SanitizeContentBlock(ContentBlock& block) {
             } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
                 b.text = platform::SanitizeExternalText(b.text);
                 b.signature = platform::SanitizeExternalText(b.signature);
+            } else if constexpr (std::is_same_v<T, ModelImageBlock>) {
+                // 引用块:字段全是本地起的(id 是 wire 串,文件名是 ASCII),
+                // 照样过一遍编码关,坏串洗掉,不另开例外。
+                b.id = platform::SanitizeExternalText(b.id);
+                b.filename = platform::SanitizeExternalText(b.filename);
+                b.path = platform::SanitizeExternalText(b.path);
+                b.mime_type = platform::SanitizeExternalText(b.mime_type);
+                b.sha256 = platform::SanitizeExternalText(b.sha256);
             }
         },
         block);

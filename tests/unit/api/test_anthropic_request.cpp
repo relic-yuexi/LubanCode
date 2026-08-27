@@ -310,3 +310,25 @@ TEST_CASE("工具空 schema 兑成 type=object,合规的原样放行") {
     CHECK(body.at("tools").at(0).at("input_schema").at("properties").is_object());
     CHECK(body.at("tools").at(1).at("input_schema") == good);
 }
+
+
+TEST_CASE("ModelImageBlock 重放:翻 text 短标记,不带 base64") {
+    Request request;
+    request.model = "claude-x";
+    ModelImageBlock ref;
+    ref.id = "ig_1";
+    ref.filename = "img-abcd12.png";
+    ref.path = "images/img-abcd12.png";
+    ref.width = 512;
+    ref.height = 512;
+    Message assistant;
+    assistant.role = Role::Assistant;
+    assistant.content.push_back(ref);
+    request.messages.push_back(assistant);
+
+    const auto body = BuildRequestJson(request, /*native_web_search=*/false, nlohmann::json::object());
+    const std::string dumped = body.dump();
+    CHECK(dumped.find("[模型已生成图片: img-abcd12.png (512x512)]") != std::string::npos);
+    CHECK(dumped.find("images/img-abcd12.png") == std::string::npos);
+    CHECK(dumped.find("\"image\"") == std::string::npos);
+}

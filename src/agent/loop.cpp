@@ -726,6 +726,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         api::MessageAssembler assembler;
         bool stream_error = false;
         std::string stream_error_message;
+        // 模型输出图片(ccmoon 巡检单 P0):落盘成功的引用块按到达序攒着,
+        // 流收口后并进 assistant 消息;同一 item id 只落一回(重复终帧——
+        // output_item.done 与 response.completed 各到一次——只算头一回)。
+        std::vector<api::ModelImageBlock> model_images;
+        std::vector<std::string> landed_image_ids;
         // MessageStart 的身份(request id/model)单记一笔:usage 报告要带
         // 它,哪一步是哪个请求才有账可查(前缀缓存守恒单第一期)。
         std::string stream_request_id;
@@ -779,6 +784,46 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                         } else if constexpr (std::is_same_v<T, api::StreamError>) {
                             stream_error = true;
                             stream_error_message = e.message;
+                        } else if constexpr (std::is_same_v<T, api::ImageOutput>) {
+                            // 图片正文到站(Responses 的 image_generation_call。
+                            // result):base64 只走到这里为止——落盘口还引用,
+                            // 引用入历史,正文用完即弃,不进 assembler/session。
+                            if (std::find(landed_image_ids.begin(), landed_image_ids.end(), e.id) !=
+                                landed_image_ids.end()) {
+                                return;  // 重复终帧:同 id 只落一回
+                            }
+                            if (stream_error) {
+                                return;  // 已有错在身,别再落新盘
+                            }
+                            const auto close_image_card = [&](bool ok, const std::string& summary) {
+                                if (wiring.events != nullptr) {
+                                    wiring.events->OnBuiltinToolDone(e.id, "image_generation",
+                                                                     nlohmann::json::object(), summary, !ok);
+                                }
+                            };
+                            if (!wiring.on_model_image) {
+                                stream_error = true;
+                                stream_error_message = "服务端返回了图片,但本会话未接线图片落盘,结果未保存";
+                                close_image_card(false, stream_error_message);
+                                return;
+                            }
+                            const auto landing = wiring.on_model_image(e);
+                            if (!landing.has_value()) {
+                                stream_error = true;
+                                stream_error_message = "图片未保存: " + landing.error();
+                                close_image_card(false, stream_error_message);
+                                return;
+                            }
+                            landed_image_ids.push_back(e.id);
+                            model_images.push_back(std::move(landing->block));
+                            {
+                                const api::ModelImageBlock& block = model_images.back();
+                                std::string meta;
+                                if (block.width > 0 || block.height > 0) {
+                                    meta += " " + std::to_string(block.width) + "x" + std::to_string(block.height);
+                                }
+                                close_image_card(true, "已保存 " + landing->display_path + meta);
+                            }
                         } else if constexpr (std::is_same_v<T, api::BuiltinToolStart>) {
                             if (wiring.events != nullptr) {
                                 wiring.events->OnBuiltinToolStart(e.id, e.name, e.input);
@@ -813,9 +858,13 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             if (err.kind == api::ErrorKind::Cancelled) {
                 // ESC 打断:流被从中间掐断,ContentBlockDone/MessageDone 永远
                 // 不会来了,手动把还开着的块(文本或 tool_use)收个尾,半截话
-                // 也要照常攒进历史,不能悄悄丢掉。
+                // 也要照常攒进历史,不能悄悄丢掉。打断前已落盘的图片引用也
+                // 一并带上——文件是真落了的,历史不留账就成了孤儿。
                 assembler.FinalizeOpenBlock();
                 api::Message assistant_message = assembler.BuildMessage();
+                for (auto& image : model_images) {
+                    assistant_message.content.push_back(std::move(image));
+                }
                 assistant_message.content.push_back(api::TextBlock{"[用户按 ESC 打断了这条回答]"});
                 context_.PushMessage(std::move(assistant_message));
 
@@ -848,6 +897,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         }
 
         api::Message assistant_message = assembler.BuildMessage();
+        // 模型输出的图片引用块并进消息(到达序在文本后):session/export/
+        // resume 只见引用,base64 早已在落盘口换成文件。on_assistant_message_
+        // ready 在下一行,落盘账(persist)拿到的就是这份带引用的消息。
+        for (auto& image : model_images) {
+            assistant_message.content.push_back(std::move(image));
+        }
         const std::string stop_reason = assembler.stop_reason();
         ++steps_used;
         last_stop_reason = stop_reason;

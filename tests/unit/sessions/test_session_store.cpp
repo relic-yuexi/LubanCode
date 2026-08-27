@@ -1093,3 +1093,53 @@ TEST_CASE("ExtractPromptHistory:只收用户纯文本提问,事件行/工具回�
         SerializeSessionMessage(loop_tick, "ts3") + "\n" + SerializeSessionMessage(goal_turn, "ts4") + "\n";
     CHECK(sessions::ExtractPromptHistory(jsonl3).empty());
 }
+
+
+TEST_CASE("消息序列化往返: assistant 带模型输出图片引用(base64 不进 JSONL)") {
+    api::Message original;
+    original.role = api::Role::Assistant;
+    original.content.push_back(api::TextBlock{"图好了"});
+    api::ModelImageBlock ref;
+    ref.id = "ig_9";
+    ref.filename = "img-deadbeef.png";
+    ref.path = "images/img-deadbeef.png";
+    ref.mime_type = "image/png";
+    ref.width = 1024;
+    ref.height = 768;
+    ref.bytes = 251596;
+    ref.sha256 = std::string(64, 'c');
+    original.content.push_back(ref);
+
+    const std::string line = sessions::SerializeSessionMessage(original, "ts");
+    // 引用块只带路径/尺寸/sha,绝不带 base64 正文。
+    CHECK(line.find("base64,") == std::string::npos);
+    CHECK(line.find("iVBOR") == std::string::npos);
+
+    const auto parsed = sessions::DeserializeSessionMessage(line);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->content.size() == 2);
+    const auto* image = std::get_if<api::ModelImageBlock>(&parsed->content[1]);
+    REQUIRE(image != nullptr);
+    CHECK(image->id == "ig_9");
+    CHECK(image->filename == "img-deadbeef.png");
+    CHECK(image->path == "images/img-deadbeef.png");
+    CHECK(image->mime_type == "image/png");
+    CHECK(image->width == 1024);
+    CHECK(image->height == 768);
+    CHECK(image->bytes == 251596);
+    CHECK(image->sha256 == std::string(64, 'c'));
+
+    // 导出 markdown:引用一行,不嵌正文。
+    const std::string exported = sessions::ExportSessionMarkdown(sessions::SessionMeta{}, {*parsed, UserText("画一张")}, "test");
+    CHECK(exported.find("[模型图片] images/img-deadbeef.png (1024x768, 251596 字节)") != std::string::npos);
+    CHECK(exported.find("base64,") == std::string::npos);
+
+    // 坏引用(没有落点)不还块:JSONL 手改/截断时宁缺毋假——消息本身还在,
+    // 只是那只块被跳过(与"认不得的块类型跳过"同一政策)。
+    const std::string broken =
+        R"({"role":"assistant","content":[{"type":"model_image","width":10},{"type":"text","text":"还在"}]})";
+    const auto salvaged = sessions::DeserializeSessionMessage(broken);
+    REQUIRE(salvaged.has_value());
+    REQUIRE(salvaged->content.size() == 1);
+    CHECK(std::get_if<api::TextBlock>(&salvaged->content[0]) != nullptr);
+}

@@ -87,6 +87,9 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
                         parts.push_back(json{{"inlineData", json{{"mimeType", b.media_type}, {"data", b.data}}}});
                     } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
                         // 思考不回传:Gemini 的 thought 一次性,续会话不重放。
+                    } else if constexpr (std::is_same_v<T, ModelImageBlock>) {
+                        // 模型输出图片的替身:引用翻短文本标记,base64 不回传。
+                        parts.push_back(json{{"text", ModelImageReplayText(b)}});
                     } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
                         flush_parts();
                         contents.push_back(

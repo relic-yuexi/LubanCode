@@ -125,6 +125,12 @@ struct TurnContext {
     std::string turn_id_for_trace;                // trace 口径的轮号(空 = 现发)
     lubancode::runtime::TurnView* turn_view_out = nullptr;     // 轮视图存档(Ctrl+L/resume)
 
+    // ---- 模型输出图片(ccmoon 巡检单 P0)----
+    // 会话图片目录(<sessions_dir>/<session-id>/images)。非空 = 挂上
+    // on_model_image 落盘口,模型出的图解码落盘、引用入史;空(单发/没
+    // 开会话)= 不挂,图片真来了由引擎明败("未接线图片落盘"),不吞图。
+    std::string model_images_dir;
+
     // ---- 事件流(骨架拆解批二;批二余款升唯一出水口)----
     // SessionRuntime::MakeTurnAdapter() 造的那只(落点已挂会话事件链)。
     // 给了就复用:Start(复用 trace 口径的 turn_id)→ 终端画屏的 sink 从

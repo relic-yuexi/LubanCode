@@ -423,6 +423,9 @@ add_library(lubancode_engine STATIC
   src/agent/context.cpp
   src/agent/context_events.cpp
   src/agent/artifact_store.cpp
+  # ccmoon 真机巡检单 P0:模型输出图片(Responses image_generation_call)
+  # 的解码/验身/原子落盘。
+  src/agent/model_image_store.cpp
   src/agent/model_router.cpp
   # 骨架拆解批一·病四:SampleModel 原语(六处单发采样的公共路)。
   src/agent/sample_model.cpp

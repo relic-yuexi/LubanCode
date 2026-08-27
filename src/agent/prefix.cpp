@@ -26,6 +26,10 @@ bool SameBlock(const api::ContentBlock& left, const api::ContentBlock& right) {
                 return l.id == r.id && l.name == r.name && l.input == r.input;
             } else if constexpr (std::is_same_v<T, api::ToolResultBlock>) {
                 return l.tool_use_id == r.tool_use_id && l.content == r.content && l.is_error == r.is_error;
+            } else if constexpr (std::is_same_v<T, api::ModelImageBlock>) {
+                // 引用块全字段比(路径/尺寸/sha 都是请求可见面,一个不放过)。
+                return l.id == r.id && l.filename == r.filename && l.path == r.path && l.mime_type == r.mime_type &&
+                       l.width == r.width && l.height == r.height && l.bytes == r.bytes && l.sha256 == r.sha256;
             } else {
                 return l.text == r.text && l.signature == r.signature;
             }
@@ -91,6 +95,17 @@ void HashMixBlock(std::uint64_t& hash, const api::ContentBlock& block) {
                 HashMix(hash, b.tool_use_id);
                 HashMix(hash, b.content);
                 hash ^= b.is_error ? 0x9e3779b97f4a7c15ULL : 0;
+                hash *= 1099511628211ULL;
+            } else if constexpr (std::is_same_v<T, api::ModelImageBlock>) {
+                HashMix(hash, "m:");
+                HashMix(hash, b.id);
+                HashMix(hash, b.filename);
+                HashMix(hash, b.path);
+                HashMix(hash, b.mime_type);
+                HashMix(hash, b.sha256);
+                hash ^= static_cast<std::uint64_t>(b.width) << 3;
+                hash ^= static_cast<std::uint64_t>(b.height) << 5;
+                hash ^= static_cast<std::uint64_t>(b.bytes) << 7;
                 hash *= 1099511628211ULL;
             } else {
                 HashMix(hash, "h:");

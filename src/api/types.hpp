@@ -46,6 +46,22 @@ struct ImageBlock {
     std::uint32_t height = 0;
 };
 
+// 模型输出的图片(Responses 的 image_generation_call 一类),解码校验后
+// 落进会话 artifact 目录的引用。与上面那只用户输入的 ImageBlock 分家:
+// 这里只有引用,没有 base64——session/export/resume 只存这份引用,续聊
+// 重放时翻成 ModelImageReplayText 的短文本标记,绝不把图片正文塞回请求。
+// filename/path 由本地按内容寻址起名,不信模型正文一个字。
+struct ModelImageBlock {
+    std::string id;         // wire 侧 item id(image_generation_call 的 id),重复终帧的去重键
+    std::string filename;   // "img-<sha8>.png":落盘文件名(本地起的)
+    std::string path;       // 相对会话目录的落盘路径("images/img-<sha8>.png")
+    std::string mime_type;  // 解码后按魔数判定的 MIME("image/png" 等)
+    std::uint32_t width = 0;
+    std::uint32_t height = 0;
+    std::size_t bytes = 0;  // 解码后字节数
+    std::string sha256;     // 解码后正文的 sha256
+};
+
 // 模型发起的一次工具调用请求。
 struct ToolUseBlock {
     std::string id;
@@ -68,7 +84,17 @@ struct ThinkingBlock {
     std::string signature;
 };
 
-using ContentBlock = std::variant<TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock>;
+using ContentBlock = std::variant<TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock, ModelImageBlock>;
+
+// 历史重放时模型输出图片的替身文案(四家 wire 共用):让模型记得自己
+// 出过一张图,但不把 base64 塞回请求。
+inline std::string ModelImageReplayText(const ModelImageBlock& block) {
+    std::string size;
+    if (block.width > 0 || block.height > 0) {
+        size = " (" + std::to_string(block.width) + "x" + std::to_string(block.height) + ")";
+    }
+    return "[模型已生成图片: " + block.filename + size + "]";
+}
 
 // ---------------------------------------------------------------------------
 // 消息
@@ -304,13 +330,24 @@ struct MessageDone {
     Usage usage;
 };
 
+// 模型输出的一张图片(Responses 的 image_generation_call.result)。base64
+// 只在这只事件里流转:解码、校验、落 artifact 是宿主(agent 层)的活,做完
+// 换成 ModelImageBlock 引用入历史——base64 不进 assembler、不进 session。
+// 同一张图可能随 output_item.done 与 response.completed 各到一次(重复
+// 终帧),消费端按 id 去重。
+struct ImageOutput {
+    std::string id;      // image_generation_call 的 item id
+    std::string base64;  // 图片正文(base64,不带 data: 前缀)
+};
+
 // 流里出现的错误(服务端主动报错,或者本地解析出的问题)。
 struct StreamError {
     std::string message;
 };
 
 using StreamEvent = std::variant<MessageStart, TextDelta, ThinkingDelta, ToolUseStart, ToolUseInputDelta,
-                                 ContentBlockDone, BuiltinToolStart, BuiltinToolDone, MessageDone, StreamError>;
+                                 ContentBlockDone, BuiltinToolStart, BuiltinToolDone, MessageDone, ImageOutput,
+                                 StreamError>;
 
 // ---------------------------------------------------------------------------
 // 错误
@@ -329,6 +366,12 @@ struct Error {
     std::string message;
     int http_status = 0;  // kind == HttpStatus 时才有意义
 };
+
+// 给人看的错误体摘要(ccmoon 真机巡检单 P1):HTTP 非 2xx 的原始响应体
+// 可能是整段 JSON,直接糊脸既看不清也容易夹密钥。这里抽出 error 里的
+// message/type/code(有啥抽啥),拼成一行;疑似密钥(sk-/Bearer 尾巴)
+// 打码,超 240 字节截短标省略。不是 JSON 就按原文走同一道打码截短。
+std::string SummarizeErrorBodyForUser(const std::string& body);
 
 // 鉴权三态(向导重排单):按 token 组装请求基础头。token 非空给 Content-Type
 // + Authorization;token 为空(无鉴权,或 env 缺值)只给 Content-Type,彻底

@@ -39,6 +39,14 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
                 // responses wire 的 reasoning 是一次性的,不参与续会话重放。
                 // 这里给一个 reasoning 占位,调用方(BuildRequestJson)会跳过。
                 return json{{"type", "__thinking_skip__"}};
+            } else if constexpr (std::is_same_v<T, ModelImageBlock>) {
+                // 模型输出图片的替身:历史里只有 artifact 引用,重放翻成
+                // 一句短文本标记(base64 绝不塞回请求,续聊不重放正文)。
+                return json{{"type", "message"},
+                            {"role", WireRole(role)},
+                            {"content", json::array({json{{"type", role == Role::User ? "input_text"
+                                                                                       : "output_text"},
+                                                       {"text", ModelImageReplayText(b)}}})}};
             } else {
                 return json{{"type", "function_call_output"},
                             {"call_id", b.tool_use_id},
@@ -140,6 +148,10 @@ nlohmann::json BuildRequestJson(const Request& request, bool native_web_search, 
                                                {"image_url", "data:" + b.media_type + ";base64," + b.data}});
                     } else if constexpr (std::is_same_v<T, ThinkingBlock>) {
                         // 思考块不回传:responses wire 的 reasoning 是一次性的
+                    } else if constexpr (std::is_same_v<T, ModelImageBlock>) {
+                        // 图片引用翻短文本标记,与成组分支同规矩。
+                        content.push_back(json{{"type", message.role == Role::User ? "input_text" : "output_text"},
+                                               {"text", ModelImageReplayText(b)}});
                     } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
                         flush_content();
                         input.push_back(ContentBlockToItem(block, message.role));

@@ -89,6 +89,7 @@ std::string EventName(const api::StreamEvent& event) {
     case 6: return "BuiltinToolStart";
     case 7: return "BuiltinToolDone";
     case 8: return "MessageDone";
+    case 9: return "ImageOutput";
     default: return "StreamError";
     }
 }
