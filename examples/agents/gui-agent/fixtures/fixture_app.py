@@ -60,11 +60,13 @@ class FixtureApp:
 
         # 布局用 place 钉死绝对坐标(逻辑 1x 设计,DPI 再整体放大):
         # 教学点击坐标可预测,事件账在下方。
-        place(tk.Label(self.root, text="名字:", font=self._base_font), 16, 14)
+        self.name_label = tk.Label(self.root, text="名字:", font=self._base_font)
+        place(self.name_label, 16, 14)
         self.name_entry = tk.Entry(self.root, width=28, font=self._base_font)
         place(self.name_entry, 64, 10)
 
-        place(tk.Label(self.root, text="颜色:", font=self._base_font), 16, 54)
+        self.color_label = tk.Label(self.root, text="颜色:", font=self._base_font)
+        place(self.color_label, 16, 54)
         self.color_box = ttk.Combobox(self.root, values=COLORS, state="readonly", width=25)
         self.color_box.set("green")
         place(self.color_box, 64, 50)
@@ -78,8 +80,9 @@ class FixtureApp:
         self.result_label = tk.Label(self.root, text="(未提交)", fg="#555", font=self._base_font)
         place(self.result_label, 16, 132)
 
-        place(tk.Label(self.root, text="事件账(最近在前,人工对账用):",
-                      font=self._base_font), 16, 160)
+        self.event_log_caption = tk.Label(
+            self.root, text="事件账(最近在前,人工对账用):", font=self._base_font)
+        place(self.event_log_caption, 16, 160)
         self.event_log = tk.Text(self.root, width=58, height=8, state="disabled",
                                  font=("Consolas", max(8, int(8 * scale))))
         place(self.event_log, 16, 184)
@@ -94,6 +97,37 @@ class FixtureApp:
 
         if state_file and reset_on_start:
             self.write_state({"submitted": False, "name": "", "color": ""})
+
+        # 控件文字补进 helper HWND,UIA 快照才看得见名字。Tk 控件在 Windows
+        # 上各有一枚 helper HWND(按钮是 Button 类、标签是 Static、输入框是
+        # TkChild),可 UIA/读屏软件拿到的名字来自 HWND 文字——Tk 只管自己
+        # 画,HWND 文字留空,gui_snapshot 就只见类型不见名。真世界自绘程序
+        # 十有八九也是这副样子(README 排错表"UIA 看不见自绘控件"一条);
+        # 夹具作为教学靶,自己把无障碍这块补齐,顺带教这一课。
+        self.root.update_idletasks()
+        self._decorate_a11y()
+        # 窗口映射后 Tk 偶会重建 helper HWND,主循环起来再补一枪保险。
+        self.root.after(300, self._decorate_a11y)
+
+    def _decorate_a11y(self) -> None:
+        """把控件文字写进各自 helper HWND(SetWindowTextW)。事件账正文
+        (Text 控件)故意不写:它的 helper 矩形本来就不可靠,写上反而
+        误导快照;账要看得见,截图就是了。"""
+        if sys.platform != "win32":
+            return
+        import ctypes
+        texts = [
+            (self.name_label, "名字:"), (self.color_label, "颜色:"),
+            (self.name_entry, "名字输入框"), (self.color_box, "颜色下拉"),
+            (self.submit_button, "提交"), (self.reset_button, "重置"),
+            (self.result_label, self.result_label.cget("text")),
+            (self.event_log_caption, "事件账"),
+        ]
+        for widget, text in texts:
+            try:
+                ctypes.windll.user32.SetWindowTextW(widget.winfo_id(), text)
+            except Exception:
+                pass  # 装饰失败不影响夹具本职;名字缺失时快照如实少几行
 
     # -- 事件与状态 -----------------------------------------------------------
     def log_event(self, line: str) -> None:
@@ -118,6 +152,7 @@ class FixtureApp:
         self.result_label.configure(text=f"Hello, {name} / {color}", fg="#060")
         self.write_state({"submitted": True, "name": name, "color": color})
         self.log_event(f"SUBMIT name={name!r} color={color}")
+        self._decorate_a11y()  # 结果行的新文案同步进 helper HWND,快照读得到
 
     def on_reset(self) -> None:
         self.name_entry.delete(0, "end")
@@ -125,6 +160,7 @@ class FixtureApp:
         self.result_label.configure(text="(未提交)", fg="#555")
         self.write_state({"submitted": False, "name": "", "color": ""})
         self.log_event("RESET")
+        self._decorate_a11y()
 
     def run(self) -> None:
         self.root.mainloop()

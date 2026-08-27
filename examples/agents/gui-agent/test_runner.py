@@ -21,7 +21,7 @@ sys.path.insert(0, HERE)
 import png  # noqa: E402
 import runner  # noqa: E402
 from gui_backend import FakeBackend, key_name_to_vk  # noqa: E402
-from gui_actions import Settings  # noqa: E402
+from gui_actions import SNAPSHOT_TEXT_LINES, Settings  # noqa: E402
 
 WINDOW = "0x001A0B0C"
 
@@ -58,7 +58,7 @@ def error_code(response: dict) -> str:
 class ProtocolTest(unittest.TestCase):
     """协议帧形状:call_id 回显、ok 真、content 是 text,错误码稳定。"""
 
-    def test_manifest_is_valid_and_nine_tools(self):
+    def test_manifest_is_valid_and_ten_tools(self):
         with open(os.path.join(HERE, "plugin.json"), encoding="utf-8") as handle:
             manifest = json.load(handle)
         self.assertEqual(manifest["manifest_version"], 1)
@@ -66,7 +66,7 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(manifest["runtime"]["kind"], "process")
         self.assertFalse(manifest["permissions"]["network"])
         self.assertIn("LUBANCODE_GUI_DRY_RUN", manifest["permissions"]["env"])
-        self.assertEqual(len(manifest["tools"]), 9)
+        self.assertEqual(len(manifest["tools"]), 10)
         for tool in manifest["tools"]:
             self.assertEqual(tool["input_schema"]["type"], "object")
             self.assertFalse(tool["input_schema"].get("additionalProperties", True),
@@ -301,6 +301,127 @@ class ScreenshotTest(unittest.TestCase):
         self.assertEqual(error_code(call(backend, "gui_screenshot",
                                          {"target": "window", "window_id": WINDOW})),
                          "window_minimized")
+
+
+class SnapshotTest(unittest.TestCase):
+    """UIA 快照:折叠规则、ref 顺序、深度帽、元素帽、错误码。全走
+    FakeBackend 的假 UIA 树,零真 COM。"""
+
+    def make_tree_backend(self) -> FakeBackend:
+        """假窗一棵:内容 pane(折叠)里装按钮/输入/文本,titlebar 下还
+        挂着系统按钮——夹具真树的形状。"""
+        backend = make_backend()
+        backend.set_uia_tree(WINDOW, [
+            {"control_type": "pane", "name": "", "rect": [110, 120, 570, 400],
+             "children": [
+                 {"control_type": "text", "name": "名字:", "rect": [116, 124, 160, 144]},
+                 {"control_type": "pane", "name": "名字输入框", "rect": [164, 120, 360, 148],
+                  "children": []},
+                 {"control_type": "button", "name": "提交", "rect": [164, 172, 240, 200]},
+                 {"control_type": "button", "name": "重置", "rect": [244, 172, 320, 200]},
+                 {"control_type": "edit", "name": "", "rect": [164, 220, 360, 244],
+                  "value": "阿明"},
+                 {"control_type": "text", "name": "", "rect": [116, 260, 160, 280]},
+             ]},
+            {"control_type": "titlebar", "name": "", "rect": [100, 80, 580, 116],
+             "children": [
+                 {"control_type": "button", "name": "关闭", "rect": [540, 84, 576, 112]},
+             ]},
+        ])
+        return backend
+
+    def test_tree_folded_and_refed(self):
+        response = call(self.make_tree_backend(), "gui_snapshot", {"window_id": WINDOW})
+        self.assertTrue(response["ok"])
+        elements = response["structured"]["elements"]
+        # 折叠:无名 pane(内容容器)、无名 text、titlebar 本体都不收;
+        # 有名 pane(名字输入框)、titlebar 的子按钮照收。
+        got = [(e["ref"], e["control_type"], e["name"]) for e in elements]
+        self.assertEqual(got, [
+            ("e1", "text", "名字:"), ("e2", "pane", "名字输入框"),
+            ("e3", "button", "提交"), ("e4", "button", "重置"),
+            ("e5", "edit", ""), ("e6", "button", "关闭")])
+        # 正文自带清单(有 text 不投影 structured),行格式 ref | 类型 | Name | rect
+        text = response["content"][0]["text"]
+        self.assertIn("- e3 | button | 提交 | rect=[164, 172, 240, 200]", text)
+        self.assertIn("取矩形中心", text)
+
+    def test_value_pattern_carried_in_structured(self):
+        response = call(self.make_tree_backend(), "gui_snapshot", {"window_id": WINDOW})
+        edit = [e for e in response["structured"]["elements"] if e["control_type"] == "edit"][0]
+        self.assertEqual(edit["value"], "阿明")
+
+    def test_depth_cut(self):
+        backend = self.make_tree_backend()
+        # depth=1:根的直接孩子是无名 pane/titlebar,折叠后一枚不剩。
+        response = call(backend, "gui_snapshot", {"window_id": WINDOW, "depth": 1})
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["structured"]["elements"], [])
+        self.assertFalse(response["structured"]["truncated"])
+        # depth=2 才够到内容 pane 的孩子们。
+        response = call(backend, "gui_snapshot", {"window_id": WINDOW, "depth": 2})
+        self.assertEqual(response["structured"]["count"], 6)
+
+    def test_depth_validation(self):
+        for bad in (0, 25, "3", 2.5, True):
+            self.assertEqual(error_code(call(self.make_tree_backend(), "gui_snapshot",
+                                             {"window_id": WINDOW, "depth": bad})),
+                             "invalid_arguments",
+                             f"depth={bad!r} 该拒")
+
+    def test_element_cap_truncates_with_hint(self):
+        import gui_uia
+        backend = make_backend()
+        backend.set_uia_tree(WINDOW, [
+            {"control_type": "button", "name": f"按钮{i}", "rect": [0, i, 10, i + 10]}
+            for i in range(gui_uia.MAX_ELEMENTS + 50)])
+        response = call(backend, "gui_snapshot", {"window_id": WINDOW})
+        self.assertTrue(response["ok"])
+        structured = response["structured"]
+        self.assertEqual(structured["count"], gui_uia.MAX_ELEMENTS)
+        self.assertTrue(structured["truncated"])
+        self.assertIn("depth 收窄", response["content"][0]["text"])
+        # 正文行帽:structured 全量,正文只前 60 行。
+        self.assertLessEqual(response["content"][0]["text"].count("\n- "),
+                             SNAPSHOT_TEXT_LINES)
+
+    def test_window_errors(self):
+        backend = make_backend()
+        del backend.windows[WINDOW]
+        self.assertEqual(error_code(call(backend, "gui_snapshot", {"window_id": WINDOW})),
+                         "window_not_found")
+        backend = make_backend()
+        backend.set_uia_tree(WINDOW, [])
+        self.assertEqual(error_code(call(backend, "gui_snapshot", {})),
+                         "invalid_arguments")
+        backend = make_backend()
+        backend.windows[WINDOW]["minimized"] = True
+        self.assertEqual(error_code(call(backend, "gui_snapshot", {"window_id": WINDOW})),
+                         "window_minimized")
+
+    def test_empty_tree_advises_visual_path(self):
+        backend = make_backend()
+        backend.set_uia_tree(WINDOW, [])
+        response = call(backend, "gui_snapshot", {"window_id": WINDOW})
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["structured"]["count"], 0)
+        self.assertIn("视觉路", response["content"][0]["text"])  # 盲区如实说
+
+    def test_classify_rules(self):
+        import gui_uia
+        self.assertTrue(gui_uia.should_emit("button", ""))       # 交互件无名也收
+        self.assertTrue(gui_uia.should_emit("edit", ""))
+        self.assertFalse(gui_uia.should_emit("pane", ""))        # 无名容器折叠
+        self.assertTrue(gui_uia.should_emit("pane", "名字输入框"))  # 有名容器是锚
+        self.assertTrue(gui_uia.should_emit("text", "名字:"))
+        self.assertFalse(gui_uia.should_emit("text", ""))
+        self.assertFalse(gui_uia.should_emit("window", "有名字也不收"))
+        self.assertFalse(gui_uia.should_emit("separator", "x"))
+        # 控件类型表对头文件(UIAutomationClient.h 1318-1384)。
+        self.assertEqual(gui_uia.CONTROL_TYPE_NAMES[50000], "button")
+        self.assertEqual(gui_uia.CONTROL_TYPE_NAMES[50004], "edit")
+        self.assertEqual(gui_uia.CONTROL_TYPE_NAMES[50032], "window")
+        self.assertEqual(gui_uia.CONTROL_TYPE_NAMES[50033], "pane")
 
 
 class PngCodecTest(unittest.TestCase):

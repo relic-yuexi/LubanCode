@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "id": "gui-agent-example",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "language": "python",
   "runtime": {
     "kind": "process",
@@ -59,6 +59,24 @@
           "window_id": {"type": "string", "description": "target=window 必填"},
           "artifact_dir": {"type": "string", "description": "可选;截图落盘目录,缺省走 LUBANCODE_GUI_EVIDENCE_DIR 或系统临时目录"}
         },
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "gui_snapshot",
+      "description": "UIA 控件树快照(桌面版 browser_snapshot):枚举目标窗口的可交互控件,每行 ref | 类型 | Name | rect。模型按名找控件、按 rect 中心点击,不用截图烧 token。自绘控件 UIA 看不见(收 0 项)就回 gui_screenshot 视觉路。观察类,无副作用。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "window_id": {"type": "string", "description": "形如 0x0012049A 的十六进制窗口 id(gui_list_windows 拿)"},
+          "depth": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 24,
+            "description": "可选;树深帽,默认 8。树被截断时用它收窄"
+          }
+        },
+        "required": ["window_id"],
         "additionalProperties": false
       }
     },

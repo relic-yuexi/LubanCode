@@ -1,8 +1,13 @@
 # GUI Agent — 本地 process 插件示例(Windows 桌面自动化)
 
-模型反复走"看一眼,动一下,再看一眼":截图、移鼠标、点击、输文字,九件
-工具,件件短命——每次调用起一只进程,干完就退。窗口、光标、前台焦点,
-全保存在 Windows 桌面手里。**插件自己没有状态,所以不需要 MCP。**
+模型反复走"看一眼,动一下,再看一眼":快照(UIA 控件树)、截图、移鼠标、
+点击、输文字,十件工具,件件短命——每次调用起一只进程,干完就退。窗口、
+光标、前台焦点,全保存在 Windows 桌面手里。**插件自己没有状态,所以不
+需要 MCP。**
+
+找控件有两条路:**结构路**(`gui_snapshot` 给控件名+类型+矩形,省 token、
+坐标直给)是正路;**视觉路**(截图看图)留给复核与自绘界面——这正是
+Browser Agent 的 snapshot/ref 体系在桌面的对影。
 
 完整设计账见 `todos/GUIAgent与BrowserAgent扩展示例.todo`;本 README 教你装、
 跑、看懂、改成自己的。
@@ -12,7 +17,7 @@
 | 疑问 | 答案 |
 | --- | --- |
 | 截图点击也算"会话"吧,为何不搭 MCP? | 状态在**桌面与目标程序**里,不在插件里。每次调用重新问桌面要窗口矩形,要完就退,没有跨调用要保活的对象。 |
-| MCP 有 tools/list 发现,这没有? | manifest `plugin.json` 就是静态真账,九件工具名与 schema 加载期一次读齐。 |
+| MCP 有 tools/list 发现,这没有? | manifest `plugin.json` 就是静态真账,十件工具名与 schema 加载期一次读齐。 |
 | 进程崩了怎么办? | 只坏本次调用,宿主收到唯一错误码,不带倒 LubanCode。 |
 | 什么时候该改用 MCP? | 工具要保存 DOM handle、订阅事件、维持数据库连接或接收异步下载时——状态住进了你的进程,短命进程装不下。那类示例见 Browser Agent(另单在建)。 |
 
@@ -38,7 +43,7 @@ lubancode
 进 LubanCode 后:
 
 ```text
-/plugins                 → 应见 gui-agent-example: 9 个工具
+/plugins                 → 应见 gui-agent-example: 10 个工具
 /tools                   → 模型侧工具名 plugin__gui-agent-example__gui_status 等
 ```
 
@@ -99,20 +104,27 @@ python examples\agents\gui-agent\fixtures\fixture_app.py
 结果行、事件账。事件账逐笔显示窗口收到的 Button/Key——注入到没到,
 一眼对账。加 `--events-file PATH` 可让事件账同步落盘,脚本对账用;
 `--state-file PATH` 在提交时写出 `{submitted, name, color}` 供断言。
+夹具还在布局落定后把控件文字写进各自的 helper HWND(tkinter 的控件在
+Windows 上各有一枚 helper HWND,但 Tk 只管自己画、HWND 文字留空,UIA
+快照就只见类型不见名——夹具自己补齐,顺带教这一课;真世界自绘程序
+没这份好心,见第 10 节排错)。
 
-任务链(Skill `SKILL.md` 教的就是这条):
+任务链(Skill `SKILL.md` 教的就是这条),结构路为主、截图只作复核:
 
 1. `gui_list_windows`(title_filter=LubanCode GUI Fixture)→ 拿 window_id
 2. `gui_focus_window` → 前台
-3. `gui_screenshot`(target=window)→ observation
-4. `gui_click`(window_client 坐标 + expected_window_rect)→ 点名字框
+3. `gui_snapshot` → 控件树(每行 `ref | 类型 | Name | rect`)
+4. `gui_click`(名字输入框 rect 中心 + expected_window_rect)→ 点名字框
 5. `gui_type_text`("阿明")→ 中文 Unicode 直注
 6. `gui_key`(["down"] / ["up"])→ 颜色选值
-7. `gui_click` → 提交
-8. `gui_screenshot` → 复验结果行
+7. `gui_click`(提交按钮 rect 中心)→ 提交
+8. `gui_snapshot`(结果行文字变了)/`gui_screenshot` → 复验
+
+纯视觉路(截图→看→点)也整条可用,`scripts/manual_e2e.py` 走的就是它;
+结构路的对影脚本 `scripts/uia_snapshot_e2e.py` 零截图点提交。
 
 对 LubanCode 说:"用 gui-agent 插件,在 LubanCode GUI Fixture 里填名字
-阿明、颜色保持 green、点提交,然后截图确认",模型照 Skill 走。
+阿明、颜色保持 green、点提交,然后快照确认",模型照 Skill 走。
 
 ## 4. 一份真实的工具调用长什么样
 
@@ -171,9 +183,57 @@ python examples\agents\gui-agent\fixtures\fixture_app.py
         └─ gui_screenshot ──→ 复验,才许说"成功"
 ```
 
-Skill 的死规矩:一次一项动作,动作后必截图;不许连续盲点五次。
+Skill 的死规矩:一次一项动作,动作后必快照/截图;不许连续盲点五次。
 
-## 6. 坐标空间、DPI 与 stale observation
+## 6. 结构路:gui_snapshot(UIA 控件树快照)
+
+`gui_snapshot` 是桌面版 `browser_snapshot`:Windows UI Automation 把
+目标窗口的控件树文本化,每行 `ref | 类型 | Name | rect`,模型按名找
+控件、按 rect 中心点击——不烧一枚截图 token,也不依赖多模态。真机
+回执长这样(夹具窗口):
+
+```text
+窗口 'LubanCode GUI Fixture'(0x04580338)UIA 快照:depth=8,收 13 项,走访 16 节点,42ms。ref 只在本份快照内有效;rect 是全桌面物理像素(virtual_screen 口径,与截图同源),动作取矩形中心。
+- e1 | image | 事件账 | rect=[339, 672, 969, 743]
+- e2 | image | (未提交) | rect=[339, 510, 517, 581]
+- e3 | button | 重置 | rect=[571, 430, 642, 484]
+- e4 | button | 提交 | rect=[435, 430, 506, 484]
+- e5 | pane | 颜色下拉 | rect=[435, 493, 825, 530]
+- e6 | image | 颜色: | rect=[367, 493, 411, 523]
+- e7 | pane | 名字输入框 | rect=[435, 353, 825, 390]
+- e8 | image | 名字: | rect=[367, 353, 411, 383]
+- e9 | menubar | 系统 | rect=[367, 287, 409, 331]
+- e10 | menuitem | 系统 | rect=[367, 287, 409, 331]
+- e11 | button | 最小化 | rect=[1016, 285, 1110, 342]
+- e12 | button | 最大化 | rect=[1110, 285, 1202, 342]
+- e13 | button | 关闭 | rect=[1202, 285, 1296, 342]
+```
+
+几条设计账:
+
+- **ref 是本份快照内的短码**(e1、e2……,browser 侧同款做法),重拍即
+  换号;不做窗口代次失效保护——每次快照重发新 ref,窗口没了靠
+  `window_not_found` 兜底,动作坐标防过期靠 `expected_window_rect`。
+- **只收模型要动的东西**:交互控件(按钮/输入/勾选/下拉/页签/列表项/
+  菜单项)无名也收;文本与容器带 Name 才收(有名的容器是标签化区块,
+  比如 tkinter 的输入框在 UIA 里就是一枚带名 pane);纯容器折叠,但
+  不占深度。
+- **三顶帽子**:深度帽 `depth`(默认 8,最大 24)、元素帽(400 项,
+  正文只铺前 60 行,全量在 structured)、时间帽(8s,防无响应窗口)。
+  超帽如实报"截断",教模型用 depth 收窄。
+- **零第三方依赖的 UIA 接入**:ctypes 手调 IUIAutomation COM 壳
+  (`gui_uia.py`),vtable 下标照 Windows SDK 头文件逐条对过。为什么
+  不起 PowerShell 子进程跑 System.WindowsAutomation:其一,坐标口径——
+  插件进程是 per-monitor v2 DPI 感知的,in-proc UIA 的矩形与截图、
+  SendInput 同一物理像素;PowerShell 子进程是 DPI-unaware 的,托管 UIA
+  在高 DPI 屏会把矩形虚拟化甚至给空矩形。其二,托管 UIA 微软自己都
+  不建议新用。其三,起 powershell.exe 加载 CLR 每回一到三秒,in-proc
+  走树毫秒级。代价是手排 vtable——文件头注释里立了账。
+- **盲区如实写**:自绘控件(游戏、部分 Electron、老自绘 Win32)UIA
+  看不见,收 0 项时回执明说"回视觉路"。tkinter 自己也半瞎:控件有
+  helper HWND 但不带文字,名字得应用程序自己补(夹具就是这么做的)。
+
+## 7. 坐标空间、DPI 与 stale observation
 
 - **virtual_screen**:全桌面物理像素联合坐标系,多屏时含负原点(左屏
   x 从 -1920 起)。截图像素与它一一对应。
@@ -188,7 +248,7 @@ Skill 的死规矩:一次一项动作,动作后必截图;不许连续盲点五�
   不是权限——observation 不是授权凭据。窗口换进程、换标题、换矩形,
   默认都拒。
 
-## 7. 图随结果回喂(协议 v2)
+## 8. 图随结果回喂(协议 v2)
 
 process 插件协议 v2 起,`content` 里可以带 `type=image` 块。
 `gui_screenshot` 在文本与 observation 之外,把 PNG 以 path 模式随响应帧
@@ -216,11 +276,11 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 老宿主(只认 v1)收到 protocol=2 的响应会按 UnknownContent 整帧拒——
 本插件随宿主 v2 一起交付,不做双协议回退。
 
-## 8. 安全模型
+## 9. 安全模型
 
 | 类别 | 工具 | 说明 |
 | --- | --- | --- |
-| 观察 | `gui_status` / `gui_list_windows` / `gui_screenshot` | 无输入注入。截图默认只拍目标窗口;`target=screen` 拍全部显示器,当心隐私。 |
+| 观察 | `gui_status` / `gui_list_windows` / `gui_snapshot` / `gui_screenshot` | 无输入注入。快照只读控件树,连像素都不碰;截图默认只拍目标窗口,`target=screen` 拍全部显示器,当心隐私。 |
 | 低风险动作 | `gui_focus_window` / `gui_move_mouse` | 改前台、挪鼠标,不产生点击。 |
 | 写动作 | `gui_click` / `gui_scroll` / `gui_type_text` / `gui_key` | 每次调用前 LubanCode 照常确认;`.lubancode/settings.local.json` 的 `allow_tools` 只按名单放,别开 `plugin__gui-agent-example__*` 通配。 |
 
@@ -234,7 +294,7 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 - 文本帽 4096 字符、滚轮帽 50 格、连点帽 3 次、截图帽 8MB——全在注入
   前收口。
 
-## 9. 排错
+## 10. 排错
 
 | 症状 | 先查 |
 | --- | --- |
@@ -248,8 +308,12 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 | 中文输入没出现 | 窗口是否前台(`ensured_foreground`);目标框是否只读 |
 | 点了按钮没反应 | 多半点开了下拉/浮层没收起——后续点击落在浮层上(夹具事件账里 `widget=str` 就是它)。先 `gui_key` Enter/Esc 收起浮层再点 |
 | 截图全黑 | 最小化窗口被拒是预期;若目标用 GPU 合成,PrintWindow + PW_RENDERFULLCONTENT 已覆盖大多数;仍黑就改 `target=screen` 前先想隐私 |
+| `gui_snapshot` 收 0 项 | 多半是自绘界面(游戏/部分 Electron/老自绘 Win32)没给 UIA 暴露控件——结构路的盲区,回 `gui_screenshot` 视觉路;提权窗口(管理员跑的)探不全也是它 |
+| 快照里控件没名字 | 应用没给 UIA 名字(tkinter 默认就这样:控件画在 Tk 手里,helper HWND 文字是空的)。位置与类型还在,能按 rect 点;要名字得应用自己补(教学夹具就是这么做的) |
+| 快照被截断 | 树太宽/太深。带更小的 `depth` 重拍,或换枚更具体的窗口 |
+| 点击按快照 rect 落偏 | 先 `gui_status` 查 DPI;快照 rect 与截图、SendInput 同一物理像素口径,DPI unaware 时全链路一起错位 |
 
-## 10. 改造成你自己的工具(五步)
+## 11. 改造成你自己的工具(五步)
 
 1. **改工具名**:拷走整目录,`plugin.json` 里改 `id` 与各 `tools[].name`
    (模型看到的就是 `plugin__<id>__<name>`)。
@@ -271,18 +335,20 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 - **给图片编辑器添重复动作**:批量"打开→滤镜→另存"。边界:只动你建的
   临时目录,写动作全留确认。
 
-## 11. 源码地图与平台承诺
+## 12. 源码地图与平台承诺
 
 | 文件 | 管什么 |
 | --- | --- |
-| `plugin.json` | manifest:id、runtime、九件工具 schema、env allowlist、network=false |
+| `plugin.json` | manifest:id、runtime、十件工具 schema、env allowlist、network=false |
 | `runner.py` | 协议 v1:stdin 一份 JSON → stdout 一份 JSON,日志进 stderr |
 | `gui_actions.py` | 合同层:坐标换算、stale 拦截、上限、危险键闸、dry-run、observation |
 | `gui_backend.py` | Win32 ctypes 层:窗口枚举、DPI、SendInput、BitBlt;`FakeBackend` 供测试 |
+| `gui_uia.py` | UIA COM 壳:ctypes 手调 IUIAutomation,控件树折叠规则与帽子 |
 | `png.py` | 零依赖 PNG 编码(zlib + CRC32),魔数自检 |
-| `test_runner.py` | 离线自测(零真输入):`python test_runner.py`,32 册 |
+| `test_runner.py` | 离线自测(零真输入):`python test_runner.py`,41 册 |
 | `fixtures/fixture_app.py` | 教学夹具:一条命令起的本地小窗 |
-| `scripts/manual_e2e.py` | 真桌面 E2E,默认 SKIP,`--run` 才动鼠标 |
+| `scripts/manual_e2e.py` | 视觉路 E2E(截图→看→点),默认 SKIP,`--run` 才动鼠标 |
+| `scripts/uia_snapshot_e2e.py` | 结构路 E2E(快照→rect 中心点提交,零截图),默认 SKIP,`--run` 才动鼠标 |
 | `SKILL.md` | 教模型的操作纪律(拷到 `~/.lubancode/skills/gui-agent/`) |
 | `config.example.json` | settings.local.json 样例与环境开关说明 |
 
@@ -293,7 +359,7 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 第三方依赖:无(版本与体积见 `requirements.txt` 的说明)。夹具用 tkinter,
 Windows 官方 Python 自带。
 
-## 12. 自测命令速查
+## 13. 自测命令速查
 
 ```bash
 # 离线单测(零真输入,CI 同款)
@@ -304,6 +370,9 @@ python scripts/manual_e2e.py --run --dry-run
 
 # 真跑 E2E(会动鼠标,须专用桌面)
 python scripts/manual_e2e.py --run
+
+# 结构路 E2E:快照定位、零截图点提交(会动鼠标,须专用桌面)
+python scripts/uia_snapshot_e2e.py --run
 
 # 手工灌一份协议请求看响应
 echo {"protocol":1,"call_id":"t1","plugin":"gui-agent-example","tool":"gui_status","arguments":{},"context":{}} | python runner.py

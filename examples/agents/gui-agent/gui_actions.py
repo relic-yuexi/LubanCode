@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""GUI 工具合同层:九件工具的动作纪律。
+"""GUI 工具合同层:十件工具的动作纪律。
 
 这层不管 Win32 花活(那是 gui_backend),也不管协议帧(那是 runner)。
 它守的是工单里的几条铁律:
@@ -26,9 +26,10 @@ import time
 from pathlib import Path
 from typing import Optional
 
+import gui_uia
 import png as png_codec
 
-PLUGIN_VERSION = "1.1.0"
+PLUGIN_VERSION = "1.2.0"
 
 # 协议 v2 起截图随结果回喂模型(image 块),宿主验身落账后上 wire;
 # 证据文件照旧落盘(路径作附账,artifact 可追)。
@@ -46,6 +47,11 @@ MOVE_DURATION_MS_RANGE = (0, 1000)
 IMAGE_MAX_BYTES = 8 * 1024 * 1024
 IMAGE_MAX_DIMENSION = 8000
 TITLE_MAX_CHARS = 200
+SNAPSHOT_NAME_MAX_CHARS = 200
+# 正文行帽:与 gui_list_windows 的 20 窗帽同理——有 text 就不投影
+# structured,清单必须进正文;但 400 行铺开谁也读不动,正文给前 60 行,
+# 全量在 structured,超宽教模型用 depth 收窄。
+SNAPSHOT_TEXT_LINES = 60
 
 # 动作类工具(dry-run 拦这些);观察类照常执行。
 ACTION_TOOLS = {"gui_focus_window", "gui_move_mouse", "gui_click", "gui_scroll",
@@ -320,6 +326,69 @@ def _evidence_root(arguments: dict, settings: Settings) -> Path:
     return Path(os.environ.get("TEMP", ".")) / "lubancode-gui-agent"
 
 
+def gui_snapshot(backend, arguments: dict, settings: Settings) -> tuple[str, dict]:
+    """UIA 控件树快照:桌面版 browser_snapshot。
+
+    结构路找控件的正着:每行 `ref | 类型 | Name | rect`,模型按名定位、
+    按 rect 中心点击,不用烧 token 看截图。ref 是本份快照内的短码(eN,
+    browser 侧同款做法);不做窗口代次失效保护——每次快照重发新 ref,
+    窗口没了靠 window_not_found 兜底。自绘控件 UIA 看不见是已知盲区,
+    收 0 项时如实说,教模型回视觉路(截图)。
+    """
+    window_id = arguments.get("window_id")
+    if not isinstance(window_id, str) or not window_id:
+        raise ToolError("invalid_arguments", "须带 window_id(gui_list_windows 拿)")
+    try:
+        int(window_id, 16)
+    except ValueError:
+        raise ToolError("invalid_arguments", f"window_id 不是十六进制: {window_id}") from None
+    depth = arguments.get("depth", gui_uia.DEFAULT_DEPTH)
+    if (not isinstance(depth, int) or isinstance(depth, bool)
+            or not 1 <= depth <= gui_uia.MAX_DEPTH):
+        raise ToolError("invalid_arguments",
+                        f"depth 须是 1-{gui_uia.MAX_DEPTH} 内整数(默认 {gui_uia.DEFAULT_DEPTH})")
+    state = _require_window_state(backend, window_id)
+    if state["minimized"]:
+        raise ToolError("window_minimized", "窗口最小化了,控件树无从枚举;先恢复再拍")
+    try:
+        result = backend.snapshot_tree(window_id, depth)
+    except OSError as error:
+        raise ToolError("snapshot_failed", f"UIA 走树失败:{error}") from None
+
+    elements = result["elements"]
+    for index, element in enumerate(elements, 1):
+        element["ref"] = f"e{index}"
+        element["name"] = _sanitize_text(element.get("name", ""))[:SNAPSHOT_NAME_MAX_CHARS]
+
+    lines = [f"窗口 {state['title']!r}({window_id})UIA 快照:depth={depth},"
+             f"收 {len(elements)} 项,走访 {result['visited']} 节点,"
+             f"{result['elapsed_ms']}ms。ref 只在本份快照内有效;"
+             "rect 是全桌面物理像素(virtual_screen 口径,与截图同源),动作取矩形中心。"]
+    for element in elements[:SNAPSHOT_TEXT_LINES]:
+        lines.append(f"- {element['ref']} | {element['control_type']} | {element['name']}"
+                     f" | rect={element['rect']}")
+    if len(elements) > SNAPSHOT_TEXT_LINES:
+        lines.append(f"(其余 {len(elements) - SNAPSHOT_TEXT_LINES} 项只进 structured;"
+                     "树太宽就用 depth 收窄重拍)")
+    if result["truncated"]:
+        lines.append(f"树被截断:{result['reason']}。用更小的 depth 收窄,或分区块重拍。")
+    if not elements:
+        lines.append("一枚控件也没收到。多半是自绘界面(游戏/Electron 部分/老 Win32 自绘)"
+                     "没给 UIA 暴露控件树——这是结构路的盲区,回 gui_screenshot 视觉路。")
+    text = "\n".join(lines)
+    structured = {
+        "window_id": state["id"], "title": state["title"], "window_rect": state["rect"],
+        "depth": depth, "count": len(elements),
+        "truncated": result["truncated"], "truncated_reason": result["reason"],
+        "visited": result["visited"], "elapsed_ms": result["elapsed_ms"],
+        "read_failures": result.get("read_failures", []),
+        "elements": elements,
+        "note": "ref 仅本份快照内有效;rect 为 virtual_screen 物理像素;"
+                "自绘控件 UIA 看不见,收 0 项时改走截图视觉路",
+    }
+    return text, structured
+
+
 # ---------------------------------------------------------------------------
 # 动作类工具(dry-run 拦)
 # ---------------------------------------------------------------------------
@@ -498,6 +567,7 @@ HANDLERS = {
     "gui_list_windows": gui_list_windows,
     "gui_focus_window": gui_focus_window,
     "gui_screenshot": gui_screenshot,
+    "gui_snapshot": gui_snapshot,
     "gui_move_mouse": gui_move_mouse,
     "gui_click": gui_click,
     "gui_scroll": gui_scroll,

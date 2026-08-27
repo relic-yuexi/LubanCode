@@ -414,6 +414,13 @@ class Win32Backend:
             self.user32.ReleaseDC(0, hdc_screen)
         return width, height, rows
 
+    # -- UIA 控件树快照 ------------------------------------------------------
+    def snapshot_tree(self, window_id: str, max_depth: int) -> dict:
+        """委托 gui_uia 的 ctypes COM 壳。DPI 语境继承本进程的
+        per-monitor v2 感知——矩形与截图、SendInput 同一物理像素口径。"""
+        import gui_uia
+        return gui_uia.snapshot_window(window_id, max_depth)
+
 
 class FakeBackend:
     """测试后端:窗口现场可预置,注入动作只记账不落桌面。
@@ -430,6 +437,9 @@ class FakeBackend:
         self.virtual = [-1920, 0, 2560, 1440]
         self.monitors = 2
         self.screenshot_pixels = (3, 2, [b"\x10\x20\x30" * 3, b"\x40\x50\x60" * 3])
+        # 假 UIA 树:set_uia_tree 预置嵌套节点(control_type/name/rect/children),
+        # snapshot_tree 与真后端走同一套折叠规则与帽子——离线单测不碰真 COM。
+        self.uia_trees: dict[str, list[dict]] = {}
 
     def add_window(self, window_id: str, title: str, rect: list[int], *,
                    process_name: str = "fake.exe", minimized: bool = False,
@@ -512,6 +522,28 @@ class FakeBackend:
         self.calls.append(f"screenshot_screen({rect})")
         width, height, rows = self.screenshot_pixels
         return width, height, rows
+
+    def set_uia_tree(self, window_id: str, children: list[dict]) -> None:
+        """预置假 UIA 树(节点形如 {"control_type", "name", "rect", "children",
+        可选 "class_name"/"value"}),test_runner 灌它离线测 gui_snapshot。"""
+        self.uia_trees[window_id] = children
+
+    def snapshot_tree(self, window_id: str, max_depth: int) -> dict:
+        import gui_uia
+
+        def read_props(node: dict) -> dict:
+            return {"control_type": node.get("control_type", "custom"),
+                    "name": node.get("name", ""),
+                    "class_name": node.get("class_name", ""),
+                    "rect": list(node.get("rect", [0, 0, 0, 0])),
+                    "value": node.get("value")}
+
+        children = self.uia_trees.get(window_id) or []
+        self.calls.append(f"snapshot_tree({window_id},depth={max_depth})")
+        elements, truncated, reason, visited = gui_uia.collect_tree(
+            children, lambda node: node.get("children") or [], read_props, max_depth)
+        return {"elements": elements, "truncated": truncated, "reason": reason,
+                "visited": visited, "elapsed_ms": 0, "read_failures": []}
 
 
 def make_backend(fake: Optional[FakeBackend] = None) -> Win32Backend | FakeBackend:

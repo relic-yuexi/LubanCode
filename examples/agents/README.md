@@ -17,16 +17,16 @@
 2. **"进程短命"≠"任务无状态"。** GUI Agent 的状态在桌面与目标程序;
    Browser Agent 的状态在 Browser MCP 会话里。插件与服务器只是手脚。
 3. **"截图保存成功"≠"模型看见截图"。** 须经富工具结果或显式图片输入;
-   当前协议 v1 只回文本,示例在 observation 里如实标注(见
-   [gui-agent/README.md](gui-agent/README.md) 第 7 节)。
+   协议 v2 起截图随结果回喂,示例在 observation 里如实标注(见
+   [gui-agent/README.md](gui-agent/README.md) 第 8 节)。
 
 ## 最短启动路径
 
 **GUI(Windows,十分钟):** 见 [gui-agent/README.md](gui-agent/README.md)
-第 2-3 节——拷目录、开 dry-run、起夹具、跑七步链。装法有两路:用户级
-(`%USERPROFILE%\.lubancode\plugins\`)免信任门;装进仓库的项目级
-(`<项目>\.lubancode\plugins\`)要过信任门,`/plugin trust <id>` 一条命令
-批准(详见 gui-agent README 第 2 节"装到哪")。
+第 2-3 节——拷目录、开 dry-run、起夹具、跑八步链(结构路快照为主,
+截图只作复核)。装法有两路:用户级(`%USERPROFILE%\.lubancode\plugins\`)
+免信任门;装进仓库的项目级(`<项目>\.lubancode\plugins\`)要过信任门,
+`/plugin trust <id>` 一条命令批准(详见 gui-agent README 第 2 节"装到哪")。
 
 **Browser(另单在建):** 常驻 MCP + Playwright,DOM/ref 路线,依赖
 `todos/MCP富结果与专属浏览器.todo` 的底层能力。目录落地后此处补链接。
@@ -44,15 +44,17 @@
 examples/agents/
   README.md            ← 本页:选路导航
   gui-agent/           ← 案例一:process 插件(Windows 桌面)
-    plugin.json          manifest:九件工具的静态真账
+    plugin.json          manifest:十件工具的静态真账
     runner.py            协议 v1:stdin/stdout 各一份 JSON
     gui_actions.py       合同:坐标、stale、上限、dry-run、危险键闸
     gui_backend.py       Win32 ctypes:枚举/DPI/SendInput/截图 + FakeBackend
+    gui_uia.py           UIA COM 壳:ctypes 手调 IUIAutomation 控件树快照
     png.py               零依赖 PNG 编码
     SKILL.md             教模型的操作纪律
     test_runner.py       离线自测(零真输入)
     fixtures/            教学夹具(tkinter 小窗)
-    scripts/manual_e2e.py 真桌面 E2E(默认 SKIP)
+    scripts/manual_e2e.py 真桌面 E2E,视觉路(默认 SKIP)
+    scripts/uia_snapshot_e2e.py 真桌面 E2E,结构路(默认 SKIP)
   browser-agent/       ← 案例二:常驻 MCP(另单在建,勿在此占位造空壳)
 ```
 

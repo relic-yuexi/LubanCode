@@ -1,16 +1,18 @@
 // GUI Agent 示例(gui-agent-example)的集成测试:真 manifest、真 runner
 // 进程、真协议往返——但不碰真鼠标键盘:
-//   - manifest 静态校验:九件工具、id、env allowlist、network=false
+//   - manifest 静态校验:十件工具、id、env allowlist、network=false
 //   - gui_status 真跑:平台口径如实报(Windows=ok;别处=unsupported_platform)
 //   - gui_click 走 dry-run + 假窗口 id:校验链路全通,window_not_found
 //     在注入前拦住——一只真事件都不发
+//   - gui_snapshot 走假窗口 id:快照链路真起进程,window_not_found 兜底
 //   - env allowlist 递进:LUBANCODE_GUI_DRY_RUN 经宿主最小集递给子进程
 //   - runner 防御层:坏类型参数在脚本侧也被拦(schema 是宿主的合同,
 //     脚本自己再守一道)
 //   - 文档与代码不两张皮:README 提到的工具名都真在 manifest 与 runner 里
 //
 // 真桌面 E2E(真点击真输入)不进 ctest:普通开发机会抢用户鼠标,照工单
-// 停手线走 examples/agents/gui-agent/scripts/manual_e2e.py,默认 SKIP。
+// 停手线走 examples/agents/gui-agent/scripts/manual_e2e.py(视觉路)与
+// scripts/uia_snapshot_e2e.py(结构路),默认 SKIP。
 // 缺 Python 的环境进程类测试整段跳过(manifest 静态校验照跑)。
 
 #include <doctest/doctest.h>
@@ -69,7 +71,8 @@ PluginManifest LoadExampleManifest() {
 
 constexpr const char* kExpectedTools[] = {
     "gui_status", "gui_list_windows", "gui_focus_window", "gui_screenshot",
-    "gui_move_mouse", "gui_click", "gui_scroll", "gui_type_text", "gui_key",
+    "gui_snapshot", "gui_move_mouse", "gui_click", "gui_scroll",
+    "gui_type_text", "gui_key",
 };
 
 plugin_protocol::ProcessRequest MakeRequest(const std::string& tool, const nlohmann::json& arguments) {
@@ -87,15 +90,15 @@ plugin_protocol::ProcessRequest MakeRequest(const std::string& tool, const nlohm
 // ---------------------------------------------------------------------------
 // manifest 静态真账(不需要 Python)
 // ---------------------------------------------------------------------------
-TEST_CASE("gui-agent 示例:manifest 九件工具、权限与 env allowlist 齐全") {
+TEST_CASE("gui-agent 示例:manifest 十件工具、权限与 env allowlist 齐全") {
     const auto manifest = LoadExampleManifest();
-    REQUIRE(manifest.tools.size() == 9);
+    REQUIRE(manifest.tools.size() == 10);
     CHECK(manifest.id == "gui-agent-example");
     CHECK(manifest.kind == RuntimeKind::Process);
     CHECK_FALSE(manifest.network_allowed);
     CHECK(manifest.timeout_ms == 20000);
 
-    // 九件工具名逐一对上;完整名前缀同一枚插件 id。
+    // 十件工具名逐一对上;完整名前缀同一枚插件 id。
     for (const char* name : kExpectedTools) {
         bool found = false;
         for (const auto& tool : manifest.tools) {
@@ -127,7 +130,8 @@ TEST_CASE("gui-agent 示例:manifest 九件工具、权限与 env allowlist 齐�
     CHECK(manifest.argv[1].find("runner.py") != std::string::npos);
     CHECK(std::filesystem::exists(ExampleDir() / "runner.py"));
     // runner 的同目录模块也在交付物里(整目录拷贝的安装口径)。
-    for (const char* module : {"gui_actions.py", "gui_backend.py", "png.py", "test_runner.py"}) {
+    for (const char* module : {"gui_actions.py", "gui_backend.py", "gui_uia.py", "png.py",
+                               "test_runner.py"}) {
         CHECK_MESSAGE(std::filesystem::exists(ExampleDir() / module), "示例缺文件: " << module);
     }
 }
@@ -196,6 +200,20 @@ TEST_CASE("gui-agent 示例:gui_screenshot 真跑——v2 image 块随响应回,
     CHECK(std::filesystem::exists(artifacts / image->artifact.filename));
     CHECK(image->bytes > 0);
 #endif
+}
+
+TEST_CASE("gui-agent 示例:gui_snapshot 走假窗口 id,window_not_found 兜底") {
+    const auto manifest = LoadExampleManifest();
+    if (!PythonAvailable(manifest.argv[0])) {
+        return;
+    }
+    // 快照是观察类(不注入输入);假窗口先过窗口现场重查,不到 UIA 那步
+    // 就该被拦——链路真起进程、真走协议,一只 COM 调用都不发。
+    const auto outcome = RunProcessToolCall(
+        manifest, MakeRequest("gui_snapshot", nlohmann::json{{"window_id", "0x0DEADBEEF"}}),
+        "D:/not-a-real-dir", nullptr, ProcessCallLimits{});
+    REQUIRE(outcome.code == PluginErrorCode::PluginReportedError);
+    CHECK(outcome.plugin_error_code == "window_not_found");
 }
 
 TEST_CASE("gui-agent 示例:gui_status 真跑,平台口径如实") {

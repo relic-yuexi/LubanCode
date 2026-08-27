@@ -10,7 +10,7 @@
 | [word_count_rs/](word_count_rs/) | process | Rust | cargo 出可执行文件当工具,用户机器零依赖 |
 | [local_math_c/](local_math_c/) | process | C | gcc/cl 出可执行文件,示例级 JSON 解析 |
 | [hello_plugin/](hello_plugin/) | native-library(ABI v2) | C | 三平台 .dll/.so/.dylib + host allocator buffer 契约 |
-| [agents/gui-agent/](../agents/gui-agent/) | process | Python | 较完整案例:九件 GUI 工具(截图/点击/输入),坐标合同、dry-run、stale 拦截、教学夹具与 E2E 全带 |
+| [agents/gui-agent/](../agents/gui-agent/) | process | Python | 较完整案例:十件 GUI 工具(UIA 快照/截图/点击/输入),坐标合同、dry-run、stale 拦截、教学夹具与 E2E 全带 |
 
 起步最快的一条:`lubancode plugin init python my-tool` 生成三件套
 (plugin.json + runner.py + test_runner.py),本地 `python test_runner.py`

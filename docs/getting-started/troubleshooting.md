@@ -193,6 +193,8 @@ git status --short
 - **`focus_failed` 反复出现**：Windows 限制后台进程抢前台。人工点一下目标窗口，或让用户先激活它；不是插件坏了。
 - **`stale_observation` 接连报**：窗口在被挪或自适应布局在抖。重新 `gui_screenshot` 拿新矩形，动作带最新的 `expected_window_rect`；连报就说明窗口不稳定，换 `window_client` 坐标口径。
 - **截图黑屏/空白**：目标窗口最小化了（被拒是预期）；GPU 合成窗口一般 PrintWindow 抓得住，仍黑就换 `target=screen`，先想清楚会拍下哪些显示器。
+- **`gui_snapshot` 收 0 项**：多半是自绘界面（游戏/部分 Electron/老自绘 Win32）没给 UIA 暴露控件树——结构路的盲区，回 `gui_screenshot` 视觉路；提权窗口探不全也是它。
+- **快照里控件没名字**：应用没给 UIA 名字（tkinter 默认就这样，控件画在 Tk 手里、helper HWND 文字是空的）。类型和矩形还在，能按 rect 点；要名字得应用自己补（教学夹具就是这么做的）。
 - **中文没输进去**：查 `ensured_foreground` 是否为真——窗口不在前台，键进了别的程序。本插件走 Unicode 键盘事件，与输入法状态无关。
 
 ## 10. 构建与测试
