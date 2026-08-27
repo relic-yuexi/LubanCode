@@ -165,6 +165,12 @@ public:
         // 语义。不设(默认 nullptr)= 子代理收不到外部打断,行为跟从前一样。
         const std::atomic<bool>* cancel = nullptr;
 
+        // MCP 富结果单 P0.5:工具二进制 artifact 目录随派工下发——子代理
+        // 调 MCP 工具返回的图片/音频/blob 与主回合落同一份会话 artifact
+        // 目录。空 = 父级没开(单测/没建档),富二进制块在子代理里同样按
+        // 稳定错误收口。
+        std::string tool_artifact_dir;
+
         // Plan 模式(只读研究硬闸单):子代理内部工具的 ModePolicy 闸。
         // 转发父级同名回调——子代理不因独立 context 逃闸。不设 = 子代理
         // 不过 Plan 闸(旧路)。

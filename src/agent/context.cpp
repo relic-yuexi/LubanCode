@@ -83,6 +83,39 @@ std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> m
                 continue;
             }
             auto& tool_result = std::get<api::ToolResultBlock>(block);
+            // MCP 富结果单 P0.3:富块在身的结果只裁文本(TextContent 的
+            // text,从最后一块起倒着裁),图片/音频/资源引用与
+            // structuredContent 一概不动——裁文本不许顺手删图与结构化结果;
+            // 裁完 content 按真账重算投影,缓存与权威不失步。
+            if (!tool_result.blocks.empty()) {
+                bool reduced = false;
+                for (auto it = tool_result.blocks.rbegin(); it != tool_result.blocks.rend() && total > max_chars;
+                     ++it) {
+                    auto* text_block = std::get_if<tools::TextContent>(&*it);
+                    if (text_block == nullptr || text_block->text.size() <= kMinKeepChars + mark_size) {
+                        continue;
+                    }
+                    const std::size_t overage = total - max_chars;
+                    const std::size_t reducible = text_block->text.size() - kMinKeepChars - mark_size;
+                    const std::size_t cut = overage < reducible ? overage + mark_size : reducible + mark_size;
+                    const std::size_t keep =
+                        platform::Utf8PrefixBoundary(text_block->text, text_block->text.size() - cut);
+                    text_block->text.resize(keep);
+                    text_block->text += kMark;
+                    reduced = true;
+                    {
+                        tools::ToolResultPayload payload;
+                        payload.content = tool_result.blocks;
+                        payload.structured_content = tool_result.structured_content;
+                        tool_result.content = tools::TextProjection(payload);
+                    }
+                    total = EstimateHistoryBytes(messages);
+                }
+                if (reduced && report != nullptr) {
+                    report->truncated_results = true;
+                }
+                continue;
+            }
             if (tool_result.content.size() <= kMinKeepChars + mark_size) {
                 continue;
             }

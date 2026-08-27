@@ -9,6 +9,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include "platform/text_encoding.hpp"  // SanitizeExternalText:结果正文出门前的编码关口
+#include "tools/tool_content.hpp"      // ToolResultPayload:富结果的唯一真账
+
 namespace lubancode::tools {
 
 // 副作用等级(逐枚追踪单"Effect class 与恢复策略")。声明是保守承诺:
@@ -52,6 +55,13 @@ struct ToolExecutionContext {
     // 调用方保证;工具不得跨调用存它(共享工具实例会被多只并跑的子代理
     // 同时调,存下来就是互相踩——要存请存自己 SetCancel 灌的那根做兜底)。
     const std::atomic<bool>* cancel = nullptr;
+
+    // 本调用的二进制 artifact 落盘目录(MCP 富结果单 P0.5):MCP 工具返回
+    // 的图片/音频/blob 字节先落这里的会话 artifact store(<会话目录>/
+    // mcp-artifacts/),history 里只留引用。空 = 本次没有落盘地(单测/
+    // 未开会话的调用路),富二进制块按稳定错误收口,不吞字节也不冒充
+    // 落盘。文本结果不受影响。
+    std::string artifact_dir;
 };
 
 class Tool {
@@ -87,20 +97,76 @@ public:
     virtual std::string version_or_digest() const { return std::string(); }
 
     struct Result {
-        std::string content;    // 回传给模型的文本(成功的结果,或者人能看懂的错误说明)
+        // ---- MCP 富结果单:正文真账只有一份 --------------------------------
+        // payload 是唯一权威(text/image/audio/resource_link/resource/
+        // structuredContent 全在这);content 是 payload 的 TextProjection
+        // 派生缓存,给只读它的旧调用方(终端显示、四家 wire 的文本降级、
+        // token 估算)继续用。写入一律走 SetText/SetPayload/AppendText/
+        // SanitizeInPlace——它们保证 content 与 payload 投影同步;src 内
+        // 不许再直接给 content 赋值(那会造出第二份真账,单子明令禁止),
+        // 也不许拿 content 反过来还原 payload。
+        ToolResultPayload payload;
+        std::string content;    // = payload 的文本投影(派生缓存,只读)
         bool is_error = false;  // 执行失败/被拒绝时置位
+
+        // 文本桥(MCP 富结果单 P0.2):旧聚合初始化 Tool::Result{"文本", true}
+        // 照旧编译——构造器把文本包成一枚 TextContent,行为与从前一字不差。
+        Result() = default;
+        // 不加 explicit:Tool::Result{"文本", true} 这类列表初始化遍布全仓,
+        // 构造器必须以非显式身份接住它们(单参数 string 意外的隐式转换
+        // 由第二参默认值的存在性挡住——bool/string 重载歧义不存在)。
+        Result(std::string text, bool error = false)
+            : payload(MakeTextPayload(text)), content(std::move(text)), is_error(error) {}
+
+        // 工厂:显式意图,不再依赖聚合初始化的字段次序。
+        static Result Text(std::string text) { return Result(std::move(text), false); }
+        static Result Error(std::string text, bool error = true) { return Result(std::move(text), error); }
+        static Result FromPayload(ToolResultPayload rich, bool error = false) {
+            Result result;
+            result.is_error = error;
+            result.SetPayload(std::move(rich));
+            return result;
+        }
+
+        // 唯一的写入口(同步 content 投影)。
+        void SetText(std::string text) {
+            payload = MakeTextPayload(text);
+            content = std::move(text);
+        }
+        void SetPayload(ToolResultPayload rich) {
+            payload = std::move(rich);
+            content = TextProjection(payload);
+        }
+        // 追加一段文本(hook 反馈、附注):富结果在末尾添一枚 TextContent,
+        // 纯文本直接接上;投影随之同步。
+        void AppendText(std::string text) {
+            payload.content.push_back(TextContent{std::move(text)});
+            content = TextProjection(payload);
+        }
+        // UTF-8 规范化:payload 全部文本字段(含 structured JSON)洗一遍,
+        // content 重算。幂等,合法时零成本。
+        void SanitizeInPlace() {
+            SanitizePayloadTextInPlace(payload);
+            content = TextProjection(payload);
+        }
 
         // ---- 逐枚追踪单:诊断扩展(缺省全空 = 与旧结构语义一致) ----------
         // is_error 留作 Provider/UI 的粗投影;诊断用稳定 outcome/error_code。
-        // 便利构造 {content, is_error} 照旧编译(聚合初始化前两字段),旧
+        // 便利构造 {content, is_error} 照旧编译(文本构造器接住),旧
         // builtin 一行不用改。原生 C ABI v1/v2 只回 is_error,宿主 wrapper
         // 把它投影成 tool_error/plugin_error,不添 struct 字段、不伪造
         // exception 细节(将来 ABI 再升才让插件明报细码)。
         std::string outcome;     // ToolOutcome 的稳定字符串(agent/tool_trace.hpp);空 = 未细报
         std::string error_code;  // 分层错误码(kErr* 常量);空 = 未细报
         nlohmann::json details = nlohmann::json::object();  // 结构化补充(exit_code 等)
+        // details 只放诊断附注;不许拿它偷运图片字节或 structuredContent
+        // (富内容走 payload,单子 P0.2 定案)。
         std::string effect_summary;  // 副作用一句话(改了哪个文件/起了哪个进程);可空
-        std::string result_artifact; // 大结果落仓后的 artifact id;可空
+        // 大结果卸载(context artifact store)的 artifact id;与 payload 里
+        // 内容块自带的 ArtifactRef(二进制字节的内容寻址落盘)是两笔账:
+        // 前者是"整条文本结果太长卸了货",后者是"这块图片/音频/资源本身
+        // 的字节落在哪"。前者可空;后者在富块里必填(未落盘时 stored=false)。
+        std::string result_artifact;
 
         // ---- 本地文件条件式撤销(逐枚追踪单第四期) ----
         // write_file/edit_file 产:撤销前重读目标,当前 sha 仍等于

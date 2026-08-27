@@ -25,7 +25,16 @@ bool SameBlock(const api::ContentBlock& left, const api::ContentBlock& right) {
             } else if constexpr (std::is_same_v<T, api::ToolUseBlock>) {
                 return l.id == r.id && l.name == r.name && l.input == r.input;
             } else if constexpr (std::is_same_v<T, api::ToolResultBlock>) {
-                return l.tool_use_id == r.tool_use_id && l.content == r.content && l.is_error == r.is_error;
+                // MCP 富结果单 P0.3:富块在身时块序与 structuredContent 都算
+                // ——图片引用的 MIME/sha/尺寸在块里逐字段比,structured 用
+                // 稳定序列化比,一个字段都不放过(content 是投影,富块时由
+                // blocks 派生,重复比不断错案)。
+                if (l.blocks.empty() && r.blocks.empty() && !l.structured_content.has_value() &&
+                    !r.structured_content.has_value()) {
+                    return l.tool_use_id == r.tool_use_id && l.content == r.content && l.is_error == r.is_error;
+                }
+                return l.tool_use_id == r.tool_use_id && l.is_error == r.is_error && l.blocks == r.blocks &&
+                       l.structured_content == r.structured_content;
             } else if constexpr (std::is_same_v<T, api::ModelImageBlock>) {
                 // 引用块全字段比(路径/尺寸/sha 都是请求可见面,一个不放过)。
                 return l.id == r.id && l.filename == r.filename && l.path == r.path && l.mime_type == r.mime_type &&
@@ -94,6 +103,16 @@ void HashMixBlock(std::uint64_t& hash, const api::ContentBlock& block) {
                 HashMix(hash, "r:");
                 HashMix(hash, b.tool_use_id);
                 HashMix(hash, b.content);
+                // MCP 富结果单:图片引用的 MIME/SHA/尺寸、structured 的稳定
+                // JSON 都混进指纹——缓存只认请求字节,base64 不进这层,但
+                // 引用字段换了,请求语义就换了,指纹必须跟着换。
+                for (const auto& rich : b.blocks) {
+                    HashMix(hash, tools::BlockToJson(rich).dump());
+                }
+                if (b.structured_content.has_value()) {
+                    HashMix(hash, "s:");
+                    HashMix(hash, b.structured_content->dump());
+                }
                 hash ^= b.is_error ? 0x9e3779b97f4a7c15ULL : 0;
                 hash *= 1099511628211ULL;
             } else if constexpr (std::is_same_v<T, api::ModelImageBlock>) {

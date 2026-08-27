@@ -711,6 +711,9 @@ void TerminalSessionController::RunSessionTurn(const std::string& content, TurnS
     // 没开(还没建档)就不挂,引擎遇图片明败,不吞图。
     if (sessions_dir.empty() == false && session_store.active()) {
         turn.model_images_dir = sessions_dir + "/" + session_store.session_id() + "/images";
+        // MCP 富结果单 P0.5:工具二进制 artifact 目录——MCP 返回的图片/音频/
+        // blob 字节先落这里,history 只留引用。与 images/ 并排,各管各的。
+        turn.tool_artifact_dir = sessions_dir + "/" + session_store.session_id() + "/mcp-artifacts";
     }
     // 输入图片前置拦截(MiniCPM5 真机巡检单 P2):目录与当前模型身份递给
     // RunTurn,纯文本模型的图片附件发送前就拦住。

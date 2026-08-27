@@ -93,6 +93,18 @@ nlohmann::json BlockToJson(const api::ContentBlock& block) {
                 j["tool_use_id"] = b.tool_use_id;
                 j["content"] = b.content;
                 j["is_error"] = b.is_error;
+                // MCP 富结果单 P0.3:富块与 structuredContent 入档;块序即
+                // 真序,图片/音频块只存引用(字节在会话 mcp-artifacts/ 目录)。
+                if (!b.blocks.empty()) {
+                    nlohmann::json blocks = nlohmann::json::array();
+                    for (const auto& rich : b.blocks) {
+                        blocks.push_back(tools::BlockToJson(rich));
+                    }
+                    j["blocks"] = std::move(blocks);
+                }
+                if (b.structured_content.has_value()) {
+                    j["structured_content"] = *b.structured_content;
+                }
             } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
                 j["type"] = "thinking";
                 j["text"] = b.text;
@@ -155,6 +167,20 @@ std::optional<api::ContentBlock> BlockFromJson(const nlohmann::json& j) {
         b.tool_use_id = platform::SanitizeExternalText(j.value("tool_use_id", std::string()));
         b.content = platform::SanitizeExternalText(j.value("content", std::string()));
         b.is_error = j.value("is_error", false);
+        // MCP 富结果单:恢复时块与 structuredContent 照读;旧档(只有
+        // content 字符串)blocks 为空,走纯文本路,行为与从前一字不差。
+        // 认不出的块类型弃那只块,不弃整条结果——工具调用配对不能丢。
+        if (j.contains("blocks") && j["blocks"].is_array()) {
+            for (const auto& rich : j["blocks"]) {
+                if (auto block = tools::BlockFromJson(rich)) {
+                    b.blocks.push_back(std::move(*block));
+                }
+            }
+        }
+        if (j.contains("structured_content") && j["structured_content"].is_object()) {
+            b.structured_content = j["structured_content"];
+            tools::SanitizeJsonTextInPlace(*b.structured_content);
+        }
         return api::ContentBlock{std::move(b)};
     }
     if (type == "thinking") {

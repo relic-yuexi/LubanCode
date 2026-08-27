@@ -109,9 +109,9 @@ Tool::Result WriteFileTool::execute(const nlohmann::json& input) {
     // undo token(逐枚追踪单"本地文件条件式撤销"):超 kUndoPreimageCap
     // 不内联正文,token 标不可用——不拿半截原文冒充可恢复。
     Tool::Result result;
-    result.content = "写入成功,共 " + std::to_string(content.size()) + " 字节: " + path_str;
+    result.SetText("写入成功,共 " + std::to_string(content.size()) + " 字节: " + path_str);
     if (existed_before) {
-        result.content += "(覆盖了原有文件)";
+        result.AppendText("(覆盖了原有文件)");
     }
     result.undo_path = path_str;
     result.undo_preimage_sha256 = hooks::Sha256Hex(preimage);

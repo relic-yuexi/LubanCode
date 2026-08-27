@@ -46,7 +46,7 @@ tools::Tool::Result GoalCheckpointTool::execute(const nlohmann::json& input) {
         r.is_error = true;
         r.outcome = "tool_error";
         r.error_code = std::move(code);
-        r.content = std::move(message);
+        r.SetText(std::move(message));
         return r;
     };
 
@@ -162,7 +162,7 @@ tools::Tool::Result GoalCheckpointTool::execute(const nlohmann::json& input) {
     if (status == GoalCheckpointStatus::ReadyForEvaluation) {
         ack += "宿主将按冻结合同与证据验收;ready_for_evaluation 不等于达标。";
     }
-    r.content = ack;
+    r.SetText(std::move(ack));
     r.is_error = false;
     r.outcome = "succeeded";
     r.details["checkpoint_count"] = static_cast<std::uint64_t>(state_->entries.size());

@@ -35,7 +35,7 @@ tools::Tool::Result LoopControlTool::execute(const nlohmann::json& input) {
         r.is_error = true;
         r.outcome = "tool_error";
         r.error_code = std::move(code);
-        r.content = std::move(message);
+        r.SetText(std::move(message));
         return r;
     };
 
@@ -78,14 +78,14 @@ tools::Tool::Result LoopControlTool::execute(const nlohmann::json& input) {
     ok.outcome = "success";
     if (action_str == "complete") {
         state_->complete_requested = true;
-        ok.content = "已声明任务完成(" + state_->task_id + "):" + reason_str +
-                     "。本拍答话收完就收口,下一拍不再排。";
+        ok.SetText("已声明任务完成(" + state_->task_id + "):" + reason_str +
+                   "。本拍答话收完就收口,下一拍不再排。");
         return ok;
     }
     if (action_str == "pause") {
         state_->pause_requested = true;
-        ok.content = "已请求暂停(" + state_->task_id + "):" + reason_str +
-                     "。任务定义保留,用户 /loop resume 可续。";
+        ok.SetText("已请求暂停(" + state_->task_id + "):" + reason_str +
+                   "。任务定义保留,用户 /loop resume 可续。");
         return ok;
     }
     return fail("loop.schema_invalid", "action 只认 complete 或 pause。");

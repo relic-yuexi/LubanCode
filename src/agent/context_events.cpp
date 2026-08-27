@@ -339,6 +339,10 @@ std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& h
     }
 
     // 落视图:只重写命中的 tool_result.content,消息条数与块序不动。
+    // MCP 富结果单:富块在身的结果换法——文本压成视图短句(一枚
+    // TextContent 承载),图片/音频/资源引用与 structuredContent 原样
+    // 留在 blocks 里(裁文本不删图、不删结构化结果);content 按新真账
+    // 重算投影。纯文本结果照旧只动 content 字符串。
     std::vector<api::Message> view = history;
     for (auto& message : view) {
         for (auto& block : message.content) {
@@ -347,7 +351,23 @@ std::vector<api::Message> CompressWorkingView(const std::vector<api::Message>& h
             }
             auto& result = std::get<api::ToolResultBlock>(block);
             if (auto it = rendered.find(result.tool_use_id); it != rendered.end()) {
-                result.content = it->second;
+                if (result.blocks.empty()) {
+                    result.content = it->second;
+                    continue;
+                }
+                std::vector<tools::ToolContentBlock> kept;
+                kept.push_back(tools::TextContent{it->second});
+                for (auto& rich : result.blocks) {
+                    if (std::holds_alternative<tools::TextContent>(rich)) {
+                        continue;  // 文本已并进视图短句
+                    }
+                    kept.push_back(rich);
+                }
+                tools::ToolResultPayload payload;
+                payload.content = std::move(kept);
+                payload.structured_content = result.structured_content;
+                result.blocks = payload.content;
+                result.content = tools::TextProjection(payload);
             }
         }
     }

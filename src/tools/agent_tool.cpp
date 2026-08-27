@@ -708,11 +708,11 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
                             /*prepared_system_prompt=*/nullptr,
                             scope_storage.has_value() ? &*scope_storage : nullptr);
     if (room.has_value()) {
-        result.content += FinishIsolationRoom(*room, git_runner_);
+        result.AppendText(FinishIsolationRoom(*room, git_runner_));
     }
     // 收尾入账:未送达的介入消息逐条列原文记进结果文本,不无声遗失;面板
     // x 停掉(task->cancel)与父轮 ESC 打断(hooks.cancel)都算取消。
-    result.content += TaskLedger::UndeliveredInboxNote(task);
+    result.AppendText(TaskLedger::UndeliveredInboxNote(task));
     ledger_.FinalizeFromToolResult(
         task, result.content,
         task->cancel.load(std::memory_order_acquire) ||
@@ -854,11 +854,11 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
             result = {"子代理执行失败: 未知错误", true};
         }
         if (room.has_value()) {
-            result.content += FinishIsolationRoom(*room, git_runner_);
+            result.AppendText(FinishIsolationRoom(*room, git_runner_));
         }
         // 收尾前点一遍没送达的介入消息:任务都要结束了,排着的信没有下一个
         // 轮次边界可等——逐条列原文记进结果文本,不无声遗失。
-        result.content += TaskLedger::UndeliveredInboxNote(task);
+        result.AppendText(TaskLedger::UndeliveredInboxNote(task));
         ledger_.FinalizeFromToolResult(task, result.content,
                                        task->cancel.load(std::memory_order_acquire));
     })});
@@ -1058,6 +1058,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     std::string last_denial_hook_reason;
     bool last_denial_by_deny_prefix = false;
     agent::TurnWiring turn_wiring;
+    // MCP 富结果单:工具二进制 artifact 目录随派工下发,子代理的 MCP
+    // 富二进制结果与主回合落同一份会话 artifact 目录。
+    if (foreground_hooks != nullptr) {
+        turn_wiring.tool_artifact_dir = foreground_hooks->tool_artifact_dir;
+    }
     // 逐枚追踪单:子代理内层工具的 canonical 事件转发(只读 sink 并轨)。
     if (foreground_hooks != nullptr && foreground_hooks->on_tool_trace) {
         auto parent_getter = foreground_hooks->parent_execution_id_getter;
