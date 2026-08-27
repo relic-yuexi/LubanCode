@@ -187,8 +187,18 @@ std::vector<std::pair<std::string, std::string>> ApiFixture::SseFrames() const {
 std::string Sha256File(const std::filesystem::path& path) {
     const auto bytes = ReadFileBytes(path);
     if (!bytes.has_value()) return {};
+    // 换行规范化后再算:手册 hash 对账认"内容变了",不认"autocrlf 把工作区
+    // 落成 CRLF"(同一 blob 在 LF/CRLF 两种 checkout 下都能对上,CI 与本地同绿)。
+    std::string normalized;
+    normalized.reserve(bytes->size());
+    for (std::size_t i = 0; i < bytes->size(); ++i) {
+        if ((*bytes)[i] == '\r' && i + 1 < bytes->size() && (*bytes)[i + 1] == '\n') {
+            continue;  // CRLF -> LF
+        }
+        normalized.push_back((*bytes)[i]);
+    }
     Sha256 digest;
-    digest.Update(reinterpret_cast<const unsigned char*>(bytes->data()), bytes->size());
+    digest.Update(reinterpret_cast<const unsigned char*>(normalized.data()), normalized.size());
     return digest.HexDigest();
 }
 
