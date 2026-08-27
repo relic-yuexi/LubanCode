@@ -1,0 +1,47 @@
+<!doctype html>
+<!-- Browser Agent 练习页:零依赖单文件,python -m http.server 8901 起来即用。
+     练的点:快照找 ref、点击计数(复验状态变化)、表单填写与提交(导航后
+     stale_ref 的正确反应)、同名按钮的唯一定位。 -->
+<html lang="zh">
+<meta charset="utf-8">
+<title>练习页 · 计数与表单</title>
+<style>
+  body { font-family: system-ui, sans-serif; max-width: 32em; margin: 2em auto; }
+  button { font-size: 1.1em; margin: 0.2em; padding: 0.4em 1em; }
+  #count { font-size: 2em; color: #0369a1; }
+  .done { color: #16a34a; font-weight: bold; }
+</style>
+
+<h2>第一课 · 点击与复验</h2>
+<p>计数器:<span id="count">0</span></p>
+<button onclick="bump(1)">点我 +1</button>
+<button onclick="bump(1)">点我 +1</button>  <!-- 同名按钮:练唯一定位 -->
+<button onclick="bump(5)">点我 +5</button>
+<button onclick="reset()">归零</button>
+
+<h2>第二课 · 表单与提交</h2>
+<form id="f" onsubmit="return submitForm(event)">
+  <p>名字 <input name="name" placeholder="填个名字"></p>
+  <p>颜色
+    <select name="color">
+      <option value="red">红</option>
+      <option value="green">绿</option>
+      <option value="blue">蓝</option>
+    </select></p>
+  <button type="submit">提交</button>
+</form>
+<p id="receipt"></p>
+
+<script>
+  let n = 0;
+  function bump(d) { n += d; document.getElementById('count').textContent = n; }
+  function reset() { n = 0; document.getElementById('count').textContent = n; }
+  function submitForm(ev) {
+    ev.preventDefault();  // 不导航:提交后页面还在,ref 不作废——与真表单对照着练
+    const f = new FormData(ev.target);
+    document.getElementById('receipt').innerHTML =
+      '<span class="done">已收到:</span>' + f.get('name') + ' 选了 ' + f.get('color');
+    ev.target.reset();
+    return false;
+  }
+</script>
