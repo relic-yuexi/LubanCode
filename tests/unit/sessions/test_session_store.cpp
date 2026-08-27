@@ -125,6 +125,48 @@ TEST_CASE("消息序列化往返: user 带 tool_result(含 is_error)") {
     CHECK(got->is_error);
 }
 
+TEST_CASE("消息序列化往返: 富 tool_result 的 blocks/structuredContent 照读,配对不丢(MCP 富结果单)") {
+    api::Message original;
+    original.role = api::Role::User;
+    api::ToolResultBlock result;
+    result.tool_use_id = "toolu_rich";
+    result.is_error = false;
+    tools::ImageContent image;
+    image.mime_type = "image/png";
+    image.width = 1;
+    image.height = 1;
+    image.bytes = 67;
+    image.sha256 = "00" ;
+    image.artifact.id = "art-00112233";
+    image.artifact.filename = "art-00112233.png";
+    image.artifact.path = "mcp-artifacts/art-00112233.png";
+    image.artifact.mime_type = "image/png";
+    image.artifact.bytes = 67;
+    image.artifact.sha256 = "00";
+    image.artifact.stored = true;
+    result.content = "截图\n[图片 art-00112233.png image/png 1x1 67字节 artifact=mcp-artifacts/art-00112233.png]";
+    result.blocks.push_back(tools::TextContent{"截图"});
+    result.blocks.push_back(std::move(image));
+    result.structured_content = nlohmann::json{{"answer", 42}};
+    original.content.push_back(result);
+
+    const auto parsed = sessions::DeserializeSessionMessage(sessions::SerializeSessionMessage(original, "ts"));
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->content.size() == 1);
+    const auto* got = std::get_if<api::ToolResultBlock>(&parsed->content[0]);
+    REQUIRE(got != nullptr);
+    CHECK(got->tool_use_id == "toolu_rich");
+    REQUIRE(got->blocks.size() == 2);  // 块序即真序:text -> image
+    CHECK(std::holds_alternative<tools::TextContent>(got->blocks[0]));
+    const auto* image_back = std::get_if<tools::ImageContent>(&got->blocks[1]);
+    REQUIRE(image_back != nullptr);
+    CHECK(image_back->artifact.path == "mcp-artifacts/art-00112233.png");
+    CHECK(image_back->width == 1);
+    REQUIRE(got->structured_content.has_value());
+    CHECK((*got->structured_content)["answer"] == 42);
+    CHECK(got->content == result.content);  // 投影不变
+}
+
 TEST_CASE("消息序列化往返: assistant 带 thinking(signature 也要往返)") {
     api::Message original;
     original.role = api::Role::Assistant;

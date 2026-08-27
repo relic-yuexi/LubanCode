@@ -40,6 +40,36 @@ TEST_CASE("Chat request: system、图片、工具调用和工具结果翻成兼�
     CHECK(body["tools"][0]["function"]["parameters"]["type"] == "object");
 }
 
+TEST_CASE("Chat request: 富工具结果降级——tool 消息吃投影文本,不带 base64(MCP 富结果单 P0.6)") {
+    api::Request request;
+    request.model = "glm-5.2";
+    api::Message result;
+    result.role = api::Role::User;
+    api::ToolResultBlock rich;
+    rich.tool_use_id = "call_shot";
+    rich.content = "[图片 art-00112233.png image/png 640x480 2048字节 artifact=mcp-artifacts/art-00112233.png]";
+    lubancode::tools::ImageContent image;
+    image.mime_type = "image/png";
+    image.width = 640;
+    image.height = 480;
+    image.bytes = 2048;
+    image.artifact.filename = "art-00112233.png";
+    image.artifact.path = "mcp-artifacts/art-00112233.png";
+    image.artifact.stored = true;
+    rich.blocks.push_back(std::move(image));
+    rich.structured_content = nlohmann::json{{"sha256", "ab"}};
+    result.content.push_back(rich);
+    request.messages.push_back(result);
+
+    const auto body = api::chat::BuildRequestJson(request, nlohmann::json::object());
+    REQUIRE(body["messages"].size() == 1);
+    const auto& tool_message = body["messages"][0];
+    CHECK(tool_message["role"] == "tool");
+    // Chat wire 不先假定图片支持:文本投影(artifact 短句)即全部内容。
+    CHECK(tool_message["content"] == rich.content);
+    CHECK(tool_message.dump().find("base64") == std::string::npos);
+}
+
 TEST_CASE("Chat request: extra_body 最后覆盖内置字段") {
     api::Request request;
     request.model = "m";

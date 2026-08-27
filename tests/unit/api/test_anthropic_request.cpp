@@ -20,6 +20,37 @@ namespace platform = lubancode::platform;
 namespace api = lubancode::api;
 using lubancode::api::anthropic::BuildRequestJson;
 
+TEST_CASE("富工具结果降级: tool_result 的 content 走投影文本,base64 不出门(MCP 富结果单 P0.6)") {
+    api::Request request;
+    request.model = "m";
+    request.max_tokens = 100;
+    api::Message user_msg;
+    user_msg.role = api::Role::User;
+    api::ToolResultBlock rich;
+    rich.tool_use_id = "toolu_shot";
+    rich.content = "[图片 art-00112233.png image/png 640x480 2048字节 artifact=mcp-artifacts/art-00112233.png]";
+    lubancode::tools::ImageContent image;
+    image.mime_type = "image/png";
+    image.width = 640;
+    image.height = 480;
+    image.bytes = 2048;
+    image.artifact.filename = "art-00112233.png";
+    image.artifact.path = "mcp-artifacts/art-00112233.png";
+    image.artifact.stored = true;
+    rich.blocks.push_back(std::move(image));
+    rich.structured_content = nlohmann::json{{"sha256", "ab"}};
+    user_msg.content.push_back(rich);
+    request.messages.push_back(user_msg);
+
+    const auto body = lubancode::api::anthropic::BuildRequestJson(request);
+    const auto& wire_result = body.at("messages")[0].at("content")[0];
+    CHECK(wire_result.at("type") == "tool_result");
+    CHECK(wire_result.at("tool_use_id") == "toolu_shot");
+    // 文本降级:投影短句就是 wire 上的全部,不假定原生 image 块、不带 base64。
+    CHECK(wire_result.at("content") == rich.content);
+    CHECK(wire_result.dump().find("base64") == std::string::npos);
+}
+
 TEST_CASE("原始 think 兼容门只认 thinking+tool_use 紧接 tool_result") {
     api::Request request;
     request.messages = {
