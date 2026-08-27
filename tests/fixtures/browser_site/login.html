@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head><meta charset="utf-8" /><title>验收站 - 登录</title></head>
+<body>
+  <h1>登录页(本地 Cookie 模拟)</h1>
+  <p id="cookie-state">读取 Cookie 中……</p>
+  <label>用户名 <input type="text" id="user" /></label>
+  <label>密码 <input type="password" id="pass" /></label>
+  <button id="btn-login" type="button">登录(写本地 Cookie)</button>
+  <script>
+    // 本地 Cookie 模拟会话:不走真账号,persistent profile 跨会话可读回。
+    const read = () => document.cookie.split(/;\s*/).find((c) => c.startsWith('site_session='));
+    const state = document.getElementById('cookie-state');
+    if (read()) {
+      state.textContent = '已有会话 Cookie: ' + decodeURIComponent(read().split('=')[1]);
+    } else {
+      state.textContent = '没有会话 Cookie(首次到访或 ephemeral 档)。';
+    }
+    document.getElementById('btn-login').addEventListener('click', () => {
+      document.cookie = 'site_session=' + encodeURIComponent('local-' + Date.now()) + '; path=/; max-age=3600';
+      state.textContent = '已写入会话 Cookie,刷新或下场会话(同 profile)可读回。';
+    });
+  </script>
+</body>
+</html>

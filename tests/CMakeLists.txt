@@ -161,6 +161,20 @@ target_compile_features(model_probe_e2e PRIVATE cxx_std_23)
 # 不算 PASS,退出码 0。真机跑法仍是手动 opt-in(带钥匙指环境变量)。
 add_dependencies(lubancode_tests model_probe_e2e)
 add_test(NAME manual.model_probe_stub COMMAND model_probe_e2e)
+
+# Browser MCP 自家测试(MCP 富结果单 P1.8):真 node 子进程起 server.js +
+# 真 Playwright,本地验收站(127.0.0.1 动态端口)跑核心 E2E/profile/崩溃
+# 矩阵。机器上没有 node 就不注册;有 node 没装 playwright/浏览器时 runner
+# 逐项打 SKIP 并退 0——真机项如实标 SKIP,不冒充通过。与 C++ 册分开记,
+# 报告不混成一句"全过"。
+find_program(LUBANCODE_NODE_EXECUTABLE node)
+if(LUBANCODE_NODE_EXECUTABLE)
+  add_test(NAME browser.mcp.selftest
+    COMMAND "${LUBANCODE_NODE_EXECUTABLE}" "browser/test/run-tests.js"
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
+  set_tests_properties(browser.mcp.selftest PROPERTIES
+    LABELS "browser;mcp" TIMEOUT 900)
+endif()
 set_tests_properties(manual.model_probe_stub PROPERTIES
   ENVIRONMENT "MODEL_PROBE_STUB=1;MODEL_PROBE_MANIFEST=${CMAKE_CURRENT_SOURCE_DIR}/manual/model_probe_manifest.json;MODEL_PROBE_REPORT_DIR=${CMAKE_BINARY_DIR}/test-evidence/model-probe-stub"
   LABELS "manual;api;manual.api"
