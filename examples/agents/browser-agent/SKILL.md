@@ -24,6 +24,9 @@ description: 用 browser MCP(常驻 Playwright)操作浏览器:快照→找 ref�
 - `browser_click` / `browser_type` 都吃 snapshot 发的 ref,不吃坐标。
   快照里找不到目标元素,先想页面是不是没加载完(`browser_wait`),
   再想要不要滚动后重新快照——不许凭记忆猜 ref。
+- 下拉框(`<select>`)用 `browser_select`(ref + value 或 label),
+  快照里下拉行自带"选项: value=文本"清单,照单挑。别拿
+  `browser_type` 往下拉里发箭头键——那是往框里打字,选不动下拉。
 - 导航发生后(点链接、提交表单、跳转),**旧 ref 全部作废**,
   工具会报 `stale_ref`——这不是故障,是保护。重新 snapshot 拿新 ref。
 - 同名元素多枚 ref 时工具会拒(目标不唯一):换更精确的描述重新定位,

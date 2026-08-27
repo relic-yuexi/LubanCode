@@ -429,7 +429,10 @@ const SNAPSHOT_SCRIPT = `(() => {
   const nameOf = (el) => {
     const viaLabel = el.labels && el.labels[0] ? String(el.labels[0].textContent || '').trim() : '';
     const text = String(el.textContent || '').trim().replace(/\\s+/g, ' ');
-    return String(el.getAttribute('aria-label') || el.getAttribute('title') || el.getAttribute('placeholder') ||
+    // 表单控件(<select> 的 textContent 是一堆 option 文本,不是名)优先取
+    // <label> 关联名;aria-label 仍居首(ARIA 命名计算如此)。
+    const control = el instanceof HTMLInputElement || el instanceof HTMLSelectElement || el instanceof HTMLTextAreaElement;
+    return String(el.getAttribute('aria-label') || (control && viaLabel) || el.getAttribute('title') || el.getAttribute('placeholder') ||
       text || viaLabel || el.value || '').slice(0, 80);
   };
   const selector = 'a[href], button, input, select, textarea, [role], h1, h2, h3, h4, [data-row]';
@@ -450,6 +453,15 @@ const SNAPSHOT_SCRIPT = `(() => {
       } else if (el.value) {
         line += ' =' + JSON.stringify(String(el.value).slice(0, 40));
       }
+    }
+    if (el instanceof HTMLSelectElement) {
+      // 下拉带选项清单(value=文本):模型选值得有菜单可看,不然只能瞎猜
+      // 再拿键盘箭头凑——那是 browser_type 干不了的活,browser_select 才管。
+      const entries = Array.prototype.map.call(el.options, (o) => (o.value === '' ? '' : o.value + '=') + String(o.label || o.text || '').trim());
+      let menu = entries.slice(0, 12).join(' | ');
+      if (entries.length > 12) menu += ' | …(共 ' + entries.length + ' 项)';
+      if (menu.length > 240) menu = menu.slice(0, 240) + '…';
+      line += ' 选项: ' + menu;
     }
     lines.push(line + ' [ref=' + ref + ']');
   }
@@ -694,6 +706,87 @@ const TOOLS = [
       const shown = isPassword ? '(密码框,值不回显)' : JSON.stringify(String(input.text ?? ''));
       return textResult('已输入 ' + shown + (input.press_enter ? ' 并按回车' : '') + '\nURL: ' + target.entry.page.url(),
         pageMeta(target.id, target.entry.page, target.entry, { typed: isPassword ? '[password]' : String(input.text ?? ''), password: isPassword }));
+    },
+  },
+  {
+    name: 'browser_select',
+    description: '选 <select> 下拉框的一项:按 option 的 value 或可见文本(label)匹配。下拉别用 browser_type 发箭头键——那是往框里打字,选不动下拉。多选框(multiple)传数组一次选多项。',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        page_id: { type: 'string' },
+        ref: { type: 'string', description: 'browser_snapshot 里的 eN ref(须指向 <select>)' },
+        snapshot_id: { type: 'string', description: 'ref 来自哪次快照(建议带上,导航后防 stale)' },
+        value: { type: ['string', 'array'], items: { type: 'string' }, description: '按 option 的 value 属性匹配;数组=多选框一次选多项' },
+        label: { type: ['string', 'array'], items: { type: 'string' }, description: '按 option 可见文本匹配(空白折叠后整串相等)。与 value 至少给一样;都给时按 value 优先' },
+        timeout_ms: { type: 'number' },
+      },
+      required: ['ref'],
+    },
+    handler: async (input) => {
+      await session.ensureLaunched();
+      const target = input.page_id ? { id: input.page_id, entry: session.resolvePage(input.page_id) } : await session.activePage();
+      const timeoutMs = callTimeout(input);
+      const locator = await session.refLocator(target.id, target.entry, String(input.ref || ''), input.snapshot_id);
+      const count = await withDeadline(locator.count(), timeoutMs, '数目标');
+      if (count !== 1) {
+        throw toolError(count === 0 ? 'browser.target_not_found' : 'browser.target_not_unique', 'ref ' + input.ref + ' 解析到 ' + count + ' 个目标(要恰一个)。');
+      }
+      const asList = (v) => {
+        if (Array.isArray(v)) return v.map(String);
+        if (v === undefined || v === null || v === '') return [];
+        return [String(v)];
+      };
+      const wantedValues = asList(input.value);
+      const wantedLabels = asList(input.label);
+      if (wantedValues.length === 0 && wantedLabels.length === 0) {
+        throw toolError('browser.schema', '给 value(option 的 value 属性)或 label(option 可见文本)至少一样;快照里下拉行带"选项: value=文本"清单。');
+      }
+      // 先验明是 <select> 并读全部选项:按不到值时把候选整个回给模型,
+      // 不让它在超时里猜。
+      const info = await withDeadline(
+        locator.evaluate((el) => {
+          if (!(el instanceof HTMLSelectElement)) return null;
+          return {
+            multiple: el.multiple,
+            options: Array.from(el.options).map((o) => ({ value: o.value, label: String(o.label || o.text || '').trim() })),
+          };
+        }),
+        timeoutMs, '读下拉选项',
+      );
+      if (!info) {
+        throw toolError('browser.bad_target', 'ref ' + input.ref + ' 不是 <select> 下拉框(browser_select 只管下拉;文本框用 browser_type)。');
+      }
+      if (!info.multiple && wantedValues.length + wantedLabels.length > 1) {
+        throw toolError('browser.schema', '这是单选下拉,只收一个 value 或 label;要一次选多项,目标须是 <select multiple>。');
+      }
+      const collapse = (s) => String(s).trim().replace(/\s+/g, ' ');
+      const picked = [];
+      const missing = [];
+      for (const key of wantedValues) {
+        const hit = info.options.find((o) => o.value === key);
+        if (hit) picked.push(hit); else missing.push('value=' + JSON.stringify(key));
+      }
+      for (const key of wantedLabels) {
+        const hit = info.options.find((o) => collapse(o.label) === collapse(key));
+        if (hit) picked.push(hit); else missing.push('label=' + JSON.stringify(key));
+      }
+      if (missing.length > 0) {
+        const menu = info.options.map((o) => JSON.stringify(o.value) + '(文本 ' + JSON.stringify(o.label) + ')').join(', ');
+        throw toolError('browser.option_not_found', '下拉里按不到:' + missing.join(', ') + '。可选项共 ' + info.options.length + ' 个:' + menu + '。');
+      }
+      await withDeadline(
+        locator.selectOption(picked.map((o) => ({ value: o.value })), { timeout: timeoutMs }),
+        timeoutMs, '选 ' + input.ref,
+      );
+      // 选完读回实际选中项:回执以页面为准,不以请求为准。
+      const chosen = await withDeadline(
+        locator.evaluate((el) => Array.from(el.selectedOptions).map((o) => ({ value: o.value, label: String(o.label || o.text || '').trim() }))),
+        timeoutMs, '读回选中项',
+      ).catch(() => picked.map((o) => ({ value: o.value, label: o.label })));
+      const shown = chosen.map((o) => o.value + (o.label && o.label !== o.value ? '(' + o.label + ')' : '')).join(', ');
+      return textResult('已选择 ' + input.ref + ': ' + shown + '\nURL: ' + target.entry.page.url(),
+        pageMeta(target.id, target.entry.page, target.entry, { selected_ref: input.ref, selected: chosen, multiple: info.multiple }));
     },
   },
   {
