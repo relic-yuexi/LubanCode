@@ -147,6 +147,32 @@ bool WaitForTextGone(const std::string& needle, int timeout_ms) {
     return false;
 }
 
+// 可视区口径找行(鬼影不计):footer 随流式正文滚动后,滚出窗口的旧帧行
+// 会在回滚缓冲里留影,整缓冲扫会把这种用户看不见的瞬影当残帧。
+int FindLastRowInViewport(const std::string& needle) {
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (!GetConsoleScreenBufferInfo(g_conout, &info)) {
+        return -1;
+    }
+    for (int row = info.srWindow.Bottom; row >= info.srWindow.Top; --row) {
+        if (ReadRow(row).find(needle) != std::string::npos) {
+            return row;
+        }
+    }
+    return -1;
+}
+
+bool WaitForTextGoneInViewport(const std::string& needle, int timeout_ms) {
+    const DWORD deadline = GetTickCount() + static_cast<DWORD>(timeout_ms);
+    while (GetTickCount() < deadline) {
+        if (FindLastRowInViewport(needle) == -1) {
+            return true;
+        }
+        Sleep(100);
+    }
+    return false;
+}
+
 void SendKey(WORD vk, wchar_t ch, DWORD control_state) {
     INPUT_RECORD records[2]{};
     for (int i = 0; i < 2; ++i) {
@@ -269,8 +295,11 @@ int CountHintRowsBelow(int input_row) {
 // composer 的状态行没有它)。轮末/出错后键就归空闲 composer,再按回车会把
 // 草稿真发给模型——落队前的硬前提。
 bool StreamFooterAlive() {
+    // 流式 footer 活着 = 输入行在 + turn 级活动条("• 思考中 (Ns)",整轮不
+    // 熄)还在。旧锚"状态行带'打断'"已失效:Esc 打断提示如今只写在队列
+    // 标题里,空队列时全屏没有"打断"字样。
     const int row = FindFooterInputRow();
-    return row >= 0 && ReadRow(row + 2).find("打断") != std::string::npos;
+    return row >= 0 && FindLastRow("\xE6\x80\x9D\xE8\x80\x83\xE4\xB8\xAD") >= 0;  // "思考中"
 }
 
 // 等输入行(以 '>' 起)呈现出指定内容。ReadRow 会掐掉行尾空格,所以
@@ -392,7 +421,10 @@ int wmain(int argc, wchar_t** argv) {
         Check(WaitForText("同 /think", 10000), "T4 键入 /eff:候选提示出现('/effort 同 /think')");
         SendKey(VK_TAB, L'\t', 0);
         Check(WaitForInputRowText("/effort", 8000), "T4 Tab:输入行当场变成 /effort(不闪、不铺新行)");
-        Check(WaitForTextGone("同 /think", 6000), "T4 补成唯一命令带空格后:候选提示收起,不留小尾巴");
+        // 收起断言走可视区口径:旧帧的候选行滚出窗口后会在回滚缓冲留影,
+        // 整缓冲扫会误报"没收起"。
+        Check(WaitForTextGoneInViewport("同 /think", 6000),
+              "T4 补成唯一命令带空格后:候选提示收起,不留小尾巴(可视区)");
     }
 
     // ---- T5 补全后继续输入参数 ----
@@ -431,14 +463,18 @@ int wmain(int argc, wchar_t** argv) {
         while (GetTickCount() < deadline) {
             const int row = FindFooterInputRow();
             const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
+            // 取回态形状(queue_model.cpp):rule-1 是消息行 "  ↳ [编辑中]
+            // /effort xhigh"(标记挂消息行),rule-2 是标题行 "正在编辑排队
+            // 消息 · …"。两行任一见编辑态即算取回。
             if (rule >= 2 && ReadRow(row).find("/effort xhigh") != std::string::npos &&
-                ReadRow(rule - 2).find("编辑中") != std::string::npos) {
+                (ReadRow(rule - 1).find("编辑中") != std::string::npos ||
+                 ReadRow(rule - 2).find("正在编辑") != std::string::npos)) {
                 recalled = true;
                 break;
             }
             Sleep(100);
         }
-        Check(recalled, "T7 Shift+← 取回:正文进输入行,队列条目标'编辑中'");
+        Check(recalled, "T7 Shift+← 取回:正文进输入行,队列条目挂'[编辑中]'标记");
         for (int i = 0; i < 4; ++i) {
             SendKey(VK_BACK, L'\b', 0);  // 删掉 "xhigh"
             Sleep(30);
@@ -452,7 +488,8 @@ int wmain(int argc, wchar_t** argv) {
             const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
             if (rule >= 2 && ReadRow(rule - 1).find("/effort") != std::string::npos &&
                 ReadRow(rule - 1).find("xhigh") == std::string::npos &&
-                ReadRow(rule - 2).find("编辑中") == std::string::npos &&
+                ReadRow(rule - 1).find("编辑中") == std::string::npos &&
+                ReadRow(rule - 2).find("正在编辑") == std::string::npos &&
                 ReadRow(row).find("/effort") == std::string::npos) {
                 replaced = true;
                 break;
@@ -542,8 +579,21 @@ int wmain(int argc, wchar_t** argv) {
             Check(WaitForFooterInputRow(30000, &idle_row), "T9 轮末:输入框回到可用状态");
             const int idle_rule = idle_row >= 0 ? FindRuleAboveInput(idle_row) : -1;
             if (idle_rule >= 2) {
-                const std::string queue_area = ReadRow(idle_rule - 1) + " " + ReadRow(idle_rule - 2);
-                Check(queue_area.find("/effort") == std::string::npos, "T9 队列已清空,/effort 不残留");
+                // 泵完队列该整个退场:队列条目的签名行首 "  ↳ " 在可视区一行
+                // 都不许剩。泵自己的回显("> /effort")与推理强度输出是合法
+                // 正文,不拿 "/effort" 字样当残留判据。
+                int queue_item_rows = 0;
+                CONSOLE_SCREEN_BUFFER_INFO info{};
+                if (GetConsoleScreenBufferInfo(g_conout, &info)) {
+                    for (int r = info.srWindow.Top; r <= info.srWindow.Bottom; ++r) {
+                        if (ReadRow(r).rfind("  \xE2\x86\xB3 ", 0) == 0) {  // "  ↳ "
+                            ++queue_item_rows;
+                        }
+                    }
+                }
+                Check(queue_item_rows == 0,
+                      "T9 队列已清空,可视区无 '  ↳ ' 队列条目行(实际 " +
+                          std::to_string(queue_item_rows) + " 行)");
             }
         }
     }

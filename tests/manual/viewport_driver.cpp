@@ -49,6 +49,10 @@ int g_failures = 0;
 // 幕间重置假服务的剧本状态:同一服务跑七幕,每幕的子进程都当"第一场"派
 // 甲派乙(不重置的话第二幕起主回合直接收长正文,坞行永远等不来)。
 std::function<void()> g_reset_server_state;
+// 本幕假服务真接过几笔回流请求(幕间随 g_reset_server_state 归零)。改字
+// 号会让 conhost 重排缓冲,屏面字符可能被搅得数不准;回流账以服务端为
+// 准——路由进了 reflow 分支几回,就是几只代理的结果真交回过 main。
+std::atomic<int> g_reflow_served{0};
 
 void Log(const std::string& line) {
     g_report << line << "\n";
@@ -351,11 +355,19 @@ void RespondSse(SOCKET_T s, const std::vector<std::string>& events) {
     SendAll(s, head + body);
 }
 
-// 慢流应答:先发响应头(不带 Content-Length,连接关闭即定界),再按
-// gap_ms 逐事件吐——给"流式期间采样活度账"留窗口(幕六:思考流查看态)。
+// 慢流应答:响应头带 Content-Length(与 RespondSse 同一定长成法——无定长
+// 流在客户端连接池上会被误判早断,正文整段静默丢),再按 gap_ms 逐事件吐
+// ——给"流式期间采样活度账"留窗口(幕六:思考流查看态)。
 void RespondSseSlow(SOCKET_T s, const std::vector<std::string>& events, int gap_ms) {
+    std::size_t body_bytes = 0;
+    for (const auto& event : events) {
+        body_bytes += Sse(event).size();
+    }
     const std::string head = "HTTP/1.1 200 OK\r\n"
                              "Content-Type: text/event-stream\r\n"
+                             "Content-Length: " +
+                             std::to_string(body_bytes) +
+                             "\r\n"
                              "Connection: close\r\n"
                              "\r\n";
     SendAll(s, head);
@@ -366,10 +378,36 @@ void RespondSseSlow(SOCKET_T s, const std::vector<std::string>& events, int gap_
 }
 
 std::vector<std::string> TextTurn(const std::string& text) {
+    // 正文是 JSON 字符串字面量:换行/引号/反斜杠必须转义。长正文(LongBody)
+    // 带裸换行进 JSON 会让整帧解析失败,客户端静默跳过——正文一个字都不
+    // 上屏,回合秒收,好像"模型没说话"。
+    std::string escaped;
+    for (char c : text) {
+        switch (c) {
+            case '\\':
+                escaped += "\\\\";
+                break;
+            case '"':
+                escaped += "\\\"";
+                break;
+            case '\n':
+                escaped += "\\n";
+                break;
+            case '\r':
+                escaped += "\\r";
+                break;
+            case '\t':
+                escaped += "\\t";
+                break;
+            default:
+                escaped += c;
+                break;
+        }
+    }
     return {
         "{\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"model\":\"fake-model\"}}",
         "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
-        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"" + text +
+        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"" + escaped +
             "\"}}",
         "{\"type\":\"content_block_stop\",\"index\":0}",
         "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":120,"
@@ -508,6 +546,7 @@ int StartFakeAnthropicServer() {
         state->a_reads = 0;
         state->b_reads = 0;
         state->reflow_tool_done = false;
+        g_reflow_served.store(0);
     };
     const auto serve_connection = [state](SOCKET_T client_fd) {
         const std::string raw = DrainHttpRequest(client_fd);
@@ -522,15 +561,12 @@ int StartFakeAnthropicServer() {
                                            "\xe5\xb9\xb6\xe5\xae\x8c\xe6\x88\x90"
                                            "\xe5\xa4\x9a\xe6\xad\xa5\xe4\xbb\xbb"
                                            "\xe5\x8a\xa1");  // 能搜索、分析并完成多步任务
-        // 最新一条 user 消息(回流轮分账只认它,历史旧标记不劫持)。
-        const auto newest_has = [&body](const char* needle) {
-            const std::size_t last_user = body.rfind("\"role\":\"user\"");
-            return last_user != std::string::npos && body.find(needle, last_user) != std::string::npos;
-        };
         if (!sub_agent_request && has(kWidthPrompt)) {
             // 专用改宽幕:一条 2.5 秒慢流，活动栏稳稳跨过 120 -> 80 -> 120。
+            Log("SERVER: route=width-slow-stream");
             RespondSseSlow(client_fd, TextTurn(kBodyTail), 500);
         } else if (sub_agent_request) {
+            Log("SERVER: route=sub-agent");
             if (g_thinking_scene.load()) {
                 // 幕六:甲 = 慢思考流(20 段 × 400ms),乙不出场。
                 RespondSseSlow(client_fd, ThinkingStreamTurn(), 400);
@@ -551,13 +587,21 @@ int StartFakeAnthropicServer() {
                 RespondSse(client_fd, ToolUseTurn(is_a ? "toolu_a" : "toolu_b", "read_file",
                                                   "{\"path\":\"C:/Windows/win.ini\"}"));
             }
-        } else if (newest_has("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe6\x9c\x89\xe6\x96\xb0\xe7\xbb\x93"
-                              "\xe6\x9e\x9c")) {  // 后台子代理有新结果
+        } else if (has("\xe5\x90\x8e\xe5\x8f\xb0\xe5\xad\x90\xe4\xbb\xa3\xe7\x90\x86\xe7\xbb\x93"
+                       "\xe6\x9e\x9c")) {  // 后台子代理结果
+            Log("SERVER: route=reflow(tool_done=" + std::string(state->reflow_tool_done ? "1" : "0") + ")");
+            g_reflow_served.fetch_add(1);
             if (g_thinking_scene.load()) {
                 // 幕六的回流轮:直收,不再跑工具。
                 RespondSse(client_fd, TextTurn(kReflowDone));
                 return;
             }
+            // 分账锚 = 交互路回流通知的原文起头 "后台子代理结果 #N …"
+            // (one_shot 管道路的措辞是"后台子代理有新结果送达",别混)。
+            // 不能靠 "最后一条 user 消息" 的裸串定位:请求 JSON 的尾部元数
+            // 据段还藏着 "role":"user" 字样,rfind 咬到它之后的搜索就落空;
+            // 通知短语只随真回流轮进会话,全文搜即无劫持(派发回合的历史
+            // 里只有"后台子代理 #N 已启动",不带"结果"二字)。
             std::lock_guard<std::mutex> lock(state->mutex);
             if (state->reflow_tool_done) {
                 RespondSse(client_fd, TextTurn(kReflowDone));
@@ -568,6 +612,8 @@ int StartFakeAnthropicServer() {
             }
         } else {
             // 主回合:没派过派甲(后台)-> 派过甲派乙(后台)-> 都派过长正文收口。
+            Log("SERVER: route=main(a=" + std::string(state->dispatched_a ? "1" : "0") +
+                " b=" + std::string(state->dispatched_b ? "1" : "0") + ")");
             std::lock_guard<std::mutex> lock(state->mutex);
             if (!state->dispatched_a) {
                 state->dispatched_a = true;
@@ -616,11 +662,21 @@ void SetSceneSize(int width, int window_rows, int buffer_rows) {
 }
 
 int CountBusyFooterRows() {
+    // 活动行是 BuildFooterWorkingLine 的 "• 思考中 (Ns)"。旧锚还要求行内
+    // 带 "Esc" 字样——那段打断提示如今只写在队列标题里,空队列的 footer
+    // 全屏无 "Esc",旧锚永远数出 0。行首 "• " + 思考中即活动行签名;只数
+    // 可视窗口——footer 随正文滚动后,滚出窗口的旧帧行会在回滚缓冲里留
+    // 影,整缓冲计数会把鬼影当活栏,误报"没收走"。
     const std::string working = "\xe6\x80\x9d\xe8\x80\x83\xe4\xb8\xad";  // 思考中
+    const std::string dot_prefix = "\xe2\x80\xa2 ";                      // "• "
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (!GetConsoleScreenBufferInfo(g_conout, &info)) {
+        return 0;
+    }
     int count = 0;
-    for (int row = 0; row < BufferHeight(); ++row) {
+    for (int row = info.srWindow.Top; row <= info.srWindow.Bottom; ++row) {
         const std::string text = ReadRow(row);
-        if (text.find(working) != std::string::npos && text.find("Esc") != std::string::npos) {
+        if (text.rfind(dot_prefix, 0) == 0 && text.find(working) != std::string::npos) {
             ++count;
         }
     }
@@ -788,11 +844,15 @@ void RunScenario(const std::string& name, const std::wstring& exe_path, const st
     }
     Check(ChildAlive(guard), name + ": 回流后进程仍活");
     if (hooks.font_hammer_startup || hooks.font_hammer_running || hooks.font_hammer_reflow) {
-        // 改字号幕的完成标准:任务不丢——字号来回切过后,两只代理的完成
-        // 通知与回流正文都在(账没丢;已完成+已交付的坞行按规矩退场,不再
-        // 数坞里的行),main 可回(敲一个回车空行,composer 还应答)。
-        Check(FindLastRow(kTitleA) >= 0 && FindLastRow(kTitleB) >= 0,
-              name + ": 改字号后两只后台代理的账都在(完成通知可寻,任务不丢)");
+        // 改字号幕的完成标准:任务不丢——两只代理的结果各真交回过 main
+        // 一次。改字号会让 conhost 重排缓冲,屏面字符数不准;回流账以假服
+        // 务的路由计数为准(进了 reflow 分支几回 = 几只代理交卷回流)。
+        // 旧锚找早前的标题/通知行,长正文一滚就出缓冲,把"滚屏"误报成
+        // "丢账"。main 可回(敲一个回车空行,composer 还应答)。
+        const int reflow_served = g_reflow_served.load();
+        Check(reflow_served >= 2,
+              name + ": 改字号后两只后台代理的账都在(各回流收口一次,实际 " +
+                  std::to_string(reflow_served) + " 回)");
         SendKey(VK_RETURN, L'\r', 0);
         Sleep(600);
         Check(FindComposerInputRow() > 0, name + ": 改字号后 main 仍可回(composer 应答)");
@@ -841,11 +901,23 @@ void RunWidthResizeScene(const std::wstring& exe_path, const std::wstring& workd
     DumpViewport("width-running");
 
     Check(WaitForText(kBodyTail, 10000), "改宽后当前回合仍能收口");
-    const DWORD idle_deadline = GetTickCount() + 10000;
+    // 窗口给宽(20s):改宽瞬间偶发流式读停摆、回合比 2.5s 的慢流拖长得
+    // 多(app 层嫌疑,另行记账),收栏以"最终确实收走"为准。
+    const DWORD idle_deadline = GetTickCount() + 20000;
     while (GetTickCount() < idle_deadline && CountBusyFooterRows() != 0) {
         Sleep(100);
     }
     Check(CountBusyFooterRows() == 0, "改宽回合活动栏按时收走");
+    // 退出前确保回合真收了口:万一活动栏还亮着(上一条 FAIL 的现场),先
+    // Esc 打断再退——不然 "exit" 落进忙时队列被当正文发给模型,进程永远
+    // 退不了,把下一幕的场地也堵死。
+    if (CountBusyFooterRows() != 0) {
+        SendKey(VK_ESCAPE, 0, 0);
+        const DWORD esc_deadline = GetTickCount() + 8000;
+        while (GetTickCount() < esc_deadline && CountBusyFooterRows() != 0) {
+            Sleep(150);
+        }
+    }
     SendText("exit");
     SendKey(VK_RETURN, L'\r', 0);
     if (WaitForSingleObject(guard.pi.hProcess, 15000) == WAIT_OBJECT_0) {

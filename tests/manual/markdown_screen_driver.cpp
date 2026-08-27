@@ -218,7 +218,12 @@ int wmain(int argc, wchar_t** argv) {
     SendText("请用 markdown 介绍你自己,必须包含:一个二级标题;一个三行表格(表头加两行数据,要有中文);"
              "一段 cpp 代码块;一个无序列表(短横线开头,三项)。不要调用任何工具,直接回答。");
     SendKey(VK_RETURN, L'\r', 0);
-    Check(WaitForText("[tokens]", 300000), "M1 一轮问答:统计行出现(300s 内)");
+    // 统计降噪(0.26.x):真控制台紧凑态不打 [tokens] 长行,详细态(Ctrl+O)
+    // 或管道才打。两轮问答的统计行断言走详细态。
+    SendKey(0x4F, 0, LEFT_CTRL_PRESSED);  // Ctrl+O -> 详细模式
+    Sleep(300);
+    Check(WaitForText("Worked for", 300000), "M1 一轮问答:turn 尾分界线出现(300s 内)");
+    Check(WaitForCount("[tokens]", 1, 30000), "M1 一轮问答:详细态统计行出现(30s 内)");
     Sleep(1500);
 
     const char* kTopLeft = "\xe2\x94\x8c";      // ┌
@@ -258,7 +263,25 @@ int wmain(int argc, wchar_t** argv) {
                 }
             }
         }
-        Check(code_rows >= 1, "M1 代码块:两格缩进 + │ 前缀的行出现");
+        // 代码块形状改版(2026):行首不再挂 "  │ " 前缀——复制要裸文本;
+        // 块首块尾各一根横线,语言标记夹在头两线之间(三线表式)。改验:
+        // 代码行原样、行首零前缀、语言标记在代码行上方。
+        {
+            const int code_row = FindLastRow("int main() { return 0; }");
+            Check(code_row >= 0, "M1 代码块:代码行原样出现在屏上");
+            if (code_row >= 0) {
+                Check(ReadRow(code_row).rfind("int main", 0) == 0,
+                      "M1 代码块:行首无前缀(裸文本,可复制)");
+                bool lang_seen = false;
+                for (int r = code_row - 3; r < code_row; ++r) {
+                    if (r >= 0 && ReadRow(r).find("cpp") != std::string::npos) {
+                        lang_seen = true;
+                    }
+                }
+                Check(lang_seen, "M1 代码块:语言标记 cpp 夹在头两线之间");
+            }
+        }
+        Check(code_rows == 0, "M1 代码块:旧的 '  │' 前缀已撤(裸文本形状落地)");
 
         // 列表圆点。
         Check(CountRows(kBullet) >= 3, "M1 列表:• 圆点至少三行");

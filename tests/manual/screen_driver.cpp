@@ -13,6 +13,7 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -338,7 +339,21 @@ int wmain(int argc, wchar_t** argv) {
         Check(status.find("\xe2\x8f\xb5\xe2\x8f\xb5") != std::string::npos, "F1 状态行有 ⏵⏵ 前缀");
         Check(status.find("确认模式") != std::string::npos, "F1 状态行显示确认档");
         if (!composer_only) {
-            Check(status.find("MiniMax-M3") != std::string::npos, "F1 状态行显示模型名");
+            // 模型名按调用方喂的 LUBANCODE_MODEL 断(早年硬编码 MiniMax-M3,
+            // 换假服务/换 provider 就连坐误报;意图不变:状态行要显示所配模型)。
+            std::string env_model;
+            char* buffer = nullptr;
+            std::size_t size = 0;
+            if (_dupenv_s(&buffer, &size, "LUBANCODE_MODEL") == 0 && buffer != nullptr) {
+                env_model = buffer;
+                std::free(buffer);
+            }
+            if (!env_model.empty()) {
+                Check(status.find(env_model) != std::string::npos,
+                      "F1 状态行显示模型名(LUBANCODE_MODEL=" + env_model + ")");
+            } else {
+                Log("SKIP: F1 状态行模型名(LUBANCODE_MODEL 未设)");
+            }
         }
         Check(status.find("context ") != std::string::npos, "F1 状态行显示 context 占比");
         Check(IsRuleRow(prompt_row - 1), "F1 上横线紧贴提示行");
@@ -485,6 +500,11 @@ int wmain(int argc, wchar_t** argv) {
     // ---- F6 提交帧:横线擦掉、提交行保留;一轮问答后统计行 + 新框 ----
     SendText("请用 read_file 工具读取 hello.txt,然后原样告诉我文件内容。");
     SendKey(VK_RETURN, L'\r', 0);
+    // 统计降噪(0.26.x):真控制台紧凑态不打 [tokens] 长行,详细态
+    // (Ctrl+O)或管道才打。统计行断言走详细态;回合收束的通用锚改用
+    // turn 尾分界线 "Worked for"(紧凑/详细都打,见 finish_turn_chrome)。
+    SendKey(0x4F, 0, LEFT_CTRL_PRESSED);  // Ctrl+O -> 详细模式
+    Sleep(300);
     // 0.21.x:流式期间正文下方常驻 footer 框(上横线/`> ` 输入行/下横线/
     // 状态行)。整段流式里都在,收束才擦——180s 内应能刮到一帧;定位靠
     // 框的结构,不靠占位提示文案。
@@ -507,7 +527,8 @@ int wmain(int argc, wchar_t** argv) {
         Check(submitted_row == prompt_row - 1, "F6 提交:横线擦掉,提交行上移一行保留");
         Check(!IsRuleRow(prompt_row + 1), "F6 提交:下横线已擦");
     }
-    Check(WaitForText("[tokens]", 180000), "F6 一轮问答:统计行出现(180s 内)");
+    Check(WaitForText("Worked for", 180000), "F6 一轮问答:turn 尾分界线出现(180s 内)");
+    Check(WaitForText("[tokens]", 30000), "F6 一轮问答:详细态统计行出现(30s 内)");
     Sleep(1500);
     {
         const int tokens_row = FindLastRow("[tokens]");
@@ -574,14 +595,47 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
         // 放行,等终态摘要 + 留存 diff。
-        SendText("y");
+        // v0.22.x:真控制台确认改方向键菜单(本次允许/总允许/拒绝,默认
+        // 高亮"拒绝"),[y/a/N] 行提示只剩管道模式——直接敲 "y"+Enter 等于
+        // 默认拒绝。放行 = Up Up 回"本次允许"再 Enter。
+        SendKey(VK_UP, 0, 0);
+        SendKey(VK_UP, 0, 0);
         SendKey(VK_RETURN, L'\r', 0);
         Check(WaitForText("新增 1 行,删除 1 行", 60000), "F8 终态:摘要新文案 '新增 1 行,删除 1 行'(60s 内)");
         Sleep(1000);
         {
-            const int del_row = FindLastRow("- gamma");
-            const int add_row = FindLastRow("+ GAMMA");
+            // 详细态(Ctrl+O)下条目还摊开 full_output——edit_file 工具原文里
+            // 自带一份无色 diff,行号不带 3 格补宽,别拿它当"留存 diff"。彩
+            // 色留存行夹在摘要行("新增 1 行,删除 1 行")与"完整输出"块头
+            // 之间,搜索范围掐死在这段里。
+            const int summary_row = FindLastRow("新增 1 行,删除 1 行");
+            int full_out_row = 400;
+            if (summary_row >= 0) {
+                for (int r = summary_row + 1; r < 400; ++r) {
+                    if (ReadRow(r).find("\xE5\xAE\x8C\xE6\x95\xB4\xE8\xBE\x93\xE5\x87\xBA") !=
+                        std::string::npos) {  // "完整输出"
+                        full_out_row = r;
+                        break;
+                    }
+                }
+            }
+            int del_row = -1;
+            int add_row = -1;
+            const int search_from = summary_row >= 0 ? summary_row : 0;
+            for (int r = search_from; r < full_out_row; ++r) {
+                if (ReadRow(r).find("- gamma") != std::string::npos) {
+                    del_row = r;
+                }
+                if (ReadRow(r).find("+ GAMMA") != std::string::npos) {
+                    add_row = r;
+                }
+            }
             Check(del_row >= 0 && add_row >= 0, "F8 终态:条目里留存 diff(删/增行都在)");
+            if (del_row < 0 || add_row < 0) {
+                for (int r = search_from; r < full_out_row && r < 400; ++r) {
+                    Log("DUMP[" + std::to_string(r) + "]: " + ReadRow(r));
+                }
+            }
             if (del_row >= 0) {
                 CheckDiffRowBg(del_row, "- gamma", /*want_red=*/true, /*want_green=*/false,
                                 "F8 终态:留存删除行红底属性");
