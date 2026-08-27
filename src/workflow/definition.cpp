@@ -65,6 +65,7 @@ ordered Normalize(const WorkflowDefinition& def) {
             n["subflow"] = node.subflow_id;
             if (!node.subflow_version.empty()) n["subflow_version"] = node.subflow_version;
         }
+        if (node.kind == NodeKind::Async && !node.async_body.empty()) n["body"] = node.async_body;
         if (!node.branches.empty()) n["branches"] = node.branches;
         if (node.kind == NodeKind::Parallel || node.kind == NodeKind::Join) {
             n["join"] = ToString(node.join);
@@ -72,7 +73,9 @@ ordered Normalize(const WorkflowDefinition& def) {
         }
         if (node.max_concurrency > 0) n["max_concurrency"] = node.max_concurrency;
         if (!node.items_ref.empty()) n["items"] = node.items_ref;
-        if (!node.map_body.empty()) n["body"] = node.map_body;
+        if (!node.map_body.empty() && (node.kind == NodeKind::Map || node.kind == NodeKind::Foreach)) {
+            n["body"] = node.map_body;
+        }
         if (!node.reduce_body.empty()) n["reduce_body"] = node.reduce_body;
         if (!node.initial_ref.empty()) n["initial"] = node.initial_ref;
         if (!node.conditions.empty()) {
@@ -87,6 +90,21 @@ ordered Normalize(const WorkflowDefinition& def) {
             }
             n["conditions"] = std::move(cases);
             if (!node.default_to.empty()) n["default_to"] = node.default_to;
+        }
+        if (node.kind == NodeKind::Loop) {
+            n["body"] = node.loop_body;
+            if (node.loop_until.has_value()) {
+                ordered until = ordered::object();
+                until["op"] = ToString(node.loop_until->op);
+                until["path"] = node.loop_until->path;
+                if (!node.loop_until->literal.is_null() && !node.loop_until->literal.is_object()) {
+                    until["literal"] = node.loop_until->literal;
+                }
+                n["until"] = std::move(until);
+            }
+            n["min_iterations"] = node.loop_min_iterations;
+            n["max_iterations"] = node.loop_max_iterations;
+            n["hard_limit"] = node.loop_hard_limit;
         }
         n["input"] = node.input;
         if (node.retry.has_value()) {
@@ -257,7 +275,36 @@ WorkflowDefinition WorkflowDefinition::FromJson(const nlohmann::json& in) {
             node.join_quorum = GetInt(raw, "quorum", 0);
             node.max_concurrency = GetInt(raw, "max_concurrency", 0);
             node.items_ref = GetStr(raw, "items");
-            node.map_body = GetStr(raw, "body");
+            if (node.kind == NodeKind::Loop) {
+                if (const auto body = raw.find("body"); body != raw.end() && body->is_array()) {
+                    for (const auto& id : *body) {
+                        if (id.is_string()) node.loop_body.push_back(id.get<std::string>());
+                    }
+                }
+                if (const auto until = raw.find("until"); until != raw.end() && until->is_object()) {
+                    WorkflowNode::SwitchCase condition;
+                    const std::string op = GetStr(*until, "op");
+                    if (!op.empty() && !ParseConditionOp(op, condition.op)) {
+                        throw std::runtime_error("unknown loop condition op: " + op);
+                    }
+                    condition.path = GetStr(*until, "path");
+                    if (const auto lit = until->find("literal"); lit != until->end() && !lit->is_object()) {
+                        condition.literal = *lit;
+                    }
+                    node.loop_until = std::move(condition);
+                }
+                if (const auto min = raw.find("min_iterations"); min != raw.end()) {
+                    node.loop_min_iterations = *min;
+                }
+                if (const auto max = raw.find("max_iterations"); max != raw.end()) {
+                    node.loop_max_iterations = *max;
+                }
+                node.loop_hard_limit = GetInt(raw, "hard_limit", 32);
+            } else if (node.kind == NodeKind::Async) {
+                node.async_body = GetStr(raw, "body");
+            } else {
+                node.map_body = GetStr(raw, "body");
+            }
             node.reduce_body = GetStr(raw, "reduce_body");
             node.initial_ref = GetStr(raw, "initial");
             if (const auto cs = raw.find("conditions"); cs != raw.end() && cs->is_array()) {
@@ -337,12 +384,14 @@ std::string ToString(NodeKind kind) {
         case NodeKind::Approval: return "approval";
         case NodeKind::AskUser: return "ask_user";
         case NodeKind::Subflow: return "subflow";
+        case NodeKind::Async: return "async";
         case NodeKind::Parallel: return "parallel";
         case NodeKind::Join: return "join";
         case NodeKind::Map: return "map";
         case NodeKind::Reduce: return "reduce";
         case NodeKind::Switch: return "switch";
         case NodeKind::Foreach: return "foreach";
+        case NodeKind::Loop: return "loop";
         case NodeKind::Checkpoint: return "checkpoint";
         case NodeKind::End: return "end";
     }
@@ -359,12 +408,14 @@ bool ParseNodeKind(const std::string& s, NodeKind& out) {
     if (s == "approval") { out = NodeKind::Approval; return true; }
     if (s == "ask_user") { out = NodeKind::AskUser; return true; }
     if (s == "subflow") { out = NodeKind::Subflow; return true; }
+    if (s == "async") { out = NodeKind::Async; return true; }
     if (s == "parallel") { out = NodeKind::Parallel; return true; }
     if (s == "join") { out = NodeKind::Join; return true; }
     if (s == "map") { out = NodeKind::Map; return true; }
     if (s == "reduce") { out = NodeKind::Reduce; return true; }
     if (s == "switch") { out = NodeKind::Switch; return true; }
     if (s == "foreach") { out = NodeKind::Foreach; return true; }
+    if (s == "loop") { out = NodeKind::Loop; return true; }
     if (s == "checkpoint") { out = NodeKind::Checkpoint; return true; }
     if (s == "end") { out = NodeKind::End; return true; }
     return false;

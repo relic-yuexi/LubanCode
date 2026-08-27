@@ -5,6 +5,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <ostream>
@@ -198,6 +199,105 @@ TEST_CASE("JSON round-trip: ToJson/FromJson 保真") {
     CHECK(restored.nodes.size() == parsed->nodes.size());
     CHECK(restored.edges == parsed->edges);
     CHECK(lubancode::workflow::ContentHash(restored) == lubancode::workflow::ContentHash(*parsed));
+}
+
+TEST_CASE("loop:解析、归一化与有帽校验") {
+    const char* yaml = R"YAML(
+schema_version: 1
+id: review-loop
+version: 1.0.0
+entry: review
+nodes:
+  review:
+    type: loop
+    body: [draft, inspect]
+    until: { op: equals, path: "${nodes.inspect.output.approved}", value: true }
+    min_iterations: 1
+    max_iterations: "${inputs.review_limit}"
+    hard_limit: 12
+  draft:
+    type: transform
+    operation: echo
+    input: { previous: "${nodes.review.output.previous}" }
+  inspect:
+    type: transform
+    operation: echo
+    input: { draft: "${nodes.draft.output}" }
+  fin:
+    type: end
+  exhausted:
+    type: end
+edges:
+  - { from: review, on: success, to: fin }
+  - { from: review, on: exhausted, to: exhausted }
+)YAML";
+    const auto parsed = lubancode::workflow::ParseWorkflowYaml(yaml);
+    REQUIRE(parsed.has_value());
+    const auto& loop = parsed->node_map.at("review");
+    CHECK(loop.kind == lubancode::workflow::NodeKind::Loop);
+    CHECK(loop.loop_body == std::vector<std::string>{"draft", "inspect"});
+    REQUIRE(loop.loop_until.has_value());
+    CHECK(loop.loop_until->op == lubancode::workflow::ConditionOp::Equals);
+    CHECK(loop.loop_max_iterations == "${inputs.review_limit}");
+    CHECK(loop.loop_hard_limit == 12);
+    CHECK(lubancode::workflow::ValidateDefinition(*parsed, std::nullopt).ok());
+
+    const std::string emitted = lubancode::workflow::EmitWorkflowYaml(*parsed);
+    const auto reparsed = lubancode::workflow::ParseWorkflowYaml(emitted);
+    REQUIRE(reparsed.has_value());
+    CHECK(lubancode::workflow::ContentHash(*parsed) == lubancode::workflow::ContentHash(*reparsed));
+    const auto restored = lubancode::workflow::WorkflowDefinition::FromJson(parsed->ToJson());
+    CHECK(restored.node_map.at("review") == loop);
+}
+
+TEST_CASE("loop:无 exhausted 出边、越硬帽与普通回边都拒绝") {
+    const auto has_issue = [](const lubancode::workflow::ValidationResult& result, const std::string& code) {
+        return std::any_of(result.issues.begin(), result.issues.end(), [&](const auto& issue) {
+            return issue.code == code;
+        });
+    };
+    const char* no_exhausted = R"YAML(
+schema_version: 1
+id: bad-loop
+version: 1
+entry: loop
+nodes:
+  loop:
+    type: loop
+    body: [work]
+    until: { op: equals, path: "${nodes.work.output.done}", value: true }
+    max_iterations: 9
+    hard_limit: 3
+  work: { type: transform, operation: echo }
+  fin: { type: end }
+edges:
+  - { from: loop, on: success, to: fin }
+)YAML";
+    const auto parsed = lubancode::workflow::ParseWorkflowYaml(no_exhausted);
+    REQUIRE(parsed.has_value());
+    const auto result = lubancode::workflow::ValidateDefinition(*parsed, std::nullopt);
+    CHECK(has_issue(result, "missing_loop_exhausted_edge"));
+    CHECK(has_issue(result, "loop_limit_exceeds_hard_limit"));
+
+    const auto cycle = lubancode::workflow::ParseWorkflowYaml(
+        "schema_version: 1\nid: cycle\nversion: 1\nentry: x\nnodes:\n"
+        "  x: { type: transform, operation: echo }\n"
+        "  y: { type: transform, operation: echo }\n"
+        "edges:\n  - { from: x, on: success, to: y }\n  - { from: y, on: success, to: x }\n");
+    REQUIRE(cycle.has_value());
+    CHECK(has_issue(lubancode::workflow::ValidateDefinition(*cycle, std::nullopt), "cycle_detected"));
+}
+
+TEST_CASE("示例 workflow:三省六部动态封驳可解析、可校验") {
+    const fs::path example = fs::path(__FILE__).parent_path() / "../../../examples/workflows/sansheng-liubu/workflow.yaml";
+    const auto parsed = lubancode::workflow::LoadWorkflowDefinition(example.lexically_normal());
+    if (!parsed.has_value()) {
+        for (const auto& issue : parsed.error()) MESSAGE(issue.location, ": ", issue.message);
+    }
+    REQUIRE(parsed.has_value());
+    const auto validation = lubancode::workflow::ValidateDefinition(*parsed, std::nullopt);
+    for (const auto& issue : validation.issues) MESSAGE(issue.code, " ", issue.path, ": ", issue.message);
+    CHECK(validation.ok());
 }
 
 TEST_CASE("IsSafePackageRelative 与时长解析") {
@@ -403,6 +503,37 @@ TEST_CASE("图渲染: ASCII 树与 Mermaid 均由图数据生成") {
     CHECK(mermaid.find("search_sources -->|\"joined\"| dedupe") != std::string::npos);
     // 隐含控制流(parallel 的 branches)也要画出来。
     CHECK(mermaid.find("search_sources -->|\"branch\"| arxiv") != std::string::npos);
+}
+
+TEST_CASE("async 定义:YAML/JSON 往返,body 归外壳独占") {
+    using namespace lubancode::workflow;
+    const char* yaml = R"YAML(
+schema_version: 1
+id: async-roundtrip
+version: 1.0.0
+entry: wait
+nodes:
+  wait: { type: async, body: fetch }
+  fetch: { type: tool, tool: check_inbox }
+  fin: { type: end }
+edges:
+  - { from: wait, on: success, to: fin }
+)YAML";
+    auto parsed = ParseWorkflowYaml(yaml);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->node_map.at("wait").kind == NodeKind::Async);
+    CHECK(parsed->node_map.at("wait").async_body == "fetch");
+    const WorkflowDefinition restored = WorkflowDefinition::FromJson(parsed->ToJson());
+    CHECK(restored.node_map.at("wait").async_body == "fetch");
+    CHECK(ValidateDefinition(restored, std::nullopt).ok());
+
+    WorkflowDefinition unsafe = restored;
+    unsafe.edges.push_back({"fetch", "success", "fin"});
+    unsafe.normalized = BuildNormalizedJson(unsafe);
+    const auto validation = ValidateDefinition(unsafe, std::nullopt);
+    CHECK(std::any_of(validation.issues.begin(), validation.issues.end(), [](const auto& issue) {
+        return issue.code == "control_body_edge";
+    }));
 }
 
 TEST_CASE("alias/id 合法性") {

@@ -88,12 +88,14 @@ enum class NodeKind {
     Approval,   // 经 InteractionBroker 悬起审批
     AskUser,    // 经 InteractionBroker 悬起补问
     Subflow,    // 调用另一份有版本的 Workflow
+    Async,      // 另开工作线程跑一只 I/O 节点,主调度守取消与总时限
     Parallel,   // 同时放行若干独立分支(分支形状写定)
     Join,       // 收束分支(all/all_settled/any/quorum/race)
     Map,        // 数组拆项,逐项跑一只节点或子图(运行时按数据扩开)
     Reduce,     // 按稳定次序汇总 map/parallel 结果
     Switch,     // 按结构化条件选路
     Foreach,    // 顺次迭代(有依赖或易撞 rate limit 的活)
+    Loop,       // 有硬帽的条件循环:顺次跑 body,until 命中即停
     Checkpoint, // 显式落断点
     End,        // 写终态与 Workflow 输出
 };
@@ -153,6 +155,9 @@ struct WorkflowNode {
     // subflow 节点:目标 workflow id + 版本要求(空 = 最新)。
     std::string subflow_id;
     std::string subflow_version;
+    // async:另开工作线程执行一只普通节点。它是 I/O 等待边界,不是 fan-out;
+    // 产物按 async 节点 id 再落一份,下游不必越过边界去读 body。
+    std::string async_body;
     // parallel/join:分支 id 表 + 汇合策略 + 分支并发帽。
     std::vector<std::string> branches;
     JoinPolicy join = JoinPolicy::AllSettled;
@@ -175,6 +180,15 @@ struct WorkflowNode {
     };
     std::vector<SwitchCase> conditions;
     std::string default_to;       // 可空 = 都不中时结束(outcome=skipped)
+
+    // loop:body 每轮顺次执行;until 在一轮末尾读取 body 最新输出。
+    // min/max 可写正整数,也可写 ${inputs.xxx};hard_limit 必须是定义里的
+    // 正整数,运行期 max 不得越过它。
+    std::vector<std::string> loop_body;
+    std::optional<SwitchCase> loop_until;
+    nlohmann::json loop_min_iterations = 1;
+    nlohmann::json loop_max_iterations = nullptr;
+    int loop_hard_limit = 32;
 
     // 入参:${...} 引用混字面量,ResolveInputs 阶段展开。object 形状;
     // 也可整体一个 "${...}" 字符串(此时 input 直接取引用值)。

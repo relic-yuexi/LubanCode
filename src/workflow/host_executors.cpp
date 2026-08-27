@@ -220,8 +220,10 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
     api::Message task_input;
     task_input.role = api::Role::User;
     task_input.content.push_back(api::TextBlock{request.resolved_input.dump()});
+    agent::DriveOptions drive_options;
+    drive_options.cancel = request.cancel;
     const agent::DriveReport drive =
-        agent::DriveTurn(task_agent, wiring, std::move(task_input), agent::DriveOptions{});
+        agent::DriveTurn(task_agent, wiring, std::move(task_input), std::move(drive_options));
 
     // 事件流收口:DriveTurn 一返回就按收场分型 Finish(后面的早退分支各
     // 走各的 error_code,终态映射在这定死:报错/预算尽 = Failed,打断 =
@@ -305,7 +307,9 @@ NodeExecResult LlmExecutor::ExecuteWithPrompt(const NodeExecRequest& request, co
     user.content.push_back(api::TextBlock{request.resolved_input.dump()});
     sample.messages.push_back(std::move(user));
 
-    const agent::SampleResult sampled = agent::SampleModel(*options_.backend, sample);
+    agent::SampleOptions sample_options;
+    sample_options.cancel = request.cancel;
+    const agent::SampleResult sampled = agent::SampleModel(*options_.backend, sample, sample_options);
     if (!sampled.ok) {
         result.error_code =
             sampled.error.kind == api::ErrorKind::Cancelled ? "cancelled" : "api_error";

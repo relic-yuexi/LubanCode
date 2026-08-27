@@ -26,10 +26,9 @@ nlohmann::json YamlToJson(const YAML::Node& node) {
             return nlohmann::json();
         case YAML::NodeType::Scalar: {
             const std::string& raw = node.Scalar();
-            const YAML::Node& tag_mark = node;
-            (void)tag_mark;
-            // yaml-cpp 已按 implicit 规则标好 tag:整数/浮点/布尔/null 按
-            // 本来面目还原,其余保持字符串(quoted 的天然是字符串)。
+            // yaml-cpp 在不同版本下会给普通标量 "?" 而非完整 core tag。
+            // "!" 是显式字符串(含带引号标量),必须原样留下;其余先看
+            // 完整 tag,再按完整词法还原 bool/int/float/null。
             if (node.Tag() == "tag:yaml.org,2002:int") {
                 try { return nlohmann::json(std::stoll(raw)); } catch (...) { return raw; }
             }
@@ -41,6 +40,29 @@ nlohmann::json YamlToJson(const YAML::Node& node) {
             }
             if (node.Tag() == "tag:yaml.org,2002:null") {
                 return nlohmann::json();
+            }
+            if (node.Tag() != "!") {
+                if (raw == "true" || raw == "True" || raw == "TRUE" || raw == "yes" || raw == "Yes" ||
+                    raw == "YES" || raw == "on" || raw == "On" || raw == "ON") {
+                    return true;
+                }
+                if (raw == "false" || raw == "False" || raw == "FALSE" || raw == "no" || raw == "No" ||
+                    raw == "NO" || raw == "off" || raw == "Off" || raw == "OFF") {
+                    return false;
+                }
+                if (raw == "null" || raw == "Null" || raw == "NULL" || raw == "~") return nlohmann::json();
+                try {
+                    std::size_t used = 0;
+                    const auto integer = std::stoll(raw, &used);
+                    if (used == raw.size()) return nlohmann::json(integer);
+                } catch (...) {
+                }
+                try {
+                    std::size_t used = 0;
+                    const auto number = std::stod(raw, &used);
+                    if (used == raw.size()) return nlohmann::json(number);
+                } catch (...) {
+                }
             }
             return raw;
         }
@@ -57,6 +79,18 @@ nlohmann::json YamlToJson(const YAML::Node& node) {
         default:
             return nlohmann::json();
     }
+}
+
+nlohmann::json LoopBoundFromYaml(const YAML::Node& node) {
+    if (!node || !node.IsScalar()) return YamlToJson(node);
+    const std::string raw = node.Scalar();
+    try {
+        std::size_t used = 0;
+        const int value = std::stoi(raw, &used);
+        if (used == raw.size()) return value;
+    } catch (...) {
+    }
+    return raw;
 }
 
 std::string Where(const YAML::Node& node, const std::string& field) {
@@ -258,11 +292,18 @@ std::expected<WorkflowDefinition, std::vector<ParseIssue>> ParseWorkflowYaml(con
                 try { node.max_concurrency = std::stoi(n.Scalar()); } catch (...) {}
             }
             node_str("items", node.items_ref);
-            // body 是 map/foreach/reduce 共用的字段名:map/foreach 逐项跑,
-            // reduce 累加;两处都填,消费方按节点种类取。
-            if (const auto& n = raw["body"]; n && n.IsScalar()) {
-                node.map_body = n.Scalar();
-                node.reduce_body = n.Scalar();
+            // loop 的 body 是顺次节点表;async/map/foreach 的 body 是一只节点。
+            if (const auto& n = raw["body"]; n) {
+                if (node.kind == NodeKind::Loop && n.IsSequence()) {
+                    for (const auto& item : n) {
+                        if (item.IsScalar()) node.loop_body.push_back(item.Scalar());
+                    }
+                } else if (node.kind == NodeKind::Async && n.IsScalar()) {
+                    node.async_body = n.Scalar();
+                } else if (n.IsScalar()) {
+                    node.map_body = n.Scalar();
+                    node.reduce_body = n.Scalar();
+                }
             }
             node_str("reduce_body", node.reduce_body);
             node_str("initial", node.initial_ref);
@@ -283,6 +324,25 @@ std::expected<WorkflowDefinition, std::vector<ParseIssue>> ParseWorkflowYaml(con
                 }
             }
             node_str("default_to", node.default_to);
+            if (node.kind == NodeKind::Loop) {
+                if (const auto& until = raw["until"]; until && until.IsMap()) {
+                    WorkflowNode::SwitchCase condition;
+                    std::string op = "exists";
+                    if (const auto& n = until["op"]; n && n.IsScalar()) op = n.Scalar();
+                    if (!ParseConditionOp(op, condition.op)) {
+                        sink.Add(Where(until, "nodes." + id + ".until"),
+                                 "认不得的条件操作: " + op);
+                    }
+                    if (const auto& n = until["path"]; n && n.IsScalar()) condition.path = n.Scalar();
+                    if (const auto& n = until["value"]) condition.literal = YamlToJson(n);
+                    node.loop_until = std::move(condition);
+                }
+                if (const auto& n = raw["min_iterations"]) node.loop_min_iterations = LoopBoundFromYaml(n);
+                if (const auto& n = raw["max_iterations"]) node.loop_max_iterations = LoopBoundFromYaml(n);
+                if (const auto& n = raw["hard_limit"]; n && n.IsScalar()) {
+                    try { node.loop_hard_limit = std::stoi(n.Scalar()); } catch (...) {}
+                }
+            }
             if (const auto& n = raw["input"]) node.input = YamlToJson(n);
             if (const auto& r = raw["retry"]; r && r.IsMap()) {
                 RetryPolicy policy;
@@ -543,7 +603,12 @@ std::string EmitWorkflowYaml(const WorkflowDefinition& def) {
         }
         if (node.max_concurrency > 0) out << "    max_concurrency: " << node.max_concurrency << "\n";
         if (!node.items_ref.empty()) out << "    items: " << node.items_ref << "\n";
-        if (!node.map_body.empty()) out << "    body: " << node.map_body << "\n";
+        if (node.kind == NodeKind::Async && !node.async_body.empty()) {
+            out << "    body: " << node.async_body << "\n";
+        }
+        if (!node.map_body.empty() && (node.kind == NodeKind::Map || node.kind == NodeKind::Foreach)) {
+            out << "    body: " << node.map_body << "\n";
+        }
         if (!node.reduce_body.empty()) out << "    reduce_body: " << node.reduce_body << "\n";
         if (!node.initial_ref.empty()) out << "    initial: " << node.initial_ref << "\n";
         if (!node.conditions.empty()) {
@@ -560,6 +625,25 @@ std::string EmitWorkflowYaml(const WorkflowDefinition& def) {
             }
         }
         if (!node.default_to.empty()) out << "    default_to: " << node.default_to << "\n";
+        if (node.kind == NodeKind::Loop) {
+            out << "    body:\n";
+            for (const auto& body_id : node.loop_body) out << "      - " << body_id << "\n";
+            if (node.loop_until.has_value()) {
+                out << "    until:\n";
+                out << "      op: " << ToString(node.loop_until->op) << "\n";
+                out << "      path: " << node.loop_until->path << "\n";
+                if (!node.loop_until->literal.is_null() && !node.loop_until->literal.is_object()) {
+                    out << "      value: ";
+                    EmitScalar(out, node.loop_until->literal);
+                    out << "\n";
+                }
+            }
+            out << "    min_iterations: ";
+            EmitScalar(out, node.loop_min_iterations);
+            out << "\n    max_iterations: ";
+            EmitScalar(out, node.loop_max_iterations);
+            out << "\n    hard_limit: " << node.loop_hard_limit << "\n";
+        }
         if (!node.input.empty()) {
             out << "    input:";
             EmitJsonAsYaml(out, node.input, 6);

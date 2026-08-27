@@ -292,6 +292,7 @@ inputs:
   required: [topic]
   properties:
     topic: { type: string }
+    review_limit: { type: integer, default: 2 }
 nodes:
   x:
     type: transform
@@ -303,6 +304,7 @@ edges:
   - { from: x, on: success, to: fin }
 result:
   topic: "${inputs.topic}"
+  review_limit: "${inputs.review_limit}"
 )YAML";
     auto parsed = ParseWorkflowYaml(yaml);
     REQUIRE(parsed.has_value());
@@ -330,6 +332,12 @@ result:
         const std::string out = lubancode::app::RunWorkflowById(ctx, "echo-flow", "量子纠错", executors);
         CHECK(out.find("succeeded") != std::string::npos);
     }
+    SUBCASE("具名参数按 schema 类型取值") {
+        const std::string out = lubancode::app::RunWorkflowById(
+            ctx, "echo-flow", "--topic test --review_limit=5", executors);
+        CHECK(out.find("succeeded") != std::string::npos);
+        CHECK(out.find("invalid_inputs") == std::string::npos);
+    }
     SUBCASE("缺必填:invalid_inputs 结构化错") {
         const std::string out = lubancode::app::RunWorkflowById(ctx, "echo-flow", "", executors);
         CHECK(out.find("invalid_inputs") != std::string::npos);
@@ -338,6 +346,61 @@ result:
         const std::string out = lubancode::app::RunWorkflowById(ctx, "nope", "", executors);
         CHECK(out.find("找不到") != std::string::npos);
     }
+}
+
+TEST_CASE("终端执行器装配:交互、skill、subflow 齐全,子流程能跑") {
+    using namespace lubancode::workflow;
+    TempDir tmp;
+    const char* child_yaml = R"YAML(
+schema_version: 1
+id: child-flow
+version: 1.0.0
+entry: fin
+nodes:
+  fin: { type: end }
+result:
+  value: "${inputs.value}"
+)YAML";
+    const char* parent_yaml = R"YAML(
+schema_version: 1
+id: parent-flow
+version: 1.0.0
+name: parent
+entry: call
+nodes:
+  call:
+    type: subflow
+    subflow: child-flow
+    input: { value: nested }
+  fin: { type: end }
+edges:
+  - { from: call, on: success, to: fin }
+result:
+  value: "${nodes.call.output.value}"
+)YAML";
+    auto child = ParseWorkflowYaml(child_yaml);
+    auto parent = ParseWorkflowYaml(parent_yaml);
+    REQUIRE(child.has_value());
+    REQUIRE(parent.has_value());
+    InstallOptions install;
+    REQUIRE(InstallWorkflow(*child, tmp.Get(), std::nullopt, install).has_value());
+    REQUIRE(InstallWorkflow(*parent, tmp.Get(), std::nullopt, install).has_value());
+
+    lubancode::cli::Theme theme;
+    lubancode::app::WorkflowCommandContext wf_ctx;
+    wf_ctx.project_root = tmp.Get();
+    wf_ctx.theme = &theme;
+    lubancode::app::WorkflowExecutorContext exec_ctx;
+    exec_ctx.build_tool_options = [] { return ToolExecutor::Options{}; };
+    const auto executors = lubancode::app::BuildWorkflowExecutors(wf_ctx, exec_ctx, "parent-flow");
+    CHECK(executors.contains(NodeKind::Approval));
+    CHECK(executors.contains(NodeKind::AskUser));
+    CHECK(executors.contains(NodeKind::Skill));
+    CHECK(executors.contains(NodeKind::Subflow));
+
+    const std::string out = lubancode::app::RunWorkflowById(wf_ctx, "parent-flow", "", executors);
+    CHECK(out.find("succeeded") != std::string::npos);
+    CHECK(out.find("nested") != std::string::npos);
 }
 
 TEST_CASE("alias 直呼解析:ResolveWorkflowAlias") {

@@ -47,7 +47,7 @@ namespace lubancode::workflow {
 
 enum class RunState {
     Created, Validating, Ready, Running,
-    WaitingInput, WaitingApproval, Paused,
+    WaitingInput, WaitingApproval, WaitingIo, Paused,
     Succeeded, Failed, Cancelled, BudgetExhausted,
 };
 std::string ToString(RunState state);
@@ -56,7 +56,7 @@ bool IsTerminalRunState(RunState state);
 
 enum class NodeState {
     Pending, Ready, Running, RetryWait,
-    WaitingInput, WaitingApproval,
+    WaitingInput, WaitingApproval, WaitingIo,
     Succeeded, Skipped, Failed, Cancelled, Interrupted,
 };
 std::string ToString(NodeState state);
@@ -82,6 +82,7 @@ struct NodeExecRequest {
     int attempt = 1;
     nlohmann::json resolved_input = nlohmann::json::object();  // ResolveInputs 产物
     const Store* store = nullptr;
+    const std::atomic<bool>* cancel = nullptr;  // 长活儿须合作检查
 };
 
 struct NodeExecResult {
@@ -191,6 +192,8 @@ private:
         Store* store = nullptr;
         RunJournal* journal = nullptr;
         const std::atomic<bool>* cancel = nullptr;
+        int* steps = nullptr;  // 主图与 loop body 共用同一把 max_steps 尺
+        std::int64_t started_ms = 0;  // async 等待也守整场 run 的总时限
         // 并行分支共写 account.nodes(std::map 并发写会坏):所有
         // NodeRunRecord 的读改走这把锁。Store 自带锁,不归它管。
         std::mutex* nodes_mutex = nullptr;
@@ -201,6 +204,9 @@ private:
     // store 的 body 键是共用垫,回头 GetOutput 会拿到别人的那份)。
     std::string RunNode(const ExecutionContext& ctx, const WorkflowNode& node,
                         nlohmann::json* committed_output = nullptr);
+    // async:I/O 等待边界。body 在工作线程跑,外壳守取消与总时限;
+    // 返回 success/error/skipped/cancelled/budget_exhausted。
+    std::string RunAsync(const ExecutionContext& ctx, const WorkflowNode& node);
     // 并行分支调度 + 汇合(第 3 批)。返回 join 后的 outcome
     // (success/error/skipped/cancelled);分支账进 store:<id>.outputs 按
     // 定义顺序、<id>.unavailable 记缺失。
@@ -208,6 +214,8 @@ private:
     // map/foreach:数组拆项跑 body。map 并发(foreach 顺次);map 的结果
     // 数组按 items 顺序排,完成时间只进 meta。
     std::string RunMap(const ExecutionContext& ctx, const WorkflowNode& node);
+    // loop:顺次跑 body,每轮末判 until;max 可由输入给,hard_limit 写死。
+    std::string RunLoop(const ExecutionContext& ctx, const WorkflowNode& node);
     // reduce:items 数组按定义顺序过 reduce_body,累加成单值。
     std::string RunReduce(const ExecutionContext& ctx, const WorkflowNode& node);
     // switch:受限条件评估(ConditionOp,禁 eval)。

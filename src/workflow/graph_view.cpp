@@ -36,8 +36,15 @@ GraphShape BuildShape(const WorkflowDefinition& def) {
     };
     for (const auto& node : def.nodes) {
         for (const auto& b : node.branches) implicit(node.id, b, "branch");
+        if (!node.async_body.empty()) implicit(node.id, node.async_body, "await");
         if (!node.map_body.empty()) implicit(node.id, node.map_body, "each");
         if (!node.reduce_body.empty()) implicit(node.id, node.reduce_body, "reduce");
+        if (!node.loop_body.empty()) {
+            implicit(node.id, node.loop_body.front(), "iterate");
+            for (std::size_t i = 1; i < node.loop_body.size(); ++i) {
+                implicit(node.loop_body[i - 1], node.loop_body[i], "then");
+            }
+        }
         for (const auto& c : node.conditions) implicit(node.id, c.to, "case");
         if (!node.default_to.empty()) implicit(node.id, node.default_to, "default");
         if (!node.fallback_to.empty()) implicit(node.id, node.fallback_to, "fallback");
@@ -73,6 +80,9 @@ std::string NodeSummaryLine(const WorkflowNode& node) {
         case NodeKind::Subflow:
             out << " " << node.subflow_id << (node.subflow_version.empty() ? "" : "@" + node.subflow_version);
             break;
+        case NodeKind::Async:
+            out << " body=" << node.async_body;
+            break;
         case NodeKind::Parallel:
         case NodeKind::Join:
             out << " " << ToString(node.join) << " 分支 " << node.branches.size() << " 路";
@@ -86,6 +96,9 @@ std::string NodeSummaryLine(const WorkflowNode& node) {
             break;
         case NodeKind::Switch:
             out << " " << node.conditions.size() << " 条分支";
+            break;
+        case NodeKind::Loop:
+            out << " body=" << node.loop_body.size() << " hard_limit=" << node.loop_hard_limit;
             break;
         default:
             break;

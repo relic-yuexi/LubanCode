@@ -28,6 +28,39 @@ struct NodeDeps {
     std::vector<std::string> implicit_next;
 };
 
+std::optional<std::string> ReferencedNodeId(const std::string& text) {
+    if (text.size() < 10 || text.rfind("${nodes.", 0) != 0 || text.back() != '}') return std::nullopt;
+    const std::string rest = text.substr(8, text.size() - 9);
+    const std::size_t dot = rest.find('.');
+    const std::string id = dot == std::string::npos ? rest : rest.substr(0, dot);
+    if (id.empty()) return std::nullopt;
+    return id;
+}
+
+bool IsLoopBoundSpec(const nlohmann::json& value) {
+    if (value.is_number_integer()) return true;
+    if (!value.is_string()) return false;
+    const std::string& text = value.get_ref<const std::string&>();
+    return text.size() > 11 && text.rfind("${inputs.", 0) == 0 && text.back() == '}';
+}
+
+bool IsExecutableBodyKind(NodeKind kind) {
+    switch (kind) {
+        case NodeKind::Tool:
+        case NodeKind::Agent:
+        case NodeKind::Llm:
+        case NodeKind::Skill:
+        case NodeKind::Template:
+        case NodeKind::Transform:
+        case NodeKind::Approval:
+        case NodeKind::AskUser:
+        case NodeKind::Subflow:
+            return true;
+        default:
+            return false;
+    }
+}
+
 // 递归遍历 ${...} 字符串引用,收集路径里的节点 id(nodes.<id>...)。
 void CollectRefNodes(const nlohmann::json& value, const WorkflowNode& self, std::set<std::string>& refs) {
     if (value.is_string()) {
@@ -77,7 +110,14 @@ std::map<std::string, int> EstimateTopoOrder(const WorkflowDefinition& def) {
     for (const auto& node : def.nodes) {
         for (const auto& b : node.branches) add_edge(node.id, b);
         if (!node.map_body.empty()) add_edge(node.id, node.map_body);
+        if (!node.async_body.empty()) add_edge(node.id, node.async_body);
         if (!node.reduce_body.empty()) add_edge(node.id, node.reduce_body);
+        if (!node.loop_body.empty()) {
+            add_edge(node.id, node.loop_body.front());
+            for (std::size_t i = 1; i < node.loop_body.size(); ++i) {
+                add_edge(node.loop_body[i - 1], node.loop_body[i]);
+            }
+        }
         for (const auto& c : node.conditions) add_edge(node.id, c.to);
         if (!node.default_to.empty()) add_edge(node.id, node.default_to);
         if (!node.fallback_to.empty()) add_edge(node.id, node.fallback_to);
@@ -147,6 +187,7 @@ ValidationResult ValidateDefinition(const WorkflowDefinition& def,
     }
 
     const auto node_path = [](const std::string& id) { return "nodes." + id; };
+    std::map<std::string, std::string> control_body_owner;
 
     // ---- 各节点 kind 自洽 ----
     for (const auto& node : def.nodes) {
@@ -179,6 +220,31 @@ ValidationResult ValidateDefinition(const WorkflowDefinition& def,
                 if (node.subflow_id == def.id)
                     add("subflow_cycle", base + ".subflow", "subflow 不能指向自身");
                 break;
+            case NodeKind::Async: {
+                if (node.async_body.empty()) {
+                    add("missing_async_body", base + ".body", "async 节点缺 body 节点");
+                    break;
+                }
+                const auto body = def.node_map.find(node.async_body);
+                if (body == def.node_map.end()) {
+                    add("unknown_async_body", base + ".body", "async body 节点不存在: " + node.async_body);
+                    break;
+                }
+                if (!IsExecutableBodyKind(body->second.kind)) {
+                    add("unsupported_async_body", base + ".body",
+                        "async body 只收普通执行节点,不收控制节点: " + node.async_body);
+                }
+                if (body->second.has_side_effects && body->second.idempotency_key.empty()) {
+                    add("unsafe_async_side_effect", node_path(node.async_body),
+                        "async 在打断后会重放 body;副作用节点须声明 idempotency_key");
+                }
+                const auto [owner, inserted] = control_body_owner.emplace(node.async_body, node.id);
+                if (!inserted && owner->second != node.id) {
+                    add("shared_control_body", base + ".body",
+                        "body 节点已归另一只控制节点: " + node.async_body);
+                }
+                break;
+            }
             case NodeKind::Parallel:
                 if (node.branches.empty()) add("empty_branches", base + ".branches", "parallel 节点没有分支");
                 break;
@@ -202,6 +268,73 @@ ValidationResult ValidateDefinition(const WorkflowDefinition& def,
                 if (node.conditions.empty() && node.default_to.empty())
                     add("empty_switch", base + ".conditions", "switch 节点既无条件也无 default");
                 break;
+            case NodeKind::Loop: {
+                if (node.loop_body.empty()) add("empty_loop_body", base + ".body", "loop 节点没有 body");
+                if (!node.loop_until.has_value() || node.loop_until->path.empty()) {
+                    add("missing_loop_until", base + ".until", "loop 节点缺 until 条件");
+                }
+                if (!IsLoopBoundSpec(node.loop_min_iterations)) {
+                    add("bad_loop_min", base + ".min_iterations", "min_iterations 只认正整数或 ${inputs.xxx}");
+                }
+                if (!IsLoopBoundSpec(node.loop_max_iterations)) {
+                    add("bad_loop_max", base + ".max_iterations", "max_iterations 只认正整数或 ${inputs.xxx}");
+                }
+                if (node.loop_hard_limit <= 0) {
+                    add("bad_loop_hard_limit", base + ".hard_limit", "hard_limit 必须是正整数");
+                }
+                if (node.loop_min_iterations.is_number_integer() &&
+                    node.loop_min_iterations.get<int>() <= 0) {
+                    add("bad_loop_min", base + ".min_iterations", "min_iterations 必须大于 0");
+                }
+                if (node.loop_max_iterations.is_number_integer()) {
+                    const int max_iterations = node.loop_max_iterations.get<int>();
+                    if (max_iterations <= 0) {
+                        add("bad_loop_max", base + ".max_iterations", "max_iterations 必须大于 0");
+                    }
+                    if (max_iterations > node.loop_hard_limit) {
+                        add("loop_limit_exceeds_hard_limit", base + ".max_iterations",
+                            "max_iterations 越过 hard_limit(" + std::to_string(node.loop_hard_limit) + ")");
+                    }
+                    if (node.loop_min_iterations.is_number_integer() &&
+                        node.loop_min_iterations.get<int>() > max_iterations) {
+                        add("loop_min_exceeds_max", base + ".min_iterations",
+                            "min_iterations 不能大于 max_iterations");
+                    }
+                }
+                std::set<std::string> body_seen;
+                for (const auto& body_id : node.loop_body) {
+                    if (!body_seen.insert(body_id).second) {
+                        add("duplicate_loop_body", base + ".body", "loop body 节点重复: " + body_id);
+                        continue;
+                    }
+                    const auto body = def.node_map.find(body_id);
+                    if (body == def.node_map.end()) {
+                        add("unknown_loop_body", base + ".body", "loop body 节点不存在: " + body_id);
+                        continue;
+                    }
+                    if (!IsExecutableBodyKind(body->second.kind)) {
+                        add("unsupported_loop_body", base + ".body",
+                            "loop body 暂只收可执行节点,不收控制节点: " + body_id);
+                    }
+                    if (body->second.has_side_effects && body->second.idempotency_key.empty()) {
+                        add("unsafe_loop_side_effect", node_path(body_id),
+                            "loop 会重复执行此副作用节点,须声明 idempotency_key");
+                    }
+                    const auto [owner, inserted] = control_body_owner.emplace(body_id, node.id);
+                    if (!inserted && owner->second != node.id) {
+                        add("shared_loop_body", base + ".body",
+                            "body 节点已归另一只 loop: " + body_id);
+                    }
+                }
+                if (node.loop_until.has_value()) {
+                    const auto ref = ReferencedNodeId(node.loop_until->path);
+                    if (!ref.has_value() || !body_seen.count(*ref)) {
+                        add("loop_until_outside_body", base + ".until.path",
+                            "until 必须读取本 loop body 节点的输出");
+                    }
+                }
+                break;
+            }
             case NodeKind::Approval:
             case NodeKind::AskUser:
             case NodeKind::Checkpoint:
@@ -270,6 +403,9 @@ ValidationResult ValidateDefinition(const WorkflowDefinition& def,
             add("duplicate_edge", base, "完全相同的边出现两次");
         }
         outs.push_back(edge.to);
+        if (control_body_owner.count(edge.from) > 0 || control_body_owner.count(edge.to) > 0) {
+            add("control_body_edge", base, "控制节点的 body 由外壳独占,不能再接普通边");
+        }
     }
     for (auto& [id, deps] : graph) {
         for (const auto& [outcome, tos] : deps.outgoing) {
@@ -288,14 +424,30 @@ ValidationResult ValidateDefinition(const WorkflowDefinition& def,
     };
     for (const auto& node : def.nodes) {
         for (const auto& b : node.branches) link(node.id, b);
+        if (!node.async_body.empty()) link(node.id, node.async_body);
         if (!node.map_body.empty()) link(node.id, node.map_body);
         if (!node.reduce_body.empty()) link(node.id, node.reduce_body);
+        if (!node.loop_body.empty()) {
+            link(node.id, node.loop_body.front());
+            for (std::size_t i = 1; i < node.loop_body.size(); ++i) {
+                link(node.loop_body[i - 1], node.loop_body[i]);
+            }
+        }
         for (const auto& c : node.conditions) link(node.id, c.to);
         if (!node.default_to.empty()) link(node.id, node.default_to);
         if (!node.fallback_to.empty()) link(node.id, node.fallback_to);
         // join 的分支汇回 join 自身?不——parallel 内嵌分支时,branches 直接
         // 写在 parallel 节点上,汇合由 parallel 的出边(joined outcome)接手,
         // 不需要独立 join 节点。独立 join 节点的分支经普通边进来。
+    }
+
+    for (const auto& node : def.nodes) {
+        if (node.kind != NodeKind::Loop) continue;
+        const auto graph_it = graph.find(node.id);
+        if (graph_it == graph.end() || graph_it->second.outgoing.count("exhausted") == 0) {
+            add("missing_loop_exhausted_edge", node_path(node.id) + ".edges",
+                "loop 必须显式接 exhausted 出边,不得悄悄按成功收口");
+        }
     }
 
     // ---- 可达性:entry 出发 ----
@@ -327,13 +479,8 @@ ValidationResult ValidateDefinition(const WorkflowDefinition& def,
         }
     }
 
-    // ---- 环上限:每个环必须带 max_iterations,或整体被 max_steps 罩住。
-    // 首版规矩(单子 Edge 一节):循环必须标 max_iterations 或耗用全局
-    // max_steps;无界环校验不过。实现:存在环且图中没有 checkpoint 型
-    // 循环上限声明(WorkflowLimits.max_steps 恒有默认),检查环上是否
-    // 至少有一处 retry/foreach 边界——首版用简化判据:图含环时,环上节点
-    // 必须是 map/foreach/reduce 之外的受控种类,且 foreach/map 有全局
-    // max_steps 罩底(max_steps <= 0 才算无界)。
+    // 普通边永远不许成环。条件循环只走 Loop 节点,由 max_iterations 与
+    // hard_limit 双帽约束;图本身仍是 DAG,恢复与引用次序才不会含混。
     {
         // Kahn 剩余节点 = 环上节点。
         std::unordered_map<std::string, int> degree;
@@ -375,7 +522,7 @@ ValidationResult ValidateDefinition(const WorkflowDefinition& def,
             for (const auto& [id, d] : degree) {
                 if (d > 0) {
                     add("cycle_detected", node_path(id),
-                        "节点在环上;循环须由 map/foreach(max_steps 罩底)或显式上限约束");
+                        "普通边不许回环;条件迭代请改用 loop 节点");
                     break;
                 }
             }

@@ -26,7 +26,9 @@
 #include "config/model_catalog.hpp"
 #include "runtime/event_sink.hpp"
 #include "runtime/id_authority.hpp"
+#include "runtime/interaction_broker.hpp"
 #include "tools/registry.hpp"
+#include "tools/skill_loader.hpp"
 #include "workflow/catalog.hpp"
 #include "workflow/host_executors.hpp"  // ToolExecutor::Options(执行器装配)
 #include "workflow/runtime.hpp"
@@ -107,9 +109,12 @@ struct WorkflowExecutorContext {
     lubancode::runtime::EventSink* event_sink = nullptr;  // 会话 fanout;可空
     std::string thread_id;
     lubancode::runtime::IdAuthority* id_authority = nullptr;  // 空 = 进程级
+    std::shared_ptr<lubancode::runtime::InteractionBroker> interaction_broker;
+    const std::vector<lubancode::tools::SkillMeta>* skills = nullptr;
+    int subflow_depth = 0;  // 终端首版只准一层 nesting,防交叉递归没帽
 };
 
-// 拼执行器表(transform/template/tool/agent/llm 五路)。wf_catalog_root 是
+// 拼执行器表(transform/template/tool/agent/llm/skill/interaction/subflow)。wf_catalog_root 是
 // catalog 锚点(project_root/user_root),prompt 相对路径按 id 对应条目的
 // 目录读。
 std::map<lubancode::workflow::NodeKind, std::shared_ptr<lubancode::workflow::NodeExecutor>>

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdlib>
+#include <future>
 #include <iostream>
 #include <mutex>
 #include <optional>
@@ -23,6 +24,7 @@
 #include "runtime/budget_gate.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/retry_backoff.hpp"
+#include "workflow/validator.hpp"
 
 namespace lubancode::workflow {
 
@@ -90,6 +92,19 @@ std::optional<std::string> ValidateInputsAgainstSchema(const nlohmann::json& val
     return std::nullopt;
 }
 
+nlohmann::json ApplyInputDefaults(const nlohmann::json& values, const nlohmann::json& schema) {
+    nlohmann::json result = values.is_object() ? values : nlohmann::json::object();
+    if (!schema.is_object()) return result;
+    const auto properties = schema.find("properties");
+    if (properties == schema.end() || !properties->is_object()) return result;
+    for (auto it = properties->begin(); it != properties->end(); ++it) {
+        if (result.contains(it.key()) || !it->is_object()) continue;
+        const auto fallback = it->find("default");
+        if (fallback != it->end()) result[it.key()] = *fallback;
+    }
+    return result;
+}
+
 }  // namespace
 
 // ---- 状态机 -----------------------------------------------------------------
@@ -102,6 +117,7 @@ std::string ToString(RunState state) {
         case RunState::Running: return "running";
         case RunState::WaitingInput: return "waiting_input";
         case RunState::WaitingApproval: return "waiting_approval";
+        case RunState::WaitingIo: return "waiting_io";
         case RunState::Paused: return "paused";
         case RunState::Succeeded: return "succeeded";
         case RunState::Failed: return "failed";
@@ -118,6 +134,7 @@ bool ParseRunState(const std::string& s, RunState& out) {
     if (s == "running") { out = RunState::Running; return true; }
     if (s == "waiting_input") { out = RunState::WaitingInput; return true; }
     if (s == "waiting_approval") { out = RunState::WaitingApproval; return true; }
+    if (s == "waiting_io") { out = RunState::WaitingIo; return true; }
     if (s == "paused") { out = RunState::Paused; return true; }
     if (s == "succeeded") { out = RunState::Succeeded; return true; }
     if (s == "failed") { out = RunState::Failed; return true; }
@@ -139,6 +156,7 @@ std::string ToString(NodeState state) {
         case NodeState::RetryWait: return "retry_wait";
         case NodeState::WaitingInput: return "waiting_input";
         case NodeState::WaitingApproval: return "waiting_approval";
+        case NodeState::WaitingIo: return "waiting_io";
         case NodeState::Succeeded: return "succeeded";
         case NodeState::Skipped: return "skipped";
         case NodeState::Failed: return "failed";
@@ -155,6 +173,7 @@ bool ParseNodeState(const std::string& s, NodeState& out) {
     if (s == "retry_wait") { out = NodeState::RetryWait; return true; }
     if (s == "waiting_input") { out = NodeState::WaitingInput; return true; }
     if (s == "waiting_approval") { out = NodeState::WaitingApproval; return true; }
+    if (s == "waiting_io") { out = NodeState::WaitingIo; return true; }
     if (s == "succeeded") { out = NodeState::Succeeded; return true; }
     if (s == "skipped") { out = NodeState::Skipped; return true; }
     if (s == "failed") { out = NodeState::Failed; return true; }
@@ -179,11 +198,13 @@ bool IsValidRunTransition(RunState from, RunState to) {
         case RunState::Ready:
             return to == RunState::Running || to == RunState::Failed || to == RunState::Cancelled;
         case RunState::Running:
-            return to == RunState::WaitingInput || to == RunState::WaitingApproval || to == RunState::Paused ||
+            return to == RunState::WaitingInput || to == RunState::WaitingApproval || to == RunState::WaitingIo ||
+                   to == RunState::Paused ||
                    to == RunState::Succeeded || to == RunState::Failed || to == RunState::Cancelled ||
                    to == RunState::BudgetExhausted;
         case RunState::WaitingInput:
         case RunState::WaitingApproval:
+        case RunState::WaitingIo:
         case RunState::Paused:
             return to == RunState::Running || to == RunState::Succeeded || to == RunState::Failed ||
                    to == RunState::Cancelled || to == RunState::BudgetExhausted;
@@ -202,12 +223,14 @@ bool IsValidNodeTransition(NodeState from, NodeState to) {
             return to == NodeState::Running || to == NodeState::Skipped || to == NodeState::Cancelled;
         case NodeState::Running:
             return to == NodeState::RetryWait || to == NodeState::WaitingInput ||
-                   to == NodeState::WaitingApproval || to == NodeState::Succeeded || to == NodeState::Failed ||
+                   to == NodeState::WaitingApproval || to == NodeState::WaitingIo ||
+                   to == NodeState::Succeeded || to == NodeState::Failed ||
                    to == NodeState::Cancelled;
         case NodeState::RetryWait:
             return to == NodeState::Ready || to == NodeState::Failed || to == NodeState::Cancelled;
         case NodeState::WaitingInput:
         case NodeState::WaitingApproval:
+        case NodeState::WaitingIo:
             return to == NodeState::Running || to == NodeState::Succeeded || to == NodeState::Failed ||
                    to == NodeState::Cancelled;
         case NodeState::Interrupted:
@@ -322,6 +345,7 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         request.node_run_id = account.run_id + "-" + node.id + "-a" + std::to_string(attempt);
         request.attempt = attempt;
         request.store = ctx.store;
+        request.cancel = ctx.cancel;
         auto resolved_input = ResolveTemplate(*ctx.store, node.input);
         if (!resolved_input.has_value()) {
             record.state = NodeState::Failed;
@@ -424,6 +448,103 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
     return "error";
 }
 
+std::string WorkflowRuntime::RunAsync(const ExecutionContext& ctx, const WorkflowNode& node) {
+    WorkflowRunSummary& account = *ctx.account;
+    const auto body_it = ctx.definition->node_map.find(node.async_body);
+    if (body_it == ctx.definition->node_map.end()) return "error";  // validator 已给细账
+
+    {
+        std::scoped_lock lock(*ctx.nodes_mutex);
+        NodeRunRecord& record = account.nodes[node.id];
+        record.node_id = node.id;
+        record.attempt = 1;
+        record.state = NodeState::WaitingIo;
+        record.started_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+    }
+    account.state = RunState::WaitingIo;
+    if (ctx.journal != nullptr) {
+        ctx.journal->Append(kEventNodeStarted, node.id, 1,
+                            nlohmann::json{{"kind", "async"}});
+        ctx.journal->Append(kEventNodeWaiting, node.id, 1,
+                            nlohmann::json{{"kind", "io"}, {"body", node.async_body}});
+    }
+
+    if (++*ctx.steps > ctx.definition->limits.max_steps) {
+        account.state = RunState::BudgetExhausted;
+        std::scoped_lock lock(*ctx.nodes_mutex);
+        NodeRunRecord& record = account.nodes[node.id];
+        record.state = NodeState::Failed;
+        record.error_code = "max_steps";
+        record.error_message = "async body 越过 max_steps";
+        return "budget_exhausted";
+    }
+
+    std::atomic<bool> body_cancel{false};
+    ExecutionContext body_ctx = ctx;
+    body_ctx.cancel = &body_cancel;
+    const WorkflowNode& body = body_it->second;
+    auto future = std::async(std::launch::async, [this, body_ctx, &body]() {
+        nlohmann::json output;
+        const std::string outcome = RunNode(body_ctx, body, &output);
+        return std::pair<std::string, nlohmann::json>{outcome, std::move(output)};
+    });
+
+    bool cancelled = false;
+    bool timed_out = false;
+    while (future.wait_for(std::chrono::milliseconds(20)) != std::future_status::ready) {
+        if (ctx.cancel != nullptr && ctx.cancel->load()) {
+            cancelled = true;
+            body_cancel.store(true);
+        }
+        const std::int64_t now_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+        if (ctx.definition->limits.timeout_secs > 0 &&
+            now_ms - ctx.started_ms > ctx.definition->limits.timeout_secs * 1000) {
+            timed_out = true;
+            body_cancel.store(true);
+        }
+    }
+    auto [outcome, output] = future.get();
+    account.state = RunState::Running;
+
+    std::scoped_lock lock(*ctx.nodes_mutex);
+    NodeRunRecord& record = account.nodes[node.id];
+    record.ended_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+    if (cancelled) {
+        record.state = NodeState::Cancelled;
+        record.error_code = "cancelled";
+        record.error_message = "async 等待被取消";
+        return "cancelled";
+    }
+    if (timed_out) {
+        record.state = NodeState::Failed;
+        record.error_code = "timeout";
+        record.error_message = "async 等待撞到 workflow 总时限";
+        account.state = RunState::BudgetExhausted;
+        account.error_code = "timeout";
+        account.error_message = record.error_message;
+        return "budget_exhausted";
+    }
+    if (outcome == "success" || outcome == "empty") {
+        ctx.store->CommitOutputOverwrite(node.id, output);
+        record.state = NodeState::Succeeded;
+        if (ctx.journal != nullptr) {
+            ctx.journal->Append(kEventNodeCompleted, node.id, 1,
+                                nlohmann::json{{"outcome", outcome}, {"output", output}});
+        }
+        return outcome;
+    }
+    if (outcome == "cancelled") {
+        record.state = NodeState::Cancelled;
+        record.error_code = "cancelled";
+        return "cancelled";
+    }
+    const NodeRunRecord& body_record = account.nodes.at(node.async_body);
+    record.state = outcome == "skipped" ? NodeState::Skipped : NodeState::Failed;
+    record.error_code = body_record.error_code;
+    record.error_message = body_record.error_message;
+    return outcome;
+}
+
 // ---------------------------------------------------------------------------
 // 并行、map、reduce、switch(第 3 批)
 // ---------------------------------------------------------------------------
@@ -498,6 +619,171 @@ std::string WorkflowRuntime::EvaluateSwitch(const WorkflowDefinition& def, const
         }
     }
     return node.default_to;  // 可空:都不中且无 default -> 空(主循环收 skipped)
+}
+
+std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const WorkflowNode& node) {
+    WorkflowRunSummary& account = *ctx.account;
+    const WorkflowDefinition& def = *ctx.definition;
+    NodeRunRecord& record = account.nodes[node.id];
+    record.node_id = node.id;
+    record.state = NodeState::Running;
+    record.started_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+
+    const auto fail = [&](const std::string& code, const std::string& message) {
+        record.state = NodeState::Failed;
+        record.error_code = code;
+        record.error_message = message;
+        return std::string("error");
+    };
+    const auto resolve_bound = [&](const nlohmann::json& spec, const char* field)
+        -> std::expected<int, std::string> {
+        auto resolved = ResolveTemplate(*ctx.store, spec);
+        if (!resolved.has_value()) {
+            return std::unexpected(std::string(field) + " 解析失败: " + resolved.error().message);
+        }
+        if (!resolved->value.is_number_integer()) {
+            return std::unexpected(std::string(field) + " 必须解析成整数");
+        }
+        const int value = resolved->value.get<int>();
+        if (value <= 0) return std::unexpected(std::string(field) + " 必须大于 0");
+        return value;
+    };
+
+    const auto min_iterations = resolve_bound(node.loop_min_iterations, "min_iterations");
+    if (!min_iterations.has_value()) return fail("bad_loop_min", min_iterations.error());
+    const auto max_iterations = resolve_bound(node.loop_max_iterations, "max_iterations");
+    if (!max_iterations.has_value()) return fail("bad_loop_max", max_iterations.error());
+    if (*min_iterations > *max_iterations) {
+        return fail("loop_min_exceeds_max", "min_iterations 不能大于 max_iterations");
+    }
+    if (*max_iterations > node.loop_hard_limit) {
+        return fail("loop_limit_exceeds_hard_limit",
+                    "max_iterations 越过 hard_limit(" + std::to_string(node.loop_hard_limit) + ")");
+    }
+
+    int completed = 0;
+    nlohmann::json history = nlohmann::json::array();
+    nlohmann::json previous = nullptr;
+    if (const auto saved = ctx.store->GetOutput(node.id); saved.has_value() && saved->is_object()) {
+        completed = saved->value("completed_iterations", 0);
+        if (const auto it = saved->find("history"); it != saved->end() && it->is_array()) history = *it;
+        if (const auto it = saved->find("last"); it != saved->end()) previous = *it;
+        if (saved->value("condition_met", false) && completed >= *min_iterations) {
+            record.state = NodeState::Succeeded;
+            return "success";
+        }
+        if (saved->value("exhausted", false) || completed >= *max_iterations) {
+            record.state = NodeState::Succeeded;
+            return "exhausted";
+        }
+    }
+
+    while (completed < *max_iterations) {
+        if (ctx.cancel != nullptr && ctx.cancel->load()) {
+            record.state = NodeState::Cancelled;
+            return "cancelled";
+        }
+        const int iteration = completed + 1;
+        nlohmann::json loop_context{{"iteration", iteration},
+                                    {"completed_iterations", completed},
+                                    {"previous", previous},
+                                    {"history", history},
+                                    {"condition_met", false},
+                                    {"exhausted", false}};
+        ctx.store->CommitOutputOverwrite(node.id, loop_context);
+        ctx.store->UpdateMeta(node.id, nlohmann::json{{"iteration", iteration}, {"complete", false}});
+        if (ctx.journal != nullptr) {
+            ctx.journal->Append(kEventLoopIterationStarted, node.id, iteration,
+                                nlohmann::json{{"iteration", iteration}});
+        }
+
+        nlohmann::json outputs = nlohmann::json::object();
+        for (const auto& body_id : node.loop_body) {
+            if (ctx.cancel != nullptr && ctx.cancel->load()) {
+                record.state = NodeState::Cancelled;
+                return "cancelled";
+            }
+            if (ctx.steps != nullptr && ++*ctx.steps > def.limits.max_steps) {
+                account.state = RunState::BudgetExhausted;
+                account.error_code = "max_steps";
+                account.error_message =
+                    "步数越过 max_steps(" + std::to_string(def.limits.max_steps) + ")";
+                record.state = NodeState::Failed;
+                record.error_code = "max_steps";
+                record.error_message = account.error_message;
+                return "budget_exhausted";
+            }
+            if (!WithinBudget(def.limits, account)) {
+                account.state = RunState::BudgetExhausted;
+                account.error_code = "budget_exhausted";
+                account.error_message = "预算越帽(tool_calls/tokens)";
+                record.state = NodeState::Failed;
+                return "budget_exhausted";
+            }
+            const auto body = def.node_map.find(body_id);
+            if (body == def.node_map.end()) return fail("unknown_loop_body", "loop body 节点不存在: " + body_id);
+            ctx.store->UpdateMeta(body_id, nlohmann::json{{"iteration", iteration}});
+            nlohmann::json output;
+            const std::string outcome = RunNode(ctx, body->second, &output);
+            if (outcome == "cancelled") {
+                record.state = NodeState::Cancelled;
+                return "cancelled";
+            }
+            if (outcome == "error" || outcome == "skipped") {
+                return fail("loop_body_failed", body_id + " 返回 " + outcome);
+            }
+            outputs[body_id] = std::move(output);
+        }
+
+        std::optional<nlohmann::json> resolved;
+        if (auto value = ResolveRef(*ctx.store, StripRefBraces(node.loop_until->path)); value.has_value()) {
+            resolved = std::move(*value);
+        }
+        const bool condition_met =
+            EvaluateCondition(node.loop_until->op, resolved.has_value() ? &*resolved : nullptr,
+                              node.loop_until->literal);
+        completed = iteration;
+        nlohmann::json last{{"iteration", iteration}, {"outputs", std::move(outputs)},
+                            {"condition_met", condition_met}};
+        history.push_back(last);
+        previous = last;
+        const bool exhausted = completed >= *max_iterations && !(condition_met && completed >= *min_iterations);
+        nlohmann::json output{{"iteration", iteration},
+                              {"completed_iterations", completed},
+                              {"previous", history.size() > 1 ? history[history.size() - 2] : nlohmann::json(nullptr)},
+                              {"last", last},
+                              {"history", history},
+                              {"condition_met", condition_met},
+                              {"exhausted", exhausted}};
+        ctx.store->CommitOutputOverwrite(node.id, output);
+        ctx.store->UpdateMeta(node.id, nlohmann::json{{"iteration", iteration}, {"complete", true}});
+        if (ctx.journal != nullptr) {
+            ctx.journal->Append(kEventLoopIterationCompleted, node.id, iteration,
+                                nlohmann::json{{"iteration", iteration},
+                                               {"condition_met", condition_met},
+                                               {"exhausted", exhausted},
+                                               {"output", output}});
+            ctx.journal->SaveCheckpoint(ctx.journal->last_seq(), ctx.store->ToJson());
+        }
+        if (condition_met && completed >= *min_iterations) {
+            record.state = NodeState::Succeeded;
+            record.ended_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+            if (ctx.journal != nullptr) {
+                ctx.journal->Append(kEventNodeCompleted, node.id, completed,
+                                    nlohmann::json{{"outcome", "success"}, {"output", output}});
+            }
+            return "success";
+        }
+    }
+
+    record.state = NodeState::Succeeded;
+    record.ended_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
+    if (ctx.journal != nullptr) {
+        ctx.journal->Append(kEventNodeCompleted, node.id, completed,
+                            nlohmann::json{{"outcome", "exhausted"},
+                                           {"output", ctx.store->GetOutput(node.id).value_or(nlohmann::json::object())}});
+    }
+    return "exhausted";
 }
 
 std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const WorkflowNode& node) {
@@ -888,6 +1174,11 @@ std::expected<WorkflowRunSummary, std::string> WorkflowRuntime::Resume(
             precompleted.insert_or_assign(node_id, NodeRunRecord{node_id, NodeState::Succeeded});
         }
     }
+    // loop 自己要读 checkpoint 里的轮次再判续跑/收口,不能被普通的
+    // "已有 output = 已完成"规则跳过。body 由 loop 直接调度,也不走主图跳过口。
+    for (const auto& node : definition.nodes) {
+        if (node.kind == NodeKind::Loop) precompleted.erase(node.id);
+    }
 
     Store store;
     if (checkpoint.has_value()) {
@@ -911,6 +1202,7 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
     }
 
     Store store = std::move(preloaded);
+    const nlohmann::json effective_inputs = ApplyInputDefaults(inputs, definition.inputs);
     const std::int64_t started_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
 
     // 取消最先看:用户都撤了,校验也不必做。
@@ -924,7 +1216,16 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
 
     // validating:输入 schema 对账。
     account.state = RunState::Validating;
-    if (auto problem = ValidateInputsAgainstSchema(inputs, definition.inputs)) {
+    const ValidationResult validation = ValidateDefinition(definition, std::nullopt);
+    if (!validation.ok()) {
+        account.state = RunState::Failed;
+        account.error_code = "invalid_definition";
+        const ValidationIssue& issue = validation.issues.front();
+        account.error_message = issue.path + ": " + issue.message;
+        account.duration_ms = (options_.clock ? options_.clock->NowMs() : JournalClock().NowMs()) - started_ms;
+        return account;
+    }
+    if (auto problem = ValidateInputsAgainstSchema(effective_inputs, definition.inputs)) {
         account.state = RunState::Failed;
         account.error_code = "invalid_inputs";
         account.error_message = *problem;
@@ -933,7 +1234,7 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
     }
 
     if (!resuming) {
-        store.Initialize(inputs, nlohmann::json{
+        store.Initialize(effective_inputs, nlohmann::json{
             {"workflow_id", definition.id},
             {"workflow_version", definition.version},
             {"run_id", account.run_id},
@@ -962,18 +1263,20 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
     account.state = RunState::Running;
     EmitRunEvent(account, kEventRunStarted, nlohmann::json{{"state", ToString(account.state)}});
 
+    int steps = 0;
     ExecutionContext ctx;
     ctx.definition = &definition;
     ctx.account = &account;
     ctx.store = &store;
     ctx.journal = journal.has_value() ? &*journal : nullptr;
     ctx.cancel = cancel_token;
+    ctx.steps = &steps;
+    ctx.started_ms = started_ms;
     std::mutex nodes_mutex;  // 并行分支共写账本的那把锁
     ctx.nodes_mutex = &nodes_mutex;
 
     // 主循环:entry 起步,按 outcome 边走。
     std::string current = definition.entry;
-    int steps = 0;
     while (!current.empty()) {
         if (cancel_token != nullptr && cancel_token->load()) {
             account.state = RunState::Cancelled;
@@ -1027,6 +1330,65 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
             current = EvaluateSwitch(definition, node, store);
             if (current.empty()) {
                 account.state = RunState::Succeeded;  // 都不中且无 default:skipped 收
+            }
+            continue;
+        }
+        // loop:body 每轮顺次跑,until 命中即走 success;撞 max 走 exhausted。
+        if (node.kind == NodeKind::Loop) {
+            const std::string loop_outcome = RunLoop(ctx, node);
+            if (loop_outcome == "cancelled") {
+                account.state = RunState::Cancelled;
+                account.error_code = "cancelled";
+                break;
+            }
+            if (loop_outcome == "budget_exhausted") break;
+            if (loop_outcome == "error") {
+                account.state = RunState::Failed;
+                account.error_code = "loop_failed";
+                account.error_message = node.id + ": " + account.nodes[node.id].error_message;
+                break;
+            }
+            current = NextNodeFor(definition, node.id, loop_outcome);
+            if (current.empty()) {
+                account.state = RunState::Failed;
+                account.error_code = "loop_outcome_unhandled";
+                account.error_message = node.id + " 的 " + loop_outcome + " 没接出边";
+                break;
+            }
+            continue;
+        }
+        // async:body 在工作线程跑;外壳只等这一只 I/O 活,并非 fan-out。
+        if (node.kind == NodeKind::Async) {
+            const std::string async_outcome = RunAsync(ctx, node);
+            if (async_outcome == "cancelled") {
+                account.state = RunState::Cancelled;
+                account.error_code = "cancelled";
+                break;
+            }
+            if (async_outcome == "budget_exhausted") break;
+            if (async_outcome == "error") {
+                std::string next = NextNodeFor(definition, node.id, "error");
+                if (next.empty()) {
+                    account.state = RunState::Failed;
+                    account.error_code = "async_failed";
+                    account.error_message = node.id + ": " + account.nodes[node.id].error_message;
+                    break;
+                }
+                current = next;
+                continue;
+            }
+            current = NextNodeFor(definition, node.id, async_outcome);
+            if (current.empty()) {
+                auto result = BuildResult(definition, store);
+                if (result.has_value()) {
+                    account.result = std::move(*result);
+                    account.state = RunState::Succeeded;
+                } else {
+                    account.state = RunState::Failed;
+                    account.error_code = "resolve_result";
+                    account.error_message = result.error().path + ": " + result.error().message;
+                }
+                break;
             }
             continue;
         }

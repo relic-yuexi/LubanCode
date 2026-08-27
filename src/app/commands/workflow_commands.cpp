@@ -2,7 +2,9 @@
 
 #include "app/commands/workflow_commands.hpp"
 #include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
+#include "app/turn_runner.hpp"                  // PromptAskUser(终端交互宿主)
 #include "tools/path_utils.hpp"                // Utf8ToPath(catalog 锚点拼路径)
+#include "tools/skill_loader.hpp"
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 using lubancode::cli::TermOut;
@@ -23,6 +25,82 @@ namespace lubancode::app {
 
 namespace {
 
+class ReadyWorkflowInteractionFuture final : public lubancode::runtime::InteractionFuture {
+public:
+    explicit ReadyWorkflowInteractionFuture(std::optional<lubancode::runtime::ApprovalResponse> approval)
+        : approval_(std::move(approval)) {}
+    explicit ReadyWorkflowInteractionFuture(std::optional<lubancode::runtime::QuestionResponse> question)
+        : question_(std::move(question)) {}
+
+    std::optional<lubancode::runtime::ApprovalResponse> WaitApproval() override { return approval_; }
+    std::optional<lubancode::runtime::QuestionResponse> WaitQuestion() override { return question_; }
+
+private:
+    std::optional<lubancode::runtime::ApprovalResponse> approval_;
+    std::optional<lubancode::runtime::QuestionResponse> question_;
+};
+
+class TerminalWorkflowInteractionBroker final : public lubancode::runtime::InteractionBroker {
+public:
+    explicit TerminalWorkflowInteractionBroker(const lubancode::cli::Theme& theme) : theme_(theme) {}
+
+    std::shared_ptr<lubancode::runtime::InteractionFuture> AskApproval(
+        const lubancode::runtime::ApprovalRequest& request) override {
+        lubancode::tools::AskUserQuestion question;
+        question.header = "Workflow 审批";
+        question.question = request.reason.empty() ? "要放行这一步吗?" : request.reason;
+        question.options = {{"批准", "本次放行"}, {"拒绝", "不跑这一步"}};
+        auto answer = PromptAskUser(question, theme_);
+        if (!answer.has_value()) {
+            return std::make_shared<ReadyWorkflowInteractionFuture>(
+                std::optional<lubancode::runtime::ApprovalResponse>{});
+        }
+        lubancode::runtime::ApprovalResponse response;
+        if (answer->kind == lubancode::tools::AskUserResponseKind::Answered &&
+            !answer->answers.empty() && answer->answers.front() == "批准") {
+            response.decision = lubancode::runtime::InteractionDecision::Accept;
+        } else if (answer->kind == lubancode::tools::AskUserResponseKind::Declined) {
+            response.decision = lubancode::runtime::InteractionDecision::Cancel;
+        } else {
+            response.decision = lubancode::runtime::InteractionDecision::Decline;
+            response.reason = "用户拒绝";
+        }
+        return std::make_shared<ReadyWorkflowInteractionFuture>(
+            std::optional<lubancode::runtime::ApprovalResponse>{std::move(response)});
+    }
+
+    std::shared_ptr<lubancode::runtime::InteractionFuture> AskQuestion(
+        const lubancode::runtime::QuestionRequest& request) override {
+        lubancode::tools::AskUserQuestion question;
+        question.header = request.header;
+        question.question = request.question;
+        question.multi_select = request.multi_select;
+        for (const auto& option : request.options) {
+            question.options.push_back({option.label, option.description});
+        }
+        auto answer = PromptAskUser(question, theme_);
+        if (!answer.has_value() || answer->kind == lubancode::tools::AskUserResponseKind::Declined) {
+            return std::make_shared<ReadyWorkflowInteractionFuture>(
+                std::optional<lubancode::runtime::QuestionResponse>{});
+        }
+        lubancode::runtime::QuestionResponse response;
+        response.answers = answer->answers;
+        if (answer->kind == lubancode::tools::AskUserResponseKind::Discuss && !answer->message.empty()) {
+            response.answers.push_back(answer->message);
+        }
+        return std::make_shared<ReadyWorkflowInteractionFuture>(
+            std::optional<lubancode::runtime::QuestionResponse>{std::move(response)});
+    }
+
+    bool ResolveApproval(const lubancode::runtime::InteractionRequestId&,
+                         const lubancode::runtime::ApprovalResponse&) override { return false; }
+    bool AnswerQuestion(const lubancode::runtime::InteractionRequestId&,
+                        const lubancode::runtime::QuestionResponse&) override { return false; }
+
+private:
+    const lubancode::cli::Theme& theme_;
+};
+
 std::vector<std::string> BuiltinSlashWords() {
     std::vector<std::string> words;
     words.reserve(64);
@@ -37,6 +115,24 @@ std::string TrimWord(const std::string& s, std::size_t& pos) {
     const std::size_t start = pos;
     while (pos < s.size() && s[pos] != ' ' && s[pos] != '\t') ++pos;
     return s.substr(start, pos - start);
+}
+
+nlohmann::json CoerceWorkflowInput(const nlohmann::json& properties, const std::string& name,
+                                   const std::string& raw) {
+    if (!properties.is_object()) return raw;
+    const auto property = properties.find(name);
+    if (property == properties.end() || !property->is_object()) return raw;
+    const auto type = property->find("type");
+    if (type == property->end() || !type->is_string() || *type == "string") return raw;
+
+    const auto parsed = nlohmann::json::parse(raw, nullptr, false);
+    if (parsed.is_discarded()) return raw;
+    if (*type == "integer" && parsed.is_number_integer()) return parsed;
+    if (*type == "number" && parsed.is_number()) return parsed;
+    if (*type == "boolean" && parsed.is_boolean()) return parsed;
+    if (*type == "array" && parsed.is_array()) return parsed;
+    if (*type == "object" && parsed.is_object()) return parsed;
+    return raw;
 }
 
 lubancode::workflow::CapabilityTable BuildCapabilities(const WorkflowCommandContext& context) {
@@ -465,7 +561,7 @@ std::string RunWorkflowById(const WorkflowCommandContext& context, const std::st
             }
             std::string value = raw_args.substr(value_start, pos - value_start);
             if (quoted && value.size() >= 2) value = value.substr(1, value.size() - 2);
-            if (!name.empty()) inputs[name] = value;
+            if (!name.empty()) inputs[name] = CoerceWorkflowInput(props, name, value);
             continue;
         }
         const std::size_t start = pos;
@@ -488,10 +584,9 @@ std::string RunWorkflowById(const WorkflowCommandContext& context, const std::st
             if (!field.is_string()) continue;
             const std::string name = field.get<std::string>();
             if (inputs.contains(name) || arg_index >= positional.size()) continue;
-            inputs[name] = positional[arg_index++];
+            inputs[name] = CoerceWorkflowInput(props, name, positional[arg_index++]);
         }
     }
-    (void)props;
 
     lubancode::workflow::RuntimeOptions options;
     options.executors = executors;
@@ -545,6 +640,7 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
         std::make_shared<lubancode::workflow::TemplateExecutor>();
     executors[lubancode::workflow::NodeKind::Tool] =
         std::make_shared<lubancode::workflow::ToolExecutor>(exec_ctx.build_tool_options());
+    std::shared_ptr<lubancode::workflow::LlmExecutor> llm_executor;
     {
         // prompt 从 workflow 目录读(包内相对路径;越界已被 validator
         // 拦,这里只管读)。
@@ -587,8 +683,57 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
         llm_options.backend = exec_ctx.backend;
         llm_options.model = exec_ctx.model;
         llm_options.prompt_loader = workflow_prompt_loader;
-        executors[lubancode::workflow::NodeKind::Llm] =
-            std::make_shared<lubancode::workflow::LlmExecutor>(llm_options);
+        llm_executor = std::make_shared<lubancode::workflow::LlmExecutor>(llm_options);
+        executors[lubancode::workflow::NodeKind::Llm] = llm_executor;
+    }
+
+    executors[lubancode::workflow::NodeKind::Approval] =
+        std::make_shared<lubancode::workflow::ApprovalExecutor>(exec_ctx.interaction_broker.get());
+    executors[lubancode::workflow::NodeKind::AskUser] =
+        std::make_shared<lubancode::workflow::AskUserExecutor>(exec_ctx.interaction_broker.get());
+
+    std::map<std::string, std::string> skill_bodies;
+    if (exec_ctx.skills != nullptr) {
+        for (const auto& skill : *exec_ctx.skills) {
+            const std::filesystem::path file = lubancode::tools::Utf8ToPath(skill.dir_path) / "SKILL.md";
+            std::ifstream in(file, std::ios::binary);
+            if (!in) continue;
+            std::ostringstream content;
+            content << in.rdbuf();
+            const auto parsed = lubancode::tools::ParseSkillMarkdown(content.str());
+            if (parsed.has_value()) skill_bodies.emplace(skill.name, parsed->body);
+        }
+    }
+    executors[lubancode::workflow::NodeKind::Skill] =
+        std::make_shared<lubancode::workflow::SkillExecutor>(llm_executor, std::move(skill_bodies));
+
+    // nesting 首版只开一层。子流程另起自己的 Store 与预算账，只拿父节点
+    // 明写的 input；事件、发号局与交互门仍沿用本场会话。
+    if (exec_ctx.subflow_depth < 1) {
+        const auto catalog = std::make_shared<lubancode::workflow::Catalog>(
+            lubancode::workflow::LoadCatalog(wf_ctx.project_root, wf_ctx.user_root));
+        lubancode::workflow::SubflowExecutor::DefinitionResolver resolver =
+            [catalog](const std::string& id) -> std::optional<lubancode::workflow::WorkflowDefinition> {
+                const auto* entry = catalog->Find(id);
+                if (entry == nullptr || entry->broken) return std::nullopt;
+                return entry->definition;
+            };
+        lubancode::workflow::SubflowExecutor::RuntimeRunner runner =
+            [wf_ctx, exec_ctx](const lubancode::workflow::WorkflowDefinition& definition,
+                               const nlohmann::json& inputs) {
+                WorkflowExecutorContext child_ctx = exec_ctx;
+                ++child_ctx.subflow_depth;
+                lubancode::workflow::RuntimeOptions options;
+                options.executors = BuildWorkflowExecutors(wf_ctx, child_ctx, definition.id);
+                options.event_sink = exec_ctx.event_sink;
+                options.broker = exec_ctx.interaction_broker.get();
+                options.thread_id = exec_ctx.thread_id;
+                options.id_authority = exec_ctx.id_authority;
+                lubancode::workflow::WorkflowRuntime runtime(std::move(options));
+                return runtime.Run(definition, lubancode::workflow::RunInputs(inputs));
+            };
+        executors[lubancode::workflow::NodeKind::Subflow] =
+            std::make_shared<lubancode::workflow::SubflowExecutor>(std::move(resolver), std::move(runner));
     }
     return executors;
 }
@@ -634,6 +779,8 @@ lubancode::app::WorkflowExecutorContext BuildWorkflowExecutorContext(SlashDispat
     wf_exec.event_sink = ctx.session_events;
     wf_exec.thread_id = ctx.session_runtime->thread_id();
     wf_exec.id_authority = &ctx.session_runtime->ids();
+    wf_exec.interaction_broker = std::make_shared<TerminalWorkflowInteractionBroker>(*ctx.theme);
+    wf_exec.skills = ctx.skills;
     return wf_exec;
 }
 
