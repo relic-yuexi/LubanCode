@@ -1,0 +1,18 @@
+data: {"sequence_number":0,"type":"response.created","response":{"id":"resp_xxx","output":[],"created_at":1769435906,"tool_choice":"auto","model":"qwen3.7-max","status":"queued"}}
+
+data: {"sequence_number":2,"item":{"summary":[],"type":"reasoning","id":"rs_xxx"},"output_index":0,"type":"response.output_item.added"}
+
+data: {"delta":"需要调 get_weather,先想城市名。","sequence_number":3,"output_index":0,"type":"response.reasoning_summary_text.delta","item_id":"rs_xxx","summary_index":0}
+
+data: {"sequence_number":13,"text":"需要调 get_weather,先想城市名。","output_index":0,"type":"response.reasoning_summary_text.done","item_id":"rs_xxx","summary_index":0}
+
+data: {"sequence_number":14,"item":{"summary":[{"type":"summary_text","text":"..."}],"type":"reasoning","id":"rs_xxx"},"output_index":0,"type":"response.output_item.done"}
+
+data: {"sequence_number":15,"item":{"type":"function_call","id":"fc_xxx","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"杭州\"}","status":"in_progress"},"output_index":1,"type":"response.output_item.added"}
+
+data: {"delta":"{\"city\":\"杭州\"}","sequence_number":16,"output_index":1,"type":"response.function_call_arguments.delta","item_id":"fc_xxx"}
+
+data: {"sequence_number":17,"item":{"type":"function_call","id":"fc_xxx","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"杭州\"}","status":"completed"},"output_index":1,"type":"response.output_item.done"}
+
+data: {"type":"response.completed","response":{"id":"resp_xxx","status":"completed","output":[{"type":"reasoning","id":"rs_xxx","summary":[{"type":"summary_text","text":"..."}]},{"type":"function_call","id":"fc_xxx","call_id":"call_1","name":"get_weather","arguments":"{\"city\":\"杭州\"}","status":"completed"}],"usage":{"input_tokens":30,"output_tokens":50,"total_tokens":80,"output_tokens_details":{"reasoning_tokens":12}}}}
+

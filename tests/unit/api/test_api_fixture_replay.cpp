@@ -11,6 +11,7 @@
 
 #include <algorithm>
 #include <map>
+#include <random>
 #include <string>
 #include <variant>
 #include <vector>
@@ -19,6 +20,7 @@
 #include "api/chat/events.hpp"
 #include "api/gemini/events.hpp"
 #include "api/responses/events.hpp"
+#include "api/sse_framing.hpp"
 #include "api/types.hpp"
 #include "api_fixture.hpp"
 
@@ -26,6 +28,50 @@ using namespace lubancode;
 using lubancode_test::ApiFixture;
 
 namespace {
+
+// L3 的四种切法(规格"每册 wire 实录按 1 字节、随机小块、整帧、并帧四种
+// 切法重放"):随机小块用固定 seed,失败时 CAPTURE 出来,能复跑同一刀口。
+constexpr std::uint32_t kChunkSeed = 20260827;
+
+enum class ChunkMode { Whole, OneByte, RandomFixed, PairFrames };
+
+std::vector<std::string> ChunkBytes(const std::string& stream, ChunkMode mode) {
+    std::vector<std::string> chunks;
+    switch (mode) {
+    case ChunkMode::Whole:
+        chunks.push_back(stream);
+        break;
+    case ChunkMode::OneByte:
+        for (const char byte : stream) chunks.emplace_back(1, byte);
+        break;
+    case ChunkMode::RandomFixed: {
+        std::mt19937 rng(kChunkSeed);
+        std::uniform_int_distribution<int> size(3, 11);
+        for (std::size_t i = 0; i < stream.size();) {
+            const std::size_t take = std::min<std::size_t>(size(rng), stream.size() - i);
+            chunks.push_back(stream.substr(i, take));
+            i += take;
+        }
+        break;
+    }
+    case ChunkMode::PairFrames: {
+        // 按空行切帧,两帧并一块发(并帧)。
+        std::size_t begin = 0;
+        std::vector<std::string> frames;
+        while (begin < stream.size()) {
+            const std::size_t sep = stream.find("\n\n", begin);
+            const std::size_t end = sep == std::string::npos ? stream.size() : sep + 2;
+            frames.push_back(stream.substr(begin, end - begin));
+            begin = end;
+        }
+        for (std::size_t i = 0; i < frames.size(); i += 2) {
+            chunks.push_back(i + 1 < frames.size() ? frames[i] + frames[i + 1] : frames[i]);
+        }
+        break;
+    }
+    }
+    return chunks;
+}
 
 api::SseFrame Frame(const std::pair<std::string, std::string>& raw) {
     return api::SseFrame{raw.first.empty() ? std::string("message") : raw.first, raw.second};
@@ -47,25 +93,37 @@ std::string EventName(const api::StreamEvent& event) {
     }
 }
 
-// 一册 fixture 按自家 wire 喂对应 parser,吐中立事件序列。
-std::vector<api::StreamEvent> Replay(const ApiFixture& fixture) {
+// 一册 fixture 按自家 wire 喂对应 parser,吐中立事件序列。字节先按切法
+// 分块,经生产同一只 SseFramer 切帧——单帧能解、跨 chunk 就坏这类病在
+// 这层现形。
+std::vector<api::StreamEvent> Replay(const ApiFixture& fixture, ChunkMode mode) {
     std::vector<api::StreamEvent> events;
-    const auto frames = fixture.SseFrames();
+    std::vector<api::SseFrame> frames;
+    api::SseFramer framer;
+    for (const auto& chunk : ChunkBytes(fixture.stream, mode)) {
+        for (auto& frame : framer.feed(chunk)) frames.push_back(std::move(frame));
+    }
+    REQUIRE_FALSE(framer.overflowed());
+    const auto raw_frames = [&] {
+        std::vector<std::pair<std::string, std::string>> raw;
+        for (const auto& frame : frames) raw.emplace_back(frame.event, frame.data);
+        return raw;
+    }();
     if (fixture.wire == "anthropic-messages") {
-        for (const auto& raw : frames) {
+        for (const auto& raw : raw_frames) {
             if (auto event = api::anthropic::parse_event(Frame(raw)); event.has_value()) {
                 events.push_back(*event);
             }
         }
     } else if (fixture.wire == "openai-responses") {
-        for (const auto& raw : frames) {
+        for (const auto& raw : raw_frames) {
             if (auto event = api::responses::parse_event(Frame(raw)); event.has_value()) {
                 events.push_back(*event);
             }
         }
     } else if (fixture.wire == "openai-chat-completions") {
         api::chat::EventParser parser;
-        for (const auto& raw : frames) {
+        for (const auto& raw : raw_frames) {
             for (auto& event : parser.Consume(Frame(raw))) {
                 events.push_back(std::move(event));
             }
@@ -75,7 +133,7 @@ std::vector<api::StreamEvent> Replay(const ApiFixture& fixture) {
         }
     } else {
         api::gemini::EventParser parser;
-        for (const auto& raw : frames) {
+        for (const auto& raw : raw_frames) {
             for (auto& event : parser.Consume(Frame(raw))) {
                 events.push_back(std::move(event));
             }
@@ -140,12 +198,18 @@ TEST_CASE("fixture loader:全库可读、id 不重、四家 wire 各有册、手
     CHECK(per_wire["google-generate-content"] >= 1);
 }
 
-TEST_CASE("fixture 回放:每册事件类型序列/usage/stop_reason 与 manifest 对账") {
+TEST_CASE("fixture 回放:每册事件类型序列/usage/stop_reason 与 manifest 对账(四种切法)") {
     const auto all = lubancode_test::LoadAllApiFixtures();
     REQUIRE(all.has_value());
+    // 整帧、1 字节、随机小块(seed 固定)、并帧——四种刀口下的产出必须
+    // 逐桩一致:切法只该改"字节怎么到",不许改"解出什么"。
+    const std::vector<std::pair<ChunkMode, const char*>> modes = {
+        {ChunkMode::Whole, "整帧"}, {ChunkMode::OneByte, "1 字节"},
+        {ChunkMode::RandomFixed, "随机小块"}, {ChunkMode::PairFrames, "并帧"}};
     for (const auto& fixture : *all) {
-        CAPTURE(fixture.fixture_id);
-        const auto events = Replay(fixture);
+        for (const auto& [mode, mode_name] : modes) {
+            CAPTURE(fixture.fixture_id, mode_name, kChunkSeed);
+            const auto events = Replay(fixture, mode);
 
         std::vector<std::string> names;
         names.reserve(events.size());
@@ -176,6 +240,7 @@ TEST_CASE("fixture 回放:每册事件类型序列/usage/stop_reason 与 manifes
             expect("output_reasoning_tokens", done->usage.output_reasoning_tokens);
         } else {
             CHECK(done == nullptr);
+        }
         }
     }
 }
