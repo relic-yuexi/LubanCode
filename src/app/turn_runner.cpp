@@ -1114,6 +1114,15 @@ RunTurnResult RunTurn(TurnContext ctx) {
     const std::chrono::steady_clock::time_point turn_wall_start = std::chrono::steady_clock::now();
     const bool stream_footer_enabled =
         is_console && lubancode::platform::SupportsScreenRepaint() && !silent;
+    // 条 6(画面隔网):能力探测失败不再悄悄藏掉输入框——真控制台但原地
+    // 重画探不到时明报一行降级,键入照收(TurnInputListener 不依赖 footer,
+    // 排队/打断全在),别让用户以为程序哑了。
+    if (is_console && !silent && !stream_footer_enabled) {
+        std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+        TermOut() << theme.stats << lubancode::cli::tr("footer.repaint_unsupported") << theme.reset
+                  << "\n";
+        TermOut().flush();
+    }
 
     // 先立 footer 的状态与画布,再点亮 turn 活动条。旧次序倒着调:
     // BeginTurnActivity 看见 footer 尚未启用便直接返回,随后 BeginStreamFooter

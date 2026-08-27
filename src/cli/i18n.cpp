@@ -261,6 +261,8 @@ const Entry kZhCN[] = {
     {"input.ctrlc_exit", "[已退出]"},
     {"stream.hint", "键入并回车 排队下一条 · Esc 打断"},
     {"stream.hint.plain", "键入并回车排队 · Esc 打断"},
+    {"footer.repaint_unsupported",
+     "[此终端不支持忙时重绘,流式期间不画输入框;键入照收(排队),Esc 照常打断]"},
     {"spinner.thinking", "思考中"},
     {"spinner.stopping", "正在停…"},
 
@@ -1903,6 +1905,8 @@ const Entry kEn[] = {
     {"input.ctrlc_exit", "[exited]"},
     {"stream.hint", "type + Enter to queue next · Esc to interrupt"},
     {"stream.hint.plain", "type + Enter to queue next · Esc to interrupt"},
+    {"footer.repaint_unsupported",
+     "[This terminal cannot repaint while streaming; no input box during streaming. Typing still queues, Esc still interrupts]"},
     {"spinner.thinking", "Working"},
     {"spinner.stopping", "Stopping..."},
     {"ask_user.other", "Other (type your own answer)"},
