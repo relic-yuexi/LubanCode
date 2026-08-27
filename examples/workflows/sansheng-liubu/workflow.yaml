@@ -1,4 +1,4 @@
-# 三省六部:中书与门下动态往复 -> 三房齐动 -> 缴旨收尾。
+# 三省六部:中书与门下动态往复 -> 工房营造 -> 刑兵并验 -> 缴旨收尾。
 #
 # 设计注记(详见 examples/workflows/README.md):
 #   - 尚书省不设节点:workflow 图本身就是尚书省,确定性分发,不费模型。
@@ -11,7 +11,7 @@ id: sansheng-liubu
 version: 1.0.0
 name: 三省六部
 alias: sansheng-liubu
-description: "中书与门下动态封驳,放行后三房并行干活;撞帽则带全账收口"
+description: "中书与门下动态封驳,放行后先改代码再并行测试构建;撞帽则带全账收口"
 enabled: true
 
 inputs:
@@ -21,6 +21,7 @@ inputs:
   properties:
     requirement:
       type: string
+      description: "皇上，您有什么需求？"
     review_limit:
       type: integer
       minimum: 1
@@ -103,13 +104,12 @@ nodes:
 
   liubu:
     type: parallel
-    label: "三房齐动"
+    label: "刑兵二房 并行查验"
     branches:
-      - gongfang
       - xingfang
       - bingfang
-    join: all_settled
-    max_concurrency: 3
+    join: all
+    max_concurrency: 2
 
   gongfang:
     type: agent
@@ -122,7 +122,7 @@ nodes:
       - search
     step_limit: 40
     input:
-      task: "${nodes.zhongshu.output.tasks.gongfang}"
+      task: "${nodes.fengbo.output.last.outputs.zhongshu.tasks.gongfang}"
 
   xingfang:
     type: agent
@@ -135,7 +135,7 @@ nodes:
       - search
     step_limit: 40
     input:
-      task: "${nodes.zhongshu.output.tasks.xingfang}"
+      task: "${nodes.fengbo.output.last.outputs.zhongshu.tasks.xingfang}"
 
   bingfang:
     type: agent
@@ -147,7 +147,7 @@ nodes:
       - read_file
     step_limit: 20
     input:
-      task: "${nodes.zhongshu.output.tasks.bingfang}"
+      task: "${nodes.fengbo.output.last.outputs.zhongshu.tasks.bingfang}"
 
   shouwei:
     type: end
@@ -160,16 +160,22 @@ nodes:
 edges:
   - from: fengbo
     on: success
-    to: liubu
+    to: gongfang
   - from: fengbo
     on: exhausted
     to: weijue
+  - from: gongfang
+    on: success
+    to: liubu
   - from: liubu
     on: joined
     to: shouwei
 
 result:
-  edict: "${nodes.zhongshu.output}"
-  verdict: "${nodes.menxia.output}"
+  edict: "${nodes.fengbo.output.last.outputs.zhongshu}"
+  verdict: "${nodes.fengbo.output.last.outputs.menxia}"
   review_iterations: "${nodes.fengbo.output.completed_iterations}"
   review_history: "${nodes.fengbo.output.history}"
+  implementation: "${nodes.gongfang.output}"
+  verification: "${nodes.xingfang.output}"
+  build: "${nodes.bingfang.output}"

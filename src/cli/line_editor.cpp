@@ -369,6 +369,12 @@ EditLineWindow ComputeEditLineWindow(const std::u32string& line, std::size_t cur
 LineEditorCore::LineEditorCore(std::vector<CompletionCandidate> slash_candidates)
     : slash_candidates_(std::move(slash_candidates)) {}
 
+void LineEditorCore::SetSlashCandidates(std::vector<CompletionCandidate> slash_candidates) {
+    slash_candidates_ = std::move(slash_candidates);
+    tab_cycle_.reset();
+    menu_selection_.reset();
+}
+
 void LineEditorCore::BeginLine(bool composer) {
     composer_ = composer;
     ClearBuffer();

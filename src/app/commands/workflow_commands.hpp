@@ -11,6 +11,7 @@
 
 #include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
 #include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
+#include "cli/line_editor.hpp"             // CompletionCandidate(alias 补全)
 
 #include <filesystem>
 #include <functional>
@@ -46,6 +47,10 @@ struct WorkflowCommandContext {
     const lubancode::tools::ToolRegistry* registry = nullptr;  // capability 快照
     std::vector<std::string> skill_names;               // 撞名检查用
     const lubancode::cli::Theme* theme = nullptr;       // 必填(指针免默认构造被删)
+    // 直呼 workflow 却没带必填输入时，终端可据字段 schema 当场问一句。
+    // headless/app-server 不装这只口，仍由 runtime 返回 invalid_inputs。
+    std::function<std::optional<std::string>(const std::string& field,
+                                             const nlohmann::json& schema)> request_input;
 };
 
 // 拆好的 /workflow 子命令。Invalid 时 usage 打印兜底。
@@ -91,6 +96,10 @@ std::string RunWorkflowById(const WorkflowCommandContext& context, const std::st
 // 会话层给 alias 直呼用的查询:catalog 里有没有这个 alias;返回 workflow
 // id(撞名禁用/不存在给空串)。第 5 批把这里换成 autocomplete 同源。
 std::string ResolveWorkflowAlias(const WorkflowCommandContext& context, const std::string& alias);
+
+// 当前 catalog 里可直呼、未撞名、已启用的 alias，供两只 composer 补全。
+std::vector<lubancode::cli::CompletionCandidate> BuildWorkflowSlashCompletionCandidates(
+    const WorkflowCommandContext& context);
 
 // ---- 执行器装配(终端接线收尾单自大类两段重复装配收口) ------------------
 //

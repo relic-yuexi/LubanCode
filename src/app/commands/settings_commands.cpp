@@ -214,11 +214,27 @@ void PrintSkillsCommand(const std::vector<lubancode::tools::SkillMeta>& skills, 
         return;
     }
     TermOut() << trf("cmd.skills.header", skills.size()) << "\n";
+    const std::vector<std::string> preferred_order = {"项目级", "主目录级", "官方"};
+    std::set<std::string> printed;
+    auto print_group = [&](const std::string& source) {
+        std::vector<const lubancode::tools::SkillMeta*> group;
+        for (const auto& skill : skills) {
+            if (skill.source_level == source) group.push_back(&skill);
+        }
+        if (group.empty()) return;
+        printed.insert(source);
+        TermOut() << "\n" << source << " · " << group.size() << "\n";
+        for (const auto* skill : group) {
+            TermOut() << "  " << skill->name << "\n"
+                      << "    "
+                      << (skill->description.empty() ? tr("cmd.skills.no_desc") : skill->description) << "\n";
+        }
+    };
+    for (const auto& source : preferred_order) print_group(source);
     for (const auto& skill : skills) {
-        TermOut() << "  - " << skill.name << " [" << skill.source_level << "]: "
-                   << (skill.description.empty() ? tr("cmd.skills.no_desc") : skill.description) << "\n";
-        TermOut() << "      " << skill.dir_path << "\n";
+        if (printed.count(skill.source_level) == 0) print_group(skill.source_level);
     }
+    TermOut() << "\n" << tr("cmd.skills.manage_hint") << "\n";
 }
 
 // /skill 的参数只认第一个单词作动词,余下整段留给 URL、本地路径或技能名。命令

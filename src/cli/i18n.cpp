@@ -1136,8 +1136,9 @@ const Entry kZhCN[] = {
      "  description: 一句话说明这个技能是干什么的、什么时候该用\n"
      "  ---\n"
      "  正文写具体怎么做。"},
-    {"cmd.skills.header", "已扫描到 {0} 个技能:"},
+    {"cmd.skills.header", "技能 · {0}"},
     {"cmd.skills.no_desc", "(没写说明)"},
+    {"cmd.skills.manage_hint", "安装、更新、移除与完整路径: /skill list"},
 
     // ---- /skill ----
     {"cmd.skill.usage",

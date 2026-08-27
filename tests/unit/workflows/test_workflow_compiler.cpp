@@ -332,6 +332,44 @@ result:
         const std::string out = lubancode::app::RunWorkflowById(ctx, "echo-flow", "量子纠错", executors);
         CHECK(out.find("succeeded") != std::string::npos);
     }
+    SUBCASE("裸启动会按 schema 问必填需求，再把整句送进 workflow") {
+        int questions = 0;
+        ctx.request_input = [&](const std::string& field,
+                                const nlohmann::json& schema) -> std::optional<std::string> {
+            ++questions;
+            CHECK(field == "topic");
+            CHECK(schema["type"] == "string");
+            return "先查清根因，再修掉这个 bug";
+        };
+        const std::string out = lubancode::app::RunWorkflowById(ctx, "echo-flow", "", executors);
+        CHECK(questions == 1);
+        CHECK(out.find("succeeded") != std::string::npos);
+        CHECK(out.find("先查清根因，再修掉这个 bug") != std::string::npos);
+    }
+    SUBCASE("别名后带需求便直送，不再补问") {
+        int questions = 0;
+        ctx.request_input = [&](const std::string&, const nlohmann::json&) -> std::optional<std::string> {
+            ++questions;
+            return "不该问到这里";
+        };
+        const std::string out = lubancode::app::RunWorkflowById(
+            ctx, "echo-flow", "修复 src 里的工作流入口", executors);
+        CHECK(questions == 0);
+        CHECK(out.find("succeeded") != std::string::npos);
+        CHECK(out.find("修复 src 里的工作流入口") != std::string::npos);
+    }
+    SUBCASE("自然语言尾巴原样直送，正文里的双横线不当参数") {
+        const std::string out = lubancode::app::RunWorkflowById(
+            ctx, "echo-flow", "检查  --dry-run  不该丢", executors);
+        CHECK(out.find("succeeded") != std::string::npos);
+        CHECK(out.find("检查  --dry-run  不该丢") != std::string::npos);
+    }
+    SUBCASE("单一 string 必填项吃完整自然语言,并宽容提示符分隔") {
+        const std::string out = lubancode::app::RunWorkflowById(
+            ctx, "echo-flow", "> /chaoting D:\\lubancode\\src 美化 /skills 显示", executors);
+        CHECK(out.find("succeeded") != std::string::npos);
+        CHECK(out.find("/chaoting D:\\\\lubancode\\\\src 美化 /skills 显示") != std::string::npos);
+    }
     SUBCASE("具名参数按 schema 类型取值") {
         const std::string out = lubancode::app::RunWorkflowById(
             ctx, "echo-flow", "--topic test --review_limit=5", executors);
@@ -419,6 +457,14 @@ TEST_CASE("alias 直呼解析:ResolveWorkflowAlias") {
     ctx.theme = &theme;
     CHECK(lubancode::app::ResolveWorkflowAlias(ctx, "论文检索") == "aliased");
     CHECK(lubancode::app::ResolveWorkflowAlias(ctx, "not-registered").empty());
+    const auto candidates = lubancode::app::BuildWorkflowSlashCompletionCandidates(ctx);
+    REQUIRE(candidates.size() == 1);
+    CHECK(candidates[0].name == "/论文检索");
+
+    // 撞 skill 后，执行入口与补全须同拍禁用，不能一边提示、一边不认。
+    ctx.skill_names.push_back("论文检索");
+    CHECK(lubancode::app::ResolveWorkflowAlias(ctx, "论文检索").empty());
+    CHECK(lubancode::app::BuildWorkflowSlashCompletionCandidates(ctx).empty());
 }
 
 }  // TEST_SUITE(workflows-compiler)

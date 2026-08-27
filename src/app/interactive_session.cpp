@@ -490,6 +490,7 @@ void TerminalSessionController::SyncWorktreeDirectory() {
     if (session_store.active()) {
         session_store.AppendCwdEvent(prompt_options.cwd);
     }
+    RefreshWorkflowCompletions();
 }
 
 // 处理"确定不是空行、不是裸词 exit/quit"的一行输入,不管这行是刚

@@ -222,6 +222,10 @@ public:
     // (调用方从 slash_commands 现有定义转换过来,核心层不重复定义)。
     explicit LineEditorCore(std::vector<CompletionCandidate> slash_candidates = {});
 
+    // 会话运行中会安装/停用 workflow alias。新一轮读取前换入最新候选，
+    // 保留历史与确认档，只清掉依赖旧候选的菜单/Tab 状态。
+    void SetSlashCandidates(std::vector<CompletionCandidate> slash_candidates);
+
     // 开始读新的一行:清空行缓冲、光标、Tab 补全会话状态、历史浏览位置
     // (回到"底部");历史列表本身和确认模式是会话级的,跨多轮 BeginLine()
     // 保留,这里不碰。

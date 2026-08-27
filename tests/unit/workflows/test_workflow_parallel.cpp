@@ -158,6 +158,28 @@ TEST_CASE("四路真并行:线程数=分支数,汇合按定义顺序") {
     CHECK(summary.result["unavailable"].size() == 0);
 }
 
+TEST_CASE("parallel 汇合边写 joined 也能走到 end 并结算 result") {
+    using namespace lubancode::workflow;
+    std::string yaml = kFourWayYaml;
+    const std::string old_edge = "on: success";
+    const std::size_t edge = yaml.find(old_edge);
+    REQUIRE(edge != std::string::npos);
+    yaml.replace(edge, old_edge.size(), "on: joined");
+    const WorkflowDefinition def = ParseOrDie(yaml.c_str());
+
+    auto executor = std::make_shared<TrackingExecutor>();
+    for (const char* id : {"arxiv", "dblp", "scholar", "anysearch"}) {
+        executor->behaviors[id] = {false, "", 0, nlohmann::json{{"source", id}}};
+    }
+    RuntimeOptions options;
+    options.executors[NodeKind::Transform] = executor;
+    const auto summary = WorkflowRuntime(options).Run(def, RunInputs{});
+
+    REQUIRE(summary.state == RunState::Succeeded);
+    REQUIRE(summary.result.contains("sources"));
+    CHECK(summary.result["sources"].size() == 4);
+}
+
 TEST_CASE("all_settled:一路失败其余照交,缺失账明写") {
     using namespace lubancode::workflow;
     const WorkflowDefinition def = ParseOrDie(kFourWayYaml);

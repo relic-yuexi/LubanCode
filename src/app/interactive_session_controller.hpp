@@ -100,6 +100,7 @@ private:
     // 下一份请求即时生效——从前这活是传输层包装器在 send_stream 里干的)。
     void SyncAgentRequestPolicy();
     void RefreshSkills();
+    void RefreshWorkflowCompletions();
     void RefreshProjectInstructions();
     void PersistNewMessages();
     // 建档与开仓(第二期):建档提前到发轮前;仓跟着会话 id 开张。

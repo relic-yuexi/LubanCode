@@ -527,6 +527,22 @@ TEST_CASE("BuildSlashCompletionCandidates: 与 AllSlashCommands 逐条对齐,/th
     CHECK(has_effort);
 }
 
+TEST_CASE("BuildSlashCompletionCandidates: 会话可追加并清空 workflow alias") {
+    SetAdditionalSlashCompletionCandidates({{"/sansheng-liubu", "Workflow · 三省六部"}});
+    auto candidates = BuildSlashCompletionCandidates();
+    const auto found = std::find_if(candidates.begin(), candidates.end(), [](const auto& candidate) {
+        return candidate.name == "/sansheng-liubu";
+    });
+    REQUIRE(found != candidates.end());
+    CHECK(found->description.find("三省六部") != std::string::npos);
+
+    SetAdditionalSlashCompletionCandidates({});
+    candidates = BuildSlashCompletionCandidates();
+    CHECK(std::none_of(candidates.begin(), candidates.end(), [](const auto& candidate) {
+        return candidate.name == "/sansheng-liubu";
+    }));
+}
+
 TEST_CASE("忙碌路同款 editor: /eff 出提示,Tab 一补成 /effort ,该命令用法行留住") {
     LineEditorCore editor(BuildSlashCompletionCandidates());
     editor.BeginLine(/*composer=*/true);

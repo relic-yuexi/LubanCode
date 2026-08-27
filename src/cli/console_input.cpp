@@ -84,13 +84,39 @@
 
 namespace lubancode::cli {
 
+namespace {
+
+std::mutex& AdditionalSlashCandidatesMutex() {
+    static std::mutex mutex;
+    return mutex;
+}
+
+std::vector<CompletionCandidate>& AdditionalSlashCandidatesSlot() {
+    static std::vector<CompletionCandidate> candidates;
+    return candidates;
+}
+
+}  // namespace
+
+void SetAdditionalSlashCompletionCandidates(std::vector<CompletionCandidate> candidates) {
+    std::lock_guard<std::mutex> lock(AdditionalSlashCandidatesMutex());
+    AdditionalSlashCandidatesSlot() = std::move(candidates);
+}
+
 std::vector<CompletionCandidate> BuildSlashCompletionCandidates() {
     // 见 console_input.hpp 的声明注释:空闲 SharedEditor() 与流式监听线程
     // 的本地编辑器共用这唯一一只转换口,组装循环不许再抄第二遍。
     std::vector<CompletionCandidate> candidates;
-    candidates.reserve(AllSlashCommands().size());
+    std::lock_guard<std::mutex> lock(AdditionalSlashCandidatesMutex());
+    candidates.reserve(AllSlashCommands().size() + AdditionalSlashCandidatesSlot().size());
     for (const auto& cmd : AllSlashCommands()) {
         candidates.push_back(CompletionCandidate{cmd.name, cmd.description});
+    }
+    for (const auto& candidate : AdditionalSlashCandidatesSlot()) {
+        const bool duplicate = std::any_of(candidates.begin(), candidates.end(), [&](const auto& existing) {
+            return existing.name == candidate.name;
+        });
+        if (!duplicate) candidates.push_back(candidate);
     }
     return candidates;
 }
@@ -901,6 +927,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     BracketedPasteScope paste_scope(composer && !theme.reset.empty());
 
     LineEditorCore& editor = SharedEditor();
+    editor.SetSlashCandidates(BuildSlashCompletionCandidates());
     editor.BeginLine(composer);
 
     // 0.17.0:composer 读取开输入框(上横线 + 按内容长高的正文区 + 下横线 +

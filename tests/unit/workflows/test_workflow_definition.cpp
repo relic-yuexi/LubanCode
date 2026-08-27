@@ -295,6 +295,11 @@ TEST_CASE("示例 workflow:三省六部动态封驳可解析、可校验") {
         for (const auto& issue : parsed.error()) MESSAGE(issue.location, ": ", issue.message);
     }
     REQUIRE(parsed.has_value());
+    REQUIRE(parsed->inputs["properties"]["requirement"].is_object());
+    CHECK(parsed->inputs["properties"]["requirement"]["description"] == "皇上，您有什么需求？");
+    REQUIRE(parsed->node_map.contains("fengbo"));
+    REQUIRE_FALSE(parsed->node_map.at("fengbo").loop_body.empty());
+    CHECK(parsed->node_map.at("fengbo").loop_body.front() == "zhongshu");
     const auto validation = lubancode::workflow::ValidateDefinition(*parsed, std::nullopt);
     for (const auto& issue : validation.issues) MESSAGE(issue.code, " ", issue.path, ": ", issue.message);
     CHECK(validation.ok());

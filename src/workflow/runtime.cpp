@@ -1415,6 +1415,12 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
                 break;
             }
             current = NextNodeFor(definition, node.id, join_outcome.empty() ? "joined" : join_outcome);
+            // 旧定义与 schema 文档把 parallel 的汇合边写作 joined，执行器
+            // 内部则用 success 表示 join 策略通过。两种词都已流通过，先认
+            // 执行器原词，再认 joined，免得图在汇合处无声断掉。
+            if (current.empty() && join_outcome == "success") {
+                current = NextNodeFor(definition, node.id, "joined");
+            }
             continue;
         }
         // map/foreach:数组拆项,逐项跑 body(map 并发,foreach 顺次)。
@@ -1525,8 +1531,17 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
     }
 
     if (account.state == RunState::Running) {
-        // 循环自然耗尽(空 current 起步等):按成功收。
-        account.state = RunState::Succeeded;
+        // 结构节点(loop/parallel/map/reduce)可能把 current 走到空。不能只把
+        // 状态改成成功而漏掉 result；统一在这里结算，引用断了也明白报错。
+        auto result = BuildResult(definition, store);
+        if (result.has_value()) {
+            account.result = std::move(*result);
+            account.state = RunState::Succeeded;
+        } else {
+            account.state = RunState::Failed;
+            account.error_code = "resolve_result";
+            account.error_message = result.error().path + ": " + result.error().message;
+        }
     }
 
     account.duration_ms = (options_.clock ? options_.clock->NowMs() : JournalClock().NowMs()) - started_ms;

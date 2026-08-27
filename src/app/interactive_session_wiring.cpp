@@ -712,6 +712,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
 
     // 命令注册制的分派材料:全部装配完了一次配齐(handler 从这取料)。
     AssembleDispatchContext();
+    RefreshWorkflowCompletions();
 }
 
 TerminalSessionController::~TerminalSessionController() {
@@ -738,6 +739,7 @@ TerminalSessionController::~TerminalSessionController() {
     lubancode::cli::SetBackgroundNoticeHook(nullptr);
     lubancode::cli::SetPromptHistoryProvider(nullptr);
     lubancode::cli::SetFileMentionProvider(nullptr);
+    lubancode::cli::SetAdditionalSlashCompletionCandidates({});
     // 空闲唤醒源先摘;loop 随后停 timer/join(shutdown 要 join,不能让
     // callback 析构后摸 this)。
     subagent_wake_token_.reset();
@@ -880,7 +882,20 @@ void TerminalSessionController::RefreshSkills() {
         tool->SetSkillsSegment(skills_segment);
     }
     prompt_options.skills_segment = skills_segment;
+    RefreshWorkflowCompletions();
     RebuildLoop(/*preserve_history=*/true);
+}
+
+void TerminalSessionController::RefreshWorkflowCompletions() {
+    lubancode::app::WorkflowCommandContext wf_ctx;
+    wf_ctx.project_root = std::filesystem::current_path();
+    wf_ctx.user_root = home_dir.has_value()
+                           ? std::optional<std::filesystem::path>(lubancode::tools::Utf8ToPath(*home_dir))
+                           : std::nullopt;
+    wf_ctx.theme = &theme;
+    for (const auto& skill : skills) wf_ctx.skill_names.push_back(skill.name);
+    lubancode::cli::SetAdditionalSlashCompletionCandidates(
+        lubancode::app::BuildWorkflowSlashCompletionCandidates(wf_ctx));
 }
 
 void TerminalSessionController::RefreshProjectInstructions() {
@@ -949,6 +964,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.rebuild_loop = [this](bool preserve_history) { RebuildLoop(preserve_history); };
     ctx.sync_request_policy = [this]() { SyncAgentRequestPolicy(); };
     ctx.refresh_skills = [this]() { RefreshSkills(); };
+    ctx.refresh_workflow_completions = [this]() { RefreshWorkflowCompletions(); };
     ctx.refresh_project_instructions = [this]() { RefreshProjectInstructions(); };
     ctx.sync_worktree_directory = [this]() { SyncWorktreeDirectory(); };
     ctx.ensure_memory_tool = [this]() { EnsureMemoryTool(); };

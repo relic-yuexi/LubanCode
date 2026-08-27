@@ -210,6 +210,10 @@ void SetConfirmMode(ConfirmMode mode);
 // 态副本(语言切换后下一只编辑器自然拿到新说明)。
 std::vector<CompletionCandidate> BuildSlashCompletionCandidates();
 
+// 会话层把当前可直呼的 workflow alias 放进来；空 vector 即清空。内建
+// 命令仍由 AllSlashCommands() 独占，动态项只作附加候选。
+void SetAdditionalSlashCompletionCandidates(std::vector<CompletionCandidate> candidates);
+
 // UI-D(0.16.0):等输入期间(composer 主提示符)按下 Ctrl+O / Ctrl+E /
 // 空 composer Tab / Shift+Tab / ESC(聚焦查看态返回用)时,终端层把语义
 // 转发给应用层的动作。终端层自己零 transcript 知识:回调打印什么它不管,

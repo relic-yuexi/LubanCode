@@ -27,12 +27,13 @@ cp -r examples/workflows/sansheng-liubu .lubancode/workflows/
 ```
 
 定义了 alias 的可以直呼:`/sansheng-liubu 给README补一段安装说明`。
+裸敲 `/sansheng-liubu` 时，朝廷会先问“皇上，您有什么需求？”，接住下一句再开跑。
 
 ---
 
 ## sansheng-liubu — 三省六部
 
-借三省六部的骨架跑一件事:分权起草、动态封驳、并行干活。
+借三省六部的骨架跑一件事:分权起草、动态封驳、先改后验。
 
 ```
 皇帝(requirement)
@@ -40,8 +41,9 @@ cp -r examples/workflows/sansheng-liubu .lubancode/workflows/
 往复封驳 fengbo(loop,默认最多 12 轮,用户可调,硬帽 20)
   ├─ 中书 zhongshu(llm):起草或据上一轮理由修订
   ├─ 门下 menxia(llm):审核,approved=true 当场停
-  ├─ success → 三房齐动 liubu(parallel,all_settled)
-  │               ├─ 工房 gongfang(agent·coder)
+  ├─ success → 工房 gongfang(agent·coder)
+  │               ↓ success
+  │             刑兵并验 liubu(parallel,all)
   │               ├─ 刑房 xingfang(agent·tester)
   │               └─ 兵房 bingfang(agent·builder)
   │               ↓ joined
@@ -74,10 +76,10 @@ cp -r examples/workflows/sansheng-liubu .lubancode/workflows/
 
 - **加房**:在 `liubu.branches` 添一只 agent 节点,诏书 schema 的 `tasks` 同步加字段,中书/门下的 prompt 里补这房的差事规矩。
 - **换活**:三房按活分(营造/按验/演武),不按官名分。差事变了改 prompts,图可以不动。
-- **调帽**:`limits` 里的 `timeout`/`tokens`/`tool_calls` 按差事轻重放收;三房并行吃 `max_concurrency`。
+- **调帽**:`limits` 里的 `timeout`/`tokens`/`tool_calls` 按差事轻重放收;刑兵二房并行吃 `max_concurrency`。
 
 ### 已知边界
 
 - approval/ask_user 依赖 InteractionBroker——交互终端里可用；无人值守宿主没装 Broker 时会明报 `not_configured`,不挂死。
 - agent 节点 `role` 当前无注册名录校验(能力表 agent_roles 为空),role 名自由;将来接了名录,validate 会点名。
-- 三房并行各自动手,共用工作区会互踩;要隔离,等 agent 节点接上 worktree 隔离(AgentTool 已有 IsolationRooms,workflow 装配层未接线)。
+- 工房先写，刑房与兵房随后只读查验。若往并行分支里添写操作，仍须先接 worktree 隔离，免得共用工作区互踩。

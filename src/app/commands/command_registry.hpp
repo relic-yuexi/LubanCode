@@ -149,6 +149,7 @@ struct SlashDispatchContext {
     std::function<void(bool)> rebuild_loop;               // /provider 切换后的重建
     std::function<void()> sync_request_policy;            // /think /soul 的皮上刷新
     std::function<void()> refresh_skills;                 // /skill /record install
+    std::function<void()> refresh_workflow_completions;   // /workflow alias 目录/启停变化
     std::function<void()> refresh_project_instructions;   // /init
     std::function<void()> sync_worktree_directory;        // /worktree 搬房善后
     std::function<void()> ensure_memory_tool;             // /memory on/learn 后补注册

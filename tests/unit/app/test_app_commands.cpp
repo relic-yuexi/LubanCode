@@ -52,6 +52,26 @@ std::filesystem::path TempDir(const std::string& tag) {
 
 using namespace lubancode::app;
 
+TEST_CASE("/skills 按来源分组,说明另起一行,不把长路径铺满屏") {
+    std::vector<lubancode::tools::SkillMeta> skills = {
+        {"project-skill", "项目说明", "D:/very/long/project/path", "项目级"},
+        {"official-skill", "官方说明", "D:/very/long/official/path", "官方"},
+        {"home-skill", "主目录说明", "D:/very/long/home/path", "主目录级"},
+    };
+    std::ostringstream captured;
+    std::streambuf* const old_buf = std::cout.rdbuf(captured.rdbuf());
+    PrintSkillsCommand(skills, "D:/work", std::optional<std::string>("C:/home"));
+    std::cout.rdbuf(old_buf);
+
+    const std::string out = captured.str();
+    CHECK(out.find("技能 · 3") != std::string::npos);
+    CHECK(out.find("项目级 · 1") != std::string::npos);
+    CHECK(out.find("主目录级 · 1") != std::string::npos);
+    CHECK(out.find("官方 · 1") != std::string::npos);
+    CHECK(out.find("D:/very/long") == std::string::npos);
+    CHECK(out.find("/skill list") != std::string::npos);
+}
+
 // /config 的 hooks 摘要:旧四枚数组之外,schema 2 events 也得按事件名数出
 // 来,user/project 两层分开——数量与启动横幅、/hooks 的"已装载 N 条"对账
 // (schema 2 ×N 的 N = 装载后的定义数,即全部 handler 数)。

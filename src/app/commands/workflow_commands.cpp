@@ -5,6 +5,7 @@
 #include "app/turn_runner.hpp"                  // PromptAskUser(终端交互宿主)
 #include "tools/path_utils.hpp"                // Utf8ToPath(catalog 锚点拼路径)
 #include "tools/skill_loader.hpp"
+#include "cli/console_input.hpp"
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 using lubancode::cli::TermOut;
@@ -12,12 +13,14 @@ using lubancode::cli::TermErr;
 
 #include <fstream>
 #include <iostream>
+#include <mutex>
 #include <sstream>
 
 #include "agent/agent.hpp"  // AgentProfile(批四自立门户)
 #include "cli/slash_commands.hpp"
 #include "config/model_catalog.hpp"
 #include "platform/paths.hpp"
+#include "platform/text_encoding.hpp"
 #include "workflow/compiler.hpp"
 #include "workflow/graph_view.hpp"
 
@@ -110,11 +113,34 @@ std::vector<std::string> BuiltinSlashWords() {
     return words;
 }
 
+lubancode::workflow::Catalog LoadCheckedCatalog(const WorkflowCommandContext& context) {
+    lubancode::workflow::Catalog catalog =
+        lubancode::workflow::LoadCatalog(context.project_root, context.user_root);
+    lubancode::workflow::DetectAliasConflicts(catalog, context.skill_names, BuiltinSlashWords());
+    return catalog;
+}
+
 std::string TrimWord(const std::string& s, std::size_t& pos) {
     while (pos < s.size() && (s[pos] == ' ' || s[pos] == '\t')) ++pos;
     const std::size_t start = pos;
     while (pos < s.size() && s[pos] != ' ' && s[pos] != '\t') ++pos;
     return s.substr(start, pos - start);
+}
+
+std::string TrimWorkflowRunArgs(const std::string& raw) {
+    std::size_t begin = 0;
+    while (begin < raw.size() && (raw[begin] == ' ' || raw[begin] == '\t')) ++begin;
+    // 终端里常有人把提示符/视觉分隔写成 `/alias > 需求`。`>` 不是一份
+    // 有用的需求，旧解析器却拿它填唯一必填项，后文全丢。这里宽容这一种
+    // 明确形状；真正以 `>` 起头且后面不跟空白的正文原样保留。
+    if (begin < raw.size() && raw[begin] == '>' && begin + 1 < raw.size() &&
+        (raw[begin + 1] == ' ' || raw[begin + 1] == '\t')) {
+        ++begin;
+        while (begin < raw.size() && (raw[begin] == ' ' || raw[begin] == '\t')) ++begin;
+    }
+    std::size_t end = raw.size();
+    while (end > begin && (raw[end - 1] == ' ' || raw[end - 1] == '\t')) --end;
+    return raw.substr(begin, end - begin);
 }
 
 nlohmann::json CoerceWorkflowInput(const nlohmann::json& properties, const std::string& name,
@@ -274,10 +300,26 @@ ParsedWorkflowCommand ParseWorkflowCommand(const std::string& args) {
 }
 
 std::string ResolveWorkflowAlias(const WorkflowCommandContext& context, const std::string& alias) {
-    const lubancode::workflow::Catalog catalog =
-        lubancode::workflow::LoadCatalog(context.project_root, context.user_root);
+    const lubancode::workflow::Catalog catalog = LoadCheckedCatalog(context);
     const lubancode::workflow::CatalogEntry* entry = catalog.FindByAlias(alias);
     return entry != nullptr ? entry->definition.id : std::string();
+}
+
+std::vector<lubancode::cli::CompletionCandidate> BuildWorkflowSlashCompletionCandidates(
+    const WorkflowCommandContext& context) {
+    const lubancode::workflow::Catalog catalog = LoadCheckedCatalog(context);
+    std::vector<lubancode::cli::CompletionCandidate> candidates;
+    for (const auto& entry : catalog.entries) {
+        const auto& def = entry.definition;
+        if (entry.broken || !def.enabled || def.alias.empty() ||
+            catalog.disabled_aliases.count(def.alias) > 0) {
+            continue;
+        }
+        std::string description = "Workflow · " + def.name;
+        if (!def.description.empty()) description += " · " + def.description;
+        candidates.push_back({"/" + def.alias, std::move(description)});
+    }
+    return candidates;
 }
 
 bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext& context) {
@@ -289,8 +331,7 @@ bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext
         return true;
     }
 
-    const lubancode::workflow::Catalog catalog =
-        lubancode::workflow::LoadCatalog(context.project_root, context.user_root);
+    const lubancode::workflow::Catalog catalog = LoadCheckedCatalog(context);
 
     switch (parsed.action) {
         case WorkflowCommandAction::List: {
@@ -522,69 +563,128 @@ std::string RunWorkflowById(const WorkflowCommandContext& context, const std::st
                             const std::map<lubancode::workflow::NodeKind,
                                            std::shared_ptr<lubancode::workflow::NodeExecutor>>& executors) {
     const lubancode::cli::Theme& theme = *context.theme;
-    const lubancode::workflow::Catalog catalog =
-        lubancode::workflow::LoadCatalog(context.project_root, context.user_root);
+    const lubancode::workflow::Catalog catalog = LoadCheckedCatalog(context);
     const lubancode::workflow::CatalogEntry* entry = catalog.Find(id);
     if (entry == nullptr) {
         return theme.error + "找不到 workflow: " + id + theme.reset;
     }
 
-    // 参数解析:按 input_schema 的 properties 逐个 --name value / 位置参
-    // (首个位置参给第一个 required 字段)。非交互缺必填给结构化错。
+    // 参数解析:按 input_schema 的 properties 逐个 --name value / 位置参。
+    // 直呼别名没带必填项时，终端按字段 description 补问；无交互宿主
+    // 才把缺项留给 runtime，照旧返回结构化错。
     nlohmann::json inputs = nlohmann::json::object();
-    const auto& props = entry->definition.inputs.contains("properties")
-                            ? entry->definition.inputs["properties"]
-                            : nlohmann::json::object();
+    const nlohmann::json props = entry->definition.inputs.contains("properties")
+                                     ? entry->definition.inputs["properties"]
+                                     : nlohmann::json::object();
+    const std::string clean_args = TrimWorkflowRunArgs(raw_args);
+    // 只有一项必填 string 时，alias 后面通常就是整段旨意。只要不是以
+    // `--` 起头的显式参数写法，便一字不拆地交给它；需求正文里的
+    // `--dry-run`、引号与连续空格都不该被命令行解析器吃掉。
+    std::optional<std::string> natural_language_field;
+    if (entry->definition.inputs.contains("required") &&
+        entry->definition.inputs["required"].is_array() &&
+        entry->definition.inputs["required"].size() == 1 &&
+        entry->definition.inputs["required"][0].is_string()) {
+        const std::string candidate = entry->definition.inputs["required"][0].get<std::string>();
+        const auto property = props.is_object() ? props.find(candidate) : props.end();
+        if (property == props.end() || !property->is_object() ||
+            !property->contains("type") || (*property)["type"] == "string") {
+            natural_language_field = candidate;
+        }
+    }
+    const bool explicit_named_args = clean_args.rfind("--", 0) == 0;
+    const bool natural_language_bound =
+        natural_language_field.has_value() && !clean_args.empty() && !explicit_named_args;
+    if (natural_language_bound) {
+        inputs[*natural_language_field] = clean_args;
+    }
     std::vector<std::string> positional;
     std::size_t pos = 0;
-    while (pos < raw_args.size()) {
-        while (pos < raw_args.size() && (raw_args[pos] == ' ' || raw_args[pos] == '\t')) ++pos;
-        if (pos >= raw_args.size()) break;
-        if (raw_args.compare(pos, 2, "--") == 0) {
+    while (!natural_language_bound && pos < clean_args.size()) {
+        while (pos < clean_args.size() && (clean_args[pos] == ' ' || clean_args[pos] == '\t')) ++pos;
+        if (pos >= clean_args.size()) break;
+        if (clean_args.compare(pos, 2, "--") == 0) {
             pos += 2;
             const std::size_t name_start = pos;
-            while (pos < raw_args.size() && raw_args[pos] != ' ' && raw_args[pos] != '\t' &&
-                   raw_args[pos] != '=') {
+            while (pos < clean_args.size() && clean_args[pos] != ' ' && clean_args[pos] != '\t' &&
+                   clean_args[pos] != '=') {
                 ++pos;
             }
-            std::string name = raw_args.substr(name_start, pos - name_start);
-            if (pos < raw_args.size() && raw_args[pos] == '=') ++pos;
-            while (pos < raw_args.size() && (raw_args[pos] == ' ' || raw_args[pos] == '\t')) ++pos;
+            std::string name = clean_args.substr(name_start, pos - name_start);
+            if (pos < clean_args.size() && clean_args[pos] == '=') ++pos;
+            while (pos < clean_args.size() && (clean_args[pos] == ' ' || clean_args[pos] == '\t')) ++pos;
             const std::size_t value_start = pos;
-            const bool quoted = pos < raw_args.size() && raw_args[pos] == '"';
+            const bool quoted = pos < clean_args.size() && clean_args[pos] == '"';
             if (quoted) {
                 ++pos;
-                while (pos < raw_args.size() && raw_args[pos] != '"') ++pos;
-                if (pos < raw_args.size()) ++pos;
+                while (pos < clean_args.size() && clean_args[pos] != '"') ++pos;
+                if (pos < clean_args.size()) ++pos;
             } else {
-                while (pos < raw_args.size() && raw_args[pos] != ' ' && raw_args[pos] != '\t') ++pos;
+                while (pos < clean_args.size() && clean_args[pos] != ' ' && clean_args[pos] != '\t') ++pos;
             }
-            std::string value = raw_args.substr(value_start, pos - value_start);
+            std::string value = clean_args.substr(value_start, pos - value_start);
             if (quoted && value.size() >= 2) value = value.substr(1, value.size() - 2);
             if (!name.empty()) inputs[name] = CoerceWorkflowInput(props, name, value);
             continue;
         }
         const std::size_t start = pos;
-        const bool quoted = raw_args[pos] == '"';
+        const bool quoted = clean_args[pos] == '"';
         if (quoted) {
             ++pos;
-            while (pos < raw_args.size() && raw_args[pos] != '"') ++pos;
-            if (pos < raw_args.size()) ++pos;
+            while (pos < clean_args.size() && clean_args[pos] != '"') ++pos;
+            if (pos < clean_args.size()) ++pos;
         } else {
-            while (pos < raw_args.size() && raw_args[pos] != ' ' && raw_args[pos] != '\t') ++pos;
+            while (pos < clean_args.size() && clean_args[pos] != ' ' && clean_args[pos] != '\t') ++pos;
         }
-        std::string token = raw_args.substr(start, pos - start);
+        std::string token = clean_args.substr(start, pos - start);
         if (quoted && token.size() >= 2) token = token.substr(1, token.size() - 2);
         positional.push_back(token);
     }
-    // 位置参依序填 required 里还没值的字段。
+    // 位置参依序填 required。只有一个 string 必填项时，它通常就是自然
+    // 语言任务；把所有位置词重新连成整句，不能只取第一个词。
     if (entry->definition.inputs.contains("required") && entry->definition.inputs["required"].is_array()) {
+        std::vector<std::string> missing_required;
+        for (const auto& field : entry->definition.inputs["required"]) {
+            if (field.is_string() && !inputs.contains(field.get<std::string>())) {
+                missing_required.push_back(field.get<std::string>());
+            }
+        }
+        if (missing_required.size() == 1 && !positional.empty()) {
+            const std::string& name = missing_required.front();
+            const auto property = props.is_object() ? props.find(name) : props.end();
+            const bool string_field = property == props.end() || !property->is_object() ||
+                                      !property->contains("type") || (*property)["type"] == "string";
+            if (string_field) {
+                std::string joined;
+                for (const auto& token : positional) {
+                    if (!joined.empty()) joined += ' ';
+                    joined += token;
+                }
+                inputs[name] = joined;
+                positional.clear();
+            }
+        }
         std::size_t arg_index = 0;
         for (const auto& field : entry->definition.inputs["required"]) {
             if (!field.is_string()) continue;
             const std::string name = field.get<std::string>();
             if (inputs.contains(name) || arg_index >= positional.size()) continue;
             inputs[name] = CoerceWorkflowInput(props, name, positional[arg_index++]);
+        }
+        if (context.request_input) {
+            for (const auto& field : entry->definition.inputs["required"]) {
+                if (!field.is_string()) continue;
+                const std::string name = field.get<std::string>();
+                if (inputs.contains(name)) continue;
+                const nlohmann::json schema = props.is_object() && props.contains(name) && props[name].is_object()
+                                                  ? props[name]
+                                                  : nlohmann::json::object();
+                const auto answer = context.request_input(name, schema);
+                if (!answer.has_value() || answer->empty()) {
+                    return theme.stats + "workflow 已取消：没有收到 " + name + theme.reset + "\n";
+                }
+                inputs[name] = CoerceWorkflowInput(props, name, *answer);
+            }
         }
     }
 
@@ -598,16 +698,22 @@ std::string RunWorkflowById(const WorkflowCommandContext& context, const std::st
         runtime.Run(entry->definition, lubancode::workflow::RunInputs(inputs));
 
     std::ostringstream out;
-    out << entry->definition.name << " [" << entry->definition.id << "] " << theme.stats
+    const char* run_mark = summary.state == lubancode::workflow::RunState::Succeeded ? "✓" : "×";
+    out << run_mark << " " << entry->definition.name << " [" << entry->definition.id << "] " << theme.stats
         << lubancode::workflow::ToString(summary.state) << theme.reset << " · "
         << summary.duration_ms / 1000 << "." << (summary.duration_ms % 1000) / 100 << "s · tokens "
         << summary.tokens_used << "\n";
     for (const auto& [node_id, record] : summary.nodes) {
-        const char* mark = record.state == lubancode::workflow::NodeState::Succeeded  ? "[ok] "
-                           : record.state == lubancode::workflow::NodeState::Failed    ? "[!!] "
-                           : record.state == lubancode::workflow::NodeState::Skipped   ? "[skip] "
-                                                                                       : "[..] ";
-        out << "  " << mark << node_id;
+        const char* mark = record.state == lubancode::workflow::NodeState::Succeeded  ? "✓"
+                           : record.state == lubancode::workflow::NodeState::Failed    ? "×"
+                           : record.state == lubancode::workflow::NodeState::Skipped   ? "-"
+                                                                                       : "…";
+        const auto node = entry->definition.node_map.find(node_id);
+        const std::string label = node != entry->definition.node_map.end() && !node->second.label.empty()
+                                      ? node->second.label
+                                      : node_id;
+        out << "  " << mark << " " << label;
+        if (label != node_id) out << theme.stats << "  " << node_id << theme.reset;
         if (!record.error_code.empty()) {
             out << "  " << record.error_code << " " << record.error_message.substr(0, 120);
         }
@@ -619,7 +725,16 @@ std::string RunWorkflowById(const WorkflowCommandContext& context, const std::st
         out << theme.reset << "\n";
     }
     if (!summary.result.empty()) {
-        out << theme.stats << "  结果: " << summary.result.dump().substr(0, 400) << theme.reset << "\n";
+        std::string rendered = summary.result.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+        constexpr std::size_t kResultPreviewBytes = 8000;
+        if (rendered.size() > kResultPreviewBytes) {
+            rendered.resize(lubancode::platform::Utf8PrefixBoundary(rendered, kResultPreviewBytes));
+            rendered += "\n…(结果过长，已截断；完整账见 /workflow history)";
+        }
+        out << "\n结果\n" << rendered << "\n";
+    } else if (!entry->definition.result.empty() &&
+               summary.state == lubancode::workflow::RunState::Succeeded) {
+        out << theme.error << "  结果为空：请检查 workflow 的 result 映射" << theme.reset << "\n";
     }
     if (!summary.error_message.empty() && summary.state != lubancode::workflow::RunState::Succeeded) {
         out << theme.error << "  " << summary.error_code << ": " << summary.error_message << theme.reset << "\n";
@@ -762,6 +877,19 @@ lubancode::app::WorkflowCommandContext BuildWorkflowCatalogContext(SlashDispatch
         wf_ctx.skill_names.push_back(skill.name);
     }
     wf_ctx.theme = ctx.theme;
+    wf_ctx.request_input = [theme = ctx.theme](const std::string& field,
+                                               const nlohmann::json& schema)
+        -> std::optional<std::string> {
+        const std::string question = schema.value("description", "请补充 " + field + "：");
+        {
+            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
+            TermOut() << "\n" << question << "\n";
+            TermOut().flush();
+        }
+        lubancode::cli::ReadExitReason reason = lubancode::cli::ReadExitReason::Cancel;
+        return lubancode::cli::ReadLine(theme->prompt + "> " + theme->reset, *theme,
+                                        /*esc_rejects=*/true, /*composer=*/true, &reason);
+    };
     return wf_ctx;
 }
 
@@ -800,6 +928,7 @@ CommandFlow HandleSlashWorkflow(SlashDispatchContext& ctx, const lubancode::cli:
         return CommandFlow::Continue;
     }
     HandleWorkflowCommand(parsed.args, wf_ctx);
+    if (ctx.refresh_workflow_completions) ctx.refresh_workflow_completions();
     return CommandFlow::Continue;
 }
 
