@@ -12,6 +12,9 @@
 //      (~7s),坞的 Running 灯/工时/工具计数有东西可画;
 //   3. 子代理:文本结论"子代理干完了:检索阈值回归全绿";
 //   4. 主模型:文本收尾"主代理汇总完毕"。
+//   第五幕(压测,终端画面隔网单):同一句"压测长流两本账"发两遍——
+//   千枚小 delta 滴流(~2.4s)与十枚 600 字大 delta,断言输入框常驻、
+//   心跳不饿死、一字不丢。
 // 子进程用 --yes 起跑(run_command 不弹确认),env 全量指到假服务
 // (LUBANCODE_WIRE/BASE_URL/API_KEY/MODEL + NO_PROXY),不碰真网络。
 
@@ -422,6 +425,141 @@ void RespondSse(SOCKET_T s, const std::vector<std::string>& events) {
     SendAll(s, head + body);
 }
 
+// ---- 压测两本账(终端画面隔网单验收):千枚小 delta 滴流 + 十枚大 delta ----
+
+// 第五幕(压测,终端画面隔网单验收):两本账的锚文本。用户话同一句发两
+// 遍,服务端按"历史里有没有小字流的收尾标记"分派剧本一/剧本二。
+const char* kStressUser =
+    "\xe5\x8e\x8b\xe6\xb5\x8b\xe9\x95\xbf\xe6\xb5\x81\xe4\xb8\xa4\xe6\x9c\xac\xe8\xb4\xa6";  // 压测长流两本账
+const char* kStressSmallHead =
+    "\xe5\xb0\x8f\xe5\xad\x97\xe6\xb5\x81\xe8\xb5\xb7\xe8\xb7\x91";  // 小字流起跑
+const char* kStressSmallTail =
+    "\xe5\x8d\x83\xe6\x9e\x9a\xe5\xb0\x8f\xe5\xad\x97\xe8\xb5\xb0\xe5\xae\x8c";  // 千枚小字走完
+const char* kStressBigHead =
+    "\xe5\xa4\xa7\xe5\xad\x97\xe6\xb5\x81\xe8\xb5\xb7\xe8\xb7\x91";  // 大字流起跑
+const char* kStressBigTail =
+    "\xe5\x8d\x81\xe6\x9e\x9a\xe5\xa4\xa7\xe5\xad\x97\xe8\xb5\xb0\xe5\xae\x8c";  // 十枚大字走完
+
+std::string JsonEscape(const std::string& text) {
+    std::string escaped;
+    for (char c : text) {
+        switch (c) {
+            case '\\':
+                escaped += "\\\\";
+                break;
+            case '"':
+                escaped += "\\\"";
+                break;
+            case '\n':
+                escaped += "\\n";
+                break;
+            case '\r':
+                escaped += "\\r";
+                break;
+            case '\t':
+                escaped += "\\t";
+                break;
+            default:
+                escaped += c;
+                break;
+        }
+    }
+    return escaped;
+}
+
+std::string TextDeltaEvent(const std::string& text) {
+    return "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"" +
+           JsonEscape(text) + "\"}}";
+}
+
+// 剧本一(1000 小 delta 滴流):20 拍 × 50 枚,拍间 120ms——整流 ~2.4s,
+// 跨多个帧边界(16~33ms 一帧),给"输入框常驻采样/心跳走秒"留时间;
+// 每 50 枚补一空行,喂 markdown 收束重画那条路。首枚带起跑标记,末枚带
+// 收尾标记(驱动器拿它断言一字不丢)。
+void RespondStressSmall(SOCKET_T s) {
+    std::vector<std::size_t> burst_offsets;  // 每拍起写的字节偏移(头先行,体分拍滴)
+    std::string body;
+    body += Sse("{\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"model\":\"fake-model\"}}");
+    body += Sse("{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}");
+    body += Sse(TextDeltaEvent("\xe5\xb0\x8f\xe5\xad\x97\xe6\xb5\x81\xe8\xb5\xb7\xe8\xb7\x91\n\n"));  // 小字流起跑
+    for (int burst = 0; burst < 20; ++burst) {
+        burst_offsets.push_back(body.size());
+        for (int j = 0; j < 50; ++j) {
+            const int i = burst * 50 + j;
+            body += Sse(TextDeltaEvent("\xe7\xac\x94" + std::to_string(i) + " "));  // 笔N
+            if (j == 49) {
+                body += Sse(TextDeltaEvent("\n\n"));  // 段落收束:原地重画一条路也吃到
+            }
+        }
+    }
+    burst_offsets.push_back(body.size());
+    body += Sse(TextDeltaEvent("\n\n\xe5\x8d\x83\xe6\x9e\x9a\xe5\xb0\x8f\xe5\xad\x97\xe8\xb5\xb0\xe5\xae\x8c"));  // 千枚小字走完
+    body += Sse("{\"type\":\"content_block_stop\",\"index\":0}");
+    body += Sse("{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":80,"
+                "\"output_tokens\":900}}");
+    const std::string head = "HTTP/1.1 200 OK\r\n"
+                             "Content-Type: text/event-stream\r\n"
+                             "Content-Length: " +
+                             std::to_string(body.size()) + "\r\n" + "Connection: close\r\n\r\n";
+    SendAll(s, head);
+    // 先发 leading(message_start/块开/起跑 delta),再逐拍滴正文——次序
+    // 颠倒会把协议事件在 message_start 之前送到,客户端按协议丢弃,正文
+    // 静默丢光(viewport_driver 同一处坑的亲兄弟)。
+    SendAll(s, body.substr(0, burst_offsets[0]));
+    for (std::size_t k = 0; k + 1 < burst_offsets.size(); ++k) {
+        SendAll(s, body.substr(burst_offsets[k], burst_offsets[k + 1] - burst_offsets[k]));
+        Sleep(120);
+    }
+    SendAll(s, body.substr(burst_offsets.back()));
+}
+
+// 剧本二(10 枚大 delta):每枚 600 个汉字——"500+ 字大 delta 输入框不
+// 消失"的硬剧本。每枚以空行收尾喂段落重画,首枚带起跑标记,末枚带收尾
+// 标记。逐枚滴出(150ms 一枚,整流 ~1.5s),采样才有窗口看得见"流期间
+// 输入框还在"。
+void RespondStressBig(SOCKET_T s) {
+    std::string big;
+    for (int i = 0; i < 600; ++i) {
+        big += "\xe6\xbb\xa1";  // 满
+    }
+    std::vector<std::string> leading = {
+        "{\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"model\":\"fake-model\"}}",
+        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
+        TextDeltaEvent(std::string(kStressBigHead) + "\n\n")};
+    std::vector<std::string> trailing = {
+        "{\"type\":\"content_block_stop\",\"index\":0}",
+        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":80,"
+        "\"output_tokens\":6000}}"};
+    const std::string tail_event = Sse(TextDeltaEvent(std::string(kStressBigTail)));
+    std::size_t total = 0;
+    for (const auto& event : leading) {
+        total += Sse(event).size();
+    }
+    for (int i = 0; i < 10; ++i) {
+        total += Sse(TextDeltaEvent(big + "\n\n")).size();
+    }
+    total += tail_event.size();
+    for (const auto& event : trailing) {
+        total += Sse(event).size();
+    }
+    const std::string head = "HTTP/1.1 200 OK\r\n"
+                             "Content-Type: text/event-stream\r\n"
+                             "Content-Length: " +
+                             std::to_string(total) + "\r\n" + "Connection: close\r\n\r\n";
+    SendAll(s, head);
+    for (const auto& event : leading) {
+        SendAll(s, Sse(event));
+    }
+    for (int i = 0; i < 10; ++i) {
+        SendAll(s, Sse(TextDeltaEvent(big + "\n\n")));
+        Sleep(150);
+    }
+    SendAll(s, tail_event);  // 收尾标记:别并进 trailing——上一版漏发过
+    for (const auto& event : trailing) {
+        SendAll(s, Sse(event));
+    }
+}
+
 std::vector<std::string> TextTurn(const std::string& text) {
     // 正文进 JSON 字符串字面量必须转义(换行/引号/反斜杠):裸换行会让整帧
     // 解析失败、正文静默丢光——与 viewport_driver 同一处坑,一并钉死。
@@ -635,6 +773,8 @@ int StartFakeAnthropicServer() {
                     state->main_stage = 4;
                 } else if (newest_has(kDenyUser)) {
                     state->main_stage = 5;
+                } else if (newest_has(kStressUser)) {
+                    state->main_stage = 6;
                 }
             }
             stage = state->main_stage;
@@ -779,6 +919,14 @@ int StartFakeAnthropicServer() {
                            ToolUseTurn("toolu_watch", "agent",
                                        "{\"title\":\"" + std::string(kWatchTitle) + "\",\"prompt\":\"" +
                                            std::string(kWatchPrompt) + "\",\"execution_mode\":\"background\"}"));
+            }
+        } else if (stage == 6) {
+            // 压测幕(终端画面隔网单验收):同一句用户话发两遍——第一遍
+            // 千枚小 delta 滴流,第二遍(历史里有小字收尾标记)十枚大 delta。
+            if (has(kStressSmallTail)) {
+                RespondStressBig(client_fd);
+            } else {
+                RespondStressSmall(client_fd);
             }
         } else if (stage == 5) {
             // 第五幕:主回合派 #6(写材料)后收口,剩下的交给子代理自己撞墙。
@@ -1465,7 +1613,93 @@ int wmain(int argc, wchar_t** argv) {
         Check(echoed, "第四幕:退场后键入立即回显(ReadLine 活着)");
     }
 
-    // ---- 第五幕(后台拒权当场告知,2026-08-17):后台子代理没人可问,
+    // ---- 第五幕(压测,终端画面隔网单):两本吞吐账——千枚小 delta 滴流
+    //      (整流 ~2.4s,跨多个帧边界)与十枚 600 字大 delta。断言:流期间
+    //      footer 输入行常驻(采样)、活动行在走(心跳没饿死)、收尾标记上屏
+    //      (合并批次一字不丢)、收口回空闲。 ----
+    {
+        // 压测采样:直到收尾标记上屏,每 300ms 确认一次输入行还在(帧内
+        // 擦画空窗复测三次再定罪,定罪时把屏面倒进报告留档);顺带观察
+        // 活动行文本变化——走字扫光/秒数在跳,心跳就没被 delta 洪峰饿死。
+        const auto sample_stress_stream = [&](const char* tail_marker, const char* what) {
+            bool input_ok = true;
+            bool activity_seen = false;
+            bool activity_alive = false;
+            std::string first_activity;
+            const DWORD deadline = GetTickCount() + 30000;
+            while (GetTickCount() < deadline) {
+                if (FindLastRow(tail_marker) >= 0) {
+                    break;
+                }
+                if (FindFooterInputRow() < 0) {
+                    // 帧内的擦/画空窗属正常(同步输出一帧一提交);连着四拍
+                    // (~1.2s)都找不到,才是真消失——倒屏面定罪。
+                    int misses = 0;
+                    while (misses < 4 && GetTickCount() < deadline && FindLastRow(tail_marker) < 0 &&
+                           FindFooterInputRow() < 0) {
+                        ++misses;
+                        Sleep(300);
+                    }
+                    if (FindFooterInputRow() < 0 && FindLastRow(tail_marker) < 0) {
+                        input_ok = false;
+                        Log(std::string("STRESSMISS ") + what + " t=" +
+                            std::to_string(GetTickCount() - g_start_tick) + "ms");
+                        CONSOLE_SCREEN_BUFFER_INFO info{};
+                        GetConsoleScreenBufferInfo(g_conout, &info);
+                        const int top = (std::max)(0, info.srWindow.Bottom - 32);
+                        for (int r = top; r <= info.srWindow.Bottom; ++r) {
+                            const std::string row = ReadRow(r);
+                            if (!row.empty()) {
+                                Log("STRESSMISS row " + std::to_string(r) + ": " + row);
+                            }
+                        }
+                        break;
+                    }
+                }
+                const int activity_row = FindLastRow("\xe6\x80\x9d\xe8\x80\x83\xe4\xb8\xad");  // 思考中
+                if (activity_row >= 0) {
+                    activity_seen = true;
+                    const std::string line = ReadRow(activity_row);
+                    if (first_activity.empty()) {
+                        first_activity = line;
+                    } else if (line != first_activity) {
+                        activity_alive = true;
+                    }
+                }
+                Sleep(300);
+            }
+            Log(std::string("STRESS ") + what + " input_ok=" + (input_ok ? "y" : "n") +
+                " activity_seen=" + (activity_seen ? "y" : "n") +
+                " activity_alive=" + (activity_alive ? "y" : "n"));
+            Check(input_ok, std::string(what) + ":流式期间输入框常驻(逐拍采样)");
+            if (activity_seen) {
+                Check(activity_alive, std::string(what) + ":活动行在走(心跳补画没饿死)");
+            } else {
+                Log(std::string("NOTE: ") + what + ":采样窗口没扫到活动行(流太短或已收口),不判定");
+            }
+        };
+        SendKey('C', 0, LEFT_CTRL_PRESSED);  // 清掉第四幕留下的回显草稿(ok-after-retire)
+        Sleep(300);
+        SendText(kStressUser);  // 压测长流两本账
+        SendKey(VK_RETURN, L'\r', 0);
+        Check(WaitForText(kStressSmallHead, 30000), "压测:千枚小字流开跑(首帧落屏)");
+        sample_stress_stream(kStressSmallTail, "千枚小字");
+        Check(WaitForText(kStressSmallTail, 30000), "压测:千枚小字收尾标记上屏(合并批次一字不丢)");
+        Check(WaitForIdleComposer(20000), "压测:小字流收口回空闲 composer");
+        SendText(kStressUser);  // 同一句话再发:第二本账(十枚大字)
+        SendKey(VK_RETURN, L'\r', 0);
+        Check(WaitForText(kStressBigHead, 30000), "压测:十枚大字流开跑");
+        sample_stress_stream(kStressBigTail, "十枚大字");
+        Check(WaitForText(kStressBigTail, 30000), "压测:十枚大字收尾标记上屏(大 delta 一字不丢)");
+        Check(FindFooterInputRow() > 0, "压测:大字流过后输入框仍在(500+ 字 delta 不消失)");
+        Check(WaitForIdleComposer(20000), "压测:大字流收口回空闲 composer");
+        // 给后台拒权幕备一份可清的草稿:那一幕开场先按 Ctrl+C 清草稿,而
+        // 空闲空草稿上的 Ctrl+C 是"EOF 退出会话"——原幕序里上一幕总留着
+        // 草稿可清,压测幕的两次提交把草稿清空了,这里补一枚,幕序契约不变。
+        SendText("x");
+    }
+
+    // ---- 第六幕(后台拒权当场告知,2026-08-17):后台子代理没人可问,
     //      needs_confirm 的 write_file 一律当场拒。断言拒的那一刻 toast 就挂
     //      进导航坞(不攒到最终报告)。只验这一拍:#6 被拒后的下一步在本机
     //      会踩中既有病灶(拒权后任务线程哑火、主回合随之冻住——旧代码同样

@@ -164,3 +164,67 @@ TEST_CASE("UiEventPump: 画笔锁串行化,消费线程与就地路绝不并发�
     CHECK(recorder.max_concurrent.load() <= 1);
     CHECK(recorder.JoinedText("delta:t1") == std::string(200, 'x'));
 }
+
+// ---------------------------------------------------------------------------
+// 按帧落屏(终端画面隔网单·条 2/5):帧节拍收批。一帧间隔内的增量并在队尾,
+// 到点一口气收——滴流(delta 每 10ms 一枚)下渲染批次被压到"每帧一批",
+// 远少于逐枚直写;帧间隔 0 是直写老轨,枚枚即画。两条轨的全文都一字不丢。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("UiEventPump: 按帧节拍收批——滴流下渲染批次远少于 delta 枚数") {
+    Recorder recorder;
+    constexpr int kFrameMs = 50;
+    app::UiEventPump pump(recorder.MakeRenderer(), std::chrono::milliseconds(kFrameMs));
+    // 期望全文:30 枚"字"(UTF-8 三字节,不能用 std::string(n,'字')——
+    // 多字节字符字面量截成 char 会变垃圾)。
+    std::string expected;
+    for (int i = 0; i < 30; ++i) {
+        pump.PostDelta(MakeDelta("t1", "字"));
+        expected += "字";
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    // ~300ms 的滴流,50ms 一帧:期望 5~8 批(首枚即画,其后每帧一批)。
+    // 上下界都放宽——计时测试不赌毫秒,只钉"远少于 30"与"不止一批"。
+    pump.StopAndDrain();
+    const std::size_t batches = recorder.CountTag("delta:t1");
+    CHECK(batches >= 2);
+    CHECK(batches <= 12);
+    CHECK(recorder.JoinedText("delta:t1") == expected);
+}
+
+TEST_CASE("UiEventPump: 帧间隔 0 是直写老轨——投递即醒,枚枚即画") {
+    Recorder recorder;
+    app::UiEventPump pump(recorder.MakeRenderer(), std::chrono::milliseconds(0));
+    std::string expected;
+    for (int i = 0; i < 30; ++i) {
+        pump.PostDelta(MakeDelta("t1", "字"));
+        expected += "字";
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    pump.StopAndDrain();
+    // 滴流下每枚 delta 都该有自己的批次(合并在队尾也只并掉同拍到达的,
+    // 10ms 间隔远大于线程切换,30 枚基本是 30 批)。下界放掉几拍调度抖动。
+    const std::size_t batches = recorder.CountTag("delta:t1");
+    CHECK(batches >= 20);
+    CHECK(recorder.JoinedText("delta:t1") == expected);
+}
+
+TEST_CASE("UiEventPump: 按帧等待中控制路不等帧——DispatchInline 就地排干") {
+    Recorder recorder;
+    constexpr int kFrameMs = 500;  // 长帧:消费线程多半正睡在帧边界上
+    app::UiEventPump pump(recorder.MakeRenderer(), std::chrono::milliseconds(kFrameMs));
+    pump.PostDelta(MakeDelta("t1", "正文一枚"));
+    std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    // 消费线程首枚即画(首帧不等待),随后睡在长帧里;此刻控制事件必须
+    // 就地画掉、把 pending 排干,不许等那 500ms 的帧。
+    const auto t0 = std::chrono::steady_clock::now();
+    pump.DispatchInline(MakeUsage());
+    const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - t0)
+                             .count();
+    CHECK(elapsed < 400);
+    REQUIRE(recorder.CountTag("usage") == 1);
+    CHECK(recorder.seen.back().tag == "usage");
+    pump.StopAndDrain();
+    CHECK(recorder.JoinedText("delta:t1") == "正文一枚");
+}
