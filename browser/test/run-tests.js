@@ -100,10 +100,10 @@ async function runMatrix(engine, baseUrl) {
   ]);
   await client.start();
   try {
-    // tools/list:11 件工具 + schema 齐全。
+    // tools/list:12 件工具 + schema 齐全。
     const list = await client.request('tools/list', {});
     const names = list.result.tools.map((t) => t.name);
-    for (const expected of ['browser_status', 'browser_open', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_wait', 'browser_tabs', 'browser_select_tab', 'browser_close_page', 'browser_screenshot', 'browser_downloads']) {
+    for (const expected of ['browser_status', 'browser_open', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_select', 'browser_wait', 'browser_tabs', 'browser_select_tab', 'browser_close_page', 'browser_screenshot', 'browser_downloads']) {
       ok('tools/list 含 ' + expected, names.includes(expected));
     }
     ok('tools/list 带 inputSchema', list.result.tools.every((t) => t.inputSchema && t.inputSchema.type === 'object'));
@@ -155,6 +155,29 @@ async function runMatrix(engine, baseUrl) {
       }
     }
 
+    // 下拉:快照带选项清单;browser_select 按 value / label 各选一回;
+    // 按不到的值回候选清单;非下拉目标与缺参明报。
+    const selectRef = refOfLine(snapshot.content[0].text, '颜色');
+    if (selectRef) {
+      ok('快照列下拉选项清单', (snapshot.content[0].text || '').includes('选项: red=红'), (snapshot.content[0].text || '').split('\n').find((l) => l.includes('颜色')) || '');
+      const byValue = await client.call('browser_select', { page_id: pageId, ref: selectRef, value: 'blue', snapshot_id: snapshotId });
+      const pickedByValue = ((byValue.structuredContent || {}).selected || [])[0];
+      ok('select 按 value 选中', pickedByValue && pickedByValue.value === 'blue' && pickedByValue.label === '蓝', JSON.stringify(byValue.structuredContent));
+      const byLabel = await client.call('browser_select', { page_id: pageId, ref: selectRef, label: '绿', snapshot_id: snapshotId });
+      const pickedByLabel = ((byLabel.structuredContent || {}).selected || [])[0];
+      ok('select 按 label 选中', pickedByLabel && pickedByLabel.value === 'green' && pickedByLabel.label === '绿', JSON.stringify(byLabel.structuredContent));
+      const noOption = await client.callExpectError('browser_select', { page_id: pageId, ref: selectRef, value: 'purple', snapshot_id: snapshotId });
+      ok('按不到的值回候选清单', noOption.code === 'browser.option_not_found' && noOption.text.includes('red') && noOption.text.includes('蓝'), noOption.code + ' ' + noOption.text.slice(0, 140));
+      if (nameRef) {
+        const notSelect = await client.callExpectError('browser_select', { page_id: pageId, ref: nameRef, value: 'red', snapshot_id: snapshotId });
+        ok('非下拉目标明报', notSelect.code === 'browser.bad_target', notSelect.code + ' ' + notSelect.text.slice(0, 100));
+      }
+      const noKey = await client.callExpectError('browser_select', { page_id: pageId, ref: selectRef, snapshot_id: snapshotId });
+      ok('缺 value/label 报 schema 错', noKey.code === 'browser.schema', noKey.code);
+    } else {
+      skip('下拉 select 用例', '快照文本没按预期标出颜色下拉');
+    }
+
     // click 提交按钮(表单跳 /submitted.html,generation 变,旧 ref 失效)。
     const snapBeforeClick = await client.call('browser_snapshot', { page_id: pageId });
     const clickSnapId = snapBeforeClick.structuredContent.snapshot_id;
@@ -167,6 +190,10 @@ async function runMatrix(engine, baseUrl) {
       // 旧 ref 导航后明报 stale。
       const stale = await client.callExpectError('browser_click', { page_id: pageId, ref: submitRef, snapshot_id: clickSnapId });
       ok('旧 ref 报 stale_ref', stale.code === 'browser.stale_ref', stale.code + ' ' + stale.text.slice(0, 120));
+      if (selectRef) {
+        const staleSelect = await client.callExpectError('browser_select', { page_id: pageId, ref: selectRef, value: 'blue', snapshot_id: snapshotId });
+        ok('select 吃同一套 ref 校验:旧 ref 报 stale_ref', staleSelect.code === 'browser.stale_ref', staleSelect.code);
+      }
     } else {
       skip('提交按钮 ref 定位', '快照文本没按预期标出提交按钮');
     }

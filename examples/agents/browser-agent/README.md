@@ -40,7 +40,7 @@ cd ..
 去掉 `--headless` 则弹出真浏览器窗口(你自己能看见它在动)。
 
 重启 LubanCode,`/tools` 应见 `mcp__browser__browser_click` 等
-十一件工具。
+十二件工具。
 
 ## 3. 试一手
 
