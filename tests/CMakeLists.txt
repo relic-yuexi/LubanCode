@@ -5,6 +5,17 @@ file(GLOB_RECURSE LUBANCODE_TEST_SOURCES CONFIGURE_DEPENDS
   "${CMAKE_CURRENT_SOURCE_DIR}/integration/*/test_*.cpp")
 list(SORT LUBANCODE_TEST_SOURCES)
 
+# glob 兜底(2026-08-28):examples 域的册在主树 configure 偶发漏收
+# (同 cmake 同 pattern 的独立项目能收,工头 worktree 也能收;增量与全新
+# cache 均现)。显式补齐,漏收时打日志留痕。
+list(FIND LUBANCODE_TEST_SOURCES
+     "${CMAKE_CURRENT_SOURCE_DIR}/integration/examples/test_gui_agent_example.cpp" _gui_example_idx)
+if(_gui_example_idx EQUAL -1)
+  list(APPEND LUBANCODE_TEST_SOURCES
+       "${CMAKE_CURRENT_SOURCE_DIR}/integration/examples/test_gui_agent_example.cpp")
+  message(STATUS "tests: glob 漏收 examples 册,已显式补上")
+endif()
+
 if(NOT LUBANCODE_TEST_SOURCES)
   message(FATAL_ERROR "tests/unit 与 tests/integration 下没有测试源码")
 endif()
