@@ -50,7 +50,8 @@ std::int64_t NowMsEpoch() {
 tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const TurnWiring& wiring,
                                 const std::function<bool(const tools::Tool&)>& tool_filter,
                                 const std::string& filter_denial,
-                                const ToolTraceContext* trace) {
+                                const ToolTraceContext* trace,
+                                const std::atomic<bool>* cancel) {
     // 每条收尾路共用的分发口:先清洗,再 on_tool_done,清洗版随返回值交给
     // 调用方(进 history / 下一轮请求)。日志只记字段名、长度、坏字节位置
     // 与前后几个十六进制字节,不倒正文。
@@ -433,7 +434,11 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         // 走展示与返回,不再发第二枚。
         return dispatch_done(call.id, call.name, std::move(blocked_by_trace));
     }
-    tools::Tool::Result result = tool->execute(effective_input);
+    // 取消旗随调用递进(子代理 x 停止失效单):共享工具实例上没有"这一
+    // 次"的取消源——SetCancel 灌的是装配层那根(主回合 ESC),子代理的
+    // CancelChain 合并旗到不了那里。不肯合作取消的工具无视 context、行为
+    // 不变;肯合作的(run_command/Lua/插件)置位即收,不再等到超时。
+    tools::Tool::Result result = tool->execute(effective_input, tools::ToolExecutionContext{cancel});
     // PostToolUse(新):结果先清洗成合法 UTF-8 再给钩子;钩子的反馈追加进
     // 模型所见 tool_result,原始结果照旧进审计(副作用已发生,不能撤销,
     // 也不冒充撤销)。旧回调照旧吃它一贯拿到的结果。
@@ -926,9 +931,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         }
 
         // 工具循环:逐个执行模型要的工具调用。cancel 中途被置位("工具已
-        // 执行、结果还没发回"那个当口——正在跑的这个工具照常等它跑完、结果
-        // 照常入历史;还没轮到的后续工具不再真的执行,补一条"未执行"的合成
-        // 结果)保住 tool_use/tool_result 的成对约束,再从 Run() 正常返回。
+        // 执行、结果还没发回"那个当口——正在跑的这个工具拿到取消旗后按各自
+        // 能力收口:run_command 收进程树、Lua 掐指令钩子,不肯合作的照旧等它
+        // 跑完;结果照常入历史;还没轮到的后续工具不再真的执行,补一条
+        // "未执行"的合成结果)保住 tool_use/tool_result 的成对约束,再从
+        // Run() 正常返回。
         //
         // 逐枚追踪(单子"消息落盘次序要改"):assistant message 入 history
         // 后先发批次头(装配层此刻把 assistant 消息 append+flush 进
@@ -1024,7 +1031,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
             const tools::Tool::Result result =
                 RunOneTool(registry_, call, wiring, tool_filter_, tool_filter_denial_,
-                           trace_armed ? &trace_ctx : nullptr);
+                           trace_armed ? &trace_ctx : nullptr, cancel);
             // 断言式兜底:RunOneTool 出口已经规范化过(见它文件头的信任边界
             // 注释),这里再过一遍 SanitizeUtf8 只为防将来有人在 Run() 之外
             // 绕路改历史——已经合法的内容是原样穿透的空操作。

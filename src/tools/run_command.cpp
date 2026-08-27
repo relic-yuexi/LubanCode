@@ -367,6 +367,16 @@ std::string BuildEncodedCommand(const std::string& user_command_utf8) {
 #endif  // _WIN32
 
 Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
+    return Run(input, cancel_);
+}
+
+Tool::Result RunCommandTool::execute(const nlohmann::json& input, const ToolExecutionContext& context) {
+    // context 的取消旗优先(本次调用真用的那根:主回合 ESC / 子代理的
+    // CancelChain 合并旗);没递进来(旧调用方)退回 SetCancel 灌的那根。
+    return Run(input, context.cancel != nullptr ? context.cancel : cancel_);
+}
+
+Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel) {
     if (!input.contains("command") || !input.at("command").is_string()) {
         return {"缺少必填参数 command(字符串)", true};
     }
@@ -551,14 +561,17 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
         // (跟 PowerShell 路径不一样,那边脚本里显式设了
         // [Console]::OutputEncoding=UTF8),这里拿到手就是合法 UTF-8。
         // cwd 走 lpCurrentDirectory(P1 根治:cmd 的 %VAR% 展开坑一并绕开)。
-        proc = platform::RunShellCommand(command, timeout_ms, cancel_, {}, platform::kDefaultMaxOutputBytes,
+        proc = platform::RunShellCommand(command, timeout_ms, effective_cancel, {}, platform::kDefaultMaxOutputBytes,
                                          effective_cwd);
     } else {
         // 前台 PowerShell 同上:cwd 走 lpCurrentDirectory,命令本体只保留
-        // wrapper 的编码设置,不再前置 Set-Location。
+        // wrapper 的编码设置,不再前置 Set-Location。cancel 从前写死
+        // nullptr(子代理 x 停止失效单逮出的旧账:默认 shell 反而收不到
+        // 取消,ESC/面板 x 都只能等超时)——现在与 cmd 路同走 effective_cancel,
+        // 置位即收整棵树。
         const std::wstring cmdline = std::wstring(ps_exe) + L" -NoProfile -NonInteractive -EncodedCommand " +
                                       platform::Utf8ToWide(BuildEncodedCommand(command));
-        proc = platform::RunProcess(cmdline, timeout_ms, /*cancel=*/nullptr, {},
+        proc = platform::RunProcess(cmdline, timeout_ms, effective_cancel, {},
                                     platform::kDefaultMaxOutputBytes,
                                     effective_cwd);
     }
@@ -609,10 +622,10 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     // 拼 cd——验收口径"cwd 不再拼进 shell 字符串"的前台半边。
     platform::ProcessResult proc;
     if (shell == "bash") {
-        proc = platform::RunProcess({shell_exe, "-c", command}, timeout_ms, cancel_, {},
+        proc = platform::RunProcess({shell_exe, "-c", command}, timeout_ms, effective_cancel, {},
                                     platform::kDefaultMaxOutputBytes, effective_cwd);
     } else {
-        proc = platform::RunShellCommand(command, timeout_ms, cancel_, {}, platform::kDefaultMaxOutputBytes,
+        proc = platform::RunShellCommand(command, timeout_ms, effective_cancel, {}, platform::kDefaultMaxOutputBytes,
                                          effective_cwd);
     }
 #endif
@@ -647,7 +660,7 @@ Tool::Result RunCommandTool::execute(const nlohmann::json& input) {
     }
     if (proc.cancelled) {
         std::ostringstream oss;
-        oss << "命令被取消(ESC),进程树已终止。\n";
+        oss << "命令被取消(停止信号:ESC 或子代理停止),进程树已终止。\n";
         if (!proc.output.empty()) {
             oss << "取消前捕获到的输出:\n" << proc.output;
         }

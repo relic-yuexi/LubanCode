@@ -447,6 +447,16 @@ std::string LuaTool::description() const { return description_; }
 nlohmann::json LuaTool::input_schema() const { return schema_; }
 
 Tool::Result LuaTool::execute(const nlohmann::json& input) {
+    return Run(input, cancel_);
+}
+
+Tool::Result LuaTool::execute(const nlohmann::json& input, const ToolExecutionContext& context) {
+    // context 的取消旗优先(本次调用那根:主回合 ESC / 子代理 CancelChain
+    // 合并旗);没递进来退回 SetCancel 灌的。
+    return Run(input, context.cancel != nullptr ? context.cancel : cancel_);
+}
+
+Tool::Result LuaTool::Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel) {
     // ToolRuntime 的 sub registry 会被多只后台子代理共享。Lua state 不具备
     // 线程安全语义,同一工具的栈操作须串行；不同 LuaTool 各有 state 和锁,
     // 仍能彼此并行。
@@ -457,7 +467,7 @@ Tool::Result LuaTool::execute(const nlohmann::json& input) {
     if (guard_ != nullptr) {
         guard_->instructions_used = 0;
         guard_->budget_hit = false;
-        guard_->cancel = cancel_;
+        guard_->cancel = effective_cancel;
     }
     lua_rawgeti(lua_, LUA_REGISTRYINDEX, execute_ref_);
     PushJsonToLua(lua_, input);

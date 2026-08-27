@@ -57,6 +57,18 @@ std::string PluginToolAdapter::description() const {
 nlohmann::json PluginToolAdapter::input_schema() const { return definition_->input_schema; }
 
 tools::Tool::Result PluginToolAdapter::execute(const nlohmann::json& input) {
+    return Run(input, cancel_);
+}
+
+tools::Tool::Result PluginToolAdapter::execute(const nlohmann::json& input,
+                                               const tools::ToolExecutionContext& context) {
+    // context 的取消旗优先(本次调用那根:主回合 ESC / 子代理 CancelChain
+    // 合并旗);没递进来退回 SetCancel 灌的。
+    return Run(input, context.cancel != nullptr ? context.cancel : cancel_);
+}
+
+tools::Tool::Result PluginToolAdapter::Run(const nlohmann::json& input,
+                                           const std::atomic<bool>* effective_cancel) {
     // 调用前统一验参(manifest 是合同)。实现层(process 协议)仍各自
     // 防御——Schema 不是内存安全。
     if (auto problem = ValidateArgumentsAgainstSchema(input, definition_->input_schema); problem.has_value()) {
@@ -85,7 +97,7 @@ tools::Tool::Result PluginToolAdapter::execute(const nlohmann::json& input) {
 
     ProcessCallLimits limits;
     limits.timeout_ms = manifest_->timeout_ms;
-    const auto outcome = RunProcessToolCall(*manifest_, request, cwd_utf8_, cancel_, limits);
+    const auto outcome = RunProcessToolCall(*manifest_, request, cwd_utf8_, effective_cancel, limits);
     // 日志分流:插件的 stderr 尾巴进 LogSink(终端/事件流各画各的),不进
     // 模型结果;模型只看 BuildResultText 的正文。
     if (log_sink_ && !outcome.stderr_tail.empty()) {

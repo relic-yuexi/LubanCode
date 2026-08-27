@@ -132,6 +132,10 @@ struct AgentTaskSnapshot {
     // 前台(阻塞父级调用)还是后台(独立线程)。详情可看,列表不必铺。
     bool foreground = false;
     AgentTaskState state = AgentTaskState::Running;
+    // 停止信号已发、还没收口(快照拷出时从 TaskRecord::cancel 现读;运行中
+    // 才有意义)。面板"停止中"回执用,与 AgentTaskSummary::stop_requested
+    // 同一根旗。
+    bool stop_requested = false;
     // 派出时写死的预算(0 = 不限步):面板可见,不等撞墙才揭晓(规格"现场四")。
     int step_limit = 0;
     int steps_used = 0;  // 已发生的模型请求数(RunOutcome 直接记账,不靠 usage 回调猜)
@@ -201,6 +205,9 @@ struct AgentTaskSummary {
     std::string prompt;
     bool foreground = false;
     AgentTaskState state = AgentTaskState::Running;
+    // 停止信号已发、任务线程还没报终态(Running && stop_requested = 面板行
+    // 显"停止中",不是死 Running;子代理 x 停止失效单的可验证回执半边)。
+    bool stop_requested = false;
     int step_limit = 0;
     int steps_used = 0;
     TaskOutcomeReason outcome_reason = TaskOutcomeReason::None;  // 面板短因用

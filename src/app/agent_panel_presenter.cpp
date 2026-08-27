@@ -87,16 +87,20 @@ std::string AgentActivityWord(const lubancode::tools::AgentTaskActivity& activit
 }
 
 // 状态短话(规格"现场三"):导航坞行与查看态统计行共用的一套拼装——
-// 运行中优先出实时活跃短语(治"死秒表"),没进流的空档退回"运行中";终态
-// 带短因。一处写死,两处口径永远一致。
+// 运行中优先出实时活跃短语(治"死秒表"),没进流的空档退回"运行中";停止
+// 信号已发还没收口时(面板 x /停全部)压上"停止中"前缀,不当死 Running
+//(子代理 x 停止失效单的可见回执);终态带短因。一处写死,两处口径永远
+// 一致。
 std::string AgentStateWord(lubancode::tools::AgentTaskState state, int steps_used, int step_limit,
                            lubancode::tools::TaskOutcomeReason outcome_reason,
                            const lubancode::tools::AgentTaskActivity* activity,
-                           std::chrono::steady_clock::time_point now) {
+                           std::chrono::steady_clock::time_point now, bool stop_requested = false) {
     using S = lubancode::tools::AgentTaskState;
     if (state == S::Running) {
         std::string word;
-        if (activity != nullptr) {
+        if (stop_requested) {
+            word = tr("agent_status.state_stopping");
+        } else if (activity != nullptr) {
             word = AgentActivityWord(*activity, now);
         }
         if (word.empty()) {
@@ -170,7 +174,8 @@ std::vector<lubancode::cli::AgentPanelEntry> AgentPanelPresenter::Entries(
         // 带"N/M 步",不等撞墙才揭晓。
         const std::string state_word =
             AgentStateWord(task.state, task.steps_used, task.step_limit, task.outcome_reason,
-                           task.state == lubancode::tools::AgentTaskState::Running ? &task.activity : nullptr, now);
+                           task.state == lubancode::tools::AgentTaskState::Running ? &task.activity : nullptr, now,
+                           task.stop_requested);
         entry.state = trf("agent_status.summary", state_word, task.tool_call_count, token_text,
                           lubancode::cli::FormatSeconds(seconds));  // 列表行只认真正短 title;旧任务没有 title 就显示"未命名子代理 #N"
         // ——绝不回退到 prompt 前若干字(prompt 只在详情里出现)。
@@ -253,7 +258,7 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
             trf("agent_status.summary",
                 AgentStateWord(snapshot->state, snapshot->steps_used, snapshot->step_limit,
                                snapshot->outcome.reason,
-                               running ? &snapshot->activity : nullptr, now),
+                               running ? &snapshot->activity : nullptr, now, snapshot->stop_requested),
                 static_cast<int>(snapshot->tool_calls.size()), token_text,
                 lubancode::cli::FormatSeconds(seconds));
         if (running && snapshot->activity.first_byte_ms >= 0) {

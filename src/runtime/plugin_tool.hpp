@@ -42,6 +42,10 @@ public:
     bool needs_confirm() const override { return true; }   // process 插件默认确认
     bool deferred() const override { return true; }        // tool_search:外挂工具延迟挂载
     tools::Tool::Result execute(const nlohmann::json& input) override;
+    // 子代理 x 停止失效单:取消旗随调用递进(context 优先,SetCancel 兜底)
+    // ——进程插件的子进程树跟着收。
+    tools::Tool::Result execute(const nlohmann::json& input,
+                                const tools::ToolExecutionContext& context) override;
 
     // ESC 取消链(与 PtcTool 同款:每轮由装配层灌指针,不设 = 不取消)。
     void SetCancel(const std::atomic<bool>* cancel) { cancel_ = cancel; }
@@ -55,6 +59,9 @@ public:
     const std::string& cwd() const { return cwd_utf8_; }
 
 private:
+    // 公共实现:effective_cancel 是本调用真用的取消旗。
+    tools::Tool::Result Run(const nlohmann::json& input, const std::atomic<bool>* effective_cancel);
+
     std::shared_ptr<const PluginManifest> manifest_;
     const PluginDefinition* definition_;
     std::string cwd_utf8_;

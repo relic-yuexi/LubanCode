@@ -2205,7 +2205,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                     const AgentPanelActions& actions = SessionAgentPanelHost().actions();
                     if (selected_entry != nullptr) {
                         if (selected_entry->running && actions.cancel_task) {
-                            actions.cancel_task(selected_entry->task_id);
+                            // 停止回执(子代理 x 停止失效单):按 CancelTask 的
+                            // 返话出 toast——已受理(行随后显"停止中")或已不在
+                            // 运行,不再静默吞掉,面板 x 不当死键。
+                            const bool accepted = actions.cancel_task(selected_entry->task_id);
+                            panel_notice = accepted ? trf("agent_panel.stop_notice", selected_entry->task_id)
+                                                    : trf("agent_panel.stop_not_running", selected_entry->task_id);
+                            panel_notice_until = std::chrono::steady_clock::now() + std::chrono::seconds(2);
                         } else if (!selected_entry->running && actions.clear_task) {
                             actions.clear_task(selected_entry->task_id);
                         }
@@ -3926,7 +3932,20 @@ void TurnInputListener::ThreadMain() {
                     continue;
                 }
                 if (entry.running && actions.cancel_task) {
-                    actions.cancel_task(entry.task_id);
+                    // 停止回执(与空闲路同一套文案):流式期间插打一行,正文
+                    // 行数账由 print hook 作废;行随后显"停止中"。
+                    const bool accepted = actions.cancel_task(entry.task_id);
+                    std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                    EraseStreamFooterLocked();
+                    TermOut() << "\n"
+                              << theme_.stats
+                              << (accepted ? trf("agent_panel.stop_notice", entry.task_id)
+                                           : trf("agent_panel.stop_not_running", entry.task_id))
+                              << theme_.reset << "\n";
+                    TermOut().flush();
+                    if (const auto& hook = StreamScreenPrintHookSlot()) {
+                        hook();
+                    }
                 } else if (!entry.running && actions.clear_task) {
                     actions.clear_task(entry.task_id);
                 }

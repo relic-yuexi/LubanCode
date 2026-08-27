@@ -3,6 +3,7 @@
 
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <string>
 
@@ -37,6 +38,20 @@ enum class RecoveryCapability {
     Retryable,             // 可安全重试(只读本地)
     ConditionallyUndoable, // 本地文件:undo token + 条件式撤销
     Compensatable,         // 反向业务动作(另作一枚可见工具调用)
+};
+
+// 工具执行上下文(子代理 x 停止失效单:取消令牌贯通工具进程)。渐进迁移
+// 的口子:RunOneTool 把"这一次调用"的取消旗从这里递进来,工具 override
+// execute(input, context) 便可在长操作里查旗、收子进程树;没 override 的
+// 旧工具走默认实现(照旧只跑 execute(input)),语义与从前一字不差——
+// cancel_capability 的完整分档见那单,这里先只立"取消旗"这一格。
+struct ToolExecutionContext {
+    // 本调用的取消旗:主回合 = ESC 那根,子代理 = CancelChain 并出来的那根
+    //(面板 x / 父轮 ESC / 墙钟三信号合一)。null = 本调用没有取消源
+    //(旧调用方/单测),工具行为与从前一致。指针活期盖过 execute 返回,
+    // 调用方保证;工具不得跨调用存它(共享工具实例会被多只并跑的子代理
+    // 同时调,存下来就是互相踩——要存请存自己 SetCancel 灌的那根做兜底)。
+    const std::atomic<bool>* cancel = nullptr;
 };
 
 class Tool {
@@ -111,6 +126,16 @@ public:
     // 真正执行。input 是模型给的入参(已经是解析好的 JSON 对象)。
     // 失败(参数错、文件不存在、命令跑挂了……)不抛异常,用 Result::is_error 传回去。
     virtual Result execute(const nlohmann::json& input) = 0;
+
+    // 带执行上下文的执行口(子代理 x 停止失效单):RunOneTool 走这只,把
+    // 当次调用的取消旗递给肯合作取消的工具(run_command 收进程树、Lua 掐
+    // 指令钩子、插件收子进程)。默认实现忽略 context、退回旧口——没迁的
+    // 工具零改动,行为不变;这也是为什么它不是纯虚:一夜之间要求全工具表
+    // 接取消,等于把断点从 loop 挪到每只工具身上,规格明令不许。
+    virtual Result execute(const nlohmann::json& input, const ToolExecutionContext& context) {
+        (void)context;
+        return execute(input);
+    }
 };
 
 }  // namespace lubancode::tools

@@ -266,6 +266,7 @@ const Entry kZhCN[] = {
 
     // ---- 子代理状态条(#52,#三:凑齐工具次数/token/耗时三个数字) ----
     {"agent_status.state_running", "运行中"},
+    {"agent_status.state_stopping", "停止中(等当前操作收口)"},
     {"agent_status.state_done", "完成"},
     {"agent_status.state_failed", "失败"},
     {"agent_status.state_failed_reason", "失败 · {0}"},
@@ -331,6 +332,8 @@ const Entry kZhCN[] = {
     {"agent_panel.hint_armed", "再按 Ctrl+K 确认停止全部 · Esc/超时取消"},
     {"agent_panel.window_note", "共 {0} 只 · 上方未展示 {1} 只 · 下方未展示 {2} 只"},
     {"agent_panel.stop_all_notice", "已请求停止 {0} 只运行中的子代理"},
+    {"agent_panel.stop_notice", "#{0} 已请求停止,正在收尾(停止中…)"},
+    {"agent_panel.stop_not_running", "#{0} 已不在运行,未发停止信号"},
     {"agent_panel.pending_note", "待送达消息 {0} 条"},
     {"agent_panel.detail_gone", "该任务已被清理。"},
     {"agent_panel.view_header", "── 查看 {0} · {1} · Esc 回 main ──"},
@@ -1923,6 +1926,7 @@ const Entry kEn[] = {
 
     // ---- subagent status board (#52, #three: tool calls/tokens/duration) ----
     {"agent_status.state_running", "Running"},
+    {"agent_status.state_stopping", "stopping (waiting for current operation)"},
     {"agent_status.state_done", "Done"},
     {"agent_status.state_failed", "Failed"},
     {"agent_status.state_failed_reason", "failed · {0}"},
@@ -1999,6 +2003,8 @@ const Entry kEn[] = {
     {"agent_panel.hint_armed", "Press Ctrl+K again to stop all · Esc/timeout cancels"},
     {"agent_panel.window_note", "{0} agents · {1} hidden above · {2} hidden below"},
     {"agent_panel.stop_all_notice", "Asked {0} running agent(s) to stop"},
+    {"agent_panel.stop_notice", "Asked #{0} to stop, wrapping up (stopping...)"},
+    {"agent_panel.stop_not_running", "#{0} is no longer running; no stop signal sent"},
     {"agent_panel.pending_note", "{0} queued message(s)"},
     {"agent_panel.detail_gone", "This task has been cleared."},
     {"agent_panel.view_header", "── viewing {0} · {1} · Esc back to main ──"},

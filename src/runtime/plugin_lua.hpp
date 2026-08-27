@@ -44,6 +44,11 @@ public:
     bool needs_confirm() const override { return true; }
     bool deferred() const override { return true; }
     tools::Tool::Result execute(const nlohmann::json& input) override { return tool_->execute(input); }
+    // 取消旗透传(子代理 x 停止失效单):adapter 不许洗掉 context。
+    tools::Tool::Result execute(const nlohmann::json& input,
+                                const tools::ToolExecutionContext& context) override {
+        return tool_->execute(input, context);
+    }
 
 private:
     tools::LuaTool* tool_;
