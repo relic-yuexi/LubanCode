@@ -1,0 +1,172 @@
+# ccmoon 多模型真机巡检：图片丢失、归属误报与端点能力
+
+状态：待做（2026-08-27 真机巡检。已先补一层止损：Responses 终帧若含
+`image_generation_call`，明确报“图片输出尚未接入，结果未保存”，不再把空
+回复当成功。完整图片链路、模型归属与端点筛选仍欠账）
+
+## 一句话
+
+`/provider switch ccmoon` 后，文本模型能答，工具也能跑；图像模型则把图片
+送到了线缆上，LubanCode 却没接住。另有两桩病：当前 provider 刚列出的
+模型，切换时反被说成“属别家”；Realtime 模型也混进 Responses 菜单，点了
+才报一团 `upstream_error`。
+
+HTTP 200 只说明门开了。图片能不能落盘、终端能不能看、下一轮能不能续，
+还须另算。
+
+## 巡检现场
+
+环境：Windows PowerShell，LubanCode `0.26.66`，`ccmoon`，wire 为
+`openai-responses`。先跑 `/provider refresh`，目录缓存由旧 schema 自愈到
+schema 2；这项已恢复，不列 bug。密钥、完整响应、request id 均未落盘。
+
+### 模型菜单
+
+`/model` 真机取回 21 项。可见 `gpt-5.6-{luna,sol,terra}`、`gpt-5.4-mini`、
+`gpt-4o-realtime-preview`、`gpt-4o-audio-preview`，以及
+`gpt-image-1`、`gpt-image-1.5`、`gpt-image-2`。目录能列出，不等于当前
+wire 能调用。
+
+### 已跑样本
+
+| 模型 | 场景 | 结果 | 判定 |
+|---|---|---|---|
+| `gpt-5.6-sol` | 只读 `CMakeLists.txt` 并找版本行 | 工具调用成功，答出第 15 行 | 通过 |
+| `gpt-5.6-luna` | 回 `LUNA_OK` | 约 2.4 秒返回 | 通过；伴随错误归属提示 |
+| `gpt-5.6-terra` | 回 `TERRA_OK` | 约 3 秒返回 | 通过；伴随错误归属提示 |
+| `gpt-5.4-mini` | 回 `MINI_OK` | 约 2.6 秒返回 | 通过；伴随错误归属提示 |
+| `gpt-image-1.5` | 生成齿轮图标 | 只说“已生成”，无图、无路径 | 失败 |
+| `gpt-image-2` | 生成齿轮图标 | 只说“返回了图片；路径未提供” | 失败 |
+| `gpt-image-1` | 生成锤子图标 | 只回“是”，无图、无路径 | 失败 |
+| `gpt-4o-realtime-preview` | 普通文本问答 | 约 1.3 秒报通用 `upstream_error` | 当前 Responses 端点不通 |
+
+没有实跑 `gpt-4o-audio-preview`。不可借 Realtime 的结果顺手判它死刑。
+
+## P0：Responses 图片结果被静默吞掉
+
+### 真机证据
+
+先用非流式 `/responses` 探一回：HTTP 200，`output[0].type` 为
+`image_generation_call`，`result` 有 935032 字符。
+
+又按 LubanCode 同路发 SSE：HTTP 200，`Content-Type` 为
+`text/event-stream`。关键次序如下：
+
+```text
+response.output_item.added          image_generation_call
+response.image_generation_call.*    in_progress -> generating -> completed
+response.output_item.done           result_chars=251596
+response.output_item.added          message
+response.output_text.delta           三段短说明
+response.output_item.done           message
+response.completed                  result_chars=251596
+```
+
+这不是模型没出图。图已过网。`src/api/responses/events.cpp` 原先在
+`HandleOutputItemDone` 略过陌生 item；`HandleCompleted` 也只认
+`function_call`。两处都不翻图片事件。会话里于是只有模型自述，找不到
+`ImageBlock`、图片路径或 artifact。
+
+本次已补止损与脱敏 fixture：
+
+- `response.completed` 见 `image_generation_call` 便发 `StreamError`；
+- 错误只说尚未接入、结果未保存，不夹 base64；
+- fixture 保留真机事件次序与字段形状，图片正文缩成占位串；
+- 四种 SSE 切法均须得到 `TextDelta -> ContentBlockDone -> StreamError`。
+
+Release 重编后又跑一趟 `gpt-image-2`。约 24 秒收到终帧，终端先露出模型短句
+“已生成”，随即判失败并明说结果未保存。进程退回输入态，未崩，未把 base64
+打上屏。止损链路已过真机。
+
+这层只管“不装成功”，并不算图片功能已成。
+
+### 完整修复
+
+- [ ] 给统一输出协议添图片结果。须分清用户输入 `ImageBlock` 与模型输出，
+  不要拿一只类型混过去。
+- [ ] base64 边收边解或限额解码，校验 MIME、魔数、尺寸与最大字节数。
+- [ ] 原子落到会话 artifact 目录，失败便清临时文件；文件名不得信模型正文。
+- [ ] 终端显示缩略信息与可打开路径。无图形终端也得给清楚路径。
+- [ ] session/export/resume 留 artifact 引用，不把 base64 塞进 JSONL。
+- [ ] 多图、图片加文字、只有图片、生成中断、重复终帧，各钉一册测试。
+- [ ] 图片超过 `SseFramer::kMaxFrameBytes`（现为 8 MiB）时，给出“图片帧
+  超限”而非含混传输错；决定是提高上限、分段收图，还是转非流式下载。
+- [ ] 真机验收 `gpt-image-1/1.5/2`：文件存在、可解码、尺寸可读，且续聊
+  不重放 base64。
+
+## P1：当前 provider 的真机目录被静态归属压过
+
+### 复现
+
+1. 切到 `ccmoon`。
+2. 裸跑 `/model`，菜单由 `ccmoon /models` 拉出 21 项。
+3. 从这张菜单选 `gpt-5.6-luna`、`gpt-5.6-terra` 或 `gpt-5.4-mini`。
+4. 切换已成功，随后却提示：该名“属 openai 家（未配置）”。
+5. 首次选 `gpt-image-1.5` 又被说成“属 dmxapi 家（未配置）”。
+
+提示与现场打架：模型正由当前 provider 列出，紧接着也由当前 provider 调通。
+
+### 病根
+
+`model_commands.cpp` 先以静态/用户 catalog 调 `ModelProviderHopFor`，再把这回
+真机选择交给 `RememberModelChoiceInCatalog`。也就是说，最硬的证据来晚了
+一步。静态目录又把公开模型名映到某家 provider，于是中转站第一次选择时
+容易挨一声假警告。
+
+### 验收
+
+- [ ] 裸 `/model` 的成功列表要带本次 provider 证据；从这张列表选出的项，
+  本轮不再报“属别家”。
+- [ ] 直输 `/model NAME` 时，静态归属只能说“某家目录也收录”，不可断言
+  中转站不认；自动跳家只吃权威且唯一的映射。
+- [ ] 真机列表失败时才退回静态 catalog，并把“缓存/静态”明写出来。
+- [ ] 单测钉住“当前 provider 实时列出，但静态 catalog 指向别家”的首选
+  场景；不许靠选第二回才自愈。
+
+## P1：模型可见，却未标明端点能力
+
+`gpt-4o-realtime-preview` 出现在 `openai-responses` 菜单，选择也成功；真正
+发请求才得到：
+
+```text
+{"error":{"message":"Upstream request failed","type":"upstream_error"}}
+```
+
+这只能证明本次 ccmoon Responses 路由不通。它不能证明模型本身坏，也不能
+证明 Realtime API 不通。
+
+- [ ] provider catalog / live model trace 能记 endpoint 或 capability：
+  `responses`、`chat`、`realtime`、`audio`、`image`。
+- [ ] `/model` 在当前 wire 下过滤不相干项，或至少挂一枚醒目标记并在确认前
+  说清“这模型多半不走 Responses”。
+- [ ] 错误保留安全可见的 HTTP 状态、上游错误 type/code、request id（打码
+  或截短）；不要只剩 `Upstream request failed`。
+- [ ] 补一册列表含 Realtime、当前 wire 为 Responses 的命令层测试。
+- [ ] 另跑 Audio 真机后再立结论。
+
+## P2：推理档位随模型切换的边界未说明
+
+巡检时 provider 的 `high` 档位一路带到 Image 与 Realtime。图像请求仍被
+接受，眼下不知是 ccmoon 忽略、转译，还是上游真认。此项只算疑点，不算
+bug。
+
+- [ ] 脱敏抓取各模型实际请求体，确认 `reasoning.effort` 是否仍发。
+- [ ] catalog 若声明模型不吃 reasoning，切换时停发该字段；回到推理模型后
+  恢复用户档位，莫把偏好抹掉。
+- [ ] 测试区分“HTTP 接受”与“档位真的改变行为/usage”。
+
+## 证据与复跑
+
+脱敏截图留在 `build/test-evidence/ccmoon-smoke/`，不进仓。完整 session 与
+原始响应也不进仓。可沉淀的只有协议缩样、断言、复现步骤与统计数字。
+
+复跑时请依次截：provider/config、真机模型单、四只文本结果、三只图片结果、
+Realtime 错误、直连 SSE 事件账。截图先查密钥、路径、业务正文，遮净再留。
+
+## 完成定义
+
+- [ ] 三只图像模型至少各出一张可打开图片；终端、session、resume 三账相合。
+- [ ] 当前 provider 真列出的文本模型，首选时不再挨错误跨家提示。
+- [ ] 非 Responses 模型不再混作普通可用项；失败时错误能指路。
+- [ ] 所有新增 fixture 无密钥、无 request id、无整段 base64。
+- [ ] 定向单测、fixture 四切回放、全量测试与一轮真机回归全绿。

@@ -1,0 +1,28 @@
+data: {"type":"response.created","response":{"id":"resp_image","status":"queued"},"sequence_number":0}
+
+data: {"type":"response.in_progress","response":{"id":"resp_image","status":"in_progress"},"sequence_number":1}
+
+data: {"type":"response.output_item.added","item":{"id":"ig_1","type":"image_generation_call","status":"in_progress"},"output_index":0,"sequence_number":2}
+
+data: {"type":"response.image_generation_call.in_progress","item_id":"ig_1","output_index":0,"sequence_number":3}
+
+data: {"type":"response.image_generation_call.generating","item_id":"ig_1","output_index":0,"sequence_number":4}
+
+data: {"type":"response.image_generation_call.completed","item_id":"ig_1","output_index":0,"sequence_number":5}
+
+data: {"type":"response.output_item.done","item":{"id":"ig_1","type":"image_generation_call","status":"completed","action":"generate","background":"transparent","output_format":"png","quality":"low","result":"iVBORw0KGgoAAA_SANITIZED_IMAGE_BYTES","revised_prompt":"一枚黑白圆点图标","size":"1024x1024"},"output_index":0,"sequence_number":6}
+
+data: {"type":"response.output_item.added","item":{"id":"msg_1","type":"message","role":"assistant","status":"in_progress","content":[]},"output_index":1,"sequence_number":7}
+
+data: {"type":"response.content_part.added","item_id":"msg_1","output_index":1,"content_index":0,"part":{"type":"output_text","text":"","annotations":[]},"sequence_number":8}
+
+data: {"type":"response.output_text.delta","item_id":"msg_1","output_index":1,"content_index":0,"delta":"图片已生成","sequence_number":9}
+
+data: {"type":"response.output_text.done","item_id":"msg_1","output_index":1,"content_index":0,"text":"图片已生成","sequence_number":10}
+
+data: {"type":"response.content_part.done","item_id":"msg_1","output_index":1,"content_index":0,"part":{"type":"output_text","text":"图片已生成","annotations":[]},"sequence_number":11}
+
+data: {"type":"response.output_item.done","item":{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"图片已生成","annotations":[]}]},"output_index":1,"sequence_number":12}
+
+data: {"type":"response.completed","response":{"id":"resp_image","status":"completed","output":[{"id":"ig_1","type":"image_generation_call","status":"completed","action":"generate","background":"transparent","output_format":"png","quality":"low","result":"iVBORw0KGgoAAA_SANITIZED_IMAGE_BYTES","revised_prompt":"一枚黑白圆点图标","size":"1024x1024"},{"id":"msg_1","type":"message","role":"assistant","status":"completed","content":[{"type":"output_text","text":"图片已生成","annotations":[]}]}],"usage":{"input_tokens":25,"output_tokens":3,"total_tokens":28}},"sequence_number":13}
+

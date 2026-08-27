@@ -167,6 +167,19 @@ TEST_CASE("response.completed:output 里带 function_call,stop_reason 相当于 
     CHECK(std::get<MessageDone>(*event).stop_reason == "tool_use");
 }
 
+TEST_CASE("response.completed:图片结果尚未接线时明示报错,不泄漏 base64") {
+    const std::string image_sentinel = "iVBORw0KGgoAAA_TEST_SENTINEL";
+    auto event = parse_event(Frame(
+        R"({"type":"response.completed","response":{"id":"resp_image","status":"completed","output":[{"type":"image_generation_call","id":"ig_1","status":"completed","output_format":"png","result":"iVBORw0KGgoAAA_TEST_SENTINEL"},{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"图片已生成"}]}],"usage":{"input_tokens":25,"output_tokens":3,"total_tokens":28}},"sequence_number":17})"));
+
+    REQUIRE(event.has_value());
+    REQUIRE(std::holds_alternative<StreamError>(*event));
+    const auto& error = std::get<StreamError>(*event);
+    CHECK(error.message.find("尚未接入图片输出") != std::string::npos);
+    CHECK(error.message.find("未保存") != std::string::npos);
+    CHECK(error.message.find(image_sentinel) == std::string::npos);
+}
+
 TEST_CASE("response.completed:status 是 incomplete 时 stop_reason 是 max_tokens") {
     auto event = parse_event(Frame(
         R"({"type":"response.completed","response":{"id":"resp_2","status":"incomplete","output":[{"type":"message","id":"msg_1","role":"assistant","status":"incomplete","content":[{"type":"output_text","text":"没说完"}]}],"usage":{"input_tokens":10,"output_tokens":4096,"total_tokens":4106}},"sequence_number":9})"));

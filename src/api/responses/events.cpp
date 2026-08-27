@@ -98,18 +98,31 @@ std::optional<StreamEvent> HandleCompleted(const json& data) {
     }
     const json& response = *it;
 
-    MessageDone event;
-    const std::string status = response.value("status", "");
-
     bool has_pending_function_call = false;
+    bool has_image_output = false;
     if (auto output_it = response.find("output"); output_it != response.end() && output_it->is_array()) {
         for (const auto& item : *output_it) {
-            if (item.is_object() && item.value("type", "") == "function_call") {
+            if (!item.is_object()) {
+                continue;
+            }
+            const std::string item_type = item.value("type", "");
+            if (item_type == "image_generation_call") {
+                has_image_output = true;
+            } else if (item_type == "function_call") {
                 has_pending_function_call = true;
-                break;
             }
         }
     }
+
+    // 图片结果住在 image_generation_call.result(base64) 里。中立事件、
+    // artifact 落盘与终端展示尚未接线时，绝不能把它吞掉后冒充成功；错误里
+    // 也不带 result，免得几十万字符的图片正文漏进终端、日志或 session。
+    if (has_image_output) {
+        return StreamError{"服务端返回了图片，但当前版本尚未接入图片输出；结果未保存"};
+    }
+
+    MessageDone event;
+    const std::string status = response.value("status", "");
 
     if (status == "incomplete") {
         event.stop_reason = "max_tokens";

@@ -1,0 +1,14 @@
+{
+  "fixture_id": "live_image_generation_call",
+  "wire": "openai-responses",
+  "provider": "responses-compatible-relay",
+  "model": "gpt-image-2",
+  "scenario": "image_generation_call_result_is_not_silently_dropped",
+  "source_document": "internal",
+  "captured_at": "2026-08-27",
+  "request_expectation": {"stream": true},
+  "expected_events": ["TextDelta", "ContentBlockDone", "StreamError"],
+  "expected_replay": ["image_generation_call.result 未接线时必须明示失败，不得冒充成功", "错误消息不得夹带 base64 图片正文"],
+  "usage_expectation": {},
+  "notes": "取自 ccmoon Responses 真机流的脱敏缩样。保留事件次序、item 类型与 result 字段；图片正文换成短占位串，request id 与提示正文已改写。"
+}
