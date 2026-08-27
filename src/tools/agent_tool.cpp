@@ -808,13 +808,23 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
         background_hooks = std::make_shared<lubancode::hooks::DetachedHookSession>(
             hooks_.hook_dispatcher, hooks_.hook_dispatcher->context());
     }
+    // 放行账快照(修"后台审批不查放行账"):也在主线程里定格——源读的是主
+    // 会话的活账(按 a 落名随时会插),跨线程读没锁;这里拷成 const 份,
+    // 任务线程只查不改。快照为什么定格在派出时刻、不跟主会话账活涨,见
+    // BackgroundPermissionLedger 的注释。源没配 = 空账,后台照旧全拒。
+    std::shared_ptr<const BackgroundPermissionLedger> background_permissions;
+    if (background_permission_source_) {
+        background_permissions =
+            std::make_shared<BackgroundPermissionLedger>(background_permission_source_());
+    }
     task_threads_.push_back(
         {id, std::thread([this, task, registry, prompt, agent_type, max_steps_per_turn,
                                 detached = std::move(detached),
                                 system_prompt = std::move(system_prompt),
                                 detached_registry = std::move(detached_registry),
                                 room = std::move(room),
-                                background_hooks]() mutable {
+                                background_hooks,
+                                background_permissions]() mutable {
         (void)detached_registry;  // 让独立工具表活到线程收尾
         // isolation=worktree:线程里包表、压隔离范围,收工清理。包装表按
         // 引用持源表工具,声明在源表之后,析构反序先亡,引用不悬垂。
@@ -833,7 +843,7 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
         try {
             result = RunTask(backend, effective_registry, prompt, agent_type, max_steps_per_turn, nullptr, task,
                              &detached, &system_prompt, scope_storage.has_value() ? &*scope_storage : nullptr,
-                             background_hooks);
+                             background_hooks, background_permissions);
         } catch (const std::exception& error) {
             result = {"子代理执行失败: " + std::string(error.what()), true};
         } catch (...) {
@@ -859,7 +869,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                 const DetachedAgentBackend* detached,
                                 const std::string* prepared_system_prompt,
                                 const IsolationScope* isolation_scope,
-                                const std::shared_ptr<lubancode::hooks::DetachedHookSession>& background_hooks) {
+                                const std::shared_ptr<lubancode::hooks::DetachedHookSession>& background_hooks,
+                                const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions) {
     // 派工治理(转发 SubagentScheduler):全局并发槽先占上(前台 + 后台都
     // 算),满了明报;前台任务再记一层嵌套深度,超限明报。RAII,拒绝路径也
     // 照退。
@@ -1037,9 +1048,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 给父级。后台(foreground_hooks 为空)没有可停下来问话的终端,需确认
     // 的操作一律拒绝。
     // 最近一次拒绝的原因(on_tool_confirm 与 on_tool_denial_text 同线程先后
-    // 调,RunTask 栈上局部共享):空 = 未预放行;非空 = 钩子 deny 的理由。
-    // 声明必须罩住两个 lambda 的整段存活期。
+    // 调,RunTask 栈上局部共享):last_denial_hook_reason 空 = 非"钩子 deny"
+    // 的拒绝;非空 = 钩子 deny 的理由。last_denial_by_deny_prefix 真 = 拒因
+    // 是 run_command 命中 deny 前缀黑名单。声明必须罩住 lambda 的整段存活期。
     std::string last_denial_hook_reason;
+    bool last_denial_by_deny_prefix = false;
     agent::TurnWiring turn_wiring;
     // 逐枚追踪单:子代理内层工具的 canonical 事件转发(只读 sink 并轨)。
     if (foreground_hooks != nullptr && foreground_hooks->on_tool_trace) {
@@ -1276,15 +1289,49 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         if (foreground_hooks != nullptr) {
             turn_wiring.on_tool_confirm = foreground_hooks->on_tool_confirm;
         } else {
-            // 后台任务没人可问:需确认的操作被拒那一刻,除了给子代理一份
-            // 如实的拒绝文案,还当场推一条通知进台账——主会话空闲拍里取走,
-            // toast + transcript 事件同拍落地。
+            // 后台任务没人可问:审批先查放行账快照(修"后台审批不查放行账",
+            // 2026-08)——deny 命令前缀压过一切(与主路 EvaluatePermission 的
+            // "策略黑名单最高"同序),always_allowed 命中(settings.local 的
+            // allow_tools + 会话内按 a 落的账,派出时刻定格)或 run_command
+            // 的 allow 前缀命中即放行。账不认再问 PermissionRequest 钩子,钩
+            // 子也不放才拒。档位成分(auto/yolo 的免问)不带给后台:那是"有
+            // 人可问"时的豁免,后台的免问只有预放行一条路。需确认的操作被
+            // 拒那一刻,除了给子代理一份如实的拒绝文案,还当场推一条通知进
+            // 台账——主会话空闲拍里取走,toast + transcript 事件同拍落地。
             const std::shared_ptr<lubancode::hooks::DetachedHookSession> hooks_session =
                 background_hooks != nullptr && !background_hooks->Empty() ? background_hooks : nullptr;
-            turn_wiring.on_tool_confirm = [this, task, hooks_session, &last_denial_hook_reason](
-                                             const std::string& /*tool_use_id*/, const std::string& name,
-                                             const nlohmann::json& input) {
+            turn_wiring.on_tool_confirm = [this, task, hooks_session, background_permissions,
+                                           &last_denial_hook_reason, &last_denial_by_deny_prefix](
+                                              const std::string& /*tool_use_id*/, const std::string& name,
+                                              const nlohmann::json& input) {
                 last_denial_hook_reason.clear();
+                last_denial_by_deny_prefix = false;
+                if (background_permissions != nullptr) {
+                    std::string command;
+                    if (name == "run_command") {
+                        if (const auto it = input.find("command"); it != input.end() && it->is_string()) {
+                            command = it->get<std::string>();
+                        }
+                    }
+                    const config::CommandPermission perm =
+                        name == "run_command"
+                            ? config::ClassifyCommandByPermissions(command, background_permissions->allow_commands,
+                                                                   background_permissions->deny_commands)
+                            : config::CommandPermission::None;
+                    if (perm == config::CommandPermission::Deny) {
+                        // deny 压过 allow/钩子:主路黑名单语义原样(不许借预放
+                        // 行或钩子表态绕 deny 名单)。
+                        last_denial_by_deny_prefix = true;
+                        const int task_id = task != nullptr ? task->snapshot.id : 0;
+                        ledger_.PushPermissionDenialNotice("后台 #" + std::to_string(task_id) + " 请求 " + name +
+                                                           " 命中 deny 命令前缀,已拒——deny 压过预放行");
+                        return false;
+                    }
+                    if (background_permissions->always_allowed.count(name) != 0 ||
+                        perm == config::CommandPermission::Allow) {
+                        return true;  // 预放行:后台免问的唯一正路
+                    }
+                }
                 if (hooks_session != nullptr) {
                     lubancode::hooks::HookPayload payload;
                     payload.event = lubancode::hooks::HookEvent::PermissionRequest;
@@ -1315,11 +1362,18 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             };
             // 给模型的拒绝文案:如实说"后台无法弹确认、未预放行",把出路也
             // 写上——缺省那份"用户拒绝执行该工具"会把后台边界藏起来。
-            turn_wiring.on_tool_denial_text = [&last_denial_hook_reason](const std::string& /*tool_use_id*/,
-                                                                        const std::string& name) {
-                std::string text = "后台任务无法弹出权限确认," + name + " 未预先放行,已被拒绝。";
-                if (!last_denial_hook_reason.empty()) {
-                    text += "拒绝来自 PermissionRequest 钩子:" + last_denial_hook_reason + "。";
+            turn_wiring.on_tool_denial_text = [&last_denial_hook_reason, &last_denial_by_deny_prefix](
+                                                  const std::string& /*tool_use_id*/, const std::string& name) {
+                std::string text;
+                if (last_denial_by_deny_prefix) {
+                    // deny 命中:不是"没放行",是黑名单压过放行——首句就说清,
+                    // 别让子代理拿"去 /permissions 预放行"当出路白跑一趟。
+                    text = "后台任务的 " + name + " 命中 deny 命令前缀黑名单,已被拒绝——deny 压过预放行。";
+                } else {
+                    text = "后台任务无法弹出权限确认," + name + " 未预先放行,已被拒绝。";
+                    if (!last_denial_hook_reason.empty()) {
+                        text += "拒绝来自 PermissionRequest 钩子:" + last_denial_hook_reason + "。";
+                    }
                 }
                 text += "重试同一操作不会成功:请停止重试,向用户如实报告受阻(后台未预放行,并非用户拒绝),"
                         "或改走只读产出;用户可用 /permissions 预放行后重派任务。";

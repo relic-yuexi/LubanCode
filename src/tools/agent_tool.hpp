@@ -34,6 +34,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -66,6 +67,19 @@ struct DetachedAgentBackend {
     api::RequestProfile request_profile;
     std::string model_instructions;
     std::string soul;
+};
+
+// 后台子代理的放行账快照(修"后台审批不查放行账",2026-08):主会话的
+// "总是允许"账(settings.local.json 的 allow_tools + 会话内按 a 落的集合)
+// 与 allow/deny 命令前缀,由装配层经 SetBackgroundPermissionSource 递进来。
+// LaunchBackground 在主线程(工具执行链)调源拷一份定格,带进任务线程——
+// 后台任务寿命跨轮、无人看守,账若跟着主会话活涨(用户中途 /permissions
+// 又放行了新工具),任务会在用户看不见的时刻突然拿到新写权限,权限语义
+// 漂移;定格成"派出时刻用户已知的账",任务线程只读,线程也安全。
+struct BackgroundPermissionLedger {
+    std::set<std::string> always_allowed;      // 工具名账(allow_tools + 按 a 落的)
+    std::vector<std::string> allow_commands;   // run_command 前缀白名单
+    std::vector<std::string> deny_commands;    // run_command 前缀黑名单(压过 allow)
 };
 
 // 同级派工的转发壳(规格"递归派工不能再靠拿掉工具解决"):子代理工具表
@@ -210,6 +224,14 @@ public:
         detached_registry_factory_ = std::move(factory);
     }
 
+    // 后台子代理的放行账源(修"后台审批不查放行账"):LaunchBackground 在
+    // 主线程调它取一份快照(见 BackgroundPermissionLedger 的定格理由)。
+    // 没设 = 空账,后台需确认工具照旧全拒(旧行为)。闭包按 Hooks 同一
+    // 套寿命规矩捕获会话侧引用——控制器死后主循环不在,源不会再被调。
+    void SetBackgroundPermissionSource(std::function<BackgroundPermissionLedger()> source) {
+        background_permission_source_ = std::move(source);
+    }
+
     // ---- 台账口(门面转发,本体在 TaskLedger)----
     std::vector<AgentTaskSnapshot> TaskSnapshots(std::size_t max_entries = 0) const {
         return ledger_.Snapshots(max_entries);
@@ -324,7 +346,8 @@ private:
                    const DetachedAgentBackend* detached = nullptr,
                    const std::string* prepared_system_prompt = nullptr,
                    const IsolationScope* isolation_scope = nullptr,
-                   const std::shared_ptr<lubancode::hooks::DetachedHookSession>& background_hooks = nullptr);
+                   const std::shared_ptr<lubancode::hooks::DetachedHookSession>& background_hooks = nullptr,
+                   const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions = nullptr);
 
     Result ExecuteForeground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
                              ToolRegistry& task_registry, int max_steps_per_turn, bool isolate);
@@ -348,6 +371,7 @@ private:
     bool background_by_default_ = false;
     std::function<DetachedAgentBackend()> detached_backend_factory_;
     std::function<std::unique_ptr<ToolRegistry>()> detached_registry_factory_;
+    std::function<BackgroundPermissionLedger()> background_permission_source_;  // 后台放行账源;空 = 全拒(旧行为)
     // 六职拆分(批三):台账与调度各归各家,门面只转不发。
     TaskLedger ledger_;
     SubagentScheduler scheduler_;

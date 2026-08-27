@@ -573,6 +573,25 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         allowed.insert(tool_name);
     }
 
+    // 后台子代理的放行账源(修"后台审批不查放行账",2026-08):agent 工具
+    // LaunchBackground 派工当口在主线程调它,拷一份定格快照带进任务线程。
+    // 账面与主会话 ConfirmToolUse 同一本:上面的 allow_tools 注入 + 会话内
+    // 按 a 落的 always_allowed_tools,外加 settings.local 的 allow/deny 命令
+    // 前缀。快照为什么定格在派出时刻,见 tools/agent_tool.hpp 里
+    // BackgroundPermissionLedger 的注释。闭包按 Hooks 的寿命规矩捕获引用:
+    // 控制器死后主循环不在,源不会再被调。
+    if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry().Find("agent"));
+        agent_tool != nullptr) {
+        const lubancode::config::SettingsLocal& local_permissions = settings_local;
+        agent_tool->SetBackgroundPermissionSource([&allowed, &local_permissions]() {
+            lubancode::tools::BackgroundPermissionLedger ledger;
+            ledger.always_allowed = allowed;
+            ledger.allow_commands = local_permissions.allow_commands;
+            ledger.deny_commands = local_permissions.deny_commands;
+            return ledger;
+        });
+    }
+
     // -----------------------------------------------------------------------
     // 会话存档(0.13.x):每轮结束把 history 里新增的消息逐条追加写
     // <主目录>/.lubancode/sessions/<会话id>.jsonl。文件在首条用户消息落地时
