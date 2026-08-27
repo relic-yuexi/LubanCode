@@ -62,6 +62,21 @@ struct ToolInfo {
     std::string name;
     std::string description;
     nlohmann::json input_schema;
+    // MCP 富结果单 P0.4:title/outputSchema/annotations 原样接住;模型侧
+    // 工具定义仍只暴露该暴露的字段(McpTool 的 description/input_schema
+    // 不动),outputSchema 供 tools/call 结果的 structuredContent 校验,
+    // annotations 供宿主参考(readOnlyHint 等不作授权真账)。
+    std::string title;
+    std::optional<nlohmann::json> output_schema;
+    nlohmann::json annotations = nlohmann::json::object();
+};
+
+// tools/call 的富结果解析入参(MCP 富结果单 P0.4/P0.5):artifact_dir 是
+// 本轮会话的二进制落盘地(空 = 无落盘地,二进制块按稳定错收口);
+// output_schema 是 ToolInfo 声明的 outputSchema(可空指针)。
+struct CallOptions {
+    std::string artifact_dir;
+    const nlohmann::json* output_schema = nullptr;
 };
 
 // 一个 MCP 服务器的客户端:管一条 stdio 连接的握手、请求配对、tools/list、
@@ -96,10 +111,13 @@ public:
     std::expected<std::vector<ToolInfo>, std::string> ListTools();
 
     // 执行一次工具调用(tools/call)。不抛异常,失败统统体现在返回值的
-    // is_error 字段里。
+    // is_error 字段里。富结果(text/image/audio/resource_link/resource/
+    // structuredContent)整链解析进 Result::payload,二进制先落 options.
+    // artifact_dir 再入史。
     // jsonrpc_request_id_out:逐枚追踪单,外层 execution 挂内层请求账用。
     tools::Tool::Result CallTool(const std::string& tool_name, const nlohmann::json& arguments,
-                                 std::int64_t* jsonrpc_request_id_out = nullptr);
+                                 std::int64_t* jsonrpc_request_id_out = nullptr,
+                                 const CallOptions& options = {});
 
     // 关停传输层(见 Transport::Shutdown 的语义)。
     void Shutdown();
@@ -116,6 +134,13 @@ public:
     std::string StderrTail() const;
 
     const std::string& server_name() const { return server_name_; }
+
+    // 协商定的协议版本(Initialize 之后才有值;没握过手为空)。诊断与
+    // trace 用,不参与请求拼装——请求版本统一发客户端最高版。
+    std::string negotiated_protocol_version() const { return negotiated_protocol_version_; }
+
+    // 会话累计落盘的二进制字节(诊断/测试用)。
+    std::size_t landed_artifact_bytes() const { return landed_artifact_bytes_; }
 
     // 仅供测试用:把默认/tools-call 超时收窄成几十毫秒,免得"验证超时会
     // 变成 is_error"这条测试也要真等 30s/120s。生产路径永远用 kDefaultTimeoutMs/
@@ -148,6 +173,10 @@ private:
     std::function<void(std::int64_t)> late_response_sink_;
     std::string server_name_;
     std::uint64_t transport_generation_ = 0;  // 换一代 +1,1 起(0 = 还没接过传输层)
+    // 协议协商账(MCP 富结果单 P0.4):Initialize 发客户端最高版,收
+    // initialize 响应里的 protocolVersion;认得才继续,认不得明败。空 =
+    // 还没握过手。
+    std::string negotiated_protocol_version_;
 
     std::unique_ptr<StdioTransportAdapter> owned_transport_;  // StartProcess 路径下持有
     Transport* transport_ = nullptr;                          // 实际使用的传输层(生产/测试路径统一走这个指针)
@@ -156,6 +185,9 @@ private:
     std::condition_variable cv_;
     std::map<std::int64_t, std::shared_ptr<PendingEntry>> pending_;
     std::int64_t next_id_ = 1;
+    // 会话累计落盘字节(P0.5 的会话级字节帽):CallTool 解析落盘后累加,
+    // 超 CallToolParseContext::kSessionArtifactCap 后新二进制块按帽收口。
+    std::size_t landed_artifact_bytes_ = 0;
 
     int default_timeout_ms_;
     int tool_call_timeout_ms_;

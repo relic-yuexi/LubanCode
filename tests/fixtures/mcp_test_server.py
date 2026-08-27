@@ -25,6 +25,16 @@ if hasattr(sys.stdout, "reconfigure"):
 
 BAD_TOOLS_CALL = "--bad-tools-call" in sys.argv[1:]
 
+# 1x1 像素 PNG(MCP 富结果单 P0.7 夹具):67 字节,魔数/尺寸客户端可验。
+TINY_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQ"
+    "AAAABJRU5ErkJggg=="
+)
+# 44 字节静音 WAV:RIFF/WAVE 魔数齐全。
+TINY_WAV_B64 = (
+    "UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAEAfAAABAAgAZGF0YQAAAAA="
+)
+
 TOOLS = [
     {
         "name": "echo",
@@ -46,6 +56,42 @@ TOOLS = [
             },
             "required": ["a", "b"],
         },
+    },
+    {
+        "name": "rich",
+        "description": "按 kind 返回富结果内容块(text/image/audio/resource_link/resource_text/resource_blob/mixed/unknown)",
+        "title": "富结果样例工具",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"kind": {"type": "string"}},
+            "required": ["kind"],
+        },
+        "annotations": {"title": "富结果样例", "readOnlyHint": True},
+    },
+    {
+        "name": "structured",
+        "description": "返回 structuredContent(声明了 outputSchema)",
+        "inputSchema": {"type": "object", "properties": {}},
+        "outputSchema": {
+            "type": "object",
+            "properties": {"answer": {"type": "integer"}, "label": {"type": "string"}},
+            "required": ["answer"],
+        },
+    },
+    {
+        "name": "bad_structured",
+        "description": "返回不合自己 outputSchema 的 structuredContent(客户端须报 schema 不合)",
+        "inputSchema": {"type": "object", "properties": {}},
+        "outputSchema": {
+            "type": "object",
+            "properties": {"answer": {"type": "integer"}},
+            "required": ["answer"],
+        },
+    },
+    {
+        "name": "bad_image",
+        "description": "返回伪 MIME 图片(image/png 声明、字节不是 PNG)",
+        "inputSchema": {"type": "object", "properties": {}},
     },
 ]
 
@@ -105,6 +151,100 @@ def handle_tools_call(msg_id, params):
         a = arguments.get("a", 0)
         b = arguments.get("b", 0)
         send_result(msg_id, {"content": [{"type": "text", "text": str(a + b)}], "isError": False})
+        return
+
+    if name == "rich":
+        kind = arguments.get("kind", "")
+        blocks = []
+        if kind == "text":
+            blocks = [{"type": "text", "text": "只有文本"}]
+        elif kind == "image":
+            blocks = [
+                {"type": "text", "text": "截图如下"},
+                {"type": "image", "data": TINY_PNG_B64, "mimeType": "image/png"},
+            ]
+        elif kind == "audio":
+            blocks = [{"type": "audio", "data": TINY_WAV_B64, "mimeType": "audio/wav"}]
+        elif kind == "resource_link":
+            blocks = [
+                {
+                    "type": "resource_link",
+                    "uri": "file:///reports/q3.md",
+                    "name": "q3.md",
+                    "title": "三季度报告",
+                    "mimeType": "text/markdown",
+                    "size": 4096,
+                }
+            ]
+        elif kind == "resource_text":
+            blocks = [
+                {
+                    "type": "resource",
+                    "resource": {
+                        "uri": "file:///notes/a.txt",
+                        "mimeType": "text/plain",
+                        "text": "内嵌文本资源的正文",
+                    },
+                }
+            ]
+        elif kind == "resource_blob":
+            blocks = [
+                {
+                    "type": "resource",
+                    "resource": {
+                        "uri": "file:///blob/x.bin",
+                        "mimeType": "application/zip",
+                        "blob": TINY_WAV_B64,
+                    },
+                }
+            ]
+        elif kind == "mixed":
+            blocks = [
+                {"type": "text", "text": "开头"},
+                {"type": "image", "data": TINY_PNG_B64, "mimeType": "image/png"},
+                {"type": "resource_link", "uri": "file:///m.md", "name": "m.md"},
+                {"type": "text", "text": "结尾"},
+            ]
+        elif kind == "unknown":
+            blocks = [{"type": "video", "data": "AAAA"}]
+        else:
+            send_error(msg_id, -32602, "rich: unknown kind " + kind)
+            return
+        send_result(msg_id, {"content": blocks, "isError": False})
+        return
+
+    if name == "structured":
+        send_result(
+            msg_id,
+            {
+                "content": [{"type": "text", "text": "结构化结果见 structuredContent"}],
+                "structuredContent": {"answer": 42, "label": "四十二"},
+                "isError": False,
+            },
+        )
+        return
+
+    if name == "bad_structured":
+        # answer 给字符串,不合声明的 integer——客户端须按 outputSchema 拦。
+        send_result(
+            msg_id,
+            {
+                "content": [{"type": "text", "text": "形状不对"}],
+                "structuredContent": {"answer": "不是整数"},
+                "isError": False,
+            },
+        )
+        return
+
+    if name == "bad_image":
+        # 声明 image/png,字节是纯文本:伪 MIME,客户端须拒绝。
+        import base64
+
+        fake = base64.b64encode(b"this is definitely not a png file").decode("ascii")
+        send_result(
+            msg_id,
+            {"content": [{"type": "image", "data": fake, "mimeType": "image/png"}], "isError": False},
+        )
         return
 
     send_error(msg_id, -32601, "unknown tool: " + name)

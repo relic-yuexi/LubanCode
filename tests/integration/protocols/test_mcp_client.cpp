@@ -12,8 +12,11 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <filesystem>
 #include <mutex>
+#include <optional>
 #include <thread>
+#include <variant>
 #include <vector>
 
 #include "mcp/client.hpp"
@@ -267,24 +270,45 @@ TEST_CASE("Client: CallTool 把多个 text 内容块拼接起来,isError=true �
     CHECK(result.content == "第一段 第二段");
 }
 
-TEST_CASE("Client: 非 text 内容块变成不支持提示占位符") {
+TEST_CASE("Client: 未知 content type 留占位块与码;坏 base64 的图片按协议错收口") {
     FakeTransport transport;
     mcp::Client client("test");
     client.AttachTransportForTest(&transport);
 
+    // 未知类型:不吞不崩,占位 + details 留 mcp.unsupported_content_type。
     transport.on_write = [&](const std::string& line) {
         const auto request = nlohmann::json::parse(line);
         const nlohmann::json response = {
             {"jsonrpc", "2.0"},
             {"id", request.at("id")},
-            {"result", {{"content", nlohmann::json::array({{{"type", "image"}, {"data", "base64..."}}})}}}};
+            {"result", {{"content", nlohmann::json::array({{{"type", "text"}, {"text", "前文"}},
+                                                   {{"type", "custom_thing"}, {"payload", "x"}},
+                                                   {{"type", "text"}, {"text", "后文"}}})}}}};
         client.OnLine(response.dump());
     };
 
     const auto result = client.CallTool("whatever", nlohmann::json::object());
     CHECK_FALSE(result.is_error);
-    CHECK(result.content.find("不支持的内容类型") != std::string::npos);
-    CHECK(result.content.find("image") != std::string::npos);
+    CHECK(result.content.find("前文") != std::string::npos);
+    CHECK(result.content.find("不支持的内容类型: custom_thing") != std::string::npos);
+    CHECK(result.content.find("后文") != std::string::npos);
+    CHECK(result.details.value("mcp_notice_code", std::string()) == "mcp.unsupported_content_type");
+
+    // 坏 base64 的图片:整次按协议错收口,不拿半真半假的内容继续跑。
+    transport.on_write = [&](const std::string& line) {
+        const auto request = nlohmann::json::parse(line);
+        const nlohmann::json response = {
+            {"jsonrpc", "2.0"},
+            {"id", request.at("id")},
+            {"result", {{"content", nlohmann::json::array({{{"type", "image"}, {"data", "base64..."},
+                                                            {"mimeType", "image/png"}}})}}}};
+        client.OnLine(response.dump());
+    };
+    const auto bad_image = client.CallTool("whatever", nlohmann::json::object());
+    CHECK(bad_image.is_error);
+    CHECK(bad_image.error_code == "mcp.bad_base64");
+    CHECK(bad_image.outcome == "protocol_error");
+    CHECK(bad_image.content.find("base64") != std::string::npos);
 }
 
 TEST_CASE("Client: Initialize 握手成功后会发一条 notifications/initialized 通知(无 id)") {
@@ -341,7 +365,7 @@ TEST_CASE("Client + 真实 Python 夹具:握手 + tools/list + tools/call(echo/a
 
     const auto tools_result = client.ListTools();
     REQUIRE_MESSAGE(tools_result.has_value(), tools_result.error());
-    CHECK(tools_result->size() == 2);
+    CHECK(tools_result->size() >= 2);  // echo/add 之外还有富结果夹具工具
     bool has_echo = false;
     bool has_add = false;
     for (const auto& tool : *tools_result) {
@@ -401,6 +425,128 @@ TEST_CASE("Client + 真实 Python 夹具:服务器在 tools/call 等待期间死
     CHECK(result.is_error);
     CHECK(result.content.find("退出") != std::string::npos);
     CHECK(elapsed < std::chrono::seconds(5));
+
+    client.Shutdown();
+}
+
+// ---------------------------------------------------------------------------
+// 3) MCP 富结果单 P0.7:真夹具走富内容整链——tools/list 接住 title/
+//    outputSchema/annotations,tools/call 的图片/资源/structuredContent 全链
+//    解析,伪 MIME 与 outputSchema 不合按稳定码收口。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Client + 真实 Python 夹具: tools/list 接住 title/outputSchema/annotations") {
+    mcp::Client client("test");
+    const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/mcp_test_server.py";
+    REQUIRE(client.StartProcess(kPythonCmd, {script}, {}).success);
+    REQUIRE(client.Initialize().has_value());
+    CHECK(client.negotiated_protocol_version() == "2024-11-05");  // 协商钉在旧版上照样工作
+
+    const auto tools_result = client.ListTools();
+    REQUIRE(tools_result.has_value());
+    const mcp::ToolInfo* rich = nullptr;
+    const mcp::ToolInfo* structured = nullptr;
+    for (const auto& info : *tools_result) {
+        if (info.name == "rich") rich = &info;
+        if (info.name == "structured") structured = &info;
+    }
+    REQUIRE(rich != nullptr);
+    CHECK(rich->title == "富结果样例工具");
+    CHECK(rich->annotations.value("readOnlyHint", false) == true);
+    REQUIRE(structured != nullptr);
+    REQUIRE(structured->output_schema.has_value());
+
+    client.Shutdown();
+}
+
+TEST_CASE("Client + 真实 Python 夹具: 假 MCP 返回一张 PNG,LubanCode 不再报'不支持的内容类型'") {
+    mcp::Client client("test");
+    const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/mcp_test_server.py";
+    REQUIRE(client.StartProcess(kPythonCmd, {script}, {}).success);
+    REQUIRE(client.Initialize().has_value());
+
+    const std::string artifacts = (std::filesystem::temp_directory_path() / "lubancode_mcp_it_artifacts").generic_string();
+    mcp::CallOptions options;
+    options.artifact_dir = artifacts;
+    std::int64_t jsonrpc_id = -1;
+
+    // 图片:真解码、真落盘,块里只剩引用。
+    auto result = client.CallTool("rich", {{"kind", "image"}}, &jsonrpc_id, options);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("不支持的内容类型") == std::string::npos);
+    CHECK(result.content.find("截图如下") != std::string::npos);
+    REQUIRE(result.payload.content.size() == 2);
+    const auto& image = std::get<tools::ImageContent>(result.payload.content[1]);
+    CHECK(image.mime_type == "image/png");
+    CHECK(image.width == 1);
+    CHECK(image.artifact.stored);
+    CHECK(std::filesystem::exists(std::filesystem::path(image.artifact.path)));
+    CHECK(jsonrpc_id >= 1);  // 内层 JSON-RPC id 真带出(McpTool 层再挂进 details)
+
+    // 混合块:块序保持 text -> image -> resource_link -> text。
+    result = client.CallTool("rich", {{"kind", "mixed"}}, &jsonrpc_id, options);
+    CHECK_FALSE(result.is_error);
+    REQUIRE(result.payload.content.size() == 4);
+    CHECK(std::holds_alternative<tools::TextContent>(result.payload.content[0]));
+    CHECK(std::holds_alternative<tools::ImageContent>(result.payload.content[1]));
+    CHECK(std::holds_alternative<tools::ResourceLinkContent>(result.payload.content[2]));
+    CHECK(std::holds_alternative<tools::TextContent>(result.payload.content[3]));
+
+    // 音频/内嵌资源/资源链接。
+    result = client.CallTool("rich", {{"kind", "audio"}}, &jsonrpc_id, options);
+    CHECK_FALSE(result.is_error);
+    CHECK(std::holds_alternative<tools::AudioContent>(result.payload.content[0]));
+    result = client.CallTool("rich", {{"kind", "resource_text"}}, &jsonrpc_id, options);
+    CHECK(std::get<tools::EmbeddedTextResourceContent>(result.payload.content[0]).text == "内嵌文本资源的正文");
+    result = client.CallTool("rich", {{"kind", "resource_blob"}}, &jsonrpc_id, options);
+    CHECK(std::get<tools::EmbeddedBlobResourceContent>(result.payload.content[0]).artifact.stored);
+    result = client.CallTool("rich", {{"kind", "resource_link"}}, &jsonrpc_id, options);
+    CHECK(std::get<tools::ResourceLinkContent>(result.payload.content[0]).title == "三季度报告");
+
+    client.Shutdown();
+}
+
+TEST_CASE("Client + 真实 Python 夹具: structuredContent 全链 + 伪 MIME/坏 schema 稳定码收口") {
+    mcp::Client client("test");
+    const std::string script = std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/mcp_test_server.py";
+    REQUIRE(client.StartProcess(kPythonCmd, {script}, {}).success);
+    REQUIRE(client.Initialize().has_value());
+    const auto tools_result = client.ListTools();
+    REQUIRE(tools_result.has_value());
+    std::optional<nlohmann::json> structured_schema;
+    std::optional<nlohmann::json> bad_schema;
+    for (const auto& info : *tools_result) {
+        if (info.name == "structured") structured_schema = info.output_schema;
+        if (info.name == "bad_structured") bad_schema = info.output_schema;
+    }
+    REQUIRE(structured_schema.has_value());
+    REQUIRE(bad_schema.has_value());
+
+    mcp::CallOptions good_options;
+    good_options.artifact_dir =
+        (std::filesystem::temp_directory_path() / "lubancode_mcp_it_artifacts").generic_string();
+    good_options.output_schema = &*structured_schema;
+    auto result = client.CallTool("structured", nlohmann::json::object(), nullptr, good_options);
+    CHECK_FALSE(result.is_error);
+    REQUIRE(result.payload.structured_content.has_value());
+    CHECK((*result.payload.structured_content)["answer"] == 42);
+    CHECK(result.payload.has_text_blocks());  // 文本在,structuredContent 不重复投影
+
+    mcp::CallOptions bad_options = good_options;
+    bad_options.output_schema = &*bad_schema;
+    result = client.CallTool("bad_structured", nlohmann::json::object(), nullptr, bad_options);
+    CHECK(result.is_error);
+    CHECK(result.error_code == "mcp.output_schema_mismatch");
+    CHECK(result.outcome == "protocol_error");
+
+    result = client.CallTool("bad_image", nlohmann::json::object(), nullptr, good_options);
+    CHECK(result.is_error);
+    CHECK(result.error_code == "mcp.mime_mismatch");
+
+    // 没给 artifact 目录:图片按稳定错收口,明败不吞图。
+    result = client.CallTool("rich", {{"kind", "image"}}, nullptr);
+    CHECK(result.is_error);
+    CHECK(result.error_code == "mcp.artifact_unavailable");
 
     client.Shutdown();
 }

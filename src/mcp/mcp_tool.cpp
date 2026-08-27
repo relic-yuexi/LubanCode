@@ -28,10 +28,21 @@ bool McpTool::needs_confirm() const {
 }
 
 tools::Tool::Result McpTool::execute(const nlohmann::json& input) {
+    return execute(input, tools::ToolExecutionContext{});
+}
+
+tools::Tool::Result McpTool::execute(const nlohmann::json& input, const tools::ToolExecutionContext& context) {
     // 逐枚追踪单:内层 JSON-RPC id 随结果带出(details.jsonrpc_request_id),
     // 外层 execution 关联账从这拿(单子"MCP 外层 execution 要挂内层")。
+    // MCP 富结果单 P0.5:本轮会话的 artifact 目录随 context 递进——二进制
+    // 块先落 <会话>/mcp-artifacts 再入史;没有落盘地由解析层按稳定错收口。
+    CallOptions options;
+    options.artifact_dir = context.artifact_dir;
+    if (info_.output_schema.has_value()) {
+        options.output_schema = &*info_.output_schema;
+    }
     std::int64_t jsonrpc_request_id = -1;
-    tools::Tool::Result result = client_.CallTool(info_.name, input, &jsonrpc_request_id);
+    tools::Tool::Result result = client_.CallTool(info_.name, input, &jsonrpc_request_id, options);
     if (jsonrpc_request_id >= 0) {
         result.details["jsonrpc_request_id"] = jsonrpc_request_id;
         result.details["mcp_server"] = server_name_;

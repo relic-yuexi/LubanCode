@@ -390,6 +390,7 @@ add_library(lubancode_engine STATIC
   src/memory/memory_tool.cpp
   src/mcp/transport.cpp
   src/mcp/client.cpp
+  src/mcp/rich_result.cpp  # MCP 富结果:tools/call 全块型解析与 artifact 落盘
   src/mcp/mcp_tool.cpp
   src/lsp/transport.cpp
   src/lsp/client.cpp
