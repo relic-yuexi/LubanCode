@@ -164,12 +164,14 @@ public:
     nlohmann::json input_schema() const override { return nlohmann::json::object(); }
     bool needs_confirm() const override { return needs_confirm_flag_; }
 
-    tools::Tool::Result execute(const nlohmann::json&) override {
+    tools::Tool::Result execute(const nlohmann::json& input) override {
         ++call_count;
+        inputs.push_back(input);
         return result_;
     }
 
     int call_count = 0;
+    std::vector<nlohmann::json> inputs;
 
 private:
     std::string name_;
@@ -194,6 +196,19 @@ std::vector<api::StreamEvent> ToolUseScript(const std::string& tool_id, const st
         api::ToolUseInputDelta{0, "{}"},
         api::ContentBlockDone{0},
         api::MessageDone{"tool_use", usage},
+    };
+}
+
+// 带实参的工具调用脚本(放行账测试用:run_command 的 command 字段要真传,
+// 前缀匹配才有输入可查)。
+std::vector<api::StreamEvent> ToolUseScriptInput(const std::string& tool_id, const std::string& tool_name,
+                                                 const std::string& input_json) {
+    return {
+        api::MessageStart{"msg", "model"},
+        api::ToolUseStart{0, tool_id, tool_name},
+        api::ToolUseInputDelta{0, input_json},
+        api::ContentBlockDone{0},
+        api::MessageDone{"tool_use", api::Usage{}},
     };
 }
 
@@ -1172,6 +1187,154 @@ TEST_CASE("后台子代理的 needs_confirm 工具被拒:当场入通知账,拒�
     CHECK(saw_denial);
     // 需确认工具没真执行。
     CHECK(gated_ptr->call_count == 0);
+}
+
+// 修"后台审批不查放行账"(2026-08):主会话的"总是允许"账(settings.local
+// 的 allow_tools + 会话内按 a 落的集合)以快照传入后台任务,审批回调先查
+// 账再问钩子。钉三态:账上工具免问放行、账外照拒、账是派出时刻的定格。
+TEST_CASE("后台子代理放行账:账上工具免问放行,账外照旧拒") {
+    FakeBackend foreground_backend;
+    tools::ToolRegistry sub_registry;
+    auto* allowed_ptr = new FakeTool("write_confirm", tools::Tool::Result{"写了", false}, /*needs_confirm=*/true);
+    auto* gated_ptr = new FakeTool("secret_tool", tools::Tool::Result{"动了", false}, /*needs_confirm=*/true);
+    sub_registry.Register(std::unique_ptr<FakeTool>(allowed_ptr));
+    sub_registry.Register(std::unique_ptr<FakeTool>(gated_ptr));
+
+    auto backend = std::make_unique<FakeBackend>();
+    backend->scripts = {
+        ToolUseScript("toolu_a", "write_confirm"),
+        ToolUseScript("toolu_b", "secret_tool"),
+        TextOnlyScript("收工:一件放行一件被拒"),
+    };
+    tools::AgentTool agent_tool(foreground_backend, sub_registry, "/work/dir");
+    agent_tool.SetDetachedBackendFactory([&backend]() {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::move(backend);
+        return detached;
+    });
+    std::set<std::string> ledger_names = {"write_confirm"};
+    agent_tool.SetBackgroundPermissionSource([&ledger_names]() {
+        tools::BackgroundPermissionLedger ledger;
+        ledger.always_allowed = ledger_names;
+        return ledger;
+    });
+
+    REQUIRE_FALSE(agent_tool
+                      .execute(nlohmann::json{{"title", "两件写活"}, {"prompt", "写两个文件"}, {"run_in_background", true}})
+                      .is_error);
+    for (int i = 0; i < 300 && agent_tool.HasRunningTasks(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE_FALSE(agent_tool.HasRunningTasks());
+
+    // 账上的真执行了,账外的没执行。
+    CHECK(allowed_ptr->call_count == 1);
+    CHECK(gated_ptr->call_count == 0);
+    // 只有账外那笔落拒绝通知。
+    const std::vector<std::string> notices = agent_tool.TakePermissionDenialNotices();
+    REQUIRE(notices.size() == 1);
+    CHECK(notices[0].find("secret_tool") != std::string::npos);
+    CHECK(notices[0].find("未放行") != std::string::npos);
+}
+
+TEST_CASE("后台子代理放行账:run_command 前缀——allow 命中放行,deny 压过 allow") {
+    FakeBackend foreground_backend;
+    tools::ToolRegistry sub_registry;
+    auto* run_ptr = new FakeTool("run_command", tools::Tool::Result{"跑完了", false}, /*needs_confirm=*/true);
+    sub_registry.Register(std::unique_ptr<FakeTool>(run_ptr));
+
+    auto backend = std::make_unique<FakeBackend>();
+    backend->scripts = {
+        ToolUseScriptInput("toolu_ok", "run_command", R"({"command":"git status"})"),
+        ToolUseScriptInput("toolu_deny", "run_command", R"({"command":"git push origin"})"),
+        TextOnlyScript("收工:一条放行一条被黑名单拒了"),
+    };
+    tools::AgentTool agent_tool(foreground_backend, sub_registry, "/work/dir");
+    agent_tool.SetDetachedBackendFactory([&backend]() {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::move(backend);
+        return detached;
+    });
+    // run_command 整名在账上(顶格放行),但 git push 命中 deny 前缀——deny
+    // 压过 allow,与主路 EvaluatePermission 的"策略黑名单最高"同序。
+    agent_tool.SetBackgroundPermissionSource([]() {
+        tools::BackgroundPermissionLedger ledger;
+        ledger.always_allowed = {"run_command"};
+        ledger.allow_commands = {"git"};
+        ledger.deny_commands = {"git push"};
+        return ledger;
+    });
+
+    REQUIRE_FALSE(agent_tool
+                      .execute(nlohmann::json{{"title", "跑两条命令"}, {"prompt", "跑一下"}, {"run_in_background", true}})
+                      .is_error);
+    for (int i = 0; i < 300 && agent_tool.HasRunningTasks(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE_FALSE(agent_tool.HasRunningTasks());
+
+    // git status 真执行;git push 被 deny 前缀压下,没轮到 allow。
+    CHECK(run_ptr->call_count == 1);
+    REQUIRE(run_ptr->inputs.size() == 1);
+    CHECK(run_ptr->inputs[0].value("command", std::string()) == "git status");
+
+    const std::vector<std::string> notices = agent_tool.TakePermissionDenialNotices();
+    REQUIRE(notices.size() == 1);
+    CHECK(notices[0].find("deny 命令前缀") != std::string::npos);
+
+    // 给模型的拒绝文案把"预放行也放不开"说清,不诱导子代理去讨 /permissions。
+    const auto events = agent_tool.TaskEvents(1);
+    bool saw_deny_text = false;
+    for (const auto& event : events) {
+        if (event.kind == tools::AgentTaskEventKind::ToolResult && event.is_error) {
+            saw_deny_text = true;
+            CHECK(event.result.find("deny 命令前缀黑名单") != std::string::npos);
+            CHECK(event.result.find("deny 压过预放行") != std::string::npos);
+        }
+    }
+    CHECK(saw_deny_text);
+}
+
+TEST_CASE("后台子代理放行账是派出时刻的定格:任务跑着时主会话落新账,任务不认") {
+    FakeBackend foreground_backend;
+    tools::ToolRegistry sub_registry;
+    auto* gated_ptr = new FakeTool("write_confirm", tools::Tool::Result{"写了", false}, /*needs_confirm=*/true);
+    sub_registry.Register(std::unique_ptr<FakeTool>(gated_ptr));
+
+    // 快照在 LaunchBackground 里拷贝、execute() 返回前定格——所以"launch
+    // 返回后再改源账"必然晚于定格,时序天然成立,不用挡线程。
+    tools::AgentTool agent_tool(foreground_backend, sub_registry, "/work/dir");
+    auto scripted = std::make_unique<FakeBackend>();
+    scripted->scripts = {
+        ToolUseScript("toolu_late", "write_confirm"),
+        TextOnlyScript("受阻如实汇报"),
+    };
+    agent_tool.SetDetachedBackendFactory([&scripted]() {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::move(scripted);
+        return detached;
+    });
+    std::set<std::string> ledger_names;  // 派出时:空账
+    agent_tool.SetBackgroundPermissionSource([&ledger_names]() {
+        tools::BackgroundPermissionLedger ledger;
+        ledger.always_allowed = ledger_names;
+        return ledger;
+    });
+
+    REQUIRE_FALSE(agent_tool
+                      .execute(nlohmann::json{{"title", "定格验证"}, {"prompt", "写个文件"}, {"run_in_background", true}})
+                      .is_error);
+    // execute 已返回 = 快照已定格。此刻主会话按 a 落了新账——任务不认。
+    ledger_names.insert("write_confirm");
+    for (int i = 0; i < 300 && agent_tool.HasRunningTasks(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE_FALSE(agent_tool.HasRunningTasks());
+
+    CHECK(gated_ptr->call_count == 0);
+    const std::vector<std::string> notices = agent_tool.TakePermissionDenialNotices();
+    REQUIRE(notices.size() == 1);
+    CHECK(notices[0].find("write_confirm") != std::string::npos);
 }
 
 // 回流回归(2026-08-14 死机会话):后台子代理在会话空闲时跑完,主循环正
