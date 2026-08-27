@@ -1,0 +1,334 @@
+# 模型协议兼容实录矩阵：四类 wire、思考方言与真机回放
+
+状态：待做（2026-08-27，用户查问 Anthropic / OpenAI Chat /
+OpenAI Responses / Gemini 各家格式是否真有测试，并指定以仓库根目录三份
+兼容手册为账本。已通读请求构造、事件解析、catalog 扫掠与手工探针；底座
+已有，缺口也真有。本单不把“HTTP 200”冒充兼容）
+
+## 一句话
+
+仓库不是没测。四家各有 request/events 单测，另有一册模型怪癖矩阵，能扫
+五百余只推理模型、一千五百余组档位；也有 `model_probe_e2e` 可连真端点。
+眼下欠的是“手册样例 -> 可追溯 fixture -> 精确方言 -> 全链回放 -> 真机证据”
+这一条闭环。尤须先拆掉一处错误假设：`supports_toggle` 不等于所有 Chat /
+Responses 端都认 `thinking: {type: ...}`。
+
+## 这回翻过哪些账
+
+### 三份本地兼容手册
+
+| 手册 | 请求侧思考形状 | 返回侧思考形状 | 要钉住的规矩 |
+|---|---|---|---|
+| `OpenAI兼容-Responses.md` | `reasoning.effort`；兼容旧 `enable_thinking: bool` | `reasoning` output item、`response.reasoning_summary_text.delta/done` | `reasoning.effort` 优先于 `enable_thinking`；旧开关已注明将退役 |
+| `OpenAI兼容-Chat.md` | Qwen 等用顶层 `enable_thinking: bool`；MiniMax 用 `thinking.type=adaptive/disabled`；另有 `thinking_budget`、`reasoning_effort`、`preserve_thinking` | 常见为 `delta.reasoning_content` | 私有参数虽经 SDK 的 `extra_body` 传，落到 HTTP 请求体时仍是顶层字段；模型家族不能混写 |
+| `Anthropic兼容-Messages.md` | `thinking.type=enabled/disabled`；开启时带 `budget_tokens` | `thinking_delta`、`signature_delta`，再转 `text_delta` | 签名要随思考块收下并在需要时回传；预算必须服从 `max_tokens` 约束 |
+
+Gemini 没在这三份手册里，仍纳入同一张表。现行实现走
+`generationConfig.thinkingConfig`，分别认 `includeThoughts`、
+`thinkingBudget`、`thinkingLevel`；流中 `part.thought=true` 才是思考正文。
+
+### 仓库已有底座（保留，不重造）
+
+| 层 | 现有证据 | 能证明什么 |
+|---|---|---|
+| 逐 wire 请求 | `tests/unit/api/test_{anthropic,chat,responses,gemini}_request.cpp` | 内存里的 `api::Request` 能翻成若干已知 JSON 形状 |
+| 逐 wire 事件 | `tests/unit/api/test_{anthropic,chat,responses,gemini}_events.cpp` | 单帧或短流能翻成统一 `StreamEvent` |
+| catalog 扫掠 | `tests/unit/api/test_model_quirks_matrix.cpp` | 目录里已有推理档案的模型，会按当前通用规则过一遍四家 serializer |
+| SSE 切片 | `tests/unit/api/test_sse_framing.cpp` | 半帧、并帧、CRLF、多行 data 与上限能处理 |
+| 真端点模板 | `tests/manual/model_probe_e2e.cpp` | 指定 provider/model/key 后，可跑两轮工具往返并打印请求形状与 usage |
+| 能力探针 | `/doctor effort` | 能发真实请求，比较档位与返回观察值 |
+
+这些测试不能证明任意目录项都能在真服务上工作。catalog 扫掠眼下测的是
+“实现遵守自己的抽象”，不是“抽象符合厂商”。手工探针又只打印结果，没有
+一张版本化清单判成败。二者中间还空着一截。
+
+## 已钉出的缺口
+
+### 缺口一：toggle 被压成一只布尔能力，丢了落线形状
+
+`api::ReasoningConfig` 只记 `supports_toggle`、`supports_effort`、档位与预算。
+Chat / Responses serializer 因而把任意 toggle 都翻成：
+
+```json
+{"thinking":{"type":"enabled"}}
+```
+
+可三份手册已经摆明：
+
+- Qwen 等 OpenAI Chat 兼容端认 `{"enable_thinking":true}`；
+- MiniMax Chat 认 `{"thinking":{"type":"adaptive"}}`；
+- Responses 首选 `{"reasoning":{"effort":"high"}}`，旧开关才是
+  `{"enable_thinking":true}`；
+- Anthropic Messages 才认 `thinking.type=enabled` 并配 `budget_tokens`；
+- Gemini 的开关、预算、档位全住 `generationConfig.thinkingConfig`。
+
+名字相近，门却不是一扇。`extra_body` 目前能让懂行者手填过关，却不能替
+catalog 说明能力，更不能让测试知道“应当发什么”。
+
+### 缺口二：模型家族差异没有成为可验证合同
+
+当前目录能说“支持 toggle/effort/budget”，却说不清：
+
+- 开关字段路径、值类型与 on/off 枚举；
+- effort 字段路径、允许档位、别名与服务端映射；
+- budget 字段路径、上下界、`-1/0` 的特殊语义；
+- 多字段同现时谁压谁，如 Responses 的 `reasoning.effort` 压
+  `enable_thinking`；
+- 思考增量字段是 `reasoning_content`、`reasoning`、
+  `reasoning_details[]`、Anthropic block，还是 Gemini thought part；
+- 工具调用之后，思考正文/签名要不要回传，回传到哪个字段；
+- 纯思考模型、混合思考模型、不可关闭模型各如何表现。
+
+`deepseek-chat`、Qwen、GLM、MiniMax、Kimi、Claude、OpenAI o/gpt、Gemini
+若只共享一只 `supports_toggle`，测试越齐，越会把错误翻译钉得牢。
+
+### 缺口三：手册实录没有独立 fixture 库
+
+现有 events 单测里已有少量手册样例和真机缩样，散在 C++ 字符串中。仓库
+没有 `tests/fixtures/api/`，也没有来源、抓取日期、provider、model、wire、
+场景、脱敏说明与预期事件序列。手册一变，无从对账；parser 一改，也难看出
+究竟破了哪家现场。
+
+### 缺口四：缺完整 HTTP/SSE 回放
+
+单测多从 `BuildRequestJson` 或 `parse_event` 半路起步。尚缺一只回环假服务，
+把整条路跑穿：
+
+```text
+Provider profile
+  -> Request shaping
+  -> HTTP path/headers/body
+  -> 任意大小的网络 chunk
+  -> SSE framer
+  -> wire parser
+  -> StreamEvent / assembler
+  -> tool call + tool result
+  -> 第二轮 reasoning/signature replay
+  -> usage 与 stop reason
+```
+
+这层才抓得住“请求写对，回流却丢了”“单帧能解，跨 chunk 就坏”“首轮能答，
+工具后第二轮 400”这类真病。
+
+### 缺口五：真机探针没有矩阵、判据与证据包
+
+`model_probe_e2e` 是一把好扳手，眼下仍靠人手指定一只模型，再盯 stdout。
+它没有：
+
+- 固定的 provider/model/dialect 场景清单；
+- on/off、low/high 成对探测；
+- 多次重复以压住采样抖动；
+- 请求、事件种类、usage、时延、错误的脱敏报告；
+- `accepted / emitted_thinking / effective_control / accounted` 四栏判定；
+- 已知不支持、已知忽略、暂未验证三种非绿状态。
+
+HTTP 2xx 只说明服务收了请求。返回过 thinking 只说明这回吐了思考。两档
+行为不同，才有资格说 effort 可能生效；usage 分账另算，不能拿
+`reasoning_tokens=0` 判“没思考”。
+
+## 设计定案
+
+### 一、给推理能力补“wire 方言”，不再靠布尔猜 JSON
+
+把中立能力与落线方言分开。名字可再斟酌，表达力至少到这一步：
+
+```text
+ReasoningCapability
+  modes: always | toggle | effort | budget
+  supported_efforts
+  budget_limits
+
+ReasoningWireDialect
+  toggle: none | enable_thinking_bool | thinking_type
+  toggle_on/off: true/false 或 adaptive|enabled/disabled
+  effort_path: none | reasoning.effort | reasoning_effort |
+               output_config.effort | thinkingLevel | custom
+  budget_path: none | thinking_budget | thinking.budget_tokens |
+               generationConfig.thinkingConfig.thinkingBudget | custom
+  delta: reasoning_content | reasoning | reasoning_details |
+         anthropic_thinking_block | gemini_thought_part
+  replay: never | tool_episode | always
+  replay_field / signature_required
+  precedence
+```
+
+- catalog 明写方言；serializer 只按方言落线。
+- 不按模型名猜，不拿 provider 品牌硬编码。
+- `extra_body` 留作逃生门与新字段试验场，不再冒充正式能力合同。
+- 旧目录可迁移：无方言时维持旧行为并打“未验证”标记；待 fixture 补齐后
+  再收紧，免得一刀切断用户自配端点。
+- schema 拒绝拼错字段、错类型、互斥组合；错误须点出 catalog 坐标。
+
+### 二、立一座可追溯 fixture 库
+
+建议目录：
+
+```text
+tests/fixtures/api/
+  anthropic_messages/
+  openai_chat/
+  openai_responses/
+  google_generate_content/
+```
+
+每个场景放两件：脱敏 wire 实录与 manifest。manifest 至少记：
+
+```text
+fixture_id / wire / provider / model / scenario
+source_document / source_section / captured_at / doc_snapshot_hash
+request_expectation / expected_events / expected_replay
+usage_expectation / stop_reason / notes
+```
+
+正文可换成短的合成字样，事件类型、字段、null/空串、索引、次序、usage
+形状不得改。钥匙、request id、业务正文一律脱敏。fixture 读不动、缺 manifest、
+重复 id，测试当场红。
+
+首批把三份手册中的这些形状摘进去：
+
+| wire | 必收场景 |
+|---|---|
+| Responses | `reasoning.effort`；旧 `enable_thinking`；二者同现的优先级；reasoning item + summary delta/done；工具调用夹在 reasoning 与正文之间 |
+| Chat | Qwen `enable_thinking` + `reasoning_content`；MiniMax `thinking.type`；`thinking_budget`；GLM/DeepSeek `reasoning_effort`；`preserve_thinking` 后的第二轮 |
+| Anthropic | disabled；enabled + budget；thinking/signature/text 顺序；thinking 后工具调用；签名回传；ping 与空 signature |
+| Gemini | includeThoughts；budget；level；`thought:true`；thought signature；思考、正文、函数调用同帧与跨帧 |
+
+### 三、测试分五层，各管一笔账
+
+#### L1：schema 与 catalog
+
+- [ ] 每只声明 reasoning 的模型必须能解析出明确 mode 与 wire dialect。
+- [ ] wire 不认的字段组合在 catalog parse 阶段报错。
+- [ ] 同 provider 下模型可覆写方言；不可拿 provider 默认抹平模型特例。
+- [ ] `none/minimal/auto` 只有目录明说后才解释，不靠全局猜。
+- [ ] catalog 扫掠改断言“声明的精确字段路径和值”，不再断言
+  “toggle 一概生 `thinking.type`”。
+
+#### L2：请求 golden
+
+- [ ] 每种方言各有 on/off 或 low/high 的逐字段 golden。
+- [ ] 空 effort 不偷偷开关；不支持的档位不静默改写。
+- [ ] provider `extra_body`、model variant、request override 的优先级逐项钉住。
+- [ ] 互斥键不并发：如 Gemini level/budget；Responses 新旧开关按明文优先级。
+- [ ] 工具后第二轮，Chat reasoning 字段与 Anthropic signature 原字节回传。
+
+#### L3：事件 fixture
+
+- [ ] 每册 wire 实录按 1 字节、随机小块、整帧、并帧四种切法重放。
+- [ ] 空串、null、字段缺失、未知未来事件、错误类型不崩也不串态。
+- [ ] 思考 -> 正文、思考 -> tool、tool -> 思考、并行 tool 全有序。
+- [ ] `reasoning_details` 不能只计数后丢掉；先定统一块映射，再写 fixture。
+- [ ] usage 分别钉 input/output/cache read/cache creation/reasoning，缺项记 unknown。
+
+#### L4：回环 HTTP 集成
+
+- [ ] 为四家 client 共用一只本地 loopback server，核 path/header/body。
+- [ ] server 按 fixture 发 SSE，并故意拆 chunk、延迟、插 ping、半路断流。
+- [ ] 跑一轮纯答与一轮“思考 + 工具 + 回传 + 最终答”。
+- [ ] 断言最终 history 中块序、签名、tool id、stop reason、usage 全对。
+- [ ] Windows、Linux 都跑；不靠公网，不花 token，纳入常规 CTest。
+
+#### L5：真 provider 抽验
+
+- [ ] 把 `model_probe_e2e` 改为读 manifest，可一条命令跑一组模型。
+- [ ] 至少列 Qwen Chat、MiniMax Chat、OpenAI/兼容 Responses、Anthropic
+  Messages、Gemini、GLM/DeepSeek effort 六类哨兵。
+- [ ] 每只先跑 stub 自检，再凭环境钥匙跑真机；没钥匙记 SKIP，不算 PASS。
+- [ ] toggle 跑 off/on；effort 跑 low/high 或服务声明的两端；每组至少三次。
+- [ ] 报告脱敏落 `build/test-evidence/model-probe/<date>/`，不进源码仓。
+- [ ] CI 日常只跑 L1-L4；有仓库密钥的定时/手动 job 才跑 L5，并设费用上限。
+
+## 真机判定表
+
+每个 provider/model/scenario 都写四栏，不许揉成一个“支持”：
+
+| 栏 | PASS 凭据 | 不能拿什么充数 |
+|---|---|---|
+| accepted | 请求成功，且没有流内 error | 单看 HTTP 状态，漏看 SSE error |
+| emitted_thinking | 收到该 wire 认可的非空思考事件 | 正文里自称“我思考了” |
+| effective_control | on/off 或浅/深多次对照，观察值稳定分开 | 服务回显请求参数、只跑一次 |
+| accounted | usage 明列思考 token，且守恒公式对上 | `reasoning_tokens=0`、总 token 猜分账 |
+
+结果枚举：`pass / fail / ignored / unsupported / unavailable / unverified`。
+旧行为可记 `unverified`，不可涂绿。
+
+## 首批模型/方言哨兵
+
+模型名会变，manifest 以 catalog 当时可用项为准；每类至少留一只：
+
+- OpenAI Responses effort：o 系或 gpt-5 系；
+- 阿里云 Responses：Qwen，核 `reasoning.effort` 与旧 `enable_thinking` 优先级；
+- 阿里云 Chat bool toggle：Qwen 混合思考模型；
+- Chat object toggle：MiniMax/M3；
+- Chat effort：GLM 或 DeepSeek-V4；
+- Anthropic Messages budget：Claude 或兼容端 Qwen；
+- Gemini budget：Gemini 2.5；Gemini level：Gemini 3 系；
+- 只思考/不可关：Kimi code 或目录中等价哨兵；
+- 本地 vLLM：`reasoning` delta 与 `chat_template_kwargs.enable_thinking`
+  这一类部署参数另列。它不一定是 HTTP body 顶层字段，须由部署端适配层
+  明写，不能和百炼 `enable_thinking` 混为一谈。
+
+## 施工次序
+
+### P0：先把现状变成红绿账
+
+- [ ] 给三份手册算 snapshot hash，列出首批 fixture 来源段。
+- [ ] 把现有 inline 实录迁入 fixture loader，行为不改。
+- [ ] 给当前“generic toggle -> thinking.type”补一只阿里云 Chat 反例测试，
+  先见红，证明确有缺口。
+- [ ] 给 `model_probe_e2e` 的 stub 模式登记 CTest 或独立 build-and-run 守门，
+  免得手工靶子年久失修。
+
+### P1：方言入 catalog
+
+- [ ] 扩 `ReasoningConfig`/catalog schema，迁移内置 provider/model。
+- [ ] serializer 改按精确 path/value 生成请求。
+- [ ] `/think` 与 `/doctor effort` 打印最终 wire 形状，不只报抽象档位。
+- [ ] 配置文档列出逃生门与已验证方言；未知端默认标 unverified。
+
+### P2：fixture 与回环全链
+
+- [ ] 四家请求 golden、事件 fixture、工具后回传齐备。
+- [ ] loopback server 跑穿 client/framer/parser/assembler/agent 第二轮。
+- [ ] 随机 chunk seed 固定并在失败时打印，能复跑同一刀口。
+
+### P3：真机矩阵
+
+- [ ] manifest 驱动探针，生成四栏判定报告。
+- [ ] 跑首批哨兵，失败项回灌成最小脱敏 fixture。
+- [ ] 建手动/定时 CI；模型退役只改 manifest，不删历史证据。
+
+## 验收口径
+
+- 三份本地手册列出的思考请求与流式返回形状，各有可追溯 fixture。
+- `enable_thinking: bool`、`thinking.type`、`reasoning.effort`、
+  `reasoning_effort`、Anthropic budget、Gemini level/budget 各有独立 golden。
+- catalog 中再无“只写 supports_toggle，serializer 自猜字段”的推理模型。
+- 四家 loopback 都能跑完“思考 -> 工具 -> 回传 -> 最终答”，随机切片不坏。
+- `reasoning_details` 要么正式映射并有回放规矩，要么能力层明报 unsupported；
+  不得只打一行诊断后丢正文。
+- 真机报告把 accepted、emitted、effective、accounted 四笔分开；没钥匙、没跑、
+  只收 2xx 一概不得算绿。
+- 新增 provider/model 时，缺 dialect 或缺 fixture/test waiver，catalog 守门即红。
+
+## 不顺手做
+
+- 本单不把供应商返回的 reasoning summary 宣称为模型内部完整思维链。
+- 本单不把昂贵真机矩阵塞进每次 PR；离线回放进常规 CI，真机另设门。
+- 本单不凭模型名字自动猜方言。
+- 本单不顺手改思考内容怎么画；终端流中预览另见
+  `todos/思考流中预览_逐帧露尾与完毕自折叠.todo`。
+
+## 主要落点
+
+| 责任 | 文件 |
+|---|---|
+| 中立能力与 wire 方言 | `src/api/reasoning.hpp`、`src/api/types.hpp` |
+| 四家请求/事件 | `src/api/{chat,responses,anthropic,gemini}/` |
+| provider/model 声明 | `catalog/providers.json`、`catalog/providers.schema.json` |
+| catalog 解析与配置 | `src/config/provider_catalog.*`、`src/config/config.*` |
+| 离线矩阵 | `tests/unit/api/test_model_quirks_matrix.cpp` |
+| wire fixture | 新增 `tests/fixtures/api/` 与 loader |
+| 回环集成 | 新增 `tests/integration/api/test_wire_replay.cpp`（或按 wire 分册） |
+| 真机探针 | `tests/manual/model_probe_e2e.cpp` |
+| 能力诊断 | `src/app/commands/doctor_commands.*` |
