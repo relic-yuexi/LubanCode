@@ -2,6 +2,8 @@
 // 手艺(AllocConsole + WriteConsoleInputW + ReadConsoleOutputW),验的是这轮
 // 新加的东西——流式期间正文下方常驻的框(上横线/输入行/下横线/状态行)、
 // Working 动态着色、输入光标、常驻队列、ESC 打断、长输出滚屏时框还贴得住。
+// 思考流中预览单追加一幕:进程内假 anthropic SSE 服务供思考剧本(不碰真
+// 网络),验思考露尾三行与 footer 框同屏共存、完毕自折叠不剩残行。
 // 不进 ctest,集成验证时手动跑:
 //   stream_footer_driver <lubancode.exe 路径> <子进程工作目录> <报告文件路径>
 
@@ -9,10 +11,18 @@
 #define NOMINMAX
 #include <windows.h>
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#include <atomic>
 #include <fstream>
+#include <mutex>
 #include <set>
 #include <string>
+#include <thread>
 #include <vector>
+
+#pragma comment(lib, "ws2_32.lib")
 
 namespace {
 
@@ -291,6 +301,134 @@ int FindRuleBelowInput(int input_row) {
         }
     }
     return -1;
+}
+
+// ---- 思考流中预览幕的家伙什:进程内假 anthropic SSE 服务(不碰真网络) ----
+
+using SOCKET_T = SOCKET;
+
+void SendAllBytes(SOCKET_T s, const std::string& data) {
+    std::size_t sent = 0;
+    while (sent < data.size()) {
+        const int n = ::send(s, data.data() + sent, static_cast<int>(data.size() - sent), 0);
+        if (n <= 0) {
+            return;
+        }
+        sent += static_cast<std::size_t>(n);
+    }
+}
+
+std::string DrainHttpRequestBytes(SOCKET_T s) {
+    std::string raw;
+    char buf[4096];
+    std::size_t header_end = std::string::npos;
+    while (header_end == std::string::npos) {
+        const int n = ::recv(s, buf, sizeof(buf), 0);
+        if (n <= 0) {
+            return raw;
+        }
+        raw.append(buf, static_cast<std::size_t>(n));
+        header_end = raw.find("\r\n\r\n");
+    }
+    std::size_t content_length = 0;
+    const std::string header = raw.substr(0, header_end);
+    if (const std::size_t cl_pos = header.find("Content-Length"); cl_pos != std::string::npos) {
+        content_length = static_cast<std::size_t>(atol(header.c_str() + cl_pos + 15));
+    }
+    const std::size_t total = header_end + 4 + content_length;
+    while (raw.size() < total) {
+        const int n = ::recv(s, buf, sizeof(buf), 0);
+        if (n <= 0) {
+            break;
+        }
+        raw.append(buf, static_cast<std::size_t>(n));
+    }
+    return raw;
+}
+
+std::string SseLine(const std::string& json) { return "data: " + json + "\n\n"; }
+
+// 思考剧本:16 段思考(300ms 一段,每段独立一行)+ 一小段正文收口。
+// 响应头带 Content-Length(无定长流会被客户端连接池误判早断,正文整段
+// 静默丢——viewport_driver 同款教训)。
+std::vector<std::string> ThinkingScriptEvents() {
+    const char* kPreviewLine =
+        "\xe9\xa2\x84\xe8\xa7\x88\xe8\xa1\x8c";  // 预览行
+    std::vector<std::string> events;
+    events.push_back("{\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"model\":\"fake-model\"}}");
+    events.push_back(
+        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}");
+    for (int i = 1; i <= 16; ++i) {
+        // 换行以 JSON 转义(\\n)进帧:裸换行会让整帧解析失败被静默跳过。
+        std::string piece = std::string(kPreviewLine) + "\xe7\xac\xac" + std::to_string(i) +
+                            "\xe5\x8f\xa5\xef\xbc\x9a\xe6\x85\xa2\xe6\x85\xa2\xe6\x83\xb3\xe3\x80\x82\\n";
+        events.push_back("{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\","
+                         "\"thinking\":\"" +
+                         piece + "\"}}");
+    }
+    events.push_back("{\"type\":\"content_block_stop\",\"index\":0}");
+    events.push_back(
+        "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}");
+    events.push_back(
+        "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}");
+    events.push_back("{\"type\":\"content_block_stop\",\"index\":1}");
+    events.push_back("{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_"
+                     "tokens\":60,\"output_tokens\":30}}");
+    return events;
+}
+
+int StartFakeAnthropicServer() {
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    SOCKET_T listener = ::socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (listener == INVALID_SOCKET) {
+        return 0;
+    }
+    sockaddr_in addr{};
+    addr.sin_family = AF_INET;
+    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    addr.sin_port = 0;
+    if (::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0) {
+        return 0;
+    }
+    sockaddr_in bound{};
+    int bound_len = sizeof(bound);
+    ::getsockname(listener, reinterpret_cast<sockaddr*>(&bound), &bound_len);
+    const int port = ntohs(bound.sin_port);
+    ::listen(listener, 8);
+    std::thread([listener]() {
+        while (true) {
+            sockaddr_in client{};
+            int client_len = sizeof(client);
+            const SOCKET_T client_fd =
+                ::accept(listener, reinterpret_cast<sockaddr*>(&client), &client_len);
+            if (client_fd == INVALID_SOCKET) {
+                return;
+            }
+            std::thread([client_fd]() {
+                DrainHttpRequestBytes(client_fd);
+                std::size_t body_bytes = 0;
+                for (const auto& event : ThinkingScriptEvents()) {
+                    body_bytes += SseLine(event).size();
+                }
+                const std::string head = "HTTP/1.1 200 OK\r\n"
+                                         "Content-Type: text/event-stream\r\n"
+                                         "Content-Length: " +
+                                         std::to_string(body_bytes) + "\r\n" + "Connection: close\r\n\r\n";
+                SendAllBytes(client_fd, head);
+                for (const auto& event : ThinkingScriptEvents()) {
+                    Sleep(300);
+                    SendAllBytes(client_fd, SseLine(event));
+                }
+                closesocket(client_fd);
+            }).detach();
+        }
+    }).detach();
+    return port;
+}
+
+void SetEnvVar(const std::wstring& name, const std::wstring& value) {
+    _wputenv((name + L"=" + value).c_str());
 }
 
 bool WaitForFooterInputRow(int timeout_ms, int* found_row = nullptr) {
@@ -720,14 +858,117 @@ int wmain(int argc, wchar_t** argv) {
         Sleep(1000);
     }
 
+    // ---- G6 思考流中预览(思考流中预览单):自带假服务的独立子进程 -------
+    // 前面各幕要真后端;这一幕进程内起假 anthropic SSE 服务,不碰网络也能
+    // 验思考露尾与 footer 框的同屏共存。环境变量在起第二个子进程前改写,
+    // 第一个子进程的环境是出生时的快照,不受影响。
+    {
+        const int port = StartFakeAnthropicServer();
+        Check(port != 0, "G6 假 anthropic 服务起来(思考剧本)");
+        if (port != 0) {
+            // 第一个子进程的戏份已完(G5 是最后一幕)。CONIN 只有一只,两只
+            // 子进程同读同画会互相搅(G6 的锚全被 child1 的重画冲掉)——
+            // 先送走 child1,G6 的子进程独占控制台。收尾那段对已关闭的句柄
+            // 自然短路。
+            if (pi.hProcess != nullptr) {
+                TerminateProcess(pi.hProcess, 0);
+                WaitForSingleObject(pi.hProcess, 3000);
+                CloseHandle(pi.hProcess);
+                pi.hProcess = nullptr;
+                Log("INFO: G6 前送走第一个子进程(独占控制台)");
+            }
+            SetEnvVar(L"LUBANCODE_WIRE", L"anthropic");
+            SetEnvVar(L"LUBANCODE_BASE_URL", L"http://127.0.0.1:" + std::to_wstring(port));
+            SetEnvVar(L"LUBANCODE_API_KEY", L"stream-footer-driver");
+            SetEnvVar(L"LUBANCODE_MODEL", L"fake-model");
+            SetEnvVar(L"NO_PROXY", L"127.0.0.1,localhost");
+            SetEnvVar(L"http_proxy", L"");
+            SetEnvVar(L"https_proxy", L"");
+
+            STARTUPINFOW si6{};
+            si6.cb = sizeof(si6);
+            si6.dwFlags = STARTF_USESTDHANDLES;
+            si6.hStdInput = g_conin;
+            si6.hStdOutput = g_conout;
+            si6.hStdError = g_conout;
+            PROCESS_INFORMATION pi6{};
+            std::wstring cmdline6 = L"\"" + exe_path + L"\"";
+            if (CreateProcessW(exe_path.c_str(), cmdline6.data(), nullptr, nullptr, TRUE, 0, nullptr,
+                               workdir.c_str(), &si6, &pi6)) {
+                CloseHandle(pi6.hThread);
+                Check(WaitForText("shift+tab", 30000), "G6 开场:composer 状态行出现");
+                Sleep(400);
+                SendText(
+                    "\xe6\x80\x9d\xe8\x80\x83\xe9\xa2\x84\xe8\xa7\x88\xe8\xb5\xb0\xe4\xb8\x80"
+                    "\xe6\xb3\xa2");  // 思考预览走一波
+                SendKey(VK_RETURN, L'\r', 0);
+                // 运行中标题:"思考中…"(带省略号,与 footer 的 "• 思考中 (Ns)" 区分)。
+                const std::string title_needle =
+                    "\xe6\x80\x9d\xe8\x80\x83\xe4\xb8\xad\xe2\x80\xa6";  // 思考中…
+                const std::string preview_needle =
+                    "\xe9\xa2\x84\xe8\xa7\x88\xe8\xa1\x8c\xe7\xac\xac";  // 预览行第
+                Check(WaitForText(title_needle, 30000), "G6 思考预览: 运行中标题出现(30s 内)");
+                int max_preview_rows = 0;
+                bool footer_below_preview = false;
+                const DWORD preview_deadline = GetTickCount() + 10000;
+                while (GetTickCount() < preview_deadline && FindLastRow(title_needle) >= 0) {
+                    int preview_rows = 0;
+                    for (int r = 0; r < 400; ++r) {
+                        if (ReadRow(r).find(preview_needle) != std::string::npos) {
+                            ++preview_rows;
+                        }
+                    }
+                    if (preview_rows > max_preview_rows) {
+                        max_preview_rows = preview_rows;
+                    }
+                    const int last_preview = FindLastRow(preview_needle);
+                    const int input_row = FindFooterInputRow();
+                    if (last_preview >= 0 && input_row > last_preview) {
+                        footer_below_preview = true;
+                    }
+                    Sleep(120);
+                }
+                Check(max_preview_rows >= 1, "G6 思考预览: 露尾行可见");
+                Check(max_preview_rows <= 3,
+                      "G6 思考预览: 露尾恒不超过三行(实得峰值 " + std::to_string(max_preview_rows) + ")");
+                Check(footer_below_preview, "G6 思考预览期间:footer 输入框常驻,在预览之下");
+                // 完毕自折叠:一行"思考 …(Ctrl+O 展开)",预览行一个不剩。
+                // 锚带括号,躲开 composer 帮助行"Ctrl+O 展开/收起"的误认。
+                Check(WaitForText("(Ctrl+O \xe5\xb1\x95\xe5\xbc\x80)", 30000),
+                      "G6 思考完毕: 收折行出现(带 Ctrl+O 提示)");
+                Sleep(600);
+                int preview_left = 0;
+                for (int r = 0; r < 400; ++r) {
+                    if (ReadRow(r).find(preview_needle) != std::string::npos) {
+                        ++preview_left;
+                    }
+                }
+                Check(preview_left == 0,
+                      "G6 思考完毕: 预览行一个不剩(原地收折无重影,实得 " +
+                          std::to_string(preview_left) + ")");
+                SendText("exit");
+                SendKey(VK_RETURN, L'\r', 0);
+                if (WaitForSingleObject(pi6.hProcess, 15000) != WAIT_OBJECT_0) {
+                    Log("INFO: G6 exit 超时,强杀子进程");
+                    TerminateProcess(pi6.hProcess, 9);
+                }
+                CloseHandle(pi6.hProcess);
+            } else {
+                Check(false, "G6 CreateProcess " + std::to_string(GetLastError()));
+            }
+        }
+    }
+
     // ---- 收尾:exit ----
     SendText("exit");
     SendKey(VK_RETURN, L'\r', 0);
-    if (WaitForSingleObject(pi.hProcess, 15000) != WAIT_OBJECT_0) {
-        Log("INFO: exit 超时,强杀子进程");
-        TerminateProcess(pi.hProcess, 9);
+    if (pi.hProcess != nullptr) {
+        if (WaitForSingleObject(pi.hProcess, 15000) != WAIT_OBJECT_0) {
+            Log("INFO: exit 超时,强杀子进程");
+            TerminateProcess(pi.hProcess, 9);
+        }
+        CloseHandle(pi.hProcess);
     }
-    CloseHandle(pi.hProcess);
     g_child = nullptr;
 
     Log(g_failures == 0 ? "RESULT: ALL PASS" : "RESULT: " + std::to_string(g_failures) + " FAIL");

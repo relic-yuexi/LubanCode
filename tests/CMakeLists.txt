@@ -200,6 +200,8 @@ if(WIN32)
   #   stream_footer_driver <lubancode.exe> <工作目录> <报告文件>
   add_executable(stream_footer_driver EXCLUDE_FROM_ALL manual/stream_footer_driver.cpp)
   target_compile_features(stream_footer_driver PRIVATE cxx_std_23)
+  # 思考流中预览幕的进程内假 SSE 服务要 winsock。
+  target_link_libraries(stream_footer_driver PRIVATE ws2_32)
 
   # 忙碌排队输入框 Tab 补全(0.30.x):验流式期间排队输入框的候选可见、
   # Tab 当场补全/连按轮转带标记、空正文 Tab no-op、轮末队列泵按 slash
