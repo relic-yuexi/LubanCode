@@ -68,6 +68,67 @@ int PlainDisplayWidth(const std::string& text) {
     return static_cast<int>(DisplayWidthUtf8(plain));
 }
 
+// 状态行由调用方拼好、自带主题色(与队列/坞行"外包色"的 tinted 路不同),
+// 是最后一步落帧的行。宽度感知按约定在调用方,但渲染层给最后一道兜:
+// 超宽时按显示宽截断——CSI 转义序列不占宽、永不被劈,截在色段中间就补
+// 一枚 reset,别把开着的颜色漏到帧外;末列照铁律留白不写字。
+std::string ClampAnsiRowToWidth(const std::string& row, int width) {
+    if (width <= 1) {
+        return row;
+    }
+    const int limit = width - 1;  // 末列不写字(锚点铁律,防隐式 wrap)
+    std::string out;
+    int used = 0;
+    bool cut = false;
+    for (std::size_t i = 0; i < row.size() && !cut;) {
+        if (row[i] == '\x1b' && i + 1 < row.size() && row[i + 1] == '[') {
+            std::size_t j = i + 2;
+            while (j < row.size()) {
+                const unsigned char ch = static_cast<unsigned char>(row[j++]);
+                if (ch >= 0x40U && ch <= 0x7EU) {
+                    break;
+                }
+            }
+            out.append(row, i, j - i);  // 整段转义原样带走,不占宽
+            i = j;
+            continue;
+        }
+        // 解一个 UTF-8 码点,量宽。
+        const unsigned char lead = static_cast<unsigned char>(row[i]);
+        std::size_t len = 1;
+        char32_t cp = lead;
+        if ((lead & 0xE0U) == 0xC0U) {
+            cp = lead & 0x1FU;
+            len = 2;
+        } else if ((lead & 0xF0U) == 0xE0U) {
+            cp = lead & 0x0FU;
+            len = 3;
+        } else if ((lead & 0xF8U) == 0xF0U) {
+            cp = lead & 0x07U;
+            len = 4;
+        }
+        for (std::size_t k = 1; k < len && i + k < row.size(); ++k) {
+            cp = (cp << 6) | (static_cast<unsigned char>(row[i + k]) & 0x3FU);
+        }
+        const int w = lubancode::cli::CharDisplayWidth(cp);
+        if (used + w > limit) {
+            cut = true;
+            break;
+        }
+        out.append(row, i, len);
+        used += w;
+        i += len;
+    }
+    if (!cut) {
+        return row;  // 没超宽:原样返回,不添一枚多余 reset。
+    }
+    if (used + 1 <= limit) {
+        out += ".";  // 截断的省略记号(还剩格子才写)
+    }
+    out += "\x1b[0m";
+    return out;
+}
+
 // 摘要只进指纹,不进画面:草稿全文 + 光标 + 档位 + 占位提示。宽度不进来
 // ——宽度变化走 resize 整帧重画那条路,不归"内容指纹"管。
 std::string BuildComposerDigest(const ComposerViewModel& composer) {
@@ -159,11 +220,11 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     if (model.framed) {
         push(true, BoxRuleLine(theme, width));
         for (const std::string& row : model.status_rows) {
-            push(true, row);
+            push(true, ClampAnsiRowToWidth(row, width));
         }
     } else {
         for (const std::string& row : model.status_rows) {
-            push(false, row);  // 无框读取常态没有状态行,防御性摆位
+            push(false, ClampAnsiRowToWidth(row, width));  // 无框读取常态没有状态行,防御性摆位
         }
     }
     for (const std::string& row : model.agent_dock_rows) {

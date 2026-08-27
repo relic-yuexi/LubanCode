@@ -237,6 +237,18 @@ bool WaitForText(const std::string& needle, int timeout_ms, int max_rows, int* f
     return false;
 }
 
+// 等 needle 从整块缓冲里消失(菜单收走、提示退场这类"负向"信号)。
+bool WaitForTextGone(const std::string& needle, int timeout_ms, int max_rows) {
+    const DWORD deadline = GetTickCount() + static_cast<DWORD>(timeout_ms);
+    while (GetTickCount() < deadline) {
+        if (FindLastRow(needle, max_rows) < 0) {
+            return true;
+        }
+        Sleep(150);
+    }
+    return false;
+}
+
 // WaitForText 的"只认新出现"版,见 FindLastRowAfter 注释。
 bool WaitForTextAfter(const std::string& needle, int from_row_exclusive, int timeout_ms, int max_rows,
                       int* found_row = nullptr) {
@@ -302,7 +314,10 @@ int wmain(int argc, wchar_t** argv) {
     }
     const std::wstring exe_path = argv[1];
     const std::wstring workdir = argv[2];
-    const std::string provider_name = argc >= 5 ? WideToUtf8(argv[4]) : std::string();
+    // provider 名传 "-" 表示这场不验 #七(单幕模式只需要占位把旗标顶到
+    // argv[5];真钥匙配齐的 provider 名才验清屏切换)。
+    const std::string provider_name =
+        argc >= 5 && std::wstring(argv[4]) != L"-" ? WideToUtf8(argv[4]) : std::string();
     const bool provider_only = argc >= 6 && std::wstring(argv[5]) == L"--provider-only";
     const bool provider_picker_only = argc >= 6 && std::wstring(argv[5]) == L"--provider-picker-only";
     const bool ask_user_only = argc >= 6 && std::wstring(argv[5]) == L"--ask-user-only";
@@ -420,7 +435,8 @@ int wmain(int argc, wchar_t** argv) {
         SendKey(VK_RETURN, L'\r', 0);
         Check(WaitForText("恢复哪一场会话", 10000, height),
               "#十 /resume:裸敲出现会话方向键菜单");
-        Check(WaitForText("Enter 恢复", 5000, height),
+        // 全屏台账的页脚提示改了版式(picker.footer:enter resume · …)。
+        Check(WaitForText("enter resume", 5000, height),
               "#十 /resume:菜单给出方向键与 Enter 提示");
         // 本机最新一场可能是几十行长回答，40 行控制台会把历史开头卷走。
         // 往下挑第三场短会话，才能在同一帧里同时验头、角色与收尾。
@@ -429,8 +445,52 @@ int wmain(int argc, wchar_t** argv) {
         SendKey(VK_RETURN, L'\r', 0);
         Check(WaitForText("恢复历史", 10000, height),
               "#十 /resume:选中后开始重放历史");
-        Check(WaitForText("> 你", 10000, height),
-              "#十 /resume:用户正文重新显示");
+        // 用户正文不再印 "> 你" 角色头,正文直接铺成背景块(首行带 "> "
+        // 提示符,与 live 提交同一颗 formatter)。在重放头("恢复历史")与
+        // 边界("历史到此")之间找一段 "> "+文字 的用户块行。
+        {
+            int replay_head = -1;
+            int replay_end = -1;
+            const DWORD user_block_deadline = GetTickCount() + 10000;
+            bool user_block_seen = false;
+            while (GetTickCount() < user_block_deadline && !user_block_seen) {
+                replay_head = FindLastRow("恢复历史", height);
+                if (replay_head >= 0) {
+                    for (int r = replay_head; r < height; ++r) {
+                        const std::string row_text = ReadRow(r);
+                        if (row_text.find("\xE5\x8E\x86\xE5\x8F\xB2\xE5\x88\xB0\xE6\xAD\xA4") !=
+                            std::string::npos) {  // "历史到此"
+                            replay_end = r;
+                            break;
+                        }
+                    }
+                    if (replay_end < 0) {
+                        replay_end = height;
+                    }
+                    for (int r = replay_head; r < replay_end && !user_block_seen; ++r) {
+                        const std::string row_text = ReadRow(r);
+                        // 用户块行带一格左垫(kUserPromptPadding),首个非空
+                        // 字符是 '>' 且后跟空格,其后还有正文。
+                        const std::size_t first = row_text.find_first_not_of(' ');
+                        if (first != std::string::npos && row_text.size() > first + 4 &&
+                            row_text.compare(first, 2, "> ") == 0) {
+                            user_block_seen = true;
+                        }
+                    }
+                }
+                Sleep(150);
+            }
+            Check(user_block_seen,
+                  "#十 /resume:用户正文重新显示(背景块首行带 '> ' 提示符)");
+            if (!user_block_seen) {
+                for (int r = 0; r < height; ++r) {
+                    const std::string row_text = ReadRow(r);
+                    if (!row_text.empty()) {
+                        Log("INFO: #十诊断 row[" + std::to_string(r) + "]=" + row_text);
+                    }
+                }
+            }
+        }
         Check(WaitForText("助手", 10000, height),
               "#十 /resume:助手正文重新显示");
         Check(WaitForText("历史到此", 10000, height),
@@ -489,21 +549,27 @@ int wmain(int argc, wchar_t** argv) {
         SendText("请必须调用 ask_user 工具问我一个单选题:题目是'采用哪种发布方式?',"
                  "选项只给'正式版'和'预发布'两项。不要直接在正文里问。");
         SendKey(VK_RETURN, L'\r', 0);
-        Check(WaitForText("Enter 确认", 60000, height),
+        Check(WaitForText("Enter 选择", 60000, height),
               "#八 ask_user:模型调用工具并出现方向键菜单(60s 内)");
-        Check(WaitForText("> 正式版", 5000, height),
+        // 问句面板给条目编号:光标行形如 "> 1. 正式版"(ChoiceMenuQuestionPanel
+        // 的 prefix "> " + 序号 ". ")。两项 + "自己填写" 共 3 项。
+        Check(WaitForText("> 1. 正式版", 5000, height),
               "#八 ask_user:首项默认获得选择光标");
         SendKey(VK_DOWN, 0, 0);
         SendKey(VK_DOWN, 0, 0);
-        Check(WaitForText("> 自己填写", 5000, height),
+        Check(WaitForText("> 3. 自己填写", 5000, height),
               "#八 ask_user:Down 键把光标移到末项");
         SendText("灰度发布");
         Check(WaitForText("自己填写: 灰度发布_", 10000, height),
               "#八 ask_user:末项原地编辑自填答案");
         SendKey(VK_RETURN, L'\r', 0);
-        Check(WaitForText("已选择", 10000, height) && WaitForText("灰度发布", 10000, height),
-              "#八 ask_user:自填答案留在屏上并回传工具");
-        Check(WaitForText("[tokens]", 90000, height),
+        // 旧的"已选择:"回执行已撤——答案如今留在 ask_user 条目的终态摘要里
+        // (JSON 含 "灰度发布"),菜单本身随作答擦掉。先等菜单收走,再找
+        // 摘要里的答案,免得拿菜单残影冒充"已回传"。
+        Check(WaitForTextGone("Enter 选择", 10000, height) && WaitForText("灰度发布", 10000, height),
+              "#八 ask_user:自填答案留在屏上(条目摘要)并回传工具");
+        // 统计降噪后紧凑态不打 [tokens],回合收尾锚用 turn 尾分界线。
+        Check(WaitForText("Worked for", 90000, height),
               "#八 ask_user:模型拿到答案后完成本轮");
         return finish();
     }
@@ -519,11 +585,14 @@ int wmain(int argc, wchar_t** argv) {
         SendText("请直接调用 edit_file,把文件 " + probe_utf8 +
                  " 里的 beta 改成 BETA。不要改别处,不要用其他写文件工具。");
         SendKey(VK_RETURN, L'\r', 0);
-        Check(WaitForText("[y] 本次允许", 60000, height),
-              "#九 edit_file:彩色 diff 确认提示出现(60s 内)");
-        SendText("y");
+        // v0.22.x:真控制台确认改方向键菜单(本次允许/总允许/拒绝,默认高亮
+        // "拒绝"),[y/a/N] 行提示只剩管道模式。等菜单出现后 Up Up 放行。
+        Check(WaitForText("本次允许", 60000, height),
+              "#九 edit_file:彩色 diff 确认菜单出现(60s 内)");
+        SendKey(VK_UP, 0, 0);
+        SendKey(VK_UP, 0, 0);
         SendKey(VK_RETURN, L'\r', 0);
-        Check(WaitForText("[tokens]", 90000, height),
+        Check(WaitForText("Worked for", 90000, height),
               "#九 edit_file:工具执行并完成本轮");
         Sleep(500);
         const int blank_color_run = MaxBlankColoredRun(default_background, height);
@@ -590,8 +659,8 @@ int wmain(int argc, wchar_t** argv) {
         // 模型响应慢不算这两条修复的账。
         const bool agent_done = WaitForText("\xE5\xAD\x90\xE4\xBB\xA3\xE7\x90\x86 ", 120000, height);  // "子代理 "
         Check(agent_done, "#二/#三 子代理收尾:agent 条目摘要落定('子代理 N 轮',120s 内)");
-        const bool turn_done = agent_done && WaitForText("[tokens]", 300000, height);
-        Check(turn_done, "#二/#三 整轮收尾:统计行出现(300s 内)");
+        const bool turn_done = agent_done && WaitForText("Worked for", 300000, height);
+        Check(turn_done, "#二/#三 整轮收尾:turn 尾分界线出现(300s 内)");
 
         if (!turn_done) {
             Log("INFO: 整轮没能在超时内收尾,#二/#三 的屏面校验没有可靠的\"已经\n"
@@ -654,7 +723,7 @@ int wmain(int argc, wchar_t** argv) {
             // 中",子工具调用压根没开始,后面的 0 行断言完全是误判)。
             const int baseline_agent_row = FindLastRow("agent(", height);
             const int baseline_done_row = FindLastRow("\xE5\xAD\x90\xE4\xBB\xA3\xE7\x90\x86 ", height);  // "子代理 "
-            const int baseline_agent_token_row = FindLastRow("[tokens]", height);
+            const int baseline_agent_token_row = FindLastRow("Worked for", height);
             SendText(
                 "请你必须再调用一次内置的 agent 工具,委派一个子任务代理去完成:"
                 "依次读取这两个文件——D:\\lubancode\\src\\platform\\console_posix.cpp"
@@ -711,7 +780,7 @@ int wmain(int argc, wchar_t** argv) {
                 }
             }
             const bool agent2_turn_done =
-                WaitForTextAfter("[tokens]", baseline_agent_token_row, 300000, height);
+                WaitForTextAfter("Worked for", baseline_agent_token_row, 300000, height);
             Check(agent2_turn_done,
                   "#五 第二轮子代理:统计行真正落定后才继续,不把下一条测试误塞进执行中队列");
         }
@@ -726,7 +795,7 @@ int wmain(int argc, wchar_t** argv) {
     // 就该看得见,不是等到最后才冒出来或者全程不出现。
     // run_command 会弹确认框，确认期间 footer 按设计必须让路，不能拿它测
     // “无交互纯工具回合”。这里换成无需确认的 read_file。
-    const int token_row_before_tool_turn = FindLastRow("[tokens]", height);
+    const int token_row_before_tool_turn = FindLastRow("Worked for", height);
     SendText(
         "请直接调用 read_file 工具读取 D:\\lubancode\\README.md 的前 5 行,"
         "不要说任何其他话,不要做任何总结,调用完就结束这一轮。");
@@ -743,9 +812,22 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     const bool tool_turn_done =
-        WaitForTextAfter("[tokens]", token_row_before_tool_turn, 60000, height);
+        WaitForTextAfter("Worked for", token_row_before_tool_turn, 60000, height);
     Check(tool_turn_done, "#六 纯工具回合:本轮统计行落定(不是误认上一轮统计行)");
-    const auto readme_tool_rows = FindAllRows("read_file(D:\\lubancode\\README.md)", height);
+    // 原位覆写的终态用收敛轮询:等它稳定到恰好一行(或超时按实况报数)。
+    // 针不带右括号——read_file 标题如今带 ", offset=N, limit=M" 参数尾
+    // (BuildToolTitle),老针拿 ")" 收尾永远等不来。
+    std::vector<int> readme_tool_rows;
+    {
+        const DWORD readme_deadline = GetTickCount() + 10000;
+        while (GetTickCount() < readme_deadline) {
+            readme_tool_rows = FindAllRows("read_file(D:\\lubancode\\README.md", height);
+            if (readme_tool_rows.size() == 1) {
+                break;
+            }
+            Sleep(150);
+        }
+    }
     Check(readme_tool_rows.size() == 1,
           "#六 工具终态原位覆写:README.md 的黄色开始行已换成绿色终态,标题只剩一行(实际 " +
               std::to_string(readme_tool_rows.size()) + " 行)");

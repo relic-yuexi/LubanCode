@@ -423,10 +423,35 @@ void RespondSse(SOCKET_T s, const std::vector<std::string>& events) {
 }
 
 std::vector<std::string> TextTurn(const std::string& text) {
+    // 正文进 JSON 字符串字面量必须转义(换行/引号/反斜杠):裸换行会让整帧
+    // 解析失败、正文静默丢光——与 viewport_driver 同一处坑,一并钉死。
+    std::string escaped;
+    for (char c : text) {
+        switch (c) {
+            case '\\':
+                escaped += "\\\\";
+                break;
+            case '"':
+                escaped += "\\\"";
+                break;
+            case '\n':
+                escaped += "\\n";
+                break;
+            case '\r':
+                escaped += "\\r";
+                break;
+            case '\t':
+                escaped += "\\t";
+                break;
+            default:
+                escaped += c;
+                break;
+        }
+    }
     return {
         "{\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"model\":\"fake-model\"}}",
         "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}",
-        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"" + text +
+        "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"" + escaped +
             "\"}}",
         "{\"type\":\"content_block_stop\",\"index\":0}",
         "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":120,"

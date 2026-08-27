@@ -223,6 +223,27 @@ bool IsRuleRow(int row) {
     return false;
 }
 
+// "裸横线"行:整行只有横线字符(─/-)与空白。turn 尾分界线(── Worked
+// for 2.1s ──)夹着文字,不算裸线;叠影残留是清一色的纯横线行,才算。
+bool IsBareRuleRow(int row) {
+    if (!IsRuleRow(row)) {
+        return false;
+    }
+    const std::string text = ReadRow(row);
+    for (std::size_t i = 0; i < text.size();) {
+        if (text.compare(i, 3, "\xe2\x94\x80") == 0) {  // ─
+            i += 3;
+            continue;
+        }
+        if (text[i] == '-' || text[i] == ' ') {
+            ++i;
+            continue;
+        }
+        return false;
+    }
+    return true;
+}
+
 // 结构化找 footer 的输入行(0.25.x 起排队界面定位不靠文案——文案一改便全
 // 倒,规矩是"按结构认框")。Composer 合流(P1)后框随内容长高:上横线、
 // 以 '>' 起的输入区、下横线、状态行。自定义 padding 可以插空行,故不写死
@@ -387,7 +408,9 @@ int wmain(int argc, wchar_t** argv) {
         const int top_rule_row = FindRuleAboveInput(input_row);
         const int bottom_rule_row = FindRuleBelowInput(input_row);
         const int status_row = bottom_rule_row + 1;
-        Check(top_rule_row == input_row - 2, "G1 上横线在输入行上方(隔一行留白)");
+        // Composer 合流(35c621d)后主输入区只占一行正文、紧贴上下横线
+        // (kComposerTopPaddingRows=0),旧"隔一行留白"形状已撤。
+        Check(top_rule_row == input_row - 1, "G1 上横线紧贴输入行上方(合流后紧排)");
         Check(bottom_rule_row >= 0, "G1 下横线在输入区之下");
         Check(IsRuleRow(top_rule_row), "G1 上横线在输入行上一行");
         Check(IsRuleRow(bottom_rule_row), "G1 下横线在输入行下一行(状态行上一行)");
@@ -465,24 +488,32 @@ int wmain(int argc, wchar_t** argv) {
         while (GetTickCount() < recall_deadline) {
             const int row = FindFooterInputRow();
             const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
+            // 取回态形状(queue_model.cpp):rule-1 是消息行 "  ↳ [编辑中] 你好
+            // 排队"(标记挂在消息行前缀),rule-2 是标题行 "正在编辑排队消
+            // 息 · …"(没有"编辑中"三字连写)。两行任一见到编辑态即算取回。
             if (rule >= 2 && ReadRow(row).find("你好排队") != std::string::npos &&
-                ReadRow(rule - 2).find("编辑中") != std::string::npos) {
+                (ReadRow(rule - 1).find("编辑中") != std::string::npos ||
+                 ReadRow(rule - 2).find("正在编辑") != std::string::npos)) {
                 recalled = true;
                 break;
             }
             Sleep(100);
         }
-        Check(recalled, "G4 Shift+← 取回:正文进输入行,队列条目标'编辑中'");
+        Check(recalled, "G4 Shift+← 取回:正文进输入行,队列条目挂'[编辑中]'标记");
         if (recalled) {
-            // 光标落在末尾:补一个字再原位替换,队列行跟着换新,位置不动。
+            // 光标落在末尾:补一个字再 Enter 原位替换(编辑态不打字即同步,
+            // 队列行换新全靠 Enter 提交),位置不动。
             SendText("过");
+            Sleep(200);
+            SendKey(VK_RETURN, L'\r', 0);
             bool replaced = false;
             const DWORD replace_deadline = GetTickCount() + 6000;
             while (GetTickCount() < replace_deadline) {
                 const int row = FindFooterInputRow();
                 const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
                 if (rule >= 2 && ReadRow(rule - 1).find("你好排队过") != std::string::npos &&
-                    ReadRow(rule - 2).find("编辑中") == std::string::npos &&
+                    ReadRow(rule - 1).find("编辑中") == std::string::npos &&
+                    ReadRow(rule - 2).find("正在编辑") == std::string::npos &&
                     ReadRow(row).find("你好排队过") == std::string::npos) {
                     replaced = true;
                     break;
@@ -490,6 +521,14 @@ int wmain(int argc, wchar_t** argv) {
                 Sleep(100);
             }
             Check(replaced, "G4 Enter 原位替换:队列行换新文,id/位置不动,输入行清空");
+            if (!replaced) {
+                for (int r = 0; r < 60; ++r) {
+                    const std::string row_text = ReadRow(r);
+                    if (!row_text.empty()) {
+                        Log("INFO: G4 诊断 row[" + std::to_string(r) + "]=" + row_text);
+                    }
+                }
+            }
         }
     }
     Sleep(300);
@@ -498,9 +537,11 @@ int wmain(int argc, wchar_t** argv) {
         int status_row2 = -1;
         Check(WaitForText("shift+tab", 10000, &status_row2), "G2 落队后:状态行仍在(框没被冲散)");
         if (status_row2 >= 0) {
+            // 合流后紧排版式(自上而下):上横线(status-3)/ 输入行
+            // (status-2)/ 下横线(status-1)/ 状态行(status)。
             Check(IsRuleRow(status_row2 - 1), "G2 落队后:下横线还在状态行上一行");
-            Check(!IsRuleRow(status_row2 - 2), "G2 落队后:下横线之上是补空(框随留白长高)");
-            Check(IsRuleRow(status_row2 - 5), "G2 落队后:上横线还在(框结构完整,没有残影/错位)");
+            Check(!IsRuleRow(status_row2 - 2), "G2 落队后:下横线正上方是输入行(非横线)");
+            Check(IsRuleRow(status_row2 - 3), "G2 落队后:上横线还在(框结构完整,没有残影/错位)");
         }
     }
 
@@ -564,6 +605,14 @@ int wmain(int argc, wchar_t** argv) {
     // 旧实现此时由新 Spinner 构造出的 SuspendScope 把整个 footer 藏掉，只剩
     // “思考中”。这里必须在第二个 Working 周期再次抓到 composer 与光标。
     Check(WaitForText("read_file(", 60000), "G2 工具续轮:read_file 已执行(60s 内)");
+    if (FindLastRow("read_file(") < 0) {
+        for (int r = 0; r < 80; ++r) {
+            const std::string row_text = ReadRow(r);
+            if (!row_text.empty()) {
+                Log("INFO: G2 诊断 row[" + std::to_string(r) + "]=" + row_text);
+            }
+        }
+    }
     bool post_tool_working_and_composer = false;
     bool post_tool_cursor_in_composer = false;
     const DWORD post_tool_deadline = GetTickCount() + 15000;
@@ -585,9 +634,11 @@ int wmain(int argc, wchar_t** argv) {
     Check(post_tool_cursor_in_composer,
           "G2 工具续轮:第二个 Working 期间光标仍在输入框");
 
-    // 等第一轮问答彻底收束(统计行落定),避免跟下面的 ESC 测试撞车。
-    Check(WaitForTextCount("[tokens]", 2, 180000),
-          "G1 主消息与排队消息:两轮统计行都出现(180s 内)");
+    // 等第一轮问答彻底收束。统计降噪(0.26.x)后真控制台紧凑态不打
+    // [tokens] 长行(30 行窄窗也盛不下详细态),回合收尾的锚改用 turn 尾
+    // 分界线 "Worked for"(两轮各一条,打断轮才是 Stopped after)。
+    Check(WaitForTextCount("Worked for", 2, 180000),
+          "G1 主消息与排队消息:两轮 turn 尾分界线都出现(180s 内)");
     const int read_file_title_rows = CountRowsWithText("read_file(");
     Check(read_file_title_rows == 1,
           "G2 工具终态原位覆写:read_file 标题只剩一行(实际 " +
@@ -596,7 +647,7 @@ int wmain(int argc, wchar_t** argv) {
 
     // ---- G3 ESC 打断:再发一句,几乎立刻按 ESC,验证打断提示 + 程序继续可用 ----
     {
-        const int prev_tokens_row = FindLastRow("[tokens]");
+        const int prev_tokens_row = FindLastRow("Worked for");
         SendText("请用大约 500 字详细介绍一下 C++23 的新特性。");
         SendKey(VK_RETURN, L'\r', 0);
         // 给流式一点点时间起步(先看到框子/开始吐字),再打断——纯秒按容易
@@ -620,7 +671,9 @@ int wmain(int argc, wchar_t** argv) {
             Check(!ReadRow(post_status - 2).empty() && ReadRow(post_status - 2)[0] == '>',
                   "G3 打断后:下横线正上方是 '> ' 输入行(框形状完整,不多不少)");
             Check(IsRuleRow(post_status - 3), "G3 打断后:上横线紧贴输入行");
-            Check(!IsRuleRow(post_status - 4), "G3 打断后:上横线之上没有旧框横线叠加");
+            // 上横线正上方那一行:turn 尾分界线(── Stopped after … ──)夹着
+            // 文字,是合法邻居;只有清一色纯横线的"裸线"才是叠影残留。
+            Check(!IsBareRuleRow(post_status - 4), "G3 打断后:上横线之上无裸横线叠影(文字分界线除外)");
             for (int r = post_status - 4; r <= post_status; ++r) {
                 const std::string row_text = ReadRow(r);
                 if (!row_text.empty()) {
