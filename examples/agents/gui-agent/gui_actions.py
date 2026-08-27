@@ -207,7 +207,19 @@ def gui_list_windows(backend, arguments: dict, settings: Settings) -> tuple[str,
         windows = [w for w in windows if needle in w["title"].lower()]
     for window in windows:
         window["title"] = _sanitize_text(window["title"])[:TITLE_MAX_CHARS]
-    text = f"共 {len(windows)} 个可见顶层窗口。窗口 id 只在当前桌面现场有效。"
+    # 正文自带每窗明细:宿主把工具结果喂模型时,有 text 就不投影 structured,
+    # 明细只放 structured 等于不给。逐窗一行(id/标题/进程/状态/矩形),
+    # 前 20 个进正文,余下靠 title_filter 收窄——32 窗全量铺开也读不动。
+    lines = [f"共 {len(windows)} 个可见顶层窗口。窗口 id 只在当前桌面现场有效。"]
+    for w in windows[:20]:
+        state = "/".join(s for s, on in (("前台", w.get("foreground")),
+                                         ("最小化", w.get("minimized")),
+                                         ("可见", w.get("visible"))) if on)
+        lines.append(f"- {w['id']} | {w['title']} | {w.get('process_name', '?')}"
+                     f" | {state or '?'} | rect={w.get('rect')}")
+    if len(windows) > 20:
+        lines.append(f"(其余 {len(windows) - 20} 个略,用 title_filter 收窄)")
+    text = "\n".join(lines)
     return text, {"count": len(windows), "windows": windows,
                   "note": "window_id 仅本次桌面现场有效,不跨会话"}
 

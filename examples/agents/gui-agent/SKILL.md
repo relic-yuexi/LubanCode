@@ -16,7 +16,8 @@ description: 用 gui-agent-example 插件操作 Windows 桌面程序:截图→�
    任务只校验不真点,请用户决定是否关掉再跑。
 2. 再 `gui_list_windows`(可带 `title_filter`)找到目标窗口,记下
    `window_id` 与 `rect`。窗口 id 只在本次桌面现场有效,不写进长期
-   记忆当永久凭据。
+   记忆当永久凭据。**刚 run_command 起的程序,窗口可能要几秒才成**:
+   首查扑空别下结论,隔两秒重查,最多五次。
 3. `gui_focus_window` 聚焦,然后 `gui_screenshot`(target=window)
    拿 observation。
 
