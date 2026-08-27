@@ -188,7 +188,14 @@ public:
 
     ~AgentTool() override;
 
-    void SetHooks(Hooks hooks) { hooks_ = std::move(hooks); }
+    // 宿主每轮 RunTurn 开头都会重灌这份 Hooks(turn_runner 的 BuildTurnWiring)
+    //——SetHooks 因此就是回合边界:参数连败账(见成员区注释)随灌随清,
+    // 计数归回合,不跨回合记仇。
+    void SetHooks(Hooks hooks) {
+        hooks_ = std::move(hooks);
+        param_fail_cause_.clear();
+        param_fail_streak_ = 0;
+    }
 
     // Explore 是内置只读代理。调用方另建一张只读工具表塞进来；不设时
     // Explore 仍能启动，只是沿用普通子表再由过滤器挡掉写入工具。
@@ -363,6 +370,15 @@ private:
     int wall_clock_timeout_secs_ = 0;
     int wall_clock_grace_secs_ = kDefaultSubagentWallClockGraceSecs;
     std::function<std::string(const std::string&)> turn_context_provider_;  // 子代理记忆召回;空 = 不召回
+    // ---- 连败保险(缺 title 无限重试拖死主循环单)----
+    // 同一回合内本工具因同一入参错误连续被拒,到 kParamFailLimit 次就明拒
+    // 收场,不再无限喂重试。计数归回合:宿主每轮 RunTurn 重灌 Hooks
+    // (SetHooks 即回合边界)、入参一旦过检(execute 尾段)都清零;换一个
+    // 错误原因各自重新起算。execute() 只在宿主回合线程被调(后台任务的
+    // 独立表不挂派工壳),无锁访问。
+    static constexpr int kParamFailLimit = 3;
+    std::string param_fail_cause_;  // 最近一次参数错的原因标识;空 = 无账
+    int param_fail_streak_ = 0;     // 同因连续被拒次数
 };
 
 }  // namespace lubancode::tools

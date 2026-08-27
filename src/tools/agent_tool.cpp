@@ -24,7 +24,7 @@
 #include "agent/loop.hpp"
 #include "agent/prompts.hpp"
 #include "agent/turn_harness.hpp"
-#include "cli/i18n.hpp"  // tr/trf:标题校验与墙钟/预算文案
+#include "cli/i18n.hpp"  // trf:墙钟/预算文案(参数校验的错误文案发给模型看,不走 i18n)
 #include "cli/line_editor.hpp"  // DisplayWidthUtf8:标题宽度(纯逻辑编辑核的零流符号)
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:inbox 投递文本的编码关口
@@ -496,10 +496,43 @@ nlohmann::json AgentTool::input_schema() const {
 }
 
 Tool::Result AgentTool::execute(const nlohmann::json& input) {
+    // 参数错的统一出口(缺 title 无限重试拖死主循环单):文案必须写明哪个
+    // 字段必填、示例长什么样,模型一遍就能补上;同一回合内同一原因连败到
+    // kParamFailLimit 次,第 3 次起明拒收场——不再无限喂重试,主循环不被
+    // 拖死。换一个错误原因各自重新起算;入参一旦过检(本函数尾段)或宿主
+    // 新回合 SetHooks,计数清零,不记仇。拒绝文案是发给模型看的,不走
+    // cli/i18n(那边只管界面上给人看的文案),跟本函数其余错误文案同一规矩。
+    const auto reject = [this](const std::string& cause, const std::string& message) -> Result {
+        if (param_fail_cause_ == cause) {
+            ++param_fail_streak_;
+        } else {
+            param_fail_cause_ = cause;
+            param_fail_streak_ = 1;
+        }
+        if (param_fail_streak_ < kParamFailLimit) {
+            return {message, true};
+        }
+        return {"[agent 工具连败保险] 本回合内 agent 工具已第 " + std::to_string(param_fail_streak_) +
+                    " 次因同一参数错误被拒(" + cause +
+                    "),本次调用直接拒绝:同样的入参再重试也不会成功。出路二选一:1) 按下面的参数要求把入参"
+                    "改对后再调用,参数合规的调用照常受理;2) 不再委托子代理,直接在主对话里完成任务,并向"
+                    "用户如实说明未能派工的原因。\n\n" +
+                    message,
+                true};
+    };
+
     // title:必填语义短标题。缺失/空白/多行/超 40 显示列一律拒绝,提示主模型
     // 补标题后重试——绝不替调用方截成另一句话,更不拿 prompt 片段冒充。
+    const std::string title_missing_hint =
+        "缺少必填参数 title(字符串)。title 是给人看的任务短标题:中文 4~16 字、英文 2~6 个词,名词短语或"
+        "短命令;不要照抄 prompt 首句,不要塞路径清单或验收全文;不含换行/制表符,不超过 40 显示列。"
+        "示例:title=\"检索构建配置\",或英文 title=\"fix login timeout\"。请补上 title 后重新调用 agent 工具。";
+    const std::string title_bad_hint =
+        "title 格式不合要求:须是中文 4~16 字、英文 2~6 个词的名词短语或短命令;不含换行/制表符,不超过 "
+        "40 显示列;不要照抄 prompt 首句,不要塞路径清单。示例:title=\"检索构建配置\"。请换一个合规的 "
+        "title 后重新调用 agent 工具。";
     if (!input.contains("title") || !input.at("title").is_string()) {
-        return {lubancode::cli::tr("agent_tool.title_missing"), true};
+        return reject("缺少必填参数 title", title_missing_hint);
     }
     std::string title = input.at("title").get<std::string>();
     {
@@ -508,36 +541,48 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
         title = first == std::string::npos ? std::string() : title.substr(first, last - first + 1);
     }
     if (title.empty()) {
-        return {lubancode::cli::tr("agent_tool.title_missing"), true};
+        return reject("缺少必填参数 title", title_missing_hint);
     }
     if (title.find('\n') != std::string::npos || title.find('\r') != std::string::npos ||
         title.find('\t') != std::string::npos) {
-        return {lubancode::cli::tr("agent_tool.title_bad"), true};
+        return reject("title 格式不合要求", title_bad_hint);
     }
     if (lubancode::cli::DisplayWidthUtf8(title) > kMaxTitleDisplayWidth) {
-        return {lubancode::cli::tr("agent_tool.title_bad"), true};
+        return reject("title 格式不合要求", title_bad_hint);
     }
 
     if (!input.contains("prompt") || !input.at("prompt").is_string()) {
-        return {"缺少必填参数 prompt(字符串)", true};
+        return reject("缺少必填参数 prompt",
+                      "缺少必填参数 prompt(字符串)。prompt 是交给子代理的完整任务说明:子代理看不见主对话"
+                      "历史,任务目标、范围、期望产出都要写全、写自包含。示例:prompt=\"在 D:/repo/src 里找到"
+                      "解析命令行参数的函数,报告文件路径与行号\"。请补上 prompt 后重新调用 agent 工具。");
     }
     const std::string prompt = input.at("prompt").get<std::string>();
     if (prompt.empty()) {
-        return {"prompt 不能是空字符串", true};
+        return reject("prompt 为空字符串",
+                      "prompt 不能是空字符串:子代理需要完整的任务说明(目标、范围、期望产出),它看不见主"
+                      "对话历史。示例:prompt=\"统计 src 目录下 .cpp 文件总数并回报\"。请写明任务后重新调用 "
+                      "agent 工具。");
     }
 
     if (const auto it = input.find("agent_type"); it != input.end() && !it->is_string()) {
-        return {"agent_type 得是字符串", true};
+        return reject("agent_type 类型不对",
+                      "agent_type 得是字符串。示例:agent_type=\"Explore\"(只读调查);不确定就不传,默认 "
+                      "general-purpose。");
     }
     if (const auto it = input.find("run_in_background"); it != input.end() && !it->is_boolean()) {
-        return {"run_in_background 得是布尔值", true};
+        return reject("run_in_background 类型不对",
+                      "run_in_background 得是布尔值。示例:run_in_background=true(放后台)、false(前台阻塞);"
+                      "新调用建议改用 execution_mode。");
     }
     std::string agent_type = input.value("agent_type", std::string("general-purpose"));
     if (agent_type == "explore") {
         agent_type = "Explore";
     }
     if (agent_type != "general-purpose" && agent_type != "Explore") {
-        return {"agent_type 只认 general-purpose 或 Explore", true};
+        return reject("agent_type 取值不合法",
+                      "agent_type 只认 general-purpose 或 Explore。示例:agent_type=\"Explore\"(只读搜索分析);"
+                      "不确定就不传,默认 general-purpose。");
     }
 
     // execution_mode(默认 auto):auto 在交互会话等价后台、管道/单发等价前台
@@ -547,7 +592,9 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
     bool mode_background = false;
     if (const auto it = input.find("execution_mode"); it != input.end() && !it->is_null()) {
         if (!it->is_string()) {
-            return {"execution_mode 得是字符串(auto/foreground/background)", true};
+            return reject("execution_mode 类型不对",
+                          "execution_mode 得是字符串(auto/foreground/background)。示例:execution_mode="
+                          "\"foreground\";不确定就不传,默认 auto。");
         }
         const std::string mode = it->get<std::string>();
         if (mode == "foreground") {
@@ -557,16 +604,21 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
             mode_explicit = true;
             mode_background = true;
         } else if (mode != "auto") {
-            return {"execution_mode 只认 auto、foreground 或 background", true};
+            return reject("execution_mode 取值不合法",
+                          "execution_mode 只认 auto、foreground 或 background。示例:execution_mode="
+                          "\"background\"(后台跑,结论完成后自动回流);不确定就不传,默认 auto。");
         }
     }
 
     std::string isolation = input.value("isolation", std::string("none"));
     if (isolation != "none" && isolation != "worktree") {
-        return {"isolation 只认 none 或 worktree", true};
+        return reject("isolation 取值不合法",
+                      "isolation 只认 none 或 worktree。示例:isolation=\"worktree\"(给改代码的多步任务开"
+                      "隔离房);只读摸排不传即可,默认 none。");
     }
     if (isolation == "worktree" && agent_type == "Explore") {
-        return {"Explore 是只读代理,用不上 worktree 隔离(isolation 去掉或换 general-purpose)", true};
+        return reject("Explore 用不上 worktree 隔离",
+                      "Explore 是只读代理,用不上 worktree 隔离(isolation 去掉或换 general-purpose)。");
     }
     const bool isolate = isolation == "worktree";
 
@@ -584,17 +636,21 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
         budget_arg = &*turns_arg;  // 旧名,兼容读入
     }
     if (budget_arg != nullptr) {
+        const std::string budget_key = steps_arg != input.end() ? "max_steps_per_turn" : "max_turns";
         if (!budget_arg->is_number_integer()) {
-            return {std::string(steps_arg != input.end() ? "max_steps_per_turn" : "max_turns") + " 得是整数",
-                    true};
+            return reject(budget_key + " 类型不对",
+                          budget_key + " 得是整数(0 = 不设上限)。示例:max_steps_per_turn=10。");
         }
         max_steps_per_turn = budget_arg->get<int>();
         if (max_steps_per_turn < 0) {
-            return {std::string(steps_arg != input.end() ? "max_steps_per_turn" : "max_turns") +
-                        " 不能是负数(0 = 不设上限)",
-                    true};
+            return reject(budget_key + " 不能是负数",
+                          budget_key + " 不能是负数(0 = 不设上限)。示例:max_steps_per_turn=10。");
         }
     }
+
+    // 入参过了检:连败账翻篇——改对了就不记仇,后续调用从引导文案重新起。
+    param_fail_cause_.clear();
+    param_fail_streak_ = 0;
 
     ToolRegistry& task_registry =
         agent_type == "Explore" && explore_registry_ != nullptr ? *explore_registry_ : sub_registry_;
