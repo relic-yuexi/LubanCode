@@ -69,24 +69,32 @@ struct ModeVerdict {
 };
 
 // 纯函数,可单测:Default 一概放行(Plan 闸只在 Plan 模式收紧);Plan 按
-// 单子首版工具表判。input 只给 run_command(shell 子集)与 agent(角色)
-// 两处用——细判放调用侧的 IsPlanSafeShellCommand / agent 角色检查,这里
-// 只吃它们的结果。判定次序:
+// 单子首版工具表判。input 只给 run_command(shell 子集)与 agent(角色/
+// 工具面)两处用——细判放调用侧的 ClassifyPlanShell / agent 工具面检查,
+// 这里只吃它们的结果。判定次序:
 //   1. Default -> 放行;
 //   2. 宿主声明 plan_safe -> 放行(声明不能来自工具自报,见上);
 //   3. 未知来源(MCP/插件/Deferred 透传不出可信声明)-> 拒;
-//   4. 写盘级(mutating)-> 拒;
-//   5. run_command 交调用侧细判(IsPlanSafeShellCommand),这里按
-//      capability.shell_safe 传入结论;
+//   4. 写盘级(mutating)-> 拒(agent 是派发容器,装配层不按注册档的
+//      InProcessUnknown 记 mutating,由 5' 的工具面判);
+//   5. run_command 交调用侧细判(ClassifyPlanShell),这里按
+//      capability.shell_safe 传入结论,拒绝文案带 shell_rule(命中规则);
+//   5'. agent 按参数判(P2-3):内置 Explore,或 agent_tools_readonly
+//      (tools.allow 全为只读工具的自定义 Agent)放行,其余拒;
 //   6. 其余 builtin 只读类按白名单放行,认不得的拒(保守为纲)。
 struct PlanToolInput {
     bool shell_safe = false;  // run_command 的命令串已过 Plan shell 分类器
-    std::string agent_role;   // agent 工具的 agent_type(general-purpose/Explore)
+    std::string shell_rule;   // 命中的拒绝规则(ClassifyPlanShellDetailed 给),拒绝文案用
+    std::string agent_role;   // agent 工具的 agent_type(general-purpose/Explore/自定义名)
+    // agent 工具面只读(P2-3):agent_type 解析出的 tools.allow 全是只读
+    // 工具(或内置 Explore)。装配层算好递进来,这里不摸注册表。
+    bool agent_tools_readonly = false;
 };
 ModeVerdict EvaluateModePolicy(CollaborationMode mode, const PlanToolCapability& capability,
                                const PlanToolInput& input = PlanToolInput{});
 
 // 工具名白名单(Plan 放行的内置只读件)。放表里不藏 if 链,测试逐条钉。
+// skill 在列(P2-3):加载技能只往模型上下文装 SKILL.md 说明,不改状态。
 bool IsPlanAllowedBuiltinTool(const std::string& name);
 
 // ---------------------------------------------------------------------------
@@ -98,12 +106,26 @@ bool IsPlanAllowedBuiltinTool(const std::string& name);
 // 沿用 Auto 的 Safe"):PlanReadOnly / PlanUnknown / PlanMutating。
 enum class PlanShellVerdict { ReadOnly, Unknown, Mutating };
 
+// 分类结论 + 命中的拒绝规则(P2-3:拦截回执要把命中的规则打印出来)。
+// verdict 为 ReadOnly 时 rule 为空;Unknown 时 rule 说明撞了哪条
+// (重定向/子表达式/脚本块/环境赋值/git 子命令表外/首词表外/空命令)。
+struct PlanShellClassification {
+    PlanShellVerdict verdict = PlanShellVerdict::Unknown;
+    std::string rule;
+};
+
 // 纯函数,可单测:command 原文 + shell 语义("powershell"/"cmd")。
 // 只放:rg/findstr/Get-Content/Get-ChildItem/Select-String 等只读件、
-// git status/log/diff/show/ls-files 的只读组合、pwd/Get-Location、
-// Get-Item/Test-Path、无重定向无子表达式无环境赋值的版本探针。
-// 段内有重定向/管道到写命令/子表达式/环境赋值一律不下 ReadOnly。
+// 只读管道件(Select-Object/Where-Object 无脚本块写法/Sort-Object/
+// Format-Table 等,与 command_safety 既有 Safe 分档同源)、git 只读子命令
+// (status/log/diff/show/ls-files/ls-tree/rev-parse/blame 等)、pwd/
+// Get-Location、Get-Item/Test-Path、无重定向无子表达式无环境赋值的版本
+// 探针。段内有重定向/子表达式/PowerShell 脚本块 { }/环境赋值一律不下
+// ReadOnly;真有副作用的命令照拒(真机实测 P2-3)。
 PlanShellVerdict ClassifyPlanShell(const std::string& command, const std::string& shell);
+
+// 同上,带拒绝规则(拒绝回执打印用;测试逐条钉规则文案)。
+PlanShellClassification ClassifyPlanShellDetailed(const std::string& command, const std::string& shell);
 
 // ---------------------------------------------------------------------------
 // ModeState(会话侧的两轴真值)

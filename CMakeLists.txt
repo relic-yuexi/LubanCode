@@ -363,6 +363,9 @@ add_library(lubancode_engine STATIC
   src/tools/loop_control_tool.cpp
   src/tools/ask_user.cpp
   src/tools/search.cpp
+  # 观察边界(真机实测 P2-5):search/read_file 默认不吞子代理日志与
+  # .evidence 运行时证据,显式点名才放行并告知体积。
+  src/tools/observation_filter.cpp
   src/tools/agent_tool.cpp
   # 骨架拆解批三·病十四:AgentTool 六职拆分出的台账/调度/隔间三件。
   src/tools/task_ledger.cpp

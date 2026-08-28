@@ -20,6 +20,13 @@
 #include "runtime/idle_wake.hpp"
 #include "runtime/session_runtime.hpp"
 #include "sessions/session_store.hpp"
+#include "tools/agent_tool.hpp"
+#include "tools/read_file.hpp"
+#include "tools/registry.hpp"
+#include "tools/run_command.hpp"
+#include "tools/search.hpp"
+#include "tools/skill_tool.hpp"
+#include "tools/write_file.hpp"
 
 namespace lubancode::app {
 namespace {
@@ -165,6 +172,86 @@ TEST_CASE("plan 接线器:装配独立起,Default 档一概放行,恢复空档�
     // 计划采集:Default 档不认 <proposed_plan>,历史没动。
     wiring.CollectProposal(0, "turn-1");
     CHECK(runtime.latest_plan() == nullptr);
+}
+
+// P2-3 的 Plan 闸接线钉子:真注册表(真工具的 effect_class 声明)+ 真
+// agent 工具(挂自定义 Agent 解析口),钉 EvaluateGate 在 Plan 档按参数
+// 判——skill 加载、只读 Explore、git ls-tree 放行;写盘件、general-purpose、
+// 改状态命令拦,拦截回执带命中规则。
+TEST_CASE("plan 接线器: Plan 档按参数放只读——skill/Explore/git ls-tree,拦写盘") {
+    TempCwd cwd_guard;
+    lubancode::runtime::SessionRuntime runtime({std::string(), "anthropic", "test"});
+    lubancode::agent::PromptOptions prompt_options;
+    runtime.SetCollaborationMode(lubancode::runtime::CollaborationMode::Plan, "test", "confirm");
+
+    // 真 agent 工具:send_stream 永不上路(闸测试不派真任务),解析口给
+    // 一枚 tools.allow 全只读的自定义 Agent。
+    struct IdleBackend final : public lubancode::api::Backend {
+        std::expected<void, lubancode::api::Error> send_stream(
+            const lubancode::api::Request&,
+            const std::function<void(const lubancode::api::StreamEvent&)>&,
+            const std::atomic<bool>*) override {
+            return std::unexpected(lubancode::api::Error{lubancode::api::ErrorKind::Network, "idle"});
+        }
+    };
+    static IdleBackend backend;
+    static lubancode::tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<lubancode::tools::ReadFileTool>());
+    static lubancode::tools::AgentTool agent_tool(backend, sub_registry, "Z:/nowhere", std::string(), 0,
+                                                  std::string());
+    agent_tool.SetCustomAgentResolver(
+        [](const std::string& name) -> std::optional<lubancode::tools::CustomAgentMaterial> {
+            if (name != "library-reviewer") {
+                return std::nullopt;
+            }
+            lubancode::tools::CustomAgentMaterial material;
+            material.definition.name = name;
+            material.definition.tools.allow = {"read_file", "search"};
+            return material;
+        });
+
+    lubancode::tools::ToolRegistry registry;
+    registry.Register(std::make_unique<lubancode::tools::ReadFileTool>());
+    registry.Register(std::make_unique<lubancode::tools::SearchTool>());
+    registry.Register(std::make_unique<lubancode::tools::WriteFileTool>());
+    registry.Register(std::make_unique<lubancode::tools::SkillTool>(std::vector<lubancode::tools::SkillMeta>{}));
+    registry.Register(std::make_unique<lubancode::tools::RunCommandTool>());
+    // 闸查注册表要能按名查到 "agent"(转发壳名就是 agent,免重复 owning)。
+    registry.Register(std::make_unique<lubancode::tools::AgentDispatchTool>(agent_tool));
+
+    PlanSessionWiring::Host host;
+    static lubancode::cli::Theme theme;
+    host.theme = &theme;
+    host.session_runtime = &runtime;
+    host.prompt_options = &prompt_options;
+    host.registry = [&registry] { return &registry; };
+    host.agent_tool = [] { return &agent_tool; };  // 静态存储期,免捕引用
+    host.rebuild_preserving = [] {};
+    host.start_turn = [](const std::string&, bool*) {};
+    PlanSessionWiring wiring(host);
+
+    // 放行(P2-3):skill 加载、内置 Explore、tools.allow 全只读的自定义
+    // Agent、git 只读子命令。
+    CHECK(wiring.EvaluateGate("skill", {{"name", "x"}}).empty());
+    CHECK(wiring.EvaluateGate("agent", {{"agent_type", "Explore"}}).empty());
+    CHECK(wiring.EvaluateGate("agent", {{"agent_type", "library-reviewer"}}).empty());
+    CHECK(wiring.EvaluateGate("run_command", {{"command", "git ls-tree -r --name-only HEAD"}, {"shell", "cmd"}})
+              .empty());
+    CHECK(wiring.EvaluateGate("run_command",
+                              {{"command", "Get-ChildItem | Select-Object Name"}, {"shell", "powershell"}})
+              .empty());
+
+    // 拦截:写盘件、全工具面子代理、改状态命令;回执带稳定 code 与命中
+    // 规则。
+    const std::string write_denied = wiring.EvaluateGate("write_file", nlohmann::json{});
+    CHECK(write_denied.find("mode.denied") == 0);
+    const std::string general_denied =
+        wiring.EvaluateGate("agent", {{"agent_type", "general-purpose"}});
+    CHECK(general_denied.find("mode.denied.agent_role") == 0);
+    const std::string push_denied =
+        wiring.EvaluateGate("run_command", {{"command", "git push"}, {"shell", "cmd"}});
+    CHECK(push_denied.find("mode.denied.shell") == 0);
+    CHECK(push_denied.find("git 子命令 push") != std::string::npos);  // 命中的规则进回执
 }
 
 TEST_CASE("peer 接线器:非交互不起服务,收件路与文案照旧") {

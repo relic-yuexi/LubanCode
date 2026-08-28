@@ -104,6 +104,30 @@ bool HasSubexpression(const std::string& segment, bool single_quotes) {
     return false;
 }
 
+// 引号外有没有 PowerShell 脚本块起始 {(真机实测 P2-3 放行 Where-Object
+// 时补的闸):脚本块体内是任意代码(Where-Object { Remove-Item x } 照样
+// 逐条执行),静态证明不了只读,一律 Unknown;无脚本块的简化写法
+// (Where-Object Name -eq 'x')不受影响。cmd 的 { } 没有执行语义,不查。
+bool HasUnquotedScriptBlock(const std::string& segment, bool single_quotes) {
+    char quote = '\0';
+    for (const char c : segment) {
+        if (quote != '\0') {
+            if (c == quote) {
+                quote = '\0';
+            }
+            continue;
+        }
+        if (c == '"' || (single_quotes && c == '\'')) {
+            quote = c;
+            continue;
+        }
+        if (c == '{') {
+            return true;
+        }
+    }
+    return false;
+}
+
 // 按引号外空白拆词,词身上的引号剥掉。
 std::vector<std::string> TokenizeShell(const std::string& segment, bool single_quotes) {
     std::vector<std::string> tokens;
@@ -163,42 +187,67 @@ bool InList(const std::array<std::string_view, N>& list, std::string_view word) 
     return std::find(list.begin(), list.end(), word) != list.end();
 }
 
-// Plan 只读件(两 shell 通用的窄表;cd/echo/type/cat 这些 Auto 档放行的
-// 一概不在——单子"首版只放"清单)。
-constexpr std::array<std::string_view, 7> kPlanSafeGeneric = {
-    "rg", "findstr", "pwd", "where", "which", "ls", "dir"};
+// Plan 只读件(两 shell 通用的窄表;cd/echo 这些 Auto 档放行的
+// 一概不在——单子"首版只放"清单。P2-3 补 type/cat/head/tail/wc/grep
+// 这批纯读件:command_safety 的 kGenericSafe 本就把它们分在只读档,
+// Plan 照放,不再一刀拦)。
+constexpr std::array<std::string_view, 13> kPlanSafeGeneric = {
+    "rg", "findstr", "pwd", "where", "which", "ls", "dir",
+    "type", "cat", "head", "tail", "wc", "grep"};
 
-// PowerShell 只读 cmdlet 的窄表。
-constexpr std::array<std::string_view, 6> kPlanSafePowershell = {
-    "get-content", "get-childitem", "select-string", "get-location", "get-item", "test-path"};
+// PowerShell 只读 cmdlet 的窄表。P2-3 补齐 command_safety kPowershellSafe
+// 里的只读管道件——只读管道(Get-ChildItem | Select-Object)原先逐段判
+// 时撞上 Select-Object 不在表,整条被拒。脚本块写法另由
+// HasUnquotedScriptBlock 拦(体内是任意代码,证明不了只读)。
+constexpr std::array<std::string_view, 16> kPlanSafePowershell = {
+    "get-content", "get-childitem", "select-string", "get-location", "get-item", "test-path",
+    "select-object", "where-object", "sort-object", "measure-object", "format-table", "format-list",
+    "get-process", "get-date", "write-output", "write-host"};
 
 // 版本探针旗标:首词后只跟这些才认探针。
 constexpr std::array<std::string_view, 3> kPlanProbeFlags = {"--version", "-v", "--help"};
 
-// git 只读子命令(单子首版清单:status/log/diff/show/ls-files)。
-constexpr std::array<std::string_view, 5> kPlanGitReadOnly = {"status", "log", "diff", "show", "ls-files"};
+// git 只读子命令(单子首版清单 status/log/diff/show/ls-files;P2-3 补
+// ls-tree/rev-parse 一族——真机实测里 git ls-tree -r --name-only HEAD 被
+// 拦,它只读树对象,无副作用;blame/cat-file/grep/shortlog/describe/
+// rev-list/show-ref 同为纯查询)。
+constexpr std::array<std::string_view, 14> kPlanGitReadOnly = {
+    "status", "log", "diff", "show", "ls-files", "ls-tree", "rev-parse", "rev-list",
+    "blame", "cat-file", "grep", "shortlog", "describe", "show-ref"};
 
 // git diff/show 可能起 pager 或外部 diff driver 的旗标:带这些的按 Unknown
 // (单子"git pager/external diff 不偷偷起任意程序"——禁 pager 由装配层在
 // 执行环境里钉死,分类器只保证不认明知会起进程的组合)。
 constexpr std::array<std::string_view, 4> kGitExternalFlags = {"--ext-diff", "--textconv", "--no-index", "--interactive"};
 
-// 单段判定。段已保证非纯空白。
-PlanShellVerdict ClassifyPlanSegment(const std::string& segment, bool is_powershell, bool single_quotes) {
-    if (HasUnquotedRedirection(segment, single_quotes) || HasSubexpression(segment, single_quotes)) {
-        return PlanShellVerdict::Unknown;
+// 单段判定。段已保证非纯空白。拒绝时 rule 说明撞了哪条(P2-3:拦截
+// 回执把命中的规则打印出来,模型好改写命令)。
+PlanShellClassification ClassifyPlanSegment(const std::string& segment, bool is_powershell,
+                                            bool single_quotes) {
+    const auto deny = [](std::string rule) {
+        return PlanShellClassification{PlanShellVerdict::Unknown, std::move(rule)};
+    };
+    if (HasUnquotedRedirection(segment, single_quotes)) {
+        return deny("段内含未加引号的重定向(> <),Plan 一律不认写盘");
+    }
+    if (HasSubexpression(segment, single_quotes)) {
+        return deny("段内含子表达式 $(,双引号里也执行");
+    }
+    if (is_powershell && HasUnquotedScriptBlock(segment, single_quotes)) {
+        return deny("段内含 PowerShell 脚本块 { },体内是任意代码;请改用无脚本块写法"
+                    "(如 Where-Object Name -eq 'x')");
     }
     const std::vector<std::string> tokens = TokenizeShell(segment, single_quotes);
     if (tokens.empty()) {
-        return PlanShellVerdict::Unknown;
+        return deny("空命令");
     }
     // 环境赋值($env:X= / set X=)能改后续行为,不下 ReadOnly。
     if (ToLower(tokens.front()).rfind("$env:", 0) == 0) {
-        return PlanShellVerdict::Unknown;
+        return deny("段内含环境变量赋值($env:...),能改后续行为");
     }
     const std::string first = NormalizeShellWord(tokens.front());
     if (first.empty()) {
-        return PlanShellVerdict::Unknown;
+        return deny("首词为空");
     }
     // 探针:首词任意(黑名单在上面几道先拦不了——这里探针只认"后面全是
     // 探针旗标",写盘件带 --version 不改它的写盘性,但写盘件在白名单里
@@ -212,7 +261,7 @@ PlanShellVerdict ClassifyPlanSegment(const std::string& segment, bool is_powersh
             }
         }
         if (all_probe) {
-            return PlanShellVerdict::ReadOnly;
+            return PlanShellClassification{PlanShellVerdict::ReadOnly, ""};
         }
     }
     // git:看第二词;git -C <主树> 这类全局选项照 Unknown(保守,单子同款)。
@@ -220,28 +269,31 @@ PlanShellVerdict ClassifyPlanSegment(const std::string& segment, bool is_powersh
         if (tokens.size() >= 2 && InList(kPlanGitReadOnly, ToLower(tokens[1]))) {
             for (std::size_t i = 2; i < tokens.size(); ++i) {
                 if (InList(kGitExternalFlags, ToLower(tokens[i]))) {
-                    return PlanShellVerdict::Unknown;
+                    return deny("git 旗标 " + ToLower(tokens[i]) +
+                                " 可起外部 diff driver/pager,不在 Plan 只读组合内");
                 }
             }
-            return PlanShellVerdict::ReadOnly;
+            return PlanShellClassification{PlanShellVerdict::ReadOnly, ""};
         }
-        return PlanShellVerdict::Unknown;
+        return deny("git 子命令 " + (tokens.size() >= 2 ? ToLower(tokens[1]) : std::string("(缺)")) +
+                    " 不在 Plan 只读子命令表(status/log/diff/show/ls-files/ls-tree/rev-parse 等)");
     }
     if (InList(kPlanSafeGeneric, first)) {
-        return PlanShellVerdict::ReadOnly;
+        return PlanShellClassification{PlanShellVerdict::ReadOnly, ""};
     }
     if (is_powershell && InList(kPlanSafePowershell, first)) {
-        return PlanShellVerdict::ReadOnly;
+        return PlanShellClassification{PlanShellVerdict::ReadOnly, ""};
     }
-    return PlanShellVerdict::Unknown;
+    return deny("首词 " + first + " 不在 Plan 只读白名单(rg/findstr/dir/type/Get-Content/"
+                "Get-ChildItem/Select-Object 等)");
 }
 
 }  // namespace
 
-PlanShellVerdict ClassifyPlanShell(const std::string& command, const std::string& shell) {
+PlanShellClassification ClassifyPlanShellDetailed(const std::string& command, const std::string& shell) {
     const bool is_powershell = (shell == "powershell");
     if (!is_powershell && shell != "cmd") {
-        return PlanShellVerdict::Unknown;  // 不认识的 shell,不猜
+        return {PlanShellVerdict::Unknown, "不认识的 shell(" + shell + "),Plan 不猜"};  // 不认识的 shell,不猜
     }
     const bool single_quotes = is_powershell;
     const std::vector<std::string> segments = SplitShellSegments(command, single_quotes);
@@ -253,20 +305,29 @@ PlanShellVerdict ClassifyPlanShell(const std::string& command, const std::string
             continue;
         }
         any_segment = true;
-        if (ClassifyPlanSegment(segment, is_powershell, single_quotes) != PlanShellVerdict::ReadOnly) {
-            return PlanShellVerdict::Unknown;
+        PlanShellClassification judged = ClassifyPlanSegment(segment, is_powershell, single_quotes);
+        if (judged.verdict != PlanShellVerdict::ReadOnly) {
+            return judged;
         }
     }
     // 首版没有"判成 Mutating"的独立通路:写盘动词落在 Unknown 里,照样拒。
     // 枚举留 Mutating 一档,给将来 PlanCheck 沙箱单接手时细分用。
-    return any_segment ? PlanShellVerdict::ReadOnly : PlanShellVerdict::Unknown;
+    if (any_segment) {
+        return {PlanShellVerdict::ReadOnly, ""};
+    }
+    return {PlanShellVerdict::Unknown, "空命令"};
+}
+
+PlanShellVerdict ClassifyPlanShell(const std::string& command, const std::string& shell) {
+    return ClassifyPlanShellDetailed(command, shell).verdict;
 }
 
 bool IsPlanAllowedBuiltinTool(const std::string& name) {
-    // 单子首版工具表:放行的内置件。
-    static constexpr std::array<std::string_view, 11> kAllowed = {
+    // 单子首版工具表:放行的内置件。skill 是 P2-3 补的:加载技能只往
+    // 上下文装 SKILL.md 说明,不改状态,Plan 不该管"读"。
+    static constexpr std::array<std::string_view, 12> kAllowed = {
         "read_file", "search", "context_search", "context_read", "lsp",
-        "web_search", "web_fetch", "ask_user", "tool_search", "agent", "run_command"};
+        "web_search", "web_fetch", "ask_user", "tool_search", "skill", "agent", "run_command"};
     return std::find(kAllowed.begin(), kAllowed.end(), name) != kAllowed.end();
 }
 
@@ -308,19 +369,30 @@ ModeVerdict EvaluateModePolicy(CollaborationMode mode, const PlanToolCapability&
     }
     if (capability.name == "run_command") {
         if (!input.shell_safe) {
-            return deny(kErrModeDeniedShell,
-                        "命令不在 Plan 模式的只读白名单内(重定向/子表达式/环境赋值/写盘命令均不放行)");
+            // 拒绝回执带命中的规则(P2-3:把撞了哪条说清楚,模型好改写)。
+            std::string reason = "命令不在 Plan 模式的只读白名单内";
+            if (!input.shell_rule.empty()) {
+                reason += ",命中规则: " + input.shell_rule;
+            } else {
+                reason += "(重定向/子表达式/脚本块/环境赋值/写盘命令均不放行)";
+            }
+            return deny(kErrModeDeniedShell, reason);
         }
         return verdict;
     }
     if (capability.name == "agent") {
-        // Plan 只准 Explore(单子:强制 read-only role;general-purpose/worktree 拒)。
+        // Plan 按工具面放只读子代理(P2-3):内置 Explore 走只读表;
+        // 自定义 Agent 看 tools.allow 是否全为只读工具(permissions 不设
+        // read_only 档,契约 4.9——只读由 tools.allow 表达,装配层把判定
+        // 结果经 agent_tools_readonly 递进来)。general-purpose 与工具面含
+        // 写盘/命令工具的一概拒。
         const std::string role = ToLower(input.agent_role);
-        if (role != "explore") {
-            return deny(kErrModeDeniedAgentRole,
-                        "Plan 模式只允许 Explore 只读子代理,general-purpose 会被拒");
+        if (role == "explore" || input.agent_tools_readonly) {
+            return verdict;
         }
-        return verdict;
+        return deny(kErrModeDeniedAgentRole,
+                    "Plan 模式只放只读工具面的子代理(内置 Explore,或 tools.allow 全为只读工具的"
+                    "自定义 Agent);\"" + input.agent_role + "\" 的工具面含写盘/命令工具或未加只读限制");
     }
     if (capability.name == "lsp") {
         return verdict;  // LSP 工具首版只有 definition/references/symbols/diagnostics,全只读
