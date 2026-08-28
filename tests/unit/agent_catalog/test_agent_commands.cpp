@@ -190,3 +190,98 @@ TEST_CASE("FormatAgentDoctorReport:覆盖链摆出被盖住的来源") {
     CHECK(Contains(lines, "覆盖链(被盖住的来源,优先级从高到低):"));
     CHECK(Contains(lines, "(builtin)"));
 }
+
+// ---------------------------------------------------------------------------
+// 阶段 2:Profile 覆盖检查(doctor)与来源账本(inspect)。
+// ---------------------------------------------------------------------------
+
+// 临时 prompts 根:像 Fixture 一样现造,剖析纯函数喂哪层就解析哪层。
+struct PromptsFixture {
+    std::filesystem::path base;
+    PromptsFixture() {
+        base = std::filesystem::temp_directory_path() /
+               ("lubancode_agent_prompts_test_" + std::to_string(reinterpret_cast<std::uintptr_t>(this)));
+        std::error_code ec;
+        std::filesystem::remove_all(base, ec);
+        std::filesystem::create_directories(base, ec);
+    }
+    ~PromptsFixture() {
+        std::error_code ec;
+        std::filesystem::remove_all(base, ec);
+    }
+    void Write(const std::string& rel, const std::string& content) const {
+        const std::filesystem::path full = base / rel;
+        std::filesystem::create_directories(full.parent_path());
+        std::ofstream out(full, std::ios::binary);
+        out << content;
+    }
+    std::string Str() const { return base.string(); }
+};
+
+TEST_CASE("doctor 的 Profile 行:覆盖存在报层数,不存在打 ✗,default 不查") {
+    Fixture fx;
+    PromptsFixture prompts;
+    prompts.Write("profiles/browser-tester/features/web.md", "用户层的联网方针。");
+    fx.Write("named.yaml", "schema: 1\nname: named\ndescription: d\nprompt:\n  profile: browser-tester\n");
+    fx.Write("ghost.yaml", "schema: 1\nname: ghost\ndescription: d\nprompt:\n  profile: no-such\n");
+    fx.Write("plain.yaml", "schema: 1\nname: plain\ndescription: d\n");
+    const agent::AgentCatalog catalog = fx.Load();
+
+    app::AgentPromptContext ctx;
+    ctx.user_prompts_dir = prompts.Str();
+
+    // browser-tester:内置层(core/10-identity.md + features/web.md)+ 用户层
+    // 的 web.md,报得出层数。
+    const std::vector<std::string> named = app::FormatAgentDoctorReport(catalog, "named", {}, ctx);
+    CHECK(Contains(named, "Profile: browser-tester(三层共"));
+    CHECK(Contains(named, "个模块覆盖;/agent inspect named"));
+
+    // no-such:三层全空,打 ✗ 并指路建目录。
+    const std::vector<std::string> ghost = app::FormatAgentDoctorReport(catalog, "ghost", {}, ctx);
+    CHECK(Contains(ghost, "Profile: no-such ✗"));
+    CHECK(Contains(ghost, "profiles/no-such/"));
+
+    // 没点名 Profile:default 上下文,不进 ✗ 账。
+    const std::vector<std::string> plain = app::FormatAgentDoctorReport(catalog, "plain", {}, ctx);
+    CHECK(Contains(plain, "Profile: 继承(落回 default)(default 上下文,三层覆盖不参与)"));
+    CHECK_FALSE(Contains(plain, "✗"));
+}
+
+TEST_CASE("FormatAgentInspectReport:定义来源 + prompt 三笔 + 逐模块来源账") {
+    Fixture fx;
+    PromptsFixture prompts;
+    prompts.Write("profiles/browser-tester/core/10-identity.md", "用户层的 Profile 身份。");
+    fx.Write("probe.yaml",
+             "schema: 1\nname: probe\ndescription: d\nprompt:\n  profile: browser-tester\n"
+             "  project_instructions: omit\n  soul: off\n");
+    const agent::AgentCatalog catalog = fx.Load();
+
+    app::AgentPromptContext ctx;
+    ctx.user_prompts_dir = prompts.Str();
+    const std::vector<std::string> lines = app::FormatAgentInspectReport(catalog, "probe", ctx);
+    CHECK(Contains(lines, "agent inspect: probe"));
+    CHECK(Contains(lines, "定义来源: user "));
+    CHECK(Contains(lines, "prompt: profile=browser-tester · project_instructions=omit · soul=off"));
+    CHECK(Contains(lines, "Prompt 来源账本(逐模块,谁压了谁):"));
+    // 账本逐行:用户层压住内置 Profile 的那条,与走嵌入 default 的那条。
+    CHECK(Contains(lines, "core/10-identity.md <- user profile browser-tester"));
+    CHECK(Contains(lines, "features/web.md <- embedded profile browser-tester"));
+    CHECK(Contains(lines, "core/20-workflow.md <- embedded default"));
+    CHECK(Contains(lines, "modes/default.md <- embedded host policy"));
+    CHECK(Contains(lines, "依赖预检(Skill/MCP/工具/模型): /agent doctor probe"));
+}
+
+TEST_CASE("FormatAgentInspectReport:default 上下文与查无此名") {
+    Fixture fx;
+    fx.Write("plain.yaml", "schema: 1\nname: plain\ndescription: d\n");
+    const agent::AgentCatalog catalog = fx.Load();
+
+    const std::vector<std::string> missing = app::FormatAgentInspectReport(catalog, "no-such", {});
+    REQUIRE(missing.size() == 1);
+    CHECK(missing[0].find("没有叫 \"no-such\"") != std::string::npos);
+
+    const std::vector<std::string> lines = app::FormatAgentInspectReport(catalog, "plain", {});
+    CHECK(Contains(lines, "prompt: profile=继承(落回 default) · project_instructions=inherit · soul=inherit"));
+    CHECK(Contains(lines, "core/10-identity.md <- embedded default"));
+    CHECK(Contains(lines, "(default 上下文:三层 Profile 覆盖不参与"));
+}

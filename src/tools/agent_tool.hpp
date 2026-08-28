@@ -365,6 +365,12 @@ public:
     // 文件优先、嵌入回退"。不设(默认空)= 只用嵌入版。
     void SetPromptsDir(std::string prompts_dir) { prompts_dir_ = std::move(prompts_dir); }
 
+    // Prompt Profile(阶段 2):项目模块目录(<项目根>/.lubancode/prompts)。
+    // 只有自定义 Agent 点名 Prompt Profile 时才用——Profile 的"项目选中
+    // 覆盖"这一层从这儿找(default 上下文没有项目层,主 Agent 拼装不受
+    // 影响,契约 §6.2)。不设(默认空)= 没有项目层。
+    void SetProjectPromptsRoot(std::string dir) { project_prompts_dir_ = std::move(dir); }
+
     // isolation=worktree 的房务 Git 调用可替身(测试注入假 runner);
     // 不设走真 git。
     void SetGitRunner(lubancode::cli::GitRunner runner) { git_runner_ = std::move(runner); }
@@ -414,6 +420,7 @@ private:
     int default_max_steps_per_turn_;
     std::string skills_segment_;
     std::string prompts_dir_;  // 提示词运行时化:空 = 只用嵌入版
+    std::string project_prompts_dir_;  // Prompt Profile 项目层根(阶段 2):空 = 没有项目层
     std::string project_instructions_;  // 当前工作目录的 AGENTS.md 分层内容
     Hooks hooks_;
     bool background_by_default_ = false;

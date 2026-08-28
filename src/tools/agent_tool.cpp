@@ -55,6 +55,8 @@ std::string ExplorePersona() {
 // 自定义 Agent 的人格段(P2-2):名字 + YAML description 拼一份跟内置两枚
 // 同骨架的 persona。description 是用户写给主代理看的"何时派它出场",给子
 // 代理自己也念一遍——角色边界(tools.allow)与任务姿态都在这句里。
+// 阶段 2:定义点名了 Prompt Profile 时,这段让位——core 归 Profile 的
+// 五层回路解析(契约 §6.2),身份由 Profile 的 core/10-identity.md 定。
 std::string CustomAgentPersona(const agent::AgentDefinition& definition) {
     std::string persona = "你是 " + definition.name + " 子代理。";
     if (!definition.description.empty()) {
@@ -65,6 +67,72 @@ std::string CustomAgentPersona(const agent::AgentDefinition& definition) {
         persona += "你的工具面按定义收窄,撞到不在白名单内的工具属正常边界,改用白名单内工具完成。";
     }
     return persona;
+}
+
+// 自定义 Agent 的有效工具名(tools.allow/deny 过滤后):与 RunTask 里写进
+// 皮的那份 tool_filter 同一本账——deny 压过 allow,allow 空表 = 全继承。
+// PromptCapabilities 从这名单推导(单子 §5.4:过滤后剩什么工具,提示词
+// 就只描述什么)。
+std::vector<std::string> CustomEffectiveToolNames(const ToolRegistry& registry,
+                                                  const agent::AgentDefinition& definition) {
+    const std::set<std::string> deny(definition.tools.deny.begin(), definition.tools.deny.end());
+    const std::set<std::string> allow(definition.tools.allow.begin(), definition.tools.allow.end());
+    std::vector<std::string> names;
+    for (const auto& tool : registry.All()) {
+        const std::string name = tool->name();
+        if (deny.count(name) != 0) {
+            continue;
+        }
+        if (!allow.empty() && allow.count(name) == 0) {
+            continue;
+        }
+        names.push_back(name);
+    }
+    return names;
+}
+
+// 子代理的提示词拼装上下文(阶段 2:Prompt Profile 与能力推导)。
+// 四段开关(mcp/web/lsp/wire)仍从皮(AgentProfile)来——子代理默认与主
+// 代理同段;自定义 Agent 另带两笔:
+//   prompt.profile -> PromptOptions.profile + project_prompts_dir:core 归
+//     Profile 五层回路解析,生成的 persona 让位(契约 §4.2/§6.2);没点名
+//     就照旧用生成 persona,行为与阶段 1 一字不差。
+//   tools.allow/deny 过滤后的有效工具表 -> PromptCapabilities:feature 段
+//     只描述有效工具,web/mcp/lsp 不再吃父会话的配置开关(工具都不在表
+//     里,文案不装,单子 §5.4)。
+//   prompt.project_instructions:omit -> AGENTS.md 那段不注(契约 §4.2)。
+agent::PromptOptions BuildSubagentPromptOptions(ToolRegistry& registry, const std::string& cwd,
+                                                const std::string& agent_type, const std::string& prompts_dir,
+                                                const std::string& project_prompts_dir,
+                                                const std::string& project_instructions,
+                                                const std::string& skills_segment,
+                                                const agent::AgentProfile& agent_profile,
+                                                const CustomAgentMaterial* custom) {
+    agent::PromptOptions prompt_options;
+    prompt_options.cwd = cwd;
+    prompt_options.persona = agent_type == "Explore"
+                                 ? ExplorePersona()
+                                 : (custom != nullptr ? CustomAgentPersona(custom->definition) : SubAgentPersona());
+    prompt_options.skills_segment = agent_type == "Explore" ? std::string() : skills_segment;
+    prompt_options.prompts_dir = prompts_dir;
+    prompt_options.project_instructions = project_instructions;
+    prompt_options.mcp = agent_profile.prompt_sections.mcp;
+    prompt_options.web = agent_profile.prompt_sections.web;
+    prompt_options.lsp = agent_profile.prompt_sections.lsp;
+    prompt_options.wire = agent_profile.prompt_sections.wire;
+    if (custom != nullptr) {
+        if (custom->definition.prompt.profile.has_value()) {
+            prompt_options.profile = *custom->definition.prompt.profile;
+            prompt_options.persona.clear();  // core 归 Profile 五层回路
+            prompt_options.project_prompts_dir = project_prompts_dir;
+        }
+        if (custom->definition.prompt.project_instructions == agent::AgentPromptSpec::ProjectInstructions::Omit) {
+            prompt_options.project_instructions.clear();
+        }
+        prompt_options.capabilities =
+            agent::DerivePromptCapabilities(CustomEffectiveToolNames(registry, custom->definition));
+    }
+    return prompt_options;
 }
 
 // 预装技能段(P2-2:skills.preload):body 与名字按位对齐,缺正文的技能只
@@ -950,19 +1018,11 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
     const int id = task->snapshot.id;
     const std::string prompt = task->snapshot.prompt;
     // 病十(批三):四段开关从皮(AgentProfile)来,子代理默认与主代理同段。
-    // 自定义 Agent(P2-2)另换人格段并预装技能。
-    agent::PromptOptions prompt_options;
-    prompt_options.cwd = cwd_;
-    prompt_options.persona = agent_type == "Explore"
-                                 ? ExplorePersona()
-                                 : (custom != nullptr ? CustomAgentPersona(custom->definition) : SubAgentPersona());
-    prompt_options.skills_segment = agent_type == "Explore" ? std::string() : skills_segment_;
-    prompt_options.prompts_dir = prompts_dir_;
-    prompt_options.project_instructions = project_instructions_;
-    prompt_options.mcp = agent_profile_.prompt_sections.mcp;
-    prompt_options.web = agent_profile_.prompt_sections.web;
-    prompt_options.lsp = agent_profile_.prompt_sections.lsp;
-    prompt_options.wire = agent_profile_.prompt_sections.wire;
+    // 自定义 Agent(P2-2)另换人格段并预装技能;阶段 2 起选 Prompt Profile
+    // 与能力推导(见 BuildSubagentPromptOptions)。
+    agent::PromptOptions prompt_options = BuildSubagentPromptOptions(
+        task_registry, cwd_, agent_type, prompts_dir_, project_prompts_dir_, project_instructions_,
+        skills_segment_, agent_profile_, custom);
     std::string system_prompt = agent::AssembleSystemPrompt(prompt_options);
     if (custom != nullptr) {
         system_prompt += AppendPreloadedSkills(custom->definition.skills_preload, custom->preloaded_skills);
@@ -970,7 +1030,9 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
     system_prompt += "\n\n这是后台任务。启动目录是 " + cwd_ +
                      "。调用文件与搜索工具时一律传绝对路径；不要依赖进程当前目录，它可能随主会话切换。";
     system_prompt = agent::WithModelInstructions(system_prompt, detached.model_instructions);
-    system_prompt = agent::WithSoul(system_prompt, detached.soul);
+    if (custom == nullptr || custom->definition.prompt.soul != agent::AgentPromptSpec::Soul::Off) {
+        system_prompt = agent::WithSoul(system_prompt, detached.soul);
+    }
     ToolRegistry* registry = detached_registry != nullptr ? detached_registry.get() : &task_registry;
     // 后台 hooks 会话:主线程里造好(拷一份只读策略快照,含信任/禁用账)再
     // 带进线程——后台线程不碰 dispatcher 账本与定义表,记录只投递,主会话
@@ -1069,24 +1131,15 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 索引段只是稍显陈旧,无害。
     // 病十(批三):mcp/web/lsp/platforms 四段开关从皮(AgentProfile)来——
     // 子代理默认与主代理同段(裁决:补,写明补),不再是 BuildSystemPrompt
-    // 薄壳的"四段不传"。
+    // 薄壳的"四段不传"。阶段 2 起自定义 Agent 另走 Prompt Profile 与能力
+    // 推导(见 BuildSubagentPromptOptions)。
     std::string system_prompt;
     if (prepared_system_prompt != nullptr) {
         system_prompt = *prepared_system_prompt;
     } else {
-        agent::PromptOptions prompt_options;
-        prompt_options.cwd = cwd_;
-        prompt_options.persona = agent_type == "Explore"
-                                     ? ExplorePersona()
-                                     : (custom != nullptr ? CustomAgentPersona(custom->definition)
-                                                          : SubAgentPersona());
-        prompt_options.skills_segment = agent_type == "Explore" ? std::string() : skills_segment_;
-        prompt_options.prompts_dir = prompts_dir_;
-        prompt_options.project_instructions = project_instructions_;
-        prompt_options.mcp = agent_profile_.prompt_sections.mcp;
-        prompt_options.web = agent_profile_.prompt_sections.web;
-        prompt_options.lsp = agent_profile_.prompt_sections.lsp;
-        prompt_options.wire = agent_profile_.prompt_sections.wire;
+        agent::PromptOptions prompt_options = BuildSubagentPromptOptions(
+            effective_registry, cwd_, agent_type, prompts_dir_, project_prompts_dir_, project_instructions_,
+            skills_segment_, agent_profile_, custom);
         system_prompt = agent::WithDeferredToolsIndex(
             agent::AssembleSystemPrompt(prompt_options),
             agent_type == "Explore" ? std::string()
@@ -1165,6 +1218,12 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             "(deny 再压一层)。请改用名单内工具完成;确需边界外操作,把建议写进结论交回主代理执行。";
     } else if (detached == nullptr && tool_filter_) {
         task_agent_profile.tool_filter = tool_filter_;
+    }
+    // 阶段 2:prompt.soul: off 的自定义 Agent 不带魂(契约 §4.2——Soul 只
+    // 许继承或关,不许在 Agent 文件里另塞正文)。前台任务的魂从皮
+    //(AgentProfile::soul,请求期由 AgentLoop 注入)继承,这里只关不添。
+    if (custom != nullptr && custom->definition.prompt.soul == agent::AgentPromptSpec::Soul::Off) {
+        task_agent_profile.soul.clear();
     }
     agent::Agent sub_agent(loop_backend, effective_registry, std::move(task_agent_profile));
     // 子代理的项目记忆召回:按这只任务的 prompt 独立检索,同预算同安全

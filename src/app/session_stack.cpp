@@ -9,6 +9,7 @@
 #include "agent/prompts.hpp"  // LoadSoulContentByName(魂的默认内容)
 #include "app/commands/settings_commands.hpp"  // PrintBanner/PrintLubanIcon/ApplyModelCatalog
 #include "app/commands/prompt_commands.hpp"    // LoadSoulContentByName(魂内容)
+#include "app/commands/agent_commands.hpp"     // ComputeProjectPromptsRoot(阶段 2 Profile 项目层)
 #include "app/turn_runner.hpp"                 // PromptAskUser(ask_user 工具的问话)
 #include "cli/i18n.hpp"
 #include "cli/terminal_port.hpp"
@@ -241,7 +242,10 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
             config.subagent.wall_clock_timeout_secs.value_or(
                 lubancode::config::kDefaultSubagentWallClockTimeoutSecs));
         // 提示词运行时化:子代理系统提示同机制(features 模块用户文件优先)。
+        // Prompt Profile(阶段 2):项目层根一并递进去——自定义 Agent 点名
+        // Profile 时,"项目选中覆盖"这层才用得上,default 上下文不受影响。
         stack->agent_tool()->SetPromptsDir(stack->prompts_dir);
+        stack->agent_tool()->SetProjectPromptsRoot(lubancode::app::ComputeProjectPromptsRoot());
         stack->agent_tool()->SetProjectInstructions(stack->project_instructions);
         if (stack->sub_deferral) {
             stack->agent_tool()->SetToolFilter(stack->sub_tool_filter());
