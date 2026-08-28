@@ -302,13 +302,14 @@ std::expected<nlohmann::json, ResolveError> WorkflowRuntime::BuildResult(const W
 }
 
 std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const WorkflowNode& node,
-                                     nlohmann::json* committed_output) {
+                                     nlohmann::json* committed_output, int item_index) {
     WorkflowRunSummary& account = *ctx.account;
     // 并行分支共写 account.nodes:持锁落记录。单线程路径(顺序图)锁空着,
     // 裸引用照旧——顺序图不为并行付锁钱。
     std::unique_lock<std::mutex> nodes_lock;
     if (ctx.nodes_mutex != nullptr) nodes_lock = std::unique_lock<std::mutex>(*ctx.nodes_mutex);
     NodeRunRecord& record = account.nodes[node.id];
+    const std::string item_tag = item_index >= 0 ? "-i" + std::to_string(item_index) : std::string();
     const auto emit_node_event = [&](const char* type, nlohmann::json payload) {
         const int event_attempt = payload.value("attempt", (std::max)(1, record.attempt));
         payload["node_id"] = node.id;
@@ -316,7 +317,7 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         payload["kind"] = ToString(node.kind);
         payload["attempt"] = event_attempt;
         payload["node_run_id"] =
-            account.run_id + "-" + node.id + "-a" + std::to_string(event_attempt);
+            account.run_id + "-" + node.id + item_tag + "-a" + std::to_string(event_attempt);
         EmitRunEvent(account, type, std::move(payload));
     };
 
@@ -345,8 +346,9 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         record.state = NodeState::Running;
         record.started_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
         if (ctx.journal != nullptr) {
-            ctx.journal->Append(kEventNodeStarted, node.id, attempt,
-                                nlohmann::json{{"kind", ToString(node.kind)}});
+            nlohmann::json journal_payload{{"kind", ToString(node.kind)}};
+            if (item_index >= 0) journal_payload["item"] = item_index;
+            ctx.journal->Append(kEventNodeStarted, node.id, attempt, std::move(journal_payload));
         }
         // Execute 不持账面锁:真活儿(工具/网络/模型)并发跑,只有账本串行。
         if (nodes_lock.owns_lock()) nodes_lock.unlock();
@@ -355,7 +357,7 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         request.definition = ctx.definition;
         request.node = &node;
         request.run_id = account.run_id;
-        request.node_run_id = account.run_id + "-" + node.id + "-a" + std::to_string(attempt);
+        request.node_run_id = account.run_id + "-" + node.id + item_tag + "-a" + std::to_string(attempt);
         request.attempt = attempt;
         request.store = ctx.store;
         request.cancel = ctx.cancel;
@@ -1048,7 +1050,7 @@ std::string WorkflowRuntime::RunMap(const ExecutionContext& ctx, const WorkflowN
         item_input["item"] = (*items)[index];
         item_input["index"] = index;
         body.input = item_input;
-        const std::string outcome = RunNode(ctx, body, &slots[index].output);
+        const std::string outcome = RunNode(ctx, body, &slots[index].output, static_cast<int>(index));
         if (outcome == "success" || outcome == "empty") {
             slots[index].done = true;
             return true;

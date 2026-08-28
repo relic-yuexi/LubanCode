@@ -202,8 +202,10 @@ private:
     // 单节点全生命周期(含 retry)。返回 outcome(success/error/empty/skipped)。
     // committed_output 可空:非空时把落账产物当场交还(map 并发逐项跑 body,
     // store 的 body 键是共用垫,回头 GetOutput 会拿到别人的那份)。
+    // item_index >= 0(map/foreach 的 body):node_run_id 带 "-i<下标>" 路号——
+    // 同一 body 并发跑多路时事件账才分得清谁是谁,面板/诊断不串线。
     std::string RunNode(const ExecutionContext& ctx, const WorkflowNode& node,
-                        nlohmann::json* committed_output = nullptr);
+                        nlohmann::json* committed_output = nullptr, int item_index = -1);
     // async:I/O 等待边界。body 在工作线程跑,外壳守取消与总时限;
     // 返回 success/error/skipped/cancelled/budget_exhausted。
     std::string RunAsync(const ExecutionContext& ctx, const WorkflowNode& node);

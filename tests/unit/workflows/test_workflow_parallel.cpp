@@ -11,7 +11,10 @@
 #include <mutex>
 #include <set>
 #include <thread>
+#include <vector>
 
+#include "runtime/event_sink.hpp"
+#include "workflow/journal.hpp"
 #include "workflow/parser.hpp"
 #include "workflow/runtime.hpp"
 
@@ -392,6 +395,74 @@ result:
         joined += enriched[i]["item"].get<std::string>();
     }
     CHECK(joined == "p0p1p2p3p4p5");
+}
+
+TEST_CASE("map:并发各路的 node_run_id 带路号,事件账不串线") {
+    using namespace lubancode::workflow;
+    const char* yaml = R"YAML(
+schema_version: 1
+id: map-run-id
+version: 1.0.0
+name: m
+entry: setup
+nodes:
+  setup:
+    type: transform
+    operation: make_list
+  enrich:
+    type: map
+    items: "${nodes.setup.output.papers}"
+    body: read_one
+    max_concurrency: 4
+  read_one:
+    type: transform
+    operation: fetch
+  fin:
+    type: end
+edges:
+  - { from: setup, on: success, to: enrich }
+  - { from: enrich, on: success, to: fin }
+)YAML";
+    const WorkflowDefinition def = ParseOrDie(yaml);
+
+    auto executor = std::make_shared<TrackingExecutor>();
+    executor->behaviors["setup"] = {false, "", 0,
+                                    nlohmann::json{{"papers", nlohmann::json::array({"p0", "p1", "p2"})}}};
+    executor->behaviors["read_one"] = {false, "", 0, nlohmann::json()};
+
+    struct RunIdRecorder final : public lubancode::runtime::EventSink {
+        std::mutex mutex;
+        std::vector<std::string> started_run_ids;
+        void Emit(const lubancode::runtime::ServerEvent& event) override {
+            if (event.payload.is_object() &&
+                event.payload.value("type", std::string()) ==
+                    lubancode::workflow::kEventNodeStarted) {
+                std::lock_guard<std::mutex> lock(mutex);
+                started_run_ids.push_back(event.payload.value("node_run_id", std::string()));
+            }
+        }
+    } recorder;
+
+    RuntimeOptions options;
+    options.executors[NodeKind::Transform] = executor;
+    options.event_sink = &recorder;
+    const auto summary = WorkflowRuntime(options).Run(def, RunInputs{});
+    REQUIRE(summary.state == RunState::Succeeded);
+
+    // body 三路并发,每路的 node_run_id 各带 -i<下标> 路号——面板与诊断
+    // 账靠它分清谁是谁;不带路号时三路同 id,事件互踩(0.26.79 实翻)。
+    std::vector<std::string> body_ids;
+    for (const std::string& id : recorder.started_run_ids) {
+        if (id.find("-read_one-") != std::string::npos) body_ids.push_back(id);
+    }
+    std::sort(body_ids.begin(), body_ids.end());
+    REQUIRE(body_ids.size() == 3);
+    CHECK(body_ids[0].find("-read_one-i0-a1") != std::string::npos);
+    CHECK(body_ids[1].find("-read_one-i1-a1") != std::string::npos);
+    CHECK(body_ids[2].find("-read_one-i2-a1") != std::string::npos);
+    // 三路互不相同:并发同跑不串线的基本盘。
+    CHECK(body_ids[0] != body_ids[1]);
+    CHECK(body_ids[1] != body_ids[2]);
 }
 
 TEST_CASE("map 展开越 max_nodes 拒跑") {

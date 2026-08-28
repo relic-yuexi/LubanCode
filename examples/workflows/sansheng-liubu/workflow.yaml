@@ -122,7 +122,7 @@ nodes:
     label: "御前 画敕"
     input:
       header: "诏书候旨"
-      question: "方案：${nodes.zhongshu.output.summary}\n门下判词：${nodes.menxia.output.reasons}\n待明确处：${nodes.menxia.output.question}\n方案书全文见上方中书奏章。可批准、写下批语,或行墨敕。"
+      question: "方案：${nodes.zhongshu.output.summary}\n门下判词：${nodes.menxia.output.reasons}\n待明确处：${nodes.menxia.output.question}\n方案书全文见面板『中书省』条目或 /workflow history。可批准、写下批语,或行墨敕。"
       review_approved: "${nodes.menxia.output.approved}"
       previous: "${nodes.fengbo.output.previous}"
       approve_answers:

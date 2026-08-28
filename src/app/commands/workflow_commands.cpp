@@ -181,6 +181,30 @@ private:
     std::unique_ptr<lubancode::cli::StreamFooterHeartbeat> heartbeat_;
 };
 
+// "run-x-mouyi-i1-a2" -> "run-x-mouyi-i1"（去掉结尾的重试尾 -aN）。
+// 结尾不是 -a<数字> 的原样返回——map/loop 的账都靠这只键归位。
+std::string StripAttemptSuffix(const std::string& node_run_id) {
+    const std::size_t dash = node_run_id.rfind("-a");
+    if (dash == std::string::npos || dash + 2 >= node_run_id.size()) return node_run_id;
+    for (std::size_t i = dash + 2; i < node_run_id.size(); ++i) {
+        if (node_run_id[i] < '0' || node_run_id[i] > '9') return node_run_id;
+    }
+    return node_run_id.substr(0, dash);
+}
+
+// 键尾的 map 路号（"-i<下标>"，下标从 0 计）：返回路数（下标+1）；
+// 不是 map 路键返回 0。node_id 自带 "-i<数字>" 结尾的会误认——别这么起名。
+int LaneOfEntryKey(const std::string& key) {
+    const std::size_t dash = key.rfind("-i");
+    if (dash == std::string::npos || dash + 2 >= key.size()) return 0;
+    int value = 0;
+    for (std::size_t i = dash + 2; i < key.size(); ++i) {
+        if (key[i] < '0' || key[i] > '9') return 0;
+        value = value * 10 + (key[i] - '0');
+    }
+    return value + 1;
+}
+
 // workflow 里的 llm/agent 节点也是在干活的 Agent。它们没走 AgentTool
 // 任务台，便用这本小账把节点事件投影成现成的 Agent panel 条目。
 class WorkflowAgentPanelSink final : public lubancode::runtime::EventSink {
@@ -459,13 +483,25 @@ private:
         const std::string node_id = payload.value("node_id", std::string());
         if (node_id.empty()) return;
 
+        // 记账键:node_run_id 去掉重试尾(-aN)。"run-x-mouyi-i1-a2" 归
+        // "run-x-mouyi-i1"——map/foreach 各路各一条(并发同跑不串账);loop
+        // 每轮 attempt 都从 1 起,同键复用,清账重来。旧事件不带
+        // node_run_id 时退回 node_id,行为照旧。
+        const std::string node_run_id = payload.value("node_run_id", std::string());
+        const std::string entry_key = !node_run_id.empty() ? StripAttemptSuffix(node_run_id) : node_id;
+
         std::lock_guard<std::mutex> lock(mutex_);
         if (type == lubancode::workflow::kEventNodeStarted) {
-            TrackedNode& node = nodes_[node_id];
-            if (node.entry.task_id == 0) node.entry.task_id = NextTaskId();
+            TrackedNode& node = nodes_[entry_key];
+            const bool fresh_entry = node.entry.task_id == 0;
+            if (fresh_entry) node.entry.task_id = NextTaskId();
             const auto [name, title] = SplitLabel(payload.value("label", std::string()), node_id);
             node.entry.name = name;
-            node.entry.title = title;
+            // map 多路同名:新条目行尾挂路号分彼此;重跑(loop/重试)不换题。
+            node.entry.title =
+                fresh_entry && LaneOfEntryKey(entry_key) > 0
+                    ? title + " · 第" + std::to_string(LaneOfEntryKey(entry_key)) + "路"
+                    : title;
             node.entry.running = true;
             node.entry.failed = false;
             node.entry.cancelled = false;
@@ -490,12 +526,11 @@ private:
                     DetailKind::User, input.is_string() ? input.get<std::string>() : input.dump(2)});
             }
             ++node.entry.content_revision;
-            const std::string node_run_id = payload.value("node_run_id", std::string());
-            if (!node_run_id.empty()) node_runs_[node_run_id] = node_id;
+            if (!node_run_id.empty()) node_runs_[node_run_id] = entry_key;
             return;
         }
 
-        const auto found = nodes_.find(node_id);
+        const auto found = nodes_.find(entry_key);
         if (found == nodes_.end()) return;
         TrackedNode& node = found->second;
         if (type == lubancode::workflow::kEventNodeRetrying) {
@@ -574,6 +609,16 @@ private:
                     detail->is_error = event.outcome.has_value() &&
                                        *event.outcome != lubancode::runtime::Outcome::Succeeded;
                     detail->result = event.payload.value("result", std::string());
+                    // llm 节点的正文常是机器 JSON(方案书、差遣单)。收口时
+                    // 若解析得成,缩进摆平再看——一行糊脸的 JSON 没法读。
+                    if (detail->kind == DetailKind::Text && !detail->text.empty()) {
+                        const nlohmann::json parsed =
+                            nlohmann::json::parse(detail->text, nullptr, /*allow_exceptions=*/false);
+                        if (!parsed.is_discarded() && parsed.is_object()) {
+                            detail->text = parsed.dump(2, ' ', /*ensure_ascii=*/false,
+                                                       nlohmann::json::error_handler_t::replace);
+                        }
+                    }
                 }
                 break;
             case lubancode::runtime::ServerEventKind::UsageUpdated:
@@ -601,6 +646,27 @@ private:
     std::map<std::string, std::string> node_runs_;
     const lubancode::cli::Theme& theme_;
     std::function<void(const std::string&)> on_stage_started_;
+};
+
+// main 视图的滤网:workflow 节点的流式内幕(正文增量、思考、工具条目)不进
+// 会话账——与子代理同规矩,main 只看阶段页脚与收官摘要,细节在 Agent 面板
+// 与 run 账里。UsageUpdated 放行(token 记账不缺斤短两);不带节点标记的
+// 事件(ask_user 菜单等交互宿主自己的动静)原样过。
+class WorkflowMainViewSink final : public lubancode::runtime::EventSink {
+public:
+    explicit WorkflowMainViewSink(lubancode::runtime::EventSink& inner) : inner_(inner) {}
+
+    void Emit(const lubancode::runtime::ServerEvent& event) override {
+        if (event.payload.is_object() &&
+            !event.payload.value("workflow_node_run_id", std::string()).empty() &&
+            event.kind != lubancode::runtime::ServerEventKind::UsageUpdated) {
+            return;
+        }
+        inner_.Emit(event);
+    }
+
+private:
+    lubancode::runtime::EventSink& inner_;
 };
 
 // workflow 跑着时叠一层 provider/actions，不把会话里本有的子 Agent 面板拆掉。
@@ -1537,15 +1603,19 @@ std::string RunWorkflowFromTerminal(SlashDispatchContext& ctx,
     WorkflowPanelOverlay panel_overlay(workflow_panel, workflow_cancel);
     lubancode::runtime::FanoutEventSink workflow_events;
     workflow_events.Add(&workflow_panel);
-    if (ctx.session_events != nullptr) workflow_events.Add(ctx.session_events);
+    std::optional<WorkflowMainViewSink> main_view;
+    if (ctx.session_events != nullptr) {
+        main_view.emplace(*ctx.session_events);
+        workflow_events.Add(&*main_view);
+    }
 
     lubancode::app::WorkflowCommandContext run_ctx = wf_ctx;
     run_ctx.on_run_start = [&terminal_run] { terminal_run.Start(); };
     run_ctx.event_sink = &workflow_events;
     run_ctx.thread_id = ctx.session_runtime->thread_id();
     run_ctx.id_authority = &ctx.session_runtime->ids();
-    // agent 子回合与 workflow 节点事件走同一扇分线器；面板账
-    // 只取属于 workflow Agent 的那一份，全量事件仍原样进会话账。
+    // agent 子回合与 workflow 节点事件走同一扇分线器；面板账收全量,
+    // 会话账经 main_view 滤网——节点内幕留在面板,main 不再倒原始 JSON。
     wf_exec.event_sink = &workflow_events;
     wf_exec.steering = [&workflow_panel](const lubancode::workflow::NodeExecRequest& request) {
         return workflow_panel.TakeSteering(request);
