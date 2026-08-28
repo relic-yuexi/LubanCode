@@ -1,0 +1,7 @@
+# permissions.mode 正例之三:auto(常规操作放行,危险操作仍拦)。
+schema: 1
+name: perm-auto
+description: 权限档正例:auto,常规动作自行处置。
+
+permissions:
+  mode: auto

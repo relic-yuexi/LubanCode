@@ -1,0 +1,8 @@
+# permissions.mode 正例之一:inherit(默认档,同父 Agent)。
+# 契约 4.9:mode 只认 inherit/confirm/auto/yolo,四枚各一夹具。
+schema: 1
+name: perm-inherit
+description: 权限档正例:inherit,权限跟着父 Agent 走。
+
+permissions:
+  mode: inherit

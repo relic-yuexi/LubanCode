@@ -39,4 +39,4 @@ runtime:
   isolation: none
 
 permissions:
-  mode: read_only
+  mode: confirm

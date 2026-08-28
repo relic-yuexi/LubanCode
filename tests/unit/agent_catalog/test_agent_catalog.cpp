@@ -11,6 +11,7 @@
 #include <fstream>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "agent/agent_catalog.hpp"
@@ -82,7 +83,8 @@ TEST_CASE("内置登记:general-purpose 与 Explore 进 Catalog,可用,行为字
     CHECK(explore->available);
     CHECK(explore->definition->tools.allow ==
           std::vector<std::string>{"read_file", "search", "web_fetch", "web_search", "lsp"});
-    CHECK(explore->definition->permissions_mode == "read_only");
+    // 只读不另设权限档(契约 4.9):read_only 不进首版,空 = inherit。
+    CHECK(explore->definition->permissions_mode.empty());
     CHECK(agent::ToString(agent::AgentSourceLayer::Project) == "project");
 }
 
@@ -250,4 +252,19 @@ TEST_CASE("夹具样本真文件走一遍:完整/最小/坏样本/名不符") {
     const auto* real = FindEntry(catalog, "real-name");
     CHECK(real->available);
     CHECK(real->layer == agent::AgentSourceLayer::Project);
+
+    // permissions.mode 契约四值各一枚夹具,都可用、值原样落账。
+    for (const auto& [fixture, mode] : std::vector<std::pair<const char*, const char*>>{
+             {"perm-inherit", "inherit"}, {"perm-confirm", "confirm"}, {"perm-auto", "auto"},
+             {"perm-yolo", "yolo"}}) {
+        const auto* perm = FindEntry(catalog, fixture);
+        CHECK(perm->available);
+        REQUIRE(perm->definition.has_value());
+        CHECK(perm->definition->permissions_mode == mode);
+    }
+
+    // bad-permissions-mode.yaml 写 read_only:不可用,诊断指路 tools.allow。
+    const auto* bad_perm = FindEntry(catalog, "bad-permissions-mode");
+    CHECK_FALSE(bad_perm->available);
+    CHECK(bad_perm->FirstError().find("tools.allow") != std::string::npos);
 }

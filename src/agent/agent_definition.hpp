@@ -85,7 +85,7 @@ struct AgentDefinition {
     std::string execution_mode;             // auto/foreground/background;空 = auto
     std::string isolation;                  // none/worktree;空 = none
     // ---- permissions:只能比父 Agent 更窄 ----
-    std::string permissions_mode;           // inherit/read_only;空 = inherit
+    std::string permissions_mode;           // inherit/confirm/auto/yolo;空 = inherit
 };
 
 // 解析结果:definition 在有任何一个 error 时为 nullopt(不交半份定义出去);
