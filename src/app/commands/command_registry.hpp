@@ -163,6 +163,9 @@ struct SlashDispatchContext {
     std::function<void(lubancode::runtime::CollaborationMode, const std::string&)> switch_collaboration_mode;
     std::function<void()> reset_plan_review;  // /clear /plan off 的悬稿翻篇
     std::function<lubancode::workflow::ToolExecutor::Options()> build_workflow_tool_options;
+    // workflow agent 节点的审批口(确认回调装配):空 = 该宿主没接审批,
+    // AgentExecutor 自守"needs_confirm 无门明拒"。
+    std::function<lubancode::agent::TurnWiring()> build_workflow_agent_callbacks;
 };
 
 }  // namespace lubancode::app

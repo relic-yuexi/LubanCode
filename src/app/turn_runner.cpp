@@ -456,7 +456,7 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
                     const std::vector<std::string>& deny_commands,
                     lubancode::hooks::HookDispatcher* hook_dispatcher, const lubancode::runtime::ToolHookDecision& pre,
                     bool has_permission_hooks, const std::string& name, const nlohmann::json& input,
-                    const std::function<void(bool asked, bool allowed)>& approval_observer = {}) {
+                    const std::function<void(bool asked, bool allowed)>& approval_observer) {
     const bool file_tool = name == "write_file" || name == "edit_file";
 
     // 裁定(纯逻辑,runtime 层):档位 + permissions 叠加 + PreToolUse 表态

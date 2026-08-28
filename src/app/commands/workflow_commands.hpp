@@ -120,6 +120,9 @@ struct WorkflowExecutorContext {
     lubancode::tools::ToolRegistry* registry = nullptr;
     lubancode::api::Backend* backend = nullptr;  // RebuildableBackend 那只
     std::function<lubancode::workflow::ToolExecutor::Options()> build_tool_options;
+    // agent 节点的审批口(确认回调装配);空 = 没接审批宿主。tool 节点
+    // 的确认门也借这一份(只在 build_tool_options 没填确认口时补)。
+    std::function<lubancode::agent::TurnWiring()> build_agent_callbacks;
     std::string provider;                       // active_provider
     std::string model;                          // *current_model
     std::string effort;                         // *current_think

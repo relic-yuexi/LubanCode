@@ -1317,8 +1317,18 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
     executors[lubancode::workflow::NodeKind::Transform] = transform;
     executors[lubancode::workflow::NodeKind::Template] =
         std::make_shared<lubancode::workflow::TemplateExecutor>();
-    executors[lubancode::workflow::NodeKind::Tool] =
-        std::make_shared<lubancode::workflow::ToolExecutor>(exec_ctx.build_tool_options());
+    {
+        lubancode::workflow::ToolExecutor::Options tool_options = exec_ctx.build_tool_options();
+        // tool 节点同病同治(治 BuildWorkflowToolOptions 那句"确认门暂不
+        // 接"):宿主确认口缺位时借 agent 节点那份 TurnWiring 补上。trace/
+        // 钩子/Plan 闸是 build_tool_options 自己装的,原样保留,只补这一枚口。
+        if (exec_ctx.build_agent_callbacks && !tool_options.callbacks.on_tool_confirm &&
+            !tool_options.callbacks.on_tool_confirm_async) {
+            tool_options.callbacks.on_tool_confirm = exec_ctx.build_agent_callbacks().on_tool_confirm;
+        }
+        executors[lubancode::workflow::NodeKind::Tool] =
+            std::make_shared<lubancode::workflow::ToolExecutor>(std::move(tool_options));
+    }
     std::shared_ptr<lubancode::workflow::LlmExecutor> llm_executor;
     {
         // prompt 从 workflow 目录读(包内相对路径;越界已被 validator
@@ -1357,6 +1367,11 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
         agent_options.thread_id = exec_ctx.thread_id;
         agent_options.ids = exec_ctx.id_authority;
         agent_options.steering = exec_ctx.steering;
+        // 审批口:宿主给了确认回调就接上——needs_confirm 工具不再落
+        // AgentExecutor 兜底的"未接审批宿主"明拒。
+        if (exec_ctx.build_agent_callbacks) {
+            agent_options.callbacks = exec_ctx.build_agent_callbacks();
+        }
         executors[lubancode::workflow::NodeKind::Agent] =
             std::make_shared<lubancode::workflow::AgentExecutor>(std::move(agent_options));
         lubancode::workflow::LlmExecutor::Options llm_options;
@@ -1473,6 +1488,7 @@ lubancode::app::WorkflowExecutorContext BuildWorkflowExecutorContext(SlashDispat
     wf_exec.registry = ctx.registry;
     wf_exec.backend = ctx.real_backend;
     wf_exec.build_tool_options = ctx.build_workflow_tool_options;
+    wf_exec.build_agent_callbacks = ctx.build_workflow_agent_callbacks;
     wf_exec.provider = *ctx.active_provider;
     wf_exec.model = *ctx.current_model;
     wf_exec.effort = *ctx.current_think;

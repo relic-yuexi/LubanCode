@@ -97,6 +97,9 @@ public:
 
 class AgentBackend : public lubancode::api::Backend {
 public:
+    // 首发调哪枚工具(默认 reader;审批/白名单用例换成 needs_confirm 或
+    // 白名单外的工具)。
+    std::string first_tool = "reader";
     std::vector<lubancode::api::Request> requests;
 
     std::expected<void, lubancode::api::Error> send_stream(
@@ -110,7 +113,7 @@ public:
         usage.output_tokens = 5;
         on_event(lubancode::api::MessageStart{"msg", request.model});
         if (requests.size() == 1) {
-            on_event(lubancode::api::ToolUseStart{0, "tool-1", "reader"});
+            on_event(lubancode::api::ToolUseStart{0, "tool-1", first_tool});
             on_event(lubancode::api::ToolUseInputDelta{0, "{}"});
             on_event(lubancode::api::ContentBlockDone{0});
             on_event(lubancode::api::MessageDone{"tool_use", usage});
@@ -208,6 +211,20 @@ public:
     void Emit(const lubancode::runtime::ServerEvent& event) override { events.push_back(event); }
     std::vector<lubancode::runtime::ServerEvent> events;
 };
+
+// 从一次请求的消息里拼出全部工具结果块的文本(审批拒词/白名单拒词都从这查)。
+std::string ToolResultsText(const lubancode::api::Request& request) {
+    std::string out;
+    for (const auto& message : request.messages) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<lubancode::api::ToolResultBlock>(&block)) {
+                out += result->content;
+                out += "\n";
+            }
+        }
+    }
+    return out;
+}
 
 }  // namespace
 
@@ -453,6 +470,138 @@ nodes:
     CHECK(backend.requests[0].system == "只读探索");
     REQUIRE(backend.requests[0].tools.size() == 1);
     CHECK(backend.requests[0].tools[0].name == "reader");
+}
+
+TEST_CASE("agent 节点:审批口三态——放行、拒绝、没宿主的兜底") {
+    using namespace lubancode::workflow;
+    const WorkflowDefinition def = ParseOrDie(R"YAML(
+schema_version: 1
+id: agent-confirm
+version: 1.0.0
+entry: work
+nodes:
+  work:
+    type: agent
+    task: prompts/work.md
+    allowed_tools: [writer]
+)YAML");
+    NodeExecRequest request;
+    request.definition = &def;
+    request.node = &def.node_map.at("work");
+    request.resolved_input = nlohmann::json{{"topic", "写档"}};
+
+    SUBCASE("回调放行:needs_confirm 工具真执行") {
+        lubancode::tools::ToolRegistry registry;
+        auto* writer = new FakeTool("writer", R"({"wrote":true})", false, true);
+        registry.Register(std::unique_ptr<lubancode::tools::Tool>(writer));
+        AgentBackend backend;
+        backend.first_tool = "writer";
+
+        AgentExecutor::Options options;
+        options.default_binding.backend = &backend;
+        options.default_binding.profile.request.model = "test-agent";
+        options.registry = &registry;
+        options.task_loader = [](const std::string&) { return std::string("照单办事"); };
+        options.callbacks.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) {
+            return true;
+        };
+        AgentExecutor executor(std::move(options));
+
+        const NodeExecResult result = executor.Execute(request);
+        REQUIRE(result.ok);
+        CHECK(result.output["answer"] == "ok");
+        CHECK(writer->calls == 1);  // 真执行了,不是空放行
+        REQUIRE(backend.requests.size() == 2);
+    }
+
+    SUBCASE("回调拒绝:工具不执行,流程照剧本收口") {
+        lubancode::tools::ToolRegistry registry;
+        auto* writer = new FakeTool("writer", R"({"wrote":true})", false, true);
+        registry.Register(std::unique_ptr<lubancode::tools::Tool>(writer));
+        AgentBackend backend;
+        backend.first_tool = "writer";
+
+        AgentExecutor::Options options;
+        options.default_binding.backend = &backend;
+        options.default_binding.profile.request.model = "test-agent";
+        options.registry = &registry;
+        options.task_loader = [](const std::string&) { return std::string("照单办事"); };
+        options.callbacks.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) {
+            return false;
+        };
+        AgentExecutor executor(std::move(options));
+
+        const NodeExecResult result = executor.Execute(request);
+        CHECK(writer->calls == 0);  // 拒在执行前
+        REQUIRE(result.ok);         // 拒词进历史,剧本第二发照出 JSON
+        CHECK(result.output["answer"] == "ok");
+        REQUIRE(backend.requests.size() == 2);
+        // 默认拒词(问了用户之后的拒绝是实话)
+        CHECK(ToolResultsText(backend.requests[1]).find("用户拒绝执行该工具") != std::string::npos);
+    }
+
+    SUBCASE("没接宿主:兜底明拒,模型收到的是实话") {
+        lubancode::tools::ToolRegistry registry;
+        auto* writer = new FakeTool("writer", R"({"wrote":true})", false, true);
+        registry.Register(std::unique_ptr<lubancode::tools::Tool>(writer));
+        AgentBackend backend;
+        backend.first_tool = "writer";
+
+        AgentExecutor::Options options;
+        options.default_binding.backend = &backend;
+        options.default_binding.profile.request.model = "test-agent";
+        options.registry = &registry;
+        options.task_loader = [](const std::string&) { return std::string("照单办事"); };
+        AgentExecutor executor(std::move(options));  // callbacks 全空
+
+        const NodeExecResult result = executor.Execute(request);
+        CHECK(writer->calls == 0);
+        REQUIRE(result.ok);
+        REQUIRE(backend.requests.size() == 2);
+        CHECK(ToolResultsText(backend.requests[1]).find("workflow agent 节点未接审批宿主") !=
+              std::string::npos);
+        CHECK(ToolResultsText(backend.requests[1]).find("writer") != std::string::npos);
+    }
+}
+
+TEST_CASE("agent 节点:allowed_tools 外的工具收到白名单拒词") {
+    using namespace lubancode::workflow;
+    lubancode::tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("reader", R"({"read":true})", false, false));
+    auto* editor = new FakeTool("editor", "edited", false, false);
+    registry.Register(std::unique_ptr<lubancode::tools::Tool>(editor));
+    AgentBackend backend;
+    backend.first_tool = "editor";  // 剧本偏要调白名单外的
+
+    AgentExecutor::Options options;
+    options.default_binding.backend = &backend;
+    options.default_binding.profile.request.model = "test-agent";
+    options.registry = &registry;
+    options.task_loader = [](const std::string&) { return std::string("照单办事"); };
+    AgentExecutor executor(std::move(options));
+
+    const WorkflowDefinition def = ParseOrDie(R"YAML(
+schema_version: 1
+id: agent-filter
+version: 1.0.0
+entry: work
+nodes:
+  work:
+    type: agent
+    task: prompts/work.md
+    allowed_tools: [reader]
+)YAML");
+    NodeExecRequest request;
+    request.definition = &def;
+    request.node = &def.node_map.at("work");
+    request.resolved_input = nlohmann::json{{"topic", "只读"}};
+
+    const NodeExecResult result = executor.Execute(request);
+    CHECK(editor->calls == 0);  // 白名单拦在执行前
+    REQUIRE(result.ok);         // 拒词进历史,第二发照出 JSON
+    REQUIRE(backend.requests.size() == 2);
+    CHECK(ToolResultsText(backend.requests[1]).find("此工具不在 workflow agent 节点的 allowed_tools 里") !=
+          std::string::npos);
 }
 
 TEST_CASE("agent 节点:面板补充经 TurnHarness 续投且结果认最后一轮") {
@@ -738,6 +887,48 @@ TEST_CASE("ask_user 节点:不知道会委托后续各轮且须等复审通过")
     REQUIRE(approved.ok);
     CHECK(approved.output["complete"] == true);
     CHECK(broker.questions == 1);
+}
+
+TEST_CASE("ask_user 节点:override_answers 墨敕越权放行") {
+    using namespace lubancode::workflow;
+    const WorkflowDefinition def = ParseOrDie(
+        "schema_version: 1\nid: q-override\nversion: 1\nentry: ask\nnodes:\n"
+        "  ask:\n    type: ask_user\n    input: { question: \"请批阅\" }\n");
+    NodeExecRequest request;
+    request.node = &def.node_map.at("ask");
+
+    SUBCASE("门下已驳,墨敕命中:approved/complete/overridden 全真") {
+        InstantBroker broker;
+        broker.question_answers = {"朕说了算"};
+        AskUserExecutor executor(&broker);
+        request.resolved_input = nlohmann::json{
+            {"question", "请批阅"},
+            {"review_approved", false},
+            {"override_answers", nlohmann::json::array({"朕说了算"})}};
+
+        const NodeExecResult result = executor.Execute(request);
+        REQUIRE(result.ok);
+        CHECK(result.output["approved"] == true);
+        CHECK(result.output["complete"] == true);
+        CHECK(result.output["overridden"] == true);
+    }
+
+    SUBCASE("门下已驳,墨敕不命中:照旧驳回") {
+        InstantBroker broker;
+        broker.question_answers = {"再改"};
+        AskUserExecutor executor(&broker);
+        request.resolved_input = nlohmann::json{
+            {"question", "请批阅"},
+            {"review_approved", false},
+            {"approve_answers", nlohmann::json::array({"准"})},
+            {"override_answers", nlohmann::json::array({"朕说了算"})}};
+
+        const NodeExecResult result = executor.Execute(request);
+        REQUIRE(result.ok);
+        CHECK(result.output["approved"] == false);
+        CHECK(result.output["complete"] == false);
+        CHECK(result.output["overridden"] == false);  // 恒在键,未命中给假
+    }
 }
 
 TEST_CASE("subflow:子图结果交回父图,错误不穿墙成文本") {

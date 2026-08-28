@@ -214,8 +214,8 @@ lubancode::workflow::ToolExecutor::Options TerminalSessionController::BuildWorkf
     // 封暗道(骨架拆解批一·病二):workflow 工具节点不再直捅
     // tool->execute(),改走 agent::RunOneTool 正门。这里把主回合那套横切
     // 链原样接上:hooks(PreToolUse/PostToolUse)、Plan 闸、逐枚 trace
-    //(发号 + 分线 + 副作用闸)。确认门暂不接(会话层 /workflow 还没有
-    // 审批宿主),ToolExecutor 自守"needs_confirm 无门明拒"的旧语义。
+    //(发号 + 分线 + 副作用闸)。确认门不在这填——BuildWorkflowExecutors
+    // 装配时借 build_agent_callbacks 那份补上,与 agent 节点同一道门。
     lubancode::workflow::ToolExecutor::Options options;
     options.registry = &registry();
     options.thread_id = session_runtime_.thread_id();
@@ -246,6 +246,29 @@ lubancode::workflow::ToolExecutor::Options TerminalSessionController::BuildWorkf
         return plan_wiring_.EvaluateGate(tool_name, input);
     };
     return options;
+}
+
+lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallbacks() {
+    // workflow agent 节点的审批口(治"确认门暂不接"欠下的账):回调直通
+    // ConfirmToolUse,与主回合同一颗脑袋——EvaluatePermission 先裁定
+    //(yolo/auto/预放行不问),真要问时 diff 预览 + 三档菜单 + "总是允许"
+    // 落回会话账(always_allowed_tools 按引用进 ConfirmToolUse)都在里头。
+    lubancode::agent::TurnWiring wiring;
+    wiring.on_tool_confirm = [this](const std::string& tool_use_id, const std::string& name,
+                                    const nlohmann::json& input) -> bool {
+        // 每次现起一只 ToolDisplay:workflow 的工具不在会话条目账上,
+        // OnConfirmRequest 查不到 id 拿 -1,确认块退化成纯打印,不会去动
+        // 主回合的条目;diff 预览照画(文件工具),菜单照问。
+        lubancode::cli::ToolDisplay display(transcript_ui_.items(), theme,
+                                            lubancode::platform::ProbeStdoutConsole().is_console,
+                                            todo_state(), /*cancel=*/nullptr, transcript_ui_.expanded_flag());
+        const lubancode::runtime::ToolHookDecision pre;  // workflow 路不跑 PreToolUse 钩子,空表态
+        return lubancode::app::ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display,
+                                              settings_local.allow_commands, settings_local.deny_commands,
+                                              /*hook_dispatcher=*/nullptr, pre,
+                                              /*has_permission_hooks=*/false, name, input);
+    };
+    return wiring;
 }
 
 TerminalSessionController::TerminalSessionController(const InteractiveSessionOptions& options,
@@ -987,6 +1010,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     };
     ctx.reset_plan_review = [this]() { plan_wiring_.DiscardReview(); };
     ctx.build_workflow_tool_options = [this]() { return BuildWorkflowToolOptions(); };
+    ctx.build_workflow_agent_callbacks = [this]() { return BuildWorkflowAgentCallbacks(); };
 }
 
 SessionCommandState TerminalSessionController::MakeSessionCommandState() {
