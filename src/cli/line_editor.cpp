@@ -320,6 +320,26 @@ std::vector<std::string> WrapUtf8ToDisplayWidth(const std::string& utf8, int max
     return out;
 }
 
+std::vector<std::string> WrapUtf8ToDisplayWidthCapped(const std::string& utf8, int max_width,
+                                                      int max_lines) {
+    std::vector<std::string> lines = WrapUtf8ToDisplayWidth(utf8, max_width);
+    if (lines.empty()) {
+        lines.emplace_back();  // 空文本也占一行,别让面板的问话区缩没
+    }
+    if (max_lines < 1) {
+        max_lines = 1;
+    }
+    if (static_cast<int>(lines.size()) <= max_lines) {
+        return lines;
+    }
+    lines.resize(static_cast<std::size_t>(max_lines));
+    // 末行截短时先给省略号标记留足宽度,标记拼上去必在行内
+    const std::string marker = " …";
+    const int marker_width = static_cast<int>(DisplayWidthUtf8(marker));
+    lines.back() = TruncateUtf8ToDisplayWidth(lines.back(), max_width - marker_width) + marker;
+    return lines;
+}
+
 std::size_t DisplayWidthUtf8(const std::string& utf8) { return DisplayWidth(Utf8ToUtf32(utf8)); }
 
 EditLineWindow ComputeEditLineWindow(const std::u32string& line, std::size_t cursor, int content_width) {

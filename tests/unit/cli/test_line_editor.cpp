@@ -920,6 +920,36 @@ TEST_CASE("WrapUtf8ToDisplayWidth: UTF-8 版本与 u32 版本结果一致") {
     CHECK(w[2] == "a");
 }
 
+// ---- 问话面板的折行+限帽 WrapUtf8ToDisplayWidthCapped ----------------------
+
+TEST_CASE("WrapUtf8ToDisplayWidthCapped: 帽内不截,硬换行原样保留") {
+    const std::vector<std::string> lines = WrapUtf8ToDisplayWidthCapped("ab\ncd", 10, 4);
+    REQUIRE(lines.size() == 2);
+    CHECK(lines[0] == "ab");
+    CHECK(lines[1] == "cd");
+}
+
+TEST_CASE("WrapUtf8ToDisplayWidthCapped: 超帽截断,末行截短后尾补省略号") {
+    // "abcdefghij" 按 4 折出 3 行,帽 2:留 1 行,末行给 " …"(宽 2)让位
+    const std::vector<std::string> lines = WrapUtf8ToDisplayWidthCapped("abcdefghij", 4, 2);
+    REQUIRE(lines.size() == 2);
+    CHECK(lines[0] == "abcd");
+    CHECK(lines[1] == "ef …");
+    CHECK(DisplayWidthUtf8(lines[1]) == 4);  // 标记在,行也不超帽外宽度
+}
+
+TEST_CASE("WrapUtf8ToDisplayWidthCapped: 空文本保一行空串") {
+    const std::vector<std::string> lines = WrapUtf8ToDisplayWidthCapped("", 10, 5);
+    REQUIRE(lines.size() == 1);
+    CHECK(lines[0].empty());
+}
+
+TEST_CASE("WrapUtf8ToDisplayWidthCapped: max_lines <= 0 当 1") {
+    const std::vector<std::string> lines = WrapUtf8ToDisplayWidthCapped("ab\ncd", 10, 0);
+    REQUIRE(lines.size() == 1);
+    CHECK(lines[0] == "ab …");
+}
+
 
 TEST_CASE("ComputeEditLineWindow: 整行放得下时,窗口就是整行,光标列不变") {
     const EditLineWindow window = ComputeEditLineWindow(U"hello", 3, 20);
