@@ -11,14 +11,17 @@
 using lubancode::cli::TermOut;
 using lubancode::cli::TermErr;
 
+#include <atomic>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <mutex>
 #include <sstream>
 
 #include "agent/agent.hpp"  // AgentProfile(批四自立门户)
 #include "cli/slash_commands.hpp"
 #include "config/model_catalog.hpp"
+#include "platform/console.hpp"
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"
 #include "workflow/compiler.hpp"
@@ -102,6 +105,42 @@ public:
 
 private:
     const lubancode::cli::Theme& theme_;
+};
+
+// workflow 直呼会同步占住会话线程，不能等主循环回来才重开 composer。
+// 执行期借普通 turn 的 footer 与输入监听器：框常驻、消息可排队，Esc 也
+// 直连图运行的 cancel token。析构先停读键线程，再擦 footer。
+class WorkflowTerminalRunScope final {
+public:
+    WorkflowTerminalRunScope(const lubancode::cli::Theme& theme, bool interactive)
+        : theme_(theme), interactive_(interactive) {
+        const bool footer_enabled =
+            interactive_ && lubancode::platform::SupportsScreenRepaint();
+        lubancode::cli::BeginStreamFooter(theme_, footer_enabled);
+        if (footer_enabled) {
+            lubancode::cli::StartStreamFooterWorking(lubancode::cli::tr("spinner.thinking"));
+        }
+        if (interactive_) {
+            listener_ = std::make_unique<lubancode::cli::TurnInputListener>(cancel_, theme_);
+        }
+    }
+
+    ~WorkflowTerminalRunScope() {
+        if (listener_) listener_->Stop();
+        lubancode::cli::StopStreamFooterWorking();
+        lubancode::cli::EndStreamFooter();
+    }
+
+    WorkflowTerminalRunScope(const WorkflowTerminalRunScope&) = delete;
+    WorkflowTerminalRunScope& operator=(const WorkflowTerminalRunScope&) = delete;
+
+    const std::atomic<bool>* cancel_token() const { return &cancel_; }
+
+private:
+    const lubancode::cli::Theme& theme_;
+    bool interactive_ = false;
+    std::atomic<bool> cancel_{false};
+    std::unique_ptr<lubancode::cli::TurnInputListener> listener_;
 };
 
 std::vector<std::string> BuiltinSlashWords() {
@@ -561,7 +600,8 @@ bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext
 std::string RunWorkflowById(const WorkflowCommandContext& context, const std::string& id,
                             const std::string& raw_args,
                             const std::map<lubancode::workflow::NodeKind,
-                                           std::shared_ptr<lubancode::workflow::NodeExecutor>>& executors) {
+                                           std::shared_ptr<lubancode::workflow::NodeExecutor>>& executors,
+                            const std::atomic<bool>* cancel_token) {
     const lubancode::cli::Theme& theme = *context.theme;
     const lubancode::workflow::Catalog catalog = LoadCheckedCatalog(context);
     const lubancode::workflow::CatalogEntry* entry = catalog.Find(id);
@@ -695,7 +735,7 @@ std::string RunWorkflowById(const WorkflowCommandContext& context, const std::st
     }
     lubancode::workflow::WorkflowRuntime runtime(std::move(options));
     const lubancode::workflow::WorkflowRunSummary summary =
-        runtime.Run(entry->definition, lubancode::workflow::RunInputs(inputs));
+        runtime.Run(entry->definition, lubancode::workflow::RunInputs(inputs), cancel_token);
 
     std::ostringstream out;
     const char* run_mark = summary.state == lubancode::workflow::RunState::Succeeded ? "✓" : "×";
@@ -880,6 +920,9 @@ lubancode::app::WorkflowCommandContext BuildWorkflowCatalogContext(SlashDispatch
     wf_ctx.request_input = [theme = ctx.theme](const std::string& field,
                                                const nlohmann::json& schema)
         -> std::optional<std::string> {
+        // workflow 的忙时 footer 已开着；补问必填项时暂让整块屏面，答完
+        // 再由作用域画回，提交后的 composer 不会只剩一枚裸光标。
+        const lubancode::cli::StreamFooterSuspendScope footer_suspend;
         const std::string question = schema.value("description", "请补充 " + field + "：");
         {
             std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
@@ -912,6 +955,17 @@ lubancode::app::WorkflowExecutorContext BuildWorkflowExecutorContext(SlashDispat
     return wf_exec;
 }
 
+std::string RunWorkflowFromTerminal(SlashDispatchContext& ctx,
+                                    const lubancode::app::WorkflowCommandContext& wf_ctx,
+                                    const std::string& workflow_id, const std::string& raw_args) {
+    lubancode::app::WorkflowExecutorContext wf_exec = BuildWorkflowExecutorContext(ctx);
+    WorkflowTerminalRunScope terminal_run(*ctx.theme, ctx.spinner_enabled);
+    return lubancode::app::RunWorkflowById(
+        wf_ctx, workflow_id, raw_args,
+        lubancode::app::BuildWorkflowExecutors(wf_ctx, wf_exec, workflow_id),
+        terminal_run.cancel_token());
+}
+
 }  // namespace
 
 CommandFlow HandleSlashWorkflow(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
@@ -920,11 +974,8 @@ CommandFlow HandleSlashWorkflow(SlashDispatchContext& ctx, const lubancode::cli:
     lubancode::app::WorkflowCommandContext wf_ctx = BuildWorkflowCatalogContext(ctx);
     const lubancode::app::ParsedWorkflowCommand wf_parsed = lubancode::app::ParseWorkflowCommand(parsed.args);
     if (wf_parsed.action == lubancode::app::WorkflowCommandAction::Run) {
-        // run:执行器装配与 alias 直呼共用一份。
-        lubancode::app::WorkflowExecutorContext wf_exec = BuildWorkflowExecutorContext(ctx);
-        TermOut() << lubancode::app::RunWorkflowById(
-            wf_ctx, wf_parsed.id, wf_parsed.rest,
-            lubancode::app::BuildWorkflowExecutors(wf_ctx, wf_exec, wf_parsed.id));
+        // run:执行器装配与 alias 直呼共用一份；footer 收妥后摘要再落屏。
+        TermOut() << RunWorkflowFromTerminal(ctx, wf_ctx, wf_parsed.id, wf_parsed.rest);
         return CommandFlow::Continue;
     }
     HandleWorkflowCommand(parsed.args, wf_ctx);
@@ -941,11 +992,8 @@ CommandFlow HandleSlashUnknown(SlashDispatchContext& ctx, const lubancode::cli::
         lubancode::app::WorkflowCommandContext wf_ctx = BuildWorkflowCatalogContext(ctx);
         const std::string wf_id = ResolveWorkflowAlias(wf_ctx, parsed.alias_word);
         if (!wf_id.empty()) {
-            // 与 /workflow run 同一道执行器装配。
-            lubancode::app::WorkflowExecutorContext wf_exec = BuildWorkflowExecutorContext(ctx);
-            TermOut() << lubancode::app::RunWorkflowById(
-                wf_ctx, wf_id, parsed.args,
-                lubancode::app::BuildWorkflowExecutors(wf_ctx, wf_exec, wf_id));
+            // 与 /workflow run 同一道终端外壳和执行器装配。
+            TermOut() << RunWorkflowFromTerminal(ctx, wf_ctx, wf_id, parsed.args);
             return CommandFlow::Continue;
         }
     }

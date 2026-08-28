@@ -13,6 +13,7 @@
 #include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
 #include "cli/line_editor.hpp"             // CompletionCandidate(alias 补全)
 
+#include <atomic>
 #include <filesystem>
 #include <functional>
 #include <map>
@@ -91,7 +92,8 @@ bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext
 std::string RunWorkflowById(const WorkflowCommandContext& context, const std::string& id,
                             const std::string& raw_args,
                             const std::map<lubancode::workflow::NodeKind,
-                                           std::shared_ptr<lubancode::workflow::NodeExecutor>>& executors);
+                                           std::shared_ptr<lubancode::workflow::NodeExecutor>>& executors,
+                            const std::atomic<bool>* cancel_token = nullptr);
 
 // 会话层给 alias 直呼用的查询:catalog 里有没有这个 alias;返回 workflow
 // id(撞名禁用/不存在给空串)。第 5 批把这里换成 autocomplete 同源。

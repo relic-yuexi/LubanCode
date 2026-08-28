@@ -380,6 +380,13 @@ result:
         const std::string out = lubancode::app::RunWorkflowById(ctx, "echo-flow", "", executors);
         CHECK(out.find("invalid_inputs") != std::string::npos);
     }
+    SUBCASE("取消令牌从终端入口传进 workflow runtime") {
+        std::atomic<bool> cancel{true};
+        const std::string out =
+            lubancode::app::RunWorkflowById(ctx, "echo-flow", "量子纠错", executors, &cancel);
+        CHECK(out.find("cancelled") != std::string::npos);
+        CHECK(out.find("用户取消") != std::string::npos);
+    }
     SUBCASE("找不到 workflow") {
         const std::string out = lubancode::app::RunWorkflowById(ctx, "nope", "", executors);
         CHECK(out.find("找不到") != std::string::npos);
