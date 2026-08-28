@@ -146,6 +146,49 @@ bool StringListField(const YAML::Node& map, const char* key, const std::string& 
     return ok;
 }
 
+// 取整数字段(契约 4.8 的 runtime 预算键):十进制整数标量、落在
+// [min_value, max_value] 才收。负号开头、非十进制、越界都报 error 指到
+// 行列;int 字段递 int 上限、size_t 字段递 size_t 上限,绝不截断装小。
+// 省了不算错(into 保持 nullopt = 继承)。
+constexpr long long kIntFieldMax = 2147483647;                    // int 字段上限(runtime_profile 的 int 键)
+constexpr long long kSizeFieldMax = 1099511627776LL;              // size_t 字段上限(1 TiB 级,写超这数必是笔误)
+bool IntField(const YAML::Node& map, const char* key, const std::string& prefix, long long min_value,
+              long long max_value, std::optional<unsigned long long>& into,
+              std::vector<AgentDefinitionIssue>& issues) {
+    into.reset();  // 省了/出错都先清干净:into 复用时绝不带上一键的旧值
+    const YAML::Node node = map[key];
+    if (!node || node.IsNull()) {
+        return true;  // 省了,不算错
+    }
+    bool ok = false;
+    unsigned long long value = 0;
+    if (node.IsScalar()) {
+        const std::string text = node.Scalar();
+        const std::size_t first = text.find_first_not_of(" \t");
+        if (!text.empty() && first != std::string::npos && text[first] != '-') {
+            try {
+                value = std::stoull(text.substr(first));
+                ok = true;
+            } catch (...) {
+            }
+        }
+    }
+    const YAML::Mark mark = node.Mark();
+    if (!ok || static_cast<long long>(value) < min_value) {
+        issues.push_back(AgentDefinitionIssue{
+            prefix + key, "必须是整数(且不小于 " + std::to_string(min_value) + ")", mark.line + 1,
+            mark.column + 1, false});
+        return false;
+    }
+    if (static_cast<long long>(value) > max_value) {
+        issues.push_back(AgentDefinitionIssue{
+            prefix + key, "整数超上限 " + std::to_string(max_value), mark.line + 1, mark.column + 1, false});
+        return false;
+    }
+    into = value;
+    return true;
+}
+
 }  // namespace
 
 std::string AgentDefinitionIssue::Format(const std::string& file_label) const {
@@ -346,31 +389,41 @@ AgentDefinitionParseResult ParseAgentDefinitionYaml(const std::string& yaml_text
                     has_error;
     }
 
-    // ---- runtime(字段名与 AgentRuntimeProfile 对齐,见头文件对齐账) ----
+    // ---- runtime(字段名与 AgentRuntimeProfile 一字不差,契约 4.8;见头文件
+    //      对齐账)----
     if (const YAML::Node runtime = MapField(root, "runtime", issues, &has_error); runtime) {
-        has_error = !CheckUnknownFields(runtime, "runtime.", {"max_steps_per_turn", "execution_mode", "isolation"},
+        has_error = !CheckUnknownFields(runtime, "runtime.",
+                                        {"max_output_tokens", "max_steps_per_turn", "max_context_chars",
+                                         "context_window_tokens", "length_continuations", "execution_mode",
+                                         "isolation"},
                                         issues) ||
                     has_error;
-        const YAML::Node steps = runtime["max_steps_per_turn"];
-        if (steps && !steps.IsNull()) {
-            int value = 0;
-            bool steps_ok = false;
-            if (steps.IsScalar()) {
-                try {
-                    value = std::stoi(steps.Scalar());
-                    steps_ok = value >= 0;
-                } catch (...) {
-                }
-            }
-            if (!steps_ok) {
-                const YAML::Mark mark = steps.Mark();
-                issues.push_back(AgentDefinitionIssue{"runtime.max_steps_per_turn",
-                                                      "必须是不小于 0 的整数(0 = 不限步)", mark.line + 1,
-                                                      mark.column + 1, false});
-                has_error = true;
-            } else {
-                def.max_steps_per_turn = value;
-            }
+        // 五个预算键:类型/下界/上界各异,共用 IntField;省了 = 继承(nullopt)。
+        std::optional<unsigned long long> value;
+        if (!IntField(runtime, "max_output_tokens", "runtime.", 1, kIntFieldMax, value, issues)) {
+            has_error = true;
+        } else if (value.has_value()) {
+            def.max_output_tokens = static_cast<int>(*value);
+        }
+        if (!IntField(runtime, "max_steps_per_turn", "runtime.", 0, kIntFieldMax, value, issues)) {
+            has_error = true;
+        } else if (value.has_value()) {
+            def.max_steps_per_turn = static_cast<int>(*value);
+        }
+        if (!IntField(runtime, "max_context_chars", "runtime.", 1, kSizeFieldMax, value, issues)) {
+            has_error = true;
+        } else if (value.has_value()) {
+            def.max_context_chars = static_cast<std::size_t>(*value);
+        }
+        if (!IntField(runtime, "context_window_tokens", "runtime.", 0, kSizeFieldMax, value, issues)) {
+            has_error = true;
+        } else if (value.has_value()) {
+            def.context_window_tokens = static_cast<std::size_t>(*value);
+        }
+        if (!IntField(runtime, "length_continuations", "runtime.", 0, kIntFieldMax, value, issues)) {
+            has_error = true;
+        } else if (value.has_value()) {
+            def.length_continuations = static_cast<int>(*value);
         }
         if (!EnumField(runtime, "execution_mode", "runtime.", {"auto", "foreground", "background"},
                        def.execution_mode, issues)) {

@@ -269,4 +269,10 @@ struct SlashCommandInfo {
 };
 const std::vector<SlashCommandInfo>& AllSlashCommands();
 
+// 把 AllSlashCommands 排成帮助清单(每命令一行:"  /名字<补白>一句话说明",
+// 名字列按最长命令名对齐)。顶层 --help 的斜杠命令节与交互内 /help 的正文
+// 都打这份(P3-2:三份名单——--help、/help、Tab 补全——同出 AllSlashCommands,
+// 不许各列各的);行列格式在这收口一份,两边不再手抄。
+std::vector<std::string> FormatSlashCommandListLines();
+
 }  // namespace lubancode::cli

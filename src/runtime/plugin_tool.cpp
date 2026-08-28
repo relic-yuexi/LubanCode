@@ -4,10 +4,12 @@
 #include <algorithm>
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <expected>
 #include <fstream>
 #include <iterator>
+#include <optional>
 #include <set>
 #include <utility>
 #include <vector>
@@ -16,6 +18,7 @@
 #include "hooks/hash.hpp"
 #include "mcp/rich_result.hpp"          // kMaxImageBlockBytes/kMaxCallBinaryBytes/LandToolArtifact
 #include "platform/paths.hpp"
+#include "platform/process.hpp"  // RunProcessWithStdin(/plugin test 的自测进程)
 #include "platform/text_encoding.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/plugin_process.hpp"
@@ -526,6 +529,62 @@ PluginTrustActionResult UntrustProjectPluginById(const std::filesystem::path& pr
     result.lines.push_back("重启后不再挂载;插件文件未动,要再挂 /plugin trust " + plugin_id +
                            " 重批即可。disable 标记(如有)照旧不动。");
     return result;
+}
+
+// ---------------------------------------------------------------------------
+// /plugin test <id>(P3-1):自测入口的发现与执行。
+// ---------------------------------------------------------------------------
+
+// 自测脚本的同位约定名,按此次序找第一个命中的(scaffold 出 test_runner.py,
+// Node 插件按同一形状出 test_runner.js;.mjs/.cjs 顺带认,免得 ESM 插件
+// 非得改名)。名字是纯 ASCII,path 直接按窄串拼。
+constexpr const char* kSelfTestScriptNames[] = {"test_runner.py", "test_runner.js", "test_runner.mjs",
+                                                "test_runner.cjs"};
+
+std::optional<PluginSelfTestPlan> ResolvePluginSelfTest(const PluginManifest& manifest) {
+    // 自测约定只在 process 插件(Lua/native 无此说);解析器收进来的 manifest
+    // 至少带一枚 argv[0](解释器)。
+    if (manifest.kind != RuntimeKind::Process || manifest.argv.empty()) {
+        return std::nullopt;
+    }
+    for (const char* name : kSelfTestScriptNames) {
+        std::error_code ec;
+        const std::filesystem::path candidate = manifest.plugin_dir / name;
+        if (!std::filesystem::is_regular_file(candidate, ec)) {
+            continue;
+        }
+        PluginSelfTestPlan plan;
+        plan.script = candidate;
+        plan.argv.push_back(manifest.argv[0]);
+        plan.argv.push_back(platform::PathToUtf8(candidate));
+        plan.timeout_ms = manifest.timeout_ms;
+        return plan;
+    }
+    return std::nullopt;
+}
+
+PluginSelfTestReport RunPluginSelfTest(const PluginSelfTestPlan& plan, int default_timeout_ms) {
+    PluginSelfTestReport report;
+    report.argv = plan.argv;
+    const int timeout_ms = plan.timeout_ms > 0 ? plan.timeout_ms : default_timeout_ms;
+    const auto started = std::chrono::steady_clock::now();
+    // 空 stdin = 立刻关写端:测试脚本本就不该等宿主喂请求帧。stdout/stderr
+    // 分开捕获(诊断行多半在 stderr,unittest 的成绩单在 stdout,混作一锅
+    // 就分不清"测试输出"与"日志")。cwd 不设:自测脚本按 __file__ 解析路径
+    // (scaffold/示例都这个规矩),从哪个 cwd 跑都行。
+    const platform::ProcessResult result =
+        platform::RunProcessWithStdin(plan.argv, std::string(), timeout_ms);
+    report.elapsed_ms =
+        std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started)
+            .count();
+    report.spawn_failed = result.spawn_failed;
+    report.spawn_error = result.spawn_error;
+    report.timed_out = result.timed_out;
+    report.output_truncated = result.output_truncated;
+    report.exit_code = result.exit_code;
+    report.stdout_text = result.stdout_bytes;
+    report.stderr_text = result.stderr_bytes;
+    return report;
 }
 
 }  // namespace lubancode::runtime

@@ -55,7 +55,8 @@ bool SameFilesystemPath(const std::filesystem::path& left, const std::filesystem
 void PrintPluginsCommand(const std::vector<PluginMountInfo>& mounted, const std::vector<std::string>& warnings);
 
 // /plugin 子命令(plugins 单第 8 步):inspect <id> / doctor <id> /
-// test <id> <tool> <json> / reload <id> / enable|disable <id> /
+// test <id>(P3-1:真跑 manifest 声明的 test_runner 自测,交 exit code、
+// 耗时与 stdout/stderr 摘要;未声明的明说)/ reload <id> / enable|disable <id> /
 // trust|untrust <id>(项目插件信任流)。args 是命令词后面的整段。manifests
 // 给 process 插件的清单;mounted 给 native/Lua 的挂载账。
 // reload/enable/disable 的运行时换装(v1)以"提示重启"为口径:Lua/process

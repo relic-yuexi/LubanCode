@@ -2,9 +2,19 @@
 // 的 Agent YAML 的解析结果。只装数据,不装配——合并父上下文、模型、工具、
 // 权限产出 AgentProfile 是阶段 3 的 AgentProfileResolver 的事,这里碰都不碰。
 //
-// 字段名与现有代码的对齐(阶段 0 契约):
+// 字段名与现有代码的对齐(阶段 0 契约;契约 docs/reference/agents.md §4.8
+// 定的是 AgentRuntimeProfile 全套,runtime 五个预算字段与
+// src/agent/runtime_profile.hpp 一字不差):
+//   - runtime.max_output_tokens <-> AgentRuntimeProfile.max_output_tokens
+//     (正整数;空 = 走三级解析:config > provider > 模型目录)。
 //   - runtime.max_steps_per_turn <-> AgentRuntimeProfile.max_steps_per_turn
 //     (src/agent/runtime_profile.hpp,同名同义:一个 turn 内的步数上限)。
+//   - runtime.max_context_chars <-> AgentRuntimeProfile.max_context_chars
+//     (正整数;空 = 继承,默认 600000)。
+//   - runtime.context_window_tokens <-> AgentRuntimeProfile.context_window_tokens
+//     (非负整数;0 = 未知,不做 mid-turn 评估)。
+//   - runtime.length_continuations <-> AgentRuntimeProfile.length_continuations
+//     (非负整数;0 = 不续跑,默认 1)。
 //   - runtime.execution_mode <-> agent 工具的 execution_mode 三态
 //     (auto/foreground/background,src/tools/agent_tool.cpp),不再用 bool。
 //   - runtime.isolation <-> agent 工具的 isolation(worktree 隔离)。
@@ -16,9 +26,6 @@
 //     继承开关(inherit/omit)。
 //   - prompt.soul <-> AgentProfile.soul 的启停(inherit/off;首版不许在
 //     Agent 文件里另塞 Soul 正文)。
-//   AgentRuntimeProfile 其余预算字段(max_output_tokens/max_context_chars/
-//   context_window_tokens/length_continuations)首版 YAML 不收——子代理定义
-//   只该在父档案上收窄,不该自开预算口子;要收时另加 schema 测试。
 //
 // 解析走 yaml-cpp 严格模式(单子 4.2):未知字段、类型错、缺必填、认不得的
 // 枚举值一律报错,错误指到字段与行列;绝不像旧 Workflow parser 那样静默跳过。
@@ -80,10 +87,14 @@ struct AgentDefinition {
     AgentToolRules tools;
     std::vector<std::string> mcp_servers;     // 只引用已配置、已信任的服务名,不内联启动配置
     std::vector<std::string> requires_tools;  // requires.tools,启动前检查,缺项报错不放宽
-    // ---- runtime:复用 AgentRuntimeProfile 概念(见文件头对齐账) ----
-    std::optional<int> max_steps_per_turn;  // 空 = 继承父 Agent(AgentRuntimeProfile 同名字段)
-    std::string execution_mode;             // auto/foreground/background;空 = auto
-    std::string isolation;                  // none/worktree;空 = none
+    // ---- runtime:复用 AgentRuntimeProfile 概念(见文件头对齐账,契约 4.8) ----
+    std::optional<int> max_output_tokens;      // 正整数;空 = 三级解析(config > provider > 目录)
+    std::optional<int> max_steps_per_turn;     // 非负整数;空 = 继承父 Agent(0 = 不限步)
+    std::optional<std::size_t> max_context_chars;      // 正整数;空 = 继承(默认 600000)
+    std::optional<std::size_t> context_window_tokens;  // 非负整数;空 = 继承(0 = 未知)
+    std::optional<int> length_continuations;   // 非负整数;空 = 继承(默认 1,0 = 不续)
+    std::string execution_mode;                // auto/foreground/background;空 = auto
+    std::string isolation;                     // none/worktree;空 = none
     // ---- permissions:只能比父 Agent 更窄 ----
     std::string permissions_mode;           // inherit/confirm/auto/yolo;空 = inherit
 };

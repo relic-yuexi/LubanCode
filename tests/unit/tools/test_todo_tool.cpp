@@ -9,6 +9,7 @@
 #include "tools/todo_tool.hpp"
 
 using lubancode::tools::ParseTodoStatus;
+using lubancode::tools::BuildUnclosedTodoReminder;
 using lubancode::tools::TodoItem;
 using lubancode::tools::TodoListState;
 using lubancode::tools::TodoStatus;
@@ -196,4 +197,49 @@ TEST_CASE("todo_write: name/needs_confirm/schema 基本约定") {
     const nlohmann::json schema = tool.input_schema();
     CHECK(schema["type"] == "object");
     CHECK(schema["properties"].contains("items"));
+}
+
+// ---------------------------------------------------------------------------
+// 回合收口的未闭合提醒(P3-4):纯函数直测,注入通道在 turn_runner。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("BuildUnclosedTodoReminder: 没有 in_progress 项不打扰") {
+    TodoListState state;
+    state.items = {
+        {"一", TodoStatus::Completed},
+        {"二", TodoStatus::Pending},
+    };
+    CHECK_FALSE(BuildUnclosedTodoReminder(state).has_value());
+
+    state.items.clear();
+    CHECK_FALSE(BuildUnclosedTodoReminder(state).has_value());
+}
+
+TEST_CASE("BuildUnclosedTodoReminder: 有 in_progress 项时逐条点名,带收账指引") {
+    TodoListState state;
+    state.items = {
+        {"查日志", TodoStatus::Completed},
+        {"修解析器", TodoStatus::InProgress},
+        {"补单测", TodoStatus::InProgress},
+        {"写文档", TodoStatus::Pending},
+    };
+    const auto reminder = BuildUnclosedTodoReminder(state);
+    REQUIRE(reminder.has_value());
+    CHECK(reminder->find("修解析器") != std::string::npos);
+    CHECK(reminder->find("补单测") != std::string::npos);
+    CHECK(reminder->find("查日志") == std::string::npos);  // completed 不点名
+    CHECK(reminder->find("写文档") == std::string::npos);  // pending 不是"挂着"的
+    CHECK(reminder->find("in_progress") != std::string::npos);
+    CHECK(reminder->find("todo_write") != std::string::npos);  // 指路收账动作
+    CHECK(reminder->find("非用户输入") != std::string::npos);  // 来历标明
+}
+
+TEST_CASE("BuildUnclosedTodoReminder: 空内容的 in_progress 项也不溜号") {
+    TodoListState state;
+    state.items = {
+        {"", TodoStatus::InProgress},
+    };
+    const auto reminder = BuildUnclosedTodoReminder(state);
+    REQUIRE(reminder.has_value());
+    CHECK(reminder->find("(空条目)") != std::string::npos);
 }

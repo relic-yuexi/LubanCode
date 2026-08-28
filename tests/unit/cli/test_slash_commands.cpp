@@ -2,6 +2,9 @@
 
 #include <doctest/doctest.h>
 
+#include <vector>
+
+#include "cli/console_input.hpp"
 #include "cli/slash_commands.hpp"
 
 using namespace lubancode;
@@ -536,6 +539,72 @@ TEST_CASE("ParseProviderCommand: Invalid 时 bad_word 带着第一词原始拼�
     CHECK(cli::ParseProviderCommand("Swtich").bad_word == "Swtich");        // 保留大小写
     CHECK(cli::ParseProviderCommand("refresh now").bad_word == "refresh");  // 错参也算
     CHECK(cli::ParseProviderCommand("switch glm").bad_word == "switch");    // 合法路径也带着,不用而已
+}
+
+// ---------------------------------------------------------------------------
+// 三份名单对账(P3-2):--help 与 /help 打 cli::FormatSlashCommandListLines()
+// 生成的行,Tab 补全打 BuildSlashCompletionCandidates() 的候选,两者都出
+// AllSlashCommands()——命令增减只动一处,名单不许再各列各的。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("FormatSlashCommandListLines: 每行一个 / 命令,名字与 AllSlashCommands 逐一对应") {
+    const auto lines = cli::FormatSlashCommandListLines();
+    const auto& commands = cli::AllSlashCommands();
+    REQUIRE(lines.size() == commands.size());
+    for (std::size_t i = 0; i < commands.size(); ++i) {
+        // 行形:"  /名字<补白>说明"——名字后面至少两个空格,说明非空。
+        CHECK_MESSAGE(lines[i].rfind("  " + commands[i].name, 0) == 0, commands[i].name);
+        const std::size_t after_name = lines[i].find(commands[i].name) + commands[i].name.size();
+        CHECK_MESSAGE(lines[i].compare(after_name, 2, "  ") == 0, commands[i].name);
+        CHECK_MESSAGE(lines[i].size() > after_name + 2, commands[i].name);  // 有说明文字
+    }
+}
+
+TEST_CASE("三份名单一致:帮助行、AllSlashCommands、Tab 补全候选同名同序") {
+    const auto lines = cli::FormatSlashCommandListLines();
+    std::vector<std::string> from_help;
+    from_help.reserve(lines.size());
+    for (const std::string& line : lines) {
+        const std::size_t start = 2;  // 两格缩进
+        const std::size_t end = line.find(' ', start);
+        REQUIRE(end != std::string::npos);
+        from_help.push_back(line.substr(start, end - start));
+    }
+
+    std::vector<std::string> from_table;
+    for (const auto& command : cli::AllSlashCommands()) {
+        from_table.push_back(command.name);
+    }
+
+    // 补全候选:AllSlashCommands 的名字打头;AdditionalSlashCandidatesSlot
+    // 缺省为空(别处若注册过动态候选,只核对前 from_table.size() 个)。
+    const auto candidates = cli::BuildSlashCompletionCandidates();
+    std::vector<std::string> from_completion;
+    from_completion.reserve(candidates.size());
+    for (const auto& candidate : candidates) {
+        from_completion.push_back(candidate.name);
+    }
+
+    REQUIRE(from_help.size() == from_table.size());
+    for (std::size_t i = 0; i < from_table.size(); ++i) {
+        CHECK_MESSAGE(from_help[i] == from_table[i], from_table[i]);
+    }
+    REQUIRE(from_completion.size() >= from_table.size());
+    for (std::size_t i = 0; i < from_table.size(); ++i) {
+        CHECK_MESSAGE(from_completion[i] == from_table[i], from_table[i]);
+    }
+
+    // P3-2 的原始病灶:顶层 --help 手抄清单漏了 /plan /agents /agent。同源
+    // 之后这三枚必须在帮助行里出现——漏一枚,这里红。
+    bool has_plan = false, has_agents = false, has_agent = false;
+    for (const std::string& name : from_help) {
+        has_plan = has_plan || name == "/plan";
+        has_agents = has_agents || name == "/agents";
+        has_agent = has_agent || name == "/agent";
+    }
+    CHECK(has_plan);
+    CHECK(has_agents);
+    CHECK(has_agent);
 }
 
 TEST_CASE("ParseSlashCommand: /doctor 与子命令参数") {

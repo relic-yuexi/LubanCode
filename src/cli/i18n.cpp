@@ -69,49 +69,11 @@ const Entry kZhCN[] = {
      "                                 注入在系统提示最后;留空 = 无效果\n"
      "  ~/.lubancode/souls/*.md        备选魂(自带 wenyan.md 文言示例),交互模式 /soul 名字 切换\n"},
     {"help.slash",
-     "交互模式里,输入以 / 开头的一行走命令,不发给模型:\n"
-     "  /help           列出所有命令\n"
-     "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
-     "  /model 名字     直接切到指定模型名,不用拉列表\n"
-     "  /model roles    查看 normal/cheap/lao 三档任务路由与配置来源\n"
-     "  /provider       列已配服务端;/provider add|switch|edit|remove|set|refresh 管多端模型(refresh 刷厂家目录)\n"
-     "  /config         打印当前生效配置(复用 --config 的逻辑),外加本会话实际在用的 model\n"
-     "  /update         检查 GitHub 最新 Release；升级安装时一并同步官方技能\n"
-     "  /init           在项目根生成 AGENTS.md,并让主代理、子代理立即采用\n"
-     "  /language       列可选界面语言并切换(内置 zh-CN/en,languages/*.json 可扩展)\n"
-     "  /worktree       新建/列出/退出隔离工作树;/worktree new [名字] | list | exit keep|remove\n"
-     "  /clear          清空对话历史\n"
-     "  /context        看当前上下文占用分析(系统提示/工具定义/对话历史分类明细 + 条形图)\n"
-     "  /context 512k   临时改窗口大小(256k/512k/1m/裸数字都认),只本会话生效\n"
-     "  /compact [重点说明]  手动触发一次历史压缩,可选指定这次额外保留什么\n"
-     "  /think          看当前推理强度(/effort 同义);不填是正式状态,请求里字段缺席\n"
-     "  /think 档位     切推理强度;档位列模型目录/provider 声明,没声明就明说未经能力验证\n"
-     "                  (anthropic 映射 none/low/medium/high/xhigh/max,responses 原样递)\n"
-     "  /skills         列出扫描到的技能(官方 + 主目录级 + 项目级)\n"
-     "  /skill          管技能;裸敲看安装网址、本地目录、更新与删除示例\n"
-     "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
-     "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
-     "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
-     "  /plugins        列出插件三路(native/Lua/process)的状态与加载警告\n"
-     "  /plugin         管单枚插件:inspect 看详情 / doctor 查环境 / test 试跑\n"
-     "                  (v1 以重启为 reload/enable/disable 的口径)\n"
-     "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(工具总数超过配置文件\n"
-     "                  tool_search_threshold(默认 20,0=永不延迟)时,MCP/插件等外挂工具\n"
-     "                  延迟挂载,模型用 tool_search 检索后方可调用)\n"
-     "  /memory         管项目记忆开关、召回、后台写入、列表、遗忘与索引重建\n"
-     "  /sessions       列本目录最近 20 场会话存档(时间倒序编号);/sessions all 列全部目录\n"
-     "  /resume         上下选择本目录会话并恢复历史;也可跟编号或 id\n"
-     "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
-     "  /title [标题]   看/设本场会话标题,/sessions 列表和 /export 大标题都用它\n"
-     "  /soul           看当前魂;/soul 内容 写进 SOUL.md 并即时生效,/soul clear 清空还原默认\n"
-     "                  /soul 名字 仍可切换已有备选魂,/soul off 关,/soul default 回 SOUL.md\n"
-     "  /prompt         看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md\n"
-     "  /background     列后台命令任务清单(编号/状态/PID/命令/日志);/bg 同义\n"
-     "  /record         录一遍生成技能;/record start 名字 开录,stop 出草稿,裸敲看全部子命令\n"
-     "  /peers          列同机可见的其它 Lubancode 会话(名字/状态/目录);方向键选,Enter 看详情\n"
-     "  /send           /send <名字或短id> <话>:给另一场会话递一张纯文本字条\n"
-     "  /peerperm       /peerperm auto|accept|hold|refuse:设跨会话来信的收件档\n"
-     "  /image 路径     附本地图片(也可在消息里写 @路径；支持 png/jpg/jpeg/gif/webp，每张不超过 5MB)\n"
+     // 命令清单不进表(P3-2):紧跟本引子之后由 cli::FormatSlashCommandListLines()
+     // 现排——与 /help、Tab 补全同一份 AllSlashCommands,三份名单不再各列各的。
+     "交互模式里,输入以 / 开头的一行走命令,不发给模型:\n"},
+    {"help.keys",
+     "输入与按键:\n"
      "  Shift+Enter     输入框里插一个换行,写多行消息(Alt+Enter 同义;注意 Windows Terminal\n"
      "                  默认把 Alt+Enter 绑成全屏切换、会吞掉这个键,用 Shift+Enter 最稳);\n"
      "                  Enter 把整段(多行拼换行)一次发出,空白内容按 Enter 原地不动\n"
@@ -177,44 +139,10 @@ const Entry kZhCN[] = {
 
     // ---- /help(交互内帮助) ----
     {"slash_help.body",
-     "可用命令:\n"
-     "  /help           列出所有命令\n"
-     "  /model          拉取模型列表,编号选择切换(默认第一个)\n"
-     "  /model 名字     直接切到指定模型名,不用拉列表\n"
-     "  /model roles    查看 normal/cheap/lao 三档任务路由与配置来源\n"
-     "  /provider       列已配服务端;/provider add|switch|edit|remove|set|refresh 管多端模型(refresh 刷厂家目录)\n"
-     "  /config         打印当前生效配置(api_key 打码),外加本会话实际在用的 model\n"
-     "  /update         检查 GitHub 最新 Release；升级安装时一并同步官方技能\n"
-     "  /init           在项目根生成 AGENTS.md,并让本会话立即采用\n"
-     "  /language       列可选界面语言并切换;/language 语言码 直接切(会话级,可写回配置)\n"
-     "  /worktree       新建/列出/退出隔离工作树;/worktree new [名字] | list | exit keep|remove\n"
-     "  /clear          清空对话历史\n"
-     "  /context        看当前上下文占用;/context 256k|512k|1m 临时改窗口大小\n"
-     "  /compact        手动压缩历史;/compact 重点说明 可指定这次额外保留什么\n"
-     "  /think          看当前推理强度;/think 档位 切档位(声明未知的档会如实标注,/effort 同义)\n"
-     "  /skills         列出扫描到的技能(官方 + 主目录级 + 项目级)\n"
-     "  /skill          管技能;裸敲看安装网址、本地目录、更新与删除示例\n"
-     "  /mcp            列出挂载的 MCP 服务器状态和工具清单\n"
-     "  /lsp            列出各语言 LSP 服务器状态(未启动/运行中/已闲置关停)\n"
-     "  /todos          查看当前待办清单(todo_write 工具维护的那份)\n"
-     "  /plugins        list plugins of all three runtimes (native/Lua/process) with load warnings\n"
-     "  /hooks          hooks 台账:来源/命令/信任/禁用/最近结果;trust|untrust|disable|enable <#id>、runs [N]\n"
-     "  /tools          列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)\n"
-     "  /memory         管项目记忆;/memory on|off|use|learn|list|remember|forget|rebuild\n"
-     "  /sessions       列本目录最近 20 场会话存档(时间倒序编号);/sessions all 列全部目录\n"
-     "  /resume         上下选择本目录会话并恢复历史;也可跟编号或 id,后续消息写回原文件\n"
-     "  /export [路径]  当前会话导出 Markdown(默认 sessions/<id>.md;全量流水,压缩点带标注)\n"
-     "  /title [标题]   看/设本场会话标题,/sessions 列表和 /export 大标题都用它\n"
-     "  /soul           看当前魂;/soul 内容 写进 SOUL.md 并即时生效,/soul clear 清空还原默认\n"
-     "                  /soul 名字 仍可切换已有备选魂,/soul off 关,/soul default 回 SOUL.md\n"
-     "  /prompt         看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md\n"
-     "  /background     列后台命令任务清单(编号/状态/PID/命令/日志);/bg 同义\n"
-     "  /record         录一遍生成技能;/record start 名字 开录,stop 出草稿,裸敲看全部子命令\n"
-     "  /peers          列同机可见的其它 Lubancode 会话(名字/状态/目录);方向键选,Enter 看详情\n"
-     "  /send           /send <名字或短id> <话>:给另一场会话递一张纯文本字条\n"
-     "  /peerperm       /peerperm auto|accept|hold|refuse:设跨会话来信的收件档\n"
-     "  /image 路径     附本地图片(也可在消息里写 @路径；支持 png/jpg/jpeg/gif/webp，每张不超过 5MB)\n"
-     "  /exit           退出(裸词 exit/quit 也认)\n"
+     // 命令清单不进表(P3-2):本行之后由 cli::FormatSlashCommandListLines()
+     // 现排,与 --help、Tab 补全同一份 AllSlashCommands。
+     "可用命令:\n"},
+    {"slash_help.keys",
      "多行输入:Shift+Enter 插换行(Alt+Enter 同义,但 Windows Terminal 默认把它绑成全屏\n"
      "切换、会吞掉,推荐 Shift+Enter);Enter 发送整段;多行时首行的 / 是正文,不当命令。\n"
      "排队消息:流式期间打字回车不另开一轮,排进输入框上方的待发队列,当前工具收尾后\n"
@@ -1089,8 +1017,8 @@ const Entry kZhCN[] = {
 
     // ---- /plugin 子命令(plugins 单第 8 步) ----
     {"cmd.plugin.usage",
-     "用法: /plugin inspect <id> | doctor <id> | reload <id> | enable <id> | disable <id>。裸 /plugin <id> "
-     "视同 inspect。"},
+     "用法: /plugin inspect <id> | doctor <id> | test <id> | reload <id> | enable <id> | disable <id>。"
+     "裸 /plugin <id> 视同 inspect。"},
     {"cmd.plugin.not_found", "找不到插件 {0}(/plugins 看看挂载账)。"},
     {"cmd.plugin.inspect.header", "插件 {0} v{1}(runtime={2}, language={3})"},
     {"cmd.plugin.inspect.legacy_header", "插件 {0}(legacy {1} 插件,无 plugin.json,详情看文件本体):"},
@@ -1103,9 +1031,25 @@ const Entry kZhCN[] = {
     {"cmd.plugin.doctor.command_bad", "解释器起不来: {0}({1})——检查 command 或装好解释器。"},
     {"cmd.plugin.doctor.not_process", "这不是 process 插件,doctor 只查 process 的解释器环境。"},
     {"cmd.plugin.doctor.legacy_ok", "{0} 插件在挂载账上(内嵌运行时,无外部环境依赖)。"},
-    {"cmd.plugin.test.hint",
-     "test 与模型调用同一条链(schema 验参、确认、超时),命令层不开无防护捷径——直接让模型调这件工具,"
-     "或用插件自带的测试脚本(如 python test_runner.py)离线自测。"},
+    // ---- /plugin test(P3-1:真跑 manifest 声明的自测,回执带 exit code/耗时/摘要) ----
+    {"cmd.plugin.test.no_entry",
+     "该插件未声明自测入口:插件目录里没有 test_runner.py / test_runner.js(process 插件的自测约定,"
+     "scaffold 生成的脚手架自带一份)。想能 /plugin test,先在插件目录放一个 test_runner 脚本"
+     "(纯离线自测,不起宿主、不走插件协议)。"},
+    {"cmd.plugin.test.legacy_no_entry",
+     "legacy Lua/native 插件没有自测约定(v1 的 test_runner 约定只落在 process 插件);自测办法看插件"
+     "自己的说明。"},
+    {"cmd.plugin.test.header", "自测入口: {0}\n命令: {1}"},
+    {"cmd.plugin.test.ok", "自测通过(退出码 {0},耗时 {1}ms)。"},
+    {"cmd.plugin.test.failed",
+     "自测失败(退出码 {0},耗时 {1}ms)——断言没过、协议/依赖问题都在下面的输出里,分层看。"},
+    {"cmd.plugin.test.spawn_failed",
+     "自测进程起不来: {0}——runner 缺失、解释器不在或权限不足(/plugin doctor {1} 查解释器环境)。"},
+    {"cmd.plugin.test.timed_out",
+     "自测超时(>{0}ms)被掐断——测试整包比单次工具调用的墙钟还长就拆小,或在 manifest 调 timeout_ms。"},
+    {"cmd.plugin.test.truncated", "输出超过捕获上限被截断,进程树已被强制终止。"},
+    {"cmd.plugin.test.stdout", "stdout 摘要(末尾):"},
+    {"cmd.plugin.test.stderr", "stderr 摘要(末尾):"},
     {"cmd.plugin.reload.hint",
      "v1 的 reload 以重启为口径:改完插件重启 LubanCode 即生效。Lua/process 的会话内热重载是后续批次,"
      "不在这硬造半套。"},
@@ -1732,51 +1676,12 @@ const Entry kEn[] = {
      "  ~/.lubancode/souls/*.md        alternative souls (wenyan.md sample included); switch with\n"
      "                                 /soul <name> in interactive mode\n"},
     {"help.slash",
-     "In interactive mode, a line starting with / runs a command instead of being sent to the model:\n"
-     "  /help           list all commands\n"
-     "  /model          fetch the model list and switch by number (default: first)\n"
-     "  /model <name>   switch directly to a model name without fetching the list\n"
-     "  /model roles    show the normal/cheap/lao task routes and their config sources\n"
-     "  /provider       list configured providers; /provider add|switch|edit|remove|set|refresh manages endpoints (refresh updates the catalog)\n"
-     "  /config         print the effective configuration plus the model in use this session\n"
-     "  /update         check the latest GitHub Release; installs also sync official skills\n"
-     "  /init           create AGENTS.md at the project root and load it for main/sub-agents now\n"
-     "  /language       list available UI languages and switch (built-in zh-CN/en, extendable via\n"
-     "                  languages/*.json)\n"
-     "  /worktree       create, list, or leave isolated trees; /worktree new [name] | list | exit keep|remove\n"
-     "  /clear          clear the conversation history\n"
-     "  /context        show context usage breakdown (system prompt / tools / history + bars)\n"
-     "  /context 512k   temporarily change the window size (256k/512k/1m or a plain number)\n"
-     "  /compact [note] manually compact the history; the note tells what to keep extra\n"
-     "  /think          show the reasoning effort (/effort is an alias)\n"
-     "  /think <level>  set the reasoning effort; levels are provider-defined (anthropic maps\n"
-     "                  none/low/medium/high/xhigh/max; responses passes it through)\n"
-     "  /skills         list discovered skills (official + home-level + project-level)\n"
-     "  /skill          manage skills; run it bare for URL/local install, update, and remove examples\n"
-     "  /mcp            list mounted MCP servers and their tools\n"
-     "  /lsp            list LSP server status per language\n"
-     "  /todos          show the current todo list (maintained by the todo_write tool)\n"
-     "  /plugins        list mounted plugin tools (*.dll and *.lua under .lubancode/plugins)\n"
-     "  /tools          list tool states: core / loaded / deferred (tool_search deferral kicks in\n"
-     "                  when the tool count exceeds tool_search_threshold, default 20, 0 = never)\n"
-     "  /memory         manage project memory, retrieval, background writes, forgetting and rebuilds\n"
-     "  /sessions       list the 20 most recent session archives of this directory; /sessions all\n"
-     "                  lists every directory\n"
-     "  /resume         choose a local session with arrow keys and replay it; also accepts a number or id\n"
-     "  /export [path]  export the current session as Markdown (default sessions/<id>.md)\n"
-     "  /title [title]  show/set the session title, used by /sessions and /export\n"
-     "  /soul           show the current soul; /soul <text> writes SOUL.md and takes effect now;\n"
-     "                  /soul clear restores its default; an existing soul name still switches it\n"
-     "  /prompt         show the source and length of the current system prompt persona;\n"
-     "                  /prompt reset restores system_prompt.md\n"
-     "  /background     list background command tasks (id/status/PID/command/log); /bg is an alias\n"
-     "  /record         record a workflow into a skill; /record start <name> begins, stop drafts,\n"
-     "                  run it bare for all subcommands\n"
-     "  /peers          list other Lubancode sessions on this machine (name/status/cwd); arrow keys,\n"
-     "                  Enter for details\n"
-     "  /send           /send <name-or-id> <text>: pass a plain-text note to another session\n"
-     "  /peerperm       /peerperm auto|accept|hold|refuse: set how incoming peer messages are received\n"
-     "  /image <path>   attach a local image (or use @path in a message; png/jpg/jpeg/gif/webp, 5MB each)\n"
+     // Command list stays out of the table (P3-2): the lines after this intro are
+     // generated by cli::FormatSlashCommandListLines() from the same AllSlashCommands
+     // list that /help and Tab completion use.
+     "In interactive mode, a line starting with / runs a command instead of being sent to the model:\n"},
+    {"help.keys",
+     "Input and keys:\n"
      "  Shift+Enter     insert a newline in the input box (Alt+Enter works too, but Windows Terminal\n"
      "                  binds it to fullscreen by default; Shift+Enter is safest); Enter sends the\n"
      "                  whole message; Enter on blank input does nothing\n"
@@ -1847,45 +1752,10 @@ const Entry kEn[] = {
 
     // ---- /help (interactive) ----
     {"slash_help.body",
-     "Available commands:\n"
-     "  /help           list all commands\n"
-     "  /model          fetch the model list and switch by number (default: first)\n"
-     "  /model <name>   switch directly to a model name\n"
-     "  /model roles    show the normal/cheap/lao task routes and their config sources\n"
-     "  /provider       list configured providers; /provider add|switch|edit|remove|set|refresh manages endpoints (refresh updates the catalog)\n"
-     "  /config         print the effective configuration (api_key masked) plus the session model\n"
-     "  /update         check the latest GitHub Release; installs also sync official skills\n"
-     "  /init           create AGENTS.md at the project root and load it now\n"
-     "  /language       list available UI languages and switch; /language <code> switches directly\n"
-     "  /worktree       create, list, or leave isolated trees; /worktree new [name] | list | exit keep|remove\n"
-     "  /clear          clear the conversation history\n"
-     "  /context        show context usage; /context 256k|512k|1m changes the window for this session\n"
-     "  /compact        compact the history; /compact <note> tells what to keep extra\n"
-     "  /think          show reasoning effort; /think <level> sets it (provider-defined; /effort alias)\n"
-     "  /skills         list discovered skills (official + home-level + project-level)\n"
-     "  /skill          manage skills; run it bare for URL/local install, update, and remove examples\n"
-     "  /mcp            list mounted MCP servers and their tools\n"
-     "  /lsp            list LSP server status per language\n"
-     "  /todos          show the current todo list\n"
-     "  /plugins        list mounted plugin tools (DLL + lua) and load warnings\n"
-     "  /hooks          hooks ledger: source/command/trust/disabled/last result; trust|untrust|disable|enable <#id>, runs [N]\n"
-     "  /tools          list tool states: core / loaded / deferred (tool_search)\n"
-     "  /memory         manage project memory; /memory on|off|use|learn|list|remember|forget|rebuild\n"
-     "  /sessions       list the 20 most recent session archives here; /sessions all for every dir\n"
-     "  /resume         choose and replay a local session; also accepts a number or id; new messages append there\n"
-     "  /export [path]  export this session as Markdown (default sessions/<id>.md)\n"
-     "  /title [title]  show/set the session title, used by /sessions and /export\n"
-     "  /soul           show the current soul; /soul <text> writes SOUL.md and takes effect now;\n"
-     "                  /soul clear restores default; an existing soul name still switches it\n"
-     "  /prompt         show the persona source and length; /prompt reset restores system_prompt.md\n"
-     "  /background     list background command tasks (id/status/PID/command/log); /bg is an alias\n"
-     "  /record         record a workflow into a skill; /record start <name> begins, stop drafts,\n"
-     "                  run it bare for all subcommands\n"
-     "  /peers          list other Lubancode sessions on this machine (name/status/cwd); arrow keys,\n"
-     "                  Enter for details\n"
-     "  /send           /send <name-or-id> <text>: pass a plain-text note to another session\n"
-     "  /peerperm       /peerperm auto|accept|hold|refuse: set how incoming peer messages are received\n"
-     "  /exit           quit (bare exit/quit work too)\n"
+     // Command list stays out of the table (P3-2): the lines after this header are
+     // generated by cli::FormatSlashCommandListLines() from AllSlashCommands.
+     "Available commands:\n"},
+    {"slash_help.keys",
      "Multi-line input: Shift+Enter inserts a newline (Alt+Enter too, but Windows Terminal may\n"
      "swallow it; Shift+Enter is recommended); Enter sends the whole message; on multi-line input\n"
      "a leading / is treated as text, not a command.\n"
@@ -2111,6 +1981,7 @@ const Entry kEn[] = {
     {"keymap.fixed_suffix", " (fixed)"},
     {"keymap.unbound_suffix", " (unbound)"},
     {"slash.desc.keymap", "Show or rebind keys (/keymap set action chord; saved user-level)"},
+    {"slash.desc.doctor", "/doctor effort|cache: local-compat effort levels and prefix-cache diagnostics (probes send requests)"},
     {"slash.desc.workflow", "Reusable workflow graphs: list/show/graph/validate/run/resume/cancel"},
     {"slash.desc.goal", "Durable goal: objective/status/edit/pause/resume/clear (multi-turn until verifiable end)"},
     {"slash.desc.loop", "session-scoped recurring loop: /loop [interval] [prompt] creates, list/pause/resume/stop manage, run dispatches now"},

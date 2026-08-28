@@ -11,7 +11,8 @@
 
 namespace lubancode::app {
 
-class SlashDispatchContext;
+// 定义在 command_registry.hpp(struct;前置声明与定义统一,防 MSVC C4099)。
+struct SlashDispatchContext;
 
 enum class EvolveCommandAction {
     Invalid,

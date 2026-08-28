@@ -74,6 +74,72 @@ int TempDir::counter_ = 0;
 }  // namespace
 
 // ---------------------------------------------------------------------------
+// /plugin test 的自测入口发现(P3-1):纯函数,不起进程;真跑的回执在
+// integration/plugins/test_plugin_trust_ui.cpp 那册对命令层验。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ResolvePluginSelfTest: 插件目录里有 test_runner.py 就按 manifest 解释器组计划") {
+    TempDir dir;
+    std::ofstream(dir.path / "test_runner.py", std::ios::binary) << "# self test\n";
+    auto manifest = ParsePluginManifest(kGoodManifest, dir.path);
+    REQUIRE(manifest.has_value());
+    const auto plan = ResolvePluginSelfTest(*manifest);
+    REQUIRE(plan.has_value());
+    REQUIRE(plan->argv.size() == 2);
+    CHECK(plan->argv[0] == "python3");  // manifest.runtime.command 原样
+    CHECK(plan->argv[1].find("test_runner.py") != std::string::npos);
+    CHECK(plan->timeout_ms == 30000);   // manifest.timeout_ms 原样带出
+}
+
+TEST_CASE("ResolvePluginSelfTest: .py/.js/.mjs/.cjs 按序认,一个不落") {
+    TempDir dir;
+    auto manifest = ParsePluginManifest(kGoodManifest, dir.path);
+    REQUIRE(manifest.has_value());
+    // 都没有:nullopt。
+    CHECK_FALSE(ResolvePluginSelfTest(*manifest).has_value());
+    // 只有 .js:也认(Node 插件的形状)。
+    std::ofstream(dir.path / "test_runner.js", std::ios::binary) << "// t\n";
+    const auto js_plan = ResolvePluginSelfTest(*manifest);
+    REQUIRE(js_plan.has_value());
+    CHECK(js_plan->argv[1].find("test_runner.js") != std::string::npos);
+    // .py 与 .js 并存:py 在前(scaffold 的形状优先)。
+    std::ofstream(dir.path / "test_runner.py", std::ios::binary) << "# t\n";
+    const auto py_plan = ResolvePluginSelfTest(*manifest);
+    REQUIRE(py_plan.has_value());
+    CHECK(py_plan->argv[1].find("test_runner.py") != std::string::npos);
+    // .mjs 单独在(先删掉 .py/.js):也认。
+    std::error_code ec;
+    std::filesystem::remove(dir.path / "test_runner.py", ec);
+    std::filesystem::remove(dir.path / "test_runner.js", ec);
+    std::ofstream(dir.path / "test_runner.mjs", std::ios::binary) << "// t\n";
+    const auto mjs_plan = ResolvePluginSelfTest(*manifest);
+    REQUIRE(mjs_plan.has_value());
+    CHECK(mjs_plan->argv[1].find("test_runner.mjs") != std::string::npos);
+}
+
+TEST_CASE("ResolvePluginSelfTest: runner.py(不带 test_)不算自测入口") {
+    TempDir dir;
+    std::ofstream(dir.path / "runner.py", std::ios::binary) << "# tool runner\n";
+    auto manifest = ParsePluginManifest(kGoodManifest, dir.path);
+    REQUIRE(manifest.has_value());
+    CHECK_FALSE(ResolvePluginSelfTest(*manifest).has_value());
+}
+
+TEST_CASE("ResolvePluginSelfTest: embedded-lua 插件一律无自测入口") {
+    TempDir dir;
+    std::ofstream(dir.path / "test_runner.py", std::ios::binary) << "# t\n";
+    const std::string lua_manifest = R"json({
+  "manifest_version": 1, "id": "lua-probe", "version": "1.0.0",
+  "runtime": {"kind": "embedded-lua"},
+  "tools": [{"name": "echo", "description": "d", "input_schema": {"type": "object"}}]
+})json";
+    auto manifest = ParsePluginManifest(lua_manifest, dir.path);
+    REQUIRE(manifest.has_value());
+    CHECK(manifest->kind == RuntimeKind::EmbeddedLua);
+    CHECK_FALSE(ResolvePluginSelfTest(*manifest).has_value());
+}
+
+// ---------------------------------------------------------------------------
 // 标识符与工具名
 // ---------------------------------------------------------------------------
 
