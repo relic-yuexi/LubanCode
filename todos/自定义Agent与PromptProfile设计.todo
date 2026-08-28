@@ -438,10 +438,10 @@ Workflow 只负责调度。它把 `agent` 名交给同一 AgentProfileResolver�
 
 ### 阶段 0：契约先落纸
 
-- [ ] 写 `docs/agents.md`，收录术语、schema、覆盖顺序、安全边界。
-- [ ] 加一份完整 Agent YAML，一份最小 Agent YAML，一份故意出错的诊断样例。
-- [ ] 把本单中的字段名与现有 `AgentProfile`、`AgentRuntimeProfile` 对齐。
-- [ ] 定下 schema version 与兼容策略。
+- [x] 写 `docs/reference/agents.md`，收录术语、schema、覆盖顺序、安全边界。（todo 钦定顶层 `docs/agents.md`，因仓库法顶层只留 README.md，落 reference/。）
+- [x] 加一份完整 Agent YAML，一份最小 Agent YAML，一份故意出错的诊断样例。
+- [x] 把本单中的字段名与现有 `AgentProfile`、`AgentRuntimeProfile` 对齐。
+- [x] 定下 schema version 与兼容策略。
 
 验收：实现者、Reviewer 只看文档，能说清 Agent、Skill、Workflow、Plugin、MCP、Prompt Profile 各管什么。
 

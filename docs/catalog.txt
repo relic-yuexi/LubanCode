@@ -1,6 +1,5 @@
 # 官方文档。每行一页；路径从 docs/ 起算。
 DOC README.md
-DOC agents.md
 
 # 上手与排错
 DOC getting-started/troubleshooting.md
@@ -22,6 +21,7 @@ DOC features/workflows/designing-workflows.md
 
 # 参考手册
 DOC reference/README.md
+DOC reference/agents.md
 DOC reference/commands.md
 DOC reference/configuration.md
 DOC reference/feature-index.md

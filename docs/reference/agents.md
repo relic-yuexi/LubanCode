@@ -1,6 +1,6 @@
 # Agent 与 Prompt Profile 契约
 
-[文档首页](README.md) · [扩展指南](features/extensions/README.md) · [Workflow Schema](reference/workflow-schema.md) · [配置手册](reference/configuration.md)
+[文档首页](../README.md) · [功能目录](../features/README.md) · [扩展指南](../features/extensions/README.md) · [Workflow Schema](workflow-schema.md) · [配置手册](configuration.md)
 
 本页定两样东西的格式契约：Agent Definition（一份 YAML，写谁来做、带什么能力）
 与 Prompt Profile（一套稀疏覆盖，写系统提示词怎样拼）。
