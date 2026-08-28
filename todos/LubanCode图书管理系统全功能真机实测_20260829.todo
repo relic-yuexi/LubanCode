@@ -1,0 +1,466 @@
+# LubanCode 图书管理系统全功能真机实测
+
+- 状态：已实测，问题待修
+- 日期：2026-08-29
+- 最终版本：`0.26.80`，仓库 `7dbf5f9 chore(release): 发布 0.26.80`
+- 测试目录：`build/manual-e2e/library-system`
+- 模型：`ccmoon / responses / gpt-5.6-sol / effort high / 256k context`
+- 技术栈：Node.js 24、原生 `node:http`、原生 HTML/CSS/JavaScript、JSON 文件存储、`node:test`
+- 原则：真进程，真模型，真工具，真浏览器。没拿 mock 冒充产品能力。
+
+## 一、先说结果
+
+LubanCode 确实做出了一套能用的图书管理系统。
+
+系统可管图书、读者、借阅和归还。库存会扣减。重复借阅会拦住。还书后库存会补回。数据落进 JSON，重启后还在。
+
+最终应用测试：
+
+```text
+tests 14
+pass 14
+fail 0
+duration 294.978 ms
+```
+
+插件自测：
+
+```text
+tests 4
+pass 4
+fail 0
+```
+
+网页实测：
+
+- 桌面端 `1280x720`：布局无重叠，无横向溢出。
+- 手机端 `390x844`：导航可用，卡片不挤，读者表会藏起 Email 列。
+- 新增图书：成功。
+- 搜索与分类筛选：成功。
+- 新增读者：成功。
+- 借书：成功。
+- 同一读者重复借同一本书：页面报错，拦截成功。
+- 还书：成功。
+- 仪表盘：回到 4 本书、3 位读者、0 笔在借、0 笔逾期。
+- 浏览器控制台：无 error，无 warning。
+
+这回没发现图书网页本身的桌面或手机布局毛病。全页截图曾出现缩放、留白、重复拼接。查过 DOM 和普通视口截图，毛病出在测试宿主的 full-page 拼图，不在这套网页。那几张图不拿来充 LubanCode 缺陷。
+
+## 二、功能账
+
+| 功能 | 结论 | 真凭实据 |
+|---|---|---|
+| Plan | 部分可用 | 能出计划，能进审批；边界判断过严，见问题 5 |
+| TODO | 可用但会旧 | `todo_write(10)` 成功；做完后仍有旧状态，见问题 12 |
+| Skills | 可用 | 官方 Skill 与项目 `.agents/skills/library-domain/SKILL.md` 都能发现、加载 |
+| Plugins | 可用 | 未信任会拦；信任后重启挂载；模型真调了项目审计工具 |
+| Agents 目录 | 可用 | `/agents` 能列内置 Agent 和项目 `library-reviewer` |
+| Agent doctor | 可用 | Skill、工具白名单、权限边界都检查通过 |
+| Explore 子代理 | 可用 | 真开独立上下文，真读项目，真回报告 |
+| 自定义 Agent | 能启动，难交付 | Skill 预装和只读工具生效；2 分 30 秒仍没答完 |
+| Worktree 子代理 | 可用 | 真建分支和隔离工作树，主工作树未受污染 |
+| Worktree 命令 | 可用 | `/worktree list` 能看当前树、子代理树和锁定状态 |
+| Context 压缩 | 不可靠 | 压缩后反涨、连环压缩、旧版静默退出，见问题 1 |
+| 会话续接 | 能续，账很重 | `--continue` 能载入；历史重复，2.59 MB 会话很快又顶阈值 |
+| 终端界面 | 能操作，刷新很差 | 中文输入、粘贴、计划重绘会刷出海量 ANSI，见问题 6 |
+| Node 图书系统 | 可用 | 14/14；浏览器增删查借还主链跑通 |
+
+## 三、实测过程
+
+### 3.1 Plan
+
+进入 `/plan`，要求先读需求、列计划，不准改文件。
+
+约 245 秒才见首段正文。整份计划约 16,715 字节。随后弹出批准菜单，选择 Auto，流程能往下走。
+
+计划阶段能用 `read_file`、`search`。它会拦 `skill`、`agent`。这本是宿主守边界。可它连只读 Explore、只读 Skill 加载也一并拦了。`Get-ChildItem ... | Select-Object`、`git ls-tree -r --name-only HEAD` 也吃了闭门羹。
+
+### 3.2 Skills
+
+先载入官方 `lubancode-config`。随后由 LubanCode 写下项目 Skill：
+
+```text
+.agents/skills/library-domain/SKILL.md
+```
+
+重启后 `/skills` 列出 4 项：项目 `library-domain`、用户 `anysearch`、两项官方 Skill。显式加载 `library-domain` 成功。项目层、用户层、官方层都走到了。
+
+### 3.3 Explore 子代理
+
+前台派出 Explore，让它只读审查需求和目录。Dock 能显示进度，最终能回报告。
+
+它中途读了自己的 `.evidence/subagents/subagent-1.log`。这一口把调试记录又吞回上下文。最终日志 584,931 字节，耗时约 185.7 秒。
+
+### 3.4 Worktree 子代理
+
+派 general-purpose 子代理进隔离工作树，只写验收测试：
+
+```text
+.lubancode/worktrees/agent-0t2kk16bsq
+branch: worktree/agent-0t2kk16bsq
+lock: lubancode agent agent-0t2kk16bsq
+```
+
+它只写 `test/acceptance.test.js`，没有碰主工作树。语法检查通过。实现尚未落地时，测试因缺 `src/app.js` 失败，正合 TDD 预期。主 Agent 看过差异，只取了这一份测试。
+
+隔离是真的。只是代价也大：约 328 秒，Dock 记到约 133.6k tokens，日志 649,000 字节，而且没提交。
+
+### 3.5 Plugin
+
+LubanCode 写了项目插件：
+
+```text
+.lubancode/plugins/library-audit/plugin.json
+.lubancode/plugins/library-audit/runner.js
+.lubancode/plugins/library-audit/test_runner.js
+```
+
+初次启动，项目插件未经信任，LubanCode 打出指纹并跳过。执行：
+
+```text
+/plugin trust library-audit
+```
+
+界面列出版本、运行时、目录、工具数、文件数、完整 SHA-256 指纹。批准后提示重启。重启后挂载 1 个工具。
+
+`/plugin inspect` 与 `/plugin doctor` 都能看。模型随后先用 `tool_search` 找工具，再真调：
+
+```text
+plugin__library-audit__library_catalog_audit
+```
+
+审计读了 `data/library.json`，返回图书、读者、借阅、库存和告警统计。信任、挂载、发现、调用这条链走全了。
+
+### 3.6 自定义 Agent
+
+项目 Agent：
+
+```text
+.lubancode/agents/library-reviewer.yaml
+```
+
+`/agents` 能列出 3 项：Explore、general-purpose、library-reviewer。`/agent doctor library-reviewer` 全过：
+
+- 项目 YAML 能解析。
+- `library-domain` 能预装。
+- 只开放 `read_file`、`search`。
+- 不挂 MCP。
+- isolation 为 none。
+- 静态检查通过。
+
+真派出去后，Skill 确实载入，写工具也确实看不见。可小项目审查跑了 2 分 30 秒，34 次工具调用，82.1k tokens，还卡在“等首字节”。最后人工按 Esc，终端回 `[已打断]`。
+
+### 3.7 Context 压缩与续接
+
+首段长会话从 `0.26.76` 起跑。仓库在测试期间继续发布；续接阶段又跑过 `0.26.78`，Plugin 与自定义 Agent 收尾跑到 `0.26.79/0.26.80`。
+
+第一次自动压缩：
+
+```text
+pre  91,554
+post 95,642
+耗时约 4 分 22 秒
+```
+
+压完不瘦，反而长了。随后模型写下文件，进程却无报错说明，直接以 code 1 退出。
+
+用 `--continue` 续接，界面报：
+
+```text
+有效 35 条
+全量 46 条
+经 3 次压缩
+```
+
+`/context` 当时显示 history 189.1k、used 201.3k，刚续上便贴近阈值。
+
+下一次压缩有一次真瘦了：
+
+```text
+189.3k -> 4,686
+约 66 秒
+```
+
+后面又连着出事：
+
+```text
+66.5k -> 69.3k
+70.8k -> 73.7k
+```
+
+两次都反涨。每次刚恢复，马上又触发自动压缩。整轮跑到 9 分 47 秒，仍走不出去，只好按 Esc。
+
+打断后再看 `/context`，最新请求其实只有约 47k，占 18%；界面仍把最近一次压缩记作 `70.8k -> 73.7k，校验通过`。估算账与下一次真实请求对不上。
+
+## 四、问题单
+
+### P1-1 Context 压缩会反涨，并掉进连环压缩
+
+复现：
+
+1. 跑一个带 Plan、子代理、Worktree、建站、测试的长会话。
+2. 等上下文跨过自动压缩阈值。
+3. 压缩后继续做事，再逼近阈值。
+
+实测：
+
+- `91,554 -> 95,642`。
+- `66.5k -> 69.3k`。
+- `70.8k -> 73.7k`。
+- 恢复后立刻再压，主任务长时间不得前进。
+- 打断后最新请求只约 47k，和界面最近压缩账不合。
+
+应当：压缩结果须明显低于触发线。压完要留滞回区。一次压缩若反涨，不得立刻拿同一视图再压。
+
+验收：
+
+- 覆盖真实多轮、多工具、多子代理历史。
+- 断言 `post < pre`，并低于下一次触发线。
+- 同一 turn 不得无进展连压两次。
+- `/context` 的估算、真正发出的请求、session 账三者能对上。
+- 压缩失败时给清楚回执，允许降级，不许悄悄循环。
+
+证据：
+
+- `C:\Users\moontidef\.lubancode\sessions\20260829-004427-Plan-模式规划请求-请先完整读取.jsonl`
+- 文件大小：2,592,846 字节。
+
+### P1-2 `0.26.76` 首次自动压缩后，进程静默 code 1 退出
+
+复现：同 P1-1 的首轮长会话。等第一次自动压缩结束，让 Agent 继续写文件。
+
+实测：压缩耗时约 4 分 22 秒。终端没报根因。文件刚写下，进程便以 code 1 收场。
+
+应当：若能恢复，继续跑；若不能，明说哪一层坏了，保住 session 和可续接点。
+
+验收：
+
+- 自动压缩后的下一次模型请求、工具执行、session flush 都有回归测试。
+- 所有非零退出都写错误类别、错误文本、session 路径。
+- 用同一 session 续接时，不重复装入被替换的旧历史。
+
+### P1-3 全量测试受用户全局 Plugin 污染，`0.26.80` 为 213/214
+
+命令：
+
+```powershell
+ctest --test-dir build/release -C Release --output-on-failure -j 8
+```
+
+实测：
+
+```text
+99% tests passed, 1 tests failed out of 214
+FAILED: unit.runtime.tool_runtime
+```
+
+失败点：`tests/unit/runtime/test_tool_runtime.cpp:76-77`。
+
+测试以 `EmptyConfig()` 构造运行时，却仍从 `C:\Users\moontidef\.lubancode\plugins\gui-agent` 挂进 `gui-agent-example: 10 个工具`。工具数越过阈值，`main_deferral()` 与 `sub_deferral()` 变成 true。测试仍断言 false。
+
+应当：单元测试不读用户家目录，不吃全局 Plugin、Skill、信任账或配置。
+
+验收：
+
+- 给 Config/ToolRuntime 注入临时空根目录。
+- 在用户目录装 0、1、10 个 Plugin 时，这条单测结果不变。
+- 另开集成测试，专门验证全局 Plugin 会不会触发 tool deferral。
+
+### P2-1 自定义只读 Agent 小项目审查 2 分 30 秒仍交不出结果
+
+复现：用 `library-reviewer` 审查这套小型 Node 项目。只给 `read_file`、`search`，预装一个项目 Skill。
+
+实测：34 次工具调用，82.1k tokens，2 分 30 秒仍停在“等首字节”，人工打断后才退出。
+
+应当：审查完所需入口、领域层、存储层和测试便收口。到了工具步数、时间或 token 软线，应催它作答。
+
+验收：
+
+- runtime 的 `max_steps_per_turn` 真能压住循环。
+- Dock 同时显示已用步数、上限、累计 token、最后一次工具。
+- 到软线先发“请基于现有证据收尾”；到硬线返回部分结果与停止缘由。
+
+### P2-2 自定义 Agent 在 Dock 里错标成 `Explore #1`
+
+复现：派出 `agent_type=library-reviewer`。
+
+实测：右侧任务文字能隐约看见 `library-re...`，Dock 标题却写 `Explore #1`。
+
+应当：标题写 `library-reviewer #1`。Explore 只留给内置 Explore。
+
+验收：
+
+- 内置、自定义、Workflow 派出的 Agent 都按 resolved agent name 显示。
+- 截断只截任务摘要，不截 Agent 身份。
+- session 事件、Dock、日志中的 task id 和 Agent 名能一一对上。
+
+### P2-3 Plan 边界把只读能力也一刀拦掉
+
+复现：进 `/plan` 后加载只读 Skill，或派只读 Explore；再试 `git ls-tree -r --name-only HEAD`。
+
+实测：都被当成改状态操作拦住。PowerShell 的只读管道也难过白名单。
+
+应当：Plan 管“不能改”，不该管“不能读”。Skill 只往模型上下文装说明。Explore 若硬限制为只读，也应可用。
+
+验收：
+
+- Plan 下允许 Skill 加载。
+- Plan 下允许 `permissions=read_only` 的 Agent。
+- 给 Git、PowerShell、cmd 各补一组只读命令契约测试。
+- 真有副作用的命令仍拦，并把命中的规则打印出来。
+
+### P2-4 终端输入与 Plan 重绘刷出海量 ANSI，长中文像逐字慢放
+
+实测：
+
+- 输入长中文时，每个字都触发一轮终端帧。
+- bracketed paste 的 `ESC[200~...` 也逐字渲染。
+- Plan 两段采样分别约 166,197 字符/4,535 行、105,743 字符/3,285 行。
+- 只打一条 `/plugin ...`，也常要等数秒看光标和菜单归位。
+
+应当：一次粘贴收成一次编辑事务。无变化的行不重刷。模型流式输出与 composer 不互相抢屏。
+
+验收：
+
+- 1 万字中文粘贴，渲染帧数有上限。
+- 同尺寸终端下只输出脏行。
+- 自动化测试统计写入字节、帧数、光标最终位置。
+- Windows Terminal、ConPTY、重定向日志分别覆盖。
+
+### P2-5 子代理会读自己的调试日志，把观察记录再吞回上下文
+
+复现：把子代理日志放在项目可搜索目录 `.evidence/subagents`，派 Explore 扫项目。
+
+实测：Explore 读了 `subagent-1.log`。日志里又装着它自己的工具流和输出。最终文件 584,931 字节。
+
+应当：运行时证据目录默认排除，或给 session/subagent 日志打不可读边界。至少别让 Agent 无意间递归观察自己。
+
+验收：
+
+- 默认 search/read 过滤当前 task 的 debug log。
+- 用户显式点名时才准读，并先告知体积。
+- 加一条“日志含日志路径”的递归膨胀回归测试。
+
+### P2-6 子代理与脚手架任务缺少成本刹车
+
+实测：
+
+- Explore：约 185.7 秒，日志 584,931 字节。
+- Worktree general-purpose：约 328 秒，约 133.6k tokens，日志 649,000 字节。
+- 建一只小 Plugin 和一份 Agent YAML：约 5 分 43 秒，主上下文又吃约 49.5k。
+
+它们不是没干活。只是翻了过多文档和源码，迟迟不肯落笔。
+
+应当：任务小，搜索就窄；证据够了，马上写。宿主应把步数、时间、token 预算亮出来。
+
+验收：
+
+- 子代理参数支持软/硬工具步数、时间、token 预算。
+- 超预算返回已有结果，不丢工作树。
+- Dock 能看出“读了多少、写了多少、为什么还在跑”。
+
+### P3-1 `/plugin test` 名为 test，实则不执行测试
+
+复现：
+
+```text
+/plugin test library-audit
+```
+
+实测：命令只解释信任链，说命令层不开旁路，叫用户让模型调用工具，或自己跑自测脚本。它没启动 `test_runner.js`，也没探测一次工具调用。
+
+应当：要么真跑 manifest 声明的自测；要么改名 `/plugin test-help`，别让人误以为已经测过。
+
+验收：输出 exit code、耗时、stdout/stderr 摘要。失败时能定位 runner、协议、权限、超时哪一层。
+
+### P3-2 顶层 `--help` 漏掉 `/plan`、`/agents`、`/agent`
+
+复现：
+
+```powershell
+.\build\release\Release\lubancode.exe --help
+```
+
+实测：交互补全里有这些命令，顶层帮助搜不到。
+
+应当：帮助、补全、命令注册表同源，不许各列各的。
+
+验收：注册命令后，单测核对 `--help`、`/help`、补全三份名单。
+
+### P3-3 `/plugin doctor` 的 Node 版本括号断成两行
+
+实测：
+
+```text
+解释器可用: node(v24.0.0
+)
+```
+
+应当：短状态不可在右括号前硬断行。算宽度时把 ANSI、中文宽度、括号一起算准。
+
+验收：80 列、100 列、窄终端各做快照。`node(v24.0.0)` 要么整段留在本行，要么整段移到下一行。
+
+### P3-4 TODO 状态会旧，完成项仍挂 `in_progress`
+
+实测：任务已建好基线、补齐测试、跑通 14/14；再开 `/todos`，早先“建立基线”和“补齐测试”仍挂 in progress。
+
+这不全怪工具。状态主要靠模型主动回写。可界面也没提示它“久未更新”。
+
+应当：工具调用、文件落地、测试结果能给 TODO 状态刷新提供钩子；至少在 turn 结束时提醒未收口项。
+
+验收：turn 收尾若仍有 in_progress，模型或宿主必须更新、解释或标成待确认。
+
+### P3-5 Release 编译有 `SlashDispatchContext` 的 class/struct 不一致警告
+
+`0.26.79` Release 构建成功，却反复报 C4099。涉及 goal、loop、session、command registry 一带的 `SlashDispatchContext` 前置声明。
+
+应当：前置声明与定义统一用 `class` 或 `struct`。MSVC Release 构建不留这类噪声，免得真 ABI/ODR 风险混在里面。
+
+验收：清理 `build/release` 后全量构建，C4099 为零。
+
+## 五、生成过程里自行修过的一处错
+
+LubanCode 第一次跑应用测试时，14 项里坏了 1 项。
+
+领域层归还借阅后，会原地更新 loan 对象。测试却拿同一引用再断言旧状态，断言自然失真。LubanCode 找到这点，只改 `test/domain.test.js` 两行，先存旧时间，再归还，再断言。复跑 14/14。
+
+这算一次有效自修。它不是仍待处理的产品缺陷，故不塞进上面问题单。
+
+## 六、证据清单
+
+### 应用
+
+- `build/manual-e2e/library-system/TASK.md`
+- `build/manual-e2e/library-system/README.md`
+- `build/manual-e2e/library-system/src/`
+- `build/manual-e2e/library-system/public/`
+- `build/manual-e2e/library-system/test/`
+- `build/manual-e2e/library-system/.agents/skills/library-domain/SKILL.md`
+- `build/manual-e2e/library-system/.lubancode/plugins/library-audit/`
+- `build/manual-e2e/library-system/.lubancode/agents/library-reviewer.yaml`
+
+### 子代理
+
+- `build/manual-e2e/library-system/.evidence/subagents/subagent-1.log`，584,931 字节。
+- `build/manual-e2e/library-system/.evidence/subagents/subagent-2.log`，649,000 字节。
+
+### 网页截图
+
+- `build/manual-e2e/library-system/.evidence/ui/desktop-overview-viewport.png`
+- `build/manual-e2e/library-system/.evidence/ui/mobile-books-top.png`
+- `build/manual-e2e/library-system/.evidence/ui/mobile-readers.png`
+
+### 会话
+
+- `C:\Users\moontidef\.lubancode\sessions\20260829-004427-Plan-模式规划请求-请先完整读取.jsonl`
+- `C:\Users\moontidef\.lubancode\sessions\20260829-013201-请先用-library-reviewer.jsonl`
+
+## 七、修复次序
+
+先治 Context。它会把整场活卡死，还可能把进程送走。
+
+再治测试隔离。全量测试眼下已经红，后头每次发布都容易误判。
+
+随后收自定义 Agent 的身份显示、预算和收尾。再收 Plan 只读边界、终端重绘。
+
+余下几条虽小，也别拖。命令叫 test 就该真测；帮助里有命令就该列全；一枚右括号也不该独自掉到下一行。
