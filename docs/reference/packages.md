@@ -1,6 +1,6 @@
 # Package 与组件挂载
 
-[文档首页](README.md) · [扩展 LubanCode](features/extensions/README.md) · [Workflow Schema](reference/workflow-schema.md) · [安全模型](development/security.md)
+[文档首页](../README.md) · [功能目录](../features/README.md) · [扩展 LubanCode](../features/extensions/README.md) · [Agent 契约](agents.md) · [Workflow Schema](workflow-schema.md) · [安全模型](../development/security.md)
 
 Package 是一只箱子。它只做五件事：
 
@@ -94,7 +94,7 @@ ComponentKind ::= agent | prompt_profile | skill | workflow | plugin | mcp_serve
 - `assets/`、`docs/` 不自动加载，只供组件按相对路径读取。
 - 一件 Skill 占一层目录，入口 `SKILL.md`；一件 Workflow 占一层目录，入口 `workflow.yaml`；一件 MCP server 占一层目录，入口 `mcp.yaml`。
 - 一件 packaged Plugin 必须带 `plugin.json`。裸 DLL、裸 Lua 只留给旧目录兼容，不进 Package。
-- local id 一律小写 kebab-case：`^[a-z0-9]([a-z0-9-]*[a-z0-9])?$`，长 1 到 64。首尾须字母或数字，连字符不连写。包内比旧 standalone Plugin 的 `[A-Za-z0-9_-]` 更严；旧目录不受影响。
+- local id 一律小写 kebab-case：只用小写字母、数字、单横线；首尾须字母或数字，横线不连写；长 1 到 64。包内比旧 standalone Plugin 的 `[A-Za-z0-9_-]` 更严；旧目录不受影响。
 - 未识别的顶层目录可以保留，`doctor` 给提示。`skill/`、`workflow/`、`plugin/`、`agent/` 这类少个字母的近似名要明报，不当作普通未知目录。
 
 ## 3. package.yaml（schema 1）

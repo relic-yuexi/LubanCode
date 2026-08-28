@@ -593,13 +593,13 @@ luban package doctor <path> --json
 
 ### 阶段 0：冻结合同
 
-- [ ] 写 `docs/packages.md`。
-- [ ] 冻结 `package.yaml` schema 1。
-- [ ] 冻结标准目录与 ComponentKind。
-- [ ] 冻结 canonical id 与工具 wire name 编码。
-- [ ] 写一只最小 content-only Package。
-- [ ] 写一只 Agent + Skill + Workflow + Plugin + MCP 的完整 Package。
-- [ ] 写一只故意损坏的诊断夹具。
+- [x] 写 `docs/reference/packages.md`。（todo 钦定顶层 `docs/packages.md`，因仓库法顶层只留 README.md，落 reference/。）
+- [x] 冻结 `package.yaml` schema 1。
+- [x] 冻结标准目录与 ComponentKind。
+- [x] 冻结 canonical id 与工具 wire name 编码。（wire 定为百分号编码 `%HH`，依据 `src/runtime/plugin_contract.hpp` 的 `[A-Za-z0-9_-]` 收口。）
+- [x] 写一只最小 content-only Package。
+- [x] 写一只 Agent + Skill + Workflow + Plugin + MCP 的完整 Package。
+- [x] 写一只故意损坏的诊断夹具。
 
 验收：把完整示例交给没看过代码的人，他只照目录放文件，也能说清会发现什么、会执行什么、哪一步要信任。
 

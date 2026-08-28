@@ -443,11 +443,11 @@ Evolution 层可调用原有 parser、validator 与 runtime，不可复制它们
 
 ### 阶段 0：冻结合同
 
-- [ ] 写 `docs/features/evolution/README.md`。
-- [ ] 冻结候选状态机、目录与 `evolution.json` schema 1。
-- [ ] 冻结“Memory / Skill / Workflow / Agent / code”五档决策表。
-- [ ] 冻结证据、批准与 hash 失效规则。
-- [ ] 写一只 content-only 候选夹具与一只带代码的拒绝夹具。
+- [x] 写 `docs/features/evolution/README.md`。
+- [x] 冻结候选状态机、目录与 `evolution.json` schema 1。
+- [x] 冻结“Memory / Skill / Workflow / Agent / code”五档决策表。
+- [x] 冻结证据、批准与 hash 失效规则。
+- [x] 写一只 content-only 候选夹具与一只带代码的拒绝夹具。
 
 验收：实现者能说清 Package 是产物，自进化闭环才是机制。
 

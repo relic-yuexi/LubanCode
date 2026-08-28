@@ -1,4 +1,4 @@
-# Agent 定义,格式照 todos/自定义Agent与PromptProfile设计.todo §4.1。
+# Agent 定义,格式照 docs/reference/agents.md(阶段 0 已冻结)。
 # 引用一律写本包短名:profile、skill、mcp_servers。Resolver 先在本包里找。
 schema: 1
 name: browser-tester
@@ -20,13 +20,12 @@ skills:
 tools:
   allow:
     - context_read
-    - todo_read
     - todo_write
     - plugin__moontide%2Efull-stack%2Edom-analyzer__inspect
     - mcp__moontide%2Efull-stack%2Ebrowser__navigate
     - mcp__moontide%2Efull-stack%2Ebrowser__screenshot
   deny:
-    - shell
+    - run_command
 
 mcp_servers:
   - browser
@@ -41,5 +40,5 @@ runtime:
   execution_mode: auto
   isolation: none
 
-permissions:
-  mode: read_only
+# 无 permissions 块:首版权限档只有 confirm/auto/yolo,只读由
+# tools.allow 白名单表达(见 docs/reference/agents.md)。
