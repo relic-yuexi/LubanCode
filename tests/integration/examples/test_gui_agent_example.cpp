@@ -11,8 +11,8 @@
 //   - 文档与代码不两张皮:README 提到的工具名都真在 manifest 与 runner 里
 //
 // 真桌面 E2E(真点击真输入)不进 ctest:普通开发机会抢用户鼠标,照工单
-// 停手线走 examples/agents/gui-agent/scripts/manual_e2e.py(视觉路)与
-// scripts/uia_snapshot_e2e.py(结构路),默认 SKIP。
+// 停手线走 examples/packages/gui-agent/plugins/gui-agent-example/scripts/
+// manual_e2e.py(视觉路)与 scripts/uia_snapshot_e2e.py(结构路),默认 SKIP。
 // 缺 Python 的环境进程类测试整段跳过(manifest 静态校验照跑)。
 
 #include <doctest/doctest.h>
@@ -34,9 +34,22 @@ using namespace lubancode::runtime;
 namespace {
 
 // 示例目录:测试从源码树真读,不复制——示例改坏(工具改名、manifest 坏
-// 了、runner 挪位)当场红,文档与代码不两张皮。
+// 了、runner 挪位)当场红,文档与代码不两张皮。示例已改造成 Package
+// (examples/packages/gui-agent):插件本体在 plugins/,README 在包根,
+// SKILL 在 skills/gui-agent/。
 std::filesystem::path ExampleDir() {
-    return std::filesystem::path(LUBANCODE_TEST_SOURCE_DIR) / "examples" / "agents" / "gui-agent";
+    return std::filesystem::path(LUBANCODE_TEST_SOURCE_DIR) / "examples" / "packages" / "gui-agent" /
+           "plugins" / "gui-agent-example";
+}
+
+std::filesystem::path PackageReadmePath() {
+    return std::filesystem::path(LUBANCODE_TEST_SOURCE_DIR) / "examples" / "packages" / "gui-agent" /
+           "README.md";
+}
+
+std::filesystem::path SkillFilePath() {
+    return std::filesystem::path(LUBANCODE_TEST_SOURCE_DIR) / "examples" / "packages" / "gui-agent" /
+           "skills" / "gui-agent" / "SKILL.md";
 }
 
 std::string ReadFile(const std::filesystem::path& path) {
@@ -139,8 +152,8 @@ TEST_CASE("gui-agent 示例:manifest 十件工具、权限与 env allowlist 齐�
 TEST_CASE("gui-agent 示例:README/SKILL 提的工具名与 manifest 不两张皮") {
     const auto manifest = LoadExampleManifest();
     const std::string runner_source = ReadFile(ExampleDir() / "gui_actions.py");
-    const std::string readme = ReadFile(ExampleDir() / "README.md");
-    const std::string skill = ReadFile(ExampleDir() / "SKILL.md");
+    const std::string readme = ReadFile(PackageReadmePath());
+    const std::string skill = ReadFile(SkillFilePath());
     for (const auto& tool : manifest.tools) {
         // runner 的 HANDLERS 表里真有分派(名字出现两处以上:HANDLERS 与函数定义)。
         CHECK_MESSAGE(runner_source.find("\"" + tool.name + "\":") != std::string::npos,

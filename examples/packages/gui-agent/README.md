@@ -1,4 +1,4 @@
-# GUI Agent — 本地 process 插件示例(Windows 桌面自动化)
+# GUI Agent(luban.gui-agent 0.1.0)— code-bearing 包示例(Windows 桌面自动化)
 
 模型反复走"看一眼,动一下,再看一眼":截图、移鼠标、点击、输文字、
 UIA 快照,十件工具,件件短命——每次调用起一只进程,干完就退。窗口、
@@ -10,8 +10,20 @@ UIA 快照,十件工具,件件短命——每次调用起一只进程,干完就�
 给控件名+类型+矩形,省 token、坐标直给)是 Native 控件密集场景的近道,
 自绘/Web/游戏回视觉路。教学顺序也是这个:先学看,再学抄近道。
 
-完整设计账见 `todos/GUIAgent与BrowserAgent扩展示例.todo`;本 README 教你装、
-跑、看懂、改成自己的。
+## 0. 装了什么,什么不执行
+
+| 目录 | 组件 | canonical id | 干什么 |
+| --- | --- | --- | --- |
+| `plugins/gui-agent-example/` | process Plugin | `luban.gui-agent:gui-agent-example` | 十件工具:枚举、聚焦、截图、UIA 快照、移动、点击、滚轮、输入、按键、环境底账 |
+| `skills/gui-agent/` | Skill | `luban.gui-agent:gui-agent` | 教模型的操作纪律:先看后动、region 放大、桌面常识、停手线 |
+
+**本包是 code-bearing:整包默认只被发现,不挂载。**放进目录后
+`/package list`、`/package show`、`/package doctor` 立刻可用,Plugin 一只
+进程也不起。要它真跑,得过信任门(见第 2 节)——放进目录就是执行代码,
+这条门不白设。Skill 属内容组件,校验过了即登记,不受信任门牵连。
+
+包内插件目录里另有三样开发物料,不参与挂载:`fixtures/`(教学夹具)、
+`scripts/`(真机 E2E,默认 SKIP)、`test_runner.py`(离线自测)。
 
 ## 1. 它为何不是 MCP
 
@@ -20,85 +32,68 @@ UIA 快照,十件工具,件件短命——每次调用起一只进程,干完就�
 | 截图点击也算"会话"吧,为何不搭 MCP? | 状态在**桌面与目标程序**里,不在插件里。每次调用重新问桌面要窗口矩形,要完就退,没有跨调用要保活的对象。 |
 | MCP 有 tools/list 发现,这没有? | manifest `plugin.json` 就是静态真账,十件工具名与 schema 加载期一次读齐。 |
 | 进程崩了怎么办? | 只坏本次调用,宿主收到唯一错误码,不带倒 LubanCode。 |
-| 什么时候该改用 MCP? | 工具要保存 DOM handle、订阅事件、维持数据库连接或接收异步下载时——状态住进了你的进程,短命进程装不下。那类示例见 Browser Agent(另单在建)。 |
+| 什么时候该改用 MCP? | 工具要保存 DOM handle、订阅事件、维持数据库连接或接收异步下载时——状态住进了你的进程,短命进程装不下。那类示例见隔壁 `browser-agent/`。 |
 
 一句话:**一次性本地函数走 process 插件;有独立状态与生命周期的服务走 MCP。**
 
-## 2. 安装(十分钟内到第一项可见结果)
+## 2. 安装与信任门
 
 前置:Windows 10/11,Python 3.10+(`python --version` 能出版本号;官方
 安装包默认带 ctypes 与 tkinter)。**零第三方依赖**——不装 mss、不装
-pyautogui、不装 Pillow,理由见 `requirements.txt`。
+pyautogui、不装 Pillow,理由见插件目录里的 `requirements.txt`。
+
+整包安装(推荐):
+
+```text
+把整只 gui-agent/ 目录放进 ~/.lubancode/packages/(个人)
+或 <项目>/.lubancode/packages/(团队,随 git 分发)
+```
+
+- 个人目录:你亲手放的,待遇同现有用户插件,视作已安装来源,免信任门。
+- 项目目录:外来代码。代码组件先过**内容指纹信任门**——未信任时整包仍
+  可发现、可 doctor,Plugin 一个进程不起。批准是一次明白的动作
+  (后续阶段提供 `/package trust` 类命令,回执亮内容哈希、工具清单与
+  将启动的命令);文件改一个字节,指纹就变,信任失效,须重批。
+- 开发调试:`lubancode --package-dir <本包所在目录>`,只发现,不挂载。
+
+散装安装(旧路,照旧支持):单拿插件目录拷走,不装箱——
 
 ```bat
-:: 1. 拷目录(整只 gui-agent 一起,runner 要 import 同目录模块)
-xcopy /E /I examples\agents\gui-agent %USERPROFILE%\.lubancode\plugins\gui-agent
+xcopy /E /I examples\packages\gui-agent\plugins\gui-agent-example %USERPROFILE%\.lubancode\plugins\gui-agent-example
+```
 
-:: 2. 第一回先用 dry-run:动作只校验不注入
+第一回先用 dry-run(动作只校验不注入):
+
+```bat
 set LUBANCODE_GUI_DRY_RUN=1
-
-:: 3. 起 LubanCode(同这只终端,环境变量才递得进插件)
 lubancode
 ```
 
-进 LubanCode 后:
-
-```text
-/plugins                 → 应见 gui-agent-example: 10 个工具
-/tools                   → 模型侧工具名 plugin__gui-agent-example__gui_status 等
-```
-
-试试:
+挂上后(`/plugins` 应见 gui-agent-example: 10 个工具):
 
 ```text
 你:用 gui_status 看一眼桌面环境
-模型:调用 plugin__gui-agent-example__gui_status →
+模型:调用 gui_status →
       平台 win32(承诺范围 Windows 10/11),Python 3.13,DPI 感知
       per_monitor_v2,显示器 2 台,虚拟屏 [-1920,0,2560,1440],dry-run 开。
 ```
 
 dry-run 关掉(去掉环境变量重启)后才真点鼠标。教程第一课建议一直开着。
 
-### 装到哪:用户级与项目级(信任门)
+挂载后的工具名带包命名空间(编码规矩见 `docs/reference/packages.md` §6.1;
+散装安装则是裸名 `plugin__gui-agent-example__*`):
 
-上面那条 xcopy 装的是**用户级**——`%USERPROFILE%\.lubancode\plugins\`。你
-亲手放进去的,免信任门,拿来即用。
-
-另一路是**项目级**:拷进仓库里的 `<项目>\.lubancode\plugins\gui-agent\`,
-随 git 分发,团队人人 clone 即得:
-
-```bat
-xcopy /E /I examples\agents\gui-agent <项目>\.lubancode\plugins\gui-agent
-```
-
-项目目录里的插件是外来代码,放进目录就是执行代码。LubanCode 启动时按
-"插件目录 + 全部文件内容的指纹"过**信任门**,未经信任只警告、不挂载:
-
-```text
-[plugin] gui-agent-example: 项目插件未经信任(内容指纹 a1b2c3d4e5f6),跳过——
-  ……批准:/plugin trust gui-agent-example(回执亮工具清单与完整指纹,重启后挂载)
-```
-
-批准是一条命令的事,不用手改任何 JSON:
-
-```text
-/plugin trust gui-agent-example
-```
-
-回执先把插件概要亮出来(工具清单、文件数、完整 64 位指纹),再落账:
-**已信任,重启后挂载**。插件文件改一个字节,指纹就变,信任失效,须重批
-——团队仓里升级插件后,各成员重跑一次 trust 即可。撤销用
-`/plugin untrust gui-agent-example`(只销账,不动插件文件)。
-
-怎么选:团队仓里带插件共用走项目级;个人自用装用户级,省一道门。
+| 展示名 | wire 名 |
+| --- | --- |
+| `plugin__luban.gui-agent.gui-agent-example__gui_click` | `plugin__luban%2Egui-agent%2Egui-agent-example__gui_click` |
 
 ## 3. 教学夹具与第一课
 
-不拿真实微信、银行、邮箱练手。仓里带一只本地夹具:
+不拿真实微信、银行、邮箱练手。包里带一只本地夹具:
 
 ```bat
 :: 另开一只终端
-python examples\agents\gui-agent\fixtures\fixture_app.py
+python examples\packages\gui-agent\plugins\gui-agent-example\fixtures\fixture_app.py
 ```
 
 窗口标题 `LubanCode GUI Fixture`:名字输入框、颜色下拉、提交/重置按钮、
@@ -110,7 +105,7 @@ Windows 上各有一枚 helper HWND,但 Tk 只管自己画、HWND 文字留空,U
 快照就只见类型不见名——夹具自己补齐,顺带教这一课;真世界自绘程序
 没这份好心,见第 10 节排错)。
 
-任务链(Skill `SKILL.md` 教的就是这条),纯视觉为主:
+任务链(Skill 教的就是这条),纯视觉为主:
 
 1. `gui_list_windows`(title_filter=LubanCode GUI Fixture)→ 拿 window_id
 2. `gui_focus_window` → 前台
@@ -253,7 +248,7 @@ Skill 的死规矩:一次一项动作,动作后必快照/截图;不许连续盲�
   不是权限——observation 不是授权凭据。窗口换进程、换标题、换矩形,
   默认都拒。
 
-## 8. 图随结果回喂(协议 v2)
+## 8. 图随结果回喂(协议 v2)与 1568 长边帽
 
 process 插件协议 v2 起,`content` 里可以带 `type=image` 块。
 `gui_screenshot` 在文本与 observation 之外,把 PNG 以 path 模式随响应帧
@@ -281,22 +276,17 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 老宿主(只认 v1)收到 protocol=2 的响应会按 UnknownContent 整帧拒——
 本插件随宿主 v2 一起交付,不做双协议回退。
 
-<<<<<<< HEAD
-**降采样口径**:截图长边超过 1568px 的,先按整数步长采样缩进帽内
-(`png.downscale_to_long_edge`,零依赖、不插值)再回喂与落盘,一份图
-两处共用。各家视觉 token 都按分辨率计(anthropic ≈ 宽×高/750,建议
-长边 ≤1568;gpt/gemini 按 512/768 像素块计片),3072x1918 的整窗原图
-原样上 wire 既烧 token 又顶各家边长帽。要原图附账,调用时传
-`keep_original=true`,证据目录另存 `-orig` 后缀一份,默认不双份。
-=======
 ### 放大镜:region 裁切与 1568 长边帽
 
 纯视觉路的"放大"不是插值放大,是**裁切**——局部原像素直出,无损:
 
-- **整幅图(不带 `region`)**:长边超 1568 就近邻降采样到 1568 再编码。
-  全图是给模型认布局的,再大只烧 token 不增信息;降采样后图上像素
-  不再 1:1 对应 virtual_screen,observation 里给 `image_pixel_scale`
-  供换算。
+- **整幅图(不带 `region`)**:长边超 1568 就近邻降采样到 1568 再编码
+  (`png.downscale_to_long_edge`,零依赖、不插值),回喂与落盘一份图
+  两处共用。全图是给模型认布局的,再大只烧 token 不增信息——各家视觉
+  token 都按分辨率计(anthropic ≈ 宽×高/750;gpt/gemini 按 512/768
+  像素块计片),3072x1918 的整窗原图原样上 wire 既烧 token 又顶各家
+  边长帽。降采样后图上像素不再 1:1 对应 virtual_screen,observation
+  里给 `image_pixel_scale` 供换算。
 - **局部(`region=[x,y,w,h]`,virtual_screen 口径)**:不走 1568 帽,
   原始分辨率直出——裁切即无损放大,小字看得清全靠它。target=window
   时按 observation 的 `client_origin` 换算成窗内相对区;target=screen
@@ -307,7 +297,6 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
   在局部图里看清目标,坐标即刻精确到像素。
 - 越界(裁出窗外/屏外)与空区(零宽高)在拍摄前明拒
   (`region_out_of_range` / `invalid_arguments`),不悄悄裁边。
->>>>>>> worktree-agent-a6249924751f2bda5
 
 ## 9. 安全模型
 
@@ -315,7 +304,7 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 | --- | --- | --- |
 | 观察 | `gui_status` / `gui_list_windows` / `gui_snapshot` / `gui_screenshot` | 无输入注入。快照只读控件树,连像素都不碰;截图默认只拍目标窗口(`region` 也只裁窗内),`target=screen` 拍全部显示器,当心隐私。 |
 | 低风险动作 | `gui_focus_window` / `gui_move_mouse` | 改前台、挪鼠标,不产生点击。 |
-| 写动作 | `gui_click` / `gui_scroll` / `gui_type_text` / `gui_key` | 每次调用前 LubanCode 照常确认;`.lubancode/settings.local.json` 的 `allow_tools` 只按名单放,别开 `plugin__gui-agent-example__*` 通配。 |
+| 写动作 | `gui_click` / `gui_scroll` / `gui_type_text` / `gui_key` | 每次调用前 LubanCode 照常确认;`.lubancode/settings.local.json` 的 `allow_tools` 只按名单放(样例见插件目录 `config.example.json`),别开 `plugin__*` 通配。 |
 
 - `LUBANCODE_GUI_DRY_RUN=1`:动作类工具全部只校验只报计划,连聚焦都不发。
 - Win 组合与 Alt+F4 默认禁(`dangerous_key_blocked`);确要放行须显式
@@ -331,7 +320,8 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 
 | 症状 | 先查 |
 | --- | --- |
-| `/plugins` 不见 gui-agent-example | 启动警告点名 manifest 哪项;`plugin.json` 须与 runner.py 同目录整只拷贝 |
+| `/package list` 不见本包 | 包根须有 package.yaml;放的是整只包目录 |
+| 挂不上、工具不见 | 项目级要先过信任门(第 2 节);散装路则查启动警告点名的 manifest 项,`plugin.json` 须与 runner.py 同目录整只拷贝 |
 | 调用报 `spawn_failed` | `python` 不在 PATH → manifest 的 `runtime.command` 写绝对路径 |
 | `gui_status` 报 dpi_awareness=unaware | 系统拒了 DPI 感知调用;坐标会错位,先解决它再干活 |
 | `focus_failed` | Windows 限制后台进程抢前台;人工点一下目标窗口,或让用户先激活它 |
@@ -351,7 +341,8 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 ## 11. 改造成你自己的工具(五步)
 
 1. **改工具名**:拷走整目录,`plugin.json` 里改 `id` 与各 `tools[].name`
-   (模型看到的就是 `plugin__<id>__<name>`)。
+   (模型看到的就是 `plugin__<id>__<name>`;整包安装则再套一层包
+   命名空间,见第 2 节)。
 2. **改 schema**:每件工具的 `input_schema` 收窄到你真要的参数,
    `additionalProperties: false` 别松。
 3. **改实现**:`gui_actions.py` 里每件工具一个函数,签名
@@ -372,20 +363,25 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 
 ## 12. 源码地图与平台承诺
 
-| 文件 | 管什么 |
-| --- | --- |
-| `plugin.json` | manifest:id、runtime、十件工具 schema、env allowlist、network=false |
-| `runner.py` | 协议 v1:stdin 一份 JSON → stdout 一份 JSON,日志进 stderr |
-| `gui_actions.py` | 合同层:坐标换算、stale 拦截、上限、危险键闸、dry-run、observation |
-| `gui_backend.py` | Win32 ctypes 层:窗口枚举、DPI、SendInput、BitBlt;`FakeBackend` 供测试 |
-| `gui_uia.py` | UIA COM 壳:ctypes 手调 IUIAutomation,控件树折叠规则与帽子 |
-| `png.py` | 零依赖 PNG 编码(zlib + CRC32),魔数自检 |
-| `test_runner.py` | 离线自测(零真输入):`python test_runner.py`,50 册 |
-| `fixtures/fixture_app.py` | 教学夹具:一条命令起的本地小窗 |
-| `scripts/manual_e2e.py` | 视觉路 E2E(截图→看→点),默认 SKIP,`--run` 才动鼠标 |
-| `scripts/uia_snapshot_e2e.py` | 结构路 E2E(快照→rect 中心点提交,零截图),默认 SKIP,`--run` 才动鼠标 |
-| `SKILL.md` | 教模型的操作纪律(拷到 `~/.lubancode/skills/gui-agent/`) |
-| `config.example.json` | settings.local.json 样例与环境开关说明 |
+```text
+gui-agent/
+  package.yaml                  包清单:schema 1,两段式 id,如实申报 code-bearing
+  README.md                     本页
+  skills/gui-agent/SKILL.md     教模型的操作纪律(内容组件)
+  plugins/gui-agent-example/    插件本体(代码组件)
+    plugin.json                 manifest:id、runtime、十件工具 schema、env allowlist、network=false
+    runner.py                   协议 v1 帧:stdin 一份 JSON → stdout 一份 JSON,日志进 stderr
+    gui_actions.py              合同层:坐标换算、stale 拦截、上限、危险键闸、dry-run、observation
+    gui_backend.py              Win32 ctypes 层:窗口枚举、DPI、SendInput、BitBlt;FakeBackend 供测试
+    gui_uia.py                  UIA COM 壳:ctypes 手调 IUIAutomation,控件树折叠规则与帽子
+    png.py                      零依赖 PNG 编码(zlib + CRC32),魔数自检
+    test_runner.py              离线自测(零真输入):python test_runner.py,50 册
+    config.example.json         settings.local.json 样例与环境开关说明
+    requirements.txt            零第三方依赖的说明
+    fixtures/fixture_app.py     教学夹具:一条命令起的本地小窗
+    scripts/manual_e2e.py       视觉路 E2E(截图→看→点),默认 SKIP,--run 才动鼠标
+    scripts/uia_snapshot_e2e.py 结构路 E2E(快照→rect 中心点提交,零截图),默认 SKIP
+```
 
 平台承诺:首版只承诺 Windows 10/11。`gui_status` 在别的平台如实回
 `unsupported_platform`,不装能跑。Linux/macOS 留了接口
@@ -398,17 +394,17 @@ Windows 官方 Python 自带。
 
 ```bash
 # 离线单测(零真输入,CI 同款)
-python test_runner.py
+python plugins/gui-agent-example/test_runner.py
 
 # 干跑 E2E(真枚举真截图,不注入点击)
-python scripts/manual_e2e.py --run --dry-run
+python plugins/gui-agent-example/scripts/manual_e2e.py --run --dry-run
 
 # 真跑 E2E(会动鼠标,须专用桌面)
-python scripts/manual_e2e.py --run
+python plugins/gui-agent-example/scripts/manual_e2e.py --run
 
 # 结构路 E2E:快照定位、零截图点提交(会动鼠标,须专用桌面)
-python scripts/uia_snapshot_e2e.py --run
+python plugins/gui-agent-example/scripts/uia_snapshot_e2e.py --run
 
 # 手工灌一份协议请求看响应
-echo {"protocol":1,"call_id":"t1","plugin":"gui-agent-example","tool":"gui_status","arguments":{},"context":{}} | python runner.py
+echo {"protocol":1,"call_id":"t1","plugin":"gui-agent-example","tool":"gui_status","arguments":{},"context":{}} | python plugins/gui-agent-example/runner.py
 ```

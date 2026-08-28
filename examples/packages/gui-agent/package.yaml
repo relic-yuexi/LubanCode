@@ -1,0 +1,10 @@
+schema: 1
+id: luban.gui-agent
+version: 0.1.0
+name: GUI Agent
+description: Windows 桌面自动化的 code-bearing 包:process 插件十件工具(截图、UIA 快照、点击、输入)加配套操作纪律 Skill。代码组件默认只被发现不执行,挂载须过信任门。
+
+compatibility:
+  lubancode: ">=0.26.0"
+  platforms:
+    - windows

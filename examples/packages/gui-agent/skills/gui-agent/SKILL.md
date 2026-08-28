@@ -13,7 +13,7 @@ description: 用 gui-agent-example 插件操作 Windows 桌面程序,纯视觉�
 
 ## 开工三步
 
-1. 先调 `plugin__gui-agent-example__gui_status`:确认平台是 win32、
+1. 先调 `gui_status`:确认平台是 win32、
    DPI 感知不是 unaware、dry-run 是开是关。dry-run 开着就明说:本次
    任务只校验不真点,请用户决定是否关掉再跑。
 2. 再 `gui_list_windows`(可带 `title_filter`)找到目标窗口,记下

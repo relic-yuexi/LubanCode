@@ -1,7 +1,8 @@
 {
   "_comment": [
-    "GUI Agent 示例的配置样例。插件本体不用 config.json——装法就是把",
-    "gui-agent/ 整个目录拷进 ~/.lubancode/plugins/,重启 LubanCode 即挂上。",
+    "GUI Agent 示例的配置样例。插件本体不用 config.json——整包装进",
+    "~/.lubancode/packages/,或把 plugins/gui-agent-example/ 整个目录拷进",
+    "~/.lubancode/plugins/(散装旧路),重启 LubanCode 即挂上。",
     "这份样例演示两件事:",
     "  1) 项目级 .lubancode/settings.local.json 怎么给教学夹具开免确认",
     "     (只点名单内工具,绝不开 plugin__gui-agent-example__* 通配全放);",
