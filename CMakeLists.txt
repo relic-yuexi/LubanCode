@@ -432,6 +432,9 @@ add_library(lubancode_engine STATIC
   # 四家 wire 据此上原生图块(护栏:魔数/字节/边长帽)。
   src/agent/tool_result_images.cpp
   src/agent/model_router.cpp
+  # 自定义 Agent 单阶段 1:Agent Definition 严格解析(yaml-cpp)与三层 Catalog。
+  src/agent/agent_definition.cpp
+  src/agent/agent_catalog.cpp
   # 骨架拆解批一·病四:SampleModel 原语(六处单发采样的公共路)。
   src/agent/sample_model.cpp
   src/agent/prefix.cpp
@@ -650,6 +653,8 @@ add_library(lubancode_app STATIC
   src/app/commands/hook_commands.cpp
   src/app/commands/peer_commands.cpp
   src/app/commands/doctor_commands.cpp
+  # 自定义 Agent 单阶段 1:/agents 与 /agent doctor 的只读骨架。
+  src/app/commands/agent_commands.cpp
   # /goal 持久目标单:终端 slash 的排版/gate/二次确认文案。
   src/app/commands/goal_commands.cpp
   # /loop 会话定时循环单:slash 业务面(列表/状态/暂停/补拍的终端行)。

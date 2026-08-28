@@ -1,0 +1,42 @@
+schema: 1
+name: browser-tester
+description: Inspect a web application, reproduce UI failures, and report evidence.
+
+prompt:
+  profile: browser-tester
+  project_instructions: inherit
+  soul: inherit
+
+model:
+  role: inherit
+  effort: inherit
+
+skills:
+  preload:
+    - browser-testing
+
+tools:
+  allow:
+    - context_read
+    - todo_read
+    - todo_write
+    - mcp__browser__navigate
+    - mcp__browser__screenshot
+  deny:
+    - shell
+
+mcp_servers:
+  - browser
+
+requires:
+  tools:
+    - mcp__browser__navigate
+    - mcp__browser__screenshot
+
+runtime:
+  max_steps_per_turn: 24
+  execution_mode: auto
+  isolation: none
+
+permissions:
+  mode: read_only

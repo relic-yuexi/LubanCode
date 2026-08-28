@@ -15,6 +15,10 @@ std::filesystem::path AbsoluteNormal(const std::filesystem::path& path) {
     return (ec ? path : absolute).lexically_normal();
 }
 
+}  // namespace
+
+// 项目根发现:头文件里导出(自定义 Agent 单阶段 1 起,Agent Catalog 的
+// 项目层也从这里起算),实现原样。
 std::filesystem::path FindProjectRoot(const std::filesystem::path& cwd) {
     std::filesystem::path current = AbsoluteNormal(cwd);
     std::error_code ec;
@@ -35,6 +39,8 @@ std::filesystem::path FindProjectRoot(const std::filesystem::path& cwd) {
     }
     return fallback;
 }
+
+namespace {
 
 std::string ReadTrimmed(const std::filesystem::path& path) {
     std::ifstream file(path, std::ios::binary);

@@ -175,6 +175,13 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         // Workflows 自然语言编排单:/workflow 是正门(list/show/graph/
         // validate/run/...),子命令解析在 workflow 层,这里只认词。
         parsed.command = SlashCommand::Workflow;
+    } else if (lower == "/agents") {
+        // 自定义 Agent 单阶段 1:/agents 只列 Agent Catalog(只读)。
+        parsed.command = SlashCommand::Agents;
+    } else if (lower == "/agent") {
+        // 自定义 Agent 单阶段 1:/agent 的子命令(doctor/...)在
+        // app/commands/agent_commands 拆,这里只认词。
+        parsed.command = SlashCommand::Agent;
     } else {
         // 不认得的 / 词:仍是 Unknown(语义不变),但把剥掉 / 的原词记在
         // alias_word 里——会话层对 Unknown 先查 WorkflowCatalog,查着了
@@ -847,6 +854,8 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/todos", tr("slash.desc.todos")},
             {"/plugins", tr("slash.desc.plugins")},
             {"/plugin", tr("slash.desc.plugin")},
+            {"/agents", tr("slash.desc.agents")},
+            {"/agent", tr("slash.desc.agent")},
             {"/tools", tr("slash.desc.tools")},
             {"/memory", tr("slash.desc.memory")},
             {"/sessions", tr("slash.desc.sessions")},
