@@ -1,0 +1,46 @@
+{
+  "manifest_version": 1,
+  "id": "jsonl-probe",
+  "version": "0.1.0",
+  "language": "python",
+  "runtime": {
+    "kind": "process",
+    "command": "python",
+    "args": ["${plugin_dir}/runner.py"],
+    "timeout_ms": 30000
+  },
+  "tools": [
+    {
+      "name": "jsonl_sample",
+      "description": "流式扫描超大 JSONL 文件,按行号区间抽样,回报每行可解析性与字段形状,不整读入内存。只读,不写,不起网络。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "工作区内相对路径;拒绝绝对路径与 .. 逃逸"
+          },
+          "offset_line": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "可选;起始行号,缺省 0"
+          },
+          "max_lines": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 1000,
+            "description": "可选;抽样上限,缺省 100"
+          }
+        },
+        "required": ["path"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": {
+    "network": false,
+    "env": [
+      "JSONL_PROBE_MAX_BYTES"
+    ]
+  }
+}

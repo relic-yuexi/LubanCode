@@ -1,0 +1,5 @@
+schema: 1
+id: moontide.jsonl-probe
+version: 0.1.0
+name: JSONL Probe
+description: 用 process 插件抽样超大 JSONL 账目；现有读文件工具整读会超时。

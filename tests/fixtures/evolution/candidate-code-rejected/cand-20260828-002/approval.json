@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "candidate_id": "cand-20260828-002",
+  "package_id": "moontide.jsonl-probe",
+  "candidate_version": "0.1.0-candidate.1",
+  "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "tier": "process-plugin-or-mcp",
+  "status": "rejected",
+  "requested_at": "2026-08-28T11:40:00Z",
+  "decision": {
+    "decided_by": "user",
+    "decision": "rejected",
+    "decided_at": "2026-08-28T12:00:00Z",
+    "reason": "process 插件未过 Package 信任门与沙箱核验，不批。runner 须先人工审查；评测绿不等于信任过。",
+    "fingerprint": "sha256:0000000000000000000000000000000000000000000000000000000000000000"
+  }
+}

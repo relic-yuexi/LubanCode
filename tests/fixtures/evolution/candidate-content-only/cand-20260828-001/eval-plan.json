@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "candidate_id": "cand-20260828-001",
+  "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "replay": [
+    {
+      "source_id": "run-placeholder-101",
+      "task": "复核一处 provider 绑定误判：给出疑点清单与证据链",
+      "workspace": "fixture",
+      "acceptance": [
+        "疑点清单与账本记录一致",
+        "每条疑点附文件与字段出处",
+        "清单 JSON 可解析且过 schema 校验"
+      ]
+    }
+  ],
+  "holdout": [
+    {
+      "task_id": "holdout-provider-rebind-001",
+      "task": "换一处 provider 配置，核查绑定关系与缓存失效路径",
+      "acceptance": [
+        "误报与漏报均为 0",
+        "产物 JSON 可解析",
+        "tool_calls 不超过父版基线 1.2 倍"
+      ]
+    }
+  ],
+  "baseline": {
+    "kind": "parent",
+    "ref": "moontide.provider-auditor@0.1.0",
+    "metrics": [
+      "success_rate",
+      "acceptance_rate",
+      "tool_calls",
+      "tokens",
+      "wall_clock_ms",
+      "permission_prompts",
+      "workspace_writes"
+    ]
+  },
+  "budget": {
+    "max_tool_calls": 40,
+    "max_tokens": 200000,
+    "timeout_ms": 600000
+  }
+}

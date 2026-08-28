@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "candidate_id": "cand-20260828-001",
+  "package_id": "moontide.provider-auditor",
+  "candidate_version": "0.2.0-candidate.1",
+  "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "tier": "content-only",
+  "status": "awaiting_approval",
+  "requested_at": "2026-08-28T10:20:00Z",
+  "decision": null
+}

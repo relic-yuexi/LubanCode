@@ -1,0 +1,40 @@
+{
+  "schema": 1,
+  "candidate_id": "cand-20260828-002",
+  "package_id": "moontide.jsonl-probe",
+  "candidate_version": "0.1.0-candidate.1",
+  "parent": null,
+  "objective": "给超大 JSONL 账目的抽样核查添一件本地工具；现有读文件工具整读会超时",
+  "sources": {
+    "run_ids": [
+      "run-placeholder-501"
+    ],
+    "goal_ids": [],
+    "recording_ids": [],
+    "memory_ids": [],
+    "user_feedback_ids": [
+      "fb-placeholder-502"
+    ]
+  },
+  "generator": {
+    "provider": "placeholder-provider",
+    "model": "placeholder-model",
+    "prompt_revision": "placeholder-rev-1"
+  },
+  "changes": {
+    "components_added": [
+      "plugins/jsonl-probe"
+    ],
+    "components_changed": [],
+    "components_removed": [],
+    "permissions_added": [
+      "process:python",
+      "env:JSONL_PROBE_MAX_BYTES",
+      "fs_read:workspace"
+    ],
+    "tools_added": [
+      "plugin__moontide.jsonl-probe.jsonl-probe__jsonl_sample"
+    ]
+  },
+  "created_at": "2026-08-28T11:00:00Z"
+}

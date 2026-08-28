@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "candidate_id": "cand-20260828-002",
+  "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "replay": [
+    {
+      "source_id": "run-placeholder-501",
+      "task": "对一份超大 JSONL 账目抽样核查行可解析率",
+      "workspace": "isolated",
+      "acceptance": [
+        "抽样区间与账面一致",
+        "全程不整读文件入内存",
+        "断网沙箱内可跑"
+      ]
+    }
+  ],
+  "holdout": [
+    {
+      "task_id": "holdout-jsonl-tail-001",
+      "task": "只看末尾一万行的字段形状",
+      "acceptance": [
+        "结果 JSON 可解析",
+        "tool_calls 不超过裸 Agent 基线 1.5 倍",
+        "零网络请求"
+      ]
+    }
+  ],
+  "baseline": {
+    "kind": "bare-agent",
+    "ref": "unmounted-agent",
+    "metrics": [
+      "success_rate",
+      "acceptance_rate",
+      "tool_calls",
+      "tokens",
+      "wall_clock_ms",
+      "permission_prompts",
+      "workspace_writes"
+    ]
+  },
+  "budget": {
+    "max_tool_calls": 20,
+    "max_tokens": 60000,
+    "timeout_ms": 120000
+  }
+}
