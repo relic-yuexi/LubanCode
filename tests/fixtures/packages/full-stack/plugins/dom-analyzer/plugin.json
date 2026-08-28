@@ -1,0 +1,37 @@
+{
+  "manifest_version": 1,
+  "id": "dom-analyzer",
+  "version": "1.0.0",
+  "language": "python",
+  "runtime": {
+    "kind": "process",
+    "command": "python",
+    "args": ["${plugin_dir}/runner.py"],
+    "timeout_ms": 15000
+  },
+  "tools": [
+    {
+      "name": "inspect",
+      "description": "分析一段 HTML 源码,产出 DOM 摘要:元素总数、链接、表单、标题层级、图片与 alt。只读、不出网、不落盘,纯本地统计。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "html": {
+            "type": "string",
+            "description": "待分析的 HTML 源码"
+          },
+          "url": {
+            "type": "string",
+            "description": "来源地址,只进摘要头,不真访问"
+          }
+        },
+        "required": ["html"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": {
+    "network": false,
+    "env": []
+  }
+}

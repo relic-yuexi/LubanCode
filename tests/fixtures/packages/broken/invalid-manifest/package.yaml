@@ -1,0 +1,11 @@
+# 故意写坏的清单。四处错,逐条见 broken/README.md。
+schema: 2
+id: Moontide.Bad_Package
+version: "1.0"
+name: Bad Package
+description: 故意写坏的清单,诊断夹具。
+
+permissions:
+  network: true
+  tools_allowlist:
+    - shell

@@ -1,0 +1,14 @@
+# 坏样例:args 规范化后逃出包根。见 broken/README.md。
+schema: 1
+id: leaky
+description: 故意越界的 MCP 组件,诊断夹具。
+transport: stdio
+
+runtime:
+  command: node
+  args:
+    - "${package_dir}/../../shared/server.js"
+  timeout_ms: 30000
+
+permissions:
+  network: false

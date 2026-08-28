@@ -1,0 +1,12 @@
+# 坏样例两处:文件名 Browser-Tester.yaml 大写,不合 kebab-case;
+# name 里带空格。见 broken/README.md。
+schema: 1
+name: browser tester
+description: 名字带空格的坏 Agent 定义,诊断夹具。
+
+prompt:
+  profile: default
+
+model:
+  role: inherit
+  effort: inherit

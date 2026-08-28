@@ -1,0 +1,7 @@
+{
+  "name": "browser-mcp-fixture",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Package 夹具的示例 MCP server,零依赖,纯 Node 标准库。",
+  "main": "server.js"
+}

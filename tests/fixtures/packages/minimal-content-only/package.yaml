@@ -1,0 +1,5 @@
+schema: 1
+id: moontide.minimal-content-only
+version: 0.1.0
+name: Minimal Content Only
+description: 最小内容包夹具。只装一件 Skill,零代码组件,放进目录即可发现。
