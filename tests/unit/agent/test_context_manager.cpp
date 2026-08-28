@@ -167,3 +167,64 @@ TEST_CASE("sticky 工作视图:真裁一次后钉住,后续只在尾部追加") 
     }
     CHECK(saw_new);
 }
+
+// ---------------------------------------------------------------------------
+// 压力 dry-run 视图(P1-1 口径统一):触发线、/context 与压缩前后账都该
+// 拿"结构压缩后会真发出去的那本"估,不拿未压缩全量估——真机 189k 的估账
+// 对 47k 的真实请求,就是两把尺分家的账。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+api::Message AssistantToolUse(const std::string& id, const std::string& name, const nlohmann::json& input) {
+    api::Message message;
+    message.role = api::Role::Assistant;
+    message.content.push_back(api::ToolUseBlock{id, name, input});
+    return message;
+}
+
+api::Message UserToolResult(const std::string& tool_use_id, const std::string& content) {
+    api::Message message;
+    message.role = api::Role::User;
+    message.content.push_back(api::ToolResultBlock{tool_use_id, content, false});
+    return message;
+}
+
+}  // namespace
+
+TEST_CASE("BuildPressureDryRunView: 重复工具结果被收敛,估算显著低于全量,且不污染决策台账") {
+    agent::ContextManager context;
+    // 一轮里同一文件读三遍:冷区(最后一条用户输入之前)的重复只读结果在
+    // 工作视图里只留一份正文,后来者换引用。
+    const std::string file_body = "同一份文件正文," + std::string(2000, 'f');
+    context.PushUserTurn(UserMessage("读一下这个文件"), UserMessage("读一下这个文件"));
+    const nlohmann::json input = {{"path", "src/app.cpp"}};
+    for (int i = 0; i < 3; ++i) {
+        context.PushMessage(AssistantToolUse("use_" + std::to_string(i), "read_file", input));
+        context.PushMessage(UserToolResult("use_" + std::to_string(i), file_body));
+    }
+    context.PushMessage(AssistantMessage("读完了,说点结论。"));
+
+    const std::size_t full_tokens = agent::EstimateHistoryTokens(context.request_history());
+    const std::size_t pressure_tokens = agent::EstimateHistoryTokens(context.BuildPressureDryRunView());
+    // 三份重复收敛成一份正文 + 两条引用:估算至少省掉一份以上的量。
+    CHECK(pressure_tokens < full_tokens * 3 / 4);
+
+    // dry-run 不落决策台账:正式 BuildWorkingView 照常从头定形,视图与
+    // dry-run 同形状(估算可复核)。
+    CHECK(context.result_view_memo().decisions.empty());
+    agent::ContextViewBudget budget{10000000};
+    const auto working = context.BuildWorkingView(budget);
+    CHECK(agent::EstimateHistoryTokens(working.messages) == pressure_tokens);
+    CHECK_FALSE(context.result_view_memo().decisions.empty());
+}
+
+TEST_CASE("BuildPressureDryRunView: 关掉结构压缩时原样返回请求账") {
+    agent::ContextManager context;
+    context.set_structural_compression_enabled(false);
+    context.PushUserTurn(UserMessage("问"), UserMessage("问"));
+    context.PushMessage(AssistantMessage("答"));
+    const auto view = context.BuildPressureDryRunView();
+    REQUIRE(view.size() == 2);
+    CHECK(std::get<api::TextBlock>(view[0].content[0]).text == "问");
+}

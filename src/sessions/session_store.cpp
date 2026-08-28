@@ -331,11 +331,38 @@ std::optional<api::Message> DeserializeSessionMessage(const std::string& line) {
 // 事件行(compact / title)
 // ---------------------------------------------------------------------------
 
+namespace {
+// kept_ids 字段(跳跃保留集)的读写:老档没有,缺省空表 = 连续保留老语义。
+void WriteKeptIndices(nlohmann::json& j, const std::vector<std::size_t>& kept_indices) {
+    if (kept_indices.empty()) {
+        return;  // 连续保留:不写字段,字节与老档一致
+    }
+    nlohmann::json ids = nlohmann::json::array();
+    for (const std::size_t index : kept_indices) {
+        ids.push_back(index);
+    }
+    j["kept_ids"] = std::move(ids);
+}
+std::vector<std::size_t> ReadKeptIndices(const nlohmann::json& j) {
+    std::vector<std::size_t> indices;
+    if (!j.contains("kept_ids") || !j["kept_ids"].is_array()) {
+        return indices;
+    }
+    for (const auto& item : j["kept_ids"]) {
+        if (item.is_number_unsigned()) {
+            indices.push_back(item.get<std::size_t>());
+        }
+    }
+    return indices;
+}
+}  // namespace
+
 std::string SerializeCompactEvent(const CompactEvent& event, const std::string& ts) {
     nlohmann::json j;
     j["type"] = "compact";
     j["archive"] = MessageToJson(event.archive);
     j["kept_from"] = event.kept_from;
+    WriteKeptIndices(j, event.kept_indices);
     j["ts"] = ts;
     return platform::DumpJsonSanitized(j);  // 坏串窄边界,同 SerializeSessionMessage
 }
@@ -359,10 +386,12 @@ std::optional<CompactEvent> ParseCompactEvent(const std::string& line) {
     CompactEvent event;
     event.archive = std::move(*archive);
     event.kept_from = static_cast<std::size_t>(kept);
+    event.kept_indices = ReadKeptIndices(j);
     return event;
 }
 
-CompactEvent MakeCompactEvent(std::size_t old_history_size, const std::vector<api::Message>& new_history) {
+CompactEvent MakeCompactEvent(std::size_t old_history_size, const std::vector<api::Message>& new_history,
+                               std::vector<std::size_t> kept_indices) {
     CompactEvent event;
     if (new_history.empty()) {
         // 不该发生(BuildCompactedHistory 至少给一条),纯防御:空 archive、
@@ -374,12 +403,27 @@ CompactEvent MakeCompactEvent(std::size_t old_history_size, const std::vector<ap
     event.archive = new_history.front();
     const std::size_t kept_count = new_history.size() - 1;
     event.kept_from = old_history_size >= kept_count ? old_history_size - kept_count : 0;
+    event.kept_indices = std::move(kept_indices);
     return event;
 }
 
 std::vector<api::Message> ApplyCompactEvent(std::vector<api::Message> effective, const CompactEvent& event) {
-    const std::size_t from = (std::min)(event.kept_from, effective.size());
     std::vector<api::Message> out;
+    if (!event.kept_indices.empty()) {
+        // 跳跃保留集(组收法):按下标取,被替换的旧历史不再装回来。首下标
+        // 的原消息已被 archive 并进文本(压缩时 new_history[0] = archive +
+        // 首条),不再重复取——与连续路 kept_from 的老语义同型。
+        out.reserve(event.kept_indices.size());
+        out.push_back(event.archive);
+        for (std::size_t i = 1; i < event.kept_indices.size(); ++i) {
+            const std::size_t index = event.kept_indices[i];
+            if (index < effective.size()) {
+                out.push_back(std::move(effective[index]));
+            }
+        }
+        return out;
+    }
+    const std::size_t from = (std::min)(event.kept_from, effective.size());
     out.reserve(1 + (effective.size() - from));
     out.push_back(event.archive);
     for (std::size_t i = from; i < effective.size(); ++i) {
@@ -399,6 +443,7 @@ std::string SerializeCompactV2Event(const CompactV2Event& event, const std::stri
     j["epoch"] = event.epoch;
     j["archive"] = MessageToJson(event.archive);
     j["kept_from"] = event.kept_from;
+    WriteKeptIndices(j, event.kept_indices);
     if (!event.manifest.is_null()) {
         j["manifest"] = event.manifest;
     }
@@ -428,6 +473,7 @@ std::optional<CompactV2Event> ParseCompactV2Event(const std::string& line) {
     CompactV2Event event;
     event.archive = std::move(*archive);
     event.kept_from = static_cast<std::size_t>(kept);
+    event.kept_indices = ReadKeptIndices(j);
     if (j.contains("epoch") && j["epoch"].is_number_integer()) {
         event.epoch = j["epoch"].get<int>();
     }
@@ -444,6 +490,7 @@ CompactV2Event UpgradeToV2(const CompactEvent& event, int epoch, nlohmann::json 
     CompactV2Event v2;
     v2.archive = event.archive;
     v2.kept_from = event.kept_from;
+    v2.kept_indices = event.kept_indices;
     v2.epoch = epoch;
     v2.manifest = std::move(manifest);
     v2.metrics = std::move(metrics);
@@ -454,6 +501,7 @@ CompactEvent AsCompactEvent(const CompactV2Event& event) {
     CompactEvent v1;
     v1.archive = event.archive;
     v1.kept_from = event.kept_from;
+    v1.kept_indices = event.kept_indices;
     return v1;
 }
 

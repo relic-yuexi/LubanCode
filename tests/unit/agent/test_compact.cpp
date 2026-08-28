@@ -8,6 +8,7 @@
 #include <doctest/doctest.h>
 
 #include <deque>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -163,11 +164,14 @@ TEST_CASE("BuildCompactedHistory: 热区按 token 预算往前多收几轮,老�
     CHECK(std::get<api::TextBlock>(wide[0].content[0]).text.find("老话") != std::string::npos);
     CHECK(std::get<api::TextBlock>(wide[2].content[0]).text.find("中话") != std::string::npos);
 
-    // 预算掐小:只留最后一轮(最后一轮必留,不论预算)。
+    // 预算掐小:末轮超预算时不再整轮全保——轮头(最新用户输入)必保并入
+    // 存档,后面的 assistant 消息装不下就不进热区(P1-1 反涨的修法)。
     auto narrow = agent::BuildCompactedHistory(history, archive, /*hot_zone_tokens=*/1);
-    REQUIRE(narrow.size() == 2);  // 最后一轮 2 条,第一条已并入存档
-    CHECK(std::get<api::TextBlock>(narrow[0].content[0]).text.find("新话") != std::string::npos);
-    CHECK(std::get<api::TextBlock>(narrow[0].content[0]).text.find("中话") == std::string::npos);
+    REQUIRE(narrow.size() == 1);  // 只剩轮头 user 消息一条,已并入存档
+    const std::string& narrow_text = std::get<api::TextBlock>(narrow[0].content[0]).text;
+    CHECK(narrow_text.find("新话") != std::string::npos);
+    CHECK(narrow_text.find("新回答") == std::string::npos);
+    CHECK(narrow_text.find("中话") == std::string::npos);
 }
 
 TEST_CASE("BuildCompactedHistory: tool_use 和 tool_result 永远配对,不会被切开") {
@@ -209,6 +213,87 @@ TEST_CASE("BuildCompactedHistory: 历史里找不到真正的用户文本输入�
 
     REQUIRE(new_history.size() == 1);
     CHECK(std::get<api::TextBlock>(new_history[0].content[0]).text.find("对话存档") != std::string::npos);
+}
+
+// P1-1 反涨的真机形状:mid-turn 长工具循环——从最新用户消息到尾全在一个
+// "轮"里,旧实现整轮保留导致压缩后反而更长(实测 70.8k 压成 73.7k)。新
+// 规矩:末轮超预算时轮头必保、其余按 assistant+tool_result 消息组从尾收,
+// 压缩后的新历史必须显著小于原历史。
+TEST_CASE("BuildCompactedHistory: mid-turn 巨轮超预算,按消息组从尾收,新历史显著收窄") {
+    std::vector<api::Message> history;
+    history.push_back(UserText("开始建图书系统,先读需求再写代码"));
+    // 三组工具来回,每组的结果都巨大(4k ASCII 一枚,统一口径下约 1k token)。
+    const std::string huge_result = std::string(4000, 'r');
+    for (int i = 0; i < 3; ++i) {
+        const std::string id = "tool_" + std::to_string(i);
+        history.push_back(AssistantToolUse(id, "read_file"));
+        history.push_back(UserToolResult(id, huge_result));
+    }
+    // 最后再补一组小来回:它该被优先保进热区。
+    history.push_back(AssistantToolUse("tool_last", "search"));
+    history.push_back(UserToolResult("tool_last", "短结果"));
+
+    api::Message archive = UserText("[对话存档,此前内容已压缩] 摘要正文,不短,凑够四十个字符以上。");
+    // 预算 1500 token:末轮总量约 3k+,超预算,走组收法。
+    const auto new_history = agent::BuildCompactedHistory(history, archive, /*hot_zone_tokens=*/1500);
+
+    // 1) 必须显著收窄:远小于原历史。
+    CHECK(agent::EstimateHistoryTokens(new_history) < agent::EstimateHistoryTokens(history) / 2);
+
+    // 2) 轮头(最新用户输入)必保,且存档并进它的开头。
+    REQUIRE_FALSE(new_history.empty());
+    REQUIRE(std::holds_alternative<api::TextBlock>(new_history[0].content[0]));
+    const std::string& head_text = std::get<api::TextBlock>(new_history[0].content[0]).text;
+    CHECK(head_text.find("对话存档") != std::string::npos);
+    CHECK(head_text.find("开始建图书系统") != std::string::npos);
+
+    // 3) 保留的消息组内 tool_use/tool_result 配对不破;裁掉的大结果不在。
+    std::set<std::string> kept_use_ids;
+    for (const auto& message : new_history) {
+        for (const auto& block : message.content) {
+            if (const auto* use = std::get_if<api::ToolUseBlock>(&block); use != nullptr) {
+                kept_use_ids.insert(use->id);
+            }
+        }
+    }
+    for (const auto& id : kept_use_ids) {
+        bool paired = false;
+        for (const auto& message : new_history) {
+            for (const auto& block : message.content) {
+                if (const auto* result = std::get_if<api::ToolResultBlock>(&block);
+                    result != nullptr && result->tool_use_id == id) {
+                    paired = true;
+                }
+            }
+        }
+        CHECK(paired);
+    }
+    // 尾部的小组装得下,该进热区;靠头的巨结果组装不下,不进(从尾收:
+    // 最近的工具来回最相关)。
+    CHECK(kept_use_ids.count("tool_last") == 1);
+    CHECK(kept_use_ids.count("tool_2") == 1);
+    CHECK(kept_use_ids.count("tool_0") == 0);
+    CHECK(kept_use_ids.count("tool_1") == 0);
+
+    // 4) 没有相邻两条 user 消息(archive 并入轮头,不单独成条)。
+    for (std::size_t i = 0; i + 1 < new_history.size(); ++i) {
+        const bool both_user =
+            new_history[i].role == api::Role::User && new_history[i + 1].role == api::Role::User;
+        CHECK_FALSE(both_user);
+    }
+}
+
+TEST_CASE("ShouldSkipCompactForHysteresis: 新增不足滞回带就跳过,攒足了才放行") {
+    // 无进展(同一视图连压):跳过。
+    CHECK(agent::ShouldSkipCompactForHysteresis(/*last_post=*/100000, /*before=*/100000));
+    CHECK(agent::ShouldSkipCompactForHysteresis(100000, 100500));
+    // 新增越过滞回带:放行。
+    CHECK_FALSE(agent::ShouldSkipCompactForHysteresis(100000, 100000 + agent::kCompactHysteresisFloorTokens));
+    // 历史反而更小(不该发生,防御):视为无进展,跳过。
+    CHECK(agent::ShouldSkipCompactForHysteresis(100000, 90000));
+    // 自定义带宽照算。
+    CHECK(agent::ShouldSkipCompactForHysteresis(100, 104, /*floor_tokens=*/5));
+    CHECK_FALSE(agent::ShouldSkipCompactForHysteresis(100, 106, /*floor_tokens=*/5));
 }
 
 TEST_CASE("BuildCompactedHistory: 空历史,新历史只有 archive") {

@@ -746,3 +746,309 @@ TEST_CASE("跨家判定:多家已配目录都列同名 → ambiguous,不自动�
     CHECK(solo->configured);
     CHECK(solo->provider_id == "ccmoon");
 }
+
+// ---------------------------------------------------------------------------
+// TryRunCompact 的会话级钉子(P1-1/P1-2):滞回带、反涨拒收、压缩后下一
+// 请求/工具执行/session flush 回归。夹具全是合成数据——多轮、多工具、
+// 带旧压缩摘要的形状照真机会话档捏,不碰用户真实会话。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 按脚本吐流的假后端:记下收到的请求(滞回断言"没再发请求"要数它)。
+class ScriptBackend : public lubancode::api::Backend {
+public:
+    std::vector<lubancode::api::StreamEvent> script;
+    std::vector<lubancode::api::Request> captured;
+
+    std::expected<void, lubancode::api::Error> send_stream(
+        const lubancode::api::Request& request,
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* = nullptr) override {
+        captured.push_back(request);
+        for (const auto& event : script) {
+            on_event(event);
+        }
+        return {};
+    }
+};
+
+std::vector<lubancode::api::StreamEvent> TextScript(const std::string& text) {
+    return {
+        lubancode::api::MessageStart{"msg", "model"},
+        lubancode::api::TextDelta{text},
+        lubancode::api::ContentBlockDone{0},
+        lubancode::api::MessageDone{"end_turn", lubancode::api::Usage{}},
+    };
+}
+
+std::vector<lubancode::api::StreamEvent> ToolUseScript(const std::string& tool_use_id) {
+    // 一条带 tool_use 的 assistant 消息:验证压缩后的工具执行链。
+    return {
+        lubancode::api::MessageStart{"msg", "model"},
+        lubancode::api::ToolUseStart{0, tool_use_id, "no_such_tool"},
+        lubancode::api::ToolUseInputDelta{0, "{}"},
+        lubancode::api::ContentBlockDone{0},
+        lubancode::api::MessageDone{"tool_use", lubancode::api::Usage{}},
+    };
+}
+
+// 合成会话:两轮 + 末轮多组工具来回,总量 ~16k token(ASCII 4 字符/token)。
+// 形状照真机会话档捏——工具结果占大头,正是 L1 结构压缩的主战场。
+std::vector<lubancode::api::Message> SyntheticMultiToolHistory() {
+    std::vector<lubancode::api::Message> history;
+    auto user_text = [](const std::string& text) {
+        lubancode::api::Message m;
+        m.role = lubancode::api::Role::User;
+        m.content.push_back(lubancode::api::TextBlock{text});
+        return m;
+    };
+    auto assistant_text = [](const std::string& text) {
+        lubancode::api::Message m;
+        m.role = lubancode::api::Role::Assistant;
+        m.content.push_back(lubancode::api::TextBlock{text});
+        return m;
+    };
+    history.push_back(user_text("第一轮:先做规划"));
+    history.push_back(assistant_text(std::string(2000, 'a')));
+    history.push_back(user_text("第二轮:读文件并落码"));
+    const std::string big_result(16000, 'b');
+    for (int i = 0; i < 4; ++i) {
+        const std::string id = "u" + std::to_string(i);
+        lubancode::api::Message use;
+        use.role = lubancode::api::Role::Assistant;
+        lubancode::api::ToolUseBlock block;
+        block.id = id;
+        block.name = "read_file";
+        block.input = nlohmann::json{{"path", "src/big_" + std::to_string(i) + ".cpp"}};
+        use.content.push_back(block);
+        history.push_back(use);
+        lubancode::api::Message result;
+        result.role = lubancode::api::Role::User;
+        result.content.push_back(lubancode::api::ToolResultBlock{id, big_result, false});
+        history.push_back(result);
+    }
+    return history;
+}
+
+}  // namespace
+
+TEST_CASE("TryRunCompact: 压缩收窄落档;同一视图无进展的第二次触发被滞回拦下") {
+    const auto dir = TempDir("compact_hysteresis");
+    lubancode::sessions::SessionStore store(dir.string());
+    lubancode::tools::ToolRegistry registry;
+    ScriptBackend compact_backend;
+    compact_backend.script = TextScript(
+        "## 任务目标\n建图书系统\n## 已证实的事实\n规划已出\n## 关键决策\n按层落码\n"
+        "## 涉及文件与符号\nsrc/app.cpp\n## 关键命令与结果\n(无)\n## 未完成事项\n(无)\n"
+        "```json\n{\"goal\": \"建图书系统\", \"constraints\": [], \"open_items\": [], \"next_action\": \"落码\"}\n```");
+    lubancode::agent::Agent loop(compact_backend, registry,
+                                 lubancode::agent::AgentProfile{.request{.model = "test-model"},
+                                                                .system_prompt = "sys"});
+    loop.ReplaceHistory(SyntheticMultiToolHistory());
+    REQUIRE(store.Begin(lubancode::sessions::SessionMeta{}, "sess-compact-hyst"));
+
+    CompactSessionInputs in;
+    in.agent = &loop;
+    const lubancode::cli::Theme theme;
+    in.theme = &theme;
+    int compact_epoch = 0;
+    in.session_compact_epoch = &compact_epoch;
+    std::string last_compact_line;
+    in.last_compact_line = &last_compact_line;
+    std::size_t persisted = 0;
+    in.persisted_count = &persisted;
+    in.session_store = &store;
+    in.session_store_broken = false;
+    CompactHysteresis hysteresis;
+    in.hysteresis = &hysteresis;
+    in.build_compact_options = [] { return lubancode::agent::CompactOptions{}; };
+    lubancode::agent::ModelRoute route;
+    route.model = "test-model";
+    in.route_compact = [&compact_backend, &route]() {
+        lubancode::app::ModelRouterService::Routed routed;
+        routed.route = route;
+        routed.backend = &compact_backend;
+        return routed;
+    };
+    in.route_repair = in.route_compact;
+    in.normal_backend = &compact_backend;
+    const std::string current_model = "test-model";
+    in.current_model = &current_model;
+    in.record_usage = [](const lubancode::agent::ModelRole, const lubancode::agent::ModelRoute&,
+                         const lubancode::agent::BackgroundCallAccounting&) {};
+    in.record_fallback = [](lubancode::agent::TaskKind, lubancode::agent::ModelRole,
+                            lubancode::agent::ModelRole, const std::string&) {};
+
+    const std::size_t before = loop.History().size();
+    // 第一次:成功换账,历史收窄,滞回账挂上。
+    CHECK(TryRunCompact(/*midturn=*/true, in));
+    CHECK(loop.History().size() < before);
+    CHECK(hysteresis.armed);
+    CHECK_FALSE(last_compact_line.empty());
+    const std::size_t requests_after_first = compact_backend.captured.size();
+
+    // 第二次,同一副历史,零新增:滞回拦下,连摘要请求都不发。
+    CHECK_FALSE(TryRunCompact(/*midturn=*/true, in));
+    CHECK(compact_backend.captured.size() == requests_after_first);
+
+    // 攒足新内容(越过滞回带)再触发:放行。
+    lubancode::api::Message fresh;
+    fresh.role = lubancode::api::Role::User;
+    fresh.content.push_back(lubancode::api::TextBlock{std::string(24000, 'c')});
+    loop.ReplaceHistory([&loop]() {
+        std::vector<lubancode::api::Message> extended = loop.History();
+        lubancode::api::Message fresh;
+        fresh.role = lubancode::api::Role::User;
+        fresh.content.push_back(lubancode::api::TextBlock{std::string(24000, 'c')});
+        extended.push_back(fresh);
+        return extended;
+    }());
+    CHECK(TryRunCompact(/*midturn=*/true, in));
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("TryRunCompact: 压缩结果不降反升时拒收换账,历史一字未动") {
+    const auto dir = TempDir("compact_grew");
+    lubancode::sessions::SessionStore store(dir.string());
+    lubancode::tools::ToolRegistry registry;
+    ScriptBackend compact_backend;
+    // 摘要本身 ~700 token:压不进一条总共 ~900 token 的小史。
+    compact_backend.script = TextScript(
+        "## 任务目标\n小史\n## 已证实的事实\n" + std::string(2600, 's') +
+        "\n## 关键决策\n(无)\n## 涉及文件与符号\n(无)\n## 关键命令与结果\n(无)\n## 未完成事项\n(无)\n"
+        "```json\n{\"goal\": \"小史\", \"constraints\": [], \"open_items\": [], \"next_action\": \"收工\"}\n```");
+    lubancode::agent::Agent loop(compact_backend, registry,
+                                 lubancode::agent::AgentProfile{.request{.model = "test-model"},
+                                                                .system_prompt = "sys"});
+    std::vector<lubancode::api::Message> small;
+    lubancode::api::Message u;
+    u.role = lubancode::api::Role::User;
+    u.content.push_back(lubancode::api::TextBlock{std::string(1500, 'u')});
+    small.push_back(u);
+    lubancode::api::Message a;
+    a.role = lubancode::api::Role::Assistant;
+    a.content.push_back(lubancode::api::TextBlock{std::string(1500, 'v')});
+    small.push_back(a);
+    loop.ReplaceHistory(small);
+    const std::size_t size_before = loop.History().size();
+
+    CompactSessionInputs in;
+    in.agent = &loop;
+    const lubancode::cli::Theme theme;
+    in.theme = &theme;
+    in.session_store = &store;
+    int compact_epoch = 0;
+    in.session_compact_epoch = &compact_epoch;
+    std::string last_compact_line;
+    in.last_compact_line = &last_compact_line;
+    std::size_t persisted = 0;
+    in.persisted_count = &persisted;
+    in.build_compact_options = [] { return lubancode::agent::CompactOptions{}; };
+    lubancode::agent::ModelRoute route;
+    route.model = "test-model";
+    in.route_compact = [&compact_backend, &route]() {
+        lubancode::app::ModelRouterService::Routed routed;
+        routed.route = route;
+        routed.backend = &compact_backend;
+        return routed;
+    };
+    in.route_repair = in.route_compact;
+    in.normal_backend = &compact_backend;
+    const std::string current_model = "test-model";
+    in.current_model = &current_model;
+    in.record_usage = [](const lubancode::agent::ModelRole, const lubancode::agent::ModelRoute&,
+                         const lubancode::agent::BackgroundCallAccounting&) {};
+    in.record_fallback = [](lubancode::agent::TaskKind, lubancode::agent::ModelRole,
+                            lubancode::agent::ModelRole, const std::string&) {};
+    CompactHysteresis hysteresis;
+    in.hysteresis = &hysteresis;
+
+    // 热区默认 12k 装得下整条小史:archive 并进去后比原史还长 → 拒收。
+    CHECK_FALSE(TryRunCompact(/*midturn=*/true, in));
+    CHECK(loop.History().size() == size_before);  // 历史未动
+    CHECK(hysteresis.armed);                      // 拒收也算收口:同轮不再自动重试
+
+    std::error_code ec;
+    std::filesystem::remove_all(dir, ec);
+}
+
+TEST_CASE("TryRunCompact 压缩成功后:下一次模型请求、工具执行、session flush 都活着") {
+    const auto dir = TempDir("compact_aftermath");
+    lubancode::sessions::SessionStore store(dir.string());
+    lubancode::tools::ToolRegistry registry;
+    ScriptBackend compact_backend;
+    compact_backend.script = TextScript(
+        "## 任务目标\n回归\n## 已证实的事实\n压缩已过\n## 关键决策\n(无)\n"
+        "## 涉及文件与符号\n(无)\n## 关键命令与结果\n(无)\n## 未完成事项\n(无)\n"
+        "```json\n{\"goal\": \"回归\", \"constraints\": [], \"open_items\": [], \"next_action\": \"继续\"}\n```");
+    lubancode::agent::Agent loop(compact_backend, registry,
+                                 lubancode::agent::AgentProfile{.request{.model = "test-model"},
+                                                                .runtime{.max_steps_per_turn = 2},
+                                                                .system_prompt = "sys"});
+    loop.ReplaceHistory(SyntheticMultiToolHistory());
+    REQUIRE(store.Begin(lubancode::sessions::SessionMeta{}, "sess-compact-aftermath"));
+
+    CompactSessionInputs in;
+    in.agent = &loop;
+    const lubancode::cli::Theme theme;
+    in.theme = &theme;
+    in.session_store = &store;
+    int compact_epoch = 0;
+    in.session_compact_epoch = &compact_epoch;
+    std::string last_compact_line;
+    in.last_compact_line = &last_compact_line;
+    std::size_t persisted = 0;
+    in.persisted_count = &persisted;
+    in.persist_new_messages = [] {};
+    in.build_compact_options = [] { return lubancode::agent::CompactOptions{}; };
+    lubancode::agent::ModelRoute route;
+    route.model = "test-model";
+    in.route_compact = [&compact_backend, &route]() {
+        lubancode::app::ModelRouterService::Routed routed;
+        routed.route = route;
+        routed.backend = &compact_backend;
+        return routed;
+    };
+    in.route_repair = in.route_compact;
+    in.normal_backend = &compact_backend;
+    const std::string current_model = "test-model";
+    in.current_model = &current_model;
+    in.record_usage = [](const lubancode::agent::ModelRole, const lubancode::agent::ModelRoute&,
+                         const lubancode::agent::BackgroundCallAccounting&) {};
+    in.record_fallback = [](lubancode::agent::TaskKind, lubancode::agent::ModelRole,
+                            lubancode::agent::ModelRole, const std::string&) {};
+    CompactHysteresis hysteresis;
+    in.hysteresis = &hysteresis;
+
+    REQUIRE(TryRunCompact(/*midturn=*/true, in));
+
+    // 压缩后的下一次模型请求 + 工具执行:换上带 tool_use 的脚本再跑一轮,
+    // 未知工具也走完整执行链(结果配对入史,请求链路活着)。
+    compact_backend.script = ToolUseScript("post_compact_use");
+    const auto outcome = loop.Run("压缩完继续干活", lubancode::agent::TurnWiring{});
+    REQUIRE(outcome.has_value());
+    CHECK(compact_backend.captured.size() >= 2);  // 压缩请求 + 至少一轮续请求
+    bool paired = false;
+    for (const auto& message : loop.History()) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<lubancode::api::ToolResultBlock>(&block);
+                result != nullptr && result->tool_use_id == "post_compact_use") {
+                paired = true;
+            }
+        }
+    }
+    CHECK(paired);
+
+    // session flush:存档文件落了 compact_v2 与后续消息。
+    lubancode::api::Message tail;
+    tail.role = lubancode::api::Role::User;
+    tail.content.push_back(lubancode::api::TextBlock{"压缩后的尾巴"});
+    CHECK(store.AppendMessage(tail));  // flush 路径本身不炸
+    std::error_code ec;
+    const bool ledger_exists = std::filesystem::file_size(store.file_path(), ec) > 0;
+    CHECK(ledger_exists);
+    std::filesystem::remove_all(dir, ec);
+}

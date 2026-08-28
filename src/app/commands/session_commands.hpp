@@ -110,6 +110,15 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
 // PreCompact 钩子闸 → cheap 路由 → HandleCompactCommand 正戏 → 分角色
 // 记账 + 状态栏短闪 → 落盘基线收缩 + compact_v2 事件追加(goal/loop
 // snapshot 由会话补)→ PostCompact/SessionStart 审计钩子。
+
+// 压缩滞回的会话活账(P1-1 连环压缩):由会话控制器持有,随材料包递进
+// TryRunCompact。上次压缩收口(成功换账、反涨拒收或失败收场都算)时的
+// 压力口径估算记在 last_post_tokens;下次触发先问 ShouldSkipCompact-
+// ForHysteresis——新增不足滞回带就不压,同一 turn 无进展不得连压。
+struct CompactHysteresis {
+    bool armed = false;                 // 本场是否已有一次压缩收口
+    std::size_t last_post_tokens = 0;   // 上次收口时的压力口径估算
+};
 struct CompactSessionInputs {
     lubancode::agent::Agent* agent = nullptr;
     const lubancode::cli::Theme* theme = nullptr;
@@ -119,6 +128,8 @@ struct CompactSessionInputs {
     std::size_t* persisted_count = nullptr;        // 落盘基线(压缩后收缩)
     lubancode::sessions::SessionStore* session_store = nullptr;
     bool session_store_broken = false;
+    // 压缩滞回活账(可空 = 单测/无状态场景,不设防)。
+    CompactHysteresis* hysteresis = nullptr;
     // 压缩参数现场收集(compact 的窗口预算/守恒校验材料)。BuildCompactOptions
     // 的现算(路由声明/目录条目/活动待办守恒)全在里面。
     std::function<lubancode::agent::CompactOptions()> build_compact_options;

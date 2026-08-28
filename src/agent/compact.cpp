@@ -670,7 +670,8 @@ CompactValidation ValidateCompactManifest(const CompactManifest& manifest,
 }
 
 std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>& history,
-                                                const api::Message& archive, std::size_t hot_zone_tokens) {
+                                                const api::Message& archive, std::size_t hot_zone_tokens,
+                                                std::vector<std::size_t>* kept_indices_out) {
     std::vector<api::Message> new_history;
 
     // 按轮切:turns[i] = [start, end),一条用户文本输入领起,直到下一条
@@ -690,10 +691,6 @@ std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>&
         return new_history;
     }
 
-    // 热区:从最后一轮整轮保留起,往前按轮收,收满 token 预算为止。
-    // 最后一轮(最新用户消息所在)无论多大都保——它是必须钉住的内容,
-    // 压不得;再往前的轮只有整个装得下预算才进来,装不下就停在轮边界,
-    // tool_use/tool_result 的配对天然不被切开。
     std::vector<std::size_t> message_tokens(history.size());
     for (std::size_t i = 0; i < history.size(); ++i) {
         // 每条至少记 1 token:估算为零的空壳消息不该白占热区预算(也让
@@ -712,18 +709,81 @@ std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>&
     for (std::size_t i = keep_from; i < history.size(); ++i) {
         used += message_tokens[i];
     }
-    for (std::size_t t = turns.size() - 1; t-- > 0;) {
-        const std::size_t tokens = turn_tokens(t);
-        if (used + tokens > hot_zone_tokens) {
-            break;
+    if (used <= hot_zone_tokens) {
+        // 末轮装得下:从最后一轮整轮保留起,往前按轮收,收满 token 预算
+        // 为止。再往前的轮只有整个装得下预算才进来,装不下就停在轮边界,
+        // tool_use/tool_result 的配对天然不被切开。
+        for (std::size_t t = turns.size() - 1; t-- > 0;) {
+            const std::size_t tokens = turn_tokens(t);
+            if (used + tokens > hot_zone_tokens) {
+                break;
+            }
+            used += tokens;
+            keep_from = turns[t].first;
         }
-        used += tokens;
-        keep_from = turns[t].first;
+    }
+    // 末轮超预算(P1-1 反涨的真机形状):mid-turn 压缩时,从最新用户消息
+    // 到尾全在一个"轮"里——长工具循环能攒几十 k 的工具来回,整轮保留等
+    // 于没压,archive 添在头上反而更长(实测 70.8k -> 73.7k)。这时热区
+    // 预算当真:轮头那条 user 消息(最新用户输入)必保,其后按"消息组"
+    // 收——一组 = 一条 assistant 消息(可能带 tool_use)加紧随的
+    // user(tool_result) 消息,组内天然配对不劈;收满预算为止,没收进的
+    // 中段交给存档概括。保留集在下面 kept_indices 段就地构造。
+
+    // 保留区的消息下标(升序):末轮装得下时是 [keep_from, end) 连续段;
+    // 末轮超预算走组收法时是"轮头 + 收进的若干尾部组",没收进的中段组
+    // 直接不在列——那部分交给存档概括,不占热区(这正是 mid-turn 巨轮能
+    // 收窄的那一刀)。
+    std::vector<std::size_t> kept_indices;
+    if (used > hot_zone_tokens) {
+        const std::size_t turn_begin = turns.back().first;
+        const std::size_t turn_end = history.size();
+        // 先把末轮切成消息组:一组 = 一条 assistant 消息(可能带 tool_use)
+        // 加紧随的 user(tool_result) 消息,组内天然配对不劈。
+        std::vector<std::pair<std::size_t, std::size_t>> groups;
+        for (std::size_t i = turn_begin + 1; i < turn_end;) {
+            if (history[i].role != api::Role::Assistant) {
+                ++i;  // 轮头后的零散 user 片段(理论少见),不进热区
+                continue;
+            }
+            std::size_t to = i + 1;
+            while (to < turn_end && history[to].role == api::Role::User && !IsUserTurnStart(history[to])) {
+                ++to;
+            }
+            groups.emplace_back(i, to);
+            i = to;
+        }
+        // 从尾往前收:最近的工具来回最相关,装得下就保;中段装不下的交给
+        // 存档概括。
+        std::vector<std::pair<std::size_t, std::size_t>> kept_groups;
+        std::size_t tail_used = message_tokens[turn_begin];
+        for (std::size_t g = groups.size(); g-- > 0;) {
+            std::size_t group_tokens = 0;
+            for (std::size_t j = groups[g].first; j < groups[g].second; ++j) {
+                group_tokens += message_tokens[j];
+            }
+            if (tail_used + group_tokens > hot_zone_tokens) {
+                continue;
+            }
+            tail_used += group_tokens;
+            kept_groups.push_back(groups[g]);
+        }
+        kept_indices.push_back(turn_begin);  // 最新用户输入绝不丢
+        for (std::size_t g = kept_groups.size(); g-- > 0;) {
+            for (std::size_t j = kept_groups[g].first; j < kept_groups[g].second; ++j) {
+                kept_indices.push_back(j);
+            }
+        }
+    } else {
+        for (std::size_t i = keep_from; i < history.size(); ++i) {
+            kept_indices.push_back(i);
+        }
     }
 
-    // 存档正文并入热区第一条 user 消息开头,不单独成一条消息——独立的
+    // 存档正文并入保留区第一条 user 消息开头,不单独成一条消息——独立的
     // 存档 user 消息紧跟热区的 user 输入,就是相邻两条 user,违反 Anthropic
-    // 的角色交替要求(标准端点 400;MiniMax 宽容,才一直没暴露)。
+    // 的角色交替要求(标准端点 400;MiniMax 宽容,才一直没暴露)。两条路
+    // 的第一条都是 user 文本消息(整轮路是某轮轮头;组收路是末轮轮头)。
     std::string archive_text;
     for (const auto& block : archive.content) {
         if (std::holds_alternative<api::TextBlock>(block)) {
@@ -731,23 +791,31 @@ std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>&
         }
     }
 
-    api::Message merged = history[keep_from];
-    bool merged_into_text = false;
-    for (auto& block : merged.content) {
-        if (std::holds_alternative<api::TextBlock>(block)) {
-            auto& text_block = std::get<api::TextBlock>(block);
-            text_block.text = archive_text + "\n\n" + text_block.text;
-            merged_into_text = true;
-            break;
+    new_history.reserve(kept_indices.size());
+    bool archive_merged = false;
+    for (const std::size_t index : kept_indices) {
+        api::Message message = history[index];
+        if (!archive_merged) {
+            bool merged_into_text = false;
+            for (auto& block : message.content) {
+                if (std::holds_alternative<api::TextBlock>(block)) {
+                    auto& text_block = std::get<api::TextBlock>(block);
+                    text_block.text = archive_text + "\n\n" + text_block.text;
+                    merged_into_text = true;
+                    break;
+                }
+            }
+            if (!merged_into_text) {
+                // IsUserTurnStart 保证有 TextBlock,这里纯防御。
+                message.content.push_back(api::TextBlock{archive_text});
+            }
+            archive_merged = true;
         }
+        new_history.push_back(std::move(message));
     }
-    if (!merged_into_text) {
-        // IsUserTurnStart 保证有 TextBlock,这里纯防御。
-        merged.content.push_back(api::TextBlock{archive_text});
+    if (kept_indices_out != nullptr) {
+        *kept_indices_out = std::move(kept_indices);
     }
-    new_history.push_back(std::move(merged));
-    new_history.insert(new_history.end(), history.begin() + static_cast<std::ptrdiff_t>(keep_from) + 1,
-                       history.end());
 
     return new_history;
 }

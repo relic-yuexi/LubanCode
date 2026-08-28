@@ -84,6 +84,10 @@ std::optional<api::Message> DeserializeSessionMessage(const std::string& line);
 struct CompactEvent {
     api::Message archive;
     std::size_t kept_from = 0;
+    // 跳跃保留集(P1-1 组收法):压缩前有效历史里原样保留的消息下标(升序)。
+    // 空 = 连续保留(老语义,kept_from 起);非空 = 中段有被替换的组没保,
+    // 回放按这份集取,不把旧历史再装回来。下标越界的条目回放时跳过。
+    std::vector<std::size_t> kept_indices;
 };
 
 // 事件 -> 一行 JSON(不带换行符)。
@@ -96,9 +100,14 @@ std::optional<CompactEvent> ParseCompactEvent(const std::string& line);
 // 由"压缩前有效历史长度 + BuildCompactedHistory 拼出的新历史"算出事件:
 // archive = new_history.front(),kept_from = old_size - (new_history.size()-1)。
 // 新历史为空(不该发生,纯防御)给 kept_from = old_size + 空 archive。
-CompactEvent MakeCompactEvent(std::size_t old_history_size, const std::vector<api::Message>& new_history);
+// kept_indices 非空时原样带上(组收法的跳跃保留集):连续保留时它退化为
+// [kept_from, old_size),传空等价。
+CompactEvent MakeCompactEvent(std::size_t old_history_size, const std::vector<api::Message>& new_history,
+                              std::vector<std::size_t> kept_indices = {});
 
-// 回放一次压缩事件:effective 换成 [archive] + effective[kept_from..]。
+// 回放一次压缩事件:effective 换成 [archive] + 保留的原消息。kept_indices
+// 非空时按跳跃集取(archive 已并入保留区首条,首条下标对应的原消息照取,
+// 与连续路同型);否则老路 [archive] + effective[kept_from..]。
 // kept_from 越界按"全不保留"处理(夹到 effective.size()),不越界访问。
 std::vector<api::Message> ApplyCompactEvent(std::vector<api::Message> effective, const CompactEvent& event);
 
@@ -113,6 +122,7 @@ std::vector<api::Message> ApplyCompactEvent(std::vector<api::Message> effective,
 struct CompactV2Event {
     api::Message archive;      // 同 v1:压缩后顶在最前的消息(存档已并入保留轮)
     std::size_t kept_from = 0; // 同 v1:压缩前有效历史从第几条起原样保留
+    std::vector<std::size_t> kept_indices;  // 同 v1:跳跃保留集(空 = 连续保留)
     int epoch = 0;             // 本场第几次压缩(v1 也计数,从 1 起)
     nlohmann::json manifest;   // 终稿 manifest(goal/constraints/open_items/...)
     nlohmann::json metrics;    // chunks/reduce_passes/pre_post_tokens/trigger 等

@@ -89,18 +89,38 @@ struct CompactSummary {
 };
 
 // 热区 token 预算:压缩后从最后一轮用户输入往前按整轮收,收满预算为止;
-// 最后一轮无论多大都整轮保留(最新用户消息绝不丢,TrimHistory 是它后面
-// 的安全网)。不再按固定轮数留——一轮可能只有十字,也可能拖着五万 token
-// 的工具结果。
+// 末轮装得下时整轮保留,装不下时轮头(最新用户消息)必保、其后按
+// assistant+tool_result 消息组从尾收——不再"整轮无论多大都保留"。那一
+// 条在 mid-turn 长工具循环上会让压缩反涨(整轮吞掉全部历史,存档只添
+// 不删,真机 70.8k 压成 73.7k)。TrimHistory 是热区后面的安全网。
 constexpr std::size_t kDefaultHotZoneTokens = 12000;
+
+// 压缩滞回带(P1-1 连环压缩):上次压缩收口后,新增内容不足这个量时,
+// 再压一次榨不出新空间——热区+存档本身就有十几 k 的底。同一 turn 无
+// 进展不得连压两次,靠这条带隔开。
+constexpr std::size_t kCompactHysteresisFloorTokens = 4096;
+
+// 滞回判定(纯函数):last_post_tokens 是上次压缩收口(成功换账或明确
+// 拒收)时压力口径的估算,before_tokens 是这次触发时的同一口径估算。
+// 返回 true = 跳过这次压缩(无进展,再压也是拿同一副牌重洗)。
+inline bool ShouldSkipCompactForHysteresis(std::size_t last_post_tokens, std::size_t before_tokens,
+                                           std::size_t floor_tokens = kCompactHysteresisFloorTokens) {
+    const std::size_t grew = before_tokens > last_post_tokens ? before_tokens - last_post_tokens : 0;
+    return grew < floor_tokens;
+}
 
 // 拼出压缩后的完整新历史:archive 消息并入热区第一条 user 消息开头(不
 // 单独成一条,免得相邻两条 user 违反 Anthropic 角色交替),其后是按
 // hot_zone_tokens 预算保留的最近若干完整轮。history 里找不到真正的用户
 // 文本输入时,新历史里只有 archive 这一条。
+// kept_indices 出参(可空):保留集在原 history 里的消息下标(升序)。连续
+// 保留时就是 [keep_from, end);末轮超预算走组收法时会跳过没收进的中段
+// 组——compact 事件得带上这份跳跃集,/resume 才不会把被替换的旧历史又
+// 装回来。
 std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>& history,
                                                 const api::Message& archive,
-                                                std::size_t hot_zone_tokens = kDefaultHotZoneTokens);
+                                                std::size_t hot_zone_tokens = kDefaultHotZoneTokens,
+                                                std::vector<std::size_t>* kept_indices = nullptr);
 
 // 向模型请求一次历史压缩。指令要求:固定六栏 Markdown 存档 + 末尾一枚
 // ```json manifest;required_open_items 非空时,指令明说这些条目必须逐字

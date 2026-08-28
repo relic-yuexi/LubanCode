@@ -504,18 +504,25 @@ TEST_CASE("compact 事件解析: 坏行给 nullopt") {
 }
 
 TEST_CASE("MakeCompactEvent 跟 BuildCompactedHistory 对得上账") {
-    // 老历史 4 条,压缩保留最后一轮(u2 起):新历史 = [并入存档的 u2, a2]。
+    // 老历史 4 条,末轮(u2+a2)各十几 token:预算 20 全装下,新历史 = [并入
+    // 存档的 u2, a2](连续保留,跳跃集为空,老语义)。
     std::vector<api::Message> history;
     history.push_back(UserText("u1"));
     history.push_back(AssistantText("a1"));
     history.push_back(UserText("u2"));
     history.push_back(AssistantText("a2"));
     const auto archive = UserText("[对话存档,此前内容已压缩] 要点");
-    const auto new_history = agent::BuildCompactedHistory(history, archive, /*hot_zone_tokens=*/1);
+    std::vector<std::size_t> kept_indices;
+    const auto new_history =
+        agent::BuildCompactedHistory(history, archive, /*hot_zone_tokens=*/2, &kept_indices);
     REQUIRE(new_history.size() == 2);
+    REQUIRE(kept_indices.size() == 2);
+    CHECK(kept_indices[0] == 2);
+    CHECK(kept_indices[1] == 3);
 
-    const auto event = sessions::MakeCompactEvent(history.size(), new_history);
-    CHECK(event.kept_from == 3);  // 老历史里 a2 那条起保留
+    const auto event = sessions::MakeCompactEvent(history.size(), new_history, kept_indices);
+    CHECK(event.kept_from == 3);  // 老历史里 u2 那条起保留
+    CHECK(event.kept_indices == kept_indices);
     CHECK(FirstText(event.archive) == FirstText(new_history[0]));
 
     // 回放老历史 + 事件,得到的正是内存里的新历史。
@@ -523,6 +530,65 @@ TEST_CASE("MakeCompactEvent 跟 BuildCompactedHistory 对得上账") {
     REQUIRE(replayed.size() == new_history.size());
     CHECK(FirstText(replayed[0]) == FirstText(new_history[0]));
     CHECK(FirstText(replayed[1]) == "a2");
+}
+
+TEST_CASE("组收法压缩的事件:带跳跃保留集,回放不把被替换的旧历史装回来") {
+    // mid-turn 巨轮:一条 user 输入 + 三组工具来回,预算只够装下轮头与最后
+    // 一组小的——中间两组大的被替换。回放必须跳过它们。
+    std::vector<api::Message> history;
+    history.push_back(UserText("开始干活"));
+    const std::string big(4000, 'b');
+    for (int i = 0; i < 2; ++i) {
+        const std::string id = "t" + std::to_string(i);
+        api::Message use;
+        use.role = api::Role::Assistant;
+        use.content.push_back(api::ToolUseBlock{id, "read_file", nlohmann::json::object()});
+        history.push_back(use);
+        api::Message result;
+        result.role = api::Role::User;
+        result.content.push_back(api::ToolResultBlock{id, big, false});
+        history.push_back(result);
+    }
+    api::Message last_use;
+    last_use.role = api::Role::Assistant;
+    last_use.content.push_back(api::ToolUseBlock{"t_last", "search", nlohmann::json::object()});
+    history.push_back(last_use);
+    api::Message last_result;
+    last_result.role = api::Role::User;
+    last_result.content.push_back(api::ToolResultBlock{"t_last", "短结果", false});
+    history.push_back(last_result);
+
+    const auto archive = UserText("[对话存档,此前内容已压缩] 干到一半的存档正文,凑够四十个字。");
+    std::vector<std::size_t> kept_indices;
+    const auto new_history =
+        agent::BuildCompactedHistory(history, archive, /*hot_zone_tokens=*/100, &kept_indices);
+    REQUIRE(new_history.size() < history.size());  // 巨轮收窄了
+    REQUIRE(kept_indices.size() == new_history.size());
+    CHECK(kept_indices[0] == 0);  // 轮头必在
+
+    const auto event = sessions::MakeCompactEvent(history.size(), new_history, kept_indices);
+    // 序列化往返:kept_ids 落进事件行,解析回来还是那份跳跃集。
+    const std::string line = sessions::SerializeCompactV2Event(
+        sessions::UpgradeToV2(event, 1, nlohmann::json::object(), nlohmann::json::object()), "t");
+    const auto parsed = sessions::ParseCompactV2Event(line);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->kept_indices == kept_indices);
+
+    // 回放:被裁掉的两组大结果不回来,保留组照在。
+    const auto replayed = sessions::ApplyCompactEvent(history, sessions::AsCompactEvent(*parsed));
+    REQUIRE(replayed.size() == new_history.size());
+    std::string replay_text;
+    for (const auto& message : replayed) {
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
+                replay_text += text->text;
+            } else if (const auto* result = std::get_if<api::ToolResultBlock>(&block); result != nullptr) {
+                replay_text += result->content;
+            }
+        }
+    }
+    CHECK(replay_text.find(big) == std::string::npos);  // 被替换的旧历史没装回来
+    CHECK(replay_text.find("短结果") != std::string::npos);
 }
 
 TEST_CASE("MakeCompactEvent: 新历史为空的防御路径") {
@@ -568,7 +634,7 @@ std::string JoinLines(const std::vector<std::string>& lines) {
 TEST_CASE("回放: 单次压缩,恢复的是压缩后的活状态") {
     // 流水:u1 a1 u2 a2 | compact | u3 a3
     std::vector<api::Message> history{UserText("u1"), AssistantText("a1"), UserText("u2"), AssistantText("a2")};
-    const auto new_history = agent::BuildCompactedHistory(history, UserText("[对话存档,此前内容已压缩] 玄武"), /*hot_zone_tokens=*/1);
+    const auto new_history = agent::BuildCompactedHistory(history, UserText("[对话存档,此前内容已压缩] 玄武"), /*hot_zone_tokens=*/2);
     const auto event = sessions::MakeCompactEvent(history.size(), new_history);
 
     std::vector<std::string> lines;
@@ -602,7 +668,7 @@ TEST_CASE("回放: 两次压缩,逐次替换,最后一次说了算") {
     for (const auto& m : effective) {
         lines.push_back(sessions::SerializeSessionMessage(m, "t"));
     }
-    auto compacted1 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档一"), /*hot_zone_tokens=*/1);
+    auto compacted1 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档一"), /*hot_zone_tokens=*/2);
     lines.push_back(sessions::SerializeCompactEvent(sessions::MakeCompactEvent(effective.size(), compacted1), "t"));
     effective = compacted1;
 
@@ -611,7 +677,7 @@ TEST_CASE("回放: 两次压缩,逐次替换,最后一次说了算") {
     effective.push_back(AssistantText("a3"));
     lines.push_back(sessions::SerializeSessionMessage(UserText("u3"), "t"));
     lines.push_back(sessions::SerializeSessionMessage(AssistantText("a3"), "t"));
-    auto compacted2 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档二"), /*hot_zone_tokens=*/1);
+    auto compacted2 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档二"), /*hot_zone_tokens=*/2);
     lines.push_back(sessions::SerializeCompactEvent(sessions::MakeCompactEvent(effective.size(), compacted2), "t"));
     effective = compacted2;
 
@@ -1055,14 +1121,14 @@ TEST_CASE("回放: v1 与 v2 混排,活状态逐次替换,epoch/manifest 记账"
     // 流水:u1 a1 | compact(v1) | u2 a2 | compact_v2 | u3 a3
     std::vector<api::Message> first{UserText("u1"), AssistantText("a1")};
     auto compacted1 = agent::BuildCompactedHistory(first, UserText("[对话存档,此前内容已压缩] 存档一"),
-                                                   /*hot_zone_tokens=*/1);
+                                                   /*hot_zone_tokens=*/2);
     sessions::CompactEvent v1_event = sessions::MakeCompactEvent(first.size(), compacted1);
 
     std::vector<api::Message> effective = compacted1;
     effective.push_back(UserText("u2"));
     effective.push_back(AssistantText("a2"));
     auto compacted2 = agent::BuildCompactedHistory(effective, UserText("[对话存档,此前内容已压缩] 存档二"),
-                                                   /*hot_zone_tokens=*/1);
+                                                   /*hot_zone_tokens=*/2);
     const auto v2_event =
         sessions::UpgradeToV2(sessions::MakeCompactEvent(effective.size(), compacted2), /*epoch=*/2,
                            nlohmann::json::parse(R"({"goal":"二期目标","open_items":["收尾"]})"),

@@ -302,8 +302,10 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
         return {};
     }
 
-    const auto new_history = lubancode::agent::BuildCompactedHistory(history, result->archive);
-    const auto base_event = lubancode::sessions::MakeCompactEvent(old_size, new_history);
+    std::vector<std::size_t> kept_indices;
+    const auto new_history = lubancode::agent::BuildCompactedHistory(
+        history, result->archive, lubancode::agent::kDefaultHotZoneTokens, &kept_indices);
+    const auto base_event = lubancode::sessions::MakeCompactEvent(old_size, new_history, std::move(kept_indices));
     loop.ReplaceHistory(new_history);
     const std::size_t after_tokens = EstimateHistoryTokens(new_history);
 
@@ -1251,7 +1253,10 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
     //   工具定义 = registry 里"会真进 tools 数组"的工具(延迟
     //              机制开着就按谓词过滤成核心+已挂载)的
     //              名字+描述+schema,外加延迟索引段;
-    //   对话历史 = loop.History() 全量(文本/工具调用/工具结果)。
+    //   对话历史 = 压力 dry-run 视图(P1-1 口径统一):与下一次真实请求、
+    //              自动压缩触发线同一本。拿全量 history 估会把重复工具
+    //              结果与超长回包虚算进去,真请求 47k 时显示 189k,用户
+    //              看着贴阈值、模型其实远未到。
     std::size_t sys_tokens = 0;
     std::size_t tools_tokens = 0;
     std::size_t history_tokens = 0;
@@ -1271,7 +1276,7 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
             tools_tokens += lubancode::agent::EstimateUtf8Tokens(
                 lubancode::tools::BuildDeferredToolsIndexSegment(*in.registry, *in.loaded_tools));
         }
-        history_tokens = lubancode::agent::EstimateHistoryTokens(loop.History());
+        history_tokens = lubancode::agent::EstimateHistoryTokens(loop.context().BuildPressureDryRunView());
     }
     // 分层占用 + 预算总账(第四期,规格"/context"节):视图各层
     // 枚数从决策台账数,预算从统一公式算,/context 打的就是
@@ -1414,7 +1419,31 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
     // backend 就直接走 normal 修一次的路(同一只),失败再报,不静默截史。
     auto compact_routed = in.route_compact();
     const lubancode::agent::CompactOptions options = in.build_compact_options();
-    const std::size_t before_tokens = lubancode::agent::EstimateHistoryTokens(loop.History());
+    // 压缩前后账走压力 dry-run 口径(P1-1 口径统一):与触发线、下一次真实
+    // 请求同一本——拿未压缩全量估,重复工具结果全被虚算,压完的"瘦"也是
+    // 假瘦。/context 的"最近一次压缩"行、compact_v2 的 pre/post_tokens
+    // 与状态栏短闪都从这两个数出。换账前对"新历史"也用同一把尺(临时
+    // memo 的 dry-run),反涨断言两边才可比。
+    const auto pressure_estimate_of = [&loop](const std::vector<lubancode::api::Message>& history) {
+        lubancode::agent::ResultViewMemo scratch_memo;
+        lubancode::agent::StructuralCompressionStats scratch_stats;
+        return lubancode::agent::EstimateHistoryTokens(
+            lubancode::agent::CompressWorkingView(history, loop.context().structural_options(), scratch_stats,
+                                                  scratch_memo, /*store=*/nullptr));
+    };
+    const std::size_t before_tokens = pressure_estimate_of(loop.History());
+
+    // 滞回带(P1-1 连环压缩):上次压缩收口后新增不足滞回带,再压一次榨
+    // 不出新空间——热区+存档本身就有十几 k 的底。同一 turn 无进展不得连
+    // 压两次;跨 turn 的新用户输入自然带来增量,不受这条拦。
+    if (in.hysteresis != nullptr && in.hysteresis->armed &&
+        lubancode::agent::ShouldSkipCompactForHysteresis(in.hysteresis->last_post_tokens, before_tokens)) {
+        out << theme.stats
+            << trf("compact.hysteresis_skip", lubancode::cli::FormatTokenCount(before_tokens),
+                   lubancode::cli::FormatTokenCount(in.hysteresis->last_post_tokens))
+            << theme.reset << tr("compact.hysteresis_skip_tail") << "\n";
+        return false;
+    }
 
     // PreCompact(trigger=auto):自动/中途压缩也过一遍门,可拦。
     {
@@ -1474,6 +1503,13 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
     if (!result.has_value()) {
         out << theme.error << trf("compact.auto_failed", result.error().message) << theme.reset
             << tr("compact.auto_failed_tail") << "\n";
+        // 失败也收滞回账:本 turn 的压缩尝试到此为止——同一段历史反复发
+        // 摘要请求,烧的是几分钟一轮的压缩费,循环比失败更伤。字符安全网
+        // 仍兜底,回执已在上面给了。
+        if (in.hysteresis != nullptr) {
+            in.hysteresis->armed = true;
+            in.hysteresis->last_post_tokens = before_tokens;
+        }
         return false;
     }
 
@@ -1484,10 +1520,32 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
     }
 
     const std::size_t old_size = loop.History().size();
-    const auto new_history = lubancode::agent::BuildCompactedHistory(loop.History(), result->archive);
-    const auto base_event = lubancode::sessions::MakeCompactEvent(old_size, new_history);
+    std::vector<std::size_t> kept_indices;
+    const auto new_history = lubancode::agent::BuildCompactedHistory(
+        loop.History(), result->archive, lubancode::agent::kDefaultHotZoneTokens, &kept_indices);
+    const std::size_t new_tokens = pressure_estimate_of(new_history);
+    // 反涨断言(P1-1):压缩后的新历史必须明显小于压缩前,否则换账就是
+    // 反涨——存档添在没瘦的热区头上,真机 70.8k 压成 73.7k 还标"校验通过"。
+    // 拒收:旧历史不动,滞回账记上,回执讲清"当前轮占大头,压缩收窄不了"。
+    if (new_tokens >= before_tokens) {
+        out << theme.error
+            << trf("compact.grew_rejected", lubancode::cli::FormatTokenCount(before_tokens),
+                   lubancode::cli::FormatTokenCount(new_tokens))
+            << theme.reset << tr("compact.grew_rejected_tail") << "\n";
+        if (in.hysteresis != nullptr) {
+            in.hysteresis->armed = true;
+            in.hysteresis->last_post_tokens = before_tokens;
+        }
+        return false;
+    }
+    const auto base_event = lubancode::sessions::MakeCompactEvent(old_size, new_history, std::move(kept_indices));
     loop.ReplaceHistory(new_history);
-    const std::size_t after_tokens = lubancode::agent::EstimateHistoryTokens(loop.History());
+    const std::size_t after_tokens = new_tokens;  // 同一份历史,同一把尺,不重算
+    // 成功换账:滞回账记上收口点。
+    if (in.hysteresis != nullptr) {
+        in.hysteresis->armed = true;
+        in.hysteresis->last_post_tokens = after_tokens;
+    }
     // 状态栏短闪:压缩前后与所用角色一行交代(规格"运行提示")。
     out << theme.stats
         << trf("router.compact_flash", lubancode::cli::FormatTokenCount(before_tokens),
