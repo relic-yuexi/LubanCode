@@ -129,6 +129,12 @@
 - **收口符不许独自掉行。** `/plugin doctor` 的 `node(v24.0.0)` 断行病根是 `--version` 尾换行嵌进格式串——版本串取首行剥白,折行按 ANSI 零宽与中文两列算宽,右括号与中文标点不再起行打头;80/100/窄终端快照钉死。
 - **帧账可审计。** `LUBANCODE_FRAME_AUDIT` 开关把帧数、字节、光标落点写 stderr;conhost 刮屏驱动 21 项与流式页脚 G7 幕全过,管道重定向无 ESC;Windows Terminal 无注键 API,如实记未验。
 
+## [v0.26.87] - 2026-08-29
+
+- **Plan 门只拦改,不拦读。** skill 加载与派只读 Agent(内置 Explore,自定义按 tools.allow 全只读判)放行;git 补 ls-tree/rev-parse 等一族只读子命令,PowerShell 补齐管道件,`Get-ChildItem | Select-Object` 与 `git ls-tree` 不再吃闭门羹;脚本块 `{ }` 体内是任意代码仍拦,拒绝回执把命中的规则印出来。
+- **子代理不再吞自己的日志。** `.evidence` 与调试日志目录进观察边界,search 默认不搜、read_file 默认不读;逐字点名才放行,读前报体积,超 256KB 劝阻并指路 offset/limit——递归膨胀(日志装日志)有回归钉。
+- 浏览器服务拆三层:session(Playwright 生命周期与全部状态)、tool adapter(纯组装)、transport(纯分帧),server.js 从 1137 行瘦到 220 行;104 项自测零回归,新增 Runtime 直调路 130 项两遍皆绿,阶段 3 的 App Server 适配有了桩。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
