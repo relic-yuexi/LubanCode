@@ -2,8 +2,8 @@
 // 的 47 案,逐案在 SlashCommandTable 里留名。这份测试把"行为逐一照旧"
 // 折成可数的账:
 //   1. 表上行数与枚举全集一致(旧 switch 47 案 + 后续各单新增案,如今
-//      50:自定义 Agent 单阶段 1 添 /agents、/agent 两案,Package 单
-//      阶段 1 添 /package 一案);
+//      51:自定义 Agent 单阶段 1 添 /agents、/agent 两案,Package 单
+//      阶段 1 添 /package 一案,自进化闭环阶段 1 添 /evolve 一案);
 //   2. 枚举无重复、无遗漏(死案 Image/NotSlash 也留名,handler 为空);
 //   3. 活案(有 handler)的名字与 cli::AllSlashCommands 的帮助面逐一对应
 //      ——已知差异如实记:/effort 是 /think 的别名(帮助面有、分派面归
@@ -23,7 +23,8 @@
 namespace {
 
 // 枚举全集(旧 switch 47 案的案序 + 各单新增案;Agents/Agent 是自定义
-// Agent 单阶段 1 添的,Package 是 Package 单阶段 1 添的)。
+// Agent 单阶段 1 添的,Package 是 Package 单阶段 1 添的,Evolve 是自进化
+// 闭环阶段 1 添的)。
 const std::vector<lubancode::cli::SlashCommand>& AllCommandEnums() {
     static const std::vector<lubancode::cli::SlashCommand> all = {
         lubancode::cli::SlashCommand::Image,      lubancode::cli::SlashCommand::Help,
@@ -39,7 +40,7 @@ const std::vector<lubancode::cli::SlashCommand>& AllCommandEnums() {
         lubancode::cli::SlashCommand::Tools,      lubancode::cli::SlashCommand::Hooks,
         lubancode::cli::SlashCommand::Background, lubancode::cli::SlashCommand::Keymap,
         lubancode::cli::SlashCommand::Plan,       lubancode::cli::SlashCommand::Package,
-        lubancode::cli::SlashCommand::Trace,
+        lubancode::cli::SlashCommand::Evolve,     lubancode::cli::SlashCommand::Trace,
         lubancode::cli::SlashCommand::Doctor,     lubancode::cli::SlashCommand::Goal,
         lubancode::cli::SlashCommand::Loop,       lubancode::cli::SlashCommand::Memory,
         lubancode::cli::SlashCommand::Record,     lubancode::cli::SlashCommand::Sessions,
@@ -58,9 +59,9 @@ const std::vector<lubancode::cli::SlashCommand>& AllCommandEnums() {
 
 }  // namespace
 
-TEST_CASE("命令注册表:50 案齐整,枚举可对") {
+TEST_CASE("命令注册表:51 案齐整,枚举可对") {
     const std::vector<lubancode::app::SlashCommandSpec>& table = lubancode::app::SlashCommandTable();
-    REQUIRE(table.size() == 50);
+    REQUIRE(table.size() == 51);
 
     SUBCASE("枚举逐一在表,无重复") {
         std::set<int> seen;

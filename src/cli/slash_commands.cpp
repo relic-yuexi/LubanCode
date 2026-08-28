@@ -175,6 +175,10 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         // 统一 Package 封装单阶段 1:/package 只读面(list/show/doctor,
         // 二级解析在 ParsePackageCommand,这里只认词)。
         parsed.command = SlashCommand::Package;
+    } else if (lower == "/evolve") {
+        // 自进化闭环阶段 1:/evolve 只读面(status/list/show,二级解析在
+        // ParseEvolveCommand,这里只认词)。
+        parsed.command = SlashCommand::Evolve;
     } else if (lower == "/workflow") {
         // Workflows 自然语言编排单:/workflow 是正门(list/show/graph/
         // validate/run/...),子命令解析在 workflow 层,这里只认词。
@@ -883,6 +887,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/loop", tr("slash.desc.loop")},
             {"/plan", tr("slash.desc.plan")},
             {"/package", tr("slash.desc.package")},
+            {"/evolve", tr("slash.desc.evolve")},
         };
     }
     return commands;
