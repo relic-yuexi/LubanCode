@@ -738,18 +738,22 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             context_.AppendToLast(nudge);
         }
 
-        // mid-turn 安全点:拼请求前先估 projected——system + 工具定义 + 全份
-        // history + 输出预留,过参考线就把压力通报出去。上层回调里可以同步
-        // 做一次语义压缩(ReplaceHistory),返回后下面 BuildWorkingView 拿到
-        // 的就是(可能已换短的)请求视图。窗口未知(0)或没设回调时跳过,行为
-        // 与从前一致——这一步不发出任何请求,估错了也不会误伤。
+        // mid-turn 安全点:拼请求前先估 projected——system + 工具定义 + 输出
+        // 预留 + history,过参考线就把压力通报出去。history 走压力 dry-run
+        // 视图(P1-1 口径统一):与下面 BuildWorkingView 发出去的是同一副
+        // 结构压缩后的形状——拿未压缩的全量估,重复工具结果与超长回包都
+        // 被虚算进去,真请求 47k 时估出 189k,压缩被误触发又一压再压。
+        // 上层回调里可以同步做一次语义压缩(ReplaceHistory),返回后下面
+        // BuildWorkingView 拿到的就是(可能已换短的)请求视图。窗口未知(0)
+        // 或没设回调时跳过,行为与从前一致——这一步不发出任何请求,估错了
+        // 也不会误伤。
         if (profile_.context_window_tokens > 0 && wiring_.on_context_pressure) {
             // 输出上限纳入 projected 计算(规格根因一):声明了用声明值,
             // unset 用保守估计(kUnsetOutputReserveEstimateTokens)——服务端
             // 默认上限拿不到准数,宁可早压不撞墙。
             const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
             std::size_t projected = EstimateTextTokensForPreflight(request.system) +
-                                    EstimateHistoryTokensForPreflight(context_.request_history()) +
+                                    EstimateHistoryTokensForPreflight(context_.BuildPressureDryRunView()) +
                                     static_cast<std::size_t>(output_budget.reserve_for_estimate());
             for (const auto& tool : request.tools) {
                 projected += EstimateTextTokensForPreflight(tool.name) +

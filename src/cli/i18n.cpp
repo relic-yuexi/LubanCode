@@ -942,6 +942,8 @@ const Entry kZhCN[] = {
     // ---- 通用错误 ----
     {"error.prefix", "[错误] "},
     {"error.unexpected", "未预料的异常: {0}"},
+    {"error.fatal_category", "进程将以非零码退出。错误类别: "},
+    {"error.fatal_session_hint", "会话流水存档目录: {0}(已落盘部分可用 --continue 续接)"},
     {"error.unknown_command", "不认得命令 {0},试试 /help"},
     {"error.wizard_incomplete", "配置向导未完成,退出。"},
     {"error.system_prompt_arg", "--system-prompt 后面要跟一个文件路径"},
@@ -1223,6 +1225,10 @@ const Entry kZhCN[] = {
     {"compact.done_stats", "[compact] 历史 ~{0} tokens;manifest 守住约束 {1} 条 / 待办 {2} 条"},
     {"compact.hard_trim_turns", "[警告] 上下文发生有损硬裁剪:中间 {0} 条消息被丢弃(字符安全网兜底,不是语义压缩)。模型已看不到那段原文;完整流水仍在会话存档,可 /export 查看、/compact 重建摘要。"},
     {"compact.hard_trim_results", "[警告] 上下文发生有损硬裁剪:超大工具结果被截尾(字符安全网兜底,不是语义压缩)。模型已看不到被截内容;完整流水仍在会话存档,可 /export 查看。"},
+    {"compact.hysteresis_skip", "[compact] 跳过这次自动压缩:当前 ~{0} tokens,距上次压缩收口(~{1})没有足够新内容。"},
+    {"compact.hysteresis_skip_tail", "(同一轮里反复压同一副历史榨不出空间;等新内容攒足再收,字符安全网仍兜底。若当前工具循环本身过大,可 /compact 手动收束或开新会话。)"},
+    {"compact.grew_rejected", "[compact] 压缩结果 {0} → {1} 不降反升,已拒收,历史未动。"},
+    {"compact.grew_rejected_tail", "(当前轮占大头,摘要换不瘦;继续按原历史发送,同一轮不再自动重试。完整流水在会话存档,可 /export 查看。)"},
 
     // ---- 模型路由(cheap/normal/lao 分工第一期):状态栏短闪与回退留痕 ----
     {"router.compact_flash", "压缩 {0} → {1} · {2}"},
@@ -2711,6 +2717,8 @@ const Entry kEn[] = {
     // ---- common errors ----
     {"error.prefix", "[error] "},
     {"error.unexpected", "unexpected exception: {0}"},
+    {"error.fatal_category", "Process will exit with a non-zero code. Error category: "},
+    {"error.fatal_session_hint", "Session ledger directory: {0} (already-flushed events can be resumed with --continue)"},
     {"error.unknown_command", "Unknown command {0}; try /help"},
     {"error.wizard_incomplete", "Setup wizard not completed; exiting."},
     {"error.system_prompt_arg", "--system-prompt requires a file path"},
@@ -3008,6 +3016,10 @@ const Entry kEn[] = {
     {"compact.done_stats", "[compact] history ~{0} tokens; manifest kept {1} constraints / {2} open items"},
     {"compact.hard_trim_turns", "[warning] Lossy hard trim: {0} mid-history messages were dropped (character safety net, not semantic compaction). The model can no longer see that text; the full ledger is still in the session file (/export to view, /compact to rebuild the summary)."},
     {"compact.hard_trim_results", "[warning] Lossy hard trim: oversized tool results were truncated (character safety net, not semantic compaction). The model can no longer see the cut text; the full ledger is still in the session file (/export to view)."},
+    {"compact.hysteresis_skip", "[compact] Skipping this auto-compaction: ~{0} tokens now, not enough new content since the last compaction settled (~{1})."},
+    {"compact.hysteresis_skip_tail", "(Re-compacting the same history within one turn yields no room; wait for new content. The character safety net still applies. If the current tool loop itself is oversized, /compact manually or start a new session.)"},
+    {"compact.grew_rejected", "[compact] Compaction would grow history {0} -> {1}; rejected, history untouched."},
+    {"compact.grew_rejected_tail", "(The current turn dominates, so a summary cannot shrink it; continuing with the original history, no auto retry within this turn. Full ledger in the session file via /export.)"},
 
     // ---- Session picker (SessionPicker, the full-screen ledger behind bare /resume) ----
     {"picker.title", "Resume a previous session"},

@@ -300,6 +300,21 @@ private:
     lubancode::hooks::HookDispatcher* dispatcher_;
 };
 
+// 致命退出的诊断尾行(P1-2):所有非零退出路径都要写足错误类别与会话
+// 存档去处——已 flush 的流水丢不了,--continue 接得回来。0.26.76 的静默
+// code 1(首次自动压缩后)没有任何回执,用户连"该去哪找现场"都不知道。
+void PrintFatalExitDiagnostics(const char* error_category) {
+    std::string sessions_hint;
+    if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
+        sessions_hint = *luban_dir + "/sessions";
+    }
+    std::cerr << tr("error.fatal_category") << error_category << "\n";
+    if (!sessions_hint.empty()) {
+        std::cerr << trf("error.fatal_session_hint", sessions_hint) << "\n";
+    }
+    std::cerr << std::flush;
+}
+
 // `lubancode plugin init` 子命令(plugins 单第 3 步):生成插件脚手架后
 // 退出。不读配置、不进会话——纯落盘 + 环境诊断。i18n 早初始化在这之前
 // 跑过,tr() 可用;配置不加载(脚手架不该因为模型没配好而拒绝干活)。
@@ -730,8 +745,19 @@ int RunCli(const std::vector<std::string>& args) {
         // 最后防线:到这里的是启动期/会话外层的真 fatal,退进程;交互会话
         // 内部的回合异常已在 RunTurn 与 ProcessLine 两道兜底收口,走不到这
         // 儿。异常类型一并打出,真机出事好定位(system_error 的 1113 文案
-        // 就是宽窄转换异常那单的原文)。
+        // 就是宽窄转换异常那单的原文)。P1-2 的教训:非零退出必须带错误
+        // 类别、文本与会话存档去处——0.26.76 首次自动压缩后进程 code 1 静默
+        // 退出,终端画面被 TUI 收拾过,一行 stderr 都没留下,只能靠猜。
         std::cerr << tr("error.prefix") << trf("error.unexpected", e.what()) << " (" << typeid(e).name() << ")\n";
+        PrintFatalExitDiagnostics("std::exception");
+        return 1;
+    } catch (...) {
+        // 同一道防线的无名分支:非 std::exception(自定义异常体系、跨边界
+        // 的 SEH 翻译等)原先直接穿透到 terminate,退出码既非 1 也无话。
+        // 收住,报"未知异常类别",存档去处照给。
+        std::cerr << tr("error.prefix") << trf("error.unexpected", "(unknown exception: not derived from std::exception)")
+                  << "\n";
+        PrintFatalExitDiagnostics("unknown-exception");
         return 1;
     }
     return 0;

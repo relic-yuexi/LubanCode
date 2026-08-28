@@ -98,6 +98,18 @@ ContextWorkingView ContextManager::BuildWorkingView(const ContextViewBudget& bud
     return out;
 }
 
+std::vector<api::Message> ContextManager::BuildPressureDryRunView() const {
+    if (!structural_compression_enabled_) {
+        return request_history_;
+    }
+    ResultViewMemo scratch_memo;
+    StructuralCompressionStats scratch_stats;
+    // store 传空:dry-run 不落盘 artifact,也不改本对象的决策台账——估
+    // 算归估算,正式 BuildWorkingView 时该落的照落。
+    return CompressWorkingView(request_history_, structural_options_, scratch_stats, scratch_memo,
+                               /*store=*/nullptr);
+}
+
 ContextManager::PrefixAccount ContextManager::AccountRequest(const api::Request& request) {
     const PrefixFingerprint fingerprint = FingerprintRequest(request);
     PrefixAccount account;

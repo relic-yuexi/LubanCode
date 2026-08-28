@@ -146,6 +146,7 @@ private:
         in.persisted_count = &persisted_count;
         in.session_store = &session_store;
         in.session_store_broken = session_store_broken;
+        in.hysteresis = &compact_hysteresis_;
         in.build_compact_options = [this]() { return BuildCompactOptions(); };
         in.attach_goal_snapshot = [this](lubancode::sessions::CompactV2Event& event) {
             goal_wiring_.AttachSnapshotToCompact(event);
@@ -355,6 +356,9 @@ private:
     // 最近一次 compact 的台账(第四期 /context"最近一次 compact 所用角色、
     // 模型、前后 token、耗时和校验结果"):一行人话,由压缩路径写。
     std::string last_compact_line;
+    // 压缩滞回的会话活账(P1-1 连环压缩):上次压缩收口(成功/反涨拒收/
+    // 失败)的压力口径估算记在这,自动触发先过滞回带,同一轮无进展不连压。
+    lubancode::app::CompactHysteresis compact_hysteresis_;
 
     const std::filesystem::path recordings_root;
 

@@ -68,6 +68,7 @@ public:
 
     void set_structural_compression_enabled(bool enabled) { structural_compression_enabled_ = enabled; }
     void set_structural_options(const StructuralCompressionOptions& options) { structural_options_ = options; }
+    const StructuralCompressionOptions& structural_options() const { return structural_options_; }
     void set_artifact_store(ContextArtifactStore* store) { artifact_store_ = store; }
 
     // 最近一次请求的结构压缩账(/context 与诊断用)。
@@ -80,6 +81,14 @@ public:
     // -> 字符安全网 + sticky 钉住。真裁了东西的因记进 pending_epoch_break_
     // reason,随 AccountRequest 一并点名。
     ContextWorkingView BuildWorkingView(const ContextViewBudget& budget);
+
+    // 压力/触发线专用的 dry-run 视图(P1-1 口径统一):与 BuildWorkingView
+    // 走同一条无损结构压缩决策路,但 memo/stats/store 全用临时账——不落
+    // 盘、不钉决策、不翻 sticky,纯回答"下一份请求真会发出去的 history
+    // 长什么样"。触发线、/context 与压缩前后账都该拿这一本,不该拿未压
+    // 缩的全量 history(真机 189k 的估账对 47k 的真实请求,就是两把尺
+    // 分家的账)。
+    std::vector<api::Message> BuildPressureDryRunView() const;
 
     // ---- 前缀账(agent/prefix.hpp)-----------------------------------------
 
