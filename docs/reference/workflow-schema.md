@@ -185,6 +185,27 @@ body 只收普通执行节点，不收控制节点。运行时另开工作线程
 时，其 `result` 成为 subflow 节点产物；失败以稳定错误码回父图。`subflow_version`
 当前会解析、序列化并显示在图上，resolver 仍只按 id 取定义，尚未执行版本约束。
 
+## ask_user
+
+答案判定字段都写在 `input` 里：
+
+```yaml
+ask:
+  type: ask_user
+  input:
+    question: "这样改行不行"
+    options: [{ label: "准", description: "照此交付" }, { label: "再改" }]
+    review_approved: false
+    approve_answers: ["准"]
+    delegate_answers: ["不知道，请中书定方案"]
+    override_answers: ["朕说了算"]
+```
+
+`review_approved` 是门下复审的裁定；答案命中 `approve_answers` 且门下已准，
+`approved` 才为真。命中 `delegate_answers` 走委托轮，须再过一轮规划与复审。
+`override_answers` 是墨敕：命中即皇帝越权放行，`approved` 与 `complete` 直接
+为真。输出里的 `overridden` 键恒在场，命中为真，其余场合为假。
+
 ## Store 引用
 
 支持的主要路径：

@@ -209,6 +209,10 @@ private:
     // agent::RunOneTool 正门,PreToolUse/PostToolUse 钩子、Plan 闸、逐枚
     // trace 与主回合同一条链,两处装配点(/workflow run 与 alias 直呼)共用。
     lubancode::workflow::ToolExecutor::Options BuildWorkflowToolOptions();
+    // /workflow 的 agent 节点审批口:复用主回合的 ConfirmToolUse——档位
+    // 映射、settings.local 前缀账、"总是允许"落会话账、三档菜单全同一套,
+    // 不为 workflow 另造第二颗确认脑袋。tool 节点的确认门也借这一份。
+    lubancode::agent::TurnWiring BuildWorkflowAgentCallbacks();
     // loop 单:compact 事件衡接 active loop 摘要(守恒面:task id/
     // prompt hash/间隔/状态/下一拍时间;不抄全 tick 日志进
     // summary,单子"tick 前走现有自动 compact 水位检查" + 摘要守恒)。

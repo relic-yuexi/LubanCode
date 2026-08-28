@@ -221,6 +221,10 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         wiring.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) {
             return false;
         };
+        // 拒词也说明白:缺省那句"用户拒绝"是假话——根本没人可拒。
+        wiring.on_tool_denial_text = [](const std::string&, const std::string& name) {
+            return "workflow agent 节点未接审批宿主，已拒绝 " + name;
+        };
     }
 
     // turn 推进走 TurnHarness。面板补充只在一轮正常收口后取，取到便另开
@@ -505,7 +509,8 @@ NodeExecResult AskUserExecutor::Execute(const NodeExecRequest& request) {
                                        {"skipped", true},
                                        {"delegated", true},
                                        {"approved", review_approved},
-                                       {"complete", review_approved}};
+                                       {"complete", review_approved},
+                                       {"overridden", false}};
         result.ok = true;
         return result;
     }
@@ -515,7 +520,8 @@ NodeExecResult AskUserExecutor::Execute(const NodeExecRequest& request) {
                                        {"skipped", true},
                                        {"delegated", false},
                                        {"approved", true},
-                                       {"complete", true}};
+                                       {"complete", true},
+                                       {"overridden", false}};
         result.ok = true;
         return result;
     }
@@ -555,12 +561,17 @@ NodeExecResult AskUserExecutor::Execute(const NodeExecRequest& request) {
         return result;
     }
     const bool delegated = answer_matches("delegate_answers", answer->answers);
-    const bool approved = review_approved && answer_matches("approve_answers", answer->answers);
+    // 墨敕(override_answers):门下已驳(review_approved=false)时皇帝仍可
+    // 越权放行,命中即拍板,不掺和 approve 的账。
+    const bool overridden = answer_matches("override_answers", answer->answers);
+    const bool approved = overridden || (review_approved && answer_matches("approve_answers", answer->answers));
     result.output = nlohmann::json{{"answers", answer->answers},
                                    {"delegated", delegated},
                                    {"approved", approved},
                                    // 委托至少再过一轮规划与门下复审，不能当场越闸。
-                                   {"complete", approved}};
+                                   {"complete", approved},
+                                   // 恒在键:下游模板不判存在,直接读。
+                                   {"overridden", overridden}};
     result.ok = true;
     return result;
 }
