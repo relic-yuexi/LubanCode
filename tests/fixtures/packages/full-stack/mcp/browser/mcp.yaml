@@ -1,0 +1,15 @@
+schema: 1
+id: browser
+description: 本地示例浏览器服务。navigate 记账、screenshot 给占位图,不真开浏览器。
+transport: stdio
+
+runtime:
+  command: node
+  args:
+    - "${package_dir}/mcp/browser/server.js"
+  env:
+    BROWSER_TOKEN: "${env:BROWSER_TOKEN}"
+  timeout_ms: 30000
+
+permissions:
+  network: false

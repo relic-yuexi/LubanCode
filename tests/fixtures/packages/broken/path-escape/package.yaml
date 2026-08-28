@@ -1,0 +1,5 @@
+schema: 1
+id: moontide.path-escape
+version: 0.1.0
+name: Path Escape
+description: 清单合法,组件越界引用的坏包,诊断夹具。

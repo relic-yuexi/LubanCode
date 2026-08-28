@@ -1,0 +1,27 @@
+{
+  "manifest_version": 1,
+  "id": "dom.analyzer",
+  "version": "1.0.0",
+  "language": "python",
+  "runtime": {
+    "kind": "process",
+    "command": "python",
+    "args": ["${plugin_dir}/runner.py"],
+    "timeout_ms": 10000
+  },
+  "tools": [
+    {
+      "name": "inspect",
+      "description": "坏样例:plugin id 带点,与命名空间分隔符冲突。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "html": { "type": "string" }
+        },
+        "required": ["html"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": { "network": false, "env": [] }
+}

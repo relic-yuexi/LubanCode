@@ -1,0 +1,14 @@
+# 坏样例:id 与目录名不一致。目录叫 db,id 却写 database。见 broken/README.md。
+schema: 1
+id: database
+description: id 与目录名对不上的坏样例,诊断夹具。
+transport: stdio
+
+runtime:
+  command: node
+  args:
+    - "${package_dir}/mcp/db/server.js"
+  timeout_ms: 10000
+
+permissions:
+  network: false

@@ -1,0 +1,74 @@
+# 冒烟验收:采集 DOM 摘要 -> 同包 Agent 照清单复核 -> 缴单。
+#
+# 注记:
+#   - collect 调的是本包 Plugin 的工具,写完整 wire 名
+#     (moontide.full-stack 点号按 ToolWireName 编码成 %2E,见 docs/packages.md §6.1)。
+#   - verify 的 agent: browser-tester 是包内短引用,指本包 agents/browser-tester.yaml,
+#     由统一 AgentCatalog 解析;该字段待自定义 Agent 单落地后生效。
+schema_version: 1
+id: smoke-test
+version: 1.0.0
+name: 冒烟验收
+alias: smoke-test
+description: 采一份 DOM 摘要,交同包 browser-tester 照清单复核,产出验收单
+enabled: true
+
+inputs:
+  type: object
+  required:
+    - html
+  properties:
+    html:
+      type: string
+      description: 待验收页面的 HTML 源码
+    url:
+      type: string
+      description: 页面地址,只作记录,不真访问
+
+entry: collect
+
+limits:
+  max_concurrency: 2
+  max_nodes: 16
+  max_steps: 32
+  timeout: 5m
+  tool_calls: 40
+  tokens: 60000
+
+nodes:
+  collect:
+    type: tool
+    label: 采集 DOM 摘要
+    tool: plugin__moontide%2Efull-stack%2Edom-analyzer__inspect
+    input:
+      html: "${inputs.html}"
+      url: "${inputs.url}"
+
+  verify:
+    type: agent
+    label: 验收员复核
+    agent: browser-tester
+    task: prompts/reporter.md
+    step_limit: 12
+    input:
+      url: "${inputs.url}"
+      summary: "${nodes.collect.output}"
+
+  done:
+    type: end
+    label: 缴单
+
+edges:
+  - from: collect
+    on: success
+    to: verify
+  - from: collect
+    on: error
+    to: done
+  - from: verify
+    on: success
+    to: done
+
+result:
+  summary: "${nodes.collect.output}"
+  verdict: "${nodes.verify.output}"

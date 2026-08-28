@@ -1,0 +1,45 @@
+# Agent 定义,格式照 todos/自定义Agent与PromptProfile设计.todo §4.1。
+# 引用一律写本包短名:profile、skill、mcp_servers。Resolver 先在本包里找。
+schema: 1
+name: browser-tester
+description: 照冒烟清单验收网页。给它页面源码或 DOM 摘要,它逐项核对、给证据;拿不准的明说,不猜。
+
+prompt:
+  profile: browser-tester
+  project_instructions: inherit
+  soul: inherit
+
+model:
+  role: inherit
+  effort: inherit
+
+skills:
+  preload:
+    - browser-testing
+
+tools:
+  allow:
+    - context_read
+    - todo_read
+    - todo_write
+    - plugin__moontide%2Efull-stack%2Edom-analyzer__inspect
+    - mcp__moontide%2Efull-stack%2Ebrowser__navigate
+    - mcp__moontide%2Efull-stack%2Ebrowser__screenshot
+  deny:
+    - shell
+
+mcp_servers:
+  - browser
+
+requires:
+  tools:
+    - plugin__moontide%2Efull-stack%2Edom-analyzer__inspect
+    - mcp__moontide%2Efull-stack%2Ebrowser__navigate
+
+runtime:
+  max_steps_per_turn: 24
+  execution_mode: auto
+  isolation: none
+
+permissions:
+  mode: read_only

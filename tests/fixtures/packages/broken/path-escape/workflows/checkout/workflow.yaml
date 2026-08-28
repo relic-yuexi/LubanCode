@@ -1,0 +1,47 @@
+# 坏样例:prompt 引用越出 workflow 目录与包根。见 broken/README.md。
+schema_version: 1
+id: checkout
+version: 1.0.0
+name: 越界引用
+alias: checkout
+description: prompt 引用逃出包根的坏 workflow,诊断夹具
+enabled: true
+
+inputs:
+  type: object
+  required:
+    - url
+  properties:
+    url:
+      type: string
+      description: 目标地址
+
+entry: probe
+
+limits:
+  max_concurrency: 1
+  max_nodes: 8
+  max_steps: 16
+  timeout: 2m
+  tool_calls: 10
+  tokens: 20000
+
+nodes:
+  probe:
+    type: llm
+    label: 探针
+    prompt: prompts/../../shared/report.md
+    input:
+      url: "${inputs.url}"
+
+  done:
+    type: end
+    label: 收口
+
+edges:
+  - from: probe
+    on: success
+    to: done
+
+result:
+  probe: "${nodes.probe.output}"
