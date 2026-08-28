@@ -302,6 +302,60 @@ class ScreenshotTest(unittest.TestCase):
                                          {"target": "window", "window_id": WINDOW})),
                          "window_minimized")
 
+    def test_large_screenshot_downscaled_before_feed(self):
+        """大图降采样:3072x1918 进,1536x959 出;落盘即回喂图,默认一份。"""
+        with tempfile.TemporaryDirectory() as temp:
+            backend = make_backend()
+            row = bytes(range(256)) * 36  # 9216 = 3*3072
+            backend.screenshot_pixels = (3072, 1918, [row] * 1918)
+            response = call(backend, "gui_screenshot",
+                            {"target": "window", "window_id": WINDOW,
+                             "artifact_dir": temp})
+            self.assertTrue(response["ok"])
+            observation = response["structured"]
+            image = observation["image"]
+            # 回喂与落盘都是缩后图;capture_size 留原尺寸,坐标矩形不动。
+            self.assertEqual((image["width"], image["height"]), (1536, 959))
+            self.assertEqual(image["capture_size"], [3072, 1918])
+            self.assertEqual(image["downsample"]["long_edge_cap"], 1568)
+            self.assertIn("降采样 1536x959", response["content"][0]["text"])
+            with open(image["path"], "rb") as handle:
+                data = handle.read()
+            self.assertEqual(len(data), image["bytes"])
+            self.assertEqual(struct.unpack(">II", data[16:24]), (1536, 959))
+            # 默认不双份:证据目录只有这一只 PNG。
+            self.assertEqual([name for name in os.listdir(temp) if name.endswith(".png")],
+                             [os.path.basename(image["path"])])
+            # 窗口矩形仍是原坐标:动作坐标从矩形来,不经图像。
+            self.assertEqual(observation["window_rect"], [100, 80, 580, 440])
+
+    def test_keep_original_saves_extra_evidence_copy(self):
+        """keep_original=true 且发生降采样:证据目录另存 -orig 原图。"""
+        with tempfile.TemporaryDirectory() as temp:
+            backend = make_backend()
+            row = bytes(range(256)) * 36
+            backend.screenshot_pixels = (3072, 1918, [row] * 1918)
+            response = call(backend, "gui_screenshot",
+                            {"target": "window", "window_id": WINDOW,
+                             "artifact_dir": temp, "keep_original": True})
+            self.assertTrue(response["ok"])
+            downsample = response["structured"]["image"]["downsample"]
+            original_path = downsample.get("original_path")
+            self.assertTrue(original_path)
+            with open(original_path, "rb") as handle:
+                original = handle.read()
+            self.assertTrue(original_path.endswith("-orig.png"))
+            self.assertEqual(struct.unpack(">II", original[16:24]), (3072, 1918))
+            # 帽内小图:不发生降采样,keep_original 也不另存。
+            small = make_backend()
+            response = call(small, "gui_screenshot",
+                            {"target": "window", "window_id": WINDOW,
+                             "artifact_dir": temp, "keep_original": True})
+            self.assertTrue(response["ok"])
+            image = response["structured"]["image"]
+            self.assertNotIn("downsample", image)
+            self.assertNotIn("capture_size", image)
+
 
 class SnapshotTest(unittest.TestCase):
     """UIA 快照:折叠规则、ref 顺序、深度帽、元素帽、错误码。全走
@@ -446,6 +500,40 @@ class PngCodecTest(unittest.TestCase):
     def test_all_zero_pixel_image_still_valid(self):
         data = png.encode_png(1, 1, [b"\x00\x00\x00"])
         self.assertTrue(png.is_png(data))
+
+    def test_downscale_caps_long_edge(self):
+        """长边超帽缩进帽内:步长采样、比例保住、通道序不乱。"""
+        # 3072x1918(用户炸单的那副形状):step=ceil(3072/1568)=2 →
+        # 1536x959,长边进帽,比例 3072/1918≈1536/959。
+        width, height = 3072, 1918
+        row = bytes(range(256)) * 36  # 9216 字节 = 3*3072,内容有起伏
+        rows = [row] * height
+        new_w, new_h, new_rows = png.downscale_to_long_edge(width, height, rows, 1568)
+        self.assertEqual((new_w, new_h), (1536, 959))
+        self.assertEqual(len(new_rows), new_h)
+        for out in new_rows:
+            self.assertEqual(len(out), new_w * 3)
+        # 通道序与步长:出图首像素=原图第 0 像素,次像素=原图第 2 像素
+        # (步长 2),BGR 三字节原样;行同理,出图第 1 行=原图第 2 行。
+        self.assertEqual(new_rows[0][:3], row[0:3])
+        self.assertEqual(new_rows[0][3:6], row[6:9])
+        self.assertEqual(new_rows[1][:3], row[:3])
+        # 缩后图能直接进编码器,IHDR 宽高就是缩后尺寸。
+        data = png.encode_png(new_w, new_h, new_rows)
+        self.assertEqual(struct.unpack(">II", data[16:24]), (new_w, new_h))
+
+    def test_downscale_noop_within_cap(self):
+        """帽内不动:小图原样返回,不放大、不重排。"""
+        rows = [b"\x10\x20\x30" * 3, b"\x40\x50\x60" * 3]
+        self.assertEqual(png.downscale_to_long_edge(3, 2, rows, 1568), (3, 2, rows))
+        # 恰在帽上(长边=帽)也不动。
+        self.assertEqual(png.downscale_to_long_edge(1568, 2, [b"\x00" * 1568 * 3] * 2, 1568)[0], 1568)
+
+    def test_downscale_rejects_bad_input(self):
+        with self.assertRaises(ValueError):
+            png.downscale_to_long_edge(0, 2, [b""], 1568)
+        with self.assertRaises(ValueError):
+            png.downscale_to_long_edge(2, 2, [b"\x00" * 6] * 2, 0)
 
 
 class WindowsOnlyTest(unittest.TestCase):

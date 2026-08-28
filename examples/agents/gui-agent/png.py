@@ -64,3 +64,44 @@ def is_png(data: bytes) -> bool:
     if len(data) < 8 or not data.startswith(PNG_SIGNATURE):
         return False
     return data[12:16] == b"IHDR" if len(data) >= 16 else False
+
+
+def downscale_to_long_edge(width: int, height: int, bgr_rows: list[bytes],
+                           max_edge: int) -> tuple[int, int, list[bytes]]:
+    """整数步长采样降采样:BGR 逐行位图长边缩进 max_edge 以内。
+
+    为什么缩:各家视觉 token 都按分辨率计——anthropic 口径 tokens ≈
+    (宽×高)/750 且建议长边 ≤1568(超了服务端也会先缩再计),gpt/gemini
+    按 512/768 像素块计片。3072x1918 的整窗截图原样回喂,token 与边长帽
+    两头吃亏;缩到 1568 长边内,四家上限都在安全侧。取 1568 是各家上限
+    里最紧的那档(anthropic 的有效上限,gpt 的 2048、gemini 的 4096 都
+    在它之上)。
+
+    怎么缩:整数步长采样(每 step 个像素取一个),不做插值——纯切片
+    (bytes 切片与 bytearray 步长赋值都在 C 层跑),零依赖、毫秒级,大图
+    也不卡工具超时。代价是极端细线可能被步长跳过;UI 截图的字号都在
+    数像素以上,step ≤ 2 的场景里肉眼与模型都读得清。
+    """
+    if width <= 0 or height <= 0:
+        raise ValueError("宽高必须是正整数")
+    if max_edge <= 0:
+        raise ValueError("max_edge 必须是正整数")
+    long_edge = max(width, height)
+    if long_edge <= max_edge:
+        return width, height, bgr_rows  # 帽内不动:不放大、不重排
+
+    step = -(-long_edge // max_edge)  # ceil:保证缩后长边 ≤ max_edge
+    dst_width = -(-width // step)
+    dst_height = -(-height // step)
+    # 每行三通道各按步长切片(B、G、R 起点错 1),再交错写回 bytearray
+    # 的 0/1/2 步长位——三个切片等长(尾像素三通道同进同出),纯 C 层。
+    stride = 3 * step
+    out_rows: list[bytes] = []
+    for y in range(0, height, step):
+        row = bgr_rows[y]
+        out = bytearray(dst_width * 3)
+        out[0::3] = row[0::stride]
+        out[1::3] = row[1::stride]
+        out[2::3] = row[2::stride]
+        out_rows.append(bytes(out))
+    return dst_width, dst_height, out_rows

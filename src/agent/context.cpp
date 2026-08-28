@@ -5,7 +5,8 @@
 #include <type_traits>
 #include <variant>
 
-#include "platform/text_encoding.hpp"  // Utf8PrefixBoundary:截短不劈半个字
+#include "agent/tool_result_images.hpp"  // EstimateImageTokensForPreflight:图片 token 的像素口径公共尺
+#include "platform/text_encoding.hpp"    // Utf8PrefixBoundary:截短不劈半个字
 
 namespace lubancode::agent {
 
@@ -174,24 +175,28 @@ std::size_t EstimateMessageTokens(const api::Message& message) {
                 if constexpr (std::is_same_v<T, api::TextBlock>) {
                     return EstimateUtf8Tokens(b.text);
                 } else if constexpr (std::is_same_v<T, api::ImageBlock>) {
-                    // base64 体积粗折:约 4/3 字符 3 字节,再按字节 4 折 1。
-                    return (b.media_type.size() + b.data.size() + b.filename.size()) / 4;
+                    // 图片按像素折 token(宽×高/750):与预检、工具图同一条
+                    // 公共尺(EstimateImageTokensForPreflight)——预算、压缩
+                    // 决策与窗口预检三处口径要一致,不然贴一张大图就把
+                    // /context 显示与自动压缩一起带偏。读不出宽高退字节口径。
+                    return EstimateImageTokensForPreflight(b.width, b.height, b.data);
                 } else if constexpr (std::is_same_v<T, api::ToolUseBlock>) {
                     return EstimateUtf8Tokens(b.name) + EstimateUtf8Tokens(b.id) +
                            EstimateUtf8Tokens(b.input.dump());
                 } else if constexpr (std::is_same_v<T, api::ToolResultBlock>) {
                     // 工具结果图片回喂单:重灌过的 wire_base64 会真上 wire,
-                    // 按体积粗折(与 ImageBlock 同口径);durable history 里
-                    // 恒空,老行为不变。
-                    std::size_t image_bytes = 0;
+                    // token 与用户贴图 ImageBlock 同走像素口径公共尺;durable
+                    // history 里 wire_base64 恒空(0 账),老行为不变。
+                    std::size_t image_tokens = 0;
                     for (const auto& rich : b.blocks) {
                         if (const auto* image = std::get_if<tools::ImageContent>(&rich);
                             image != nullptr) {
-                            image_bytes += image->wire_base64.size();
+                            image_tokens += EstimateImageTokensForPreflight(image->width, image->height,
+                                                                           image->wire_base64);
                         }
                     }
                     return EstimateUtf8Tokens(b.tool_use_id) + EstimateUtf8Tokens(b.content) +
-                           image_bytes / 4;
+                           image_tokens;
                 } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
                     return EstimateUtf8Tokens(b.text) + EstimateUtf8Tokens(b.signature);
                 } else {

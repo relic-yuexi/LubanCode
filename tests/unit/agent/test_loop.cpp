@@ -915,6 +915,31 @@ TEST_CASE("token 窗口预检:短词输入在线内不过度拦截") {
     CHECK(backend.captured_requests.size() == 1);
 }
 
+TEST_CASE("token 窗口预检:大尺寸截图按像素折账,不再按 base64 字节误拦") {
+    // 用户炸单的形状:3072x1918 整窗截图(base64 约 2.6MB 量级)。老字节
+    // 口径 100000 字符 base64 就折 25000 token,加输出预留 8192 越窗拦下;
+    // 像素口径只记 7845,该发就发。
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("收到")};
+    tools::ToolRegistry registry;
+    agent::Agent loop(
+        backend, registry,
+        agent::AgentProfile{.request{.model = "test-model"},
+                            .runtime{.max_output_tokens = 8192,
+                                     .max_steps_per_turn = 25,
+                                     .max_context_chars = 200000,
+                                     .context_window_tokens = 32768},
+                            .system_prompt = "sys"});
+    api::Message image_message;
+    image_message.role = api::Role::User;
+    image_message.content.push_back(
+        api::ImageBlock{"image/png", std::string(100000, 'A'), "full-window.png", 3072, 1918});
+
+    const auto result = loop.Run(std::move(image_message), agent::TurnWiring{});
+    REQUIRE(result.has_value());
+    CHECK(backend.captured_requests.size() == 1);
+}
+
 TEST_CASE("token 窗口预检:CJK、代码长串与 base64 图片都计入固定输入") {
     const auto rejected_without_request = [](const char* shape, api::Message message) {
         const std::string shape_name(shape);

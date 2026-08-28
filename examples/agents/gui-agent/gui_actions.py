@@ -46,6 +46,12 @@ CLICKS_RANGE = (1, 3)
 MOVE_DURATION_MS_RANGE = (0, 1000)
 IMAGE_MAX_BYTES = 8 * 1024 * 1024
 IMAGE_MAX_DIMENSION = 8000
+# 回喂图的长边帽(px):超过就整数步长采样缩进帽内再编码回喂(落盘同
+# 一份)。各家视觉 token 都按分辨率计(anthropic ≈ 宽×高/750,建议长边
+# ≤1568;gpt/gemini 按 512/768 像素块),大原图原样上 wire 两头吃亏。
+# 1568 是各家建议值里最紧的一档。证据目录另存原图走 keep_original,
+# 默认不双份。
+IMAGE_FEED_LONG_EDGE = 1568
 TITLE_MAX_CHARS = 200
 SNAPSHOT_NAME_MAX_CHARS = 200
 # 正文行帽:与 gui_list_windows 的 20 窗帽同理——有 text 就不投影
@@ -259,6 +265,9 @@ def gui_screenshot(backend, arguments: dict, settings: Settings) -> tuple[str, d
         raise ToolError("invalid_arguments", "target 只认 window|screen;默认 window,少拍无关隐私")
     if target == "screen" and arguments.get("window_id"):
         raise ToolError("invalid_arguments", "target=screen 不收 window_id,两者择一")
+    keep_original = arguments.get("keep_original", False)
+    if not isinstance(keep_original, bool):
+        raise ToolError("invalid_arguments", "keep_original 只认布尔(默认 false,不另存原图)")
     if target == "window":
         window_id = _parse_window_id(arguments)
         if window_id is None:
@@ -282,6 +291,15 @@ def gui_screenshot(backend, arguments: dict, settings: Settings) -> tuple[str, d
                               "note": "整屏拍摄会拍下所有显示器,含虚拟屏负坐标区"}
         what = f"整屏(虚拟屏 {virtual})"
 
+    # 大图降采样:长边超帽先整数步长采样缩进帽内,回喂与落盘都用缩后图
+    # (一份,不默认双份)。observation 里的窗口矩形/客户区仍是拍摄时的
+    # 原坐标——动作坐标从矩形来,不经图像,缩放不挪坐标。
+    capture_size = [width, height]
+    capture_rows = rows  # 原始行位图留个引用:keep_original 另存时才编码
+    width, height, rows = png_codec.downscale_to_long_edge(
+        width, height, rows, IMAGE_FEED_LONG_EDGE)
+    downscaled = [width, height] != capture_size
+
     encoded = png_codec.encode_png(width, height, rows)
     if len(encoded) > IMAGE_MAX_BYTES:
         raise ToolError("encoding_failed",
@@ -296,18 +314,38 @@ def gui_screenshot(backend, arguments: dict, settings: Settings) -> tuple[str, d
     path = evidence_root / f"gui-obs-{time.strftime('%Y%m%d-%H%M%S')}-{digest[:8]}.png"
     path.write_bytes(encoded)
 
+    # 原图另存是可选附账:默认不落,免得证据目录双份翻倍。
+    original_path = None
+    if downscaled and keep_original:
+        original = png_codec.encode_png(capture_size[0], capture_size[1], capture_rows)
+        original_digest = hashlib.sha256(original).hexdigest()
+        original_path = evidence_root / (
+            f"gui-obs-{time.strftime('%Y%m%d-%H%M%S')}-{original_digest[:8]}-orig.png")
+        original_path.write_bytes(original)
+
+    image_meta = {"artifact_id": f"sha256:{digest}", "path": str(path),
+                  "width": width, "height": height, "mime_type": "image/png",
+                  "bytes": len(encoded)}
+    if downscaled:
+        image_meta["capture_size"] = capture_size
+        image_meta["downsample"] = {
+            "long_edge_cap": IMAGE_FEED_LONG_EDGE,
+            "note": "长边超帽,整数步长采样缩进帽内回喂;原图可传 keep_original 另存",
+        }
+        if original_path is not None:
+            image_meta["downsample"]["original_path"] = str(original_path)
     observation = {
         "observation_id": f"obs-{random.randbytes(6).hex()}",
         "target": target,
         **observation_window,
         "virtual_origin": [backend.virtual_screen()[0], backend.virtual_screen()[1]],
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
-        "image": {"artifact_id": f"sha256:{digest}", "path": str(path),
-                  "width": width, "height": height, "mime_type": "image/png",
-                  "bytes": len(encoded)},
+        "image": image_meta,
         "model_visibility": MODEL_FEED_NOTE,
     }
-    text = (f"已截图 {what},{width}x{height},图已随结果回喂(直接描述画面即可),"
+    size_note = (f"{capture_size[0]}x{capture_size[1]},降采样 {width}x{height} 回喂"
+                 if downscaled else f"{width}x{height}")
+    text = (f"已截图 {what},{size_note},图已随结果回喂(直接描述画面即可),"
             f"证据文件落 {path}(sha256 前 8 位 {digest[:8]})。"
             "动作时请带 expected_window_rect 防坐标过期。")
     # 协议 v2:图随结果回喂(path 模式——宿主读文件、验魔数、落会话
