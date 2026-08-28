@@ -1,0 +1,6 @@
+# 诊断样例(警告):agent.name_mismatch
+# 文件名 name-mismatch.yaml 与 name 字段 code-reviewer 对不上。
+# 以 name 为准,给 warning,日后可升为错误。
+schema: 1
+name: code-reviewer
+description: 文件名与名字不一致的样例。

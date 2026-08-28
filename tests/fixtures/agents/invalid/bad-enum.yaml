@@ -1,0 +1,9 @@
+# 诊断样例:agent.bad_enum
+# prompt.soul 只收 inherit、off。custom 不认,也不许借这里塞 Soul 正文。
+# 诊断须报字段路径与合法取值表。
+schema: 1
+name: bad-enum
+description: 枚举值非法的样例。
+
+prompt:
+  soul: custom

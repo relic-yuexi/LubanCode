@@ -1,0 +1,14 @@
+# 诊断样例:agent.mcp_inline
+# mcp_servers 只收服务名字符串。元素是映射且带 command/args/env 任一键,
+# 报内联启动配置错——Agent 文件不是 MCP 启动器,密钥更不许进来。
+schema: 1
+name: mcp-inline
+description: 内联 MCP 启动配置的样例。
+
+mcp_servers:
+  - id: browser
+    command: node
+    args:
+      - server.js
+    env:
+      BROWSER_TOKEN: replace-me

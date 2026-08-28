@@ -1,0 +1,4 @@
+# 最小合法样例:三行即成。其余字段全继承父 Agent。
+schema: 1
+name: note-taker
+description: 记录会话要点,整理成简短纪要。

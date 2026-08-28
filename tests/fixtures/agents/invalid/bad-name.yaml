@@ -1,0 +1,6 @@
+# 诊断样例:agent.bad_name
+# name 须为小写 kebab-case:1-64 字符,小写字母/数字/单横线,
+# 横线不顶头、收尾、连写。这份混了大写与下划线。
+schema: 1
+name: Browser_Tester
+description: 名字不合规矩。

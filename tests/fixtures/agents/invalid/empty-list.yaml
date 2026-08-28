@@ -1,0 +1,9 @@
+# 诊断样例:agent.empty_list
+# tools.allow 写成空数组不合法:与"不写"分不清意图。
+# 要表达收窄,写明确要保留的工具名。
+schema: 1
+name: empty-list
+description: 空数组的样例。
+
+tools:
+  allow: []

@@ -1,5 +1,6 @@
 # 官方文档。每行一页；路径从 docs/ 起算。
 DOC README.md
+DOC agents.md
 
 # 上手与排错
 DOC getting-started/troubleshooting.md

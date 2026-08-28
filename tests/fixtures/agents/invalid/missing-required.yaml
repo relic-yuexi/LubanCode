@@ -1,0 +1,3 @@
+# 诊断样例:agent.missing_field
+# 缺 name,也缺 description。诊断须报字段路径与期望类型。
+schema: 1

@@ -1,0 +1,5 @@
+# 诊断样例:agent.schema_unsupported
+# schema 只收 1。写了 2,拒绝加载,报错附升级提示;不降级猜解。
+schema: 2
+name: future-agent
+description: 用了尚不存在的高版本 schema。

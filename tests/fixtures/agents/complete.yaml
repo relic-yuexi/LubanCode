@@ -1,0 +1,49 @@
+# 全字段合法样例。字段规矩见 docs/agents.md 第 4 节。
+# 工具名、服务名、Skill 名、Profile 名都是演示占位,解析测试只验格式。
+schema: 1
+name: browser-tester
+description: 查验网页应用,复现界面故障,回报带截图的证据。
+
+prompt:
+  profile: browser-tester
+  project_instructions: inherit
+  soul: inherit
+
+model:
+  role: inherit
+  effort: inherit
+
+skills:
+  preload:
+    - browser-testing
+
+tools:
+  allow:
+    - read_file
+    - search
+    - context_read
+    - todo_write
+    - mcp__browser__navigate
+    - mcp__browser__screenshot
+  deny:
+    - run_command
+
+mcp_servers:
+  - browser
+
+requires:
+  tools:
+    - mcp__browser__navigate
+    - mcp__browser__screenshot
+
+runtime:
+  max_output_tokens: 8192
+  max_steps_per_turn: 24
+  max_context_chars: 600000
+  context_window_tokens: 0
+  length_continuations: 1
+  execution_mode: auto
+  isolation: none
+
+permissions:
+  mode: inherit

@@ -1,0 +1,14 @@
+# 诊断样例:agent.requires_conflict
+# requires.tools 断言 run_command 必在,tools.deny 又把它挡了。
+# 自相矛盾,解析时报错;不许悄悄放宽任何一边。
+schema: 1
+name: requires-conflict
+description: 断言与黑名单打架的样例。
+
+tools:
+  deny:
+    - run_command
+
+requires:
+  tools:
+    - run_command

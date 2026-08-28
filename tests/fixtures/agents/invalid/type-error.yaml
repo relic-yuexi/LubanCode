@@ -1,0 +1,9 @@
+# 诊断样例:agent.type_mismatch
+# tools.allow 须为字符串数组,这里写成了单个字符串。
+# 诊断须报文件、行、列。
+schema: 1
+name: type-error
+description: 类型不对的样例。
+
+tools:
+  allow: read_file

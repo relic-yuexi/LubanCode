@@ -1,0 +1,9 @@
+# 诊断样例:agent.unknown_field
+# 顶层没有 system_prompt 这个字段,严格解析拒绝之。
+# 稳定提示词放 Prompt Profile;临时提示词由调用任务传入。
+schema: 1
+name: unknown-field
+description: 夹带未知字段的样例。
+
+system_prompt: |
+  你是一枚测试代理。这段正文不该出现在 Agent 文件里。
