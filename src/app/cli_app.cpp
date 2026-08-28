@@ -433,6 +433,10 @@ int RunCli(const std::vector<std::string>& args) {
             // 子:不能让用户误以为只读保护已经开了)。
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
+        case CliAction::BadPackageDir:
+            // 统一 Package 封装单:--package-dir 缺值,明报退出。
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
         case CliAction::ResetSystemPrompt: {
             // 跟 /prompt reset 同效,只是不进交互、不二次确认(命令行参数
             // 本身就是明确意图),打结果就退。
@@ -716,6 +720,8 @@ int RunCli(const std::vector<std::string>& args) {
             effective, theme, model_catalog, settings_local,
             cli_options.auto_confirm, persona, spinner_enabled, cli_options.continue_last, law_source,
             executable, ResolveStartupPlanMode(cli_options, settings_local)};
+        // 统一 Package 封装单:--package-dir 递给 /package 的只读面。
+        session_options.package_dirs = cli_options.package_dirs;
         std::unique_ptr<lubancode::app::SessionStack> session_stack =
             lubancode::app::BuildSessionStack(session_options);
         session_options.stack = session_stack.get();

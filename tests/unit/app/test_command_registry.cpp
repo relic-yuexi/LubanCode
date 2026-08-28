@@ -1,7 +1,7 @@
 // 命令分派注册制(会话终章)的对账钉子:旧 interactive_session 大 switch
-// 的 47 案,逐案在 SlashCommandTable 里留名。这份测试把"行为逐一照旧"
+// 的 48 案,逐案在 SlashCommandTable 里留名。这份测试把"行为逐一照旧"
 // 折成可数的账:
-//   1. 表上恰好 47 行(与旧 switch 的 case 数同);
+//   1. 表上恰好 48 行(旧 switch 47 案 + /package);
 //   2. 枚举无重复、无遗漏(死案 Image/NotSlash 也留名,handler 为空);
 //   3. 活案(有 handler)的名字与 cli::AllSlashCommands 的帮助面逐一对应
 //      ——已知差异如实记:/effort 是 /think 的别名(帮助面有、分派面归
@@ -20,7 +20,7 @@
 
 namespace {
 
-// 旧 switch 的 47 案枚举全集(案序即旧 case 序)。
+// 命令枚举全集(旧 switch 47 案 + Package,案序即旧 case 序)。
 const std::vector<lubancode::cli::SlashCommand>& AllCommandEnums() {
     static const std::vector<lubancode::cli::SlashCommand> all = {
         lubancode::cli::SlashCommand::Image,      lubancode::cli::SlashCommand::Help,
@@ -35,7 +35,8 @@ const std::vector<lubancode::cli::SlashCommand>& AllCommandEnums() {
         lubancode::cli::SlashCommand::Plugins,    lubancode::cli::SlashCommand::Plugin,
         lubancode::cli::SlashCommand::Tools,      lubancode::cli::SlashCommand::Hooks,
         lubancode::cli::SlashCommand::Background, lubancode::cli::SlashCommand::Keymap,
-        lubancode::cli::SlashCommand::Plan,       lubancode::cli::SlashCommand::Trace,
+        lubancode::cli::SlashCommand::Plan,       lubancode::cli::SlashCommand::Package,
+        lubancode::cli::SlashCommand::Trace,
         lubancode::cli::SlashCommand::Doctor,     lubancode::cli::SlashCommand::Goal,
         lubancode::cli::SlashCommand::Loop,       lubancode::cli::SlashCommand::Memory,
         lubancode::cli::SlashCommand::Record,     lubancode::cli::SlashCommand::Sessions,
@@ -53,9 +54,9 @@ const std::vector<lubancode::cli::SlashCommand>& AllCommandEnums() {
 
 }  // namespace
 
-TEST_CASE("命令注册表:47 案齐整,枚举可对") {
+TEST_CASE("命令注册表:48 案齐整,枚举可对") {
     const std::vector<lubancode::app::SlashCommandSpec>& table = lubancode::app::SlashCommandTable();
-    REQUIRE(table.size() == 47);
+    REQUIRE(table.size() == 48);
 
     SUBCASE("枚举逐一在表,无重复") {
         std::set<int> seen;

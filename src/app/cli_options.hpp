@@ -22,6 +22,10 @@ struct CliOptions {
     // "不能安静落回 Default,让用户误以为只读保护已经开了")。
     std::string mode;               // "--mode <plan|default>";空 = 没给
     bool mode_given = false;
+    // 统一 Package 封装单:--package-dir <path>(可重复)——开发调试层,
+    // 目录下每个直接子目录是一只 Package,优先级最高(dev > project >
+    // user > official)。只喂给 /package 的只读面,不挂任何组件。
+    std::vector<std::string> package_dirs;
 };
 
 // `lubancode plugin init <模板> [名字]` 子命令(plugins 单第 3 步:Python
@@ -55,6 +59,7 @@ enum class CliAction {
     BadPluginInit,            // plugin init 的参数不对:人话已塞进 error_text
     ManageSession,            // archive/unarchive/delete 子命令
     BadMode,                  // --mode 认不得:人话已塞进 error_text(Plan 单)
+    BadPackageDir,            // --package-dir 缺值:人话已塞进 error_text(Package 单)
 };
 
 struct ParsedCliArgs {

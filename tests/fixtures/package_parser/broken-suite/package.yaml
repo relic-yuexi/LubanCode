@@ -1,0 +1,5 @@
+schema: 1
+id: sample.broken-suite
+version: 0.1
+name: Broken Suite
+description: Fixture package with a non-SemVer version and a near-miss skill/ dir.

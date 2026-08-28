@@ -61,6 +61,20 @@ std::optional<std::string> OfficialSkillsDir() {
     return std::string(reinterpret_cast<const char*>(value.data()), value.size());
 }
 
+std::optional<std::string> OfficialPackagesDir() {
+    const auto executable = ExecutablePath();
+    if (!executable.has_value()) {
+        return std::nullopt;
+    }
+    const std::filesystem::path candidate = executable->parent_path() / "packages";
+    std::error_code ec;
+    if (!std::filesystem::is_directory(candidate, ec) || ec) {
+        return std::nullopt;
+    }
+    const std::u8string value = candidate.u8string();
+    return std::string(reinterpret_cast<const char*>(value.data()), value.size());
+}
+
 std::expected<void, std::string> ReplaceFileAtomically(const std::filesystem::path& source,
                                                         const std::filesystem::path& destination) {
     if (MoveFileExW(source.c_str(), destination.c_str(),

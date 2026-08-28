@@ -602,6 +602,11 @@ add_library(lubancode_core STATIC
   src/workflow/compiler.cpp
   src/workflow/planner.cpp
   src/workflow/frontend.cpp
+  # 统一 Package 封装单阶段 1:根清单严格解析、SemVer/兼容范围、四层扫描、
+  # 稳定盘点与内容哈希(纯逻辑,与 workflow 平级)。
+  src/package/semver.cpp
+  src/package/manifest.cpp
+  src/package/inventory.cpp
 )
 target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -655,6 +660,8 @@ add_library(lubancode_app STATIC
   # /loop 会话定时循环单:slash 业务面(列表/状态/暂停/补拍的终端行)。
   src/app/commands/loop_commands.cpp
   src/app/commands/workflow_commands.cpp
+  # 统一 Package 封装单阶段 1:/package list|show|doctor 只读面。
+  src/app/commands/package_commands.cpp
   # 终端接线收尾单:/memory 命令 presenter(自大类搬出)。
   src/app/commands/memory_commands.cpp
   # 终端接线收尾单:/trace 命令 presenter(自大类搬出)。

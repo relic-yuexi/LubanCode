@@ -9,6 +9,7 @@
 #include "app/commands/loop_commands.hpp"
 #include "app/commands/memory_commands.hpp"
 #include "app/commands/model_commands.hpp"
+#include "app/commands/package_commands.hpp"
 #include "app/commands/peer_commands.hpp"
 #include "app/commands/prompt_commands.hpp"
 #include "app/commands/session_commands.hpp"
@@ -58,6 +59,7 @@ const std::vector<SlashCommandSpec>& SlashCommandTable() {
         {lubancode::cli::SlashCommand::Background, "background", HandleSlashBackground, false, false},
         {lubancode::cli::SlashCommand::Keymap, "keymap", HandleSlashKeymap, false, false},
         {lubancode::cli::SlashCommand::Plan, "plan", HandleSlashPlan, false, true},
+        {lubancode::cli::SlashCommand::Package, "package", HandleSlashPackage, false, false},
         {lubancode::cli::SlashCommand::Trace, "trace", HandleSlashTrace, false, false},
         {lubancode::cli::SlashCommand::Doctor, "doctor", HandleSlashDoctor, false, false},
         {lubancode::cli::SlashCommand::Goal, "goal", HandleSlashGoal, false, false},
