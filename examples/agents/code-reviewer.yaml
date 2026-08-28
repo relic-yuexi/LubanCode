@@ -1,0 +1,47 @@
+# 散装 Agent 定义示例:一只只读的代码评审员。
+# 契约全文见 docs/reference/agents.md。最小合法定义只要 schema/name/
+# description 三行;下面每一段各演示一种取舍,删掉哪段仍合法。
+#
+# 装法:拷进 ~/.lubancode/agents/(用户级)或 <项目>/.lubancode/agents/
+# (项目级,优先级更高),重启 LubanCode,/agents 里应列得出,
+# /agent doctor code-reviewer 诊得过。
+schema: 1
+name: code-reviewer
+description: 评审待合并的代码改动:通读 diff 与周边上下文,按严重度列问题清单,每条附文件与行号证据,只查不改。要有人专司挑错、独立给结论时派它。
+
+# 提示词:显式钉 default——不继承父 Agent 的 Profile,评审口径自带。
+# project_instructions 与 soul 省略即继承,不写。
+prompt:
+  profile: default
+
+# 模型:评审要细读,不吃廉价档;effort 省略即继承。
+model:
+  role: normal
+
+# 工具:白名单收成只读。这就是"只读子 Agent"的写法——权限档只有
+# confirm/auto/yolo,只读限制用 tools.allow 表达,不另造档。
+# 名单外的工具一概不可见,run_command 自然进不来,不必再写 deny。
+tools:
+  allow:
+    - read_file
+    - search
+    - context_read
+    - todo_write
+
+# 启动断言:这几件必须在有效工具表里,缺了报错,不悄悄放宽。
+# allow 是过滤,requires 是断言,两码事——详见契约 4.7。
+requires:
+  tools:
+    - read_file
+    - search
+
+# 运行参数:只挑有讲究的写,其余逐字段继承。
+runtime:
+  max_steps_per_turn: 40      # 评审要多走几步读上下文,放宽步帽
+  execution_mode: foreground  # 结论要当面看,不进后台
+  isolation: none            # 只读不写,不必隔离 worktree
+
+# 权限:省略即 inherit(同父)。铁律:只能比父 Agent 更窄,不能更宽;
+# 想要"只读",上面 tools.allow 白名单就是正解,不必动这档。
+permissions:
+  mode: inherit
