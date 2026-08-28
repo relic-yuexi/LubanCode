@@ -90,6 +90,11 @@
 - **ask_user 增 override_answers(墨敕)。** 审核方已驳(review_approved=false)时,命中此档皇帝仍可越权放行:approved/complete 直接为真,不掺和 approve 的账;overridden 键恒在,下游直接读。
 - **三省六部示例重写成 2.0:官制归数据。** 几案并陈(inputs.lanes)与职官路由表(inputs.ministries)都是数组——添一部、添一案,改输入不动图;谋议出 loop(献策一次,修诏多轮),门下不见用户原话、只审诏书里的"需求复述",御前加签与墨敕两特权落地。
 
+## [v0.26.80] - 2026-08-29
+
+- **两个扩展示例改造成 Package。** browser-agent 与 gui-agent 从 examples/agents/ 迁进 examples/packages/——按 schema 1 摆目录(package.yaml + skills/ + plugins/ + assets/),`/package doctor` 双双 valid 零警告;gui-agent 如实挂 code-bearing 标,被发现不挂载,过信任门才执行。git 认成 rename,历史没断。
+- **examples/agents/ 改放散装 Agent 定义示例。** 新示例 code-reviewer.yaml 逐段带注,演示 allow 白名单、requires 断言与 runtime 取舍;整包能力示例一律指路 examples/packages/。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
