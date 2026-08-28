@@ -11,6 +11,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 namespace lubancode::cli {
 struct Theme;
@@ -49,6 +50,10 @@ struct InteractiveSessionOptions {
     // 控制器只收装好的件。空 = 调用方没走组合根(单测/旧调用点),入口
     // 自己现装一份,两条路共用同一只 BuildSessionStack。
     SessionStack* stack = nullptr;
+    // 统一 Package 封装单:--package-dir 攒下的开发调试层(可重复),
+    // /package 只读面从这里拿 dev 层扫描根。放尾部:cli_app 的位置式聚合
+    // 初始化不必跟着改。
+    std::vector<std::string> package_dirs;
 };
 
 // 没带位置参数时的交互会话:读一行、问一句,exit/quit 或 EOF 退出。

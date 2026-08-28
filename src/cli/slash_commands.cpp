@@ -171,6 +171,10 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
     } else if (lower == "/plan") {
         // Plan 模式单:/plan 是正门(裸敲/status/off/review/带正文)。
         parsed.command = SlashCommand::Plan;
+    } else if (lower == "/package") {
+        // 统一 Package 封装单阶段 1:/package 只读面(list/show/doctor,
+        // 二级解析在 ParsePackageCommand,这里只认词)。
+        parsed.command = SlashCommand::Package;
     } else if (lower == "/workflow") {
         // Workflows 自然语言编排单:/workflow 是正门(list/show/graph/
         // validate/run/...),子命令解析在 workflow 层,这里只认词。
@@ -878,6 +882,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/goal", tr("slash.desc.goal")},
             {"/loop", tr("slash.desc.loop")},
             {"/plan", tr("slash.desc.plan")},
+            {"/package", tr("slash.desc.package")},
         };
     }
     return commands;

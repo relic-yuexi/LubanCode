@@ -53,6 +53,11 @@ std::optional<std::filesystem::path> ExecutablePath();
 // 再找 <prefix>/share/lubancode/skills（POSIX install.sh/CMake install）。
 std::optional<std::string> OfficialSkillsDir();
 
+// 官方 Package 目录（统一 Package 封装单四层扫描的 official 层）：探法与
+// OfficialSkillsDir 同款，只是名字换 packages。找不到返回 nullopt，主程
+// 序照常运行——official 层缺席只少一层扫描。
+std::optional<std::string> OfficialPackagesDir();
+
 // 把 source 原子换到 destination。两条路径须在同一文件系统；成功后
 // source 不复存在。memory/index 这类“先写临时文件，再整份替换”的路径
 // 共用它，免得 Windows 的 rename 不能覆盖目标、POSIX 却能覆盖，业务层

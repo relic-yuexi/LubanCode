@@ -124,6 +124,17 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             options.mode_given = true;
             continue;
         }
+        if (arg == "--package-dir") {
+            // 统一 Package 封装单:开发调试层,可重复。缺值当场退——
+            // 静默吞掉一个空目录会把"想挂的没挂上"藏到 /package list 里。
+            if (i + 1 >= args.size()) {
+                parsed.action = CliAction::BadPackageDir;
+                parsed.error_text = "--package-dir 需要一个目录路径(可重复)";
+                return parsed;
+            }
+            options.package_dirs.push_back(args[++i]);
+            continue;
+        }
         if (arg == "--reset-system-prompt") {
             // 跟 /prompt reset 同效,只是不进交互、不二次确认(命令行参数
             // 本身就是明确意图),RunCli 打完结果就退。

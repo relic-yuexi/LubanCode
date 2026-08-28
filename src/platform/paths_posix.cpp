@@ -80,6 +80,26 @@ std::optional<std::string> OfficialSkillsDir() {
     return std::nullopt;
 }
 
+std::optional<std::string> OfficialPackagesDir() {
+    const auto executable = ExecutablePath();
+    if (!executable.has_value()) {
+        return std::nullopt;
+    }
+    const std::filesystem::path exe_dir = executable->parent_path();
+    const std::filesystem::path candidates[] = {
+        exe_dir / "packages",
+        exe_dir.parent_path() / "share" / "lubancode" / "packages",
+    };
+    for (const auto& candidate : candidates) {
+        std::error_code ec;
+        if (std::filesystem::is_directory(candidate, ec) && !ec) {
+            const std::u8string value = candidate.u8string();
+            return std::string(reinterpret_cast<const char*>(value.data()), value.size());
+        }
+    }
+    return std::nullopt;
+}
+
 std::expected<void, std::string> ReplaceFileAtomically(const std::filesystem::path& source,
                                                         const std::filesystem::path& destination) {
     std::error_code ec;
