@@ -763,9 +763,12 @@ TEST_CASE("矩阵 C4: responses——input_tokens 已含 cached,摊开不加两�
 
 TEST_CASE("矩阵 C5: gemini 两代口径——total 对账归一,另计的一代把思考并进 output") {
     // 2.5 时代(candidates 已含思考):total = prompt + candidates,照旧。
+    // (事件先落盘再取指针——FindEvent 的结果指着这份 vector,悬在临时上
+    // 就是踩野内存,与 C2 同一副坑。)
     api::gemini::EventParser old_gen;
-    const auto* old_done = FindEvent<api::MessageDone>(old_gen.Consume(Frame(
-        R"({"candidates":[{"content":{"parts":[{"text":"答"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":50000,"candidatesTokenCount":80,"thoughtsTokenCount":20,"cachedContentTokenCount":49000,"totalTokenCount":50080}})")));
+    const auto old_events = old_gen.Consume(Frame(
+        R"({"candidates":[{"content":{"parts":[{"text":"答"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":50000,"candidatesTokenCount":80,"thoughtsTokenCount":20,"cachedContentTokenCount":49000,"totalTokenCount":50080}})"));
+    const auto* old_done = FindEvent<api::MessageDone>(old_events);
     REQUIRE(old_done != nullptr);
     CHECK(old_done->usage.output_tokens == 80);
     CHECK(old_done->usage.output_reasoning_tokens == 20);
@@ -774,8 +777,9 @@ TEST_CASE("矩阵 C5: gemini 两代口径——total 对账归一,另计的一�
     // 现行手册口径(思考另计):total = prompt + thoughts + candidates,
     // 思考并进 output(中立契约:reasoning 含在 output 里),输入账不变。
     api::gemini::EventParser new_gen;
-    const auto* new_done = FindEvent<api::MessageDone>(new_gen.Consume(Frame(
-        R"({"candidates":[{"content":{"parts":[{"text":"答"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":171,"thoughtsTokenCount":297,"totalTokenCount":1468}})")));
+    const auto new_events = new_gen.Consume(Frame(
+        R"({"candidates":[{"content":{"parts":[{"text":"答"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":171,"thoughtsTokenCount":297,"totalTokenCount":1468}})"));
+    const auto* new_done = FindEvent<api::MessageDone>(new_events);
     REQUIRE(new_done != nullptr);
     CHECK(new_done->usage.input_tokens == 1000);
     CHECK(new_done->usage.output_tokens == 171 + 297);
@@ -783,8 +787,9 @@ TEST_CASE("矩阵 C5: gemini 两代口径——total 对账归一,另计的一�
 
     // 没报 total 的旧端:按 2.5 旧口径,宁可少算不瞎加。
     api::gemini::EventParser no_total;
-    const auto* legacy_done = FindEvent<api::MessageDone>(no_total.Consume(Frame(
-        R"({"candidates":[{"content":{"parts":[{"text":"答"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":90,"thoughtsTokenCount":40}})")));
+    const auto legacy_events = no_total.Consume(Frame(
+        R"({"candidates":[{"content":{"parts":[{"text":"答"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":100,"candidatesTokenCount":90,"thoughtsTokenCount":40}})"));
+    const auto* legacy_done = FindEvent<api::MessageDone>(legacy_events);
     REQUIRE(legacy_done != nullptr);
     CHECK(legacy_done->usage.output_tokens == 90);
     CHECK(legacy_done->usage.output_reasoning_tokens == 40);
