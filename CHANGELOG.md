@@ -95,6 +95,10 @@
 - **两个扩展示例改造成 Package。** browser-agent 与 gui-agent 从 examples/agents/ 迁进 examples/packages/——按 schema 1 摆目录(package.yaml + skills/ + plugins/ + assets/),`/package doctor` 双双 valid 零警告;gui-agent 如实挂 code-bearing 标,被发现不挂载,过信任门才执行。git 认成 rename,历史没断。
 - **examples/agents/ 改放散装 Agent 定义示例。** 新示例 code-reviewer.yaml 逐段带注,演示 allow 白名单、requires 断言与 runtime 取舍;整包能力示例一律指路 examples/packages/。
 
+## [v0.26.81] - 2026-08-29
+
+- **自定义 Agent 的 permissions.mode 对齐契约。** 解析器只认 inherit/confirm/auto/yolo;写了 read_only 会点名报错并指路"只读用 tools.allow 白名单表达"(带行列号)。内置 Explore 撤掉 read_only 标记,只读仍由五枚工具白名单扛——契约与代码不再两张皮。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
