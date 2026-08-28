@@ -9,6 +9,7 @@ DOC getting-started/troubleshooting.md
 DOC features/README.md
 DOC features/app-server/README.md
 DOC features/context/compaction.md
+DOC features/evolution/README.md
 DOC features/extensions/README.md
 DOC features/extensions/hooks.md
 DOC features/project-instructions/README.md

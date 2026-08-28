@@ -16,6 +16,7 @@
 | [Hooks](extensions/hooks.md) | 事件、协议、信任、决策归并与后台语义 |
 | [PTC](tools/ptc.md) | 程序化工具调用、runner、预算与回落 |
 | [Workflow](workflows/README.md) | 安装、运行、恢复与工作流设计原语 |
+| [自进化闭环](evolution/README.md) | Package 候选、评测、批准、晋升与回滚的闭环契约 |
 
 项目记忆横跨用户行为与内部数据流。使用命令见
 [会话与上下文](sessions/README.md)，完整设计见
