@@ -1,6 +1,7 @@
 // 工具结果图片回喂单:artifact 重灌(agent::RehydrateToolResultImages)的
 // 纯函数单测——好图灌上、伪 MIME 拒、字节帽拒、脏文件名拒、文件丢了不炸、
-// 幂等与请求合计帽。不碰网络;artifact 目录用临时目录。
+// 幂等与请求合计帽;外加预检图片 token 的像素口径尺
+// (EstimateImageTokensForPreflight)。不碰网络;artifact 目录用临时目录。
 #include <doctest/doctest.h>
 
 #include <filesystem>
@@ -70,6 +71,80 @@ std::string TinyPngBytes() {
     const auto decoded = agent::DecodeBase64Strict(kTinyPngB64, 1024);
     REQUIRE(decoded.has_value());
     return *decoded;
+}
+
+// ---- 像素口径尺的夹具:合成带指定宽高头的 PNG/JPEG 字节,再编 base64。----
+
+std::string TestBase64Encode(const std::string& bytes) {
+    static const char kTable[] =
+        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string out;
+    out.reserve((bytes.size() + 2) / 3 * 4);
+    std::size_t i = 0;
+    while (i + 3 <= bytes.size()) {
+        const std::uint32_t n = (static_cast<unsigned char>(bytes[i]) << 16) |
+                                (static_cast<unsigned char>(bytes[i + 1]) << 8) |
+                                static_cast<unsigned char>(bytes[i + 2]);
+        out += kTable[(n >> 18) & 0x3F];
+        out += kTable[(n >> 12) & 0x3F];
+        out += kTable[(n >> 6) & 0x3F];
+        out += kTable[n & 0x3F];
+        i += 3;
+    }
+    if (bytes.size() - i == 1) {
+        const std::uint32_t n = static_cast<unsigned char>(bytes[i]) << 16;
+        out += kTable[(n >> 18) & 0x3F];
+        out += kTable[(n >> 12) & 0x3F];
+        out += "==";
+    } else if (bytes.size() - i == 2) {
+        const std::uint32_t n = (static_cast<unsigned char>(bytes[i]) << 16) |
+                                (static_cast<unsigned char>(bytes[i + 1]) << 8);
+        out += kTable[(n >> 18) & 0x3F];
+        out += kTable[(n >> 12) & 0x3F];
+        out += kTable[(n >> 6) & 0x3F];
+        out += '=';
+    }
+    return out;
+}
+
+void AppendBe32(std::string& out, std::uint32_t value) {
+    out += static_cast<char>((value >> 24) & 0xFF);
+    out += static_cast<char>((value >> 16) & 0xFF);
+    out += static_cast<char>((value >> 8) & 0xFF);
+    out += static_cast<char>(value & 0xFF);
+}
+
+void AppendBe16(std::string& out, std::uint32_t value) {
+    out += static_cast<char>((value >> 8) & 0xFF);
+    out += static_cast<char>(value & 0xFF);
+}
+
+// 只带签名 + IHDR 头的 PNG 段(ReadImageDimensions 只认签名与 IHDR 标签,
+// CRC 不进门)。宽高按大端写进 16..24。
+std::string MakePngHeaderBytes(std::uint32_t width, std::uint32_t height) {
+    std::string bytes("\x89PNG\r\n\x1a\n", 8);
+    AppendBe32(bytes, 13);  // IHDR 长度
+    bytes += "IHDR";
+    AppendBe32(bytes, width);
+    AppendBe32(bytes, height);
+    bytes += std::string(5, '\x08');  // bit depth/color type/压缩/滤波/隔行
+    return bytes;
+}
+
+// SOF0 段的 JPEG 头(同 test_model_image_store 的形状):宽高大端住段里。
+std::string MakeJpegHeaderBytes(std::uint32_t width, std::uint32_t height) {
+    std::string bytes("\xFF\xD8", 2);  // SOI
+    bytes += '\xFF';
+    bytes += '\xC0';  // SOF0
+    AppendBe16(bytes, 17);  // 段长
+    bytes += '\x08';        // 精度
+    AppendBe16(bytes, height);
+    AppendBe16(bytes, width);
+    bytes += '\x01';  // 分量数
+    bytes += std::string(9, '\x00');
+    bytes += '\xFF';
+    bytes += '\xD9';  // EOI
+    return bytes;
 }
 
 }  // namespace
@@ -178,4 +253,43 @@ TEST_CASE("重灌: 多张图逐张判——好的都灌,坏的各按各的规矩
     CHECK(std::get<tools::ImageContent>(blocks[1]).wire_base64 == kTinyPngB64);
     CHECK(std::get<tools::ImageContent>(blocks[2]).wire_base64.empty());
     CHECK(std::get<tools::ImageContent>(blocks[3]).wire_base64.empty());
+}
+
+// ---------------------------------------------------------------------------
+// 预检图片 token 的像素口径尺:宽×高/750 优先,base64 读头次之,字节兜底。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("图片 token 预检尺: 宽高已知按像素折,大图不再记成 base64 字节账") {
+    // 用户炸单的那副形状:3072x1918 的整窗截图。像素口径 5892096/750=7856;
+    // 老字节口径会把约 2.6MB base64 记成 65 万 token,误报越窗。
+    CHECK(agent::EstimateImageTokensForPreflight(3072, 1918, std::string(2632812, 'A')) == 7856);
+    // 1568 长边内的小图:1568*982/750=2053。
+    CHECK(agent::EstimateImageTokensForPreflight(1568, 982, "") == 2053);
+    // 1x1 极小图:像素口径下不足一枚 token,记 0。
+    CHECK(agent::EstimateImageTokensForPreflight(1, 1, kTinyPngB64) == 0);
+    // base64 都没有(未重灌的引用块):图不上 wire,零账。
+    CHECK(agent::EstimateImageTokensForPreflight(0, 0, "") == 0);
+}
+
+TEST_CASE("图片 token 预检尺: 宽高未知从 base64 读头——PNG IHDR / JPEG SOFn") {
+    const std::string png_b64 = TestBase64Encode(MakePngHeaderBytes(1568, 982));
+    CHECK(agent::EstimateImageTokensForPreflight(0, 0, png_b64) == 2053);
+    const std::string jpeg_b64 = TestBase64Encode(MakeJpegHeaderBytes(200, 100));
+    CHECK(agent::EstimateImageTokensForPreflight(0, 0, jpeg_b64) == 26);  // 20000/750
+    // 宽高只报了一半:不算已知,走解码读头(夹具真尺寸 1568x982)。
+    CHECK(agent::EstimateImageTokensForPreflight(0, 982, png_b64) == 2053);
+}
+
+TEST_CASE("图片 token 预检尺: 读不出宽高退字节口径——截断头/认不得格式/坏 base64") {
+    // PNG 签名认得但 IHDR 被截(不足 24 字节):格式对、宽高读不出。
+    std::string truncated("\x89PNG\r\n\x1a\n", 8);
+    truncated += std::string(2, '\0');
+    const std::string truncated_b64 = TestBase64Encode(truncated);
+    CHECK(agent::EstimateImageTokensForPreflight(0, 0, truncated_b64) == truncated_b64.size() / 4);
+    // 合法 base64 但字节认不出格式(解码全零):老尺 base64/4 兜底。
+    const std::string garbage_b64(4000, 'A');
+    CHECK(agent::EstimateImageTokensForPreflight(0, 0, garbage_b64) == 1000);
+    // 坏 base64(长度不是 4 的倍数):同样兜底,不炸。
+    const std::string bad_b64(4001, 'A');
+    CHECK(agent::EstimateImageTokensForPreflight(0, 0, bad_b64) == 4001 / 4);
 }

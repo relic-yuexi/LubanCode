@@ -66,7 +66,11 @@ std::size_t EstimateMessageTokensForPreflight(const api::Message& message) {
                 if constexpr (std::is_same_v<T, api::TextBlock>) {
                     return EstimateTextTokensForPreflight(b.text);
                 } else if constexpr (std::is_same_v<T, api::ImageBlock>) {
-                    return (b.media_type.size() + b.data.size() + b.filename.size()) / 4;
+                    // 图片按像素折 token(宽×高/750,anthropic 口径、各家
+                    // 居中):块上宽高优先,缺了从 base64 读头,真读不出才
+                    // 退字节口径——公共尺在 EstimateImageTokensForPreflight
+                    // (工具结果图片回喂单),与工具图同一条。
+                    return EstimateImageTokensForPreflight(b.width, b.height, b.data);
                 } else if constexpr (std::is_same_v<T, api::ToolUseBlock>) {
                     return EstimateTextTokensForPreflight(b.name) + EstimateTextTokensForPreflight(b.id) +
                            EstimateTextTokensForPreflight(b.input.dump());
@@ -74,18 +78,20 @@ std::size_t EstimateMessageTokensForPreflight(const api::Message& message) {
                     // MCP 富结果单 P0.3:富块的 base64 从不进 durable history
                     // ——content 是 TextProjection,图片/音频只剩 artifact
                     // 短句,按短文本估。工具结果图片回喂单添的后账:请求副本
-                    // 上重灌过的 wire_base64 会真上 wire,按 base64 体积粗折
-                    // (与用户贴图 ImageBlock 同一口径 /4),不然窗口预检漏算
-                    // 这笔大账。
-                    std::size_t image_bytes = 0;
+                    // 上重灌过的 wire_base64 会真上 wire,token 与用户贴图
+                    // ImageBlock 同走像素口径公共尺(宽×高/750,读不出宽高
+                    // 退字节口径)——老字节口径把 3MB 的 3072x1918 截图记成
+                    // 65 万 token,真上 wire 只值八千,整轮被误报越窗。
+                    std::size_t image_tokens = 0;
                     for (const auto& rich : b.blocks) {
                         if (const auto* image = std::get_if<tools::ImageContent>(&rich);
                             image != nullptr) {
-                            image_bytes += image->wire_base64.size();
+                            image_tokens += EstimateImageTokensForPreflight(image->width, image->height,
+                                                                           image->wire_base64);
                         }
                     }
                     return EstimateTextTokensForPreflight(b.tool_use_id) +
-                           EstimateTextTokensForPreflight(b.content) + image_bytes / 4;
+                           EstimateTextTokensForPreflight(b.content) + image_tokens;
                 } else if constexpr (std::is_same_v<T, api::ThinkingBlock>) {
                     return EstimateTextTokensForPreflight(b.text) + EstimateTextTokensForPreflight(b.signature);
                 } else {

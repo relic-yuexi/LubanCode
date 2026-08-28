@@ -47,7 +47,7 @@
     },
     {
       "name": "gui_screenshot",
-      "description": "截图并把 PNG 随结果回喂模型(协议 v2 image 块,模型直接看见画面),同时落证据文件、返回 observation(窗口矩形、客户区尺寸、DPI、虚拟原点、图片 sha256 与路径)。默认 target=window 只拍目标窗口,少碰无关隐私;target=screen 拍全部显示器。最小化窗口拒绝。动作工具带 expected_window_rect 引用本次 observation 的矩形可防坐标过期。",
+      "description": "截图并把 PNG 随结果回喂模型(协议 v2 image 块,模型直接看见画面),同时落证据文件、返回 observation(窗口矩形、客户区尺寸、DPI、虚拟原点、图片 sha256 与路径)。长边超 1568px 的截图先整数步长采样缩进帽内再回喂与落盘(视觉 token 按分辨率计,大原图两头吃亏);要原图附账传 keep_original。默认 target=window 只拍目标窗口,少碰无关隐私;target=screen 拍全部显示器。最小化窗口拒绝。动作工具带 expected_window_rect 引用本次 observation 的矩形可防坐标过期。",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -57,7 +57,11 @@
             "description": "window=离屏抓目标窗口(默认,遮挡也能抓);screen=拍整块虚拟屏(注意隐私)"
           },
           "window_id": {"type": "string", "description": "target=window 必填"},
-          "artifact_dir": {"type": "string", "description": "可选;截图落盘目录,缺省走 LUBANCODE_GUI_EVIDENCE_DIR 或系统临时目录"}
+          "artifact_dir": {"type": "string", "description": "可选;截图落盘目录,缺省走 LUBANCODE_GUI_EVIDENCE_DIR 或系统临时目录"},
+          "keep_original": {
+            "type": "boolean",
+            "description": "可选,默认 false;发生降采样时证据目录额外另存一份原图(-orig 后缀),平时不双份"
+          }
         },
         "additionalProperties": false
       }

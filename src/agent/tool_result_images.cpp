@@ -4,6 +4,7 @@
 #include <fstream>
 
 #include "agent/model_image_store.hpp"  // SniffImageFormat/ReadImageDimensions
+#include "platform/log_sink.hpp"        // 退字节口径时的留痕日志
 #include "platform/paths.hpp"           // Utf8ToPath:目录路径不走 ACP 窄口
 #include "platform/text_encoding.hpp"
 
@@ -79,6 +80,43 @@ bool ReadFileBytes(const std::string& path_utf8, std::string& out) {
 }
 
 }  // namespace
+
+std::size_t EstimateImageTokensForPreflight(std::uint32_t width, std::uint32_t height,
+                                            const std::string& base64) {
+    // 像素优先:块上的宽高是解析期读好的账(贴图 LoadImage/工具图验身
+    // 时读的),不用再解一遍 base64。
+    if (width > 0 && height > 0) {
+        return static_cast<std::size_t>(static_cast<std::uint64_t>(width) * height / 750);
+    }
+    // base64 也没有(未重灌的引用块/空块):图不上 wire,零账。
+    if (base64.empty()) {
+        return 0;
+    }
+    // 现解码读头。cap 与模型图上限同档(kMaxModelImageBytes,20MiB):
+    // 超帽/坏串按读不出走字节兜底——兜底只会多算,不会漏算。
+    const auto decoded = DecodeBase64Strict(base64, kMaxModelImageBytes);
+    if (decoded.has_value()) {
+        const ImageFormat format = SniffImageFormat(*decoded);
+        if (!format.mime_type.empty()) {
+            const ImageDimensions dims = ReadImageDimensions(*decoded, format.mime_type);
+            if (dims.width > 0 && dims.height > 0) {
+                return static_cast<std::size_t>(static_cast<std::uint64_t>(dims.width) * dims.height / 750);
+            }
+            platform::LogSink::Instance().Debug(
+                "tool-image", "预检图片 token:格式认得(" + format.mime_type + ")但宽高读不出,base64 " +
+                                  std::to_string(base64.size()) + " 字符,退回字节口径估算");
+        } else {
+            platform::LogSink::Instance().Debug(
+                "tool-image", "预检图片 token:认不出图片格式,base64 " + std::to_string(base64.size()) +
+                                  " 字符,退回字节口径估算");
+        }
+    } else {
+        platform::LogSink::Instance().Debug("tool-image",
+                                            "预检图片 token:base64 解不开(" + decoded.error() +
+                                                "),退回字节口径估算");
+    }
+    return base64.size() / 4;  // 老尺兜底:base64 字符 4 折 1,宁多勿漏
+}
 
 std::size_t RehydrateToolResultImages(api::Request& request, const std::string& artifact_root) {
     if (artifact_root.empty()) {

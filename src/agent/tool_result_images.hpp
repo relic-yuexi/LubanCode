@@ -42,4 +42,22 @@ inline constexpr std::size_t kMaxToolResultWireImageTotalBytes = 20 * 1024 * 102
 // 超帽的一律跳过。返回本轮灌进去的张数(日志/诊断用)。
 std::size_t RehydrateToolResultImages(api::Request& request, const std::string& artifact_root);
 
+// 图片块进上下文窗口的 token 预检尺——像素口径,用户贴图(ImageBlock)
+// 与工具结果图(wire_base64)共用这一把:
+//
+//   宽高已知  →  宽 × 高 / 750
+//   宽高未知  →  base64 解码读头(PNG IHDR / JPEG SOFn,GIF/WebP 顺带,
+//                model_image_store 的既有读头),读出同上
+//   读不出    →  退回老字节口径 base64 字符数 / 4,Debug 日志留痕
+//
+// 出处与折中:anthropic 官方口径 tokens ≈ (width × height) / 750;gpt 系
+// 按 512px 块计片、gemini 按 768px 块计片,同分辨率下与 /750 彼此差不到
+// 一倍。预检要防的是老字节口径那类离谱账(3MB 的 3072x1918 截图按
+// base64/4 记 65 万 token,真上 wire 只值八千上下,整轮被误报越窗),
+// 取各家居中偏保守的 /750:宁多算几百,不虚拦一轮。宽高按原图记,不做
+// 1568 长边折算(anthropic 服务端会把超长边图缩回 1568 再计——按原图
+// 记只会偏保守,不漏算)。
+std::size_t EstimateImageTokensForPreflight(std::uint32_t width, std::uint32_t height,
+                                            const std::string& base64);
+
 }  // namespace lubancode::agent
