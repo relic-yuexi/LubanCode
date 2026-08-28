@@ -9,6 +9,10 @@ namespace lubancode::config {
 
 constexpr std::size_t kDefaultProjectInstructionsMaxBytes = 32 * 1024;
 
+// 项目根发现(自定义 Agent 单阶段 1 起对外):从 cwd 往上找 .git,找不到
+// 就用 cwd 本身。项目级配置/Agent 目录都从这里起算,不各自猜 cwd。
+std::filesystem::path FindProjectRoot(const std::filesystem::path& cwd);
+
 struct ProjectInstructions {
     std::filesystem::path project_root;
     std::vector<std::filesystem::path> sources;

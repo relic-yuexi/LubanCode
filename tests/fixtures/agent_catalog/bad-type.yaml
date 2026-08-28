@@ -1,0 +1,5 @@
+schema: 1
+name: type-error-agent
+description: runtime.max_steps_per_turn 故意给字符串,严格解析该报类型错。
+runtime:
+  max_steps_per_turn: 很多步

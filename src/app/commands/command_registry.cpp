@@ -3,6 +3,7 @@
 // 路由职责收于此,案序照旧 switch 登册(枚举可对)。
 #include "app/commands/command_registry.hpp"
 
+#include "app/commands/agent_commands.hpp"
 #include "app/commands/doctor_commands.hpp"
 #include "app/commands/goal_commands.hpp"
 #include "app/commands/hook_commands.hpp"
@@ -53,6 +54,8 @@ const std::vector<SlashCommandSpec>& SlashCommandTable() {
         {lubancode::cli::SlashCommand::Todos, "todos", HandleSlashTodos, false, false},
         {lubancode::cli::SlashCommand::Plugins, "plugins", HandleSlashPlugins, false, false},
         {lubancode::cli::SlashCommand::Plugin, "plugin", HandleSlashPlugin, false, false},
+        {lubancode::cli::SlashCommand::Agents, "agents", HandleSlashAgents, false, false},
+        {lubancode::cli::SlashCommand::Agent, "agent", HandleSlashAgent, false, false},
         {lubancode::cli::SlashCommand::Tools, "tools", HandleSlashTools, false, false},
         {lubancode::cli::SlashCommand::Hooks, "hooks", HandleSlashHooks, false, false},
         {lubancode::cli::SlashCommand::Background, "background", HandleSlashBackground, false, false},

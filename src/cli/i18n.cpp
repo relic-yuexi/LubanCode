@@ -640,6 +640,8 @@ const Entry kZhCN[] = {
     {"slash.desc.plugins", "列出插件三路(native/Lua/process)的状态与加载警告"},
     {"slash.desc.plugin",
      "管单枚插件:inspect 看详情 / doctor 查环境 / test 试跑 / reload 重载 / enable|disable 开关"},
+    {"slash.desc.agents", "列 Agent Catalog:名称/来源层/可用性/描述(builtin + 用户级 + 项目级)"},
+    {"slash.desc.agent", "单 Agent 静态预检;/agent doctor <名字> 查定义解析与依赖缺项(只读)"},
     {"slash.desc.tools", "列工具三态:核心(恒在)/已加载/延迟未加载(tool_search 延迟挂载)"},
     {"slash.desc.memory",
      "管理项目记忆;/memory on|off|use|learn|review|accept|edit|reject|list|remember|forget|rebuild|why"},
@@ -2327,6 +2329,8 @@ const Entry kEn[] = {
     {"slash.desc.plugins", "list plugins of all three runtimes (native/Lua/process) with load warnings"},
     {"slash.desc.plugin",
      "manage one plugin: inspect / doctor / test / reload / enable|disable"},
+    {"slash.desc.agents", "list the agent catalog: name/source layer/availability/description (builtin + user + project)"},
+    {"slash.desc.agent", "static precheck for one agent; /agent doctor <name> (read-only)"},
     {"slash.desc.tools", "list tool states: core / loaded / deferred (tool_search)"},
     {"slash.desc.memory",
      "manage project memory; /memory on|off|use|learn|review|accept|edit|reject|list|remember|forget|"

@@ -1,0 +1,3 @@
+schema: 2
+name: future-schema-agent
+description: schema 写 2,本版只收 1,该拒载并提示升级。
