@@ -141,6 +141,12 @@
 - **能力说明不再说一套做一套。** 自定义 Agent 的 feature 文案从过滤后的有效工具表推导——没给 shell 就不装 shell 说明,没给 todo 就不装 todo 说明;web/mcp/lsp 只认能力,不吃父会话开关。
 - **`/agent inspect` 点亮来源账本。** 定义来源、覆盖链、prompt 三笔开关、逐模块"这段提示词从哪层哪文件来"一目了然;`/agent doctor` 的 Profile 行升级为查三层覆盖存在性。
 
+## [v0.26.89] - 2026-08-29
+
+- **`/plugin test` 真跑测试了。** 发现插件目录同位的 test_runner.py/.js/.mjs,用 manifest 自己的解释器起进程,回执带入口、命令行、退出码、耗时与 stdout/stderr 摘要;起不来、超时、非零退出分层定位。真机验:gui-agent 55 项自测 479ms 通过,故意失败的探针带完整 traceback。
+- **三份命令名单同源。** `--help`、`/help`、Tab 补全全从 cli::AllSlashCommands 出,手抄清单撤下——/plan、/agents、/agent 不再只在补全里见得着。
+- **小件四桩清账。** TODO 回合收口时提醒未关项(打断与预算断线不催);C4099 class/struct 前置声明清编归零;测试 FindEvent 加右值删除重载,悬垂写法编译期就报;Agent YAML runtime 段补齐契约五字段(带下界上限校验)。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
