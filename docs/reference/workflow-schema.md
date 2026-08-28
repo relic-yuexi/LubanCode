@@ -110,7 +110,7 @@ edges:
 | --- | --- |
 | `exists` / `not_exists` | 值存在或不存在 |
 | `equals` / `not_equals` | 与 JSON 字面量相等或不等 |
-| `greater_than` / `less_than` | 数值比较 |
+| `gt` / `lt` | 数值比较 |
 | `contains` | 数组或字符串包含字面量 |
 | `starts_with` | 字符串前缀 |
 | `non_empty` | 数组或字符串非空 |

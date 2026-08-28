@@ -72,9 +72,10 @@ Store 快照。恢复时以内容 hash、已完成节点与最新完整 checkpoi
 - `找不到 workflow`：检查目录层级，`workflow.yaml` 应直接住在 `<id>/` 下。
 - alias 不响应：查 `/workflow alias`；撞内建命令、Skill 或另一份 alias 时，直呼会被禁用。
 - `invalid_definition`：按错误给出的字段路径改图，不要绕过 validator 直接跑。
-- `not_configured`：节点种类存在，宿主却没装对应 executor 或 Broker；这不是重试能治的错。
+- `not_configured`：节点种类存在，宿主却没装对应 executor 或 Broker；这不是重试能治的错。agent/tool 节点的审批不在此列——已接终端确认链。
 - `budget_exhausted`：查 `max_steps`、总时限、tool_calls 与 tokens；loop body 的每一步也吃总账。
 
 Workflow 能调用工具、模型、子代理与交互 Broker，也能写工作区。权限仍由原工具、
-Hook 与确认机制守门；workflow 不替用户扩大权限。副作用节点若会重试、循环、异步
+Hook 与确认机制守门；workflow 不替用户扩大权限。agent 与 tool 节点的审批已接
+终端确认链，写盘、执行一类动作照旧过御前。副作用节点若会重试、循环、异步
 重放，须给稳定 `idempotency_key`。
