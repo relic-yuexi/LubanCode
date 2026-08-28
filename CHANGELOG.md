@@ -79,6 +79,11 @@
 - **自定义 Agent 落了第一层。** Agent YAML 契约冻结(`docs/reference/agents.md`:逐字段、严格解析、诊断码、YAML 与 C++ 对照);builtin、user、project 三层扫描进 Catalog,`/agents` 一条列全账(来源、可用性、遮蔽),`/agent doctor` 逐份指错到字段与行号——坏定义标 unavailable,不炸全局。
 - **general-purpose 与 Explore 登进 Catalog。** 纯只读面,现有行为一字未动。
 
+## [v0.26.78] - 2026-08-29
+
+- **Package 落了第一层(只读)。** package.yaml schema 1 契约冻结(`docs/reference/packages.md`:标准目录、命名空间、wire 百分号编码);严格解析指错到字段与行号,四层扫描(`--package-dir` > 项目 > 用户 > 官方),稳定盘点加整包内容哈希——改一个字节哈希就变。
+- **`/package list/show/doctor` 三件只读命令。** 同名包报遮蔽账;symlink 与 junction 越界一律拦;近似目录名提示疑似拼错。阶段 1 不挂载任何组件,代码组件零执行。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
