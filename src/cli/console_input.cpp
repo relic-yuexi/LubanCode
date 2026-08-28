@@ -3950,6 +3950,60 @@ bool TurnActivityActive() {
     return FooterSlot().turn_working;
 }
 
+StreamFooterHeartbeat::StreamFooterHeartbeat(bool enabled,
+                                             std::chrono::steady_clock::time_point started_at,
+                                             const std::atomic<bool>* cancel)
+    : started_at_(started_at), cancel_(cancel) {
+    if (enabled) {
+        thread_ = std::thread([this] { ThreadMain(); });
+    }
+}
+
+StreamFooterHeartbeat::~StreamFooterHeartbeat() { Stop(); }
+
+void StreamFooterHeartbeat::Stop() {
+    stop_.store(true, std::memory_order_release);
+    if (thread_.joinable()) {
+        thread_.join();
+    }
+}
+
+void StreamFooterHeartbeat::ThreadMain() {
+    try {
+        std::size_t frame = 0;
+        bool stopping_reported = false;
+        while (!stop_.load(std::memory_order_acquire)) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(200));
+            if (stop_.load(std::memory_order_acquire)) return;
+
+            // 活动态的公开口各自拿 stdout 锁；非活动态才在这里拿锁，调用
+            // “Locked” 重画口。两者倒过来套会在 MSVC 下撞递归上锁异常。
+            if (TurnActivityActive()) {
+                const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
+                                         std::chrono::steady_clock::now() - started_at_)
+                                         .count();
+                if (cancel_ != nullptr && cancel_->load(std::memory_order_acquire) &&
+                    !stopping_reported) {
+                    SetTurnActivityInterruptRequested();
+                    stopping_reported = true;
+                }
+                UpdateTurnActivityElapsed(frame, elapsed);
+            } else {
+                std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+                if (RepaintSuspendedLocked()) continue;
+                RedrawStreamFooterLocked();
+            }
+            ++frame;
+        }
+    } catch (const std::exception& e) {
+        TermErr() << "\n[footer-heartbeat] " << e.what() << "\n";
+        TermErr().flush();
+    } catch (...) {
+        TermErr() << "\n[footer-heartbeat] unknown exception\n";
+        TermErr().flush();
+    }
+}
+
 // 见 console_input.hpp StreamFooterSuspendScope 的注释。构造/析构各自只在
 // 临界区里拿一下 StdoutWriteMutex,不会跨整个确认交互一直攥着锁。
 StreamFooterSuspendScope::StreamFooterSuspendScope() {

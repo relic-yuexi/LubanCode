@@ -21,6 +21,7 @@
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "agent/agent.hpp"
@@ -1053,5 +1054,19 @@ TEST_CASE("turn 活动条:footer 先启用,首个流事件前也立即亮起并�
     CHECK(lubancode::cli::EndTurnActivity() == 5);
     CHECK_FALSE(lubancode::cli::TurnActivityActive());
 
+    lubancode::cli::EndStreamFooter();
+}
+
+TEST_CASE("footer 公共心跳:长活儿没有正文增量,秒数仍会越过零") {
+    lubancode::cli::BeginStreamFooter(lubancode::cli::Theme{}, /*enabled=*/true);
+    lubancode::cli::BeginTurnActivity("Working", 1000);
+    std::atomic<bool> cancel{false};
+    const auto started_at = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+    {
+        lubancode::cli::StreamFooterHeartbeat heartbeat(/*enabled=*/true, started_at, &cancel);
+        std::this_thread::sleep_for(std::chrono::milliseconds(350));
+        heartbeat.Stop();
+    }
+    CHECK(lubancode::cli::EndTurnActivity() >= 2);
     lubancode::cli::EndStreamFooter();
 }

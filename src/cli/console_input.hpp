@@ -15,6 +15,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -533,6 +534,30 @@ void SetTurnActivityInterruptRequested();
 long long EndTurnActivity();
 // 当前 turn 活动条是否亮着(装配层判断要不要抢 Spinner 的绘制权)。
 bool TurnActivityActive();
+
+// footer 的公共心跳：普通 turn 与同步 workflow 都靠它每 200ms 推一帧。
+// 活动条亮着时更新时间与扫光，cancel 置位后切成 Stopping；没有活动条时
+// 只补画 footer/代理坞。Stop 幂等，调用方须在 EndTurnActivity/EndStreamFooter
+// 之前停妥，免得后台线程追着已经收场的帧写。
+class StreamFooterHeartbeat {
+public:
+    StreamFooterHeartbeat(bool enabled, std::chrono::steady_clock::time_point started_at,
+                          const std::atomic<bool>* cancel = nullptr);
+    ~StreamFooterHeartbeat();
+
+    StreamFooterHeartbeat(const StreamFooterHeartbeat&) = delete;
+    StreamFooterHeartbeat& operator=(const StreamFooterHeartbeat&) = delete;
+
+    void Stop();
+
+private:
+    void ThreadMain();
+
+    std::chrono::steady_clock::time_point started_at_;
+    const std::atomic<bool>* cancel_ = nullptr;
+    std::atomic<bool> stop_{false};
+    std::thread thread_;
+};
 
 // 0.22.5:工具确认交互(main.cpp 的 PrintConfirmDetails/ShowDiffPreview 到
 // ReadLine([y/a/N] 提示)那一整段)期间,流式脚注框必须让路——真机实测

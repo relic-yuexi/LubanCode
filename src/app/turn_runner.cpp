@@ -1189,72 +1189,8 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 回合视觉收束:心跳同管 turn 活动条——秒数从 turn_wall_start 现算
     // (一秒一跳),走字扫光沿 "Working" 七个字母缓扫(帧率 200ms 一拍,
     // 字符数与显示宽恒不变,不拿 -\|/ 换字符引起抖动)。
-    const class FooterHeartbeat {
-    public:
-        explicit FooterHeartbeat(bool enabled, const std::chrono::steady_clock::time_point* turn_start,
-                                 const std::atomic<bool>* cancel_ptr) {
-            if (!enabled) {
-                return;
-            }
-            thread_ = std::thread([this, turn_start, cancel_ptr] {
-                try {
-                    std::size_t frame = 0;
-                    bool stopping_reported = false;
-                    while (!stop_.load(std::memory_order_acquire)) {
-                        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-                        if (stop_.load(std::memory_order_acquire)) {
-                            return;
-                        }
-                        // TurnActivityActive/Set/Update 都自带 StdoutWriteMutex。
-                        // 旧代码先在这里攥锁，再调它们，MSVC 会以
-                        // resource_deadlock_would_occur 报同线程二次上锁；异常
-                        // 又从 std::thread 顶漏出，整进程便以 0xC0000409 快退。
-                        // 活动态只走自带锁的公开口。非活动态才在本层拿锁，
-                        // 调用约定为“调用方已持锁”的 Redraw...Locked。
-                        if (lubancode::cli::TurnActivityActive()) {
-                            const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                                                     std::chrono::steady_clock::now() - *turn_start)
-                                                     .count();
-                            // ESC 真置了 cancel:活动条换 Stopping(终态落账后才
-                            // 退场,不瞬间消失让人以为已停、后台却还在跑)。
-                            if (cancel_ptr != nullptr && cancel_ptr->load(std::memory_order_acquire)) {
-                                if (!stopping_reported) {
-                                    lubancode::cli::SetTurnActivityInterruptRequested();
-                                    stopping_reported = true;
-                                }
-                            }
-                            lubancode::cli::UpdateTurnActivityElapsed(frame, elapsed);
-                        } else {
-                            std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-                            if (lubancode::cli::RepaintSuspendedLocked()) {
-                                continue;  // 菜单占屏/挂起:零输出,秒数照走(账不丢)
-                            }
-                            lubancode::cli::RedrawStreamFooterLocked();
-                        }
-                        ++frame;
-                    }
-                } catch (const std::exception& e) {
-                    TermErr() << "\n[footer-heartbeat] " << e.what() << "\n";
-                    TermErr().flush();
-                } catch (...) {
-                    TermErr() << "\n[footer-heartbeat] unknown exception\n";
-                    TermErr().flush();
-                }
-            });
-        }
-        ~FooterHeartbeat() {
-            stop_.store(true, std::memory_order_release);
-            if (thread_.joinable()) {
-                thread_.join();
-            }
-        }
-        FooterHeartbeat(const FooterHeartbeat&) = delete;
-        FooterHeartbeat& operator=(const FooterHeartbeat&) = delete;
-
-    private:
-        std::atomic<bool> stop_{false};
-        std::thread thread_;
-    } footer_heartbeat(stream_footer_enabled, &turn_wall_start, &cancel_flag);
+    lubancode::cli::StreamFooterHeartbeat footer_heartbeat(
+        stream_footer_enabled, turn_wall_start, &cancel_flag);
 
     // 监听线程:流式期间的面板按键、排队/打断都在它手里(键位优先级见
     // TurnInputListener::ThreadMain)。

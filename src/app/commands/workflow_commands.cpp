@@ -12,6 +12,7 @@ using lubancode::cli::TermOut;
 using lubancode::cli::TermErr;
 
 #include <atomic>
+#include <chrono>
 #include <fstream>
 #include <iostream>
 #include <memory>
@@ -113,21 +114,28 @@ private:
 class WorkflowTerminalRunScope final {
 public:
     WorkflowTerminalRunScope(const lubancode::cli::Theme& theme, bool interactive)
-        : theme_(theme), interactive_(interactive) {
-        const bool footer_enabled =
-            interactive_ && lubancode::platform::SupportsScreenRepaint();
-        lubancode::cli::BeginStreamFooter(theme_, footer_enabled);
-        if (footer_enabled) {
-            lubancode::cli::StartStreamFooterWorking(lubancode::cli::tr("spinner.thinking"));
+        : theme_(theme),
+          footer_enabled_(interactive && lubancode::platform::SupportsScreenRepaint()),
+          started_at_(std::chrono::steady_clock::now()) {
+        lubancode::cli::BeginStreamFooter(theme_, footer_enabled_);
+        if (footer_enabled_) {
+            lubancode::cli::BeginTurnActivity(
+                lubancode::cli::tr("spinner.thinking"),
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::system_clock::now().time_since_epoch())
+                    .count());
+            heartbeat_ = std::make_unique<lubancode::cli::StreamFooterHeartbeat>(
+                true, started_at_, &cancel_);
         }
-        if (interactive_) {
+        if (interactive) {
             listener_ = std::make_unique<lubancode::cli::TurnInputListener>(cancel_, theme_);
         }
     }
 
     ~WorkflowTerminalRunScope() {
         if (listener_) listener_->Stop();
-        lubancode::cli::StopStreamFooterWorking();
+        if (heartbeat_) heartbeat_->Stop();
+        lubancode::cli::EndTurnActivity();
         lubancode::cli::EndStreamFooter();
     }
 
@@ -138,9 +146,11 @@ public:
 
 private:
     const lubancode::cli::Theme& theme_;
-    bool interactive_ = false;
+    bool footer_enabled_ = false;
+    std::chrono::steady_clock::time_point started_at_;
     std::atomic<bool> cancel_{false};
     std::unique_ptr<lubancode::cli::TurnInputListener> listener_;
+    std::unique_ptr<lubancode::cli::StreamFooterHeartbeat> heartbeat_;
 };
 
 std::vector<std::string> BuiltinSlashWords() {
