@@ -1,17 +1,27 @@
-# 三省六部:Lao 三案 -> 中书合案 -> 门下独审 -> 皇帝批改 -> 尚书分牒 -> 六部办理。
+# 三省六部 2.0:官制归数据。
 #
-# 设计注记(详见 examples/workflows/README.md):
-#   - 尚书省只在御批后拆差遣。它见整份方案书,各房只见自己的密封差遣。
-#   - fengbo 是有硬帽的条件 loop。门下放行便停;驳回则把本轮诏书与
-#     理由装进 previous,下一轮中书据此修订。
-#   - llm 节点只输出纯 JSON:执行器对输出做 json::parse,解析不成整段退成
-#     {content: 文本},switch 就没得读了。prompts 里已下死命令。
+# 两层宪制(详见 examples/workflows/README.md):
+#   宪法层固定——谋议(map)→封驳(loop)→分牒→加签→定牒→发牌(map)→复命。
+#   行政层是数据——几案并陈(inputs.lanes)、几部分牒(inputs.ministries)。
+#   添一部、添一案,改的是 inputs 数组,图不动。
+#
+# 引擎语义注记:
+#   - map body 只收一只节点 id。item/index 由引擎注入 body 的输入,
+#     prompt 教模型从用户消息 JSON 的 item 字段里读;body 的 input 写不得
+#     ${item}(resolver 只认 inputs/vars/nodes/artifacts/run)。
+#   - map 产物是 {items: [...], failures: N}:中书取 candidates 要走
+#     ${nodes.moulue.output.items},复命走 ${nodes.fapai.output.items}。
+#   - moulue 在 loop 外:谋议只献策一次,封驳回炉由中书吸收驳词。
+#   - menxia 不见用户原话:诏书 memorial 里必有一节"需求复述"。
+#   - llm 节点的 output_schema 引擎不接线,不强制;纯 JSON 全靠 prompt
+#     死命令。llm 节点只输出纯 JSON:执行器对输出做 json::parse,解析不成
+#     整段退成 {content: 文本},下游就没得读了。prompts 里已下死命令。
 schema_version: 1
 id: sansheng-liubu
-version: 1.3.0
+version: 2.0.0
 name: 三省六部
 alias: sansheng-liubu
-description: "Lao 并出三案,中书合成方案书,门下独立拒审,皇帝批准后由尚书分牒六部"
+description: "几案并陈,中书合案拟诏,门下不见原话独立封驳,御批画敕,尚书照路由表分牒,六部并行办差,御史复命"
 enabled: true
 
 inputs:
@@ -22,13 +32,27 @@ inputs:
     requirement:
       type: string
       description: "皇上，您有什么需求？"
+    lanes:
+      type: array
+      description: "谋议路线:每案沿一路立场独立推演"
+      default:
+        - "最小改动：优先沿用现有边界与抽象，压低影响面"
+        - "结构治理：优先理顺职责、状态所有权与长期维护"
+        - "风险优先：优先可观测、可回退、机械门禁与失败收口"
+    ministries:
+      type: array
+      description: "职官路由表:尚书照此拆差遣"
+      default:
+        - { id: gongbu, name: 工部, mandate: "改代码、落实现", tools: [read_file, edit_file, search] }
+        - { id: xingbu,  name: 刑部, mandate: "跑测试与检查", tools: [read_file, search, run_command] }
+        - { id: bingbu,  name: 兵部, mandate: "构建与打包",   tools: [read_file, run_command] }
     review_limit:
       type: integer
       minimum: 1
       maximum: 20
       default: 12
 
-entry: fengbo
+entry: moulue
 
 limits:
   max_concurrency: 3
@@ -39,11 +63,25 @@ limits:
   tokens: 200000
 
 nodes:
+  moulue:
+    type: map
+    label: "谋议 几案并陈"
+    items: "${inputs.lanes}"
+    body: mouyi
+    max_concurrency: 3
+
+  mouyi:
+    type: llm
+    label: "谋士 沿立场拟案"
+    model_role: lao
+    prompt: prompts/mouyi.md
+    input:
+      requirement: "${inputs.requirement}"
+
   fengbo:
     type: loop
-    label: "中书门下 与皇帝往复澄清"
+    label: "中书门下 与御前往复"
     body:
-      - moulue
       - zhongshu
       - menxia
       - chengzhi
@@ -55,212 +93,104 @@ nodes:
     max_iterations: "${inputs.review_limit}"
     hard_limit: 20
 
-  moulue:
-    type: parallel
-    label: "Lao 谋议 三案并陈"
-    branches:
-      - plan_a
-      - plan_b
-      - plan_c
-    join: all
-    max_concurrency: 3
-
-  plan_a:
-    type: llm
-    label: "Lao 方案甲 最小改动"
-    model_role: lao
-    prompt: prompts/planner.md
-    input:
-      requirement: "${inputs.requirement}"
-      lane: "最小改动：优先沿用现有边界与抽象，压低影响面"
-      previous: "${nodes.fengbo.output.previous}"
-
-  plan_b:
-    type: llm
-    label: "Lao 方案乙 结构治理"
-    model_role: lao
-    prompt: prompts/planner.md
-    input:
-      requirement: "${inputs.requirement}"
-      lane: "结构治理：优先理顺职责、状态所有权与长期维护"
-      previous: "${nodes.fengbo.output.previous}"
-
-  plan_c:
-    type: llm
-    label: "Lao 方案丙 风险优先"
-    model_role: lao
-    prompt: prompts/planner.md
-    input:
-      requirement: "${inputs.requirement}"
-      lane: "风险优先：优先可观测、可回退、机械门禁与失败收口"
-      previous: "${nodes.fengbo.output.previous}"
-
   zhongshu:
     type: llm
-    label: "中书省 合案成书"
+    label: "中书省 合案拟诏"
     model_role: lao
     prompt: prompts/zhongshu.md
-    output_schema:
-      type: object
-      required:
-        - memorial
-        - summary
-        - selected_strategy
-        - scope
-        - impact
-        - acceptance
-        - known_unknowns
-        - workstreams
-      properties:
-        memorial:
-          type: string
-        summary:
-          type: string
-        selected_strategy:
-          type: string
-        scope:
-          type: array
-        impact:
-          type: array
-        acceptance:
-          type: array
-        known_unknowns:
-          type: array
-        workstreams:
-          type: object
-          required:
-            - gongfang
-            - xingfang
-            - bingfang
-          properties:
-            gongfang:
-              type: string
-            xingfang:
-              type: string
-            bingfang:
-              type: string
     input:
       requirement: "${inputs.requirement}"
       iteration: "${nodes.fengbo.output.iteration}"
       previous: "${nodes.fengbo.output.previous}"
-      candidates:
-        - "${nodes.plan_a.output}"
-        - "${nodes.plan_b.output}"
-        - "${nodes.plan_c.output}"
+      candidates: "${nodes.moulue.output.items}"
 
   menxia:
     type: llm
-    label: "门下省 独立拒审"
+    label: "门下省 独立封驳"
     prompt: prompts/menxia.md
-    output_schema:
-      type: object
-      required:
-        - approved
-        - reasons
-        - question
-      properties:
-        approved:
-          type: boolean
-        reasons:
-          type: array
-        question:
-          type: string
     input:
-      requirement: "${inputs.requirement}"
-      iteration: "${nodes.fengbo.output.iteration}"
       edict: "${nodes.zhongshu.output}"
       rejection_criteria:
-        - "偏离用户原意或擅加范围"
+        - "需求复述与正文自相矛盾,或擅加范围"
         - "改动范围、影响面、验收标准或已知未知没有写清"
         - "靠猜测跨过会改变实现方向的缺口"
-        - "执行单元职责交叠，或检查不能机械判定"
+        - "拆出去的差遣职责交叠,或验收不能机械判定"
         - "包含危险、不可回退或可绕过的门禁"
 
   chengzhi:
     type: ask_user
-    label: "御前 批阅方案书"
+    label: "御前 画敕"
     input:
-      header: "方案书候旨"
-      question: "${nodes.zhongshu.output.memorial}\n\n门下判词：${nodes.menxia.output.reasons}\n\n待明确处：${nodes.menxia.output.question}\n\n可批准、写下修改意见，或把拿不准的细节交中书定案。"
+      header: "诏书候旨"
+      question: "${nodes.zhongshu.output.memorial}\n\n门下判词：${nodes.menxia.output.reasons}\n\n待明确处：${nodes.menxia.output.question}\n\n可批准、写下批语,或行墨敕。"
       review_approved: "${nodes.menxia.output.approved}"
       previous: "${nodes.fengbo.output.previous}"
       approve_answers:
         - "批准当前方案书"
       delegate_answers:
-        - "不知道，请中书定方案"
+        - "不知道，请中书定案"
+      override_answers:
+        - "墨敕：门下虽驳，朕意已决"
       options:
         - label: "批准当前方案书"
-          description: "门下也放行时，随即交固定职司办理"
-        - label: "不知道，请中书定方案"
-          description: "余下细节全交中书定案；门下继续复审，不再逐项来问"
+          description: "门下也放行时,随即交尚书分牒办理"
+        - label: "不知道，请中书定案"
+          description: "余下细节全交中书定案;门下继续复审,不再逐项来问"
+        - label: "墨敕：门下虽驳，朕意已决"
+          description: "越过门下封驳强行放行,走此路责任在朕"
 
   shangshu:
     type: llm
-    label: "尚书省 分牒定责"
+    label: "尚书省 照牒分遣"
     model_role: lao
     prompt: prompts/shangshu.md
-    output_schema:
-      type: object
-      required:
-        - gongfang
-        - xingfang
-        - bingfang
-      properties:
-        gongfang:
-          type: object
-        xingfang:
-          type: object
-        bingfang:
-          type: object
     input:
       edict: "${nodes.fengbo.output.last.outputs.zhongshu}"
+      ministries: "${inputs.ministries}"
 
-  liubu:
-    type: parallel
-    label: "刑兵二房 并行查验"
-    branches:
-      - xingfang
-      - bingfang
-    join: all
-    max_concurrency: 2
+  jiaqian:
+    type: ask_user
+    label: "御前 差遣加签"
+    input:
+      header: "差遣候签"
+      question: "尚书已拆差遣如下：\n${nodes.shangshu.output.dispatches}\n\n照单全发,或写下批注(增、删、改),批注会并入定牒。"
+      options:
+        - label: "照单全发"
+          description: "差遣原样誊定,发六部办理"
 
-  gongfang:
+  dingdie:
+    type: llm
+    label: "定牒 誊单并批"
+    prompt: prompts/dingdie.md
+    input:
+      dispatches: "${nodes.shangshu.output.dispatches}"
+      answers: "${nodes.jiaqian.output.answers}"
+
+  fapai:
+    type: map
+    label: "发牌 六部并行"
+    items: "${nodes.dingdie.output.dispatches}"
+    body: banshi
+    max_concurrency: 3
+
+  banshi:
     type: agent
-    label: "工房 营造(改代码)"
+    label: "六部差役 办差"
     role: coder
-    task: prompts/gongfang.md
+    task: prompts/banshi.md
     allowed_tools:
       - read_file
       - edit_file
       - search
-    step_limit: 40
-    input:
-      dispatch: "${nodes.shangshu.output.gongfang}"
-
-  xingfang:
-    type: agent
-    label: "刑房 按验(测试)"
-    role: tester
-    task: prompts/xingfang.md
-    allowed_tools:
       - run_command
-      - read_file
-      - search
     step_limit: 40
-    input:
-      dispatch: "${nodes.shangshu.output.xingfang}"
 
-  bingfang:
-    type: agent
-    label: "兵房 演武(构建)"
-    role: builder
-    task: prompts/bingfang.md
-    allowed_tools:
-      - run_command
-      - read_file
-    step_limit: 20
+  fuming:
+    type: llm
+    label: "御史 复命汇奏"
+    prompt: prompts/fuming.md
     input:
-      dispatch: "${nodes.shangshu.output.bingfang}"
+      executions: "${nodes.fapai.output.items}"
 
   shouwei:
     type: end
@@ -271,28 +201,20 @@ nodes:
     label: "封驳越帽 未决收口"
 
 edges:
-  - from: fengbo
-    on: success
-    to: shangshu
-  - from: fengbo
-    on: exhausted
-    to: weijue
-  - from: shangshu
-    on: success
-    to: gongfang
-  - from: gongfang
-    on: success
-    to: liubu
-  - from: liubu
-    on: joined
-    to: shouwei
+  - { from: moulue, on: success, to: fengbo }
+  - { from: fengbo, on: success, to: shangshu }
+  - { from: fengbo, on: exhausted, to: weijue }
+  - { from: shangshu, on: success, to: jiaqian }
+  - { from: jiaqian, on: success, to: dingdie }
+  - { from: dingdie, on: success, to: fapai }
+  - { from: fapai, on: success, to: fuming }
+  - { from: fuming, on: success, to: shouwei }
 
 result:
   edict: "${nodes.fengbo.output.last.outputs.zhongshu}"
   verdict: "${nodes.fengbo.output.last.outputs.menxia}"
   review_iterations: "${nodes.fengbo.output.completed_iterations}"
   review_history: "${nodes.fengbo.output.history}"
-  dispatches: "${nodes.shangshu.output}"
-  implementation: "${nodes.gongfang.output}"
-  verification: "${nodes.xingfang.output}"
-  build: "${nodes.bingfang.output}"
+  dispatches: "${nodes.dingdie.output.dispatches}"
+  executions: "${nodes.fapai.output.items}"
+  report: "${nodes.fuming.output}"

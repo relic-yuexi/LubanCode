@@ -288,7 +288,7 @@ edges:
     CHECK(has_issue(lubancode::workflow::ValidateDefinition(*cycle, std::nullopt), "cycle_detected"));
 }
 
-TEST_CASE("示例 workflow:三省六部有御批、尚书分牒与密封差遣") {
+TEST_CASE("示例 workflow:三省六部两层宪制——官制归数据") {
     const fs::path example = fs::path(__FILE__).parent_path() / "../../../examples/workflows/sansheng-liubu/workflow.yaml";
     const auto parsed = lubancode::workflow::LoadWorkflowDefinition(example.lexically_normal());
     if (!parsed.has_value()) {
@@ -297,32 +297,73 @@ TEST_CASE("示例 workflow:三省六部有御批、尚书分牒与密封差遣")
     REQUIRE(parsed.has_value());
     REQUIRE(parsed->inputs["properties"]["requirement"].is_object());
     CHECK(parsed->inputs["properties"]["requirement"]["description"] == "皇上，您有什么需求？");
+    // 行政层是数据:几案并陈、几部分牒都是带默认值的数组。
+    REQUIRE(parsed->inputs["properties"]["lanes"]["default"].is_array());
+    CHECK(parsed->inputs["properties"]["lanes"]["default"].size() == 3);
+    REQUIRE(parsed->inputs["properties"]["ministries"]["default"].is_array());
+    CHECK(parsed->inputs["properties"]["ministries"]["default"].size() == 3);
+
+    // 宪法层:entry 是 moulue,map 的 items 引 inputs.lanes,body 是 mouyi。
+    CHECK(parsed->entry == "moulue");
+    REQUIRE(parsed->node_map.contains("moulue"));
+    CHECK(parsed->node_map.at("moulue").kind == lubancode::workflow::NodeKind::Map);
+    CHECK(parsed->node_map.at("moulue").items_ref == "${inputs.lanes}");
+    CHECK(parsed->node_map.at("moulue").map_body == "mouyi");
+    REQUIRE(parsed->node_map.contains("mouyi"));
+    CHECK(parsed->node_map.at("mouyi").kind == lubancode::workflow::NodeKind::Llm);
+    CHECK(parsed->node_map.at("mouyi").model_role == "lao");
+
+    // 封驳 loop:body 恰为拟诏、封驳、画敕三节点,until 读御批 complete。
     REQUIRE(parsed->node_map.contains("fengbo"));
-    REQUIRE_FALSE(parsed->node_map.at("fengbo").loop_body.empty());
-    CHECK(parsed->node_map.at("fengbo").loop_body.front() == "moulue");
+    CHECK(parsed->node_map.at("fengbo").kind == lubancode::workflow::NodeKind::Loop);
+    const auto& loop_body = parsed->node_map.at("fengbo").loop_body;
+    REQUIRE(loop_body.size() == 3);
+    CHECK(loop_body[0] == "zhongshu");
+    CHECK(loop_body[1] == "menxia");
+    CHECK(loop_body[2] == "chengzhi");
+    REQUIRE(parsed->node_map.at("fengbo").loop_until.has_value());
+    CHECK(parsed->node_map.at("fengbo").loop_until->path == "${nodes.chengzhi.output.complete}");
+
+    // 门下不见用户原话;御前画敕带墨敕一档。
+    REQUIRE(parsed->node_map.contains("menxia"));
+    CHECK_FALSE(parsed->node_map.at("menxia").input.contains("requirement"));
+    REQUIRE(parsed->node_map.contains("chengzhi"));
+    REQUIRE(parsed->node_map.at("chengzhi").input.contains("override_answers"));
+    CHECK(parsed->node_map.at("chengzhi").input["override_answers"].is_array());
+
+    // 尚书照路由表分牒,定牒誊单,发牌 map 引 dingdie 的 dispatches。
     REQUIRE(parsed->node_map.contains("shangshu"));
     CHECK(parsed->node_map.at("shangshu").kind == lubancode::workflow::NodeKind::Llm);
-    CHECK(parsed->node_map.at("shangshu").input.size() == 1);
     CHECK(parsed->node_map.at("shangshu").input.contains("edict"));
+    CHECK(parsed->node_map.at("shangshu").input.contains("ministries"));
+    REQUIRE(parsed->node_map.contains("fapai"));
+    CHECK(parsed->node_map.at("fapai").kind == lubancode::workflow::NodeKind::Map);
+    CHECK(parsed->node_map.at("fapai").items_ref == "${nodes.dingdie.output.dispatches}");
+    CHECK(parsed->node_map.at("fapai").map_body == "banshi");
 
-    const auto check_sealed_dispatch = [&](const std::string& node_id,
-                                           const std::string& expected_ref) {
-        REQUIRE(parsed->node_map.contains(node_id));
-        const auto& input = parsed->node_map.at(node_id).input;
-        REQUIRE(input.is_object());
-        CHECK(input.size() == 1);
-        REQUIRE(input.contains("dispatch"));
-        CHECK(input["dispatch"] == expected_ref);
+    // 密封差遣:banshi 是 agent,input 无自有字段,只吃引擎注入的 item。
+    REQUIRE(parsed->node_map.contains("banshi"));
+    CHECK(parsed->node_map.at("banshi").kind == lubancode::workflow::NodeKind::Agent);
+    REQUIRE(parsed->node_map.at("banshi").input.is_object());
+    CHECK(parsed->node_map.at("banshi").input.empty());
+
+    // 行政链各 success 边都在。
+    const auto has_edge = [&](const std::string& from, const std::string& to) {
+        return std::ranges::any_of(parsed->edges, [&](const auto& edge) {
+            return edge.from == from && edge.outcome == "success" && edge.to == to;
+        });
     };
-    check_sealed_dispatch("gongfang", "${nodes.shangshu.output.gongfang}");
-    check_sealed_dispatch("xingfang", "${nodes.shangshu.output.xingfang}");
-    check_sealed_dispatch("bingfang", "${nodes.shangshu.output.bingfang}");
+    CHECK(has_edge("moulue", "fengbo"));
+    CHECK(has_edge("fengbo", "shangshu"));
+    CHECK(has_edge("shangshu", "jiaqian"));
+    CHECK(has_edge("jiaqian", "dingdie"));
+    CHECK(has_edge("dingdie", "fapai"));
+    CHECK(has_edge("fapai", "fuming"));
+    CHECK(has_edge("fuming", "shouwei"));
+    CHECK(std::ranges::any_of(parsed->edges, [](const auto& edge) {
+        return edge.from == "fengbo" && edge.outcome == "exhausted" && edge.to == "weijue";
+    }));
 
-    const auto shangshu_edge = std::ranges::find_if(parsed->edges, [](const auto& edge) {
-        return edge.from == "fengbo" && edge.outcome == "success";
-    });
-    REQUIRE(shangshu_edge != parsed->edges.end());
-    CHECK(shangshu_edge->to == "shangshu");
     const auto validation = lubancode::workflow::ValidateDefinition(*parsed, std::nullopt);
     for (const auto& issue : validation.issues) MESSAGE(issue.code, " ", issue.path, ": ", issue.message);
     CHECK(validation.ok());
