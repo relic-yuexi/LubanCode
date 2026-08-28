@@ -44,11 +44,16 @@ def encode_png(width: int, height: int, bgr_rows: list[bytes]) -> bytes:
             raise ValueError(f"第 {index} 行 {len(row)} 字节,该是 {expected}")
 
     # RGB 换序 + filter 0 前缀,一口气压成一段 IDAT。
+    # 换序走步长切片(0::3 取 R、2::3 取 B),整行在 C 里倒——
+    # 1568x980 的图逐像素循环要好几秒,切片法几十毫秒。
     scanlines = bytearray()
     for row in bgr_rows:
-        scanlines.append(0)
-        for offset in range(0, expected, 3):
-            scanlines += bytes((row[offset + 2], row[offset + 1], row[offset]))
+        rgb = bytearray(expected)
+        rgb[0::3] = row[2::3]  # R <- BGR 的第三字节
+        rgb[1::3] = row[1::3]  # G
+        rgb[2::3] = row[0::3]  # B <- BGR 的第一字节
+        scanlines += b"\x00"
+        scanlines += rgb
 
     header = struct.pack(">IIBBBBB", width, height, _BIT_DEPTH_8, _COLOR_TYPE_RGB, 0, 0, 0)
     return (

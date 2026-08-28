@@ -1,13 +1,14 @@
 # GUI Agent — 本地 process 插件示例(Windows 桌面自动化)
 
-模型反复走"看一眼,动一下,再看一眼":快照(UIA 控件树)、截图、移鼠标、
-点击、输文字,十件工具,件件短命——每次调用起一只进程,干完就退。窗口、
+模型反复走"看一眼,动一下,再看一眼":截图、移鼠标、点击、输文字、
+UIA 快照,十件工具,件件短命——每次调用起一只进程,干完就退。窗口、
 光标、前台焦点,全保存在 Windows 桌面手里。**插件自己没有状态,所以不
 需要 MCP。**
 
-找控件有两条路:**结构路**(`gui_snapshot` 给控件名+类型+矩形,省 token、
-坐标直给)是正路;**视觉路**(截图看图)留给复核与自绘界面——这正是
-Browser Agent 的 snapshot/ref 体系在桌面的对影。
+找控件两条路,**纯视觉为主体、结构为捷径**:**视觉路**(`gui_screenshot`
+看图,看不清带 `region` 裁局部原像素放大)是正路;**结构路**(`gui_snapshot`
+给控件名+类型+矩形,省 token、坐标直给)是 Native 控件密集场景的近道,
+自绘/Web/游戏回视觉路。教学顺序也是这个:先学看,再学抄近道。
 
 完整设计账见 `todos/GUIAgent与BrowserAgent扩展示例.todo`;本 README 教你装、
 跑、看懂、改成自己的。
@@ -109,19 +110,21 @@ Windows 上各有一枚 helper HWND,但 Tk 只管自己画、HWND 文字留空,U
 快照就只见类型不见名——夹具自己补齐,顺带教这一课;真世界自绘程序
 没这份好心,见第 10 节排错)。
 
-任务链(Skill `SKILL.md` 教的就是这条),结构路为主、截图只作复核:
+任务链(Skill `SKILL.md` 教的就是这条),纯视觉为主:
 
 1. `gui_list_windows`(title_filter=LubanCode GUI Fixture)→ 拿 window_id
 2. `gui_focus_window` → 前台
-3. `gui_snapshot` → 控件树(每行 `ref | 类型 | Name | rect`)
-4. `gui_click`(名字输入框 rect 中心 + expected_window_rect)→ 点名字框
+3. `gui_screenshot`(整窗)→ 看布局;字太小就再截一张带 `region`
+   的局部(原像素放大),看清提交按钮的位置与文字
+4. `gui_click`(名字输入框处 + expected_window_rect)→ 点名字框
 5. `gui_type_text`("阿明")→ 中文 Unicode 直注
 6. `gui_key`(["down"] / ["up"])→ 颜色选值
-7. `gui_click`(提交按钮 rect 中心)→ 提交
-8. `gui_snapshot`(结果行文字变了)/`gui_screenshot` → 复验
+7. `gui_click`(提交按钮处)→ 提交
+8. `gui_screenshot`(局部裁结果行)→ 复验
 
-纯视觉路(截图→看→点)也整条可用,`scripts/manual_e2e.py` 走的就是它;
-结构路的对影脚本 `scripts/uia_snapshot_e2e.py` 零截图点提交。
+捷径走法(结构路,原生控件窗体才值得):第 3 步换成 `gui_snapshot`,
+后面照旧——`scripts/uia_snapshot_e2e.py` 零截图点提交;
+`scripts/manual_e2e.py` 走的则是纯视觉路。
 
 对 LubanCode 说:"用 gui-agent 插件,在 LubanCode GUI Fixture 里填名字
 阿明、颜色保持 green、点提交,然后快照确认",模型照 Skill 走。
@@ -166,9 +169,10 @@ Windows 上各有一枚 helper HWND,但 Tk 只管自己画、HWND 文字留空,U
 ## 5. 观察→动作→再观察的数据流
 
 ```text
-        ┌─ gui_screenshot ──→ 桌面(PrintWindow 离屏抓窗)
+        ┌─ gui_screenshot ──→ 桌面(PrintWindow 离屏抓窗;region 直拍/裁切)
+        │      ↓ 全图长边>1568 近邻降采样;region 局部原像素直过
         │      ↓ PNG 编码(手写,zlib) → 落盘 artifact
-        │      ↓ observation{window_rect, client_size, dpi_scale, sha256...}
+        │      ↓ observation{window_rect, client_origin, client_size, region_in_image...}
         │
    模型 │  拿 observation 里的 window_rect 填进动作参数
         ↓
@@ -185,12 +189,13 @@ Windows 上各有一枚 helper HWND,但 Tk 只管自己画、HWND 文字留空,U
 
 Skill 的死规矩:一次一项动作,动作后必快照/截图;不许连续盲点五次。
 
-## 6. 结构路:gui_snapshot(UIA 控件树快照)
+## 6. 捷径:gui_snapshot(UIA 控件树快照)
 
 `gui_snapshot` 是桌面版 `browser_snapshot`:Windows UI Automation 把
 目标窗口的控件树文本化,每行 `ref | 类型 | Name | rect`,模型按名找
-控件、按 rect 中心点击——不烧一枚截图 token,也不依赖多模态。真机
-回执长这样(夹具窗口):
+控件、按 rect 中心点击——不烧一枚截图 token,也不依赖多模态。这是
+**结构捷径**:Native 控件密集、控件名字明确的窗体走它最省;自绘/Web/
+游戏 UIA 看不见,回视觉路。真机回执长这样(夹具窗口):
 
 ```text
 窗口 'LubanCode GUI Fixture'(0x04580338)UIA 快照:depth=8,收 13 项,走访 16 节点,42ms。ref 只在本份快照内有效;rect 是全桌面物理像素(virtual_screen 口径,与截图同源),动作取矩形中心。
@@ -276,18 +281,39 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 老宿主(只认 v1)收到 protocol=2 的响应会按 UnknownContent 整帧拒——
 本插件随宿主 v2 一起交付,不做双协议回退。
 
+<<<<<<< HEAD
 **降采样口径**:截图长边超过 1568px 的,先按整数步长采样缩进帽内
 (`png.downscale_to_long_edge`,零依赖、不插值)再回喂与落盘,一份图
 两处共用。各家视觉 token 都按分辨率计(anthropic ≈ 宽×高/750,建议
 长边 ≤1568;gpt/gemini 按 512/768 像素块计片),3072x1918 的整窗原图
 原样上 wire 既烧 token 又顶各家边长帽。要原图附账,调用时传
 `keep_original=true`,证据目录另存 `-orig` 后缀一份,默认不双份。
+=======
+### 放大镜:region 裁切与 1568 长边帽
+
+纯视觉路的"放大"不是插值放大,是**裁切**——局部原像素直出,无损:
+
+- **整幅图(不带 `region`)**:长边超 1568 就近邻降采样到 1568 再编码。
+  全图是给模型认布局的,再大只烧 token 不增信息;降采样后图上像素
+  不再 1:1 对应 virtual_screen,observation 里给 `image_pixel_scale`
+  供换算。
+- **局部(`region=[x,y,w,h]`,virtual_screen 口径)**:不走 1568 帽,
+  原始分辨率直出——裁切即无损放大,小字看得清全靠它。target=window
+  时按 observation 的 `client_origin` 换算成窗内相对区;target=screen
+  时后端按区域直拍,不多抓一枚像素。
+- 回执带 `region`(virtual_screen 区)与 `region_in_image`(在全幅里的
+  位置),模型靠它把局部图摆回全图空间;文案里直接给换算式:
+  图中像素 (px,py) = virtual_screen (region_x+px, region_y+py)——
+  在局部图里看清目标,坐标即刻精确到像素。
+- 越界(裁出窗外/屏外)与空区(零宽高)在拍摄前明拒
+  (`region_out_of_range` / `invalid_arguments`),不悄悄裁边。
+>>>>>>> worktree-agent-a6249924751f2bda5
 
 ## 9. 安全模型
 
 | 类别 | 工具 | 说明 |
 | --- | --- | --- |
-| 观察 | `gui_status` / `gui_list_windows` / `gui_snapshot` / `gui_screenshot` | 无输入注入。快照只读控件树,连像素都不碰;截图默认只拍目标窗口,`target=screen` 拍全部显示器,当心隐私。 |
+| 观察 | `gui_status` / `gui_list_windows` / `gui_snapshot` / `gui_screenshot` | 无输入注入。快照只读控件树,连像素都不碰;截图默认只拍目标窗口(`region` 也只裁窗内),`target=screen` 拍全部显示器,当心隐私。 |
 | 低风险动作 | `gui_focus_window` / `gui_move_mouse` | 改前台、挪鼠标,不产生点击。 |
 | 写动作 | `gui_click` / `gui_scroll` / `gui_type_text` / `gui_key` | 每次调用前 LubanCode 照常确认;`.lubancode/settings.local.json` 的 `allow_tools` 只按名单放,别开 `plugin__gui-agent-example__*` 通配。 |
 
@@ -313,6 +339,8 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 | `window_not_found` | 窗口关了或换了桌面;重新 list |
 | `dangerous_key_blocked` | 预期行为;确认真要用再开环境变量 |
 | 中文输入没出现 | 窗口是否前台(`ensured_foreground`);目标框是否只读 |
+| 整幅截图里小字糊 | 预期行为:全图长边超 1568 被降采样。带 `region` 裁局部,原像素直出 |
+| `region_out_of_range` | region 越出拍摄区(窗客户区/虚拟屏)。对着 observation 的 `client_origin`+`client_size` 重算;先整幅截图看布局再定裁切区 |
 | 点了按钮没反应 | 多半点开了下拉/浮层没收起——后续点击落在浮层上(夹具事件账里 `widget=str` 就是它)。先 `gui_key` Enter/Esc 收起浮层再点 |
 | 截图全黑 | 最小化窗口被拒是预期;若目标用 GPU 合成,PrintWindow + PW_RENDERFULLCONTENT 已覆盖大多数;仍黑就改 `target=screen` 前先想隐私 |
 | `gui_snapshot` 收 0 项 | 多半是自绘界面(游戏/部分 Electron/老自绘 Win32)没给 UIA 暴露控件——结构路的盲区,回 `gui_screenshot` 视觉路;提权窗口(管理员跑的)探不全也是它 |
@@ -352,7 +380,7 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 | `gui_backend.py` | Win32 ctypes 层:窗口枚举、DPI、SendInput、BitBlt;`FakeBackend` 供测试 |
 | `gui_uia.py` | UIA COM 壳:ctypes 手调 IUIAutomation,控件树折叠规则与帽子 |
 | `png.py` | 零依赖 PNG 编码(zlib + CRC32),魔数自检 |
-| `test_runner.py` | 离线自测(零真输入):`python test_runner.py`,41 册 |
+| `test_runner.py` | 离线自测(零真输入):`python test_runner.py`,50 册 |
 | `fixtures/fixture_app.py` | 教学夹具:一条命令起的本地小窗 |
 | `scripts/manual_e2e.py` | 视觉路 E2E(截图→看→点),默认 SKIP,`--run` 才动鼠标 |
 | `scripts/uia_snapshot_e2e.py` | 结构路 E2E(快照→rect 中心点提交,零截图),默认 SKIP,`--run` 才动鼠标 |

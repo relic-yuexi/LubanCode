@@ -29,7 +29,7 @@ from typing import Optional
 import gui_uia
 import png as png_codec
 
-PLUGIN_VERSION = "1.2.0"
+PLUGIN_VERSION = "1.3.0"
 
 # 协议 v2 起截图随结果回喂模型(image 块),宿主验身落账后上 wire;
 # 证据文件照旧落盘(路径作附账,artifact 可追)。
@@ -54,6 +54,12 @@ IMAGE_MAX_DIMENSION = 8000
 IMAGE_FEED_LONG_EDGE = 1568
 TITLE_MAX_CHARS = 200
 SNAPSHOT_NAME_MAX_CHARS = 200
+# 全图长边帽:不带 region 的整幅截图,长边超 1568 就近邻降采样到 1568。
+# 全图是给模型看布局的——各家视觉链路到 1568 长边再往上只烧 token 不
+# 增信息。带 region 的局部裁切**不走这顶帽**:局部就是要原始像素,裁切
+# 即无损放大(不插值),小字看得清全靠它。两条规矩合起来就是纯视觉路
+# 的"先看全图认布局,看不清裁局部读细节"。
+FULLSHOT_LONG_EDGE_MAX = 1568
 # 正文行帽:与 gui_list_windows 的 20 窗帽同理——有 text 就不投影
 # structured,清单必须进正文;但 400 行铺开谁也读不动,正文给前 60 行,
 # 全量在 structured,超宽教模型用 depth 收窄。
@@ -259,6 +265,61 @@ def gui_focus_window(backend, arguments: dict, settings: Settings) -> tuple[str,
         "window_id": verify["id"], "focused": True, "rect": verify["rect"]}
 
 
+def _parse_region(arguments: dict) -> Optional[list[int]]:
+    """region = [x, y, w, h],virtual_screen 物理像素,与快照 rect、点击坐标
+    同一口径。target=window 时截图像素原点是客户区左上(observation 的
+    client_origin),内部按它换算成图内相对区;target=screen 时原点即
+    虚拟屏原点。空区(w/h 非正)在这里就拒,不出空图。"""
+    region = arguments.get("region")
+    if region is None:
+        return None
+    if (not isinstance(region, list) or len(region) != 4
+            or not all(isinstance(v, int) and not isinstance(v, bool) for v in region)):
+        raise ToolError("invalid_arguments",
+                        "region 须是 [x,y,w,h] 整数数组(virtual_screen 物理像素)")
+    if region[2] <= 0 or region[3] <= 0:
+        raise ToolError("invalid_arguments",
+                        f"region 空区:w/h 须为正,收 [{region[0]},{region[1]},"
+                        f"{region[2]},{region[3]}]")
+    return region
+
+
+def _check_region_in_area(region: list[int], area: list[int], what: str) -> None:
+    """region 须整个落在拍摄区 area=[l,t,r,b] 内。越界明拒不裁边——模型
+    该知道裁到哪了,悄悄裁边只会让它对错位置。"""
+    x, y, w, h = region
+    left, top, right, bottom = area
+    if x < left or y < top or x + w > right or y + h > bottom:
+        raise ToolError("region_out_of_range",
+                        f"region [{x},{y},{w},{h}] 越出{what}范围 "
+                        f"[{left},{top},{right},{bottom}]。挪进来再裁;"
+                        "先整幅截图看布局,再按图定裁切区。")
+
+
+def _crop_rows(rows: list[bytes], x0: int, y0: int, w: int, h: int) -> list[bytes]:
+    """从整幅 BGR 行位图里裁 [x0,y0,w,h]。纯切片,零插值——这就是
+    "放大"的实现:裁出来的每一像素都是原像素。"""
+    start, end = x0 * 3, (x0 + w) * 3
+    return [row[start:end] for row in rows[y0:y0 + h]]
+
+
+def _downscale_rows(rows: list[bytes], width: int, height: int) -> tuple[int, int, list[bytes]]:
+    """长边超帽的整幅图近邻降采样。近邻不糊字棱(比起双线性),纯整数
+    下标也快;这是给模型认布局的,要读字请走 region 原像素。只缩不放。"""
+    long_edge = max(width, height)
+    if long_edge <= FULLSHOT_LONG_EDGE_MAX:
+        return width, height, rows
+    ratio = FULLSHOT_LONG_EDGE_MAX / long_edge
+    dst_w = max(1, round(width * ratio))
+    dst_h = max(1, round(height * ratio))
+    src_offsets = [x * width // dst_w * 3 for x in range(dst_w)]
+    cropped: list[bytes] = []
+    for y in range(dst_h):
+        source = rows[y * height // dst_h]
+        cropped.append(b"".join([source[o:o + 3] for o in src_offsets]))
+    return dst_w, dst_h, cropped
+
+
 def gui_screenshot(backend, arguments: dict, settings: Settings) -> tuple[str, dict]:
     target = arguments.get("target", "window")
     if target not in ("window", "screen"):
@@ -268,6 +329,11 @@ def gui_screenshot(backend, arguments: dict, settings: Settings) -> tuple[str, d
     keep_original = arguments.get("keep_original", False)
     if not isinstance(keep_original, bool):
         raise ToolError("invalid_arguments", "keep_original 只认布尔(默认 false,不另存原图)")
+    region = _parse_region(arguments)
+    downscaled = False
+    capture_size = None
+    capture_rows = None
+
     if target == "window":
         window_id = _parse_window_id(arguments)
         if window_id is None:
@@ -276,29 +342,56 @@ def gui_screenshot(backend, arguments: dict, settings: Settings) -> tuple[str, d
         if state["minimized"]:
             raise ToolError("window_minimized",
                             "窗口最小化了,没有稳定画面(不冒充旧帧);先恢复再拍")
-        width, height, rows = backend.screenshot_window(window_id)
+        origin_x, origin_y = state["client_origin"]
+        client_w, client_h = (state["client_rect_local"][2], state["client_rect_local"][3])
+        if region is not None:
+            _check_region_in_area(region, [origin_x, origin_y,
+                                           origin_x + client_w, origin_y + client_h],
+                                  f"窗口 {state['title']!r} 客户区(截图像素只含客户区)")
+        full_w, full_h, rows = backend.screenshot_window(window_id)
+        if region is not None:
+            local_x, local_y = region[0] - origin_x, region[1] - origin_y
+            # 防御:现场客户区尺寸与预置口径不一致时如实拒,不裁错位图。
+            if (local_x < 0 or local_y < 0
+                    or local_x + region[2] > full_w or local_y + region[3] > full_h):
+                raise ToolError("region_out_of_range",
+                                f"region 换算后 [{local_x},{local_y},{region[2]},"
+                                f"{region[3]}] 超出实拍 {full_w}x{full_h}")
+            width, height = region[2], region[3]
+            rows = _crop_rows(rows, local_x, local_y, width, height)
+        else:
+            width, height = full_w, full_h
         observation_window = {
             "window_id": state["id"], "window_rect": state["rect"],
-            "client_size": [state["client_rect_local"][2], state["client_rect_local"][3]],
+            "client_origin": [origin_x, origin_y],
+            "client_size": [client_w, client_h],
             "dpi_scale": state["dpi_scale"], "title": state["title"],
         }
         what = f"窗口 {state['title']!r}"
+        full_size = [full_w, full_h]
     else:
         virtual = backend.virtual_screen()
-        width, height, rows = backend.screenshot_screen(virtual)
-        observation_window = {"window_rect": virtual, "client_size": [width, height],
+        full_size = [virtual[2] - virtual[0], virtual[3] - virtual[1]]
+        if region is not None:
+            _check_region_in_area(region, virtual, "整屏(虚拟屏)")
+            rect = [region[0], region[1], region[0] + region[2], region[1] + region[3]]
+            width, height, rows = backend.screenshot_screen(rect)
+        else:
+            width, height, rows = backend.screenshot_screen(virtual)
+        observation_window = {"window_rect": virtual, "client_size": full_size,
                               "dpi_scale": None, "title": None,
                               "note": "整屏拍摄会拍下所有显示器,含虚拟屏负坐标区"}
         what = f"整屏(虚拟屏 {virtual})"
 
-    # 大图降采样:长边超帽先整数步长采样缩进帽内,回喂与落盘都用缩后图
-    # (一份,不默认双份)。observation 里的窗口矩形/客户区仍是拍摄时的
-    # 原坐标——动作坐标从矩形来,不经图像,缩放不挪坐标。
-    capture_size = [width, height]
-    capture_rows = rows  # 原始行位图留个引用:keep_original 另存时才编码
-    width, height, rows = png_codec.downscale_to_long_edge(
-        width, height, rows, IMAGE_FEED_LONG_EDGE)
-    downscaled = [width, height] != capture_size
+    # 整幅才降采样(长边超 1568 整数步长缩进帽,回喂与落盘同一份,省认布局的
+    # token);region 局部原像素直出——裁切即无损放大,看小字用的。窗口矩形/
+    # 客户区坐标仍是拍摄时原值:动作坐标从矩形来,不经图像,缩放不挪坐标。
+    if region is None:
+        capture_size = [width, height]
+        capture_rows = rows
+        width, height, rows = png_codec.downscale_to_long_edge(
+            width, height, rows, IMAGE_FEED_LONG_EDGE)
+        downscaled = [width, height] != capture_size
 
     encoded = png_codec.encode_png(width, height, rows)
     if len(encoded) > IMAGE_MAX_BYTES:
@@ -342,14 +435,39 @@ def gui_screenshot(backend, arguments: dict, settings: Settings) -> tuple[str, d
         "captured_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
         "image": image_meta,
         "model_visibility": MODEL_FEED_NOTE,
+        "downscaled": downscaled,
+        # 拍摄原尺寸(降采样前;region 时为整幅原尺寸,region 另有字段)。
+        "capture_size": full_size,
     }
-    size_note = (f"{capture_size[0]}x{capture_size[1]},降采样 {width}x{height} 回喂"
-                 if downscaled else f"{width}x{height}")
-    text = (f"已截图 {what},{size_note},图已随结果回喂(直接描述画面即可),"
-            f"证据文件落 {path}(sha256 前 8 位 {digest[:8]})。"
-            "动作时请带 expected_window_rect 防坐标过期。")
-    # 协议 v2:图随结果回喂(path 模式——宿主读文件、验魔数、落会话
-    # artifact 后上 wire;这里不塞 base64,响应帧保持轻)。
+    if downscaled:
+        observation["image_pixel_scale"] = [
+            round(full_size[0] / width, 4), round(full_size[1] / height, 4)]
+    if region is not None:
+        region_x, region_y = region[0], region[1]
+        observation["region"] = list(region)
+        # 裁切区在整幅原图里的位置:模型靠它把局部图摆回全图空间。
+        observation["region_in_image"] = [
+            region_x - (origin_x if target == "window" else virtual[0]),
+            region_y - (origin_y if target == "window" else virtual[1]),
+            region[2], region[3]]
+        text = (f"已裁切 {what} 的区域 [{region_x},{region_y},{region[2]},{region[3]}]"
+                f"(在全幅 {full_size[0]}x{full_size[1]} 内的 "
+                f"{observation['region_in_image'][:2]})。局部图 {width}x{height} 为"
+                "原始分辨率、未降采样——放大看细节用;图中像素 (px,py) 对应 "
+                f"virtual_screen ({region_x}+px, {region_y}+py),照它算点击坐标。"
+                f"证据文件落 {path}(sha256 前 8 位 {digest[:8]})。"
+                "动作时请带 expected_window_rect 防坐标过期。")
+    else:
+        size_note = (f"{capture_size[0]}x{capture_size[1]},降采样 {width}x{height} 回喂"
+                     if downscaled else f"{width}x{height}")
+        text = (f"已截图 {what},{size_note},图已随结果回喂(直接描述画面即可),"
+                f"证据文件落 {path}(sha256 前 8 位 {digest[:8]})。"
+                "动作时请带 expected_window_rect 防坐标过期。")
+        if downscaled:
+            scale = observation["image_pixel_scale"]
+            text += (f"全幅长边超 {IMAGE_FEED_LONG_EDGE} 已降采样省 token——图上像素乘 "
+                     f"({scale[0]},{scale[1]}) 才是客户区像素;小字看不清就带 region "
+                     "裁局部(原像素,无损放大)。")
     return text, observation, [{"mime_type": "image/png", "path": str(path)}]
 
 
