@@ -84,6 +84,12 @@
 - **Package 落了第一层(只读)。** package.yaml schema 1 契约冻结(`docs/reference/packages.md`:标准目录、命名空间、wire 百分号编码);严格解析指错到字段与行号,四层扫描(`--package-dir` > 项目 > 用户 > 官方),稳定盘点加整包内容哈希——改一个字节哈希就变。
 - **`/package list/show/doctor` 三件只读命令。** 同名包报遮蔽账;symlink 与 junction 越界一律拦;近似目录名提示疑似拼错。阶段 1 不挂载任何组件,代码组件零执行。
 
+## [v0.26.79] - 2026-08-29
+
+- **workflow 的 agent/tool 节点接上真审批。** needs_confirm 工具(edit_file/run_command 一类)不再被一律明拒、更不诓称"用户拒绝"——确认直通主回合同一颗脑袋:档位与预放行先裁定,yolo/auto 不多问;真要问时 diff 预览、三档菜单、"总是允许"落回会话账。没接审批宿主的宿主里,拒词也改成实话("未接审批宿主")。
+- **ask_user 增 override_answers(墨敕)。** 审核方已驳(review_approved=false)时,命中此档皇帝仍可越权放行:approved/complete 直接为真,不掺和 approve 的账;overridden 键恒在,下游直接读。
+- **三省六部示例重写成 2.0:官制归数据。** 几案并陈(inputs.lanes)与职官路由表(inputs.ministries)都是数组——添一部、添一案,改输入不动图;谋议出 loop(献策一次,修诏多轮),门下不见用户原话、只审诏书里的"需求复述",御前加签与墨敕两特权落地。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
