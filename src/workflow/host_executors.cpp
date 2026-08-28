@@ -183,7 +183,11 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         runtime::EventSink* sink = options_.event_sink;
         std::string* text_out = &text;
         std::int64_t* tokens_out = &tokens;
-        events.Attach([sink, text_out, tokens_out](const runtime::ServerEvent& event) {
+        const std::string node_run_id = request.node_run_id;
+        const std::string node_id = request.node->id;
+        const std::string node_label = request.node->label;
+        events.Attach([sink, text_out, tokens_out, node_run_id, node_id,
+                       node_label](const runtime::ServerEvent& event) {
             switch (event.kind) {
                 case runtime::ServerEventKind::ItemDelta:
                     if (event.item_kind == runtime::ItemKind::Text) {
@@ -200,7 +204,12 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
                     break;
             }
             if (sink != nullptr) {
-                sink->Emit(event);
+                runtime::ServerEvent forwarded = event;
+                if (!forwarded.payload.is_object()) forwarded.payload = nlohmann::json::object();
+                forwarded.payload["workflow_node_run_id"] = node_run_id;
+                forwarded.payload["workflow_node_id"] = node_id;
+                forwarded.payload["workflow_node_label"] = node_label;
+                sink->Emit(forwarded);
             }
         });
         events.Start(request.run_id);

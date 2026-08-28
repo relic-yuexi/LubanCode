@@ -309,12 +309,24 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
     std::unique_lock<std::mutex> nodes_lock;
     if (ctx.nodes_mutex != nullptr) nodes_lock = std::unique_lock<std::mutex>(*ctx.nodes_mutex);
     NodeRunRecord& record = account.nodes[node.id];
+    const auto emit_node_event = [&](const char* type, nlohmann::json payload) {
+        const int event_attempt = payload.value("attempt", (std::max)(1, record.attempt));
+        payload["node_id"] = node.id;
+        payload["label"] = node.label;
+        payload["kind"] = ToString(node.kind);
+        payload["attempt"] = event_attempt;
+        payload["node_run_id"] =
+            account.run_id + "-" + node.id + "-a" + std::to_string(event_attempt);
+        EmitRunEvent(account, type, std::move(payload));
+    };
 
     const auto executor_it = options_.executors.find(node.kind);
     if (executor_it == options_.executors.end()) {
         record.state = NodeState::Failed;
         record.error_code = "no_executor";
         record.error_message = "节点种类 " + ToString(node.kind) + " 没配执行器";
+        emit_node_event(kEventNodeCompleted,
+                        nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
         return "error";
     }
     NodeExecutor& executor = *executor_it->second;
@@ -327,6 +339,7 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         // 取消检查:每个 attempt 之前看一眼。
         if (ctx.cancel != nullptr && ctx.cancel->load()) {
             record.state = NodeState::Cancelled;
+            emit_node_event(kEventNodeCompleted, nlohmann::json{{"outcome", "cancelled"}});
             return "cancelled";
         }
         record.state = NodeState::Running;
@@ -357,10 +370,16 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                                                    {"code", record.error_code},
                                                    {"error", record.error_message}});
             }
+            emit_node_event(kEventNodeCompleted,
+                            nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
             return "error";
         }
         request.resolved_input = resolved_input->value;
 
+        // 到这里，输入已解好、执行器也找着了；此刻才算真正交办。终端据
+        // 这条回执告诉用户“中书省已经接到”，不拿预备状态冒充已发送。
+        emit_node_event(kEventNodeStarted,
+                        nlohmann::json{{"attempt", attempt}, {"max_attempts", max_attempts}});
         result = executor.Execute(request);
         if (nodes_lock.owns_lock() == false && ctx.nodes_mutex != nullptr) {
             nodes_lock.lock();
@@ -393,6 +412,10 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                                                    {"attempt", attempt},
                                                    {"max_attempts", max_attempts}});
             }
+            emit_node_event(kEventNodeRetrying,
+                            nlohmann::json{{"attempt", attempt},
+                                           {"max_attempts", max_attempts},
+                                           {"code", result.error_code}});
             // backoff 等待:受取消打断。fake clock 下 wait 缩为 0(单测不
             // 靠 sleep 赌时序)。批五:阶梯与等待走公共退避件;定义里的
             // jitter 仍不启用(声明了未接线是现状,开了改节奏,另立一批)。
@@ -423,6 +446,11 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                                                {"code", result.error_code},
                                                {"error", result.error_message}});
         }
+        emit_node_event(kEventNodeCompleted,
+                        nlohmann::json{{"outcome", "error"},
+                                       {"code", result.error_code},
+                                       {"duration_ms", result.duration_ms},
+                                       {"tokens", result.tokens_used}});
         return "error";
     }
 
@@ -442,9 +470,14 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                                                {"tokens", result.tokens_used},
                                                {"duration_ms", result.duration_ms}});
         }
+        emit_node_event(kEventNodeCompleted,
+                        nlohmann::json{{"outcome", result.empty ? "empty" : "success"},
+                                       {"duration_ms", result.duration_ms},
+                                       {"tokens", result.tokens_used}});
         return result.empty ? "empty" : "success";
     }
     record.state = NodeState::Failed;
+    emit_node_event(kEventNodeCompleted, nlohmann::json{{"outcome", "error"}});
     return "error";
 }
 

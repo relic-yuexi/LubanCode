@@ -334,15 +334,42 @@ result:
     }
     SUBCASE("裸启动会按 schema 问必填需求，再把整句送进 workflow") {
         int questions = 0;
+        bool answered = false;
+        bool run_started = false;
+        std::vector<std::string> event_types;
+        lubancode::runtime::FunctionEventSink events(
+            [&](const lubancode::runtime::ServerEvent& event) {
+                if (event.payload.contains("type")) {
+                    event_types.push_back(event.payload["type"].get<std::string>());
+                    if (event.payload["type"] == kEventNodeStarted) {
+                        const std::string node_id = event.payload.value("node_id", std::string());
+                        CHECK(event.payload.value("node_run_id", std::string()).find(
+                                  "-" + node_id + "-a1") != std::string::npos);
+                    }
+                }
+            });
         ctx.request_input = [&](const std::string& field,
                                 const nlohmann::json& schema) -> std::optional<std::string> {
             ++questions;
             CHECK(field == "topic");
             CHECK(schema["type"] == "string");
+            answered = true;
             return "先查清根因，再修掉这个 bug";
         };
+        ctx.on_run_start = [&] {
+            CHECK(answered);
+            run_started = true;
+        };
+        ctx.event_sink = &events;
         const std::string out = lubancode::app::RunWorkflowById(ctx, "echo-flow", "", executors);
         CHECK(questions == 1);
+        CHECK(run_started);
+        CHECK((event_types == std::vector<std::string>{
+                                  kEventRunStarted,
+                                  kEventNodeStarted,
+                                  kEventNodeCompleted,
+                                  kEventRunCompleted,
+                              }));
         CHECK(out.find("succeeded") != std::string::npos);
         CHECK(out.find("先查清根因，再修掉这个 bug") != std::string::npos);
     }

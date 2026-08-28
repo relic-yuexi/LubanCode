@@ -448,6 +448,7 @@ nodes:
     request.node = &def.node_map.at("explore");
     request.resolved_input = nlohmann::json{{"topic", "事件流"}};
     request.run_id = "run-wf-1";
+    request.node_run_id = "run-wf-1-explore-a1";
 
     const NodeExecResult result = executor.Execute(request);
     REQUIRE(result.ok);
@@ -487,6 +488,9 @@ nodes:
     for (const auto& event : sink.events) {
         CHECK(event.envelope.thread_id == "wf-th");
         CHECK(event.turn_id == "run-wf-1");
+        CHECK(event.payload.value("workflow_node_run_id", std::string()) ==
+              "run-wf-1-explore-a1");
+        CHECK(event.payload.value("workflow_node_id", std::string()) == "explore");
         CHECK(event.envelope.seq > last_seq);
         last_seq = event.envelope.seq;
     }

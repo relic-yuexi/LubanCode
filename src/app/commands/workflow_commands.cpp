@@ -5,8 +5,11 @@
 #include "app/turn_runner.hpp"                  // PromptAskUser(终端交互宿主)
 #include "tools/path_utils.hpp"                // Utf8ToPath(catalog 锚点拼路径)
 #include "tools/skill_loader.hpp"
+#include "cli/agent_panel_host.hpp"
 #include "cli/console_input.hpp"
+#include "cli/format_utils.hpp"
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
+#include "cli/transcript.hpp"
 
 using lubancode::cli::TermOut;
 using lubancode::cli::TermErr;
@@ -15,9 +18,11 @@ using lubancode::cli::TermErr;
 #include <chrono>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <sstream>
+#include <vector>
 
 #include "agent/agent.hpp"  // AgentProfile(批四自立门户)
 #include "cli/slash_commands.hpp"
@@ -113,10 +118,17 @@ private:
 // 直连图运行的 cancel token。析构先停读键线程，再擦 footer。
 class WorkflowTerminalRunScope final {
 public:
-    WorkflowTerminalRunScope(const lubancode::cli::Theme& theme, bool interactive)
+    WorkflowTerminalRunScope(const lubancode::cli::Theme& theme, bool interactive,
+                             std::atomic<bool>& cancel)
         : theme_(theme),
+          interactive_(interactive),
           footer_enabled_(interactive && lubancode::platform::SupportsScreenRepaint()),
-          started_at_(std::chrono::steady_clock::now()) {
+          cancel_(cancel) {}
+
+    void Start() {
+        if (started_) return;
+        started_ = true;
+        started_at_ = std::chrono::steady_clock::now();
         lubancode::cli::BeginStreamFooter(theme_, footer_enabled_);
         if (footer_enabled_) {
             lubancode::cli::BeginTurnActivity(
@@ -127,15 +139,16 @@ public:
             heartbeat_ = std::make_unique<lubancode::cli::StreamFooterHeartbeat>(
                 true, started_at_, &cancel_);
         }
-        if (interactive) {
+        if (interactive_) {
             listener_ = std::make_unique<lubancode::cli::TurnInputListener>(cancel_, theme_);
         }
     }
 
     ~WorkflowTerminalRunScope() {
+        if (!started_) return;
         if (listener_) listener_->Stop();
         if (heartbeat_) heartbeat_->Stop();
-        lubancode::cli::EndTurnActivity();
+        if (footer_enabled_) lubancode::cli::EndTurnActivity();
         lubancode::cli::EndStreamFooter();
     }
 
@@ -146,11 +159,275 @@ public:
 
 private:
     const lubancode::cli::Theme& theme_;
+    bool interactive_ = false;
     bool footer_enabled_ = false;
-    std::chrono::steady_clock::time_point started_at_;
-    std::atomic<bool> cancel_{false};
+    bool started_ = false;
+    std::chrono::steady_clock::time_point started_at_{};
+    std::atomic<bool>& cancel_;
     std::unique_ptr<lubancode::cli::TurnInputListener> listener_;
     std::unique_ptr<lubancode::cli::StreamFooterHeartbeat> heartbeat_;
+};
+
+// workflow 里的 llm/agent 节点也是在干活的 Agent。它们没走 AgentTool
+// 任务台，便用这本小账把节点事件投影成现成的 Agent panel 条目。
+class WorkflowAgentPanelSink final : public lubancode::runtime::EventSink {
+public:
+    void Emit(const lubancode::runtime::ServerEvent& event) override {
+        if (!event.payload.is_object()) return;
+        const std::string type = event.payload.value("type", std::string());
+        if (type == lubancode::workflow::kEventNodeStarted ||
+            type == lubancode::workflow::kEventNodeRetrying ||
+            type == lubancode::workflow::kEventNodeCompleted) {
+            ConsumeNodeEvent(type, event.payload);
+            return;
+        }
+        ConsumeAgentEvent(event);
+    }
+
+    std::vector<lubancode::cli::AgentPanelEntry> Entries() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        std::vector<lubancode::cli::AgentPanelEntry> out;
+        out.reserve(nodes_.size());
+        const auto now = std::chrono::steady_clock::now();
+        for (const auto& [_, node] : nodes_) {
+            if (node.hidden) continue;
+            lubancode::cli::AgentPanelEntry entry = node.entry;
+            const auto end = entry.running ? now : node.ended_at;
+            const double seconds = std::chrono::duration<double>(end - node.started_at).count();
+            entry.state = node.phase;
+            if (node.tool_calls > 0) {
+                entry.state += " · " + std::to_string(node.tool_calls) + " 次工具";
+            }
+            if (node.tokens > 0) {
+                entry.state += " · " + lubancode::cli::FormatTokenCount(node.tokens) + " tokens";
+            } else if (entry.running) {
+                entry.state += " · tokens 未报告";
+            }
+            entry.state += " · " + lubancode::cli::FormatSeconds((std::max)(0.0, seconds));
+            out.push_back(std::move(entry));
+        }
+        return out;
+    }
+
+    bool OwnsTask(int task_id) const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return FindByTaskId(task_id) != nullptr;
+    }
+
+    bool CancelTask(int task_id, std::atomic<bool>& cancel) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        TrackedNode* node = FindByTaskId(task_id);
+        if (node == nullptr || !node->entry.running) return false;
+        node->phase = "停止中";
+        ++node->entry.content_revision;
+        cancel.store(true);
+        return true;
+    }
+
+    bool ClearTask(int task_id) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        TrackedNode* node = FindByTaskId(task_id);
+        if (node == nullptr || node->entry.running) return false;
+        node->hidden = true;
+        ++node->entry.content_revision;
+        return true;
+    }
+
+    int CancelAll(std::atomic<bool>& cancel) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        int running = 0;
+        for (auto& [_, node] : nodes_) {
+            if (!node.entry.running) continue;
+            ++running;
+            node.phase = "停止中";
+            ++node.entry.content_revision;
+        }
+        if (running > 0) cancel.store(true);
+        return running;
+    }
+
+private:
+    struct TrackedNode {
+        lubancode::cli::AgentPanelEntry entry;
+        std::string phase = "等待模型";
+        std::chrono::steady_clock::time_point started_at{};
+        std::chrono::steady_clock::time_point ended_at{};
+        std::int64_t tokens = 0;
+        int tool_calls = 0;
+        bool hidden = false;
+    };
+
+    static int NextTaskId() {
+        static std::atomic<int> next{1000000000};
+        return next.fetch_add(1);
+    }
+
+    static std::pair<std::string, std::string> SplitLabel(const std::string& label,
+                                                           const std::string& node_id) {
+        const std::string text = label.empty() ? node_id : label;
+        const std::size_t split = text.find(' ');
+        if (split == std::string::npos) return {text, node_id};
+        return {text.substr(0, split), text.substr(split + 1)};
+    }
+
+    TrackedNode* FindByTaskId(int task_id) const {
+        for (auto& [_, node] : nodes_) {
+            if (node.entry.task_id == task_id) return &node;
+        }
+        return nullptr;
+    }
+
+    void ConsumeNodeEvent(const std::string& type, const nlohmann::json& payload) {
+        const std::string kind = payload.value("kind", std::string());
+        if (kind != "agent" && kind != "llm") return;
+        const std::string node_id = payload.value("node_id", std::string());
+        if (node_id.empty()) return;
+
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (type == lubancode::workflow::kEventNodeStarted) {
+            TrackedNode& node = nodes_[node_id];
+            if (node.entry.task_id == 0) node.entry.task_id = NextTaskId();
+            const auto [name, title] = SplitLabel(payload.value("label", std::string()), node_id);
+            node.entry.name = name;
+            node.entry.title = title;
+            node.entry.running = true;
+            node.entry.failed = false;
+            node.entry.cancelled = false;
+            node.entry.done_delivered = false;
+            node.hidden = false;
+            node.phase = "已交办 · 等待模型";
+            node.started_at = std::chrono::steady_clock::now();
+            node.ended_at = node.started_at;
+            node.tokens = 0;
+            node.tool_calls = 0;
+            ++node.entry.content_revision;
+            const std::string node_run_id = payload.value("node_run_id", std::string());
+            if (!node_run_id.empty()) node_runs_[node_run_id] = node_id;
+            return;
+        }
+
+        const auto found = nodes_.find(node_id);
+        if (found == nodes_.end()) return;
+        TrackedNode& node = found->second;
+        if (type == lubancode::workflow::kEventNodeRetrying) {
+            node.phase = "退回重办 · 等待下一试";
+            ++node.entry.content_revision;
+            return;
+        }
+
+        const std::string outcome = payload.value("outcome", std::string());
+        node.entry.running = false;
+        node.entry.failed = outcome != "success" && outcome != "empty" && outcome != "cancelled";
+        node.entry.cancelled = outcome == "cancelled";
+        node.ended_at = std::chrono::steady_clock::now();
+        node.tokens = payload.value("tokens", node.tokens);
+        if (outcome == "success") node.phase = "已办结";
+        else if (outcome == "empty") node.phase = "已办结 · 无输出";
+        else if (outcome == "cancelled") node.phase = "已取消";
+        else node.phase = "出错 " + payload.value("code", std::string());
+        ++node.entry.content_revision;
+    }
+
+    void ConsumeAgentEvent(const lubancode::runtime::ServerEvent& event) {
+        const std::string node_run_id = event.payload.value("workflow_node_run_id", std::string());
+        if (node_run_id.empty()) return;
+        std::lock_guard<std::mutex> lock(mutex_);
+        const auto run = node_runs_.find(node_run_id);
+        if (run == node_runs_.end()) return;
+        const auto found = nodes_.find(run->second);
+        if (found == nodes_.end()) return;
+        TrackedNode& node = found->second;
+
+        switch (event.kind) {
+            case lubancode::runtime::ServerEventKind::ModelStepStarted:
+                node.phase = "思考中";
+                break;
+            case lubancode::runtime::ServerEventKind::ItemStarted:
+                if (event.item_kind == lubancode::runtime::ItemKind::Tool) {
+                    ++node.tool_calls;
+                    node.phase = "调用工具 " + event.payload.value("tool_name", std::string());
+                } else if (event.item_kind == lubancode::runtime::ItemKind::Thinking) {
+                    node.phase = "思考中";
+                } else if (event.item_kind == lubancode::runtime::ItemKind::Text) {
+                    node.phase = "整理答复";
+                }
+                break;
+            case lubancode::runtime::ServerEventKind::ItemDelta:
+                if (event.item_kind == lubancode::runtime::ItemKind::Thinking) node.phase = "思考中";
+                if (event.item_kind == lubancode::runtime::ItemKind::Text) node.phase = "整理答复";
+                break;
+            case lubancode::runtime::ServerEventKind::UsageUpdated:
+                node.tokens += event.payload.value("input_tokens", std::int64_t{0}) +
+                               event.payload.value("cache_read_tokens", std::int64_t{0}) +
+                               event.payload.value("cache_creation_tokens", std::int64_t{0}) +
+                               event.payload.value("output_tokens", std::int64_t{0});
+                break;
+            case lubancode::runtime::ServerEventKind::QuestionRequested:
+            case lubancode::runtime::ServerEventKind::ApprovalRequested:
+                node.phase = "等待用户";
+                break;
+            case lubancode::runtime::ServerEventKind::Error:
+                node.phase = "出错";
+                break;
+            default:
+                break;
+        }
+        ++node.entry.content_revision;
+    }
+
+    mutable std::mutex mutex_;
+    mutable std::map<std::string, TrackedNode> nodes_;
+    std::map<std::string, std::string> node_runs_;
+};
+
+// workflow 跑着时叠一层 provider/actions，不把会话里本有的子 Agent 面板拆掉。
+// 析构时原样挂回；声明顺序保证 footer 先停，回调才失效。
+class WorkflowPanelOverlay final {
+public:
+    WorkflowPanelOverlay(WorkflowAgentPanelSink& tracker, std::atomic<bool>& cancel)
+        : tracker_(tracker), cancel_(cancel) {
+        auto& host = lubancode::cli::SessionAgentPanelHost();
+        previous_provider_ = host.provider();
+        previous_actions_ = host.actions();
+        host.SetProvider([this]() {
+            std::vector<lubancode::cli::AgentPanelEntry> entries =
+                previous_provider_ ? previous_provider_() : std::vector<lubancode::cli::AgentPanelEntry>{};
+            auto workflow_entries = tracker_.Entries();
+            entries.insert(entries.end(), workflow_entries.begin(), workflow_entries.end());
+            return entries;
+        });
+
+        lubancode::cli::AgentPanelActions actions;
+        actions.cancel_task = [this](int task_id) {
+            if (tracker_.OwnsTask(task_id)) return tracker_.CancelTask(task_id, cancel_);
+            return previous_actions_.cancel_task ? previous_actions_.cancel_task(task_id) : false;
+        };
+        actions.clear_task = [this](int task_id) {
+            if (tracker_.OwnsTask(task_id)) return tracker_.ClearTask(task_id);
+            return previous_actions_.clear_task ? previous_actions_.clear_task(task_id) : false;
+        };
+        actions.cancel_all = [this]() {
+            int count = tracker_.CancelAll(cancel_);
+            if (previous_actions_.cancel_all) count += previous_actions_.cancel_all();
+            return count;
+        };
+        host.SetActions(std::move(actions));
+    }
+
+    ~WorkflowPanelOverlay() {
+        auto& host = lubancode::cli::SessionAgentPanelHost();
+        host.SetProvider(std::move(previous_provider_));
+        host.SetActions(std::move(previous_actions_));
+    }
+
+    WorkflowPanelOverlay(const WorkflowPanelOverlay&) = delete;
+    WorkflowPanelOverlay& operator=(const WorkflowPanelOverlay&) = delete;
+
+private:
+    WorkflowAgentPanelSink& tracker_;
+    std::atomic<bool>& cancel_;
+    lubancode::cli::AgentPanelProvider previous_provider_;
+    lubancode::cli::AgentPanelActions previous_actions_;
 };
 
 std::vector<std::string> BuiltinSlashWords() {
@@ -740,9 +1017,13 @@ std::string RunWorkflowById(const WorkflowCommandContext& context, const std::st
 
     lubancode::workflow::RuntimeOptions options;
     options.executors = executors;
+    options.event_sink = context.event_sink;
+    options.thread_id = context.thread_id;
+    options.id_authority = context.id_authority;
     if (context.home_lubancode.has_value()) {
         options.runs_root = *context.home_lubancode / "workflow-runs";
     }
+    if (context.on_run_start) context.on_run_start();
     lubancode::workflow::WorkflowRuntime runtime(std::move(options));
     const lubancode::workflow::WorkflowRunSummary summary =
         runtime.Run(entry->definition, lubancode::workflow::RunInputs(inputs), cancel_token);
@@ -966,13 +1247,28 @@ lubancode::app::WorkflowExecutorContext BuildWorkflowExecutorContext(SlashDispat
 }
 
 std::string RunWorkflowFromTerminal(SlashDispatchContext& ctx,
-                                    const lubancode::app::WorkflowCommandContext& wf_ctx,
-                                    const std::string& workflow_id, const std::string& raw_args) {
+    const lubancode::app::WorkflowCommandContext& wf_ctx,
+    const std::string& workflow_id, const std::string& raw_args) {
     lubancode::app::WorkflowExecutorContext wf_exec = BuildWorkflowExecutorContext(ctx);
-    WorkflowTerminalRunScope terminal_run(*ctx.theme, ctx.spinner_enabled);
+    std::atomic<bool> workflow_cancel{false};
+    WorkflowAgentPanelSink workflow_panel;
+    WorkflowPanelOverlay panel_overlay(workflow_panel, workflow_cancel);
+    WorkflowTerminalRunScope terminal_run(*ctx.theme, ctx.spinner_enabled, workflow_cancel);
+    lubancode::runtime::FanoutEventSink workflow_events;
+    workflow_events.Add(&workflow_panel);
+    if (ctx.session_events != nullptr) workflow_events.Add(ctx.session_events);
+
+    lubancode::app::WorkflowCommandContext run_ctx = wf_ctx;
+    run_ctx.on_run_start = [&terminal_run] { terminal_run.Start(); };
+    run_ctx.event_sink = &workflow_events;
+    run_ctx.thread_id = ctx.session_runtime->thread_id();
+    run_ctx.id_authority = &ctx.session_runtime->ids();
+    // agent 子回合与 workflow 节点事件走同一扇分线器；面板账
+    // 只取属于 workflow Agent 的那一份，全量事件仍原样进会话账。
+    wf_exec.event_sink = &workflow_events;
     return lubancode::app::RunWorkflowById(
-        wf_ctx, workflow_id, raw_args,
-        lubancode::app::BuildWorkflowExecutors(wf_ctx, wf_exec, workflow_id),
+        run_ctx, workflow_id, raw_args,
+        lubancode::app::BuildWorkflowExecutors(run_ctx, wf_exec, workflow_id),
         terminal_run.cancel_token());
 }
 

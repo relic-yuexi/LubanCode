@@ -52,6 +52,14 @@ struct WorkflowCommandContext {
     // headless/app-server 不装这只口，仍由 runtime 返回 invalid_inputs。
     std::function<std::optional<std::string>(const std::string& field,
                                              const nlohmann::json& schema)> request_input;
+    // 真正开跑前才调：终端拿它在必填输入收齐后起忙碌钟，不能把用户
+    // 停在输入框里的工夫算进执行耗时。
+    std::function<void()> on_run_start;
+    // workflow 自身的 run/node 事件出口。终端、app-server 与 headless
+    // 各自装 sink；空指针仍可安静运行。
+    lubancode::runtime::EventSink* event_sink = nullptr;
+    std::string thread_id;
+    lubancode::runtime::IdAuthority* id_authority = nullptr;
 };
 
 // 拆好的 /workflow 子命令。Invalid 时 usage 打印兜底。
