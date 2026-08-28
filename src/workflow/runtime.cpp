@@ -379,7 +379,9 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         // 到这里，输入已解好、执行器也找着了；此刻才算真正交办。终端据
         // 这条回执告诉用户“中书省已经接到”，不拿预备状态冒充已发送。
         emit_node_event(kEventNodeStarted,
-                        nlohmann::json{{"attempt", attempt}, {"max_attempts", max_attempts}});
+                        nlohmann::json{{"attempt", attempt},
+                                       {"max_attempts", max_attempts},
+                                       {"input", request.resolved_input}});
         result = executor.Execute(request);
         if (nodes_lock.owns_lock() == false && ctx.nodes_mutex != nullptr) {
             nodes_lock.lock();
@@ -757,7 +759,15 @@ std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const Workflow
             if (body == def.node_map.end()) return fail("unknown_loop_body", "loop body 节点不存在: " + body_id);
             ctx.store->UpdateMeta(body_id, nlohmann::json{{"iteration", iteration}});
             nlohmann::json output;
-            const std::string outcome = RunNode(ctx, body->second, &output);
+            std::string outcome;
+            if (body->second.kind == NodeKind::Parallel) {
+                outcome = RunParallel(ctx, body->second);
+                if (const auto joined = ctx.store->GetOutput(body_id); joined.has_value()) {
+                    output = *joined;
+                }
+            } else {
+                outcome = RunNode(ctx, body->second, &output);
+            }
             if (outcome == "cancelled") {
                 record.state = NodeState::Cancelled;
                 return "cancelled";

@@ -47,6 +47,15 @@ namespace lubancode::workflow {
 // 返回完整 prompt 文本;空串 = 读不到(报错)。
 using PromptLoader = std::function<std::string(const std::string& package_relative_path)>;
 
+// 终端从 Agent 面板递来的补充。执行器在一轮正常收口后取一次；若下一轮
+// 没真正送成，restore 把原消息退回宿主队列。
+struct NodeSteeringBatch {
+    std::string input;
+    std::function<void()> restore;
+};
+using NodeSteeringSource =
+    std::function<std::optional<NodeSteeringBatch>(const NodeExecRequest& request)>;
+
 // ---------------------------------------------------------------------------
 // tool 节点
 // ---------------------------------------------------------------------------
@@ -115,6 +124,7 @@ public:
         runtime::EventSink* event_sink = nullptr;
         runtime::IdAuthority* ids = nullptr;
         std::string thread_id;
+        NodeSteeringSource steering;
     };
 
     explicit AgentExecutor(Options options);
@@ -130,11 +140,25 @@ private:
 
 class LlmExecutor : public NodeExecutor {
 public:
+    struct Binding {
+        api::Backend* backend = nullptr;
+        std::shared_ptr<api::Backend> owned_backend;
+        std::string model;
+        std::string reasoning_effort;
+    };
+    using BindingResolver = std::function<std::optional<Binding>(const WorkflowNode& node)>;
+
     struct Options {
         api::Backend* backend = nullptr;
         std::string model;
+        std::string reasoning_effort;
+        BindingResolver resolve_binding;  // model_role 路由；空则用上面缺省档
         PromptLoader prompt_loader;  // 包内路径 -> 正文
         std::int64_t max_output_tokens = 4096;
+        runtime::EventSink* event_sink = nullptr;
+        runtime::IdAuthority* ids = nullptr;
+        std::string thread_id;
+        NodeSteeringSource steering;
     };
 
     explicit LlmExecutor(Options options);

@@ -536,6 +536,65 @@ result:
     CHECK(summary.result["review"]["history"].size() == 2);
 }
 
+TEST_CASE("loop:每轮可先跑 parallel 分支再由后续节点合案") {
+    using namespace lubancode::workflow;
+    const char* yaml = R"YAML(
+schema_version: 1
+id: parallel-plans
+version: 1.0.0
+entry: review
+limits: { max_steps: 20 }
+nodes:
+  review:
+    type: loop
+    body: [plans, merge, gate]
+    until: { op: equals, path: "${nodes.gate.output.complete}", value: true }
+    max_iterations: 2
+    hard_limit: 3
+  plans:
+    type: parallel
+    branches: [a, b, c]
+    join: all
+  a: { type: transform, operation: echo, input: { name: a } }
+  b: { type: transform, operation: echo, input: { name: b } }
+  c: { type: transform, operation: echo, input: { name: c } }
+  merge:
+    type: transform
+    operation: echo
+    input:
+      candidates:
+        - "${nodes.a.output}"
+        - "${nodes.b.output}"
+        - "${nodes.c.output}"
+  gate: { type: transform, operation: approve }
+  fin: { type: end }
+  exhausted: { type: end }
+edges:
+  - { from: review, on: success, to: fin }
+  - { from: review, on: exhausted, to: exhausted }
+result:
+  merged: "${nodes.merge.output}"
+)YAML";
+    auto parsed = ParseWorkflowYaml(yaml);
+    REQUIRE(parsed.has_value());
+    const auto validation = ValidateDefinition(*parsed, std::nullopt);
+    CHECK(validation.ok());
+
+    auto transforms = std::make_shared<TransformExecutor>();
+    transforms->Register("echo", [](const nlohmann::json& input) { return input; });
+    transforms->Register("approve", [](const nlohmann::json&) {
+        return nlohmann::json{{"complete", true}};
+    });
+    RuntimeOptions options;
+    options.executors[NodeKind::Transform] = transforms;
+    WorkflowRuntime runtime(options);
+    const auto summary = runtime.Run(*parsed, RunInputs{});
+    REQUIRE(summary.state == RunState::Succeeded);
+    REQUIRE(summary.result["merged"]["candidates"].size() == 3);
+    CHECK(summary.result["merged"]["candidates"][0]["name"] == "a");
+    CHECK(summary.result["merged"]["candidates"][2]["name"] == "c");
+}
+
 TEST_CASE("loop:输入决定软帽,撞帽走 exhausted") {
     using namespace lubancode::workflow;
     const char* yaml = R"YAML(

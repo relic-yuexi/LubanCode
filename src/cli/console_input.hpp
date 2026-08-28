@@ -548,12 +548,13 @@ public:
     StreamFooterHeartbeat(const StreamFooterHeartbeat&) = delete;
     StreamFooterHeartbeat& operator=(const StreamFooterHeartbeat&) = delete;
 
+    void ResetElapsed(std::chrono::steady_clock::time_point started_at);
     void Stop();
 
 private:
     void ThreadMain();
 
-    std::chrono::steady_clock::time_point started_at_;
+    std::atomic<std::int64_t> started_at_ms_{0};
     const std::atomic<bool>* cancel_ = nullptr;
     std::atomic<bool> stop_{false};
     std::thread thread_;

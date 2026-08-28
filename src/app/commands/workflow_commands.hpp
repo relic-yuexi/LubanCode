@@ -130,6 +130,8 @@ struct WorkflowExecutorContext {
     lubancode::runtime::IdAuthority* id_authority = nullptr;  // 空 = 进程级
     std::shared_ptr<lubancode::runtime::InteractionBroker> interaction_broker;
     const std::vector<lubancode::tools::SkillMeta>* skills = nullptr;
+    lubancode::workflow::NodeSteeringSource steering;
+    lubancode::workflow::LlmExecutor::BindingResolver resolve_llm_binding;
     int subflow_depth = 0;  // 终端首版只准一层 nesting,防交叉递归没帽
 };
 

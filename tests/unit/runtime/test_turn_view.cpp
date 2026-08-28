@@ -1070,3 +1070,18 @@ TEST_CASE("footer 公共心跳:长活儿没有正文增量,秒数仍会越过零
     CHECK(lubancode::cli::EndTurnActivity() >= 2);
     lubancode::cli::EndStreamFooter();
 }
+
+TEST_CASE("footer 公共心跳:workflow 换节点后可从零重计") {
+    lubancode::cli::BeginStreamFooter(lubancode::cli::Theme{}, /*enabled=*/true);
+    lubancode::cli::BeginTurnActivity("旧节点", 1000);
+    std::atomic<bool> cancel{false};
+    lubancode::cli::StreamFooterHeartbeat heartbeat(
+        /*enabled=*/true, std::chrono::steady_clock::now() - std::chrono::seconds(8), &cancel);
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    heartbeat.ResetElapsed(std::chrono::steady_clock::now());
+    lubancode::cli::BeginTurnActivity("新节点", 2000);
+    std::this_thread::sleep_for(std::chrono::milliseconds(250));
+    heartbeat.Stop();
+    CHECK(lubancode::cli::EndTurnActivity() == 0);
+    lubancode::cli::EndStreamFooter();
+}

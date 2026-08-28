@@ -77,14 +77,15 @@ public:
     std::int64_t input_tokens = 100;
     std::int64_t output_tokens = 50;
     int calls = 0;
+    std::vector<lubancode::api::Request> requests;
 
     std::expected<void, lubancode::api::Error> send_stream(
         const lubancode::api::Request& request,
         const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
         const std::atomic<bool>* cancel) override {
-        (void)request;
         (void)cancel;
         ++calls;
+        requests.push_back(request);
         on_event(lubancode::api::TextDelta{reply});
         lubancode::api::MessageDone done;
         done.usage.input_tokens = input_tokens;
@@ -148,6 +149,7 @@ public:
     std::vector<std::string> question_answers = {"答案一"};
     int approvals = 0;
     int questions = 0;
+    lubancode::runtime::QuestionRequest last_question;
 
     class InstantFuture final : public lubancode::runtime::InteractionFuture {
     public:
@@ -171,7 +173,7 @@ public:
 
     std::shared_ptr<lubancode::runtime::InteractionFuture> AskQuestion(
         const lubancode::runtime::QuestionRequest& request) override {
-        (void)request;
+        last_question = request;
         ++questions;
         auto future = std::make_shared<InstantFuture>();
         lubancode::runtime::QuestionResponse response;
@@ -321,6 +323,85 @@ result:
     CHECK(backend.calls == 1);
 }
 
+TEST_CASE("llm 节点:面板补充在首轮收口后送入第二轮") {
+    using namespace lubancode::workflow;
+    FakeBackend backend;
+    LlmExecutor::Options options;
+    options.backend = &backend;
+    options.model = "test-model";
+    options.prompt_loader = [](const std::string&) { return "你是分析器"; };
+    int pulls = 0;
+    options.steering = [&pulls](const NodeExecRequest&) -> std::optional<NodeSteeringBatch> {
+        if (pulls++ > 0) return std::nullopt;
+        return NodeSteeringBatch{"请把验收条件写清楚", nullptr};
+    };
+    LlmExecutor executor(std::move(options));
+
+    const WorkflowDefinition def = ParseOrDie(R"YAML(
+schema_version: 1
+id: llm-steering
+version: 1.0.0
+entry: analyze
+nodes:
+  analyze:
+    type: llm
+    prompt: prompts/analyze.md
+)YAML");
+    NodeExecRequest request;
+    request.node = &def.node_map.at("analyze");
+    request.resolved_input = nlohmann::json{{"topic", "参与"}};
+    request.run_id = "run-steering";
+    request.node_run_id = "run-steering-analyze-a1";
+
+    const NodeExecResult result = executor.Execute(request);
+    REQUIRE(result.ok);
+    REQUIRE(backend.requests.size() == 2);
+    REQUIRE(backend.requests[1].messages.size() == 3);
+    const auto* followup = std::get_if<lubancode::api::TextBlock>(
+        &backend.requests[1].messages.back().content.front());
+    REQUIRE(followup != nullptr);
+    CHECK(followup->text.find("验收条件") != std::string::npos);
+    CHECK(result.tokens_used == 300);
+}
+
+TEST_CASE("llm 节点:model_role 可换到独立 Lao binding") {
+    using namespace lubancode::workflow;
+    FakeBackend normal;
+    FakeBackend lao;
+    LlmExecutor::Options options;
+    options.backend = &normal;
+    options.model = "normal-model";
+    options.prompt_loader = [](const std::string&) { return "拟方案"; };
+    options.resolve_binding = [&lao](const WorkflowNode& node)
+        -> std::optional<LlmExecutor::Binding> {
+        CHECK(node.model_role == "lao");
+        return LlmExecutor::Binding{&lao, nullptr, "lao-model", "high"};
+    };
+    LlmExecutor executor(std::move(options));
+
+    const WorkflowDefinition def = ParseOrDie(R"YAML(
+schema_version: 1
+id: llm-lao
+version: 1.0.0
+entry: plan
+nodes:
+  plan:
+    type: llm
+    model_role: lao
+    prompt: prompts/plan.md
+)YAML");
+    NodeExecRequest request;
+    request.node = &def.node_map.at("plan");
+    request.resolved_input = nlohmann::json{{"topic", "方案"}};
+
+    const NodeExecResult result = executor.Execute(request);
+    REQUIRE(result.ok);
+    CHECK(normal.calls == 0);
+    REQUIRE(lao.requests.size() == 1);
+    CHECK(lao.requests[0].model == "lao-model");
+    CHECK(lao.requests[0].reasoning_effort == "high");
+}
+
 TEST_CASE("agent 节点:同一 Agent 吃 profile、工具白名单并跑完整工具循环") {
     using namespace lubancode::workflow;
     lubancode::tools::ToolRegistry registry;
@@ -372,6 +453,57 @@ nodes:
     CHECK(backend.requests[0].system == "只读探索");
     REQUIRE(backend.requests[0].tools.size() == 1);
     CHECK(backend.requests[0].tools[0].name == "reader");
+}
+
+TEST_CASE("agent 节点:面板补充经 TurnHarness 续投且结果认最后一轮") {
+    using namespace lubancode::workflow;
+    lubancode::tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("reader", R"({"read":true})", false, false));
+    AgentBackend backend;
+
+    AgentExecutor::Options options;
+    options.default_binding.backend = &backend;
+    options.default_binding.profile.request.model = "test-agent";
+    options.registry = &registry;
+    options.task_loader = [](const std::string&) { return std::string("照单办事"); };
+    int pulls = 0;
+    options.steering = [&pulls](const NodeExecRequest&) -> std::optional<NodeSteeringBatch> {
+        if (pulls++ > 0) return std::nullopt;
+        return NodeSteeringBatch{"再核对一遍", nullptr};
+    };
+    AgentExecutor executor(std::move(options));
+
+    const WorkflowDefinition def = ParseOrDie(R"YAML(
+schema_version: 1
+id: agent-steering
+version: 1.0.0
+entry: work
+nodes:
+  work:
+    type: agent
+    task: prompts/work.md
+    allowed_tools: [reader]
+)YAML");
+    NodeExecRequest request;
+    request.node = &def.node_map.at("work");
+    request.resolved_input = nlohmann::json{{"topic", "参与"}};
+    request.run_id = "run-agent-steering";
+    request.node_run_id = "run-agent-steering-work-a1";
+
+    const NodeExecResult result = executor.Execute(request);
+    REQUIRE(result.ok);
+    CHECK(result.output["answer"] == "ok");
+    REQUIRE(backend.requests.size() == 3);
+    bool saw_followup = false;
+    for (const auto& message : backend.requests.back().messages) {
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<lubancode::api::TextBlock>(&block);
+                text != nullptr && text->text.find("再核对一遍") != std::string::npos) {
+                saw_followup = true;
+            }
+        }
+    }
+    CHECK(saw_followup);
 }
 
 TEST_CASE("agent 节点:backend 报错经 TurnHarness 收场,映射与从前一字不差") {
@@ -540,7 +672,8 @@ TEST_CASE("ask_user 节点:答案进 output") {
     broker.question_answers = {"用 arXiv"};
     auto executor = std::make_shared<AskUserExecutor>(&broker);
     const char* yaml = "schema_version: 1\nid: q\nversion: 1\nentry: ask\nnodes:\n"
-                       "  ask:\n    type: ask_user\n    input: { question: \"查哪路\" }\n"
+                       "  ask:\n    type: ask_user\n    input:\n      question: \"查哪路\"\n"
+                       "      options:\n        - { label: \"arXiv\", description: \"论文库\" }\n"
                        "  fin:\n    type: end\nedges:\n  - { from: ask, on: success, to: fin }\n"
                        "result:\n  answer: \"${nodes.ask.output.answers.0}\"\n";
     const WorkflowDefinition def = ParseOrDie(yaml);
@@ -550,6 +683,61 @@ TEST_CASE("ask_user 节点:答案进 output") {
     const auto summary = runtime.Run(def, RunInputs{});
     REQUIRE(summary.state == RunState::Succeeded);
     CHECK(summary.result["answer"] == "用 arXiv");
+    REQUIRE(broker.last_question.options.size() == 1);
+    CHECK(broker.last_question.options[0].label == "arXiv");
+    CHECK(broker.last_question.options[0].description == "论文库");
+}
+
+TEST_CASE("ask_user 节点:上游已通过时跳过菜单") {
+    using namespace lubancode::workflow;
+    InstantBroker broker;
+    AskUserExecutor executor(&broker);
+    const WorkflowDefinition def = ParseOrDie(
+        "schema_version: 1\nid: q-skip\nversion: 1\nentry: ask\nnodes:\n"
+        "  ask:\n    type: ask_user\n    input: { skip_when: true, question: \"不该问\" }\n");
+    NodeExecRequest request;
+    request.node = &def.node_map.at("ask");
+    request.resolved_input = nlohmann::json{{"skip_when", true}, {"question", "不该问"}};
+    const NodeExecResult result = executor.Execute(request);
+    REQUIRE(result.ok);
+    CHECK(result.output["skipped"] == true);
+    CHECK(broker.questions == 0);
+}
+
+TEST_CASE("ask_user 节点:不知道会委托后续各轮且须等复审通过") {
+    using namespace lubancode::workflow;
+    InstantBroker broker;
+    broker.question_answers = {"不知道，请中书定方案"};
+    AskUserExecutor executor(&broker);
+    const WorkflowDefinition def = ParseOrDie(
+        "schema_version: 1\nid: q-delegate\nversion: 1\nentry: ask\nnodes:\n"
+        "  ask:\n    type: ask_user\n    input: { question: \"请批阅\" }\n");
+    NodeExecRequest request;
+    request.node = &def.node_map.at("ask");
+    request.resolved_input = nlohmann::json{
+        {"question", "请批阅"},
+        {"review_approved", false},
+        {"delegate_answers", nlohmann::json::array({"不知道，请中书定方案"})}};
+
+    const NodeExecResult first = executor.Execute(request);
+    REQUIRE(first.ok);
+    CHECK(first.output["delegated"] == true);
+    CHECK(first.output["complete"] == false);
+    CHECK(broker.questions == 1);
+
+    request.resolved_input["previous"] =
+        nlohmann::json{{"outputs", {{"ask", first.output}}}};
+    const NodeExecResult rejected_again = executor.Execute(request);
+    REQUIRE(rejected_again.ok);
+    CHECK(rejected_again.output["skipped"] == true);
+    CHECK(rejected_again.output["complete"] == false);
+    CHECK(broker.questions == 1);
+
+    request.resolved_input["review_approved"] = true;
+    const NodeExecResult approved = executor.Execute(request);
+    REQUIRE(approved.ok);
+    CHECK(approved.output["complete"] == true);
+    CHECK(broker.questions == 1);
 }
 
 TEST_CASE("subflow:子图结果交回父图,错误不穿墙成文本") {

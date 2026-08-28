@@ -4,6 +4,7 @@
 
 #include "workflow/host_executors.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <set>
 #include <utility>
@@ -222,15 +223,31 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         };
     }
 
-    // turn 推进走 TurnHarness 的续投外环(批五乙:三外壳降策略——workflow
-    // 的 agent 节点不再自家直调 Agent::Run,run turn 的路全仓只 harness 一
-    // 份;批二余款:Callbacks 退役,装配走 TurnWiring)。单轮即收:没续投
-    // 源、没墙钟、没取消链(取消在 runtime 的节点边界看,与从前一致)。
+    // turn 推进走 TurnHarness。面板补充只在一轮正常收口后取，取到便另开
+    // 一轮；送不成由 batch.restore 退回原队列。
     api::Message task_input;
     task_input.role = api::Role::User;
     task_input.content.push_back(api::TextBlock{request.resolved_input.dump()});
     agent::DriveOptions drive_options;
     drive_options.cancel = request.cancel;
+    int steering_round = 1;
+    if (options_.steering) {
+        drive_options.continuation = [this, &request, &events, &text,
+                                      &steering_round]() -> std::optional<agent::ContinuationBatch> {
+            // 先收当前文字条目，再把用户补充记进详情账；下一轮正文才会排
+            // 在补充之后，不会倒插回上一张卡。
+            events.Finish(runtime::Outcome::Succeeded);
+            auto batch = options_.steering(request);
+            if (!batch.has_value()) return std::nullopt;
+            text.clear();  // workflow 输出认最后一轮，旧轮仍留在事件账里。
+            ++steering_round;
+            events.Start(request.run_id + "-r" + std::to_string(steering_round));
+            agent::ContinuationBatch out;
+            out.input = std::move(batch->input);
+            out.restore = std::move(batch->restore);
+            return out;
+        };
+    }
     const agent::DriveReport drive =
         agent::DriveTurn(task_agent, wiring, std::move(task_input), std::move(drive_options));
 
@@ -292,7 +309,17 @@ NodeExecResult LlmExecutor::Execute(const NodeExecRequest& request) {
 
 NodeExecResult LlmExecutor::ExecuteWithPrompt(const NodeExecRequest& request, const std::string& prompt_text) {
     NodeExecResult result;
-    if (options_.backend == nullptr) {
+    std::optional<Binding> resolved;
+    if (options_.resolve_binding) resolved = options_.resolve_binding(*request.node);
+    Binding binding;
+    if (resolved.has_value()) {
+        binding = std::move(*resolved);
+    } else {
+        binding.backend = options_.backend;
+        binding.model = options_.model;
+        binding.reasoning_effort = options_.reasoning_effort;
+    }
+    if (binding.backend == nullptr) {
         result.error_code = "not_configured";
         result.error_message = "llm 节点没有 backend";
         return result;
@@ -306,7 +333,8 @@ NodeExecResult LlmExecutor::ExecuteWithPrompt(const NodeExecRequest& request, co
     // 采样走 SampleModel 原语(批一·病四):路只有一条,提示拼装仍在本层。
     // 旧路的语义原样:无看门狗、无取消;流错折 Api;Cancelled 单列。
     agent::SampleRequest sample;
-    sample.model = options_.model;
+    sample.model = binding.model;
+    sample.reasoning_effort = binding.reasoning_effort;
     sample.system = prompt_text;
     if (options_.max_output_tokens > 0) {
         sample.max_tokens = static_cast<int>(options_.max_output_tokens);
@@ -316,26 +344,86 @@ NodeExecResult LlmExecutor::ExecuteWithPrompt(const NodeExecRequest& request, co
     user.content.push_back(api::TextBlock{request.resolved_input.dump()});
     sample.messages.push_back(std::move(user));
 
+    runtime::TurnEventAdapter events(!options_.thread_id.empty() ? options_.thread_id : std::string("workflow"),
+                                     options_.ids != nullptr ? *options_.ids : runtime::ProcessIdAuthority());
+    if (options_.event_sink != nullptr) {
+        runtime::EventSink* sink = options_.event_sink;
+        const std::string node_run_id = request.node_run_id;
+        const std::string node_id = request.node->id;
+        const std::string node_label = request.node->label;
+        events.Attach([sink, node_run_id, node_id, node_label](const runtime::ServerEvent& event) {
+            runtime::ServerEvent forwarded = event;
+            if (!forwarded.payload.is_object()) forwarded.payload = nlohmann::json::object();
+            forwarded.payload["workflow_node_run_id"] = node_run_id;
+            forwarded.payload["workflow_node_id"] = node_id;
+            forwarded.payload["workflow_node_label"] = node_label;
+            sink->Emit(forwarded);
+        });
+    }
+
     agent::SampleOptions sample_options;
     sample_options.cancel = request.cancel;
-    const agent::SampleResult sampled = agent::SampleModel(*options_.backend, sample, sample_options);
-    if (!sampled.ok) {
-        result.error_code =
-            sampled.error.kind == api::ErrorKind::Cancelled ? "cancelled" : "api_error";
-        result.error_message = sampled.error.message.substr(0, 500);
-        return result;
+    std::string final_text;
+    std::function<void()> inflight_restore;
+    int round = 1;
+    for (;;) {
+        events.Start(round == 1 ? request.run_id : request.run_id + "-r" + std::to_string(round));
+        events.OnModelStepStarted(round - 1);
+        const agent::SampleResult sampled = agent::SampleModel(*binding.backend, sample, sample_options);
+        result.tokens_used += api::TotalInputTokens(sampled.usage) + sampled.usage.output_tokens;
+        if (sampled.usage_reported) {
+            api::UsageReport usage;
+            usage.usage = sampled.usage;
+            usage.step_index = round - 1;
+            usage.model = binding.model;
+            events.OnUsage(usage);
+        }
+        if (!sampled.ok) {
+            if (inflight_restore) inflight_restore();
+            events.Finish(sampled.error.kind == api::ErrorKind::Cancelled
+                              ? runtime::Outcome::Cancelled
+                              : runtime::Outcome::Failed,
+                          sampled.error.message);
+            result.error_code =
+                sampled.error.kind == api::ErrorKind::Cancelled ? "cancelled" : "api_error";
+            result.error_message = sampled.error.message.substr(0, 500);
+            return result;
+        }
+        inflight_restore = nullptr;  // 这一批已经随模型请求送达。
+        final_text = sampled.text;
+        events.OnTextDelta(sampled.text);
+        events.Finish(runtime::Outcome::Succeeded);
+
+        auto steering = options_.steering ? options_.steering(request) : std::nullopt;
+        if (!steering.has_value()) break;
+
+        api::Message assistant;
+        assistant.role = api::Role::Assistant;
+        assistant.content.push_back(api::TextBlock{sampled.text});
+        sample.messages.push_back(std::move(assistant));
+        api::Message followup;
+        followup.role = api::Role::User;
+        followup.content.push_back(api::TextBlock{steering->input});
+        sample.messages.push_back(std::move(followup));
+        inflight_restore = std::move(steering->restore);
+        ++round;
+
+        if (request.cancel != nullptr && request.cancel->load(std::memory_order_acquire)) {
+            if (inflight_restore) inflight_restore();
+            result.error_code = "cancelled";
+            result.error_message = "用户取消";
+            return result;
+        }
     }
-    // token 账:输入+输出都计入 run 预算(重试也计,不开免单账)。
-    result.tokens_used = api::TotalInputTokens(sampled.usage) + sampled.usage.output_tokens;
 
     nlohmann::json parsed = nlohmann::json::object();
     bool parsed_ok = false;
     try {
-        parsed = nlohmann::json::parse(sampled.text);
+        parsed = nlohmann::json::parse(final_text);
         parsed_ok = true;
     } catch (...) {
     }
-    result.output = parsed_ok ? parsed : nlohmann::json{{"content", sampled.text}};
+    result.output = parsed_ok ? parsed : nlohmann::json{{"content", final_text}};
     result.ok = true;
     return result;
 }
@@ -387,6 +475,50 @@ AskUserExecutor::AskUserExecutor(runtime::InteractionBroker* broker) : broker_(b
 
 NodeExecResult AskUserExecutor::Execute(const NodeExecRequest& request) {
     NodeExecResult result;
+    const auto answer_matches = [&request](const char* field,
+                                           const std::vector<std::string>& answers) {
+        const auto configured = request.resolved_input.find(field);
+        if (configured == request.resolved_input.end() || !configured->is_array()) return false;
+        for (const auto& candidate : *configured) {
+            if (!candidate.is_string()) continue;
+            if (std::find(answers.begin(), answers.end(), candidate.get<std::string>()) != answers.end()) {
+                return true;
+            }
+        }
+        return false;
+    };
+    const bool review_approved = request.resolved_input.value("review_approved", true);
+    bool delegated_before = false;
+    if (const auto previous = request.resolved_input.find("previous");
+        previous != request.resolved_input.end() && previous->is_object()) {
+        const auto outputs = previous->find("outputs");
+        if (outputs != previous->end() && outputs->is_object()) {
+            const auto prior = outputs->find(request.node->id);
+            delegated_before = prior != outputs->end() && prior->is_object() &&
+                               prior->value("delegated", false);
+        }
+    }
+    // 皇帝已把余下细节交给规划者后，后续轮只走“修订 -> 独立复审”。
+    // 复审没过便再修，不再把新问题一张张弹回御前。
+    if (delegated_before) {
+        result.output = nlohmann::json{{"answers", nlohmann::json::array()},
+                                       {"skipped", true},
+                                       {"delegated", true},
+                                       {"approved", review_approved},
+                                       {"complete", review_approved}};
+        result.ok = true;
+        return result;
+    }
+    // 澄清 loop 用：上游已经判明“信息够了”时，不再弹一张多余菜单。
+    if (request.resolved_input.value("skip_when", false)) {
+        result.output = nlohmann::json{{"answers", nlohmann::json::array()},
+                                       {"skipped", true},
+                                       {"delegated", false},
+                                       {"approved", true},
+                                       {"complete", true}};
+        result.ok = true;
+        return result;
+    }
     if (broker_ == nullptr) {
         result.error_code = "not_configured";
         result.error_message = "ask_user 节点没有 InteractionBroker(不挂死,明报)";
@@ -398,6 +530,23 @@ NodeExecResult AskUserExecutor::Execute(const NodeExecRequest& request) {
         header != request.resolved_input.end() && header->is_string()) {
         question.header = header->get<std::string>();
     }
+    if (const auto multi = request.resolved_input.find("multi_select");
+        multi != request.resolved_input.end() && multi->is_boolean()) {
+        question.multi_select = multi->get<bool>();
+    }
+    if (const auto options = request.resolved_input.find("options");
+        options != request.resolved_input.end() && options->is_array()) {
+        for (const auto& option : *options) {
+            runtime::QuestionOption parsed;
+            if (option.is_string()) {
+                parsed.label = option.get<std::string>();
+            } else if (option.is_object()) {
+                parsed.label = option.value("label", std::string());
+                parsed.description = option.value("description", std::string());
+            }
+            if (!parsed.label.empty()) question.options.push_back(std::move(parsed));
+        }
+    }
     auto future = broker_->AskQuestion(question);
     const auto answer = future->WaitQuestion();
     if (!answer.has_value() || answer->answers.empty()) {
@@ -405,7 +554,13 @@ NodeExecResult AskUserExecutor::Execute(const NodeExecRequest& request) {
         result.error_message = "提问悬空收口";
         return result;
     }
-    result.output = nlohmann::json{{"answers", answer->answers}};
+    const bool delegated = answer_matches("delegate_answers", answer->answers);
+    const bool approved = review_approved && answer_matches("approve_answers", answer->answers);
+    result.output = nlohmann::json{{"answers", answer->answers},
+                                   {"delegated", delegated},
+                                   {"approved", approved},
+                                   // 委托至少再过一轮规划与门下复审，不能当场越闸。
+                                   {"complete", approved}};
     result.ok = true;
     return result;
 }

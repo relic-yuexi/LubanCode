@@ -530,6 +530,11 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     {
         lubancode::cli::TranscriptUiController::Hooks transcript_hooks;
         transcript_hooks.build_task_transcript = [this](int task_id, int width) {
+            const auto& workflow_detail = lubancode::cli::SessionAgentPanelHost().transcript_provider();
+            if (workflow_detail) {
+                auto lines = workflow_detail(task_id, width, transcript_ui_.agent_view_expanded());
+                if (lines.has_value()) return *lines;
+            }
             return agent_panel_presenter_.TaskTranscriptLines(session_agent_tool(), task_id, width,
                                                               transcript_ui_.agent_view_expanded());
         };

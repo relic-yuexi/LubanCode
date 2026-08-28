@@ -116,6 +116,10 @@ std::map<std::string, int> EstimateTopoOrder(const WorkflowDefinition& def) {
             add_edge(node.id, node.loop_body.front());
             for (std::size_t i = 1; i < node.loop_body.size(); ++i) {
                 add_edge(node.loop_body[i - 1], node.loop_body[i]);
+                const auto previous = def.node_map.find(node.loop_body[i - 1]);
+                if (previous != def.node_map.end() && previous->second.kind == NodeKind::Parallel) {
+                    for (const auto& branch : previous->second.branches) add_edge(branch, node.loop_body[i]);
+                }
             }
         }
         for (const auto& c : node.conditions) add_edge(node.id, c.to);
@@ -312,9 +316,9 @@ ValidationResult ValidateDefinition(const WorkflowDefinition& def,
                         add("unknown_loop_body", base + ".body", "loop body 节点不存在: " + body_id);
                         continue;
                     }
-                    if (!IsExecutableBodyKind(body->second.kind)) {
+                    if (!IsExecutableBodyKind(body->second.kind) && body->second.kind != NodeKind::Parallel) {
                         add("unsupported_loop_body", base + ".body",
-                            "loop body 暂只收可执行节点,不收控制节点: " + body_id);
+                            "loop body 只收可执行节点与 parallel,不收其余控制节点: " + body_id);
                     }
                     if (body->second.has_side_effects && body->second.idempotency_key.empty()) {
                         add("unsafe_loop_side_effect", node_path(body_id),
@@ -431,6 +435,10 @@ ValidationResult ValidateDefinition(const WorkflowDefinition& def,
             link(node.id, node.loop_body.front());
             for (std::size_t i = 1; i < node.loop_body.size(); ++i) {
                 link(node.loop_body[i - 1], node.loop_body[i]);
+                const auto previous = def.node_map.find(node.loop_body[i - 1]);
+                if (previous != def.node_map.end() && previous->second.kind == NodeKind::Parallel) {
+                    for (const auto& branch : previous->second.branches) link(branch, node.loop_body[i]);
+                }
             }
         }
         for (const auto& c : node.conditions) link(node.id, c.to);

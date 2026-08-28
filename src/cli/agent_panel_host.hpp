@@ -12,17 +12,29 @@
 
 #pragma once
 
+#include <optional>
+#include <vector>
+
 #include "cli/console_input.hpp"  // AgentPanelProvider/AgentPanelActions(接线类型)
 
 namespace lubancode::cli {
+
+// 查看态的详情来源。返回 nullopt 表示“不认这枚 task_id”，宿主继续问
+// 后一层；有值(哪怕空行组)便表示已经接管。
+using AgentPanelTranscriptProvider =
+    std::function<std::optional<std::vector<std::string>>(int task_id, int width, bool expanded)>;
 
 class AgentPanelHost {
 public:
     void SetProvider(AgentPanelProvider provider) { provider_ = std::move(provider); }
     void SetActions(AgentPanelActions actions) { actions_ = std::move(actions); }
+    void SetTranscriptProvider(AgentPanelTranscriptProvider provider) {
+        transcript_provider_ = std::move(provider);
+    }
 
     const AgentPanelProvider& provider() const { return provider_; }
     const AgentPanelActions& actions() const { return actions_; }
+    const AgentPanelTranscriptProvider& transcript_provider() const { return transcript_provider_; }
 
     // 会话收场(/clear、退出、切 worktree):provider/actions 双清。
     void Reset();
@@ -30,6 +42,7 @@ public:
 private:
     AgentPanelProvider provider_;
     AgentPanelActions actions_;
+    AgentPanelTranscriptProvider transcript_provider_;
 };
 
 // 进程级面板接线实例。

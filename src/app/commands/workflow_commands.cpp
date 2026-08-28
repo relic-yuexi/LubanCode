@@ -2,6 +2,7 @@
 
 #include "app/commands/workflow_commands.hpp"
 #include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
+#include "app/model_router.hpp"
 #include "app/turn_runner.hpp"                  // PromptAskUser(终端交互宿主)
 #include "tools/path_utils.hpp"                // Utf8ToPath(catalog 锚点拼路径)
 #include "tools/skill_loader.hpp"
@@ -21,6 +22,7 @@ using lubancode::cli::TermErr;
 #include <map>
 #include <memory>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <vector>
 
@@ -132,7 +134,7 @@ public:
         lubancode::cli::BeginStreamFooter(theme_, footer_enabled_);
         if (footer_enabled_) {
             lubancode::cli::BeginTurnActivity(
-                lubancode::cli::tr("spinner.thinking"),
+                "流程候旨",
                 std::chrono::duration_cast<std::chrono::milliseconds>(
                     std::chrono::system_clock::now().time_since_epoch())
                     .count());
@@ -142,6 +144,17 @@ public:
         if (interactive_) {
             listener_ = std::make_unique<lubancode::cli::TurnInputListener>(cancel_, theme_);
         }
+    }
+
+    void BeginStage(const std::string& label) {
+        if (!footer_enabled_ || !heartbeat_) return;
+        started_at_ = std::chrono::steady_clock::now();
+        heartbeat_->ResetElapsed(started_at_);
+        lubancode::cli::BeginTurnActivity(
+            label.empty() ? std::string("流程办理中") : label,
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::system_clock::now().time_since_epoch())
+                .count());
     }
 
     ~WorkflowTerminalRunScope() {
@@ -172,6 +185,10 @@ private:
 // 任务台，便用这本小账把节点事件投影成现成的 Agent panel 条目。
 class WorkflowAgentPanelSink final : public lubancode::runtime::EventSink {
 public:
+    explicit WorkflowAgentPanelSink(const lubancode::cli::Theme& theme,
+                                    std::function<void(const std::string&)> on_stage_started = {})
+        : theme_(theme), on_stage_started_(std::move(on_stage_started)) {}
+
     void Emit(const lubancode::runtime::ServerEvent& event) override {
         if (!event.payload.is_object()) return;
         const std::string type = event.payload.value("type", std::string());
@@ -214,6 +231,136 @@ public:
         return FindByTaskId(task_id) != nullptr;
     }
 
+    std::optional<std::vector<std::string>> TranscriptLines(int task_id, int width, bool expanded) const {
+        TrackedNode node;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const TrackedNode* found = FindByTaskId(task_id);
+            if (found == nullptr) return std::nullopt;
+            node = *found;
+        }
+
+        std::vector<std::string> lines;
+        lines.push_back(lubancode::cli::TruncateUtf8ToDisplayWidth(
+            "── " + node.entry.name + " · " + node.entry.title + " ──", std::max(0, width - 1)));
+        const auto end = node.entry.running ? std::chrono::steady_clock::now() : node.ended_at;
+        const double seconds = std::chrono::duration<double>(end - node.started_at).count();
+        std::string state = node.phase;
+        if (node.tool_calls > 0) state += " · " + std::to_string(node.tool_calls) + " 次工具";
+        state += node.tokens > 0 ? " · " + lubancode::cli::FormatTokenCount(node.tokens) + " tokens"
+                                : " · tokens 未报告";
+        state += " · " + lubancode::cli::FormatSeconds((std::max)(0.0, seconds));
+        lines.push_back("  " + theme_.stats + state + theme_.reset);
+
+        int next_item_id = 1;
+        for (const DetailItem& detail : node.details) {
+            switch (detail.kind) {
+                case DetailKind::User:
+                    AppendMarkdown(lines, theme_.confirm + "> 用户交办" + theme_.reset, detail.text, width);
+                    break;
+                case DetailKind::Steering:
+                    AppendMarkdown(lines, theme_.confirm + "> 用户补充（已送达）" + theme_.reset,
+                                   detail.text, width);
+                    break;
+                case DetailKind::Text:
+                    AppendMarkdown(lines, theme_.banner + "● Agent" + theme_.reset, detail.text, width);
+                    break;
+                case DetailKind::Thinking: {
+                    const auto item = lubancode::cli::MakeAgentTaskThinkingItem(
+                        next_item_id++, detail.text, !detail.completed);
+                    AppendRendered(lines, lubancode::cli::FormatTranscriptItem(
+                                              item, theme_, width, expanded && !detail.completed));
+                    break;
+                }
+                case DetailKind::Tool: {
+                    const auto item = lubancode::cli::MakeAgentTaskToolItem(
+                        next_item_id++, detail.tool_name, detail.input_json, detail.completed,
+                        detail.is_error, detail.result);
+                    AppendRendered(lines,
+                                   lubancode::cli::FormatTranscriptItem(item, theme_, width, false));
+                    break;
+                }
+                case DetailKind::Notice:
+                    lines.push_back("  " + theme_.stats + detail.text + theme_.reset);
+                    break;
+            }
+        }
+
+        const auto pending = lubancode::cli::SessionSteeringQueue().Snapshot();
+        std::vector<std::string> waiting;
+        for (const auto& message : pending) {
+            if (message.target == lubancode::cli::MessageTarget::Agent(task_id) &&
+                message.state == lubancode::cli::QueueItemState::Queued) {
+                waiting.push_back(message.text);
+            }
+        }
+        if (!waiting.empty()) {
+            lines.push_back(theme_.stats + "待下一轮送达 " + std::to_string(waiting.size()) + " 条" + theme_.reset);
+            for (const auto& text : waiting) {
+                lines.push_back("  * " + lubancode::cli::TruncateUtf8ToDisplayWidth(text, std::max(0, width - 5)));
+            }
+        }
+        return lines;
+    }
+
+    std::optional<lubancode::workflow::NodeSteeringBatch> TakeSteering(
+        const lubancode::workflow::NodeExecRequest& request) {
+        int task_id = 0;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            const auto run = node_runs_.find(request.node_run_id);
+            if (run == node_runs_.end()) return std::nullopt;
+            const auto found = nodes_.find(run->second);
+            if (found == nodes_.end()) return std::nullopt;
+            task_id = found->second.entry.task_id;
+        }
+        auto queued = lubancode::cli::SessionSteeringQueue().TakeDeliverable(
+            lubancode::cli::MessageTarget::Agent(task_id));
+        if (queued.empty()) return std::nullopt;
+
+        std::ostringstream input;
+        input << "[用户从 Agent 面板补充]\n";
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            TrackedNode* node = FindByTaskId(task_id);
+            for (std::size_t i = 0; i < queued.size(); ++i) {
+                if (i > 0) input << '\n';
+                input << queued[i].text;
+                if (node != nullptr) node->details.push_back(DetailItem{DetailKind::Steering, queued[i].text});
+            }
+            if (node != nullptr) {
+                node->phase = "收到补充 · 继续办理";
+                ++node->entry.content_revision;
+            }
+        }
+
+        auto restore_items = std::make_shared<std::vector<lubancode::cli::QueuedMessage>>(std::move(queued));
+        lubancode::workflow::NodeSteeringBatch batch;
+        batch.input = input.str();
+        batch.restore = [restore_items]() {
+            for (auto it = restore_items->rbegin(); it != restore_items->rend(); ++it) {
+                lubancode::cli::SessionSteeringQueue().ReturnToFront(std::move(*it));
+            }
+            restore_items->clear();
+        };
+        return batch;
+    }
+
+    void ClosePendingMessages() const {
+        std::set<int> task_ids;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            for (const auto& [_, node] : nodes_) task_ids.insert(node.entry.task_id);
+        }
+        for (const auto& message : lubancode::cli::SessionSteeringQueue().Snapshot()) {
+            if (message.target.kind == lubancode::cli::MessageTarget::Kind::Subagent &&
+                task_ids.contains(message.target.task_id)) {
+                lubancode::cli::SessionSteeringQueue().MarkTargetGone(
+                    message.id, "workflow Agent 已收场，消息没有送出");
+            }
+        }
+    }
+
     bool CancelTask(int task_id, std::atomic<bool>& cancel) {
         std::lock_guard<std::mutex> lock(mutex_);
         TrackedNode* node = FindByTaskId(task_id);
@@ -247,6 +394,18 @@ public:
     }
 
 private:
+    enum class DetailKind { User, Steering, Text, Thinking, Tool, Notice };
+
+    struct DetailItem {
+        DetailKind kind = DetailKind::Notice;
+        std::string text;
+        std::string tool_name;
+        std::string input_json;
+        std::string result;
+        bool completed = false;
+        bool is_error = false;
+    };
+
     struct TrackedNode {
         lubancode::cli::AgentPanelEntry entry;
         std::string phase = "等待模型";
@@ -255,7 +414,21 @@ private:
         std::int64_t tokens = 0;
         int tool_calls = 0;
         bool hidden = false;
+        std::vector<DetailItem> details;
+        std::map<std::string, std::size_t> item_indexes;
     };
+
+    static void AppendRendered(std::vector<std::string>& lines, const std::string& rendered) {
+        std::istringstream in(rendered);
+        std::string line;
+        while (std::getline(in, line)) lines.push_back(std::move(line));
+    }
+
+    void AppendMarkdown(std::vector<std::string>& lines, const std::string& header,
+                        const std::string& text, int width) const {
+        lines.push_back(header);
+        for (const auto& line : lubancode::cli::RenderMarkdown(text, theme_, width)) lines.push_back(line);
+    }
 
     static int NextTaskId() {
         static std::atomic<int> next{1000000000};
@@ -278,6 +451,9 @@ private:
     }
 
     void ConsumeNodeEvent(const std::string& type, const nlohmann::json& payload) {
+        if (type == lubancode::workflow::kEventNodeStarted && on_stage_started_) {
+            on_stage_started_(payload.value("label", payload.value("node_id", std::string())));
+        }
         const std::string kind = payload.value("kind", std::string());
         if (kind != "agent" && kind != "llm") return;
         const std::string node_id = payload.value("node_id", std::string());
@@ -300,6 +476,19 @@ private:
             node.ended_at = node.started_at;
             node.tokens = 0;
             node.tool_calls = 0;
+            const int attempt = payload.value("attempt", 1);
+            if (attempt <= 1) {
+                node.details.clear();
+                node.item_indexes.clear();
+            } else {
+                node.details.push_back(
+                    DetailItem{DetailKind::Notice, "第 " + std::to_string(attempt) + " 次办理"});
+            }
+            if (payload.contains("input")) {
+                const auto& input = payload["input"];
+                node.details.push_back(DetailItem{
+                    DetailKind::User, input.is_string() ? input.get<std::string>() : input.dump(2)});
+            }
             ++node.entry.content_revision;
             const std::string node_run_id = payload.value("node_run_id", std::string());
             if (!node_run_id.empty()) node_runs_[node_run_id] = node_id;
@@ -311,6 +500,7 @@ private:
         TrackedNode& node = found->second;
         if (type == lubancode::workflow::kEventNodeRetrying) {
             node.phase = "退回重办 · 等待下一试";
+            node.details.push_back(DetailItem{DetailKind::Notice, node.phase});
             ++node.entry.content_revision;
             return;
         }
@@ -325,6 +515,7 @@ private:
         else if (outcome == "empty") node.phase = "已办结 · 无输出";
         else if (outcome == "cancelled") node.phase = "已取消";
         else node.phase = "出错 " + payload.value("code", std::string());
+        node.details.push_back(DetailItem{DetailKind::Notice, node.phase});
         ++node.entry.content_revision;
     }
 
@@ -338,11 +529,31 @@ private:
         if (found == nodes_.end()) return;
         TrackedNode& node = found->second;
 
+        auto find_item = [&node, &event]() -> DetailItem* {
+            const auto item = node.item_indexes.find(event.item_id);
+            if (item == node.item_indexes.end() || item->second >= node.details.size()) return nullptr;
+            return &node.details[item->second];
+        };
+
         switch (event.kind) {
             case lubancode::runtime::ServerEventKind::ModelStepStarted:
                 node.phase = "思考中";
                 break;
             case lubancode::runtime::ServerEventKind::ItemStarted:
+                if (!event.item_id.empty() && !node.item_indexes.contains(event.item_id)) {
+                    DetailItem detail;
+                    if (event.item_kind == lubancode::runtime::ItemKind::Tool) {
+                        detail.kind = DetailKind::Tool;
+                        detail.tool_name = event.payload.value("tool_name", std::string("tool"));
+                        if (event.payload.contains("input")) detail.input_json = event.payload["input"].dump();
+                    } else if (event.item_kind == lubancode::runtime::ItemKind::Thinking) {
+                        detail.kind = DetailKind::Thinking;
+                    } else {
+                        detail.kind = DetailKind::Text;
+                    }
+                    node.item_indexes[event.item_id] = node.details.size();
+                    node.details.push_back(std::move(detail));
+                }
                 if (event.item_kind == lubancode::runtime::ItemKind::Tool) {
                     ++node.tool_calls;
                     node.phase = "调用工具 " + event.payload.value("tool_name", std::string());
@@ -353,8 +564,17 @@ private:
                 }
                 break;
             case lubancode::runtime::ServerEventKind::ItemDelta:
+                if (DetailItem* detail = find_item(); detail != nullptr) detail->text += event.text;
                 if (event.item_kind == lubancode::runtime::ItemKind::Thinking) node.phase = "思考中";
                 if (event.item_kind == lubancode::runtime::ItemKind::Text) node.phase = "整理答复";
+                break;
+            case lubancode::runtime::ServerEventKind::ItemCompleted:
+                if (DetailItem* detail = find_item(); detail != nullptr) {
+                    detail->completed = true;
+                    detail->is_error = event.outcome.has_value() &&
+                                       *event.outcome != lubancode::runtime::Outcome::Succeeded;
+                    detail->result = event.payload.value("result", std::string());
+                }
                 break;
             case lubancode::runtime::ServerEventKind::UsageUpdated:
                 node.tokens += event.payload.value("input_tokens", std::int64_t{0}) +
@@ -368,6 +588,7 @@ private:
                 break;
             case lubancode::runtime::ServerEventKind::Error:
                 node.phase = "出错";
+                node.details.push_back(DetailItem{DetailKind::Notice, node.phase});
                 break;
             default:
                 break;
@@ -378,6 +599,8 @@ private:
     mutable std::mutex mutex_;
     mutable std::map<std::string, TrackedNode> nodes_;
     std::map<std::string, std::string> node_runs_;
+    const lubancode::cli::Theme& theme_;
+    std::function<void(const std::string&)> on_stage_started_;
 };
 
 // workflow 跑着时叠一层 provider/actions，不把会话里本有的子 Agent 面板拆掉。
@@ -389,6 +612,7 @@ public:
         auto& host = lubancode::cli::SessionAgentPanelHost();
         previous_provider_ = host.provider();
         previous_actions_ = host.actions();
+        previous_transcript_provider_ = host.transcript_provider();
         host.SetProvider([this]() {
             std::vector<lubancode::cli::AgentPanelEntry> entries =
                 previous_provider_ ? previous_provider_() : std::vector<lubancode::cli::AgentPanelEntry>{};
@@ -412,12 +636,20 @@ public:
             return count;
         };
         host.SetActions(std::move(actions));
+        host.SetTranscriptProvider([this](int task_id, int width, bool expanded) {
+            auto lines = tracker_.TranscriptLines(task_id, width, expanded);
+            if (lines.has_value()) return lines;
+            return previous_transcript_provider_
+                       ? previous_transcript_provider_(task_id, width, expanded)
+                       : std::optional<std::vector<std::string>>{};
+        });
     }
 
     ~WorkflowPanelOverlay() {
         auto& host = lubancode::cli::SessionAgentPanelHost();
         host.SetProvider(std::move(previous_provider_));
         host.SetActions(std::move(previous_actions_));
+        host.SetTranscriptProvider(std::move(previous_transcript_provider_));
     }
 
     WorkflowPanelOverlay(const WorkflowPanelOverlay&) = delete;
@@ -428,6 +660,7 @@ private:
     std::atomic<bool>& cancel_;
     lubancode::cli::AgentPanelProvider previous_provider_;
     lubancode::cli::AgentPanelActions previous_actions_;
+    lubancode::cli::AgentPanelTranscriptProvider previous_transcript_provider_;
 };
 
 std::vector<std::string> BuiltinSlashWords() {
@@ -1123,12 +1356,19 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
         agent_options.event_sink = exec_ctx.event_sink;
         agent_options.thread_id = exec_ctx.thread_id;
         agent_options.ids = exec_ctx.id_authority;
+        agent_options.steering = exec_ctx.steering;
         executors[lubancode::workflow::NodeKind::Agent] =
             std::make_shared<lubancode::workflow::AgentExecutor>(std::move(agent_options));
         lubancode::workflow::LlmExecutor::Options llm_options;
         llm_options.backend = exec_ctx.backend;
         llm_options.model = exec_ctx.model;
+        llm_options.reasoning_effort = exec_ctx.effort;
+        llm_options.resolve_binding = exec_ctx.resolve_llm_binding;
         llm_options.prompt_loader = workflow_prompt_loader;
+        llm_options.event_sink = exec_ctx.event_sink;
+        llm_options.thread_id = exec_ctx.thread_id;
+        llm_options.ids = exec_ctx.id_authority;
+        llm_options.steering = exec_ctx.steering;
         llm_executor = std::make_shared<lubancode::workflow::LlmExecutor>(llm_options);
         executors[lubancode::workflow::NodeKind::Llm] = llm_executor;
     }
@@ -1243,6 +1483,30 @@ lubancode::app::WorkflowExecutorContext BuildWorkflowExecutorContext(SlashDispat
     wf_exec.id_authority = &ctx.session_runtime->ids();
     wf_exec.interaction_broker = std::make_shared<TerminalWorkflowInteractionBroker>(*ctx.theme);
     wf_exec.skills = ctx.skills;
+    wf_exec.resolve_llm_binding = [router = ctx.model_router](
+                                      const lubancode::workflow::WorkflowNode& node)
+        -> std::optional<lubancode::workflow::LlmExecutor::Binding> {
+        if (router == nullptr || node.model_role.empty() || node.model_role == "normal") {
+            return std::nullopt;
+        }
+        lubancode::agent::TaskKind kind;
+        if (node.model_role == "lao" || node.model_role == "plan") {
+            kind = lubancode::agent::TaskKind::Plan;
+        } else if (node.model_role == "cheap") {
+            kind = lubancode::agent::TaskKind::Classification;
+        } else {
+            return std::nullopt;
+        }
+        auto routed = router->RouteDetached(kind);
+        lubancode::workflow::LlmExecutor::Binding binding;
+        binding.model = routed.route.model;
+        binding.reasoning_effort = routed.route.effort;
+        if (routed.backend) {
+            binding.owned_backend = std::shared_ptr<lubancode::api::Backend>(std::move(routed.backend));
+            binding.backend = binding.owned_backend.get();
+        }
+        return binding;
+    };
     return wf_exec;
 }
 
@@ -1251,9 +1515,10 @@ std::string RunWorkflowFromTerminal(SlashDispatchContext& ctx,
     const std::string& workflow_id, const std::string& raw_args) {
     lubancode::app::WorkflowExecutorContext wf_exec = BuildWorkflowExecutorContext(ctx);
     std::atomic<bool> workflow_cancel{false};
-    WorkflowAgentPanelSink workflow_panel;
-    WorkflowPanelOverlay panel_overlay(workflow_panel, workflow_cancel);
     WorkflowTerminalRunScope terminal_run(*ctx.theme, ctx.spinner_enabled, workflow_cancel);
+    WorkflowAgentPanelSink workflow_panel(
+        *ctx.theme, [&terminal_run](const std::string& label) { terminal_run.BeginStage(label); });
+    WorkflowPanelOverlay panel_overlay(workflow_panel, workflow_cancel);
     lubancode::runtime::FanoutEventSink workflow_events;
     workflow_events.Add(&workflow_panel);
     if (ctx.session_events != nullptr) workflow_events.Add(ctx.session_events);
@@ -1266,10 +1531,15 @@ std::string RunWorkflowFromTerminal(SlashDispatchContext& ctx,
     // agent 子回合与 workflow 节点事件走同一扇分线器；面板账
     // 只取属于 workflow Agent 的那一份，全量事件仍原样进会话账。
     wf_exec.event_sink = &workflow_events;
-    return lubancode::app::RunWorkflowById(
+    wf_exec.steering = [&workflow_panel](const lubancode::workflow::NodeExecRequest& request) {
+        return workflow_panel.TakeSteering(request);
+    };
+    std::string rendered = lubancode::app::RunWorkflowById(
         run_ctx, workflow_id, raw_args,
         lubancode::app::BuildWorkflowExecutors(run_ctx, wf_exec, workflow_id),
         terminal_run.cancel_token());
+    workflow_panel.ClosePendingMessages();
+    return rendered;
 }
 
 }  // namespace

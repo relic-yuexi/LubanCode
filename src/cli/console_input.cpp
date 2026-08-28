@@ -3953,13 +3953,20 @@ bool TurnActivityActive() {
 StreamFooterHeartbeat::StreamFooterHeartbeat(bool enabled,
                                              std::chrono::steady_clock::time_point started_at,
                                              const std::atomic<bool>* cancel)
-    : started_at_(started_at), cancel_(cancel) {
+    : cancel_(cancel) {
+    ResetElapsed(started_at);
     if (enabled) {
         thread_ = std::thread([this] { ThreadMain(); });
     }
 }
 
 StreamFooterHeartbeat::~StreamFooterHeartbeat() { Stop(); }
+
+void StreamFooterHeartbeat::ResetElapsed(std::chrono::steady_clock::time_point started_at) {
+    started_at_ms_.store(
+        std::chrono::duration_cast<std::chrono::milliseconds>(started_at.time_since_epoch()).count(),
+        std::memory_order_release);
+}
 
 void StreamFooterHeartbeat::Stop() {
     stop_.store(true, std::memory_order_release);
@@ -3979,9 +3986,11 @@ void StreamFooterHeartbeat::ThreadMain() {
             // 活动态的公开口各自拿 stdout 锁；非活动态才在这里拿锁，调用
             // “Locked” 重画口。两者倒过来套会在 MSVC 下撞递归上锁异常。
             if (TurnActivityActive()) {
-                const auto elapsed = std::chrono::duration_cast<std::chrono::seconds>(
-                                         std::chrono::steady_clock::now() - started_at_)
-                                         .count();
+                const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                        std::chrono::steady_clock::now().time_since_epoch())
+                                        .count();
+                const auto elapsed = (std::max<std::int64_t>)(
+                    0, now_ms - started_at_ms_.load(std::memory_order_acquire)) / 1000;
                 if (cancel_ != nullptr && cancel_->load(std::memory_order_acquire) &&
                     !stopping_reported) {
                     SetTurnActivityInterruptRequested();

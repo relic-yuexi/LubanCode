@@ -7,6 +7,7 @@ namespace lubancode::cli {
 void AgentPanelHost::Reset() {
     provider_ = AgentPanelProvider{};
     actions_ = AgentPanelActions{};
+    transcript_provider_ = AgentPanelTranscriptProvider{};
 }
 
 AgentPanelHost& SessionAgentPanelHost() {

@@ -288,7 +288,7 @@ edges:
     CHECK(has_issue(lubancode::workflow::ValidateDefinition(*cycle, std::nullopt), "cycle_detected"));
 }
 
-TEST_CASE("示例 workflow:三省六部动态封驳可解析、可校验") {
+TEST_CASE("示例 workflow:三省六部有御批、尚书分牒与密封差遣") {
     const fs::path example = fs::path(__FILE__).parent_path() / "../../../examples/workflows/sansheng-liubu/workflow.yaml";
     const auto parsed = lubancode::workflow::LoadWorkflowDefinition(example.lexically_normal());
     if (!parsed.has_value()) {
@@ -299,7 +299,30 @@ TEST_CASE("示例 workflow:三省六部动态封驳可解析、可校验") {
     CHECK(parsed->inputs["properties"]["requirement"]["description"] == "皇上，您有什么需求？");
     REQUIRE(parsed->node_map.contains("fengbo"));
     REQUIRE_FALSE(parsed->node_map.at("fengbo").loop_body.empty());
-    CHECK(parsed->node_map.at("fengbo").loop_body.front() == "zhongshu");
+    CHECK(parsed->node_map.at("fengbo").loop_body.front() == "moulue");
+    REQUIRE(parsed->node_map.contains("shangshu"));
+    CHECK(parsed->node_map.at("shangshu").kind == lubancode::workflow::NodeKind::Llm);
+    CHECK(parsed->node_map.at("shangshu").input.size() == 1);
+    CHECK(parsed->node_map.at("shangshu").input.contains("edict"));
+
+    const auto check_sealed_dispatch = [&](const std::string& node_id,
+                                           const std::string& expected_ref) {
+        REQUIRE(parsed->node_map.contains(node_id));
+        const auto& input = parsed->node_map.at(node_id).input;
+        REQUIRE(input.is_object());
+        CHECK(input.size() == 1);
+        REQUIRE(input.contains("dispatch"));
+        CHECK(input["dispatch"] == expected_ref);
+    };
+    check_sealed_dispatch("gongfang", "${nodes.shangshu.output.gongfang}");
+    check_sealed_dispatch("xingfang", "${nodes.shangshu.output.xingfang}");
+    check_sealed_dispatch("bingfang", "${nodes.shangshu.output.bingfang}");
+
+    const auto shangshu_edge = std::ranges::find_if(parsed->edges, [](const auto& edge) {
+        return edge.from == "fengbo" && edge.outcome == "success";
+    });
+    REQUIRE(shangshu_edge != parsed->edges.end());
+    CHECK(shangshu_edge->to == "shangshu");
     const auto validation = lubancode::workflow::ValidateDefinition(*parsed, std::nullopt);
     for (const auto& issue : validation.issues) MESSAGE(issue.code, " ", issue.path, ": ", issue.message);
     CHECK(validation.ok());

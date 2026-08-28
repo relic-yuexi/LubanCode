@@ -33,16 +33,24 @@ cp -r examples/workflows/sansheng-liubu .lubancode/workflows/
 
 ## sansheng-liubu — 三省六部
 
-借三省六部的骨架跑一件事:分权起草、动态封驳、先改后验。
+借三省六部的骨架跑一件事:三案并陈、合案成书、独立拒审、批准后执行。
 
 ```
 皇帝(requirement)
   ↓
-往复封驳 fengbo(loop,默认最多 12 轮,用户可调,硬帽 20)
-  ├─ 中书 zhongshu(llm):起草或据上一轮理由修订
-  ├─ 门下 menxia(llm):审核,approved=true 当场停
-  ├─ success → 工房 gongfang(agent·coder)
-  │               ↓ success
+往复澄清 fengbo(loop,默认最多 12 轮,用户可调,硬帽 20)
+  ├─ Lao 谋议 moulue(parallel):最小改动/结构治理/风险优先三案并陈
+  ├─ 中书 zhongshu(llm·lao):择案合并，写成方案书
+  ├─ 门下 menxia(llm):只看方案书和拒绝标准，独立输出 approve/reject
+  ├─ 御前 chengzhi(ask_user):展示方案书与判词，批准、打回或委托中书定案
+  ├─ 未批准 → 带批语、驳词回入口，再拟三案
+  ├─ 皇帝与门下都放行 → 尚书省 shangshu(llm·分牒)
+  │                         ├─ 工房只收实现牒
+  │                         ├─ 刑房只收测试牒
+  │                         └─ 兵房只收构建牒
+  │               ↓
+  │             工房 gongfang(agent·coder)
+  │               ↓
   │             刑兵并验 liubu(parallel,all)
   │               ├─ 刑房 xingfang(agent·tester)
   │               └─ 兵房 bingfang(agent·builder)
@@ -53,15 +61,21 @@ cp -r examples/workflows/sansheng-liubu .lubancode/workflows/
 
 ### 设计注记
 
-**尚书省去哪了?** 没设节点。workflow 图本身就是尚书省——确定性代码分发,不费模型。这是这套引擎的本分:编排归图,判断归模型。
+**尚书省做什么?** 御批之前不露面。皇帝与门下都放行后，它接整份方案书，拆成工、刑、兵三封密封差遣。各房 input 只含自己的 `dispatch`，不含整份诏书，也不含别房任务。workflow 图仍掌握次序与汇合；尚书只作语义分工，不改诏、不添需求。
 
 **封驳怎么循环?** 不画普通回边。`loop` 节点收住 body、停止条件与轮次帽。
 每轮产物写进 `history`,上一轮放在 `previous`;门下放行便走 `success`,撞软帽
 便走 `exhausted`。`review_limit` 默认 12；用户可用 `--review_limit=5` 放收。
 `hard_limit` 写死在定义里,运行参数越不过。
 
-终端的 workflow 执行器已经接上 `InteractionBroker`。这份示例仍让门下模型按
-结构化判词收口；要人工圣裁,可在 `exhausted` 后添 `approval` 或 `ask_user`。
+三只候选节点都写 `model_role: lao`。宿主按会话 ModelRouter 给它们各造独立
+backend，并行请求不会共抢一只 client。中书也走 Lao；门下不接候选案，只接成稿与
+拒绝标准，免得中书的推演过程污染复审。中书只列高层 `workstreams`；御批后，尚书才把它们展开成可执行差遣。
+
+`chengzhi` 把方案书、门下判词、待明确处一并摆给用户。用户批准，且门下也放行，
+才算过闸；用户写修改意见，整份批语回入口重拟。点“不知道，请中书定方案”后，
+委托标记会跨轮留账：中书按稳妥默认值修，门下继续真审；没审过便自动再修，
+不再换一批小问题反复烦人。`review_history` 留着每轮 approve/reject，能查拒绝率是否长期归零。
 
 **循环活在哪?** 禁环禁的是"图上回边",不是循环本身。三层载体:
 
@@ -70,11 +84,13 @@ cp -r examples/workflows/sansheng-liubu .lubancode/workflows/
 3. **map/foreach**:数据驱动。items 有几项便跑几项;它不拿上一轮判词决定何时停。
 4. **loop**:条件驱动。body 顺次跑,until 命中便停;软帽可取输入,硬帽必须写死。
 
-**门下省要换强模型。** 同模型自审自己,等于皇帝兼中书令。当前 llm 节点统一用会话模型,节点级 `model_role` 未接——升级路:装配层给 menxia 单独 backend。
+**门下不该吃中书上下文。** 两只节点各发独立请求。门下 input 只有原旨、方案书、
+轮次与拒绝标准；没有三份候选案，也没有中书思路。若要给门下另配模型，可在节点上
+另写 `model_role`；未写便走会话 normal。
 
 ### 改玩法
 
-- **加房**:在 `liubu.branches` 添一只 agent 节点,诏书 schema 的 `tasks` 同步加字段,中书/门下的 prompt 里补这房的差事规矩。
+- **加房**:在 `liubu.branches` 添一只 agent 节点；中书 `workstreams`、尚书输出 schema 与 prompt 同步加字段，门下也补这房的职责拒绝标准。
 - **换活**:三房按活分(营造/按验/演武),不按官名分。差事变了改 prompts,图可以不动。
 - **调帽**:`limits` 里的 `timeout`/`tokens`/`tool_calls` 按差事轻重放收;刑兵二房并行吃 `max_concurrency`。
 
