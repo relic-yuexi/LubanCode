@@ -1,0 +1,784 @@
+# 统一 Package 封装与组件挂载系统设计
+
+- 状态：待实现
+- 日期：2026-08-28
+- 前置：`todos/自定义Agent与PromptProfile设计.todo`
+- 范围：本地 Package 目录、清单、发现、校验、命名空间、信任、挂载、启停、诊断与示例
+- 不在本单：远端市场、付费分发、签名服务、自动下载依赖、云端注册表
+
+## 一、先把名字分开
+
+LubanCode 需要一层 Package。它只做五件事：
+
+```text
+发现 -> 校验 -> 记账 -> 挂载 -> 卸载
+```
+
+Package 不跑模型，也不直接出工具。它是一只箱子。箱里可装：
+
+- Agent Definition。
+- Prompt Profile。
+- Skill。
+- Workflow。
+- Plugin。
+- MCP server。
+- 各组件所需脚本、模板、资料和静态资源。
+
+Plugin 仍是工具运行时。它可能是 native、Lua 或 process。MCP 仍是协议服务。二者会跑代码，Package 不会。
+
+关系如下：
+
+```text
+Package
+├── agents/      谁来做，引用 Prompt、Skill、工具与模型
+├── prompts/     Agent 使用的 Prompt Profile 覆盖
+├── skills/      怎样做，可带脚本、模板、资料
+├── workflows/   何时做，怎样编排
+├── plugins/     本地工具实现
+└── mcp/         MCP 服务与工具
+```
+
+`solutions` 仍可写教程、配方和组合示例。它不进 Package runtime，也不拿来做依赖解析。
+
+## 二、为什么叫 Package，不叫 Plugin
+
+Claude Code 把一整包扩展都叫 Plugin。里面可放 Agent、Skill、MCP、Hook 等组件。OpenAI 也把 Plugin 当安装与分发单位，里面装 Skill 与 MCP。
+
+这条路可借。名字却不能硬抄。
+
+LubanCode 早已有 Plugin 运行时，代码里有 native ABI、Lua、process manifest、工具挂载和项目插件信任账。若再把外层安装包也叫 Plugin，两层同名，命令、日志、错误、文档全要打架。
+
+故此定名：
+
+```text
+外层：Package
+内层：Agent / Prompt / Skill / Workflow / Plugin / MCP
+```
+
+可借之处：
+
+- 约定目录，放进去便能发现。
+- 根清单只管身份、版本与兼容。
+- 组件仍用各自格式，各自校验。
+- 整包带命名空间，免得 Skill、Agent 撞名。
+- 安装版本用独立目录，会话钉住旧快照。
+- 包根以外的文件不可引用。
+
+不可照搬之处：
+
+- LubanCode 的 Workflow 与 Prompt Profile 是一等组件，也要进包。
+- LubanCode Plugin 已是执行组件，不能再充当外壳。
+- Package 不得借清单越过现有工具权限、插件信任与 MCP 安全门。
+
+资料：
+
+- Claude Code Plugin reference：<https://code.claude.com/docs/en/plugins-reference>
+- Claude Code Plugin guide：<https://code.claude.com/docs/en/plugins>
+- OpenAI Plugin architecture：<https://developers.openai.com/plugins/concepts/plugins>
+
+## 三、眼下各走各路
+
+现有加载规矩并不统一：
+
+| 组件 | 眼下入口 | 眼下特点 |
+|---|---|---|
+| Skill | 官方目录、`~/.agents/skills`、`~/.lubancode/skills`、项目同名目录 | 项目遮用户，用户遮官方；目录按名字合并 |
+| Workflow | `~/.lubancode/workflows`、项目 `.lubancode/workflows` | 项目遮用户；自带 Catalog 与冲突诊断 |
+| Plugin | `~/.lubancode/plugins`、项目 `.lubancode/plugins` | 多种 runtime；项目 process plugin 有内容指纹信任门 |
+| MCP | 用户或项目 `config.json` 的 `mcpServers` | 项目整段遮用户整段；启动时直接起服务 |
+| Agent | 待上一张 TODO 实现 | 计划有 builtin、user、project 三层 Catalog |
+| Prompt Profile | 待上一张 TODO 实现 | 计划沿用现有 `src/prompts` 稀疏覆盖 |
+
+Package 不能叫各加载器再多扫一条硬编码目录。那样只是把散乱翻一倍。
+
+正路是：Package 先产出一张 Mount Plan，再把组件根目录交给原有解析器和 Catalog。
+
+```text
+PackageCatalog
+    -> PackageMountPlan
+        -> AgentCatalog source roots
+        -> PromptProfileResolver roots
+        -> Skill loader source roots
+        -> WorkflowCatalog source roots
+        -> Plugin runtime source roots
+        -> MCP config sources
+```
+
+## 四、标准目录
+
+一只完整 Package：
+
+```text
+browser-suite/
+├── package.yaml
+├── README.md
+├── LICENSE
+├── agents/
+│   ├── browser-tester.yaml
+│   └── accessibility-reviewer.yaml
+├── prompts/
+│   └── profiles/
+│       ├── browser-tester/
+│       │   ├── core/
+│       │   │   └── 10-identity.md
+│       │   └── features/
+│       │       └── web.md
+│       └── accessibility-reviewer/
+│           └── core/
+│               └── 10-identity.md
+├── skills/
+│   ├── browser-testing/
+│   │   ├── SKILL.md
+│   │   ├── scripts/
+│   │   └── references/
+│   └── accessibility-audit/
+│       └── SKILL.md
+├── workflows/
+│   └── smoke-test/
+│       ├── workflow.yaml
+│       └── prompts/
+├── plugins/
+│   └── dom-analyzer/
+│       ├── plugin.json
+│       └── runner.py
+├── mcp/
+│   └── browser/
+│       ├── mcp.yaml
+│       ├── server.js
+│       └── package.json
+├── assets/
+└── docs/
+```
+
+规矩要硬：
+
+- `package.yaml` 必须在包根。
+- 六类组件目录必须在包根，不递归猜目录名。
+- `assets/`、`docs/` 不自动加载，只供组件按相对路径读取。
+- 一件 Skill 占一层目录，入口仍是 `SKILL.md`。
+- 一件 Workflow 占一层目录，入口仍是 `workflow.yaml`。
+- 一件 packaged Plugin 必须有 `plugin.json`。裸 DLL、裸 Lua 只留给旧目录兼容。
+- 一件 MCP server 占一层目录，入口是 `mcp.yaml`。
+- 一份 Agent 是 `agents/*.yaml`，格式见前置 TODO。
+- Prompt Profile 沿用 `prompts/profiles/<profile>/...`。
+- 未识别的顶层目录可以保留，但 `doctor` 给提示；拼错 `skill/`、`workflow/` 这类近似名要明报。
+
+把目录摆对，Package 便能发现组件。无需再到 `package.yaml` 手抄一遍文件清单。
+
+## 五、package.yaml
+
+### 5.1 清单要薄
+
+最小清单：
+
+```yaml
+schema: 1
+id: moontide.browser-suite
+version: 0.1.0
+name: Browser Suite
+description: Browser inspection agents, skills, workflows, plugins, and MCP tools.
+```
+
+完整清单：
+
+```yaml
+schema: 1
+id: moontide.browser-suite
+version: 0.1.0
+name: Browser Suite
+description: Browser inspection agents, skills, workflows, plugins, and MCP tools.
+
+authors:
+  - name: Moontide
+    url: https://example.com
+
+license: Apache-2.0
+homepage: https://example.com/browser-suite
+repository: https://example.com/browser-suite.git
+
+compatibility:
+  lubancode: ">=0.27.0 <0.28.0"
+  platforms:
+    - windows
+    - linux
+    - macos
+```
+
+字段规矩：
+
+- `schema`：必填，首版只认 `1`。
+- `id`：必填，使用小写字母、数字、点与连字符。例：`moontide.browser-suite`。
+- `version`：必填，按 SemVer 解析，不拿普通字符串比较。
+- `name`、`description`：必填，供列表与审批页展示。
+- `authors`、`license`、`homepage`、`repository`：可省，只作说明与溯源。
+- `compatibility.lubancode`：可省；写了就严格检查。
+- `compatibility.platforms`：可省；写了就按当前平台检查。
+
+清单不写：
+
+- Agent、Skill、Workflow 等逐文件列表。
+- command、args、env、网络权限。
+- 工具 allowlist。
+- 密钥与 token。
+- 安装后的启停状态。
+
+这些账各有主人。Package manifest 不替组件 manifest 发号施令。
+
+### 5.2 自动盘点
+
+扫描后生成 `PackageInventory`，不写回源目录：
+
+```text
+package id/version/source/root/content hash
+agents[]
+prompt_profiles[]
+skills[]
+workflows[]
+plugins[]
+mcp_servers[]
+assets/docs file count
+code-bearing files
+diagnostics[]
+```
+
+盘点须稳定：先规范路径，再按 UTF-8 路径排序。不可拿文件系统枚举次序当 ID、覆盖次序或哈希次序。
+
+## 六、MCP 组件格式
+
+MCP 眼下只从 `config.json` 读 command、args、env。Package 里须有独立入口，免得改用户配置才能启包。
+
+建议 `mcp/<id>/mcp.yaml`：
+
+```yaml
+schema: 1
+id: browser
+description: Local Playwright browser server.
+transport: stdio
+
+runtime:
+  command: node
+  args:
+    - "${package_dir}/mcp/browser/server.js"
+  env:
+    BROWSER_TOKEN: "${env:BROWSER_TOKEN}"
+  timeout_ms: 30000
+
+permissions:
+  network: false
+```
+
+首版只收本地 `stdio`。远端 HTTP、OAuth 与共享连接另开单。
+
+安全规矩：
+
+- `command` 与 `args` 走 exec form，不经 Shell 拼串。
+- `${package_dir}` 只在结构化路径字段展开；规范化后不得逃出包根。
+- `${package_data}` 指向持久数据目录，更新 Package 不丢数据。
+- `${project_dir}` 只在明确允许的字段展开。
+- `${env:NAME}` 只读宿主已有环境变量。清单不得写真实密钥。
+- `permissions.network` 首版若尚无执法能力，只可用于 doctor 与审批展示，不得谎称已隔离。
+- MCP 的最终工具名必须带 Package 命名空间。
+
+解析后仍落为现有 `McpServerConfig` 或其后继类型。起服、握手、`tools/list`、注册仍走现有 MCP runtime。
+
+## 七、命名空间
+
+Package 一多，重名是常事。不可再靠“后扫到的盖前面”。
+
+每件 packaged component 都有两枚名字：
+
+```text
+local id:     browser-tester
+canonical id: moontide.browser-suite:browser-tester
+```
+
+适用于：
+
+- Agent：`moontide.browser-suite:browser-tester`
+- Skill：`moontide.browser-suite:browser-testing`
+- Workflow：`moontide.browser-suite:smoke-test`
+- Prompt Profile：`moontide.browser-suite:browser-tester`
+- Plugin：Package namespace + plugin local id
+- MCP：Package namespace + server local id
+
+包内引用可写短名：
+
+```yaml
+skills:
+  preload:
+    - browser-testing
+mcp_servers:
+  - browser
+prompt:
+  profile: browser-tester
+```
+
+Resolver 先在本包里找，再找显式 canonical id。包外引用必须写全名。
+
+工具名沿用现有前缀，但把有效组件 ID 命名空间化：
+
+```text
+plugin__moontide.browser-suite.dom-analyzer__inspect
+mcp__moontide.browser-suite.browser__navigate
+```
+
+实现前先检查各 provider 对工具名字符的限制。若点号或连字符不合某条 wire，就新增可逆 `ToolWireName` 编码；展示名仍用 canonical id。不可拿一次字符串替换到处凑。
+
+旧目录里的 standalone component 保留裸名字。Package component 不抢裸 alias。日后若要短别名，另做显式 alias 与冲突诊断。
+
+## 八、Package 从哪里来
+
+首版扫描：
+
+```text
+<official packages>/
+~/.lubancode/packages/
+<project>/.lubancode/packages/
+--package-dir <path>    # 开发调试，可重复
+```
+
+每个直接子目录是一只 Package。例：
+
+```text
+~/.lubancode/packages/
+├── browser-suite/package.yaml
+└── office-suite/package.yaml
+```
+
+同 `package id` 的优先级：
+
+```text
+CLI 开发目录 > project > user > official
+```
+
+被盖住的版本仍进诊断账。`/package inspect` 要列出所有候选、实际所用版本与来源。
+
+这套优先级只管同一 Package。它不改 standalone Skill、Workflow、Plugin 的旧优先级。Package component 有 canonical id，也不会暗中盖住旧裸名字。
+
+## 九、发现不等于执行
+
+“放进去就成功”分三步看：
+
+```text
+放进目录 -> 立刻被发现
+格式无错 -> 立刻可列、可 inspect、可 doctor
+越过信任门 -> 才能挂载会跑代码的组件
+```
+
+这不是多此一举。Plugin 与 MCP 能起进程、读环境变量、访问网络。扫到目录便执行，等于把项目 checkout 当安装器。
+
+### 9.1 内容组件
+
+下列组件沿用现有待遇：
+
+- Agent Definition。
+- Prompt Profile。
+- Skill。
+- Workflow。
+
+项目 Package 中这些组件可在静态校验后登记。真正执行时仍受 Agent 工具过滤、Workflow capability 校验、沙箱与审批约束。
+
+### 9.2 代码组件
+
+下列组件算 code-bearing：
+
+- Plugin 的二进制、Lua、process command 与脚本。
+- MCP 的 command、args 与可执行文件。
+- 日后若 Skill 脚本加入自动安装或自动执行，也算。
+
+用户级 Package：用户亲手放进 `~/.lubancode/packages`，待遇与现有用户插件相同，可视作已安装来源。仍要在 inspect 中亮出命令与权限。
+
+项目级 Package：代码组件先过 Package 内容指纹信任门。未信任时，整包仍可发现、检查；代码组件不启动，依赖它们的 Agent、Workflow 标 unavailable。
+
+批准一只 Package 时须亮出：
+
+- canonical root 与完整内容哈希。
+- Package id、version、来源。
+- Plugin 与 MCP 清单。
+- 将启动的 command 与 args；密钥值打码。
+- 声明的网络、env、cwd 权限。
+- 将新增的工具名。
+
+文件改一个字节，哈希就变，旧信任失效。
+
+## 十、整包成，整包败
+
+Package 不可半挂。
+
+激活分七步：
+
+```text
+1. Parse package.yaml
+2. Build deterministic inventory and hash
+3. Parse every component with its native parser
+4. Resolve package-local references
+5. Check compatibility, trust and collisions
+6. Build PackageMountPlan
+7. Atomically publish catalogs and runtimes
+```
+
+前六步有一处错，Package 就是 invalid。它的 Agent、Skill、Workflow、Plugin、MCP 一件也不露给运行时。
+
+第七步若需启动多个 Plugin/MCP：
+
+- 先在暂存 ToolRegistry 与暂存 runtime owner 中启动。
+- 全部成功，再把快照交给 SessionStack。
+- 中途失败，停止已启动进程，卸掉暂存模块，丢掉暂存表。
+- 不可留下半包工具。
+
+旧 standalone MCP 仍可维持“坏一只，跳一只”的兼容语义。Package 走整包事务，二者不要混。
+
+## 十一、核心类型
+
+建议添这些职责：
+
+```text
+PackageManifest       根清单的解析结果
+PackageSource         root、scope、origin、precedence
+PackageInventory      确定性组件与文件账
+PackageCandidate      一份扫描候选
+PackageRecord         解析、信任、启停与诊断状态
+PackageCatalog        扫描、选版、列举、刷新
+PackageMountPlan      给各组件系统的只读挂载计划
+PackageSnapshot       一场会话钉住的不可变快照
+PackageTrustStore     Package 内容哈希信任账
+PackageDataDirs       持久数据目录分配与清理
+```
+
+再为组件加载器抽一枚共同来源：
+
+```cpp
+struct ComponentSourceRoot {
+    std::filesystem::path root;
+    ComponentKind kind;
+    SourceScope scope;
+    std::optional<std::string> package_id;
+    std::optional<std::string> package_version;
+    std::string content_hash;
+    bool trusted_for_code = false;
+};
+```
+
+Skill loader、Workflow Catalog、Agent Catalog、Prompt resolver、Plugin runtime、MCP loader 都收 `ComponentSourceRoot`。它们不反过来扫描 Package。
+
+一条规矩一处权威：
+
+- Package 发现、版本、整包哈希、启停、整包事务归 PackageCatalog。
+- Agent schema 归 Agent parser。
+- Skill frontmatter 归 Skill loader。
+- Workflow schema 归 Workflow parser/validator。
+- Plugin manifest 与运行安全归 Plugin runtime。
+- MCP 握手与工具注册归 MCP runtime。
+- 权限归现有宿主策略。
+
+## 十二、状态、数据与快照
+
+### 12.1 源码与数据分家
+
+Package 根按只读看待。运行产生的缓存、数据库、下载物、虚拟环境不可写回包内。
+
+持久数据放：
+
+```text
+~/.lubancode/package-data/<package-id>/
+```
+
+组件通过 `${package_data}` 或宿主 API 取路径。卸载 Package 时，默认保留数据；`purge` 才删。删除是破坏动作，须单独确认。
+
+### 12.2 启停账在包外
+
+Package 自己不可写 `enabled: false`。启停、信任、固定版本另记用户状态：
+
+```text
+~/.lubancode/package-state.json
+```
+
+状态键至少带：
+
+- package id。
+- source root。
+- content hash。
+- enabled/disabled。
+- trusted/untrusted。
+- 选中的版本与来源。
+
+项目共享启用清单与用户私有信任账要分开。仓库不可提交某台机器的信任决定。
+
+### 12.3 会话钉快照
+
+一场会话启动时拿一份 `PackageSnapshot`。运行中的 Agent、Workflow、Plugin、MCP 都指向这份快照。
+
+Reload 后：
+
+- 新任务使用新快照。
+- 已运行 Agent、Workflow 继续用旧快照。
+- content-only Package 可热换 Catalog。
+- 带 native Plugin 或常驻 MCP 的 Package，首版提示重启会话；不要冒险热卸 DLL。
+
+## 十三、命令面
+
+至少补齐：
+
+```text
+/package list [all|user|project|official|dev]
+/package show <id>
+/package doctor <id|path>
+/package trust <id>
+/package untrust <id>
+/package enable <id>
+/package disable <id>
+/package reload
+/package scaffold <path> <id>
+```
+
+`list` 显示：
+
+- id、version、来源与状态。
+- valid、untrusted、unavailable、active、shadowed。
+- 六类组件各有几件。
+- 是否 code-bearing。
+
+`show` 显示：
+
+- 清单与 canonical root。
+- 内容哈希与信任状态。
+- 所有组件 canonical id。
+- 内部引用解析结果。
+- 将启动的 Plugin/MCP 与工具名。
+- 被谁遮住，或遮住了谁。
+
+`doctor` 检查：
+
+- package schema 与 SemVer。
+- LubanCode 版本、平台。
+- 标准目录拼写。
+- 每件组件的原生 schema。
+- 相对路径与符号链接越界。
+- 内部引用、外部依赖、工具冲突。
+- command 是否存在，env 只报变量名是否缺失。
+- 信任、启停与 runtime 支持。
+- Agent Prompt Profile、Skill、MCP、Plugin 工具依赖是否闭合。
+
+`scaffold` 只建目录、最小 `package.yaml`、README 与一份验证脚本。默认不塞空的六类目录，用户要哪类再添哪类。
+
+另加非交互入口，供 CI 使用：
+
+```text
+luban package doctor <path> --json
+```
+
+退出码须区分：清单错、组件错、依赖缺、未信任、runtime 不支持。
+
+## 十四、首版安装方式
+
+首版先把本地目录跑稳：
+
+1. 用户把 Package 文件夹放进 `~/.lubancode/packages/`。
+2. 团队把 Package 文件夹提交到 `<project>/.lubancode/packages/`。
+3. 开发者用 `--package-dir` 临时挂源码目录。
+4. `/package reload` 或重启后发现。
+
+不要一开头就做远端市场、Git 拉取、压缩包、依赖求解、自动更新。那些事会把路径、版本、供应链与回滚一齐搅进来。
+
+本地首版稳后，再另开二期：
+
+- `luban package install <path|git-url>`。
+- 版本缓存与原子切换。
+- 项目 lockfile。
+- 签名、来源证明与 checksum。
+- 远端 registry、搜索与更新。
+- `.lubanpkg` 可移植归档。
+
+## 十五、实现次序
+
+### 阶段 0：冻结合同
+
+- [ ] 写 `docs/packages.md`。
+- [ ] 冻结 `package.yaml` schema 1。
+- [ ] 冻结标准目录与 ComponentKind。
+- [ ] 冻结 canonical id 与工具 wire name 编码。
+- [ ] 写一只最小 content-only Package。
+- [ ] 写一只 Agent + Skill + Workflow + Plugin + MCP 的完整 Package。
+- [ ] 写一只故意损坏的诊断夹具。
+
+验收：把完整示例交给没看过代码的人，他只照目录放文件，也能说清会发现什么、会执行什么、哪一步要信任。
+
+### 阶段 1：Package parser 与 inventory
+
+- [ ] 实现 PackageManifest 严格 YAML parser。
+- [ ] 实现 PackageSource 与四层扫描。
+- [ ] 实现稳定文件盘点、内容哈希与来源账。
+- [ ] 校验包根、symlink、路径越界与近似目录名。
+- [ ] 解析 SemVer 与 LubanCode compatibility。
+- [ ] 实现 `/package list/show/doctor` 只读版。
+
+验收：不挂任何组件，也能把一只包的全账查清。
+
+### 阶段 2：组件解析与内部引用
+
+- [ ] 各组件 loader 接受 ComponentSourceRoot。
+- [ ] PackageCatalog 调原生 parser，不复制 schema。
+- [ ] 实现 package-local short ref 与 canonical ref。
+- [ ] 实现 PackageMountPlan。
+- [ ] 任何组件坏，整包 invalid。
+- [ ] 诊断从顶层 Package 一路指到具体文件、行、字段。
+
+验收：完整 Package 能产出静态 Mount Plan；还不启动 Plugin 与 MCP。
+
+### 阶段 3：内容组件挂载
+
+- [ ] 挂载 packaged Skills。
+- [ ] 挂载 packaged Workflows。
+- [ ] 接上前置 TODO 的 AgentCatalog。
+- [ ] 接上 Prompt Profile roots 与来源账本。
+- [ ] Catalog 与命令展示 canonical id。
+- [ ] legacy standalone 目录行为不变。
+
+验收：content-only Package 放进目录，reload 后 Agent、Skill、Workflow、Prompt 同时可见，卸载后同时消失。
+
+### 阶段 4：Package 信任
+
+- [ ] 把项目 Plugin 的内容哈希做法抽成共用能力。
+- [ ] 实现 PackageTrustStore。
+- [ ] 自动识别 code-bearing inventory。
+- [ ] `/package trust/untrust` 亮完整审批材料。
+- [ ] 文件变动让旧信任失效。
+- [ ] 依赖未信任组件的 Agent、Workflow 标 unavailable。
+
+验收：项目 Package 未批时一行代码也不起；批准后只启动账上列出的组件。
+
+### 阶段 5：Plugin 与 MCP 挂载事务
+
+- [ ] packaged Plugin 一律走 `plugin.json`。
+- [ ] 为 native、Lua、process 统一 manifest-backed 入口；旧裸文件只兼容，不进 Package。
+- [ ] 实现 `mcp.yaml` 到 MCP runtime config 的解析。
+- [ ] 实现 `${package_dir}`、`${package_data}`、`${env:NAME}` 结构化展开。
+- [ ] 暂存 runtime、暂存 registry、失败回滚、成功发布。
+- [ ] ToolOrigin 记 package id/version/component id。
+- [ ] `/tools`、`/mcp`、`/plugins` 显示 Package 来源。
+
+验收：一只包含两件 Plugin 与一只 MCP 的 Package，只要一件起不来，三件都不进正式 ToolRegistry。
+
+### 阶段 6：启停、reload 与会话快照
+
+- [ ] 实现 package-state。
+- [ ] 实现 enable/disable。
+- [ ] 实现原子 Catalog reload。
+- [ ] 会话钉 PackageSnapshot。
+- [ ] content-only 热换；code-bearing 首版要求新会话。
+- [ ] 已运行 Agent/Workflow 不受目录突变影响。
+
+验收：reload 不会让半场 Workflow 换 Skill，也不会卸掉正在被 ToolRegistry 引用的模块。
+
+### 阶段 7：示例与旧目录并存
+
+- [ ] 新建 `examples/packages/browser-suite/`，收纳一套完整组合。
+- [ ] 新建 `examples/packages/content-only/`，证明不带代码也能用。
+- [ ] 更新 `examples/README.md`，讲清 standalone 与 Package 两条路。
+- [ ] 上一张 Agent TODO 的最终示例优先落在 Package 内。
+- [ ] 旧 `examples/plugins`、`examples/workflows` 暂不删除，留作 standalone 兼容测试。
+- [ ] 文档明确：新项目宜用 Package；单件试验仍可放旧目录。
+
+验收：用户照 README 把整个目录复制过去，不改全局 config，便能发现全部内容组件；代码组件只差一次明白的信任动作。
+
+## 十六、测试账
+
+### Package 清单与盘点
+
+- [ ] 最小/完整 package.yaml。
+- [ ] 未知字段、错类型、错 schema。
+- [ ] id 非法、version 非 SemVer、版本范围非法。
+- [ ] 目录名与 id 不同的 warning。
+- [ ] 空 Package、近似目录名、未知顶层目录。
+- [ ] 文件枚举稳定，哈希跨重复扫描不漂。
+- [ ] 内容改动必改哈希。
+- [ ] symlink、junction、`..`、绝对路径逃逸。
+
+### 发现与覆盖
+
+- [ ] official、user、project、CLI dev 四层优先级。
+- [ ] 同 id 多版本只激活一份，其余可 inspect。
+- [ ] Package canonical id 不撞 standalone 裸 id。
+- [ ] 两只 Package 的同 local id 可并存。
+- [ ] 包外引用短名失败，canonical id 成功。
+- [ ] 包内短名先解到本包。
+
+### 组件闭合
+
+- [ ] Agent 引用同包 Prompt、Skill、MCP。
+- [ ] Workflow 引用同包 Agent、Skill、子 Workflow。
+- [ ] 缺引用时整包 invalid。
+- [ ] 原生 parser 错误保留文件、行、列。
+- [ ] Package manifest 不可放宽组件权限。
+- [ ] Tool wire name 编码可逆，且各 provider 都接受。
+
+### 信任与安全
+
+- [ ] content-only 与 code-bearing 分类。
+- [ ] 项目代码包未信任时零进程、零 DLL、零 Lua state。
+- [ ] trust 后生效，文件一改立即失效。
+- [ ] untrust 后新会话不再挂载。
+- [ ] command/args 不经 shell。
+- [ ] `${package_dir}` 与 symlink 不可越界。
+- [ ] `${env:NAME}` 只读，不在日志中吐值。
+- [ ] `package_data` 与 package root 分离。
+- [ ] disable 不删数据，purge 才删。
+
+### 事务与生命周期
+
+- [ ] 第一只、居中一只、最后一只 Plugin/MCP 启动失败。
+- [ ] 失败时已启动进程全停，暂存 registry 全丢。
+- [ ] 成功时一次发布全部组件。
+- [ ] reload 失败保住旧快照。
+- [ ] 运行中 Agent、Workflow 持旧快照。
+- [ ] native Plugin 不热卸。
+- [ ] Package 删除、重装、换版本不悬垂引用。
+
+### 兼容
+
+- [ ] 没有 packages 目录时，行为与当前版本相同。
+- [ ] standalone Skills 加载次序不变。
+- [ ] standalone Workflows 加载次序不变。
+- [ ] standalone Plugins 与项目信任门不变。
+- [ ] config.json 的 MCP 仍能启动。
+- [ ] 旧命令输出只添来源，不改已有工具名。
+
+### 真机验收
+
+- [ ] 跑 Release 全量 CTest，记真实命令与通过数。
+- [ ] 用真实 `luban` 启动，跑 user Package 与 project Package。
+- [ ] 用 `/provider ccmoon`，至少挑两种模型角色。
+- [ ] 实测 Agent、Skill、Workflow、Plugin、MCP 从同一 Package 闭环工作。
+- [ ] 截图留证：list、show、doctor、trust、工具来源、Prompt 来源、Workflow 执行、整包回滚。
+- [ ] 故意改一行脚本，证明内容哈希变、信任失效。
+- [ ] 故意弄坏一只 MCP，证明整包没有半挂。
+- [ ] HTTP 成功或模型口头说“已加载”，都不算验收；须看真实 Catalog、工具调用、进程与产物。
+
+## 十七、完成线
+
+- [ ] 一只目录能同时容纳 Agent、Prompt、Skill、Workflow、Plugin 与 MCP。
+- [ ] 根清单只写身份、版本与兼容，不重复组件清单。
+- [ ] 标准目录自动发现，拼错目录能 doctor 出来。
+- [ ] Package component 全有 canonical id，两只包可带同名组件。
+- [ ] 包内短引用可用，包外引用须写全名。
+- [ ] Package 先产 Mount Plan，各组件仍归原生 parser/runtime。
+- [ ] 任何静态错误让整包 invalid；任何启动错误让整包回滚。
+- [ ] 项目代码包先信任后执行，内容变动后须重批。
+- [ ] 包根只读，运行数据另存，卸载默认不删数据。
+- [ ] standalone 旧目录零回归。
+- [ ] 命令、诊断、单测、集成测试、Release CTest 与真实 CLI 证据齐全。
+
+## 十八、留到二期
+
+- 远端 Package registry 与搜索。
+- Git/URL 安装器。
+- `.lubanpkg` 归档格式。
+- 依赖图、版本求解与项目 lockfile。
+- 签名、发布者身份、透明日志与供应链证明。
+- 自动更新、灰度与回滚。
+- Package 之间共享持久服务。
+- 细粒度组件启停。
+- Windows、macOS、Linux 多构件选择。
+- Package 市场 UI。
+
+先把本地目录、清单、命名、信任、事务做稳。箱子扣得严，往后才好装货。

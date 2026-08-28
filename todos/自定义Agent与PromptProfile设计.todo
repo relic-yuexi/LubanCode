@@ -1,0 +1,617 @@
+# 自定义 Agent 与 Prompt Profile 设计
+
+- 状态：待实现
+- 日期：2026-08-28
+- 范围：Agent 定义、Prompt Profile、加载与解析、运行时接线、命令与诊断、示例迁移
+- 不在本单：实现新的 MCP 服务、重写 Skill 格式、建立 solutions 运行时概念、引入多 Agent 编队
+
+## 一、先定边界
+
+LubanCode 里已有几套东西。各管一摊，不要混账。
+
+| 名称 | 管什么 | 不管什么 |
+|---|---|---|
+| Agent | 谁来做、带什么上下文、用什么模型和工具、受什么限制 | 不实现工具，不收藏大段通用教程 |
+| Prompt Profile | Agent 怎样拼系统提示词 | 不调度步骤，不授予权限 |
+| Skill | 某类事怎样做，可带说明、脚本、模板和资料 | 不占一套独立上下文，不决定模型 |
+| Workflow | 先做什么、后做什么、何时分支 | 不另造一套 Agent 运行时 |
+| Plugin | 可执行工具组件，承载 native、Lua 或 process 工具 | 不打包 Agent、Skill、Workflow |
+| Package | 安装与分发单位，可收纳 Agent、Prompt、Skill、Workflow、Plugin、MCP | 不参与执行，不授予权限 |
+| MCP | 把外部工具接进来 | 不决定谁能调用工具 |
+
+关系如下：
+
+```text
+Package -> Skill -------------+
+       -> Plugin tools -------+
+       -> MCP tools ----------+----> Agent Definition
+       -> Prompt Profile -----+
+Model catalog ----------------+
+                               |
+                               v
+                         Resolved AgentProfile
+                               |
+                         Agent + AgentLoop
+                               |
+                  AgentTool / Workflow Executor
+```
+
+一句话：Agent 选能力，也选 Prompt；Skill 教它办事；MCP 给它工具；Workflow 排它出场。
+
+`solutions` 可以留作教程、配方、样例集合。它不该进运行时类型系统。
+
+Package 外壳另见 `todos/统一Package封装与组件挂载系统设计.todo`。
+
+## 二、外部参照
+
+### Claude Code
+
+Claude Code 把自定义 subagent 写成 Markdown 加 YAML frontmatter。Agent 有独立上下文，可选模型、工具、权限、Skill、MCP、记忆和隔离方式。
+
+可取之处：
+
+- Agent 有名字和描述，主 Agent 可据描述派活。
+- 工具、Skill、模型、权限都能按 Agent 收窄。
+- 用户级与项目级 Agent 分层加载。
+- 插件也能带 Agent，但插件 Agent 不可夹带任意 MCP 配置和权限钩子。
+
+不照搬之处：
+
+- Claude 把正文当 Agent system prompt。LubanCode 已有一套可拆、可换、可分层覆盖的 Prompt Library，不能压扁成一段正文。
+- LubanCode 的 Agent 文件应当薄些。它引用 Prompt Profile，不吞掉 Prompt 系统。
+
+资料：<https://code.claude.com/docs/en/sub-agents>
+
+### Codex
+
+Codex 用 `.codex/agents/*.toml` 定义自定义 Agent。定义里可放模型、推理强度、沙箱、MCP 与 Skill 配置。它把 Agent 文件当配置层，不当工具包。
+
+可取之处：
+
+- Agent 本质上是一层运行配置。
+- 项目级与用户级配置分开。
+- 内置 Agent 与自定义 Agent 走同一调度入口。
+
+不照搬之处：
+
+- Codex 主要靠 `developer_instructions` 承载提示词。LubanCode 要保住模块化 Prompt 装配。
+- LubanCode 已用 YAML 解析 Workflow，也已引入 `yaml-cpp`。此处无需再添 TOML 解析器。
+
+资料：<https://learn.chatgpt.com/docs/agent-configuration/subagents>
+
+### OpenAI Skills 与 Plugins
+
+OpenAI 把 Skill 当可复用流程包。Skill 可声明 MCP 工具依赖。Plugin 则是安装包，可带 Skills 和 MCP。Skill 里的 `agents/openai.yaml` 只是 UI 与依赖元数据，并非自定义 Agent。
+
+这恰好印证本单边界：Agent、Skill、Plugin、MCP 不该互相冒名。
+
+资料：
+
+- <https://learn.chatgpt.com/docs/build-skills>
+- <https://developers.openai.com/plugins/concepts/plugins>
+
+## 三、LubanCode 眼下有什么
+
+### Prompt 已经分层
+
+`src/prompts` 眼下分为：
+
+- `core/`：身份、工作法、写作风格。
+- `features/`：文件、Shell、委派、TODO、Skill、Web、MCP、LSP 等能力说明。
+- `platforms/`：Anthropic、Responses、Chat Completions 差异。
+- `modes/`：default、plan 等宿主管控模式。
+- `tools/`：按语言保存工具描述与 schema 文本。
+- `models/`：只留说明；模型专属指令来自 `models.json`。
+
+`PromptAssembler` 已有两条要紧规矩：
+
+1. 用户 Prompt 文件可逐模块覆盖内置文件。
+2. `system_prompt.md` 或 persona 可替换 core，但 environment、feature、platform、mode 等段仍由宿主接上。
+
+此外，model instructions、deferred tool index、Soul 还会在请求前继续拼接。Agent 设计不可打乱这条次序。
+
+### Agent 运行时已经成形
+
+`AgentProfile` 已装着 provider、request、runtime、system prompt、model instructions、Soul、工具过滤器等信息。`AgentTool` 已能开独立上下文，跑前台或后台，也能用 worktree。Workflow 的 `AgentExecutor` 又复用了同一 Agent 引擎。
+
+眼下缺的不是第二套执行器。缺的是：
+
+- 可落盘的 Agent Definition。
+- 可分层的 Agent Catalog。
+- 能保住现有 Prompt 自由度的 Prompt Profile。
+- 一处统一的 AgentProfile 解析与构造入口。
+
+## 四、文件格式
+
+### 4.1 每个 Agent 一份 YAML
+
+推荐：
+
+```text
+~/.lubancode/agents/browser-tester.yaml
+<project>/.lubancode/agents/browser-tester.yaml
+```
+
+不要再套一层 `browser-tester/agent.yaml`。Agent 自己不该收藏脚本和资料；那些东西归 Skill 或 Plugin。单文件便于列举、覆盖、校验和展示来源。
+
+首版 schema：
+
+```yaml
+schema: 1
+name: browser-tester
+description: Inspect a web application, reproduce UI failures, and report evidence.
+
+prompt:
+  profile: browser-tester
+  project_instructions: inherit
+  soul: inherit
+
+model:
+  role: inherit
+  effort: inherit
+
+skills:
+  preload:
+    - browser-testing
+
+tools:
+  allow:
+    - context_read
+    - todo_read
+    - todo_write
+    - mcp__browser__navigate
+    - mcp__browser__screenshot
+  deny:
+    - shell
+
+mcp_servers:
+  - browser
+
+requires:
+  tools:
+    - mcp__browser__navigate
+    - mcp__browser__screenshot
+
+runtime:
+  max_steps_per_turn: 24
+  execution_mode: auto
+  isolation: none
+
+permissions:
+  mode: read_only
+```
+
+字段规矩：
+
+- `schema`：必填，只收 `1`。
+- `name`：必填，使用小写 kebab-case；它是稳定 ID。
+- `description`：必填。写何时派它出场，不写宣传话。
+- `prompt.profile`：可省。省了就继承父 Agent 的 Profile 或落回 `default`。
+- `project_instructions`：只收 `inherit`、`omit`。
+- `soul`：首版只收 `inherit`、`off`。不要在 Agent 文件里另塞 Soul 正文。
+- `model.role`：引用现有模型角色。`inherit` 沿用父 Agent。
+- `model.effort`：引用现有推理强度；不得越过 provider 能力。
+- `skills.preload`：启动 Agent 时把 Skill 正文装进上下文。
+- `tools.allow`、`tools.deny`：只收完整工具名。首版不做 glob。
+- `mcp_servers`：只引用已配置、已信任的服务名。不得内联 command、args、env。
+- `requires`：只作启动前检查。缺项就报错，绝不悄悄放宽工具。
+- `runtime`：复用现有 AgentRuntimeProfile 概念。
+- `permissions.mode`：只能比父 Agent 更窄，不能更宽。
+
+首版不收 Markdown 正文，也不收 `developer_instructions`。临时提示词仍可由调用任务传入；稳定提示词放 Prompt Profile；可复用做法放 Skill。
+
+### 4.2 严格解析
+
+用 `yaml-cpp`。不要拿 Skill 那套简易 frontmatter 扫描器来凑。
+
+解析器须做到：
+
+- 未知字段报错，不可静默吞掉。
+- 类型不合报文件、行、列。
+- 同层重名报冲突来源。
+- 名称与文件名不一致时，以 `name` 为准，但给 warning；日后可升为错误。
+- 数组去重，同时保住原次序。
+- 所有路径都经规范化与越界检查。
+- 诊断里打印来源层，不打印密钥和环境变量值。
+
+## 五、Prompt Profile
+
+### 5.1 Profile 不是一段字符串
+
+新增概念 `PromptProfile`。它是一组稀疏覆盖。它沿用 `src/prompts` 现有模块树，只改自己点名的文件。
+
+内置 Profile：
+
+```text
+src/prompts/profiles/browser-tester/core/10-identity.md
+src/prompts/profiles/browser-tester/features/web.md
+```
+
+用户覆盖：
+
+```text
+~/.lubancode/prompts/profiles/browser-tester/core/10-identity.md
+~/.lubancode/prompts/profiles/browser-tester/features/web.md
+```
+
+项目覆盖：
+
+```text
+<project>/.lubancode/prompts/profiles/browser-tester/core/10-identity.md
+```
+
+没有 `profiles/default/` 也能跑。现有 `src/prompts/{core,features,platforms}` 就是隐式 `default`，老配置不受影响。
+
+### 5.2 解析次序
+
+同一模块按下列次序找。越往后，权越大：
+
+```text
+内置 default 模块
+-> 用户全局 default 覆盖
+-> 内置选中 Profile 覆盖
+-> 用户选中 Profile 覆盖
+-> 项目选中 Profile 覆盖
+```
+
+`system_prompt.md` 与 CLI persona 仍可替换 core。它们只替 core，不抹掉动态环境、有效能力说明、platform、mode、model instructions、tool index 和 Soul。
+
+拼装总次序须写成测试，不可只写在注释里：
+
+```text
+resolved core/persona
+-> runtime environment
+-> project instructions（若继承）
+-> effective feature modules
+-> platform module
+-> host-owned mode module
+-> deferred tool index
+-> model instructions
+-> Soul（若启用）
+```
+
+### 5.3 哪些可以换，哪些不能换
+
+Agent Profile 可以换：
+
+- core 模块。
+- feature 模块文案。
+- platform 文案。
+- 是否继承 project instructions。
+- 是否启用 Soul。
+
+Agent Profile 不可以换：
+
+- `modes/`。Mode 是宿主策略，不能让项目 Agent 改写。
+- 模型能力与模型专属指令。它们仍从 `models.json` 和 provider 解析。
+- 工具 schema。它归工具注册表。
+- 权限判断、沙箱、审批、步数硬上限。
+
+### 5.4 只给有效能力配说明
+
+当前 PromptAssembler 会常驻装入 files、shell、delegation、todo 等 feature 文案。自定义 Agent 一旦裁掉工具，这样便会说一套、做一套。
+
+实现 Agent 时，新增 `PromptCapabilities`。它从过滤后的有效 ToolRegistry 推导：
+
+```text
+effective tools -> PromptCapabilities -> feature modules
+```
+
+例：Agent 没有 Shell，就不装 shell feature；没有 `agent` 工具，就不装 delegation feature；没有 todo 工具，就不装 todo feature。
+
+这条只先用于自定义 Agent。验证稳了，再决定是否收拢主 Agent 的旧逻辑。不要借本单顺手大改主 Prompt。
+
+### 5.5 保留来源账本
+
+不要只产出最终字符串。解析结果须带一份 `PromptSourceLedger`：
+
+```text
+core/10-identity.md <- project profile browser-tester
+core/20-workflow.md <- user global default
+features/web.md     <- embedded profile browser-tester
+platforms/responses.md <- embedded default
+modes/default.md    <- embedded host policy
+```
+
+这份账本供 `/agent inspect`、`/prompt`、日志与测试使用。出了 Prompt 覆盖问题，一眼便能看见是谁压了谁。
+
+## 六、运行时接法
+
+### 6.1 新增四个职责
+
+建议落下这些类型。命名可随代码风格调整，职责不可混：
+
+```text
+AgentDefinition       只装解析后的 YAML
+AgentCatalog          扫描、分层、去重、列举、刷新
+PromptProfileResolver 解析 Prompt 模块和来源账本
+AgentProfileResolver  合并父上下文、定义、模型、工具、权限，产出 AgentProfile
+```
+
+可以再放一层 `AgentFactory`。它只做实例化，不重算业务规则。
+
+核心调用链：
+
+```text
+AgentTool / Workflow AgentExecutor
+        -> AgentCatalog::Resolve(name)
+        -> AgentProfileResolver::Resolve(parent, definition)
+        -> AgentFactory::Create(resolved_profile, wiring)
+        -> Agent
+```
+
+一条业务规矩只许有一处权威。工具过滤、Prompt 拼装、模型继承、权限收窄，都不可在 `AgentTool` 与 Workflow 各写一遍。
+
+### 6.2 内置 Agent 也进 Catalog
+
+眼下 `agent_type` 只认 `general-purpose` 与 `Explore`。实现后，把二者注册成内置定义，再叠加磁盘定义。
+
+加载优先级：
+
+```text
+project > user > builtin
+```
+
+同一层重名直接报错。跨层同名属于显式覆盖，`inspect` 须列出被盖住的来源。
+
+### 6.3 动态工具 schema
+
+`agent` 工具的 `agent_type` 不再写死两项。它从 AgentCatalog 取可用 Agent 名称与描述。
+
+若定义太多，别把几十段全文都塞进 schema。首版只放 `name + description`。日后再做 deferred catalog。
+
+### 6.4 Workflow 复用同一解析器
+
+Workflow 节点可写：
+
+```yaml
+type: agent
+agent: browser-tester
+task: Reproduce the reported checkout failure.
+```
+
+Workflow 只负责调度。它把 `agent` 名交给同一 AgentProfileResolver。不要在 Workflow compiler 里再拼 Prompt、再筛工具。
+
+## 七、加载范围与信任
+
+扫描三层：
+
+```text
+<embedded resources>/agents/*.yaml
+~/.lubancode/agents/*.yaml
+<project>/.lubancode/agents/*.yaml
+```
+
+项目根目录须复用现有项目配置或 instruction 发现规则。不要各自猜 cwd。
+
+安全规矩：
+
+- 项目 Agent 只能引用已启用、已信任的 Plugin、MCP 和工具。
+- Agent 文件不得内联 MCP 启动命令、环境变量或密钥。
+- 子 Agent 的权限、工具、沙箱只能继承或收窄。
+- `allow` 点到一个父 Agent 没有的工具，不算授权；解析时报清楚。
+- 依赖缺失时，Agent 标为 unavailable；调用时报缺什么，不能退化成全工具 Agent。
+- Prompt Profile 只能改模型所见文字，不能改宿主 ModePolicy 与权限门。
+- 每次解析都保留定义来源、Prompt 来源、有效工具与有效权限，方便审计。
+
+首版不做自动热重载。启动时加载，另给显式 reload 命令。这样好查，也少竞态。
+
+## 八、命令与可见性
+
+至少补齐：
+
+```text
+/agents
+/agent inspect <name>
+/agent doctor <name>
+/agent reload
+```
+
+`/agents` 显示：
+
+- 名称、描述、来源层。
+- 是否可用；不可用则写第一条原因。
+- 模型角色与 Prompt Profile。
+- 有效工具数、预装 Skill 数。
+
+`/agent inspect` 显示：
+
+- 原始定义路径。
+- 覆盖链。
+- 最终模型、effort、runtime、isolation、permissions。
+- 工具 allow/deny 后的最终名单。
+- Skill 与 MCP 依赖。
+- PromptSourceLedger。
+
+`/agent doctor` 做静态预检：
+
+- Agent schema。
+- Profile 是否存在。
+- Skill、MCP、工具是否存在且已启用。
+- 模型角色是否能解析。
+- 权限是否越界。
+- Prompt 模块是否越过允许根目录。
+
+`/agent reload` 原子替换 Catalog。新目录有错，就保留旧 Catalog，并把错报出来。
+
+## 九、实现次序
+
+### 阶段 0：契约先落纸
+
+- [ ] 写 `docs/agents.md`，收录术语、schema、覆盖顺序、安全边界。
+- [ ] 加一份完整 Agent YAML，一份最小 Agent YAML，一份故意出错的诊断样例。
+- [ ] 把本单中的字段名与现有 `AgentProfile`、`AgentRuntimeProfile` 对齐。
+- [ ] 定下 schema version 与兼容策略。
+
+验收：实现者、Reviewer 只看文档，能说清 Agent、Skill、Workflow、Plugin、MCP、Prompt Profile 各管什么。
+
+### 阶段 1：Definition 与 Catalog
+
+- [ ] 新建 AgentDefinition 数据结构与 yaml-cpp 解析器。
+- [ ] 实现 builtin、user、project 三层扫描。
+- [ ] 做稳定排序、重名检查、来源记录与 unavailable 状态。
+- [ ] 把 `general-purpose`、`Explore` 登进 Catalog，先不改行为。
+- [ ] 加 `/agents` 与 `/agent doctor` 的只读骨架。
+
+验收：不启动模型，也能列全 Agent，指出每份定义从哪里来、哪里错了。
+
+### 阶段 2：Prompt Profile
+
+- [ ] 为 PromptAssembler 加 Profile overlay roots。
+- [ ] 引入 PromptSourceLedger。
+- [ ] 明定 core/persona、feature、platform、mode、model instructions、Soul 次序。
+- [ ] 从过滤后工具表推导自定义 Agent 的 PromptCapabilities。
+- [ ] 保住现有 default Prompt 输出；未选 Profile 时，黄金测试不得无故变化。
+- [ ] 扩充 `/agent inspect` 或 `/prompt`，打印来源账本。
+
+验收：改一个用户 Profile 文件，只影响点名 Agent；删掉覆盖后，稳稳退回下一层。
+
+### 阶段 3：统一 AgentProfile 解析
+
+- [ ] 实现 AgentProfileResolver。
+- [ ] 合并父 Agent、Definition、模型角色、Prompt、Skill、工具、MCP、权限与 runtime。
+- [ ] 所有权限按“只可收窄”校验。
+- [ ] 缺依赖时报结构化错误。
+- [ ] 保持 deferred tool index、model instructions、Soul 的现有请求期行为。
+
+验收：同一 Agent Definition 从 AgentTool 与 Workflow 解析，所得 Profile 完全一致。
+
+### 阶段 4：AgentTool 接入
+
+- [ ] 把写死的 `agent_type` 校验换成 AgentCatalog。
+- [ ] 动态生成 Agent 类型说明。
+- [ ] 自定义 Agent 支持前台、后台、取消、消息、结果回收。
+- [ ] 自定义 Agent 支持现有 worktree isolation。
+- [ ] 证明工具收窄、Skill 预装、Profile 选择都已生效。
+
+验收：主 Agent 能按描述派出自定义 Agent；子 Agent 看不见未授权工具，也不会收到那些工具的 Prompt 说明。
+
+### 阶段 5：Workflow 接入
+
+- [ ] Workflow Agent 节点支持 `agent: <name>`。
+- [ ] compiler 只校验引用，executor 调统一 resolver/factory。
+- [ ] 前台失败、超时、取消、后台回收维持现有语义。
+- [ ] 未知或 unavailable Agent 在编译期或最早可知时失败。
+
+验收：同一 Agent 既能由 `agent` 工具唤起，也能由 Workflow 节点唤起；Prompt 与工具完全同源。
+
+### 阶段 6：示例归位
+
+眼下 `examples/agents/` 混着 Plugin、Skill、README 与工具夹具。功能落地后再迁，不要提前搬空。
+
+目标样子：
+
+```text
+examples/agents/
+  browser-tester.yaml
+  gui-operator.yaml
+  README.md
+
+examples/skills/
+  browser-testing/SKILL.md
+  gui-operation/SKILL.md
+
+examples/plugins/
+  gui-agent/...
+
+examples/browser/
+  server.js
+  README.md
+```
+
+- [ ] `examples/agents/` 只放 Agent Definition 与说明。
+- [ ] `agent-browser/skills/`、`agent-gui/skills/` 拆回 `examples/skills/`。
+- [ ] Plugin 示例归 `examples/plugins/`。
+- [ ] Browser MCP 仍归 `examples/browser/`。
+- [ ] 更新 README，删掉“另单在建”这类过期话。
+- [ ] 更新依赖旧路径的测试；不靠兼容软链遮问题。
+
+验收：读目录名就知道东西归谁。没有同一 Skill 复制两份，也没有 Agent 目录暗藏 MCP 实现。
+
+## 十、测试账
+
+### 解析与加载
+
+- [ ] 最小 YAML、完整 YAML、未知字段、错类型、错 schema。
+- [ ] 文件名与 name 不同的 warning。
+- [ ] 同层重名报错；跨层覆盖可追溯。
+- [ ] 扫描次序确定；不同文件系统枚举顺序不改结果。
+- [ ] 路径穿越、符号链接越界、非法绝对路径。
+- [ ] reload 失败时保住旧 Catalog。
+
+### Prompt
+
+- [ ] default 输出兼容黄金测试。
+- [ ] builtin default、user default、builtin profile、user profile、project profile 逐层覆盖。
+- [ ] 稀疏 Profile 只改点名模块。
+- [ ] persona/system_prompt 只替 core。
+- [ ] mode 不可覆盖。
+- [ ] platform 按 wire 选择。
+- [ ] model instructions、deferred index、Soul 次序不变。
+- [ ] project instructions 的 inherit/omit。
+- [ ] 工具被裁后，相应 feature 文案也消失。
+- [ ] PromptSourceLedger 每段都指向真实来源。
+
+### 能力与安全
+
+- [ ] allow 与 deny 交叠时 deny 胜出。
+- [ ] 子 Agent 不能取到父 Agent 没有的工具。
+- [ ] 项目 Agent 不能抬高权限、取消沙箱或绕过审批。
+- [ ] MCP 只许引用已有服务，拒绝内联启动配置。
+- [ ] 缺 Skill、MCP、tool、model role 时标 unavailable。
+- [ ] unavailable Agent 不得静默退回 general-purpose。
+- [ ] 日志与 doctor 不泄露密钥、环境变量值。
+
+### 执行
+
+- [ ] 内置 general-purpose、Explore 行为回归。
+- [ ] 自定义 Agent 前台执行。
+- [ ] 自定义 Agent 后台执行、消息、等待、回收。
+- [ ] 取消与超时。
+- [ ] worktree isolation。
+- [ ] AgentTool 与 Workflow 解析同一 Definition，所得 Profile 一致。
+- [ ] Workflow 未知 Agent 报错位置清楚。
+
+### 真机验收
+
+- [ ] 跑 Release 全量 CTest，记下真实命令与通过数。
+- [ ] 用真实 `luban` 启动，不只跑单测。
+- [ ] 用 `/provider ccmoon`，至少挑两种模型角色各跑一次。
+- [ ] 实测 `/agents`、`inspect`、`doctor`、前台 Agent、后台 Agent、Workflow Agent。
+- [ ] 截图留证：定义来源、Prompt 来源账本、工具收窄、缺依赖报错、成功执行结果。
+- [ ] HTTP 成功、模型复述配置、单张截图，都不算能力已生效；须看实际工具调用与产物。
+
+## 十一、兼容与发布
+
+- [ ] 未发现任何 Agent YAML 时，行为与当前版本相同。
+- [ ] `general-purpose`、`Explore` 名称先保留。
+- [ ] schema 带版本；未知高版本拒绝加载，并写升级提示。
+- [ ] 新字段先按严格解析走。要加字段，就加 schema 测试和文档。
+- [ ] Agent 定义不写进会话历史正文；历史只记稳定 name、定义来源摘要与解析后版本标识。
+- [ ] 若 reload 后同名 Agent 变了，已运行 Agent 持有旧快照，新任务才用新定义。
+- [ ] 发布说明写清：Agent YAML 是运行配置；Prompt Profile 才是提示词覆盖入口。
+
+## 十二、完成线
+
+做到下面几条，本单才算收口：
+
+- [ ] Agent、Skill、Workflow、Plugin、MCP 五者边界写进文档，也落进代码结构。
+- [ ] 自定义 Agent 能从用户层、项目层加载，并能覆盖内置定义。
+- [ ] Agent 能选 Prompt Profile，且不破坏现有 Prompt 分层与自由覆盖。
+- [ ] AgentTool 与 Workflow 共用一套 Catalog、Resolver、Factory。
+- [ ] 权限只缩不涨，MCP 不可内联，缺依赖不偷着降级。
+- [ ] Prompt、工具、模型、权限均可 inspect、可 doctor、可追根。
+- [ ] 示例目录归位，旧 README 与测试一并更新。
+- [ ] 单测、集成测试、Release CTest、真实 CLI、多模型与截图证据齐全。
+
+## 十三、留到后头
+
+这些事先不做。等首版跑稳，再另开单：
+
+- Agent 继承另一个 Agent。
+- Agent 组合、团队与自动路由器。
+- Agent 专属长期记忆。
+- Agent Profile 市场与远端安装。
+- 通配工具权限、条件权限与细粒度 MCP resource 过滤。
+- 自动热重载与运行中迁移。
+- `solutions/` 教程索引。它仍是内容组织，不进运行时。
