@@ -327,3 +327,37 @@ Package doctor
 
 夹具里 run、goal、recording 各 ID 一律占位；哈希用 `sha256:` 接 64 个 0 占位；
 日期统一 2026-08-28。字段与本页逐一对得上。
+
+## 观察账（阶段 1 落地）
+
+采集器只产 `EvolutionObservation`，落只追加的 JSONL 观察账：
+
+```text
+~/.lubancode/evolution/observations/
+  observations.jsonl   一行一条观察（schema 1），只追加
+  rejected.jsonl       一行一条被拒 fingerprint，只追加
+```
+
+`observations.jsonl` 行字段：`schema`(1)、`id`(`obs-` 前缀，由来源类型 +
+来源 ID 决定，重采同一条账 id 不变)、`source`(`run`/`goal`/`recording`/
+`tooltrace`/`memory`/`user_feedback`)、`source_id`、`source_ref`(原始账文件)、
+`summary`(脱敏一句话)、`outcome`(`success`/`failure`/`partial`/`unknown`)、
+`fingerprint`、`details`(来源专属脱敏结构账)、`evidence[]`(指回原始账的
+引用，不抄正文)、`created_at`(来源账本时间，可空)。坏行/半截行读取时跳过，
+不废整账。
+
+同类指纹口径：recording 收目标口述 + 验收 + 工具名序列；run 收 workflow id +
+终态 + 节点序列；goal 收 objective + 最终判词；tooltrace 收工具名 + error_code；
+memory 收 kind + 标题。日期、URL、绝对路径归一成 `<date>`/`<url>`/`<path>`
+占位；时间戳、路径、来源 ID、入参原文、内容哈希、时长、模型名一概不进指纹。
+口径版本在指纹前缀 `v1|` 里，改口径即换版本，老账自然失配。
+
+脱敏复用录制件与 journal 的既有打码器（`RedactSecrets`/`SanitizeToolInput`
+同规矩）：观察全文查无 token、Cookie、authorization、私钥。模型思考原文
+压根不收——适配器只读各家账本的白名单字段，会话消息正文一处不读。
+
+命令面（阶段 1）：`/evolve status`（扫五路账本采观察、落账、报账面）、
+`/evolve list`（按指纹聚类列账，可按来源过滤）、`/evolve show <观察id>`
+（看一条观察，指回来源 ID 与原始账文件）。三条都只读观察；不生成 Package，
+不装任何东西。`rejected.jsonl` 的去重门在阶段 2 接 `/evolve reject` 时启用，
+阶段 1 由 store 把守：被拒 fingerprint 不再重复进观察账。

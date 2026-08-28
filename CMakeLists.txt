@@ -610,6 +610,12 @@ add_library(lubancode_core STATIC
   src/package/semver.cpp
   src/package/manifest.cpp
   src/package/inventory.cpp
+  # 自进化闭环阶段 1:EvolutionObservation、五路只读 adapter、指纹归一、
+  # 采集器与只追加观察账(纯逻辑,复用 skills/journal 的既有脱敏)。
+  src/evolution/observation.cpp
+  src/evolution/adapters.cpp
+  src/evolution/collector.cpp
+  src/evolution/observation_store.cpp
 )
 target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -667,6 +673,8 @@ add_library(lubancode_app STATIC
   src/app/commands/workflow_commands.cpp
   # 统一 Package 封装单阶段 1:/package list|show|doctor 只读面。
   src/app/commands/package_commands.cpp
+  # 自进化闭环阶段 1:/evolve status|list|show 只读面。
+  src/app/commands/evolve_commands.cpp
   # 终端接线收尾单:/memory 命令 presenter(自大类搬出)。
   src/app/commands/memory_commands.cpp
   # 终端接线收尾单:/trace 命令 presenter(自大类搬出)。

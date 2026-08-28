@@ -59,6 +59,7 @@ enum class SlashCommand {
     Loop,      // /loop [interval] [prompt]|list/status/pause/resume/stop/run:会话定时循环(loop 单)
     Plan,      // /plan [正文|status|off|review]:只读研究模式(Plan 模式单)
     Package,  // /package list|show|doctor:Package 只读面(统一 Package 封装单阶段 1)
+    Evolve,   // /evolve status|list|show:自进化观察账只读面(自进化闭环阶段 1)
     WorkflowAlias,  // /<workflow-alias> <args>:直呼已装 Workflow(运行时查 catalog)
     Agents,   // /agents:列 Agent Catalog(自定义 Agent 单阶段 1,只读)
     Agent,    // /agent doctor <名字>:单 Agent 静态预检(阶段 1 只读骨架)

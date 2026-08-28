@@ -5,6 +5,7 @@
 
 #include "app/commands/agent_commands.hpp"
 #include "app/commands/doctor_commands.hpp"
+#include "app/commands/evolve_commands.hpp"
 #include "app/commands/goal_commands.hpp"
 #include "app/commands/hook_commands.hpp"
 #include "app/commands/loop_commands.hpp"
@@ -63,6 +64,7 @@ const std::vector<SlashCommandSpec>& SlashCommandTable() {
         {lubancode::cli::SlashCommand::Keymap, "keymap", HandleSlashKeymap, false, false},
         {lubancode::cli::SlashCommand::Plan, "plan", HandleSlashPlan, false, true},
         {lubancode::cli::SlashCommand::Package, "package", HandleSlashPackage, false, false},
+        {lubancode::cli::SlashCommand::Evolve, "evolve", HandleSlashEvolve, false, false},
         {lubancode::cli::SlashCommand::Trace, "trace", HandleSlashTrace, false, false},
         {lubancode::cli::SlashCommand::Doctor, "doctor", HandleSlashDoctor, false, false},
         {lubancode::cli::SlashCommand::Goal, "goal", HandleSlashGoal, false, false},
