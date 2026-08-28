@@ -24,28 +24,32 @@ bool IsAsciiAlnum(char c) {
     return std::isalnum(static_cast<unsigned char>(c)) != 0;
 }
 
-// frontmatter 里的技能名:只留 ASCII 字母数字与 '-' '_' '.',其余(含中文、
-// 空白)换 '-',连续并一、首尾剥。全没了给 "recorded-skill"。这是安装层
-// SanitizeSkillDirectoryName 认的字汇,起草时就对齐,免得装的时候再撞墙。
+// frontmatter 里的技能名按 Agent Skills 规范收口:只留 ASCII 小写字母、
+// 数字与单横线,最多 64 字符。其余(含中文、空白)换横线；全没了给
+// "recorded-skill"。
 std::string MakeSkillNameSlug(const std::string& name) {
     std::string out;
     bool last_dash = false;
-    for (const char c : name) {
-        if (IsAsciiAlnum(c) || c == '-' || c == '_' || c == '.') {
+    for (const unsigned char raw : name) {
+        const char c = static_cast<char>(raw);
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
             out.push_back(c);
+            last_dash = false;
+        } else if (c >= 'A' && c <= 'Z') {
+            out.push_back(static_cast<char>(c - 'A' + 'a'));
             last_dash = false;
         } else if (!last_dash && !out.empty()) {
             out.push_back('-');
             last_dash = true;
         }
-    }
-    while (!out.empty() && (out.front() == '-' || out.front() == '.')) {
-        out.erase(out.begin());
+        if (out.size() >= 64) {
+            break;
+        }
     }
     while (!out.empty() && out.back() == '-') {
         out.pop_back();
     }
-    if (out.empty() || out == "." || out == "..") {
+    if (out.empty()) {
         return "recorded-skill";
     }
     return out;
@@ -90,6 +94,16 @@ std::string SingleLine(std::string text, std::size_t max_chars) {
         out += "…";
     }
     return out;
+}
+
+std::size_t Utf8CharacterCount(const std::string& text) {
+    std::size_t count = 0;
+    for (const unsigned char ch : text) {
+        if ((ch & 0xC0) != 0x80) {
+            ++count;
+        }
+    }
+    return count;
 }
 
 // ---------------------------------------------------------------------------
@@ -479,8 +493,15 @@ std::expected<std::string, std::string> ValidateSkillMarkdownForInstall(const st
     if (!parsed->name.has_value() || parsed->name->empty()) {
         return std::unexpected("frontmatter 缺 name,不予安装");
     }
-    if (!parsed->description.has_value() || parsed->description->empty()) {
+    if (!parsed->description.has_value() ||
+        parsed->description->find_first_not_of(" \t\r\n") == std::string::npos) {
         return std::unexpected("frontmatter 缺 description,不予安装");
+    }
+    if (!tools::IsValidAgentSkillName(*parsed->name)) {
+        return std::unexpected("frontmatter name 不合 Agent Skills 命名规范,不予安装");
+    }
+    if (Utf8CharacterCount(*parsed->description) > 1024) {
+        return std::unexpected("frontmatter description 超过 1024 字符,不予安装");
     }
     if (parsed->body.find("验收") == std::string::npos) {
         return std::unexpected("正文缺验收节,不予安装");

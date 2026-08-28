@@ -400,15 +400,17 @@ MCP wrapper 默认 `needs_confirm=true`。schema 来自外部服务器，不代�
 
 ## 十三、Skill 系统怎样触发
 
-Skill 是按需说明，不是可执行协议。启动时扫描三层：
+Skill 是按需说明，不是可执行协议。启动时扫描五处：
 
 ```text
 发行包官方 skills
+~/.agents/skills
 ~/.lubancode/skills
+<cwd>/.agents/skills
 <cwd>/.lubancode/skills
 ```
 
-同名取项目 > 用户 > 官方。结果按名字稳定排序。
+同名取项目 > 用户 > 官方；同一层取 `.lubancode` > `.agents`。冲突记日志，结果按名字稳定排序。
 
 启动只把 `name + description` 注入 system：
 
@@ -428,21 +430,22 @@ Skill 是按需说明，不是可执行协议。启动时扫描三层：
 
 ## 十四、Skill 解析与 corner cases
 
-frontmatter 不是完整 YAML parser。现版只认：
+frontmatter 交给 yaml-cpp。现版按 Agent Skills 规范处理：
 
 - 第一行必须恰是 `---`。
 - 后面要有闭合 `---`。
-- 块内按首个冒号切 `name`、`description`。
-- 值两端成对单双引号会剥掉。
-- 其他 key 与不含冒号的行忽略。
+- `name`、`description` 必填且须是 YAML 标量。
+- 多行 description 与其他标准 frontmatter 字段可照常出现。
+- 别家旧件若只坏在裸 description 含冒号，会退回扁平解析，尽量兼容。
 
 边界：
 
 | 情形 | 当前行为 |
 | --- | --- |
-| 没 frontmatter | 整篇当正文；name 回落目录名 |
+| 没 frontmatter | 缺必填元数据，跳过并警告 |
 | 开了 `---` 未闭合 | 跳过整份技能，stderr 警告 |
-| 无 description | 能加载；索引说明为空，较难触发 |
+| 无 name / description | 跳过并警告 |
+| name 不合格式或不等于目录名 | 警告，仍按 frontmatter 名兼容加载 |
 | 启动后手工改正文 | 清单不重扫；调用时按原目录重读正文 |
 | 启动后删文件 | 调用报“目录还在但 SKILL.md 读不到” |
 | 超长 SKILL.md | 当前整篇读入，没有独立字节上限；后续上下文层兜底 |

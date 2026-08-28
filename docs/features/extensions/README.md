@@ -35,15 +35,17 @@ Skill 是一份按需展开的工作说明。它可带参考资料、模板和�
 ```text
 <exe-dir>/skills/<skill-name>/SKILL.md
 <prefix>/share/lubancode/skills/<skill-name>/SKILL.md
+~/.agents/skills/<skill-name>/SKILL.md
 ~/.lubancode/skills/<skill-name>/SKILL.md
+<project>/.agents/skills/<skill-name>/SKILL.md
 <project>/.lubancode/skills/<skill-name>/SKILL.md
 ```
 
 前两处是同一层“官方级”：便携包和 Windows 安装从可执行文件旁找；POSIX 前缀安装还会找 `share/lubancode/skills`。发行包、安装脚本与 CMake install 会把官方 Skill 一并带上。
 
-同名优先级为：项目级 > 用户级 > 官方级。旧版本曾把官方 `lubancode-config` 播种进用户目录；若那份文件带系统维护标记，现版会让它退位，改用发行包新版。真正由用户自建的同名 Skill 仍可覆盖官方级。
+同名优先级为：项目 `.lubancode` > 项目 `.agents` > 用户 `.lubancode` > 用户 `.agents` > 官方级。项目总压过用户；同一层里，LubanCode 专用版本压过跨客户端共享版本。每次冲突都会写警告日志。旧版本曾把官方 `lubancode-config` 播种进用户目录；若那份文件带系统维护标记，现版会让它退位，改用发行包新版。真正由用户自建的同名 Skill 仍可覆盖官方级。
 
-LubanCode 不自动扫描 `.codex/skills`、`.claude/skills` 或 `.agents/skills`；要用外部 Skill，先安装进自己的技能目录。
+`.agents/skills` 是 Agent Skills 的跨客户端共享目录，LubanCode 会自动扫描。`.codex/skills`、`.claude/skills` 仍不扫；需要时可用 `/skill install` 装进 LubanCode 用户目录。
 
 ### 2.2 最小文件
 
@@ -58,7 +60,9 @@ description: 发版前核对版本、测试、变更记录与产物。
 先读版本号与 git 状态，再跑测试。任何一步失败，停下说明，不得打 tag。
 ```
 
-`name` 要稳定。`description` 要写“何时该用”，别只写一串漂亮话。正文列步骤、边界和失败处置。脚本、模板、参考资料放在同一目录，用相对路径引用。
+`name` 须与父目录同名，长 1 到 64 字符，只用小写字母、数字和单横线；横线不可顶头、收尾或连写。`description` 长 1 到 1024 字符，要把“能做什么、何时该用”一并写清。正文列步骤、边界和失败处置。脚本、模板、参考资料放在同一目录，用相对路径引用。
+
+解析走真正的 YAML，故多行 description、`license`、`compatibility`、`metadata` 与实验字段 `allowed-tools` 都可保留。发现时只把 `name + description` 放进上下文；命中后才载正文，资源仍按需读取。格式不规范的名字会记警告后兼容加载；缺 `name`、缺 `description` 或 YAML 完全读不通，则跳过该 Skill。
 
 ### 2.3 管理命令
 
@@ -508,7 +512,7 @@ Hooks 在会话或工具边界跑外部命令。适合审计、格式检查、�
 
 **Skill**
 
-一项技能一个目录。只带必要资源。写清依赖、平台与安装步骤。随 LubanCode 发布的官方 Skill 放仓库 `skills/`，打包后保持同样目录；用户自装 Skill 仍落 `~/.lubancode/skills/`，升级程序不覆盖。
+一项技能一个目录。只带必要资源。写清依赖、平台与安装步骤。随 LubanCode 发布的官方 Skill 放仓库 `skills/`，打包后保持同样目录；用户自装 Skill 仍落 `~/.lubancode/skills/`，升级程序不覆盖。要与 VS Code、Codex 等兼容客户端共用，就手工放进 `.agents/skills/`。
 
 **MCP**
 

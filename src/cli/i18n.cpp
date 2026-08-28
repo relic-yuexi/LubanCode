@@ -1128,7 +1128,9 @@ const Entry kZhCN[] = {
     {"cmd.skills.empty",
      "还没有扫描到任何技能。\n\n"
      "技能目录约定(先建目录,再放一份 <技能名>/SKILL.md):\n"
+     "  项目共享: {0}/.agents/skills/<技能名>/SKILL.md\n"
      "  项目级: {0}/.lubancode/skills/<技能名>/SKILL.md\n"
+     "  主目录共享: {1}/.agents/skills/<技能名>/SKILL.md\n"
      "  主目录级: {1}/.lubancode/skills/<技能名>/SKILL.md\n\n"
      "SKILL.md 起手要有 YAML frontmatter(name/description 两个字段,后面跟正文):\n"
      "  ---\n"
@@ -1156,6 +1158,7 @@ const Entry kZhCN[] = {
      "  /skill remove <名字>\n"
      "      删除用户级技能。\n"
      "用户级落盘: ~/.lubancode/skills/<名字>/SKILL.md\n"
+     "跨客户端共享: ~/.agents/skills 或 <cwd>/.agents/skills\n"
      "项目级手工放置: <cwd>/.lubancode/skills/<名字>/SKILL.md"},
     {"cmd.skill.no_home", "找不到用户主目录，技能没处安放。"},
     {"cmd.skill.list_empty", "这里还没有技能。用 /skill install <网址或本地路径> 装一份。"},
@@ -2781,6 +2784,7 @@ const Entry kEn[] = {
      "  /skill remove <name>\n"
      "      Remove a home-level skill.\n"
      "Home path: ~/.lubancode/skills/<name>/SKILL.md\n"
+     "Cross-client paths: ~/.agents/skills or <cwd>/.agents/skills\n"
      "Project path (manual): <cwd>/.lubancode/skills/<name>/SKILL.md"},
     {"cmd.resume.usage", "Usage: /resume (full-screen picker) | /resume <number> | /resume <id>"},
     {"cmd.resume.cancelled", "Resume cancelled."},

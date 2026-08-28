@@ -175,7 +175,7 @@
 
 ### `skill`
 
-按技能名读取 `SKILL.md` 与所需资源，把内容交给模型。同名优先级是项目级 > 用户级 > 发行包官方级。管理命令由 `/skill` 负责，模型工具只负责使用，不负责暗中安装。
+按技能名读取 `SKILL.md`，把正文与资源基准目录交给模型。扫描兼容 Agent Skills 的用户级、项目级 `.agents/skills`，也保留 `.lubancode/skills`。同名优先级是项目 > 用户 > 官方；同层里 `.lubancode` > `.agents`。管理命令由 `/skill` 负责，模型工具只负责使用，不负责暗中安装。
 
 ### `tool_search`
 

@@ -59,7 +59,7 @@
 | 用户选择 | `ask_user` 一次问 1 到 4 题，支持单选、多选和自由填写；只在交互模式挂载。 |
 | 工具延迟挂载 | 工具总数超过阈值时，MCP/插件等先留索引；`tool_search` 命中后再放进请求 schema。 |
 | PTC 后端 | `programmatic_tool_calling` 把一条脚本拆成多枚受控工具调用；每枚调用仍走 schema、Hook、确认、取消与审计。 |
-| Skills | 官方级、用户级、项目级三层 `SKILL.md`；项目 > 用户 > 官方。可列出、安装、更新、删除用户技能。 |
+| Skills | Agent Skills `SKILL.md`；扫描官方级及用户/项目两层 `.agents/skills`、`.lubancode/skills`。项目 > 用户 > 官方，同层原生 > 共享。可列出、安装、更新、删除用户技能。 |
 | 项目指令 | 从 Git 根到 cwd 分层加载 `AGENTS.override.md` / `AGENTS.md`；主代理与子代理共用。 |
 | 隔离 worktree | 新建、列出、保留或移除工作树；会话切换到新 cwd 后重建项目上下文。 |
 | 项目记忆 | 默认关闭；本地召回；`off/review/auto` 三档学习；待审候选与正式写入分账。 |

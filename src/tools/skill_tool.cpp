@@ -29,6 +29,12 @@ nlohmann::json SkillTool::input_schema() const {
     nlohmann::json name_prop = nlohmann::json::object();
     name_prop["type"] = "string";
     name_prop["description"] = ToolText("skill", "param.name", "要加载的技能名,跟系统提示里列出的名字一致");
+    if (!skills_.empty()) {
+        name_prop["enum"] = nlohmann::json::array();
+        for (const auto& skill : skills_) {
+            name_prop["enum"].push_back(skill.name);
+        }
+    }
     properties["name"] = name_prop;
 
     schema["properties"] = properties;

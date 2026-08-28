@@ -98,6 +98,46 @@ TEST_CASE("ParseSkillMarkdown: 引号包裹的值会被去掉引号") {
     CHECK(*parsed->description == "single quoted");
 }
 
+TEST_CASE("ParseSkillMarkdown: 真 YAML 多行 description 可解析") {
+    const std::string content =
+        "---\n"
+        "name: multiline-description\n"
+        "description: >\n"
+        "  处理表格与图表。\n"
+        "  用户提到数据分析时使用。\n"
+        "metadata:\n"
+        "  author: example\n"
+        "---\n"
+        "正文\n";
+    const auto parsed = tools::ParseSkillMarkdown(content);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->description.has_value());
+    CHECK(*parsed->description == "处理表格与图表。 用户提到数据分析时使用。\n");
+}
+
+TEST_CASE("ParseSkillMarkdown: 兼容 description 裸值里的冒号") {
+    const std::string content =
+        "---\n"
+        "name: legacy-colon\n"
+        "description: Use when: the user asks about PDFs\n"
+        "---\n"
+        "正文\n";
+    const auto parsed = tools::ParseSkillMarkdown(content);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->description.has_value());
+    CHECK(*parsed->description == "Use when: the user asks about PDFs");
+}
+
+TEST_CASE("Agent Skills name 校验遵守标准字汇与边界") {
+    CHECK(tools::IsValidAgentSkillName("pdf-processing"));
+    CHECK(tools::IsValidAgentSkillName("skill2"));
+    CHECK_FALSE(tools::IsValidAgentSkillName("PDF-processing"));
+    CHECK_FALSE(tools::IsValidAgentSkillName("pdf_processing"));
+    CHECK_FALSE(tools::IsValidAgentSkillName("-pdf"));
+    CHECK_FALSE(tools::IsValidAgentSkillName("pdf--processing"));
+    CHECK_FALSE(tools::IsValidAgentSkillName(std::string(65, 'a')));
+}
+
 // ---------------------------------------------------------------------------
 // 2) ScanSkillsDir / LoadSkills:真在临时目录造文件。
 // ---------------------------------------------------------------------------
@@ -123,6 +163,15 @@ public:
     // 在 <root>/<home_or_project>/.lubancode/skills/<skill_name>/SKILL.md 里写一份技能。
     void WriteSkill(const std::string& base_subdir, const std::string& skill_name, const std::string& content) const {
         const std::filesystem::path skill_dir = dir_ / base_subdir / ".lubancode" / "skills" / skill_name;
+        std::error_code ec;
+        std::filesystem::create_directories(skill_dir, ec);
+        std::ofstream file(skill_dir / "SKILL.md", std::ios::binary);
+        file << content;
+    }
+
+    void WriteAgentSkill(const std::string& base_subdir, const std::string& skill_name,
+                         const std::string& content) const {
+        const std::filesystem::path skill_dir = dir_ / base_subdir / ".agents" / "skills" / skill_name;
         std::error_code ec;
         std::filesystem::create_directories(skill_dir, ec);
         std::ofstream file(skill_dir / "SKILL.md", std::ios::binary);
@@ -167,6 +216,27 @@ TEST_CASE("ScanSkillsDir: 扫到一个正常技能") {
     CHECK(metas[0].source_level == "项目级");
 }
 
+TEST_CASE("ScanSkillsDir: 缺 Agent Skills 必填元数据就跳过") {
+    TempSkillsRoot root;
+    root.WriteSkill("proj", "missing-name", "---\ndescription: 有说明\n---\n正文\n");
+    root.WriteSkill("proj", "missing-description", "---\nname: missing-description\n---\n正文\n");
+    root.WriteSkill("proj", "plain-markdown", "只有正文\n");
+
+    const auto metas =
+        tools::ScanSkillsDir(std::filesystem::path(root.Path()) / "proj" / ".lubancode" / "skills", "项目级");
+    CHECK(metas.empty());
+}
+
+TEST_CASE("ScanSkillsDir: 名字不合规范或不匹配目录时警告但兼容加载") {
+    TempSkillsRoot root;
+    root.WriteSkill("proj", "folder-name", SkillContent("Legacy_Name", "旧客户端技能", "正文\n"));
+
+    const auto metas =
+        tools::ScanSkillsDir(std::filesystem::path(root.Path()) / "proj" / ".lubancode" / "skills", "项目级");
+    REQUIRE(metas.size() == 1);
+    CHECK(metas[0].name == "Legacy_Name");
+}
+
 TEST_CASE("LoadSkills: 同名技能,项目级覆盖主目录级") {
     TempSkillsRoot root;
     root.WriteSkill("home", "shared-skill", SkillContent("shared-skill", "主目录级的说明", "主目录级正文\n"));
@@ -207,6 +277,40 @@ TEST_CASE("LoadSkills: 官方、主目录、项目三级按顺序覆盖") {
                                        [](const tools::SkillMeta& meta) { return meta.name == "official-only"; });
     REQUIRE(official != skills.end());
     CHECK(official->source_level == "官方");
+}
+
+TEST_CASE("LoadSkills: .agents 与原生目录五处按固定次序覆盖") {
+    TempSkillsRoot root;
+    root.WriteOfficialSkill("shared-skill", SkillContent("shared-skill", "官方", "官方正文\n"));
+    root.WriteAgentSkill("home", "shared-skill", SkillContent("shared-skill", "用户共享", "正文\n"));
+    root.WriteSkill("home", "shared-skill", SkillContent("shared-skill", "用户原生", "正文\n"));
+    root.WriteAgentSkill("proj", "shared-skill", SkillContent("shared-skill", "项目共享", "正文\n"));
+    root.WriteSkill("proj", "shared-skill", SkillContent("shared-skill", "项目原生", "正文\n"));
+    root.WriteAgentSkill("home", "home-agent-only",
+                         SkillContent("home-agent-only", "用户 .agents", "正文\n"));
+    root.WriteAgentSkill("proj", "project-agent-only",
+                         SkillContent("project-agent-only", "项目 .agents", "正文\n"));
+
+    const auto skills =
+        tools::LoadSkills(root.BaseDir("proj"), root.BaseDir("home"), root.BaseDir("official"));
+    REQUIRE(skills.size() == 3);
+    const auto shared = std::find_if(skills.begin(), skills.end(),
+                                     [](const tools::SkillMeta& meta) { return meta.name == "shared-skill"; });
+    REQUIRE(shared != skills.end());
+    CHECK(shared->description == "项目原生");
+    CHECK(shared->dir_path.find(".lubancode") != std::string::npos);
+
+    const auto home_agent = std::find_if(
+        skills.begin(), skills.end(), [](const tools::SkillMeta& meta) { return meta.name == "home-agent-only"; });
+    REQUIRE(home_agent != skills.end());
+    CHECK(home_agent->source_level == "主目录级");
+    CHECK(home_agent->dir_path.find(".agents") != std::string::npos);
+
+    const auto project_agent = std::find_if(
+        skills.begin(), skills.end(), [](const tools::SkillMeta& meta) { return meta.name == "project-agent-only"; });
+    REQUIRE(project_agent != skills.end());
+    CHECK(project_agent->source_level == "项目级");
+    CHECK(project_agent->dir_path.find(".agents") != std::string::npos);
 }
 
 TEST_CASE("LoadSkills: 旧版播种的官方维护副本让位给发行包新版") {
@@ -291,6 +395,9 @@ TEST_CASE("SkillTool: 命中,返回目录行 + body 正文") {
     CHECK(result.content.find("技能目录: ") != std::string::npos);
     CHECK(result.content.find(skills[0].dir_path) != std::string::npos);
     CHECK(result.content.find("写诗必须五言绝句") != std::string::npos);
+    const auto schema = tool.input_schema();
+    REQUIRE(schema["properties"]["name"]["enum"].is_array());
+    CHECK(schema["properties"]["name"]["enum"] == nlohmann::json::array({"poem-style"}));
 }
 
 TEST_CASE("SkillTool: 未命中,is_error 并列出可用名字") {

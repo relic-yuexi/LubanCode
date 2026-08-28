@@ -520,7 +520,7 @@ GLM 模型档位已经写进 provider 目录。`glm-5.2` 认 `max/xhigh/high/med
 
 项目级的 `.lubancode/`(在 `<cwd>` 下)能放 `config.json`(按字段压过全局)、`settings.local.json`(本地权限,不进版本库)与 `skills/`(同名技能时项目级压过主目录级)。
 
-官方 Skill 不再播种进主目录。便携包、Windows 安装与开发构建从 `<exe-dir>/skills/` 读取，并把同版本官方文档放在 `<exe-dir>/docs/`。POSIX 前缀安装则用 `<prefix>/share/lubancode/skills/` 与 `<prefix>/share/lubancode/docs/`。两处都守同一相对布局，故 `lubancode-config` 可从技能目录经 `../../docs` 读取官方文档。同名优先级是项目级 > 主目录级 > 官方级。旧版主目录里带系统维护标记的 `lubancode-config` 副本会自动让位给发行包新版。
+官方 Skill 不再播种进主目录。便携包、Windows 安装与开发构建从 `<exe-dir>/skills/` 读取，并把同版本官方文档放在 `<exe-dir>/docs/`。POSIX 前缀安装则用 `<prefix>/share/lubancode/skills/` 与 `<prefix>/share/lubancode/docs/`。两处都守同一相对布局，故 `lubancode-config` 可从技能目录经 `../../docs` 读取官方文档。用户级与项目级还会各扫 `.agents/skills`、`.lubancode/skills`。同名优先级是项目 > 用户 > 官方，同层取 `.lubancode` > `.agents`。旧版主目录里带系统维护标记的 `lubancode-config` 副本会自动让位给发行包新版。
 
 ## 十、命令会改哪份文件
 

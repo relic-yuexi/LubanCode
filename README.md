@@ -212,7 +212,7 @@ git diff --cached | lubancode "替我审一遍这份改动"
 | `/model` · `/think` | 切模型与推理强度；`/model roles` 看三档路由，`/model <role> <id>` 直接改某一档。 |
 | `/doctor` | 诊断本地兼容端：`effort` 发极小探针看档位实发值与 usage 拆账，`cache` 读服务端指标、对账固定前缀命中率。 |
 | `/context` · `/compact` | 看上下文占用（最近一次主请求的占用，不含子代理累计），手工压缩历史。 |
-| `/skills` · `/skill` | 管理 `~/.lubancode/skills` 里的技能；裸敲 `/skill` 看完整安装示例。 |
+| `/skills` · `/skill` | 使用 Agent Skills；扫描 `.agents/skills`，安装默认落 `~/.lubancode/skills`。 |
 | `/mcp` · `/lsp` · `/plugins` | 看外接工具与语言服务器状态。 |
 | `/tools` · `/todos` | 看工具挂载状态与待办清单。 |
 | `/plan` | 进只读规划档，先查清、列计划，再审后执行。 |
@@ -241,7 +241,7 @@ git diff --cached | lubancode "替我审一遍这份改动"
 
 LubanCode 留了四扇门：
 
-1. **Skills**：一份带 frontmatter 的 `SKILL.md`，可放主目录，也可随项目走。
+1. **Skills**：一份标准 `SKILL.md`；可放 `.agents/skills` 跨客户端共享，也可放 `.lubancode/skills`。
 2. **MCP / LSP**：在配置里挂 stdio 服务与语言服务器。
 3. **Lua 插件**：一个 `.lua` 文件就是一件工具，适合轻量扩展。
 4. **C ABI 插件**：Windows DLL 同进程加载，适合原生能力与已有 C/C++ 库。

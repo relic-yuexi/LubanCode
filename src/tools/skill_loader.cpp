@@ -7,6 +7,8 @@
 #include <sstream>
 #include <string_view>
 
+#include <yaml-cpp/yaml.h>
+
 #include "tools/path_utils.hpp"
 #include "platform/log_sink.hpp"
 
@@ -69,6 +71,64 @@ std::string TrimTrailingCr(const std::string& line) {
     return line;
 }
 
+std::optional<ParsedSkillFile> ParseLooseFrontmatter(const std::string& frontmatter, std::string body) {
+    ParsedSkillFile result;
+    result.body = std::move(body);
+    std::istringstream iss(frontmatter);
+    std::string line;
+    while (std::getline(iss, line)) {
+        line = TrimTrailingCr(line);
+        const std::size_t colon = line.find(':');
+        if (colon == std::string::npos) {
+            continue;
+        }
+        const std::string key = Trim(line.substr(0, colon));
+        const std::string value = StripQuotes(Trim(line.substr(colon + 1)));
+        if (key == "name") {
+            result.name = value;
+        } else if (key == "description") {
+            result.description = value;
+        }
+    }
+    if (!result.name.has_value() && !result.description.has_value()) {
+        return std::nullopt;
+    }
+    return result;
+}
+
+void WarnCollision(const SkillMeta& previous, const SkillMeta& replacement) {
+    platform::LogSink::Instance().Warn(
+        "skills", "同名技能 " + replacement.name + " 冲突，采用 " + replacement.dir_path + "，遮住 " +
+                      previous.dir_path);
+}
+
+}  // namespace
+
+bool IsValidAgentSkillName(const std::string& name) {
+    if (name.empty() || name.size() > 64 || name.front() == '-' || name.back() == '-' ||
+        name.find("--") != std::string::npos) {
+        return false;
+    }
+    for (const unsigned char ch : name) {
+        if ((ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-') {
+            return false;
+        }
+    }
+    return true;
+}
+
+namespace {
+
+std::size_t Utf8CharacterCount(const std::string& text) {
+    std::size_t count = 0;
+    for (const unsigned char ch : text) {
+        if ((ch & 0xC0) != 0x80) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 }  // namespace
 
 std::optional<ParsedSkillFile> ParseSkillMarkdown(const std::string& content) {
@@ -118,24 +178,26 @@ std::optional<ParsedSkillFile> ParseSkillMarkdown(const std::string& content) {
     const std::string frontmatter = content.substr(frontmatter_begin, close_begin - frontmatter_begin);
     result.body = (close_line_end == std::string::npos) ? std::string() : content.substr(close_line_end + 1);
 
-    std::istringstream iss(frontmatter);
-    std::string line;
-    while (std::getline(iss, line)) {
-        line = TrimTrailingCr(line);
-        const std::size_t colon = line.find(':');
-        if (colon == std::string::npos) {
-            continue;  // 不是 "key: value" 形状的行,直接跳过,不当错误
+    try {
+        const YAML::Node root = YAML::Load(frontmatter);
+        if (!root.IsMap()) {
+            return std::nullopt;
         }
-        const std::string key = Trim(line.substr(0, colon));
-        const std::string value = StripQuotes(Trim(line.substr(colon + 1)));
-        if (key == "name") {
-            result.name = value;
-        } else if (key == "description") {
-            result.description = value;
-        }
+        const auto read_string = [&](const char* key) -> std::optional<std::string> {
+            const YAML::Node value = root[key];
+            if (!value || !value.IsScalar()) {
+                return std::nullopt;
+            }
+            return value.as<std::string>();
+        };
+        result.name = read_string("name");
+        result.description = read_string("description");
+        return result;
+    } catch (const YAML::Exception&) {
+        // 接入指南特意建议宽容这类旧件。只回退顶层 name/description，
+        // 不拿这条小路冒充完整 YAML 解析器。
+        return ParseLooseFrontmatter(frontmatter, std::move(result.body));
     }
-
-    return result;
 }
 
 std::vector<SkillMeta> ScanSkillsDir(const std::filesystem::path& skills_root, const std::string& source_level) {
@@ -174,9 +236,29 @@ std::vector<SkillMeta> ScanSkillsDir(const std::filesystem::path& skills_root, c
         }
 
         const std::string dir_name = PathToUtf8(entry.path().filename());
+        if (!parsed->name.has_value() || parsed->name->empty()) {
+            platform::LogSink::Instance().Warn("skills", PathToUtf8(skill_md) + " 缺必填 name，跳过");
+            continue;
+        }
+        if (!parsed->description.has_value() || Trim(*parsed->description).empty()) {
+            platform::LogSink::Instance().Warn("skills", PathToUtf8(skill_md) + " 缺必填 description，跳过");
+            continue;
+        }
+        if (!IsValidAgentSkillName(*parsed->name)) {
+            platform::LogSink::Instance().Warn(
+                "skills", PathToUtf8(skill_md) + " 的 name 不合 Agent Skills 命名规范，仍按兼容模式加载");
+        }
+        if (*parsed->name != dir_name) {
+            platform::LogSink::Instance().Warn(
+                "skills", PathToUtf8(skill_md) + " 的 name 与父目录名不一致，仍按 frontmatter 名加载");
+        }
+        if (Utf8CharacterCount(*parsed->description) > 1024) {
+            platform::LogSink::Instance().Warn(
+                "skills", PathToUtf8(skill_md) + " 的 description 超过 1024 字符，仍按兼容模式加载");
+        }
         SkillMeta meta;
-        meta.name = parsed->name.value_or(dir_name);
-        meta.description = parsed->description.value_or(std::string());
+        meta.name = *parsed->name;
+        meta.description = Trim(*parsed->description);
         meta.dir_path = PathToUtf8(entry.path());
         meta.source_level = source_level;
         meta.managed_official_copy = IsManagedOfficialCopy(content, *parsed);
@@ -190,26 +272,38 @@ std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::opt
                                   const std::optional<std::string>& official_skills_dir) {
     std::map<std::string, SkillMeta> merged;  // std::map 天然按 key 排序,输出顺序稳定
 
-    if (official_skills_dir.has_value()) {
-        for (auto& meta : ScanSkillsDir(Utf8ToPath(*official_skills_dir), "官方")) {
+    const auto merge = [&](std::vector<SkillMeta> incoming) {
+        for (auto& meta : incoming) {
+            if (const auto previous = merged.find(meta.name); previous != merged.end()) {
+                WarnCollision(previous->second, meta);
+            }
             merged[meta.name] = std::move(meta);
         }
+    };
+
+    if (official_skills_dir.has_value()) {
+        merge(ScanSkillsDir(Utf8ToPath(*official_skills_dir), "官方"));
     }
 
     if (home_dir.has_value()) {
+        const std::filesystem::path home_agents_root = Utf8ToPath(*home_dir) / ".agents" / "skills";
+        merge(ScanSkillsDir(home_agents_root, "主目录级"));
+
         const std::filesystem::path home_skills_root = Utf8ToPath(*home_dir) / ".lubancode" / "skills";
         for (auto& meta : ScanSkillsDir(home_skills_root, "主目录级")) {
             if (meta.managed_official_copy && merged.contains(meta.name)) {
                 continue;
             }
+            if (const auto previous = merged.find(meta.name); previous != merged.end()) {
+                WarnCollision(previous->second, meta);
+            }
             merged[meta.name] = std::move(meta);
         }
     }
 
-    const std::filesystem::path project_skills_root = Utf8ToPath(project_dir) / ".lubancode" / "skills";
-    for (auto& meta : ScanSkillsDir(project_skills_root, "项目级")) {
-        merged[meta.name] = std::move(meta);  // 同名:项目级覆盖主目录级
-    }
+    const std::filesystem::path project_root = Utf8ToPath(project_dir);
+    merge(ScanSkillsDir(project_root / ".agents" / "skills", "项目级"));
+    merge(ScanSkillsDir(project_root / ".lubancode" / "skills", "项目级"));
 
     std::vector<SkillMeta> out;
     out.reserve(merged.size());
@@ -225,10 +319,9 @@ std::string BuildSkillsPromptSegment(const std::vector<SkillMeta>& skills) {
         return std::string();
     }
     std::string out =
-        "技能目录铁则:LubanCode 扫发行包官方 skills、~/.lubancode/skills/<技能名>/SKILL.md 与 "
-        "<cwd>/.lubancode/skills/<技能名>/SKILL.md;绝不可把给 LubanCode 的技能装进 "
-        ".codex/skills、.claude/skills 或 .agents/skills。本机来源可用 /skill install <目录或 SKILL.md> "
-        "装进用户级目录。\n"
+        "技能目录约定:LubanCode 扫发行包官方 skills、~/.agents/skills、~/.lubancode/skills、"
+        "<cwd>/.agents/skills 与 <cwd>/.lubancode/skills。跨客户端共享技能可放 .agents/skills；"
+        "/skill install 默认装进 ~/.lubancode/skills。\n"
         "可用技能(用 skill 工具按名加载):\n";
     for (const auto& meta : skills) {
         out += "- " + meta.name + ": " + meta.description + "\n";

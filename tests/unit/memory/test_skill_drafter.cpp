@@ -194,6 +194,12 @@ TEST_CASE("校验:frontmatter 不合法不许装,回炉保正文") {
                     "---\nname: a\ndescription: b\n---\n正文里没有成事标准\n")
                     .has_value());
     CHECK_FALSE(lubancode::skills::ValidateSkillMarkdownForInstall("---\nname: a\ndescription: b\n正文").has_value());
+    CHECK_FALSE(lubancode::skills::ValidateSkillMarkdownForInstall(
+                    "---\nname: Bad_Name\ndescription: b\n---\n## 验收\n- x\n")
+                    .has_value());
+    CHECK_FALSE(lubancode::skills::ValidateSkillMarkdownForInstall(
+                    "---\nname: blank-description\ndescription: '   '\n---\n## 验收\n- x\n")
+                    .has_value());
 
     // 回炉:损坏 frontmatter 推倒重建,正文保住
     const std::string repaired = lubancode::skills::RepairSkillFrontmatter(
