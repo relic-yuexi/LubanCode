@@ -51,6 +51,37 @@ std::string ExplorePersona() {
                     "完成后给出简明结论和具体文件位置,不要寒暄。");
 }
 
+// 自定义 Agent 的人格段(P2-2):名字 + YAML description 拼一份跟内置两枚
+// 同骨架的 persona。description 是用户写给主代理看的"何时派它出场",给子
+// 代理自己也念一遍——角色边界(tools.allow)与任务姿态都在这句里。
+std::string CustomAgentPersona(const agent::AgentDefinition& definition) {
+    std::string persona = "你是 " + definition.name + " 子代理。";
+    if (!definition.description.empty()) {
+        persona += definition.description + " ";
+    }
+    persona += "专注给定任务,完成后直接给出结论,不要寒暄。";
+    if (!definition.tools.allow.empty()) {
+        persona += "你的工具面按定义收窄,撞到不在白名单内的工具属正常边界,改用白名单内工具完成。";
+    }
+    return persona;
+}
+
+// 预装技能段(P2-2:skills.preload):body 与名字按位对齐,缺正文的技能只
+// 登记名字(正文读不到不挡派发——doctor 那边另有诊断)。空名单返回空串,
+// 一个字不注入。
+std::string AppendPreloadedSkills(const std::vector<std::string>& names,
+                                  const std::vector<std::string>& bodies) {
+    if (names.empty()) {
+        return std::string();
+    }
+    std::string out = "\n\n[预装技能] 以下技能说明书已随任务预载,直接照做,不必再用 skill 工具加载:";
+    for (std::size_t i = 0; i < names.size(); ++i) {
+        out += "\n\n--- 预装技能 " + names[i] + " ---\n";
+        out += i < bodies.size() && !bodies[i].empty() ? bodies[i] : "(正文未能读取——如需细节可用 skill 工具按名加载)";
+    }
+    return out;
+}
+
 std::string ExtractLastText(const agent::Agent& loop) {
     const auto& history = loop.History();
     if (history.empty()) {
@@ -279,7 +310,8 @@ public:
             ++task_->content_revision;
             ledger_.Touch();
         }
-        LogLine("request seq=" + std::to_string(seq) + " model=" + request.model +
+        LogLine("request seq=" + std::to_string(seq) + " task=" + std::to_string(task_->snapshot.id) +
+                " agent=" + task_->snapshot.agent_type + " model=" + request.model +
                 " messages=" + std::to_string(request.messages.size()));
         const auto wrapped = [&](const api::StreamEvent& event) {
             const EventTag tag = TagOfEvent(event);
@@ -455,10 +487,10 @@ nlohmann::json AgentTool::input_schema() const {
 
     nlohmann::json type_prop = nlohmann::json::object();
     type_prop["type"] = "string";
-    type_prop["enum"] = nlohmann::json::array({"general-purpose", "Explore"});
     type_prop["description"] =
         ToolText("agent", "param.agent_type",
-                 "子代理类型:Explore 只读搜索分析;general-purpose 可做多步操作。默认 general-purpose。");
+                 "子代理类型:Explore 只读搜索分析;general-purpose 可做多步操作(默认);或 /agents 清单里的自定义 "
+                 "Agent 名(各自带工具边界、预装技能与预算,清单以 /agents 实时输出为准)。");
     properties["agent_type"] = type_prop;
 
     nlohmann::json mode_prop = nlohmann::json::object();
@@ -583,15 +615,32 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
     if (agent_type == "explore") {
         agent_type = "Explore";
     }
+    // 自定义 Agent(P2-1/P2-2):内置两枚之外的类型问解析口——从 AgentCatalog
+    // 按名取定义,取到就按它派发:身份记 resolved name(Dock/台账/日志不再
+    // 冒名 Explore)、tools.allow/deny 收窄、skills.preload 预装、runtime 预算
+    // 落账。没配解析口(旧调用方)或名字不在清单,维持旧拒绝口径,文案指
+    // 引去 /agents 看清单。
+    std::optional<CustomAgentMaterial> custom;
     if (agent_type != "general-purpose" && agent_type != "Explore") {
-        return reject("agent_type 取值不合法",
-                      "agent_type 只认 general-purpose 或 Explore。示例:agent_type=\"Explore\"(只读搜索分析);"
-                      "不确定就不传,默认 general-purpose。");
+        if (!custom_agent_resolver_) {
+            return reject("agent_type 取值不合法",
+                          "agent_type 只认 general-purpose 或 Explore(本入口未接自定义 Agent 目录)。示例:"
+                          "agent_type=\"Explore\"(只读搜索分析);不确定就不传,默认 general-purpose。");
+        }
+        custom = custom_agent_resolver_(agent_type);
+        if (!custom.has_value()) {
+            return reject("agent_type 取值不合法",
+                          "agent_type 只认 general-purpose、Explore,或 /agents 清单里可用的自定义 Agent。\""
+                              + agent_type +
+                              "\" 不在清单(或定义解析有错)——先看 /agents 列清单、/agent doctor " + agent_type
+                              + " 查诊断;确认名字拼写后重试,或改用 general-purpose。");
+        }
     }
 
     // execution_mode(默认 auto):auto 在交互会话等价后台、管道/单发等价前台
     // ——由 background_by_default_ 承载,首版不做自动猜测,模型自己显式覆盖。
-    // 旧 run_in_background 仍认;两者都给时显式(非 auto)的优先。
+    // 旧 run_in_background 仍认;两者都给时显式(非 auto)的优先。自定义
+    // Agent 的 runtime.execution_mode 是缺省档(P2-2):入参显式压过它。
     bool mode_explicit = false;
     bool mode_background = false;
     if (const auto it = input.find("execution_mode"); it != input.end() && !it->is_null()) {
@@ -613,6 +662,13 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
                           "\"background\"(后台跑,结论完成后自动回流);不确定就不传,默认 auto。");
         }
     }
+    if (!mode_explicit && !input.contains("run_in_background") && custom.has_value()) {
+        const std::string& defined = custom->definition.execution_mode;
+        if (defined == "foreground" || defined == "background") {
+            mode_explicit = true;
+            mode_background = defined == "background";
+        }
+    }
 
     std::string isolation = input.value("isolation", std::string("none"));
     if (isolation != "none" && isolation != "worktree") {
@@ -620,17 +676,31 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
                       "isolation 只认 none 或 worktree。示例:isolation=\"worktree\"(给改代码的多步任务开"
                       "隔离房);只读摸排不传即可,默认 none。");
     }
+    // 自定义 Agent 的 runtime.isolation 同是缺省档:入参显式压过它(YAML
+    // 解析层已保证值只可能是 none/worktree)。
+    if (!input.contains("isolation") && custom.has_value() &&
+        (custom->definition.isolation == "worktree" || custom->definition.isolation == "none")) {
+        isolation = custom->definition.isolation;
+    }
     if (isolation == "worktree" && agent_type == "Explore") {
         return reject("Explore 用不上 worktree 隔离",
                       "Explore 是只读代理,用不上 worktree 隔离(isolation 去掉或换 general-purpose)。");
     }
     const bool isolate = isolation == "worktree";
 
-    // 入参双读(命名规范第二批):两个键都不出 schema(见 input_schema 的
+    // 入参双读(命名规范第二批):预算类键都不出 schema(见 input_schema 的
     // 说明——模型见字段就填,索性不给),但解析层照旧收:手写 JSON、老脚本、
     // 测试都还走这条路。新名 max_steps_per_turn 优先,旧名 max_turns 兼容;
     // 两者同现取新名。没给就用 default_max_steps_per_turn_(配置来的)。
-    int max_steps_per_turn = default_max_steps_per_turn_;
+    // 成本刹车(P2-6)同批:max_time_secs(墙钟硬线,秒)、max_tokens(累计
+    // token 硬线,完整输入+输出)、budget_soft_percent(软线百分比,1~100,
+    // 缺省 80;0 = 只留硬闸不催办)。解析次序:入参显式 > 自定义 Agent YAML
+    // 的 runtime 字段(P2-1:max_steps_per_turn 真能落到派出预算)> 配置默认。
+    SubagentBudget budget;
+    budget.max_steps_per_turn = default_max_steps_per_turn_;
+    if (custom.has_value() && custom->definition.max_steps_per_turn.has_value()) {
+        budget.max_steps_per_turn = *custom->definition.max_steps_per_turn;
+    }
     const auto steps_arg = input.find("max_steps_per_turn");
     const auto turns_arg = input.find("max_turns");
     const nlohmann::json* budget_arg = nullptr;
@@ -645,11 +715,52 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
             return reject(budget_key + " 类型不对",
                           budget_key + " 得是整数(0 = 不设上限)。示例:max_steps_per_turn=10。");
         }
-        max_steps_per_turn = budget_arg->get<int>();
-        if (max_steps_per_turn < 0) {
+        const int value = budget_arg->get<int>();
+        if (value < 0) {
             return reject(budget_key + " 不能是负数",
                           budget_key + " 不能是负数(0 = 不设上限)。示例:max_steps_per_turn=10。");
         }
+        budget.max_steps_per_turn = value;
+    }
+    // 时间硬线(max_time_secs,秒)。
+    if (const auto it = input.find("max_time_secs"); it != input.end() && !it->is_null()) {
+        if (!it->is_number_integer()) {
+            return reject("max_time_secs 类型不对",
+                          "max_time_secs 得是整数秒(0 = 不设)。示例:max_time_secs=180(任务整轮墙钟 3 分钟)。");
+        }
+        const int value = it->get<int>();
+        if (value < 0) {
+            return reject("max_time_secs 不能是负数",
+                          "max_time_secs 不能是负数(0 = 不设)。示例:max_time_secs=180。");
+        }
+        budget.max_wall_secs = value;
+    }
+    // token 硬线(max_tokens,累计完整输入+输出)。
+    if (const auto it = input.find("max_tokens"); it != input.end() && !it->is_null()) {
+        if (!it->is_number_integer()) {
+            return reject("max_tokens 类型不对",
+                          "max_tokens 得是整数(0 = 不设)。示例:max_tokens=50000(任务累计 token 五万)。");
+        }
+        const std::int64_t value = it->get<std::int64_t>();
+        if (value < 0) {
+            return reject("max_tokens 不能是负数",
+                          "max_tokens 不能是负数(0 = 不设)。示例:max_tokens=50000。");
+        }
+        budget.max_total_tokens = value;
+    }
+    // 软线百分比(budget_soft_percent)。
+    if (const auto it = input.find("budget_soft_percent"); it != input.end() && !it->is_null()) {
+        if (!it->is_number_integer()) {
+            return reject("budget_soft_percent 类型不对",
+                          "budget_soft_percent 得是 0~100 的整数(0 = 不催办,只留硬闸)。示例:"
+                          "budget_soft_percent=80。");
+        }
+        const int value = it->get<int>();
+        if (value < 0 || value > 100) {
+            return reject("budget_soft_percent 取值不合法",
+                          "budget_soft_percent 只收 0~100(0 = 不催办,只留硬闸)。示例:budget_soft_percent=80。");
+        }
+        budget.soft_percent = value;
     }
 
     // 入参过了检:连败账翻篇——改对了就不记仇,后续调用从引导文案重新起。
@@ -661,14 +772,17 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
     const bool background =
         mode_explicit ? mode_background : input.value("run_in_background", background_by_default_);
     if (background) {
-        return LaunchBackground(input, title, agent_type, task_registry, max_steps_per_turn, isolate);
+        return LaunchBackground(input, title, agent_type, task_registry, budget, isolate,
+                                custom.has_value() ? &*custom : nullptr);
     }
-    return ExecuteForeground(input, title, agent_type, task_registry, max_steps_per_turn, isolate);
+    return ExecuteForeground(input, title, agent_type, task_registry, budget, isolate,
+                             custom.has_value() ? &*custom : nullptr);
 }
 
 Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std::string& title,
                                           const std::string& agent_type, ToolRegistry& task_registry,
-                                          int max_steps_per_turn, bool isolate) {
+                                          const SubagentBudget& budget, bool isolate,
+                                          const CustomAgentMaterial* custom) {
     // isolation=worktree:建房、锁房、工具表套 base_dir 包装、隔离范围压栈,
     // 跑完收工(干净删房,有活留房附路径)。cwd 一根指头都不动。
     std::optional<lubancode::cli::AgentWorktree> room;
@@ -695,18 +809,23 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
     snapshot.title = title;
     snapshot.prompt = input.at("prompt").get<std::string>();
     snapshot.foreground = true;
-    snapshot.step_limit = max_steps_per_turn;  // 派出时预算进快照(规格"现场四")
+    snapshot.step_limit = budget.max_steps_per_turn;  // 派出时预算进快照(规格"现场四")
+    snapshot.wall_limit_secs = budget.max_wall_secs;
+    snapshot.token_limit = budget.max_total_tokens;
     snapshot.state = AgentTaskState::Running;
     snapshot.start_time = std::chrono::steady_clock::now();
     snapshot.delivered = true;
     const std::shared_ptr<TaskRecord> task = ledger_.Register(std::move(snapshot));
 
     const Hooks hooks = hooks_;
-    Result result = RunTask(backend_, effective_registry, task->snapshot.prompt, agent_type, max_steps_per_turn,
+    Result result = RunTask(backend_, effective_registry, task->snapshot.prompt, agent_type, budget,
                             &hooks, task,
                             /*detached=*/nullptr,
                             /*prepared_system_prompt=*/nullptr,
-                            scope_storage.has_value() ? &*scope_storage : nullptr);
+                            scope_storage.has_value() ? &*scope_storage : nullptr,
+                            /*background_hooks=*/nullptr,
+                            /*background_permissions=*/nullptr,
+                            custom);
     if (room.has_value()) {
         result.AppendText(FinishIsolationRoom(*room, git_runner_));
     }
@@ -722,7 +841,8 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
 
 Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std::string& title,
                                          const std::string& agent_type, ToolRegistry& task_registry,
-                                         int max_steps_per_turn, bool isolate) {
+                                         const SubagentBudget& budget, bool isolate,
+                                         const CustomAgentMaterial* custom) {
     if (!detached_backend_factory_) {
         return {"当前入口没有配置后台子代理后端,请把 run_in_background 设为 false", true};
     }
@@ -780,7 +900,9 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
     snapshot.agent_type = agent_type;
     snapshot.title = title;
     snapshot.prompt = input.at("prompt").get<std::string>();
-    snapshot.step_limit = max_steps_per_turn;  // 派出时预算进快照(规格"现场四")
+    snapshot.step_limit = budget.max_steps_per_turn;  // 派出时预算进快照(规格"现场四")
+    snapshot.wall_limit_secs = budget.max_wall_secs;
+    snapshot.token_limit = budget.max_total_tokens;
     snapshot.state = AgentTaskState::Running;
     snapshot.start_time = std::chrono::steady_clock::now();
     const std::shared_ptr<TaskRecord> task = ledger_.Register(std::move(snapshot));
@@ -788,9 +910,12 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
     const int id = task->snapshot.id;
     const std::string prompt = task->snapshot.prompt;
     // 病十(批三):四段开关从皮(AgentProfile)来,子代理默认与主代理同段。
+    // 自定义 Agent(P2-2)另换人格段并预装技能。
     agent::PromptOptions prompt_options;
     prompt_options.cwd = cwd_;
-    prompt_options.persona = agent_type == "Explore" ? ExplorePersona() : SubAgentPersona();
+    prompt_options.persona = agent_type == "Explore"
+                                 ? ExplorePersona()
+                                 : (custom != nullptr ? CustomAgentPersona(custom->definition) : SubAgentPersona());
     prompt_options.skills_segment = agent_type == "Explore" ? std::string() : skills_segment_;
     prompt_options.prompts_dir = prompts_dir_;
     prompt_options.project_instructions = project_instructions_;
@@ -799,6 +924,9 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
     prompt_options.lsp = agent_profile_.prompt_sections.lsp;
     prompt_options.wire = agent_profile_.prompt_sections.wire;
     std::string system_prompt = agent::AssembleSystemPrompt(prompt_options);
+    if (custom != nullptr) {
+        system_prompt += AppendPreloadedSkills(custom->definition.skills_preload, custom->preloaded_skills);
+    }
     system_prompt += "\n\n这是后台任务。启动目录是 " + cwd_ +
                      "。调用文件与搜索工具时一律传绝对路径；不要依赖进程当前目录，它可能随主会话切换。";
     system_prompt = agent::WithModelInstructions(system_prompt, detached.model_instructions);
@@ -822,7 +950,9 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
             std::make_shared<BackgroundPermissionLedger>(background_permission_source_());
     }
     task_threads_.push_back(
-        {id, std::thread([this, task, registry, prompt, agent_type, max_steps_per_turn,
+        {id, std::thread([this, task, registry, prompt, agent_type, budget,
+                                custom_copy = custom != nullptr ? std::make_optional(*custom)
+                                                                : std::nullopt,
                                 detached = std::move(detached),
                                 system_prompt = std::move(system_prompt),
                                 detached_registry = std::move(detached_registry),
@@ -845,9 +975,10 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
         DetachedRequestBackend backend(detached);
         Result result;
         try {
-            result = RunTask(backend, effective_registry, prompt, agent_type, max_steps_per_turn, nullptr, task,
+            result = RunTask(backend, effective_registry, prompt, agent_type, budget, nullptr, task,
                              &detached, &system_prompt, scope_storage.has_value() ? &*scope_storage : nullptr,
-                             background_hooks, background_permissions);
+                             background_hooks, background_permissions,
+                             custom_copy.has_value() ? &*custom_copy : nullptr);
         } catch (const std::exception& error) {
             result = {"子代理执行失败: " + std::string(error.what()), true};
         } catch (...) {
@@ -868,13 +999,15 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
 }
 
 Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_registry, const std::string& prompt,
-                                const std::string& agent_type, int max_steps_per_turn, const Hooks* foreground_hooks,
+                                const std::string& agent_type, const SubagentBudget& budget,
+                                const Hooks* foreground_hooks,
                                 const std::shared_ptr<TaskRecord>& task,
                                 const DetachedAgentBackend* detached,
                                 const std::string* prepared_system_prompt,
                                 const IsolationScope* isolation_scope,
                                 const std::shared_ptr<lubancode::hooks::DetachedHookSession>& background_hooks,
-                                const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions) {
+                                const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions,
+                                const CustomAgentMaterial* custom) {
     // 派工治理(转发 SubagentScheduler):全局并发槽先占上(前台 + 后台都
     // 算),满了明报;前台任务再记一层嵌套深度,超限明报。RAII,拒绝路径也
     // 照退。
@@ -903,7 +1036,10 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     } else {
         agent::PromptOptions prompt_options;
         prompt_options.cwd = cwd_;
-        prompt_options.persona = agent_type == "Explore" ? ExplorePersona() : SubAgentPersona();
+        prompt_options.persona = agent_type == "Explore"
+                                     ? ExplorePersona()
+                                     : (custom != nullptr ? CustomAgentPersona(custom->definition)
+                                                          : SubAgentPersona());
         prompt_options.skills_segment = agent_type == "Explore" ? std::string() : skills_segment_;
         prompt_options.prompts_dir = prompts_dir_;
         prompt_options.project_instructions = project_instructions_;
@@ -915,6 +1051,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             agent::AssembleSystemPrompt(prompt_options),
             agent_type == "Explore" ? std::string()
                                       : (deferred_index_provider_ ? deferred_index_provider_() : std::string()));
+        if (custom != nullptr) {
+            system_prompt += AppendPreloadedSkills(custom->definition.skills_preload, custom->preloaded_skills);
+        }
     }
     if (isolation_scope != nullptr) {
         system_prompt += "\n\n本次任务运行在隔离的 git worktree 里: " + isolation_scope->base_dir +
@@ -928,10 +1067,15 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                        ? detached->request_profile.model
                                        : model_;
     // 运行策略与 main 同一份(规格根因一):输出上限、字符安全网、续跑
-    // 次数从 runtime_profile_ 继承,步数用派出时的预算。model 走皮上的
-    // request 档案(批四·病十一其一:运行档案不再另存一份)。
+    // 次数从 runtime_profile_ 继承,步数用派出时的预算。成本刹车(P2-6):
+    // 时间/token 硬线与软线百分比一并落进运行档案,AgentLoop 在步顶执法。
+    // main 的 budget_soft_percent 默认 0(不催),子代理派发一律带软线。
+    // model 走皮上的 request 档案(批四·病十一其一:运行档案不再另存一份)。
     agent::AgentRuntimeProfile task_profile = runtime_profile_;
-    task_profile.max_steps_per_turn = max_steps_per_turn;
+    task_profile.max_steps_per_turn = budget.max_steps_per_turn;
+    task_profile.max_wall_secs = budget.max_wall_secs;
+    task_profile.max_total_tokens = budget.max_total_tokens;
+    task_profile.budget_soft_percent = budget.soft_percent;
     if (context_window_tokens_ > 0) {
         task_profile.context_window_tokens = context_window_tokens_;
     }
@@ -954,7 +1098,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         task_agent_profile.request.model = task_model;
     }
     // 工具可见性(病十三的方向):谓词与拒绝文案写进皮。Explore 的只读
-    // 白名单是角色限制;其余角色沿用装配层灌进来的过滤(tool_search)。
+    // 白名单是角色限制;自定义 Agent 的 tools.allow/deny 同是角色限制
+    // (P2-1:library-reviewer 只给 read_file/search,写工具确实看不见);
+    // 其余角色沿用装配层灌进来的过滤(tool_search)。
     if (agent_type == "Explore") {
         task_agent_profile.tool_filter = [](const Tool& tool) { return ExploreAllows(tool); };
         // 角色限制明说(规格:错误说明写"角色限制"):模型撞到这堵墙时,
@@ -962,6 +1108,21 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         task_agent_profile.tool_filter_denial =
             "此工具不在 Explore 角色的只读白名单内(角色限制):请改用只读工具(read_file/search/web_fetch/"
             "web_search/lsp)完成调查;确需写入,把改动建议写进结论交回主代理执行。";
+    } else if (custom != nullptr) {
+        auto allow = std::make_shared<const std::set<std::string>>(custom->definition.tools.allow.begin(),
+                                                                   custom->definition.tools.allow.end());
+        auto deny = std::make_shared<const std::set<std::string>>(custom->definition.tools.deny.begin(),
+                                                                  custom->definition.tools.deny.end());
+        const std::string name = custom->definition.name;
+        task_agent_profile.tool_filter = [allow, deny](const Tool& tool) {
+            if (deny->count(tool.name()) != 0) {
+                return false;  // deny 压过 allow(与 doctor 同一本账)
+            }
+            return allow->empty() || allow->count(tool.name()) != 0;
+        };
+        task_agent_profile.tool_filter_denial =
+            "此工具不在自定义 Agent " + name + " 的工具边界内(角色限制):定义只开放 tools.allow 名单"
+            "(deny 再压一层)。请改用名单内工具完成;确需边界外操作,把建议写进结论交回主代理执行。";
     } else if (detached == nullptr && tool_filter_) {
         task_agent_profile.tool_filter = tool_filter_;
     }
@@ -1172,6 +1333,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                             AgentTaskToolCall{tool_name, tool_input.dump(), std::string(), false, false, tool_use_id});
                         task->activity.stage = AgentTaskActivity::Stage::Tool;
                         task->activity.tool_name = tool_name;
+                        task->activity.last_tool_name = tool_name;  // 收口不清:坞行"上次 <工具>"常驻(P2-1)
                         task->activity.tool_started = std::chrono::steady_clock::now();
                         ++task->content_revision;
                         ledger_.Touch();
@@ -1475,15 +1637,22 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 墙钟看门狗(规格三):整轮上限兜底。到点置 wall_stop(取消链收进停止
     // 信号——绝不置 task->cancel,那会被收成"用户中止");宽限期内任务线程
     // 仍没报终态(所有超时全失效、后端不理取消的绝境),直接把台账翻成
-    // Failed/WallClockTimeout——任务绝不无限占着坞行。
-    if (task != nullptr && wall_clock_timeout_secs_ > 0) {
+    // Failed/WallClockTimeout——任务绝不无限占着坞行。任务自带时间预算
+    // (P2-6 max_time_secs)时取更紧的那根:引擎侧软停(步顶查)先到,看门狗
+    // 只在引擎停不下来的绝境落锤。
+    int effective_wall_secs = wall_clock_timeout_secs_;
+    if (budget.max_wall_secs > 0 &&
+        (effective_wall_secs <= 0 || budget.max_wall_secs < effective_wall_secs)) {
+        effective_wall_secs = budget.max_wall_secs;
+    }
+    if (task != nullptr && effective_wall_secs > 0) {
         task->wall_stop.store(false, std::memory_order_release);
         task->wall_clock_fired.store(false, std::memory_order_release);
         task->finalized.store(false, std::memory_order_release);
         task->force_finalized = false;
-        const auto deadline = task->snapshot.start_time + std::chrono::seconds(wall_clock_timeout_secs_);
+        const auto deadline = task->snapshot.start_time + std::chrono::seconds(effective_wall_secs);
         const int grace_secs = wall_clock_grace_secs_;
-        std::thread watchdog([this, task, deadline, grace_secs] {
+        std::thread watchdog([this, task, deadline, grace_secs, effective_wall_secs] {
             while (!task->finalized.load(std::memory_order_acquire) &&
                    std::chrono::steady_clock::now() < deadline) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(250));
@@ -1501,7 +1670,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             if (task->finalized.load(std::memory_order_acquire)) {
                 return;  // 停止信号起了作用,任务线程自己收的账更准
             }
-            ledger_.ForceFinalizeWallClock(task, wall_clock_timeout_secs_);
+            ledger_.ForceFinalizeWallClock(task, effective_wall_secs);
         });
         task->watchdog = std::move(watchdog);
     }
@@ -1684,9 +1853,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
 
     // ---- 收场分型(批三:harness 的 ClassifyTurnEnd,一份)----------------
     TaskOutcome task_outcome;
-    task_outcome.step_limit = max_steps_per_turn;
+    task_outcome.step_limit = budget.max_steps_per_turn;
     task_outcome.steps_used = drive.steps_used;
     task_outcome.stop_reason = drive.stop_reason;
+    task_outcome.wall_limit_secs = budget.max_wall_secs;
+    task_outcome.token_limit = budget.max_total_tokens;
     // 输出预算账(规格根因四):撞墙上限、续跑次数、usage 是否报告、思考
     // 检查点,一并交出去。
     if (drive.output_budget.has_value()) {
@@ -1722,8 +1893,16 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     agent::TurnEndgame endgame;
     endgame.cancelled = drive.cancelled;
     endgame.hit_step_limit = drive.hit_step_limit;
-    endgame.wall_clock = drive.wall_clock ||
-                         (task != nullptr && task->wall_clock_fired.load(std::memory_order_acquire));
+    // 墙钟信号归因(P2-6):看门狗那根线若是任务自带的时间预算掐的,算
+    // TimeBudget(预算断线,带部分结果),不算看门狗兜底的 WallClockTimeout
+    // ——两码事,缘由要分清。
+    const bool wall_fired =
+        drive.wall_clock || (task != nullptr && task->wall_clock_fired.load(std::memory_order_acquire));
+    const bool wall_line_is_task_budget =
+        budget.max_wall_secs > 0 && (wall_clock_timeout_secs_ <= 0 || budget.max_wall_secs <= wall_clock_timeout_secs_);
+    endgame.time_budget_exhausted = drive.time_budget_exhausted || (wall_fired && wall_line_is_task_budget);
+    endgame.token_budget_exhausted = drive.token_budget_exhausted;
+    endgame.wall_clock = wall_fired && !wall_line_is_task_budget;
     endgame.error = drive.ok ? std::string() : drive.error;
     endgame.history_empty = sub_agent.History().empty();
     endgame.final_text = text;
@@ -1754,7 +1933,27 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             task_outcome.status = TaskOutcomeStatus::BudgetExhausted;
             task_outcome.reason = TaskOutcomeReason::StepLimitExhausted;
             task_outcome.message = "步数预算已用满(" + std::to_string(drive.steps_used) + "/" +
-                                   std::to_string(max_steps_per_turn) + " 步)";
+                                   std::to_string(budget.max_steps_per_turn) + " 步)";
+            task_outcome.partial_result = partial;
+            run_result = {ComposeOutcomeText(task_outcome), true};
+            break;
+        case agent::TurnVerdict::Reason::TimeBudget:
+            // 时间成本闸(P2-6):断线缘由写明,部分结果(检查点/最后工具
+            // 结果)照常带走——不静默丢,也不冒充失败。
+            task_outcome.status = TaskOutcomeStatus::BudgetExhausted;
+            task_outcome.reason = TaskOutcomeReason::TimeBudgetExhausted;
+            task_outcome.message = "时间预算已用满(上限 " + std::to_string(budget.max_wall_secs) + " 秒,已跑 " +
+                                   std::to_string(drive.steps_used) + " 步)";
+            task_outcome.partial_result = partial;
+            run_result = {ComposeOutcomeText(task_outcome), true};
+            break;
+        case agent::TurnVerdict::Reason::TokenBudget:
+            task_outcome.status = TaskOutcomeStatus::BudgetExhausted;
+            task_outcome.reason = TaskOutcomeReason::TokenBudgetExhausted;
+            task_outcome.message = "token 预算已用满(上限 " + std::to_string(budget.max_total_tokens) +
+                                   ",已用 " + std::to_string(task_outcome.total_input_tokens() +
+                                                              task_outcome.output_tokens) +
+                                   ",跑了 " + std::to_string(drive.steps_used) + " 步)";
             task_outcome.partial_result = partial;
             run_result = {ComposeOutcomeText(task_outcome), true};
             break;

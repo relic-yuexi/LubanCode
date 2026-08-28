@@ -12,7 +12,7 @@ The task description handed to the subagent; it must be self-contained—the sub
 
 ## param.agent_type
 
-Subagent type: Explore is read-only search and analysis; general-purpose can perform multi-step operations. Default general-purpose.
+Subagent type: Explore is read-only search and analysis; general-purpose can perform multi-step operations (default); or a custom agent name from the /agents catalog (each with its own tool boundary, preloaded skills, and budgets—the catalog listing from /agents is authoritative).
 
 ## param.execution_mode
 

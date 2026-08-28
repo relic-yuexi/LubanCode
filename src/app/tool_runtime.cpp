@@ -12,10 +12,12 @@
 #include <utility>
 
 #include "app/version.hpp"
+#include "app/commands/agent_commands.hpp"  // ComputeAgentScanRoots:自定义 Agent 目录三层的根
 #include "cli/i18n.hpp"
 #include "memory/memory_tool.hpp"
 #include "mcp/mcp_tool.hpp"
 #include "ptc/profile.hpp"
+#include "agent/agent_catalog.hpp"  // LoadAgentCatalog:派发时按名解析自定义 Agent(P2-2)
 #include "tools/agent_message_tool.hpp"
 #include "tools/background_output.hpp"
 #include "tools/edit_file.hpp"
@@ -294,6 +296,35 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         skills_segment));
     agent_tool_ = dynamic_cast<lubancode::tools::AgentTool*>(main_registry_.Find("agent"));
     if (agent_tool_ != nullptr) {
+        // 自定义 Agent 解析口(真机实测 P2-1/P2-2):agent 工具收到非内置类型
+        // 时按名查 AgentCatalog。现扫不缓存——用户改了 YAML,下一次派发即
+        // 生效,不必重启会话。预装技能的正文从启动时扫到的技能清单里读;
+        // 名单里没有的技能留给 doctor 诊断,这里只降级(登记名字不注正文)。
+        agent_tool_->SetCustomAgentResolver(
+            [skills](const std::string& name) -> std::optional<lubancode::tools::CustomAgentMaterial> {
+                const lubancode::agent::AgentCatalog catalog =
+                    lubancode::agent::LoadAgentCatalog(ComputeAgentScanRoots());
+                const lubancode::agent::AgentCatalogEntry* entry = catalog.Find(name);
+                if (entry == nullptr || !entry->available || !entry->definition.has_value()) {
+                    return std::nullopt;
+                }
+                lubancode::tools::CustomAgentMaterial material;
+                material.definition = *entry->definition;
+                for (const std::string& skill_name : material.definition.skills_preload) {
+                    const auto meta = std::find_if(skills.begin(), skills.end(),
+                                                   [&](const lubancode::tools::SkillMeta& candidate) {
+                                                       return candidate.name == skill_name;
+                                                   });
+                    std::string body;
+                    if (meta != skills.end()) {
+                        if (const auto text = lubancode::tools::ReadSkillBody(*meta); text.has_value()) {
+                            body = *text;
+                        }
+                    }
+                    material.preloaded_skills.push_back(std::move(body));
+                }
+                return material;
+            });
         // 长任务 compact:子代理复用主 compact,窗口从配置来(0 = 未知不评估)。
         agent_tool_->SetContextWindowTokens(config.context_window_tokens);
         // 派工治理(规格"递归派工不能再靠拿掉工具解决"):并发槽与深度上限

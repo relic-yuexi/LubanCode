@@ -12,7 +12,7 @@
 
 ## param.agent_type
 
-子代理类型:Explore 只读搜索分析;general-purpose 可做多步操作。默认 general-purpose。
+子代理类型:Explore 只读搜索分析;general-purpose 可做多步操作(默认);或 /agents 清单里的自定义 Agent 名(各自带工具边界、预装技能与预算,清单以 /agents 实时输出为准)。
 
 ## param.execution_mode
 

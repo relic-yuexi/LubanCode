@@ -33,6 +33,11 @@ inline constexpr int kUnsetOutputReserveEstimateTokens = 8192;
 // 工具调用或检查点;更多次就是在替用户烧 token,显式配置才能加。
 inline constexpr int kDefaultLengthContinuations = 1;
 
+// 成本刹车的默认软线百分比(真机实测 P2-1/P2-6):任一硬线(步数/时间/
+// token)跨过这个比例,就注入一次"请基于现有证据收尾"的系统级催办。
+// 80 是产品缺省,入参/配置可显式改;0 = 只留硬闸,不催。
+inline constexpr int kDefaultBudgetSoftPercent = 80;
+
 // 输出上限最终从哪一级来(/config、/context、agent 查看态写明来源)。
 // 从低到高:模型目录 < provider 声明 < 配置文件(项目级压全局在 config
 // 层已合并完,到这里只剩一级)。子代理的显式收窄/放宽也算配置文件级,
@@ -91,10 +96,35 @@ struct AgentRuntimeProfile {
     // max_tokens 打断在思考段时的自动续跑次数(规格根因四;0 = 不续)。
     int length_continuations = kDefaultLengthContinuations;
 
+    // ---- 成本刹车(真机实测 P2-1/P2-6)------------------------------------
+    // 三根硬线,AgentLoop::Run 在每个步顶查:任一断线就停循环,把到限为止
+    // 的部分结果连同"哪根线断的"交回(分型 budget_exhausted,不静默丢)。
+    // 0 = 不设。步数硬线就是上面的 max_steps_per_turn,不另立字段。
+    int max_wall_secs = 0;            // 整轮墙钟硬线(秒)
+    std::int64_t max_total_tokens = 0;  // 累计 token 硬线(完整输入 + 输出)
+    // 软线百分比(1~100;0 = 不催):任一硬线跨过 soft% 注入一次催办。
+    // 派发层可按任务收窄,main 默认 0(主回合不催,子代理才吃成本闸)。
+    int budget_soft_percent = 0;
+
+    // 便捷:是否设了任何一根成本硬线(步数/时间/token)。
+    bool HasCostBudget() const {
+        return max_steps_per_turn > 0 || max_wall_secs > 0 || max_total_tokens > 0;
+    }
+
     // 便捷:main 的 profile 派生子代理默认份——输出上限等 inherited 字段
     // 原样照抄(默认同级,不暗自缩小);覆盖由调用方在拷贝上显式改并明写
     // 来源(subagent 段的显式收窄/放宽)。
     AgentRuntimeProfile InheritForSubagent() const { return *this; }
 };
+
+// 软线取值(纯函数,单测钉):hard>0 且 percent>0 时 = hard*percent/100
+// (至少 1,预算再小软线也得是个正数);任一为 0 返回 0(没有软线这回事)。
+inline std::int64_t BudgetSoftLine(std::int64_t hard, int percent) {
+    if (hard <= 0 || percent <= 0) {
+        return 0;
+    }
+    const std::int64_t line = hard * percent / 100;
+    return line < 1 ? 1 : line;
+}
 
 }  // namespace lubancode::agent

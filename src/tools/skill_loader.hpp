@@ -73,4 +73,9 @@ std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::opt
 // 不影响没配技能的既有场景。
 std::string BuildSkillsPromptSegment(const std::vector<SkillMeta>& skills);
 
+// 读一份技能的正文(frontmatter 之后的 body)。读不到、frontmatter 损坏都
+// 返回 nullopt——预装侧(自定义 Agent 的 skills.preload)据此降级:只登记
+// 名字不注正文,不挡派发。
+std::optional<std::string> ReadSkillBody(const SkillMeta& meta);
+
 }  // namespace lubancode::tools

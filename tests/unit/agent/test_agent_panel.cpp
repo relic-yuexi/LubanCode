@@ -405,6 +405,40 @@ TEST_CASE("渲染:身份列钳位 4~28,长名字吞不掉全屏") {
     CHECK(layout.identity_width >= 4);
 }
 
+TEST_CASE("渲染:自定义 Agent 身份整名在行,窄屏截的是任务摘要不是身份(真机实测 P2-2)") {
+    SetLanguage("zh");
+    AgentPanelEntry entry;
+    entry.task_id = 1;
+    // resolved agent name(派 library-reviewer 时 Dock 的真身),不再冒名
+    // Explore;配一只同场 Explore 作对照。
+    entry.name = "library-reviewer #1";
+    entry.title = "审查图书馆项目的入口与领域层,顺带看一眼存储与测试覆盖";
+    entry.state = "运行中(12/20 步 · 34 次工具调用 · 82.1k tokens · 150s)";
+    entry.running = true;
+    AgentPanelEntry explore;
+    explore.task_id = 2;
+    explore.name = "Explore #2";
+    explore.title = "扫目录";
+    explore.state = "运行中";
+    explore.running = true;
+    for (const int width : {60, 100}) {
+        const auto layout = LayoutAgentDock({entry, explore}, 1, true, 0, 0, width, false, false, false);
+        const auto lines = RenderAgentDockLines(layout, width);
+        REQUIRE(lines.size() == 4);  // 提示 + main + 2 只
+        const std::string& custom_row = lines[2];
+        const std::string& explore_row = lines[3];
+        // 身份整名一个字不少;Explore 只留给内置 Explore,两行各归各。
+        CHECK(Contains(custom_row, "library-reviewer #1"));
+        CHECK_FALSE(Contains(custom_row, "Explore #1"));
+        CHECK(Contains(explore_row, "Explore #2"));
+        // 截断吃的是任务摘要(中段),不吃身份:窄屏下标题被截、身份仍在。
+        if (width == 60) {
+            CHECK_FALSE(Contains(custom_row, "测试覆盖"));
+        }
+        CHECK(DisplayWidthUtf8(custom_row) <= width - 1);
+    }
+}
+
 // -----------------------------------------------------------------------
 // 按键状态机
 // -----------------------------------------------------------------------

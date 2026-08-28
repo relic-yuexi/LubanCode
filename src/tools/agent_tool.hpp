@@ -43,6 +43,7 @@
 
 #include "api/backend.hpp"
 #include "agent/agent.hpp"  // Agent/AgentProfile/Callbacks:子代理的引擎与皮
+#include "agent/agent_definition.hpp"  // AgentDefinition:自定义 Agent 的解析结果(P2-2)
 #include "agent/loop.hpp"      // RunOutcome/RunOneTool:轮次收口与工具执行链
 #include "agent/runtime_profile.hpp"
 #include "api/types.hpp"
@@ -80,6 +81,25 @@ struct BackgroundPermissionLedger {
     std::set<std::string> always_allowed;      // 工具名账(allow_tools + 按 a 落的)
     std::vector<std::string> allow_commands;   // run_command 前缀白名单
     std::vector<std::string> deny_commands;    // run_command 前缀黑名单(压过 allow)
+};
+
+// 自定义 Agent 的派发材料(真机实测 P2-1/P2-2):宿主(会话装配层)从
+// AgentCatalog 按名解析一份定义交进来。preloaded_skills 与 definition.
+// skills_preload 按位对齐——预装技能的正文(SKILL.md frontmatter 之后的
+// body)在宿主侧读好带进来,tools 层不认得技能目录的扫描规矩,也不该认。
+struct CustomAgentMaterial {
+    agent::AgentDefinition definition;
+    std::vector<std::string> preloaded_skills;
+};
+
+// 一次派工的成本预算(真机实测 P2-6):三根硬线 + 软线百分比,全部 0(软
+// 线除外) = 不设。解析次序:入参显式 > 自定义 Agent YAML 的 runtime 字段
+// > 配置默认(subagent.max_steps_per_turn 一脉)。
+struct SubagentBudget {
+    int max_steps_per_turn = 0;
+    int max_wall_secs = 0;
+    std::int64_t max_total_tokens = 0;
+    int soft_percent = agent::kDefaultBudgetSoftPercent;
 };
 
 // 同级派工的转发壳(规格"递归派工不能再靠拿掉工具解决"):子代理工具表
@@ -222,6 +242,15 @@ public:
     // Explore 仍能启动，只是沿用普通子表再由过滤器挡掉写入工具。
     void SetExploreRegistry(ToolRegistry* registry) { explore_registry_ = registry; }
 
+    // 自定义 Agent 解析口(真机实测 P2-1/P2-2):agent_type 不是内置两枚时,
+    // execute() 拿名字问这枚回调。给到材料就按自定义 Agent 派发——身份按
+    // resolved name 记(Dock/台账/日志不再冒名 Explore)、tools.allow/deny
+    // 收窄工具面、skills.preload 预装、runtime.max_steps_per_turn 落预算。
+    // 空函数(默认,旧调用方/单测)= 只认内置两枚,行为与从前一致。
+    void SetCustomAgentResolver(std::function<std::optional<CustomAgentMaterial>(const std::string&)> resolver) {
+        custom_agent_resolver_ = std::move(resolver);
+    }
+
     // 交互会话开、单发/单测关。入参显式给 run_in_background 时压过它。
     void SetBackgroundByDefault(bool enabled) { background_by_default_ = enabled; }
     void SetDetachedBackendFactory(std::function<DetachedAgentBackend()> factory) {
@@ -352,18 +381,21 @@ private:
     // 造好带进来;前台路径为空)。RunTask 拿它在后台线程发 SubagentStart/Stop
     // 与工具事件——记录只投递,主会话安全点归并。
     Result RunTask(api::Backend& backend, ToolRegistry& task_registry, const std::string& prompt,
-                   const std::string& agent_type, int max_steps_per_turn, const Hooks* foreground_hooks,
+                   const std::string& agent_type, const SubagentBudget& budget, const Hooks* foreground_hooks,
                    const std::shared_ptr<TaskRecord>& task,
                    const DetachedAgentBackend* detached = nullptr,
                    const std::string* prepared_system_prompt = nullptr,
                    const IsolationScope* isolation_scope = nullptr,
                    const std::shared_ptr<lubancode::hooks::DetachedHookSession>& background_hooks = nullptr,
-                   const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions = nullptr);
+                   const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions = nullptr,
+                   const CustomAgentMaterial* custom = nullptr);
 
     Result ExecuteForeground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
-                             ToolRegistry& task_registry, int max_steps_per_turn, bool isolate);
+                             ToolRegistry& task_registry, const SubagentBudget& budget, bool isolate,
+                             const CustomAgentMaterial* custom = nullptr);
     Result LaunchBackground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
-                            ToolRegistry& task_registry, int max_steps_per_turn, bool isolate);
+                            ToolRegistry& task_registry, const SubagentBudget& budget, bool isolate,
+                            const CustomAgentMaterial* custom = nullptr);
 
     // 子代理请求的包装后端(agent_tool.cpp 内实现):一次不落地把"请求发出/
     // 首事件/逐事件/收场错误"记进活度账与诊断日志(LUBANCODE_DEBUG_SUBAGENT)。
@@ -397,6 +429,9 @@ private:
     std::vector<TaskThreadEntry> task_threads_;
     std::function<bool(const Tool&)> tool_filter_;            // tool_search:空 = 不过滤
     std::function<std::string()> deferred_index_provider_;    // tool_search:空 = 不注索引段
+    // 自定义 Agent 解析口(P2-2):空 = 只认内置两枚(旧行为)。宿主在会话
+    // 装配时灌入;回调在 execute() 的宿主线程被调,内部自管线程安全。
+    std::function<std::optional<CustomAgentMaterial>(const std::string&)> custom_agent_resolver_;
     lubancode::cli::GitRunner git_runner_;                    // isolation 房务;空 = 真 git
     std::size_t context_window_tokens_ = 0;                   // 子代理 mid-turn 压缩评估;0 = 未知
     agent::AgentRuntimeProfile runtime_profile_;              // 运行策略:与 main 同一份(默认 unset)

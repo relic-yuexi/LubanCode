@@ -50,6 +50,10 @@ std::string ReasonShortLabel(TaskOutcomeReason reason) {
             return "接口报错";
         case TaskOutcomeReason::StepLimitExhausted:
             return "耗尽";
+        case TaskOutcomeReason::TimeBudgetExhausted:
+            return "时间耗尽";
+        case TaskOutcomeReason::TokenBudgetExhausted:
+            return "token 耗尽";
         case TaskOutcomeReason::OutputBudgetExhausted:
             return "输出超限";
         case TaskOutcomeReason::MaxContext:
@@ -119,6 +123,12 @@ std::string ComposeOutcomeText(const TaskOutcome& outcome) {
         out += " · 步数 " + std::to_string(outcome.steps_used) + "/" + std::to_string(outcome.step_limit);
     } else if (outcome.steps_used > 0) {
         out += " · 步数 " + std::to_string(outcome.steps_used);
+    }
+    if (outcome.wall_limit_secs > 0) {
+        out += " · 时间上限 " + std::to_string(outcome.wall_limit_secs) + "s";
+    }
+    if (outcome.token_limit > 0) {
+        out += " · token 上限 " + std::to_string(outcome.token_limit);
     }
     if (!outcome.partial_result.empty()) {
         out += "\n检查点/部分结果:\n" + outcome.partial_result;
@@ -253,6 +263,8 @@ std::vector<AgentTaskSummary> TaskLedger::Summaries() const {
         summary.stop_requested = task->cancel.load(std::memory_order_acquire);
         summary.step_limit = task->snapshot.step_limit;
         summary.steps_used = task->snapshot.steps_used;
+        summary.wall_limit_secs = task->snapshot.wall_limit_secs;
+        summary.token_limit = task->snapshot.token_limit;
         summary.outcome_reason = task->snapshot.outcome.reason;
         summary.input_tokens = task->snapshot.input_tokens;
         summary.cache_read_tokens = task->snapshot.cache_read_tokens;
