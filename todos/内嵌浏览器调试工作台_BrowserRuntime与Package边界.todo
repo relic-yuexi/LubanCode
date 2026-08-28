@@ -1,6 +1,6 @@
 # 内嵌浏览器调试工作台：BrowserRuntime 与 Package 边界
 
-- 状态：待设计、待实现
+- 状态：阶段 0/1 已落地（拆三层、直调 130 项、边界契约冻结），阶段 2 起待实现
 - 日期：2026-08-29
 - 目标：让 LubanCode 像桌面 Codex 一样，能在宿主界面里打开网页、操作页面、查看截图、Console 与 Network，并把同一份观察送给用户和模型
 - 相关现状：`browser/server.js`、`src/mcp/rich_result.*`、`src/agent/tool_result_images.*`、`src/app_server/`、`examples/packages/browser-agent/`
@@ -492,21 +492,21 @@ examples/packages/browser-debug/
 
 ### 阶段 0：冻结边界
 
-- [ ] 写 `docs/reference/browser-runtime.md`。
-- [ ] 定下 BrowserRuntime、Package、MCP adapter、Desktop Tab 的职责。
-- [ ] 冻结 session/page/generation/snapshot/ref/seq 术语。
-- [ ] 定下用户与 Agent 操作仲裁。
-- [ ] 把 `examples/packages/browser-agent` 标成 content-only，不再暗示它承载浏览器本体。
+- [x] 写 `docs/reference/browser-runtime.md`。
+- [x] 定下 BrowserRuntime、Package、MCP adapter、Desktop Tab 的职责。
+- [x] 冻结 session/page/generation/snapshot/ref/seq 术语。
+- [x] 定下用户与 Agent 操作仲裁。
+- [x] 把 `examples/packages/browser-agent` 标成 content-only，不再暗示它承载浏览器本体。
 
 验收：实现者不看本 TODO，也不会把 Runtime 塞回 Package 或 MCP handler。
 
 ### 阶段 1：从 MCP 中抽 BrowserSession
 
-- [ ] 把 `browser/server.js` 分成 session、transport、tool adapter。
-- [ ] Playwright 生命周期只归 session。
-- [ ] MCP adapter 不保存第二份 page registry。
-- [ ] 保住现有 104 项测试。
-- [ ] 增加 Runtime 直调测试，不经 MCP 也能 open/snapshot/click/screenshot。
+- [x] 把 `browser/server.js` 分成 session、transport、tool adapter。
+- [x] Playwright 生命周期只归 session。
+- [x] MCP adapter 不保存第二份 page registry。
+- [x] 保住现有 104 项测试。（拆后 104 项零回归，加直调 130 项两遍皆绿。）
+- [x] 增加 Runtime 直调测试，不经 MCP 也能 open/snapshot/click/screenshot。
 
 验收：同一 Runtime 可被 MCP adapter 与测试宿主调用，结果一致。
 
