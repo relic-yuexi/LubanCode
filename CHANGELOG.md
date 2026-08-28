@@ -135,6 +135,12 @@
 - **子代理不再吞自己的日志。** `.evidence` 与调试日志目录进观察边界,search 默认不搜、read_file 默认不读;逐字点名才放行,读前报体积,超 256KB 劝阻并指路 offset/limit——递归膨胀(日志装日志)有回归钉。
 - 浏览器服务拆三层:session(Playwright 生命周期与全部状态)、tool adapter(纯组装)、transport(纯分帧),server.js 从 1137 行瘦到 220 行;104 项自测零回归,新增 Runtime 直调路 130 项两遍皆绿,阶段 3 的 App Server 适配有了桩。
 
+## [v0.26.88] - 2026-08-29
+
+- **Prompt Profile 三层覆盖成真。** 内置/用户/项目三层稀疏覆盖同一模块树,后者压前者;项目层只在选中 Profile 时参与,主 Agent 的 default 拼装一字不动(黄金测试零 diff,数学与字节双证)。内置样例 `browser-tester` 随库。
+- **能力说明不再说一套做一套。** 自定义 Agent 的 feature 文案从过滤后的有效工具表推导——没给 shell 就不装 shell 说明,没给 todo 就不装 todo 说明;web/mcp/lsp 只认能力,不吃父会话开关。
+- **`/agent inspect` 点亮来源账本。** 定义来源、覆盖链、prompt 三笔开关、逐模块"这段提示词从哪层哪文件来"一目了然;`/agent doctor` 的 Profile 行升级为查三层覆盖存在性。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
