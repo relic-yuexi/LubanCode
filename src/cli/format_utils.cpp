@@ -1,5 +1,7 @@
 #include "cli/format_utils.hpp"
 
+#include "cli/line_editor.hpp"  // Utf8ToUtf32/CharDisplayWidth:WrapStatusRows 的宽度账
+
 #include <algorithm>
 #include <cmath>
 #include <cstdio>
@@ -406,6 +408,146 @@ std::string FormatTurnFooterText(std::int64_t milliseconds, TurnFooterTone tone)
             break;
     }
     return "Worked for " + duration;
+}
+
+namespace {
+
+// 收口符:紧跟着前一个词的这些字符不许折在它们前头(P3-3 的右括号断行)。
+bool IsWrapCloser(char32_t cp) {
+    switch (cp) {
+        case U')':
+        case U']':
+        case U'}':
+        case U'>':
+        case U'"':
+        case U'%':
+        case U'、':  // 、
+        case U'。':  // 。
+        case U'，':  // ，
+        case U'：':  // ：
+        case U'；':  // ；
+        case U'！':  // ！
+        case U'？':  // ？
+        case U'〉':  // 〉
+        case U'》':  // 》
+        case U'】':  // 】
+        case U'〕':  // 〕
+        case U'”':  // ”
+        case U'’':  // ’
+            return true;
+        default:
+            return false;
+    }
+}
+
+}  // namespace
+
+std::vector<std::string> WrapStatusRows(const std::string& utf8, int width) {
+    if (width <= 0 || utf8.empty()) {
+        return {utf8};
+    }
+    // 先解码成"单元":ANSI 转义(零宽,黏在原位)、空格(唯一合法断点,
+    // 断在它后面)、普通码点(按显示宽计)。收口符跟在非空格码点后时,
+    // 断点只能挪到这串收口符再后面——贪心量行,放不下就退回上一个合法
+    // 断点折行;一个合法断点都没有(词比整行宽)就不折,原样占一行。
+    struct Unit {
+        std::string bytes;
+        int width = 0;
+        bool is_space = false;
+        bool break_after = false;  // 空格且其后不是收口符:这里可以折
+    };
+    std::vector<Unit> units;
+    std::size_t i = 0;
+    while (i < utf8.size()) {
+        const unsigned char lead = static_cast<unsigned char>(utf8[i]);
+        if (lead == 0x1b) {
+            std::size_t end = i + 1;
+            if (end < utf8.size() && utf8[end] == '[') {
+                ++end;
+                while (end < utf8.size() &&
+                       (static_cast<unsigned char>(utf8[end]) < 0x40 ||
+                        static_cast<unsigned char>(utf8[end]) > 0x7e)) {
+                    ++end;
+                }
+                if (end < utf8.size()) {
+                    ++end;  // 终止字节
+                }
+            }
+            Unit unit;
+            unit.bytes = utf8.substr(i, end - i);
+            units.push_back(std::move(unit));
+            i = end;
+            continue;
+        }
+        std::size_t bytes = 1;
+        if ((lead & 0xE0U) == 0xC0U) {
+            bytes = 2;
+        } else if ((lead & 0xF0U) == 0xE0U) {
+            bytes = 3;
+        } else if ((lead & 0xF8U) == 0xF0U) {
+            bytes = 4;
+        }
+        bytes = (std::min)(bytes, utf8.size() - i);
+        const std::string chunk = utf8.substr(i, bytes);
+        const std::u32string decoded = Utf8ToUtf32(chunk);
+        Unit unit;
+        unit.bytes = chunk;
+        if (!decoded.empty()) {
+            unit.width = CharDisplayWidth(decoded[0]);
+            unit.is_space = decoded[0] == U' ' || decoded[0] == U'　';
+        }
+        units.push_back(std::move(unit));
+        i += bytes;
+    }
+    // 空格断点资格:其后紧跟收口符的空格不许当断点(收口符要跟上一个词)。
+    for (std::size_t u = 0; u < units.size(); ++u) {
+        if (!units[u].is_space) {
+            continue;
+        }
+        const std::u32string next_cp = Utf8ToUtf32(u + 1 < units.size() ? units[u + 1].bytes : std::string());
+        if (next_cp.empty() || !IsWrapCloser(next_cp[0])) {
+            units[u].break_after = true;
+        }
+    }
+
+    std::vector<std::string> rows;
+    std::string current;
+    int current_width = 0;
+    // 最后一个可折空格在 current 里的字节下标、字节长与显示宽(全角空格
+    // 占 3 字节 2 列,折行时整枚吃掉)。
+    std::size_t last_break = std::string::npos;
+    std::size_t last_break_bytes = 1;
+    int last_break_width = 1;
+    int width_at_break = 0;
+    for (const Unit& unit : units) {
+        if (current_width + unit.width > width && !current.empty()) {
+            if (last_break != std::string::npos) {
+                rows.push_back(current.substr(0, last_break));
+                current = current.substr(last_break + last_break_bytes);
+                current_width -= width_at_break + last_break_width;
+                last_break = std::string::npos;
+                // 折行后还超(词本身超宽):照加,不切。
+            }
+        }
+        if (unit.is_space && current.empty()) {
+            continue;  // 折行吃掉的行首空格不再补
+        }
+        if (unit.break_after) {
+            last_break = current.size();
+            last_break_bytes = unit.bytes.size();
+            last_break_width = unit.width;
+            width_at_break = current_width;
+        }
+        current += unit.bytes;
+        current_width += unit.width;
+    }
+    if (!current.empty()) {
+        rows.push_back(std::move(current));
+    }
+    if (rows.empty()) {
+        rows.push_back(std::string());
+    }
+    return rows;
 }
 
 std::string FormatApprovalWaitNote(std::int64_t approval_wait_ms) {

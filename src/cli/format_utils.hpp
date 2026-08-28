@@ -110,6 +110,13 @@ std::string BuildStatusPanelText(const std::vector<std::string>& items,
 // D:\very\long\project -> D:\…\project。max_width 按终端显示列算。
 std::string CompactStatusPath(std::string_view path, int max_width);
 
+// 短状态行按终端显示宽折行(P3-3 括号断行单):宽度账把 ANSI 转义(零
+// 宽)与中文宽字一起算;断点只认空格,右括号一类的收口符紧跟着前一个
+// 词,不许折在它前头——"node(v24.0.0)"要么整段留在本行,要么整段挪到
+// 下一行,再不会出现右括号孤零零掉行。单个词比整行还宽时不切(不切半
+// 个宽字),原样占一行交给终端裁。width<=0 原样一行。
+std::vector<std::string> WrapStatusRows(const std::string& utf8, int width);
+
 // 0.21.x 流式脚注文本(纯函数,i18n 驱动,不夹 ANSI/不认 IO)。
 // StreamHintText:输入行空闲(没在键入)时的淡色占位提示——只提"键入并
 // 回车排队",不再捎带打断说明(0.25.x 起"Esc 打断"挪进状态行)。

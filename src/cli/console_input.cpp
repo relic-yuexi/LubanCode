@@ -368,6 +368,11 @@ struct StreamFooterState {
     int last_frame_origin = -1;
     std::string last_fingerprint;
     bool needs_repaint = false;
+    // 帧账审计(P2-4 验收):LUBANCODE_FRAME_AUDIT 置位才统计,EndStreamFooter
+    // 落一行 stderr。驱动测试拿帧数/字节数对"有帽、只出脏行"的账。
+    std::uint64_t audit_frames = 0;
+    std::uint64_t audit_bytes = 0;
+    std::uint64_t audit_dirty_rows = 0;
     // VT 批量序列(TerminalBatch)这一场能不能用:BeginStreamFooter 探一次
     // 存住(探测带 SetConsoleMode,不该每帧来一遍)。
     bool vt_batch = false;
@@ -380,6 +385,27 @@ struct StreamFooterState {
 StreamFooterState& FooterSlot() {
     static StreamFooterState f;
     return f;
+}
+
+// 帧账审计开关(P2-4 验收):LUBANCODE_FRAME_AUDIT 置位即开。忙路脚注、
+// 空闲 composer 各落一行 stderr,统计真写出去的帧数与字节——跳过的帧
+// 一个字节都不写,自然也不计数。驱动测试(刮屏/管道)拿 stderr 收账。
+bool FrameAuditEnabled() {
+    static const bool enabled = [] {
+        const char* raw = std::getenv("LUBANCODE_FRAME_AUDIT");
+        return raw != nullptr && *raw != '\0' && std::string_view(raw) != "0";
+    }();
+    return enabled;
+}
+
+// 空闲路的同款账:ReadLineKeyByKey 一整次读取里真画了几帧、写了多少字节。
+struct IdleFrameAudit {
+    std::uint64_t frames = 0;
+    std::uint64_t bytes = 0;
+};
+IdleFrameAudit& IdleFrameAuditSlot() {
+    static IdleFrameAudit audit;
+    return audit;
 }
 
 void ForgetStreamFooterFrame(StreamFooterState& f) {
@@ -788,7 +814,17 @@ void RedrawEditArea(int& start_row, const BottomChromeModel& model, const Theme&
     if (vt_enabled) {
         platform::TerminalBatch batch(viewport_x, viewport_y);
         QueueInlineFrameDiff(batch, previous, next, frame_top);
-        batch.Flush();
+        if (batch.has_commands()) {
+            const std::size_t batch_bytes = batch.Finish().size();
+            batch.Flush();
+            if (FrameAuditEnabled() && batch_bytes > 0) {
+                IdleFrameAudit& audit = IdleFrameAuditSlot();
+                ++audit.frames;
+                audit.bytes += batch_bytes;
+            }
+        } else {
+            batch.Flush();
+        }
     } else {
         PaintInlineFrameLegacy(previous, next, frame_top);
     }
@@ -2462,7 +2498,24 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
 std::optional<std::string> ReadLine(const std::string& prompt, const Theme& theme, bool esc_rejects, bool composer,
                                     ReadExitReason* exit_reason) {
     if (platform::StdinIsInteractive()) {
-        return ReadLineKeyByKey(prompt, theme, esc_rejects, composer, exit_reason);
+        const std::optional<std::string> result =
+            ReadLineKeyByKey(prompt, theme, esc_rejects, composer, exit_reason);
+        if (FrameAuditEnabled()) {
+            // 这次读取(一次输入事务,打字/粘贴/编辑都在内)真画了几帧、写了
+            // 多少字节、光标落在哪——P2-4 验收的账从这收。
+            const IdleFrameAudit& audit = IdleFrameAuditSlot();
+            std::string cursor_note;
+            if (const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+                info.has_value()) {
+                cursor_note = " cursor=(" + std::to_string(info->cursor_x) + "," +
+                              std::to_string(info->cursor_y) + ")";
+            }
+            TermErr() << "[frame-audit] idle_composer frames=" << audit.frames
+                      << " bytes=" << audit.bytes << cursor_note << "\n";
+            TermErr().flush();
+            IdleFrameAuditSlot() = IdleFrameAudit{};
+        }
+        return result;
     }
     (void)composer;  // 管道/重定向:没有 composer 概念,照旧逐行 getline
 
@@ -3458,6 +3511,7 @@ bool EnsureStreamScreenRowsLocked(int rows_needed) {
         if (const auto& hook = StreamScreenScrollHookSlot()) {
             hook(overflow);
         }
+        ShiftStreamFooterFrameOriginLocked(overflow);  // 框随内容上移,帧账跟上
         platform::SetCursorPos(info->cursor_x, info->cursor_y - overflow);
     }
     return true;
@@ -3529,6 +3583,124 @@ void EraseStreamFooterLocked() {
         f.last_width = info->width;
     }
     ForgetStreamFooterFrame(f);
+}
+
+// P2-4 流式重绘风暴的外科版"擦脚注":正文落笔前的准备。旧路每笔 delta
+// 都整框擦掉再整框重画(EraseStreamFooterLocked 抹净全部脚注行,帧账也
+// Forget),行级 diff 与指纹跳帧形同虚设——正文只在自家行上续写、脚注
+// 原点没挪的那一拍,本该一个字节都不写。这里只办三件事:
+//   1. 光标钉回正文续写点(旧路由 Erase 顺带办);
+//   2. 改宽了照旧走整框 Erase 的 resize 追账(reflow 后绝对锚点不可信);
+//   3. 正文真要写进脚注区(行往下长,顶穿框顶)时,只清被压住的那几行,
+//      并把帧账里对应的行标脏——下一拍 diff 只重画这些行,其余行一字
+//      不写。整框 Forget 不再发生,diff 的"无变化行不重刷"才真正生效。
+// 调用方持 StdoutWriteMutex。delta_newlines/delta_width_cols 由正文侧
+// 按这笔 delta 的文本量报上来(高估无害:多清一两行只是小账,低估才会
+// 留脏行)。
+void PrepareStreamBodyWriteLocked(int delta_newlines, int delta_width_cols) {
+    StreamFooterState& f = FooterSlot();
+    if (!f.enabled || f.row < 0) {
+        return;  // 框没画:没有可护的行,光标也早就在正文手上
+    }
+    const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+    if (!info.has_value()) {
+        ForgetStreamFooterFrame(f);  // 探不到屏,旧账不可信,退回整框路
+        return;
+    }
+    if (f.last_width != -1 && f.last_width != info->width) {
+        EraseStreamFooterLocked();  // 改宽:reflow 后只能整框追账,旧路原样
+        return;
+    }
+    const int bx = f.body_x >= 0 ? f.body_x : info->cursor_x;
+    const int by = f.body_y >= 0 ? f.body_y : info->cursor_y;
+    platform::SetCursorPos(bx, by);  // 正文续写点(上一拍重画后光标停在输入行)
+
+    // 这笔正文要占的行数:从续写点 (bx,by) 起算——换行数 + (bx+新宽度)
+    // 折过的整行数,再垫一行余量吸收延迟 EOL/宽字取整的误差。不能像
+    // PrintPieceLocked 的滚屏预算那样垫两行:这里多算的每一行都会白清
+    // 一行脚注、白付一次重画,行内增量(最常见的帧)就再也不是零输出了。
+    const int width = (std::max)(1, info->width);
+    const int rows_needed = delta_newlines + (bx + delta_width_cols) / width + 1;
+    const int write_bottom = by + rows_needed;  // 正文可能写到的最深行(不含)
+    if (write_bottom <= f.row || f.rows <= 0) {
+        return;  // 够不着框:一行都不用清,diff 自会跳过整帧
+    }
+    const int clear_top = (std::max)(f.row, by);
+    const int clear_bottom = (std::min)(write_bottom, f.row + f.rows);
+    if (clear_bottom <= clear_top) {
+        return;
+    }
+    TermOut() << kSyncOutputBegin;
+    ClearStreamFooterRowsAt(clear_top, clear_bottom - clear_top, info->width, info->height);
+    TermOut() << kSyncOutputEnd;
+    TermOut().flush();
+    platform::SetCursorPos(bx, by);
+    // 帧账里被压住的行标脏(x 挪到取不到的负值,永远比不中),下一拍
+    // diff 只重画它们;needs_repaint 同步置上,压住指纹跳帧的那一道闸。
+    if (f.last_frame.has_value()) {
+        for (int i = clear_top; i < clear_bottom; ++i) {
+            const std::size_t index = static_cast<std::size_t>(i - f.row);
+            if (index < f.last_frame->rows.size()) {
+                f.last_frame->rows[index].x = -1000;
+            }
+        }
+    }
+    f.needs_repaint = true;
+}
+
+// 正文这笔写完,光标落在新续写点。旧路靠 Erase 的 Forget 让 Redraw 从
+// 光标现值认领正文位;帧账保下来之后,Redraw 的 bx/by 会优先读旧账,
+// 这里把账面拨到现值,框顶 = 新正文末尾 + 1 才算得对。调用方持锁。
+void NoteStreamBodyCursorLocked() {
+    StreamFooterState& f = FooterSlot();
+    if (!f.enabled || f.row < 0) {
+        return;
+    }
+    const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+    if (!info.has_value()) {
+        return;
+    }
+    f.body_x = info->cursor_x;
+    f.body_y = info->cursor_y;
+}
+
+// 内容滚屏后脚注帧账的对账:框随内容一起上移 rows 行。旧路每笔 delta
+// 都 Forget,错不错账都整框重画;帧账保下来之后,滚屏不记账会让
+// "原点恰好又对上"的巧合骗过 diff,拿旧行当新行跳过——屏上留的是滚
+// 过的旧内容。凡在锁内主动滚了屏的正文路(PrintPieceLocked/
+// RepaintBlockLocked/EnsureStreamScreenRowsLocked)都要叫这一声。
+void ShiftStreamFooterFrameOriginLocked(int rows) {
+    StreamFooterState& f = FooterSlot();
+    if (rows <= 0 || f.row < 0) {
+        return;
+    }
+    f.row = (std::max)(-1, f.row - rows);
+    f.last_frame_origin = (std::max)(-1, f.last_frame_origin - rows);
+    f.input_row = f.input_row >= 0 ? (std::max)(0, f.input_row - rows) : -1;
+}
+
+// 正文侧要往 [top_row, top_row+rows) 写字、且自带清行时(收束重画的整块
+// 重铺):物理清写由调用方办,这里只把压住的脚注行在帧账里标脏,下一拍
+// diff 记得重画它们。调用方持 StdoutWriteMutex。
+void MarkStreamFooterRowsDirtyLocked(int top_row, int rows) {
+    StreamFooterState& f = FooterSlot();
+    if (f.row < 0 || rows <= 0) {
+        return;
+    }
+    const int top = (std::max)(f.row, top_row);
+    const int bottom = (std::min)(f.row + f.rows, top_row + rows);
+    if (bottom <= top) {
+        return;
+    }
+    if (f.last_frame.has_value()) {
+        for (int i = top; i < bottom; ++i) {
+            const std::size_t index = static_cast<std::size_t>(i - f.row);
+            if (index < f.last_frame->rows.size()) {
+                f.last_frame->rows[index].x = -1000;
+            }
+        }
+    }
+    f.needs_repaint = true;
 }
 
 // 忙路重画(终端画面隔网单·战术三重写,对齐空闲路 RedrawEditArea 的帧账):
@@ -3738,28 +3910,40 @@ void RedrawStreamFooterLocked() {
     const int target = by + (bx > 0 ? 1 : 0);
 
     // 行级双缓冲(战术三):原点没挪就 diff——没变的行一字不写,回显只画
-    // 受影响行;挪了(或首帧)先整块清掉旧帧,再整帧落笔。两条路与空闲路
+    // 受影响行;挪了(或首帧)先清掉旧帧残行,再整帧落笔。两条路与空闲路
     // RedrawEditArea 的 QueueInlineFrameDiff/PaintInlineFrameLegacy 同一套账。
     const InlineFrame* previous = nullptr;
     if (f.last_frame.has_value() && f.last_frame_origin == target) {
         previous = &*f.last_frame;
     }
     if (previous == nullptr && f.row >= 0) {
-        // 旧帧还挂在屏上但原点对不上:整块清净再画,别让旧框垫在新帧底下。
-        if (f.vt_batch) {
-            platform::TerminalBatch sweep(viewport_x, viewport_y);
-            for (int i = 0; i < f.rows; ++i) {
-                sweep.ClearRowHardFrom(0, f.row + i, width);
+        // 旧帧还挂在屏上但原点对不上:清残行再画,别让旧框垫在新帧底下。
+        // 清扫只从 max(旧帧顶, 新帧顶) 起:正文往下长了把框顶下去时,
+        // [旧帧顶, 新帧顶) 这几行现在是刚落笔的正文,擦它们等于吃字。
+        const int sweep_top = (std::max)(f.row, target);
+        const int sweep_rows = f.row + f.rows - sweep_top;
+        if (sweep_rows > 0) {
+            if (f.vt_batch) {
+                platform::TerminalBatch sweep(viewport_x, viewport_y);
+                for (int i = 0; i < sweep_rows; ++i) {
+                    sweep.ClearRowHardFrom(0, sweep_top + i, width);
+                }
+                sweep.Flush();
+            } else {
+                ClearStreamFooterRowsAt(sweep_top, sweep_rows, width, info->height);
             }
-            sweep.Flush();
-        } else {
-            ClearStreamFooterRowsAt(f.row, f.rows, width, info->height);
         }
     }
     if (f.vt_batch) {
         platform::TerminalBatch batch(viewport_x, viewport_y);
-        QueueInlineFrameDiff(batch, previous, paint->frame, target);
+        const InlineFrameDiffStats diff_stats = QueueInlineFrameDiff(batch, previous, paint->frame, target);
+        const std::size_t batch_bytes = batch.has_commands() ? batch.Finish().size() : 0;
         batch.Flush();
+        if (FrameAuditEnabled() && batch_bytes > 0) {
+            ++f.audit_frames;
+            f.audit_bytes += batch_bytes;
+            f.audit_dirty_rows += diff_stats.changed_rows;
+        }
     } else {
         PaintInlineFrameLegacy(previous, paint->frame, target);
     }
@@ -3792,6 +3976,9 @@ void BeginStreamFooter(const Theme& theme, bool enabled) {
     ForgetStreamFooterFrame(f);
     f.last_width = -1;
     f.needs_repaint = false;
+    f.audit_frames = 0;
+    f.audit_bytes = 0;
+    f.audit_dirty_rows = 0;
     f.vt_batch = platform::ProbeStdoutConsole().vt_enabled;
     f.composer = RenderState{};  // 忙时草稿从空开始(取回编辑除外,那由取回方写)
     f.echo.clear();   // 废弃镜像(见 StreamFooterState 迁移注记),归零防旧值漏读
@@ -3814,6 +4001,13 @@ void EndStreamFooter() {
     std::lock_guard<std::mutex> lock(StdoutWriteMutex());
     StreamFooterState& f = FooterSlot();
     EraseStreamFooterLocked();  // 擦掉常驻那行,免得残留在 markdown 收束重画区之外
+    if (FrameAuditEnabled()) {
+        // 一轮流式的脚注帧账:驱动测试对"帧数有帽、字节只花在脏行"用的
+        // 就是这一行(stderr,不搅正文)。
+        TermErr() << "[frame-audit] busy_footer frames=" << f.audit_frames
+                  << " bytes=" << f.audit_bytes << " dirty_rows=" << f.audit_dirty_rows << "\n";
+        TermErr().flush();
+    }
     f.enabled = false;
     f.composer = RenderState{};
     f.echo.clear();

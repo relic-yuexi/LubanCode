@@ -474,6 +474,67 @@ private:
 // enabled=false(管道/重定向/plain 主题)时 OnDelta 退化成"拿锁原样打印"
 // (跟 0.18.0 的 on_text_delta 逐字节一致),其余方法全是空操作。
 // ---------------------------------------------------------------------------
+// 一笔 delta 切步的纯函数(P2-4 抽出来钉单测):输出"原样落笔/收束重画"
+// 两型步骤,围栏账与空行边界都在这里判。旧实现同一笔 delta 里第二段的
+// 重画会把第一段再渲染一遍、铺在错的锚点上——UI 泵按 33ms 并批后,一笔
+// delta 常跨好几段,重复渲染成了重绘洪峰的大头(Plan 采样 166k 字符对
+// 16k 正文,十倍的账)。规矩改为:空行一到,先落最后一段原文,再以"自
+// 上次收口以来攒的全部正文"触发一次收束重画,随后攒账清零——一段只
+// 渲染一次,渲染的永远是自己的原文。
+struct BodyDeltaStep {
+    bool repaint = false;
+    std::string text;  // repaint=false:原样落笔的段;repaint=true:待整块渲染的块原文
+};
+
+struct BodyScanState {
+    bool fence_open = false;
+    std::string line_probe;
+};
+
+inline std::vector<BodyDeltaStep> ScanBodyDelta(BodyScanState& state, const std::string& text,
+                                                const std::string& block_so_far) {
+    std::vector<BodyDeltaStep> steps;
+    std::string projected = block_so_far;  // 自上次收口以来攒的整块正文
+    std::string piece;
+    for (const char c : text) {
+        piece += c;
+        if (c != '\n') {
+            state.line_probe += c;
+            continue;
+        }
+        std::size_t first = 0;
+        while (first < state.line_probe.size() &&
+               (state.line_probe[first] == ' ' || state.line_probe[first] == '\t')) {
+            ++first;
+        }
+        if (state.line_probe.compare(first, 3, "```") == 0) {
+            state.fence_open = !state.fence_open;
+        }
+        const bool blank = first == state.line_probe.size();
+        state.line_probe.clear();
+        if (blank && !state.fence_open) {
+            if (!piece.empty()) {
+                projected += piece;
+                BodyDeltaStep print_step;
+                print_step.text = piece;
+                steps.push_back(std::move(print_step));
+            }
+            piece.clear();
+            BodyDeltaStep repaint_step;
+            repaint_step.repaint = true;
+            repaint_step.text = projected;
+            steps.push_back(std::move(repaint_step));
+            projected.clear();  // 收口:下一段从空串重新攒,不再回头渲染旧段
+        }
+    }
+    if (!piece.empty()) {
+        BodyDeltaStep print_step;
+        print_step.text = piece;
+        steps.push_back(std::move(print_step));
+    }
+    return steps;
+}
+
 class StreamBodyTracker {
 public:
     // 原地重画能力探不到时直接按 enabled=false 走：OnDelta 退化成“拿锁
@@ -513,10 +574,21 @@ public:
         }
         // ---- 锁内:落笔(脚注擦画、分段原样打、收束重画) ----
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
-        // 0.21.x 流式脚注:正文落笔前先把脚注那行擦掉(免得跟正文抢行/被正文
-        // 顶到中间),落笔后再重画到正文下方——见 console_input.hpp 注释。
-        // footer 没启用(非真终端或能力探测失败)时这两句是空操作。
-        lubancode::cli::EraseStreamFooterLocked();
+        // P2-4 流式重绘风暴:旧路每笔 delta 都整框擦掉再整框重画,行级
+        // diff 与指纹跳帧形同虚设。改外科准备——光标钉回正文续写点,正文
+        // 压到哪行才清哪行、只标脏那些行;正文写在自家行上、脚注没动的
+        // 那一拍,收尾的 diff 一个字节都不写。改宽照旧走整框追账。
+        if (enabled_) {
+            int newlines = 0;
+            for (const char c : text) {
+                newlines += c == '\n' ? 1 : 0;
+            }
+            lubancode::cli::PrepareStreamBodyWriteLocked(
+                newlines, static_cast<int>(lubancode::cli::DisplayWidthUtf8(text)));
+        } else {
+            // footer 没启用(非真终端或能力探测失败)时这句是空操作。
+            lubancode::cli::EraseStreamFooterLocked();
+        }
         // 工具终态行本身以换行收尾。下一段正文若直接落笔，视觉上便会
         // 贴住最后一条工具；这里另起一空行，且不把它塞进 Markdown 缓冲，
         // 免得收束重画时被 RenderMarkdown 的头尾裁剪吃掉。
@@ -539,6 +611,8 @@ public:
                 RepaintBlockLocked(step.plan);
             }
         }
+        // 正文这笔写完:帧账里的续写点拨到新光标,脚注框顶跟着算对。
+        lubancode::cli::NoteStreamBodyCursorLocked();
         lubancode::cli::RedrawStreamFooterLocked();  // 脚注重画到正文当前底部下方
     }
 
@@ -577,8 +651,8 @@ public:
         }
         in_block_ = false;
         buffer_.clear();
-        line_probe_.clear();
-        fence_open_ = false;
+        scan_.line_probe.clear();
+        scan_.fence_open = false;
     }
 
     // 工具终态已经画完。暂不落笔，等正文真来了再补分隔；若没有后续
@@ -596,8 +670,8 @@ public:
         const BlockRenderPlan plan = PrepareBlockRender(buffer_);
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         RepaintBlockLocked(plan);
-        line_probe_.clear();
-        fence_open_ = false;
+        scan_.line_probe.clear();
+        scan_.fence_open = false;
     }
 
 private:
@@ -623,45 +697,22 @@ private:
     // 与别人劈腿。buffer_ 只读起步一份投影(收束预案要"边界那一刻"的整
     // 块正文),锁内 PrintPieceLocked 落一笔补一笔,账对得上。
     std::vector<DeltaStep> ScanDelta(const std::string& text) {
+        // 切段与围栏账在纯函数 ScanBodyDelta(见上,单测钉死:
+        // 一段只渲染一次,收口即清零,不再把旧段回头再渲染一遍、
+        // 铺在错的锚点上)。这里只给每个收束步备好渲染预案。
+        const std::vector<BodyDeltaStep> raw_steps =
+            ScanBodyDelta(scan_, text, in_block_ ? buffer_ : std::string());
         std::vector<DeltaStep> steps;
-        std::string projected = in_block_ ? buffer_ : std::string();
-        // 长回答不能等到整轮结束才重画：那时块首多半早滚出屏幕。按空行
-        // 切成小段，逐段记锚、逐段收束；代码围栏没闭合时不切，免得把块内
-        // 空行错当段落边界。这样前一段失去锚点，后一段仍能重新起账。
-        std::string piece;
-        for (const char c : text) {
-            piece += c;
-            if (c != '\n') {
-                line_probe_ += c;
-                continue;
+        steps.reserve(raw_steps.size());
+        for (const BodyDeltaStep& raw : raw_steps) {
+            DeltaStep step;
+            step.repaint = raw.repaint;
+            if (raw.repaint) {
+                step.plan = PrepareBlockRender(raw.text);
+            } else {
+                step.piece = raw.text;
             }
-            std::size_t first = 0;
-            while (first < line_probe_.size() && (line_probe_[first] == ' ' || line_probe_[first] == '\t')) {
-                ++first;
-            }
-            if (line_probe_.compare(first, 3, "```") == 0) {
-                fence_open_ = !fence_open_;
-            }
-            const bool blank = first == line_probe_.size();
-            line_probe_.clear();
-            if (blank && !fence_open_) {
-                if (!piece.empty()) {
-                    projected += piece;
-                    DeltaStep print_step;
-                    print_step.piece = std::move(piece);
-                    steps.push_back(std::move(print_step));
-                }
-                piece.clear();
-                DeltaStep repaint_step;
-                repaint_step.repaint = true;
-                repaint_step.plan = PrepareBlockRender(projected);
-                steps.push_back(std::move(repaint_step));
-            }
-        }
-        if (!piece.empty()) {
-            DeltaStep print_step;
-            print_step.piece = std::move(piece);
-            steps.push_back(std::move(print_step));
+            steps.push_back(std::move(step));
         }
         return steps;
     }
@@ -717,6 +768,9 @@ private:
                     unsafe_ = true;
                 } else if (overflow > 0) {
                     start_row_ -= overflow;
+                    // 滚屏对账:脚注帧随内容上移,帧账跟上,不然 diff 会拿
+                    // 旧行当新行跳过(见 ShiftStreamFooterFrameOriginLocked)。
+                    lubancode::cli::ShiftStreamFooterFrameOriginLocked(overflow);
                     lubancode::platform::SetCursorPos(info->cursor_x, info->cursor_y - overflow);
                 }
             } else {
@@ -776,6 +830,8 @@ private:
             }
             if (overflow > 0) {
                 start_row_ -= overflow;
+                // 滚屏对账:同 PrintPieceLocked,脚注帧账跟着内容上移。
+                lubancode::cli::ShiftStreamFooterFrameOriginLocked(overflow);
             }
             // 平移视口(返回 0)与滚内容(返回 >0)都会动 viewport 原点,
             // 重探不问返回值。
@@ -785,6 +841,9 @@ private:
             }
         }
         const int rows_to_clear = (std::max)(old_rows, new_rows);
+        // 渲染块要压进脚注区时,把压住的脚注行在帧账里标脏(物理清行下面
+        // 自己办)——不然下一拍 diff 以为它们还在屏上,跳过不重画。
+        lubancode::cli::MarkStreamFooterRowsDirtyLocked(start_row_, rows_to_clear);
         std::string rendered;
         for (int i = 0; i < new_rows; ++i) {
             rendered += lines[static_cast<std::size_t>(i)];
@@ -824,8 +883,7 @@ private:
     bool unsafe_ = false;
     int start_row_ = 0;
     std::string buffer_;
-    std::string line_probe_;
-    bool fence_open_ = false;
+    BodyScanState scan_;
     bool separate_next_body_ = false;
 };
 

@@ -363,3 +363,69 @@ TEST_CASE("FormatContextBreakdown: 窗口为 0 不除零,百分比一律 0、条
     // 压缩线 0(80%)、剩余 0,不炸就是胜利。
     CHECK(lines[6].find("0(80%)") != std::string::npos);
 }
+
+// ---- WrapStatusRows(P3-3 括号断行) --------------------------------------------------
+
+TEST_CASE("WrapStatusRows: node(v24.0.0) 80/100 列整行一排,不折") {
+    const std::string line = "解释器可用: node(v24.0.0)";
+    CHECK(lubancode::cli::WrapStatusRows(line, 80) == std::vector<std::string>{line});
+    CHECK(lubancode::cli::WrapStatusRows(line, 100) == std::vector<std::string>{line});
+}
+
+TEST_CASE("WrapStatusRows: 窄终端快照——右括号跟着词走,不独自起行") {
+    const std::string line = "解释器可用: node(v24.0.0)";
+    // 14 列:"解释器可用:"(12 列)在首行,"node(v24.0.0)"(12 列)整段挪次行。
+    const auto narrow = lubancode::cli::WrapStatusRows(line, 14);
+    REQUIRE(narrow.size() == 2);
+    CHECK(narrow[0] == "解释器可用:");
+    CHECK(narrow[1] == "node(v24.0.0)");
+    // 再窄(10 列):前缀 12 列也装不下,无断点,原样占一行不切字。
+    const auto tiny = lubancode::cli::WrapStatusRows(line, 10);
+    REQUIRE(tiny.size() == 2);
+    CHECK(tiny[0] == "解释器可用:");
+    CHECK(tiny[1] == "node(v24.0.0)");
+    // 任意宽度下,没有一行以右括号开头。
+    for (const int width : {8, 12, 14, 16, 20, 24, 30, 40, 60}) {
+        for (const std::string& row : lubancode::cli::WrapStatusRows(line, width)) {
+            if (!row.empty()) {
+                CHECK(row.front() != ')');
+                CHECK(row.find('\n') == std::string::npos);
+            }
+        }
+    }
+}
+
+TEST_CASE("WrapStatusRows: 中文宽度两列记账,折点只认空格,不切半个宽字") {
+    // 前缀(4 列) + 半角冒号(1) + 空格(1) + 八个汉字(16) = 22 列。
+    const std::string line = "前缀: 一二三四五六七八";
+    CHECK(lubancode::cli::WrapStatusRows(line, 22).size() == 1);
+    CHECK(lubancode::cli::WrapStatusRows(line, 21).size() == 2);
+    const auto rows = lubancode::cli::WrapStatusRows(line, 10);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0] == "前缀:");
+    CHECK(rows[1] == "一二三四五六七八");  // 16 列超宽也整词占行,不切
+}
+
+TEST_CASE("WrapStatusRows: ANSI 转义零宽,不占折行宽度也不被切断") {
+    const std::string line = "[32m绿色[0m tail-of-the-line";
+    const auto rows = lubancode::cli::WrapStatusRows(line, 12);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0] == "[32m绿色[0m");
+    CHECK(rows[1] == "tail-of-the-line");
+}
+
+TEST_CASE("WrapStatusRows: 中文收口符同样不许起行") {
+    const std::string line = "abc 【标签】";
+    const auto rows = lubancode::cli::WrapStatusRows(line, 6);
+    REQUIRE(rows.size() == 2);
+    CHECK(rows[0] == "abc");
+    CHECK(rows[1] == "【标签】");
+    // 任意窄度折出的行,首字符都不是收口符"】"(U+3011 的 UTF-8 首字节 0xE3)。
+    // 任意窄度折出的行都不以收口符“】”起头(开括号“【”起头是正当的)。
+    const std::string closer = "】";
+    for (const int width : {4, 5, 6, 7}) {
+        for (const std::string& row : lubancode::cli::WrapStatusRows(line, width)) {
+            CHECK(row.compare(0, closer.size(), closer) != 0);
+        }
+    }
+}

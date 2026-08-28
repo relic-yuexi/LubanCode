@@ -480,6 +480,21 @@ void EndStreamFooter();
 // 下面两个要求调用方已持有 StdoutWriteMutex(OnDelta/OnBlockBreak 正持着)。
 void EraseStreamFooterLocked();
 void RedrawStreamFooterLocked();
+// 正文落笔前的外科准备(P2-4):光标钉回正文续写点;正文要压进脚注区时
+// 只清被压住的行并把这些行在帧账里标脏,整框 Forget 不再发生——下一拍
+// diff 只重画脏行,无变化的行一字不写。改宽了退回整框 Erase 追 reflow。
+// delta_newlines/delta_width_cols 是这笔正文的行数与显示列数(高估无害)。
+// 调用方须已持有 StdoutWriteMutex。
+void PrepareStreamBodyWriteLocked(int delta_newlines, int delta_width_cols);
+// 正文这笔写完,把帧账里的正文续写点拨到当前光标(框顶=新正文末尾+1)。
+// 调用方须已持有 StdoutWriteMutex。
+void NoteStreamBodyCursorLocked();
+// 内容滚屏后脚注帧账的对账:框随内容上移 rows 行。锁内主动滚屏的正文路
+// 都要叫这一声,不然"原点恰好又对上"的巧合会骗过 diff,拿旧行当新行跳过。
+void ShiftStreamFooterFrameOriginLocked(int rows);
+// 正文侧自带清行的整块重铺(收束重画)要压进脚注区时,把压住的行在帧账
+// 里标脏(物理清写由调用方自己办)。调用方持 StdoutWriteMutex。
+void MarkStreamFooterRowsDirtyLocked(int top_row, int rows);
 // 从当前光标起为 rows_needed 行腾出位置；必要时滚屏并通知上面的钩子。
 // 调用方须已持有 StdoutWriteMutex。末尾带换行的 N 行文字应传 N + 1。
 bool EnsureStreamScreenRowsLocked(int rows_needed);

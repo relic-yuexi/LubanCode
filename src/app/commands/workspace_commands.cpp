@@ -4,6 +4,7 @@
 #include "cli/todo_render.hpp"                // /todos 的排版
 #include "config/project_instructions.hpp"    // /init 的建档
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
+#include "cli/format_utils.hpp"   // WrapStatusRows:doctor 状态行的宽度折行(P3-3)
 
 using lubancode::cli::TermOut;
 using lubancode::cli::TermErr;
@@ -285,16 +286,51 @@ void HandlePluginCommand(const std::string& args,
         if (manifest != nullptr) {
             if (manifest->kind == lubancode::runtime::RuntimeKind::Process) {
                 const auto result = lubancode::platform::RunProcess({manifest->argv[0], "--version"}, 15000);
+                // 版本串取输出首个非空行、剥首尾空白:--version 的尾巴多半
+                // 带换行,原样塞进格式串会把右括号顶到下一行(P3-3 的病根)。
+                const auto first_line_trimmed = [](const std::string& output) {
+                    std::size_t start = 0;
+                    std::size_t end = output.size();
+                    while (start < end) {
+                        const std::size_t nl = output.find('\n', start);
+                        const std::size_t line_end = nl == std::string::npos ? end : nl;
+                        std::size_t b = start;
+                        std::size_t e = line_end;
+                        while (b < e && (output[b] == ' ' || output[b] == '\t' || output[b] == '\r')) {
+                            ++b;
+                        }
+                        while (e > b && (output[e - 1] == ' ' || output[e - 1] == '\t' || output[e - 1] == '\r')) {
+                            --e;
+                        }
+                        if (b < e) {
+                            return output.substr(b, e - b);
+                        }
+                        if (nl == std::string::npos) {
+                            break;
+                        }
+                        start = nl + 1;
+                    }
+                    return std::string();
+                };
+                const int wrap_width = lubancode::cli::DetectConsoleWidth().value_or(80);
                 if (result.spawn_failed || result.exit_code != 0) {
-                    TermOut() << trf("cmd.plugin.doctor.command_bad", manifest->argv[0],
-                                     result.spawn_failed ? result.spawn_error : std::to_string(result.exit_code))
-                              << "\n";
+                    const std::string line =
+                        trf("cmd.plugin.doctor.command_bad", manifest->argv[0],
+                            result.spawn_failed ? result.spawn_error : std::to_string(result.exit_code));
+                    for (const std::string& row : lubancode::cli::WrapStatusRows(line, wrap_width)) {
+                        TermOut() << row << "\n";
+                    }
                 } else {
-                    std::string version = result.output;
+                    std::string version = first_line_trimmed(result.output);
                     if (version.size() > 80) {
                         version = version.substr(0, 80) + "...";
                     }
-                    TermOut() << trf("cmd.plugin.doctor.command_ok", manifest->argv[0], version) << "\n";
+                    // 折行口径(P3-3):宽度算 ANSI 与中文宽字,"node(v24.0.0)"
+                    // 整段留在本行或整段挪下一行,右括号不独自掉行。
+                    const std::string line = trf("cmd.plugin.doctor.command_ok", manifest->argv[0], version);
+                    for (const std::string& row : lubancode::cli::WrapStatusRows(line, wrap_width)) {
+                        TermOut() << row << "\n";
+                    }
                 }
             } else {
                 TermOut() << tr("cmd.plugin.doctor.not_process") << "\n";

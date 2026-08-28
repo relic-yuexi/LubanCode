@@ -377,6 +377,43 @@ std::vector<std::string> ThinkingScriptEvents() {
     return events;
 }
 
+// ---- G7 帧账审计(P2-4)的家伙什与独立幕 ----
+
+// 长正文剧本:六段散文,每段 30 枚小 delta(每枚 5 个宽字,服务端 20ms
+// 一枚)——行内增量多、段落边界少,正是旧路"每笔 delta 整框擦了重画"的
+// 重灾区:正文在自家行上续写时,脚注本该一个字节都不写。
+std::vector<std::string> LongBodyScriptEvents() {
+    std::vector<std::string> events;
+    events.push_back(
+        "{\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"model\":\"fake-model\"}}");
+    events.push_back(
+        "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}");
+    for (int paragraph = 0; paragraph < 6; ++paragraph) {
+        for (int piece = 0; piece < 30; ++piece) {
+            std::string chunk;
+            for (int i = 0; i < 5; ++i) {
+                chunk += "流";
+            }
+            if (piece == 29) {
+                // JSON 里换行以 \\n 转义进帧(裸换行会废整帧,见思考剧本注)。
+                chunk += "收尾。\\n\\n";
+            }
+            events.push_back(
+                "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"" +
+                chunk + "\"}}");
+        }
+    }
+    events.push_back("{\"type\":\"content_block_stop\",\"index\":0}");
+    events.push_back(
+        "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":60,"
+        "\"output_tokens\":30}}");
+    return events;
+}
+
+std::vector<std::string> (*g_script_events)() = &ThinkingScriptEvents;
+int g_event_delay_ms = 300;
+std::vector<std::string> ScriptEvents() { return g_script_events(); }
+
 int StartFakeAnthropicServer() {
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -408,7 +445,7 @@ int StartFakeAnthropicServer() {
             std::thread([client_fd]() {
                 DrainHttpRequestBytes(client_fd);
                 std::size_t body_bytes = 0;
-                for (const auto& event : ThinkingScriptEvents()) {
+                for (const auto& event : ScriptEvents()) {
                     body_bytes += SseLine(event).size();
                 }
                 const std::string head = "HTTP/1.1 200 OK\r\n"
@@ -416,8 +453,8 @@ int StartFakeAnthropicServer() {
                                          "Content-Length: " +
                                          std::to_string(body_bytes) + "\r\n" + "Connection: close\r\n\r\n";
                 SendAllBytes(client_fd, head);
-                for (const auto& event : ThinkingScriptEvents()) {
-                    Sleep(300);
+                for (const auto& event : ScriptEvents()) {
+                    Sleep(g_event_delay_ms);
                     SendAllBytes(client_fd, SseLine(event));
                 }
                 closesocket(client_fd);
@@ -447,6 +484,137 @@ bool WaitForFooterInputRow(int timeout_ms, int* found_row = nullptr) {
 }
 
 }  // namespace
+
+std::string ReadAuditFileUtf8(const wchar_t* path) {
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+    std::string out;
+    char buf[4096];
+    DWORD read = 0;
+    while (ReadFile(file, buf, sizeof(buf), &read, nullptr) && read > 0) {
+        out.append(buf, read);
+    }
+    CloseHandle(file);
+    return out;
+}
+
+bool ParseAuditFields(const std::string& audit, const std::string& tag, long long* frames, long long* bytes) {
+    const std::string marker = "[frame-audit] " + tag;
+    const std::size_t at = audit.rfind(marker);
+    if (at == std::string::npos) {
+        return false;
+    }
+    const std::size_t nl = audit.find('\n', at);
+    const std::string line = audit.substr(at, nl == std::string::npos ? std::string::npos : nl - at);
+    const auto field = [&line](const char* key) -> long long {
+        const std::size_t k = line.find(key);
+        return k == std::string::npos ? -1 : atoll(line.c_str() + k + std::string(key).size());
+    };
+    *frames = field("frames=");
+    *bytes = field("bytes=");
+    return *frames >= 0 && *bytes >= 0;
+}
+
+// G7 幕:第三个子进程带 LUBANCODE_FRAME_AUDIT=1,stderr 改道进文件;假服务
+// 换长正文剧本(180 枚小 delta、20ms 一枚)。断言整轮流式的脚注帧数与
+// 字节数都有帽——旧路每笔 delta 都整框擦了重画,180 枚 delta 至少 180 帧
+// 起;外科路里行内增量帧零输出,只有行跨越与秒针换帧。
+// 可单跑:stream_footer_driver <exe> <dir> <报告> g7(沙箱/CI 用,不碰需要
+// 真后端的 G1-G6)。
+void RunG7AuditScene(const std::wstring& exe_path, const std::wstring& workdir, const wchar_t* report_path) {
+    g_script_events = &LongBodyScriptEvents;
+    g_event_delay_ms = 20;
+    const int port7 = StartFakeAnthropicServer();
+    Check(port7 != 0, "G7 假 anthropic 服务起来(长正文剧本)");
+    if (port7 == 0) {
+        g_script_events = &ThinkingScriptEvents;
+        g_event_delay_ms = 300;
+        return;
+    }
+    SetEnvVar(L"LUBANCODE_WIRE", L"anthropic");
+    SetEnvVar(L"LUBANCODE_BASE_URL", L"http://127.0.0.1:" + std::to_wstring(port7));
+    SetEnvVar(L"LUBANCODE_API_KEY", L"stream-footer-driver");
+    SetEnvVar(L"LUBANCODE_MODEL", L"fake-model");
+    SetEnvVar(L"NO_PROXY", L"127.0.0.1,localhost");
+    SetEnvVar(L"http_proxy", L"");
+    SetEnvVar(L"https_proxy", L"");
+    SetEnvVar(L"LUBANCODE_FRAME_AUDIT", L"1");
+    const std::wstring audit7 = std::wstring(report_path) + L".g7audit";
+    DeleteFileW(audit7.c_str());
+    SECURITY_ATTRIBUTES inherit7{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE err7 = CreateFileW(audit7.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &inherit7, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    STARTUPINFOW si7{};
+    si7.cb = sizeof(si7);
+    si7.dwFlags = STARTF_USESTDHANDLES;
+    si7.hStdInput = g_conin;
+    si7.hStdOutput = g_conout;
+    si7.hStdError = err7;
+    PROCESS_INFORMATION pi7{};
+    std::wstring cmdline7 = L"\"" + exe_path + L"\"";
+    if (CreateProcessW(exe_path.c_str(), cmdline7.data(), nullptr, nullptr, TRUE, 0, nullptr, workdir.c_str(),
+                       &si7, &pi7)) {
+        CloseHandle(pi7.hThread);
+        Check(WaitForText("shift+tab", 30000), "G7 开场:composer 状态行出现");
+        Sleep(400);
+        SendText("请分六段长篇大论一番");
+        SendKey(VK_RETURN, L'\r', 0);
+        // 流式中途键入:composer 的帧不能被流式正文冲掉,反之亦然。
+        Check(WaitForText("流流流", 20000), "G7 长正文开始流出");
+        SendText("同屏输入");
+        Sleep(600);
+        {
+            int input_row7 = -1;
+            bool typed_visible = false;
+            bool body_alive = false;
+            for (int r = 0; r < 400; ++r) {
+                const std::string row = ReadRow(r);
+                if (row.find("同屏输入") != std::string::npos) {
+                    typed_visible = true;
+                }
+                if (row.find("流流流") != std::string::npos) {
+                    body_alive = true;
+                }
+            }
+            Check(typed_visible, "G7 流式中途键入:composer 回显可见,没被正文冲掉");
+            Check(body_alive, "G7 流式中途键入:正文还在屏上,没被 composer 冲掉");
+        }
+        Check(WaitForText("Worked for", 60000), "G7 长正文流完,turn footer 出现");
+        Sleep(300);
+        SendText("exit");
+        SendKey(VK_RETURN, L'\r', 0);
+        if (WaitForSingleObject(pi7.hProcess, 15000) != WAIT_OBJECT_0) {
+            Log("INFO: G7 exit 超时,强杀子进程");
+            TerminateProcess(pi7.hProcess, 9);
+        }
+        CloseHandle(pi7.hProcess);
+        CloseHandle(err7);
+
+        long long frames7 = -1;
+        long long bytes7 = -1;
+        const std::string audit_text7 = ReadAuditFileUtf8(audit7.c_str());
+        const bool parsed7 = ParseAuditFields(audit_text7, "busy_footer", &frames7, &bytes7);
+        Check(parsed7, "G7 帧账行落在 stderr 日志");
+        if (parsed7) {
+            // 帽:180 枚 delta,只有行跨越(~30)与秒针换帧付账;旧路是每笔
+            // delta 一整框,180 帧起、字节翻几番。
+            Check(frames7 <= 96, "G7 长正文:忙路脚注帧数有帽(实得 " + std::to_string(frames7) +
+                                      " 帧,旧路 180+ 起步)");
+            Check(bytes7 <= 64 * 1024, "G7 长正文:忙路脚注字节有帽(实得 " +
+                                           std::to_string(bytes7) + " 字节)");
+            Log("INFO: G7 busy_footer frames=" + std::to_string(frames7) + " bytes=" + std::to_string(bytes7));
+            DeleteFileW(audit7.c_str());
+        }
+    } else {
+        Check(false, "G7 CreateProcess " + std::to_string(GetLastError()));
+        CloseHandle(err7);
+    }
+    SetEnvVar(L"LUBANCODE_FRAME_AUDIT", L"");
+    g_script_events = &ThinkingScriptEvents;
+    g_event_delay_ms = 300;
+}
 
 int wmain(int argc, wchar_t** argv) {
     if (argc < 4) {
@@ -485,6 +653,13 @@ int wmain(int argc, wchar_t** argv) {
     SetConsoleWindowInfo(g_conout, TRUE, &window);
     FlushConsoleInputBuffer(g_conin);
     Log("INFO: console buffer " + std::to_string(BufferWidth()) + " cols, window 30 rows");
+
+    // g7 单跑模式:跳过需要真后端的 G1-G6,只跑帧账审计幕(沙箱/CI 用)。
+    if (argc >= 5 && wcscmp(argv[4], L"g7") == 0) {
+        RunG7AuditScene(exe_path, workdir, argv[3]);
+        Log(g_failures == 0 ? "RESULT: ALL PASS" : "RESULT: " + std::to_string(g_failures) + " FAIL");
+        return g_failures == 0 ? 0 : 1;
+    }
 
     STARTUPINFOW si{};
     si.cb = sizeof(si);
@@ -958,6 +1133,9 @@ int wmain(int argc, wchar_t** argv) {
             }
         }
     }
+
+    // ---- G7 帧账审计(P2-4):长正文洪流期间,忙路脚注只画脏行 ----
+    RunG7AuditScene(exe_path, workdir, argv[3]);
 
     // ---- 收尾:exit ----
     SendText("exit");
