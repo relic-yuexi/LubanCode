@@ -81,6 +81,8 @@ struct TurnVerdict {
         None,                 // 正常完成
         UserStop,             // 用户中止(ESC/面板 x)
         StepLimit,            // 步数预算用满
+        TimeBudget,           // 时间预算用满(成本硬线,区别于看门狗墙钟)
+        TokenBudget,          // token 预算用满(成本硬线)
         OutputBudget,         // 输出预算耗尽(续跑用完仍无正文)
         ApiError,             // 接口报错(请求失败/流中断)
         MaxContext,           // 上下文装不下
@@ -101,6 +103,8 @@ struct TurnVerdict {
 struct TurnEndgame {
     bool cancelled = false;             // 有轮被打断
     bool hit_step_limit = false;        // 有轮撞步数闸
+    bool time_budget_exhausted = false;  // 有轮撞时间成本闸(P2-6)
+    bool token_budget_exhausted = false;  // 有轮撞 token 成本闸(P2-6)
     bool wall_clock = false;            // 墙钟看门狗到点(置位时压过 cancelled)
     std::string error;                  // 有轮报错(Run 的 unexpected 文案)
     bool history_empty = false;         // 连一条 assistant 都没有
@@ -151,6 +155,8 @@ struct DriveReport {
     bool ok = true;               // 最后一轮 Run 是否正常交账(false = error 有货)
     bool cancelled = false;       // 任一轮被打断(含续投领批后发现的取消)
     bool hit_step_limit = false;  // 任一轮撞步数闸
+    bool time_budget_exhausted = false;   // 任一轮撞时间成本闸(P2-6)
+    bool token_budget_exhausted = false;  // 任一轮撞 token 成本闸(P2-6)
     bool wall_clock = false;      // 轮间查到墙钟到点
     std::string error;            // !ok 时的错误文案
     std::string stop_reason;      // 最后一轮正常收口的 stop_reason

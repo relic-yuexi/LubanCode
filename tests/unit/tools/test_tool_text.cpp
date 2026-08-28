@@ -417,7 +417,8 @@ TEST_CASE("批3 代理族: 缺省(zh-CN)description 与 persona 逐字节回到�
     CHECK(schema["properties"]["prompt"]["description"] ==
           "交给子代理的任务描述,必须自包含——子代理看不见主对话历史,任务目标、范围、期望的输出形式都要写清楚。");
     CHECK(schema["properties"]["agent_type"]["description"] ==
-          "子代理类型:Explore 只读搜索分析;general-purpose 可做多步操作。默认 general-purpose。");
+          "子代理类型:Explore 只读搜索分析;general-purpose 可做多步操作(默认);或 /agents 清单里的自定义 "
+          "Agent 名(各自带工具边界、预装技能与预算,清单以 /agents 实时输出为准)。");
     CHECK(schema["properties"]["isolation"]["description"] ==
           "worktree = 给子代理单独开一间 git worktree 隔离房干活:写不碰主 checkout(文件/命令/git 三道闸拦),"
           "干完没改动房自动删,有改动则保留并在结果里附房路径与分支,由主代理或用户收尾。"
@@ -443,8 +444,9 @@ TEST_CASE("批3 代理族: en 下 description、参数说明与 persona 都出�
     AgentTool agent(backend, registry, "/work/dir");
     CHECK(agent.description().find("Delegate independent tasks to subagents") == 0);
     CHECK(agent.input_schema()["properties"]["agent_type"]["description"] ==
-          "Subagent type: Explore is read-only search and analysis; general-purpose can perform multi-step operations. "
-          "Default general-purpose.");
+          "Subagent type: Explore is read-only search and analysis; general-purpose can perform multi-step operations "
+          "(default); or a custom agent name from the /agents catalog (each with its own tool boundary, preloaded "
+          "skills, and budgets—the catalog listing from /agents is authoritative).");
     // persona 键同样走 en 档:Explore 只读人格的英文特征句。
     CHECK(ToolText("agent", "persona.explore").find("You are an Explore subagent") == 0);
     CHECK(ToolText("agent", "persona.general").find("You are a general-purpose subagent") == 0);

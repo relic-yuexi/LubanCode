@@ -220,6 +220,8 @@ struct OutputBudgetReport {
 // hit_step_limit=true 表示步数预算用满(max_steps_per_turn>0 才可能):也不是
 // 错误,history 里留着到限为止的全部来回——上层(子代理)据此按
 // budget_exhausted 收账、带走部分结果,不许笼统当 failed。
+// hit_time_budget/hit_token_budget 同款(真机实测 P2-6 成本刹车):墙钟或
+// 累计 token 硬线断的,分型时写明是哪根线,部分结果照常带走。
 // stop_reason/steps_used 把模型最后一次应答的原始 stop reason 与实际请求
 // 次数交出去,失败语义由调用方分型。
 // output_budget:输出预算账(见上)。length_empty_output 是它的旧视图
@@ -234,6 +236,10 @@ struct RunOutcome {
     std::string stop_reason;  // 模型最后一次应答的原始 stop_reason(空 = 一个字都没回来)
     int steps_used = 0;       // 本次 Run() 实际发出的模型请求数(turn 内的 step 数)
     OutputBudgetReport output_budget;
+    // 成本硬线(步顶查,断线即收场):时间与 token 两根;步数那根是上面的
+    // hit_step_limit。三根都只在对应上限 >0 时可能置位。
+    bool hit_time_budget = false;
+    bool hit_token_budget = false;
 };
 
 // 步数将尽提醒:剩三步时在当步末条消息尾部附一句"收口"提示——停止
@@ -248,6 +254,17 @@ constexpr int kStepLimitNudgeThreshold = 3;
 // 将尽"的提示。max_steps_per_turn <= 0 表示无上限,永远不触发(压根没有
 // "将尽"这回事)。
 bool ShouldNudgeStepLimit(int step_index, int max_steps_per_turn);
+
+// 预算软线催办(真机实测 P2-1/P2-6)的正文:跨过软线那一步注入,要求模型
+// 基于现有证据收尾——开新调查方向就别想了,把已查到的写下来。
+std::string BuildBudgetSoftNudgeText();
+
+// 纯函数,可单测:三根硬线(步数/累计 token/墙钟毫秒)各与已用量比对,
+// 任一跨过软线(BudgetSoftLine 派生,percent 0 = 该线不催)即真。Run 循环
+// 里只催一次:调用方自持 nudged 旗,本函数只管"此刻过没过线"。
+bool CrossesBudgetSoftLine(int steps_used, int max_steps_per_turn, std::int64_t tokens_seen,
+                           std::int64_t max_total_tokens, std::int64_t elapsed_ms, std::int64_t max_wall_ms,
+                           int soft_percent);
 
 class Agent;
 

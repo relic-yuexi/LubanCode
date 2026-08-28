@@ -53,6 +53,8 @@ enum class TaskOutcomeReason {
     None,              // 无(还没收场/正常完成)
     ApiError,          // 接口报错(请求失败/流中断)
     StepLimitExhausted,  // 步数预算耗尽(旧名 MaxTurns,口径已改按 step 记)
+    TimeBudgetExhausted,   // 时间预算耗尽(成本硬线,真机实测 P2-6)
+    TokenBudgetExhausted,  // token 预算耗尽(成本硬线,真机实测 P2-6)
     OutputBudgetExhausted,  // 输出预算耗尽(max_tokens;续跑用完仍无正文,规格根因四)
     MaxContext,        // 上下文装不下
     NoFinalText,   // 最后一轮没有文本结论
@@ -83,6 +85,10 @@ struct AgentTaskActivity {
     // 工具执行中:工具名与起跑时刻(坞行显示"工具 read_file · 3s")。
     std::string tool_name;
     std::chrono::steady_clock::time_point tool_started{};
+    // 最后一次工具调用的名字(真机实测 P2-1:Dock 要求"最后一次工具"常驻
+    // 可见,不只工具跑着的那几秒)。工具收口不清,下一枚工具发起时覆盖;
+    // 终态清空(整个 activity 一起换)。
+    std::string last_tool_name;
 };
 
 struct TaskOutcome {
@@ -94,6 +100,10 @@ struct TaskOutcome {
     std::string last_tool;       // 最后一次工具名与结果摘要
     int steps_used = 0;
     int step_limit = 0;          // 0 = 不限步(一个 turn 内的模型请求数上限)
+    // 成本预算账(真机实测 P2-6):派出时的时间/token 硬线,0 = 不设。断线
+    // 时 message 写明哪根线,这里留数好对账。
+    int wall_limit_secs = 0;
+    std::int64_t token_limit = 0;
     // 输出预算账(规格根因四,来自 agent::OutputBudgetReport):撞墙的
     // 上限(0 = unset,墙在服务端)、续跑次数、usage 是否报告、思考检查点。
     int output_limit_tokens = 0;       // 0 = unset(请求没带字段)
@@ -139,6 +149,10 @@ struct AgentTaskSnapshot {
     // 派出时写死的预算(0 = 不限步):面板可见,不等撞墙才揭晓(规格"现场四")。
     int step_limit = 0;
     int steps_used = 0;  // 已发生的模型请求数(RunOutcome 直接记账,不靠 usage 回调猜)
+    // 派出时的时间/token 成本预算(真机实测 P2-6;0 = 不设)。与 step_limit
+    // 同一规矩:预算进快照,坞行与详情看得见,超了有短因。
+    int wall_limit_secs = 0;
+    std::int64_t token_limit = 0;
     // api::Usage 统一口径(input=非缓存输入),完整输入 = 三项相加。
     std::int64_t input_tokens = 0;
     std::int64_t cache_read_tokens = 0;
@@ -210,6 +224,8 @@ struct AgentTaskSummary {
     bool stop_requested = false;
     int step_limit = 0;
     int steps_used = 0;
+    int wall_limit_secs = 0;       // 派出时的时间预算(0 = 不设;P2-6)
+    std::int64_t token_limit = 0;  // 派出时的 token 预算(0 = 不设;P2-6)
     TaskOutcomeReason outcome_reason = TaskOutcomeReason::None;  // 面板短因用
     std::int64_t input_tokens = 0;
     std::int64_t cache_read_tokens = 0;

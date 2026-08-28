@@ -332,4 +332,21 @@ std::string BuildSkillsPromptSegment(const std::vector<SkillMeta>& skills) {
     return out;
 }
 
+std::optional<std::string> ReadSkillBody(const SkillMeta& meta) {
+    const std::filesystem::path skill_md = Utf8ToPath(meta.dir_path) / "SKILL.md";
+    std::error_code ec;
+    if (!std::filesystem::exists(skill_md, ec) || ec) {
+        return std::nullopt;
+    }
+    std::ifstream file(skill_md, std::ios::binary);
+    if (!file.is_open()) {
+        return std::nullopt;
+    }
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    const std::string content = buffer.str();
+    const auto parsed = ParseSkillMarkdown(content);
+    return parsed.has_value() ? parsed->body : content;
+}
+
 }  // namespace lubancode::tools

@@ -606,6 +606,35 @@ bool ShouldNudgeStepLimit(int step_index, int max_steps_per_turn) {
     return (max_steps_per_turn - step_index) == (std::min)(max_steps_per_turn, kStepLimitNudgeThreshold);
 }
 
+// 预算软线催办(真机实测 P2-1:只读审查 34 次工具调用仍停在"等首字节"):
+// 任一成本硬线跨过软线时注入一次,要求模型基于现有证据收尾。与步数将尽
+// 提醒同一注入点、同一份追加律;两条共用一面"已催"旗,一次 Run 至多一条。
+std::string BuildBudgetSoftNudgeText() {
+    return "\n\n[系统提醒] 本任务的预算已过大半,请基于现有证据收尾:不要再开新的调查方向;"
+           "把已经查到的事实与关键证据位置整理成结论交回;确有未尽事项,作为后续建议列出,"
+           "不要继续展开。";
+}
+
+// 三根硬线任一跨过软线?(纯函数,单测钉)各硬线 0 = 未设该线,不参与。
+bool CrossesBudgetSoftLine(int steps_used, int max_steps_per_turn, std::int64_t tokens_seen,
+                           std::int64_t max_total_tokens, std::int64_t elapsed_ms, std::int64_t max_wall_ms,
+                           int soft_percent) {
+    if (soft_percent <= 0) {
+        return false;  // 不催:只留硬闸
+    }
+    if (max_steps_per_turn > 0 &&
+        static_cast<std::int64_t>(steps_used) >= BudgetSoftLine(max_steps_per_turn, soft_percent)) {
+        return true;
+    }
+    if (max_total_tokens > 0 && tokens_seen >= BudgetSoftLine(max_total_tokens, soft_percent)) {
+        return true;
+    }
+    if (max_wall_ms > 0 && elapsed_ms >= BudgetSoftLine(max_wall_ms, soft_percent)) {
+        return true;
+    }
+    return false;
+}
+
 std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message user_message,
                                                        const TurnWiring& wiring,
                                                        const std::atomic<bool>* cancel) {
@@ -653,6 +682,16 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
     // 等,不再靠解析错误文案猜。
     int steps_used = 0;
     std::string last_stop_reason;
+    // 成本刹车活账(真机实测 P2-6):本 Run 的墙钟起算点与累计 token(完整
+    // 输入 + 输出,与台账/面板同一口径)。三根硬线(步数在上面 profile_ 里)
+    // 每个步顶查一次,软线催办也吃这两笔账。
+    const auto run_started = std::chrono::steady_clock::now();
+    std::int64_t tokens_seen = 0;
+    const std::int64_t max_wall_ms =
+        profile_.max_wall_secs > 0 ? static_cast<std::int64_t>(profile_.max_wall_secs) * 1000 : 0;
+    // 催办只此一条:步数将尽提示与预算软线催办共用这面旗(规格"重复念叨
+    // 只会把剩余步数也烧掉"同一笔账),一次 Run 至多注入一次。
+    bool budget_nudged = false;
     // 回合视觉收束(终端回合视觉收束单):本 Run() 已发出的批次序号
     // (on_tool_batch_started 的 batch_index 用;每个含工具的 step 消耗
     // 一枚,跨 step 不重号)。
@@ -686,6 +725,24 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         if (wiring_.inbox && step_index > 0) {
             while (auto incoming = wiring_.inbox()) {
                 context_.InjectIncoming(std::move(*incoming));
+            }
+        }
+
+        // 成本硬线(真机实测 P2-6):时间/token 两根在步顶查——步数那根由
+        // 循环条件执法。断线即收场:不是错误,history 里留着到限为止的全部
+        // 来回,部分结果由调用方按 budget_exhausted 带走,缘由写明哪根线断。
+        if (profile_.max_wall_secs > 0 || profile_.max_total_tokens > 0) {
+            const std::int64_t elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                std::chrono::steady_clock::now() - run_started)
+                                                .count();
+            const bool over_wall = max_wall_ms > 0 && elapsed_ms >= max_wall_ms;
+            const bool over_tokens = profile_.max_total_tokens > 0 && tokens_seen >= profile_.max_total_tokens;
+            if (over_wall || over_tokens) {
+                RunOutcome outcome{false, false, false, last_stop_reason, steps_used};
+                outcome.hit_time_budget = over_wall;
+                outcome.hit_token_budget = over_tokens;
+                outcome.output_budget = budget_report;
+                return outcome;
             }
         }
 
@@ -728,14 +785,25 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     "。当前消息本身已装不下，压缩旧历史也无济于事；请缩短输入或调低输出上限。");
             }
         }
-        // 步数将尽提醒(第五期):固定文案,在"剩余步数第一次降到阈值"那一步
-        // 追加进尚未发出的尾部消息(user 输入或刚攒完的 tool result),随
-        // history 留住——不改 system,不撤旧提醒,追加律不破。ShouldNudge-
-        // StepLimit 每次 Run 只真一次,天然只注一遍。
-        if (ShouldNudgeStepLimit(step_index, profile_.max_steps_per_turn) &&
-            !context_.durable_history().empty()) {
-            const api::TextBlock nudge{BuildStepLimitNudgeText()};
-            context_.AppendToLast(nudge);
+        // 步数将尽提醒(第五期)+ 预算软线催办(P2-1/P2-6):固定文案,在触发
+        // 条件第一次成立的那一步追加进尚未发出的尾部消息(user 输入或刚攒完
+        // 的 tool result),随 history 留住——不改 system,不撤旧提醒,追加律
+        // 不破。两条共用 budget_nudged:一次 Run 至多注入一条,先到先得。
+        if (!budget_nudged && !context_.durable_history().empty()) {
+            if (ShouldNudgeStepLimit(step_index, profile_.max_steps_per_turn)) {
+                const api::TextBlock nudge{BuildStepLimitNudgeText()};
+                context_.AppendToLast(nudge);
+                budget_nudged = true;
+            } else if (CrossesBudgetSoftLine(steps_used, profile_.max_steps_per_turn, tokens_seen,
+                                             profile_.max_total_tokens,
+                                             std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                 std::chrono::steady_clock::now() - run_started)
+                                                 .count(),
+                                             max_wall_ms, profile_.budget_soft_percent)) {
+                const api::TextBlock nudge{BuildBudgetSoftNudgeText()};
+                context_.AppendToLast(nudge);
+                budget_nudged = true;
+            }
         }
 
         // mid-turn 安全点:拼请求前先估 projected——system + 工具定义 + 全份
@@ -1079,6 +1147,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             budget_report.usage_reported = budget_report.usage_reported || usage.input_tokens > 0 ||
                                             usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
                                             usage.cache_creation_tokens > 0 || usage.output_reasoning_tokens > 0;
+            // 成本刹车(P2-6):token 硬线按"完整输入 + 输出"累计,与台账/
+            // 面板同口径——provider 漏 usage 只会晚触发,不会把闸拆了。
+            tokens_seen += api::TotalInputTokens(usage) + usage.output_tokens;
         }
 
         if (wiring.events != nullptr) {

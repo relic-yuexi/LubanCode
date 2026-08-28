@@ -102,6 +102,18 @@ TurnVerdict ClassifyTurnEnd(const TurnEndgame& end) {
         verdict.reason = TurnVerdict::Reason::StepLimit;
         return verdict;
     }
+    if (end.time_budget_exhausted) {
+        // 时间成本闸(P2-6):预算断线不是失败,是 budget_exhausted——部分
+        // 结果照常带走,缘由写明是时间线断的。
+        verdict.status = TurnVerdict::Status::BudgetExhausted;
+        verdict.reason = TurnVerdict::Reason::TimeBudget;
+        return verdict;
+    }
+    if (end.token_budget_exhausted) {
+        verdict.status = TurnVerdict::Status::BudgetExhausted;
+        verdict.reason = TurnVerdict::Reason::TokenBudget;
+        return verdict;
+    }
     if (!end.error.empty()) {
         verdict.status = TurnVerdict::Status::Failed;
         verdict.reason = end.error.find("上下文") != std::string::npos
@@ -185,6 +197,13 @@ DriveReport DriveTurn(Agent& agent, const TurnWiring& wiring, api::Message input
             report.hit_step_limit = true;
             break;
         }
+        if (outcome->hit_time_budget || outcome->hit_token_budget) {
+            // 成本硬线(时间/token):与步数闸同款——退批收场,分型写明线别。
+            restore_inflight();
+            report.time_budget_exhausted = report.time_budget_exhausted || outcome->hit_time_budget;
+            report.token_budget_exhausted = report.token_budget_exhausted || outcome->hit_token_budget;
+            break;
+        }
         inflight.reset();  // 上一批已随本轮请求真正送达,提交
         if (!options.continuation) {
             break;  // 没有续投源(主回合):单轮即收
@@ -230,6 +249,12 @@ void RunStopContinuation(Agent& agent, const TurnWiring& wiring, const StopOptio
         const auto continuation = agent.Run(options.label + merged.block_reason, wiring, options.cancel);
         if (!continuation.has_value() || continuation->cancelled || continuation->hit_step_limit) {
             break;  // 续跑轮报错/被打断/撞预算:如实停,不带病硬续
+        }
+        if (continuation->hit_time_budget || continuation->hit_token_budget) {
+            // 成本硬线:续跑轮同样停——成本闸不因钩子续跑而豁免(P2-6)。
+            report.time_budget_exhausted = report.time_budget_exhausted || continuation->hit_time_budget;
+            report.token_budget_exhausted = report.token_budget_exhausted || continuation->hit_token_budget;
+            break;
         }
         report.cancelled = report.cancelled || continuation->cancelled;
         report.steps_used += continuation->steps_used;

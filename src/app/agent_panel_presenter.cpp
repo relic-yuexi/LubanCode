@@ -33,6 +33,10 @@ std::string OutcomeReasonText(lubancode::tools::TaskOutcomeReason reason) {
             return tr("agent_status.reason_api_error");
         case R::StepLimitExhausted:
             return tr("agent_status.reason_step_limit");
+        case R::TimeBudgetExhausted:
+            return tr("agent_status.reason_time_budget");
+        case R::TokenBudgetExhausted:
+            return tr("agent_status.reason_token_budget");
         case R::MaxContext:
             return tr("agent_status.reason_max_context");
         case R::NoFinalText:
@@ -106,8 +110,18 @@ std::string AgentStateWord(lubancode::tools::AgentTaskState state, int steps_use
         if (word.empty()) {
             word = tr("agent_status.state_running");
         }
+        // 步数常驻可见(真机实测 P2-1:Dock 要"已用步数、上限、累计 token、
+        // 最后一次工具"四样都看得到):有上限带 N/M,没上限跑过步数也带 N。
         if (step_limit > 0) {
             word += trf("agent_status.budget_suffix", steps_used, step_limit);
+        } else if (steps_used > 0) {
+            word += trf("agent_status.steps_suffix", steps_used);
+        }
+        // 最后一次工具:工具跑着时活度短语已带名字;不在跑的空档(等首字节/
+        // 思考/正文)补"上次 <工具>",长任务分得清卡在哪枚工具后头。
+        if (activity != nullptr && activity->stage != lubancode::tools::AgentTaskActivity::Stage::Tool &&
+            !activity->last_tool_name.empty()) {
+            word += trf("agent_status.last_tool", activity->last_tool_name);
         }
         return word;
     }
@@ -117,7 +131,12 @@ std::string AgentStateWord(lubancode::tools::AgentTaskState state, int steps_use
         case S::Cancelled:
             return trf("agent_status.state_stopped_reason", tr("agent_status.reason_user_stop"));
         case S::BudgetExhausted:
-            return trf("agent_status.state_exhausted", steps_used, step_limit);
+            // 断的是时间/token 线时步数上限多半是 0,不画"N/0 步"的假账——
+            // 短因写明线别,步数与预算明细在详情行看(P2-6)。
+            if (step_limit > 0) {
+                return trf("agent_status.state_exhausted", steps_used, step_limit);
+            }
+            return trf("agent_status.state_stopped_reason", OutcomeReasonText(outcome_reason));
         case S::Failed:
         case S::Running:
             return trf("agent_status.state_failed_reason", OutcomeReasonText(outcome_reason));
@@ -265,6 +284,30 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
             stats_line += " · " + trf("agent_activity.first_byte", snapshot->activity.first_byte_ms);
         }
         lines.push_back(stats_line + theme.reset);
+        // 预算明细行(真机实测 P2-6:Dock 要能看出"为什么还在跑"):派出时
+        // 设了哪几根线、各用到哪了——步数/时间/token 三样,只列设了的。
+        {
+            std::vector<std::string> parts;
+            if (snapshot->step_limit > 0) {
+                parts.push_back(std::to_string(snapshot->steps_used) + "/" + std::to_string(snapshot->step_limit) +
+                                " 步");
+            }
+            if (snapshot->wall_limit_secs > 0) {
+                parts.push_back(lubancode::cli::FormatSeconds(seconds) + "/" +
+                                std::to_string(snapshot->wall_limit_secs) + "s");
+            }
+            if (snapshot->token_limit > 0) {
+                parts.push_back(lubancode::cli::FormatTokenCount(tokens) + "/" +
+                                lubancode::cli::FormatTokenCount(snapshot->token_limit));
+            }
+            if (!parts.empty()) {
+                std::string joined = parts[0];
+                for (std::size_t i = 1; i < parts.size(); ++i) {
+                    joined += " · " + parts[i];
+                }
+                lines.push_back("  " + theme.stats + trf("agent_panel.budget_head", joined) + theme.reset);
+            }
+        }
     }
 
     const std::vector<lubancode::tools::AgentTaskEvent> events =
