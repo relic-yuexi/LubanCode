@@ -74,7 +74,38 @@ embed_group(kPlatform platforms "")
 # 用户目录(单子:mode instructions 宿主内置,不给项目覆盖)。
 embed_group(kMode modes kModeModules IN_ALL_MODULES FALSE)
 
+# Prompt Profile 单(阶段 2):profiles/<名>/{core,features,platforms}/*.md 是
+# 内置 Profile 模块(稀疏覆盖,契约 docs/reference/agents.md §6.1)。递归收进
+# kProfileModules,相对路径带 profiles/<名>/ 前缀。不进 kAllModules——那张
+# 表是 default 树的播种/来源统计账,Profile 模块另立一本。目录缺席或全空
+# 都合法(没有 profiles/default/ 也能跑,default 隐式成立)。
+file(GLOB_RECURSE _profile_files "${PROMPTS_DIR}/profiles/*.md")
+list(SORT _profile_files)
+set(_profile_body "")
+set(_profile_entries "")
+foreach(_file IN LISTS _profile_files)
+  get_filename_component(_stem "${_file}" NAME_WE)
+  if(_stem STREQUAL "README")
+    continue()
+  endif()
+  file(RELATIVE_PATH _rel "${PROMPTS_DIR}" "${_file}")
+  file(READ "${_file}" _content)
+  string(REPLACE "\r\n" "\n" _content "${_content}")
+  string(STRIP "${_content}" _content)
+  if(_content STREQUAL "")
+    message(FATAL_ERROR "Profile 模块是空的: ${_file}")
+  endif()
+  if(_content MATCHES "\\)LUBAN_MD\"")
+    message(FATAL_ERROR "Profile 模块正文撞上了 raw string 定界符 )LUBAN_MD\": ${_file}")
+  endif()
+  string(REGEX REPLACE "[^A-Za-z0-9]" "_" _ident "${_rel}")
+  string(APPEND _profile_body "// ${_rel}\n")
+  string(APPEND _profile_body "inline constexpr const char kProfile_${_ident}[] = R\"LUBAN_MD(${_content})LUBAN_MD\";\n\n")
+  string(APPEND _profile_entries "    {\"${_rel}\", kProfile_${_ident}},\n")
+endforeach()
+
 string(APPEND _header "${_body}")
+string(APPEND _header "${_profile_body}")
 string(APPEND _header "// 全部模块的 {相对路径, 嵌入正文} 总表,分组内按文件名排序、组序\n")
 string(APPEND _header "// core -> features -> platforms。播种用户目录模块、运行时逐模块判\n")
 string(APPEND _header "// \"用户文件还是内置\"都以这张表为准。\n")
@@ -83,6 +114,9 @@ string(APPEND _header "    const char* rel_path;\n")
 string(APPEND _header "    const char* content;\n")
 string(APPEND _header "};\n")
 string(APPEND _header "inline constexpr EmbeddedModule kAllModules[] = {\n${_entries}};\n\n")
+string(APPEND _header "// 内置 Profile 模块总表(稀疏:只收 Profile 点名的文件,相对路径带\n")
+string(APPEND _header "// profiles/<名>/ 前缀),按路径排序。没有内置 Profile 时是空表。\n")
+string(APPEND _header "inline constexpr EmbeddedModule kProfileModules[] = {\n${_profile_entries}};\n\n")
 string(APPEND _header "}  // namespace lubancode::agent::embedded\n")
 
 # 内容没变就不动文件(时间戳不变,免得下游无谓重编)。

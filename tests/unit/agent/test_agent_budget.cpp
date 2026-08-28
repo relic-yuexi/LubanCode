@@ -401,6 +401,113 @@ TEST_CASE("自定义 Agent:身份按 resolved name 记,不冒名 Explore;工具�
     CHECK_FALSE(RequestOffersTool(request, "write_file"));
 }
 
+TEST_CASE("自定义 Agent:点名 Prompt Profile——core 走五层,裁掉的工具不配文案") {
+    // 用户层放一份 browser-tester 的 core 覆盖:用户 Profile 层要压过内置
+    // Profile 层(契约 §6.2),生成的 persona 让位。
+    const std::filesystem::path user_prompts =
+        std::filesystem::temp_directory_path() /
+        ("lubancode_agent_profile_test_" +
+         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
+    std::filesystem::create_directories(user_prompts / "profiles" / "browser-tester" / "core");
+    {
+        std::ofstream out(user_prompts / "profiles" / "browser-tester" / "core" / "10-identity.md",
+                          std::ios::binary);
+        out << "用户层的 Profile 身份:专管网页查验。";
+    }
+
+    FakeBackend backend;
+    backend.scripts = {TextScript("结论:查验完毕")};
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>("read_file", tools::Tool::Result{"内容", false}));
+    sub_registry.Register(std::make_unique<FakeTool>("search", tools::Tool::Result{"命中", false}));
+    sub_registry.Register(std::make_unique<FakeTool>("web_fetch", tools::Tool::Result{"网页", false}));
+    sub_registry.Register(std::make_unique<FakeTool>("run_command", tools::Tool::Result{"跑完了", false}));
+    sub_registry.Register(std::make_unique<FakeTool>("todo_write", tools::Tool::Result{"记了", false}));
+
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+    agent_tool.SetPromptsDir(user_prompts.string());
+    tools::CustomAgentMaterial material = ReviewerMaterial();
+    material.definition.prompt.profile = "browser-tester";
+    material.definition.tools.allow = {"read_file", "search", "web_fetch"};  // 裁掉 shell/todo/委派
+    agent_tool.SetCustomAgentResolver(
+        [material](const std::string& name) -> std::optional<tools::CustomAgentMaterial> {
+            return name == material.definition.name ? std::optional<tools::CustomAgentMaterial>(material)
+                                                    : std::nullopt;
+        });
+
+    nlohmann::json input;
+    input["title"] = "查验任务";
+    input["prompt"] = "查";
+    input["agent_type"] = "library-reviewer";
+    const tools::Tool::Result result = agent_tool.execute(input);
+    CHECK_FALSE(result.is_error);
+
+    REQUIRE(backend.captured_requests.size() == 1);
+    const api::Request& request = backend.captured_requests[0];
+    // core 来自用户 Profile 层;生成的 persona(名字+描述)让位。
+    CHECK(request.system.find("用户层的 Profile 身份:专管网页查验") != std::string::npos);
+    CHECK(request.system.find("你是 library-reviewer 子代理") == std::string::npos);
+    // web 工具在表里:web feature 装的是内置 Profile 版文案(用户层没盖它)。
+    CHECK(request.system.find("联网查证(网页查验向)") != std::string::npos);
+    // 只给有效能力配说明(单子 §5.4):按各模块正文里的特征句认位——
+    // files 在(read_file);run_command/todo_write/agent 被裁,shell/todo/
+    // delegation 文案一个字不装。
+    CHECK(request.system.find("读文件用 read_file") != std::string::npos);
+    CHECK(request.system.find("跑命令用 run_command") == std::string::npos);
+    CHECK(request.system.find("先调用 todo_write 列一份清单") == std::string::npos);
+    CHECK(request.system.find("优先用 agent 工具委托给子代理") == std::string::npos);
+    // 工具面与文案同源:run_command 模型也看不见。
+    CHECK_FALSE(RequestOffersTool(request, "run_command"));
+    CHECK(RequestOffersTool(request, "web_fetch"));
+
+    // 删掉用户层覆盖,再派一次:稳稳退回内置 Profile 层(验收线)。
+    std::error_code ec;
+    std::filesystem::remove(user_prompts / "profiles" / "browser-tester" / "core" / "10-identity.md", ec);
+    backend.captured_requests.clear();
+    backend.scripts = {TextScript("结论:再验一次")};
+    const tools::Tool::Result again = agent_tool.execute(input);
+    CHECK_FALSE(again.is_error);
+    REQUIRE(backend.captured_requests.size() == 1);
+    CHECK(backend.captured_requests[0].system.find("你是 browser-tester,一只专管网页查验的子代理") !=
+          std::string::npos);  // 内置 Profile 的身份模块
+    CHECK(backend.captured_requests[0].system.find("用户层的 Profile 身份") == std::string::npos);
+
+    std::filesystem::remove_all(user_prompts, ec);
+}
+
+TEST_CASE("自定义 Agent:不点名 Profile——生成 persona 与恒在四件套照旧") {
+    FakeBackend backend;
+    backend.scripts = {TextScript("结论:照旧")};
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>("read_file", tools::Tool::Result{"内容", false}));
+    sub_registry.Register(std::make_unique<FakeTool>("run_command", tools::Tool::Result{"跑完了", false}));
+    sub_registry.Register(std::make_unique<FakeTool>("todo_write", tools::Tool::Result{"记了", false}));
+    sub_registry.Register(std::make_unique<FakeTool>("agent", tools::Tool::Result{"派了", false}));
+
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+    tools::CustomAgentMaterial material = ReviewerMaterial();
+    material.definition.tools.allow.clear();  // 全继承:四件套的说明都该在
+    agent_tool.SetCustomAgentResolver(
+        [material](const std::string& name) -> std::optional<tools::CustomAgentMaterial> {
+            return name == material.definition.name ? std::optional<tools::CustomAgentMaterial>(material)
+                                                    : std::nullopt;
+        });
+
+    nlohmann::json input;
+    input["title"] = "照旧任务";
+    input["prompt"] = "审";
+    input["agent_type"] = "library-reviewer";
+    const tools::Tool::Result result = agent_tool.execute(input);
+    CHECK_FALSE(result.is_error);
+    REQUIRE(backend.captured_requests.size() == 1);
+    const api::Request& request = backend.captured_requests[0];
+    CHECK(request.system.find("你是 library-reviewer 子代理") != std::string::npos);
+    CHECK(request.system.find("读文件用 read_file") != std::string::npos);        // files
+    CHECK(request.system.find("跑命令用 run_command") != std::string::npos);      // shell
+    CHECK(request.system.find("先调用 todo_write 列一份清单") != std::string::npos);  // todo
+    CHECK(request.system.find("优先用 agent 工具委托给子代理") != std::string::npos);  // delegation
+}
+
 TEST_CASE("自定义 Agent:runtime.max_steps_per_turn 落到派出预算,真能压住循环") {
     FakeBackend backend;
     for (int i = 0; i < 6; ++i) {

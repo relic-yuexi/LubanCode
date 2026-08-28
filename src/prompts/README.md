@@ -18,6 +18,18 @@
 统计。注意:法(`~/.lubancode/system_prompt.md`)被用户改出内容差异时仍
 整段替换 core 模块;播种原样未改的法文件视同"内置默认",core 走运行时模块。
 
+## Prompt Profile(阶段 2)
+
+自定义 Agent 可在 YAML 里 `prompt.profile: <名>` 点名一组稀疏覆盖,详见
+`profiles/README.md` 与契约 `docs/reference/agents.md` §6。同一模块按五层找,
+越往后权越大:内置 default → 用户全局 default 覆盖(`~/.lubancode/prompts/`)
+→ 内置选中 Profile(`src/prompts/profiles/<名>/`)→ 用户选中 Profile
+(`~/.lubancode/prompts/profiles/<名>/`)→ 项目选中 Profile
+(`<项目根>/.lubancode/prompts/profiles/<名>/`)。没点名的模块原样走默认;
+删掉覆盖文件即稳退下一层;`/agent inspect <名字>` 逐段列来源账
+(PromptSourceLedger)。default 上下文(主 Agent)不走 Profile 层,黄金输出
+一字不变。
+
 ## 目录与拼装规则
 
 | 目录 | 嵌入常量 | 注入条件 |

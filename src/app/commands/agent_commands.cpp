@@ -9,6 +9,7 @@
 #include <system_error>
 #include <utility>
 
+#include "agent/prompt_assembler.hpp"  // BuildPromptProfileLedger(阶段 2 来源账本)
 #include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "cli/terminal_port.hpp"
 #include "config/config.hpp"                  // HomeLubancodeDir
@@ -82,6 +83,27 @@ bool HasError(const lubancode::agent::AgentCatalogEntry& entry) {
     return false;
 }
 
+// 用户 prompts 根(~/.lubancode/prompts)的 UTF-8 串;没主目录给空串
+//(= 只有嵌入层,与拼装侧"prompts_dir 空只用嵌入版"同语义)。
+std::string UserPromptsRootUtf8() {
+    const auto home = lubancode::config::HomeLubancodeDir();
+    return home.has_value() ? (*home + "/prompts") : std::string();
+}
+
+// Profile 是否真有覆盖:账本里只要有任一模块来自三个 Profile 层(内置/
+// 用户/项目)就算存在。doctor 的"Profile 是否存在"查的就是这个。
+std::size_t ProfileOverlayCount(const lubancode::agent::PromptSourceLedger& ledger) {
+    std::size_t count = 0;
+    for (const auto& entry : ledger.entries) {
+        if (entry.origin == lubancode::agent::PromptModuleOrigin::EmbeddedProfile ||
+            entry.origin == lubancode::agent::PromptModuleOrigin::UserProfile ||
+            entry.origin == lubancode::agent::PromptModuleOrigin::ProjectProfile) {
+            ++count;
+        }
+    }
+    return count;
+}
+
 }  // namespace
 
 std::vector<std::string> FormatAgentCatalogListing(const lubancode::agent::AgentCatalog& catalog) {
@@ -117,7 +139,8 @@ std::vector<std::string> FormatAgentCatalogListing(const lubancode::agent::Agent
 }
 
 std::vector<std::string> FormatAgentDoctorReport(const lubancode::agent::AgentCatalog& catalog,
-                                                 const std::string& name, const AgentDoctorMaterials& materials) {
+                                                 const std::string& name, const AgentDoctorMaterials& materials,
+                                                 const AgentPromptContext& prompts) {
     std::vector<std::string> lines;
     const auto* entry = catalog.Find(name);
     if (entry == nullptr) {
@@ -152,9 +175,22 @@ std::vector<std::string> FormatAgentDoctorReport(const lubancode::agent::AgentCa
     lines.push_back("模型: role=" + DescribeModelRole(def) + " · effort=" + DescribeEffort(def) +
                     "(档位是否越过 provider 能力,阶段 3 的 resolver 查)");
 
-    // ---- Profile:名字登记;存在性与来源账本(PromptSourceLedger)属阶段 2 ----
-    lines.push_back("Profile: " + DescribeProfile(def) +
-                        "(模块存在性与来源账本属阶段 2 Prompt Profile,此处只登记名字)");
+    // ---- Profile(阶段 2):名字 + 覆盖是否存在(三层里有没有任何模块) ----
+    if (!def.prompt.profile.has_value() || *def.prompt.profile == "default") {
+        lines.push_back("Profile: " + DescribeProfile(def) + "(default 上下文,三层覆盖不参与)");
+    } else {
+        const lubancode::agent::PromptSourceLedger ledger = lubancode::agent::BuildPromptProfileLedger(
+            *def.prompt.profile, prompts.user_prompts_dir, prompts.project_prompts_dir);
+        const std::size_t overlays = ProfileOverlayCount(ledger);
+        if (overlays > 0) {
+            lines.push_back("Profile: " + *def.prompt.profile + "(三层共 " + std::to_string(overlays) +
+                            " 个模块覆盖;/agent inspect " + entry->name + " 看逐段来源账本)");
+        } else {
+            lines.push_back("Profile: " + *def.prompt.profile +
+                            " ✗(内置/用户/项目三层都没有任何模块覆盖,现全走 default 模块;先建 "
+                            "profiles/" + *def.prompt.profile + "/ 下的覆盖文件)");
+        }
+    }
 
     // ---- Skill 预装 ----
     if (def.skills_preload.empty()) {
@@ -264,6 +300,59 @@ std::vector<std::string> FormatAgentDoctorReport(const lubancode::agent::AgentCa
     return lines;
 }
 
+// /agent inspect <name> 的报告(阶段 2 落地):定义来源与覆盖链、prompt 段
+// 三笔开关、Prompt 来源账本(单子 §5.5——哪个模块从哪层哪文件来,出了
+// 覆盖问题一眼看见是谁压了谁)。模型/权限的最终合并属阶段 3,这里只登
+// 定义里写的值;依赖预检归 /agent doctor,各管一摊。
+std::vector<std::string> FormatAgentInspectReport(const lubancode::agent::AgentCatalog& catalog,
+                                                  const std::string& name, const AgentPromptContext& prompts) {
+    std::vector<std::string> lines;
+    const auto* entry = catalog.Find(name);
+    if (entry == nullptr) {
+        lines.push_back("没有叫 \"" + name + "\" 的 Agent(先 /agents 看清单;名字大小写敏感)。");
+        return lines;
+    }
+    lines.push_back("agent inspect: " + entry->name);
+    lines.push_back("定义来源: " + lubancode::agent::ToString(entry->layer) + " " + entry->file);
+    if (!entry->shadowed_sources.empty()) {
+        lines.push_back("覆盖链(被盖住的来源,优先级从高到低):");
+        for (const std::string& shadow : entry->shadowed_sources) {
+            lines.push_back("  - " + shadow);
+        }
+    }
+    if (!entry->definition.has_value()) {
+        lines.push_back("定义: 没解析成,没有可查的 Prompt 账本 —— 先 /agent doctor " + entry->name +
+                        " 看诊断。");
+        return lines;
+    }
+    const auto& def = *entry->definition;
+
+    // prompt 段三笔:profile / project_instructions / soul。
+    const std::string project_instructions =
+        def.prompt.project_instructions == lubancode::agent::AgentPromptSpec::ProjectInstructions::Omit
+            ? "omit"
+            : "inherit";
+    const std::string soul = def.prompt.soul == lubancode::agent::AgentPromptSpec::Soul::Off ? "off" : "inherit";
+    lines.push_back("prompt: profile=" + DescribeProfile(def) + " · project_instructions=" + project_instructions +
+                    " · soul=" + soul);
+
+    // 来源账本:整张 default 模块树在这个 Profile 上下文下逐段解析。
+    const std::string profile = def.prompt.profile.value_or(std::string());
+    lines.push_back("Prompt 来源账本(逐模块,谁压了谁):");
+    const lubancode::agent::PromptSourceLedger ledger =
+        lubancode::agent::BuildPromptProfileLedger(profile, prompts.user_prompts_dir,
+                                                   prompts.project_prompts_dir);
+    for (const auto& ledger_entry : ledger.entries) {
+        lines.push_back("  " + ledger_entry.FormatLine());
+    }
+    if (!lubancode::agent::IsPromptProfileActive(profile)) {
+        lines.push_back("  (default 上下文:三层 Profile 覆盖不参与;改一个用户 Profile 文件只影响"
+                        "点名它的 Agent)");
+    }
+    lines.push_back("依赖预检(Skill/MCP/工具/模型): /agent doctor " + entry->name);
+    return lines;
+}
+
 lubancode::agent::AgentCatalogScanRoots ComputeAgentScanRoots() {
     lubancode::agent::AgentCatalogScanRoots roots;
     roots.builtin_dir = EmbeddedAgentsDir();
@@ -273,6 +362,15 @@ lubancode::agent::AgentCatalogScanRoots ComputeAgentScanRoots() {
     roots.project_dir = lubancode::config::FindProjectRoot(std::filesystem::current_path()) / ".lubancode" /
                         "agents";
     return roots;
+}
+
+// Prompt Profile 的项目层根(阶段 2):<项目根>/.lubancode/prompts,UTF-8
+// 串。项目根与 Agent 扫描同一条发现规则(FindProjectRoot),不各自猜 cwd。
+// 目录不存在照旧返回——拼装侧对缺席层静默跳过。会话装配与 /agent inspect
+// 都从这儿拿,一个口径。
+std::string ComputeProjectPromptsRoot() {
+    return lubancode::platform::PathToUtf8(lubancode::config::FindProjectRoot(std::filesystem::current_path()) /
+                                           ".lubancode" / "prompts");
 }
 
 CommandFlow HandleSlashAgents(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
@@ -305,7 +403,8 @@ CommandFlow HandleSlashAgent(SlashDispatchContext& ctx, const lubancode::cli::Pa
     rest = trim(rest);
 
     if (sub.empty()) {
-        TermOut() << "用法:/agent doctor <名字>(静态预检,只查不改)。/agents 列清单。\n";
+        TermOut() << "用法:/agent doctor <名字>(静态预检)、/agent inspect <名字>(Prompt 来源账本)。\n"
+                     "/agents 列清单。\n";
         return CommandFlow::Continue;
     }
     if (sub == "doctor") {
@@ -324,17 +423,34 @@ CommandFlow HandleSlashAgent(SlashDispatchContext& ctx, const lubancode::cli::Pa
             }
             materials.mcp_server_names = &mcp_names;
         }
-        for (const std::string& line : FormatAgentDoctorReport(catalog, rest, materials)) {
+        AgentPromptContext prompts;
+        prompts.user_prompts_dir = UserPromptsRootUtf8();
+        prompts.project_prompts_dir = ComputeProjectPromptsRoot();
+        for (const std::string& line : FormatAgentDoctorReport(catalog, rest, materials, prompts)) {
             TermOut() << line << "\n";
         }
         return CommandFlow::Continue;
     }
-    if (sub == "inspect" || sub == "reload") {
-        TermOut() << "/agent " << sub << " 属后续阶段(阶段 2/3 接 Prompt Profile 与统一解析后落);现阶段用 "
-                     "/agents 列清单、/agent doctor <名字> 做静态预检。\n";
+    if (sub == "inspect") {
+        if (rest.empty()) {
+            TermOut() << "用法:/agent inspect <名字>(名字看 /agents;大小写敏感)。\n";
+            return CommandFlow::Continue;
+        }
+        const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(ComputeAgentScanRoots());
+        AgentPromptContext prompts;
+        prompts.user_prompts_dir = UserPromptsRootUtf8();
+        prompts.project_prompts_dir = ComputeProjectPromptsRoot();
+        for (const std::string& line : FormatAgentInspectReport(catalog, rest, prompts)) {
+            TermOut() << line << "\n";
+        }
         return CommandFlow::Continue;
     }
-    TermOut() << "认不得的子命令 \"" << sub << "\"。用法:/agent doctor <名字>。\n";
+    if (sub == "reload") {
+        TermOut() << "/agent reload 属后续阶段(阶段 3 统一解析时连同原子替换一起落);现阶段 Catalog "
+                     "现扫现建,改了 YAML 下一次派发即生效。\n";
+        return CommandFlow::Continue;
+    }
+    TermOut() << "认不得的子命令 \"" << sub << "\"。用法:/agent doctor <名字>、/agent inspect <名字>。\n";
     return CommandFlow::Continue;
 }
 

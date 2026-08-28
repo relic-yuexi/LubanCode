@@ -48,6 +48,7 @@
 #include "app/commands/prompt_commands.hpp"
 #include "app/commands/settings_commands.hpp"
 #include "app/commands/workspace_commands.hpp"
+#include "app/commands/agent_commands.hpp"  // ComputeProjectPromptsRoot(阶段 2 Profile 项目层)
 #include "app/version.hpp"
 #include "cli/console_input.hpp"
 #include "cli/context_tracker.hpp"
@@ -190,6 +191,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     const auto sub_tool_filter = tool_runtime.sub_tool_filter();
     if (auto* agent_tool = tool_runtime.agent_tool(); agent_tool != nullptr) {
         agent_tool->SetPromptsDir(prompts_dir);  // 子代理系统提示同机制
+        // Prompt Profile(阶段 2):项目层根,自定义 Agent 点名 Profile 时用。
+        agent_tool->SetProjectPromptsRoot(lubancode::app::ComputeProjectPromptsRoot());
         agent_tool->SetProjectInstructions(project_instructions);
         // 病十(批三):四段开关随皮走——单发的子代理与 main 同段(mcp/web/
         // lsp 按配置、platforms 按 wire),不再走"四段不传"的薄壳。

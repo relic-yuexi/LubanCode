@@ -1,6 +1,6 @@
 # 自定义 Agent 与 Prompt Profile 设计
 
-- 状态：阶段 0/1 已落地（0.26.77/0.26.81），阶段 2 起待实现
+- 状态：阶段 0/1/2 已落地（0.26.77/0.26.81；阶段 2 Prompt Profile 已实现待合并），阶段 3 起待实现
 - 日期：2026-08-28
 - 范围：Agent 定义、Prompt Profile、加载与解析、运行时接线、命令与诊断、示例迁移
 - 不在本单：实现新的 MCP 服务、重写 Skill 格式、建立 solutions 运行时概念、引入多 Agent 编队
@@ -457,12 +457,12 @@ Workflow 只负责调度。它把 `agent` 名交给同一 AgentProfileResolver�
 
 ### 阶段 2：Prompt Profile
 
-- [ ] 为 PromptAssembler 加 Profile overlay roots。
-- [ ] 引入 PromptSourceLedger。
-- [ ] 明定 core/persona、feature、platform、mode、model instructions、Soul 次序。
-- [ ] 从过滤后工具表推导自定义 Agent 的 PromptCapabilities。
-- [ ] 保住现有 default Prompt 输出；未选 Profile 时，黄金测试不得无故变化。
-- [ ] 扩充 `/agent inspect` 或 `/prompt`，打印来源账本。
+- [x] 为 PromptAssembler 加 Profile overlay roots。（内置 `src/prompts/profiles/<名>/` 嵌进 kProfileModules；用户 `~/.lubancode/prompts/profiles/<名>/`；项目 `<项目根>/.lubancode/prompts/profiles/<名>/`。同一模块按契约 §6.2 五层次序解析。）
+- [x] 引入 PromptSourceLedger。（`AssembleSystemPrompt(options, &ledger)` 逐段记账；`BuildPromptProfileLedger` 整表记账供 `/agent inspect`。）
+- [x] 明定 core/persona、feature、platform、mode、model instructions、Soul 次序。（九段次序写成断言：test_prompt_profile.cpp"拼装总次序"，含 deferred tool index。）
+- [x] 从过滤后工具表推导自定义 Agent 的 PromptCapabilities。（`DerivePromptCapabilities` 吃 allow/deny 过滤后的有效工具名；feature 段只描述有效工具，web/mcp/lsp 不再吃父会话开关。）
+- [x] 保住现有 default Prompt 输出；未选 Profile 时，黄金测试不得无故变化。（黄金基线测试 + prompt_profile_driver 字节级 diff，基线与改后零 diff；CTest 224 册全绿。）
+- [x] 扩充 `/agent inspect` 或 `/prompt`，打印来源账本。（`/agent inspect <名字>` 落地：定义来源、覆盖链、prompt 三笔开关、逐模块来源账本；doctor 的 Profile 行同步查覆盖存在性。不新增命令。）
 
 验收：改一个用户 Profile 文件，只影响点名 Agent；删掉覆盖后，稳稳退回下一层。
 
@@ -541,16 +541,16 @@ examples/browser/
 
 ### Prompt
 
-- [ ] default 输出兼容黄金测试。
-- [ ] builtin default、user default、builtin profile、user profile、project profile 逐层覆盖。
-- [ ] 稀疏 Profile 只改点名模块。
-- [ ] persona/system_prompt 只替 core。
-- [ ] mode 不可覆盖。
-- [ ] platform 按 wire 选择。
-- [ ] model instructions、deferred index、Soul 次序不变。
-- [ ] project instructions 的 inherit/omit。
-- [ ] 工具被裁后，相应 feature 文案也消失。
-- [ ] PromptSourceLedger 每段都指向真实来源。
+- [x] default 输出兼容黄金测试。（test_prompt_profile.cpp 黄金基线 + prompt_profile_driver 字节 diff）
+- [x] builtin default、user default、builtin profile、user profile、project profile 逐层覆盖。
+- [x] 稀疏 Profile 只改点名模块。
+- [x] persona/system_prompt 只替 core。
+- [x] mode 不可覆盖。
+- [x] platform 按 wire 选择。
+- [x] model instructions、deferred index、Soul 次序不变。（九段次序断言）
+- [ ] project instructions 的 inherit/omit。（omit 已实现于派发链,尚未单独成测）
+- [x] 工具被裁后，相应 feature 文案也消失。
+- [x] PromptSourceLedger 每段都指向真实来源。
 
 ### 能力与安全
 

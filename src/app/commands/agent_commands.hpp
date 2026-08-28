@@ -33,6 +33,14 @@ struct AgentDoctorMaterials {
     const std::vector<std::string>* mcp_server_names = nullptr;
 };
 
+// Prompt Profile 的解析上下文(阶段 2):用户层与项目层的 prompts 根。
+// 纯函数不摸环境——handler 现算好递进来(ComputeProjectPromptsRoot /
+// HomeLubancodeDir),单测想造什么层就造什么层。都空 = 只有内置层。
+struct AgentPromptContext {
+    std::string user_prompts_dir;
+    std::string project_prompts_dir;
+};
+
 // ---------------- 纯函数(单测钉住) ----------------
 
 // /agents 的全部输出行:每名一志(名称/层/可用性/描述/模型/Profile/工具/
@@ -42,10 +50,17 @@ std::vector<std::string> FormatAgentCatalogListing(const lubancode::agent::Agent
 
 // /agent doctor <name> 的静态预检报告(单子八"agent doctor"清单里阶段 1
 // 能查的:定义解析、覆盖链、Skill/MCP/工具引用、模型角色写法、runtime 与
-// permissions 登账;Profile 存在性属阶段 2,权限越界比对属阶段 3,都如实
-// 写明,不装查过了)。查无此名给一行"没这个 Agent,先 /agents"。
+// permissions 登账;Profile 覆盖存在性阶段 2 已查,权限越界比对属阶段 3,
+// 都如实写明,不装查过了)。查无此名给一行"没这个 Agent,先 /agents"。
 std::vector<std::string> FormatAgentDoctorReport(const lubancode::agent::AgentCatalog& catalog,
-                                                 const std::string& name, const AgentDoctorMaterials& materials);
+                                                 const std::string& name, const AgentDoctorMaterials& materials,
+                                                 const AgentPromptContext& prompts = {});
+
+// /agent inspect <name> 的报告(阶段 2):定义来源与覆盖链、prompt 段三笔
+// 开关、PromptSourceLedger 逐模块来源账(单子 §5.5)。依赖预检归 doctor,
+// 这里不重复。
+std::vector<std::string> FormatAgentInspectReport(const lubancode::agent::AgentCatalog& catalog,
+                                                  const std::string& name, const AgentPromptContext& prompts);
 
 // ---------------- 执行(IO) ----------------
 
@@ -54,6 +69,11 @@ std::vector<std::string> FormatAgentDoctorReport(const lubancode::agent::AgentCa
 // 发现规则)/.lubancode/agents。目录不存在照旧进 roots——Catalog 对缺席
 // 层静默跳过。
 lubancode::agent::AgentCatalogScanRoots ComputeAgentScanRoots();
+
+// Prompt Profile 的项目层根(阶段 2):<项目根>/.lubancode/prompts,UTF-8
+// 串。会话装配(给 AgentTool 塞项目层)与 /agent inspect 共用这一个口,
+// 不各自猜 cwd。
+std::string ComputeProjectPromptsRoot();
 
 // 命令分派注册制:/agents 与 /agent 的分派位。
 CommandFlow HandleSlashAgents(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);

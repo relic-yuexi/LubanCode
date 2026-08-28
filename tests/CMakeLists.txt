@@ -149,6 +149,15 @@ add_executable(tool_text_lang_driver EXCLUDE_FROM_ALL manual/tool_text_lang_driv
 target_link_libraries(tool_text_lang_driver PRIVATE lubancode_core)
 target_compile_features(tool_text_lang_driver PRIVATE cxx_std_23)
 
+# Prompt Profile 单(阶段 2)的黄金 dump 驱动(不进 ctest,验收手动跑):
+#   prompt_profile_driver default    未选 Profile 的 default 拼装全文
+#   prompt_profile_driver persona    法替换 core 的对照全文
+# 基线与改后各跑一遍 default 落盘 diff,即"未选 Profile 时零 diff"的
+# 字节证据;测试册 test_prompt_profile.cpp 的重构断言是数学证据。
+add_executable(prompt_profile_driver EXCLUDE_FROM_ALL manual/prompt_profile_driver.cpp)
+target_link_libraries(prompt_profile_driver PRIVATE lubancode_core)
+target_compile_features(prompt_profile_driver PRIVATE cxx_std_23)
+
 # DeepSeek 真机 e2e(前缀缓存守恒单):opt-in,不进 ctest——没设
 # DEEPSEEK_API_KEY 自己就跳过(exit 0),要跑先导钥匙:
 #   deepseek_e2e   (可配 DEEPSEEK_MODEL / DEEPSEEK_BASE_URL)
