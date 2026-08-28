@@ -7,6 +7,7 @@
 #include <system_error>
 
 #include "platform/text_encoding.hpp"  // IsValidUtf8:文件编码的明规矩,见 execute 尾部
+#include "tools/observation_filter.hpp"  // 观察边界(P2-5):点名读运行时日志,先告知体积
 #include "tools/tool_text.hpp"         // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
 
 namespace lubancode::tools {
@@ -89,6 +90,19 @@ Tool::Result ReadFileTool::execute(const nlohmann::json& input) {
     std::ifstream file(path, std::ios::binary);
     if (!file.is_open()) {
         return {"打不开文件(权限不够或者被占用): " + path_str, true};
+    }
+
+    // 观察边界(P2-5,真机实测"子代理吞自己日志"):read_file 的 path 本来
+    // 就是逐字点名,点名即放行——默认过滤挡的是 search 无意间把日志内容
+    // 搜出来。放行归放行,读前先给一行体积提示,超过 256KB 劝阻(单子
+    // 验收原文),正文照旧受 offset/limit 与 1MB 封顶约束。
+    std::string observation_notice;
+    {
+        std::error_code size_ec;
+        const std::uintmax_t file_size = std::filesystem::file_size(path, size_ec);
+        if (!size_ec) {
+            observation_notice = ObservationReadNotice(path, file_size);
+        }
     }
 
     long long offset = 1;
@@ -204,7 +218,7 @@ Tool::Result ReadFileTool::execute(const nlohmann::json& input) {
         }
     }
 
-    return {out.str(), false};
+    return {observation_notice + out.str(), false};
 }
 
 }  // namespace lubancode::tools

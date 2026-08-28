@@ -29,6 +29,7 @@
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:inbox 投递文本的编码关口
 #include "runtime/turn_runtime.hpp"    // MapPreToolDecision:PreToolUse 归并映射与主路径同一颗
+#include "tools/observation_filter.hpp"  // 观察边界(P2-5):子代理日志目录默认不可搜
 #include "tools/path_utils.hpp"
 #include "tools/subagent_isolation.hpp"
 #include "tools/todo_tool.hpp"
@@ -277,6 +278,42 @@ std::string FirstLineCapped(const std::string& text, std::size_t cap = 200) {
 
 }  // namespace
 
+bool AgentFaceIsReadOnly(
+    const std::function<std::optional<CustomAgentMaterial>(const std::string&)>& resolver,
+    const ToolRegistry& registry, const std::string& agent_type) {
+    std::string lowered = agent_type;
+    std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    if (lowered == "explore") {
+        return true;  // 内置只读代理:explore_registry 整表只读
+    }
+    if (lowered == "general-purpose") {
+        return false;  // 默认子代理与 main 同工具面,含写盘与命令
+    }
+    if (!resolver) {
+        return false;  // 没挂解析口(旧调用方/单测):认不得就拒
+    }
+    const std::optional<CustomAgentMaterial> material = resolver(agent_type);
+    if (!material.has_value()) {
+        return false;  // 名字解析不出(unavailable/不存在):拒
+    }
+    const std::vector<std::string>& allow = material->definition.tools.allow;
+    if (allow.empty()) {
+        return false;  // 空 allow = 不裁,继承全工具面(契约:空白名单不是只读)
+    }
+    for (const std::string& tool_name : allow) {
+        const ToolRegistration* registration = registry.RegistrationOf(tool_name);
+        if (registration == nullptr) {
+            return false;  // 主表查无此名(可能是 MCP/插件工具):静态证明不了,拒
+        }
+        if (registration->effect_class != EffectClass::ReadOnlyLocal &&
+            registration->effect_class != EffectClass::ReadOnlyRemote) {
+            return false;  // 白名单里混进写盘/命令/未知档:工具面不算只读
+        }
+    }
+    return true;
+}
+
 // 子代理请求的包装后端:一进(请求发出)、一首个事件、逐事件、一收场,全数
 // 记进活度账(台账锁下)与诊断日志(开了环境变量才有文件)。前台与后台
 // 任务都从 RunTask 走这里,主会话的请求不经此包装。
@@ -287,6 +324,9 @@ public:
         if (const auto dir = SubagentDebugLogDir(); dir.has_value()) {
             const std::filesystem::path path = *dir / ("subagent-" + std::to_string(task->snapshot.id) + ".log");
             log_.open(path, std::ios::binary | std::ios::app);
+            // 日志目录进观察边界(P2-5):用户把 LUBANCODE_DEBUG_SUBAGENT 指进
+            // 项目可搜目录时,子代理的 search 默认不再读回自己的日志。
+            ObservationBoundary::Instance().AddExcludedDir(*dir);
         }
     }
 

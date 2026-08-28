@@ -20,6 +20,7 @@
 #include <string>
 #include <vector>
 
+#include "tools/observation_filter.hpp"  // 观察边界(P2-5):子代理日志/.evidence 默认不搜
 #include "tools/path_utils.hpp"
 #include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
 
@@ -30,7 +31,10 @@ namespace {
 constexpr std::size_t kMaxResults = 100;
 
 const std::vector<std::string>& SkipDirNames() {
-    static const std::vector<std::string> names = {".git", "build", "node_modules"};
+    // .evidence 是 P2-5 补的:运行时证据目录(会话/子代理产物)默认不搜,
+    // 免得 Agent 把自己的观察记录吞回上下文。显式把 path 点名到边界内
+    // (根在边界内/单文件)不受这道限制,见 WalkFiles 与 CollectSearchFiles。
+    static const std::vector<std::string> names = {".git", "build", "node_modules", ".evidence"};
     return names;
 }
 
@@ -126,12 +130,16 @@ std::string NormalizeSlashes(std::string s) {
 // (绝对路径, 相对 root 的路径) 丢给 visit。visit 返回 false 表示"够了,别再
 // 找了"(用来在拿满上限结果之后尽早收手,免得大仓库遍历半天)。
 // root 不是目录(不存在、或是单个文件)时由调用方另行分发,这里只管目录。
+// 观察边界(P2-5):root 在边界外时,边界内的目录与文件(子代理日志、
+// .evidence 产物、运行时登记的日志目录)默认不进结果;root 本身在边界内
+// = path 显式点名到了证据区,照常搜——默认过滤只挡"无意间搜到"。
 template <typename Visit>
 void WalkFiles(const std::filesystem::path& root, const Visit& visit) {
     std::error_code ec;
     if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec)) {
         return;
     }
+    const bool root_in_boundary = PathInObservationBoundary(root);
 
     std::filesystem::recursive_directory_iterator it(
         root, std::filesystem::directory_options::skip_permission_denied, ec);
@@ -145,10 +153,18 @@ void WalkFiles(const std::filesystem::path& root, const Visit& visit) {
 
         std::error_code entry_ec;
         if (entry.is_directory(entry_ec)) {
-            if (ShouldSkipDir(entry.path().filename())) {
+            if (ShouldSkipDir(entry.path().filename()) ||
+                (!root_in_boundary && PathInObservationBoundary(entry.path()))) {
                 it.disable_recursion_pending();
             }
         } else if (entry.is_regular_file(entry_ec)) {
+            if (!root_in_boundary && PathInObservationBoundary(entry.path())) {
+                it.increment(ec);
+                if (ec) {
+                    return;
+                }
+                continue;
+            }
             std::error_code rel_ec;
             const std::filesystem::path rel = std::filesystem::relative(entry.path(), root, rel_ec);
             if (!rel_ec) {
@@ -204,6 +220,21 @@ Tool::Result RunGrep(const std::filesystem::path& root, const std::string& patte
     std::size_t hit_count = 0;
     bool truncated = false;
 
+    // P2-5:单文件点名到观察边界内 = 显式点名,照常搜,但正文前给一行
+    // 体积提示(超过 256KB 劝阻)。目录根不用提示——过滤逻辑在 WalkFiles
+    // 里,边界内的文件默认根本进不来。
+    std::string notice;
+    {
+        std::error_code file_ec;
+        if (std::filesystem::is_regular_file(root, file_ec)) {
+            std::error_code size_ec;
+            const std::uintmax_t size = std::filesystem::file_size(root, size_ec);
+            if (!size_ec) {
+                notice = ObservationReadNotice(root, size);
+            }
+        }
+    }
+
     CollectSearchFiles(root, [&](const std::filesystem::path& abs_path, const std::filesystem::path& rel_path) -> bool {
         if (hit_count >= kMaxResults) {
             truncated = true;
@@ -244,9 +275,9 @@ Tool::Result RunGrep(const std::filesystem::path& root, const std::string& patte
     });
 
     if (hit_count == 0) {
-        return {"没搜到匹配的内容", false};
+        return {notice + "没搜到匹配的内容", false};
     }
-    std::string content = out.str();
+    std::string content = notice + out.str();
     if (truncated) {
         content += "……(结果超过 " + std::to_string(kMaxResults) + " 条,已截断,建议缩小 pattern 或 path 范围)\n";
     }
@@ -303,7 +334,8 @@ std::string SearchTool::description() const {
                     "在目录或单个文件里搜索,两种模式:mode=\"grep\" 按正则(ECMAScript 语法)搜文件内容,"
                     "命中的行按 文件:行号:行内容 返回;mode=\"glob\" 按文件名通配(支持 * ? **)找文件,"
                     "返回相对路径列表。默认从当前工作目录开始搜,自动跳过 .git/、build/、"
-                    "node_modules/ 和二进制文件。结果超过 100 条会截断并注明。");
+                    "node_modules/、.evidence/(运行时观察记录)和二进制文件。结果超过 100 条会截断并注明;"
+                    "要搜观察记录,把 path 逐字点名到具体文件或目录即可。");
 }
 
 nlohmann::json SearchTool::input_schema() const {

@@ -1,6 +1,6 @@
 ## description
 
-Search a directory or a single file, in two modes: mode="grep" searches file contents by regex (ECMAScript syntax) and returns matching lines as file:line:content; mode="glob" finds files by name wildcard (supports * ? **) and returns a list of relative paths. Searching starts from the current working directory by default and automatically skips .git/, build/, node_modules/ and binary files. Results are truncated at 100 hits, with a note when that happens.
+Search a directory or a single file, in two modes: mode="grep" searches file contents by regex (ECMAScript syntax) and returns matching lines as file:line:content; mode="glob" finds files by name wildcard (supports * ? **) and returns a list of relative paths. Searching starts from the current working directory by default and automatically skips .git/, build/, node_modules/, .evidence/ (runtime observation records) and binary files. Results are truncated at 100 hits, with a note when that happens. To search observation records, name the exact file or directory in path.
 
 ## param.mode
 

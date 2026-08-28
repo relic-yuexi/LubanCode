@@ -231,11 +231,27 @@ std::string PlanSessionWiring::EvaluateGate(const std::string& tool_name, const 
     if (tool_name == "run_command") {
         const std::string command = input.value("command", std::string());
         const std::string shell = input.value("shell", std::string("powershell"));
-        plan_input.shell_safe =
-            lubancode::runtime::ClassifyPlanShell(command, shell) == lubancode::runtime::PlanShellVerdict::ReadOnly;
+        const lubancode::runtime::PlanShellClassification classification =
+            lubancode::runtime::ClassifyPlanShellDetailed(command, shell);
+        plan_input.shell_safe = classification.verdict == lubancode::runtime::PlanShellVerdict::ReadOnly;
+        plan_input.shell_rule = classification.rule;  // 拒绝回执把命中的规则打出来(P2-3)
     }
     if (tool_name == "agent") {
+        // P2-3:agent 是派发容器,自身不落盘——注册档的 InProcessUnknown
+        // 只说明"内部行为未知",不代表这一派就是写盘;Plan 闸按派出去的
+        // 工具面判(Explore / tools.allow 全只读的自定义 Agent 放行),
+        // 交给 EvaluateModePolicy 的 agent 分支。真正写盘的子代理在那儿拒。
+        capability.mutating = false;
         plan_input.agent_role = input.value("agent_type", std::string("general-purpose"));
+        lubancode::tools::AgentTool* agent_tool =
+            host_.agent_tool != nullptr ? host_.agent_tool() : nullptr;
+        lubancode::tools::ToolRegistry* registry =
+            host_.registry != nullptr ? host_.registry() : nullptr;
+        if (agent_tool != nullptr && registry != nullptr) {
+            plan_input.agent_tools_readonly =
+                lubancode::tools::AgentFaceIsReadOnly(agent_tool->custom_agent_resolver(), *registry,
+                                                      plan_input.agent_role);
+        }
     }
     const lubancode::runtime::ModeVerdict verdict =
         lubancode::runtime::EvaluateModePolicy(CollaborationMode::Plan, capability, plan_input);

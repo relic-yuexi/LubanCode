@@ -250,6 +250,11 @@ public:
     void SetCustomAgentResolver(std::function<std::optional<CustomAgentMaterial>(const std::string&)> resolver) {
         custom_agent_resolver_ = std::move(resolver);
     }
+    // 只读口(真机实测 P2-3):Plan 闸按 agent_type 判工具面时要用同一份
+    // 解析器,不许装配层再养一份平行账。
+    const std::function<std::optional<CustomAgentMaterial>(const std::string&)>& custom_agent_resolver() const {
+        return custom_agent_resolver_;
+    }
 
     // 交互会话开、单发/单测关。入参显式给 run_in_background 时压过它。
     void SetBackgroundByDefault(bool enabled) { background_by_default_ = enabled; }
@@ -450,5 +455,15 @@ private:
     std::string param_fail_cause_;  // 最近一次参数错的原因标识;空 = 无账
     int param_fail_streak_ = 0;     // 同因连续被拒次数
 };
+
+// agent_type 的工具面是否只读(真机实测 P2-3):内置 Explore 是;自定义
+// Agent 看 resolver 解析出的 tools.allow——非空且每一枚都在 registry 里
+// 注册为只读档(ReadOnlyLocal/ReadOnlyRemote)才算。空 allow(继承全工
+// 具面)、解析失败、查无注册、含非只读档,一律 false(保守为纲;契约
+// 4.9:只读不设权限档,由 tools.allow 表达)。纯查表,不发请求、不碰盘
+// 之外的任何状态。
+bool AgentFaceIsReadOnly(
+    const std::function<std::optional<CustomAgentMaterial>(const std::string&)>& resolver,
+    const ToolRegistry& registry, const std::string& agent_type);
 
 }  // namespace lubancode::tools

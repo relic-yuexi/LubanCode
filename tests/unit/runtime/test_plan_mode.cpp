@@ -71,7 +71,7 @@ TEST_CASE("plan_mode: Plan 放行只读白名单") {
 
 TEST_CASE("plan_mode: Plan 拒写盘件——todo_write/write_file/edit_file/memory_save/undo/record") {
     using lubancode::runtime::CollaborationMode;
-    for (const char* name : {"todo_write", "write_file", "edit_file", "memory_save", "undo_file_edit", "skill"}) {
+    for (const char* name : {"todo_write", "write_file", "edit_file", "memory_save", "undo_file_edit", "worktree"}) {
         auto capability = Builtin(name);
         capability.mutating = true;
         const auto verdict = lubancode::runtime::EvaluateModePolicy(CollaborationMode::Plan, capability);
@@ -80,6 +80,17 @@ TEST_CASE("plan_mode: Plan 拒写盘件——todo_write/write_file/edit_file/mem
         // 拒绝文案带 /plan off 指引(单子:UI 要给退路)。
         CHECK(verdict.reason.find("/plan off") != std::string::npos);
     }
+}
+
+TEST_CASE("plan_mode: Plan 放行 skill——加载技能只装说明进上下文(P2-3)") {
+    using lubancode::runtime::CollaborationMode;
+    // 只读档(注册处 SkillTool::effect_class 已声明 ReadOnlyLocal):放行。
+    const auto allowed =
+        lubancode::runtime::EvaluateModePolicy(CollaborationMode::Plan, Builtin("skill"));
+    CHECK(allowed.allowed);
+    CHECK(allowed.code.empty());
+    // 白名单表里有它(装配层据此给 plan_safe_by_default)。
+    CHECK(lubancode::runtime::IsPlanAllowedBuiltinTool("skill"));
 }
 
 TEST_CASE("plan_mode: 未知来源(MCP/插件/Deferred)默认拒,annotation 不算数") {
@@ -107,7 +118,7 @@ TEST_CASE("plan_mode: MCP readOnlyHint 单独存在仍拒——宿主显式声�
     CHECK(lubancode::runtime::EvaluateModePolicy(CollaborationMode::Plan, capability).allowed);
 }
 
-TEST_CASE("plan_mode: agent 只准 Explore,general-purpose 拒") {
+TEST_CASE("plan_mode: agent 按 Explore 与只读工具面判(P2-3)") {
     using lubancode::runtime::CollaborationMode;
     const auto capability = Builtin("agent");
     lubancode::runtime::PlanToolInput explore;
@@ -122,9 +133,22 @@ TEST_CASE("plan_mode: agent 只准 Explore,general-purpose 拒") {
     lubancode::runtime::PlanToolInput lower;
     lower.agent_role = "explore";
     CHECK(lubancode::runtime::EvaluateModePolicy(CollaborationMode::Plan, capability, lower).allowed);
+    // 工具面只读的自定义 Agent(tools.allow 全为只读工具):放行。
+    lubancode::runtime::PlanToolInput readonly_custom;
+    readonly_custom.agent_role = "library-reviewer";
+    readonly_custom.agent_tools_readonly = true;
+    CHECK(lubancode::runtime::EvaluateModePolicy(CollaborationMode::Plan, capability, readonly_custom).allowed);
+    // 工具面含写盘/命令工具的自定义 Agent:拒,回执说明判定口径。
+    lubancode::runtime::PlanToolInput writing_custom;
+    writing_custom.agent_role = "builder";
+    writing_custom.agent_tools_readonly = false;
+    const auto denied = lubancode::runtime::EvaluateModePolicy(CollaborationMode::Plan, capability, writing_custom);
+    CHECK_FALSE(denied.allowed);
+    CHECK(denied.code == lubancode::runtime::kErrModeDeniedAgentRole);
+    CHECK(denied.reason.find("tools.allow") != std::string::npos);
 }
 
-TEST_CASE("plan_mode: run_command 按 shell 细判,白名单内放、外拒") {
+TEST_CASE("plan_mode: run_command 按 shell 细判,白名单内放、外拒带命中规则(P2-3)") {
     using lubancode::runtime::CollaborationMode;
     const auto capability = Builtin("run_command");
     lubancode::runtime::PlanToolInput safe;
@@ -135,6 +159,13 @@ TEST_CASE("plan_mode: run_command 按 shell 细判,白名单内放、外拒") {
     const auto verdict = lubancode::runtime::EvaluateModePolicy(CollaborationMode::Plan, capability, unsafe);
     CHECK_FALSE(verdict.allowed);
     CHECK(verdict.code == lubancode::runtime::kErrModeDeniedShell);
+    // 命中规则进回执(单子验收:"把命中的规则打印出来")。
+    lubancode::runtime::PlanToolInput with_rule;
+    with_rule.shell_safe = false;
+    with_rule.shell_rule = "git 子命令 checkout 不在 Plan 只读子命令表";
+    const auto ruled = lubancode::runtime::EvaluateModePolicy(CollaborationMode::Plan, capability, with_rule);
+    CHECK_FALSE(ruled.allowed);
+    CHECK(ruled.reason.find("git 子命令 checkout") != std::string::npos);
 }
 
 TEST_CASE("plan_mode: 不在白名单的内置件拒(保守为纲)") {
@@ -185,15 +216,42 @@ TEST_CASE("plan_shell: 只读件放行") {
     // 版本探针(无重定向/管道/子表达式)。
     CHECK(lubancode::runtime::ClassifyPlanShell("python --version", "cmd") == PlanShellVerdict::ReadOnly);
     CHECK(lubancode::runtime::ClassifyPlanShell("node -v", "cmd") == PlanShellVerdict::ReadOnly);
+    // P2-3 补的只读件:纯读命令与 git 查询子命令。
+    CHECK(lubancode::runtime::ClassifyPlanShell("type main.cpp", "cmd") == PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("cat package.json", "powershell") == PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("head -n 20 log.txt", "cmd") == PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("tail log.txt", "cmd") == PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("wc -l src/main.cpp", "cmd") == PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("grep -n TODO src", "cmd") == PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("dir src", "cmd") == PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("git ls-tree -r --name-only HEAD", "cmd") ==
+          PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("git rev-parse HEAD", "cmd") == PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("git rev-list --count HEAD~5..HEAD", "cmd") ==
+          PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("git blame src/main.cpp", "cmd") == PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("git cat-file -p abc123", "cmd") == PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("git show-ref", "cmd") == PlanShellVerdict::ReadOnly);
+    // P2-3 补的 PowerShell 只读管道:真机实测 Get-ChildItem | Select-Object 被拦。
+    CHECK(lubancode::runtime::ClassifyPlanShell("Get-ChildItem | Select-Object Name,Length", "powershell") ==
+          PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("Get-ChildItem -Recurse | Sort-Object Length | Select-Object -First 5",
+                                                "powershell") == PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("Get-Content package.json | Measure-Object -Line", "powershell") ==
+          PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("Get-ChildItem | Where-Object Extension -eq .cpp", "powershell") ==
+          PlanShellVerdict::ReadOnly);
+    CHECK(lubancode::runtime::ClassifyPlanShell("Get-ChildItem | Format-Table Name", "powershell") ==
+          PlanShellVerdict::ReadOnly);
 }
 
-TEST_CASE("plan_shell: 与 Auto 档 Safe 分道——cd/echo/cat 这些 Plan 不放") {
+TEST_CASE("plan_shell: 与 Auto 档 Safe 分道——cd/echo 这些 Plan 不放") {
     using lubancode::runtime::PlanShellVerdict;
-    // Auto 档的 kGenericSafe 里有 cd/echo/cat/type;Plan 的窄表没有。
+    // Auto 档的 kGenericSafe 里有 cd/echo;Plan 的窄表没有(cd 改进程状态,
+    // echo 是 Auto 档的放行,与只读无关)。type/cat 是 P2-3 后的只读件,
+    // 已挪去上面的放行测试。
     CHECK(lubancode::runtime::ClassifyPlanShell("cd src", "cmd") == PlanShellVerdict::Unknown);
     CHECK(lubancode::runtime::ClassifyPlanShell("echo hi", "cmd") == PlanShellVerdict::Unknown);
-    CHECK(lubancode::runtime::ClassifyPlanShell("type main.cpp", "cmd") == PlanShellVerdict::Unknown);
-    CHECK(lubancode::runtime::ClassifyPlanShell("cat main.cpp", "cmd") == PlanShellVerdict::Unknown);
 }
 
 TEST_CASE("plan_shell: 重定向/管道/子表达式/环境赋值一律不放") {
@@ -220,6 +278,79 @@ TEST_CASE("plan_shell: git 只认只读子命令,写盘子命令与外部 diff �
     CHECK(lubancode::runtime::ClassifyPlanShell("git diff --ext-diff", "cmd") == PlanShellVerdict::Unknown);
     // 全局选项(git -C ...)照 Unknown,保守(与 ClassifyCommand 同取舍)。
     CHECK(lubancode::runtime::ClassifyPlanShell("git -C .. status", "cmd") == PlanShellVerdict::Unknown);
+}
+
+// ---------------------------------------------------------------------------
+// P2-3 契约:Git/PowerShell/cmd 三张只读命令表——只读写法放行,改状态
+// 写法拦截,拦截回执带命中的规则。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("plan_shell 契约: git 只读写法放行,改状态写法拦并报命中规则") {
+    using lubancode::runtime::PlanShellClassification;
+    using lubancode::runtime::PlanShellVerdict;
+    // 只读:查询与列举。
+    for (const char* command : {"git status", "git log --oneline -5", "git diff", "git show HEAD",
+                                "git ls-files", "git ls-tree -r --name-only HEAD", "git rev-parse HEAD",
+                                "git blame src/a.cpp", "git cat-file -t abc"}) {
+        CHECK(lubancode::runtime::ClassifyPlanShell(command, "cmd") == PlanShellVerdict::ReadOnly);
+    }
+    // 改状态:工作树/引用/远端。
+    for (const char* command : {"git add .", "git commit -m x", "git checkout -b feat", "git reset --hard",
+                                "git push origin main", "git clean -fd", "git stash", "git merge feat"}) {
+        const PlanShellClassification judged = lubancode::runtime::ClassifyPlanShellDetailed(command, "cmd");
+        CHECK(judged.verdict == PlanShellVerdict::Unknown);
+        CHECK_FALSE(judged.rule.empty());  // 回执把命中的规则说清(单子验收)
+    }
+    const PlanShellClassification checkout =
+        lubancode::runtime::ClassifyPlanShellDetailed("git checkout main", "cmd");
+    CHECK(checkout.rule.find("checkout") != std::string::npos);
+    CHECK(checkout.rule.find("只读子命令") != std::string::npos);
+}
+
+TEST_CASE("plan_shell 契约: powershell 只读管道放行,写盘与脚本块拦并报命中规则") {
+    using lubancode::runtime::PlanShellClassification;
+    using lubancode::runtime::PlanShellVerdict;
+    // 只读管道(真机实测闭门羹:Get-ChildItem ... | Select-Object)。
+    for (const char* command : {"Get-ChildItem", "Get-ChildItem -Recurse -Filter *.cpp",
+                                "Get-Content src/main.cpp", "Get-ChildItem | Select-Object FullName",
+                                "Get-ChildItem | Where-Object Length -gt 100",
+                                "Get-ChildItem | Sort-Object Name | Select-Object -First 3",
+                                "Get-Content log.txt | Measure-Object -Line"}) {
+        CHECK(lubancode::runtime::ClassifyPlanShell(command, "powershell") == PlanShellVerdict::ReadOnly);
+    }
+    // 写盘/任意代码:拦。
+    const PlanShellClassification out_file =
+        lubancode::runtime::ClassifyPlanShellDetailed("Remove-Item -Recurse build", "powershell");
+    CHECK(out_file.verdict == PlanShellVerdict::Unknown);
+    CHECK(out_file.rule.find("首词") != std::string::npos);
+    // 脚本块体内是任意代码:拦,并指路无脚本块写法。
+    const PlanShellClassification scriptblock =
+        lubancode::runtime::ClassifyPlanShellDetailed("Get-ChildItem | Where-Object { $_.Length -gt 5 }",
+                                                      "powershell");
+    CHECK(scriptblock.verdict == PlanShellVerdict::Unknown);
+    CHECK(scriptblock.rule.find("脚本块") != std::string::npos);
+    // 引号里的 { 不算脚本块(引号状态机)。
+    CHECK(lubancode::runtime::ClassifyPlanShell("Select-String -Pattern \"a { b\"", "powershell") ==
+          PlanShellVerdict::ReadOnly);
+}
+
+TEST_CASE("plan_shell 契约: cmd 只读写法放行,写盘写法拦并报命中规则") {
+    using lubancode::runtime::PlanShellClassification;
+    using lubancode::runtime::PlanShellVerdict;
+    // 只读:dir/type/findstr 与管道到只读件。
+    for (const char* command : {"dir src", "type config.toml", "findstr /s /i TODO *.cpp",
+                                "dir | findstr lib"} ) {
+        CHECK(lubancode::runtime::ClassifyPlanShell(command, "cmd") == PlanShellVerdict::ReadOnly);
+    }
+    // 写盘:拦。
+    for (const char* command : {"del build.log", "rd /s /q build", "copy a b", "move a b",
+                                "npm install left-pad", "dotnet build"}) {
+        const PlanShellClassification judged = lubancode::runtime::ClassifyPlanShellDetailed(command, "cmd");
+        CHECK(judged.verdict == PlanShellVerdict::Unknown);
+        CHECK_FALSE(judged.rule.empty());
+    }
+    const PlanShellClassification del = lubancode::runtime::ClassifyPlanShellDetailed("del x.txt", "cmd");
+    CHECK(del.rule.find("首词") != std::string::npos);
 }
 
 TEST_CASE("plan_shell: 链上有一段不安全整条不安全;不认的 shell 不猜") {
