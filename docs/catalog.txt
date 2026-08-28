@@ -26,6 +26,7 @@ DOC reference/commands.md
 DOC reference/configuration.md
 DOC reference/feature-index.md
 DOC reference/packages.md
+DOC reference/browser-runtime.md
 DOC reference/tools.md
 DOC reference/workflow-schema.md
 

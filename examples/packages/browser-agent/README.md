@@ -11,10 +11,13 @@
 | `skills/browser-agent/` | Skill | `luban.browser-agent:browser-agent` | 操作纪律:快照→找 ref→动→复验;导航后 stale_ref 的正确反应;停手线 |
 | `assets/practice-page/` | 资料 | —(不自动加载) | 零依赖练习页,本地起个 http 服务即可练手 |
 
-浏览器本体不在此包。页签、Cookie、登录态、下载由常驻 browser MCP server
-保管——那只 server 是 LubanCode 仓库自带的 `browser/` 目录(0.26.72 起),
-照下文挂进 config 即可。包只管"教模型怎么用",不管"跑浏览器":这就是
-content-only 的边界,也是 Skill 与 MCP 的分工。
+浏览器本体不在此包,也永远不该进任何一只包。页签、Cookie、登录态、下载
+归 BrowserRuntime——LubanCode 核心产品层的一部分,代码在仓库自带的
+`browser/` 目录(session 层即 Runtime 本体,MCP server 是它的适配入口,
+边界见 `docs/reference/browser-runtime.md`)。眼下宿主还没长出内嵌
+Browser Tab,经 MCP 挂进来是现阶段的唯一入口;往后桌面端直连 Runtime,
+MCP 退居 CLI 与第三方客户端的兼容口。包只管"教模型怎么用",不管
+"跑浏览器":这就是 content-only 的边界,也是 Skill 与 Runtime 的分工。
 
 ## 安装
 
@@ -41,9 +44,9 @@ lubancode --package-dir <本包所在目录>
 
 `--package-dir` 是开发层(dev),优先级最高,直接指向源目录。
 
-## 挂 browser MCP(一次性)
+## 挂 browser MCP(一次性,兼容入口)
 
-Skill 教的是工具用法;工具本身来自 browser MCP server。编辑
+Skill 教的是工具用法;工具本身来自 BrowserRuntime 的 MCP 适配入口。编辑
 `~/.lubancode/config.json`,加一节 mcpServers(args 里的路径按你机器上
 仓库的实际位置写成绝对路径):
 

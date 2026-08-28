@@ -11,5 +11,6 @@
 - [工具参考](tools.md)：工具 schema、确认、上限、结果与错误。
 - [Agent 与 Prompt Profile 契约](agents.md)：Agent YAML 逐字段、三层扫描、严格解析与诊断码。
 - [Package 与组件挂载](packages.md)：标准目录、package.yaml schema 1、命名空间与 wire 编码。
+- [BrowserRuntime 与内嵌浏览器边界](browser-runtime.md)：四层职责、术语冻结、状态真值与用户/Agent 仲裁。
 - [Workflow Schema](workflow-schema.md)：定义、节点、边、Store、预算与控制结构。
 - [app-server 协议](../features/app-server/README.md)：无界面后台协议的方法面、事件账、diff 行表与 SSH 承载。

@@ -2,7 +2,7 @@ schema: 1
 id: luban.browser-agent
 version: 0.1.0
 name: Browser Agent
-description: 浏览器操作章法的内容包:一枚 Skill 教模型"快照→找 ref→动→复验",一张练习页供本地演练。零代码组件。
+description: 浏览器操作章法的内容包:一枚 Skill 教模型"快照→找 ref→动→复验",一张练习页供本地演练。零代码组件,不承载浏览器本体——BrowserRuntime 归核心产品层。
 
 compatibility:
   lubancode: ">=0.26.0"

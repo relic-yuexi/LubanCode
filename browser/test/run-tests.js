@@ -14,6 +14,7 @@ const path = require('path');
 
 const { BrowserMcpClient } = require('./mcp_client');
 const { startSite } = require('./site');
+const { runDirectMatrix } = require('./run-direct-tests');
 
 let passed = 0;
 let failed = 0;
@@ -484,6 +485,16 @@ async function main() {
       ++failed;
       failures.push('crash 矩阵异常: ' + String(error.message || error));
       console.log('  FAIL crash 矩阵异常: ' + String(error.message || error));
+    }
+
+    // Runtime 直调(单子:内嵌浏览器调试工作台 阶段 1):不经 MCP 协议
+    // 直接调 session 层,再与 MCP adapter 路对照同一本账。
+    try {
+      await runDirectMatrix(baseUrl, { ok, skip, section, tempDir, refOfLine });
+    } catch (error) {
+      ++failed;
+      failures.push('直调矩阵异常: ' + String(error.message || error));
+      console.log('  FAIL 直调矩阵异常: ' + String(error.message || error));
     }
 
     console.log('\n---- 汇总 ----');
