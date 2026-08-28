@@ -399,7 +399,7 @@ int main(void) {
 
 ### 6.6 完整案例：GUI Agent（Windows 桌面自动化）
 
-单工具示例见 [examples/plugins/](../../../examples/plugins/README.md)；要看的“多工具、有安全合同的完整插件”，见 **[examples/agents/gui-agent](../../../examples/agents/gui-agent/README.md)**——九件 GUI 工具（截图/枚举/聚焦/移动/点击/滚轮/输入/按键/状态），带：
+单工具示例见 [examples/plugins/](../../../examples/plugins/README.md)；要看的“多工具、有安全合同的完整插件”，见 **[examples/packages/gui-agent](../../../examples/packages/gui-agent/README.md)**——九件 GUI 工具（截图/枚举/聚焦/移动/点击/滚轮/输入/按键/状态），带：
 
 - 坐标合同：`virtual_screen` 物理像素与 `window_client` 两种口径，动作前换算、越界拒绝；
 - stale observation：截图时的窗口矩形进 observation，动作带 `expected_window_rect` 复查，窗口挪了即拒，不拿旧图坐标硬点；

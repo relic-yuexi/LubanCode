@@ -347,7 +347,7 @@ DLL 生命周期由 `PluginHost` 扛住。主表与子代理表各有一层 `Plu
 
 Lua state 随 `LuaTool` 析构而 `lua_close`。没有插件级 shutdown callback。插件若开了线程、句柄或临时文件，须自己收拾；宿主没法发“会话结束”通知。
 
-process 插件把“短寿命”走到头：每次调用一只进程，起、干、退，无状态可收。想看“状态全在外部”的活例子，读 [examples/agents/gui-agent](../../../examples/agents/gui-agent/README.md)——GUI 自动化插件每次调用重新问桌面要窗口矩形与前台状态，窗口、光标、输入焦点全由 OS 与目标程序保存；两次调用之间插件什么都不持有，所以窗口挪了要靠 `expected_window_rect` 复查（stale observation），而不是靠内存里的旧句柄。反过来，若你的工具需要跨调用保活对象（DOM handle、连接池、订阅），状态就住进了你的进程——那是 MCP 的地界，别用短命进程硬撑。
+process 插件把“短寿命”走到头：每次调用一只进程，起、干、退，无状态可收。想看“状态全在外部”的活例子，读 [examples/packages/gui-agent](../../../examples/packages/gui-agent/README.md)——GUI 自动化插件每次调用重新问桌面要窗口矩形与前台状态，窗口、光标、输入焦点全由 OS 与目标程序保存；两次调用之间插件什么都不持有，所以窗口挪了要靠 `expected_window_rect` 复查（stale observation），而不是靠内存里的旧句柄。反过来，若你的工具需要跨调用保活对象（DOM handle、连接池、订阅），状态就住进了你的进程——那是 MCP 的地界，别用短命进程硬撑。
 
 ## 🔐 确认不是沙箱
 
