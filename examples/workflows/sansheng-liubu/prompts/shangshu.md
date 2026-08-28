@@ -19,6 +19,7 @@
       "acceptance": ["办成的可核对条件"],
       "ambiguity_action": "停手，把歧义回报朝廷"
     }
-  ]
+  ],
+  "roster": "一行一封的差遣清单，给御前加签时过目。每行格式如「工部：修 add 函数 [build/wf-smoke/calc.py]」——部名、一句话差遣、关键路径或命令。行数与 dispatches 对齐，不加评论"
 }
 ```

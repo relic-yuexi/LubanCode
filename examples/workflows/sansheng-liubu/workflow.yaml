@@ -122,7 +122,7 @@ nodes:
     label: "御前 画敕"
     input:
       header: "诏书候旨"
-      question: "${nodes.zhongshu.output.memorial}\n\n门下判词：${nodes.menxia.output.reasons}\n\n待明确处：${nodes.menxia.output.question}\n\n可批准、写下批语,或行墨敕。"
+      question: "方案：${nodes.zhongshu.output.summary}\n门下判词：${nodes.menxia.output.reasons}\n待明确处：${nodes.menxia.output.question}\n方案书全文见上方中书奏章。可批准、写下批语,或行墨敕。"
       review_approved: "${nodes.menxia.output.approved}"
       previous: "${nodes.fengbo.output.previous}"
       approve_answers:
@@ -153,7 +153,7 @@ nodes:
     label: "御前 差遣加签"
     input:
       header: "差遣候签"
-      question: "尚书已拆差遣如下：\n${nodes.shangshu.output.dispatches}\n\n照单全发,或写下批注(增、删、改),批注会并入定牒。"
+      question: "尚书已拆差遣：\n${nodes.shangshu.output.roster}\n照单全发,或写下批注(增、删、改),批注会并入定牒。"
       options:
         - label: "照单全发"
           description: "差遣原样誊定,发六部办理"

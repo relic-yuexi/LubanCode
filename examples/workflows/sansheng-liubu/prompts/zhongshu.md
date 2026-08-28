@@ -13,7 +13,7 @@
 ```json
 {
   "memorial": "给皇帝读的完整方案书，Markdown 分节，首节为需求复述，不写 JSON 腔",
-  "summary": "一句话方案",
+  "summary": "一句话方案——御前面板只摆这一行，要写得皇帝光看它便知道批的是什么",
   "selected_strategy": "选了哪条路线，为何胜过其余",
   "scope": ["改动范围"],
   "impact": ["影响面"],
