@@ -6,9 +6,15 @@
 
 #include <doctest/doctest.h>
 
+#include <fstream>
+#include <sstream>
 #include <string>
 
 #include "agent/agent_definition.hpp"
+
+#ifndef LUBANCODE_TEST_FIXTURES_DIR
+#define LUBANCODE_TEST_FIXTURES_DIR "tests/fixtures"
+#endif
 
 using namespace lubancode;
 
@@ -70,7 +76,11 @@ requires:
     - mcp__browser__navigate
 
 runtime:
+  max_output_tokens: 8192
   max_steps_per_turn: 24
+  max_context_chars: 600000
+  context_window_tokens: 0
+  length_continuations: 1
   execution_mode: auto
   isolation: none
 
@@ -95,8 +105,17 @@ permissions:
     CHECK(def.tools.deny == std::vector<std::string>{"shell"});
     CHECK(def.mcp_servers == std::vector<std::string>{"browser"});
     CHECK(def.requires_tools == std::vector<std::string>{"mcp__browser__navigate"});
+    // 契约 4.8:五个预算字段与 AgentRuntimeProfile 同名同义,逐一对账。
+    REQUIRE(def.max_output_tokens.has_value());
+    CHECK(*def.max_output_tokens == 8192);
     REQUIRE(def.max_steps_per_turn.has_value());
     CHECK(*def.max_steps_per_turn == 24);
+    REQUIRE(def.max_context_chars.has_value());
+    CHECK(*def.max_context_chars == 600000);
+    REQUIRE(def.context_window_tokens.has_value());
+    CHECK(*def.context_window_tokens == 0);  // 0 = 未知,合法值
+    REQUIRE(def.length_continuations.has_value());
+    CHECK(*def.length_continuations == 1);
     CHECK(def.execution_mode == "auto");
     CHECK(def.isolation == "none");
     CHECK(def.permissions_mode == "confirm");
@@ -118,7 +137,11 @@ TEST_CASE("最小合法 YAML:三样必填之外全走默认(继承)") {
     CHECK(def.tools.deny.empty());
     CHECK(def.mcp_servers.empty());
     CHECK(def.requires_tools.empty());
+    CHECK_FALSE(def.max_output_tokens.has_value());
     CHECK_FALSE(def.max_steps_per_turn.has_value());
+    CHECK_FALSE(def.max_context_chars.has_value());
+    CHECK_FALSE(def.context_window_tokens.has_value());
+    CHECK_FALSE(def.length_continuations.has_value());
     CHECK(def.execution_mode.empty());  // 空 = auto,由 resolver 落默认
     CHECK(def.isolation.empty());
     CHECK(def.permissions_mode.empty());
@@ -172,6 +195,90 @@ TEST_CASE("类型错:runtime.max_steps_per_turn 给字符串,报行列") {
         if (issue.field == "runtime.max_steps_per_turn") {
             CHECK(issue.line == 5);
             CHECK(issue.column > 0);
+        }
+    }
+}
+
+TEST_CASE("runtime 五预算键(契约 4.8):正例与 tests/fixtures/agents/complete.yaml 同款") {
+    // 与夹具同款的 runtime 段全键过一遍——名字与 AgentRuntimeProfile 一字不差。
+    const std::string yaml = R"yaml(schema: 1
+name: budget-probe
+description: d
+runtime:
+  max_output_tokens: 4096
+  max_steps_per_turn: 0
+  max_context_chars: 200000
+  context_window_tokens: 256000
+  length_continuations: 0
+)yaml";
+    const auto result = agent::ParseAgentDefinitionYaml(yaml, "budget-probe.yaml");
+    REQUIRE(result.definition.has_value());
+    CHECK(result.issues.empty());
+    const auto& def = *result.definition;
+    REQUIRE(def.max_output_tokens.has_value());
+    CHECK(*def.max_output_tokens == 4096);
+    REQUIRE(def.max_steps_per_turn.has_value());
+    CHECK(*def.max_steps_per_turn == 0);  // 0 = 不限步,合法
+    REQUIRE(def.max_context_chars.has_value());
+    CHECK(*def.max_context_chars == 200000);
+    REQUIRE(def.context_window_tokens.has_value());
+    CHECK(*def.context_window_tokens == 256000);
+    REQUIRE(def.length_continuations.has_value());
+    CHECK(*def.length_continuations == 0);  // 0 = 不续跑,合法
+
+    // tests/fixtures/agents/complete.yaml 本尊也过一遍(夹具即正例)。
+    std::ifstream fixture(std::string(LUBANCODE_TEST_FIXTURES_DIR) + "/agents/complete.yaml",
+                          std::ios::binary);
+    REQUIRE_MESSAGE(fixture.is_open(), "夹具 tests/fixtures/agents/complete.yaml 打不开");
+    std::stringstream buffer;
+    buffer << fixture.rdbuf();
+    const auto from_file = agent::ParseAgentDefinitionYaml(buffer.str(), "complete.yaml");
+    REQUIRE(from_file.definition.has_value());
+    CHECK(from_file.issues.empty());
+    REQUIRE(from_file.definition->max_output_tokens.has_value());
+    CHECK(*from_file.definition->max_output_tokens == 8192);
+    REQUIRE(from_file.definition->max_context_chars.has_value());
+    CHECK(*from_file.definition->max_context_chars == 600000);
+    REQUIRE(from_file.definition->context_window_tokens.has_value());
+    CHECK(*from_file.definition->context_window_tokens == 0);
+    REQUIRE(from_file.definition->length_continuations.has_value());
+    CHECK(*from_file.definition->length_continuations == 1);
+    REQUIRE(from_file.definition->max_steps_per_turn.has_value());
+    CHECK(*from_file.definition->max_steps_per_turn == 24);
+}
+
+TEST_CASE("runtime 五预算键:下界与类型各报一处,行列指得到") {
+    // max_output_tokens 要正整数:0 报错(契约 4.8"正整数")。
+    CHECK(HasIssueOn(agent::ParseAgentDefinitionYaml(
+                         "schema: 1\nname: a\ndescription: d\nruntime:\n  max_output_tokens: 0\n", "a.yaml"),
+                     "runtime.max_output_tokens"));
+    // max_context_chars 要正整数:0 报错。
+    CHECK(HasIssueOn(agent::ParseAgentDefinitionYaml(
+                         "schema: 1\nname: a\ndescription: d\nruntime:\n  max_context_chars: 0\n", "a.yaml"),
+                     "runtime.max_context_chars"));
+    // 负数:stoull 不收负号,按类型错报。
+    CHECK(HasIssueOn(agent::ParseAgentDefinitionYaml(
+                         "schema: 1\nname: a\ndescription: d\nruntime:\n  length_continuations: -1\n", "a.yaml"),
+                     "runtime.length_continuations"));
+    // 字符串类型错,行列指到那一行(第 5 行)。
+    const auto typed = agent::ParseAgentDefinitionYaml(
+        "schema: 1\nname: a\ndescription: d\nruntime:\n  context_window_tokens: 很大\n", "a.yaml");
+    CHECK_FALSE(typed.definition.has_value());
+    REQUIRE(HasIssueOn(typed, "runtime.context_window_tokens"));
+    for (const auto& issue : typed.issues) {
+        if (issue.field == "runtime.context_window_tokens") {
+            CHECK(issue.line == 5);
+            CHECK(issue.column > 0);
+        }
+    }
+    // 超上限(size_t 键的 1 TiB 帽):写一串离谱的数,报"超上限"不截断装小。
+    const auto overflow = agent::ParseAgentDefinitionYaml(
+        "schema: 1\nname: a\ndescription: d\nruntime:\n  max_context_chars: 9999999999999999\n", "a.yaml");
+    CHECK_FALSE(overflow.definition.has_value());
+    REQUIRE(HasIssueOn(overflow, "runtime.max_context_chars"));
+    for (const auto& issue : overflow.issues) {
+        if (issue.field == "runtime.max_context_chars") {
+            CHECK(issue.message.find("超上限") != std::string::npos);
         }
     }
 }

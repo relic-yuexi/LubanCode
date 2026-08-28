@@ -162,14 +162,21 @@ bool ResolveStartupPlanMode(const CliOptions& cli_options, const config::Setting
 
 // i18n:帮助文本按节进表(help.title/usage/options/scaffold/slash/config),
 // 版本号、三个内置默认值走占位符。zh-CN 表的值与旧字面文案一致。
+// 斜杠命令清单(P3-2)不再手抄进表——intro 之后打
+// cli::FormatSlashCommandListLines() 生成的行,与 /help、Tab 补全同一份
+// AllSlashCommands,三份名单永不各列各的。
 void PrintHelp() {
     std::cout << trf("help.title", kVersion) << "\n\n"
               << tr("help.usage") << "\n"
               << tr("help.options") << "\n"
               << tr("help.scaffold") << "\n"
-              << tr("help.slash") << "\n"
+              << tr("help.slash");
+    for (const std::string& line : lubancode::cli::FormatSlashCommandListLines()) {
+        std::cout << line << "\n";
+    }
+    std::cout << tr("help.keys")
               << trf("help.config", lubancode::config::kDefaultMaxContextChars,
-                      lubancode::config::kDefaultTheme, lubancode::config::kDefaultContextWindowTokens);
+                     lubancode::config::kDefaultTheme, lubancode::config::kDefaultContextWindowTokens);
 }
 
 // /tools 命令:列工具三态——核心(恒在)/已加载的延迟工具/延迟未加载,

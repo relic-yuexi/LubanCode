@@ -1451,6 +1451,21 @@ RunTurnResult RunTurn(TurnContext ctx) {
         }
     }
 
+    // TODO 未收口提醒(P3-4):回合正常收口(没被打断、没撞预算)而清单里
+    // 仍有 in_progress 项时,宿主给模型递一条提醒——经 InjectIncoming 落双账
+    // (末条是 assistant 就另起一条 user;末条是 user 就并进去,三种 wire 都
+    // 安全),模型在下一份请求里看得见;会话层的 PersistNewMessages 随后照常
+    // 落盘。打断/失败轮不催——那轮本就没收完账,催了也是噪声。
+    if (!out.cancelled && !turn_failed && todo_state != nullptr) {
+        if (const auto reminder = lubancode::tools::BuildUnclosedTodoReminder(*todo_state);
+            reminder.has_value()) {
+            lubancode::api::Message notice;
+            notice.role = lubancode::api::Role::User;
+            notice.content.push_back(lubancode::api::TextBlock{*reminder});
+            loop.context().InjectIncoming(std::move(notice));
+        }
+    }
+
     // 统计降噪(终端回合视觉收束单第七节):输入/缓存/输出/请求数/context
     // 长行不再每轮全摊——context 与缓存命中常驻底部状态栏(UpdateStatusLine
     // Context 已在 on_usage 局部发布),紧凑态 footer 只写总耗时;详细态

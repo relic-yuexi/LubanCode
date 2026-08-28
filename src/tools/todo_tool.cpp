@@ -31,6 +31,31 @@ std::string TodoStatusToString(TodoStatus status) {
     return "pending";
 }
 
+std::optional<std::string> BuildUnclosedTodoReminder(const TodoListState& state) {
+    std::string items;
+    for (const TodoItem& item : state.items) {
+        if (item.status != TodoStatus::InProgress) {
+            continue;
+        }
+        items += "  - ";
+        items += item.content.empty() ? "(空条目)" : item.content;
+        items += "\n";
+    }
+    if (items.empty()) {
+        return std::nullopt;
+    }
+    // 与 loop.cpp 的步数将尽/预算催办同一口吻:明写"非用户输入",不伪装人话;
+    // 只点名收账动作,不替模型决定各项的归宿。
+    std::string text =
+        "[系统提醒,非用户输入] 本回合已收口,但待办清单里还有标着 in_progress 的项没有收账:\n";
+    text += items;
+    text +=
+        "下一次调用 todo_write 时请处理这些项:已做完的改成 completed;还在做的改回 pending,"
+        "并在回复里说明为什么没做完;需要用户拍板的,说明后把条目内容标注\"待确认\"。"
+        "不要不动声色地把 in_progress 留过夜。";
+    return text;
+}
+
 std::string TodoWriteTool::name() const {
     return "todo_write";
 }

@@ -374,8 +374,16 @@ TEST_CASE("/model roles 在补全说明与帮助里中英都有入口") {
     for (const std::string language : {"zh-CN", "en"}) {
         cli::SetLanguage(language);
         CHECK(cli::tr("slash.desc.model").find("/model roles") != std::string::npos);
-        CHECK(cli::tr("help.slash").find("/model roles") != std::string::npos);
-        CHECK(cli::tr("slash_help.body").find("/model roles") != std::string::npos);
+        // P3-2 起 --help(help.slash)与 /help(slash_help.body)的命令清单不再
+        // 手抄进表,由 cli::FormatSlashCommandListLines() 从 AllSlashCommands
+        // 现排——入口改在生成行上对账:/model 那行带着 roles 的说法。
+        bool model_line_mentions_roles = false;
+        for (const std::string& line : cli::FormatSlashCommandListLines()) {
+            if (line.find("/model") != std::string::npos && line.find("roles") != std::string::npos) {
+                model_line_mentions_roles = true;
+            }
+        }
+        CHECK(model_line_mentions_roles);
         const std::string header = cli::tr("cmd.model.roles_header");
         const bool names_subagents = header.find("子代理") != std::string::npos ||
                                      header.find("subagent") != std::string::npos ||

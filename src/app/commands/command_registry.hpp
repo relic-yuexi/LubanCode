@@ -53,7 +53,9 @@
 
 namespace lubancode::app {
 
-class SlashDispatchContext;
+// 与底下 struct SlashDispatchContext 的定义同一写法(class/struct 混写是
+// MSVC C4099,全仓前置声明与定义统一成 struct)。
+struct SlashDispatchContext;
 
 // 一案一行。handler 为空 = 死案(Image 进不来分派、NotSlash 在上一层已
 // 分流),表上留名只为 47 案对账齐整。

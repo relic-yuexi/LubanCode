@@ -186,9 +186,10 @@ void PrintPluginsCommand(const std::vector<PluginMountInfo>& mounted, const std:
 
 // /plugin 子命令(plugins 单第 8 步)的实现。三路插件的账都从调用方递
 // 进来:process 走 manifests,native/Lua 走 mounted(完整工具名前缀对
-// 得上插件 id)。doctor 只探环境不执行 tool;test 走与模型调用同一条
-// 执行链(这里给 v1 的最短版:经 ToolRuntime 的 registry 由调用方真跑,
-// 命令层只出说明——真跑要确认流,硬造一条免确认的捷径正是单子禁的)。
+// 得上插件 id)。doctor 只探环境不执行 tool;test(P3-1)真跑插件自带的
+// test_runner 自测脚本(发现与执行在 runtime 侧:ResolvePluginSelfTest/
+// RunPluginSelfTest),这里只拆参数、打回执——跑的是作者自己的测试,不经
+// 模型调用链,与 doctor 探解释器同一待遇,没有确认流。
 // trust/untrust(信任流)另收项目根与信任账:账务与概要在 runtime 侧
 // (TrustProjectPluginById 一族),这里只递材料、打回执。
 void HandlePluginCommand(const std::string& args,
@@ -349,10 +350,97 @@ void HandlePluginCommand(const std::string& args,
     }
 
     if (action == "test") {
-        // test 的口径:与模型调用同一条链(schema 验参、确认、timeout)。
-        // 确认流在交互层,命令层不另开无防护捷径——这里指路,真跑让模型
-        // 调(或用 scaffold 生成的 test_runner.py 离线自测)。
-        TermOut() << tr("cmd.plugin.test.hint") << "\n";
+        // test 的口径(P3-1):找 manifest 声明的自测入口(examples 与 scaffold
+        // 的约定:插件目录里同位的 test_runner.py/.js),起进程真跑,交回
+        // exit code、耗时、stdout/stderr 摘要;失败按层定位(起不来/超时/
+        // 非零退出)。未声明自测入口的明说,不装样子。跑的是插件作者自己
+        // 的测试脚本(不经模型调用链),所以没有确认流——同 /plugin doctor
+        // 探解释器一个待遇:只读式诊断动作。
+        if (target_id.empty()) {
+            TermOut() << "用法:/plugin test <id>(id 看 /plugins)\n";
+            return;
+        }
+        if (manifest == nullptr) {
+            // legacy Lua/native:分派面在 mounted 里按前缀认;自测约定 v1 只有
+            // process 插件有。
+            const std::string prefix = "plugin__" + target_id + "__";
+            for (const auto& info : mounted) {
+                if (info.tool_name.rfind(prefix, 0) == 0) {
+                    TermOut() << tr("cmd.plugin.test.legacy_no_entry") << "\n";
+                    return;
+                }
+            }
+            TermOut() << trf("cmd.plugin.not_found", target_id) << "\n";
+            return;
+        }
+        const auto plan = lubancode::runtime::ResolvePluginSelfTest(*manifest);
+        if (!plan.has_value()) {
+            TermOut() << tr("cmd.plugin.test.no_entry") << "\n";
+            return;
+        }
+        std::string argv_text;
+        for (const auto& a : plan->argv) {
+            argv_text += argv_text.empty() ? a : (" " + a);
+        }
+        TermOut() << trf("cmd.plugin.test.header", lubancode::tools::PathToUtf8(plan->script), argv_text)
+                  << "\n";
+        // 自测墙钟:manifest.timeout_ms 是单次工具调用的预算,测试整包可以
+        // 比它慢;manifest 没设(0)时给 120s 兜底,设了就照它的来。
+        const lubancode::runtime::PluginSelfTestReport report =
+            lubancode::runtime::RunPluginSelfTest(*plan, 120000);
+        if (report.spawn_failed) {
+            TermOut() << trf("cmd.plugin.test.spawn_failed", report.spawn_error, target_id) << "\n";
+            return;
+        }
+        if (report.timed_out) {
+            TermOut() << trf("cmd.plugin.test.timed_out",
+                             plan->timeout_ms > 0 ? std::to_string(plan->timeout_ms) : std::string("120000"))
+                      << "\n";
+        } else if (report.exit_code == 0) {
+            TermOut() << trf("cmd.plugin.test.ok", report.exit_code, report.elapsed_ms) << "\n";
+        } else {
+            TermOut() << trf("cmd.plugin.test.failed", report.exit_code, report.elapsed_ms) << "\n";
+        }
+        if (report.output_truncated) {
+            TermOut() << tr("cmd.plugin.test.truncated") << "\n";
+        }
+        // stdout/stderr 摘要:留末尾 15 行、每路至多 1600 字节(测试输出的
+        // 败因总在尾巴上:unittest 的 FAILED 段、node:test 的汇总)。
+        const auto print_summary = [](const char* key, const std::string& text) {
+            if (text.empty()) {
+                return;
+            }
+            TermOut() << tr(key) << "\n";
+            std::vector<std::string> lines;
+            std::size_t begin = 0;
+            while (begin <= text.size()) {
+                const std::size_t nl = text.find('\n', begin);
+                const std::size_t end = nl == std::string::npos ? text.size() : nl;
+                lines.push_back(text.substr(begin, end - begin));
+                if (nl == std::string::npos) {
+                    break;
+                }
+                begin = nl + 1;
+            }
+            while (!lines.empty() && lines.back().empty()) {
+                lines.pop_back();  // 尾部空行不占摘要
+            }
+            if (lines.size() > 15) {
+                TermOut() << "    …(前面还有 " << (lines.size() - 15) << " 行)\n";
+                lines.erase(lines.begin(), lines.end() - 15);
+            }
+            std::size_t shown = 0;
+            for (const std::string& line : lines) {
+                if (shown + line.size() > 1600) {
+                    TermOut() << "    …(字节帽到这儿,后面的截去)\n";
+                    break;
+                }
+                shown += line.size();
+                TermOut() << "    " << line << "\n";
+            }
+        };
+        print_summary("cmd.plugin.test.stdout", report.stdout_text);
+        print_summary("cmd.plugin.test.stderr", report.stderr_text);
         return;
     }
 

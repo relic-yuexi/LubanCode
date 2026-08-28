@@ -893,4 +893,24 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
     return commands;
 }
 
+std::vector<std::string> FormatSlashCommandListLines() {
+    // 帮助清单的唯一排版口(P3-2):--help 的斜杠命令节与 /help 的正文都打
+    // 这里出的行,与 Tab 补全同一份 AllSlashCommands,名单不许各列各的。
+    const std::vector<SlashCommandInfo>& commands = AllSlashCommands();
+    std::size_t name_width = 0;
+    for (const SlashCommandInfo& command : commands) {
+        name_width = name_width > command.name.size() ? name_width : command.name.size();
+    }
+    std::vector<std::string> lines;
+    lines.reserve(commands.size());
+    for (const SlashCommandInfo& command : commands) {
+        std::string line = "  ";
+        line += command.name;
+        line.append(name_width - command.name.size() + 2, ' ');
+        line += command.description;
+        lines.push_back(std::move(line));
+    }
+    return lines;
+}
+
 }  // namespace lubancode::cli

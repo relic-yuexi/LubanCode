@@ -139,4 +139,39 @@ PluginTrustActionResult UntrustProjectPluginById(const std::filesystem::path& pr
                                                  config::PluginTrustStore* trust,
                                                  const std::string& plugin_id);
 
+// ---------------------------------------------------------------------------
+// /plugin test <id>(P3-1):找 manifest 声明的自测并起进程真跑。
+// 自测的"声明"按 examples 与 scaffold 的共同约定:process 插件目录里同位
+// 的 test_runner.py / test_runner.js / test_runner.mjs / test_runner.cjs 即
+// 自测入口,用 manifest 自己的解释器(runtime.command)起。插件目录里没有
+// 这类文件的,回执明说"未声明自测入口",不装样子。embedded-lua/native
+// 没有自测约定,一律按未声明处理。
+// ---------------------------------------------------------------------------
+
+// 一次自测的执行计划:起哪条命令行、墙钟多少。
+struct PluginSelfTestPlan {
+    std::filesystem::path script;  // test_runner.* 的全路径(canonical 后的插件目录里)
+    std::vector<std::string> argv; // [manifest 的解释器, 脚本 UTF-8 路径]
+    int timeout_ms = 0;            // manifest.timeout_ms 原样;0 = 调用方给缺省
+};
+
+// 未声明自测入口 = nullopt。纯函数,不起进程。
+std::optional<PluginSelfTestPlan> ResolvePluginSelfTest(const PluginManifest& manifest);
+
+// 真跑一回:起进程、等它跑完或超时杀树,交回执行账。stdout/stderr 分开
+// 捕获(原始字节;展示层的摘要与裁剪归命令层)。default_timeout_ms 在
+// manifest.timeout_ms 为 0(显式不设墙)时兜底。
+struct PluginSelfTestReport {
+    bool spawn_failed = false;
+    std::string spawn_error;
+    bool timed_out = false;
+    bool output_truncated = false;
+    unsigned long exit_code = 0;
+    long long elapsed_ms = 0;
+    std::string stdout_text;  // 原始字节(多半是 UTF-8;坏编码原样带出)
+    std::string stderr_text;
+    std::vector<std::string> argv;  // 实际起的命令行(回执亮出来)
+};
+PluginSelfTestReport RunPluginSelfTest(const PluginSelfTestPlan& plan, int default_timeout_ms);
+
 }  // namespace lubancode::runtime

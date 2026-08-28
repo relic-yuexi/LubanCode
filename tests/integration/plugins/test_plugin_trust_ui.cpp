@@ -21,6 +21,7 @@
 #include "hooks/hash.hpp"  // DefinitionHashShort(短指纹口径)
 #include "platform/paths.hpp"
 #include "runtime/plugin_tool.hpp"
+#include "app/tool_runtime.hpp"  // PluginMountInfo
 
 using namespace lubancode;
 using namespace lubancode::runtime;
@@ -277,4 +278,46 @@ TEST_CASE("HandlePluginCommand:trust/untrust 子命令回执照打,用法文案�
     app::HandlePluginCommand("trust trust-ui-probe", {}, {}, std::string(), nullptr);
     out.flush();
     CHECK(out.str().find("信任账不可用") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 命令层:/plugin test 子命令(P3-1)。真跑一路要真解释器,冒烟在真机上
+// 验;这里钉三张回执:未声明自测入口、查无此插件、legacy 无自测约定。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("HandlePluginCommand:test 子命令对未声明自测的插件明说,不装样子") {
+    TempDir project;
+    MakeProjectWithPlugin(project.path);  // plugin.json + helper.py/extra.py:没有 test_runner.*
+    const std::string project_root_utf8 = platform::PathToUtf8(project.path);
+
+    // manifests:不走信任账,直接扫(用户级口径)拿解析好的清单。
+    const auto scan = ScanPluginDirectories(project.path / ".lubancode" / "plugins");
+    REQUIRE(scan.manifests.size() == 1);
+    REQUIRE(scan.manifests[0]->id == "trust-ui-probe");
+
+    std::ostringstream out;
+    std::ostringstream err;
+    lubancode::cli::TermPort().Redirect(&out, &err);
+    struct PortGuard {
+        ~PortGuard() { lubancode::cli::TermPort().Reset(); }
+    } port_guard;
+
+    app::HandlePluginCommand("test trust-ui-probe", {}, scan.manifests, project_root_utf8, nullptr);
+    out.flush();
+    CHECK(out.str().find("该插件未声明自测入口") != std::string::npos);
+    CHECK(out.str().find("test_runner") != std::string::npos);  // 指路约定名
+
+    out.str("");
+    app::HandlePluginCommand("test no-such-plugin", {}, scan.manifests, project_root_utf8, nullptr);
+    out.flush();
+    CHECK(out.str().find("no-such-plugin") != std::string::npos);
+
+    // legacy Lua 挂载账:没有自测约定,也明说。
+    out.str("");
+    const std::vector<app::PluginMountInfo> mounted = {
+        {"plugin__legacy-probe__word_count", "lua"},
+    };
+    app::HandlePluginCommand("test legacy-probe", mounted, scan.manifests, project_root_utf8, nullptr);
+    out.flush();
+    CHECK(out.str().find("没有自测约定") != std::string::npos);
 }

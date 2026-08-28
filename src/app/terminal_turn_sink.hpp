@@ -34,7 +34,9 @@
 #include "runtime/event_sink.hpp"
 
 namespace lubancode::cli {
-class ToolDisplay;
+// ToolDisplay 定义是 struct(cli/tool_display.hpp);前置声明与定义统一,
+// 防 MSVC C4099。
+struct ToolDisplay;
 class StreamBodyTracker;
 class ContextTracker;
 }  // namespace lubancode::cli

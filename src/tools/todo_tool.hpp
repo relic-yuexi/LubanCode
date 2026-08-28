@@ -45,6 +45,12 @@ std::optional<TodoStatus> ParseTodoStatus(const std::string& text);
 // 反过来,状态转回 schema 里那个字符串——测试、以后别处要用同一份映射时复用。
 std::string TodoStatusToString(TodoStatus status);
 
+// 回合收口时若清单里仍有 in_progress 项(P3-4),宿主给模型的提醒行:逐条
+// 列出未收口项,提示更新状态、说明缘由或标待确认。全表没有 in_progress
+// 返回 nullopt(不打扰)。纯函数,注入时机与通道归调用方(turn_runner 在
+// 正常收口的回合把文本经 InjectIncoming 送进双账,模型下一请求看得见)。
+std::optional<std::string> BuildUnclosedTodoReminder(const TodoListState& state);
+
 class TodoWriteTool : public Tool {
 public:
     explicit TodoWriteTool(std::shared_ptr<TodoListState> state) : state_(std::move(state)) {}

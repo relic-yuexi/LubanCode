@@ -1641,7 +1641,13 @@ void HandleContextPressure(const lubancode::agent::ContextPressure& pressure, co
 // ---------------------------------------------------------------------------
 
 void PrintSlashHelp() {
+    // 名单与 --help、Tab 补全同源(P3-2):正文打 cli::FormatSlashCommandListLines()
+    // 生成的行,不再手抄进 i18n 表——手抄那份漏了 /plan /agents /agent。
     TermOut() << tr("slash_help.body");
+    for (const std::string& line : lubancode::cli::FormatSlashCommandListLines()) {
+        TermOut() << line << "\n";
+    }
+    TermOut() << tr("slash_help.keys");
 }
 
 CommandFlow HandleSlashHelp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {

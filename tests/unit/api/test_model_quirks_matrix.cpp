@@ -687,6 +687,13 @@ const T* FindEvent(const std::vector<api::StreamEvent>& events) {
     return nullptr;
 }
 
+// 右值实参一律拒绝(C5 的教训钉成编译错):FindEvent 返回的指针指着实参
+// vector 自己,`FindEvent(parser.Consume(...))` 悬在临时上,真机上就是
+// 0xDD 野内存。纯右值优先绑定右值引用,这份 delete 恰好拦住;要先把
+// Consume(...) 落成具名 vector 再取指针(C2/C5 的样板)。
+template <typename T>
+const T* FindEvent(std::vector<api::StreamEvent>&& events) = delete;
+
 }  // namespace
 
 TEST_CASE("矩阵 C1: anthropic——四字段原账,输入守恒 input+read+creation") {
