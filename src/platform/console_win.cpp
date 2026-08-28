@@ -16,7 +16,8 @@
 //   SetupConsoleUtf8          <- wmain 开头的 SetConsoleOutputCP/SetConsoleCP
 #include "platform/console.hpp"
 
-#include "platform/paths.hpp"  // Utf8ToWide/WideToUtf8:输入侧宽窄转换共用 platform 那份(不许抛)
+#include "platform/paste_burst.hpp"  // ClassifyTextBurst:同批字符折一次粘贴事务的纯判别
+#include "platform/paths.hpp"        // Utf8ToWide/WideToUtf8:输入侧宽窄转换共用 platform 那份(不许抛)
 
 #define WIN32_LEAN_AND_MEAN
 #define NOMINMAX
@@ -320,6 +321,53 @@ std::optional<KeyInput> TryReadNativePasteBurst(const INPUT_RECORD& first) {
     KeyInput out;
     out.kind = KeyInput::Kind::Paste;
     out.text = WideToUtf8(text);
+    return out;
+}
+
+// P2-4 输入重绘风暴的另一半:单行大粘贴(既没有换行、也没有 bracketed
+// 标记,TryReadNativePasteBurst 的形状认不出)会逐字当打字交付,每个字
+// 一轮终端帧。这里在逐键交付前先看一眼:同一时刻排队的一批纯文本攒过
+// 阈值(paste_burst.hpp),整批折成一枚 Paste——一次编辑事务、一轮帧。
+// 前几枚已经当打字交付出去的字符(跨批的粘贴尾巴)由 prior_text 带上,
+// replace_before 交代编辑器把它们原位撤下再并进附件,与 Enter 路的
+// TryFinishClipboardPaste 同一份账。
+//
+// 不越线(正常打字/输入法整词提交)就把吸进来的记录原样还回队列,
+// 只当这一枚没来过,交付路径一字不改。
+std::optional<KeyInput> TryReadCoalescedTextBurst(const INPUT_RECORD& first,
+                                                  const std::wstring& prior_text,
+                                                  std::size_t prior_chars) {
+    std::vector<INPUT_RECORD> tail;
+    INPUT_RECORD record{};
+    while (ReadInputRecord(record, 0)) {
+        tail.push_back(record);
+    }
+
+    std::wstring text;
+    bool saw_newline = false;
+    bool saw_text_after_newline = false;
+    AppendNativePasteKey(first, text, saw_newline, saw_text_after_newline);
+    std::size_t consumed = 0;
+    for (std::size_t i = 0; i < tail.size(); ++i) {
+        if (!AppendNativePasteKey(tail[i], text, saw_newline, saw_text_after_newline)) {
+            break;  // 编辑键来了:只并它前面的文本,其余原样还回
+        }
+        ++consumed;
+    }
+    const TextBurstDecision decision = ClassifyTextBurst(std::move(text));
+    if (!decision.is_paste) {
+        RestoreInputRecords(tail);
+        return std::nullopt;
+    }
+    if (consumed < tail.size()) {
+        RestoreInputRecords(
+            std::vector<INPUT_RECORD>(tail.begin() + static_cast<std::ptrdiff_t>(consumed), tail.end()));
+    }
+
+    KeyInput out;
+    out.kind = KeyInput::Kind::Paste;
+    out.text = WideToUtf8(NormalizeNewlines(prior_text + decision.text));
+    out.replace_before = prior_chars;
     return out;
 }
 
@@ -742,10 +790,32 @@ std::optional<KeyInput> KeyReader::ReadOne() {
         out.alt = true;
     } else if (ke.uChar.UnicodeChar != 0 && !ctrl) {
         const wchar_t wc = ke.uChar.UnicodeChar;
+        if (wc == 0x1b) {
+            // 裸 0x1b 字符事件(ConPTY 某些形状不给 VK_ESCAPE):先按
+            // bracketed paste 的开头探一遍,标记字符紧跟着就到;探不到,
+            // 它就是一枚普通的 Esc 键。旧路把 0x1b 静默丢弃,后面的
+            // "[200~"便逐字漏进编辑器——正是实测里"标记也被逐字渲染"
+            // 的病根。
+            if (auto paste = TryReadBracketedPaste(); paste.has_value()) {
+                reset_text_run();
+                pending_high_surrogate_.reset();
+                return paste;
+            }
+            reset_text_run();
+            pending_high_surrogate_.reset();
+            out.kind = KeyInput::Kind::Esc;
+            return out;
+        }
         constexpr ULONGLONG kRapidTextGapMs = 50;
         const ULONGLONG now = GetTickCount64();
         if (!rapid_text_run_.empty() && now - last_text_tick_ > kRapidTextGapMs) {
             reset_text_run();
+        }
+        if (auto burst = TryReadCoalescedTextBurst(record, rapid_text_run_, rapid_char_count_);
+            burst.has_value()) {
+            reset_text_run();
+            pending_high_surrogate_.reset();
+            return burst;
         }
         rapid_text_run_.push_back(wc);
         last_text_tick_ = now;

@@ -154,6 +154,69 @@ void SendTerminalPasteBatch(const std::wstring& text) {
     WriteConsoleInputW(g_in, records.data(), static_cast<DWORD>(records.size()), &written);
 }
 
+
+// ---- P2-4 帧账审计的家伙什:LUBANCODE_FRAME_AUDIT=1 的子进程把
+// [frame-audit] 行落进 stderr;stderr 改道到文件,结束后解析。 ----
+
+std::wstring g_audit_path;
+
+bool StartAuditChild(const wchar_t* exe, const wchar_t* workdir, const wchar_t* audit_path,
+                     STARTUPINFOW* si, PROCESS_INFORMATION* pi) {
+    DeleteFileW(audit_path);
+    SECURITY_ATTRIBUTES inheritable{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    HANDLE err_file = CreateFileW(audit_path, GENERIC_WRITE, FILE_SHARE_READ, &inheritable,
+                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (err_file == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    SetEnvironmentVariableW(L"LUBANCODE_FRAME_AUDIT", L"1");
+    si->cb = sizeof(*si);
+    si->dwFlags = STARTF_USESTDHANDLES;
+    si->hStdInput = g_in;
+    si->hStdOutput = g_out;
+    si->hStdError = err_file;
+    std::wstring command = L"\"" + std::wstring(exe) + L"\"";
+    const bool ok = CreateProcessW(exe, command.data(), nullptr, nullptr, TRUE, 0, nullptr, workdir, si, pi) != 0;
+    SetEnvironmentVariableW(L"LUBANCODE_FRAME_AUDIT", nullptr);
+    CloseHandle(err_file);  // 子进程已继承,自家的这份收掉
+    return ok;
+}
+
+std::string ReadAuditFile(const wchar_t* audit_path) {
+    HANDLE file = CreateFileW(audit_path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return {};
+    }
+    std::string out;
+    char buf[4096];
+    DWORD read = 0;
+    while (ReadFile(file, buf, sizeof(buf), &read, nullptr) && read > 0) {
+        out.append(buf, read);
+    }
+    CloseHandle(file);
+    return out;
+}
+
+// 从审计文本里抽第 last 个 "idle_composer frames=N bytes=M" 的 N/M;没有返回 -1。
+bool ParseAuditLine(const std::string& audit, const std::string& tag, long long* frames, long long* bytes) {
+    std::size_t at = audit.rfind("[frame-audit] " + tag);
+    if (at == std::string::npos) {
+        return false;
+    }
+    const std::size_t nl = audit.find('\n', at);
+    const std::string line = audit.substr(at, nl == std::string::npos ? std::string::npos : nl - at);
+    const auto field = [&line](const char* key) -> long long {
+        const std::size_t k = line.find(key);
+        if (k == std::string::npos) {
+            return -1;
+        }
+        return atoll(line.c_str() + k + std::string(key).size());
+    };
+    *frames = field("frames=");
+    *bytes = field("bytes=");
+    return *frames >= 0;
+}
+
 std::optional<std::wstring> ReadClipboardText() {
     if (OpenClipboard(nullptr) == FALSE) {
         return std::nullopt;
@@ -202,6 +265,31 @@ bool SetClipboardText(const std::wstring& text) {
     }
     CloseClipboard();
     return true;  // SetClipboardData 成功后由系统接管 memory
+}
+
+// 一次粘贴的真实形状:整批字符一枚 WriteConsoleInputW 全部进队。控制台
+// 输入缓冲若一口吃不下,循环补齐,批间不加延时——单行大粘贴在 ConPTY
+// 上就是这样一口气到的。
+void SendTextBatchAllAtOnce(const std::wstring& text) {
+    std::vector<INPUT_RECORD> records;
+    records.reserve(text.size() * 2);
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        AppendKeyRecord(records, true, 0, text[i]);
+        AppendKeyRecord(records, false, 0, text[i]);
+    }
+    std::size_t sent = 0;
+    while (sent < records.size()) {
+        DWORD written = 0;
+        if (!WriteConsoleInputW(g_in, records.data() + sent,
+                                static_cast<DWORD>(records.size() - sent), &written)) {
+            return;
+        }
+        if (written == 0) {
+            Sleep(5);
+            continue;
+        }
+        sent += written;
+    }
 }
 
 }  // namespace
@@ -323,6 +411,92 @@ int wmain(int argc, wchar_t** argv) {
         WaitForSingleObject(process.hProcess, 5000);
     }
     CloseHandle(process.hProcess);
+    // ---- P2-4 帧账审计幕:第二个子进程带 LUBANCODE_FRAME_AUDIT=1,
+    // stderr 改道进文件。两桩账:一万字中文粘贴的帧数帽;终端把 bracketed
+    // 标记拆成裸字符投递时不再漏成正文。 ----
+    {
+        const std::wstring audit_path = std::wstring(argv[3]) + L".audit";
+        STARTUPINFOW si2{};
+        PROCESS_INFORMATION pi2{};
+        if (StartAuditChild(argv[1], argv[2], audit_path.c_str(), &si2, &pi2)) {
+            CloseHandle(pi2.hThread);
+            Check(WaitForAny({L"shift+tab"}, 30000), "audit child: composer ready");
+            Sleep(300);
+
+            // 账一:ESC 以裸字符事件(VK=0)投,标记跟着逐字符到——旧路把
+            // 0x1b 静默丢弃,"[200~"便逐字漏进编辑器。
+            SendKey(VK_ESCAPE, 0x1b);  // 空输入框上 Ctrl+C 是退出,清场用 Esc
+            Sleep(200);
+            SendKey(0, 0x1b);
+            SendText(L"[200~标记剥离");
+            SendKey(0, 0x1b);
+            SendText(L"[201~");
+            Check(WaitForAny({L"标记剥离"}, 5000), "bare-ESC bracketed paste: 正文进编辑器");
+            Check(!ScreenContains(L"[200~") && !ScreenContains(L"[201~"),
+                  "bare-ESC bracketed paste: 标记一个字都不漏成正文");
+
+            // 账二:一万字中文单行粘贴。单行没换行也没标记,旧路逐字当
+            // 打字交付,每个字一轮终端帧;一次粘贴须收成一次编辑事务
+            // (占位符),整场 ReadLine 的帧数有帽。分批投递模拟 ConPTY
+            // 拆批:批与批之间的 Paste 事件在编辑器里并成同一枚附件。
+            SendKey(VK_ESCAPE, 0x1b);  // 清掉上一幕的正文(空框上 Ctrl+C 会退出)
+            Sleep(200);
+            std::wstring big;
+            for (int i = 0; i < 10000; ++i) {
+                big += L"万字中文"[static_cast<std::size_t>(i % 4)];
+            }
+            SendTextBatchAllAtOnce(big);
+            Check(WaitForAny({L"[Pasted Content 10000 chars]", L"[粘贴内容 10000 字符]"}, 8000),
+                  "10000-char paste collapses to one placeholder (single edit transaction)");
+
+            // 收场:清掉占位符再 exit(Esc 清输入),ReadLine 返回,帧账落 stderr。
+            SendKey(VK_ESCAPE, 0x1b);
+            Sleep(200);
+            SendText(L"exit");
+            SendKey(VK_RETURN, L'');
+            WaitForSingleObject(pi2.hProcess, 15000);
+            DWORD audit_exit = STILL_ACTIVE;
+            GetExitCodeProcess(pi2.hProcess, &audit_exit);
+            Check(audit_exit == 0, "audit child exits cleanly");
+            if (audit_exit == STILL_ACTIVE) {
+                TerminateProcess(pi2.hProcess, 3);
+                WaitForSingleObject(pi2.hProcess, 5000);
+            }
+            CloseHandle(pi2.hProcess);
+
+            long long frames = -1;
+            long long bytes = -1;
+            const std::string audit = ReadAuditFile(audit_path.c_str());
+            const bool parsed = ParseAuditLine(audit, "idle_composer", &frames, &bytes);
+            Check(parsed, "frame audit line present in stderr log");
+            if (!parsed) {
+                g_report << "INFO: audit file bytes=" << audit.size() << " head=[" << audit.substr(0, 200)
+                         << "]" << std::endl;
+            }
+            if (parsed) {
+                // 帽:一万字粘贴 + 前后键入,帧数以百计都算过;旧路是一万
+                // 帧起(每字一轮)。字节同帽(约几万,旧路百万级)。
+                Check(frames <= 160, "10000-char paste: whole ReadLine draws at most 160 frames (got " +
+                                          std::to_string(frames) + ")");
+                Check(bytes <= 512 * 1024, "10000-char paste: written bytes capped (got " +
+                                               std::to_string(bytes) + ")");
+                g_report << "INFO: frame audit idle_composer frames=" << frames
+                         << " bytes=" << bytes << "\n";
+            }
+            // 光标终位:子进程退场后控制台光标仍在缓冲区界内。
+            CONSOLE_SCREEN_BUFFER_INFO after{};
+            if (GetConsoleScreenBufferInfo(g_out, &after)) {
+                Check(after.dwCursorPosition.X >= 0 && after.dwCursorPosition.Y >= 0,
+                      "cursor lands inside the buffer after paste session");
+            }
+            if (parsed) {
+                DeleteFileW(audit_path.c_str());
+            }
+        } else {
+            Check(false, "audit child CreateProcess failed");
+        }
+    }
+
     g_report << "RESULT: " << (g_failures == 0 ? "ALL PASS" : "FAIL") << "\n";
     return g_failures == 0 ? 0 : 1;
 }
