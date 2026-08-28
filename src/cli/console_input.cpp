@@ -2991,11 +2991,39 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
     const bool panel_has_separator =
         question_panel && options.separator_before_index.has_value() &&
         *options.separator_before_index > 0 && *options.separator_before_index < items.size();
+    // 问话多行化:折行要屏宽,menu_rows 又得先于 EnsureStreamScreenRowsLocked
+    // 算出来——先探一次屏面做预算(探不到按 80 列/24 行保守折),问话预折成
+    // question_lines,行数自此定死。draw 每次重画只描这份预折结果,不现折;
+    // 窗口中途改宽不重折(整单菜单本就不响应改宽),重画时按当前屏宽再截
+    // 一刀,防预折行溢出把下方行账折乱。
+    std::vector<std::string> question_lines;
+    if (question_panel) {
+        int panel_width = 80;
+        int panel_height = 24;
+        const std::optional<platform::ScreenInfo> probe = platform::GetScreenInfo();
+        if (probe.has_value()) {
+            if (probe->width > 0) {
+                panel_width = probe->width;
+            }
+            const int visible_rows =
+                probe->viewport_height > 0 ? probe->viewport_height : probe->height;
+            if (visible_rows > 0) {
+                panel_height = visible_rows;
+            }
+        }
+        // 问话行帽:可视屏高的一半,3 行起步、12 行封顶。问话再长也不能把
+        // 选项区挤没了;超帽截断,末行带省略号标记,全文用户仍可从上方
+        // 事件账/非交互路径看。
+        const int question_cap = (std::min)(12, (std::max)(3, panel_height / 2));
+        question_lines = WrapUtf8ToDisplayWidthCapped(options.question_panel->question,
+                                                      (std::max)(1, panel_width - 1), question_cap);
+    }
     int menu_rows = static_cast<int>(items.size()) + 1;
     if (question_panel) {
-        // 顶横线、问题、两处留白、选项与 hint；有题头、有说明或动作分隔线
-        // 时再各加一行。没有动作分隔线的普通问题面板补一根底横线。
-        menu_rows = 5 + static_cast<int>(items.size());
+        // 顶横线、问话(折行后占 question_lines.size() 行)、两处留白、选项
+        // 与 hint；有题头、有说明或动作分隔线时再各加一行。没有动作分隔线
+        // 的普通问题面板补一根底横线。
+        menu_rows = 4 + static_cast<int>(question_lines.size()) + static_cast<int>(items.size());
         if (!options.question_panel->header.empty()) {
             menu_rows += 2;  // 题头 + 题头后的留白
         }
@@ -3042,9 +3070,12 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
                 platform::ClearRowHardFrom(0, start_row + row, width);
                 ++row;
             }
-            platform::ClearRowHardFrom(0, start_row + row, width);
-            platform::SetCursorPos(0, start_row + row++);
-            TermOut() << TruncateUtf8ToDisplayWidth(options.question_panel->question, width - 1);
+            // 问话逐行描;行是起手屏宽预折的,这里按当前屏宽兜底截一刀
+            for (const std::string& question_line : question_lines) {
+                platform::ClearRowHardFrom(0, start_row + row, width);
+                platform::SetCursorPos(0, start_row + row++);
+                TermOut() << TruncateUtf8ToDisplayWidth(question_line, width - 1);
+            }
             platform::ClearRowHardFrom(0, start_row + row, width);
             ++row;
         }

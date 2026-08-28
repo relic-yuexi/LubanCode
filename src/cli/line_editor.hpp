@@ -163,6 +163,14 @@ std::vector<std::u32string> WrapToDisplayWidth(const std::u32string& text, int m
 // 字节"处理,同 TruncateUtf8ToDisplayWidth。
 std::vector<std::string> WrapUtf8ToDisplayWidth(const std::string& utf8, int max_width);
 
+// 折完再限帽:行数超过 max_lines 就只留前 max_lines 行,末行先截短(给标记
+// 留足宽度)再尾补 " …" 省略号标记——标记必可见,不会被挤掉。空文本折完
+// 保底一行空串,调用方面板照画一行,与单行时代口径一致;max_lines <= 0 当
+// 1。问话面板多行化(0.26.80)用:问话再长也有帽,帽外全文仍可从事件账/
+// 非交互路径看。
+std::vector<std::string> WrapUtf8ToDisplayWidthCapped(const std::string& utf8, int max_width,
+                                                      int max_lines);
+
 // 编辑行超宽时的可视窗口:保证光标所在列落在窗口内,绝不让编辑行折行。
 // content_width <= 0 时给空窗口。取舍见 console_input.cpp 里调用处的注释——
 // 每帧独立按当前光标位置重算窗口,不跨帧持久化滚动偏移。
