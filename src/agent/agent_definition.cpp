@@ -381,11 +381,21 @@ AgentDefinitionParseResult ParseAgentDefinitionYaml(const std::string& yaml_text
         }
     }
 
-    // ---- permissions ----
+    // ---- permissions(契约 4.9:mode 只认 inherit/confirm/auto/yolo) ----
+    // read_only 不进首版——只读由 tools.allow 白名单表达(Explore 即此做法),
+    // 单独点名指路,别让人猜;其余认不得的值走通用枚举错(agent.bad_enum)。
     if (const YAML::Node permissions = MapField(root, "permissions", issues, &has_error); permissions) {
         has_error = !CheckUnknownFields(permissions, "permissions.", {"mode"}, issues) || has_error;
-        if (!EnumField(permissions, "mode", "permissions.", {"inherit", "read_only"}, def.permissions_mode,
-                       issues)) {
+        const YAML::Node mode = permissions["mode"];
+        if (mode && mode.IsScalar() && mode.Scalar() == "read_only") {
+            const YAML::Mark mark = mode.Mark();
+            issues.push_back(AgentDefinitionIssue{
+                "permissions.mode",
+                "认不得的值 \"read_only\"(只收 inherit / confirm / auto / yolo);只读限制用 tools.allow 白名单表达",
+                mark.line + 1, mark.column + 1, false});
+            has_error = true;
+        } else if (!EnumField(permissions, "mode", "permissions.", {"inherit", "confirm", "auto", "yolo"},
+                              def.permissions_mode, issues)) {
             has_error = true;
         }
     }

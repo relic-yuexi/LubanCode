@@ -1,0 +1,7 @@
+# permissions.mode 正例之二:confirm(写操作先问人)。
+schema: 1
+name: perm-confirm
+description: 权限档正例:confirm,动手前先请示。
+
+permissions:
+  mode: confirm

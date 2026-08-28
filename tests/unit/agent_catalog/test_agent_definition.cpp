@@ -75,7 +75,7 @@ runtime:
   isolation: none
 
 permissions:
-  mode: read_only
+  mode: confirm
 )yaml";
     const auto result = agent::ParseAgentDefinitionYaml(yaml, "browser-tester.yaml");
     REQUIRE(result.definition.has_value());
@@ -99,7 +99,7 @@ permissions:
     CHECK(*def.max_steps_per_turn == 24);
     CHECK(def.execution_mode == "auto");
     CHECK(def.isolation == "none");
-    CHECK(def.permissions_mode == "read_only");
+    CHECK(def.permissions_mode == "confirm");
 }
 
 TEST_CASE("最小合法 YAML:三样必填之外全走默认(继承)") {
@@ -216,6 +216,31 @@ TEST_CASE("枚举认不得:prompt.soul=on 报错并列出只收的值") {
         if (issue.field == "prompt.soul") {
             CHECK(issue.message.find("inherit") != std::string::npos);
             CHECK(issue.message.find("off") != std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("permissions.mode:契约四值各过,read_only 报错并指路 tools.allow") {
+    // 契约 4.9:mode 只认 inherit/confirm/auto/yolo,四值各解析成自己。
+    for (const char* mode : {"inherit", "confirm", "auto", "yolo"}) {
+        const std::string yaml =
+            std::string("schema: 1\nname: a\ndescription: d\npermissions:\n  mode: ") + mode + "\n";
+        const auto result = agent::ParseAgentDefinitionYaml(yaml, "a.yaml");
+        REQUIRE(result.definition.has_value());
+        CHECK(result.issues.empty());
+        CHECK(result.definition->permissions_mode == mode);
+    }
+
+    // read_only 不进首版:报 agent.bad_enum 一路的错,文案点名 tools.allow。
+    const auto rejected = agent::ParseAgentDefinitionYaml(
+        "schema: 1\nname: a\ndescription: d\npermissions:\n  mode: read_only\n", "a.yaml");
+    CHECK_FALSE(rejected.definition.has_value());
+    REQUIRE(HasIssueOn(rejected, "permissions.mode"));
+    for (const auto& issue : rejected.issues) {
+        if (issue.field == "permissions.mode") {
+            CHECK(issue.line == 5);
+            CHECK(issue.message.find("read_only") != std::string::npos);
+            CHECK(issue.message.find("tools.allow") != std::string::npos);
         }
     }
 }

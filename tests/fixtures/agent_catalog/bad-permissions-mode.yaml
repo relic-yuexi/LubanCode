@@ -1,0 +1,8 @@
+# 反例:permissions.mode 写 read_only(契约 4.9 明言不进首版)。
+# 只读限制用 tools.allow 白名单表达;诊断文案须指这条路。
+schema: 1
+name: bad-permissions-mode
+description: permissions.mode 用了已裁掉的 read_only 档。
+
+permissions:
+  mode: read_only

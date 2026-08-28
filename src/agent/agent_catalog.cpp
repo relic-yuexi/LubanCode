@@ -192,9 +192,9 @@ AgentDefinition BuiltinExploreDefinition() {
     def.name = "Explore";  // 名称先保留(单子"兼容与发布"),带大写、不过 kebab-case 闸
     def.description = "快速搜索、阅读并分析代码库的只读代理;不改文件,结论带具体文件位置。";
     // allow 表如实记 AgentTool::ExploreAllows 放行的那五枚(阶段 1 只登账,
-    // 不接线,运行时的只读仍由 Explore 专用工具表管)。
+    // 不接线,运行时的只读仍由 Explore 专用工具表管)。只读不另设权限档
+    // (契约 4.9:read_only 不进首版,permissions.mode 只认四值,默认 inherit)。
     def.tools.allow = {"read_file", "search", "web_fetch", "web_search", "lsp"};
-    def.permissions_mode = "read_only";
     return def;
 }
 
