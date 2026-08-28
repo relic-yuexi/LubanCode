@@ -55,6 +55,18 @@ def error_code(response: dict) -> str:
     return response["error"]["code"]
 
 
+def decode_png_pixels(data: bytes) -> tuple[int, int, list[bytes]]:
+    """解本插件自己编码的 PNG(IHDR 定尺寸、单段 IDAT、filter 0),回
+    (width, height, rgb_rows)。region/降采样测试靠它逐像素对账。"""
+    width, height = struct.unpack(">II", data[16:24])
+    idat_start = data.find(b"IDAT") + 4
+    idat_end = idat_start + struct.unpack(">I", data[idat_start - 4:idat_start])[0]
+    raw = zlib.decompress(data[idat_start:idat_end])
+    stride = width * 3 + 1  # 行首 filter 字节
+    rows = [raw[y * stride + 1:(y + 1) * stride] for y in range(height)]
+    return width, height, rows
+
+
 class ProtocolTest(unittest.TestCase):
     """协议帧形状:call_id 回显、ok 真、content 是 text,错误码稳定。"""
 
@@ -301,6 +313,190 @@ class ScreenshotTest(unittest.TestCase):
         self.assertEqual(error_code(call(backend, "gui_screenshot",
                                          {"target": "window", "window_id": WINDOW})),
                          "window_minimized")
+
+    def test_small_fullshot_not_downscaled(self):
+        """小图(长边≤1568)原样回:capture_size 与 image 同尺寸。"""
+        with tempfile.TemporaryDirectory() as temp:
+            response = call(make_backend(), "gui_screenshot",
+                            {"target": "window", "window_id": WINDOW,
+                             "artifact_dir": temp})
+            observation = response["structured"]
+            self.assertFalse(observation["downscaled"])
+            self.assertEqual(observation["capture_size"], [3, 2])
+            self.assertEqual(observation["image"]["width"], 3)
+            self.assertEqual(observation["image"]["height"], 2)
+
+
+class RegionCropTest(unittest.TestCase):
+    """region 裁切:原像素回喂、位置逐像素对账、越界/空区明拒、
+    target=window 按客户区原点换算。FakeBackend 开位置编码画布
+    (B=0x40,G=vy&0xFF,R=vx&0xFF),解出 PNG 每枚像素都能反查坐标。"""
+
+    def make_positional(self) -> FakeBackend:
+        backend = make_backend()
+        backend.positional_pixels = True
+        return backend
+
+    def test_window_region_original_pixels_and_position(self):
+        with tempfile.TemporaryDirectory() as temp:
+            backend = self.make_positional()
+            # client_origin=[108,112],客户区 460x308:裁图内 (130,88) 起 64x48。
+            region = [108 + 130, 112 + 88, 64, 48]
+            response = call(backend, "gui_screenshot",
+                            {"target": "window", "window_id": WINDOW,
+                             "region": region, "artifact_dir": temp})
+            self.assertTrue(response["ok"])
+            observation = response["structured"]
+            self.assertEqual(observation["region"], region)
+            self.assertEqual(observation["region_in_image"], [130, 88, 64, 48])
+            self.assertEqual(observation["capture_size"], [460, 308])
+            self.assertFalse(observation["downscaled"])
+            self.assertEqual(observation["image"]["width"], 64)
+            self.assertEqual(observation["image"]["height"], 48)
+            with open(observation["image"]["path"], "rb") as handle:
+                data = handle.read()
+            width, height, rows = decode_png_pixels(data)
+            self.assertEqual((width, height), (64, 48))
+            # 角像素对账:左上 (vx&0xFF, vy&0xFF, 0x40),右下同式——
+            # 裁切没挪一像素,这就是"无损放大"。
+            self.assertEqual(rows[0][0:3],
+                             bytes((region[0] & 0xFF, region[1] & 0xFF, 0x40)))
+            self.assertEqual(rows[height - 1][(width - 1) * 3:width * 3],
+                             bytes(((region[0] + 63) & 0xFF,
+                                    (region[1] + 47) & 0xFF, 0x40)))
+            # 回执教模型把局部摆回全图、按原图坐标换算点击位
+            text = response["content"][0]["text"]
+            self.assertIn("原始分辨率", text)
+            self.assertIn(f"({region[0]}+px, {region[1]}+py)", text)
+
+    def test_screen_region_captures_exactly_the_rect(self):
+        with tempfile.TemporaryDirectory() as temp:
+            backend = self.make_positional()
+            region = [-1920 + 40, 100, 32, 24]  # 多屏负原点区照裁
+            response = call(backend, "gui_screenshot",
+                            {"target": "screen", "region": region,
+                             "artifact_dir": temp})
+            self.assertTrue(response["ok"])
+            observation = response["structured"]
+            self.assertEqual(observation["region"], region)
+            self.assertEqual(observation["region_in_image"], [40, 100, 32, 24])
+            self.assertEqual(observation["image"]["width"], 32)
+            self.assertEqual(observation["image"]["height"], 24)
+            # 后端按区域直拍(不是全屏拍完再裁)
+            self.assertIn("screenshot_screen([-1880, 100, -1848, 124])",
+                          backend.calls)
+            with open(observation["image"]["path"], "rb") as handle:
+                data = handle.read()
+            _, _, rows = decode_png_pixels(data)
+            self.assertEqual(rows[0][0:3],
+                             bytes((region[0] & 0xFF, region[1] & 0xFF, 0x40)))
+
+    def test_window_region_out_of_client_rejected_before_capture(self):
+        backend = self.make_positional()
+        # 客户区在 virtual [108,112]-[568,420];这两个区都在外头。
+        for region in ([0, 0, 50, 50],           # 左上越界(把标题栏当客户区了)
+                       [108, 112, 461, 10],      # 右缘探出一像素
+                       [560, 400, 20, 30]):      # 右下整个在外
+            with self.subTest(region=region):
+                response = call(backend, "gui_screenshot",
+                                {"target": "window", "window_id": WINDOW,
+                                 "region": region})
+                self.assertEqual(error_code(response), "region_out_of_range")
+                # 拒在拍摄前:一枚 BitBlt 都没发生
+                self.assertEqual(backend.calls, [])
+                self.assertIn("客户区", response["error"]["message"])
+
+    def test_screen_region_out_of_virtual_rejected(self):
+        backend = self.make_positional()
+        for region in ([2560 - 10, 0, 20, 5],    # 右缘探出
+                       [-1980, 0, 50, 50]):      # 左屏外头
+            with self.subTest(region=region):
+                self.assertEqual(error_code(call(backend, "gui_screenshot",
+                                                 {"target": "screen",
+                                                  "region": region})),
+                                 "region_out_of_range")
+
+    def test_region_shape_and_emptiness_rejected(self):
+        backend = self.make_positional()
+        for region in ([108, 112, 0, 10],        # 零宽
+                       [108, 112, 10, -5],       # 负高
+                       [108, 112, 10],           # 三个数
+                       [108, 112, 10, 10, 10],   # 五个数
+                       [108, 112, 10.5, 10],     # 浮点
+                       [108, 112, True, 10],     # 布尔冒充整数
+                       "108,112,10,10"):         # 字符串
+            with self.subTest(region=region):
+                self.assertEqual(error_code(call(backend, "gui_screenshot",
+                                                 {"target": "window",
+                                                  "window_id": WINDOW,
+                                                  "region": region})),
+                                 "invalid_arguments")
+
+
+class DownscaleTest(unittest.TestCase):
+    """1568 长边帽:整幅超帽近邻压到 1568(认布局够用);region 局部
+    不走帽(原像素放大看细节)。两条规矩是一对,测就成对测。"""
+
+    BIG = "0x00C0FFEE"
+
+    def make_big_window(self) -> FakeBackend:
+        backend = FakeBackend()
+        backend.positional_pixels = True
+        # rect 2000x960 → 客户区 1980x908(长边 1980 > 1568)
+        backend.add_window(self.BIG, "Big Window", [200, 100, 2200, 1060],
+                           client_origin=[210, 140])
+        return backend
+
+    def test_fullshot_over_cap_downscaled_to_1568(self):
+        with tempfile.TemporaryDirectory() as temp:
+            backend = self.make_big_window()
+            response = call(backend, "gui_screenshot",
+                            {"target": "window", "window_id": self.BIG,
+                             "artifact_dir": temp})
+            self.assertTrue(response["ok"])
+            observation = response["structured"]
+            self.assertTrue(observation["downscaled"])
+            self.assertEqual(observation["capture_size"], [1980, 908])
+            self.assertEqual(observation["image"]["width"], 1568)
+            self.assertEqual(observation["image"]["height"], 719)
+            scale = observation["image_pixel_scale"]
+            self.assertAlmostEqual(scale[0], 1980 / 1568, places=3)
+            self.assertAlmostEqual(scale[1], 908 / 719, places=3)
+            text = response["content"][0]["text"]
+            self.assertIn("1568", text)
+            self.assertIn("region", text)  # 文案教模型:看不清就裁局部
+
+    def test_region_bypasses_cap_original_pixels(self):
+        with tempfile.TemporaryDirectory() as temp:
+            backend = self.make_big_window()
+            region = [210 + 100, 140 + 80, 300, 200]
+            response = call(backend, "gui_screenshot",
+                            {"target": "window", "window_id": self.BIG,
+                             "region": region, "artifact_dir": temp})
+            self.assertTrue(response["ok"])
+            observation = response["structured"]
+            self.assertFalse(observation["downscaled"])
+            self.assertEqual(observation["image"]["width"], 300)
+            self.assertEqual(observation["image"]["height"], 200)
+            with open(observation["image"]["path"], "rb") as handle:
+                data = handle.read()
+            width, height, rows = decode_png_pixels(data)
+            self.assertEqual((width, height), (300, 200))
+            self.assertEqual(rows[0][0:3],
+                             bytes((region[0] & 0xFF, region[1] & 0xFF, 0x40)))
+
+    def test_screen_fullshot_over_cap_downscaled(self):
+        with tempfile.TemporaryDirectory() as temp:
+            backend = self.make_big_window()
+            backend.virtual = [0, 0, 2000, 1000]
+            response = call(backend, "gui_screenshot",
+                            {"target": "screen", "artifact_dir": temp})
+            self.assertTrue(response["ok"])
+            observation = response["structured"]
+            self.assertTrue(observation["downscaled"])
+            self.assertEqual(observation["capture_size"], [2000, 1000])
+            self.assertEqual(observation["image"]["width"], 1568)
+            self.assertEqual(observation["image"]["height"], 784)
 
 
 class SnapshotTest(unittest.TestCase):

@@ -355,9 +355,12 @@ class Win32Backend:
                                        ctypes.byref(header), DIB_RGB_COLORS)
         if fetched != height:
             raise OSError(f"GetDIBits 只取回 {fetched}/{height} 行")
+        # buffer.raw 每取一次就整块拷贝一回(3072x1920 的屏是 17MB,
+        # 在循环里取 1920 次等于拷几十 GB)——出循环,只拷这一回。
+        raw = buffer.raw
         rows = []
         for index in range(height):
-            row = buffer.raw[index * stride:(index + 1) * stride]
+            row = raw[index * stride:(index + 1) * stride]
             rows.append(row[:width * 3])  # 去掉对齐垫字节
         return rows
 
@@ -437,9 +440,25 @@ class FakeBackend:
         self.virtual = [-1920, 0, 2560, 1440]
         self.monitors = 2
         self.screenshot_pixels = (3, 2, [b"\x10\x20\x30" * 3, b"\x40\x50\x60" * 3])
+        # 位置编码画布开关:开了之后截图不再回固定 3x2,而是按拍摄区逐像素
+        # 生成 B=0x40、G=vy&0xFF、R=vx&0xFF 的画布——test_runner 靠它对账
+        # "裁切的位置对不对、降采样压没压局部":解码 PNG 后每枚像素都能
+        # 反查出它该在全图哪里。
+        self.positional_pixels = False
         # 假 UIA 树:set_uia_tree 预置嵌套节点(control_type/name/rect/children),
         # snapshot_tree 与真后端走同一套折叠规则与帽子——离线单测不碰真 COM。
         self.uia_trees: dict[str, list[dict]] = {}
+
+    def _positional_rows(self, left: int, top: int, width: int,
+                         height: int) -> tuple[int, int, list[bytes]]:
+        base_template = bytearray(
+            b"".join(bytes((0x40, 0, (left + x) & 0xFF)) for x in range(256)))
+        rows = []
+        for y in range(height):
+            base = bytearray(base_template)
+            base[1::3] = bytes([(top + y) & 0xFF] * 256)
+            rows.append(bytes(base * (width // 256 + 1))[0:width * 3])
+        return width, height, rows
 
     def add_window(self, window_id: str, title: str, rect: list[int], *,
                    process_name: str = "fake.exe", minimized: bool = False,
@@ -515,11 +534,19 @@ class FakeBackend:
         if info["minimized"]:
             raise OSError("window_minimized")
         self.calls.append(f"screenshot_window({window_id})")
+        if self.positional_pixels:
+            origin = info["client_origin"]
+            size = info["client_size"]
+            return self._positional_rows(origin[0], origin[1], size[0], size[1])
         width, height, rows = self.screenshot_pixels
         return width, height, rows
 
     def screenshot_screen(self, rect: list[int]) -> tuple[int, int, list[bytes]]:
         self.calls.append(f"screenshot_screen({rect})")
+        if self.positional_pixels:
+            width = rect[2] - rect[0]
+            height = rect[3] - rect[1]
+            return self._positional_rows(rect[0], rect[1], width, height)
         width, height, rows = self.screenshot_pixels
         return width, height, rows
 

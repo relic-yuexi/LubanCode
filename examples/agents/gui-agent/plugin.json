@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "id": "gui-agent-example",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "language": "python",
   "runtime": {
     "kind": "process",
@@ -47,7 +47,7 @@
     },
     {
       "name": "gui_screenshot",
-      "description": "截图并把 PNG 随结果回喂模型(协议 v2 image 块,模型直接看见画面),同时落证据文件、返回 observation(窗口矩形、客户区尺寸、DPI、虚拟原点、图片 sha256 与路径)。默认 target=window 只拍目标窗口,少碰无关隐私;target=screen 拍全部显示器。最小化窗口拒绝。动作工具带 expected_window_rect 引用本次 observation 的矩形可防坐标过期。",
+      "description": "截图并把 PNG 随结果回喂模型(协议 v2 image 块,模型直接看见画面),同时落证据文件、返回 observation(窗口矩形、客户区原点与尺寸、DPI、虚拟原点、图片 sha256 与路径)。默认 target=window 只拍目标窗口,少碰无关隐私;target=screen 拍全部显示器。整幅图长边超 1568 自动降采样省 token(看布局够用);带 region 裁局部则回原始分辨率、不降采样——看小字/放大专用,裁切即无损放大,回执带区域在全图的位置与像素到 virtual_screen 的换算。最小化窗口拒绝。动作工具带 expected_window_rect 引用本次 observation 的矩形可防坐标过期。",
       "input_schema": {
         "type": "object",
         "properties": {
@@ -57,6 +57,13 @@
             "description": "window=离屏抓目标窗口(默认,遮挡也能抓);screen=拍整块虚拟屏(注意隐私)"
           },
           "window_id": {"type": "string", "description": "target=window 必填"},
+          "region": {
+            "type": "array",
+            "items": {"type": "integer"},
+            "minItems": 4,
+            "maxItems": 4,
+            "description": "可选;裁切区 [x,y,w,h],virtual_screen 物理像素(与 gui_snapshot 的 rect 同口径;target=window 时原点是 observation 的 client_origin)。只回该区域的原始分辨率图,不走 1568 帽——看不清就裁局部放大"
+          },
           "artifact_dir": {"type": "string", "description": "可选;截图落盘目录,缺省走 LUBANCODE_GUI_EVIDENCE_DIR 或系统临时目录"}
         },
         "additionalProperties": false
@@ -82,7 +89,7 @@
     },
     {
       "name": "gui_move_mouse",
-      "description": "只移动鼠标,不点击。坐标口径 coordinate_space:virtual_screen=全桌面物理像素(多屏联合,可含负坐标,默认);window_client=目标窗口客户区坐标,执行前换算。越界拒绝。低风险动作。",
+      "description": "只移动鼠标,不点击,可当 hover 用(如移到屏幕底缘停住,唤出自动隐藏的任务栏)。坐标口径 coordinate_space:virtual_screen=全桌面物理像素(多屏联合,可含负坐标,默认);window_client=目标窗口客户区坐标,执行前换算。越界拒绝。低风险动作。",
       "input_schema": {
         "type": "object",
         "properties": {
