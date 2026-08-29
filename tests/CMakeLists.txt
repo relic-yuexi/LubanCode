@@ -158,6 +158,17 @@ add_executable(prompt_profile_driver EXCLUDE_FROM_ALL manual/prompt_profile_driv
 target_link_libraries(prompt_profile_driver PRIVATE lubancode_core)
 target_compile_features(prompt_profile_driver PRIVATE cxx_std_23)
 
+# 自定义 Agent 单·阶段 5(Workflow 接入)的冒烟驱动(不进 ctest,验收手动跑):
+#   workflow_custom_agent_driver validate <agents_dir> <workflow_dir>
+#       真扫 AgentCatalog 走编译期校验(unknown_agent 正反两面)
+#   workflow_custom_agent_driver run <agents_dir> <workflow_dir>
+#       假后端跑一幕,打印系统提示首行/工具表/节点回执身份(resolved 名)
+# 夹具:tests/fixtures/agents/smoke-probe.yaml 与
+# tests/fixtures/workflows/custom-agent-smoke/。
+add_executable(workflow_custom_agent_driver EXCLUDE_FROM_ALL manual/workflow_custom_agent_driver.cpp)
+target_link_libraries(workflow_custom_agent_driver PRIVATE lubancode_core)
+target_compile_features(workflow_custom_agent_driver PRIVATE cxx_std_23)
+
 # DeepSeek 真机 e2e(前缀缓存守恒单):opt-in,不进 ctest——没设
 # DEEPSEEK_API_KEY 自己就跳过(exit 0),要跑先导钥匙:
 #   deepseek_e2e   (可配 DEEPSEEK_MODEL / DEEPSEEK_BASE_URL)

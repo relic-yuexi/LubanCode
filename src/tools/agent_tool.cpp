@@ -69,6 +69,8 @@ std::string CustomAgentPersona(const agent::AgentDefinition& definition) {
     return persona;
 }
 
+}  // namespace
+
 // 子代理的提示词拼装上下文(阶段 2:Prompt Profile 与能力推导;阶段 3 起
 // 自定义 Agent 的三笔决议从 ResolvedAgentProfile 来——合并归 Resolver,
 // 这里只按决议拼,不再读定义原文,拼装次序一字不动)。
@@ -81,6 +83,9 @@ std::string CustomAgentPersona(const agent::AgentDefinition& definition) {
 //     PromptCapabilities:feature 段只描述有效工具,web/mcp/lsp 不再吃父
 //     会话的配置开关(工具都不在表里,文案不装,单子 §5.4)。
 //   resolved.project_instructions = false -> AGENTS.md 那段不注(契约 §4.2)。
+// 阶段 5 从匿名 namespace 提出(具名导出):Workflow 的 agent 节点与
+// agent 工具派发路共用这一只,"同一 Agent 两路唤起,Prompt 完全同源"
+// 的验收线钉在这里。
 agent::PromptOptions BuildSubagentPromptOptions(const std::string& cwd, const std::string& agent_type,
                                                 const std::string& prompts_dir,
                                                 const std::string& project_prompts_dir,
@@ -119,9 +124,9 @@ agent::PromptOptions BuildSubagentPromptOptions(const std::string& cwd, const st
     return prompt_options;
 }
 
-// 预装技能段(P2-2:skills.preload):body 与名字按位对齐,缺正文的技能只
-// 登记名字(正文读不到不挡派发——doctor 那边另有诊断)。空名单返回空串,
-// 一个字不注入。
+// 预装技能段(P2-2):body 与名字按位对齐,缺正文的技能只登记名字(正文
+// 读不到不挡派发——doctor 那边另有诊断)。空名单返回空串,一个字不注入。
+// 阶段 5 与 BuildSubagentPromptOptions 同批导出,两路共用。
 std::string AppendPreloadedSkills(const std::vector<std::string>& names,
                                   const std::vector<std::string>& bodies) {
     if (names.empty()) {
@@ -134,6 +139,8 @@ std::string AppendPreloadedSkills(const std::vector<std::string>& names,
     }
     return out;
 }
+
+namespace {
 
 std::string ExtractLastText(const agent::Agent& loop) {
     const auto& history = loop.History();

@@ -93,6 +93,9 @@ struct NodeExecResult {
     bool empty = false;          // "没有产出"分支(outcome=empty)
     std::int64_t tokens_used = 0;   // 计入 run 预算(重试也计,不开免单账)
     std::int64_t duration_ms = 0;
+    // agent 节点派的自定义 Agent 的 resolved 名(阶段 5;空 = 非自定义
+    // 路或未解析)。回执身份用——journal 与事件不冒用户写的短名。
+    std::string agent_name;
 };
 
 // 执行器:一只节点种类的落地。宿主(tool/llm/agent/approval...)各给实现;
@@ -115,6 +118,8 @@ struct NodeRunRecord {
     int attempt = 0;
     std::string error_code;
     std::string error_message;
+    // agent 节点派的自定义 Agent 的 resolved 名(阶段 5;空 = 非自定义路)。
+    std::string agent_name;
     std::int64_t started_ms = 0;
     std::int64_t ended_ms = 0;
     std::int64_t tokens_used = 0;

@@ -50,6 +50,9 @@ struct WorkflowCommandContext {
     std::vector<lubancode::workflow::PackagedWorkflowSource> packaged_workflows;
     const lubancode::tools::ToolRegistry* registry = nullptr;  // capability 快照
     std::vector<std::string> skill_names;               // 撞名检查用
+    // AgentCatalog 可用条目名(阶段 5):`agent: <name>` 节点的编译期引用
+    // 校验查这张表(canonical 与裸名两套键)。空 = 没扫(旧装配),不校验。
+    std::vector<std::string> agent_names;
     const lubancode::cli::Theme* theme = nullptr;       // 必填(指针免默认构造被删)
     // 直呼 workflow 却没带必填输入时，终端可据字段 schema 当场问一句。
     // headless/app-server 不装这只口，仍由 runtime 返回 invalid_inputs。
@@ -151,6 +154,15 @@ struct WorkflowExecutorContext {
     lubancode::workflow::NodeSteeringSource steering;
     lubancode::workflow::LlmExecutor::BindingResolver resolve_llm_binding;
     int subflow_depth = 0;  // 终端首版只准一层 nesting,防交叉递归没帽
+    // ---- 自定义 Agent(阶段 5)----
+    // `agent: <name>` 节点的解析口来源:会话级 agent 工具(它的
+    // custom_agent_resolver 与 resolve_environment 是 agent 工具路的同一
+    // 只——两路解析喂同一份查名与环境账,才不各养一本)。空 = 没接
+    //(headless/旧装配),点名 agent 的节点报 not_configured。
+    lubancode::tools::AgentTool* agent_tool = nullptr;
+    // 子代理系统提示的会话材料(与 agent 工具路同源):从主回合的
+    // PromptOptions 折来,宿主保证两路值一致。
+    lubancode::workflow::SubagentPromptMaterial subagent_prompt_material;
 };
 
 // 拼执行器表(transform/template/tool/agent/llm/skill/interaction/subflow)。wf_catalog_root 是

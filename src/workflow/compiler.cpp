@@ -85,7 +85,8 @@ std::expected<WorkflowDraft, std::vector<ValidationIssue>> ParseDraftJson(
     for (const auto& issue : structure.issues) {
         // 图不完整的部分(编辑中)记 unknowns,不拦预览;能力类错误直接拦。
         if (issue.code == "unknown_tool" || issue.code == "unknown_skill" || issue.code == "unknown_transform" ||
-            issue.code == "unknown_subflow" || issue.code == "plaintext_secret" || issue.code == "path_escape") {
+            issue.code == "unknown_subflow" || issue.code == "unknown_agent" ||
+            issue.code == "plaintext_secret" || issue.code == "path_escape") {
             issues.push_back(issue);
         }
     }

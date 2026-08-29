@@ -312,6 +312,11 @@ public:
     void SetResolveEnvironment(std::function<agent::AgentProfileResolveEnvironment()> environment) {
         resolve_environment_ = std::move(environment);
     }
+    // 只读口(阶段 5):Workflow 的 agent 节点接自定义 Agent 时复用同一份
+    // 环境账——两路解析喂同一只供应商,权限/依赖查账才不各养一本。
+    const std::function<agent::AgentProfileResolveEnvironment()>& resolve_environment_provider() const {
+        return resolve_environment_;
+    }
 
     // 交互会话开、单发/单测关。入参显式给 run_in_background 时压过它。
     void SetBackgroundByDefault(bool enabled) { background_by_default_ = enabled; }
@@ -552,6 +557,27 @@ private:
     std::string param_fail_cause_;  // 最近一次参数错的原因标识;空 = 无账
     int param_fail_streak_ = 0;     // 同因连续被拒次数
 };
+
+// 子代理系统提示的统一装配口(自定义 Agent 单·阶段 5 从匿名 namespace
+// 提出):agent 工具派发路(AgentTool 的 ExecuteForeground/LaunchBackground/
+// RunTask)与 Workflow 的 agent 节点(AgentExecutor)两路共用同一只——
+// "同一 Agent 从两路唤起,Prompt 完全同源"的验收线钉的就是这两枚函数。
+// 参数全是纯数据,不摸盘、不发请求;拼装次序见 agent/prompt_assembler
+// (阶段 2 黄金测试)。
+agent::PromptOptions BuildSubagentPromptOptions(const std::string& cwd, const std::string& agent_type,
+                                                const std::string& prompts_dir,
+                                                const std::string& project_prompts_dir,
+                                                const std::string& project_instructions,
+                                                const std::string& skills_segment,
+                                                const agent::AgentProfile& agent_profile,
+                                                const CustomAgentMaterial* custom,
+                                                const agent::ResolvedAgentProfile* resolved,
+                                                const std::vector<agent::PackageProfileRoot>& package_roots);
+
+// 预装技能段(skills.preload):名字与正文按位对齐,缺正文只登记名字。
+// 与 BuildSubagentPromptOptions 同一批提出的同源件。
+std::string AppendPreloadedSkills(const std::vector<std::string>& names,
+                                  const std::vector<std::string>& bodies);
 
 // agent_type 的工具面是否只读(真机实测 P2-3;阶段 4 起 resolver 优先):
 // 接了解析口的先问它——查到码内内置两枚按旧答案(Explore 只读、

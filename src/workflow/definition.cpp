@@ -52,6 +52,7 @@ ordered Normalize(const WorkflowDefinition& def) {
         n["kind"] = ToString(node.kind);
         if (!node.tool.empty()) n["tool"] = node.tool;
         if (!node.role.empty()) n["role"] = node.role;
+        if (!node.agent.empty()) n["agent"] = node.agent;  // 阶段 5:JSON roundtrip 补账(0.26.92 收字段时的欠账)
         if (!node.task.empty()) n["task"] = node.task;
         if (!node.allowed_tools.empty()) n["allowed_tools"] = node.allowed_tools;
         if (node.step_limit > 0) n["step_limit"] = node.step_limit;
@@ -247,6 +248,7 @@ WorkflowDefinition WorkflowDefinition::FromJson(const nlohmann::json& in) {
             }
             node.tool = GetStr(raw, "tool");
             node.role = GetStr(raw, "role");
+            node.agent = GetStr(raw, "agent");  // 阶段 5:与 ToJson 同批补齐
             node.task = GetStr(raw, "task");
             if (const auto a = raw.find("allowed_tools"); a != raw.end() && a->is_array()) {
                 for (const auto& t : *a) {

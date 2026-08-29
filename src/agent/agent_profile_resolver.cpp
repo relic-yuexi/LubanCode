@@ -49,23 +49,8 @@ const AgentRoleRoute& OrFallback(const AgentRoleRoute& route, const AgentRoleRou
 
 }  // namespace
 
-int AgentPermissionModeRank(AgentPermissionMode mode) {
-    switch (mode) {
-        case AgentPermissionMode::Confirm: return 0;
-        case AgentPermissionMode::Auto: return 1;
-        case AgentPermissionMode::Yolo: return 2;
-    }
-    return 0;
-}
-
-std::string ToString(AgentPermissionMode mode) {
-    switch (mode) {
-        case AgentPermissionMode::Confirm: return "confirm";
-        case AgentPermissionMode::Auto: return "auto";
-        case AgentPermissionMode::Yolo: return "yolo";
-    }
-    return "confirm";
-}
+// AgentPermissionMode 与 Rank/ToString 已拆去 permission_mode.hpp(阶段 5:
+// loop.hpp 也要用,不拆与 agent.hpp 循环)。
 
 ResolvedAgentProfile ResolveAgentProfile(const AgentProfileResolveRequest& request) {
     ResolvedAgentProfile resolved;

@@ -38,6 +38,10 @@ struct CapabilityTable {
     std::vector<std::string> transforms; // 宿主注册的纯数据变换名
     std::vector<std::string> workflows;  // 可作 subflow 的 workflow id(不含自身)
     std::vector<std::string> agent_roles; // 现有子代理角色名(空表 = 不限制)
+    // AgentCatalog 可用条目名(自定义 Agent 单·阶段 5):canonical 与裸名
+    // 两套键都在里面;`agent: <name>` 节点的编译期引用校验查这张表。
+    // 空表 = 宿主没递(旧装配),不校验,运行时首知即报。
+    std::vector<std::string> agent_names;
 };
 
 // 校验结果:issues 空 = 过。
