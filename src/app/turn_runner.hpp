@@ -89,14 +89,17 @@ std::expected<lubancode::tools::AskUserResponse, std::string> PromptAskUser(
 // agent/tool 节点审批口也走这同一颗脑袋(见 interactive_session_wiring 的
 // BuildWorkflowAgentCallbacks),不另开第二套确认逻辑。pre 是 PreToolUse 的
 // 归并决策(调用方没接钩子就给默认空表态);has_permission_hooks 为假时
-// 跳过 PermissionRequest 钩子的发射。
+// 跳过 PermissionRequest 钩子的发射。permission_floor 是子代理定义带来的
+// 档位下限(自定义 Agent 单·阶段 4:只可收窄):会话档比它宽时向下并到
+// 它,该问就真问;缺省 Yolo = 没有下限,行为与从前一字不差。
 bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
                     std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                     lubancode::cli::ToolDisplay& display, const std::vector<std::string>& allow_commands,
                     const std::vector<std::string>& deny_commands,
                     lubancode::hooks::HookDispatcher* hook_dispatcher, const runtime::ToolHookDecision& pre,
                     bool has_permission_hooks, const std::string& name, const nlohmann::json& input,
-                    const std::function<void(bool asked, bool allowed)>& approval_observer = {});
+                    const std::function<void(bool asked, bool allowed)>& approval_observer = {},
+                    runtime::PermissionMode permission_floor = runtime::PermissionMode::Yolo);
 
 // ---------------------------------------------------------------------------
 // TurnContext(骨架拆解批三:harness 合流):RunTurn 二十四参 +

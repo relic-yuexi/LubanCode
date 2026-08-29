@@ -324,6 +324,39 @@ std::string FirstLineCapped(const std::string& text, std::size_t cap = 200) {
     return text.substr(0, end);
 }
 
+// 动态 schema 的清单一行(阶段 4·单子 §6.3):换行压成空格、UTF-8 按码点
+// 截到 max_chars——description 是 YAML 里的自由文本,塞进 schema 前先压平
+// 截短,免得一份长描述把参数说明冲成一锅(首版只放 name+description,
+// 一条一句,几十枚也撑不大 schema)。
+std::string AgentTypeListingLine(const AgentTypeInfo& info, std::size_t max_chars = 160) {
+    std::string flat;
+    flat.reserve(info.description.size());
+    for (char c : info.description) {
+        flat.push_back(c == '\n' || c == '\r' || c == '\t' ? ' ' : c);
+    }
+    std::size_t count = 0;
+    std::size_t pos = 0;
+    while (pos < flat.size()) {
+        if (count == max_chars) {
+            return "- " + info.name + ": " + flat.substr(0, pos) + "…";
+        }
+        const auto byte = static_cast<unsigned char>(flat[pos]);
+        std::size_t len = 1;
+        if ((byte & 0x80U) == 0x00U) {
+            len = 1;
+        } else if ((byte & 0xE0U) == 0xC0U) {
+            len = 2;
+        } else if ((byte & 0xF0U) == 0xE0U) {
+            len = 3;
+        } else if ((byte & 0xF8U) == 0xF0U) {
+            len = 4;
+        }
+        pos += len;
+        ++count;
+    }
+    return "- " + info.name + ": " + flat;
+}
+
 }  // namespace
 
 bool AgentFaceIsReadOnly(
@@ -332,18 +365,34 @@ bool AgentFaceIsReadOnly(
     std::string lowered = agent_type;
     std::transform(lowered.begin(), lowered.end(), lowered.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    if (lowered == "explore") {
-        return true;  // 内置只读代理:explore_registry 整表只读
-    }
-    if (lowered == "general-purpose") {
-        return false;  // 默认子代理与 main 同工具面,含写盘与命令
-    }
-    if (!resolver) {
-        return false;  // 没挂解析口(旧调用方/单测):认不得就拒
-    }
-    const std::optional<CustomAgentMaterial> material = resolver(agent_type);
-    if (!material.has_value()) {
-        return false;  // 名字解析不出(unavailable/不存在):拒
+    // 阶段 4:resolver 优先——Catalog 驱动,user/project 层盖掉内置名时按
+    // 覆盖定义的 allow 表算,不再认死两枚内置名。小写 explore 与派发口
+    // 同一条归一规矩:原名查不到再按 Explore 查一次(Catalog 里登的是
+    // 带大写那枚;项目层自己造了小写 explore 则按它算)。
+    std::optional<CustomAgentMaterial> material;
+    if (resolver) {
+        material = resolver(agent_type);
+        if (!material.has_value() && agent_type == "explore") {
+            material = resolver("Explore");
+        }
+        if (!material.has_value()) {
+            return false;  // 名字解析不出(不在 Catalog/unavailable):派不出,拒
+        }
+        if (material->builtin) {
+            // 码内内置两枚:旧答案。Explore 的只读是 explore_registry 整表
+            // 只读这一运行时事实,registry 查档反而证不出来(测试表多为
+            // 未知档),照旧按角色事实答。
+            return lowered == "explore";
+        }
+    } else {
+        // 没挂解析口(旧调用方/单测):退回内置两枚的旧口径。
+        if (lowered == "explore") {
+            return true;  // 内置只读代理:explore_registry 整表只读
+        }
+        if (lowered == "general-purpose") {
+            return false;  // 默认子代理与 main 同工具面,含写盘与命令
+        }
+        return false;  // 认不得就拒
     }
     const std::vector<std::string>& allow = material->definition.tools.allow;
     if (allow.empty()) {
@@ -575,10 +624,23 @@ nlohmann::json AgentTool::input_schema() const {
 
     nlohmann::json type_prop = nlohmann::json::object();
     type_prop["type"] = "string";
-    type_prop["description"] =
-        ToolText("agent", "param.agent_type",
-                 "子代理类型:Explore 只读搜索分析;general-purpose 可做多步操作(默认);或 /agents 清单里的自定义 "
-                 "Agent 名(各自带工具边界、预装技能与预算,清单以 /agents 实时输出为准)。");
+    // 阶段 4·动态 schema:说明先走静态文案(查表,与从前逐字节一致),再按
+    // 类型清单缓存追加"当前可派的类型"。清单从 AgentCatalog 拉(内置+自
+    // 定义,各带一句 description),回合边界翻新、平时读缓存——input_schema
+    // 每次构造请求都跑,不许拖磁盘扫描(性能口径见 SetAgentTypesProvider)。
+    // 没配清单源(单测/旧调用方)= 一个字不追加,schema 与从前零 diff。
+    std::string type_description = ToolText(
+        "agent", "param.agent_type",
+        "子代理类型:Explore 只读搜索分析;general-purpose 可做多步操作(默认);或 /agents 清单里的自定义 "
+        "Agent 名(各自带工具边界、预装技能与预算,清单以 /agents 实时输出为准)。");
+    const std::vector<AgentTypeInfo> agent_types = CachedAgentTypes();
+    if (!agent_types.empty()) {
+        type_description += "\n当前可派的类型(按 description 挑人;清单以 /agents 实时输出为准):";
+        for (const AgentTypeInfo& info : agent_types) {
+            type_description += "\n" + AgentTypeListingLine(info);
+        }
+    }
+    type_prop["description"] = std::move(type_description);
     properties["agent_type"] = type_prop;
 
     nlohmann::json mode_prop = nlohmann::json::object();
@@ -617,6 +679,22 @@ nlohmann::json AgentTool::input_schema() const {
     schema["required"] = nlohmann::json::array({"title", "prompt"});
 
     return schema;
+}
+
+// 类型清单缓存(阶段 4):首次使用经 provider 现拉一份快照,之后只读;
+// SetHooks(回合边界)与 SetAgentTypesProvider 翻新。前台主线程与后台任务
+// 的派工壳都会到这(input_schema 每请求构造),锁短持有——provider 在锁内
+// 跑,生产装配里是一次 Catalog 扫描,一回合至多一遍。
+std::vector<AgentTypeInfo> AgentTool::CachedAgentTypes() const {
+    if (!agent_types_provider_) {
+        return {};
+    }
+    std::lock_guard<std::mutex> lock(agent_types_cache_.mutex);
+    if (!agent_types_cache_.loaded) {
+        agent_types_cache_.types = agent_types_provider_();
+        agent_types_cache_.loaded = true;
+    }
+    return agent_types_cache_.types;
 }
 
 Tool::Result AgentTool::execute(const nlohmann::json& input) {
@@ -703,26 +781,29 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
     if (agent_type == "explore") {
         agent_type = "Explore";
     }
-    // 自定义 Agent(P2-1/P2-2):内置两枚之外的类型问解析口——从 AgentCatalog
-    // 按名取定义,取到就按它派发:身份记 resolved name(Dock/台账/日志不再
-    // 冒名 Explore)、tools.allow/deny 收窄、skills.preload 预装、runtime 预算
-    // 落账。没配解析口(旧调用方)或名字不在清单,维持旧拒绝口径,文案指
-    // 引去 /agents 看清单。
+    // agent_type 派发校验(阶段 4:写死两枚内置名的白名单换净成 AgentCatalog
+    // ——单子 §6.2/6.3):接了解析口就一律问它,"查得到即可派"。Catalog 里
+    // 码内注册的两枚带 builtin 记号,走阶段 4 之前的内置快路(行为一字不
+    // 动);user/project 层显式覆盖内置名的按覆盖定义走自定义路(跨层覆盖
+    // 由此真正生效)。查不到报"没有这名,看 /agents"。没接解析口(旧调用
+    // 方/单测)退回旧口径:只认两枚内置名。
     std::optional<CustomAgentMaterial> custom;
-    if (agent_type != "general-purpose" && agent_type != "Explore") {
-        if (!custom_agent_resolver_) {
-            return reject("agent_type 取值不合法",
-                          "agent_type 只认 general-purpose 或 Explore(本入口未接自定义 Agent 目录)。示例:"
-                          "agent_type=\"Explore\"(只读搜索分析);不确定就不传,默认 general-purpose。");
-        }
+    if (custom_agent_resolver_) {
         custom = custom_agent_resolver_(agent_type);
         if (!custom.has_value()) {
             return reject("agent_type 取值不合法",
-                          "agent_type 只认 general-purpose、Explore,或 /agents 清单里可用的自定义 Agent。\""
-                              + agent_type +
-                              "\" 不在清单(或定义解析有错)——先看 /agents 列清单、/agent doctor " + agent_type
-                              + " 查诊断;确认名字拼写后重试,或改用 general-purpose。");
+                          "没有名叫 \"" + agent_type + "\" 的可派 Agent。可用类型看 /agents 清单;定义解析有错"
+                          "先跑 /agent doctor " + agent_type +
+                          " 查诊断。确认名字拼写后重试;不挑类型就不传 agent_type,默认 general-purpose"
+                          "(多步操作)或 \"Explore\"(只读搜索分析)。");
         }
+        if (custom->builtin) {
+            custom.reset();  // 码内内置两枚:内置快路,自定义派发材料不掺和
+        }
+    } else if (agent_type != "general-purpose" && agent_type != "Explore") {
+        return reject("agent_type 取值不合法",
+                      "agent_type 只认 general-purpose 或 Explore(本入口未接自定义 Agent 目录)。示例:"
+                      "agent_type=\"Explore\"(只读搜索分析);不确定就不传,默认 general-purpose。");
     }
 
     // execution_mode(默认 auto):auto 在交互会话等价后台、管道/单发等价前台
@@ -856,12 +937,12 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
     // 字段)、配置默认步数、会话同步的窗口、宿主递进的环境账(权限/技能/
     // MCP/角色路由/思考档)与父有效工具面(本表 + 延迟过滤)。结构化错误
     //(权限越宽、缺依赖、allow 越权)在此明拒——不是入参错,不进连败账。
+    std::optional<agent::AgentProfileResolveEnvironment> environment;
+    if (custom.has_value() && resolve_environment_) {
+        environment = resolve_environment_();
+    }
     std::optional<agent::ResolvedAgentProfile> resolved_storage;
     if (custom.has_value()) {
-        std::optional<agent::AgentProfileResolveEnvironment> environment;
-        if (resolve_environment_) {
-            environment = resolve_environment_();
-        }
         std::vector<std::string> parent_tool_names;
         parent_tool_names.reserve(sub_registry_.All().size());
         for (const auto& tool : sub_registry_.All()) {
@@ -888,6 +969,18 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
     const agent::ResolvedAgentProfile* resolved =
         resolved_storage.has_value() ? &*resolved_storage : nullptr;
 
+    // 权限收窄执法(阶段 4 接线):Resolver 校验过"不许放宽"(越宽在派发口
+    // 明拒),"收窄生效"在这半截——子定义档比父会话档严时(父 yolo 子
+    // confirm),把确认下限带进 RunTask,子代理循环里 needs_confirm 的工具
+    // 真把确认拉回。父档经环境账现读;没递环境账(旧调用方/单测)按"没账
+    // 可查"跳过——与技能/MCP 查账同一骨气,不报错,也不放宽。
+    std::optional<agent::AgentPermissionMode> permission_floor;
+    if (resolved != nullptr && environment.has_value() &&
+        agent::AgentPermissionModeRank(resolved->permission) <
+            agent::AgentPermissionModeRank(environment->parent_permission)) {
+        permission_floor = resolved->permission;
+    }
+
     // 入参过了检:连败账翻篇——改对了就不记仇,后续调用从引导文案重新起。
     param_fail_cause_.clear();
     param_fail_streak_ = 0;
@@ -898,17 +991,18 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
         mode_explicit ? mode_background : input.value("run_in_background", background_by_default_);
     if (background) {
         return LaunchBackground(input, title, agent_type, task_registry, budget, isolate,
-                                custom.has_value() ? &*custom : nullptr, resolved);
+                                custom.has_value() ? &*custom : nullptr, resolved, permission_floor);
     }
     return ExecuteForeground(input, title, agent_type, task_registry, budget, isolate,
-                             custom.has_value() ? &*custom : nullptr, resolved);
+                             custom.has_value() ? &*custom : nullptr, resolved, permission_floor);
 }
 
 Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std::string& title,
                                           const std::string& agent_type, ToolRegistry& task_registry,
                                           const SubagentBudget& budget, bool isolate,
                                           const CustomAgentMaterial* custom,
-                                          const agent::ResolvedAgentProfile* resolved) {
+                                          const agent::ResolvedAgentProfile* resolved,
+                                          std::optional<agent::AgentPermissionMode> permission_floor) {
     // isolation=worktree:建房、锁房、工具表套 base_dir 包装、隔离范围压栈,
     // 跑完收工(干净删房,有活留房附路径)。cwd 一根指头都不动。
     std::optional<lubancode::cli::AgentWorktree> room;
@@ -951,7 +1045,7 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
                             scope_storage.has_value() ? &*scope_storage : nullptr,
                             /*background_hooks=*/nullptr,
                             /*background_permissions=*/nullptr,
-                            custom, resolved);
+                            custom, resolved, permission_floor);
     if (room.has_value()) {
         result.AppendText(FinishIsolationRoom(*room, git_runner_));
     }
@@ -969,7 +1063,8 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
                                          const std::string& agent_type, ToolRegistry& task_registry,
                                          const SubagentBudget& budget, bool isolate,
                                          const CustomAgentMaterial* custom,
-                                         const agent::ResolvedAgentProfile* resolved) {
+                                         const agent::ResolvedAgentProfile* resolved,
+                                         std::optional<agent::AgentPermissionMode> permission_floor) {
     if (!detached_backend_factory_) {
         return {"当前入口没有配置后台子代理后端,请把 run_in_background 设为 false", true};
     }
@@ -1077,6 +1172,7 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
                                                                 : std::nullopt,
                                 resolved_copy = resolved != nullptr ? std::make_optional(*resolved)
                                                                     : std::nullopt,
+                                permission_floor,
                                 detached = std::move(detached),
                                 system_prompt = std::move(system_prompt),
                                 detached_registry = std::move(detached_registry),
@@ -1103,7 +1199,7 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
                              &detached, &system_prompt, scope_storage.has_value() ? &*scope_storage : nullptr,
                              background_hooks, background_permissions,
                              custom_copy.has_value() ? &*custom_copy : nullptr,
-                             resolved_copy.has_value() ? &*resolved_copy : nullptr);
+                             resolved_copy.has_value() ? &*resolved_copy : nullptr, permission_floor);
         } catch (const std::exception& error) {
             result = {"子代理执行失败: " + std::string(error.what()), true};
         } catch (...) {
@@ -1133,7 +1229,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                 const std::shared_ptr<lubancode::hooks::DetachedHookSession>& background_hooks,
                                 const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions,
                                 const CustomAgentMaterial* custom,
-                                const agent::ResolvedAgentProfile* resolved) {
+                                const agent::ResolvedAgentProfile* resolved,
+                                std::optional<agent::AgentPermissionMode> permission_floor) {
     // 派工治理(转发 SubagentScheduler):全局并发槽先占上(前台 + 后台都
     // 算),满了明报;前台任务再记一层嵌套深度,超限明报。RAII,拒绝路径也
     // 照退。
@@ -1582,7 +1679,22 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // ---- 控制面:确认/钩子/Plan 闸(问话口原样走 TurnWiring)----------------
     if (task != nullptr) {
         if (foreground_hooks != nullptr) {
-            turn_wiring.on_tool_confirm = foreground_hooks->on_tool_confirm;
+            // 权限收窄执法(阶段 4):子定义档比父会话档严时,确认回调换成
+            // 宿主的"带下限"口——yolo/auto 的免问在里头被 min(会话档,
+            // 下限) 并掉,该问就真把确认拉回(单子"执行"账:自定义 Agent
+            // 取消与超时之外,权限收窄也是运行期要真生效的一笔)。宿主没接
+            // floored 口(旧调用方)或档不比父严时,原样转发,行为不变。
+            if (permission_floor.has_value() && foreground_hooks->on_tool_confirm_floored) {
+                auto floored = foreground_hooks->on_tool_confirm_floored;
+                const agent::AgentPermissionMode floor = *permission_floor;
+                turn_wiring.on_tool_confirm = [floored, floor](const std::string& tool_use_id,
+                                                               const std::string& name,
+                                                               const nlohmann::json& input) {
+                    return floored(tool_use_id, name, input, floor);
+                };
+            } else {
+                turn_wiring.on_tool_confirm = foreground_hooks->on_tool_confirm;
+            }
         } else {
             // 后台任务没人可问:审批先查放行账快照(修"后台审批不查放行账",
             // 2026-08)——deny 命令前缀压过一切(与主路 EvaluatePermission 的

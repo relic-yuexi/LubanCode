@@ -456,14 +456,22 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
                     const std::vector<std::string>& deny_commands,
                     lubancode::hooks::HookDispatcher* hook_dispatcher, const lubancode::runtime::ToolHookDecision& pre,
                     bool has_permission_hooks, const std::string& name, const nlohmann::json& input,
-                    const std::function<void(bool asked, bool allowed)>& approval_observer) {
+                    const std::function<void(bool asked, bool allowed)>& approval_observer,
+                    lubancode::runtime::PermissionMode permission_floor) {
     const bool file_tool = name == "write_file" || name == "edit_file";
 
     // 裁定(纯逻辑,runtime 层):档位 + permissions 叠加 + PreToolUse 表态
     // -> 放行还是问。auto_confirm/--yes 与 yolo 在里头一并判。档位翻译复
     // 用 BuildTurnRuntimeOptions(Confirm/Auto/Yolo 的映射一处定)。
-    const lubancode::runtime::TurnRuntime::Options core_options =
+    lubancode::runtime::TurnRuntime::Options core_options =
         BuildTurnRuntimeOptions(auto_confirm, always_allowed_tools, allow_commands, deny_commands, hook_dispatcher);
+    // 权限收窄执法(自定义 Agent 单·阶段 4):子代理定义的档比会话档严时,
+    // 会话档向下并到下限——yolo/auto 的免问不再免,min(会话,下限) 裁定,
+    // 该问就真问。auto_confirm(--yes 的显式全放)不并:那是用户全局的
+    // 明确让渡,不是档位成分;deny 黑名单与 PreToolUse 表态的次序也不动。
+    if (permission_floor < core_options.permission_mode) {
+        core_options.permission_mode = permission_floor;
+    }
     lubancode::runtime::PermissionContext permission;
     permission.auto_confirm = core_options.auto_confirm;
     permission.mode = core_options.permission_mode;
@@ -773,6 +781,31 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
         // "没人可问"的同步短路正是要保住的路径)。主轮回合有 async 就走
         // async,子代理转发保持同步,两不串。
         hooks.on_tool_confirm = wiring.on_tool_confirm;
+        // 权限收窄执法(自定义 Agent 单·阶段 4):同一颗确认脑袋,多带一枚
+        // 档位下限——自定义 Agent 定义比会话档严时(父 yolo 子 confirm),
+        // 子代理 needs_confirm 的工具真把确认拉回(ConfirmToolUse 里把会话
+        // 档向下并到下限),不因父会话开着 yolo 而免问。
+        hooks.on_tool_confirm_floored =
+            [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands, &deny_commands,
+             hook_dispatcher, pre_decision_slot, has_permission_hooks,
+             approval_observer](const std::string& tool_use_id, const std::string& name,
+                                 const nlohmann::json& input, lubancode::agent::AgentPermissionMode floor) -> bool {
+            lubancode::runtime::PermissionMode runtime_floor = lubancode::runtime::PermissionMode::Yolo;
+            switch (floor) {
+                case lubancode::agent::AgentPermissionMode::Confirm:
+                    runtime_floor = lubancode::runtime::PermissionMode::Confirm;
+                    break;
+                case lubancode::agent::AgentPermissionMode::Auto:
+                    runtime_floor = lubancode::runtime::PermissionMode::Auto;
+                    break;
+                case lubancode::agent::AgentPermissionMode::Yolo:
+                    runtime_floor = lubancode::runtime::PermissionMode::Yolo;
+                    break;
+            }
+            return ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display, allow_commands,
+                                  deny_commands, hook_dispatcher, *pre_decision_slot, has_permission_hooks, name,
+                                  input, approval_observer, runtime_floor);
+        };
         // ESC/Ctrl+C 打断信号透传:没这一行,子代理内部工具循环永远拿到
         // nullptr,顶层怎么置位 cancel_flag 都传不进去——子代理会一路跑到
         // 自己的步数上限(max_steps_per_turn)或任务自然完成才停,ESC/Ctrl+C 对它形同虚设。

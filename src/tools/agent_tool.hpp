@@ -88,9 +88,25 @@ struct BackgroundPermissionLedger {
 // AgentCatalog 按名解析一份定义交进来。preloaded_skills 与 definition.
 // skills_preload 按位对齐——预装技能的正文(SKILL.md frontmatter 之后的
 // body)在宿主侧读好带进来,tools 层不认得技能目录的扫描规矩,也不该认。
+//
+// builtin(阶段 4):这条材料是 Catalog 里码内注册的两枚内置定义时置真。
+// agent_type 的派发校验已换净成"查得到即可派"(下面 SetCustomAgentResolver
+// 的注释),内置名也照查 Catalog——查到的若正是码内那份,builtin 让它走
+// 阶段 4 之前的内置快路(explore_registry、Explore 白名单、persona 查表),
+// 行为一字不动;user/project 层显式覆盖内置名的(builtin=false)则按定义
+// 走自定义路,契约 §6.2"跨层同名属于显式覆盖"由此真正生效。
 struct CustomAgentMaterial {
     agent::AgentDefinition definition;
     std::vector<std::string> preloaded_skills;
+    bool builtin = false;  // 码内内置定义(general-purpose/Explore)的记号
+};
+
+// 动态 schema 的一行(阶段 4·单子 §6.3):名字 + 一句描述,从 AgentCatalog
+// 拉。agent 工具 input_schema 的 agent_type 说明据此列"当前可派的类型",
+// 模型照单挑人。首版只放 name + description,不做 deferred catalog。
+struct AgentTypeInfo {
+    std::string name;
+    std::string description;
 };
 
 // 一次派工的成本预算(真机实测 P2-6):三根硬线 + 软线百分比,全部 0(软
@@ -142,6 +158,15 @@ public:
         // 转发给父级 on_usage——累计进本轮 token 统计与逐步流水账,请求
         // 次数也算进去。
         std::function<void(const api::UsageReport& report)> on_usage;
+
+        // 权限收窄执法(阶段 4):宿主的"带下限的确认"口。自定义 Agent 的
+        // permissions.mode 比父会话档严时(父 yolo 子 confirm),子代理
+        // needs_confirm 的工具走这一口——宿主按 min(会话档, 下限) 裁定,
+        // 该问就真把确认拉回来,yolo/auto 的免问不再免。空 = 宿主没接
+        //(旧调用方/单测),退回 on_tool_confirm 原样转发,行为与从前一致。
+        std::function<bool(const std::string& tool_use_id, const std::string& name,
+                           const nlohmann::json& input, agent::AgentPermissionMode floor)>
+            on_tool_confirm_floored;
 
         // M9:子代理内部的工具调用也要受 pre_tool/post_tool 钩子管——原样
         // 转发给父级的同名回调,子代理这边不重复实现匹配/执行逻辑。
@@ -232,22 +257,31 @@ public:
 
     // 宿主每轮 RunTurn 开头都会重灌这份 Hooks(turn_runner 的 BuildTurnWiring)
     //——SetHooks 因此就是回合边界:参数连败账(见成员区注释)随灌随清,
-    // 计数归回合,不跨回合记仇。
+    // 计数归回合,不跨回合记仇;agent 类型清单的 schema 缓存也在这里翻新
+    //(用户改了 YAML,下一回合的 schema 就列得出新名字——派发口本来就
+    // 现扫现查,两头不脱节太久;/agents 仍是权威清单)。
     void SetHooks(Hooks hooks) {
         hooks_ = std::move(hooks);
         param_fail_cause_.clear();
         param_fail_streak_ = 0;
+        {
+            std::lock_guard<std::mutex> lock(agent_types_cache_.mutex);
+            agent_types_cache_.loaded = false;
+        }
     }
 
     // Explore 是内置只读代理。调用方另建一张只读工具表塞进来；不设时
     // Explore 仍能启动，只是沿用普通子表再由过滤器挡掉写入工具。
     void SetExploreRegistry(ToolRegistry* registry) { explore_registry_ = registry; }
 
-    // 自定义 Agent 解析口(真机实测 P2-1/P2-2):agent_type 不是内置两枚时,
-    // execute() 拿名字问这枚回调。给到材料就按自定义 Agent 派发——身份按
-    // resolved name 记(Dock/台账/日志不再冒名 Explore)、tools.allow/deny
-    // 收窄工具面、skills.preload 预装、runtime.max_steps_per_turn 落预算。
-    // 空函数(默认,旧调用方/单测)= 只认内置两枚,行为与从前一致。
+    // 自定义 Agent 解析口(真机实测 P2-1/P2-2;阶段 4 起是 agent_type 的
+    // 唯一派发校验):execute() 拿名字问这枚回调——宿主侧接的是 AgentCatalog
+    // 按名查账。给到材料就派:码内内置两枚(builtin=true)走内置快路,行为
+    // 与阶段 4 前一字不差;其余按自定义 Agent 派发——身份按 resolved name
+    // 记(Dock/台账/日志不冒名)、tools.allow/deny 收窄工具面、skills.preload
+    // 预装、runtime.max_steps_per_turn 落预算。查不到 = "没有这名,看
+    // /agents",不再写死两枚内置名当白名单。空函数(默认,旧调用方/单测)
+    // = 退回旧口径,只认内置两枚,行为与从前一致。
     void SetCustomAgentResolver(std::function<std::optional<CustomAgentMaterial>(const std::string&)> resolver) {
         custom_agent_resolver_ = std::move(resolver);
     }
@@ -255,6 +289,19 @@ public:
     // 解析器,不许装配层再养一份平行账。
     const std::function<std::optional<CustomAgentMaterial>(const std::string&)>& custom_agent_resolver() const {
         return custom_agent_resolver_;
+    }
+
+    // agent 类型清单源(阶段 4·动态 schema):宿主从 AgentCatalog 拉"当前
+    // 可派的类型"(内置+自定义,各带一句 description)递进来。input_schema
+    // 的 agent_type 说明据此列单;清单在回合边界(SetHooks)翻新、平时读
+    // 缓存——input_schema 每次构造请求都要跑一遍,不许它拖着一回磁盘扫
+    // 描(性能口径:单子 §6.3 照 skill 工具 enum 的同一先例——动态内容进
+    // 缓存快照,不进每请求重算)。不设(默认空)= 说明不追加清单,schema
+    // 与从前逐字节一致。
+    void SetAgentTypesProvider(std::function<std::vector<AgentTypeInfo>()> provider) {
+        agent_types_provider_ = std::move(provider);
+        std::lock_guard<std::mutex> lock(agent_types_cache_.mutex);
+        agent_types_cache_.loaded = false;
     }
 
     // 自定义 Agent 的解析环境(阶段 3:AgentProfileResolver 的父会话活材料
@@ -409,16 +456,31 @@ private:
                    const std::shared_ptr<lubancode::hooks::DetachedHookSession>& background_hooks = nullptr,
                    const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions = nullptr,
                    const CustomAgentMaterial* custom = nullptr,
-                   const agent::ResolvedAgentProfile* resolved = nullptr);
+                   const agent::ResolvedAgentProfile* resolved = nullptr,
+                   std::optional<agent::AgentPermissionMode> permission_floor = std::nullopt);
 
     Result ExecuteForeground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
                              ToolRegistry& task_registry, const SubagentBudget& budget, bool isolate,
                              const CustomAgentMaterial* custom = nullptr,
-                             const agent::ResolvedAgentProfile* resolved = nullptr);
+                             const agent::ResolvedAgentProfile* resolved = nullptr,
+                             std::optional<agent::AgentPermissionMode> permission_floor = std::nullopt);
     Result LaunchBackground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
                             ToolRegistry& task_registry, const SubagentBudget& budget, bool isolate,
                             const CustomAgentMaterial* custom = nullptr,
-                            const agent::ResolvedAgentProfile* resolved = nullptr);
+                            const agent::ResolvedAgentProfile* resolved = nullptr,
+                            std::optional<agent::AgentPermissionMode> permission_floor = std::nullopt);
+
+    // 类型清单缓存(阶段 4·动态 schema):provider 的快照 + 回合边界翻新。
+    // input_schema() 是 const 且会被后台任务的派工壳跨线程调——整只缓存
+    // mutable,锁短持有;provider 在锁内跑,生产装配里是一次 Catalog 扫描,
+    // 一回合至多一遍。
+    struct AgentTypesCache {
+        std::mutex mutex;
+        bool loaded = false;
+        std::vector<AgentTypeInfo> types;
+    };
+    mutable AgentTypesCache agent_types_cache_;
+    std::vector<AgentTypeInfo> CachedAgentTypes() const;
 
     // 子代理请求的包装后端(agent_tool.cpp 内实现):一次不落地把"请求发出/
     // 首事件/逐事件/收场错误"记进活度账与诊断日志(LUBANCODE_DEBUG_SUBAGENT)。
@@ -456,6 +518,10 @@ private:
     // 自定义 Agent 解析口(P2-2):空 = 只认内置两枚(旧行为)。宿主在会话
     // 装配时灌入;回调在 execute() 的宿主线程被调,内部自管线程安全。
     std::function<std::optional<CustomAgentMaterial>(const std::string&)> custom_agent_resolver_;
+    // agent 类型清单源(阶段 4):空 = schema 不列清单。与 resolver 同一条
+    // 寿命规矩;provider 在宿主线程或后台线程经 CachedAgentTypes 调,内部
+    // 自管线程安全(生产装配里就是一次 Catalog 扫描)。
+    std::function<std::vector<AgentTypeInfo>()> agent_types_provider_;
     // 解析环境供应商(阶段 3):空 = 没接(旧调用方),Resolver 的权限/依赖
     // 校验按"没账可查"跳过。与 custom_agent_resolver_ 同一条寿命规矩。
     std::function<agent::AgentProfileResolveEnvironment()> resolve_environment_;
@@ -478,12 +544,15 @@ private:
     int param_fail_streak_ = 0;     // 同因连续被拒次数
 };
 
-// agent_type 的工具面是否只读(真机实测 P2-3):内置 Explore 是;自定义
-// Agent 看 resolver 解析出的 tools.allow——非空且每一枚都在 registry 里
-// 注册为只读档(ReadOnlyLocal/ReadOnlyRemote)才算。空 allow(继承全工
-// 具面)、解析失败、查无注册、含非只读档,一律 false(保守为纲;契约
-// 4.9:只读不设权限档,由 tools.allow 表达)。纯查表,不发请求、不碰盘
-// 之外的任何状态。
+// agent_type 的工具面是否只读(真机实测 P2-3;阶段 4 起 resolver 优先):
+// 接了解析口的先问它——查到码内内置两枚按旧答案(Explore 只读、
+// general-purpose 不只读,explore_registry 整表只读是运行时事实,不靠
+// registry 查档);查到自定义/覆盖定义走 tools.allow 查账——非空且每一枚
+// 都在 registry 里注册为只读档(ReadOnlyLocal/ReadOnlyRemote)才算。空
+// allow(继承全工具面)、解析失败、查无注册、含非只读档,一律 false
+//(保守为纲;契约 4.9:只读不设权限档,由 tools.allow 表达)。没接解析口
+//(旧调用方)退回内置两枚的旧答案。纯查表,不发请求、不碰盘之外的任何
+// 状态。
 bool AgentFaceIsReadOnly(
     const std::function<std::optional<CustomAgentMaterial>(const std::string&)>& resolver,
     const ToolRegistry& registry, const std::string& agent_type);

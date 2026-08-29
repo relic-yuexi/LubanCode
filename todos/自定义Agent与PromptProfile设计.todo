@@ -1,6 +1,6 @@
 # 自定义 Agent 与 Prompt Profile 设计
 
-- 状态：阶段 0/1/2 已落地（0.26.77/0.26.81/0.26.88），阶段 3 起待实现
+- 状态：阶段 0/1/2/3/4 已落地（0.26.77/0.26.81/0.26.88/0.26.95/阶段 4 本笔），阶段 5 起待实现
 - 日期：2026-08-28
 - 范围：Agent 定义、Prompt Profile、加载与解析、运行时接线、命令与诊断、示例迁移
 - 不在本单：实现新的 MCP 服务、重写 Skill 格式、建立 solutions 运行时概念、引入多 Agent 编队
@@ -478,13 +478,14 @@ Workflow 只负责调度。它把 `agent` 名交给同一 AgentProfileResolver�
 
 ### 阶段 4：AgentTool 接入
 
-- [ ] 把写死的 `agent_type` 校验换成 AgentCatalog。
-- [ ] 动态生成 Agent 类型说明。
-- [ ] 自定义 Agent 支持前台、后台、取消、消息、结果回收。
-- [ ] 自定义 Agent 支持现有 worktree isolation。
-- [ ] 证明工具收窄、Skill 预装、Profile 选择都已生效。
+- [x] 把写死的 `agent_type` 校验换成 AgentCatalog。（接了解析口一律问它,"查得到即可派,查不到报没有这名看 /agents";码内内置两枚由宿主标 builtin 走内置快路,行为一字不动;user/project 层覆盖内置名的按定义走自定义路,契约 §6.2 跨层覆盖由此生效。AgentFaceIsReadOnly 同步换序:resolver 优先,没接退回旧答案。）
+- [x] 动态生成 Agent 类型说明。（agent 工具 schema 的 agent_type 说明追加"当前可派的类型"清单,从 Catalog 拉可用条目(内置+自定义,各带一句 description,换行压平、按码点截 160)。性能口径照 skill 工具 enum 先例:清单进缓存快照,SetHooks(回合边界)翻新,一回合至多扫一遍盘;没配清单源零追加,schema 与从前零 diff。）
+- [x] 自定义 Agent 支持前台、后台、取消、消息、结果回收。（前台/后台本就同一条 RunTask;测试册 test_custom_agent_dispatch.cpp 逐件对账:后台派出(台账记 resolved name)、x 取消(CancelTask 贯通到任务线程,终态 Cancelled)、agent_message 送达(工具收尾后下一请求注入)、结果回收(完成通知排走、delivered 置位)。）
+- [x] 自定义 Agent 支持现有 worktree isolation。（YAML runtime.isolation 与入参显式都真开房:写不出房、预算断房保留并附路径;入参显式压过 YAML 缺省档。）
+- [x] 证明工具收窄、Skill 预装、Profile 选择都已生效。（工具面收窄+Capabilities 说明面收窄在前台(既有册)与后台(新册)两路口都钉;预装技能正文进两路系统提示;Profile 选择的五层回路阶段 2 已钉。）
+- [x] 权限收窄强制执行（R 单遗留,本笔接线）：子定义档比父严时（父 yolo 子 confirm），子代理循环里真把确认拉回——AgentTool::Hooks 新增 on_tool_confirm_floored 口,turn_runner 同一颗 ConfirmToolUse 多带一枚档位下限,会话档向下并到下限再裁定;宿主没接口或档不比父严时原样转发,行为不变。
 
-验收：主 Agent 能按描述派出自定义 Agent；子 Agent 看不见未授权工具，也不会收到那些工具的 Prompt 说明。
+验收：主 Agent 能按描述派出自定义 Agent；子 Agent 看不见未授权工具，也不会收到那些工具的 Prompt 说明。（schema 清单带 name+description 供模型挑人;派发按名即达;工具面与说明面两路口收窄均有测试钉。）
 
 ### 阶段 5：Workflow 接入
 
@@ -556,7 +557,7 @@ examples/browser/
 
 - [ ] allow 与 deny 交叠时 deny 胜出。
 - [x] 子 Agent 不能取到父 Agent 没有的工具。（阶段 3:allow 越权报 agent.tool_not_granted,resolver 与派发口两层测试钉;有效面保父面次序。）
-- [x] 项目 Agent 不能抬高权限、取消沙箱或绕过审批。（阶段 3:permissions.mode 比父宽报 agent.permission_widening,派发口明拒——校验落了;运行期强制收窄(子档比父严时把确认拉回)留阶段 4 接。）
+- [x] 项目 Agent 不能抬高权限、取消沙箱或绕过审批。（阶段 3:permissions.mode 比父宽报 agent.permission_widening,派发口明拒;阶段 4 接上运行期强制收窄——子档比父严时经 on_tool_confirm_floored 把确认真拉回,宿主按 min(会话档,下限) 裁定,测试钉。）
 - [ ] MCP 只许引用已有服务，拒绝内联启动配置。
 - [x] 缺 Skill、MCP、tool、model role 时标 unavailable。（阶段 3:缺依赖报 agent.missing_dependency 结构化错并拒发,不退化成全工具 Agent;doctor 的静态缺项账照旧。）
 - [ ] unavailable Agent 不得静默退回 general-purpose。
@@ -564,11 +565,11 @@ examples/browser/
 
 ### 执行
 
-- [ ] 内置 general-purpose、Explore 行为回归。
-- [ ] 自定义 Agent 前台执行。
-- [ ] 自定义 Agent 后台执行、消息、等待、回收。
-- [ ] 取消与超时。
-- [ ] worktree isolation。
+- [x] 内置 general-purpose、Explore 行为回归。（阶段 4:接了 Catalog 解析口后内置两枚走 builtin 快路,persona/工具面/Explore+worktree 拒绝口径照旧,测试钉。）
+- [x] 自定义 Agent 前台执行。（既有册 test_agent_budget.cpp + 新册 test_custom_agent_dispatch.cpp。）
+- [x] 自定义 Agent 后台执行、消息、等待、回收。（新册逐件对账:派出/agent_message 送达/结果回收。）
+- [x] 取消与超时。（取消:CancelTask 贯通到自定义 Agent 后台线程,终态 Cancelled;超时:预算三线的自定义 Agent 变体在 worktree 册一并钉——预算断房保留,0.26.83 先例的延伸。）
+- [x] worktree isolation。（YAML 缺省与入参显式两路:写不出房、预算断不丢房。）
 - [x] AgentTool 与 Workflow 解析同一 Definition，所得 Profile 一致。（阶段 3 对账册 test_agent_profile_resolver.cpp:两口各解析同一份 YAML 逐字段比,含 runtime 五字段/工具谓词行为/权限档/缺项错。）
 - [ ] Workflow 未知 Agent 报错位置清楚。
 

@@ -341,10 +341,12 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
             }
             return env;
         });
-        // 自定义 Agent 解析口(真机实测 P2-1/P2-2):agent 工具收到非内置类型
-        // 时按名查 AgentCatalog。现扫不缓存——用户改了 YAML,下一次派发即
-        // 生效,不必重启会话。预装技能的正文从启动时扫到的技能清单里读;
-        // 名单里没有的技能留给 doctor 诊断,这里只降级(登记名字不注正文)。
+        // 自定义 Agent 解析口(真机实测 P2-1/P2-2;阶段 4 起是 agent_type 的
+        // 唯一派发校验):按名查 AgentCatalog,查得到即可派——码内内置两枚
+        // 标 builtin(工具层走内置快路),user/project 层覆盖内置名的按定义
+        // 走自定义路。现扫不缓存——用户改了 YAML,下一次派发即生效,不必
+        // 重启会话。预装技能的正文从启动时扫到的技能清单里读;名单里没有
+        // 的技能留给 doctor 诊断,这里只降级(登记名字不注正文)。
         agent_tool_->SetCustomAgentResolver(
             [skills](const std::string& name) -> std::optional<lubancode::tools::CustomAgentMaterial> {
                 const lubancode::agent::AgentCatalog catalog =
@@ -355,6 +357,8 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
                 }
                 lubancode::tools::CustomAgentMaterial material;
                 material.definition = *entry->definition;
+                material.builtin = entry->layer == lubancode::agent::AgentSourceLayer::Builtin &&
+                                   entry->file == "(builtin)";
                 for (const std::string& skill_name : material.definition.skills_preload) {
                     const auto meta = std::find_if(skills.begin(), skills.end(),
                                                    [&](const lubancode::tools::SkillMeta& candidate) {
@@ -370,6 +374,19 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
                 }
                 return material;
             });
+        // agent 类型清单源(阶段 4·动态 schema):schema 的 agent_type 说明
+        // 列"当前可派的类型"(可用条目:内置+自定义,各带一句 description)。
+        // 现扫现列与派发口同款——AgentTool 在回合边界(SetHooks)翻新缓存,
+        // 一回合至多扫一遍盘,不是每请求一遍。
+        agent_tool_->SetAgentTypesProvider([]() -> std::vector<lubancode::tools::AgentTypeInfo> {
+            std::vector<lubancode::tools::AgentTypeInfo> types;
+            const lubancode::agent::AgentCatalog catalog =
+                lubancode::agent::LoadAgentCatalog(ComputeAgentScanRoots());
+            for (const lubancode::agent::AgentCatalogEntry* entry : catalog.Available()) {
+                types.push_back(lubancode::tools::AgentTypeInfo{entry->name, entry->definition->description});
+            }
+            return types;
+        });
         // 长任务 compact:子代理复用主 compact,窗口从配置来(0 = 未知不评估)。
         agent_tool_->SetContextWindowTokens(config.context_window_tokens);
         // 派工治理(规格"递归派工不能再靠拿掉工具解决"):并发槽与深度上限
