@@ -14,6 +14,10 @@ std::string BoxRuleLine(const Theme& theme, int console_width) {
 
 std::string BottomChromeFingerprint(const BottomChromeFrame& frame) {
     std::string value;
+    value += "h:";
+    for (const auto& row : frame.help_rows) {
+        value += row + "\n";
+    }
     value += "a:";
     for (const auto& row : frame.activity_rows) {
         value += row + "\n";
@@ -143,6 +147,19 @@ std::string BuildComposerDigest(const ComposerViewModel& composer) {
 
 }  // namespace
 
+bool HelpOverlayNext(bool visible, HelpOverlayEvent event) {
+    switch (event) {
+        case HelpOverlayEvent::TogglePressed:
+            return !visible;  // 头一按展开,再一按收起——同一枚键,同一个动作
+        case HelpOverlayEvent::EscapePressed:
+            return false;     // Esc 只收不开(改绑 help.show 后的确定出口)
+        case HelpOverlayEvent::DraftFilled:
+        case HelpOverlayEvent::SceneChanged:
+            return false;     // 场景换了,帮助层不让位也得让位
+    }
+    return visible;
+}
+
 BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const Theme& theme,
                                             int terminal_width, int height_budget) {
     const int width = (std::max)(1, terminal_width);
@@ -167,10 +184,13 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             : 0;
 
     // ---- 高度预算钳制(终端画面隔网单·战术二):"输入行必画得下"的硬约束 ----
-    // 可选行(活动条/队列/坞/提示)按 transient -> dock -> queue -> activity
-    // 的次序舍(即保的优先级相反:活动条最保、提示最先舍);可选行全舍了
-    // 还装不下,composer 的物理行围光标开窗——窗口尾部贴光标,保底一行,
-    // 留白跟着免掉。0 = 不限(单测与无终端环境的老行为)。
+    // 可选行(帮助/活动条/队列/坞/提示)按 transient -> dock -> queue ->
+    // activity -> help 的次序舍(即保的优先级相反:帮助层是用户刚显式要
+    // 的,最保、最后舍;舍时保头——表头写着怎么收,丢了头用户就找不到门,
+    // 装不下全表即面板内截断);可选行全舍了还装不下,composer 的物理行围
+    // 光标开窗——窗口尾部贴光标,保底一行,留白跟着免掉。0 = 不限(单测
+    // 与无终端环境的老行为)。
+    std::size_t help_count = model.help_rows.size();
     std::size_t activity_count = model.activity_rows.size();
     std::size_t queue_count = model.queue_rows.size();
     std::size_t dock_count = model.agent_dock_rows.size();
@@ -195,6 +215,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
                 room -= granted;
                 return static_cast<std::size_t>(granted);
             };
+            help_count = take(model.help_rows.size());
             activity_count = take(model.activity_rows.size());
             queue_count = take(model.queue_rows.size());
             dock_count = take(model.agent_dock_rows.size());
@@ -203,6 +224,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             // 绝境:可选行一行不剩,composer 围光标开窗。窗口保底一行;
             // 连横线+状态行都容不下时它们也让位——"输入行必画得下"是底线,
             // 别的一切都排它后头。
+            help_count = 0;
             activity_count = 0;
             queue_count = 0;
             dock_count = 0;
@@ -230,7 +252,8 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             bottom_padding = 0;
         }
         dropped_optional_rows =
-            static_cast<int>(model.activity_rows.size() - activity_count +
+            static_cast<int>(model.help_rows.size() - help_count +
+                             model.activity_rows.size() - activity_count +
                              model.queue_rows.size() - queue_count +
                              model.agent_dock_rows.size() - dock_count +
                              model.transient_rows.size() - transient_count);
@@ -247,6 +270,10 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
         layout.frame.rows.push_back(InlineFrameRow{0, width, hard, std::move(text)});
     };
 
+    for (std::size_t i = 0; i < help_count; ++i) {
+        // 帮助层垫帧最顶:与队列同款淡色包装,超宽按屏宽截断。
+        push(false, tinted(model.help_rows[i]));
+    }
     for (std::size_t i = 0; i < activity_count; ++i) {
         push(false, model.activity_rows[i]);  // Working 行自带配色,布局只管摆位
     }
@@ -322,6 +349,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     BottomChromeFrame& chrome = layout.chrome;
     // 行数账记"真画出来的":预算钳掉的可选行不进账/指纹——同一窗口高下
     // 画面相同即指纹相同,跳帧判断不被"画不出来的行"搅动。
+    chrome.help_rows.assign(model.help_rows.begin(), model.help_rows.begin() + help_count);
     chrome.activity_rows.assign(model.activity_rows.begin(), model.activity_rows.begin() + activity_count);
     chrome.queue_rows.assign(model.queue_rows.begin(), model.queue_rows.begin() + queue_count);
     chrome.agent_dock_rows.assign(model.agent_dock_rows.begin(),

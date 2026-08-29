@@ -484,7 +484,242 @@ int wmain(int argc, wchar_t** argv) {
     SendKey(VK_TAB, 0, SHIFT_PRESSED);
     Check(WaitForRowText(status_row, "确认模式", 5000), "F5 键位:切回确认档");
 
+    // ---- H 幕:? 键位帮助层(0.32.x 可开可合)----
+    // 帮助表是底栏帧最顶的 retained 层:展开时帧向上长高、直接覆写可视
+    // 对话,滚屏里从头到尾没有表;收起(再按 ? / Esc)整屏重建,composer
+    // 与底栏回原位。断言全用语言无关的锚(help.show 动作名、横线结构、
+    // "> " 提示行),不碰译文。
+    const auto run_help_scenario = [&]() {
+        // 前置说明:F5 收尾后草稿本就空,这里不补 Ctrl+C——空草稿上的
+        // Ctrl+C 是"取消整次读取"(line_editor 的老语义),会把子进程送走。
+        // 帮助和弦由环境变量 LUBANCODE_TEST_HELP_CHORD 参数化(默认 "?"):
+        // 另一轮预写 keymap.json 改绑成 alt+h 再跑,同一套断言验"改绑后
+        // 新和弦能开合、表头脚注显新和弦"——不在会话里 /keymap set(它的
+        // 回显带着全本键位表,针脚全被污染)。
+        std::string help_chord;
+        {
+            char* buffer = nullptr;
+            std::size_t size = 0;
+            if (_dupenv_s(&buffer, &size, "LUBANCODE_TEST_HELP_CHORD") == 0 && buffer != nullptr) {
+                help_chord = buffer;
+                std::free(buffer);
+            }
+        }
+        const bool alt_help = help_chord == "alt+h";
+        const auto send_help_key = [&]() {
+            if (alt_help) {
+                // Alt+H 要带 UnicodeChar:平台层的 Alt+字母和弦分支先认
+                // uChar 非空(挡输入法/死键),只给 vk 不给字会被当死键丢掉。
+                SendKey('H', L'h', LEFT_ALT_PRESSED);
+                Sleep(60);
+            } else {
+                SendText("?");
+            }
+        };
+        // H1 展开:空 composer 按帮助和弦,表出现,提示符与状态行还在表下。
+        send_help_key();
+        Check(WaitForText("help.show", 5000), "H1 展开:帮助表出现(5s 内)");
+        Sleep(500);
+        {
+            const int help_row = FindLastRow("help.show");
+            const int status_now = FindLastRow("shift+tab");
+            Check(help_row >= 0 && status_now >= 0, "H1 展开:表与状态行都在屏上");
+            if (help_row >= 0 && status_now >= 0) {
+                Check(help_row < status_now, "H1 展开:表在状态行之上");
+                // composer 提示行还在(表之下、状态行之上,序:表 < 提示 < 状态)。
+                const int prompt_now = status_now - 2;
+                Check(help_row < prompt_now, "H1 展开:表在提示行之上");
+                const std::string prompt_text = ReadRow(prompt_now);
+                Check(!prompt_text.empty() && prompt_text.back() == '>',
+                      "H1 展开:提示行仍是 '> '(草稿没动)");
+                Check(IsRuleRow(prompt_now - 1), "H1 展开:上横线紧贴提示行");
+            }
+            // 展开时整块缓冲区里只有一份表(没往滚屏叠)。
+            int help_copies = 0;
+            for (int r = 0; r < 400; ++r) {
+                if (ReadRow(r).find("help.show") != std::string::npos) {
+                    ++help_copies;
+                }
+            }
+            Check(help_copies == 1, "H1 展开:全缓冲只有一份表(" + std::to_string(help_copies) + ")");
+        }
+
+        // H2 再按收起:表整块消失,composer/底栏回位,滚屏零残留。
+        send_help_key();
+        {
+            const DWORD deadline = GetTickCount() + 5000;
+            while (GetTickCount() < deadline && FindLastRow("help.show") >= 0) {
+                Sleep(100);
+            }
+            Check(FindLastRow("help.show") < 0, "H2 收起:再按 ? 表整块消失(5s 内)");
+            Sleep(300);
+            const int status_after = FindLastRow("shift+tab");
+            Check(status_after >= 0, "H2 收起:状态行回位");
+            if (status_after >= 0) {
+                const std::string prompt_text = ReadRow(status_after - 2);
+                Check(!prompt_text.empty() && prompt_text.back() == '>',
+                      "H2 收起:提示行仍是 '> ',草稿光标原样");
+                Check(IsRuleRow(status_after - 3), "H2 收起:上横线回位");
+            }
+            int residue = 0;
+            for (int r = 0; r < 400; ++r) {
+                if (ReadRow(r).find("help.show") != std::string::npos) {
+                    ++residue;
+                }
+            }
+            Check(residue == 0, "H2 收起:全缓冲 400 行零残留(" + std::to_string(residue) + ")");
+        }
+
+        // H3 Esc 也收:展开后 Esc,表消失。
+        send_help_key();
+        Check(WaitForText("help.show", 5000), "H3 Esc 收:表先展开");
+        SendKey(VK_ESCAPE, 0, 0);
+        {
+            const DWORD deadline = GetTickCount() + 5000;
+            while (GetTickCount() < deadline && FindLastRow("help.show") >= 0) {
+                Sleep(100);
+            }
+            Check(FindLastRow("help.show") < 0, "H3 Esc 收:Esc 后表消失(5s 内)");
+        }
+
+        // H4 非空 composer:帮助和弦不当帮助——默认绑定时 '?' 是普通字符;
+        // 改绑轮(alt+h)里 Alt+H 落给编辑器也不进正文(带修饰的 Char 不插)。
+        if (alt_help) {
+            SendText("a");
+            Sleep(300);
+            send_help_key();
+            Sleep(600);
+            Check(FindLastRow("> a") >= 0, "H4 非空:正文还是 '> a'(Alt+H 没插字符)");
+            Check(FindLastRow("help.show") < 0, "H4 非空:帮助表没开");
+        } else {
+            SendText("a?");
+            Sleep(600);
+            Check(FindLastRow("> a?") >= 0, "H4 非空: '?' 进了正文(a?)");
+            Check(FindLastRow("help.show") < 0, "H4 非空:帮助表没开");
+        }
+        SendKey('C', 3, LEFT_CTRL_PRESSED);
+        Sleep(400);
+
+        // H5 连开合十次:滚屏不叠十份,屏上无残影。
+        for (int i = 0; i < 10; ++i) {
+            send_help_key();
+            const bool opened = WaitForText("help.show", 5000);
+            if (!opened) {
+                Check(false, "H5 十次开合:第 " + std::to_string(i + 1) + " 次展开失败");
+                break;
+            }
+            send_help_key();
+            const DWORD deadline = GetTickCount() + 5000;
+            while (GetTickCount() < deadline && FindLastRow("help.show") >= 0) {
+                Sleep(100);
+            }
+            if (FindLastRow("help.show") >= 0) {
+                Check(false, "H5 十次开合:第 " + std::to_string(i + 1) + " 次收起失败");
+                break;
+            }
+        }
+        {
+            int copies = 0;
+            for (int r = 0; r < 400; ++r) {
+                if (ReadRow(r).find("help.show") != std::string::npos) {
+                    ++copies;
+                }
+            }
+            Check(copies == 0, "H5 十次开合:滚屏零帮助表,屏上零残影(" + std::to_string(copies) + ")");
+        }
+
+        // H6 展开态 resize:窗口先压矮(高变,底栏重画),再改宽(整屏重建,
+        // 表重排),表始终在、提示符不被挤走;恢复尺寸后收起干净。
+        send_help_key();
+        Check(WaitForText("help.show", 5000), "H6 resize:表先展开");
+        {
+            SMALL_RECT shorter{0, 0, 119, 25};
+            SetConsoleWindowInfo(g_conout, TRUE, &shorter);
+            const DWORD deadline = GetTickCount() + 5000;
+            while (GetTickCount() < deadline && FindLastRow("help.show") < 0) {
+                Sleep(100);
+            }
+            Check(FindLastRow("help.show") >= 0, "H6 resize:压矮后表仍在(面板内截断不挤提示符)");
+            const int status_short = FindLastRow("shift+tab");
+            Check(status_short >= 0, "H6 resize:压矮后状态行仍在");
+            if (status_short >= 0) {
+                const std::string prompt_text = ReadRow(status_short - 2);
+                Check(!prompt_text.empty() && prompt_text.back() == '>', "H6 resize:压矮后提示行仍是 '> '");
+            }
+        }
+        {
+            // 改宽:窗口先缩到 100 列内,缓冲才能跟着缩(窗口比缓冲宽时
+            // SetConsoleScreenBufferSize 直接失败)。
+            SMALL_RECT narrow_win{0, 0, 99, 25};
+            SetConsoleWindowInfo(g_conout, TRUE, &narrow_win);
+            SetConsoleScreenBufferSize(g_conout, COORD{100, 400});
+            Sleep(1500);
+            Check(FindLastRow("help.show") >= 0, "H6 resize:改宽整屏重建后表重排仍在");
+            const int status_wide = FindLastRow("shift+tab");
+            Check(status_wide >= 0, "H6 resize:改宽后状态行回位");
+        }
+        // 恢复 120 列 40 行,再按帮助和弦收起,零残留交还现场。
+        SetConsoleScreenBufferSize(g_conout, COORD{120, 400});
+        SMALL_RECT restored{0, 0, 119, 40};
+        SetConsoleWindowInfo(g_conout, TRUE, &restored);
+        Sleep(1500);
+        send_help_key();
+        {
+            const DWORD deadline = GetTickCount() + 5000;
+            while (GetTickCount() < deadline && FindLastRow("help.show") >= 0) {
+                Sleep(100);
+            }
+            Check(FindLastRow("help.show") < 0, "H6 resize:恢复尺寸后收起,表消失");
+            int residue = 0;
+            for (int r = 0; r < 400; ++r) {
+                if (ReadRow(r).find("help.show") != std::string::npos) {
+                    ++residue;
+                }
+            }
+            Check(residue == 0, "H6 resize:收起后全缓冲零残留");
+            const int status_end = FindLastRow("shift+tab");
+            Check(status_end >= 0, "H6 resize:收起后底栏在位");
+            if (status_end >= 0) {
+                const std::string prompt_text = ReadRow(status_end - 2);
+                Check(!prompt_text.empty() && prompt_text.back() == '>', "H6 resize:收起后提示行 '> ' 在位");
+            }
+        }
+
+        // H7(改绑轮 alt+h 才跑):表头/表尾写实际和弦(语言无关:认
+        // "Alt+H" 本身,且不与 help.show 绑定行混淆);'?' 在这轮是普通
+        // 字符。改绑来自预写的 keymap.json(配置加载路),不是 /keymap set
+        // ——那条的回显带全本键位表,针脚全被污染。
+        if (alt_help) {
+            SendText("?");
+            Sleep(700);
+            Check(FindLastRow("> ?") >= 0, "H7 改绑:旧和弦 '?' 退回普通字符");
+            SendKey('C', 3, LEFT_CTRL_PRESSED);
+            Sleep(400);
+            send_help_key();
+            Check(WaitForText("help.show", 5000), "H7 改绑:Alt+H 展开帮助");
+            Sleep(500);
+            bool header_has_chord = false;
+            const int chord_status = FindLastRow("shift+tab");
+            for (int r = 0; r < chord_status && r < 400; ++r) {
+                const std::string row = ReadRow(r);
+                if (row.find("Alt+H") != std::string::npos &&
+                    row.find("help.show") == std::string::npos) {
+                    header_has_chord = true;  // 表头/表尾行(不是绑定行,不混底栏提示)
+                    break;
+                }
+            }
+            Check(header_has_chord, "H7 改绑:表头/表尾显示新和弦 Alt+H");
+            send_help_key();
+            const DWORD close_deadline = GetTickCount() + 5000;
+            while (GetTickCount() < close_deadline && FindLastRow("help.show") >= 0) {
+                Sleep(100);
+            }
+            Check(FindLastRow("help.show") < 0, "H7 改绑:再按 Alt+H 收起");
+        }
+    };
+
     if (composer_only) {
+        run_help_scenario();
         SendText("exit");
         SendKey(VK_RETURN, L'\r', 0);
         if (WaitForSingleObject(pi.hProcess, 15000) != WAIT_OBJECT_0) {
@@ -655,6 +890,10 @@ int wmain(int argc, wchar_t** argv) {
         }
         Sleep(1000);
     }
+
+    // ---- H 幕(完整模式):? 帮助层开合/字符/十连击/resize,放在最后,
+    // 免得 resize 往返惊动前面各幕记下的绝对行号。----
+    run_help_scenario();
 
     // ---- 收尾:exit ----
     SendText("exit");

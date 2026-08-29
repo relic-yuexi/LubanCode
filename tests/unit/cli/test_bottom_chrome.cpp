@@ -552,3 +552,99 @@ TEST_CASE("高度预算:刚好装下不多舍,差一行才舍") {
     CHECK(one_less.frame.rows.size() == 6);
     CHECK(one_less.dropped_optional_rows == 1);
 }
+
+// ---------------------------------------------------------------------------
+// 场景帮助层(`?` 键位帮助只能展开不能收起单):帮助行是底栏帧最顶的一块
+// retained 层——进帧、进指纹、受高度预算钳制(最保,保头舍尾);开合
+// 状态机 HelpOverlayNext 纯逻辑钉死在这里,终端层各处只报事件。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("帮助层开合状态机:同一枚键展开/收起,Esc 只收,场景换必收") {
+    bool visible = false;
+    // 头一按展开,再一按收起——同一枚键,同一个动作。
+    visible = HelpOverlayNext(visible, HelpOverlayEvent::TogglePressed);
+    CHECK(visible);
+    visible = HelpOverlayNext(visible, HelpOverlayEvent::TogglePressed);
+    CHECK_FALSE(visible);
+    // Esc 只收不开:没开的时候按 Esc 不把帮助顶出来。
+    visible = HelpOverlayNext(visible, HelpOverlayEvent::EscapePressed);
+    CHECK_FALSE(visible);
+    visible = HelpOverlayNext(visible, HelpOverlayEvent::TogglePressed);
+    CHECK(visible);
+    visible = HelpOverlayNext(visible, HelpOverlayEvent::EscapePressed);
+    CHECK_FALSE(visible);
+    // 草稿一有正文(打字/粘贴/取回),场景换了,帮助必收。
+    visible = HelpOverlayNext(visible, HelpOverlayEvent::TogglePressed);
+    CHECK(visible);
+    visible = HelpOverlayNext(visible, HelpOverlayEvent::DraftFilled);
+    CHECK_FALSE(visible);
+    // 底栏让位/场景切换(搜索开、外部编辑器、转录导航、查看态切换)同款。
+    visible = HelpOverlayNext(visible, HelpOverlayEvent::TogglePressed);
+    CHECK(visible);
+    visible = HelpOverlayNext(visible, HelpOverlayEvent::SceneChanged);
+    CHECK_FALSE(visible);
+}
+
+TEST_CASE("帮助层布局:垫帧最顶,行序在活动条/队列之上,进指纹") {
+    const Theme plain;
+    BottomChromeModel model = FramedModel(ComposerState({U""}, 0, 0), ComposerMode::Idle);
+    model.help_rows = {"帮助表头", "? help.show", "帮助表尾"};
+    model.activity_rows = {"• Working (3s)"};
+    model.queue_rows = {"待发 1 条"};
+    const auto layout = BuildBottomChromeLayout(model, plain, 40);
+    // 行序:帮助 3 行 > 活动条 > 队列 > 上横线 > 输入 > 下横线 > 状态。
+    CHECK(layout.frame.rows[0].text == "帮助表头");
+    CHECK(layout.frame.rows[1].text == "? help.show");
+    CHECK(layout.frame.rows[2].text == "帮助表尾");
+    CHECK(layout.frame.rows[3].text == "• Working (3s)");
+    CHECK(layout.frame.rows[4].text == "待发 1 条");
+    CHECK(layout.frame.rows[5].text == PlainRule(40));
+    CHECK(layout.composer_first_row == 6);
+    CHECK(layout.chrome.help_rows.size() == 3);
+    CHECK(layout.chrome.TotalRows() == static_cast<int>(layout.frame.rows.size()));
+    // 指纹认帮助行:行变了指纹必变;与别区分区隔开,同文不误判相等。
+    BottomChromeFrame a = layout.chrome;
+    BottomChromeFrame b = a;
+    CHECK(BottomChromeFingerprint(a) == BottomChromeFingerprint(b));
+    b.help_rows[1] = "? chat.search_history";
+    CHECK(BottomChromeFingerprint(a) != BottomChromeFingerprint(b));
+    b.help_rows.clear();
+    b.queue_rows = a.help_rows;  // 帮助行挪进队列区,分区标记得拦住"相等"
+    CHECK(BottomChromeFingerprint(a) != BottomChromeFingerprint(b));
+}
+
+TEST_CASE("帮助层布局:高度预算里最保,装不下保头舍尾不挤提示符") {
+    const Theme plain;
+    BottomChromeModel model = FramedModel(ComposerState({U""}, 0, 0), ComposerMode::Idle);
+    model.help_rows = {"表头", "行一", "行二", "行三", "行四", "表尾"};
+    model.agent_dock_rows = {"↑/↓ 选择", "● main"};
+    model.transient_rows = {"  /help"};
+    // 不限 = 帮助6 + 横线2 + 输入1 + 状态1 + 坞2 + 提示1 = 13 行。
+    REQUIRE(BuildBottomChromeLayout(model, plain, 40).frame.rows.size() == 13);
+    // 预算 10(核心4 + 帮助6 恰好,坞/提示让位):帮助一行不少,提示符照画。
+    const auto keeps_help = BuildBottomChromeLayout(model, plain, 40, 10);
+    CHECK(keeps_help.frame.rows.size() == 10);
+    CHECK(keeps_help.chrome.help_rows.size() == 6);
+    CHECK(keeps_help.chrome.agent_dock_rows.empty());
+    CHECK(keeps_help.chrome.transient_rows.empty());
+    CHECK(keeps_help.dropped_optional_rows == 3);
+    bool has_input = false;
+    for (const auto& row : keeps_help.frame.rows) {
+        if (!row.text.empty() && row.text[0] == '>') {
+            has_input = true;
+        }
+    }
+    CHECK(has_input);
+    // 预算 7(核心4 + 帮助3):帮助保头舍尾——表头在,表尾让位。
+    const auto truncated = BuildBottomChromeLayout(model, plain, 40, 7);
+    CHECK(truncated.frame.rows.size() == 7);
+    REQUIRE(truncated.chrome.help_rows.size() == 3);
+    CHECK(truncated.chrome.help_rows[0] == "表头");
+    CHECK(truncated.chrome.help_rows[2] == "行二");
+    CHECK(truncated.dropped_optional_rows == 3 + 3);  // 帮助3 + 坞2 + 提示1
+    // 绝境(预算 2,连核心都装不下):帮助一行不剩,输入行必画得下。
+    const auto desperate = BuildBottomChromeLayout(model, plain, 40, 2);
+    CHECK(desperate.frame.rows.size() == 1);
+    CHECK(desperate.chrome.help_rows.empty());
+    CHECK(desperate.composer_row_count == 1);
+}

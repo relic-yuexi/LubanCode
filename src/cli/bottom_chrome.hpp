@@ -3,6 +3,7 @@
 // 布局函数只产行与高度,终端 painter 只管锚点、擦除、落笔。
 //
 // 帧的行序(自上而下):
+//   help_rows(场景按键帮助层,`?` 展开;空 = 没开,垫最顶)
 //   activity_rows(Working 活动条)
 //   queue_rows(待发队列,composer 上横线之上)
 //   上横线 / top_padding 留白 / composer_rows 行输入 / bottom_padding 补空 / 下横线
@@ -28,6 +29,7 @@
 namespace lubancode::cli {
 
 struct BottomChromeFrame {
+    std::vector<std::string> help_rows;       // 场景帮助层(0.32.x ? 开合;空 = 没开)
     std::vector<std::string> activity_rows;   // Working 活动条(空闲空)
     std::vector<std::string> queue_rows;      // 待发队列(空队列零行)
     std::vector<std::string> agent_dock_rows; // 导航坞(无子代理零行)
@@ -42,16 +44,16 @@ struct BottomChromeFrame {
     int selected_task_id = 0;  // 导航当前选中(0=main,-1=汇总哨兵)
     std::uint64_t revision = 0;  // 帧身份:内容变必变
 
-    // 整帧行数(活动条+队列+横线+输入+状态+坞+提示)。
+    // 整帧行数(帮助+活动条+队列+横线+输入+状态+坞+提示)。
     int TotalRows() const {
-        return static_cast<int>(activity_rows.size()) + static_cast<int>(queue_rows.size()) +
-               composer_rows + rule_rows + status_rows +
+        return static_cast<int>(help_rows.size()) + static_cast<int>(activity_rows.size()) +
+               static_cast<int>(queue_rows.size()) + composer_rows + rule_rows + status_rows +
                static_cast<int>(agent_dock_rows.size()) + static_cast<int>(transient_rows.size());
     }
-    // 坞首行相对帧顶的偏移:队列之后、框与状态栏之下。
+    // 坞首行相对帧顶的偏移:帮助/队列之后、框与状态栏之下。
     int AgentDockFirstRow() const {
-        return static_cast<int>(activity_rows.size()) + static_cast<int>(queue_rows.size()) +
-               composer_rows + rule_rows + status_rows;
+        return static_cast<int>(help_rows.size()) + static_cast<int>(activity_rows.size()) +
+               static_cast<int>(queue_rows.size()) + composer_rows + rule_rows + status_rows;
     }
 };
 
@@ -88,6 +90,7 @@ struct ComposerViewModel {
 // 只负责摆位与截断。framed=false 是无框单行读取(向导/确认提示)的退化
 // 形态:不画横线、不留白、不摆状态行。
 struct BottomChromeModel {
+    std::vector<std::string> help_rows;        // 场景帮助层(空 = 没开,垫帧最顶)
     std::vector<std::string> activity_rows;    // Working 活动条(空闲空)
     std::vector<std::string> queue_rows;       // 待发队列(空队列零行)
     ComposerViewModel composer;
@@ -98,6 +101,25 @@ struct BottomChromeModel {
     int selected_task_id = 0;                  // 导航当前选中(0=main)
     bool framed = true;                        // 是否带横线框(见上)
 };
+
+// ---------------------------------------------------------------------------
+// 帮助层开合状态机(纯,`?` 键位帮助只能展开不能收起单):终端层各处只报
+// 事件,下一状态全在这查——谁也不许多写一份 if。事件语义:
+//   TogglePressed    空 composer 按下 help.show 和弦(非空时那枚键是普通
+//                    字符,事件压根不发生);
+//   EscapePressed    Esc(帮助层开着时优先收帮助,不给编辑器/面板);
+//   DraftFilled      草稿从空变非空(打字/粘贴/取回),场景换了;
+//   SceneChanged     底栏让位或场景切换(搜索开/队列取回/外部编辑器/转录
+//                    导航/查看态切换……),帮助层跟着底栏一起走。
+// ---------------------------------------------------------------------------
+enum class HelpOverlayEvent {
+    TogglePressed,
+    EscapePressed,
+    DraftFilled,
+    SceneChanged,
+};
+
+bool HelpOverlayNext(bool visible, HelpOverlayEvent event);
 
 // BuildBottomChromeLayout 的产物:可直接落笔的整帧 + 行数账 + 光标。
 // cursor_row 相对帧顶;composer_first_row 是首个输入物理行在帧里的下标。

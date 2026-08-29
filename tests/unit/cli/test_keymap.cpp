@@ -257,3 +257,65 @@ TEST_CASE("AllBindings:作用域分组齐全,含固定键") {
     CHECK(saw_fixed);
     CHECK(saw_unbound);
 }
+
+// ---------------------------------------------------------------------------
+// 场景帮助表(`?` 键位帮助只能展开不能收起单):BuildSceneHelpLines 是帮助层
+// 的唯一内容源——表头/表尾写 help.show 的实际和弦(改绑跟着改),流式
+// 作用域不进表,行数与 AllBindings 对得上。断言只认和弦文本与动作名
+// (语言无关),不碰译文的字眼。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("场景帮助表:默认绑定下表头表尾写 ?,行数与非流式绑定对齐") {
+    const Keymap map;
+    const std::vector<std::string> lines = BuildSceneHelpLines(map);
+    REQUIRE(lines.size() >= 3);  // 表头 + 至少一行绑定 + 表尾
+    // 表头/表尾都带默认和弦(语言无关的断言:只认和弦文本本身)。
+    CHECK(lines.front().find("?") != std::string::npos);
+    CHECK(lines.back().find("?") != std::string::npos);
+    // help.show 自家那行的和弦列也写 ?。
+    bool saw_help_show = false;
+    std::size_t binding_rows = 0;
+    for (std::size_t i = 1; i + 1 < lines.size(); ++i) {
+        ++binding_rows;
+        CHECK(lines[i].size() >= 12);  // 和弦列定宽 12 + 动作名
+        if (lines[i].find("help.show") != std::string::npos) {
+            saw_help_show = true;
+            CHECK(lines[i].substr(0, 12).find("?") != std::string::npos);
+        }
+    }
+    CHECK(saw_help_show);
+    // 行数 = 非 Streaming 绑定数(表头表尾各一行;流式那批不属空闲场景)。
+    std::size_t non_streaming = 0;
+    for (const auto& record : map.AllBindings()) {
+        if (record.scope != KeyScope::Streaming) {
+            ++non_streaming;
+        }
+    }
+    CHECK(binding_rows == non_streaming);
+    // 固定键也入表(screen.redraw 不可改绑,但可查可显)。
+    bool saw_fixed_key = false;
+    for (std::size_t i = 1; i + 1 < lines.size(); ++i) {
+        if (lines[i].find("screen.redraw") != std::string::npos) {
+            saw_fixed_key = true;
+        }
+    }
+    CHECK(saw_fixed_key);
+}
+
+TEST_CASE("场景帮助表:改绑 help.show 后表头表尾写新和弦,不再写 ?") {
+    Keymap map;
+    std::string error;
+    REQUIRE(map.SetBinding(ActionId::HelpShow, *ParseKeyChord("alt+h"), error));
+    const std::vector<std::string> lines = BuildSceneHelpLines(map);
+    REQUIRE(lines.size() >= 3);
+    CHECK(lines.front().find("Alt+H") != std::string::npos);
+    CHECK(lines.back().find("Alt+H") != std::string::npos);
+    CHECK(lines.front().find("?") == std::string::npos);
+    CHECK(lines.back().find("?") == std::string::npos);
+    // 绑定行里的 help.show 那一行也换成了新和弦。
+    for (std::size_t i = 1; i + 1 < lines.size(); ++i) {
+        if (lines[i].find("help.show") != std::string::npos) {
+            CHECK(lines[i].find("Alt+H") != std::string::npos);
+        }
+    }
+}

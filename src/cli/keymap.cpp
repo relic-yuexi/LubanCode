@@ -11,6 +11,7 @@
 #include <sstream>
 
 #include <nlohmann/json.hpp>
+#include "cli/i18n.hpp"
 #include "tools/path_utils.hpp"
 
 namespace lubancode::cli::keymap {
@@ -288,6 +289,40 @@ bool BindableAction(ActionId action) {
         }
     }
     return false;
+}
+
+std::vector<std::string> BuildSceneHelpLines(const Keymap& keymap) {
+    // 收起出口写实际和弦:改绑后表头/表尾跟着改,不硬写问号;未绑键时
+    // 拿动作名兜底,起码指得出 /keymap set help.show <和弦> 这条路。
+    std::string chord_label;
+    if (const std::optional<KeyChord> chord = keymap.ChordFor(ActionId::HelpShow);
+        chord.has_value()) {
+        chord_label = FormatKeyChord(*chord);
+    } else {
+        chord_label = ActionName(ActionId::HelpShow);
+    }
+
+    std::vector<std::string> lines;
+    lines.push_back(trf("help.scene_header", chord_label));
+    constexpr int kChordColumnWidth = 12;  // 和弦列宽:最长 "Ctrl+X Ctrl+K" 一档
+    for (const BindingRecord& record : keymap.AllBindings()) {
+        if (record.scope == KeyScope::Streaming) {
+            continue;  // 流式脚注那批不属"当前场景"(空闲 composer)
+        }
+        std::string row = record.has_default ? FormatKeyChord(record.chord) : "-";
+        for (int pad = static_cast<int>(row.size()); pad < kChordColumnWidth; ++pad) {
+            row.push_back(' ');
+        }
+        row += ActionName(record.action);
+        if (!record.bindable) {
+            row += tr("help.fixed_suffix");
+        } else if (!record.has_default) {
+            row += tr("help.unbound_suffix");
+        }
+        lines.push_back(std::move(row));
+    }
+    lines.push_back(trf("help.scene_footer", chord_label));
+    return lines;
 }
 
 Keymap::Keymap() {
