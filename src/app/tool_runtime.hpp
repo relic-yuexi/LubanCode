@@ -24,6 +24,7 @@
 #include <vector>
 
 #include "api/backend.hpp"
+#include "agent/agent_profile_resolver.hpp"  // AgentProfileResolveEnvironment:阶段 3 解析环境
 #include "cli/theme.hpp"
 #include "cli/worktree.hpp"
 #include "config/config.hpp"
@@ -257,6 +258,9 @@ private:
     std::function<bool(const lubancode::tools::Tool&)> sub_tool_filter_;
     std::vector<PluginMountInfo> plugin_mounted_;
     std::vector<std::string> plugin_warnings_;
+    // 阶段 3:自定义 Agent 解析环境的静态半份(技能/MCP 名单、角色路由、
+    // 思考档表——构造时定格)。权限档是会话活账,供应商回调里现读。
+    lubancode::agent::AgentProfileResolveEnvironment resolve_env_static_;
 };
 
 }  // namespace lubancode::app

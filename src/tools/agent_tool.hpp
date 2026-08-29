@@ -44,6 +44,7 @@
 #include "api/backend.hpp"
 #include "agent/agent.hpp"  // Agent/AgentProfile/Callbacks:子代理的引擎与皮
 #include "agent/agent_definition.hpp"  // AgentDefinition:自定义 Agent 的解析结果(P2-2)
+#include "agent/agent_profile_resolver.hpp"  // ResolvedAgentProfile:阶段 3 统一解析
 #include "agent/loop.hpp"      // RunOutcome/RunOneTool:轮次收口与工具执行链
 #include "agent/runtime_profile.hpp"
 #include "api/types.hpp"
@@ -256,6 +257,14 @@ public:
         return custom_agent_resolver_;
     }
 
+    // 自定义 Agent 的解析环境(阶段 3:AgentProfileResolver 的父会话活材料
+    // 账——权限档、技能/MCP 名单、角色路由、思考档表)。每笔派发现调,
+    // 会话内会变的账(权限档)读到的总是当下值。空 = 宿主没接(旧调用方/
+    // 单测),权限与依赖校验按"没账可查"跳过:不报错,也不放宽。
+    void SetResolveEnvironment(std::function<agent::AgentProfileResolveEnvironment()> environment) {
+        resolve_environment_ = std::move(environment);
+    }
+
     // 交互会话开、单发/单测关。入参显式给 run_in_background 时压过它。
     void SetBackgroundByDefault(bool enabled) { background_by_default_ = enabled; }
     void SetDetachedBackendFactory(std::function<DetachedAgentBackend()> factory) {
@@ -399,14 +408,17 @@ private:
                    const IsolationScope* isolation_scope = nullptr,
                    const std::shared_ptr<lubancode::hooks::DetachedHookSession>& background_hooks = nullptr,
                    const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions = nullptr,
-                   const CustomAgentMaterial* custom = nullptr);
+                   const CustomAgentMaterial* custom = nullptr,
+                   const agent::ResolvedAgentProfile* resolved = nullptr);
 
     Result ExecuteForeground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
                              ToolRegistry& task_registry, const SubagentBudget& budget, bool isolate,
-                             const CustomAgentMaterial* custom = nullptr);
+                             const CustomAgentMaterial* custom = nullptr,
+                             const agent::ResolvedAgentProfile* resolved = nullptr);
     Result LaunchBackground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
                             ToolRegistry& task_registry, const SubagentBudget& budget, bool isolate,
-                            const CustomAgentMaterial* custom = nullptr);
+                            const CustomAgentMaterial* custom = nullptr,
+                            const agent::ResolvedAgentProfile* resolved = nullptr);
 
     // 子代理请求的包装后端(agent_tool.cpp 内实现):一次不落地把"请求发出/
     // 首事件/逐事件/收场错误"记进活度账与诊断日志(LUBANCODE_DEBUG_SUBAGENT)。
@@ -444,6 +456,9 @@ private:
     // 自定义 Agent 解析口(P2-2):空 = 只认内置两枚(旧行为)。宿主在会话
     // 装配时灌入;回调在 execute() 的宿主线程被调,内部自管线程安全。
     std::function<std::optional<CustomAgentMaterial>(const std::string&)> custom_agent_resolver_;
+    // 解析环境供应商(阶段 3):空 = 没接(旧调用方),Resolver 的权限/依赖
+    // 校验按"没账可查"跳过。与 custom_agent_resolver_ 同一条寿命规矩。
+    std::function<agent::AgentProfileResolveEnvironment()> resolve_environment_;
     lubancode::cli::GitRunner git_runner_;                    // isolation 房务;空 = 真 git
     std::size_t context_window_tokens_ = 0;                   // 子代理 mid-turn 压缩评估;0 = 未知
     agent::AgentRuntimeProfile runtime_profile_;              // 运行策略:与 main 同一份(默认 unset)

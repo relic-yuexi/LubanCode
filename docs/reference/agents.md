@@ -432,6 +432,15 @@ Agent 定义不写进会话历史正文。历史只记稳定 `name`、定义来�
 - `PromptSectionSwitches`（mcp/web/lsp/wire 四段开关）：解析器按有效工具与
   配置推导，首版不开放 YAML 直写。
 
+合并档（阶段 3，`AgentProfileResolver` 是唯一权威，AgentTool 派发与 Workflow
+绑定同一口进）：runtime 五枚预算字段各按
+**入参显式 > YAML runtime > 父值/配置默认**落档；`max_output_tokens` 的 YAML
+显式值视同 config 级声明（来源标 `ConfigFile`），YAML 缺席时父值连同来源枚举
+原样继承；`context_window_tokens` 在父值之前另有一级"会话同步的窗口"（发轮
+前再同步的活值）。合并期诊断用 §9.2/§9.3 的稳定码（`agent.tool_not_granted`、
+`agent.permission_widening`、`agent.effort_not_supported`、
+`agent.missing_dependency`），派发口结构化明拒，不悄悄放宽。
+
 与 todo 样例的三处出入，已在本文档订正：
 
 1. 工具名对齐现有注册表：命令工具叫 `run_command`（不叫 `shell`）；待办工具

@@ -163,7 +163,10 @@ mcp_servers:
     CHECK(Contains(lines, "mcp__nope__shot ✗(当前会话注册表里没有)"));
     CHECK(Contains(lines, "allow 与 deny 交叠: read_file(deny 胜出)"));
     CHECK(Contains(lines, "browser ✓ 已挂载"));
-    CHECK(Contains(lines, "runtime: max_steps_per_turn=继承"));
+    // 阶段 3:runtime 五枚预算字段一并登账,没声明的如实写"继承"。
+    CHECK(Contains(lines, "runtime: max_output_tokens=继承"));
+    CHECK(Contains(lines, "max_steps_per_turn=继承"));
+    CHECK(Contains(lines, "length_continuations=继承"));
     CHECK(Contains(lines, "permissions: inherit"));
     CHECK(Contains(lines, "结论: 定义可用,但静态预检发现"));
 }

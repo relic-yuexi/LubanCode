@@ -14,10 +14,12 @@
 #include "app/version.hpp"
 #include "app/commands/agent_commands.hpp"  // ComputeAgentScanRoots:自定义 Agent 目录三层的根
 #include "cli/i18n.hpp"
+#include "cli/console_input.hpp"  // CurrentConfirmMode:父会话权限档(阶段 3 解析环境)
 #include "memory/memory_tool.hpp"
 #include "mcp/mcp_tool.hpp"
 #include "ptc/profile.hpp"
 #include "agent/agent_catalog.hpp"  // LoadAgentCatalog:派发时按名解析自定义 Agent(P2-2)
+#include "agent/agent_profile_resolver.hpp"  // AgentProfileResolveEnvironment:阶段 3 解析环境
 #include "tools/agent_message_tool.hpp"
 #include "tools/background_output.hpp"
 #include "tools/edit_file.hpp"
@@ -296,6 +298,49 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         skills_segment));
     agent_tool_ = dynamic_cast<lubancode::tools::AgentTool*>(main_registry_.Find("agent"));
     if (agent_tool_ != nullptr) {
+        // 阶段 3:解析环境(AgentProfileResolver 的父会话活材料账)。静态
+        // 半份(技能/MCP 名单、角色路由、思考档表)构造时定格;权限档是
+        // 会话活账(Shift+Tab 随时切),供应商回调里现读——每笔派发拿到的
+        // 都是当下值。角色路由照 BuildRoleSpecs 的优先级:高级段
+        // model_roles.<role>.model 非空优先,回落 shorthand 三字段。
+        resolve_env_static_.skill_names.reserve(skills.size());
+        for (const auto& skill : skills) {
+            resolve_env_static_.skill_names.push_back(skill.name);
+        }
+        resolve_env_static_.mcp_server_names.reserve(mcp_servers_.size());
+        for (const auto& server : mcp_servers_) {
+            resolve_env_static_.mcp_server_names.push_back(server.name);
+        }
+        const auto route_of = [](const config::ModelRoleRouteConfig& advanced,
+                                 const std::string& shorthand) -> lubancode::agent::AgentRoleRoute {
+            if (!advanced.model.empty()) {
+                return {advanced.provider, advanced.model};
+            }
+            if (!shorthand.empty()) {
+                return {std::string(), shorthand};
+            }
+            return {};
+        };
+        resolve_env_static_.role_normal = route_of(config.model_roles.normal, config.normal_model);
+        resolve_env_static_.role_cheap = route_of(config.model_roles.cheap, config.cheap_model);
+        resolve_env_static_.role_lao = route_of(config.model_roles.lao, config.lao_model);
+        resolve_env_static_.supported_efforts = config.provider_think_levels;
+        agent_tool_->SetResolveEnvironment([this]() {
+            lubancode::agent::AgentProfileResolveEnvironment env = resolve_env_static_;
+            switch (lubancode::cli::CurrentConfirmMode()) {
+                case lubancode::cli::ConfirmMode::Auto:
+                    env.parent_permission = lubancode::agent::AgentPermissionMode::Auto;
+                    break;
+                case lubancode::cli::ConfirmMode::Yolo:
+                    env.parent_permission = lubancode::agent::AgentPermissionMode::Yolo;
+                    break;
+                case lubancode::cli::ConfirmMode::Confirm:
+                default:
+                    env.parent_permission = lubancode::agent::AgentPermissionMode::Confirm;
+                    break;
+            }
+            return env;
+        });
         // 自定义 Agent 解析口(真机实测 P2-1/P2-2):agent 工具收到非内置类型
         // 时按名查 AgentCatalog。现扫不缓存——用户改了 YAML,下一次派发即
         // 生效,不必重启会话。预装技能的正文从启动时扫到的技能清单里读;
