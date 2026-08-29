@@ -331,13 +331,14 @@ TEST_CASE("示例 workflow:三省六部两层宪制——官制归数据") {
     REQUIRE(parsed->node_map.at("chengzhi").input.contains("override_answers"));
     CHECK(parsed->node_map.at("chengzhi").input["override_answers"].is_array());
 
-    // 尚书照路由表分牒,定牒誊单,发牌 map 引 dingdie 的 dispatches。
+    // 尚书照路由表分牒,定牒誊单,发牌 foreach 按单序串行(验-修-验有依赖,
+    // 并发 map 会让基线被修复动作污染——0.26.85 真机实翻)。
     REQUIRE(parsed->node_map.contains("shangshu"));
     CHECK(parsed->node_map.at("shangshu").kind == lubancode::workflow::NodeKind::Llm);
     CHECK(parsed->node_map.at("shangshu").input.contains("edict"));
     CHECK(parsed->node_map.at("shangshu").input.contains("ministries"));
     REQUIRE(parsed->node_map.contains("fapai"));
-    CHECK(parsed->node_map.at("fapai").kind == lubancode::workflow::NodeKind::Map);
+    CHECK(parsed->node_map.at("fapai").kind == lubancode::workflow::NodeKind::Foreach);
     CHECK(parsed->node_map.at("fapai").items_ref == "${nodes.dingdie.output.dispatches}");
     CHECK(parsed->node_map.at("fapai").map_body == "banshi");
 

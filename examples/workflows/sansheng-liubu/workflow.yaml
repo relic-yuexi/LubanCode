@@ -167,11 +167,10 @@ nodes:
       answers: "${nodes.jiaqian.output.answers}"
 
   fapai:
-    type: map
-    label: "发牌 六部并行"
+    type: foreach
+    label: "发牌 六部按单序办差"
     items: "${nodes.dingdie.output.dispatches}"
     body: banshi
-    max_concurrency: 3
 
   banshi:
     type: agent
