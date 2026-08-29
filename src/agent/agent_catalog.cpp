@@ -28,6 +28,7 @@ struct LayerRecord {
 std::string LayerLabel(AgentSourceLayer layer) {
     switch (layer) {
         case AgentSourceLayer::Builtin: return "builtin";
+        case AgentSourceLayer::Package: return "package";
         case AgentSourceLayer::User: return "user";
         case AgentSourceLayer::Project: return "project";
     }
@@ -219,10 +220,28 @@ AgentCatalog LoadAgentCatalog(const AgentCatalogScanRoots& roots) {
     std::vector<LayerRecord> project = ScanLayer(roots.project_dir, AgentSourceLayer::Project,
                                                  catalog.load_errors);
 
-    // 合并:同名取最高层(project > user > builtin),所以按优先级从高到低
-    // 喂。高层的条目即使不可用也占住名字(显式覆盖,坏了也不许静默退回
-    // 低层——单子"unavailable Agent 不得静默退回"同款骨气);低层来源进
-    // shadowed_sources,账序 = 优先级从高到低(紧挨其下的层在前)。
+    // 包层(阶段 3):成品件直接进 LayerRecord——解析与引用折 canonical 都
+    // 在 Package 挂载层(AnalyzePackage)做完,这里不重读文件。同层重名
+    // 规矩同样管:两包同 id 已在扫描层定过胜者,同 canonical 重名只在挂载
+    // 材料自造重复时发生,照样整组不可用。
+    std::vector<LayerRecord> packaged_records;
+    packaged_records.reserve(roots.packaged.size());
+    for (const PackagedAgentEntry& packaged : roots.packaged) {
+        LayerRecord record;
+        record.name = packaged.canonical_name;
+        record.definition = packaged.definition;
+        record.layer = AgentSourceLayer::Package;
+        record.file = packaged.file_utf8;
+        packaged_records.push_back(std::move(record));
+    }
+    ReportSameLayerConflicts(packaged_records, catalog.load_errors);
+
+    // 合并:同名取最高层(project > user > package > builtin),所以按优先级
+    // 从高到低喂。高层的条目即使不可用也占住名字(显式覆盖,坏了也不许静默
+    // 退回低层——单子"unavailable Agent 不得静默退回"同款骨气);低层来源
+    // 进 shadowed_sources,账序 = 优先级从高到低(紧挨其下的层在前)。包层
+    // 的 canonical 名带点带冒号,与裸名命名空间不相交,理论上的跨层撞名
+    // 实际不发生(座次见 agent_catalog.hpp 的枚举注释)。
     struct MergeSlot {
         const LayerRecord* chosen = nullptr;
         std::vector<const LayerRecord*> shadowed;
@@ -240,6 +259,7 @@ AgentCatalog LoadAgentCatalog(const AgentCatalogScanRoots& roots) {
     };
     feed(project);
     feed(user);
+    feed(packaged_records);
     feed(builtin);
 
     catalog.entries.reserve(merged.size());
@@ -251,6 +271,11 @@ AgentCatalog LoadAgentCatalog(const AgentCatalogScanRoots& roots) {
         entry.definition = slot.chosen->definition;
         entry.issues = slot.chosen->issues;
         entry.available = slot.chosen->definition.has_value() && !slot.chosen->conflict;
+        if (slot.chosen->layer == AgentSourceLayer::Package) {
+            // canonical 名就是 <package_id>:<local>,剥前段即来源包。
+            const std::size_t colon = name.find(':');
+            entry.package_id = colon == std::string::npos ? std::string() : name.substr(0, colon);
+        }
         for (const LayerRecord* shadow : slot.shadowed) {
             entry.shadowed_sources.push_back(shadow->file);
         }

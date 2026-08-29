@@ -44,6 +44,7 @@
 #include "config/model_catalog.hpp"
 #include "lsp/manager.hpp"
 #include "memory/project_memory.hpp"  // ProjectMemory(/memory 的会话件)
+#include "package/mounting.hpp"       // PackageMount:会话钉快照(阶段 3 挂载)
 #include "peers/peer_session.hpp"
 #include "runtime/event_sinks.hpp"
 #include "runtime/session_runtime.hpp"
@@ -95,6 +96,9 @@ struct SlashDispatchContext {
     std::optional<std::string>* config_file_path = nullptr;
     const std::optional<std::string>* home_dir = nullptr;        // /skills 的扫描位
     const std::optional<std::string>* home_lubancode = nullptr;  // /keymap /workflow
+    // Package 会话钉快照(统一封装单阶段 3):/agents、/agent doctor|inspect、
+    // /workflow、/package 的包层挂载材料都从这折;空 = 没有包(裸机照旧)。
+    const lubancode::package::PackageMount* package_mount = nullptr;
     const std::string* prompts_dir = nullptr;
     std::string* persona = nullptr;
     const std::filesystem::path* global_skills_root = nullptr;

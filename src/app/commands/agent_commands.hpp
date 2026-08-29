@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "agent/agent_catalog.hpp"
+#include "agent/prompt_assembler.hpp"  // PackageProfileRoot:包层 Profile 根(阶段 3)
 #include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
 #include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
 #include "tools/registry.hpp"
@@ -36,9 +37,12 @@ struct AgentDoctorMaterials {
 // Prompt Profile 的解析上下文(阶段 2):用户层与项目层的 prompts 根。
 // 纯函数不摸环境——handler 现算好递进来(ComputeProjectPromptsRoot /
 // HomeLubancodeDir),单测想造什么层就造什么层。都空 = 只有内置层。
+// package_roots(统一 Package 封装单阶段 3):包层根,canonical 名的
+// Profile 在这里解析;空 = 没有包层。
 struct AgentPromptContext {
     std::string user_prompts_dir;
     std::string project_prompts_dir;
+    std::vector<lubancode::agent::PackageProfileRoot> package_roots;
 };
 
 // ---------------- 纯函数(单测钉住) ----------------
@@ -68,7 +72,8 @@ std::vector<std::string> FormatAgentInspectReport(const lubancode::agent::AgentC
 // ~/.lubancode/agents、project = 项目根(FindProjectRoot,复用 instruction
 // 发现规则)/.lubancode/agents。目录不存在照旧进 roots——Catalog 对缺席
 // 层静默跳过。
-lubancode::agent::AgentCatalogScanRoots ComputeAgentScanRoots();
+lubancode::agent::AgentCatalogScanRoots ComputeAgentScanRoots(
+    std::vector<lubancode::agent::PackagedAgentEntry> packaged = {});
 
 // Prompt Profile 的项目层根(阶段 2):<项目根>/.lubancode/prompts,UTF-8
 // 串。会话装配(给 AgentTool 塞项目层)与 /agent inspect 共用这一个口,

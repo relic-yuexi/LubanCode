@@ -11,11 +11,13 @@
 #include "app/commands/prompt_commands.hpp"    // LoadSoulContentByName(魂内容)
 #include "app/commands/agent_commands.hpp"     // ComputeProjectPromptsRoot(阶段 2 Profile 项目层)
 #include "app/turn_runner.hpp"                 // PromptAskUser(ask_user 工具的问话)
+#include "app/version.hpp"                     // kVersion:包兼容性检查的当前版本
 #include "cli/i18n.hpp"
 #include "cli/terminal_port.hpp"
 #include "config/model_catalog.hpp"
 #include "config/project_instructions.hpp"
 #include "memory/memory_tool.hpp"
+#include "package/inventory.hpp"  // ScanOptions/ScopeToString
 #include "platform/console.hpp"
 #include "platform/paths.hpp"
 #include "tools/agent_tool.hpp"
@@ -56,6 +58,61 @@ std::shared_ptr<lubancode::memory::ProjectMemory> BuildProjectMemory(
         }
     }
     return project_memory;
+}
+
+// ---- Package 会话钉快照(统一封装单阶段 3) ----
+// 首版语义:启动扫描装配一次,运行中目录变化不热生效——下回启动才见
+//(单子 §十二;不做热重载)。四层根与 /package 命令的 BuildScanOptions 同
+// 一套口径:home 的 packages、项目 .lubancode/packages、官方目录、
+// --package-dir 的 dev 层。包外短引用的兜底账喂 config 的 mcpServers 键与
+// builtin Agent 两名;standalone 技能名在 LoadSessionSkills 的第一趟里扫。
+lubancode::package::PackageMount BuildSessionPackageMount(const lubancode::config::Config& config,
+                                                          const std::vector<std::string>& package_dirs) {
+    lubancode::package::PackageMountInput input;
+    lubancode::package::ScanOptions& scan = input.scan;
+    if (const auto home_lubancode = lubancode::config::HomeLubancodeDir(); home_lubancode.has_value()) {
+        scan.user_root = lubancode::platform::Utf8ToPath(*home_lubancode) / "packages";
+    }
+    scan.project_root = std::filesystem::current_path() / ".lubancode" / "packages";
+    if (const auto official = lubancode::platform::OfficialPackagesDir(); official.has_value()) {
+        scan.official_root = lubancode::platform::Utf8ToPath(*official);
+    }
+    for (const std::string& dir : package_dirs) {
+        if (!dir.empty()) {
+            scan.dev_roots.push_back(lubancode::platform::Utf8ToPath(dir));
+        }
+    }
+    if (const auto version = lubancode::package::ParseSemVer(kVersion); version.has_value()) {
+        scan.current_lubancode = *version;
+    }
+#if defined(_WIN32)
+    scan.current_platform = "windows";
+#elif defined(__APPLE__)
+    scan.current_platform = "macos";
+#else
+    scan.current_platform = "linux";
+#endif
+    for (const auto& [name, server] : config.mcp_servers) {
+        (void)server;
+        input.external.mcp_servers.insert(name);
+    }
+    input.external.agents.insert("general-purpose");
+    input.external.agents.insert("Explore");
+    for (const auto& meta : lubancode::tools::LoadSkills(CurrentDirUtf8(), lubancode::config::HomeDir(),
+                                                         lubancode::platform::OfficialSkillsDir())) {
+        input.external.skills.insert(meta.name);
+    }
+    return lubancode::package::BuildPackageMount(input);
+}
+
+// 会话技能清单:两趟。第一趟裸扫 standalone(官方/用户/项目五处),名单
+// 喂包挂载的兜底账;第二趟带包根合出正式清单——packaged 技能以 canonical
+// 名并表,standalone 结果一字不变(无包时第二趟与第一趟同源同果)。
+std::vector<lubancode::tools::SkillMeta> LoadSessionSkills(
+    const std::optional<std::string>& home_dir, const std::optional<std::string>& official_skills_dir,
+    const lubancode::package::PackageMount& package_mount) {
+    return lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir, official_skills_dir,
+                                        lubancode::package::MountSkillRoots(package_mount));
 }
 
 }  // namespace
@@ -101,7 +158,8 @@ SessionStack::SessionStack(const InteractiveSessionOptions& options)
     : config_result(options.config_result),
       home_dir(lubancode::config::HomeDir()),
       official_skills_dir(lubancode::platform::OfficialSkillsDir()),
-      skills(lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir, official_skills_dir)),
+      package_mount(BuildSessionPackageMount(config_result.config, options.package_dirs)),
+      skills(LoadSessionSkills(home_dir, official_skills_dir, package_mount)),
       skills_segment(lubancode::tools::BuildSkillsPromptSegment(skills)),
       home_lubancode(lubancode::config::HomeLubancodeDir()),
       prompts_dir(home_lubancode.has_value() ? (*home_lubancode + "/prompts") : std::string()),
@@ -201,6 +259,9 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
     };
     runtime_options.memory = stack->project_memory;
     runtime_options.worktree_session = &stack->worktree_session;
+    // Package 会话钉快照递进工具栈:agent 工具派发时按 canonical 名解析
+    // packaged Agent(借用指针,SessionStack 持有、活得比 ToolRuntime 久)。
+    runtime_options.package_mount = &stack->package_mount;
     // worktree 工具的两道硬确认(进园子外的房、脏房强删)走自己的问话通道,
     // 不经三档确认——确认档压不住这一问,管道模式没人可问就拒。
     runtime_options.worktree_confirm = [theme_ref = &theme](const std::string& question) -> std::optional<bool> {
@@ -244,8 +305,12 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
         // 提示词运行时化:子代理系统提示同机制(features 模块用户文件优先)。
         // Prompt Profile(阶段 2):项目层根一并递进去——自定义 Agent 点名
         // Profile 时,"项目选中覆盖"这层才用得上,default 上下文不受影响。
+        // 统一 Package 封装单阶段 3:包层 Profile 根同进——packaged Agent
+        // 点名的 canonical Profile 在包根里解析。
         stack->agent_tool()->SetPromptsDir(stack->prompts_dir);
         stack->agent_tool()->SetProjectPromptsRoot(lubancode::app::ComputeProjectPromptsRoot());
+        stack->agent_tool()->SetPackageProfileRoots(
+            lubancode::package::MountProfileRoots(stack->package_mount));
         stack->agent_tool()->SetProjectInstructions(stack->project_instructions);
         if (stack->sub_deferral) {
             stack->agent_tool()->SetToolFilter(stack->sub_tool_filter());

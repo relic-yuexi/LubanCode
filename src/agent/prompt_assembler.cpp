@@ -126,13 +126,48 @@ const embedded::EmbeddedModule* FindProfileModule(std::string_view profile_rel_p
 // Profile 不生效(profile 空或 "default")时只走前两层,与 0.21.x 的
 // "用户文件优先、嵌入回退"逐字节同路——default 上下文的黄金基线钉这
 // 一点。下层缺席(文件不存在/空白/目录没有)就停在该层,稳稳退回下一层。
+//
+// 包层(统一 Package 封装单阶段 3,契约 §6.1 列了"Package 覆盖"这个来源、
+// §6.2 的五层次序没给它定位)在此定死:**canonical 名("<包id>:<名>")
+// 的 Profile 只在包根里解析,裸名 Profile 只在内置/用户/项目三层里解析,
+// 两套命名空间不相交**。这样定的一句理:包内 Profile 是包给自家 Agent
+// 配的套件,用户/项目要盖它,不是去包目录里改文件,而是给自己的 Agent
+// 点自家裸名 Profile——本地主人自家的话,永远走自家的层。裸名各层的
+// 五层次序一个字符不动(黄金基线续钉)。
 struct ResolvedModule {
     std::string content;
     PromptSourceLedgerEntry entry;
 };
 
+// canonical 名的包层解析:profile = "<包id>:<名>",在 package_roots 里找
+// 同包 id 的根,读 <根>/<名>/<相对路径>。找不到包或缺文件 = nullopt
+//(停在该层,回退已解析的正文)。
+std::optional<ModuleFile> ReadPackagedProfileModule(const std::vector<PackageProfileRoot>& roots,
+                                                    const std::string& profile, std::string_view rel_path) {
+    const std::size_t colon = profile.find(':');
+    if (colon == std::string::npos || colon == 0 || colon + 1 >= profile.size()) {
+        return std::nullopt;
+    }
+    const std::string package_id = profile.substr(0, colon);
+    const std::string local = profile.substr(colon + 1);
+    for (const PackageProfileRoot& root : roots) {
+        if (root.package_id != package_id) continue;
+        return ReadModuleFile(root.profiles_dir_utf8, local + "/" + std::string(rel_path));
+    }
+    return std::nullopt;
+}
+
+// Profile 名是否 canonical("<包id>:<名>" 形状):只在有名有冒号时认,
+// 不再深究包 id 合法性——包层挂载材料只会给出真包 id,这里宽松些只为
+// 分流(非 canonical 的带冒号名找不到包根,自然全程缺席)。
+bool IsCanonicalProfileName(const std::string& profile) {
+    return profile.find(':') != std::string::npos;
+}
+
 ResolvedModule ResolveModule(const std::string& profile, const std::string& prompts_dir,
-                             const std::string& project_prompts_dir, std::string_view rel_path) {
+                             const std::string& project_prompts_dir,
+                             const std::vector<PackageProfileRoot>& package_roots,
+                             std::string_view rel_path) {
     ResolvedModule out;
     out.entry.rel_path = std::string(rel_path);
     if (const embedded::EmbeddedModule* module = FindModule(rel_path); module != nullptr) {
@@ -145,6 +180,17 @@ ResolvedModule ResolveModule(const std::string& profile, const std::string& prom
         out.entry.file = std::move(user->path_utf8);
     }
     if (IsPromptProfileActive(profile)) {
+        if (IsCanonicalProfileName(profile)) {
+            // canonical 名:只走包层(命名空间不相交,见上注)。
+            if (auto packaged = ReadPackagedProfileModule(package_roots, profile, rel_path);
+                packaged.has_value()) {
+                out.content = std::move(packaged->content);
+                out.entry.origin = PromptModuleOrigin::PackageProfile;
+                out.entry.profile = profile;
+                out.entry.file = std::move(packaged->path_utf8);
+            }
+            return out;
+        }
         const std::string profile_rel = "profiles/" + profile + "/" + out.entry.rel_path;
         if (const embedded::EmbeddedModule* module = FindProfileModule(profile_rel); module != nullptr) {
             out.content = module->content;
@@ -235,6 +281,8 @@ std::string ToString(PromptModuleOrigin origin) {
             return "user profile";
         case PromptModuleOrigin::ProjectProfile:
             return "project profile";
+        case PromptModuleOrigin::PackageProfile:
+            return "package profile";
         case PromptModuleOrigin::Persona:
             return "persona";
         case PromptModuleOrigin::RuntimeEnvironment:
@@ -335,7 +383,8 @@ std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedge
                 continue;
             }
             ResolvedModule resolved = ResolveModule(options.profile, options.prompts_dir,
-                                                    options.project_prompts_dir, module.rel_path);
+                                                    options.project_prompts_dir,
+                                                    options.package_profile_roots, module.rel_path);
             if (!prompt.empty()) {
                 prompt += "\n\n";
             }
@@ -349,7 +398,8 @@ std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedge
     };
     const auto append_module = [&](std::string_view rel_path) {
         ResolvedModule resolved = ResolveModule(options.profile, options.prompts_dir,
-                                                options.project_prompts_dir, rel_path);
+                                                options.project_prompts_dir,
+                                                options.package_profile_roots, rel_path);
         append(resolved.content);
         LedgerAdd(ledger, std::move(resolved.entry));
     };
@@ -438,10 +488,12 @@ std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedge
 }
 
 PromptSourceLedger BuildPromptProfileLedger(const std::string& profile, const std::string& prompts_dir,
-                                            const std::string& project_prompts_dir) {
+                                            const std::string& project_prompts_dir,
+                                            const std::vector<PackageProfileRoot>& package_roots) {
     PromptSourceLedger ledger;
     for (const auto& module : embedded::kAllModules) {
-        ResolvedModule resolved = ResolveModule(profile, prompts_dir, project_prompts_dir, module.rel_path);
+        ResolvedModule resolved =
+            ResolveModule(profile, prompts_dir, project_prompts_dir, package_roots, module.rel_path);
         ledger.entries.push_back(std::move(resolved.entry));
     }
     PromptSourceLedgerEntry mode_entry;

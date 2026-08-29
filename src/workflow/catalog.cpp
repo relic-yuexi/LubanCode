@@ -71,7 +71,12 @@ void ScanScope(const std::filesystem::path& root, WorkflowScope scope, std::vect
 }  // namespace
 
 std::string ToString(WorkflowScope scope) {
-    return scope == WorkflowScope::Project ? "project" : "home";
+    switch (scope) {
+        case WorkflowScope::Project: return "project";
+        case WorkflowScope::User: return "home";
+        case WorkflowScope::Package: return "package";
+    }
+    return "?";
 }
 
 bool IsValidAlias(const std::string& alias) {
@@ -103,9 +108,36 @@ bool IsValidWorkflowId(const std::string& id) {
     return true;
 }
 
+bool IsCanonicalPackagedWorkflowId(const std::string& id) {
+    // 形状:<包id>:<local>。包 id 至少两段(一个点)、每段小写 kebab;冒号
+    // 恰一枚;local 段是合法裸 workflow id。总长帽沿用 64 的精神放宽到
+    // 128——包 id 自身可到 64,死卡 64 会把合法包全拒了。
+    const std::size_t colon = id.find(':');
+    if (colon == std::string::npos || id.find(':', colon + 1) != std::string::npos) return false;
+    if (id.empty() || id.size() > 128) return false;
+    const std::string package_id = id.substr(0, colon);
+    if (package_id.size() < 3 || package_id.find('.') == std::string::npos) return false;
+    std::size_t segment_begin = 0;
+    bool segment_ok = false;
+    for (std::size_t i = 0; i <= package_id.size(); ++i) {
+        if (i == package_id.size() || package_id[i] == '.') {
+            if (!segment_ok || package_id[i - 1] == '.') return false;  // 空段或双点
+            segment_ok = false;
+            segment_begin = i + 1;
+            continue;
+        }
+        const char c = package_id[i];
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
+        if (!ok || i == segment_begin && c == '-') return false;  // 段首不许横线
+        segment_ok = true;
+    }
+    return IsValidWorkflowId(id.substr(colon + 1));
+}
+
 const CatalogEntry* Catalog::Find(const std::string& id) const {
     // entries 里项目级遮用户级:同 id 只留项目那份(LoadCatalog 已处理),
-    // 顺序找第一个即对。
+    // 顺序找第一个即对。包层(阶段 3)的 canonical id 与裸 id 命名空间不相
+    // 交,同一张表里两种键并存,Find 照单全收。
     for (const auto& entry : entries) {
         if (!entry.broken && entry.definition.id == id) return &entry;
     }
@@ -115,6 +147,9 @@ const CatalogEntry* Catalog::Find(const std::string& id) const {
 const CatalogEntry* Catalog::FindByAlias(const std::string& alias) const {
     if (disabled_aliases.count(alias) > 0) return nullptr;
     for (const auto& entry : entries) {
+        // 包层不抢裸 alias(契约 packages.md §6"Package component 不抢裸
+        // alias"):packaged workflow 只走 /workflow run <canonical id> 正门。
+        if (entry.scope == WorkflowScope::Package) continue;
         if (!entry.broken && entry.definition.enabled && entry.definition.alias == alias) return &entry;
     }
     return nullptr;
@@ -125,6 +160,10 @@ void DetectAliasConflicts(Catalog& catalog, const std::vector<std::string>& skil
     std::map<std::string, int> alias_owner_count;
     std::map<std::string, std::string> alias_first_owner;
     for (const auto& entry : catalog.entries) {
+        // 包层(阶段 3)不参与裸 alias 的撞名账:它不注册裸 alias(FindByAlias
+        // 已跳过),也就没有"谁的 alias 被谁禁用"可算——packaged workflow
+        // 永远走 canonical id 正门。
+        if (entry.scope == WorkflowScope::Package) continue;
         if (entry.broken || entry.definition.alias.empty()) continue;
         const std::string& alias = entry.definition.alias;
         if (!IsValidAlias(alias)) {
@@ -162,7 +201,8 @@ void DetectAliasConflicts(Catalog& catalog, const std::vector<std::string>& skil
 }
 
 Catalog LoadCatalog(const std::optional<std::filesystem::path>& project_root,
-                    const std::optional<std::filesystem::path>& user_root) {
+                    const std::optional<std::filesystem::path>& user_root,
+                    const std::vector<PackagedWorkflowSource>& packaged) {
     Catalog catalog;
     std::vector<CatalogEntry> project_entries;
     std::vector<CatalogEntry> user_entries;
@@ -189,10 +229,30 @@ Catalog LoadCatalog(const std::optional<std::filesystem::path>& project_root,
     for (auto& entry : project_entries) {
         catalog.entries.push_back(std::move(entry));
     }
-    // 项目在前,稳住 Find 的顺序假设。
+    // 包层(阶段 3):成品件直接登册——解析与包内引用折 canonical 都在
+    // Package 挂载层做完。canonical id 与裸 id 命名空间不相交,不参与上方
+    // 的项目/用户遮蔽账。
+    for (const PackagedWorkflowSource& source : packaged) {
+        CatalogEntry entry;
+        entry.scope = WorkflowScope::Package;
+        entry.dir = source.dir;
+        entry.definition = source.definition;
+        entry.content_hash = source.content_hash;
+        entry.package_id = source.package_id;
+        catalog.entries.push_back(std::move(entry));
+    }
+    // 项目在前,稳住 Find 的顺序假设;包层垫底(座次见枚举注释)。
+    const auto scope_rank = [](WorkflowScope scope) {
+        switch (scope) {
+            case WorkflowScope::Project: return 0;
+            case WorkflowScope::User: return 1;
+            case WorkflowScope::Package: return 2;
+        }
+        return 3;
+    };
     std::stable_sort(catalog.entries.begin(), catalog.entries.end(),
-                     [](const CatalogEntry& a, const CatalogEntry& b) {
-                         return a.scope == WorkflowScope::Project && b.scope == WorkflowScope::User;
+                     [scope_rank](const CatalogEntry& a, const CatalogEntry& b) {
+                         return scope_rank(a.scope) < scope_rank(b.scope);
                      });
     return catalog;
 }

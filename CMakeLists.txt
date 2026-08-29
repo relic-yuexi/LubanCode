@@ -620,6 +620,9 @@ add_library(lubancode_core STATIC
   # Root)、mcp.yaml 解析、短名/全名引用解析、MountPlan(只产计划不执行)。
   src/package/component.cpp
   src/package/catalog.cpp
+  # 统一 Package 封装单阶段 3:会话钉快照(PackageMount)与四类内容组件
+  # (Skill/Workflow/Agent/Prompt Profile)的挂载材料折算。
+  src/package/mounting.cpp
   # 自进化闭环阶段 1:EvolutionObservation、五路只读 adapter、指纹归一、
   # 采集器与只追加观察账(纯逻辑,复用 skills/journal 的既有脱敏)。
   src/evolution/observation.cpp
