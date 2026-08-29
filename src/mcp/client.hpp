@@ -146,6 +146,12 @@ public:
     // 会话累计落盘的二进制字节(诊断/测试用)。
     std::size_t landed_artifact_bytes() const { return landed_artifact_bytes_; }
 
+    // 生产超时口(统一 Package 封装单阶段 5):mcp.yaml 的 runtime.timeout_ms
+    // 是包作者给的握手/调用墙钟帽,起服那侧折进来。只许在握手前调;值 <=0
+    // 忽略,沿用内置默认(30s/120s)。standalone(config.json)路不调,行为
+    // 一字不变。
+    void SetTimeouts(int default_timeout_ms, int tool_call_timeout_ms);
+
     // 仅供测试用:把默认/tools-call 超时收窄成几十毫秒,免得"验证超时会
     // 变成 is_error"这条测试也要真等 30s/120s。生产路径永远用 kDefaultTimeoutMs/
     // kToolCallTimeoutMs 这两个常量,不调这个方法。

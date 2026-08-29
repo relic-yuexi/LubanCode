@@ -2,9 +2,11 @@
 
 namespace lubancode::mcp {
 
-McpTool::McpTool(Client& client, std::string server_name, ToolInfo info)
+McpTool::McpTool(Client& client, std::string server_name, ToolInfo info,
+                 std::string display_server_name)
     : client_(client),
       server_name_(std::move(server_name)),
+      display_server_name_(std::move(display_server_name)),
       info_(std::move(info)),
       full_name_("mcp__" + server_name_ + "__" + info_.name) {}
 
@@ -13,7 +15,10 @@ std::string McpTool::name() const {
 }
 
 std::string McpTool::description() const {
-    return "[MCP:" + server_name_ + "] " + info_.description;
+    // 阶段 5:packaged MCP 说明前缀用带点的 canonical 名(契约 §6.1:展示
+    // 名给人看,wire 名只进注册表与权限账)。
+    return "[MCP:" + (display_server_name_.empty() ? server_name_ : display_server_name_) + "] " +
+           info_.description;
 }
 
 nlohmann::json McpTool::input_schema() const {

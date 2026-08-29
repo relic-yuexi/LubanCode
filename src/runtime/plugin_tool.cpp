@@ -116,10 +116,16 @@ std::expected<tools::ImageContent, std::string> LandResponseImage(
 }  // namespace
 
 PluginToolAdapter::PluginToolAdapter(std::shared_ptr<const PluginManifest> manifest,
-                                     const PluginDefinition* definition)
-    : manifest_(std::move(manifest)), definition_(definition) {}
+                                     const PluginDefinition* definition,
+                                     std::string wire_name_override)
+    : manifest_(std::move(manifest)), definition_(definition),
+      wire_name_override_(std::move(wire_name_override)) {}
 
-std::string PluginToolAdapter::name() const { return definition_->full_name; }
+std::string PluginToolAdapter::name() const {
+    // 阶段 5:packaged 插件带 wire 覆盖名(命名空间化的 %HH 编码段);协议
+    // 帧里的 plugin/tool 字段仍走 manifest 原名,不受这枚注册名影响。
+    return wire_name_override_.empty() ? definition_->full_name : wire_name_override_;
+}
 
 std::string PluginToolAdapter::description() const {
     // 模型可见文本:只有 description 本身。language/command/env/path/

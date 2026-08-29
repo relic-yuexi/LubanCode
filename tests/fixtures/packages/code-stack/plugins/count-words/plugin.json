@@ -1,0 +1,33 @@
+{
+  "manifest_version": 1,
+  "id": "count-words",
+  "version": "1.0.0",
+  "language": "python",
+  "runtime": {
+    "kind": "process",
+    "command": "python",
+    "args": ["${plugin_dir}/runner.py"],
+    "timeout_ms": 15000
+  },
+  "tools": [
+    {
+      "name": "count",
+      "description": "数一段文本的词数。纯本地统计,不出网,不落盘。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "待数的文本"
+          }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": {
+    "network": false,
+    "env": []
+  }
+}

@@ -34,9 +34,15 @@ class PluginToolAdapter : public tools::Tool {
 public:
     // manifest:整份插件清单(argv/timeout 从这里来);definition 指向
     // manifest.tools 里的一项,manifest 须活得比本对象久(shared_ptr 钉住)。
-    PluginToolAdapter(std::shared_ptr<const PluginManifest> manifest, const PluginDefinition* definition);
+    // wire_name_override(统一 Package 封装单阶段 5):packaged 插件的注册名
+    // 用命名空间化的 wire 名(plugin__<pkg>%2E<local>__<tool>,契约
+    // packages.md §6.1)替下 manifest 本地的 plugin__<id>__<tool>。协议帧
+    // 不受影响——请求里的 plugin/tool 字段仍用 manifest 原名,只换注册表
+    // 与 provider 看到的那枚名字。standalone 路不传,行为一字不变。
+    PluginToolAdapter(std::shared_ptr<const PluginManifest> manifest, const PluginDefinition* definition,
+                      std::string wire_name_override = {});
 
-    std::string name() const override;         // plugin__<id>__<tool>
+    std::string name() const override;         // plugin__<id>__<tool>(packaged 用 wire 覆盖名)
     std::string description() const override;  // 模型可见说明(不带宿主元数据)
     nlohmann::json input_schema() const override;
     bool needs_confirm() const override { return true; }   // process 插件默认确认
@@ -66,6 +72,7 @@ private:
 
     std::shared_ptr<const PluginManifest> manifest_;
     const PluginDefinition* definition_;
+    std::string wire_name_override_;  // 空 = 用 definition_->full_name(standalone 旧路)
     std::string cwd_utf8_;
     const std::atomic<bool>* cancel_ = nullptr;
     PluginLogSink log_sink_;

@@ -22,6 +22,15 @@ namespace lubancode::tools {
 // 这边零 agent 依赖)。
 enum class ToolSourceKind { Builtin, Mcp, Lsp, PluginLua, PluginNative, Agent, Ptc, Deferred };
 
+// Package 来源账(统一封装单阶段 5 的 ToolOrigin 轻账):packaged 组件挂上
+// 的工具逐枚记这三样,/tools、/mcp、/plugins 展示 canonical 名 + 包版本都
+// 从这份账取。standalone(旧目录/config.json)工具不带,nullopt。
+struct ToolOrigin {
+    std::string package_id;        // moontide.full-stack
+    std::string package_version;   // 0.1.0(清单原文)
+    std::string component_id;      // canonical id:<package_id>:<local_id>
+};
+
 // 一枚注册的全部元数据(单子"引入注册元数据"那张表)。
 struct ToolRegistration {
     std::unique_ptr<Tool> tool;
@@ -31,6 +40,7 @@ struct ToolRegistration {
     EffectClass effect_class = EffectClass::InProcessUnknown;
     Idempotency idempotency = Idempotency::Unknown;
     RecoveryCapability recovery = RecoveryCapability::None;
+    std::optional<ToolOrigin> package_origin;  // 阶段 5:包来源账(无包工具空)
 };
 
 class ToolRegistry {

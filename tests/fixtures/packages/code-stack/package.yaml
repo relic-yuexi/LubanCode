@@ -1,0 +1,7 @@
+schema: 1
+id: moontide.code-stack
+version: 0.1.0
+name: Code Stack Sample
+description: 阶段 5 挂载事务的三件套夹具。两件 process 插件加一只 stdio MCP,全部用 Python,起得来也说得上话。
+
+license: Apache-2.0

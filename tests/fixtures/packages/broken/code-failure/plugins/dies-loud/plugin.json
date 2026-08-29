@@ -1,0 +1,27 @@
+{
+  "manifest_version": 1,
+  "id": "dies-loud",
+  "version": "1.0.0",
+  "language": "python",
+  "runtime": {
+    "kind": "process",
+    "command": "python",
+    "args": ["${plugin_dir}/runner.py"],
+    "timeout_ms": 15000
+  },
+  "tools": [
+    {
+      "name": "shout",
+      "description": "坏件:启动即退非零,什么也不回。挂载事务的探针必须拦下它,整包回滚。",
+      "input_schema": {
+        "type": "object",
+        "properties": {},
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": {
+    "network": false,
+    "env": []
+  }
+}

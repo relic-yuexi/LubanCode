@@ -17,7 +17,12 @@ namespace lubancode::mcp {
 
 class McpTool : public lubancode::tools::Tool {
 public:
-    McpTool(Client& client, std::string server_name, ToolInfo info);
+    // display_server_name(统一 Package 封装单阶段 5):packaged MCP 的注册名
+    // 用 wire 服务段(mcp__<%2E 编码>__<tool>,契约 packages.md §6.1),给人
+    // 看的说明前缀换带点的 canonical 名。standalone 路不传,server_name 一枚
+    // 两用,行为一字不变。
+    McpTool(Client& client, std::string server_name, ToolInfo info,
+            std::string display_server_name = {});
 
     std::string name() const override;
     std::string description() const override;
@@ -36,6 +41,7 @@ public:
 private:
     Client& client_;
     std::string server_name_;
+    std::string display_server_name_;  // 空 = 与 server_name 同一枚(standalone)
     ToolInfo info_;
     std::string full_name_;
 };

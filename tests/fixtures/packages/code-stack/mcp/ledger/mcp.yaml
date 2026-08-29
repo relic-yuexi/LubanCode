@@ -1,0 +1,13 @@
+schema: 1
+id: ledger
+description: 记事小账。ping 应声,note 记一笔,不出网不落盘(夹具)。
+transport: stdio
+
+runtime:
+  command: python
+  args:
+    - "${package_dir}/mcp/ledger/server.py"
+  timeout_ms: 15000
+
+permissions:
+  network: false
