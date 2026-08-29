@@ -140,6 +140,11 @@ struct BackgroundProcessHandle {
     // 约定 UTF-8 但不保证;unknown = 未知程序。
     std::string encoding_hint;
 
+    // TerminateTree 失败时的人话原因(background 管理面单):失败分支写,
+    // 成功收口不保证清空(只有失败那次才有人读)。stop_failed 的原因从这
+    // 带回台账。空 = 最近一次收口没报错。
+    std::string last_terminate_error;
+
     // 平台实现持有原生身份(句柄/pid),定义在 process_win/posix.cpp。
     struct Impl;
     std::unique_ptr<Impl> impl;

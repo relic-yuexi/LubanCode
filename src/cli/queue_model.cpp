@@ -388,7 +388,7 @@ bool SlashCommandQueueableDuringBusy(SlashCommand command) {
         case SlashCommand::Lsp:       // LSP 状态,只打印
         case SlashCommand::Plugins:   // 插件三路与警告,只打印
         case SlashCommand::Tools:     // 工具三态,只打印
-        case SlashCommand::Background:  // 后台任务清单,只打印
+        case SlashCommand::Background:  // 后台任务清单/详情/日志,只读为主(stop all 的确认就地收)
         case SlashCommand::Trace:     // 逐枚追踪账,只读
         case SlashCommand::Config:    // 配置诊断,只打印
         case SlashCommand::Package:   // Package 只读面(list/show/doctor)

@@ -322,10 +322,14 @@ bool BackgroundProcessHandle::TerminateTree(int grace_ms) {
     if (impl->job != nullptr) {
         if (!TerminateJobObject(impl->job, 1)) {
             ok = false;  // 杀不动:如实报,调用方进 stop_failed 不盖章
+            last_terminate_error =
+                "TerminateJobObject 失败(Windows 错误码 " + std::to_string(GetLastError()) + ")";
         }
     } else if (impl->process != nullptr) {
         if (!TerminateProcess(impl->process, 1)) {
             ok = false;
+            last_terminate_error =
+                "TerminateProcess 失败(Windows 错误码 " + std::to_string(GetLastError()) + ")";
         }
     }
     if (ok && impl->process != nullptr) {

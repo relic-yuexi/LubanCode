@@ -431,6 +431,7 @@ bool BackgroundProcessHandle::TerminateTree(int grace_ms) {
         completion_.terminated_by_stop = true;
         return true;
     }
+    last_terminate_error = "SIGKILL 已发,5 秒后进程树仍未退净";
     return false;  // 5 秒还没死透:如实报,调用方进 stop_failed
 }
 

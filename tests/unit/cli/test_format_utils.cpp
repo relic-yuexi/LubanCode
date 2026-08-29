@@ -176,6 +176,36 @@ TEST_CASE("StatusPanel: goal/loop 段非空恒挂,不进 items 配置") {
     }
 }
 
+TEST_CASE("StatusPanel: 后台任务段非空恒挂,空账收起(background 管理面单)") {
+    // 空 = 没后台任务,整段不挂,状态行零变化。
+    {
+        StatusPanelData data;
+        data.model = "gpt-test";
+        const auto segments = BuildStatusPanelSegments({"model"}, ConfirmMode::Confirm, data);
+        bool seen = false;
+        for (const auto& segment : segments) {
+            if (segment.key == "background") seen = true;
+        }
+        CHECK_FALSE(seen);
+    }
+    // 非空 = 恒挂,items 没配也挂(与 REC/WT/tools/plan/goal_loop 同待遇:
+    // 后台有没有东西在跑,用户没配也得看得见)。
+    {
+        StatusPanelData data;
+        data.model = "gpt-test";
+        data.background = "后台 2 运行 / 1 完成";
+        const auto segments = BuildStatusPanelSegments({"model"}, ConfirmMode::Confirm, data);
+        bool seen = false;
+        for (const auto& segment : segments) {
+            if (segment.key == "background") {
+                seen = true;
+                CHECK(segment.text == "后台 2 运行 / 1 完成");
+            }
+        }
+        CHECK(seen);
+    }
+}
+
 TEST_CASE("CompactStatusPath: 长路径从左收起，保住盘符和末级目录") {
     CHECK(CompactStatusPath("D:\\very\\long\\folder\\project", 15) == "D:\\…\\project");
     CHECK(CompactStatusPath("/home/user/very/long/project", 12) == "/…/project");

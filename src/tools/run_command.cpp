@@ -362,6 +362,33 @@ std::string BuildEncodedCommand(const std::string& user_command_utf8) {
     return Base64Encode(reinterpret_cast<const unsigned char*>(wide.data()), wide.size() * sizeof(wchar_t));
 }
 
+// 后台专用的流式 wrapper(background 管理面单):与上面那颗的差异只有
+// 一处——命令裸执行,输出不落变量、不套 Out-String,stdout/stderr 由
+// platform 层直接接进日志文件。捕获式 wrapper 会把输出攒在内存里,进程
+// 不退日志一个字不落:dev server 这类长命进程被停掉时,攒的那点输出全
+// 跟着陪葬——"查看启动后持续增长的日志"就成了空话(实测:3 秒时日志
+// 0 字节,进程退出才 40 字节)。流式 wrapper 边跑边落盘(实测:3 秒时
+// 已有两行)。
+// 退出码契约与前台同款三条:
+//   1. 显式 exit N —— 原样(N 直接终止进程,下面的判定碰不到它);
+//   2. 跑过 native —— $LASTEXITCODE 末次值;
+//   3. 没跑过 native —— $? 真=0 假=1。
+// 两只坑都实测过:命令必须裸跑(套 & { } 的 scriptblock 会把 $? 吞成
+// 真,cmdlet 报错也测不出);`2>&1` 不能要(合并会叫 $? 恒真)——stderr
+// 由 hStdError 直接落日志,不劳脚本合并。
+std::string BuildBackgroundEncodedCommand(const std::string& user_command_utf8) {
+    const std::string script_utf8 =
+        "$ProgressPreference='SilentlyContinue'\r\n"
+        "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8\r\n"
+        "$LASTEXITCODE = $null\r\n"  // 清账:别让宿主/前一只 native 的旧码冒充本段的退出码
+        + user_command_utf8 + "\r\n" +  // 裸执行:边跑边流,日志实时增长
+        "if ($LASTEXITCODE -ne $null) { exit $LASTEXITCODE }\r\n"
+        "if ($?) { exit 0 } else { exit 1 }\r\n";
+
+    const std::wstring wide = platform::Utf8ToWide(script_utf8);
+    return Base64Encode(reinterpret_cast<const unsigned char*>(wide.data()), wide.size() * sizeof(wchar_t));
+}
+
 }  // namespace
 
 #endif  // _WIN32
@@ -527,9 +554,10 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
             bg = platform::RunShellCommandBackground(command, effective_cwd);
         } else {
             // 后台 PowerShell:命令本体不用拼 cd(cwd 走 lpCurrentDirectory),
-            // 只保留 wrapper 的编码设置。
+            // wrapper 用流式那颗(BuildBackgroundEncodedCommand)——输出边跑
+            // 边落日志,长命进程不等退出就能看输出。
             const std::wstring cmdline = std::wstring(ps_exe) + L" -NoProfile -NonInteractive -EncodedCommand " +
-                                          platform::Utf8ToWide(BuildEncodedCommand(command));
+                                          platform::Utf8ToWide(BuildBackgroundEncodedCommand(command));
             bg = platform::RunProcessBackground(cmdline, effective_cwd);
         }
         if (!bg.success) {
@@ -543,12 +571,16 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
             bg.handle->encoding_hint = "utf-8";
         }
         const std::string task_id = BackgroundTaskRegistry::Instance().Register(
-            command, shell, bg.pid, bg.log_path, std::move(bg.handle), max_runtime_ms);
+            command, shell,
+            effective_cwd.empty() ? PathToUtf8(std::filesystem::current_path())
+                                  : effective_cwd,
+            bg.pid, bg.log_path, std::move(bg.handle), max_runtime_ms);
         std::ostringstream oss;
         oss << "已在后台启动(task #" << task_id << ", PID " << bg.pid << "),不等它跑完。\n"
             << "日志文件: " << bg.log_path << "\n"
             << "查状态/输出: 用 background_output 工具(传 task_id=" << task_id << ")。\n"
-            << "收掉它: 用 stop_background 工具,或 Stop-Process -Id " << bg.pid << " -Force";
+            << "收掉它: 用 stop_background 工具,或 /background stop " << task_id
+            << ",或 Stop-Process -Id " << bg.pid << " -Force";
         if (max_runtime_ms > 0) {
             oss << "\n最长运行 " << max_runtime_ms << " 毫秒,到点自动收树。";
         }
@@ -606,12 +638,16 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
         // 登记进后台任务台账(同 Windows 分支):task_id + watcher 持原生句柄
         // 探活,完成时通知;退出码由唯一收尸方写进完成态,不再丢。
         const std::string task_id = BackgroundTaskRegistry::Instance().Register(
-            command, shell, bg.pid, bg.log_path, std::move(bg.handle), max_runtime_ms);
+            command, shell,
+            effective_cwd.empty() ? PathToUtf8(std::filesystem::current_path())
+                                  : effective_cwd,
+            bg.pid, bg.log_path, std::move(bg.handle), max_runtime_ms);
         std::ostringstream oss;
         oss << "已在后台启动(task #" << task_id << ", PID " << bg.pid << "),不等它跑完。\n"
             << "日志文件: " << bg.log_path << "\n"
             << "查状态/输出: 用 background_output 工具(传 task_id=" << task_id << ")。\n"
-            << "收掉它: 用 stop_background 工具,或 kill " << bg.pid << "(不行就 kill -9 " << bg.pid << ")";
+            << "收掉它: 用 stop_background 工具,或 /background stop " << task_id << ",或 kill " << bg.pid
+            << "(不行就 kill -9 " << bg.pid << ")";
         if (max_runtime_ms > 0) {
             oss << "\n最长运行 " << max_runtime_ms << " 毫秒,到点自动收树。";
         }

@@ -717,6 +717,8 @@ add_library(lubancode_app STATIC
   src/app/commands/workflow_commands.cpp
   # 统一 Package 封装单阶段 1:/package list|show|doctor 只读面。
   src/app/commands/package_commands.cpp
+  # background 管理面单:/background show|logs|stop 的用户命令面。
+  src/app/commands/background_commands.cpp
   # 自进化闭环阶段 1:/evolve status|list|show 只读面。
   src/app/commands/evolve_commands.cpp
   # 终端接线收尾单:/memory 命令 presenter(自大类搬出)。

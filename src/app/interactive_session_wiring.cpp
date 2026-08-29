@@ -64,6 +64,7 @@
 #include "app/commands/prompt_commands.hpp"
 #include "app/commands/settings_commands.hpp"
 #include "app/commands/workspace_commands.hpp"
+#include "app/commands/background_commands.hpp"  // BuildBackgroundStatusSegment:底栏后台段折数
 #include "app/commands/hook_commands.hpp"
 #include "app/commands/peer_commands.hpp"
 #include "app/commands/doctor_commands.hpp"
@@ -539,7 +540,22 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     subagent_wake_token_ = idle_wakes_.AddSource("subagent", [this]() {
         return session_agent_tool() != nullptr && session_agent_tool()->HasUndeliveredCompletions();
     });
+    // 后台命令任务的唤醒源(background 管理面单):watcher 把某条任务翻成
+    // 终态那一刻(HasUnreportedCompletions 只看不取),空闲 composer 让位,
+    // 主循环顶打完成/失败通知行,顺手重折底栏计数——用户不敲一行也当拍
+    // 看见,通知不闪一下就没(台账留着,/background 随时回看)。
+    background_wake_token_ = idle_wakes_.AddSource("background_tasks", []() {
+        return lubancode::tools::BackgroundTaskRegistry::Instance().HasUnreportedCompletions();
+    });
     lubancode::cli::SetIdleWakeHook([this]() { return idle_wakes_.AnyReady(); });
+
+    // 底栏状态行的后台任务段数据源(background 管理面单):BuildStatusLine
+    // 每次组行现折一次(空闲 100ms 拍与流式 footer 每帧),"后台 N 运行 /
+    // M 完成"跟着台账走,无任务空串收起。终端层不认台账,折数归这层。
+    lubancode::cli::SetBackgroundStatusProvider([]() {
+        return lubancode::app::BuildBackgroundStatusSegment(
+            lubancode::tools::BackgroundTaskRegistry::Instance().List());
+    });
 
     // 后台代理权限拒绝的当场告知(后台代理权限拒绝无告知单,2026-08-17):
     // 后台任务的 needs_confirm 工具被拒那一刻,AgentTool 已把一行通知推进
@@ -805,12 +821,14 @@ TerminalSessionController::~TerminalSessionController() {
     lubancode::cli::SetAgentViewSwitchHook(nullptr);
     lubancode::cli::SetIdleWakeHook(nullptr);
     lubancode::cli::SetBackgroundNoticeHook(nullptr);
+    lubancode::cli::SetBackgroundStatusProvider(nullptr);
     lubancode::cli::SetPromptHistoryProvider(nullptr);
     lubancode::cli::SetFileMentionProvider(nullptr);
     lubancode::cli::SetAdditionalSlashCompletionCandidates({});
     // 空闲唤醒源先摘;loop 随后停 timer/join(shutdown 要 join,不能让
     // callback 析构后摸 this)。
     subagent_wake_token_.reset();
+    background_wake_token_.reset();
     loop_wiring_.Shutdown();
 }
 

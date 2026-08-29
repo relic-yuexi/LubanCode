@@ -96,12 +96,11 @@ struct WorkspaceCommandState {
 CommandFlow HandleWorktreeCommand(WorkspaceCommandState& state, const std::string& args,
                                   const lubancode::cli::Theme& theme);
 
-// /background:列后台命令任务清单(运维视图,字面量文案不经 i18n)。
-CommandFlow HandleBackgroundCommand(const lubancode::cli::Theme& theme);
+// /background:挪去 background_commands.hpp(管理面单:show/logs/stop)。
 
 // ---------------------------------------------------------------------------
 // 命令分派注册制(会话终章):工作面域的分派位(init/worktree/mcp/lsp/
-// todos/plugins/plugin/tools/background)。case 体原样自 interactive_session
+// todos/plugins/plugin/tools)。case 体原样自 interactive_session
 // 的大 switch 搬来,材料经 SlashDispatchContext 递入。
 // ---------------------------------------------------------------------------
 struct SlashDispatchContext;
@@ -113,6 +112,5 @@ CommandFlow HandleSlashTodos(SlashDispatchContext& ctx, const lubancode::cli::Pa
 CommandFlow HandleSlashPlugins(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 CommandFlow HandleSlashPlugin(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 CommandFlow HandleSlashTools(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
-CommandFlow HandleSlashBackground(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 
 }  // namespace lubancode::app

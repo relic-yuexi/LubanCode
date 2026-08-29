@@ -593,7 +593,7 @@ const Entry kZhCN[] = {
     {"slash.desc.title", "看当前会话标题;/title 标题 给本场起名,/sessions 列表和导出都用它"},
     {"slash.desc.soul", "看当前魂;/soul 内容 写进 SOUL.md,/soul clear 还原默认；名字仍可切换备选魂"},
     {"slash.desc.prompt", "看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md"},
-    {"slash.desc.background", "列后台命令任务清单(状态/PID/命令);run_command run_in_background 起的那些"},
+    {"slash.desc.background", "后台命令任务管理面:列清单,show <id> 详情,logs <id> 查看日志,stop <id>|all 停止;run_command run_in_background 起的那些"},
     {"slash.desc.record", "录一遍生成技能;/record start 名字 开录,stop 出草稿,确认后安装"},
     {"slash.desc.plan", "只读研究并提交计划;/plan 正文 开始规划,status 看状态,off 退出,review 重开审阅"},
 
@@ -2254,7 +2254,7 @@ const Entry kEn[] = {
     {"slash.desc.title", "show the session title; /title <title> names this session"},
     {"slash.desc.soul", "show the current soul; /soul <text> writes SOUL.md; /soul clear restores default; a name switches souls"},
     {"slash.desc.prompt", "show the persona source/length; /prompt reset restores system_prompt.md"},
-    {"slash.desc.background", "list background command tasks (status/PID/command); from run_command run_in_background"},
+    {"slash.desc.background", "background command tasks: list, show <id>, logs <id>, stop <id>|all; from run_command run_in_background"},
     {"slash.desc.record", "record a workflow into a skill; /record start <name> to begin, stop drafts SKILL.md, install after review"},
     {"slash.desc.plan", "read-only research then a reviewable plan; /plan <task> to plan, status, off exits, review reopens"},
 
