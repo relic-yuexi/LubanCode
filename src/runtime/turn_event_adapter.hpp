@@ -149,6 +149,32 @@ public:
         ServerEvent event = MakeEvent(ServerEventKind::ItemCompleted, item_id, ItemKind::Tool);
         event.outcome = result.is_error ? Outcome::Failed : Outcome::Succeeded;
         event.payload = nlohmann::json{{"result", result.content}, {"is_error", result.is_error}};
+        // 截图 artifact 引用账(可见调试单阶段 2):MCP 富结果的图片块只
+        // 发元数据与 ArtifactRef(id/路径/尺寸/字节/sha256),绝不带
+        // base64——字节在会话 artifact 落盘处,事件只递指针。终端与
+        // app_server 前端凭它画截图卡片;模型侧照旧走重灌路。
+        nlohmann::json images = nlohmann::json::array();
+        for (const auto& block : result.payload.content) {
+            if (const auto* image = std::get_if<tools::ImageContent>(&block)) {
+                images.push_back(nlohmann::json{
+                    {"mime_type", image->mime_type},
+                    {"width", image->width},
+                    {"height", image->height},
+                    {"bytes", image->bytes},
+                    {"sha256", image->sha256},
+                    {"artifact", nlohmann::json{{"id", image->artifact.id},
+                                                {"filename", image->artifact.filename},
+                                                {"path", image->artifact.path},
+                                                {"mime_type", image->artifact.mime_type},
+                                                {"bytes", image->artifact.bytes},
+                                                {"sha256", image->artifact.sha256},
+                                                {"stored", image->artifact.stored}}},
+                });
+            }
+        }
+        if (!images.empty()) {
+            event.payload["images"] = std::move(images);
+        }
         MarkSubordinate(event, subordinate);
         Emit(std::move(event));
     }

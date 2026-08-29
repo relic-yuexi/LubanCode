@@ -1,0 +1,27 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>LubanCode 验收站 - Journal 页</title>
+  <style>body { font-family: sans-serif; margin: 2rem; }</style>
+</head>
+<body>
+  <h1>Journal 验收页</h1>
+  <p id="status">页面已加载。</p>
+  <button type="button" id="btn-noop">按一下</button>
+  <script>
+    // Console 四级 + 未捕获异常 + 一条带敏感样的日志(脱敏用)。
+    console.log('日志一条');
+    console.info('信息一条');
+    console.warn('警告一条');
+    console.error('错误一条');
+    console.log('token=abc123-should-be-redacted');
+    for (let i = 0; i < 16; ++i) console.log('noise-' + i);
+    setTimeout(() => { throw new Error('未捕获异常'); }, 50);
+    // Network:200 / 500 / 404 各一发;token 走 query(脱敏用)。
+    fetch('/api/ok?token=abc123').then((r) => { document.getElementById('status').textContent = 'api-ok ' + r.status; });
+    fetch('/api/fail').then((r) => { document.getElementById('status').textContent = 'api-fail ' + r.status; });
+    fetch('/definitely-missing-404').then(() => {}, () => {});
+  </script>
+</body>
+</html>

@@ -92,7 +92,7 @@ crash_epoch
 | --- | --- | --- |
 | 0 | 冻结边界（本文） | 已落 |
 | 1 | 从 MCP 中抽 BrowserSession，三层分家，直调测试 | 已落（`browser/lib/`） |
-| 2 | Console/Network journal、screenshot artifact 进 App Server 事件、可见调试面板 | 待做 |
+| 2 | Console/Network journal、screenshot artifact 进 App Server 事件、可见调试面板 | 已落(`browser_console`/`browser_network` 两本环形账;`item/completed` 附截图 artifact 引用;headed 可选;用户观察代仲裁。面板落终端工具回执——Desktop Tab 待阶段 4) |
 | 3 | App Server Browser 协议（方法 + 带 seq 的事件 + 断线补账） | 待做 |
 | 4 | 真正内嵌 Browser Tab（Electron/WebView2/CEF 选型另写 ADR） | 待做 |
 | 5 | 官方 Browser Package（Agent/Skill/Workflow，不复制 Runtime） | 待做 |

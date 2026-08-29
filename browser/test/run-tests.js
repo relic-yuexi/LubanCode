@@ -14,7 +14,7 @@ const path = require('path');
 
 const { BrowserMcpClient } = require('./mcp_client');
 const { startSite } = require('./site');
-const { runDirectMatrix } = require('./run-direct-tests');
+const { runDirectMatrix, runJournalMatrix } = require('./run-direct-tests');
 
 let passed = 0;
 let failed = 0;
@@ -101,10 +101,10 @@ async function runMatrix(engine, baseUrl) {
   ]);
   await client.start();
   try {
-    // tools/list:12 件工具 + schema 齐全。
+    // tools/list:14 件工具 + schema 齐全。
     const list = await client.request('tools/list', {});
     const names = list.result.tools.map((t) => t.name);
-    for (const expected of ['browser_status', 'browser_open', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_select', 'browser_wait', 'browser_tabs', 'browser_select_tab', 'browser_close_page', 'browser_screenshot', 'browser_downloads']) {
+    for (const expected of ['browser_status', 'browser_open', 'browser_snapshot', 'browser_click', 'browser_type', 'browser_select', 'browser_wait', 'browser_tabs', 'browser_select_tab', 'browser_close_page', 'browser_screenshot', 'browser_console', 'browser_network', 'browser_downloads']) {
       ok('tools/list 含 ' + expected, names.includes(expected));
     }
     ok('tools/list 带 inputSchema', list.result.tools.every((t) => t.inputSchema && t.inputSchema.type === 'object'));
@@ -437,6 +437,82 @@ async function runCancelMatrix(baseUrl) {
 }
 
 // ---------------------------------------------------------------------------
+// journal 工具面(阶段 2):browser_console / browser_network 两枚查询工具
+// 经 MCP 协议出账——与直调路同一本 session 账,回执带摘要行与 rows。
+// ---------------------------------------------------------------------------
+
+async function runJournalToolsMatrix(baseUrl) {
+  section('journal 工具面(engine=chromium)');
+  if (!playwrightAvailable) {
+    skip('journal 工具面', 'playwright 依赖未安装');
+    return;
+  }
+  const client = new BrowserMcpClient(['--engine', 'chromium', '--headless', '--profile', 'ephemeral']);
+  await client.start();
+  try {
+    const opened = await client.call('browser_open', { url: baseUrl + '/journal.html' });
+    const pageId = opened.structuredContent.page_id;
+    await new Promise((resolve) => setTimeout(resolve, 900));
+
+    const con = await client.call('browser_console', { page_id: pageId });
+    const conText = con.content[0].text || '';
+    ok('browser_console 回摘要行', conText.includes('console 账') && conText.includes('last_seq='), conText.split('\n')[0]);
+    ok('browser_console 见 pageerror', conText.includes('pageerror') && conText.includes('未捕获异常'));
+    ok('browser_console rows 带 seq/level/generation', (con.structuredContent.rows || []).every((r) => r.seq > 0 && r.level && r.generation >= 1));
+    ok('browser_console 脱敏出账', !(JSON.stringify(con.structuredContent).includes('abc123')));
+
+    const onlyError = await client.call('browser_console', { page_id: pageId, level: 'error' });
+    ok('browser_console level 过滤', ((onlyError.structuredContent || {}).rows || []).length >= 1 && onlyError.structuredContent.rows.every((r) => r.level === 'error'));
+
+    const net = await client.call('browser_network', { page_id: pageId, url_contains: '/api/' });
+    const netText = net.content[0].text || '';
+    ok('browser_network 回摘要行', netText.includes('network 账'), netText.split('\n')[0]);
+    ok('browser_network 见 /api/fail 500', netText.includes('/api/fail') && netText.includes('500'));
+    ok('browser_network rows 是元数据(无响应体字段)', (net.structuredContent.rows || []).every((r) => !('body' in r) && r.method && Number.isFinite(r.duration_ms)));
+    const badPage = await client.callExpectError('browser_console', { page_id: 'p999' });
+    ok('查不存在的页明报', badPage.code === 'browser.unknown_page', badPage.code);
+  } finally {
+    await client.stop();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// headed 窗口(阶段 2:默认可选 headed):CI 与无显示器环境不硬跑,
+// 设 LUBAN_BROWSER_HEADED_TEST=1 且非 CI 才起真窗口。
+// ---------------------------------------------------------------------------
+
+async function runHeadedMatrix(baseUrl) {
+  section('headed 窗口(engine=chromium)');
+  if (!playwrightAvailable) {
+    skip('headed 窗口矩阵', 'playwright 依赖未安装');
+    return;
+  }
+  if (process.env.CI) {
+    skip('headed 窗口矩阵', 'CI 无显示器,明记不硬跑(本机手动设 LUBAN_BROWSER_HEADED_TEST=1 冒烟)');
+    return;
+  }
+  if (process.env.LUBAN_BROWSER_HEADED_TEST !== '1') {
+    skip('headed 窗口矩阵', '未设 LUBAN_BROWSER_HEADED_TEST=1(headed 起真窗,默认不自动跑)');
+    return;
+  }
+  const { buildConfig } = require('../lib/config');
+  const { BrowserSession } = require('../lib/session');
+  const runtime = new BrowserSession(buildConfig({ engine: 'chromium', headless: false, profile: 'ephemeral' }));
+  try {
+    const opened = await runtime.open(baseUrl + '/journal.html', {});
+    const status = await runtime.status();
+    ok('headed 模式 status 报 headless=false', status.headless === false);
+    ok('headed 页面照常开', Boolean(opened.pageId) && opened.title.includes('Journal'));
+    const shot = await runtime.screenshot(opened.pageId, {});
+    ok('headed 截图照常出 PNG', shot.buffer.length > 1000 && shot.buffer[1] === 0x50, 'bytes=' + shot.buffer.length);
+    const snap = await runtime.snapshot(opened.pageId, {});
+    ok('headed 快照照常出 ref', /\[ref=e\d+\]/.test(snap.text));
+  } finally {
+    await runtime.shutdown();
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 主流程
 // ---------------------------------------------------------------------------
 
@@ -495,6 +571,29 @@ async function main() {
       ++failed;
       failures.push('直调矩阵异常: ' + String(error.message || error));
       console.log('  FAIL 直调矩阵异常: ' + String(error.message || error));
+    }
+
+    // 阶段 2:两本 journal 的直调矩阵、工具面矩阵、headed 窗口矩阵。
+    try {
+      await runJournalMatrix(baseUrl, { ok, skip, section, tempDir, refOfLine });
+    } catch (error) {
+      ++failed;
+      failures.push('journal 矩阵异常: ' + String(error.message || error));
+      console.log('  FAIL journal 矩阵异常: ' + String(error.message || error));
+    }
+    try {
+      await runJournalToolsMatrix(baseUrl);
+    } catch (error) {
+      ++failed;
+      failures.push('journal 工具面矩阵异常: ' + String(error.message || error));
+      console.log('  FAIL journal 工具面矩阵异常: ' + String(error.message || error));
+    }
+    try {
+      await runHeadedMatrix(baseUrl);
+    } catch (error) {
+      ++failed;
+      failures.push('headed 矩阵异常: ' + String(error.message || error));
+      console.log('  FAIL headed 矩阵异常: ' + String(error.message || error));
     }
 
     console.log('\n---- 汇总 ----');

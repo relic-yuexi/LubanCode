@@ -78,6 +78,16 @@ const MIME = {
 function startSite() {
   const server = http.createServer((req, res) => {
     const url = new URL(req.url, 'http://127.0.0.1');
+    if (url.pathname === '/api/ok') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end('{"ok":true}');
+      return;
+    }
+    if (url.pathname === '/api/fail') {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end('{"ok":false}');
+      return;
+    }
     if (url.pathname === '/downloads/text') {
       res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8', 'Content-Disposition': 'attachment; filename="note.txt"' });
       res.end('本地验收站的文本下载。\n');
