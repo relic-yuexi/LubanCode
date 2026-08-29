@@ -232,6 +232,12 @@
 - **工具带上了出身。** 每件包内工具挂 ToolOrigin(package/version/component),`/tools`、`/plugins`、`/mcp` 照实显示"来自哪只包哪一版";占位符 `${package_dir}/${package_data}/${env:NAME}` 结构化展开,逃包根双闸拦。
 - **修实一桩合并事故(致歉)。** 0.26.103 的合并把三处未解冲突标记提交进了 package_commands.cpp,当夜的"全绿"吃了陈旧二进制的假账。本版解净(信任账与 store 五路两边都留),以新编译产物重验:241 册全绿,exe 时间戳亲核。
 
+## [v0.26.105] - 2026-08-29
+
+- **gui-agent 学会两件结构路兵器(借 computer-use 的招)。** `gui_set_value`:UIA ValuePattern 整体替换可编辑控件的值——先校验可写、存替换前值、设完复读核对,比逐字 typing 可靠;`gui_invoke`:InvokePattern 点按钮、ExpandCollapsePattern 展开收起下拉树形,做完回读真状态,不冒充。
+- **快照自带路标。** 控件行尾标 `[value]` `[invoke]` `[expand]`,模型看得见哪条结构路可走;SKILL 纪律同步——优先结构路,坐标与 typing 降为后备。ref 解析抽成公共底座,快照与动作同一套折叠规则与 DFS 序号,深度帽错位有专案钉死。
+- 自测 60→73 册(活体册用原生控件——tkinter 三只 pattern 一只探不出,这课写进文件头存照);BSTR 指针不钉 restype 会被 c_int 截断成残指针直接崩,探针踩实立注。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
