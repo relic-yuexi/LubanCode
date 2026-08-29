@@ -467,17 +467,22 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         // 共用垫,回头 GetOutput 取到的是"最后一只 commit 的",不是自己那份。
         if (committed_output != nullptr) *committed_output = result.output;
         record.state = NodeState::Succeeded;
+        record.agent_name = result.agent_name;
+        // 回执身份(阶段 5):自定义 Agent 节点带 resolved 名,事件与
+        // journal 不冒用户写的短名。
         if (ctx.journal != nullptr) {
-            ctx.journal->Append(kEventNodeCompleted, node.id, record.attempt,
-                                nlohmann::json{{"outcome", result.empty ? "empty" : "success"},
-                                               {"output", result.output},
-                                               {"tokens", result.tokens_used},
-                                               {"duration_ms", result.duration_ms}});
+            nlohmann::json completed = nlohmann::json{{"outcome", result.empty ? "empty" : "success"},
+                                                      {"output", result.output},
+                                                      {"tokens", result.tokens_used},
+                                                      {"duration_ms", result.duration_ms}};
+            if (!result.agent_name.empty()) completed["agent"] = result.agent_name;
+            ctx.journal->Append(kEventNodeCompleted, node.id, record.attempt, completed);
         }
-        emit_node_event(kEventNodeCompleted,
-                        nlohmann::json{{"outcome", result.empty ? "empty" : "success"},
-                                       {"duration_ms", result.duration_ms},
-                                       {"tokens", result.tokens_used}});
+        nlohmann::json event_payload = nlohmann::json{{"outcome", result.empty ? "empty" : "success"},
+                                                      {"duration_ms", result.duration_ms},
+                                                      {"tokens", result.tokens_used}};
+        if (!result.agent_name.empty()) event_payload["agent"] = result.agent_name;
+        emit_node_event(kEventNodeCompleted, event_payload);
         return result.empty ? "empty" : "success";
     }
     record.state = NodeState::Failed;

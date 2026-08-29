@@ -47,7 +47,7 @@ JSON 值。
 | `type` | 必要字段 | 产物或用途 |
 | --- | --- | --- |
 | `tool` | `tool` | 调已注册工具 |
-| `agent` | `task`；可选 `role`、`allowed_tools`、`step_limit`、`model_role` | 跑完整 Agent 工具循环 |
+| `agent` | `task`；可选 `agent`、`role`、`allowed_tools`、`step_limit`、`model_role` | 跑完整 Agent 工具循环 |
 | `llm` | `prompt`；可选 `output_schema` | 单次模型调用 |
 | `skill` | `skill` | 装载一份 Skill |
 | `template` | `template` | 安全模板渲染 |
@@ -68,6 +68,28 @@ JSON 值。
 
 `Flow`、`Batch`、`Branch`、`Shared`、`Looping`、`Nesting` 是设计原语；其中
 有些对应多种节点或整张图，不是额外 `type`。
+
+### agent 节点的 `agent` 字段
+
+`agent` 节点可用 `agent: <名字>` 点名一只自定义 Agent（`/agents` 登册的
+定义，见 [agents 契约](agents.md)）。名字两套键都认：裸名
+（`browser-tester`）与 canonical 全名（`moontide.browser-suite:browser-tester`）。
+Package 内的 workflow 写包内短名即可——挂载层自动折成 canonical；不在
+本包的短名按外部裸名解析。
+
+- 不写 `agent`（或留空）时走既有路：会话材料折的 default binding。
+- 写了 `agent` 的节点，Prompt 与工具表与 `agent` 工具派发自定义 Agent
+  完全同源——同一只 `AgentProfileResolver` 解析，同一套系统提示拼装
+  （Prompt Profile 五层、能力推导、预装技能、AGENTS.md 继承都按定义走）。
+- `task` 仍是必填：自定义路里它是任务指令，与节点 `input` 一起进首条
+  user message，不进系统提示。
+- `allowed_tools` 与 `step_limit` 是调用方显式值，压过定义的缺省档
+  （契约 §4.8）。
+- 名字查不到或定义不可用：编译期能查（能力表带 AgentCatalog 名单）就
+  报 `unknown_agent`，运行时首知即报 `agent_unresolved`——不会静默换
+  `general-purpose`。
+- 定义声明 `permissions.mode` 比会话档严时，节点内工具的确认真拉回
+  （与 `agent` 工具同一执法路）。
 
 ## 公共节点字段
 

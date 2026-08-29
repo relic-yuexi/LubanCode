@@ -1,0 +1,15 @@
+# 冒烟夹具(阶段 5):带 agent: 节点的 workflow 点名的自定义 Agent。
+# 工具面收窄到只读两枚,预算给小帽,便于一眼核对解析决议。
+schema: 1
+name: smoke-probe
+description: 冒烟探针,只读摸排后交结论。
+tools:
+  allow:
+    - read_file
+    - search
+runtime:
+  max_steps_per_turn: 4
+  max_output_tokens: 1024
+prompt:
+  project_instructions: omit
+  soul: off

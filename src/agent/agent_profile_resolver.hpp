@@ -40,17 +40,10 @@
 
 #include "agent/agent.hpp"             // AgentProfile:合并结果的皮
 #include "agent/agent_definition.hpp"  // AgentDefinition/Issue:定义与诊断
+#include "agent/permission_mode.hpp"   // AgentPermissionMode:权限三档(阶段 5 拆出的轻头)
 
 namespace lubancode::agent {
 
-// 权限三档(契约 §4.9):runtime::PermissionMode 的中立镜像——agent 层不
-// include turn_runtime(那头牵 config),枚举在此重申,映射由 app 装配层
-// 做,与 runtime::PermissionMode 镜像 cli::ConfirmMode 同一规矩。
-enum class AgentPermissionMode { Confirm, Auto, Yolo };
-
-// 宽窄序:confirm(0) < auto(1) < yolo(2)。子代理的档 rank 只许 <= 父。
-int AgentPermissionModeRank(AgentPermissionMode mode);
-std::string ToString(AgentPermissionMode mode);
 
 // 一档模型角色路由:model 空 = 该角色未配置(走回落链);provider 空 =
 // 沿用父 provider(与 config 的 ModelRoleRouteConfig 同义,剥掉 effort/

@@ -268,6 +268,36 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
                                               /*hook_dispatcher=*/nullptr, pre,
                                               /*has_permission_hooks=*/false, name, input);
     };
+    // 权限下限(阶段 5,R 单遗留——"确认口走 ConfirmToolUse 缺省无下限,
+    // 等 resolver 接线时一并喂"):`agent: <name>` 节点的自定义 Agent 定义
+    // 比会话档严时,AgentExecutor 用这枚带下限的口——同一颗 ConfirmToolUse,
+    // 会话档向下并到下限再裁定,父会话开着 yolo 也不免问。与 agent 工具
+    // 路的 Hooks::on_tool_confirm_floored 同一先例(0.26.96)。
+    wiring.on_tool_confirm_floored =
+        [this](const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
+               lubancode::agent::AgentPermissionMode floor) -> bool {
+        lubancode::cli::ToolDisplay display(transcript_ui_.items(), theme,
+                                            lubancode::platform::ProbeStdoutConsole().is_console,
+                                            todo_state(), /*cancel=*/nullptr, transcript_ui_.expanded_flag());
+        const lubancode::runtime::ToolHookDecision pre;
+        lubancode::runtime::PermissionMode runtime_floor = lubancode::runtime::PermissionMode::Yolo;
+        switch (floor) {
+            case lubancode::agent::AgentPermissionMode::Confirm:
+                runtime_floor = lubancode::runtime::PermissionMode::Confirm;
+                break;
+            case lubancode::agent::AgentPermissionMode::Auto:
+                runtime_floor = lubancode::runtime::PermissionMode::Auto;
+                break;
+            case lubancode::agent::AgentPermissionMode::Yolo:
+                runtime_floor = lubancode::runtime::PermissionMode::Yolo;
+                break;
+        }
+        return lubancode::app::ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display,
+                                              settings_local.allow_commands, settings_local.deny_commands,
+                                              /*hook_dispatcher=*/nullptr, pre,
+                                              /*has_permission_hooks=*/false, name, input, {},
+                                              runtime_floor);
+    };
     return wiring;
 }
 

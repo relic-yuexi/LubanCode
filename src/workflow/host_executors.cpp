@@ -10,6 +10,7 @@
 #include <utility>
 #include <variant>
 
+#include "agent/prompt_assembler.hpp"  // AssembleSystemPrompt:自定义 Agent 的同源拼装
 #include "agent/sample_model.hpp"
 #include "agent/tool_trace.hpp"  // kErrPermissionDeclined:旧稳定码的映射锚
 #include "agent/turn_harness.hpp"  // DriveTurn:agent 节点的 turn 推进正门(批五乙)
@@ -136,6 +137,38 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         return result;
     }
 
+    // ---- 自定义 Agent(`agent: <name>`,阶段 5)---------------------------
+    // 名字非空时先走统一解析:宿主查 AgentCatalog(canonical/裸名;包内
+    // 短引用已在 Package 挂载层折成 canonical),解析不过(查无此名、
+    // unavailable、定义或环境有错)在这里失败——运行时首知即报,不静默
+    // 退回 default binding,也不悄悄换 general-purpose。
+    std::optional<CustomAgentNodeResolution> custom;
+    const bool is_custom = !request.node->agent.empty();
+    if (is_custom) {
+        if (!options_.custom_agent_resolver) {
+            result.error_code = "not_configured";
+            result.error_message = "agent 节点点名了自定义 Agent,但宿主没接解析口: " + request.node->agent;
+            return result;
+        }
+        std::string resolve_error;
+        custom = options_.custom_agent_resolver(*request.node, resolve_error);
+        if (!custom.has_value()) {
+            result.error_code = "agent_unresolved";
+            result.error_message = "自定义 Agent 解析不过: " + request.node->agent +
+                                   (resolve_error.empty() ? std::string("(查无此名,可用清单看 /agents)")
+                                                          : ": " + resolve_error);
+            return result;
+        }
+        if (!custom->resolved.ok()) {
+            result.error_code = "agent_unresolved";
+            result.error_message = "自定义 Agent \"" + request.node->agent + "\" 解析不过(定义或环境有错;先 " +
+                                   "/agent doctor " + request.node->agent + " 看诊断):\n" +
+                                   agent::FormatResolutionIssues(custom->resolved.issues);
+            return result;
+        }
+        result.agent_name = custom->resolved_name;
+    }
+
     std::optional<Binding> resolved;
     if (options_.resolve_binding) {
         resolved = options_.resolve_binding(*request.node);
@@ -146,6 +179,12 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         result.error_message = "agent 节点没有 backend";
         return result;
     }
+    if (is_custom) {
+        // 统一解析的皮整份接管:provider/request/runtime/四段开关/工具谓词
+        // 都在 Resolver 里合并完(与 agent 工具路同一只 AgentProfileResolver,
+        // 两路逐字段一致的账钉在对账册)。backend 仍走宿主递的这条。
+        binding.profile = custom->resolved.profile;
+    }
 
     const std::string task_prompt = options_.task_loader ? options_.task_loader(request.node->task) : std::string();
     if (task_prompt.empty()) {
@@ -153,12 +192,43 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         result.error_message = "task 读不到: " + request.node->task;
         return result;
     }
-    binding.profile.system_prompt = task_prompt;
-    if (request.node->step_limit > 0) {
+    if (is_custom) {
+        // 系统提示与 agent 工具路同源(阶段 5 的验收线):同一只
+        // BuildSubagentPromptOptions + AssembleSystemPrompt + 预装技能段
+        // ——Prompt Profile 五层回路、能力推导、AGENTS.md 继承、魂启停
+        // 全按 Resolver 的决议走。task 是任务指令,不进系统提示(与
+        // agent 工具路的用户 prompt 同位,进 user message)。
+        const SubagentPromptMaterial& mat = options_.subagent_prompt_material;
+        agent::ResolvedAgentProfile prompt_resolved = custom->resolved;
+        if (!request.node->allowed_tools.empty()) {
+            // 节点白名单压过 YAML 的 allow(契约 §4.8:调用方显式 > 定义
+            // 缺省):谓词重设,effective_tools 同步收窄——prompt 的能力
+            // 推导按交集算,文案不吹不存在的工具。
+            std::set<std::string> allowed(request.node->allowed_tools.begin(), request.node->allowed_tools.end());
+            std::vector<std::string> intersected;
+            for (const std::string& name : prompt_resolved.effective_tools) {
+                if (allowed.count(name) > 0) intersected.push_back(name);
+            }
+            prompt_resolved.effective_tools = std::move(intersected);
+        }
+        binding.profile.system_prompt =
+            agent::AssembleSystemPrompt(tools::BuildSubagentPromptOptions(
+                mat.cwd, custom->resolved_name, mat.prompts_dir, mat.project_prompts_dir,
+                mat.project_instructions, mat.skills_segment, binding.profile, &custom->material,
+                &prompt_resolved, mat.package_profile_roots)) +
+            tools::AppendPreloadedSkills(custom->material.definition.skills_preload,
+                                         custom->material.preloaded_skills);
+    } else {
+        binding.profile.system_prompt = task_prompt;
+    }
+    if (!is_custom && request.node->step_limit > 0) {
+        // 自定义路的步数在 Resolver 里并过(节点 step_limit 走 overrides
+        // 三级:入参 > YAML > 父步数),这里不重设,免得两笔账打架。
         binding.profile.runtime.max_steps_per_turn = request.node->step_limit;
     }
     // 工具可见性(病十三的方向):allowed_tools 的白名单写进皮,不再走
-    // loop 级 setter。
+    // loop 级 setter。自定义路的 YAML allow/deny 已由 Resolver 装好,节点
+    // 白名单(给了的话)压过它——同一道门,非自定义路行为一字不动。
     if (!request.node->allowed_tools.empty()) {
         const auto allowed = std::make_shared<const std::set<std::string>>(
             request.node->allowed_tools.begin(), request.node->allowed_tools.end());
@@ -166,6 +236,10 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
             return allowed->contains(tool.name());
         };
         binding.profile.tool_filter_denial = "此工具不在 workflow agent 节点的 allowed_tools 里。";
+    } else if (is_custom && binding.profile.tool_filter == nullptr) {
+        // Resolver 的 allow/deny 全空时旧语义是全放行(自定义 Agent 不吃
+        // 装配层的延迟过滤)——与 agent 工具路同一笔账。
+        binding.profile.tool_filter = [](const tools::Tool&) { return true; };
     }
 
     agent::Agent task_agent(*binding.backend, *options_.registry, std::move(binding.profile));
@@ -226,12 +300,37 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
             return "workflow agent 节点未接审批宿主，已拒绝 " + name;
         };
     }
+    // 权限下限接线(阶段 5,R 单遗留):Resolver 已校验"不许放宽"(越宽在
+    // 解析口明拒),"收窄生效"在这半截——自定义 Agent 的定义档比会话档
+    // 严时(父 yolo 子 confirm),确认回调换成宿主的"带下限"口,会话档
+    // 向下并到下限再裁定,该问就真把确认拉回。宿主没接 floored 口(旧
+    // 装配)或档不比父严时,原样转发,行为不变。与 agent 工具路的
+    // Hooks::on_tool_confirm_floored 同一先例(0.26.96)。
+    if (custom.has_value() && custom->permission_floor.has_value() && wiring.on_tool_confirm_floored) {
+        auto floored = wiring.on_tool_confirm_floored;
+        const agent::AgentPermissionMode floor = *custom->permission_floor;
+        wiring.on_tool_confirm = [floored, floor](const std::string& tool_use_id, const std::string& name,
+                                                  const nlohmann::json& input) {
+            return floored(tool_use_id, name, input, floor);
+        };
+    }
 
     // turn 推进走 TurnHarness。面板补充只在一轮正常收口后取，取到便另开
     // 一轮；送不成由 batch.restore 退回原队列。
     api::Message task_input;
     task_input.role = api::Role::User;
-    task_input.content.push_back(api::TextBlock{request.resolved_input.dump()});
+    if (is_custom) {
+        // 自定义路(阶段 5):task 是任务指令,与 agent 工具路的用户 prompt
+        // 同位——正文在前、节点的 resolved input 在后,同一条 user message。
+        std::string user_text = task_prompt;
+        if (!request.resolved_input.empty()) {
+            if (!user_text.empty()) user_text += "\n\n";
+            user_text += request.resolved_input.dump();
+        }
+        task_input.content.push_back(api::TextBlock{std::move(user_text)});
+    } else {
+        task_input.content.push_back(api::TextBlock{request.resolved_input.dump()});
+    }
     agent::DriveOptions drive_options;
     drive_options.cancel = request.cancel;
     int steering_round = 1;

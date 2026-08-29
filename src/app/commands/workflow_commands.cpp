@@ -2,6 +2,7 @@
 
 #include "app/commands/workflow_commands.hpp"
 #include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
+#include "app/commands/agent_commands.hpp"  // ComputeAgentScanRoots:`agent:` 节点校验表的 Catalog 根
 #include "package/mounting.hpp"               // MountWorkflowSources(阶段 3 包层挂载)
 #include "app/model_router.hpp"
 #include "app/turn_runner.hpp"                  // PromptAskUser(终端交互宿主)
@@ -1007,6 +1008,7 @@ lubancode::workflow::CapabilityTable BuildCapabilities(const WorkflowCommandCont
         }
     }
     caps.skills = context.skill_names;
+    caps.agent_names = context.agent_names;  // 阶段 5:`agent:` 节点的编译期引用校验
     return caps;
 }
 
@@ -1670,12 +1672,59 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
                 workflow_parent_tools.push_back(tool->name());
             }
         }
+        // 父上下文与父工具面留下原份:default binding 与自定义 Agent 的
+        // 节点级解析共用同一份(阶段 5——两路喂同一只 Resolver 的前提)。
+        const lubancode::agent::AgentProfile custom_parent = workflow_parent;
+        const std::vector<std::string> custom_parent_tools = workflow_parent_tools;
         agent_options.default_binding.profile = lubancode::agent::ResolveAgentProfile(
             lubancode::agent::BuildWorkflowAgentResolveRequest(
                 lubancode::agent::BuiltinGeneralPurposeDefinition(), workflow_parent,
                 std::move(workflow_parent_tools), exec_ctx.agent_profile.max_steps_per_turn,
                 lubancode::agent::AgentProfileResolveEnvironment{}, lubancode::agent::AgentDispatchOverrides{}))
             .profile;
+        // 阶段 5:`agent: <name>` 节点的解析口。查名与预装技能正文复用
+        // 会话 agent 工具的同一只 resolver(Catalog 现扫现查),环境账
+        //(权限档/技能/MCP/角色路由/思考档)复用它的同一只供应商——
+        // 同一份定义从 agent 工具与 Workflow 节点两路解析,喂的是同一套
+        // 口子,结果逐字段一致(对账册钉死的验收线)。节点 step_limit 走
+        // overrides(入参显式 > YAML > 父步数)。
+        if (exec_ctx.agent_tool != nullptr) {
+            lubancode::tools::AgentTool* agent_tool = exec_ctx.agent_tool;
+            agent_options.custom_agent_resolver =
+                [agent_tool, custom_parent, custom_parent_tools,
+                 default_steps = exec_ctx.agent_profile.max_steps_per_turn](
+                    const lubancode::workflow::WorkflowNode& node,
+                    std::string& error) -> std::optional<lubancode::workflow::CustomAgentNodeResolution> {
+                std::optional<lubancode::tools::CustomAgentMaterial> material =
+                    agent_tool->custom_agent_resolver()(node.agent);
+                if (!material.has_value()) {
+                    error = "没有名叫 \"" + node.agent + "\" 的 Agent(可用清单看 /agents)";
+                    return std::nullopt;
+                }
+                std::optional<lubancode::agent::AgentProfileResolveEnvironment> environment;
+                if (agent_tool->resolve_environment_provider()) {
+                    environment = agent_tool->resolve_environment_provider()();
+                }
+                lubancode::agent::AgentDispatchOverrides overrides;
+                if (node.step_limit > 0) {
+                    overrides.max_steps_per_turn = node.step_limit;  // 入参显式压过 YAML
+                }
+                lubancode::workflow::CustomAgentNodeResolution out;
+                out.resolved = lubancode::agent::ResolveAgentProfile(
+                    lubancode::agent::BuildWorkflowAgentResolveRequest(
+                        material->definition, custom_parent, custom_parent_tools, default_steps, environment,
+                        overrides));
+                out.material = std::move(*material);
+                out.resolved_name = node.agent;
+                if (environment.has_value() &&
+                    lubancode::agent::AgentPermissionModeRank(out.resolved.permission) <
+                        lubancode::agent::AgentPermissionModeRank(environment->parent_permission)) {
+                    out.permission_floor = out.resolved.permission;
+                }
+                return out;
+            };
+        }
+        agent_options.subagent_prompt_material = exec_ctx.subagent_prompt_material;
         agent_options.registry = exec_ctx.registry;
         agent_options.task_loader = workflow_prompt_loader;
         // 批二:agent 节点上事件流(会话 sink,seq 与主回合同源)。
@@ -1783,6 +1832,17 @@ lubancode::app::WorkflowCommandContext BuildWorkflowCatalogContext(SlashDispatch
     for (const auto& skill : *ctx.skills) {
         wf_ctx.skill_names.push_back(skill.name);
     }
+    // 阶段 5:`agent:` 节点的编译期引用校验表——AgentCatalog 现扫(与
+    // agent 工具派发口同一套根),可用条目名(canonical+裸名)进表。
+    if (ctx.agent_tool != nullptr) {
+        const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(
+            ComputeAgentScanRoots(ctx.package_mount != nullptr
+                                      ? lubancode::package::MountAgentEntries(*ctx.package_mount)
+                                      : std::vector<lubancode::agent::PackagedAgentEntry>{}));
+        for (const lubancode::agent::AgentCatalogEntry* entry : catalog.Available()) {
+            wf_ctx.agent_names.push_back(entry->name);
+        }
+    }
     wf_ctx.theme = ctx.theme;
     wf_ctx.request_input = [theme = ctx.theme](const std::string& field,
                                                const nlohmann::json& schema)
@@ -1820,6 +1880,23 @@ lubancode::app::WorkflowExecutorContext BuildWorkflowExecutorContext(SlashDispat
     wf_exec.id_authority = &ctx.session_runtime->ids();
     wf_exec.interaction_broker = std::make_shared<TerminalWorkflowInteractionBroker>(*ctx.theme);
     wf_exec.skills = ctx.skills;
+    // 阶段 5:`agent: <name>` 节点的解析口来源——会话级 agent 工具(查名
+    // 与环境账都是它的同一只)。系统提示材料照 AgentTool 的 setter 同源
+    // 折(prompts_dir/project_instructions/skills_segment 与会话栈同一份,
+    // 项目层根与包层根同式现算)——两路系统提示逐字节一致的前提。
+    wf_exec.agent_tool = ctx.agent_tool;
+    wf_exec.subagent_prompt_material.cwd =
+        ctx.prompt_options != nullptr ? ctx.prompt_options->cwd : std::string();
+    wf_exec.subagent_prompt_material.prompts_dir = ctx.prompts_dir != nullptr ? *ctx.prompts_dir : std::string();
+    wf_exec.subagent_prompt_material.project_prompts_dir = lubancode::app::ComputeProjectPromptsRoot();
+    wf_exec.subagent_prompt_material.project_instructions =
+        ctx.prompt_options != nullptr ? ctx.prompt_options->project_instructions : std::string();
+    wf_exec.subagent_prompt_material.skills_segment =
+        ctx.prompt_options != nullptr ? ctx.prompt_options->skills_segment : std::string();
+    if (ctx.package_mount != nullptr) {
+        wf_exec.subagent_prompt_material.package_profile_roots =
+            lubancode::package::MountProfileRoots(*ctx.package_mount);
+    }
     wf_exec.resolve_llm_binding = [router = ctx.model_router](
                                       const lubancode::workflow::WorkflowNode& node)
         -> std::optional<lubancode::workflow::LlmExecutor::Binding> {

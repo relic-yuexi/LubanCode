@@ -1,6 +1,6 @@
 # 自定义 Agent 与 Prompt Profile 设计
 
-- 状态：阶段 0/1/2/3/4 已落地（0.26.77/0.26.81/0.26.88/0.26.95/阶段 4 本笔），阶段 5 起待实现
+- 状态：阶段 0/1/2/3/4/5 已落地（0.26.77/0.26.81/0.26.88/0.26.95/阶段 4 本笔/阶段 5 本笔），阶段 6 待做
 - 日期：2026-08-28
 - 范围：Agent 定义、Prompt Profile、加载与解析、运行时接线、命令与诊断、示例迁移
 - 不在本单：实现新的 MCP 服务、重写 Skill 格式、建立 solutions 运行时概念、引入多 Agent 编队
@@ -489,12 +489,12 @@ Workflow 只负责调度。它把 `agent` 名交给同一 AgentProfileResolver�
 
 ### 阶段 5：Workflow 接入
 
-- [ ] Workflow Agent 节点支持 `agent: <name>`。
-- [ ] compiler 只校验引用，executor 调统一 resolver/factory。
-- [ ] 前台失败、超时、取消、后台回收维持现有语义。
-- [ ] 未知或 unavailable Agent 在编译期或最早可知时失败。
+- [x] Workflow Agent 节点支持 `agent: <name>`。（名字解析链:Package 挂载层已把包内短引用折成 canonical(mounting.cpp 的 CanonicalizeRef),宿主解析口按 canonical/裸名查 AgentCatalog——查名复用会话 agent 工具的同一只 custom_agent_resolver。AgentExecutor::Options 加 custom_agent_resolver + subagent_prompt_material;回执身份(resolved 名)进 NodeExecResult.agent_name 与 journal 完成事件。）
+- [x] compiler 只校验引用，executor 调统一 resolver/factory。（validator 的 CapabilityTable 加 agent_names,`agent:` 点名不在表里报 unknown_agent(编译期能查就编译期报);executor 调 BuildWorkflowAgentResolveRequest,系统提示与 agent 工具路共用同一只 BuildSubagentPromptOptions/AppendPreloadedSkills(自 agent_tool.cpp 匿名 namespace 提出)。）
+- [x] 前台失败、超时、取消、后台回收维持现有语义。（test_workflow_custom_agent.cpp 逐件对账:前台失败 agent_error、预算尽 budget_exhausted、取消(打断不是错误,半截收场,事件流 Cancelled)、async 外壳换线程跑自定义 body 产物挂回——自定义路与 role 路同一条收口链。）
+- [x] 未知或 unavailable Agent 在编译期或最早可知时失败。（编译期 unknown_agent;运行时首知报 agent_unresolved(查无此名/定义解析不过,带 FormatResolutionIssues 的稳定码);宿主没接解析口报 not_configured;一律不静默退回 default binding。另补 0.26.92 的欠账:定义 JSON roundtrip 收 agent 字段。）
 
-验收：同一 Agent 既能由 `agent` 工具唤起，也能由 Workflow 节点唤起；Prompt 与工具完全同源。
+验收：同一 Agent 既能由 `agent` 工具唤起，也能由 Workflow 节点唤起；Prompt 与工具完全同源。（端到端对账册:同一 YAML 两路各跑一轮(假后端),request.system 逐字节一致、工具表逐枚一致;冒烟 driver workflow_custom_agent_driver + 夹具 smoke-probe.yaml/custom-agent-smoke 走真 Catalog 扫描与一幕回执身份。todo_write 的私有台账 schema 差异(agent 工具路每任务换独占实例)是台账机制不是定义差异,对账面不进。权限下限(R 单遗留)一并接线:TurnWiring 加 on_tool_confirm_floored,宿主 BuildWorkflowAgentCallbacks 装 ConfirmToolUse 带下限档,executor 按节点的 permission_floor 包装——自定义定义比会话严时真收紧。）
 
 ### 阶段 6：示例归位
 

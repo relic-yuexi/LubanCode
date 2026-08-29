@@ -625,6 +625,15 @@ ValidationResult ValidateDefinition(const WorkflowDefinition& def,
                         !contains(caps.agent_roles, node.role)) {
                         add("unknown_role", base + ".role", "agent 角色不存在: " + node.role);
                     }
+                    // 自定义 Agent 引用(阶段 5):名字可解析且 available 才
+                    // 放行——canonical 与裸名两套键都在 agent_names 里
+                    //(Package 挂载层已把包内短引用折成 canonical)。编译期
+                    // 能查就编译期报,不留给运行时静默换人。
+                    if (!caps.agent_names.empty() && !node.agent.empty() &&
+                        !contains(caps.agent_names, node.agent)) {
+                        add("unknown_agent", base + ".agent",
+                            "agent 不存在或不可用: " + node.agent + "(可用清单看 /agents)");
+                    }
                     for (const auto& t : node.allowed_tools) {
                         if (!contains(caps.tools, t)) {
                             add("unknown_tool", base + ".allowed_tools", "工具白名单里有未注册项: " + t);

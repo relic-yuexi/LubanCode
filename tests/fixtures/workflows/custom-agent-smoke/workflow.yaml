@@ -1,0 +1,23 @@
+schema_version: 1
+id: custom-agent-smoke
+version: 1.0.0
+name: 自定义 Agent 冒烟
+description: 一只 "agent:" 节点点名 smoke-probe,验证 Workflow 接入解析链。
+alias: custom-agent-smoke
+entry: probe
+inputs:
+  type: object
+  required: [topic]
+  properties:
+    topic: { type: string }
+nodes:
+  probe:
+    type: agent
+    agent: smoke-probe
+    task: prompts/probe.md
+  fin:
+    type: end
+edges:
+  - { from: probe, on: success, to: fin }
+result:
+  out: "${nodes.probe.output}"

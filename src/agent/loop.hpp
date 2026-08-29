@@ -38,6 +38,7 @@
 #include "tools/registry.hpp"
 
 #include "agent/model_image_store.hpp"  // ModelImageLanding:on_model_image 的回执形状
+#include "agent/permission_mode.hpp"  // AgentPermissionMode:on_tool_confirm_floored 的下限档
 
 namespace lubancode::agent {
 
@@ -75,6 +76,17 @@ struct TurnWiring {
     // 2026-08-17)。与审批口同线程先后调用,回调层可以拿同一份局部状态区
     // 分拒绝原因。
     std::function<std::string(const std::string& tool_use_id, const std::string& name)> on_tool_denial_text;
+
+    // 权限收窄执法(自定义 Agent 单·阶段 5,Workflow 侧接线):带档位下限
+    // 的确认口。Workflow agent 节点派的自定义 Agent 定义比会话档严时
+    //(父 yolo 子 confirm),AgentExecutor 用它把 on_tool_confirm 包一层
+    // ——宿主在里头把会话档向下并到下限再裁定,该问就真把确认拉回。
+    // 与 agent 工具路的 AgentTool::Hooks::on_tool_confirm_floored 同一
+    // 先例(0.26.96)。空 = 宿主没接(旧装配),原样走 on_tool_confirm,
+    // 行为不变。
+    std::function<bool(const std::string& tool_use_id, const std::string& name,
+                       const nlohmann::json& input, AgentPermissionMode floor)>
+        on_tool_confirm_floored;
 
     // ---- 钩子表态(HookDispatcher 的归并决策,发射本体在 runtime 层)------
 

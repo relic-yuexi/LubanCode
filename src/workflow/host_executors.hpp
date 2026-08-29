@@ -34,10 +34,12 @@
 
 #include "agent/agent.hpp"  // Agent/AgentProfile:agent 节点与 main/sub 共用引擎
 #include "agent/loop.hpp"
+#include "agent/prompt_assembler.hpp"  // PackageProfileRoot:子代理系统提示的包层根
 #include "api/backend.hpp"
 #include "runtime/event_sink.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/interaction_broker.hpp"
+#include "tools/agent_tool.hpp"  // CustomAgentMaterial/BuildSubagentPromptOptions:自定义 Agent 的同源件
 #include "tools/registry.hpp"
 #include "workflow/runtime.hpp"
 
@@ -103,6 +105,40 @@ private:
 // agent 节点：与 main/subagent 共用 agent::Agent
 // ---------------------------------------------------------------------------
 
+// 自定义 Agent 节点(`agent: <name>`,阶段 5)的解析产物:宿主查
+// AgentCatalog(canonical/裸名;Package 挂载层已把包内短引用折成
+// canonical)、走统一 AgentProfileResolver 之后递进来。workflow 层不摸
+// Catalog——扫描与查名是宿主的活,这里只消费统一解析的结果;同一份定义
+// 从 agent 工具与 Workflow 节点两路解析的账,钉在 AgentProfileResolver 的
+// 对账册(test_agent_profile_resolver.cpp)。
+struct CustomAgentNodeResolution {
+    tools::CustomAgentMaterial material;   // 定义 + 预装技能正文 + builtin 记号
+    agent::ResolvedAgentProfile resolved;  // 统一解析结果(profile/effective_tools/三笔决议)
+    std::string resolved_name;             // 回执身份(Catalog 键名:canonical 或裸名)
+    // 权限下限(比会话档严时的档位):Resolver 校验"不许放宽"在前,这枚
+    // 是"收窄生效"——宿主按环境账的父档算好递进来,executor 接进
+    // on_tool_confirm_floored。nullopt = 不比父严(或没递环境账)。
+    std::optional<agent::AgentPermissionMode> permission_floor;
+};
+
+// 名字 -> 解析产物的口。error 出参带人话(查无此名/不可用的原因);
+// 返回 nullopt 即失败。宿主装配,executor 首知即报。
+using CustomAgentResolver =
+    std::function<std::optional<CustomAgentNodeResolution>(const WorkflowNode& node, std::string& error)>;
+
+// 子代理系统提示的会话材料(阶段 5):BuildSubagentPromptOptions 的入参
+// 里,除节点/定义/解析结果外全是宿主会话材料——agent 工具路与 Workflow
+// 节点路各持一份,宿主从同一来源(主回合 prompt_options / AgentTool 的
+// setter 同源的值)灌同一份。"两路系统提示逐字节一致"的验收以此为前提。
+struct SubagentPromptMaterial {
+    std::string cwd;
+    std::string prompts_dir;             // 用户模块目录;空 = 只用嵌入版
+    std::string project_prompts_dir;     // 项目模块目录;空 = 没有项目层
+    std::string project_instructions;    // AGENTS.md 分层内容;空 = 不注入
+    std::string skills_segment;          // 技能清单段;空 = 不注 skills 模块
+    std::vector<agent::PackageProfileRoot> package_profile_roots;  // 包层 Profile 根
+};
+
 class AgentExecutor : public NodeExecutor {
 public:
     struct Binding {
@@ -125,6 +161,11 @@ public:
         runtime::IdAuthority* ids = nullptr;
         std::string thread_id;
         NodeSteeringSource steering;
+        // ---- 自定义 Agent(阶段 5)----
+        // `agent: <name>` 节点的解析口。空(旧装配/单测)= 没接:点名
+        // agent 的节点报 not_configured,不静默退回 default binding。
+        CustomAgentResolver custom_agent_resolver;
+        SubagentPromptMaterial subagent_prompt_material;  // 系统提示的会话材料
     };
 
     explicit AgentExecutor(Options options);
