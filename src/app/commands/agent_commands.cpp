@@ -14,6 +14,7 @@
 #include "cli/terminal_port.hpp"
 #include "config/config.hpp"                  // HomeLubancodeDir
 #include "config/project_instructions.hpp"    // FindProjectRoot(项目层根)
+#include "package/mounting.hpp"               // MountAgentEntries/MountProfileRoots(阶段 3)
 #include "platform/paths.hpp"
 
 using lubancode::cli::TermOut;
@@ -109,7 +110,8 @@ std::size_t ProfileOverlayCount(const lubancode::agent::PromptSourceLedger& ledg
 std::vector<std::string> FormatAgentCatalogListing(const lubancode::agent::AgentCatalog& catalog) {
     std::vector<std::string> lines;
     lines.push_back("Agent Catalog 共 " + std::to_string(catalog.entries.size()) +
-                    " 个(优先级 project > user > builtin;/agent doctor <名字> 看静态预检):");
+                    " 个(优先级 project > user > package > builtin;包层带 canonical 名"
+                    " <包id>:<名>;/agent doctor <名字> 看静态预检):");
     for (const auto& entry : catalog.entries) {
         if (entry.available) {
             lines.push_back("  - " + entry.name + "  [" + lubancode::agent::ToString(entry.layer) + "]  可用");
@@ -176,11 +178,13 @@ std::vector<std::string> FormatAgentDoctorReport(const lubancode::agent::AgentCa
                     "(档位是否越过 provider 能力,阶段 3 的 resolver 查)");
 
     // ---- Profile(阶段 2):名字 + 覆盖是否存在(三层里有没有任何模块) ----
+    // 阶段 3:包层根一并递进——canonical 名("<包id>:<名>")的覆盖只在包里。
     if (!def.prompt.profile.has_value() || *def.prompt.profile == "default") {
         lines.push_back("Profile: " + DescribeProfile(def) + "(default 上下文,三层覆盖不参与)");
     } else {
         const lubancode::agent::PromptSourceLedger ledger = lubancode::agent::BuildPromptProfileLedger(
-            *def.prompt.profile, prompts.user_prompts_dir, prompts.project_prompts_dir);
+            *def.prompt.profile, prompts.user_prompts_dir, prompts.project_prompts_dir,
+            prompts.package_roots);
         const std::size_t overlays = ProfileOverlayCount(ledger);
         if (overlays > 0) {
             lines.push_back("Profile: " + *def.prompt.profile + "(三层共 " + std::to_string(overlays) +
@@ -390,7 +394,7 @@ std::vector<std::string> FormatAgentInspectReport(const lubancode::agent::AgentC
     lines.push_back("Prompt 来源账本(逐模块,谁压了谁):");
     const lubancode::agent::PromptSourceLedger ledger =
         lubancode::agent::BuildPromptProfileLedger(profile, prompts.user_prompts_dir,
-                                                   prompts.project_prompts_dir);
+                                                   prompts.project_prompts_dir, prompts.package_roots);
     for (const auto& ledger_entry : ledger.entries) {
         lines.push_back("  " + ledger_entry.FormatLine());
     }
@@ -402,7 +406,8 @@ std::vector<std::string> FormatAgentInspectReport(const lubancode::agent::AgentC
     return lines;
 }
 
-lubancode::agent::AgentCatalogScanRoots ComputeAgentScanRoots() {
+lubancode::agent::AgentCatalogScanRoots ComputeAgentScanRoots(
+    std::vector<lubancode::agent::PackagedAgentEntry> packaged) {
     lubancode::agent::AgentCatalogScanRoots roots;
     roots.builtin_dir = EmbeddedAgentsDir();
     if (const auto home = lubancode::config::HomeLubancodeDir(); home.has_value()) {
@@ -410,7 +415,24 @@ lubancode::agent::AgentCatalogScanRoots ComputeAgentScanRoots() {
     }
     roots.project_dir = lubancode::config::FindProjectRoot(std::filesystem::current_path()) / ".lubancode" /
                         "agents";
+    // 统一 Package 封装单阶段 3:包层成品件(调用方从会话钉快照折来)。
+    roots.packaged = std::move(packaged);
     return roots;
+}
+
+// 会话钉快照折包层成品件(快照缺席 = 空表,行为与从前一致)。
+std::vector<lubancode::agent::PackagedAgentEntry> PackagedAgentsFromMount(SlashDispatchContext& ctx) {
+    if (ctx.package_mount == nullptr) {
+        return {};
+    }
+    return lubancode::package::MountAgentEntries(*ctx.package_mount);
+}
+
+std::vector<lubancode::agent::PackageProfileRoot> PackagedProfileRootsFromMount(SlashDispatchContext& ctx) {
+    if (ctx.package_mount == nullptr) {
+        return {};
+    }
+    return lubancode::package::MountProfileRoots(*ctx.package_mount);
 }
 
 // Prompt Profile 的项目层根(阶段 2):<项目根>/.lubancode/prompts,UTF-8
@@ -423,9 +445,9 @@ std::string ComputeProjectPromptsRoot() {
 }
 
 CommandFlow HandleSlashAgents(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
-    (void)ctx;
     (void)parsed;
-    const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(ComputeAgentScanRoots());
+    const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(
+        ComputeAgentScanRoots(PackagedAgentsFromMount(ctx)));
     for (const std::string& line : FormatAgentCatalogListing(catalog)) {
         TermOut() << line << "\n";
     }
@@ -461,7 +483,8 @@ CommandFlow HandleSlashAgent(SlashDispatchContext& ctx, const lubancode::cli::Pa
             TermOut() << "用法:/agent doctor <名字>(名字看 /agents;大小写敏感)。\n";
             return CommandFlow::Continue;
         }
-        const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(ComputeAgentScanRoots());
+        const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(
+            ComputeAgentScanRoots(PackagedAgentsFromMount(ctx)));
         AgentDoctorMaterials materials;
         materials.skills = ctx.skills;
         materials.registry = ctx.registry;
@@ -475,6 +498,7 @@ CommandFlow HandleSlashAgent(SlashDispatchContext& ctx, const lubancode::cli::Pa
         AgentPromptContext prompts;
         prompts.user_prompts_dir = UserPromptsRootUtf8();
         prompts.project_prompts_dir = ComputeProjectPromptsRoot();
+        prompts.package_roots = PackagedProfileRootsFromMount(ctx);
         for (const std::string& line : FormatAgentDoctorReport(catalog, rest, materials, prompts)) {
             TermOut() << line << "\n";
         }
@@ -485,10 +509,12 @@ CommandFlow HandleSlashAgent(SlashDispatchContext& ctx, const lubancode::cli::Pa
             TermOut() << "用法:/agent inspect <名字>(名字看 /agents;大小写敏感)。\n";
             return CommandFlow::Continue;
         }
-        const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(ComputeAgentScanRoots());
+        const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(
+            ComputeAgentScanRoots(PackagedAgentsFromMount(ctx)));
         AgentPromptContext prompts;
         prompts.user_prompts_dir = UserPromptsRootUtf8();
         prompts.project_prompts_dir = ComputeProjectPromptsRoot();
+        prompts.package_roots = PackagedProfileRootsFromMount(ctx);
         for (const std::string& line : FormatAgentInspectReport(catalog, rest, prompts)) {
             TermOut() << line << "\n";
         }

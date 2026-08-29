@@ -40,11 +40,14 @@ namespace lubancode::app {
 
 // /workflow 命令的装配材料。project_root/user_root 是两级 workflows 目录
 // 的锚点(catalog 自己拼 .lubancode/workflows);registry 可空(空则
-// capability check 只数 core 工具,给 unknown_tool 警告)。
+// capability check 只数 core 工具,给 unknown_tool 警告)。packaged_workflows
+// (统一 Package 封装单阶段 3):包层成品件,会话钉快照折来——canonical
+// id 登册,不参与裸 alias;空 = 没有包,行为与从前一致。
 struct WorkflowCommandContext {
     std::optional<std::filesystem::path> project_root;  // 通常 cwd
     std::optional<std::filesystem::path> user_root;     // 通常 home
     std::optional<std::filesystem::path> home_lubancode;  // workflow-runs 落点
+    std::vector<lubancode::workflow::PackagedWorkflowSource> packaged_workflows;
     const lubancode::tools::ToolRegistry* registry = nullptr;  // capability 快照
     std::vector<std::string> skill_names;               // 撞名检查用
     const lubancode::cli::Theme* theme = nullptr;       // 必填(指针免默认构造被删)

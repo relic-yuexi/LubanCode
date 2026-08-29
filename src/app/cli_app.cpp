@@ -716,7 +716,8 @@ int RunCli(const std::vector<std::string>& args) {
                 LoadSoulContentByName(once_config.soul.empty() ? "default" : once_config.soul, /*warn=*/false);
             return AskOnce(once_config, cli_options.positional, cli_options.auto_confirm, theme, persona,
                             spinner_enabled,
-                            settings_local, catalog_apply.base_instructions, soul_content);
+                            settings_local, catalog_apply.base_instructions, soul_content,
+                            cli_options.package_dirs);
         }
 
         // 交互模式缺连接时开欢迎页。用户可以直接添 provider，也可以明选
@@ -742,7 +743,8 @@ int RunCli(const std::vector<std::string>& args) {
             effective, theme, model_catalog, settings_local,
             cli_options.auto_confirm, persona, spinner_enabled, cli_options.continue_last, law_source,
             executable, ResolveStartupPlanMode(cli_options, settings_local)};
-        // 统一 Package 封装单:--package-dir 递给 /package 的只读面。
+        // 统一 Package 封装单:--package-dir 递给会话钉快照(阶段 3 挂载的
+        // dev 层)与 /package 命令面。
         session_options.package_dirs = cli_options.package_dirs;
         std::unique_ptr<lubancode::app::SessionStack> session_stack =
             lubancode::app::BuildSessionStack(session_options);

@@ -58,6 +58,15 @@ PromptCapabilities DerivePromptCapabilities(const std::vector<std::string>& tool
 // 这一口径,不许各写一遍。
 bool IsPromptProfileActive(const std::string& profile);
 
+// 一只包的 Prompt Profile 来源根(统一 Package 封装单阶段 3):
+// profiles_dir_utf8 = <包根>/prompts/profiles。包内 Profile 以 canonical 名
+// ("<包id>:<名>")被点名——packaged Agent 的 prompt.profile 短引用在挂载
+// 层已折成 canonical。
+struct PackageProfileRoot {
+    std::string package_id;
+    std::string profiles_dir_utf8;
+};
+
 struct PromptOptions {
     std::string cwd;             // 运行环境段现填
     std::string persona;         // 非空 = 法/CLI 人格,整段替换 core 模块
@@ -80,20 +89,26 @@ struct PromptOptions {
     // 覆盖"这一层用它——default 上下文没有项目层,主 Agent 的拼装不受
     // 项目目录影响(契约 §6.2 的五层次序如此,黄金基线也钉住这一点)。
     std::string project_prompts_dir;
+    // 包层 Profile 根(阶段 3;Prompt Profile 单留的口)。只在 profile 名是
+    // canonical("<包id>:<名>")时被查——见 ResolveModule 的包层注释。
+    std::vector<PackageProfileRoot> package_profile_roots;
     // 自定义 Agent 的能力推导:有值时 feature 段(含恒在四件套)按能力
     // 开合,web/mcp/lsp 也以能力为准(不看上面的配置开关——开关是父会话
     // 的账,自定义 Agent 只认自己的有效工具表)。空 = 旧行为。
     std::optional<PromptCapabilities> capabilities;
 };
 
-// 一段提示词的来源层。前五层是契约 §6.2 的模块五层;后三段是拼装里的
-// 宿主段(现填/继承/内置),也一并记账。
+// 一段提示词的来源层。前五层是契约 §6.2 的模块五层;PackageProfile 是
+// 统一 Package 封装单阶段 3 加的包层(契约 §6.1 列了 Package 覆盖这个来
+// 源,§6.2 的五层次序没给它定位);后四段是拼装里的宿主段(现填/继承/
+// 内置),也一并记账。
 enum class PromptModuleOrigin {
     EmbeddedDefault,      // 内置 default 模块(嵌入常量)
     UserDefault,          // 用户全局 default 覆盖(~/.lubancode/prompts/<相对路径>)
     EmbeddedProfile,      // 内置选中 Profile 覆盖(src/prompts/profiles/<名>/<相对路径>)
     UserProfile,          // 用户选中 Profile 覆盖(~/.lubancode/prompts/profiles/<名>/<相对路径>)
     ProjectProfile,       // 项目选中 Profile 覆盖(<项目根>/.lubancode/prompts/profiles/<名>/<相对路径>)
+    PackageProfile,       // 包内 Profile 覆盖(<包根>/prompts/profiles/<名>/<相对路径>;阶段 3)
     Persona,              // 法/CLI 人格/persona 整段替换 core(拼装外的活字)
     RuntimeEnvironment,   // 运行环境段(工作目录/日期/系统,现填)
     ProjectInstructions,  // AGENTS.md 分层内容(继承时注入)
@@ -129,8 +144,11 @@ std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedge
 // 整表记账:default 树里每个可覆盖模块(core/features/platforms)在给定
 // Profile 上下文下会解析到哪层,末尾补 modes/ 的宿主内置行。不论拼装时
 // feature 开关实际注没注——开关是能力的事,账本管来源。/agent inspect 用。
+// package_roots(阶段 3):包层 Profile 根,canonical 名的 Profile 在这里
+// 解析;空 = 没有包,行为与旧签名一致。
 PromptSourceLedger BuildPromptProfileLedger(const std::string& profile, const std::string& prompts_dir,
-                                            const std::string& project_prompts_dir);
+                                            const std::string& project_prompts_dir,
+                                            const std::vector<PackageProfileRoot>& package_roots = {});
 
 // 嵌入的 core 模块按文件名序拼出的内置默认人格——prompts.hpp 的
 // DefaultPersona()、法文件脚手架与 /prompt reset 的还原源,全打这儿来,

@@ -32,6 +32,7 @@
 #include "lsp/manager.hpp"
 #include "mcp/client.hpp"
 #include "memory/project_memory.hpp"
+#include "package/mounting.hpp"  // PackageMount:会话钉快照(阶段 3 挂载)
 #include "ptc/ptc_tool.hpp"
 #include "runtime/plugin_lua.hpp"
 #include "runtime/tool_trace_hub.hpp"
@@ -160,6 +161,11 @@ public:
         lubancode::cli::WorktreeSession* worktree_session = nullptr;
         lubancode::tools::WorktreeTool::ConfirmHandler worktree_confirm;
         std::function<void()> on_worktree_moved;
+        // Package 会话钉快照(统一封装单阶段 3):借用指针,调用方(SessionStack
+        // /单发的局部)持有且活得比本对象久。agent 工具派发自定义 Agent 时,
+        // 包层成品件并进 AgentCatalog(canonical 名解析)。空 = 没有包,
+        // 行为与从前一致。
+        const lubancode::package::PackageMount* package_mount = nullptr;
     };
 
     ToolRuntime(const lubancode::config::Config& config, const lubancode::cli::Theme& theme,

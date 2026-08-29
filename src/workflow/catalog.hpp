@@ -24,9 +24,25 @@
 
 namespace lubancode::workflow {
 
-enum class WorkflowScope { Project, User };
+// Package(统一 Package 封装单阶段 3):包内 workflows 的挂载层。座次最低
+//(project > user > package)——与 AgentCatalog 的包层同一决断:本地主人
+// 自家的账永远盖过第三方包带来的。挂载名是 canonical id(<包id>:<名>),
+// 与裸 id 命名空间不相交,理论撞名实际不发生;包层 workflow 不抢裸 alias
+//(契约 packages.md §6),直呼只认 standalone。
+enum class WorkflowScope { Project, User, Package };
 
 std::string ToString(WorkflowScope scope);
+
+// 一件已解析的 packaged workflow(阶段 3 挂载):Package 层已过原生 parser
+// 并把包内 agent/skill/subflow 短引用折成 canonical,这里只收成品。dir 指
+// 包内 workflows/<名>/ 目录——task/prompt/template 文件引用相对它解析。
+struct PackagedWorkflowSource {
+    std::filesystem::path dir;       // <包根>/workflows/<名>
+    std::string canonical_id;        // 挂载名 <包id>:<local>
+    std::string package_id;          // 来源包(展示用)
+    WorkflowDefinition definition;   // id 已换成 canonical;文件引用原样(相对 dir)
+    std::string content_hash;
+};
 
 // 一份已装载的定义条目。
 struct CatalogEntry {
@@ -34,6 +50,7 @@ struct CatalogEntry {
     WorkflowScope scope = WorkflowScope::Project;
     std::filesystem::path dir;   // workflow 目录(含 workflow.yaml)
     std::string content_hash;    // 定义的 SHA-256
+    std::string package_id;      // Package 层非空(阶段 3);standalone 为空
     // 解析失败的定义也进 catalog(状态标出来,不算装死):definition.id 空。
     bool broken = false;
     std::vector<ParseIssue> issues;  // broken 时的原因
@@ -73,8 +90,14 @@ bool IsValidAlias(const std::string& alias);
 // workflow id 合法性:ASCII 小写字母数字与 '-',首字符须字母;目录名安全。
 bool IsValidWorkflowId(const std::string& id);
 
+// canonical workflow id 的形状(阶段 3):<包id>:<local>,单冒号;前段是包
+// id 字符集(小写字母/数字/点/连字符,至少一个点),后段是合法裸 workflow
+// id。只有 Package 挂载层产这种 id;standalone 目录照旧只出裸 id。
+bool IsCanonicalPackagedWorkflowId(const std::string& id);
+
 // 扫两级目录。project_root 传空 optional = 只扫用户级。目录不存在给空表。
 Catalog LoadCatalog(const std::optional<std::filesystem::path>& project_root,
-                    const std::optional<std::filesystem::path>& user_root);
+                    const std::optional<std::filesystem::path>& user_root,
+                    const std::vector<PackagedWorkflowSource>& packaged = {});
 
 }  // namespace lubancode::workflow

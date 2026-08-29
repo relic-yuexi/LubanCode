@@ -27,6 +27,7 @@
 #include "cli/worktree.hpp"
 #include "config/config.hpp"
 #include "memory/project_memory.hpp"
+#include "package/mounting.hpp"  // PackageMount:会话钉快照(阶段 3)
 #include "tools/skill_loader.hpp"  // SkillMeta
 
 namespace lubancode::app {
@@ -39,6 +40,10 @@ struct SessionStack {
     lubancode::config::ConfigResult config_result;  // 会话内配置真值(唯一一份)
     const std::optional<std::string> home_dir;
     const std::optional<std::string> official_skills_dir;
+    // Package 会话钉快照(统一封装单阶段 3):启动扫一次,运行中不热生效。
+    // 声明在 skills 之前——挂载材料先于技能清单装配(两趟:先裸扫 standalone
+    // 技能喂包外短引用账,再带包根合出正式清单)。
+    const lubancode::package::PackageMount package_mount;
     std::vector<lubancode::tools::SkillMeta> skills;  // /skills 展示与 agent 工具段
     std::string skills_segment;
     const std::optional<std::string> home_lubancode;

@@ -157,8 +157,12 @@ ValidationResult ValidateDefinition(const WorkflowDefinition& def,
     };
 
     // ---- 顶层字段 ----
-    if (!IsValidWorkflowId(def.id)) {
-        add("bad_id", "id", "workflow id 只认小写字母开头的小写字母/数字/'-',长度 <= 64: " + def.id);
+    // 统一 Package 封装单阶段 3:包内挂载的 workflow 以 canonical id
+    // (<包id>:<名>) 登册,形状另属(IsCanonicalPackagedWorkflowId);裸 id
+    // 规矩只管 standalone 目录。
+    if (!IsValidWorkflowId(def.id) && !IsCanonicalPackagedWorkflowId(def.id)) {
+        add("bad_id", "id", "workflow id 只认小写字母开头的小写字母/数字/'-',长度 <= 64"
+                           "(Package 挂载层另认 <包id>:<名>): " + def.id);
     }
     if (def.version.empty()) {
         add("missing_version", "version", "缺业务版本(如 1.0.0)");

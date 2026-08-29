@@ -88,7 +88,8 @@ agent::PromptOptions BuildSubagentPromptOptions(const std::string& cwd, const st
                                                 const std::string& skills_segment,
                                                 const agent::AgentProfile& agent_profile,
                                                 const CustomAgentMaterial* custom,
-                                                const agent::ResolvedAgentProfile* resolved) {
+                                                const agent::ResolvedAgentProfile* resolved,
+                                                const std::vector<agent::PackageProfileRoot>& package_roots) {
     agent::PromptOptions prompt_options;
     prompt_options.cwd = cwd;
     prompt_options.persona = agent_type == "Explore"
@@ -106,6 +107,9 @@ agent::PromptOptions BuildSubagentPromptOptions(const std::string& cwd, const st
             prompt_options.profile = resolved->prompt_profile;
             prompt_options.persona.clear();  // core 归 Profile 五层回路
             prompt_options.project_prompts_dir = project_prompts_dir;
+            // 阶段 3:canonical 名的 Profile("<包id>:<名>")只在包层根里解析;
+            // 裸名照旧走内置/用户/项目三层,不受这份根影响。
+            prompt_options.package_profile_roots = package_roots;
         }
         if (!resolved->project_instructions) {
             prompt_options.project_instructions.clear();
@@ -1042,7 +1046,7 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
     // BuildSubagentPromptOptions)。
     agent::PromptOptions prompt_options = BuildSubagentPromptOptions(
         cwd_, agent_type, prompts_dir_, project_prompts_dir_, project_instructions_,
-        skills_segment_, agent_profile_, custom, resolved);
+        skills_segment_, agent_profile_, custom, resolved, package_profile_roots_);
     std::string system_prompt = agent::AssembleSystemPrompt(prompt_options);
     if (custom != nullptr) {
         system_prompt += AppendPreloadedSkills(custom->definition.skills_preload, custom->preloaded_skills);
@@ -1163,7 +1167,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     } else {
         agent::PromptOptions prompt_options = BuildSubagentPromptOptions(
             cwd_, agent_type, prompts_dir_, project_prompts_dir_, project_instructions_,
-            skills_segment_, agent_profile_, custom, resolved);
+            skills_segment_, agent_profile_, custom, resolved, package_profile_roots_);
         system_prompt = agent::WithDeferredToolsIndex(
             agent::AssembleSystemPrompt(prompt_options),
             agent_type == "Explore" ? std::string()

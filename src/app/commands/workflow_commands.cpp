@@ -2,6 +2,7 @@
 
 #include "app/commands/workflow_commands.hpp"
 #include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
+#include "package/mounting.hpp"               // MountWorkflowSources(阶段 3 包层挂载)
 #include "app/model_router.hpp"
 #include "app/turn_runner.hpp"                  // PromptAskUser(终端交互宿主)
 #include "tools/path_utils.hpp"                // Utf8ToPath(catalog 锚点拼路径)
@@ -951,8 +952,8 @@ std::vector<std::string> BuiltinSlashWords() {
 }
 
 lubancode::workflow::Catalog LoadCheckedCatalog(const WorkflowCommandContext& context) {
-    lubancode::workflow::Catalog catalog =
-        lubancode::workflow::LoadCatalog(context.project_root, context.user_root);
+    lubancode::workflow::Catalog catalog = lubancode::workflow::LoadCatalog(
+        context.project_root, context.user_root, context.packaged_workflows);
     lubancode::workflow::DetectAliasConflicts(catalog, context.skill_names, BuiltinSlashWords());
     return catalog;
 }
@@ -1010,7 +1011,7 @@ lubancode::workflow::CapabilityTable BuildCapabilities(const WorkflowCommandCont
 }
 
 void PrintUsage(const lubancode::cli::Theme& theme) {
-    TermOut() << "用法: /workflow list [project|home|all] | show <id> | graph <id> [ascii|mermaid|json]"
+    TermOut() << "用法: /workflow list [project|home|package|all] | show <id> | graph <id> [ascii|mermaid|json]"
               << " | validate <id> | doctor\n";
     TermOut() << "  运行与恢复: /workflow run <id> [参数...] | resume <run_id> | cancel <run_id>"
               << " | history <id>\n";
@@ -1049,7 +1050,8 @@ ParsedWorkflowCommand ParseWorkflowCommand(const std::string& args) {
     if (verb == "list") {
         parsed.action = WorkflowCommandAction::List;
         parsed.scope = TrimWord(args, pos);
-        if (parsed.scope != "project" && parsed.scope != "home" && parsed.scope != "all" && !parsed.scope.empty()) {
+        if (parsed.scope != "project" && parsed.scope != "home" && parsed.scope != "all" &&
+            parsed.scope != "package" && !parsed.scope.empty()) {
             parsed.action = WorkflowCommandAction::Invalid;
         }
         return parsed;
@@ -1147,6 +1149,9 @@ std::vector<lubancode::cli::CompletionCandidate> BuildWorkflowSlashCompletionCan
     const lubancode::workflow::Catalog catalog = LoadCheckedCatalog(context);
     std::vector<lubancode::cli::CompletionCandidate> candidates;
     for (const auto& entry : catalog.entries) {
+        // 包层(阶段 3)不抢裸 alias:packaged workflow 只走
+        // /workflow run <canonical id> 正门,补全不列。
+        if (entry.scope == lubancode::workflow::WorkflowScope::Package) continue;
         const auto& def = entry.definition;
         if (entry.broken || !def.enabled || def.alias.empty() ||
             catalog.disabled_aliases.count(def.alias) > 0) {
@@ -1173,10 +1178,16 @@ bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext
     switch (parsed.action) {
         case WorkflowCommandAction::List: {
             const std::string& scope = parsed.scope.empty() ? "all" : parsed.scope;
+            // scope 过滤(阶段 3 起 package 是第三档;home 只认用户级)。
+            const auto scope_matches = [&](const lubancode::workflow::CatalogEntry& entry) {
+                if (scope == "all") return true;
+                if (scope == "package") return entry.scope == lubancode::workflow::WorkflowScope::Package;
+                if (scope == "project") return entry.scope == lubancode::workflow::WorkflowScope::Project;
+                return entry.scope == lubancode::workflow::WorkflowScope::User;
+            };
             std::size_t shown = 0;
             for (const auto& entry : catalog.entries) {
-                if (scope != "all" &&
-                    (scope == "project") != (entry.scope == lubancode::workflow::WorkflowScope::Project)) {
+                if (!scope_matches(entry)) {
                     continue;
                 }
                 ++shown;
@@ -1191,7 +1202,10 @@ bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext
                 }
                 TermOut() << "  " << entry.definition.name << "  [" << entry.definition.id << " v"
                           << entry.definition.version << "] (" << source << ")";
-                if (!entry.definition.alias.empty()) {
+                // 包层(阶段 3)不抢裸 alias:列表不显示直呼名,免得许一个
+                // 死的 /<alias>;canonical id 正门(上面的 [id])才通。
+                if (!entry.definition.alias.empty() &&
+                    entry.scope != lubancode::workflow::WorkflowScope::Package) {
                     TermOut() << "  /" << entry.definition.alias;
                     if (catalog.disabled_aliases.count(entry.definition.alias) > 0) {
                         TermOut() << theme.error << "(禁用:" << catalog.disabled_aliases.at(entry.definition.alias)
@@ -1358,6 +1372,9 @@ bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext
         }
         case WorkflowCommandAction::Alias: {
             for (const auto& entry : catalog.entries) {
+                // 包层(阶段 3)不抢裸 alias:直呼名册只列 standalone;
+                // packaged workflow 走 /workflow run <canonical id> 正门。
+                if (entry.scope == lubancode::workflow::WorkflowScope::Package) continue;
                 if (entry.broken || entry.definition.alias.empty()) continue;
                 const bool disabled = catalog.disabled_aliases.count(entry.definition.alias) > 0;
                 TermOut() << "  /" << entry.definition.alias << " -> " << entry.definition.id << " ("
@@ -1610,9 +1627,10 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
     std::shared_ptr<lubancode::workflow::LlmExecutor> llm_executor;
     {
         // prompt 从 workflow 目录读(包内相对路径;越界已被 validator
-        // 拦,这里只管读)。
-        const lubancode::workflow::Catalog wf_catalog =
-            lubancode::workflow::LoadCatalog(wf_ctx.project_root, wf_ctx.user_root);
+        // 拦,这里只管读)。包层成品件一并喂:packaged workflow 的 prompt
+        // 相对包内 workflows/<名>/ 目录解析(dir 指到那里)。
+        const lubancode::workflow::Catalog wf_catalog = lubancode::workflow::LoadCatalog(
+            wf_ctx.project_root, wf_ctx.user_root, wf_ctx.packaged_workflows);
         const lubancode::workflow::CatalogEntry* wf_entry = wf_catalog.Find(workflow_id);
         const std::filesystem::path prompt_dir =
             wf_entry != nullptr ? wf_entry->dir : std::filesystem::path();
@@ -1709,8 +1727,8 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
     // nesting 首版只开一层。子流程另起自己的 Store 与预算账，只拿父节点
     // 明写的 input；事件、发号局与交互门仍沿用本场会话。
     if (exec_ctx.subflow_depth < 1) {
-        const auto catalog = std::make_shared<lubancode::workflow::Catalog>(
-            lubancode::workflow::LoadCatalog(wf_ctx.project_root, wf_ctx.user_root));
+        const auto catalog = std::make_shared<lubancode::workflow::Catalog>(lubancode::workflow::LoadCatalog(
+            wf_ctx.project_root, wf_ctx.user_root, wf_ctx.packaged_workflows));
         lubancode::workflow::SubflowExecutor::DefinitionResolver resolver =
             [catalog](const std::string& id) -> std::optional<lubancode::workflow::WorkflowDefinition> {
                 const auto* entry = catalog->Find(id);
@@ -1756,6 +1774,11 @@ lubancode::app::WorkflowCommandContext BuildWorkflowCatalogContext(SlashDispatch
                                 ? std::optional<std::filesystem::path>(
                                       lubancode::tools::Utf8ToPath(**ctx.home_lubancode))
                                 : std::nullopt;
+    // 统一 Package 封装单阶段 3:包层成品件从会话钉快照折来(canonical id
+    // 登册;快照缺席 = 空表,行为与从前一致)。
+    if (ctx.package_mount != nullptr) {
+        wf_ctx.packaged_workflows = lubancode::package::MountWorkflowSources(*ctx.package_mount);
+    }
     wf_ctx.registry = ctx.registry;
     for (const auto& skill : *ctx.skills) {
         wf_ctx.skill_names.push_back(skill.name);

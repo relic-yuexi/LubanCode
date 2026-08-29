@@ -5,6 +5,7 @@
 #pragma once
 
 #include <string>
+#include <vector>
 
 #include "cli/theme.hpp"
 #include "config/config.hpp"
@@ -26,6 +27,7 @@ namespace lubancode::app {
 int AskOnce(const lubancode::config::Config& config, const std::string& question, bool auto_confirm,
             const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled,
             const lubancode::config::SettingsLocal& settings_local,
-            const std::string& model_instructions = std::string(), const std::string& soul_content = std::string());
+            const std::string& model_instructions = std::string(), const std::string& soul_content = std::string(),
+            const std::vector<std::string>& package_dirs = std::vector<std::string>{});
 
 }  // namespace lubancode::app

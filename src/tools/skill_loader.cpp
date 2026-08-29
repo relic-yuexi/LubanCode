@@ -200,7 +200,11 @@ std::optional<ParsedSkillFile> ParseSkillMarkdown(const std::string& content) {
     }
 }
 
-std::vector<SkillMeta> ScanSkillsDir(const std::filesystem::path& skills_root, const std::string& source_level) {
+// 裸扫描的实现体:package_id 非空 = 包内挂载扫描(阶段 3)——名字折成
+// canonical("<包id>:<名>")、记 package_id、跳过裸名规范与名不符警告
+//(local id 的命名规矩归 package 层的盘点与 doctor,loader 不重复报)。
+std::vector<SkillMeta> ScanSkillsDirImpl(const std::filesystem::path& skills_root, const std::string& source_level,
+                                         const std::string* package_id) {
     std::vector<SkillMeta> metas;
 
     std::error_code ec;
@@ -244,32 +248,47 @@ std::vector<SkillMeta> ScanSkillsDir(const std::filesystem::path& skills_root, c
             platform::LogSink::Instance().Warn("skills", PathToUtf8(skill_md) + " 缺必填 description，跳过");
             continue;
         }
-        if (!IsValidAgentSkillName(*parsed->name)) {
-            platform::LogSink::Instance().Warn(
-                "skills", PathToUtf8(skill_md) + " 的 name 不合 Agent Skills 命名规范，仍按兼容模式加载");
-        }
-        if (*parsed->name != dir_name) {
-            platform::LogSink::Instance().Warn(
-                "skills", PathToUtf8(skill_md) + " 的 name 与父目录名不一致，仍按 frontmatter 名加载");
+        if (package_id == nullptr) {
+            // 裸目录的老规矩:名字规范与目录一致性都只警告、照加载。包内扫描
+            // 不走这两条——canonical 名带点带冒号,本就不合裸名规范;目录名
+            // 规矩归 package 层盘点。
+            if (!IsValidAgentSkillName(*parsed->name)) {
+                platform::LogSink::Instance().Warn(
+                    "skills", PathToUtf8(skill_md) + " 的 name 不合 Agent Skills 命名规范，仍按兼容模式加载");
+            }
+            if (*parsed->name != dir_name) {
+                platform::LogSink::Instance().Warn(
+                    "skills", PathToUtf8(skill_md) + " 的 name 与父目录名不一致，仍按 frontmatter 名加载");
+            }
         }
         if (Utf8CharacterCount(*parsed->description) > 1024) {
             platform::LogSink::Instance().Warn(
                 "skills", PathToUtf8(skill_md) + " 的 description 超过 1024 字符，仍按兼容模式加载");
         }
         SkillMeta meta;
-        meta.name = *parsed->name;
+        meta.name = package_id != nullptr ? (*package_id + ":" + *parsed->name) : *parsed->name;
         meta.description = Trim(*parsed->description);
         meta.dir_path = PathToUtf8(entry.path());
         meta.source_level = source_level;
         meta.managed_official_copy = IsManagedOfficialCopy(content, *parsed);
+        meta.package_id = package_id != nullptr ? *package_id : std::string();
         metas.push_back(std::move(meta));
     }
 
     return metas;
 }
 
+std::vector<SkillMeta> ScanSkillsDir(const std::filesystem::path& skills_root, const std::string& source_level) {
+    return ScanSkillsDirImpl(skills_root, source_level, /*package_id=*/nullptr);
+}
+
+std::vector<SkillMeta> ScanPackagedSkillsDir(const PackagedSkillRoot& root) {
+    return ScanSkillsDirImpl(root.skills_dir, root.source_level, &root.package_id);
+}
+
 std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::optional<std::string>& home_dir,
-                                  const std::optional<std::string>& official_skills_dir) {
+                                  const std::optional<std::string>& official_skills_dir,
+                                  const std::vector<PackagedSkillRoot>& package_roots) {
     std::map<std::string, SkillMeta> merged;  // std::map 天然按 key 排序,输出顺序稳定
 
     const auto merge = [&](std::vector<SkillMeta> incoming) {
@@ -304,6 +323,13 @@ std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::opt
     const std::filesystem::path project_root = Utf8ToPath(project_dir);
     merge(ScanSkillsDir(project_root / ".agents" / "skills", "项目级"));
     merge(ScanSkillsDir(project_root / ".lubancode" / "skills", "项目级"));
+
+    // 包内技能(统一 Package 封装单阶段 3)最后并入:canonical 名带点带
+    // 冒号,与裸名两套命名空间不相交(契约 packages.md §6),并入只添行
+    // 不遮行。
+    for (const PackagedSkillRoot& root : package_roots) {
+        merge(ScanPackagedSkillsDir(root));
+    }
 
     std::vector<SkillMeta> out;
     out.reserve(merged.size());

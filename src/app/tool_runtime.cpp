@@ -345,10 +345,15 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         // 时按名查 AgentCatalog。现扫不缓存——用户改了 YAML,下一次派发即
         // 生效,不必重启会话。预装技能的正文从启动时扫到的技能清单里读;
         // 名单里没有的技能留给 doctor 诊断,这里只降级(登记名字不注正文)。
+        // 统一 Package 封装单阶段 3:包层成品件从会话钉快照折来并入——包
+        // 的增删不热生效(下回启动才见),会话内包内容与启动时一致。
+        const lubancode::package::PackageMount* package_mount = options.package_mount;
         agent_tool_->SetCustomAgentResolver(
-            [skills](const std::string& name) -> std::optional<lubancode::tools::CustomAgentMaterial> {
-                const lubancode::agent::AgentCatalog catalog =
-                    lubancode::agent::LoadAgentCatalog(ComputeAgentScanRoots());
+            [skills, package_mount](const std::string& name) -> std::optional<lubancode::tools::CustomAgentMaterial> {
+                const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(
+                    ComputeAgentScanRoots(package_mount != nullptr
+                                              ? lubancode::package::MountAgentEntries(*package_mount)
+                                              : std::vector<lubancode::agent::PackagedAgentEntry>{}));
                 const lubancode::agent::AgentCatalogEntry* entry = catalog.Find(name);
                 if (entry == nullptr || !entry->available || !entry->definition.has_value()) {
                     return std::nullopt;

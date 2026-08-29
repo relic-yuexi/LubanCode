@@ -35,6 +35,20 @@ struct SkillMeta {
     std::string dir_path;      // 技能目录的绝对路径(UTF-8),SKILL.md 就在这个目录下
     std::string source_level;  // "官方"、"项目级" 或 "主目录级",/skills 展示用
     bool managed_official_copy = false;  // 旧版播种进主目录的官方维护副本
+    // 统一 Package 封装单阶段 3:来自 Package 的技能带包命名空间,name 是
+    // canonical id("<包id>:<名>");standalone 照旧裸名,此字段为空。
+    std::string package_id;
+};
+
+// 一只包的 skills 来源根(阶段 3 挂载):skills_dir = <包根>/skills。loader
+// 不反过来扫 Package——根由 Package 挂载层算好递进来(单子 §十一)。扫出的
+// SkillMeta.name 一律 canonical 化为 "<package_id>:<目录名>",source_level 用
+// 调用方给的标签(如 "包(project)"),包内 local id 的命名规矩归 package 层
+// 检查,这里不重复报 canonical 名不合 Agent Skills 裸名规范的警告。
+struct PackagedSkillRoot {
+    std::filesystem::path skills_dir;
+    std::string package_id;
+    std::string source_level;
 };
 
 // SKILL.md 的 frontmatter 解析结果。name/description 缺失时是
@@ -66,8 +80,14 @@ std::vector<SkillMeta> ScanSkillsDir(const std::filesystem::path& skills_root, c
 // 可能没有)与 project_dir(cwd)合并官方、.agents 与 .lubancode 五处。
 // 优先级:项目原生 > 项目共享 > 用户原生 > 用户共享 > 官方。旧版落在
 // 主目录的官方维护副本会自动让位。返回结果按名字排序。
+// package_roots(统一 Package 封装单阶段 3):包内 skills 的挂载根,空 =
+// 没有包,行为与旧签名逐字节一致。packaged 技能以 canonical 名
+// ("<包id>:<名>")进表——canonical 名带点带冒号,不与任何裸名相撞
+//(契约 packages.md §6"Package component 不抢裸 alias");同 canonical
+// 撞车只在两包同 id 时发生,那在扫描层已按四层优先级定过胜者。
 std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::optional<std::string>& home_dir,
-                                  const std::optional<std::string>& official_skills_dir = std::nullopt);
+                                  const std::optional<std::string>& official_skills_dir = std::nullopt,
+                                  const std::vector<PackagedSkillRoot>& package_roots = {});
 
 // 系统提示词里"可用技能"这一段。skills 为空时返回空串——一个字都不注入,
 // 不影响没配技能的既有场景。

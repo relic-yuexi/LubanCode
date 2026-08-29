@@ -92,14 +92,28 @@ lubancode::package::ScanOptions BuildScanOptions(SlashDispatchContext& ctx) {
 }
 
 // 一只包的"列表行":id、版本、来源、状态、六类组件计数、code-bearing。
+// mount 非空时按会话钉快照如实标挂载状态(阶段 3):内容组件挂了几件、
+// 代码组件待信任门、现扫到但会话没挂的(启动后才放进目录)注明下回启动
+// 才见。
 std::string DescribePackage(const lubancode::package::PackageInventory& inventory,
-                            const std::string& state) {
+                            const std::string& state,
+                            const lubancode::package::PackageMount* mount) {
     std::ostringstream out;
     out << "  " << inventory.package_id;
     if (!inventory.version_text.empty()) {
         out << " " << inventory.version_text;
     }
     out << " [" << lubancode::package::ScopeToString(inventory.scope) << "] " << state;
+    if (mount != nullptr) {
+        if (const auto* mounted = mount->Find(inventory.package_id)) {
+            out << "  已挂载内容组件 " << mounted->mounted_canonical_ids.size() << " 件";
+            if (mounted->code_pending_trust) {
+                out << ";Plugin/MCP 待信任门(阶段 4)";
+            }
+        } else if (inventory.valid) {
+            out << "  未挂载(会话启动后才见;下回启动生效)";
+        }
+    }
     out << "  agents:" << inventory.agents.size()
         << " prompts:" << inventory.prompt_profiles.size()
         << " skills:" << inventory.skills.size()
@@ -267,7 +281,8 @@ void PrintUsage() {
 }
 
 void RunPackageList(const lubancode::package::ScanOptions& options,
-                    const std::optional<std::string>& scope_filter) {
+                    const std::optional<std::string>& scope_filter,
+                    const lubancode::package::PackageMount* mount) {
     const std::vector<lubancode::package::PackageCandidate> candidates =
         lubancode::package::ScanPackages(options);
 
@@ -314,10 +329,10 @@ void RunPackageList(const lubancode::package::ScanOptions& options,
         ++shown;
         if (row.shadowed) {
             TermOut() << DescribePackage(row.inventory,
-                                         "shadowed(被 " + row.shadowed_by + " 遮住)");
+                                         "shadowed(被 " + row.shadowed_by + " 遮住)", mount);
         } else {
             TermOut() << DescribePackage(row.inventory,
-                                         row.inventory.valid ? "valid" : "invalid");
+                                         row.inventory.valid ? "valid" : "invalid", mount);
         }
         TermOut() << "\n";
     }
@@ -327,7 +342,8 @@ void RunPackageList(const lubancode::package::ScanOptions& options,
     TermOut().flush();
 }
 
-void RunPackageShow(const lubancode::package::ScanOptions& options, const std::string& target) {
+void RunPackageShow(const lubancode::package::ScanOptions& options, const std::string& target,
+                    const lubancode::package::PackageMount* mount) {
     const std::vector<lubancode::package::PackageCandidate> candidates =
         lubancode::package::ScanPackages(options);
     const PackageLookup lookup = LookupPackage(candidates, target);
@@ -344,8 +360,22 @@ void RunPackageShow(const lubancode::package::ScanOptions& options, const std::s
               << (inventory.code_bearing() ? "  [code-bearing]" : "") << "\n";
     TermOut() << "  来源: [" << lubancode::package::ScopeToString(inventory.scope) << "] "
               << lubancode::platform::PathToUtf8(inventory.package_root) << "\n";
+    if (mount != nullptr) {
+        if (const auto* mounted = mount->Find(inventory.package_id)) {
+            TermOut() << "  挂载: 内容组件 " << mounted->mounted_canonical_ids.size()
+                      << " 件已挂(canonical id 见下;会话钉快照)";
+            if (mounted->code_pending_trust) {
+                TermOut() << ";Plugin/MCP 待信任门(阶段 4),一件不挂不执行";
+            }
+            TermOut() << "\n";
+        } else if (inventory.valid) {
+            TermOut() << "  挂载: 本会话未挂(启动后才放进目录;下回启动生效)\n";
+        } else {
+            TermOut() << "  挂载: 无效包,一件不挂(整包成整包败)\n";
+        }
+    }
     TermOut() << "  内容哈希: " << inventory.content_hash << "  (盘点文件 "
-              << inventory.total_file_count << " 个;阶段 1 只读,不挂载)\n";
+              << inventory.total_file_count << " 个)\n";
     if (!lookup.shadowed.empty()) {
         TermOut() << "  被遮住的候选(" << lookup.shadowed.size() << " 份):\n";
         for (const auto* shadow : lookup.shadowed) {
@@ -503,10 +533,10 @@ CommandFlow HandleSlashPackage(SlashDispatchContext& ctx,
     const lubancode::package::ScanOptions options = BuildScanOptions(ctx);
     switch (command.action) {
         case PackageCommandAction::List:
-            RunPackageList(options, command.scope_filter);
+            RunPackageList(options, command.scope_filter, ctx.package_mount);
             return CommandFlow::Continue;
         case PackageCommandAction::Show:
-            RunPackageShow(options, command.target);
+            RunPackageShow(options, command.target, ctx.package_mount);
             return CommandFlow::Continue;
         case PackageCommandAction::Doctor:
             RunPackageDoctor(options, BuildExternalNamespaces(ctx), command.target);

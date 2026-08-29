@@ -25,8 +25,25 @@
 namespace lubancode::agent {
 
 // 来源层,从低到高。ToString 给 /agents、doctor 的来源标签用。
-enum class AgentSourceLayer { Builtin, User, Project };
+// Package 层(统一 Package 封装单阶段 3)定死在 user 之下、builtin 之上:
+//   project > user > package > builtin
+// 契约(packages.md §7/agents.md §11)只说包内 Agent 以 canonical id
+// (<包id>:<名>)登记、不撞 standalone 裸名,没给包层在四层里的座次——
+// 本仓定夺:用户/项目是本地主人自家的话,理论撞名(实际因 canonical 命名
+// 空间不相交而不发生)也永远盖过第三方包带来的;builtin 仍是地板。
+enum class AgentSourceLayer { Builtin, Package, User, Project };
 std::string ToString(AgentSourceLayer layer);
+
+// 一件已解析的 packaged Agent(阶段 3 挂载):Package 层在 AnalyzePackage
+// 里已过原生 parser 并把包内短引用(prompt.profile / skills.preload)折成
+// canonical,这里只收成品,不重读文件、不重扫包(单子 §十一:loader 收
+// ComponentSourceRoot,不反过来扫 Package)。
+struct PackagedAgentEntry {
+    std::string canonical_name;              // 挂载名 <包id>:<local>(Catalog 的键)
+    std::string package_id;                  // 来源包(展示"/agents 带来源包")
+    AgentDefinition definition;              // name 保持 local 人话;引用已折 canonical
+    std::string file_utf8;                   // agents/<local>.yaml 的 UTF-8 全路径
+};
 
 // Catalog 里的一条:一个名字的最终归属。definition 缺席(解析失败/重名
 // 冲突)= 不可用,issues 带第一条错。
@@ -35,6 +52,7 @@ struct AgentCatalogEntry {
     std::optional<AgentDefinition> definition;
     AgentSourceLayer layer = AgentSourceLayer::Builtin;
     std::string file;  // UTF-8 来源路径;码内注册的写 "(builtin)"
+    std::string package_id;  // Package 层非空(阶段 3);standalone 为空
     bool available = true;
     std::vector<AgentDefinitionIssue> issues;  // 解析诊断 + 重名冲突 + 名不符警告
     // 被这一条盖住的低层来源(优先级从高到低列),跨层覆盖的账,inspect 用。
@@ -57,11 +75,13 @@ struct AgentCatalog {
 };
 
 // 三层扫描根,哪层不要就给 nullopt(目录不存在按"没有那层"静默跳过,
-// 与 SkillLoader 同款;路径会先做 lexically_normal 规范化)。
+// 与 SkillLoader 同款;路径会先做 lexically_normal 规范化)。packaged 是
+// 阶段 3 的包层成品件(空 = 没有包,行为与旧签名一致)。
 struct AgentCatalogScanRoots {
     std::optional<std::filesystem::path> builtin_dir;   // <embedded>/agents(可空)
     std::optional<std::filesystem::path> user_dir;      // ~/.lubancode/agents(可空)
     std::optional<std::filesystem::path> project_dir;   // <项目根>/.lubancode/agents(可空)
+    std::vector<PackagedAgentEntry> packaged;           // 包内 Agent(会话钉快照折的)
 };
 
 // 码内内置定义(单子 6.2:general-purpose 与 Explore 先登进 Catalog,行为
@@ -71,7 +91,9 @@ struct AgentCatalogScanRoots {
 AgentDefinition BuiltinGeneralPurposeDefinition();
 AgentDefinition BuiltinExploreDefinition();
 
-// 扫描三层并合并。总是先垫进码内两个内置定义(builtin 层),再叠磁盘层。
+// 扫描三层并合并。总是先垫进码内两个内置定义(builtin 层),再叠磁盘层,
+// 最后并入包层成品件(阶段 3:canonical 名与裸名两套命名空间不相交,并入
+// 只添行不遮行)。
 AgentCatalog LoadAgentCatalog(const AgentCatalogScanRoots& roots);
 
 }  // namespace lubancode::agent

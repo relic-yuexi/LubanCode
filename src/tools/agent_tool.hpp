@@ -48,6 +48,7 @@
 #include "agent/loop.hpp"      // RunOutcome/RunOneTool:轮次收口与工具执行链
 #include "agent/runtime_profile.hpp"
 #include "api/types.hpp"
+#include "agent/prompt_assembler.hpp"  // PackageProfileRoot:包层 Profile 根(阶段 3)
 #include "cli/worktree.hpp"
 #include "hooks/detached.hpp"
 #include "hooks/dispatcher.hpp"
@@ -380,6 +381,13 @@ public:
     // 影响,契约 §6.2)。不设(默认空)= 没有项目层。
     void SetProjectPromptsRoot(std::string dir) { project_prompts_dir_ = std::move(dir); }
 
+    // 统一 Package 封装单阶段 3:包层 Profile 根。packaged Agent 点名的
+    // canonical Profile("<包id>:<名>")只在包根里解析(命名空间与裸名不相
+    // 交,见 prompt_assembler 的包层注释)。不设(默认空)= 没有包层。
+    void SetPackageProfileRoots(std::vector<lubancode::agent::PackageProfileRoot> roots) {
+        package_profile_roots_ = std::move(roots);
+    }
+
     // isolation=worktree 的房务 Git 调用可替身(测试注入假 runner);
     // 不设走真 git。
     void SetGitRunner(lubancode::cli::GitRunner runner) { git_runner_ = std::move(runner); }
@@ -433,6 +441,7 @@ private:
     std::string skills_segment_;
     std::string prompts_dir_;  // 提示词运行时化:空 = 只用嵌入版
     std::string project_prompts_dir_;  // Prompt Profile 项目层根(阶段 2):空 = 没有项目层
+    std::vector<lubancode::agent::PackageProfileRoot> package_profile_roots_;  // 包层(阶段 3)
     std::string project_instructions_;  // 当前工作目录的 AGENTS.md 分层内容
     Hooks hooks_;
     bool background_by_default_ = false;
