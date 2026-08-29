@@ -575,3 +575,187 @@ reasoning：关闭或最低档
 - 独立 cheap 已配置时，标题请求只含首问截段，输入不随首轮工具数量增长。
 - 标题输出上限收紧到足够容纳目标长度，不再给十几个字预留 100 tokens。
 - 真机记录 query 接收、临时标题、精炼标题、首个 normal token、主答结束五个时间点，校验时序。
+
+## 问题 8：`Ctrl+R` 把本会话每条提问列了两遍
+
+- 状态：已定位，待修复
+- 级别：P2
+- 证据：`C:\Users\MOONTI~1\AppData\Local\Temp\codex-clipboard-13858c17-ed98-4748-9627-621ce6460627.png`
+- 会话：`C:\Users\moontidef\.lubancode\sessions\20260829-223210-做一个图书管理系统，node前端，nod.jsonl`
+
+### 现场
+
+按下 `Ctrl+R` 后，终端进入“历史搜索 [本会话]”。本场三条真实提问各出现两遍：
+
+```text
+做一个图书管理系统，node前端，node后端。要有图书的增删改查。
+为什么后台任务会退出？
+那你挂后台启动吧
+```
+
+上面一批尾巴写 `20260829-223210 · library_sys`，下面一批写具体时间与会话标题。看上去像发了六次，实则只发了三次。
+
+### 根因
+
+`CollectPromptHistory()` 先遍历 session 文件，把本场已落盘提问全收进来：
+
+```text
+src/app/interactive_session.cpp:388-415
+```
+
+随后它又无条件遍历 `main_agent->History()`，把本场活历史再并一次：
+
+```text
+src/app/interactive_session.cpp:416-443
+```
+
+代码注释说活历史只作“建档前（或建不了档）的本场提问”兜底，实际没有先查磁盘里是否已有本场，也没有只补尚未落盘的尾巴。
+
+索引层只去掉“同一场、前后相邻、文字相同”的条目：
+
+```text
+src/cli/history_search.cpp:100-109
+```
+
+磁盘一批、内存一批中间隔着别的提问，故三组重复全漏过去。现有单测只钉连续同文，没有覆盖“当前 session 文件 + 活 history 重叠”：
+
+```text
+tests/unit/cli/test_history_search.cpp:50-74
+```
+
+### `Ctrl+R` 是什么
+
+它不是缓存面板，而是提问历史反向搜索：
+
+```text
+输入文字：筛选历史提问
+Ctrl+R：往更早一条走
+Ctrl+S：切换本会话 / 本项目 / 全部范围
+Tab：取回到输入框
+Enter：取回并发送
+Ctrl+C：退出
+```
+
+### 预期结果
+
+本场已落盘的提问只列一次。活历史只补尚未落盘的尾巴，不能把整场重抄一遍。
+
+去重不能只拿文字硬砍。同一句话若由用户在不同时间真发了两次，应留两条。最好给提问事件保留稳定身份，如 session id 加事件序号或 JSONL 偏移；磁盘与内存认出同一事件后合并，另一次真实提交仍照常保留。
+
+### 验收
+
+- 本场三条提问已落盘，`Ctrl+R` 只显示三条。
+- 新提问尚未落盘时，活历史能补出这一条；落盘后不变成两条。
+- 用户隔一阵真把同一句发两次，两次都保留，并带各自时间。
+- resume 旧会话后继续提问，旧档与新活历史不重不漏。
+- 单测覆盖：仅磁盘、仅内存、磁盘与内存完全重叠、尾部部分重叠、同文不同事件。
+
+## 问题 9：同一缓存 epoch 内命中率忽高忽低，现有面板说不清断在何处
+
+- 状态：现象已确认，根因待探针分层
+- 级别：P1
+- 证据：
+  - `C:\Users\MOONTI~1\AppData\Local\Temp\codex-clipboard-083c7067-9682-48ed-8253-c1f8ad81f5af.png`
+  - `C:\Users\MOONTI~1\AppData\Local\Temp\codex-clipboard-eb30b24d-de1c-4bf4-a5bd-4a03b3bcdbf2.png`
+  - `C:\Users\MOONTI~1\AppData\Local\Temp\codex-clipboard-13858c17-ed98-4748-9627-621ce6460627.png`
+
+### 先把三笔账分开
+
+状态栏这句：
+
+```text
+缓存命中 20k(68%)
+```
+
+说的是最近一次模型请求：总输入约 `29.5k`，其中 provider 回报 `20k cached_tokens`。
+
+`/context` 里的：
+
+```text
+会话累计：命中 208.4k / 总输入 728.3k(29%)
+```
+
+说的是本会话主代理全部模型请求累计。它不是当前窗口占用，也不是用户提交次数。
+
+本场用户只提交三条 query。一次 query 里，模型会“请求模型 → 调工具 → 塞回工具结果 → 再请求模型”，来回多次。因此账上有 `31 次 normal 调用`，并不等于用户发了 31 轮。问题 5 已另记这层命名混乱。
+
+### 真正可疑之处
+
+最近十二次 provider 请求都落在 `epoch 1`，输入从 `27.2k` 长到 `29.5k`。命中却这样跳：
+
+```text
+0%, 0%, 91%, 98%, 0%, 23%, 0%, 0%, 97%, 23%, 0%, 68%
+```
+
+若旧前缀稳定，只在尾巴追加工具调用与结果，已经出现过的长前缀理当反复可用。如今刚命中 `98%`，下一次便掉到 `0%`；再过几次又回到 `97%`。用户多发几条消息只能让请求尾巴变长，解释不了同一 epoch 里的这般抖动。
+
+### 本地已能确认的边界
+
+LubanCode 直接读取 Responses API 回包里的 `input_tokens_details.cached_tokens`，再摊成非缓存输入与缓存命中：
+
+```text
+src/api/responses/events.cpp:153-164
+```
+
+故 `0% / 23% / 98%` 不是界面凭空估出来的，是 ccmoon / 上游端点报回来的数。
+
+本地 `cache epoch` 只比较模型、system、工具定义与历史消息指纹。旧消息没改，只往尾部添消息，epoch 就不变：
+
+```text
+src/agent/prefix.cpp:180-233
+src/agent/context_manager.cpp:113-132
+```
+
+这说明 LubanCode 眼里的请求对象保持追加律。它还不能单独证明：
+
+- 当前 wire 序列化后的实际缓存前缀逐字节稳定；
+- ccmoon 是否把相邻请求送到共享同一缓存的上游节点；
+- 上游缓存是否过期、逐出、分片，或按别的字段另算 cache key；
+- provider 回报的 `cached_tokens` 是否始终可靠。
+
+眼下不可贸然断言是本地改写前缀，也不可把锅径直推给 ccmoon。须拿探针把两边拆开。
+
+### 现有诊断还差一口气
+
+`/doctor cache probe` 已有两轮固定前缀探针，还会比较当前 wire 两份请求体的公共前缀：
+
+```text
+src/app/commands/doctor_commands.cpp:559-623
+```
+
+可它为公网 provider 设了安全闸：`base_url` 不是 loopback，且没配 `metrics_url` 时，不发探针：
+
+```text
+src/app/commands/doctor_commands.cpp:561-566
+```
+
+当前 ccmoon 场景很可能只能看日常请求账，没法在会话内一键做成对复测。日常账又只画 token 数、epoch 与命中率，不展示 wire 前缀指纹、上游节点线索或 miss 分型。
+
+### 预期结果
+
+缓存面板不只报“命中多少”，还要答出“本地前缀有没有变”。本地没变而 provider 报零时，应明写“上游未命中”，不能让用户误以为自己多发了几条便冲掉缓存。
+
+建议每次请求留一笔不含正文、不含密钥的诊断账：
+
+```text
+turn_id / request_index
+cache_epoch / epoch_break_reason / prefix_append_only
+model / wire
+system_hash / tools_hash / stable-message-prefix hash 与长度
+序列化公共前缀长度（诊断模式）
+provider cached_tokens / total_input_tokens
+miss 分类：首请求、明确断 epoch、本地前缀稳定但上游未命中、usage 未回报
+```
+
+公网探针不可偷偷烧 token。可加一次性确认，明写会发两枚小请求、预计上限与端点；用户答应后再跑。没有 metrics 权限，也应凭两轮 usage 与本地 wire 前缀作有限判断。
+
+### 验收
+
+- 同一 epoch 的每次请求都能看见 `prefix_append_only` 与稳定前缀长度。
+- system、工具定义、旧消息或 wire 前缀一变，epoch 当场递增并点名断因。
+- 本地前缀稳定、provider 却回 `cached_tokens=0` 时，标成“上游未命中”，不标成“本地前缀失效”。
+- provider 没回 usage 时显示“未回报”，不拿 `0%` 顶替。
+- 经用户确认后，可对当前公网 provider 发两轮固定前缀探针；输出两轮 usage 与实际公共前缀字节数。
+- 连跑多组探针，能区分稳定命中、固定阈值命中、间歇性 miss 与完全不支持缓存。
+- 日志不落 prompt 正文、API key、完整 URL 查询参数；只留短 hash、长度与分类。
+- 真机复测当前 ccmoon：至少跑五组相同固定前缀，逐组记命中；若仍高低交替，再查代理分流、缓存亲和与上游回报。
