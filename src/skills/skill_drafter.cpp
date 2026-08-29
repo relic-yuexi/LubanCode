@@ -481,6 +481,19 @@ std::string StepOutcomeText(const DraftStep& step) {
 
 }  // namespace
 
+std::vector<DraftFailureMode> CollectStableFailureModes(const std::vector<RecordEvent>& events) {
+    std::vector<DraftFailureMode> out;
+    for (const DraftStep& step : CollectSteps(events)) {
+        if (!step.attempts.empty() && !step.attempts.back().ok) {
+            DraftFailureMode mode;
+            mode.tool = step.tool;
+            mode.summary = step.attempts.back().summary;
+            out.push_back(std::move(mode));
+        }
+    }
+    return out;
+}
+
 // ---------------------------------------------------------------------------
 // 校验
 // ---------------------------------------------------------------------------

@@ -1,7 +1,8 @@
-// /evolve 命令(自进化闭环阶段 1):status/list/show 只读面。
-// 只看观察账、只采观察——不生成 Package,不装任何东西(propose/approve 一类
-// 写动作是后续阶段的事,这里不冒头)。参数拆解是纯函数,单测直接钉;IO
-// (扫描、落账、打印)在 cpp 的 handler 一头。照 /package 的先例。
+// /evolve 命令(自进化闭环阶段 1/2):status/list/show 只读面,加阶段 2 的
+// propose/diff/reject 三条子命令——从一场录制起草最小 content-only Package
+// Candidate、看候选与父版或空对照的 diff、拒绝候选并把指纹进拒绝账。
+// 候选状态机的写笔全在 EvolutionCoordinator(契约铁律),命令层只递材料、
+// 只打印,不自写迁移。approve/use/promote 是后续阶段的事,这里不冒头。
 #pragma once
 
 #include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
@@ -16,15 +17,19 @@ struct SlashDispatchContext;
 
 enum class EvolveCommandAction {
     Invalid,
-    Status,  // /evolve status(裸 /evolve 同义):扫五路账本采观察,报账面
-    List,    // /evolve list [run|goal|recording|tooltrace|memory|all]:按指纹聚类列账
-    Show,    // /evolve show <观察id>:看一条观察的全文与证据指回
+    Status,   // /evolve status(裸 /evolve 同义):扫五路账本采观察,报账面
+    List,     // /evolve list [run|goal|recording|tooltrace|memory|all]:按指纹聚类列账 + 候选区
+    Show,     // /evolve show <观察id|候选id>:看一条观察或一只候选,指回来源
+    Propose,  // /evolve propose <recording-id|observation-id>:起草并落候选(阶段 2)
+    Diff,     // /evolve diff <candidate-id>:与父版或空对照(阶段 2)
+    Reject,   // /evolve reject <candidate-id> [reason]:落 rejected,指纹进拒绝账(阶段 2)
 };
 
 struct ParsedEvolveCommand {
     EvolveCommandAction action = EvolveCommandAction::Invalid;
     std::string source_filter;  // List 时:run/goal/recording/tooltrace/memory;nullopt 语义用空串 = all
-    std::string target;         // Show 的观察 id
+    std::string target;         // Show/Propose/Diff/Reject 的目标 id
+    std::string reason;         // Reject 的理由(可省)
     std::string bad_word;       // Invalid 时第一词的原始拼写(提示用)
 };
 

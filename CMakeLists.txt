@@ -619,6 +619,12 @@ add_library(lubancode_core STATIC
   src/evolution/adapters.cpp
   src/evolution/collector.cpp
   src/evolution/observation_store.cpp
+  # 自进化闭环阶段 2:录制 -> 最小 content-only 候选的起草器、候选态
+  # (evolution/approval/状态机序列化 + 候选仓只读盘点)与状态机唯一写口
+  # EvolutionCoordinator(整包哈希照 package 阶段 1 盘点算法复算)。
+  src/evolution/drafter.cpp
+  src/evolution/candidate.cpp
+  src/evolution/coordinator.cpp
 )
 target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

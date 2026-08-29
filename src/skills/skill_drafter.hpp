@@ -54,6 +54,16 @@ std::expected<std::string, std::string> ValidateSkillMarkdownForInstall(const st
 // (调用方判空)。不碰磁盘。
 std::string ComposeSkillMarkdown(const std::vector<RecordEvent>& events);
 
+// 稳定失败路(纯函数):同工具同入参折叠后,最后一次尝试仍失败的步子
+// (连败不附成功)。"失败→成功"的偶然重试不进这里——那不是稳定失败,
+// 折叠时已并进步骤描述。自进化阶段 2 用它写 SKILL 的排错节:换项目仍会
+// 踩的坑,得留在纸面上。
+struct DraftFailureMode {
+    std::string tool;     // 工具名
+    std::string summary;  // 最后一次失败的短摘要(录制件里已脱敏)
+};
+std::vector<DraftFailureMode> CollectStableFailureModes(const std::vector<RecordEvent>& events);
+
 // 回炉(纯函数):frontmatter 推倒重建(名字回落 recorded-skill、描述回落
 // 内置句),正文尽力保住——过得了解析器就用解析出的 body,过不了就掐掉
 // 头两个 '---' 行之间的东西。

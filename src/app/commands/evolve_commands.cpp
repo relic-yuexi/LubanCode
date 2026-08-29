@@ -1,6 +1,9 @@
-// /evolve 命令的执行体(自进化闭环阶段 1)。status = 扫五路账本采观察 +
-// 落观察账(只追加)+ 报账面;list = 按指纹聚类列账;show = 看一条观察,
-// 指回来源 ID 与原始账文件。不生成 Package、不装任何东西、不改各家源账。
+// /evolve 命令的执行体(自进化闭环阶段 1/2)。status = 扫五路账本采观察 +
+// 落观察账(只追加)+ 报账面;list = 按指纹聚类列账 + 候选区;show = 看一
+// 条观察或一只候选,指回来源。阶段 2 加三条:propose = 从一场录制起草最小
+// content-only 候选(EvolutionCoordinator 唯一写口);diff = 与父版或空对照;
+// reject = 落 rejected 并把指纹进拒绝账。不进 PackageCatalog、不装任何东西、
+// 不改各家源账。
 #include "app/commands/evolve_commands.hpp"
 #include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:统一走输出端口
@@ -9,13 +12,16 @@
 #include <cctype>
 #include <filesystem>
 #include <map>
+#include <optional>
 #include <string_view>
 #include <utility>
 #include <vector>
 
 #include "evolution/collector.hpp"
+#include "evolution/coordinator.hpp"
 #include "evolution/observation_store.hpp"
 #include "platform/paths.hpp"
+#include "skills/workflow_recorder.hpp"
 
 namespace lubancode::app {
 
@@ -49,6 +55,16 @@ std::filesystem::path BuildStoreRoot(SlashDispatchContext& ctx) {
         return std::filesystem::path();
     }
     return lubancode::platform::Utf8ToPath(**ctx.home_lubancode) / "evolution" / "observations";
+}
+
+// 候选仓根:<home>/.lubancode/package-candidates(README"候选目录"节)。
+// 与正式 Package 目录(packages/、package-store/)分开——四层扫描不扫这里,
+// /package list 天然看不见候选(防偷装靠的是目录分仓,不是名单过滤)。
+std::filesystem::path BuildCandidateRoot(SlashDispatchContext& ctx) {
+    if (ctx.home_lubancode == nullptr || !ctx.home_lubancode->has_value()) {
+        return std::filesystem::path();
+    }
+    return lubancode::platform::Utf8ToPath(**ctx.home_lubancode) / "package-candidates";
 }
 
 // 五路账本的输入装配:全从分派材料借,缺哪路就空着哪路(采集器对空根自然跳过)。
@@ -98,8 +114,12 @@ std::string Ellipsize(std::string text, std::size_t cap) {
 void PrintUsage() {
     TermOut() << "用法: /evolve status\n"
                  "      /evolve list [run|goal|recording|tooltrace|memory|all]\n"
-                 "      /evolve show <观察id>\n"
-                 "阶段 1 只读:采集观察、聚类列账、追根查看;不生成 Package,不装任何东西。\n";
+                 "      /evolve show <观察id|候选id>\n"
+                 "      /evolve propose <recording-id|observation-id>\n"
+                 "      /evolve diff <candidate-id>\n"
+                 "      /evolve reject <candidate-id> [reason]\n"
+                 "阶段 1 只读观察;阶段 2 从录制起草最小 content-only 候选(propose)、看\n"
+                 "diff、拒绝(reject)。候选只落候选仓,不进 PackageCatalog,装不进 /package。\n";
     TermOut().flush();
 }
 
@@ -217,11 +237,36 @@ void RunEvolveList(SlashDispatchContext& ctx, const std::string& source_filter) 
             TermOut() << "\n";
         }
     }
+
+    // ---- 候选区(阶段 2):观察与候选同一张账面看 ----
+    const std::filesystem::path candidate_root = BuildCandidateRoot(ctx);
+    if (!candidate_root.empty()) {
+        const std::vector<lubancode::evolution::CandidateSummary> candidates =
+            lubancode::evolution::CandidateStore(candidate_root).LoadAll();
+        if (!candidates.empty()) {
+            TermOut() << "\n候选仓(" << candidates.size() << " 只,均在候选区,未进 /package):\n";
+            for (const lubancode::evolution::CandidateSummary& candidate : candidates) {
+                TermOut() << "  " << candidate.candidate_id << "  ["
+                          << lubancode::evolution::ToString(candidate.state) << "]  "
+                          << candidate.package_id << "  ";
+                if (candidate.record.has_value()) {
+                    TermOut() << Ellipsize(candidate.record->objective, 56);
+                }
+                TermOut() << "\n";
+            }
+        }
+    }
     TermOut().flush();
 }
 
-// ---- show:一条观察的全文与证据指回 ----
+// ---- show:一条观察的全文与证据指回;候选则回指来源 ----
+void RunEvolveShowCandidate(SlashDispatchContext& ctx, const std::string& target);
 void RunEvolveShow(SlashDispatchContext& ctx, const std::string& target) {
+    // 候选 id(cand- 起头)走候选页;其余按观察 id 查。
+    if (target.rfind("cand-", 0) == 0) {
+        RunEvolveShowCandidate(ctx, target);
+        return;
+    }
     lubancode::evolution::ObservationStore store(BuildStoreRoot(ctx));
     const auto found = store.Find(target);
     if (!found.has_value()) {
@@ -250,6 +295,198 @@ void RunEvolveShow(SlashDispatchContext& ctx, const std::string& target) {
             TermOut() << "    " << ref.ref << "  -- " << ref.note << "\n";
         }
     }
+    TermOut().flush();
+}
+
+// ---- show 候选页:演化账 + 批准账 + 状态 + 来源回指 ----
+void RunEvolveShowCandidate(SlashDispatchContext& ctx, const std::string& target) {
+    lubancode::evolution::CandidateStore store(BuildCandidateRoot(ctx));
+    const auto found = store.Find(target);
+    if (!found.has_value()) {
+        TermOut() << "没找到候选 \"" << target << "\"(先 /evolve list 看候选区)\n";
+        TermOut().flush();
+        return;
+    }
+    TermOut() << found->candidate_id << "  [" << lubancode::evolution::ToString(found->state)
+              << "]  " << found->package_id << "\n";
+    TermOut() << "  目录: " << lubancode::platform::PathToUtf8(found->dir) << "\n";
+    TermOut() << "  整包哈希: " << (found->content_hash.empty() ? "(package/ 缺失)" : found->content_hash)
+              << "\n";
+    if (found->record.has_value()) {
+        const lubancode::evolution::EvolutionRecord& record = *found->record;
+        TermOut() << "  候选版本: " << record.candidate_version;
+        if (record.parent.has_value()) {
+            TermOut() << "(父版 " << record.parent->version << " " << record.parent->content_hash
+                      << ")";
+        } else {
+            TermOut() << "(无父版,与空对照)";
+        }
+        TermOut() << "\n";
+        TermOut() << "  目标: " << Ellipsize(record.objective, 96) << "\n";
+        // 来源回指:稳定来源 ID -> 观察账 id(可再 /evolve show 追到原始账)。
+        TermOut() << "  来源: ";
+        bool any_source = false;
+        for (const std::string& id : record.sources.recording_ids) {
+            TermOut() << (any_source ? ", " : "") << "recording " << id << " = 观察 "
+                      << lubancode::evolution::MakeObservationId(
+                             lubancode::evolution::ObservationSource::Recording, id);
+            any_source = true;
+        }
+        for (const std::string& id : record.sources.run_ids) {
+            TermOut() << (any_source ? ", " : "") << "run " << id;
+            any_source = true;
+        }
+        for (const std::string& id : record.sources.goal_ids) {
+            TermOut() << (any_source ? ", " : "") << "goal " << id;
+            any_source = true;
+        }
+        for (const std::string& id : record.sources.memory_ids) {
+            TermOut() << (any_source ? ", " : "") << "memory " << id;
+            any_source = true;
+        }
+        if (!any_source) {
+            TermOut() << "(演化账未记来源)";
+        }
+        TermOut() << "\n";
+        TermOut() << "  生成器: " << record.generator.provider << " / " << record.generator.model
+                  << " / " << record.generator.prompt_revision << "\n";
+        TermOut() << "  改动: 新增组件 ";
+        for (const std::string& item : record.changes.components_added) {
+            TermOut() << item << " ";
+        }
+        TermOut() << "权限差异 " << record.changes.permissions_added.size() << " 条,新工具 "
+                  << record.changes.tools_added.size() << " 件\n";
+        TermOut() << "  起草于: " << (record.created_at.empty() ? "(未记)" : record.created_at) << "\n";
+    }
+    if (found->approval.has_value()) {
+        TermOut() << "  批准账: " << found->approval->tier << " / " << found->approval->status;
+        if (found->approval->decision.has_value()) {
+            TermOut() << "(由 " << found->approval->decision->decided_by << " 于 "
+                      << found->approval->decision->decided_at << " 决定;指纹 "
+                      << found->approval->decision->fingerprint << ")";
+        }
+        TermOut() << "\n";
+    } else {
+        TermOut() << "  批准账: (缺——候选不完整)\n";
+    }
+    TermOut() << "  下一步: /evolve diff " << found->candidate_id << ";评测在阶段 3 接\n";
+    TermOut().flush();
+}
+
+// ---- propose:从一场录制起草最小 content-only 候选 ----
+// 目标认两种:录制件 id,或观察 id(obs- 起头,须是 recording 来源)。
+void RunEvolvePropose(SlashDispatchContext& ctx, const std::string& target) {
+    const std::filesystem::path store_root = BuildStoreRoot(ctx);
+    const std::filesystem::path candidate_root = BuildCandidateRoot(ctx);
+    if (store_root.empty() || candidate_root.empty()) {
+        TermOut() << "没有主目录(.lubancode),候选无处落。\n";
+        TermOut().flush();
+        return;
+    }
+    if (ctx.recordings_root == nullptr) {
+        TermOut() << "没有录制件根,找不到录制。\n";
+        TermOut().flush();
+        return;
+    }
+
+    // 目标 -> 录制件 id。
+    std::string recording_id = target;
+    lubancode::evolution::ObservationStore observations(store_root);
+    if (target.rfind("obs-", 0) == 0) {
+        const auto found = observations.Find(target);
+        if (!found.has_value()) {
+            TermOut() << "没找到观察 \"" << target << "\"(先 /evolve status 采集一回)\n";
+            TermOut().flush();
+            return;
+        }
+        if (found->source != lubancode::evolution::ObservationSource::Recording) {
+            TermOut() << "观察 \"" << target << "\" 的来源是 "
+                      << lubancode::evolution::ToString(found->source)
+                      << ",阶段 2 只从 recording 起草。\n";
+            TermOut().flush();
+            return;
+        }
+        recording_id = found->source_id;
+    }
+    if (recording_id.find('/') != std::string::npos ||
+        recording_id.find('\\') != std::string::npos ||
+        recording_id.find("..") != std::string::npos) {
+        TermOut() << "录制件 id 只认单段目录名: \"" << recording_id << "\"\n";
+        TermOut().flush();
+        return;
+    }
+
+    // 找录制件目录(盘上现查,不靠观察账转述)。
+    std::optional<lubancode::skills::RecordingStatus> status;
+    for (const lubancode::skills::RecordingStatus& item :
+         lubancode::skills::ListRecordings(*ctx.recordings_root)) {
+        if (item.id == recording_id) {
+            status = item;
+            break;
+        }
+    }
+    if (!status.has_value()) {
+        TermOut() << "找不到录制件 \"" << recording_id << "\"(先 /record 录一回,再 /evolve status)\n";
+        TermOut().flush();
+        return;
+    }
+
+    lubancode::evolution::EvolutionCoordinator coordinator(candidate_root, &observations);
+    const auto result = coordinator.ProposeRecording(
+        *status, lubancode::skills::ReadRecordingEvents(status->dir));
+    if (!result.has_value()) {
+        TermOut() << "起草失败: " << result.error() << "\n";
+        TermOut().flush();
+        return;
+    }
+    TermOut() << "候选已落(只进候选仓,/package 看不见它):\n";
+    TermOut() << "  候选: " << result->candidate_id << "  [" << result->package_id << " "
+              << result->candidate_version << "]\n";
+    TermOut() << "  整包哈希: " << result->content_hash << "\n";
+    TermOut() << "  目录: " << lubancode::platform::PathToUtf8(result->candidate_dir) << "\n";
+    TermOut() << "  组件: " << result->skill_rel_path << "(content-only,无进程无网络)\n";
+    TermOut() << "  下一步: /evolve show " << result->candidate_id << " 或 /evolve diff "
+              << result->candidate_id << ";评测在阶段 3 接\n";
+    TermOut().flush();
+}
+
+// ---- diff:与父版或空对照 ----
+void RunEvolveDiff(SlashDispatchContext& ctx, const std::string& target) {
+    lubancode::evolution::EvolutionCoordinator coordinator(BuildCandidateRoot(ctx), nullptr);
+    const auto result = coordinator.Diff(target);
+    if (!result.has_value()) {
+        TermOut() << result.error() << "\n";
+        TermOut().flush();
+        return;
+    }
+    TermOut() << "候选 " << result->candidate_id << "(" << result->package_id << ")对照 "
+              << result->baseline << ":\n";
+    TermOut() << "  新增文件(" << result->added.size() << "):\n";
+    for (const lubancode::evolution::EvolutionCoordinator::DiffFile& file : result->added) {
+        TermOut() << "    + " << file.rel << "  " << file.size << " 字节  "
+                  << file.hash.substr(0, 19) << "\n";
+    }
+    if (!result->skill_summary.empty()) {
+        TermOut() << "  SKILL 正文摘要:\n" << result->skill_summary;  // 摘要自带换行
+    } else {
+        TermOut() << "  (包里没有 skills/*/SKILL.md)\n";
+    }
+    TermOut().flush();
+}
+
+// ---- reject:落 rejected,指纹进拒绝账 ----
+void RunEvolveReject(SlashDispatchContext& ctx, const std::string& target, const std::string& reason) {
+    lubancode::evolution::ObservationStore observations(BuildStoreRoot(ctx));
+    lubancode::evolution::EvolutionCoordinator coordinator(BuildCandidateRoot(ctx), &observations);
+    const auto result = coordinator.Reject(target, reason);
+    if (!result.has_value()) {
+        TermOut() << result.error() << "\n";
+        TermOut().flush();
+        return;
+    }
+    TermOut() << "候选 " << target << " 已拒绝。\n";
+    TermOut() << "  指纹: " << result->fingerprint << "(同类不再进观察账,不再被劝)\n";
+    TermOut() << "  目录: " << lubancode::platform::PathToUtf8(result->candidate_dir) << "(账保留,不删)\n";
     TermOut().flush();
 }
 
@@ -297,6 +534,32 @@ ParsedEvolveCommand ParseEvolveCommand(const std::string& args) {
         parsed.target = rest;
         return parsed;
     }
+    if (lower == "propose" || lower == "diff") {
+        if (rest.empty()) {
+            parsed.action = EvolveCommandAction::Invalid;
+            parsed.bad_word = word;
+            return parsed;
+        }
+        parsed.action = lower == "propose" ? EvolveCommandAction::Propose : EvolveCommandAction::Diff;
+        parsed.target = rest;
+        return parsed;
+    }
+    if (lower == "reject") {
+        // reject <candidate-id> [reason]:目标取第一词,余下整段是理由。
+        const std::size_t target_space = rest.find_first_of(" \t");
+        const std::string reject_target =
+            target_space == std::string::npos ? rest : rest.substr(0, target_space);
+        if (reject_target.empty()) {
+            parsed.action = EvolveCommandAction::Invalid;
+            parsed.bad_word = word;
+            return parsed;
+        }
+        parsed.action = EvolveCommandAction::Reject;
+        parsed.target = reject_target;
+        parsed.reason =
+            target_space == std::string::npos ? std::string() : Trimmed(rest.substr(target_space + 1));
+        return parsed;
+    }
     parsed.action = EvolveCommandAction::Invalid;
     parsed.bad_word = word;
     return parsed;
@@ -316,6 +579,15 @@ CommandFlow HandleSlashEvolve(SlashDispatchContext& ctx,
             return CommandFlow::Continue;
         case EvolveCommandAction::Show:
             RunEvolveShow(ctx, command.target);
+            return CommandFlow::Continue;
+        case EvolveCommandAction::Propose:
+            RunEvolvePropose(ctx, command.target);
+            return CommandFlow::Continue;
+        case EvolveCommandAction::Diff:
+            RunEvolveDiff(ctx, command.target);
+            return CommandFlow::Continue;
+        case EvolveCommandAction::Reject:
+            RunEvolveReject(ctx, command.target, command.reason);
             return CommandFlow::Continue;
         case EvolveCommandAction::Invalid:
             TermOut() << "认不得 \"" << command.bad_word << "\"。\n";

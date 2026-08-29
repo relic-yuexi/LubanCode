@@ -1,6 +1,6 @@
 # Package 驱动的自进化闭环设计
 
-- 状态：阶段 0/1 已落地（0.26.82），阶段 2 起待实现
+- 状态：阶段 0/1 已落地（0.26.82），阶段 2 已落地（Skill-only 候选起草），阶段 3 起待实现
 - 日期：2026-08-28
 - 前置：`todos/统一Package封装与组件挂载系统设计.todo`
 - 相关：`todos/自定义Agent与PromptProfile设计.todo`、`/record`、项目记忆、Workflow、`/goal`
@@ -462,11 +462,11 @@ Evolution 层可调用原有 parser、validator 与 runtime，不可复制它们
 
 ### 阶段 2：Skill-only Package Candidate
 
-- [ ] 复用现有 Skill drafter。
-- [ ] 生成最小 `package.yaml` 与 `skills/<id>/SKILL.md`。
-- [ ] 写 `evolution.json`、父版、来源与权限差异。
-- [ ] 候选只落 candidate store，不进 PackageCatalog。
-- [ ] 接 `/evolve propose/diff/reject`。
+- [x] 复用现有 Skill drafter。（SKILL.md 出自 `skills::ComposeSkillMarkdown`，另补"排错"节收稳定失败路。）
+- [x] 生成最小 `package.yaml` 与 `skills/<id>/SKILL.md`。（id 两段式 `evolve.<slug>`，版本 0.1.0，过 manifest 严格解析，单测钉。）
+- [x] 写 `evolution.json`、父版、来源与权限差异。（无父明写 null；content-only 无权限差异、无新工具。）
+- [x] 候选只落 candidate store，不进 PackageCatalog。（`~/.lubancode/package-candidates/`，四层扫描扫不到，单测钉。）
+- [x] 接 `/evolve propose/diff/reject`。（状态机走口一律经 EvolutionCoordinator；reject 指纹进拒绝账。）
 
 验收：一场 `/record` 能变成可查、不可偷装的 content-only Package Candidate。
 
