@@ -12,6 +12,9 @@
 //   第二幕·收尾重画:tool_result 回来后模型补一段带空行的完整正文
 //     (逐字滴的 **粗体**、标题、列表、代码块内 ** 字面量、\** 转义)。
 //     断言:正文区无裸 **;代码块内 ** 原样;收尾统计行出现。
+//   M3·标题间距(问题 3:分块渲染吃掉标题前空行):第二幕的标题
+//     "### 运行方式"独立成块,断言它上一行是空行、上上行(粗体段)非空
+//     ——恰好一行,不贴死也不多垫。
 // 结论逐行写报告文件(PASS/FAIL/INFO),退出码 0 = 全过。
 
 #define WIN32_LEAN_AND_MEAN
@@ -619,6 +622,14 @@ int wmain(int argc, wchar_t** argv) {
         Check(heading >= 0, "M2 收尾重画:标题行在屏上");
         if (heading >= 0) {
             Check(ReadRow(heading).find("###") == std::string::npos, "M2 收尾重画:标题已剥 ###");
+            // 问题 3(分块吃掉标题前空行):标题前恰好一行空行——上一行空、
+            // 上上行(粗体段)非空,不贴死也不越撑越松。
+            if (heading >= 2) {
+                Check(ReadRow(heading - 1).empty(), "M3 标题间距:标题上一行是空行");
+                Check(!ReadRow(heading - 2).empty(), "M3 标题间距:标题前恰好一行(上上行非空)");
+            } else {
+                Check(false, "M3 标题间距:标题行离屏顶太近,位置异常");
+            }
         }
         // 列表圆点。
         const std::string bullet = "\xE2\x80\xA2";
