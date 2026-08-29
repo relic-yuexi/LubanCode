@@ -1,0 +1,7 @@
+{
+  "task": "eval-smoke-replay",
+  "findings": [
+    { "id": 1, "source": "cfg/provider.yaml", "field": "binding" },
+    { "id": 2, "source": "cfg/catalog.json", "field": "wire" }
+  ]
+}

@@ -1,0 +1,32 @@
+{
+  "schema": 1,
+  "candidate_id": "cand-20260828-003",
+  "package_id": "evolve.eval-smoke",
+  "candidate_version": "0.1.0-candidate.1",
+  "parent": null,
+  "objective": "评测冒烟：验证候选带着可执行验收夹具能跑通五道门",
+  "sources": {
+    "run_ids": [],
+    "goal_ids": [],
+    "recording_ids": [
+      "rec-placeholder-203"
+    ],
+    "memory_ids": [],
+    "user_feedback_ids": []
+  },
+  "generator": {
+    "provider": "placeholder-provider",
+    "model": "placeholder-model",
+    "prompt_revision": "placeholder-rev-1"
+  },
+  "changes": {
+    "components_added": [
+      "skills/eval-smoke-audit"
+    ],
+    "components_changed": [],
+    "components_removed": [],
+    "permissions_added": [],
+    "tools_added": []
+  },
+  "created_at": "2026-08-28T11:00:00Z"
+}

@@ -154,6 +154,50 @@ TEST_CASE("早退参数在 plugin 之前:早退生效") {
 }
 
 // ---------------------------------------------------------------------------
+// evolve test 子命令(自进化闭环阶段 3 的 CI 非交互入口)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("evolve test:候选目录与旗标落位") {
+    ParsedCliArgs parsed =
+        ParseCliArgs(Args({"lubancode", "evolve", "test", "path/to/cand-20260828-001"}));
+    CHECK(parsed.action == CliAction::RunEvolveTest);
+    CHECK(parsed.evolve_test.candidate_dir == "path/to/cand-20260828-001");
+    CHECK(parsed.evolve_test.baseline_dir.empty());
+    CHECK_FALSE(parsed.evolve_test.json);
+
+    parsed = ParseCliArgs(Args({"lubancode", "evolve", "test", "cand-dir", "--json",
+                                "--baseline", "parent/pkg-dir"}));
+    CHECK(parsed.action == CliAction::RunEvolveTest);
+    CHECK(parsed.evolve_test.candidate_dir == "cand-dir");
+    CHECK(parsed.evolve_test.baseline_dir == "parent/pkg-dir");
+    CHECK(parsed.evolve_test.json);
+}
+
+TEST_CASE("evolve test 参数形状不对:当场退用法") {
+    CHECK(ParseCliArgs(Args({"lubancode", "evolve"})).action == CliAction::BadEvolveTest);
+    CHECK(ParseCliArgs(Args({"lubancode", "evolve", "status"})).action == CliAction::BadEvolveTest);
+    CHECK(ParseCliArgs(Args({"lubancode", "evolve", "test"})).action == CliAction::BadEvolveTest);
+    const ParsedCliArgs flag_first =
+        ParseCliArgs(Args({"lubancode", "evolve", "test", "--json"}));
+    CHECK(flag_first.action == CliAction::BadEvolveTest);
+    CHECK_FALSE(flag_first.error_text.empty());
+    const ParsedCliArgs bad_flag =
+        ParseCliArgs(Args({"lubancode", "evolve", "test", "cand", "--baseline"}));
+    CHECK(bad_flag.action == CliAction::BadEvolveTest);
+    const ParsedCliArgs unknown =
+        ParseCliArgs(Args({"lubancode", "evolve", "test", "cand", "--wat"}));
+    CHECK(unknown.action == CliAction::BadEvolveTest);
+    CHECK_FALSE(unknown.error_text.empty());
+}
+
+TEST_CASE("evolve 出现在位置参数之后:当普通文本并进 positional(旧语义)") {
+    const ParsedCliArgs parsed =
+        ParseCliArgs(Args({"lubancode", "问点啥", "evolve", "test", "cand"}));
+    CHECK(parsed.action == CliAction::Proceed);
+    CHECK(parsed.options.positional == "问点啥 evolve test cand");
+}
+
+// ---------------------------------------------------------------------------
 // 会话管理子命令(会话管理器单第四、五步):archive/unarchive/delete
 // ---------------------------------------------------------------------------
 

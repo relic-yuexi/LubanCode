@@ -3,6 +3,7 @@
 #include "evolution/coordinator.hpp"
 
 #include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <ctime>
 #include <fstream>
@@ -11,8 +12,11 @@
 #include <system_error>
 #include <utility>
 
+#include <nlohmann/json.hpp>
+
 #include "evolution/adapters.hpp"
 #include "evolution/drafter.hpp"
+#include "evolution/eval.hpp"
 #include "hooks/hash.hpp"
 #include "platform/paths.hpp"
 
@@ -212,6 +216,299 @@ std::string SummarizeSkillBody(const std::string& content) {
 
 }  // namespace
 
+// ---------------------------------------------------------------------------
+// 评测(阶段 3)。写口规矩不变:eval-results.jsonl 只追加,state.jsonl 迁移
+// 只走 AppendState。静态门全绿才 drafted->validated;五道门入账才
+// validated->evaluated(评测有 fail 也算"跑完",失败记在账上,不挡迁移)。
+// ---------------------------------------------------------------------------
+
+// 从候选目录直接装一份盘点(CI 按目录评测,不经候选仓扫描)。
+std::optional<CandidateSummary> LoadCandidateAt(const std::filesystem::path& candidate_dir) {
+    const auto record_text = ReadFileText(candidate_dir / "evolution.json");
+    if (!record_text.has_value()) {
+        return std::nullopt;  // 残缺目录,不算候选
+    }
+    auto record = ParseEvolutionRecord(*record_text);
+    if (!record.has_value()) {
+        return std::nullopt;
+    }
+    CandidateSummary summary;
+    summary.package_id = record->package_id;
+    summary.candidate_id = record->candidate_id;
+    summary.dir = candidate_dir;
+    summary.state = CandidateStore::ReadState(candidate_dir);
+    summary.record = record;
+    if (const auto text = ReadFileText(candidate_dir / "approval.json"); text.has_value()) {
+        summary.approval = ParseApprovalRecord(*text);
+    }
+    summary.content_hash = ComputeCandidateContentHash(candidate_dir / "package");
+    return summary;
+}
+
+std::expected<EvolutionCoordinator::TestReport, std::string> EvolutionCoordinator::Test(
+    const std::string& candidate_id, const TestOptions& options) {
+    const auto found = store_.Find(candidate_id);
+    if (!found.has_value()) {
+        return std::unexpected("找不到候选 \"" + candidate_id + "\"(先 /evolve list 看)");
+    }
+    return TestDir(found->dir, options);
+}
+
+std::expected<EvolutionCoordinator::TestReport, std::string> EvolutionCoordinator::TestDir(
+    const std::filesystem::path& candidate_dir, const TestOptions& options) {
+    const auto found = LoadCandidateAt(candidate_dir);
+    if (!found.has_value()) {
+        return std::unexpected("目录不是候选(缺 evolution.json 或解析不过): " +
+                               PathToUtf8(candidate_dir));
+    }
+    const CandidateSummary& summary = *found;
+    if (summary.content_hash.empty()) {
+        return std::unexpected("候选缺 package/ 目录,复算不出内容哈希: " +
+                               PathToUtf8(candidate_dir));
+    }
+    CandidateState state = summary.state;
+    if (IsTerminalCandidateState(state)) {
+        return std::unexpected("候选 \"" + summary.candidate_id + "\" 已在终态 " + ToString(state) +
+                               ",不再评测(账保留,不删)");
+    }
+
+    TestReport report;
+    report.candidate_id = summary.candidate_id;
+    report.package_id = summary.package_id;
+    report.content_hash = summary.content_hash;
+    report.candidate_dir = candidate_dir;
+    report.state_before = ToString(state);
+
+    // ---- 计划:hash 对不上即作废(契约),不静默拿旧计划评新内容 ----
+    std::optional<EvalPlan> plan;
+    if (const auto plan_text = ReadFileText(candidate_dir / "eval-plan.json");
+        plan_text.has_value()) {
+        auto parsed = ParseEvalPlan(*plan_text);
+        if (parsed.has_value()) {
+            if (parsed->content_hash != summary.content_hash) {
+                return std::unexpected("eval-plan.json 绑定的内容哈希与当前候选对不上(内容变"
+                                       "过,计划作废;重做候选,或按新哈希重写计划)");
+            }
+            if (parsed->candidate_id != summary.candidate_id) {
+                return std::unexpected("eval-plan.json 的 candidate_id 与候选对不上: " +
+                                       parsed->candidate_id);
+            }
+            plan = std::move(*parsed);
+            report.plan_loaded = true;
+        } else {
+            report.plan_error = parsed.error();
+        }
+    } else {
+        report.plan_error = "缺 eval-plan.json(propose 会落一份最小计划)";
+    }
+
+    std::vector<EvalResultLine> to_append;
+
+    // ---- 门一/门二(静态):Package doctor + 组件原生 validator + 密钥/绝对路径扫描 ----
+    {
+        const auto started = std::chrono::steady_clock::now();
+        const StaticGateResult static_result = RunStaticGate(candidate_dir / "package");
+        const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                 std::chrono::steady_clock::now() - started)
+                                 .count();
+        report.static_gate = static_result;
+        EvalResultLine line;
+        line.gate = "static";
+        line.task_id = "static";
+        line.candidate_id = summary.candidate_id;
+        line.content_hash = summary.content_hash;
+        line.outcome = static_result.pass() ? "pass" : "fail";
+        line.metrics.success_rate = static_result.pass() ? 1.0 : 0.0;
+        line.metrics.acceptance_rate = static_result.pass() ? 1.0 : 0.0;
+        line.metrics.wall_clock_ms = elapsed;
+        line.findings = static_result.findings;
+        for (std::size_t i = 0; i < static_result.errors.size() && i < 8; ++i) {
+            line.notes.push_back(static_result.errors[i]);
+        }
+        line.unverified.push_back("compat-range");  // doctor 没喂当前版本,兼容范围没查
+        line.recorded_at = IsoNowUtc();
+        to_append.push_back(std::move(line));
+    }
+
+    // ---- 门三/门四(来源回放 + 留出):确定性检查代跑,不起真模型 ----
+    if (plan.has_value()) {
+        for (const EvalTask& task : plan->replay) {
+            TaskRunResult run = RunEvalTask("replay", task, summary.candidate_id,
+                                            summary.content_hash, candidate_dir, *plan);
+            report.fixture_missing_any = report.fixture_missing_any || run.fixture_missing;
+            to_append.push_back(std::move(run.line));
+        }
+        for (const EvalTask& task : plan->holdout) {
+            TaskRunResult run = RunEvalTask("holdout", task, summary.candidate_id,
+                                            summary.content_hash, candidate_dir, *plan);
+            report.fixture_missing_any = report.fixture_missing_any || run.fixture_missing;
+            to_append.push_back(std::move(run.line));
+        }
+    }
+
+    // ---- 门五(基线对照):父版或裸 Agent 的确定性指标账 ----
+    if (plan.has_value()) {
+        EvalResultLine line;
+        line.gate = "baseline";
+        line.task_id = "baseline";
+        line.candidate_id = summary.candidate_id;
+        line.content_hash = summary.content_hash;
+        line.baseline_ref = plan->baseline_ref;
+        line.recorded_at = IsoNowUtc();
+
+        std::optional<BaselineFixture> fixture;
+        if (!plan->baseline_fixture.empty()) {
+            const std::filesystem::path fixture_path =
+                candidate_dir / lubancode::platform::Utf8ToPath(plan->baseline_fixture);
+            if (const auto text = ReadFileText(fixture_path); text.has_value()) {
+                fixture = ParseBaselineFixture(*text);
+                if (!fixture.has_value()) {
+                    line.notes.push_back("基线夹具解析不过: " + plan->baseline_fixture);
+                }
+            } else {
+                line.notes.push_back("基线夹具缺失: " + plan->baseline_fixture);
+                report.fixture_missing_any = true;
+                line.unverified.push_back("fixture-missing");
+            }
+        } else {
+            line.unverified.push_back("baseline-metrics");  // 没附指标账,代价对照缺
+        }
+
+        // CI 的 --baseline <dir>:给父版包补静态对照与哈希对账。
+        if (options.baseline_package_dir.has_value()) {
+            const std::filesystem::path& baseline_dir = *options.baseline_package_dir;
+            const StaticGateResult baseline_static = RunStaticGate(baseline_dir);
+            CheckResult check;
+            check.kind = "baseline-static";
+            check.detail = PathToUtf8(baseline_dir);
+            check.pass = baseline_static.pass();
+            if (!check.pass) {
+                std::string note = "父版静态门未过";
+                if (!baseline_static.errors.empty()) {
+                    note += ": " + baseline_static.errors.front();
+                }
+                check.note = note;
+            }
+            line.checks.push_back(std::move(check));
+            if (summary.record.has_value() && summary.record->parent.has_value()) {
+                const std::string parent_hash =
+                    ComputeCandidateContentHash(baseline_dir);
+                if (!parent_hash.empty()) {
+                    if (parent_hash == summary.record->parent->content_hash) {
+                        line.notes.push_back("父版哈希对上(" + parent_hash.substr(0, 19) + ")");
+                    } else {
+                        line.notes.push_back("父版哈希对不上:演化账记 " +
+                                             summary.record->parent->content_hash.substr(0, 19) +
+                                             ",盘上是 " + parent_hash.substr(0, 19));
+                    }
+                }
+            }
+        }
+
+        // 对照判词:候选本次的确定性结果 vs 基线指标账。判不了(无夹具/
+        // 候选无可执行检查)就 skipped,不硬判。
+        int rate_rows = 0;
+        double success_sum = 0.0;
+        double acceptance_sum = 0.0;
+        for (const EvalResultLine& appended : to_append) {
+            if ((appended.gate == "replay" || appended.gate == "holdout") &&
+                appended.outcome != "skipped") {
+                success_sum += appended.metrics.success_rate;
+                acceptance_sum += appended.metrics.acceptance_rate;
+                ++rate_rows;
+            }
+        }
+        if (fixture.has_value()) {
+            line.metrics = fixture->metrics;
+            line.unverified = fixture->unverified;
+            if (!fixture->task_id.empty()) {
+                line.task_id = fixture->task_id;
+            }
+            if (rate_rows == 0) {
+                line.outcome = "skipped";
+                line.notes.push_back("候选侧没有可执行检查,对照无从判");
+            } else {
+                const double success = success_sum / rate_rows;
+                const double acceptance = acceptance_sum / rate_rows;
+                const bool not_worse = success >= fixture->metrics.success_rate &&
+                                       acceptance >= fixture->metrics.acceptance_rate;
+                line.outcome = not_worse ? "pass" : "fail";
+                if (!not_worse) {
+                    char rates[96]{};
+                    std::snprintf(rates, sizeof(rates), "%.2f 对 %.2f", success,
+                                  fixture->metrics.success_rate);
+                    line.notes.push_back(std::string("候选确定性结果低于基线(成功率 ") + rates +
+                                         ")");
+                }
+            }
+        } else {
+            line.outcome = "skipped";
+            const bool fixture_broken = std::find(line.unverified.begin(), line.unverified.end(),
+                                                  "fixture-missing") != line.unverified.end();
+            line.notes.push_back(fixture_broken ? "基线夹具缺失" :
+                                                  "基线没附确定性指标账,只做静态对照");
+        }
+        to_append.push_back(std::move(line));
+    }
+
+    // ---- 落账:只追加,seq 续着账面编(坏行也占号,只求单调) ----
+    {
+        std::int64_t seq = 0;
+        if (const auto text = ReadFileText(candidate_dir / "eval-results.jsonl");
+            text.has_value()) {
+            for (const char c : *text) {
+                if (c == '\n') {
+                    ++seq;
+                }
+            }
+        }
+        for (EvalResultLine& line : to_append) {
+            line.seq = ++seq;
+            if (!AppendFileLine(candidate_dir / "eval-results.jsonl", SerializeEvalResultLine(line))) {
+                return std::unexpected("写评测账失败: " +
+                                       PathToUtf8(candidate_dir / "eval-results.jsonl"));
+            }
+            report.appended.push_back(line);
+        }
+    }
+
+    // ---- 迁移:静态门全绿 -> validated;五道门入账 -> evaluated ----
+    if (report.static_gate.pass() && state == CandidateState::Drafted) {
+        const auto moved = AppendState(candidate_dir, CandidateState::Drafted,
+                                       CandidateState::Validated, "user",
+                                       "静态门全绿(doctor + 密钥/绝对路径扫描)");
+        if (!moved.has_value()) {
+            return std::unexpected(moved.error());
+        }
+        state = CandidateState::Validated;
+        report.transitioned_validated = true;
+    }
+    if (state == CandidateState::Validated && report.plan_loaded) {
+        const auto moved = AppendState(candidate_dir, CandidateState::Validated,
+                                       CandidateState::Evaluated, "user",
+                                       "评测五道门跑完,结果入账(账只追加)");
+        if (!moved.has_value()) {
+            return std::unexpected(moved.error());
+        }
+        state = CandidateState::Evaluated;
+        report.transitioned_evaluated = true;
+    }
+    report.state_after = ToString(state);
+
+    // ---- 汇总与退出码 ----
+    report.run_summary = SummarizeEvalLedger(report.appended);
+    report.ledger_summary =
+        SummarizeEvalLedger(LoadEvalResults(candidate_dir / "eval-results.jsonl"));
+    report.ledger_summary.has_holdout = report.ledger_summary.has_holdout ||
+                                        (plan.has_value() && !plan->holdout.empty());
+    if (plan.has_value()) {
+        report.ledger_summary.baseline_kind = plan->baseline_kind;
+    }
+    report.exit_code = EvalExitCode(report.run_summary, report.plan_loaded,
+                                    report.fixture_missing_any);
+    return report;
+}
+
 EvolutionCoordinator::EvolutionCoordinator(std::filesystem::path candidates_root,
                                            ObservationStore* observations)
     : root_(std::move(candidates_root)), observations_(observations), store_(root_) {}
@@ -288,24 +585,43 @@ EvolutionCoordinator::ProposeRecording(
         return std::unexpected("写批准账失败: " + PathToUtf8(candidate_dir / "approval.json"));
     }
 
-    // ---- 评测计划(最小空账,阶段 3 补全)与结果账(空文件) ----
+    // ---- 评测计划(阶段 3:replay 指回来源录制,验收留人工;夹具与留出
+    // 任务由用户/后续阶段补)与结果账(空文件) ----
     {
-        std::string plan;
-        plan += "{\n";
-        plan += "  \"schema\": 1,\n";
-        plan += "  \"candidate_id\": \"" + candidate_id + "\",\n";
-        plan += "  \"content_hash\": \"" + content_hash + "\",\n";
-        plan += "  \"replay\": [],\n";
-        plan += "  \"holdout\": [],\n";
-        plan += "  \"baseline\": {\n";
-        plan += "    \"kind\": \"bare-agent\",\n";
-        plan += "    \"ref\": \"default-agent\",\n";
-        plan += "    \"metrics\": [\"success_rate\", \"acceptance_rate\", \"tool_calls\", \"tokens\",\n";
-        plan += "                 \"wall_clock_ms\", \"permission_prompts\", \"workspace_writes\"]\n";
-        plan += "  },\n";
-        plan += "  \"budget\": {\"max_tool_calls\": 40, \"max_tokens\": 200000, \"timeout_ms\": 600000}\n";
-        plan += "}\n";
-        if (!WriteFileBytes(candidate_dir / "eval-plan.json", plan)) {
+        nlohmann::json plan;
+        plan["schema"] = 1;
+        plan["candidate_id"] = candidate_id;
+        plan["content_hash"] = content_hash;
+        // 来源回放占位:任务是录制目标,验收是录制时的口述——确定性检查器
+        // 判不了人话,/evolve test 会如实记 skipped + manual-acceptance。
+        std::string acceptance_text;
+        for (const skills::RecordEvent& event : events) {
+            if (event.type == skills::kEventRecordStart) {
+                const auto it = event.data.find("acceptance");
+                if (it != event.data.end() && it->is_string()) {
+                    acceptance_text = it->get<std::string>();
+                }
+            }
+        }
+        if (acceptance_text.empty()) {
+            acceptance_text = "按录制口述人工验收";
+        }
+        plan["replay"] = nlohmann::json::array({nlohmann::json{
+            {"source_id", status.id},
+            {"task", draft->objective},
+            {"workspace", ""},
+            {"acceptance", nlohmann::json::array({acceptance_text})},
+        }});
+        plan["holdout"] = nlohmann::json::array();
+        plan["baseline"] = {
+            {"kind", "bare-agent"},
+            {"ref", "default-agent"},
+            {"metrics", nlohmann::json::array({"success_rate", "acceptance_rate", "tool_calls",
+                                               "tokens", "wall_clock_ms", "permission_prompts",
+                                               "workspace_writes"})},
+        };
+        plan["budget"] = {{"max_tool_calls", 40}, {"max_tokens", 200000}, {"timeout_ms", 600000}};
+        if (!WriteFileBytes(candidate_dir / "eval-plan.json", plan.dump(2) + "\n")) {
             return std::unexpected("写评测计划失败: " + PathToUtf8(candidate_dir / "eval-plan.json"));
         }
     }

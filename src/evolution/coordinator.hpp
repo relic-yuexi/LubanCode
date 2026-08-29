@@ -23,6 +23,7 @@
 #include <vector>
 
 #include "evolution/candidate.hpp"
+#include "evolution/eval.hpp"
 #include "evolution/observation_store.hpp"
 #include "skills/workflow_recorder.hpp"
 
@@ -57,6 +58,41 @@ public:
     // 指纹(观察账在才有),取不到回落到包 id + 当前内容哈希。
     std::expected<RejectResult, std::string> Reject(const std::string& candidate_id,
                                                     const std::string& reason);
+
+    // ---- 评测(阶段 3):五道门跑完,结果只追加进 eval-results.jsonl ----
+
+    struct TestOptions {
+        // CI 的 --baseline <package-dir>:父版包目录,补一份静态对照
+        // (doctor + 哈希对账)。不给就按计划的 baseline 节走。
+        std::optional<std::filesystem::path> baseline_package_dir;
+    };
+
+    struct TestReport {
+        std::string candidate_id;
+        std::string package_id;
+        std::string content_hash;
+        std::filesystem::path candidate_dir;
+        std::string state_before;
+        std::string state_after;
+        bool transitioned_validated = false;  // drafted -> validated(静态门全绿)
+        bool transitioned_evaluated = false;  // validated -> evaluated(五道门入账)
+        bool plan_loaded = false;
+        std::string plan_error;               // 计划读不出/解析失败的人话
+        StaticGateResult static_gate;
+        std::vector<EvalResultLine> appended;  // 本次追加的行(含 static)
+        bool fixture_missing_any = false;      // workspace/基线夹具缺失(CI 退 2)
+        EvalSummary run_summary;               // 本次行的汇总
+        EvalSummary ledger_summary;            // 追加后整账的汇总(show 用)
+        int exit_code = 0;                     // CI 口径:全过 0/有 fail 1/夹具缺失 2
+    };
+
+    // 按候选 id 评测(/evolve test)。
+    std::expected<TestReport, std::string> Test(const std::string& candidate_id,
+                                                const TestOptions& options = TestOptions{});
+    // 按候选目录评测(CI:luban evolve test <candidate-dir>)。目录形状须是
+    // <root>/<package-id>/<candidate-id>,evolution.json 齐才算候选。
+    std::expected<TestReport, std::string> TestDir(const std::filesystem::path& candidate_dir,
+                                                   const TestOptions& options = TestOptions{});
 
     struct DiffFile {
         std::string rel;      // 包内相对路径('/' 分隔)

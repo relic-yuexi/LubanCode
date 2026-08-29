@@ -1,0 +1,5 @@
+schema: 1
+id: evolve.eval-smoke
+version: 0.1.0
+name: Eval Smoke Audit
+description: 评测冒烟用的候选技能包，带可执行验收夹具。

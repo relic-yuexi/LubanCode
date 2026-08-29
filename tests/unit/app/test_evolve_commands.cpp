@@ -17,6 +17,7 @@ const char* ActionName(lubancode::app::EvolveCommandAction action) {
         case lubancode::app::EvolveCommandAction::Propose: return "Propose";
         case lubancode::app::EvolveCommandAction::Diff: return "Diff";
         case lubancode::app::EvolveCommandAction::Reject: return "Reject";
+        case lubancode::app::EvolveCommandAction::Test: return "Test";
     }
     return "?";
 }
@@ -106,4 +107,15 @@ TEST_CASE("evolve.parse:认不得的子命令 Invalid") {
     CHECK(parsed.action == lubancode::app::EvolveCommandAction::Invalid);
     CHECK(parsed.bad_word == "approve");
     CHECK(ActionName(parsed.action) == std::string("Invalid"));  // 全案覆盖(防未用告警)
+}
+
+TEST_CASE("evolve.parse:test 带候选 id;缺目标 Invalid") {
+    const auto test = lubancode::app::ParseEvolveCommand("test cand-20260828-001");
+    CHECK(test.action == lubancode::app::EvolveCommandAction::Test);
+    CHECK(test.target == "cand-20260828-001");
+    CHECK(lubancode::app::ParseEvolveCommand("TEST cand-1").action ==
+          lubancode::app::EvolveCommandAction::Test);
+    const auto missing = lubancode::app::ParseEvolveCommand("test");
+    CHECK(missing.action == lubancode::app::EvolveCommandAction::Invalid);
+    CHECK(missing.bad_word == "test");
 }

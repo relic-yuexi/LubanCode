@@ -632,6 +632,11 @@ add_library(lubancode_core STATIC
   src/evolution/drafter.cpp
   src/evolution/candidate.cpp
   src/evolution/coordinator.cpp
+  # 自进化闭环阶段 3:评测与基线——eval-plan 解析、确定性验收检查
+  # (file_exists/json_parses/command 一类)、静态门(doctor 复用 + 密钥/
+  # 绝对路径扫描)、指标账七项、账面汇总与确定性判词。只产结果不落盘,
+  # 落账与状态迁移仍走 EvolutionCoordinator。
+  src/evolution/eval.cpp
 )
 target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

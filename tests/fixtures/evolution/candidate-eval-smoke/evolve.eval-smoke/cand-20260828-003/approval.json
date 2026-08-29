@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "candidate_id": "cand-20260828-003",
+  "package_id": "evolve.eval-smoke",
+  "candidate_version": "0.1.0-candidate.1",
+  "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "tier": "content-only",
+  "status": "awaiting_approval",
+  "requested_at": "2026-08-28T11:00:00Z",
+  "decision": null
+}

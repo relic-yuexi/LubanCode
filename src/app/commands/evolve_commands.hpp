@@ -1,11 +1,12 @@
-// /evolve 命令(自进化闭环阶段 1/2):status/list/show 只读面,加阶段 2 的
-// propose/diff/reject 三条子命令——从一场录制起草最小 content-only Package
-// Candidate、看候选与父版或空对照的 diff、拒绝候选并把指纹进拒绝账。
+// /evolve 命令(自进化闭环阶段 1/2/3):status/list/show 只读面,阶段 2 的
+// propose/diff/reject,阶段 3 的 test——跑评测五道门,结果只追加进
+// eval-results.jsonl,状态经 EvolutionCoordinator 迁到 evaluated。
 // 候选状态机的写笔全在 EvolutionCoordinator(契约铁律),命令层只递材料、
 // 只打印,不自写迁移。approve/use/promote 是后续阶段的事,这里不冒头。
 #pragma once
 
 #include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
+#include "app/cli_options.hpp"            // EvolveTestArgs(CI 子命令)
 #include "cli/slash_commands.hpp"          // ParsedSlashCommand(分派注册制)
 
 #include <string>
@@ -23,12 +24,13 @@ enum class EvolveCommandAction {
     Propose,  // /evolve propose <recording-id|observation-id>:起草并落候选(阶段 2)
     Diff,     // /evolve diff <candidate-id>:与父版或空对照(阶段 2)
     Reject,   // /evolve reject <candidate-id> [reason]:落 rejected,指纹进拒绝账(阶段 2)
+    Test,     // /evolve test <candidate-id>:跑评测五道门,账只追加(阶段 3)
 };
 
 struct ParsedEvolveCommand {
     EvolveCommandAction action = EvolveCommandAction::Invalid;
     std::string source_filter;  // List 时:run/goal/recording/tooltrace/memory;nullopt 语义用空串 = all
-    std::string target;         // Show/Propose/Diff/Reject 的目标 id
+    std::string target;         // Show/Propose/Diff/Reject/Test 的目标 id
     std::string reason;         // Reject 的理由(可省)
     std::string bad_word;       // Invalid 时第一词的原始拼写(提示用)
 };
@@ -40,5 +42,10 @@ ParsedEvolveCommand ParseEvolveCommand(const std::string& args);
 // /evolve 的分派位(命令注册表登册用)。
 CommandFlow HandleSlashEvolve(SlashDispatchContext& ctx,
                               const lubancode::cli::ParsedSlashCommand& parsed);
+
+// CI 非交互入口:luban evolve test <candidate-dir> [--baseline <package-dir>]
+// [--json]。人话或 JSON 打到 stdout,退出码按结果(全过 0/有 fail 1/夹具
+// 缺失 2)。评测引擎与 /evolve test 同一枚 EvolutionCoordinator::TestDir。
+int RunEvolveTestCommand(const EvolveTestArgs& args);
 
 }  // namespace lubancode::app
