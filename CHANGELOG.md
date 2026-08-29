@@ -203,6 +203,11 @@
 - **高频事件有界可合并可补账。** journal 源头批量(帽 200、40ms 一冲、撞帽丢整批计数),出站同页合并;丢了凭 sinceSeq 补账,dropped 明说;截图只发 artifact 引用,整条出站流无 base64。
 - **浏览器动作过审批与取消。** agent 动作须带 threadId 过 permission/request,acceptForSession 按方法记会话级放行;取消贯通审批段(悬空收口、迟到答复明报)与执行段(轮询见旗即停),thread/stop 联动。顺手修净三处 app_server 既有暗坑:stdin 短报文阻塞、出站无写线程、审批答复 resolve 口没递——交互客户端原本立不住的根。
 
+## [v0.26.100] - 2026-08-29
+
+- **官方浏览器包 luban.browser 0.1.0。** browser-reviewer Agent(只读面、预装包内 Skill)、四只 Workflows(smoke 冒烟/responsive 双视口/console-error 容忍清单/network-failure 关键请求)、练习页三课靶子;Skill 与练习页从旧 browser-agent 包整体迁入,git rename 保历史。
+- **包只装章法,不装浏览器。** Runtime 归核心(MCP 配 config、协议 1.1 在核心),包声明依赖不复制本体;可选 code-bearing 的 MCP 薄启动器(找不到核心服务明说退出,不下载不内置)。卸掉包,浏览器照用——少的只是专门 Agent、Skill 与 Workflow,doctor valid 七组件引用七十条全闭合。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
