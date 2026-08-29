@@ -39,7 +39,7 @@ std::string IsoNowUtc() {
 #ifdef _WIN32
     gmtime_s(&utc, &now);
 #else
-    gmtime_r(&utc, &now);
+    gmtime_r(&now, &utc);
 #endif
     char buffer[32]{};
     std::strftime(buffer, sizeof(buffer), "%Y-%m-%dT%H:%M:%SZ", &utc);

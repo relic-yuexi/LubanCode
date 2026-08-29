@@ -111,7 +111,7 @@ std::string NextCandidateId(const std::filesystem::path& root, const std::string
             }
         }
     }
-    char buffer[8]{};
+    char buffer[16]{};  // %03d 最少三位,序号破千也不许截断(GCC -Wformat-truncation)
     std::snprintf(buffer, sizeof(buffer), "%03d", max_seq + 1);
     return prefix + buffer;
 }
