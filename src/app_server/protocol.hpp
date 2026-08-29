@@ -18,7 +18,13 @@ namespace lubancode::app_server {
 
 // 协议版本(initialize 结果里回给前端)。schema 冻结前从 "1.0" 起跳;
 // 往后任何报文形状变更必须 bump,前端拿它对表。
-inline constexpr std::string_view kProtocolVersion = "1.0";
+//
+// 版本账:
+//   1.0 —— 骨架期全部方法与事件(thread/turn/item、审批、usage/context)。
+//   1.1 —— 浏览器调试工作台阶段 3:additive 新增 browser/* 方法 18 枚与
+//          browser/* 事件 13 族(老方法老事件形状一字未动;详见本文件
+//          browser 两节与 docs/features/app-server/README.md)。
+inline constexpr std::string_view kProtocolVersion = "1.1";
 
 // jsonrpc:"2.0" 字段去留已冻结(阶段 3,schema 定案):
 //   - 出站:不带。方法名/params/id 的形状自足,少一个字段少一分冗余;
@@ -115,6 +121,67 @@ inline constexpr std::string_view kMethodLoopRunNow = "loop/run";
 inline constexpr std::string_view kMethodPlanSetMode = "plan/set_mode";
 inline constexpr std::string_view kMethodPlanReview = "plan/review";
 inline constexpr std::string_view kMethodPlanReopen = "plan/reopen";
+
+// ---------------------------------------------------------------------------
+// browser(浏览器调试工作台 阶段 3:前端 <-> Runtime 的方法面)
+//
+// C++ 侧是协议转发层:真 Runtime 在 Node sidecar(browser/sidecar.js)里,
+// 复用 browser/lib/session.js 的 BrowserSession——Playwright 生命周期、
+// 页签账、ref、journal、崩溃终态只有那一本账。这里的 handler 只做参数
+// 校验、审批、取消、事件转发与 artifact 落盘。
+//
+// 方法分两档:
+//   同步(读线程直答,sidecar 内存账,快):status / page/list /
+//     console/query / network/query / downloads/query;
+//   异步(立即回 actionId,终态走 browser/action/completed 事件):
+//     start / stop / page 一族 / snapshot / screenshot / action——导航与
+//     动作可能要等审批、等页面,不许堵读线程。
+//
+// owner 仲裁:写动作带 owner("agent"|"user",缺省 user)。owner=agent 须
+// 带 threadId,过 permission/request 审批(acceptForSession 按方法名记账);
+// owner=user 是宿主自己的手,不再问审批。
+// ---------------------------------------------------------------------------
+
+inline constexpr std::string_view kMethodBrowserStart = "browser/start";
+inline constexpr std::string_view kMethodBrowserStop = "browser/stop";
+inline constexpr std::string_view kMethodBrowserStatus = "browser/status";
+inline constexpr std::string_view kMethodBrowserPageOpen = "browser/page/open";
+inline constexpr std::string_view kMethodBrowserPageList = "browser/page/list";
+inline constexpr std::string_view kMethodBrowserPageSelect = "browser/page/select";
+inline constexpr std::string_view kMethodBrowserPageClose = "browser/page/close";
+inline constexpr std::string_view kMethodBrowserPageNavigate = "browser/page/navigate";
+inline constexpr std::string_view kMethodBrowserPageBack = "browser/page/back";
+inline constexpr std::string_view kMethodBrowserPageForward = "browser/page/forward";
+inline constexpr std::string_view kMethodBrowserPageReload = "browser/page/reload";
+inline constexpr std::string_view kMethodBrowserSnapshot = "browser/snapshot";
+inline constexpr std::string_view kMethodBrowserScreenshot = "browser/screenshot";
+inline constexpr std::string_view kMethodBrowserAction = "browser/action";
+inline constexpr std::string_view kMethodBrowserActionCancel = "browser/action/cancel";
+inline constexpr std::string_view kMethodBrowserConsoleQuery = "browser/console/query";
+inline constexpr std::string_view kMethodBrowserNetworkQuery = "browser/network/query";
+inline constexpr std::string_view kMethodBrowserDownloadsQuery = "browser/downloads/query";
+
+// ---------------------------------------------------------------------------
+// browser 事件族(阶段 3)。params 一律带 seq(连接层统一盖)。高频的
+// console/network 走批量事件(entries 数组 + dropped 明账),丢了可用
+// browser/console/query / browser/network/query 凭 sinceSeq 补账。
+// screenshot 只发 artifact 引用,绝不塞 base64。
+// ---------------------------------------------------------------------------
+
+inline constexpr std::string_view kEventBrowserStarted = "browser/started";
+inline constexpr std::string_view kEventBrowserStopped = "browser/stopped";
+inline constexpr std::string_view kEventBrowserCrashed = "browser/crashed";
+inline constexpr std::string_view kEventBrowserPageCreated = "browser/page/created";
+inline constexpr std::string_view kEventBrowserPageUpdated = "browser/page/updated";
+inline constexpr std::string_view kEventBrowserPageClosed = "browser/page/closed";
+inline constexpr std::string_view kEventBrowserNavigation = "browser/navigation";
+inline constexpr std::string_view kEventBrowserConsoleEvent = "browser/console/event";
+inline constexpr std::string_view kEventBrowserNetworkEvent = "browser/network/event";
+inline constexpr std::string_view kEventBrowserDownloadEvent = "browser/download/event";
+inline constexpr std::string_view kEventBrowserScreenshotReady = "browser/screenshot/ready";
+inline constexpr std::string_view kEventBrowserActionStarted = "browser/action/started";
+inline constexpr std::string_view kEventBrowserActionCompleted = "browser/action/completed";
+inline constexpr std::string_view kEventBrowserUserEpoch = "browser/user_epoch";
 
 // ---------------------------------------------------------------------------
 // 服务端反向请求(骨架期只留名字与形状,不接线)

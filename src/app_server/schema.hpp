@@ -194,6 +194,45 @@ ParamsCheck CheckPlanMutationParams(const nlohmann::json& params, std::string_vi
                                     std::string& out_thread_id);
 
 // ---------------------------------------------------------------------------
+// browser 参数表(阶段 3)。方法分两档:异步动作面(受理即回 actionId)
+// 与同步查询面。owner("agent"|"user",缺省 user)与 threadId(owner=agent
+// 必填)的仲裁校验在 browser_service 的受理皮里,这里只管字段形状。
+// ---------------------------------------------------------------------------
+
+// browser/start:全可选(engine/headed/profile/profileName/viewport/
+// journalCap/timeoutMs)。给了的须对型:engine 只认 chromium|webkit;
+// profile 只认 persistent|ephemeral;viewport 是 {width,height} 正整数;
+// journalCap/timeoutMs 正整数。
+ParamsCheck CheckBrowserStartParams(const nlohmann::json& params);
+
+// browser/stop:无必填。
+ParamsCheck CheckBrowserStopParams(const nlohmann::json& params);
+
+// browser/page/open:url 必填(字符串)。
+ParamsCheck CheckBrowserPageOpenParams(const nlohmann::json& params, std::string& out_url);
+
+// browser/page/navigate:pageId 与 url 必填。
+ParamsCheck CheckBrowserPageNavigateParams(const nlohmann::json& params, std::string& out_page_id,
+                                           std::string& out_url);
+
+// browser/page/select|close|back|forward|reload 共用:pageId 必填。
+ParamsCheck CheckBrowserPageTargetParams(const nlohmann::json& params, std::string_view method,
+                                         std::string& out_page_id);
+
+// browser/console|network/query 共用:pageId 必填;sinceSeq 可选(非负
+// 整数,断线补账的 cursor);level/limit/urlContains/status/failedOnly
+// 可选(执行链再细查)。
+ParamsCheck CheckBrowserJournalQueryParams(const nlohmann::json& params, std::string_view method,
+                                           std::string& out_page_id, std::uint64_t& out_since_seq);
+
+// browser/action:kind 必填(click|type|select|wait);click/select 须 ref;
+// type 须 ref+text;wait 须 forText/urlContains/ms 至少一样。
+ParamsCheck CheckBrowserActionParams(const nlohmann::json& params, std::string& out_kind);
+
+// browser/action/cancel:actionId 必填。
+ParamsCheck CheckBrowserActionCancelParams(const nlohmann::json& params, std::string& out_action_id);
+
+// ---------------------------------------------------------------------------
 // 出站事件参数的拼装助手(一处拼、处处用,字段名冻结前不许散着抄)
 // ---------------------------------------------------------------------------
 

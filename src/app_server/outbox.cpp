@@ -70,6 +70,68 @@ std::optional<std::string> CoalesceDeltaPair(const std::string& queued, const st
     return platform::DumpJsonSanitized(merged);
 }
 
+// journal 批量事件(browser/console/event、browser/network/event)的合并
+// (阶段 3,高频事件可合并的另一半):同 method、同 pageId 的两条批量行,
+// entries 数组拼接、dropped 求和、lastSeq/seq 取新行的。条目自带单调
+// seq,前端按 seq 查漏去重,合并不丢信息。合不了(不是批量事件/页不
+// 同/形状坏)返回 nullopt,走丢事件的路。
+std::optional<std::string> CoalesceJournalPair(const std::string& queued, const std::string& incoming) {
+    nlohmann::json old_json;
+    nlohmann::json new_json;
+    try {
+        old_json = nlohmann::json::parse(queued);
+        new_json = nlohmann::json::parse(incoming);
+    } catch (const nlohmann::json::exception&) {
+        return std::nullopt;
+    }
+    if (!old_json.is_object() || !new_json.is_object()) {
+        return std::nullopt;
+    }
+    const auto old_method = old_json.find("method");
+    const auto new_method = new_json.find("method");
+    if (old_method == old_json.end() || new_method == new_json.end() || !old_method->is_string() ||
+        !new_method->is_string()) {
+        return std::nullopt;
+    }
+    const bool is_console = *old_method == std::string(kEventBrowserConsoleEvent);
+    const bool is_network = *old_method == std::string(kEventBrowserNetworkEvent);
+    if (!(is_console || is_network) || *new_method != *old_method) {
+        return std::nullopt;
+    }
+    const auto old_params = old_json.find("params");
+    const auto new_params = new_json.find("params");
+    if (old_params == old_json.end() || new_params == new_json.end() || !old_params->is_object() ||
+        !new_params->is_object()) {
+        return std::nullopt;
+    }
+    const auto old_page = old_params->find("pageId");
+    const auto new_page = new_params->find("pageId");
+    if (old_page == old_params->end() || new_page == new_params->end() || !old_page->is_string() ||
+        !new_page->is_string() || *old_page != *new_page) {
+        return std::nullopt;
+    }
+    auto old_entries = old_params->find("entries");
+    const auto new_entries = new_params->find("entries");
+    if (old_entries == old_params->end() || new_entries == new_params->end() ||
+        !old_entries->is_array() || !new_entries->is_array()) {
+        return std::nullopt;
+    }
+    for (const auto& entry : *new_entries) {
+        old_entries->push_back(entry);
+    }
+    const std::uint64_t old_dropped = old_params->value("dropped", std::uint64_t{0});
+    (*old_params)["dropped"] = old_dropped + new_params->value("dropped", std::uint64_t{0});
+    const auto new_seq = new_params->find(kSeqField);
+    if (new_seq != new_params->end()) {
+        (*old_params)[kSeqField] = *new_seq;
+    }
+    const auto new_last = new_params->find("lastSeq");
+    if (new_last != new_params->end()) {
+        (*old_params)["lastSeq"] = *new_last;
+    }
+    return platform::DumpJsonSanitized(old_json);
+}
+
 }  // namespace
 
 bool BoundedOutbox::Push(std::string line, bool must_keep) {
@@ -77,12 +139,19 @@ bool BoundedOutbox::Push(std::string line, bool must_keep) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (queue_.size() >= capacity_ && !must_keep) {
-            // 撞满的可丢事件:先试并进队尾同 item 的 delta(不丢内容、
-            // 不动队列长度)。救不下再丢。
+            // 撞满的可丢事件:先试并进队尾同 item 的 delta 或同页的
+            // journal 批量(不丢内容、不动队列长度)。救不下再丢。
             if (!queue_.empty() && !queue_.back().must_keep) {
                 if (std::optional<std::string> merged =
                         CoalesceDeltaPair(queue_.back().line, line)) {
                     queue_.back().line = std::move(*merged);
+                    ++coalesced_;
+                    cv_.notify_all();
+                    return true;
+                }
+                if (std::optional<std::string> journal_merged =
+                        CoalesceJournalPair(queue_.back().line, line)) {
+                    queue_.back().line = std::move(*journal_merged);
                     ++coalesced_;
                     cv_.notify_all();
                     return true;

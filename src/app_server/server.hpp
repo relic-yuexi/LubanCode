@@ -29,6 +29,7 @@
 #include "agent/loop.hpp"
 #include "sessions/session_store.hpp"
 #include "api/backend.hpp"
+#include "app_server/browser_service.hpp"
 #include "app_server/connection.hpp"
 #include "app_server/dispatcher.hpp"
 #include "app_server/interaction.hpp"
@@ -36,6 +37,7 @@
 #include "app/version.hpp"
 #include "runtime/command_service.hpp"
 #include "runtime/goal_coordinator.hpp"
+#include "runtime/interaction_broker.hpp"
 #include "runtime/loop_scheduler.hpp"
 #include "runtime/session_command_service.hpp"
 #include "runtime/session_runtime.hpp"
@@ -111,6 +113,11 @@ struct ServerOptions {
     // 的 features.goals/features.loop 缺省一致,装配层显式开)。
     bool features_goal = false;
     bool features_loop = false;
+    // 浏览器面(阶段 3):sidecar 命令与参数、截图 artifact 目录。
+    // sidecar_command 空 = browser/* 方法回 browser.not_configured(不冒充)。
+    std::string browser_sidecar_command;
+    std::vector<std::string> browser_sidecar_args;
+    std::string browser_artifact_dir;
 };
 
 // 一台 app-server。一个进程一台;装配好后 Run() 进 stdio 主循环。
@@ -195,12 +202,21 @@ public:
     // 当前活着的 thread 数(测试断言用)。
     std::size_t active_thread_count();
 
+    // ---- 测试直驱:browser 面的持有体(注入假 sidecar / 直查状态用) ----
+    BrowserService& browser_service() { return *browser_; }
+
 private:
     void RegisterMethods();
     // 整回合驱动(工作线程体):审批/ask_user 悬停、打断旗、终态分型。
     void RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, const std::string& thread_id,
                              const std::string& turn_id, const std::string& text,
                              const std::vector<nlohmann::json>& images);
+
+    // browser 动作的审批询问(browser_service 的 ApprovalAsk 落点):
+    // 挂到 thread 的悬起件上,取消旗贯通(动作取消即悬空收口 + 擦账)。
+    std::optional<BrowserService::ApprovalTicket> HandleBrowserApproval(const std::string& thread_id,
+                                                                        const runtime::ApprovalRequest& request,
+                                                                        const std::atomic<bool>* cancel);
 
     // 找一场 thread 的家当(锁内拷 shared_ptr)。
     std::shared_ptr<ThreadRecord> FindThread(const std::string& thread_id);
@@ -213,6 +229,8 @@ private:
     // P9 收尾:thread/list|archive|unarchive|delete 的执行体。server 不
     // 另写扫盘路,全从这里走(sessions_dir 空 = 没建,搬删一律拒)。
     std::unique_ptr<runtime::SessionCommandService> session_commands_;
+    // 浏览器面(阶段 3):sidecar 进程管理 + browser/* 方法与事件。
+    std::unique_ptr<BrowserService> browser_;
 
     std::mutex threads_mutex_;
     std::map<std::string, std::shared_ptr<ThreadRecord>> threads_;

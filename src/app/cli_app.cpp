@@ -389,6 +389,36 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result) {
             break;
     }
     options.session_model = config_result.config.model;
+    // 浏览器面(可见调试阶段 3):sidecar 命令解析——环境变量
+    // LUBAN_BROWSER_SIDECAR 指到 browser/sidecar.js 优先;没指则按可执行
+    // 文件旁边与当前目录找 browser/sidecar.js。找不到就不配(browser/*
+    // 方法回 browser.not_configured,不冒充)。截图 artifact 落
+    // <HomeLubancodeDir>/browser-artifacts(内容寻址)。
+    if (const char* env_sidecar = std::getenv("LUBAN_BROWSER_SIDECAR");
+        env_sidecar != nullptr && *env_sidecar != '\0') {
+        options.browser_sidecar_command = "node";
+        options.browser_sidecar_args = {std::string(env_sidecar)};
+    } else {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        std::vector<fs::path> candidates;
+        if (const auto executable = lubancode::platform::ExecutablePath(); executable.has_value()) {
+            const fs::path exe_dir = executable->parent_path();
+            candidates.push_back(exe_dir / "browser" / "sidecar.js");
+            candidates.push_back(exe_dir.parent_path() / "browser" / "sidecar.js");
+        }
+        candidates.push_back(fs::path("browser") / "sidecar.js");
+        for (const fs::path& candidate : candidates) {
+            if (fs::exists(candidate, ec)) {
+                options.browser_sidecar_command = "node";
+                options.browser_sidecar_args = {lubancode::platform::PathToUtf8(candidate)};
+                break;
+            }
+        }
+    }
+    if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
+        options.browser_artifact_dir = *luban_dir + "/browser-artifacts";
+    }
     lubancode::app_server::Server server(
         std::move(options),
         [&config_result]() { return lubancode::app::BuildBackend(config_result.config); },

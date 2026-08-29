@@ -27,9 +27,15 @@
 
 ## 协议版本
 
-`1.0`。任何报文形状变更必须 bump,前端拿 `initialize` 结果里的 `protocolVersion` 对表。
+`1.1`。任何报文形状变更必须 bump,前端拿 `initialize` 结果里的 `protocolVersion` 对表。
 
-1.0 内有一笔 additive 字段(2026-08 起):`item/completed` 可带可选 `images` 数组——MCP 富结果图片(截图一类)的元数据与 `artifact` 引用,不带 base64。只加字段、不改不删既有字段,老前端照旧;浏览器方法与事件面(须 bump)在可见调试单阶段 3 统一升版。
+版本账:
+
+| 版本 | 内容 |
+| --- | --- |
+| `1.0` | 骨架期全部方法与事件(thread/turn/item、审批、usage/context、workflow/trace 查询、goal/loop/plan)。 |
+| `1.0` 内 additive | `item/completed` 可带可选 `images` 数组——MCP 富结果图片的元数据与 `artifact` 引用,不带 base64(2026-08 起)。 |
+| `1.1` | 浏览器调试工作台阶段 3:additive 新增 `browser/*` 方法 18 枚与 `browser/*` 事件 13 族(见下两节)。老方法老事件形状一字未动。 |
 
 ## 方法面
 
@@ -69,6 +75,35 @@
 | --- | --- | --- |
 | `workflow/query` | `runId, lastSeq?` | `{runId, workflowId, state, lastSeq, nodes, ...}` 快照 + `lastSeq+1` 起的增量事件(`workflow/event`)。`lastSeq` 缺省 0 = 全量。读 `~/.lubancode/workflow-runs/<run-id>/`。 |
 
+### browser(浏览器调试工作台,1.1 起)
+
+C++ 这层是协议转发层:真 Runtime 在 Node sidecar(`browser/sidecar.js`,复用 `browser/lib/session.js` 的 BrowserSession——Playwright 生命周期、页签账、ref、journal、崩溃终态只有那一本账)。sidecar 懒起、进程复用、崩溃明报、收线收尸;`LUBAN_BROWSER_SIDECAR` 环境变量指到 `browser/sidecar.js`(没指则按可执行文件旁边与当前目录找)。术语(`pageId`/`generation`/`snapshotId`/`ref`/`seq`)与 `docs/reference/browser-runtime.md` 冻结版一致。
+
+方法分两档。**同步**(读线程直答,sidecar 内存账):`browser/status`、`browser/page/list`、`browser/console/query`、`browser/network/query`、`browser/downloads/query`。**异步**(受理即回 `{actionId, accepted}`,终态走 `browser/action/completed` 事件——导航与动作可能要等审批、等页面,不堵读线程):其余全部。
+
+| 方法 | 档 | 参数 | 说明 |
+| --- | --- | --- | --- |
+| `browser/start` | 异步 | `engine?`(chromium\|webkit)、`headed?`、`profile?`(persistent\|ephemeral)、`profileName?`、`viewport?{width,height}`、`journalCap?`、`timeoutMs?` | 起一场浏览器会话(浏览器本身仍是首个页面动作才懒启动)。已有一场活会话报 `browser.session_running`。 |
+| `browser/stop` | 异步 | 无 | 收掉会话(context/browser/profile 锁)。 |
+| `browser/status` | 同步 | 无 | 会话状态(engine/headless/profile/launched/crashed/pages/downloadsDir)+ `sidecarRunning`。 |
+| `browser/page/open` | 异步 | `url`、`newPage?`、`waitUntil?`、`timeoutMs?` | 只收 http/https/about:blank。回 `pageId`/`generation`/标题/HTTP 状态。 |
+| `browser/page/list` | 同步 | 无 | 页签行数组 `{pageId, title, url, active, generation}`。 |
+| `browser/page/select` | 异步 | `pageId` | 明切活动页(不靠"最后一页"猜)。 |
+| `browser/page/close` | 异步 | `pageId` | 关页;旧 `pageId` 稳定报 `page_closed`,不复用。 |
+| `browser/page/navigate` | 异步 | `pageId, url, waitUntil?, timeoutMs?` | 指名导航;`generation` +1,旧 ref 即 stale。 |
+| `browser/page/back` / `forward` / `reload` | 异步 | `pageId` | 历史导航;没有历史时 `navigated:false` 如实说。 |
+| `browser/snapshot` | 异步 | `pageId?, maxChars?, timeoutMs?` | 语义快照(可访问性树),带 `snapshotId` 与 ref 标记。 |
+| `browser/screenshot` | 异步 | `pageId?, fullPage?, ref?, snapshotId?, timeoutMs?` | 截图。**只回 artifact 引用**(`result.image.artifact`,与 `item/completed` 的 images 同形),另发 `browser/screenshot/ready` 事件;字节落 `<HomeLubancodeDir>/browser-artifacts`(内容寻址)。 |
+| `browser/action` | 异步 | `kind`(click\|type\|select\|wait)+ 各自的 `ref/text/value/label/forText/urlContains/ms` + `snapshotId?/timeoutMs?` | 统一动作口。click/type/select 须 `ref`;type 另须 `text`;wait 须条件其一。 |
+| `browser/action/cancel` | 同步 | `actionId` | 取消在飞动作:审批段立即悬空收口;sidecar 段发 `cancelled` 通知(轮询型动作见旗即停,单发动作靠自身超时)。动作不在跑报 `-32005`(`browser.stale_action`)。 |
+| `browser/console/query` | 同步 | `pageId, sinceSeq?, level?, limit?` | Console journal 补账:回 `rows/total/dropped/lastSeq`。`sinceSeq` 是"已见到的最大 seq",返回大于它的。 |
+| `browser/network/query` | 同步 | `pageId, sinceSeq?, urlContains?, status?, failedOnly?, limit?` | Network journal 补账(元数据账,响应体不收)。 |
+| `browser/downloads/query` | 同步 | 无 | 下载账(id/state/filename/mime/bytes/sha256/path)。 |
+
+**owner 仲裁**:写动作(`page/*` 导航族、`page/select`、`page/close`、`action`)可带 `owner`("agent"|"user",缺省 user)。`owner=agent` 须带 `threadId`:先过 `permission/request` 审批(`acceptForSession` 按方法名记会话级放行账),decline/cancel/超时/打断按拒绝收口;`owner=user` 是宿主自己的手,不再问审批。
+
+browser 错误走 `error.data.reason` 带稳定串(`browser.not_configured`/`browser.sidecar_spawn_failed`/`browser.sidecar_dead`/`browser.sidecar_timeout`/`browser.session_running`/`browser.permission_denied`/`browser.approval_cancelled`/`browser.artifact_unavailable`/`browser.thread_required`/`browser.stale_action` 等),sidecar 侧的浏览器码(`browser.stale_ref`、`browser.unknown_page`、`browser.page_closed`、`browser.timeout` 等)原样透传。
+
 ## 事件账
 
 统一三层:会话装回合,回合装条目。每条事件的 `params` 带 `seq`——进程内单调序号(连接层统一盖),前端凭它排序、查漏。
@@ -88,6 +123,22 @@
 | `turn/completed` | 唯一终态:`status`(success/error/cancelled/interrupted)、`usage`、`stepsUsed`;error 时带 `error` 文案。 |
 | `queue/overflow` | 丢事件后的通报:`dropped`、`coalesced`。 |
 | `workflow/event` | wf run 的 journal 事件:`runId`、`eventSeq`(run 内单调号,与快照的 `lastSeq` 对账)、`type`、`workflowId`、`nodeId?`、`data`。 |
+| `browser/started` | 会话起:`sessionId, engine, headless, profile, profileName`。 |
+| `browser/stopped` | 会话收:`sessionId`。终态,must_keep。 |
+| `browser/crashed` | 崩溃终态:`reason`。旧 page id / ref / 截图观察全作废。must_keep。 |
+| `browser/page/created` | `pageId`。 |
+| `browser/page/updated` | 切页等:`pageId, url, generation`。 |
+| `browser/page/closed` | `pageId, reason`(closed\|crashed)。 |
+| `browser/navigation` | `pageId, url, generation`(主框架导航,generation 已递增)。 |
+| `browser/console/event` | **批量**:`pageId, entries:[{seq, level, text, sourceUrl, line, column, ts, generation}], dropped, lastSeq`。Console 四级 + 未捕获异常,文本默认脱敏。 |
+| `browser/network/event` | **批量**:`pageId, entries:[{seq, method, url, status, resourceType, durationMs, failed, error, ts, generation}], dropped, lastSeq`。元数据账。 |
+| `browser/download/event` | 下载账单条:`id, state, suggested, filename?, path?, mime?, bytes?, sha256?, error?`。 |
+| `browser/screenshot/ready` | `pageId, generation, url, fullPage, image`(image 与 `item/completed` 的 images 元素同形,只带 artifact 引用)。must_keep(无查询口)。 |
+| `browser/action/started` | `actionId, method, owner, threadId?, input`。 |
+| `browser/action/completed` | 动作终态:`actionId, method, owner, ok, result?\|error?{code,message}, cancelled?, durationMs`。must_keep。 |
+| `browser/user_epoch` | `pageId, userEpoch`——用户动了页面(手点/按键),观察代递增,旧 ref 按仲裁规矩报 stale。 |
+
+**高频事件的有界规矩**(console/network):sidecar 源头批量(单批帽 200 条、40ms 一冲;在飞批数帽 64,撞帽丢最老整批并计数),App Server 出站队列再兜一层有界(撞满先合并同页批量——entries 拼接、dropped 求和——再丢可丢事件并补 `queue/overflow` 通报)。丢了不要紧:`browser/console/query` / `browser/network/query` 凭 `sinceSeq` 补账,`dropped` 明说丢过多少,不冒充全账。
 
 条目类型(`item.type`):`text`、`thinking`、`tool`、`command`、`file_change`(留位)、`question`(留位)、`agent`(留位)、`error`。
 
@@ -156,6 +207,7 @@ ssh <host> lubancode app-server
 
 - 单测 `tests/integration/app_server/test_app_server_smoke.cpp`:真进程 + stdio 管道替身(SSH 通道的进程形状),验 stdout 逐行可解析、握手一条线、坏 JSON 不炸、EOF 自退。
 - 手测脚本 `scripts/tests/app_server_ssh_smoke.sh`:真 SSH 通道(`ssh localhost` 起手;无 sshd 的机器 `--local` 走本机管道)。验 login shell 拉起、stderr 隔离、断线后远端不留孤儿。
+- 浏览器面:`tests/unit/app_server/test_app_server_browser.cpp`(假 sidecar 直驱协议层:方法面、参数表、审批、取消、journal 批量、截图 artifact、真进程 sidecar 的起/复用/崩/收尸);`scripts/tests/app_server_browser_smoke.sh` 起真 `lubancode app-server` + 真 sidecar + 真 Playwright 跑一幕(独立协议客户端 `app_server_browser_client.js`:开页、导航、收事件、cursor 补账、取消、审批、截图 artifact、断线重连的边界)。
 
 ```bash
 # 本机管道(CI/开发机)

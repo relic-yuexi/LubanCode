@@ -4,6 +4,16 @@
 #include <utility>
 #include <vector>
 
+#include <thread>
+
+#if defined(_WIN32)
+#include <windows.h>
+#include <fcntl.h>
+#include <io.h>
+#else
+#include <unistd.h>
+#endif
+
 #include "runtime/id_authority.hpp"
 
 namespace lubancode::app_server {
@@ -63,7 +73,7 @@ void StdioConnection::ProcessLine(const std::string& line) {
         const nlohmann::json response = error.has_id
                                              ? MakeError(error.id, error.code, error.message)
                                              : MakeErrorForUnparseable(error.code, error.message);
-        writer_(SerializeMessage(response));
+        outbox_.Push(SerializeMessage(response), true);
         return;
     }
 
@@ -96,19 +106,36 @@ void StdioConnection::ProcessLine(const std::string& line) {
             outcome = dispatcher_->HandleNotification(message->notification, context);
             break;
         case IncomingMessage::Kind::Response:
-            outcome = dispatcher_->HandleResponse(message->response);
+            // 反向请求的答复(审批/ask_user):context 带上 resolve 口——
+            // 没它,悬起件配不上对,审批答复整条路在真 stdio 上是死的。
+            outcome = dispatcher_->HandleResponse(message->response, context);
             break;
     }
 
+    // 响应与事件同走 outbox(单一 FIFO 出水口,次序即产出次序)。响应是
+    // 请求配对的命根:must_keep,溢出也不丢。
     for (const std::string& outbound_line : outcome.outbound) {
-        writer_(outbound_line);
+        outbox_.Push(outbound_line, true);
     }
     if (outcome.close_connection) {
         closed_.store(true);
+        outbox_.Notify();
     }
 }
 
 int StdioConnection::Run() {
+    // 写线程(文件头早已写明的模型):从 outbox 逐条 PopWait、写 stdout。
+    // 没有它,事件只在收线时冲刷——交互客户端(SSH/桌面宿主)整场都
+    // 看不见事件。慢客户端堵的是这条线程与有界队列,不堵读线程。
+    std::thread writer_thread([this]() {
+        while (!closed_.load()) {
+            const std::optional<std::string> line = outbox_.PopWait(std::chrono::milliseconds(100));
+            if (line.has_value()) {
+                writer_(*line);
+            }
+        }
+    });
+
     while (!closed_.load()) {
         const std::string chunk = reader_();
         if (chunk.empty()) {
@@ -125,17 +152,19 @@ int StdioConnection::Run() {
         if (framer_.overflowed()) {
             // 超长行:尽力回一条 parse error,然后退线——协议已不可信。
             Diagnose("入站单行超过上限,退线");
-            writer_(SerializeMessage(MakeErrorForUnparseable(kErrParseError, "单行超过长度上限")));
+            outbox_.Push(SerializeMessage(MakeErrorForUnparseable(kErrParseError, "单行超过长度上限")), true);
             closed_.store(true);
             break;
         }
     }
 
+    closed_.store(true);
+    outbox_.Notify();
+    writer_thread.join();
     // 收线:把出站队列里剩的刷完(终态不悄悄丢)。
     while (const std::optional<std::string> line = outbox_.Pop()) {
         writer_(*line);
     }
-    closed_.store(true);
     return 0;
 }
 
@@ -153,12 +182,29 @@ bool WriteProtocolLine(const std::string& line) {
 }
 
 std::string ReadStdinChunk() {
+    // 读"当前可得"的字节,不等满缓冲:fread 会阻塞到 64KB 或 EOF,交互
+    // 客户端(SSH/桌面宿主)一段短报文就被吊死。Windows 走 ReadFile(管道
+    // 上有多少读多少,断管/EOF 返回失败),POSIX 走 read(2) 同语义。
+#if defined(_WIN32)
+    static HANDLE stdin_handle = [] {
+        _setmode(_fileno(stdin), _O_BINARY); // JSON 是 UTF-8 字节,不做 CRLF 翻译
+        return GetStdHandle(STD_INPUT_HANDLE);
+    }();
     char buffer[65536];
-    const std::size_t got = std::fread(buffer, 1, sizeof(buffer), stdin);
-    if (got == 0) {
-        return std::string();
+    DWORD got = 0;
+    if (stdin_handle == nullptr || stdin_handle == INVALID_HANDLE_VALUE ||
+        !ReadFile(stdin_handle, buffer, static_cast<DWORD>(sizeof(buffer)), &got, nullptr)) {
+        return std::string(); // EOF / 断管
     }
-    return std::string(buffer, got);
+    return got == 0 ? std::string() : std::string(buffer, got);
+#else
+    char buffer[65536];
+    const ssize_t got = ::read(STDIN_FILENO, buffer, sizeof(buffer));
+    if (got <= 0) {
+        return std::string(); // EOF / 断管
+    }
+    return std::string(buffer, static_cast<std::size_t>(got));
+#endif
 }
 
 }  // namespace lubancode::app_server

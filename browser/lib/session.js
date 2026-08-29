@@ -308,6 +308,25 @@ class BrowserSession {
     this.queue = Promise.resolve(); // actor 队列:并发动作串行
     this.releaseLock = null;
     this.agentActing = false; // Agent 自家动作进行中:用户观察代不误记(仲裁第 4 条)
+    // 事件口(阶段 3:App Server sidecar 用):宿主挂上监听器后,页签开合、
+    // 导航、journal 入账、userEpoch 递增、崩溃终态都会从这儿递出去。不挂
+    // 就是一根空管——MCP 路与直调路的行为一分不改。监听器抛错一律吞掉:
+    // 事件是旁路账,不许把浏览器动作拖死。
+    this.eventListener = null;
+  }
+
+  // 挂事件监听器(sidecar 专用;fn(type, payload) 同步调)。
+  setEventListener(fn) {
+    this.eventListener = typeof fn === 'function' ? fn : null;
+  }
+
+  emitEvent(type, payload) {
+    if (!this.eventListener) return;
+    try {
+      this.eventListener(type, payload || {});
+    } catch (_) {
+      /* 旁路账出错不拦正路 */
+    }
   }
 
   // actor 队列:一份浏览器状态一位主人,两只并发调用不得同时抢一只 page。
@@ -377,6 +396,7 @@ class BrowserSession {
         sha256: '',
       };
       this.downloads.push(record);
+      this.emitEvent('download/event', { ...record });
       try {
         fs.mkdirSync(this.config.downloadsDir, { recursive: true });
         const safe = sanitizeFilename(download.suggestedFilename() || 'download.bin');
@@ -392,6 +412,7 @@ class BrowserSession {
         record.state = 'failed';
         record.error = String(error.message || error);
       }
+      this.emitEvent('download/event', { ...record });
     });
     // 崩溃与断连:所有在飞调用只收一次终态,不吊死。
     const onGone = (reason) => {
@@ -402,6 +423,7 @@ class BrowserSession {
           entry.closed = true;
         }
         log('browser gone:', reason);
+        this.emitEvent('session/crashed', { reason });
       }
     };
     if (this.browser) {
@@ -474,6 +496,11 @@ class BrowserSession {
     page.on('framenavigated', (frame) => {
       if (frame === page.mainFrame()) {
         entry.generation += 1;
+        this.emitEvent('page/navigation', {
+          pageId: id,
+          url: frame.url(),
+          generation: entry.generation,
+        });
       }
     });
     // Console 与未捕获异常(阶段 2):level 取 Playwright 的 type,pageerror
@@ -481,7 +508,7 @@ class BrowserSession {
     page.on('console', (message) => {
       const location = message.location() || {};
       entry.consoleSeq += 1;
-      pushRing(entry.consoleJournal, {
+      const record = {
         seq: entry.consoleSeq,
         level: String(message.type() || 'log'),
         text: sanitizeJournalText(message.text()),
@@ -490,11 +517,13 @@ class BrowserSession {
         column: Number(location.columnNumber) || 0,
         ts: new Date().toISOString(),
         generation: entry.generation,
-      }, 'consoleDropped');
+      };
+      pushRing(entry.consoleJournal, record, 'consoleDropped');
+      this.emitEvent('console/entry', { pageId: id, entry: record });
     });
     page.on('pageerror', (error) => {
       entry.consoleSeq += 1;
-      pushRing(entry.consoleJournal, {
+      const record = {
         seq: entry.consoleSeq,
         level: 'pageerror',
         text: sanitizeJournalText(error && error.message ? error.message : String(error)),
@@ -503,7 +532,9 @@ class BrowserSession {
         column: 0,
         ts: new Date().toISOString(),
         generation: entry.generation,
-      }, 'consoleDropped');
+      };
+      pushRing(entry.consoleJournal, record, 'consoleDropped');
+      this.emitEvent('console/entry', { pageId: id, entry: record });
     });
     // Network journal:起笔记 method/url/资源类型,终态补 status 或失败
     // 原因;duration 用起笔到终态的墙钟差。响应体不收(明说,不冒充)。
@@ -525,7 +556,9 @@ class BrowserSession {
       entry.pendingRequests.delete(response.request());
       pending.status = response.status();
       pending.durationMs = Math.max(0, Date.now() - pending.startedAt);
-      pushRing(entry.networkJournal, { ...pending, failed: false, error: '' }, 'networkDropped');
+      const record = { ...pending, failed: false, error: '' };
+      pushRing(entry.networkJournal, record, 'networkDropped');
+      this.emitEvent('network/entry', { pageId: id, entry: record });
     });
     page.on('requestfailed', (request) => {
       const pending = entry.pendingRequests.get(request);
@@ -536,7 +569,9 @@ class BrowserSession {
       pending.durationMs = Math.max(0, Date.now() - pending.startedAt);
       pending.failed = true;
       pending.error = String(failure.errorText || 'request failed');
-      pushRing(entry.networkJournal, { ...pending }, 'networkDropped');
+      const record = { ...pending };
+      pushRing(entry.networkJournal, record, 'networkDropped');
+      this.emitEvent('network/entry', { pageId: id, entry: record });
     });
     // 用户输入监听:exposeBinding 供给回调,init script 每份新文档挂监听;
     // 已加载的文档再补挂一次(open(new_page=false) 的老页)。
@@ -544,15 +579,19 @@ class BrowserSession {
       if (this.agentActing) return; // Agent 自家动作不误记
       entry.userEpoch += 1;
       log('user input observed on', id, '-> userEpoch', entry.userEpoch);
+      this.emitEvent('user_epoch', { pageId: id, userEpoch: entry.userEpoch });
     }).catch(() => { /* 挂不上不拦功能 */ });
     page.addInitScript(USER_INPUT_WATCH_SCRIPT).catch(() => { /* 同上 */ });
     page.evaluate(USER_INPUT_WATCH_SCRIPT).catch(() => { /* about:blank 等挂不上就算了 */ });
     page.on('close', () => {
       entry.closed = true;
+      this.emitEvent('page/closed', { pageId: id, reason: 'closed' });
     });
     page.on('crash', () => {
       entry.closed = true;
+      this.emitEvent('page/closed', { pageId: id, reason: 'crashed' });
     });
+    this.emitEvent('page/created', { pageId: id });
     return { id, entry };
   }
 
@@ -937,7 +976,59 @@ class BrowserSession {
     await this.ensureLaunched();
     const entry = this.resolvePage(String(pageId || ''));
     await withDeadline(entry.page.bringToFront(), this.callTimeout(options), '切页');
+    this.emitEvent('page/selected', { pageId: String(pageId), url: entry.page.url(), generation: entry.generation });
     return { pageId: String(pageId), url: entry.page.url(), generation: entry.generation };
+  }
+
+  // 指名导航(阶段 3:App Server sidecar 的 page/navigate 面):与 open
+  // 不同,这里必须给 page_id,在既有页上 goto。generation 递增与 stale 语义
+  // 由 framenavigated 监听统一管,与 open 同一本账。
+  async navigate(pageId, url, options) {
+    options = options || {};
+    url = String(url || '');
+    checkUrl(url);
+    await this.ensureLaunched();
+    const entry = this.resolvePage(String(pageId || ''));
+    const timeoutMs = this.callTimeout(options);
+    const waitUntil = ['load', 'domcontentloaded', 'networkidle'].includes(options.waitUntil) ? options.waitUntil : 'load';
+    const response = await withDeadline(entry.page.goto(url, { waitUntil, timeout: timeoutMs }), timeoutMs, '导航 ' + url);
+    return {
+      pageId: String(pageId),
+      url: entry.page.url(),
+      title: await safeTitle(entry.page),
+      httpStatus: response ? String(response.status()) : '',
+      generation: entry.generation,
+    };
+  }
+
+  // 历史导航:back/forward/reload。Playwright 的 goBack/goForward 在没有
+  // 历史时回 null(不算错);回执里 navigated 如实说,不冒充。
+  async historyNav(pageId, direction, options) {
+    options = options || {};
+    await this.ensureLaunched();
+    const entry = this.resolvePage(String(pageId || ''));
+    const timeoutMs = this.callTimeout(options);
+    const before = entry.generation;
+    const beforeUrl = entry.page.url();
+    let response = null;
+    if (direction === 'reload') {
+      response = await withDeadline(entry.page.reload({ timeout: timeoutMs }), timeoutMs, '刷新');
+    } else if (direction === 'back') {
+      response = await withDeadline(entry.page.goBack({ timeout: timeoutMs }), timeoutMs, '后退');
+    } else {
+      response = await withDeadline(entry.page.goForward({ timeout: timeoutMs }), timeoutMs, '前进');
+    }
+    await withDeadline(pageSettled(entry.page), Math.min(timeoutMs, 3000), '等页面稳定').catch(() => null);
+    const afterUrl = entry.page.url();
+    return {
+      pageId: String(pageId),
+      navigated: direction === 'reload' ? true : afterUrl !== beforeUrl,
+      url: afterUrl,
+      title: await safeTitle(entry.page),
+      httpStatus: response ? String(response.status()) : '',
+      generation: entry.generation,
+      generationBefore: before,
+    };
   }
 
   async closePage(pageId, options) {

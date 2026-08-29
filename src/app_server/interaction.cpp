@@ -157,6 +157,7 @@ std::shared_ptr<runtime::InteractionFuture> InteractionLedger::AskApproval(
         Entry entry;
         entry.info = PendingInteraction{request_id, thread_id_, turn_id,
                                         std::string(kMethodPermissionRequest), request.tool_name,
+                                        request.tool_use_id,
                                         PendingInteraction::Kind::Approval};
         entry.approval_promise = future->approval_promise;
         pending_[request_id] = std::move(entry);
@@ -181,7 +182,8 @@ std::shared_ptr<PendingFuture> InteractionLedger::AskQuestion(
         std::lock_guard<std::mutex> lock(mutex_);
         Entry entry;
         entry.info = PendingInteraction{request_id, thread_id_, turn_id, std::string(kMethodUserAsk),
-                                        std::string(), PendingInteraction::Kind::Question};
+                                        std::string(), std::string(),
+                                        PendingInteraction::Kind::Question};
         entry.question_promise = future->question_promise;
         pending_[request_id] = std::move(entry);
     }
@@ -327,6 +329,37 @@ std::size_t InteractionLedger::CancelPending() {
         promise->set_value(std::nullopt);
     }
     return cleared;
+}
+
+std::size_t InteractionLedger::CancelPendingForToolUse(const std::string& tool_use_id) {
+    if (tool_use_id.empty()) {
+        return 0;
+    }
+    std::vector<std::shared_ptr<std::promise<std::optional<runtime::ApprovalResponse>>>> approval_promises;
+    std::vector<std::shared_ptr<std::promise<std::optional<runtime::QuestionResponse>>>> question_promises;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = pending_.begin(); it != pending_.end();) {
+            if (it->second.info.tool_use_id == tool_use_id) {
+                if (it->second.approval_promise) {
+                    approval_promises.push_back(it->second.approval_promise);
+                }
+                if (it->second.question_promise) {
+                    question_promises.push_back(it->second.question_promise);
+                }
+                it = pending_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    for (auto& promise : approval_promises) {
+        promise->set_value(std::nullopt);
+    }
+    for (auto& promise : question_promises) {
+        promise->set_value(std::nullopt);
+    }
+    return approval_promises.size() + question_promises.size();
 }
 
 bool InteractionLedger::IsSessionAllowed(const std::string& tool_name) const {

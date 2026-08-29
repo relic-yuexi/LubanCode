@@ -120,29 +120,40 @@ TEST_CASE("真进程冒烟:握手 -> thread/start -> thread/list -> shutdown -> 
     CHECK(ledger.bad_lines.empty());
     REQUIRE(ledger.messages.size() >= 4);
 
+    // 响应按 id 配对(事件与响应同走一条出站队列,不钉位置——thread/
+    // started 事件完全可能排在 thread/start 响应前面)。
+    const auto find_response = [&ledger](int id) -> const nlohmann::json* {
+        for (const nlohmann::json& message : ledger.messages) {
+            if (message.contains("id") && message["id"] == id) {
+                return &message;
+            }
+        }
+        return nullptr;
+    };
+
     // 1 = initialize 的响应:能力表在。
-    const nlohmann::json& init = ledger.messages[0];
-    CHECK(init["id"] == 1);
-    CHECK(init["result"]["protocolVersion"].get<std::string>() == app_server::kProtocolVersion);
-    CHECK(init["result"].contains("capabilities"));
-    CHECK(init["result"].contains("lubancodeVersion"));
-    CHECK(init["result"].contains("platform"));
+    const nlohmann::json* init = find_response(1);
+    REQUIRE(init != nullptr);
+    CHECK((*init)["result"]["protocolVersion"].get<std::string>() == app_server::kProtocolVersion);
+    CHECK((*init)["result"].contains("capabilities"));
+    CHECK((*init)["result"].contains("lubancodeVersion"));
+    CHECK((*init)["result"].contains("platform"));
 
     // 2 = thread/start 的响应:threadId 给了。
-    const nlohmann::json& start = ledger.messages[1];
-    CHECK(start["id"] == 2);
-    CHECK(start["result"]["threadId"].get<std::string>().size() >= 8);
+    const nlohmann::json* start = find_response(2);
+    REQUIRE(start != nullptr);
+    CHECK((*start)["result"]["threadId"].get<std::string>().size() >= 8);
 
     // 3 = thread/list 的响应:数组在(自家的场刚建,能否列出取决于 HOME
     // 的会话档——只钉形状,不钉内容)。
-    const nlohmann::json& list = ledger.messages[2];
-    CHECK(list["id"] == 3);
-    CHECK(list["result"]["threads"].is_array());
+    const nlohmann::json* list = find_response(3);
+    REQUIRE(list != nullptr);
+    CHECK((*list)["result"]["threads"].is_array());
 
     // 4 = shutdown 的响应。
-    const nlohmann::json& shutdown = ledger.messages[3];
-    CHECK(shutdown["id"] == 4);
-    CHECK(shutdown.contains("result"));
+    const nlohmann::json* shutdown = find_response(4);
+    REQUIRE(shutdown != nullptr);
+    CHECK(shutdown->contains("result"));
 
     // thread/started 事件在出站流里(cwd 带上——SSH 通道上就是远端目录)。
     bool saw_thread_started = false;
