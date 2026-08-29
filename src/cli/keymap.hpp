@@ -202,6 +202,13 @@ private:
     std::vector<Entry> entries_;
 };
 
+// 当前场景按键帮助的整张表(`?` 键位帮助层,纯文本行,不着色不截宽——
+// 着色截宽归布局层):表头 + 每条绑定一行 + 表尾。表头/表尾都写
+// help.show 的实际和弦(用户改绑后跟着改,不硬写问号);流式作用域
+// (Streaming)不属空闲场景,不进表;未绑键的动作和弦列记 "-"。
+// 宽度自适应不在这里做——行交给 chrome 布局按屏宽截断。
+std::vector<std::string> BuildSceneHelpLines(const Keymap& keymap);
+
 // ---------------------------------------------------------------------------
 // 进程级活动表:终端层/面板/帮助共用一份。启动时(cli_app)调
 // LoadActiveKeymapOverrides 读用户文件;交互层改绑后(SetBinding)调

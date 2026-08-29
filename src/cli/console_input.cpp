@@ -811,7 +811,15 @@ void RedrawEditArea(int& start_row, const BottomChromeModel& model, const Theme&
         effective.queue_rows.erase(effective.queue_rows.begin(),
                                    effective.queue_rows.end() - above_count);
     }
-    int frame_top = start_row - above_count - fixed_rows_above_input;
+    // 帮助层垫在队列之上,贴缓冲顶装不下时保头舍尾——表头写着怎么收,
+    // 丢了头用户就找不到门(与队列"保尾舍头"方向相反,各按各的语义裁)。
+    int help_above = static_cast<int>(effective.help_rows.size());
+    const int help_room = start_row - fixed_rows_above_input - above_count;
+    if (help_above > help_room) {
+        help_above = std::max(0, help_room);
+        effective.help_rows.resize(static_cast<std::size_t>(help_above));
+    }
+    int frame_top = start_row - above_count - help_above - fixed_rows_above_input;
     if (frame_top < 0) {
         frame_top = 0;  // 理论到不了(box 模式提示符行上方至少有一行),防越界
     }
@@ -844,10 +852,21 @@ void RedrawEditArea(int& start_row, const BottomChromeModel& model, const Theme&
     }
 
     // 上一帧的绝对帧顶对不上(面板增减/滚屏/换锚)就不比了,整帧重画。
-    // VT 终端把擦行、落字、归光标攒进一段字节,一次 write + flush;老终端
-    // 仍走 Console API 兼容路。
+    // 帧顶挪了还有一笔账要清:diff 只认原点没挪的帧,旧帧范围里落在
+    // 新帧之外的行(帮助层收起/队列抽条那一侧)没人认领会留残影——
+    // 先把旧帧范围整块擦净,再落新帧(帮助层开合单;对生长方向是白擦
+    // 一层马上盖回,对收小方向正是去鬼影的那一笔)。
     const InlineFrame* previous =
         previous_frame.has_value() && prev_frame_origin == frame_top ? &*previous_frame : nullptr;
+    const bool stale_extent = previous == nullptr && prev_frame_origin >= 0;
+    if (stale_extent) {
+        const int old_bottom = (std::min)(prev_frame_origin + prev_body_row_count, buffer_height - 1);
+        for (int y = (std::max)(0, prev_frame_origin); y <= old_bottom; ++y) {
+            platform::ClearRowHardFrom(0, y, buffer_width);
+        }
+    }
+    // VT 终端把擦行、落字、归光标攒进一段字节,一次 write + flush;老终端
+    // 仍走 Console API 兼容路。
     if (vt_enabled) {
         platform::TerminalBatch batch(viewport_x, viewport_y);
         QueueInlineFrameDiff(batch, previous, next, frame_top);
@@ -1044,6 +1063,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     std::chrono::steady_clock::time_point panel_notice_until{};
     int prev_frame_origin = -1;  // 上一帧的绝对帧顶;面板增减/滚屏后对不上就整帧重画
 
+    // 场景按键帮助层(? 键位帮助只能展开不能收起单):帮助不是打进滚屏的
+    // 一段输出,而是底栏帧最顶的一块 retained 层(help_rows 进 BottomChrome
+    // Model/Frame)——开合、让位全走 HelpOverlayNext 状态机,展开时帧向上
+    // 长高直接覆写可视对话(不写滚屏),收起时整屏重建把可视对话请回来,
+    // 滚屏里从头到尾没有表。
+    bool help_visible = false;
+
     if (composer) {
         SetComposerTarget(std::nullopt);  // 每次读取开始先归 main;首帧 build_panel 会按查看态再挂回去
     }
@@ -1212,6 +1238,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                                  int selected_task_id) {
         BottomChromeModel model;
         model.framed = box;
+        if (help_visible && state.line.empty()) {
+            // 帮助层垫帧最顶:行内容出自 keymap(表头带实际和弦),摆位、
+            // 淡色、按屏宽截断、高度预算钳制全归布局函数,与队列/坞同一本账。
+            // 只属空 composer——草稿一有正文就不进帧(粘贴/取回这类不走逐键
+            // 路径的入口,当拍也不闪帮助),状态机随后一拍正式收掉。
+            model.help_rows = keymap::BuildSceneHelpLines(keymap::ActiveKeymap());
+        }
         model.queue_rows = queue_rows;
         model.agent_dock_rows = dock;
         model.transient_rows = state.hint_lines;
@@ -1351,6 +1384,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     // 内容铺完后的重锚(UI 按键回调路 / 视图切换路共用):重打上横线与提示
     // 符、重测锚点、作废旧帧、整帧重画。铺出的正文把旧 chrome 自然顶进滚屏。
     const auto reanchor_prompt_and_redraw = [&]() {
+        // 重锚 = 上方刚铺了新正文,场景换了:帮助层跟着旧锚一起退场,
+        // 不然重画会把帮助表盖在新铺的正文上(焦点导航/查看切换这类路)。
+        help_visible = HelpOverlayNext(help_visible, HelpOverlayEvent::SceneChanged);
         if (box) {
             const std::optional<platform::ScreenInfo> rule_info = platform::GetScreenInfo();
             const int console_width = rule_info.has_value() ? rule_info->width : 80;
@@ -1399,6 +1435,10 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         previous_frame.reset();
         prev_frame_origin = -1;
         prev_body_row_count = 0;
+        // 帮助层长在底栏帧最顶:底栏整帧退场,帮助跟着退,不单独留一块
+        // 没人认领的表在屏上。收起路(再按/Esc)不走这里,那条要整屏重建
+        // 恢复可视对话;这里只是让位(外部编辑器/转录导航/查看态切换)。
+        help_visible = HelpOverlayNext(help_visible, HelpOverlayEvent::SceneChanged);
     };
 
     // Ctrl+G 外部编辑器(0.30.x 第三批):收掉底栏帧把整屏让给编辑器,
@@ -1633,6 +1673,37 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
     }
 
+    // 帮助层展开前的沉底(短会话形态):提示符若停在窗腰(下方还有整片
+    // 空行),帮助表上方装不下。终端里内容只能上移不能下移,但底栏是自家
+    // 帧——擦掉旧帧、把锚点挪到窗底重画,上方的净空就出来了。不滚屏、
+    // 不写滚屏历史,收起时 rebuild_screen 自会按 transcript 重锚回原位。
+    // 返回真 = 真沉了,调用方需要再画一帧。
+    const auto dock_chrome_to_bottom_for_help = [&](int help_rows) -> bool {
+        if (prev_frame_origin < 0 || help_rows <= 0) {
+            return false;  // 没有上一帧的账可对,不硬挪
+        }
+        const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+        if (!info.has_value()) {
+            return false;
+        }
+        const int vh = info->viewport_height > 0 ? info->viewport_height : info->height;
+        const int rows_below_anchor =
+                (std::max)(0, prev_frame_origin + prev_body_row_count - start_row);
+        const int max_start =
+                (std::min)(info->viewport_y + vh - 1, info->height - 1) - rows_below_anchor;
+        // 帧顶到视口顶的余地(帮助层从新帧顶向上铺,盖的是可视对话,只受
+        // "不画出视口"这一条约束)。
+        const int rows_above_now = prev_frame_origin - info->viewport_y;
+        if (help_rows <= rows_above_now || start_row >= max_start) {
+            return false;  // 上方本就装得下,或已贴底无处可沉
+        }
+        const bool keep_help = help_visible;
+        retire_idle_chrome();   // 擦旧帧、帧账归零(顺带把 help_visible 归 false)
+        help_visible = keep_help;  // 沉底不是退场:帮助层跟着新锚一起重画
+        start_row = max_start;
+        return true;
+    };
+
     // Ctrl+L 与 resize 共用的整屏重建(规格"整屏重画"节):作废帧锚点、清
     // 可视区(不清回滚历史)、请应用层重铺 transcript、重打提示符与底栏。
     // composer 草稿、面板选择、查看态与收件目标全在状态里,一个都不丢;
@@ -1677,6 +1748,29 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         previous_frame.reset();
         prev_frame_origin = -1;
         redraw_with_panel(editor.CurrentRenderState(), panel_entries());
+        // 帮助层还开着的话补一笔沉底:重建把提示符重锚到 transcript 尾——
+        // 短会话里那就是窗顶,上方没了余地,帮助会被锚点护栏钳到零行
+        // (resize 改宽后"表格重排"正是这条路)。照开合那套再沉一次,表
+        // 跟着新锚回来。
+        if (help_visible && editor.CurrentRenderState().line.empty() && composer) {
+            if (dock_chrome_to_bottom_for_help(
+                    static_cast<int>(keymap::BuildSceneHelpLines(keymap::ActiveKeymap()).size()))) {
+                redraw_with_panel(editor.CurrentRenderState(), panel_entries());
+            }
+        }
+    };
+
+    // 收帮助层(再按和弦/Esc/场景换):整屏重建一条路——可视区清干净、
+    // 正文从 transcript 快照重铺、提示符重锚、底栏整帧重画。帮助展开时
+    // 是直接覆写在对话上的,光擦帮助行只会留一片空白,重建才对得起
+    // "收起后恢复原 composer、底栏与可视对话"。滚屏从头到尾没有表,
+    // 重建也一张表都不添。
+    const auto close_scene_help = [&]() {
+        if (!help_visible) {
+            return;
+        }
+        help_visible = HelpOverlayNext(help_visible, HelpOverlayEvent::SceneChanged);
+        rebuild_screen();
     };
 
     // resize 探测:宽变了走整屏重建(下一拍内完成),不能等指纹——
@@ -1815,7 +1909,14 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                 }
             }
             if (armed_expired || fingerprint_of(entries, frame, snapshot) != panel_fingerprint) {
-                redraw_with_panel(editor.CurrentRenderState(), entries);
+                if (help_visible && !tick_state.line.empty()) {
+                    // 草稿非空了(粘贴/取回一类不走逐键路径的入口):场景换
+                    // 了,帮助层整屏重建收掉,可视对话回来。
+                    help_visible = HelpOverlayNext(help_visible, HelpOverlayEvent::DraftFilled);
+                    rebuild_screen();
+                } else {
+                    redraw_with_panel(editor.CurrentRenderState(), entries);
+                }
             }
             // 空闲唤醒:系统侧有事件(后台子代理跑完等)要在会话空闲时处理。
             // composer 空着才让位——用户敲了一半的正文不抢;让位前先正式
@@ -1898,15 +1999,25 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             };
             const auto search_chord = keymap::ChordFromKeyInput(*raw_key);
             if (!history_search.active() && !queue_edit.has_value() && search_chord.has_value()) {
+                // 帮助层开着时 Esc 优先收帮助(改绑 help.show 后的确定出口),
+                // 不落给编辑器(老语义清草稿/停 loop)也不落给面板(逐层退)。
+                if (help_visible && search_chord->key == keymap::KeyChord::Key::Esc &&
+                    !search_chord->ctrl && !search_chord->alt) {
+                    help_visible = HelpOverlayNext(help_visible, HelpOverlayEvent::EscapePressed);
+                    rebuild_screen();
+                    continue;
+                }
                 using keymap::ActionId;
                 switch (keymap::ActiveKeymap().Lookup(keymap::KeyScope::Composer, *search_chord)) {
                     case ActionId::ChatSearchHistory: {
                         // Ctrl+R 反向搜索:原草稿整份存起(取消时一字不少装
                         // 回),编辑器清成空查询。没有数据源(单发/管道/未注册)
-                        // 时这个键不消费,落回编辑器原语义。
+                        // 时这个键不消费,落回编辑器原语义。场景换了,帮助层
+                        // 先收(它列的是空闲场景的键,搜索开着便词不达意)。
                         if (!PromptHistoryProviderSlot()) {
                             break;
                         }
+                        close_scene_help();
                         history_search_draft = Utf32ToUtf8(editor.CurrentRenderState().line);
                         history_search.Open(PromptHistoryProviderSlot()(), HistorySearchScope::Session);
                         history_search_last_query.clear();
@@ -1933,6 +2044,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                                 panel_notice = tr("stash.restore_refused");
                             } else {
                                 editor.LoadText(Utf8ToUtf32(stash.text));
+                                // 取回的正文一进草稿,帮助层就让位(场景换了)。
+                                help_visible =
+                                        HelpOverlayNext(help_visible, HelpOverlayEvent::DraftFilled);
                                 ComposerStashSlot() = ComposerStashSnapshot{};
                                 panel_notice = tr("stash.restored");
                             }
@@ -1951,39 +2065,31 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
                         continue;
                     }
                     case ActionId::HelpShow: {
-                        // '?' 场景帮助:只列当前场景有效键,不倒整本 /help;
-                        // 键位从 keymap 反查,用户改键后提示跟着改。空
-                        // composer 才当帮助,有正文时 '?' 是普通字符。
+                        // '?' 场景帮助(可开可合的临时层):只列当前场景有效键,
+                        // 键位从 keymap 反查,用户改键后表头/表尾跟着改。空
+                        // composer 才当帮助,有正文时 '?' 是普通字符。展开=
+                        // 帮助行进底栏帧最顶(覆写可视对话,不写滚屏);收起=
+                        // 整屏重建恢复可视对话。同一枚键,同一个动作。
                         if (!editor.CurrentRenderState().line.empty()) {
                             break;
                         }
-                        retire_idle_chrome();
-                        TermOut() << "\n";
-                        {
-                            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
-                            TermOut() << theme.tool_line << tr("help.scene_header") << theme.reset << "\n";
-                            for (const auto& record : keymap::ActiveKeymap().AllBindings()) {
-                                if (record.scope == keymap::KeyScope::Streaming) {
-                                    continue;  // 流式脚注那批不属"当前场景"(空闲 composer)
-                                }
-                                const std::string chord_text =
-                                    record.has_default ? keymap::FormatKeyChord(record.chord) : "-";
-                                TermOut() << theme.stats << "  " << chord_text;
-                                for (int pad = static_cast<int>(chord_text.size()); pad < 12; ++pad) {
-                                    TermOut() << ' ';
-                                }
-                                TermOut() << keymap::ActionName(record.action);
-                                if (!record.bindable) {
-                                    TermOut() << tr("help.fixed_suffix");
-                                } else if (!record.has_default) {
-                                    TermOut() << tr("help.unbound_suffix");
-                                }
-                                TermOut() << theme.reset << "\n";
-                            }
-                            TermOut() << theme.stats << tr("help.scene_footer") << theme.reset << "\n";
-                            TermOut().flush();
+                        const bool next_visible =
+                                HelpOverlayNext(help_visible, HelpOverlayEvent::TogglePressed);
+                        if (next_visible) {
+                            // 展开:短会话里提示符若停在窗腰,先把底栏帧沉到
+                            // 窗底,给整张表腾出净空(装不下的尾巴由高度预算
+                            // 钳制,保头舍尾)。行内容在 build_model 里按
+                            // help_visible 现拼,重画自会带上。
+                            dock_chrome_to_bottom_for_help(
+                                    static_cast<int>(keymap::BuildSceneHelpLines(
+                                                             keymap::ActiveKeymap())
+                                                             .size()));
+                            help_visible = true;
+                            redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
+                        } else {
+                            help_visible = next_visible;  // 状态机翻面(false)
+                            rebuild_screen();
                         }
-                        reanchor_prompt_and_redraw();
                         continue;
                     }
                     case ActionId::TranscriptPrevUserTurn:
@@ -2224,6 +2330,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             if (auto handle = steering.BeginEditLatest(); handle.has_value()) {
                 queue_edit = std::move(*handle);
                 editor.LoadText(Utf8ToUtf32(queue_edit->text));
+                // 取回的条目进草稿,帮助层让位(正文非空,帮助帧当拍就退,
+                // 状态一拍内正式收平)。
+                help_visible = HelpOverlayNext(help_visible, HelpOverlayEvent::DraftFilled);
                 queue_delete_armed = false;
                 redraw_with_panel(editor.CurrentRenderState(), entries_before_key);
             }
@@ -2495,7 +2604,15 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             return Utf32ToUtf8(state.line);
         }
 
-        redraw_with_panel(state, entries_before_key);
+        if (help_visible && !state.line.empty()) {
+            // 帮助开着,草稿却有了正文(打的字当拍就到这):场景换了,整屏
+            // 重建收帮助——对话回来,光标留在新正文上,一字不动。
+            help_visible = HelpOverlayNext(help_visible, HelpOverlayEvent::DraftFilled);
+            rebuild_screen();
+            state = editor.CurrentRenderState();  // 重建已按最新状态重画,别再叠一帧
+        } else {
+            redraw_with_panel(state, entries_before_key);
+        }
 
         if (state.esc_pressed && esc_rejects) {
             // 确认与可取消选择场景:Esc 不留在循环里继续等，直接交回
