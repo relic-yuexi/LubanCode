@@ -1,7 +1,7 @@
 {
   "manifest_version": 1,
   "id": "gui-agent-example",
-  "version": "1.3.0",
+  "version": "1.4.0",
   "language": "python",
   "runtime": {
     "kind": "process",
@@ -205,6 +205,54 @@
           }
         },
         "required": ["keys"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "gui_set_value",
+      "description": "按快照 ref 对可编辑控件整体替换值(UIA ValuePattern):清空重填、表单整替,比逐字 typing 可靠——不经键盘、不抢焦点、与 DPI/坐标无关,后台窗口也能写。快照行尾带 [value] 标的控件才支持;不支持的(自绘居多)明报并指路 type 输入。text 传空串即清空。写动作(改控件值,不写盘)。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "window_id": {"type": "string", "description": "形如 0x0012049A 的十六进制窗口 id(gui_list_windows 拿)"},
+          "ref": {"type": "string", "description": "gui_snapshot 回执里的元素短码,如 e5;带 [value] 标的才支持"},
+          "text": {
+            "type": "string",
+            "maxLength": 4096,
+            "description": "替换后的完整值(整体替换,不是追加);空串即清空"
+          },
+          "depth": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 24,
+            "description": "须与出 ref 那份快照的 depth 一致(默认 8),否则序号数错位"
+          }
+        },
+        "required": ["window_id", "ref", "text"],
+        "additionalProperties": false
+      }
+    },
+    {
+      "name": "gui_invoke",
+      "description": "按快照 ref 发 UIA 次级动作(结构路,不挪鼠标、不抢焦点):action=invoke 对按钮/链接/菜单项触发点击等价物(快照行尾 [invoke] 标);action=expand/collapse 对下拉、树形、菜单开合(快照行尾 [expand] 标)。比坐标点击稳:控件挪位、被遮挡、在后台都不碍事。写动作(触发界面行为,不写盘)。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "window_id": {"type": "string", "description": "形如 0x0012049A 的十六进制窗口 id(gui_list_windows 拿)"},
+          "ref": {"type": "string", "description": "gui_snapshot 回执里的元素短码,如 e3"},
+          "action": {
+            "type": "string",
+            "enum": ["invoke", "expand", "collapse"],
+            "description": "invoke=按钮族触发;expand/collapse=下拉/树形/菜单开合"
+          },
+          "depth": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 24,
+            "description": "须与出 ref 那份快照的 depth 一致(默认 8),否则序号数错位"
+          }
+        },
+        "required": ["window_id", "ref", "action"],
         "additionalProperties": false
       }
     }

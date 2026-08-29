@@ -1,9 +1,9 @@
 # GUI Agent(luban.gui-agent 0.1.0)— code-bearing 包示例(Windows 桌面自动化)
 
 模型反复走"看一眼,动一下,再看一眼":截图、移鼠标、点击、输文字、
-UIA 快照,十件工具,件件短命——每次调用起一只进程,干完就退。窗口、
-光标、前台焦点,全保存在 Windows 桌面手里。**插件自己没有状态,所以不
-需要 MCP。**
+UIA 快照、结构路整替与触发,十二件工具,件件短命——每次调用起一只
+进程,干完就退。窗口、光标、前台焦点,全保存在 Windows 桌面手里。
+**插件自己没有状态,所以不需要 MCP。**
 
 找控件两条路,**纯视觉为主体、结构为捷径**:**视觉路**(`gui_screenshot`
 看图,看不清带 `region` 裁局部原像素放大)是正路;**结构路**(`gui_snapshot`
@@ -14,7 +14,7 @@ UIA 快照,十件工具,件件短命——每次调用起一只进程,干完就�
 
 | 目录 | 组件 | canonical id | 干什么 |
 | --- | --- | --- | --- |
-| `plugins/gui-agent-example/` | process Plugin | `luban.gui-agent:gui-agent-example` | 十件工具:枚举、聚焦、截图、UIA 快照、移动、点击、滚轮、输入、按键、环境底账 |
+| `plugins/gui-agent-example/` | process Plugin | `luban.gui-agent:gui-agent-example` | 十二件工具:枚举、聚焦、截图、UIA 快照、移动、点击、滚轮、输入、按键、结构路整替(set_value)/次级动作(invoke)、环境底账 |
 | `skills/gui-agent/` | Skill | `luban.gui-agent:gui-agent` | 教模型的操作纪律:先看后动、region 放大、桌面常识、停手线 |
 
 **本包是 code-bearing:整包默认只被发现,不挂载。**放进目录后
@@ -30,7 +30,7 @@ UIA 快照,十件工具,件件短命——每次调用起一只进程,干完就�
 | 疑问 | 答案 |
 | --- | --- |
 | 截图点击也算"会话"吧,为何不搭 MCP? | 状态在**桌面与目标程序**里,不在插件里。每次调用重新问桌面要窗口矩形,要完就退,没有跨调用要保活的对象。 |
-| MCP 有 tools/list 发现,这没有? | manifest `plugin.json` 就是静态真账,十件工具名与 schema 加载期一次读齐。 |
+| MCP 有 tools/list 发现,这没有? | manifest `plugin.json` 就是静态真账,十二件工具名与 schema 加载期一次读齐。 |
 | 进程崩了怎么办? | 只坏本次调用,宿主收到唯一错误码,不带倒 LubanCode。 |
 | 什么时候该改用 MCP? | 工具要保存 DOM handle、订阅事件、维持数据库连接或接收异步下载时——状态住进了你的进程,短命进程装不下。那类示例见隔壁 `browser/`。 |
 
@@ -69,7 +69,7 @@ set LUBANCODE_GUI_DRY_RUN=1
 lubancode
 ```
 
-挂上后(`/plugins` 应见 gui-agent-example: 10 个工具):
+挂上后(`/plugins` 应见 gui-agent-example: 12 个工具):
 
 ```text
 你:用 gui_status 看一眼桌面环境
@@ -118,8 +118,11 @@ Windows 上各有一枚 helper HWND,但 Tk 只管自己画、HWND 文字留空,U
 8. `gui_screenshot`(局部裁结果行)→ 复验
 
 捷径走法(结构路,原生控件窗体才值得):第 3 步换成 `gui_snapshot`,
-后面照旧——`scripts/uia_snapshot_e2e.py` 零截图点提交;
-`scripts/manual_e2e.py` 走的则是纯视觉路。
+第 5/6/7 步有短标就换结构路——输入框带 [value] 标用 `gui_set_value`
+整体替换,按钮带 [invoke] 标用 `gui_invoke` 触发,下拉带 [expand] 标用
+`gui_invoke` 开合;坐标点击与 `gui_type_text` 降为后备。
+`scripts/uia_snapshot_e2e.py` 零截图点提交;`scripts/manual_e2e.py`
+走的则是纯视觉路。
 
 对 LubanCode 说:"用 gui-agent 插件,在 LubanCode GUI Fixture 里填名字
 阿明、颜色保持 green、点提交,然后快照确认",模型照 Skill 走。
@@ -196,8 +199,8 @@ Skill 的死规矩:一次一项动作,动作后必快照/截图;不许连续盲�
 窗口 'LubanCode GUI Fixture'(0x04580338)UIA 快照:depth=8,收 13 项,走访 16 节点,42ms。ref 只在本份快照内有效;rect 是全桌面物理像素(virtual_screen 口径,与截图同源),动作取矩形中心。
 - e1 | image | 事件账 | rect=[339, 672, 969, 743]
 - e2 | image | (未提交) | rect=[339, 510, 517, 581]
-- e3 | button | 重置 | rect=[571, 430, 642, 484]
-- e4 | button | 提交 | rect=[435, 430, 506, 484]
+- e3 | button | 重置 | rect=[571, 430, 642, 484] | [invoke]
+- e4 | button | 提交 | rect=[435, 430, 506, 484] | [invoke]
 - e5 | pane | 颜色下拉 | rect=[435, 493, 825, 530]
 - e6 | image | 颜色: | rect=[367, 493, 411, 523]
 - e7 | pane | 名字输入框 | rect=[435, 353, 825, 390]
@@ -232,6 +235,29 @@ Skill 的死规矩:一次一项动作,动作后必快照/截图;不许连续盲�
 - **盲区如实写**:自绘控件(游戏、部分 Electron、老自绘 Win32)UIA
   看不见,收 0 项时回执明说"回视觉路"。tkinter 自己也半瞎:控件有
   helper HWND 但不带文字,名字得应用程序自己补(夹具就是这么做的)。
+
+### 6a. 结构路动作:gui_set_value 与 gui_invoke(1.4.0 起)
+
+快照不只是导航图,还是动作菜单:行尾短标 **[value]/[invoke]/[expand]**
+标出该控件支持的结构路动作,模型照标走 `gui_set_value` / `gui_invoke`,
+坐标路与 typing 降为后备(与"先结构后视觉"同一条纪律):
+
+- **`gui_set_value`(按 ref 整替值)**:UIA ValuePattern 的 SetValue——
+  清空重填、表单整替比逐字 typing 可靠:不经键盘、不抢焦点、不怕输入法
+  截胡,DPI/坐标无关,后台窗口也照写。text 传空串即清空。不带 [value]
+  标的控件(自绘居多)明报 `pattern_unsupported` 并指路
+  gui_click+gui_type_text。回执带替换前后值与复核读回。
+- **`gui_invoke`(按 ref 发次级动作)**:action=invoke 是按钮族"点击"的
+  UIA 等价物(不挪鼠标,控件挪位/被遮挡/在后台都不碍事);
+  action=expand/collapse 开合下拉、树形、菜单——比硬点坐标稳。做完回读
+  ExpandCollapseState,不冒充。OpenAI computer-use 的 Raise/Scroll 我们
+  已有等价物(gui_focus_window/滚轮),不做重复。
+- **ref 的时效**:eN 是快照的收录序号,动作时按同一套折叠规则重走树数
+  回来。树没变就指同一枚;控件树变了或 depth 不一致就可能数错位——
+  schema 要求 depth 与出 ref 那份快照一致,回执回显控件名与类型,模型
+  对不上就重拍。ref 超出收录数报 `ref_not_found`,不猜。
+- 这两件也是写动作(改控件值/触发界面行为),照常走确认面与 dry-run;
+  不写盘、不落证据文件,权限面与观察类同款(env 只读那三枚开关)。
 
 ## 7. 坐标空间、DPI 与 stale observation
 
@@ -304,7 +330,7 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 | --- | --- | --- |
 | 观察 | `gui_status` / `gui_list_windows` / `gui_snapshot` / `gui_screenshot` | 无输入注入。快照只读控件树,连像素都不碰;截图默认只拍目标窗口(`region` 也只裁窗内),`target=screen` 拍全部显示器,当心隐私。 |
 | 低风险动作 | `gui_focus_window` / `gui_move_mouse` | 改前台、挪鼠标,不产生点击。 |
-| 写动作 | `gui_click` / `gui_scroll` / `gui_type_text` / `gui_key` | 每次调用前 LubanCode 照常确认;`.lubancode/settings.local.json` 的 `allow_tools` 只按名单放(样例见插件目录 `config.example.json`),别开 `plugin__*` 通配。 |
+| 写动作 | `gui_click` / `gui_scroll` / `gui_type_text` / `gui_key` / `gui_set_value` / `gui_invoke` | 每次调用前 LubanCode 照常确认;`.lubancode/settings.local.json` 的 `allow_tools` 只按名单放(样例见插件目录 `config.example.json`),别开 `plugin__*` 通配。后两件是结构路(改控件值/触发界面行为,不写盘),纪律同款。 |
 
 - `LUBANCODE_GUI_DRY_RUN=1`:动作类工具全部只校验只报计划,连聚焦都不发。
 - Win 组合与 Alt+F4 默认禁(`dangerous_key_blocked`);确要放行须显式
@@ -337,6 +363,8 @@ wire 明降级为路径附注)。也就是说:**截图保存成功 = 模型看�
 | 快照里控件没名字 | 应用没给 UIA 名字(tkinter 默认就这样:控件画在 Tk 手里,helper HWND 文字是空的)。位置与类型还在,能按 rect 点;要名字得应用自己补(教学夹具就是这么做的) |
 | 快照被截断 | 树太宽/太深。带更小的 `depth` 重拍,或换枚更具体的窗口 |
 | 点击按快照 rect 落偏 | 先 `gui_status` 查 DPI;快照 rect 与截图、SendInput 同一物理像素口径,DPI unaware 时全链路一起错位 |
+| `gui_set_value`/`gui_invoke` 报 `pattern_unsupported` | 该控件没给 UIA 这只 pattern(自绘、tkinter 控件多半如此)。set_value 改 gui_click+gui_type_text;invoke 改按 rect 中心点;都不行走视觉路 |
+| 结构路动作落在别的控件上 | 快照与动作之间控件树变了,或 depth 不一致数错位。看回执回显的控件名对不对,重拍 gui_snapshot 拿新 ref(动作带同款 depth) |
 
 ## 11. 改造成你自己的工具(五步)
 
@@ -369,13 +397,13 @@ gui-agent/
   README.md                     本页
   skills/gui-agent/SKILL.md     教模型的操作纪律(内容组件)
   plugins/gui-agent-example/    插件本体(代码组件)
-    plugin.json                 manifest:id、runtime、十件工具 schema、env allowlist、network=false
+    plugin.json                 manifest:id、runtime、十二件工具 schema、env allowlist、network=false
     runner.py                   协议 v1 帧:stdin 一份 JSON → stdout 一份 JSON,日志进 stderr
     gui_actions.py              合同层:坐标换算、stale 拦截、上限、危险键闸、dry-run、observation
     gui_backend.py              Win32 ctypes 层:窗口枚举、DPI、SendInput、BitBlt;FakeBackend 供测试
     gui_uia.py                  UIA COM 壳:ctypes 手调 IUIAutomation,控件树折叠规则与帽子
     png.py                      零依赖 PNG 编码(zlib + CRC32),魔数自检
-    test_runner.py              离线自测(零真输入):python test_runner.py,50 册
+    test_runner.py              自测:python test_runner.py,73 册(离线册零真输入;活体册真 UIA 真控件,不注入一枚键盘鼠标)
     config.example.json         settings.local.json 样例与环境开关说明
     requirements.txt            零第三方依赖的说明
     fixtures/fixture_app.py     教学夹具:一条命令起的本地小窗

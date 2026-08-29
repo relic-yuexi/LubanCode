@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""GUI 工具合同层:十件工具的动作纪律。
+"""GUI 工具合同层:十二件工具的动作纪律。
 
 这层不管 Win32 花活(那是 gui_backend),也不管协议帧(那是 runner)。
 它守的是工单里的几条铁律:
@@ -15,6 +15,9 @@
   - 危险组合:Win+X 与 Alt+F4 默认禁,环境变量显式开禁才放。
   - dry-run:动作类工具只走校验、只报计划,不注入一枚事件。
   - 动作只报事实:"点击已发送",不猜界面结果;下一步必须重新观察。
+  - 结构路动作(gui_set_value/gui_invoke):按快照 ref 直调 UIA pattern,
+    不注入键盘鼠标、不抢焦点、与 DPI/坐标无关。ref 是收录序号,重走树
+    数回来——树变了就数错位,错位靠结果里回显的控件名兜底发现。
 """
 from __future__ import annotations
 
@@ -29,7 +32,7 @@ from typing import Optional
 import gui_uia
 import png as png_codec
 
-PLUGIN_VERSION = "1.3.0"
+PLUGIN_VERSION = "1.4.0"
 
 # 协议 v2 起截图随结果回喂模型(image 块),宿主验身落账后上 wire;
 # 证据文件照旧落盘(路径作附账,artifact 可追)。
@@ -67,7 +70,7 @@ SNAPSHOT_TEXT_LINES = 60
 
 # 动作类工具(dry-run 拦这些);观察类照常执行。
 ACTION_TOOLS = {"gui_focus_window", "gui_move_mouse", "gui_click", "gui_scroll",
-                "gui_type_text", "gui_key"}
+                "gui_type_text", "gui_key", "gui_set_value", "gui_invoke"}
 
 
 class ToolError(Exception):
@@ -498,11 +501,7 @@ def gui_snapshot(backend, arguments: dict, settings: Settings) -> tuple[str, dic
         int(window_id, 16)
     except ValueError:
         raise ToolError("invalid_arguments", f"window_id 不是十六进制: {window_id}") from None
-    depth = arguments.get("depth", gui_uia.DEFAULT_DEPTH)
-    if (not isinstance(depth, int) or isinstance(depth, bool)
-            or not 1 <= depth <= gui_uia.MAX_DEPTH):
-        raise ToolError("invalid_arguments",
-                        f"depth 须是 1-{gui_uia.MAX_DEPTH} 内整数(默认 {gui_uia.DEFAULT_DEPTH})")
+    depth = _parse_snapshot_depth(arguments)
     state = _require_window_state(backend, window_id)
     if state["minimized"]:
         raise ToolError("window_minimized", "窗口最小化了,控件树无从枚举;先恢复再拍")
@@ -519,10 +518,18 @@ def gui_snapshot(backend, arguments: dict, settings: Settings) -> tuple[str, dic
     lines = [f"窗口 {state['title']!r}({window_id})UIA 快照:depth={depth},"
              f"收 {len(elements)} 项,走访 {result['visited']} 节点,"
              f"{result['elapsed_ms']}ms。ref 只在本份快照内有效;"
-             "rect 是全桌面物理像素(virtual_screen 口径,与截图同源),动作取矩形中心。"]
+             "rect 是全桌面物理像素(virtual_screen 口径,与截图同源),动作取矩形中心;"
+             "行尾 [value]/[invoke]/[expand] 标该控件支持的结构路动作"
+             "(gui_set_value 整替值 / gui_invoke invoke·expand·collapse),"
+             "优先走它们,坐标与 typing 是后备。"]
     for element in elements[:SNAPSHOT_TEXT_LINES]:
-        lines.append(f"- {element['ref']} | {element['control_type']} | {element['name']}"
-                     f" | rect={element['rect']}")
+        line = (f"- {element['ref']} | {element['control_type']} | {element['name']}"
+                f" | rect={element['rect']}")
+        tags = " ".join(f"[{short}]" for short in ("value", "invoke", "expand")
+                        if short in element.get("patterns", []))
+        if tags:
+            line = f"{line} | {tags}"
+        lines.append(line)
     if len(elements) > SNAPSHOT_TEXT_LINES:
         lines.append(f"(其余 {len(elements) - SNAPSHOT_TEXT_LINES} 项只进 structured;"
                      "树太宽就用 depth 收窄重拍)")
@@ -540,6 +547,7 @@ def gui_snapshot(backend, arguments: dict, settings: Settings) -> tuple[str, dic
         "read_failures": result.get("read_failures", []),
         "elements": elements,
         "note": "ref 仅本份快照内有效;rect 为 virtual_screen 物理像素;"
+                "elements[].patterns 标结构路可选动作(value/invoke/expand);"
                 "自绘控件 UIA 看不见,收 0 项时改走截图视觉路",
     }
     return text, structured
@@ -701,6 +709,131 @@ def gui_key(backend, arguments: dict, settings: Settings) -> tuple[str, dict]:
                 "ensured_foreground": focused, "verify_next": "gui_screenshot"})
 
 
+# ---------------------------------------------------------------------------
+# 结构路动作:按快照 ref 直调 UIA pattern(不注入键盘鼠标,不抢焦点)
+# ---------------------------------------------------------------------------
+
+def _parse_ref(arguments: dict) -> int:
+    """快照短码 eN → 收录序号。格式不合、零号、非 e 起头都在这拒。"""
+    ref = arguments.get("ref")
+    if (not isinstance(ref, str) or len(ref) < 2 or ref[0] != "e"
+            or not ref[1:].isdigit()):
+        raise ToolError("invalid_arguments", "ref 须是快照短码,形如 e3(gui_snapshot 回执里拿)")
+    index = int(ref[1:])
+    if index < 1:
+        raise ToolError("invalid_arguments", "ref 从 e1 起数,没有 e0")
+    return index
+
+
+def _parse_snapshot_depth(arguments: dict) -> int:
+    """depth 校验;出 ref 的动作类工具须与快照时同值,数错位就指错元素。"""
+    depth = arguments.get("depth", gui_uia.DEFAULT_DEPTH)
+    if (not isinstance(depth, int) or isinstance(depth, bool)
+            or not 1 <= depth <= gui_uia.MAX_DEPTH):
+        raise ToolError("invalid_arguments",
+                        f"depth 须是 1-{gui_uia.MAX_DEPTH} 内整数(默认 {gui_uia.DEFAULT_DEPTH};"
+                        "set_value/invoke 须与出 ref 那份快照的 depth 一致)")
+    return depth
+
+
+def _structural_preamble(backend, arguments: dict) -> tuple[str, int, int, dict]:
+    """结构路动作的公共前置:窗口在、没最小化;ref/depth 校验。"""
+    window_id = arguments.get("window_id")
+    if not isinstance(window_id, str) or not window_id:
+        raise ToolError("invalid_arguments", "须带 window_id(gui_list_windows 拿)")
+    try:
+        int(window_id, 16)
+    except ValueError:
+        raise ToolError("invalid_arguments", f"window_id 不是十六进制: {window_id}") from None
+    ref_index = _parse_ref(arguments)
+    depth = _parse_snapshot_depth(arguments)
+    state = _require_window_state(backend, window_id)
+    if state["minimized"]:
+        raise ToolError("window_minimized", "窗口最小化了,控件树无从定位;先恢复再动")
+    return window_id, depth, ref_index, state
+
+
+def _run_structural(backend, call, window_id: str, what: str) -> dict:
+    """跑一把后端结构路动作,把 gui_uia.ActionError 换成 ToolError 上帧。"""
+    import gui_uia
+    try:
+        return call()
+    except gui_uia.ActionError as error:
+        raise ToolError(error.code, error.message) from None
+    except OSError as error:
+        raise ToolError("action_failed", f"{what} 走 UIA 失败:{error}") from None
+
+
+def gui_set_value(backend, arguments: dict, settings: Settings) -> tuple[str, dict]:
+    """UIA ValuePattern 整体替换:清空重填、表单整替,比逐字 typing 可靠
+    (typing 要先点焦点、逐字符注入、半路被输入法抢;SetValue 一把到位)。
+    不支持 ValuePattern 的控件(自绘居多)明报,指路 type 输入。"""
+    window_id, depth, ref_index, state = _structural_preamble(backend, arguments)
+    text = arguments.get("text")
+    if not isinstance(text, str):
+        raise ToolError("invalid_arguments", "text 须是字符串(整替成空串就是清空)")
+    if len(text) > TEXT_MAX_CHARS:
+        raise ToolError("text_too_long",
+                        f"text {len(text)} 字符,超 {TEXT_MAX_CHARS} 帽;分段替换")
+    if settings.dry_run:
+        plan = [f"对窗口 {state['title']!r} 快照里的 e{ref_index} 整替值 "
+                f"({len(text)} 字符,内容不回显,depth={depth})"]
+        return _dry_run_report("gui_set_value", plan, state)
+    outcome = _run_structural(
+        backend,
+        lambda: backend.set_value_by_ref(window_id, depth, ref_index, text),
+        window_id, "set_value")
+    after = outcome["after"]
+    replaced = after == text
+    text_out = (f"已对 {outcome['name']!r}({outcome['control_type']},{outcome['ref']})"
+                f"整体替换值:替换前 {len(outcome['before'])} 字符 → 现 {len(after)} 字符"
+                f"(复核读回{'一致' if replaced else '不一致:' + after[:40]!r})。"
+                "结构路不经键盘、不抢焦点;值进了控件不等于界面已刷新,"
+                "下一步 gui_snapshot/gui_screenshot 复验。")
+    return text_out, {
+        "window_id": state["id"], "ref": outcome["ref"],
+        "control_type": outcome["control_type"], "name": outcome["name"],
+        "before": outcome["before"], "after": outcome["after"],
+        "chars": len(text), "verified": replaced,
+        "verify_next": "gui_snapshot"}
+
+
+def gui_invoke(backend, arguments: dict, settings: Settings) -> tuple[str, dict]:
+    """UIA 次级动作:invoke(按钮族点击的结构路等价物,不挪鼠标)、
+    expand/collapse(下拉、树形、菜单的开合,不用硬点坐标)。sky 的
+    Raise/Scroll 我们已有等价物(gui_focus_window/滚轮),不做重复。"""
+    window_id, depth, ref_index, state = _structural_preamble(backend, arguments)
+    action = arguments.get("action")
+    if action not in ("invoke", "expand", "collapse"):
+        raise ToolError("invalid_arguments", "action 只认 invoke|expand|collapse")
+    if settings.dry_run:
+        plan = [f"对窗口 {state['title']!r} 快照里的 e{ref_index} 发结构路 {action}"
+                f"(depth={depth})"]
+        return _dry_run_report("gui_invoke", plan, state)
+    if action == "invoke":
+        outcome = _run_structural(
+            backend, lambda: backend.invoke_by_ref(window_id, depth, ref_index),
+            window_id, "invoke")
+        text_out = (f"已对 {outcome['name']!r}({outcome['control_type']},{outcome['ref']})"
+                    "发结构路 Invoke(按钮类'点击'的 UIA 等价物,不经鼠标、不抢焦点)。"
+                    "动作事实,生效与否下一步快照/截图复验。")
+    else:
+        outcome = _run_structural(
+            backend,
+            lambda: backend.expand_by_ref(window_id, depth, ref_index,
+                                          action == "expand"),
+            window_id, action)
+        text_out = (f"已对 {outcome['name']!r}({outcome['control_type']},{outcome['ref']})"
+                    f"发结构路 {outcome['action']},复核状态 {outcome['expand_state']}。"
+                    "动作事实,展开列表/子节点是否真出来,下一步快照/截图复验。")
+    return text_out, {
+        "window_id": state["id"], "ref": outcome["ref"],
+        "control_type": outcome["control_type"], "name": outcome["name"],
+        "action": outcome["action"], **({"expand_state": outcome["expand_state"]}
+                                        if "expand_state" in outcome else {}),
+        "verify_next": "gui_snapshot"}
+
+
 def _is_dangerous(keys: list[str]) -> bool:
     """Win 组合与 Alt+F4 列高风险档:前者唤系统壳,后者直接关窗口。"""
     if "win" in keys:
@@ -729,4 +862,6 @@ HANDLERS = {
     "gui_scroll": gui_scroll,
     "gui_type_text": gui_type_text,
     "gui_key": gui_key,
+    "gui_set_value": gui_set_value,
+    "gui_invoke": gui_invoke,
 }

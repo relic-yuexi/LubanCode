@@ -4,9 +4,17 @@
 全部用 FakeBackend,一只真鼠标都不动:坐标换算、stale 拦截、危险键闸、
 dry-run、各类上限、PNG 编码、协议帧,逐项断言。真桌面 E2E 另走
 scripts/manual_e2e.py(默认 SKIP,须显式 --run)。
+
+例外一册:LiveStructuralTest 在 Windows 上起一只原生 Win32 窗(纯 ctypes
+造 EDIT/BUTTON/COMBOBOX),真 UIA 真快照真 set_value/invoke/expand——这些
+是 COM pattern 调用,不注入一枚键盘鼠标事件,不抢焦点,与"一只真鼠标
+都不动"的承诺不冲突。tkinter 的控件造不了这只夹具:Tk 自绘,UIA 不带
+ValuePattern/InvokePattern/ExpandCollapsePattern(探针实测,连 BM_CLICK
+都不触发 Tk 命令),原生控件才是结构路的真靶子。
 """
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import struct
@@ -70,7 +78,7 @@ def decode_png_pixels(data: bytes) -> tuple[int, int, list[bytes]]:
 class ProtocolTest(unittest.TestCase):
     """协议帧形状:call_id 回显、ok 真、content 是 text,错误码稳定。"""
 
-    def test_manifest_is_valid_and_ten_tools(self):
+    def test_manifest_is_valid_and_twelve_tools(self):
         with open(os.path.join(HERE, "plugin.json"), encoding="utf-8") as handle:
             manifest = json.load(handle)
         self.assertEqual(manifest["manifest_version"], 1)
@@ -78,7 +86,7 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(manifest["runtime"]["kind"], "process")
         self.assertFalse(manifest["permissions"]["network"])
         self.assertIn("LUBANCODE_GUI_DRY_RUN", manifest["permissions"]["env"])
-        self.assertEqual(len(manifest["tools"]), 10)
+        self.assertEqual(len(manifest["tools"]), 12)
         for tool in manifest["tools"]:
             self.assertEqual(tool["input_schema"]["type"], "object")
             self.assertFalse(tool["input_schema"].get("additionalProperties", True),
@@ -567,15 +575,18 @@ class SnapshotTest(unittest.TestCase):
                  {"control_type": "text", "name": "名字:", "rect": [116, 124, 160, 144]},
                  {"control_type": "pane", "name": "名字输入框", "rect": [164, 120, 360, 148],
                   "children": []},
-                 {"control_type": "button", "name": "提交", "rect": [164, 172, 240, 200]},
-                 {"control_type": "button", "name": "重置", "rect": [244, 172, 320, 200]},
+                 {"control_type": "button", "name": "提交", "rect": [164, 172, 240, 200],
+                  "patterns": ["invoke"]},
+                 {"control_type": "button", "name": "重置", "rect": [244, 172, 320, 200],
+                  "patterns": ["invoke"]},
                  {"control_type": "edit", "name": "", "rect": [164, 220, 360, 244],
-                  "value": "阿明"},
+                  "value": "阿明", "patterns": ["value"]},
                  {"control_type": "text", "name": "", "rect": [116, 260, 160, 280]},
              ]},
             {"control_type": "titlebar", "name": "", "rect": [100, 80, 580, 116],
              "children": [
-                 {"control_type": "button", "name": "关闭", "rect": [540, 84, 576, 112]},
+                 {"control_type": "button", "name": "关闭", "rect": [540, 84, 576, 112],
+                  "patterns": ["invoke"]},
              ]},
         ])
         return backend
@@ -600,6 +611,19 @@ class SnapshotTest(unittest.TestCase):
         response = call(self.make_tree_backend(), "gui_snapshot", {"window_id": WINDOW})
         edit = [e for e in response["structured"]["elements"] if e["control_type"] == "edit"][0]
         self.assertEqual(edit["value"], "阿明")
+
+    def test_pattern_tags_in_snapshot_lines(self):
+        """行尾短标:模型看得见哪枚控件有结构路可选([value]/[invoke]/[expand])。"""
+        response = call(self.make_tree_backend(), "gui_snapshot", {"window_id": WINDOW})
+        text = response["content"][0]["text"]
+        self.assertIn("- e3 | button | 提交 | rect=[164, 172, 240, 200] | [invoke]", text)
+        self.assertIn("- e5 | edit |  | rect=[164, 220, 360, 244] | [value]", text)
+        # 没探测出 pattern 的控件行尾不带标(与旧格式逐字节一致)。
+        self.assertIn("- e1 | text | 名字: | rect=[116, 124, 160, 144]\n", text)
+        self.assertIn("[value]/[invoke]/[expand]", text.splitlines()[0])  # 头行教用法
+        structured = response["structured"]["elements"]
+        self.assertEqual([e for e in structured if e["ref"] == "e3"][0]["patterns"],
+                         ["invoke"])
 
     def test_depth_cut(self):
         backend = self.make_tree_backend()
@@ -672,6 +696,374 @@ class SnapshotTest(unittest.TestCase):
         self.assertEqual(gui_uia.CONTROL_TYPE_NAMES[50004], "edit")
         self.assertEqual(gui_uia.CONTROL_TYPE_NAMES[50032], "window")
         self.assertEqual(gui_uia.CONTROL_TYPE_NAMES[50033], "pane")
+
+
+class StructuralActionTest(unittest.TestCase):
+    """结构路动作合同(离线,FakeBackend):gui_set_value 整替、gui_invoke
+    的 invoke/expand/collapse、pattern 闸、ref 解析、dry-run、错误码。"""
+
+    def make_action_backend(self) -> FakeBackend:
+        backend = make_backend()
+        backend.set_uia_tree(WINDOW, [
+            {"control_type": "edit", "name": "名字", "rect": [164, 120, 360, 148],
+             "value": "旧值", "patterns": ["value"]},
+            {"control_type": "button", "name": "提交", "rect": [164, 172, 240, 200],
+             "patterns": ["invoke"]},
+            {"control_type": "combobox", "name": "颜色", "rect": [164, 220, 360, 248],
+             "value": "green", "patterns": ["value", "expand"]},
+            {"control_type": "text", "name": "说明", "rect": [16, 260, 160, 280]},
+        ])
+        return backend
+
+    def tree_node(self, backend: FakeBackend, name: str) -> dict:
+        return [n for n in backend.uia_trees[WINDOW] if n.get("name") == name][0]
+
+    def test_set_value_replaces_whole_value(self):
+        backend = self.make_action_backend()
+        response = call(backend, "gui_set_value",
+                        {"window_id": WINDOW, "ref": "e1", "text": "新值一二三"})
+        self.assertTrue(response["ok"])
+        structured = response["structured"]
+        self.assertEqual(structured["before"], "旧值")
+        self.assertEqual(structured["after"], "新值一二三")
+        self.assertTrue(structured["verified"])
+        # 真替换:假树节点本身换了值,不只是回执嘴上说说。
+        self.assertEqual(self.tree_node(backend, "名字")["value"], "新值一二三")
+        self.assertIn("set_value(", "".join(backend.calls))
+
+    def test_set_value_empty_string_clears(self):
+        backend = self.make_action_backend()
+        response = call(backend, "gui_set_value",
+                        {"window_id": WINDOW, "ref": "e1", "text": ""})
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["structured"]["after"], "")
+        self.assertEqual(self.tree_node(backend, "名字")["value"], "")
+
+    def test_set_value_without_pattern_points_to_typing(self):
+        backend = self.make_action_backend()
+        response = call(backend, "gui_set_value",
+                        {"window_id": WINDOW, "ref": "e2", "text": "x"})
+        self.assertEqual(error_code(response), "pattern_unsupported")
+        self.assertIn("gui_type_text", response["error"]["message"])
+        self.assertEqual(self.tree_node(backend, "名字")["value"], "旧值")  # 没动
+
+    def test_invoke_fires_and_records(self):
+        backend = self.make_action_backend()
+        response = call(backend, "gui_invoke",
+                        {"window_id": WINDOW, "ref": "e2", "action": "invoke"})
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["structured"]["action"], "invoke")
+        self.assertIn(f"invoke({WINDOW},e2)", backend.calls)
+
+    def test_expand_and_collapse_toggle_state(self):
+        backend = self.make_action_backend()
+        response = call(backend, "gui_invoke",
+                        {"window_id": WINDOW, "ref": "e3", "action": "expand"})
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["structured"]["expand_state"], "expanded")
+        self.assertTrue(self.tree_node(backend, "颜色")["expanded"])
+        response = call(backend, "gui_invoke",
+                        {"window_id": WINDOW, "ref": "e3", "action": "collapse"})
+        self.assertEqual(response["structured"]["expand_state"], "collapsed")
+        self.assertFalse(self.tree_node(backend, "颜色")["expanded"])
+        self.assertIn(f"expand({WINDOW},e3)", "".join(backend.calls))
+        self.assertIn(f"collapse({WINDOW},e3)", "".join(backend.calls))
+
+    def test_expand_without_pattern_rejected(self):
+        backend = self.make_action_backend()
+        self.assertEqual(error_code(call(backend, "gui_invoke",
+                                         {"window_id": WINDOW, "ref": "e1",
+                                          "action": "expand"})),
+                         "pattern_unsupported")
+
+    def test_unknown_action_rejected(self):
+        backend = self.make_action_backend()
+        # sky 的 Raise/Scroll 有等价物(activate/滚轮),不进这枚枚举。
+        for bad in ("raise", "scroll_up", "Invoke", ""):
+            with self.subTest(action=bad):
+                self.assertEqual(error_code(call(backend, "gui_invoke",
+                                                 {"window_id": WINDOW, "ref": "e2",
+                                                  "action": bad})),
+                                 "invalid_arguments")
+
+    def test_ref_format_rejected(self):
+        for bad in ("3", "e", "e0", "x3", "e1x", 3, None, True):
+            with self.subTest(ref=bad):
+                self.assertEqual(error_code(call(self.make_action_backend(), "gui_set_value",
+                                                 {"window_id": WINDOW, "ref": bad,
+                                                  "text": "x"})),
+                                 "invalid_arguments")
+
+    def test_ref_beyond_count_reports_stale_ref(self):
+        backend = self.make_action_backend()
+        response = call(backend, "gui_set_value",
+                        {"window_id": WINDOW, "ref": "e9", "text": "x"})
+        self.assertEqual(error_code(response), "ref_not_found")
+        self.assertIn("重拍", response["error"]["message"])
+
+    def test_window_errors(self):
+        backend = self.make_action_backend()
+        del backend.windows[WINDOW]
+        self.assertEqual(error_code(call(backend, "gui_set_value",
+                                         {"window_id": WINDOW, "ref": "e1", "text": "x"})),
+                         "window_not_found")
+        backend = self.make_action_backend()
+        backend.windows[WINDOW]["minimized"] = True
+        self.assertEqual(error_code(call(backend, "gui_invoke",
+                                         {"window_id": WINDOW, "ref": "e2",
+                                          "action": "invoke"})),
+                         "window_minimized")
+
+    def test_depth_mismatch_changes_resolution(self):
+        """depth 数错位就指错元素:深度帽砍的是 DFS 序中段的深节点,同一枚
+        e3 在 depth=2 的快照里是丙,depth=8 重数却指到乙——这就是 schema 里
+        'depth 须与快照一致'的原因。"""
+        backend = make_backend()
+        backend.set_uia_tree(WINDOW, [
+            {"control_type": "pane", "name": "表单区", "rect": [10, 10, 90, 120],
+             "children": [
+                 {"control_type": "edit", "name": "甲输入", "rect": [12, 12, 88, 30],
+                  "value": "", "patterns": ["value"],
+                  "children": [
+                      {"control_type": "edit", "name": "乙输入", "rect": [12, 32, 88, 50],
+                       "value": "", "patterns": ["value"]},
+                  ]},
+                 {"control_type": "edit", "name": "丙输入", "rect": [12, 52, 88, 70],
+                  "value": "", "patterns": ["value"]},
+             ]},
+        ])
+        snap = call(backend, "gui_snapshot", {"window_id": WINDOW, "depth": 2})
+        self.assertEqual([e["name"] for e in snap["structured"]["elements"]],
+                         ["表单区", "甲输入", "丙输入"])  # 乙被深度帽砍了
+        response = call(backend, "gui_set_value",
+                        {"window_id": WINDOW, "ref": "e3", "text": "x", "depth": 8})
+        # 快照里 e3 是丙输入;depth=8 重数把乙算进来,e3 变了乙输入。
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["structured"]["name"], "乙输入")
+        response = call(backend, "gui_set_value",
+                        {"window_id": WINDOW, "ref": "e3", "text": "y", "depth": 2})
+        self.assertEqual(response["structured"]["name"], "丙输入")  # 一致时才对得上
+
+    def test_dry_run_reports_plan_only(self):
+        settings = Settings(env={})
+        settings.dry_run = True
+        backend = self.make_action_backend()
+        response = call(backend, "gui_set_value",
+                        {"window_id": WINDOW, "ref": "e1", "text": "计划值"}, settings)
+        self.assertTrue(response["ok"])
+        self.assertTrue(response["structured"]["dry_run"])
+        response = call(backend, "gui_invoke",
+                        {"window_id": WINDOW, "ref": "e2", "action": "invoke"}, settings)
+        self.assertTrue(response["structured"]["dry_run"])
+        self.assertEqual(backend.calls, [])  # 一枚 pattern 调用都没发
+        self.assertEqual(self.tree_node(backend, "名字")["value"], "旧值")
+
+
+@unittest.skipUnless(sys.platform == "win32", "真 UIA 活体册只在 Windows")
+class LiveStructuralTest(unittest.TestCase):
+    """真 COM、真控件、零输入注入:set_value/invoke/expand 是 UIA pattern
+    调用,不是 SendInput——不碰鼠标键盘、不抢焦点(窗口 WS_EX_NOACTIVATE)。
+
+    夹具是纯 ctypes 造的原生 EDIT/BUTTON/COMBOBOX。为什么不用 tkinter:
+    Tk 控件自绘,UIA 不带这三只 pattern(实测 Entry/Combobox 一只 pattern
+    都探不出;tk.Button 的 Invoke 回 S_OK 但 BM_CLICK 不进 Tk 的事件翻译,
+    命令不触发)。原生控件是结构路的真靶子;tkinter 的"半瞎"本身是教学
+    点,排错表里另立账。建窗失败(无桌面会话的 CI)整册跳过。
+    """
+
+    WINDOW_TEXT = "LubanCode Live Structural Fixture"
+
+    @classmethod
+    def setUpClass(cls):
+        import ctypes
+        import ctypes.wintypes as wt
+        cls._ct = ctypes
+        cls._wt = wt
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        # 64 位句柄不经 argtypes 钉死会被 c_int 截断——探针上踩实过的坑。
+        user32.CreateWindowExW.restype = ctypes.c_void_p
+        user32.CreateWindowExW.argtypes = [ctypes.c_ulong, ctypes.c_wchar_p, ctypes.c_wchar_p,
+                                           ctypes.c_ulong, ctypes.c_int, ctypes.c_int,
+                                           ctypes.c_int, ctypes.c_int, ctypes.c_void_p,
+                                           ctypes.c_void_p, ctypes.c_void_p, ctypes.c_void_p]
+        user32.DefWindowProcW.restype = ctypes.c_ssize_t
+        user32.DefWindowProcW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                          ctypes.c_size_t, ctypes.c_ssize_t]
+        user32.SendMessageW.restype = ctypes.c_ssize_t
+        user32.SendMessageW.argtypes = [ctypes.c_void_p, ctypes.c_uint,
+                                        ctypes.c_size_t, ctypes.c_ssize_t]
+        user32.PeekMessageW.argtypes = [ctypes.c_void_p, ctypes.c_void_p,
+                                        ctypes.c_uint, ctypes.c_uint, ctypes.c_uint]
+        user32.TranslateMessage.argtypes = [ctypes.c_void_p]
+        user32.DispatchMessageW.argtypes = [ctypes.c_void_p]
+        user32.DestroyWindow.argtypes = [ctypes.c_void_p]
+        user32.UnregisterClassW.argtypes = [ctypes.c_wchar_p, ctypes.c_void_p]
+        cls.user32 = user32
+        cls.instance = kernel32.GetModuleHandleW(None)
+        cls.clicks: list[int] = []
+        cls.edit_id, cls.button_id, cls.combo_id = 2001, 2002, 2003
+
+        @ctypes.WINFUNCTYPE(ctypes.c_ssize_t, ctypes.c_void_p, ctypes.c_uint,
+                            ctypes.c_size_t, ctypes.c_ssize_t)
+        def wnd_proc(hwnd, msg, wparam, lparam):
+            if msg == 0x0111 and (wparam >> 16) == 0:  # WM_COMMAND / BN_CLICKED
+                cls.clicks.append(wparam & 0xFFFF)
+            return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+        cls.wnd_proc = wnd_proc  # 引用攥在类上,窗口活着它就得活着
+
+        class WNDCLASSW(ctypes.Structure):
+            _fields_ = [("style", ctypes.c_uint), ("lpfnWndProc", ctypes.c_void_p),
+                        ("cbClsExtra", ctypes.c_int), ("cbWndExtra", ctypes.c_int),
+                        ("hInstance", ctypes.c_void_p), ("hIcon", ctypes.c_void_p),
+                        ("hCursor", ctypes.c_void_p), ("hbrBackground", ctypes.c_void_p),
+                        ("lpszMenuName", ctypes.c_wchar_p),
+                        ("lpszClassName", ctypes.c_wchar_p)]
+
+        wc = WNDCLASSW()
+        wc.style = 3
+        wc.lpfnWndProc = ctypes.cast(wnd_proc, ctypes.c_void_p)
+        wc.hInstance = ctypes.c_void_p(cls.instance)
+        wc.lpszClassName = "LubanCodeGuiAgentLive"
+        if not user32.RegisterClassW(ctypes.byref(wc)):
+            raise unittest.SkipTest("RegisterClassW 失败,活体册跳过")
+        # WS_EX_NOACTIVATE(0x08000000):不抢前台;/plugin test 跑这册时
+        # 用户桌面不动一分。
+        cls.top = user32.CreateWindowExW(
+            0x08000000, "LubanCodeGuiAgentLive", cls.WINDOW_TEXT,
+            0x00CF0000 | 0x10000000, 60, 60, 420, 240,
+            None, None, ctypes.c_void_p(cls.instance), None)
+        if not cls.top:
+            raise unittest.SkipTest("CreateWindowExW 失败(无桌面会话?),活体册跳过")
+        WS_CHILD_VISIBLE = 0x40000000 | 0x10000000
+        cls.edit_hwnd = user32.CreateWindowExW(
+            0, "EDIT", "活体旧值", WS_CHILD_VISIBLE, 16, 14, 300, 24,
+            cls.top, cls.edit_id, ctypes.c_void_p(cls.instance), None)
+        cls.combo_hwnd = user32.CreateWindowExW(
+            0, "COMBOBOX", None, WS_CHILD_VISIBLE | 0x0003,  # CBS_DROPDOWNLIST
+            16, 54, 300, 200, cls.top, cls.combo_id,
+            ctypes.c_void_p(cls.instance), None)
+        for item in ("green", "blue", "red"):
+            user32.SendMessageW(cls.combo_hwnd, 0x0143, 0,
+                                ctypes.cast(ctypes.c_wchar_p(item),
+                                            ctypes.c_void_p).value or 0)
+        user32.SendMessageW(cls.combo_hwnd, 0x014E, 0, 0)  # CB_SETCURSEL 0
+        cls.button_hwnd = user32.CreateWindowExW(
+            0, "BUTTON", "活体提交", WS_CHILD_VISIBLE, 16, 94, 120, 30,
+            cls.top, cls.button_id, ctypes.c_void_p(cls.instance), None)
+        user32.UpdateWindow(cls.top)
+        cls.window_id = f"0x{cls.top & 0xFFFFFFFF:08X}"
+
+    @classmethod
+    def tearDownClass(cls):
+        if getattr(cls, "top", None):
+            cls.user32.DestroyWindow(cls.top)
+            cls.user32.UnregisterClassW("LubanCodeGuiAgentLive",
+                                        ctypes.c_void_p(cls.instance))
+
+    @classmethod
+    def _pump(cls):
+        msg = cls._wt.MSG()
+        while cls.user32.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+            cls.user32.TranslateMessage(ctypes.byref(msg))
+            cls.user32.DispatchMessageW(ctypes.byref(msg))
+
+    def _live_call(self, tool: str, arguments: dict) -> dict:
+        return runner.build_response(
+            {"protocol": 1, "call_id": "live", "plugin": "gui-agent-example",
+             "tool": tool, "arguments": arguments, "context": {}}, None)
+
+    def _snapshot(self) -> dict:
+        response = self._live_call("gui_snapshot", {"window_id": self.window_id})
+        self.assertTrue(response["ok"],
+                        f"快照失败: {response.get('error', response['structured'])}")
+        return response
+
+    def _element(self, snapshot: dict, control_type: str) -> dict:
+        for element in snapshot["structured"]["elements"]:
+            if element["control_type"] == control_type:
+                return element
+        self.fail(f"快照里没有 {control_type}:"
+                  f"{[e['control_type'] for e in snapshot['structured']['elements']]}")
+
+    def _element_by_name(self, snapshot: dict, name: str) -> dict:
+        """按名定位(不是按类型取头一枚:标题栏的最小化/关闭也是 button,
+        逮住它们 invoke 会真把窗口最小化/关掉)。"""
+        for element in snapshot["structured"]["elements"]:
+            if element["name"] == name:
+                return element
+        self.fail(f"快照里没有名为 {name!r} 的控件:"
+                  f"{[(e['ref'], e['control_type'], e['name']) for e in snapshot['structured']['elements']]}")
+
+    def test_snapshot_annotates_native_controls(self):
+        snapshot = self._snapshot()
+        text = snapshot["content"][0]["text"]
+        edit = self._element(snapshot, "edit")
+        button = self._element_by_name(snapshot, "活体提交")
+        combobox = self._element(snapshot, "combobox")
+        # 真 UIA 探出的 pattern 进 structured,也进正文行尾短标。
+        self.assertIn("value", edit["patterns"])
+        self.assertIn("invoke", button["patterns"])
+        self.assertIn("expand", combobox["patterns"])
+        self.assertRegex(text, rf"- {edit['ref']} \| edit \|.*\| \[value\]")
+        self.assertRegex(text, rf"- {button['ref']} \| button \|.*\| .*invoke")
+        self.assertRegex(text, rf"- {combobox['ref']} \| combobox \|.*expand")
+
+    def test_set_value_replaces_edit_content(self):
+        snapshot = self._snapshot()
+        edit = self._element(snapshot, "edit")
+        response = self._live_call("gui_set_value",
+                                   {"window_id": self.window_id, "ref": edit["ref"],
+                                    "text": "整替后的新值"})
+        self.assertTrue(response["ok"], response.get("error"))
+        structured = response["structured"]
+        self.assertEqual(structured["before"], "活体旧值")
+        self.assertEqual(structured["after"], "整替后的新值")
+        self.assertTrue(structured["verified"])
+        # 不信回执信控件:WM_GETTEXT 直读 EDIT 的真身。
+        user32 = self.user32
+        length = user32.SendMessageW(self.edit_hwnd, 0x000E, 0, 0)  # WM_GETTEXTLENGTH
+        buffer = self._ct.create_unicode_buffer(length + 1)
+        user32.SendMessageW(self.edit_hwnd, 0x000D, length + 1,
+                            self._ct.addressof(buffer))  # WM_GETTEXT
+        self.assertEqual(buffer.value, "整替后的新值")
+
+    def test_invoke_fires_real_button_command(self):
+        snapshot = self._snapshot()
+        button = self._element_by_name(snapshot, "活体提交")
+        clicks_before = len(self.clicks)
+        response = self._live_call("gui_invoke",
+                                   {"window_id": self.window_id, "ref": button["ref"],
+                                    "action": "invoke"})
+        self.assertTrue(response["ok"], response.get("error"))
+        self._pump()  # BN_CLICKED 走消息队列,泵一把才落地
+        self.assertEqual(len(self.clicks), clicks_before + 1, response["structured"])
+        self.assertEqual(self.clicks[-1], self.button_id)
+
+    def test_combobox_expand_and_collapse(self):
+        snapshot = self._snapshot()
+        combobox = self._element(snapshot, "combobox")
+        response = self._live_call("gui_invoke",
+                                   {"window_id": self.window_id, "ref": combobox["ref"],
+                                    "action": "expand"})
+        self.assertTrue(response["ok"], response.get("error"))
+        self.assertEqual(response["structured"]["expand_state"], "expanded")
+        response = self._live_call("gui_invoke",
+                                   {"window_id": self.window_id, "ref": combobox["ref"],
+                                    "action": "collapse"})
+        self.assertTrue(response["ok"], response.get("error"))
+        self.assertEqual(response["structured"]["expand_state"], "collapsed")
+
+    def test_set_value_on_button_reports_pattern_fallback(self):
+        snapshot = self._snapshot()
+        button = self._element(snapshot, "button")
+        response = self._live_call("gui_set_value",
+                                   {"window_id": self.window_id, "ref": button["ref"],
+                                    "text": "x"})
+        self.assertFalse(response["ok"])
+        self.assertEqual(response["error"]["code"], "pattern_unsupported")
+        self.assertIn("gui_type_text", response["error"]["message"])
 
 
 class PngCodecTest(unittest.TestCase):

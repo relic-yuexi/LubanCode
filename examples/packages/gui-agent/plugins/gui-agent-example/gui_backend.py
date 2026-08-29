@@ -424,6 +424,21 @@ class Win32Backend:
         import gui_uia
         return gui_uia.snapshot_window(window_id, max_depth)
 
+    # -- UIA 结构路动作 ------------------------------------------------------
+    def set_value_by_ref(self, window_id: str, max_depth: int, index: int,
+                         text: str) -> dict:
+        import gui_uia
+        return gui_uia.set_value_by_ref(window_id, max_depth, index, text)
+
+    def invoke_by_ref(self, window_id: str, max_depth: int, index: int) -> dict:
+        import gui_uia
+        return gui_uia.invoke_by_ref(window_id, max_depth, index)
+
+    def expand_by_ref(self, window_id: str, max_depth: int, index: int,
+                      expand: bool) -> dict:
+        import gui_uia
+        return gui_uia.expand_by_ref(window_id, max_depth, index, expand)
+
 
 class FakeBackend:
     """测试后端:窗口现场可预置,注入动作只记账不落桌面。
@@ -552,25 +567,94 @@ class FakeBackend:
 
     def set_uia_tree(self, window_id: str, children: list[dict]) -> None:
         """预置假 UIA 树(节点形如 {"control_type", "name", "rect", "children",
-        可选 "class_name"/"value"}),test_runner 灌它离线测 gui_snapshot。"""
+        可选 "class_name"/"value"/"patterns"}),test_runner 灌它离线测
+        gui_snapshot 与结构路动作。patterns 是节点声称支持的短标清单
+        (value/invoke/expand),照真后端 _read_props 的探测口径。"""
         self.uia_trees[window_id] = children
+
+    def _read_uia_props(self, node: dict) -> dict:
+        return {"control_type": node.get("control_type", "custom"),
+                "name": node.get("name", ""),
+                "class_name": node.get("class_name", ""),
+                "rect": list(node.get("rect", [0, 0, 0, 0])),
+                "value": node.get("value"),
+                "patterns": list(node.get("patterns", []))}
+
+    def _resolve_ref(self, window_id: str, max_depth: int, index: int):
+        """假树上的 ref 解析:与快照同一套折叠规则数序号,回
+        (node, props, count)。"""
+        import gui_uia
+        children = self.uia_trees.get(window_id) or []
+        node, props, count, _truncated, _reason = gui_uia.resolve_ref(
+            children, lambda item: item.get("children") or [],
+            self._read_uia_props, max_depth, index)
+        return node, props, count
 
     def snapshot_tree(self, window_id: str, max_depth: int) -> dict:
         import gui_uia
 
-        def read_props(node: dict) -> dict:
-            return {"control_type": node.get("control_type", "custom"),
-                    "name": node.get("name", ""),
-                    "class_name": node.get("class_name", ""),
-                    "rect": list(node.get("rect", [0, 0, 0, 0])),
-                    "value": node.get("value")}
-
         children = self.uia_trees.get(window_id) or []
         self.calls.append(f"snapshot_tree({window_id},depth={max_depth})")
         elements, truncated, reason, visited = gui_uia.collect_tree(
-            children, lambda node: node.get("children") or [], read_props, max_depth)
+            children, lambda node: node.get("children") or [],
+            self._read_uia_props, max_depth)
         return {"elements": elements, "truncated": truncated, "reason": reason,
                 "visited": visited, "elapsed_ms": 0, "read_failures": []}
+
+    def set_value_by_ref(self, window_id: str, max_depth: int, index: int,
+                         text: str) -> dict:
+        import gui_uia
+        node, props, count = self._resolve_ref(window_id, max_depth, index)
+        if node is None:
+            raise gui_uia.ActionError(
+                "ref_not_found",
+                f"走完整棵树只收录 {count} 项,没有 e{index};重拍 gui_snapshot。")
+        if "value" not in node.get("patterns", []):
+            raise gui_uia.ActionError(
+                "pattern_unsupported",
+                f"控件 {props['control_type']}({props['name']!r})不支持 UIA "
+                "ValuePattern;改走 gui_click + gui_type_text。")
+        before = node.get("value")
+        node["value"] = text
+        self.calls.append(f"set_value({window_id},e{index})")
+        return {"ref": f"e{index}", "control_type": props["control_type"],
+                "name": props["name"], "before": before, "after": text}
+
+    def invoke_by_ref(self, window_id: str, max_depth: int, index: int) -> dict:
+        import gui_uia
+        node, props, count = self._resolve_ref(window_id, max_depth, index)
+        if node is None:
+            raise gui_uia.ActionError(
+                "ref_not_found",
+                f"走完整棵树只收录 {count} 项,没有 e{index};重拍 gui_snapshot。")
+        if "invoke" not in node.get("patterns", []):
+            raise gui_uia.ActionError(
+                "pattern_unsupported",
+                f"控件 {props['control_type']}({props['name']!r})不支持 UIA "
+                "InvokePattern;改走 gui_click 按 rect 中心点。")
+        self.calls.append(f"invoke({window_id},e{index})")
+        return {"ref": f"e{index}", "control_type": props["control_type"],
+                "name": props["name"], "action": "invoke"}
+
+    def expand_by_ref(self, window_id: str, max_depth: int, index: int,
+                      expand: bool) -> dict:
+        import gui_uia
+        node, props, count = self._resolve_ref(window_id, max_depth, index)
+        if node is None:
+            raise gui_uia.ActionError(
+                "ref_not_found",
+                f"走完整棵树只收录 {count} 项,没有 e{index};重拍 gui_snapshot。")
+        if "expand" not in node.get("patterns", []):
+            raise gui_uia.ActionError(
+                "pattern_unsupported",
+                f"控件 {props['control_type']}({props['name']!r})不支持 UIA "
+                "ExpandCollapsePattern;下拉类改用 gui_click 点开。")
+        node["expanded"] = expand
+        action = "expand" if expand else "collapse"
+        self.calls.append(f"{action}({window_id},e{index})")
+        return {"ref": f"e{index}", "control_type": props["control_type"],
+                "name": props["name"], "action": action,
+                "expand_state": "expanded" if expand else "collapsed"}
 
 
 def make_backend(fake: Optional[FakeBackend] = None) -> Win32Backend | FakeBackend:
