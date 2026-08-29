@@ -396,6 +396,106 @@ std::optional<CheckResult> CheckResult::FromJson(const nlohmann::json& json) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// 复杂度代价(阶段 5):组合包比最小 Skill 包多出的组件数与维护面
+// ---------------------------------------------------------------------------
+
+nlohmann::json ComplexityCost::ToJson() const {
+    nlohmann::json out;
+    out["shape"] = shape;
+    out["has_workflow"] = has_workflow;
+    out["has_agent"] = has_agent;
+    out["components"] = components;
+    out["minimal_components"] = minimal_components;
+    out["extra_components"] = extra_components;
+    out["files"] = files;
+    out["minimal_files"] = minimal_files;
+    out["extra_files"] = extra_files;
+    return out;
+}
+
+std::optional<ComplexityCost> ComplexityCost::FromJson(const nlohmann::json& json) {
+    if (!json.is_object()) {
+        return std::nullopt;
+    }
+    ComplexityCost cost;
+    cost.shape = GetString(json, "shape");
+    if (cost.shape.empty()) {
+        return std::nullopt;
+    }
+    cost.has_workflow = json.value("has_workflow", false);
+    cost.has_agent = json.value("has_agent", false);
+    cost.components = static_cast<int>(GetInt(json, "components"));
+    cost.minimal_components = static_cast<int>(GetInt(json, "minimal_components"));
+    cost.extra_components = static_cast<int>(GetInt(json, "extra_components"));
+    cost.files = static_cast<int>(GetInt(json, "files"));
+    cost.minimal_files = static_cast<int>(GetInt(json, "minimal_files"));
+    cost.extra_files = static_cast<int>(GetInt(json, "extra_files"));
+    return cost;
+}
+
+std::string ComplexityCost::SummaryLine() const {
+    if (shape.empty()) {
+        return std::string();
+    }
+    if (shape == "skill-only") {
+        return "最小可行包(Skill-only," + std::to_string(components) + " 件组件," +
+               std::to_string(files) + " 个文件;与最小档持平)";
+    }
+    std::string line = "组合包(";
+    line += has_workflow ? "带 workflow" : "无 workflow";
+    line += has_agent ? "+agent" : "";
+    line += "):" + std::to_string(components) + " 件组件、" + std::to_string(files) +
+            " 个文件,比最小 Skill 包多 " + std::to_string(extra_components) + " 件组件、" +
+            std::to_string(extra_files) + " 个文件要维护";
+    return line;
+}
+
+ComplexityCost ComputeComplexityCost(const fs::path& package_dir) {
+    ComplexityCost cost;
+    std::error_code ec;
+    if (!std::filesystem::is_directory(package_dir, ec) || ec) {
+        cost.shape = std::string();  // 读不动:不冒充算过
+        return cost;
+    }
+    int skills = 0;
+    int workflows = 0;
+    int agents = 0;
+    int files = 0;
+    for (auto it = std::filesystem::recursive_directory_iterator(package_dir, ec);
+         it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        if (ec || !it->is_regular_file()) {
+            continue;
+        }
+        ++files;
+        std::string rel = lubancode::platform::PathToUtf8(it->path().lexically_relative(package_dir));
+        std::replace(rel.begin(), rel.end(), '\\', '/');
+        if (rel == "package.yaml") {
+            continue;
+        }
+        if (rel.rfind("skills/", 0) == 0 && rel.size() >= 17 &&
+            rel.find('/', 7) == rel.size() - 9 &&
+            rel.compare(rel.size() - 9, 9, "/SKILL.md") == 0) {
+            ++skills;  // skills/<id>/SKILL.md(目录名单段;最短 skills/a/SKILL.md 17 字符)
+        } else if (rel.rfind("workflows/", 0) == 0 && rel.size() > 22 &&
+                   rel.substr(rel.size() - 14) == "/workflow.yaml" &&
+                   std::count(rel.begin(), rel.end(), '/') == 2) {
+            ++workflows;
+        } else if (rel.rfind("agents/", 0) == 0 && rel.size() > 12 &&
+                   rel.find('/', 7) == std::string::npos && rel.substr(rel.size() - 5) == ".yaml") {
+            ++agents;
+        }
+    }
+    cost.has_workflow = workflows > 0;
+    cost.has_agent = agents > 0;
+    cost.components = skills + workflows + agents;
+    cost.extra_components = std::max(0, cost.components - cost.minimal_components);
+    cost.files = files;
+    cost.extra_files = std::max(0, files - cost.minimal_files);
+    cost.shape = (workflows > 0 || agents > 0) ? "combination" : "skill-only";
+    return cost;
+}
+
 nlohmann::json ScanFinding::ToJson() const {
     nlohmann::json out;
     out["kind"] = kind;
@@ -443,6 +543,9 @@ nlohmann::json EvalResultLine::ToJson() const {
     }
     if (!notes.empty()) {
         out["notes"] = notes;
+    }
+    if (complexity.has_value()) {
+        out["complexity"] = complexity->ToJson();
     }
     return out;
 }
@@ -501,6 +604,9 @@ std::optional<EvalResultLine> EvalResultLine::FromJson(const nlohmann::json& jso
                 line.findings.push_back(std::move(finding));
             }
         }
+    }
+    if (const auto it = json.find("complexity"); it != json.end() && it->is_object()) {
+        line.complexity = ComplexityCost::FromJson(*it);
     }
     if (line.gate.empty() || line.outcome.empty()) {
         return std::nullopt;
@@ -1104,6 +1210,9 @@ EvalSummary SummarizeEvalLedger(const std::vector<EvalResultLine>& lines) {
             } else {
                 ++summary.checks_skipped;
             }
+            if (line.complexity.has_value()) {
+                summary.complexity = line.complexity;  // 取最近一带账的静态行
+            }
         } else if (line.gate == "replay" || line.gate == "holdout") {
             TallyLine(line, line.gate == "replay" ? summary.replay : summary.holdout);
             if (line.gate == "holdout") {
@@ -1226,6 +1335,9 @@ std::string BuildDeterministicVerdict(const EvalSummary& summary) {
     }
     if (!summary.has_holdout) {
         out << "  (无留出任务:只可标 experimental,不可自动建议晋升稳定版)\n";
+    }
+    if (summary.complexity.has_value() && !summary.complexity->shape.empty()) {
+        out << "  复杂度代价: " << summary.complexity->SummaryLine() << ";不是组件越多越容易晋升\n";
     }
     return out.str();
 }

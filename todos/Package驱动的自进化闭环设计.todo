@@ -1,6 +1,6 @@
 # Package 驱动的自进化闭环设计
 
-- 状态：阶段 0/1 已落地（0.26.82），阶段 2 已落地（Skill-only 候选起草），阶段 3 已落地（评测与基线），阶段 4 已落地（批准、安装与回滚），阶段 5 起待实现
+- 状态：阶段 0/1 已落地（0.26.82），阶段 2 已落地（Skill-only 候选起草），阶段 3 已落地（评测与基线），阶段 4 已落地（批准、安装与回滚），阶段 5 已落地（Workflow 与 Agent 组合包），阶段 6 起待实现
 - 日期：2026-08-28
 - 前置：`todos/统一Package封装与组件挂载系统设计.todo`
 - 相关：`todos/自定义Agent与PromptProfile设计.todo`、`/record`、项目记忆、Workflow、`/goal`
@@ -493,13 +493,13 @@ Evolution 层可调用原有 parser、validator 与 runtime，不可复制它们
 
 ### 阶段 5：Workflow 与 Agent 组合包
 
-- [ ] 从多场同类任务提炼结构化 Workflow。
-- [ ] 只有稳定工具、Prompt 与 Skill 组合才提炼 Agent。
-- [ ] 校验包内短引用与 canonical id。
-- [ ] 评测 Workflow 与被测 Workflow 分家。
-- [ ] 比较组合包与最小 Skill 包，证明复杂度确有收益。
+- [x] 从多场同类任务提炼结构化 Workflow。（两把尺:尺一 Workflow 档=簇 ≥2 场独立任务且各场"成功路折叠序列"同形——tool_call 按连续同名折叠(与观察指纹同口径)后只数最终成功的步子,各场名字/次数/次序一致且步数 ≥2;单步归 Skill。`/evolve propose` 先按观察账聚同 fingerprint 簇(点名场在前,簇帽八场),再交起草器。workflow.yaml 节点=成功路折叠步,各场同值(抽象后)的入参留字面量、异值提成 `${inputs.step<N>_<key>}`,嵌套不一致的不焊死;失败路=阶段 2 已抽的稳定失败模式,簇内并账写进头注释与 description,不排进成功链;验收=eval-plan replay 带可执行检查器(file_exists/file_contains 查包形状)+人工口述。）
+- [x] 只有稳定工具、Prompt 与 Skill 组合才提炼 Agent。（尺二 Agent 档更严:尺一之上各场"全场工具面"同形——含失败尝试在内出现过的每一个工具名都一致;编排看成功路,角色看整个工具面,面不同不封同一只 Agent。过门才添 agents/<slug>-agent.yaml:tools.allow 照观察到的实际面、skills.preload 预装包内 Skill(短名,挂载层折 canonical)。一次任务不造 Agent,最小可行包仍是默认答案。）
+- [x] 校验包内短引用与 canonical id。（组合件落盘后立刻过静态门:AnalyzePackage 的引用闭合/canonical 名/无越界 + 密钥/绝对路径扫描。过不了就地删 workflows/ 与 agents/ 降回 Skill-only,诊断进 state.jsonl 与 propose 回执,演化账 prompt_revision 记 evolution-stage5-downgraded;降档后的包必须真过静态门,不带病落盘。）
+- [x] 评测 Workflow 与被测 Workflow 分家。（评测执行只有阶段 3 的确定性检查器,workflow 组件只做静态校验+来源回放的夹具;acceptance 的 kind 白名单没有"跑被测 workflow"这种 kind,认不得的 kind 整份计划拒解析——门在解析层钉死。README 注明。）
+- [x] 比较组合包与最小 Skill 包，证明复杂度确有收益。（评测账静态门行带 complexity 扩展字段:shape/has_workflow/has_agent/components/minimal_components/extra_components/files/extra_files——组合包比最小 Skill 包多出的组件数与维护面。/evolve show、test、批准页、CI JSON 照实亮;批准页明写"不是组件越多越容易晋升,批的是这份代价换来的编排"。）
 
-验收：不是组件越多越容易晋升；最小可行包仍是默认答案。
+验收：不是组件越多越容易晋升；最小可行包仍是默认答案。（单测钉:同形两场出组合候选且静态门/原生 parser 全过;单场或组合不稳照旧 Skill-only;悬空引用的组合降档 Skill-only 带诊断;复杂度栏组合>最小档。tests/unit/evolution/test_evolution_stage5.cpp）
 
 ### 阶段 6：代码型候选
 
