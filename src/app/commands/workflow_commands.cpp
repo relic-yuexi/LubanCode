@@ -16,6 +16,7 @@ using lubancode::cli::TermOut;
 using lubancode::cli::TermErr;
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <fstream>
 #include <iostream>
@@ -36,6 +37,194 @@ using lubancode::cli::TermErr;
 #include "workflow/graph_view.hpp"
 
 namespace lubancode::app {
+
+WorkflowPanelOutput FormatWorkflowPanelOutput(const std::string& raw) {
+    WorkflowPanelOutput out;
+    const nlohmann::json parsed = nlohmann::json::parse(raw, nullptr, false);
+    if (parsed.is_discarded() || !parsed.is_object()) {
+        out.markdown = raw;
+        return out;
+    }
+    out.structured = true;
+
+    const auto string_field = [&parsed](const char* key) {
+        const auto found = parsed.find(key);
+        return found != parsed.end() && found->is_string() ? found->get<std::string>() : std::string();
+    };
+    const auto first_line = [](std::string value) {
+        const std::size_t end = value.find('\n');
+        if (end != std::string::npos) value.resize(end);
+        return value;
+    };
+    auto append_list = [](std::ostringstream& text, const std::string& title,
+                          const nlohmann::json& values) {
+        if (!values.is_array() || values.empty()) return;
+        text << "\n\n### " << title << "\n";
+        for (const auto& value : values) {
+            text << "\n- ";
+            if (value.is_string()) text << value.get<std::string>();
+            else text << value.dump(-1, ' ', false, nlohmann::json::error_handler_t::replace);
+        }
+    };
+    auto append_dispatches = [&append_list](std::ostringstream& text, const nlohmann::json& dispatches) {
+        if (!dispatches.is_array()) return;
+        for (const auto& dispatch : dispatches) {
+            if (!dispatch.is_object()) continue;
+            const std::string ministry = dispatch.value("ministry", std::string("差遣"));
+            const std::string objective = dispatch.value("objective", std::string());
+            text << "\n\n### " << ministry;
+            if (!objective.empty()) text << "：" << objective;
+            append_list(text, "准许范围", dispatch.value("allowed_scope", nlohmann::json::array()));
+            append_list(text, "禁域", dispatch.value("forbidden_scope", nlohmann::json::array()));
+            append_list(text, "验收", dispatch.value("acceptance", nlohmann::json::array()));
+            const std::string ambiguity = dispatch.value("ambiguity_action", std::string());
+            if (!ambiguity.empty()) text << "\n\n**遇疑：** " << ambiguity;
+        }
+    };
+
+    out.summary = string_field("summary");
+    if (out.summary.empty()) out.summary = string_field("name");
+
+    if (const std::string memorial = string_field("memorial"); !memorial.empty()) {
+        out.markdown = memorial;
+        if (out.summary.empty()) out.summary = first_line(memorial);
+        return out;
+    }
+
+    if (!string_field("name").empty() || !string_field("strategy").empty()) {
+        std::ostringstream text;
+        const std::string name = string_field("name");
+        text << "## " << (name.empty() ? "候选方案" : name);
+        const std::string strategy = string_field("strategy");
+        if (!strategy.empty()) text << "\n\n" << strategy;
+        append_list(text, "改动范围", parsed.value("scope", nlohmann::json::array()));
+        append_list(text, "影响面", parsed.value("impact", nlohmann::json::array()));
+        append_list(text, "验收", parsed.value("acceptance", nlohmann::json::array()));
+        append_list(text, "尚待裁定", parsed.value("unknowns", nlohmann::json::array()));
+        append_list(text, "取舍", parsed.value("tradeoffs", nlohmann::json::array()));
+        out.markdown = text.str();
+        return out;
+    }
+
+    if (parsed.contains("approved") && parsed["approved"].is_boolean()) {
+        const bool approved = parsed["approved"].get<bool>();
+        out.summary = approved ? "门下通过" : "门下驳回";
+        std::ostringstream text;
+        text << "## 门下判词\n\n**" << (approved ? "准" : "驳") << "**";
+        append_list(text, "判词", parsed.value("reasons", nlohmann::json::array()));
+        const std::string question = string_field("question");
+        if (!question.empty()) text << "\n\n### 待明确处\n\n" << question;
+        out.markdown = text.str();
+        return out;
+    }
+
+    if (parsed.contains("dispatches") && parsed["dispatches"].is_array()) {
+        std::ostringstream text;
+        const std::string roster = string_field("roster");
+        text << "## 差遣清单";
+        if (!roster.empty()) text << "\n\n" << roster;
+        append_dispatches(text, parsed["dispatches"]);
+        out.markdown = text.str();
+        if (out.summary.empty()) {
+            out.summary = !roster.empty() ? first_line(roster)
+                                          : std::to_string(parsed["dispatches"].size()) + " 封差遣";
+        }
+        return out;
+    }
+
+    if (const std::string report = string_field("report"); !report.empty()) {
+        out.markdown = report;
+        if (out.summary.empty()) out.summary = first_line(report);
+        return out;
+    }
+
+    static const std::map<std::string, std::string> labels = {
+        {"selected_strategy", "所取路线"}, {"scope", "改动范围"},
+        {"impact", "影响面"}, {"acceptance", "验收"},
+        {"known_unknowns", "已知未知"}, {"unknowns", "尚待裁定"},
+        {"tradeoffs", "取舍"}, {"reasons", "判词"}, {"question", "待明确处"},
+        {"executions", "办差回报"}, {"objective", "差事"},
+    };
+    std::ostringstream text;
+    for (const auto& [key, value] : parsed.items()) {
+        const auto label = labels.find(key);
+        text << (text.tellp() > 0 ? "\n\n" : "") << "### "
+             << (label == labels.end() ? key : label->second) << "\n\n";
+        if (value.is_array()) {
+            for (const auto& item : value) {
+                text << "- " << (item.is_string() ? item.get<std::string>()
+                                                   : item.dump(2, ' ', false,
+                                                               nlohmann::json::error_handler_t::replace))
+                     << "\n";
+            }
+        } else if (value.is_string()) {
+            text << value.get<std::string>();
+        } else if (value.is_boolean()) {
+            text << (value.get<bool>() ? "是" : "否");
+        } else {
+            text << value.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+        }
+    }
+    out.markdown = text.str();
+    return out;
+}
+
+std::string FormatWorkflowPanelInput(const nlohmann::json& input) {
+    if (!input.is_object()) {
+        return input.is_string() ? input.get<std::string>()
+                                 : input.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+    }
+    std::ostringstream text;
+    auto add = [&text](const std::string& label, const std::string& value) {
+        if (value.empty()) return;
+        if (text.tellp() > 0) text << "\n\n";
+        text << "**" << label << "：** " << value;
+    };
+    if (const auto requirement = input.find("requirement");
+        requirement != input.end() && requirement->is_string()) {
+        add("任务", requirement->get<std::string>());
+    }
+    if (const auto item = input.find("item"); item != input.end()) {
+        if (item->is_string()) {
+            add("本路立场", item->get<std::string>());
+        } else if (item->is_object()) {
+            add("署部", item->value("ministry", std::string()));
+            add("差事", item->value("objective", std::string()));
+        }
+    }
+    if (const auto iteration = input.find("iteration");
+        iteration != input.end() && iteration->is_number_integer()) {
+        add("轮次", std::to_string(iteration->get<int>()));
+    }
+    if (text.tellp() > 0) return text.str();
+
+    for (const auto& [key, value] : input.items()) {
+        std::string preview;
+        if (value.is_string()) {
+            preview = value.get<std::string>();
+            if (preview.size() > 240) preview.resize(240), preview += "...";
+        } else if (value.is_array()) {
+            preview = "已收到 " + std::to_string(value.size()) + " 项";
+        } else if (value.is_object()) {
+            preview = "已收到结构化材料";
+        } else {
+            preview = value.dump();
+        }
+        add(key, preview);
+    }
+    return text.str();
+}
+
+std::string FormatWorkflowRunResult(const nlohmann::json& result) {
+    if (result.is_object()) {
+        const auto report = result.find("report");
+        if (report != result.end() && report->is_string() && !report->get_ref<const std::string&>().empty()) {
+            return report->get<std::string>();
+        }
+    }
+
+    return result.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+}
 
 namespace {
 
@@ -229,18 +418,28 @@ public:
         std::lock_guard<std::mutex> lock(mutex_);
         std::vector<lubancode::cli::AgentPanelEntry> out;
         out.reserve(nodes_.size());
-        const auto now = std::chrono::steady_clock::now();
+        std::vector<const TrackedNode*> visible;
+        visible.reserve(nodes_.size());
         for (const auto& [_, node] : nodes_) {
-            if (node.hidden) continue;
-            lubancode::cli::AgentPanelEntry entry = node.entry;
-            const auto end = entry.running ? now : node.ended_at;
-            const double seconds = std::chrono::duration<double>(end - node.started_at).count();
-            entry.state = node.phase;
-            if (node.tool_calls > 0) {
-                entry.state += " · " + std::to_string(node.tool_calls) + " 次工具";
+            if (!node.hidden) visible.push_back(&node);
+        }
+        std::sort(visible.begin(), visible.end(), [](const TrackedNode* left, const TrackedNode* right) {
+            return left->order < right->order;
+        });
+        const auto now = std::chrono::steady_clock::now();
+        for (const TrackedNode* node : visible) {
+            lubancode::cli::AgentPanelEntry entry = node->entry;
+            if (!node->result_summary.empty()) {
+                entry.title = node->base_title + " · " + node->result_summary;
             }
-            if (node.tokens > 0) {
-                entry.state += " · " + lubancode::cli::FormatTokenCount(node.tokens) + " tokens";
+            const auto end = entry.running ? now : node->ended_at;
+            const double seconds = std::chrono::duration<double>(end - node->started_at).count();
+            entry.state = node->phase;
+            if (node->tool_calls > 0) {
+                entry.state += " · " + std::to_string(node->tool_calls) + " 次工具";
+            }
+            if (node->tokens > 0) {
+                entry.state += " · " + lubancode::cli::FormatTokenCount(node->tokens) + " tokens";
             } else if (entry.running) {
                 entry.state += " · tokens 未报告";
             }
@@ -287,7 +486,12 @@ public:
                                    detail.text, width);
                     break;
                 case DetailKind::Text:
-                    AppendMarkdown(lines, theme_.banner + "● Agent" + theme_.reset, detail.text, width);
+                    AppendMarkdown(lines, theme_.banner + "● 产出" + theme_.reset,
+                                   !detail.completed && detail.text.find_first_not_of(" \t\r\n") != std::string::npos &&
+                                           detail.text[detail.text.find_first_not_of(" \t\r\n")] == '{'
+                                       ? "结构化结果尚在誊写，办结后展开。"
+                                       : detail.text,
+                                   width);
                     break;
                 case DetailKind::Thinking: {
                     const auto item = lubancode::cli::MakeAgentTaskThinkingItem(
@@ -432,7 +636,10 @@ private:
 
     struct TrackedNode {
         lubancode::cli::AgentPanelEntry entry;
+        std::string base_title;
+        std::string result_summary;
         std::string phase = "等待模型";
+        std::uint64_t order = 0;
         std::chrono::steady_clock::time_point started_at{};
         std::chrono::steady_clock::time_point ended_at{};
         std::int64_t tokens = 0;
@@ -502,6 +709,9 @@ private:
                 fresh_entry && LaneOfEntryKey(entry_key) > 0
                     ? title + " · 第" + std::to_string(LaneOfEntryKey(entry_key)) + "路"
                     : title;
+            node.base_title = node.entry.title;
+            node.result_summary.clear();
+            if (fresh_entry) node.order = next_order_++;
             node.entry.running = true;
             node.entry.failed = false;
             node.entry.cancelled = false;
@@ -523,7 +733,7 @@ private:
             if (payload.contains("input")) {
                 const auto& input = payload["input"];
                 node.details.push_back(DetailItem{
-                    DetailKind::User, input.is_string() ? input.get<std::string>() : input.dump(2)});
+                    DetailKind::User, FormatWorkflowPanelInput(input)});
             }
             ++node.entry.content_revision;
             if (!node_run_id.empty()) node_runs_[node_run_id] = entry_key;
@@ -609,14 +819,13 @@ private:
                     detail->is_error = event.outcome.has_value() &&
                                        *event.outcome != lubancode::runtime::Outcome::Succeeded;
                     detail->result = event.payload.value("result", std::string());
-                    // llm 节点的正文常是机器 JSON(方案书、差遣单)。收口时
-                    // 若解析得成,缩进摆平再看——一行糊脸的 JSON 没法读。
+                    // llm 节点的正文常是机器 JSON(方案书、差遣单)。运行账
+                    // 仍留原 JSON；面板在收口时投成人话，并把短摘要挂到导航行。
                     if (detail->kind == DetailKind::Text && !detail->text.empty()) {
-                        const nlohmann::json parsed =
-                            nlohmann::json::parse(detail->text, nullptr, /*allow_exceptions=*/false);
-                        if (!parsed.is_discarded() && parsed.is_object()) {
-                            detail->text = parsed.dump(2, ' ', /*ensure_ascii=*/false,
-                                                       nlohmann::json::error_handler_t::replace);
+                        WorkflowPanelOutput formatted = FormatWorkflowPanelOutput(detail->text);
+                        if (formatted.structured) {
+                            detail->text = std::move(formatted.markdown);
+                            node.result_summary = std::move(formatted.summary);
                         }
                     }
                 }
@@ -644,6 +853,7 @@ private:
     mutable std::mutex mutex_;
     mutable std::map<std::string, TrackedNode> nodes_;
     std::map<std::string, std::string> node_runs_;
+    std::uint64_t next_order_ = 1;
     const lubancode::cli::Theme& theme_;
     std::function<void(const std::string&)> on_stage_started_;
 };
@@ -1355,13 +1565,13 @@ std::string RunWorkflowById(const WorkflowCommandContext& context, const std::st
         out << theme.reset << "\n";
     }
     if (!summary.result.empty()) {
-        std::string rendered = summary.result.dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+        std::string rendered = FormatWorkflowRunResult(summary.result);
         constexpr std::size_t kResultPreviewBytes = 8000;
         if (rendered.size() > kResultPreviewBytes) {
             rendered.resize(lubancode::platform::Utf8PrefixBoundary(rendered, kResultPreviewBytes));
             rendered += "\n…(结果过长，已截断；完整账见 /workflow history)";
         }
-        out << "\n结果\n" << rendered << "\n";
+        out << "\n奏报\n" << rendered << "\n";
     } else if (!entry->definition.result.empty() &&
                summary.state == lubancode::workflow::RunState::Succeeded) {
         out << theme.error << "  结果为空：请检查 workflow 的 result 映射" << theme.reset << "\n";

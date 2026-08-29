@@ -113,6 +113,18 @@ struct ChoiceMenuOptions {
     std::optional<std::size_t> max_visible_rows;
 };
 
+// 问话菜单的纵向排版账。长问题、带说明的选项挤在矮屏上时，先把说明
+// 收到选项同行；仍放不下，再截问题。不能把超高菜单交给屏面层后静默取消。
+struct ChoiceMenuQuestionLayout {
+    int question_rows = 1;
+    int total_rows = 0;
+    bool stack_descriptions = true;
+};
+
+ChoiceMenuQuestionLayout PlanChoiceMenuQuestionLayout(int viewport_rows, int item_count,
+                                                       int described_item_count, bool has_header,
+                                                       int desired_question_rows);
+
 struct ChoiceMenuResult {
     std::vector<std::size_t> selected_indices;
     std::optional<std::string> custom_text;

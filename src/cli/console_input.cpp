@@ -2618,6 +2618,27 @@ std::size_t ChoiceMenuSearchWindowRows(int viewport_rows, std::optional<std::siz
                : viewport_budget;
 }
 
+ChoiceMenuQuestionLayout PlanChoiceMenuQuestionLayout(int viewport_rows, int item_count,
+                                                       int described_item_count, bool has_header,
+                                                       int desired_question_rows) {
+    const int items = (std::max)(0, item_count);
+    const int descriptions = (std::max)(0, described_item_count);
+    const int viewport = (std::max)(1, viewport_rows);
+    const int desired = (std::max)(1, desired_question_rows);
+    // 4 = 顶横线、问话后留白、选项后留白、hint；另有动作/底横线 1 行。
+    const int fixed_rows = 5 + items + (has_header ? 2 : 0);
+
+    ChoiceMenuQuestionLayout out;
+    out.question_rows = desired;
+    out.stack_descriptions = fixed_rows + desired + descriptions <= viewport;
+    if (!out.stack_descriptions && fixed_rows + out.question_rows > viewport) {
+        out.question_rows = (std::max)(1, viewport - fixed_rows);
+    }
+    out.total_rows = fixed_rows + out.question_rows +
+                     (out.stack_descriptions ? descriptions : 0);
+    return out;
+}
+
 ChoiceMenuSearchCore::ChoiceMenuSearchCore(std::vector<ChoiceMenuItem> items, bool multi_select,
                                            std::optional<std::size_t> editable_index,
                                            std::size_t initial_cursor)
@@ -3050,9 +3071,10 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
     // 窗口中途改宽不重折(整单菜单本就不响应改宽),重画时按当前屏宽再截
     // 一刀,防预折行溢出把下方行账折乱。
     std::vector<std::string> question_lines;
+    bool stack_descriptions = question_panel;
+    int panel_height = 24;
     if (question_panel) {
         int panel_width = 80;
-        int panel_height = 24;
         const std::optional<platform::ScreenInfo> probe = platform::GetScreenInfo();
         if (probe.has_value()) {
             if (probe->width > 0) {
@@ -3067,9 +3089,18 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
         // 问话行帽:可视屏高的一半,3 行起步、12 行封顶。问话再长也不能把
         // 选项区挤没了;超帽截断,末行带省略号标记,全文用户仍可从上方
         // 事件账/非交互路径看。
-        const int question_cap = (std::min)(12, (std::max)(3, panel_height / 2));
+        const int desired_cap = (std::min)(12, (std::max)(3, panel_height / 2));
+        int described_items = 0;
+        for (const ChoiceMenuItem& item : items) {
+            if (!item.description.empty()) ++described_items;
+        }
+        const ChoiceMenuQuestionLayout plan = PlanChoiceMenuQuestionLayout(
+            panel_height, static_cast<int>(items.size()), described_items,
+            !options.question_panel->header.empty(), desired_cap);
+        stack_descriptions = plan.stack_descriptions;
         question_lines = WrapUtf8ToDisplayWidthCapped(options.question_panel->question,
-                                                      (std::max)(1, panel_width - 1), question_cap);
+                                                      (std::max)(1, panel_width - 1),
+                                                      plan.question_rows);
     }
     int menu_rows = static_cast<int>(items.size()) + 1;
     if (question_panel) {
@@ -3082,7 +3113,7 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
         }
         ++menu_rows;  // 动作分隔线，或普通面板的底横线
         for (const ChoiceMenuItem& item : items) {
-            if (!item.description.empty()) {
+            if (stack_descriptions && !item.description.empty()) {
                 ++menu_rows;
             }
         }
@@ -3176,7 +3207,7 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
             }
             TermOut() << prefix << label << theme.reset;
             if (!items[i].description.empty()) {
-                if (question_panel) {
+                if (question_panel && stack_descriptions) {
                     const std::string indent(static_cast<std::size_t>(options.multi_select ? 9 : 5), ' ');
                     platform::ClearRowHardFrom(0, start_row + row, width);
                     platform::SetCursorPos(0, start_row + row++);

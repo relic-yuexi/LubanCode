@@ -89,6 +89,18 @@ struct ParsedWorkflowCommand {
     bool confirm = false;  // remove/delete 的确认词(remove yes / delete yes)
 };
 
+// Workflow Agent 面板把结构化节点产物投成人话。运行时仍收原 JSON，
+// 这里只改终端读法；summary 给导航行，markdown 给查看页。
+struct WorkflowPanelOutput {
+    std::string summary;
+    std::string markdown;
+    bool structured = false;
+};
+
+WorkflowPanelOutput FormatWorkflowPanelOutput(const std::string& raw);
+std::string FormatWorkflowPanelInput(const nlohmann::json& input);
+std::string FormatWorkflowRunResult(const nlohmann::json& result);
+
 // 纯解析(单测钉)。
 ParsedWorkflowCommand ParseWorkflowCommand(const std::string& args);
 

@@ -9,6 +9,7 @@ using lubancode::cli::ChoiceMenuOptions;
 using lubancode::cli::ChoiceMenuQuestionPanel;
 using lubancode::cli::ChoiceMenuSearchCore;
 using lubancode::cli::ChoiceMenuSearchWindowRows;
+using lubancode::cli::PlanChoiceMenuQuestionLayout;
 using lubancode::cli::KeyEvent;
 using lubancode::cli::KeyKind;
 
@@ -139,6 +140,22 @@ TEST_CASE("choice menu search: 向导上限钳住选项窗并给搜索栏与 hin
     CHECK(ChoiceMenuSearchWindowRows(27, 10) == 10);
     CHECK(ChoiceMenuSearchWindowRows(8, 10) == 6);
     CHECK(ChoiceMenuSearchWindowRows(2, 0) == 1);
+}
+
+TEST_CASE("choice menu question: 24 行屏收起说明，长问题不再把菜单顶死") {
+    const auto compact = PlanChoiceMenuQuestionLayout(24, 5, 3, true, 12);
+    CHECK_FALSE(compact.stack_descriptions);
+    CHECK(compact.question_rows == 12);
+    CHECK(compact.total_rows == 24);
+
+    const auto roomy = PlanChoiceMenuQuestionLayout(40, 5, 3, true, 12);
+    CHECK(roomy.stack_descriptions);
+    CHECK(roomy.total_rows == 27);
+
+    const auto tight = PlanChoiceMenuQuestionLayout(14, 5, 3, true, 12);
+    CHECK_FALSE(tight.stack_descriptions);
+    CHECK(tight.question_rows == 2);
+    CHECK(tight.total_rows == 14);
 }
 
 TEST_CASE("choice menu search: 键入过滤、退格恢复、Enter 返回原索引") {
