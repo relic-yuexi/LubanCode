@@ -180,6 +180,26 @@ ViewFrameLedger& ViewFrameLedgerSlot() {
     return ledger;
 }
 
+// Agent 会话切页认整块可视区，不认上一页留下的绝对行号。main/subagent
+// 都是同级 Panel；切到谁，上半屏就只铺谁。调用方须持 StdoutWriteMutex，
+// 免得流式正文或 footer 心跳在清、铺之间插进来。
+std::optional<platform::ScreenInfo> ClearVisibleAgentPanelLocked() {
+    const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
+    if (!info.has_value()) {
+        return std::nullopt;
+    }
+    const int viewport_height = info->viewport_height > 0 ? info->viewport_height : info->height;
+    const int top = info->viewport_y;
+    for (int y = top; y < top + viewport_height && y < info->height; ++y) {
+        platform::ClearRowHardFrom(0, y, info->width);
+    }
+    platform::SetCursorPos(0, top);
+    platform::ScreenInfo cleared = *info;
+    cleared.cursor_x = 0;
+    cleared.cursor_y = top;
+    return cleared;
+}
+
 std::vector<int> PanelEntryIds(const std::vector<AgentPanelEntry>& entries) {
     std::vector<int> ids;
     ids.reserve(entries.size());
@@ -1498,8 +1518,19 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     // tail_rows>0 是实时流的重铺拍(只铺头几行+最近 N 行,见 console_input.hpp
     // 的钩子注释)。
     const auto print_view_frame = [&](int viewed_after, int tail_rows = 0) {
-        erase_previous_view_body();
-        const std::optional<platform::ScreenInfo> before = platform::GetScreenInfo();
+        std::optional<platform::ScreenInfo> before;
+        if (tail_rows == 0) {
+            // 真切页(main <-> agent):上半屏是一块独立 Panel，整块换源。
+            // 旧页哪怕滚过屏、锚点漂过，也不能在新页留半截正文。
+            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+            EraseStreamFooterLocked();
+            before = ClearVisibleAgentPanelLocked();
+            view_body_top.reset();
+        } else {
+            // 同一 agent 的实时尾帧刷新仍走原位擦铺，免得每秒整屏闪一下。
+            erase_previous_view_body();
+            before = platform::GetScreenInfo();
+        }
         const auto& view_hook = AgentViewSwitchHookSlot();
         if (view_hook) {
             view_hook(viewed_after, tail_rows);
@@ -4488,8 +4519,15 @@ void TurnInputListener::ThreadMain() {
         view_body_top.reset();
     };
     const auto print_view_frame = [&](int viewed_after) {
-        erase_previous_view_body();
-        const std::optional<platform::ScreenInfo> before = platform::GetScreenInfo();
+        // 流式期间也按 Panel 整页换源。先正式收掉 footer，再清可视内容区；
+        // view hook 铺完目标会话后会把独立 footer 原样画回。
+        std::optional<platform::ScreenInfo> before;
+        {
+            std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+            EraseStreamFooterLocked();
+            before = ClearVisibleAgentPanelLocked();
+            view_body_top.reset();
+        }
         const auto& view_hook = AgentViewSwitchHookSlot();
         if (view_hook) {
             view_hook(viewed_after, /*tail_rows=*/0);
@@ -4522,6 +4560,25 @@ void TurnInputListener::ThreadMain() {
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
         FooterSlot().composer = editor.CurrentRenderState();
         RedrawStreamFooterLocked();
+    };
+
+    // 屏上已经铺的是哪只会话。状态机可能由三条路改动：按键切页、footer
+    // 心跳发现任务退场、别处清理条目。监听线程每拍把“想看谁”与“屏上是谁”
+    // 对一遍，凡有变化都走同一只整页换源口；不许只改导航灯和收件目标。
+    int rendered_viewed_task_id = CurrentAgentViewedTaskId();
+    const auto sync_agent_panel_view = [&]() {
+        if (!FooterSlot().enabled) {
+            return false;
+        }
+        const std::vector<int> ids = panel_ids_now();
+        PanelSessionSlot().OnEntriesChanged(ids);
+        const int viewed_now = PanelSessionSlot().SnapshotFor(ids).viewed_task_id;
+        if (viewed_now == rendered_viewed_task_id) {
+            return false;
+        }
+        print_view_frame(viewed_now);
+        rendered_viewed_task_id = viewed_now;
+        return true;
     };
 
     // 取回一条排队消息进编辑器(光标落末尾),Del 待确认解除。
@@ -4601,6 +4658,11 @@ void TurnInputListener::ThreadMain() {
     constexpr auto kCtrlCDoubleTapWindow = std::chrono::milliseconds(1200);
 
     while (!stop_requested_.load()) {
+        // 没按键也要查：正在看的 subagent 若完成退场，心跳会先把状态切回
+        // main；这一拍随即把上半屏也换回 main，不留旧 sub Panel。
+        if (sync_agent_panel_view()) {
+            refresh_footer();
+        }
         // 先等“有键可读”，再去抢输入权。旧代码把这 50ms 等待也攥在锁
         // 里，POSIX 的 DSR 光标查询便无门可入；更糟的是监听线程可能先
         // 吞掉 CPR 应答。poll 不消费字节，等完再抢锁；若前台编辑器或
@@ -4666,6 +4728,7 @@ void TurnInputListener::ThreadMain() {
                     (void)PanelSessionSlot().HandleKey(PanelKey::Esc, ids,
                                                        editor.CurrentRenderState().line.empty(),
                                                        std::chrono::steady_clock::now());
+                    (void)sync_agent_panel_view();
                     refresh_footer();
                     continue;
                 }
@@ -4867,10 +4930,8 @@ void TurnInputListener::ThreadMain() {
                                                        std::chrono::steady_clock::now());
                     const int viewed_after = PanelSessionSlot().SnapshotFor(ids).viewed_task_id;
                     if (viewed_after != snapshot.viewed_task_id) {
-                        // 真切会话:先按上一帧的账擦净旧查看帧,钩子只打印
-                        // (自管锁:先擦 footer 再铺、铺完重画 footer),这里
-                        // 不持锁调用。
-                        print_view_frame(viewed_after);
+                        // 真切会话统一走 Panel 换页口；rendered 账也在一处收。
+                        (void)sync_agent_panel_view();
                     }
                     refresh_footer();
                     continue;

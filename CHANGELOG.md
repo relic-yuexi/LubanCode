@@ -226,6 +226,12 @@
 - **version store 原子落、账一枚不删。** 候选复制 staging→复算哈希→再过静态门→rename 成正式版本(`~/.lubancode/package-store/`);写一半失败正式 store 纹丝不动。回滚只切指针不删版本——评测账、批准账、迁移账、install-log 全保留。会话钉快照:promote/rollback 后旧会话照用旧版,新会话拿新版。
 - **store 选中版本并进 `/package list`**(scope 记 store,压 user/official、让位 dev 与 project)——进化出的能力正式进了发现面;手改 store 文件,下次启动拒挂并指路。
 
+## [v0.26.104] - 2026-08-29
+
+- **挂载事务落地:整包成整包败有了执行版(阶段 5)。** 过了信任门的 plugin 与 MCP 先进暂存——插件起探针进程走一遍协议(判通道不判业务),MCP 走 initialize+tools/list;全部起得来才原子并进正式 ToolRegistry,一件起不来整包回滚(杀已握手的进程、清暂存表、零残留),诊断指到坏件。两插件一 MCP 三件套测试:坏一件,三件全不进。
+- **工具带上了出身。** 每件包内工具挂 ToolOrigin(package/version/component),`/tools`、`/plugins`、`/mcp` 照实显示"来自哪只包哪一版";占位符 `${package_dir}/${package_data}/${env:NAME}` 结构化展开,逃包根双闸拦。
+- **修实一桩合并事故(致歉)。** 0.26.103 的合并把三处未解冲突标记提交进了 package_commands.cpp,当夜的"全绿"吃了陈旧二进制的假账。本版解净(信任账与 store 五路两边都留),以新编译产物重验:241 册全绿,exe 时间戳亲核。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。

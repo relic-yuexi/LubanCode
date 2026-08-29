@@ -1132,6 +1132,19 @@ void RunThinkingViewScene(const std::wstring& exe_path, const std::wstring& work
     Check(last > first, "思考流: 思考字数在长(" + std::to_string(first) + " -> " + std::to_string(last) + ")");
     DumpViewport("thinking-view");
 
+    // Panel 换页回归:上半屏只认当前 agent。Esc 回 main 后，sub 查看页专属
+    // 的“[后台]”来源行必须从当前可视区退干净；底下 composer 仍在，不能
+    // 随上半屏换页一同丢掉。
+    SendKey(VK_ESCAPE, 0, 0);
+    const std::string back_to_main =
+        "\xe5\xb7\xb2\xe5\x9b\x9e\xe4\xb8\xbb\xe4\xbc\x9a\xe8\xaf\x9d";  // 已回主会话
+    const std::string background_source = "\xe5\x90\x8e\xe5\x8f\xb0";      // 后台
+    Check(WaitForText(back_to_main, 8000), "思考流: Esc 整页切回 main Panel");
+    Sleep(400);
+    Check(FindLastRow(background_source) < 0, "思考流: main Panel 不残留 sub 的来源行");
+    Check(FindComposerInputRow() > 0, "思考流: 换 Panel 后独立 composer 仍在");
+    DumpViewport("thinking-view-back-main");
+
     // 等甲收口(回流正文此环境不总可刮,等完成短行即可),再干净退出。
     const DWORD done_deadline = GetTickCount() + 30000;
     while (GetTickCount() < done_deadline && FindLastRow(kThinkingDone) < 0 &&
@@ -1139,8 +1152,6 @@ void RunThinkingViewScene(const std::wstring& exe_path, const std::wstring& work
         Sleep(300);
     }
     Sleep(1200);
-    SendKey(VK_ESCAPE, 0, 0);  // 退查看态/焦点(多余的一拍归编辑器清空,无害)
-    Sleep(200);
     SendText("exit");
     SendKey(VK_RETURN, L'\r', 0);
     if (WaitForSingleObject(guard.pi.hProcess, 15000) == WAIT_OBJECT_0) {
@@ -1323,6 +1334,13 @@ int wmain(int argc, wchar_t** argv) {
     if (argc >= 5 && std::wstring(argv[4]) == L"--width-hammer") {
         SetSceneSize(120, 30, 400);
         RunWidthResizeScene(exe_path, workdir, /*hammer_cycles=*/6);
+        Log(g_failures == 0 ? "ALL PASS" : ("FAILURES: " + std::to_string(g_failures)));
+        FreeConsole();
+        return g_failures == 0 ? 0 : 1;
+    }
+    if (argc >= 5 && std::wstring(argv[4]) == L"--thinking-only") {
+        SetSceneSize(120, 30, 400);
+        RunThinkingViewScene(exe_path, workdir);
         Log(g_failures == 0 ? "ALL PASS" : ("FAILURES: " + std::to_string(g_failures)));
         FreeConsole();
         return g_failures == 0 ? 0 : 1;
