@@ -1,7 +1,8 @@
-// /package 命令(统一 Package 封装单阶段 1/4):list/show/doctor 只读版 +
-// trust/untrust 信任门(阶段 4:批的是整包内容哈希,重启生效)。enable/
-// disable/scaffold 等写动作仍是后续阶段的事。命令参数拆解是纯函数,单测
-// 直接钉;IO(扫描、打印、信任账)在 cpp 的 handler 一头。
+// /package 命令(统一封装单阶段 1/4/6):list/show/doctor 只读版 +
+// trust/untrust 信任门(阶段 4:批的是整包内容哈希,重启生效)+ enable/
+// disable 启停账与 reload 重折快照(阶段 6:启停在包外,生效在下回装配)。
+// scaffold 是后续阶段的事。命令参数拆解是纯函数,单测直接钉;IO(扫描、
+// 打印、信任账、启停账)在 cpp 的 handler 一头。
 #pragma once
 
 #include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
@@ -22,12 +23,15 @@ enum class PackageCommandAction {
     Doctor,  // /package doctor <id|路径>
     Trust,   // /package trust <id>(批准整包内容哈希,重启生效)
     Untrust, // /package untrust <id>(销账)
+    Enable,  // /package enable <id>(复启;下回装配生效)
+    Disable, // /package disable <id>(停用;挂载一律跳过,下回装配生效)
+    Reload,  // /package reload(重扫五路折新快照,折好才换)
 };
 
 struct ParsedPackageCommand {
     PackageCommandAction action = PackageCommandAction::Invalid;
     std::optional<std::string> scope_filter;  // List 时:user/project/official/dev;nullopt = all
-    std::string target;                       // Show/Doctor 的 id 或路径
+    std::string target;                       // Show/Doctor/Trust/Enable/Disable 的 id 或路径
     std::string bad_word;                     // Invalid 时第一词的原始拼写(提示用)
 };
 

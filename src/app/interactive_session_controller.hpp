@@ -102,6 +102,10 @@ private:
     void RefreshSkills();
     void RefreshWorkflowCompletions();
     void RefreshProjectInstructions();
+    // /package reload 的会话侧(统一封装单阶段 6):重折快照(折不动就
+    // 一分不动)→ 原子换档 → 刷下游(技能清单/Profile 根/补全)。回执
+    // 逐行带回,由命令层打印。
+    std::vector<std::string> ReloadPackages();
     void PersistNewMessages();
     // 建档与开仓(第二期):建档提前到发轮前;仓跟着会话 id 开张。
     bool EnsureSessionBegun(const std::string& first_text);
@@ -313,6 +317,10 @@ private:
 
     // ---- 主 AgentLoop 与轮次材料 ----
     lubancode::agent::PromptOptions prompt_options;
+    // Package 快照镜像(阶段 6):命令面 ctx.package_mount 借用的那份账的
+    // 拥有者——reload 换档时先换镜像再重指 ctx,借用在会话内永不悬垂。
+    // 与 stack_.package_snapshot(原子槽)同折同换,由 ReloadPackages 维护。
+    std::shared_ptr<const lubancode::package::PackageSnapshot> package_snapshot_view_;
     std::function<void()> reapply_peer_inbox;  // loop 重建后重灌收件点
     // loop 持 registry 引用,声明在后 = 先死,引用不悬垂。
     std::optional<lubancode::agent::Agent> main_agent;

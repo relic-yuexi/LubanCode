@@ -661,12 +661,12 @@ luban package doctor <path> --json
 
 ### 阶段 6：启停、reload 与会话快照
 
-- [ ] 实现 package-state。
-- [ ] 实现 enable/disable。
-- [ ] 实现原子 Catalog reload。
-- [ ] 会话钉 PackageSnapshot。
-- [ ] content-only 热换；code-bearing 首版要求新会话。
-- [ ] 已运行 Agent/Workflow 不受目录突变影响。
+- [x] 实现 package-state。（`src/package/state.*`：`~/.lubancode/package-state.json`，包 id/enabled/改动时刻 + 版本与层随账记；原子写照信任账惯例，坏 JSON 按全启用续。）
+- [x] 实现 enable/disable。（`/package enable|disable <id>` 子命令；回执如实说"下回启动生效"，reload 重折后的装配同见效。）
+- [x] 实现原子 Catalog reload。（`/package reload`：重扫四层+store+启停账折新快照，`ReloadPackageSnapshot` 折好才换——中途任何错旧账不动、回执带诊断。）
+- [x] 会话钉 PackageSnapshot。（`PackageSnapshot` 显式快照对象：挂载账+钉住的信任账+启停账+技能正文查表；会话持 atomic 槽，在跑引用钉各自那份。）
+- [x] content-only 热换；code-bearing 首版要求新会话。（reload 只换内容账；code 组件挂载事务只在会话启动跑，回执明说须新会话，不热插不热卸。）
+- [x] 已运行 Agent/Workflow 不受目录突变影响。（测试钉：删包/改 SKILL/disable 后旧快照照旧出材料，新折查不着。）
 
 验收：reload 不会让半场 Workflow 换 Skill，也不会卸掉正在被 ToolRegistry 引用的模块。
 

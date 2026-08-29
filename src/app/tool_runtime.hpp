@@ -78,6 +78,18 @@ lubancode::memory::Options MemoryOptionsFromConfig(const lubancode::config::Memo
 lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode::tools::SkillMeta>& skills,
                                                      const lubancode::config::SearchConfig& search_config);
 
+// 自定义 Agent 的解析体(统一封装单阶段 3/6,自 ToolRuntime 的 resolver
+// lambda 折出):AgentCatalog 现扫(包层成品件从给定快照折来并入;快照空
+// = 空表,行为与从前一致),查名命中且可用才折 CustomAgentMaterial;预装
+// 技能的正文包内件从快照读(records 里 parser 已读进内存,盘中删改不影响
+// 钉住这份的会话),standalone 件照旧从盘上现读;名单里没有的技能留给
+// doctor 诊断,这里只降级(登记名字不注正文)。ToolRuntime 的 resolver
+//(每派发现取现行快照)与 Workflow 的 agent 节点(跑一趟钉一份,半场
+// reload 不换这趟的账)共用这一只——同一份定义两路解析,结果逐字段一致。
+std::optional<lubancode::tools::CustomAgentMaterial> ResolveCustomAgentMaterial(
+    const std::vector<lubancode::tools::SkillMeta>& skills,
+    const lubancode::package::PackageSnapshot* snapshot, const std::string& name);
+
 // Explore 的硬边界落在工具表，不只写在提示词里。只给文件读取、代码
 // 搜索与网页查阅；命令、写入、技能和外挂工具一概不挂。
 lubancode::tools::ToolRegistry BuildExploreToolRegistry(const lubancode::config::SearchConfig& search_config);
@@ -179,11 +191,12 @@ public:
         lubancode::cli::WorktreeSession* worktree_session = nullptr;
         lubancode::tools::WorktreeTool::ConfirmHandler worktree_confirm;
         std::function<void()> on_worktree_moved;
-        // Package 会话钉快照(统一封装单阶段 3):借用指针,调用方(SessionStack
-        // /单发的局部)持有且活得比本对象久。agent 工具派发自定义 Agent 时,
-        // 包层成品件并进 AgentCatalog(canonical 名解析)。空 = 没有包,
-        // 行为与从前一致。
-        const lubancode::package::PackageMount* package_mount = nullptr;
+        // Package 会话钉快照的现行供应商(统一封装单阶段 3/6):返回一份
+        // shared_ptr 拷贝(快照不可变,在跑引用钉住各自那份)。构造时取一次
+        // 跑 code 挂载事务(只在会话启动跑);agent 工具派发自定义 Agent 时
+        // 每派发现取——reload 换档后下一次装配即见新账,在跑的照旧用旧折。
+        // 空 = 没有包,行为与从前一致。
+        std::function<std::shared_ptr<const lubancode::package::PackageSnapshot>()> package_snapshot;
     };
 
     ToolRuntime(const lubancode::config::Config& config, const lubancode::cli::Theme& theme,

@@ -633,6 +633,9 @@ add_library(lubancode_core STATIC
   # McpServerConfig(${package_dir}/${package_data}/${env:NAME} 结构化展开)、
   # 插件探针、暂存 runtime、失败回滚、成功发布(整包成整包败的执行版)。
   src/package/code_mounting.cpp
+  # 统一 Package 封装单阶段 6:启停账(PackageStateStore——包外
+  # package-state.json,停用的包挂载一律跳过,连内容组件都不挂)。
+  src/package/state.cpp
   # 自进化闭环阶段 1:EvolutionObservation、五路只读 adapter、指纹归一、
   # 采集器与只追加观察账(纯逻辑,复用 skills/journal 的既有脱敏)。
   src/evolution/observation.cpp

@@ -620,7 +620,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     prompt_options.prompts_dir = prompts_dir;  // 运行时模块:拼装时现读现拼
     // 统一 Package 封装单阶段 3:包层 Profile 根——主 Agent 点名 canonical
     // Profile("<包id>:<名>")时在包根里解析;裸名照旧走内置/用户/项目层。
-    prompt_options.package_profile_roots = lubancode::package::MountProfileRoots(stack_.package_mount);
+    // (阶段 6:折现行快照;镜像成员在此起持有,ctx.package_mount 借它的账。)
+    package_snapshot_view_ = stack_.CurrentPackageSnapshot();
+    prompt_options.package_profile_roots =
+        lubancode::package::MountProfileRoots(package_snapshot_view_->mount());
 
     // 跨会话传话(0.25.x 同机首版):loop 每次 rebuild(/clear、/model、
     // provider 切换)都会 emplace 重来,安全收件点(SetInbox)得跟着重灌。
@@ -931,10 +934,12 @@ void TerminalSessionController::SyncAgentRequestPolicy() {
 }
 
 void TerminalSessionController::RefreshSkills() {
-    // 包根来自会话钉快照(阶段 3):/skill 装了新散装技能,重扫时包内清单
-    // 仍按启动那一份(包目录变化下回启动才见)。
-    skills = lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir, official_skills_dir,
-                                          lubancode::package::MountSkillRoots(stack_.package_mount));
+    // 包根来自会话钉快照(阶段 3;/package reload 后的 RefreshSkills 折
+    // 现行快照):/skill 装了新散装技能照旧重扫;包内清单按现行快照那一
+    // 份(reload 之外,包目录变化下回启动才见)。
+    skills = lubancode::tools::LoadSkills(
+        CurrentDirUtf8(), home_dir, official_skills_dir,
+        lubancode::package::MountSkillRoots(stack_.CurrentPackageSnapshot()->mount()));
     skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
     if (auto* tool = dynamic_cast<lubancode::tools::SkillTool*>(registry().Find("skill")); tool != nullptr) {
         tool->SetSkills(skills);
@@ -956,11 +961,52 @@ void TerminalSessionController::RefreshWorkflowCompletions() {
     wf_ctx.user_root = home_dir.has_value()
                            ? std::optional<std::filesystem::path>(lubancode::tools::Utf8ToPath(*home_dir))
                            : std::nullopt;
-    wf_ctx.packaged_workflows = lubancode::package::MountWorkflowSources(stack_.package_mount);
+    wf_ctx.packaged_workflows =
+        lubancode::package::MountWorkflowSources(stack_.CurrentPackageSnapshot()->mount());
     wf_ctx.theme = &theme;
     for (const auto& skill : skills) wf_ctx.skill_names.push_back(skill.name);
     lubancode::cli::SetAdditionalSlashCompletionCandidates(
         lubancode::app::BuildWorkflowSlashCompletionCandidates(wf_ctx));
+}
+
+std::vector<std::string> TerminalSessionController::ReloadPackages() {
+    // /package reload 的会话侧(阶段 6):折好才换——重折一份崭新快照,
+    // 任何错都兜在 package 层(旧快照一分不动);折成了才原子换档,在跑
+    // 引用各自钉着旧 shared_ptr 照旧跑完。code 组件(Plugin/MCP)不重挂:
+    // 挂载事务只在会话启动跑,reload 不热插不热卸(回执里如实说)。
+    const std::shared_ptr<const lubancode::package::PackageSnapshot> current =
+        stack_.CurrentPackageSnapshot();
+    std::vector<std::string> warnings;
+    lubancode::package::PackageMountInput input = BuildSessionPackageMountInput(
+        config, opts_.package_dirs, current ? current->pinned_trust
+                                            : lubancode::package::PackageTrustSnapshot{},
+        &warnings);
+    const lubancode::package::PackageReloadReport report =
+        lubancode::package::ReloadPackageSnapshot(current, std::move(input));
+    if (!report.ok) {
+        warnings.push_back(report.error);
+        return warnings;  // 旧快照未动,下游一个不刷
+    }
+    // 换档三步:原子槽换新折 → 镜像换新折(ctx 借用的账)→ ctx 重指。
+    // 命令都在主线程跑,这三步之间没有并发窗口。
+    stack_.package_snapshot.store(report.snapshot);
+    package_snapshot_view_ = report.snapshot;
+    dispatch_ctx_.package_mount = &package_snapshot_view_->mount();
+    // 下游刷新:技能清单(含包根,重灌 skill 工具与 agent 工具段)、
+    // Profile 根(主 Agent 与 agent 工具两处)、workflow 补全。RefreshSkills
+    // 内部自带 RebuildLoop,系统提示段下一轮即新。
+    RefreshSkills();
+    prompt_options.package_profile_roots =
+        lubancode::package::MountProfileRoots(package_snapshot_view_->mount());
+    if (lubancode::tools::AgentTool* tool = session_agent_tool(); tool != nullptr) {
+        tool->SetPackageProfileRoots(prompt_options.package_profile_roots);
+    }
+    RefreshWorkflowCompletions();
+    warnings.reserve(warnings.size() + report.lines.size());
+    for (const std::string& line : report.lines) {
+        warnings.push_back(line);
+    }
+    return warnings;
 }
 
 void TerminalSessionController::RefreshProjectInstructions() {
@@ -984,7 +1030,10 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.config_file_path = &config_file_path;
     ctx.home_dir = &home_dir;
     ctx.home_lubancode = &home_lubancode;
-    ctx.package_mount = &stack_.package_mount;
+    // 阶段 6:挂载账借镜像持有的现行快照(reload 换档时镜像先换、这里后
+    // 指);供应商口拷 shared_ptr 出去,workflow 跑一趟钉一份。
+    ctx.package_mount = &package_snapshot_view_->mount();
+    ctx.package_snapshot_provider = [this]() { return stack_.CurrentPackageSnapshot(); };
     ctx.prompts_dir = &prompts_dir;
     ctx.persona = &persona;
     ctx.global_skills_root = &global_skills_root;
@@ -1030,6 +1079,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.rebuild_loop = [this](bool preserve_history) { RebuildLoop(preserve_history); };
     ctx.sync_request_policy = [this]() { SyncAgentRequestPolicy(); };
     ctx.refresh_skills = [this]() { RefreshSkills(); };
+    ctx.reload_packages = [this]() { return ReloadPackages(); };
     ctx.refresh_workflow_completions = [this]() { RefreshWorkflowCompletions(); };
     ctx.refresh_project_instructions = [this]() { RefreshProjectInstructions(); };
     ctx.sync_worktree_directory = [this]() { SyncWorktreeDirectory(); };

@@ -330,7 +330,7 @@ Plugin 与 MCP 能起进程、读环境变量、访问网络。扫到目录便�
 /package untrust <id> 销该包全部批准（含哈希已对不上的陈账）
 ```
 
-批准重启后生效——会话启动时折一份只读信任快照钉住，运行中批/销不换本会话的账（与 §9 的会话钉快照同语义）。未过门时：content 组件照挂；code 组件一件不挂不执行；引用包内 Plugin/MCP 的 Agent 标 unavailable（`/agents` 注明缘由），直接引工具或依赖此类 Agent 的 Workflow 同理（Catalog 里 broken 注缘由）。哈希对不上（文件动过）视同未信任：拦下并指路重批，不静默放行也不静默卸载；把文件改回去，旧账自然重新对上。
+批准重启后生效——会话启动时折一份只读信任快照钉住，运行中批/销不换本会话的账（与 §9 的会话钉快照同语义；`/package reload` 复用这份钉住的账，也不放行新批的 code——须新会话）。未过门时：content 组件照挂；code 组件一件不挂不执行；引用包内 Plugin/MCP 的 Agent 标 unavailable（`/agents` 注明缘由），直接引工具或依赖此类 Agent 的 Workflow 同理（Catalog 里 broken 注缘由）。哈希对不上（文件动过）视同未信任：拦下并指路重批，不静默放行也不静默卸载；把文件改回去，旧账自然重新对上。
 
 ## 8. 整包成，整包败
 
@@ -378,12 +378,15 @@ Package 不可半挂。激活分七步：
 **启停账在包外。** Package 自己不可写 `enabled: false`。启停、信任、固定版本另记：
 
 ```text
-~/.lubancode/package-state.json
+~/.lubancode/package-state.json     # 启停账(阶段 6 落地)
+~/.lubancode/package-trust.json     # 信任账(§7.1,另一本)
 ```
 
-状态键至少带：package id、source root、content hash、enabled/disabled、trusted/untrusted、选中的版本与来源。项目共享的启用清单与用户私有的信任账分开记。仓库不可提交某台机器的信任决定。
+启停账 v1 只记改过启停的包（账上没有 = 启用）：一条记录带 package id、enabled/disabled、改动那刻的版本与所在层、改动的时刻。原子写（先落临时文件再换名），坏 JSON 容错读——警告亮给用户、按全启用续跑，不崩会话。启停按包 id 生效（四层同 id 是同一只包：遮蔽归选版，启停靠人）。仓库不可提交某台机器的信任决定，也不可提交它的启停账。
 
-**会话钉快照。** 一场会话启动时取一份 `PackageSnapshot`，运行中的 Agent、Workflow、Plugin、MCP 都指向它。Reload 之后：新任务用新快照；已在跑的 Agent、Workflow 继续用旧快照。content-only 包可热换 Catalog；带 native Plugin 或常驻 MCP 的包，首版提示重启会话，不冒险热卸 DLL。
+停用的包：扫描发现照旧（list/doctor 可见，list 标 disabled）；挂载一律跳过——连内容组件一件不挂。`/package enable|disable <id>` 只落账，不拆在跑的会话：生效在下回启动，或 `/package reload` 重折快照后的下一次装配。
+
+**会话钉快照。** 一场会话启动时取一份显式 `PackageSnapshot`（挂载账 + 钉住的信任账 + 启停账 + 包内技能正文），运行中的 Agent、Workflow、Plugin、MCP 都指向它；目录怎么变（删包、改 SKILL、disable）影响不到在跑引用——它们读快照，不回盘。Reload 之后：新任务用新快照；已在跑的 Agent、Workflow 继续用旧快照（workflow 跑一趟钉一份）。Reload 原子在“折好才换”：重扫四层 + store 选中 + 启停账折一份崭新快照，中途任何错旧账不动、回执带诊断；折成了才换档。content-only 包的增删对下一次装配生效；带 native Plugin 或常驻 MCP 的包，首版明说须重启会话——reload 不热插也不热卸（挂载事务只在会话启动跑），不冒险热卸 DLL。reload 复用会话启动时钉住的信任账：运行中新批的信任不放行给本会话，须新会话。
 
 ## 10. 诊断与夹具
 

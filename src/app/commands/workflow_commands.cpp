@@ -3,6 +3,7 @@
 #include "app/commands/workflow_commands.hpp"
 #include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "app/commands/agent_commands.hpp"  // ComputeAgentScanRoots:`agent:` 节点校验表的 Catalog 根
+#include "app/tool_runtime.hpp"  // ResolveCustomAgentMaterial(阶段 6:agent 节点解析钉快照)
 #include "package/mounting.hpp"               // MountWorkflowSources(阶段 3 包层挂载)
 #include "app/model_router.hpp"
 #include "app/turn_runner.hpp"                  // PromptAskUser(终端交互宿主)
@@ -1688,15 +1689,23 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
         // 同一份定义从 agent 工具与 Workflow 节点两路解析,喂的是同一套
         // 口子,结果逐字段一致(对账册钉死的验收线)。节点 step_limit 走
         // overrides(入参显式 > YAML > 父步数)。
+        // 阶段 6:解析钉 exec_ctx.package_snapshot 这份快照——跑一趟钉
+        // 一份,半场 /package reload 不换这趟的 Skill/Agent 账(验收线:
+        // reload 不会让半场 Workflow 换 Skill);没接快照退回会话级
+        // resolver(现行快照,行为与从前一致)。
         if (exec_ctx.agent_tool != nullptr) {
             lubancode::tools::AgentTool* agent_tool = exec_ctx.agent_tool;
+            const std::shared_ptr<const lubancode::package::PackageSnapshot> pinned = exec_ctx.package_snapshot;
+            const std::vector<lubancode::tools::SkillMeta>* pinned_skills = exec_ctx.skills;
             agent_options.custom_agent_resolver =
-                [agent_tool, custom_parent, custom_parent_tools,
+                [agent_tool, pinned, pinned_skills, custom_parent, custom_parent_tools,
                  default_steps = exec_ctx.agent_profile.max_steps_per_turn](
                     const lubancode::workflow::WorkflowNode& node,
                     std::string& error) -> std::optional<lubancode::workflow::CustomAgentNodeResolution> {
                 std::optional<lubancode::tools::CustomAgentMaterial> material =
-                    agent_tool->custom_agent_resolver()(node.agent);
+                    (pinned != nullptr && pinned_skills != nullptr)
+                        ? lubancode::app::ResolveCustomAgentMaterial(*pinned_skills, pinned.get(), node.agent)
+                        : agent_tool->custom_agent_resolver()(node.agent);
                 if (!material.has_value()) {
                     error = "没有名叫 \"" + node.agent + "\" 的 Agent(可用清单看 /agents)";
                     return std::nullopt;
@@ -1884,7 +1893,11 @@ lubancode::app::WorkflowExecutorContext BuildWorkflowExecutorContext(SlashDispat
     // 与环境账都是它的同一只)。系统提示材料照 AgentTool 的 setter 同源
     // 折(prompts_dir/project_instructions/skills_segment 与会话栈同一份,
     // 项目层根与包层根同式现算)——两路系统提示逐字节一致的前提。
+    // 阶段 6:Package 快照跑一趟钉一份(半场 reload 不换这趟的账)。
     wf_exec.agent_tool = ctx.agent_tool;
+    if (ctx.package_snapshot_provider != nullptr) {
+        wf_exec.package_snapshot = ctx.package_snapshot_provider();
+    }
     wf_exec.subagent_prompt_material.cwd =
         ctx.prompt_options != nullptr ? ctx.prompt_options->cwd : std::string();
     wf_exec.subagent_prompt_material.prompts_dir = ctx.prompts_dir != nullptr ? *ctx.prompts_dir : std::string();

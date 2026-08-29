@@ -26,6 +26,7 @@
 #include "api/backend.hpp"
 #include "cli/theme.hpp"
 #include "config/model_catalog.hpp"
+#include "package/mounting.hpp"  // PackageSnapshot(阶段 6:跑一趟钉一份)
 #include "runtime/event_sink.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/interaction_broker.hpp"
@@ -160,6 +161,11 @@ struct WorkflowExecutorContext {
     // 只——两路解析喂同一份查名与环境账,才不各养一本)。空 = 没接
     //(headless/旧装配),点名 agent 的节点报 not_configured。
     lubancode::tools::AgentTool* agent_tool = nullptr;
+    // Package 会话钉快照(统一封装单阶段 6):跑一趟钉一份——agent 节点
+    // 的解析与预装技能正文全从这份折,半场 /package reload 不换这趟的账
+    //(验收线:reload 不会让半场 Workflow 换 Skill)。空 = 没接包快照,
+    // 解析口退回会话级 resolver(行为与从前一致)。
+    std::shared_ptr<const lubancode::package::PackageSnapshot> package_snapshot;
     // 子代理系统提示的会话材料(与 agent 工具路同源):从主回合的
     // PromptOptions 折来,宿主保证两路值一致。
     lubancode::workflow::SubagentPromptMaterial subagent_prompt_material;
