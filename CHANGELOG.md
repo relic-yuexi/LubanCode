@@ -167,6 +167,12 @@
 - **自进化闭环转起第一圈:一场 /record 能变成候选了。** `/evolve propose` 从录制件起草 Skill-only 候选——正文出自现有起草器,偶然值抽象成占位,稳定失败路写进排错节;封成最小 content-only 包(过 manifest 严格解析),落 `~/.lubancode/package-candidates/` 带全套演化账(evolution.json、approval、状态迁移账)。
 - **`/evolve diff / reject` 接上。** diff 与父版(或空)对照列新增件与正文摘要;reject 落拒绝指纹进去重账——同类经验不再反复劝起草。候选只进候选区,`/package list` 看不见(有反证单测:拷进用户层立即扫得着,证明是分仓不是不合法)。
 
+## [v0.26.94] - 2026-08-29
+
+- **浏览器学会记账了:Console 与 Network 两本 journal。** 每页环形账(帽 500 可调),条目带页内单调 seq 与 generation,断线可补账;console 文本与 network URL 敏感键值自动遮 `<redacted>`,超长截断。两枚新工具 `browser_console`、`browser_network` 按级别/URL/状态过滤查账,关页后账仍可查。
+- **用户动过手,旧 ref 即作废。** 仲裁第四条真落地:页面挂输入监听递 userEpoch,Agent 拿旧快照动作时明报 stale_ref 并注明"用户在页面上动过手";Agent 自家输入不误记。浏览器自测 130→162 项。
+- **截图进 App Server 事件。** 工具完成事件附 images 数组(MIME/尺寸/哈希/artifact 引用),绝不带 base64;纯文本工具不带该字段,老事件形状不变。headed 模式真窗冒烟过,CI 无显示器如实 SKIP。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
