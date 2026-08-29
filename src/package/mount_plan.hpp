@@ -9,6 +9,7 @@
 #pragma once
 
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "package/component.hpp"
@@ -17,6 +18,12 @@ namespace lubancode::package {
 
 // 挂载目标表(单子 §三的六张表;名字即给 doctor/审计看的去处)。
 std::string MountTargetTable(ComponentKind kind);
+
+// code 组件的信任门状态(阶段 4):NoCode = 包里没有 plugin/mcp;Trusted =
+// 过了门(免审层放置即信任,或账上有这枚哈希);PendingTrust = 待信任
+//(外来层未批,或文件动过哈希对不上)。信任的是那枚哈希,哈希变即失效。
+enum class CodeTrustStatus { NoCode, Trusted, PendingTrust };
+std::string_view CodeTrustStatusText(CodeTrustStatus status);
 
 struct MountPlanTool {
     std::string short_name;   // manifest 里的工具短名
@@ -34,7 +41,8 @@ struct MountPlanEntry {
     std::string wire_component_id;  // 编码后的 <pkg>.<local>(plugin/mcp 有)
     std::vector<MountPlanTool> tools;  // plugin 的逐件工具(mcp 工具要握手才知道)
     std::vector<std::string> depends_on;  // 解析到的本包依赖(canonical id,去重保序)
-    bool code_bearing = false;    // plugin/mcp:挂载要过信任门(阶段 4)
+    bool code_bearing = false;    // plugin/mcp:挂载要过信任门
+    bool trusted = false;         // code 件的门禁(PendingTrust 时 false,内容件不参与)
 };
 
 struct PackageMountPlan {
@@ -42,6 +50,7 @@ struct PackageMountPlan {
     std::string package_version;
     std::string content_hash;
     std::vector<MountPlanEntry> entries;  // 按六类目录序、local id 字节序,稳定
+    CodeTrustStatus code_trust = CodeTrustStatus::NoCode;  // 整包门禁(阶段 4)
 
     std::size_t CountKind(ComponentKind kind) const;
     bool HasCodeBearing() const;

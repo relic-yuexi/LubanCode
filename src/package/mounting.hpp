@@ -5,8 +5,10 @@
 // 运行中目录变化不热生效——下回启动才见。不做热重载,不监听目录。
 //
 // 只挂内容组件(单子 §9.1):Skill、Workflow、Agent、Prompt Profile。带
-// Plugin/MCP 的包照样挂它的内容组件,代码组件一件不挂不起(阶段 4/5 的
-// 信任门与挂载事务),账上标 code_pending_trust。
+// Plugin/MCP 的包照样挂它的内容组件,代码组件一件不挂不起(信任门阶段 4
+// 在此收口;挂载事务是阶段 5),账上记 code_trust。包未过信任门时,引
+// 用包内 Plugin/MCP 的 Agent、Workflow 标 unavailable 并注明缘由——登记
+// 不是放行,依赖也不是可用。
 //
 // 挂载路数(单子 §三"正路"):Package 先产分析账(AnalyzePackage),这里
 // 把组件根与成品定义交给原有加载器/Catalog——SkillCatalog、AgentCatalog、
@@ -26,6 +28,7 @@
 #include "agent/agent_catalog.hpp"      // PackagedAgentEntry
 #include "agent/prompt_assembler.hpp"   // PackageProfileRoot
 #include "package/catalog.hpp"          // AnalyzePackage 的产物
+#include "package/trust.hpp"            // PackageTrustSnapshot(阶段 4 信任门)
 #include "tools/skill_loader.hpp"       // PackagedSkillRoot
 #include "workflow/catalog.hpp"         // PackagedWorkflowSource
 
@@ -42,7 +45,10 @@ struct PackageMountEntry {
     std::string content_hash;
     // 内容组件的 canonical id 清账(按 ComponentKind 目录序、local id 字节序)。
     std::vector<std::string> mounted_canonical_ids;
-    bool code_pending_trust = false;  // 包里有 plugin/mcp,代码组件待信任门(阶段 4/5)
+    // code 组件(Plugin/MCP)的门禁(阶段 4):Trusted = 过了门(挂载事务
+    // 在阶段 5);PendingTrust = 一件不挂不执行,依赖它的 Agent/Workflow
+    // 连坐 unavailable;NoCode = 包里没有。
+    CodeTrustStatus code_trust = CodeTrustStatus::NoCode;
 };
 
 struct PackageMount {
@@ -58,10 +64,12 @@ struct PackageMount {
 // 挂载输入:扫描四层的根 + 包外短引用的兜底账(standalone 技能名、
 // config.json 的 mcpServers 键、builtin Agent 名——有就喂,与 /package
 // doctor 的 BuildExternalNamespaces 同一口径;不喂则指向它们的短引用按
-// 悬空判,整包 invalid)。
+// 悬空判,整包 invalid)+ 信任账的只读快照(阶段 4:启动时从
+// ~/.lubancode/package-trust.json 折一份,会话钉住;不喂 = 谁都没批)。
 struct PackageMountInput {
     ScanOptions scan;
     ExternalNamespaces external;
+    PackageTrustSnapshot trust;
 };
 
 // 启动装配一次。次序:四层扫描 -> 同 id 按优先级定胜者(dev > project >
@@ -77,11 +85,15 @@ PackageMount BuildPackageMount(const PackageMountInput& input);
 // Skill loader 的包根(<包根>/skills;source_level 带 scope 标签)。
 std::vector<tools::PackagedSkillRoot> MountSkillRoots(const PackageMount& mount);
 
-// AgentCatalog 的包层成品件(定义里的包内短引用已折 canonical)。
+// AgentCatalog 的包层成品件(定义里的包内短引用已折 canonical)。引用了
+// 未信任 Plugin/MCP 的 Agent 标 available=false + unavailable_reason(阶段
+// 4 连坐:登记不是放行,依赖也不是可用)。
 std::vector<agent::PackagedAgentEntry> MountAgentEntries(const PackageMount& mount);
 
 // WorkflowCatalog 的包层成品件(id 换 canonical;包内 agent/skill/subflow
 // 短引用已折 canonical;task/prompt/template 文件引用原样,dir 指包内)。
+// 依赖未信任 code 组件(直接引工具,或经 unavailable 的 Agent)同样
+// available=false + unavailable_reason。
 std::vector<workflow::PackagedWorkflowSource> MountWorkflowSources(const PackageMount& mount);
 
 // Prompt Profile 的包层根(<包根>/prompts/profiles,canonical 名在此解析)。

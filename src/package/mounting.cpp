@@ -61,6 +61,48 @@ std::string CanonicalizeRef(const OwnComponents& own, const std::string& package
     return raw;  // 外部裸名(standalone skill 等),原样
 }
 
+// 未信任 code 组件的连坐账(阶段 4):包未过信任门时,直接引用本包
+// Plugin/MCP 的组件(Agent 的 mcp_servers、tools.allow/requires.tools 的
+// wire 名;Workflow 的 tool 节点)不可用;引用不可用组件的(Workflow 的
+// agent 节点)同样不可用——定点迭代到不再涨。返回 canonical id -> 缘由。
+// 过了门或没有 code 组件的包,连坐账为空(内容件全数照挂)。
+std::map<std::string, std::string> UnavailableForUntrustedCode(const PackageRecord& record) {
+    std::map<std::string, std::string> out;
+    if (record.code_trust != CodeTrustStatus::PendingTrust) {
+        return out;
+    }
+    std::map<std::string, ComponentKind> kinds;
+    for (const auto& component : record.components) {
+        kinds.emplace(component.canonical_id, component.kind);
+    }
+    bool grew = true;
+    while (grew) {
+        grew = false;
+        for (const auto& ref : record.references) {
+            if (!ref.resolved || !ref.in_package || ref.is_file_ref) continue;
+            if (out.count(ref.from) > 0) continue;
+            // 工具型 target 是 <canonical>:<tool>(两枚冒号),剥尾段回到组件。
+            std::string target = ref.target;
+            if (std::count(target.begin(), target.end(), ':') == 2) {
+                target = target.substr(0, target.rfind(':'));
+            }
+            const auto kind_it = kinds.find(target);
+            if (kind_it == kinds.end()) continue;
+            if (kind_it->second == ComponentKind::Plugin || kind_it->second == ComponentKind::McpServer) {
+                out.emplace(ref.from,
+                            "依赖的 " + std::string(ComponentKindName(kind_it->second)) + " " + target +
+                                " 未过信任门(包未批准或文件动过哈希已变),批准前不挂不执行;"
+                                "批准: /package trust " + record.inventory.package_id);
+                grew = true;
+            } else if (out.count(target) > 0) {
+                out.emplace(ref.from, "依赖的 " + target + " 因未信任的 code 组件不可用");
+                grew = true;
+            }
+        }
+    }
+    return out;
+}
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
@@ -95,7 +137,8 @@ PackageMount BuildPackageMount(const PackageMountInput& input) {
 
     for (const auto& [package_id, candidate] : winners) {
         (void)package_id;  // 键与 record.inventory.package_id 一致,值里取
-        PackageRecord record = AnalyzePackage(*candidate, input.scan, ref_index, input.external);
+        PackageRecord record =
+            AnalyzePackage(*candidate, input.scan, ref_index, input.external, &input.trust);
         if (!record.valid || !record.mount_plan.has_value()) {
             continue;  // 整包成整包败:一件也不挂,诊断走 /package doctor
         }
@@ -105,10 +148,10 @@ PackageMount BuildPackageMount(const PackageMountInput& input) {
         entry.scope = record.inventory.scope;
         entry.package_root = record.inventory.package_root;
         entry.content_hash = record.inventory.content_hash;
-        entry.code_pending_trust = record.mount_plan->HasCodeBearing();
+        entry.code_trust = record.code_trust;
         for (const auto& plan_entry : record.mount_plan->entries) {
-            // 清账只收真挂了的内容组件;plugin/mcp 待信任门(阶段 4/5),
-            // 单独走 code_pending_trust 这一笔。
+            // 清账只收真挂了的内容组件;plugin/mcp 走 code_trust 那一笔
+            //(PendingTrust 一件不挂;Trusted 也只记账,挂载事务在阶段 5)。
             if (plan_entry.kind == ComponentKind::Plugin || plan_entry.kind == ComponentKind::McpServer) {
                 continue;
             }
@@ -140,6 +183,7 @@ std::vector<agent::PackagedAgentEntry> MountAgentEntries(const PackageMount& mou
     std::vector<agent::PackagedAgentEntry> entries;
     for (const auto& record : mount.records) {
         const OwnComponents own = CollectOwn(record);
+        const std::map<std::string, std::string> unavailable = UnavailableForUntrustedCode(record);
         const std::string& package_id = record.inventory.package_id;
         for (const auto& component : record.components) {
             if (component.kind != ComponentKind::Agent || !component.agent.has_value()) continue;
@@ -154,8 +198,14 @@ std::vector<agent::PackagedAgentEntry> MountAgentEntries(const PackageMount& mou
             for (std::string& skill : out.definition.skills_preload) {
                 skill = CanonicalizeRef(own, package_id, skill, ComponentKind::Skill);
             }
-            // mcp_servers 不折:包内 MCP 待信任门(阶段 4/5),派发期的
-            // 依赖校验照实报缺——登记不是放行。
+            // mcp_servers 不折:包内 MCP 待信任门,派发期的依赖校验照实报
+            // 缺——登记不是放行。包未过门时,引它的 Agent 整件 unavailable
+            //(缘由注明),Catalog 里看得见、用不了(阶段 4 连坐)。
+            const auto blocked = unavailable.find(component.canonical_id);
+            if (blocked != unavailable.end()) {
+                out.available = false;
+                out.unavailable_reason = blocked->second;
+            }
             out.file_utf8 = PathToUtf8(record.inventory.package_root / Utf8ToPath(component.rel_path));
             entries.push_back(std::move(out));
         }
@@ -167,6 +217,7 @@ std::vector<workflow::PackagedWorkflowSource> MountWorkflowSources(const Package
     std::vector<workflow::PackagedWorkflowSource> sources;
     for (const auto& record : mount.records) {
         const OwnComponents own = CollectOwn(record);
+        const std::map<std::string, std::string> unavailable = UnavailableForUntrustedCode(record);
         const std::string& package_id = record.inventory.package_id;
         for (const auto& component : record.components) {
             if (component.kind != ComponentKind::Workflow || !component.workflow.has_value()) continue;
@@ -191,6 +242,11 @@ std::vector<workflow::PackagedWorkflowSource> MountWorkflowSources(const Package
                 // CatalogEntry.dir 指包内目录,执行器照旧相对解析。
             }
             out.content_hash = workflow::ContentHash(*component.workflow);
+            const auto blocked = unavailable.find(component.canonical_id);
+            if (blocked != unavailable.end()) {
+                out.available = false;
+                out.unavailable_reason = blocked->second;
+            }
             sources.push_back(std::move(out));
         }
     }

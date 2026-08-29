@@ -138,7 +138,7 @@ TEST_CASE("content-only 包端到端:四张表可见,删包后消失") {
     REQUIRE_FALSE(mount.empty());
     REQUIRE(mount.entries.size() == 1);
     CHECK(mount.entries[0].package_id == "test.content-kit");
-    CHECK(mount.entries[0].code_pending_trust == false);  // 纯内容包
+    CHECK(mount.entries[0].code_trust == CodeTrustStatus::NoCode);  // 纯内容包不过门
     CHECK(mount.entries[0].mounted_canonical_ids.size() == 4);
 
     // ---- Skill 表:canonical 名,来源标签带包 ----
@@ -413,7 +413,7 @@ TEST_CASE("full-stack 夹具:内容组件挂载,Plugin/MCP 待信任门") {
     REQUIRE(mount.entries.size() >= 2);  // full-stack + minimal-content-only
     const PackageMountEntry* full = mount.Find("moontide.full-stack");
     REQUIRE(full != nullptr);
-    CHECK(full->code_pending_trust == true);  // 有 plugin + mcp
+    CHECK(full->code_trust == CodeTrustStatus::PendingTrust);  // 有 plugin + mcp,未批
     // 内容组件四类各一,canonical 齐全;plugin/mcp 不进 mounted 清账。
     // agent 与 profile 同名各归各表(契约 §6:canonical 不带 kind 段)。
     std::set<std::string> ids(full->mounted_canonical_ids.begin(), full->mounted_canonical_ids.end());
@@ -429,4 +429,15 @@ TEST_CASE("full-stack 夹具:内容组件挂载,Plugin/MCP 待信任门") {
     CHECK(agents[0].canonical_name == "moontide.full-stack:browser-tester");
     CHECK(agents[0].definition.prompt.profile.value_or("") ==
           "moontide.full-stack:browser-tester");  // 短名已折 canonical
+    // 阶段 4 连坐:包未信任,引 MCP browser 的 Agent 不可用并注明缘由;
+    // 依赖该 Agent(又直引 plugin 工具)的 Workflow 同样不可用。
+    CHECK_FALSE(agents[0].available);
+    CHECK(agents[0].unavailable_reason.find("未过信任门") != std::string::npos);
+    CHECK(agents[0].unavailable_reason.find("moontide.full-stack:browser") != std::string::npos);
+    const std::vector<lubancode::workflow::PackagedWorkflowSource> workflows =
+        MountWorkflowSources(mount);
+    REQUIRE(workflows.size() == 1);
+    CHECK(workflows[0].canonical_id == "moontide.full-stack:smoke-test");
+    CHECK_FALSE(workflows[0].available);
+    CHECK(workflows[0].unavailable_reason.find("未过信任门") != std::string::npos);
 }

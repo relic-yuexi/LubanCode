@@ -91,14 +91,22 @@ struct PackageRecord {
     std::vector<ComponentRef> references;       // 引用解析全账
     std::optional<PackageMountPlan> mount_plan;  // valid 才有;invalid 时 nullopt
     bool valid = false;  // manifest 干净 + 无 Error 诊断 + 引用全闭合
+    // code 组件的信任门状态(阶段 4):mount_plan 里的 code 件 trusted 随
+    // 它定,mounting 的连坐账(依赖未信任 code 的 Agent/Workflow 不可用)
+    // 也吃它。invalid 包恒 NoCode(没有 plan 可言)。
+    CodeTrustStatus code_trust = CodeTrustStatus::NoCode;
 
     const ParsedComponent* FindComponent(ComponentKind kind, const std::string& local_id) const;
 };
 
 // 分析一只包。options 只为复用 BuildPackageInventory 的口径(版本/平台检
-// 查)。ref_index 给全名跨包引用对账;external 给包外短名兜底。
+// 查)。ref_index 给全名跨包引用对账;external 给包外短名兜底。trust 给
+// 信任账的只读视图(阶段 4):nullptr / 默认 = 谁都没批,code 件一律
+// PendingTrust(免审层除外——user/official 放置即信任)。
+struct PackageTrustSnapshot;
 PackageRecord AnalyzePackage(const PackageCandidate& candidate, const ScanOptions& options,
                              const PackageRefIndex& ref_index,
-                             const ExternalNamespaces& external = ExternalNamespaces{});
+                             const ExternalNamespaces& external = ExternalNamespaces{},
+                             const PackageTrustSnapshot* trust = nullptr);
 
 }  // namespace lubancode::package
