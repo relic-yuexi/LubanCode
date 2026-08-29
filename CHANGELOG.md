@@ -214,6 +214,12 @@
 - **`/package trust` 五样回执。** 插件命令 argv 直递不经 shell、MCP 的 command/args/env 形状(env 只认 `${env:NAME}` 占位,真值不落账)、网络面、文件数、完整指纹。未过门:content 组件照挂,plugin/mcp 一件不进挂载账。
 - **依赖连坐。** 未信任包里直引 plugin/MCP 的组件先倒,引用倒者的 Workflow→Agent 跟着倒——`/agents` 里明注"不可用:依赖的 mcp_server 未过信任门",不静默。
 
+## [v0.26.102] - 2026-08-29
+
+- **Workflow 节点认得自定义 Agent 了(阶段 5)。** `agent: <名>` 三层解析:包内短引用折 canonical、宿主口查 AgentCatalog、resolver 出统一材料;回执与 journal 事件的 agent 键落 resolved 名。同一 YAML 从 agent 工具与 Workflow 节点两路各跑一轮,系统提示词与工具表逐字节一致——同源有对账册钉死。
+- **编译期拦鬼名。** validator 新增 unknown_agent(capability 表从 AgentCatalog 现扫),写错名字编译就红,不静默换 general-purpose。权限下限也接进节点:自定义定义比会话严时,该问真问。
+- 前台失败、预算尽、取消、后台回收四件语义与内置路逐件对账;顺手修实 0.26.92 一笔真欠账——定义 JSON roundtrip 丢 agent 字段,会伤 journal 恢复与 ContentHash,已补齐带测试钉。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
