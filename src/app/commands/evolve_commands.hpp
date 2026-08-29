@@ -1,8 +1,7 @@
-// /evolve 命令(自进化闭环阶段 1/2/3):status/list/show 只读面,阶段 2 的
-// propose/diff/reject,阶段 3 的 test——跑评测五道门,结果只追加进
-// eval-results.jsonl,状态经 EvolutionCoordinator 迁到 evaluated。
-// 候选状态机的写笔全在 EvolutionCoordinator(契约铁律),命令层只递材料、
-// 只打印,不自写迁移。approve/use/promote 是后续阶段的事,这里不冒头。
+// /evolve 命令(自进化闭环阶段 1/2/3/4):status/list/show 只读面,阶段 2 的
+// propose/diff/reject,阶段 3 的 test,阶段 4 的 approve/use/promote/rollback
+// ——批准页、点名 canary、晋升与回滚。候选状态机的写笔全在
+// EvolutionCoordinator(契约铁律),命令层只递材料、只打印,不自写迁移。
 #pragma once
 
 #include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
@@ -25,12 +24,17 @@ enum class EvolveCommandAction {
     Diff,     // /evolve diff <candidate-id>:与父版或空对照(阶段 2)
     Reject,   // /evolve reject <candidate-id> [reason]:落 rejected,指纹进拒绝账(阶段 2)
     Test,     // /evolve test <candidate-id>:跑评测五道门,账只追加(阶段 3)
+    Approve,  // /evolve approve <candidate-id>:出批准页并装 store(阶段 4)
+    Use,      // /evolve use <candidate-id>:点名 canary(阶段 4)
+    Promote,  // /evolve promote <candidate-id>:canary -> active(阶段 4)
+    Rollback, // /evolve rollback <package-id> [version]:切回父版或指定版(阶段 4)
 };
 
 struct ParsedEvolveCommand {
     EvolveCommandAction action = EvolveCommandAction::Invalid;
     std::string source_filter;  // List 时:run/goal/recording/tooltrace/memory;nullopt 语义用空串 = all
-    std::string target;         // Show/Propose/Diff/Reject/Test 的目标 id
+    std::string target;         // Show/Propose/Diff/Reject/Test/Approve/Use/Promote/Rollback 的目标 id
+    std::string target_extra;   // Rollback 的可选版本号
     std::string reason;         // Reject 的理由(可省)
     std::string bad_word;       // Invalid 时第一词的原始拼写(提示用)
 };

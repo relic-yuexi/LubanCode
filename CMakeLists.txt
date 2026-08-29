@@ -640,6 +640,10 @@ add_library(lubancode_core STATIC
   # 绝对路径扫描)、指标账七项、账面汇总与确定性判词。只产结果不落盘,
   # 落账与状态迁移仍走 EvolutionCoordinator。
   src/evolution/eval.cpp
+  # 自进化闭环阶段 4:VersionStore——staging 复制与原子落位、channels
+  # 指针账(active/canary)、install-log 只追加事件账与 PackageSnapshot
+  # (路径+哈希,装配折算)。store 机械归它;迁状态的笔仍在 Coordinator。
+  src/evolution/promoter.cpp
 )
 target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

@@ -1,9 +1,9 @@
-// /evolve 命令的执行体(自进化闭环阶段 1/2)。status = 扫五路账本采观察 +
+// /evolve 命令的执行体(自进化闭环阶段 1/2/3/4)。status = 扫五路账本采观察 +
 // 落观察账(只追加)+ 报账面;list = 按指纹聚类列账 + 候选区;show = 看一
-// 条观察或一只候选,指回来源。阶段 2 加三条:propose = 从一场录制起草最小
-// content-only 候选(EvolutionCoordinator 唯一写口);diff = 与父版或空对照;
-// reject = 落 rejected 并把指纹进拒绝账。不进 PackageCatalog、不装任何东西、
-// 不改各家源账。
+// 条观察或一只候选,指回来源。阶段 2:propose/diff/reject。阶段 3:test 跑
+// 评测五道门。阶段 4:approve 出批准页并原子装 store、use 点名 canary、
+// promote 晋升、rollback 切回——迁移全走 EvolutionCoordinator(唯一写口),
+// 这里只递材料、只打印。
 #include "app/commands/evolve_commands.hpp"
 #include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:统一走输出端口
@@ -71,6 +71,16 @@ std::filesystem::path BuildCandidateRoot(SlashDispatchContext& ctx) {
     return lubancode::platform::Utf8ToPath(**ctx.home_lubancode) / "package-candidates";
 }
 
+// version store 根:<home>/.lubancode/package-store(README"晋升、灰度与
+// 回滚"节)。批准后版本原子落这里;active/canary 指针在 channels.json。
+// (与上面的 BuildStoreRoot 是两处账:那边是观察账,这边是版本仓。)
+std::filesystem::path BuildVersionStoreRoot(SlashDispatchContext& ctx) {
+    if (ctx.home_lubancode == nullptr || !ctx.home_lubancode->has_value()) {
+        return std::filesystem::path();
+    }
+    return lubancode::platform::Utf8ToPath(**ctx.home_lubancode) / "package-store";
+}
+
 // 五路账本的输入装配:全从分派材料借,缺哪路就空着哪路(采集器对空根自然跳过)。
 lubancode::evolution::CollectSources BuildCollectSources(SlashDispatchContext& ctx) {
     lubancode::evolution::CollectSources sources;
@@ -123,9 +133,15 @@ void PrintUsage() {
                  "      /evolve diff <candidate-id>\n"
                  "      /evolve reject <candidate-id> [reason]\n"
                  "      /evolve test <candidate-id>\n"
+                 "      /evolve approve <candidate-id>\n"
+                 "      /evolve use <candidate-id>\n"
+                 "      /evolve promote <candidate-id>\n"
+                 "      /evolve rollback <package-id> [version]\n"
                  "阶段 1 只读观察;阶段 2 从录制起草最小 content-only 候选(propose)、看\n"
-                 "diff、拒绝(reject);阶段 3 评测(test):静态门+回放+留出+基线对照,账只追加。\n"
-                 "候选只落候选仓,不进 PackageCatalog,装不进 /package。CI 另有非交互入口:\n"
+                 "diff、拒绝(reject);阶段 3 评测(test):静态门+回放+留出+基线对照,账只追加;\n"
+                 "阶段 4 批准与灰度(approve/use/promote/rollback):批准只认当前哈希,批准后\n"
+                 "原子落 package-store,点名 canary 新会话生效、旧任务照旧,回滚不删版本不抹账。\n"
+                 "code-bearing 候选(带 Plugin/MCP)不走 approve,另过 Package trust。CI 入口:\n"
                  "  lubancode evolve test <候选目录> --baseline <父包目录> --json\n";
     TermOut().flush();
 }
@@ -441,8 +457,8 @@ void RunEvolveShowCandidate(SlashDispatchContext& ctx, const std::string& target
         TermOut() << "  评测账(" << results.size() << " 行,只追加):\n";
         PrintEvalSummary(summary, "    ");
     }
-    TermOut() << "  下一步: /evolve diff " << found->candidate_id << ";评测跑过便可交批准页"
-              << "(approve 是阶段 4 的事)\n";
+    TermOut() << "  下一步: /evolve diff " << found->candidate_id << ";评测入账后 /evolve approve "
+              << found->candidate_id << " 出批准页(只认当前哈希)\n";
     TermOut().flush();
 }
 
@@ -518,8 +534,8 @@ void RunEvolvePropose(SlashDispatchContext& ctx, const std::string& target) {
     TermOut() << "  整包哈希: " << result->content_hash << "\n";
     TermOut() << "  目录: " << lubancode::platform::PathToUtf8(result->candidate_dir) << "\n";
     TermOut() << "  组件: " << result->skill_rel_path << "(content-only,无进程无网络)\n";
-    TermOut() << "  下一步: /evolve show " << result->candidate_id << " 或 /evolve diff "
-              << result->candidate_id << ";评测在阶段 3 接\n";
+    TermOut() << "  下一步: /evolve test " << result->candidate_id << "(评测五道门)或 /evolve show "
+              << result->candidate_id << "\n";
     TermOut().flush();
 }
 
@@ -629,7 +645,139 @@ void RunEvolveTest(SlashDispatchContext& ctx, const std::string& target) {
     TermOut() << "  账本: " << lubancode::platform::PathToUtf8(result->candidate_dir /
                                                               "eval-results.jsonl")
               << "\n";
-    TermOut() << "  下一步: /evolve show " << result->candidate_id << ";approve 是阶段 4 的事\n";
+    TermOut() << "  下一步: /evolve show " << result->candidate_id << ";批得动便 /evolve approve "
+              << result->candidate_id << "\n";
+    TermOut().flush();
+}
+
+// ---- approve:出批准页,验门装 store(阶段 4) ----
+void RunEvolveApprove(SlashDispatchContext& ctx, const std::string& target) {
+    lubancode::evolution::EvolutionCoordinator coordinator(BuildCandidateRoot(ctx), nullptr,
+                                                           BuildVersionStoreRoot(ctx));
+    const auto result = coordinator.Approve(target);
+    if (!result.has_value()) {
+        TermOut() << result.error() << "\n";
+        TermOut().flush();
+        return;
+    }
+
+    // ---- 批准页(README §十清单;这份材料就是批准绑定的账面) ----
+    const auto& brief = result->brief;
+    TermOut() << "批准页 " << brief.candidate_id << "(content-only):\n";
+    TermOut() << "  Package: " << brief.package_id << "\n";
+    TermOut() << "  候选版本: " << brief.candidate_version << "(" << brief.parent_line << ")\n";
+    TermOut() << "  内容哈希: " << brief.content_hash << "(批准只认当前哈希;文件变过即作废)\n";
+    TermOut() << "  来源: ";
+    if (brief.source_lines.empty()) {
+        TermOut() << "(演化账未记来源)";
+    } else {
+        for (std::size_t i = 0; i < brief.source_lines.size() && i < 6; ++i) {
+            TermOut() << (i > 0 ? ", " : "") << brief.source_lines[i];
+        }
+    }
+    TermOut() << "\n";
+    TermOut() << "  组件: 新增 " << brief.components_added.size() << ",改 "
+              << brief.components_changed.size() << ",删 " << brief.components_removed.size()
+              << "\n";
+    for (const std::string& item : brief.components_added) {
+        TermOut() << "    + " << item << "\n";
+    }
+    TermOut() << "  权限差异: ";
+    if (brief.permissions_added.empty() && brief.tools_added.empty()) {
+        TermOut() << "无新增工具、进程、网络、env 与文件权限(content-only)\n";
+    } else {
+        TermOut() << "新工具 " << brief.tools_added.size() << " 件,新权限 "
+                  << brief.permissions_added.size() << " 条(须单列审批)\n";
+        for (const std::string& item : brief.tools_added) {
+            TermOut() << "    tool " << item << "\n";
+        }
+        for (const std::string& item : brief.permissions_added) {
+            TermOut() << "    perm " << item << "\n";
+        }
+    }
+    if (brief.eval_summary.has_value()) {
+        TermOut() << "  评测(账只追加):\n";
+        PrintEvalSummary(*brief.eval_summary, "    ");
+        if (!brief.eval_task_ids.empty()) {
+            TermOut() << "    任务样例: ";
+            for (std::size_t i = 0; i < brief.eval_task_ids.size() && i < 6; ++i) {
+                TermOut() << (i > 0 ? ", " : "") << brief.eval_task_ids[i];
+            }
+            TermOut() << "\n";
+        }
+    }
+    TermOut() << "  安装位置: " << lubancode::platform::PathToUtf8(result->version_dir)
+              << (result->already_present ? "(已在,未重装)" : "(staging 复算哈希 + 静态门后原子落)")
+              << "\n";
+    TermOut() << "  灰度办法: /evolve use " << brief.candidate_id
+              << "(点名 canary;新会话生效,旧任务照旧)\n";
+    TermOut() << "  回滚目标: " << brief.rollback_target_line << "\n";
+    TermOut() << "已批准并装架: " << brief.package_id << " " << result->installed_version
+              << " -> staged(store 里有账,/package list 可见)\n";
+    TermOut().flush();
+}
+
+// ---- use:点名 canary(阶段 4) ----
+void RunEvolveUse(SlashDispatchContext& ctx, const std::string& target) {
+    lubancode::evolution::EvolutionCoordinator coordinator(BuildCandidateRoot(ctx), nullptr,
+                                                           BuildVersionStoreRoot(ctx));
+    const auto result = coordinator.Use(target);
+    if (!result.has_value()) {
+        TermOut() << result.error() << "\n";
+        TermOut().flush();
+        return;
+    }
+    TermOut() << "已点名 canary: " << result->package_id << " " << result->version << "\n";
+    TermOut() << "  目录: " << lubancode::platform::PathToUtf8(result->version_dir) << "\n";
+    TermOut() << "  语义: 新会话/新任务用新版本;在跑会话钉着旧快照,照旧到收场\n";
+    TermOut() << "  下一步: /evolve promote " << target << "(晋升 active)或 /evolve rollback "
+              << result->package_id << "(切回)\n";
+    TermOut().flush();
+}
+
+// ---- promote:canary -> active(阶段 4) ----
+void RunEvolvePromote(SlashDispatchContext& ctx, const std::string& target) {
+    lubancode::evolution::EvolutionCoordinator coordinator(BuildCandidateRoot(ctx), nullptr,
+                                                           BuildVersionStoreRoot(ctx));
+    const auto result = coordinator.Promote(target);
+    if (!result.has_value()) {
+        TermOut() << result.error() << "\n";
+        TermOut().flush();
+        return;
+    }
+    TermOut() << "已晋升 active: " << result->package_id << " " << result->version << "\n";
+    TermOut() << "  目录: " << lubancode::platform::PathToUtf8(result->version_dir) << "\n";
+    TermOut() << "  语义: 新会话起拿这枚版本;旧任务钉旧快照;canary 指针清空\n";
+    TermOut() << "  下一步: /evolve rollback " << result->package_id
+              << "(切回父版或指定版;版本与账一枚不删)\n";
+    TermOut().flush();
+}
+
+// ---- rollback:切回父版或指定版(阶段 4) ----
+void RunEvolveRollback(SlashDispatchContext& ctx, const std::string& target,
+                       const std::string& version) {
+    lubancode::evolution::EvolutionCoordinator coordinator(BuildCandidateRoot(ctx), nullptr,
+                                                           BuildVersionStoreRoot(ctx));
+    const auto result = coordinator.Rollback(target, version);
+    if (!result.has_value()) {
+        TermOut() << result.error() << "\n";
+        TermOut().flush();
+        return;
+    }
+    TermOut() << "已回滚: " << result->package_id;
+    if (!result->from_version.empty()) {
+        TermOut() << "(原 " << result->from_version << ")";
+    }
+    if (result->to_version.has_value()) {
+        TermOut() << " -> " << *result->to_version << "\n";
+    } else {
+        TermOut() << " -> 撤下(无父版可回;包不再挂载)\n";
+    }
+    for (const std::string& candidate_id : result->rolled_back_candidates) {
+        TermOut() << "  候选 " << candidate_id << " -> rolled_back\n";
+    }
+    TermOut() << "  账目: 版本一枚不删,候选/评测/批准/迁移账一笔不抹;新会话拿旧版,\n"
+                 "    在跑会话钉着自己的快照照旧跑完\n";
     TermOut().flush();
 }
 
@@ -677,7 +825,8 @@ ParsedEvolveCommand ParseEvolveCommand(const std::string& args) {
         parsed.target = rest;
         return parsed;
     }
-    if (lower == "propose" || lower == "diff" || lower == "test") {
+    if (lower == "propose" || lower == "diff" || lower == "test" || lower == "approve" ||
+        lower == "use" || lower == "promote") {
         if (rest.empty()) {
             parsed.action = EvolveCommandAction::Invalid;
             parsed.bad_word = word;
@@ -685,8 +834,33 @@ ParsedEvolveCommand ParseEvolveCommand(const std::string& args) {
         }
         parsed.action = lower == "propose"   ? EvolveCommandAction::Propose
                         : lower == "diff"    ? EvolveCommandAction::Diff
-                                             : EvolveCommandAction::Test;
+                        : lower == "test"    ? EvolveCommandAction::Test
+                        : lower == "approve" ? EvolveCommandAction::Approve
+                        : lower == "use"     ? EvolveCommandAction::Use
+                                             : EvolveCommandAction::Promote;
         parsed.target = rest;
+        return parsed;
+    }
+    if (lower == "rollback") {
+        // rollback <package-id> [version]:目标取第一词,第二词(若有)是版本。
+        const std::size_t target_space = rest.find_first_of(" \t");
+        const std::string rollback_target =
+            target_space == std::string::npos ? rest : rest.substr(0, target_space);
+        if (rollback_target.empty()) {
+            parsed.action = EvolveCommandAction::Invalid;
+            parsed.bad_word = word;
+            return parsed;
+        }
+        parsed.action = EvolveCommandAction::Rollback;
+        parsed.target = rollback_target;
+        if (target_space != std::string::npos) {
+            const std::size_t version_space =
+                rest.find_first_of(" \t", target_space + 1);
+            parsed.target_extra = version_space == std::string::npos
+                                      ? Trimmed(rest.substr(target_space + 1))
+                                      : rest.substr(target_space + 1,
+                                                   version_space - target_space - 1);
+        }
         return parsed;
     }
     if (lower == "reject") {
@@ -736,6 +910,18 @@ CommandFlow HandleSlashEvolve(SlashDispatchContext& ctx,
             return CommandFlow::Continue;
         case EvolveCommandAction::Test:
             RunEvolveTest(ctx, command.target);
+            return CommandFlow::Continue;
+        case EvolveCommandAction::Approve:
+            RunEvolveApprove(ctx, command.target);
+            return CommandFlow::Continue;
+        case EvolveCommandAction::Use:
+            RunEvolveUse(ctx, command.target);
+            return CommandFlow::Continue;
+        case EvolveCommandAction::Promote:
+            RunEvolvePromote(ctx, command.target);
+            return CommandFlow::Continue;
+        case EvolveCommandAction::Rollback:
+            RunEvolveRollback(ctx, command.target, command.target_extra);
             return CommandFlow::Continue;
         case EvolveCommandAction::Invalid:
             TermOut() << "认不得 \"" << command.bad_word << "\"。\n";
