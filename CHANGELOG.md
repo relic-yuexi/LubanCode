@@ -162,6 +162,11 @@
 - **包内短引用成真。** 组件互引先在本包找,包外须写 `<包id>:<名>` 全名;悬空引用、wire 名超 64 帽、路径越界(`${package_dir}` 逃包根)任一命中即整包 invalid——但全件照解析逐件照报,不因第一个错停摆。
 - workflow 定义补收 `agent` 字段(包内短引用的钦定落点,旧 `role` 不动);工具 wire 编码收进 plugin_contract 一处(Encode/Decode/64 帽)。
 
+## [v0.26.93] - 2026-08-29
+
+- **自进化闭环转起第一圈:一场 /record 能变成候选了。** `/evolve propose` 从录制件起草 Skill-only 候选——正文出自现有起草器,偶然值抽象成占位,稳定失败路写进排错节;封成最小 content-only 包(过 manifest 严格解析),落 `~/.lubancode/package-candidates/` 带全套演化账(evolution.json、approval、状态迁移账)。
+- **`/evolve diff / reject` 接上。** diff 与父版(或空)对照列新增件与正文摘要;reject 落拒绝指纹进去重账——同类经验不再反复劝起草。候选只进候选区,`/package list` 看不见(有反证单测:拷进用户层立即扫得着,证明是分仓不是不合法)。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
