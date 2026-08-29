@@ -197,6 +197,12 @@
 - **包层座次定死:本地主人盖过第三方包。** Agent 为 project > user > package > builtin;Profile 的 canonical 名只在包根解析,裸名五层一字不动(黄金基线续钉);Workflow 包层不抢裸 alias——许诺一个直呼 alias 会骗人,canonical 正门才通。
 - **legacy 散装零变化有逐字节证据。** 无包时技能扫描、AgentCatalog、workflow 目录、系统提示词拼装与旧路完全一致;会话钉快照——盘中途增删,会话内不变,下回启动才见。
 
+## [v0.26.99] - 2026-08-29
+
+- **App Server 有了浏览器协议(1.1,additive)。** 方法十八枚(会话/页签/导航/快照/截图/动作/journal 查询),事件十三族全带连接层 seq;真 Runtime 住 Node sidecar——懒起、整台复用、崩了发事件并收口在飞、下笔自动重起、收线杀进程树,Playwright 生命周期仍只有一本账。独立协议客户端 26/26 真跑:控页、收事件、断线边界。
+- **高频事件有界可合并可补账。** journal 源头批量(帽 200、40ms 一冲、撞帽丢整批计数),出站同页合并;丢了凭 sinceSeq 补账,dropped 明说;截图只发 artifact 引用,整条出站流无 base64。
+- **浏览器动作过审批与取消。** agent 动作须带 threadId 过 permission/request,acceptForSession 按方法记会话级放行;取消贯通审批段(悬空收口、迟到答复明报)与执行段(轮询见旗即停),thread/stop 联动。顺手修净三处 app_server 既有暗坑:stdin 短报文阻塞、出站无写线程、审批答复 resolve 口没递——交互客户端原本立不住的根。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
