@@ -14,7 +14,6 @@
 #include "agent/microcompact.hpp"  // RunMicrocompact(按需摘要)
 #include "app/memory_extract.hpp"  // ClassifyTaskType/BuildTurnTranscript 一族
 #include "app/model_router.hpp"
-#include "app/session_title.hpp"  // GenerateSessionTitle
 #include "cli/console_input.hpp"
 #include "cli/i18n.hpp"
 #include "cli/terminal_port.hpp"
@@ -591,61 +590,6 @@ std::expected<std::string, std::string> SummarizeArtifactOnDemand(const SessionT
     out += "\n摘要不作最终证据;有疑点请用 context_search/context_read 回看 artifact " +
            ref.artifact_id + " 原文。";
     return out;
-}
-
-void MaybeGenerateSessionTitle(const SessionTailContext& ctx, lubancode::agent::TaskKind kind) {
-    const lubancode::cli::Theme& theme = *ctx.theme;
-    std::string& session_title = *ctx.session_title;
-    if (*ctx.session_title_auto_attempted || *ctx.session_title_pending || !session_title.empty()) {
-        return;
-    }
-    if (!ctx.session_store->active()) {
-        return;  // 没建档就没什么好起名的,/title 的人工路径照旧
-    }
-    // 得有真实对话可看:至少一条 assistant 正文(用户消息建房时必有)。
-    const auto& history = ctx.agent->History();
-    bool has_reply = false;
-    for (const auto& message : history) {
-        if (message.role != api::Role::Assistant) {
-            continue;
-        }
-        for (const auto& block : message.content) {
-            if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr && !text->text.empty()) {
-                has_reply = true;
-                break;
-            }
-        }
-        if (has_reply) {
-            break;
-        }
-    }
-    if (!has_reply) {
-        return;
-    }
-    *ctx.session_title_auto_attempted = true;  // 一场只试一次,失败安静降级
-
-    const auto routed = ctx.model_router->Route(kind);
-    if (routed.backend == nullptr) {
-        return;
-    }
-    lubancode::agent::BackgroundCallAccounting accounting;
-    const auto title = GenerateSessionTitle(*routed.backend, routed.route.model, routed.route.effort, history,
-                                            /*timeout_secs=*/30, &accounting);
-    ctx.model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, routed.route.model, accounting.usage,
-                                      accounting.duration_ms, accounting.usage_reported);
-    if (!title.has_value() || title->empty()) {
-        return;
-    }
-    session_title = *title;
-    if (ctx.session_store->AppendTitleEvent(session_title)) {
-        TermOut() << theme.stats
-                  << trf("router.task_flash", trf("cmd.title.set", session_title),
-                         "cheap:" + routed.route.model)
-                  << theme.reset << "\n";
-    } else {
-        TermOut() << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
-        session_title.clear();  // 落不了盘就不占内存标题,/sessions 仍用首句
-    }
 }
 
 // 命令分派注册制(会话终章):/memory 的分派位——命令与排版全在本文件,

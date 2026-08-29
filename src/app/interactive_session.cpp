@@ -229,6 +229,149 @@ bool TerminalSessionController::EnsureSessionBegun(const std::string& first_text
     return true;
 }
 
+// ---- 两层会话标题(实测问题 7) ----------------------------------------------
+//
+// 病:标题要等主回合收尾才同步生成——十分钟的活就十分钟后才见标题;主答
+// 出来了还得再等 cheap 6 秒才还提示符;cheap 未单配时还回落 normal,低价
+// 值标题打了主模型。
+//
+// 修:两层。第一层本地标题,首问建档当场就位,零模型 token;第二层精炼,
+// 只在配了独立 cheap 时异步并行发,结果原子替换,失败保留本地标题。
+
+// 第一层:首条真实 query 建档成功当场起本地临时标题(清洗首行、截到合宜
+// 长度),落 title 事件——/sessions 立刻有名字,session_title 非空后本场
+// 不再动标题。已有人工标题(含待建档的 pending)、本场已试过、建档失败,
+// 都直接回——失败时一个后台任务也不起,不留孤儿。
+void TerminalSessionController::BeginSessionTitle(const std::string& first_query) {
+    if (session_title_auto_attempted || session_title_pending || !session_title.empty()) {
+        return;
+    }
+    if (session_store_broken || !session_store.active()) {
+        return;  // 没建档就没什么好起名的,/title 的人工路径照旧
+    }
+    session_title_auto_attempted = true;  // 一场只试一次,失败安静降级
+    const std::string local = lubancode::app::LocalSessionTitle(first_query);
+    if (local.empty()) {
+        return;  // 首问没剩可看的字(全空白那类):标题留空,/sessions 用首句
+    }
+    session_title = local;
+    if (!session_store.AppendTitleEvent(session_title)) {
+        // 落不了盘就不占内存标题(老规矩),/sessions 仍用首句摘要。
+        session_title.clear();
+        TermOut() << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
+        return;
+    }
+    TermOut() << theme.stats << trf("cmd.title.local_set", session_title) << theme.reset << "\n";
+    StartTitleRefinement(first_query);
+}
+
+// 第二层:配了独立 cheap 才并行发精炼。判据看路由表自带的回落标记——
+// cheap 未单配时整体回落 normal(fell_back_to_normal),低价值标题不值得
+// 再打一次主模型:直接留本地标题,一个请求也不发(模型调用账里标题
+// 记 0 次)。发了也只喂首问,与 normal 主请求各走各的独占 client,不抢
+// 流式回调,不占主会话 context。
+void TerminalSessionController::StartTitleRefinement(const std::string& first_query) {
+    const auto info = model_router->RouteInfo(lubancode::agent::TaskKind::SessionTitle);
+    if (info.model.empty() || info.fell_back_to_normal) {
+        return;
+    }
+    // 独占裸 backend(RouteDetached):不与主会话共用 client,也不借同步
+    // 路由的缓存 client 并发——标题线程自己持有、自己释放。
+    auto detached = model_router->RouteDetached(lubancode::agent::TaskKind::SessionTitle);
+    if (detached.backend == nullptr) {
+        return;
+    }
+    lubancode::app::SessionTitleRefiner::Inputs inputs;
+    inputs.backend = std::move(detached.backend);
+    inputs.model = std::move(detached.route.model);
+    inputs.effort = std::move(detached.route.effort);
+    inputs.first_query = first_query;
+    inputs.generation = title_epoch_;
+    session_title_refiner_.Start(std::move(inputs));
+}
+
+// resume 换场善后(实测问题 7):翻标题代数、取消在飞的精炼——上一场的
+// 迟到结果不许落进新场子的存档。恢复的场子已有标题(存档里最后一条
+// title 事件)不重复起;没标题的老档拿首条用户 query 补一枚本地标题,
+// 零模型 token,不再为老档发精炼请求。
+void TerminalSessionController::BackfillTitleOnResume() {
+    title_epoch_++;
+    session_title_refiner_.RequestCancel();
+    session_title_auto_attempted = true;  // 恢复的场子不走"首问自动起名"路
+    if (!session_title.empty() || session_store_broken || !session_store.active()) {
+        return;
+    }
+    // 档里首条用户消息的正文(图片消息拿文件名)——与落盘兜底同一条路。
+    std::string first_text;
+    for (const auto& message : main_agent->History()) {
+        if (message.role != lubancode::api::Role::User) {
+            continue;
+        }
+        for (const auto& block : message.content) {
+            if (const auto* tb = std::get_if<lubancode::api::TextBlock>(&block)) {
+                first_text = tb->text;
+                break;
+            }
+            if (const auto* image = std::get_if<lubancode::api::ImageBlock>(&block)) {
+                first_text = image->filename;
+                break;
+            }
+        }
+        break;
+    }
+    const std::string local = lubancode::app::LocalSessionTitle(first_text);
+    if (local.empty()) {
+        return;  // 老档没有可看的正文:标题留空,/sessions 用首句,不拦人
+    }
+    session_title = local;
+    if (!session_store.AppendTitleEvent(session_title)) {
+        session_title.clear();  // 老档补名失败安静退,不占内存标题
+        return;
+    }
+    TermOut() << theme.stats << trf("cmd.title.local_set", session_title) << theme.reset << "\n";
+}
+
+// 会话循环顶的收货点(实测问题 7):精炼任务落地就记 cheap 账、对代替换、
+// 上屏。非阻塞——没完工直接回,轮末到提示符的路上没有一步在等标题;
+// 结果通常在主回合跑着的时候就备好了,回合一收口这里一眼取走。
+void TerminalSessionController::PollSessionTitleRefinement() {
+    std::optional<lubancode::app::SessionTitleRefiner::Outcome> outcome =
+        session_title_refiner_.TakeFinished();
+    if (!outcome.has_value()) {
+        return;
+    }
+    // usage 分账:记 cheap 台账;context_tracker 一个字不碰——标题采样不
+    // 混主会话 context 占用。迟到被弃也照记:token 是真花了的。
+    model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, outcome->model,
+                                  outcome->accounting.usage, outcome->accounting.duration_ms,
+                                  outcome->accounting.usage_reported);
+    if (!outcome->ok || outcome->title.empty()) {
+        return;  // 失败保留本地标题,不重试,不回落 normal
+    }
+    if (outcome->generation != title_epoch_) {
+        return;  // 人工 /title、/clear 或 resume 抢先:迟到的自动结果丢弃
+    }
+    if (session_store_broken || !session_store.active()) {
+        return;  // 场子没了:标题无处落,不追着写
+    }
+    session_title = std::move(outcome->title);
+    if (!session_store.AppendTitleEvent(session_title)) {
+        // 落不了盘就不占内存标题(老规矩),/sessions 仍用首句摘要。
+        std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
+        TermOut() << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
+        session_title.clear();
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
+        TermOut() << theme.stats
+                  << trf("router.task_flash", trf("cmd.title.set", session_title), "cheap:" + outcome->model)
+                  << theme.reset << "\n";
+    }
+    // 跨会话名册同步改名(与人工 /title 同一条路)。
+    peer_wiring_.SetName(session_title);
+}
+
 // 开仓:<sessions_dir>/<session-id>/context(与 <session-id>.jsonl 并排,
 // /sessions 只扫 *.jsonl,互不干扰)。开不成只告警——仓是加层,不是依赖。
 void TerminalSessionController::OpenArtifactStore() {
@@ -627,6 +770,9 @@ void TerminalSessionController::RunSessionTurn(const std::string& content, TurnS
         // 建档提前到发轮之前(第二期):仓要拿 session id 开张,第一轮请求里
         // 的超长结果才有地方落盘。失败不拦会话,只是没有 artifact 可追。
         EnsureSessionBegun(content);
+        // 两层标题(实测问题 7):首问建档当场起本地临时标题,配了独立
+        // cheap 再并行发精炼——不等首个 normal token,更不等整轮收尾。
+        BeginSessionTitle(content);
         // 窗口同步(0.27.x):/context、/model 改的是 tracker 的窗口,loop 的
         // mid-turn 评估用同一份,发轮前对齐一次。
         main_agent->SetContextWindowTokens(context_tracker.window_tokens());
@@ -789,9 +935,8 @@ void TerminalSessionController::RunSessionTurn(const std::string& content, TurnS
         if (turn_result.status == 0 && !turn_result.cancelled) {
             plan_wiring_.CollectProposal(history_before, trace_turn_id);
         }
-        // 会话起名(cheap 角色):建档后第一轮回合收尾、还没有标题时起一枚,
-        // 成功落 title 事件;失败安静降级(/sessions 继续用首句摘要,不拦人)。
-        lubancode::app::MaybeGenerateSessionTitle(MakeTailContext(), lubancode::agent::TaskKind::SessionTitle);
+        // (会话起名原先也在这收尾处同步等 cheap——实测问题 7 后搬到发轮
+        // 前:首问建档当场起本地标题,精炼异步跑,轮末这条路不碰标题。)
         // 回合收尾总结与候选抽取(learn off 时是空操作)。
         lubancode::app::ExtractTurnMemory(MakeTailContext(), content, history_before);
     }
@@ -924,6 +1069,11 @@ void TerminalSessionController::Run() {
         status_data.background = lubancode::app::BuildBackgroundStatusSegment(
             lubancode::tools::BackgroundTaskRegistry::Instance().List());
         lubancode::cli::SetStatusLineData(status_data, config.status_panel.items, config.status_panel.separator);
+
+        // 两层标题收货点(实测问题 7):首问时异步发出的标题精炼若已落地,
+        // 在这里记 cheap 账、原子替换本地临时标题。非阻塞一眼——轮末到
+        // 提示符的路上没有一步在等标题;没落地就下圈再看。
+        PollSessionTitleRefinement();
 
         // 后台命令完成通知:每圈开头取一次"新进入终态"的任务,有就打一行淡色
         // 通知给用户。不插进对话流(不发给模型、不消耗 token)——只让人看见
@@ -1091,6 +1241,10 @@ void TerminalSessionController::Run() {
         const std::optional<std::string> line =
             lubancode::cli::ReadLine(theme.prompt + "> " + theme.reset, theme,
                                       /*esc_rejects=*/false, /*composer=*/true);
+        // 两层标题的第二个收货点(实测问题 7):ReadLine 阻塞期间精炼可能
+        // 已落定——取到输入先非阻塞收一眼再分派,exit/EOF 也先走这一步,
+        // 迟到的标题不因退出被整笔丢掉(usage 也照记)。
+        PollSessionTitleRefinement();
         if (!line.has_value()) {
             if (lubancode::cli::ComposerStashHasContent()) {
                 TermOut() << theme.stats << tr("stash.still_there") << theme.reset << "\n";

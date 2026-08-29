@@ -327,7 +327,7 @@ TEST_CASE("标题清洗:剥围栏/引号、压空白、按码点限长") {
     CHECK(truncated == "一二三");
 }
 
-TEST_CASE("会话标题转写:600 字节刀口不留下半个汉字") {
+TEST_CASE("标题精炼:只喂首问,600 字节刀口不留下半个汉字") {
     struct CaptureBackend final : lubancode::api::Backend {
         lubancode::api::Request captured;
 
@@ -345,19 +345,40 @@ TEST_CASE("会话标题转写:600 字节刀口不留下半个汉字") {
 
     std::string text(599, 'a');
     text += "中";  // 第 600 字节正落在这枚三字节字符的腰上。
-    lubancode::api::Message message;
-    message.role = lubancode::api::Role::User;
-    message.content.push_back(lubancode::api::TextBlock{text});
 
-    const auto title = lubancode::app::GenerateSessionTitle(
-        backend, "test-model", "", {message}, /*timeout_secs=*/2, /*accounting=*/nullptr);
+    const auto title = lubancode::app::RefineSessionTitle(backend, "test-model", "", text,
+                                                          /*timeout_secs=*/2);
     REQUIRE(title.has_value());
     CHECK(*title == "边界安全");
     REQUIRE(backend.captured.messages.size() == 1);
     REQUIRE(backend.captured.messages[0].content.size() == 1);
     const auto& sent = std::get<lubancode::api::TextBlock>(backend.captured.messages[0].content[0]).text;
     CHECK(lubancode::platform::IsValidUtf8(sent));
-    CHECK(sent == "用户: " + std::string(599, 'a') + "\n");
+    // 只喂首问截段,不带对话转写的尾巴。
+    CHECK(sent == "用户: " + std::string(599, 'a'));
+    // 单子预算:输出上限收紧到 24,reasoning 没配档位时压到最低档 low。
+    REQUIRE(backend.captured.max_tokens.has_value());
+    CHECK(*backend.captured.max_tokens == lubancode::app::kTitleRefineMaxTokens);
+    CHECK(backend.captured.max_tokens.value_or(0) <= 24);
+    CHECK(backend.captured.reasoning_effort == "low");
+    // 路由带档位就按配的来,不覆盖用户的显式配置。
+    CaptureBackend backend2;
+    lubancode::app::RefineSessionTitle(backend2, "test-model", "minimal", text, /*timeout_secs=*/2);
+    CHECK(backend2.captured.reasoning_effort == "minimal");
+}
+
+TEST_CASE("本地临时标题:取首行、清空白、按码点限长") {
+    using lubancode::app::LocalSessionTitle;
+    CHECK(LocalSessionTitle("做一个图书管理系统,node 前端") == "做一个图书管理系统,node 前端");
+    // 多行粘贴只取首行。
+    CHECK(LocalSessionTitle("第一行是题眼\n第二行是细节\n") == "第一行是题眼");
+    // 连续空白压成单空格,首尾空白剥掉。
+    CHECK(LocalSessionTitle("  调研   向量库  选型 \t") == "调研 向量库 选型");
+    // 中文按码点截断:24 字限 10,绝不在多字节中腰劈开。
+    CHECK(LocalSessionTitle("一二三四五六七八九十甲乙丙丁", 10) == "一二三四五六七八九十");
+    // 首问没剩可看的字:空串(调用方当"没起出来"处理)。
+    CHECK(LocalSessionTitle("   \n第二行") == "");
+    CHECK(LocalSessionTitle("") == "");
 }
 
 TEST_CASE("ModelRouterService:同 provider 走主 backend,跨 provider 建裸 client") {

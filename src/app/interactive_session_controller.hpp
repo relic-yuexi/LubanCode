@@ -6,6 +6,7 @@
 // controller 之外的层。
 #pragma once
 
+#include <cstdint>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -32,6 +33,7 @@
 #include "app/memory_extract.hpp"
 #include "app/mention_support.hpp"
 #include "app/session_stack.hpp"
+#include "app/session_title_refiner.hpp"  // SessionTitleRefiner(两层标题第二层)
 #include "app/turn_runner.hpp"
 #include "app/wirings/goal_session_wiring.hpp"
 #include "app/wirings/loop_session_wiring.hpp"
@@ -109,6 +111,16 @@ private:
     void PersistNewMessages();
     // 建档与开仓(第二期):建档提前到发轮前;仓跟着会话 id 开张。
     bool EnsureSessionBegun(const std::string& first_text);
+    // ---- 两层会话标题(实测问题 7) ----
+    // 第一层:首问建档当场起本地临时标题(零模型 token),/sessions 立刻
+    // 有名字;配了独立 cheap 再并行发第二层精炼——不阻塞 normal 主请求,
+    // 不拖轮末提示符,迟到或被人工抢先即弃。
+    void BeginSessionTitle(const std::string& first_query);
+    void StartTitleRefinement(const std::string& first_query);
+    // resume 换场善后:翻标题代数、取消在飞精炼;旧档没标题就补本地标题。
+    void BackfillTitleOnResume();
+    // 会话循环顶的非阻塞收货点:精炼落地记 cheap 账、对代替换、上屏。
+    void PollSessionTitleRefinement();
     void OpenArtifactStore();
     // 外来消息轮:peer 来信是 user 语义(另一会话的用户正文);后台完成
     // 唤醒是宿主合成控制消息,传 BackgroundCompletion——检索整轮跳过,
@@ -187,9 +199,6 @@ private:
         tail.artifact_store = artifact_store.get();
         tail.session_store = &session_store;
         tail.theme = &theme;
-        tail.session_title = &session_title;
-        tail.session_title_pending = &session_title_pending;
-        tail.session_title_auto_attempted = &session_title_auto_attempted;
         return tail;
     }
     void EnsureMemoryTool();
@@ -360,7 +369,12 @@ private:
     bool& session_store_broken;         // 建档失败过,别每轮都再撞一次
     std::string& session_title;         // /title 设的标题;resume 时取存档里最后一条
     bool& session_title_pending;        // 建档前设了标题,建档成功后补写事件行
-    bool session_title_auto_attempted = false;  // cheap 起名只试一次,失败不追着重试
+    bool session_title_auto_attempted = false;  // 自动起名只试一次,失败不追着重试
+    // 两层标题的活账(实测问题 7):代数在人工 /title、/clear、/resume 时
+    // 翻号——在飞的精炼结果落地对代,对不上就弃(人工优先);精炼器持有
+    // 自己的后台线程,析构自带取消与有界收尾。
+    std::uint64_t title_epoch_ = 0;
+    lubancode::app::SessionTitleRefiner session_title_refiner_;
     // 最近一次 compact 的台账(第四期 /context"最近一次 compact 所用角色、
     // 模型、前后 token、耗时和校验结果"):一行人话,由压缩路径写。
     std::string last_compact_line;
