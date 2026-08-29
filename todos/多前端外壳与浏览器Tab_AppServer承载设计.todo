@@ -1,0 +1,193 @@
+# 多前端外壳与浏览器 Tab：AppServer 承载设计
+
+- 状态：待实现
+- 日期：2026-08-29
+- 前置：`todos/内嵌浏览器调试工作台_BrowserRuntime与Package边界.todo`（阶段 0-3、5 已落）
+- 相关：`src/app_server/`（协议 1.1）、`docs/features/app-server/README.md`、`browser/`（Runtime 与 sidecar）
+- 范围：AppServer 第二承载、用户输入路由、页面镜像流、多客户端、参考前端
+- 不在本单：钦点唯一外壳；内核里长 GUI；远端多人协作；内核侧新增浏览器能力（协议 1.1 已够第一版）
+
+## 一、先下断语
+
+外壳是外壳，内核是内核。AppServer 就是那道缝。
+
+LubanCode 的内核（会话、Agent、Workflow、BrowserRuntime、进化闭环）只认一条边：
+AppServer 协议。外壳是终端 TUI、是 Tauri、是纯 Web 页、是 Android 应用，内核一概不知，
+也不必知。浏览器内嵌这件事，不是"挑一家嵌入框架塞进内核"，是"把协议面补到任意外壳
+都能把浏览器画出来"。
+
+```text
+终端 TUI ─┐
+Tauri 壳 ─┤
+纯 Web 页 ─┼──> AppServer 协议（唯一缝）──> LubanCode 内核
+Android ──┘                              └──> BrowserRuntime（Playwright sidecar）
+```
+
+原工作台单的阶段 4（Electron/WebView2/CEF 三选一）就此作废。嵌入引擎的抉择属于
+"第一只图形外壳用哪家"——Tauri 自带 WebView，Web 前端自带浏览器，Android 自带
+WebView，内核谁的都不欠。
+
+## 二、现状盘点：缝已经有多宽
+
+协议 1.1（0.26.99）已给：
+
+- browser 方法十八枚（会话/页签/导航/快照/截图/动作/journal 查询）。
+- browser 事件十三族（带连接层 seq；journal 批量有界可合并可丢明报）。
+- 审批与取消贯通（permission/request、acceptForSession、action/cancel）。
+- 截图只发 artifact 引用，不塞 base64。
+- 断线凭 cursor 补账。
+
+还缺四件，都是外壳无关的内核活：
+
+1. **第二承载**：协议如今只在 stdio 上跑。Web 与 Android 外壳要 TCP 上的
+   WebSocket（或退一步 SSE + HTTP POST）承载同一套协议。
+2. **用户输入路由**：现在只有 Agent 动作走协议。用户在浏览器 Tab 里的点击、
+   输入、滚动，要经协议回传（`owner: "user"`），与 Agent 动作进同一仲裁。
+3. **页面镜像流**：Web 外壳嵌不了任意网页（X-Frame-Options 拦着），要靠
+   截图流镜像；Tauri/Android 可嵌真 WebView，但镜像流仍是兜底。Playwright
+   自带 screencast，折成有帧率帽的事件。
+4. **多客户端**：终端开着、图形外壳也连着，同一场会话两边都该活着——至少
+   事件两边都收，输入按来源记账。
+
+## 三、三种外壳各自的活法
+
+### 3.1 纯 Web 前端（localhost 页面）
+
+- 连法：WS 连本机 AppServer。
+- 聊天、页签账、Console/Network 面板、截图卡片——协议 1.1 现成。
+- 浏览器 Tab = **镜像**：截图流 + 输入注入（用户点镜像，外壳发
+   `browser/action` 带 `owner:"user"`，内核注入真页面）。
+- 最容易做，当**参考前端**——它绿了，别的壳都只是换渲染层。
+
+### 3.2 Tauri 壳
+
+- 前端同 Web 页（一套代码）；Tauri 只是把页装进桌面窗、给系统 WebView。
+- 浏览器 Tab 两路任选：镜像（同上），或 Tauri 多 WebView 直开 Playwright
+   的调试端口（真页面，输入直通）——镜像先行，直连后议。
+- 壳层的事：打包、托盘、多窗。内核不管。
+
+### 3.3 Android 应用
+
+- WebView 壳装 Web 前端，WS 连本机或局域网的 AppServer。
+- 输入适配（触屏手势折成 click/scroll/type）在外壳层做。
+- 局域网连接牵鉴权（见 §六），首版可以只做本机 adb 反向代理。
+
+一句话：**内核不为任何一家外壳加一行动作**。三家共用同一协议、同一参考前端。
+
+## 四、内核侧四件活
+
+### 4.1 第二承载（WS）
+
+- `src/app_server/` 加 WebSocket 承载：同一套 protocol/dispatcher，新添传输层。
+- 启动开关（如 `--app-server-ws <port>`），与 stdio 并存。
+- 帧即现有 JSON 消息；连接层 seq、断线补账、反向请求（审批）原样适用。
+- 鉴权：本机回环首版免鉴权；非回环要求 token（§六）。
+
+### 4.2 用户输入路由
+
+- 协议已有 `owner` 字段（阶段 3 落的"agent"/"user"）——补的是**真用户路**：
+  外壳发 `browser/action` 带 `owner:"user"`、不带 threadId（用户不是 Agent）。
+- 仲裁升级：用户动作与 Agent 动作同队列；用户动作不排队（用户优先，Agent
+  动作让路），动作后照旧递 userEpoch——Agent 拿旧观察自然 stale。
+- 一键暂停：`browser/pause`、`browser/resume`——暂停期间 Agent 动作一律
+  受理不执行、明报"已暂停"，用户动作照走。终态事件照发。
+
+### 4.3 镜像流
+
+- `browser/screencast/start|stop`：Playwright screencast 折成事件
+  `browser/screencast/frame`（artifact 化存盘、事件只带引用与 page_id）。
+- 帧率帽（如 5fps 起步可调）、有界队列、慢消费者丢帧明记 dropped——沿用
+  journal 的有界规矩。
+- 截图流与单发截图同一条 artifact 链，不另起炉灶。
+
+### 4.4 多客户端
+
+- 同一会话多连接：事件按连接层各自补账；输入带来源；审批请求可路由到
+  任一连接，先答先得（记谁批的）。
+- 首版上限（如 4 连接）防失控。
+
+## 五、参考前端（验证缝的宽窄）
+
+一只最小 localhost Web 页（进 `examples/` 或独立目录，不进内核）：
+
+- 聊天流（走既有 thread/turn 事件）。
+- 页签账 + Console/Network 面板（协议 1.1 现成）。
+- 浏览器 Tab 镜像（screencast 流 + 输入注入）。
+- 审批弹层（permission/request 反向请求）。
+
+它不是产品，是**验收工具**：协议面缺什么，写它的时候全暴露。
+
+## 六、安全账
+
+- WS 承载首版只绑回环；要听非回环，须显式开关加 token（环境变量或配置，
+  不落日志）。
+- 用户输入路由进来的动作同样过确认门——用户动作多数免问（本人操作），
+  但 Agent 假冒不来：`owner` 由内核按连接与鉴权裁定，外壳报什么不算数。
+- 镜像流的截图含页面隐私，artifact 目录照旧会话隔离，不外发。
+- 注入防线沿用 computer-use 那条铁律：页面内容（网页里的话）不算许可——
+  Agent 在页面上下文里"看到"的授权指令一律无效。
+
+## 七、实现次序
+
+### 阶段 A：WS 承载
+
+- [ ] app_server 加 WebSocket 传输，与 stdio 同协议同 dispatcher。
+- [ ] 回环绑定 + token 开关（非回环）。
+- [ ] 连接层 seq/补账在 WS 上逐条对账。
+
+验收：独立 WS 客户端跑通浏览器冒烟二十六项的等价集。
+
+### 阶段 B：用户输入路由与暂停
+
+- [ ] `owner:"user"` 动作路（不排队、递 epoch）。
+- [ ] `browser/pause|resume`，暂停语义如 §4.2。
+- [ ] 仲裁测试：用户让路、Agent stale、暂停受理不执行。
+
+验收：参考前端能安全点页面，Agent 不抢用户的手。
+
+### 阶段 C：镜像流
+
+- [ ] screencast 起停与帧事件（artifact 引用）。
+- [ ] 帧率帽、有界、丢帧明记。
+- [ ] 慢消费者测试。
+
+验收：低配消费者不掉线、不炸内存，丢帧有账。
+
+### 阶段 D：参考前端
+
+- [ ] 最小 Web 页四件套（聊天/页签/面板/镜像 + 审批弹层）。
+- [ ] 全程只走协议，不 import 内核头文件。
+
+验收：换掉这页的渲染层（换个框架重写）不动内核一行——缝够宽。
+
+### 阶段 E：外壳孵化（按需）
+
+- [ ] Tauri 包装参考前端（镜像路）。
+- [ ] Android WebView 壳（触屏手势折输入）。
+- [ ] 各自的打包与发布账另立单。
+
+验收：三家外壳零内核改动。
+
+## 八、测试账
+
+- WS 承载：协议全方法/事件对账（与 stdio 路同语义）、断线重连补账、token。
+- 输入路由：owner 裁定不可伪造、用户优先、暂停门。
+- 镜像流：帧帽、丢帧计数、artifact 一致性。
+- 多客户端：双连事件各自补账、审批先答先得、来源记账。
+- 参考前端：端到端一幕（开页→看账→点镜像→Agent 收 stale）。
+
+## 九、完成线
+
+- [ ] 任何外壳只用 AppServer 协议即可呈现完整浏览器工作台。
+- [ ] 用户与 Agent 双向动作、暂停、镜像流、多客户端全在协议内闭环。
+- [ ] 内核零 GUI 依赖、零特定外壳依赖。
+- [ ] 参考前端换皮不动内核。
+
+## 十、留到后头
+
+- Tauri 直连 Playwright 调试端口的真页面路。
+- 局域网发现与配对（mDNS/二维码）。
+- 外壳自动升级与版本协商。
+- 多用户同场（当前明确不做）。
+
+缝就一条：协议。壳随便换，内核不挪窝。

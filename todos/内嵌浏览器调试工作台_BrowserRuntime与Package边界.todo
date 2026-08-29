@@ -1,6 +1,6 @@
 # 内嵌浏览器调试工作台：BrowserRuntime 与 Package 边界
 
-- 状态：阶段 0/1/2/3 已落地（拆三层、两本 journal、App Server Browser 协议 1.1 + sidecar），阶段 4 起待实现
+- 状态：阶段 0-3、5 已落地（拆三层、两本 journal、协议 1.1 + sidecar、官方包）；阶段 4 翻案归 `todos/多前端外壳与浏览器Tab_AppServer承载设计.todo`
 - 日期：2026-08-29
 - 目标：让 LubanCode 像桌面 Codex 一样，能在宿主界面里打开网页、操作页面、查看截图、Console 与 Network，并把同一份观察送给用户和模型
 - 相关现状：`browser/server.js`、`src/mcp/rich_result.*`、`src/agent/tool_result_images.*`、`src/app_server/`、`examples/packages/browser-agent/`
@@ -532,16 +532,12 @@ examples/packages/browser-debug/
 
 验收：独立协议客户端能完整控制页面、看事件、断线重接。
 
-### 阶段 4：真正内嵌 Browser Tab
+### 阶段 4：真正内嵌 Browser Tab（已翻案，归 `todos/多前端外壳与浏览器Tab_AppServer承载设计.todo`）
 
-- [ ] 选 Electron/WebView2/CEF 路线，写 ADR。
-- [ ] 页面嵌入主工作区。
-- [ ] 地址栏、页签、视口、缩放、截图。
-- [ ] DOM、Console、Network 面板。
-- [ ] 用户与 Agent 焦点仲裁。
-- [ ] 工具条目里的截图可点开原图。
-
-验收：不用另找浏览器窗口，聊天、页面、调试账同屏工作。
+原思路"选 Electron/WebView2/CEF 三选一"作废：AppServer 本就是为多前端设计的缝，
+内核不为任何一家外壳加一行动作。Tauri、纯 Web、Android 各自连协议，浏览器 Tab
+由外壳渲染（镜像流或真嵌入是外壳自己的事）。本阶段剩余目标（页面同屏、面板、
+仲裁、截图原图）在新单的阶段 A-D 里接续。
 
 ### 阶段 5：官方 Browser Package
 
