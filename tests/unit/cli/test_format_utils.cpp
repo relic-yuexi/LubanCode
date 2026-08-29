@@ -8,8 +8,10 @@
 #include <vector>
 
 #include "cli/format_utils.hpp"
+#include "cli/context_tracker.hpp"
 #include "cli/theme.hpp"
 
+using namespace lubancode;
 using lubancode::cli::BuildStatusLineText;
 using lubancode::cli::BuildStatusPanelSegments;
 using lubancode::cli::BuildStatusPanelText;
@@ -428,4 +430,110 @@ TEST_CASE("WrapStatusRows: 中文收口符同样不许起行") {
             CHECK(row.compare(0, closer.size(), closer) != 0);
         }
     }
+}
+
+// ---- 逐请求缓存命中块(真实实测问题单问题 5) -------------------------------
+// 一行 = 一次带回 usage 的模型请求(不是用户轮);按外层用户轮次分组,
+// 上限/总数/未回报都说破。拼装全在 BuildCacheRequestHistoryLines,这里钉
+// 字符串。
+
+TEST_CASE("BuildCacheRequestHistoryLines: 一请求五工具 = 1 个用户轮次 / 6 次模型请求") {
+    lubancode::cli::ContextTracker tracker(100000);
+    tracker.BeginUserTurn("turn-3", "那你挂后台启动吧");
+    for (int step = 0; step <= 5; ++step) {
+        tracker.ApplyUsage(api::Usage{27000 + step * 100, 400, 25000 + step * 100, 0}, "turn-3", step);
+    }
+    const auto lines = lubancode::cli::BuildCacheRequestHistoryLines(tracker);
+    REQUIRE(lines.size() == 2 + 1 + 6);  // 头两行 + 组头 + 6 次请求
+    // 表头:口径说死——逐请求、仅主会话、会话内、不是用户轮。
+    CHECK(lines[0].find("逐请求缓存命中") != std::string::npos);
+    CHECK(lines[0].find("仅主会话") != std::string::npos);
+    CHECK(lines[0].find("6 次模型请求") != std::string::npos);
+    // 计数行:1 个用户轮次 / 6 次模型请求,两种计数各叫各名。
+    CHECK(lines[1].find("1 个用户轮次 / 6 次模型请求") != std::string::npos);
+    // 组头:轮次序号 + turn_id 可追 + 用户输入标签。
+    CHECK(lines[2].find("用户轮次 #1") != std::string::npos);
+    CHECK(lines[2].find("turn-3") != std::string::npos);
+    CHECK(lines[2].find("那你挂后台启动吧") != std::string::npos);
+    // 请求行:请求 1..6,输入/命中/百分比。
+    CHECK(lines[3].find("请求 1") != std::string::npos);
+    // 完整输入 = input + cache_read(Anthropic 语义,TotalInputTokens):
+    // 请求 1 = 27000 + 25000 = 52000 -> "52k"。
+    CHECK(lines[3].find("52k") != std::string::npos);
+    CHECK(lines[7].find("请求 5") != std::string::npos);
+    CHECK(lines[8].find("请求 6") != std::string::npos);
+}
+
+TEST_CASE("BuildCacheRequestHistoryLines: 跨用户轮次分组,轮次不明与未登记各有措辞") {
+    lubancode::cli::ContextTracker tracker(100000);
+    tracker.BeginUserTurn("turn-1", "第一问");
+    tracker.ApplyUsage(api::Usage{1000, 10, 0, 0}, "turn-1", 0);
+    tracker.ApplyUsage(api::Usage{2000, 10, 1000, 0}, "turn-1", 1);
+    tracker.BeginUserTurn("turn-2", "第二问");
+    tracker.ApplyUsage(api::Usage{3000, 10, 2800, 0}, "turn-2", 0);
+    const auto lines = lubancode::cli::BuildCacheRequestHistoryLines(tracker);
+    CHECK(lines[1].find("2 个用户轮次 / 3 次模型请求") != std::string::npos);
+    CHECK(lines[2].find("用户轮次 #1") != std::string::npos);
+    CHECK(lines[5].find("用户轮次 #2") != std::string::npos);
+
+    // 事件没带 turn_id:按"轮次不明"分组,不猜。
+    lubancode::cli::ContextTracker orphan(100000);
+    orphan.ApplyUsage(api::Usage{1000, 10, 0, 0}, "", 0);
+    const auto orphan_lines = lubancode::cli::BuildCacheRequestHistoryLines(orphan);
+    REQUIRE(orphan_lines.size() >= 4);
+    CHECK(orphan_lines[2].find("轮次不明") != std::string::npos);
+
+    // 陌生 turn_id(没走 BeginUserTurn 的路径):自动补号,标签写"未登记用户输入"。
+    lubancode::cli::ContextTracker plain(100000);
+    plain.ApplyUsage(api::Usage{1000, 10, 0, 0}, "turn-7", 0);
+    const auto plain_lines = lubancode::cli::BuildCacheRequestHistoryLines(plain);
+    CHECK(plain_lines[2].find("turn-7") != std::string::npos);
+    CHECK(plain_lines[2].find("未登记用户输入") != std::string::npos);
+}
+
+TEST_CASE("BuildCacheRequestHistoryLines: 达上限明写仅保留最近 12 次,不冒充总数") {
+    lubancode::cli::ContextTracker tracker(100000);
+    for (int turn = 1; turn <= 15; ++turn) {
+        const std::string turn_id = "turn-" + std::to_string(turn);
+        tracker.BeginUserTurn(turn_id, "第 " + std::to_string(turn) + " 问");
+        tracker.ApplyUsage(api::Usage{1000, 10, 900, 0}, turn_id, 0);
+    }
+    REQUIRE(tracker.cache_request_history().size() == lubancode::cli::ContextTracker::kCacheHistorySize);
+    const auto lines = lubancode::cli::BuildCacheRequestHistoryLines(tracker);
+    // 头三行:表头、计数、上限说明(全会话共 15 次,12 只是窗口)。
+    CHECK(lines[0].find("12 次模型请求") != std::string::npos);
+    CHECK(lines[2].find("仅保留最近 12 次") != std::string::npos);
+    CHECK(lines[2].find("全会话共 15 次模型请求") != std::string::npos);
+    // 窗口里只剩 turn-4..turn-15,最旧的 turn-1..3 被挤掉。
+    CHECK(lines[3].find("turn-4") != std::string::npos);
+
+    // 未到上限:不说"仅保留",总数如实。
+    lubancode::cli::ContextTracker small(100000);
+    small.BeginUserTurn("turn-1", "只有一问");
+    small.ApplyUsage(api::Usage{1000, 10, 0, 0}, "turn-1", 0);
+    const auto small_lines = lubancode::cli::BuildCacheRequestHistoryLines(small);
+    for (const auto& line : small_lines) {
+        CHECK(line.find("仅保留") == std::string::npos);
+    }
+}
+
+TEST_CASE("BuildCacheRequestHistoryLines: 未回报请求标缺测,不冒充 0%") {
+    lubancode::cli::ContextTracker tracker(100000);
+    tracker.BeginUserTurn("turn-1", "这一问");
+    tracker.ApplyUsage(api::Usage{1000, 10, 0, 0}, "turn-1", 0);
+    tracker.ApplyUsage(api::Usage{}, "turn-1", 1);  // 第二次请求 provider 没回 usage
+    const auto lines = lubancode::cli::BuildCacheRequestHistoryLines(tracker);
+    REQUIRE(lines.size() == 2 + 1 + 2);
+    // 时间序:请求 1 是实测(命中 0 如实报 0%),请求 2 是缺测(未回报)。
+    CHECK(lines[3].find("请求 1") != std::string::npos);
+    CHECK(lines[3].find("0%") != std::string::npos);       // 实测过 0 命中,如实 0%
+    CHECK(lines[4].find("请求 2") != std::string::npos);
+    CHECK(lines[4].find("未回报") != std::string::npos);
+    CHECK(lines[4].find("%") == std::string::npos);  // 缺测行没有百分比
+}
+
+TEST_CASE("BuildCacheRequestHistoryLines: 一次请求都没有返回空表(本地 slash 不进账)") {
+    lubancode::cli::ContextTracker tracker(100000);
+    tracker.BeginUserTurn("turn-1", "还没发请求");
+    CHECK(lubancode::cli::BuildCacheRequestHistoryLines(tracker).empty());
 }

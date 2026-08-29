@@ -130,6 +130,16 @@ std::string StreamHintText(bool plain);
 // report.reported();空闲重建路径传 !tracker.usage_stale())。
 std::string BuildCacheNote(const class ContextTracker& tracker, bool last_usage_reported);
 
+// /context 缓存卡片的"逐请求缓存命中"块(真实实测问题单问题 5):把
+// tracker 的请求级环形缓冲按外层用户轮次分组,一行组头(用户轮次 #N
+// (turn-id):标签)+ 每次模型请求一行(请求 n 输入 X / 命中 Y(Z%))。
+// 头两行把口径说死:仅主会话、会话内(跨用户轮次)最近 N 次模型请求;
+// 达到环形上限时明写"仅保留最近 12 次,全会话共 M 次",不把 12 冒充
+// 总数;缺测请求(unreported)写"未回报",不冒充 0%。一次请求都没有
+// 返回空表。行内不带换行符,缩进已含(组头两格、组内四格、请求行六格),
+// 打印由调用方管。
+std::vector<std::string> BuildCacheRequestHistoryLines(const class ContextTracker& tracker);
+
 // /context 裸敲的分类占用分析:系统提示/工具定义/对话历史三类,配一条按
 // "占窗口比例"取整的条形图(默认 16 格,█ 实 ░ 空;plain 主题回退 # 和 -,
 // 拿 theme.reset 是不是空串当探针——plain 全字段空串,真主题 reset 恒非空),

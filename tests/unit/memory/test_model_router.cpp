@@ -229,13 +229,18 @@ TEST_CASE("usage 分角色记账:Record/ReportLines/回退留痕") {
     ledger.Record(ModelRole::Normal, "m-normal", usage, 0, false);
 
     const auto lines = ledger.ReportLines();
-    REQUIRE(lines.size() == 2);
-    // 顺序固定 cheap -> normal,好对照 /model roles。
+    // 三角色固定列全(问题 6):零调用的 lao 也露脸,不隐藏。
+    REQUIRE(lines.size() == 3);
+    // 顺序固定 cheap -> normal -> lao,好对照 /model roles。
     CHECK(lines[0].find("cheap") != std::string::npos);
     CHECK(lines[0].find("m-cheap") != std::string::npos);
     CHECK(lines[0].find("2 次调用") != std::string::npos);
     CHECK(lines[0].find("2000") != std::string::npos);  // 输入累计
     CHECK(lines[1].find("usage 未报告") != std::string::npos);
+    CHECK(lines[2].find("lao") != std::string::npos);
+    CHECK(lines[2].find("0 次调用") != std::string::npos);
+    CHECK(lines[2].find("本场未触发") != std::string::npos);
+    CHECK(lines[2].find("Plan/规划任务") != std::string::npos);
 
     ledger.RecordFallback(TaskKind::Compact, ModelRole::Cheap, ModelRole::Normal, "provider 超时");
     REQUIRE(ledger.fallback_notes().size() == 1);
@@ -244,6 +249,46 @@ TEST_CASE("usage 分角色记账:Record/ReportLines/回退留痕") {
     // from == to 不是回退,不记。
     ledger.RecordFallback(TaskKind::Compact, ModelRole::Normal, ModelRole::Normal, "x");
     CHECK(ledger.fallback_notes().size() == 1);
+}
+
+TEST_CASE("分角色账:新会话三角色全见 0 次,职责各写一句(问题 6)") {
+    lubancode::agent::ModelUsageLedger ledger;
+    const auto table =
+        ResolveModelRoutes(Spec("m-normal"), Spec("m-cheap"), Spec("m-lao"), "qwen-session", "prov");
+    const auto lines = ledger.ReportLines(&table);
+    REQUIRE(lines.size() == 3);
+    for (const auto& line : lines) {
+        CHECK(line.find("0 次调用") != std::string::npos);
+        CHECK(line.find("本场未触发") != std::string::npos);
+    }
+    CHECK(lines[0].find("m-cheap") != std::string::npos);   // 零调用也摆有效路由的模型
+    CHECK(lines[0].find("后台采样") != std::string::npos);  // cheap 职责
+    CHECK(lines[1].find("m-normal") != std::string::npos);
+    CHECK(lines[1].find("普通对话与实现") != std::string::npos);
+    CHECK(lines[2].find("m-lao") != std::string::npos);
+}
+
+TEST_CASE("分角色账:只调 normal 时 cheap/lao 仍列 0 次;回落行内写明(问题 6)") {
+    lubancode::agent::ModelUsageLedger ledger;
+    lubancode::api::Usage usage;
+    usage.input_tokens = 100;
+    ledger.Record(ModelRole::Normal, "m-normal", usage, 1200, true);
+    // cheap/lao 未配置 -> 回落 normal(与 /model roles 同一张表、同一份 source)。
+    const auto table = ResolveModelRoutes(Spec("m-normal"), EmptySpec(), EmptySpec(), "qwen-session", "prov");
+    const auto lines = ledger.ReportLines(&table);
+    REQUIRE(lines.size() == 3);
+    CHECK(lines[0].find("cheap") != std::string::npos);
+    CHECK(lines[0].find("0 次调用") != std::string::npos);
+    CHECK(lines[0].find("回落到 normal") != std::string::npos);  // 回落写明,不重印同名装独立配置
+    CHECK(lines[1].find("1 次调用") != std::string::npos);
+    CHECK(lines[2].find("lao") != std::string::npos);
+    CHECK(lines[2].find("0 次调用") != std::string::npos);
+    CHECK(lines[2].find("回落到 normal") != std::string::npos);
+    // 配了独立 lao 就不写回落。
+    const auto table2 = ResolveModelRoutes(Spec("m-normal"), EmptySpec(), Spec("m-lao"), "qwen-session", "prov");
+    const auto lines2 = ledger.ReportLines(&table2);
+    CHECK(lines2[2].find("m-lao") != std::string::npos);
+    CHECK(lines2[2].find("回落到 normal") == std::string::npos);
 }
 
 TEST_CASE("/model roles 短表:回落行写明'回落到 normal'") {

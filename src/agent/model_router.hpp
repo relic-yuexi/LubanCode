@@ -63,6 +63,11 @@ enum class TaskKind {
 std::string ToString(ModelRole role);
 std::string ToString(TaskKind kind);
 
+// 一档角色的默认职责一句(真实实测问题单问题 6):零调用行的
+// "本场未触发(职责)"注脚,叫用户看得出这角色是干什么的、没触发是不是
+// 正常——缺行会让人猜"没配置/回落了/坏了",说破最省事。
+std::string RoleDutyText(ModelRole role);
+
 // 默认角色映射表(纯函数):哪种任务走哪档角色。调用方只报 TaskKind,
 // 不自行拼 model 字符串(规格"调用点收拢")。
 ModelRole DefaultRoleForTask(TaskKind kind);
@@ -164,8 +169,12 @@ public:
     const std::vector<std::string>& fallback_notes() const { return fallback_notes_; }
 
     // 一行一账,给 /context 与 /model roles 用:角色 · 模型 · N 次 ·
-    // 输入 X · 输出 Y。没账的角色不列。
-    std::vector<std::string> ReportLines() const;
+    // 输入 X · 输出 Y。三角色(cheap/normal/lao)固定列全(问题 6):零调用
+    // 角色也露脸,写"0 次调用 · 本场未触发(默认职责)",不叫人猜缺行是
+    // 没配置、回落还是坏了。routes(可空)给三角色有效路由:零调用行的
+    // 模型名取自有效路由;回落到 normal 的角色(fell_back_to_normal)行内
+    // 写明回落来源——与 /model roles 同一份 source 口径,同名不装独立配置。
+    std::vector<std::string> ReportLines(const ModelRouteTable* routes = nullptr) const;
 
     void Clear() {
         by_role_.clear();

@@ -3,6 +3,9 @@
 
 #include <doctest/doctest.h>
 
+#include <string>
+
+#include "agent/model_router.hpp"
 #include "cli/context_tracker.hpp"
 
 using namespace lubancode;
@@ -117,39 +120,168 @@ TEST_CASE("ContextTracker: 本场累计命中率跨请求累加,与最近一次�
     CHECK(tracker.usage_stale());
 }
 
-TEST_CASE("ContextTracker: 逐轮命中历史按轮记、环形保留最近 N 轮") {
+TEST_CASE("ContextTracker: 逐请求命中历史按请求记、环形保留最近 N 次") {
     cli::ContextTracker tracker(1000);
-    CHECK(tracker.cache_history().empty());  // 一次实测都没有
-    // 三轮:冷 miss、吃缓存、半命中。历史按时间序,每轮分子分母独立。
-    tracker.ApplyUsage(api::Usage{1000, 10, 0, 0});       // 输入 1k,命中 0
-    tracker.ApplyUsage(api::Usage{1000, 10, 1000, 0});    // 输入 2k,命中 1k
-    tracker.ApplyUsage(api::Usage{500, 10, 500, 0});      // 输入 1k,命中 0.5k
-    REQUIRE(tracker.cache_history().size() == 3);
-    CHECK(tracker.cache_history()[0].input_tokens == 1000);
-    CHECK(tracker.cache_history()[0].cache_read_tokens == 0);
-    CHECK(tracker.cache_history()[0].hit_percent() == 0);
-    CHECK(tracker.cache_history()[1].input_tokens == 2000);
-    CHECK(tracker.cache_history()[1].cache_read_tokens == 1000);
-    CHECK(tracker.cache_history()[1].hit_percent() == 50);
-    CHECK(tracker.cache_history()[2].input_tokens == 1000);
-    CHECK(tracker.cache_history()[2].cache_read_tokens == 500);
-    CHECK(tracker.cache_history()[2].hit_percent() == 50);
-    // 第 4 轮:未到环形上限(12),4 条都保留,按时间序。
-    tracker.ApplyUsage(api::Usage{100, 0, 900, 0});
-    REQUIRE(tracker.cache_history().size() == 4);
-    CHECK(tracker.cache_history()[0].input_tokens == 1000);  // 第一轮还在
-    CHECK(tracker.cache_history()[3].input_tokens == 1000);  // 新轮在末尾
-    // 全零 usage(没实测)不进历史。
-    tracker.ApplyUsage(api::Usage{});
-    REQUIRE(tracker.cache_history().size() == 4);
-    // 超出环形上限:保留最近 kCacheHistorySize 轮。
+    CHECK(tracker.cache_request_history().empty());  // 一次实测都没有
+    // 三次请求:冷 miss、吃缓存、半命中。历史按时间序,每次分子分母独立。
+    tracker.ApplyUsage(api::Usage{1000, 10, 0, 0}, "turn-1", 0);    // 输入 1k,命中 0
+    tracker.ApplyUsage(api::Usage{1000, 10, 1000, 0}, "turn-1", 1); // 输入 2k,命中 1k
+    tracker.ApplyUsage(api::Usage{500, 10, 500, 0}, "turn-2", 0);   // 输入 1k,命中 0.5k
+    REQUIRE(tracker.cache_request_history().size() == 3);
+    CHECK(tracker.cache_request_history()[0].input_tokens == 1000);
+    CHECK(tracker.cache_request_history()[0].cache_read_tokens == 0);
+    CHECK(tracker.cache_request_history()[0].hit_percent() == 0);
+    CHECK(tracker.cache_request_history()[1].input_tokens == 2000);
+    CHECK(tracker.cache_request_history()[1].cache_read_tokens == 1000);
+    CHECK(tracker.cache_request_history()[1].hit_percent() == 50);
+    CHECK(tracker.cache_request_history()[2].input_tokens == 1000);
+    CHECK(tracker.cache_request_history()[2].cache_read_tokens == 500);
+    CHECK(tracker.cache_request_history()[2].hit_percent() == 50);
+    CHECK(tracker.total_model_requests() == 3);
+    // 第 4 次:未到环形上限(12),4 条都保留,按时间序。
+    tracker.ApplyUsage(api::Usage{100, 0, 900, 0}, "turn-2", 1);
+    REQUIRE(tracker.cache_request_history().size() == 4);
+    CHECK(tracker.cache_request_history()[0].input_tokens == 1000);  // 第一次还在
+    CHECK(tracker.cache_request_history()[3].input_tokens == 1000);  // 新请求在末尾
+    CHECK(tracker.total_model_requests() == 4);
+    // 全零 usage(provider 没回)也记一笔缺测(unreported),不整行蒸发。
+    tracker.ApplyUsage(api::Usage{}, "turn-2", 2);
+    REQUIRE(tracker.cache_request_history().size() == 5);
+    CHECK(tracker.cache_request_history()[4].unreported);
+    CHECK(tracker.cache_request_history()[4].hit_percent() == -1);  // 缺测不是 0%
+    CHECK(tracker.cache_request_history()[4].step_index == 2);
+    CHECK(tracker.total_model_requests() == 5);  // 缺测也是一次真实请求
+    // 超出环形上限:窗口保留最近 kCacheHistorySize 次,总账不跟着挤。
     cli::ContextTracker big(1000);
     for (int i = 0; i < 20; ++i) {
-        big.ApplyUsage(api::Usage{100, 0, 100, 0});
+        big.ApplyUsage(api::Usage{100, 0, 100, 0}, "turn-x", i);
     }
-    REQUIRE(big.cache_history().size() == cli::ContextTracker::kCacheHistorySize);
-    CHECK(big.cache_history().front().input_tokens == 200);  // 最旧 = 第 9 轮
-    CHECK(big.cache_history().back().input_tokens == 200);
+    REQUIRE(big.cache_request_history().size() == cli::ContextTracker::kCacheHistorySize);
+    CHECK(big.cache_request_history().front().input_tokens == 200);  // 最旧 = 第 9 次
+    CHECK(big.cache_request_history().back().input_tokens == 200);
+    CHECK(big.total_model_requests() == 20);  // 总数不被 12 冒充
+}
+
+TEST_CASE("ContextTracker: 缓存记录带 turn_id 与请求序,可追外层轮次(问题 5)") {
+    cli::ContextTracker tracker(1000);
+    // 一条用户请求连调 5 次工具 = 同一 turn 下 6 次模型请求(step 0..5)。
+    for (int step = 0; step <= 5; ++step) {
+        tracker.ApplyUsage(api::Usage{1000 + step, 10, 900, 0}, "turn-3", step);
+    }
+    REQUIRE(tracker.cache_request_history().size() == 6);
+    for (int step = 0; step <= 5; ++step) {
+        CHECK(tracker.cache_request_history()[step].turn_id == "turn-3");
+        CHECK(tracker.cache_request_history()[step].step_index == step);
+    }
+}
+
+TEST_CASE("ContextTracker: 用户轮次登记、陌生轮次自动补号、空 id 不登记") {
+    cli::ContextTracker tracker(1000);
+    CHECK(tracker.FindTurnLabel("turn-1") == nullptr);
+    tracker.BeginUserTurn("turn-1", "做一个图书管理系统");
+    tracker.BeginUserTurn("turn-2", "为什么后台任务会退出?");
+    REQUIRE(tracker.turn_labels().size() == 2);
+    CHECK(tracker.turn_labels()[0].ordinal == 1);
+    CHECK(tracker.turn_labels()[1].ordinal == 2);
+    // 重复登记同一轮:只补标签,序号不动。
+    tracker.BeginUserTurn("turn-1", "做一个图书管理系统(改)");
+    REQUIRE(tracker.turn_labels().size() == 2);
+    CHECK(tracker.turn_labels()[0].ordinal == 1);
+    CHECK(tracker.turn_labels()[0].label.find("(改)") != std::string::npos);
+    // 陌生 turn_id(单发/续跑路径没走 BeginUserTurn)由记录自动补号。
+    tracker.ApplyUsage(api::Usage{100, 0, 0, 0}, "turn-9", 0);
+    REQUIRE(tracker.turn_labels().size() == 3);
+    CHECK(tracker.turn_labels()[2].turn_id == "turn-9");
+    CHECK(tracker.turn_labels()[2].ordinal == 3);
+    CHECK(tracker.turn_labels()[2].label.empty());
+    // 空 turn_id 不登记。
+    tracker.ApplyUsage(api::Usage{100, 0, 0, 0}, "", 0);
+    CHECK(tracker.turn_labels().size() == 3);
+}
+
+TEST_CASE("ContextTracker: 场景账——纯文本直答/一次工具/多次工具/失败与打断/本地 slash/续接") {
+    // 纯文本直答:一条用户输入,一次模型请求,一步到位。
+    {
+        cli::ContextTracker tracker(100000);
+        tracker.BeginUserTurn("turn-1", "你好");
+        tracker.ApplyUsage(api::Usage{500, 80, 0, 0}, "turn-1", 0);
+        REQUIRE(tracker.cache_request_history().size() == 1);
+        CHECK(tracker.cache_request_history()[0].turn_id == "turn-1");
+        CHECK(tracker.turn_labels().size() == 1);
+    }
+    // 一次工具:同轮两次请求(工具前一问,工具结果回来再问)。
+    {
+        cli::ContextTracker tracker(100000);
+        tracker.BeginUserTurn("turn-1", "读一下这个文件");
+        tracker.ApplyUsage(api::Usage{500, 80, 0, 0}, "turn-1", 0);
+        tracker.ApplyUsage(api::Usage{900, 60, 400, 0}, "turn-1", 1);
+        REQUIRE(tracker.cache_request_history().size() == 2);
+        CHECK(tracker.cache_request_history()[1].step_index == 1);
+    }
+    // 多次工具:5 次工具 = 6 次请求,仍然只有一个用户轮次。
+    {
+        cli::ContextTracker tracker(100000);
+        tracker.BeginUserTurn("turn-1", "改这五个文件");
+        for (int step = 0; step <= 5; ++step) {
+            tracker.ApplyUsage(api::Usage{900 + step, 60, 800, 0}, "turn-1", step);
+        }
+        REQUIRE(tracker.cache_request_history().size() == 6);
+        std::size_t distinct_turns = 0;
+        std::string previous;
+        for (const auto& record : tracker.cache_request_history()) {
+            if (record.turn_id != previous) {
+                ++distinct_turns;
+                previous = record.turn_id;
+            }
+        }
+        CHECK(distinct_turns == 1);  // 6 次模型请求,1 个用户轮次
+    }
+    // 请求失败/ESC 打断:请求没走完,on_usage 压根不来,不记半截账。
+    {
+        cli::ContextTracker tracker(100000);
+        tracker.BeginUserTurn("turn-1", "会失败的一问");
+        tracker.ApplyUsage(api::Usage{500, 80, 0, 0}, "turn-1", 0);  // 第一次成功
+        // 第二次请求 HTTP 错误被 ESC 打断:没有 ApplyUsage,表里不添行。
+        REQUIRE(tracker.cache_request_history().size() == 1);
+        CHECK_FALSE(tracker.usage_stale());
+    }
+    // 本地 slash 命令:不发模型请求,这张请求级缓存表一条不增。
+    {
+        cli::ContextTracker tracker(100000);
+        tracker.BeginUserTurn("turn-1", "第一问");
+        tracker.ApplyUsage(api::Usage{500, 80, 0, 0}, "turn-1", 0);
+        const auto size_before = tracker.cache_request_history().size();
+        // /context、/help 这类本地命令不走 ApplyUsage——这里不发就是不发,
+        // 表与总账都不动(钉住口径:这张表只认 provider 请求)。
+        CHECK(tracker.cache_request_history().size() == size_before);
+        CHECK(tracker.total_model_requests() == 1);
+    }
+    // compact 请求:压缩/标题这类后台采样走 ModelUsageLedger 另记,
+    // 不进这张主会话逐请求表(口径:仅主会话回合请求)。
+    {
+        cli::ContextTracker tracker(100000);
+        tracker.BeginUserTurn("turn-1", "第一问");
+        tracker.ApplyUsage(api::Usage{500, 80, 0, 0}, "turn-1", 0);
+        agent::ModelUsageLedger ledger;  // compact 的账在隔壁,不碰 tracker
+        api::Usage compact_usage{3000, 400, 0, 0};
+        ledger.Record(agent::ModelRole::Cheap, "m-cheap", compact_usage, 900, true);
+        CHECK(tracker.cache_request_history().size() == 1);
+        CHECK(tracker.total_model_requests() == 1);
+    }
+    // 续接会话:恢复后新轮次接着记,跨环形边界分组不断档。
+    {
+        cli::ContextTracker tracker(100000);
+        tracker.BeginUserTurn("turn-1", "旧会话第一问");
+        for (int step = 0; step <= 3; ++step) {
+            tracker.ApplyUsage(api::Usage{900, 60, 800, 0}, "turn-1", step);
+        }
+        // /resume 之后的新用户输入:新一轮,新 turn_id。
+        tracker.BeginUserTurn("turn-2", "续上的第二问");
+        tracker.ApplyUsage(api::Usage{4000, 60, 3900, 0}, "turn-2", 0);
+        REQUIRE(tracker.cache_request_history().size() == 5);
+        CHECK(tracker.cache_request_history()[4].turn_id == "turn-2");
+        CHECK(tracker.turn_labels().size() == 2);
+    }
 }
 
 

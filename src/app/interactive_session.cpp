@@ -690,6 +690,14 @@ void TerminalSessionController::RunSessionTurn(const std::string& content, TurnS
         // (普通 turn = normal 档);compact/抽取的后台采样在各自路径另记,
         // 不混进这里。
         trace_turn_id = session_runtime_.ids().NextTurnId();
+        // 用户轮次登记(问题 5):turn_id 配一句人话标签(输入首行截断),
+        // /context 的逐请求缓存表按它分组显示。只登记真实用户输入——
+        // slash 命令在这层之上已分流,不会走到这。
+        {
+            std::string first_line = content.substr(0, content.find('\n'));
+            context_tracker.BeginUserTurn(trace_turn_id,
+                                          lubancode::sessions::TruncateUtf8Chars(first_line, 24));
+        }
         turn_views_.emplace_back();
     }
     // 批二:这轮的事件适配器(sink 已在 SessionRuntime 上配好;User 的

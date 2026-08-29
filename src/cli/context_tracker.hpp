@@ -41,7 +41,13 @@ public:
     // 现有数字标成旧值。状态栏/状态行据 usage_stale() 带 ~ 提醒,别让人把
     // 上一次的实测当成这一次的新数;ESC/HTTP 错误路径压根不会走到
     // on_usage,自然也不会把旧数伪装成本次新值。
-    void ApplyUsage(const api::Usage& usage);
+    //
+    // turn_id / step_index 是这次请求的身份证(问题 5):turn_id 指所属
+    // 外层用户轮次(runtime 事件自带),step_index 是该轮内第几次模型请求
+    //(agent loop 的步号)。usage 缺测(全零)也照记一笔 unreported 的
+    // 请求账——"未回报"另记缺测,不冒充 0%,更不许整行蒸发。默认参数只
+    // 照顾旧调用点(单测/单发),交互路径必带。
+    void ApplyUsage(const api::Usage& usage, const std::string& turn_id = std::string(), int step_index = 0);
 
     // 最近一次"请求结束"是否没有带回实测 usage(旧值标记)。一次实测都没
     // 发生过(刚启动,current_tokens 还是 0)时为 false——那时也没有数字
@@ -93,18 +99,30 @@ public:
         return static_cast<int>(ratio + 0.5);
     }
 
-    // 逐轮缓存命中历史:每笔实测 usage 记一条"该轮完整输入 / 该轮命中",
-    // 环形缓冲,保留最近 kCacheHistorySize 轮。分子分母都是"那一轮"的,
-    // 不加总、不掺跨轮重复——跟 session_* 累计口径互补:累计口径回答
-    // "整个 session 我发了多少输入、多少走了缓存读",逐轮口径回答
-    // "每一轮各自命中多少"。命中率掉的时候,一眼看出是哪一轮、什么
-    // 操作导致的(epoch 断因在回合统计/流水账里另有细账)。
+    // 逐请求缓存命中历史:每次"一次带回 usage 的 provider 请求"记一条
+    // "该次请求完整输入 / 该次请求命中",环形缓冲,保留最近
+    // kCacheHistorySize 次。注意口径:一行是一次**模型请求**,不是一轮用户
+    // 问答——一条用户输入触发工具循环时会连发多次请求,每笔带 turn_id 与
+    // step_index,可追到所属外层轮次(真实实测问题单问题 5:"轮"字混用
+    // 误导,这里把名字钉死在"请求"上)。分子分母都是"那一次请求"的,
+    // 不加总、不掺重复——跟 session_* 累计口径互补:累计口径回答"整个
+    // session 我发了多少输入、多少走了缓存读",逐请求口径回答"每一次
+    // 请求各自命中多少"。命中率掉的时候,一眼看出是哪一次、什么操作
+    // 导致的(epoch 断因在回合统计/流水账里另有细账)。
     static constexpr std::size_t kCacheHistorySize = 12;
 
-    struct CacheTurn {
-        std::int64_t input_tokens = 0;      // 该轮完整输入(TotalInputTokens)
-        std::int64_t cache_read_tokens = 0; // 该轮缓存命中
-        // 该轮命中率(百分比,四舍五入);input 为 0 时返回 -1(未实测)。
+    struct CacheRequestRecord {
+        std::int64_t input_tokens = 0;      // 该次请求完整输入(TotalInputTokens)
+        std::int64_t cache_read_tokens = 0; // 该次请求缓存命中
+        // 该次请求属于哪个外层用户轮次(runtime 发的 turn_id,如 "turn-3";
+        // 空 = 事件没带,显示层按"轮次不明"分组)。
+        std::string turn_id;
+        // 该轮内第几次模型请求(0-based,agent loop 的 step_index,一步
+        // 一次请求;显示层 +1 报"请求 1/2/3…")。
+        int step_index = 0;
+        // 该次请求 provider 没回 usage(缺测):显示层写"未回报",不冒充 0%。
+        bool unreported = false;
+        // 该次请求命中率(百分比,四舍五入);input 为 0(含未回报)时返回 -1。
         int hit_percent() const {
             if (input_tokens <= 0) {
                 return -1;
@@ -115,9 +133,31 @@ public:
         }
     };
 
-    // 最近 kCacheHistorySize 轮,按时间顺序(最旧在前)。不满一轮时
-    // 也按序排好;一次实测都没有时为空。调用方直接读,显示层负责截断。
-    const std::vector<CacheTurn>& cache_history() const { return cache_history_; }
+    // 外层用户轮次的登记账(/context 分组显示用):turn_id 配一句人话标签
+    //(用户输入首行截断)。会话层在发轮前 BeginUserTurn 登记;没登记到的
+    // turn_id(单发/续跑等路径)由记录路径自动补号,标签留空。
+    struct UserTurnLabel {
+        std::string turn_id;
+        std::string label;  // 用户输入首行(截断);空 = 未登记
+        int ordinal = 0;    // 本会话第几个用户轮次(1 起,登记序)
+    };
+
+    // 登记一个外层用户轮次(发轮前调):turn_id 已在账上就只补标签,不重号。
+    void BeginUserTurn(const std::string& turn_id, const std::string& label);
+
+    // 已登记的用户轮次(按登记序)。显示层拿 turn_id 查标签与序号。
+    const std::vector<UserTurnLabel>& turn_labels() const { return turn_labels_; }
+
+    // 按 turn_id 查登记账;没登记过返回 nullptr。
+    const UserTurnLabel* FindTurnLabel(const std::string& turn_id) const;
+
+    // 本会话(含已被环形缓冲挤掉的)总共记过多少次模型请求——显示层
+    // 拿它写"全会话共 N 次",不把环形上限 12 冒充总数。
+    std::int64_t total_model_requests() const { return total_model_requests_; }
+
+    // 最近 kCacheHistorySize 次模型请求,按时间顺序(最旧在前)。一次
+    // 实测都没有时为空。调用方直接读,显示层负责分组与截断。
+    const std::vector<CacheRequestRecord>& cache_request_history() const { return cache_history_; }
 
     // /context <档位> 用:会话级临时改窗口大小,不改配置文件。
     void set_window_tokens(std::size_t window_tokens) { window_tokens_ = window_tokens; }
@@ -130,6 +170,10 @@ public:
     bool ShouldAutoCompact() const;
 
 private:
+    // 陌生 turn_id 自动补号(记录路径兜底);空 id 不登记,显示层按
+    // "轮次不明"分组。
+    void RegisterTurnIfMissing(const std::string& turn_id);
+
     std::size_t current_tokens_ = 0;
     std::size_t window_tokens_;
     std::int64_t last_cache_read_tokens_ = 0;
@@ -138,7 +182,13 @@ private:
     std::optional<bool> server_prefix_caching_;
     std::int64_t session_cache_read_total_ = 0;
     std::int64_t session_input_total_ = 0;
-    std::vector<CacheTurn> cache_history_;
+    std::vector<CacheRequestRecord> cache_history_;
+    // 请求总账(不被环形缓冲挤掉)与用户轮次登记账(有界,只留最近
+    // kMaxTurnLabels 个——12 笔请求至多跨 12 个轮次,32 留足余量)。
+    std::int64_t total_model_requests_ = 0;
+    std::vector<UserTurnLabel> turn_labels_;
+    int next_turn_ordinal_ = 0;
+    static constexpr std::size_t kMaxTurnLabels = 32;
 };
 
 }  // namespace lubancode::cli
