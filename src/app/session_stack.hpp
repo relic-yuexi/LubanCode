@@ -31,12 +31,36 @@
 #include "tools/skill_loader.hpp"  // SkillMeta
 
 #include <atomic>
+#include <mutex>
 
 namespace lubancode::app {
 
 // 装好的整束件。控制器持引用用,不重复造;可变的会话皮(current_model/
 // think/soul/active_provider)也在里头——模型分工的路由器与 detached
 // 工厂都要读它们,单一真值只有这一份。
+// Package 快照槽:互斥锁护一枚 shared_ptr。读写都短(拷指针还引用计数),
+// 几纳秒的锁换三平台通吃——libc++ 对 std::atomic<shared_ptr> 有
+// trivially-copyable 硬规(Xcode 26 的 libc++ 拒编),MSVC/GCC 当扩展放行,
+// 换档与读档的互斥语义用锁实现一样成立。
+class PackageSnapshotSlot {
+public:
+    PackageSnapshotSlot() = default;
+    explicit PackageSnapshotSlot(std::shared_ptr<const lubancode::package::PackageSnapshot> snapshot)
+        : snapshot_(std::move(snapshot)) {}
+    std::shared_ptr<const lubancode::package::PackageSnapshot> load() const {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        return snapshot_;
+    }
+    void store(std::shared_ptr<const lubancode::package::PackageSnapshot> snapshot) {
+        const std::lock_guard<std::mutex> lock(mutex_);
+        snapshot_ = std::move(snapshot);
+    }
+
+private:
+    mutable std::mutex mutex_;
+    std::shared_ptr<const lubancode::package::PackageSnapshot> snapshot_;
+};
+
 struct SessionStack {
     // ---- 提示词与记忆材料 ----
     lubancode::config::ConfigResult config_result;  // 会话内配置真值(唯一一份)
@@ -46,10 +70,10 @@ struct SessionStack {
     // 对象):启动折一份(第 1 折),/package reload 才换新折。声明在 skills
     // 之前——挂载材料先于技能清单装配(两趟:先裸扫 standalone 技能喂包外
     // 短引用账,再带包根合出正式清单)。
-    // atomic 槽:workflow 并行支线从工作线程经 agent 解析口折材料,换档与
+    // 快照槽:workflow 并行支线从工作线程经 agent 解析口折材料,换档与
     // 读档不得互踩;快照本身不可变,在跑引用各自钉 shared_ptr 拷贝,照旧
     // 跑完——reload 换档影响的是下一次装配,不是在跑的那批。
-    std::atomic<std::shared_ptr<const lubancode::package::PackageSnapshot>> package_snapshot;
+    PackageSnapshotSlot package_snapshot;
     std::vector<lubancode::tools::SkillMeta> skills;  // /skills 展示与 agent 工具段
     std::string skills_segment;
     const std::optional<std::string> home_lubancode;
@@ -114,9 +138,9 @@ struct SessionStack {
     // 构造 = 原控制器初始化列表的装配(成员声明序即装配序)。
     explicit SessionStack(const InteractiveSessionOptions& options);
 
-    // 现行快照(原子拷一份 shared_ptr;reload 换档后取到的即新折)。
+    // 现行快照(拷一份 shared_ptr;reload 换档后取到的即新折)。
     std::shared_ptr<const lubancode::package::PackageSnapshot> CurrentPackageSnapshot() const {
-        return package_snapshot.load(std::memory_order_acquire);
+        return package_snapshot.load();
     }
 };
 

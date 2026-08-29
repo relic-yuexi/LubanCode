@@ -333,14 +333,16 @@ private:
     std::function<void()> reapply_peer_inbox;  // loop 重建后重灌收件点
     // loop 持 registry 引用,声明在后 = 先死,引用不悬垂。
     std::optional<lubancode::agent::Agent> main_agent;
-    // P6:本体在 SessionRuntime.always_allowed(),这里引用别名(按 a 落
-    // 进来的同一本账,远端审批 accept_for_session 也写它)。
-    std::set<std::string>& always_allowed_tools;
     std::optional<std::string> config_file_path;  // /model、/language 可写回配置文件路径
 
     // ---- 会话存档与权限账(P6:本体在 runtime::SessionRuntime,这里引用) ----
     // runtime 声明在前(先析构引用别名,本体后析构),引用一律指它。
     lubancode::runtime::SessionRuntime session_runtime_;
+    // P6:本体在 SessionRuntime.always_allowed(),这里引用别名(按 a 落
+    // 进来的同一本账,远端审批 accept_for_session 也写它)。声明在
+    // session_runtime_ 之后——构造序先本体后引用,别名绑的是活对象
+    //(原先排反了,clang -Wuninitialized 抓过正着:绑进生内存属 UB)。
+    std::set<std::string>& always_allowed_tools;
     // 逐枚追踪单:canonical 工具事件的分线器(持久栅栏落 session、UI 投影
     // 待接 EventSink、录制投影由 RunTurn 挂)。与 session_runtime_ 同寿命。
     // 逐枚追踪单:hub 要抓 session_runtime_ 的 ids/store 引用,构造体里
