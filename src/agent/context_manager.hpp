@@ -109,6 +109,12 @@ public:
     // 断因——loop 自己知道的因(compact/hard trim)优先,没有就按指纹
     // diff 点名(model/system/tools/旧消息)。返回这份请求的判定,随
     // UsageReport 交出去。
+    //
+    // wire_dump(问题 9 诊断模式,LUBANCODE_DEBUG_PREFIX 打开时由 loop
+    // 拿 backend 序列化好递进来):非空调用时与上一份序列化文本量公共
+    // 前缀字节数,记进 account.wire_common_prefix_bytes 并留存这份文本供
+    // 下一次比较;传 nullptr(默认,常态)完全不序列化、不存文本,字段
+    // 留 -1(不可得),不冒充 0。
     struct PrefixAccount {
         bool append_only = true;
         std::string break_reason;  // 没断是空串
@@ -120,8 +126,18 @@ public:
         std::size_t appended_messages = 0;       // 尾部新添的消息条数
         std::string system_hash;                 // 指纹 hash 原样(loop 截前 8 位打日志)
         std::string tools_hash;
+        // ---- 每请求缓存诊断账(问题 9):本地前缀视角,只留 hash 与长度 ----
+        int cache_epoch = 1;  // 记账后的 epoch(断了就是新号)
+        // 稳定消息前缀:与上一份请求逐条相等的那段开头消息。没有上一份
+        // (首请求)或一条都不共享时 stable_prefix_messages=0、prefix_hash
+        // 为空。total_messages 是本次请求的消息总数。
+        std::string prefix_hash;             // 稳定前缀的合成指纹(空 = 无稳定前缀)
+        std::size_t stable_prefix_messages = 0;
+        std::size_t total_messages = 0;
+        // wire 序列化公共前缀字节(-1 = 诊断模式没开/backend 不提供)。
+        std::int64_t wire_common_prefix_bytes = -1;
     };
-    PrefixAccount AccountRequest(const api::Request& request);
+    PrefixAccount AccountRequest(const api::Request& request, const std::string* wire_dump = nullptr);
 
 private:
     std::vector<api::Message> history_;          // 可持久、可 compact 的真历史
@@ -132,6 +148,10 @@ private:
     std::optional<PrefixFingerprint> last_prefix_;
     int cache_epoch_ = 1;
     std::string pending_epoch_break_reason_;
+    // 诊断模式(LUBANCODE_DEBUG_PREFIX)才留:上一份请求的 wire 序列化
+    // 文本,只为量下一次的公共前缀字节。常态度(不开诊断)永远是空,
+    // 不为对账常年序列化全份请求、揣着几 MB 文本跑。
+    std::string last_wire_dump_;
     // 结构压缩"首次定形"的决策台账(tool_use_id -> 决策),epoch 内跨请求
     // 钉死;ReplaceHistory(开新 epoch)时清空。
     ResultViewMemo result_view_memo_;

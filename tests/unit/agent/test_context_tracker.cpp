@@ -296,3 +296,93 @@ TEST_CASE("ContextTracker: 服务端前缀缓存结论三态,默认未验证") {
     tracker.set_server_prefix_caching(true);
     CHECK(*tracker.server_prefix_caching());
 }
+
+// ---- 问题 9:每请求缓存诊断账与 miss 分型 ----------------------------------
+
+namespace {
+
+cli::ContextTracker::CacheDiagnostics Diag(bool first, bool append_only,
+                                           const char* break_reason = "") {
+    cli::ContextTracker::CacheDiagnostics diag;
+    diag.present = true;
+    diag.cache_epoch = 1;
+    diag.epoch_break_reason = break_reason;
+    diag.prefix_append_only = append_only;
+    diag.epoch_first_request = first;
+    diag.system_hash = "0123456789abcdef";
+    diag.tools_hash = "fedcba9876543210";
+    diag.prefix_hash = append_only && !first ? "abcdef0123456789" : "";
+    diag.stable_prefix_messages = append_only && !first ? 4 : 0;
+    diag.total_messages = append_only && !first ? 6 : 2;
+    diag.wire_common_prefix_bytes = -1;
+    return diag;
+}
+
+}  // namespace
+
+TEST_CASE("ClassifyMiss: 分型四态各归各,缺测最优先,本地断因先于上游结论") {
+    using Kind = cli::ContextTracker::CacheMissKind;
+    // 缺测:不管本地视角如何,先记"未回报",不冒充 0% 也不猜断因。
+    CHECK(cli::ContextTracker::ClassifyMiss(false, 0, Diag(false, true)) == Kind::Unreported);
+    CHECK(cli::ContextTracker::ClassifyMiss(false, 500, Diag(false, true)) == Kind::Unreported);
+
+    // epoch 首请求:没有前一份可比,miss 是天然的。
+    CHECK(cli::ContextTracker::ClassifyMiss(true, 0, Diag(true, true)) == Kind::FirstRequest);
+    // 首请求报了命中也不改口:它不是 miss,分型按命中算。
+    CHECK(cli::ContextTracker::ClassifyMiss(true, 100, Diag(true, true)) == Kind::FirstRequest);
+
+    // 明确断 epoch:锅在本地,断因在诊断账里另有点名。
+    CHECK(cli::ContextTracker::ClassifyMiss(true, 0, Diag(false, false, "tools_changed")) ==
+          Kind::EpochBreak);
+
+    // 本地前缀稳定:报了命中是命中,报零是上游没接住——锅不背到本地头上。
+    CHECK(cli::ContextTracker::ClassifyMiss(true, 800, Diag(false, true)) == Kind::Hit);
+    CHECK(cli::ContextTracker::ClassifyMiss(true, 0, Diag(false, true)) == Kind::UpstreamMiss);
+}
+
+TEST_CASE("ApplyUsage 带诊断账: epoch/追加律/稳定前缀逐笔记进请求账") {
+    cli::ContextTracker tracker(100000);
+    tracker.BeginUserTurn("turn-1", "第一问");
+    // 首请求:epoch 1、无前一份。
+    tracker.ApplyUsage(api::Usage{1000, 10, 0, 0}, "turn-1", 0, Diag(true, true));
+    // 追加请求、provider 报零:本地稳定、上游未命中。
+    tracker.ApplyUsage(api::Usage{2000, 10, 0, 0}, "turn-1", 1, Diag(false, true));
+    // 追加请求、报命中。
+    tracker.ApplyUsage(api::Usage{2000, 10, 1500, 0}, "turn-1", 2, Diag(false, true));
+    // 断 epoch(换工具表)。
+    tracker.ApplyUsage(api::Usage{800, 10, 0, 0}, "turn-1", 3, Diag(false, false, "tools_changed"));
+    // 缺测一笔。
+    tracker.ApplyUsage(api::Usage{}, "turn-1", 4, Diag(false, true));
+
+    const auto& history = tracker.cache_request_history();
+    REQUIRE(history.size() == 5);
+
+    CHECK(history[0].diagnostics_present);
+    CHECK(history[0].epoch_first_request);
+    CHECK(history[0].miss_kind == cli::ContextTracker::CacheMissKind::FirstRequest);
+
+    CHECK(history[1].prefix_append_only);
+    CHECK(history[1].stable_prefix_messages == 4);
+    CHECK(history[1].total_messages == 6);
+    CHECK(history[1].system_hash == "0123456789abcdef");
+    CHECK(history[1].prefix_hash.size() == 16);
+    CHECK(history[1].wire_common_prefix_bytes == -1);  // 诊断模式没开:不可得,不冒充 0
+    CHECK(history[1].miss_kind == cli::ContextTracker::CacheMissKind::UpstreamMiss);
+
+    CHECK(history[2].miss_kind == cli::ContextTracker::CacheMissKind::Hit);
+
+    CHECK_FALSE(history[3].prefix_append_only);
+    CHECK(history[3].epoch_break_reason == "tools_changed");
+    CHECK(history[3].miss_kind == cli::ContextTracker::CacheMissKind::EpochBreak);
+
+    CHECK(history[4].unreported);
+    CHECK(history[4].miss_kind == cli::ContextTracker::CacheMissKind::Unreported);
+}
+
+TEST_CASE("ApplyUsage 缺诊断: 记账不炸,标诊断未随行,不拿默认值分型") {
+    cli::ContextTracker tracker(1000);
+    tracker.ApplyUsage(api::Usage{1000, 10, 0, 0}, "turn-1", 0);  // 老调用点(单测/单发)
+    REQUIRE(tracker.cache_request_history().size() == 1);
+    CHECK_FALSE(tracker.cache_request_history()[0].diagnostics_present);
+    CHECK(tracker.cache_request_history()[0].miss_kind == cli::ContextTracker::CacheMissKind::Unknown);
+}

@@ -135,6 +135,16 @@ void TerminalTurnSink::RenderEvent(const runtime::ServerEvent& event) {
             report.cache_epoch = event.payload.value("cache_epoch", 1);
             report.epoch_break_reason = event.payload.value("epoch_break_reason", std::string());
             report.prefix_append_only = event.payload.value("prefix_append_only", true);
+            // 问题 9 的每请求诊断账:从事件 payload 还原(键由
+            // TurnEventAdapter::OnUsage 填,只含 hash/长度/枚举,不含正文)。
+            report.epoch_first_request = event.payload.value("epoch_first_request", false);
+            report.system_hash = event.payload.value("system_hash", std::string());
+            report.tools_hash = event.payload.value("tools_hash", std::string());
+            report.prefix_hash = event.payload.value("prefix_hash", std::string());
+            report.stable_prefix_messages =
+                event.payload.value("stable_prefix_messages", static_cast<std::size_t>(0));
+            report.total_messages = event.payload.value("total_messages", static_cast<std::size_t>(0));
+            report.wire_common_prefix_bytes = event.payload.value("wire_common_prefix_bytes", std::int64_t{-1});
             const bool reported = event.payload.value("reported", report.reported());
             if (ingredients_.view_collector != nullptr) {
                 ingredients_.view_collector->OnUsage(report);
@@ -148,8 +158,22 @@ void TerminalTurnSink::RenderEvent(const runtime::ServerEvent& event) {
             // 只把现有数字标成旧值;ESC/HTTP 错误路径压根走不到这里,不会
             // 把旧数伪装成本次新值。turn_id/step_index(问题 5)取自事件:
             // 外层用户轮次号 + 该轮内请求序,逐请求缓存表靠它们分组。
+            // 诊断账(问题 9)同笔随行:epoch/追加律/稳定前缀/miss 分型,
+            // 从上面还原的 report 抄进 CacheDiagnostics 递给 tracker。
             if (ingredients_.context_tracker != nullptr) {
-                ingredients_.context_tracker->ApplyUsage(report.usage, event.turn_id, report.step_index);
+                lubancode::cli::ContextTracker::CacheDiagnostics diag;
+                diag.present = true;
+                diag.cache_epoch = report.cache_epoch;
+                diag.epoch_break_reason = report.epoch_break_reason;
+                diag.prefix_append_only = report.prefix_append_only;
+                diag.epoch_first_request = report.epoch_first_request;
+                diag.system_hash = report.system_hash;
+                diag.tools_hash = report.tools_hash;
+                diag.prefix_hash = report.prefix_hash;
+                diag.stable_prefix_messages = report.stable_prefix_messages;
+                diag.total_messages = report.total_messages;
+                diag.wire_common_prefix_bytes = report.wire_common_prefix_bytes;
+                ingredients_.context_tracker->ApplyUsage(report.usage, event.turn_id, report.step_index, diag);
                 // usage 一到就把 context/tokens 两段发布给状态行数据源——
                 // 只改数据不落笔(锁与重画事务在 cli::UpdateStatusLineContext
                 // 里),回合内状态栏跟着前进,不必等整轮收口回外层循环重建

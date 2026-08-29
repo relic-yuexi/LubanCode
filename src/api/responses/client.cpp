@@ -107,4 +107,13 @@ std::expected<void, Error> ResponsesBackend::send_stream(
     return {};
 }
 
+// 诊断模式的 wire 序列化(问题 9):与 send_stream 同一条拼装路(清洗 +
+// 同参数 BuildRequestJson + 同一只 dump),保证"公共前缀字节"对账量的
+// 就是真要上 wire 的字节。只在 LUBANCODE_DEBUG_PREFIX 打开时被调用。
+std::string ResponsesBackend::SerializeForDiagnostics(const Request& request) const {
+    Request sanitized_request = request;
+    SanitizeRequest(sanitized_request);
+    return DumpRequestBody("responses", BuildRequestJson(sanitized_request, native_web_search_, extra_body_));
+}
+
 }  // namespace lubancode::api::responses

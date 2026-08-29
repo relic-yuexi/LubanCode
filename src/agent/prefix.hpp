@@ -71,4 +71,15 @@ PrefixFingerprint FingerprintRequest(const api::Request& request);
 // 大历史用这份;测试与小历史直接用 DiffRequests)。
 PrefixDiff DiffFingerprints(const PrefixFingerprint& prev, const PrefixFingerprint& next);
 
+// 稳定消息前缀(问题 9 诊断账):next 与 prev 逐条 hash 相等的那段开头
+// 消息——它是"这一份请求里对上一份而言理应可命中缓存"的本地视角。
+// messages 是条数;hash 是这段前缀的合成指纹(空串 = 没有稳定前缀:
+// 首请求或一条都不共享)。注意它只看消息层,tools/system 变没变不归它管
+//(那两根梁由 DiffFingerprints 各自点名)。
+struct StablePrefixView {
+    std::size_t messages = 0;
+    std::string hash;  // 16 hex;messages == 0 时为空串
+};
+StablePrefixView StablePrefixOf(const PrefixFingerprint& prev, const PrefixFingerprint& next);
+
 }  // namespace lubancode::agent

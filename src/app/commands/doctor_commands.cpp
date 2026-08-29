@@ -16,9 +16,11 @@ using lubancode::cli::TermErr;
 #include <cstdlib>
 #include <expected>
 #include <iostream>
+#include <limits>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <sstream>
 #include <string_view>
 #include <utility>
@@ -26,6 +28,7 @@ using lubancode::cli::TermErr;
 
 #include <cpr/cpr.h>
 
+#include "agent/context.hpp"  // EstimateUtf8Tokens:设计前缀 token 估算的统一口径
 #include "api/anthropic/client.hpp"
 #include "api/chat/client.hpp"
 #include "api/chat/request.hpp"
@@ -33,6 +36,7 @@ using lubancode::cli::TermErr;
 #include "api/responses/client.hpp"
 #include "api/responses/request.hpp"
 #include "app/backend_stack.hpp"
+#include "cli/console_input.hpp"  // ReadLine:公网探针的一次性确认门(问题 9)
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
 #include "config/model_catalog.hpp"
@@ -364,7 +368,9 @@ std::vector<std::string> SummarizeEffortProbeRounds(const std::vector<EffortProb
     return lines;
 }
 
-FixedPrefixProbePair BuildFixedPrefixProbePair(const std::string& model, std::size_t prefix_fill_bytes) {    // 填充段是一段无信息量的固定文字:诊断信号在前缀字节稳不稳,不在内容。
+FixedPrefixProbeSet BuildFixedPrefixProbes(const std::string& model, int rounds,
+                                            std::size_t prefix_fill_bytes) {
+    // 填充段是一段无信息量的固定文字:诊断信号在前缀字节稳不稳,不在内容。
     const std::string filler = "prefix-cache probe filler segment 0123456789. ";
     std::string fixed;
     fixed.reserve(prefix_fill_bytes + filler.size());
@@ -373,24 +379,159 @@ FixedPrefixProbePair BuildFixedPrefixProbePair(const std::string& model, std::si
     }
     const std::string system = "You are a prefix-cache diagnostic probe. Always answer with exactly: ok";
 
-    FixedPrefixProbePair out;
-    for (int round = 1; round <= 2; ++round) {
-        api::Request& request = round == 1 ? out.round1 : out.round2;
+    if (rounds < 2) {
+        rounds = 2;
+    }
+    if (rounds > kCacheProbeMaxRounds) {
+        rounds = kCacheProbeMaxRounds;
+    }
+    FixedPrefixProbeSet out;
+    out.requests.reserve(static_cast<std::size_t>(rounds));
+    for (int round = 1; round <= rounds; ++round) {
+        api::Request request;
         request.model = model;
         request.system = system;
-        request.max_tokens = 32;
+        request.max_tokens = static_cast<int>(kCacheProbeOutputTokenCapPerRound);
         api::Message prefix;
         prefix.role = api::Role::User;
         prefix.content.push_back(api::TextBlock{fixed});
         api::Message tail;
         tail.role = api::Role::User;
-        tail.content.push_back(api::TextBlock{round == 1 ? "First round. Reply with exactly: ok"
-                                                          : "Second round. Reply with exactly: ok"});
+        // 每轮尾巴各一句:公共前缀(system+固定消息)之外只差这几个字节,
+        // 序列化后前缀是否逐字节稳定,CommonPrefixBytes 一量便知。
+        tail.content.push_back(api::TextBlock{"Round " + std::to_string(round) +
+                                              ". Reply with exactly: ok"});
         request.messages.push_back(std::move(prefix));
         request.messages.push_back(std::move(tail));
+        out.requests.push_back(std::move(request));
     }
     out.designed_prefix_bytes = system.size() + fixed.size();
+    // 设计前缀的 token 估算(分型比对用):与全库统一口径同一把尺
+    //(agent::EstimateUtf8Tokens;填充段是 ASCII,约 4 字符/token)。
+    out.designed_prefix_tokens =
+        static_cast<std::int64_t>(lubancode::agent::EstimateUtf8Tokens(system + fixed));
     return out;
+}
+
+FixedPrefixProbePair BuildFixedPrefixProbePair(const std::string& model, std::size_t prefix_fill_bytes) {
+    // 旧两口(单测钉着):N 轮组的前两轮,行为与从前一字不差。
+    const FixedPrefixProbeSet set = BuildFixedPrefixProbes(model, 2, prefix_fill_bytes);
+    FixedPrefixProbePair out;
+    out.round1 = set.requests[0];
+    out.round2 = set.requests[1];
+    out.designed_prefix_bytes = set.designed_prefix_bytes;
+    return out;
+}
+
+bool AllowCacheProbeRun(bool loopback, bool has_metrics_url, std::optional<bool> consent) {
+    if (loopback || has_metrics_url) {
+        return true;  // 本机端 / 明配 metrics 的自有端:旧安全闸的放行面不变
+    }
+    return consent.has_value() && *consent;  // 公网:没答、拒答都不发
+}
+
+std::optional<bool> ParseProbeConsentAnswer(const std::string& answer) {
+    std::string text;
+    text.reserve(answer.size());
+    for (const char c : answer) {
+        if (c != ' ' && c != '\t') {
+            text += static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+    }
+    if (text == "y" || text == "yes" || text == "是" || text == "好") {
+        return true;
+    }
+    if (text == "n" || text == "no" || text == "否" || text == "不") {
+        return false;
+    }
+    return std::nullopt;  // 空句/认不得:不算同意,调用方按不放行处理
+}
+
+std::string DescribeEndpointForDisclosure(const std::string& url) {
+    // 只留 scheme://host[:port][/路径]:query 与 fragment 整段剥掉——
+    // 确认门要明写发去哪,但不把可能带 key 的查询参数亮到屏上或日志里。
+    const std::size_t cut = url.find_first_of("?#");
+    return cut == std::string::npos ? url : url.substr(0, cut);
+}
+
+CacheProbeVerdict ClassifyCacheProbeRounds(const std::vector<CacheProbeRoundResult>& rounds,
+                                            std::int64_t designed_prefix_tokens,
+                                            int coverage_threshold_percent) {
+    // 只看 http_ok 且真报了 usage 的轮——HTTP 失败与缺测的轮不进分型,
+    // 不拿 0 冒充证据。
+    std::vector<const CacheProbeRoundResult*> reported;
+    reported.reserve(rounds.size());
+    for (const auto& round : rounds) {
+        if (round.http_ok && round.usage_reported) {
+            reported.push_back(&round);
+        }
+    }
+    if (reported.empty()) {
+        return CacheProbeVerdict::NotReported;
+    }
+    // 全零:完全未见命中。
+    bool any_hit = false;
+    for (const auto* round : reported) {
+        if (round->cache_read > 0) {
+            any_hit = true;
+            break;
+        }
+    }
+    if (!any_hit) {
+        return CacheProbeVerdict::NoHit;
+    }
+    // 首轮按惯例是写缓存(冷启动 miss 不算上游的错),判命中形状看后续
+    // 轮;只有首轮可用时(两轮探针、第二轮 HTTP 失败)退回首轮自己。
+    std::size_t tail_begin = reported.size() >= 2 ? 1 : 0;
+    bool tail_has_miss = false;
+    bool tail_all_covered = true;
+    bool tail_constant = true;
+    const std::int64_t threshold =
+        designed_prefix_tokens > 0
+            ? designed_prefix_tokens * coverage_threshold_percent / 100
+            : (std::numeric_limits<std::int64_t>::max)();  // 括号防 windows.h 的 max 宏
+    const std::int64_t reference = reported[tail_begin]->cache_read;
+    for (std::size_t i = tail_begin; i < reported.size(); ++i) {
+        const std::int64_t cache_read = reported[i]->cache_read;
+        if (cache_read == 0) {
+            tail_has_miss = true;
+        }
+        if (cache_read < threshold) {
+            tail_all_covered = false;
+        }
+        if (cache_read != reference) {
+            tail_constant = false;
+        }
+    }
+    if (tail_has_miss) {
+        return CacheProbeVerdict::IntermittentMiss;
+    }
+    if (tail_all_covered) {
+        return CacheProbeVerdict::StableHit;
+    }
+    if (tail_constant) {
+        // 恒定且低于设计前缀:上游只肯缓存一只固定的块(如恒 1024)。
+        return CacheProbeVerdict::FixedQuantumHit;
+    }
+    // 全命中、没吃满、也不恒定:命中量在抖——归间歇 miss,比硬塞进
+    // "稳定"诚实。
+    return CacheProbeVerdict::IntermittentMiss;
+}
+
+std::string CacheProbeVerdictLabel(CacheProbeVerdict verdict) {
+    switch (verdict) {
+        case CacheProbeVerdict::StableHit:
+            return tr("doctor.cache.verdict.stable_hit");
+        case CacheProbeVerdict::FixedQuantumHit:
+            return tr("doctor.cache.verdict.fixed_quantum");
+        case CacheProbeVerdict::IntermittentMiss:
+            return tr("doctor.cache.verdict.intermittent");
+        case CacheProbeVerdict::NoHit:
+            return tr("doctor.cache.verdict.no_hit");
+        case CacheProbeVerdict::NotReported:
+            return tr("doctor.cache.verdict.not_reported");
+    }
+    return std::string();
 }
 
 std::size_t CommonPrefixBytes(const std::string& a, const std::string& b) {
@@ -556,18 +697,42 @@ std::optional<PrefixCacheMetrics> ReadAndReportMetrics(const DoctorContext& cont
     return metrics;
 }
 
-// /doctor cache probe:两轮固定前缀对账。
-void RunCacheProbe(const DoctorContext& context) {
+// /doctor cache probe:N 轮固定前缀对账(默认 2,上限 kCacheProbeMaxRounds)。
+// 公网 provider 走一次性确认门(问题 9):先披露轮数、token 上限与端点,
+// 答应才发;回环端与明配 metrics_url 的端照旧直发。
+void RunCacheProbe(const DoctorContext& context, int rounds) {
     const lubancode::config::Config& config = context.config;
-    // 安全闸:公网 provider 不发探针。metrics_url 明配 = 用户声明这是自有端。
-    if (!IsLoopbackUrl(config.base_url) && config.metrics_url.empty()) {
-        TermOut() << tr("doctor.cache.probe_gate") << "\n";
-        return;
+    if (rounds < 2) {
+        rounds = 2;
+    }
+    if (rounds > kCacheProbeMaxRounds) {
+        TermOut() << trf("doctor.cache.probe_rounds_capped", kCacheProbeMaxRounds) << "\n";
+        rounds = kCacheProbeMaxRounds;
+    }
+    const bool loopback = IsLoopbackUrl(config.base_url);
+    // 确认门:回环/明配 metrics 直发;公网先披露再问,未确认不发。
+    if (!AllowCacheProbeRun(loopback, !config.metrics_url.empty(), std::nullopt)) {
+        TermOut() << tr("doctor.cache.probe_disclosure_header") << "\n";
+        TermOut() << trf("doctor.cache.probe_disclosure_body",
+                         DescribeEndpointForDisclosure(config.base_url), rounds,
+                         lubancode::cli::FormatTokenCount(kCacheProbeInputTokenCapPerRound),
+                         lubancode::cli::FormatTokenCount(kCacheProbeOutputTokenCapPerRound))
+                  << "\n";
+        const auto answer =
+            lubancode::cli::ReadLine(tr("doctor.cache.probe_confirm_prompt"), context.theme);
+        if (!answer.has_value() ||
+            !AllowCacheProbeRun(loopback, !config.metrics_url.empty(), ParseProbeConsentAnswer(*answer))) {
+            TermOut() << tr("doctor.cache.probe_declined") << "\n";
+            TermOut().flush();
+            return;
+        }
     }
     std::optional<PrefixCacheMetrics> before = ReadAndReportMetrics(context);
 
-    const FixedPrefixProbePair pair = BuildFixedPrefixProbePair(context.current_model);
+    const FixedPrefixProbeSet probes = BuildFixedPrefixProbes(context.current_model, rounds);
     auto backend = BuildBackend(config);
+    std::vector<CacheProbeRoundResult> round_results;
+    round_results.reserve(probes.requests.size());
 
     const auto describe_round = [&](int round, const ProbeOutcome& outcome) {
         TermOut() << trf("doctor.cache.probe_round", round) << "\n";
@@ -583,7 +748,7 @@ void RunCacheProbe(const DoctorContext& context) {
         TermOut() << tr("doctor.effort.http_ok") << "\n";
         if (outcome.usage_reported) {
             TermOut() << trf("doctor.cache.probe_usage",
-                             lubancode::cli::FormatTokenCount(outcome.usage.input_tokens),
+                             lubancode::cli::FormatTokenCount(api::TotalInputTokens(outcome.usage)),
                              lubancode::cli::FormatTokenCount(outcome.usage.cache_read_tokens))
                       << "\n";
         } else {
@@ -591,35 +756,60 @@ void RunCacheProbe(const DoctorContext& context) {
         }
     };
 
-    const ProbeOutcome round1 = RunProbe(*backend, pair.round1);
-    describe_round(1, round1);
-    const ProbeOutcome round2 = RunProbe(*backend, pair.round2);
-    describe_round(2, round2);
-
-    // 前缀字节稳定性:按当前 wire 把两轮请求体序列化出来,量公共前缀。
-    {
-        std::string dump1;
-        std::string dump2;
-        if (config.wire == lubancode::config::Wire::ChatCompletions) {
-            lubancode::api::chat::ChatRequestOptions options;
-            options.reasoning_param = config.think_param;
-            dump1 = lubancode::api::chat::BuildRequestJson(pair.round1, config.extra_body, options).dump();
-            dump2 = lubancode::api::chat::BuildRequestJson(pair.round2, config.extra_body, options).dump();
-        } else if (config.wire == lubancode::config::Wire::Responses) {
-            dump1 = lubancode::api::responses::BuildRequestJson(pair.round1).dump();
-            dump2 = lubancode::api::responses::BuildRequestJson(pair.round2).dump();
-        } else if (config.wire == lubancode::config::Wire::GoogleGenerateContent) {
-            dump1 = lubancode::api::gemini::BuildRequestJson(pair.round1, config.extra_body).dump();
-            dump2 = lubancode::api::gemini::BuildRequestJson(pair.round2, config.extra_body).dump();
-        } else {
-            dump1 = lubancode::api::anthropic::BuildRequestJson(pair.round1, false, config.extra_body).dump();
-            dump2 = lubancode::api::anthropic::BuildRequestJson(pair.round2, false, config.extra_body).dump();
+    for (std::size_t i = 0; i < probes.requests.size(); ++i) {
+        const ProbeOutcome outcome = RunProbe(*backend, probes.requests[i]);
+        describe_round(static_cast<int>(i) + 1, outcome);
+        CacheProbeRoundResult result;
+        result.http_ok = outcome.error.empty();
+        result.usage_reported = outcome.usage_reported;
+        if (outcome.usage_reported) {
+            result.cache_read = outcome.usage.cache_read_tokens;
+            result.total_input = api::TotalInputTokens(outcome.usage);
         }
-        const std::size_t common = CommonPrefixBytes(dump1, dump2);
-        TermOut() << trf("doctor.cache.probe_prefix", common, pair.designed_prefix_bytes)
-                  << (common >= pair.designed_prefix_bytes ? tr("doctor.cache.probe_prefix_stable")
-                                                            : tr("doctor.cache.probe_prefix_broken"))
+        round_results.push_back(result);
+    }
+
+    // 前缀字节稳定性:按当前 wire 把各轮请求体序列化出来,量相邻两轮的
+    // 公共前缀,取最小值——任意相邻一对不稳,前缀就是不稳。
+    {
+        const auto dump_request = [&](const api::Request& request) {
+            if (config.wire == lubancode::config::Wire::ChatCompletions) {
+                lubancode::api::chat::ChatRequestOptions options;
+                options.reasoning_param = config.think_param;
+                return lubancode::api::chat::BuildRequestJson(request, config.extra_body, options).dump();
+            }
+            if (config.wire == lubancode::config::Wire::Responses) {
+                return lubancode::api::responses::BuildRequestJson(request).dump();
+            }
+            if (config.wire == lubancode::config::Wire::GoogleGenerateContent) {
+                return lubancode::api::gemini::BuildRequestJson(request, config.extra_body).dump();
+            }
+            return lubancode::api::anthropic::BuildRequestJson(request, false, config.extra_body).dump();
+        };
+        std::size_t common = probes.designed_prefix_bytes;  // 上限:设计前缀
+        std::string previous = dump_request(probes.requests[0]);
+        for (std::size_t i = 1; i < probes.requests.size(); ++i) {
+            const std::string current = dump_request(probes.requests[i]);
+            const std::size_t pair_common = CommonPrefixBytes(previous, current);
+            if (pair_common < common) {
+                common = pair_common;
+            }
+            previous = current;
+        }
+        TermOut() << trf("doctor.cache.probe_prefix", common, probes.designed_prefix_bytes)
+                  << (common >= probes.designed_prefix_bytes ? tr("doctor.cache.probe_prefix_stable")
+                                                              : tr("doctor.cache.probe_prefix_broken"))
                   << "\n";
+    }
+
+    // 分型(问题 9):多轮固定前缀的命中形状——稳定命中/固定阈值命中/
+    // 间歇 miss/完全未见命中/无法判定,判词后紧跟证据边界,不越权背书。
+    {
+        const CacheProbeVerdict verdict = ClassifyCacheProbeRounds(round_results, probes.designed_prefix_tokens);
+        TermOut() << trf("doctor.cache.probe_verdict", CacheProbeVerdictLabel(verdict)) << "\n";
+        if (!before.has_value() || !before->enabled.has_value()) {
+            TermOut() << tr("doctor.cache.probe_evidence_bound") << "\n";
+        }
     }
 
     // 服务端 query/hit 增量:轮前轮后各读一次 metrics,差值才是一这轮探针
@@ -798,7 +988,19 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
             c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         }
         if (action == "probe") {
-            RunCacheProbe(context);
+            // 可带轮数:/doctor cache probe 5(2-8,默认 2;多轮才分得出
+            // 稳定/固定阈值/间歇)。认不得的按默认走,不当错误。
+            std::string rounds_text;
+            rest_input >> rounds_text;
+            int rounds = 2;
+            if (!rounds_text.empty()) {
+                try {
+                    rounds = std::stoi(rounds_text);
+                } catch (...) {
+                    rounds = 2;
+                }
+            }
+            RunCacheProbe(context, rounds);
             return;
         }
         if (action == "usage") {

@@ -52,6 +52,9 @@ public:
         const std::function<void(const StreamEvent&)>& on_event,
         const std::atomic<bool>* cancel = nullptr) override;
 
+    // 诊断模式的 wire 序列化(与 send_stream 同一条拼装路,见 client.cpp)。
+    std::string SerializeForDiagnostics(const Request& request) const override;
+
 private:
     std::string base_url_;
     std::string auth_token_;

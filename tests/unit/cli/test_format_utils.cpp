@@ -9,6 +9,7 @@
 
 #include "cli/format_utils.hpp"
 #include "cli/context_tracker.hpp"
+#include "cli/i18n.hpp"  // SetLanguage:断言按中文文案钉死
 #include "cli/theme.hpp"
 
 using namespace lubancode;
@@ -536,4 +537,153 @@ TEST_CASE("BuildCacheRequestHistoryLines: 一次请求都没有返回空表(本�
     lubancode::cli::ContextTracker tracker(100000);
     tracker.BeginUserTurn("turn-1", "还没发请求");
     CHECK(lubancode::cli::BuildCacheRequestHistoryLines(tracker).empty());
+}
+
+// ---- 问题 9:诊断段(epoch/追加律/稳定前缀/miss 分型) ----------------------
+
+namespace {
+
+lubancode::cli::ContextTracker::CacheDiagnostics PanelDiag(bool first, bool append_only,
+                                                            int epoch = 1, const char* reason = "",
+                                                            std::int64_t wire = -1) {
+    lubancode::cli::ContextTracker::CacheDiagnostics diag;
+    diag.present = true;
+    diag.cache_epoch = epoch;
+    diag.epoch_break_reason = reason;
+    diag.prefix_append_only = append_only;
+    diag.epoch_first_request = first;
+    diag.stable_prefix_messages = first ? 0 : 12;
+    diag.total_messages = first ? 2 : 14;
+    diag.wire_common_prefix_bytes = wire;
+    return diag;
+}
+
+}  // namespace
+
+TEST_CASE("CacheMissKindLabel: 分型短词各有各的说法,Unknown 留空") {
+    cli::SetLanguage("zh-CN");
+    using Kind = lubancode::cli::ContextTracker::CacheMissKind;
+    CHECK(cli::CacheMissKindLabel(Kind::Hit) == "命中");
+    CHECK(cli::CacheMissKindLabel(Kind::FirstRequest) == "首请求");
+    CHECK(cli::CacheMissKindLabel(Kind::EpochBreak) == "断 epoch");
+    CHECK(cli::CacheMissKindLabel(Kind::UpstreamMiss).find("上游未命中") == 0);
+    CHECK(cli::CacheMissKindLabel(Kind::Unreported) == "未回报");
+    CHECK(cli::CacheMissKindLabel(Kind::Unknown).empty());
+}
+
+TEST_CASE("BuildCacheDiagSegment: 本地前缀视角一段拼齐,诊断未随行另有说法") {
+    cli::SetLanguage("zh-CN");
+    lubancode::cli::ContextTracker tracker(100000);
+
+    // 稳定追加 + 稳定命中:epoch、追加律、稳定前缀条数;命中不再念第二遍。
+    {
+        lubancode::cli::ContextTracker::CacheRequestRecord record;
+        record.diagnostics_present = true;
+        record.cache_epoch = 1;
+        record.prefix_append_only = true;
+        record.stable_prefix_messages = 12;
+        record.total_messages = 14;
+        record.miss_kind = lubancode::cli::ContextTracker::CacheMissKind::Hit;
+        const std::string segment = cli::BuildCacheDiagSegment(record);
+        CHECK(segment.find("epoch 1") != std::string::npos);
+        CHECK(segment.find("前缀追加") != std::string::npos);
+        CHECK(segment.find("稳定前缀 12/14 条") != std::string::npos);
+        CHECK(segment.find("命中") == std::string::npos);  // 行首已有"命中 X(Y%)"
+    }
+    // 稳定追加但上游报零:明写"上游未命中",不让人赖本地。
+    {
+        lubancode::cli::ContextTracker::CacheRequestRecord record;
+        record.diagnostics_present = true;
+        record.cache_epoch = 1;
+        record.prefix_append_only = true;
+        record.stable_prefix_messages = 14;
+        record.total_messages = 16;
+        record.miss_kind = lubancode::cli::ContextTracker::CacheMissKind::UpstreamMiss;
+        record.wire_common_prefix_bytes = 54321;
+        const std::string segment = cli::BuildCacheDiagSegment(record);
+        CHECK(segment.find("上游未命中") != std::string::npos);
+        CHECK(segment.find("wire 前缀 54321B") != std::string::npos);
+    }
+    // 断 epoch:epoch 带断因,追加律写"前缀断",分型写"断 epoch"。
+    {
+        lubancode::cli::ContextTracker::CacheRequestRecord record;
+        record.diagnostics_present = true;
+        record.cache_epoch = 2;
+        record.epoch_break_reason = "tools_changed";
+        record.prefix_append_only = false;
+        record.stable_prefix_messages = 0;
+        record.total_messages = 6;
+        record.miss_kind = lubancode::cli::ContextTracker::CacheMissKind::EpochBreak;
+        const std::string segment = cli::BuildCacheDiagSegment(record);
+        CHECK(segment.find("epoch 2(断:tools_changed)") != std::string::npos);
+        CHECK(segment.find("前缀断") != std::string::npos);
+        CHECK(segment.find("断 epoch") != std::string::npos);
+    }
+    // 诊断没随行:只说一句,不拿默认值编故事。
+    {
+        lubancode::cli::ContextTracker::CacheRequestRecord record;
+        const std::string segment = cli::BuildCacheDiagSegment(record);
+        CHECK(segment.find("诊断未随行") != std::string::npos);
+    }
+    (void)tracker;
+}
+
+TEST_CASE("BuildCacheRequestHistoryLines: 带诊断的行亮追加律与稳定前缀,窗口末尾出分型小计") {
+    cli::SetLanguage("zh-CN");
+    lubancode::cli::ContextTracker tracker(100000);
+    tracker.BeginUserTurn("turn-1", "第一问");
+    // 首请求(全 miss 是天然的)。
+    tracker.ApplyUsage(api::Usage{1000, 10, 0, 0}, "turn-1", 0, PanelDiag(true, true));
+    // 追加且上游命中。
+    tracker.ApplyUsage(api::Usage{2000, 10, 1800, 0}, "turn-1", 1, PanelDiag(false, true));
+    // 追加但上游报零:上游未命中,不背本地锅。
+    tracker.ApplyUsage(api::Usage{2100, 10, 0, 0}, "turn-1", 2, PanelDiag(false, true));
+
+    const auto lines = cli::BuildCacheRequestHistoryLines(tracker);
+    // 行内容:每行带诊断段(首请求/上游未命中各有说法)。
+    bool saw_first = false;
+    bool saw_upstream = false;
+    bool saw_append = false;
+    bool saw_stable = false;
+    for (const auto& line : lines) {
+        if (line.find("首请求") != std::string::npos) saw_first = true;
+        if (line.find("上游未命中") != std::string::npos) saw_upstream = true;
+        if (line.find("前缀追加") != std::string::npos) saw_append = true;
+        if (line.find("稳定前缀 12/14 条") != std::string::npos) saw_stable = true;
+    }
+    CHECK(saw_first);
+    CHECK(saw_upstream);
+    CHECK(saw_append);
+    CHECK(saw_stable);
+    // 末行:分型小计(命中 1 · 首请求 1 · 上游未命中(本地前缀稳定) 1)。
+    REQUIRE(!lines.empty());
+    const std::string& tally = lines.back();
+    CHECK(tally.find("窗口内分型") != std::string::npos);
+    CHECK(tally.find("命中 1") != std::string::npos);
+    CHECK(tally.find("首请求 1") != std::string::npos);
+    CHECK(tally.find("上游未命中(本地前缀稳定) 1") != std::string::npos);
+
+    // 全窗口都没有诊断(单测/单发路径):不出小计,不占屏。
+    lubancode::cli::ContextTracker plain(100000);
+    plain.ApplyUsage(api::Usage{1000, 10, 0, 0}, "turn-1", 0);
+    const auto plain_lines = cli::BuildCacheRequestHistoryLines(plain);
+    for (const auto& line : plain_lines) {
+        CHECK(line.find("窗口内分型") == std::string::npos);
+    }
+    CHECK(plain_lines.back().find("诊断未随行") != std::string::npos);
+}
+
+TEST_CASE("BuildCacheNote: 本地前缀稳定而 provider 报零,状态栏明写上游未命中") {
+    cli::SetLanguage("zh-CN");
+    lubancode::cli::ContextTracker tracker(100000);
+    // 先来一笔带命中的,让"最近一次请求"有账可查(1500/3000 = 50%)。
+    tracker.ApplyUsage(api::Usage{1500, 10, 1500, 0}, "turn-1", 0, PanelDiag(true, true));
+    CHECK(cli::BuildCacheNote(tracker, true) == "缓存命中 1500(50%)");
+    // 下一笔:本地追加稳定、provider 报零——注记点破"上游未命中"。
+    tracker.ApplyUsage(api::Usage{2100, 10, 0, 0}, "turn-1", 1, PanelDiag(false, true));
+    CHECK(cli::BuildCacheNote(tracker, true) == "缓存上游未命中(本地前缀稳定)");
+    // 没带诊断的报零:照旧"缓存 0 命中",不越权推断。
+    lubancode::cli::ContextTracker plain(100000);
+    plain.ApplyUsage(api::Usage{2100, 10, 0, 0}, "turn-1", 0);
+    CHECK(cli::BuildCacheNote(plain, true) == "缓存 0 命中");
 }

@@ -1,17 +1,21 @@
-// /doctor:本地兼容端 Effort 与前缀缓存诊断(2026-08 单)。两个子命令:
+// /doctor:本地兼容端 Effort 与前缀缓存诊断(2026-08 单 + 真实实测问题单
+// 问题 9 的公网确认门)。两个子命令:
 //   /doctor effort [档位|unset]   发一只极小探针,报告 HTTP 状态、服务端
 //                                  错误(清洗后)、请求里实际发送的档位、
 //                                  usage 的 reasoning/output 拆账。
-//   /doctor cache [probe|usage]   metrics_url 明配后读服务端 /metrics,报
-//                                  前缀缓存四态;probe 再发两轮固定前缀
-//                                  请求对账;usage 做 stream_usage 能力探针
-//                                  并写回 provider 配置。
+//   /doctor cache [probe [N]|usage]
+//                                  metrics_url 明配后读服务端 /metrics,报
+//                                  前缀缓存四态;probe 发 N 轮固定前缀请求
+//                                  对账(默认 2,上限 8),出 usage、wire 公共
+//                                  前缀字节与分型;usage 做 stream_usage
+//                                  能力探针并写回 provider 配置。
 // 裸敲 /doctor 列两个子命令的现状摘要,不发任何请求。
 //
-// 诊断只对本地兼容端动手:probe/usage 两个要发模型请求的动作都挡在
-// IsLoopbackUrl 或"metrics_url 已明配"这道闸后面,绝不擅自探公网 provider。
-// 密钥与正文照旧打码:报告只摆参数名、档位值、token 数与错误摘要,不打
-// Authorization、不打 system/messages 正文。
+// 探针的发送面:本地回环端与明配 metrics_url 的端照旧直发;公网 provider
+// 走一次性确认门(AllowCacheProbeRun)——先披露轮数、token 上限与端点,
+// 用户答应才发,不偷偷烧 token。密钥与正文照旧打码:报告只摆参数名、档位
+// 值、token 数与错误摘要,不打 Authorization、不打 system/messages 正文、
+// 不打带查询参数的完整 URL。
 
 #pragma once
 
@@ -101,6 +105,68 @@ struct FixedPrefixProbePair {
 };
 FixedPrefixProbePair BuildFixedPrefixProbePair(const std::string& model,
                                                std::size_t prefix_fill_bytes = 2048);
+
+// ---- cache probe 多轮与分型(真实实测问题单问题 9)-----------------------
+
+// N 轮固定前缀探针组(问题 9):每轮同 system、同固定前缀消息,只换最后
+// 一句("Round i. Reply with exactly: ok")。rounds 钳在 [2, kCacheProbeMaxRounds]。
+// designed_prefix_tokens 按探针填充段 ASCII 4 字符/token 估,供分型比对。
+struct FixedPrefixProbeSet {
+    std::vector<api::Request> requests;
+    std::size_t designed_prefix_bytes = 0;
+    std::int64_t designed_prefix_tokens = 0;
+};
+FixedPrefixProbeSet BuildFixedPrefixProbes(const std::string& model, int rounds,
+                                            std::size_t prefix_fill_bytes = 2048);
+
+// 探针的 token 上限(保守写死,不许现场加码):输入按"填充段全量折 token
+// 再放一倍余量"给 4096/轮,输出 32/轮(探针请求 max_tokens 就用这个数)。
+// 轮数上限 8——确认门给用户看的预计上限全从这里算。
+inline constexpr std::int64_t kCacheProbeInputTokenCapPerRound = 4096;
+inline constexpr std::int64_t kCacheProbeOutputTokenCapPerRound = 32;
+inline constexpr int kCacheProbeMaxRounds = 8;
+
+// 一轮探针的收账(分型的输入侧):http_ok = HTTP 2xx 且无传输错;
+// usage_reported = provider 真回了 usage(没回不冒充 0);cache_read 是
+// cached_tokens 命中量,total_input 是完整输入(非缓存+缓存读)。
+struct CacheProbeRoundResult {
+    bool http_ok = false;
+    bool usage_reported = false;
+    std::int64_t cache_read = 0;
+    std::int64_t total_input = 0;
+};
+
+// 多轮探针分型(问题 9):连跑多组固定前缀,区分——
+//   StableHit        后续轮都命中,且命中量吃满设计前缀(稳定命中);
+//   FixedQuantumHit  后续轮都命中,但命中量恒定且明显低于设计前缀
+//                    (固定阈值命中,如上游恒只缓存 1024 token 的块);
+//   IntermittentMiss 后续轮有的命中有的零,或命中量在抖(间歇 miss——同
+//                    epoch 命中率抖动的上游侧形状);
+//   NoHit            报了 usage 的轮全零命中(完全未见命中);
+//   NotReported      一轮都没回 usage(无法判定,不猜)。
+// 首轮按惯例是写缓存(冷启动 miss 不算上游的错):判命中形状看后续轮,
+// 只有首轮可用时退回首轮自己。只统计 http_ok 且真报了 usage 的轮;
+// coverage_threshold_percent 是"算吃满前缀"的覆盖比(默认 90)。
+enum class CacheProbeVerdict { NotReported, NoHit, FixedQuantumHit, StableHit, IntermittentMiss };
+CacheProbeVerdict ClassifyCacheProbeRounds(const std::vector<CacheProbeRoundResult>& rounds,
+                                            std::int64_t designed_prefix_tokens,
+                                            int coverage_threshold_percent = 90);
+std::string CacheProbeVerdictLabel(CacheProbeVerdict verdict);
+
+// 确认门(问题 9):公网 provider 不再一律拒发,改成一次性确认——先向
+// 用户披露要发几枚请求、预计 token 上限与目标端点,答应才发。
+//   loopback 或明配 metrics_url:直接跑(旧安全闸的放行面不变);
+//   否则须 consent = true;nullopt(还没问/没答)与 false 一律不放行。
+// 纯函数,单测钉死"未确认不发"。
+bool AllowCacheProbeRun(bool loopback, bool has_metrics_url, std::optional<bool> consent);
+
+// 确认答句的判定:y/yes/是/好 -> true;n/no/否/不 -> false;空与认不得的
+// 一律 nullopt(不算同意,也不算拒绝——调用方按不放行处理)。
+std::optional<bool> ParseProbeConsentAnswer(const std::string& answer);
+
+// 端点描述(日志纪律):只留 scheme://host[:port][/路径],剥掉 query 与
+// fragment——确认门明写发去哪,但不把带 key 的查询参数亮到屏上/日志里。
+std::string DescribeEndpointForDisclosure(const std::string& url);
 
 // 两段文本的最长公共前缀字节数(报"前缀字节是否稳定"用)。
 std::size_t CommonPrefixBytes(const std::string& a, const std::string& b);

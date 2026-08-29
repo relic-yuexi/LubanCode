@@ -6,6 +6,21 @@ namespace lubancode::cli {
 
 ContextTracker::ContextTracker(std::size_t window_tokens) : window_tokens_(window_tokens) {}
 
+ContextTracker::CacheMissKind ContextTracker::ClassifyMiss(bool reported, std::int64_t cache_read,
+                                                           const CacheDiagnostics& diag) {
+    if (!reported) {
+        return CacheMissKind::Unreported;  // 缺测最优先:不冒充 0%,也不猜断因
+    }
+    if (diag.epoch_first_request) {
+        return CacheMissKind::FirstRequest;
+    }
+    if (!diag.prefix_append_only) {
+        return CacheMissKind::EpochBreak;  // 本地断因先于上游结论
+    }
+    // 本地前缀稳定(追加律成立):报了命中就是命中,报零就是上游没接住。
+    return cache_read > 0 ? CacheMissKind::Hit : CacheMissKind::UpstreamMiss;
+}
+
 void ContextTracker::Update(const api::Usage& usage) {
     // 统一口径(api::Usage 文件头):input_tokens 已是"非缓存输入",
     // 完整提示词体积 = TotalInputTokens(input + cache_read + cache_creation),
@@ -20,7 +35,8 @@ void ContextTracker::Update(const api::Usage& usage) {
     last_input_tokens_ = api::TotalInputTokens(usage);
 }
 
-void ContextTracker::ApplyUsage(const api::Usage& usage, const std::string& turn_id, int step_index) {
+void ContextTracker::ApplyUsage(const api::Usage& usage, const std::string& turn_id, int step_index,
+                                const CacheDiagnostics& diag) {
     // 四项全零 = provider 没在流末给 usage(见头文件注释):不清零、不
     // 覆盖,现有数字原样保住,只标旧值。
     const bool measured = usage.input_tokens > 0 || usage.output_tokens > 0 ||
@@ -36,6 +52,8 @@ void ContextTracker::ApplyUsage(const api::Usage& usage, const std::string& turn
     // 逐请求历史:一次模型请求一笔,实测与缺测都记(缺测标 unreported,
     // 显示层写"未回报"),环形缓冲保留最近 kCacheHistorySize 次。总账
     // 不跟着环形挤,显示层拿它写"全会话共 N 次",12 不冒充总数。
+    // 问题 9:同一笔把诊断账抄进去并分型——本地前缀稳不稳、断在哪层,
+    // 面板不再让人猜。
     CacheRequestRecord record;
     record.turn_id = turn_id;
     record.step_index = step_index;
@@ -43,6 +61,20 @@ void ContextTracker::ApplyUsage(const api::Usage& usage, const std::string& turn
     if (measured) {
         record.input_tokens = api::TotalInputTokens(usage);
         record.cache_read_tokens = usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0;
+    }
+    if (diag.present) {
+        record.diagnostics_present = true;
+        record.cache_epoch = diag.cache_epoch;
+        record.epoch_break_reason = diag.epoch_break_reason;
+        record.prefix_append_only = diag.prefix_append_only;
+        record.epoch_first_request = diag.epoch_first_request;
+        record.system_hash = diag.system_hash;
+        record.tools_hash = diag.tools_hash;
+        record.prefix_hash = diag.prefix_hash;
+        record.stable_prefix_messages = diag.stable_prefix_messages;
+        record.total_messages = diag.total_messages;
+        record.wire_common_prefix_bytes = diag.wire_common_prefix_bytes;
+        record.miss_kind = ClassifyMiss(measured, usage.cache_read_tokens, diag);
     }
     cache_history_.push_back(std::move(record));
     if (cache_history_.size() > kCacheHistorySize) {
