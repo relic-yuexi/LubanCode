@@ -89,8 +89,16 @@ public:
     // 记账一路经 UsageReport/事件流带过来):缓存 epoch、追加律、稳定前缀
     // 长度与指纹、miss 分型全靠它。缺省(单测/单发)按"没有诊断信息"记,
     // 显示层写"诊断未随行",不猜。
-    void ApplyUsage(const api::Usage& usage, const std::string& turn_id = std::string(), int step_index = 0,
-                    const CacheDiagnostics& diag = CacheDiagnostics{});
+    // 不用默认实参写 CacheDiagnostics{}:GCC 不许嵌套类的 NSDMI 在外层
+    // 类定义完之前被默认实参要求(MSVC 放行,GCC 13 拒编);且无默认的参
+    // 不能跟在有默认的参后头。索性默认参一概不用,重载三板斧——内联成员
+    // 函数体按类定义完之后解析,里头构造没问题。
+    void ApplyUsage(const api::Usage& usage) { ApplyUsage(usage, std::string(), 0, CacheDiagnostics{}); }
+    void ApplyUsage(const api::Usage& usage, const std::string& turn_id, int step_index) {
+        ApplyUsage(usage, turn_id, step_index, CacheDiagnostics{});
+    }
+    void ApplyUsage(const api::Usage& usage, const std::string& turn_id, int step_index,
+                    const CacheDiagnostics& diag);
 
     // 最近一次"请求结束"是否没有带回实测 usage(旧值标记)。一次实测都没
     // 发生过(刚启动,current_tokens 还是 0)时为 false——那时也没有数字
