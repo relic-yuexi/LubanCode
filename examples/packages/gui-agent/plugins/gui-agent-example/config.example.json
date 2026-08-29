@@ -19,7 +19,7 @@
         "plugin__gui-agent-example__gui_screenshot"
       ]
     },
-    "_note": "注意 allow_tools 嵌在 permissions 段里(宿主只认这个层级)。观察类五件可免确认(snapshot 只读控件树,连像素都不碰)。click/type/key/move/scroll 属写动作,留着每次确认——教程不教'允许所有 gui_*'。"
+    "_note": "注意 allow_tools 嵌在 permissions 段里(宿主只认这个层级)。观察类五件可免确认(snapshot 只读控件树,连像素都不碰)。click/type/key/move/scroll/set_value/invoke 属写动作,留着每次确认——教程不教'允许所有 gui_*'。后两件虽是结构路(改控件值/触发界面行为,不写盘),纪律同款。"
   },
   "environment_switches": {
     "LUBANCODE_GUI_DRY_RUN": "1 = 动作类工具只校验只报计划,不注入一枚输入事件。第一回照 README 先用它走全流程。",

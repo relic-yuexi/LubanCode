@@ -1,6 +1,6 @@
 // GUI Agent 示例(gui-agent-example)的集成测试:真 manifest、真 runner
 // 进程、真协议往返——但不碰真鼠标键盘:
-//   - manifest 静态校验:十件工具、id、env allowlist、network=false
+//   - manifest 静态校验:十二件工具、id、env allowlist、network=false
 //   - gui_status 真跑:平台口径如实报(Windows=ok;别处=unsupported_platform)
 //   - gui_click 走 dry-run + 假窗口 id:校验链路全通,window_not_found
 //     在注入前拦住——一只真事件都不发
@@ -85,7 +85,7 @@ PluginManifest LoadExampleManifest() {
 constexpr const char* kExpectedTools[] = {
     "gui_status", "gui_list_windows", "gui_focus_window", "gui_screenshot",
     "gui_snapshot", "gui_move_mouse", "gui_click", "gui_scroll",
-    "gui_type_text", "gui_key",
+    "gui_type_text", "gui_key", "gui_set_value", "gui_invoke",
 };
 
 plugin_protocol::ProcessRequest MakeRequest(const std::string& tool, const nlohmann::json& arguments) {
@@ -103,9 +103,9 @@ plugin_protocol::ProcessRequest MakeRequest(const std::string& tool, const nlohm
 // ---------------------------------------------------------------------------
 // manifest 静态真账(不需要 Python)
 // ---------------------------------------------------------------------------
-TEST_CASE("gui-agent 示例:manifest 十件工具、权限与 env allowlist 齐全") {
+TEST_CASE("gui-agent 示例:manifest 十二件工具、权限与 env allowlist 齐全") {
     const auto manifest = LoadExampleManifest();
-    REQUIRE(manifest.tools.size() == 10);
+    REQUIRE(manifest.tools.size() == 12);
     CHECK(manifest.id == "gui-agent-example");
     CHECK(manifest.kind == RuntimeKind::Process);
     CHECK_FALSE(manifest.network_allowed);
@@ -227,6 +227,30 @@ TEST_CASE("gui-agent 示例:gui_snapshot 走假窗口 id,window_not_found 兜底
         "D:/not-a-real-dir", nullptr, ProcessCallLimits{});
     REQUIRE(outcome.code == PluginErrorCode::PluginReportedError);
     CHECK(outcome.plugin_error_code == "window_not_found");
+}
+
+TEST_CASE("gui-agent 示例:结构路动作走假窗口 id,同样 window_not_found 兜底") {
+    const auto manifest = LoadExampleManifest();
+    if (!PythonAvailable(manifest.argv[0])) {
+        return;
+    }
+    // set_value/invoke 是写动作但不注入输入;假窗口先过窗口现场重查,
+    // 一枚 pattern 调用都不发就拦住。
+    const auto set_value = RunProcessToolCall(
+        manifest, MakeRequest("gui_set_value", nlohmann::json{{"window_id", "0x0DEADBEEF"},
+                                                              {"ref", "e1"},
+                                                              {"text", "x"}}),
+        "D:/not-a-real-dir", nullptr, ProcessCallLimits{});
+    REQUIRE(set_value.code == PluginErrorCode::PluginReportedError);
+    CHECK(set_value.plugin_error_code == "window_not_found");
+
+    const auto invoke = RunProcessToolCall(
+        manifest, MakeRequest("gui_invoke", nlohmann::json{{"window_id", "0x0DEADBEEF"},
+                                                           {"ref", "e1"},
+                                                           {"action", "invoke"}}),
+        "D:/not-a-real-dir", nullptr, ProcessCallLimits{});
+    REQUIRE(invoke.code == PluginErrorCode::PluginReportedError);
+    CHECK(invoke.plugin_error_code == "window_not_found");
 }
 
 TEST_CASE("gui-agent 示例:gui_status 真跑,平台口径如实") {
