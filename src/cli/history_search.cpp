@@ -3,6 +3,8 @@
 #include "cli/history_search.hpp"
 
 #include <algorithm>
+#include <set>
+#include <utility>
 
 #include "cli/i18n.hpp"
 #include "cli/keymap.hpp"  // ChordFor/FormatKeyChord(首行键名反查)
@@ -97,17 +99,19 @@ std::vector<PromptHistoryEntry> BuildHistorySearchIndex(const PromptHistoryDatas
                 break;
         }
     }
-    // 连续同文去重(同一场里连着两三次同一个问法只留最新);跨场不去重
-    // ——同话不同场,时间戳与项目就是区分。
+    // 事件身份去重:同一事件(session id + 场内序号)只留一条——存档侧与
+    // 活历史侧认出同一事件即合并,先见的(数据集里排前的存档份,ts 是档上
+    // 真时间)为准;同文不同事件(用户真发了两次)身份不同,各自保留。
     std::vector<PromptHistoryEntry> deduped;
     deduped.reserve(filtered.size());
-    for (auto it = filtered.rbegin(); it != filtered.rend(); ++it) {  // 新→旧
-        if (!deduped.empty() && deduped.back().text == it->text &&
-            deduped.back().session_id == it->session_id) {
+    std::set<std::pair<std::string, std::size_t>> seen_ids;
+    for (const auto& entry : filtered) {  // 旧→新
+        if (!seen_ids.insert(std::make_pair(entry.session_id, entry.event_seq)).second) {
             continue;
         }
-        deduped.push_back(*it);
+        deduped.push_back(entry);
     }
+    std::reverse(deduped.begin(), deduped.end());  // 输出新→旧
     if (deduped.size() > max) {
         deduped.resize(max);
     }
@@ -134,7 +138,10 @@ void HistorySearchSession::Open(PromptHistoryDataset dataset, HistorySearchScope
     dataset_ = std::move(dataset);
     scope_ = initial_scope;
     index_ = BuildHistorySearchIndex(dataset_, scope_);
-    matches_.clear();
+    // 开张即列全部(空查询=全部):终端层"查询未变不重跑"的短路在开张那
+    // 一帧会因空串==空串跳过 Rerun,这里不先填上,面板就误报"没有命中",
+    // 敲一个字才活过来(实测问题 8 验收:Ctrl+R 一开就该显条目)。
+    matches_ = SearchHistoryEntries(index_, std::string());
     selected_ = 0;
     active_ = true;
 }

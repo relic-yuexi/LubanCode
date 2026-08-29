@@ -1182,15 +1182,23 @@ TEST_CASE("ExtractPromptHistory:只收用户纯文本提问,事件行/工具回�
     REQUIRE(records.size() == 1);
     CHECK(records[0].text == "怎么配代理");
     CHECK(records[0].ts == "2026-08-16 10:00:00");
+    CHECK(records[0].seq == 0);  // 场内提问事件序号,0 起
 
-    // 空串/纯空白提问不进;多行提问整段收(拼 '\n'),首尾空白剥掉。
+    // 空串/纯空白提问不进;多行提问整段收(拼 '\n'),首尾空白剥掉;
+    // 不算提问的消息(slash)不占事件序号,下一条序号照接。
     const api::Message multiline = api::Message{api::Role::User, {api::TextBlock{"第一行\n第二行\n\n  "}}};
     const api::Message blank = api::Message{api::Role::User, {api::TextBlock{"   "}}};
-    const std::string jsonl2 =
-        SerializeSessionMessage(multiline, "ts1") + "\n" + SerializeSessionMessage(blank, "ts2") + "\n";
+    const api::Message second = api::Message{api::Role::User, {api::TextBlock{"第二条真提问"}}};
+    const std::string jsonl2 = SerializeSessionMessage(multiline, "ts1") + "\n" +
+                               SerializeSessionMessage(blank, "ts2") + "\n" +
+                               SerializeSessionMessage(user_slash, "ts2b") + "\n" +
+                               SerializeSessionMessage(second, "ts3") + "\n";
     const auto records2 = sessions::ExtractPromptHistory(jsonl2);
-    REQUIRE(records2.size() == 1);
+    REQUIRE(records2.size() == 2);
     CHECK(records2[0].text == "第一行\n第二行");
+    CHECK(records2[0].seq == 0);
+    CHECK(records2[1].text == "第二条真提问");
+    CHECK(records2[1].seq == 1);
 
     // loop 单:scheduled tick 的宿主前缀消息与 goal synthetic 不进
     // (Ctrl+R 满屏重复句的防线)。
@@ -1200,6 +1208,87 @@ TEST_CASE("ExtractPromptHistory:只收用户纯文本提问,事件行/工具回�
     const std::string jsonl3 =
         SerializeSessionMessage(loop_tick, "ts3") + "\n" + SerializeSessionMessage(goal_turn, "ts4") + "\n";
     CHECK(sessions::ExtractPromptHistory(jsonl3).empty());
+}
+
+TEST_CASE("PromptTextFromMessage:提问裁判的唯一口径") {
+    // 正经提问:剥首尾空白后给正文。
+    CHECK(sessions::PromptTextFromMessage(UserText("  怎么配代理 \n")) == std::optional<std::string>("怎么配代理"));
+    // 非用户角色 / 空内容 / 首块非纯文本 / 夹 tool_result / 空白串 /
+    // slash / 定时 tick / goal 合成轮:一律 nullopt。
+    CHECK_FALSE(sessions::PromptTextFromMessage(AssistantText("答")).has_value());
+    CHECK_FALSE(sessions::PromptTextFromMessage(api::Message{api::Role::User, {}}).has_value());
+    const api::Message text_plus_result =
+        api::Message{api::Role::User, {api::TextBlock{"先说一句"}, api::ToolResultBlock{"t-1", "输出", false}}};
+    CHECK_FALSE(sessions::PromptTextFromMessage(text_plus_result).has_value());
+    CHECK_FALSE(sessions::PromptTextFromMessage(UserText("/model gpt")).has_value());
+    CHECK_FALSE(sessions::PromptTextFromMessage(UserText("   ")).has_value());
+    CHECK_FALSE(sessions::PromptTextFromMessage(UserText("[定时循环 tick]\n...")).has_value());
+    CHECK_FALSE(sessions::PromptTextFromMessage(UserText("[goal g-1 r1 iteration 2]\n...")).has_value());
+    // 斜杠前带空白:剥完空白再判,仍是命令,不算提问。
+    CHECK_FALSE(sessions::PromptTextFromMessage(UserText(" /resume")).has_value());
+}
+
+TEST_CASE("ExtractLivePromptTail:活历史只补未落盘的尾巴") {
+    // 一场:u1 a1 u2(斜杠,不算提问) a2 u3 a3 u4,前四条已落盘。
+    std::vector<api::Message> history;
+    history.push_back(UserText("问一"));
+    history.push_back(AssistantText("答一"));
+    history.push_back(UserText("/model 别的模型"));  // 不占提问事件序号
+    history.push_back(AssistantText("答二"));
+    history.push_back(UserText("问三"));
+    history.push_back(AssistantText("答三"));
+    history.push_back(UserText("问四"));
+
+    SUBCASE("仅磁盘:全落盘(persisted 盖满),尾巴空") {
+        const auto tail = sessions::ExtractLivePromptTail(history, history.size(), "now");
+        CHECK(tail.empty());
+    }
+
+    SUBCASE("完全重叠:persisted 正落在磁盘边界,只出其后一条") {
+        // 前 4 条落盘:磁盘侧出"问一";尾巴只该出"问三""问四"。
+        const auto tail = sessions::ExtractLivePromptTail(history, 4, "2026-08-29 22:00:00");
+        REQUIRE(tail.size() == 2);
+        CHECK(tail[0].text == "问三");
+        CHECK(tail[1].text == "问四");
+        // seq 按全场提问次序编:问一是 0,问三 1,问四 2——斜杠不占号。
+        CHECK(tail[0].seq == 1);
+        CHECK(tail[1].seq == 2);
+        CHECK(tail[0].ts == "2026-08-29 22:00:00");  // ts 由调用方给(收集时刻)
+    }
+
+    SUBCASE("仅内存:一条没落盘,全场都出") {
+        const auto tail = sessions::ExtractLivePromptTail(history, 0, "now");
+        REQUIRE(tail.size() == 3);
+        CHECK(tail[0].seq == 0);  // 落盘后存档侧抽出的 seq 与这里一致
+        CHECK(tail[1].seq == 1);
+        CHECK(tail[2].seq == 2);
+    }
+
+    SUBCASE("同文不同事件:真发两次,两条都出,序号不同") {
+        history.push_back(UserText("问三"));  // 与未落盘的"问三"同文
+        const auto tail = sessions::ExtractLivePromptTail(history, 5, "now");
+        REQUIRE(tail.size() == 2);
+        CHECK(tail[0].text == "问四");
+        CHECK(tail[1].text == "问三");
+        CHECK(tail[0].seq != tail[1].seq);
+    }
+
+    SUBCASE("persisted 超过 history 长度:按满账处理,不越界") {
+        CHECK(sessions::ExtractLivePromptTail(history, history.size() + 3, "now").empty());
+    }
+
+    SUBCASE("磁盘与活历史认出同一事件:序列化回读后 seq 与档上一致") {
+        // 前 4 条落盘,档上的提问序号与尾巴的序号同一条口径。
+        std::string jsonl;
+        for (std::size_t i = 0; i < 4; ++i) {
+            jsonl += sessions::SerializeSessionMessage(history[i], "ts") + "\n";
+        }
+        const auto disk = sessions::ExtractPromptHistory(jsonl);
+        REQUIRE(disk.size() == 1);           // 只有"问一"
+        CHECK(disk[0].seq == 0);             // 档上序号 0
+        const auto tail = sessions::ExtractLivePromptTail(history, 4, "now");
+        CHECK(tail.front().seq == 1);        // 尾巴从 1 接上,不重号
+    }
 }
 
 

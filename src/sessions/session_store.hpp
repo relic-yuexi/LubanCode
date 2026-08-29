@@ -454,17 +454,37 @@ std::optional<std::string> ReadSessionFileBytes(const std::string& file_path);
 // 提问历史抽取(0.30.x Ctrl+R 反向搜索)
 // ---------------------------------------------------------------------------
 
-// 一条从存档里抽出的用户提问。只读事件账,不新增任何写路径。
+// 一条用户提问事件。只读事件账,不新增任何写路径。
 struct PromptHistoryRecord {
-    std::string text;  // 提问正文(多行拼 '\n')
-    std::string ts;    // 存档消息行里的原始 ts
+    std::string text;      // 提问正文(多行拼 '\n')
+    std::string ts;        // 存档消息行里的原始 ts
+    std::size_t seq = 0;   // 场内第几条提问事件(0 起,与 session id 合成
+                           // 事件身份):磁盘与活历史认出同一事件靠它对上,
+                           // 同文不同事件序号不同,各自保留
 };
 
-// 纯函数:一场存档的完整 JSONL -> 该场的用户提问记录。只收"role==user 且
-// 首块是纯 text、无 tool_result 块"的行——工具结果、密钥、未发送草稿、
-// 事件行(compact/title/cwd)一概不进;以 '/' 起头的 slash 命令不是提问,
-// 也不进。坏行跳过,不废整份。时间序,文件里什么序就什么序。
+// "这条消息算不算一次用户提问"的唯一裁判:role==user、首块是非空纯文本、
+// 整条无 tool_result 块、剥掉首尾空白后非空且不以 '/' 起头、不是定时循环
+// tick / goal 的宿主合成消息。是提问就给剥好空白的正文,不是给 nullopt。
+// 磁盘抽取(ExtractPromptHistory)与活历史尾巴(ExtractLivePromptTail)
+// 共用这一份,两边口径永不走样。
+std::optional<std::string> PromptTextFromMessage(const api::Message& message);
+
+// 纯函数:一场存档的完整 JSONL -> 该场的用户提问记录。只收上述裁判认账
+// 的消息行——工具结果、密钥、未发送草稿、事件行(compact/title/cwd)一概
+// 不进。坏行跳过,不废整份。时间序,文件里什么序就什么序;seq 按场内
+// 提问事件次序编(0 起)。
 std::vector<PromptHistoryRecord> ExtractPromptHistory(const std::string& jsonl_content);
+
+// 纯函数:活历史的"未落盘尾巴"。history 前 persisted_count 条已经进存档
+// (Ctrl+R 的存档侧会读出来),这里只收其后的提问——不把整场重抄一遍,
+// 免得同一条提问列两份。seq 按全场(含已落盘前缀)提问事件次序编:落盘
+// 后存档侧算出的 seq 与之一致,同一事件两边给出同一身份;同文不同事件
+// 序号不同,各自保留。ts 由调用方给(尾巴还没落盘,没有档上时间,取
+// 收集时的当前时间)。
+std::vector<PromptHistoryRecord> ExtractLivePromptTail(const std::vector<api::Message>& history,
+                                                       std::size_t persisted_count,
+                                                       const std::string& ts);
 
 // 当前本地时间,"yyyy-mm-dd HH:MM:SS"。meta.started_at / 消息 ts 用。
 std::string NowTimestamp();
