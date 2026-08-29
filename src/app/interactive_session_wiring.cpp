@@ -732,6 +732,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         lubancode::agent::AgentWiring wiring = main_agent->wiring();
         wiring.inbox = [this, peer_inbox_poll]() -> std::optional<lubancode::api::Message> {
             PumpSteeringToSubagents();
+            // 问题二(忙碌期排队的 /context 被当普通消息送模型):TakeDeliverable
+            // 在队列层对 slash 条目让路——这里取到的只有普通文字,slash 留在
+            // 队列,由轮末会话泵(主循环 TakeFirstAutoSendable → ProcessLine)
+            // 本地执行,任何模型请求都见不到它。
             const auto queued = SessionSteeringQueue().TakeDeliverable(lubancode::cli::MessageTarget::Main());
             if (!queued.empty()) {
                 // 取走即不再属于 footer 的活队列；若入队那一帧恰因终端隐藏/

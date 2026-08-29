@@ -294,6 +294,14 @@ void TerminalSessionController::PumpSteeringToSubagents() {
             item.state != lubancode::cli::QueueItemState::Queued || item.edit_open) {
             continue;
         }
+        // 问题二:本地 slash 命令没有子代理可执行——忙碌提交门已拦新条目,
+        // 这里兜住旧档恢复进来的漏网:标 Failed 留在原位(屏上带原因),等
+        // 用户取回改写或删除,绝不转投(转投就是喂给那只代理的模型)。
+        if (lubancode::cli::IsQueuedSlashText(item.text)) {
+            SessionSteeringQueue().MarkFailed(item.id, "本地命令不能投给子代理,请取回改写或删除");
+            queue_changed = true;
+            continue;
+        }
         lubancode::tools::AgentTool* agent_tool = session_agent_tool();
         if (agent_tool == nullptr) {
             SessionSteeringQueue().MarkFailed(item.id, "当前会话没有可用的子代理通道");
@@ -940,6 +948,9 @@ void TerminalSessionController::Run() {
         // 收场,原样还回队首并带"已试过一次"的账——同一条最多自动重试
         // 一次,再失败留队列等用户手动(Shift+← 取回改写再排、或删掉),
         // 错误文案旁明写一句"没送达,已回队",不再无声吞掉。
+        // 问题二:忙碌期排队的 slash 命令也被这只泵取走——ProcessLine 开头
+        // 先跑 ParseSlashCommand,于是它在这里本地执行(开 /context 面板那
+        // 类),不发模型;工具边界(TakeDeliverable)对它让路,故轮末必达。
         PumpSteeringToSubagents();
         if (auto head = SessionSteeringQueue().TakeFirstAutoSendable(lubancode::cli::MessageTarget::Main())) {
             TermOut() << theme.prompt << "> " << theme.reset << head->text << "\n";
