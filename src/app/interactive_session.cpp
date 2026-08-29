@@ -385,10 +385,14 @@ void TerminalSessionController::RestoreSteeringQueueFrom(
     SessionSteeringQueue().RestoreFromArchive(std::move(restored));
 }
 
-// Ctrl+R 提问历史搜索的数据源:只读 session 事件账。ListSessions 按新→旧
-// 给场次,这里倒序遍历(整体旧→新,BuildHistorySearchIndex 认这个序);
-// 每场内部 ExtractPromptHistory 本就是旧→新。当前会话若还没建档(首条
-// 消息未落地),活 history 里的用户提问也并进来——同一只读规则。
+// Ctrl+R 提问历史搜索的数据源:只读 session 事件账 + 活历史的未落盘尾巴。
+// ListSessions 按新→旧给场次,这里倒序遍历(整体旧→新,BuildHistorySearch
+// Index 认这个序);每场内部 ExtractPromptHistory 本就是旧→新,每条带场内
+// 事件序号。当前会话的提问以存档侧为准;活 history 只补 persisted_count
+// 之后尚未落盘的尾巴(轮内提问、建档前/建不了档的场次),不把整场重抄
+// 一遍。尾巴的序号按全场提问次序编,落盘后与存档侧同一事件同一身份,
+// 索引层认得出;万一两边都见着同一事件(落盘账与实际文件短暂脱节),
+// 也按身份合并成一条。
 lubancode::cli::PromptHistoryDataset TerminalSessionController::CollectPromptHistory() {
     lubancode::cli::PromptHistoryDataset data;
     data.current_session_id = session_store.session_id();
@@ -409,36 +413,25 @@ lubancode::cli::PromptHistoryDataset TerminalSessionController::CollectPromptHis
                 entry.session_id = it->id;
                 entry.title = it->title;
                 entry.project_key = project_key;
+                entry.event_seq = record.seq;
                 data.entries.push_back(std::move(entry));
             }
         }
     }
-    // 活 history 兜底:建档前(或建不了档)的本场提问。
+    // 活历史只补尾巴:history 前 persisted_count 条已进存档(上面读过),
+    // ExtractLivePromptTail 只收其后的提问;ts 取收集时的当前时间(还没
+    // 落盘,档上时间未定),标题用活会话的(与档上最后一条 title 事件同源)。
     const std::string current_id =
         data.current_session_id.empty() ? std::string("current") : data.current_session_id;
-    for (const auto& message : main_agent->History()) {
-        if (message.role != lubancode::api::Role::User || message.content.empty()) {
-            continue;
-        }
-        const auto* text = std::get_if<lubancode::api::TextBlock>(&message.content.front());
-        if (text == nullptr || text->text.empty() || text->text.front() == '/') {
-            continue;  // 与 ExtractPromptHistory 同一只读规则
-        }
-        bool has_tool_result = false;
-        for (const auto& block : message.content) {
-            if (std::holds_alternative<lubancode::api::ToolResultBlock>(block)) {
-                has_tool_result = true;
-                break;
-            }
-        }
-        if (has_tool_result) {
-            continue;
-        }
+    for (auto& record : lubancode::sessions::ExtractLivePromptTail(
+             main_agent->History(), persisted_count, lubancode::sessions::NowTimestamp())) {
         lubancode::cli::PromptHistoryEntry entry;
-        entry.text = text->text;
+        entry.text = std::move(record.text);
+        entry.ts = std::move(record.ts);
         entry.session_id = current_id;
+        entry.title = session_title;
         entry.project_key = data.current_project_key;
-        entry.ts = session_start_ts;
+        entry.event_seq = record.seq;
         data.entries.push_back(std::move(entry));
     }
     return data;

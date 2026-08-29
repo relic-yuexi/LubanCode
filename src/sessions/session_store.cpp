@@ -1615,6 +1615,39 @@ std::string NowTimestamp() { return FormatLocalTime("%Y-%m-%d %H:%M:%S"); }
 
 std::string NowIdTimestamp() { return FormatLocalTime("%Y%m%d-%H%M%S"); }
 
+std::optional<std::string> PromptTextFromMessage(const api::Message& message) {
+    if (message.role != api::Role::User || message.content.empty()) {
+        return std::nullopt;
+    }
+    const auto* text = std::get_if<api::TextBlock>(&message.content.front());
+    if (text == nullptr || text->text.empty()) {
+        return std::nullopt;  // 首块不是纯文本(图片开头/空内容)不算提问
+    }
+    // tool_result 装在 user 消息里(工具回执),不是提问。
+    for (const auto& block : message.content) {
+        if (std::holds_alternative<api::ToolResultBlock>(block)) {
+            return std::nullopt;
+        }
+    }
+    std::string trimmed = text->text;
+    // 首尾空白剥掉;空白串、slash 命令不是提问。
+    while (!trimmed.empty() && (trimmed.front() == ' ' || trimmed.front() == '\t' ||
+                                trimmed.front() == '\n' || trimmed.front() == '\r')) {
+        trimmed.erase(trimmed.begin());
+    }
+    while (!trimmed.empty() && (trimmed.back() == ' ' || trimmed.back() == '\t' ||
+                                trimmed.back() == '\n' || trimmed.back() == '\r')) {
+        trimmed.pop_back();
+    }
+    // 定时循环 tick 的 scheduled message(loop 单)与 goal 合成轮:宿主
+    // 定时触发的重复句不算提问,不进 Ctrl+R 历史搜索(免得满屏重复)。
+    if (trimmed.empty() || trimmed.front() == '/' || trimmed.starts_with("[定时循环 tick]") ||
+        trimmed.starts_with("[goal ")) {
+        return std::nullopt;
+    }
+    return trimmed;
+}
+
 std::vector<PromptHistoryRecord> ExtractPromptHistory(const std::string& jsonl_content) {
     std::vector<PromptHistoryRecord> out;
     std::size_t line_start = 0;
@@ -1629,39 +1662,14 @@ std::vector<PromptHistoryRecord> ExtractPromptHistory(const std::string& jsonl_c
                 // 消息行没有顶层 type;事件行(compact/title/cwd)有,跳过。
                 const bool is_message = parsed.is_object() && !parsed.contains("type") &&
                                         parsed.contains("role") && parsed.contains("content");
-                if (is_message && parsed["role"] == "user" && parsed["content"].is_array() &&
-                    !parsed["content"].empty()) {
-                    const auto& first = parsed["content"][0];
-                    bool has_text_only = first.is_object() && first.value("type", "") == "text" &&
-                                         first.contains("text") && first["text"].is_string();
-                    if (has_text_only) {
-                        // tool_result 装在 user 消息里(工具回执),不是提问。
-                        for (const auto& block : parsed["content"]) {
-                            if (block.is_object() && block.value("type", "") == "tool_result") {
-                                has_text_only = false;
-                                break;
-                            }
-                        }
-                    }
-                    if (has_text_only) {
-                        std::string text = first["text"].get<std::string>();
-                        // 首尾空白剥掉;空白串、slash 命令不是提问。
-                        while (!text.empty() && (text.front() == ' ' || text.front() == '\t' ||
-                                                 text.front() == '\n' || text.front() == '\r')) {
-                            text.erase(text.begin());
-                        }
-                        while (!text.empty() && (text.back() == ' ' || text.back() == '\t' ||
-                                                 text.back() == '\n' || text.back() == '\r')) {
-                            text.pop_back();
-                        }
-                        // 定时循环 tick 的 scheduled message(loop 单):定时
-                        // 触发的重复句不算提问,不进 Ctrl+R
-                        // 历史搜索(免得满屏重复)。
-                        if (!text.empty() && text.front() != '/' &&
-                            !text.starts_with("[定时循环 tick]") &&
-                            !text.starts_with("[goal ")) {
-                            out.push_back(PromptHistoryRecord{std::move(text),
-                                                              parsed.value("ts", std::string())});
+                if (is_message) {
+                    const auto message = MessageFromJson(parsed);
+                    if (message.has_value()) {
+                        auto text = PromptTextFromMessage(*message);
+                        if (text.has_value()) {
+                            out.push_back(PromptHistoryRecord{std::move(*text),
+                                                              parsed.value("ts", std::string()),
+                                                              out.size()});
                         }
                     }
                 }
@@ -1673,6 +1681,24 @@ std::vector<PromptHistoryRecord> ExtractPromptHistory(const std::string& jsonl_c
             break;
         }
         line_start = line_end + 1;
+    }
+    return out;
+}
+
+std::vector<PromptHistoryRecord> ExtractLivePromptTail(const std::vector<api::Message>& history,
+                                                       std::size_t persisted_count,
+                                                       const std::string& ts) {
+    std::vector<PromptHistoryRecord> out;
+    std::size_t seq = 0;  // 全场提问事件序号:已落盘前缀也计数,尾巴序号才接得上存档侧
+    for (std::size_t i = 0; i < history.size(); ++i) {
+        auto text = PromptTextFromMessage(history[i]);
+        if (!text.has_value()) {
+            continue;  // 不是提问的消息不占事件序号
+        }
+        if (i >= persisted_count) {
+            out.push_back(PromptHistoryRecord{std::move(*text), ts, seq});
+        }
+        ++seq;
     }
     return out;
 }

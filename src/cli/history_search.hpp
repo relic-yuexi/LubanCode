@@ -22,6 +22,9 @@ struct PromptHistoryEntry {
     std::string title;    // 会话标题(可空,展示层退回首句)
     std::string project;  // 项目短名(cwd 末段;全部范围里分场用)
     std::string project_key;  // cwd 归一化比较键(范围过滤用)
+    // 场内提问事件序号(与 session_id 合成事件身份):存档侧按场内提问
+    // 次序编,活历史侧按全场提问次序编——同一事件两边对得上号。
+    std::size_t event_seq = 0;
 };
 
 // 应用层给的整份数据(一次搜索会话里取一次,范围轮换本地过滤)。
@@ -36,7 +39,10 @@ enum class HistorySearchScope { Session, Project, All };
 // 范围轮换:本会话 -> 本项目 -> 全部 -> 本会话。
 HistorySearchScope NextHistorySearchScope(HistorySearchScope scope);
 
-// 数据集 + 范围 -> 搜索索引:过滤、连续同文去重、最新在前,截最近 max 条。
+// 数据集 + 范围 -> 搜索索引:过滤、事件身份去重、最新在前,截最近 max 条。
+// 去重只认身份(session id + event_seq):同一事件从存档侧与活历史侧各来
+// 一份就合并;同文不同事件(用户真发了两次)各自保留,带各自时间;跨场
+// 本来就不去。
 std::vector<PromptHistoryEntry> BuildHistorySearchIndex(const PromptHistoryDataset& dataset,
                                                         HistorySearchScope scope, std::size_t max = 500);
 

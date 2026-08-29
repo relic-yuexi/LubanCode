@@ -288,6 +288,14 @@ if(WIN32)
   target_compile_features(agent_stream_driver PRIVATE cxx_std_23)
   target_link_libraries(agent_stream_driver PRIVATE ws2_32)
 
+  # Ctrl+R 提问历史搜索驱动器(实测问题 8:同一条提问列两遍):真控制台
+  # 跑真回合真落盘,按真 Ctrl+R 键刮屏断言搜索面板"不重不漏"——两条已落
+  # 盘只显两条、未落盘尾巴补上、落盘后不重复、同文两次真发两行都留:
+  #   history_search_driver <lubancode.exe> <工作目录> <报告文件>
+  add_executable(history_search_driver EXCLUDE_FROM_ALL manual/history_search_driver.cpp)
+  target_compile_features(history_search_driver PRIVATE cxx_std_23)
+  target_link_libraries(history_search_driver PRIVATE ws2_32)
+
   # 可视区重排驱动器(多智能体真机回归单):真控制台跑"主回合派两只后台
   # 代理随即收口"的完整回合,断言 composer 顶边/代理坞/状态栏全在可视窗
   # 口里(不许靠改字号/滚轮救场)。五幕:80×24、120×35、全屏、改字号三
