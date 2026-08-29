@@ -1,0 +1,2139 @@
+# 多渠道消息接入与常驻 ChannelPlugin 设计
+
+- 状态：待实现
+- 日期：2026-08-29
+- 范围：常驻渠道插件、平台消息入站、会话路由、Agent 唤起、流式回发、可靠性、安全、Package 挂载、命令与诊断
+- 首批目标：QQ Bot、WeChat；合同同时覆盖 LINE、WeCom、Feishu、Yuanbao、Zalo、Zalo ClawBot、Zalo Personal
+- 不在本单：重写模型 SSE、把 MCP 改成消息总线、实现平台后台审批流程、代用户申请平台账号、绕过平台风控
+
+## 一、先下断语
+
+LubanCode 要接 QQ、微信、飞书这类聊天平台，缺的不是一只新工具，也不是一条 SSE。
+
+缺的是一层常驻的 Channel Runtime：
+
+```text
+聊天平台
+  -> Webhook / WebSocket / 长轮询 / SDK 事件
+  -> ChannelAdapter
+  -> 统一 ChannelInboundEvent
+  -> 鉴权、去重、排队、会话路由
+  -> 已经运行的 LubanCode Agent
+  -> TurnEventAdapter
+  -> ReplyAssembler
+  -> ChannelAdapter::Send
+  -> 聊天平台
+```
+
+最终定案：
+
+1. 新增 `ChannelPlugin`。它是一类常驻消息适配器。
+2. `ChannelPlugin` 不冒充现有工具 Plugin。现有 Plugin 仍是“一次工具调用，一次执行”。
+3. `ChannelPlugin` 不冒充 MCP。MCP 仍是 Agent 主动调用外部工具的协议。
+4. Package 只负责发现、校验、信任与挂载 Channel 组件，不参与收消息，不开 Agent turn。
+5. 平台 SDK、鉴权、Webhook、WebSocket、长轮询都留在 adapter/sidecar。C++ 内核只认统一事件。
+6. 模型流与平台流分账。模型端即便用 SSE，渠道端也不因此变成 SSE。
+7. 一场会话同时只跑一枚 main turn。平台线程只投信，不可直闯 Agent。
+
+一句话：平台来信唤醒 Agent，Agent 回话交还平台。ChannelPlugin 管这条来回路。
+
+## 二、外部实现查账
+
+本节按 2026-08-29 的官方仓库与文档查得。后续开工前须再核版本，不可把今日行为当永久合同。
+
+### 2.1 渠道传输不是一门协议
+
+| 渠道 | OpenClaw 收消息 | Hermes 收消息 | 回消息 | 是否靠 SSE |
+|---|---|---|---|---|
+| LINE | HTTPS Webhook | `aiohttp` Webhook | Reply API，失效后 Push API | 否 |
+| WeChat | iLink `getUpdates` 长轮询 | iLink `getupdates` 长轮询 | HTTP `sendMessage`，回带 `context_token` | 否 |
+| WeCom | Bot WebSocket 或 Bot Webhook；自建应用 XML Webhook | Bot WebSocket；另有自建应用 Callback | WebSocket 回复或 HTTP `message/send` | 否 |
+| QQ Bot | 默认 WebSocket，另可 Webhook | WebSocket | REST；C2C 可走 `stream_messages` | 否 |
+| Feishu | 默认 WebSocket，可选 Webhook | 默认 WebSocket，可选 Webhook | 消息 API；流式卡片靠更新 | 否 |
+| Yuanbao | WebSocket | WebSocket | WebSocket 协议内回发、分块 | 否 |
+| Zalo Bot | 默认长轮询，可选 Webhook | 当前主分支未见适配器 | Bot API | 否 |
+| Zalo ClawBot | `getUpdates` 长轮询 | 当前主分支未见适配器 | 官方 Bot API | 否 |
+| Zalo Personal | `zca-js` 原生事件监听 | 当前主分支未见适配器 | `zca-js` API | 否 |
+
+资料：
+
+- OpenClaw Channel 入站合同：<https://docs.openclaw.ai/plugins/sdk-channel-inbound>
+- OpenClaw LINE：<https://docs.openclaw.ai/channels/line>
+- Tencent WeChat 插件：<https://github.com/Tencent/openclaw-weixin>
+- Tencent WeCom 插件：<https://github.com/WecomTeam/wecom-openclaw-plugin>
+- Tencent QQ Bot 插件：<https://github.com/tencent-connect/openclaw-qqbot>
+- OpenClaw Feishu：<https://docs.openclaw.ai/channels/feishu>
+- OpenClaw Yuanbao：<https://docs.openclaw.ai/channels/yuanbao>
+- OpenClaw Zalo：<https://docs.openclaw.ai/channels/zalo>
+- OpenClaw Zalo ClawBot：<https://docs.openclaw.ai/channels/zaloclawbot>
+- OpenClaw Zalo Personal：<https://docs.openclaw.ai/channels/zalouser>
+- Hermes 平台适配器合同：<https://github.com/NousResearch/hermes-agent/blob/main/website/docs/developer-guide/adding-platform-adapters.md>
+
+### 2.2 OpenClaw 的路
+
+OpenClaw 把渠道接收路径收成一句：
+
+```text
+platform event -> inbound facts/context -> agent reply -> message delivery
+```
+
+每个渠道插件自管：
+
+- 账号与 token。
+- WebSocket、Webhook 或长轮询生命周期。
+- 平台验签、心跳、重连、cursor/resume sequence。
+- 平台消息转成中立入站事实。
+- 平台消息长度、媒体、引用、线程与流式能力。
+- 回复发送、编辑、分块与回执。
+
+Gateway 自管：
+
+- 私聊与群聊准入。
+- 绑定哪只 Agent、哪场 session。
+- 入站耐久、去重与每会话串行。
+- 调 Agent。
+- 把 Agent 事件交回渠道投递层。
+
+### 2.3 Hermes 的路
+
+Hermes 的骨架也一样：
+
+```text
+User <-> Messaging Platform <-> Platform Adapter <-> Gateway Runner <-> AIAgent
+```
+
+Adapter 统一实现：
+
+- `connect()`：开 WebSocket、长轮询或 HTTP Server。
+- `disconnect()`：停监听、停心跳、收线程。
+- `send()`：发消息。
+- `send_typing()`：可选。
+- `get_chat_info()`：可选。
+- 收到消息后构造 `MessageEvent`，调用 `handle_message(event)`。
+
+Gateway Runner 再做鉴权、会话解析、创建或恢复 Agent、运行一轮、回发。
+
+### 2.4 SSE 到底住哪儿
+
+须分三股水：
+
+```text
+平台入站流：Webhook / WebSocket / 长轮询
+模型生成流：HTTP SSE / provider SDK stream
+平台出站流：发送、编辑、卡片更新、平台原生 stream API
+```
+
+模型吐 token 时，LubanCode 现有 provider 可以走 SSE。`TurnEventAdapter` 把 token 翻成 `ItemDelta`。Channel 只消费这份中立事件，再按平台能力处理：
+
+- LINE：攒成完整块再发。
+- QQ C2C：可用官方 `stream_messages` 更新累计正文。
+- Feishu：可更新流式卡片。
+- WeCom/Yuanbao：可走平台自带流式回复。
+- 不支持更新的平台：按字符数和空闲时间合并，再分块发送。
+
+所以，SSE 只是模型侧一条水管。它不该写进 ChannelPlugin 的核心合同。
+
+## 三、LubanCode 眼下已有的底子
+
+### 3.1 已有可复用件
+
+| 现有件 | 已有本事 | 本单怎样复用 |
+|---|---|---|
+| `PeerMailbox` | message id 去重、正文短窗去重、限速、队列上限、线程安全 Drain | 抽出通用 ingress 队列规矩，或照合同另建 `ChannelInbox` |
+| `PeerSessionWiring` | 传输线程只投 mailbox；主线程在安全边界取信；外来消息可自动开 turn | 沿用“线程不直闯 Agent”的铁律，不直接拿它承载公网渠道 |
+| `SessionWorkScheduler` | 用户、交互、goal、loop、maintenance 公平取件；一场只跑一枚 main turn | 新增 `ChannelTurn` 工作种类，渠道消息与用户排队消息同属高优先级 |
+| `IdleWakeCoordinator` | 后台源只投 wake，主泵醒来再取件 | ChannelManager 每个活跃账号挂一枚 wake source |
+| `SessionRuntime` | thread id、事件发号、session 存档、权限账、Mode 真值 | Headless Channel Session 直接复用 |
+| `TurnEventAdapter` | 正文、思考、工具、usage、step、turn 终态统一成 ServerEvent | ReplyAssembler 的唯一输入，不再另开模型回调旁路 |
+| `FanoutEventSink` | 同一事件流投多家 sink | 终端、App Server、Channel ReplySink 可并挂 |
+| `RunTurn` / Agent | 主会话、子代理、Workflow 共用执行引擎 | ChannelSessionHost 不重写 Agent loop |
+| Package inventory | 已认 Agent、Prompt、Skill、Workflow、Plugin、MCP 六类组件 | 加第七类 `Channel`，沿用发现、来源、诊断与快照规矩 |
+
+### 3.2 现有 process Plugin 接不住
+
+`src/runtime/plugin_process.cpp` 的合同很清楚：
+
+```text
+一次工具调用
+-> 起一个子进程
+-> stdin 写恰好一份 JSON
+-> 关 stdin
+-> stdout 收恰好一份 JSON
+-> 子进程退出
+```
+
+这条路适合“算一遍、回一份结果”。不适合：
+
+- 常驻 WebSocket。
+- 35 秒一轮的长轮询。
+- HTTP Webhook Server。
+- 主动上报来信。
+- 心跳、重连、QR 登录。
+- 同时管理多个账号。
+
+不能拿“把 timeout 设成 0”来凑。stdin 会被关，协议又只收一份 stdout，生命周期压根儿不对。
+
+### 3.3 现有 MCP 也接不住
+
+`src/mcp/client.cpp::OnLine()` 只接带整数 `id` 的响应。没有 `id` 的服务端通知会直接忽略。眼下 MCP 只管：
+
+- initialize。
+- tools/list。
+- tools/call。
+- 客户端发 notifications/initialized、notifications/cancelled。
+
+就算把通知接起来，MCP 的业务语义仍是工具与资源，不是聊天账号、会话准入、消息回执与平台重连。不可为省一只协议壳，把两套领域硬拧在一起。
+
+### 3.4 眼下真正缺什么
+
+缺七样：
+
+1. 常驻 Channel 生命周期。
+2. sidecar 与宿主双向协议。
+3. 统一入站事件与出站动作。
+4. 多账号配置、密钥与状态目录。
+5. 由 channel conversation 映射 session 的路由表。
+6. 无终端的 Headless Session Host。
+7. 回答合并、平台分块、回执与失败重试。
+
+## 四、目标与非目标
+
+### 4.1 首版目标
+
+- 一个已经运行的 LubanCode 进程能常驻一个或多个渠道账号。
+- 外部消息到达后，无需用户再敲键，自动唤起对应 session。
+- 同一 conversation 内严格串行；不同 conversation 可限额并行。
+- 进程重启后，未完成入站不会无声丢失。
+- 平台重复投递不会重复开 Agent turn。
+- Agent 正文可按渠道能力完整发送、分块发送或原生流式更新。
+- 思考正文默认不出站；工具进度默认不出站。
+- 账号、sender、conversation、message、session、turn、delivery 六本账能串起来查。
+- 渠道包可以经 Package 安装、信任、启停与诊断。
+- QQ Bot 做首只参考实现；WeChat 紧随其后。
+
+### 4.2 首版不做
+
+- 不让公网消息直接控制正在操作的终端输入框。
+- 不把外部用户文字当 system/developer 指令。
+- 不默认开放 shell、write、browser 等高风险工具。
+- 不转发模型思考链。
+- 不保证所有平台都有逐 token 流式体验。
+- 不替平台补一套不存在的 thread、reaction、edit 能力。
+- 不让项目目录自行开启全局渠道账号或读取全局密钥。
+- 不在 C++ 内核里逐家手写 SDK。
+- 不首期支持集群横向扩容；先把单机耐久与账号锁做实。
+
+## 五、名字与边界
+
+| 名称 | 管什么 | 不管什么 |
+|---|---|---|
+| Channel | 一类平台，如 `qqbot`、`weixin` | 不代表某个账号 |
+| Channel Account | 一份登录身份与凭据 | 不决定 Agent 全局配置 |
+| ChannelPlugin | 一类可安装渠道实现 | 不直接持宿主 Agent |
+| ChannelAdapter | ChannelPlugin 某个账号的运行实例 | 不拼系统提示词 |
+| ChannelManager | 启停 adapter、收状态、管账号锁与退避 | 不执行模型步骤 |
+| ChannelBridge | C++ 宿主与进程 sidecar 的双向协议 | 不对外冒充 MCP |
+| ChannelIngressStore | 入站去重、耐久状态、dead letter | 不保存整份 session history |
+| ChannelRouter | conversation -> session/agent/policy | 不碰平台 SDK |
+| ChannelSessionHost | 无终端运行一场 session | 不处理平台协议 |
+| ReplyAssembler | ServerEvent -> 渠道出站动作 | 不泄露 thinking |
+| DeliveryDriver | 调 adapter 发送、编辑、上传、重试 | 不重新跑 Agent |
+| Package | 分发与挂载 ChannelPlugin | 不参与执行 |
+| MCP | Agent 主动调用外部工具 | 不接收平台来信 |
+
+产品界面可以把它统称“渠道插件”。代码里仍要把 `PluginTool` 与 `ChannelPlugin` 分开，免得生命周期、权限和错误码串账。
+
+## 六、总架构
+
+```text
+                          +----------------------+
+                          | PackageCatalog       |
+                          | trust / mount / pin  |
+                          +----------+-----------+
+                                     |
+                                     v
++----------------+       +-----------+-----------+
+| QQ / WeChat /  |<----->| Channel sidecar       |
+| LINE / Feishu  |       | SDK + auth + transport|
++----------------+       +-----------+-----------+
+                                     | Channel Bridge v1
+                                     v
+                          +----------+-----------+
+                          | ChannelManager       |
+                          | lifecycle / accounts |
+                          +----------+-----------+
+                                     |
+                                     v
+                          +----------+-----------+
+                          | ChannelIngressStore  |
+                          | durable / dedupe      |
+                          +----------+-----------+
+                                     |
+                                     v
+                          +----------+-----------+
+                          | ChannelRouter        |
+                          | auth / bind / policy |
+                          +----------+-----------+
+                                     |
+                                     v
+                          +----------+-----------+
+                          | SessionWorkScheduler |
+                          | single-flight / FIFO |
+                          +----------+-----------+
+                                     |
+                                     v
+                          +----------+-----------+
+                          | ChannelSessionHost   |
+                          | SessionRuntime+Agent |
+                          +----------+-----------+
+                                     |
+                          TurnEventAdapter / EventSink
+                                     |
+                                     v
+                          +----------+-----------+
+                          | ReplyAssembler       |
+                          | coalesce / chunk     |
+                          +----------+-----------+
+                                     |
+                                     v
+                          +----------+-----------+
+                          | DeliveryDriver       |
+                          +----------------------+
+```
+
+依赖只朝一个方向走：
+
+```text
+platform sidecar -> channel protocol -> channel runtime -> session runtime -> agent
+agent events -> reply assembler -> channel protocol -> platform sidecar
+```
+
+`agent`、`sessions`、`runtime` 不反向 include 某一家平台 SDK。
+
+## 七、建议目录与职责
+
+```text
+src/channel/
+  types.hpp                    中立入站、出站、账号、能力类型
+  manifest.hpp/.cpp            channel.yaml 严格解析
+  catalog.hpp/.cpp             builtin/user/project/package 来源与覆盖
+  bridge_protocol.hpp/.cpp     Channel Bridge v1 帧与错误码
+  bridge_process.hpp/.cpp      常驻 sidecar、双向请求、通知、进程树收尾
+  manager.hpp/.cpp             多账号生命周期、状态机、退避、账号锁
+  ingress_store.hpp/.cpp       WAL、去重、状态迁移、dead letter
+  inbox.hpp/.cpp               内存队列、限速、每会话 FIFO
+  router.hpp/.cpp              绑定、session key、Agent 与策略解析
+  policy.hpp/.cpp              DM/group/sender/mention/tool 权限
+  session_host.hpp/.cpp        Headless Session 装配与 turn 泵
+  reply_assembler.hpp/.cpp     TurnEvent 到 ReplyAction
+  delivery.hpp/.cpp            send/edit/upload/typing/retry
+  diagnostics.hpp/.cpp         status/doctor/trace 投影
+
+src/app/commands/
+  channel_commands.hpp/.cpp    /channels 与 /channel
+
+tests/unit/channel/
+tests/integration/channel/
+tests/manual/channel/
+```
+
+平台实现不进 `src/channel/platforms/`。它们住 Package：
+
+```text
+examples/packages/qqbot-channel/
+  package.yaml
+  channels/
+    qqbot/
+      channel.yaml
+      runtime/
+        package.json
+        dist/index.js
+```
+
+官方发布时可把参考包迁到独立仓库。仓内先留一只最小假渠道和一只 QQ 真适配器，守住协议与 E2E。
+
+## 八、Package 与 Channel 组件
+
+### 8.1 新增第七类组件
+
+在 `package::ComponentKind` 末尾追加：
+
+```cpp
+enum class ComponentKind {
+    Agent,
+    PromptProfile,
+    Skill,
+    Workflow,
+    Plugin,
+    McpServer,
+    Channel,
+};
+```
+
+目录名固定为 `channels/`。追加枚举，不改前六类旧值与旧行为。
+
+Package inventory 应识别：
+
+```text
+channels/<local-id>/channel.yaml
+```
+
+canonical id：
+
+```text
+<package-id>:<channel-local-id>
+```
+
+对外渠道 id 可由 `channel.yaml:id` 给出，如 `qqbot`。同一时刻只许一份已挂载实现占用同一渠道 id。冲突按 Package 原子挂载失败，不临时挑一份。
+
+### 8.2 不扩写 plugin.json
+
+现有 `plugin.json` 表示工具 Plugin。不要给它硬添 `lifecycle: daemon`、`inbound`、`accounts` 等字段。那会令一份 manifest 同时背两套生命周期。
+
+Channel 自有 `channel.yaml`。Package 将两类组件并排收纳：
+
+```text
+plugins/foo/plugin.json       一次工具调用
+channels/qqbot/channel.yaml   常驻消息渠道
+```
+
+### 8.3 发现不等于运行
+
+Channel 含网络、账号、密钥与常驻进程。发现后必须依次过：
+
+```text
+discover
+-> static parse
+-> dependency check
+-> package trust
+-> channel enablement
+-> account credentials resolve
+-> account lock
+-> sidecar spawn
+-> initialize
+-> start
+-> running
+```
+
+任何一关失败，都不可留下半只 adapter 或半份路由。
+
+### 8.4 会话钉快照
+
+一枚 Channel turn 开始时，钉住：
+
+- Package digest。
+- Channel manifest digest。
+- adapter protocol version。
+- account config revision。
+- policy revision。
+- Agent definition snapshot。
+- Prompt/Skill/Tool snapshot。
+
+reload 只影响后来的 turn。正在跑的一轮不得中途换 adapter、政策或 Agent。
+
+## 九、channel.yaml
+
+首版 schema：
+
+```yaml
+schema: 1
+id: qqbot
+name: QQ Bot
+description: Connect QQ Bot accounts through the official QQ Bot API.
+
+runtime:
+  kind: process
+  command: node
+  args:
+    - ${channel_dir}/runtime/dist/index.js
+  protocol: lubancode-channel/1
+  startup_timeout_ms: 15000
+  shutdown_timeout_ms: 5000
+  requires:
+    executables:
+      - name: node
+        version: ">=20"
+
+capabilities:
+  transports: [websocket, webhook]
+  conversations: [direct, group, guild, thread]
+  inbound: [text, image, audio, video, file, mention, reply]
+  outbound: [text, image, audio, video, file, reply]
+  delivery: [send, edit, native_stream, typing]
+  login: [credentials, qr]
+
+limits:
+  text_chars: 2000
+  media_bytes: 20971520
+  outbound_requests_per_minute: 60
+
+state:
+  format: 1
+  migrator: ${channel_dir}/runtime/dist/migrate.js
+```
+
+字段规矩：
+
+- `schema` 只收 `1`。
+- `id` 使用小写 kebab-case，是全局渠道 id。
+- `runtime.kind` 首版只收 `process`。
+- `command`、`args` 只许 `${channel_dir}` 占位，不走 shell。
+- `command` 可以是 Package 内冻结 executable，也可以是 `requires.executables` 明列的裸命令。
+- 裸命令在信任时解析绝对路径并记 fingerprint；后来 PATH 指到另一份 executable，须重新批准。
+- Package 内 command canonical 后必须留在 Package 根内。
+- `protocol` 首版只收 `lubancode-channel/1`。
+- capabilities 是声明，不是授权。运行时握手所得能力只能等于或窄于声明。
+- limits 是宿主上限；sidecar 报得更小就取更小，报得更大不放宽。
+- manifest 不放账号 token，不放用户 allowlist，不放 webhook 公网 URL。
+- 未知字段报错。类型、行、列、来源一并报。
+
+首版不做 native-library Channel。常驻 DLL 难卸载，崩一次带走宿主，第三方 SDK 又多是 Node/Python。进程 sidecar 边界更稳。
+
+## 十、用户配置与密钥
+
+### 10.1 配置仍进 config.json
+
+全局 `~/.lubancode/config.json`：
+
+```json
+{
+  "channels": {
+    "qqbot": {
+      "enabled": true,
+      "default_account": "main",
+      "accounts": {
+        "main": {
+          "enabled": true,
+          "transport": "websocket",
+          "app_id": "123456",
+          "secret_env": "QQBOT_CLIENT_SECRET",
+          "dm_policy": "allowlist",
+          "allow_from": ["owner_openid"],
+          "group_policy": "allowlist",
+          "group_allow_from": ["group_openid"],
+          "require_mention": true,
+          "agent": "general-purpose",
+          "reply": {
+            "mode": "block",
+            "tool_progress": false
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+### 10.2 配置层级
+
+渠道是全局网络能力。层级规矩比普通模型配置更严：
+
+```text
+全局 config：可启用账号、给凭据、定最大权限
+项目 config：只可绑定本项目 Agent、收窄 sender/group/tool/reply 策略
+环境变量：只供密钥值，不替项目开启账号
+CLI 临时参数：只可停用或收窄，不可悄悄放宽
+```
+
+陌生项目不能写一份 `.lubancode/config.json`，便替用户启动微信、读取 QQ token、开放公网 Webhook。
+
+### 10.3 密钥来源
+
+首版只收：
+
+- `secret_env`：环境变量名。
+- `secret_file`：用户明确指定的文件，须做权限与越界检查。
+- 平台登录后写入的 token：放 Channel 私有 state，0600/DACL 当前用户。
+
+可兼容 `secret` 明文，但 `/channel doctor` 必须给 warning；日志、trace、session、错误文案一概打码。
+
+### 10.4 状态目录
+
+```text
+~/.lubancode/channels/
+  locks/
+    qqbot-main.lock
+  qqbot/
+    main/
+      account.json          非密配置与版本
+      credentials.json.enc 登录产物；能接系统密钥库时改用引用
+      ingress/
+        journal.jsonl
+        dead-letter.jsonl
+      outbox/
+        journal.jsonl
+      adapter/
+        state.json          cursor、resume seq、sync buf
+      logs/
+        adapter.log
+```
+
+源码与数据分家。Package 升级、卸载，不得顺手删账号状态。
+
+### 10.5 pairing 不是平台登录
+
+两件事不可混：
+
+- 平台登录：证明这只 adapter 能代表哪个 bot/account。
+- 用户 pairing：决定哪个远端 sender 可以驱动 LubanCode。
+
+未知 DM 在 `dm_policy=pairing` 下：
+
+```text
+收到消息
+-> 不进 Agent
+-> 生成一次性 pairing code
+-> 回固定配对提示
+-> 本地 /channel pairing approve 后才放行后续消息
+```
+
+pairing 记录须带 channel、account、sender id、创建时间、过期时间与尝试次数。code 用加密随机数，短期有效，存 hash 不存明文。重复申请限速。批准只认宿主看到的 sender id，不认模型文字里自报身份。
+
+## 十一、Channel Bridge Protocol v1
+
+### 11.1 为何另立协议
+
+协议要办五件事：
+
+1. 宿主启停 sidecar。
+2. sidecar 主动上报入站消息。
+3. 宿主下发发送、编辑、typing、上传动作。
+4. 双方交换状态、能力、回执与登录挑战。
+5. 断线后按 delivery id、cursor、resume token 续上。
+
+这不是 MCP tools/call。另立 `lubancode-channel/1`，边界才干净。
+
+### 11.2 帧格式
+
+复用 PeerTransport 已验证的 framing 思路：
+
+```text
+4 字节大端长度 + UTF-8 JSON 正文
+```
+
+规矩：
+
+- 单帧默认上限 8 MiB；媒体只传 ArtifactRef/文件路径/URL，不塞大段 base64。
+- JSON 须是 object。
+- stdout 只走协议帧；日志一律 stderr。
+- 字符串过 UTF-8 校验。
+- request/response/notification 采用 JSON-RPC 2.0 形状。
+- 两边都能发 request，也都能回 response。
+- request id 在各自方向独立递增；响应只配本方向 pending。
+- 陌生 method 回 `-32601`，不可静默吞。
+- 协议错、超帽、连续坏帧立即停 adapter，进入 backoff。
+
+### 11.3 握手
+
+宿主先发：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "channel.initialize",
+  "params": {
+    "protocol_version": "2026-08-29",
+    "channel_id": "qqbot",
+    "account_id": "main",
+    "state_dir": "...",
+    "locale": "zh-CN",
+    "host": {
+      "name": "lubancode",
+      "version": "0.x"
+    },
+    "requested_capabilities": {
+      "inbound": ["text", "image", "audio", "file"],
+      "delivery": ["send", "edit", "typing"]
+    }
+  }
+}
+```
+
+sidecar 回：
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "result": {
+    "protocol_version": "2026-08-29",
+    "adapter": {"name": "openclaw-qqbot-bridge", "version": "1.0.0"},
+    "capabilities": {
+      "transports": ["websocket", "webhook"],
+      "delivery": ["send", "native_stream", "typing"]
+    },
+    "account_state_version": 1
+  }
+}
+```
+
+版本不认得就明败。能力取 manifest、宿主请求、sidecar 回报三者交集。
+
+### 11.4 宿主发给 sidecar 的 method
+
+| method | 形状 | 用处 |
+|---|---|---|
+| `channel.start` | request | 登录检查后开始收消息 |
+| `channel.stop` | request | 停收、flush、关连接 |
+| `channel.health` | request | 取连接、游标、积压、最近错误 |
+| `channel.send` | request | 发新消息或媒体 |
+| `channel.edit` | request | 改已发消息/卡片 |
+| `channel.typing` | notification | 开关输入状态，丢了也无妨 |
+| `channel.react` | request | 平台支持时加 reaction |
+| `channel.login.begin` | request | 开 QR/OAuth/设备码登录 |
+| `channel.login.cancel` | request | 取消登录 |
+| `channel.logout` | request | 吊销本地会话并停账号 |
+| `channel.inbound.ack` | request | 宿主耐久接收后确认 delivery id |
+| `channel.inbound.nack` | request | 明拒并给 retry/dead-letter 指示 |
+
+### 11.5 sidecar 发给宿主的 method
+
+| method | 形状 | 用处 |
+|---|---|---|
+| `channel.inbound` | notification | 上报一枚已在 sidecar 暂存的入站事件 |
+| `channel.status` | notification | connecting/running/degraded/backoff 等状态 |
+| `channel.delivery.receipt` | notification | 平台异步送达、失败、撤回回执 |
+| `channel.login.challenge` | notification | QR、URL、device code、过期时间 |
+| `channel.login.completed` | notification | 登录完成与账号摘要 |
+| `channel.capabilities.changed` | notification | 平台降级或权限改变 |
+| `channel.fatal` | notification | 不可自动恢复的账号错误 |
+
+`channel.inbound` 用 notification，随后宿主以 `delivery_id` 发 ack/nack。sidecar 在 ack 前保留本地 spool，可按退避重发。这样不让双向 request 的长处理堵住读循环。
+
+### 11.6 关闭顺序
+
+```text
+ChannelManager 标 stopping
+-> 停收新 turn
+-> 等正在发送的请求收口（有上限）
+-> channel.stop
+-> sidecar flush spool/cursor
+-> 关 stdin
+-> 等进程退出
+-> 超时杀进程树
+-> 释放账号锁
+```
+
+析构、reload、Ctrl+C、服务停止都走同一条幂等路径。
+
+## 十二、统一入站事件
+
+```cpp
+struct ChannelInboundEvent {
+    int schema = 1;
+    std::string delivery_id;       // sidecar -> host 投递 id
+    std::string provider_event_id; // 平台原始去重 id
+    std::string channel_id;
+    std::string account_id;
+    std::int64_t received_at_ms = 0;
+    std::int64_t provider_at_ms = 0;
+
+    ChannelConversation conversation;
+    ChannelSender sender;
+    std::string message_id;
+    std::optional<std::string> reply_to_message_id;
+    std::vector<ChannelPart> parts;
+    ChannelIngressHints hints;
+};
+```
+
+conversation：
+
+```cpp
+enum class ConversationKind { Direct, Group, Guild, Channel, Thread };
+
+struct ChannelConversation {
+    ConversationKind kind;
+    std::string id;
+    std::optional<std::string> parent_id;
+    std::optional<std::string> thread_id;
+    std::string title;
+};
+```
+
+sender：
+
+```cpp
+struct ChannelSender {
+    std::string id;
+    std::string display_name;
+    bool is_bot = false;
+    bool is_owner = false; // 只能由宿主 allowlist 推导，sidecar 声称不算
+};
+```
+
+parts 首版：
+
+```text
+text
+image
+audio
+video
+file
+link
+mention
+location
+unsupported
+```
+
+每个媒体 part 只带：
+
+- 平台 media id。
+- MIME、文件名、大小。
+- sidecar 已下载的受控本地路径，或待下载引用。
+- 可选 caption。
+- SHA-256（已下载时）。
+
+原始平台 JSON 默认不进 Agent history。诊断需要时，可写经脱敏、带大小帽的 sidecar debug artifact。
+
+### 12.1 媒体怎样进 Agent
+
+当前 `api::Message` 的稳定模型输入以 Text/Image 为主。统一事件可以先收 audio、video、file，不等于 Agent 已能原生理解它们。
+
+投影规矩：
+
+- text -> `TextBlock`。
+- image -> 过下载、MIME、魔数、大小检查后转 `ImageBlock`/ArtifactRef。
+- audio -> 有受信 STT 能力才转录；否则只给文件名、MIME、大小与“未转录”说明。
+- file -> 交文档抽取工具或 Skill；未解析前不可把二进制冒充文本。
+- video -> 首版只存 artifact 与元数据；抽帧/转写另走受信工具。
+- unsupported -> 给模型一行稳定说明，不悄悄丢掉。
+
+下载、转录、文档解析都要有独立工具权限和大小帽。ChannelAdapter 只搬运与规范化，不在 sidecar 里悄悄调用第三方模型。
+
+### 12.2 provenance 不可只写进正文
+
+现有 `api::Message` 只有 role 与 content。Channel 要补宿主真账：
+
+```cpp
+enum class MessageOrigin {
+    HumanTerminal,
+    ExternalChannel,
+    PeerSession,
+    BackgroundCompletion,
+    ToolResult,
+    HostSynthetic,
+};
+
+struct MessageProvenance {
+    MessageOrigin origin;
+    std::string channel_id;
+    std::string account_id;
+    std::string sender_id;
+    std::string conversation_id;
+    std::string provider_message_id;
+};
+```
+
+这份 provenance：
+
+- 由宿主生成，模型不可改。
+- 落 session JSONL。
+- 不原样塞进模型正文。
+- provider request serializer 默认忽略这份宿主元数据，只由 Prompt/Tool 隐式上下文按需取安全子集。
+- 供权限、审计、工具隐式上下文与回复关联使用。
+- 老 session 没字段时回落 `HumanTerminal`/`HostSynthetic` 的兼容推断。
+
+首期若不敢直接扩 `api::Message`，可先把 provenance 放 `TurnIngress` 与 session 事件行；但最终必须收进统一持久合同，不能永远靠 `[来自 QQ]` 这类文字标签猜身份。
+
+## 十三、入站耐久、去重与确认
+
+### 13.1 交付语义
+
+首版定为：
+
+```text
+adapter -> host：at least once
+host ingress -> Agent turn：at least once + 持久去重
+Agent reply -> platform：幂等尽力；平台支持 client id 时用 client id
+```
+
+不许写“exactly once”。崩溃夹在模型副作用与状态落盘之间，仍可能重放。能做的是把窗口缩小、留账、让重复可识别。
+
+### 13.2 去重键
+
+优先：
+
+```text
+channel_id + account_id + provider_event_id
+```
+
+平台没 event id 时退到：
+
+```text
+channel_id + account_id + conversation_id + message_id
+```
+
+再没有 message id，才用受限指纹：
+
+```text
+sender_id + normalized parts digest + provider timestamp bucket
+```
+
+指纹只作短窗去重，不可冒充永久 id。
+
+### 13.3 状态机
+
+```text
+received
+-> durable
+-> authorized | rejected
+-> routed
+-> queued
+-> running
+-> replied | completed_without_reply
+-> delivered | delivery_failed
+-> archived
+```
+
+旁路终态：
+
+```text
+duplicate
+rate_limited
+unsupported
+dead_letter
+cancelled
+```
+
+每次迁移只追加 journal。快照可重建，不拿一份可覆盖 JSON 当唯一真账。
+
+### 13.4 Webhook 的 200 何时回
+
+Webhook adapter 必须先把原始必要字段写进 sidecar spool，再回平台 2xx：
+
+```text
+验签成功
+-> schema/大小检查
+-> sidecar durable spool
+-> HTTP 200
+-> 上报宿主
+```
+
+落盘失败就回 5xx，让平台重试。不可先 200，再慢慢看能否落盘。
+
+### 13.5 WebSocket 与长轮询游标
+
+- WebSocket resume sequence 只在事件进 sidecar durable spool 后推进。
+- 长轮询 sync buf/cursor 只在响应事件进 spool 后提交。
+- host ack 后，sidecar 才可清理已上报 spool。
+- 未 ack 事件重连后再送，host 以 provider event id 去重。
+
+QQ、微信最先拿这条做故障注入测试。
+
+### 13.6 队列与背压
+
+每账号设：
+
+- 总 pending 上限。
+- 每 conversation pending 上限。
+- 每 sender 速率窗。
+- 同正文短窗。
+- 下载媒体总字节帽。
+- dead letter 上限与保留期。
+
+队列满时：
+
+- Webhook：耐久层满，回 429/503，由平台重试。
+- WebSocket：停读或断开，让 resume 重放；不可默丢。
+- 长轮询：先停下一轮 poll，待水位下降。
+- 已经 durable 的事件不可因内存队列满而消失。
+
+## 十四、鉴权、绑定与会话键
+
+### 14.1 先鉴权，后建 session
+
+```text
+event
+-> account enabled
+-> bot/self-loop check
+-> DM/group policy
+-> sender allowlist
+-> group allowlist
+-> mention/reply trigger
+-> command policy
+-> route binding
+-> session resolve
+```
+
+不通过准入的消息，不建 session，不召回记忆，不调用模型。
+
+### 14.2 policy
+
+```text
+dm_policy: pairing | allowlist | open | disabled
+group_policy: allowlist | open | disabled
+require_mention: true | false
+allow_bots: false
+```
+
+默认值：
+
+- DM：`pairing`。
+- Group：`allowlist`。
+- Group mention：`true`。
+- 其他 bot：拒绝。
+- Zalo Personal：默认整体 disabled，须明写风险确认。
+
+### 14.3 session key
+
+```text
+channel:<channel_id>:<account_id>:<kind>:<conversation_id>
+```
+
+thread 平台：
+
+```text
+channel:<channel_id>:<account_id>:<kind>:<conversation_id>:thread:<thread_id>
+```
+
+群聊可配置 scope：
+
+```text
+group           全群一场 session
+group_sender    每位 sender 一场
+group_thread    每条 thread 一场
+group_thread_sender
+```
+
+默认 `group`。切 scope 不迁旧 history；新 key 开新场，旧绑定留档可查。
+
+### 14.4 binding
+
+```json
+{
+  "bindings": [
+    {
+      "agent": "ops-agent",
+      "match": {
+        "channel": "qqbot",
+        "account": "main",
+        "conversation": {"kind": "group", "id": "group_openid"}
+      },
+      "policy": {
+        "tools": {"allow": ["read_file", "search"], "deny": ["shell", "write_file"]}
+      }
+    }
+  ]
+}
+```
+
+匹配从具体到宽：
+
+```text
+conversation+thread
+-> conversation
+-> account
+-> channel
+-> default Agent
+```
+
+同档命中两条，报冲突，不按文件次序碰运气。
+
+### 14.5 记忆与多用户隔离
+
+本地项目记忆、用户记忆里可能藏着别场资料。渠道一开，不能默认把这些都递给任意远端 sender。
+
+首版默认：
+
+```text
+owner DM       可按 binding 明开 project/user memory
+非 owner DM    user memory 关闭；project memory 关闭
+group          user memory 关闭；project memory 关闭
+```
+
+要给某个工作群开 project memory，须在全局账号授权与具体 binding 两处都明写。项目 config 只能在全局授权范围内收窄。召回结果仍走现有证据与预算规则，但 query provenance 必须带 sender/conversation；缓存不能跨安全域复用。
+
+session history 也按 session key 隔离。`group_sender` 与 `group` 切换后，不把旧场内容自动并入新场。
+
+## 十五、Headless Channel Session
+
+### 15.1 不直接复用 TerminalSessionController
+
+`TerminalSessionController` 还握着输入框、主题、确认框、面板、spinner 等终端件。Channel 若直接 new 它，往后每添平台都会把 UI 假件塞进 runtime。
+
+应新增 `ChannelSessionHost`，复用底层：
+
+- `SessionStack`。
+- `SessionRuntime`。
+- `ToolRuntime`。
+- `AgentProfileResolver` / `AgentFactory`。
+- `RunTurn`。
+- `TurnEventAdapter`。
+- `SessionWorkScheduler`。
+- session store/replay/compact/memory。
+
+终端与 Channel 两只 host 共用一套 turn engine，不互相继承。
+
+### 15.2 TurnIngress
+
+把现有 `RunSessionTurn(string, TurnSource)` 往下一层收成：
+
+```cpp
+struct TurnIngress {
+    api::Message message;
+    MessageProvenance provenance;
+    TurnSource source;
+    std::string session_key;
+    std::string reply_route;
+    std::string ingress_delivery_id;
+    bool allow_memory_retrieval = true;
+};
+```
+
+终端、peer、channel、后台完成各造自己的 TurnIngress。共同入口只管：
+
+- 建/恢复 session。
+- 取有效 Agent Profile。
+- 取工具与权限快照。
+- 开 turn。
+- 落消息与事件。
+- 回终态。
+
+### 15.3 单飞与并发
+
+铁律：
+
+- 同一 session 同时只跑一轮。
+- 同一 conversation 按 provider 时间、arrival seq 串行。
+- 不同 session 可并行，但受全局 `max_active_channel_turns` 限制。
+- 同一账号 adapter 不因多 conversation 并行而重建。
+- 进程退出时，新消息停接；已 running turn 按 shutdown grace 收口。
+
+`WorkKind` 追加：
+
+```cpp
+ChannelTurn
+```
+
+优先级与 `UserQueuedTurn` 同档。它是真人从渠道发来的输入，不该排在 goal/loop 后头。
+
+### 15.4 忙时又来消息
+
+默认：每条平台消息各开下一轮，不在模型 SSE 半截硬塞进去。
+
+可选 `debounce_ms`：同一 sender、同一 conversation、尚未开 turn 的连续纯文本，在短窗合成一条。合并须保原 message id 列表与顺序。
+
+首版不把外部消息注入当前 tool batch 的 `inbox`。这会让一条平台消息失去独立回执和重试边界。日后若做 channel steering，另立显式配置与事件账。
+
+### 15.5 slash 命令
+
+渠道命令只收白名单：
+
+```text
+/help
+/status
+/new
+/stop
+/model
+```
+
+其余 `/xxx` 默认当普通文字，不拿去调终端命令表。高风险命令不得靠模型猜着执行。
+
+`/stop` 只停当前 conversation 的活跃 turn，不停整个 ChannelManager。
+
+## 十六、权限与远端审批
+
+### 16.1 无终端便不能弹确认框
+
+Channel Session 没本地用户守着键盘。现有 confirm 档遇上工具审批时，首版必须 fail closed：
+
+- 工具已在全局账号政策与 binding allowlist 明确允许：可执行。
+- 工具须确认但没有远端审批能力：拒绝，并回一条短说明。
+- deny 工具：直接拒绝。
+- project policy 只能继续收窄。
+
+不可为“机器人好用”便把 confirm 偷换成 auto。
+
+### 16.2 权限交集
+
+最终有效工具：
+
+```text
+主 Agent 工具
+∩ Channel 全局上限
+∩ Account 上限
+∩ Binding 上限
+∩ Conversation 上限
+- deny 并集
+```
+
+每一层只可收窄。解析时保留来源账。
+
+### 16.3 远端审批留二期
+
+二期可按平台能力做按钮/卡片审批：
+
+```text
+tool proposal
+-> 宿主生成不可猜 approval id + payload hash + expiry
+-> Channel 发按钮
+-> 平台 interaction 回调
+-> 验 sender/account/conversation
+-> 核 id/revision/hash/expiry
+-> accept once / accept session / reject
+```
+
+模型不可提供 sender id，不可生成 approval id，不可改 hash。无 interaction 能力的平台仍 fail closed。
+
+## 十七、ReplyAssembler
+
+### 17.1 唯一输入
+
+ReplyAssembler 只吃 `ServerEvent`：
+
+- `TurnStarted`
+- Text `ItemStarted/ItemDelta/ItemCompleted`
+- Tool `ItemStarted/ItemCompleted`
+- `UsageUpdated`
+- `TurnCompleted`
+
+不另接 provider SSE，不读 Agent 内部 buffer。这样终端、App Server、Channel 看的是同一轮真账。
+
+### 17.2 默认投影
+
+| 事件 | 默认出站 |
+|---|---|
+| thinking delta | 丢弃 |
+| text delta | 进 coalescer |
+| tool started | 不发；可选发脱敏进度 |
+| tool completed | 不发；可选更新进度 |
+| usage | 不发 |
+| turn success | flush 正文 |
+| turn failed | flush 已有正文，再发稳定错误提示 |
+| turn cancelled | flush 已有正文，再发“已停止” |
+
+模型思考、工具入参、密钥、绝对路径、stderr 不得直接进聊天平台。
+
+### 17.3 三种回复模式
+
+```text
+final   等 TurnCompleted，一次或按上限分块发
+block   按 min_chars / idle_ms / max_chars 合并后分块发
+native  用平台原生 streaming/edit/card update
+```
+
+默认：
+
+- 平台有稳定 native streaming：`native`。
+- 只有普通发送：`block`。
+- LINE 这类 reply token 有时限且编辑弱：按平台策略选 `final` 或受控 block。
+
+### 17.4 coalescing
+
+配置：
+
+```json
+{
+  "reply": {
+    "mode": "block",
+    "min_chars": 200,
+    "max_chars": 1800,
+    "idle_ms": 1200,
+    "max_updates_per_second": 1,
+    "typing": true,
+    "tool_progress": false
+  }
+}
+```
+
+规矩：
+
+- `max_chars` 不得超过 manifest 与运行时能力交集。
+- 优先在段落、换行、句号处切；实在不成才硬切 Unicode code point。
+- 不劈 UTF-8，不劈 Markdown code fence；劈开时补 fence，下一块重开。
+- native edit 发送累计全文，不发 delta，除非平台明确要 delta。
+- 更新节流与最终 flush 分开；最终 flush 不因节流漏掉。
+- 空正文不发空消息。
+
+### 17.5 回复关联
+
+每轮生成稳定：
+
+```text
+reply_route_id
+outbound_delivery_id
+provider_reply_to_message_id
+```
+
+同一 inbound 的多块回复都带同一 parent 账。平台支持 reply/quote 时，默认只首块引用原消息；可配置 all/off。
+
+### 17.6 媒体与 Artifact
+
+Agent 产出 ArtifactRef 时：
+
+1. 检查渠道 outbound media 能力。
+2. 检查 MIME、魔数、大小与允许根。
+3. sidecar 上传。
+4. 拿 provider media id 发消息。
+5. 不支持时发一条安全的文本说明；不可暴露本地绝对路径。
+
+远端 URL 下载须过 SSRF、重定向、大小、超时与 MIME 检查。
+
+### 17.7 preview 与 committed delivery 分账
+
+不是每次 UI 更新都值得落一笔 durable outbox：
+
+| 动作 | 耐久要求 |
+|---|---|
+| typing on/off | best effort，不进 outbox |
+| 工具进度提示 | best effort，可丢 |
+| native stream 中间更新 | preview，只记采样 trace |
+| block 模式已经发出的正文块 | committed，进 outbox/receipt 账 |
+| final 模式最终正文 | committed |
+| native stream 最终 complete/update | committed |
+| 文件、图片等媒体 | committed |
+
+preview 失败只降级，不重跑 Agent。committed delivery 失败按 delivery id 重试。中间 native stream 崩了，若 turn 最终正文已经落 session，重启后可发送一枚 final committed 更新；若 turn 自己没完成，只留失败账，不凭半截 delta 编造最终答案。
+
+## 十八、平台适配方案
+
+### 18.1 QQ Bot：首只参考实现
+
+入站：
+
+- 默认 WebSocket Gateway。
+- 可选 HTTP Webhook。
+- 每账号独立 token cache、连接、resume session 与 seq。
+- WebSocket 心跳、IDENTIFY、RESUME、INVALID_SESSION、重连由 sidecar 管。
+- Webhook 做 Ed25519 验签；验证 challenge 在 sidecar 内收口。
+
+出站：
+
+- 普通文本与媒体走官方 REST API。
+- C2C 可走 `stream_messages`；每次更新发累计全文。
+- group/guild 没同等能力时回落 block/final。
+
+首版适配优先复用 `@tencent-connect/qqbot-nodejs` 或官方插件中独立 SDK 层，不拷一份旧协议实现进 C++。
+
+必须测：
+
+- READY 后掉线 RESUME。
+- durable 前断线不推进 seq。
+- 同一 event 重放只开一轮。
+- 每 conversation 队列不因文件消息卡死。
+- token 刷新按 account 隔离。
+- C2C native stream 最终内容与完整回复一致。
+
+### 18.2 WeChat：第二只参考实现
+
+这条接的是 iLink bot identity，不把普通个人微信号浏览器自动化冒充官方能力。
+
+入站：
+
+- HTTP JSON `getUpdates` 长轮询。
+- server 建议 timeout；客户端 timeout 须留余量，不能与 server hold 时间一样长。
+- 持久 `get_updates_buf`。
+- 事件进 spool 后才提交新 buf。
+- 停账号时 AbortController 立即取消在途 poll。
+
+出站：
+
+- HTTP `sendMessage`。
+- 每 peer 保存并回带 `context_token`。
+- typing、上传 URL、CDN 按平台 API 做。
+
+必须测：
+
+- 正常空轮询不算错误。
+- 连续网络错退避。
+- session expired 转 `needs_login`，不死循环刷请求。
+- cursor 重启恢复。
+- context token 按 account+peer 隔离。
+- at-least-once 重投不重复开 turn。
+
+### 18.3 LINE
+
+入站：HTTPS Webhook。
+
+- 校验 `X-Line-Signature`。
+- raw body 先验签，不能 parse 后重序列化再验。
+- durable 后回 200。
+- `webhookEventId` 去重。
+
+出站：
+
+- 优先用单次、有时限的 reply token。
+- token 失效或缺失时回落 Push API。
+- 文本按 LINE 上限切块，每次 API 最多消息数照平台限制。
+- 媒体须可由 LINE 访问；宿主不得随手暴露任意本地文件。
+
+### 18.4 WeCom
+
+支持三路，写成同一 channel、不同 transport/mode：
+
+```text
+Bot WebSocket      默认；无需公网回调
+Bot Webhook        JSON callback
+Agent Callback     XML AES callback + HTTP proactive send
+```
+
+Bot WebSocket 由 sidecar 主动连 `wss://openws.work.weixin.qq.com`，做 subscribe、heartbeat、reconnect。Agent Callback 须验签、解密、立即 ack，再用 `message/send` 主动回。
+
+不要把“Bot 流式回复”叫 SSE。它是 WeCom 自家 WebSocket/stream 消息合同。
+
+### 18.5 Feishu
+
+默认 WebSocket，Webhook 可选。
+
+- WebSocket 用官方 SDK，免公网 URL。
+- Webhook 校 verification token/encrypt key。
+- `im.message.receive_v1` 进 durable 队列。
+- 回复走 message API。
+- native 模式用卡片创建与更新做流式体验。
+- 卡片更新受节流，失败回落普通文本，不重跑 Agent。
+
+### 18.6 Yuanbao
+
+- WebSocket 唯一主路。
+- HMAC/ticket 握手、heartbeat、reconnect 在 sidecar。
+- DM/group 消息转统一 event。
+- 出站可 immediate 或 merge-text。
+- 媒体经平台 COS 路径处理。
+
+### 18.7 Zalo Bot
+
+- 默认 `getUpdates` 长轮询。
+- 可选 HTTPS Webhook；两种模式互斥。
+- Webhook secret 常量时间比较。
+- durable 后回 200。
+- 文本按平台约束分块。
+
+### 18.8 Zalo ClawBot
+
+- QR 绑定 Mini App 下的 owner-bound bot。
+- 底下仍是官方 Bot Platform `getUpdates` 长轮询。
+- 账号只与 owner 通话；宿主仍要做 owner id 绑定，不能只信宣传口径。
+- 凭据进账号私有 state。
+
+### 18.9 Zalo Personal
+
+- `zca-js` 事件监听与 JS API 发送。
+- 属非官方个人账号自动化。
+- manifest 必须声明 `risk: unofficial_personal_account`。
+- 首次启用须本地交互确认；服务端配置与项目配置不能代替。
+- `/channel status` 常驻显示风险标。
+- 默认不进官方分发包，不列首批验收。
+
+## 十九、ChannelManager 生命周期
+
+### 19.1 账号状态机
+
+```text
+Disabled
+-> Validating
+-> Starting
+-> Authenticating
+-> Connecting
+-> Running
+-> Degraded
+-> Backoff
+-> Stopping
+-> Stopped
+```
+
+不可恢复终态：
+
+```text
+Misconfigured
+TrustRequired
+NeedsLogin
+Fatal
+```
+
+状态迁移都带：
+
+- channel/account。
+- timestamp。
+- stable reason code。
+- 脱敏 detail。
+- retry_at。
+- generation。
+
+### 19.2 重启与退避
+
+```text
+1s, 2s, 4s, 8s, 16s, 30s, 60s
+```
+
+加 10% jitter。成功稳定运行一段后归零。
+
+以下不自动重试：
+
+- manifest/schema 错。
+- trust 未批。
+- 凭据缺失。
+- 账号被吊销。
+- 协议版本不兼容。
+- 状态迁移失败。
+
+### 19.3 账号锁
+
+同一 `channel_id + account_id + credential fingerprint` 只许一只本机实例持有。锁文件记 pid、start time、generation，不记密钥。
+
+假死锁须核进程存活再清。不可见锁便直接删。
+
+### 19.4 reload
+
+reload 走 diff：
+
+- 只改 reply/policy：新 turn 用新快照，不重连 adapter。
+- 改 transport/credential：优雅重启该 account。
+- 改 Package digest/protocol：先起新 generation，握手成功后切流，再停旧 generation。
+- 新 generation 起不来：保旧 generation，报 reload failed。
+
+首版可先 stop-old/start-new，但须把消息空窗与重投写进测试。不可装作原子热切已经完成。
+
+## 二十、进程形态
+
+### 20.1 默认关闭与四道启动闸
+
+普通启动 `lubancode` 时，Channel 必须完全不运行。即使全局配置里已有账号、已有 `enabled: true`，普通交互模式也只许读配置、列状态，不得拉 sidecar、开 WebSocket、做长轮询或监听 Webhook 端口。
+
+真正启动一个账号，须同时过四道闸：
+
+```text
+Package 已安装且已信任
+&& channels.<id>.enabled == true
+&& accounts.<id>.enabled == true
+&& process_mode == Gateway
+```
+
+随后再查凭据与账号锁：
+
+```text
+credentials_ready
+&& account_lock_acquired
+```
+
+完整判断写成一只权威函数，不在 CLI、ChannelManager、Package mounting 三处各猜一遍：
+
+```cpp
+ChannelActivationDecision ResolveChannelActivation(
+    ProcessMode process_mode,
+    const PackageTrustSnapshot& trust,
+    const ChannelConfig& channel,
+    const ChannelAccountConfig& account,
+    const CredentialState& credentials,
+    const AccountLockState& lock);
+```
+
+返回值须分清：
+
+```text
+DisabledByDefault
+NotGatewayMode
+PackageUntrusted
+ChannelDisabled
+AccountDisabled
+CredentialsMissing
+AccountInUse
+Ready
+```
+
+只有 `Ready` 才能 spawn sidecar。其余状态只供 `/channels`、doctor 与日志展示，不产生后台线程和网络副作用。
+
+默认行为表：
+
+| 启动方式 | 配置 enabled | 是否启动 Channel |
+|---|---:|---:|
+| `lubancode` | 无/false | 否 |
+| `lubancode` | true | 否，只显示 `gateway not running` |
+| 单发/管道模式 | true | 否 |
+| App Server 普通模式 | true | 否 |
+| `lubancode gateway run` | false | 否 |
+| `lubancode gateway run` | true，且信任/凭据/锁齐 | 是 |
+| `lubancode gateway start` | true，且信任/凭据/锁齐 | 是 |
+
+`/channel login` 是唯一例外，但它只可起一只短命 setup helper：完成 QR/OAuth/凭据校验便退出，不开收消息循环，不留下监听端口。登录成功只把账号写成 `credentials_ready`；是否常驻，仍等 Gateway 模式过四道闸。
+
+`/channel start` 若当前没有 Gateway，不可在普通交互进程内就地拉起账号。它应提示启动 `lubancode gateway run`，或明确调用后台服务控制面。不能因一条 slash 命令悄悄改变当前进程形态。
+
+项目级 config 无权把 Channel 从关闭改成开启。它只能在全局启用后收窄 binding、sender、工具、记忆与回复策略。
+
+### 20.2 目标形态：lubancode gateway
+
+新增常驻入口：
+
+```text
+lubancode gateway run
+lubancode gateway install
+lubancode gateway start
+lubancode gateway stop
+lubancode gateway restart
+lubancode gateway status
+```
+
+Gateway 持：
+
+- ChannelManager。
+- Headless Session registry。
+- SessionWorkScheduler。
+- Agent/Package/Tool catalogs。
+- App Server（可选，同进程另一前端）。
+
+它不需要终端输入框。终端客户端日后可连 Gateway；首版也可让 `gateway run` 在前台打印日志。
+
+### 20.3 过渡形态
+
+为缩短首个 E2E，可先在现有交互进程里挂 ChannelManager，只绑定当前 session。但要明写局限：
+
+- 终端退出，渠道全停。
+- 多 conversation 不能都挤进当前 session。
+- 本地确认框与远端用户身份容易混账。
+
+这只能作阶段 2 的试跑壳，不是最终架构。
+
+即便走这只开发壳，也须用显式测试参数，例如 `--dev-host-channels`。正式构建和默认命令不得打开。验收完成后应删掉旁路，免得两套启动真值长期并存。
+
+### 20.4 与 App Server 的关系
+
+App Server 是前端/控制面的接入协议。Channel 是外部消息面。两者可共用 SessionRuntime 与 EventSink，谁也不包谁：
+
+```text
+Desktop/Web -> App Server ----+
+                              +-> Session Host -> Agent
+QQ/WeChat -> Channel Runtime -+
+```
+
+普通 App Server 也不因配置里有 `channels` 便启动 Channel。需要桌面/Web 管理渠道时，前端连接已经运行的 Gateway 控制面；是否合并成同一服务进程，须由显式 Gateway 启动参数决定。
+
+## 二十一、命令与可见性
+
+至少补：
+
+```text
+/channels
+/channel show <channel> [account]
+/channel add <channel> [account]
+/channel login <channel> [account]
+/channel logout <channel> [account]
+/channel start <channel> [account]
+/channel stop <channel> [account]
+/channel restart <channel> [account]
+/channel doctor <channel> [account]
+/channel bind <channel> <conversation> <agent>
+/channel unbind <channel> <conversation>
+/channel dead-letter <channel> [account]
+/channel pairing list <channel> [account]
+/channel pairing approve <channel> <code>
+/channel pairing reject <channel> <code>
+```
+
+`/channels` 显示：
+
+- 渠道、账号、Package 来源与版本。
+- enabled/running/degraded/needs-login。
+- transport、连接时长、最近入站、最近出站。
+- pending/running/dead-letter 数。
+- 绑定 Agent。
+- policy 摘要。
+- 风险标。
+
+`/channel doctor` 查：
+
+- Package trust 与 digest。
+- manifest schema。
+- runtime command 与依赖。
+- 密钥来源，不打印值。
+- state dir 权限。
+- 账号锁。
+- 协议握手。
+- 平台 probe（显式执行，避免 doctor 默认产生外部副作用）。
+- Webhook bind、path、HTTPS/public URL 提示。
+- route 冲突。
+- tool policy 是否越权。
+- pairing 过期、重复 sender 与审批来源。
+
+## 二十二、日志、指标与追踪
+
+### 22.1 关联键
+
+每条日志至少带可用者：
+
+```text
+channel_id
+account_id
+adapter_generation
+delivery_id
+provider_event_id
+conversation_id
+sender_id_hash
+session_id
+turn_id
+outbound_delivery_id
+```
+
+sender 默认 hash，debug 也不随意打印正文与 token。
+
+### 22.2 指标
+
+```text
+channel_connection_state
+channel_reconnect_total
+channel_inbound_total
+channel_inbound_duplicate_total
+channel_inbound_rejected_total
+channel_inbound_queue_depth
+channel_turn_duration_ms
+channel_reply_first_block_ms
+channel_outbound_total
+channel_outbound_retry_total
+channel_dead_letter_total
+channel_sidecar_restart_total
+```
+
+### 22.3 trace 事件
+
+建议新增：
+
+```text
+channel_inbound_received
+channel_inbound_durable
+channel_inbound_authorized
+channel_inbound_routed
+channel_turn_started
+channel_reply_block_ready
+channel_delivery_started
+channel_delivery_completed
+channel_delivery_failed
+channel_inbound_completed
+```
+
+正文不进 trace。只记大小、part 类型、digest 与关联 id。
+
+## 二十三、安全账
+
+### 23.1 外部消息就是不可信用户输入
+
+通过 allowlist 只证明“谁发的”，不证明“他说的都安全”。消息可驱动 Agent，但仍受：
+
+- Agent 工具表。
+- Channel 工具上限。
+- ModePolicy。
+- 路径与沙箱。
+- 审批边界。
+- Prompt injection 防线。
+
+不要像 Peer 字条那样把所有内容都标成“只供参考，不执行”。授权用户发来的正常任务，本就该驱动 Agent。正确做法是保住 provenance 与宿主权限，不靠正文警语冒充安全边界。
+
+### 23.2 bot loop
+
+- 默认拒绝 `sender.is_bot`。
+- 记录本 bot 发出的 provider message id，过滤自回声。
+- 同一内容跨 bot 往返设 hop/digest 窗。
+- Channel 到 Channel 的主动转发须显式工具与目标 allowlist。
+
+### 23.3 Webhook
+
+- raw body 验签。
+- 时间窗与 replay id。
+- body 上限、content-type、读超时。
+- path 规范化。
+- 每 path+IP 限速。
+- loopback bind 默认；公开监听须显式配置。
+- 反向代理传来的 client IP 不盲信，须配置 trusted proxies。
+
+### 23.4 sidecar
+
+- 不走 shell 字符串，只传 argv。
+- 最小环境变量继承。
+- 密钥按声明注入，不把全环境递给子进程。
+- state_dir 单账号隔离。
+- stdout 只协议，stderr 大小帽与轮转。
+- crash、超时、坏帧杀整棵进程树。
+- Package 未信任不执行。
+- 首版 sidecar 仍拿当前用户 OS 权限，文档不可虚称强沙箱。
+
+### 23.5 媒体
+
+- 文件名去路径段。
+- 临时文件放账号受控目录。
+- MIME 声明与魔数复核。
+- 解压包默认不自动展开。
+- 远端下载防 SSRF。
+- 病毒扫描留可插拔 Hook；未配置时不可声称扫过。
+- retention 到期清理，清理只碰已验证状态根。
+
+### 23.6 隐私
+
+- session history 只保存 Agent 真正看过的规范化内容。
+- raw webhook 默认短期留 sidecar spool，完成后按 retention 清。
+- access token、context token、cookie、QR token 不进 session/trace。
+- `/export` 可带 channel provenance 摘要，不带凭据与 raw event。
+
+## 二十四、失败矩阵
+
+| 故障 | 该怎样收口 |
+|---|---|
+| sidecar 起不来 | account `Fatal/SpawnFailed`，其余账号照跑 |
+| initialize 版本不合 | 明报 `channel.protocol_incompatible`，不重试 |
+| WebSocket 掉线 | adapter backoff + resume；host 不重复开 turn |
+| 长轮询超时 | 正常再 poll，不记 error |
+| 长轮询连续网络错 | 退避，状态 `Degraded/Backoff` |
+| Webhook 验签失败 | 401/403，不入 spool |
+| sidecar spool 写失败 | Webhook 回 5xx；WS/poll 不推进 cursor |
+| host ingress journal 写失败 | 不 ack sidecar，待重送 |
+| 未授权 sender | 记 rejected；可选回固定提示，不跑模型 |
+| session 正忙 | 入 conversation FIFO，投 wake |
+| Agent 失败 | 已有正文可 flush；再发稳定错误摘要 |
+| outbound 429 | 尊重 Retry-After，delivery 不重跑 Agent |
+| outbound 永久 4xx | dead letter，保回复 artifact 与错误码 |
+| 发送成功但回执丢了 | 用 client id 查重；不支持时可能重复，留账 |
+| 进程在 turn 后、delivery 前崩 | 重启从 outbox 重发，不重跑 Agent |
+| 进程在工具副作用后、turn 落盘前崩 | 可能重放；标 at-least-once，不虚称 exactly-once |
+| Package reload 失败 | 保旧 generation，拒绝半挂载 |
+| 账号凭据失效 | `NeedsLogin`，停自动重试风暴 |
+
+## 二十五、实现次序
+
+### 阶段 0：冻结合同
+
+- [ ] 把本 TODO 提炼成 `docs/architecture/channels/` 正式文档。
+- [ ] 冻结 `channel.yaml` schema 1。
+- [ ] 冻结 Channel Bridge v1 method、错误码与 framing。
+- [ ] 冻结 ChannelInboundEvent、ReplyAction、MessageProvenance。
+- [ ] 写 threat model 与数据保留表。
+- [ ] 明定 config 层级：项目只能收窄。
+
+验收：不写平台代码，Reviewer 已能画清入站、turn、出站三条水路，能说清 Plugin/MCP/Channel/Package 边界。
+
+### 阶段 1：纯合同与假 sidecar
+
+- [ ] 新建 `src/channel/types.*`。
+- [ ] 新建严格 `channel.yaml` parser。
+- [ ] 在 Package ComponentKind 追加 Channel。
+- [ ] 实现 4-byte frame decoder/encoder，覆盖拆包、粘包、超帽、坏 UTF-8。
+- [ ] 实现双向 request/response/notification router。
+- [ ] 做 `fake-channel-sidecar`：能 start、发假消息、收 send、断线、重放。
+- [ ] 立稳定错误码。
+
+验收：不启模型，宿主能与假 sidecar 握手、收三封来信、ack、发两块回复、优雅停进程。
+
+### 阶段 2：ChannelManager 与入站耐久
+
+- [ ] 实现账号状态机、generation、退避与锁。
+- [ ] 实现 ChannelIngressStore append-only journal 与 replay。
+- [ ] 实现 provider event id 去重。
+- [ ] 实现每账号/每 conversation 队列与背压。
+- [ ] 实现 pairing pending/approve/reject/expiry。
+- [ ] 接 IdleWakeCoordinator。
+- [ ] 加 `/channels`、`/channel show/doctor/start/stop/restart`。
+
+验收：在 ack 前杀宿主，重启后假 sidecar 重送，宿主只留一枚 durable 事件；队列满不默丢。
+
+### 阶段 3：Headless Session 与路由
+
+- [ ] 引入 TurnIngress/MessageProvenance。
+- [ ] session JSONL 向后兼容保存 provenance。
+- [ ] 实现 ChannelRouter 与 binding 冲突诊断。
+- [ ] 实现 ChannelSessionHost，复用 SessionRuntime、Agent、RunTurn。
+- [ ] `WorkKind` 加 ChannelTurn，与用户消息同优先级。
+- [ ] 同 session 单飞，不同 session 限额并行。
+- [ ] 无远端审批时，confirm 工具 fail closed。
+- [ ] owner/non-owner/group 的 memory 默认隔离。
+
+验收：两只假 conversation 同时来信，各进自己的 session；同一 conversation 保序；工具权限不越过 binding。
+
+### 阶段 4：ReplyAssembler 与 outbox
+
+- [ ] 新建 ChannelReplySink，挂 FanoutEventSink。
+- [ ] 实现 final/block/native 三档。
+- [ ] 实现 Unicode/Markdown 安全分块。
+- [ ] thinking、usage 默认不出站。
+- [ ] preview 与 committed delivery 分账。
+- [ ] 实现 typing、tool progress 可选投影。
+- [ ] 实现 durable outbox、delivery retry、dead letter。
+- [ ] ArtifactRef -> media upload 流程。
+
+验收：假 backend 一字一字吐；假渠道分别以 final、block、native 收到同一完整正文。中途取消、失败、429、宿主重启皆有唯一终态与可查账。
+
+### 阶段 5：QQ Bot 参考适配器
+
+- [ ] 基于官方 QQ SDK 起 Node sidecar。
+- [ ] WebSocket READY/heartbeat/reconnect/RESUME。
+- [ ] 可选 Webhook + Ed25519。
+- [ ] C2C、group、guild 入站规范化。
+- [ ] REST 文本/媒体出站。
+- [ ] C2C `stream_messages`。
+- [ ] 多账号 token cache 隔离。
+- [ ] QQ 真机 sandbox E2E。
+
+验收：私聊问一句，QQ 收到回复；运行中断网再接，未 ack 消息不丢不重跑；群聊不 @ 时不触发。
+
+### 阶段 6：WeChat 参考适配器
+
+- [ ] QR 登录与凭据 state。
+- [ ] `getUpdates` 长轮询、Abort、退避。
+- [ ] sync buf 持久化。
+- [ ] context token 按 account+peer 持久化。
+- [ ] 文本与媒体出站。
+- [ ] 微信真机 E2E。
+
+验收：扫码后可收发；空轮询不刷错误；杀进程重启继续 cursor；同一来信重放只回一轮。
+
+### 阶段 7：Webhook 共用底座
+
+- [ ] sidecar HTTP listener helper。
+- [ ] raw-body signature hook。
+- [ ] durable-before-200 helper。
+- [ ] body/rate/replay/trusted-proxy 防线。
+- [ ] LINE adapter。
+- [ ] Feishu webhook mode。
+- [ ] Zalo webhook mode。
+- [ ] WeCom callback mode。
+
+验收：四家签名/加密 fixture 全过；落盘故障回 5xx；重复 webhook 不重复开 turn。
+
+### 阶段 8：其余 WebSocket/轮询渠道
+
+- [ ] WeCom Bot WebSocket。
+- [ ] Feishu WebSocket + streaming card。
+- [ ] Yuanbao WebSocket。
+- [ ] Zalo Bot 长轮询。
+- [ ] Zalo ClawBot QR + 长轮询。
+- [ ] Zalo Personal 只作实验包，带风险确认。
+
+验收：每只 adapter 都过同一份 channel conformance suite，再补平台专属测试。
+
+### 阶段 9：Gateway 服务化
+
+- [ ] 实现 `ProcessMode::Gateway` 与唯一 `ResolveChannelActivation`。
+- [ ] 普通交互、单发、管道、App Server 默认路径全加“零 sidecar、零 listener”回归测试。
+- [ ] `/channel login` 使用短命 setup helper，完成即收尸。
+- [ ] `lubancode gateway run/install/start/stop/restart/status`。
+- [ ] Windows service 与 POSIX service 安装。
+- [ ] 多 Headless Session registry。
+- [ ] 优雅停机、更新与 crash recovery。
+- [ ] App Server 与 Channel 共用 session/event contracts。
+- [ ] 运维文档、备份/恢复、日志轮转。
+
+验收：普通 `lubancode` 即使读到 enabled 账号也不生后台线程、不连网、不开端口；无人守终端时，显式 Gateway 服务重启后账号、cursor、session、outbox 全续上；终端客户端可查状态，不接管账号锁。
+
+## 二十六、测试账
+
+### 26.1 Manifest 与 Package
+
+- [ ] channel.yaml 未知字段、坏类型、坏路径、坏占位符。
+- [ ] Channel id 冲突整包失败。
+- [ ] Package 未信任不启动 sidecar。
+- [ ] active turn 钉旧 Package snapshot。
+- [ ] reload 失败保旧 generation。
+- [ ] Package 被发现但普通进程模式不执行。
+
+### 26.2 Bridge
+
+- [ ] 一帧拆 1/2/N 段读。
+- [ ] 多帧粘一段读。
+- [ ] 0 长度、超帽、坏 UTF-8、坏 JSON。
+- [ ] 双向 id 不串。
+- [ ] 陌生响应、迟到响应、重复响应。
+- [ ] notification 洪水限速。
+- [ ] stderr 超帽仍持续排空。
+- [ ] stop 超时杀进程树。
+
+### 26.3 Ingress
+
+- [ ] provider id 在配置保留期内持久去重。
+- [ ] 无 id 指纹短窗去重。
+- [ ] durable 前 crash。
+- [ ] durable 后 ack 前 crash。
+- [ ] ack 后 sidecar 重送。
+- [ ] 队列满、sender 限速、conversation 限额。
+- [ ] dead letter replay。
+
+### 26.4 路由与权限
+
+- [ ] DM pairing/allowlist/open/disabled。
+- [ ] group allowlist 与 require mention。
+- [ ] bot/self echo 拒绝。
+- [ ] binding 具体项压过 account/channel 默认。
+- [ ] 同档 binding 冲突。
+- [ ] 项目 config 试图放宽被拒。
+- [ ] confirm 工具在无审批渠道 fail closed。
+- [ ] provenance 不受模型参数篡改。
+
+### 26.5 Session
+
+- [ ] 同 conversation 严格 FIFO。
+- [ ] 两 conversation 限额并行。
+- [ ] 同 session single-flight。
+- [ ] resume 后继续同 history。
+- [ ] compact、memory、Agent Profile 与终端路径一致。
+- [ ] `/new` 开新 session，旧 session 可查。
+- [ ] `/stop` 只停本 conversation。
+
+### 26.6 Reply
+
+- [ ] final/block/native 完整正文相同。
+- [ ] 不发 thinking、usage、tool input。
+- [ ] tool progress 脱敏。
+- [ ] UTF-8、emoji、中文、code fence 分块。
+- [ ] 发送 429、5xx、永久 4xx。
+- [ ] edit 失败回落 send。
+- [ ] native stream 最终 flush。
+- [ ] Artifact 大小、MIME、魔数、SSRF。
+
+### 26.7 平台 conformance suite
+
+每只 adapter 都须通过：
+
+```text
+initialize
+start
+health
+inbound text
+inbound media metadata
+ack/nack
+send text
+delivery error mapping
+disconnect/reconnect
+duplicate replay
+stop
+credential redaction
+```
+
+声明某项 capability，便须加那项测试；没能力就不得硬报支持。
+
+### 26.8 启动模式
+
+- [ ] 没有 `channels` 配置：普通启动零新增线程、进程、端口。
+- [ ] `enabled=false`：Gateway 也不启动账号。
+- [ ] `enabled=true` + 普通 `lubancode`：只显示 `gateway not running`。
+- [ ] `enabled=true` + 单发/管道/App Server：不启动账号。
+- [ ] `enabled=true` + Gateway + 未信任 Package：不执行 sidecar。
+- [ ] `enabled=true` + Gateway + 凭据缺失：状态 `CredentialsMissing`，不重试风暴。
+- [ ] 两只 Gateway 抢同一账号：后一只报 `AccountInUse`。
+- [ ] `/channel login` 完成后 helper 退出，账号监听仍未启动。
+- [ ] `/channel start` 在非 Gateway 进程只给引导，不改变进程形态。
+
+## 二十七、真机验收剧本
+
+### 27.1 QQ Bot
+
+1. 开 QQ sandbox bot。
+2. `lubancode gateway run`。
+3. 私聊发“只回复 LUBANCODE_QQ_OK”。
+4. 验 session 建档、provenance、turn id、outbound delivery id。
+5. 群里不 @，确认不触发。
+6. 群里 @，确认只触发一次。
+7. Agent 正吐字时断网，恢复后最终回复完整。
+8. 在 host ack 前杀进程，重启后只跑一轮。
+9. 发图片与文件，查大小帽和 Artifact。
+10. 泄露检查：日志、session、trace 不见 secret/token。
+
+### 27.2 WeChat
+
+1. 本机 QR 登录。
+2. 另一账号发纯文本。
+3. 验长轮询返回、sync buf 推进、context token 保存。
+4. 杀 gateway，重启。
+5. 再发消息，确认 cursor 续上。
+6. 模拟连续三次网络错，确认退避，不刷 CPU/日志。
+7. 模拟 session expired，状态转 NeedsLogin。
+8. 发媒体，确认下载、大小、清理。
+
+### 27.3 Webhook
+
+1. 用固定 fixture 算签名。
+2. 发合法 webhook，确认 durable 后 200。
+3. 让 journal 写失败，确认 5xx。
+4. 重发同 event id，确认只开一轮。
+5. 发坏签名、超大 body、错 content-type，确认拒绝。
+6. 反向代理场景验 trusted proxy。
+
+### 27.4 重启守恒
+
+在以下每个点杀进程一次：
+
+```text
+sidecar spool 前
+sidecar spool 后、host ack 前
+host durable 后、queue 前
+queue 后、turn 前
+turn 中
+turn 完成、outbox 前
+outbox 后、平台发送前
+平台发送后、receipt 前
+```
+
+逐点查：消息是否丢、是否重跑、是否重复发、账上能否说明。
+
+## 二十八、迁移与兼容
+
+- 现有工具 Plugin manifest version 不变。
+- 现有 process plugin 一次一进程的语义不变。
+- MCP Client 不因本单接渠道通知；若日后补 MCP notifications，仍不拿它承载 Channel。
+- Package ComponentKind 只追加 Channel；老 Package inventory 输出保持稳定。
+- 老 config 没 `channels` 时，零行为变化，不起线程，不开端口。
+- 老 session 没 provenance 时可恢复。
+- 终端主会话的消息泵、peer、goal、loop 不因 Channel 默认改优先级；只有启用 Channel 的 Headless Session 才多一种 WorkKind。
+- App Server 事件 schema 若新增 channel provenance，字段必须可选，老客户端忽略即可。
+
+## 二十九、开工时的文件清单
+
+首批预计会碰：
+
+```text
+src/package/component.hpp/.cpp
+src/package/inventory.*
+src/package/mount_plan.hpp
+src/channel/*
+src/runtime/session_work_scheduler.hpp/.cpp
+src/runtime/session_runtime.*
+src/runtime/event.hpp
+src/api/types.hpp
+src/sessions/session_store.*
+src/app/commands/channel_commands.*
+src/app/commands/command_registry.*
+src/config/config.hpp/.cpp
+docs/reference/configuration.md
+docs/reference/commands.md
+docs/reference/feature-index.md
+tests/unit/channel/*
+tests/integration/channel/*
+examples/packages/fake-channel/*
+examples/packages/qqbot-channel/*
+```
+
+这只是落点账，不是叫一次 PR 全改。照阶段拆小，每阶段独立可测、可回退。
+
+## 三十、完成线
+
+下列各条全满足，本单才算完：
+
+- [ ] Channel 不再借 PluginTool/MCP 名义活着，有独立合同与生命周期。
+- [ ] QQ 与 WeChat 至少两只真 adapter 通过真机 E2E。
+- [ ] 至少一只 Webhook 渠道通过 durable-before-200 故障测试。
+- [ ] 同 conversation 单飞、跨 conversation 限额并行。
+- [ ] 重启后 ingress、session、outbox 可续。
+- [ ] 去重、限速、dead letter 与 delivery retry 有稳定账。
+- [ ] ReplyAssembler 只吃 ServerEvent，不碰 provider SSE 私路。
+- [ ] thinking 与敏感工具信息默认不出站。
+- [ ] 项目配置不能开启账号、读取密钥或放宽权限。
+- [ ] Package trust、启停、reload、snapshot 对 Channel 生效。
+- [ ] `/channels`、`/channel doctor` 能说清当前状态与第一处故障。
+- [ ] 日志、session、trace 不泄露 token、secret、cookie、context token。
+- [ ] 文档不再把 block streaming、WebSocket、Webhook、SSE 混叫“流式”。
+
+## 三十一、最后定案
+
+这项能力不该从“给 MCP 加一个回调”起手，也不该从“让 process plugin 永不退出”起手。
+
+正路只有一条：
+
+```text
+Package 装 ChannelPlugin
+-> ChannelManager 常驻 adapter
+-> adapter 按平台原生协议收消息
+-> ChannelIngressStore 耐久、去重
+-> ChannelRouter 定 Agent 与 session
+-> SessionWorkScheduler 单飞开 turn
+-> TurnEventAdapter 吐统一事件
+-> ReplyAssembler 按平台能力回发
+```
+
+QQ 用 WebSocket/Webhook，微信用长轮询，LINE 用 Webhook，飞书两样都能走。各家水管不同，进了 LubanCode 便只剩一份消息合同。
+
+如此一来，接新平台只须补 adapter 与 capability，不必再改 Agent loop。平台换协议，也只动自己的 ChannelPlugin。内核稳坐中堂，来一封，收一封；回一句，送一句。

@@ -1,0 +1,823 @@
+# Compact 四分区、工具原子组与双账总结构设计
+
+- 状态：待实现
+- 日期：2026-08-29
+- 范围：达到上下文阈值后的 semantic compact、按 turn 四分区、工具原子组、末区热区、用户契约、工作状态、会话回放与评测
+- 依据：论文《LLMs Get Lost in Multi-Turn Conversation》（arXiv:2505.06120v1）与当前 `src/agent/compact.*` 实现
+- 不在本单：按固定 turn 数后台预摘要、project memory、向量检索、重写 artifact、把 compact 变成每轮常驻调用
+
+## 一、要做成什么
+
+假设主模型上下文窗口是 `1m` token。现有规则照旧：
+
+```text
+上下文占用达到 80%
+        -> 触发 compact
+```
+
+compact 真触发后，再按完整 turn 收历史：
+
+```text
+把全部原始 turns 按 token 重量切成连续四份，边界只落在 turn 之间
+P1：map 总结
+P2：map 总结
+P3：map 总结
+P4：热区，保留原始消息形状
+末后：旧 archive + S1 + S2 + S3 + P4 一道 final reduce
+```
+
+默认值都可配置：
+
+```json
+{
+  "context_window": "1m",
+  "compact_partition_count": 4
+}
+```
+
+`compact_partition_count`：把当前原始 turns 切成几份。默认 `4`。最后一份是热区，其余各跑一次 map。
+
+默认四分法若都装得下，map 固定 3 次，final reduce 1 次。
+
+这比“冷区每 3 turn 一组”省的是 map 请求固定提示、局部摘要输出与 final reduce 输入。冷区原始 token 仍须被 map 读一遍，不能把这部分成本说没了。
+
+本单只在 compact 已触发后分区。不是每过几轮便在后台调用一次模型。
+
+### 1.1 先分清 Context、History 与 Turn
+
+本文中的 `Context` 专指某一次 provider 请求里，模型实际能看见的全部输入：
+
+```text
+Model Request Context
+  System
+    基础 system prompt
+    项目指令、运行环境、模式与本轮系统附注
+  Tool Definitions
+    tool name + description + input schema
+  Messages（由 request working view 产出）
+    user text/image
+    assistant text/thinking/tool_use
+    user tool_result
+    compact archive
+    本轮召回的记忆与宿主上下文
+```
+
+边界须钉死：
+
+| 项目 | 算请求 Context | 算可压缩 History | 开启新 Turn |
+|---|---:|---:|---:|
+| System Prompt | 是 | 否 | 否 |
+| Tool Definitions / JSON Schema | 是 | 否 | 否 |
+| 真正的外层 user text/image | 是 | 是 | 是 |
+| assistant text/thinking/tool_use | 是 | 是 | 否，归当前 Turn |
+| 纯 ToolResult 的 user-role message | 是 | 是 | 否，归当前 Turn |
+| compact archive | 是 | 是，作为宿主合成历史 | 否 |
+| Session JSONL 全文 | 否 | 否，只作审计与恢复 | 否 |
+| Artifact blob 全文 | 默认否 | 否；只把引用/预览放进工作视图 | 否 |
+| Project Memory 全库 | 否 | 否；只算本轮召回片段 | 否 |
+| output reserve / protocol headroom | 只占预算，模型看不见正文 | 否 | 否 |
+
+`model`、采样参数等 request metadata 也不算可压缩文本。
+
+一次带工具调用的外层 Turn，会发出多次 provider 请求：
+
+```text
+Request 1 Messages: U1
+Assistant:            A1 ToolUse(t1)
+Tool:                 TR1 ToolResult(t1)
+
+Request 2 Messages: U1 + A1/ToolUse(t1) + TR1
+Assistant:            A2 ToolUse(t2)
+Tool:                 TR2 ToolResult(t2)
+
+Request 3 Messages: U1 + A1/ToolUse(t1) + TR1
+                          + A2/ToolUse(t2) + TR2
+Assistant:            A3 final text
+```
+
+`U1 + A1 + TR1 + A2 + TR2 + A3` 合起来才是一枚 Turn。每次请求都会重新带上 System、Tools 与当时的 Messages 工作视图；provider cache 可能省计算或计费，却不改逻辑 Context。
+
+故而四分区只切 `Messages` 中可压缩的完整 Turns。System、Tool Definitions、输出预留与协议余量不入 P1-P4，也不能靠 compact 缩掉。
+
+压缩后的 `Messages` 固定长这样：
+
+```text
+[用户契约]
+[工作状态]
+[最近热区原文]
+```
+
+整个新请求仍是：
+
+```text
+[System，原样]
+[Tool Definitions，原样]
+[Messages]
+  [用户契约]
+  [工作状态]
+  [最近热区原文]
+```
+
+前两段是宿主合成的总结构，放在 Messages，不塞进 System。最后一段是第四分区的最近 turns。它保留消息与工具调用关系；长 ToolResult 的模型视图仍可用 artifact 预览，不等于把大回包全文重新内联。
+
+### 1.2 四层账的关系
+
+实现时不得把“磁盘上存着”误当作“模型本次看见”：
+
+```text
+Session JSONL
+  完整审计记录，不会整本送给模型
+        |
+        v
+history_
+  当前有效的 durable conversation
+        |
+        v
+request_history_
+  history_ + 本轮临时注入的记忆、环境与宿主事件
+        |
+        v
+working_view
+  artifact 化、去重、结构压缩、预算裁剪后的模型消息
+        |
+        v
+request.messages
+```
+
+触发预算看 `working_view` 将送出的 token；Turn 分界从有来源标记的有效 history 中认；map、hot raw 和新主请求都使用同一套稳定工作视图规则。
+
+## 二、Turn 怎样算
+
+一枚 turn 从真正的外层用户输入开始，到下一枚外层用户输入之前结束。
+
+```text
+Turn N
+  user text/image
+  assistant text/tool_use
+  user tool_result
+  assistant text/tool_use
+  user tool_result
+  assistant final text
+```
+
+只带 `ToolResultBlock` 的 user 消息不是新 turn。
+
+一枚 turn 必须整体进退：
+
+- 不从 assistant/tool_result 中腰劈开。
+- 不拆 tool use/result 对。
+- 不把一轮的 assistant 留下，却把本轮用户要求扔掉。
+- turn 的顺序永远照原 history。
+
+建议收拢现有三处 `IsUserTurnStart()`，落成一份公共纯函数，免得 compact、context、context_events 日后各算各的。
+
+若宿主合成通知、Hook 附注也会以 user text 进入 durable history，须补 `MessageOrigin` 或等价来源标记。只有真正外层用户输入才能开 turn，也才能进入用户契约。
+
+## 三、一次 compact 的完整算法
+
+### 3.1 触发
+
+保留现有三条入口：
+
+- 回合前：最近一次 provider usage 达到窗口 80%。
+- 回合中：下一次请求的 projected usage 达到窗口 80%。
+- 手工：`/compact [重点说明]`。
+
+`context_window = 1m` 时，80% 线约为 `800k` token。判断仍须算系统提示、工具 schema、历史、输出预留与协议余量，沿用现有统一预算账。
+
+预算式明确写成：
+
+```text
+F = System + Tool Definitions
+H = Messages working view
+R = output reserve + protocol headroom
+
+projected_context = F + H + R
+projected_context >= 0.8 * context_window  -> 触发 compact
+```
+
+compact 只能缩 `H`，不能缩 `F` 与 `R`。若 `F + 最新一枚 Turn + R` 已超窗口，压旧历史也救不回来，须走明确拒绝或上游降载，不能继续空跑 compact。
+
+### 3.2 解析旧 archive 与原始 turns
+
+有效 history 可能已经压过一次：
+
+```text
+[旧用户契约 + 旧工作状态]
+[上次保留的热区原文]
+[上次 compact 后新增的 turns]
+```
+
+宿主先剥出旧 archive。它不算 turn。余下原始消息按 turn 切分。
+
+第一次 compact 没有旧 archive，直接切完整 history。
+
+### 3.3 按 turn 边界切成四份
+
+先给每枚 turn 算模型实际会见到的 token 重量。这里须用 L1 结构压缩后的稳定工作视图，不能拿 durable history 中长 ToolResult 全文虚算。
+
+随后把有序 turns 切成 `P=4` 个连续分区：
+
+```text
+P1 | P2 | P3 | P4
+```
+
+目标是四份 token 大致相等。切口只许落在 turn 边界，不得为了凑四等份劈开一轮。
+
+前三份是冷区 map 输入。第四份是热区。它参加 final reduce，随后又以工作视图原样接回新 history。
+
+例如共有 17 turn。若各轮大小接近，可切成：
+
+```text
+P1 = T1-T4      -> map S1
+P2 = T5-T8      -> map S2
+P3 = T9-T12     -> map S3
+P4 = T13-T17    -> hot raw
+```
+
+若 T4 内有大工具回包，token 平衡器可改成：
+
+```text
+P1 = T1-T3
+P2 = T4-T6
+P3 = T7-T11
+P4 = T12-T17
+```
+
+故而“按 turn”指边界按完整 turn；“四等份”按结构压缩后的 token 重量，不按 turn 数硬平分。
+
+turn 少于 4 时，实际分区数取 `min(T, 4)`。最后一份仍是热区，前面每份各 map 一次。只有一枚 turn 且没有旧 archive 时，通常无压缩收益，应拒绝空跑。
+
+### 3.4 前三分区各做一次 map
+
+每个冷分区产一份结构化局部摘要：
+
+```text
+TurnGroupSummary
+  来源 turn 范围
+  用户需求变化
+  已证实事实
+  工具结果
+  涉及文件
+  已做修改
+  失败尝试
+  未完成事项
+  下一步候选
+```
+
+map 不写散文。它须输出严格 JSON，宿主解析、校验，再交 reduce。
+
+每份 map summary 都要钉来源 turn id，例如 `t1-t4`、`t5-t8`。turn id 由宿主生成，不由模型编。
+
+四分法是优先计划，不是拿安全换固定三次请求。若某个冷分区超过 compact 模型单次输入预算：
+
+1. 先用现有结构压缩与 artifact 预览收工具结果。
+2. 仍超预算，只把超限分区沿 turn 边界再切，map 次数可以多于 3。
+3. 单个 turn 仍装不下，明确拒绝该次 compact；不截半条用户输入，不拆工具原子组。
+
+### 3.5 final reduce 做一次总总结
+
+final reduce 的输入是：
+
+```text
+旧 archive（若有）
++ 冷区各 TurnGroupSummary
++ 最近 K 个 hot turns 原文
+```
+
+热区原文也要参加 final reduce。最近一轮可能刚纠正旧要求。若总契约不看热区，`当前有效约束` 便可能还是旧的。
+
+final reduce 只产两份总结构：
+
+```text
+UserContract
+WorkState
+```
+
+随后宿主把未经改写的 hot turns 接回去：
+
+```text
+[UserContract]
+[WorkState]
+[T15 原文]
+[T16 原文]
+[T17 原文]
+```
+
+于是总契约已吸收最新纠正，模型又能看见最近原话与工具来回。
+
+### 3.6 验收后换 history
+
+换账前须过这些门：
+
+- UserContract schema 合法。
+- WorkState schema 合法。
+- 用户需求的来源 turn 都存在。
+- active/superseded 关系合法。
+- 活动 todo 一项不少。
+- 最新 K 个 turns 原文仍在。
+- tool use/result 仍配对。
+- 新工作视图 token 必须小于旧工作视图。
+
+任一项失败，旧 history 原样保留。
+
+手工 `/compact` 与自动 compact 必须共用反涨校验。现版只有自动路径会拦新史反涨，手工路径须补齐。
+
+## 四、UserContract
+
+目标内容：
+
+```text
+目标
+当前有效约束
+验收条件
+用户后来补充的要求
+已被后续要求废掉的旧要求
+尚待澄清的问题
+每条要求来自哪一轮用户消息
+```
+
+建议 schema：
+
+```json
+{
+  "goal": {
+    "text": "当前任务目标",
+    "source_turns": ["t1", "t4"]
+  },
+  "active_constraints": [
+    {
+      "id": "r1",
+      "text": "只修改 compact，不改 project memory",
+      "source_turns": ["t3"]
+    }
+  ],
+  "acceptance_criteria": [
+    {
+      "id": "r2",
+      "text": "第四分区保留最近 turns 的原始消息形状",
+      "source_turns": ["t7"]
+    }
+  ],
+  "additions": [
+    {
+      "id": "r3",
+      "text": "全部 turns 按 token 重量四分，前三份各总结一次",
+      "source_turns": ["t8"]
+    }
+  ],
+  "superseded_requirements": [
+    {
+      "id": "r0",
+      "text": "旧要求",
+      "source_turns": ["t2"],
+      "superseded_by": "r3",
+      "superseded_at_turn": "t8"
+    }
+  ],
+  "open_questions": [
+    {
+      "text": "配置是否允许项目级覆盖",
+      "source_turns": ["t9"]
+    }
+  ]
+}
+```
+
+权威规矩：
+
+- UserContract 只从真正用户输入提取。
+- assistant、tool_result 不可成为用户要求来源。
+- 后来的用户要求可覆盖早先用户要求。
+- 后来的 assistant 话不能覆盖用户要求。
+- 模型认为两条要求冲突，却找不到明确覆盖关系时，放进 `open_questions`，不可擅自删一条。
+- 被废掉的旧要求不直接消失。它进入 `superseded_requirements`，留下来源与替代项。
+- 每条 active constraint、acceptance criterion、addition 都至少有一枚 `source_turns`。
+
+宿主至少校验：
+
+- source turn 存在，且由真正用户输入领起。
+- `superseded_by` 指向存在的新 requirement。
+- 覆盖方向从旧 turn 指向新 turn。
+- 覆盖图无环。
+- 活动约束不可无来源。
+
+首版不强求宿主证明自然语言完全同义。它先守住来源、顺序、类型与不漏 active todo。语义保真再由真实评测量。
+
+## 五、WorkState
+
+目标内容：
+
+```text
+已证实事实
+工具结果
+涉及文件
+已经做过的修改
+失败尝试
+未完成事项
+下一步
+```
+
+建议 schema：
+
+```json
+{
+  "confirmed_facts": [
+    {
+      "text": "自动 compact 在 80% 触发",
+      "evidence_refs": ["t4:e3"]
+    }
+  ],
+  "tool_results": [
+    {
+      "tool": "ctest",
+      "result": "6 项相关测试通过",
+      "evidence_refs": ["t6:e2"]
+    }
+  ],
+  "files": [
+    "src/agent/compact.cpp",
+    "src/app/commands/session_commands.cpp"
+  ],
+  "changes_made": [
+    {
+      "text": "尚未修改实现",
+      "evidence_refs": ["t10"]
+    }
+  ],
+  "failed_attempts": [
+    {
+      "text": "某次 compact 摘要反涨，已拒收",
+      "evidence_refs": ["t11:e4"]
+    }
+  ],
+  "open_items": [
+    "实现按 turn 分组",
+    "补 session 回放测试"
+  ],
+  "next_action": "先统一 turn 切分函数"
+}
+```
+
+规矩：
+
+- `confirmed_facts` 只收用户确认或工具证实的内容。
+- assistant 推测不可冒充已证实事实。
+- 工具错误、退出码、关键路径、测试结果不得只写“处理过”。
+- `failed_attempts` 要保住失败原因与后来采用的路，免得恢复后再踩一遍。
+- `open_items` 继续承接现有 active todo 守恒。
+- `next_action` 是工作接力，不是用户需求；不可塞进 UserContract。
+
+## 六、ToolUse 与 ToolResult 怎样处理
+
+### 6.1 工具来回先组成原子组
+
+定义 `ToolExchangeGroup`：
+
+```text
+assistant message
+  Text/Thinking（若有）
+  ToolUseBlock A
+  ToolUseBlock B（并行调用时可能有多枚）
+
+紧随的 user tool-result message(s)
+  ToolResultBlock A
+  ToolResultBlock B
+```
+
+规矩：
+
+- 一条 assistant 消息里的并行 tool uses 与匹配 results 整组进退。
+- 不能把 ToolUse A 放 P1，却把 ToolResult A 放 P2。
+- 不能只按“下一条 user 消息”猜配对；须按 `tool_use_id` 收齐本 assistant 消息发出的所有调用。
+- result 缺失、重复或 id 对不上时，标 orphan/incomplete。自动 compact 只在两次模型请求之间的安全点动手；仍有不完整原子组时拒绝跨它切分。
+- `todo_write` 仍可作为工作阶段信号，却不能把它所在工具原子组劈开。
+
+四分区的第一层边界只落在 turn 之间，正常情形下工具组天然留在同一 turn。若某个超大 turn 日后需要二次细分，也只能沿 `ToolExchangeGroup` 边界切，绝不可按 message/token 裸切。
+
+### 6.2 map 看哪一版 ToolResult
+
+durable history 与 session JSONL 继续保留原工具结果。compact 模型不必每次重读大回包全文。
+
+map 输入先走现有稳定 L1 工作视图：
+
+```text
+短 ToolResult      -> 正文内联
+长 ToolResult      -> artifact id + 头尾预览 + hash + 字节数
+重复只读结果       -> duplicate ref
+旧版本读取结果     -> superseded preview
+副作用工具结果     -> 不按“命令相同”判执行重复，但可把长输出外置
+```
+
+artifact blob 与 session 原文不删。摘要证据不足时，compact 路可按预算用 `context_search/context_read` 追回关键片段；不可把预览省略号当全文。
+
+热区所谓“保留原文”，保的是原始消息顺序、ToolUse/ToolResult 结构与语义。模型请求中的长 ToolResult 仍沿用已经定形的 artifact 视图，免得第四分区被一枚日志撑爆。
+
+### 6.3 WorkState 怎样记工具证据
+
+每枚关键工具来回至少收：
+
+```text
+tool_name
+tool_use_id / evidence ref
+关键输入摘要
+status: ok | error | cancelled | incomplete
+关键输出、错误码、退出码
+artifact_id（若全文外置）
+造成的文件/外部状态变化
+```
+
+UserContract 不收 tool 内容。工具只能证实或推翻 WorkState 中的事实，不能替用户发明目标、约束或验收条件。
+
+### 6.4 token 账
+
+四分法下，冷区原始 token 大致各读一次：
+
+```text
+map input 约等于 P1 + P2 + P3
+final input 约等于 S1 + S2 + S3 + P4 + prior archive
+新主请求约等于 UserContract + WorkState + P4
+```
+
+相较“每 3 turn 一次 map”，省下的是大量 map prompt、局部 summary output 与 final reduce 中的 summary 数量。长 ToolResult 再经 artifact 视图收窄，才是主要输入 token 节流点。
+
+## 七、多次 compact 怎样接力
+
+第一次 compact，假设共有 16 turn：
+
+```text
+P1=T1-T4   -> S1
+P2=T5-T8   -> S2
+P3=T9-T12  -> S3
+P4=T13-T16 -> hot raw
+S1 + S2 + S3 + P4 -> UserContract V1 + WorkState V1
+
+新 history：
+[V1 contract]
+[V1 state]
+[T13-T16 raw]
+```
+
+会话继续，又产生 T17-T28。第二次 compact 时：
+
+```text
+旧 archive：V1 contract + V1 state
+原始 turns：T13-T28
+重新按当前 token 重量四分：
+  P1=T13-T16 -> S1'
+  P2=T17-T20 -> S2'
+  P3=T21-T24 -> S3'
+  P4=T25-T28 -> hot raw
+
+V1 + S1' + S2' + S3' + P4
+    -> V2 contract + V2 state
+```
+
+上一轮留下的热区 turns，等新 turn 足够多后自然落入前三分区，再被 map 总结。
+
+旧 archive 只作为结构化基线，不再拿整篇旧 Markdown 当普通对话反复摘要。
+
+新原始 turn 与旧 archive 冲突时：
+
+```text
+新用户要求 > 旧 UserContract
+新工具证据 > 旧 WorkState
+新 assistant 猜测 不得覆盖旧用户要求或已证实事实
+```
+
+## 八、配置设计
+
+建议在现有顶层配置中新增：
+
+```json
+{
+  "compact_partition_count": 4
+}
+```
+
+取值规则：
+
+- 是正整数，默认 `4`。
+- 建议首版范围 `2..8`，越界报错，不静默夹值。
+- 最后一分区固定为热区，前 `partition_count - 1` 份各 map 一次。
+- 项目配置、全局配置与来源账沿用 `context_window` 同类合并规矩。
+- 暂不新增环境变量。若项目惯例要求 env，再另审。
+
+`/context` 增加一行：
+
+```text
+compact turn 策略：按 token 平衡四分；前三份 map，末份热区
+```
+
+`/compact --dry-run` 增加：
+
+```text
+总 turn 数
+P1/P2/P3/P4 的 turn 范围与 token 估算
+预计 map 次数（预算内默认 3）
+长 ToolResult 外置前后 token
+是否存在分区或单 turn 超 compact 模型预算
+```
+
+## 九、极端情况
+
+### 9.1 第四分区自己便很大
+
+默认目标是保留最后约四分之一的结构压缩工作视图。可一个 turn 也可能塞进几十万 token。
+
+安全规则：
+
+1. 先保最新 turn。
+2. 再向前逐个保完整 turn，尽量接近四分之一区间目标。
+3. 第四分区装不下时，较老的 hot turn 转入第三分区总结。
+4. 最新 turn 自己仍超主模型可用预算，沿用现有明确报错与 hard-trim 安全网；不可声称第四分区已完整保留。
+
+终端须显示目标与实际保留数。
+
+### 9.2 turn 数少于四
+
+实际分区数取 `min(turn_count, partition_count)`。最后一份留热区，其余分区各 map 一次。
+
+### 9.3 没有冷区
+
+不跑 map。若已有旧 archive，可用旧 archive + hot raw 做一次 final reduce；若连旧 archive 也没有，手工 compact 应提示无收益并拒绝换账。
+
+### 9.4 map 摘要仍塞不进 final reduce
+
+按现有 reduce 思路，两两合并相邻 TurnGroupSummary，直到装得下。合并仍须保住来源 turn 范围与双账字段。
+
+### 9.5 map 或 final reduce 失败
+
+整次 compact 失败。旧 history 一字不动。不得收下一半成功的 chunks 便换账。
+
+## 十、实现阶段
+
+### 阶段 0：先补当前硬缺口
+
+- [ ] 手工 `/compact` 与自动 compact 共用反涨校验。
+- [ ] `constraints`、`next_action` 的 schema/type 校验收紧。
+- [ ] 抽出公共 turn splitter，统一真正用户输入与 ToolResult user 的边界。
+- [ ] 给 turn splitter、手工反涨、坏 manifest 补单测。
+
+验收：不改双账也先堵住越压越长与 turn 算法漂移。
+
+### 阶段 1：配置与 TurnPartitionPlan
+
+- [ ] 新增 `compact_partition_count`，默认 4。
+- [ ] 实现 `BuildTurnPartitionPlan(history, partition_count, budgets)` 纯函数。
+- [ ] 按 L1 工作视图 token 平衡分区，边界只落 turn 之间。
+- [ ] plan 给出 prior archive、P1..Pn、hot partition、工具原子组与预算诊断。
+- [ ] `/context` 与 `/compact --dry-run` 展示 turn 计划。
+
+验收：不调用模型，也能准确打印“四份各有哪些 turn、各占多少 token、哪些 ToolResult 已外置”。
+
+### 阶段 2：TurnGroupSummary map
+
+- [ ] 默认前三分区各发一次 map，调用数固定为 3。
+- [ ] map 输出严格 JSON，不再只收任意 Markdown。
+- [ ] 宿主给 chunk 钉 turn 范围与事件范围。
+- [ ] 单分区超预算时只递归拆该分区，允许 map 次数多于 3。
+- [ ] 单 turn 仍超预算时明确拒绝。
+- [ ] map 任一块失败，整次 compact 失败。
+
+验收：17-turn 等重夹具稳定分成四个连续分区、三次 map；工具重载夹具按 token 调整边界，工具原子组无一拆开。
+
+### 阶段 3：UserContract + WorkState final reduce
+
+- [ ] final reduce 输入 prior archive、全部 group summaries 与 hot raw turns。
+- [ ] 产出严格双账 JSON。
+- [ ] UserContract 每条要求带 source turns。
+- [ ] 后用户可覆盖前用户，旧要求进入 superseded 列表。
+- [ ] assistant/tool 不可成为用户要求来源。
+- [ ] WorkState 保工具证据、文件、改动、失败、待办与下一步。
+- [ ] map 使用稳定 L1 ToolResult 视图，长结果保 artifact id 与证据入口。
+- [ ] active todo 继续逐字守恒。
+- [ ] 校验失败旧 history 不动。
+
+验收：热区最后一轮纠正旧约束后，总 UserContract 只把新约束列 active，旧约束有来源地列在 superseded。
+
+### 阶段 4：新 history 与 session 回放
+
+- [ ] `BuildCompactedHistory()` 产 `[UserContract][WorkState][hot raw]`。
+- [ ] 保持 provider role 交替合法。
+- [ ] 最新用户输入、图片与 tool pair 不丢。
+- [ ] `compact_v2` manifest 记录双账 schema、turn chunk 配置、总 turn 数、chunk 数、实际 hot turn 数。
+- [ ] 旧 `compact`、旧 flat `compact_v2`、新双账 `compact_v2` 都能回放。
+- [ ] 第二次 compact 从旧双账继续归并，不复印旧摘要。
+- [ ] `/export` 仍能看全量原始流水。
+
+验收：compact、退出、resume、继续 9 turn、再 compact，所得 V2 双账与一次性处理同一完整历史的结果语义一致。
+
+### 阶段 5：论文式多轮评测
+
+- [ ] 准备 30-50 个不可按轮独立求解的 coding tasks。
+- [ ] 每题拆成 2-8 turn，含补约束、改验收、撤旧要求与工具后纠正。
+- [ ] 对照 FULL、CONCAT、SHARDED、当前 compact、turn 双账 compact。
+- [ ] 同模型同题每组至少跑 10 次。
+- [ ] 记录通过率、约束漏失、旧要求误执行、纠错恢复、答案膨胀、P90-P10、token、耗时与 cache。
+- [ ] 真实收益没量出前，不写“已解决多轮失败”。
+
+验收：能分别回答“省了多少 token”和“任务成功率涨了多少”，两本账不混。
+
+## 十一、建议源码入口
+
+```text
+src/agent/compact.hpp/.cpp                 turn plan、map/reduce、双账 parser/validator
+src/agent/context.hpp/.cpp                 公共 turn splitter 或其下沉位置
+src/agent/context_events.hpp/.cpp          turn/event 来源与工具证据
+src/config/config.hpp/.cpp                 两枚配置字段与来源合并
+src/app/interactive_session_wiring.cpp     CompactOptions 接线
+src/app/commands/session_commands.cpp      dry-run、手工/自动反涨、新 history
+src/sessions/session_store.hpp/.cpp        双账 compact_v2 回放
+docs/reference/configuration.md             配置说明
+docs/architecture/context/compaction.md     算法与边界
+docs/features/context/compaction.md         用户说明
+```
+
+测试：
+
+```text
+tests/unit/agent/test_compact.cpp
+tests/unit/api/test_context.cpp
+tests/unit/api/test_context_events.cpp
+tests/unit/app/test_app_commands.cpp
+tests/unit/config/test_config.cpp
+tests/unit/sessions/test_session_store.cpp
+tests/integration/compact_turn_sharding/     新增真实多轮夹具
+```
+
+## 十二、单测账
+
+### Turn 与分组
+
+- [ ] 0、1、2、3、4、6、7、17 turn 的分区边界。
+- [ ] 默认 partition_count=4；自定义 2/3/5/8。
+- [ ] 等长 turns 大致四等分。
+- [ ] tool-heavy turns 按工作视图 token 调整分界，不按 turn 数硬平分。
+- [ ] ToolResult user 不开新 turn。
+- [ ] 图片 user 开新 turn。
+- [ ] 单工具、并行多工具、多 result message 都按 tool_use_id 收成原子组。
+- [ ] tool use/result 原子组不跨分区。
+- [ ] orphan/incomplete tool exchange 不被静默切开。
+- [ ] 长 ToolResult 在 map/hot 工作视图中用稳定 artifact 预览，session 全文仍在。
+- [ ] prior archive 不算 turn。
+
+### UserContract
+
+- [ ] 目标、active constraints、acceptance、additions、superseded、open questions 齐全。
+- [ ] 每条要求有合法 source turns。
+- [ ] assistant 猜测不能进入用户契约。
+- [ ] tool_result 不能进入用户契约。
+- [ ] 后用户纠正前用户，旧项移入 superseded。
+- [ ] 没有明确覆盖关系的冲突进入 open questions。
+- [ ] source turn 悬空、倒序覆盖、环形覆盖全拒收。
+
+### WorkState
+
+- [ ] 已证实事实带证据。
+- [ ] 工具错误、退出码、文件路径与测试结果保留。
+- [ ] 已做修改与失败尝试分栏。
+- [ ] active todo 一项不少。
+- [ ] next_action 不混进 UserContract。
+
+### 换账与回放
+
+- [ ] final context 严格是双账 + hot raw。
+- [ ] 默认第四分区作为 hot raw，前三分区各 map 一次。
+- [ ] hot turns 参加 final reduce，最新纠正能改总契约。
+- [ ] 新史不短时 manual/auto 都拒收。
+- [ ] 旧 history 在任一失败路径不动。
+- [ ] 旧 session、新 session、多次 compact 都能回放。
+
+## 十三、真机验收
+
+- [ ] 配 `context_window: 1m`，确认自动线显示约 80%。
+- [ ] 配默认 partition_count=4，跑足够多 turn 后手工 `/compact --dry-run`，核四分计划与三次 map。
+- [ ] 跑真实 `/compact`，核最终上下文为 UserContract + WorkState + 第四分区原文。
+- [ ] 制造一轮超长工具输出，核模型只看 artifact 视图，session/artifact 全文可追回。
+- [ ] 制造一轮并行多工具调用，核 uses/results 整组留在同一分区。
+- [ ] 最近一轮改掉早先约束，核 active/superseded 正确。
+- [ ] 故意让 compact 模型漏一条 active todo，确认拒收。
+- [ ] 故意让 assistant 猜测冒充用户要求，确认来源校验拒收。
+- [ ] 构造单个超大 turn，确认不拆用户输入与工具对。
+- [ ] compact 后退出再 `/resume`，继续数轮再 compact，核旧双账接力。
+- [ ] `/export` 核原始流水仍全在。
+- [ ] Release 全量 CTest，记真实命令与通过数。
+
+## 十四、完成线
+
+- [ ] 到 80% 才自动 compact；不按固定 turn 数后台调用模型。
+- [ ] 默认按工作视图 token 把原始 turns 切成四个连续分区。
+- [ ] 前三分区预算内固定三次 map，第四分区保留热区。
+- [ ] 分区边界只落完整 turn 之间；工具原子组永不拆。
+- [ ] 长 ToolResult 用 artifact 视图节流，全文仍可追。
+- [ ] final reduce 同时看旧 archive、三份 map summary 与第四分区 hot raw。
+- [ ] 最终有效上下文是 `[用户契约][工作状态][最近热区原文]`。
+- [ ] 用户契约能列目标、当前约束、验收、补充、废止、疑问与来源 turn。
+- [ ] 工作状态能列事实、工具结果、文件、改动、失败、待办与下一步。
+- [ ] assistant/tool 不能伪造用户要求。
+- [ ] 手工与自动 compact 共用预算、校验与反涨闸。
+- [ ] 新旧 session 可回放，全量流水不删。
+- [ ] 单测、集成测试、真实 CLI、重复多轮评测都有账。
+
+先按 turn 切齐，再照 token 四分。前三份各收一回，末一份留在眼前。工具调用与回包成组进退，长结果收进 artifact。用户要什么，与事情做到哪一步，各写各的；末后并在一处，交给模型接着办。
