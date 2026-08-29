@@ -297,4 +297,13 @@ if(WIN32)
   add_executable(viewport_driver EXCLUDE_FROM_ALL manual/viewport_driver.cpp)
   target_compile_features(viewport_driver PRIVATE cxx_std_23)
   target_link_libraries(viewport_driver PRIVATE ws2_32)
+
+  # 流式正文渲染冒烟驱动器(真实实测问题 1:粗体不渲染):进程内假
+  # anthropic SSE 服务喂"正文段(含 **粗体**、无空行结尾)后直接跟
+  # tool_use"的实测形状 + 逐字滴的收尾段,真控制台刮屏断言让路定格、
+  # 增量重画、代码块字面量与转义:
+  #   body_render_driver <lubancode.exe> <工作目录> <报告文件>
+  add_executable(body_render_driver EXCLUDE_FROM_ALL manual/body_render_driver.cpp)
+  target_compile_features(body_render_driver PRIVATE cxx_std_23)
+  target_link_libraries(body_render_driver PRIVATE ws2_32)
 endif()

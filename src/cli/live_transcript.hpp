@@ -459,8 +459,16 @@ private:
 // 空行收尾的一段由 FinalizeRepaint 收账。长回答不再攒到整轮末尾才重画，
 // 免得块首滚出屏幕后整篇放弃渲染。
 //
-// 工具条目要开画时(on_tool_start)，尚未收束的小段作罢、保持原样；下一段
-// 重新取锚。已在段落边界画好的 Markdown 不受影响。
+// 问题 1(真实实测:流式粗体不渲染)补的两层:
+//   1. 增量重画——块内每新到一行完整行、或行内标记新配成一对,就按当前
+//      累计正文整块重画一次(ScanBodyDelta 产增量步,防洪峰预算见
+//      kBodyIncrementalMax*);闭合的 `**` 不必再苦等段尾空行。
+//   2. 让路定格——工具条目/思考块开画(OnBlockBreak)时,未收束的正文块
+//      先按渲染版定格再清账。老路直接丢账,模型"正文段 + tool_use 同条
+//      消息、正文后无空行"的写法(实测真机最常见)会让星号永远露着。
+//
+// 工具条目要开画时(on_tool_start)，尚未收束的小段定格成渲染版(画不动
+// 才保持原样)；下一段重新取锚。已在段落边界画好的 Markdown 不受影响。
 //
 // 行数记账不猜折行:块首记起始行号,收束时按光标位移算物理行数——原样
 // 流式的长行由控制台自然折行,逐字模拟折行规则(延迟 EOL 那套)不可靠。
@@ -481,15 +489,47 @@ private:
 // 16k 正文,十倍的账)。规矩改为:空行一到,先落最后一段原文,再以"自
 // 上次收口以来攒的全部正文"触发一次收束重画,随后攒账清零——一段只
 // 渲染一次,渲染的永远是自己的原文。
+//
+// 增量重画(真实实测问题 1:流式粗体不渲染):老路只在空行收束时重画,
+// 段没等到空行就遇到工具边界(正文后直接跟 tool_use)的话,块被整个丢
+// 掉,`**` 星号永远露着。切步器再多产一型"行/标记边界增量步":块内每
+// 新到一行完整行、或行内标记新配成一对,就按当前累计正文整块重画一次
+// (未闭合标记 RenderMarkdown 天然原样保留,半行的渲染版与原样一字不
+// 差,续打无缝);块的攒账不清,空行收束照旧。防洪峰:块换行数/字节超
+// 预算后退回"只等空行收束"。
 struct BodyDeltaStep {
     bool repaint = false;
+    // repaint=true 时这步是哪种重画:
+    //   finalize=true:空行收束——块定格成渲染版,攒账清零,下段另起;
+    //   finalize=false:行/标记边界增量——块重画但继续攒,后续正文续接。
+    bool finalize = false;
     std::string text;  // repaint=false:原样落笔的段;repaint=true:待整块渲染的块原文
 };
 
 struct BodyScanState {
     bool fence_open = false;
     std::string line_probe;
+    // 增量重画账:上次重画那一刻块内的换行数/行内标记对数。新完整行或
+    // 新配对到达才再画;空行收束/块作废时随块清零。
+    int last_newlines = 0;
+    int last_pairs = 0;
 };
+
+// 增量重画的防洪峰预算:块高/块宽超过这份就不再逐行重画(整块重画的账
+// 是 O(块高^2),超预算的长段退回"空行收束才画",与老路一致)。
+constexpr int kBodyIncrementalMaxNewlines = 48;
+constexpr std::size_t kBodyIncrementalMaxBytes = 16384;
+
+// 块内行内标记的成对数(** 对 + ` 对,数法与 DetectMarkdownStructure 同款:
+// 非重叠扫)。对数增加 = 又有标记闭合,值得重画一次。
+inline int CountInlineMarkPairs(const std::string& text) {
+    std::size_t bold_marks = 0;
+    for (std::size_t pos = text.find("**"); pos != std::string::npos; pos = text.find("**", pos + 2)) {
+        ++bold_marks;
+    }
+    const std::size_t backticks = static_cast<std::size_t>(std::count(text.begin(), text.end(), '`'));
+    return static_cast<int>(bold_marks / 2 + backticks / 2);
+}
 
 inline std::vector<BodyDeltaStep> ScanBodyDelta(BodyScanState& state, const std::string& text,
                                                 const std::string& block_so_far) {
@@ -522,15 +562,91 @@ inline std::vector<BodyDeltaStep> ScanBodyDelta(BodyScanState& state, const std:
             piece.clear();
             BodyDeltaStep repaint_step;
             repaint_step.repaint = true;
+            repaint_step.finalize = true;
             repaint_step.text = projected;
             steps.push_back(std::move(repaint_step));
             projected.clear();  // 收口:下一段从空串重新攒,不再回头渲染旧段
+            state.last_newlines = 0;
+            state.last_pairs = 0;
         }
     }
     if (!piece.empty()) {
         BodyDeltaStep print_step;
         print_step.text = piece;
         steps.push_back(std::move(print_step));
+    }
+    // 行/标记边界增量重画:当前未收束块(projected + piece)比上次重画时
+    // 多了完整行或新配对的行内标记,且块还在预算内——整块重画一次,块
+    // 照常继续攒。空行收束刚画过的空块(pending 为空)不触发。
+    const std::string pending = projected + piece;
+    if (!pending.empty()) {
+        int newlines = 0;
+        for (const char c : pending) {
+            newlines += c == '\n' ? 1 : 0;
+        }
+        const int pairs = CountInlineMarkPairs(pending);
+        if ((newlines > state.last_newlines || pairs > state.last_pairs) &&
+            newlines <= kBodyIncrementalMaxNewlines && pending.size() <= kBodyIncrementalMaxBytes) {
+            state.last_newlines = newlines;
+            state.last_pairs = pairs;
+            BodyDeltaStep repaint_step;
+            repaint_step.repaint = true;
+            repaint_step.finalize = false;
+            repaint_step.text = pending;
+            steps.push_back(std::move(repaint_step));
+        }
+    }
+    return steps;
+}
+
+// 收束/增量重画的渲染预案(条 4:锁外算好,锁内照单落笔)。hit=false 就是
+// "没探到 markdown 结构"——锁内只清账不画。
+struct BodyRenderPlan {
+    bool hit = false;                      // DetectMarkdownStructure 命中
+    std::vector<std::string> lines;        // 命中:RenderMarkdown 的渲染行
+    bool ended_with_newline = false;       // 原样块末尾带不带换行(老账)
+};
+
+// 备一份重画预案:没探到 markdown 结构给 hit=false(锁内不画、原样保留)。
+inline BodyRenderPlan PrepareBodyRenderPlan(const std::string& block_text, const lubancode::cli::Theme& theme,
+                                            int width) {
+    BodyRenderPlan plan;
+    plan.hit = lubancode::cli::DetectMarkdownStructure(block_text);
+    if (!plan.hit) {
+        return plan;
+    }
+    plan.ended_with_newline = !block_text.empty() && block_text.back() == '\n';
+    plan.lines = lubancode::cli::RenderMarkdown(block_text, theme, width);
+    return plan;
+}
+
+// 一笔正文 delta 的完整渲染决策(锁外纯拼装,条 4):ScanBodyDelta 切步,
+// 每个重画步就地备好渲染预案。StreamBodyTracker::ScanDelta 是它的薄壳
+// (只补终端宽度探测);单测直接钉这里——分块怎么切、每步渲染成什么行,
+// 不用真终端就能穿过"真实分块收束路径"(问题 1 验收)。
+struct BodyRenderStep {
+    bool repaint = false;
+    bool finalize = false;             // repaint=true 时:收束清账还是增量保账
+    std::string piece;                 // repaint=false:原样落笔的段
+    BodyRenderPlan plan;               // repaint=true:渲染预案
+};
+
+inline std::vector<BodyRenderStep> PlanBodyDelta(BodyScanState& state, const std::string& block_so_far,
+                                                 const std::string& text, const lubancode::cli::Theme& theme,
+                                                 int width) {
+    const std::vector<BodyDeltaStep> raw_steps = ScanBodyDelta(state, text, block_so_far);
+    std::vector<BodyRenderStep> steps;
+    steps.reserve(raw_steps.size());
+    for (const BodyDeltaStep& raw : raw_steps) {
+        BodyRenderStep step;
+        step.repaint = raw.repaint;
+        step.finalize = raw.finalize;
+        if (raw.repaint) {
+            step.plan = PrepareBodyRenderPlan(raw.text, theme, width);
+        } else {
+            step.piece = raw.text;
+        }
+        steps.push_back(std::move(step));
     }
     return steps;
 }
@@ -568,7 +684,7 @@ public:
         }
         // ---- 锁外:拼装(切段/围栏账/段落边界)与 Markdown 解析 ----
         // (enabled_=false 时老路压根不进这套账,照旧整笔直打,这里不扫。)
-        std::vector<DeltaStep> steps;
+        std::vector<BodyRenderStep> steps;
         if (enabled_) {
             steps = ScanDelta(text);
         }
@@ -604,11 +720,13 @@ public:
             return;
         }
 
-        for (const DeltaStep& step : steps) {
+        for (const BodyRenderStep& step : steps) {
             if (!step.repaint) {
                 PrintPieceLocked(step.piece);
-            } else {
+            } else if (step.finalize) {
                 RepaintBlockLocked(step.plan);
+            } else {
+                RepaintBlockInPlaceLocked(step.plan);
             }
         }
         // 正文这笔写完:帧账里的续写点拨到新光标,脚注框顶跟着算对。
@@ -636,13 +754,25 @@ public:
         start_row_ -= rows;
     }
 
-    // 工具条目要开画了:当前块到此为止,屏上保持原样。
+    // 工具条目/思考块要开画了:当前正文块到此为止。老路只清账、屏上保持
+    // 原样——真实实测问题 1 的根因即此:模型把正文段与 tool_use 写在同一
+    // 条消息里、正文后没有空行,块等不到收束就被丢,`**` 星号永远露着。
+    // 现在先把未收束的块按渲染版定格(锁外备预案,锁内落笔,条 4 同款),
+    // 几何绝境(unsafe)时照老路原样保留——宁可漏渲染,不可错渲染。
     void OnBlockBreak() {
+        std::optional<BodyRenderPlan> pending_plan;
+        if (enabled_ && in_block_ && !buffer_.empty()) {
+            pending_plan = PrepareBodyRenderPlan(buffer_, theme_,
+                                                 lubancode::cli::DetectConsoleWidth().value_or(80));
+        }
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         // 工具条目要开画/换请求了:脚注这行先擦掉,免得它残留在工具输出或
         // 下一轮"思考中"转轮当中(转轮跟 footer 同处一行会打架)。下一块
         // 正文到来时 OnDelta 会重新把脚注摆到正文下方。footer 没启用时空操作。
         lubancode::cli::EraseStreamFooterLocked();
+        if (pending_plan.has_value()) {
+            RepaintBlockLocked(*pending_plan);  // 收束重画(内部自清 in_block_/buffer_)
+        }
         // 若上一个工具后接的仍是工具，TranscriptPainter::PaintNew 自会
         // 留一空行；别把这枚标志带到更后面的正文，再多垫一层。
         separate_next_body_ = false;
@@ -653,6 +783,8 @@ public:
         buffer_.clear();
         scan_.line_probe.clear();
         scan_.fence_open = false;
+        scan_.last_newlines = 0;
+        scan_.last_pairs = 0;
     }
 
     // 工具终态已经画完。暂不落笔，等正文真来了再补分隔；若没有后续
@@ -667,69 +799,27 @@ public:
         if (!enabled_ || !in_block_) {
             return;
         }
-        const BlockRenderPlan plan = PrepareBlockRender(buffer_);
+        const BodyRenderPlan plan = PrepareBodyRenderPlan(buffer_, theme_,
+                                                          lubancode::cli::DetectConsoleWidth().value_or(80));
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         RepaintBlockLocked(plan);
         scan_.line_probe.clear();
         scan_.fence_open = false;
+        scan_.last_newlines = 0;
+        scan_.last_pairs = 0;
     }
 
 private:
-    // 收束重画的预案(条 4:锁外算好,锁内照单落笔)。hit=false 就是
-    // "没探到 markdown 结构"——锁内只清账不画。
-    struct BlockRenderPlan {
-        bool hit = false;                      // DetectMarkdownStructure 命中
-        std::vector<std::string> lines;        // 命中:RenderMarkdown 的渲染行
-        bool ended_with_newline = false;       // 原样块末尾带不带换行(老账)
-    };
-
-    // OnDelta 锁外拼装出的一步:要么落一笔原文,要么按预案收束重画。
-    struct DeltaStep {
-        bool repaint = false;
-        std::string piece;        // repaint=false:原样落笔的段(空段不生成步,
-                                  // 与老路 PrintPieceLocked 的空笔 no-op 等价)
-        BlockRenderPlan plan;     // repaint=true:收束重画的预案
-    };
-
     // OnDelta 的锁外半边(条 4):切段 + 围栏账 + 段落边界探测 + 边界处的
-    // Markdown 解析。line_probe_/fence_open_ 只在这一路动;动它们的人(这
+    // Markdown 解析。全部决策在纯函数 PlanBodyDelta(见上,单测钉死:
+    // 一段只渲染一次,收口即清零;行/标记边界增量重画问题 1);这里只补
+    // 终端宽度探测。line_probe_/fence_open_ 只在这一路动;动它们的人(这
     // 里与锁内 OnBlockBreak 清账)全被泵的画笔锁串着,锁外的这一窗不会
     // 与别人劈腿。buffer_ 只读起步一份投影(收束预案要"边界那一刻"的整
     // 块正文),锁内 PrintPieceLocked 落一笔补一笔,账对得上。
-    std::vector<DeltaStep> ScanDelta(const std::string& text) {
-        // 切段与围栏账在纯函数 ScanBodyDelta(见上,单测钉死:
-        // 一段只渲染一次,收口即清零,不再把旧段回头再渲染一遍、
-        // 铺在错的锚点上)。这里只给每个收束步备好渲染预案。
-        const std::vector<BodyDeltaStep> raw_steps =
-            ScanBodyDelta(scan_, text, in_block_ ? buffer_ : std::string());
-        std::vector<DeltaStep> steps;
-        steps.reserve(raw_steps.size());
-        for (const BodyDeltaStep& raw : raw_steps) {
-            DeltaStep step;
-            step.repaint = raw.repaint;
-            if (raw.repaint) {
-                step.plan = PrepareBlockRender(raw.text);
-            } else {
-                step.piece = raw.text;
-            }
-            steps.push_back(std::move(step));
-        }
-        return steps;
-    }
-
-    // 收束重画的解析半边(条 4:锁外)。block_text 是"边界那一刻"的整块
-    // 正文。宽度探测与渲染都在锁外——探测是只读查询,PrintDivider 一类
-    // 早有不持锁调它的先例;渲染纯 CPU。
-    BlockRenderPlan PrepareBlockRender(const std::string& block_text) const {
-        BlockRenderPlan plan;
-        plan.hit = lubancode::cli::DetectMarkdownStructure(block_text);
-        if (!plan.hit) {
-            return plan;
-        }
-        plan.ended_with_newline = !block_text.empty() && block_text.back() == '\n';
-        plan.lines = lubancode::cli::RenderMarkdown(
-            block_text, theme_, lubancode::cli::DetectConsoleWidth().value_or(80));
-        return plan;
+    std::vector<BodyRenderStep> ScanDelta(const std::string& text) {
+        return PlanBodyDelta(scan_, in_block_ ? buffer_ : std::string(), text, theme_,
+                             lubancode::cli::DetectConsoleWidth().value_or(80));
     }
 
     void StartBlockLocked() {
@@ -782,21 +872,37 @@ private:
         buffer_ += text;
     }
 
-    // 收束重画的落笔半边(条 4:吃锁外算好的预案,锁内只剩几何与写屏)。
-    // unsafe_ 在这一刻现读(老路同款——监听线程插行的作废标要走到落笔
-    // 这一步才算数),预案白算的情形(作废/几何绝境)只浪费 CPU,不差画。
-    void RepaintBlockLocked(const BlockRenderPlan& plan) {
+    // 收束重画(空行收束/OnBlockBreak 让路/FinalizeRepaint):画完清账,
+    // 块就此定格。unsafe_ 在这一刻现读(老路同款——监听线程插行的作废标
+    // 要走到落笔这一步才算数),预案白算的情形(作废/几何绝境)只浪费
+    // CPU,不差画。
+    void RepaintBlockLocked(const BodyRenderPlan& plan) {
         if (!in_block_) {
             return;
         }
+        PaintBlockLocked(plan);
         in_block_ = false;
+        buffer_.clear();
+    }
+
+    // 增量重画(问题 1:行/标记边界):块按当前累计正文整块重画,但攒账
+    // 不清、块继续——后续正文从渲染版末尾原样续打,下次边界再整块对齐。
+    // 画不动(unsafe/没探到结构/几何绝境)就什么都不动,原样账还在。
+    void RepaintBlockInPlaceLocked(const BodyRenderPlan& plan) {
+        if (!in_block_ || unsafe_) {
+            return;
+        }
+        PaintBlockLocked(plan);
+    }
+
+    // 重画的落笔半边(条 4:吃锁外算好的预案,锁内只剩几何与写屏)。
+    // 只动屏幕与锚点账,不动 in_block_/buffer_——收束与否由外壳定。
+    void PaintBlockLocked(const BodyRenderPlan& plan) {
         if (unsafe_ || buffer_.empty() || !plan.hit) {
-            buffer_.clear();
             return;
         }
         const std::optional<lubancode::platform::ScreenInfo> info = lubancode::platform::GetScreenInfo();
         if (!info.has_value()) {
-            buffer_.clear();
             return;
         }
         const int buffer_height = info->height;
@@ -804,15 +910,14 @@ private:
         int viewport_x = info->viewport_x;
         int viewport_y = info->viewport_y;
         // 原样块占的物理行数按光标位移算(末行没换行、光标停在行中时也算
-        // 一行),不逐字模拟折行。
+        // 一行),不逐字模拟折行。增量重画后光标停在渲染版末尾,这笔账同样
+        // 成立——渲染版行数即物理行数。
         const int old_rows = info->cursor_y - start_row_ + (info->cursor_x > 0 ? 1 : 0);
         if (old_rows <= 0) {
-            buffer_.clear();
             return;
         }
         const std::vector<std::string>& lines = plan.lines;
         const bool ended_with_newline = plan.ended_with_newline;
-        buffer_.clear();
         if (lines.empty()) {
             return;
         }
@@ -871,8 +976,9 @@ private:
             TermOut() << rendered;
             TermOut().flush();
         }
-        // 渲染版每行都截到 width-1,绝不物理折行;末行不带换行收梢,跟原样
-        // 流式一致——RunTurn 随后那个 "\n" 照常把行关上,下游行为分毫不差。
+        // 渲染版每行都截到 width-1,绝不物理折行;末行按原样块带不带换行
+        // 收梢——原样流式一致,RunTurn 随后那个 "\n" 照常把行关上,下游
+        // 行为分毫不差。
     }
 
     const lubancode::cli::Theme& theme_;

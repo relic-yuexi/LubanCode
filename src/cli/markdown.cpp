@@ -268,8 +268,11 @@ std::vector<Run> ParseInline(const std::string& s, bool plain) {
     };
     std::size_t i = 0;
     while (i < s.size()) {
-        if (s[i] == '\\' && i + 1 < s.size() && s[i + 1] == '$') {
-            cur += '$';
+        // 行内转义:\$ 之外再认 \* 与 \`——反斜杠吃掉,字面字符落下且不作为
+        // 标记参与配对(`\**字面**` 不得被吞成粗体;`\*\*` 全字面)。
+        if (s[i] == '\\' && i + 1 < s.size() &&
+            (s[i + 1] == '$' || s[i + 1] == '*' || s[i + 1] == '`')) {
+            cur += s[i + 1];
             i += 2;
             continue;
         }
