@@ -37,6 +37,7 @@
 #include "runtime/turn_event_adapter.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
+#include "tools/tool_content.hpp"
 
 namespace rt = lubancode::runtime;
 using namespace lubancode;
@@ -92,6 +93,71 @@ public:
 };
 
 }  // namespace
+
+// 可见调试单阶段 2:MCP 富结果带图的工具(browser_screenshot 一类),
+// ItemCompleted 须附 images 引用账(元数据 + ArtifactRef),且绝不把
+// wire_base64 带进事件——字节在 artifact 落盘处,事件只递指针。
+TEST_CASE("工具富结果带图:ItemCompleted 附 artifact 引用,不带 base64") {
+    tools::ImageContent image;
+    image.mime_type = "image/png";
+    image.width = 1280;
+    image.height = 720;
+    image.bytes = 4567;
+    image.sha256 = "deadbeef" + std::string(56, '0');
+    image.artifact.id = "art-0000abcd";
+    image.artifact.filename = "art-0000abcd.png";
+    image.artifact.path = "mcp-artifacts/art-0000abcd.png";
+    image.artifact.mime_type = "image/png";
+    image.artifact.bytes = 4567;
+    image.artifact.sha256 = image.sha256;
+    image.artifact.stored = true;
+    image.wire_base64 = "SHOULD-NOT-LEAK";
+    tools::ToolResultPayload payload;
+    payload.content.push_back(tools::TextContent{"截图完成"});
+    payload.content.push_back(std::move(image));
+    tools::Tool::Result result = tools::Tool::Result::FromPayload(std::move(payload));
+
+    RecordingSink recorder;
+    rt::TurnEventAdapter adapter("th-shot", rt::ProcessIdAuthority());
+    adapter.Attach([&](const rt::ServerEvent& event) { recorder.Emit(event); });
+    adapter.OnToolStart("toolu_shot", "browser_screenshot", nlohmann::json{{"page_id", "p1"}});
+    adapter.OnToolDone("toolu_shot", "browser_screenshot", result);
+    adapter.Finish(rt::Outcome::Succeeded);
+
+    const rt::ServerEvent* completed = nullptr;
+    for (const auto& event : recorder.events) {
+        if (event.kind == rt::ServerEventKind::ItemCompleted && event.item_kind == rt::ItemKind::Tool) {
+            completed = &event;
+        }
+    }
+    REQUIRE(completed != nullptr);
+    REQUIRE(completed->payload.contains("images"));
+    REQUIRE(completed->payload["images"].is_array());
+    REQUIRE(completed->payload["images"].size() == 1);
+    const nlohmann::json& shot = completed->payload["images"][0];
+    CHECK(shot["mime_type"] == "image/png");
+    CHECK(shot["width"] == 1280);
+    CHECK(shot["height"] == 720);
+    CHECK(shot["bytes"] == 4567);
+    CHECK(shot["artifact"]["id"] == "art-0000abcd");
+    CHECK(shot["artifact"]["path"] == "mcp-artifacts/art-0000abcd.png");
+    CHECK(shot["artifact"]["stored"] == true);
+    // base64 不进事件:序列化后全文搜不着恳求态字节。
+    CHECK(completed->payload.dump().find("SHOULD-NOT-LEAK") == std::string::npos);
+    // 纯文本工具(无图)不带 images 字段——老事件形状一个字节不变。
+    tools::Tool::Result plain = tools::Tool::Result::Text("工具跑完了");
+    RecordingSink plain_recorder;
+    rt::TurnEventAdapter plain_adapter("th-plain", rt::ProcessIdAuthority());
+    plain_adapter.Attach([&](const rt::ServerEvent& event) { plain_recorder.Emit(event); });
+    plain_adapter.OnToolStart("toolu_plain", "read_file", nlohmann::json::object());
+    plain_adapter.OnToolDone("toolu_plain", "read_file", plain);
+    plain_adapter.Finish(rt::Outcome::Succeeded);
+    for (const auto& event : plain_recorder.events) {
+        if (event.kind == rt::ServerEventKind::ItemCompleted && event.item_kind == rt::ItemKind::Tool) {
+            CHECK_FALSE(event.payload.contains("images"));
+        }
+    }
+}
 
 TEST_CASE("同一假 backend 脚本:Terminal 与 Json 两 sink 同流同账") {
     FakeBackend backend;

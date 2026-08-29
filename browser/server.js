@@ -6,8 +6,9 @@
 //
 //   lib/config.js     配置层:参数、目录、视口、安全闸,唯一一份默认值
 //   lib/session.js    session 层:BrowserSession 本体——Playwright 生命
-//                     周期、页签账、ref、下载、崩溃、串行队列
-//   lib/tools.js      tool adapter 层:12 件 MCP 工具的皮,不持状态
+//                     周期、页签账、ref、下载、崩溃、串行队列、Console/
+//                     Network 两本环形 journal、用户观察代(仲裁)
+//   lib/tools.js      tool adapter 层:14 件 MCP 工具的皮,不持状态
 //   lib/transport.js  transport 层:stdio JSON-RPC 分帧
 //   server.js         本文件:装配 + MCP 方法 + 取消账 + 进程生命周期
 //
@@ -33,6 +34,7 @@
 //                  [--profile persistent|ephemeral] [--profile-name <名>]
 //                  [--user-data-dir <目录>] [--downloads-dir <目录>]
 //                  [--viewport WxH] [--action-timeout-ms <毫秒>]
+//                  [--journal-cap <每页账帽,默认 500>]
 //
 // 配进 LubanCode(示例,~/.lubancode/settings.json 或项目 .lubancode/config):
 //   "mcpServers": {

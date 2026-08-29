@@ -193,6 +193,14 @@ public:
                 } else {
                     payload["result"] = event.payload.value("result", std::string());
                     payload["isError"] = event.payload.value("is_error", false);
+                    // 截图等富图片的 artifact 引用(可见调试单阶段 2):只递
+                    // 元数据与 ArtifactRef,不带 base64——正文在会话 artifact
+                    // 落盘处,前端凭 path/id 取。模型看的图与前端点开的图
+                    // 指向同一 artifact,不许各说各话。
+                    if (event.payload.contains("images") && event.payload["images"].is_array() &&
+                        !event.payload["images"].empty()) {
+                        payload["images"] = event.payload["images"];
+                    }
                 }
                 emit_(kEventItemCompleted,
                       MakeItemCompletedParams(event.envelope.thread_id, event.turn_id, event.item_id,

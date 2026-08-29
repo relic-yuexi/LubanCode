@@ -23,13 +23,15 @@ function parseArgs(argv) {
     else if (a === '--downloads-dir') out.downloadsDir = next();
     else if (a === '--viewport') out.viewport = next();
     else if (a === '--action-timeout-ms') out.actionTimeoutMs = Number(next());
+    else if (a === '--journal-cap') out.journalCap = Number(next());
   }
   return out;
 }
 
 // args 是 parseArgs 的输出(测试宿主可手工构造同形对象);env 缺省取
 // process.env。字段:engine/headless/profileMode/profileName/sessionId/
-// userDataDir/downloadsDir/viewport/defaultActionTimeoutMs/maxActionTimeoutMs。
+// userDataDir/downloadsDir/viewport/defaultActionTimeoutMs/maxActionTimeoutMs/
+// journalCap(Console/Network 每页环形账帽)。
 function buildConfig(args, env) {
   env = env || process.env;
   args = args || {};
@@ -45,6 +47,8 @@ function buildConfig(args, env) {
     viewport: parseViewport(args.viewport),
     defaultActionTimeoutMs: Math.min(Math.max(args.actionTimeoutMs || 15000, 1000), 60000),
     maxActionTimeoutMs: 60000,
+    // Console/Network journal 每页每账的容量帽(环形,丢最老明记 dropped)。
+    journalCap: Math.min(Math.max(args.journalCap || 500, 10), 5000),
   };
 }
 

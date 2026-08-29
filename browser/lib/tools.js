@@ -265,6 +265,106 @@ function createBrowserTools({ session }) {
       },
     },
     {
+      name: 'browser_console',
+      description: '查 Console journal:页面 console 消息与未捕获异常(log/info/warning/error/debug/pageerror),每条带 seq/page_id/generation 与 source 行列,文本默认脱敏。环形账,溢出明记 dropped;since_seq 断线补账,level 过滤。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          page_id: { type: 'string', description: '要查的页(缺省查不了账——两本账都按页记,须给 page_id)' },
+          since_seq: { type: 'number', description: '只回 seq 大于该号的条目(断线补账)' },
+          level: { type: 'string', description: 'log|info|warning|error|debug|pageerror' },
+          limit: { type: 'number', description: '最多回几条(默认 50,帽 500)' },
+        },
+        required: ['page_id'],
+      },
+      handler: (input) => {
+        const m = session.consoleEntries(input.page_id, {
+          sinceSeq: input.since_seq,
+          level: input.level,
+          limit: input.limit,
+        });
+        const counts = {};
+        for (const row of m.rows) counts[row.level] = (counts[row.level] || 0) + 1;
+        const summary = 'console 账:在册 ' + m.total + ' 条'
+          + (m.dropped > 0 ? '(环形帽已丢最老 ' + m.dropped + ' 条)' : '')
+          + ',本次回 ' + m.rows.length + ' 条'
+          + (Object.keys(counts).length > 0 ? ' [' + Object.entries(counts).map(([k, v]) => k + '×' + v).join(' ') + ']' : '')
+          + ',last_seq=' + m.lastSeq;
+        const body = m.rows.length === 0 ? '(这段没有条目)' : m.rows.map((row) => {
+          const where = row.sourceUrl ? ' (' + row.sourceUrl.split('/').pop() + (row.line ? ':' + row.line + (row.column ? ':' + row.column : '') : '') + ')' : '';
+          return '[' + row.seq + '] ' + row.level + ' ' + row.text + where + ' g' + row.generation;
+        }).join('\n');
+        return textResult(summary + '\n' + body, {
+          page_id: m.pageId,
+          total: m.total,
+          dropped: m.dropped,
+          last_seq: m.lastSeq,
+          rows: m.rows.map((row) => ({
+            seq: row.seq,
+            level: row.level,
+            text: row.text,
+            source_url: row.sourceUrl,
+            line: row.line,
+            column: row.column,
+            ts: row.ts,
+            generation: row.generation,
+          })),
+        });
+      },
+    },
+    {
+      name: 'browser_network',
+      description: '查 Network journal:请求/响应元数据(method/url/status/资源类型/耗时/失败原因),响应体不收——这是元数据账,不冒充抓包。URL query 默认脱敏;环形账,溢出明记 dropped;since_seq 断线补账。',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          page_id: { type: 'string' },
+          since_seq: { type: 'number', description: '只回 seq 大于该号的条目(断线补账)' },
+          url_contains: { type: 'string', description: '只回 URL 含该段的条目' },
+          status: { type: 'number', description: '只回该 HTTP 状态码(0=失败请求)' },
+          failed_only: { type: 'boolean', description: '只看失败请求(连接失败/超时等)' },
+          limit: { type: 'number', description: '最多回几条(默认 50,帽 500)' },
+        },
+        required: ['page_id'],
+      },
+      handler: (input) => {
+        const m = session.networkEntries(input.page_id, {
+          sinceSeq: input.since_seq,
+          urlContains: input.url_contains,
+          status: input.status,
+          failedOnly: input.failed_only,
+          limit: input.limit,
+        });
+        const failed = m.rows.filter((r) => r.failed).length;
+        const summary = 'network 账:在册 ' + m.total + ' 条'
+          + (m.dropped > 0 ? '(环形帽已丢最老 ' + m.dropped + ' 条)' : '')
+          + ',本次回 ' + m.rows.length + ' 条' + (failed > 0 ? '(失败 ' + failed + ' 条)' : '')
+          + ',last_seq=' + m.lastSeq;
+        const body = m.rows.length === 0 ? '(这段没有条目)' : m.rows.map((row) => {
+          const status = row.failed ? 'FAIL(' + row.error + ')' : String(row.status);
+          return '[' + row.seq + '] ' + row.method + ' ' + row.url + ' -> ' + status + ' ' + row.resourceType + ' ' + row.durationMs + 'ms g' + row.generation;
+        }).join('\n');
+        return textResult(summary + '\n' + body, {
+          page_id: m.pageId,
+          total: m.total,
+          dropped: m.dropped,
+          last_seq: m.lastSeq,
+          rows: m.rows.map((row) => ({
+            seq: row.seq,
+            method: row.method,
+            url: row.url,
+            status: row.status,
+            resource_type: row.resourceType,
+            duration_ms: row.durationMs,
+            failed: row.failed,
+            error: row.error,
+            ts: row.ts,
+            generation: row.generation,
+          })),
+        });
+      },
+    },
+    {
       name: 'browser_downloads',
       description: '列下载账:状态、建议名、安全文件名、MIME、字节、sha256、落盘路径。默认隔离目录,可执行不自动运行、压缩包不自动解压。',
       inputSchema: { type: 'object', properties: {} },
@@ -283,7 +383,7 @@ function createBrowserTools({ session }) {
       description: tool.description,
       inputSchema: tool.inputSchema,
       title: tool.name.replace(/^browser_/, '').replace(/_/g, ' '),
-      annotations: { readOnlyHint: tool.name === 'browser_status' || tool.name === 'browser_tabs' || tool.name === 'browser_downloads' || tool.name === 'browser_snapshot' },
+      annotations: { readOnlyHint: tool.name === 'browser_status' || tool.name === 'browser_tabs' || tool.name === 'browser_downloads' || tool.name === 'browser_snapshot' || tool.name === 'browser_console' || tool.name === 'browser_network' },
     }));
   }
 

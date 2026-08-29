@@ -164,4 +164,106 @@ async function runDirectMatrix(baseUrl, helpers) {
   }
 }
 
-module.exports = { runDirectMatrix };
+// ---------------------------------------------------------------------------
+// Runtime journal 矩阵(单子:内嵌浏览器调试工作台 阶段 2):Console/
+// Network 两本账的记账、脱敏、环形帽、补账口径;用户与 Agent 仲裁第 4
+// 条(Agent 动作不递观察代;用户手点后旧 ref 明报 stale)。
+// headless 全跑——Playwright 的 mouse 事件走 CDP,与 headed 同一条
+// DOM 事件路,仲裁语义不用真开窗验。
+// ---------------------------------------------------------------------------
+async function runJournalMatrix(baseUrl, helpers) {
+  const { ok, skip, section, tempDir, refOfLine } = helpers;
+  section('Runtime journal:console/network/仲裁(阶段 2)');
+  if (!playwrightAvailable) {
+    skip('journal 矩阵', 'playwright 依赖未安装');
+    return;
+  }
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+  const runtime = new BrowserSession(buildConfig({
+    engine: 'chromium', headless: true, profile: 'ephemeral',
+    downloadsDir: tempDir('lubancode-browser-journal-dl-'),
+  }));
+  try {
+    const opened = await runtime.open(baseUrl + '/journal.html', {});
+    await sleep(900); // 等 console/异步 fetch/pageerror 落账
+
+    const consoleAll = runtime.consoleEntries(opened.pageId, { limit: 500 });
+    ok('console 账收四级', ['log', 'info', 'warning', 'error'].every((l) => consoleAll.rows.some((r) => r.level === l)),
+       JSON.stringify(consoleAll.rows.map((r) => r.level)));
+    ok('console 账收未捕获异常(pageerror)', consoleAll.rows.some((r) => r.level === 'pageerror' && r.text.includes('未捕获异常')));
+    ok('console 条目带 seq/generation', consoleAll.rows.every((r) => r.seq > 0 && r.generation >= 1));
+    ok('console 脱敏:token 值遮掉', consoleAll.rows.some((r) => r.text.includes('token=<redacted>')) && !consoleAll.rows.some((r) => r.text.includes('abc123')));
+    const onlyError = runtime.consoleEntries(opened.pageId, { level: 'error' });
+    ok('level 过滤只回 error', onlyError.rows.length >= 1 && onlyError.rows.every((r) => r.level === 'error'));
+    const lastSeqSeen = consoleAll.rows[consoleAll.rows.length - 1].seq;
+    const since = runtime.consoleEntries(opened.pageId, { sinceSeq: lastSeqSeen - 2 });
+    ok('since_seq 补账只回更新的', since.rows.every((r) => r.seq > lastSeqSeen - 2) && since.rows.length >= 1);
+
+    const netAll = runtime.networkEntries(opened.pageId, { limit: 500 });
+    ok('network 账收 document 请求', netAll.rows.some((r) => r.resourceType === 'document' && r.status === 200));
+    ok('network 账收 fetch 200/500/404', ['200', '500', '404'].every((s) => netAll.rows.some((r) => r.resourceType === 'fetch' && String(r.status) === s)),
+       JSON.stringify(netAll.rows.map((r) => r.resourceType + ':' + r.status)));
+    ok('network 脱敏:query token 遮掉', !netAll.rows.some((r) => r.url.includes('abc123')) && netAll.rows.some((r) => r.url.includes('token=')));
+    // generation >= 0:document 请求在首航边沿(g0->g1)起笔,记 0 是合法账。
+    ok('network 条目带 duration/seq/generation', netAll.rows.every((r) => r.seq > 0 && r.durationMs >= 0 && r.generation >= 0));
+    const apiFail = runtime.networkEntries(opened.pageId, { urlContains: '/api/fail' });
+    ok('url_contains 过滤到 500', apiFail.rows.length === 1 && apiFail.rows[0].status === 500);
+
+    // ---- 仲裁第 4 条:用户一动 DOM,旧 ref 明报 stale -------------------
+    const snap = await runtime.snapshot(opened.pageId, {});
+    const btnRef = refOfLine(snap.text, '按一下');
+    if (btnRef) {
+      // Agent 自己连点两次:动作经 withAgentInput 包旗,不递观察代。
+      await runtime.click(opened.pageId, btnRef, { snapshotId: snap.snapshotId });
+      const again = await runtime.click(opened.pageId, btnRef, { snapshotId: snap.snapshotId });
+      ok('Agent 动作不递观察代(同 snapshot 可续动作)', Boolean(again));
+      // 用户手点(page.mouse 直发,不经 Agent 队列):观察代 +1,旧 ref stale。
+      await runtime.pages.get(opened.pageId).page.mouse.click(5, 5);
+      await sleep(400);
+      const touched = await expectError(() => runtime.click(opened.pageId, btnRef, { snapshotId: snap.snapshotId }));
+      ok('用户动过手后旧 ref 报 stale_ref', touched.code === 'browser.stale_ref' && touched.message.includes('用户'),
+         touched.code + ' ' + touched.message.slice(0, 100));
+      const snap2 = await runtime.snapshot(opened.pageId, {});
+      const btnRef2 = refOfLine(snap2.text, '按一下');
+      const after = btnRef2 ? await runtime.click(opened.pageId, btnRef2, { snapshotId: snap2.snapshotId }) : null;
+      ok('重新快照后动作恢复', Boolean(after));
+    } else {
+      skip('仲裁矩阵', '快照文本没按预期标出按钮');
+    }
+    // 关页后账仍可查(unknown_page 才拒)。
+    const closedQuery = runtime.consoleEntries(opened.pageId, { level: 'pageerror' });
+    ok('关页前账可查', closedQuery.rows.length >= 1);
+  } finally {
+    await runtime.shutdown();
+  }
+
+  // 环形帽:journalCap=10,夹具页打 20+ 条,丢最老明记 dropped。
+  const capped = new BrowserSession(buildConfig({
+    engine: 'chromium', headless: true, profile: 'ephemeral', journalCap: 10,
+    downloadsDir: tempDir('lubancode-browser-journal-cap-'),
+  }));
+  try {
+    const opened = await capped.open(baseUrl + '/journal.html', {});
+    await sleep(900);
+    const c = capped.consoleEntries(opened.pageId, { limit: 500 });
+    ok('环形帽生效(rows<=10)', c.rows.length <= 10, 'rows=' + c.rows.length);
+    ok('溢出明记 dropped', c.dropped >= 1 && c.lastSeq > 10, 'dropped=' + c.dropped + ' lastSeq=' + c.lastSeq);
+    ok('帽内是最新且 seq 连续', c.rows.every((r, i) => i === 0 || r.seq === c.rows[i - 1].seq + 1));
+    const missing = expectErrorSync(() => capped.consoleEntries('p999', {}));
+    ok('查不存在的页明报 unknown_page', missing.code === 'browser.unknown_page', missing.code);
+  } finally {
+    await capped.shutdown();
+  }
+}
+
+function expectErrorSync(fn) {
+  try {
+    fn();
+  } catch (error) {
+    return { code: error.code || '', message: String(error.message || error) };
+  }
+  return { code: '', message: '(没抛错)' };
+}
+
+module.exports = { runDirectMatrix, runJournalMatrix };

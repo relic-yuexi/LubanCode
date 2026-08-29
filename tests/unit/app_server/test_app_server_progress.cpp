@@ -37,6 +37,7 @@
 #include "app_server/server.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
+#include "tools/tool_content.hpp"
 
 using namespace lubancode;
 
@@ -115,6 +116,35 @@ private:
     std::shared_ptr<std::atomic<int>> counter_;
 };
 
+// 假截图工具(可见调试单阶段 2):回文本 + 图片块(带 artifact 引用),
+// 钉 item/completed 的 images 折叠——只递元数据,不递 base64。
+class FakeImageTool : public tools::Tool {
+public:
+    std::string name() const override { return "browser_screenshot"; }
+    std::string description() const override { return "假截图工具"; }
+    nlohmann::json input_schema() const override { return nlohmann::json::object(); }
+    tools::Tool::Result execute(const nlohmann::json&) override {
+        tools::ImageContent image;
+        image.mime_type = "image/png";
+        image.width = 640;
+        image.height = 360;
+        image.bytes = 1234;
+        image.sha256 = std::string(64, 'a');
+        image.artifact.id = "art-aaaa1111";
+        image.artifact.filename = "art-aaaa1111.png";
+        image.artifact.path = "mcp-artifacts/art-aaaa1111.png";
+        image.artifact.mime_type = "image/png";
+        image.artifact.bytes = 1234;
+        image.artifact.sha256 = std::string(64, 'a');
+        image.artifact.stored = true;
+        image.wire_base64 = "SHOULD-NOT-LEAK";
+        tools::ToolResultPayload payload;
+        payload.content.push_back(tools::TextContent{"截图完成"});
+        payload.content.push_back(std::move(image));
+        return tools::Tool::Result::FromPayload(std::move(payload));
+    }
+};
+
 struct ScriptedIo {
     std::vector<std::string> written;
     app_server::StdioConnection::LineWriter Writer() {
@@ -130,7 +160,7 @@ struct ProgressHarness {
     std::vector<std::string> tool_names;
 
     explicit ProgressHarness(std::vector<std::string> names, const std::string& sessions_dir = std::string(),
-                             std::size_t outbox_capacity = 4096) {
+                             std::size_t outbox_capacity = 4096, bool with_image_tool = false) {
         tool_names = std::move(names);
         app_server::ServerOptions options;
         options.sessions_dir = sessions_dir;
@@ -142,10 +172,13 @@ struct ProgressHarness {
             [state]() -> std::unique_ptr<api::Backend> {
                 return std::make_unique<SharedScriptBackend>(state);
             },
-            [this]() -> std::unique_ptr<tools::ToolRegistry> {
+            [this, with_image_tool]() -> std::unique_ptr<tools::ToolRegistry> {
                 auto registry = std::make_unique<tools::ToolRegistry>();
                 for (const std::string& name : tool_names) {
                     registry->Register(std::make_unique<FakeNamedTool>(name, tool_calls));
+                }
+                if (with_image_tool) {
+                    registry->Register(std::make_unique<FakeImageTool>());
                 }
                 return registry;
             });
@@ -195,6 +228,46 @@ void WriteFileUtf8(const std::string& path, const std::string& content) {
 // ---------------------------------------------------------------------------
 // diff 行表穿透:item/started 带 runtime::DiffTable 直转的行表
 // ---------------------------------------------------------------------------
+
+// 可见调试单阶段 2:截图 artifact 进 item/completed——事件带 images
+// 数组(元数据 + ArtifactRef),不带 base64;前端与模型看同一 artifact。
+TEST_CASE("截图 artifact:item/completed 带 images 引用,不带 base64") {
+    ProgressHarness harness({}, std::string(), 4096, /*with_image_tool=*/true);
+    harness.backend->scripts = {ToolUseScript("t1", "browser_screenshot", nlohmann::json{{"page_id", "p1"}}.dump()),
+                                TextOnlyScript("截图好了。")};
+    std::string error_code;
+    const nlohmann::json start = harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());
+    harness.server->HandleTurnStart(start["threadId"], "截一张", {}, error_code);
+    REQUIRE(error_code.empty());
+
+    // 找带图的那条 item/completed(文本条目的 completed 不带 images)。
+    harness.PumpOutbox();
+    nlohmann::json shot_completed;
+    for (const std::string& line : harness.io.written) {
+        const nlohmann::json parsed = nlohmann::json::parse(line);
+        if (parsed.value("method", std::string()) == "item/completed" &&
+            parsed["params"]["item"].contains("images")) {
+            shot_completed = parsed;
+            break;
+        }
+    }
+    REQUIRE(!shot_completed.is_null());
+    const nlohmann::json& item = shot_completed["params"]["item"];
+    // 注:item/completed 不带 tool 字段(那是 item/started 的),别 const
+    // 读缺失键——MSVC Debug 下是 assert。工具身份从 images 内容侧面钉。
+    REQUIRE(item.contains("images"));
+    REQUIRE(item["images"].is_array());
+    REQUIRE(item["images"].size() == 1);
+    const nlohmann::json& shot = item["images"][0];
+    CHECK(shot["mime_type"] == "image/png");
+    CHECK(shot["width"] == 640);
+    CHECK(shot["height"] == 360);
+    CHECK(shot["artifact"]["id"] == "art-aaaa1111");
+    CHECK(shot["artifact"]["path"] == "mcp-artifacts/art-aaaa1111.png");
+    CHECK(shot["artifact"]["stored"] == true);
+    CHECK(shot_completed.dump().find("SHOULD-NOT-LEAK") == std::string::npos);
+}
 
 TEST_CASE("diff 行表:write_file 的 item/started 带中立行表") {
     const std::string dir = MakeTempDir("lubancode_test_app_server_diff");

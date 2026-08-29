@@ -82,6 +82,53 @@ function acquireProfileLock(dir) {
   };
 }
 
+// Console/Network journal(单子:内嵌浏览器调试工作台 阶段 2):
+//   - 每页两本环形账(console/network),容量帽 config.journalCap(缺省
+//     500/页/账),溢出丢最老并计 dropped——查询回执明说,不冒充全账。
+//   - 每条带 seq(页内单调)与 generation,断线后按 since_seq 补账去重。
+//   - Network 只记元数据(method/url/status/资源类型/耗时/失败原因),
+//     响应体不收——正文明说是元数据账,不冒充抓包。
+//   - Console 文本与 URL query 默认脱敏:疑似 token/Authorization/Cookie/
+//     密码的键值遮 <redacted>,超长截断。
+const JOURNAL_TEXT_CAP = 2000;
+const SENSITIVE_KEY_RE = /(authorization|cookie|set-cookie|token|secret|password|passwd|api[-_]?key|session[-_]?id)/i;
+
+function sanitizeJournalText(raw) {
+  let text = String(raw ?? '');
+  // Bearer 头与"key: value"样式的敏感对遮值。
+  text = text.replace(/(Bearer\s+)\S+/gi, '$1<redacted>');
+  text = text.replace(new RegExp('(' + SENSITIVE_KEY_RE.source + ')\\s*[:=]\\s*\\S+', 'gi'), '$1=<redacted>');
+  if (text.length > JOURNAL_TEXT_CAP) {
+    text = text.slice(0, JOURNAL_TEXT_CAP) + '…(超长截断,原 ' + text.length + ' 字符)';
+  }
+  return text;
+}
+
+function sanitizeJournalUrl(raw) {
+  try {
+    const parsed = new URL(String(raw ?? ''));
+    for (const [key, value] of parsed.searchParams.entries()) {
+      if (SENSITIVE_KEY_RE.test(key)) parsed.searchParams.set(key, '<redacted>');
+    }
+    return parsed.toString();
+  } catch (_) {
+    return String(raw ?? '');
+  }
+}
+
+// 用户输入监听脚本(仲裁第 4 条:用户一动 DOM,观察代递增,旧 ref 报
+// stale)。exposeBinding 装的 window.__lubanOnUserInput 由 session 供给;
+// 每份文档挂一次 document 捕获监听,幂等。
+const USER_INPUT_WATCH_SCRIPT = `(() => {
+  if (window.__lubanUserWatch) return;
+  window.__lubanUserWatch = true;
+  const touch = () => {
+    try { if (typeof window.__lubanOnUserInput === 'function') window.__lubanOnUserInput(); } catch (_) { /* 不拦页面 */ }
+  };
+  document.addEventListener('pointerdown', touch, true);
+  document.addEventListener('keydown', touch, true);
+})()`;
+
 // 快照脚本:主框架 DOM 走一遍,认交互元素与标题,发 eN ref 并把
 // ref -> CSS 选择器登记进页面(window.__lubanRefSelectors)。首版不进
 // iframe 与 shadow DOM,快照头部明说(单子 P1.4:不支持的形状须明报);
@@ -260,6 +307,7 @@ class BrowserSession {
     this.crashReason = '';
     this.queue = Promise.resolve(); // actor 队列:并发动作串行
     this.releaseLock = null;
+    this.agentActing = false; // Agent 自家动作进行中:用户观察代不误记(仲裁第 4 条)
   }
 
   // actor 队列:一份浏览器状态一位主人,两只并发调用不得同时抢一只 page。
@@ -392,14 +440,113 @@ class BrowserSession {
   registerPage(page) {
     const id = 'p' + this.nextPageNumber++;
     // generation 从 0 起:首次 goto 之后恰为 1;再导航才 +1。
-    const entry = { page, generation: 0, snapshotSeq: 0, closed: false };
+    const entry = {
+      page,
+      generation: 0,
+      snapshotSeq: 0,
+      closed: false,
+      // 用户观察代(仲裁第 4 条):用户手点/按键一次 +1;snapshot 记下当时
+      // 的代,动作带旧 snapshot 时对表,不等当前代就明报 stale。
+      userEpoch: 0,
+      snapshotEpochs: new Map(), // snapshot_id -> 快照时的 userEpoch
+      // Console journal:环形账,帽 config.journalCap。
+      consoleJournal: [],
+      consoleSeq: 0,
+      consoleDropped: 0,
+      // Network journal:同帽;pendingRequests 记在飞请求(request ->
+      // 起笔元数据),拿到终态(response/requestfailed)才入账。
+      networkJournal: [],
+      networkSeq: 0,
+      networkDropped: 0,
+      pendingRequests: new Map(),
+    };
     this.pages.set(id, entry);
+    const cap = Math.max(10, Math.trunc(this.config.journalCap) || 500);
+    const pushRing = (journal, record, droppedKey) => {
+      journal.push(record);
+      if (journal.length > cap) {
+        // 环形:丢最老,明记 dropped——查询回执如实报,不冒充全账。
+        journal.splice(0, journal.length - cap);
+        entry[droppedKey] += 1;
+      }
+    };
     // 主框架导航 = 换页:generation +1,旧 ref 即刻失效(单子 P1.4)。
     page.on('framenavigated', (frame) => {
       if (frame === page.mainFrame()) {
         entry.generation += 1;
       }
     });
+    // Console 与未捕获异常(阶段 2):level 取 Playwright 的 type,pageerror
+    // 单列一级;source 行列尽力给,拿不到留空。
+    page.on('console', (message) => {
+      const location = message.location() || {};
+      entry.consoleSeq += 1;
+      pushRing(entry.consoleJournal, {
+        seq: entry.consoleSeq,
+        level: String(message.type() || 'log'),
+        text: sanitizeJournalText(message.text()),
+        sourceUrl: sanitizeJournalUrl(location.url || ''),
+        line: Number(location.lineNumber) || 0,
+        column: Number(location.columnNumber) || 0,
+        ts: new Date().toISOString(),
+        generation: entry.generation,
+      }, 'consoleDropped');
+    });
+    page.on('pageerror', (error) => {
+      entry.consoleSeq += 1;
+      pushRing(entry.consoleJournal, {
+        seq: entry.consoleSeq,
+        level: 'pageerror',
+        text: sanitizeJournalText(error && error.message ? error.message : String(error)),
+        sourceUrl: '',
+        line: 0,
+        column: 0,
+        ts: new Date().toISOString(),
+        generation: entry.generation,
+      }, 'consoleDropped');
+    });
+    // Network journal:起笔记 method/url/资源类型,终态补 status 或失败
+    // 原因;duration 用起笔到终态的墙钟差。响应体不收(明说,不冒充)。
+    page.on('request', (request) => {
+      entry.networkSeq += 1;
+      entry.pendingRequests.set(request, {
+        seq: entry.networkSeq,
+        method: request.method(),
+        url: sanitizeJournalUrl(request.url()),
+        resourceType: request.resourceType() || '',
+        startedAt: Date.now(),
+        ts: new Date().toISOString(),
+        generation: entry.generation,
+      });
+    });
+    page.on('response', (response) => {
+      const pending = entry.pendingRequests.get(response.request());
+      if (!pending) return;
+      entry.pendingRequests.delete(response.request());
+      pending.status = response.status();
+      pending.durationMs = Math.max(0, Date.now() - pending.startedAt);
+      pushRing(entry.networkJournal, { ...pending, failed: false, error: '' }, 'networkDropped');
+    });
+    page.on('requestfailed', (request) => {
+      const pending = entry.pendingRequests.get(request);
+      if (!pending) return;
+      entry.pendingRequests.delete(request);
+      const failure = request.failure() || {};
+      pending.status = 0;
+      pending.durationMs = Math.max(0, Date.now() - pending.startedAt);
+      pending.failed = true;
+      pending.error = String(failure.errorText || 'request failed');
+      pushRing(entry.networkJournal, { ...pending }, 'networkDropped');
+    });
+    // 用户输入监听:exposeBinding 供给回调,init script 每份新文档挂监听;
+    // 已加载的文档再补挂一次(open(new_page=false) 的老页)。
+    page.exposeBinding('__lubanOnUserInput', () => {
+      if (this.agentActing) return; // Agent 自家动作不误记
+      entry.userEpoch += 1;
+      log('user input observed on', id, '-> userEpoch', entry.userEpoch);
+    }).catch(() => { /* 挂不上不拦功能 */ });
+    page.addInitScript(USER_INPUT_WATCH_SCRIPT).catch(() => { /* 同上 */ });
+    page.evaluate(USER_INPUT_WATCH_SCRIPT).catch(() => { /* about:blank 等挂不上就算了 */ });
     page.on('close', () => {
       entry.closed = true;
     });
@@ -449,6 +596,12 @@ class BrowserSession {
       if (!String(snapshotId).startsWith(prefix)) {
         throw toolError('browser.stale_ref', 'ref 已过期(snapshot ' + snapshotId + ',当前页代前缀应为 ' + prefix + ')。页面导航或重启后须重新 browser_snapshot 再动作。');
       }
+      // 用户观察代对表(仲裁第 4 条):快照之后用户在页面上动过手
+      //(手点/按键),旧 ref 一律作废——Agent 重新 snapshot 再动作。
+      const epoch = entry.snapshotEpochs.get(String(snapshotId));
+      if (epoch !== undefined && epoch !== entry.userEpoch) {
+        throw toolError('browser.stale_ref', '用户在页面上动过手(观察代 ' + epoch + ' -> ' + entry.userEpoch + '),snapshot ' + snapshotId + ' 的旧 ref 已过期。重新 browser_snapshot 再动作。');
+      }
     }
     const page = entry.page;
     let selector = null;
@@ -474,6 +627,18 @@ class BrowserSession {
     const asked = Number(options && options.timeoutMs);
     if (!Number.isFinite(asked)) return this.config.defaultActionTimeoutMs;
     return Math.min(Math.max(Math.trunc(asked), 1000), this.config.maxActionTimeoutMs);
+  }
+
+  // Agent 自家的输入动作(click/type/select 的键盘鼠标段)包一层旗:
+  // 期间页面监听到的输入事件不算用户动作,不误递观察代。竞态窗口若仍有
+  // 迟到事件溜进来,只会多递一代——方向是"多一次快照",安全侧。
+  async withAgentInput(job) {
+    this.agentActing = true;
+    try {
+      return await job();
+    } finally {
+      this.agentActing = false;
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -548,6 +713,14 @@ class BrowserSession {
     }
     target.entry.snapshotSeq += 1;
     const snapshotId = target.id + '-g' + target.entry.generation + '-s' + target.entry.snapshotSeq;
+    // 快照记下当时的用户观察代:动作带旧 snapshot_id 时对表,用户动过手
+    // 就明报 stale(仲裁第 4 条)。只留最近 32 份,更老的靠 generation
+    // 前缀校验兜着。
+    target.entry.snapshotEpochs.set(snapshotId, target.entry.userEpoch);
+    if (target.entry.snapshotEpochs.size > 32) {
+      const oldest = target.entry.snapshotEpochs.keys().next().value;
+      target.entry.snapshotEpochs.delete(oldest);
+    }
     const maxChars = Math.min(Math.max(Number(options.maxChars) || 20000, 500), 200000);
     const truncated = yaml.length > maxChars;
     return {
@@ -571,7 +744,7 @@ class BrowserSession {
     if (count === 0) throw toolError('browser.target_not_found', 'ref ' + ref + ' 在当前页面找不到(0 个目标)。页面变了就重新 browser_snapshot。');
     if (count > 1) throw toolError('browser.target_not_unique', 'ref ' + ref + ' 解析到 ' + count + ' 个目标,拒绝乱点第一个。重新 browser_snapshot 拿唯一 ref。');
     const before = target.entry.generation;
-    await withDeadline(locator.click({ timeout: timeoutMs }), timeoutMs, '点击 ' + ref);
+    await this.withAgentInput(() => withDeadline(locator.click({ timeout: timeoutMs }), timeoutMs, '点击 ' + ref));
     // 点击后等"真稳态":framenavigated 异步注册,waitForLoadState 对已
     // 载完的页会立即返回——先给换页一小口气(1.5s 内代数变了才算导航),
     // 再等 domcontentloaded 收尾。
@@ -606,12 +779,12 @@ class BrowserSession {
       isPassword = await locator.evaluate((el) => el instanceof HTMLElement && (el.type === 'password' || el.getAttribute('type') === 'password'));
     } catch (_) { /* 评不了就当普通框 */ }
     if (options.mode === 'type') {
-      await withDeadline(locator.pressSequentially(String(text ?? ''), { timeout: timeoutMs, delay: 10 }), timeoutMs, '逐键输入');
+      await this.withAgentInput(() => withDeadline(locator.pressSequentially(String(text ?? ''), { timeout: timeoutMs, delay: 10 }), timeoutMs, '逐键输入'));
     } else {
-      await withDeadline(locator.fill(String(text ?? ''), { timeout: timeoutMs }), timeoutMs, '填入');
+      await this.withAgentInput(() => withDeadline(locator.fill(String(text ?? ''), { timeout: timeoutMs }), timeoutMs, '填入'));
     }
     if (options.pressEnter) {
-      await withDeadline(locator.press('Enter', { timeout: timeoutMs }), timeoutMs, '按回车');
+      await this.withAgentInput(() => withDeadline(locator.press('Enter', { timeout: timeoutMs }), timeoutMs, '按回车'));
     }
     // 密码值永不出账:typed 只回 '[password]'。
     return {
@@ -677,10 +850,10 @@ class BrowserSession {
       const menu = info.options.map((o) => JSON.stringify(o.value) + '(文本 ' + JSON.stringify(o.label) + ')').join(', ');
       throw toolError('browser.option_not_found', '下拉里按不到:' + missing.join(', ') + '。可选项共 ' + info.options.length + ' 个:' + menu + '。');
     }
-    await withDeadline(
+    await this.withAgentInput(() => withDeadline(
       locator.selectOption(picked.map((o) => ({ value: o.value })), { timeout: timeoutMs }),
       timeoutMs, '选 ' + ref,
-    );
+    ));
     // 选完读回实际选中项:回执以页面为准,不以请求为准。
     const chosen = await withDeadline(
       locator.evaluate((el) => Array.from(el.selectedOptions).map((o) => ({ value: o.value, label: String(o.label || o.text || '').trim() }))),
@@ -799,6 +972,62 @@ class BrowserSession {
       fullPage: Boolean(options.fullPage),
       buffer,
       sha256,
+    };
+  }
+
+  // Console journal 查询(阶段 2):page_id 对账(unknown_page 明报),
+  // 已关页的账仍可查——账在页对象名下,关页不清。since_seq 取"大于"该
+  // 号的条目(断线补账口径);level 过滤(log/info/warning/error/debug/
+  // pageerror);limit 默认 50、帽 500。
+  consoleEntries(pageId, options) {
+    options = options || {};
+    const entry = this.pages.get(String(pageId || ''));
+    if (!entry) {
+      throw toolError('browser.unknown_page', 'page_id "' + pageId + '" 不存在(从未开过或浏览器已重启)。用 browser_tabs 列当前页。');
+    }
+    const sinceSeq = Number(options.sinceSeq) || 0;
+    const limit = Math.min(Math.max(Number(options.limit) || 50, 1), 500);
+    const wantedLevel = options.level ? String(options.level) : '';
+    const rows = entry.consoleJournal.filter((row) => {
+      if (row.seq <= sinceSeq) return false;
+      if (wantedLevel && row.level !== wantedLevel) return false;
+      return true;
+    });
+    return {
+      pageId: String(pageId),
+      rows: rows.slice(-limit),
+      total: entry.consoleJournal.length,
+      dropped: entry.consoleDropped,
+      lastSeq: entry.consoleSeq,
+    };
+  }
+
+  // Network journal 查询(阶段 2):同口径;只记元数据(响应体不收),
+  // url_contains/status 过滤;failed=true 只看失败请求。
+  networkEntries(pageId, options) {
+    options = options || {};
+    const entry = this.pages.get(String(pageId || ''));
+    if (!entry) {
+      throw toolError('browser.unknown_page', 'page_id "' + pageId + '" 不存在(从未开过或浏览器已重启)。用 browser_tabs 列当前页。');
+    }
+    const sinceSeq = Number(options.sinceSeq) || 0;
+    const limit = Math.min(Math.max(Number(options.limit) || 50, 1), 500);
+    const urlContains = options.urlContains ? String(options.urlContains) : '';
+    const wantedStatus = Number(options.status) || 0;
+    const failedOnly = Boolean(options.failedOnly);
+    const rows = entry.networkJournal.filter((row) => {
+      if (row.seq <= sinceSeq) return false;
+      if (urlContains && !row.url.includes(urlContains)) return false;
+      if (wantedStatus && row.status !== wantedStatus) return false;
+      if (failedOnly && !row.failed) return false;
+      return true;
+    });
+    return {
+      pageId: String(pageId),
+      rows: rows.slice(-limit),
+      total: entry.networkJournal.length,
+      dropped: entry.networkDropped,
+      lastSeq: entry.networkSeq,
     };
   }
 

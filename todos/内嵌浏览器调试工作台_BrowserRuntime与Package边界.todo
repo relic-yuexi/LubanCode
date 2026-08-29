@@ -512,12 +512,12 @@ examples/packages/browser-debug/
 
 ### 阶段 2：可见调试 MVP
 
-- [ ] 默认可选 headed 浏览器。
-- [ ] Console journal。
-- [ ] Network journal。
-- [ ] screenshot artifact 进入 App Server 事件。
-- [ ] 前端先画页签账、截图、DOM、Console、Network。
-- [ ] Agent 动作在前端逐项亮出。
+- [x] 默认可选 headed 浏览器。
+- [x] Console journal。
+- [x] Network journal。
+- [x] screenshot artifact 进入 App Server 事件。
+- [x] 前端先画页签账、截图、DOM、Console、Network。
+- [x] Agent 动作在前端逐项亮出。
 
 验收：浏览器虽另开窗，用户已能在 LubanCode 面板里看证据和调试账。
 

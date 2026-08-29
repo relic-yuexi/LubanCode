@@ -29,6 +29,8 @@
 
 `1.0`。任何报文形状变更必须 bump,前端拿 `initialize` 结果里的 `protocolVersion` 对表。
 
+1.0 内有一笔 additive 字段(2026-08 起):`item/completed` 可带可选 `images` 数组——MCP 富结果图片(截图一类)的元数据与 `artifact` 引用,不带 base64。只加字段、不改不删既有字段,老前端照旧;浏览器方法与事件面(须 bump)在可见调试单阶段 3 统一升版。
+
 ## 方法面
 
 ### 握手与退场
@@ -80,7 +82,7 @@
 | `turn/started` | `threadId, turnId`。 |
 | `item/started` | `params.item`: `{id, type, ...}`。工具条目带 `tool`/`toolUseId`/`input`;`write_file`/`edit_file` 额外带 `diff`(见下);`run_command` 的 type 是 `command`。 |
 | `item/delta` | `itemId, delta`(正文/思考/输出的增量)。 |
-| `item/completed` | `params.item`: 终态字段(`result`/`isError`;打断收口的带 `cancelled`)。 |
+| `item/completed` | `params.item`: 终态字段(`result`/`isError`;打断收口的带 `cancelled`)。工具富结果带图(截图一类)时另带 `images` 数组:每项 `{mime_type, width, height, bytes, sha256, artifact:{id, filename, path, mime_type, bytes, sha256, stored}}`——只递 artifact 引用不递 base64,前端点开的图与模型看的图指向同一 artifact。 |
 | `turn/usage` | 每次到模型的请求收尾:`usage`(五项 camelCase,与 `turn/completed` 的 usage 同形)、`model`。 |
 | `turn/context` | 上下文压力:`context.phase`(pre_request/after_hard_trim)、`projectedTokens`、`windowTokens` 等。前端画水位条吃这个。 |
 | `turn/completed` | 唯一终态:`status`(success/error/cancelled/interrupted)、`usage`、`stepsUsed`;error 时带 `error` 文案。 |
