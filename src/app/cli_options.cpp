@@ -125,6 +125,52 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             options.continue_last = true;
             continue;
         }
+        // WS 承载(app-server 子命令的修饰):值是 <port> 或 <host>:<port>。
+        // 这里只查形状(端口 1..65535 的数字;host 留给装配层的 bind 去验),
+        // "没配 app-server 子命令"的跨参数规矩归 RunCli。
+        if (arg == "--app-server-ws") {
+            if (i + 1 >= args.size()) {
+                parsed.action = CliAction::BadAppServerWs;
+                parsed.error_text = "--app-server-ws 需要一个值:<端口> 或 <主机>:<端口>";
+                return parsed;
+            }
+            const std::string& value = args[++i];
+            const std::size_t colon = value.rfind(':');
+            const std::string port_text =
+                colon == std::string::npos ? value : value.substr(colon + 1);
+            bool port_ok = !port_text.empty() && port_text.size() <= 5;
+            int port = 0;
+            for (const char digit : port_text) {
+                if (digit < '0' || digit > '9') {
+                    port_ok = false;
+                    break;
+                }
+                port = port * 10 + (digit - '0');
+            }
+            if (port_ok && (port < 1 || port > 65535)) {
+                port_ok = false;
+            }
+            if (colon != std::string::npos && (colon == 0 || colon == value.size() - 1)) {
+                port_ok = false; // ":9001" / "host:" 这类半截
+            }
+            if (!port_ok) {
+                parsed.action = CliAction::BadAppServerWs;
+                parsed.error_text =
+                    "--app-server-ws 认不得 \"" + value + "\":要 <端口> 或 <主机>:<端口>(1-65535)";
+                return parsed;
+            }
+            options.app_server_ws_bind = value;
+            continue;
+        }
+        if (arg == "--app-server-ws-token") {
+            if (i + 1 >= args.size()) {
+                parsed.action = CliAction::BadAppServerWs;
+                parsed.error_text = "--app-server-ws-token 需要一个 token 值";
+                return parsed;
+            }
+            options.app_server_ws_token = args[++i];
+            continue;
+        }
         if (arg == "--version") {
             parsed.action = CliAction::PrintVersion;
             return parsed;

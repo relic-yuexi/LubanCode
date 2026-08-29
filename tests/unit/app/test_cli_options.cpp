@@ -260,3 +260,43 @@ TEST_CASE("标题带空格的引用:多词并成一个引用") {
     CHECK(parsed.action == CliAction::ManageSession);
     CHECK(parsed.session_command.session_ref == "房甲 的场");
 }
+
+// ---------------------------------------------------------------------------
+// WS 承载旗标(多前端外壳单阶段 A):app-server 子命令的修饰
+// ---------------------------------------------------------------------------
+
+TEST_CASE("--app-server-ws:裸端口与 host:port 落位,坏值当场退") {
+    // 裸端口:默认回环绑定。
+    const auto port_only = ParseCliArgs(Args({"lubancode", "app-server", "--app-server-ws", "9001"}));
+    CHECK(port_only.action == CliAction::Proceed);
+    CHECK(port_only.options.app_server);
+    CHECK(port_only.options.app_server_ws_bind == "9001");
+
+    // host:port:显式给非回环地址(装配层要 token)。
+    const auto host_port =
+        ParseCliArgs(Args({"lubancode", "app-server", "--app-server-ws", "0.0.0.0:9001"}));
+    CHECK(host_port.action == CliAction::Proceed);
+    CHECK(host_port.options.app_server_ws_bind == "0.0.0.0:9001");
+
+    // token 修饰:显式启用首帧门。
+    const auto with_token = ParseCliArgs(
+        Args({"lubancode", "app-server", "--app-server-ws", "9001", "--app-server-ws-token", "t0"}));
+    CHECK(with_token.action == CliAction::Proceed);
+    CHECK(with_token.options.app_server_ws_token == "t0");
+
+    // 坏值:缺值/非数字/越界/半截。
+    CHECK(ParseCliArgs(Args({"lubancode", "app-server", "--app-server-ws"})).action ==
+          CliAction::BadAppServerWs);
+    CHECK(ParseCliArgs(Args({"lubancode", "app-server", "--app-server-ws", "nine"})).action ==
+          CliAction::BadAppServerWs);
+    CHECK(ParseCliArgs(Args({"lubancode", "app-server", "--app-server-ws", "0"})).action ==
+          CliAction::BadAppServerWs);
+    CHECK(ParseCliArgs(Args({"lubancode", "app-server", "--app-server-ws", "70000"})).action ==
+          CliAction::BadAppServerWs);
+    CHECK(ParseCliArgs(Args({"lubancode", "app-server", "--app-server-ws", ":9001"})).action ==
+          CliAction::BadAppServerWs);
+    CHECK(ParseCliArgs(Args({"lubancode", "app-server", "--app-server-ws", "host:"})).action ==
+          CliAction::BadAppServerWs);
+    CHECK(ParseCliArgs(Args({"lubancode", "app-server", "--app-server-ws-token"})).action ==
+          CliAction::BadAppServerWs);
+}

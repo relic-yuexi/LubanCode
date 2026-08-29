@@ -701,6 +701,11 @@ add_library(lubancode_app STATIC
   # 可见调试阶段 3:browser/* 方法面——sidecar 进程管理、RPC 配对、
   # 事件转发、审批与取消、截图 artifact。
   src/app_server/browser_service.cpp
+  # 多前端外壳单阶段 A:WS 承载——纯函数帧编解码、跨平台 socket 薄层、
+  # 监听/升级/首帧 token 门(同一条 protocol/dispatcher 线)。
+  src/app_server/ws_frames.cpp
+  src/app_server/ws_sockets.cpp
+  src/app_server/ws_transport.cpp
   src/app/commands/prompt_commands.cpp
   src/app/commands/session_commands.cpp
   src/app/commands/settings_commands.cpp
@@ -752,6 +757,10 @@ add_library(lubancode_app STATIC
   src/cli/spinner_backend.cpp
   src/cli/record_command.cpp)
 target_link_libraries(lubancode_app PUBLIC lubancode_core)
+# WS 承载的 socket 层在 Windows 走 Winsock2(POSIX 不加东西)。
+if(WIN32)
+  target_link_libraries(lubancode_app PUBLIC ws2_32)
+endif()
 target_compile_features(lubancode_app PUBLIC cxx_std_23)
 target_precompile_headers(lubancode_app PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")

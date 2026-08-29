@@ -16,6 +16,13 @@ struct CliOptions {
     bool print_config = false;      // --config
     bool continue_last = false;     // --continue
     bool app_server = false;        // app-server 子命令:无界面后台协议(stdio)
+    // WS 承载(多前端外壳单阶段 A):--app-server-ws <port | host:port>,
+    // 只在 app-server 子命令下有效(RunCli 守)。空 = stdio 承载。裸端口
+    // 绑回环;host:port 显式给非回环地址须配 token(装配层拒)。
+    std::string app_server_ws_bind;
+    // --app-server-ws-token <token>:显式 token,启用首帧门;不 给 则 看
+    // LUBANCODE_APPSERVER_TOKEN(装配层)。token 不进任何日志。
+    std::string app_server_ws_token;
     std::string system_prompt_file_arg;  // --system-prompt <文件>(空 = 没给)
     // Plan 模式单:--mode plan(只认 "plan";"default" 等价没给)。非法值
     // 在解析层就退 BadMode——认不得的值报错,不静默落回 Default(单子:
@@ -70,6 +77,7 @@ enum class CliAction {
     ManageSession,            // archive/unarchive/delete 子命令
     BadMode,                  // --mode 认不得:人话已塞进 error_text(Plan 单)
     BadPackageDir,            // --package-dir 缺值:人话已塞进 error_text(Package 单)
+    BadAppServerWs,           // --app-server-ws[-token] 参数不对:人话在 error_text(WS 承载单)
     RunEvolveTest,            // evolve test 子命令:跑候选评测后退(自进化阶段 3)
     BadEvolveTest,            // evolve test 参数不对:人话已塞进 error_text
 };

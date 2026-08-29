@@ -61,6 +61,11 @@ public:
     // 连接是否已收线(测试断言用)。
     bool closed() const { return closed_.load(); }
 
+    // 对端是否以 exit/shutdown 收的线(dispatcher 置的 close_connection)。
+    // WS 承载靠它分"纯断线(进程活着等重连)"与"exit(整场收线)";stdio
+    // 不用分,EOF 一律收场。
+    bool close_requested() const { return close_requested_.load(); }
+
 private:
     // 处理一行入站:解析、路由、把产出推进出站队列。坏 JSON 回稳定
     // 错误码(kErrParseError,null id),不崩、不死锁、不撞死服务。
@@ -73,6 +78,7 @@ private:
     LineFramer framer_;
     std::function<std::string(const IncomingResponse&)> resolve_interaction_;
     std::atomic<bool> closed_{false};
+    std::atomic<bool> close_requested_{false};
 };
 
 // 生产实现的 writer/stdout:一行 + '\n' + flush。返回 false 表示 stdout
