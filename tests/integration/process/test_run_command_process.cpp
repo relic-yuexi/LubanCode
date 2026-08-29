@@ -424,7 +424,8 @@ TEST_CASE("background(POSIX): 后台 exit 7 稳定报 7,不再偶发 Completed/0
     REQUIRE(bg.success);
     REQUIRE(bg.handle != nullptr);
 
-    const std::string task_id = reg.Register("exit 7", "sh", bg.pid, bg.log_path, bg.handle);
+    const std::string task_id =
+        reg.Register("exit 7", "sh", /*cwd=*/".", bg.pid, bg.log_path, bg.handle);
 
     const bool finished = WaitUntil(
         [&] {
@@ -453,7 +454,7 @@ TEST_CASE("background(POSIX): 快进程连起数百枚,每枚都进终态,无永
         // 那枚 P0 竞态(修前次序是先起线程后进表)。
         const auto bg = lubancode::platform::RunShellCommandBackground("true");
         REQUIRE(bg.success);
-        task_ids.push_back(reg.Register("true", "sh", bg.pid, bg.log_path, bg.handle));
+        task_ids.push_back(reg.Register("true", "sh", /*cwd=*/".", bg.pid, bg.log_path, bg.handle));
     }
     const bool all_terminal = WaitUntil(
         [&] {
@@ -486,7 +487,8 @@ TEST_CASE("background(POSIX): Stop 收掉整棵树(根、子、孙),孙进程真
         "sleep 30 & sleep 30 & wait");
     REQUIRE(bg.success);
     REQUIRE(bg.handle != nullptr);
-    const std::string task_id = reg.Register("sleep tree", "sh", bg.pid, bg.log_path, bg.handle);
+    const std::string task_id =
+        reg.Register("sleep tree", "sh", /*cwd=*/".", bg.pid, bg.log_path, bg.handle);
 
     // 给 sh 一拍把两个子进程拉起来。
     std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -523,7 +525,8 @@ TEST_CASE("background(POSIX): ReadOutput 尾读从换行边界起刀,半行加�
         std::ofstream file(log_path, std::ios::binary);
         file << content;
     }
-    const std::string task_id = reg.Register("tail probe", "sh", /*pid=*/1, log_path);
+    const std::string task_id =
+        reg.Register("tail probe", "sh", /*cwd=*/".", /*pid=*/1, log_path);
 
     const std::string tail = reg.ReadOutput(task_id, /*tail_lines=*/0);
     CHECK(tail.find("[日志前部已省略]") != std::string::npos);
@@ -545,7 +548,8 @@ TEST_CASE("background(POSIX): ReadOutput 坏 UTF-8 日志清洗后出口合法")
         std::ofstream file(log_path, std::ios::binary);
         file << bad;
     }
-    const std::string task_id = reg.Register("bad utf8", "sh", /*pid=*/1, log_path);
+    const std::string task_id =
+        reg.Register("bad utf8", "sh", /*cwd=*/".", /*pid=*/1, log_path);
     const std::string out = reg.ReadOutput(task_id, 0);
     CHECK(lubancode::platform::IsValidUtf8(out));
     CHECK(out.find("tail-end") != std::string::npos);
@@ -691,8 +695,8 @@ TEST_CASE("background(POSIX): max_runtime_ms 到点自动收树,状态进 Stoppe
     const auto bg = lubancode::platform::RunShellCommandBackground("sleep 30");
     REQUIRE(bg.success);
     // 1 秒的墙:到点收树,不再等 30 秒,也不改 timeout_ms 旧义。
-    const std::string task_id = reg.Register("sleep 30", "sh", bg.pid, bg.log_path, bg.handle,
-                                             /*max_runtime_ms=*/1000);
+    const std::string task_id = reg.Register("sleep 30", "sh", /*cwd=*/".", bg.pid, bg.log_path,
+                                             bg.handle, /*max_runtime_ms=*/1000);
     const bool stopped = WaitUntil(
         [&] {
             const auto info = reg.Get(task_id);
