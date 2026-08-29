@@ -25,6 +25,18 @@ enum class CommandSafety { Safe, NeedsConfirm };
 // 工具的 shell 参数同一套语义)。别的 shell 值一律 NeedsConfirm。
 CommandSafety ClassifyCommand(const std::string& command, const std::string& shell);
 
+// 段内引号外有没有 PowerShell 脚本块起始 {(原是 plan_mode 的私有件,P2-3
+// 单落的;下沉到这儿与分档逻辑同一份,别写第二份):脚本块体内是任意代码
+// (Where-Object { Remove-Item x } 照样逐条执行),静态证明不了无害。segment
+// 是按分隔符拆好的段;single_quotes 语义同上(单引号算不算引号)。
+bool HasUnquotedScriptBlock(const std::string& segment, bool single_quotes);
+
+// 整条命令逐段查(段拆分与 ClassifyCommand 同一套):有没有引号外的
+// PowerShell 脚本块。给不走 ClassifyCommand 分档的调用方(Auto 档的
+// 放行账 allow_commands 直通)借这道闸。非 PowerShell shell 恒 false
+// (cmd 的 { } 无执行语义)。
+bool CommandHasUnquotedScriptBlock(const std::string& command, const std::string& shell);
+
 // 隔离的 git 改道闸(纯静态,单测直接钉):住在 worktree 房里的会话,命令串
 // 若把 git 指回主 checkout——git -C <主树> / --git-dir=<主树\.git> /
 // --work-tree=<主树> / GIT_DIR、GIT_WORK_TREE 环境变量赋值 / cd <主树> 后

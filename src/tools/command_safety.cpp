@@ -18,6 +18,9 @@
 //      Tee-Object 出现在段内任何位置同罪。
 //   4. 子表达式即不安全:单引号外出现 $( 一律 NeedsConfirm——powershell
 //      的 "$(rm x)" 在双引号里照样执行,echo 打头也拦不住它。
+//   4.5 PowerShell 脚本块即不安全:引号外出现 { 一律 NeedsConfirm——
+//      where-object { del x } 的 { } 体内是任意代码,黑名单只查首词
+//      拦不住体内动词(与 Plan 档同一道闸,HasUnquotedScriptBlock)。
 //   5. 首词判定:剥前导空白、剥路径前缀取文件名、剥 .exe/.bat/.cmd/.com
 //      扩展、小写化,先过黑名单(黑名单压过一切),再看探版
 //      (后面只跟 --version/-v/--help 的放行),再查白名单。
@@ -211,6 +214,11 @@ CommandSafety ClassifySegment(const std::string& segment, bool is_powershell, bo
     if (HasUnquotedRedirection(segment, single_quotes) || HasSubexpression(segment, single_quotes)) {
         return CommandSafety::NeedsConfirm;
     }
+    // 脚本块体内是任意代码,黑名单只查首词证明不了它无害——含未引用
+    // 脚本块整段不得判 Safe(保守路,别名无穷没法按体内动词细判)。
+    if (is_powershell && HasUnquotedScriptBlock(segment, single_quotes)) {
+        return CommandSafety::NeedsConfirm;
+    }
 
     const std::vector<std::string> tokens = Tokenize(segment, single_quotes);
     if (tokens.empty()) {
@@ -284,6 +292,31 @@ CommandSafety ClassifySegment(const std::string& segment, bool is_powershell, bo
 
 }  // namespace
 
+// 引号外有没有 PowerShell 脚本块起始 {(原是 plan_mode 的私有件,P2-3 单
+// 落的;下沉到这儿与分档逻辑同一份,别写第二份):脚本块体内是任意代码
+// (Where-Object { Remove-Item x } 照样逐条执行),静态证明不了无害;引号
+// 里的 { 不算(引号状态机),无脚本块的简化写法(Where-Object Name -eq
+// 'x')不受影响。cmd 的 { } 没有执行语义,调用方自行按 shell 分流。
+bool HasUnquotedScriptBlock(const std::string& segment, bool single_quotes) {
+    char quote = '\0';
+    for (const char c : segment) {
+        if (quote != '\0') {
+            if (c == quote) {
+                quote = '\0';
+            }
+            continue;
+        }
+        if (c == '"' || (single_quotes && c == '\'')) {
+            quote = c;
+            continue;
+        }
+        if (c == '{') {
+            return true;
+        }
+    }
+    return false;
+}
+
 CommandSafety ClassifyCommand(const std::string& command, const std::string& shell) {
     const bool is_powershell = (shell == "powershell" || shell == "pwsh");
     if (!is_powershell && shell != "cmd") {
@@ -307,6 +340,19 @@ CommandSafety ClassifyCommand(const std::string& command, const std::string& she
     }
     // 空串/纯空白(一段都没有)→ NeedsConfirm。
     return any_segment ? CommandSafety::Safe : CommandSafety::NeedsConfirm;
+}
+
+bool CommandHasUnquotedScriptBlock(const std::string& command, const std::string& shell) {
+    const bool is_powershell = (shell == "powershell" || shell == "pwsh");
+    if (!is_powershell) {
+        return false;  // cmd 的 { } 没有执行语义,不查
+    }
+    for (const std::string& segment : SplitSegments(command, /*single_quotes=*/true)) {
+        if (HasUnquotedScriptBlock(segment, /*single_quotes=*/true)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // ---------------------------------------------------------------------------

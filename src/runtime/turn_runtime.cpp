@@ -54,8 +54,11 @@ PermissionVerdict EvaluatePermission(const PermissionContext& context, const run
     bool safe_command = false;
     if (context.mode == PermissionMode::Auto && name == "run_command" && !deny_hit) {
         // allow_commands 命中 → auto 档等价 command_safety 的 Safe(补白名单)。
-        safe_command = tools::ClassifyCommand(command, shell) == tools::CommandSafety::Safe ||
-                       perm == config::CommandPermission::Allow;
+        // PowerShell 脚本块例外:{ } 体内是任意代码,白名单与放行账都证明
+        // 不了它无害,一律拉回确认(与 command_safety 分档同一道闸)。
+        safe_command = !tools::CommandHasUnquotedScriptBlock(command, shell) &&
+                       (tools::ClassifyCommand(command, shell) == tools::CommandSafety::Safe ||
+                        perm == config::CommandPermission::Allow);
     }
     // PreToolUse 钩子的表态参与裁决:deny_hit(策略黑名单)最高;钩子
     // allow 只跳"问用户"这一步;钩子 ask 把"本来自动放行"拉回确认。
