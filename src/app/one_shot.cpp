@@ -190,6 +190,16 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
                                                          lubancode::platform::OfficialSkillsDir())) {
         package_input.external.skills.insert(meta.name);
     }
+    // 信任账的只读快照(阶段 4),与交互会话同一出入口;单发一场即一会话,
+    // 同样钉住。
+    if (const auto trust_path = lubancode::package::PackageTrustStore::DefaultStorePath();
+        trust_path.has_value()) {
+        auto [trust_store, trust_error] = lubancode::package::PackageTrustStore::Load(trust_path);
+        if (trust_error.has_value()) {
+            std::cerr << "[package] " << *trust_error << "\n";
+        }
+        package_input.trust = trust_store.Snapshot();
+    }
     const lubancode::package::PackageMount package_mount =
         lubancode::package::BuildPackageMount(package_input);
     const std::vector<lubancode::tools::SkillMeta> skills = lubancode::tools::LoadSkills(

@@ -22,7 +22,7 @@
 #include <windows.h>
 #endif
 
-#include "hooks/hash.hpp"
+#include "platform/dir_fingerprint.hpp"  // FileSha256Hex/PackageLedgerFingerprintV1
 #include "platform/paths.hpp"
 
 namespace lubancode::package {
@@ -577,26 +577,27 @@ PackageInventory BuildPackageInventory(const PackageCandidate& candidate, const 
              manifest_error.has_value() ? manifest_error->Format() : "根清单缺失"});
     }
 
-    // 文件账 + 内容哈希(先盘文件,哈希吃全账)。
+    // 文件账 + 内容哈希(先盘文件,哈希吃全账)。材料拼法与逐文件 sha256
+    // 走 platform/dir_fingerprint 的共用底座(阶段 4:Package 与 Plugin 同
+    // 一把尺,v1 材料冻着)。
     std::vector<InventoryFile> files;
     CollectFiles(candidate.package_root, files, inventory.diagnostics);
-    std::ostringstream hash_input;
-    hash_input << "luban-package-v1\n";
+    std::vector<platform::LedgerFile> ledger;
+    ledger.reserve(files.size());
     for (InventoryFile& file : files) {
-        const auto bytes = ReadFileBytes(candidate.package_root / Utf8ToPath(file.rel));
-        if (!bytes.has_value()) {
+        file.hash = platform::FileSha256Hex(candidate.package_root / Utf8ToPath(file.rel));
+        if (file.hash.empty()) {
             inventory.diagnostics.push_back({PackageDiagnostic::Kind::Error, file.rel, "读不动,不进哈希"});
             file.hash = "(unreadable)";
             continue;
         }
-        file.hash = hooks::Sha256Hex(*bytes);
-        hash_input << file.rel << '\t' << file.size << '\t' << file.hash << '\n';
+        ledger.push_back(platform::LedgerFile{file.rel, file.size, file.hash});
         ++inventory.total_file_count;
         if (file.code_bearing) ++inventory.code_bearing_file_count;
         if (file.rel.rfind("assets/", 0) == 0) ++inventory.assets_file_count;
         if (file.rel.rfind("docs/", 0) == 0) ++inventory.docs_file_count;
     }
-    inventory.content_hash = hooks::Sha256Hex(hash_input.str());
+    inventory.content_hash = platform::PackageLedgerFingerprintV1(ledger);
 
     CollectComponents(candidate.package_root, inventory.package_id, inventory);
     CollectTopLevel(candidate.package_root, inventory);

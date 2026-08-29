@@ -45,7 +45,7 @@ struct ComponentSourceRoot {
     std::string package_id;       // 解析失败时可能为空
     std::string package_version;  // 原文;没写为空
     std::string content_hash;     // 包内容哈希(阶段 1 盘点出的那份)
-    bool trusted_for_code = false;  // 阶段 4 之前恒 false
+    bool trusted_for_code = false;  // 阶段 4:整包信任门已过(免审层或账上有这枚哈希)
 };
 
 // 一条组件级诊断:从顶层 Package 一路指到文件、行、字段(单子阶段 2 清

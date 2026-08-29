@@ -86,8 +86,10 @@ struct PluginScanResult {
 PluginScanResult ScanPluginDirectories(const std::filesystem::path& dir);
 
 // 项目插件的内容指纹:插件目录里全部常规文件(排序稳定)的相对路径 +
-// 字节,过 SHA-256(实现复用 hooks/hash)。任一文件改了指纹就变,信任
-// 失效须重审(单子「零配置与兼容」:首次见到须按 manifest + 文件 hash 信任)。
+// 字节,过 SHA-256。任一文件改了指纹就变,信任失效须重审(单子「零配置
+// 与兼容」:首次见到须按 manifest + 文件 hash 信任)。实现是
+// platform/dir_fingerprint 的 PluginDirFingerprintV1——统一封装单阶段 4 起
+// Package 与 Plugin 同一把尺,材料格式各自冻结。
 std::expected<std::string, std::string> ComputePluginContentHash(const std::filesystem::path& plugin_dir);
 
 // 项目级插件扫描(plugins 单第 8 步):扫 <project>/.lubancode/plugins/,

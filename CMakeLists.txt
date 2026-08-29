@@ -317,6 +317,9 @@ add_library(lubancode_engine STATIC
   src/platform/terminal_batch.cpp
   src/platform/text_encoding.cpp
   src/platform/json_safe.cpp
+  # 统一 Package 封装单阶段 4:目录内容指纹的共用底座(Plugin 与 Package
+  # 同一把尺,两把 v1 材料各自冻结)。
+  src/platform/dir_fingerprint.cpp
   src/api/sse_framing.cpp
   src/api/http_stream_transport.cpp  # 批六:四家 wire client 共用的 cpr 传输骨架
   src/api/anthropic/client.cpp
@@ -623,6 +626,9 @@ add_library(lubancode_core STATIC
   # 统一 Package 封装单阶段 3:会话钉快照(PackageMount)与四类内容组件
   # (Skill/Workflow/Agent/Prompt Profile)的挂载材料折算。
   src/package/mounting.cpp
+  # 统一 Package 封装单阶段 4:Package 信任门(PackageTrustStore + 审批
+  # 材料与账务;指纹底座在 platform/dir_fingerprint)。
+  src/package/trust.cpp
   # 自进化闭环阶段 1:EvolutionObservation、五路只读 adapter、指纹归一、
   # 采集器与只追加观察账(纯逻辑,复用 skills/journal 的既有脱敏)。
   src/evolution/observation.cpp

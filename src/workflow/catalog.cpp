@@ -239,6 +239,12 @@ Catalog LoadCatalog(const std::optional<std::filesystem::path>& project_root,
         entry.definition = source.definition;
         entry.content_hash = source.content_hash;
         entry.package_id = source.package_id;
+        if (!source.available) {
+            // 阶段 4 连坐:依赖未信任 code 组件——条目登册,状态 broken,
+            // run 一趟就拦下并把缘由摆出来(不静默放行也不静默卸载)。
+            entry.broken = true;
+            entry.issues.push_back(ParseIssue{"package.trust", source.unavailable_reason});
+        }
         catalog.entries.push_back(std::move(entry));
     }
     // 项目在前,稳住 Find 的顺序假设;包层垫底(座次见枚举注释)。

@@ -102,6 +102,17 @@ lubancode::package::PackageMount BuildSessionPackageMount(const lubancode::confi
                                                          lubancode::platform::OfficialSkillsDir())) {
         input.external.skills.insert(meta.name);
     }
+    // 信任账的只读快照(阶段 4):启动折一份钉进会话——批准/销账是运行中
+    // 的事,本会话的门禁不变,重启才见。读不动警告 + 空白续(谁都没批,
+    // code 件一律待信任,拦得住)。
+    if (const auto path = lubancode::package::PackageTrustStore::DefaultStorePath();
+        path.has_value()) {
+        auto [store, load_error] = lubancode::package::PackageTrustStore::Load(path);
+        if (load_error.has_value()) {
+            TermOut() << "[package] " << *load_error << "\n";
+        }
+        input.trust = store.Snapshot();
+    }
     return lubancode::package::BuildPackageMount(input);
 }
 

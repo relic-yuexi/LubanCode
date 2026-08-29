@@ -43,6 +43,10 @@ struct PackagedAgentEntry {
     std::string package_id;                  // 来源包(展示"/agents 带来源包")
     AgentDefinition definition;              // name 保持 local 人话;引用已折 canonical
     std::string file_utf8;                   // agents/<local>.yaml 的 UTF-8 全路径
+    // 阶段 4 连坐:引用的包内 Plugin/MCP 未过信任门时 false,Catalog 里
+    // unavailable 并注明缘由(登记不是放行,依赖也不是可用)。
+    bool available = true;
+    std::string unavailable_reason;
 };
 
 // Catalog 里的一条:一个名字的最终归属。definition 缺席(解析失败/重名

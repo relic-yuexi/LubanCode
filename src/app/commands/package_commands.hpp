@@ -1,7 +1,7 @@
-// /package 命令(统一 Package 封装单阶段 1):list/show/doctor 只读版。
-// 只查只诊,不挂任何组件——trust/enable/disable/scaffold 等写动作是后
-// 续阶段的事,这里不冒头。命令参数拆解是纯函数,单测直接钉;IO(扫描、
-// 打印)在 cpp 的 handler 一头。
+// /package 命令(统一 Package 封装单阶段 1/4):list/show/doctor 只读版 +
+// trust/untrust 信任门(阶段 4:批的是整包内容哈希,重启生效)。enable/
+// disable/scaffold 等写动作仍是后续阶段的事。命令参数拆解是纯函数,单测
+// 直接钉;IO(扫描、打印、信任账)在 cpp 的 handler 一头。
 #pragma once
 
 #include "app/commands/command_flow.hpp"  // CommandFlow(分派注册制)
@@ -20,6 +20,8 @@ enum class PackageCommandAction {
     List,    // /package list [all|user|project|official|dev]
     Show,    // /package show <id>
     Doctor,  // /package doctor <id|路径>
+    Trust,   // /package trust <id>(批准整包内容哈希,重启生效)
+    Untrust, // /package untrust <id>(销账)
 };
 
 struct ParsedPackageCommand {

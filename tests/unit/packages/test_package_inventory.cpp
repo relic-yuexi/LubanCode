@@ -449,7 +449,7 @@ TEST_CASE("命令.参数解析") {
     }
     {
         const auto parsed = lubancode::app::ParsePackageCommand("trust a.b");
-        CHECK(parsed.action == lubancode::app::PackageCommandAction::Invalid);
-        CHECK(parsed.bad_word == "trust");  // 阶段 1 没有 trust,明说不认
+        CHECK(parsed.action == lubancode::app::PackageCommandAction::Trust);  // 阶段 4 起收
+        CHECK(parsed.target == "a.b");
     }
 }

@@ -306,6 +306,7 @@ Plugin 与 MCP 能起进程、读环境变量、访问网络。扫到目录便�
 
 - 用户级 Package：用户亲手放进 `~/.lubancode/packages/`，待遇同现有用户插件，视作已安装来源。`inspect` 仍须亮出命令与权限。
 - 项目级 Package：代码组件先过 Package 内容指纹信任门。未信任时整包仍可发现、可检查；代码组件一个不启动，依赖它们的 Agent、Workflow 标 unavailable。
+- 官方与 dev 层（`--package-dir`）：官方视同已安装来源；dev 是外来源码目录，与项目级同样过门。
 
 批准一只 Package 时须亮出：
 
@@ -317,6 +318,19 @@ Plugin 与 MCP 能起进程、读环境变量、访问网络。扫到目录便�
 - 将新增的工具名（wire 名与展示名并列）。
 
 文件改一个字节，哈希就变，旧信任失效，须重批。
+
+### 7.1 信任账（阶段 4 落地口径）
+
+批准记录落 `<home>/.lubancode/package-trust.json`（与 plugin-trust.json 同惯例，绝不写回包目录）。一条记录绑四样：package id、version、整包内容哈希（阶段 1 的盘点算法，与 Plugin 指纹同一把底座）、何时批的。比对只认 id + 哈希——version 在 package.yaml 里，package.yaml 在哈希里，版本变哈希必变。
+
+命令面（`/package` 的子命令，不新增斜杠命令）：
+
+```text
+/package trust <id>   亮全份审批材料（五样回执）后落账；幂等
+/package untrust <id> 销该包全部批准（含哈希已对不上的陈账）
+```
+
+批准重启后生效——会话启动时折一份只读信任快照钉住，运行中批/销不换本会话的账（与 §9 的会话钉快照同语义）。未过门时：content 组件照挂；code 组件一件不挂不执行；引用包内 Plugin/MCP 的 Agent 标 unavailable（`/agents` 注明缘由），直接引工具或依赖此类 Agent 的 Workflow 同理（Catalog 里 broken 注缘由）。哈希对不上（文件动过）视同未信任：拦下并指路重批，不静默放行也不静默卸载；把文件改回去，旧账自然重新对上。
 
 ## 8. 整包成，整包败
 

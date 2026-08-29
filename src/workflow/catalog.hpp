@@ -42,6 +42,10 @@ struct PackagedWorkflowSource {
     std::string package_id;          // 来源包(展示用)
     WorkflowDefinition definition;   // id 已换成 canonical;文件引用原样(相对 dir)
     std::string content_hash;
+    // 阶段 4 连坐:依赖未信任 code 组件(直接引工具,或经 unavailable 的
+    // Agent)时 false——Catalog 里 broken + issues 注缘由,跑不起来。
+    bool available = true;
+    std::string unavailable_reason;
 };
 
 // 一份已装载的定义条目。

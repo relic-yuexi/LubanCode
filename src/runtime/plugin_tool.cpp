@@ -17,6 +17,7 @@
 #include "agent/model_image_store.hpp"  // DecodeBase64Strict/SniffImageFormat/ReadImageDimensions
 #include "hooks/hash.hpp"
 #include "mcp/rich_result.hpp"          // kMaxImageBlockBytes/kMaxCallBinaryBytes/LandToolArtifact
+#include "platform/dir_fingerprint.hpp"  // PluginDirFingerprintV1(指纹共用底座)
 #include "platform/paths.hpp"
 #include "platform/process.hpp"  // RunProcessWithStdin(/plugin test 的自测进程)
 #include "platform/text_encoding.hpp"
@@ -309,54 +310,10 @@ PluginScanResult ScanPluginDirectories(const std::filesystem::path& dir) {
 // 项目插件:内容指纹 + 信任门(plugins 单第 8 步)
 // ---------------------------------------------------------------------------
 
-namespace {
-
-// 插件目录里的全部常规文件(相对路径,排序钉死顺序——枚举次序随文件系统
-// 心情,指纹与文件数都要跨进程稳定)。指纹材料与概要的文件数共用这一次
-// 收账,不各走各的。
-std::expected<std::vector<std::filesystem::path>, std::string> CollectPluginFiles(
-    const std::filesystem::path& plugin_dir) {
-    std::error_code ec;
-    if (!std::filesystem::is_directory(plugin_dir, ec)) {
-        return std::unexpected("插件目录不存在: " + platform::PathToUtf8(plugin_dir));
-    }
-    std::vector<std::filesystem::path> files;
-    for (const auto& entry : std::filesystem::recursive_directory_iterator(plugin_dir, ec)) {
-        if (ec) {
-            break;
-        }
-        std::error_code file_ec;
-        if (!entry.is_regular_file(file_ec) || file_ec) {
-            continue;  // 子目录/坏项:只哈希文件字节
-        }
-        files.push_back(std::filesystem::relative(entry.path(), plugin_dir, file_ec));
-    }
-    std::sort(files.begin(), files.end(), [](const auto& left, const auto& right) {
-        return platform::PathToUtf8(left) < platform::PathToUtf8(right);
-    });
-    return files;
-}
-
-}  // namespace
-
 std::expected<std::string, std::string> ComputePluginContentHash(const std::filesystem::path& plugin_dir) {
-    const auto files = CollectPluginFiles(plugin_dir);
-    if (!files.has_value()) {
-        return std::unexpected(files.error());
-    }
-    // 相对路径 + 字节全部喂进同一口锅:改名/改内容/添删文件都变指纹。
-    std::string material;
-    for (const auto& file : *files) {
-        material += platform::PathToUtf8(file);
-        material += '\0';
-        std::ifstream in(plugin_dir / file, std::ios::binary);
-        if (!in.is_open()) {
-            return std::unexpected("读不到文件: " + platform::PathToUtf8(plugin_dir / file));
-        }
-        material.append((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        material += '\0';
-    }
-    return hooks::Sha256Hex(material);
+    // 指纹底座抽到 platform/dir_fingerprint(统一封装单阶段 4:Package 与
+    // Plugin 同一把尺),v1 材料冻着,行为一字不动。
+    return platform::PluginDirFingerprintV1(plugin_dir);
 }
 
 PluginScanResult ScanProjectPluginDirectories(const std::filesystem::path& project_dir,
@@ -413,7 +370,9 @@ std::vector<ProjectPluginTrustInfo> CollectProjectPluginTrustInfo(
         ProjectPluginTrustInfo info;
         info.manifest = manifest;
         info.dir_utf8 = platform::PathToUtf8(manifest->plugin_dir);
-        const auto files = CollectPluginFiles(manifest->plugin_dir);
+        // 文件数走共用枚举(与指纹同一份收账口径,阶段 4 抽出)。
+        const auto files = platform::ListRegularFilesUtf8Sorted(manifest->plugin_dir,
+                                                                /*follow_symlinks=*/true);
         const auto content_hash = ComputePluginContentHash(manifest->plugin_dir);
         if (!files.has_value() || !content_hash.has_value()) {
             continue;  // 指纹算不出(目录刚被删/文件读不到):材料不全,不进账

@@ -229,9 +229,16 @@ AgentCatalog LoadAgentCatalog(const AgentCatalogScanRoots& roots) {
     for (const PackagedAgentEntry& packaged : roots.packaged) {
         LayerRecord record;
         record.name = packaged.canonical_name;
-        record.definition = packaged.definition;
         record.layer = AgentSourceLayer::Package;
         record.file = packaged.file_utf8;
+        if (packaged.available) {
+            record.definition = packaged.definition;
+        } else {
+            // 阶段 4 连坐:依赖未信任 code 组件——名目登册,定义缺席,
+            // issues 带缘由(unavailable + /agents 第一条原因,指路重批)。
+            record.issues.push_back(
+                AgentDefinitionIssue{"package.trust", packaged.unavailable_reason, -1, -1, false, ""});
+        }
         packaged_records.push_back(std::move(record));
     }
     ReportSameLayerConflicts(packaged_records, catalog.load_errors);

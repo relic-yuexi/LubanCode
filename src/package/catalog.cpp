@@ -9,6 +9,7 @@
 #include <iterator>
 #include <system_error>
 
+#include "package/trust.hpp"  // ScopeRequiresTrust/PackageTrustSnapshot(第 7 步信任门)
 #include "platform/paths.hpp"
 #include "workflow/parser.hpp"  // IsSafePackageRelative(workflow 文件引用的越界口径)
 
@@ -545,6 +546,15 @@ bool PackageMountPlan::HasCodeBearing() const {
     return false;
 }
 
+std::string_view CodeTrustStatusText(CodeTrustStatus status) {
+    switch (status) {
+        case CodeTrustStatus::NoCode: return "无 code 组件";
+        case CodeTrustStatus::Trusted: return "已过信任门";
+        case CodeTrustStatus::PendingTrust: return "待信任门";
+    }
+    return "?";
+}
+
 // ---------------------------------------------------------------------------
 // AnalyzePackage
 // ---------------------------------------------------------------------------
@@ -558,7 +568,8 @@ const ParsedComponent* PackageRecord::FindComponent(ComponentKind kind,
 }
 
 PackageRecord AnalyzePackage(const PackageCandidate& candidate, const ScanOptions& options,
-                             const PackageRefIndex& ref_index, const ExternalNamespaces& external) {
+                             const PackageRefIndex& ref_index, const ExternalNamespaces& external,
+                             const PackageTrustSnapshot* trust) {
     PackageRecord record;
     record.inventory = BuildPackageInventory(candidate, options);
 
@@ -581,6 +592,24 @@ PackageRecord AnalyzePackage(const PackageCandidate& candidate, const ScanOption
     ctx.external = &external;
     ctx.refs = &record.references;
 
+    // 信任门(阶段 4)在解析前就算好:组件 parser 吃的 ComponentSourceRoot
+    // 带 trusted_for_code,阶段 5 的挂载事务据此放行。口径与 plan 里的
+    // code_trust 同一式:免审层放置即信任;外来层只认账上那枚哈希。
+    const CodeTrustStatus code_trust =
+        [&] {
+            if (record.inventory.plugins.empty() && record.inventory.mcp_servers.empty()) {
+                return CodeTrustStatus::NoCode;
+            }
+            if (!ScopeRequiresTrust(record.inventory.scope)) {
+                return CodeTrustStatus::Trusted;
+            }
+            if (trust != nullptr &&
+                trust->IsTrusted(record.inventory.package_id, record.inventory.content_hash)) {
+                return CodeTrustStatus::Trusted;
+            }
+            return CodeTrustStatus::PendingTrust;
+        }();
+
     for (const auto& group : groups) {
         for (const auto& item : *group.list) {
             ComponentSourceRoot source;
@@ -593,6 +622,7 @@ PackageRecord AnalyzePackage(const PackageCandidate& candidate, const ScanOption
             source.package_id = record.inventory.package_id;
             source.package_version = record.inventory.version_text;
             source.content_hash = record.inventory.content_hash;
+            source.trusted_for_code = code_trust == CodeTrustStatus::Trusted;
             ctx.own.Add(group.kind, item.local_id);
             record.components.push_back(ParsePackageComponent(source));
         }
@@ -676,6 +706,16 @@ PackageRecord AnalyzePackage(const PackageCandidate& candidate, const ScanOption
             entry.depends_on = DedupePreserveOrder(entry.depends_on);
             plan.entries.push_back(std::move(entry));
         }
+        // ---- 第 7 步(阶段 4):信任门 ----
+        // 与解析前算的同一式(免审层放置即信任;外来层只认账上那枚哈希
+        // ——文件动一个字节,IsTrusted 即翻脸,code 件全数退回待信任)。
+        plan.code_trust = code_trust;
+        for (auto& entry : plan.entries) {
+            if (entry.code_bearing) {
+                entry.trusted = plan.code_trust == CodeTrustStatus::Trusted;
+            }
+        }
+        record.code_trust = plan.code_trust;
         record.mount_plan = std::move(plan);
     }
     return record;
