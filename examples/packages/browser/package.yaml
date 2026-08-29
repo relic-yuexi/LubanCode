@@ -1,0 +1,11 @@
+schema: 1
+id: luban.browser
+version: 0.1.0
+name: Luban Browser
+description: 官方浏览器内容包:browser-reviewer Agent、操作章法 Skill、四只检查 Workflow(smoke/responsive/console-error/network-failure)与练习页。浏览器本体(BrowserRuntime/Playwright)归核心,不在此包;mcp/ 里一件可选启动器是唯一 code-bearing 组件,未过信任不挂。
+compatibility:
+  lubancode: ">=0.26.99"
+  platforms:
+    - windows
+    - linux
+    - macos

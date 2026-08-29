@@ -6,7 +6,7 @@
 
 | 包 | 档位 | 装什么 |
 | --- | --- | --- |
-| [browser-agent/](browser-agent/README.md) | content-only | 浏览器操作纪律 Skill 加练习页;零代码组件,放进目录即用 |
+| [browser/](browser/README.md) | 内容为主,一件可选 code-bearing | 官方浏览器包(luban.browser):browser-reviewer Agent、操作章法 Skill、四只检查 Workflow 加练习页;mcp/ 里一件可选薄启动器,未过信任不挂。浏览器本体归核心,不在此包 |
 | [gui-agent/](gui-agent/README.md) | code-bearing | Windows 桌面 process 插件(十件工具)加配套 Skill;代码组件默认只被发现不挂载,执行须过信任门 |
 
 ## 验一只包(不动配置)

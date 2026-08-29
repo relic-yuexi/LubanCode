@@ -1,0 +1,63 @@
+# browser-reviewer:官方 Browser Package 的验收员。
+#
+# 格式照 docs/reference/agents.md(阶段 0 冻结);引用写本包短名,Resolver
+# 先在本包里找。取舍与取舍的理由:
+#
+#   - 不写 mcp_servers:browser MCP 是核心分发的独立配置(config.json 的
+#     mcpServers 键),不是本包组件。短名引用的解析要对着 config 的键;
+#     用户没配,整包就 invalid——把包的效力和用户配置绑死,不划算。
+#     工具面由 tools.allow 收到 mcp__browser__*,依赖断言走 requires.tools,
+#     两道都在,不必再列服务名。
+#   - 不写 prompt.profile:包内 Profile(canonical 名)眼下会让
+#     /agent doctor 的"Profile 存在性"检查误报——那检查数内置/用户/项目
+#     三层,还没学会数包层(PackageProfile)。身份由 description 加预装
+#     Skill 承担,等检查补上包层再迁 Profile。
+#   - 只读工具面:read_file/search 加 browser 一族;写文件与跑命令全 deny。
+schema: 1
+name: browser-reviewer
+description: 审网页、复现界面故障、回报带证据的验收员。派它出场:要打开页面核对面板、文案或控件在不在;要复现一个界面 bug 并拿到截图、Console 报错或 Network 请求账;要一份照单验收网页的证据单。只读不写:改代码、提交表单、登录支付不归它。
+
+skills:
+  preload:
+    - browser-agent
+
+tools:
+  allow:
+    - read_file
+    - search
+    - mcp__browser__browser_status
+    - mcp__browser__browser_open
+    - mcp__browser__browser_snapshot
+    - mcp__browser__browser_click
+    - mcp__browser__browser_type
+    - mcp__browser__browser_select
+    - mcp__browser__browser_wait
+    - mcp__browser__browser_tabs
+    - mcp__browser__browser_select_tab
+    - mcp__browser__browser_close_page
+    - mcp__browser__browser_screenshot
+    - mcp__browser__browser_console
+    - mcp__browser__browser_network
+    - mcp__browser__browser_downloads
+  deny:
+    - run_command
+    - write_file
+    - edit_file
+
+# 启动前断言:这五件不在有效工具表里(browser MCP 没配好)就明报缺,
+# 不悄悄放宽成全工具 Agent。
+requires:
+  tools:
+    - mcp__browser__browser_open
+    - mcp__browser__browser_snapshot
+    - mcp__browser__browser_screenshot
+    - mcp__browser__browser_console
+    - mcp__browser__browser_network
+
+runtime:
+  max_steps_per_turn: 32
+  execution_mode: auto
+  isolation: none
+
+# 无 permissions 块:权限档只收 confirm/auto/yolo,只读由 tools.allow
+# 白名单表达(见 docs/reference/agents.md §4.9)。

@@ -1,0 +1,102 @@
+# Network 巡账:开页,静置攒账,browser-reviewer 断言关键请求都活着。
+#
+# "关键"由 url_contains 圈定(如 "/api/"):账里 URL 含该段的请求才算数。
+# 翻案条件两条:圈内的请求有 failed(连接失败/超时,DNS 炸也算);
+# 或者一条都没见着——页面压根没发这批请求,同样是 fail,别当干净。
+# url_contains 留空则查全量 failed(全页任何失败请求都翻案)。
+# 失败路与 console-error 同款:open/settle 无 error 边快死快报;
+# audit 判 fail 走 failures_found 收口。
+schema_version: 1
+id: network-failure
+version: 1.0.0
+name: Network 巡账
+alias: network-failure
+description: 开页静置后翻 Network journal,断言关键请求没有失败、也确实发出去过
+enabled: true
+
+inputs:
+  type: object
+  required:
+    - url
+  properties:
+    url:
+      type: string
+      description: 目标页(http/https)
+    url_contains:
+      type: string
+      description: 关键请求的 URL 片段(如 "/api/");空串查全量
+      default: ""
+    settle_ms:
+      type: integer
+      description: 开页后的静置毫秒(攒 network 账)
+      default: 2000
+
+entry: open
+
+limits:
+  max_concurrency: 2
+  max_nodes: 16
+  max_steps: 40
+  timeout: 8m
+  tool_calls: 50
+  tokens: 70000
+
+nodes:
+  open:
+    type: tool
+    label: 开页
+    tool: mcp__browser__browser_open
+    input:
+      url: "${inputs.url}"
+
+  settle:
+    type: tool
+    label: 静置攒账
+    tool: mcp__browser__browser_wait
+    input:
+      ms: "${inputs.settle_ms}"
+
+  audit:
+    type: agent
+    label: 翻账断言
+    agent: browser-reviewer
+    task: prompts/audit.md
+    step_limit: 16
+    allowed_tools:
+      - mcp__browser__browser_status
+      - mcp__browser__browser_tabs
+      - mcp__browser__browser_network
+      - mcp__browser__browser_console
+      - mcp__browser__browser_wait
+    input:
+      url: "${inputs.url}"
+      url_contains: "${inputs.url_contains}"
+      open_receipt: "${nodes.open.output.content}"
+
+  gate:
+    type: switch
+    label: 判词分流
+    conditions:
+      - op: equals
+        path: "${nodes.audit.output.verdict}"
+        value: pass
+        to: passed
+    default_to: failures_found
+
+  passed:
+    type: end
+    label: 关键请求都活着
+
+  failures_found:
+    type: end
+    label: 有失败请求(看 result 账)
+
+edges:
+  - { from: open, on: success, to: settle }
+  - { from: settle, on: success, to: audit }
+  - { from: audit, on: success, to: gate }
+
+result:
+  url: "${inputs.url}"
+  verdict: "${nodes.audit.output.verdict}"
+  failures: "${nodes.audit.output.failures}"

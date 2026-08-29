@@ -1,0 +1,114 @@
+# 双视口对照:桌面服、手机服各开一页,交 browser-reviewer 截图比对。
+#
+# 为什么两只服务:viewport 是 browser MCP 的启动参数(--viewport WxH),
+# 一只服务一只视口,页内换不了。双视口就得两只服务——config.json 配两键:
+#   "browser"        桌口(如 --viewport 1280x800)
+#   "browser-mobile" 手机口(如 --viewport 390x844)
+# 没配 browser-mobile 时,open_mobile 报 tool_unavailable,这一路无 error
+# 边,run 直接 Failed——去配第二只服务,别拿单视口凑合。
+# 截图比对在 agent 手里做:workflow 的工具回执只有文本投影,图进不了
+# Store;reviewer 自己截(browser_screenshot 的 image 块随工具结果进
+# 它的上下文),多模态模型才比得了,配不动图模型时它该如实报读不了。
+schema_version: 1
+id: responsive
+version: 1.0.0
+name: 双视口对照
+alias: responsive
+description: 桌面与手机两只 browser MCP 服务各开一页,browser-reviewer 截图比对布局与溢出
+enabled: true
+
+inputs:
+  type: object
+  required:
+    - url
+  properties:
+    url:
+      type: string
+      description: 目标页(http/https)
+    settle_ms:
+      type: integer
+      description: 开页后的静置毫秒(等渲染稳)
+      default: 1200
+
+entry: open_desktop
+
+limits:
+  max_concurrency: 2
+  max_nodes: 16
+  max_steps: 48
+  timeout: 10m
+  tool_calls: 60
+  tokens: 90000
+
+nodes:
+  open_desktop:
+    type: tool
+    label: 桌口开页
+    tool: mcp__browser__browser_open
+    input:
+      url: "${inputs.url}"
+
+  open_mobile:
+    type: tool
+    label: 手机口开页
+    tool: mcp__browser-mobile__browser_open
+    input:
+      url: "${inputs.url}"
+
+  settle:
+    type: tool
+    label: 静置等稳
+    tool: mcp__browser__browser_wait
+    input:
+      ms: "${inputs.settle_ms}"
+
+  compare:
+    type: agent
+    label: 双视口比对
+    agent: browser-reviewer
+    task: prompts/compare.md
+    step_limit: 20
+    allowed_tools:
+      - mcp__browser__browser_status
+      - mcp__browser__browser_tabs
+      - mcp__browser__browser_snapshot
+      - mcp__browser__browser_screenshot
+      - mcp__browser__browser_wait
+      - mcp__browser-mobile__browser_status
+      - mcp__browser-mobile__browser_tabs
+      - mcp__browser-mobile__browser_snapshot
+      - mcp__browser-mobile__browser_screenshot
+      - mcp__browser-mobile__browser_wait
+    input:
+      url: "${inputs.url}"
+      desktop_receipt: "${nodes.open_desktop.output.content}"
+      mobile_receipt: "${nodes.open_mobile.output.content}"
+
+  gate:
+    type: switch
+    label: 判词分流
+    conditions:
+      - op: equals
+        path: "${nodes.compare.output.verdict}"
+        value: pass
+        to: passed
+    default_to: layout_fail
+
+  passed:
+    type: end
+    label: 双视口都过关
+
+  layout_fail:
+    type: end
+    label: 布局有问题(看 result 判词)
+
+edges:
+  - { from: open_desktop, on: success, to: open_mobile }
+  - { from: open_mobile, on: success, to: settle }
+  - { from: settle, on: success, to: compare }
+  - { from: compare, on: success, to: gate }
+
+result:
+  url: "${inputs.url}"
+  verdict: "${nodes.compare.output.verdict}"
+  findings: "${nodes.compare.output.findings}"

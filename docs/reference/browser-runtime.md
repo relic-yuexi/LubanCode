@@ -95,7 +95,7 @@ crash_epoch
 | 2 | Console/Network journal、screenshot artifact 进 App Server 事件、可见调试面板 | 已落(`browser_console`/`browser_network` 两本环形账;`item/completed` 附截图 artifact 引用;headed 可选;用户观察代仲裁。面板落终端工具回执——Desktop Tab 待阶段 4) |
 | 3 | App Server Browser 协议（方法 + 带 seq 的事件 + 断线补账） | 已落（协议升 1.1，additive；`browser/sidecar.js` 起 Node sidecar 复用 `BrowserSession`，`src/app_server/browser_service.*` 只做转发；journal 批量有帽丢老明记，`browser/console\|network query` 凭 `sinceSeq` 补账；截图只发 artifact 引用；owner=agent 写动作过审批，取消贯通到 sidecar 动作队列。断线重连的边界：stdio app-server 断线即 EOF 退场、sidecar 随之收尸，页面状态不跨 app-server 重启存活——跨进程续场归阶段 4 的宿主） |
 | 4 | 真正内嵌 Browser Tab（Electron/WebView2/CEF 选型另写 ADR） | 待做 |
-| 5 | 官方 Browser Package（Agent/Skill/Workflow，不复制 Runtime） | 待做 |
+| 5 | 官方 Browser Package（Agent/Skill/Workflow，不复制 Runtime） | 已落（`examples/packages/browser/`，id `luban.browser`：browser-reviewer Agent、操作章法 Skill、smoke/responsive/console-error/network-failure 四只 Workflow、练习页；可选 code-bearing MCP 薄启动器未过信任不挂） |
 
 MCP adapter 日后可作为可选 code-bearing 组件进 Package，只用于终端版无 Desktop、第三方 MCP 客户端、旧配置兼容与远程无界面场景；照 Package 信任门走。核心 BrowserRuntime 随 LubanCode 发布，不吃项目 Package 信任。
 

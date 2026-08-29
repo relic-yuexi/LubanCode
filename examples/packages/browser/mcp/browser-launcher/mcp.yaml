@@ -1,0 +1,31 @@
+# 可选 MCP 启动器——本包唯一的 code-bearing 组件,未过信任门不挂。
+#
+# 它不是浏览器 Runtime:BrowserRuntime(Playwright、页签账、journal)住
+# LubanCode 核心分发的 browser/server.js,永不进包(docs/reference/
+# browser-runtime.md 的边界)。这只组件只负责"找到核心 server.js 并接管
+# stdio",给四类场景用:终端版没挂 Desktop、第三方 MCP 客户端、旧配置
+# 兼容、远程无界面运行。
+#
+# LubanCode 本机用户请优先走 config.json 直配核心服务(键名 "browser"),
+# 那样工具 wire 名是 mcp__browser__*,与本包 Agent/Workflow 声明的一致。
+# 本启动器过了信任门注册出来的工具走包名空间
+# (mcp__luban.browser.browser-launcher__*),是另一套名字。
+schema: 1
+id: browser-launcher
+description: 找到 LubanCode 核心分发的 browser MCP 并接管 stdio 的薄启动器;自身不实现浏览器,code-bearing,须过 Package 信任门才挂载。
+transport: stdio
+
+runtime:
+  command: node
+  args:
+    - "${package_dir}/mcp/browser-launcher/server.js"
+  # 引擎/视口等参数原样透传,示例:
+  #   - --engine
+  #   - chromium
+  #   - --viewport
+  #   - 390x844
+  timeout_ms: 30000
+
+# 不谎称隔离:browser 会按用户给的 URL 出网。
+permissions:
+  network: true

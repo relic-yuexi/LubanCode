@@ -14,7 +14,7 @@
 | 旧示例 | 去处 |
 | --- | --- |
 | gui-agent(process 插件,Windows 桌面) | [../packages/gui-agent/](../packages/gui-agent/README.md) |
-| browser-agent(Skill + 练习页,配 browser MCP) | [../packages/browser-agent/](../packages/browser-agent/README.md) |
+| browser-agent(Skill + 练习页,配 browser MCP) | [../packages/browser/](../packages/browser/README.md)(阶段 5 归拢为官方包 luban.browser,添了 Agent 与四只 Workflow) |
 
 ## 装一只试试
 

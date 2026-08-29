@@ -1,0 +1,135 @@
+# 冒烟:开页 -> 等关键元素 -> 快照 -> 复核缴单。
+#
+# 断言分两道:
+#   - 机械道:给了 expect_text,browser_wait 的 for_text 就是断言——等不到
+#     文本,工具超时报错,这一路没有 error 边,run 直接 Failed,journal 指到
+#     wait_text 节点。开不了页、快照失败同理(open/snapshot 也无 error 边,
+#     快死快报,不带病往下走)。
+#   - 复核道:report 节点(browser-reviewer)读快照与开页回执,出一行纯
+#     JSON 判词;gate 按 verdict 分流,判 fail 走 review_fail 收口(run 状态
+#     是成功,判词在 result.verdict,看单不看灯)。
+# 工具依赖:mcp__browser__* 来自核心 browser MCP(config.json 的 mcpServers
+# 配 "browser")。没配时 /workflow validate 报 unknown_tool,run 会
+# tool_unavailable——先配 MCP 再跑。
+schema_version: 1
+id: smoke
+version: 1.0.0
+name: 浏览器冒烟
+alias: smoke
+description: 打开页面,等关键元素出现,采一份语义快照,交 browser-reviewer 复核缴单
+enabled: true
+
+inputs:
+  type: object
+  required:
+    - url
+  properties:
+    url:
+      type: string
+      description: 目标页(http/https;别的协议工具侧拒)
+    expect_text:
+      type: string
+      description: 关键元素的可见文本;给了就当断言(等不到即失败),空则只等页面稳
+      default: ""
+    wait_ms:
+      type: integer
+      description: 未给 expect_text 时的静置毫秒
+      default: 1500
+
+entry: open
+
+limits:
+  max_concurrency: 2
+  max_nodes: 16
+  max_steps: 32
+  timeout: 5m
+  tool_calls: 40
+  tokens: 60000
+
+nodes:
+  open:
+    type: tool
+    label: 开页
+    tool: mcp__browser__browser_open
+    input:
+      url: "${inputs.url}"
+
+  route:
+    type: switch
+    label: 有无断言文本
+    conditions:
+      - op: non_empty
+        path: "${inputs.expect_text}"
+        to: wait_text
+    default_to: settle
+
+  wait_text:
+    type: tool
+    label: 等关键元素(即断言)
+    tool: mcp__browser__browser_wait
+    input:
+      for_text: "${inputs.expect_text}"
+      timeout_ms: 15000
+
+  settle:
+    type: tool
+    label: 静置等稳
+    tool: mcp__browser__browser_wait
+    input:
+      ms: "${inputs.wait_ms}"
+
+  snapshot:
+    type: tool
+    label: 语义快照
+    tool: mcp__browser__browser_snapshot
+    input: {}
+
+  report:
+    type: agent
+    label: 复核缴单
+    agent: browser-reviewer
+    task: prompts/review.md
+    step_limit: 12
+    allowed_tools:
+      - mcp__browser__browser_status
+      - mcp__browser__browser_tabs
+      - mcp__browser__browser_snapshot
+      - mcp__browser__browser_screenshot
+      - mcp__browser__browser_console
+      - mcp__browser__browser_network
+    input:
+      url: "${inputs.url}"
+      expect_text: "${inputs.expect_text}"
+      open_receipt: "${nodes.open.output.content}"
+      snapshot_text: "${nodes.snapshot.output.content}"
+
+  gate:
+    type: switch
+    label: 判词分流
+    conditions:
+      - op: equals
+        path: "${nodes.report.output.verdict}"
+        value: pass
+        to: passed
+    default_to: review_fail
+
+  passed:
+    type: end
+    label: 冒烟通过
+
+  review_fail:
+    type: end
+    label: 复核未过(看 result 判词)
+
+edges:
+  - { from: open, on: success, to: route }
+  - { from: wait_text, on: success, to: snapshot }
+  - { from: settle, on: success, to: snapshot }
+  - { from: snapshot, on: success, to: report }
+  - { from: report, on: success, to: gate }
+
+result:
+  url: "${inputs.url}"
+  verdict: "${nodes.report.output.verdict}"
+  evidence: "${nodes.report.output.evidence}"
+  snapshot: "${nodes.snapshot.output.content}"

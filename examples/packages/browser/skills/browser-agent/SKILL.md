@@ -40,6 +40,11 @@ description: 用 browser MCP(常驻 Playwright)操作浏览器:快照→找 ref�
   表单交了,看 URL/内容变没。**没复验过的不说"已完成"**。
 - 需要视觉判断(截图配色、布局对不对)时用 `browser_screenshot`
   拿图——注意当前会话若不是多模态模型,你读不了图,如实请用户人工核对。
+- 报错查账:`browser_console`(须给 page_id)翻 Console journal,
+  error 与未捕获异常都在册,每条带 seq 与 source 行列;`browser_network`
+  翻 Network journal,failed 请求、状态码、耗时一目了然。两本账都是
+  环形账,溢出明记 dropped,`since_seq` 可断线补账。审查页面先翻这两本,
+  别只看页面表面。
 - 下载:动作后 `browser_downloads` 对账,别只信页面提示"下载已开始"。
 
 ## 停手线
@@ -55,3 +60,6 @@ description: 用 browser MCP(常驻 Playwright)操作浏览器:快照→找 ref�
 
 - 交代三笔账:动过哪些页(开/关)、下载了什么(文件名与路径)、
   登录态有没有动。没把握的如实说没验证。
+- 审查类差事另缴证据:结论后头跟上 page_id 与 generation,报错引
+  console 账的 seq,请求引 network 账的条目——没账的话就说没账,
+  不编。

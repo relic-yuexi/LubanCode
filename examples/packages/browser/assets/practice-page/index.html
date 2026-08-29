@@ -1,7 +1,8 @@
 <!doctype html>
-<!-- Browser Agent 练习页:零依赖单文件,python -m http.server 8901 起来即用。
+<!-- Luban Browser 练习页:零依赖单文件,python -m http.server 8901 起来即用。
      练的点:快照找 ref、点击计数(复验状态变化)、表单填写与提交(导航后
-     stale_ref 的正确反应)、同名按钮的唯一定位。 -->
+     stale_ref 的正确反应)、同名按钮的唯一定位;第三课另埋了巡账靶子
+     (console error、失败请求、手机口溢出宽卡),给包内四只 workflow 练枪。 -->
 <html lang="zh">
 <meta charset="utf-8">
 <title>练习页 · 计数与表单</title>
@@ -32,6 +33,15 @@
 </form>
 <p id="receipt"></p>
 
+<h2>第三课 · 巡账靶子</h2>
+<!-- 给包内 console-error / network-failure / responsive 三只 workflow 当
+     靶子:一枚故意的 console error、一条故意的失败请求、一张手机口必溢出
+     的宽卡。别修"好"它们——修了靶子就没了。 -->
+<p id="probe-status">巡账靶子在下面。</p>
+<div id="wide-card" style="width: 720px; border: 2px dashed #d97706; padding: 8px;">
+  宽卡:桌面口正好,手机口(390px)必横向溢出——responsive 对照用。
+</div>
+
 <script>
   let n = 0;
   function bump(d) { n += d; document.getElementById('count').textContent = n; }
@@ -44,4 +54,12 @@
     ev.target.reset();
     return false;
   }
+
+  // 第三课的靶子:console error + 失败请求(端口 9 上没有服务,稳失败)。
+  setTimeout(() => {
+    console.error('练习靶:故意的 console error(可当容忍清单条目用)');
+    fetch('http://127.0.0.1:9/api/practice-probe')
+      .then(() => { document.getElementById('probe-status').textContent = '探针居然通了?'; })
+      .catch(() => { document.getElementById('probe-status').textContent = '探针失败(预期内,network 账里看)'; });
+  }, 300);
 </script>

@@ -2,7 +2,7 @@
 
 | 目录 | 内容 |
 | --- | --- |
-| [packages/](packages/README.md) | Package 示例:整箱分发,带 package.yaml 清单——browser-agent(内容包:Skill 加练习页)、gui-agent(code-bearing:process 插件加 Skill,默认只发现不挂载) |
+| [packages/](packages/README.md) | Package 示例:整箱分发,带 package.yaml 清单——browser(官方浏览器包:Agent 加 Skill 加四只 Workflow,浏览器本体归核心)、gui-agent(code-bearing:process 插件加 Skill,默认只发现不挂载) |
 | [agents/](agents/README.md) | 散装 Agent 定义示例(如 code-reviewer.yaml,一只 YAML 一只 Agent) |
 | [plugins/](plugins/README.md) | 散装插件四条路各一枚:Lua、process(Python/Rust/C)、native DLL |
 | [workflows/](workflows/README.md) | 散装工作流示例(三省六部) |
