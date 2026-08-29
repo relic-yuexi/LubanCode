@@ -467,6 +467,16 @@ private:
 //      先按渲染版定格再清账。老路直接丢账,模型"正文段 + tool_use 同条
 //      消息、正文后无空行"的写法(实测真机最常见)会让星号永远露着。
 //
+// 问题 3(真实实测:分块渲染吃掉标题前空行)补的两笔:
+//   1. 前距自带——块的渲染预案在"上一块已定格成渲染版"时自带一行前距
+//      (PrepareBodyRenderPlan 的 leading_gap)。前一块的重画从块首写到
+//      光标,把它块尾那行分隔空行一并擦了(渲染版头尾空行都剪),后一块
+//      不自带前距的话两块贴死;上一块原样保留时空行还在屏上,不自带,
+//      免得两行。整篇开头/工具边界后的第一块不带,不凭空多首行空白。
+//   2. 空行吸收——ScanBodyDelta 把空行连发的第二枚起整个吞掉(不落笔、
+//      不产空块收束步):第一枚已随收束段上屏,多枚再打只会越撑越松,
+//      "连续多空行收成一行"在落笔这层就办掉。
+//
 // 工具条目要开画时(on_tool_start)，尚未收束的小段定格成渲染版(画不动
 // 才保持原样)；下一段重新取锚。已在段落边界画好的 Markdown 不受影响。
 //
@@ -513,6 +523,15 @@ struct BodyScanState {
     // 新配对到达才再画;空行收束/块作废时随块清零。
     int last_newlines = 0;
     int last_pairs = 0;
+    // 问题 3(分块渲染吃掉标题前空行)的两笔账:
+    //   blank_run:正处空行连发当中(或正文还没落过一笔)——收束步的原样
+    //   段已把第一枚空行带上屏,后续空行整枚吸收,多枚只当一枚用。非空行
+    //   一完成便翻回 false。初值 true:正文开头的空行也算"连发",照吸。
+    //   rendered_before:上一块是否已定格成渲染版——是,则它块尾那行分隔
+    //   空行已被重画擦掉,本块的渲染预案要自带一行前距;否(原样保留/开
+    //   头第一块),空行还在屏上或压根没有,不带,免得凭空多出空白。
+    bool blank_run = true;
+    bool rendered_before = false;
 };
 
 // 增量重画的防洪峰预算:块高/块宽超过这份就不再逐行重画(整块重画的账
@@ -553,6 +572,13 @@ inline std::vector<BodyDeltaStep> ScanBodyDelta(BodyScanState& state, const std:
         const bool blank = first == state.line_probe.size();
         state.line_probe.clear();
         if (blank && !state.fence_open) {
+            if (state.blank_run) {
+                // 问题 3:空行连发的第二枚起整枚吸收——第一枚已随收束段
+                // 原样上屏(或正文开头压根还没落过笔),这枚再落笔只会把
+                // 画面越撑越松。不打印、不产空块收束步,吞掉完事。
+                piece.clear();
+                continue;
+            }
             if (!piece.empty()) {
                 projected += piece;
                 BodyDeltaStep print_step;
@@ -568,6 +594,9 @@ inline std::vector<BodyDeltaStep> ScanBodyDelta(BodyScanState& state, const std:
             projected.clear();  // 收口:下一段从空串重新攒,不再回头渲染旧段
             state.last_newlines = 0;
             state.last_pairs = 0;
+            state.blank_run = true;  // 进入空行连发:后续空行吸收
+        } else if (!blank) {
+            state.blank_run = false;  // 有内容的行完成:连发到此为止
         }
     }
     if (!piece.empty()) {
@@ -608,8 +637,13 @@ struct BodyRenderPlan {
 };
 
 // 备一份重画预案:没探到 markdown 结构给 hit=false(锁内不画、原样保留)。
+// leading_gap(问题 3:分块渲染吃掉标题前空行):本块渲染版自带一行前距。
+// 前一块定格成渲染版时,它的重画把块尾分隔空行擦了(渲染版头尾空行都
+// 剪),本块再不自带前距,两块在屏上贴死——标题前那行空行就是这么丢的。
+// 恰好一行:多枚空行在 ScanBodyDelta 已收成一枚,这里只垫这一行,不叠
+// 加;整篇开头/工具边界后的第一块传 false,不凭空多首行空白。
 inline BodyRenderPlan PrepareBodyRenderPlan(const std::string& block_text, const lubancode::cli::Theme& theme,
-                                            int width) {
+                                            int width, bool leading_gap = false) {
     BodyRenderPlan plan;
     plan.hit = lubancode::cli::DetectMarkdownStructure(block_text);
     if (!plan.hit) {
@@ -617,6 +651,9 @@ inline BodyRenderPlan PrepareBodyRenderPlan(const std::string& block_text, const
     }
     plan.ended_with_newline = !block_text.empty() && block_text.back() == '\n';
     plan.lines = lubancode::cli::RenderMarkdown(block_text, theme, width);
+    if (leading_gap && !plan.lines.empty()) {
+        plan.lines.insert(plan.lines.begin(), std::string());
+    }
     return plan;
 }
 
@@ -642,7 +679,13 @@ inline std::vector<BodyRenderStep> PlanBodyDelta(BodyScanState& state, const std
         step.repaint = raw.repaint;
         step.finalize = raw.finalize;
         if (raw.repaint) {
-            step.plan = PrepareBodyRenderPlan(raw.text, theme, width);
+            step.plan = PrepareBodyRenderPlan(raw.text, theme, width, state.rendered_before);
+            if (raw.finalize) {
+                // 下一块的前距看这一块的收束:定格成渲染版(块尾空行被擦)
+                // → 下一块自带前距;原样保留(空行还在屏上)→ 不带,免得
+                // 两行空行。空块收束步(hit=false)照原样保留论。
+                state.rendered_before = step.plan.hit;
+            }
         } else {
             step.piece = raw.text;
         }
@@ -763,7 +806,8 @@ public:
         std::optional<BodyRenderPlan> pending_plan;
         if (enabled_ && in_block_ && !buffer_.empty()) {
             pending_plan = PrepareBodyRenderPlan(buffer_, theme_,
-                                                 lubancode::cli::DetectConsoleWidth().value_or(80));
+                                                 lubancode::cli::DetectConsoleWidth().value_or(80),
+                                                 scan_.rendered_before);
         }
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         // 工具条目要开画/换请求了:脚注这行先擦掉,免得它残留在工具输出或
@@ -785,6 +829,10 @@ public:
         scan_.fence_open = false;
         scan_.last_newlines = 0;
         scan_.last_pairs = 0;
+        // 正文另起(问题 3 的账随块清):下一块按"开头第一块"论——不带
+        // 前距(与工具条目的空行由 separate_next_body_ 管),开头空行照吸。
+        scan_.blank_run = true;
+        scan_.rendered_before = false;
     }
 
     // 工具终态已经画完。暂不落笔，等正文真来了再补分隔；若没有后续
@@ -800,13 +848,16 @@ public:
             return;
         }
         const BodyRenderPlan plan = PrepareBodyRenderPlan(buffer_, theme_,
-                                                          lubancode::cli::DetectConsoleWidth().value_or(80));
+                                                          lubancode::cli::DetectConsoleWidth().value_or(80),
+                                                          scan_.rendered_before);
         std::lock_guard<std::mutex> lock(lubancode::cli::StdoutWriteMutex());
         RepaintBlockLocked(plan);
         scan_.line_probe.clear();
         scan_.fence_open = false;
         scan_.last_newlines = 0;
         scan_.last_pairs = 0;
+        scan_.blank_run = true;
+        scan_.rendered_before = false;
     }
 
 private:

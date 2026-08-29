@@ -7,6 +7,8 @@
 //      用的 PrepareBodyRenderPlan 渲染行同样剥星号;
 //   4. 中英混排、窄终端 width-1 铁律;
 //   5. 代码块内与 \** 转义字面量不误渲染。
+// 问题 3(分块渲染吃掉标题前空行)的 H 系:块级前距自带 + 空行连发吸收,
+// 断"分块最终画面 == 整篇渲染",三种到达方式(单笔/跨块/逐字)都钉。
 // 锁内落笔(擦行/锚点/VT 批)由 body_render_driver 刮屏冒烟盖,这里只钉决策。
 
 #include <doctest/doctest.h>
@@ -281,4 +283,211 @@ TEST_CASE("P9 渲染链: 增量步在长块超出预算后退场,空行收束照
     }
     CHECK(incremental == 48);  // 预算内逐行画,超了退场
     REQUIRE(finalize == 1);    // 空行收束兜底,整块最终定格成渲染版
+}
+
+// ---- 问题 3:分块渲染吃掉标题前空行 ------------------------------------------
+//
+// 前一块定格成渲染版时,它的重画把块尾那行分隔空行一并擦掉(渲染版头尾
+// 空行都剪),后一块的渲染预案得自带一行前距,否则两块贴死——标题前那
+// 行空行就是这么丢的。这节穿过 ScanBodyDelta 的真实空行切块 + PlanBodyDelta
+// 的预案拼装断"最终画面",锁内落笔的几何由 body_render_driver 刮屏盖。
+
+namespace {
+
+// 屏面模拟器:按 StreamBodyTracker 的锚点契约回放决策链的步骤——原样段
+// 逐字落进光标行(换行才滚新行),命中的收束/增量步把自己那片(块首锚点
+// 到光标)整块换成渲染行;渲染版带换行收梢时光标落到新空行。光标行及其
+// 以下是"下一块的地界",不算已定格画面。
+std::vector<std::string> ScreenLines(const std::vector<std::string>& deltas) {
+    std::vector<std::string> screen{std::string()};
+    std::size_t block_start = 0;
+    bool in_block = false;
+    BodyScanState state;
+    std::string buffer;
+    const auto print_raw = [&screen](const std::string& text) {
+        std::size_t at = 0;
+        while (at < text.size()) {
+            const std::size_t nl = text.find('\n', at);
+            if (nl == std::string::npos) {
+                screen.back() += text.substr(at);
+                return;
+            }
+            screen.back() += text.substr(at, nl - at);
+            screen.emplace_back();
+            at = nl + 1;
+        }
+    };
+    for (const std::string& delta : deltas) {
+        for (const BodyRenderStep& step : PlanBodyDelta(state, buffer, delta, BuiltinTheme("dark"), 80)) {
+            if (!step.repaint) {
+                if (!in_block) {
+                    in_block = true;
+                    block_start = screen.size() - 1;  // 锚点 = 光标行
+                }
+                print_raw(step.piece);
+                buffer += step.piece;
+                continue;
+            }
+            if (in_block && step.plan.hit) {
+                screen.erase(screen.begin() + static_cast<std::ptrdiff_t>(block_start), screen.end());
+                screen.insert(screen.begin() + static_cast<std::ptrdiff_t>(block_start), step.plan.lines.begin(),
+                              step.plan.lines.end());
+                if (step.plan.ended_with_newline) {
+                    screen.emplace_back();  // 渲染版换行收梢:光标落到新行
+                }
+            }
+            if (step.finalize) {
+                in_block = false;
+                buffer.clear();
+            }
+        }
+    }
+    while (screen.size() > 1 && screen.back().empty()) {
+        screen.pop_back();
+    }
+    for (std::string& line : screen) {
+        line = StripAnsi(line);
+    }
+    return screen;
+}
+
+// 整篇一次渲染的行(去 ANSI)——分块画面的对照基准。
+std::vector<std::string> WholeDocLines(const std::string& text) {
+    std::vector<std::string> lines = lubancode::cli::RenderMarkdown(text, BuiltinTheme("dark"), 80);
+    for (std::string& line : lines) {
+        line = StripAnsi(line);
+    }
+    return lines;
+}
+
+std::vector<std::string> CharDeltas(const std::string& text) {
+    std::vector<std::string> out;
+    for (const char c : text) {
+        out.emplace_back(1, c);
+    }
+    return out;
+}
+
+std::vector<std::vector<std::string>> FinalizedPlans(const FeedResult& fed) {
+    std::vector<std::vector<std::string>> out;
+    for (const BodyRenderStep& step : fed.steps) {
+        if (step.finalize && step.plan.hit) {
+            out.push_back(step.plan.lines);
+        }
+    }
+    return out;
+}
+
+}  // namespace
+
+TEST_CASE("H1 渲染链: 列表接标题——标题块预案自带恰好一行前距(单 delta)") {
+    const std::string text = "- 列表末项\n\n### 标题\n\n";
+    const auto fed = Feed({text});
+    const auto plans = FinalizedPlans(fed);
+    REQUIRE(plans.size() == 2);
+    CHECK_FALSE(plans[0].empty());
+    CHECK_FALSE(plans[0].front().empty());  // 第一块:不凭空多首行空白
+    REQUIRE(plans[1].size() == 2);
+    CHECK(plans[1].front().empty());  // 标题块:恰好一行前距
+    CHECK(Contains(StripAnsi(plans[1][1]), "标题"));
+    // 最终画面:列表、空行、标题——与整篇渲染一字不差。
+    CHECK(ScreenLines({text}) == WholeDocLines(text));
+}
+
+TEST_CASE("H2 渲染链: 跨 delta 到达——两块分笔到,标题块照样带前距") {
+    const std::string text = "- 列表末项\n\n### 标题\n\n";
+    const auto fed = Feed({"- 列表末项\n\n", "### 标题\n\n"});
+    const auto plans = FinalizedPlans(fed);
+    REQUIRE(plans.size() == 2);
+    CHECK_FALSE(plans[0].front().empty());
+    REQUIRE(plans[1].size() == 2);
+    CHECK(plans[1].front().empty());
+    CHECK(ScreenLines({"- 列表末项\n\n", "### 标题\n\n"}) == WholeDocLines(text));
+}
+
+TEST_CASE("H3 渲染链: 逐字 delta——标题块的增量步与收束步都带前距") {
+    const std::string text = "- 列表末项\n\n### 标题\n\n";
+    const auto fed = Feed(CharDeltas(text));
+    std::size_t heading_repaints = 0;
+    for (const BodyRenderStep& step : fed.steps) {
+        if (step.repaint && step.plan.hit && Contains(JoinLines(step.plan.lines), "标题")) {
+            ++heading_repaints;
+            REQUIRE(step.plan.lines.size() >= 2);
+            CHECK(step.plan.lines.front().empty());  // 中途画面也不贴死
+        }
+    }
+    CHECK(heading_repaints >= 2);  // 至少:行边界增量 + 空行收束
+    CHECK(ScreenLines(CharDeltas(text)) == WholeDocLines(text));
+}
+
+TEST_CASE("H4 渲染链: 段落/列表/代码块接标题——三种到达的分块画面与整篇渲染逐行一致") {
+    const std::string text = "先说结论:**方案已定**。\n\n"
+                             "### 运行方式\n\n"
+                             "- 先 npm install\n- 再 npm run dev\n\n"
+                             "```js\nnpm run dev\n```\n\n"
+                             "### 收尾\n\n"
+                             "- 干完收工。\n";
+    const auto want = WholeDocLines(text);
+    CHECK(ScreenLines({text}) == want);  // 单笔
+    CHECK(ScreenLines({"先说结论:**方案已定**。\n\n",
+                       "### 运行方式\n\n",
+                       "- 先 npm install\n- 再 npm run dev\n\n",
+                       "```js\nnpm run dev\n```\n\n",
+                       "### 收尾\n\n",
+                       "- 干完收工。\n"}) == want);            // 跨块
+    CHECK(ScreenLines(CharDeltas(text)) == want);               // 逐字
+    // 标题前恰好一行(不多不少):整篇基准里每枚标题的上一行都是空行,
+    // 上上行都不是。
+    for (std::size_t i = 1; i < want.size(); ++i) {
+        if (Contains(want[i], "运行方式") || Contains(want[i], "收尾")) {
+            CHECK(want[i - 1].empty());
+            CHECK_FALSE(want[i - 2].empty());
+        }
+    }
+}
+
+TEST_CASE("H5 渲染链: 无标记段落接标题——前距由原样空行保住,预案不叠加") {
+    const std::string text = "纯段落没有标记。\n\n### 标题\n\n";
+    const auto fed = Feed({text});
+    const auto plans = FinalizedPlans(fed);
+    REQUIRE(plans.size() == 1);  // 段落块没探到结构,只有标题块有收束预案
+    CHECK_FALSE(plans[0].front().empty());  // 空行还在屏上:预案不带前距
+    CHECK(ScreenLines({text}) == WholeDocLines(text));
+    CHECK(ScreenLines(CharDeltas(text)) == WholeDocLines(text));
+}
+
+TEST_CASE("H6 渲染链: 连续多枚空行收成恰好一行——吸收在切段层办掉") {
+    const std::string text = "段落收束。\n\n\n\n### 标题\n\n";
+    const auto fed = Feed({text});
+    std::vector<std::string> pieces;
+    for (const BodyRenderStep& step : fed.steps) {
+        if (!step.repaint) {
+            pieces.push_back(step.piece);
+        }
+    }
+    // 落笔段只有两枚:段落段(带着第一枚空行)与标题段;中间空行整枚吸收。
+    REQUIRE(pieces.size() == 2);
+    CHECK(pieces[0] == "段落收束。\n\n");
+    CHECK(pieces[1] == "### 标题\n\n");
+    CHECK(ScreenLines({text}) == WholeDocLines(text));
+    // 空行逐笔到(跨 delta 的空行连发)同样收成一行。
+    CHECK(ScreenLines({"段落收束。\n", "\n", "\n", "\n", "### 标题\n\n"}) == WholeDocLines(text));
+    CHECK(ScreenLines(CharDeltas(text)) == WholeDocLines(text));
+}
+
+TEST_CASE("H7 渲染链: 标题在开头——不凭空多首行空白,开头空行照吸") {
+    {
+        const auto fed = Feed({"### 标题\n\n"});
+        const auto lines = LastRepaintLines(fed);
+        REQUIRE(lines.size() == 1);
+        CHECK_FALSE(lines[0].empty());
+        CHECK(Contains(StripAnsi(lines[0]), "标题"));
+        CHECK(ScreenLines({"### 标题\n\n"}) == WholeDocLines("### 标题\n\n"));
+    }
+    {
+        // 模型开头自带空行的写法:空行吸收,标题落首行,不垫首行空白。
+        const std::string text = "\n\n### 标题\n\n";
+        CHECK(ScreenLines({text}) == WholeDocLines(text));
+        CHECK(ScreenLines(CharDeltas(text)) == WholeDocLines(text));
+    }
 }
