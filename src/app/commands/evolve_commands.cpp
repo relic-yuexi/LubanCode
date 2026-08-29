@@ -1,9 +1,10 @@
-// /evolve 命令的执行体(自进化闭环阶段 1/2/3/4)。status = 扫五路账本采观察 +
-// 落观察账(只追加)+ 报账面;list = 按指纹聚类列账 + 候选区;show = 看一
-// 条观察或一只候选,指回来源。阶段 2:propose/diff/reject。阶段 3:test 跑
-// 评测五道门。阶段 4:approve 出批准页并原子装 store、use 点名 canary、
-// promote 晋升、rollback 切回——迁移全走 EvolutionCoordinator(唯一写口),
-// 这里只递材料、只打印。
+// /evolve 命令的执行体(自进化闭环阶段 1/2/3/4/5)。status = 扫五路账本采
+// 观察 + 落观察账(只追加)+ 报账面;list = 按指纹聚类列账 + 候选区;show =
+// 看一条观察或一只候选,指回来源。阶段 2:propose/diff/reject。阶段 3:test
+// 跑评测五道门。阶段 4:approve 出批准页并原子装 store、use 点名 canary、
+// promote 晋升、rollback 切回。阶段 5:propose 聚同指纹簇起草(够门槛出组合
+// 候选,否则最小 Skill-only),diff/show 分档展示,批准页亮复杂度代价——
+// 迁移全走 EvolutionCoordinator(唯一写口),这里只递材料、只打印。
 #include "app/commands/evolve_commands.hpp"
 #include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:统一走输出端口
@@ -20,6 +21,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "evolution/adapters.hpp"  // ObservationsFromRecording(聚簇按指纹)
 #include "evolution/collector.hpp"
 #include "evolution/coordinator.hpp"
 #include "evolution/eval.hpp"
@@ -140,7 +142,11 @@ void PrintUsage() {
                  "阶段 1 只读观察;阶段 2 从录制起草最小 content-only 候选(propose)、看\n"
                  "diff、拒绝(reject);阶段 3 评测(test):静态门+回放+留出+基线对照,账只追加;\n"
                  "阶段 4 批准与灰度(approve/use/promote/rollback):批准只认当前哈希,批准后\n"
-                 "原子落 package-store,点名 canary 新会话生效、旧任务照旧,回滚不删版本不抹账。\n"
+                 "原子落 package-store,点名 canary 新会话生效、旧任务照旧,回滚不删版本不抹账;\n"
+                 "阶段 5 propose 升级:同指纹簇攒够门槛(>=2 场独立任务且成功路序列同形)出\n"
+                 "组合候选(Skill+Workflow,全场工具面同形再加 Agent),否则照旧最小 Skill-only\n"
+                 "包;组合件须过 AnalyzePackage,过不了降档 Skill-only,不硬塞;评测与被测\n"
+                 "workflow 分家,批准页亮复杂度代价。\n"
                  "code-bearing 候选(带 Plugin/MCP)不走 approve,另过 Package trust。CI 入口:\n"
                  "  lubancode evolve test <候选目录> --baseline <父包目录> --json\n";
     TermOut().flush();
@@ -389,6 +395,15 @@ void RunEvolveShowCandidate(SlashDispatchContext& ctx, const std::string& target
     TermOut() << "  目录: " << lubancode::platform::PathToUtf8(found->dir) << "\n";
     TermOut() << "  整包哈希: " << (found->content_hash.empty() ? "(package/ 缺失)" : found->content_hash)
               << "\n";
+    // 形状照盘上现状说(组合/最小),复杂度顺带亮一笔。
+    {
+        const lubancode::evolution::ComplexityCost cost =
+            lubancode::evolution::ComputeComplexityCost(found->dir / "package");
+        if (!cost.shape.empty()) {
+            TermOut() << "  形状: " << (cost.shape == "combination" ? "组合包" : "最小 Skill-only 包")
+                      << ";复杂度 " << cost.SummaryLine() << "\n";
+        }
+    }
     if (found->record.has_value()) {
         const lubancode::evolution::EvolutionRecord& record = *found->record;
         TermOut() << "  候选版本: " << record.candidate_version;
@@ -462,8 +477,11 @@ void RunEvolveShowCandidate(SlashDispatchContext& ctx, const std::string& target
     TermOut().flush();
 }
 
-// ---- propose:从一场录制起草最小 content-only 候选 ----
+// ---- propose:从一场录制起草候选;簇够门槛出组合包,否则最小 Skill-only ----
 // 目标认两种:录制件 id,或观察 id(obs- 起头,须是 recording 来源)。
+// 阶段 5:先按观察账聚同 fingerprint 簇(>=2 场独立任务),再交
+// ProposeFromCluster——两把尺(成功路序列同形/全场工具面同形)在起草器里
+// 判;账上没有同类或只有这一场,簇就只有点名场,照旧 Skill-only。
 void RunEvolvePropose(SlashDispatchContext& ctx, const std::string& target) {
     const std::filesystem::path store_root = BuildStoreRoot(ctx);
     const std::filesystem::path candidate_root = BuildCandidateRoot(ctx);
@@ -491,7 +509,7 @@ void RunEvolvePropose(SlashDispatchContext& ctx, const std::string& target) {
         if (found->source != lubancode::evolution::ObservationSource::Recording) {
             TermOut() << "观察 \"" << target << "\" 的来源是 "
                       << lubancode::evolution::ToString(found->source)
-                      << ",阶段 2 只从 recording 起草。\n";
+                      << ",propose 只从 recording 起草。\n";
             TermOut().flush();
             return;
         }
@@ -505,24 +523,69 @@ void RunEvolvePropose(SlashDispatchContext& ctx, const std::string& target) {
         return;
     }
 
-    // 找录制件目录(盘上现查,不靠观察账转述)。
-    std::optional<lubancode::skills::RecordingStatus> status;
-    for (const lubancode::skills::RecordingStatus& item :
-         lubancode::skills::ListRecordings(*ctx.recordings_root)) {
-        if (item.id == recording_id) {
-            status = item;
-            break;
+    // 录制件盘点(盘上现查,不靠观察账转述)。
+    const std::vector<lubancode::skills::RecordingStatus> recordings =
+        lubancode::skills::ListRecordings(*ctx.recordings_root);
+    const auto find_recording = [&](const std::string& id) ->
+        std::optional<lubancode::skills::RecordingStatus> {
+        for (const lubancode::skills::RecordingStatus& item : recordings) {
+            if (item.id == id) {
+                return item;
+            }
         }
-    }
-    if (!status.has_value()) {
+        return std::nullopt;
+    };
+    const auto named = find_recording(recording_id);
+    if (!named.has_value()) {
         TermOut() << "找不到录制件 \"" << recording_id << "\"(先 /record 录一回,再 /evolve status)\n";
         TermOut().flush();
         return;
     }
 
+    // ---- 聚簇:点名场在前,账上同指纹的独立任务随后 ----
+    std::vector<lubancode::evolution::ClusterTaskMaterial> cluster;
+    {
+        lubancode::evolution::ClusterTaskMaterial head;
+        head.status = *named;
+        head.events = lubancode::skills::ReadRecordingEvents(named->dir);
+        cluster.push_back(std::move(head));
+    }
+    std::string fingerprint;
+    {
+        const std::vector<lubancode::evolution::EvolutionObservation> made =
+            lubancode::evolution::ObservationsFromRecording({cluster.front().status,
+                                                             cluster.front().events});
+        if (!made.empty()) {
+            fingerprint = made.front().fingerprint;
+        }
+    }
+    int cluster_skipped = 0;
+    if (!fingerprint.empty()) {
+        for (const lubancode::evolution::EvolutionObservation& observation : observations.Load()) {
+            if (cluster.size() >= 8) {
+                break;  // 簇帽:起草看形状,八场足矣
+            }
+            if (observation.source != lubancode::evolution::ObservationSource::Recording ||
+                observation.fingerprint != fingerprint) {
+                continue;
+            }
+            if (observation.source_id == recording_id) {
+                continue;  // 点名场已在
+            }
+            const auto other = find_recording(observation.source_id);
+            if (!other.has_value() || !other->finished) {
+                ++cluster_skipped;  // 录制件没了或没录完:不进簇
+                continue;
+            }
+            lubancode::evolution::ClusterTaskMaterial material;
+            material.status = *other;
+            material.events = lubancode::skills::ReadRecordingEvents(other->dir);
+            cluster.push_back(std::move(material));
+        }
+    }
+
     lubancode::evolution::EvolutionCoordinator coordinator(candidate_root, &observations);
-    const auto result = coordinator.ProposeRecording(
-        *status, lubancode::skills::ReadRecordingEvents(status->dir));
+    const auto result = coordinator.ProposeFromCluster(cluster);
     if (!result.has_value()) {
         TermOut() << "起草失败: " << result.error() << "\n";
         TermOut().flush();
@@ -533,9 +596,28 @@ void RunEvolvePropose(SlashDispatchContext& ctx, const std::string& target) {
               << result->candidate_version << "]\n";
     TermOut() << "  整包哈希: " << result->content_hash << "\n";
     TermOut() << "  目录: " << lubancode::platform::PathToUtf8(result->candidate_dir) << "\n";
-    TermOut() << "  组件: " << result->skill_rel_path << "(content-only,无进程无网络)\n";
-    TermOut() << "  下一步: /evolve test " << result->candidate_id << "(评测五道门)或 /evolve show "
-              << result->candidate_id << "\n";
+    // 分档亮形:组合还是最小包,簇多大,组件几件。
+    if (result->shape == "combination") {
+        TermOut() << "  形状: 组合候选(簇 " << result->cluster_size
+                  << " 场同形任务;两把尺过门)——workflow" << (result->agent_drafted ? " + Agent" : "")
+                  << " + Skill\n";
+    } else {
+        TermOut() << "  形状: 最小 Skill-only 包(默认答案;Agent 是升档不是标配)\n";
+    }
+    TermOut() << "  组件: ";
+    for (std::size_t i = 0; i < result->component_paths.size(); ++i) {
+        TermOut() << (i > 0 ? ", " : "") << result->component_paths[i];
+    }
+    TermOut() << "(content-only,无进程无网络)\n";
+    if (!result->downgrade_note.empty()) {
+        TermOut() << "  降档: " << Ellipsize(result->downgrade_note, 160) << "\n";
+    }
+    if (cluster_skipped > 0) {
+        TermOut() << "  注: 簇外另有 " << cluster_skipped
+                  << " 条同指纹观察找不到可读录制件,未进簇\n";
+    }
+    TermOut() << "  下一步: /evolve diff " << result->candidate_id << "(分档看形状)或 /evolve test "
+              << result->candidate_id << "(评测五道门)\n";
     TermOut().flush();
 }
 
@@ -550,15 +632,32 @@ void RunEvolveDiff(SlashDispatchContext& ctx, const std::string& target) {
     }
     TermOut() << "候选 " << result->candidate_id << "(" << result->package_id << ")对照 "
               << result->baseline << ":\n";
+    TermOut() << "  形状: " << (result->shape == "combination" ? "组合包(workflow/agent + skill)"
+                                                              : "最小 Skill-only 包")
+              << "\n";
     TermOut() << "  新增文件(" << result->added.size() << "):\n";
     for (const lubancode::evolution::EvolutionCoordinator::DiffFile& file : result->added) {
-        TermOut() << "    + " << file.rel << "  " << file.size << " 字节  "
+        TermOut() << "    + " << file.rel << "  [" << file.kind << "]  " << file.size << " 字节  "
                   << file.hash.substr(0, 19) << "\n";
     }
     if (!result->skill_summary.empty()) {
         TermOut() << "  SKILL 正文摘要:\n" << result->skill_summary;  // 摘要自带换行
     } else {
         TermOut() << "  (包里没有 skills/*/SKILL.md)\n";
+    }
+    // ---- 阶段 5:组合件分档摘要 ----
+    if (!result->workflow_summary.empty()) {
+        TermOut() << "  Workflow:\n    " << result->workflow_summary << "\n";
+        for (const std::string& failure : result->workflow_failures) {
+            TermOut() << "    失败路: " << failure << "\n";
+        }
+    }
+    if (!result->agent_summary.empty()) {
+        TermOut() << "  Agent:\n    " << result->agent_summary << "\n";
+    }
+    if (result->shape == "combination") {
+        TermOut() << "  注: 组合件只经静态校验与来源回放夹具;评测执行不起它"
+                     "(评测与被测分家)\n";
     }
     TermOut().flush();
 }
@@ -704,6 +803,13 @@ void RunEvolveApprove(SlashDispatchContext& ctx, const std::string& target) {
                 TermOut() << (i > 0 ? ", " : "") << brief.eval_task_ids[i];
             }
             TermOut() << "\n";
+        }
+    }
+    // 阶段 5:复杂度代价照实亮——组合包比最小 Skill 包多出的组件数与维护面。
+    if (brief.complexity.has_value() && !brief.complexity->shape.empty()) {
+        TermOut() << "  复杂度代价: " << brief.complexity->SummaryLine() << "\n";
+        if (brief.complexity->extra_components > 0) {
+            TermOut() << "    (不是组件越多越容易晋升;批的是这份代价换来的编排)\n";
         }
     }
     TermOut() << "  安装位置: " << lubancode::platform::PathToUtf8(result->version_dir)
@@ -1020,6 +1126,10 @@ nlohmann::json BuildEvolveTestJson(const lubancode::evolution::EvolutionCoordina
     cost["acceptance_rate"] = metric_json(report.run_summary.acceptance_rate);
     summary["cost_vs_baseline"] = cost;
     summary["baseline_ref"] = report.run_summary.baseline_ref;
+    // 阶段 5:复杂度代价(组合包 vs 最小 Skill 包的组件数与维护面)。
+    if (report.run_summary.complexity.has_value()) {
+        summary["complexity"] = report.run_summary.complexity->ToJson();
+    }
     summary["verdict_text"] = BuildDeterministicVerdict(report.run_summary);
     out["summary"] = summary;
     out["exit_code"] = report.exit_code;

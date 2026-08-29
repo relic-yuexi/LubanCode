@@ -6,9 +6,12 @@
 propose/diff/reject），阶段 3 已落（评测与基线：静态门、确定性回放/留出、
 基线对照、`/evolve test` 与 CI JSON），阶段 4 已落（批准与安装：
 approve/use/promote/rollback、staging 原子落 version store、点名 canary、
-会话钉快照与哈希失效三处对账）。代码型候选、自动建议未落，命令与行为以
-实现后的程序为准。设计全文见 `todos/Package驱动的自进化闭环设计.todo`；Package
-清单与目录契约见 `todos/统一Package封装与组件挂载系统设计.todo`。
+会话钉快照与哈希失效三处对账），阶段 5 已落（组合包：同指纹簇攒够门槛起
+草 Skill+Workflow[+Agent] 组合候选，静态门过不了就地降档 Skill-only，评测
+与被测 workflow 分家，批准页亮复杂度代价）。代码型候选、自动建议未落，
+命令与行为以实现后的程序为准。设计全文见
+`todos/Package驱动的自进化闭环设计.todo`；Package 清单与目录契约见
+`todos/统一Package封装与组件挂载系统设计.todo`。
 
 ## 一句话
 
@@ -203,7 +206,9 @@ candidate-id；旧评测与旧批准不得沿用。
   `json_parses`（`path`）、`file_contains`（`path` + `text`）、`command`
   （`command`，按空白拆 argv 直接起进程，不经 shell 拼串，cwd=任务的
   workspace，超时吃 `budget.timeout_ms`）、`manual`。`path` 一律相对任务
-  的 `workspace`。
+  的 `workspace`。kind 白名单里没有（也不许有）"拿被测 workflow 跑一遍"
+  这种 kind——认不得的 kind 整份计划拒解析（阶段 5 钉的评测分家规矩，
+  见"组合包（阶段 5 落地）"）。
 - `baseline` 可另带 `fixture`：一份基线确定性指标账 JSON（相对候选目录），
   字段 `schema`(1)、`kind`、`ref`、`task_id`、`metrics`（七项全字段）、
   `unverified[]`。没附 `fixture` 的基线只做静态对照，代价对照如实记缺。
@@ -230,6 +235,12 @@ candidate-id；旧评测与旧批准不得沿用。
 `detail`、`outcome`、`note`）、`findings[]`（静态门的密钥/绝对路径发现：
 `kind`、`path`、`line`、`detail`，不回显密钥原文）、`notes[]`（预算越帽、
 夹具缺失一类的人话）。必填字段一概不动。
+
+阶段 5 的增补（只增不改）：行可带扩展字段 `complexity`（静态门行携带）：
+`shape`（`combination`/`skill-only`）、`has_workflow`、`has_agent`、
+`components`、`minimal_components`、`extra_components`、`files`、
+`minimal_files`、`extra_files`——组合包比最小 Skill 包多出的组件数与维护
+面，照实记账（见下"组合包（阶段 5 落地）"）。
 
 ## approval.json（schema 1）
 
@@ -426,7 +437,8 @@ memory 收 kind + 标题。日期、URL、绝对路径归一成 `<date>`/`<url>`
 ## 候选起草（阶段 2 落地）
 
 `/evolve propose <recording-id|observation-id>` 把一场 `/record` 录制变成
-最小 content-only Package Candidate：SKILL.md 复用现有 skill drafter
+最小 content-only Package Candidate（阶段 5 起簇够门槛可升组合档，见下
+"组合包"节）：SKILL.md 复用现有 skill drafter
 （偶然值抽象、失败重试折叠），另补一节"排错"收录连败无成功的稳定失败路；
 `package.yaml` 只写最小五字段，须过 manifest 严格解析。候选落
 `~/.lubancode/package-candidates/<包id>/<候选id>/`（目录形状如上"候选目录"
@@ -500,3 +512,71 @@ id、候选版本、父版与内容哈希；来源（run/goal/recording/memory/u
 批准与评测一并作废，重做候选。code-bearing 候选（带 Plugin/MCP 或有
 工具/权限差异）首版明拒，指路 Package trust 流程；native/core patch 永不
 进 `/evolve approve`。
+
+## 组合包（阶段 5 落地）
+
+阶段 2 的 propose 只出最小 Skill-only 包。阶段 5 升级 `/evolve propose`：
+先按观察账聚**同 fingerprint 簇**（点名场在前，账上同指纹的独立任务随后，
+簇帽八场；录制件已删或没录完的不进簇），再交起草器判两把尺。
+
+**提炼门槛两把尺**（"同形怎么判"的口径）：
+
+| 尺 | 判什么 | 口径 |
+| --- | --- | --- |
+| 尺一（Workflow 档） | 稳定编排 | 簇 ≥2 场独立任务，且各场**成功路折叠序列**同形：`tool_call` 事件按连续同名折叠（与观察指纹同一折叠口径）后只数**最终成功**的步子，各场的工具名序列（名字、次数、次序）完全一致；步数 ≥2（单步的稳定做法归 Skill，不算编排） |
+| 尺二（Agent 档，更严） | 稳定角色 | 尺一之上，各场**全场工具面**也同形：含失败尝试在内出现过的每一个工具名都一致 |
+
+编排看成功路，角色看整个工具面——失败重试里摸过的工具也是这只角色的
+习惯，面不同就不封同一只 Agent。同一场里"失败→成功"的重试折进同一步
+（不算稳定失败）；连败不附成功的工具不在成功路上，进失败路。
+
+**组合包形状**（够门槛才出；形状照官方 `examples/packages/browser/`）：
+
+```text
+package/
+  package.yaml                     最小五字段(id 仍 evolve.<slug>)
+  skills/<slug>/SKILL.md           阶段 2 同款(含"排错"节)
+  workflows/<slug>-flow/workflow.yaml   节点=成功路折叠步(type: tool),
+                                       失败路写进头注释与 description
+  agents/<slug>-agent.yaml              尺二过门才添:tools.allow 照观察
+                                       到的实际面,skills.preload 预装包内
+                                       Skill(包内短名,挂载层折 canonical)
+```
+
+偶然值照 §8.2 抽：各场同值（抽象后）的入参留字面量，异值的提成 workflow
+输入 `${inputs.step<N>_<key>}`（各场示例进 description）；各场不一致的
+嵌套入参不焊死，注记在 workflow 头注释。失败路（阶段 2 已抽的稳定失败
+模式，簇内并账）不排进成功链——编排只走成功路，连败的工具以头注释与
+description 记下"遇此先换路"，排错细节在同包 SKILL 的"排错"节。验收用
+可执行检查器：组合候选的 eval-plan replay 带 `file_exists`/`file_contains`
+一类对象式检查（workspace=候选目录，只查包形状），人工口述照列。
+
+**降档路径（不硬塞）**：组合件落盘后立刻过静态门（`AnalyzePackage` 的
+引用闭合、canonical 名、无越界 + 密钥/绝对路径扫描）。过不了就地删掉
+`workflows/` 与 `agents/`、降回 Skill-only，诊断进 `state.jsonl` 迁移账与
+propose 回执（`prompt_revision` 记 `evolution-stage5-downgraded`），演化账
+按降档后的形状记组件。降档后的包必须真过静态门，不带病落盘。
+
+**评测 Workflow 与被测 Workflow 分家**：候选包里若带 workflow，评测计划
+的执行**不得用被测 workflow 自己跑**。评测执行只有阶段 3 的确定性检查器
+（`file_exists`/`json_parses`/`file_contains`/`command`），workflow 组件只做
+静态校验 + 来源回放的夹具。acceptance 的 kind 白名单里没有"跑被测
+workflow"这种 kind，认不得的 kind 整份计划拒解析——这道门在解析层钉死。
+
+**复杂度代价栏**：评测账的静态门行带 `complexity` 扩展字段——组合包比
+最小 Skill 包多出的组件数（skills+workflows+agents 对 1 件）与维护面
+（文件数对 2 个）。`/evolve show`、`/evolve test`、批准页、CI JSON 都照实
+亮。**不是组件越多越容易晋升**：组合候选的批准页多一行"复杂度代价"，
+组件多出的部分须由编排的收益来换，评测与批准照常走五道门。
+
+**命令面**：`/evolve propose <recording-id|observation-id>` 照旧一个入口——
+簇够两把尺的门槛出组合候选（回执亮形状、簇大小、组件清单），否则照旧
+Skill-only（回执明写"最小 Skill-only 包(默认答案)"）。`/evolve diff` 分档
+展示（文件带 `[skill]`/`[workflow]`/`[agent]` 标签，workflow 摘要列节点链
+与失败路，Agent 摘要列工具面与预装 Skill）；`/evolve show` 亮形状与复杂度。
+
+验收钉子（单测 `tests/unit/evolution/test_evolution_stage5.cpp`）：同形
+两场 → 组合候选（workflow 过 parser 与结构校验、Agent 过 parser、整包过
+静态门、diff 见 workflow+agent）；单场或组合不稳 → Skill-only；悬空引用
+的组合 → 降档 Skill-only 带诊断；评测计划只带确定性检查器（分家）；
+复杂度栏组合 > 最小档。

@@ -130,6 +130,30 @@ struct ScanFinding {
 // eval-results.jsonl(行 schema 1,只追加)
 // ---------------------------------------------------------------------------
 
+// 复杂度代价(阶段 5):组合包比最小 Skill 包多出的组件数与维护面。
+// 计法:components = 包内 skill + workflow + agent 件数;最小可行包 = 1 件
+// (一份 Skill);files 按包内全部文件对"清单 + 一份 SKILL.md"多出的数。
+// 评测账的静态门行带它,批准页照实亮——不是组件越多越容易晋升。
+struct ComplexityCost {
+    std::string shape;          // "combination" / "skill-only"
+    bool has_workflow = false;
+    bool has_agent = false;
+    int components = 0;         // skills + workflows + agents
+    int minimal_components = 1; // 最小可行包:一份 Skill
+    int extra_components = 0;   // components - minimal
+    int files = 0;              // 包内全部文件(含 package.yaml)
+    int minimal_files = 2;      // package.yaml + SKILL.md
+    int extra_files = 0;        // files - minimal_files
+
+    nlohmann::json ToJson() const;
+    static std::optional<ComplexityCost> FromJson(const nlohmann::json& json);
+    // 一行人话(批准页/判词用):组合包亮代价,Skill-only 亮"最小包"。
+    std::string SummaryLine() const;
+};
+
+// 从候选 package/ 目录盘点复杂度代价(只读;目录读不动给 shape 空串)。
+ComplexityCost ComputeComplexityCost(const std::filesystem::path& package_dir);
+
 struct EvalResultLine {
     int schema = 1;
     std::int64_t seq = 0;          // 账内递增,由落账方(Coordinator)编
@@ -146,6 +170,9 @@ struct EvalResultLine {
     std::vector<CheckResult> checks;    // 扩展:逐项检查账
     std::vector<ScanFinding> findings;  // 扩展:静态门的密钥/绝对路径发现
     std::vector<std::string> notes;     // 扩展:预算越帽/夹具缺失一类的人话
+    // 扩展(阶段 5):复杂度代价——组合包比最小 Skill 包多出的组件数与
+    // 维护面。静态门行携带;批准页与 CI JSON 照实亮。
+    std::optional<ComplexityCost> complexity;
 
     nlohmann::json ToJson() const;
     static std::optional<EvalResultLine> FromJson(const nlohmann::json& json);
@@ -191,6 +218,11 @@ struct TaskRunResult {
     bool fixture_missing = false;  // workspace 给了却不在盘上:没测,不是测砸
 };
 
+// 评测 Workflow 与被测 Workflow 分家(阶段 5 钉死):任务门的"执行"只有
+// 确定性检查器(file_exists/json_parses/file_contains/command),永远不起
+// 候选包里的 workflow 自己跑——workflow 组件只做静态校验与来源回放的
+// 夹具,免得自己给自己打分。acceptance 的 kind 白名单里没有(也不许有)
+// "拿被测 workflow 跑一遍"这种 kind:认不得的 kind 整份计划拒解析。
 TaskRunResult RunEvalTask(const std::string& gate, const EvalTask& task,
                           const std::string& candidate_id, const std::string& content_hash,
                           const std::filesystem::path& candidate_dir, const EvalPlan& plan);
@@ -249,6 +281,7 @@ struct EvalSummary {
     MetricDelta wall_clock_ms;
     MetricDelta permission_prompts;
     MetricDelta workspace_writes;
+    std::optional<ComplexityCost> complexity;  // 阶段 5:最近一带账静态行的复杂度代价
 
     bool any_fail() const {
         return static_gate.fail > 0 || replay.fail > 0 || holdout.fail > 0 || baseline.fail > 0;

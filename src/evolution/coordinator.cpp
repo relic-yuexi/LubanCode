@@ -14,11 +14,13 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/agent_definition.hpp"
 #include "evolution/adapters.hpp"
 #include "evolution/drafter.hpp"
 #include "evolution/eval.hpp"
 #include "hooks/hash.hpp"
 #include "platform/paths.hpp"
+#include "workflow/parser.hpp"
 
 namespace lubancode::evolution {
 
@@ -26,6 +28,32 @@ namespace {
 
 std::string PathToUtf8(const std::filesystem::path& path) {
     return lubancode::platform::PathToUtf8(path);
+}
+
+// UTF-8 边界截断(命令层 Ellipsize 同款:从切口往回退,不吐残缺多字节)。
+std::string TruncateUtf8(const std::string& text, std::size_t cap) {
+    if (text.size() <= cap) {
+        return text;
+    }
+    std::size_t end = cap;
+    while (end > 0 && (static_cast<unsigned char>(text[end]) & 0xC0) == 0x80) {
+        --end;
+    }
+    return text.substr(0, end) + "…";
+}
+
+// 按行切(吞 \r;末行无换行也收)。
+std::vector<std::string> SplitLines(const std::string& text) {
+    std::vector<std::string> lines;
+    std::istringstream stream(text);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (!line.empty() && line.back() == '\r') {
+            line.pop_back();
+        }
+        lines.push_back(line);
+    }
+    return lines;
 }
 
 // 本地日期 "YYYYMMDD"(候选 id 的日期段按本地时区)。
@@ -326,6 +354,7 @@ std::expected<EvolutionCoordinator::TestReport, std::string> EvolutionCoordinato
             line.notes.push_back(static_result.errors[i]);
         }
         line.unverified.push_back("compat-range");  // doctor 没喂当前版本,兼容范围没查
+        line.complexity = ComputeComplexityCost(candidate_dir / "package");  // 阶段 5:复杂度代价
         line.recorded_at = IsoNowUtc();
         to_append.push_back(std::move(line));
     }
@@ -567,6 +596,15 @@ EvolutionCoordinator::BuildApprovalBrief(const std::string& candidate_id) {
     brief.tools_added = record.changes.tools_added;
     brief.tier = "content-only";  // code-bearing 在 Approve 的门上明拒,进不了页
     brief.eval_summary = SummarizeEvalLedger(rows);
+    // 复杂度代价(阶段 5):评测账带了照账;没带(旧候选)从盘上现盘。
+    if (brief.eval_summary.has_value() && brief.eval_summary->complexity.has_value()) {
+        brief.complexity = brief.eval_summary->complexity;
+    } else {
+        const ComplexityCost on_disk = ComputeComplexityCost(found->dir / "package");
+        if (!on_disk.shape.empty()) {
+            brief.complexity = on_disk;
+        }
+    }
     for (const EvalResultLine& row : rows) {
         if ((row.gate == "replay" || row.gate == "holdout") && !row.task_id.empty()) {
             // 任务样例:同 gate 同任务只记头一回(重跑评测账只追加)。
@@ -875,26 +913,52 @@ std::expected<EvolutionCoordinator::RollbackResult, std::string> EvolutionCoordi
 std::expected<EvolutionCoordinator::ProposeResult, std::string>
 EvolutionCoordinator::ProposeRecording(
     const skills::RecordingStatus& status, const std::vector<skills::RecordEvent>& events) {
+    ClusterTaskMaterial material;
+    material.status = status;
+    material.events = events;
+    return ProposeFromCluster({std::move(material)});
+}
+
+std::expected<EvolutionCoordinator::ProposeResult, std::string>
+EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>& tasks) {
+    if (tasks.empty()) {
+        return std::unexpected("簇是空的,起不出候选");
+    }
     // ---- 拒绝门:被拒 fingerprint 的同类不再起草(契约:不死缠) ----
-    const RecordingMaterial material{status, events};
-    const std::vector<EvolutionObservation> observations = ObservationsFromRecording(material);
-    if (observations.empty()) {
-        return std::unexpected("录制件 \"" + status.id + "\" 没录完(缺 record_stop),起不出候选");
+    std::vector<EvolutionObservation> observations;
+    observations.reserve(tasks.size());
+    for (const ClusterTaskMaterial& task : tasks) {
+        const RecordingMaterial material{task.status, task.events};
+        const std::vector<EvolutionObservation> made = ObservationsFromRecording(material);
+        if (made.empty()) {
+            return std::unexpected("录制件 \"" + task.status.id +
+                                   "\" 没录完(缺 record_stop),起不出候选");
+        }
+        observations.push_back(made.front());
     }
     const EvolutionObservation& observation = observations.front();
-    if (observations_ != nullptr) {
-        const auto appended = observations_->Append(observation);
-        if (!appended.has_value()) {
-            return std::unexpected("观察落账失败: " + appended.error());
+    for (const EvolutionObservation& other : observations) {
+        if (other.fingerprint != observation.fingerprint) {
+            return std::unexpected("簇内指纹不一致(\"" + observation.source_id + "\" 对 \"" +
+                                   other.source_id + "\"),不是同类经验,起不出组合候选");
         }
-        if (*appended == ObservationStore::AppendStatus::SuppressedRejected) {
-            return std::unexpected("同类经验已被拒绝过(" + observation.fingerprint +
-                                   "),不再起草;内容未变的同款不会重提");
+    }
+    if (observations_ != nullptr) {
+        for (const EvolutionObservation& item : observations) {
+            const auto appended = observations_->Append(item);
+            if (!appended.has_value()) {
+                return std::unexpected("观察落账失败: " + appended.error());
+            }
+            if (&item == &observation &&
+                *appended == ObservationStore::AppendStatus::SuppressedRejected) {
+                return std::unexpected("同类经验已被拒绝过(" + observation.fingerprint +
+                                       "),不再起草;内容未变的同款不会重提");
+            }
         }
     }
 
-    // ---- 起草(纯函数)与身份 ----
-    const auto draft = DraftSkillCandidate(status, events);
+    // ---- 起草(纯函数,两把尺在里头)与身份 ----
+    const auto draft = DraftEvolutionCandidate(tasks);
     if (!draft.has_value()) {
         return std::unexpected(draft.error());
     }
@@ -902,18 +966,74 @@ EvolutionCoordinator::ProposeRecording(
     const std::string candidate_id = NextCandidateId(root_, date);
     const std::filesystem::path candidate_dir = store_.CandidateDir(draft->package_id, candidate_id);
 
-    // ---- 落盘:先 package/ 两份文本 ----
+    // ---- 落盘:先 package/ 全部文本 ----
     const std::string skill_rel = "skills/" + draft->skill_slug + "/SKILL.md";
+    std::string workflow_rel;
+    std::string agent_rel;
     if (!WriteFileBytes(candidate_dir / "package" / "package.yaml", draft->package_yaml) ||
         !WriteFileBytes(candidate_dir / "package" / lubancode::platform::Utf8ToPath(skill_rel),
                         draft->skill_markdown)) {
         return std::unexpected("写候选包失败: " + PathToUtf8(candidate_dir));
     }
+    if (!draft->workflow_id.empty()) {
+        workflow_rel = "workflows/" + draft->workflow_id + "/workflow.yaml";
+        if (!WriteFileBytes(candidate_dir / "package" / lubancode::platform::Utf8ToPath(workflow_rel),
+                            draft->workflow_yaml)) {
+            return std::unexpected("写候选包 workflow 失败: " + PathToUtf8(candidate_dir));
+        }
+    }
+    if (draft->with_agent && !draft->agent_name.empty()) {
+        agent_rel = "agents/" + draft->agent_name + ".yaml";
+        if (!WriteFileBytes(candidate_dir / "package" / lubancode::platform::Utf8ToPath(agent_rel),
+                            draft->agent_yaml)) {
+            return std::unexpected("写候选包 Agent 失败: " + PathToUtf8(candidate_dir));
+        }
+    }
 
-    // ---- 复算整包哈希(照 Package 阶段 1 的盘点算法) ----
+    // ---- 组合件静态门(阶段 5):AnalyzePackage + 扫描过了一遍才认。
+    //      过不了就地降回 Skill-only——删掉 workflows/ 与 agents/,诊断进
+    //      状态账与 ProposeResult,不硬塞。 ----
+    std::string shape = workflow_rel.empty() && agent_rel.empty() ? "skill-only" : "combination";
+    std::string downgrade_note;
+    if (shape == "combination") {
+        const StaticGateResult combo_gate = RunStaticGate(candidate_dir / "package");
+        if (!combo_gate.pass()) {
+            std::string diagnostics;
+            for (std::size_t i = 0;
+                 i < combo_gate.errors.size() && i < combo_gate.findings.size() + 3 && i < 5; ++i) {
+                if (!diagnostics.empty()) {
+                    diagnostics += ";";
+                }
+                diagnostics += TruncateUtf8(combo_gate.errors[i], 160);
+            }
+            if (diagnostics.empty() && !combo_gate.findings.empty()) {
+                diagnostics = "扫描发现 " + std::to_string(combo_gate.findings.size()) + " 处";
+            }
+            std::error_code ec;
+            std::filesystem::remove_all(candidate_dir / "package" / "workflows", ec);
+            std::filesystem::remove_all(candidate_dir / "package" / "agents", ec);
+            workflow_rel.clear();
+            agent_rel.clear();
+            shape = "skill-only";
+            downgrade_note = "组合草稿过不了静态门(引用闭合/canonical 名/越界/扫描),已降回 "
+                             "Skill-only:" +
+                             (diagnostics.empty() ? "见 /evolve test 静态门" : diagnostics);
+        }
+    }
+
+    // ---- 复算整包哈希(照 Package 阶段 1 的盘点算法;降档后按最终形状算) ----
     const std::string content_hash = ComputeCandidateContentHash(candidate_dir / "package");
     if (content_hash.empty()) {
         return std::unexpected("复算候选整包哈希失败: " + PathToUtf8(candidate_dir / "package"));
+    }
+
+    // ---- 组件清单(演化账与 ProposeResult 共用;照降档后的最终形状) ----
+    std::vector<std::string> components = {skill_rel};
+    if (!workflow_rel.empty()) {
+        components.push_back(workflow_rel);
+    }
+    if (!agent_rel.empty()) {
+        components.push_back(agent_rel);
     }
 
     // ---- 演化账(schema 1) ----
@@ -923,9 +1043,14 @@ EvolutionCoordinator::ProposeRecording(
     record.candidate_version = draft->package_version + "-candidate.1";
     record.parent = std::nullopt;  // 无父明写 null,不假装升级
     record.objective = draft->objective;
-    record.sources.recording_ids = {status.id};
-    record.generator = {"builtin", "skill-drafter", "evolution-stage2"};
-    record.changes.components_added = {skill_rel};
+    record.sources.recording_ids = draft->recording_ids;
+    if (shape == "combination") {
+        record.generator = {"builtin", "combo-drafter", "evolution-stage5"};
+    } else {
+        record.generator = {"builtin", "skill-drafter",
+                             downgrade_note.empty() ? "evolution-stage2" : "evolution-stage5-downgraded"};
+    }
+    record.changes.components_added = components;
     record.created_at = IsoNowUtc();
     if (!WriteFileBytes(candidate_dir / "evolution.json", SerializeEvolutionRecord(record))) {
         return std::unexpected("写演化账失败: " + PathToUtf8(candidate_dir / "evolution.json"));
@@ -944,17 +1069,14 @@ EvolutionCoordinator::ProposeRecording(
         return std::unexpected("写批准账失败: " + PathToUtf8(candidate_dir / "approval.json"));
     }
 
-    // ---- 评测计划(阶段 3:replay 指回来源录制,验收留人工;夹具与留出
-    // 任务由用户/后续阶段补)与结果账(空文件) ----
+    // ---- 评测计划与结果账(空文件)----
+    // 评测分家(阶段 5):候选包里的 workflow 不进评测执行——workflow 组件
+    // 只做静态校验与来源回放的夹具。组合候选的 replay 验收带可执行检查器
+    // (file_exists/file_contains 查包形状),人工口述照列;Skill-only 照
+    // 阶段 3 的旧形状(验收留人工,确定性判不了就如实 skipped)。
     {
-        nlohmann::json plan;
-        plan["schema"] = 1;
-        plan["candidate_id"] = candidate_id;
-        plan["content_hash"] = content_hash;
-        // 来源回放占位:任务是录制目标,验收是录制时的口述——确定性检查器
-        // 判不了人话,/evolve test 会如实记 skipped + manual-acceptance。
         std::string acceptance_text;
-        for (const skills::RecordEvent& event : events) {
+        for (const skills::RecordEvent& event : tasks.front().events) {
             if (event.type == skills::kEventRecordStart) {
                 const auto it = event.data.find("acceptance");
                 if (it != event.data.end() && it->is_string()) {
@@ -965,11 +1087,34 @@ EvolutionCoordinator::ProposeRecording(
         if (acceptance_text.empty()) {
             acceptance_text = "按录制口述人工验收";
         }
+        nlohmann::json acceptance = nlohmann::json::array({acceptance_text});
+        if (shape == "combination") {
+            acceptance.push_back(nlohmann::json{{"kind", "file_exists"},
+                                                {"path", "package" + std::string("/") + skill_rel},
+                                                {"note", "SKILL 在包里"}});
+            if (!workflow_rel.empty()) {
+                acceptance.push_back(nlohmann::json{
+                    {"kind", "file_exists"}, {"path", "package/" + workflow_rel},
+                    {"note", "workflow 组件在(只做静态校验与夹具,评测不起它)"}});
+                acceptance.push_back(nlohmann::json{
+                    {"kind", "file_contains"}, {"path", "package/" + workflow_rel},
+                    {"text", "id: " + draft->workflow_id}, {"note", "workflow id 与目录一致"}});
+            }
+            if (!agent_rel.empty()) {
+                acceptance.push_back(nlohmann::json{
+                    {"kind", "file_exists"}, {"path", "package/" + agent_rel},
+                    {"note", "Agent 组件在(tools.allow 照观察到的实际面)"}});
+            }
+        }
+        nlohmann::json plan;
+        plan["schema"] = 1;
+        plan["candidate_id"] = candidate_id;
+        plan["content_hash"] = content_hash;
         plan["replay"] = nlohmann::json::array({nlohmann::json{
-            {"source_id", status.id},
+            {"source_id", tasks.front().status.id},
             {"task", draft->objective},
-            {"workspace", ""},
-            {"acceptance", nlohmann::json::array({acceptance_text})},
+            {"workspace", shape == "combination" ? std::string(".") : std::string("")},
+            {"acceptance", acceptance},
         }});
         plan["holdout"] = nlohmann::json::array();
         plan["baseline"] = {
@@ -989,8 +1134,15 @@ EvolutionCoordinator::ProposeRecording(
     }
 
     // ---- 状态账首行:observed -> drafted。写到这里候选才算齐 ----
+    std::string reason = "propose " + tasks.front().status.id;
+    if (shape == "combination") {
+        reason += "(组合候选:簇 " + std::to_string(tasks.size()) + " 场,两把尺过门)";
+    }
+    if (!downgrade_note.empty()) {
+        reason += "(降档: " + TruncateUtf8(downgrade_note, 240) + ")";
+    }
     const auto state = AppendState(candidate_dir, CandidateState::Observed, CandidateState::Drafted,
-                                   "user", "propose " + status.id);
+                                   "user", reason);
     if (!state.has_value()) {
         return std::unexpected(state.error());
     }
@@ -1002,6 +1154,11 @@ EvolutionCoordinator::ProposeRecording(
     result.content_hash = content_hash;
     result.candidate_dir = candidate_dir;
     result.skill_rel_path = skill_rel;
+    result.shape = shape;
+    result.component_paths = components;
+    result.cluster_size = static_cast<int>(tasks.size());
+    result.agent_drafted = !agent_rel.empty();
+    result.downgrade_note = downgrade_note;
     return result;
 }
 
@@ -1129,7 +1286,31 @@ std::expected<EvolutionCoordinator::DiffResult, std::string> EvolutionCoordinato
         }
         file.is_skill = rel.rfind("skills/", 0) == 0 && rel.size() >= 9 + 7 &&
                         rel.compare(rel.size() - 9, 9, "/SKILL.md") == 0;
+        if (file.is_skill) {
+            file.kind = "skill";
+        } else if (rel.rfind("workflows/", 0) == 0 && rel.size() > 14 &&
+                   rel.compare(rel.size() - 14, 14, "/workflow.yaml") == 0) {
+            file.kind = "workflow";
+        } else if (rel.rfind("agents/", 0) == 0 && rel.size() > 5 &&
+                   rel.compare(rel.size() - 5, 5, ".yaml") == 0) {
+            file.kind = "agent";
+        } else if (rel == "package.yaml") {
+            file.kind = "manifest";
+        } else {
+            file.kind = "other";
+        }
         result.added.push_back(std::move(file));
+    }
+
+    // 分档形状:包里有 workflow 或 agent 就是组合档(照盘上现状说,不猜)。
+    for (const DiffFile& file : result.added) {
+        if (file.kind == "workflow" || file.kind == "agent") {
+            result.shape = "combination";
+            break;
+        }
+    }
+    if (result.shape.empty()) {
+        result.shape = "skill-only";
     }
 
     // SKILL 正文摘要:包里第一份 skills/*/SKILL.md。
@@ -1140,6 +1321,81 @@ std::expected<EvolutionCoordinator::DiffResult, std::string> EvolutionCoordinato
         if (const auto text = ReadFileText(package_dir / lubancode::platform::Utf8ToPath(file.rel));
             text.has_value()) {
             result.skill_summary = SummarizeSkillBody(*text);
+        }
+        break;
+    }
+
+    // ---- 阶段 5:组合件的摘要(diff 页分档展示) ----
+    for (const DiffFile& file : result.added) {
+        if (file.kind != "workflow") {
+            continue;
+        }
+        const auto text = ReadFileText(package_dir / lubancode::platform::Utf8ToPath(file.rel));
+        if (!text.has_value()) {
+            continue;
+        }
+        const auto definition = lubancode::workflow::LoadWorkflowDefinition(
+            package_dir / lubancode::platform::Utf8ToPath(file.rel));
+        if (!definition.has_value()) {
+            result.workflow_summary = "(workflow 解析不过: " +
+                                      (definition.error().empty()
+                                           ? std::string("无诊断")
+                                           : definition.error().front().message) +
+                                      ")";
+            continue;
+        }
+        std::string chain;
+        for (const auto& node : definition->nodes) {
+            if (node.kind != lubancode::workflow::NodeKind::Tool) {
+                continue;
+            }
+            if (!chain.empty()) {
+                chain += " -> ";
+            }
+            chain += node.tool.empty() ? node.id : node.tool;
+        }
+        std::size_t failure_count = 0;
+        for (const std::string& line : SplitLines(*text)) {
+            const std::size_t at = line.find("#   - ");
+            if (at == std::string::npos) {
+                continue;
+            }
+            result.workflow_failures.push_back(TruncateUtf8(line.substr(at + 6), 88));
+            ++failure_count;
+        }
+        result.workflow_summary = chain.empty() ? "(无工具节点)"
+                                                : chain + "(入口 " + definition->entry + ")";
+        if (failure_count > 0) {
+            result.workflow_summary += ";已知失败路 " + std::to_string(failure_count) + " 处";
+        }
+        break;  // 摘要只做第一份 workflow
+    }
+    for (const DiffFile& file : result.added) {
+        if (file.kind != "agent") {
+            continue;
+        }
+        const auto text = ReadFileText(package_dir / lubancode::platform::Utf8ToPath(file.rel));
+        if (!text.has_value()) {
+            continue;
+        }
+        const auto parsed =
+            lubancode::agent::ParseAgentDefinitionYaml(*text, "agents/" + file.rel);
+        if (!parsed.definition.has_value()) {
+            result.agent_summary = "(Agent 解析不过)";
+            break;
+        }
+        std::string face;
+        for (const std::string& tool : parsed.definition->tools.allow) {
+            if (!face.empty()) {
+                face += ", ";
+            }
+            face += tool;
+        }
+        result.agent_summary = file.rel + ":工具面 " +
+                               std::to_string(parsed.definition->tools.allow.size()) + " 件(" +
+                               TruncateUtf8(face, 96) + ")";
+        if (!parsed.definition->skills_preload.empty()) {
+            result.agent_summary += ";预装 Skill " + parsed.definition->skills_preload.front();
         }
         break;
     }

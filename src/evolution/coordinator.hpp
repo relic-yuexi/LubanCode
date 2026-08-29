@@ -1,19 +1,24 @@
-// 自进化闭环阶段 2/3/4:EvolutionCoordinator——候选状态机的唯一写口。
+// 自进化闭环阶段 2/3/4/5:EvolutionCoordinator——候选状态机的唯一写口。
 //
 // 契约铁律(README"候选状态机"):状态只许这一枚改。CLI、TUI、Workflow、
 // Agent 都不得各写一套迁移规矩。本类的职责:
-//   - ProposeRecording:一场录制 -> 最小 content-only 候选落盘(候选只落
-//     candidate store,不进 PackageCatalog,不进四层扫描目录);
+//   - ProposeFromCluster(阶段 5)/ProposeRecording:一个同 fingerprint 簇
+//     -> 候选落盘。簇攒够两把尺的门槛出组合包(Skill+Workflow[+Agent]),
+//     够不着照旧最小 Skill-only 包;组合件落盘后过 AnalyzePackage(引用
+//     闭合、canonical 名、无越界),过不了就地降回 Skill-only,不硬塞
+//     (候选只落 candidate store,不进 PackageCatalog,不进四层扫描目录);
 //   - Reject:任意非终态 -> rejected,approval.json 记 decision(含去重
 //     fingerprint),观察账 MarkRejected(被拒 fingerprint 不再重复进账,
 //     也不可再起草同类);
-//   - Diff:与父版或空对照,列新增文件与 SKILL 正文摘要(只读);
+//   - Diff:与父版或空对照,列新增文件(分档:skill/workflow/agent)与
+//     正文摘要(只读);
 //   - Test(阶段 3):评测五道门,结果只追加进 eval-results.jsonl;
+//     静态门行带复杂度代价(阶段 5);
 //   - Approve/Use/Promote/Rollback(阶段 4):批准绑当前哈希、staging 原子
 //     落 version store、点名 canary、晋升与回滚——迁状态的笔只有这里,
 //     store 机械走 VersionStore(promoter.hpp)。
 //
-// 写盘次序有讲究:先 package/ 两份文本,复算整包哈希,再落 evolution.json、
+// 写盘次序有讲究:先 package/ 全部文本,复算整包哈希,再落 evolution.json、
 // approval.json、eval-plan.json、eval-results.jsonl,最后写 state.jsonl 首行
 // (observed->drafted)。写到一半崩掉、连演化账都没落上的残缺目录,
 // CandidateStore::LoadAll 不认它作候选;落了演化账却缺状态账的,读取时按
@@ -27,6 +32,7 @@
 #include <vector>
 
 #include "evolution/candidate.hpp"
+#include "evolution/drafter.hpp"  // ClusterTaskMaterial 与组合起草(阶段 5)
 #include "evolution/eval.hpp"
 #include "evolution/observation_store.hpp"
 #include "evolution/promoter.hpp"  // VersionStore(阶段 4 的 store 机械)
@@ -50,10 +56,24 @@ public:
         std::string content_hash;
         std::filesystem::path candidate_dir;
         std::string skill_rel_path;  // 包内相对路径 skills/<id>/SKILL.md
+        // 阶段 5:分档与组合账
+        std::string shape;                        // "combination" / "skill-only"
+        std::vector<std::string> component_paths;  // 全部组件(包内相对路径,含 skill)
+        int cluster_size = 1;                      // 参与起草的场数
+        bool agent_drafted = false;                // 组合包是否带 Agent(尺二)
+        std::string downgrade_note;                // 组合降档 Skill-only 的诊断(空=没降)
     };
 
-    // 起草并落候选。观察先过拒绝门(被拒 fingerprint 的同类不再起草);
-    // 观察不在账里就顺手落账(重采幂等,由 ObservationStore 把守)。
+    // 起草并落候选(阶段 5 入口):收一个同 fingerprint 簇——首元素是点名
+    // 场(用户指的那条),余下是账上同指纹的独立任务。观察先过拒绝门(被
+    // 拒 fingerprint 的同类不再起草);观察不在账里就顺手落账(重采幂等,
+    // 由 ObservationStore 把守)。簇够两把尺的门槛出组合候选;组合件落盘后
+    // 过静态门(AnalyzePackage + 扫描),过不了就地降回 Skill-only,诊断进
+    // downgrade_note 与状态账。
+    std::expected<ProposeResult, std::string> ProposeFromCluster(
+        const std::vector<ClusterTaskMaterial>& tasks);
+
+    // 兼容入口(阶段 2):一场录制 = 单场簇,照旧最小 Skill-only 候选。
     std::expected<ProposeResult, std::string> ProposeRecording(
         const skills::RecordingStatus& status, const std::vector<skills::RecordEvent>& events);
 
@@ -107,6 +127,7 @@ public:
         std::size_t size = 0;
         std::string hash;     // "sha256:" + 64hex(单文件)
         bool is_skill = false;
+        std::string kind;     // skill / workflow / agent / manifest / other(分档展示)
     };
 
     struct DiffResult {
@@ -115,6 +136,11 @@ public:
         std::string baseline;  // "父版 <pkg>@<ver>(hash …)" 或 "(无父版,与空对照)"
         std::vector<DiffFile> added;
         std::string skill_summary;  // SKILL 正文摘要(节标题 + 要点行)
+        // 阶段 5:分档展示
+        std::string shape;                    // "combination" / "skill-only"
+        std::string workflow_summary;         // 节点链一行("read_file -> write_file;…")
+        std::vector<std::string> workflow_failures;  // 失败路一行一条(工具: 摘要)
+        std::string agent_summary;            // Agent 摘要(工具面 + 预装 Skill)
     };
 
     // 与父版或空对照(只读)。阶段 2 候选一律无父,即与空对照,全量列新增。
@@ -144,6 +170,9 @@ public:
         std::vector<std::string> eval_task_ids;   // replay/holdout 任务样例
         std::string install_dir_utf8;             // 安装位置(预览)
         std::string rollback_target_line;         // 回滚目标
+        // 阶段 5:复杂度代价照实亮(组合包比最小 Skill 包多出的组件数与
+        // 维护面;评测账在但没带 complexity 时也从盘上现盘)。
+        std::optional<ComplexityCost> complexity;
     };
 
     // 只读收集批准页材料(不过门、不迁状态;缺候选/缺评测账给错误)。
