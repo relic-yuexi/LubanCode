@@ -156,6 +156,12 @@
 - **PowerShell 脚本块的洞全堵了。** `where-object { del x }` 这类命令,黑名单原先只查首词就判 Safe——脚本块体内是任意代码。今下沉一份检测进 command_safety,Plan 与 Auto 两档共用;Auto 档的白名单与放行账两条暗路也前置同一道闸,命中拉回询问。yolo 与"总是允许"的显式全放照旧不拦(与 deny 待遇对齐)。引号内的 `{` 不误伤,cmd 无此语义不查。
 - **turn_view 高并发假红治净。** 心跳两处吃墙钟的断言改限时重试(8 秒内满意即收),`-j 8` 三连跑零红;真坏了轮轮红,调度抖动至多多跑几轮。
 
+## [v0.26.92] - 2026-08-29
+
+- **Package 会看组件了(阶段 2,仍只读)。** 六类组件(Skill/Workflow/Agent/Prompt/plugin.json/mcp.yaml)一律过原生 parser 解析,包层零 schema 复制;`/package doctor` 列组件清单、引用解析全账与静态 MountPlan——哪件挂到哪张表、wire 名与展示名各是什么、依赖谁,一眼看清。不启动 Plugin 与 MCP。
+- **包内短引用成真。** 组件互引先在本包找,包外须写 `<包id>:<名>` 全名;悬空引用、wire 名超 64 帽、路径越界(`${package_dir}` 逃包根)任一命中即整包 invalid——但全件照解析逐件照报,不因第一个错停摆。
+- workflow 定义补收 `agent` 字段(包内短引用的钦定落点,旧 `role` 不动);工具 wire 编码收进 plugin_contract 一处(Encode/Decode/64 帽)。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
