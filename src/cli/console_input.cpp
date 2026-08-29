@@ -3503,6 +3503,17 @@ std::function<void(int)>& StreamScreenScrollHookSlot() {
     return hook;
 }
 
+// 问题二:忙碌期 slash 排队被拒时的一行人话。两档理由分开说——白名单外
+// (要即时交互/会改会话去向,等空闲再敲)与子代理目标(本地命令没有代理
+// 可执行)。命令词取 ParseSlashCommand 的原文,不猜用户敲了什么。
+std::string SlashQueueRejectionLine(const std::string& text, const MessageTarget& target) {
+    const ParsedSlashCommand parsed = ParseSlashCommand(text);
+    if (!target.is_main()) {
+        return trf("queue.slash_not_for_subagent", parsed.raw_word);
+    }
+    return trf("queue.slash_rejected_busy", parsed.raw_word);
+}
+
 }  // namespace
 
 void SetStreamScreenPrintHook(std::function<void()> hook) {
@@ -4901,7 +4912,26 @@ void TurnInputListener::ThreadMain() {
                 // 原位替换:保 id、目标、排队次序。版本对不上 = 那条已在工具
                 // 边界送走/被别处改过——提交失败,打一行提示,编辑器正文保留
                 // 当新草稿(再 Enter 即落新队),绝不"一边送旧文一边显示已保存"。
-                const auto status = steering.CommitEdit(*edit, editor_text_utf8());
+                // 问题二提交门:改写成 slash 也要过忙碌排队门(白名单外/子代理
+                // 目标的命令不进队列),拒绝时编辑事务保持开着,正文留着再改。
+                const std::string edited_text = editor_text_utf8();
+                if (!QueueTextAdmittedDuringBusy(edited_text, edit->target)) {
+                    {
+                        std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                        EraseStreamFooterLocked();
+                        TermOut() << "\n"
+                                  << theme_.error
+                                  << SlashQueueRejectionLine(edited_text, edit->target)
+                                  << theme_.reset << "\n";
+                        TermOut().flush();
+                        if (const auto& hook = StreamScreenPrintHookSlot()) {
+                            hook();  // 插打了整行,正文块的行数账作废(锁还攥着)
+                        }
+                    }
+                    refresh_footer();
+                    continue;
+                }
+                const auto status = steering.CommitEdit(*edit, edited_text);
                 if (status == SteeringQueue::CommitStatus::Ok) {
                     close_edit_clear();
                 } else {
@@ -4939,13 +4969,31 @@ void TurnInputListener::ThreadMain() {
             }
             // 落队:带目标的 QueuedMessage 进会话层队列,正文挪进上方队列区,
             // 输入行清空回占位提示。全空白不落。
+            // 问题二提交门:忙碌期的 slash 只放白名单内的 main 目标条目——
+            // 命令身份由正文自带(IsQueuedSlashText),工具边界让路,轮末经
+            // ProcessLine 本地执行;白名单外或投给子代理的命令明说拒绝入队,
+            // 不悄悄降成普通文字送给模型。拒绝的正文留在 composer 供当场改写。
             const std::string text = editor_text_utf8();
             if (!text.empty()) {
                 const std::optional<int> agent_target = GetComposerTarget();
-                steering.Enqueue(agent_target.has_value() ? MessageTarget::Agent(*agent_target)
-                                                          : MessageTarget::Main(),
-                                 text);
-                editor.BeginLine(/*composer=*/true);
+                const MessageTarget target = agent_target.has_value() ? MessageTarget::Agent(*agent_target)
+                                                                      : MessageTarget::Main();
+                if (!QueueTextAdmittedDuringBusy(text, target)) {
+                    {
+                        std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
+                        EraseStreamFooterLocked();
+                        TermOut() << "\n"
+                                  << theme_.error << SlashQueueRejectionLine(text, target) << theme_.reset
+                                  << "\n";
+                        TermOut().flush();
+                        if (const auto& hook = StreamScreenPrintHookSlot()) {
+                            hook();  // 插打了整行,正文块的行数账作废(锁还攥着)
+                        }
+                    }
+                } else {
+                    steering.Enqueue(target, text);
+                    editor.BeginLine(/*composer=*/true);
+                }
             }
             refresh_footer();
             continue;

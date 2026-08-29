@@ -13,16 +13,22 @@
 #include <vector>
 
 #include "cli/queue_model.hpp"
+#include "cli/slash_commands.hpp"
 
 using lubancode::cli::BuildQueueArchiveRows;
 using lubancode::cli::BuildQueueDisposalRows;
 using lubancode::cli::BuildSteeringQueueRows;
 using lubancode::cli::DeliveryMode;
+using lubancode::cli::IsQueuedSlashText;
 using lubancode::cli::MessageTarget;
+using lubancode::cli::ParseSlashCommand;
 using lubancode::cli::QueueItemState;
+using lubancode::cli::QueueTextAdmittedDuringBusy;
 using lubancode::cli::QueueTitleMode;
 using lubancode::cli::QueueViewOptions;
 using lubancode::cli::QueuedMessage;
+using lubancode::cli::SlashCommand;
+using lubancode::cli::SlashCommandQueueableDuringBusy;
 using lubancode::cli::SteeringQueue;
 using Status = SteeringQueue::CommitStatus;
 
@@ -423,4 +429,112 @@ TEST_CASE("BuildSteeringQueueRows:超上限加'另有 N 条',围着编辑条目�
     CHECK(rows[3].find("话2") != std::string::npos);
     CHECK(rows[3].find("编辑中") != std::string::npos);  // 编辑条目带标记
     CHECK(rows[4].find("话3") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 问题二(2026-08-29 实测:忙碌期排队的 /context 被包成 [用户排队消息] 送
+// 模型,轮末 ProcessLine 再也看不见它):slash 身份保留 + 工具边界让路 +
+// 提交门。跨 AgentLoop 的"工具边界早于轮末"回归在
+// tests/unit/agent/test_queue_slash_boundary.cpp。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("slash 身份:IsQueuedSlashText 与 ProcessLine 同一颗 ParseSlashCommand") {
+    CHECK(IsQueuedSlashText("/context"));
+    CHECK(IsQueuedSlashText("/HELP"));            // 命令词大小写不敏感
+    CHECK(IsQueuedSlashText("  /todos  "));       // 前后空白剥掉
+    CHECK(IsQueuedSlashText("/think high"));      // 带参数仍是完整命令
+    CHECK(IsQueuedSlashText("/不认得的词"));       // Unknown 也是 slash:轮末交给本地分派器打"不认得"
+    CHECK(IsQueuedSlashText("/context\n还有一行"));  // 多行整段:命令词认不认得都先按 slash 归宿走
+    CHECK_FALSE(IsQueuedSlashText("普通正文"));
+    CHECK_FALSE(IsQueuedSlashText("正文里带 /context 词"));  // 不以 / 起头
+    CHECK_FALSE(IsQueuedSlashText(""));
+    CHECK_FALSE(IsQueuedSlashText("   "));
+}
+
+TEST_CASE("工具边界让路:TakeDeliverable 跳过 slash,文字照旧按序;slash 留给轮末泵") {
+    SteeringQueue q;
+    q.Enqueue(MessageTarget::Main(), "文字一");
+    const auto slash_id = q.Enqueue(MessageTarget::Main(), "/context");
+    q.Enqueue(MessageTarget::Main(), "文字二");
+    q.Enqueue(MessageTarget::Agent(3), "/todos");  // 子代理目标的 slash 同样不进边界(兜旧档漏网)
+
+    // 工具边界:只取走普通文字,slash 两枚都留下。
+    auto batch = q.TakeDeliverable(MessageTarget::Main());
+    REQUIRE(batch.size() == 2);
+    CHECK(batch[0].text == "文字一");  // 文字之间保持落队顺序
+    CHECK(batch[1].text == "文字二");
+
+    auto snapshot = q.Snapshot();
+    REQUIRE(snapshot.size() == 2);
+    CHECK(snapshot[0].id == slash_id);  // /context 原样留队,没被边界抢走
+    CHECK(snapshot[1].text == "/todos");
+    CHECK(q.HasDeliverable(MessageTarget::Main()));    // 只剩 slash 仍是"还有没办完的事"
+    CHECK(q.HasDeliverable(MessageTarget::Agent(3)));  // 子代理目标同理
+
+    // 轮末泵:slash 也是待办,TakeFirstAutoSendable 照取队头。
+    auto head = q.TakeFirstAutoSendable(MessageTarget::Main());
+    REQUIRE(head.has_value());
+    CHECK(head->id == slash_id);
+    // 取走的这条经 ProcessLine 开头那颗 ParseSlashCommand 认得——轮末走的
+    // 是本地分派,不是模型。
+    CHECK(ParseSlashCommand(head->text).command == SlashCommand::Context);
+    CHECK_FALSE(q.HasDeliverable(MessageTarget::Main()));  // main 的办完了
+
+    // TakeFirstDeliverable 的让路规矩与批量版一致。
+    CHECK(q.TakeFirstDeliverable(MessageTarget::Agent(3)) == std::nullopt);
+    CHECK(q.size() == 1);
+}
+
+TEST_CASE("提交门:白名单内放行,白名单外与子代理目标的 slash 明拒") {
+    // 普通文字恒放行(不论目标——给子代理递话正是队列的本职)。
+    CHECK(QueueTextAdmittedDuringBusy("普通排队文字", MessageTarget::Main()));
+    CHECK(QueueTextAdmittedDuringBusy("给三号的补充", MessageTarget::Agent(3)));
+    // 单子点名的可排队样例 + 同类只读/维护面。
+    CHECK(QueueTextAdmittedDuringBusy("/context", MessageTarget::Main()));
+    CHECK(QueueTextAdmittedDuringBusy("/help", MessageTarget::Main()));
+    CHECK(QueueTextAdmittedDuringBusy("/todos", MessageTarget::Main()));
+    CHECK(QueueTextAdmittedDuringBusy("/compact 重点保住收尾清单", MessageTarget::Main()));
+    CHECK(QueueTextAdmittedDuringBusy("/think high", MessageTarget::Main()));
+    CHECK(QueueTextAdmittedDuringBusy("/effort low", MessageTarget::Main()));   // /think 别名
+    CHECK(QueueTextAdmittedDuringBusy("/bg", MessageTarget::Main()));           // /background 别名
+    CHECK(QueueTextAdmittedDuringBusy("/sessions all", MessageTarget::Main()));
+    // 菜单/向导类:轮末自动弹 ReadLine,用户不在场。
+    CHECK_FALSE(QueueTextAdmittedDuringBusy("/model", MessageTarget::Main()));
+    CHECK_FALSE(QueueTextAdmittedDuringBusy("/provider add x", MessageTarget::Main()));
+    CHECK_FALSE(QueueTextAdmittedDuringBusy("/peers", MessageTarget::Main()));
+    // 换场/毁档类:排队的旧命令不该悄悄改会话去向。
+    CHECK_FALSE(QueueTextAdmittedDuringBusy("/exit", MessageTarget::Main()));
+    CHECK_FALSE(QueueTextAdmittedDuringBusy("/quit", MessageTarget::Main()));
+    CHECK_FALSE(QueueTextAdmittedDuringBusy("/clear", MessageTarget::Main()));
+    CHECK_FALSE(QueueTextAdmittedDuringBusy("/resume 1", MessageTarget::Main()));
+    CHECK_FALSE(QueueTextAdmittedDuringBusy("/init", MessageTarget::Main()));
+    // 起工作/发模型类:那是排一轮活,不是本地命令。
+    CHECK_FALSE(QueueTextAdmittedDuringBusy("/plan", MessageTarget::Main()));
+    CHECK_FALSE(QueueTextAdmittedDuringBusy("/workflow run x", MessageTarget::Main()));
+    CHECK_FALSE(QueueTextAdmittedDuringBusy("/image a.png", MessageTarget::Main()));
+    // Unknown(含 workflow alias)一律不排:不认得的命令不进队列。
+    CHECK_FALSE(QueueTextAdmittedDuringBusy("/不认得", MessageTarget::Main()));
+    // 本地命令不投子代理:哪一档白名单内的都不行。
+    CHECK_FALSE(QueueTextAdmittedDuringBusy("/context", MessageTarget::Agent(3)));
+    CHECK_FALSE(QueueTextAdmittedDuringBusy("/help", MessageTarget::Agent(3)));
+    // 枚举口径直钉:Image/Unknown/Exit 不在白名单,Context/Help 在。
+    CHECK_FALSE(SlashCommandQueueableDuringBusy(SlashCommand::Image));
+    CHECK_FALSE(SlashCommandQueueableDuringBusy(SlashCommand::Unknown));
+    CHECK_FALSE(SlashCommandQueueableDuringBusy(SlashCommand::Exit));
+    CHECK(SlashCommandQueueableDuringBusy(SlashCommand::Context));
+    CHECK(SlashCommandQueueableDuringBusy(SlashCommand::Help));
+}
+
+TEST_CASE("队列区成行:排队 slash 带'轮末执行'标记,普通文字不带") {
+    std::vector<QueuedMessage> items;
+    items.push_back(QueuedMessage{1, MessageTarget::Main(), "/context"});
+    items.push_back(QueuedMessage{2, MessageTarget::Main(), "普通话"});
+    QueueViewOptions opt;
+    opt.visible_cap = 4;
+    const auto rows = BuildSteeringQueueRows(items, opt);
+    REQUIRE(rows.size() == 3);
+    CHECK(rows[1].find("轮末执行") != std::string::npos);  // slash 条目明说归宿
+    CHECK(rows[1].find("/context") != std::string::npos);
+    CHECK(rows[2].find("轮末执行") == std::string::npos);  // 普通文字不带
+    CHECK(rows[2].find("普通话") != std::string::npos);
 }

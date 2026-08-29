@@ -25,6 +25,7 @@
 #include <string>
 #include <vector>
 
+#include "cli/slash_commands.hpp"  // SlashCommand(忙碌排队白名单的判料)
 #include "platform/console.hpp"  // KeyInput::Kind(取回键判定)
 
 namespace lubancode::cli {
@@ -90,6 +91,12 @@ struct QueuedMessage {
     std::string note;         // TargetGone/Failed 的原因说明(展示用)
     std::uint64_t version = 1;  // 编辑事务版本:每次成功改写 +1
     bool edit_open = false;   // 编辑事务开着:投递冻结(见文件头注释)
+    // slash 身份不落字段:忙碌期排队的完整斜杠命令,身份每次从正文现折
+    // (IsQueuedSlashText,判法与 ProcessLine 同一颗 ParseSlashCommand)。
+    // 好处是永远不漂——Shift+← 取回改写、存档落盘、resume 灌回,身份天然
+    // 跟着正文走;要真存一枚旗子,编辑改写/存档恢复处处都得同步,漏一处
+    // 就是"字段说普通文、正文是命令"的两本账(问题二:忙碌期排队的
+    // /context 被当成普通消息送模型)。
     // 自动发送失败回还账(取走即消费单):会话泵把这条拿去自动发送、那轮
     // 却以请求失败收场时,ReturnToFront 原样还回队首并翻开这位。已试过一次
     // 的条目不再自动重发(防死循环):会话泵见它跳过,留队等用户手动处置
@@ -137,9 +144,12 @@ public:
     // ---- 投递 ----
     // 取走该目标的可投递条目(状态 Queued、非编辑冻结),按落队顺序;取走
     // 即出队(视为已送达,不再留在活队列)。跨目标互不影响。
+    // 问题二(忙碌期排队的 slash 被当普通消息送模型):slash 条目(IsQueued-
+    // SlashText)在这里一律让路——不随工具边界进模型,留在队列等轮末会话泵
+    // 经 ProcessLine 本地执行。普通文字照旧按落队顺序取走。
     std::vector<QueuedMessage> TakeDeliverable(MessageTarget target);
-    // 只取队头一条(会话泵"一条一条自动发送"用;一次边界多条的批量注入
-    // 走 TakeDeliverable)。没有可投递的给 nullopt。
+    // 只取队头一条(一次边界只送一条的场合;批量注入走 TakeDeliverable)。
+    // 没有可投递的给 nullopt。slash 让路规矩与 TakeDeliverable 同款。
     std::optional<QueuedMessage> TakeFirstDeliverable(MessageTarget target);
     // 出路二的失败退还(取走即消费单):TakeFirstDeliverable 拿去自动发送
     // 的那条,若那轮以请求失败收场,从这里塞回队首(attempts +1),原 id、
@@ -194,6 +204,54 @@ private:
 // /clear 与会话析构时 TakeAllForDisposal 清账。单测自建局部 SteeringQueue,
 // 不碰这份全局。
 SteeringQueue& SessionSteeringQueue();
+
+// ---------------------------------------------------------------------------
+// 忙碌期排队的 slash 命令(问题二:排队的 /context 被包成 [用户排队消息]
+// 直接送模型,轮末 ProcessLine 再也看不见它)
+//
+// 三层规矩:
+//   1. 身份保留:完整斜杠命令入队即认 slash,身份由正文自带(见
+//      QueuedMessage 的注释),不降成普通文本;
+//   2. 工具边界让路:TakeDeliverable 见 slash 跳过——不注入模型,留在
+//      队列;轮末会话泵(TakeFirstAutoSendable → ProcessLine)本地执行
+//      (打开 /context 的本地面板那类)。普通排队文字照旧在工具边界作
+//      steering 送模型;
+//   3. 提交门:不支持忙碌排队的命令提交时就明说拒绝入队(QueueText-
+//      AdmittedDuringBusy),不悄悄降级。
+// ---------------------------------------------------------------------------
+
+// 这行排队正文是不是完整斜杠命令。判法与 ProcessLine(interactive_
+// session.cpp:501-514)同源:ParseSlashCommand 认它不是 NotSlash 就是
+// (含 Unknown——轮末分派器自会打"不认得"/查 workflow alias,不是发
+// 模型,队列层不多嘴)。以 `/` 起头的整段都算:命令词认不认得都先按
+// slash 的归宿走,与空闲时敲同一串字的归宿一致(不过忙碌提交门会把
+// Unknown 拒在入队之前,见下)。
+bool IsQueuedSlashText(const std::string& text);
+
+// 忙碌期 slash 排队白名单(口径审过全部 51 案后定):
+//   放行 = 「轮末本地执行无害」——只读本地面板/清单类(help/context/
+//   todos/skills/mcp/lsp/plugins/tools/background/trace/config/package/
+//   evolve/agents/sessions:只打印,不动状态)与会话内维护类(compact/
+//   think/title/copy:效果即时可见、可逆,不换会话、不删档、不写项目
+//   文件、不发网络请求)。
+//   拒绝 = 其余全部,按病根分三类——
+//   - 菜单/向导类(model/provider/language/keymap/record/peers/send/
+//     peerperm 等):轮末自动弹出 ReadLine 选择器,用户不在场;
+//   - 换场/毁档类(clear/exit/archive/delete/resume/worktree/init/
+//     update/export/prompt/soul/skill/plugin/memory/hooks/doctor 等):
+//     一条排队的旧命令悄悄改掉会话去向或写盘,用户早忘了排过它;
+//   - 起工作/发模型类(plan/goal/loop/workflow/image 等):那是排一轮
+//     活,不是本地命令,想续话排普通文字即可。Unknown(含 workflow
+//     alias)一律不排:不认得的命令不进队列。
+// 默认从严:新命令不进这张表就先拒,审明白再放。
+bool SlashCommandQueueableDuringBusy(SlashCommand command);
+
+// 忙碌期提交门:这行正文可不可排进队列(拦截点在流式 footer 的 Enter
+// 与排队条目编辑的 CommitEdit)。普通文字恒放行;slash 须同时满足
+// 「目标是 main」(本地命令没有子代理可执行,递给代理只会变成喂它的
+// 一行字)与「命令在白名单内」。拒绝时调用方明说原因,正文留在
+// composer 供当场改写。
+bool QueueTextAdmittedDuringBusy(const std::string& text, MessageTarget target);
 
 // -----------------------------------------------------------------------
 // 清账告知(取走即消费单路径三:淡字换醒目)

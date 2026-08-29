@@ -135,6 +135,14 @@ std::vector<QueuedMessage> SteeringQueue::TakeDeliverable(MessageTarget target) 
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<QueuedMessage> out;
     for (auto it = items_.begin(); it != items_.end();) {
+        // 问题二:slash 条目在工具边界让路——不进注入批次,留在队列等
+        // 轮末会话泵经 ProcessLine 本地执行。跳过不分目标(main 与子代理
+        // 一致:本地命令哪边都不该喂模型;子代理目标的新提交已被提交门
+        // 拦下,这里兜住旧档恢复进来的漏网)。
+        if (IsQueuedSlashText(it->text)) {
+            ++it;
+            continue;
+        }
         if (it->target == target && it->state == QueueItemState::Queued && !it->edit_open) {
             out.push_back(std::move(*it));
             it = items_.erase(it);
@@ -148,6 +156,9 @@ std::vector<QueuedMessage> SteeringQueue::TakeDeliverable(MessageTarget target) 
 std::optional<QueuedMessage> SteeringQueue::TakeFirstDeliverable(MessageTarget target) {
     std::lock_guard<std::mutex> lock(mutex_);
     for (auto it = items_.begin(); it != items_.end(); ++it) {
+        if (IsQueuedSlashText(it->text)) {
+            continue;  // slash 让路,规矩与 TakeDeliverable 同款
+        }
         if (it->target == target && it->state == QueueItemState::Queued && !it->edit_open) {
             std::optional<QueuedMessage> out = std::move(*it);
             items_.erase(it);
@@ -352,6 +363,60 @@ SteeringQueue& SessionSteeringQueue() {
     return queue;
 }
 
+// ---------------------------------------------------------------------------
+// 忙碌期排队的 slash 命令(问题二):身份判法、白名单、提交门
+// ---------------------------------------------------------------------------
+
+bool IsQueuedSlashText(const std::string& text) {
+    // 与 ProcessLine 同一颗脑袋:ParseSlashCommand 只看"剥过空白后是否以
+    // / 起头"。Unknown 也算——轮末 ProcessLine 对它走的是本地分派器
+    // (打"不认得"/查 workflow alias),不是发模型,身份口径两边必须一致。
+    return ParseSlashCommand(text).command != SlashCommand::NotSlash;
+}
+
+bool SlashCommandQueueableDuringBusy(SlashCommand command) {
+    // 口径全文见 queue_model.hpp 的声明注释(审过 51 案):只读本地面板/
+    // 清单 + 会话内维护,默认从严。
+    switch (command) {
+        case SlashCommand::Help:      // 帮助清单,只打印
+        case SlashCommand::Context:   // 上下文占用面板/临时窗口档位,本会话内可逆
+        case SlashCommand::Compact:   // 历史压缩,会话内维护(单子点名的可排队样例)
+        case SlashCommand::Think:     // 看/改推理档位,下一请求生效,可逆
+        case SlashCommand::Todos:     // 待办清单,只打印
+        case SlashCommand::Skills:    // 技能清单,只打印
+        case SlashCommand::Mcp:       // MCP 服务器状态,只打印
+        case SlashCommand::Lsp:       // LSP 状态,只打印
+        case SlashCommand::Plugins:   // 插件三路与警告,只打印
+        case SlashCommand::Tools:     // 工具三态,只打印
+        case SlashCommand::Background:  // 后台任务清单,只打印
+        case SlashCommand::Trace:     // 逐枚追踪账,只读
+        case SlashCommand::Config:    // 配置诊断,只打印
+        case SlashCommand::Package:   // Package 只读面(list/show/doctor)
+        case SlashCommand::Evolve:    // 自进化观察账,只读
+        case SlashCommand::Agents:    // Agent Catalog,只读
+        case SlashCommand::Sessions:  // 会话存档列表,只读
+        case SlashCommand::Title:     // 看/设会话标题,元数据无害
+        case SlashCommand::Copy:      // 复制上一段答话到剪贴板,本地只读
+            return true;
+        default:
+            // 菜单/向导类、换场/毁档类、起工作/发模型类、Unknown(含
+            // workflow alias):一律不排队,提交门明拒(理由分类见头注释)。
+            return false;
+    }
+}
+
+bool QueueTextAdmittedDuringBusy(const std::string& text, MessageTarget target) {
+    const ParsedSlashCommand parsed = ParseSlashCommand(text);
+    if (parsed.command == SlashCommand::NotSlash) {
+        return true;  // 普通排队文字:照旧在工具边界作 steering 送模型
+    }
+    // 本地命令只认 main 账本:子代理目标收不到本地执行,递过去只是喂模型。
+    if (!target.is_main()) {
+        return false;
+    }
+    return SlashCommandQueueableDuringBusy(parsed.command);
+}
+
 // -----------------------------------------------------------------------
 // 显示成行
 // -----------------------------------------------------------------------
@@ -438,6 +503,12 @@ std::vector<std::string> BuildSteeringQueueRows(const std::vector<QueuedMessage>
         }
         if (!item.target.is_main()) {
             prefix += trf("queue.mark.target", item.target.task_id);
+        }
+        if (IsQueuedSlashText(item.text)) {
+            // 问题二:排队 slash 的语义与普通文字不同(轮末本地执行,不送
+            // 模型),队列区明说,不留"排的是本地命令、送的却是模型消息"的
+            // 误会。
+            prefix += tr("queue.mark.slash");
         }
         if (item.edit_open) {
             prefix += tr("queue.mark.editing");

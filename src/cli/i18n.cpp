@@ -185,6 +185,11 @@ const Entry kZhCN[] = {
     {"queue.disposal_preview", "  首条 [{0}] {1}"},
     {"queue.archive_head", "排队消息 {0} 条未送出,已随会话存档带走,/resume 可接回:"},
     {"queue.autosend_returned", "你排队的消息没送达,已回队(不再自动重发):{0}"},
+    {"queue.mark.slash", "[命令·轮末执行] "},
+    {"queue.slash_rejected_busy",
+     "{0} 不支持忙碌期排队(要即时交互,或会改会话去向)。等空闲提示符再敲,或按 Esc "
+     "打断后再发;只读与维护类(/context、/help、/todos、/compact 等)可排队,留到回合收尾本地执行。"},
+    {"queue.slash_not_for_subagent", "{0} 是本地命令,排不进子代理队列;给子代理递话请用普通文字。"},
     {"input.pasted_content", "[粘贴内容 {0} 字符]"},
     {"input.ctrlc_exit", "[已退出]"},
     {"stream.hint", "键入并回车 排队下一条 · Esc 打断"},
@@ -1804,6 +1809,13 @@ const Entry kEn[] = {
     {"queue.disposal_preview", "  first [{0}] {1}"},
     {"queue.archive_head", "{0} queued message(s) not yet sent; saved with the session archive, /resume will bring them back:"},
     {"queue.autosend_returned", "Your queued message was not delivered; returned to queue (no auto-retry): {0}"},
+    {"queue.mark.slash", "[command · runs at turn end] "},
+    {"queue.slash_rejected_busy",
+     "{0} cannot be queued while busy (it needs immediate interaction or changes where the session goes). Type it "
+     "at the idle prompt, or press Esc to interrupt first; read-only and maintenance commands (/context, /help, "
+     "/todos, /compact, ...) may queue and run locally at turn end."},
+    {"queue.slash_not_for_subagent",
+     "{0} is a local command and cannot be queued for a subagent; steer a subagent with plain text."},
     {"input.pasted_content", "[Pasted Content {0} chars]"},
     {"input.ctrlc_exit", "[exited]"},
     {"stream.hint", "type + Enter to queue next · Esc to interrupt"},
