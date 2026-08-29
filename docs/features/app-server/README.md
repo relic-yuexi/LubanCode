@@ -13,17 +13,35 @@
                          └─ 日志、diff、usage 与终态事件
 ```
 
-不把监听端口裸露到公网。首版只走 SSH 承载的 stdio;WebSocket 是另一张单的事。
+不把监听端口裸露到公网。stdio 走 SSH 承载;本机/局域网的 WebSocket 承载见下文《WS 承载》——回环免鉴权,非回环强制 token。
 
 ## 传输与进程纪律
 
-- stdin 逐行收 UTF-8 JSON,stdout 逐行吐 UTF-8 JSON;一行一条完整消息。
+- 承载两副面孔,按需起一种:`lubancode app-server` 走 stdio(stdin 逐行收 UTF-8 JSON,stdout 逐行吐 UTF-8 JSON,一行一条完整消息);`lubancode app-server --app-server-ws <端口|主机:端口>` 走 WebSocket(一条文本帧一条消息)。两副面孔同一套协议、同一个方法表。
 - stdout 是协议专线。日志、诊断、崩溃前说明一概走 stderr;工具子进程输出装进事件字段,绝不漏到 stdout 搅坏分帧。
 - **jsonrpc 字段已冻结**:出站不带 `jsonrpc:"2.0"`,入站不校验(带不带都认)。翻这个开关等于协议破坏,须 bump 协议版本。
-- 先 `initialize`(回能力表)再 `initialized`(通知),然后业务放行;重复 initialize 报 `-32600`,握手前调业务报 `-32002`。
+- 先 `initialize`(回能力表)再 `initialized`(通知),然后业务放行;重复 initialize 报 `-32600`,握手前调业务报 `-32002`。握手状态机是**连接级**的:WS 重连后须重新 initialize(每条连接自己的握手)。
 - EOF、断管、`shutdown`、`exit` 都收口:打断在跑回合、刷完能刷的终态、退出,不留孤儿进程。
-- 入站单行上限 1MB,超限回 parse error 后退线。
+- 入站单行上限 1MB(stdio)/ 单条消息上限 8MB(WS 分片拼装),超限回 parse error 后退线(WS 直接断线)。
 - 事件队列有界(默认 4096)。撞满先合并可合并的 delta(同条目的增量并成一条,计 `coalesced`),再丢可丢事件并补一条 `queue/overflow` 通报(计 `dropped`);终态与审批类事件绝不丢。
+
+## WS 承载(多前端外壳单阶段 A)
+
+同一条 protocol/dispatcher 线的第二个传输层,给 Web/Android 外壳用:
+
+```bash
+lubancode app-server --app-server-ws 8765                # 127.0.0.1:8765,回环免鉴权
+lubancode app-server --app-server-ws 0.0.0.0:8765        # 非回环:强制 token(见下)
+lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
+```
+
+- **绑定**:裸端口只绑 `127.0.0.1`;`<主机>:<端口>` 显式给地址(点分 IPv4 或 `localhost`),非回环地址启动时没配 token 直接拒启。
+- **token 门**:`--app-server-ws-token` 或环境变量 `LUBANCODE_APPSERVER_TOKEN` 配了就启用——HTTP 升级完成后**第一条文本帧**必须是 `{"method":"app_server/auth","params":{"token":...}}`,不过即断(连接关闭,不回协议错误)。token 恒时比较,不落任何日志。回环 + 没配 token = 免鉴权(本机首版口径)。
+- **连接生命周期**:TCP 断开只收那条连接(进程活着等重连——与 stdio 的"EOF 自退"不同);对端发 `exit`/`shutdown` 才整场收线、进程退出。断线后:thread 账与浏览器会话(sidecar)不收尸,重连的壳凭 cursor(`browser/console/query`、`browser/network/query`、`trace/query`、`workflow/query` 的 `lastSeq`/`sinceSeq`)补账,老 threadId 继续用。
+- **seq**:事件序号进程级单调(`ProcessIdAuthority` 唯一发号),每条连接看到的是自己的单调子序列;重连不回卷、永不复用,cursor 补账不撞号。
+- **多连接**:阶段 A 一条一条串行服务(同拍一条活连接);同拍多客户端是 §4.4 的活,不在本阶段。
+- **实现**:服务端 WS(握手算料、帧编解码、回环 TCP)是仓内自带的极小实现(`src/app_server/ws_frames.*`、`ws_sockets.*`、`ws_transport.*`),零第三方依赖——不谈压缩扩展、不收 binary 帧、客户端帧必须掩码;不引依赖巨兽。
+- 验证口径:单测 `tests/unit/app_server/test_app_server_ws.cpp`(握手算料 RFC 向量、帧编解码分型、token 门、回环真监听一幕幕:事件 seq、断线重连、exit 收线);冒烟 `scripts/tests/app_server_ws_smoke.sh`(独立客户端 `app_server_ws_client.js`:本地假 Anthropic 后端跑一 turn、断线重连、cursor 补账、token 门;浏览器面等价集要 playwright)。
 
 ## 协议版本
 
@@ -36,6 +54,7 @@
 | `1.0` | 骨架期全部方法与事件(thread/turn/item、审批、usage/context、workflow/trace 查询、goal/loop/plan)。 |
 | `1.0` 内 additive | `item/completed` 可带可选 `images` 数组——MCP 富结果图片的元数据与 `artifact` 引用,不带 base64(2026-08 起)。 |
 | `1.1` | 浏览器调试工作台阶段 3:additive 新增 `browser/*` 方法 18 枚与 `browser/*` 事件 13 族(见下两节)。老方法老事件形状一字未动。 |
+| `1.1`(承载注) | WS 传输层(2026-08 起):同一条报文线的第二副面孔,报文形状零改动,不 bump 版本。连接级握手(`initialize`)每条连接各来一遍;首帧鉴权消息 `app_server/auth` 只在 WS 且配了 token 时出现,不算协议方法面。 |
 
 ## 方法面
 

@@ -34,8 +34,10 @@ std::optional<lubancode::config::ConfigResult> RunInitialSetupWizard(
 int RunCli(const std::vector<std::string>& args);
 
 // app-server 子模式(无界面后台协议):装配前奏(配置/i18n/hooks)已在
-// RunCli 里跑完,这里立服务进 stdio 主循环。stdout 从此是协议专线。
-int RunAppServerMode(const lubancode::config::ConfigResult& config_result);
+// RunCli 里跑完,这里立服务进主循环。stdout 从此是协议专线。配了
+// --app-server-ws 就走 WS 监听承载(stdout 不再是协议口)。
+int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
+                     const CliOptions& cli_options);
 
 // `lubancode plugin init <模板> [名字]` 子命令(plugins 单第 3 步):生成
 // 插件脚手架后退出。i18n 已初始化,配置不加载——脚手架不该因为模型没配

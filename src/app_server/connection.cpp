@@ -118,6 +118,7 @@ void StdioConnection::ProcessLine(const std::string& line) {
         outbox_.Push(outbound_line, true);
     }
     if (outcome.close_connection) {
+        close_requested_.store(true);
         closed_.store(true);
         outbox_.Notify();
     }

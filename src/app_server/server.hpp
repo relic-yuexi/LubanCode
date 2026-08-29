@@ -21,6 +21,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -34,6 +35,7 @@
 #include "app_server/dispatcher.hpp"
 #include "app_server/interaction.hpp"
 #include "app_server/outbox.hpp"
+#include "app_server/ws_transport.hpp"
 #include "app/version.hpp"
 #include "runtime/command_service.hpp"
 #include "runtime/goal_coordinator.hpp"
@@ -118,9 +120,14 @@ struct ServerOptions {
     std::string browser_sidecar_command;
     std::vector<std::string> browser_sidecar_args;
     std::string browser_artifact_dir;
+    // WS 承载(多前端外壳单阶段 A):有值 = Run() 走 WS 监听而不是 stdio
+    // (两承载按需起一种,不并跑——stdio 的"EOF 即进程收线"与 WS 的
+    // "断线只收连接、进程等重连"语义不同,混跑两头都拧巴)。
+    std::optional<WsOptions> ws;
 };
 
-// 一台 app-server。一个进程一台;装配好后 Run() 进 stdio 主循环。
+// 一台 app-server。一个进程一台;装配好后 Run() 进主循环(stdio 或 WS
+// 承载,按 ServerOptions::ws 择一)。
 class Server {
 public:
     // backend_factory:回合驱动用的 api::Backend(生产是 cpr 后端,测试
@@ -131,8 +138,24 @@ public:
     Server(ServerOptions options, BackendFactory backend_factory, RegistryFactory registry_factory);
     ~Server();
 
-    // 装配方法表,跑 stdio 主循环到收线。返回退出码。
+    // 装配方法表,跑主循环到收线:配了 ws 走 WS 监听,否则 stdio。返回
+    // 退出码。
     int Run();
+
+    // ---- WS 承载(阶段 A) ----
+    // 一条连接服务完的分型:纯断线(进程活着等重连)、对端 exit/shutdown
+    // (整场收线,stdio 同义)、监听收摊(叫停或监听层错,没有后续)。
+    enum class WsServeOutcome { Disconnected, ExitRequested, ListenerStopped };
+
+    // 接一条 WS 连接并服务到收线:每条连接自己的 Dispatcher(握手状态机
+    // 不许跨连接复用)与 StdioConnection(WS 帧收发折成 writer/reader),
+    // 收线后打断在跑的回合(浏览器会话与 thread 账不动——重连续用)。
+    // 单测直驱也走它(一条一条喂连接,不进死循环)。
+    WsServeOutcome ServeWsConnection(WsTransport& transport);
+
+    // 喂给 ServeWsConnection 的 dispatcher 工厂:每条 WS 连接新铸一只,
+    // 方法表与 stdio 那只同源(RegisterMethods + browser 面 + 能力表)。
+    std::shared_ptr<Dispatcher> MakeWsDispatcher();
 
     // 收线:在跑的回合按打断收口(置旗 + 清悬起 + 等收尾),等不到就分离。
     // Run() 返回前与析构都会走;断管/exit 的"打断在跑回合,停后台任务"
@@ -206,7 +229,19 @@ public:
     BrowserService& browser_service() { return *browser_; }
 
 private:
-    void RegisterMethods();
+    void RegisterMethods(Dispatcher& dispatcher);
+    // WS 主循环(Run 的 ws 分支):起监听、逐条服务连接到整场收线。
+    int RunWsLoop();
+    // 反向请求响应的装配口(stdio 与 WS 同一份):HandleInteractionResponse
+    // 的薄封,错误码口径见 connection.hpp。
+    std::function<std::string(const IncomingResponse&)> MakeInteractionResolver();
+    // 事件出水的安全口:快照当下活连接再发(WS 换连接的窗口里,回合工作
+    // 线程/分离出去的僵尸线程不扑空)。没有活连接 = 丢弃(有界队列语义
+    // 的极端版:没人听的事件不留)。
+    void EmitEventSafe(std::string_view method, const nlohmann::json& params);
+    // 在跑的回合一律按打断收口(WS 连接收线后调用:浏览器会话不动,只
+    // 把回合从旧连接上摘下来)。Shutdown 的回合段就是它。
+    void InterruptRunningTurns();
     // 整回合驱动(工作线程体):审批/ask_user 悬停、打断旗、终态分型。
     void RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, const std::string& thread_id,
                              const std::string& turn_id, const std::string& text,
@@ -225,7 +260,10 @@ private:
     BackendFactory backend_factory_;
     RegistryFactory registry_factory_;
     std::shared_ptr<Dispatcher> dispatcher_;
-    std::unique_ptr<StdioConnection> connection_;
+    // 活连接(stdio 一条用到退场;WS 每条连接换一只)。回合工作线程经
+    // EmitEventSafe 快照访问,换装由 Run/ServeWsConnection 独占做。
+    std::shared_ptr<StdioConnection> connection_;
+    std::mutex connection_mutex_;
     // P9 收尾:thread/list|archive|unarchive|delete 的执行体。server 不
     // 另写扫盘路,全从这里走(sessions_dir 空 = 没建,搬删一律拒)。
     std::unique_ptr<runtime::SessionCommandService> session_commands_;

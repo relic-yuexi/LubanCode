@@ -13,6 +13,7 @@
 #include <cctype>
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <deque>
 #include <expected>
@@ -364,7 +365,8 @@ int HandlePluginInitCommand(const PluginInitArgs& init) {
 // 主循环。stdout 从这一刻起是协议专线,任何 std::cout 都不许再出现
 // (诊断走 stderr,app_server 模块自己守规矩,这层也一样)。
 // backend 走真装配(BuildBackend)——假 backend 只在单测里注入。
-int RunAppServerMode(const lubancode::config::ConfigResult& config_result) {
+int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
+                     const CliOptions& cli_options) {
     lubancode::app_server::ServerOptions options;
     if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
         options.sessions_dir = *luban_dir + "/sessions";
@@ -418,6 +420,38 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result) {
     }
     if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
         options.browser_artifact_dir = *luban_dir + "/browser-artifacts";
+    }
+    // WS 承载(多前端外壳单阶段 A):--app-server-ws <port | host:port>。
+    // 裸端口绑回环;显式 host 须是点分 IPv4 或 localhost(ws_sockets 的
+    // 绑定面)。非回环绑定强制要 token:旗标给的优先,其次环境变量
+    // LUBANCODE_APPSERVER_TOKEN;两处都没有就拒启——token 不落日志,拒启
+    // 的话里也不带它。
+    if (!cli_options.app_server_ws_bind.empty()) {
+        std::string spec = cli_options.app_server_ws_bind;
+        std::string host = "127.0.0.1";
+        const std::size_t colon = spec.rfind(':');
+        if (colon != std::string::npos) {
+            host = spec.substr(0, colon);
+            spec = spec.substr(colon + 1);
+        }
+        std::string token = cli_options.app_server_ws_token;
+        if (token.empty()) {
+            token = lubancode::platform::GetEnvVar("LUBANCODE_APPSERVER_TOKEN").value_or(std::string());
+        }
+        const bool loopback = host == "127.0.0.1" || host == "localhost";
+        if (!loopback && token.empty()) {
+            std::fprintf(stderr,
+                         "[app-server] 非回环绑定(%s)须配 token:--app-server-ws-token 或环境变量"
+                         " LUBANCODE_APPSERVER_TOKEN\n",
+                         host.c_str());
+            return 1;
+        }
+        app_server::WsOptions ws;
+        ws.bind_host = host;
+        ws.port = std::stoi(spec);
+        ws.token = token; // 空串 = 回环免鉴权;配了就启用首帧门
+        options.ws = ws;
+        // WS 模式下 stdout 不再是协议口,但仍守 stdio 纪律:诊断一律 stderr。
     }
     lubancode::app_server::Server server(
         std::move(options),
@@ -724,7 +758,14 @@ int RunCli(const std::vector<std::string>& args) {
         if (cli_options.app_server) {
             // app-server 是独占模式:不进单发,不进交互。旗标在解析层就
             // 拦下了,这里再守一道(one_shot 防守的单子原文),双保险。
-            return RunAppServerMode(*config_result);
+            return RunAppServerMode(*config_result, cli_options);
+        }
+        if (!cli_options.app_server_ws_bind.empty() || !cli_options.app_server_ws_token.empty()) {
+            // --app-server-ws 系旗标只在 app-server 子命令下有意义;别处
+            // 给了就是用错地方,明说,不当普通位置参数吞。
+            std::cerr << "--app-server-ws/--app-server-ws-token 只在 app-server 子命令下有效: "
+                         "lubancode app-server --app-server-ws <端口|主机:端口>\n";
+            return 1;
         }
         if (!cli_options.positional.empty()) {
             // 单发模式/管道模式:不进向导(没有交互终端可问),缺配置直接

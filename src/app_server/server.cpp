@@ -269,9 +269,7 @@ Server::Server(ServerOptions options, BackendFactory backend_factory, RegistryFa
         browser_ = std::make_unique<BrowserService>(
             std::move(browser_options),
             [this](std::string_view method, const nlohmann::json& params) {
-                if (connection_ != nullptr) {
-                    connection_->EmitEvent(method, params);
-                }
+                EmitEventSafe(method, params);
             });
         browser_->SetApprovalAsk(
             [this](const std::string& thread_id, const runtime::ApprovalRequest& request,
@@ -279,7 +277,7 @@ Server::Server(ServerOptions options, BackendFactory backend_factory, RegistryFa
                 return HandleBrowserApproval(thread_id, request, cancel);
             });
     }
-    RegisterMethods();
+    RegisterMethods(*dispatcher_);
 }
 
 // browser 动作的审批:与工具审批同一套悬起件(permission/request 反向
@@ -303,9 +301,7 @@ std::optional<BrowserService::ApprovalTicket> Server::HandleBrowserApproval(
         [this](std::string_view method, const nlohmann::json& params) {
             // must_keep:审批丢了客户端不知道要答。EmitEvent 统一盖 seq
             // + 兜溢出通报。
-            if (connection_ != nullptr) {
-                connection_->EmitEvent(method, params);
-            }
+            EmitEventSafe(method, params);
         }));
     if (options_.approval_timeout_ms > 0) {
         future->SetTimeout(std::chrono::milliseconds(options_.approval_timeout_ms));
@@ -337,9 +333,9 @@ Server::~Server() {
     Shutdown();
 }
 
-void Server::RegisterMethods() {
+void Server::RegisterMethods(Dispatcher& dispatcher) {
     // thread/start
-    dispatcher_->RegisterMethod(
+    dispatcher.RegisterMethod(
         kMethodThreadStart, [this](const IncomingRequest& request, DispatchContext& context)
                            -> std::optional<nlohmann::json> {
             std::string error_code;
@@ -363,7 +359,7 @@ void Server::RegisterMethods() {
 
     // thread/list(P9:查询参数透传 SessionCommandService,server 不另写
     // 扫盘路。旧响应形状 {threads:[...]} 不变,新加 total)。
-    dispatcher_->RegisterMethod(
+    dispatcher.RegisterMethod(
         kMethodThreadList, [this](const IncomingRequest& request, DispatchContext&)
                              -> std::optional<nlohmann::json> {
             const ParamsCheck base = CheckParamsIsObject(request.params, kMethodThreadList);
@@ -421,9 +417,9 @@ void Server::RegisterMethods() {
             return MakeResult(request.id, result);
         };
     };
-    dispatcher_->RegisterMethod(kMethodThreadArchive, lifecycle_handler(kMethodThreadArchive));
-    dispatcher_->RegisterMethod(kMethodThreadUnarchive, lifecycle_handler(kMethodThreadUnarchive));
-    dispatcher_->RegisterMethod(kMethodThreadDelete, lifecycle_handler(kMethodThreadDelete));
+    dispatcher.RegisterMethod(kMethodThreadArchive, lifecycle_handler(kMethodThreadArchive));
+    dispatcher.RegisterMethod(kMethodThreadUnarchive, lifecycle_handler(kMethodThreadUnarchive));
+    dispatcher.RegisterMethod(kMethodThreadDelete, lifecycle_handler(kMethodThreadDelete));
 
     // trace/query(逐枚追踪单第 5 期):断线补账与冷回放。事件从 session
     // 存档的 tool_trace_v1 行折叠——线程重启、app-server 重启后都有账可
@@ -432,7 +428,7 @@ void Server::RegisterMethods() {
     // 0 = 全量。脱敏是默认:正文只回 preview 摘要,不回 inline 原文
     // (单子"/trace 默认遮敏;--raw 须本机交互确认"——远端通道没有本机
     // 交互,一律走遮敏档)。
-    dispatcher_->RegisterMethod(
+    dispatcher.RegisterMethod(
         kMethodTraceQuery, [this](const IncomingRequest& request, DispatchContext&)
                              -> std::optional<nlohmann::json> {
             std::string thread_id;
@@ -547,7 +543,7 @@ void Server::RegisterMethods() {
 
     // workflow/query(wf 线的事件出口:LoadSnapshotFromDisk +
     // BuildIncrementalEvents,server 只折协议形状)。
-    dispatcher_->RegisterMethod(
+    dispatcher.RegisterMethod(
         kMethodWorkflowQuery, [this](const IncomingRequest& request, DispatchContext& context)
                               -> std::optional<nlohmann::json> {
             std::string run_id;
@@ -576,7 +572,7 @@ void Server::RegisterMethods() {
         });
 
     // thread/stop
-    dispatcher_->RegisterMethod(
+    dispatcher.RegisterMethod(
         kMethodThreadStop, [this](const IncomingRequest& request, DispatchContext& context)
                            -> std::optional<nlohmann::json> {
             std::string thread_id;
@@ -594,7 +590,7 @@ void Server::RegisterMethods() {
         });
 
     // turn/start
-    dispatcher_->RegisterMethod(
+    dispatcher.RegisterMethod(
         kMethodTurnStart, [this](const IncomingRequest& request, DispatchContext&)
                           -> std::optional<nlohmann::json> {
             std::string thread_id;
@@ -621,7 +617,7 @@ void Server::RegisterMethods() {
         });
 
     // turn/interrupt
-    dispatcher_->RegisterMethod(
+    dispatcher.RegisterMethod(
         kMethodTurnInterrupt, [this](const IncomingRequest& request, DispatchContext&)
                               -> std::optional<nlohmann::json> {
             std::string thread_id;
@@ -662,26 +658,26 @@ void Server::RegisterMethods() {
         }
         return MakeResult(request.id, result);
     };
-    dispatcher_->RegisterMethod(kMethodGoalCreate, domain_handler);
-    dispatcher_->RegisterMethod(kMethodGoalGet, domain_handler);
-    dispatcher_->RegisterMethod(kMethodGoalEdit, domain_handler);
-    dispatcher_->RegisterMethod(kMethodGoalPause, domain_handler);
-    dispatcher_->RegisterMethod(kMethodGoalResume, domain_handler);
-    dispatcher_->RegisterMethod(kMethodGoalClear, domain_handler);
-    dispatcher_->RegisterMethod(kMethodLoopCreate, domain_handler);
-    dispatcher_->RegisterMethod(kMethodLoopList, domain_handler);
-    dispatcher_->RegisterMethod(kMethodLoopRead, domain_handler);
-    dispatcher_->RegisterMethod(kMethodLoopPause, domain_handler);
-    dispatcher_->RegisterMethod(kMethodLoopResume, domain_handler);
-    dispatcher_->RegisterMethod(kMethodLoopCancel, domain_handler);
-    dispatcher_->RegisterMethod(kMethodLoopRunNow, domain_handler);
-    dispatcher_->RegisterMethod(kMethodPlanSetMode, domain_handler);
-    dispatcher_->RegisterMethod(kMethodPlanReview, domain_handler);
-    dispatcher_->RegisterMethod(kMethodPlanReopen, domain_handler);
+    dispatcher.RegisterMethod(kMethodGoalCreate, domain_handler);
+    dispatcher.RegisterMethod(kMethodGoalGet, domain_handler);
+    dispatcher.RegisterMethod(kMethodGoalEdit, domain_handler);
+    dispatcher.RegisterMethod(kMethodGoalPause, domain_handler);
+    dispatcher.RegisterMethod(kMethodGoalResume, domain_handler);
+    dispatcher.RegisterMethod(kMethodGoalClear, domain_handler);
+    dispatcher.RegisterMethod(kMethodLoopCreate, domain_handler);
+    dispatcher.RegisterMethod(kMethodLoopList, domain_handler);
+    dispatcher.RegisterMethod(kMethodLoopRead, domain_handler);
+    dispatcher.RegisterMethod(kMethodLoopPause, domain_handler);
+    dispatcher.RegisterMethod(kMethodLoopResume, domain_handler);
+    dispatcher.RegisterMethod(kMethodLoopCancel, domain_handler);
+    dispatcher.RegisterMethod(kMethodLoopRunNow, domain_handler);
+    dispatcher.RegisterMethod(kMethodPlanSetMode, domain_handler);
+    dispatcher.RegisterMethod(kMethodPlanReview, domain_handler);
+    dispatcher.RegisterMethod(kMethodPlanReopen, domain_handler);
 
     // browser 面(阶段 3):方法表、事件转发、审批与取消都在
     // BrowserService 里,这里只递 dispatcher 与 thread 查找口。
-    browser_->RegisterMethods(*dispatcher_, [this](const std::string& thread_id) {
+    browser_->RegisterMethods(dispatcher, [this](const std::string& thread_id) {
         return FindThread(thread_id);
     });
 }
@@ -989,7 +985,7 @@ nlohmann::json Server::HandleTurnStart(const std::string& thread_id, const std::
 void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, const std::string& thread_id,
                                  const std::string& turn_id, const std::string& text,
                                  const std::vector<nlohmann::json>& images) {
-    connection_->EmitEvent(kEventTurnStarted, MakeTurnStartedParams(thread_id, turn_id));
+    EmitEventSafe(kEventTurnStarted, MakeTurnStartedParams(thread_id, turn_id));
 
     // 用户消息:text + 图片(images 字段名与 api::ImageBlock 对齐,阶段 3
     // 冻结)。图片原样入 history——下一轮、重放、会话恢复都带得上。
@@ -1044,7 +1040,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         std::vector<api::UsageReport> usage_reports;
         ProtocolBridgeSink bridge(
             [this](std::string_view method, const nlohmann::json& params) {
-                connection_->EmitEvent(method, params);
+                EmitEventSafe(method, params);
             },
             usage_reports);
         runtime::TurnEventAdapter turn_events(thread_id, runtime::ProcessIdAuthority());
@@ -1069,7 +1065,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
             context["hardTrimmedTurns"] = pressure.hard_trimmed_turns;
             context["hardDroppedMessages"] = pressure.hard_dropped_messages;
             context["hardTruncatedResults"] = pressure.hard_truncated_results;
-            connection_->EmitEvent(kEventTurnContext,
+            EmitEventSafe(kEventTurnContext,
                                    MakeTurnContextParams(thread_id, turn_id, std::move(context)));
         };
         loop.SetWiring(std::move(loop_wiring));
@@ -1095,7 +1091,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                     [this](std::string_view method, const nlohmann::json& params) {
                         // must_keep:审批丢了客户端不知道要答。EmitEvent
                         // 统一盖 seq + 兜溢出通报。
-                        connection_->EmitEvent(method, params);
+                        EmitEventSafe(method, params);
                     }));
                 if (options_.approval_timeout_ms > 0) {
                     // 限时悬停:超时按悬空收口,悬停不偷跑。
@@ -1134,7 +1130,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                     auto future = record->interactions->AskQuestion(
                         request, turn_id,
                         [this](std::string_view method, const nlohmann::json& params) {
-                            connection_->EmitEvent(method, params);
+                            EmitEventSafe(method, params);
                         });
                     if (options_.approval_timeout_ms > 0) {
                         future->SetTimeout(std::chrono::milliseconds(options_.approval_timeout_ms));
@@ -1204,7 +1200,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
     // 回合收口:清掉这一轮残留的悬起请求(理论到不了这——审批都是同步
     // Wait 的;防御:中断路径上 future 撤了 promise 没收的,这里兜底)。
     record->interactions->CancelPending();
-    connection_->EmitEvent(kEventTurnCompleted, completed_params);
+    EmitEventSafe(kEventTurnCompleted, completed_params);
     record->last_completed = completed_params;
     record->turn_finished.store(true);
     record->turn_running.store(false);
@@ -1398,8 +1394,24 @@ InteractionResolution Server::HandleInteractionResponse(const IncomingResponse& 
     return result;
 }
 
+std::function<std::string(const IncomingResponse&)> Server::MakeInteractionResolver() {
+    return [this](const IncomingResponse& response) -> std::string {
+        const InteractionResolution result = HandleInteractionResponse(response);
+        if (result.ok) {
+            return std::string();
+        }
+        return result.error_code.empty() ? std::string(runtime::kStaleRequestId) : result.error_code;
+    };
+}
+
 int Server::Run() {
-    connection_ = std::make_unique<StdioConnection>(
+    // 两承载按需起一种(多前端外壳单阶段 A):配了 ws 走监听循环;stdio
+    // 的"EOF 即进程收线"与 WS 的"断线只收连接、进程等重连"语义不同,
+    // 并跑两头都拧巴,不并。
+    if (options_.ws.has_value()) {
+        return RunWsLoop();
+    }
+    connection_ = std::make_shared<StdioConnection>(
         dispatcher_,
         [](const std::string& line) {
             if (!WriteProtocolLine(line)) {
@@ -1407,26 +1419,98 @@ int Server::Run() {
             }
         },
         []() { return ReadStdinChunk(); }, options_.outbox_capacity);
-    connection_->SetInteractionResolver([this](const IncomingResponse& response) -> std::string {
-        const InteractionResolution result = HandleInteractionResponse(response);
-        if (result.ok) {
-            return std::string();
-        }
-        return result.error_code.empty() ? std::string(runtime::kStaleRequestId) : result.error_code;
-    });
+    connection_->SetInteractionResolver(MakeInteractionResolver());
     const int code = connection_->Run();
     Shutdown();
     return code;
 }
 
-void Server::Shutdown() {
-    // 浏览器面先收:取消在飞动作(审批悬着的也醒)、杀 sidecar 进程树
-    // (收尸;profile 锁由 sidecar 退出钩子释放)。
-    if (browser_ != nullptr) {
-        browser_->Shutdown();
+// WS 承载主循环:一条一条接连接服务。纯断线(Disconnected)接着等重连;
+// 对端 exit/shutdown(ExitRequested)整场收线;监听收摊(ListenerStopped)
+// 同样收线——监听层错没有自愈路,赖活着只会空转。
+int Server::RunWsLoop() {
+    WsTransport transport(*options_.ws);
+    if (!transport.Start()) {
+        return 1;
     }
-    // 在跑的回合一律按打断收口:置旗、悬起全清(审批悬停立即醒),等
-    // 收尾(硬时限内),等不到就分离——绝不许 join 卡死把退场路堵死。
+    while (true) {
+        const WsServeOutcome outcome = ServeWsConnection(transport);
+        if (outcome != WsServeOutcome::Disconnected) {
+            break;
+        }
+    }
+    Shutdown();
+    return 0;
+}
+
+Server::WsServeOutcome Server::ServeWsConnection(WsTransport& transport) {
+    std::unique_ptr<WsTransport::Session> session = transport.Accept();
+    if (session == nullptr) {
+        return WsServeOutcome::ListenerStopped; // 监听叫停/监听层错:没有连接可服务
+    }
+    // 每条连接新铸 dispatcher:握手状态机(先 initialize 才放业务)是
+    // 连接级的,跨连接复用会把第二条连接卡死在 kErrNotInitialized 之外
+    // 的所有岔路上。
+    const std::shared_ptr<Dispatcher> dispatcher = MakeWsDispatcher();
+    // Session 的生命周期:lambda 拿裸指针,连接对象(conn)在本函数栈上
+    // 先于 session 析构,不悬空。writer 是写线程调,reader 是读线程调,
+    // Session 自己线程安全(写锁 + 收件箱只归读线程)。
+    WsTransport::Session* session_ptr = session.get();
+    auto connection = std::make_shared<StdioConnection>(
+        dispatcher,
+        [session_ptr](const std::string& line) {
+            if (!session_ptr->SendMessage(line)) {
+                Diagnose("WS 写失败(断线),收线");
+            }
+        },
+        [session_ptr]() -> std::string {
+            const std::optional<std::string> message = session_ptr->ReadMessage();
+            if (!message.has_value()) {
+                return std::string(); // EOF:连接收线
+            }
+            // 一条 WS 文本帧 = 一行协议消息:补上换行喂给 LineFramer
+            // (分帧由 WS 层扛,这里只借它的行纪律)。
+            return *message + "\n";
+        },
+        options_.outbox_capacity);
+    connection->SetInteractionResolver(MakeInteractionResolver());
+    {
+        std::lock_guard<std::mutex> lock(connection_mutex_);
+        connection_ = connection;
+    }
+    connection->Run();
+    const bool exit_requested = connection->close_requested();
+    // 这条连接收线:打断还挂在它身上的回合(分离出去的僵尸线程经
+    // EmitEventSafe 快照,扑不空),thread 账与浏览器会话不动——重连的
+    // 外壳凭 cursor(query 类方法)补账,老 threadId 还能继续用。
+    InterruptRunningTurns();
+    {
+        std::lock_guard<std::mutex> lock(connection_mutex_);
+        connection_.reset();
+    }
+    return exit_requested ? WsServeOutcome::ExitRequested : WsServeOutcome::Disconnected;
+}
+
+std::shared_ptr<Dispatcher> Server::MakeWsDispatcher() {
+    const std::shared_ptr<Dispatcher> dispatcher = std::make_shared<Dispatcher>();
+    dispatcher->SetInitializeResultFactory(
+        [this]() { return MakeInitializeResult(options_.lubancode_version, PlatformId()); });
+    RegisterMethods(*dispatcher);
+    return dispatcher;
+}
+
+void Server::EmitEventSafe(std::string_view method, const nlohmann::json& params) {
+    std::shared_ptr<StdioConnection> connection;
+    {
+        std::lock_guard<std::mutex> lock(connection_mutex_);
+        connection = connection_;
+    }
+    if (connection != nullptr) {
+        connection->EmitEvent(method, params);
+    }
+}
+
+void Server::InterruptRunningTurns() {
     std::vector<std::shared_ptr<ThreadRecord>> records;
     {
         std::lock_guard<std::mutex> lock(threads_mutex_);
@@ -1450,6 +1534,26 @@ void Server::Shutdown() {
                 record->turn_worker.detach();
             }
         }
+    }
+}
+
+void Server::Shutdown() {
+    // 浏览器面先收:取消在飞动作(审批悬着的也醒)、杀 sidecar 进程树
+    // (收尸;profile 锁由 sidecar 退出钩子释放)。
+    if (browser_ != nullptr) {
+        browser_->Shutdown();
+    }
+    // 在跑的回合一律按打断收口(与 WS 连接收线同一段),随后会话档句柄
+    // 全收。
+    InterruptRunningTurns();
+    std::vector<std::shared_ptr<ThreadRecord>> records;
+    {
+        std::lock_guard<std::mutex> lock(threads_mutex_);
+        for (const auto& [id, record] : threads_) {
+            records.push_back(record);
+        }
+    }
+    for (const std::shared_ptr<ThreadRecord>& record : records) {
         if (record->store != nullptr) {
             record->store->Reset();
         }
@@ -1460,13 +1564,7 @@ void Server::Shutdown() {
 // 先用假读写器把连接立起来,再直调 handler。resolver 一并接上,整线
 // 直驱(Feed 响应信封)与生产同路。
 void Server::AttachForTest(std::unique_ptr<StdioConnection> connection) {
-    connection->SetInteractionResolver([this](const IncomingResponse& response) -> std::string {
-        const InteractionResolution result = HandleInteractionResponse(response);
-        if (result.ok) {
-            return std::string();
-        }
-        return result.error_code.empty() ? std::string(runtime::kStaleRequestId) : result.error_code;
-    });
+    connection->SetInteractionResolver(MakeInteractionResolver());
     connection_ = std::move(connection);
 }
 
