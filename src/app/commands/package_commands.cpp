@@ -96,7 +96,6 @@ lubancode::package::ScanOptions BuildScanOptions(SlashDispatchContext& ctx) {
     return options;
 }
 
-<<<<<<< HEAD
 // 信任账的只读装载(show/list/doctor 摆状态用;读不动只警告,按空白续
 // ——重新审一遍比带着一本读不动的账继续跑更安全)。
 std::pair<std::optional<lubancode::package::PackageTrustStore>, std::optional<std::string>>
@@ -107,7 +106,8 @@ LoadTrustStoreReadOnly() {
     }
     auto [store, error] = lubancode::package::PackageTrustStore::Load(path);
     return {std::move(store), std::move(error)};
-=======
+}
+
 // evolution store 的选中版本(阶段 4):active/canary 指针指到的那枚折成
 // scope=Store 的现成候选,并进 /package 的账面——四层扫描之外第五路,哈希
 // 验完好与 tamper 都在列(list 是发现账;挂载侧只收完好的)。
@@ -137,7 +137,6 @@ std::vector<lubancode::package::PackageCandidate> ScanAllLayers(
                           std::make_move_iterator(store.end()));
     }
     return candidates;
->>>>>>> worktree-agent-aa2da30c095bbf3ab
 }
 
 // 一只包的"列表行":id、版本、来源、状态、六类组件计数、code-bearing。
@@ -343,13 +342,9 @@ void PrintUsage() {
                  "      /package trust <id>    批准整包内容哈希(重启生效;文件一改即失效)\n"
                  "      /package untrust <id>  销信任账\n"
                  "只读:list/show 只查静态账;doctor 另诊组件(逐件原生 parser)、引用解析与\n"
-<<<<<<< HEAD
                  "MountPlan 摘要。trust 亮全份审批材料(逐件命令面 + 完整指纹)才落账——\n"
-                 "未信任的 code 组件(Plugin/MCP)一件不挂不启动。\n";
-=======
-                 "MountPlan 摘要——不挂任何组件、不启动任何 Plugin 与 MCP。store 一路是自进化\n"
+                 "未信任的 code 组件(Plugin/MCP)一件不挂不启动。store 一路是自进化\n"
                  "闭环装进 package-store 的选中版本(/evolve approve 落架,/evolve use 点灰度)。\n";
->>>>>>> worktree-agent-aa2da30c095bbf3ab
     TermOut().flush();
 }
 
@@ -395,17 +390,13 @@ void RunPackageList(const lubancode::package::ScanOptions& options,
     };
 
     std::size_t shown = 0;
-<<<<<<< HEAD
     auto [trust_store, trust_error] = LoadTrustStoreReadOnly();
     if (trust_error.has_value()) {
         TermOut() << "警告: " << *trust_error << "\n";
     }
     const lubancode::package::PackageTrustStore* trust =
         trust_store.has_value() ? &*trust_store : nullptr;
-    TermOut() << "Package(四层: dev > project > user > official):\n";
-=======
     TermOut() << "Package(五路: dev > project > store > user > official;store 是自进化装架):\n";
->>>>>>> worktree-agent-aa2da30c095bbf3ab
     for (const auto& row : rows) {
         if (!scope_matches(row)) continue;
         ++shown;

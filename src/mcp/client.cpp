@@ -38,6 +38,13 @@ Client::Client(std::string server_name)
       default_timeout_ms_(kDefaultTimeoutMs),
       tool_call_timeout_ms_(kToolCallTimeoutMs) {}
 
+void Client::SetTimeouts(int default_timeout_ms, int tool_call_timeout_ms) {
+    // <=0 视为"没给",沿用内置默认——mcp.yaml 缺省 30000 由解析层补,这里
+    // 只防手滑传 0(0 在别处语义是"不限",握手不等死)。
+    if (default_timeout_ms > 0) default_timeout_ms_ = default_timeout_ms;
+    if (tool_call_timeout_ms > 0) tool_call_timeout_ms_ = tool_call_timeout_ms;
+}
+
 void Client::SetTimeoutsForTest(int default_timeout_ms, int tool_call_timeout_ms) {
     default_timeout_ms_ = default_timeout_ms;
     tool_call_timeout_ms_ = tool_call_timeout_ms;

@@ -32,7 +32,8 @@
 #include "lsp/manager.hpp"
 #include "mcp/client.hpp"
 #include "memory/project_memory.hpp"
-#include "package/mounting.hpp"  // PackageMount:会话钉快照(阶段 3 挂载)
+#include "package/code_mounting.hpp"  // PackageCodeMountResult:阶段 5 挂载事务成品
+#include "package/mounting.hpp"       // PackageMount:会话钉快照(阶段 3 挂载)
 #include "ptc/ptc_tool.hpp"
 #include "runtime/plugin_lua.hpp"
 #include "runtime/tool_trace_hub.hpp"
@@ -91,6 +92,9 @@ struct McpServerRuntime {
     std::string name;
     std::unique_ptr<lubancode::mcp::Client> client;
     std::vector<lubancode::mcp::ToolInfo> tools;
+    // 阶段 5:packaged MCP 的来源账(canonical 名 + 包版本);standalone
+    //(config.json)空。/mcp 显示与注册元数据都从这份取。
+    std::optional<lubancode::tools::ToolOrigin> package_origin;
 };
 
 // 按配置逐个起 MCP 服务器:起子进程 + initialize 握手 + tools/list。单个
@@ -104,14 +108,28 @@ std::vector<McpServerRuntime> StartMcpServers(
 // 把每个 MCP 服务器握手拿到的工具包成 McpTool,注册进 registry——主循环表、
 // 子代理表都要各调一遍(MCP 工具对子代理同样有用),两份各自独立的
 // McpTool 实例,但底下持的是同一个 mcp::Client&(工具背后是同一个子进程,
-// 不会因为注册了两份就多起一个进程)。
+// 不会因为注册了两份就多起一个进程)。packaged MCP(带 package_origin)
+// 的注册名用 wire 服务段、说明前缀用带点 canonical 名,注册元数据记
+// ToolOrigin(阶段 5 来源账)。
 void RegisterMcpTools(std::vector<McpServerRuntime>& mcp_servers, lubancode::tools::ToolRegistry& registry);
 
 // M7:一条插件工具的挂载记录,/plugins 命令展示用。
 struct PluginMountInfo {
     std::string tool_name;  // 完整名(plugin__<名>__<工具>),跟模型看到的一致
-    std::string kind;       // "DLL" 或 "lua"
+    std::string kind;       // "DLL"、"lua"、"process" 或 "package-process"
+    // 阶段 5:packaged 插件的来源账(展示名换成带点 canonical 段);standalone 空。
+    std::optional<lubancode::tools::ToolOrigin> package_origin;
 };
+
+// 阶段 5 发布段的 plugin 半边:把挂载事务暂存的 plugin 逐件工具造 adapter
+// (wire 覆盖名 + ToolOrigin 来源账)注册进 registry——主表与子表各调一遍,
+// 两份独立 adapter 共用同一份 manifest(shared_ptr 钉住)。report 时往
+// mounted 里记 /plugins 的账(packaged 展示名带点,kind 记 package-process)。
+// MCP 半边不用这里管:事务成品在构造早期就并进 mcp_servers_,RegisterMcpTools
+// 一并覆盖。
+void PublishPackagedPlugins(const lubancode::package::PackageCodeMountResult& staged,
+                            lubancode::tools::ToolRegistry& registry, std::vector<PluginMountInfo>& mounted,
+                            bool report);
 
 // M7:扫两类插件(<主目录>/.lubancode/plugins 下的 *.dll 和 *.lua),挂进
 // 目标 registry——主表与子代理表都挂(子代理与 main 同能力,独立任务
@@ -202,6 +220,13 @@ public:
     const std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& process_manifests() const {
         return process_manifests_;
     }
+    // 阶段 5 挂载事务的账:失败包的诊断(整包回滚,指到坏件)与非致命
+    // notes(env 变量缺一类,只报名)。成品的 MCP 已并进 mcp_servers_、
+    // plugin adapter 已进各表,这里留的是审计账。
+    const std::vector<lubancode::package::PackageCodeDiagnostic>& package_code_diagnostics() const {
+        return package_code_.diagnostics;
+    }
+    const std::vector<std::string>& package_code_notes() const { return package_code_.notes; }
     // /plugin trust|untrust(信任流 UI)的执行材料:项目根(挂载扫描用的
     // 那份,会话期不动)与信任账本体。账可能没有(主目录拿不到),命令层
     // 判空降级。
@@ -240,6 +265,9 @@ private:
     std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>> process_manifests_;
     std::vector<std::unique_ptr<lubancode::runtime::PluginToolAdapter>> process_adapters_;
     std::vector<std::string> process_plugin_warnings_;
+    // 阶段 5 挂载事务的成品与审计账:MCP client 已移交给 mcp_servers_,
+    // 这里留 plugin manifest(shared_ptr,adapter 共享)、诊断与 notes。
+    lubancode::package::PackageCodeMountResult package_code_;
     // 项目插件的信任账(plugins 单第 8 步):启动装载一次,挂在拥有者区。
     // project_root_utf8_:构造时的项目根(挂载扫描与信任流共用同一份路径
     // 口径,账本键才对得上)。

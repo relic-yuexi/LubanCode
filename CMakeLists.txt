@@ -629,6 +629,10 @@ add_library(lubancode_core STATIC
   # 统一 Package 封装单阶段 4:Package 信任门(PackageTrustStore + 审批
   # 材料与账务;指纹底座在 platform/dir_fingerprint)。
   src/package/trust.cpp
+  # 统一 Package 封装单阶段 5:Plugin 与 MCP 挂载事务——mcp.yaml 折
+  # McpServerConfig(${package_dir}/${package_data}/${env:NAME} 结构化展开)、
+  # 插件探针、暂存 runtime、失败回滚、成功发布(整包成整包败的执行版)。
+  src/package/code_mounting.cpp
   # 自进化闭环阶段 1:EvolutionObservation、五路只读 adapter、指纹归一、
   # 采集器与只追加观察账(纯逻辑,复用 skills/journal 的既有脱敏)。
   src/evolution/observation.cpp

@@ -39,8 +39,21 @@ using lubancode::cli::trf;
 
 // 各带计数。没启用延迟机制(总数没超阈值,或阈值是 0)时说明一句,不摆
 // 三态的空架子。
+// 统一 Package 封装单阶段 5:带 ToolOrigin 来源账的工具,行尾加
+// "(包 <canonical 组件名> <版本>)"——wire 名给人看费眼,canonical 名 +
+// 包版本才是对得上的账(契约 packages.md §6.1:展示名用 canonical)。
 void PrintToolsCommand(const lubancode::tools::ToolRegistry& registry, const std::set<std::string>& loaded,
                         bool deferral_enabled, int threshold) {
+    const auto print_tool_line = [](const lubancode::tools::Tool& tool,
+                                    const lubancode::tools::ToolRegistry& reg) {
+        const lubancode::tools::ToolRegistration* registration = reg.RegistrationOf(tool.name());
+        TermOut() << "  - " << tool.name();
+        if (registration != nullptr && registration->package_origin.has_value()) {
+            TermOut() << "  (包 " << registration->package_origin->component_id << " "
+                      << registration->package_origin->package_version << ")";
+        }
+        TermOut() << "\n";
+    };
     std::vector<const lubancode::tools::Tool*> core;
     std::vector<const lubancode::tools::Tool*> loaded_deferred;
     std::vector<const lubancode::tools::Tool*> pending_deferred;
@@ -59,25 +72,25 @@ void PrintToolsCommand(const lubancode::tools::ToolRegistry& registry, const std
                                           : trf("cmd.tools.below_threshold", threshold))
                    << "\n";
         for (const auto& tool : registry.All()) {
-            TermOut() << "  - " << tool->name() << "\n";
+            print_tool_line(*tool, registry);
         }
         return;
     }
     TermOut() << trf("cmd.tools.enabled", threshold) << "\n";
     TermOut() << trf("cmd.tools.core", core.size()) << "\n";
     for (const auto* tool : core) {
-        TermOut() << "  - " << tool->name() << "\n";
+        print_tool_line(*tool, registry);
     }
     TermOut() << trf("cmd.tools.loaded", loaded_deferred.size()) << "\n";
     for (const auto* tool : loaded_deferred) {
-        TermOut() << "  - " << tool->name() << "\n";
+        print_tool_line(*tool, registry);
     }
     if (loaded_deferred.empty()) {
         TermOut() << tr("cmd.tools.none_loaded") << "\n";
     }
     TermOut() << trf("cmd.tools.pending", pending_deferred.size()) << "\n";
     for (const auto* tool : pending_deferred) {
-        TermOut() << "  - " << tool->name() << "\n";
+        print_tool_line(*tool, registry);
     }
 }
 
@@ -173,7 +186,13 @@ void PrintPluginsCommand(const std::vector<PluginMountInfo>& mounted, const std:
     if (!mounted.empty()) {
         TermOut() << trf("cmd.plugins.mounted", mounted.size()) << "\n";
         for (const auto& info : mounted) {
-            TermOut() << "  - " << info.tool_name << "  (" << info.kind << ")\n";
+            TermOut() << "  - " << info.tool_name << "  (" << info.kind;
+            // 阶段 5:packaged 插件带 ToolOrigin 来源账(canonical 名 + 包版本)。
+            if (info.package_origin.has_value()) {
+                TermOut() << ",包 " << info.package_origin->package_id << " "
+                          << info.package_origin->package_version;
+            }
+            TermOut() << ")\n";
         }
     }
     if (!warnings.empty()) {
@@ -485,6 +504,8 @@ void HandlePluginCommand(const std::string& args,
 
 // /mcp 命令:每个服务器一行状态(运行中/已退出)+ 工具数,底下缩进列出
 // 完整工具名(mcp__服务器名__工具名,跟模型实际看到的名字一致)。
+// 统一 Package 封装单阶段 5:packaged MCP 的服务器行换 canonical 名 + 包
+// 版本,工具行换带点展示名(wire 名模型看,人看 canonical——契约 §6.1)。
 void PrintMcpCommand(const std::vector<McpServerRuntime>& mcp_servers) {
     if (mcp_servers.empty()) {
         TermOut() << tr("cmd.mcp.empty") << "\n";
@@ -492,11 +513,24 @@ void PrintMcpCommand(const std::vector<McpServerRuntime>& mcp_servers) {
     }
     for (const auto& runtime : mcp_servers) {
         const bool alive = runtime.client != nullptr && runtime.client->Alive();
-        TermOut() << trf("cmd.mcp.line", runtime.name, alive ? tr("mcp.state.alive") : tr("mcp.state.dead"),
-                          runtime.tools.size())
-                   << "\n";
+        if (runtime.package_origin.has_value()) {
+            TermOut() << trf("cmd.mcp.package_line", runtime.package_origin->component_id,
+                             runtime.package_origin->package_version,
+                             alive ? tr("mcp.state.alive") : tr("mcp.state.dead"), runtime.tools.size())
+                      << "\n";
+        } else {
+            TermOut() << trf("cmd.mcp.line", runtime.name, alive ? tr("mcp.state.alive") : tr("mcp.state.dead"),
+                             runtime.tools.size())
+                      << "\n";
+        }
+        const std::string display_server =
+            runtime.package_origin.has_value()
+                ? runtime.package_origin->package_id + "." +
+                      runtime.package_origin->component_id.substr(
+                          runtime.package_origin->component_id.find(':') + 1)
+                : runtime.name;
         for (const auto& tool_info : runtime.tools) {
-            TermOut() << "      mcp__" << runtime.name << "__" << tool_info.name << "\n";
+            TermOut() << "      mcp__" << display_server << "__" << tool_info.name << "\n";
         }
     }
 }

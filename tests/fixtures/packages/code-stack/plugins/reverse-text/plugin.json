@@ -1,0 +1,33 @@
+{
+  "manifest_version": 1,
+  "id": "reverse-text",
+  "version": "1.0.0",
+  "language": "python",
+  "runtime": {
+    "kind": "process",
+    "command": "python",
+    "args": ["${plugin_dir}/runner.py"],
+    "timeout_ms": 15000
+  },
+  "tools": [
+    {
+      "name": "reverse",
+      "description": "把一段文本倒过来。纯本地,不出网,不落盘。",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "text": {
+            "type": "string",
+            "description": "待倒序的文本"
+          }
+        },
+        "required": ["text"],
+        "additionalProperties": false
+      }
+    }
+  ],
+  "permissions": {
+    "network": false,
+    "env": []
+  }
+}

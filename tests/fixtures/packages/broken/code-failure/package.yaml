@@ -1,0 +1,7 @@
+schema: 1
+id: moontide.code-failure
+version: 0.1.0
+name: Code Failure Sample
+description: 阶段 5 挂载事务的坏件夹具。静态全好;dies-loud 插件启动即退非零,整包一件不挂。
+
+license: Apache-2.0

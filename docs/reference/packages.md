@@ -357,6 +357,12 @@ Package 不可半挂。激活分七步：
 
 旧 standalone MCP 维持“坏一只，跳一只”的兼容语义。Package 走整包事务，两套不混。
 
+### 8.1 挂载事务的落地口径（阶段 5）
+
+事务单位是包：一只包里的 Plugin 与 MCP 同生共死；两只包互不连坐。“起得来”的判据分两路：process 插件起一只探针进程走一遍协议（stdin 请求帧、stdout 响应帧），收到任何一帧合法响应即算起得来——包括插件自报 `ok=false` 的 `execution_failed`，判的是通道不是业务；MCP 起服 + `initialize` 握手 + `tools/list` 全过才算。embedded-lua / native-library 写进 `plugins/` 的，按“runtime 不支持”明拒，不静默宽化。
+
+挂上的每件工具带 ToolOrigin 来源账（package id、版本、组件 canonical id），`/tools`、`/mcp`、`/plugins` 展示 canonical 名 + 包版本；注册名与权限账用 §6.1 的 wire 名。未过信任门的包压根不进事务（连暂存都不进）；store 选中版本是正常包，同走这条路。
+
 ## 9. 源码与数据分家、启停账在包外、会话钉快照
 
 本节只定合同，不涉实现细节。
@@ -403,12 +409,14 @@ Package 不可半挂。激活分七步：
 | --- | --- |
 | `minimal-content-only/` | 最小内容包。清单加一件 Skill，两层即成。放进目录、reload，Skill 即可发现，全程零代码组件 |
 | `full-stack/` | 完整包。六类组件各至少一件真样例，自述见其 `README.md`。交予没看过代码的人，只照目录也应说清：会发现什么、会执行什么、哪一步要信任 |
+| `code-stack/` | 阶段 5 事务夹具。两件 process 插件 + 一只 stdio MCP（全 Python），三件全起得来，整包进账 |
 | `broken/missing-manifest/` | 缺 `package.yaml`。组件无辜，整包 `manifest_missing` |
 | `broken/invalid-manifest/` | 清单四处错：schema 非 1、id 大写带下划线、version 非 SemVer、未知字段 `permissions`。逐条对应上表 |
 | `broken/path-escape/` | MCP 的 `${package_dir}/../../` 逃出包根；Workflow 的 `prompt:` 引用 `../` 越界 |
 | `broken/bad-names/` | 近似目录 `skill/`、agent 文件名大写且 `name` 带空格、Skill frontmatter 名不合规且与目录不符、Plugin id 带点、MCP id 与目录不符 |
+| `broken/code-failure/` | 静态全好，起不来：`dies-loud` 插件启动即退非零，整包回滚，同包好件连坐 |
 
-`broken/README.md` 逐条指错。四个坏包各自独立，别把 `broken/` 整个丢进 packages 目录——它自己没有清单。
+`broken/README.md` 逐条指错。五个坏包各自独立，别把 `broken/` 整个丢进 packages 目录——它自己没有清单。
 
 ## 11. 从哪里来，先做什么
 

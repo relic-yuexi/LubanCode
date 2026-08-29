@@ -148,8 +148,55 @@ void RegisterMcpTools(std::vector<McpServerRuntime>& mcp_servers, lubancode::too
             // tool_search:MCP 工具裹一层 DeferredTool 标成延迟挂载(mcp/
             // 目录不动,没法直接在 McpTool 上加 override)。阈值没超时延迟
             // 机制整个不启用,这层包装只是纯转发,行为不变。
-            registry.Register(std::make_unique<lubancode::tools::DeferredTool>(
-                std::make_unique<lubancode::mcp::McpTool>(*runtime.client, runtime.name, tool_info)));
+            // 阶段 5:packaged MCP 注册名用 wire 服务段(%2E 编码,契约
+            // packages.md §6.1),说明前缀换带点 canonical 名;来源账进
+            // 注册元数据(/tools、/mcp 显示用)。
+            std::string display_server;
+            if (runtime.package_origin.has_value()) {
+                const auto& origin = *runtime.package_origin;
+                display_server =
+                    origin.package_id + "." + origin.component_id.substr(origin.component_id.find(':') + 1);
+            }
+            lubancode::tools::ToolRegistration registration;
+            registration.tool = std::make_unique<lubancode::tools::DeferredTool>(
+                std::make_unique<lubancode::mcp::McpTool>(*runtime.client, runtime.name, tool_info,
+                                                          std::move(display_server)));
+            if (runtime.package_origin.has_value()) {
+                registration.source_kind = lubancode::tools::ToolSourceKind::Mcp;
+                registration.source_instance = runtime.package_origin->component_id;
+                registration.package_origin = runtime.package_origin;
+            }
+            registry.Register(std::move(registration));
+        }
+    }
+}
+
+void PublishPackagedPlugins(const lubancode::package::PackageCodeMountResult& staged,
+                            lubancode::tools::ToolRegistry& registry, std::vector<PluginMountInfo>& mounted,
+                            bool report) {
+    for (const auto& plugin : staged.plugins) {
+        for (const auto& tool : plugin.manifest->tools) {
+            const std::string local_id =
+                plugin.canonical_id.substr(plugin.canonical_id.find(':') + 1);
+            const std::string wire_name = lubancode::runtime::BuildPackagedToolWireName(
+                "plugin", plugin.package_id, local_id, tool.name);
+            const std::string display_name = lubancode::runtime::BuildPackagedToolDisplayName(
+                "plugin", plugin.package_id, local_id, tool.name);
+            lubancode::tools::ToolRegistration registration;
+            registration.tool = std::make_unique<lubancode::runtime::PluginToolAdapter>(
+                plugin.manifest, &tool, wire_name);
+            registration.source_instance = plugin.canonical_id;
+            registration.package_origin = lubancode::tools::ToolOrigin{
+                plugin.package_id, plugin.package_version, plugin.canonical_id};
+            registry.Register(std::move(registration));
+            if (report) {
+                PluginMountInfo info;
+                info.tool_name = display_name;  // 展示名带点(canonical 段)
+                info.kind = "package-process";
+                info.package_origin = lubancode::tools::ToolOrigin{
+                    plugin.package_id, plugin.package_version, plugin.canonical_id};
+                mounted.push_back(std::move(info));
+            }
         }
     }
 }
@@ -261,6 +308,53 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     // M8:起服务器打出 "[mcp] xxx: N 个工具已挂载" 行,紧跟着调用方
     // 刚打完的横幅;单个服务器出岔子只打警告跳过,不阻塞会话。
     mcp_servers_ = StartMcpServers(config.mcp_servers, theme);
+    // 统一 Package 封装单阶段 5:packaged Plugin/MCP 走挂载事务(整包成
+    // 整包败)。暂存在事务里完成——plugin 探针进程过协议、MCP 起服握手列
+    // 工具;全件起得来才把 MCP client 并进 mcp_servers_(发布),坏一件
+    // 整包回滚(杀已起进程),诊断指到坏件。必须在 mcp_servers_ 定型后、
+    // resolve_env_static_ 折账前跑:packaged MCP 的 canonical 名要进 Agent
+    // 解析环境的名单。plugin adapter 的注册晚一步(registry 建好后
+    // PublishPackagedPlugins),那步不失败,不破坏原子性。
+    if (options.package_mount != nullptr) {
+        lubancode::package::PackageCodeMountOptions code_options;
+        code_options.cwd_utf8 = cwd_utf8;
+        if (const auto home_lubancode = lubancode::config::HomeLubancodeDir();
+            home_lubancode.has_value()) {
+            const std::filesystem::path data_root =
+                lubancode::tools::Utf8ToPath(*home_lubancode) / "package-data";
+            std::error_code ec;
+            std::filesystem::create_directories(data_root, ec);  // 拿不到/建不动都照旧
+            code_options.package_data_root = data_root;
+        }
+        package_code_ = lubancode::package::MountPackageCode(*options.package_mount, code_options);
+        for (auto& staged : package_code_.mcp_servers) {
+            McpServerRuntime runtime;
+            runtime.name = staged.wire_server_name;
+            runtime.tools = std::move(staged.tools);
+            runtime.package_origin = lubancode::tools::ToolOrigin{
+                staged.package_id, staged.package_version, staged.canonical_id};
+            std::cout << trf("package.code.mounted_mcp", staged.canonical_id, runtime.tools.size(),
+                             staged.package_id + " " + staged.package_version)
+                      << "\n";
+            runtime.client = std::move(staged.client);
+            mcp_servers_.push_back(std::move(runtime));
+        }
+        for (const auto& plugin : package_code_.plugins) {
+            std::cout << trf("package.code.mounted_plugin", plugin.canonical_id,
+                             plugin.manifest->tools.size(),
+                             plugin.package_id + " " + plugin.package_version)
+                      << "\n";
+        }
+        for (const auto& note : package_code_.notes) {
+            std::cout << theme.stats << "[package] " << note << theme.reset << "\n";
+        }
+        for (const auto& diagnostic : package_code_.diagnostics) {
+            const std::string line = diagnostic.Format();
+            std::cout << theme.error << line << theme.reset << "\n";
+            plugin_warnings_.push_back(std::move(line));
+        }
+        package_code_.mcp_servers.clear();  // client 已移交,清掉防双重持有
+    }
     // LSP:配了 lsp 段才构造;构造本身不起进程(懒启动,首次用到某语言
     // 才拉),析构时把还活着的服务器按 shutdown/exit + 2s 兜底全关。
     if (!config.lsp_servers.empty()) {
@@ -460,6 +554,11 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     MountPlugins(plugin_host_, lua_runtime_, sub_registry_, theme, plugin_mounted_, plugin_warnings_,
                  /*report=*/false, process_manifests_, process_plugin_warnings_, cwd_utf8,
                  project_plugin_trust_.has_value() ? &*project_plugin_trust_ : nullptr);
+    // 阶段 5 发布段 plugin 半边:事务暂存的 plugin 造 adapter(wire 覆盖名
+    // + 来源账)注册进两表;MCP 半边早在 mcp_servers_ 定型时一并进了
+    // RegisterMcpTools。放在 SetCwd 循环前,packaged adapter 同吃项目根。
+    PublishPackagedPlugins(package_code_, main_registry_, plugin_mounted_, /*report=*/true);
+    PublishPackagedPlugins(package_code_, sub_registry_, plugin_mounted_, /*report=*/false);
     for (const auto& adapter : main_registry_.All()) {
         if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(adapter.get());
             plugin_adapter != nullptr) {

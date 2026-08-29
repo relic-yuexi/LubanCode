@@ -960,6 +960,9 @@ const Entry kZhCN[] = {
     {"mcp.list_failed", "[mcp] {0}: 获取工具清单失败 - {1}"},
     {"mcp.mounted", "[mcp] {0}: {1} 个工具已挂载"},
     {"plugin.mounted_line", "[plugin] {0}: {1} 个工具"},
+    // 统一 Package 封装单阶段 5:挂载事务的发布行(packaged 组件带包来源)。
+    {"package.code.mounted_mcp", "[package] {0}: {1} 个工具已挂载(来自 {2})"},
+    {"package.code.mounted_plugin", "[package] {0}: {1} 个工具(来自 {2},process)"},
     {"ptc.fallback_line", "[ptc] programmatic 工具调用未启用,回落 JSON: {0}"},
     {"ptc.probe_failed", "[ptc] Python 探测失败: {0}"},
     {"tool_search.enabled", "[tool_search] 工具超过阈值 {0},MCP/插件等外挂工具改为延迟挂载(/tools 看三态)"},
@@ -1076,6 +1079,8 @@ const Entry kZhCN[] = {
     {"mcp.state.alive", "运行中"},
     {"mcp.state.dead", "已退出"},
     {"cmd.mcp.line", "  - {0}: {1}, {2} 个工具"},
+    // 统一 Package 封装单阶段 5:packaged MCP 的服务器行(canonical 名 + 包版本)。
+    {"cmd.mcp.package_line", "  - {0} (包 {1}): {2}, {3} 个工具"},
     {"cmd.lsp.empty", "没有配置任何 LSP 服务器(config.json 里没写 lsp 段,lsp 工具也没注册)。"},
     {"cmd.lsp.header", "已配置 {0} 个 LSP 服务器:"},
 
