@@ -1,6 +1,7 @@
 #include "app/session_title.hpp"
 
 #include <string_view>
+#include <utility>
 #include <variant>
 
 #include "agent/sample_model.hpp"  // SampleModel 原语:采样的公共路(批一·病四)
@@ -102,63 +103,55 @@ std::string SanitizeTitle(const std::string& raw, std::size_t max_chars) {
     return squeezed;
 }
 
-std::expected<std::string, std::string> GenerateSessionTitle(lubancode::api::Backend& backend,
-                                                             const std::string& model,
-                                                             const std::string& reasoning_effort,
-                                                             const std::vector<lubancode::api::Message>& head,
-                                                             int timeout_secs,
-                                                             lubancode::agent::BackgroundCallAccounting* accounting) {
-    if (head.empty()) {
-        return std::unexpected("没有可起标题的对话内容");
-    }
-    // 转写:只取用户/助手正文,各截一小段——标题不需要全文。
-    std::string transcript;
-    for (const auto& message : head) {
-        for (const auto& block : message.content) {
-            if (const auto* text = std::get_if<lubancode::api::TextBlock>(&block)) {
-                // 刀口必须在原串上算。旧写法先 substr(0, 600)，再从成品
-                // 尾部删续字节；若刀口落进三字节汉字，删完会剩一枚孤立
-                // 首字节，随后拼入的 '\n' 就成了 nlohmann 报出的 0x0A。
-                constexpr std::size_t kExcerptMaxBytes = 600;
-                const std::size_t cut = lubancode::platform::Utf8PrefixBoundary(text->text, kExcerptMaxBytes);
-                std::string piece = text->text.substr(0, cut);
-                transcript += (message.role == lubancode::api::Role::User ? "用户: " : "助手: ") + piece + "\n";
-            }
-        }
-        if (transcript.size() > 4000) {
-            break;
-        }
-    }
-    if (transcript.empty()) {
-        return std::unexpected("对话里没有可用的文本");
+std::string LocalSessionTitle(const std::string& first_query, std::size_t max_chars) {
+    // 只取首行:多行粘贴的首行就是用户的题眼,后面几行截掉。
+    const std::size_t newline = first_query.find('\n');
+    const std::string first_line = newline == std::string::npos
+                                       ? first_query
+                                       : first_query.substr(0, newline);
+    // 清洗与限长全走 SanitizeTitle(同一把刀,单测钉同一处)。
+    return SanitizeTitle(first_line, max_chars);
+}
+
+std::expected<std::string, std::string> RefineSessionTitle(lubancode::api::Backend& backend,
+                                                           const std::string& model,
+                                                           const std::string& reasoning_effort,
+                                                           const std::string& first_query,
+                                                           int timeout_secs, const std::atomic<bool>* cancel,
+                                                           lubancode::agent::BackgroundCallAccounting* accounting) {
+    // 只喂首问(实测问题 7):输入不随首轮工具数量增长,也不等首轮回复。
+    // 刀口必须在原串上算(600 字节刀口不留下半个汉字的老规矩)。
+    constexpr std::size_t kQueryMaxBytes = 600;
+    const std::size_t cut = lubancode::platform::Utf8PrefixBoundary(first_query, kQueryMaxBytes);
+    const std::string query_excerpt = first_query.substr(0, cut);
+    if (query_excerpt.empty()) {
+        return std::unexpected("首问没有可起标题的文本");
     }
 
     // 采样走 SampleModel 原语(批一·病四):攒流/usage/兜错/看门狗的路只有
     // 一份,这里只剩提示拼装与标题清洗;错误只回 message(旧口径)。
     lubancode::agent::SampleRequest sample;
     sample.model = model;
-    sample.reasoning_effort = reasoning_effort;
-    sample.system = "给下面这段对话起一个会话标题。要求:中文不超过 16 个字(英文不超过 8 个词),"
-                    "说清对话在做什么(比如\"修登录超时\"\"调研向量库选型\");"
+    // reasoning 关或最低(单子预算):路由带档位就按配的来,没带就压到 low,
+    // 不为十几个 token 烧思考。
+    sample.reasoning_effort = reasoning_effort.empty() ? std::string("low") : reasoning_effort;
+    sample.system = "给下面这条用户请求起一个会话标题。要求:中文不超过 16 个字(英文不超过 8 个词),"
+                    "说清请求在做什么(比如\"修登录超时\"\"调研向量库选型\");"
                     "直接输出标题本身,不要引号、不要标点结尾、不要解释。";
     lubancode::api::Message message;
     message.role = lubancode::api::Role::User;
-    message.content.push_back(lubancode::api::TextBlock{transcript});
+    message.content.push_back(lubancode::api::TextBlock{"用户: " + query_excerpt});
     sample.messages.push_back(std::move(message));
-    sample.max_tokens = 100;
+    sample.max_tokens = kTitleRefineMaxTokens;
 
     lubancode::agent::SampleOptions sample_options;
     sample_options.timeout_secs = timeout_secs;
+    sample_options.cancel = cancel;
     const lubancode::agent::SampleResult sampled =
         lubancode::agent::SampleModel(backend, sample, sample_options);
 
     if (accounting != nullptr) {
-        accounting->usage.input_tokens += sampled.usage.input_tokens;
-        accounting->usage.cache_read_tokens += sampled.usage.cache_read_tokens;
-        accounting->usage.cache_creation_tokens += sampled.usage.cache_creation_tokens;
-        accounting->usage.output_tokens += sampled.usage.output_tokens;
-        accounting->usage.output_reasoning_tokens += sampled.usage.output_reasoning_tokens;
-        accounting->usage_reported = sampled.usage_reported;
+        lubancode::agent::AddSampleAccounting(accounting, sampled);
         accounting->duration_ms = sampled.duration_ms;
     }
 

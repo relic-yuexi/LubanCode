@@ -48,8 +48,10 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
 
 // ---- 会话尾款的 memory 接线(终端接线收尾单自大类搬出) --------------------
 //
-// 回合收尾的记忆抽取、artifact 按需摘要、cheap 起名——三样都是"回合外面
-// 的后台小活",原先住在大类里,搬到这里;材料经 SessionTailContext 递入。
+// 回合收尾的记忆抽取、artifact 按需摘要——两样都是"回合外面的后台小活",
+// 原先住在大类里,搬到这里;材料经 SessionTailContext 递入。(会话起名
+// 原是第三样,实测问题 7 后搬到会话控制器:首问建档当场起本地标题,
+// 精炼走 SessionTitleRefiner 异步,不再在回合收尾同步等 cheap。)
 struct SessionTailContext {
     lubancode::memory::ProjectMemory* project_memory = nullptr;
     lubancode::agent::Agent* agent = nullptr;          // 活 loop(history 与路由)
@@ -58,10 +60,6 @@ struct SessionTailContext {
     lubancode::agent::ContextArtifactStore* artifact_store = nullptr;  // 可空
     lubancode::sessions::SessionStore* session_store = nullptr;
     const lubancode::cli::Theme* theme = nullptr;
-    // 会话标题账(runtime 那份的引用,MaybeGenerateSessionTitle 读写)。
-    std::string* session_title = nullptr;
-    const bool* session_title_pending = nullptr;
-    bool* session_title_auto_attempted = nullptr;
 };
 
 // 回合收尾抽取:只看本轮增量,借 cheap 路由产严格 JSON;候选进待审区
@@ -73,11 +71,6 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
 // 真本,返回给工具回执追加在历史尾部。
 std::expected<std::string, std::string> SummarizeArtifactOnDemand(const SessionTailContext& ctx,
                                                                   const lubancode::agent::ArtifactRef& ref);
-
-// 会话起名(cheap 角色):新会话首轮收尾或 resume 进来一场没标题的旧档时,
-// 拿开头几条消息起一枚短标题,成功落 title 事件;失败安静降级。一场只试
-// 一次,不追着重试。
-void MaybeGenerateSessionTitle(const SessionTailContext& ctx, lubancode::agent::TaskKind kind);
 
 // 命令分派注册制(会话终章):/memory 的分派位(case 体原样搬自大 switch)。
 struct SlashDispatchContext;

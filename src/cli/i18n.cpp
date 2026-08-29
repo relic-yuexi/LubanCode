@@ -1553,6 +1553,7 @@ const Entry kZhCN[] = {
     {"cmd.title.current", "当前标题: {0}"},
     {"cmd.title.set", "标题已设为: {0}"},
     {"cmd.title.set_pending", "标题已设为: {0}(首条消息落盘后写入存档)"},
+    {"cmd.title.local_set", "会话标题(取自首问): {0}"},
     {"cmd.title.write_failed", "[会话存档] 标题写入失败,只在本次会话内存里生效。"},
     {"cmd.peers.start_failed", "[跨会话] 传话未启用: {0}"},
     {"cmd.peers.off", "跨会话传话在本场未启用(只有交互会话才有)。"},

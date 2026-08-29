@@ -681,6 +681,9 @@ add_library(lubancode_app STATIC
   # 终端接线收尾单:子代理面板 presenter(条目列表/查看态视口,自大类搬出)。
   src/app/agent_panel_presenter.cpp
   src/app/session_title.cpp
+  # 实测问题 7:会话标题的异步精炼器(独立线程 + 独占 backend,主回合与
+  # 提示符一概不等它)。
+  src/app/session_title_refiner.cpp
   src/app/runtime_profile.cpp
   src/app/tool_runtime.cpp
   src/app/turn_runner.cpp

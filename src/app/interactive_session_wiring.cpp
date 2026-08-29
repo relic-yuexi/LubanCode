@@ -128,7 +128,6 @@
 #include "app/memory_extract.hpp"
 #include "app/mention_support.hpp"  // @ 提及支件(会话终章)
 #include "app/model_router.hpp"
-#include "app/session_title.hpp"
 #include "mcp/client.hpp"
 #include "mcp/mcp_tool.hpp"
 #include "tools/agent_tool.hpp"
@@ -698,10 +697,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             // loop 单:loop 事件账随档恢复(active 默认暂停,用户 /loop
             // resume 显式续;单子"恢复"节)。
             lubancode::app::RestoreLoopFromArchive(loop_wiring_.MakeCommandWiring());
-            // resume 进来的旧档没标题:cheap 角色给续聊点个名(规格"会话标题
-            // 与 resume 列表摘要"归 cheap)。
-            lubancode::app::MaybeGenerateSessionTitle(MakeTailContext(),
-                                             lubancode::agent::TaskKind::ResumeSummary);
+            // resume 进来的旧档(实测问题 7):有标题不重复;没标题的补一枚
+            // 本地标题(零模型 token),不再为老档发精炼请求;顺带翻标题代数、
+            // 取消在飞的精炼。
+            BackfillTitleOnResume();
         }
     }
 
@@ -1128,8 +1127,19 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
             if (project_memory != nullptr) {
                 project_memory->set_source_session(session_start_ts);
             }
+            // 两层标题(实测问题 7):翻场翻代,上一场在飞的精炼落地即弃;
+            // 新场子的下一问重走本地起名 + 精炼。
+            title_epoch_++;
+            session_title_refiner_.RequestCancel();
+            session_title_auto_attempted = false;
         },
-        [this](const std::string& title) { peer_wiring_.SetName(title); },
+        [this](const std::string& title) {
+            peer_wiring_.SetName(title);
+            // 人工 /title 抢先(实测问题 7):翻标题代数,迟到的自动精炼结果
+            // 丢弃;在飞的请求顺手取消,省几个 token。
+            title_epoch_++;
+            session_title_refiner_.RequestCancel();
+        },
         [this]() { SyncWorktreeDirectory(); },
         [this]() { CleanupBackgroundAgents(/*dispose_queue=*/true); },
         &worktree_session,
@@ -1144,6 +1154,9 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
             OpenArtifactStore();
             // 持久目标单:goal 事件账随档恢复(默认 paused-on-resume)。
             goal_wiring_.RestoreFromArchive();
+            // 两层标题(实测问题 7):换场善后——翻代、取消在飞的精炼,旧档
+            // 没标题就补一枚本地标题。
+            BackfillTitleOnResume();
         },
         // /resume 的排队账重建(路径二):存档快照灌回会话层队列。
         [this](const std::vector<lubancode::sessions::ArchivedQueueItem>& items) {
