@@ -155,6 +155,22 @@ TEST_CASE("命令分类:子表达式 $() 不放行") {
     CHECK(Asks("Write-Output \"$(rm x)\""));  // 双引号里照样执行,得问
 }
 
+TEST_CASE("命令分类:PowerShell 脚本块拦——首词再白,{ } 体内是任意代码") {
+    // 黑名单原先只查首词:where-object 在白名单,{ del x } 整段溜过去。
+    CHECK(Asks("where-object { del x }"));
+    CHECK(Asks("Where-Object { Remove-Item -Recurse build }"));
+    CHECK(Asks("Get-ChildItem | Where-Object { $_.Length -gt 5 }"));
+    CHECK(Asks("git status | where-object { rm -rf build }"));
+    CHECK(Asks("Sort-Object { del x }; echo done"));
+    // 引号里的 { 不是脚本块(引号状态机),照旧放行。
+    CHECK(Safe("echo 'literal { brace'"));
+    CHECK(Safe("Select-String -Pattern \"a { b\" src"));
+    // 无脚本块的简化写法照放。
+    CHECK(Safe("Get-ChildItem | Where-Object Length -gt 100"));
+    // cmd 的 { } 没有执行语义,不受这道闸管。
+    CHECK(Safe("echo { x }", "cmd"));
+}
+
 TEST_CASE("命令分类:路径前缀/扩展/大小写归一后查表") {
     CHECK(Safe("C:\\Windows\\System32\\where.exe cmake"));
     CHECK(Safe("C:\\Windows\\System32\\findstr.exe /s x *.txt", "cmd"));

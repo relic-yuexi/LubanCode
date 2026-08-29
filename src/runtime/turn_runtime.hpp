@@ -45,7 +45,8 @@ enum class PermissionMode { Confirm, Auto, Yolo };
 //      ClassifyCommandByPermissions——deny 命中即黑名单,压过 allow、压过
 //      会话"总是允许";yolo/--yes 是显式全放,deny 不拦。
 //   2. auto 档里 run_command 过 ClassifyCommand(tools/command_safety)自动
-//      分析,Safe 或 allow 命中即放。
+//      分析,Safe 或 allow 命中即放;PowerShell 脚本块({ } 体内是任意
+//      代码)两条路都不放,拉回确认。
 //   3. PreToolUse 钩子的表态参与裁决:deny_hit 最高;钩子 allow 只跳"问
 //      用户"这一步;钩子 ask 把"本来自动放行"拉回确认。
 //   4. auto_confirm(--yes)/yolo/auto 档文件工具/选过 a 的工具,放行。

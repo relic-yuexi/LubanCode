@@ -8,6 +8,8 @@
 #include <string_view>
 #include <vector>
 
+#include "tools/command_safety.hpp"  // HasUnquotedScriptBlock:与 command_safety 共用同一份
+
 namespace lubancode::runtime {
 
 namespace {
@@ -105,28 +107,9 @@ bool HasSubexpression(const std::string& segment, bool single_quotes) {
 }
 
 // 引号外有没有 PowerShell 脚本块起始 {(真机实测 P2-3 放行 Where-Object
-// 时补的闸):脚本块体内是任意代码(Where-Object { Remove-Item x } 照样
-// 逐条执行),静态证明不了只读,一律 Unknown;无脚本块的简化写法
-// (Where-Object Name -eq 'x')不受影响。cmd 的 { } 没有执行语义,不查。
-bool HasUnquotedScriptBlock(const std::string& segment, bool single_quotes) {
-    char quote = '\0';
-    for (const char c : segment) {
-        if (quote != '\0') {
-            if (c == quote) {
-                quote = '\0';
-            }
-            continue;
-        }
-        if (c == '"' || (single_quotes && c == '\'')) {
-            quote = c;
-            continue;
-        }
-        if (c == '{') {
-            return true;
-        }
-    }
-    return false;
-}
+// 时补的闸):实现在 tools/command_safety,两档共用同一份,别写第二份。
+// 语义:脚本块体内是任意代码,静态证明不了只读,一律 Unknown;cmd 的
+// { } 没有执行语义,不查。
 
 // 按引号外空白拆词,词身上的引号剥掉。
 std::vector<std::string> TokenizeShell(const std::string& segment, bool single_quotes) {
@@ -233,7 +216,7 @@ PlanShellClassification ClassifyPlanSegment(const std::string& segment, bool is_
     if (HasSubexpression(segment, single_quotes)) {
         return deny("段内含子表达式 $(,双引号里也执行");
     }
-    if (is_powershell && HasUnquotedScriptBlock(segment, single_quotes)) {
+    if (is_powershell && tools::HasUnquotedScriptBlock(segment, single_quotes)) {
         return deny("段内含 PowerShell 脚本块 { },体内是任意代码;请改用无脚本块写法"
                     "(如 Where-Object Name -eq 'x')");
     }

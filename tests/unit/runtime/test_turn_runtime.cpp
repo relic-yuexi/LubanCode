@@ -148,6 +148,35 @@ TEST_CASE("权限:deny 前缀压过 allow、压过总是允许;auto+allow 前缀
     }
 }
 
+TEST_CASE("权限:auto 档 PowerShell 脚本块不放行——白名单与放行账都拦") {
+    const runtime::ToolHookDecision no_hook;
+
+    SUBCASE("首词在 PowerShell 白名单,{ } 体内是任意代码:照问") {
+        rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
+        const auto verdict = rt::EvaluatePermission(context, no_hook, "run_command",
+                                                    RunCommandInput("Where-Object { Remove-Item x }"));
+        CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);
+    }
+
+    SUBCASE("放行账(allow_commands 前缀命中)同样不得放脚本块") {
+        const std::vector<std::string> allow{"Where-Object"};
+        rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
+        context.allow_commands = &allow;
+        const auto verdict = rt::EvaluatePermission(context, no_hook, "run_command",
+                                                    RunCommandInput("Where-Object { Remove-Item x }"));
+        CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);
+    }
+
+    SUBCASE("放行账不误伤:无脚本块的命中照放") {
+        const std::vector<std::string> allow{"Where-Object"};
+        rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
+        context.allow_commands = &allow;
+        const auto verdict = rt::EvaluatePermission(context, no_hook, "run_command",
+                                                    RunCommandInput("Where-Object Length -gt 5"));
+        CHECK(verdict.action == rt::PermissionVerdict::Action::Allow);
+    }
+}
+
 TEST_CASE("权限:PreToolUse 表态参与——allow 跳问,ask 拉回,deny 规则照走") {
     const std::vector<std::string> deny{"rm "};
     const std::vector<std::string> allow{"git status"};

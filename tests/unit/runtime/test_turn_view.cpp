@@ -18,6 +18,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <iostream>
 #include <sstream>
 #include <string>
@@ -1057,31 +1058,68 @@ TEST_CASE("turn 活动条:footer 先启用,首个流事件前也立即亮起并�
     lubancode::cli::EndStreamFooter();
 }
 
-TEST_CASE("footer 公共心跳:长活儿没有正文增量,秒数仍会越过零") {
-    lubancode::cli::BeginStreamFooter(lubancode::cli::Theme{}, /*enabled=*/true);
-    lubancode::cli::BeginTurnActivity("Working", 1000);
-    std::atomic<bool> cancel{false};
-    const auto started_at = std::chrono::steady_clock::now() - std::chrono::seconds(2);
-    {
-        lubancode::cli::StreamFooterHeartbeat heartbeat(/*enabled=*/true, started_at, &cancel);
-        std::this_thread::sleep_for(std::chrono::milliseconds(350));
-        heartbeat.Stop();
+// 心跳线程 200ms 一跳,把 (now - started_at) 的整秒数推进活动条账上。
+// 下面两册原先各靠单发定长 sleep 押注调度:ctest -j 抢 CPU 时心跳线程
+// 要么整窗没被调度到(末值停在 0),要么一跳跨过 1s 边界(0 变 1),偶发
+// 假红。改成限时重试:每轮走与原先同一套动作、同一套断言口径,拿到真值
+// 即收;限时内轮轮不成才是红——真坏了轮轮红,纯调度抖动至多多跑几轮。
+// (ctest 层没有"独占跑"属性:RUN_SERIAL 只管同一测试的多次迭代,
+// RESOURCE_LOCK 只在与别的测试共锁时才起作用,都挡不住无关测试抢 CPU。)
+namespace {
+
+// 限时重试的外壳:round 跑一轮返回末值,满意即真;超时后由调用方断言。
+long long RetryHeartbeatRoundUntil(const std::function<long long()>& round,
+                                   const std::function<bool(long long)>& settled) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    long long ended = round();
+    while (!settled(ended) && std::chrono::steady_clock::now() < deadline) {
+        ended = round();
     }
-    CHECK(lubancode::cli::EndTurnActivity() >= 2);
-    lubancode::cli::EndStreamFooter();
+    return ended;
+}
+
+}  // namespace
+
+TEST_CASE("footer 公共心跳:长活儿没有正文增量,秒数仍会越过零") {
+    const long long ended = RetryHeartbeatRoundUntil(
+        [] {
+            lubancode::cli::BeginStreamFooter(lubancode::cli::Theme{}, /*enabled=*/true);
+            lubancode::cli::BeginTurnActivity("Working", 1000);
+            std::atomic<bool> cancel{false};
+            const auto started_at = std::chrono::steady_clock::now() - std::chrono::seconds(2);
+            {
+                lubancode::cli::StreamFooterHeartbeat heartbeat(/*enabled=*/true, started_at, &cancel);
+                std::this_thread::sleep_for(std::chrono::milliseconds(350));
+                heartbeat.Stop();
+            }
+            const long long value = lubancode::cli::EndTurnActivity();
+            lubancode::cli::EndStreamFooter();
+            return value;
+        },
+        [](long long value) { return value >= 2; });
+    CHECK(ended >= 2);
 }
 
 TEST_CASE("footer 公共心跳:workflow 换节点后可从零重计") {
-    lubancode::cli::BeginStreamFooter(lubancode::cli::Theme{}, /*enabled=*/true);
-    lubancode::cli::BeginTurnActivity("旧节点", 1000);
-    std::atomic<bool> cancel{false};
-    lubancode::cli::StreamFooterHeartbeat heartbeat(
-        /*enabled=*/true, std::chrono::steady_clock::now() - std::chrono::seconds(8), &cancel);
-    std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    heartbeat.ResetElapsed(std::chrono::steady_clock::now());
-    lubancode::cli::BeginTurnActivity("新节点", 2000);
-    std::this_thread::sleep_for(std::chrono::milliseconds(250));
-    heartbeat.Stop();
-    CHECK(lubancode::cli::EndTurnActivity() == 0);
-    lubancode::cli::EndStreamFooter();
+    const long long ended = RetryHeartbeatRoundUntil(
+        [] {
+            lubancode::cli::BeginStreamFooter(lubancode::cli::Theme{}, /*enabled=*/true);
+            lubancode::cli::BeginTurnActivity("旧节点", 1000);
+            std::atomic<bool> cancel{false};
+            {
+                lubancode::cli::StreamFooterHeartbeat heartbeat(
+                    /*enabled=*/true, std::chrono::steady_clock::now() - std::chrono::seconds(8),
+                    &cancel);
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                heartbeat.ResetElapsed(std::chrono::steady_clock::now());
+                lubancode::cli::BeginTurnActivity("新节点", 2000);
+                std::this_thread::sleep_for(std::chrono::milliseconds(250));
+                heartbeat.Stop();
+            }
+            const long long value = lubancode::cli::EndTurnActivity();
+            lubancode::cli::EndStreamFooter();
+            return value;
+        },
+        [](long long value) { return value == 0; });
+    CHECK(ended == 0);
 }
