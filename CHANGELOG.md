@@ -220,6 +220,12 @@
 - **编译期拦鬼名。** validator 新增 unknown_agent(capability 表从 AgentCatalog 现扫),写错名字编译就红,不静默换 general-purpose。权限下限也接进节点:自定义定义比会话严时,该问真问。
 - 前台失败、预算尽、取消、后台回收四件语义与内置路逐件对账;顺手修实 0.26.92 一笔真欠账——定义 JSON roundtrip 丢 agent 字段,会伤 journal 恢复与 ContentHash,已补齐带测试钉。
 
+## [v0.26.103] - 2026-08-29
+
+- **自进化闭环走通了全程(阶段 4)。** propose→test→approve 出批准页(id、版本、哈希、来源、改动、评测摘要、权限差异、安装位置、灰度办法、回滚目标十样)→use 点名 canary→promote 转 active→rollback 一条命令切回父版。批准只认当前哈希:改一个字节,评测、批准、store 三道门先后拒之。
+- **version store 原子落、账一枚不删。** 候选复制 staging→复算哈希→再过静态门→rename 成正式版本(`~/.lubancode/package-store/`);写一半失败正式 store 纹丝不动。回滚只切指针不删版本——评测账、批准账、迁移账、install-log 全保留。会话钉快照:promote/rollback 后旧会话照用旧版,新会话拿新版。
+- **store 选中版本并进 `/package list`**(scope 记 store,压 user/official、让位 dev 与 project)——进化出的能力正式进了发现面;手改 store 文件,下次启动拒挂并指路。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。

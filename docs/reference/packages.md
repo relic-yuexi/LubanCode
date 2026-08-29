@@ -423,6 +423,8 @@ Package 不可半挂。激活分七步：
 
 同 id 优先级：CLI 开发目录 > project > user > official。被盖住的版本仍进诊断账，`/package inspect` 列出所有候选、实际所用版本与来源。这套优先级只管同一只 Package，不改 standalone Skill、Workflow、Plugin 的旧优先级。
 
+另有第五路 **store 选中版本**（自进化闭环阶段 4）：`~/.lubancode/package-store/` 里 active/canary 指针指到的那一枚，由装配并进挂载与 `/package list`（scope 记 `store`），不参与上面四层的目录扫描。同 id 时 store 压 user/official、让位于 dev 与 project。哈希完好在进化侧验过才递进来；手改 store 内文件，下次启动拒挂并指路。
+
 上手三步：
 
 1. 照 `minimal-content-only/` 摆一只内容包，`/package reload` 后 `/skills` 能看到它。
