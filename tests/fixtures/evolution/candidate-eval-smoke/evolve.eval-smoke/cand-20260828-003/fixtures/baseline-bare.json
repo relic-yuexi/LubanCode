@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "kind": "bare-agent",
+  "ref": "default-agent",
+  "task_id": "rec-placeholder-203",
+  "metrics": {
+    "success_rate": 0.75,
+    "acceptance_rate": 0.5,
+    "tool_calls": 2,
+    "tokens": 1500,
+    "wall_clock_ms": 4200,
+    "permission_prompts": 1,
+    "workspace_writes": 1
+  },
+  "unverified": ["model-in-the-loop"]
+}

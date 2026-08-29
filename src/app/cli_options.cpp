@@ -73,6 +73,54 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             parsed.session_command = cmd;
             return parsed;
         }
+        // 自进化闭环阶段 3 的 CI 子命令:luban evolve test <candidate-dir>
+        // [--baseline <package-dir>] [--json]。只认第一个位置参数是裸
+        // "evolve" 且第二个是 "test" 的情形;参数形状不对当场退用法,
+        // 不静默当普通位置参数走单发问句。
+        if (arg == "evolve" && options.positional.empty()) {
+            const std::size_t rest = args.size() - i - 1;
+            if (rest == 0 || args[i + 1] != "test") {
+                parsed.action = CliAction::BadEvolveTest;
+                parsed.error_text =
+                    "用法: lubancode evolve test <候选目录> [--baseline <父包目录>] [--json]";
+                return parsed;
+            }
+            if (rest < 2) {
+                parsed.action = CliAction::BadEvolveTest;
+                parsed.error_text = "evolve test 缺候选目录路径";
+                return parsed;
+            }
+            EvolveTestArgs evolve;
+            evolve.candidate_dir = args[i + 2];
+            if (evolve.candidate_dir.rfind("--", 0) == 0) {
+                parsed.action = CliAction::BadEvolveTest;
+                parsed.error_text = "evolve test 第一个参数须是候选目录,不是旗标: " +
+                                    evolve.candidate_dir;
+                return parsed;
+            }
+            for (std::size_t j = i + 3; j < args.size(); ++j) {
+                if (args[j] == "--json") {
+                    evolve.json = true;
+                    continue;
+                }
+                if (args[j] == "--baseline") {
+                    if (j + 1 >= args.size()) {
+                        parsed.action = CliAction::BadEvolveTest;
+                        parsed.error_text = "--baseline 需要一个父包目录路径";
+                        return parsed;
+                    }
+                    evolve.baseline_dir = args[++j];
+                    continue;
+                }
+                parsed.action = CliAction::BadEvolveTest;
+                parsed.error_text = "evolve test 认不得参数 \"" + args[j] +
+                                    "\":只认 <候选目录> --baseline <父包目录> --json";
+                return parsed;
+            }
+            parsed.action = CliAction::RunEvolveTest;
+            parsed.evolve_test = evolve;
+            return parsed;
+        }
         if (arg == "--continue") {
             options.continue_last = true;
             continue;

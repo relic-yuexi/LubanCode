@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "candidate_id": "cand-20260828-003",
+  "content_hash": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "replay": [
+    {
+      "source_id": "rec-placeholder-203",
+      "task": "复核 report.json 的疑点清单，核每条有没有出处",
+      "workspace": "fixtures/replay-workspace",
+      "acceptance": [
+        { "kind": "file_exists", "path": "report.json" },
+        { "kind": "json_parses", "path": "report.json" },
+        { "kind": "file_contains", "path": "report.json", "text": "findings" }
+      ]
+    }
+  ],
+  "holdout": [
+    {
+      "task_id": "holdout-eval-smoke-001",
+      "task": "换一处配置，重出一版疑点清单",
+      "workspace": "fixtures/replay-workspace",
+      "acceptance": [
+        { "kind": "file_exists", "path": "report.json" },
+        "每条疑点的说法与账本记录一致（人工复核）"
+      ]
+    }
+  ],
+  "baseline": {
+    "kind": "bare-agent",
+    "ref": "default-agent",
+    "metrics": [
+      "success_rate",
+      "acceptance_rate",
+      "tool_calls",
+      "tokens",
+      "wall_clock_ms",
+      "permission_prompts",
+      "workspace_writes"
+    ],
+    "fixture": "fixtures/baseline-bare.json"
+  },
+  "budget": {
+    "max_tool_calls": 10,
+    "max_tokens": 200000,
+    "timeout_ms": 60000
+  }
+}

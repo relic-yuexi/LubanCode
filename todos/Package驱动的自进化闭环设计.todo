@@ -1,6 +1,6 @@
 # Package 驱动的自进化闭环设计
 
-- 状态：阶段 0/1 已落地（0.26.82），阶段 2 已落地（Skill-only 候选起草），阶段 3 起待实现
+- 状态：阶段 0/1 已落地（0.26.82），阶段 2 已落地（Skill-only 候选起草），阶段 3 已落地（评测与基线），阶段 4 起待实现
 - 日期：2026-08-28
 - 前置：`todos/统一Package封装与组件挂载系统设计.todo`
 - 相关：`todos/自定义Agent与PromptProfile设计.todo`、`/record`、项目记忆、Workflow、`/goal`
@@ -472,12 +472,12 @@ Evolution 层可调用原有 parser、validator 与 runtime，不可复制它们
 
 ### 阶段 3：评测与基线
 
-- [ ] 实现静态门、密钥扫描与绝对路径扫描。
-- [ ] 支持来源任务回放与留出 fixture。
-- [ ] 支持父版或裸 Agent 基线。
-- [ ] 记录成功率、验收、tool calls、tokens、耗时与权限请求。
-- [ ] 独立 Evaluator 只在确定性证据之后给判词。
-- [ ] 接 `/evolve test/show` 与 JSON CI 输出。
+- [x] 实现静态门、密钥扫描与绝对路径扫描。（静态门复用 `package::AnalyzePackage` 做schema/组件/引用诊断，不另写；密钥扫描（键形态+裸 sk- key，占位值不冤枉）与绝对路径扫描（盘符/UNC/家目录，URL 不冤枉）扫候选包全文含 SKILL 正文，发现即 error 记账。）
+- [x] 支持来源任务回放与留出 fixture。（eval-plan 的 acceptance 认纯字符串=人工验收（如实 skipped）与对象式可执行检查 file_exists/json_parses/file_contains/command；command 按空白拆 argv 直起进程不经 shell，cwd=任务 workspace；确定性优先，不起真模型——没起模型行行写 unverified。夹具落候选目录 fixtures/ 或 tests/fixtures/evolution/。）
+- [x] 支持父版或裸 Agent 基线。（基线夹具=一份确定性指标账 JSON（七项+自身 unverified）；CI --baseline 另做父版静态对照与父版哈希对账；基线行只判"候选确定性结果是否低于基线"，判不了就 skipped。）
+- [x] 记录成功率、验收、tool calls、tokens、耗时与权限请求。（七项全字段；诚实口径：tool_calls 只数真起的进程，tokens 恒 0，墙钟实测，写入=快照对比，确认=0（非交互）；误报漏报首版判不了，unverified 明记。）
+- [x] 独立 Evaluator 只在确定性证据之后给判词。（首版 Evaluator=结构化"确定性结果汇总+未测之处清单"（BuildDeterministicVerdict），不接真模型；行里 verdict 字段留给模型判词，权重低于测试与产物。）
+- [x] 接 `/evolve test/show` 与 JSON CI 输出。（/evolve test 落账只追加+状态经 Coordinator 迁 evaluated；/evolve show 亮"通过几项、没测什么、比基线贵多少"；CI 口 `luban evolve test <候选目录> --baseline <父包目录> --json` 退出码 0/1/2。）
 
 验收：能如实说“通过几项、没测什么、比旧版贵多少”，不只吐一句 pass。
 

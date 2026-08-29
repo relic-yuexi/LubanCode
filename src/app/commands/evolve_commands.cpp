@@ -11,14 +11,18 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <iostream>
 #include <map>
 #include <optional>
 #include <string_view>
 #include <utility>
 #include <vector>
 
+#include <nlohmann/json.hpp>
+
 #include "evolution/collector.hpp"
 #include "evolution/coordinator.hpp"
+#include "evolution/eval.hpp"
 #include "evolution/observation_store.hpp"
 #include "platform/paths.hpp"
 #include "skills/workflow_recorder.hpp"
@@ -118,8 +122,11 @@ void PrintUsage() {
                  "      /evolve propose <recording-id|observation-id>\n"
                  "      /evolve diff <candidate-id>\n"
                  "      /evolve reject <candidate-id> [reason]\n"
+                 "      /evolve test <candidate-id>\n"
                  "阶段 1 只读观察;阶段 2 从录制起草最小 content-only 候选(propose)、看\n"
-                 "diff、拒绝(reject)。候选只落候选仓,不进 PackageCatalog,装不进 /package。\n";
+                 "diff、拒绝(reject);阶段 3 评测(test):静态门+回放+留出+基线对照,账只追加。\n"
+                 "候选只落候选仓,不进 PackageCatalog,装不进 /package。CI 另有非交互入口:\n"
+                 "  lubancode evolve test <候选目录> --baseline <父包目录> --json\n";
     TermOut().flush();
 }
 
@@ -298,6 +305,60 @@ void RunEvolveShow(SlashDispatchContext& ctx, const std::string& target) {
     TermOut().flush();
 }
 
+// ---- 评测摘要(show 页与 test 页共用):通过几项、没测什么、比基线贵多少 ----
+void PrintEvalSummary(const lubancode::evolution::EvalSummary& summary, const char* indent) {
+    TermOut() << indent << "静态门 " << (summary.static_gate.fail > 0 ? "fail" : "pass")
+              << ";replay pass " << summary.replay.pass << " / fail " << summary.replay.fail
+              << " / 跳过 " << summary.replay.skipped << ";holdout pass " << summary.holdout.pass
+              << " / fail " << summary.holdout.fail << " / 跳过 " << summary.holdout.skipped
+              << ";baseline " << (summary.baseline.total() == 0
+                                      ? "未跑"
+                                      : "pass " + std::to_string(summary.baseline.pass) + " / fail " +
+                                            std::to_string(summary.baseline.fail))
+              << "\n";
+    TermOut() << indent << "通过 " << summary.checks_passed << " 项检查,失败 "
+              << summary.checks_failed << ",跳过 " << summary.checks_skipped
+              << "(人工验收/缺夹具)\n";
+    if (!summary.unverified.empty()) {
+        TermOut() << indent << "没测到: ";
+        for (std::size_t i = 0; i < summary.unverified.size(); ++i) {
+            TermOut() << (i > 0 ? "," : "") << summary.unverified[i];
+        }
+        TermOut() << "\n";
+    }
+    if (summary.has_baseline_metrics) {
+        const auto cost = [&summary](const lubancode::evolution::MetricDelta& delta,
+                                     const char* name) {
+            std::string text = name;
+            text += " " + std::to_string(static_cast<std::int64_t>(delta.candidate)) + " 对 " +
+                    std::to_string(static_cast<std::int64_t>(delta.baseline));
+            if (delta.delta == 0) {
+                text += "(持平)";
+            } else {
+                text += "(" + (delta.delta > 0 ? std::string("+") : std::string()) +
+                        std::to_string(static_cast<std::int64_t>(delta.delta));
+                if (delta.baseline > 0) {
+                    text += "," + (delta.delta_pct > 0 ? std::string("+") : std::string()) +
+                            std::to_string(delta.delta_pct) + "%";
+                }
+                text += ")";
+            }
+            return text;
+        };
+        TermOut() << indent << "对照基线 "
+                  << (summary.baseline_ref.empty() ? "(未记)" : summary.baseline_ref) << ":"
+                  << cost(summary.tool_calls, "tool calls") << "," << cost(summary.tokens, "tokens")
+                  << "," << cost(summary.wall_clock_ms, "墙钟ms") << ","
+                  << cost(summary.permission_prompts, "确认") << ","
+                  << cost(summary.workspace_writes, "写入") << "\n";
+    } else {
+        TermOut() << indent << "对照基线: 基线侧没有指标账,代价对照缺(未测)\n";
+    }
+    if (!summary.has_holdout) {
+        TermOut() << indent << "(无留出任务:只可标 experimental,不可自动建议晋升稳定版)\n";
+    }
+}
+
 // ---- show 候选页:演化账 + 批准账 + 状态 + 来源回指 ----
 void RunEvolveShowCandidate(SlashDispatchContext& ctx, const std::string& target) {
     lubancode::evolution::CandidateStore store(BuildCandidateRoot(ctx));
@@ -369,7 +430,19 @@ void RunEvolveShowCandidate(SlashDispatchContext& ctx, const std::string& target
     } else {
         TermOut() << "  批准账: (缺——候选不完整)\n";
     }
-    TermOut() << "  下一步: /evolve diff " << found->candidate_id << ";评测在阶段 3 接\n";
+    // ---- 评测账摘要(阶段 3):通过几项、没测什么、比基线贵多少 ----
+    const std::vector<lubancode::evolution::EvalResultLine> results =
+        lubancode::evolution::LoadEvalResults(found->dir / "eval-results.jsonl");
+    if (results.empty()) {
+        TermOut() << "  评测账: 空(先 /evolve test " << found->candidate_id << ")\n";
+    } else {
+        const lubancode::evolution::EvalSummary summary =
+            lubancode::evolution::SummarizeEvalLedger(results);
+        TermOut() << "  评测账(" << results.size() << " 行,只追加):\n";
+        PrintEvalSummary(summary, "    ");
+    }
+    TermOut() << "  下一步: /evolve diff " << found->candidate_id << ";评测跑过便可交批准页"
+              << "(approve 是阶段 4 的事)\n";
     TermOut().flush();
 }
 
@@ -490,6 +563,76 @@ void RunEvolveReject(SlashDispatchContext& ctx, const std::string& target, const
     TermOut().flush();
 }
 
+// ---- test:跑评测五道门,账只追加,状态经 Coordinator 迁移(阶段 3)----
+void RunEvolveTest(SlashDispatchContext& ctx, const std::string& target) {
+    lubancode::evolution::EvolutionCoordinator coordinator(BuildCandidateRoot(ctx), nullptr);
+    const auto result = coordinator.Test(target);
+    if (!result.has_value()) {
+        TermOut() << result.error() << "\n";
+        TermOut().flush();
+        return;
+    }
+    TermOut() << "评测 " << result->candidate_id << "(" << result->package_id << "),账只追加:\n";
+    TermOut() << "  状态: " << result->state_before << " -> " << result->state_after;
+    if (result->transitioned_validated) {
+        TermOut() << "(静态门全绿)";
+    }
+    if (result->transitioned_evaluated) {
+        TermOut() << "(五道门入账)";
+    }
+    if (!result->transitioned_validated && !result->transitioned_evaluated &&
+        result->state_before == result->state_after) {
+        TermOut() << "(状态未动";
+        if (!result->static_gate.pass()) {
+            TermOut() << ",静态门有错";
+        }
+        TermOut() << ")";
+    }
+    TermOut() << "\n";
+    if (!result->plan_loaded) {
+        TermOut() << "  计划: 读不出(" << result->plan_error << "),只跑了静态门\n";
+    }
+    // 静态门的发现与错误:密钥/绝对路径发现即 error,亮出来。
+    TermOut() << "  静态门: " << (result->static_gate.pass() ? "pass" : "fail")
+              << "(doctor " << (result->static_gate.doctor_valid ? "valid" : "invalid")
+              << ",诊断 error " << result->static_gate.diagnostics_errors << "/warning "
+              << result->static_gate.diagnostics_warnings << ",组件 " <<
+        result->static_gate.components_ok << "/" << result->static_gate.components_total
+              << " ok,扫描发现 " << result->static_gate.findings.size() << " 处)\n";
+    for (const lubancode::evolution::ScanFinding& finding : result->static_gate.findings) {
+        TermOut() << "    [" << finding.kind << "] " << finding.path << ":" << finding.line << "  "
+                  << finding.detail << "\n";
+    }
+    for (const std::string& error : result->static_gate.errors) {
+        TermOut() << "    [doctor] " << Ellipsize(error, 100) << "\n";
+    }
+    // 逐门结果:通过几项、没测什么。
+    TermOut() << "  结果(" << result->appended.size() << " 行入账):\n";
+    for (const lubancode::evolution::EvalResultLine& line : result->appended) {
+        if (line.gate == "static") {
+            continue;
+        }
+        TermOut() << "    " << line.gate << " " << line.outcome << "  " << line.task_id << "  (检查 "
+                  << line.checks.size() << " 项,tool calls " << line.metrics.tool_calls
+                  << ",墙钟 " << line.metrics.wall_clock_ms << "ms,写入 "
+                  << line.metrics.workspace_writes << ")\n";
+        for (const lubancode::evolution::CheckResult& check : line.checks) {
+            TermOut() << "      " << (check.skipped ? "跳过" : (check.pass ? "过" : "败")) << "  "
+                      << check.kind << "  " << Ellipsize(check.detail, 72) << "\n";
+        }
+        for (const std::string& note : line.notes) {
+            TermOut() << "      注: " << Ellipsize(note, 88) << "\n";
+        }
+    }
+    TermOut() << "  汇总(确定性;Evaluator 首版=结构化汇总,未接模型):\n";
+    PrintEvalSummary(result->run_summary, "    ");
+    TermOut() << "  账本: " << lubancode::platform::PathToUtf8(result->candidate_dir /
+                                                              "eval-results.jsonl")
+              << "\n";
+    TermOut() << "  下一步: /evolve show " << result->candidate_id << ";approve 是阶段 4 的事\n";
+    TermOut().flush();
+}
+
 }  // namespace
 
 // ---------------- 纯解析(单测钉) ----------------
@@ -534,13 +677,15 @@ ParsedEvolveCommand ParseEvolveCommand(const std::string& args) {
         parsed.target = rest;
         return parsed;
     }
-    if (lower == "propose" || lower == "diff") {
+    if (lower == "propose" || lower == "diff" || lower == "test") {
         if (rest.empty()) {
             parsed.action = EvolveCommandAction::Invalid;
             parsed.bad_word = word;
             return parsed;
         }
-        parsed.action = lower == "propose" ? EvolveCommandAction::Propose : EvolveCommandAction::Diff;
+        parsed.action = lower == "propose"   ? EvolveCommandAction::Propose
+                        : lower == "diff"    ? EvolveCommandAction::Diff
+                                             : EvolveCommandAction::Test;
         parsed.target = rest;
         return parsed;
     }
@@ -589,12 +734,175 @@ CommandFlow HandleSlashEvolve(SlashDispatchContext& ctx,
         case EvolveCommandAction::Reject:
             RunEvolveReject(ctx, command.target, command.reason);
             return CommandFlow::Continue;
+        case EvolveCommandAction::Test:
+            RunEvolveTest(ctx, command.target);
+            return CommandFlow::Continue;
         case EvolveCommandAction::Invalid:
             TermOut() << "认不得 \"" << command.bad_word << "\"。\n";
             PrintUsage();
             return CommandFlow::Continue;
     }
     return CommandFlow::Continue;
+}
+
+// ---------------- CI 非交互入口:luban evolve test <候选目录> ----------------
+
+namespace {
+
+// JSON 面:一份报告 -> 逐项 + 汇总 + unverified 清单(stdout 吐,CI 吃)。
+nlohmann::json BuildEvolveTestJson(const lubancode::evolution::EvolutionCoordinator::TestReport& report,
+                                   const std::string& candidate_dir_utf8) {
+    nlohmann::json out;
+    out["schema"] = 1;
+    out["tool"] = "lubancode evolve test";
+    nlohmann::json candidate;
+    candidate["candidate_id"] = report.candidate_id;
+    candidate["package_id"] = report.package_id;
+    candidate["content_hash"] = report.content_hash;
+    candidate["dir"] = candidate_dir_utf8;
+    candidate["state_before"] = report.state_before;
+    candidate["state_after"] = report.state_after;
+    out["candidate"] = candidate;
+    out["plan"] = {{"loaded", report.plan_loaded}, {"error", report.plan_error}};
+    nlohmann::json st;
+    st["outcome"] = report.static_gate.pass() ? "pass" : "fail";
+    st["doctor_valid"] = report.static_gate.doctor_valid;
+    st["diagnostics_errors"] = report.static_gate.diagnostics_errors;
+    st["diagnostics_warnings"] = report.static_gate.diagnostics_warnings;
+    st["components_total"] = report.static_gate.components_total;
+    st["components_ok"] = report.static_gate.components_ok;
+    st["errors"] = report.static_gate.errors;
+    nlohmann::json findings = nlohmann::json::array();
+    for (const lubancode::evolution::ScanFinding& finding : report.static_gate.findings) {
+        findings.push_back(finding.ToJson());
+    }
+    st["findings"] = findings;
+    out["static"] = st;
+    nlohmann::json gates = nlohmann::json::array();
+    for (const lubancode::evolution::EvalResultLine& line : report.appended) {
+        if (line.gate == "static") {
+            continue;
+        }
+        nlohmann::json item;
+        item["gate"] = line.gate;
+        item["task_id"] = line.task_id;
+        item["outcome"] = line.outcome;
+        item["metrics"] = line.metrics.ToJson();
+        item["unverified"] = line.unverified;
+        item["notes"] = line.notes;
+        nlohmann::json checks = nlohmann::json::array();
+        for (const lubancode::evolution::CheckResult& check : line.checks) {
+            checks.push_back(check.ToJson());
+        }
+        item["checks"] = checks;
+        gates.push_back(std::move(item));
+    }
+    out["gates"] = gates;
+    nlohmann::json summary;
+    summary["totals"] = {{"pass", report.run_summary.checks_passed},
+                         {"fail", report.run_summary.checks_failed},
+                         {"skipped", report.run_summary.checks_skipped}};
+    summary["gates"] = {
+        {"static", {{"pass", report.run_summary.static_gate.pass},
+                    {"fail", report.run_summary.static_gate.fail},
+                    {"skipped", report.run_summary.static_gate.skipped}}},
+        {"replay", {{"pass", report.run_summary.replay.pass},
+                    {"fail", report.run_summary.replay.fail},
+                    {"skipped", report.run_summary.replay.skipped}}},
+        {"holdout", {{"pass", report.run_summary.holdout.pass},
+                     {"fail", report.run_summary.holdout.fail},
+                     {"skipped", report.run_summary.holdout.skipped}}},
+        {"baseline", {{"pass", report.run_summary.baseline.pass},
+                      {"fail", report.run_summary.baseline.fail},
+                      {"skipped", report.run_summary.baseline.skipped}}}};
+    summary["unverified"] = report.run_summary.unverified;
+    summary["holdout_present"] = report.run_summary.has_holdout;
+    nlohmann::json cost;
+    const auto metric_json = [](const lubancode::evolution::MetricDelta& delta) {
+        return nlohmann::json{{"candidate", delta.candidate},
+                              {"baseline", delta.baseline},
+                              {"has_baseline", delta.has_baseline},
+                              {"delta", delta.delta},
+                              {"delta_pct", delta.delta_pct}};
+    };
+    cost["tool_calls"] = metric_json(report.run_summary.tool_calls);
+    cost["tokens"] = metric_json(report.run_summary.tokens);
+    cost["wall_clock_ms"] = metric_json(report.run_summary.wall_clock_ms);
+    cost["permission_prompts"] = metric_json(report.run_summary.permission_prompts);
+    cost["workspace_writes"] = metric_json(report.run_summary.workspace_writes);
+    cost["success_rate"] = metric_json(report.run_summary.success_rate);
+    cost["acceptance_rate"] = metric_json(report.run_summary.acceptance_rate);
+    summary["cost_vs_baseline"] = cost;
+    summary["baseline_ref"] = report.run_summary.baseline_ref;
+    summary["verdict_text"] = BuildDeterministicVerdict(report.run_summary);
+    out["summary"] = summary;
+    out["exit_code"] = report.exit_code;
+    return out;
+}
+
+}  // namespace
+
+int RunEvolveTestCommand(const EvolveTestArgs& args) {
+    const std::filesystem::path candidate_dir = lubancode::platform::Utf8ToPath(args.candidate_dir);
+    std::error_code ec;
+    if (!std::filesystem::is_directory(candidate_dir, ec) || ec) {
+        if (args.json) {
+            nlohmann::json error;
+            error["schema"] = 1;
+            error["tool"] = "lubancode evolve test";
+            error["error"] = "候选目录不存在: " + args.candidate_dir;
+            error["exit_code"] = 2;
+            std::cout << error.dump(2) << "\n";
+        } else {
+            std::cerr << "候选目录不存在: " << args.candidate_dir << "\n";
+        }
+        return 2;
+    }
+
+    lubancode::evolution::EvolutionCoordinator::TestOptions options;
+    if (!args.baseline_dir.empty()) {
+        options.baseline_package_dir = lubancode::platform::Utf8ToPath(args.baseline_dir);
+    }
+    // TestDir 直收目录;coordinator 的仓根只作兜底(候选目录上一层的上一层)。
+    lubancode::evolution::EvolutionCoordinator coordinator(
+        candidate_dir.parent_path().parent_path(), nullptr);
+    const auto report = coordinator.TestDir(candidate_dir, options);
+    if (!report.has_value()) {
+        if (args.json) {
+            nlohmann::json error;
+            error["schema"] = 1;
+            error["tool"] = "lubancode evolve test";
+            error["error"] = report.error();
+            error["exit_code"] = 2;
+            std::cout << error.dump(2) << "\n";
+        } else {
+            std::cerr << report.error() << "\n";
+        }
+        return 2;
+    }
+
+    if (args.json) {
+        std::cout << BuildEvolveTestJson(*report, args.candidate_dir).dump(2) << "\n";
+        std::cout.flush();
+        return report->exit_code;
+    }
+
+    // 人话面:与 /evolve test 同一页(少一层会话上下文)。
+    TermOut() << "评测 " << report->candidate_id << "(" << report->package_id << "):\n";
+    TermOut() << "  状态: " << report->state_before << " -> " << report->state_after << "\n";
+    TermOut() << "  静态门: " << (report->static_gate.pass() ? "pass" : "fail") << "(doctor "
+              << (report->static_gate.doctor_valid ? "valid" : "invalid") << ",扫描发现 "
+              << report->static_gate.findings.size() << " 处)\n";
+    for (const lubancode::evolution::ScanFinding& finding : report->static_gate.findings) {
+        TermOut() << "    [" << finding.kind << "] " << finding.path << ":" << finding.line << "  "
+                  << finding.detail << "\n";
+    }
+    TermOut() << "  入账 " << report->appended.size() << " 行;\n";
+    PrintEvalSummary(report->run_summary, "  ");
+    TermOut() << "确定性判词:\n" << BuildDeterministicVerdict(report->run_summary);
+    TermOut() << "退出码 " << report->exit_code << "(0 全过 / 1 有 fail / 2 夹具缺失)\n";
+    TermOut().flush();
+    return report->exit_code;
 }
 
 }  // namespace lubancode::app

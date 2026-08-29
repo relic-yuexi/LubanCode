@@ -3,9 +3,10 @@
 [文档首页](../../README.md) · [功能目录](../README.md) · [扩展](../extensions/README.md) · [Workflow](../workflows/README.md)
 
 状态：阶段 0/1 已落（0.26.82），阶段 2 已落（Skill-only 候选起草与
-propose/diff/reject）。评测、批准、灰度未落，命令与行为以实现后的程序为准。
-设计全文见 `todos/Package驱动的自进化闭环设计.todo`；Package 清单与目录契约见
-`todos/统一Package封装与组件挂载系统设计.todo`。
+propose/diff/reject），阶段 3 已落（评测与基线：静态门、确定性回放/留出、
+基线对照、`/evolve test` 与 CI JSON）。批准、灰度未落，命令与行为以实现后
+的程序为准。设计全文见 `todos/Package驱动的自进化闭环设计.todo`；Package
+清单与目录契约见 `todos/统一Package封装与组件挂载系统设计.todo`。
 
 ## 一句话
 
@@ -192,6 +193,19 @@ candidate-id；旧评测与旧批准不得沿用。
 
 没有留出任务的候选，只可标 `experimental`，不可自动建议晋升稳定版。
 
+阶段 3 的可执行口径（对上表的两处增补，只增不改）：
+
+- 任务的 `acceptance[]` 元素两种形态：纯字符串 = 人工验收，确定性评测
+  判不了，行行如实记 `skipped` + `manual-acceptance`；对象 =
+  `{"kind": "..."}` 可执行检查，kind 认五种——`file_exists`（`path`）、
+  `json_parses`（`path`）、`file_contains`（`path` + `text`）、`command`
+  （`command`，按空白拆 argv 直接起进程，不经 shell 拼串，cwd=任务的
+  workspace，超时吃 `budget.timeout_ms`）、`manual`。`path` 一律相对任务
+  的 `workspace`。
+- `baseline` 可另带 `fixture`：一份基线确定性指标账 JSON（相对候选目录），
+  字段 `schema`(1)、`kind`、`ref`、`task_id`、`metrics`（七项全字段）、
+  `unverified[]`。没附 `fixture` 的基线只做静态对照，代价对照如实记缺。
+
 ## eval-results.jsonl（行 schema 1）
 
 一行一条 JSON，只追加。末行写半截可丢，恢复时跳过不完整行。
@@ -200,7 +214,7 @@ candidate-id；旧评测与旧批准不得沿用。
 | --- | --- |
 | `schema` | 只认 `1` |
 | `seq` | 递增序号 |
-| `gate` | `replay` / `holdout` / `baseline` |
+| `gate` | `static` / `replay` / `holdout` / `baseline` |
 | `task_id`、`candidate_id`、`content_hash` | 绑定候选与任务 |
 | `outcome` | `pass` / `fail` / `skipped` |
 | `metrics` | `success_rate`、`acceptance_rate`、`tool_calls`、`tokens`、`wall_clock_ms`、`permission_prompts`、`workspace_writes` |
@@ -208,6 +222,12 @@ candidate-id；旧评测与旧批准不得沿用。
 | `unverified[]` | 没测到的写明，如 `network`、`real-service`、`multi-platform`。不许静默当测过 |
 | `verdict` | 可省。评判模型的文字判词，只算一份证据 |
 | `recorded_at` | ISO 8601 |
+
+阶段 3 的增补（只增不改）：`gate` 另认 `static`（静态门也是一道门，
+发现即 error 记账）；行可带扩展字段 `checks[]`（逐项检查：`kind`、
+`detail`、`outcome`、`note`）、`findings[]`（静态门的密钥/绝对路径发现：
+`kind`、`path`、`line`、`detail`，不回显密钥原文）、`notes[]`（预算越帽、
+夹具缺失一类的人话）。必填字段一概不动。
 
 ## approval.json（schema 1）
 
@@ -318,16 +338,24 @@ Package doctor
 
 ## 夹具
 
-`tests/fixtures/evolution/` 收两只候选夹具：
+`tests/fixtures/evolution/` 收三只候选夹具：
 
 - `candidate-content-only/`：content-only 候选。最小包（`package.yaml` +
   `skills/provider-binding-audit/SKILL.md`），评测三行入账，停在
   awaiting_approval。
 - `candidate-code-rejected/`：带 process Plugin 草稿的候选。评测虽过，用户以
   未过信任门为由拒绝；拒绝账留 fingerprint。
+- `candidate-eval-smoke/`：阶段 3 的评测形状样板（`cand-20260828-003`）。
+  `eval-plan.json` 的 replay/holdout 各带夹具工作区与对象式可执行验收
+  （`file_exists`/`json_parses`/`file_contains`），人工字符串验收混排；
+  `baseline.fixture` 指向 `fixtures/baseline-bare.json`（裸 Agent 指标账）。
+  内容哈希用 64 个 0 占位——真跑评测会因哈希对不上拒评，这是有意的：
+  执行型测试在 `tests/unit/evolution/test_evolution_eval.cpp` 里用临时目录
+  现算哈希现写计划，不在仓库夹具上留一改就失效的硬哈希。
 
 夹具里 run、goal、recording 各 ID 一律占位；哈希用 `sha256:` 接 64 个 0 占位；
-日期统一 2026-08-28。字段与本页逐一对得上。
+日期统一 2026-08-28。字段与本页逐一对得上。夹具不写真实密钥、账号、绝对
+路径；验收命令只放跨平台无害的（文件存在/JSON 可解析一类，不起危险进程）。
 
 ## 观察账（阶段 1 落地）
 
@@ -378,3 +406,54 @@ propose 落 `observed -> drafted` 首行，`/evolve reject <候选id> [理由]` 
 `/evolve list` 的账面同时列观察簇与候选区，`/evolve show` 认 `cand-` 起头
 的候选 id，回指来源观察。整包内容哈希照 Package 阶段 1 的盘点算法复算，
 进 `approval.json` 与 `eval-plan.json`；评测与批准是阶段 3/4 的事。
+
+## 评测与基线（阶段 3 落地）
+
+`/evolve test <候选id>` 跑评测五道门，结果只追加进 `eval-results.jsonl`，
+状态经 `EvolutionCoordinator::Test` 迁 `drafted -> validated -> evaluated`
+（静态门全绿才 validated，五道门入账才 evaluated；评测行有 fail 不挡
+迁移——失败记在账上，状态如实反映"跑完了"）。五道门各自的实现与口径：
+
+- **静态门（doctor + 扫描）**：复用 `package::AnalyzePackage` 做 schema、
+  SemVer、组件原生 parser、包内引用与路径越界诊断，不另写一套；另补
+  密钥扫描（键形态 `token:`/`api_key=` 一类与裸 `sk-` key，占位值
+  `[已打码]`/`{{…}}`/`<…>` 不冤枉）与绝对路径扫描（盘符、UNC、
+  `/home/`、`/Users/`、`~/`，URL 不冤枉）——扫候选包全文含 SKILL 正文，
+  发现即 error 记账，静态门不过则状态停在 drafted。doctor 没喂当前
+  LubanCode 版本，兼容范围检查没做，行里记 `unverified: compat-range`。
+- **来源回放与留出**：确定性优先——不起真模型。任务的"执行"由夹具携带
+  产物、检查器逐项验收（`file_exists`/`json_parses`/`file_contains`/
+  `command`）。夹具放候选目录下（`fixtures/…`，相对路径引用），或
+  `tests/fixtures/evolution/`。人工验收（字符串项）如实记 skipped。
+  workspace 给了却不在盘上 = 没测（`fixture-missing`），不是测砸。
+- **基线对照**：父版在比父版（CI `--baseline <父包目录>` 另做静态对照与
+  父版哈希对账），无父比裸 Agent——对照的另一边是基线夹具里的确定性
+  指标账（七项指标 + 基线自己的 unverified）。基线行 outcome 只判
+  "候选确定性结果是否低于基线"，判不了（无夹具/候选无可执行检查）就
+  skipped，不硬判。
+- **指标账的诚实口径**：`tool_calls` 只数确定性检查里真起了的进程
+  （command 项），`tokens` 恒 0（不起模型），`wall_clock_ms` 为检查执行
+  实测，`workspace_writes` 为检查前后快照对比的新增/改动文件数，
+  `permission_prompts` 为 0（非交互）。这是"确定性代跑"的账，不是模型
+  回合的账；没起模型、真实服务、多平台没测到，行行写 unverified
+  （`model-in-the-loop`、`agent-metrics`……）。
+- **独立 Evaluator 只在确定性证据之后**：首版 Evaluator 是结构化的
+  "确定性结果汇总 + 未测之处清单"（`BuildDeterministicVerdict`），不接
+  真模型；行里的 `verdict` 字段留给后续的模型判词，判词权重永远低于
+  测试与产物。
+
+`/evolve show` 的候选页带评测摘要：通过几项、没测什么、比基线贵多少
+（tool calls/tokens/墙钟/确认/写入五路 delta）。CI 非交互入口：
+
+```text
+lubancode evolve test <候选目录> --baseline <父包目录> --json
+```
+
+stdout 吐 JSON（候选身份、静态门逐项、各门结果与检查账、汇总
+`totals`/`unverified`/`cost_vs_baseline`、确定性判词文本），退出码：
+全过 0、有 fail 1、夹具/计划缺失 2。评测引擎与 `/evolve test` 同一枚
+`EvolutionCoordinator::TestDir`，写口只有它。
+
+预算（`budget`）在任务行上判：tool calls 或墙钟越帽，该行即 fail
+（note 记数）。重跑 `/evolve test` 账照追加（seq 续号），状态不非法
+迁移；候选内容改一字，计划哈希对不上即拒评——重做候选，不沿用旧账。
