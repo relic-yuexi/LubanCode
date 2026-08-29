@@ -213,6 +213,68 @@ std::string BuildCacheNote(const ContextTracker& tracker, bool last_usage_report
     return tr("status.cache_note_zero");
 }
 
+std::vector<std::string> BuildCacheRequestHistoryLines(const ContextTracker& tracker) {
+    // 逐请求缓存命中(问题 5):一行 = 一次带回 usage 的 provider 请求,
+    // 不是一轮用户问答。按外层用户轮次分组,"用户轮次""模型请求""工具
+    // 调用"三种计数各叫各名。环形缓冲只留最近 kCacheHistorySize 次,总账
+    // (total_model_requests)说总数。
+    std::vector<std::string> lines;
+    const auto& history = tracker.cache_request_history();
+    if (history.empty()) {
+        return lines;
+    }
+    // 窗口内覆盖的用户轮次数:历史按时间序,同 turn_id 连续,换号即换轮。
+    std::size_t turn_count = 0;
+    std::string previous_turn;
+    bool has_turn = false;
+    for (const auto& record : history) {
+        if (!has_turn || record.turn_id != previous_turn) {
+            ++turn_count;
+            previous_turn = record.turn_id;
+            has_turn = true;
+        }
+    }
+    lines.push_back(std::string("  ") + trf("cmd.context.cache_history_header", history.size()));
+    lines.push_back(std::string("  ") + trf("cmd.context.cache_history_counts", turn_count, history.size()));
+    if (history.size() >= ContextTracker::kCacheHistorySize) {
+        lines.push_back(std::string("  ") + trf("cmd.context.cache_history_capped",
+                                                ContextTracker::kCacheHistorySize, tracker.total_model_requests()));
+    }
+    // 分组:同 turn_id 连续成组;标签查登记账,查不到按"未登记/轮次不明"
+    // 措辞,不猜内容。
+    std::string current_turn;
+    bool in_group = false;
+    for (const auto& record : history) {
+        if (!in_group || record.turn_id != current_turn) {
+            current_turn = record.turn_id;
+            in_group = true;
+            if (current_turn.empty()) {
+                lines.push_back(std::string("    ") + tr("cmd.context.cache_history_turn_unknown"));
+            } else {
+                const ContextTracker::UserTurnLabel* label = tracker.FindTurnLabel(current_turn);
+                if (label != nullptr) {
+                    lines.push_back(std::string("    ") +
+                                    trf("cmd.context.cache_history_turn", label->ordinal, label->turn_id,
+                                        label->label.empty() ? tr("cmd.context.cache_history_turn_nolabel")
+                                                             : label->label));
+                } else {
+                    lines.push_back(std::string("    ") + trf("cmd.context.cache_history_turn_plain", current_turn));
+                }
+            }
+        }
+        if (record.unreported || record.hit_percent() < 0) {
+            lines.push_back(std::string("      ") +
+                            trf("cmd.context.cache_history_row_unreported", record.step_index + 1));
+        } else {
+            lines.push_back(std::string("      ") +
+                            trf("cmd.context.cache_history_row", record.step_index + 1,
+                                FormatTokenCount(record.input_tokens), FormatTokenCount(record.cache_read_tokens),
+                                std::to_string(record.hit_percent())));
+        }
+    }
+    return lines;
+}
+
 namespace {
 
 // 显示列宽:ASCII 一列,非 ASCII(这里的用途只有 CJK 标签,按全角)两列;

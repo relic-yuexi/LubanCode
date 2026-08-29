@@ -17,6 +17,18 @@ std::string ToString(ModelRole role) {
     return "normal";
 }
 
+std::string RoleDutyText(ModelRole role) {
+    switch (role) {
+        case ModelRole::Cheap:
+            return "压缩/摘要/标题等后台采样";
+        case ModelRole::Normal:
+            return "普通对话与实现";
+        case ModelRole::Lao:
+            return "Plan/规划任务";
+    }
+    return std::string();
+}
+
 std::string ToString(TaskKind kind) {
     switch (kind) {
         case TaskKind::NormalTurn:
@@ -160,26 +172,42 @@ void ModelUsageLedger::RecordFallback(TaskKind kind, ModelRole from, ModelRole t
                               (reason.empty() ? std::string() : ": " + reason));
 }
 
-std::vector<std::string> ModelUsageLedger::ReportLines() const {
+std::vector<std::string> ModelUsageLedger::ReportLines(const ModelRouteTable* routes) const {
     std::vector<std::string> lines;
-    // 固定按 cheap -> normal -> lao 出账,顺序稳定好对照 /model roles。
+    // 固定按 cheap -> normal -> lao 出账,顺序稳定好对照 /model roles;
+    // 三行固定列全(问题 6):零调用角色不隐藏,写明"本场未触发 + 职责"。
     const ModelRole order[] = {ModelRole::Cheap, ModelRole::Normal, ModelRole::Lao};
     for (const ModelRole role : order) {
         const auto it = by_role_.find(role);
-        if (it == by_role_.end() || it->second.empty()) {
-            continue;
-        }
-        const ModelUsageEntry& entry = it->second;
-        std::string line = ToString(role) + " · " + entry.last_model + " · " + std::to_string(entry.calls) + " 次调用";
-        if (entry.reported) {
-            line += " · 输入 " + std::to_string(entry.input_tokens) + " tok · 输出 " +
-                    std::to_string(entry.output_tokens) + " tok";
+        const ModelUsageEntry* entry = it != by_role_.end() ? &it->second : nullptr;
+        const ModelRoute* route = routes != nullptr ? &routes->RoleRoute(role) : nullptr;
+        const bool has_calls = entry != nullptr && entry->calls > 0;
+        // 模型名:有调用用实际用过的;零调用取有效路由的(没路由就空着,
+        // 不拿 normal 的名字顶包)。
+        std::string line = ToString(role);
+        if (has_calls) {
+            line += " · " + entry->last_model + " · " + std::to_string(entry->calls) + " 次调用";
+            if (entry->reported) {
+                line += " · 输入 " + std::to_string(entry->input_tokens) + " tok · 输出 " +
+                        std::to_string(entry->output_tokens) + " tok";
+            } else {
+                line += " · usage 未报告";
+            }
+            if (entry->duration_ms > 0) {
+                line += " · 用时 " + std::to_string(entry->duration_ms / 1000) + "." +
+                        std::to_string((entry->duration_ms % 1000) / 100) + "s";
+            }
         } else {
-            line += " · usage 未报告";
+            if (route != nullptr && !route->model.empty()) {
+                line += " · " + route->model;
+            }
+            line += " · 0 次调用 · 本场未触发(" + RoleDutyText(role) + ")";
         }
-        if (entry.duration_ms > 0) {
-            line += " · 用时 " + std::to_string(entry.duration_ms / 1000) + "." +
-                    std::to_string((entry.duration_ms % 1000) / 100) + "s";
+        // 回落写明(问题 6):cheap/lao 未配置整体回落 normal 时,行内带上
+        // source("回落到 normal(...)"),不把同名再印一遍装独立配置;
+        // 与 /model roles 同一份口径(routes 即那张表的 RoleRoute)。
+        if (route != nullptr && route->fell_back_to_normal && !route->source.empty()) {
+            line += " · " + route->source;
         }
         lines.push_back(std::move(line));
     }

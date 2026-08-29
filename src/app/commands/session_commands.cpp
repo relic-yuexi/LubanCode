@@ -76,7 +76,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const lubancode::agent::AgentRuntimeProfile* main_profile,
                            const lubancode::agent::ModelUsageLedger* usage_ledger,
                            const lubancode::agent::ContextArtifactStore* artifact_store,
-                           const ContextLayersReport* layers) {
+                           const ContextLayersReport* layers,
+                           const lubancode::agent::ModelRouteTable* roles_table) {
     if (args.empty()) {
         const auto lines = lubancode::cli::FormatContextBreakdown(
             sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
@@ -115,19 +116,11 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                                  session_percent >= 0 ? std::to_string(session_percent) : std::string("?"))
                           << "\n";
             }
-            // 逐轮命中率趋势:最近 kCacheHistorySize 轮,每轮一行,最旧在前。
-            // 命中率掉的时候一眼看出是哪一轮、什么操作导致的。
-            const auto& history = context_tracker.cache_history();
-            if (!history.empty()) {
-                TermOut() << "  " << trf("cmd.context.cache_history_header", history.size()) << "\n";
-                for (const auto& turn : history) {
-                    const int pct = turn.hit_percent();
-                    TermOut() << "    " << trf("cmd.context.cache_history_row",
-                                               lubancode::cli::FormatTokenCount(turn.input_tokens),
-                                               lubancode::cli::FormatTokenCount(turn.cache_read_tokens),
-                                               pct >= 0 ? std::to_string(pct) : std::string("?"))
-                              << "\n";
-                }
+            // 逐请求命中率趋势(问题 5):一行是一次模型请求(不是用户轮),
+            // 按外层用户轮次分组,上限/总数/未回报全说破——拼装在
+            // BuildCacheRequestHistoryLines(纯函数,单测钉)。
+            for (const std::string& line : lubancode::cli::BuildCacheRequestHistoryLines(context_tracker)) {
+                TermOut() << line << "\n";
             }
         }
 
@@ -218,8 +211,10 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         }
         // 分角色 usage 台账(模型分工第一期,规格"路由看得见"):普通 turn
         // 归 normal,压缩/抽取/标题的后台采样归 cheap,回退单独留痕。
+        // 三角色固定列全(问题 6):零调用角色也露脸,写明"本场未触发 +
+        // 默认职责";回落关系与 /model roles 同一份 routes(source 同源)。
         if (usage_ledger != nullptr) {
-            const auto role_lines = usage_ledger->ReportLines();
+            const auto role_lines = usage_ledger->ReportLines(roles_table);
             if (!role_lines.empty()) {
                 TermOut() << "  " << tr("router.usage.header") << "\n";
                 for (const std::string& line : role_lines) {
@@ -1321,7 +1316,8 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
         layers.last_compact_line = *in.last_compact_line;
     }
     HandleContextCommand(args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme,
-                         loop.cache_epoch(), &loop.runtime_profile(), in.usage_ledger, in.artifact_store, &layers);
+                         loop.cache_epoch(), &loop.runtime_profile(), in.usage_ledger, in.artifact_store, &layers,
+                         in.roles_table);
 }
 
 void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) {
@@ -1689,6 +1685,13 @@ CommandFlow HandleSlashContext(SlashDispatchContext& ctx, const lubancode::cli::
     context_in.agent = ctx.main_agent;
     context_in.context_tracker = ctx.context_tracker;
     context_in.usage_ledger = ctx.model_router != nullptr ? &ctx.model_router->ledger() : nullptr;
+    // 三角色有效路由(问题 6):与 /model roles 同一份 ModelRouterService
+    // 的 Table(),栈上存一份给本次打印用(分角色账列全三角色 + 回落口径)。
+    lubancode::agent::ModelRouteTable roles_table_storage;
+    if (ctx.model_router != nullptr) {
+        roles_table_storage = ctx.model_router->Table();
+        context_in.roles_table = &roles_table_storage;
+    }
     context_in.artifact_store = ctx.artifact_store.get();
     context_in.last_compact_line = ctx.last_compact_line;
     RunContextCommand(parsed.args, context_in, *ctx.theme);

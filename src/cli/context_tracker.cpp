@@ -20,7 +20,7 @@ void ContextTracker::Update(const api::Usage& usage) {
     last_input_tokens_ = api::TotalInputTokens(usage);
 }
 
-void ContextTracker::ApplyUsage(const api::Usage& usage) {
+void ContextTracker::ApplyUsage(const api::Usage& usage, const std::string& turn_id, int step_index) {
     // 四项全零 = provider 没在流末给 usage(见头文件注释):不清零、不
     // 覆盖,现有数字原样保住,只标旧值。
     const bool measured = usage.input_tokens > 0 || usage.output_tokens > 0 ||
@@ -31,16 +31,65 @@ void ContextTracker::ApplyUsage(const api::Usage& usage) {
         // 本场累计(命中率分子分母):只认实测到的这笔,跨轮不清零。
         session_cache_read_total_ += usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0;
         session_input_total_ += api::TotalInputTokens(usage);
-        // 逐轮历史:环形缓冲,保留最近 kCacheHistorySize 轮。
-        cache_history_.push_back(CacheTurn{api::TotalInputTokens(usage),
-                                           usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0});
-        if (cache_history_.size() > kCacheHistorySize) {
-            cache_history_.erase(cache_history_.begin());
-        }
         usage_stale_ = false;
-        return;
     }
-    usage_stale_ = true;
+    // 逐请求历史:一次模型请求一笔,实测与缺测都记(缺测标 unreported,
+    // 显示层写"未回报"),环形缓冲保留最近 kCacheHistorySize 次。总账
+    // 不跟着环形挤,显示层拿它写"全会话共 N 次",12 不冒充总数。
+    CacheRequestRecord record;
+    record.turn_id = turn_id;
+    record.step_index = step_index;
+    record.unreported = !measured;
+    if (measured) {
+        record.input_tokens = api::TotalInputTokens(usage);
+        record.cache_read_tokens = usage.cache_read_tokens > 0 ? usage.cache_read_tokens : 0;
+    }
+    cache_history_.push_back(std::move(record));
+    if (cache_history_.size() > kCacheHistorySize) {
+        cache_history_.erase(cache_history_.begin());
+    }
+    ++total_model_requests_;
+    // 陌生 turn_id(没走过 BeginUserTurn 的路径,如单发/续跑)自动补号,
+    // 标签留空;显示层按"未登记"措辞,不猜内容。
+    RegisterTurnIfMissing(turn_id);
+    if (!measured) {
+        usage_stale_ = true;
+    }
+}
+
+void ContextTracker::RegisterTurnIfMissing(const std::string& turn_id) {
+    if (turn_id.empty()) {
+        return;  // 空 id 不登记:显示层按"轮次不明"分组
+    }
+    BeginUserTurn(turn_id, std::string());
+}
+
+void ContextTracker::BeginUserTurn(const std::string& turn_id, const std::string& label) {
+    for (auto& entry : turn_labels_) {
+        if (entry.turn_id == turn_id) {
+            if (!label.empty()) {
+                entry.label = label;  // 已登记就只补标签,序号不动
+            }
+            return;
+        }
+    }
+    UserTurnLabel entry;
+    entry.turn_id = turn_id;
+    entry.label = label;
+    entry.ordinal = ++next_turn_ordinal_;
+    turn_labels_.push_back(std::move(entry));
+    if (turn_labels_.size() > kMaxTurnLabels) {
+        turn_labels_.erase(turn_labels_.begin());
+    }
+}
+
+const ContextTracker::UserTurnLabel* ContextTracker::FindTurnLabel(const std::string& turn_id) const {
+    for (const auto& entry : turn_labels_) {
+        if (entry.turn_id == turn_id) {
+            return &entry;
+        }
+    }
+    return nullptr;
 }
 
 int ContextTracker::UsagePercent() const {

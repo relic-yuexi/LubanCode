@@ -146,9 +146,10 @@ void TerminalTurnSink::RenderEvent(const runtime::ServerEvent& event) {
             // usage_stats 一起累加——语义区别见 cli/context_tracker.hpp 文件头。
             // ApplyUsage 兼管"provider 没回 usage"(四项全零)的语义:不清零、
             // 只把现有数字标成旧值;ESC/HTTP 错误路径压根走不到这里,不会
-            // 把旧数伪装成本次新值。
+            // 把旧数伪装成本次新值。turn_id/step_index(问题 5)取自事件:
+            // 外层用户轮次号 + 该轮内请求序,逐请求缓存表靠它们分组。
             if (ingredients_.context_tracker != nullptr) {
-                ingredients_.context_tracker->ApplyUsage(report.usage);
+                ingredients_.context_tracker->ApplyUsage(report.usage, event.turn_id, report.step_index);
                 // usage 一到就把 context/tokens 两段发布给状态行数据源——
                 // 只改数据不落笔(锁与重画事务在 cli::UpdateStatusLineContext
                 // 里),回合内状态栏跟着前进,不必等整轮收口回外层循环重建

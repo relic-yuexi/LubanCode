@@ -72,14 +72,17 @@ struct ContextLayersReport {
 
 // usage_ledger(可空,模型分工第一期):分角色 usage 台账,非空时列一节
 // "模型调用分角色账"——普通 turn 归 normal,压缩/抽取/标题归 cheap,
-// 回退另有留痕(规格"路由看得见")。
+// 回退另有留痕(规格"路由看得见")。roles_table(可空,问题 6):三角色
+// 有效路由,非空时账目固定列全 cheap/normal/lao,零调用角色写明"本场
+// 未触发 + 默认职责",回落关系与 /model roles 同一份 source 口径。
 void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracker& context_tracker,
                            std::size_t sys_tokens, std::size_t tools_tokens, std::size_t history_tokens,
                            const lubancode::cli::Theme& theme, int cache_epoch = 1,
                            const lubancode::agent::AgentRuntimeProfile* main_profile = nullptr,
                            const lubancode::agent::ModelUsageLedger* usage_ledger = nullptr,
                            const lubancode::agent::ContextArtifactStore* artifact_store = nullptr,
-                           const ContextLayersReport* layers = nullptr);
+                           const ContextLayersReport* layers = nullptr,
+                           const lubancode::agent::ModelRouteTable* roles_table = nullptr);
 
 // ---- /context 的会话现场收集(终端接线收尾单自大类搬出) ------------------
 //
@@ -99,6 +102,10 @@ struct ContextEstimateInputs {
     lubancode::agent::Agent* agent = nullptr;  // 活 loop(要能会话路由)
     lubancode::cli::ContextTracker* context_tracker = nullptr;
     const lubancode::agent::ModelUsageLedger* usage_ledger = nullptr;  // 可空
+    // 三角色有效路由(问题 6:零调用角色列全 + 回落口径)。可空(单测/
+    // 无路由路径,分角色账退回无模型名的裸账)。指向调用方栈上现算的
+    // ModelRouterService::Table() 副本,本结构不拥有。
+    const lubancode::agent::ModelRouteTable* roles_table = nullptr;
     const lubancode::agent::ContextArtifactStore* artifact_store = nullptr;  // 可空
     const std::string* last_compact_line = nullptr;
 };
