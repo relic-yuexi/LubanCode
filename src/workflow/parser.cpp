@@ -256,6 +256,7 @@ std::expected<WorkflowDefinition, std::vector<ParseIssue>> ParseWorkflowYaml(con
             };
             node_str("tool", node.tool);
             node_str("role", node.role);
+            node_str("agent", node.agent);
             node_str("task", node.task);
             if (const auto& n = raw["allowed_tools"]; n && n.IsSequence()) {
                 for (const auto& t : n) {
@@ -574,6 +575,7 @@ std::string EmitWorkflowYaml(const WorkflowDefinition& def) {
             out << "\n";
         }
         if (!node.role.empty()) out << "    role: " << node.role << "\n";
+        if (!node.agent.empty()) out << "    agent: " << node.agent << "\n";
         if (!node.task.empty()) out << "    task: " << node.task << "\n";
         if (!node.allowed_tools.empty()) {
             out << "    allowed_tools:\n";

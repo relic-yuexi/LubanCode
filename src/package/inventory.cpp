@@ -370,11 +370,17 @@ void CollectFiles(const std::filesystem::path& root, std::vector<InventoryFile>&
               [](const InventoryFile& a, const InventoryFile& b) { return a.rel < b.rel; });
 }
 
-// 六类组件目录的盘点。规矩(单子 §四):目录必须在包根;一件 Skill/Workflow/
-// Plugin/MCP 各占一层目录,入口文件各有其名;Agent 是 agents/*.yaml;Prompt
-// Profile 沿用 prompts/profiles/<profile>/。入口文件缺了不吞——进诊断账。
-void CollectComponents(const std::filesystem::path& root, const std::string& package_id,
-                       PackageInventory& inventory) {
+}  // namespace
+
+// 六类组件目录的盘点(包级导出:引用索引与 MountPlan 也吃这份轻账)。
+// 规矩(单子 §四):目录必须在包根;一件 Skill/Workflow/Plugin/MCP 各占
+// 一层目录,入口文件各有其名;Agent 是 agents/*.yaml;Prompt Profile 沿用
+// prompts/profiles/<profile>/。入口文件缺了不吞——进诊断账。
+std::vector<PackageComponent> ListPackageComponents(const std::filesystem::path& root,
+                                                    const std::string& package_id,
+                                                    std::vector<PackageDiagnostic>* diagnostics) {
+    std::vector<PackageComponent> skills, workflows, plugins, mcp_servers, agents, profiles;
+
     const auto scan_dir_components = [&](const char* dir_name, const char* entry_file,
                                          std::vector<PackageComponent>& out,
                                          bool entry_required) {
@@ -397,17 +403,17 @@ void CollectComponents(const std::filesystem::path& root, const std::string& pac
             const std::string rel = std::string(dir_name) + "/" + name;
             if (HasEntry(child, entry_file)) {
                 out.push_back(MakeComponent(package_id, name, rel));
-            } else if (entry_required) {
-                inventory.diagnostics.push_back(
+            } else if (entry_required && diagnostics != nullptr) {
+                diagnostics->push_back(
                     {PackageDiagnostic::Kind::Warning, rel,
                      std::string("缺入口文件 ") + entry_file + ",组件不成立"});
             }
         }
     };
-    scan_dir_components("skills", "SKILL.md", inventory.skills, true);
-    scan_dir_components("workflows", "workflow.yaml", inventory.workflows, true);
-    scan_dir_components("plugins", "plugin.json", inventory.plugins, true);
-    scan_dir_components("mcp", "mcp.yaml", inventory.mcp_servers, true);
+    scan_dir_components("skills", "SKILL.md", skills, true);
+    scan_dir_components("workflows", "workflow.yaml", workflows, true);
+    scan_dir_components("plugins", "plugin.json", plugins, true);
+    scan_dir_components("mcp", "mcp.yaml", mcp_servers, true);
 
     // agents/*.yaml:根下的一层文件即一份 Agent 定义(单子 §四)。
     {
@@ -429,7 +435,7 @@ void CollectComponents(const std::filesystem::path& root, const std::string& pac
             }
             std::sort(names.begin(), names.end());
             for (const std::string& name : names) {
-                inventory.agents.push_back(MakeComponent(package_id, name, "agents/" + name + ".yaml"));
+                agents.push_back(MakeComponent(package_id, name, "agents/" + name + ".yaml"));
             }
         }
     }
@@ -449,9 +455,45 @@ void CollectComponents(const std::filesystem::path& root, const std::string& pac
             }
             std::sort(names.begin(), names.end());
             for (const std::string& name : names) {
-                inventory.prompt_profiles.push_back(
-                    MakeComponent(package_id, name, "prompts/profiles/" + name));
+                profiles.push_back(MakeComponent(package_id, name, "prompts/profiles/" + name));
             }
+        }
+    }
+
+    // 并成一份账,次序固定:agents, prompt_profiles, skills, workflows,
+    // plugins, mcp_servers(与 PackageInventory 的字段序一致)。
+    std::vector<PackageComponent> out;
+    out.reserve(agents.size() + profiles.size() + skills.size() + workflows.size() +
+                plugins.size() + mcp_servers.size());
+    out.insert(out.end(), agents.begin(), agents.end());
+    out.insert(out.end(), profiles.begin(), profiles.end());
+    out.insert(out.end(), skills.begin(), skills.end());
+    out.insert(out.end(), workflows.begin(), workflows.end());
+    out.insert(out.end(), plugins.begin(), plugins.end());
+    out.insert(out.end(), mcp_servers.begin(), mcp_servers.end());
+    return out;
+}
+
+namespace {
+
+void CollectComponents(const std::filesystem::path& root, const std::string& package_id,
+                       PackageInventory& inventory) {
+    std::vector<PackageComponent> listed = ListPackageComponents(root, package_id,
+                                                                 &inventory.diagnostics);
+    for (auto& component : listed) {
+        const std::string& prefix = component.rel_path.substr(0, component.rel_path.find('/'));
+        if (prefix == "agents") {
+            inventory.agents.push_back(std::move(component));
+        } else if (prefix == "prompts") {
+            inventory.prompt_profiles.push_back(std::move(component));
+        } else if (prefix == "skills") {
+            inventory.skills.push_back(std::move(component));
+        } else if (prefix == "workflows") {
+            inventory.workflows.push_back(std::move(component));
+        } else if (prefix == "plugins") {
+            inventory.plugins.push_back(std::move(component));
+        } else if (prefix == "mcp") {
+            inventory.mcp_servers.push_back(std::move(component));
         }
     }
 }

@@ -183,6 +183,92 @@ std::string BuildPluginToolName(std::string_view plugin_id, std::string_view too
     return out;
 }
 
+namespace {
+
+constexpr char kWireHex[] = "0123456789ABCDEF";
+
+bool WireIdByteAllowed(unsigned char byte) {
+    return CodePointAllowed(static_cast<char>(byte));
+}
+
+int HexDigitValue(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+std::string AppendDisplayComponentId(std::string_view package_id, std::string_view local_id) {
+    std::string out;
+    out.reserve(package_id.size() + 1 + local_id.size());
+    out += package_id;
+    out += '.';
+    out += local_id;
+    return out;
+}
+
+}  // namespace
+
+std::string EncodeToolWireId(std::string_view component_id) {
+    std::string out;
+    out.reserve(component_id.size());
+    for (const unsigned char byte : component_id) {
+        if (WireIdByteAllowed(byte)) {
+            out += static_cast<char>(byte);
+        } else {
+            out += '%';
+            out += kWireHex[byte >> 4];
+            out += kWireHex[byte & 0x0F];
+        }
+    }
+    return out;
+}
+
+std::optional<std::string> DecodeToolWireId(std::string_view encoded) {
+    std::string out;
+    out.reserve(encoded.size());
+    for (std::size_t i = 0; i < encoded.size(); ++i) {
+        const unsigned char byte = static_cast<unsigned char>(encoded[i]);
+        if (byte == '%') {
+            if (i + 2 >= encoded.size()) return std::nullopt;
+            const int high = HexDigitValue(encoded[i + 1]);
+            const int low = HexDigitValue(encoded[i + 2]);
+            if (high < 0 || low < 0) return std::nullopt;
+            out += static_cast<char>((high << 4) | low);
+            i += 2;
+        } else {
+            out += static_cast<char>(byte);
+        }
+    }
+    return out;
+}
+
+std::string BuildPackagedToolWireName(std::string_view kind_prefix, std::string_view package_id,
+                                      std::string_view local_id, std::string_view tool) {
+    std::string out;
+    const std::string display = AppendDisplayComponentId(package_id, local_id);
+    out.reserve(kind_prefix.size() + display.size() * 3 + tool.size() + 4);
+    out += kind_prefix;
+    out += "__";
+    out += EncodeToolWireId(display);
+    out += "__";
+    out += tool;
+    return out;
+}
+
+std::string BuildPackagedToolDisplayName(std::string_view kind_prefix, std::string_view package_id,
+                                         std::string_view local_id, std::string_view tool) {
+    std::string out;
+    const std::string display = AppendDisplayComponentId(package_id, local_id);
+    out.reserve(kind_prefix.size() + display.size() + tool.size() + 4);
+    out += kind_prefix;
+    out += "__";
+    out += display;
+    out += "__";
+    out += tool;
+    return out;
+}
+
 std::expected<std::string, std::string> ExpandPluginDirPlaceholder(std::string_view text,
                                                                    const std::filesystem::path& plugin_dir) {
     constexpr std::string_view kPlaceholder = "${plugin_dir}";
