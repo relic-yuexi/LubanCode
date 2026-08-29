@@ -173,6 +173,12 @@
 - **用户动过手,旧 ref 即作废。** 仲裁第四条真落地:页面挂输入监听递 userEpoch,Agent 拿旧快照动作时明报 stale_ref 并注明"用户在页面上动过手";Agent 自家输入不误记。浏览器自测 130→162 项。
 - **截图进 App Server 事件。** 工具完成事件附 images 数组(MIME/尺寸/哈希/artifact 引用),绝不带 base64;纯文本工具不带该字段,老事件形状不变。headed 模式真窗冒烟过,CI 无显示器如实 SKIP。
 
+## [v0.26.95] - 2026-08-29
+
+- **AgentProfile 解析归一处。** 新 AgentProfileResolver 成为唯一合并权威:父 Agent、定义 YAML、模型角色、Prompt、Skill、工具、MCP、权限、runtime 九路材料六步合成一份——散在派发链里的手工合并尽数收编。同一份定义从 AgentTool 与 Workflow 两条路解析逐字段对账,连"错也错得一样"都钉了测试。
+- **权限只可收窄成铁律。** 子 Agent 想比父档宽(confirm 想跳 yolo)即结构化明拒,不进连败账;requires 缺依赖、allow 点到父面之外,各报结构化错不悄悄放宽——后者头一天实战就逮住一处旧测试债。
+- **YAML 预算四字段并流。** max_output_tokens 等 runtime 预算从定义 YAML 真正落进运行时(显式 > 父值,来源档随级标注),`/agent doctor` 与 `/agent inspect` 亮出来源账;请求期拼装(黄金测试)零变化。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
