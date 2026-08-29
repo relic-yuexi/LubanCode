@@ -195,6 +195,46 @@ TEST_CASE("FingerprintRequest/DiffFingerprints: 与逐字节 diff 同一套判�
     CHECK(f1.message_hashes == f2.message_hashes);
 }
 
+TEST_CASE("StablePrefixOf: 稳定前缀的条数与合成指纹(问题 9 诊断账)") {
+    api::Request base;
+    base.model = "m";
+    base.system = "s";
+    base.messages.push_back(UserText("一"));
+    base.messages.push_back(UserText("二"));
+    base.messages.push_back(UserText("三"));
+    const auto fb = agent::FingerprintRequest(base);
+
+    // 完全相同的下一份:稳定前缀 = 全部 3 条,指纹非空。
+    const auto same = agent::StablePrefixOf(fb, agent::FingerprintRequest(base));
+    CHECK(same.messages == 3);
+    CHECK(same.hash.size() == 16);
+
+    // 原样追加一条:稳定前缀还是 3 条,指纹与"完全相同"那份一致(同一段
+    // 前缀折出同一枚 hash,诊断账才能跨请求对上号)。
+    api::Request appended = base;
+    appended.messages.push_back(UserText("四"));
+    const auto appended_view = agent::StablePrefixOf(fb, agent::FingerprintRequest(appended));
+    CHECK(appended_view.messages == 3);
+    CHECK(appended_view.hash == same.hash);
+
+    // 中途分岔:稳定前缀缩到分岔处(第 2 条起不同 -> 稳定 1 条)。
+    api::Request diverged = base;
+    diverged.messages[1] = UserText("改");
+    const auto diverged_view = agent::StablePrefixOf(fb, agent::FingerprintRequest(diverged));
+    CHECK(diverged_view.messages == 1);
+    CHECK(diverged_view.hash != same.hash);
+
+    // 一条都不共享:0 条,指纹空(无稳定前缀,显示层另按"首请求/无共享"
+    // 措辞,不拿空 hash 编故事)。
+    api::Request alien;
+    alien.model = "m";
+    alien.system = "s";
+    alien.messages.push_back(UserText("全新"));
+    const auto alien_view = agent::StablePrefixOf(fb, agent::FingerprintRequest(alien));
+    CHECK(alien_view.messages == 0);
+    CHECK(alien_view.hash.empty());
+}
+
 // ---------------------------------------------------------------------------
 // 钉追加律:默认普通工具往返(绿)
 // ---------------------------------------------------------------------------

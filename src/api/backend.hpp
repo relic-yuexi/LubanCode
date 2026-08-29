@@ -25,6 +25,13 @@ public:
         const Request& request,
         const std::function<void(const StreamEvent&)>& on_event,
         const std::atomic<bool>* cancel = nullptr) = 0;
+
+    // 诊断模式专用(真实实测问题单问题 9):按本 backend 的 wire 把请求
+    // 序列化成 JSON 文本,只用于"与上一份请求的公共前缀字节"对账——
+    // 不发送、不落盘,只在 LUBANCODE_DEBUG_PREFIX 打开时被调用。默认
+    // 返回空串 = 该 backend(trace/桩/后台派生类)不提供,诊断账记
+    // "不可得"(-1),不冒充 0。
+    virtual std::string SerializeForDiagnostics(const Request& request) const { (void)request; return {}; }
 };
 
 }  // namespace lubancode::api

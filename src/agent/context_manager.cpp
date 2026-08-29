@@ -8,6 +8,21 @@
 
 namespace lubancode::agent {
 
+namespace {
+
+// 两段 wire 文本的最长公共前缀字节数(与 doctor 探针的 CommonPrefixBytes
+// 同一只算法;那头导出在 app 层纯函数,这里不跨层引用,自留一份三行)。
+std::size_t CommonWirePrefixBytes(const std::string& a, const std::string& b) {
+    const std::size_t n = a.size() < b.size() ? a.size() : b.size();
+    std::size_t i = 0;
+    while (i < n && a[i] == b[i]) {
+        ++i;
+    }
+    return i;
+}
+
+}  // namespace
+
 void ContextManager::PushUserTurn(api::Message durable, api::Message request_view) {
     history_.push_back(std::move(durable));
     request_history_.push_back(std::move(request_view));
@@ -44,6 +59,7 @@ void ContextManager::ReplaceHistory(std::vector<api::Message> new_history) {
     ++cache_epoch_;
     pending_epoch_break_reason_ = "history_compacted";
     last_prefix_.reset();
+    last_wire_dump_.clear();  // 新 epoch:上一份 wire 文本不再可比,清掉
     // 新 epoch,压缩决策与 sticky 视图一并翻篇:compact 是唯一常规的全量
     // 重写点,重写后的视图从头定形(前缀缓存守恒单第六期)。
     result_view_memo_.decisions.clear();
@@ -110,22 +126,35 @@ std::vector<api::Message> ContextManager::BuildPressureDryRunView() const {
                                /*store=*/nullptr);
 }
 
-ContextManager::PrefixAccount ContextManager::AccountRequest(const api::Request& request) {
+ContextManager::PrefixAccount ContextManager::AccountRequest(const api::Request& request, const std::string* wire_dump) {
     const PrefixFingerprint fingerprint = FingerprintRequest(request);
     PrefixAccount account;
     account.system_hash = fingerprint.system_hash;
     account.tools_hash = fingerprint.tools_hash;
+    account.total_messages = fingerprint.message_hashes.size();
     if (last_prefix_.has_value()) {
         const PrefixDiff diff = DiffFingerprints(*last_prefix_, fingerprint);
         account.had_previous = true;
         account.append_only = diff.append_only();
         account.old_message_changed_at = diff.old_message_changed_at;
         account.appended_messages = diff.appended_messages;
+        // 稳定消息前缀(问题 9 诊断账):只看消息层,与追加律判定分开
+        // ——tools/system 换了梁,消息前缀照样可以逐条稳定。
+        const StablePrefixView stable = StablePrefixOf(*last_prefix_, fingerprint);
+        account.stable_prefix_messages = stable.messages;
+        account.prefix_hash = stable.hash;
         if (!account.append_only) {
             account.break_reason =
                 pending_epoch_break_reason_.empty() ? diff.break_reason() : pending_epoch_break_reason_;
             ++cache_epoch_;
         }
+    }
+    account.cache_epoch = cache_epoch_;
+    // wire 公共前缀(诊断模式才有):量完即换新的一份,留待下一次比较。
+    if (wire_dump != nullptr) {
+        account.wire_common_prefix_bytes =
+            last_wire_dump_.empty() ? -1 : static_cast<std::int64_t>(CommonWirePrefixBytes(last_wire_dump_, *wire_dump));
+        last_wire_dump_ = *wire_dump;
     }
     pending_epoch_break_reason_.clear();
     last_prefix_ = std::move(fingerprint);

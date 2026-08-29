@@ -74,4 +74,13 @@ std::expected<void, Error> ChatCompletionsBackend::send_stream(
     return {};
 }
 
+// 诊断模式的 wire 序列化(问题 9):与 send_stream 同一条拼装路(清洗 +
+// 同参数 BuildRequestJson + 同一只 dump)。只在 LUBANCODE_DEBUG_PREFIX
+// 打开时被调用,默认不序列化。
+std::string ChatCompletionsBackend::SerializeForDiagnostics(const Request& request) const {
+    Request sanitized_request = request;
+    SanitizeRequest(sanitized_request);
+    return DumpRequestBody("chat", BuildRequestJson(sanitized_request, extra_body_, options_));
+}
+
 }  // namespace lubancode::api::chat

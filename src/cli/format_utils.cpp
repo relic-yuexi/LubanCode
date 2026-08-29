@@ -211,6 +211,13 @@ std::string BuildCacheNote(const ContextTracker& tracker, bool last_usage_report
     if (!last_usage_reported) {
         return tr("status.cache_note_not_reported");
     }
+    // 问题 9:零命中先看本地视角——最近一笔诊断说本地前缀稳定而 provider
+    // 报零,明写"上游未命中",不让人误以为是自己多发几条冲掉了缓存。
+    const auto& history = tracker.cache_request_history();
+    if (!history.empty() && history.back().diagnostics_present &&
+        history.back().miss_kind == ContextTracker::CacheMissKind::UpstreamMiss) {
+        return tr("status.cache_note_upstream_miss");
+    }
     const auto enabled = tracker.server_prefix_caching();
     if (enabled.has_value() && !*enabled) {
         return tr("status.cache_note_disabled");
@@ -218,11 +225,66 @@ std::string BuildCacheNote(const ContextTracker& tracker, bool last_usage_report
     return tr("status.cache_note_zero");
 }
 
+std::string CacheMissKindLabel(ContextTracker::CacheMissKind kind) {
+    switch (kind) {
+        case ContextTracker::CacheMissKind::Hit:
+            return tr("cmd.context.cache_miss.hit");
+        case ContextTracker::CacheMissKind::FirstRequest:
+            return tr("cmd.context.cache_miss.first");
+        case ContextTracker::CacheMissKind::EpochBreak:
+            return tr("cmd.context.cache_miss.epoch_break");
+        case ContextTracker::CacheMissKind::UpstreamMiss:
+            return tr("cmd.context.cache_miss.upstream");
+        case ContextTracker::CacheMissKind::Unreported:
+            return tr("cmd.context.cache_miss.unreported");
+        case ContextTracker::CacheMissKind::Unknown:
+            return std::string();  // 诊断未随行:显示层另行说明,不猜
+    }
+    return std::string();
+}
+
+std::string BuildCacheDiagSegment(const ContextTracker::CacheRequestRecord& record) {
+    // 问题 9 的本地前缀视角段:只拼 epoch/追加律/稳定前缀/分型/wire 字节
+    // 这些"账",不碰任何正文。诊断没随行(单测/单发路径)整段只说一句
+    // "诊断未随行",不拿默认值编故事。
+    if (!record.diagnostics_present) {
+        return tr("cmd.context.cache_diag_absent");
+    }
+    std::vector<std::string> parts;
+    if (record.epoch_break_reason.empty()) {
+        parts.push_back(trf("cmd.context.cache_diag_epoch", record.cache_epoch));
+    } else {
+        parts.push_back(trf("cmd.context.cache_diag_epoch_broken", record.cache_epoch,
+                            record.epoch_break_reason));
+    }
+    parts.push_back(record.prefix_append_only ? tr("cmd.context.cache_diag_append")
+                                              : tr("cmd.context.cache_diag_broken"));
+    parts.push_back(trf("cmd.context.cache_diag_stable", record.stable_prefix_messages, record.total_messages));
+    const std::string miss = CacheMissKindLabel(record.miss_kind);
+    if (!miss.empty() && record.miss_kind != ContextTracker::CacheMissKind::Hit) {
+        // 命中不必再念一遍(行首的"命中 X(Y%)"就是它);miss 分型才点名。
+        parts.push_back(miss);
+    }
+    if (record.wire_common_prefix_bytes >= 0) {
+        parts.push_back(trf("cmd.context.cache_diag_wire", record.wire_common_prefix_bytes));
+    }
+    std::string out;
+    for (const auto& part : parts) {
+        if (!out.empty()) {
+            out += " · ";
+        }
+        out += part;
+    }
+    return out;
+}
+
 std::vector<std::string> BuildCacheRequestHistoryLines(const ContextTracker& tracker) {
     // 逐请求缓存命中(问题 5):一行 = 一次带回 usage 的 provider 请求,
     // 不是一轮用户问答。按外层用户轮次分组,"用户轮次""模型请求""工具
     // 调用"三种计数各叫各名。环形缓冲只留最近 kCacheHistorySize 次,总账
     // (total_model_requests)说总数。
+    // 问题 9:每行再跟一段本地前缀视角(见 BuildCacheDiagSegment),窗口
+    // 末尾添一行分型小计——命中率抖动时断在哪层一眼可辨。
     std::vector<std::string> lines;
     const auto& history = tracker.cache_request_history();
     if (history.empty()) {
@@ -267,14 +329,68 @@ std::vector<std::string> BuildCacheRequestHistoryLines(const ContextTracker& tra
                 }
             }
         }
+        const std::string diag = BuildCacheDiagSegment(record);
         if (record.unreported || record.hit_percent() < 0) {
             lines.push_back(std::string("      ") +
-                            trf("cmd.context.cache_history_row_unreported", record.step_index + 1));
+                            trf("cmd.context.cache_history_row_unreported", record.step_index + 1, diag));
         } else {
             lines.push_back(std::string("      ") +
                             trf("cmd.context.cache_history_row", record.step_index + 1,
                                 FormatTokenCount(record.input_tokens), FormatTokenCount(record.cache_read_tokens),
-                                std::to_string(record.hit_percent())));
+                                std::to_string(record.hit_percent()), diag));
+        }
+    }
+    // 分型小计:窗口内有诊断账才出这行,各类计数用短词,断在本地还是
+    // 上游一望即知。全部行都"诊断未随行"就不出,免得空账占屏。
+    {
+        std::size_t hits = 0;
+        std::size_t firsts = 0;
+        std::size_t breaks = 0;
+        std::size_t upstream = 0;
+        std::size_t unreported = 0;
+        bool any_diag = false;
+        for (const auto& record : history) {
+            if (!record.diagnostics_present) {
+                continue;
+            }
+            any_diag = true;
+            switch (record.miss_kind) {
+                case ContextTracker::CacheMissKind::Hit:
+                    ++hits;
+                    break;
+                case ContextTracker::CacheMissKind::FirstRequest:
+                    ++firsts;
+                    break;
+                case ContextTracker::CacheMissKind::EpochBreak:
+                    ++breaks;
+                    break;
+                case ContextTracker::CacheMissKind::UpstreamMiss:
+                    ++upstream;
+                    break;
+                case ContextTracker::CacheMissKind::Unreported:
+                    ++unreported;
+                    break;
+                case ContextTracker::CacheMissKind::Unknown:
+                    break;
+            }
+        }
+        if (any_diag) {
+            std::string tally;
+            const auto append = [&tally](const std::string& label, std::size_t count) {
+                if (count == 0) {
+                    return;
+                }
+                if (!tally.empty()) {
+                    tally += " · ";
+                }
+                tally += label + " " + std::to_string(count);
+            };
+            append(tr("cmd.context.cache_miss.hit"), hits);
+            append(tr("cmd.context.cache_miss.first"), firsts);
+            append(tr("cmd.context.cache_miss.epoch_break"), breaks);
+            append(tr("cmd.context.cache_miss.upstream"), upstream);
+            append(tr("cmd.context.cache_miss.unreported"), unreported);
+            lines.push_back(std::string("  ") + trf("cmd.context.cache_history_tally", tally));
         }
     }
     return lines;

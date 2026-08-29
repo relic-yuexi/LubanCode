@@ -275,6 +275,24 @@ struct UsageReport {
     std::string epoch_break_reason;  // 本步断了 epoch 时的点名(空 = 没断)
     bool prefix_append_only = true;  // 本步请求是否上一份的原样追加版
 
+    // ---- 每请求缓存诊断账(问题 9):本地前缀视角,不含任何正文 ----
+    // 全部由 AgentLoop 的前缀记账(agent/prefix.hpp 的指纹)在发请求前
+    // 填好;一路经事件流到 ContextTracker 的逐请求账。只留短 hash、
+    // 长度与枚举,不落 prompt 正文、密钥或完整 URL(单子验收明文)。
+    bool epoch_first_request = false;  // 本 epoch 首份请求,没有可比的前一份
+    std::string system_hash;           // system 指纹(16 hex,显示层截 8)
+    std::string tools_hash;            // 工具定义指纹(16 hex,显示层截 8)
+    // 稳定消息前缀:与上一份请求逐条相等的那段开头消息。prefix_hash 是
+    // 这段前缀的合成指纹(空串 = 没有稳定前缀,首请求/一条都不共享);
+    // stable_prefix_messages 是它的条数,total_messages 是本次请求消息
+    // 总数(追加律成立时二者之差就是尾部新添的条数)。
+    std::string prefix_hash;
+    std::size_t stable_prefix_messages = 0;
+    std::size_t total_messages = 0;
+    // wire 序列化公共前缀字节数(诊断模式 LUBANCODE_DEBUG_PREFIX 才算,
+    // 默认关——不做全序列化):-1 = 没开诊断或该 backend 不提供序列化。
+    std::int64_t wire_common_prefix_bytes = -1;
+
     // provider 是否真回报了 usage(五项全零 = 没给,真实请求不可能全零)。
     // 没回报就记 unknown,不许拿 0 冒充"真未命中"。
     bool reported() const {

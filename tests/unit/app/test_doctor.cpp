@@ -373,3 +373,165 @@ TEST_CASE("/think none: 目录声明关不掉时,切换前后都明说未证实�
         CHECK(capture.text().find("此端点未证实可关") == std::string::npos);
     }
 }
+
+
+// ---- 问题 9:公网探针确认门与多轮分型 --------------------------------------
+
+TEST_CASE("AllowCacheProbeRun: 公网端未确认不发,确认/自有端/回环才放行") {
+    // 回环端:照旧直发,不需要确认。
+    CHECK(app::AllowCacheProbeRun(true, false, std::nullopt));
+    // 明配 metrics_url(用户声明自有端):照旧直发。
+    CHECK(app::AllowCacheProbeRun(false, true, std::nullopt));
+    // 公网端:没问过(nullopt)、答了拒(false)都不发——单测钉死
+    // "未确认不发"。
+    CHECK_FALSE(app::AllowCacheProbeRun(false, false, std::nullopt));
+    CHECK_FALSE(app::AllowCacheProbeRun(false, false, false));
+    // 明确答应才发。
+    CHECK(app::AllowCacheProbeRun(false, false, true));
+}
+
+TEST_CASE("ParseProbeConsentAnswer: 答句判定,空句与认不得的不算同意") {
+    CHECK(app::ParseProbeConsentAnswer("y") == true);
+    CHECK(app::ParseProbeConsentAnswer(" Y ") == true);
+    CHECK(app::ParseProbeConsentAnswer("yes") == true);
+    CHECK(app::ParseProbeConsentAnswer("是") == true);
+    CHECK(app::ParseProbeConsentAnswer("n") == false);
+    CHECK(app::ParseProbeConsentAnswer("No") == false);
+    CHECK(app::ParseProbeConsentAnswer("否") == false);
+    // 空句/认不得:不是同意,也不是明确拒绝,一律不放行。
+    CHECK_FALSE(app::ParseProbeConsentAnswer("").has_value());
+    CHECK_FALSE(app::ParseProbeConsentAnswer("随便").has_value());
+}
+
+TEST_CASE("DescribeEndpointForDisclosure: 端点明写但剥查询参数,不亮 key") {
+    CHECK(app::DescribeEndpointForDisclosure("https://api.example.com/v1") == "https://api.example.com/v1");
+    CHECK(app::DescribeEndpointForDisclosure("https://api.example.com/v1?key=SECRET&x=1") ==
+          "https://api.example.com/v1");
+    CHECK(app::DescribeEndpointForDisclosure("https://api.example.com/v1#frag") == "https://api.example.com/v1");
+}
+
+TEST_CASE("BuildFixedPrefixProbes: N 轮同前缀各换尾句,轮数钳在 2..8,token 上限保守") {
+    const auto set = app::BuildFixedPrefixProbes("m", 5, 512);
+    REQUIRE(set.requests.size() == 5);
+    // 各轮公共段一致,尾巴各一句。
+    const auto& fixed_1 = std::get<api::TextBlock>(set.requests[0].messages[0].content[0]).text;
+    const auto& fixed_3 = std::get<api::TextBlock>(set.requests[2].messages[0].content[0]).text;
+    CHECK(fixed_1 == fixed_3);
+    const auto& tail_1 = std::get<api::TextBlock>(set.requests[0].messages[1].content[0]).text;
+    const auto& tail_3 = std::get<api::TextBlock>(set.requests[2].messages[1].content[0]).text;
+    CHECK(tail_1 != tail_3);
+    // 每轮输出上限就是那只写死的保守值。
+    for (const auto& request : set.requests) {
+        CHECK(*request.max_tokens == app::kCacheProbeOutputTokenCapPerRound);
+    }
+    CHECK(app::kCacheProbeInputTokenCapPerRound >= set.designed_prefix_tokens);  // 上限盖住设计前缀
+    CHECK(set.designed_prefix_tokens > 0);
+    // 轮数钳制:1 -> 2,99 -> 8。
+    CHECK(app::BuildFixedPrefixProbes("m", 1).requests.size() == 2);
+    CHECK(app::BuildFixedPrefixProbes("m", 99).requests.size() ==
+          static_cast<std::size_t>(app::kCacheProbeMaxRounds));
+}
+
+TEST_CASE("ClassifyCacheProbeRounds: 五种分型各归各") {
+    using R = app::CacheProbeRoundResult;
+    const std::int64_t prefix_tokens = 2000;
+    // 稳定命中:各轮都报、命中吃满设计前缀(>= 90%)。
+    {
+        std::vector<R> rounds(4);
+        for (auto& r : rounds) {
+            r.http_ok = true;
+            r.usage_reported = true;
+            r.cache_read = 1900;
+            r.total_input = 2100;
+        }
+        CHECK(app::ClassifyCacheProbeRounds(rounds, prefix_tokens) == app::CacheProbeVerdict::StableHit);
+    }
+    // 固定阈值命中:各轮都命中但恒定低位(如恒 1024 边界)。
+    {
+        std::vector<R> rounds(4);
+        rounds[0].http_ok = rounds[0].usage_reported = true;
+        rounds[0].cache_read = 1024;
+        for (std::size_t i = 1; i < rounds.size(); ++i) {
+            rounds[i].http_ok = rounds[i].usage_reported = true;
+            rounds[i].cache_read = 1024;  // 非首轮彼此相等
+            rounds[i].total_input = 2100;
+        }
+        CHECK(app::ClassifyCacheProbeRounds(rounds, prefix_tokens) ==
+              app::CacheProbeVerdict::FixedQuantumHit);
+    }
+    // 间歇 miss:有的轮命中、有的轮零——同 epoch 命中率抖动的上游侧形状。
+    {
+        std::vector<R> rounds(4);
+        for (std::size_t i = 0; i < rounds.size(); ++i) {
+            rounds[i].http_ok = rounds[i].usage_reported = true;
+            rounds[i].cache_read = (i % 2 == 0) ? 1900 : 0;
+            rounds[i].total_input = 2100;
+        }
+        CHECK(app::ClassifyCacheProbeRounds(rounds, prefix_tokens) ==
+              app::CacheProbeVerdict::IntermittentMiss);
+    }
+    // 完全未见命中:报了的轮全零(HTTP 失败的轮不进分型)。
+    {
+        std::vector<R> rounds(3);
+        for (auto& r : rounds) {
+            r.http_ok = true;
+            r.usage_reported = true;
+            r.cache_read = 0;
+            r.total_input = 2100;
+        }
+        rounds[2].http_ok = false;  // HTTP 失败:不算"零命中"的证据
+        CHECK(app::ClassifyCacheProbeRounds(rounds, prefix_tokens) == app::CacheProbeVerdict::NoHit);
+    }
+    // 无法判定:没有一轮回报 usage(缺测不冒充证据)。
+    {
+        std::vector<R> rounds(3);
+        for (auto& r : rounds) {
+            r.http_ok = true;
+        }
+        CHECK(app::ClassifyCacheProbeRounds(rounds, prefix_tokens) == app::CacheProbeVerdict::NotReported);
+    }
+    // 全命中但命中量在抖(没吃满、也不恒定):归间歇,比硬塞"稳定"诚实。
+    {
+        std::vector<R> rounds(4);
+        const std::int64_t hits[] = {1000, 1200, 1100, 1300};
+        for (std::size_t i = 0; i < rounds.size(); ++i) {
+            rounds[i].http_ok = rounds[i].usage_reported = true;
+            rounds[i].cache_read = hits[i];
+            rounds[i].total_input = 2100;
+        }
+        CHECK(app::ClassifyCacheProbeRounds(rounds, prefix_tokens) ==
+              app::CacheProbeVerdict::IntermittentMiss);
+    }
+    // 首轮写缓存 miss、后续轮全额命中:这是冷启动的正常形状,算稳定命中,
+    // 不冤枉成间歇。
+    {
+        std::vector<R> rounds(4);
+        for (std::size_t i = 0; i < rounds.size(); ++i) {
+            rounds[i].http_ok = rounds[i].usage_reported = true;
+            rounds[i].cache_read = i == 0 ? 0 : 1900;
+            rounds[i].total_input = 2100;
+        }
+        CHECK(app::ClassifyCacheProbeRounds(rounds, prefix_tokens) == app::CacheProbeVerdict::StableHit);
+    }
+    // 两轮默认探针、首轮 miss:第二轮命中吃满即判稳定(后续轮只有它)。
+    {
+        std::vector<R> rounds(2);
+        rounds[0] = R{true, true, 0, 2100};
+        rounds[1] = R{true, true, 1950, 2100};
+        CHECK(app::ClassifyCacheProbeRounds(rounds, prefix_tokens) == app::CacheProbeVerdict::StableHit);
+    }
+}
+
+TEST_CASE("CacheProbeVerdictLabel: 判词与分型对得上") {
+    cli::SetLanguage("zh-CN");
+    CHECK(app::CacheProbeVerdictLabel(app::CacheProbeVerdict::StableHit).find("稳定命中") !=
+          std::string::npos);
+    CHECK(app::CacheProbeVerdictLabel(app::CacheProbeVerdict::FixedQuantumHit).find("固定阈值") !=
+          std::string::npos);
+    CHECK(app::CacheProbeVerdictLabel(app::CacheProbeVerdict::IntermittentMiss).find("间歇") !=
+          std::string::npos);
+    CHECK(app::CacheProbeVerdictLabel(app::CacheProbeVerdict::NoHit).find("完全未见命中") !=
+          std::string::npos);
+    CHECK(app::CacheProbeVerdictLabel(app::CacheProbeVerdict::NotReported).find("无法判定") !=
+          std::string::npos);
+}

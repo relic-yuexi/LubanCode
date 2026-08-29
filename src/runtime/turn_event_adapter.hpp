@@ -209,9 +209,11 @@ public:
         Emit(std::move(event));
     }
 
-    // usage:身份齐着带(step 号/请求 id/缓存 epoch/追加律)——终端的逐步
-    // 流水账(TurnUsageStats)从这份 payload 里还原 UsageReport,不必另开
-    // 一条旁路回调。
+    // usage:身份齐着带(step 号/请求 id/缓存 epoch/追加律 + 问题 9 的每请
+    // 求诊断账:epoch 首请求、指纹短 hash、稳定前缀长度、wire 公共前缀字
+    // 节)——终端的逐步流水账(TurnUsageStats)与 ContextTracker 的逐请求
+    // 缓存账都从这份 payload 里还原,不必另开一条旁路回调。诊断字段只含
+    // hash/长度/枚举,不含正文。
     void OnUsage(const api::UsageReport& report, bool subordinate = false) {
         ServerEvent event = MakeEvent(ServerEventKind::UsageUpdated);
         event.payload = nlohmann::json{{"input_tokens", report.usage.input_tokens},
@@ -225,7 +227,14 @@ public:
                                        {"request_id", report.request_id},
                                        {"cache_epoch", report.cache_epoch},
                                        {"epoch_break_reason", report.epoch_break_reason},
-                                       {"prefix_append_only", report.prefix_append_only}};
+                                       {"prefix_append_only", report.prefix_append_only},
+                                       {"epoch_first_request", report.epoch_first_request},
+                                       {"system_hash", report.system_hash},
+                                       {"tools_hash", report.tools_hash},
+                                       {"prefix_hash", report.prefix_hash},
+                                       {"stable_prefix_messages", report.stable_prefix_messages},
+                                       {"total_messages", report.total_messages},
+                                       {"wire_common_prefix_bytes", report.wire_common_prefix_bytes}};
         MarkSubordinate(event, subordinate);
         Emit(std::move(event));
     }

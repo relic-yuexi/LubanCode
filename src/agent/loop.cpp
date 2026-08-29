@@ -697,9 +697,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
     // 一枚,跨 step 不重号)。
     std::size_t batches_emitted = 0;
     // 前缀记账(agent/prefix.hpp):本步请求与上一份的追加律判定结果,
-    // 发请求前算好,报 usage 时随 UsageReport 交出去。
+    // 发请求前算好,报 usage 时随 UsageReport 交出去。诊断账(问题 9)
+    // 在同一处攒:epoch/稳定前缀/指纹 hash,发 usage 时一并交出去。
     bool step_prefix_append_only = true;
     std::string step_epoch_break_reason;
+    ContextManager::PrefixAccount step_prefix_account;
     // 输出预算活账(规格根因四):撞墙、续跑、usage 是否报告、思考检查点
     // 都在这一份上滚,收场时随 RunOutcome.output_budget 交出去。
     OutputBudgetReport budget_report;
@@ -919,22 +921,39 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 断因——loop 自己知道的因(compact/hard trim)比指纹反推的准,
         // 优先用它;没有显式因就按 diff 点名(model/system/tools/旧消息)。
         // epoch 断不是失败,无名无姓地断才是失败(agent/prefix.hpp)。
+        // 诊断模式(LUBANCODE_DEBUG_PREFIX)才把请求按 wire 序列化一份
+        // 递进去量公共前缀字节;常态传 nullptr,不做全序列化。
         {
-            const ContextManager::PrefixAccount account = context_.AccountRequest(request);
-            step_prefix_append_only = account.append_only;
-            step_epoch_break_reason = account.break_reason;
-            if (account.had_previous && PrefixDebugEnabled()) {
+            std::string wire_dump;
+            const std::string* wire_dump_ptr = nullptr;
+            if (PrefixDebugEnabled()) {
+                wire_dump = backend_.SerializeForDiagnostics(request);
+                if (!wire_dump.empty()) {
+                    wire_dump_ptr = &wire_dump;
+                }
+            }
+            step_prefix_account = context_.AccountRequest(request, wire_dump_ptr);
+            step_prefix_append_only = step_prefix_account.append_only;
+            step_epoch_break_reason = step_prefix_account.break_reason;
+            if (step_prefix_account.had_previous && PrefixDebugEnabled()) {
                 // 诊断行:只带断因/位置/条数,不带任何正文与 hash 以外的东西。
-                std::string prefix_diag = "[prefix] epoch " + std::to_string(context_.cache_epoch()) +
+                std::string prefix_diag = "[prefix] epoch " + std::to_string(step_prefix_account.cache_epoch) +
                                           " step " + std::to_string(step_index) + " append_only=" +
                                           (step_prefix_append_only ? "true" : "false");
                 if (!step_prefix_append_only) {
                     prefix_diag += " reason=" + step_epoch_break_reason +
-                                   " old_message_changed_at=" + std::to_string(account.old_message_changed_at);
+                                   " old_message_changed_at=" +
+                                   std::to_string(step_prefix_account.old_message_changed_at);
                 }
-                prefix_diag += " appended_messages=" + std::to_string(account.appended_messages) +
-                               " system_hash=" + account.system_hash.substr(0, 8) +
-                               " tools_hash=" + account.tools_hash.substr(0, 8);
+                prefix_diag += " appended_messages=" + std::to_string(step_prefix_account.appended_messages) +
+                               " stable_prefix=" + std::to_string(step_prefix_account.stable_prefix_messages) +
+                               "/" + std::to_string(step_prefix_account.total_messages) +
+                               " system_hash=" + step_prefix_account.system_hash.substr(0, 8) +
+                               " tools_hash=" + step_prefix_account.tools_hash.substr(0, 8);
+                if (step_prefix_account.wire_common_prefix_bytes >= 0) {
+                    prefix_diag += " wire_common_prefix_bytes=" +
+                                   std::to_string(step_prefix_account.wire_common_prefix_bytes);
+                }
                 platform::LogSink::Instance().Debug("loop", prefix_diag);
             }
         }
@@ -1165,6 +1184,16 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             report.cache_epoch = context_.cache_epoch();
             report.epoch_break_reason = step_epoch_break_reason;
             report.prefix_append_only = step_prefix_append_only;
+            // 每请求缓存诊断账(问题 9):本地前缀视角全量带出——epoch 首请
+            // 求、system/tools/稳定前缀指纹与长度、wire 公共前缀字节(诊断
+            // 模式才有,-1 = 不可得)。只留短 hash 与长度,不落正文。
+            report.epoch_first_request = !step_prefix_account.had_previous;
+            report.system_hash = step_prefix_account.system_hash;
+            report.tools_hash = step_prefix_account.tools_hash;
+            report.prefix_hash = step_prefix_account.prefix_hash;
+            report.stable_prefix_messages = step_prefix_account.stable_prefix_messages;
+            report.total_messages = step_prefix_account.total_messages;
+            report.wire_common_prefix_bytes = step_prefix_account.wire_common_prefix_bytes;
             wiring.events->OnUsage(report);
         }
 

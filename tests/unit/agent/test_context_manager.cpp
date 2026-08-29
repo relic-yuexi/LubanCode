@@ -228,3 +228,61 @@ TEST_CASE("BuildPressureDryRunView: 关掉结构压缩时原样返回请求账")
     REQUIRE(view.size() == 2);
     CHECK(std::get<api::TextBlock>(view[0].content[0]).text == "问");
 }
+
+// ---- 问题 9:每请求缓存诊断账(稳定前缀/指纹/wire 公共前缀) -----------------
+
+TEST_CASE("诊断账: 稳定前缀条数与合成指纹随追加律走,常态 wire 字节不可得") {
+    agent::ContextManager context;
+    context.PushUserTurn(UserMessage("第一问"), UserMessage("第一问"));
+    context.PushMessage(AssistantMessage("第一答"));
+
+    // 首份请求:没有上一份,稳定前缀 0 条、指纹空;wire 公共前缀不可得。
+    auto first = context.AccountRequest(MakeRequest(context.request_history()));
+    CHECK_FALSE(first.had_previous);
+    CHECK(first.stable_prefix_messages == 0);
+    CHECK(first.prefix_hash.empty());
+    CHECK(first.total_messages == 2);
+    CHECK(first.wire_common_prefix_bytes == -1);  // 没传 wire dump:不冒充 0
+    CHECK(first.cache_epoch == 1);
+
+    // 追加一条再发:稳定前缀 = 上一份的 2 条,指纹非空且 16 hex,epoch 不动。
+    context.PushMessage(UserMessage("第二问"));
+    auto second = context.AccountRequest(MakeRequest(context.request_history()));
+    CHECK(second.had_previous);
+    CHECK(second.stable_prefix_messages == 2);
+    CHECK(second.total_messages == 3);
+    CHECK(second.prefix_hash.size() == 16);
+    CHECK(second.cache_epoch == 1);
+    CHECK(second.wire_common_prefix_bytes == -1);
+
+    // 追改旧消息:追加律破,稳定前缀缩到分岔处,epoch +1 并点名。
+    std::vector<api::Message> rewritten = context.request_history();
+    std::get<api::TextBlock>(rewritten[0].content[0]).text = "改口";
+    auto broken = context.AccountRequest(MakeRequest(rewritten));
+    CHECK_FALSE(broken.append_only);
+    CHECK(broken.break_reason == "old_message_changed");
+    CHECK(broken.stable_prefix_messages == 0);
+    CHECK(broken.prefix_hash.empty());
+    CHECK(broken.cache_epoch == 2);
+}
+
+TEST_CASE("诊断账: wire dump 只在递进来才算,首记不可得、次记可比;换史清 dump") {
+    agent::ContextManager context;
+    context.PushUserTurn(UserMessage("问"), UserMessage("问"));
+
+    const std::string body_a = "AAAA-prefix-body.AAAA";
+    const std::string body_b = "AAAA-prefix-body.BBBB";
+    // 第一次(诊断模式刚开):没有上一份 dump,不可得,但这份已留存。
+    auto first = context.AccountRequest(MakeRequest(context.request_history()), &body_a);
+    CHECK(first.wire_common_prefix_bytes == -1);
+    // 第二次:与留存的 body_a 量公共前缀("AAAA-prefix-body." 17 字节)。
+    auto second = context.AccountRequest(MakeRequest(context.request_history()), &body_b);
+    CHECK(second.wire_common_prefix_bytes == 17);
+    // 常态(不传 dump):不做全序列化,字段回 -1,留存的 dump 不动。
+    auto third = context.AccountRequest(MakeRequest(context.request_history()));
+    CHECK(third.wire_common_prefix_bytes == -1);
+    // 换史(新 epoch):留存的 dump 清掉,下一份又从"不可得"起步。
+    context.ReplaceHistory({UserMessage("[存档] 摘要")});
+    auto after = context.AccountRequest(MakeRequest(context.request_history()), &body_b);
+    CHECK(after.wire_common_prefix_bytes == -1);
+}

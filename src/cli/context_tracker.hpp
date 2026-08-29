@@ -30,6 +30,43 @@ class ContextTracker {
 public:
     explicit ContextTracker(std::size_t window_tokens);
 
+    // ---- 每请求缓存诊断账(问题 9)---------------------------------------
+    //
+    // 一笔请求的本地前缀视角,agent loop 的前缀记账(agent/prefix.hpp 的
+    // 指纹)在发请求前算好、随 UsageReport/事件流带到这里。全部字段只含
+    // 短 hash、长度与判定——不落 prompt 正文、API key 或完整 URL(单子
+    // 验收明文);缺省值 = "该路径没有诊断信息"(单测/单发),显示层另写
+    // "诊断未随行",不拿默认值猜。
+    struct CacheDiagnostics {
+        bool present = false;  // 事件流真带了诊断字段(交互路径必带)
+        int cache_epoch = 1;
+        std::string epoch_break_reason;   // 本请求断了 epoch 的点名(空 = 没断)
+        bool prefix_append_only = true;   // 本地视角:自上一请求旧消息未变只追加
+        bool epoch_first_request = false; // 本 epoch 首请求,没有可比的前一份
+        std::string system_hash;          // 16 hex,显示层截 8
+        std::string tools_hash;
+        std::string prefix_hash;          // 稳定消息前缀合成指纹(空 = 无稳定前缀)
+        std::size_t stable_prefix_messages = 0; // 稳定前缀条数
+        std::size_t total_messages = 0;         // 本次请求消息总数
+        std::int64_t wire_common_prefix_bytes = -1;  // 诊断模式:-1 = 未开/不可得
+    };
+
+    // miss 分型(问题 9):命中率掉下来时,断在哪一层一眼可辨——
+    //   Hit          provider 报了 cached_tokens > 0,这一笔不是 miss;
+    //   FirstRequest epoch 首请求,本地就没有可比的前一份,miss 是天然的;
+    //   EpochBreak   本地前缀变了(model/system/tools/旧消息),锅在本地,
+    //                break_reason 点名是哪根梁;
+    //   UpstreamMiss 本地前缀稳定(追加律成立)而 provider 报 cached=0
+    //                ——锅不在本地,明写"上游未命中";
+    //   Unreported   provider 没回 usage,缺测另记,不冒充 0%。
+    // 诊断没随行(diag.present=false)时不分型,显示层写"诊断未随行"。
+    enum class CacheMissKind { Hit, FirstRequest, EpochBreak, UpstreamMiss, Unreported, Unknown };
+
+    // 分型判定(纯逻辑,单测钉):优先级 Unreported > FirstRequest >
+    // EpochBreak > UpstreamMiss > Hit——缺测最不该被冒充,本地断因先于
+    // 上游结论(本地断了,上游报什么都不用猜)。
+    static CacheMissKind ClassifyMiss(bool reported, std::int64_t cache_read, const CacheDiagnostics& diag);
+
     // 用最近一次请求的 usage 覆盖当前占用(input_tokens + cache_read_tokens +
     // cache_creation_tokens + output_tokens),不是累加——理由见文件头注释。
     void Update(const api::Usage& usage);
@@ -47,7 +84,13 @@ public:
     //(agent loop 的步号)。usage 缺测(全零)也照记一笔 unreported 的
     // 请求账——"未回报"另记缺测,不冒充 0%,更不许整行蒸发。默认参数只
     // 照顾旧调用点(单测/单发),交互路径必带。
-    void ApplyUsage(const api::Usage& usage, const std::string& turn_id = std::string(), int step_index = 0);
+    //
+    // diag(问题 9)是同一笔请求的本地前缀视角诊断账(agent loop 的前缀
+    // 记账一路经 UsageReport/事件流带过来):缓存 epoch、追加律、稳定前缀
+    // 长度与指纹、miss 分型全靠它。缺省(单测/单发)按"没有诊断信息"记,
+    // 显示层写"诊断未随行",不猜。
+    void ApplyUsage(const api::Usage& usage, const std::string& turn_id = std::string(), int step_index = 0,
+                    const CacheDiagnostics& diag = CacheDiagnostics{});
 
     // 最近一次"请求结束"是否没有带回实测 usage(旧值标记)。一次实测都没
     // 发生过(刚启动,current_tokens 还是 0)时为 false——那时也没有数字
@@ -111,6 +154,8 @@ public:
     // 导致的(epoch 断因在回合统计/流水账里另有细账)。
     static constexpr std::size_t kCacheHistorySize = 12;
 
+    // 逐请求记录:问题 5 的 turn_id/step_index/unreported 之上,问题 9 再
+    // 抄入每请求诊断账(见类头的 CacheDiagnostics)与 miss 分型。
     struct CacheRequestRecord {
         std::int64_t input_tokens = 0;      // 该次请求完整输入(TotalInputTokens)
         std::int64_t cache_read_tokens = 0; // 该次请求缓存命中
@@ -122,6 +167,19 @@ public:
         int step_index = 0;
         // 该次请求 provider 没回 usage(缺测):显示层写"未回报",不冒充 0%。
         bool unreported = false;
+        // ---- 问题 9 诊断账(由 ApplyUsage 从 CacheDiagnostics 抄入) ----
+        bool diagnostics_present = false;   // false = 该路径没带诊断(显示层另写)
+        int cache_epoch = 1;
+        std::string epoch_break_reason;     // 本请求断 epoch 的点名(空 = 没断)
+        bool prefix_append_only = true;     // 本地视角追加律
+        bool epoch_first_request = false;
+        std::string system_hash;            // 显示层截 8 位
+        std::string tools_hash;
+        std::string prefix_hash;
+        std::size_t stable_prefix_messages = 0;
+        std::size_t total_messages = 0;
+        std::int64_t wire_common_prefix_bytes = -1;
+        CacheMissKind miss_kind = CacheMissKind::Unknown;
         // 该次请求命中率(百分比,四舍五入);input 为 0(含未回报)时返回 -1。
         int hit_percent() const {
             if (input_tokens <= 0) {

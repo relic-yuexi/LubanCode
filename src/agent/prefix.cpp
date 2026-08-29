@@ -233,4 +233,29 @@ PrefixDiff DiffFingerprints(const PrefixFingerprint& prev, const PrefixFingerpri
     return diff;
 }
 
+StablePrefixView StablePrefixOf(const PrefixFingerprint& prev, const PrefixFingerprint& next) {
+    StablePrefixView out;
+    const std::size_t shared =
+        prev.message_hashes.size() <= next.message_hashes.size() ? prev.message_hashes.size()
+                                                                 : next.message_hashes.size();
+    std::size_t stable = 0;
+    while (stable < shared && prev.message_hashes[stable] == next.message_hashes[stable]) {
+        ++stable;
+    }
+    out.messages = stable;
+    if (stable == 0) {
+        return out;  // 一条都不共享:无稳定前缀,hash 留空
+    }
+    // 合成指纹:把这段前缀的逐条 hash 再折一层 FNV——诊断账只留这一枚
+    // 短 hash,不落任何消息正文。
+    std::uint64_t hash = 14695981039346656037ULL;
+    for (std::size_t i = 0; i < stable; ++i) {
+        HashMix(hash, prev.message_hashes[i]);
+        hash ^= static_cast<std::uint64_t>(i);
+        hash *= 1099511628211ULL;
+    }
+    out.hash = HashFinish(hash);
+    return out;
+}
+
 }  // namespace lubancode::agent
