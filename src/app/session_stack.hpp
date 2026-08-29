@@ -27,8 +27,10 @@
 #include "cli/worktree.hpp"
 #include "config/config.hpp"
 #include "memory/project_memory.hpp"
-#include "package/mounting.hpp"  // PackageMount:会话钉快照(阶段 3)
+#include "package/mounting.hpp"  // PackageSnapshot:会话钉快照(阶段 3/6)
 #include "tools/skill_loader.hpp"  // SkillMeta
+
+#include <atomic>
 
 namespace lubancode::app {
 
@@ -40,10 +42,14 @@ struct SessionStack {
     lubancode::config::ConfigResult config_result;  // 会话内配置真值(唯一一份)
     const std::optional<std::string> home_dir;
     const std::optional<std::string> official_skills_dir;
-    // Package 会话钉快照(统一封装单阶段 3):启动扫一次,运行中不热生效。
-    // 声明在 skills 之前——挂载材料先于技能清单装配(两趟:先裸扫 standalone
-    // 技能喂包外短引用账,再带包根合出正式清单)。
-    const lubancode::package::PackageMount package_mount;
+    // Package 会话钉快照(统一封装单阶段 3;阶段 6 升成显式 PackageSnapshot
+    // 对象):启动折一份(第 1 折),/package reload 才换新折。声明在 skills
+    // 之前——挂载材料先于技能清单装配(两趟:先裸扫 standalone 技能喂包外
+    // 短引用账,再带包根合出正式清单)。
+    // atomic 槽:workflow 并行支线从工作线程经 agent 解析口折材料,换档与
+    // 读档不得互踩;快照本身不可变,在跑引用各自钉 shared_ptr 拷贝,照旧
+    // 跑完——reload 换档影响的是下一次装配,不是在跑的那批。
+    std::atomic<std::shared_ptr<const lubancode::package::PackageSnapshot>> package_snapshot;
     std::vector<lubancode::tools::SkillMeta> skills;  // /skills 展示与 agent 工具段
     std::string skills_segment;
     const std::optional<std::string> home_lubancode;
@@ -107,6 +113,11 @@ struct SessionStack {
 
     // 构造 = 原控制器初始化列表的装配(成员声明序即装配序)。
     explicit SessionStack(const InteractiveSessionOptions& options);
+
+    // 现行快照(原子拷一份 shared_ptr;reload 换档后取到的即新折)。
+    std::shared_ptr<const lubancode::package::PackageSnapshot> CurrentPackageSnapshot() const {
+        return package_snapshot.load(std::memory_order_acquire);
+    }
 };
 
 // 装配本体(组合根):原控制器构造函数的装配段逐字搬来。输出次序与原先
@@ -120,5 +131,16 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
 // 指路)。交互会话与单发模式同一枚——新会话拿新选中,在跑会话钉着自己的
 // 快照照旧跑完。
 void AddEvolutionStoreSelections(lubancode::package::PackageMountInput& input);
+
+// 折一份会话装包输入(统一封装单阶段 3/6):四层扫描根 + 包外短引用的
+// 兜底账 + evolution store 选中版本 + 启停账(现读
+// ~/.lubancode/package-state.json)。信任账由调用方钉好递进来——启动读一次,reload
+// 复用同一份(code 门禁会话启动定终身,契约 §7.1)。warnings 非空时收
+// "启停账读不动"一类非致命账,调用方决定亮到哪(启动直打,reload 并进
+// 回执)。交互会话与单发同一只——两处从前各写一份,现并成一处口径。
+lubancode::package::PackageMountInput BuildSessionPackageMountInput(
+    const lubancode::config::Config& config, const std::vector<std::string>& package_dirs,
+    const lubancode::package::PackageTrustSnapshot& pinned_trust,
+    std::vector<std::string>* warnings = nullptr);
 
 }  // namespace lubancode::app

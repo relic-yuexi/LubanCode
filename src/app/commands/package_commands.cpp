@@ -29,6 +29,7 @@ using lubancode::cli::TermErr;
 #include "package/inventory.hpp"
 #include "package/manifest.hpp"
 #include "package/semver.hpp"
+#include "package/state.hpp"
 #include "package/trust.hpp"
 #include "evolution/promoter.hpp"  // VersionStore(阶段 4:store 选中版本并进 /package 账面)
 #include "platform/paths.hpp"
@@ -108,6 +109,18 @@ LoadTrustStoreReadOnly() {
     return {std::move(store), std::move(error)};
 }
 
+// 启停账的只读装载(阶段 6;读不动只警告,按全启用续——启停是"别挂谁"
+// 的账,不是放行账,缺省态是启用)。
+std::pair<std::optional<lubancode::package::PackageStateStore>, std::optional<std::string>>
+LoadStateStoreReadOnly() {
+    const auto path = lubancode::package::PackageStateStore::DefaultStatePath();
+    if (!path.has_value()) {
+        return {std::nullopt, std::nullopt};
+    }
+    auto [store, error] = lubancode::package::PackageStateStore::Load(path);
+    return {std::move(store), std::move(error)};
+}
+
 // evolution store 的选中版本(阶段 4):active/canary 指针指到的那枚折成
 // scope=Store 的现成候选,并进 /package 的账面——四层扫描之外第五路,哈希
 // 验完好与 tamper 都在列(list 是发现账;挂载侧只收完好的)。
@@ -142,27 +155,42 @@ std::vector<lubancode::package::PackageCandidate> ScanAllLayers(
 // 一只包的"列表行":id、版本、来源、状态、六类组件计数、code-bearing。
 // mount 非空时按会话钉快照如实标挂载状态(阶段 3):内容组件挂了几件、
 // 代码组件的门禁(阶段 4)、现扫到但会话没挂的(启动后才放进目录)注明
-// 下回启动才见。trust 非空时另摆一行现查的信任状态。
+// 下回启动才见。state_store 非空时现查启停账(阶段 6):停用的标 disabled
+// ——扫描发现照旧,挂载跳过;本会话快照仍挂着的如实注明(下回装配不再
+// 挂)。trust 非空时另摆一行现查的信任状态。
 std::string DescribePackage(const lubancode::package::PackageInventory& inventory,
                             const std::string& state,
                             const lubancode::package::PackageMount* mount,
-                            const lubancode::package::PackageTrustStore* trust) {
+                            const lubancode::package::PackageTrustStore* trust,
+                            const lubancode::package::PackageStateStore* state_store) {
+    const bool disabled =
+        state_store != nullptr && !state_store->IsEnabled(inventory.package_id);
     std::ostringstream out;
     out << "  " << inventory.package_id;
     if (!inventory.version_text.empty()) {
         out << " " << inventory.version_text;
     }
-    out << " [" << lubancode::package::ScopeToString(inventory.scope) << "] " << state;
+    out << " [" << lubancode::package::ScopeToString(inventory.scope) << "] ";
+    if (disabled) {
+        // valid → disabled 盖掉;shadowed/invalid 一类另注一笔,两头都看得见。
+        out << (state == "valid" ? "disabled" : state + ";disabled");
+    } else {
+        out << state;
+    }
     if (mount != nullptr) {
         if (const auto* mounted = mount->Find(inventory.package_id)) {
             out << "  已挂载内容组件 " << mounted->mounted_canonical_ids.size() << " 件";
+            if (disabled) {
+                out << "(已停用;本会话快照钉着启动那折,在跑的不拆,下回装配不再挂)";
+            }
             if (mounted->code_trust == lubancode::package::CodeTrustStatus::PendingTrust) {
                 out << ";Plugin/MCP 待信任门";
             } else if (mounted->code_trust == lubancode::package::CodeTrustStatus::Trusted) {
                 out << ";Plugin/MCP 已过信任门(挂载事务在下一阶段)";
             }
         } else if (inventory.valid) {
-            out << "  未挂载(会话启动后才见;下回启动生效)";
+            out << (disabled ? "  已停用(挂载跳过,连内容组件一件不挂)"
+                             : "  未挂载(会话启动后才见;下回启动生效)");
         }
     }
     out << "  agents:" << inventory.agents.size()
@@ -326,6 +354,25 @@ ParsedPackageCommand ParsePackageCommand(const std::string& args) {
         parsed.target = rest;
         return parsed;
     }
+    if (lower == "enable" || lower == "disable") {
+        if (rest.empty()) {
+            parsed.action = PackageCommandAction::Invalid;
+            parsed.bad_word = word;
+            return parsed;
+        }
+        parsed.action = lower == "enable" ? PackageCommandAction::Enable : PackageCommandAction::Disable;
+        parsed.target = rest;
+        return parsed;
+    }
+    if (lower == "reload") {
+        if (!rest.empty()) {
+            parsed.action = PackageCommandAction::Invalid;
+            parsed.bad_word = rest;
+            return parsed;
+        }
+        parsed.action = PackageCommandAction::Reload;
+        return parsed;
+    }
     parsed.action = PackageCommandAction::Invalid;
     parsed.bad_word = word;
     return parsed;
@@ -341,10 +388,15 @@ void PrintUsage() {
                  "      /package doctor <id|路径>\n"
                  "      /package trust <id>    批准整包内容哈希(重启生效;文件一改即失效)\n"
                  "      /package untrust <id>  销信任账\n"
+                 "      /package enable <id>   复启(下回启动或 reload 后的装配生效)\n"
+                 "      /package disable <id>  停用(挂载一律跳过;扫描发现照旧)\n"
+                 "      /package reload        重扫五路折新快照(折好才换;code 组件须新会话)\n"
                  "只读:list/show 只查静态账;doctor 另诊组件(逐件原生 parser)、引用解析与\n"
                  "MountPlan 摘要。trust 亮全份审批材料(逐件命令面 + 完整指纹)才落账——\n"
-                 "未信任的 code 组件(Plugin/MCP)一件不挂不启动。store 一路是自进化\n"
-                 "闭环装进 package-store 的选中版本(/evolve approve 落架,/evolve use 点灰度)。\n";
+                 "未信任的 code 组件(Plugin/MCP)一件不挂不启动。启停账在包外\n"
+                 "(~/.lubancode/package-state.json),enable/disable 只落账不拆在跑的。\n"
+                 "store 一路是自进化闭环装进 package-store 的选中版本(/evolve approve 落架,\n"
+                 "/evolve use 点灰度)。\n";
     TermOut().flush();
 }
 
@@ -396,16 +448,22 @@ void RunPackageList(const lubancode::package::ScanOptions& options,
     }
     const lubancode::package::PackageTrustStore* trust =
         trust_store.has_value() ? &*trust_store : nullptr;
+    auto [state_store, state_error] = LoadStateStoreReadOnly();
+    if (state_error.has_value()) {
+        TermOut() << "警告: " << *state_error << "\n";
+    }
+    const lubancode::package::PackageStateStore* state =
+        state_store.has_value() ? &*state_store : nullptr;
     TermOut() << "Package(五路: dev > project > store > user > official;store 是自进化装架):\n";
     for (const auto& row : rows) {
         if (!scope_matches(row)) continue;
         ++shown;
         if (row.shadowed) {
             TermOut() << DescribePackage(row.inventory,
-                                         "shadowed(被 " + row.shadowed_by + " 遮住)", mount, trust);
+                                         "shadowed(被 " + row.shadowed_by + " 遮住)", mount, trust, state);
         } else {
             TermOut() << DescribePackage(row.inventory,
-                                         row.inventory.valid ? "valid" : "invalid", mount, trust);
+                                         row.inventory.valid ? "valid" : "invalid", mount, trust, state);
         }
         TermOut() << "\n";
     }
@@ -431,13 +489,22 @@ void RunPackageShow(const lubancode::package::ScanOptions& options, const std::s
     }
     const lubancode::package::PackageTrustStore* trust =
         trust_store.has_value() ? &*trust_store : nullptr;
+    auto [state_store, state_error] = LoadStateStoreReadOnly();
+    if (state_error.has_value()) {
+        TermOut() << "警告: " << *state_error << "\n";
+    }
+    const lubancode::package::PackageStateStore* state =
+        state_store.has_value() ? &*state_store : nullptr;
+    const bool disabled = state != nullptr && !state->IsEnabled(inventory.package_id);
     TermOut() << inventory.package_id
               << (inventory.version_text.empty() ? "" : " " + inventory.version_text) << "\n";
     TermOut() << "  状态: " << (inventory.valid ? "valid" : "invalid")
+              << (disabled ? "(已停用)" : "")
               << (inventory.manifest_ok ? "" : "(根清单解析失败)")
               << (inventory.code_bearing() ? "  [code-bearing]" : "") << "\n";
     TermOut() << "  来源: [" << lubancode::package::ScopeToString(inventory.scope) << "] "
               << lubancode::platform::PathToUtf8(inventory.package_root) << "\n";
+    TermOut() << "  启停: " << lubancode::package::DescribeStateStatus(inventory, state) << "\n";
     if (inventory.code_bearing()) {
         TermOut() << "  信任: " << lubancode::package::DescribeTrustStatus(inventory, trust) << "\n";
     }
@@ -450,9 +517,13 @@ void RunPackageShow(const lubancode::package::ScanOptions& options, const std::s
             } else if (mounted->code_trust == lubancode::package::CodeTrustStatus::Trusted) {
                 TermOut() << ";Plugin/MCP 已过信任门(挂载事务在下一阶段)";
             }
+            if (disabled) {
+                TermOut() << ";已停用,本会话照旧跑完,下回装配不再挂";
+            }
             TermOut() << "\n";
         } else if (inventory.valid) {
-            TermOut() << "  挂载: 本会话未挂(启动后才放进目录;下回启动生效)\n";
+            TermOut() << (disabled ? "  挂载: 已停用(挂载跳过,连内容组件一件不挂)\n"
+                                   : "  挂载: 本会话未挂(启动后才放进目录;下回启动生效)\n");
         } else {
             TermOut() << "  挂载: 无效包,一件不挂(整包成整包败)\n";
         }
@@ -611,6 +682,17 @@ void RunPackageDoctor(const lubancode::package::ScanOptions& options,
     }
     TermOut() << "  包根: [" << lubancode::package::ScopeToString(inventory.scope) << "] "
               << lubancode::platform::PathToUtf8(inventory.package_root) << "\n";
+    // 启停一行(阶段 6,doctor 表的"信任、启停与 runtime"项):现查启停账。
+    {
+        auto [state_store, state_error] = LoadStateStoreReadOnly();
+        if (state_error.has_value()) {
+            TermOut() << "警告: " << *state_error << "\n";
+        }
+        TermOut() << "  启停: "
+                  << lubancode::package::DescribeStateStatus(
+                         inventory, state_store.has_value() ? &*state_store : nullptr)
+                  << "\n";
+    }
     TermOut() << "  盘点: 文件 " << inventory.total_file_count << "(assets "
               << inventory.assets_file_count << " / docs " << inventory.docs_file_count
               << " / code-bearing " << inventory.code_bearing_file_count
@@ -667,6 +749,69 @@ void RunPackageTrust(SlashDispatchContext& ctx, const std::string& target, bool 
     TermOut().flush();
 }
 
+// /package enable|disable <id>(阶段 6):扫描定胜者 -> 轻盘点出身份 ->
+// 账务(EnableDisablePackage,回执逐行)。落账即时,生效在下回装配(会话
+// 钉快照,不拆在跑的)——回执里如实说,另注明本会话快照还给它挂着几件。
+void RunPackageEnableDisable(SlashDispatchContext& ctx, const std::string& target, bool enable) {
+    const lubancode::package::ScanOptions options = BuildScanOptions(ctx);
+    const std::vector<lubancode::package::PackageCandidate> candidates =
+        ScanAllLayers(ctx, options);
+    const PackageLookup lookup = LookupPackage(candidates, target);
+    if (lookup.winner == nullptr && lookup.shadowed.empty()) {
+        TermOut() << "没找到包 \"" << target
+                  << "\"(enable/disable 按 id 或目录名查;先 /package list 看全账)\n";
+        TermOut().flush();
+        return;
+    }
+    const lubancode::package::PackageInventory inventory =
+        lubancode::package::BuildPackageInventory(*lookup.winner, options);
+
+    // 启停账:主目录一份,交互与管道同一出入口。读不动警告 + 按全启用续。
+    std::optional<lubancode::package::PackageStateStore> store;
+    if (const auto path = lubancode::package::PackageStateStore::DefaultStatePath();
+        path.has_value()) {
+        auto [loaded, load_error] = lubancode::package::PackageStateStore::Load(path);
+        if (load_error.has_value()) {
+            TermOut() << "警告: " << *load_error << "\n";
+        }
+        store = std::move(loaded);
+    }
+    // 本会话快照给它挂着几件(disable 回执注明"在跑的照旧")。
+    int mounted_count = -1;
+    if (ctx.package_mount != nullptr) {
+        if (const auto* mounted = ctx.package_mount->Find(inventory.package_id)) {
+            mounted_count = static_cast<int>(mounted->mounted_canonical_ids.size());
+        } else {
+            mounted_count = 0;
+        }
+    }
+    const lubancode::package::PackageStateActionResult result = lubancode::package::EnableDisablePackage(
+        inventory, store.has_value() ? &*store : nullptr, enable, mounted_count);
+    if (!result.ok) {
+        TermOut() << result.error << "\n";
+    } else {
+        for (const std::string& line : result.lines) {
+            TermOut() << line << "\n";
+        }
+    }
+    TermOut().flush();
+}
+
+// /package reload(阶段 6):会话侧重折快照 + 原子换档 + 刷下游。回执行
+//(含折不动的诊断)逐行打印;没接会话执行体(纯函数装配)如实明说。
+void RunPackageReload(SlashDispatchContext& ctx) {
+    if (ctx.reload_packages == nullptr) {
+        TermOut() << "这个装配没接会话 reload 口(单发/无交互栈),折不了新快照。\n"
+                     "重启会话即可按最新目录与启停账装配。\n";
+        TermOut().flush();
+        return;
+    }
+    for (const std::string& line : ctx.reload_packages()) {
+        TermOut() << line << "\n";
+    }
+    TermOut().flush();
+}
+
 }  // namespace
 
 CommandFlow HandleSlashPackage(SlashDispatchContext& ctx,
@@ -689,6 +834,15 @@ CommandFlow HandleSlashPackage(SlashDispatchContext& ctx,
             return CommandFlow::Continue;
         case PackageCommandAction::Untrust:
             RunPackageTrust(ctx, command.target, /*trust_action=*/false);
+            return CommandFlow::Continue;
+        case PackageCommandAction::Enable:
+            RunPackageEnableDisable(ctx, command.target, /*enable=*/true);
+            return CommandFlow::Continue;
+        case PackageCommandAction::Disable:
+            RunPackageEnableDisable(ctx, command.target, /*enable=*/false);
+            return CommandFlow::Continue;
+        case PackageCommandAction::Reload:
+            RunPackageReload(ctx);
             return CommandFlow::Continue;
         case PackageCommandAction::Invalid:
             TermOut() << "认不得 \"" << command.bad_word << "\"。\n";

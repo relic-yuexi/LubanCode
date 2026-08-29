@@ -62,14 +62,47 @@ std::shared_ptr<lubancode::memory::ProjectMemory> BuildProjectMemory(
     return project_memory;
 }
 
-// ---- Package 会话钉快照(统一封装单阶段 3) ----
-// 首版语义:启动扫描装配一次,运行中目录变化不热生效——下回启动才见
-//(单子 §十二;不做热重载)。四层根与 /package 命令的 BuildScanOptions 同
-// 一套口径:home 的 packages、项目 .lubancode/packages、官方目录、
-// --package-dir 的 dev 层。包外短引用的兜底账喂 config 的 mcpServers 键与
-// builtin Agent 两名;standalone 技能名在 LoadSessionSkills 的第一趟里扫。
-lubancode::package::PackageMount BuildSessionPackageMount(const lubancode::config::Config& config,
-                                                          const std::vector<std::string>& package_dirs) {
+// ---- Package 会话钉快照(统一封装单阶段 3;阶段 6 起快照是真身) ----
+// 会话技能清单:两趟。第一趟裸扫 standalone(官方/用户/项目五处),名单
+// 喂包挂载的兜底账;第二趟带包根合出正式清单——packaged 技能以 canonical
+// 名并表,standalone 结果一字不变(无包时第二趟与第一趟同源同果)。
+std::vector<lubancode::tools::SkillMeta> LoadSessionSkills(
+    const std::optional<std::string>& home_dir, const std::optional<std::string>& official_skills_dir,
+    const lubancode::package::PackageSnapshot& package_snapshot) {
+    return lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir, official_skills_dir,
+                                        lubancode::package::MountSkillRoots(package_snapshot.mount()));
+}
+
+// 启动折第一份快照(阶段 6):信任账在此钉住——读不动警告直打 + 空白续
+//(谁都没批,code 件一律待信任,拦得住);reload 复用这份钉住的账(见
+// 控制器的 ReloadPackages),code 门禁会话启动定终身(契约 §7.1)。
+std::shared_ptr<const lubancode::package::PackageSnapshot> BuildStartupPackageSnapshot(
+    const lubancode::config::Config& config, const std::vector<std::string>& package_dirs) {
+    lubancode::package::PackageTrustSnapshot trust;
+    if (const auto path = lubancode::package::PackageTrustStore::DefaultStorePath();
+        path.has_value()) {
+        auto [store, load_error] = lubancode::package::PackageTrustStore::Load(path);
+        if (load_error.has_value()) {
+            TermOut() << "[package] " << *load_error << "\n";
+        }
+        trust = store.Snapshot();
+    }
+    return lubancode::package::BuildPackageSnapshot(
+        BuildSessionPackageMountInput(config, package_dirs, trust), /*generation=*/1);
+}
+
+}  // namespace
+
+// 首版语义:启动扫描装配一次,运行中目录变化不热生效——下回启动(或
+// /package reload 重折)才见(单子 §十二)。四层根与 /package 命令的
+// BuildScanOptions 同一套口径:home 的 packages、项目 .lubancode/packages、
+// 官方目录、--package-dir 的 dev 层。包外短引用的兜底账喂 config 的
+// mcpServers 键与 builtin Agent 两名;standalone 技能名在 LoadSessionSkills
+// 的第一趟里扫。信任账由调用方钉(启动读一次;reload 复用,见控制器);
+// 启停账每次现读(disable 只落账不拆在跑的,重折时才见效)。
+lubancode::package::PackageMountInput BuildSessionPackageMountInput(
+    const lubancode::config::Config& config, const std::vector<std::string>& package_dirs,
+    const lubancode::package::PackageTrustSnapshot& pinned_trust, std::vector<std::string>* warnings) {
     lubancode::package::PackageMountInput input;
     lubancode::package::ScanOptions& scan = input.scan;
     if (const auto home_lubancode = lubancode::config::HomeLubancodeDir(); home_lubancode.has_value()) {
@@ -104,32 +137,24 @@ lubancode::package::PackageMount BuildSessionPackageMount(const lubancode::confi
                                                          lubancode::platform::OfficialSkillsDir())) {
         input.external.skills.insert(meta.name);
     }
-    // 信任账的只读快照(阶段 4):启动折一份钉进会话——批准/销账是运行中
-    // 的事,本会话的门禁不变,重启才见。读不动警告 + 空白续(谁都没批,
-    // code 件一律待信任,拦得住)。
-    if (const auto path = lubancode::package::PackageTrustStore::DefaultStorePath();
-        path.has_value()) {
-        auto [store, load_error] = lubancode::package::PackageTrustStore::Load(path);
+    input.trust = pinned_trust;
+    // 启停账的只读快照(阶段 6):每次折输入现读——enable/disable 只落账,
+    // 生效靠下一折(下回启动或 reload)。读不动警告 + 按全启用续(启停是
+    // "别挂谁"的账,不是放行账,缺省态是启用)。
+    if (const auto path = lubancode::package::PackageStateStore::DefaultStatePath(); path.has_value()) {
+        auto [store, load_error] = lubancode::package::PackageStateStore::Load(path);
         if (load_error.has_value()) {
-            TermOut() << "[package] " << *load_error << "\n";
+            if (warnings != nullptr) {
+                warnings->push_back("[package] " + *load_error);
+            } else {
+                TermOut() << "[package] " << *load_error << "\n";
+            }
         }
-        input.trust = store.Snapshot();
+        input.state = store.Snapshot();
     }
     AddEvolutionStoreSelections(input);
-    return lubancode::package::BuildPackageMount(input);
+    return input;
 }
-
-// 会话技能清单:两趟。第一趟裸扫 standalone(官方/用户/项目五处),名单
-// 喂包挂载的兜底账;第二趟带包根合出正式清单——packaged 技能以 canonical
-// 名并表,standalone 结果一字不变(无包时第二趟与第一趟同源同果)。
-std::vector<lubancode::tools::SkillMeta> LoadSessionSkills(
-    const std::optional<std::string>& home_dir, const std::optional<std::string>& official_skills_dir,
-    const lubancode::package::PackageMount& package_mount) {
-    return lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir, official_skills_dir,
-                                        lubancode::package::MountSkillRoots(package_mount));
-}
-
-}  // namespace
 
 // evolution store 的选中版本并进挂载输入(阶段 4):哈希验完好的才递;对
 // 不上的(store 内文件被手改)拒挂,警告亮给用户并指路。装配一次定终身
@@ -198,8 +223,8 @@ SessionStack::SessionStack(const InteractiveSessionOptions& options)
     : config_result(options.config_result),
       home_dir(lubancode::config::HomeDir()),
       official_skills_dir(lubancode::platform::OfficialSkillsDir()),
-      package_mount(BuildSessionPackageMount(config_result.config, options.package_dirs)),
-      skills(LoadSessionSkills(home_dir, official_skills_dir, package_mount)),
+      package_snapshot(BuildStartupPackageSnapshot(config_result.config, options.package_dirs)),
+      skills(LoadSessionSkills(home_dir, official_skills_dir, *package_snapshot.load())),
       skills_segment(lubancode::tools::BuildSkillsPromptSegment(skills)),
       home_lubancode(lubancode::config::HomeLubancodeDir()),
       prompts_dir(home_lubancode.has_value() ? (*home_lubancode + "/prompts") : std::string()),
@@ -299,9 +324,13 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
     };
     runtime_options.memory = stack->project_memory;
     runtime_options.worktree_session = &stack->worktree_session;
-    // Package 会话钉快照递进工具栈:agent 工具派发时按 canonical 名解析
-    // packaged Agent(借用指针,SessionStack 持有、活得比 ToolRuntime 久)。
-    runtime_options.package_mount = &stack->package_mount;
+    // Package 会话钉快照递进工具栈(阶段 6 换供应商口):构造时取一次跑
+    // code 挂载事务(只在会话启动跑);agent 工具派发时每派发现取——
+    // reload 换档后下一次装配即见新账,在跑引用各自钉着旧 shared_ptr。
+    // SessionStack 持槽,活得比 ToolRuntime 久。
+    runtime_options.package_snapshot = [raw = stack.get()] {
+        return raw->CurrentPackageSnapshot();
+    };
     // worktree 工具的两道硬确认(进园子外的房、脏房强删)走自己的问话通道,
     // 不经三档确认——确认档压不住这一问,管道模式没人可问就拒。
     runtime_options.worktree_confirm = [theme_ref = &theme](const std::string& question) -> std::optional<bool> {
@@ -350,7 +379,7 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
         stack->agent_tool()->SetPromptsDir(stack->prompts_dir);
         stack->agent_tool()->SetProjectPromptsRoot(lubancode::app::ComputeProjectPromptsRoot());
         stack->agent_tool()->SetPackageProfileRoots(
-            lubancode::package::MountProfileRoots(stack->package_mount));
+            lubancode::package::MountProfileRoots(stack->CurrentPackageSnapshot()->mount()));
         stack->agent_tool()->SetProjectInstructions(stack->project_instructions);
         if (stack->sub_deferral) {
             stack->agent_tool()->SetToolFilter(stack->sub_tool_filter());

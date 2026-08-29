@@ -150,65 +150,26 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         return 2;
     }    // M9:技能扫描,理由同 InteractiveLoop——单发模式也该能用技能。
     const std::optional<std::string> home_dir = lubancode::config::HomeDir();
-    // Package 会话钉快照(统一封装单阶段 3):单发一场即一会话,启动装配
-    // 一次,跑完即弃。四层根与交互会话同一套口径(home 的 packages、项目
-    // .lubancode/packages、官方目录、--package-dir);包外短引用的兜底账喂
-    // config 的 mcpServers 键、builtin Agent 两名与第一趟裸扫的技能名单。
-    lubancode::package::PackageMountInput package_input;
-    if (const auto home_lubancode_for_packages = lubancode::config::HomeLubancodeDir();
-        home_lubancode_for_packages.has_value()) {
-        package_input.scan.user_root =
-            lubancode::tools::Utf8ToPath(*home_lubancode_for_packages) / "packages";
-    }
-    package_input.scan.project_root = std::filesystem::current_path() / ".lubancode" / "packages";
-    if (const auto official_packages = lubancode::platform::OfficialPackagesDir();
-        official_packages.has_value()) {
-        package_input.scan.official_root = lubancode::tools::Utf8ToPath(*official_packages);
-    }
-    for (const std::string& dev_dir : package_dirs) {
-        if (!dev_dir.empty()) {
-            package_input.scan.dev_roots.push_back(lubancode::tools::Utf8ToPath(dev_dir));
-        }
-    }
-    if (const auto version = lubancode::package::ParseSemVer(lubancode::app::kVersion);
-        version.has_value()) {
-        package_input.scan.current_lubancode = *version;
-    }
-#if defined(_WIN32)
-    package_input.scan.current_platform = "windows";
-#elif defined(__APPLE__)
-    package_input.scan.current_platform = "macos";
-#else
-    package_input.scan.current_platform = "linux";
-#endif
-    for (const auto& [mcp_name, mcp_server] : config.mcp_servers) {
-        (void)mcp_server;
-        package_input.external.mcp_servers.insert(mcp_name);
-    }
-    package_input.external.agents.insert("general-purpose");
-    package_input.external.agents.insert("Explore");
-    for (const auto& meta : lubancode::tools::LoadSkills(CurrentDirUtf8(), home_dir,
-                                                         lubancode::platform::OfficialSkillsDir())) {
-        package_input.external.skills.insert(meta.name);
-    }
-    // 信任账的只读快照(阶段 4),与交互会话同一出入口;单发一场即一会话,
-    // 同样钉住。
+    // Package 会话钉快照(统一封装单阶段 3;阶段 6 起与交互会话共用
+    // BuildSessionPackageMountInput 一只折算):单发一场即一会话,启动装配
+    // 一次,跑完即弃。信任账同样在此钉住(读不动警告 + 空白续),启停账
+    // 现读——停用的包单发也不挂,与交互会话同一道门。
+    lubancode::package::PackageTrustSnapshot pinned_trust;
     if (const auto trust_path = lubancode::package::PackageTrustStore::DefaultStorePath();
         trust_path.has_value()) {
         auto [trust_store, trust_error] = lubancode::package::PackageTrustStore::Load(trust_path);
         if (trust_error.has_value()) {
             std::cerr << "[package] " << *trust_error << "\n";
         }
-        package_input.trust = trust_store.Snapshot();
+        pinned_trust = trust_store.Snapshot();
     }
-    // evolution store 的选中版本并轨(阶段 4):单发一场即一会话,与交互
-    // 会话同一枚并轨逻辑;store 后续指针变化不影响本场。
-    lubancode::app::AddEvolutionStoreSelections(package_input);
-    const lubancode::package::PackageMount package_mount =
-        lubancode::package::BuildPackageMount(package_input);
+    const std::shared_ptr<const lubancode::package::PackageSnapshot> package_snapshot =
+        lubancode::package::BuildPackageSnapshot(
+            lubancode::app::BuildSessionPackageMountInput(config, package_dirs, pinned_trust),
+            /*generation=*/1);
     const std::vector<lubancode::tools::SkillMeta> skills = lubancode::tools::LoadSkills(
         CurrentDirUtf8(), home_dir, lubancode::platform::OfficialSkillsDir(),
-        lubancode::package::MountSkillRoots(package_mount));
+        lubancode::package::MountSkillRoots(package_snapshot->mount()));
     const std::string skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
 
     // 提示词运行时化:单发模式同走用户模块目录,拼出去的结构跟交互模式一致。
@@ -241,10 +202,11 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // options 里:单发无 explore、无 ask_user、不挂 memory_save)。单发
     // 没有横幅与 /mcp、/plugins、/lsp、/tools 命令,挂载行/机制照旧。
     lubancode::app::ToolRuntime::Options runtime_options;
-    // Package 会话钉快照递进工具栈(阶段 3):agent 工具派发时按 canonical
-    // 名解析 packaged Agent。借用指针,local 变量 package_mount 声明在前、
-    // 活得比 tool_runtime 久。
-    runtime_options.package_mount = &package_mount;
+    // Package 会话钉快照递进工具栈(阶段 3/6 换供应商口):单发一场一会
+    // 话、没有 reload,供应商固定回这一折;local 变量 package_snapshot
+    // 声明在前、活得比 tool_runtime 久。
+    runtime_options.package_snapshot =
+        [snapshot = package_snapshot]() { return snapshot; };
     lubancode::app::ToolRuntime tool_runtime(config, theme, wrapped_backend, skills, skills_segment,
                                              CurrentDirUtf8(), std::move(runtime_options));
     auto& registry = tool_runtime.main_registry();
@@ -259,7 +221,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         // Prompt Profile(阶段 2):项目层根,自定义 Agent 点名 Profile 时用。
         agent_tool->SetProjectPromptsRoot(lubancode::app::ComputeProjectPromptsRoot());
         // 统一 Package 封装单阶段 3:包层 Profile 根,canonical 名在包里解析。
-        agent_tool->SetPackageProfileRoots(lubancode::package::MountProfileRoots(package_mount));
+        agent_tool->SetPackageProfileRoots(lubancode::package::MountProfileRoots(package_snapshot->mount()));
         agent_tool->SetProjectInstructions(project_instructions);
         // 病十(批三):四段开关随皮走——单发的子代理与 main 同段(mcp/web/
         // lsp 按配置、platforms 按 wire),不再走"四段不传"的薄壳。
@@ -303,7 +265,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     prompt_options.wire = lubancode::config::ProviderWireName(config.wire);
     prompt_options.prompts_dir = prompts_dir;  // 运行时模块:构造时现读现拼
     // 统一 Package 封装单阶段 3:包层 Profile 根(canonical 名在包里解析)。
-    prompt_options.package_profile_roots = lubancode::package::MountProfileRoots(package_mount);
+    prompt_options.package_profile_roots = lubancode::package::MountProfileRoots(package_snapshot->mount());
 
     // 运行策略走统一 profile(规格根因一):输出上限三级解析(config >
     // provider > 模型目录),unset 交服务端默认——与交互会话同一只装配

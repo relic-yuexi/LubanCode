@@ -302,6 +302,51 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime:
     }
 }
 
+// 自定义 Agent 的解析体(阶段 6 自 resolver lambda 折出,两路共用):
+// Catalog 现扫(包层成品件从给定快照折),预装技能正文包内件从快照读、
+// standalone 件从盘上现读。快照为空 = 从前的无包行为。
+std::optional<lubancode::tools::CustomAgentMaterial> ResolveCustomAgentMaterial(
+    const std::vector<lubancode::tools::SkillMeta>& skills,
+    const lubancode::package::PackageSnapshot* snapshot, const std::string& name) {
+    const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(
+        ComputeAgentScanRoots(snapshot != nullptr
+                                  ? lubancode::package::MountAgentEntries(snapshot->mount())
+                                  : std::vector<lubancode::agent::PackagedAgentEntry>{}));
+    const lubancode::agent::AgentCatalogEntry* entry = catalog.Find(name);
+    if (entry == nullptr || !entry->available || !entry->definition.has_value()) {
+        return std::nullopt;
+    }
+    lubancode::tools::CustomAgentMaterial material;
+    material.definition = *entry->definition;
+    material.builtin = entry->layer == lubancode::agent::AgentSourceLayer::Builtin && entry->file == "(builtin)";
+    for (const std::string& skill_name : material.definition.skills_preload) {
+        std::string body;
+        bool have_body = false;
+        // 包内技能优先从快照读:正文在折快照时已进 records,盘中删包/改
+        // SKILL 都不影响钉住这份的在跑引用(阶段 6 验收线)。
+        if (snapshot != nullptr) {
+            if (const auto pinned = snapshot->SkillBody(skill_name); pinned.has_value()) {
+                body = *pinned;
+                have_body = true;
+            }
+        }
+        // standalone 技能照旧从盘上现读;名单里没有的留给 doctor,只降级。
+        if (!have_body) {
+            const auto meta = std::find_if(skills.begin(), skills.end(),
+                                           [&](const lubancode::tools::SkillMeta& candidate) {
+                                               return candidate.name == skill_name;
+                                           });
+            if (meta != skills.end()) {
+                if (const auto text = lubancode::tools::ReadSkillBody(*meta); text.has_value()) {
+                    body = *text;
+                }
+            }
+        }
+        material.preloaded_skills.push_back(std::move(body));
+    }
+    return material;
+}
+
 ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancode::cli::Theme& theme,
                          lubancode::api::Backend& agent_backend, const std::vector<lubancode::tools::SkillMeta>& skills,
                          const std::string& skills_segment, const std::string& cwd_utf8, Options options) {
@@ -315,7 +360,7 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     // resolve_env_static_ 折账前跑:packaged MCP 的 canonical 名要进 Agent
     // 解析环境的名单。plugin adapter 的注册晚一步(registry 建好后
     // PublishPackagedPlugins),那步不失败,不破坏原子性。
-    if (options.package_mount != nullptr) {
+    if (options.package_snapshot != nullptr) {
         lubancode::package::PackageCodeMountOptions code_options;
         code_options.cwd_utf8 = cwd_utf8;
         if (const auto home_lubancode = lubancode::config::HomeLubancodeDir();
@@ -326,7 +371,12 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
             std::filesystem::create_directories(data_root, ec);  // 拿不到/建不动都照旧
             code_options.package_data_root = data_root;
         }
-        package_code_ = lubancode::package::MountPackageCode(*options.package_mount, code_options);
+        // 挂载事务吃启动这一折的快照(阶段 6):code 组件只在会话启动跑,
+        // reload 不热插也不热卸——须新会话。现行快照经供应商口取,装配
+        // 次序上 reload 尚不存在,取到的必是启动折。
+        const std::shared_ptr<const lubancode::package::PackageSnapshot> startup_snapshot =
+            options.package_snapshot();
+        package_code_ = lubancode::package::MountPackageCode(startup_snapshot->mount(), code_options);
         for (auto& staged : package_code_.mcp_servers) {
             McpServerRuntime runtime;
             runtime.name = staged.wire_server_name;
@@ -439,39 +489,18 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         // 唯一派发校验):按名查 AgentCatalog,查得到即可派——码内内置两枚
         // 标 builtin(工具层走内置快路),user/project 层覆盖内置名的按定义
         // 走自定义路。现扫不缓存——用户改了 YAML,下一次派发即生效,不必
-        // 重启会话。预装技能的正文从启动时扫到的技能清单里读;名单里没有
-        // 的技能留给 doctor 诊断,这里只降级(登记名字不注正文)。
-        // 统一 Package 封装单阶段 3:包层成品件从会话钉快照折来并入——包
-        // 的增删不热生效(下回启动才见),会话内包内容与启动时一致。
-        const lubancode::package::PackageMount* package_mount = options.package_mount;
+        // 重启会话。预装技能的正文:包内件从快照读(在跑引用不回盘),名
+        // 单里没有的技能留给 doctor 诊断,这里只降级(登记名字不注正文)。
+        // 统一 Package 封装单阶段 6:每派发经供应商口取现行快照——reload
+        // 换档后的下一次装配即见新账,在跑引用各自钉着旧折照旧跑完。
+        const std::function<std::shared_ptr<const lubancode::package::PackageSnapshot>()>
+            snapshot_provider = options.package_snapshot;
         agent_tool_->SetCustomAgentResolver(
-            [skills, package_mount](const std::string& name) -> std::optional<lubancode::tools::CustomAgentMaterial> {
-                const lubancode::agent::AgentCatalog catalog = lubancode::agent::LoadAgentCatalog(
-                    ComputeAgentScanRoots(package_mount != nullptr
-                                              ? lubancode::package::MountAgentEntries(*package_mount)
-                                              : std::vector<lubancode::agent::PackagedAgentEntry>{}));
-                const lubancode::agent::AgentCatalogEntry* entry = catalog.Find(name);
-                if (entry == nullptr || !entry->available || !entry->definition.has_value()) {
-                    return std::nullopt;
+            [skills, snapshot_provider](const std::string& name) -> std::optional<lubancode::tools::CustomAgentMaterial> {
+                if (snapshot_provider == nullptr) {
+                    return ResolveCustomAgentMaterial(skills, nullptr, name);
                 }
-                lubancode::tools::CustomAgentMaterial material;
-                material.definition = *entry->definition;
-                material.builtin = entry->layer == lubancode::agent::AgentSourceLayer::Builtin &&
-                                   entry->file == "(builtin)";
-                for (const std::string& skill_name : material.definition.skills_preload) {
-                    const auto meta = std::find_if(skills.begin(), skills.end(),
-                                                   [&](const lubancode::tools::SkillMeta& candidate) {
-                                                       return candidate.name == skill_name;
-                                                   });
-                    std::string body;
-                    if (meta != skills.end()) {
-                        if (const auto text = lubancode::tools::ReadSkillBody(*meta); text.has_value()) {
-                            body = *text;
-                        }
-                    }
-                    material.preloaded_skills.push_back(std::move(body));
-                }
-                return material;
+                return ResolveCustomAgentMaterial(skills, snapshot_provider().get(), name);
             });
         // agent 类型清单源(阶段 4·动态 schema):schema 的 agent_type 说明
         // 列"当前可派的类型"(可用条目:内置+自定义,各带一句 description)。
