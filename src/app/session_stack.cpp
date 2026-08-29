@@ -3,6 +3,7 @@
 // BuildSessionStack),行为一字未改——注释一并随行。
 #include "app/session_stack.hpp"
 
+#include <algorithm>
 #include <chrono>
 #include <utility>
 
@@ -16,6 +17,7 @@
 #include "cli/terminal_port.hpp"
 #include "config/model_catalog.hpp"
 #include "config/project_instructions.hpp"
+#include "evolution/promoter.hpp"  // VersionStore(阶段 4 的 store 选中版本)
 #include "memory/memory_tool.hpp"
 #include "package/inventory.hpp"  // ScanOptions/ScopeToString
 #include "platform/console.hpp"
@@ -113,6 +115,7 @@ lubancode::package::PackageMount BuildSessionPackageMount(const lubancode::confi
         }
         input.trust = store.Snapshot();
     }
+    AddEvolutionStoreSelections(input);
     return lubancode::package::BuildPackageMount(input);
 }
 
@@ -127,6 +130,32 @@ std::vector<lubancode::tools::SkillMeta> LoadSessionSkills(
 }
 
 }  // namespace
+
+// evolution store 的选中版本并进挂载输入(阶段 4):哈希验完好的才递;对
+// 不上的(store 内文件被手改)拒挂,警告亮给用户并指路。装配一次定终身
+// ——会话钉住的就是这一份,store 里后续 promote/rollback 改的是指针账,
+// 不动在跑会话的快照。
+void AddEvolutionStoreSelections(lubancode::package::PackageMountInput& input) {
+    const auto home_lubancode = lubancode::config::HomeLubancodeDir();
+    if (!home_lubancode.has_value()) {
+        return;
+    }
+    const lubancode::evolution::VersionStore store(
+        lubancode::platform::Utf8ToPath(*home_lubancode) / "package-store");
+    const lubancode::evolution::VersionStore::Snapshot snapshot = store.BuildSnapshot();
+    input.store_candidates = store.ScanSelectedCandidates();
+    // 哈希对不上的从挂载候选里剔出去(发现账归 /package list,挂载只收完好的)。
+    for (const auto& entry : snapshot.rejected) {
+        input.store_candidates.erase(
+            std::remove_if(input.store_candidates.begin(), input.store_candidates.end(),
+                           [&](const lubancode::package::PackageCandidate& candidate) {
+                               return candidate.dir_name == entry.package_id;
+                           }),
+            input.store_candidates.end());
+        TermOut() << "警告: evolution store 里 " << entry.package_id << "@" << entry.version
+                  << " 与安装账对不上,拒挂。" << entry.note << "\n";
+    }
+}
 
 // ---- 窄口 ----
 lubancode::tools::ToolRegistry& SessionStack::registry() { return tool_runtime->main_registry(); }

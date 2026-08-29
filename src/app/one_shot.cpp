@@ -2,6 +2,7 @@
 // 未改;对 interactive_session.hpp 的依赖在后续 commit 里解。
 
 #include "app/one_shot.hpp"
+#include "app/session_stack.hpp"  // AddEvolutionStoreSelections(store 选中版本并轨)
 
 #include <algorithm>
 #include <atomic>
@@ -200,6 +201,9 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         }
         package_input.trust = trust_store.Snapshot();
     }
+    // evolution store 的选中版本并轨(阶段 4):单发一场即一会话,与交互
+    // 会话同一枚并轨逻辑;store 后续指针变化不影响本场。
+    lubancode::app::AddEvolutionStoreSelections(package_input);
     const lubancode::package::PackageMount package_mount =
         lubancode::package::BuildPackageMount(package_input);
     const std::vector<lubancode::tools::SkillMeta> skills = lubancode::tools::LoadSkills(

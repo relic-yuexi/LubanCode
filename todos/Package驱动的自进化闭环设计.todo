@@ -1,6 +1,6 @@
 # Package 驱动的自进化闭环设计
 
-- 状态：阶段 0/1 已落地（0.26.82），阶段 2 已落地（Skill-only 候选起草），阶段 3 已落地（评测与基线），阶段 4 起待实现
+- 状态：阶段 0/1 已落地（0.26.82），阶段 2 已落地（Skill-only 候选起草），阶段 3 已落地（评测与基线），阶段 4 已落地（批准、安装与回滚），阶段 5 起待实现
 - 日期：2026-08-28
 - 前置：`todos/统一Package封装与组件挂载系统设计.todo`
 - 相关：`todos/自定义Agent与PromptProfile设计.todo`、`/record`、项目记忆、Workflow、`/goal`
@@ -483,11 +483,11 @@ Evolution 层可调用原有 parser、validator 与 runtime，不可复制它们
 
 ### 阶段 4：批准、安装与回滚
 
-- [ ] 批准绑定 candidate content hash。
-- [ ] 接 Package staging、version store 与 PackageSnapshot。
-- [ ] 实现点名 canary、新任务生效、旧任务持旧版。
-- [ ] 实现 promote 与 rollback，保留所有账。
-- [ ] 文件变动后让旧评测、批准与信任一并失效。
+- [x] 批准绑定 candidate content hash。（approve 只认当前哈希:批准账与评测行的哈希对不上即拒批,指路重做候选;code-bearing(带 Plugin/MCP 或工具/权限差异)首版明拒指路 Package trust,与信任门单各管各的账。）
+- [x] 接 Package staging、version store 与 PackageSnapshot。（staging 复制→复算哈希→静态门→rename 原子落 ~/.lubancode/package-store/<包id>/<版本>/,staging 写一半失败正式 store 不变(单测钉);channels.json 记已装版本账+active/canary 指针,install-log.jsonl 只追加;PackageSnapshot 折路径+期望哈希+现算哈希。）
+- [x] 实现点名 canary、新任务生效、旧任务持旧版。（/evolve use 标 canary,新会话装配快照选 canary(遮 active);在跑会话的 PackageMount 装配一次定终身,promote/rollback 改指针不动旧快照,旧版本目录不删(单测钉)。store 层进挂载输入 scope=Store,同 id 遮蔽 dev>project>store>user>official。）
+- [x] 实现 promote 与 rollback，保留所有账。（promote=canary→active 改指针;rollback 无参切父版(无父撤下)、带参切指定版;候选/评测/批准/迁移账一笔不删,store 版本一枚不删,install-log 四类事件只追加。）
+- [x] 文件变动后让旧评测、批准与信任一并失效。（三处对账:评测计划哈希(阶段3)、批准当前哈希、store 侧 staging 复算/切指针前复算/装配快照现算——store 内文件被手改,下次装配拒挂并指路(单测钉)。）
 
 验收：候选坏了，一条命令切回父版；半场任务不换能力。
 

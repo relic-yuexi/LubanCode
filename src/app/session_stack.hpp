@@ -114,4 +114,11 @@ struct SessionStack {
 // 清扫 → [mcp] 挂载行 → 延迟索引提示)。
 std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions& options);
 
+// Package 会话钉快照的 evolution store 并轨(自进化闭环阶段 4):把
+// package-store 里选中版本(active/canary 指针指到的那枚)折成的现成候选
+// 递进挂载输入;哈希验完好的才递(store 内文件被手改的拒挂,警告亮出并
+// 指路)。交互会话与单发模式同一枚——新会话拿新选中,在跑会话钉着自己的
+// 快照照旧跑完。
+void AddEvolutionStoreSelections(lubancode::package::PackageMountInput& input);
+
 }  // namespace lubancode::app

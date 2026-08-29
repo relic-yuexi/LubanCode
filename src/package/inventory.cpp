@@ -125,8 +125,9 @@ std::vector<std::string> ReservedTopLevelNames() {
 
 int ScopePrecedence(PackageScope scope) {
     switch (scope) {
-        case PackageScope::Dev: return 3;
-        case PackageScope::Project: return 2;
+        case PackageScope::Dev: return 4;
+        case PackageScope::Project: return 3;
+        case PackageScope::Store: return 2;
         case PackageScope::User: return 1;
         case PackageScope::Official: return 0;
     }
@@ -137,6 +138,7 @@ std::string ScopeToString(PackageScope scope) {
     switch (scope) {
         case PackageScope::Dev: return "dev";
         case PackageScope::Project: return "project";
+        case PackageScope::Store: return "store";
         case PackageScope::User: return "user";
         case PackageScope::Official: return "official";
     }

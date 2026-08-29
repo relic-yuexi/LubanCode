@@ -18,13 +18,17 @@ namespace lubancode::package {
 
 // ---------------------------------------------------------------------------
 // 来源与四层扫描(单子 §八)。同 package id 的优先级:
-//   CLI dev(--package-dir) > project > user > official
+//   CLI dev(--package-dir) > project > store(自进化装架) > user > official
 // 每层都是"包目录的父目录":层下每个直接子目录是一只 Package。被盖住的
 // 版本仍进诊断账,不静默丢弃。
 // ---------------------------------------------------------------------------
-enum class PackageScope { Official, User, Project, Dev };
+// Store 层(自进化闭环阶段 4)不是扫描层:ScanPackages 不产它,它是
+// evolution version store 的选中版本(active/canary 指针指到的那一枚)折成
+// 的现成候选,由装配方递进 PackageMountInput.store_candidates / /package
+// 命令并进账。同一只包 id,store 压 user/official、让 dev/project。
+enum class PackageScope { Official, User, Store, Project, Dev };
 
-// 数值越大越优先。Dev 3 > Project 2 > User 1 > Official 0。
+// 数值越大越优先。Dev 4 > Project 3 > Store 2 > User 1 > Official 0。
 int ScopePrecedence(PackageScope scope);
 std::string ScopeToString(PackageScope scope);
 

@@ -16,6 +16,7 @@ using lubancode::cli::TermErr;
 
 #include <algorithm>
 #include <filesystem>
+#include <iterator>
 #include <map>
 #include <optional>
 #include <sstream>
@@ -29,6 +30,7 @@ using lubancode::cli::TermErr;
 #include "package/manifest.hpp"
 #include "package/semver.hpp"
 #include "package/trust.hpp"
+#include "evolution/promoter.hpp"  // VersionStore(阶段 4:store 选中版本并进 /package 账面)
 #include "platform/paths.hpp"
 
 namespace lubancode::app {
@@ -94,6 +96,7 @@ lubancode::package::ScanOptions BuildScanOptions(SlashDispatchContext& ctx) {
     return options;
 }
 
+<<<<<<< HEAD
 // 信任账的只读装载(show/list/doctor 摆状态用;读不动只警告,按空白续
 // ——重新审一遍比带着一本读不动的账继续跑更安全)。
 std::pair<std::optional<lubancode::package::PackageTrustStore>, std::optional<std::string>>
@@ -104,6 +107,37 @@ LoadTrustStoreReadOnly() {
     }
     auto [store, error] = lubancode::package::PackageTrustStore::Load(path);
     return {std::move(store), std::move(error)};
+=======
+// evolution store 的选中版本(阶段 4):active/canary 指针指到的那枚折成
+// scope=Store 的现成候选,并进 /package 的账面——四层扫描之外第五路,哈希
+// 验完好与 tamper 都在列(list 是发现账;挂载侧只收完好的)。
+std::vector<lubancode::package::PackageCandidate> BuildStoreCandidates(SlashDispatchContext& ctx) {
+    if (ctx.home_lubancode == nullptr || !ctx.home_lubancode->has_value()) {
+        return {};
+    }
+    const lubancode::evolution::VersionStore store(
+        lubancode::platform::Utf8ToPath(**ctx.home_lubancode) / "package-store");
+    return store.ScanSelectedCandidates();
+}
+
+// 四层扫描 + store 选中,按优先级从高到低稳排(dev > project > store >
+// user > official):list 的行序、LookupPackage 的胜者判定共用这一份。
+std::vector<lubancode::package::PackageCandidate> ScanAllLayers(
+    SlashDispatchContext& ctx, const lubancode::package::ScanOptions& options) {
+    std::vector<lubancode::package::PackageCandidate> candidates =
+        lubancode::package::ScanPackages(options);
+    std::vector<lubancode::package::PackageCandidate> store = BuildStoreCandidates(ctx);
+    if (!store.empty()) {
+        const auto insert_at = std::find_if(
+            candidates.begin(), candidates.end(), [](const auto& scanned) {
+                return lubancode::package::ScopePrecedence(scanned.scope) <
+                       lubancode::package::ScopePrecedence(lubancode::package::PackageScope::Store);
+            });
+        candidates.insert(insert_at, std::make_move_iterator(store.begin()),
+                          std::make_move_iterator(store.end()));
+    }
+    return candidates;
+>>>>>>> worktree-agent-aa2da30c095bbf3ab
 }
 
 // 一只包的"列表行":id、版本、来源、状态、六类组件计数、code-bearing。
@@ -264,7 +298,7 @@ ParsedPackageCommand ParsePackageCommand(const std::string& args) {
         if (!rest.empty()) {
             const std::string scope = ToLowerAscii(rest);
             if (scope == "all" || scope == "user" || scope == "project" || scope == "official" ||
-                scope == "dev") {
+                scope == "dev" || scope == "store") {
                 parsed.scope_filter = scope;
             } else {
                 parsed.action = PackageCommandAction::Invalid;
@@ -303,22 +337,26 @@ ParsedPackageCommand ParsePackageCommand(const std::string& args) {
 namespace {
 
 void PrintUsage() {
-    TermOut() << "用法: /package list [all|user|project|official|dev]\n"
+    TermOut() << "用法: /package list [all|user|project|store|official|dev]\n"
                  "      /package show <id>\n"
                  "      /package doctor <id|路径>\n"
                  "      /package trust <id>    批准整包内容哈希(重启生效;文件一改即失效)\n"
                  "      /package untrust <id>  销信任账\n"
                  "只读:list/show 只查静态账;doctor 另诊组件(逐件原生 parser)、引用解析与\n"
+<<<<<<< HEAD
                  "MountPlan 摘要。trust 亮全份审批材料(逐件命令面 + 完整指纹)才落账——\n"
                  "未信任的 code 组件(Plugin/MCP)一件不挂不启动。\n";
+=======
+                 "MountPlan 摘要——不挂任何组件、不启动任何 Plugin 与 MCP。store 一路是自进化\n"
+                 "闭环装进 package-store 的选中版本(/evolve approve 落架,/evolve use 点灰度)。\n";
+>>>>>>> worktree-agent-aa2da30c095bbf3ab
     TermOut().flush();
 }
 
 void RunPackageList(const lubancode::package::ScanOptions& options,
                     const std::optional<std::string>& scope_filter,
-                    const lubancode::package::PackageMount* mount) {
-    const std::vector<lubancode::package::PackageCandidate> candidates =
-        lubancode::package::ScanPackages(options);
+                    const lubancode::package::PackageMount* mount,
+                    const std::vector<lubancode::package::PackageCandidate>& candidates) {
 
     // 同 id 分组,组内最高优先级为胜者,其余 shadowed。
     struct Row {
@@ -357,6 +395,7 @@ void RunPackageList(const lubancode::package::ScanOptions& options,
     };
 
     std::size_t shown = 0;
+<<<<<<< HEAD
     auto [trust_store, trust_error] = LoadTrustStoreReadOnly();
     if (trust_error.has_value()) {
         TermOut() << "警告: " << *trust_error << "\n";
@@ -364,6 +403,9 @@ void RunPackageList(const lubancode::package::ScanOptions& options,
     const lubancode::package::PackageTrustStore* trust =
         trust_store.has_value() ? &*trust_store : nullptr;
     TermOut() << "Package(四层: dev > project > user > official):\n";
+=======
+    TermOut() << "Package(五路: dev > project > store > user > official;store 是自进化装架):\n";
+>>>>>>> worktree-agent-aa2da30c095bbf3ab
     for (const auto& row : rows) {
         if (!scope_matches(row)) continue;
         ++shown;
@@ -383,9 +425,8 @@ void RunPackageList(const lubancode::package::ScanOptions& options,
 }
 
 void RunPackageShow(const lubancode::package::ScanOptions& options, const std::string& target,
-                    const lubancode::package::PackageMount* mount) {
-    const std::vector<lubancode::package::PackageCandidate> candidates =
-        lubancode::package::ScanPackages(options);
+                    const lubancode::package::PackageMount* mount,
+                    const std::vector<lubancode::package::PackageCandidate>& candidates) {
     const PackageLookup lookup = LookupPackage(candidates, target);
     if (lookup.winner == nullptr && lookup.shadowed.empty()) {
         TermOut() << "没找到包 \"" << target << "\"(按 id 或目录名查;先 /package list 看全账)\n";
@@ -522,7 +563,8 @@ void PrintMountPlan(const lubancode::package::PackageRecord& record) {
 }
 
 void RunPackageDoctor(const lubancode::package::ScanOptions& options,
-                      const lubancode::package::ExternalNamespaces& external, const std::string& target) {
+                      const lubancode::package::ExternalNamespaces& external, const std::string& target,
+                      const std::vector<lubancode::package::PackageCandidate>& scanned) {
     // doctor 收 id 或路径:路径存在(目录)就当包根直接诊,否则按 id 查。
     std::optional<lubancode::package::PackageCandidate> direct;
     std::error_code ec;
@@ -539,9 +581,8 @@ void RunPackageDoctor(const lubancode::package::ScanOptions& options,
         }
     }
 
-    const std::vector<lubancode::package::PackageCandidate> candidates =
-        lubancode::package::ScanPackages(options);
-    // 跨包全名引用的对账索引:四层扫描里"已存在包"的账。
+    const std::vector<lubancode::package::PackageCandidate> candidates = scanned;
+    // 跨包全名引用的对账索引:扫描账里"已存在包"的账(store 选中也在内)。
     const lubancode::package::PackageRefIndex ref_index =
         lubancode::package::BuildPackageRefIndex(candidates);
     // 信任账的只读快照:code 件在 plan 里的门禁标随它定(阶段 4)。
@@ -641,15 +682,16 @@ CommandFlow HandleSlashPackage(SlashDispatchContext& ctx,
                                const lubancode::cli::ParsedSlashCommand& parsed) {
     const ParsedPackageCommand command = ParsePackageCommand(parsed.args);
     const lubancode::package::ScanOptions options = BuildScanOptions(ctx);
+    const std::vector<lubancode::package::PackageCandidate> candidates = ScanAllLayers(ctx, options);
     switch (command.action) {
         case PackageCommandAction::List:
-            RunPackageList(options, command.scope_filter, ctx.package_mount);
+            RunPackageList(options, command.scope_filter, ctx.package_mount, candidates);
             return CommandFlow::Continue;
         case PackageCommandAction::Show:
-            RunPackageShow(options, command.target, ctx.package_mount);
+            RunPackageShow(options, command.target, ctx.package_mount, candidates);
             return CommandFlow::Continue;
         case PackageCommandAction::Doctor:
-            RunPackageDoctor(options, BuildExternalNamespaces(ctx), command.target);
+            RunPackageDoctor(options, BuildExternalNamespaces(ctx), command.target, candidates);
             return CommandFlow::Continue;
         case PackageCommandAction::Trust:
             RunPackageTrust(ctx, command.target, /*trust_action=*/true);

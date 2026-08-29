@@ -66,15 +66,22 @@ struct PackageMount {
 // doctor 的 BuildExternalNamespaces 同一口径;不喂则指向它们的短引用按
 // 悬空判,整包 invalid)+ 信任账的只读快照(阶段 4:启动时从
 // ~/.lubancode/package-trust.json 折一份,会话钉住;不喂 = 谁都没批)。
+//
+// store_candidates(自进化闭环阶段 4):evolution version store 的选中版本
+// (active/canary 指针指到的那一枚)折成的现成候选,scope=Store。哈希验
+// 完好没有由 evolution 侧负责——对不上(手改过 store 内文件)的根本不
+// 递进来,这里照单全收。同 id 优先级:dev > project > store > user >
+// official(store 压手装的用户层拷贝,让显式调试层)。
 struct PackageMountInput {
     ScanOptions scan;
     ExternalNamespaces external;
     PackageTrustSnapshot trust;
+    std::vector<PackageCandidate> store_candidates;
 };
 
 // 启动装配一次。次序:四层扫描 -> 同 id 按优先级定胜者(dev > project >
-// user > official,被遮的不挂) -> 逐胜者 AnalyzePackage -> valid 的收进
-// 挂载账(invalid 一件不挂——整包成整包败)。
+// store > user > official,被遮的不挂) -> 逐胜者 AnalyzePackage -> valid
+// 的收进挂载账(invalid 一件不挂——整包成整包败)。
 PackageMount BuildPackageMount(const PackageMountInput& input);
 
 // ---------------------------------------------------------------------------

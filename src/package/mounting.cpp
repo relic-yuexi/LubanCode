@@ -121,8 +121,16 @@ PackageMount BuildPackageMount(const PackageMountInput& input) {
 
     // 四层扫描;同 id 定胜者:ScanPackages 已按优先级从高到低排,先见者胜
     //(与 BuildPackageRefIndex 同口径)。被遮的候选不挂载——/package 命令
-    // 的现扫账里它们照旧可 list/show/doctor。
-    const std::vector<PackageCandidate> candidates = ScanPackages(input.scan);
+    // 的现扫账里它们照旧可 list/show/doctor。store 的选中版本(阶段 4)按
+    // 优先级插进 project 与 user 之间:dev > project > store > user > official。
+    std::vector<PackageCandidate> candidates = ScanPackages(input.scan);
+    if (!input.store_candidates.empty()) {
+        const auto insert_at = std::find_if(
+            candidates.begin(), candidates.end(), [](const PackageCandidate& scanned) {
+                return ScopePrecedence(scanned.scope) < ScopePrecedence(PackageScope::Store);
+            });
+        candidates.insert(insert_at, input.store_candidates.begin(), input.store_candidates.end());
+    }
     std::map<std::string, const PackageCandidate*> winners;
     for (const auto& candidate : candidates) {
         if (!candidate.manifest.has_value()) continue;  // 清单坏的包进不了挂载账

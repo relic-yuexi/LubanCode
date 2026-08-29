@@ -18,6 +18,10 @@ const char* ActionName(lubancode::app::EvolveCommandAction action) {
         case lubancode::app::EvolveCommandAction::Diff: return "Diff";
         case lubancode::app::EvolveCommandAction::Reject: return "Reject";
         case lubancode::app::EvolveCommandAction::Test: return "Test";
+        case lubancode::app::EvolveCommandAction::Approve: return "Approve";
+        case lubancode::app::EvolveCommandAction::Use: return "Use";
+        case lubancode::app::EvolveCommandAction::Promote: return "Promote";
+        case lubancode::app::EvolveCommandAction::Rollback: return "Rollback";
     }
     return "?";
 }
@@ -103,9 +107,9 @@ TEST_CASE("evolve.parse:reject 带候选 id 与可选理由") {
 }
 
 TEST_CASE("evolve.parse:认不得的子命令 Invalid") {
-    const auto parsed = lubancode::app::ParseEvolveCommand("approve cand-1");
+    const auto parsed = lubancode::app::ParseEvolveCommand("install cand-1");
     CHECK(parsed.action == lubancode::app::EvolveCommandAction::Invalid);
-    CHECK(parsed.bad_word == "approve");
+    CHECK(parsed.bad_word == "install");
     CHECK(ActionName(parsed.action) == std::string("Invalid"));  // 全案覆盖(防未用告警)
 }
 
@@ -118,4 +122,41 @@ TEST_CASE("evolve.parse:test 带候选 id;缺目标 Invalid") {
     const auto missing = lubancode::app::ParseEvolveCommand("test");
     CHECK(missing.action == lubancode::app::EvolveCommandAction::Invalid);
     CHECK(missing.bad_word == "test");
+}
+
+TEST_CASE("evolve.parse:approve/use/promote 带候选 id;缺目标 Invalid") {
+    const auto approve = lubancode::app::ParseEvolveCommand("APPROVE cand-20260828-001");
+    CHECK(approve.action == lubancode::app::EvolveCommandAction::Approve);
+    CHECK(approve.target == "cand-20260828-001");
+    const auto use = lubancode::app::ParseEvolveCommand("use cand-20260828-001");
+    CHECK(use.action == lubancode::app::EvolveCommandAction::Use);
+    CHECK(use.target == "cand-20260828-001");
+    const auto promote = lubancode::app::ParseEvolveCommand("promote cand-20260828-001");
+    CHECK(promote.action == lubancode::app::EvolveCommandAction::Promote);
+    CHECK(promote.target == "cand-20260828-001");
+    for (const char* word : {"approve", "use", "promote"}) {
+        const auto missing = lubancode::app::ParseEvolveCommand(word);
+        INFO(word);
+        CHECK(missing.action == lubancode::app::EvolveCommandAction::Invalid);
+        CHECK(missing.bad_word == word);
+    }
+}
+
+TEST_CASE("evolve.parse:rollback 带包 id 与可选版本;缺目标 Invalid") {
+    const auto bare = lubancode::app::ParseEvolveCommand("rollback evolve.provider-auditor");
+    CHECK(bare.action == lubancode::app::EvolveCommandAction::Rollback);
+    CHECK(bare.target == "evolve.provider-auditor");
+    CHECK(bare.target_extra.empty());
+    const auto with_version =
+        lubancode::app::ParseEvolveCommand("ROLLBACK evolve.provider-auditor 0.1.0");
+    CHECK(with_version.action == lubancode::app::EvolveCommandAction::Rollback);
+    CHECK(with_version.target == "evolve.provider-auditor");
+    CHECK(with_version.target_extra == "0.1.0");
+    // 第三段起不认(版本只一段),只吃第二词。
+    const auto extra = lubancode::app::ParseEvolveCommand("rollback pkg 0.1.0 noise");
+    CHECK(extra.action == lubancode::app::EvolveCommandAction::Rollback);
+    CHECK(extra.target_extra == "0.1.0");
+    const auto missing = lubancode::app::ParseEvolveCommand("rollback");
+    CHECK(missing.action == lubancode::app::EvolveCommandAction::Invalid);
+    CHECK(missing.bad_word == "rollback");
 }

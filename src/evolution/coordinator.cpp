@@ -510,8 +510,367 @@ std::expected<EvolutionCoordinator::TestReport, std::string> EvolutionCoordinato
 }
 
 EvolutionCoordinator::EvolutionCoordinator(std::filesystem::path candidates_root,
-                                           ObservationStore* observations)
-    : root_(std::move(candidates_root)), observations_(observations), store_(root_) {}
+                                           ObservationStore* observations,
+                                           std::filesystem::path store_root)
+    : root_(std::move(candidates_root)),
+      observations_(observations),
+      store_(root_),
+      // store 根缺省从候选仓的姊妹目录推:<home>/package-candidates 的
+      // 旁边就是 <home>/package-store(README"晋升、灰度与回滚"的钉子)。
+      versions_(store_root.empty() ? root_.parent_path() / "package-store" : std::move(store_root)) {}
+
+// ---------------------------------------------------------------------------
+// 批准、安装与回滚(阶段 4)。迁状态的笔只有这里;store 机械走 VersionStore。
+// ---------------------------------------------------------------------------
+
+// 批准页材料:身份、来源、改动、评测、权限、安装与回滚(README §十清单)。
+std::expected<EvolutionCoordinator::ApprovalBrief, std::string>
+EvolutionCoordinator::BuildApprovalBrief(const std::string& candidate_id) {
+    const auto found = store_.Find(candidate_id);
+    if (!found.has_value()) {
+        return std::unexpected("找不到候选 \"" + candidate_id + "\"(先 /evolve list 看)");
+    }
+    if (!found->record.has_value()) {
+        return std::unexpected("候选 \"" + candidate_id + "\" 的演化账读不出,批不得");
+    }
+    const EvolutionRecord& record = *found->record;
+    const std::vector<EvalResultLine> rows = LoadEvalResults(found->dir / "eval-results.jsonl");
+    if (rows.empty()) {
+        return std::unexpected("评测账是空的:先 /evolve test " + candidate_id);
+    }
+
+    ApprovalBrief brief;
+    brief.candidate_id = found->candidate_id;
+    brief.package_id = found->package_id;
+    brief.candidate_version = record.candidate_version;
+    brief.content_hash = found->content_hash;
+    if (record.parent.has_value()) {
+        brief.parent_line = "父版 " + record.parent->version + " " + record.parent->content_hash;
+    } else {
+        brief.parent_line = "(无父版,与空对照)";
+    }
+    const auto join_sources = [](const std::vector<std::string>& ids, const char* label,
+                                 std::vector<std::string>& out) {
+        for (const std::string& id : ids) {
+            out.push_back(std::string(label) + " " + id);
+        }
+    };
+    join_sources(record.sources.run_ids, "run", brief.source_lines);
+    join_sources(record.sources.goal_ids, "goal", brief.source_lines);
+    join_sources(record.sources.recording_ids, "recording", brief.source_lines);
+    join_sources(record.sources.memory_ids, "memory", brief.source_lines);
+    join_sources(record.sources.user_feedback_ids, "user-feedback", brief.source_lines);
+    brief.components_added = record.changes.components_added;
+    brief.components_changed = record.changes.components_changed;
+    brief.components_removed = record.changes.components_removed;
+    brief.permissions_added = record.changes.permissions_added;
+    brief.tools_added = record.changes.tools_added;
+    brief.tier = "content-only";  // code-bearing 在 Approve 的门上明拒,进不了页
+    brief.eval_summary = SummarizeEvalLedger(rows);
+    for (const EvalResultLine& row : rows) {
+        if ((row.gate == "replay" || row.gate == "holdout") && !row.task_id.empty()) {
+            // 任务样例:同 gate 同任务只记头一回(重跑评测账只追加)。
+            std::string line = row.gate + " " + row.task_id;
+            if (std::find(brief.eval_task_ids.begin(), brief.eval_task_ids.end(), line) ==
+                brief.eval_task_ids.end()) {
+                brief.eval_task_ids.push_back(std::move(line));
+            }
+        }
+    }
+    brief.install_dir_utf8 =
+        PathToUtf8(versions_.VersionDir(found->package_id, "<版本>")) + "(package.yaml 的稳定版号)";
+    if (record.parent.has_value()) {
+        brief.rollback_target_line =
+            "父版 " + record.parent->version + "(/evolve rollback " + found->package_id + ")";
+    } else {
+        brief.rollback_target_line =
+            "无父版:/evolve rollback " + found->package_id + " 即撤下(版本与账保留)";
+    }
+    return brief;
+}
+
+std::expected<EvolutionCoordinator::ApproveResult, std::string> EvolutionCoordinator::Approve(
+    const std::string& candidate_id) {
+    const auto found = store_.Find(candidate_id);
+    if (!found.has_value()) {
+        return std::unexpected("找不到候选 \"" + candidate_id + "\"(先 /evolve list 看)");
+    }
+    const std::filesystem::path& candidate_dir = found->dir;
+    CandidateState state = found->state;
+    if (IsTerminalCandidateState(state)) {
+        return std::unexpected("候选 \"" + candidate_id + "\" 已在终态 " + ToString(state) +
+                               ",不再迁移(账保留,不删)");
+    }
+    if (state == CandidateState::Staged || state == CandidateState::Canary ||
+        state == CandidateState::Active) {
+        return std::unexpected("候选 \"" + candidate_id + "\" 已是 " + ToString(state) +
+                               ";灰度走 /evolve use,晋升走 /evolve promote");
+    }
+    if (state == CandidateState::Observed || state == CandidateState::Drafted ||
+        state == CandidateState::Validated) {
+        return std::unexpected("候选 \"" + candidate_id + "\" 还在 " + ToString(state) +
+                               ",先 /evolve test " + candidate_id + " 把五道门跑完");
+    }
+    if (!found->record.has_value() || !found->approval.has_value()) {
+        return std::unexpected("候选 \"" + candidate_id + "\" 的演化账或批准账读不出,批不得");
+    }
+
+    // ---- 门一:哈希绑定。批准只认当前 content hash;文件变过即拒批。 ----
+    if (found->content_hash.empty()) {
+        return std::unexpected("候选缺 package/ 目录,复算不出内容哈希: " +
+                               PathToUtf8(candidate_dir));
+    }
+    if (found->content_hash != found->approval->content_hash) {
+        return std::unexpected(
+            "内容变过:批准账绑的是 " + found->approval->content_hash.substr(0, 19) + ",当前复算是 " +
+            found->content_hash.substr(0, 19) +
+            "。旧评测与旧批准一并作废——重做候选(改一字即新候选),或按新哈希重写计划再 /evolve test");
+    }
+    const std::vector<EvalResultLine> rows = LoadEvalResults(candidate_dir / "eval-results.jsonl");
+    if (rows.empty()) {
+        return std::unexpected("评测账是空的:先 /evolve test " + candidate_id);
+    }
+    for (const EvalResultLine& row : rows) {
+        if (row.content_hash != found->content_hash) {
+            return std::unexpected("评测账绑的是旧哈希 " + row.content_hash.substr(0, 19) +
+                                   ",当前候选是 " + found->content_hash.substr(0, 19) +
+                                   "。旧评测作废——重做候选,或按新哈希重写计划再 /evolve test");
+        }
+    }
+
+    // ---- 门二:档位分类。content-only 直接可批;code-bearing 首版明拒,
+    //      指路 Package trust 流程(与信任门单各管各的账)。 ----
+    if (found->approval->tier == "native-or-core-patch") {
+        return std::unexpected("native Plugin / core patch 不走自动晋升:交人工审查与发布流程"
+                               "(LubanCode core patch 永远不进 /evolve approve)");
+    }
+    {
+        const EvolutionRecord& record = *found->record;
+        bool code_bearing = !record.changes.tools_added.empty() ||
+                            !record.changes.permissions_added.empty();
+        if (!code_bearing) {
+            lubancode::package::PackageCandidate probe;
+            probe.scope = lubancode::package::PackageScope::Dev;
+            probe.package_root = candidate_dir / "package";
+            probe.dir_name = "package";
+            const lubancode::package::PackageInventory inventory =
+                lubancode::package::BuildPackageInventory(probe);
+            code_bearing = inventory.code_bearing() || !inventory.plugins.empty() ||
+                           !inventory.mcp_servers.empty();
+        }
+        if (code_bearing) {
+            return std::unexpected(
+                "候选是 code-bearing 档(带 Plugin/MCP 或新工具/权限差异),首版不走 "
+                "/evolve approve:另过 Package trust 与运行沙箱流程(与信任门单各管各的账)");
+        }
+    }
+
+    // ---- 材料(批准页;失败也把材料备齐不了就不动状态) ----
+    auto brief_result = BuildApprovalBrief(candidate_id);
+    if (!brief_result.has_value()) {
+        return std::unexpected(brief_result.error());
+    }
+    ApprovalBrief brief = std::move(*brief_result);
+
+    // ---- 门三:提交批准页(evaluated -> awaiting_approval) ----
+    if (state == CandidateState::Evaluated) {
+        const auto moved = AppendState(candidate_dir, CandidateState::Evaluated,
+                                       CandidateState::AwaitingApproval, "user",
+                                       "评测材料齐备,提交批准页");
+        if (!moved.has_value()) {
+            return std::unexpected(moved.error());
+        }
+        state = CandidateState::AwaitingApproval;
+    }
+
+    // ---- 门四:装 store(staging 复算哈希 + 静态门 + 原子落;失败停在
+    //      awaiting_approval,重批即恢复) ----
+    const auto installed =
+        versions_.Install(candidate_dir / "package", found->candidate_id, found->content_hash);
+    if (!installed.has_value()) {
+        return std::unexpected(installed.error());
+    }
+
+    // ---- 批准账:approved + decision 齐(只认这一枚哈希) ----
+    ApprovalRecord approval = *found->approval;
+    approval.tier = "content-only";
+    approval.status = "approved";
+    ApprovalDecision decision;
+    decision.decided_by = "user";
+    decision.decision = "approved";
+    decision.decided_at = IsoNowUtc();
+    decision.reason = "用户批准;内容哈希复算一致,staging 静态门过";
+    decision.fingerprint = std::string();
+    approval.decision = decision;
+    if (!WriteFileBytes(candidate_dir / "approval.json", SerializeApprovalRecord(approval))) {
+        return std::unexpected("写批准账失败: " + PathToUtf8(candidate_dir / "approval.json"));
+    }
+
+    // ---- 状态:awaiting_approval -> staged ----
+    const auto moved = AppendState(candidate_dir, CandidateState::AwaitingApproval,
+                                   CandidateState::Staged, "user",
+                                   "用户批准,内容哈希复算一致,原子落 version store");
+    if (!moved.has_value()) {
+        return std::unexpected(moved.error());
+    }
+
+    ApproveResult result;
+    result.brief = std::move(brief);
+    result.installed_version = installed->version;
+    result.version_dir = installed->version_dir;
+    result.already_present = installed->already_present;
+    return result;
+}
+
+std::expected<EvolutionCoordinator::UseResult, std::string> EvolutionCoordinator::Use(
+    const std::string& candidate_id) {
+    const auto found = store_.Find(candidate_id);
+    if (!found.has_value()) {
+        return std::unexpected("找不到候选 \"" + candidate_id + "\"(先 /evolve list 看)");
+    }
+    const CandidateState state = found->state;
+    if (state != CandidateState::Staged) {
+        if (state == CandidateState::Canary) {
+            return std::unexpected("候选 \"" + candidate_id +
+                                   "\" 已在 canary;晋升走 /evolve promote,撤走走 /evolve rollback");
+        }
+        return std::unexpected("候选 \"" + candidate_id + "\" 在 " + ToString(state) +
+                               ",点名 canary 须先 /evolve approve 落到 staged");
+    }
+    // 装架时的版本(package.yaml 的稳定版号)。
+    const auto manifest_text = ReadFileText(found->dir / "package" / "package.yaml");
+    if (!manifest_text.has_value()) {
+        return std::unexpected("候选缺 package.yaml: " + PathToUtf8(found->dir / "package"));
+    }
+    const auto manifest = lubancode::package::ParsePackageManifest(*manifest_text);
+    if (!manifest.has_value()) {
+        return std::unexpected("候选根清单解析不过: " + manifest.error().Format());
+    }
+    // 已有别的 canary 占着(同包另一版本):先处理它,账不混。
+    if (const auto channels = versions_.LoadChannels(found->package_id); channels.has_value()) {
+        if (channels->canary.has_value() &&
+            channels->canary->candidate_id != found->candidate_id) {
+            return std::unexpected("包 \"" + found->package_id + "\" 已有 canary 版本 " +
+                                   channels->canary->version + "(候选 " +
+                                   channels->canary->candidate_id +
+                                   ");先 /evolve promote 或 /evolve rollback 收走它");
+        }
+    }
+    const auto canary = versions_.SetCanary(found->package_id, manifest->version.text);
+    if (!canary.has_value()) {
+        return std::unexpected(canary.error());
+    }
+    const auto moved = AppendState(found->dir, CandidateState::Staged, CandidateState::Canary,
+                                   "user", "点名 canary(新会话生效,旧任务钉旧快照)");
+    if (!moved.has_value()) {
+        return std::unexpected(moved.error());
+    }
+    UseResult result;
+    result.package_id = found->package_id;
+    result.version = canary->version;
+    result.version_dir = versions_.VersionDir(found->package_id, canary->version);
+    return result;
+}
+
+std::expected<EvolutionCoordinator::PromoteResult, std::string> EvolutionCoordinator::Promote(
+    const std::string& candidate_id) {
+    const auto found = store_.Find(candidate_id);
+    if (!found.has_value()) {
+        return std::unexpected("找不到候选 \"" + candidate_id + "\"(先 /evolve list 看)");
+    }
+    const CandidateState state = found->state;
+    if (state != CandidateState::Canary) {
+        return std::unexpected("候选 \"" + candidate_id + "\" 在 " + ToString(state) +
+                               ";晋升只从 canary 起步(先 /evolve approve 再 /evolve use)");
+    }
+    // canary 指针须正指这只候选的版本——账要对得上。
+    const auto channels = versions_.LoadChannels(found->package_id);
+    if (!channels.has_value() || !channels->canary.has_value()) {
+        return std::unexpected("包 \"" + found->package_id +
+                               "\" 的 canary 指针账读不出,晋升无从对账");
+    }
+    if (channels->canary->candidate_id != found->candidate_id) {
+        return std::unexpected("canary 指针指在候选 " + channels->canary->candidate_id +
+                               ",不是 \"" + candidate_id + "\";先收走它(/evolve rollback)");
+    }
+    const auto promoted = versions_.PromoteToActive(found->package_id);
+    if (!promoted.has_value()) {
+        return std::unexpected(promoted.error());
+    }
+    const auto moved = AppendState(found->dir, CandidateState::Canary, CandidateState::Active,
+                                   "user", "样本足够,canary -> active(新会话起用新版)");
+    if (!moved.has_value()) {
+        return std::unexpected(moved.error());
+    }
+    PromoteResult result;
+    result.package_id = found->package_id;
+    result.version = promoted->version;
+    result.version_dir = versions_.VersionDir(found->package_id, promoted->version);
+    return result;
+}
+
+std::expected<EvolutionCoordinator::RollbackResult, std::string> EvolutionCoordinator::Rollback(
+    const std::string& package_id, const std::string& version) {
+    const auto channels = versions_.LoadChannels(package_id);
+    if (!channels.has_value()) {
+        return std::unexpected("store 里没有包 \"" + package_id +
+                               "\" 的账(先 /evolve list 看候选,/evolve approve 落架)");
+    }
+    std::string from_version;
+    std::string from_candidate;
+    if (channels->active.has_value()) {
+        from_version = channels->active->version;
+        from_candidate = channels->active->candidate_id;
+    } else if (channels->canary.has_value()) {
+        from_version = channels->canary->version;
+        from_candidate = channels->canary->candidate_id;
+    } else {
+        return std::unexpected("包 \"" + package_id + " 没有 active 也没有 canary,没有可回的版本");
+    }
+
+    // ---- 解回滚目标:给了版本用版本;没给切父版(演化账 parent);无父撤下 ----
+    std::string target = version;
+    std::string reason;
+    if (!version.empty()) {
+        reason = "切回指定版本 " + version;
+    } else {
+        const auto from = store_.Find(from_candidate);
+        if (from.has_value() && from->record.has_value() && from->record->parent.has_value()) {
+            target = from->record->parent->version;
+            reason = "切回父版 " + target + "(候选 " + from_candidate + " 的演化账)";
+        } else {
+            reason = "无父版可回,撤下(active/canary 清空;版本与账保留)";
+        }
+    }
+
+    const auto switched = versions_.RollbackTo(package_id, target, reason);
+    if (!switched.has_value()) {
+        return std::unexpected(switched.error());
+    }
+
+    // ---- 状态迁移:这只包名下在 canary/active 的候选,一枚枚落 rolled_back ----
+    RollbackResult result;
+    result.package_id = package_id;
+    result.from_version = from_version;
+    if (switched->has_value()) {
+        result.to_version = (*switched)->version;
+    }
+    for (const CandidateSummary& candidate : store_.LoadAll()) {
+        if (candidate.package_id != package_id) {
+            continue;
+        }
+        if (candidate.state != CandidateState::Canary && candidate.state != CandidateState::Active) {
+            continue;
+        }
+        const auto moved = AppendState(candidate.dir, candidate.state, CandidateState::RolledBack,
+                                       "user", reason);
+        if (!moved.has_value()) {
+            return std::unexpected(moved.error());
+        }
+        result.rolled_back_candidates.push_back(candidate.candidate_id);
+    }
+    return result;
+}
 
 std::expected<EvolutionCoordinator::ProposeResult, std::string>
 EvolutionCoordinator::ProposeRecording(

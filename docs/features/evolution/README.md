@@ -4,8 +4,10 @@
 
 状态：阶段 0/1 已落（0.26.82），阶段 2 已落（Skill-only 候选起草与
 propose/diff/reject），阶段 3 已落（评测与基线：静态门、确定性回放/留出、
-基线对照、`/evolve test` 与 CI JSON）。批准、灰度未落，命令与行为以实现后
-的程序为准。设计全文见 `todos/Package驱动的自进化闭环设计.todo`；Package
+基线对照、`/evolve test` 与 CI JSON），阶段 4 已落（批准与安装：
+approve/use/promote/rollback、staging 原子落 version store、点名 canary、
+会话钉快照与哈希失效三处对账）。代码型候选、自动建议未落，命令与行为以
+实现后的程序为准。设计全文见 `todos/Package驱动的自进化闭环设计.todo`；Package
 清单与目录契约见 `todos/统一Package封装与组件挂载系统设计.todo`。
 
 ## 一句话
@@ -304,22 +306,52 @@ Package doctor
 ```text
 ~/.lubancode/package-store/
   moontide.provider-auditor/
-    0.1.0/
+    0.1.0/            版本目录 = 一份完整包拷贝
     0.2.0/
+    channels.json     已装版本账 + active/canary 指针（schema 1，原子替换）
+    install-log.jsonl 只追加的 store 事件账（install/canary/promote/rollback）
 ```
 
 晋升次序：
 
-1. 候选复制到 staging，复算 hash。
-2. 再跑 Package doctor。
-3. 原子落入 version store。
-4. 新会话或新任务拿到 canary 快照。
+1. 候选复制到 staging（包目录下 `.staging/<版本>`），复算 hash——与批准
+   绑定的对不上即停晋升，staging 清走，正式 store 不动。
+2. 再跑 Package doctor（静态门复用 `AnalyzePackage` + 密钥/绝对路径扫描）。
+3. 原子落入 version store（`rename` 成正式版本目录；同版本已存在且内容
+   不同即拒，不原地改）。
+4. 新会话或新任务拿到 canary 快照（`/evolve use` 点名）。
 5. 老任务继续钉旧快照。
-6. 观察到足够样本后，才改 active version。
+6. 观察到足够样本后，才改 active version（`/evolve promote`）。
 
 首版灰度从简：只在用户点名 `/evolve use <candidate>` 时启用，不做复杂流量
 路由。回滚只切回旧快照，不删除新版本，不抹评测账。候选已造成外部副作用时，
 切版本只撤能力，不假装外部世界已复原；补偿另走步骤。
+
+阶段 4 的落地口径（对上册的增补，只增不改）：
+
+- **批准页**：`/evolve approve <候选id>` 一枚命令出材料并批——先递
+  `evaluated -> awaiting_approval`（评测材料齐备，提交批准页），再验三道门
+  （哈希绑定、档位分类、评测账在），装 store 后落
+  `awaiting_approval -> staged`。装失败的候选停在 awaiting_approval，
+  清障重批即恢复；同版本同哈希已装则幂等跳过。
+- **哈希失效三处对账**：①评测——计划哈希对不上拒评（阶段 3 已落）；
+  ②批准——当前哈希与批准账或评测行的哈希对不上即拒批，指路重做候选；
+  ③store——staging 复算对不上停晋升；canary/promote/rollback 切指针前
+  复算；会话装配折 PackageSnapshot 时再复算，对不上即拒挂并指路
+  （重装该版本或 `/evolve rollback`）。store 内文件被手改，下次启动看得见。
+- **会话钉快照**：装配一次定终身——`PackageMountInput.store_candidates` 收
+  evolution store 的选中版本（scope=Store，同 id 遮蔽次序 dev > project >
+  store > user > official），`BuildPackageMount` 折成会话快照；store 里后续
+  promote/rollback 改的只是 channels 指针，不动在跑会话的快照，旧版本目录
+  一枚不删，在跑任务照旧读得到。
+- **回滚语义**：`/evolve rollback <包id>` 无参切父版（演化账 `parent` 的
+  版本；无父即撤下——包不再挂载，版本与账保留）；`/evolve rollback <包id>
+  <版本>` 切指定版（须在 store 已装账里）。canary/active 状态的候选落
+  `rolled_back`（状态不回退；此后再点名切回某版是 store 层的指针操作，
+  候选账不动）。
+- **命令面**：`/evolve approve|use|promote` 收候选 id，`/evolve rollback`
+  收包 id（可带版本）；`/package list` 的账面并进 store 选中版本
+  （`store` 过滤词），发现不等于挂载——tamper 的在列，挂载侧拒。
 
 ## 安全铁律
 
@@ -457,3 +489,14 @@ stdout 吐 JSON（候选身份、静态门逐项、各门结果与检查账、�
 预算（`budget`）在任务行上判：tool calls 或墙钟越帽，该行即 fail
 （note 记数）。重跑 `/evolve test` 账照追加（seq 续号），状态不非法
 迁移；候选内容改一字，计划哈希对不上即拒评——重做候选，不沿用旧账。
+
+## 批准与安装（阶段 4 落地）
+
+`/evolve approve <候选id>` 出批准页并装架。页面材料照 §十 清单：Package
+id、候选版本、父版与内容哈希；来源（run/goal/recording/memory/user-feedback
+的稳定 ID）；添改删组件；评测汇总（通过几项、没测什么、比基线贵多少）与
+任务样例；新增工具与权限差异（content-only 明写"无"）；安装位置、灰度
+办法（`/evolve use`）与回滚目标。批准只认当前 content hash——文件变过，
+批准与评测一并作废，重做候选。code-bearing 候选（带 Plugin/MCP 或有
+工具/权限差异）首版明拒，指路 Package trust 流程；native/core patch 永不
+进 `/evolve approve`。
