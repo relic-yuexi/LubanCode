@@ -2,8 +2,9 @@
 
 [文档首页](../../README.md) · [功能目录](../README.md) · [扩展](../extensions/README.md) · [Workflow](../workflows/README.md)
 
-状态：契约冻结（阶段 0）。实现未落，命令与行为以实现后的程序为准。设计全文
-见 `todos/Package驱动的自进化闭环设计.todo`；Package 清单与目录契约见
+状态：阶段 0/1 已落（0.26.82），阶段 2 已落（Skill-only 候选起草与
+propose/diff/reject）。评测、批准、灰度未落，命令与行为以实现后的程序为准。
+设计全文见 `todos/Package驱动的自进化闭环设计.todo`；Package 清单与目录契约见
 `todos/统一Package封装与组件挂载系统设计.todo`。
 
 ## 一句话
@@ -361,3 +362,19 @@ memory 收 kind + 标题。日期、URL、绝对路径归一成 `<date>`/`<url>`
 （看一条观察，指回来源 ID 与原始账文件）。三条都只读观察；不生成 Package，
 不装任何东西。`rejected.jsonl` 的去重门在阶段 2 接 `/evolve reject` 时启用，
 阶段 1 由 store 把守：被拒 fingerprint 不再重复进观察账。
+
+## 候选起草（阶段 2 落地）
+
+`/evolve propose <recording-id|observation-id>` 把一场 `/record` 录制变成
+最小 content-only Package Candidate：SKILL.md 复用现有 skill drafter
+（偶然值抽象、失败重试折叠），另补一节"排错"收录连败无成功的稳定失败路；
+`package.yaml` 只写最小五字段，须过 manifest 严格解析。候选落
+`~/.lubancode/package-candidates/<包id>/<候选id>/`（目录形状如上"候选目录"
+节，另加只追加的 `state.jsonl` 迁移账），不进 PackageCatalog、不进四层扫描
+目录——`/package list` 看不见它。状态机唯一写口是 `EvolutionCoordinator`：
+propose 落 `observed -> drafted` 首行，`/evolve reject <候选id> [理由]` 落
+`rejected` 并把指纹写进 `rejected.jsonl`（同类不再进观察账，也不再被劝）。
+`/evolve diff <候选id>` 与父版或空对照，列新增文件与 SKILL 正文摘要；
+`/evolve list` 的账面同时列观察簇与候选区，`/evolve show` 认 `cand-` 起头
+的候选 id，回指来源观察。整包内容哈希照 Package 阶段 1 的盘点算法复算，
+进 `approval.json` 与 `eval-plan.json`；评测与批准是阶段 3/4 的事。

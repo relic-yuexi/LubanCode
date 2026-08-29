@@ -14,6 +14,9 @@ const char* ActionName(lubancode::app::EvolveCommandAction action) {
         case lubancode::app::EvolveCommandAction::Status: return "Status";
         case lubancode::app::EvolveCommandAction::List: return "List";
         case lubancode::app::EvolveCommandAction::Show: return "Show";
+        case lubancode::app::EvolveCommandAction::Propose: return "Propose";
+        case lubancode::app::EvolveCommandAction::Diff: return "Diff";
+        case lubancode::app::EvolveCommandAction::Reject: return "Reject";
     }
     return "?";
 }
@@ -60,9 +63,47 @@ TEST_CASE("evolve.parse:show 带目标;缺目标 Invalid") {
     CHECK(lubancode::app::ParseEvolveCommand("show a b").target == "a b");
 }
 
+TEST_CASE("evolve.parse:propose 带目标;缺目标 Invalid") {
+    const auto propose = lubancode::app::ParseEvolveCommand("propose 20260828-090000-demo");
+    CHECK(propose.action == lubancode::app::EvolveCommandAction::Propose);
+    CHECK(propose.target == "20260828-090000-demo");
+    CHECK(propose.reason.empty());
+    // 观察口述 id 也照收(执行体再查观察账)。
+    CHECK(lubancode::app::ParseEvolveCommand("propose obs-abcdef0123456789").target ==
+          "obs-abcdef0123456789");
+    const auto missing = lubancode::app::ParseEvolveCommand("propose");
+    CHECK(missing.action == lubancode::app::EvolveCommandAction::Invalid);
+    CHECK(missing.bad_word == "propose");
+    CHECK(lubancode::app::ParseEvolveCommand("  PROPOSE  rec-1 ").action ==
+          lubancode::app::EvolveCommandAction::Propose);
+}
+
+TEST_CASE("evolve.parse:diff 带候选 id;缺目标 Invalid") {
+    const auto diff = lubancode::app::ParseEvolveCommand("diff cand-20260828-001");
+    CHECK(diff.action == lubancode::app::EvolveCommandAction::Diff);
+    CHECK(diff.target == "cand-20260828-001");
+    CHECK(lubancode::app::ParseEvolveCommand("diff").action ==
+          lubancode::app::EvolveCommandAction::Invalid);
+}
+
+TEST_CASE("evolve.parse:reject 带候选 id 与可选理由") {
+    const auto bare = lubancode::app::ParseEvolveCommand("reject cand-20260828-001");
+    CHECK(bare.action == lubancode::app::EvolveCommandAction::Reject);
+    CHECK(bare.target == "cand-20260828-001");
+    CHECK(bare.reason.empty());
+    // 理由是目标之后的一整段(可含空格)。
+    const auto with_reason =
+        lubancode::app::ParseEvolveCommand("reject cand-20260828-001  未过信任门,不要");
+    CHECK(with_reason.action == lubancode::app::EvolveCommandAction::Reject);
+    CHECK(with_reason.target == "cand-20260828-001");
+    CHECK(with_reason.reason == "未过信任门,不要");
+    CHECK(lubancode::app::ParseEvolveCommand("reject").action ==
+          lubancode::app::EvolveCommandAction::Invalid);
+}
+
 TEST_CASE("evolve.parse:认不得的子命令 Invalid") {
-    const auto parsed = lubancode::app::ParseEvolveCommand("propose run-1");
+    const auto parsed = lubancode::app::ParseEvolveCommand("approve cand-1");
     CHECK(parsed.action == lubancode::app::EvolveCommandAction::Invalid);
-    CHECK(parsed.bad_word == "propose");
+    CHECK(parsed.bad_word == "approve");
     CHECK(ActionName(parsed.action) == std::string("Invalid"));  // 全案覆盖(防未用告警)
 }
