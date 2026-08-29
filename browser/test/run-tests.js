@@ -15,6 +15,7 @@ const path = require('path');
 const { BrowserMcpClient } = require('./mcp_client');
 const { startSite } = require('./site');
 const { runDirectMatrix, runJournalMatrix } = require('./run-direct-tests');
+const { runSidecarMatrix } = require('./run-sidecar-tests');
 
 let passed = 0;
 let failed = 0;
@@ -587,6 +588,14 @@ async function main() {
       ++failed;
       failures.push('journal 工具面矩阵异常: ' + String(error.message || error));
       console.log('  FAIL journal 工具面矩阵异常: ' + String(error.message || error));
+    }
+    // 阶段 3:sidecar(App Server 的 BrowserRuntime 进程面)。
+    try {
+      await runSidecarMatrix(baseUrl, { ok, skip, section, tempDir, refOfLine });
+    } catch (error) {
+      ++failed;
+      failures.push('sidecar 矩阵异常: ' + String(error.message || error));
+      console.log('  FAIL sidecar 矩阵异常: ' + String(error.message || error));
     }
     try {
       await runHeadedMatrix(baseUrl);

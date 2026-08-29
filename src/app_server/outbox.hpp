@@ -90,9 +90,15 @@ private:
 //   - 其余(item/delta 等):可丢,丢了有 overflow 通报兜底。
 // 审批反向请求(permission/request、user/ask)也是 must_keep——
 // 审批丢了客户端不知道要答,回合就挂死在等答复上。
+// 浏览器族(阶段 3):browser/stopped 与 browser/crashed 是会话终态,
+// browser/action/completed 是动作终态,browser/screenshot/ready 没有
+// 查询口(丢了就真丢了图)——这四枚必须保;console/network 批量事件
+// 可丢(有 sinceSeq 补账),其余浏览器事件可丢(status/list 可重建)。
 inline bool EventMustKeep(std::string_view method) {
     return method == kEventTurnCompleted || method == kEventQueueOverflow ||
-           method == kMethodPermissionRequest || method == kMethodUserAsk;
+           method == kMethodPermissionRequest || method == kMethodUserAsk ||
+           method == kEventBrowserStopped || method == kEventBrowserCrashed ||
+           method == kEventBrowserActionCompleted || method == kEventBrowserScreenshotReady;
 }
 
 }  // namespace lubancode::app_server

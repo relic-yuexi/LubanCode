@@ -465,7 +465,26 @@ nlohmann::json MakeInitializeResult(std::string_view lubancode_version, std::str
         std::string(kMethodLoopRead),        std::string(kMethodLoopPause),
         std::string(kMethodLoopResume),      std::string(kMethodLoopCancel),
         std::string(kMethodLoopRunNow),      std::string(kMethodPlanSetMode),
-        std::string(kMethodPlanReview),      std::string(kMethodPlanReopen)};
+        std::string(kMethodPlanReview),      std::string(kMethodPlanReopen),
+        // 浏览器调试工作台阶段 3:browser 面(方法 18 枚,事件 13 族)。
+        std::string(kMethodBrowserStart),
+        std::string(kMethodBrowserStop),
+        std::string(kMethodBrowserStatus),
+        std::string(kMethodBrowserPageOpen),
+        std::string(kMethodBrowserPageList),
+        std::string(kMethodBrowserPageSelect),
+        std::string(kMethodBrowserPageClose),
+        std::string(kMethodBrowserPageNavigate),
+        std::string(kMethodBrowserPageBack),
+        std::string(kMethodBrowserPageForward),
+        std::string(kMethodBrowserPageReload),
+        std::string(kMethodBrowserSnapshot),
+        std::string(kMethodBrowserScreenshot),
+        std::string(kMethodBrowserAction),
+        std::string(kMethodBrowserActionCancel),
+        std::string(kMethodBrowserConsoleQuery),
+        std::string(kMethodBrowserNetworkQuery),
+        std::string(kMethodBrowserDownloadsQuery)};
     capabilities["pending"] = std::vector<std::string>{
         std::string(kMethodThreadResume),    std::string(kMethodThreadRead),
         std::string(kMethodTurnSteer),       std::string(kMethodModelList),
@@ -612,6 +631,173 @@ ParamsCheck CheckPlanMutationParams(const nlohmann::json& params, std::string_vi
         }
     }
     return ParamsCheck{};  // reopen 只查 threadId
+}
+
+// ---------------------------------------------------------------------------
+// browser 参数表(阶段 3):见 schema.hpp 的分档说明。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 可选正整数字段:给了须 >= min。
+ParamsCheck OptionalPositiveInt(const nlohmann::json& params, const char* key, std::string_view method,
+                                std::int64_t min = 1) {
+    if (!params.contains(key) || params[key].is_null()) {
+        return ParamsCheck{};
+    }
+    if (!params[key].is_number_integer()) {
+        return ParamsCheck{false, kErrInvalidParams,
+                           std::string(method) + ": " + key + " 必须是整数(>= " + std::to_string(min) + ")"};
+    }
+    const std::int64_t value = params[key].get<std::int64_t>();
+    if (value < min) {
+        return ParamsCheck{false, kErrInvalidParams,
+                           std::string(method) + ": " + key + " 必须 >= " + std::to_string(min)};
+    }
+    return ParamsCheck{};
+}
+
+}  // namespace
+
+ParamsCheck CheckBrowserStartParams(const nlohmann::json& params) {
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodBrowserStart);
+    if (!base.ok) {
+        return base;
+    }
+    if (params.contains("engine") && !params["engine"].is_null()) {
+        const std::string engine = params.value("engine", std::string());
+        if (engine != "chromium" && engine != "webkit") {
+            return ParamsCheck{false, kErrInvalidParams,
+                               std::string(kMethodBrowserStart) + ": engine 只认 chromium|webkit"};
+        }
+    }
+    if (params.contains("headed") && !params["headed"].is_null() && !params["headed"].is_boolean()) {
+        return ParamsCheck{false, kErrInvalidParams, std::string(kMethodBrowserStart) + ": headed 必须是布尔"};
+    }
+    if (params.contains("profile") && !params["profile"].is_null()) {
+        const std::string profile = params.value("profile", std::string());
+        if (profile != "persistent" && profile != "ephemeral") {
+            return ParamsCheck{false, kErrInvalidParams,
+                               std::string(kMethodBrowserStart) + ": profile 只认 persistent|ephemeral"};
+        }
+    }
+    if (params.contains("viewport") && !params["viewport"].is_null()) {
+        const nlohmann::json& viewport = params["viewport"];
+        if (!viewport.is_object() || !viewport.contains("width") || !viewport.contains("height") ||
+            !viewport["width"].is_number_integer() || !viewport["height"].is_number_integer() ||
+            viewport["width"].get<std::int64_t>() < 1 || viewport["height"].get<std::int64_t>() < 1) {
+            return ParamsCheck{false, kErrInvalidParams,
+                               std::string(kMethodBrowserStart) + ": viewport 须是 {width,height} 正整数"};
+        }
+    }
+    ParamsCheck check = OptionalPositiveInt(params, "journalCap", kMethodBrowserStart);
+    if (!check.ok) {
+        return check;
+    }
+    return OptionalPositiveInt(params, "timeoutMs", kMethodBrowserStart);
+}
+
+ParamsCheck CheckBrowserStopParams(const nlohmann::json& params) {
+    return CheckParamsIsObject(params, kMethodBrowserStop);
+}
+
+ParamsCheck CheckBrowserPageOpenParams(const nlohmann::json& params, std::string& out_url) {
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodBrowserPageOpen);
+    if (!base.ok) {
+        return base;
+    }
+    return RequireString(params, "url", kMethodBrowserPageOpen, out_url);
+}
+
+ParamsCheck CheckBrowserPageNavigateParams(const nlohmann::json& params, std::string& out_page_id,
+                                           std::string& out_url) {
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodBrowserPageNavigate);
+    if (!base.ok) {
+        return base;
+    }
+    ParamsCheck check = RequireString(params, "pageId", kMethodBrowserPageNavigate, out_page_id);
+    if (!check.ok) {
+        return check;
+    }
+    return RequireString(params, "url", kMethodBrowserPageNavigate, out_url);
+}
+
+ParamsCheck CheckBrowserPageTargetParams(const nlohmann::json& params, std::string_view method,
+                                         std::string& out_page_id) {
+    const ParamsCheck base = CheckParamsIsObject(params, method);
+    if (!base.ok) {
+        return base;
+    }
+    return RequireString(params, "pageId", method, out_page_id);
+}
+
+ParamsCheck CheckBrowserJournalQueryParams(const nlohmann::json& params, std::string_view method,
+                                           std::string& out_page_id, std::uint64_t& out_since_seq) {
+    out_since_seq = 0; // 缺省全量
+    const ParamsCheck base = CheckParamsIsObject(params, method);
+    if (!base.ok) {
+        return base;
+    }
+    ParamsCheck check = RequireString(params, "pageId", method, out_page_id);
+    if (!check.ok) {
+        return check;
+    }
+    if (params.contains("sinceSeq") && !params["sinceSeq"].is_null()) {
+        if (!params["sinceSeq"].is_number_integer() || params["sinceSeq"].get<std::int64_t>() < 0) {
+            return ParamsCheck{false, kErrInvalidParams,
+                               std::string(method) + ": sinceSeq 必须是非负整数(断线补账的 cursor)"};
+        }
+        out_since_seq = static_cast<std::uint64_t>(params["sinceSeq"].get<std::int64_t>());
+    }
+    return OptionalPositiveInt(params, "limit", method, 1);
+}
+
+ParamsCheck CheckBrowserActionParams(const nlohmann::json& params, std::string& out_kind) {
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodBrowserAction);
+    if (!base.ok) {
+        return base;
+    }
+    ParamsCheck check = RequireString(params, "kind", kMethodBrowserAction, out_kind);
+    if (!check.ok) {
+        return check;
+    }
+    if (out_kind != "click" && out_kind != "type" && out_kind != "select" && out_kind != "wait") {
+        return ParamsCheck{false, kErrInvalidParams,
+                           std::string(kMethodBrowserAction) + ": kind 只认 click|type|select|wait,收到: " +
+                               out_kind};
+    }
+    if (out_kind != "wait") {
+        std::string ref;
+        check = RequireString(params, "ref", kMethodBrowserAction, ref);
+        if (!check.ok) {
+            return check;
+        }
+    }
+    if (out_kind == "type") {
+        std::string text;
+        check = RequireString(params, "text", kMethodBrowserAction, text);
+        if (!check.ok) {
+            return check;
+        }
+    }
+    if (out_kind == "wait") {
+        const bool has_for_text = params.contains("forText") && params["forText"].is_string();
+        const bool has_url = params.contains("urlContains") && params["urlContains"].is_string();
+        const bool has_ms = params.contains("ms") && params["ms"].is_number_integer();
+        if (!has_for_text && !has_url && !has_ms) {
+            return ParamsCheck{false, kErrInvalidParams,
+                               std::string(kMethodBrowserAction) + ": wait 须给 forText/urlContains/ms 至少一样"};
+        }
+    }
+    return ParamsCheck{};
+}
+
+ParamsCheck CheckBrowserActionCancelParams(const nlohmann::json& params, std::string& out_action_id) {
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodBrowserActionCancel);
+    if (!base.ok) {
+        return base;
+    }
+    return RequireString(params, "actionId", kMethodBrowserActionCancel, out_action_id);
 }
 
 }  // namespace lubancode::app_server

@@ -53,6 +53,9 @@ struct PendingInteraction {
     std::string method;
     // 审批对应的工具名(acceptForSession 记会话级放行账用;提问时空)。
     std::string tool_name;
+    // 审批请求自带的 tool_use_id(浏览器动作的 actionId 等):按枚取消
+    // 的配对键(阶段 3 browser 面)。提问时空。
+    std::string tool_use_id;
     // 答复类型:审批走 ApprovalResponse,提问走 QuestionResponse。
     enum class Kind { Approval, Question };
     Kind kind = Kind::Approval;
@@ -147,6 +150,11 @@ public:
     // 清掉全部挂起请求(打断/断线/超时/关 thread):resolve 成 cancel
     // 语义(future 返回 nullopt,调用方写真因文案)。返回清掉的条数。
     std::size_t CancelPending();
+
+    // 按枚取消:审批请求自带的 tool_use_id 配对(浏览器动作取消/悬空
+    // 收口用——审批人没答的那枚不该再吃迟到答案)。resolve 成 cancel
+    // 语义并擦表,迟到的答复按 stale 收口。返回清掉的条数。
+    std::size_t CancelPendingForToolUse(const std::string& tool_use_id);
 
     // ---- 会话级放行账(acceptForSession) ----
 

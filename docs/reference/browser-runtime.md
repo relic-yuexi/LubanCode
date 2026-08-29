@@ -69,7 +69,7 @@ crash_epoch
 
 前端不另造活动页，MCP adapter 不另造 page registry，测试宿主也不造。所有人调同一套 Runtime 方法。
 
-现状：这本账在 `browser/lib/session.js` 的 `BrowserSession`。`browser/server.js` 是装配壳；`browser/lib/tools.js` 是 MCP 工具皮，不持状态；`browser/lib/transport.js` 只管 stdio JSON-RPC 分帧。直调（不经 MCP 协议）与经 MCP adapter 的结果由同一套自测对账（`browser/test/run-direct-tests.js`）。
+现状：这本账在 `browser/lib/session.js` 的 `BrowserSession`。App Server 侧（阶段 3）经 `browser/sidecar.js` 这只 Node sidecar 访问同一份账——MCP adapter、sidecar、直调测试宿主调的是同一套方法，谁也不许另建第二份 page registry。`browser/server.js` 是装配壳；`browser/lib/tools.js` 是 MCP 工具皮，不持状态；`browser/lib/transport.js` 只管 stdio JSON-RPC 分帧。直调（不经 MCP 协议）与经 MCP adapter 的结果由同一套自测对账（`browser/test/run-direct-tests.js`）。
 
 ## 4. 用户与 Agent 仲裁
 
@@ -93,7 +93,7 @@ crash_epoch
 | 0 | 冻结边界（本文） | 已落 |
 | 1 | 从 MCP 中抽 BrowserSession，三层分家，直调测试 | 已落（`browser/lib/`） |
 | 2 | Console/Network journal、screenshot artifact 进 App Server 事件、可见调试面板 | 已落(`browser_console`/`browser_network` 两本环形账;`item/completed` 附截图 artifact 引用;headed 可选;用户观察代仲裁。面板落终端工具回执——Desktop Tab 待阶段 4) |
-| 3 | App Server Browser 协议（方法 + 带 seq 的事件 + 断线补账） | 待做 |
+| 3 | App Server Browser 协议（方法 + 带 seq 的事件 + 断线补账） | 已落（协议升 1.1，additive；`browser/sidecar.js` 起 Node sidecar 复用 `BrowserSession`，`src/app_server/browser_service.*` 只做转发；journal 批量有帽丢老明记，`browser/console\|network query` 凭 `sinceSeq` 补账；截图只发 artifact 引用；owner=agent 写动作过审批，取消贯通到 sidecar 动作队列。断线重连的边界：stdio app-server 断线即 EOF 退场、sidecar 随之收尸，页面状态不跨 app-server 重启存活——跨进程续场归阶段 4 的宿主） |
 | 4 | 真正内嵌 Browser Tab（Electron/WebView2/CEF 选型另写 ADR） | 待做 |
 | 5 | 官方 Browser Package（Agent/Skill/Workflow，不复制 Runtime） | 待做 |
 

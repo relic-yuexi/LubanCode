@@ -259,7 +259,70 @@ Server::Server(ServerOptions options, BackendFactory backend_factory, RegistryFa
     if (!sessions_dir_.empty()) {
         session_commands_ = std::make_unique<runtime::SessionCommandService>(sessions_dir_);
     }
+    // 浏览器面(阶段 3):事件出水走连接层的统一出口(seq + 有界 + 溢出
+    // 通报);审批口挂 thread 的悬起件(取消旗贯通到动作)。
+    {
+        BrowserServiceOptions browser_options;
+        browser_options.sidecar_command = options_.browser_sidecar_command;
+        browser_options.sidecar_args = options_.browser_sidecar_args;
+        browser_options.artifact_dir = options_.browser_artifact_dir;
+        browser_ = std::make_unique<BrowserService>(
+            std::move(browser_options),
+            [this](std::string_view method, const nlohmann::json& params) {
+                if (connection_ != nullptr) {
+                    connection_->EmitEvent(method, params);
+                }
+            });
+        browser_->SetApprovalAsk(
+            [this](const std::string& thread_id, const runtime::ApprovalRequest& request,
+                   const std::atomic<bool>* cancel) -> std::optional<BrowserService::ApprovalTicket> {
+                return HandleBrowserApproval(thread_id, request, cancel);
+            });
+    }
     RegisterMethods();
+}
+
+// browser 动作的审批:与工具审批同一套悬起件(permission/request 反向
+// 请求 + 会话级放行账 + 打断/取消/超时的悬空收口)。turn_id 空——浏览器
+// 动作不在回合里,悬起件按 thread 配对。
+std::optional<BrowserService::ApprovalTicket> Server::HandleBrowserApproval(
+    const std::string& thread_id, const runtime::ApprovalRequest& request, const std::atomic<bool>* cancel) {
+    const std::shared_ptr<ThreadRecord> record = FindThread(thread_id);
+    if (record == nullptr) {
+        return std::nullopt;
+    }
+    if (record->interactions->IsSessionAllowed(request.tool_name)) {
+        BrowserService::ApprovalTicket ticket;
+        runtime::ApprovalResponse accepted;
+        accepted.decision = runtime::InteractionDecision::Accept;
+        ticket.future = std::make_shared<ReadyApprovalFuture>(std::move(accepted));
+        return ticket;
+    }
+    auto future = std::static_pointer_cast<PendingFuture>(record->interactions->AskApproval(
+        request, std::string(),
+        [this](std::string_view method, const nlohmann::json& params) {
+            // must_keep:审批丢了客户端不知道要答。EmitEvent 统一盖 seq
+            // + 兜溢出通报。
+            if (connection_ != nullptr) {
+                connection_->EmitEvent(method, params);
+            }
+        }));
+    if (options_.approval_timeout_ms > 0) {
+        future->SetTimeout(std::chrono::milliseconds(options_.approval_timeout_ms));
+    }
+    // 动作自己的取消旗挂进打断路:browser/action/cancel、thread/stop、
+    // turn/interrupt(CancelPending)都能把悬着的审批叫醒。
+    if (cancel != nullptr) {
+        future->WatchInterrupt(cancel);
+    }
+    BrowserService::ApprovalTicket ticket;
+    ticket.future = future;
+    // 悬空收口的擦账口:把这枚悬起件从 thread 的 pending 表里摘掉,
+    // 迟到的答复按 stale 报(审批人没答的不许吞)。
+    ticket.cancel = [record, tool_use_id = request.tool_use_id] {
+        record->interactions->CancelPendingForToolUse(tool_use_id);
+    };
+    return ticket;
 }
 
 std::shared_ptr<ThreadRecord> Server::FindThread(const std::string& thread_id) {
@@ -615,6 +678,12 @@ void Server::RegisterMethods() {
     dispatcher_->RegisterMethod(kMethodPlanSetMode, domain_handler);
     dispatcher_->RegisterMethod(kMethodPlanReview, domain_handler);
     dispatcher_->RegisterMethod(kMethodPlanReopen, domain_handler);
+
+    // browser 面(阶段 3):方法表、事件转发、审批与取消都在
+    // BrowserService 里,这里只递 dispatcher 与 thread 查找口。
+    browser_->RegisterMethods(*dispatcher_, [this](const std::string& thread_id) {
+        return FindThread(thread_id);
+    });
 }
 
 std::size_t Server::active_thread_count() {
@@ -802,6 +871,10 @@ Server::WorkflowQueryResult Server::HandleWorkflowQuery(const std::string& run_i
 
 nlohmann::json Server::HandleThreadStop(const std::string& thread_id, std::string& out_error_code) {
     out_error_code.clear();
+    // thread 名下在飞的浏览器动作先取消(审批悬着的也叫醒)。
+    if (browser_ != nullptr) {
+        browser_->CancelActionsForThread(thread_id, "thread/stop");
+    }
     std::shared_ptr<ThreadRecord> record;
     {
         std::lock_guard<std::mutex> lock(threads_mutex_);
@@ -1347,6 +1420,11 @@ int Server::Run() {
 }
 
 void Server::Shutdown() {
+    // 浏览器面先收:取消在飞动作(审批悬着的也醒)、杀 sidecar 进程树
+    // (收尸;profile 锁由 sidecar 退出钩子释放)。
+    if (browser_ != nullptr) {
+        browser_->Shutdown();
+    }
     // 在跑的回合一律按打断收口:置旗、悬起全清(审批悬停立即醒),等
     // 收尾(硬时限内),等不到就分离——绝不许 join 卡死把退场路堵死。
     std::vector<std::shared_ptr<ThreadRecord>> records;

@@ -673,6 +673,9 @@ add_library(lubancode_app STATIC
   src/app_server/connection.cpp
   src/app_server/interaction.cpp
   src/app_server/server.cpp
+  # 可见调试阶段 3:browser/* 方法面——sidecar 进程管理、RPC 配对、
+  # 事件转发、审批与取消、截图 artifact。
+  src/app_server/browser_service.cpp
   src/app/commands/prompt_commands.cpp
   src/app/commands/session_commands.cpp
   src/app/commands/settings_commands.cpp

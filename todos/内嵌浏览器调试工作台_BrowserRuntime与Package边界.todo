@@ -1,6 +1,6 @@
 # 内嵌浏览器调试工作台：BrowserRuntime 与 Package 边界
 
-- 状态：阶段 0/1 已落地（拆三层、直调 130 项、边界契约冻结），阶段 2 起待实现
+- 状态：阶段 0/1/2/3 已落地（拆三层、两本 journal、App Server Browser 协议 1.1 + sidecar），阶段 4 起待实现
 - 日期：2026-08-29
 - 目标：让 LubanCode 像桌面 Codex 一样，能在宿主界面里打开网页、操作页面、查看截图、Console 与 Network，并把同一份观察送给用户和模型
 - 相关现状：`browser/server.js`、`src/mcp/rich_result.*`、`src/agent/tool_result_images.*`、`src/app_server/`、`examples/packages/browser-agent/`
@@ -523,12 +523,12 @@ examples/packages/browser-debug/
 
 ### 阶段 3：App Server Browser 协议
 
-- [ ] 协议升版。
-- [ ] browser 方法与事件落 `protocol.hpp`、schema、dispatcher。
-- [ ] 高频事件有界、可合并、可丢项明报。
-- [ ] Console/Network 支持 cursor 与断线补账。
-- [ ] screenshot 只发 artifact 引用，不塞大 base64。
-- [ ] browser action 接 permission broker 与 cancellation。
+- [x] 协议升版。（1.0 -> 1.1，additive；版本账记在 protocol.hpp 与 app-server README）
+- [x] browser 方法与事件落 `protocol.hpp`、schema、dispatcher。（方法 18 枚 + 事件 13 族；真 Runtime 在 `browser/sidecar.js` 的 Node sidecar，C++ 侧 `src/app_server/browser_service.*` 只转发）
+- [x] 高频事件有界、可合并、可丢项明报。（journal 在 sidecar 源头批量：单批帽 200、40ms 一冲、在飞帽 64 丢老明记；出站队列兜底有界 + 同页批合并 entries 拼接 dropped 求和）
+- [x] Console/Network 支持 cursor 与断线补账。（`browser/console|network/query` 的 sinceSeq；条目 seq 页内单调，`browser/console|network/event` 批量带 lastSeq）
+- [x] screenshot 只发 artifact 引用，不塞大 base64。（字节走 sidecar 内部通道，C++ 落 `<HomeLubancodeDir>/browser-artifacts` 内容寻址，事件与方法结果只带 image.artifact 引用）
+- [x] browser action 接 permission broker 与 cancellation。（owner=agent 写动作过 permission/request，acceptForSession 按方法名记账；`browser/action/cancel` 贯通审批段（悬空收口+擦账，迟到答复报 stale）与 sidecar 段（cancelled 通知，轮询型动作见旗即停）；thread/stop 取消该 thread 名下动作）
 
 验收：独立协议客户端能完整控制页面、看事件、断线重接。
 
