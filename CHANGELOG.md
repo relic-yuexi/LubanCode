@@ -191,6 +191,12 @@
 - **`luban evolve test --json` CI 路。** 全过退 0,验收挂退 1(记退出码与"低于基线"对照),夹具缺失退 2(明写"没测,不是测砸");JSON 带逐项 checks、各门 outcome、unverified 清单与基线七路 delta。`/evolve show` 同页出"通过几项、没测什么、比旧版贵多少"三样。
 - **判不了的老实说判不了。** tokens 恒 0(不起模型)、误报漏报、模型在环、真实服务、兼容范围——五项 unverified 明记,不拿确定性结果冒充模型评测。
 
+## [v0.26.98] - 2026-08-29
+
+- **Package 的内容组件真挂上了(阶段 3)。** Skill、Workflow、Agent、Prompt Profile 四类从包根落进各自运行时表,一律 canonical 名(`<包id>:<名>`)登记展示;放包进目录,重启后四类同现,拿走同隐——端到端测试钉死。Plugin 与 MCP 照旧一件不挂不执行,等阶段 4 信任门。
+- **包层座次定死:本地主人盖过第三方包。** Agent 为 project > user > package > builtin;Profile 的 canonical 名只在包根解析,裸名五层一字不动(黄金基线续钉);Workflow 包层不抢裸 alias——许诺一个直呼 alias 会骗人,canonical 正门才通。
+- **legacy 散装零变化有逐字节证据。** 无包时技能扫描、AgentCatalog、workflow 目录、系统提示词拼装与旧路完全一致;会话钉快照——盘中途增删,会话内不变,下回启动才见。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
