@@ -131,6 +131,29 @@ bool IsValidPluginVersion(std::string_view value, std::size_t max_len);
 std::string BuildPluginToolName(std::string_view plugin_id, std::string_view tool_name);
 
 // ---------------------------------------------------------------------------
+// ToolWireName(统一 Package 封装单·契约 docs/reference/packages.md §6.1)。
+// packaged 组件的 canonical id(如 moontide.full-stack:dom-analyzer 的工具
+// ID 段 moontide.full-stack.dom-analyzer)里有点号,进不了各 provider 的
+// [A-Za-z0-9_-] 收口。故定一枚可逆百分号编码:canonical 名里每个落在
+// [A-Za-z0-9_-] 之外的字符按字节换成 %HH(大写十六进制)。'%' 本身不在
+// 合法集里,原文从不出现裸 '%',解码唯一、可逆。全仓唯一实现——别处不
+// 许各写字符串替换(点改下划线不可逆,明令禁止)。
+// ---------------------------------------------------------------------------
+// ID 段编码:moontide.full-stack.dom-analyzer -> moontide%2Efull-stack%2Edom-analyzer。
+std::string EncodeToolWireId(std::string_view component_id);
+// 解码(可逆性验收):遇到非法 %HH 或裸 '%' 返回 nullopt,不猜。
+std::optional<std::string> DecodeToolWireId(std::string_view encoded);
+
+// 打包组件工具的两枚名字。wire 名发给 provider 与权限账;display 名给人
+// 看(/tools、/mcp、/package show 用)。kind_prefix 是 "plugin" 或 "mcp"。
+std::string BuildPackagedToolWireName(std::string_view kind_prefix, std::string_view package_id,
+                                      std::string_view local_id, std::string_view tool);
+std::string BuildPackagedToolDisplayName(std::string_view kind_prefix, std::string_view package_id,
+                                         std::string_view local_id, std::string_view tool);
+// 编码后的完整工具名长度帽(契约 §6.1:超 64 字符 doctor 报错)。
+inline constexpr std::size_t kToolWireNameMaxLength = 64;
+
+// ---------------------------------------------------------------------------
 // PluginDefinition:一件工具的中立定义。模型可见的只有 name/description/
 // input_schema 三样;其余字段是宿主元数据,ToolRegistry 拼请求时一概剥掉
 // (PluginToolAdapter 只导出这三样)。execution 是 manifest 里该工具的

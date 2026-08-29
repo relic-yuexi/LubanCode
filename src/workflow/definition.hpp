@@ -139,6 +139,11 @@ struct WorkflowNode {
     std::string tool;
     // agent 节点:role/task/allowed_tools/step_limit/model_role。
     std::string role;
+    // agent 节点的显式 Agent 引用(统一 Package 单:包内短名或 canonical
+    // 全名,如 browser-tester / moontide.browser-suite:browser-tester)。
+    // 与 role 分立:role 是既有 agent 工具的既有角色名,agent 是自定义
+    // AgentCatalog 的名。两者都写时 agent 优先,Resolver 决定次序。
+    std::string agent;
     std::string task;             // prompts/xx.md 一类包内引用
     std::vector<std::string> allowed_tools;
     int step_limit = 0;           // 0 = 用全局默认

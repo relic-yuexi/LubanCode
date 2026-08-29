@@ -110,6 +110,14 @@ std::vector<std::string> ReservedTopLevelNames();
 PackageInventory BuildPackageInventory(const PackageCandidate& candidate,
                                        const ScanOptions& options = ScanOptions{});
 
+// 轻扫六类组件目录:只认目录与入口文件名,不读内容、不算哈希。四层扫描
+// 之外另要一份"这只包有哪些组件"的账时用(阶段 2 的跨包引用索引、
+// MountPlan 的 source root 清点)。diagnostics 可空;给了就照盘点口径收
+// "缺入口文件"一类的 warning。
+std::vector<PackageComponent> ListPackageComponents(const std::filesystem::path& package_root,
+                                                    const std::string& package_id,
+                                                    std::vector<PackageDiagnostic>* diagnostics = nullptr);
+
 // ---------------------------------------------------------------------------
 // 路径安全(单子 §十三 doctor 的"相对路径与符号链接越界")。纯函数,单测
 // 直接喂构造串。

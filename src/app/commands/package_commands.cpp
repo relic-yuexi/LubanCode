@@ -1,7 +1,9 @@
-// /package 命令的执行体(统一 Package 封装单阶段 1)。只读:list 列全账、
+// /package 命令的执行体(统一 Package 封装单阶段 1/2)。只读:list 列全账、
 // show 看一只包、doctor 诊一只包。不挂任何组件、不写任何文件——发现不等
-// 于执行,这一版连信任门都不碰(后续阶段)。参数拆解是纯函数(Parse-
-// PackageCommand,单测钉),这一头只留扫描与打印。
+// 于执行,这一版连信任门都不碰(后续阶段)。doctor 在阶段 2 升级:静态账
+// 之外,逐件过原生 parser 诊组件、解包内引用、给 MountPlan 摘要,一样只
+// 读。参数拆解是纯函数(ParsePackageCommand,单测钉),这一头只留扫描与
+// 打印。
 #include "app/commands/package_commands.hpp"
 #include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
 #include "app/version.hpp"                     // kVersion:版本号唯一出处
@@ -20,6 +22,7 @@ using lubancode::cli::TermErr;
 #include <utility>
 #include <vector>
 
+#include "package/catalog.hpp"
 #include "package/inventory.hpp"
 #include "package/manifest.hpp"
 #include "package/semver.hpp"
@@ -146,14 +149,13 @@ void PrintComponents(const lubancode::package::PackageInventory& inventory) {
 }
 
 // id(或精确目录名)在全部候选里选份:优先级高的胜,其余进 shadowed 账。
-// 返回 {胜者盘点, 被遮住的候选列表}。
+// 返回 {胜者候选, 被遮住的候选列表}。
 struct PackageLookup {
-    lubancode::package::PackageInventory winner;
-    std::vector<lubancode::package::PackageCandidate> shadowed;
+    const lubancode::package::PackageCandidate* winner = nullptr;
+    std::vector<const lubancode::package::PackageCandidate*> shadowed;
 };
 
 PackageLookup LookupPackage(const std::vector<lubancode::package::PackageCandidate>& candidates,
-                            const lubancode::package::ScanOptions& options,
                             const std::string& id) {
     // 全部同名候选(id 或目录名)先收齐,再按四层优先级定胜者——被盖住的
     // 版本仍进账,show 要能列出所有候选(单子 §八)。
@@ -167,22 +169,43 @@ PackageLookup LookupPackage(const std::vector<lubancode::package::PackageCandida
     }
     PackageLookup lookup;
     if (matches.empty()) {
-        return lookup;  // package_root 空,调用方据此报"没找到"
+        return lookup;  // winner 空,调用方据此报"没找到"
     }
-    const lubancode::package::PackageCandidate* winner = matches.front();
+    lookup.winner = matches.front();
     for (const auto* match : matches) {
         if (lubancode::package::ScopePrecedence(match->scope) >
-            lubancode::package::ScopePrecedence(winner->scope)) {
-            winner = match;
+            lubancode::package::ScopePrecedence(lookup.winner->scope)) {
+            lookup.winner = match;
         }
     }
-    lookup.winner = lubancode::package::BuildPackageInventory(*winner, options);
     for (const auto* match : matches) {
-        if (match != winner) {
-            lookup.shadowed.push_back(*match);
+        if (match != lookup.winner) {
+            lookup.shadowed.push_back(match);
         }
     }
     return lookup;
+}
+
+// 引用解析的包外既有名(单子 §七:Resolver 先本包,再看外部命名空间)。
+// 有就喂:config.json 的 mcpServers 键、已扫到的 Skill、builtin Agent 两名。
+lubancode::package::ExternalNamespaces BuildExternalNamespaces(SlashDispatchContext& ctx) {
+    lubancode::package::ExternalNamespaces external;
+    if (ctx.config != nullptr) {
+        for (const auto& [name, server] : ctx.config->mcp_servers) {
+            (void)server;
+            external.mcp_servers.insert(name);
+        }
+    }
+    if (ctx.skills != nullptr) {
+        for (const auto& meta : *ctx.skills) {
+            external.skills.insert(meta.name);
+        }
+    }
+    // builtin Agent 码内注册两名(agent_catalog.hpp 的口径);user/project 层
+    // 的自定义 Agent 目录这层不扫,短名引用它们按悬空报、写全名或挪进包。
+    external.agents.insert("general-purpose");
+    external.agents.insert("Explore");
+    return external;
 }
 
 }  // namespace
@@ -238,7 +261,8 @@ void PrintUsage() {
     TermOut() << "用法: /package list [all|user|project|official|dev]\n"
                  "      /package show <id>\n"
                  "      /package doctor <id|路径>\n"
-                 "阶段 1 只读:list/show/doctor 只查只诊,不挂任何组件。\n";
+                 "只读:list/show 只查静态账;doctor 另诊组件(逐件原生 parser)、引用解析与\n"
+                 "MountPlan 摘要——不挂任何组件、不启动任何 Plugin 与 MCP。\n";
     TermOut().flush();
 }
 
@@ -306,13 +330,13 @@ void RunPackageList(const lubancode::package::ScanOptions& options,
 void RunPackageShow(const lubancode::package::ScanOptions& options, const std::string& target) {
     const std::vector<lubancode::package::PackageCandidate> candidates =
         lubancode::package::ScanPackages(options);
-    const PackageLookup lookup = LookupPackage(candidates, options, target);
-    if (lookup.winner.package_root.empty() && lookup.shadowed.empty()) {
+    const PackageLookup lookup = LookupPackage(candidates, target);
+    if (lookup.winner == nullptr && lookup.shadowed.empty()) {
         TermOut() << "没找到包 \"" << target << "\"(按 id 或目录名查;先 /package list 看全账)\n";
         TermOut().flush();
         return;
     }
-    const auto& inventory = lookup.winner;
+    const auto inventory = lubancode::package::BuildPackageInventory(*lookup.winner, options);
     TermOut() << inventory.package_id
               << (inventory.version_text.empty() ? "" : " " + inventory.version_text) << "\n";
     TermOut() << "  状态: " << (inventory.valid ? "valid" : "invalid")
@@ -324,9 +348,9 @@ void RunPackageShow(const lubancode::package::ScanOptions& options, const std::s
               << inventory.total_file_count << " 个;阶段 1 只读,不挂载)\n";
     if (!lookup.shadowed.empty()) {
         TermOut() << "  被遮住的候选(" << lookup.shadowed.size() << " 份):\n";
-        for (const auto& shadow : lookup.shadowed) {
-            TermOut() << "    [" << lubancode::package::ScopeToString(shadow.scope) << "] "
-                      << lubancode::platform::PathToUtf8(shadow.package_root) << "\n";
+        for (const auto* shadow : lookup.shadowed) {
+            TermOut() << "    [" << lubancode::package::ScopeToString(shadow->scope) << "] "
+                      << lubancode::platform::PathToUtf8(shadow->package_root) << "\n";
         }
     }
     PrintComponents(inventory);
@@ -334,9 +358,86 @@ void RunPackageShow(const lubancode::package::ScanOptions& options, const std::s
     TermOut().flush();
 }
 
-void RunPackageDoctor(const lubancode::package::ScanOptions& options, const std::string& target) {
+// doctor 的三段新账:组件逐件诊断、引用解析、MountPlan 摘要(只读)。
+void PrintAnalyzedComponents(const lubancode::package::PackageRecord& record) {
+    TermOut() << "  组件(" << record.components.size()
+              << " 件,逐件过原生 parser;坏件照列,不因第一个错停):\n";
+    if (record.components.empty()) {
+        TermOut() << "    (没有组件;六类目录里没有可认的件)\n";
+        return;
+    }
+    for (const auto& component : record.components) {
+        const bool has_error = component.HasError();
+        TermOut() << "    " << std::string(lubancode::package::ComponentKindName(component.kind))
+                  << "  " << component.canonical_id << "  "
+                  << (has_error ? "[error]" : (component.ok ? "ok" : "[error]")) << "  "
+                  << component.rel_path;
+        if (component.kind == lubancode::package::ComponentKind::Plugin && component.plugin.has_value()) {
+            TermOut() << "  (" << component.plugin->tools.size() << " 件工具)";
+        }
+        if (component.kind == lubancode::package::ComponentKind::PromptProfile &&
+            !component.profile_files.empty()) {
+            TermOut() << "  (" << component.profile_files.size() << " 个覆盖文件)";
+        }
+        TermOut() << "\n";
+        for (const auto& issue : component.issues) {
+            TermOut() << "      " << issue.Format() << "\n";
+        }
+    }
+}
+
+void PrintReferences(const lubancode::package::PackageRecord& record) {
+    TermOut() << "  引用解析(" << record.references.size() << " 条):\n";
+    if (record.references.empty()) {
+        TermOut() << "    (没有包内引用)\n";
+        return;
+    }
+    for (const auto& ref : record.references) {
+        TermOut() << "    " << ref.Format() << "\n";
+    }
+}
+
+void PrintMountPlan(const lubancode::package::PackageRecord& record) {
+    if (!record.mount_plan.has_value()) {
+        TermOut() << "  MountPlan: 不产(整包 invalid,一件也不挂——整包成整包败)\n";
+        return;
+    }
+    const auto& plan = *record.mount_plan;
+    TermOut() << "  MountPlan(只读计划,不启动 Plugin 与 MCP):\n";
+    TermOut() << "    " << plan.entries.size() << " 件待挂:agent " << plan.CountKind(lubancode::package::ComponentKind::Agent)
+              << " / prompt " << plan.CountKind(lubancode::package::ComponentKind::PromptProfile)
+              << " / skill " << plan.CountKind(lubancode::package::ComponentKind::Skill)
+              << " / workflow " << plan.CountKind(lubancode::package::ComponentKind::Workflow)
+              << " / plugin " << plan.CountKind(lubancode::package::ComponentKind::Plugin)
+              << " / mcp " << plan.CountKind(lubancode::package::ComponentKind::McpServer);
+    if (plan.HasCodeBearing()) {
+        TermOut() << "  [code-bearing,挂载要过信任门(阶段 4)]";
+    }
+    TermOut() << "\n";
+    for (const auto& entry : plan.entries) {
+        TermOut() << "    " << entry.canonical_id << " -> " << entry.target_table << "  (源 "
+                  << entry.source_root << ")\n";
+        for (const auto& tool : entry.tools) {
+            TermOut() << "      工具 " << tool.wire_name << "\n"
+                      << "         展示 " << tool.display_name << "\n";
+        }
+        if (!entry.depends_on.empty()) {
+            TermOut() << "      依赖 " << [&] {
+                std::string joined;
+                for (const auto& dep : entry.depends_on) {
+                    if (!joined.empty()) joined += ", ";
+                    joined += dep;
+                }
+                return joined;
+            }() << "\n";
+        }
+    }
+}
+
+void RunPackageDoctor(const lubancode::package::ScanOptions& options,
+                      const lubancode::package::ExternalNamespaces& external, const std::string& target) {
     // doctor 收 id 或路径:路径存在(目录)就当包根直接诊,否则按 id 查。
-    std::optional<lubancode::package::PackageInventory> inventory;
+    std::optional<lubancode::package::PackageCandidate> direct;
     std::error_code ec;
     const std::filesystem::path as_path = lubancode::platform::Utf8ToPath(target);
     if (target.find('/') != std::string::npos || target.find('\\') != std::string::npos ||
@@ -347,38 +448,50 @@ void RunPackageDoctor(const lubancode::package::ScanOptions& options, const std:
             candidate.layer_root = as_path.parent_path();
             candidate.package_root = as_path;
             candidate.dir_name = lubancode::platform::PathToUtf8(as_path.filename());
-            inventory = lubancode::package::BuildPackageInventory(candidate, options);
+            direct = std::move(candidate);
         }
     }
-    if (!inventory.has_value()) {
-        const std::vector<lubancode::package::PackageCandidate> candidates =
-            lubancode::package::ScanPackages(options);
-        const PackageLookup lookup = LookupPackage(candidates, options, target);
-        if (lookup.winner.package_root.empty() && lookup.shadowed.empty()) {
+
+    const std::vector<lubancode::package::PackageCandidate> candidates =
+        lubancode::package::ScanPackages(options);
+    // 跨包全名引用的对账索引:四层扫描里"已存在包"的账。
+    const lubancode::package::PackageRefIndex ref_index =
+        lubancode::package::BuildPackageRefIndex(candidates);
+
+    lubancode::package::PackageRecord record;
+    if (direct.has_value()) {
+        record = lubancode::package::AnalyzePackage(*direct, options, ref_index, external);
+    } else {
+        const PackageLookup lookup = LookupPackage(candidates, target);
+        if (lookup.winner == nullptr && lookup.shadowed.empty()) {
             TermOut() << "没找到包 \"" << target << "\"(doctor 收 id 或包路径)\n";
             TermOut().flush();
             return;
         }
-        inventory = lookup.winner;
+        record = lubancode::package::AnalyzePackage(*lookup.winner, options, ref_index, external);
     }
 
-    TermOut() << "诊断 " << inventory->package_id << ":\n";
-    TermOut() << "  根清单: " << (inventory->manifest_ok ? "解析通过(schema 1, SemVer)"
+    const auto& inventory = record.inventory;
+    TermOut() << "诊断 " << inventory.package_id << ":\n";
+    TermOut() << "  根清单: " << (inventory.manifest_ok ? "解析通过(schema 1, SemVer)"
                                                           : "解析失败")
-              << (inventory->version_text.empty() ? "" : ",version " + inventory->version_text) << "\n";
+              << (inventory.version_text.empty() ? "" : ",version " + inventory.version_text) << "\n";
     if (options.current_lubancode.has_value()) {
         TermOut() << "  LubanCode: 当前 " << options.current_lubancode->text
                   << ",平台 " << options.current_platform << "(写了 compatibility 就检查)\n";
     }
-    TermOut() << "  包根: [" << lubancode::package::ScopeToString(inventory->scope) << "] "
-              << lubancode::platform::PathToUtf8(inventory->package_root) << "\n";
-    TermOut() << "  盘点: 文件 " << inventory->total_file_count << "(assets "
-              << inventory->assets_file_count << " / docs " << inventory->docs_file_count
-              << " / code-bearing " << inventory->code_bearing_file_count
-              << "),内容哈希 " << inventory->content_hash << "\n";
-    PrintDiagnostics(*inventory);
-    TermOut() << "  结论: " << (inventory->valid ? "valid(静态账干净;挂载是后续阶段的事)"
-                                                 : "invalid(按清单修好再看)") << "\n";
+    TermOut() << "  包根: [" << lubancode::package::ScopeToString(inventory.scope) << "] "
+              << lubancode::platform::PathToUtf8(inventory.package_root) << "\n";
+    TermOut() << "  盘点: 文件 " << inventory.total_file_count << "(assets "
+              << inventory.assets_file_count << " / docs " << inventory.docs_file_count
+              << " / code-bearing " << inventory.code_bearing_file_count
+              << "),内容哈希 " << inventory.content_hash << "\n";
+    PrintDiagnostics(inventory);
+    PrintAnalyzedComponents(record);
+    PrintReferences(record);
+    PrintMountPlan(record);
+    TermOut() << "  结论: " << (record.valid ? "valid(静态账干净;挂载是后续阶段的事)"
+                                             : "invalid(按清单修好再看)") << "\n";
     TermOut().flush();
 }
 
@@ -396,7 +509,7 @@ CommandFlow HandleSlashPackage(SlashDispatchContext& ctx,
             RunPackageShow(options, command.target);
             return CommandFlow::Continue;
         case PackageCommandAction::Doctor:
-            RunPackageDoctor(options, command.target);
+            RunPackageDoctor(options, BuildExternalNamespaces(ctx), command.target);
             return CommandFlow::Continue;
         case PackageCommandAction::Invalid:
             TermOut() << "认不得 \"" << command.bad_word << "\"。\n";
