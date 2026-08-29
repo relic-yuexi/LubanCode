@@ -251,6 +251,16 @@ std::function<void()>& BackgroundNoticeHookSlot() {
     return hook;
 }
 
+// 状态行"后台任务"段的现折数据源(background 管理面单):BuildStatusLine
+// 每次组行前叫一声,拿最新段文本(应用层从 BackgroundTaskRegistry 折,
+// 空串 = 没任务,段收起)。空闲路在主线程、footer 路在 StdoutWriteMutex
+// 内被调——与 StatusDataSlot 的既有写纪律同款(圈边界主线程写,回合内
+// 锁内写),不加新锁。装 nullptr 回到"只用 StatusDataSlot 里存的那份"。
+std::function<std::string()>& BackgroundStatusProviderSlot() {
+    static std::function<std::string()> provider;
+    return provider;
+}
+
 // Ctrl+R 提问历史搜索的数据源槽(同一套会话级静态槽;主线程读写)。
 PromptHistoryProvider& PromptHistoryProviderSlot() {
     static PromptHistoryProvider provider;
@@ -667,7 +677,14 @@ struct BoxChrome {
 std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
     const Theme& theme = *chrome.theme;
     const StatusLineData& data = StatusDataSlot();
-    auto segments = BuildStatusPanelSegments(data.items, chrome.mode, data.values);
+    // 后台任务段现折(background 管理面单):空闲 100ms 拍与 footer 每帧
+    // 都从这里取最新数,后台起/收那一刻底栏跟着变,不等主循环边界。局部
+    // 拷贝刷新,不回写共享槽——线程纪律照旧。
+    StatusPanelData values = data.values;
+    if (const auto& provider = BackgroundStatusProviderSlot()) {
+        values.background = provider();
+    }
+    auto segments = BuildStatusPanelSegments(data.items, chrome.mode, values);
 
     // 宽度不够时先从左边收工作目录，保住项目末级目录与它后面的分支；
     // 还不够才按用户给的字段顺序从行尾截。
@@ -3381,6 +3398,10 @@ void ShowPanelToast(const std::string& text) {
 void SetIdleWakeHook(std::function<bool()> hook) { IdleWakeHookSlot() = std::move(hook); }
 
 void SetBackgroundNoticeHook(std::function<void()> hook) { BackgroundNoticeHookSlot() = std::move(hook); }
+
+void SetBackgroundStatusProvider(std::function<std::string()> provider) {
+    BackgroundStatusProviderSlot() = std::move(provider);
+}
 
 void SetPromptHistoryProvider(PromptHistoryProvider provider) {
     PromptHistoryProviderSlot() = std::move(provider);

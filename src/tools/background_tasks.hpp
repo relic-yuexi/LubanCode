@@ -54,14 +54,34 @@ struct BackgroundTaskInfo {
     std::string task_id;
     std::string command;
     std::string shell;          // powershell/cmd/sh,描述用,不参与执行
+    std::string cwd;            // 启动时的工作目录(spawn 真用的那份;show 给人看)
     unsigned long pid = 0;
     std::string log_path;       // 合并 stdout/stderr 的日志文件(UTF-8 路径)
     BackgroundTaskStatus status = BackgroundTaskStatus::Running;
     BackgroundExit exit;        // 终态时填;不知道便是 nullopt
+    std::string stop_error;     // StopFailed 时的人话原因(其余终态为空)
     std::string encoding_hint;  // 日志字节的编码线索(powershell=utf-8 等)
     std::chrono::system_clock::time_point start_time;
     std::chrono::system_clock::time_point finish_time;  // 终态时填
     bool completed_reported = false;  // 这条"新完成"是否已被 DrainCompleted 取走
+};
+
+// ReadLogDetail 的结果:日志为什么没读出来,读出来的话长什么样。四类
+// "没内容"各有各的如实话,不许混成一句空串(background_output 工具的老
+// 口径只认文本,这条新账给 /background logs 用)。
+struct BackgroundLogRead {
+    enum class Kind {
+        Ok,           // text 是尾部行(保证合法 UTF-8)
+        TaskNotFound, // task_id 不认得
+        FileMissing,  // 日志文件不存在(被清理/被删)
+        Empty,        // 文件在,还没有内容(进程没开写)
+        ReadFailed,   // 打开/读失败(权限、占用等)
+    };
+    Kind kind = Kind::Ok;
+    std::string text;        // Ok 时有效;不带"前部已省略"前缀(看 head_omitted)
+    bool sanitized = false;  // 清洗改过字节:日志里混了非法 UTF-8
+    bool head_omitted = false;  // 超 64KB 读档,前部起刀截掉
+    long long file_size = 0;    // 日志文件当时的大小(字节)
 };
 
 // 人话标签(List/detail/通知共用一份,别再两处各写一套)。
@@ -74,10 +94,13 @@ public:
     // 登记一个已经 spawn 成功的后台任务(run_command 后台分支调)。先建
     // entry 进表、再起 watcher——反过来就是 P0 竞态。watcher 持 handle 的
     // 共享状态探活,不再按 task_id 回表里找自己。
+    // cwd:spawn 时真用的工作目录(lpCurrentDirectory/子进程 chdir 那份;
+    // 调用方没指定就传当时的进程 cwd,别传空)。show 详情要给人看。
     // max_runtime_ms:可选最长运行时间(进程生命线单 P2)。0 = 无限(dev
     // server 缺省);显式传值由 watcher 到点收树(TerminateTree),状态进
     // Stopped。不改 timeout_ms 旧义(后台照旧忽略它)。
-    std::string Register(std::string command, std::string shell, unsigned long pid, std::string log_path,
+    std::string Register(std::string command, std::string shell, std::string cwd, unsigned long pid,
+                         std::string log_path,
                          std::shared_ptr<platform::BackgroundProcessHandle> handle = nullptr,
                          long long max_runtime_ms = 0);
 
@@ -94,6 +117,11 @@ public:
     // UTF-8 边界与换行边界,首段被截加 [日志前部已省略] 标记。
     std::string ReadOutput(const std::string& task_id, int tail_lines = 50);
 
+    // ReadOutput 的明细版(background 管理面单):空日志/日志被删/读不动
+    // 各报各的 kind,清洗与截断各带旗子。文本口径与 ReadOutput 同一份
+    // (同一颗实现),模型工具与用户命令读的是同一本账。
+    BackgroundLogRead ReadLogDetail(const std::string& task_id, int tail_lines = 50);
+
     // 杀掉指定任务:落 handle->TerminateTree(整棵树),状态 Stopping ->
     // Stopped;收不动如实进 StopFailed,不先盖章。没有 handle 的旧调用
     // (测试直接 Register)退化成 PID 探活那条老路。
@@ -103,6 +131,11 @@ public:
     // 取走"自上次 drain 以来新进入终态"的任务,按完成先后顺序。调用后这些
     // 任务标 completed_reported=true,不会重复吐。
     std::vector<BackgroundTaskInfo> DrainCompleted();
+
+    // 有没有"终态但还没被 DrainCompleted 取走"的任务(不消费、不标记)。
+    // 给空闲唤醒源用:后台命令跑完那一刻让主循环醒来打通知,别等用户
+    // 再敲一行。
+    bool HasUnreportedCompletions();
 
 private:
     BackgroundTaskRegistry() = default;
@@ -115,6 +148,7 @@ private:
         std::mutex mutex;
         BackgroundTaskStatus status = BackgroundTaskStatus::Running;
         BackgroundExit exit;
+        std::string stop_error;  // StopFailed 的原因(Stop 那边写)
         std::chrono::system_clock::time_point finish_time{};
         bool completed_reported = false;
         std::string log_path;  // watcher 的日志截断用(不回表抢 mutex_)

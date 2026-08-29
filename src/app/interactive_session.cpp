@@ -75,6 +75,7 @@
 #include "app/commands/prompt_commands.hpp"
 #include "app/commands/settings_commands.hpp"
 #include "app/commands/workspace_commands.hpp"
+#include "app/commands/background_commands.hpp"  // BuildBackgroundStatusSegment:底栏后台段折数
 #include "app/commands/hook_commands.hpp"
 #include "app/commands/peer_commands.hpp"
 #include "app/commands/doctor_commands.hpp"
@@ -917,6 +918,11 @@ void TerminalSessionController::Run() {
         // goal/loop 会话状态段(goal 单合流):有常驻自动工作在跑才挂。
         status_data.goal_loop =
             lubancode::app::BuildGoalLoopStatusSegment(goal_wiring_.coordinator(), loop_wiring_.scheduler());
+        // 后台命令任务段(background 管理面单):台账里有任务才挂"后台 N 运行
+        // / M 完成"。这里给的是圈边界那份基线;空闲 100ms 拍与流式 footer
+        // 每帧另经 SetBackgroundStatusProvider 现折,后台起/收当场就变。
+        status_data.background = lubancode::app::BuildBackgroundStatusSegment(
+            lubancode::tools::BackgroundTaskRegistry::Instance().List());
         lubancode::cli::SetStatusLineData(status_data, config.status_panel.items, config.status_panel.separator);
 
         // 后台命令完成通知:每圈开头取一次"新进入终态"的任务,有就打一行淡色

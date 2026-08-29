@@ -4,6 +4,7 @@
 #include "app/commands/command_registry.hpp"
 
 #include "app/commands/agent_commands.hpp"
+#include "app/commands/background_commands.hpp"
 #include "app/commands/doctor_commands.hpp"
 #include "app/commands/evolve_commands.hpp"
 #include "app/commands/goal_commands.hpp"

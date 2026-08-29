@@ -71,8 +71,8 @@ BackgroundTaskRegistry::~BackgroundTaskRegistry() {
     }
 }
 
-std::string BackgroundTaskRegistry::Register(std::string command, std::string shell, unsigned long pid,
-                                              std::string log_path,
+std::string BackgroundTaskRegistry::Register(std::string command, std::string shell, std::string cwd,
+                                              unsigned long pid, std::string log_path,
                                               std::shared_ptr<platform::BackgroundProcessHandle> handle,
                                               long long max_runtime_ms) {
     // P0 次序修复:先在锁内建 entry、分配 task_id、放进表,再起 watcher。
@@ -83,6 +83,7 @@ std::string BackgroundTaskRegistry::Register(std::string command, std::string sh
     entry->info.task_id = std::to_string(next_id_.fetch_add(1));
     entry->info.command = std::move(command);
     entry->info.shell = std::move(shell);
+    entry->info.cwd = std::move(cwd);
     entry->info.pid = pid;
     entry->info.log_path = std::move(log_path);
     entry->info.status = BackgroundTaskStatus::Running;
@@ -136,6 +137,7 @@ std::vector<BackgroundTaskInfo> BackgroundTaskRegistry::List() {
             std::lock_guard<std::mutex> slock(entry->state->mutex);
             info.status = entry->state->status;
             info.exit = entry->state->exit;
+            info.stop_error = entry->state->stop_error;
             info.finish_time = entry->state->finish_time;
         }
         out.push_back(std::move(info));
@@ -157,6 +159,7 @@ std::optional<BackgroundTaskInfo> BackgroundTaskRegistry::Get(const std::string&
                 std::lock_guard<std::mutex> slock(entry->state->mutex);
                 info.status = entry->state->status;
                 info.exit = entry->state->exit;
+                info.stop_error = entry->state->stop_error;
                 info.finish_time = entry->state->finish_time;
             }
             return info;
@@ -166,32 +169,51 @@ std::optional<BackgroundTaskInfo> BackgroundTaskRegistry::Get(const std::string&
 }
 
 std::string BackgroundTaskRegistry::ReadOutput(const std::string& task_id, int tail_lines) {
+    // 老口径(background_output 工具):只认文本,四类"没内容"一律空串。
+    // 明细(kind/旗子)给 /background logs 那条路走 ReadLogDetail。
+    const BackgroundLogRead detail = ReadLogDetail(task_id, tail_lines);
+    if (detail.kind != BackgroundLogRead::Kind::Ok) {
+        return std::string();
+    }
+    return detail.head_omitted ? "[日志前部已省略]\n" + detail.text : detail.text;
+}
+
+BackgroundLogRead BackgroundTaskRegistry::ReadLogDetail(const std::string& task_id, int tail_lines) {
+    BackgroundLogRead result;
     std::string log_path;
-    std::string encoding_hint;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         for (const auto& entry : entries_) {
             if (entry->info.task_id == task_id) {
                 log_path = entry->info.log_path;
-                encoding_hint = entry->info.encoding_hint;
                 break;
             }
         }
     }
     if (log_path.empty()) {
-        return std::string();  // task_id 不认得
+        result.kind = BackgroundLogRead::Kind::TaskNotFound;
+        return result;
     }
 
     // 日志文件可能正在被后台进程写,以 ate(定位到末尾)方式打开,读文件大小
-    // 后决定是从头读还是只取末尾 kReadCapBytes。
+    // 后决定是从头读还是只取末尾 kReadCapBytes。文件不在了如实报 FileMissing
+    // ——别跟"还没写"混成一句话。
+    std::error_code exists_ec;
+    if (!std::filesystem::exists(Utf8ToPath(log_path), exists_ec) || exists_ec) {
+        result.kind = BackgroundLogRead::Kind::FileMissing;
+        return result;
+    }
     std::ifstream file(log_path, std::ios::binary | std::ios::ate);
     if (!file.is_open()) {
-        return std::string();  // 文件读不了(可能刚被清理/权限问题)
+        result.kind = BackgroundLogRead::Kind::ReadFailed;  // 在,但打不开(权限/占用)
+        return result;
     }
     const std::streamoff size = file.tellg();
     if (size <= 0) {
-        return std::string();  // 空文件/还没写东西
+        result.kind = BackgroundLogRead::Kind::Empty;  // 空文件/还没写东西
+        return result;
     }
+    result.file_size = static_cast<long long>(size);
 
     std::string data;
     const std::streamoff read_from = (size > kReadCapBytes) ? (size - kReadCapBytes) : 0;
@@ -199,21 +221,21 @@ std::string BackgroundTaskRegistry::ReadOutput(const std::string& task_id, int t
     data.resize(static_cast<std::size_t>(size - read_from));
     file.read(data.data(), data.size());
     if (file.gcount() <= 0) {
-        return std::string();
+        result.kind = BackgroundLogRead::Kind::ReadFailed;
+        return result;
     }
     data.resize(static_cast<std::size_t>(file.gcount()));
 
-    // 64KB 起刀处先退到完整换行:不把半行冒充完整行(首段若被截,后面加
-    // 标记)。再退到 UTF-8 边界(清洗之后不会再有半字)。
-    bool head_omitted = false;
+    // 64KB 起刀处先退到完整换行:不把半行冒充完整行(首段被截由 head_omitted
+    // 报)。再退到 UTF-8 边界(清洗之后不会再有半字)。
     if (read_from > 0) {
         const auto first_nl = data.find('\n');
         if (first_nl != std::string::npos && first_nl + 1 < data.size()) {
             data = data.substr(first_nl + 1);
-            head_omitted = true;
+            result.head_omitted = true;
         } else if (first_nl != std::string::npos) {
             data.clear();
-            head_omitted = true;
+            result.head_omitted = true;
         }
     }
 
@@ -222,15 +244,15 @@ std::string BackgroundTaskRegistry::ReadOutput(const std::string& task_id, int t
     //   oem-ansi(cmd)/unknown/空 hint  -> SanitizeUtf8:先验 UTF-8,非法时
     //      Windows 上按 ACP 重解(cmd 的 OEM/ANSI 字节那条路),再不行
     //      逐段替换 U+FFFD;非 Windows 直接逐段替换。不无声猜代码页。
-    data = platform::SanitizeUtf8(data);
-
-    std::string prefix;
-    if (head_omitted) {
-        prefix = "[日志前部已省略]\n";
-    }
+    // 清洗改没改字节记一笔(sanitized):非法 UTF-8 要如实标注,不悄悄换字。
+    const std::string sanitized = platform::SanitizeUtf8(data);
+    result.sanitized = sanitized != data;
+    data = std::move(sanitized);
 
     if (tail_lines <= 0) {
-        return prefix + data;  // 全文(已截断到末尾 64KB)
+        result.kind = BackgroundLogRead::Kind::Ok;
+        result.text = std::move(data);  // 全文(已截断到末尾 64KB)
+        return result;
     }
 
     // 按行切,取末尾 tail_lines 行。
@@ -251,18 +273,19 @@ std::string BackgroundTaskRegistry::ReadOutput(const std::string& task_id, int t
         }
     }
     std::ostringstream oss;
-    oss << prefix;
     if (static_cast<int>(lines.size()) <= tail_lines) {
         for (const auto& l : lines) {
             oss << l;
         }
-        return oss.str();
+    } else {
+        const std::size_t start = lines.size() - static_cast<std::size_t>(tail_lines);
+        for (std::size_t i = start; i < lines.size(); ++i) {
+            oss << lines[i];
+        }
     }
-    const std::size_t start = lines.size() - static_cast<std::size_t>(tail_lines);
-    for (std::size_t i = start; i < lines.size(); ++i) {
-        oss << lines[i];
-    }
-    return oss.str();
+    result.kind = BackgroundLogRead::Kind::Ok;
+    result.text = oss.str();
+    return result;
 }
 
 bool BackgroundTaskRegistry::Stop(const std::string& task_id) {
@@ -291,7 +314,7 @@ bool BackgroundTaskRegistry::Stop(const std::string& task_id) {
     }
 
     // 有 handle:Stop 落 TerminateTree(整棵树)。状态先 Stopping,树死透了
-    // 才 Stopped;收不动如实 StopFailed,不先盖章。
+    // 才 Stopped;收不动如实 StopFailed + 原因,不先盖章。
     if (handle != nullptr) {
         {
             std::lock_guard<std::mutex> slock(state->mutex);
@@ -301,6 +324,7 @@ bool BackgroundTaskRegistry::Stop(const std::string& task_id) {
         std::lock_guard<std::mutex> slock(state->mutex);
         if (killed) {
             state->status = BackgroundTaskStatus::Stopped;
+            state->stop_error.clear();
             const auto completion = handle->Peek();
             if (completion.known) {
                 state->exit.exit_code = completion.exit_code;
@@ -313,6 +337,11 @@ bool BackgroundTaskRegistry::Stop(const std::string& task_id) {
         } else {
             state->status = BackgroundTaskStatus::StopFailed;
             state->exit.exit_code = std::nullopt;
+            // 原因从 handle 带回来(TerminateTree 失败分支写的);没有就给
+            // 一句不装懂的人话,绝不空着让用户猜。
+            state->stop_error = handle->last_terminate_error.empty()
+                                    ? std::string("收进程树的系统调用失败,原因未知")
+                                    : handle->last_terminate_error;
         }
         state->finish_time = std::chrono::system_clock::now();
         state->completed_reported = false;
@@ -340,6 +369,22 @@ bool BackgroundTaskRegistry::Stop(const std::string& task_id) {
     return true;
 }
 
+bool BackgroundTaskRegistry::HasUnreportedCompletions() {
+    // 只看不动账(DrainCompleted 才标记):空闲唤醒源每 100ms 问一次,
+    // 不能把通知偷走。锁序与 DrainCompleted 相同(mutex_ -> state->mutex)。
+    std::lock_guard<std::mutex> lock(mutex_);
+    for (const auto& entry : entries_) {
+        std::lock_guard<std::mutex> slock(entry->state->mutex);
+        const bool terminal = entry->state->status != BackgroundTaskStatus::Running &&
+                              entry->state->status != BackgroundTaskStatus::Stopping &&
+                              entry->state->status != BackgroundTaskStatus::StopFailed;
+        if (terminal && !entry->state->completed_reported) {
+            return true;
+        }
+    }
+    return false;
+}
+
 std::vector<BackgroundTaskInfo> BackgroundTaskRegistry::DrainCompleted() {
     std::lock_guard<std::mutex> lock(mutex_);
     std::vector<BackgroundTaskInfo> out;
@@ -353,6 +398,7 @@ std::vector<BackgroundTaskInfo> BackgroundTaskRegistry::DrainCompleted() {
             BackgroundTaskInfo info = entry->info;
             info.status = entry->state->status;
             info.exit = entry->state->exit;
+            info.stop_error = entry->state->stop_error;
             info.finish_time = entry->state->finish_time;
             out.push_back(std::move(info));
         }

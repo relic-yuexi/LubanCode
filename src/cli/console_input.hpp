@@ -322,6 +322,13 @@ void SetIdleWakeHook(std::function<bool()> hook);
 // 不让位、不起轮,纯通知。传空钩子即清除;管道/重定向走不到逐键路径。
 void SetBackgroundNoticeHook(std::function<void()> hook);
 
+// 状态行"后台任务"段的数据源(background 管理面单):BuildStatusLine 组行
+// 前现叫一次,拿最新段文本(形如 "后台 2 运行 / 1 完成";空串 = 没任务,
+// 段收起)。空闲 100ms 拍与流式 footer 每帧都会问——后台起/收那一刻底栏
+// 跟着变,不等主循环边界。应用层从 BackgroundTaskRegistry 折,终端层不
+// 认台账。传空清除(回到 SetStatusLineData 存的那份)。
+void SetBackgroundStatusProvider(std::function<std::string()> provider);
+
 // Ctrl+R 提问历史反向搜索的数据源(0.30.x 第二批):应用层从 session 事件
 // 账只读现抽一份 PromptHistoryDataset(打开搜索框时取一次,范围轮换在
 // 终端层本地过滤,不反复读盘)。传空清除;管道/重定向走不到逐键路径,

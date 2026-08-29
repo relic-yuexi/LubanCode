@@ -21,6 +21,7 @@
 using lubancode::tools::BackgroundTaskRegistry;
 using lubancode::tools::BackgroundTaskInfo;
 using lubancode::tools::BackgroundTaskStatus;
+using lubancode::tools::BackgroundLogRead;
 
 namespace {
 
@@ -67,8 +68,8 @@ TEST_CASE("background: Register 返回单调递增的 task_id,List/Get 能查到
     // 用一个几乎肯定不存在的 pid——watcher 会立刻探到"已结束"标终态,不影响
     // 这里测登记/查询本身。pid 取大数,降低撞上真实进程的概率。
     const unsigned long fake_pid = 40000;
-    const std::string id1 = reg.Register("echo first", "sh", fake_pid, "/tmp/a.log");
-    const std::string id2 = reg.Register("echo second", "sh", fake_pid + 1, "/tmp/b.log");
+    const std::string id1 = reg.Register("echo first", "sh", /*cwd=*/"/w/one", fake_pid, "/tmp/a.log");
+    const std::string id2 = reg.Register("echo second", "sh", /*cwd=*/"/w/two", fake_pid + 1, "/tmp/b.log");
 
     CHECK_FALSE(id1.empty());
     CHECK_FALSE(id2.empty());
@@ -85,12 +86,13 @@ TEST_CASE("background: Register 返回单调递增的 task_id,List/Get 能查到
     CHECK(found1);
     CHECK(found2);
 
-    // Get 找得到、字段对得上。
+    // Get 找得到、字段对得上(cwd 也一并入账:/background show 要给人看)。
     const auto info = reg.Get(id2);
     REQUIRE(info.has_value());
     CHECK(info->command == "echo second");
     CHECK(info->pid == fake_pid + 1);
     CHECK(info->log_path == "/tmp/b.log");
+    CHECK(info->cwd == "/w/two");
 
     // 乱填 task_id 找不到。
     CHECK_FALSE(reg.Get("nonexistent-zzz-999").has_value());
@@ -100,7 +102,7 @@ TEST_CASE("background: ReadOutput 读日志文件尾部") {
     auto& reg = BackgroundTaskRegistry::Instance();
     // 造一个有内容的日志文件。
     TempLogFile file("line1\nline2\nline3\nline4\nline5\n");
-    const std::string task_id = reg.Register("some cmd", "sh", /*pid=*/1, file.Utf8Path());
+    const std::string task_id = reg.Register("some cmd", "sh", /*cwd=*/"", /*pid=*/1, file.Utf8Path());
 
     // 读最后 2 行。
     const std::string tail2 = reg.ReadOutput(task_id, /*tail_lines=*/2);
@@ -117,6 +119,72 @@ TEST_CASE("background: ReadOutput 读日志文件尾部") {
     CHECK(reg.ReadOutput("no-such-task-zzz").empty());
 }
 
+// ReadLogDetail(background 管理面单):四类"没内容"各有各的 kind,清洗与
+// 截断各带旗子——/background logs 的如实话全靠这本明细账。
+TEST_CASE("background: ReadLogDetail 对空/删/坏/超长日志各说各的") {
+    auto& reg = BackgroundTaskRegistry::Instance();
+
+    // 不认得的 task_id。
+    const auto not_found = reg.ReadLogDetail("no-such-task-zzz", 100);
+    CHECK(not_found.kind == BackgroundLogRead::Kind::TaskNotFound);
+
+    // 空文件:进程还没开写。
+    {
+        TempLogFile empty_file("");
+        const std::string id = reg.Register("empty log cmd", "sh", /*cwd=*/"", /*pid=*/1, empty_file.Utf8Path());
+        const auto empty = reg.ReadLogDetail(id, 100);
+        CHECK(empty.kind == BackgroundLogRead::Kind::Empty);
+        CHECK(empty.text.empty());
+    }
+
+    // 正常读取:Ok + 文本 + 文件大小。
+    {
+        TempLogFile file("hello\nworld\n");
+        const std::string id = reg.Register("ok log cmd", "sh", /*cwd=*/"", /*pid=*/1, file.Utf8Path());
+        const auto ok = reg.ReadLogDetail(id, 100);
+        CHECK(ok.kind == BackgroundLogRead::Kind::Ok);
+        CHECK(ok.text.find("world") != std::string::npos);
+        CHECK(ok.file_size == static_cast<long long>(std::string("hello\nworld\n").size()));
+        CHECK_FALSE(ok.sanitized);
+        CHECK_FALSE(ok.head_omitted);
+    }
+
+    // 非法 UTF-8 字节:sanitized 旗子如实亮,出口保证合法 UTF-8。
+    {
+        const std::string bad = "good\xFF\xFE bad\n";
+        TempLogFile file(bad);
+        const std::string id = reg.Register("bad utf8 cmd", "sh", /*cwd=*/"", /*pid=*/1, file.Utf8Path());
+        const auto dirty = reg.ReadLogDetail(id, 100);
+        CHECK(dirty.kind == BackgroundLogRead::Kind::Ok);
+        CHECK(dirty.sanitized);
+    }
+
+    // 超过 64KB 读档:head_omitted 如实亮,读的还是末尾。
+    {
+        std::string big(70 * 1024, 'x');
+        big += "\ntail-marker\n";
+        TempLogFile file(big);
+        const std::string id = reg.Register("big log cmd", "sh", /*cwd=*/"", /*pid=*/1, file.Utf8Path());
+        const auto capped = reg.ReadLogDetail(id, 10);
+        CHECK(capped.kind == BackgroundLogRead::Kind::Ok);
+        CHECK(capped.head_omitted);
+        CHECK(capped.text.find("tail-marker") != std::string::npos);
+        CHECK(capped.file_size == static_cast<long long>(big.size()));
+    }
+
+    // 日志被删:FileMissing(与"还没写"分开说)。
+    {
+        std::string ghost_path;
+        {
+            TempLogFile doomed("soon gone\n");
+            ghost_path = doomed.Utf8Path();
+        }  // 析构已删
+        const std::string id = reg.Register("deleted log cmd", "sh", /*cwd=*/"", /*pid=*/1, ghost_path);
+        const auto missing = reg.ReadLogDetail(id, 100);
+        CHECK(missing.kind == BackgroundLogRead::Kind::FileMissing);
+    }
+}
+
 TEST_CASE("background: 短命后台命令完成时 DrainCompleted 取到通知") {
     auto& reg = BackgroundTaskRegistry::Instance();
 
@@ -125,7 +193,8 @@ TEST_CASE("background: 短命后台命令完成时 DrainCompleted 取到通知")
     REQUIRE(bg.success);
     CHECK_FALSE(bg.log_path.empty());
 
-    const std::string task_id = reg.Register("echo bg_done_marker_xyz", "sh-or-cmd", bg.pid, bg.log_path);
+    const std::string task_id =
+        reg.Register("echo bg_done_marker_xyz", "sh-or-cmd", /*cwd=*/"", bg.pid, bg.log_path);
 
     // 等 watcher 探到完成(命令秒退,5 秒窗口绰绰有余)。
     const bool finished = WaitUntil(
@@ -207,7 +276,7 @@ TEST_CASE("background: 长命命令先 Running 再自然完成") {
 
     const auto bg = lubancode::platform::RunShellCommandBackground(delay_cmd);
     REQUIRE(bg.success);
-    const std::string task_id = reg.Register(delay_cmd, "shell", bg.pid, bg.log_path);
+    const std::string task_id = reg.Register(delay_cmd, "shell", /*cwd=*/"", bg.pid, bg.log_path);
 
     // 起手应该是 Running(命令要跑约 2 秒,此刻还活着)。
     auto info = reg.Get(task_id);
@@ -233,4 +302,83 @@ TEST_CASE("background: 长命命令先 Running 再自然完成") {
         }
     }
     CHECK(found);
+}
+
+// HasUnreportedCompletions(background 管理面单):只看不取——空闲唤醒源
+// 每拍问它,DrainCompleted 才许动账。
+TEST_CASE("background: HasUnreportedCompletions 只报不取,drain 后归零") {
+    auto& reg = BackgroundTaskRegistry::Instance();
+
+    const auto bg = lubancode::platform::RunShellCommandBackground("echo wake_marker_xyz");
+    REQUIRE(bg.success);
+    const std::string task_id = reg.Register("echo wake_marker_xyz", "sh-or-cmd", /*cwd=*/"", bg.pid, bg.log_path);
+
+    const bool finished = WaitUntil(
+        [&] {
+            const auto info = reg.Get(task_id);
+            return info.has_value() && info->status != BackgroundTaskStatus::Running;
+        },
+        /*timeout_ms=*/5000);
+    REQUIRE(finished);
+
+    // 有未报的完成;问几遍都还在(不消费)。
+    CHECK(reg.HasUnreportedCompletions());
+    CHECK(reg.HasUnreportedCompletions());
+
+    (void)reg.DrainCompleted();
+    CHECK_FALSE(reg.HasUnreportedCompletions());  // 取走即归零
+}
+
+// stop 的三段语义(background 管理面单):真起一只长命后台命令,Stop 走
+// Running -> Stopping -> Stopped;树死透了才报已停;对已终态任务不重复杀。
+TEST_CASE("background: Stop 收长命命令进 Stopped,已终态不重复杀") {
+    auto& reg = BackgroundTaskRegistry::Instance();
+
+#ifdef _WIN32
+    const std::string delay_cmd = "ping -n 30 127.0.0.1 > nul";  // 约 30 秒,足够停
+#else
+    const std::string delay_cmd = "sleep 30";
+#endif
+    const auto bg = lubancode::platform::RunShellCommandBackground(delay_cmd);
+    REQUIRE(bg.success);
+    REQUIRE(bg.handle != nullptr);
+    const std::string task_id = reg.Register(delay_cmd, "shell", /*cwd=*/"", bg.pid, bg.log_path,
+                                             bg.handle, /*max_runtime_ms=*/0);
+
+    // 起手 Running。
+    {
+        const auto info = reg.Get(task_id);
+        REQUIRE(info.has_value());
+        CHECK(info->status == BackgroundTaskStatus::Running);
+        CHECK(info->stop_error.empty());
+    }
+
+    // Stop 同步走完 Stopping -> Stopped:返回时树已死透(Windows 是 Job 一锅端,
+    // POSIX 是进程组 SIGTERM/SIGKILL),台账停在终态。
+    CHECK(reg.Stop(task_id));
+    {
+        const auto info = reg.Get(task_id);
+        REQUIRE(info.has_value());
+        CHECK(info->status == BackgroundTaskStatus::Stopped);
+        CHECK(info->stop_error.empty());
+        CHECK(info->finish_time > info->start_time);
+    }
+
+    // 已终态:Stop 返回 true(认得),状态不动,不重复杀。
+    CHECK(reg.Stop(task_id));
+    {
+        const auto info = reg.Get(task_id);
+        REQUIRE(info.has_value());
+        CHECK(info->status == BackgroundTaskStatus::Stopped);
+    }
+
+    // 终止通知进 DrainCompleted(停止也是"新终态",要报一回)。
+    bool stop_reported = false;
+    for (const auto& t : reg.DrainCompleted()) {
+        if (t.task_id == task_id) {
+            stop_reported = true;
+            CHECK(t.status == BackgroundTaskStatus::Stopped);
+        }
+    }
+    CHECK(stop_reported);
 }

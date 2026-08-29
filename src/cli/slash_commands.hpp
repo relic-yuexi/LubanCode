@@ -45,7 +45,7 @@ enum class SlashCommand {
     Language,  // /language [语言码]:列可选界面语言/切换(i18n)
     Image,     // /image <路径...>:附一张或多张本地图片
     Worktree,  // /worktree new|list|exit:隔离工作树会话
-    Background,  // /background:列后台任务清单(run_command run_in_background 起的)
+    Background,  // /background:后台任务管理面(list/show/logs/stop,run_command run_in_background 起的)
     Hooks,  // /hooks:hooks 来源/命令/信任/禁用/最近结果与运行记录
     Record,   // /record start|note|pause|resume|stop|cancel|status|list|install|discard:录一遍生成技能
     Peers,   // /peers:列同机可见的其它会话(跨会话传话),方向键菜单

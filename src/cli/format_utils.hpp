@@ -83,6 +83,12 @@ struct StatusPanelData {
     // (与 REC/WT/tools/plan 同待遇)。文字由应用层拼好递进来,这里只管
     // 摆——渲染层不做 goal/loop 的状态机翻译。
     std::string goal_loop;
+    // 后台命令任务段(background 管理面单):非空时恒亮一段,形如
+    // "后台 2 运行 / 1 完成"。数据出自 BackgroundTaskRegistry(应用层
+    // provider 现折),一只任务都没有时为空串——整段收起,零影响。与
+    // goal_loop 同待遇:不进 items 配置(后台有没有东西在跑,用户没配
+    // 也得看得见),文字由应用层拼好递进来。
+    std::string background;
 };
 
 // 状态行数据的局部更新:只改 context/tokens 两段的数字、旧值标记与缓存

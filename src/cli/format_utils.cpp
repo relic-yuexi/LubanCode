@@ -107,6 +107,11 @@ std::vector<StatusPanelSegment> BuildStatusPanelSegments(
     if (!data.goal_loop.empty()) {
         out.push_back({"goal_loop", data.goal_loop});
     }
+    // 后台命令任务段(background 管理面单):非空恒挂一段,不进 items 配置
+    //(理由见 StatusPanelData::background 注释)。文字应用层拼好递进来。
+    if (!data.background.empty()) {
+        out.push_back({"background", data.background});
+    }
     for (const std::string& key : items) {
         std::string text;
         if (key == "permission_mode") {
