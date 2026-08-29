@@ -438,6 +438,9 @@ add_library(lubancode_engine STATIC
   # 自定义 Agent 单阶段 1:Agent Definition 严格解析(yaml-cpp)与三层 Catalog。
   src/agent/agent_definition.cpp
   src/agent/agent_catalog.cpp
+  # 自定义 Agent 单阶段 3:AgentProfileResolver——父上下文 + Definition ->
+  # Resolved AgentProfile 的唯一合并权威(AgentTool 派发与 Workflow 绑定共用)。
+  src/agent/agent_profile_resolver.cpp
   # 骨架拆解批一·病四:SampleModel 原语(六处单发采样的公共路)。
   src/agent/sample_model.cpp
   src/agent/prefix.cpp

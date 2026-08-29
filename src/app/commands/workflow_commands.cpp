@@ -28,6 +28,8 @@ using lubancode::cli::TermErr;
 #include <vector>
 
 #include "agent/agent.hpp"  // AgentProfile(批四自立门户)
+#include "agent/agent_catalog.hpp"  // BuiltinGeneralPurposeDefinition:workflow default binding 的定义
+#include "agent/agent_profile_resolver.hpp"  // ResolveAgentProfile:阶段 3 统一解析(workflow 绑定同源)
 #include "cli/slash_commands.hpp"
 #include "config/model_catalog.hpp"
 #include "platform/console.hpp"
@@ -1626,16 +1628,36 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
         };
         lubancode::workflow::AgentExecutor::Options agent_options;
         agent_options.default_binding.backend = exec_ctx.backend;
-        agent_options.default_binding.profile.provider = exec_ctx.provider;
-        agent_options.default_binding.profile.request.model = exec_ctx.model;
-        agent_options.default_binding.profile.request.reasoning_effort = exec_ctx.effort;
+        // 阶段 3:default binding 走统一 AgentProfileResolver(单子 §6.4——
+        // Workflow 复用同一解析器,合并不许在两处各写一遍)。父上下文 = 会话
+        // 材料(provider/model/effort/reasoning + main 运行档案),定义 = 内置
+        // general-purpose(全继承,合并结果与直填父值一字不差);节点级
+        // allowed_tools/step_limit 仍由 AgentExecutor 按派发参数叠加(契约
+        // §4.8:调用方显式压过定义缺省)。阶段 5 接 `agent: <name>` 时同一
+        // 口换定义即可。
+        lubancode::agent::AgentProfile workflow_parent;
+        workflow_parent.provider = exec_ctx.provider;
+        workflow_parent.request.model = exec_ctx.model;
+        workflow_parent.request.reasoning_effort = exec_ctx.effort;
         if (exec_ctx.model_catalog != nullptr) {
             if (const auto* entry = exec_ctx.model_catalog->FindByProviderAndSlug(exec_ctx.provider, exec_ctx.model);
                 entry != nullptr) {
-                agent_options.default_binding.profile.request.reasoning = entry->reasoning;
+                workflow_parent.request.reasoning = entry->reasoning;
             }
         }
-        agent_options.default_binding.profile.runtime = exec_ctx.agent_profile;
+        workflow_parent.runtime = exec_ctx.agent_profile;
+        std::vector<std::string> workflow_parent_tools;
+        if (exec_ctx.registry != nullptr) {
+            for (const auto& tool : exec_ctx.registry->All()) {
+                workflow_parent_tools.push_back(tool->name());
+            }
+        }
+        agent_options.default_binding.profile = lubancode::agent::ResolveAgentProfile(
+            lubancode::agent::BuildWorkflowAgentResolveRequest(
+                lubancode::agent::BuiltinGeneralPurposeDefinition(), workflow_parent,
+                std::move(workflow_parent_tools), exec_ctx.agent_profile.max_steps_per_turn,
+                lubancode::agent::AgentProfileResolveEnvironment{}, lubancode::agent::AgentDispatchOverrides{}))
+            .profile;
         agent_options.registry = exec_ctx.registry;
         agent_options.task_loader = workflow_prompt_loader;
         // 批二:agent 节点上事件流(会话 sink,seq 与主回合同源)。

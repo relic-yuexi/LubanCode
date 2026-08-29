@@ -192,7 +192,8 @@ bool IntField(const YAML::Node& map, const char* key, const std::string& prefix,
 }  // namespace
 
 std::string AgentDefinitionIssue::Format(const std::string& file_label) const {
-    return FormatIssueLocation(file_label, line, column) + " `" + field + "`: " + message;
+    const std::string code_part = code.empty() ? std::string() : (" [" + code + "]");
+    return FormatIssueLocation(file_label, line, column) + " `" + field + "`" + code_part + ": " + message;
 }
 
 bool IsValidAgentName(const std::string& name) {

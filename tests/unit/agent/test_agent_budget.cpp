@@ -516,6 +516,7 @@ TEST_CASE("自定义 Agent:runtime.max_steps_per_turn 落到派出预算,真能�
     tools::ToolRegistry sub_registry;
     sub_registry.Register(std::make_unique<FakeTool>("read_file", tools::Tool::Result{"又读了一遍", false}));
     sub_registry.Register(std::make_unique<FakeTool>("write_file", tools::Tool::Result{"写了", false}));
+    sub_registry.Register(std::make_unique<FakeTool>("search", tools::Tool::Result{"命中", false}));  // allow 点名,须在父面
 
     tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");  // 配置默认 0 = 不限步
     tools::CustomAgentMaterial material = ReviewerMaterial();
@@ -550,6 +551,7 @@ TEST_CASE("自定义 Agent:runtime.max_steps_per_turn 落到派出预算,真能�
     }
     tools::ToolRegistry sub_registry2;
     sub_registry2.Register(std::make_unique<FakeTool>("read_file", tools::Tool::Result{"又读了一遍", false}));
+    sub_registry2.Register(std::make_unique<FakeTool>("search", tools::Tool::Result{"命中", false}));  // allow 点名,须在父面
     tools::AgentTool agent_tool2(backend2, sub_registry2, "/work/dir");
     agent_tool2.SetCustomAgentResolver(
         [material](const std::string& name) -> std::optional<tools::CustomAgentMaterial> {
@@ -593,6 +595,150 @@ TEST_CASE("自定义 Agent:名字不在清单明拒并指路 /agents;没接解�
     const tools::Tool::Result old_result = old_tool.execute(old_input);
     CHECK(old_result.is_error);
     CHECK(old_result.content.find("只认 general-purpose 或 Explore") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 阶段 3:统一解析(AgentProfileResolver)接进派发链
+// ---------------------------------------------------------------------------
+
+TEST_CASE("自定义 Agent:YAML runtime 预算四字段并流——给了压父值,没给落父值") {
+    // YAML 给了 max_output_tokens=1234:请求带 1234(视同 config 级显式)。
+    {
+        FakeBackend backend;
+        backend.scripts = {TextScript("结论:预算并流已验")};
+        tools::ToolRegistry sub_registry;
+        sub_registry.Register(std::make_unique<FakeTool>("read_file", tools::Tool::Result{"内容", false}));
+        sub_registry.Register(std::make_unique<FakeTool>("search", tools::Tool::Result{"命中", false}));
+        tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+        agent::AgentRuntimeProfile parent;
+        parent.max_output_tokens = 4096;
+        parent.max_output_tokens_source = agent::OutputBudgetSource::ProviderDeclared;
+        agent_tool.SetRuntimeProfile(parent);
+        tools::CustomAgentMaterial material = ReviewerMaterial();
+        material.definition.max_output_tokens = 1234;
+        material.definition.max_context_chars = 555555;
+        material.definition.context_window_tokens = 32000;
+        material.definition.length_continuations = 4;
+        agent_tool.SetCustomAgentResolver(
+            [material](const std::string& name) -> std::optional<tools::CustomAgentMaterial> {
+                return name == material.definition.name ? std::optional<tools::CustomAgentMaterial>(material)
+                                                        : std::nullopt;
+            });
+        nlohmann::json input;
+        input["title"] = "预算并流";
+        input["prompt"] = "审";
+        input["agent_type"] = "library-reviewer";
+        const tools::Tool::Result result = agent_tool.execute(input);
+        CHECK_FALSE(result.is_error);
+        REQUIRE(backend.captured_requests.size() == 1);
+        CHECK(backend.captured_requests[0].max_tokens == std::optional<int>(1234));  // YAML 压父值 4096
+    }
+    // YAML 没给:落父值 4096(provider 声明档原样继承)。
+    {
+        FakeBackend backend;
+        backend.scripts = {TextScript("结论:落父值已验")};
+        tools::ToolRegistry sub_registry;
+        sub_registry.Register(std::make_unique<FakeTool>("read_file", tools::Tool::Result{"内容", false}));
+        sub_registry.Register(std::make_unique<FakeTool>("search", tools::Tool::Result{"命中", false}));
+        tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+        agent::AgentRuntimeProfile parent;
+        parent.max_output_tokens = 4096;
+        parent.max_output_tokens_source = agent::OutputBudgetSource::ProviderDeclared;
+        agent_tool.SetRuntimeProfile(parent);
+        tools::CustomAgentMaterial material = ReviewerMaterial();  // runtime 全不给
+        agent_tool.SetCustomAgentResolver(
+            [material](const std::string& name) -> std::optional<tools::CustomAgentMaterial> {
+                return name == material.definition.name ? std::optional<tools::CustomAgentMaterial>(material)
+                                                        : std::nullopt;
+            });
+        nlohmann::json input;
+        input["title"] = "落父值";
+        input["prompt"] = "审";
+        input["agent_type"] = "library-reviewer";
+        const tools::Tool::Result result = agent_tool.execute(input);
+        CHECK_FALSE(result.is_error);
+        REQUIRE(backend.captured_requests.size() == 1);
+        CHECK(backend.captured_requests[0].max_tokens == std::optional<int>(4096));
+    }
+}
+
+TEST_CASE("自定义 Agent:权限放宽与缺依赖在派发口结构化明拒") {
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<FakeTool>("read_file", tools::Tool::Result{"内容", false}));
+    sub_registry.Register(std::make_unique<FakeTool>("search", tools::Tool::Result{"命中", false}));
+
+    // 权限放宽:父会话 auto,定义声明 yolo -> agent.permission_widening,拒发。
+    {
+        FakeBackend backend;
+        tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+        agent_tool.SetResolveEnvironment([]() -> agent::AgentProfileResolveEnvironment {
+            agent::AgentProfileResolveEnvironment env;
+            env.parent_permission = agent::AgentPermissionMode::Auto;
+            return env;
+        });
+        tools::CustomAgentMaterial material = ReviewerMaterial();
+        material.definition.permissions_mode = "yolo";
+        agent_tool.SetCustomAgentResolver(
+            [material](const std::string& name) -> std::optional<tools::CustomAgentMaterial> {
+                return name == material.definition.name ? std::optional<tools::CustomAgentMaterial>(material)
+                                                        : std::nullopt;
+            });
+        nlohmann::json input;
+        input["title"] = "越权任务";
+        input["prompt"] = "审";
+        input["agent_type"] = "library-reviewer";
+        const tools::Tool::Result result = agent_tool.execute(input);
+        CHECK(result.is_error);
+        CHECK(result.content.find("agent.permission_widening") != std::string::npos);
+        CHECK(result.content.find("yolo") != std::string::npos);
+        CHECK(result.content.find("auto") != std::string::npos);
+        CHECK(backend.captured_requests.empty());  // 拒发:一个请求不出
+    }
+    // 收窄(auto 父下声明 confirm)照常派发。
+    {
+        FakeBackend backend;
+        backend.scripts = {TextScript("结论:收窄放行")};
+        tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+        agent_tool.SetResolveEnvironment([]() -> agent::AgentProfileResolveEnvironment {
+            agent::AgentProfileResolveEnvironment env;
+            env.parent_permission = agent::AgentPermissionMode::Auto;
+            return env;
+        });
+        tools::CustomAgentMaterial material = ReviewerMaterial();
+        material.definition.permissions_mode = "confirm";
+        agent_tool.SetCustomAgentResolver(
+            [material](const std::string& name) -> std::optional<tools::CustomAgentMaterial> {
+                return name == material.definition.name ? std::optional<tools::CustomAgentMaterial>(material)
+                                                        : std::nullopt;
+            });
+        nlohmann::json input;
+        input["title"] = "收窄任务";
+        input["prompt"] = "审";
+        input["agent_type"] = "library-reviewer";
+        const tools::Tool::Result result = agent_tool.execute(input);
+        CHECK_FALSE(result.is_error);
+    }
+    // 缺依赖:requires.tools 点到 allow 面外 -> agent.missing_dependency,不退化。
+    {
+        FakeBackend backend;
+        tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+        tools::CustomAgentMaterial material = ReviewerMaterial();
+        material.definition.requires_tools = {"ghost_tool"};
+        agent_tool.SetCustomAgentResolver(
+            [material](const std::string& name) -> std::optional<tools::CustomAgentMaterial> {
+                return name == material.definition.name ? std::optional<tools::CustomAgentMaterial>(material)
+                                                        : std::nullopt;
+            });
+        nlohmann::json input;
+        input["title"] = "缺依赖任务";
+        input["prompt"] = "审";
+        input["agent_type"] = "library-reviewer";
+        const tools::Tool::Result result = agent_tool.execute(input);
+        CHECK(result.is_error);
+        CHECK(result.content.find("agent.missing_dependency") != std::string::npos);
+        CHECK(result.content.find("ghost_tool") != std::string::npos);
+        CHECK(backend.captured_requests.empty());
+    }
 }
 
 // ---------------------------------------------------------------------------

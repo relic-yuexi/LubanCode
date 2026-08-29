@@ -468,13 +468,13 @@ Workflow 只负责调度。它把 `agent` 名交给同一 AgentProfileResolver�
 
 ### 阶段 3：统一 AgentProfile 解析
 
-- [ ] 实现 AgentProfileResolver。
-- [ ] 合并父 Agent、Definition、模型角色、Prompt、Skill、工具、MCP、权限与 runtime。
-- [ ] 所有权限按“只可收窄”校验。
-- [ ] 缺依赖时报结构化错误。
-- [ ] 保持 deferred tool index、model instructions、Soul 的现有请求期行为。
+- [x] 实现 AgentProfileResolver。（src/agent/agent_profile_resolver.*:父皮+定义+环境账 -> ResolvedAgentProfile,合并次序六步写死在头文件;AgentTool 派发与 Workflow 绑定共用,散在 agent_tool 的手工合并尽数收编。）
+- [x] 合并父 Agent、Definition、模型角色、Prompt、Skill、工具、MCP、权限与 runtime。（预算四字段按"YAML 显式 > 父值"并流,steps 按"入参 > YAML > 配置默认";模型角色照现有回落链 normal ?? 父、cheap ?? normal、lao ?? normal;prompt 三笔、execution_mode/isolation 缺省档、permissions 一并决议。）
+- [x] 所有权限按“只可收窄”校验。（宽窄序 confirm < auto < yolo;比父宽报 agent.permission_widening,派发口结构化明拒;父档经环境账从会话确认档现读。）
+- [x] 缺依赖时报结构化错误。（requires.tools/requires 缺项、MCP 未挂载、预装技能不在清单、allow 越权各报稳定码(agent.missing_dependency/agent.tool_not_granted),不悄悄放宽;宿主没递环境账的旧调用跳过技能/MCP/权限查账,requires 恒查。）
+- [x] 保持 deferred tool index、model instructions、Soul 的现有请求期行为。（Resolver 只出静态决策,system_prompt/model_instructions/Soul/deferred index 一律不搬运;拼装次序一字未动,黄金测试照旧。）
 
-验收：同一 Agent Definition 从 AgentTool 与 Workflow 解析，所得 Profile 完全一致。
+验收：同一 Agent Definition 从 AgentTool 与 Workflow 解析，所得 Profile 完全一致。（test_agent_profile_resolver.cpp 对账册:同一份 complete.yaml 走 BuildSubagentResolveRequest 与 BuildWorkflowAgentResolveRequest 两口,逐字段比,含谓词行为等价;workflow_commands 的 default binding 生产路已真走 Resolver。）
 
 ### 阶段 4：AgentTool 接入
 
@@ -555,10 +555,10 @@ examples/browser/
 ### 能力与安全
 
 - [ ] allow 与 deny 交叠时 deny 胜出。
-- [ ] 子 Agent 不能取到父 Agent 没有的工具。
-- [ ] 项目 Agent 不能抬高权限、取消沙箱或绕过审批。
+- [x] 子 Agent 不能取到父 Agent 没有的工具。（阶段 3:allow 越权报 agent.tool_not_granted,resolver 与派发口两层测试钉;有效面保父面次序。）
+- [x] 项目 Agent 不能抬高权限、取消沙箱或绕过审批。（阶段 3:permissions.mode 比父宽报 agent.permission_widening,派发口明拒——校验落了;运行期强制收窄(子档比父严时把确认拉回)留阶段 4 接。）
 - [ ] MCP 只许引用已有服务，拒绝内联启动配置。
-- [ ] 缺 Skill、MCP、tool、model role 时标 unavailable。
+- [x] 缺 Skill、MCP、tool、model role 时标 unavailable。（阶段 3:缺依赖报 agent.missing_dependency 结构化错并拒发,不退化成全工具 Agent;doctor 的静态缺项账照旧。）
 - [ ] unavailable Agent 不得静默退回 general-purpose。
 - [ ] 日志与 doctor 不泄露密钥、环境变量值。
 
@@ -569,7 +569,7 @@ examples/browser/
 - [ ] 自定义 Agent 后台执行、消息、等待、回收。
 - [ ] 取消与超时。
 - [ ] worktree isolation。
-- [ ] AgentTool 与 Workflow 解析同一 Definition，所得 Profile 一致。
+- [x] AgentTool 与 Workflow 解析同一 Definition，所得 Profile 一致。（阶段 3 对账册 test_agent_profile_resolver.cpp:两口各解析同一份 YAML 逐字段比,含 runtime 五字段/工具谓词行为/权限档/缺项错。）
 - [ ] Workflow 未知 Agent 报错位置清楚。
 
 ### 真机验收

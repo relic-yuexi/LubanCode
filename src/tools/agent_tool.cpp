@@ -69,45 +69,26 @@ std::string CustomAgentPersona(const agent::AgentDefinition& definition) {
     return persona;
 }
 
-// 自定义 Agent 的有效工具名(tools.allow/deny 过滤后):与 RunTask 里写进
-// 皮的那份 tool_filter 同一本账——deny 压过 allow,allow 空表 = 全继承。
-// PromptCapabilities 从这名单推导(单子 §5.4:过滤后剩什么工具,提示词
-// 就只描述什么)。
-std::vector<std::string> CustomEffectiveToolNames(const ToolRegistry& registry,
-                                                  const agent::AgentDefinition& definition) {
-    const std::set<std::string> deny(definition.tools.deny.begin(), definition.tools.deny.end());
-    const std::set<std::string> allow(definition.tools.allow.begin(), definition.tools.allow.end());
-    std::vector<std::string> names;
-    for (const auto& tool : registry.All()) {
-        const std::string name = tool->name();
-        if (deny.count(name) != 0) {
-            continue;
-        }
-        if (!allow.empty() && allow.count(name) == 0) {
-            continue;
-        }
-        names.push_back(name);
-    }
-    return names;
-}
-
-// 子代理的提示词拼装上下文(阶段 2:Prompt Profile 与能力推导)。
+// 子代理的提示词拼装上下文(阶段 2:Prompt Profile 与能力推导;阶段 3 起
+// 自定义 Agent 的三笔决议从 ResolvedAgentProfile 来——合并归 Resolver,
+// 这里只按决议拼,不再读定义原文,拼装次序一字不动)。
 // 四段开关(mcp/web/lsp/wire)仍从皮(AgentProfile)来——子代理默认与主
 // 代理同段;自定义 Agent 另带两笔:
-//   prompt.profile -> PromptOptions.profile + project_prompts_dir:core 归
-//     Profile 五层回路解析,生成的 persona 让位(契约 §4.2/§6.2);没点名
-//     就照旧用生成 persona,行为与阶段 1 一字不差。
-//   tools.allow/deny 过滤后的有效工具表 -> PromptCapabilities:feature 段
-//     只描述有效工具,web/mcp/lsp 不再吃父会话的配置开关(工具都不在表
-//     里,文案不装,单子 §5.4)。
-//   prompt.project_instructions:omit -> AGENTS.md 那段不注(契约 §4.2)。
-agent::PromptOptions BuildSubagentPromptOptions(ToolRegistry& registry, const std::string& cwd,
-                                                const std::string& agent_type, const std::string& prompts_dir,
+//   resolved.prompt_profile -> PromptOptions.profile + project_prompts_dir:
+//     core 归 Profile 五层回路解析,生成的 persona 让位(契约 §4.2/§6.2);
+//     没点名就照旧用生成 persona,行为与阶段 1 一字不差。
+//   resolved.effective_tools(Resolver 过滤后的有效工具表)->
+//     PromptCapabilities:feature 段只描述有效工具,web/mcp/lsp 不再吃父
+//     会话的配置开关(工具都不在表里,文案不装,单子 §5.4)。
+//   resolved.project_instructions = false -> AGENTS.md 那段不注(契约 §4.2)。
+agent::PromptOptions BuildSubagentPromptOptions(const std::string& cwd, const std::string& agent_type,
+                                                const std::string& prompts_dir,
                                                 const std::string& project_prompts_dir,
                                                 const std::string& project_instructions,
                                                 const std::string& skills_segment,
                                                 const agent::AgentProfile& agent_profile,
-                                                const CustomAgentMaterial* custom) {
+                                                const CustomAgentMaterial* custom,
+                                                const agent::ResolvedAgentProfile* resolved) {
     agent::PromptOptions prompt_options;
     prompt_options.cwd = cwd;
     prompt_options.persona = agent_type == "Explore"
@@ -120,17 +101,16 @@ agent::PromptOptions BuildSubagentPromptOptions(ToolRegistry& registry, const st
     prompt_options.web = agent_profile.prompt_sections.web;
     prompt_options.lsp = agent_profile.prompt_sections.lsp;
     prompt_options.wire = agent_profile.prompt_sections.wire;
-    if (custom != nullptr) {
-        if (custom->definition.prompt.profile.has_value()) {
-            prompt_options.profile = *custom->definition.prompt.profile;
+    if (resolved != nullptr) {
+        if (!resolved->prompt_profile.empty()) {
+            prompt_options.profile = resolved->prompt_profile;
             prompt_options.persona.clear();  // core 归 Profile 五层回路
             prompt_options.project_prompts_dir = project_prompts_dir;
         }
-        if (custom->definition.prompt.project_instructions == agent::AgentPromptSpec::ProjectInstructions::Omit) {
+        if (!resolved->project_instructions) {
             prompt_options.project_instructions.clear();
         }
-        prompt_options.capabilities =
-            agent::DerivePromptCapabilities(CustomEffectiveToolNames(registry, custom->definition));
+        prompt_options.capabilities = agent::DerivePromptCapabilities(resolved->effective_tools);
     }
     return prompt_options;
 }
@@ -802,13 +782,11 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
     // 两者同现取新名。没给就用 default_max_steps_per_turn_(配置来的)。
     // 成本刹车(P2-6)同批:max_time_secs(墙钟硬线,秒)、max_tokens(累计
     // token 硬线,完整输入+输出)、budget_soft_percent(软线百分比,1~100,
-    // 缺省 80;0 = 只留硬闸不催办)。解析次序:入参显式 > 自定义 Agent YAML
-    // 的 runtime 字段(P2-1:max_steps_per_turn 真能落到派出预算)> 配置默认。
+    // 缺省 80;0 = 只留硬闸不催办)。解析次序(阶段 3 起 YAML 一并归
+    // AgentProfileResolver):入参显式 > 自定义 Agent YAML 的 runtime 字段
+    //(P2-1:max_steps_per_turn 真能落到派出预算)> 配置默认。
     SubagentBudget budget;
     budget.max_steps_per_turn = default_max_steps_per_turn_;
-    if (custom.has_value() && custom->definition.max_steps_per_turn.has_value()) {
-        budget.max_steps_per_turn = *custom->definition.max_steps_per_turn;
-    }
     const auto steps_arg = input.find("max_steps_per_turn");
     const auto turns_arg = input.find("max_turns");
     const nlohmann::json* budget_arg = nullptr;
@@ -871,6 +849,45 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
         budget.soft_percent = value;
     }
 
+    // ---- 阶段 3:统一解析(自定义 Agent)---------------------------------------
+    // 父上下文 + 定义 -> ResolvedAgentProfile 的合并只许发生在
+    // AgentProfileResolver 一处(单子 §6.1:一条业务规矩只许有一处权威)。
+    // 这里的活材料:皮(agent_profile_,SetAgentProfile 时已剥掉 main 的活
+    // 字段)、配置默认步数、会话同步的窗口、宿主递进的环境账(权限/技能/
+    // MCP/角色路由/思考档)与父有效工具面(本表 + 延迟过滤)。结构化错误
+    //(权限越宽、缺依赖、allow 越权)在此明拒——不是入参错,不进连败账。
+    std::optional<agent::ResolvedAgentProfile> resolved_storage;
+    if (custom.has_value()) {
+        std::optional<agent::AgentProfileResolveEnvironment> environment;
+        if (resolve_environment_) {
+            environment = resolve_environment_();
+        }
+        std::vector<std::string> parent_tool_names;
+        parent_tool_names.reserve(sub_registry_.All().size());
+        for (const auto& tool : sub_registry_.All()) {
+            if (tool_filter_ == nullptr || tool_filter_(*tool)) {
+                parent_tool_names.push_back(tool->name());
+            }
+        }
+        agent::AgentDispatchOverrides overrides;
+        if (budget_arg != nullptr) {
+            overrides.max_steps_per_turn = budget.max_steps_per_turn;  // 入参显式压过 YAML
+        }
+        resolved_storage = agent::ResolveAgentProfile(agent::BuildSubagentResolveRequest(
+            custom->definition, agent_profile_, std::move(parent_tool_names),
+            default_max_steps_per_turn_, context_window_tokens_, environment, overrides));
+        if (!resolved_storage->ok()) {
+            return {"自定义 Agent \"" + agent_type + "\" 解析不过,已拒发(定义或环境有错,重试同样的入参"
+                    "不会成功;先 /agent doctor " + agent_type + " 看诊断):\n" +
+                        agent::FormatResolutionIssues(resolved_storage->issues),
+                    true};
+        }
+        // 步数预算的权威账在解析器里(入参 > YAML > 配置默认),派发链照抄。
+        budget.max_steps_per_turn = resolved_storage->profile.runtime.max_steps_per_turn;
+    }
+    const agent::ResolvedAgentProfile* resolved =
+        resolved_storage.has_value() ? &*resolved_storage : nullptr;
+
     // 入参过了检:连败账翻篇——改对了就不记仇,后续调用从引导文案重新起。
     param_fail_cause_.clear();
     param_fail_streak_ = 0;
@@ -881,16 +898,17 @@ Tool::Result AgentTool::execute(const nlohmann::json& input) {
         mode_explicit ? mode_background : input.value("run_in_background", background_by_default_);
     if (background) {
         return LaunchBackground(input, title, agent_type, task_registry, budget, isolate,
-                                custom.has_value() ? &*custom : nullptr);
+                                custom.has_value() ? &*custom : nullptr, resolved);
     }
     return ExecuteForeground(input, title, agent_type, task_registry, budget, isolate,
-                             custom.has_value() ? &*custom : nullptr);
+                             custom.has_value() ? &*custom : nullptr, resolved);
 }
 
 Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std::string& title,
                                           const std::string& agent_type, ToolRegistry& task_registry,
                                           const SubagentBudget& budget, bool isolate,
-                                          const CustomAgentMaterial* custom) {
+                                          const CustomAgentMaterial* custom,
+                                          const agent::ResolvedAgentProfile* resolved) {
     // isolation=worktree:建房、锁房、工具表套 base_dir 包装、隔离范围压栈,
     // 跑完收工(干净删房,有活留房附路径)。cwd 一根指头都不动。
     std::optional<lubancode::cli::AgentWorktree> room;
@@ -933,7 +951,7 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
                             scope_storage.has_value() ? &*scope_storage : nullptr,
                             /*background_hooks=*/nullptr,
                             /*background_permissions=*/nullptr,
-                            custom);
+                            custom, resolved);
     if (room.has_value()) {
         result.AppendText(FinishIsolationRoom(*room, git_runner_));
     }
@@ -950,7 +968,8 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
 Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std::string& title,
                                          const std::string& agent_type, ToolRegistry& task_registry,
                                          const SubagentBudget& budget, bool isolate,
-                                         const CustomAgentMaterial* custom) {
+                                         const CustomAgentMaterial* custom,
+                                         const agent::ResolvedAgentProfile* resolved) {
     if (!detached_backend_factory_) {
         return {"当前入口没有配置后台子代理后端,请把 run_in_background 设为 false", true};
     }
@@ -1019,10 +1038,11 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
     const std::string prompt = task->snapshot.prompt;
     // 病十(批三):四段开关从皮(AgentProfile)来,子代理默认与主代理同段。
     // 自定义 Agent(P2-2)另换人格段并预装技能;阶段 2 起选 Prompt Profile
-    // 与能力推导(见 BuildSubagentPromptOptions)。
+    // 与能力推导,阶段 3 起三笔决议从 ResolvedAgentProfile 来(见
+    // BuildSubagentPromptOptions)。
     agent::PromptOptions prompt_options = BuildSubagentPromptOptions(
-        task_registry, cwd_, agent_type, prompts_dir_, project_prompts_dir_, project_instructions_,
-        skills_segment_, agent_profile_, custom);
+        cwd_, agent_type, prompts_dir_, project_prompts_dir_, project_instructions_,
+        skills_segment_, agent_profile_, custom, resolved);
     std::string system_prompt = agent::AssembleSystemPrompt(prompt_options);
     if (custom != nullptr) {
         system_prompt += AppendPreloadedSkills(custom->definition.skills_preload, custom->preloaded_skills);
@@ -1030,7 +1050,7 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
     system_prompt += "\n\n这是后台任务。启动目录是 " + cwd_ +
                      "。调用文件与搜索工具时一律传绝对路径；不要依赖进程当前目录，它可能随主会话切换。";
     system_prompt = agent::WithModelInstructions(system_prompt, detached.model_instructions);
-    if (custom == nullptr || custom->definition.prompt.soul != agent::AgentPromptSpec::Soul::Off) {
+    if (resolved == nullptr || resolved->soul) {
         system_prompt = agent::WithSoul(system_prompt, detached.soul);
     }
     ToolRegistry* registry = detached_registry != nullptr ? detached_registry.get() : &task_registry;
@@ -1055,6 +1075,8 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
         {id, std::thread([this, task, registry, prompt, agent_type, budget,
                                 custom_copy = custom != nullptr ? std::make_optional(*custom)
                                                                 : std::nullopt,
+                                resolved_copy = resolved != nullptr ? std::make_optional(*resolved)
+                                                                    : std::nullopt,
                                 detached = std::move(detached),
                                 system_prompt = std::move(system_prompt),
                                 detached_registry = std::move(detached_registry),
@@ -1080,7 +1102,8 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
             result = RunTask(backend, effective_registry, prompt, agent_type, budget, nullptr, task,
                              &detached, &system_prompt, scope_storage.has_value() ? &*scope_storage : nullptr,
                              background_hooks, background_permissions,
-                             custom_copy.has_value() ? &*custom_copy : nullptr);
+                             custom_copy.has_value() ? &*custom_copy : nullptr,
+                             resolved_copy.has_value() ? &*resolved_copy : nullptr);
         } catch (const std::exception& error) {
             result = {"子代理执行失败: " + std::string(error.what()), true};
         } catch (...) {
@@ -1109,7 +1132,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                 const IsolationScope* isolation_scope,
                                 const std::shared_ptr<lubancode::hooks::DetachedHookSession>& background_hooks,
                                 const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions,
-                                const CustomAgentMaterial* custom) {
+                                const CustomAgentMaterial* custom,
+                                const agent::ResolvedAgentProfile* resolved) {
     // 派工治理(转发 SubagentScheduler):全局并发槽先占上(前台 + 后台都
     // 算),满了明报;前台任务再记一层嵌套深度,超限明报。RAII,拒绝路径也
     // 照退。
@@ -1138,8 +1162,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         system_prompt = *prepared_system_prompt;
     } else {
         agent::PromptOptions prompt_options = BuildSubagentPromptOptions(
-            effective_registry, cwd_, agent_type, prompts_dir_, project_prompts_dir_, project_instructions_,
-            skills_segment_, agent_profile_, custom);
+            cwd_, agent_type, prompts_dir_, project_prompts_dir_, project_instructions_,
+            skills_segment_, agent_profile_, custom, resolved);
         system_prompt = agent::WithDeferredToolsIndex(
             agent::AssembleSystemPrompt(prompt_options),
             agent_type == "Explore" ? std::string()
@@ -1164,12 +1188,17 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 时间/token 硬线与软线百分比一并落进运行档案,AgentLoop 在步顶执法。
     // main 的 budget_soft_percent 默认 0(不催),子代理派发一律带软线。
     // model 走皮上的 request 档案(批四·病十一其一:运行档案不再另存一份)。
-    agent::AgentRuntimeProfile task_profile = runtime_profile_;
-    task_profile.max_steps_per_turn = budget.max_steps_per_turn;
+    // 阶段 3:自定义 Agent 的运行档案与请求档案从 ResolvedAgentProfile 来
+    //(Resolver 已按"入参 > YAML > 父值"合并完,含四枚预算字段与模型角色);
+    // 内置两枚与旧调用路径照旧从 runtime_profile_/agent_profile_ 派生,一字
+    // 不动。成本三线(wall/token/软线)是派发参数不是 YAML 字段,这里叠加。
+    agent::AgentRuntimeProfile task_profile =
+        resolved != nullptr ? resolved->profile.runtime : runtime_profile_;
+    task_profile.max_steps_per_turn = budget.max_steps_per_turn;  // 与 Resolver 同一笔账
     task_profile.max_wall_secs = budget.max_wall_secs;
     task_profile.max_total_tokens = budget.max_total_tokens;
     task_profile.budget_soft_percent = budget.soft_percent;
-    if (context_window_tokens_ > 0) {
+    if (resolved == nullptr && context_window_tokens_ > 0) {
         task_profile.context_window_tokens = context_window_tokens_;
     }
     // 活度账 + 诊断日志的包装后端:子代理的每次模型请求都从这里过。必须
@@ -1180,7 +1209,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         traced_storage.emplace(backend, ledger_, task);
     }
     api::Backend& loop_backend = traced_storage.has_value() ? *traced_storage : backend;
-    agent::AgentProfile task_agent_profile = agent_profile_;
+    agent::AgentProfile task_agent_profile = resolved != nullptr ? resolved->profile : agent_profile_;
     task_agent_profile.runtime = std::move(task_profile);
     task_agent_profile.system_prompt = system_prompt;
     if (detached != nullptr) {
@@ -1192,8 +1221,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     }
     // 工具可见性(病十三的方向):谓词与拒绝文案写进皮。Explore 的只读
     // 白名单是角色限制;自定义 Agent 的 tools.allow/deny 同是角色限制
-    // (P2-1:library-reviewer 只给 read_file/search,写工具确实看不见);
-    // 其余角色沿用装配层灌进来的过滤(tool_search)。
+    //(P2-1:library-reviewer 只给 read_file/search,写工具确实看不见)——
+    // 阶段 3 起谓词由 AgentProfileResolver 装进 resolved->profile,这里整份
+    // 照抄,不再手工重拼;其余角色沿用装配层灌进来的过滤(tool_search)。
     if (agent_type == "Explore") {
         task_agent_profile.tool_filter = [](const Tool& tool) { return ExploreAllows(tool); };
         // 角色限制明说(规格:错误说明写"角色限制"):模型撞到这堵墙时,
@@ -1201,28 +1231,23 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         task_agent_profile.tool_filter_denial =
             "此工具不在 Explore 角色的只读白名单内(角色限制):请改用只读工具(read_file/search/web_fetch/"
             "web_search/lsp)完成调查;确需写入,把改动建议写进结论交回主代理执行。";
-    } else if (custom != nullptr) {
-        auto allow = std::make_shared<const std::set<std::string>>(custom->definition.tools.allow.begin(),
-                                                                   custom->definition.tools.allow.end());
-        auto deny = std::make_shared<const std::set<std::string>>(custom->definition.tools.deny.begin(),
-                                                                  custom->definition.tools.deny.end());
-        const std::string name = custom->definition.name;
-        task_agent_profile.tool_filter = [allow, deny](const Tool& tool) {
-            if (deny->count(tool.name()) != 0) {
-                return false;  // deny 压过 allow(与 doctor 同一本账)
-            }
-            return allow->empty() || allow->count(tool.name()) != 0;
-        };
-        task_agent_profile.tool_filter_denial =
-            "此工具不在自定义 Agent " + name + " 的工具边界内(角色限制):定义只开放 tools.allow 名单"
-            "(deny 再压一层)。请改用名单内工具完成;确需边界外操作,把建议写进结论交回主代理执行。";
+    } else if (resolved != nullptr) {
+        // Resolver 已按 allow/deny 装好谓词;allow/deny 全空时旧语义是挂一只
+        // 全放行谓词(自定义 Agent 不吃装配层的延迟过滤)——照旧,一字不动。
+        if (resolved->profile.tool_filter != nullptr) {
+            task_agent_profile.tool_filter = resolved->profile.tool_filter;
+            task_agent_profile.tool_filter_denial = resolved->profile.tool_filter_denial;
+        } else {
+            task_agent_profile.tool_filter = [](const Tool&) { return true; };
+        }
     } else if (detached == nullptr && tool_filter_) {
         task_agent_profile.tool_filter = tool_filter_;
     }
     // 阶段 2:prompt.soul: off 的自定义 Agent 不带魂(契约 §4.2——Soul 只
     // 许继承或关,不许在 Agent 文件里另塞正文)。前台任务的魂从皮
-    //(AgentProfile::soul,请求期由 AgentLoop 注入)继承,这里只关不添。
-    if (custom != nullptr && custom->definition.prompt.soul == agent::AgentPromptSpec::Soul::Off) {
+    //(AgentProfile::soul,请求期由 AgentLoop 注入)继承,这里只关不添
+    //(resolved->profile 的魂在 Resolver 侧本就清空,关即不注)。
+    if (resolved != nullptr && !resolved->soul) {
         task_agent_profile.soul.clear();
     }
     agent::Agent sub_agent(loop_backend, effective_registry, std::move(task_agent_profile));

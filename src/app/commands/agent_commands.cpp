@@ -274,13 +274,31 @@ std::vector<std::string> FormatAgentDoctorReport(const lubancode::agent::AgentCa
     }
 
     // ---- runtime 与 permissions:登账;权限越界比对属阶段 3 ----
-    std::string runtime = "runtime: max_steps_per_turn=";
-    runtime += def.max_steps_per_turn.has_value() ? std::to_string(*def.max_steps_per_turn) : std::string("继承");
+    // 阶段 3 起五枚预算字段一并登(并流口径:YAML 显式 > 父值;steps 另有
+    // 入参与配置默认两级,见 AgentProfileResolver)。显式与否如实标——
+    // "继承"就是落父值,不猜数。
+    std::string runtime = "runtime: max_output_tokens=";
+    runtime += def.max_output_tokens.has_value()
+                   ? std::to_string(*def.max_output_tokens) + "(YAML 显式,视同 config 级)"
+                   : std::string("继承");
+    runtime += " · max_steps_per_turn=";
+    runtime += def.max_steps_per_turn.has_value()
+                   ? std::to_string(*def.max_steps_per_turn) + "(入参 > YAML > 配置默认)"
+                   : std::string("继承");
+    runtime += " · max_context_chars=";
+    runtime += def.max_context_chars.has_value() ? std::to_string(*def.max_context_chars)
+                                                 : std::string("继承");
+    runtime += " · context_window_tokens=";
+    runtime += def.context_window_tokens.has_value() ? std::to_string(*def.context_window_tokens)
+                                                     : std::string("继承");
+    runtime += " · length_continuations=";
+    runtime += def.length_continuations.has_value() ? std::to_string(*def.length_continuations)
+                                                    : std::string("继承");
     runtime += " · execution_mode=" + (def.execution_mode.empty() ? std::string("auto") : def.execution_mode);
     runtime += " · isolation=" + (def.isolation.empty() ? std::string("none") : def.isolation);
     lines.push_back(std::move(runtime));
     lines.push_back("permissions: " + (def.permissions_mode.empty() ? std::string("inherit") : def.permissions_mode) +
-                    "(只能比父 Agent 更窄;越界比对属阶段 3)");
+                    "(只能比父 Agent 更窄;派发时 AgentProfileResolver 按 agent.permission_widening 明拒)");
 
     // ---- 结论:定义解析过 ≠ 依赖齐;缺项如实数出来 ----
     std::size_t problems = 0;
@@ -335,6 +353,37 @@ std::vector<std::string> FormatAgentInspectReport(const lubancode::agent::AgentC
     const std::string soul = def.prompt.soul == lubancode::agent::AgentPromptSpec::Soul::Off ? "off" : "inherit";
     lines.push_back("prompt: profile=" + DescribeProfile(def) + " · project_instructions=" + project_instructions +
                     " · soul=" + soul);
+
+    // runtime 并流账(阶段 3):定义里显式声明的预算字段逐笔点名,没声明的
+    // 落父值。来源口径:入参显式 > YAML runtime > 父值/配置默认
+    //(AgentProfileResolver 是唯一权威,两条派发路同一份)。
+    {
+        std::string declared;
+        const auto append = [&declared](const char* field, const std::string& value) {
+            if (!declared.empty()) {
+                declared += "、";
+            }
+            declared += std::string(field) + "=" + value;
+        };
+        if (def.max_output_tokens.has_value()) {
+            append("max_output_tokens", std::to_string(*def.max_output_tokens) + "(来源档:config 级)");
+        }
+        if (def.max_steps_per_turn.has_value()) {
+            append("max_steps_per_turn", std::to_string(*def.max_steps_per_turn));
+        }
+        if (def.max_context_chars.has_value()) {
+            append("max_context_chars", std::to_string(*def.max_context_chars));
+        }
+        if (def.context_window_tokens.has_value()) {
+            append("context_window_tokens", std::to_string(*def.context_window_tokens));
+        }
+        if (def.length_continuations.has_value()) {
+            append("length_continuations", std::to_string(*def.length_continuations));
+        }
+        lines.push_back("runtime 并流: " +
+                        (declared.empty() ? std::string("定义未显式声明预算字段,五枚全落父值")
+                                          : ("显式声明 " + declared + ";其余落父值")));
+    }
 
     // 来源账本:整张 default 模块树在这个 Profile 上下文下逐段解析。
     const std::string profile = def.prompt.profile.value_or(std::string());

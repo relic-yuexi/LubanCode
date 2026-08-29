@@ -49,8 +49,13 @@ struct AgentDefinitionIssue {
     int line = -1;        // 1 起的行号;拿不到时 -1
     int column = -1;      // 1 起的列号;拿不到时 -1
     bool warning = false;
+    // 稳定错误码(阶段 3 起,Resolver 的合并期诊断用,契约 §9.2/§9.3 的码
+    // 表:agent.permission_widening 一族)。空 = 解析层老账(码进文档表,
+    // message 里是人话)——解析层不回头补码,两级各自安好。
+    std::string code;
 
-    // 诊断里打印的那一行:"file:line:col `field`: message"(行列缺席就短写)。
+    // 诊断里打印的那一行:"file:line:col `field` [code]: message"(行列与
+    // 码缺席就短写)。
     std::string Format(const std::string& file_label) const;
 };
 
