@@ -1,6 +1,5 @@
 # 多前端外壳与浏览器 Tab：AppServer 承载设计
 - 状态：阶段 A 已落地（0.26.109 WS 承载）；阶段 B（输入路由与暂停）起待实现
-- 状态：待实现
 - 日期：2026-08-29
 - 前置：`todos/内嵌浏览器调试工作台_BrowserRuntime与Package边界.todo`（阶段 0-3、5 已落）
 - 相关：`src/app_server/`（协议 1.1）、`docs/features/app-server/README.md`、`browser/`（Runtime 与 sidecar）

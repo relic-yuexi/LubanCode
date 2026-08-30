@@ -1,6 +1,5 @@
 # Kimi 保留式思考、工具循环与历史回传兼容设计
 - 状态：P0 已落地（0.26.120：Always 回传、四模型方言定档、loopback 契约钉死）；P1（K2.6 可选跨轮）、P2（真机探针）待实现
-- 状态：已定位，待实现
 - 日期：2026-08-30
 - 级别：P0（`kimi-k3`、`kimi-k2.7-code` 协议合规；`kimi-k2.6` 工具循环正确性）
 - 范围：Moonshot OpenAI-compatible Chat API、`reasoning_content` 接收与原样回传、`thinking.keep`、模型级 reasoning 方言、会话恢复、compact 边界、测试与诊断
