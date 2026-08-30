@@ -1774,6 +1774,13 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             }
             config.features_loop = field["loop"].get<bool>();
         }
+        if (field.contains("trajectory")) {
+            if (!field["trajectory"].is_boolean()) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 features.trajectory 必须是布尔值");
+            }
+            config.features_trajectory = field["trajectory"].get<bool>();
+        }
     }
     // goals 段:预算默认值(整段回退;duration 收原始字符串)。
     if (parsed.contains("goals")) {
@@ -2587,6 +2594,16 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
                 : (global_ptr != nullptr && global_ptr->features_loop.has_value() ? global_ptr : nullptr);
         if (loop_file != nullptr) {
             result.config.features_loop = *loop_file->features_loop;
+        }
+        // P0-2 轨迹:同一待遇(项目级压全局,环境变量在
+        // runtime::ResolveTrajectoryEnabled 里合成)。
+        const FileConfig* trajectory_file =
+            project_ptr != nullptr && project_ptr->features_trajectory.has_value()
+                ? project_ptr
+                : (global_ptr != nullptr && global_ptr->features_trajectory.has_value() ? global_ptr
+                                                                                       : nullptr);
+        if (trajectory_file != nullptr) {
+            result.config.features_trajectory = *trajectory_file->features_trajectory;
         }
         const FileConfig* goals_file = project_ptr != nullptr && project_ptr->goals.has_value()
                                            ? project_ptr

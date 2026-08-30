@@ -12,6 +12,20 @@ namespace lubancode::runtime {
 
 SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)), store_(options_.sessions_dir) {
     thread_id_ = ids_.NextThreadId();
+    // P0-2 轨迹账:flag 开的会话在这里开张(进程一场,LaunchSession)。
+    // 开不出来记 error,由装配层决定会话启动失败——本类不回退旧写口。
+    if (options_.trajectory_enabled) {
+        TrajectorySessionLedger::Options ledger_options;
+        ledger_options.workspace_root = options_.trajectory_workspace_root;
+        ledger_options.readable_workspace_name = options_.trajectory_workspace_name;
+        ledger_options.lubancode_version = options_.lubancode_version;
+        auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
+        if (ledger.has_value()) {
+            trajectory_.emplace(std::move(*ledger));
+        } else {
+            trajectory_open_error_ = ledger.error();
+        }
+    }
 }
 
 SessionRuntime::~SessionRuntime() = default;
@@ -32,6 +46,11 @@ TurnEventAdapter SessionRuntime::MakeTurnAdapter() {
 
 SessionBeginResult SessionRuntime::EnsureBegun(const std::string& first_text, const std::string& model,
                                                const std::string& cwd) {
+    if (options_.trajectory_enabled) {
+        // P0-2:单一真账在 Trajectory Journal,旧 SessionStore 不建档
+        //(禁 dual-write)。标题等控制事实后续走 control.* 事件。
+        return SessionBeginResult::Disabled;
+    }
     if (store_.active()) {
         return SessionBeginResult::Active;
     }
@@ -68,6 +87,11 @@ SessionBeginResult SessionRuntime::EnsureBegun(const std::string& first_text, co
 
 SessionPersistResult SessionRuntime::PersistNew(const std::vector<api::Message>& history, const std::string& model,
                                                 const std::string& cwd) {
+    if (options_.trajectory_enabled) {
+        // P0-2:轮末补抄停用(§15.3"删除轮末按 persisted_count_ 扫 history
+        // 追加这条路")。轨迹路的事实已随事件即时落账。
+        return SessionPersistResult::Nothing;
+    }
     if (options_.sessions_dir.empty() || store_broken_) {
         return SessionPersistResult::Nothing;
     }

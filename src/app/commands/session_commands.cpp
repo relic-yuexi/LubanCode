@@ -36,6 +36,7 @@
 #include "cli/terminal_port.hpp"
 #include "cli/format_utils.hpp"
 #include "hooks/dispatcher.hpp"
+#include "hooks/hash.hpp"  // Sha256Hex:P0-2 compact 状态指纹
 #include "tools/tool_search.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/i18n.hpp"
@@ -75,6 +76,31 @@ std::size_t PressureEstimateTokens(lubancode::agent::Agent& loop,
     lubancode::agent::StructuralCompressionStats scratch_stats;
     return lubancode::agent::EstimateHistoryTokens(lubancode::agent::CompressWorkingView(
         history, loop.context().structural_options(), scratch_stats, scratch_memo, /*store=*/nullptr));
+}
+
+// P0-2 轨迹:compact 前后的 effective history 指纹(compact.applied 的
+// old/new state hash)。投影标记用——角色序 + 各块正文拼串再 hash,不是
+// 密码学真值;同一份历史两次算必然同值(确定性重放的锚点)。
+std::string HistoryStateHash(const std::vector<lubancode::api::Message>& history) {
+    std::string buffer;
+    for (const auto& message : history) {
+        buffer += message.role == lubancode::api::Role::User
+                      ? std::string("U")
+                      : (message.role == lubancode::api::Role::Assistant ? std::string("A") : std::string("?"));
+        buffer += std::to_string(message.content.size());
+        for (const auto& block : message.content) {
+            if (const auto* text = std::get_if<lubancode::api::TextBlock>(&block)) {
+                buffer += text->text;
+            } else if (const auto* thinking = std::get_if<lubancode::api::ThinkingBlock>(&block)) {
+                buffer += thinking->text;
+            } else if (const auto* call = std::get_if<lubancode::api::ToolUseBlock>(&block)) {
+                buffer += call->id + call->name + call->input.dump();
+            } else if (const auto* result = std::get_if<lubancode::api::ToolResultBlock>(&block)) {
+                buffer += result->tool_use_id + result->content;
+            }
+        }
+    }
+    return lubancode::hooks::Sha256Hex(buffer);
 }
 
 // 反涨闸(0.26.84 治三,阶段 0 收口):压缩后的新史(压力口径)不比旧史小
@@ -1459,6 +1485,13 @@ void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) 
         return;
     }
     lubancode::agent::BackgroundCallAccounting compact_accounting;
+    // P0-2 轨迹:typed 状态机开卷(§14.4)。requested 先 durable,随后才
+    // 动手;old epoch 与输入状态指纹随账带出。flag 关的会话零调用。
+    const std::string trajectory_state_before =
+        in.trajectory != nullptr ? HistoryStateHash(loop.History()) : std::string();
+    if (in.trajectory != nullptr) {
+        in.trajectory->RecordCompactRequested("manual", *in.session_compact_epoch, trajectory_state_before);
+    }
     const auto compact_result =
         HandleCompactCommand(args, loop, *compact_routed.backend, compact_routed.route, theme,
                              in.spinner_enabled, in.build_compact_options(), *in.session_compact_epoch,
@@ -1478,6 +1511,17 @@ void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) 
                                 std::to_string(compact_accounting.duration_ms / 1000) + "." +
                                 std::to_string((compact_accounting.duration_ms % 1000) / 100) +
                                 "s · 校验通过(manifest 守恒)";
+    }
+    // P0-2 轨迹:applied/failed 按 Event 投影落账;原事件不改、不抄
+    //(§14.4:只改变后续 request 的引用,不重写事实)。
+    if (in.trajectory != nullptr) {
+        if (compact_result.event.has_value()) {
+            in.trajectory->RecordCompactApplied(trajectory_state_before, HistoryStateHash(loop.History()),
+                                                compact_result.before_tokens, compact_result.after_tokens,
+                                                *in.session_compact_epoch);
+        } else {
+            in.trajectory->RecordCompactFailed("compact_not_applied");
+        }
     }
     // 压缩把 history 换短了(失败则原样):落盘基线收到新长度,
     // 存档文件保持只追加——全量流水不动,补写一行 compact_v2
@@ -1561,6 +1605,13 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
     }
 
     out << theme.stats << tr(midturn ? "compact.midturn_start" : "compact.auto_start") << theme.reset << "\n";
+    // P0-2 轨迹:auto/midturn 与 manual 同一状态机,只差 trigger(§14.4)。
+    const std::string trajectory_state_before =
+        in.trajectory != nullptr ? HistoryStateHash(loop.History()) : std::string();
+    if (in.trajectory != nullptr) {
+        in.trajectory->RecordCompactRequested(midturn ? "midturn" : "auto", *in.session_compact_epoch,
+                                              trajectory_state_before);
+    }
     lubancode::cli::Spinner spinner(theme, in.spinner_enabled);
     // 走路由给的 backend(cheap 跨 provider 时是另一只裸 client,理由同
     // /compact:压缩自己把 route.model 写进 request.model)。分层路:装得下
@@ -1600,6 +1651,9 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
     if (!result.has_value()) {
         out << theme.error << trf("compact.auto_failed", result.error().message) << theme.reset
             << tr("compact.auto_failed_tail") << "\n";
+        if (in.trajectory != nullptr) {
+            in.trajectory->RecordCompactFailed(result.error().message);
+        }
         // 失败也收滞回账:本 turn 的压缩尝试到此为止——同一段历史反复发
         // 摘要请求,烧的是几分钟一轮的压缩费,循环比失败更伤。字符安全网
         // 仍兜底,回执已在上面给了。
@@ -1629,6 +1683,9 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
         if (in.hysteresis != nullptr) {
             in.hysteresis->armed = true;
             in.hysteresis->last_post_tokens = before_tokens;
+        }
+        if (in.trajectory != nullptr) {
+            in.trajectory->RecordCompactFailed("grown_history_rejected");
         }
         return false;
     }
@@ -1677,6 +1734,12 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
 
     // 落盘基线收到新长度,补写 compact 事件,理由同 /compact 分支。
     *in.persisted_count = (std::min)(*in.persisted_count, loop.History().size());
+    // P0-2 轨迹:applied 落 Journal(反涨拒收的路在上面 return,不落
+    // applied——effective history 没换,如实不算生效)。
+    if (in.trajectory != nullptr) {
+        in.trajectory->RecordCompactApplied(trajectory_state_before, HistoryStateHash(loop.History()),
+                                            before_tokens, after_tokens, *in.session_compact_epoch);
+    }
     if (in.session_store->active() && !in.session_store_broken) {
         // 写盘校验,理由同 /compact 分支。
         if (in.attach_goal_snapshot) {

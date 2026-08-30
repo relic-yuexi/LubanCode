@@ -36,6 +36,7 @@
 #include "runtime/event.hpp"
 #include "runtime/event_sink.hpp"
 #include "runtime/id_authority.hpp"
+#include "runtime/tool_trajectory_sink.hpp"
 
 namespace lubancode::runtime {
 
@@ -59,6 +60,12 @@ public:
     // Runtime 事件落点(可空:终端老路只落 session 不上事件流)。装了
     // app-server/Json sink 的会话在这里接上,工具相位随 ServerEvent 走。
     void AttachSink(EventSink* sink) { sink_ = sink; }
+
+    // 轨迹落点(P0-2,§15.2 ToolTraceHub -> TrajectorySink):flag 开的
+    // 会话由 turn_runner 每轮挂上;挂了之后持久账走轨迹(不写
+    // SessionStore,禁 dual-write),没挂照旧路。每轮各一只,轮结束 Detach。
+    void AttachTrajectory(ToolTrajectorySink* trajectory) { trajectory_ = trajectory; }
+    void DetachTrajectory() { trajectory_ = nullptr; }
 
     // Workflow projection(可空):录制开启时由装配层挂上,只吃 execution_
     // id/outcome/error_code/摘要——不吃原始入参/结果正文(单子"WorkflowRecorder
@@ -114,6 +121,9 @@ public:
     // 没在跑 agent 工具时为空——子代理事件照发,parent 如实缺边。
     std::string current_agent_execution() const;
     void set_current_agent_execution(std::string execution_id);
+    // 同一枚 agent 调用的模型侧 call_id(tool_use id;P0-2 轨迹接线:
+    // 子代理 run.started 的 relations.parent_call_id 从这里取)。
+    std::string current_agent_call_id() const;
 
     // 某一轮 turn 的 finished 执行快照(goal 采证用):按投递序拷出
     // recent_ 里 turn_id 匹配、kind=ExecutionFinished 的事件。进程内账
@@ -133,6 +143,7 @@ private:
     sessions::SessionStore* store_;  // 不持有;空 = 只投影不落盘
     Options options_;
     EventSink* sink_ = nullptr;
+    ToolTrajectorySink* trajectory_ = nullptr;  // P0-2:不持有,轮内由装配层挂
     Projection projection_;
 
     ServerEvent MakeWarningEvent(const agent::ToolTraceEvent& event, const std::string& code);
@@ -144,6 +155,7 @@ private:
     std::string turn_id_;
     std::set<std::string> blocked_executions_;      // started 落盘失败被拦的 execution
     std::string current_agent_execution_;           // 进行中的 agent 调用(parent 边)
+    std::string current_agent_call_id_;             // 同一枚调用的模型 tool_use id
     std::uint64_t dropped_count_ = 0;               // 非关键事件丢弃计数(队列满口径)
 };
 

@@ -392,6 +392,9 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
             break;
     }
     options.session_model = config_result.config.model;
+    // P0-2 轨迹:与终端同一颗 flag(features.trajectory + 环境变量)。
+    options.features_trajectory =
+        lubancode::runtime::ResolveTrajectoryEnabled(config_result.config.features_trajectory);
     // 浏览器面(可见调试阶段 3):sidecar 命令解析——环境变量
     // LUBAN_BROWSER_SIDECAR 指到 browser/sidecar.js 优先;没指则按可执行
     // 文件旁边与当前目录找 browser/sidecar.js。找不到就不配(browser/*

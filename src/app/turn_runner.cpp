@@ -267,7 +267,8 @@ namespace {
 lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& display,
                                              lubancode::runtime::TurnUsageStats& usage_stats,
                                              const std::atomic<bool>& cancel_flag,
-                                             lubancode::runtime::TurnEventAdapter& events) {
+                                             lubancode::runtime::TurnEventAdapter& events,
+                                             lubancode::runtime::TrajectoryTurnBridge* trajectory_bridge) {
     const bool auto_confirm = ctx.auto_confirm;
     std::set<std::string>& always_allowed_tools = *ctx.always_allowed_tools;
     const lubancode::cli::Theme& theme = ctx.theme;
@@ -280,6 +281,10 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
     const std::function<std::string(const std::string&, const nlohmann::json&)>& mode_gate = ctx.mode_gate;
     const std::function<void(bool asked, bool allowed)>& approval_observer = ctx.approval_observer;
     lubancode::agent::TurnWiring wiring;
+
+    // P0-2 轨迹接线:loop 的模型边界(request/usage/output)进本轮边界桥。
+    // 空 = flag 关的旧路,一处不设。
+    wiring.boundary_recorder = trajectory_bridge;
 
     // Plan 模式(只读研究硬闸单):ModePolicy 接到 RunOneTool 的
     // on_mode_policy 挂点。空 gate = 没装 Plan 闸(单测/子代理旧路)。
@@ -474,6 +479,34 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
             };
             hooks.parent_execution_id_getter = [trace_hub]() {
                 return trace_hub->current_agent_execution();
+            };
+        }
+        // P0-2 轨迹(§3.5/§15.6):子代理派工时向会话账本申请独立 JSONL。
+        // 子 loop 的边界与工具事件落子账(RunTask 里改挂);父账只发边界
+        // 引用(started/终态带 child_run_id 与子账 terminal hash)。空 =
+        // flag 关的旧路,子事件照旧旁听进父账。
+        if (ctx.trajectory_ledger != nullptr && trace_hub != nullptr && trajectory_bridge != nullptr) {
+            lubancode::runtime::TrajectorySessionLedger* ledger = ctx.trajectory_ledger;
+            lubancode::runtime::ToolTraceHub* hub = trace_hub;
+            lubancode::runtime::TrajectoryTurnBridge* main_bridge = trajectory_bridge;
+            hooks.trajectory_spawn = [ledger, hub, main_bridge](
+                                         const std::string& task_label)
+                                        -> std::unique_ptr<lubancode::runtime::TrajectorySubagentBridge> {
+                const std::string parent_call_id = hub->current_agent_call_id();
+                auto child = ledger->SpawnSubagent(parent_call_id, task_label);
+                if (!child.has_value()) {
+                    return nullptr;  // 子账开张失败:子代理照跑,父账如实缺子边
+                }
+                if (!parent_call_id.empty()) {
+                    main_bridge->AttachChildRun(parent_call_id, (*child)->run_id());
+                }
+                return std::move(*child);
+            };
+            // 子账收口(run terminal 落定)后回填父桥:父侧 agent 调用的
+            // 执行终态事件引用子账 terminal hash(§3.5 边界对账)。
+            hooks.trajectory_child_finished = [main_bridge](const std::string& run_id,
+                                                            const std::string& terminal_hash) {
+                main_bridge->NoteChildTerminal(run_id, terminal_hash);
             };
         }
         if (wiring.on_post_tool_use_hook) {
@@ -723,6 +756,14 @@ RunTurnResult RunTurn(TurnContext ctx) {
     lubancode::runtime::TurnEventAdapter local_turn_events("oneshot", lubancode::runtime::ProcessIdAuthority());
     lubancode::runtime::TurnEventAdapter& turn_event_stream =
         turn_events != nullptr ? *turn_events : local_turn_events;
+    // P0-2 轨迹接线(flag 开的会话):一轮一只边界桥绑 main recorder,
+    // 先于 BuildTurnWiring 造好(hooks.trajectory_spawn 要用它挂父子边)。
+    std::unique_ptr<lubancode::runtime::TrajectoryTurnBridge> turn_trajectory;
+    if (ctx.trajectory_ledger != nullptr) {
+        lubancode::runtime::TrajectoryTurnBridge::Identity identity{ctx.trajectory_provider,
+                                                                    ctx.trajectory_wire, "terminal"};
+        turn_trajectory = ctx.trajectory_ledger->NewTurnBridge(std::move(identity));
+    }
     TerminalTurnSink::Ingredients sink_ingredients;
     sink_ingredients.display = &display;
     sink_ingredients.body_tracker = &body_tracker;
@@ -736,7 +777,8 @@ RunTurnResult RunTurn(TurnContext ctx) {
     turn_event_stream.AttachAlongside(
         [&terminal_sink](const lubancode::runtime::ServerEvent& event) { terminal_sink.Emit(event); });
     turn_event_stream.Start(turn_id_for_trace);
-    lubancode::agent::TurnWiring wiring = BuildTurnWiring(ctx, display, usage_stats, cancel_flag, turn_event_stream);
+    lubancode::agent::TurnWiring wiring = BuildTurnWiring(ctx, display, usage_stats, cancel_flag, turn_event_stream,
+                                                          turn_trajectory.get());
     if (turn_trace_hub != nullptr) {
         if (recorder != nullptr) {
             turn_trace_hub->AttachProjection(
@@ -753,6 +795,11 @@ RunTurnResult RunTurn(TurnContext ctx) {
                 });
         }
         turn_trace_hub->Install(loop, wiring, thread_id_for_trace, turn_id_for_trace);
+        // P0-2 轨迹:hub 的持久账从 SessionStore 改接本轮边界桥(§15.2)。
+        // 桥在 Install 之后挂(Install 装的落盘关口会看它分流)。
+        if (turn_trajectory != nullptr) {
+            turn_trace_hub->AttachTrajectory(turn_trajectory.get());
+        }
         // 补偿关系边(单子第四期):undo_file_edit execute 后报"这枚补偿
         // 谁",finished 栅栏随账落 compensates。
         wiring.on_tool_compensates = [&registry](const std::string& /*execution_id*/,
@@ -870,6 +917,12 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 单轮即收,Stop 续跑环在终端 chrome 收妥后再跑)。
     std::expected<lubancode::agent::RunOutcome, std::string> result;
     lubancode::agent::DriveReport drive;
+    // P0-2 轨迹:轮开张(turn.started + input.received 先于首请求,§6.2
+    // 约束 3)。durable 输入用 prepared 后的消息(图片已解成附件账)。
+    if (turn_trajectory != nullptr) {
+        turn_trajectory->BeginTurn(turn_event_stream.turn_id(), ctx.trajectory_trigger);
+        turn_trajectory->RecordInput(prepared_input->message);
+    }
     try {
         lubancode::agent::DriveOptions drive_options;
         drive_options.cancel = &cancel_flag;
@@ -960,6 +1013,18 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 文案随 Failed 带上;没收尾的条目由适配器按 Cancelled 兜底。
     const std::string turn_error_text = result.has_value() ? std::string() : result.error();
     const auto finish_turn_chrome = [&](lubancode::cli::TurnFooterTone tone) {
+        // P0-2 轨迹:轮收口走同一只漏斗(错误早退/步数满/正常三路都过这)。
+        // tone 三档映射 turn.completed/cancelled/failed;Stop 钩子续跑轮在
+        // 此之前已并入同一 turn 的账。
+        if (turn_trajectory != nullptr) {
+            turn_trajectory->EndTurn(tone == lubancode::cli::TurnFooterTone::Worked,
+                                     tone == lubancode::cli::TurnFooterTone::Stopped,
+                                     tone == lubancode::cli::TurnFooterTone::Failed ? turn_error_text
+                                                                                    : std::string());
+            if (turn_trace_hub != nullptr) {
+                turn_trace_hub->DetachTrajectory();
+            }
+        }
         turn_event_stream.Finish(tone == lubancode::cli::TurnFooterTone::Worked
                                      ? lubancode::runtime::Outcome::Succeeded
                                  : tone == lubancode::cli::TurnFooterTone::Stopped

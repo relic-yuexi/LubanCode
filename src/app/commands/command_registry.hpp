@@ -79,6 +79,14 @@ const std::vector<SlashCommandSpec>& SlashCommandTable();
 CommandFlow DispatchSessionSlashCommand(SlashDispatchContext& ctx,
                                         const lubancode::cli::ParsedSlashCommand& parsed);
 
+// P0-2 TrajectoryCommandExecutor(§14.1/§15.7):terminal 与 app-server
+// 命令入口的统一包装——flag 开的会话先 durable 落 control.command.
+// requested(actor=user),handler 跑完落 completed。flag 关直接透传,
+// 行为零变。effect class 按命令名粗分表(动作级细分随 P0-4 注册表
+// 元数据落)。
+CommandFlow ExecuteSessionCommand(SlashDispatchContext& ctx,
+                                  const lubancode::cli::ParsedSlashCommand& parsed);
+
 // 会话控制器递给各域 handler 的整束材料。全借用:会话(构造它的
 // TerminalSessionController)与组合根(装好的栈)在命令执行期间保证存活。
 // 字段按用途分组,域 handler 只取自己那几样,不摸控制器本体。
@@ -150,6 +158,9 @@ struct SlashDispatchContext {
     lubancode::agent::Agent* main_agent = nullptr;
     lubancode::runtime::SessionRuntime* session_runtime = nullptr;  // 模式档/thread id
     lubancode::runtime::ToolTraceHub* trace_hub = nullptr;          // 可空
+    // P0-2 轨迹:flag 开的会话递账本,TrajectoryCommandExecutor 包住分派
+    // 入口记 command lifecycle。空 = 旧路零变。
+    lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
     lubancode::runtime::FanoutEventSink* session_events = nullptr;
     lubancode::sessions::SessionStore* session_store = nullptr;
     const std::string* sessions_dir = nullptr;

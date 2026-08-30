@@ -18,6 +18,7 @@
 #include "agent/context.hpp"  // EstimateHistory*:token 估算
 #include "agent/loop.hpp"
 #include "agent/prompt_assembler.hpp"  // PromptOptions(/context 的系统提示估算)
+#include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger:P0-2 compact typed 状态机
 #include "sessions/session_store.hpp"
 #include "sessions/session_lifecycle.hpp"
 #include "api/backend.hpp"
@@ -179,6 +180,10 @@ struct CompactSessionInputs {
         record_fallback;
     // mid-turn 压缩前补全量落盘(JSONL 一字不丢)。
     std::function<void()> persist_new_messages;
+    // P0-2 轨迹:flag 开的会话递账本进来,compact 走 typed 状态机
+    //(compact.requested/applied/failed 落 Journal),不再走
+    // AppendCompactV2Event 旁路(§14.4)。空 = 旧路。
+    lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
 };
 void RunCompactCommand(const std::string& args, const CompactSessionInputs& in);
 

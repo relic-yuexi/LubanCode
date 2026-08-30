@@ -143,6 +143,18 @@ struct TurnContext {
     std::string turn_id_for_trace;                // trace 口径的轮号(空 = 现发)
     lubancode::runtime::TurnView* turn_view_out = nullptr;     // 轮视图存档(Ctrl+L/resume)
 
+    // ---- 轨迹账(P0-2,flag 开的会话才填;空 = 旧路,行为零变) ------
+    // 会话轨迹账本(SessionRuntime 持有)。非空 = RunTurn 造一轮边界桥,
+    // loop 模型边界与 hub 工具栅栏进同一本 Trajectory Journal(不写
+    // SessionStore)。
+    lubancode::runtime::TrajectorySessionLedger* trajectory_ledger = nullptr;
+    // turn.started 的 trigger(§5.1):external_user | queued_user | peer_agent
+    // | scheduled_host | goal_continuation。
+    std::string trajectory_trigger = "external_user";
+    // 身份字段(model.request.prepared 的 provider/wire 名)。
+    std::string trajectory_provider;
+    std::string trajectory_wire;
+
     // ---- 模型输出图片(ccmoon 巡检单 P0)----
     // 会话图片目录(<sessions_dir>/<session-id>/images)。非空 = 挂上
     // on_model_image 落盘口,模型出的图解码落盘、引用入史;空(单发/没

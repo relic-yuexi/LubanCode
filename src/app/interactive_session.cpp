@@ -688,7 +688,9 @@ CommandFlow TerminalSessionController::ProcessLine(const std::string& content, b
 // 在 commands/command_registry;这里只把会话材料装进 SlashDispatchContext
 // (构造尾一次配齐)递过去。
 CommandFlow TerminalSessionController::DispatchSlashCommand(const lubancode::cli::ParsedSlashCommand& parsed) {
-    return lubancode::app::DispatchSessionSlashCommand(dispatch_ctx_, parsed);
+    // P0-2:统一过 TrajectoryCommandExecutor(flag 开的会话记 command
+    // lifecycle;flag 关零变透传)。
+    return lubancode::app::ExecuteSessionCommand(dispatch_ctx_, parsed);
 }
 
 
@@ -871,7 +873,13 @@ void TerminalSessionController::RunSessionTurn(const std::string& content, TurnS
     turn.turn_events = &turn_events;
     // 模型输出图片的落盘口(ccmoon 巡检单 P0):会话开了档才有目录;
     // 没开(还没建档)就不挂,引擎遇图片明败,不吞图。
-    if (sessions_dir.empty() == false && session_store.active()) {
+    // P0-2 轨迹路:旧档不开,图片与 artifact 落进轨迹 session 目录
+    //(同一份目录树,§3.1)。
+    if (session_runtime_.trajectory() != nullptr) {
+        const std::filesystem::path dir = session_runtime_.trajectory()->session_dir();
+        turn.model_images_dir = (dir / "images").generic_string();
+        turn.tool_artifact_dir = (dir / "mcp-artifacts").generic_string();
+    } else if (sessions_dir.empty() == false && session_store.active()) {
         turn.model_images_dir = sessions_dir + "/" + session_store.session_id() + "/images";
         // MCP 富结果单 P0.5:工具二进制 artifact 目录——MCP 返回的图片/音频/
         // blob 字节先落这里,history 只留引用。与 images/ 并排,各管各的。
@@ -888,6 +896,11 @@ void TerminalSessionController::RunSessionTurn(const std::string& content, TurnS
         turn.thread_id_for_trace = session_runtime_.thread_id();
         turn.turn_id_for_trace = trace_turn_id;
         turn.turn_view_out = &turn_views_.back();
+        // P0-2 轨迹:flag 开的会话把账本递进 RunTurn(模型边界/工具栅栏/
+        // 子代理派工全接同一口);provider 名照实报当前激活端。
+        turn.trajectory_ledger = session_runtime_.trajectory();
+        turn.trajectory_provider = active_provider;
+        turn.trajectory_wire = session_runtime_.wire_name();
         turn.mode_gate = [this](const std::string& tool_name, const nlohmann::json& input) {
             return plan_wiring_.EvaluateGate(tool_name, input);
         };
@@ -1026,6 +1039,14 @@ void TerminalSessionController::CleanupBackgroundAgents(bool dispose_queue) {
 
 
 void TerminalSessionController::Run() {
+    // P0-2 轨迹(§十七"要么全走 Trajectory 要么启动失败"):flag 开了却
+    // 开不出账,明败退出——不许回退旧 SessionStore 写口续命。
+    if (session_runtime_.trajectory_enabled() && session_runtime_.trajectory() == nullptr) {
+        TermErr() << theme.error << tr("error.prefix")
+                  << "轨迹账开张失败,会话不启动: " << session_runtime_.trajectory_open_error()
+                  << theme.reset << "\n";
+        return;
+    }
     while (true) {
         // status panel 每圈都重取 cwd 与 Git 分支。/worktree、run_command
         // 切目录/分支，或队列紧接着发下一条时，都不会挂着上一帧的旧值。
@@ -1052,7 +1073,18 @@ void TerminalSessionController::Run() {
         // composer 不会先新后旧。
         status_data.context_stale = context_tracker.usage_stale();
         // REC 标记:录制中恒挂状态行第一段(见 StatusPanelData::rec)。
-        status_data.rec = lubancode::cli::RecorderStatusMarker(record_wiring_.recorder_optional());
+        // P0-2:轨迹选段器的 REC 标记(record.selection 活动时);flag 关
+        // 照旧 WorkflowRecorder 标记。
+        if (session_runtime_.trajectory() != nullptr) {
+            auto& selection = session_runtime_.trajectory()->record_selection();
+            status_data.rec =
+                selection.active()
+                    ? (selection.paused() ? std::string(tr("record.status.paused_marker"))
+                                          : "REC · " + selection.record_id())
+                    : std::string();
+        } else {
+            status_data.rec = lubancode::cli::RecorderStatusMarker(record_wiring_.recorder_optional());
+        }
         // 工具调用后端档(PTC 单):json 默认时留空(状态行零变化),
         // programmatic/auto 时恒亮一段,回落原因写全(规格 UI 节)。
         if (config.tool_calling != lubancode::config::ToolCallingMode::Json) {

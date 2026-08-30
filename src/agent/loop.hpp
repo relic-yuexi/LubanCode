@@ -42,6 +42,36 @@
 
 namespace lubancode::agent {
 
+// 轮次边界的轨迹记录口(P0-2 轨迹接线:AgentLoop 接 input/request/output
+// 边界)。AgentLoop 只在模型请求/输出这些边界上问宿主;落盘与状态机校验
+// 全在实现侧(TrajectoryRecorder),loop 不碰文件。语义:
+//   OnRequestPrepared —— 请求拼好、即将上 wire。返回 request_id;空串 =
+//                        账写不住,loop 本步明败不发模型(§7.4"request
+//                        prepared 记不住,不发模型")。
+//   OnRequestSent     —— prepared 落稳后随发随记(prepared_event_id 由实现
+//                        侧在 OnRequestPrepared 里落好,这里只报发出去)。
+//   OnUsageRecorded   —— v2 usage owner(一 request attempt 一 owner;wire
+//                        见没见过 usage 帧如实报)。
+//   OnOutput*         —— 收口三态:completed(带规范消息与 stop_reason)、
+//                        failed、cancelled。
+// 不设(空指针)= 会话没接轨迹(flag 关的老路),一处不调,行为与从前
+// 逐字节一致。
+class LoopBoundaryRecorder {
+public:
+    virtual ~LoopBoundaryRecorder() = default;
+    virtual std::string OnRequestPrepared(const api::Request& request) = 0;
+    virtual void OnRequestSent(const std::string& request_id) = 0;
+    virtual void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
+                                 bool reported_by_provider, const std::string& provider_response_id) = 0;
+    // 返回 false = 输出事实没写稳,loop 不执行工具(§7.4"model output
+    // 记不住,不执行工具"),本步明败。
+    virtual bool OnOutputCompleted(const std::string& request_id, const api::Message& assistant,
+                                   const std::string& stop_reason,
+                                   const std::string& provider_response_id) = 0;
+    virtual void OnOutputFailed(const std::string& request_id, const std::string& reason) = 0;
+    virtual void OnOutputCancelled(const std::string& request_id) = 0;
+};
+
 // 一轮的引擎接线(骨架拆解批二余款:Callbacks 肥结构退役)。控制半在这
 // 里:每一枚都是"引擎问宿主、宿主答话"的关口——有返回值,或有落账副作
 // 用;显示出水不在这些口上(events 一只口管完)。
@@ -213,6 +243,11 @@ struct TurnWiring {
     // 标——画屏侧跳过(终端照旧只画一张外层卡),账面侧照收。子代理不走
     // 这枚(它有自己的从路适配器,见 agent_tool 的装配)。
     bool subordinate_stream = false;
+
+    // ---- 轨迹边界口(P0-2)---------------------------------------------------
+    // 模型请求/输出边界的轨迹记录(见 LoopBoundaryRecorder)。空 = 没接,
+    // 行为与从前一字不差。不持有,调用方保证存活到本轮收口。
+    LoopBoundaryRecorder* boundary_recorder = nullptr;
 };
 
 // 输出预算耗尽的明细账(规格根因四):max_tokens 从普通 end turn 里拆出来

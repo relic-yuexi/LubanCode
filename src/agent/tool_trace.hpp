@@ -181,6 +181,10 @@ struct ToolTraceEvent {
     // ---- ExecutionStarted 载荷 ----
     std::string effective_input_sha256; // 钩子改写后实际执行的入参摘要
     EffectClass effect_class = EffectClass::InProcessUnknown;
+    // 实际执行的入参原文(钩子改写后的那份;P0-2 轨迹接线起随 started 带,
+    // trajectory 的 tool.input.effective 需要 effective_arguments 正文,只有
+    // 摘要对不上账)。缺省 null = 老路没填,只落摘要。
+    nlohmann::json effective_arguments;
 
     // ---- ExecutionFinished 载荷 ----
     ToolOutcome outcome = ToolOutcome::Succeeded;

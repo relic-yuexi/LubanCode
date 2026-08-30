@@ -3,6 +3,8 @@
 // 路由职责收于此,案序照旧 switch 登册(枚举可对)。
 #include "app/commands/command_registry.hpp"
 
+#include <set>
+
 #include "app/commands/agent_commands.hpp"
 #include "app/commands/background_commands.hpp"
 #include "app/commands/doctor_commands.hpp"
@@ -104,6 +106,64 @@ CommandFlow DispatchSessionSlashCommand(SlashDispatchContext& ctx,
         return spec.handler(ctx, parsed);
     }
     return CommandFlow::Continue;  // switch 完备性兜底同款
+}
+
+// ---------------------------------------------------------------------------
+// P0-2 TrajectoryCommandExecutor(§14.1/§15.7)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// effect class 的粗分表(§14.2 的类别列;动作级细分——/context 裸敲与
+// /context 256k 之别——随 P0-4 的注册表元数据落,P0-2 按命令名粗分)。
+const char* CoarseEffectClass(const std::string& name) {
+    static const std::set<std::string> kSessionState = {
+        "model",     "provider", "think",  "context", "plan",       "soul",     "prompt",
+        "language",  "title",    "keymap", "init",    "worktree",   "config",   "hooks",
+        "compact",   "record",   "memory", "todos"};
+    static const std::set<std::string> kExternalWrite = {"skill", "plugin", "package", "send", "peerperm",
+                                                         "evolve"};
+    static const std::set<std::string> kSpawnRun = {"agent", "workflow", "goal", "loop", "background",
+                                                    "doctor"};
+    static const std::set<std::string> kSessionBoundary = {"clear", "resume", "exit", "archive", "delete"};
+    if (kSessionBoundary.count(name) != 0) {
+        return name == "delete" ? "destructive" : "session_boundary";
+    }
+    if (kSpawnRun.count(name) != 0) {
+        return "spawn_run";
+    }
+    if (kExternalWrite.count(name) != 0) {
+        return "external_write";
+    }
+    if (kSessionState.count(name) != 0) {
+        return "session_state";
+    }
+    return "read_only";  // help/skills/mcp/lsp/agents/tools/peers/sessions/trace/export/copy/unknown...
+}
+
+}  // namespace
+
+CommandFlow ExecuteSessionCommand(SlashDispatchContext& ctx,
+                                  const lubancode::cli::ParsedSlashCommand& parsed) {
+    lubancode::runtime::TrajectorySessionLedger* ledger = ctx.trajectory;
+    if (ledger == nullptr) {
+        return DispatchSessionSlashCommand(ctx, parsed);  // flag 关:零变透传
+    }
+    std::string spec_name = "unknown";
+    for (const SlashCommandSpec& spec : SlashCommandTable()) {
+        if (spec.command == parsed.command) {
+            spec_name = spec.name;
+            break;
+        }
+    }
+    // requested 先 durable(§14.1:有外部写入/派生执行/session 切换时
+    // 须先落账再动手),handler 跑完落 terminal。P0-2 的 handler 还没翻成
+    // CommandOutcome,status 只按流转给("ok"——failed 分型随 P0-4)。
+    const std::string command_id = ledger->BeginCommand(spec_name, spec_name,
+                                                        CoarseEffectClass(spec_name));
+    const CommandFlow flow = DispatchSessionSlashCommand(ctx, parsed);
+    ledger->EndCommand(command_id, /*ok=*/true, std::string());
+    return flow;
 }
 
 }  // namespace lubancode::app

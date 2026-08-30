@@ -1051,6 +1051,12 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
     const std::shared_ptr<TaskRecord> task = ledger_.Register(std::move(snapshot));
 
     const Hooks hooks = hooks_;
+    // P0-2 轨迹:前台派工在主线程(父轮工具线程)申请子账——此刻父桥
+    // 活着,父子边挂得上。
+    std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory;
+    if (hooks.trajectory_spawn) {
+        trajectory = hooks.trajectory_spawn(agent_type + ": " + task->snapshot.prompt.substr(0, 120));
+    }
     Result result = RunTask(backend_, effective_registry, task->snapshot.prompt, agent_type, budget,
                             &hooks, task,
                             /*detached=*/nullptr,
@@ -1058,7 +1064,7 @@ Tool::Result AgentTool::ExecuteForeground(const nlohmann::json& input, const std
                             scope_storage.has_value() ? &*scope_storage : nullptr,
                             /*background_hooks=*/nullptr,
                             /*background_permissions=*/nullptr,
-                            custom, resolved, permission_floor);
+                            custom, resolved, permission_floor, std::move(trajectory));
     if (room.has_value()) {
         result.AppendText(FinishIsolationRoom(*room, git_runner_));
     }
@@ -1179,6 +1185,13 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
         background_permissions =
             std::make_shared<BackgroundPermissionLedger>(background_permission_source_());
     }
+    // P0-2 轨迹:后台派工也在主线程申请子账(spawn 钩子引用的父桥此刻
+    // 活着);子账随线程走,收口在 RunTask 里办。子账 terminal hash 不回填
+    // 父桥(父轮早已收口),留账本注册表给 P0-3 的 verifier 跨文件核对。
+    std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory;
+    if (hooks_.trajectory_spawn) {
+        trajectory = hooks_.trajectory_spawn(agent_type + ": " + prompt.substr(0, 120));
+    }
     task_threads_.push_back(
         {id, std::thread([this, task, registry, prompt, agent_type, budget,
                                 custom_copy = custom != nullptr ? std::make_optional(*custom)
@@ -1191,7 +1204,8 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
                                 detached_registry = std::move(detached_registry),
                                 room = std::move(room),
                                 background_hooks,
-                                background_permissions]() mutable {
+                                background_permissions,
+                                trajectory = std::move(trajectory)]() mutable {
         (void)detached_registry;  // 让独立工具表活到线程收尾
         // isolation=worktree:线程里包表、压隔离范围,收工清理。包装表按
         // 引用持源表工具,声明在源表之后,析构反序先亡,引用不悬垂。
@@ -1212,7 +1226,8 @@ Tool::Result AgentTool::LaunchBackground(const nlohmann::json& input, const std:
                              &detached, &system_prompt, scope_storage.has_value() ? &*scope_storage : nullptr,
                              background_hooks, background_permissions,
                              custom_copy.has_value() ? &*custom_copy : nullptr,
-                             resolved_copy.has_value() ? &*resolved_copy : nullptr, permission_floor);
+                             resolved_copy.has_value() ? &*resolved_copy : nullptr, permission_floor,
+                             std::move(trajectory));
         } catch (const std::exception& error) {
             result = {"子代理执行失败: " + std::string(error.what()), true};
         } catch (...) {
@@ -1243,7 +1258,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                 const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions,
                                 const CustomAgentMaterial* custom,
                                 const agent::ResolvedAgentProfile* resolved,
-                                std::optional<agent::AgentPermissionMode> permission_floor) {
+                                std::optional<agent::AgentPermissionMode> permission_floor,
+                                std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory) {
     // 派工治理(转发 SubagentScheduler):全局并发槽先占上(前台 + 后台都
     // 算),满了明报;前台任务再记一层嵌套深度,超限明报。RAII,拒绝路径也
     // 照退。
@@ -1459,7 +1475,19 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         turn_wiring.tool_artifact_dir = foreground_hooks->tool_artifact_dir;
     }
     // 逐枚追踪单:子代理内层工具的 canonical 事件转发(只读 sink 并轨)。
-    if (foreground_hooks != nullptr && foreground_hooks->on_tool_trace) {
+    // P0-2 轨迹路:给了子代理轨迹桥的,子代理的工具事件落子账(独立
+    // JSONL),不再旁听进父账——父子文件只传边界引用(§3.5)。
+    if (trajectory != nullptr) {
+        runtime::TrajectoryTurnBridge& child_bridge = trajectory->turn_bridge();
+        turn_wiring.boundary_recorder = &child_bridge;
+        turn_wiring.on_tool_trace = [&child_bridge](const agent::ToolTraceEvent& event) {
+            child_bridge.OnToolTrace(event);
+        };
+        turn_wiring.on_tool_results_committed = [&child_bridge](const std::string& batch_id,
+                                                               const api::Message& results) {
+            child_bridge.OnToolResultsCommitted(batch_id, results);
+        };
+    } else if (foreground_hooks != nullptr && foreground_hooks->on_tool_trace) {
         auto parent_getter = foreground_hooks->parent_execution_id_getter;
         turn_wiring.on_tool_trace = [parent_getter, trace_hook = foreground_hooks->on_tool_trace](
                                           const agent::ToolTraceEvent& event) {
@@ -2054,6 +2082,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     api::Message initial_input;
     initial_input.role = api::Role::User;
     initial_input.content.push_back(api::TextBlock{prompt});
+    // P0-2 轨迹:子账开卷(turn.started + input.received 先于首请求)。
+    if (trajectory != nullptr) {
+        trajectory->turn_bridge().BeginTurn("turn-1", "external_user");
+        trajectory->turn_bridge().RecordInput(initial_input);
+    }
     agent::DriveReport drive = agent::DriveTurn(sub_agent, turn_wiring, std::move(initial_input), drive_options);
     // 取消链收口(合流前的次序:join 在 Stop 续跑环之前;合并旗 Stop 时
     // 置真,续跑轮拿到即收——与旧行为一致)。
@@ -2111,6 +2144,21 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             std::lock_guard<std::mutex> lock(ledger_.mutex);
             task->snapshot.steps_used = drive.steps_used;
             ledger_.Touch();
+        }
+    }
+
+    // P0-2 轨迹:子账收口——turn 终态、run 终态、关柄(§8.3);前台任务
+    // 把子账 terminal hash 回填父桥(父侧 agent 调用的执行终态引用它,
+    // §3.5)。后台任务的 hash 留在账本注册表,P0-3 的 session verifier
+    // 跨文件核对。
+    if (trajectory != nullptr) {
+        const bool ok = drive.ok;
+        const bool cancelled = drive.cancelled;
+        trajectory->turn_bridge().EndTurn(ok, cancelled, drive.ok ? std::string() : drive.error);
+        const std::string terminal_hash =
+            trajectory->Finish(ok, ok ? "done" : (cancelled ? "cancelled" : "failed"));
+        if (foreground_hooks != nullptr && foreground_hooks->trajectory_child_finished) {
+            foreground_hooks->trajectory_child_finished(trajectory->run_id(), terminal_hash);
         }
     }
 

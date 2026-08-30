@@ -19,6 +19,9 @@ lubancode::cli::RecordCommandContext RecordSessionWiring::MakeCommandContext() {
                                                         ? *host_.global_skills_root
                                                         : std::filesystem::path(),
                                                     host_.refresh_skills};
+    // P0-2 轨迹:选段器在位,/record 生命周期动作全走 selection。
+    record_ctx.selection =
+        host_.trajectory != nullptr ? &host_.trajectory->record_selection() : nullptr;
     return record_ctx;
 }
 

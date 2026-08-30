@@ -115,6 +115,9 @@ struct ServerOptions {
     // 的 features.goals/features.loop 缺省一致,装配层显式开)。
     bool features_goal = false;
     bool features_loop = false;
+    // P0-2 轨迹(§十七内部预览):开的 thread 走 Trajectory 单写口
+    //(与终端同一颗 SessionRuntime 账本);缺省关。
+    bool features_trajectory = false;
     // 浏览器面(阶段 3):sidecar 命令与参数、截图 artifact 目录。
     // sidecar_command 空 = browser/* 方法回 browser.not_configured(不冒充)。
     std::string browser_sidecar_command;

@@ -239,6 +239,9 @@ std::string SerializeToolTraceEvent(const ToolTraceEvent& event, const std::stri
         case ToolTraceEventKind::ExecutionStarted:
             PutStr(j, "effective_input_sha256", event.effective_input_sha256);
             PutStr(j, "effect_class", ToString(event.effect_class));
+            if (event.effective_arguments.is_object()) {
+                j["effective_arguments"] = event.effective_arguments;
+            }
             break;
         case ToolTraceEventKind::ExecutionFinished: {
             j["outcome"] = ToString(event.outcome);
@@ -369,6 +372,9 @@ std::optional<ToolTraceEvent> ParseToolTraceEvent(const std::string& line) {
                 if (!ParseEffectClass(cls, event.effect_class)) {
                     event.effect_class = EffectClass::InProcessUnknown;
                 }
+            }
+            if (const auto it = j.find("effective_arguments"); it != j.end() && it->is_object()) {
+                event.effective_arguments = *it;
             }
             break;
         case ToolTraceEventKind::ExecutionFinished: {

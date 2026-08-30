@@ -16,6 +16,7 @@
 
 #include "skills/workflow_recorder.hpp"
 #include "cli/theme.hpp"
+#include "runtime/trajectory_session.hpp"  // RecordSelectionController:P0-2 选段器
 
 namespace lubancode::cli {
 
@@ -26,6 +27,10 @@ struct RecordCommandContext {
     std::filesystem::path project_skills_root;  // <cwd>/.lubancode/skills
     std::filesystem::path home_skills_root;     // <主目录>/.lubancode/skills
     std::function<void()> refresh_skills;       // 装好后刷新本场技能清单
+    // P0-2 轨迹选段器(§14.3):flag 开的会话递进来。非空 = /record 走
+    // selection(只圈 canonical refs,不旁听、不复制事实),WorkflowRecorder
+    // 不启动;空 = 旧录音笔路,行为与从前一致。
+    lubancode::runtime::RecordSelectionController* selection = nullptr;
 };
 
 // 解析与执行 /record 的二级命令。args 是 /record 之后的那一段。

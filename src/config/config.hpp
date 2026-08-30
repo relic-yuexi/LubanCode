@@ -669,6 +669,13 @@ struct Config {
     // 局),没配就是 false(首版藏起来);环境变量 LUBANCODE_DISABLE_
     // LOOP=1 是总闸,装配层读(只关功能不改存档,不开第二只来源)。
     bool features_loop = false;
+    // P0 新轨迹记录单 P0-2:trajectory 单写口的 feature gate(§十七
+    // "内部预览")。features.trajectory 只从配置文件来(项目级压全
+    // 局),没配就是 false;环境变量 LUBANCODE_TRAJECTORY=1/0 显式压
+    // 一头(runtime::ResolveTrajectoryEnabled 合成)。开的会话只写
+    // Trajectory Journal、不写旧 SessionStore(禁 dual-write);关的
+    // 会话行为与从前一字不差。
+    bool features_trajectory = false;
     // goals 段:预算默认值(只从配置文件来,项目级压全局;CLI /goal 首版
     // 不塞 budget flag,全从这读)。没配的字段落 GoalsConfig 里的内置默认。
     GoalsConfig goals;
@@ -847,6 +854,8 @@ struct FileConfig {
     // 持久目标单:features.goals(布尔)与 goals 段(整段回退)。
     std::optional<bool> features_goals;
     std::optional<bool> features_loop;
+    // P0-2 轨迹:features.trajectory(布尔)。
+    std::optional<bool> features_trajectory;
     std::optional<GoalsFileConfig> goals;
     std::optional<MemoryFileConfig> memory;
     std::string source_path;
