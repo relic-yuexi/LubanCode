@@ -337,6 +337,12 @@
 - **挖出一枚暗雷**:cpr 的 Session 构造器默认跟重定向(Redirect::follow 缺省 true)——不显式关,3xx 会静默跟还拿真 DNS 解析 Location,正好绕过钉地址。本单显式关死;provider SSE 路同患未迁,记账留后。
 - **四处字节帽在数据入口落锤**:URL/请求头(Secret 注入后)/请求体在 cpr 前拒(拒时 DNS 都不问);响应头/体在回调里达帽即掐流不多攒一块;墙钟分型 timeout。取消五段覆盖,timeout 与 cancelled 不串码。回环假服务全矩阵(§13.3 逐案对号)含私网/metadata/rebinding 夹具全拦。
 
+## [v0.26.123] - 2026-08-30
+
+- **Lua 拿到了受控的水管与钥匙(Lua HTTP 单阶段 3)。** `luban.http.request` 与 `luban.secrets.available/ref` 注册进 manifest-backed Lua state;`LuaCallContext` RAII 钉死动态作用域——顶层加载期调任何 Host API 一律 `no_active_tool_call`,假 transport/resolver 计数为零,结构性碰不到网络与 Secret。
+- **SecretRef 锁成黑匣。** 零字节壳 + 逻辑 id;`tostring` 只得 `<secret:id>`;索引/拼接/遍历走 Lua 原生报错;metatable 锁死;转 JSON 被拒(handler 想把 ref 回给模型即报错);`auth.secret` 字符串糖与 ref 同折同一条注入链。C 函数整件 try/catch,异常不穿 Lua 边界,炸了折 `network_failed`。
+- 取消贯通:hook 管 Lua VM、transport 回调管阻塞 C 边界,同一枚旗。23 案 159 断言:生命周期六案全落(§13.4 对号),同 state 串行/不同插件并行各有计时证据。FAKE_ 原文只活在宿主侧最终头表。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
