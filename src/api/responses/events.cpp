@@ -16,6 +16,8 @@ std::optional<StreamEvent> HandleOutputTextDelta(const json& data) {
 
 // response.reasoning_summary_text.delta:推理摘要的流式增量(OpenAI o-series
 // / 兼容端的 reasoning 事件)。翻成 ThinkingDelta 让界面即时展示"思考中"。
+// response.reasoning_text.delta:思考正文的流式增量(vLLM 扩展,OpenAI 新版
+// API 同名)——字段同样叫 delta,同走这一枝;done/part 系不单独发事件。
 std::optional<StreamEvent> HandleReasoningDelta(const json& data) {
     ThinkingDelta event;
     event.text = data.value("delta", "");
@@ -244,6 +246,9 @@ std::optional<StreamEvent> parse_event(const SseFrame& frame) try {
     if (type == "response.reasoning_summary_text.delta") {
         return HandleReasoningDelta(data);
     }
+    if (type == "response.reasoning_text.delta") {
+        return HandleReasoningDelta(data);
+    }
     if (type == "response.output_item.added") {
         return HandleOutputItemAdded(data);
     }
@@ -265,8 +270,9 @@ std::optional<StreamEvent> parse_event(const SseFrame& frame) try {
 
     // 没见过的、或者语义上不需要单独发事件的类型(response.created、
     // response.in_progress、response.content_part.*、response.output_text.done、
-    // response.function_call_arguments.done、reasoning 相关、其它内置工具/MCP
-    // 相关……):静默跳过,别崩。
+    // response.function_call_arguments.done、reasoning 的 done/part 系
+    // (reasoning_text.done、reasoning_part.added/done、summary 的 done 系)、
+    // 其它内置工具/MCP 相关……):静默跳过,别崩。
     return std::nullopt;
 } catch (const json::exception&) {
     // 字段存在但类型不对时,.value()/.get() 抛的是 type_error(不是

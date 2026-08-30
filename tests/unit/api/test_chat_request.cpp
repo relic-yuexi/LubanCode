@@ -633,6 +633,44 @@ TEST_CASE("Chat request: toggle-only 模型只写 thinking,不乱发 reasoning_e
     CHECK_FALSE(body.contains("reasoning_effort"));
 }
 
+// vLLM 本地模型四 wire 支持勘察单 P1:qwen3 模板的思考开关唯一真生效路是
+// chat_template_kwargs.enable_thinking(本机 vLLM 0.27.1 实测顶层
+// enable_thinking 被无视)。方言声明了这档形状,on/off 两态各落各的嵌套键;
+// 未声明零污染。
+TEST_CASE("Chat request: 方言 chat_template_kwargs_enable_thinking——on/off 落嵌套键,顶层与 thinking 都不碰") {
+    api::Request request;
+    request.model = "qwen3.8-27b";
+    request.reasoning_effort = "high";
+    request.reasoning.supports_toggle = true;
+    request.reasoning.dialect.toggle = "chat_template_kwargs_enable_thinking";
+    request.reasoning.dialect.toggle_on = "true";
+    request.reasoning.dialect.toggle_off = "false";
+
+    const auto on = api::chat::BuildRequestJson(request);
+    CHECK(on["chat_template_kwargs"]["enable_thinking"] == true);
+    // 顶层布尔这台端不认(被无视),thinking 键也不是这家的形状——都不发。
+    CHECK_FALSE(on.contains("enable_thinking"));
+    CHECK_FALSE(on.contains("thinking"));
+    CHECK_FALSE(on.contains("reasoning_effort"));  // 方言没声明档位形状,不落
+
+    request.reasoning_effort = "none";  // off 档(ReasoningEffortIsOff 认 none)
+    const auto off = api::chat::BuildRequestJson(request);
+    CHECK(off["chat_template_kwargs"]["enable_thinking"] == false);
+    CHECK_FALSE(off.contains("enable_thinking"));
+    CHECK_FALSE(off.contains("thinking"));
+
+    // 未声明该形状的模型零污染:没有 chat_template_kwargs 键。
+    api::Request plain;
+    plain.reasoning_effort = "high";
+    plain.reasoning.supports_toggle = true;
+    plain.reasoning.dialect.toggle = "thinking_type";
+    plain.reasoning.dialect.toggle_on = "enabled";
+    plain.reasoning.dialect.toggle_off = "disabled";
+    const auto untouched = api::chat::BuildRequestJson(plain);
+    CHECK_FALSE(untouched.contains("chat_template_kwargs"));
+    CHECK(untouched["thinking"]["type"] == "enabled");
+}
+
 // ---------------------------------------------------------------------------
 // reasoning 回传字段名(reasoning_replay_field,vLLM/Qwen 单):回传历史
 // 时不许想当然把所有服务都写成 reasoning_content——DeepSeek 协议要

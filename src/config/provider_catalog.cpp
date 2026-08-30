@@ -97,10 +97,11 @@ std::expected<lubancode::api::ReasoningWireDialect, std::string> ParseReasoningD
         return std::expected<void, std::string>{};
     };
     if (auto parsed = read_enum("toggle", &out.toggle,
-                                {"none", "enable_thinking_bool", "thinking_type", "include_thoughts"});
+                                {"none", "enable_thinking_bool", "thinking_type", "include_thoughts",
+                                 "chat_template_kwargs_enable_thinking"});
         !parsed.has_value()) return std::unexpected(parsed.error());
     if (out.toggle != "none") {
-        if (out.toggle == "enable_thinking_bool") {
+        if (out.toggle == "enable_thinking_bool" || out.toggle == "chat_template_kwargs_enable_thinking") {
             if (auto parsed = read_enum("toggle_on", &out.toggle_on, {"true"}); !parsed.has_value())
                 return std::unexpected(parsed.error());
             if (auto parsed = read_enum("toggle_off", &out.toggle_off, {"false"}); !parsed.has_value())
@@ -205,6 +206,11 @@ std::expected<void, std::string> CheckDialectMatchesWire(const lubancode::api::R
     case Wire::Responses:
         if (dialect.toggle == "thinking_type" || dialect.toggle == "include_thoughts") {
             return reject("responses 家没有 " + dialect.toggle + " 开关(手册只有 enable_thinking 旧开关)");
+        }
+        if (dialect.toggle == "chat_template_kwargs_enable_thinking") {
+            // vLLM 本地模型勘察单:responses 面的 chat_template_kwargs 未实测
+            // (同源推测不写死),落线等真机验证后再放行。
+            return reject("responses 家未验证 chat_template_kwargs 开关,不认 " + dialect.toggle);
         }
         if (dialect.effort_path != "reasoning.effort" && !dialect.effort_path.empty()) {
             return reject("responses 家的档位只认 reasoning.effort,不认 " + dialect.effort_path);
@@ -414,6 +420,21 @@ std::expected<ProviderCatalogModel, std::string> ParseModel(const std::string& i
     return model;
 }
 
+// base_url 的 https 规则给本地端点留一条明路(vLLM 本地模型勘察单 P1):
+// 回环地址(http://localhost[:port]/... 与 http://127.0.0.1[:port]/...)不
+// 出网,明文无险,放行——vLLM/Ollama 这类本地服务在目录里有名分了。回环
+// 之外(含 http://localhost.evil.com 这类假回环域名)仍必须 https。
+bool HttpsOrLoopbackBaseUrl(const std::string& url) {
+    if (url.rfind("https://", 0) == 0) return true;
+    for (const std::string_view host : {"localhost", "127.0.0.1"}) {
+        const std::string prefix = std::string("http://") + std::string(host);
+        if (url.rfind(prefix, 0) != 0) continue;
+        const std::size_t next = prefix.size();
+        if (next == url.size() || url[next] == ':' || url[next] == '/') return true;
+    }
+    return false;
+}
+
 std::expected<ProviderPreset, std::string> ParseProvider(const std::string& id, const json& value) {
     const std::string where = "providers." + id;
     if (!value.is_object()) return std::unexpected(where + " 必须是 JSON object");
@@ -450,7 +471,9 @@ std::expected<ProviderPreset, std::string> ParseProvider(const std::string& id, 
         preset.reasoning_dialect = *dialect;
         provider_dialect = value["reasoning_dialect"];
     }
-    if (preset.base_url.rfind("https://", 0) != 0) return std::unexpected(where + ".base_url 必须以 https:// 开头");
+    if (!HttpsOrLoopbackBaseUrl(preset.base_url)) {
+        return std::unexpected(where + ".base_url 必须以 https:// 开头(本地端点可用 http://localhost 或 http://127.0.0.1)");
+    }
     if (value.contains("description")) {
         if (!value["description"].is_string()) return std::unexpected(where + ".description 必须是字符串");
         preset.description = value["description"].get<std::string>();
@@ -747,6 +770,9 @@ std::string DescribeReasoningDialect(const lubancode::api::ReasoningWireDialect&
     std::vector<std::string> parts;
     if (dialect.toggle == "enable_thinking_bool") {
         parts.push_back("enable_thinking=" + dialect.toggle_on + "/" + dialect.toggle_off);
+    } else if (dialect.toggle == "chat_template_kwargs_enable_thinking") {
+        parts.push_back("chat_template_kwargs.enable_thinking=" + dialect.toggle_on + "/" +
+                        dialect.toggle_off);
     } else if (dialect.toggle == "thinking_type") {
         parts.push_back("thinking.type=" + dialect.toggle_on + "/" + dialect.toggle_off);
     } else if (dialect.toggle == "include_thoughts") {

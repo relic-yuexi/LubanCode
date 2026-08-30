@@ -1,6 +1,6 @@
 # vLLM 本地模型（qwen3.8-27b）四 wire 支持勘察
 
-- 状态：勘察报告/待实现（本单未动任何 src/tests 代码，未做夹具）
+- 状态：P0 三条已落（responses parser 补 reasoning_text.delta；responses/chat 两只回归夹具；catalog.md 本地端点小节）。P1 两条已落（chat_template_kwargs_enable_thinking 方言形状 + 单测；目录 vllm/vllm-anthropic 双预设）。P2 未动。
 - 日期：2026-08-31
 - 级别：P0（openai-responses 思考事件名一笔 + 三只回归夹具）；P1（chat_template_kwargs 方言形状 + 目录 vLLM 条目）；P2（诊断与文档）
 - 范围：vLLM 0.27.1 @ `http://localhost:8001`（`qwen3.8-27b`，tp8，max_model_len 262144，system_fingerprint `vllm-0.27.1-tp8-e0441ef0`）；`/v1/chat/completions`、`/v1/responses`、`/v1/messages` 三面各两路（流式/非流式）；LubanCode 四家 wire（src/api/ 四目录）逐家对照；tests/fixtures/api 夹具缺口清单
@@ -285,13 +285,13 @@ manifest 里 `expected_replay` 各写一句：chat 面记"回传字段 reasoning
 分期：
 
 - **P0（不加新功能让它跑起来）**
-  1. responses parser 补 `response.reasoning_text.delta` → ThinkingDelta（一处分支，约五行）。
-  2. 落 §五 前两只夹具（responses 思考流先红后绿；chat 工具流补全）。
-  3. 文档不待代码：§四 的三份 provider 配置即今日可用指南（chat/anthropic 两面全功能，responses 面文本工具可用）。
+  - [x] responses parser 补 `response.reasoning_text.delta` → ThinkingDelta（一处分支，约五行）。（src/api/responses/events.cpp 加一枝走既有 HandleReasoningDelta；`.done`/`reasoning_part.*` 维持跳过）
+  - [x] 落 §五 前两只夹具（responses 思考流先红后绿；chat 工具流补全）。（openai_responses/live_vllm_qwen38_reasoning_text_stream + openai_chat/live_vllm_qwen38_tool_episode_stream，挂进 tests/fixtures/api manifest 体系，四种切法回放；chat 那只另进 wire_replay 集成册两轮回环）
+  - [x] 文档不待代码：§四 的三份 provider 配置即今日可用指南（chat/anthropic 两面全功能，responses 面文本工具可用）。（docs/features/providers/catalog.md 新增"本地端点"小节，chat/anthropic 两份样例，字段名按现行配置核正为 context_window）
 - **P1（方言与目录）**
-  1. 方言 toggle 加形状：`chat_template_kwargs_enable_thinking`（值落 `body["chat_template_kwargs"]["enable_thinking"]`），provider_catalog 校验表同步。
-  2. 目录加 vLLM 预设（provider 级：base_url 占位 https:// 规则需放行 localhost 或留文档示例、stream_usage true、replay tool_episode、replay_field reasoning）与 qwen3.8 模型条目（delta reasoning、toggle chat_template_kwargs_enable_thinking、supports_toggle true）。
-  3. anthropic 面对 `thinking.type=disabled` 无效这事，`/doctor` 真机探针明报（当前会静默收下）。
+  - [x] 方言 toggle 加形状：`chat_template_kwargs_enable_thinking`（值落 `body["chat_template_kwargs"]["enable_thinking"]`），provider_catalog 校验表同步。（reasoning.hpp/chat request.cpp 枚举与落线；provider_catalog 解析枚举、responses/anthropic 家拒收、DescribeReasoningDialect 人话；单测 test_chat_request + test_provider_catalog）
+  - [x] 目录加 vLLM 预设（provider 级：base_url 占位 https:// 规则需放行 localhost 或留文档示例、stream_usage true、replay tool_episode、replay_field reasoning）与 qwen3.8 模型条目（delta reasoning、toggle chat_template_kwargs_enable_thinking、supports_toggle true）。（base_url 回环放行 localhost/127.0.0.1（假回环域名仍拒）；catalog/providers.json 加 vllm + vllm-anthropic 双预设；schema 同步）
+  - [ ] anthropic 面对 `thinking.type=disabled` 无效这事，`/doctor` 真机探针明报（当前会静默收下）。
 - **P2（锦上添花）**
   1. 根目录补一份「vLLM 兼容」手册（三面帧实录即 §二 底稿），挂进 fixture hash 对账。
   2. `metrics_url` 指向 vLLM `/metrics`（Prometheus 文本）的 /doctor cache 读数验证。

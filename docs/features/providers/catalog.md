@@ -41,8 +41,54 @@ Provider 目录是一册“厂家与模型默认值”。它替向导备好地�
 | `deepseek` | DeepSeek | Chat Completions | `deepseek-v4-pro` |
 | `kimi` | Kimi（国内） | Chat Completions | `kimi-k2.6` |
 | `grok` | xAI Grok | Responses | `grok-4.5` |
+| `vllm` | vLLM（本地） | Chat Completions | `qwen3.8-27b` |
+| `vllm-anthropic` | vLLM（本地, Messages） | Messages | `qwen3.8-27b` |
 
 预设会随目录更新而变。上表写的是本仓库这版，不拿它当永久承诺。用户已经保存的 Provider 不会跟着在线目录暗中改值。
+
+### 本地端点（自建 vLLM 这类）
+
+目录的 `base_url` 规则给本地端点留了门：回环地址（`http://localhost` / `http://127.0.0.1`，可带端口）可以走明文 HTTP，其余地址仍必须 HTTPS——回环不出网，明文无险。
+
+以 vLLM 0.27 起 qwen3 系思考模型为例（真机实测口径，2026-08-31）。用 `/provider add` 从目录选 vLLM 预设最省事；手写的话，下面两份样例最实用，落进 `~/.lubancode/config.json` 的 `providers` 数组即可。
+
+主路走 Chat 面（思考展示、工具循环、思考回传、usage 记账一样不缺）：
+
+```json
+{
+  "name": "vllm-local",
+  "base_url": "http://localhost:8001/v1",
+  "wire": "openai-chat-completions",
+  "auth": "none",
+  "model": "qwen3.8-27b",
+  "context_window": 262144,
+  "stream_usage": true,
+  "reasoning_replay": "tool_episode",
+  "reasoning_replay_field": "reasoning"
+}
+```
+
+- `base_url` 写到 `/v1`（程序直拼 `/chat/completions`）；端口按本机部署改。
+- 无鉴权部署写 `"auth": "none"`；带了 `--api-key` 就照常配 key。
+- 思考增量字段（`reasoning`）双别名自动兼容，可不写 `reasoning_delta_field`；写了则钉死单字段。
+- 模型名与目录条目对上（如 `qwen3.8-27b`）后，`/think` 的开关按方言落 `chat_template_kwargs.enable_thinking` 嵌套键——这是 vLLM/qwen3 模板唯一真生效的关思考路（顶层 `enable_thinking` 这台端不认）。模型名对不上目录时，想静态关思考可加 `"extra_body": {"chat_template_kwargs": {"enable_thinking": false}}`。
+
+Anthropic 兼容面（`/v1/messages`，思考块带假签回传也走得通）：
+
+```json
+{
+  "name": "vllm-local-msg",
+  "base_url": "http://localhost:8001",
+  "wire": "anthropic-messages",
+  "auth": "none",
+  "model": "qwen3.8-27b",
+  "context_window": 262144
+}
+```
+
+- `base_url` 写根（不带 `/v1`，程序直拼 `/v1/messages`），与 Chat 面不同。
+- 这面 `thinking.type=disabled` 端上无效，思考关不掉；要关思考走 Chat 面。
+- 流式无 ping 帧、signature 是 32 位 hex 假签，程序都不依赖格式，原样回传即可。
 
 ## 3. 三层目录
 
@@ -104,7 +150,7 @@ ETag 另存一份。下次刷新发送条件请求；远端没变，便不重写
 | --- | --- | --- |
 | `name` | 是 | 向导展示名 |
 | `wire` | 是 | `anthropic-messages`、`openai-responses`、`openai-chat-completions` 或 `google-generate-content` |
-| `base_url` | 是 | HTTPS API 根地址 |
+| `base_url` | 是 | HTTPS API 根地址；本地端点可用 `http://localhost…` / `http://127.0.0.1…`（见「本地端点」一节） |
 | `key_env` | 是 | 推荐保存密钥的环境变量名 |
 | `default_model` | 是 | 添加后默认启用的模型 ID |
 | `models` | 是 | 模型资料表 |
@@ -186,7 +232,7 @@ ETag 另存一份。下次刷新发送条件请求；远端没变，便不重写
 2. 响应不超过 2 MiB。
 3. JSON 能解析。
 4. `schema_version` 认得。
-5. 必填字段、类型、HTTPS 地址、环境变量名均合 schema。
+5. 必填字段、类型、地址（HTTPS，或 localhost/127.0.0.1 回环）、环境变量名均合 schema。
 6. 临时文件写完整，再原子替换缓存。
 
 任一道不成，旧缓存不动。旧缓存也不可用，便退回内置快照。在线更新不会改 `~/.lubancode/config.json`，不会切当前 Provider，也不会碰密钥。

@@ -1,0 +1,30 @@
+{
+  "fixture_id": "live_vllm_qwen38_tool_episode_stream",
+  "wire": "openai-chat-completions",
+  "provider": "vllm",
+  "model": "qwen3.8-27b",
+  "scenario": "reasoning_then_tool_calls_with_usage_chunk",
+  "source_document": "internal",
+  "captured_at": "2026-08-31",
+  "request_expectation": {
+    "stream_options": {"include_usage": true},
+    "chat_template_kwargs": {"enable_thinking": true}
+  },
+  "expected_events": [
+    "MessageStart",
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "ContentBlockDone",
+    "ToolUseStart",
+    "ToolUseInputDelta",
+    "ContentBlockDone",
+    "MessageDone"
+  ],
+  "expected_replay": ["回传字段 reasoning(reasoning_replay_field 声明),tool_episode 段内 assistant.reasoning 原字节回传;tool_call id 原样(chatcmpl-tool- 前缀,非 call_ 前缀)"],
+  "usage_expectation": {"input_tokens": 59, "output_tokens": 32, "cache_read_tokens": 0},
+  "stop_reason": "tool_use",
+  "notes": "vLLM 0.27.1 + qwen3.8-27b /v1/chat/completions 真机实录缩样(vLLM 本地模型四 wire 支持勘察单 P0)。思考走 delta.reasoning(vLLM 0.27 新名,双别名自动兼容);工具增量标准 OpenAI 形状,首帧带 chatcmpl-tool- 前缀 id;include_usage 尾帧 choices=[] 只有 usage。关思考唯一生效路是 chat_template_kwargs.enable_thinking(顶层 enable_thinking 被端无视)。"
+}
