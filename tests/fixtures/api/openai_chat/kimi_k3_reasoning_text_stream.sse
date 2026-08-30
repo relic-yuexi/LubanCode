@@ -1,0 +1,7 @@
+data: {"id":"chatcmpl_kimi_k3","object":"chat.completion.chunk","model":"kimi-k3","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"先想一句再答"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_kimi_k3","choices":[{"index":0,"delta":{"content":"答:你好"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_kimi_k3","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]

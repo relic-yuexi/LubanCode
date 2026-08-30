@@ -1,0 +1,29 @@
+{
+  "fixture_id": "kimi_k26_tool_episode_stream",
+  "wire": "openai-chat-completions",
+  "provider": "moonshot",
+  "model": "kimi-k2.6",
+  "scenario": "thinking_then_tool_calls",
+  "source_document": "internal",
+  "captured_at": "2026-08-30",
+  "request_expectation": {
+    "thinking": {
+      "type": "enabled"
+    }
+  },
+  "expected_events": [
+    "MessageStart",
+    "ThinkingDelta",
+    "ContentBlockDone",
+    "ToolUseStart",
+    "ToolUseInputDelta",
+    "ContentBlockDone",
+    "MessageDone"
+  ],
+  "expected_replay": [
+    "同一工具循环的后续请求按 tool_episode 原字节带回 assistant.reasoning_content,tool_call id 原样;不携带 reasoning_effort 与 thinking_budget"
+  ],
+  "usage_expectation": {},
+  "stop_reason": "tool_use",
+  "notes": "Kimi K2.6 工具循环实录缩样:reasoning_content 思考 -> tool_calls 分片拼接 -> finish_reason=tool_calls -> [DONE]。形状按官方文档合成(https://platform.kimi.com/docs/guide/use-thinking-models,核对 2026-08-30):K2.6 只认 thinking.type,不支持 reasoning_effort。"
+}

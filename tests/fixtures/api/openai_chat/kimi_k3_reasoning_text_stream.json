@@ -1,0 +1,24 @@
+{
+  "fixture_id": "kimi_k3_reasoning_text_stream",
+  "wire": "openai-chat-completions",
+  "provider": "moonshot",
+  "model": "kimi-k3",
+  "scenario": "preserved_thinking_pure_dialogue",
+  "source_document": "internal",
+  "captured_at": "2026-08-30",
+  "request_expectation": {
+    "reasoning_effort": "high"
+  },
+  "expected_events": [
+    "MessageStart",
+    "ThinkingDelta",
+    "TextDelta",
+    "MessageDone"
+  ],
+  "expected_replay": [
+    "第二轮请求的 assistant 消息按 always 原字节带回 reasoning_content(Kimi K3 Preserved Thinking 契约),thinking 键不出现"
+  ],
+  "usage_expectation": {},
+  "stop_reason": "end_turn",
+  "notes": "Kimi K3 纯对话实录缩样:reasoning_content 思考 -> content 正文 -> finish_reason=stop -> [DONE]。形状按官方文档合成(https://platform.kimi.com/docs/guide/use-thinking-models,核对 2026-08-30):K3 始终思考,只认顶层 reasoning_effort,不应发送 thinking。"
+}

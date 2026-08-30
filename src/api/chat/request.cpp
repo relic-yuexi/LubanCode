@@ -112,6 +112,34 @@ std::vector<bool> SegmentToolUseFlags(const std::vector<Message>& messages) {
     return flags;
 }
 
+// 回传策略的最终裁决(Kimi 保留式思考单 P0,决策次序见该单 §5.3):
+//   1. request.reasoning.dialect 有正式声明 -> 用 model-resolved
+//      replay/replay_field(目录可识别模型的唯一真相);
+//   2. 方言为空(手写旧 provider)-> 回落 ChatRequestOptions;
+//   3. 两边都没写 -> Never。
+// 不按模型字符串猜:同一模型可能经直连、聚合端、本地 vLLM 出站,协议
+// 责任随实际绑定 provider 声明的方言走。字段名同裁决:方言 replay_field
+// 压过 legacy reasoning_replay_field,空 = reasoning_content。
+struct ResolvedReplay {
+    ReasoningReplayPolicy policy = ReasoningReplayPolicy::Never;
+    std::string field;
+};
+
+ResolvedReplay ResolveReplay(const Request& request, const ChatRequestOptions& options) {
+    ResolvedReplay out;
+    if (!request.reasoning.dialect.empty()) {
+        const std::string& replay = request.reasoning.dialect.replay;
+        out.policy = replay == "always" ? ReasoningReplayPolicy::Always
+                      : replay == "tool_episode" ? ReasoningReplayPolicy::ToolEpisode
+                                                 : ReasoningReplayPolicy::Never;
+        out.field = request.reasoning.dialect.replay_field;
+        return out;
+    }
+    out.policy = options.reasoning_replay;
+    out.field = options.reasoning_replay_field;
+    return out;
+}
+
 }  // namespace
 
 nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& extra_body,
@@ -129,9 +157,10 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
         messages.push_back(json{{"role", "system"}, {"content", request.system}});
     }
 
-    // tool_episode 策略的段标记(never 策略不用,不算)。
+    // 回传策略裁决(方言优先,legacy 回落),tool_episode 才要算段标记。
+    const ResolvedReplay replay = ResolveReplay(request, options);
     const std::vector<bool> segment_tool_use =
-        options.reasoning_replay == ReasoningReplayPolicy::ToolEpisode
+        replay.policy == ReasoningReplayPolicy::ToolEpisode
             ? SegmentToolUseFlags(request.messages)
             : std::vector<bool>{};
 
@@ -166,18 +195,27 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
         json assistant{{"role", "assistant"}};
         const std::string text = JoinedText(message);
         assistant["content"] = text.empty() ? json(nullptr) : json(text);
-        // reasoning 回传(tool_episode):这段交互走了工具,段内 assistant 的
-        // 思考按原字节回传——字段名按 provider 声明走(默认
-        // reasoning_content,DeepSeek 协议;vLLM/Qwen 这类端声明成
-        // reasoning),一条消息只写一份(多枚 tool call 也不拆不重),不混进
-        // content。纯对话段照旧略过。
-        if (options.reasoning_replay == ReasoningReplayPolicy::ToolEpisode &&
-            message_index < segment_tool_use.size() && segment_tool_use[message_index]) {
+        // reasoning 回传:策略裁决(方言优先,legacy 回落)说了算。
+        //   tool_episode:这段交互走了工具,段内 assistant 的思考按原字节
+        //   回传——字段名按 provider 声明走(默认 reasoning_content,
+        //   DeepSeek 协议;vLLM/Qwen 这类端声明成 reasoning),一条消息只写
+        //   一份(多枚 tool call 也不拆不重),不混进 content。纯对话段照旧
+        //   略过。
+        //   always:工作视图里每条原始 assistant 只要带 ThinkingBlock 就回传
+        //   (Kimi K3/K2.7 Preserved Thinking:完整 assistant message 原样
+        //   送回,消息在,配套 reasoning 就得在),纯对话/工具/总结一视同仁;
+        //   多枚思考块按块序原字节拼接,只落一枚字段;没思考不造空串,也不
+        //   凭正文 <think> 猜——只有 provider 正式 reasoning 字段攒出的块
+        //   才算数。
+        const bool replay_reasoning =
+            replay.policy == ReasoningReplayPolicy::Always ||
+            (replay.policy == ReasoningReplayPolicy::ToolEpisode &&
+             message_index < segment_tool_use.size() && segment_tool_use[message_index]);
+        if (replay_reasoning) {
             const std::string reasoning = JoinedThinking(message);
             if (!reasoning.empty()) {
                 const std::string field =
-                    options.reasoning_replay_field.empty() ? std::string("reasoning_content")
-                                                           : options.reasoning_replay_field;
+                    replay.field.empty() ? std::string("reasoning_content") : replay.field;
                 assistant[field] = reasoning;
             }
         }

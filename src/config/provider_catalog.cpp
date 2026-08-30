@@ -742,6 +742,12 @@ std::string DescribeReasoningDialect(const lubancode::api::ReasoningWireDialect&
     }
     if (!dialect.budget_path.empty()) parts.push_back(dialect.budget_path);
     if (!dialect.delta.empty()) parts.push_back("delta:" + dialect.delta);
+    // 思考回传策略一并亮(never 不刷屏——那是缺省;always/tool_episode
+    // 是正式契约,用户该看见"历史思考要不要送回去")。
+    if (dialect.replay != "never" || !dialect.replay_field.empty()) {
+        parts.push_back("replay:" + dialect.replay +
+                        (dialect.replay_field.empty() ? std::string() : "->" + dialect.replay_field));
+    }
     std::string out;
     for (const auto& part : parts) {
         if (!out.empty()) out += " · ";

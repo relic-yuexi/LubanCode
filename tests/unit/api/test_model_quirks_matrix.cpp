@@ -440,24 +440,23 @@ TEST_CASE("矩阵 A8: o 系与 gpt-5(responses wire)——effort 原样透传,gp
     CHECK_FALSE(gpt5_body.contains("thinking"));  // 无 toggle,不写 thinking 键
 }
 
-TEST_CASE("矩阵 A9: kimi-k2.7-code——纯 budget:anthropic 落预算,chat 发不出任何 reasoning 键(记案)") {
+TEST_CASE("矩阵 A9: kimi-k2.7-code——官方契约零请求参数:chat 不发任何 reasoning 键,思考回传走 always") {
+    // Kimi 保留式思考单 P0 校正:官方现行参数表里 K2.7 Code 没有任何请求侧
+    // reasoning 控制(服务端固定思考),旧画像的 budget 30720 与其带来的
+    // anthropic 预算翻译一并撤掉。Preserved Thinking 是客户端回传责任,
+    // 与请求参数无关——回传形状由 test_provider_catalog 的 golden 钉。
     const auto* moonshot = EmbeddedCatalog().FindProvider("moonshot");
     REQUIRE(moonshot != nullptr);
     const auto* model = moonshot->FindModel("kimi-k2.7-code");
     REQUIRE(model != nullptr);
-    REQUIRE(model->reasoning.budget_max.has_value());
+    CHECK_FALSE(model->reasoning.budget_max.has_value());
     CHECK_FALSE(model->reasoning.supports_effort);
     CHECK_FALSE(model->reasoning.supports_toggle);
+    CHECK(model->reasoning.dialect.replay == "always");
+    CHECK(model->reasoning.dialect.toggle == "none");
 
-    // anthropic wire:budget 档照翻,0 + 30720*2/4 = 15360。
-    const auto anthropic_body =
-        api::anthropic::BuildRequestJson(SweepRequest(*model, "high"));
-    CHECK(anthropic_body["thinking"].at("type") == "enabled");
-    CHECK(anthropic_body["thinking"].at("budget_tokens") == 15360);
-
-    // chat wire:中立层没有 Chat 方言的 budget 参数名,这只模型在 chat 家
-    // 发不出任何 reasoning 字段(现状记案:要靠目录加方言声明才能修,
-    // 见模型怪癖矩阵工单的报告;这里钉住"至少不发错形状")。
+    // chat wire:什么 reasoning 键都不发(用户挂了档位也不乱发——这只
+    // 模型没有档位可落)。
     const auto chat_body = api::chat::BuildRequestJson(SweepRequest(*model, "high"));
     CHECK_FALSE(chat_body.contains("reasoning_effort"));
     CHECK_FALSE(chat_body.contains("thinking"));

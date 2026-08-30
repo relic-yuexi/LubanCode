@@ -2016,6 +2016,31 @@ CommandFlow HandleSlashThink(SlashDispatchContext& ctx, const lubancode::cli::Pa
         } else {
             TermOut() << "落线形状: 目录未声明方言,走兼容形状(未验证)。\n";
         }
+        // Kimi 保留式思考单 P0:"本轮思考"与"历史回传"是两笔账,分开亮——
+        // 档位只管这一轮想多深,历史 assistant 的 reasoning 是否随下一份
+        // 请求送回,由 replay 策略说了算(方言优先;本地自定义端回落
+        // provider 兼容声明)。诊断行直接拼字,与落线形状同一风格。
+        TermOut() << "本轮思考: "
+                  << (ctx.current_think->empty() ? std::string("未设档位(不发推理参数)")
+                                                 : *ctx.current_think)
+                  << "\n";
+        const auto replay_line = [](const std::string& policy, const std::string& field,
+                                    const char* source) {
+            const std::string named = field.empty() ? std::string("reasoning_content") : field;
+            return "历史回传: " + policy + " -> " + named + "(" + source + ")";
+        };
+        if (model != nullptr && !model->reasoning.dialect.empty()) {
+            TermOut() << replay_line(model->reasoning.dialect.replay,
+                                     model->reasoning.dialect.replay_field, "模型方言声明")
+                      << "\n";
+        } else {
+            TermOut() << replay_line(ctx.config->reasoning_replay.empty()
+                                         ? std::string("never")
+                                         : ctx.config->reasoning_replay,
+                                     ctx.config->reasoning_replay_field,
+                                     "provider 兼容声明,模型无方言")
+                      << "\n";
+        }
     }
     // 五层后端退役(批四):effort 的即时生效改走皮上的 request 档案,
     // 下一份请求带上新档位。

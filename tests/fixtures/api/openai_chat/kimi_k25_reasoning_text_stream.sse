@@ -1,0 +1,7 @@
+data: {"id":"chatcmpl_kimi_k25","object":"chat.completion.chunk","model":"kimi-k2.5","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"本轮想过但不许回传"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_kimi_k25","choices":[{"index":0,"delta":{"content":"答:你好"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_kimi_k25","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]
