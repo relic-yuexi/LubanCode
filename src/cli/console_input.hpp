@@ -142,6 +142,18 @@ std::size_t ChoiceMenuSearchWindowRows(int viewport_rows, std::optional<std::siz
 // ChoiceMenuCore::HandleKey 逐条对齐;新添的是搜索词、过滤视图(命中项
 // 的原索引数组)与窗口(scroll() 是窗口首行在 view() 里的偏移)。
 //
+// 与 ChoiceMenuCore 的合并评估(骨架拆解反弹·问题 5,2026-08 复核):不
+// 合并,双份是刻意取舍不是笔误。两条硬分叉:其一,输入面不同——Core 是
+// 纯索引状态机(构造只拿 item_count,不认条目文本),SearchCore 必须持
+// 全量 items 才能按 label/description 过滤,并成一只就得让 Core 认文本,
+// "纯索引"这条设计线就断了(session_picker 的 SessionPickerCore 正是照
+// 这条线另起的一份);其二,键语义分叉走远——Core 的上下键循环绕圈
+//(一屏列得下的短单),SearchCore 到头不绕圈、按窗口翻页、可打印字符
+// 进搜索词(与 /resume 选择器同口径),两套规矩各有单测钉着,硬合会给
+// Core 平添六个搜索/视图字段、翻倍它的行为面。若日后菜单规则要改,两
+// 边的 Enter/Esc/多选/行内编辑四条公共规矩须同步改——这是留双份的代
+// 价,认了。
+//
 // 键分派(搜索模式):
 //   - 可打印字符:光标正落在 editable 项上时照旧进它的行内文本;不在其上
 //     才追加进搜索词并重筛,光标跳到过滤后第一项。多选空格仍勾选当前项

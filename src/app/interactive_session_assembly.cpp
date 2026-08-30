@@ -2,6 +2,9 @@
 // 回合重建与皮上刷新、分派材料装配、会话命令材料包——函数体原样自
 // interactive_session.cpp 搬来(行为一字未改,注释随行);运行半边(主
 // 循环/泵仲裁/回合入口)在同一只类的 interactive_session.cpp。
+// 骨架拆解反弹·问题 2:本文件原名 interactive_session_wiring.cpp,与组合根
+// 目录 src/app/wirings/ 撞车(那儿的文件才是"把零件接起来"的装配根);
+// 这里是同一个大类的另一半方法实现,按内容改名为 assembly(装配半边)。
 #include "app/interactive_session.hpp"
 #include "app/interactive_session_controller.hpp"  // 控制器类声明(私头,会话终章)
 
@@ -371,8 +374,14 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       session_store_broken(session_runtime_.store_broken()),
       session_title(session_runtime_.title()),
       session_title_pending(session_runtime_.title_pending()),
+      // 两层标题的账(骨架拆解反弹·问题 2):绑 runtime 那份标题真值与
+      // 存档口,判定本体在 app/session_title_account。
+      titles_(session_title, session_title_pending, session_store, session_store_broken),
       recordings_root(home_lubancode.has_value() ? lubancode::tools::Utf8ToPath(*home_lubancode) / "recordings"
                                                  : std::filesystem::path()),
+      // 非 turn 通知的终端画法(骨架拆解反弹·问题 2):controller 经
+      // notice_sink() 的基类口递通知。声明序在杂项段前,列表同序。
+      notice_sink_terminal_(theme),
       active_provider_write_path(stack_.active_provider_write_path) {
     // 逐枚追踪单:trace hub 安家(抓 session_runtime_ 的 ids/store 引用;
     // 分线 canonical 工具事件到 session 栅栏/录制投影/UI 投影)。
@@ -818,9 +827,27 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         plan_wiring_.SwitchMode(lubancode::runtime::CollaborationMode::Plan, "slash");
     }
 
+    // 状态面板拼装材料(骨架拆解反弹·问题 2):指针字段绑一次,goal/loop
+    // 两枚每圈在 Run() 顶刷新;折数在 app/status_panel_assembly。
+    status_inputs_.current_model = current_model.get();
+    status_inputs_.active_provider = &active_provider;
+    status_inputs_.current_think = current_think.get();
+    status_inputs_.ptc_resolution = &tool_runtime_->ptc_resolution();
+    status_inputs_.context_tracker = &context_tracker;
+    status_inputs_.worktree_session = &worktree_session;
+    status_inputs_.config_result = &config_result;
+    status_inputs_.session_runtime = &session_runtime_;
+    status_inputs_.recorder = &record_wiring_.recorder_optional();
+
     // 命令注册制的分派材料:全部装配完了一次配齐(handler 从这取料)。
     AssembleDispatchContext();
     RefreshWorkflowCompletions();
+}
+
+lubancode::app::SessionNoticeSink& TerminalSessionController::notice_sink() {
+    // 经基类口递通知:终端画法在 TerminalSessionNoticeSink,往后 app-server
+    // 挂第二只 sink 时这里换个返回值就行,调用点一个不动。
+    return notice_sink_terminal_;
 }
 
 TerminalSessionController::~TerminalSessionController() {
@@ -1193,17 +1220,15 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
                 project_memory->set_source_session(session_start_ts);
             }
             // 两层标题(实测问题 7):翻场翻代,上一场在飞的精炼落地即弃;
-            // 新场子的下一问重走本地起名 + 精炼。
-            title_epoch_++;
-            session_title_refiner_.RequestCancel();
-            session_title_auto_attempted = false;
+            // 新场子的下一问重走本地起名 + 精炼(判定本体在 titles_)。
+            titles_.ResetForNewSession();
         },
         [this](const std::string& title) {
             peer_wiring_.SetName(title);
             // 人工 /title 抢先(实测问题 7):翻标题代数,迟到的自动精炼结果
             // 丢弃;在飞的请求顺手取消,省几个 token。
-            title_epoch_++;
-            session_title_refiner_.RequestCancel();
+            titles_.BumpGeneration();
+            titles_.refiner().RequestCancel();
         },
         [this]() { SyncWorktreeDirectory(); },
         [this]() { CleanupBackgroundAgents(/*dispose_queue=*/true); },

@@ -79,7 +79,7 @@ void PrintTurnFooter(const lubancode::cli::Theme& theme, bool is_console, std::i
 // AskToolConfirm)——diff 预览、三档菜单、"总是允许"落会话账、
 // settings.local.json 追问与持久化全在那边,本文件不碰真终端 IO、不写
 // 配置。主回合之外,workflow 的 agent/tool 节点审批口也走这同一颗脑袋
-//(见 interactive_session_wiring 的 BuildWorkflowAgentCallbacks),不另开
+//(见 interactive_session_assembly 的 BuildWorkflowAgentCallbacks),不另开
 // 第二套确认逻辑。pre 是 PreToolUse 的归并决策(调用方没接钩子就给默认
 // 空表态);has_permission_hooks 为假时跳过 PermissionRequest 钩子的发射。
 // permission_floor 是子代理定义带来的档位下限(自定义 Agent 单·阶段 4:

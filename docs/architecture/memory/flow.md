@@ -216,7 +216,7 @@ worker 依次做这些事：
 - `src/memory/memory_tool.cpp`：`memory_save` 参数与排队。
 - `src/app/interactive_session.cpp`：外层 turn 的召回与收尾调用。
 - `src/app/commands/memory_commands.cpp`：`/memory` 分派、候选操作与回合尾抽取。
-- `src/app/interactive_session_wiring.cpp`：记忆工具、子代理召回与会话材料接线。
+- `src/app/interactive_session_assembly.cpp`：记忆工具、子代理召回与会话材料接线。
 - `src/app/memory_extract.cpp`：本轮转写、候选 JSON 请求与解析。
 
 相关测试集中在 `tests/unit/memory/test_project_memory.cpp`、`tests/unit/memory/test_memory_retrieval.cpp` 与记忆候选、迁移、worker 测试。

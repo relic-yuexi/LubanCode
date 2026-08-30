@@ -821,7 +821,17 @@ add_library(lubancode_app STATIC
   src/app/session_stack.cpp
   # 会话终章:控制器的装配半边(构造/析构/接线/材料包;运行半边在
   # interactive_session.cpp,类声明共享 interactive_session_controller.hpp)。
-  src/app/interactive_session_wiring.cpp
+  # 骨架拆解反弹·问题 2:自 interactive_session_wiring.cpp 改名——原名与
+  # 组合根目录 src/app/wirings/ 撞车,实际是同一个大类的另一半方法实现,
+  # 不是装配根文件。
+  src/app/interactive_session_assembly.cpp
+  # 骨架拆解反弹·问题 2:自 TerminalSessionController 拆出的旁挂件——两层
+  # 标题的账、整轮 usage 折算、状态面板拼装、非 turn 通知口(各带单测,
+  # 不必起完整 controller)。
+  src/app/session_title_account.cpp
+  src/app/turn_usage_account.cpp
+  src/app/status_panel_assembly.cpp
+  src/app/session_notice.cpp
   # 会话终章:@ 提及支件(索引缓存 + 提交前校验/账单,自大类搬出)。
   src/app/mention_support.cpp
   src/app/interactive_session.cpp
@@ -830,6 +840,14 @@ add_library(lubancode_app STATIC
   src/app/plugin_scaffold.cpp
   src/app/cli_app.cpp
   src/cli/console_input.cpp
+  # 骨架拆解反弹·问题 5:console_input 拆三台机器(composer 主循环/流式
+  # footer/turn 监听线程),共享底层(锁/状态行/面板会话/键位翻译/菜单)
+  # 留原文件;跨文件签名在 console_input_internal.hpp(家族私有,不对外)。
+  # 构建边界不变:三枚新文件随 console_input 住 app target,不进 core/
+  # engine/runtime。
+  src/cli/console_input_composer.cpp
+  src/cli/console_input_stream_footer.cpp
+  src/cli/console_input_turn_listener.cpp
   src/cli/session_picker_panel.cpp
   src/cli/spinner.cpp
   # 骨架拆解批二:SpinnerBackend 自 backend_stack 挪来(UI 件归显示层)。
