@@ -8,8 +8,8 @@
 // 按"字段"逐个决,不是整套配置一刀切——比如配置文件只写了 base_url,
 // model 照样能从下一级来。密钥绝不硬编码进源码。
 //
-// M6.5:配置文件挪进 <主目录>/.lubancode/ 目录(往后还要住 plugins/、skills/,
-// 是 lubancode 的家)。读到旧位置文件而新位置不存在时自动迁移(见
+// 配置文件住在 <主目录>/.lubancode/,与 plugins/、skills/ 共用一处。
+// 读到旧位置文件而新位置不存在时自动迁移(见
 // MigrateConfigFileIfNeeded),不留旧新两份配置混着用的糊涂账。
 //
 // lubancode 是通用工具,不绑死哪一家模型服务:内置默认值只有 wire=anthropic

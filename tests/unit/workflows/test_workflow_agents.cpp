@@ -126,7 +126,7 @@ public:
     }
 };
 
-// 假 backend:send_stream 直接报错(批五乙降策略的钉用——agent 节点走
+// 假 backend:send_stream 直接报错,验证 agent 节点走
 // TurnHarness 的 DriveTurn 收场,报错映射与从前一字不差)。
 class FailingBackend : public lubancode::api::Backend {
 public:
@@ -684,7 +684,7 @@ nodes:
     request.node = &def.node_map.at("work");
     request.resolved_input = nlohmann::json{{"topic", "钉收场"}};
 
-    // 批五乙降策略:turn 推进走 DriveTurn(单轮即收,没续投源),报错
+    // turn 推进走 DriveTurn(单轮即收,没续投源),报错
     // 折 agent_error、错误文案带 backend 原话、不发第二次请求。
     const NodeExecResult result = executor.Execute(request);
     REQUIRE_FALSE(result.ok);

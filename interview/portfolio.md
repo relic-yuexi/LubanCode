@@ -14,7 +14,7 @@ LubanCode 是一款用 C++23 编写的跨平台 AI 编程 CLI。它用统一事�
 
 ### 30 秒介绍
 
-我用 C++23 独立做了一款终端 AI 编程工具。项目不只包了一层模型接口。我把三套流式协议归一成中立消息与事件，写了可扩展工具注册表、子代理、MCP/LSP 接入、上下文压缩与会话恢复。终端侧支持流式 Markdown、行内 Unicode 数学、块级盒式 LaTeX、可编辑输入、消息排队、diff 确认与工具明细折叠。底层进程管理分别适配 Windows Job Object 与 POSIX 进程组。CI 覆盖 MSVC、GCC 与 Clang。
+这是我的个人项目。我用 C++23 主导设计与交付，也长期借 AI 辅助方案推演、实现、重构、测试和文档。项目不只包了一层模型接口。我把三套流式协议归一成中立消息与事件，写了可扩展工具注册表、子代理、MCP/LSP 接入、上下文压缩与会话恢复。终端侧支持流式 Markdown、行内 Unicode 数学、块级盒式 LaTeX、可编辑输入、消息排队、diff 确认与工具明细折叠。底层进程管理分别适配 Windows Job Object 与 POSIX 进程组。CI 覆盖 MSVC、GCC 与 Clang。
 
 ### 2 分钟介绍
 
@@ -57,6 +57,7 @@ LubanCode 是一款用 C++23 编写的跨平台 AI 编程 CLI。它用统一事�
 | 测试代码 | 发布前按“数据刷新”重算，并标日期与 commit |
 | 自动测试 | 发布前跑 Release 全套，并记录通过、失败、跳过与环境 |
 | 提交记录 | 发布前按“数据刷新”重算 |
+| 开发归属 | 个人项目；AI 深度参与方案、实现、测试与文档，不报无法审计的行级手写比例 |
 | 模型协议 | Anthropic Messages、OpenAI Responses、Chat Completions |
 | 平台 | Windows x64、Linux x64、macOS arm64 |
 | 编译器矩阵 | MSVC、GCC、Clang |
@@ -69,7 +70,7 @@ LubanCode 是一款用 C++23 编写的跨平台 AI 编程 CLI。它用统一事�
 
 ### 标准版：C++ / AI Agent / 基础设施
 
-**LubanCode：跨平台 AI 编程 CLI｜独立开发｜C++23**
+**LubanCode：跨平台 AI 编程 CLI｜个人项目，主导设计与交付（AI 辅助）｜C++23**
 
 - 设计中立消息、工具调用与流式事件模型，将 Anthropic Messages、OpenAI Responses、Chat Completions 三套协议隔离在独立后端；Agent loop 无须感知厂家字段，支持运行时切换 provider 与模型。
 - 构建 Schema 驱动的工具注册表与多轮代理循环，覆盖文件读写、容错编辑、命令执行、搜索、子代理和待办；接入 MCP、LSP、Skills、Lua 与 C ABI 插件，并用延迟挂载控制工具 schema 的上下文开销。
@@ -81,7 +82,7 @@ LubanCode 是一款用 C++23 编写的跨平台 AI 编程 CLI。它用统一事�
 
 **LubanCode｜C++23 跨平台 AI 编程代理**
 
-- 独立设计三协议统一 Agent runtime，完成流式事件、工具循环、子代理、MCP/LSP、插件、上下文压缩与会话恢复；以抽象边界隔离模型协议、工具执行和终端 UI。
+- 主导设计三协议统一 Agent runtime，完成流式事件、工具循环、子代理、MCP/LSP、插件、上下文压缩与会话恢复；以抽象边界隔离模型协议、工具执行和终端 UI，并对 AI 辅助产出的实现与测试负责。
 - 解决跨线程终端重画与跨平台进程回收问题；三平台 CI 与自动发布链齐备，工程规模与测试数按投递时 commit 复测。
 
 ### 偏 AI 应用基础设施岗位
@@ -184,6 +185,11 @@ sequenceDiagram
 1. 工具循环、历史裁剪、确认和会话逻辑本来就相同，复制会让行为漂移。
 2. 协议真正不同的是请求映射与事件语义，放在后端边界最合适。
 3. 中立层不是“最小公分母”。厂商私有字段仍能从 `extra_body` 透传，通用逻辑不必知道它们。
+
+这层也有边。它押的是线性消息流与宿主执行工具。若新 provider 只输出一份声明式
+状态机，宿主仍掌握校验、权限和调度，可以加 `ProgramBlock` 与执行器。若 provider
+自己推进状态、并发调度、落副作用，`StreamEvent -> MessageAssembler` 会先失效，
+`AgentLoop` 随后失效。那该另开执行协议，不能把状态转移硬压成伪 tool call。
 
 ## 七、六项技术亮点
 
@@ -366,7 +372,7 @@ Skill 是提示与资源，不在进程内执行。MCP/LSP 是子进程。Lua �
 
 **Result**
 
-Release 构建通过；新增断言 7/7 通过；当前全量 1151 个用例通过。更要紧的是，测试标准从“按键有反应”变成“用户目标真的达成”。
+当次修复的 Release 构建通过，新增断言 7/7 通过；彼时全量 1151 个用例通过。这是那次提交的历史账，不拿来冒充当前测试总数。更要紧的是，测试标准从“按键有反应”变成“用户目标真的达成”。
 
 **一句复盘**
 
@@ -417,7 +423,7 @@ Release 构建通过；新增断言 7/7 通过；当前全量 1151 个用例通�
 
 **讲法**
 
-代码项目查询常带路径、类名、函数名和命令，精确词法信号很强。第一版用路径、符号、关键词和字符 n-gram 打分，同步本地完成；不引入 embedding 网络调用、向量数据库和额外隐私面。Markdown 保持可读，catalog 坏了能重建。待真实误召回数据积够，再决定是否加语义检索，而不是先为“高级”买复杂度。
+代码项目查询常带路径、类名、函数名和命令，精确词法信号很强。第一版用路径、符号、关键词和字符 n-gram 打分，同步本地完成；不引入 embedding 网络调用、向量数据库和额外隐私面。Markdown 保持可读，catalog 坏了能重建。如今固定中文尺子已有 100 条记忆与 127 条问句：Recall@1/@3 都是 100%，Precision@3 为 88.35%，负例误命中 2/39，也就是 5.13%。两条误召回分别把“依赖注入”撞到 vcpkg，把“git 撤销提交”撞到小 PR 偏好。这些数字能守回归，仍不是自然流量。下一步应积真实语义漏召回与误注入，再决定是否加向量召回。
 
 ## 九、高频追问与答法
 
@@ -428,6 +434,16 @@ Release 构建通过；新增断言 7/7 通过；当前全量 1151 个用例通�
 可这样答：
 
 > 我选 C++，一是想把单文件分发、进程控制、原生终端与 C ABI 插件放在同一技术栈里；二是借项目系统练习资源寿命、并发和跨平台边界。代价也清楚：字符串编码、平台 API 和构建依赖更费工。若目标只是快速验证 Agent 逻辑，我会先用 Python；若从零做更强内存安全的长期系统，Rust 也值得评估。
+
+### 单文件分发兑现成什么数字？
+
+2026-08-30 本机 `0.26.127` Windows x64 Release 为 `11,575,296` 字节，
+即 `11.04 MiB`。程序主体是一只 `lubancode.exe`；发行包仍带 LICENSE、skills、
+文档与安装脚本。
+
+用 `ProcessStartInfo` 起进程、读完输出并等退出。`--version` 51 次中位
+`211.03 ms`，P95 `853.49 ms`；`--help` 21 次中位 `225.17 ms`，P95
+`824.90 ms`。这只量短命令，不等于交互界面 ready，更不算受控冷启动。
 
 ### `std::expected` 用在哪里？异常呢？
 
@@ -470,7 +486,7 @@ MCP 也没有多余。它用进程与协议成本换隔离、语言自由、独�
 可以直说四项：
 
 1. `main.cpp` 仍承担较多会话接线与屏幕协调，应继续拆出 session controller 与 transcript runtime。
-2. 真终端驱动尚未纳入默认 CTest；它依赖真实控制台，部分场景还依赖模型服务。下一步应配本地确定性 fake backend。
+2. 真终端驱动尚未纳入默认 CTest；仓内已有 15 只驱动，几只主力驱动也已有本地 fake backend，可它们仍要手工点名构建运行。下一步应把无网络、无私钥、时序确定的那批纳入 Windows CI。
 3. POSIX 的复杂原地重画能力弱于 Windows，当前选择保信息、不冒险错画。
 4. Lua 与 DLL 是进程内扩展，没有沙箱。若面向不可信插件，要改成进程外宿主。
 
@@ -597,9 +613,9 @@ ctest --test-dir build/release -C Release --output-on-failure
 
 ### P2：后续工程加分项
 
-- [ ] 用本地 fake backend 驱动真终端测试，摆脱外部模型与网络时序。
+- [ ] 把已有本地 fake backend 的真终端驱动纳入 Windows CI；真模型探针继续 opt-in。
 - [ ] 拆小 `main.cpp`，把会话协调与转录 runtime 移出入口文件。
-- [ ] 为启动耗时、常驻内存、长输出吞吐补 benchmark。
+- [ ] 把现有一次启动点测收成 CI benchmark；另补交互 ready、常驻内存与长输出吞吐。
 - [ ] 明确插件信任模型；若接不可信插件，改进程外隔离。
 - [ ] 补贡献指南、issue 模板与最小开发环境说明。
 
@@ -644,6 +660,15 @@ Anthropic Messages、OpenAI Responses 和 Chat Completions，并提供可扩展
 git rev-list --count HEAD
 git tag
 git shortlog -sn --all
+
+# AI 联署提交只算参与下限，不换算成 AI 代码行占比
+$allCommits = [int](git rev-list --count HEAD)
+$nonMergeCommits = [int](git rev-list --count --no-merges HEAD)
+$aiCommits = @(git log HEAD --format='%H' --extended-regexp --regexp-ignore-case `
+  --grep='Co-Authored-By:[[:space:]]+(Claude|Codex)')
+$aiNonMerge = @(git log HEAD --no-merges --format='%H' --extended-regexp --regexp-ignore-case `
+  --grep='Co-Authored-By:[[:space:]]+(Claude|Codex)')
+"all=$allCommits ai=$($aiCommits.Count) non_merge=$nonMergeCommits ai_non_merge=$($aiNonMerge.Count)"
 
 # 测试
 cmake --preset release

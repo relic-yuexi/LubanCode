@@ -64,7 +64,7 @@ struct JournalEvent {
 std::string SerializeJournalEvent(const JournalEvent& event);
 // 一行 -> 事件;坏行/半截行给 nullopt(跳过,不废整场)。
 std::optional<JournalEvent> ParseJournalEvent(const std::string& line);
-// journal 行 <-> 统一回放信封(批五乙:统一回放接口的 workflow 域编解码)。
+// journal 行 <-> 统一回放信封,这里保留 workflow 域编解码。
 // 域字段 run_id/workflow_id/node_id/attempt/data 进 payload 原样过境;
 // seq 是 journal 独有的行内次序号,信封正位收下(回放按它稳定排序)。
 std::optional<runtime::replay::Envelope> ParseJournalEnvelopeLine(const std::string& line);

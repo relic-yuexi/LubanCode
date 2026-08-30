@@ -19,6 +19,267 @@ _面向 LubanCode 项目答辩：每题先给一口短答，再指出面试官�
 
 > 📌 **答题规矩:** 不会的边界直说“当前没做”。一个诚实欠账，常比一套空泛“高可用设计”更有分量。
 
+## A 组：逼你交数字
+
+下列数字取自 2026-08-30 的仓库与本机 Release 测试。固定语料评测、真机故障、
+日常使用账各算各的，不能揉成一团。
+
+### 1. compact 前后，token 到底降了多少？
+
+**先答：** 目前还没有一组能拿来证明收益的成功对照实验。我能交出的真机数字，
+反倒是一条失败账：旧热区算法曾把约 `70.8k` 压成 `73.7k`，多出 `2.9k`，
+约涨 `4.1%`。病根是 mid-turn 长工具循环全挤在最后一轮，旧算法把整轮原样留下，
+又在前头添了一份存档。现版自动路径发现新史不短，便拒收，原 history 不动。
+
+这条数字只证明“旧算法会反涨，新闸能挡住”。它不能证明压缩后任务不跑偏。
+眼下没有同任务、同模型、同输入的 FULL/compact 多轮对照；也没有一份真实长会话
+同时记下压缩请求 `input_tokens`、`output_tokens`、耗时、后续任务判分。故这四个数
+都不能编。
+
+“摘要漏待办就拒收”已有确定性回归。此次本机跑 `Compact:*` 与
+`CompactHierarchical:*`，共 `22` 条用例、`105` 个断言，全过。可生产拒收率仍是
+未知。成功的 `compact_v2` 事件会记 `pre_tokens`、`post_tokens`、分块数与 manifest；
+失败只在当场报错，没有耐久的 attempt/reject 分母。没分母，便算不出拒收率。
+
+**面试官若追“下一步怎么量”：** 给每次尝试落一条 `compact_attempt`，记估算前后
+token、provider 输入输出 usage、耗时、接受或拒绝及理由。再冻结一组多轮任务，
+每轮查活动待办、文件改动、测试结果与最终判分。至少重复五次，方能报中位数、
+P95、拒收率与跑偏率。
+
+证据：[`compaction.md`](../docs/features/context/compaction.md)、
+[`session_commands.cpp`](../src/app/commands/session_commands.cpp)、
+[`test_compact.cpp`](../tests/unit/agent/test_compact.cpp)。
+
+### 2. BM25 召回质量怎么评？误召回长什么样？
+
+**先答：** 现在不再是“一条数据也没有”。中文固定尺子有 `100` 条项目记忆、
+`88` 条应命中问句、`39` 条不应命中问句。此次实跑结果如下：
+
+| 指标 | 实测 |
+| --- | ---: |
+| Recall@1 | `100%` |
+| Recall@3 | `100%` |
+| Precision@3 | `88.35%` |
+| 负例误命中率 | `2/39 = 5.13%` |
+| 注入字节 P50 / P95 | `269 / 547` |
+
+两条误命中很具体：问“依赖注入是什么设计模式？”，词法检索撞上
+`fact.zh-dep-vcpkg`；问“git 怎么撤销上一次提交”，撞上
+`preference.zh-small-pr`。前一条把“依赖”当成包依赖，后一条把 git 操作泛词
+拉向提交偏好。另一本中英混排尺子有 `34` 条记忆、`43` 条正问、`33` 条负问；
+Recall@1/@3 都是 `100%`，Precision@3 是 `97.73%`，负问零误召回。它仍有一条
+过注入：“MergeConfig 配置合并的顺序”除正确项外，又捎上 hooks 配置。
+
+边界也要当场说：这些是固定 fixture，不是线上自然流量。它能防检索器改坏，
+不能替代真实使用日志。是否加语义检索，要看自然问句里的语义漏召回、跨表达失败
+与误注入成本；眼下这份数据只够说明词法基线有多准，尚不够证明向量检索没用。
+
+证据：[`test_memory_retrieval_zh.cpp`](../tests/unit/memory/test_memory_retrieval_zh.cpp)、
+[`corpus_zh.json`](../tests/fixtures/memory_retrieval/corpus_zh.json)、
+[`test_memory_retrieval.cpp`](../tests/unit/memory/test_memory_retrieval.cpp)。
+
+### 3. CI 覆盖率多少？真终端回归靠什么兜底？
+
+**先答：** 行覆盖率、分支覆盖率都没采，故百分比未知。不能拿“测试很多”冒充
+coverage。当前 CMake 注册 `268` 个 CTest 项；主 doctest 程序列出 `3692` 条用例。
+GitHub Actions 跑 Windows、Ubuntu、macOS 三条腿。2026-08-30 本机现有 Release
+构建实跑 `267/268` 通过。唯一红项是 `browser.mcp.selftest` 的崩溃收口分支：
+它内部 `195 PASS / 1 FAIL / 2 SKIP`，旧 page id 回了 `browser.internal_error`，
+没按预期报 page 已失效。故这一版不能答“全绿”。
+
+真终端另有 `15` 只 `*_driver.cpp`。它们会开真实 Windows 控制台、注键、刮屏，
+查 composer、footer、面板、滚屏与残影。它们全是 `EXCLUDE_FROM_ALL`，默认 CTest
+不编也不跑。眼下兜底分三层：纯状态机与渲染边界进默认 CTest；
+`agent_stream_driver`、`viewport_driver`、`history_search_driver` 等用进程内假
+provider 穿过真 `lubancode.exe`；改终端路径时，再点名构建并手跑对应驱动，
+报告落盘。
+
+这套替代手段能挡住不少回归，却不是完整 CI 闸。开发者若忘了手跑，ConHost
+特有故障仍可能漏网。真正还账的办法，是挑无网络、无私钥、时序确定的 fake
+backend 驱动纳入 Windows CI；依赖真模型的探针继续 opt-in。
+
+证据：[`testing.md`](../docs/development/testing.md)、
+[`tests/CMakeLists.txt`](../tests/CMakeLists.txt)、
+[`ci.yml`](../.github/workflows/ci.yml)。
+
+### 4. 这工具每天用吗？它真坑过你吗？
+
+**先答：** 我不能拿现有材料证明“每天都用”。能证明的是 2026-08-29 有一场真实
+项目 dogfooding：用户只发了 `3` 条 query，工具往返却带出 `31` 次 normal 调用，
+累计输入约 `728.3k` token，provider 报缓存命中 `208.4k`，约 `29%`。这场使用
+一口气记下 `10` 个真实问题，不是拿测试夹具扮日常使用。
+
+最扎手的一回，是首轮主答已经出来，程序才同步起标题请求。用户眼看答案落完，
+提示符却又卡了约 `6.3` 秒。那枚标题只吃 `492` 输入 token、吐约 `10` token；
+偏生 `cheap` 没配独立小模型，回落到与 normal 同一只 `gpt-5.6-sol`。token 不算
+大，关键路径白等六秒多，体验照样坏。后来把它拆成两层：首问建档时先起本地
+临时标题，模型精炼异步跑，不再堵住首轮收尾。
+
+这才算 dogfooding 故事：先报现场与代价，再说根因、修法和回归。若面试官追问
+连续使用天数、日均会话数、失败率，现有账答不上来，就直说没量。
+
+证据：[`LubanCode 真实实测问题记录`](../todos/LubanCode真实实测问题记录_20260829.todo)、
+[`session_title_refiner.cpp`](../src/app/session_title_refiner.cpp)、
+[`interactive_session.cpp`](../src/app/interactive_session.cpp)。
+
+## B 组：AI 辅助编码
+
+这组题先认账，再讲控制。别把“个人项目”“独立负责”偷换成“每行代码都由我亲手
+敲出”。
+
+### 1. 多少代码是手写的，多少是 AI 生成的？
+
+**先答：** 我给不出可信的行级比例。仓库没给每一行保存“人写、AI 起草、人改写”
+这类来源，Git author 也不能回答。当前 `HEAD=90fb612`，主线共有 `1087` 个提交，
+都落在同一名人类作者名下；其中 `819` 个提交明确带 Claude 或 Codex 的
+`Co-Authored-By`，占 `75.3%`。去掉 merge 后有 `891` 个提交，其中 `739` 个带
+AI 联署，占 `82.9%`。
+
+这组数只能证明 AI 深度参与，不能换算成“82.9% 代码由 AI 写”。一枚 AI 联署
+提交里可能有人写的设计、AI 起的样板和双方来回改过的测试；没写 trailer 的提交
+也未必没有 AI。故我不会报手写行数百分比，更不会说“只有样板用了 AI”。
+
+我把它称作个人项目，意思是没有第二名人类开发者同我分担产品责任。我负责定目标、
+拆边界、挑方案、审 diff、跑验收、决定是否合入，并为发布结果担责。AI 参与方案
+推演、实现、重构、测试和文档，范围很深。简历里原先的“独立开发”容易叫人误会，
+更稳的写法是：
+
+> 个人项目｜主导设计与交付｜AI 辅助开发
+
+面试官若问某一模块是谁写，不凭印象抢功。翻对应提交、设计记录与测试，说清我给了
+哪些约束，AI 起了哪些草稿，我又改掉什么、补了什么验证。
+
+### 2. AI 生成的代码怎样验收？出过事吗？
+
+**先答：** 出过事。后台拒权通知那次改动在 `0d3d706` 引入两枚 lambda。它们按
+引用捕获 `last_denial_hook_reason`，变量却活在一层 `else` 块里。装配块先退栈，
+`sub_loop.Run()` 后调回调，便踩成 `stack-use-after-scope`。MSVC 没立刻炸，Linux
+第一回调用就 `SIGSEGV`。引入提交明确带 Claude 联署；Git 不能证明那一行究竟由
+谁敲下，故准确说法是“AI 辅助变更引入，人工验收也漏掉”，不能把锅全甩给模型。
+修复提交是 `0d44eb8`，同样有 Claude 参与。ASAN 钉出现场后，把变量提到
+`RunTask` 函数体，罩住两枚回调整段寿命，再补后台拒权回归。
+
+我如今把 AI patch 当外部贡献验，分五道门：
+
+1. 先对需求、不变量与信任边界；答非所问，测试再多也不收。
+2. 逐段看 diff，尤其查所有权、引用寿命、线程、错误路、取消与平台分支。
+3. 跑最窄的修前红、修后绿测试；fixture 要复刻故障形状。
+4. 再跑 Release CTest 与三平台 CI；终端、进程、网络另上真控制台、裸 socket、
+   假 provider 或 opt-in 真服务。
+5. 留提交、测试和故障复盘。AI 参与不免责任，发现漏检便反过来抬高验收门槛。
+
+这五道门也不保证零事故。那枚悬垂引用说明：AI 会写出看着顺眼、编译也过、只在
+另一平台发作的代码；人工若只看 happy path，一样会放它过关。
+
+证据：提交 `0d3d706`、`0d44eb8`，以及
+[`development-challenges.md`](retrospectives/development-challenges.md)、
+[`agent_tool.cpp`](../src/tools/agent_tool.cpp)、
+[`test_agent_tool.cpp`](../tests/unit/agent/test_agent_tool.cpp)。
+
+## C 组：把设计推到失效
+
+这组题不考背类名。先画出抽象押了什么，再说哪一步先裂。没有量过的成本，
+当场认账。
+
+### 1. 模型若直接流式输出可执行状态机，中立层还守得住吗？
+
+**先答：** 现版中立层守得住的，不是“一切模型协议”，而是**消息式交互、宿主
+掌握执行权**这一族协议。`Backend::send_stream` 吐出线性 `StreamEvent`，
+`MessageAssembler` 把事件攒成一条 assistant `Message`；`AgentLoop` 再从中找
+`ToolUseBlock`，逐枚交给本机工具。三家 wire 虽不同，都还服从这副骨架。
+
+若新状态机只是一份声明式程序，模型负责描述，宿主仍能校验节点、掌握权限、调度
+工具、记录副作用，那便可扩中立层：新增 `ProgramBlock` 与 `ExecutionEvent`，再接一只
+宿主执行器。旧消息路不用推倒。
+
+若 provider 自己推进状态、并发调度、暂停恢复，甚至绕过宿主直接做外部副作用，
+第一处会裂在 `StreamEvent -> MessageAssembler`。它只会把线性内容流收成一条消息，
+表达不了状态转移、检查点和分支。下一处才是 `AgentLoop`：它押的是“模型回包 ->
+有限 tool use -> 宿主执行 -> tool result 回填 -> 下一 step”。硬把状态机拆成伪
+`ToolUseBlock`，会丢转移身份、依赖、回滚与并发语义，审计账也会说谎。
+
+那时该另开执行协议，例如 `ModelOutput = Message | ExecutionPlan`，把内容事件与执行
+事件分账；权限和副作用仍由宿主把关。若 provider 不肯交回执行权，我不会宣称
+“加一只 adapter 就支持”，而会把它列成另一套 runtime。中立层的承载边界，就在
+这里。
+
+证据：[`backend.hpp`](../src/api/backend.hpp)、[`types.hpp`](../src/api/types.hpp)、
+[`assembler.hpp`](../src/api/assembler.hpp)、[`loop.cpp`](../src/agent/loop.cpp)。
+
+### 2. 顺序执行实测过代价吗？工具等待占多少？
+
+**先答：** 典型任务占比没测过。现版能在 trace 开启时为每枚 `RunOneTool` 链写
+`duration_ms`，轮视图也记 `wall_duration_ms` 与 `approval_wait_ms`；可前一项从工具
+入口起算，夹着 Hook、确认与真正 execute，并非纯工具 I/O。仓内也没有报表把同一轮
+的模型等待、工具链、审批等待和宿主开销对齐。2026-08-29 那场真实 dogfooding
+留了 `31` 次模型调用与 token 账，没有逐工具墙钟。故我不能报“工具占 30%”一类
+数字。
+
+顺序执行并非全凭感觉。文件改写、确认、Hook、ESC 分账和结果次序都要求先有一条
+确定路径；在未证明调用彼此独立前，并发会改语义。可“这份正确性花了多少时间”
+仍没量，性能取舍只做了一半。
+
+下一轮测试会固定三类任务：只读检索、读后改写、混合长命令。每轮同时记模型首字节
+与收尾、每枚工具起止、审批等待和整轮墙钟。主指标为：
+
+```text
+工具链占比 = sum(run_one_tool_duration_ms) / turn_wall_ms
+去审批工具链占比 = (sum(run_one_tool_duration_ms) - approval_wait_ms)
+                 / (turn_wall_ms - approval_wait_ms)
+可并行上界 = sum(独立只读组耗时) - max(该组耗时)
+```
+
+还要在 `execute` 前后另打点，才报纯工具等待。各项再报中位数与 P95。只读且无依赖
+的调用方可进候选并发组；写文件、共享进程、需要确认或 Hook 改参的调用仍顺序跑。
+没有这份账之前，不拿“顺序可审计”冒充成本已经算过。
+
+证据：[`loop.cpp`](../src/agent/loop.cpp)、[`turn_view.hpp`](../src/runtime/turn_view.hpp)、
+[`schema.cpp`](../src/trajectory/schema.cpp)。
+
+### 3. 主请求不重试，用户要怎样续？
+
+**先答：** 不重试守住了副作用，现版也保住了可信前缀；可一键续跑体验还没补齐。
+每次模型请求前，用户输入与已完成 step 已进 history。上一 step 的 assistant、工具
+调用和工具结果也已逐条落 session。网络错、`429`、`5xx` 或解析错来了，本轮明报
+`请求失败`，会话不杀，输入提示符回来。用户可输入“继续上一项任务”；进程重启后
+也可用 `--continue` 或 `/resume` 找回已成账前缀。工具自己失败时，宿主写一条错误
+`ToolResultBlock`，模型可换参数，用新 call id 再走确认与 Hook。
+
+有一道窄缝必须明说：普通 transport 断流后，屏上已经露出的半截正文不会写进
+history。只有用户按 ESC，主循环才强制收起 partial assistant，添打断标记，并给
+未执行工具补结果。故网络抖在第一 step，原始用户任务还在，用户不必从头重写；
+可那段只在屏上见过的半句话，模型续跑时看不见。若半句含了关键判断，用户得补述。
+
+当前错误文案会带 HTTP 状态或清洗后的错误摘要，却没告诉用户“保住了哪一步、下一步
+该按什么”。也没有 `/retry-last`。这便是没还完的可用性债。补法分三层：错误卡明列
+最近耐久检查点；给一枚“从检查点继续”命令；只有确认零响应字节、零工具副作用，
+且服务端有幂等保障时，才做有限退避。其余情况仍由用户点明续跑。
+
+证据：[`loop.cpp`](../src/agent/loop.cpp)、
+[`reliability.md`](../docs/architecture/agent-loop/reliability.md)、
+[`session_store.cpp`](../src/sessions/session_store.cpp)。
+
+### 4. 单二进制最终多大？启动多快？
+
+**先答：** 2026-08-30 本机 `0.26.127` Windows x64 Release 快照为
+`11,575,296` 字节，即 `11.04 MiB`。程序主体是一只原生 `lubancode.exe`；完整发行
+包还带 LICENSE、skills、文档与安装脚本，不能把“单二进制”说成“发行包只有一只
+文件”。
+
+同一文件用 Windows `ProcessStartInfo` 起进程、读完输出并等退出。`--version` 连跑
+`51` 次：中位 `211.03 ms`，P95 `853.49 ms`，最小 `83.43 ms`；`--help` 连跑
+`21` 次：中位 `225.17 ms`，P95 `824.90 ms`，最小 `90.58 ms`。这一批只能说明
+CLI 启动、解析参数、输出后退出的墙钟；它没有量交互终端何时可输入，也没有控制
+Windows Defender、文件缓存与调度噪声。故我会说“可执行文件 11.04 MiB，短命令
+中位约 0.21 秒”，不会说“完整冷启动 0.21 秒”。
+
+这还是一次本机点测，不是持续 benchmark。README 里的旧 `8.2 MiB` 已跟当前产物
+不符。下一步应在 Release CI 固定落三项：exe 字节数、`--version` 热启动分布、
+新环境交互 ready 时间；超阈值便告警。
+
+证据：[`version.hpp`](../src/app/version.hpp)、[`release.yml`](../.github/workflows/release.yml)、
+[`portfolio.md`](portfolio.md)。
+
 ## 🧠 模型、Provider 与 Schema
 
 | 追问 | 先答哪句 | 他在验什么 |
@@ -265,7 +526,7 @@ _面向 LubanCode 项目答辩：每题先给一口短答，再指出面试官�
 
 | 追问 | 先答哪句 | 他在验什么 |
 | --- | --- | --- |
-| 哪些是你独立设计 | 报具体边界、提交与测试，不报空泛“全栈” | 真实贡献 |
+| 哪些由你主导设计 | 报具体决策、AI 参与、提交与验收，不报空泛“全栈” | 真实贡献 |
 | 参考开源是否算抄 | 说明看过什么、重写什么、为何不同、许可证如何处理 | 工程伦理 |
 | 为什么不用现成 SDK | 三协议统一、C++ 运行时与细粒度流事件需要自控 | build vs buy |
 | 最大一次事故是什么 | 讲症状、根因、不变量、回归测试 | 故障复盘 |

@@ -11,10 +11,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+  <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml/badge.svg?branch=main&event=push" alt="main 分支 CI"></a>
   <img src="https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white" alt="C++23">
-  <img src="https://img.shields.io/badge/version-0.26.47-CB2C31" alt="v0.26.47">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-3D6DCC" alt="Apache-2.0"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-444444" alt="Windows, Linux and macOS">
 </p>
 
@@ -22,7 +21,7 @@ LubanCode 原生支持 Anthropic Messages、OpenAI Responses 与 Chat Completion
 
 鲁班造物，先正绳墨，再下斧凿。LubanCode 也守这条规矩：先看清，再动手；改了什么，明明白白摆给你看。
 
-> 当前源码版本：`v0.26.47`。Windows、Ubuntu、macOS 三路 CI 均会编译并跑全量测试。
+> 源码版本只认 [`src/app/version.hpp`](src/app/version.hpp)。主分支代码改动会在 Windows、Ubuntu、macOS 三路编译并跑全量测试；结果以页首 CI badge 为准。
 
 ## 真机界面
 
@@ -44,7 +43,7 @@ LubanCode 原生支持 Anthropic Messages、OpenAI Responses 与 Chat Completion
 
 ### 1. 下载即用，不用另装运行时
 
-不需要 Node.js。不需要 Python。不需要 `npm install`。Windows x64 的 `v0.26.47` Release 主程序约 8.2 MiB，一份原生二进制便能起跑。Windows 一行命令安装，Linux / macOS 解压即用。官方 skills 与文档另随发行包一道带上。
+不需要 Node.js。不需要 Python。不需要 `npm install`。Windows x64 Release 主程序约 8.2 MiB，一份原生二进制便能起跑。Windows 一行命令安装，Linux / macOS 解压即用。官方 skills、文档与许可证另随发行包一道带上。
 
 ### 2. 忙时也能接着输入
 
@@ -264,7 +263,7 @@ LubanCode 留了四扇门：
 
 ## CI 与发布
 
-每次 push 与 pull request 都会在下列环境编译、测试：
+代码改动 push 或提交 pull request 后，会在下列环境编译、测试：
 
 - Windows + MSVC
 - Ubuntu + GCC
@@ -273,10 +272,11 @@ LubanCode 留了四扇门：
 推送 `v*` 标签会触发发布流水线。三平台分别打包，随后自动创建 GitHub Release、生成发布说明并上传产物：
 
 ```bash
-git tag -a v0.26.47 -m "v0.26.47"
-git push origin v0.26.47
+version=vX.Y.Z
+git tag -a "$version" -m "$version"
+git push origin "$version"
 ```
 
 ## 许可
 
-仓库尚未附开源许可证。在 `LICENSE` 落地之前，代码版权仍归作者保留。
+LubanCode 采用 [Apache License 2.0](LICENSE)。你可以使用、修改与分发代码，也可以把它用于商业项目；分发时须遵守许可证中的署名、改动说明与专利条款。

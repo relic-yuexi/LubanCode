@@ -454,8 +454,8 @@ std::vector<JournalEvent> ReadJournalEvents(const std::filesystem::path& run_dir
     std::vector<JournalEvent> out;
     std::ifstream file(run_dir / "events.jsonl", std::ios::binary);
     if (!file) return out;
-    // 回放走统一恢复入口(批五乙·病十六后半):次序(seq 稳定排序)、
-    // 坏行跳过不废整场的规矩只在 runtime/replay 一份;journal 的域编解码
+    // 次序(seq 稳定排序)、坏行跳过不废整场的规矩只在 runtime/replay
+    // 一份;journal 的域编解码
     // 与折叠(收 JournalEvent)在这头。
     std::vector<std::string> lines;
     std::string line;

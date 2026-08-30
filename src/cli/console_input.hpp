@@ -5,7 +5,7 @@
 // (交互模式里"主提示符读一行"跟"工具确认读一行"正好就是这种交替)。
 // 见 console_input.cpp 开头注释,写了实测结论。
 //
-// M6.5 把真控制台这条路从"整行读入(ReadConsoleW)"升级成"逐键输入编辑器"
+// 真控制台从"整行读入(ReadConsoleW)"改走"逐键输入编辑器"
 // (核心逻辑在 cli/line_editor.hpp 的 LineEditorCore,不认 Win32,可单测;
 // 这里只是拿真实按键喂它、按它吐出来的 RenderState 重画屏幕),换来方向键
 // 移光标、上下键翻历史、Tab 补全 slash 命令、Shift+Tab 循环切确认模式这些

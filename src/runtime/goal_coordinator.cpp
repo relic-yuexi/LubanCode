@@ -11,8 +11,8 @@
 
 #include "hooks/hash.hpp"
 #include "platform/json_safe.hpp"  // DumpJsonSanitized:goal 事件落档的编码窄边界
-#include "runtime/budget_gate.hpp"  // 预算闸/连撞计数机制(批五:外壳横切件)
-#include "runtime/replay.hpp"  // 统一回放接口(批五乙):RestoreFromArchive 的次序/跳过/账面规矩
+#include "runtime/budget_gate.hpp"  // 三种宿主共用的预算闸与连撞计数
+#include "runtime/replay.hpp"  // RestoreFromArchive 的次序、跳过与账面规矩
 #include "sessions/session_store.hpp"  // MakeSessionLedgerSink(问题 3:存档 sink 搭建)
 
 namespace lubancode::runtime::goal {
@@ -1253,7 +1253,7 @@ void GoalCoordinator::ReplayEvent(const GoalCoordinatorEvent& event) {
 
 GoalCoordinator::ReplayStats GoalCoordinator::RestoreFromArchive(
     const std::vector<lubancode::sessions::GoalSessionEvent>& events) {
-    // 回放走统一恢复入口(批五乙·病十六后半):goal 行的中立解析在
+    // goal 行的中立解析留在
     // sessions 层(ParseGoalEvent,不反向依赖 runtime 的老规矩),这里
     // 解析后的域事件折成信封、经同一条次序/坏行跳过/账面规矩交
     // ReplayEvent。goal_id/iteration_id/revision 是域字段,进 payload

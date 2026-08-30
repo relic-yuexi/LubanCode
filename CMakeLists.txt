@@ -583,8 +583,8 @@ add_library(lubancode_runtime STATIC
   # 骨架拆解批五先行半批:重试退避(固定/指数/阶梯 + 上限 + 抖动档 +
   # 可取消等待)——loop 的 5s/15s 与 workflow 的节点级指数同走这枚。
   src/runtime/retry_backoff.cpp
-  # 骨架拆解批五乙(病十六后半):统一回放接口——信封/次序/恢复入口
-  # 一份;loop/goal/workflow 三家回放各接各的域编解码与折叠口。
+  # 统一回放接口只收信封、次序与坏行恢复规矩;loop/goal/workflow
+  # 各自保留域编解码与折叠口。
   src/runtime/replay.cpp
 )
 target_include_directories(lubancode_runtime PUBLIC

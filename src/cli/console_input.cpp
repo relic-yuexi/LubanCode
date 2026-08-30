@@ -21,7 +21,7 @@
 // 彻底不走窄字符 CP_UTF8 那条路;stdin 是管道/重定向时走原来的
 // std::getline,不影响 `echo "x" | lubancode.exe` 这种自动化用法。
 //
-// M6.5 补充:真控制台这条路从"ReadConsoleW 整行读入"升级成"逐键输入编辑器"
+// 真控制台从"ReadConsoleW 整行读入"改走"逐键输入编辑器"
 // (逐个键盘事件读,翻成 cli::KeyEvent 喂 LineEditorCore,按吐出来的
 // RenderState 重画)。这一步没法在当前 headless 环境里自动化敲键盘验证
 // (见上面"复现条件"),已经过编译告警检查(/W4 /permissive- 无告警)、

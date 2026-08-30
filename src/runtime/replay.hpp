@@ -1,4 +1,4 @@
-// 统一回放接口(骨架拆解批五乙,病十六后半):五套台账的回放规矩归一。
+// 五套台账共用这一份回放规矩。
 //
 // 收的是"规矩",不是载荷:loop 的 loop_task_v1/loop_tick_v1、goal 的
 // goal_v1 族、workflow 的 RunJournal+checkpoint,事件载荷与折叠语义各域
@@ -14,7 +14,7 @@
 //     这里一份——编解码给 nullopt、折叠口返 false 或抛异常,都算这一条
 //     不认,账面交 Stats,整场照跑)。
 //
-// 落 runtime/ 与批五甲的横切件(BudgetGate/RetryBackoff/IdAuthority)同屋:
+// 落在 runtime/,与 BudgetGate/RetryBackoff/IdAuthority 这些横切件同屋:
 // 三家消费方(loop 装配层、goal coordinator、workflow journal)依赖方向
 // 全部合法。sessions/ 不反向依赖 runtime(老规矩)——goal 行的中立解析
 // (ParseGoalEvent)留在 sessions 层,信封折账在 coordinator 这头做。

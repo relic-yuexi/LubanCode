@@ -367,6 +367,12 @@
 - **Key 铁律落成代码**:服务端返回 auto_registered 时 Lua 就地摘除整字段,只回"服务端提供新 Key,当前宿主不自动保存"的非敏感提示——值不进模型、不落盘(测试钉死 FAKE 原文与字段名都搜不到)。字段名按真 API 实测校准(设计稿的 tag/params 服务端不收)。
 - **假 server 13 案 196 断言**(FakeDns 注入照阶段 2 先例,manifest 原文不动):匿名无 Authorization、keyed 才有 Bearer;401/429/5xx/坏 JSON/超帽/取消各分型对号;batch 串行且取消后余笔不发。**匿名真网一笔实跑通过**(生产构造路+系统 DNS,status 200);keyed 真测按规矩 opt-in 未烧。
 
+## [v0.26.128] - 2026-08-30
+
+- **Lua 受控 HTTP 单收官(阶段 6)。** 六阶段一日走完:合同与 SecretResolver(0.26.119)→受控 HTTP 五道边界(122)→Lua Host API(123)→manifest 挂载(124)→AnySearch 参考包(127)→今日文档。三处文档落定:扩展指南选型表把 Lua 拆两行(裸=纯计算无 Host API/manifest v2=受控联网)、plugin-runtime 深挖校正四笔旧账("标准库全开无指令钩"三句全错)、security 新增 §9.1(Secret 来源/数据路径/五道边界/打码/cpr 备注)。
+- todo §十八终稿:六阶段逐条记账,§十七条完成定义十二条全勾,§5.2 字段名按真 API 实测订正。Debug/Release 双 268/268,focused 12 册 195 案全过,docs check 47 页 605 链接全绿。
+- 自此 LubanCode 有了一条完整的进程内受控联网路:Lua 描述请求,宿主握住水管与钥匙,Secret 原文六处都进不去。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。

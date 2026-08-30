@@ -11,10 +11,9 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml/badge.svg" alt="CI"></a>
-  <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/release.yml/badge.svg" alt="Release"></a>
+  <a href="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml?query=branch%3Amain+event%3Apush"><img src="https://github.com/relic-yuexi/LubanCode/actions/workflows/ci.yml/badge.svg?branch=main&event=push" alt="main branch CI"></a>
   <img src="https://img.shields.io/badge/C%2B%2B-23-00599C?logo=cplusplus&logoColor=white" alt="C++23">
-  <img src="https://img.shields.io/badge/version-0.26.47-CB2C31" alt="v0.26.47">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-Apache--2.0-3D6DCC" alt="Apache-2.0"></a>
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-444444" alt="Windows, Linux and macOS">
 </p>
 
@@ -22,7 +21,7 @@ LubanCode connects natively to Anthropic Messages, OpenAI Responses, and OpenAI-
 
 The name comes from Lu Ban, the traditional Chinese master craftsman. The idea is simple: measure first, cut second, and always show the work.
 
-> Current source version: `v0.26.47`. Windows, Ubuntu, and macOS CI build the project and run the full test suite.
+> [`src/app/version.hpp`](src/app/version.hpp) is the source of truth for the version. Code changes on `main` build and run the full test suite on Windows, Ubuntu, and macOS; the CI badge above reports the current result.
 
 ## Real terminal captures
 
@@ -44,7 +43,7 @@ Five things worth putting up front.
 
 ### 1. Download and run — no separate runtime
 
-No Node.js. No Python. No `npm install`. The Windows x64 `v0.26.47` Release executable is about 8.2 MiB. One native binary is enough to start; the release archive carries the official skills and documentation beside it.
+No Node.js. No Python. No `npm install`. The Windows x64 Release executable is about 8.2 MiB. One native binary is enough to start; the release archive carries the official skills, documentation, and license beside it.
 
 ### 2. Keep typing while work is in flight
 
@@ -263,7 +262,7 @@ See the [extension guide](docs/features/extensions/README.md) for layouts, examp
 
 ## CI and releases
 
-Every push and pull request is built and tested on:
+Code changes pushed to the repository or submitted through a pull request are built and tested on:
 
 - Windows with MSVC
 - Ubuntu with GCC
@@ -272,10 +271,11 @@ Every push and pull request is built and tested on:
 Pushing a `v*` tag builds all three release archives, creates a GitHub Release, generates release notes, and uploads the binaries:
 
 ```bash
-git tag -a v0.26.47 -m "v0.26.47"
-git push origin v0.26.47
+version=vX.Y.Z
+git tag -a "$version" -m "$version"
+git push origin "$version"
 ```
 
 ## License
 
-No open-source license has been added yet. Until a `LICENSE` file is published, all rights remain reserved by the author.
+LubanCode is licensed under the [Apache License 2.0](LICENSE). You may use, modify, distribute, and commercially deploy the code subject to its attribution, change-notice, and patent terms.

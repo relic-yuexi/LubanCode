@@ -1,5 +1,4 @@
-// 宿主侧执行器(自然语言编排单第 4 批):tool/llm/approval/ask_user/skill
-// 接现成设施。
+// 宿主侧执行器:tool/llm/approval/ask_user/skill 接现成设施。
 //
 // 分层:workflow 层(runtime)只认 NodeExecutor 抽象;这里把 LubanCode 的
 // ToolRegistry、Backend、InteractionBroker 适配进去。执行器不反向 include
@@ -7,11 +6,11 @@
 // abstractions,单子"现有代码可接之处")。
 //
 // tool:经 agent::RunOneTool 正门调 ToolRegistry 已注册工具——PreToolUse/
-// PostToolUse 钩子、确认档、Plan 闸、逐枚 trace 与主回合同一条链(批一
-// 封暗道);旧 ConfirmGate 保留作确认缺省。llm:单次结构化模型调用,采样
-// 走 agent::SampleModel 原语(批一·病四),不开完整 agent loop。agent:
+// PostToolUse 钩子、确认档、Plan 闸、逐枚 trace 与主回合同一条链;旧
+// ConfirmGate 保留作确认缺省。llm:单次结构化模型调用,采样走
+// agent::SampleModel 原语,不开完整 agent loop。agent:
 // 与 main/subagent 共用 agent::Agent,turn 推进走 TurnHarness 的
-// DriveTurn(批五乙·三外壳降策略:怎么跑 turn 只 harness 一份)。
+// DriveTurn,让三种宿主只认一份 turn 推进语义。
 // approval:经 InteractionBroker 悬起,等用户决定(accept/decline/cancel)。
 // ask_user:经 InteractionBroker 问一句,答案写进 output。
 // skill:把 Skill 的 SKILL.md 正文装进 llm 执行的上下文(同一只 llm 执行

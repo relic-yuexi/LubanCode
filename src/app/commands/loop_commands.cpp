@@ -436,7 +436,7 @@ void RestoreLoopFromArchive(const LoopWiring& wiring) {
     if (!bytes.has_value()) {
         return;
     }
-    // 回放走统一恢复入口(批五乙·病十六后半):行进信封出、文件序喂
+    // 行进信封出、文件序喂
     // 折叠口、坏行跳过不废整场——规矩只在 runtime/replay 一份;loop 的
     // 域编解码(ParseLoopLedgerLine)与折叠(ReplayEvent)各归各。
     std::vector<std::string> lines;

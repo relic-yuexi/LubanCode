@@ -172,7 +172,7 @@ public:
     // 坏事件跳过(返回 false),不废整场。
     bool ReplayEvent(const LoopSchedulerEvent& event);
 
-    // ---- 台账行编解码(批五乙:统一回放接口的 loop 域半边) ------------------
+    // ---- loop 台账的域编解码 ---------------------------------------------
     // 一行 session JSONL -> 统一回放信封。行形状与装配层 FlushLoopEvents
     // 落盘的对齐({"type","event","task_id","tick_id"?,"payload",
     // "timestamp_ms"});非 loop 族/坏行给 nullopt(跳过规矩在 replay.hpp,

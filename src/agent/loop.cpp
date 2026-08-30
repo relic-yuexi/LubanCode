@@ -23,7 +23,7 @@
 #include "api/assembler.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:trace 的入参/结果摘要锚
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
-#include "platform/wall_clock.hpp"     // 统一墙钟(批五):trace/计划动作的时间戳同源
+#include "platform/wall_clock.hpp"     // trace 与计划动作须共用一枚墙钟
 #include "runtime/plan_mode.hpp"       // kErrModeDenied:Plan 硬闸的稳定码
 #include "tools/schema_check.hpp"      // updatedInput 改写后的 schema 复检
 #include "platform/log_sink.hpp"
@@ -33,9 +33,8 @@ namespace lubancode::agent {
 namespace {
 constexpr std::size_t kContextPreflightHeadroomTokens = 512;
 
-// Unix epoch 毫秒(chrono 跨 clock 铁律:两枚 now 差只在这类帮手里出现,
-// 全文件统一走它)。批五乙收进统一墙钟:五套台账的真钟只 platform 一枚
-// 落点,口径不变。
+// Unix epoch 毫秒。chrono 不同 clock 不能混算;所有台账都从 platform
+// 取墙钟,免得各自换算后留下不同口径。
 std::int64_t NowMsEpoch() {
     return platform::WallClockNowMs();
 }
@@ -195,8 +194,7 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         if (event.compensates.empty()) {
             event.compensates = trace->compensates;
         }
-        // 批五乙留账收尾:trace 钟原先直读 system_clock,收进统一墙钟
-        //(与全文件其余账面同一只手)。
+        // trace 与其余台账须同用一枚墙钟,否则跨账对时会生偏差。
         event.timestamp_ms = NowMsEpoch();
         if (event.kind == ToolTraceEventKind::ExecutionStarted) {
             fired_started = event;

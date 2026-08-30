@@ -1,6 +1,6 @@
-// 宿主侧执行器实现(自然语言编排单第 4 批;批一封暗道:tool 走
-// agent::RunOneTool 正门,llm 走 agent::SampleModel 原语;批五乙降策略:
-// agent 节点的 turn 推进走 agent::DriveTurn,不再自家直调 Agent::Run)。
+// 宿主侧执行器实现。tool 走 agent::RunOneTool,llm 走
+// agent::SampleModel;agent 节点走 agent::DriveTurn。三条路都复用 Agent
+// 的正式入口,免得 workflow 另养一套执行语义。
 
 #include "workflow/host_executors.hpp"
 
@@ -13,8 +13,8 @@
 #include "agent/prompt_assembler.hpp"  // AssembleSystemPrompt:自定义 Agent 的同源拼装
 #include "agent/sample_model.hpp"
 #include "agent/tool_trace.hpp"  // kErrPermissionDeclined:旧稳定码的映射锚
-#include "agent/turn_harness.hpp"  // DriveTurn:agent 节点的 turn 推进正门(批五乙)
-#include "platform/wall_clock.hpp"  // 统一墙钟(批五):trace 批头事件的钟同源
+#include "agent/turn_harness.hpp"  // DriveTurn:agent 节点的 turn 推进入口
+#include "platform/wall_clock.hpp"  // trace 与批头事件须共用一枚墙钟
 #include "runtime/turn_event_adapter.hpp"
 #include "tools/instruction_scope.hpp"  // 写前作用域闸(AGENTS.md 作用域单 P0)
 #include "tools/path_utils.hpp"         // Utf8ToPath:材料里的 cwd 串转路径
