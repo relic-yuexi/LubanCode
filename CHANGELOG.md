@@ -402,6 +402,14 @@
 - **十二场合成夹具**:单请求全报/三步工具 cache 递增/失败重试两笔分开/主+双子代理三流分账/workflow 重试/compact map+reduce/v1 legacy/验证失败后修好/用户纠正 partial/active+truncated+corrupt。双目录重建三份 JSON 逐文件字节一致——不接真实 runtime 也能稳定出账。
 - **钱算得干净**:价格表 v1 拆段乘法全程 int64 零浮点(整数 micros),reasoning 不双计;隐私 allowlist 八类 secret 扫描+九种 canary 过脱敏后报告里捞不着。A1 起的真接线压在 Trajectory P0-2 之后,照单子次序不越。
 
+## [v0.26.134] - 2026-08-31
+
+- **用户能在浏览器里抢回自己的手了(多前端阶段 B)。** `browser/pause|resume` 立内核手闸:暂停期间 Agent 动作受理不执行(终态 browser.paused)、用户动作照走;手闸只归用户连接,agent 连接按不动。owner 由内核按连接身份盖章(principal)——**外壳报什么不算数**:agent 连接谎报 owner:"user" 一律 owner_denied 明拒。
+- **用户让路**:工作线程挑队先挑用户动作,同类 FIFO——用户不排在任何在队 Agent 动作后头;用户动作执行后递 userEpoch,Agent 拿旧快照的 ref 再动作即 stale_ref(阶段 2 机制复用)。WS 独立客户端仲裁三案+伪造案真打 50/50 全过。
+- **顺手挖出 thread/start 同秒撞名暗雷**:秒级时间戳+固定 slug 同秒两场撞成同一 id,旧场被顶掉、审批账跟着悬死。修法撞了追加序号,查重与入账同锁;回归案钉死同秒三连开。
+
+另:P0-1b SessionManager 落地(clear 八步换账、生命周期状态机、session 独占锁 PID+起始 token 身份核、崩溃恢复八册——崩在任一半路都能续办不加重复事件)。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
