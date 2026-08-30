@@ -1259,6 +1259,12 @@ void TerminalSessionController::Run() {
             break;
         }
     }
+    // P0-3 轨迹:退出即封口(§14.5 /exit 与 EOF——收口活动流、run terminal、
+    // session.ended、session.json closed)。封不干净标 incomplete,不写
+    // clean closed;这里的账面结果不打扰终端,要看得走 /doctor trajectory。
+    if (session_runtime_.trajectory() != nullptr) {
+        (void)session_runtime_.trajectory()->CloseSession("exit");
+    }
 }
 
 int RunInteractiveSession(const InteractiveSessionOptions& options) {

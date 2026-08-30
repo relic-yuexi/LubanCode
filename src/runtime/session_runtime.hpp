@@ -69,6 +69,11 @@ public:
         std::filesystem::path trajectory_workspace_root;  // 空 = 当前目录
         std::string trajectory_workspace_name;            // 空 = 目录名
         std::string lubancode_version;
+        // P0-3 resume(§10.4):--continue 启动路开 start_reason=resume 的
+        // 新场(source 只读,永不 reopen append)。source id 空 = 取本
+        // workspace 最近一场可恢复的;没有可恢复场回落普通开张。
+        bool trajectory_resume_at_launch = false;
+        std::string trajectory_resume_source_session_id;
     };
 
     explicit SessionRuntime(Options options);

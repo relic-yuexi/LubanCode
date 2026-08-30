@@ -905,7 +905,8 @@ RecordReceipt TrajectoryRecorder::Record(RecordRequest request, Durability durab
     return receipt;
 }
 
-RecordReceipt TrajectoryRecorder::WriteRunStarted(nlohmann::json extra, Durability durability) {
+RecordReceipt TrajectoryRecorder::WriteRunStarted(nlohmann::json extra, Durability durability,
+                                                  EventLinks links) {
     nlohmann::json payload = nlohmann::json::object();
     payload["run_kind"] = RunKindName(impl_->base.run_kind);
     for (auto it = extra.begin(); it != extra.end(); ++it) {
@@ -917,6 +918,7 @@ RecordReceipt TrajectoryRecorder::WriteRunStarted(nlohmann::json extra, Durabili
     request.scope.turn_id = std::nullopt;
     request.scope.request_id = std::nullopt;
     request.scope.call_id = std::nullopt;
+    request.links = std::move(links);
     request.payload = std::move(payload);
     return Record(std::move(request), durability);
 }

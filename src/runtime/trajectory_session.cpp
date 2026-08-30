@@ -595,6 +595,9 @@ struct TrajectorySessionLedger::Impl {
     // 子代理账:run_id -> 终态 hash(Finish 时填,父账边界引用用)。
     std::map<std::string, std::string> child_terminal_hashes;
     std::uint64_t subagent_counter = 0;
+    // --continue 启动路的 resume 投影(没 resume 为空)。
+    bool launch_resumed = false;
+    std::vector<api::Message> launch_resume_history;
 };
 
 std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Open(Options options) {
@@ -622,6 +625,38 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     Impl impl;
     impl.recorder_options.event_schema_version = options.event_schema_version;
     impl.manager = std::make_unique<trajectory::SessionManager>(std::move(manager_options));
+
+    // --continue 启动路(§10.4):直接建 start_reason=resume 的新 session,
+    // 不先造空 session。没有可恢复场(或源场验不过)回落普通开张,与旧路
+    // --continue 的 quiet_if_none 语义一致;真出错(目录坏了开不出新场)
+    // 照旧失败退出,不回退旧写口。
+    if (options.resume_at_launch) {
+        const std::string latest = impl.manager->LatestResumableSessionId();
+        if (!latest.empty()) {
+            trajectory::ResumeRequest resume;
+            resume.source_session_id = options.resume_source_session_id.empty()
+                                           ? latest
+                                           : options.resume_source_session_id;
+            resume.interactive = false;  // 启动路没有旧 requested 可指
+            const auto resumed = impl.manager->ResumeAsNew(resume);
+            if (resumed.error_code.empty()) {
+                impl.active = impl.manager->active();
+                impl.main_run_id = impl.active->manifest.main_run_id;
+                impl.launch_resumed = true;
+                impl.launch_resume_history = ProjectHistoryFromReplay(
+                    [&resumed] {
+                        trajectory::ReplayState projection;
+                        projection.effective_conversation = resumed.effective_conversation;
+                        return projection;
+                    }());
+                TrajectorySessionLedger ledger;
+                ledger.impl_ = std::make_unique<Impl>(std::move(impl));
+                return ledger;
+            }
+            // resume 失败回落普通开张:源场坏不拦人开新会话(明错留给
+            // /doctor trajectory 查),与旧路 --continue 找不到档不报错同门。
+        }
+    }
     auto active = impl.manager->LaunchSession();
     if (!active.has_value()) {
         return std::unexpected("trajectory.launch_failed: " + active.error());
@@ -741,8 +776,9 @@ TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const 
     if (!parent_call_id.empty()) {
         links.parent_call_id = parent_call_id;
     }
-    const auto started =
-        recorder_owner->WriteRunStarted(std::move(payload), trajectory::Durability::PowerLoss);
+    const auto started = recorder_owner->WriteRunStarted(std::move(payload),
+                                                          trajectory::Durability::PowerLoss,
+                                                          std::move(links));
     if (started.status != trajectory::RecordReceipt::Status::Committed) {
         return std::unexpected("trajectory.subagent_run_started: " + started.error_code);
     }
@@ -769,6 +805,220 @@ trajectory::CloseOutcome TrajectorySessionLedger::CloseSession(const std::string
     request.reason = reason;
     trajectory::NullClearParticipant participant;
     return impl_->manager->Close(request, &participant);
+}
+
+// ---------------------------------------------------------------------------
+// P0-3:clear 八步 / resume-as-new / replay 读口
+// ---------------------------------------------------------------------------
+
+std::vector<api::Message> ProjectHistoryFromReplay(const trajectory::ReplayState& state) {
+    std::vector<api::Message> history;
+    for (const auto& message : state.effective_conversation) {
+        api::Message projected;
+        switch (message.role) {
+            case trajectory::ReplayMessage::Role::User:
+                projected.role = api::Role::User;
+                break;
+            case trajectory::ReplayMessage::Role::Assistant:
+                projected.role = api::Role::Assistant;
+                break;
+            case trajectory::ReplayMessage::Role::Tool:
+                projected.role = api::Role::User;  // ToolResult 以 user 消息携带(与 hub 回喂同形)
+                break;
+        }
+        if (!message.blocks.is_array()) {
+            continue;
+        }
+        if (message.role == trajectory::ReplayMessage::Role::Tool) {
+            // ToolResult:content blocks -> ToolResultBlock,call_id 配对(§11.2)。
+            api::ToolResultBlock result;
+            result.tool_use_id = message.call_id.value_or(std::string());
+            for (const auto& block : message.blocks) {
+                if (block.is_object() && block.value("type", std::string()) == "text" &&
+                    block.contains("text")) {
+                    result.content = block["text"].get<std::string>();
+                    break;
+                }
+            }
+            projected.content.push_back(std::move(result));
+            history.push_back(std::move(projected));
+            continue;
+        }
+        for (const auto& block : message.blocks) {
+            if (!block.is_object()) {
+                continue;
+            }
+            const std::string type = block.value("type", std::string());
+            if (type == "text" && block.contains("text")) {
+                api::TextBlock text;
+                text.text = block["text"].get<std::string>();
+                projected.content.push_back(std::move(text));
+            } else if (type == "thinking" && block.contains("text")) {
+                api::ThinkingBlock thinking;
+                thinking.text = block["text"].get<std::string>();
+                projected.content.push_back(std::move(thinking));
+            } else if (type == "tool_call" && block.contains("call_id") && block.contains("name")) {
+                api::ToolUseBlock call;
+                call.id = block["call_id"].get<std::string>();
+                call.name = block["name"].get<std::string>();
+                if (block.contains("arguments")) {
+                    call.input = block["arguments"];
+                }
+                projected.content.push_back(std::move(call));
+            }
+        }
+        history.push_back(std::move(projected));
+    }
+    return history;
+}
+
+trajectory::ClearOutcome TrajectorySessionLedger::ClearSession(
+    const trajectory::ClearRequest& request, trajectory::ClearParticipant* participant) {
+    if (impl_ == nullptr || impl_->manager == nullptr) {
+        trajectory::ClearOutcome outcome;
+        outcome.error_code = "clear.no_active_session";
+        return outcome;
+    }
+    const auto outcome = impl_->manager->Clear(request, participant);
+    if (outcome.error_code.empty()) {
+        // 账本跟着换场:active 指针(manager 内 std::optional 同址换值)、
+        // run 号、选段器重置(新场不带旧 selection,§3.3.1)。
+        impl_->active = impl_->manager->active();
+        if (impl_->active != nullptr) {
+            impl_->main_run_id = impl_->active->manifest.main_run_id;
+        }
+        impl_->child_terminal_hashes.clear();
+        record_selection_ = nullptr;  // 惰性重建(RecordSelectionController)
+    }
+    return outcome;
+}
+
+TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::string& source_session_id,
+                                                                   const std::string& command_name) {
+    TrajectoryResumeSummary summary;
+    if (impl_ == nullptr || impl_->manager == nullptr) {
+        summary.outcome.error_code = "resume.no_ledger";
+        summary.outcome.message = "轨迹账本没开";
+        return summary;
+    }
+    trajectory::SessionManager& manager = *impl_->manager;
+    const bool has_active = manager.active() != nullptr;
+    trajectory::ResumeRequest request;
+    request.source_session_id = source_session_id;
+    request.interactive = has_active;  // 交互路:有旧场才有跨 session requested 可指
+    request.user_initiated = true;
+
+    // 旧场(若有):requested 先 durable,随后 switch_to_resume 封口
+    //(§10.4/§14.1 的 clear/resume 例外:旧 main 写 requested 与 terminal)。
+    if (has_active) {
+        const std::string command_id = "cmd-" + std::to_string(++command_counter_);
+        const std::string boundary_operation_id =
+            impl_->active->session_id() + ":resume";  // 稳定可追,不落随机
+        auto* old_main = impl_->active->main.has_value() ? &*impl_->active->main : nullptr;
+        std::string requested_event_id;
+        if (old_main != nullptr) {
+            trajectory::RecordRequest requested;
+            requested.kind = trajectory::EventKind::ControlCommandRequested;
+            requested.scope = old_main->base_scope();
+            requested.scope.actor = trajectory::Actor::User;
+            requested.scope.origin = trajectory::Origin::ExternalUser;
+            requested.scope.visibility = {trajectory::Visibility::HostOnly};
+            requested.scope.training_policy = trajectory::TrainingPolicy::Exclude;
+            requested.payload["command_id"] = command_id;
+            requested.payload["command_name"] = command_name;
+            requested.payload["action_name"] = command_name;
+            requested.payload["effect_class"] = "session_boundary";
+            requested.payload["args_ref"] =
+                nlohmann::json{{"source_session_id", source_session_id},
+                               {"boundary_operation_id", boundary_operation_id}};
+            requested.links.correlation_id = boundary_operation_id;
+            const auto receipt = old_main->Record(requested, trajectory::Durability::PowerLoss);
+            if (receipt.status == trajectory::RecordReceipt::Status::Committed) {
+                requested_event_id = receipt.event_id;
+            }
+        }
+        trajectory::CloseRequest close;
+        close.reason = "switch_to_resume";
+        trajectory::NullClearParticipant participant;
+        const auto closed = manager.Close(close, &participant);
+        if (!closed.error_code.empty()) {
+            summary.outcome.error_code = "resume." + closed.error_code;
+            summary.outcome.message = "封旧场失败: " + closed.message;
+            return summary;
+        }
+        request.previous_session_id = closed.session_id;
+        if (!requested_event_id.empty()) {
+            request.boundary_command.command_id = command_id;
+            request.boundary_command.requested_session_id = closed.session_id;
+            request.boundary_command.requested_event_id = requested_event_id;
+            request.boundary_command.boundary_operation_id = boundary_operation_id;
+        } else {
+            // requested 落不住(旧账坏):不硬造跨 session 生命周期,按
+            // 启动路口径办(§14.1 的开口只在 requested 真落了才走)。
+            request.interactive = false;
+        }
+    }
+    summary.outcome = manager.ResumeAsNew(request);
+    if (!summary.outcome.error_code.empty()) {
+        return summary;
+    }
+    // 换场成功:账本指到新场,选段器重置,history 折叠投影交出去。
+    impl_->active = manager.active();
+    if (impl_->active != nullptr) {
+        impl_->main_run_id = impl_->active->manifest.main_run_id;
+    }
+    impl_->child_terminal_hashes.clear();
+    record_selection_ = nullptr;
+    trajectory::ReplayState projection_state;
+    // 投影只需要 effective conversation;从 outcome 的引用直接翻。
+    projection_state.effective_conversation = summary.outcome.effective_conversation;
+    summary.history = ProjectHistoryFromReplay(projection_state);
+    return summary;
+}
+
+std::string TrajectorySessionLedger::LatestResumableSessionId() const {
+    return impl_ != nullptr && impl_->manager != nullptr
+               ? impl_->manager->LatestResumableSessionId()
+               : std::string();
+}
+
+bool TrajectorySessionLedger::resumed_at_launch() const {
+    return impl_ != nullptr && impl_->launch_resumed;
+}
+
+std::vector<api::Message> TrajectorySessionLedger::LaunchResumeHistory() const {
+    return impl_ != nullptr ? impl_->launch_resume_history : std::vector<api::Message>();
+}
+
+trajectory::ReplayReport TrajectorySessionLedger::FoldMainReplay() const {
+    if (impl_ == nullptr || impl_->active == nullptr) {
+        trajectory::ReplayReport report;
+        report.error_code = "replay.no_active_session";
+        return report;
+    }
+    return trajectory::FoldStreamReplay(impl_->active->directory.main_stream_path());
+}
+
+trajectory::SessionVerifyReport TrajectorySessionLedger::VerifySession() const {
+    if (impl_ == nullptr || impl_->active == nullptr) {
+        trajectory::SessionVerifyReport report;
+        report.error_code = "verify.no_active_session";
+        return report;
+    }
+    return trajectory::VerifySessionDir(impl_->active->directory.session_dir());
+}
+
+TrajectorySessionLedger::ExactReplay TrajectorySessionLedger::ExactReplayMain() const {
+    ExactReplay replay;
+    const auto fold = FoldMainReplay();
+    if (!fold.ok()) {
+        replay.error_code = fold.error_code;
+        return replay;
+    }
+    replay.ok = true;
+    replay.state_hash = trajectory::ComputeReplayStateHash(fold.state);
+    replay.state = std::move(fold.state);
+    return replay;
 }
 
 RecordSelectionController& TrajectorySessionLedger::record_selection() {

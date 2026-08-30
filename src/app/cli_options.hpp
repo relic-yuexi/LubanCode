@@ -63,6 +63,13 @@ struct EvolveTestArgs {
     bool json = false;          // --json:stdout 吐 JSON(结果逐项+汇总+unverified)
 };
 
+// P0-3 轨迹子命令:`lubancode trajectory <verify|replay|harness-replay>
+// <session-id>`。只读诊断,不进会话;退出码 0/1/2(过/用法/验账未过)。
+struct TrajectoryCliArgs {
+    std::string verb;        // verify | replay | harness-replay
+    std::string session_id;  // trajectory session id
+};
+
 // 解析结果:action 不是 Proceed 时,RunCli 兑现完动作就退,不进会话。
 enum class CliAction {
     Proceed,                  // 正常路径:按 options 继续启动
@@ -80,15 +87,18 @@ enum class CliAction {
     BadAppServerWs,           // --app-server-ws[-token] 参数不对:人话在 error_text(WS 承载单)
     RunEvolveTest,            // evolve test 子命令:跑候选评测后退(自进化阶段 3)
     BadEvolveTest,            // evolve test 参数不对:人话已塞进 error_text
+    RunTrajectory,            // trajectory 子命令:verify/replay/harness-replay 后退(P0-3)
+    BadTrajectory,            // trajectory 参数不对:人话已塞进 error_text
 };
 
 struct ParsedCliArgs {
     CliAction action = CliAction::Proceed;
     CliOptions options;
     PluginInitArgs plugin_init;  // action==RunPluginInit 时有效
-    std::string error_text;      // action==BadPluginInit/BadEvolveTest 时的人话
+    std::string error_text;      // action==BadPluginInit/BadEvolveTest/BadTrajectory 时的人话
     SessionManagementCommand session_command;  // action == ManageSession 时有效
     EvolveTestArgs evolve_test;  // action == RunEvolveTest 时有效
+    TrajectoryCliArgs trajectory;  // action == RunTrajectory 时有效
 };
 
 // args[0] 是程序名,实参从 args[1] 起。多个早退参数同时出现时,按扫描

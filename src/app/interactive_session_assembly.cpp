@@ -373,6 +373,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
               runtime_options.trajectory_workspace_name =
                   runtime_options.trajectory_workspace_root.filename().generic_string();
               runtime_options.lubancode_version = std::string(lubancode::app::kVersion);
+              // P0-3 --continue(§10.4):启动路直接开 start_reason=resume 的
+              // 新场,不先造空 session;没有可恢复场回落普通开张(同旧路
+              // quiet_if_none)。恢复的历史由启动善后段灌进 loop。
+              runtime_options.trajectory_resume_at_launch = options.continue_last;
           }
           return runtime_options;
       }()),
@@ -729,7 +733,28 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // 安静开新会话。resume 可能把会话搬回存档里的 worktree 房,搬没搬记
     // 一笔,后面 sync 定义好了再善后。
     bool resume_moved_into_worktree = false;
-    if (opts_.continue_last) {
+    // P0-3 轨迹档:--continue 走 §10.4 启动路——账本在 SessionRuntime ctor
+    // 里已按 resume-as-new 开张(start_reason=resume 的新 session,source
+    // 只读),这里只把折叠投影灌进 loop;旧 SessionStore 的 resume 路不碰。
+    if (opts_.continue_last && session_runtime_.trajectory() != nullptr) {
+        if (session_runtime_.trajectory()->resumed_at_launch()) {
+            const std::vector<lubancode::api::Message> resumed =
+                session_runtime_.trajectory()->LaunchResumeHistory();
+            main_agent->ReplaceHistory(resumed);
+            TermOut() << theme.banner
+                      << trf("cmd.resume.restored", session_runtime_.trajectory()->session_id(),
+                             resumed.size())
+                      << theme.reset << " (resume-as-new)\n";
+            TermOut() << trf("cmd.resume.estimate", lubancode::agent::EstimateHistoryTokens(resumed))
+                      << "\n";
+            // resume 的历史开新账(SessionStart source=resume),仓按新场开。
+            EmitSessionHook(lubancode::hooks::HookEvent::SessionStart,
+                            nlohmann::json{{"source", "resume"}}, "resume");
+            OpenArtifactStore();
+            goal_wiring_.RestoreFromArchive();
+            BackfillTitleOnResume();
+        }
+    } else if (opts_.continue_last) {
         const std::function<void(const std::vector<lubancode::sessions::ArchivedQueueItem>&)> queue_restorer =
             [this](const std::vector<lubancode::sessions::ArchivedQueueItem>& items) {
                 RestoreSteeringQueueFrom(items);

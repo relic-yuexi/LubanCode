@@ -84,6 +84,8 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::RunStarted, "min_reader_version", "u", false},
     {EventKind::RunStarted, "required_capabilities", "a", false},
     {EventKind::RunStarted, "previous_session_id", "s", false},
+    // P0-3 resume(§10.4):start_reason=resume 的新场反指 source session。
+    {EventKind::RunStarted, "resumed_from_session_id", "s", false},
     {EventKind::RunStarted, "caused_by_event_ref", "o", false},
     {EventKind::RunEnvironmentCaptured, "snapshot_ref", "o", true},
     {EventKind::RunEnvironmentCaptured, "replay_level", "s", false},

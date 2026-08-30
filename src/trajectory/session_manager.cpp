@@ -1181,6 +1181,308 @@ CloseOutcome SessionManager::Close(const CloseRequest& request, ClearParticipant
     return outcome;
 }
 
+// ---------------------------------------------------------------------------
+// resume-as-new(§10.4 七步)
+// ---------------------------------------------------------------------------
+
+std::string SessionManager::LatestResumableSessionId() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return LatestResumableSessionIdLocked();
+}
+
+// 调用方须已持 mutex_(ResumeAsNew 七步内取默认源用,不再二次加锁)。
+std::string SessionManager::LatestResumableSessionIdLocked() {
+    std::error_code ec;
+    const auto sessions = workspace_dir_ / "sessions";
+    if (!std::filesystem::exists(sessions, ec)) {
+        return std::string();
+    }
+    std::string best;
+    std::int64_t best_created = -1;
+    for (const auto& entry : std::filesystem::directory_iterator(sessions, ec)) {
+        if (!entry.is_directory(ec)) {
+            continue;
+        }
+        const std::string id = platform::PathToUtf8(entry.path().filename());
+        if (active_.has_value() && id == active_->session_id()) {
+            continue;  // 自己这场不作为 resume 源
+        }
+        const auto manifest = ReadSessionJson(entry.path());
+        if (!manifest.has_value()) {
+            continue;
+        }
+        const auto status = SessionStatusFromName(manifest->status);
+        // 可恢复源:closed/archived 为正路;无活 writer 的 incomplete 按
+        // 已验证前缀 resume-as-new(§3.3.2)。running/preparing 不碰。
+        if (!status.has_value() || (*status != SessionStatus::Closed &&
+                                    *status != SessionStatus::Archived &&
+                                    *status != SessionStatus::Incomplete)) {
+            continue;
+        }
+        if (!std::filesystem::exists(entry.path() / "main.jsonl", ec)) {
+            continue;
+        }
+        if (manifest->created_at_ms > best_created) {
+            best_created = manifest->created_at_ms;
+            best = id;
+        }
+    }
+    return best;
+}
+
+ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
+    if (boundary_in_progress_.load()) {
+        ResumeOutcome busy;
+        busy.error_code = "resume.busy";
+        busy.message = "clear/close 未收完";
+        return busy;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    ResumeOutcome outcome;
+    const auto fail = [&outcome](std::string code, std::string message) {
+        outcome.error_code = std::move(code);
+        outcome.message = std::move(message);
+        return outcome;
+    };
+    if (boundary_in_progress_.load()) {
+        return fail("resume.busy", "clear/close 未收完");
+    }
+    // active 残留判定:Close 封口后 active_ 仍挂着(进程一场、封口即退的
+    // 语义),但 status 已是 Closed/Incomplete——没有活 writer,不算占着;
+    // 只有 Running/Preparing/Closing 的活场才挡 resume(交互 /resume 须先
+    // Close(switch_to_resume))。
+    const bool active_live =
+        active_.has_value() && (active_->status == SessionStatus::Running ||
+                                active_->status == SessionStatus::Preparing ||
+                                active_->status == SessionStatus::Closing);
+    if (active_live) {
+        return fail("resume.busy",
+                    "active session 还开着(" + active_->session_id() +
+                        ");交互 /resume 先 Close(switch_to_resume) 再来");
+    }
+    std::string error;
+    if (!EnsureWorkspace(&error)) {
+        return fail("resume.step1_failed", error);
+    }
+    boundary_in_progress_ = true;
+    struct Gate {
+        std::atomic<bool>& flag;
+        ~Gate() { flag = false; }
+    } gate{boundary_in_progress_};
+
+    // ---- 第 1 步:锁定并读取 source,验 schema/逐流 seq/hash chain/父子边。
+    std::string source_id = request.source_session_id;
+    if (source_id.empty()) {
+        source_id = LatestResumableSessionIdLocked();
+        if (source_id.empty()) {
+            return fail("resume.source_not_found", "本 workspace 没有可恢复的 session");
+        }
+    }
+    outcome.source_session_id = source_id;
+    const auto source_dir = SessionDirOf(source_id);
+    if (!std::filesystem::is_directory(source_dir)) {
+        return fail("resume.source_not_found", "source session 目录不存在");
+    }
+    // 活锁在外进程:默认拒绝(§10.4 末段)。本进程的 active 已在上面拦了。
+    if (const auto holder = SessionLock::Inspect(source_dir); holder.has_value()) {
+        if (ProbeLockHolder(*holder) == LockHolderState::Alive) {
+            return fail("resume.source_locked", "source session 仍被别的进程持写锁");
+        }
+    }
+    // 逐流验链 + 父子边交叉核(§3.9)。尾行截断是可恢复缺口:按已验证
+    // 前缀续(§3.3.2);链断/坏行才是 corrupt。
+    const auto verify = VerifySessionDir(source_dir);
+    bool truncated_tail = false;
+    for (const auto& stream : verify.streams) {
+        if (stream.error_code == "verify.truncated_tail") {
+            truncated_tail = true;
+        }
+    }
+    const bool corrupt = !verify.ok && !truncated_tail;
+    if (corrupt) {
+        return fail("resume.source_corrupt",
+                    verify.message.empty() ? verify.error_code : verify.message);
+    }
+    outcome.source_verified = true;
+    outcome.source_truncated_tail = truncated_tail;
+
+    // ---- 第 2/3 步:找最后一枚完整 checkpoint;没有便从头折叠。折叠出
+    // effective conversation、control state 与 state hash。
+    const auto main_stream = source_dir / "main.jsonl";
+    ReplayReport fold = FoldStreamReplay(main_stream);
+    if (fold.ok()) {
+        outcome.from_checkpoint = false;
+    } else if (fold.error_code == "replay.unsupported") {
+        return fail("resume.source_unsupported", fold.message);
+    } else {
+        return fail("resume.source_corrupt", fold.error_code + ": " + fold.message);
+    }
+    const auto checkpoint = FindLatestUsableCheckpoint(source_dir, "main", main_stream);
+    if (checkpoint.has_value()) {
+        ReplayState continued = checkpoint->folded;
+        std::string continue_error;
+        if (ContinueFoldFrom(main_stream, &continued, &continue_error)) {
+            fold.state = std::move(continued);
+            outcome.from_checkpoint = true;
+            outcome.checkpoint_seq = checkpoint->source_seq;
+            outcome.checkpoint_event_hash = checkpoint->source_event_hash;
+        }
+        // 续折失败:checkpoint 缓存靠不住,退回整折(上面的 fold 还在)。
+    }
+    outcome.source_event_count = fold.state.integrity.events_folded;
+    outcome.source_main_last_event_hash = fold.state.integrity.last_event_hash;
+    outcome.replay_version = std::to_string(kReplayProjectionVersion);
+    outcome.imported_state_hash = ComputeReplayStateHash(fold.state);
+    outcome.effective_conversation = fold.state.effective_conversation;
+    outcome.control = fold.state.control;
+    // 已完成的 child 只在 verifier 里核过 terminal hash;正文不进新 main
+    //(§10.4"不把正文灌进新 main.jsonl",effective history 只引用 source
+    // 事件——ReplayMessage 带的就是 source event id,不复制 child 细账)。
+
+    // ---- 第 4 步:尾部悬空工具按三道账给明确状态;未知副作用不可重跑。
+    outcome.dangling_tools = CollectDanglingTools(fold.state);
+
+    // ---- 第 5 步:建新 session 与新 main.jsonl,首条 run.started(resume)。
+    std::string previous_session_id = request.previous_session_id;
+    if (previous_session_id.empty() && !request.interactive) {
+        previous_session_id = source_id;  // --continue:直接前驱就是 source
+    }
+    SessionManifest manifest;
+    manifest.schema_version = 1;
+    manifest.workspace_key = workspace_key_;
+    manifest.session_id = NewStampId();
+    manifest.launch_cwd = options_.launch_cwd;
+    manifest.main_run_id = NextMainRunId();
+    manifest.start_reason = "resume";
+    manifest.previous_session_id =
+        previous_session_id.empty() ? std::optional<std::string>{} : std::optional(previous_session_id);
+    manifest.status = SessionStatusName(SessionStatus::Preparing);
+    manifest.created_at_ms = clock_->WallMs();
+    manifest.lubancode_version = options_.lubancode_version;
+
+    auto directory = TrajectoryDirectory::CreateSession(options_.trajectories_root / "workspaces",
+                                                        workspace_key_, manifest);
+    if (!directory.has_value()) {
+        return fail("resume.step5_failed", directory.error());
+    }
+    auto lock_file = SessionLock::Acquire(directory->session_dir(), clock_->LockOwner());
+    if (!lock_file.has_value()) {
+        return fail("resume.step5_failed", lock_file.error());
+    }
+    // lifecycle:create_session + resume_reference(§3.2 恢复引用账)。
+    const std::string create_op = NewStampId();
+    LifecycleIntent intent;
+    intent.operation_id = create_op;
+    intent.operation = LifecycleOperationName(LifecycleOperation::CreateSession);
+    intent.workspace_key = workspace_key_;
+    intent.session_id = manifest.session_id;
+    intent.requested_at_ms = clock_->WallMs();
+    intent.parameters["start_reason"] = "resume";
+    intent.parameters["resumed_from_session_id"] = source_id;
+    if (const auto intent_dir = lifecycle().WriteIntent(intent); !intent_dir.has_value()) {
+        return fail("resume.step5_failed", intent_dir.error());
+    }
+    auto recorder = TrajectoryRecorder::Start(directory->main_stream_path(),
+                                              directory->artifacts_root(), MainBaseScope(manifest),
+                                              options_.recorder, clock_);
+    if (!recorder.has_value()) {
+        return fail("resume.step5_failed", recorder.error());
+    }
+    nlohmann::json start_extra;
+    start_extra["start_reason"] = "resume";
+    start_extra["resumed_from_session_id"] = source_id;
+    if (!previous_session_id.empty()) {
+        start_extra["previous_session_id"] = previous_session_id;
+    }
+    // source 末枚事件的 qualified ref(seq 折叠高水位)。
+    const std::string source_last_event_id =
+        FormatEventId(fold.state.run_id, fold.state.integrity.events_folded);
+    start_extra["caused_by_event_ref"] =
+        EventRef{source_id, source_last_event_id, fold.state.integrity.last_event_hash}.ToJson();
+    const auto started = recorder->WriteRunStarted(start_extra, Durability::PowerLoss);
+    if (started.status != RecordReceipt::Status::Committed) {
+        return fail("resume.step5_failed", "新 main run.started 落不了: " + started.error_code);
+    }
+    outcome.new_session_id = manifest.session_id;
+    outcome.new_main_run_id = manifest.main_run_id;
+    outcome.new_run_started_event_id = started.event_id;
+
+    // ---- 第 6 步:resume.source.attached(source id/末 hash/replay 版本/
+    // imported state hash/checkpoint ref/qualified refs);交互路再补跨
+    // session command.completed(qualified ref 指回旧 requested)。
+    RecordRequest attached;
+    attached.kind = EventKind::ResumeSourceAttached;
+    attached.scope = recorder->base_scope();
+    attached.payload["source_session_id"] = source_id;
+    attached.payload["source_terminal_event_hash"] = outcome.source_main_last_event_hash;
+    attached.payload["replay_version"] = outcome.replay_version;
+    attached.payload["imported_state_hash"] = outcome.imported_state_hash;
+    if (outcome.from_checkpoint) {
+        attached.payload["checkpoint_ref"] = nlohmann::json{
+            {"seq", outcome.checkpoint_seq}, {"source_event_hash", outcome.checkpoint_event_hash}};
+    }
+    attached.payload["qualified_event_refs"] = nlohmann::json::array({EventRef{
+        source_id, source_last_event_id, outcome.source_main_last_event_hash}.ToJson()});
+    const auto attached_receipt = recorder->Record(attached, Durability::PowerLoss);
+    if (attached_receipt.status != RecordReceipt::Status::Committed) {
+        return fail("resume.step6_failed",
+                    "resume.source.attached 落不了: " + attached_receipt.error_code);
+    }
+    outcome.resume_attached_event_id = attached_receipt.event_id;
+
+    if (request.interactive) {
+        RecordRequest completed;
+        completed.kind = EventKind::ControlCommandCompleted;
+        completed.scope = recorder->base_scope();
+        if (request.user_initiated) {
+            completed.scope.actor = Actor::User;
+            completed.scope.origin = Origin::ExternalUser;
+        }
+        completed.payload["command_id"] = request.boundary_command.command_id;
+        completed.payload["status"] = "completed";
+        completed.payload["qualified_requested_ref"] =
+            nlohmann::json{{"session_id", request.boundary_command.requested_session_id},
+                           {"event_id", request.boundary_command.requested_event_id}};
+        completed.payload["boundary_operation_id"] = request.boundary_command.boundary_operation_id;
+        completed.links.correlation_id = request.boundary_command.boundary_operation_id;
+        const auto completed_receipt = recorder->Record(completed, Durability::PowerLoss);
+        if (completed_receipt.status != RecordReceipt::Status::Committed) {
+            return fail("resume.step6_failed",
+                        "跨 session command completed 落不了: " + completed_receipt.error_code);
+        }
+        outcome.command_completed_event_id = completed_receipt.event_id;
+    }
+
+    // ---- 第 7 步:session.json 转 running,切 active;新 turn/request/
+    // call/seq 全从新命名空间起号(新 recorder 天然新号,§10.4 第 7 步)。
+    ActiveSession session;
+    session.directory = *directory;
+    session.main = std::move(*recorder);
+    session.manifest = manifest;
+    session.lock = std::move(*lock_file);
+    if (const auto transition = TransitionSessionStatus(session.session_dir(), &session.manifest,
+                                                        SessionStatus::Running);
+        !transition.has_value()) {
+        return fail("resume.step7_failed", transition.error());
+    }
+    session.status = SessionStatus::Running;
+    outcome.new_session_running = true;
+
+    LifecycleResult result;
+    result.operation_id = create_op;
+    result.status = "completed";
+    result.completed_at_ms = clock_->WallMs();
+    result.outcome["session_dir"] = platform::PathToUtf8(session.session_dir());
+    result.outcome["resumed_from_session_id"] = source_id;
+    result.outcome["imported_state_hash"] = outcome.imported_state_hash;
+    if (const auto written = lifecycle().WriteResult(result); !written.has_value()) {
+        return fail("resume.step5_failed", written.error());
+    }
+    active_ = std::move(session);
+    outcome.active_switched = true;
+    return outcome;
+}
+
 std::vector<std::filesystem::path> SessionManager::UnterminatedStreamsInSession(
     const std::filesystem::path& session_dir) {
     // main.jsonl 不算——封口时它正在写 terminal。goal/loop 首版只有占位

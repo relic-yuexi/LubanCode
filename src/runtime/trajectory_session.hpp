@@ -216,6 +216,17 @@ private:
 // 一场 session 的轨迹账本(flag 开的会话由装配层挂进 SessionRuntime)
 // ---------------------------------------------------------------------------
 
+// ReplayState -> api::Message 投影(P0-3 §15.4:durable history 是 replay
+// projection 的内存缓存,每项带 source event id)。runtime 适配层做翻译,
+// trajectory 纯库不认 api。
+std::vector<api::Message> ProjectHistoryFromReplay(const trajectory::ReplayState& state);
+
+// resume 七步的 runtime 摘要(/resume 与 --continue 的接货单)。
+struct TrajectoryResumeSummary {
+    trajectory::ResumeOutcome outcome;  // 空 error_code = 成功
+    std::vector<api::Message> history;  // 折叠出的有效对话(投影)
+};
+
 class TrajectorySessionLedger {
 public:
     struct Options {
@@ -227,11 +238,19 @@ public:
         // run.started 的 v2 usage owner 账(Token 账本单 §6.1.1):
         // main 与 subagent 各自的 stream 统一 v2。
         int event_schema_version = 2;
+        // --continue 启动路(§10.4):不先造空 session,直接开
+        // start_reason=resume 的新场。resume_source_session_id 空 = 取本
+        // workspace 最近一场可恢复的;没有任何可恢复场时回落普通开张
+        // (quiet_if_none 语义,与旧路 --continue 一致)。
+        bool resume_at_launch = false;
+        std::string resume_source_session_id;
     };
 
     // 进程一场:LaunchSession(建 workspace/session 目录、独占锁、
     // main recorder、run.started、session.json running)。flag 开了却开
     // 不出账,给错误——调用方须让会话启动失败,不许回退旧写口(§十七)。
+    // resume_at_launch:先按 §10.4 七步 resume-as-new;源场验不过按
+    // options 的回落策略(见上)。
     static std::expected<TrajectorySessionLedger, std::string> Open(Options options);
 
     TrajectorySessionLedger(TrajectorySessionLedger&&) noexcept;
@@ -258,6 +277,46 @@ public:
     // 正常封口(/exit 与 EOF):turn 收齐后 run terminal + session.ended +
     // session.json closed。恢复器/replay 是 P0-3 的活,这里只留封口。
     trajectory::CloseOutcome CloseSession(const std::string& reason);
+
+    // ---- P0-3:clear 八步换账 / resume-as-new / replay 读口 ----
+
+    // /clear 的换账事务(§3.3.1 八步,SessionManager 串行掌管)。flag 关
+    // 的会话不走这里(P0-2 遗留#3 的收口)。成功后账本自动指到新场,
+    // 选段器重置。
+    trajectory::ClearOutcome ClearSession(const trajectory::ClearRequest& request,
+                                          trajectory::ClearParticipant* participant);
+
+    // 交互 /resume(§10.4):旧场写 requested → 封口(end_reason=
+    // switch_to_resume)→ 新场七步开张(start_reason=resume)。source
+    // Journal 永不 reopen append;已完成 child 只核 terminal hash,不内联
+    // 正文。回的 history 是折叠投影,调用方 ReplaceHistory 接上。
+    TrajectoryResumeSummary ResumeInteractive(const std::string& source_session_id,
+                                              const std::string& command_name = "resume");
+
+    // 本 workspace 最近一场可恢复的 session(空 = 没有)。
+    std::string LatestResumableSessionId() const;
+
+    // --continue 启动路开出来的场是不是 resume(装配层据此把折叠投影灌进
+    // loop 的 history 并打"已恢复 N 条"一行)。
+    bool resumed_at_launch() const;
+    // 启动路 resume 折叠出的有效对话投影(没 resume 给空)。
+    std::vector<api::Message> LaunchResumeHistory() const;
+
+    // 折叠本场 main.jsonl(纯读,writer 持句柄照读——journal 以共享读开)。
+    // /export、/copy、session view 的数据源(§14.5:一律读 ReplayState)。
+    trajectory::ReplayReport FoldMainReplay() const;
+
+    // session verifier 引擎口(trajectory verify)。
+    trajectory::SessionVerifyReport VerifySession() const;
+
+    // exact replay 引擎口:回本场折叠账与规范状态 hash。
+    struct ExactReplay {
+        bool ok = false;
+        std::string state_hash;
+        std::string error_code;
+        trajectory::ReplayState state;
+    };
+    ExactReplay ExactReplayMain() const;
 
     // /record 选段器(一场 session 一只)。
     RecordSelectionController& record_selection();

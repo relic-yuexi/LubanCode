@@ -124,8 +124,10 @@ public:
 
     // ---- 封口便捷口(自动带 §8.3 终态封口四件套) ----
 
-    // run.started;extra 并入 payload(start_reason 等放这里)。
-    RecordReceipt WriteRunStarted(nlohmann::json extra, Durability durability);
+    // run.started;extra 并入 payload(start_reason 等放这里)。links 带
+    // relations(子账的 parent_run_id/parent_call_id owner 边,§3.5)。
+    RecordReceipt WriteRunStarted(nlohmann::json extra, Durability durability,
+                                  EventLinks links = {});
     // run.completed/failed/cancelled;reason 可空。
     RecordReceipt FinishRun(EventKind terminal_kind, std::string reason, Durability durability);
     // session.ended(只许 main stream;须在 run terminal 之后,§5.1)。

@@ -19,6 +19,8 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)), 
         ledger_options.workspace_root = options_.trajectory_workspace_root;
         ledger_options.readable_workspace_name = options_.trajectory_workspace_name;
         ledger_options.lubancode_version = options_.lubancode_version;
+        ledger_options.resume_at_launch = options_.trajectory_resume_at_launch;
+        ledger_options.resume_source_session_id = options_.trajectory_resume_source_session_id;
         auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
         if (ledger.has_value()) {
             trajectory_.emplace(std::move(*ledger));
