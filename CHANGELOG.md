@@ -349,6 +349,12 @@
 - **Package 第四类 code 组件进事务**:embedded-lua 与 process 探针同构——顶层零副作用加载、handler 对账、配齐 SecretResolver(数据目录 .env)与受控 transport;同包坏一件,Lua state 随暂存 vector 弃置即 lua_close,整包不挂。inspect/doctor 六行照契约(pure + host-http、逐目的地 DNS 安全检查,不带 Secret 发网)。
 - **零执行铁证**:未信任包里放 `error("TOPLEVEL_SHOULD_NOT_RUN")` 的 chunk——零诊断即零执行。裸 .lua/v1 process/native 三条旧路一字未动。
 
+## [v0.26.125] - 2026-08-30
+
+- **工具确认的判断与渲染分家了(职责分离整改 1+3)。** ConfirmToolUse 只裁定与拼 ToolConfirmRequest,菜单/diff 预览/读行全搬进 `src/cli/tool_confirm_ui`;"允许并记住"的配置写入拆成 `OnToolAllowedPersist` 回调,由 UI 收到答复后调——turn_runner.cpp 不再 include config/config.hpp(双零命中)。PromptAskUser 整段 190 行同步搬 cli。事件流从此真是唯一出水口:App Server/无终端场景跑确认不再依赖终端实现。
+- **wirings/ 归位纯装配根**:loop 的 PumpDueTick/FinishTick 状态机下沉 `runtime/loop_tick_driver`(打印改产 LoopTickNotice 事件,墙钟可注入);goal 的 ledger sink 搭建抽成 `runtime::goal::MakeSessionLedgerSink`(12 处 TermOut 改 Host.notify);BuildWorkflowExecutors 212 行搬进 `wirings/workflow_wiring`。四只 wiring 对照 record_session_wiring 标尺自查:无终端 IO、无业务分支外溢;boundary gate 新增 grep 门钉死。
+- 顺手修一处旧注释谎言:"失源 task 落 Broken"实为 Cancelled,按实改正并单测钉住。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
