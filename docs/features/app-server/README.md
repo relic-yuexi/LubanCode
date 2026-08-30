@@ -55,6 +55,7 @@ lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
 | `1.0` 内 additive | `item/completed` 可带可选 `images` 数组——MCP 富结果图片的元数据与 `artifact` 引用,不带 base64(2026-08 起)。 |
 | `1.1` | 浏览器调试工作台阶段 3:additive 新增 `browser/*` 方法 18 枚与 `browser/*` 事件 13 族(见下两节)。老方法老事件形状一字未动。 |
 | `1.1`(承载注) | WS 传输层(2026-08 起):同一条报文线的第二副面孔,报文形状零改动,不 bump 版本。连接级握手(`initialize`)每条连接各来一遍;首帧鉴权消息 `app_server/auth` 只在 WS 且配了 token 时出现,不算协议方法面。 |
+| `1.1`(阶段 B 注) | 用户输入路由与暂停(2026-08 起,additive):新增 `browser/pause`/`browser/resume` 方法与 `browser/paused`/`browser/resumed` 事件;`browser/status` 的 result 增可选布尔 `paused`;`browser/action/completed` 增稳定错误码 `browser.paused`。**owner 仲裁升级**:`owner` 由内核按连接与鉴权裁定(见《owner 仲裁》),外壳报的只是意向;`owner` 缺省值从写死 `user` 改为连接的裁定身份。老报文形状零改动。 |
 
 ## 方法面
 
@@ -104,7 +105,7 @@ C++ 这层是协议转发层:真 Runtime 在 Node sidecar(`browser/sidecar.js`,�
 | --- | --- | --- | --- |
 | `browser/start` | 异步 | `engine?`(chromium\|webkit)、`headed?`、`profile?`(persistent\|ephemeral)、`profileName?`、`viewport?{width,height}`、`journalCap?`、`timeoutMs?` | 起一场浏览器会话(浏览器本身仍是首个页面动作才懒启动)。已有一场活会话报 `browser.session_running`。 |
 | `browser/stop` | 异步 | 无 | 收掉会话(context/browser/profile 锁)。 |
-| `browser/status` | 同步 | 无 | 会话状态(engine/headless/profile/launched/crashed/pages/downloadsDir)+ `sidecarRunning`。 |
+| `browser/status` | 同步 | 无 | 会话状态(engine/headless/profile/launched/crashed/pages/downloadsDir)+ `sidecarRunning` + `paused`(1.1 阶段 B 注起:内核的暂停旗,sidecar 不知道这事)。 |
 | `browser/page/open` | 异步 | `url`、`newPage?`、`waitUntil?`、`timeoutMs?` | 只收 http/https/about:blank。回 `pageId`/`generation`/标题/HTTP 状态。 |
 | `browser/page/list` | 同步 | 无 | 页签行数组 `{pageId, title, url, active, generation}`。 |
 | `browser/page/select` | 异步 | `pageId` | 明切活动页(不靠"最后一页"猜)。 |
@@ -118,10 +119,17 @@ C++ 这层是协议转发层:真 Runtime 在 Node sidecar(`browser/sidecar.js`,�
 | `browser/console/query` | 同步 | `pageId, sinceSeq?, level?, limit?` | Console journal 补账:回 `rows/total/dropped/lastSeq`。`sinceSeq` 是"已见到的最大 seq",返回大于它的。 |
 | `browser/network/query` | 同步 | `pageId, sinceSeq?, urlContains?, status?, failedOnly?, limit?` | Network journal 补账(元数据账,响应体不收)。 |
 | `browser/downloads/query` | 同步 | 无 | 下载账(id/state/filename/mime/bytes/sha256/path)。 |
+| `browser/pause` | 同步 | 无 | 拨暂停旗(1.1 阶段 B 注起)。暂停期间 `owner=agent` 的动作一律**受理不执行**,终态 `error.code=browser.paused`;用户动作照走;终态事件照发。回 `{paused:true}`,另发 `browser/paused` 事件(must_keep)。手闸只归用户连接。 |
+| `browser/resume` | 同步 | 无 | 落暂停旗。回 `{paused:false}`,另发 `browser/resumed` 事件。 |
 
-**owner 仲裁**:写动作(`page/*` 导航族、`page/select`、`page/close`、`action`)可带 `owner`("agent"|"user",缺省 user)。`owner=agent` 须带 `threadId`:先过 `permission/request` 审批(`acceptForSession` 按方法名记会话级放行账),decline/cancel/超时/打断按拒绝收口;`owner=user` 是宿主自己的手,不再问审批。
+**owner 仲裁**(1.1 阶段 B 注起,内核说了算):写动作(`page/*` 导航族、`page/select`、`page/close`、`action`)可带 `owner`("agent"|"user"),但 **`owner` 由内核按连接与鉴权裁定,外壳报什么不算数**——stdio 宿主与过门的 WS 连接(回环免鉴权或 token)裁定为操作者本人(`user`),内核内部的 agent 发放路(回合驱动的浏览器工具,与多客户端阶段的 agent 连接)裁定为 `agent`。规则:
 
-browser 错误走 `error.data.reason` 带稳定串(`browser.not_configured`/`browser.sidecar_spawn_failed`/`browser.sidecar_dead`/`browser.sidecar_timeout`/`browser.session_running`/`browser.permission_denied`/`browser.approval_cancelled`/`browser.artifact_unavailable`/`browser.thread_required`/`browser.stale_action` 等),sidecar 侧的浏览器码(`browser.stale_ref`、`browser.unknown_page`、`browser.page_closed`、`browser.timeout` 等)原样透传。
+- 缺省 `owner` = 连接的裁定身份(用户连接缺省 `user`;agent 侧缺省 `agent`——缺省也逃不过审批,不许靠"不说 owner"绕门)。
+- 非用户连接报 `owner=user`:**明拒**(`error.data.reason=browser.owner_denied`)——Agent 假冒用户,门都没有。
+- `owner=user`(用户路):不带 `threadId`(带了也被内核摘掉——用户不是 Agent)、不问审批、**不排队**——排队时先挑用户动作,Agent 动作让路(在途的那只让不了:一份浏览器状态一位主人,动作串行是底线);输入动作(click/type/select)执行成功后 sidecar 递 `userEpoch` 并发 `browser/user_epoch` 事件,Agent 拿旧 snapshot 的 ref 再动作即报 `browser.stale_ref`(仲裁第 4 条原样复用)。
+- `owner=agent`:须带 `threadId`,先过 `permission/request` 审批(`acceptForSession` 按方法名记会话级放行账),decline/cancel/超时/打断按拒绝收口;暂停期间按 `browser.paused` 收口(不问审批)。
+
+browser 错误走 `error.data.reason` 带稳定串(`browser.not_configured`/`browser.sidecar_spawn_failed`/`browser.sidecar_dead`/`browser.sidecar_timeout`/`browser.session_running`/`browser.permission_denied`/`browser.approval_cancelled`/`browser.artifact_unavailable`/`browser.thread_required`/`browser.stale_action`/`browser.owner_denied` 等;`browser.paused` 是暂停期间 agent 动作的**终态**错误码,走 `browser/action/completed` 的 `error.code`),sidecar 侧的浏览器码(`browser.stale_ref`、`browser.unknown_page`、`browser.page_closed`、`browser.timeout` 等)原样透传。
 
 ## 事件账
 
@@ -154,8 +162,9 @@ browser 错误走 `error.data.reason` 带稳定串(`browser.not_configured`/`bro
 | `browser/download/event` | 下载账单条:`id, state, suggested, filename?, path?, mime?, bytes?, sha256?, error?`。 |
 | `browser/screenshot/ready` | `pageId, generation, url, fullPage, image`(image 与 `item/completed` 的 images 元素同形,只带 artifact 引用)。must_keep(无查询口)。 |
 | `browser/action/started` | `actionId, method, owner, threadId?, input`。 |
-| `browser/action/completed` | 动作终态:`actionId, method, owner, ok, result?\|error?{code,message}, cancelled?, durationMs`。must_keep。 |
-| `browser/user_epoch` | `pageId, userEpoch`——用户动了页面(手点/按键),观察代递增,旧 ref 按仲裁规矩报 stale。 |
+| `browser/action/completed` | 动作终态:`actionId, method, owner, ok, result?\|error?{code,message}, cancelled?, durationMs`。must_keep。暂停期间 agent 动作的终态是 `ok=false, error.code=browser.paused`。 |
+| `browser/user_epoch` | `pageId, userEpoch`——用户动了页面(手点/按键,或经协议注入的 `owner=user` 输入动作),观察代递增,旧 ref 按仲裁规矩报 stale。 |
+| `browser/paused` / `browser/resumed` | 暂停旗拨动:`paused`。must_keep(1.1 阶段 B 注起)。 |
 
 **高频事件的有界规矩**(console/network):sidecar 源头批量(单批帽 200 条、40ms 一冲;在飞批数帽 64,撞帽丢最老整批并计数),App Server 出站队列再兜一层有界(撞满先合并同页批量——entries 拼接、dropped 求和——再丢可丢事件并补 `queue/overflow` 通报)。丢了不要紧:`browser/console/query` / `browser/network/query` 凭 `sinceSeq` 补账,`dropped` 明说丢过多少,不冒充全账。
 

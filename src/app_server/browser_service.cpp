@@ -370,8 +370,19 @@ void BrowserService::ActionWorkerLoop() {
                 }
                 continue;
             }
-            action = action_queue_.front();
-            action_queue_.pop_front();
+            // 用户让路(阶段 B):队里先挑用户动作——用户动作不排在任何
+            // Agent 动作后头;没有用户动作才轮到最老的 Agent 动作。同类
+            // 之间照旧 FIFO。在途那只让不了:一份浏览器状态一位主人,
+            // 串行是 Runtime 的仲裁底线,用户动作顶多等它收尾。
+            std::size_t pick = 0;
+            for (std::size_t i = 0; i < action_queue_.size(); ++i) {
+                if (action_queue_[i]->owner == "user") {
+                    pick = i;
+                    break;
+                }
+            }
+            action = action_queue_[pick];
+            action_queue_.erase(action_queue_.begin() + static_cast<std::ptrdiff_t>(pick));
         }
         RunAction(action);
     }
@@ -391,9 +402,18 @@ void BrowserService::RunAction(const std::shared_ptr<BrowserAction>& action) {
     Emit(kEventBrowserActionStarted, started_params);
 
     SidecarCallResult outcome;
-    bool proceed = true; // 审批拒了/悬空了就不再发 sidecar
+    bool proceed = true; // 审批拒了/悬空了/暂停了就不再发 sidecar
+    // ---- 暂停门(阶段 B):暂停期间 Agent 动作一律受理不执行、明报
+    // "已暂停"(终态事件照发);用户动作不走这道门。审批也不问——
+    // 暂停的手闸在用户手里,先问审批等于让 Agent 的事占用户的线。----
+    if (paused_.load() && action->owner == "agent") {
+        proceed = false;
+        outcome = SidecarCallResult{
+            false, {}, "browser.paused",
+            "浏览器已暂停(browser/pause),Agent 动作受理不执行;browser/resume 后重发,或让用户替你点。"};
+    }
     // ---- 审批(owner=agent 的写动作) ----
-    if (action->needs_approval) {
+    else if (action->needs_approval) {
         runtime::ApprovalRequest request;
         request.tool_use_id = action->action_id;
         request.tool_name = action->method;
@@ -433,6 +453,14 @@ void BrowserService::RunAction(const std::shared_ptr<BrowserAction>& action) {
                         (decision->reason.empty() ? std::string() : ":" + decision->reason)};
             }
         }
+    }
+    // 审批放行后才拨下暂停的:一样不执行——暂停对 owner=agent 的动作
+    // 一律生效,不分受理先后;已进 sidecar 的在途调用追不回,终态照发。
+    if (proceed && paused_.load() && action->owner == "agent") {
+        proceed = false;
+        outcome = SidecarCallResult{
+            false, {}, "browser.paused",
+            "浏览器已暂停(browser/pause),Agent 动作受理不执行;browser/resume 后重发,或让用户替你点。"};
     }
     // ---- sidecar 调用 ----
     if (proceed) {
@@ -550,27 +578,45 @@ void BrowserService::RegisterMethods(
     (void)find_thread;
 
     // ---- 异步动作面(受理即回 actionId,终态走 browser/action/completed) ----
-    // 公共受理皮:checker 先验参数;owner=agent 的写动作查审批口与 threadId;
-    // 参数折算(owner/threadId/actionId 是协议层的仲裁字段,不进 sidecar;
+    // 公共受理皮:checker 先验参数;owner 由内核按连接裁定(阶段 B,§六:
+    // 外壳报的 owner 只是意向,principal 说了算);owner=agent 的写动作查
+    // 审批口与 threadId;参数折算(threadId/actionId 是协议层的仲裁字段,
+    // 不进 sidecar;owner 留给 sidecar——输入动作执行后靠它递 userEpoch;
     // start 的 headed/timeoutMs 翻成 sidecar 的 headless/actionTimeoutMs)。
     const auto register_async = [this, &dispatcher](
                                    std::string_view method,
                                    const std::function<ParamsCheck(const nlohmann::json&)>& checker) {
         dispatcher.RegisterMethod(
-            method, [this, method, checker](const IncomingRequest& request, DispatchContext&)
+            method, [this, method, checker](const IncomingRequest& request, DispatchContext& context)
                              -> std::optional<nlohmann::json> {
             const ParamsCheck base = checker(request.params);
             if (!base.ok) {
                 return MakeError(request.id, base.code, base.message);
             }
             const nlohmann::json& params = request.params;
-            const std::string owner = params.value("owner", std::string("user"));
-            const bool needs_approval = owner == "agent" && MethodNeedsApproval(method);
-            if (owner != "agent" && owner != "user") {
+            // ---- owner 裁定(内核真值) ----
+            // 缺省 = 这条连接自己的手:用户连接缺省 user;agent 连接缺省
+            // agent(缺省也逃不过审批——不许靠"不说 owner"绕门)。
+            // 假冒:非用户连接报 owner=user,browser.owner_denied 明拒。
+            const std::string claimed = params.value("owner", std::string());
+            std::string owner;
+            if (claimed.empty()) {
+                owner = context.principal == "agent" ? "agent" : "user";
+            } else if (claimed == "user") {
+                if (context.principal == "agent") {
+                    return MakeError(request.id, kErrInvalidParams,
+                                     std::string(method) + ": owner 由内核按连接裁定,这条连接不是用户连接,假冒 user 被拒。",
+                                     nlohmann::json{{"reason", "browser.owner_denied"}});
+                }
+                owner = "user";
+            } else if (claimed == "agent") {
+                owner = "agent";
+            } else {
                 return MakeError(request.id, kErrInvalidParams,
-                                 std::string(method) + ": owner 只认 agent|user,收到: " + owner,
+                                 std::string(method) + ": owner 只认 agent|user,收到: " + claimed,
                                  nlohmann::json{{"reason", "browser.bad_owner"}});
             }
+            const bool needs_approval = owner == "agent" && MethodNeedsApproval(method);
             if (needs_approval) {
                 if (approval_ask_ == nullptr) {
                     return MakeError(request.id, kErrInvalidParams,
@@ -583,8 +629,14 @@ void BrowserService::RegisterMethods(
                                      nlohmann::json{{"reason", "browser.thread_required"}});
                 }
             }
-            nlohmann::json sidecar_params = params;
-            sidecar_params.erase("owner");
+            // 事件与审批展示用裁定后的 owner(外壳报的什么从此作废)。
+            nlohmann::json effective = params;
+            effective["owner"] = owner;
+            if (owner == "user") {
+                // 用户不是 Agent:threadId 就算带了也只是噪音,摘掉。
+                effective.erase("threadId");
+            }
+            nlohmann::json sidecar_params = effective;
             sidecar_params.erase("threadId");
             if (method == kMethodBrowserStart) {
                 if (params.contains("headed")) {
@@ -603,8 +655,9 @@ void BrowserService::RegisterMethods(
                                  std::string(method) + " 失败: " + ensured.error_message,
                                  nlohmann::json{{"reason", ensured.error_code}});
             }
-            return MakeResult(request.id, AcceptAction(std::string(method), SidecarMethodFor(method), params,
-                                                       std::move(sidecar_params), needs_approval));
+            return MakeResult(request.id, AcceptAction(std::string(method), SidecarMethodFor(method),
+                                                       std::move(effective), std::move(sidecar_params),
+                                                       needs_approval));
         });
     };
 
@@ -691,6 +744,11 @@ void BrowserService::RegisterMethods(
             if (add_sidecar_flag && result.is_object()) {
                 result["sidecarRunning"] = true;
             }
+            if (method == kMethodBrowserStatus && result.is_object()) {
+                // 暂停旗在内核这层,sidecar 不知道——status 把它捎上,
+                // 外壳的暂停灯有账可对。
+                result["paused"] = paused_.load();
+            }
             return MakeResult(request.id, std::move(result));
         });
     };
@@ -737,6 +795,32 @@ void BrowserService::RegisterMethods(
             }
             return MakeResult(request.id, nlohmann::json{{"actionId", action_id}, {"cancelled", true}});
         });
+
+    // ---- browser/pause|resume(阶段 B) ----
+    // 暂停旗的拨杆:同步直答(不碰 sidecar——旗在内核),另发
+    // browser/paused|resumed 通报(must_keep,暂停灯丢了就与内核拧着)。
+    // 手闸只归用户连接:agent 侧不许按(拿暂停卡死用户、或趁隙放行,
+    // 都是 Agent 的手伸进用户的地界)。
+    const auto register_pause_toggle = [this, &dispatcher](std::string_view method, bool pause) {
+        dispatcher.RegisterMethod(
+            method, [this, method, pause](const IncomingRequest& request, DispatchContext& context)
+                           -> std::optional<nlohmann::json> {
+            const ParamsCheck base = CheckParamsIsObject(request.params, method);
+            if (!base.ok) {
+                return MakeError(request.id, base.code, base.message);
+            }
+            if (context.principal == "agent") {
+                return MakeError(request.id, kErrInvalidParams,
+                                 std::string(method) + ": 暂停手闸只归用户连接,这条连接不是用户连接。",
+                                 nlohmann::json{{"reason", "browser.owner_denied"}});
+            }
+            paused_.store(pause);
+            Emit(pause ? kEventBrowserPaused : kEventBrowserResumed, nlohmann::json{{"paused", pause}});
+            return MakeResult(request.id, nlohmann::json{{"paused", pause}});
+        });
+    };
+    register_pause_toggle(kMethodBrowserPause, true);
+    register_pause_toggle(kMethodBrowserResume, false);
 }
 
 // ---------------------------------------------------------------------------

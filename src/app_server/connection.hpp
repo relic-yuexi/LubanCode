@@ -55,6 +55,13 @@ public:
         resolve_interaction_ = std::move(resolver);
     }
 
+    // 连接身份(阶段 B):内核按连接与鉴权盖的 principal("user"/
+    // "agent"),逐条请求带进 DispatchContext。缺省 "user"——stdio 宿主
+    // 与过门的 WS 连接都是操作者本人的手;内核给 agent 侧的连接显式另
+    // 盖。外壳报什么不算数,身份只有这一处出处。
+    void SetPrincipal(std::string principal) { principal_ = std::move(principal); }
+    const std::string& principal() const { return principal_; }
+
     BoundedOutbox& outbox() { return outbox_; }
     const std::shared_ptr<Dispatcher>& dispatcher() const { return dispatcher_; }
 
@@ -77,6 +84,7 @@ private:
     BoundedOutbox outbox_;
     LineFramer framer_;
     std::function<std::string(const IncomingResponse&)> resolve_interaction_;
+    std::string principal_ = "user"; // 见 SetPrincipal:内核按连接盖的身份章
     std::atomic<bool> closed_{false};
     std::atomic<bool> close_requested_{false};
 };

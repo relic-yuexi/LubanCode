@@ -78,6 +78,7 @@ void StdioConnection::ProcessLine(const std::string& line) {
     }
 
     DispatchContext context;
+    context.principal = principal_; // 内核按连接盖的身份章,handler 凭它裁权限
     context.emit_event = [this](std::string_view method, const nlohmann::json& params, bool must_keep) {
         if (must_keep == EventMustKeep(method)) {
             // 分型一致:走统一出口(seq 盖章 + 溢出通报)。

@@ -24,6 +24,12 @@ namespace lubancode::app_server {
 //   1.1 —— 浏览器调试工作台阶段 3:additive 新增 browser/* 方法 18 枚与
 //          browser/* 事件 13 族(老方法老事件形状一字未动;详见本文件
 //          browser 两节与 docs/features/app-server/README.md)。
+//   1.1(阶段 B 注,additive)—— 用户输入路由与暂停:新增 browser/pause|
+//          browser/resume 两枚方法与 browser/paused|browser/resumed 两族
+//          事件;browser/status 的 result 增可选布尔 paused;owner 改由
+//          内核按连接裁定(外壳报的 owner 只是意向,内核说了算——伪造
+//          owner:"user" 的非用户连接被 browser.owner_denied 明拒);owner
+//          缺省不再是写死的 "user",而是连接的裁定身份。老报文形状零改动。
 inline constexpr std::string_view kProtocolVersion = "1.1";
 
 // jsonrpc:"2.0" 字段去留已冻结(阶段 3,schema 定案):
@@ -137,9 +143,14 @@ inline constexpr std::string_view kMethodPlanReopen = "plan/reopen";
 //     start / stop / page 一族 / snapshot / screenshot / action——导航与
 //     动作可能要等审批、等页面,不许堵读线程。
 //
-// owner 仲裁:写动作带 owner("agent"|"user",缺省 user)。owner=agent 须
-// 带 threadId,过 permission/request 审批(acceptForSession 按方法名记账);
-// owner=user 是宿主自己的手,不再问审批。
+// owner 仲裁:写动作带 owner("agent"|"user")。阶段 B 起 owner 由内核按
+// 连接裁定(DispatchContext::principal):stdio 宿主与过门的 WS 连接是
+// 操作者本人的手("user");内核内部(回合驱动的浏览器工具)与将来的
+// agent 连接是 "agent"。外壳报的 owner 只是意向——非用户连接假冒
+// owner:"user" 一律 browser.owner_denied 明拒(§六:Agent 假冒不来)。
+// owner=agent 须带 threadId,过 permission/request 审批(acceptForSession
+// 按方法名记账);owner=user 不带 threadId、不问审批、执行后递 userEpoch
+// (Agent 拿旧观察自然 stale——阶段 2 的机制原样复用)。
 // ---------------------------------------------------------------------------
 
 inline constexpr std::string_view kMethodBrowserStart = "browser/start";
@@ -157,6 +168,11 @@ inline constexpr std::string_view kMethodBrowserSnapshot = "browser/snapshot";
 inline constexpr std::string_view kMethodBrowserScreenshot = "browser/screenshot";
 inline constexpr std::string_view kMethodBrowserAction = "browser/action";
 inline constexpr std::string_view kMethodBrowserActionCancel = "browser/action/cancel";
+// 一键暂停(阶段 B):暂停期间 owner=agent 的动作一律受理不执行、终态
+// error.code=browser.paused;用户动作照走;终态事件照发。只有用户连接
+// 能按(操作者的手闸,Agent 自己不许碰)。
+inline constexpr std::string_view kMethodBrowserPause = "browser/pause";
+inline constexpr std::string_view kMethodBrowserResume = "browser/resume";
 inline constexpr std::string_view kMethodBrowserConsoleQuery = "browser/console/query";
 inline constexpr std::string_view kMethodBrowserNetworkQuery = "browser/network/query";
 inline constexpr std::string_view kMethodBrowserDownloadsQuery = "browser/downloads/query";
@@ -182,6 +198,10 @@ inline constexpr std::string_view kEventBrowserScreenshotReady = "browser/screen
 inline constexpr std::string_view kEventBrowserActionStarted = "browser/action/started";
 inline constexpr std::string_view kEventBrowserActionCompleted = "browser/action/completed";
 inline constexpr std::string_view kEventBrowserUserEpoch = "browser/user_epoch";
+// 暂停/恢复通报(阶段 B):params {paused:bool}。must_keep——丢了前端
+// 的暂停灯就与内核拧着。
+inline constexpr std::string_view kEventBrowserPaused = "browser/paused";
+inline constexpr std::string_view kEventBrowserResumed = "browser/resumed";
 
 // ---------------------------------------------------------------------------
 // 服务端反向请求(骨架期只留名字与形状,不接线)

@@ -17,13 +17,22 @@
 //      问),decline/cancel/超时按拒绝收口,acceptForSession 按方法名
 //      记会话级放行账;
 //   5. 截图 artifact:sidecar 回的字节只在内部通道走,这边落
-//      artifact(内容寻址)后只发引用,协议上绝不出现 base64。
+//      artifact(内容寻址)后只发引用,协议上绝不出现 base64;
+//   6. 用户输入路由与暂停(多前端外壳单阶段 B):owner 由内核按连接
+//      裁定(DispatchContext::principal,外壳报什么不算数——非用户
+//      连接假冒 owner=user 一律 browser.owner_denied 明拒);用户动作
+//      不排队(队里先挑,Agent 动作让路)、不带 threadId、不问审批,
+//      owner 随参数转给 sidecar(输入动作执行后递 userEpoch,Agent 拿
+//      旧观察自然 stale);browser/pause|resume 是暂停旗——暂停期间
+//      owner=agent 的动作一律受理不执行、终态明报 browser.paused,
+//      用户动作照走,终态事件照发。
 //
 // 线程模型:
 //   - 读线程:同步查询(status/list/console|network|downloads query)
 //      直答;异步方法受理即回 actionId;
 //   - 动作工作线程(一条):排队跑异步动作(审批 -> sidecar 调用 ->
-//      终态事件)。一份浏览器状态一位主人,动作串行是仲裁规矩;
+//      终态事件)。一份浏览器状态一位主人,动作串行是仲裁规矩;挑队
+//      时用户动作优先(在途的让不了——串行底线,在队的全让路);
 //   - sidecar 读线程(StdioTransport 内部):回响应、发事件。
 #pragma once
 
@@ -134,6 +143,11 @@ public:
     // 停场/打断:取消某 thread 名下在飞的浏览器动作(审批悬着也叫醒)。
     std::size_t CancelActionsForThread(const std::string& thread_id, const std::string& reason);
 
+    // ---- 暂停旗(阶段 B) ----
+    // browser/pause|resume 拨的旗:暂停期间 owner=agent 的动作受理不执行
+    //(终态 browser.paused),用户动作照走。测试直读。
+    bool paused() const { return paused_.load(); }
+
     // 收线收尸:取消全部动作、冲事件、杀 sidecar 进程树。
     void Shutdown();
 
@@ -219,6 +233,9 @@ private:
     std::condition_variable action_cv_;
     std::atomic<std::uint64_t> next_action_seq_{0};
     std::atomic<int> spawn_count_{0};
+    // 暂停旗(阶段 B):browser/pause 置位、browser/resume 清零。动作
+    // 工作线程在跑 owner=agent 的动作前看它一眼。
+    std::atomic<bool> paused_{false};
 };
 
 }  // namespace lubancode::app_server

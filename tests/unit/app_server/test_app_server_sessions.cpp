@@ -168,6 +168,30 @@ std::string SeedWorkflowRun(const std::string& runs_dir, const std::vector<std::
 // thread/archive|unarchive|delete:SessionCommandService 执行
 // ---------------------------------------------------------------------------
 
+TEST_CASE("thread/start 同秒撞名:两场各有各的 id,旧场不被顶掉") {
+    SessionHarness harness(MakeTempDir("luban-as-sessions-collision"));
+    // id 是秒级时间戳 + 固定 slug——同秒连开两场,没防就撞成同一个 id,
+    // threads_ 里旧场被悄悄顶掉(审批/放行账跟着丢,悬着的审批没人答得
+    // 对)。防住了:id 追加序号,两场都活着。
+    std::string first_error;
+    const nlohmann::json first = harness.server->HandleThreadStart(nlohmann::json::object(), first_error);
+    REQUIRE(first_error.empty());
+    std::string second_error;
+    const nlohmann::json second = harness.server->HandleThreadStart(nlohmann::json::object(), second_error);
+    REQUIRE(second_error.empty());
+    const std::string id1 = first["threadId"];
+    const std::string id2 = second["threadId"];
+    CHECK_FALSE(id1 == id2);
+    CHECK(harness.server->active_thread_count() == 2);
+    // 第三场同秒:序号接着排。
+    std::string third_error;
+    const nlohmann::json third = harness.server->HandleThreadStart(nlohmann::json::object(), third_error);
+    REQUIRE(third_error.empty());
+    CHECK_FALSE(third["threadId"] == id1);
+    CHECK_FALSE(third["threadId"] == id2);
+    CHECK(harness.server->active_thread_count() == 3);
+}
+
 TEST_CASE("thread/archive -> thread/unarchive:真搬文件,事件各归各位") {
     const std::string dir = MakeTempDir("lubancode_test_app_server_archive");
     const std::string thread_id = SeedSession(dir, "a");

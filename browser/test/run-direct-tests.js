@@ -231,6 +231,29 @@ async function runJournalMatrix(baseUrl, helpers) {
     } else {
       skip('仲裁矩阵', '快照文本没按预期标出按钮');
     }
+
+    // ---- 阶段 B(多前端外壳单):owner=user 的注入动作(协议用户路)也
+    // 递观察代——App Server 把内核裁定后的 owner 随参数转给 sidecar,
+    // 用户点镜像与真手点同一条规矩:旧 ref 即 stale。----
+    const userEpochEvents = [];
+    runtime.setEventListener((type, payload) => {
+      if (type === 'user_epoch') userEpochEvents.push(payload);
+    });
+    const snapUser = await runtime.snapshot(opened.pageId, {});
+    const btnUser = refOfLine(snapUser.text, '按一下');
+    if (btnUser) {
+      await runtime.click(opened.pageId, btnUser, { snapshotId: snapUser.snapshotId, owner: 'user' });
+      await sleep(200);
+      ok('owner=user 注入动作递观察代(user_epoch 事件)',
+         userEpochEvents.some((e) => e.pageId === opened.pageId && e.userEpoch >= 1),
+         JSON.stringify(userEpochEvents));
+      const staleUser = await expectError(() =>
+        runtime.click(opened.pageId, btnUser, { snapshotId: snapUser.snapshotId, owner: 'user' }));
+      ok('递代后旧 ref 报 stale(用户路与真手点同一规矩)',
+         staleUser.code === 'browser.stale_ref', staleUser.code + ' ' + staleUser.message.slice(0, 100));
+    } else {
+      skip('用户注入路矩阵', '快照文本没按预期标出按钮');
+    }
     // 关页后账仍可查(unknown_page 才拒)。
     const closedQuery = runtime.consoleEntries(opened.pageId, { level: 'pageerror' });
     ok('关页前账可查', closedQuery.rows.length >= 1);

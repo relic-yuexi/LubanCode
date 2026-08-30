@@ -302,6 +302,10 @@ const methods = {
     const opts = {
       snapshotId: params.snapshotId,
       timeoutMs: params.timeoutMs,
+      // owner 原样转给 session(多前端外壳单阶段 B):owner=user 的输入
+      // 动作收尾时递观察代——Agent 拿旧 snapshot 的 ref 即 stale。host
+      // 侧按连接裁定后才发,这里只信 host。
+      owner: params.owner,
     };
     switch (params.kind) {
       case 'click':

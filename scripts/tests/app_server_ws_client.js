@@ -52,6 +52,7 @@ function findBinary(explicit) {
   if (explicit) return explicit;
   const candidates = [
     path.join(REPO, 'build', 'debug', 'lubancode.exe'),
+    path.join(REPO, 'build', 'debug', 'Debug', 'lubancode.exe'),
     path.join(REPO, 'build', 'lubancode.exe'),
     path.join(REPO, 'build', 'lubancode'),
     path.join(REPO, 'build', 'Debug', 'lubancode.exe'),
@@ -486,6 +487,39 @@ async function main() {
     ok('补账:cursor(lastSeq=3)只回 4、5 两条', incremental.result && fresh.join(',') === '4,5',
       'fresh=' + JSON.stringify(fresh));
 
+    // ---- 6.5 阶段 B:暂停门(不依赖 playwright——暂停旗在内核,Agent
+    //      动作到不了浏览器那一步就按 browser.paused 收口) ----
+    {
+      const arbThread = await client2.request('thread/start', {});
+      const arbThreadId = arbThread.result.threadId;
+      const pauseReply = await client2.request('browser/pause', {});
+      ok('阶段B:browser/pause 回 {paused:true}', pauseReply.result && pauseReply.result.paused === true,
+        JSON.stringify(pauseReply.result));
+      ok('阶段B:browser/paused 事件(must_keep)', Boolean(await client2.waitForEvent('browser/paused')));
+      const blocked = await client2.request('browser/page/open', {
+        url: 'http://127.0.0.1:1/', owner: 'agent', threadId: arbThreadId,
+      });
+      ok('阶段B:暂停期 Agent 动作照常受理(actionId)', blocked.result && blocked.result.accepted === true,
+        JSON.stringify(blocked.result));
+      const blockedDone = await client2.waitForEvent('browser/action/completed',
+        (e) => e.params.actionId === blocked.result.actionId, 15000);
+      ok('阶段B:暂停期 Agent 动作终态 browser.paused(不执行、无审批)',
+         Boolean(blockedDone) && blockedDone.params.ok === false &&
+           blockedDone.params.error.code === 'browser.paused',
+         JSON.stringify(blockedDone && blockedDone.params.error));
+      const askedWhilePaused = client2.events.find(
+        (e) => e.method === 'permission/request' && e.params.threadId === arbThreadId);
+      ok('阶段B:暂停门在审批之前(不发 permission/request)', !askedWhilePaused);
+      const statusPaused = await client2.request('browser/status', {});
+      ok('阶段B:browser/status 带 paused=true', statusPaused.result && statusPaused.result.paused === true,
+         JSON.stringify(statusPaused.result && statusPaused.result.paused));
+      const resumeReply = await client2.request('browser/resume', {});
+      ok('阶段B:browser/resume 回 {paused:false}', resumeReply.result && resumeReply.result.paused === false);
+      ok('阶段B:browser/resumed 事件', Boolean(await client2.waitForEvent('browser/resumed')));
+      const statusAfter = await client2.request('browser/status', {});
+      ok('阶段B:resume 后 status.paused=false', statusAfter.result && statusAfter.result.paused === false);
+    }
+
     // ---- 7. 浏览器面等价集(playwright 在才跑) ----
     let playwrightAvailable = false;
     try {
@@ -583,6 +617,118 @@ async function runBrowserActs(client, port, okFn) {
       shotDone.params.result.image.artifact.stored === true);
     okFn('出站流没有 base64 图片正文', client.frames.every(
       (text) => !text.includes('dataBase64') && !text.includes('iVBORw0KGgo')));
+
+    // ---- 阶段 B(多前端外壳单):仲裁三案真打 ----
+    //   案一:用户点页面(userEpoch 递)→ Agent 拿旧观察动作 → stale;
+    //   案二:pause → Agent 动作受理不执行 → 用户照走 → resume → 照走;
+    //   案三:让路——在途的让不了,在队的全让路(用户先于排队的 Agent)。
+    const arbOk = (name, condition, detail) => {
+      if (!condition) {
+        // 诊断:失败时把最近的事件尾倒出来(定位"动作卡在哪一站")。
+        const tail = client.events.slice(-10).map((e) => e.method +
+          (e.params && e.params.actionId ? ':' + e.params.actionId : '') +
+          (e.params && e.params.error && e.params.error.code ? ':' + e.params.error.code : ''));
+        console.log('    [diag] 事件尾: ' + tail.join(' | '));
+      }
+      okFn(name, condition, detail);
+    };
+    const arbThread = await client.request('thread/start', {});
+    const arbThreadId = arbThread.result.threadId;
+    const refOf = (snapText, keyword) => {
+      const line = String(snapText || '').split('\n').find((l) => l.includes(keyword) && l.includes('[ref='));
+      const hit = line ? /\[ref=(e\d+)\]/.exec(line) : null;
+      return hit ? hit[1] : null;
+    };
+    const actionDone = (reply, timeout) => client.waitForEvent('browser/action/completed',
+      (e) => e.params.actionId === reply.result.actionId, timeout || 30000);
+    // 已答过的审批不再认账(waitForEvent 会翻旧事件,得按 requestId 排重)。
+    const answeredIds = new Set();
+    const answerPermission = async (decision) => {
+      const asked = await client.waitForEvent('permission/request',
+        (e) => e.params.threadId === arbThreadId && !answeredIds.has(e.params.requestId));
+      if (asked) {
+        answeredIds.add(asked.params.requestId);
+        client.answerServerRequest(asked.params.requestId, { decision });
+      }
+      return asked;
+    };
+
+    // 案一:用户导航(不走审批——用户自己的手)→ Agent 快照 → 用户点击
+    // 递代 → Agent 拿旧 snapshot 动作 → browser.stale_ref。
+    const navUser = await client.request('browser/page/navigate', { pageId, url: baseUrl + '/journal.html', timeoutMs: 45000 });
+    const navUserDone = await actionDone(navUser);
+    arbOk('阶段B·案一:用户导航不走审批,照走', Boolean(navUserDone) && navUserDone.params.ok === true &&
+      navUserDone.params.owner === 'user', JSON.stringify(navUserDone && navUserDone.params.error));
+    const snapReply = await client.request('browser/snapshot', { pageId, owner: 'agent', threadId: arbThreadId, timeoutMs: 45000 });
+    const snapDone = await actionDone(snapReply);
+    const snapshotId = snapDone && snapDone.params.ok ? snapDone.params.result.snapshotId : '';
+    const noopRef = snapDone && snapDone.params.ok ? refOf(snapDone.params.result.text, '按一下') : null;
+    arbOk('阶段B·案一:Agent 快照拿到 snapshotId 与 noop ref', Boolean(snapshotId) && Boolean(noopRef),
+      'snapshotId=' + snapshotId + ' ref=' + noopRef);
+    if (snapshotId && noopRef) {
+      const userClick = await client.request('browser/action', { pageId, kind: 'click', ref: noopRef, snapshotId, timeoutMs: 45000 });
+      const userClickDone = await actionDone(userClick);
+      arbOk('阶段B·案一:用户点击(不带 threadId)受理即执行,owner 裁定 user',
+        Boolean(userClickDone) && userClickDone.params.ok === true && userClickDone.params.owner === 'user',
+        JSON.stringify(userClickDone && userClickDone.params.error));
+      const epochEvent = await client.waitForEvent('browser/user_epoch',
+        (e) => e.params.pageId === pageId && e.params.userEpoch >= 1, 10000);
+      arbOk('阶段B·案一:用户动作执行后 userEpoch 递(Agent 旧观察作废)',
+        Boolean(epochEvent), JSON.stringify(epochEvent && epochEvent.params));
+      const agentClick = await client.request('browser/action', {
+        pageId, kind: 'click', ref: noopRef, snapshotId, owner: 'agent', threadId: arbThreadId, timeoutMs: 45000,
+      });
+      await answerPermission('accept');
+      const agentClickDone = await actionDone(agentClick);
+      arbOk('阶段B·案一:Agent 拿旧 snapshot 动作报 browser.stale_ref',
+        Boolean(agentClickDone) && agentClickDone.params.ok === false &&
+          agentClickDone.params.error.code === 'browser.stale_ref',
+        JSON.stringify(agentClickDone && agentClickDone.params.error));
+    }
+
+    // 案二:pause → Agent 动作受理不执行(browser.paused)→ 用户照走 →
+    // resume → status 旗落。
+    const pauseOn = await client.request('browser/pause', {});
+    arbOk('阶段B·案二:browser/pause 回 {paused:true}', pauseOn.result && pauseOn.result.paused === true);
+    const pausedNav = await client.request('browser/page/navigate', {
+      pageId, url: baseUrl + '/journal.html', owner: 'agent', threadId: arbThreadId, timeoutMs: 45000,
+    });
+    const pausedNavDone = await actionDone(pausedNav);
+    arbOk('阶段B·案二:暂停期 Agent 动作受理不执行(browser.paused)',
+      Boolean(pausedNavDone) && pausedNavDone.params.ok === false &&
+        pausedNavDone.params.error.code === 'browser.paused',
+      JSON.stringify(pausedNavDone && pausedNavDone.params.error));
+    if (noopRef) {
+      const userClick2 = await client.request('browser/action', { pageId, kind: 'click', ref: noopRef, timeoutMs: 45000 });
+      const userClick2Done = await actionDone(userClick2);
+      arbOk('阶段B·案二:暂停期用户动作照走', Boolean(userClick2Done) && userClick2Done.params.ok === true,
+        JSON.stringify(userClick2Done && userClick2Done.params.error));
+    }
+    const statusPaused = await client.request('browser/status', {});
+    arbOk('阶段B·案二:status 报 paused=true', statusPaused.result && statusPaused.result.paused === true);
+    const resumeOff = await client.request('browser/resume', {});
+    arbOk('阶段B·案二:browser/resume 回 {paused:false}', resumeOff.result && resumeOff.result.paused === false);
+
+    // 案三:让路。在途:Agent 等待一号(2.5s);在队:Agent 等待二号,
+    // 用户点击——用户必须插到二号前头(completed 的 seq 对账)。
+    const wait1 = await client.request('browser/action', {
+      pageId, kind: 'wait', ms: 2500, timeoutMs: 30000, owner: 'agent', threadId: arbThreadId,
+    });
+    await answerPermission('acceptForSession'); // browser/action 会话级放行,二号不再问
+    const wait2 = await client.request('browser/action', {
+      pageId, kind: 'wait', ms: 2500, timeoutMs: 30000, owner: 'agent', threadId: arbThreadId,
+    });
+    const userJump = noopRef
+      ? await client.request('browser/action', { pageId, kind: 'click', ref: noopRef, timeoutMs: 30000 })
+      : null;
+    const w1Done = await actionDone(wait1, 40000);
+    const jumpDone = userJump ? await actionDone(userJump, 40000) : null;
+    const w2Done = await actionDone(wait2, 40000);
+    const seqOf = (e) => (e && e.params ? e.params.seq : -1);
+    arbOk('阶段B·案三:在途 Agent 等待先收尾(串行底线,让不了)', Boolean(w1Done) && w1Done.params.ok === true);
+    arbOk('阶段B·案三:用户点击先于排队的 Agent 等待(Agent 让路)',
+      Boolean(jumpDone) && Boolean(w2Done) && jumpDone.params.ok === true && seqOf(jumpDone) < seqOf(w2Done),
+      'user seq=' + seqOf(jumpDone) + ' agent2 seq=' + seqOf(w2Done));
 
     // WS 专属:断线 → 重连 → console/query 凭 cursor 补账(会话不丢)。
     client.hardDrop();

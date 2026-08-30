@@ -698,7 +698,21 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
     // 会话账:复用 SessionStore,不另立第二本账。首句摘要用一句占位的
     // 协议话——thread/start 阶段还没有用户文本(单子的存档恢复线会把
     // 真首句补进来);MakeSessionId 的 slug 拿它生成文件名。
-    record->thread_id = sessions::MakeSessionId(sessions::NowIdTimestamp(), "app-server-thread");
+    //
+    // 同秒撞名防(多前端外壳单阶段 B 挖出的暗雷):id 是秒级时间戳 +
+    // 固定 slug,同秒两场 thread/start 会撞成同一个 id——threads_ 里旧
+    // 场被悄悄顶掉,审批/放行账随之丢,悬着的审批再没人答得对。撞了就
+    // 追加序号直到唯一;入账与查重在同一把锁里,不留窗口。
+    {
+        std::lock_guard<std::mutex> lock(threads_mutex_);
+        std::string candidate = sessions::MakeSessionId(sessions::NowIdTimestamp(), "app-server-thread");
+        const std::string base = candidate;
+        for (int n = 2; threads_.count(candidate) > 0; ++n) {
+            candidate = base + "-" + std::to_string(n);
+        }
+        record->thread_id = candidate;
+        threads_[candidate] = record;
+    }
     record->interactions = std::make_unique<InteractionLedger>(record->thread_id);
     if (!sessions_dir_.empty()) {
         record->store = std::make_unique<sessions::SessionStore>(sessions_dir_);
@@ -717,10 +731,6 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
         }
     }
 
-    {
-        std::lock_guard<std::mutex> lock(threads_mutex_);
-        threads_[record->thread_id] = record;
-    }
     // goal 单合流批:typed 命令面的会话级状态按 thread 各起一本。goal/
     // loop 的 feature 门从 options 折(关着也建实例——命令面回稳定禁用
     // 码,存档侧不碰);Plan 的 SessionRuntime 纯内存跑(sessions_dir 空,
@@ -1419,6 +1429,9 @@ int Server::Run() {
             }
         },
         []() { return ReadStdinChunk(); }, options_.outbox_capacity);
+    // 身份章(阶段 B):stdio 宿主是拉起本进程的操作者本人——principal
+    // 裁定 "user"(browser 面 owner 仲裁的内核真值,外壳报什么不算数)。
+    connection_->SetPrincipal("user");
     connection_->SetInteractionResolver(MakeInteractionResolver());
     const int code = connection_->Run();
     Shutdown();
@@ -1473,6 +1486,11 @@ Server::WsServeOutcome Server::ServeWsConnection(WsTransport& transport) {
             return *message + "\n";
         },
         options_.outbox_capacity);
+    // 身份章(阶段 B):走到这儿的 WS 连接要么回环免鉴权(本机操作者)、
+    // 要么过了 token 门(token 是操作者的秘密)——都裁定 "user"。没过
+    // 门的连接在 Accept 里就断了,到不了方法面。内核内部发放的 agent
+    // principal(回合驱动的浏览器工具、§4.4 的 agent 连接)不走这儿。
+    connection->SetPrincipal("user");
     connection->SetInteractionResolver(MakeInteractionResolver());
     {
         std::lock_guard<std::mutex> lock(connection_mutex_);

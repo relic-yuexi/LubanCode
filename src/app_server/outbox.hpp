@@ -98,7 +98,8 @@ inline bool EventMustKeep(std::string_view method) {
     return method == kEventTurnCompleted || method == kEventQueueOverflow ||
            method == kMethodPermissionRequest || method == kMethodUserAsk ||
            method == kEventBrowserStopped || method == kEventBrowserCrashed ||
-           method == kEventBrowserActionCompleted || method == kEventBrowserScreenshotReady;
+           method == kEventBrowserActionCompleted || method == kEventBrowserScreenshotReady ||
+           method == kEventBrowserPaused || method == kEventBrowserResumed;
 }
 
 }  // namespace lubancode::app_server

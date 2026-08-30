@@ -16,6 +16,7 @@
 //   11. 真进程 sidecar(起/复用/崩/收尸;缺 node 或缺脚本则整段跳过)。
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cstdio>
@@ -205,8 +206,10 @@ struct BrowserHarness {
 
     // 喂一行入站协议:解析、路由(dispatcher)、事件出水(connection 的
     // 出站口)。与 StdioConnection::ProcessLine 同一条路(它是 private,
-    // 这里照抄装配,行为一致)。
-    void Feed(const std::string& line) {
+    // 这里照抄装配,行为一致)。principal 是内核盖的连接身份(阶段 B 的
+    // owner 裁定用;缺省 "user"——直驱的口径,与生产连接的盖章一致)。
+    void Feed(const std::string& line) { Feed(line, "user"); }
+    void Feed(const std::string& line, const std::string& principal) {
         app_server::EnvelopeError envelope_error;
         const std::optional<app_server::IncomingMessage> message = app_server::ParseIncoming(line, envelope_error);
         if (!message.has_value()) {
@@ -219,6 +222,7 @@ struct BrowserHarness {
             return;
         }
         app_server::DispatchContext context;
+        context.principal = principal;
         context.emit_event = [this](std::string_view method, const nlohmann::json& params, bool) {
             server->connection().EmitEvent(method, params);
         };
@@ -299,9 +303,40 @@ struct BrowserHarness {
         return std::nullopt;
     }
 
+    // 等某 actionId 的 completed(动作工作线程要一口时间)。
+    std::optional<nlohmann::json> WaitForActionCompleted(const std::string& action_id, int timeout_ms = 5000) {
+        for (int i = 0; i < timeout_ms / 5; ++i) {
+            if (auto event = FindActionCompleted(action_id)) {
+                return event;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return std::nullopt;
+    }
+
     // 前端答复审批(反向请求的响应信封)。
     void AnswerApproval(const std::string& request_id, const std::string& decision) {
         Feed(nlohmann::json{{"id", 0}, {"result", {{"requestId", request_id}, {"decision", decision}}}}.dump());
+    }
+
+    // 等一枚没答过的审批请求(WaitForEvent 会翻旧事件,同场多枚审批时
+    // 按 requestId 排重,拿最新的未答那枚)。
+    std::optional<nlohmann::json> WaitForPermission(const std::vector<std::string>& answered,
+                                                    int timeout_ms = 5000) {
+        for (int i = 0; i < timeout_ms / 5; ++i) {
+            PumpOutbox();
+            for (auto it = io.written.rbegin(); it != io.written.rend(); ++it) {
+                const nlohmann::json parsed = nlohmann::json::parse(*it);
+                if (parsed.value("method", std::string()) == "permission/request") {
+                    const std::string rid = parsed["params"].value("requestId", std::string());
+                    if (std::find(answered.begin(), answered.end(), rid) == answered.end()) {
+                        return parsed;
+                    }
+                }
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        return std::nullopt;
     }
 };
 
@@ -434,14 +469,15 @@ TEST_CASE("异步动作:受理即回 actionId,started/completed 事件终态,参
     CHECK((*started)["params"]["actionId"] == action_id);
     CHECK((*started)["params"]["owner"] == "user");
 
-    // sidecar 收到的请求:参数折算后带 url/newPage,不带 owner。
+    // sidecar 收到的请求:参数折算后带 url/newPage;owner 随裁定值转给
+    // sidecar(阶段 B:owner=user 的输入动作执行后靠它递 userEpoch)。
     const auto requests = harness.sidecar.TakeRequests();
     REQUIRE(requests.size() >= 1);
     const nlohmann::json& sent = requests.back();
     CHECK(sent["method"] == "page/open");
     CHECK(sent["params"]["url"] == "http://127.0.0.1:1/");
     CHECK(sent["params"]["newPage"] == true);
-    CHECK_FALSE(sent["params"].contains("owner"));
+    CHECK(sent["params"]["owner"] == "user");
 }
 
 TEST_CASE("异步动作:sidecar 报错折 error.code,completed ok=false") {
@@ -622,6 +658,265 @@ TEST_CASE("取消:动作收口后再取消报 stale") {
     REQUIRE(response.has_value());
     CHECK((*response)["error"]["code"] == app_server::kErrStaleRequestId);
     CHECK((*response)["error"]["data"]["reason"] == "browser.stale_action");
+}
+
+// ---------------------------------------------------------------------------
+// 阶段 B:用户输入路由与暂停(多前端外壳单)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("阶段B·暂停:Agent 动作受理不执行,用户动作照走,终态照发") {
+    BrowserHarness harness;
+    std::atomic<int> agent_sidecar_calls{0};
+    std::atomic<int> user_sidecar_calls{0};
+    harness.sidecar.SetHandler("action", [&](const nlohmann::json& params) {
+        if (params.value("owner", std::string()) == "agent") {
+            agent_sidecar_calls.fetch_add(1);
+        } else {
+            user_sidecar_calls.fetch_add(1);
+        }
+        return nlohmann::json{{"pageId", "p1"}, {"clickedRef", params.value("ref", std::string("e1"))}};
+    });
+    std::string error_code;
+    const std::string thread_id =
+        harness.server->HandleThreadStart(nlohmann::json::object(), error_code)["threadId"];
+
+    // pause:用户连接的手闸,同步直答 + must_keep 通报。
+    harness.Feed(R"({"id":70,"method":"browser/pause","params":{}})");
+    auto response = harness.FindResponse(70);
+    REQUIRE(response.has_value());
+    CHECK((*response)["result"]["paused"] == true);
+    const auto paused_event = harness.WaitForEvent("browser/paused");
+    REQUIRE(paused_event.has_value());
+    CHECK((*paused_event)["params"]["paused"] == true);
+    CHECK(harness.server->browser_service().paused());
+
+    // 暂停期间 agent 动作:受理照回 actionId,终态明报 browser.paused,
+    // sidecar 一个字没收到,审批也不发(暂停门在审批之前)。
+    harness.Feed(nlohmann::json{{"id", 71},
+                                {"method", "browser/action"},
+                                {"params",
+                                 {{"kind", "click"}, {"ref", "e1"}, {"owner", "agent"}, {"threadId", thread_id}}}}
+                     .dump());
+    response = harness.FindResponse(71);
+    REQUIRE(response.has_value());
+    REQUIRE((*response)["result"]["accepted"] == true);
+    const std::string paused_action_id = (*response)["result"]["actionId"];
+    const auto paused_completed = harness.WaitForActionCompleted(paused_action_id);
+    REQUIRE(paused_completed.has_value());
+    CHECK((*paused_completed)["params"]["ok"] == false);
+    CHECK((*paused_completed)["params"]["error"]["code"] == "browser.paused");
+    CHECK(harness.FindEvent("permission/request") == std::nullopt);
+
+    // 暂停期间用户动作照走(不带 owner/threadId——真用户路的形状)。
+    harness.Feed(R"({"id":72,"method":"browser/action","params":{"kind":"click","ref":"e2"}})");
+    response = harness.FindResponse(72);
+    REQUIRE(response.has_value());
+    REQUIRE((*response)["result"]["accepted"] == true);
+    CHECK((*response)["result"]["owner"] == "user");
+    const auto user_completed = harness.WaitForActionCompleted((*response)["result"]["actionId"]);
+    REQUIRE(user_completed.has_value());
+    CHECK((*user_completed)["params"]["ok"] == true);
+    CHECK(user_sidecar_calls.load() == 1);
+
+    // resume:旗落,agent 动作照走(过审批)。
+    harness.Feed(R"({"id":73,"method":"browser/resume","params":{}})");
+    response = harness.FindResponse(73);
+    REQUIRE(response.has_value());
+    CHECK((*response)["result"]["paused"] == false);
+    CHECK(harness.WaitForEvent("browser/resumed").has_value());
+    CHECK_FALSE(harness.server->browser_service().paused());
+
+    harness.Feed(nlohmann::json{{"id", 74},
+                                {"method", "browser/action"},
+                                {"params",
+                                 {{"kind", "click"}, {"ref", "e3"}, {"owner", "agent"}, {"threadId", thread_id}}}}
+                     .dump());
+    response = harness.FindResponse(74);
+    REQUIRE(response.has_value());
+    const auto permission = harness.WaitForEvent("permission/request");
+    REQUIRE(permission.has_value());
+    const std::string answered_request = (*permission)["params"]["requestId"];
+    harness.AnswerApproval(answered_request, "accept");
+    const auto agent_completed =
+        harness.WaitForActionCompleted(response->at("result").value("actionId", std::string()));
+    REQUIRE(agent_completed.has_value());
+    CHECK((*agent_completed)["params"]["ok"] == true);
+    CHECK(agent_sidecar_calls.load() == 1);
+
+    // 审批悬着时才拨下暂停的:放了也不执行——暂停对 owner=agent 的动作
+    // 一律生效,不分受理先后。
+    harness.Feed(nlohmann::json{{"id", 75},
+                                {"method", "browser/action"},
+                                {"params",
+                                 {{"kind", "click"}, {"ref", "e4"}, {"owner", "agent"}, {"threadId", thread_id}}}}
+                     .dump());
+    response = harness.FindResponse(75);
+    REQUIRE(response.has_value());
+    const auto pending_permission = harness.WaitForPermission({answered_request});
+    REQUIRE(pending_permission.has_value());
+    harness.Feed(R"({"id":76,"method":"browser/pause","params":{}})");
+    REQUIRE(harness.FindResponse(76).has_value());
+    harness.AnswerApproval((*pending_permission)["params"]["requestId"], "accept");
+    const auto late_completed =
+        harness.WaitForActionCompleted(response->at("result").value("actionId", std::string()));
+    REQUIRE(late_completed.has_value());
+    CHECK((*late_completed)["params"]["ok"] == false);
+    CHECK((*late_completed)["params"]["error"]["code"] == "browser.paused");
+    CHECK(agent_sidecar_calls.load() == 1); // 放了也没碰 sidecar
+    // 旗回落,别把暂停留给后续用例。
+    harness.Feed(R"({"id":77,"method":"browser/resume","params":{}})");
+    REQUIRE(harness.FindResponse(77).has_value());
+}
+
+TEST_CASE("阶段B·让路:用户动作不排在 Agent 动作后头") {
+    BrowserHarness harness;
+    // 慢档:每笔 sidecar 调用悬 250ms——第一笔占住在途,后面的排队。
+    std::mutex order_mutex;
+    std::vector<std::string> sidecar_order;
+    const auto note = [&](const std::string& tag) {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        sidecar_order.push_back(tag);
+    };
+    harness.sidecar.SetHandler("action", [&](const nlohmann::json& params) {
+        note(std::string("action:") + params.value("owner", std::string("?")));
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        return nlohmann::json{{"pageId", "p1"}};
+    });
+    harness.sidecar.SetHandler("snapshot", [&](const nlohmann::json& params) {
+        note(std::string("snapshot:") + params.value("owner", std::string("?")));
+        std::this_thread::sleep_for(std::chrono::milliseconds(250));
+        return nlohmann::json{{"snapshotId", "p1-g1-s1"}, {"text", "- button \"x\" [ref=e1]"}};
+    });
+
+    // 在途:agent 快照(读动作,不过审批,但占着唯一的动作工位)。
+    harness.Feed(R"({"id":80,"method":"browser/snapshot","params":{"owner":"agent","threadId":"t-arb"}})");
+    for (int i = 0; i < 400; i++) {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        if (!sidecar_order.empty()) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    REQUIRE([&] {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        return sidecar_order.size();
+    }() == 1);
+
+    // 排队:agent 快照二号,再用户点击。用户点击必须先于 agent 二号跑。
+    harness.Feed(R"({"id":81,"method":"browser/snapshot","params":{"owner":"agent","threadId":"t-arb"}})");
+    harness.Feed(R"({"id":82,"method":"browser/action","params":{"kind":"click","ref":"e1"}})");
+    for (int i = 0; i < 600; i++) {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        if (sidecar_order.size() == 3) {
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    std::vector<std::string> order;
+    {
+        std::lock_guard<std::mutex> lock(order_mutex);
+        order = sidecar_order;
+    }
+    REQUIRE(order.size() == 3);
+    CHECK(order[0] == "snapshot:agent"); // 在途的让不了(串行底线)
+    CHECK(order[1] == "action:user");    // 用户插队,排到 agent 二号前头
+    CHECK(order[2] == "snapshot:agent"); // Agent 让路
+
+    // 等三笔都收口再退场:handler 引用的账在本例栈上,工作线程还有在途
+    // 调用就拆栈会撞空(teardown 与在途 handler 赛跑的旧坑)。
+    const auto action_id_of = [&](std::int64_t id) -> std::string {
+        const auto reply = harness.FindResponse(id);
+        REQUIRE(reply.has_value());
+        return reply->at("result").value("actionId", std::string());
+    };
+    const std::string id80 = action_id_of(80);
+    const std::string id81 = action_id_of(81);
+    const std::string id82 = action_id_of(82);
+    CHECK(harness.WaitForActionCompleted(id80, 10000).has_value());
+    CHECK(harness.WaitForActionCompleted(id81, 10000).has_value());
+    CHECK(harness.WaitForActionCompleted(id82, 10000).has_value());
+
+    // owner 随参数转给了 sidecar(用户动作收尾递 epoch 的钩子);threadId 不进 sidecar。
+    const auto requests = harness.sidecar.TakeRequests();
+    REQUIRE(requests.size() >= 3);
+    bool saw_user_owner = false;
+    for (const nlohmann::json& request : requests) {
+        CHECK_FALSE(request["params"].contains("threadId"));
+        if (request["method"] == "action" && request["params"].value("owner", std::string()) == "user") {
+            saw_user_owner = true;
+        }
+    }
+    CHECK(saw_user_owner);
+}
+
+TEST_CASE("阶段B·owner 裁定:外壳报什么不算数,内核按连接说了算") {
+    BrowserHarness harness;
+    harness.sidecar.SetHandler("action", [](const nlohmann::json&) {
+        return nlohmann::json{{"pageId", "p1"}};
+    });
+    std::string error_code;
+    const std::string thread_id =
+        harness.server->HandleThreadStart(nlohmann::json::object(), error_code)["threadId"];
+
+    // 伪造案:agent 连接谎报 owner=user——内核明拒,受理都不给。
+    harness.Feed(R"({"id":90,"method":"browser/action","params":{"kind":"click","ref":"e1","owner":"user"}})",
+                 "agent");
+    auto response = harness.FindResponse(90);
+    REQUIRE(response.has_value());
+    CHECK((*response)["error"]["code"] == app_server::kErrInvalidParams);
+    CHECK((*response)["error"]["data"]["reason"] == "browser.owner_denied");
+
+    // agent 连接不说 owner:缺省裁定为 agent 自己的手——写动作照样要
+    // threadId(不许靠"不说"混进用户路)。
+    harness.Feed(R"({"id":91,"method":"browser/action","params":{"kind":"click","ref":"e1"}})", "agent");
+    response = harness.FindResponse(91);
+    REQUIRE(response.has_value());
+    CHECK((*response)["error"]["data"]["reason"] == "browser.thread_required");
+
+    // agent 连接报 owner=agent:名实相符,照走审批路。
+    harness.Feed(nlohmann::json{{"id", 92},
+                                {"method", "browser/action"},
+                                {"params", {{"kind", "click"}, {"ref", "e1"}, {"threadId", thread_id}}}}
+                     .dump(),
+                 "agent");
+    response = harness.FindResponse(92);
+    REQUIRE(response.has_value());
+    CHECK((*response)["result"]["accepted"] == true);
+    CHECK((*response)["result"]["owner"] == "agent");
+    const auto permission = harness.WaitForEvent("permission/request");
+    REQUIRE(permission.has_value());
+    harness.AnswerApproval((*permission)["params"]["requestId"], "decline");
+    const auto declined = harness.WaitForActionCompleted((*response)["result"]["actionId"]);
+    REQUIRE(declined.has_value());
+    CHECK((*declined)["params"]["error"]["code"] == "browser.permission_denied");
+
+    // 暂停手闸只归用户连接:agent 连接按不动。
+    harness.Feed(R"({"id":93,"method":"browser/pause","params":{}})", "agent");
+    response = harness.FindResponse(93);
+    REQUIRE(response.has_value());
+    CHECK((*response)["error"]["data"]["reason"] == "browser.owner_denied");
+    CHECK_FALSE(harness.server->browser_service().paused());
+
+    // 用户连接报 owner=user:名实相符,用户路照走(不带 threadId)。
+    harness.Feed(R"({"id":94,"method":"browser/action","params":{"kind":"click","ref":"e1","owner":"user"}})");
+    response = harness.FindResponse(94);
+    REQUIRE(response.has_value());
+    CHECK((*response)["result"]["accepted"] == true);
+    CHECK((*response)["result"]["owner"] == "user");
+
+    // 用户动作就算硬塞 threadId 也进不了审批——用户不是 Agent,内核摘掉。
+    harness.Feed(nlohmann::json{{"id", 95},
+                                {"method", "browser/action"},
+                                {"params", {{"kind", "click"}, {"ref", "e1"}, {"threadId", thread_id}}}}
+                     .dump());
+    response = harness.FindResponse(95);
+    REQUIRE(response.has_value());
+    CHECK((*response)["result"]["accepted"] == true);
+    CHECK((*response)["result"]["owner"] == "user");
+    const auto completed = harness.WaitForActionCompleted((*response)["result"]["actionId"]);
+    REQUIRE(completed.has_value());
+    CHECK((*completed)["params"]["ok"] == true);
+    CHECK((*completed)["params"]["owner"] == "user");
 }
 
 // ---------------------------------------------------------------------------
