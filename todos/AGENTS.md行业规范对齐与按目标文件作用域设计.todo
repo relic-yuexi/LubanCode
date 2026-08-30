@@ -1,0 +1,662 @@
+# AGENTS.md 行业规范对齐与按目标文件作用域设计
+
+- 状态：已有基础支持；目标文件作用域尚未对齐，待实现
+- 日期：2026-08-30
+- 级别：P0（嵌套 `AGENTS.md` 对实际目标文件生效）/ P1（诊断、预算与动态刷新）/ P2（跨工具兼容扩展）
+- 范围：`AGENTS.md` 开放格式、项目根与嵌套作用域、冲突优先级、`AGENTS.override.md`、主代理/子代理/Workflow、文件工具写入门、32 KiB 预算、来源诊断、安全边界与兼容测试
+- 行业依据：
+  - `https://agents.md/`
+  - `https://github.com/agentsmd/agents.md`
+  - `https://learn.chatgpt.com/docs/agent-configuration/agents-md`
+  - `https://github.blog/changelog/2025-08-28-copilot-coding-agent-now-supports-agents-md-custom-instructions/`
+- 资料核对日期：2026-08-30
+- 当前源码依据：`src/config/project_instructions.*`、`src/app/session_stack.*`、`src/app/interactive_session*`、`src/tools/agent_tool.*`、`src/agent/prompt_assembler.*`
+- 当前验证：`unit.config.project_instructions`、`unit.config.prompt_assembler`、`unit.agent_catalog.agent_profile_resolver` 三项通过
+- 不在本单：把 AGENTS.md 做成 YAML/JSON Schema、解析自然语言真假、让项目指令越过宿主权限、自动执行文件里的命令、替各家私有规则文件做无条件多读合并
+
+## 一、先纠正结论
+
+LubanCode 已经支持 `AGENTS.md`，不是“还不支持”。
+
+现有能力包括：
+
+- `/init` 在 Git 根生成 `AGENTS.md`，已有文件不覆盖；
+- 启动时从 Git 根走到 cwd；
+- 每层先取非空 `AGENTS.override.md`，否则取非空 `AGENTS.md`；
+- 根目录内容先拼，近 cwd 内容后拼；
+- 空文件跳过；
+- 合计设 32 KiB 上限；
+- 主代理、子代理与 Workflow Agent 都能继承项目指令；
+- `/init` 可在当前会话重载。
+
+故而真正的问题不是“认不认文件名”，而是“作用域认到哪儿”。
+
+官网 `agents.md` 的核心规矩是：嵌套 `AGENTS.md` 管所在目录树，离实际编辑文件最近的一份优先。LubanCode 眼下只从项目根走到会话启动 cwd。若从仓库根启动，却去改 `src/parser/token.cpp`，`src/parser/AGENTS.md` 不会自动进入上下文。现有文档也明写：程序不会扫描 cwd 以下尚未进入的目录。
+
+一句话：根规则已通，按目标文件下钻还没通。
+
+## 二、AGENTS.md 到底算什么“标准”
+
+### 2.1 它是开放格式与行业事实约定，不是严格式协议
+
+`agents.md` 官网把它称作 “simple, open format”。官网与仓库给出的本体很薄：
+
+- 文件名固定为 `AGENTS.md`；
+- 内容就是标准 Markdown；
+- 没有必填字段；
+- 标题随项目自己定；
+- 推荐写项目概览、构建测试、代码风格、安全边界、提交与 PR 规矩；
+- 大仓可在子目录再放 `AGENTS.md`；
+- 规则冲突时，离目标文件最近者优先；
+- 明确的用户聊天要求优先于文件指令。
+
+它没有一份带版本号的 RFC，也没有机器可校验的字段 Schema。故本文称它为“行业事实标准”或“跨工具开放约定”，不写成强制性国际标准。
+
+### 2.2 生态采用已成气候
+
+官网在 2026-08-30 的页面上：
+
+- 列出 Codex、GitHub Copilot、Gemini CLI、Cursor、Windsurf、Jules、Amp、Zed、Aider、Junie、Devin、opencode 等兼容工具；
+- 链出 GitHub 上 60k+ 份非 fork、非 archived 的 `AGENTS.md` 示例；
+- 说明该格式由 Agentic AI Foundation 在 Linux Foundation 旗下维护。
+
+这三条足以说明它已成气候，却不能推出“名单上每家语义一字不差”。各工具仍有扩展：
+
+- Codex 另认 `AGENTS.override.md`、全局 `~/.codex/AGENTS.md`、fallback filenames 与大小配置；
+- GitHub Copilot 还认 `.github/copilot-instructions.md`、`*.instructions.md`、`CLAUDE.md`、`GEMINI.md`；
+- Gemini CLI 可经配置把 context filename 改成 `AGENTS.md`；
+- Aider 需在配置里把 `AGENTS.md` 列为常读文件。
+
+跨工具共同本体只有：标准 Markdown、固定入口、嵌套作用域、近处优先。LubanCode 应先把这四件做稳，再谈私有兼容。
+
+## 三、行业共同语义与产品扩展分账
+
+| 能力 | `agents.md` 共同约定 | Codex/GitHub 等扩展 | LubanCode 当前 |
+|---|---|---|---|
+| 根文件 `AGENTS.md` | 是 | 是 | 已支持 |
+| 任意 Markdown，无必填字段 | 是 | 是 | 已支持，整段读取 |
+| 子目录嵌套 | 是 | 是 | 部分支持：只走 root -> 启动 cwd |
+| 最近目标文件者优先 | 是 | 是 | 未完整支持：不随目标路径解析 |
+| 同层 override 文件 | 非共同本体 | Codex 支持 | 已支持 `AGENTS.override.md` |
+| 全局 home 指令 | 非共同本体 | Codex 支持 | 未支持；现有 system prompt/SOUL 另管全局偏好 |
+| fallback filenames | 非共同本体 | Codex 可配置 | 未支持 |
+| 组合字节上限 | 非共同本体 | Codex 默认 32 KiB | 有 32 KiB，但会静默截断且近处规则可能挤没 |
+| 生效来源诊断 | 产品能力 | Codex 可查日志/会话 | 只有 Prompt 总账中的一条总项，缺逐文件命令面 |
+| 动态重载 | 非共同本体 | 多为新会话重读 | `/init` 可手动重载；无按路径惰性刷新 |
+| 子代理继承 | 代理产品能力 | 各家不同 | 已继承一份会话级字符串快照 |
+
+## 四、LubanCode 当前真实路径
+
+### 4.1 发现与拼装
+
+```text
+cwd
+  -> FindProjectRoot(cwd)
+       向上找 .git；找不到便以 cwd 为根
+  -> DirectoriesRootToCwd(root, cwd)
+  -> 每层选择一份
+       AGENTS.override.md（非空优先）
+       AGENTS.md          （无非空 override 时）
+  -> 根到近处依次拼接
+  -> 最多 32 KiB
+  -> ProjectInstructions.content
+  -> PromptOptions.project_instructions
+  -> AssembleSystemPrompt()
+```
+
+源码落点：
+
+- `src/config/project_instructions.cpp:FindProjectRoot`
+- `src/config/project_instructions.cpp:LoadProjectInstructions`
+- `src/agent/prompt_assembler.cpp:AssembleSystemPrompt`
+
+这条路能认嵌套文件，前提是 cwd 已在那条嵌套路径里。
+
+### 4.2 主代理
+
+`SessionStack` 启动时用进程当前目录读取一次。交互会话把所得字符串塞进主 Agent 的 system prompt。`/init` 会重读并重建提示。
+
+外部编辑器直接改 `AGENTS.md`，当前会话不会监听。再次执行 `/init` 或重启才生效。这是现文档明示行为，不算暗坑。
+
+### 4.3 子代理与 Workflow
+
+`AgentTool` 保存的是：
+
+```cpp
+std::string project_instructions_;
+```
+
+派发时把这份字符串交给子代理。Workflow 的 host material 也沿用主会话那份。它们没有按子任务目标路径重新 Resolve。
+
+故而“子代理继承 AGENTS.md”这句话只对会话已加载的链成立。若子代理从仓库根接活，专门去改一个带嵌套 `AGENTS.md` 的包，它仍可能看不见包内规则。
+
+### 4.4 已有测试证明了什么
+
+现有测试已证明：
+
+- root -> cwd 顺序正确；
+- 同层非空 override 压过 AGENTS；
+- 空 override 会回落 AGENTS；
+- 空文件跳过；
+- 32 KiB 路径会截断；
+- `/init` 只创建一次，不覆盖；
+- project instructions 进入 prompt；
+- 自定义 Agent 的 inherit/omit 决议能解析。
+
+它们没有证明：
+
+- 从 repo root 修改深层文件时，最近规则会自动生效；
+- 一枚 patch 涉及两个不同 scope 时，各文件按各自规则办；
+- 子代理/worktree 会按实际目标路径重算；
+- 指令文件变动后会在写入前失效旧缓存；
+- 超限时近处关键规则仍在；
+- 读取失败、坏 UTF-8、越界 symlink 会明报。
+
+## 五、已定位的缺口
+
+### 5.1 P0：作用域绑在 cwd，不绑在目标文件
+
+官网语义：
+
+```text
+repo/AGENTS.md
+repo/src/AGENTS.md
+repo/src/parser/AGENTS.md
+repo/src/parser/token.cpp
+```
+
+编辑 `token.cpp` 时，生效链应是：
+
+```text
+repo/AGENTS.md
+repo/src/AGENTS.md
+repo/src/parser/AGENTS.md
+```
+
+当前 LubanCode 若从 `repo/` 启动，只会加载：
+
+```text
+repo/AGENTS.md
+```
+
+这与“最近目标文件者优先”的共同语义不齐。
+
+### 5.2 P0：写工具没有作用域闸
+
+`write_file`、`edit_file`、`apply_patch` 一类工具在真正落盘前，没有统一步骤去问：
+
+```text
+这次要改哪些绝对路径？
+每条路径的 instruction chain 是什么？
+当前 Agent 是否已看过这份 chain 的最新指纹？
+```
+
+模型也许会主动搜索 `AGENTS.md`，却没有宿主保证。行业约定既然写“自动读取”，这件事不能只托付给模型自觉。
+
+### 5.3 P0：多路径改动没有逐文件 scope
+
+一份 patch 可同时改：
+
+```text
+frontend/src/a.ts        -> frontend/AGENTS.md
+backend/src/b.cpp        -> backend/AGENTS.md
+```
+
+两棵子树的规则可能相反。不能把两份近处规则粗暴拼成一份全局提示，再让模型猜哪条管哪条。必须保留 scope_dir 与目标文件映射。
+
+### 5.4 P1：32 KiB 会让近处规则饿死
+
+当前实现根文件先拼。满 32 KiB 后当场截断，后续文件不再读。根目录若写得太长，离目标最近、优先级最高的规则反倒进不来。
+
+这与“近处优先”打架。现文档虽提醒用户把根文件写短，提醒不能替代协议正确性。
+
+另有一笔实现细节：正文拼到上限后，函数还会再在最前头添 `# Project Instructions` 与说明。故最终字符串可能略超 32 KiB；“所有项目指令正文与来源标题合计最多 32 KiB”与源码并不完全一致。
+
+### 5.5 P1：截断会从文件中腰落刀
+
+`Utf8PrefixLength()` 只保证不劈坏 UTF-8。它仍可能切在：
+
+- 半条禁令中间；
+- 未闭合代码块中间；
+- “仅可修改 A，不可修改 B”的后半句之前；
+- 近处 override 的第一段中间。
+
+这种截断对文本编码没错，对指令语义却不稳。更糟的是，主 Agent 没有一条醒目的运行时诊断说明哪些规则没装下。
+
+### 5.6 P1：来源账被压成一条
+
+`ProjectInstructions.sources` 本来记着各文件路径。到了 `PromptSourceLedger`，却只留：
+
+```text
+(project instructions)
+```
+
+用户看不见：
+
+- 实际读了哪几份；
+- 哪一份是 override；
+- 哪些文件为空、坏掉、超限或没读；
+- 当前目标文件到底由哪一份最近规则管。
+
+### 5.7 P1：I/O 错误与坏编码会静默降成“没指令”
+
+`ReadTrimmed()` 打不开文件便返回空串。调用方把它当空文件跳过。权限错误、短暂 I/O 错、坏路径与真正空文件没有分账。
+
+输入也没先做 UTF-8 合法性校验。坏字节若一路进 system prompt，后头才出错，现场会离根因很远。
+
+### 5.8 P1：子代理继承的是快照，不是 resolver
+
+主代理把一份字符串交给子代理。子代理缺少：
+
+- 自己的 active scope；
+- 已确认 instruction fingerprint；
+- 目标路径变化后的重算；
+- 隔离 worktree 下的路径映射；
+- 指令文件更新后的失效。
+
+Workflow Agent 同病。
+
+### 5.9 P1：冲突优先级只写在提示里，产品没有诊断
+
+自由 Markdown 无法像配置表那样自动判定语义冲突。LubanCode 至少应把机械优先级钉住：
+
+```text
+父目录先，子目录后；同层 override 取代 AGENTS；目标文件最近者胜。
+```
+
+至于两句自然语言是否真正相冲，模型来理解。宿主不可假装自己已解出语义，却应把来源、顺序与 scope 清清楚楚亮出来。
+
+### 5.10 P2：跨工具兼容尚无明确政策
+
+LubanCode 不读 `CLAUDE.md`、`GEMINI.md`、`.github/copilot-instructions.md`。这不算违反 `AGENTS.md` 开放格式，因为它们是各家扩展。
+
+若日后支持 fallback filenames，也应显式配置、每层只选一份，并显示来源。不可默认把四五份规则全拼进 system，平白制造冲突。
+
+## 六、所有权重画
+
+现状把最终字符串当作事实：
+
+```text
+SessionStack.project_instructions: string
+```
+
+目标应把“文档、链、作用域、Agent 已见状态”分开：
+
+```cpp
+struct InstructionDocument {
+    path source_path;
+    path scope_dir;
+    InstructionDocumentKind kind;  // Agents / Override / Fallback
+    std::string content;
+    std::string sha256;
+    std::size_t bytes;
+    file_time_type last_write_time;
+};
+
+struct InstructionChain {
+    path project_root;
+    path target_path;
+    std::vector<InstructionDocument> documents;  // root -> nearest
+    std::string fingerprint;
+    std::vector<InstructionDiagnostic> diagnostics;
+};
+```
+
+所有权定死：
+
+| 事实 | 唯一 owner |
+|---|---|
+| 项目根在哪 | `ProjectRootResolver` |
+| 某目标路径受哪些文档管 | `ProjectInstructionResolver` |
+| 同层选 override 还是 agents | Resolver |
+| 文件内容、hash、I/O 诊断 | `InstructionDocumentCache` |
+| 当前 Agent 已看过哪些 chain | Agent 自己的 `InstructionScopeState` |
+| 写前能不能落盘 | `ScopedInstructionGate` |
+| 指令怎样进下一份请求 | Agent 的 request working view |
+| 权限、确认、模式能不能被放宽 | Runtime，AGENTS 无权改 |
+
+共享的只能是不可变文档缓存。主代理、子代理、Workflow 各持自己的“已见 scope”状态，不共享一枚含混布尔值。
+
+## 七、目标流程
+
+### 7.1 启动时只装基线，不递归灌全文
+
+```text
+session cwd
+  -> ResolveForPath(cwd)
+  -> root -> cwd baseline chain
+  -> 拼入主 system prompt
+```
+
+不在启动时递归读取整仓所有 `AGENTS.md` 正文。大 monorepo 可能有几十上百份，统统塞进 prompt 既贵又会串 scope。
+
+可以建一份轻索引，也可以在目标路径到来时按祖先目录惰性查找。无需全仓扫描正文。
+
+### 7.2 文件读取时提示 scope
+
+`read_file`、符号跳转、搜索命中某文件时，宿主可解析其 chain。若出现当前 Agent 尚未见过的近处文档：
+
+- 读操作仍可完成；
+- 工具结果附一枚结构化 `instruction_scope_notice`；
+- 下一份模型请求在动态项目指令段带上新文档、scope 与 fingerprint；
+- 不把同一内容反复塞进 durable history。
+
+搜索命中百个文件时，只返回 scope manifest 与少量新增文档。不可把百份正文一道灌回。
+
+### 7.3 文件写入前必须过闸
+
+对路径可知的 mutating tools：
+
+```text
+模型提出 tool call
+  -> 工具解析全部目标绝对路径
+  -> ScopedInstructionGate.Resolve(targets)
+  -> 比对 Agent 已见 chain fingerprint
+       已见且未变：放行
+       未见或已变：本次不落盘
+                    返回 instructions_required
+                    将新 chain 放进下一请求 working view
+                    模型读后重试
+```
+
+这道闸须早于：
+
+- 打开目标文件写句柄；
+- 创建目录；
+- 写临时文件；
+- 套 patch；
+- 改权限或重命名。
+
+第一次拦住不是错误，是协议握手。第二次带同一 fingerprint 重试才放行。
+
+### 7.4 一枚 patch 涉及多 scope
+
+先从 patch 结构中取出全部目标路径，再按 fingerprint 分组：
+
+```text
+scope A -> [frontend/src/a.ts, frontend/test/a.test.ts]
+scope B -> [backend/src/b.cpp]
+```
+
+动态指令段须写清：
+
+```text
+以下规则只管 scope A：...
+以下规则只管 scope B：...
+```
+
+不得把 B 的局部规矩强加给 A。若任一 scope 尚未确认，整枚 patch 不落。不能先改一半，再回来补读另一半规则。
+
+### 7.5 run_command 的边界
+
+Shell 命令可能改任意文件，宿主无法可靠解析所有副作用。第一期至少做到：
+
+1. 按命令声明的 cwd Resolve instruction chain；
+2. cwd 的 chain 未见时，先拦再注入；
+3. 系统提示明说：命令若跨子树写文件，须先读取那棵子树的 `AGENTS.md`；
+4. 内置文件工具有精确路径时，走强制门；shell 只给有限保证，不冒充全知沙箱。
+
+日后若命令执行层接入文件变更审计，可在落盘后发现越 scope 写入并明报，但不能把事后发现写成事前防护。
+
+### 7.6 子代理、Workflow 与 worktree
+
+- 每只 Agent 收 `ProjectInstructionResolver` 引用与自己的 `InstructionScopeState`。
+- 子代理启动时按它的实际 cwd Resolve baseline，不复制父 Agent 的最终字符串。
+- isolation worktree 先把项目相对路径映射到新根，再从新根读取；文档 hash 应基于 worktree 里的实际内容。
+- Workflow 节点与 AgentTool 共用 resolver/gate，不再各自拼一份 AGENTS 字符串。
+- `project_instructions: omit` 仍可关闭注入；关闭后写工具是否仍过宿主 scope gate，须明定。建议 gate 仍提示“该 Agent 配置选择 omit”，并按产品政策决定拒绝写入或要求显式放行，不能静默绕过仓库规矩。
+
+## 八、预算与截断
+
+### 8.1 不再静默中腰截
+
+建议把“编码安全”升成“指令完整”：
+
+- 先完整读取并校验每份文档；
+- 按文档为原子单位装链；
+- 超限时不从正文中腰截断；
+- mutating tool 所需 active chain 装不下时 fail closed，明说哪份多大、总额多少、怎样拆；
+- read-only 请求可带醒目 warning 继续，但不得显示“全部已加载”。
+
+### 8.2 近处规则须有席位
+
+若仍保留软预算，至少先收全链大小，再按优先级分配。可选策略：
+
+```text
+方案 A（推荐）：active chain 超限便拒绝写，要求拆分或调高上限
+方案 B：根与最近文档各保留固定席位，中间层按距目标由近到远装
+```
+
+方案 A 说得明白，也不丢安全禁令。第一期采用 A。
+
+32 KiB 可保留作默认值，也可配置。无论取多少，wrapper、来源标题、正文都须算进同一笔最终 request bytes，文档与实现不可各报一套。
+
+### 8.3 大背景走渐进披露
+
+`AGENTS.md` 只放可执行规矩与必要索引。长架构材料留在普通 docs，由 AGENTS 写明：
+
+```text
+改 parser 前先读 docs/architecture/parser.md
+```
+
+这符合官网“README for agents”的用法，也免得根文件吞掉上下文。
+
+## 九、诊断与命令面
+
+建议新增：
+
+```text
+/instructions
+/instructions path <路径>
+/instructions reload
+/doctor instructions
+```
+
+`/instructions` 显示当前 cwd 基线：
+
+```text
+项目根：D:/repo
+目标：D:/repo
+上限：32768 bytes
+已加载：
+  1. D:/repo/AGENTS.md              AGENTS    1820 B  sha256:abcd1234
+状态：完整
+```
+
+`/instructions path src/parser/token.cpp` 显示目标链：
+
+```text
+1. D:/repo/AGENTS.md
+2. D:/repo/src/AGENTS.override.md
+3. D:/repo/src/parser/AGENTS.md      <- nearest
+合计：6412 B
+fingerprint: ...
+```
+
+诊断必须区分：
+
+- `loaded`
+- `empty_skipped`
+- `shadowed_same_directory`
+- `read_error`
+- `invalid_utf8`
+- `outside_project`
+- `symlink_outside_project`
+- `over_budget`
+- `stale_fingerprint`
+
+不能再把“打不开”与“空文件”都写成没发现。
+
+## 十、安全与优先级
+
+### 10.1 AGENTS 是指令来源，不是权限来源
+
+仓库可以写：
+
+```text
+运行测试 X
+不要改 generated/
+改 API 必须补兼容测试
+```
+
+它不能：
+
+- 切换 Plan/Default 模式；
+- 放宽 confirm/auto/yolo；
+- 取消命令黑名单；
+- 读取未授权 Secret；
+- 开监听器或常驻进程；
+- 把项目外路径纳入工作区；
+- 借一句“无需确认”越过宿主确认。
+
+现有 Runtime 边界继续压在最上。AGENTS 只影响代理怎样做获准的工作。
+
+### 10.2 用户要求与项目规则冲突
+
+官网 FAQ 写“明确用户聊天要求优先”。LubanCode 当前把项目指令拼进 system prompt，实际权威高于普通 user message。两者并不天然一致。
+
+这里不能悄悄改权威层。须先冻结产品政策：
+
+```text
+宿主安全与权限            最高，不可覆盖
+用户本轮明确任务          可改业务目标
+目标文件最近 AGENTS       管仓库工作法与局部边界
+父级 AGENTS               管全仓通则
+默认 Agent 风格/偏好      最后
+```
+
+若用户明确要求越过“不要改 generated/”这类仓库禁令，LubanCode 应指出冲突并请用户明示授权，留下审计；不可只凭模型自行权衡。行业 FAQ 的一句话不替产品解决安全与协作责任。
+
+### 10.3 symlink
+
+官网迁移建议允许把 `AGENTS.md` 做成符号链接。LubanCode 可支持，但须解析真实目标：
+
+- 链到项目内普通文件：允许，诊断同时显示 link 与 resolved path；
+- 链到项目外：默认拒绝或要求项目信任明确放行；
+- 链环、断链：明报；
+- hash 取实际内容，scope 仍取 link 所在目录。
+
+当前 `is_regular_file()` 可能跟随 symlink 读取项目外内容，这笔边界须补测试。
+
+## 十一、实现分期
+
+### P0：作用域正确
+
+1. 把字符串 loader 升成 `ProjectInstructionResolver`，返回结构化 documents/chain/diagnostics。
+2. 增加 `ResolveForPath(target)`，机械顺序固定为 root -> target parent。
+3. 给 `write_file/edit_file/apply_patch` 等路径可知的写工具接 `ScopedInstructionGate`。
+4. 新 scope 首次出现时先不落盘，把完整规则注入下一请求，模型重试后放行。
+5. 多路径 patch 按 chain fingerprint 分组；任一未确认，整笔不落。
+6. 主 Agent、AgentTool、Workflow 共用 resolver；各 Agent 自持 scope state。
+7. 保留当前 root->cwd baseline 与 `AGENTS.override.md` 行为，旧项目不退化。
+
+### P1：可见、完整、可刷新
+
+1. 新增 `/instructions` 与 `/doctor instructions`。
+2. Prompt ledger 从一条总项扩成逐 source 账。
+3. I/O 错、坏 UTF-8、空文件、同层遮蔽、超限分开报。
+4. 不再从文档中腰静默截；active write chain 超限时 fail closed。
+5. 缓存按 path + size + mtime 快筛、内容 hash 落锤；目标解析时发现变化便失效旧 fingerprint。
+6. `/init` 继续做建档与显式 reload；外部编辑不必常驻监听，Resolve 时惰性发现即可。
+7. 修正文档中 32 KiB 的真实计费口径。
+
+### P2：兼容扩展
+
+1. 评估全局 `~/.lubancode/AGENTS.md`。它不是开放格式共同本体，须与 system prompt/SOUL 分工后再开。
+2. 评估 `project_doc_fallback_filenames`。默认空，用户显式配置后每层按顺序取第一份非空文件。
+3. 可提供迁移诊断：发现 `AGENT.md`、`CLAUDE.md`、`GEMINI.md` 时只提示，不自动多读。
+4. 记录兼容矩阵与出处；第三方工具语义变动时更新文档，不拿官网 logo 当永久合同。
+
+## 十二、测试矩阵
+
+### 12.1 Resolver
+
+- Git 根、非 Git cwd、Git worktree `.git` 文件三种根发现。
+- root -> target parent 顺序。
+- 同层 override 压 AGENTS；空 override 回落。
+- 目标本身是目录与普通文件两种输入。
+- 相对路径、绝对路径、`.`/`..`、Windows 大小写与分隔符归一。
+- 项目外路径明报，不偷读共同父目录。
+- 项目内 symlink、项目外 symlink、断链、环。
+- 空文件、读失败、坏 UTF-8 分账。
+
+### 12.2 写前作用域闸
+
+- 从 repo root 改 `src/parser/token.cpp`，首次写前加载三层规则并拒绝落盘；重试才成功。
+- 当前 Agent 已见相同 fingerprint，后续同 scope 写不重复拦。
+- AGENTS 内容变动后 fingerprint 失效，下一次写重新拦。
+- 一枚 patch 跨 frontend/backend 两 scope，任何一边未见时零文件改动。
+- rename/move 同时检查 source 与 destination scope。
+- 新建文件按其 parent scope 解析。
+- 删除 `AGENTS.md` 本身时，先按删除前的 chain 办，并在成功后失效缓存。
+
+### 12.3 主代理、子代理与 Workflow
+
+- 三路对同一目标路径得出同一 chain/fingerprint。
+- 子代理从仓库根派去深层包，能在写前拿到包内规则。
+- worktree 隔离后从 worktree 实际文件读取，不串回主 checkout。
+- Agent 配 `project_instructions: omit` 时，行为与安全政策一致且诊断可见。
+- 后台 Agent 启动后 AGENTS 变动，下一次跨写边界能发现 stale fingerprint。
+
+### 12.4 预算
+
+- wrapper + headings + content 一道计入上限。
+- 超限不切半条 UTF-8，也不切半份文档。
+- 根文件过大时，不得静默宣称近处规则已加载。
+- mutating tool 遇超限零副作用，并给出拆分/调大建议。
+- read-only 路可继续，但状态明确为 incomplete。
+
+### 12.5 命令面
+
+- `/instructions` 列 cwd baseline。
+- `/instructions path` 列目标链、nearest、hash 与字节。
+- shadowed/empty/error/over-budget 文案分开。
+- 输出不泄露文件正文；展开正文须另有明确操作。
+
+## 十三、验收
+
+### P0 必过
+
+- 用户从仓库根启动 LubanCode，修改任意深层文件前，该文件祖先链上的嵌套 `AGENTS.md` 自动生效。
+- 最近目标文件规则后置，机械优先级与 `agents.md` 官网一致。
+- 多 scope patch 在所有规则装入前不改任何文件。
+- 主代理、子代理、Workflow、隔离 worktree 走同一 Resolver 与 Gate。
+- 当前已有 root->cwd、override、空文件、`/init` 行为不退化。
+- 不能只在 system prompt 加一句“记得自己找 AGENTS.md”便算完成；须有宿主写前门。
+
+### P1 必过
+
+- 用户可查当前与任意目标路径的完整来源链。
+- 读取失败、坏编码、超限不会伪装成空文件。
+- active chain 不再中腰静默截断。
+- AGENTS 变动后，无需重启便会在下一次路径 Resolve 时失效旧指纹。
+- 32 KiB 口径在实现、文档、诊断与测试里一致。
+
+### 事实边界
+
+- 源码与单测通过，只能证明 LubanCode 现有 root->cwd 支持成立。
+- P0 做完并跑过跨 scope 回环，才能写“嵌套 AGENTS.md 按目标文件生效”。
+- 未与第三方 Agent 做互操作实测时，只能写“遵循 agents.md 开放格式核心语义”，不能写“与所有官网列名工具完全一致”。
+
+## 十四、明确不算完成的做法
+
+- 把现有 `/init` 截图当成完整行业兼容证据。
+- 只从 repo root 读一份 `AGENTS.md`。
+- 只按会话 cwd 合并，继续漏掉目标文件下方嵌套规则。
+- 让模型自行搜索，宿主写工具不设门。
+- 启动时递归灌入整仓所有 AGENTS 正文。
+- 多 scope patch 把所有局部规则揉成一段，不标适用路径。
+- 超限后静默截半份文件，仍显示“已加载”。
+- 默认同时读 AGENTS/CLAUDE/GEMINI/Copilot 四套文件。
+- 让 AGENTS 放宽权限、替用户批准命令或开启常驻能力。
+- 因官网列出某工具 logo，便宣称两家冲突、reload、global scope 语义完全相同。
+
+## 十五、实现状态
+
+截至 2026-08-30：
+
+- 已实现：`AGENTS.md` 根文件与 root->cwd 分层读取、同层 override、空文件回落、32 KiB 字节帽、`/init` 建档/重载、主代理与子代理 prompt 注入。
+- 已验证：三项相关单测通过。
+- 已确认缺口：只按启动 cwd 取链；没有按目标文件 Resolve；写工具没有 scope gate；子代理继承字符串快照；超限静默截断；逐文件来源与错误不可查。
+- 尚未实现：结构化 Resolver、目标路径 Gate、多 scope 原子写、指纹失效、诊断命令、完整预算语义、fallback/global 扩展。
+- 当前产品结论：LubanCode 已支持 AGENTS.md 基础用法，却尚未完整兑现行业约定中“离实际编辑文件最近者优先”这一条。

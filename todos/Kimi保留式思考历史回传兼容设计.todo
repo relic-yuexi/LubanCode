@@ -1,0 +1,498 @@
+# Kimi 保留式思考、工具循环与历史回传兼容设计
+
+- 状态：已定位，待实现
+- 日期：2026-08-30
+- 级别：P0（`kimi-k3`、`kimi-k2.7-code` 协议合规；`kimi-k2.6` 工具循环正确性）
+- 范围：Moonshot OpenAI-compatible Chat API、`reasoning_content` 接收与原样回传、`thinking.keep`、模型级 reasoning 方言、会话恢复、compact 边界、测试与诊断
+- 官方依据：
+  - `https://platform.kimi.com/docs/guide/use-thinking-models`
+  - `https://platform.kimi.com/docs/api/chat`
+  - `https://platform.kimi.com/docs/api/models-overview`
+- 文档核对日期：2026-08-30
+- 当前验证：`unit.api.chat_request` 与 `integration.api.wire_replay` 通过；只证明现有 Chat `tool_episode` 机关可用，尚未跑 Moonshot 真机
+- 不在本单：展示层 thinking 折叠、推理正文脱敏策略、Anthropic wire 通用重构、替厂商编造或摘要 reasoning、Kimi 模型质量评测
+
+## 一、先下断语
+
+LubanCode 已能接住、保存、恢复 `reasoning_content`。它也有一套 Chat 专用的思考回传机关。可这套机关眼下只认 `never` 与 `tool_episode`，Moonshot 内置预设又落成 `never`。正常选用 Kimi 时，历史 thinking 不会随下一份请求送回。
+
+这不是显示问题，也不是会话没存住。缺口在请求协议：
+
+```text
+Kimi SSE delta.reasoning_content
+        -> ThinkingDelta                 已有
+        -> ThinkingBlock                 已有
+        -> history / session JSONL       已有
+        -> 下一份 Chat messages
+             assistant.reasoning_content 部分已有
+             replay=always               没有
+             thinking.keep="all"         没有
+             Kimi 模型级策略接线          没有
+```
+
+本单定案：
+
+1. 原始 thinking 仍由 `ThinkingBlock` 持有，不另造第二份历史。
+2. 是否回传，由“当前 provider + 当前 model + 当前 wire”所得模型级方言决定，不由 provider 名字硬编码。
+3. Chat 回传策略扩成 `never / tool_episode / always`。
+4. `kimi-k3`、`kimi-k2.7-code` 固定 `always`。
+5. `kimi-k2.6` 默认只保证本枚外层 Turn 的工具循环；用户显式开 Preserved Thinking 后，才发 `thinking.keep: "all"` 并跨 Turn 全量回传。
+6. `kimi-k2.5` 不支持 Preserved Thinking，不许借公共 Moonshot 默认误开。
+7. 不从正文 `<think>`、compact 摘要或宿主提示里伪造 `reasoning_content`。只有 provider 正式 reasoning 字段产出的 `ThinkingBlock` 才能回传。
+
+## 二、Kimi 眼下的正式契约
+
+### 2.1 四枚模型不可混作一家
+
+| 模型 | 当前轮是否思考 | 跨轮 Preserved Thinking | 请求控制 | 客户端回传责任 |
+|---|---|---|---|---|
+| `kimi-k3` | 始终开启 | 始终开启 | 顶层 `reasoning_effort=low/high/max`；不应发送 `thinking` | 多轮对话与工具调用都须把完整 assistant message 原样回传，包括可能出现的 `reasoning_content` |
+| `kimi-k2.7-code` / highspeed | 始终开启 | 始终开启 | 无需发送 `thinking`；若显式发送，只认合法启用形状 | 每轮历史 assistant 的 `reasoning_content` 必须原样保留 |
+| `kimi-k2.6` | 默认开启，可关闭 | 默认不跨轮；可用 `thinking.keep="all"` 打开 | `thinking.type=enabled/disabled`；不支持 `reasoning_effort` | 同一工具调用循环里的 thinking 须回传；跨 Turn 是否保留看 `thinking.keep` |
+| `kimi-k2.5` | 可开关 | 不支持 | `thinking.type=enabled/disabled` | 不得宣称支持 Preserved Thinking |
+
+“同一工具调用循环”与“跨轮对话”须分开：
+
+```text
+外层 Turn 1
+  U1
+  A1 reasoning + tool_call(t1)
+  T1 tool_result(t1)
+  A2 reasoning + tool_call(t2)
+  T2 tool_result(t2)
+  A3 reasoning + final text
+
+外层 Turn 2
+  U2
+  ...
+```
+
+K2.6 即使没开 `thinking.keep="all"`，A1、A2 的 `reasoning_content` 也须跟着 T1、T2 送回，才能稳稳走完 Turn 1。到了 U2，是否继续保留 Turn 1 的 thinking，才由 `thinking.keep` 决定。
+
+K3 与 K2.7 Code 没这道选择。只要原 assistant 消息还在 `messages`，对应 `reasoning_content` 就得在。
+
+### 2.2 “产生 thinking”与“回传 thinking”是两笔账
+
+不可再拿一枚 `/think` 档位包办四件事：
+
+| 账 | 问的是什么 | Kimi 例子 |
+|---|---|---|
+| 产生 | 本轮会不会输出 reasoning | K2.6 的 `thinking.type` |
+| 强度 | 本轮想多深 | K3 的 `reasoning_effort` |
+| 回传 | 历史 assistant 的 reasoning 是否写回 `messages` | `never/tool_episode/always` |
+| 服务端保留 | 服务端是否把跨 Turn reasoning 纳入本轮推理 | K2.6 的 `thinking.keep` |
+
+`thinking.keep` 不会替客户端补历史。客户端若没把 `reasoning_content` 放回 `messages`，服务端无从保留。反过来也一样：客户端带了字段，不代表 K2.6 已启用跨轮 Preserved Thinking；服务端仍按 `thinking.keep` 办事。
+
+## 三、源码现状
+
+### 3.1 已有底子
+
+| 环节 | 当前落点 | 现状 |
+|---|---|---|
+| 流式解析 | `src/api/chat/events.cpp` | 能把 `delta.reasoning_content` 或声明过的别名翻成 `ThinkingDelta` |
+| 消息装配 | `src/api/assembler.cpp` | 能拼接 thinking 文本，收成 `ThinkingBlock{text, signature}` |
+| 有效历史 | `src/agent/loop.cpp`、`src/agent/context.*` | assistant 消息连 thinking 一道进入 durable history，并纳入 token 预估 |
+| 会话持久化 | `src/sessions/session_store.cpp` | `type=thinking` 的 text/signature 可序列化、反序列化，退出恢复不丢 |
+| Chat 请求 | `src/api/chat/request.cpp` | `JoinedThinking()` 可按原块序拼接，并写入 assistant 的 provider 声明字段 |
+| 传输配置 | `src/api/chat/request.hpp`、`src/app/backend_stack.cpp` | 有 `Never`、`ToolEpisode` 两档；provider 配置可选 `reasoning_replay_field` |
+| 方言目录 | `src/api/reasoning.hpp`、`catalog/providers.schema.json` | 纸面已经允许 `replay=never/tool_episode/always` 与 `replay_field` |
+
+故而数据链前半截无须推倒。要修的是策略所有权与序列化出口。
+
+### 3.2 现有 `tool_episode` 到底会做什么
+
+`SegmentToolUseFlags()` 用“真正 user 输入”切段。只带 `ToolResultBlock` 的 user-role 消息不另开段。某段只要出现过 assistant tool use，段内 assistant 的 thinking 就按原字节写回。
+
+这套语义能支撑 K2.6 单轮多步工具调用，也挡住了 tool use/result 之间漏传 reasoning 的 400 风险。它却不能代替 K3/K2.7 的全历史回传：纯对话段没有工具，`tool_episode` 会略过其中的 reasoning。
+
+### 3.3 已定位的六处缺口
+
+#### 缺口一：运行期枚举没有 `Always`
+
+`src/api/chat/request.hpp`：
+
+```cpp
+enum class ReasoningReplayPolicy { Never, ToolEpisode };
+```
+
+Schema 与 `ReasoningWireDialect` 已写得下 `always`，Chat 后端却接不住。目录即使改成 `always`，也落不到 wire。
+
+#### 缺口二：模型方言没有接到 Chat 回传策略
+
+模型目录把合并后的方言放进 `Request.reasoning.dialect`。Chat client 的 replay 选择却来自 `Config.reasoning_replay -> ChatRequestOptions`。两条路各走各的。
+
+更要紧的是，`ProviderConfigFromPreset()` 只复制 provider 顶层的 legacy `reasoning_replay`，不会拿当前模型的 `reasoning.dialect.replay`。目录里的模型级 `replay` 眼下只供描述和校验，没成为请求行为。
+
+#### 缺口三：Moonshot 预设明确写成 `never`
+
+`catalog/providers.json` 的 `moonshot.reasoning_dialect.replay` 当前为 `never`。K3、K2.7 Code、K2.6、K2.5 又共享这份 provider 方言。四枚模型的规矩不同，provider 级一刀切压根儿装不下。
+
+#### 缺口四：没有 `thinking.keep`
+
+Chat serializer 只会造：
+
+```json
+{"thinking":{"type":"enabled"}}
+```
+
+它不会造：
+
+```json
+{"thinking":{"type":"enabled","keep":"all"}}
+```
+
+拿 provider `extra_body` 硬塞也不成。`extra_body` 是 provider 级浅覆盖：给 K2.6 塞进去，切到不该发送 `thinking` 的 K3 时仍会带着；切到不支持 Preserved Thinking 的 K2.5 时也会误发。
+
+#### 缺口五：Moonshot 模型能力表本身有误
+
+当前目录把 K2.6 写成支持 effort、toggle、budget，并给了 `none/minimal/low/medium/high/xhigh/max`。官方现行说明只给 K2.6 `thinking.type` 与可选 `thinking.keep`，不支持 `reasoning_effort`。眼下默认 `default_think=high` 还可能诱使 serializer 发出顶层 `reasoning_effort=high`。
+
+当前 K3 条目又带 toggle，并把 `none` 放进 `supportedEfforts`。官方现行契约却是始终思考，只认 `low/high/max`，不该发送 `thinking`。
+
+K2.7 Code 当前 reasoning 画像只列 budget，也与官方现行参数表对不上。
+
+故本单不能只改 replay。Moonshot 四枚模型的 controls、supported efforts、dialect 都要一道校正。
+
+#### 缺口六：现有测试没钉 Kimi
+
+现有单测与回环集成测试钉住的是 DeepSeek 风格 `tool_episode`。它们证明机关能转，却没有证明：
+
+- K3 纯对话历史会回传 reasoning；
+- K2.7 Code 每枚 assistant 都保留 reasoning；
+- K2.6 工具循环回传，但默认不误发 `reasoning_effort`；
+- K2.6 开 `keep=all` 后，纯对话段也回传；
+- K2.5 不会误带 `keep`；
+- session resume 后仍能按模型规矩回传。
+
+## 四、根因
+
+眼下有两份“思考协议真相”：
+
+```text
+ModelCatalog / Request.reasoning.dialect
+  管 toggle、effort、budget、delta，纸面还管 replay
+
+ProviderConfig / ChatRequestOptions
+  真正管 stream_usage、reasoning_replay、replay_field
+```
+
+同一事实有两位 owner，迟早打架。Moonshot 恰好把问题照得通亮：回传规矩按模型变化，provider 级配置没有足够分辨率。
+
+真正 owner 应是：
+
+```text
+active provider + active model + active wire
+        -> resolved ReasoningConfig / ReasoningWireDialect
+        -> current api::Request
+        -> wire serializer
+```
+
+`ChatRequestOptions` 只留 transport 能力与旧自定义 provider 的兼容声明。目录可识别模型一旦有正式 dialect，就以 `request.reasoning.dialect` 为准。
+
+## 五、目标结构
+
+### 5.1 中立状态
+
+建议在中立请求档案里把两笔状态分开：
+
+```cpp
+enum class ReasoningReplayPolicy {
+    Never,
+    ToolEpisode,
+    Always,
+};
+
+enum class ReasoningHistoryMode {
+    ProviderDefault,  // 不显式请求跨 Turn 保留
+    All,              // 显式请求完整保留
+};
+```
+
+`ReasoningReplayPolicy` 决定客户端怎样序列化已有 `ThinkingBlock`。
+
+`ReasoningHistoryMode` 表达用户/Agent 对跨 Turn preserved thinking 的要求。它是中立意图，不直接写死 `thinking.keep`。Chat/Kimi 方言再把 `All` 落成 `thinking.keep="all"`；不支持的模型当场报错，不静默忽略。
+
+若第一期不做用户可调的跨轮保留，也须先留清楚边界：
+
+- K2.6：`ToolEpisode + ProviderDefault`
+- K3/K2.7：`Always + ProviderDefault`，因为服务端固定开启，无需发送 keep
+- K2.5：`Never + ProviderDefault`
+
+### 5.2 方言扩展
+
+现有 `ReasoningWireDialect` 保留：
+
+```text
+replay: never | tool_episode | always
+replay_field: reasoning_content
+```
+
+另加一枚服务端历史控制形状，名字要说清是 request control，不可与 replay 混作一件事：
+
+```text
+history_control: none | thinking_keep
+history_all_value: all
+history_default: provider_default | all
+```
+
+Schema、parser、合并、描述行一道补齐。模型级字段可覆写 provider 级字段，也须能用 `none` 清掉继承来的控制。
+
+### 5.3 Chat serializer 的决策次序
+
+```text
+1. request.reasoning.dialect 有正式声明
+     -> 用 model-resolved replay / replay_field / history_control
+
+2. request.reasoning.dialect 为空（手写旧 provider）
+     -> 回落 ChatRequestOptions.reasoning_replay / replay_field
+
+3. 两边都没写
+     -> Never
+```
+
+不可按模型字符串写：
+
+```cpp
+if (request.model.starts_with("kimi-")) { ... }  // 禁止
+```
+
+同一模型可能经 Moonshot、聚合端、本地 vLLM 出站。协议责任随实际 wire 与已绑定 provider 走，不能看见名字便猜。
+
+### 5.4 三种 replay 的精确语义
+
+#### `Never`
+
+- assistant 的 `content`、`tool_calls` 照旧。
+- 不写 reasoning 回传字段。
+- `ThinkingBlock` 仍留在本地历史与 session，不因“不回传”而删除。
+
+#### `ToolEpisode`
+
+- 维持现有 user-to-user 段与工具标记语义。
+- 某段走过工具，段内原始 assistant 的 ThinkingBlock 原字节回传。
+- 不摘要，不加标签，不塞进 `content`。
+- K2.6 默认用此档，保住同一 Turn 的多步工具循环。
+
+#### `Always`
+
+- 工作视图里每条原始 assistant 消息，只要带 ThinkingBlock，就写回 provider 声明字段。
+- 纯对话、工具调用、最终总结一视同仁。
+- 一条 assistant 有多枚 ThinkingBlock 时，按块序原字节拼接；字段只写一次。
+- 没有 ThinkingBlock 时不造空串，也不凭正文猜。
+- ToolUseBlock、TextBlock、ModelImageBlock 原有序列化规矩不动。
+
+### 5.5 Kimi 模型目录应落成什么
+
+示意如下，字段名以最终 schema 为准：
+
+| 模型 | toggle | effort | budget | replay | history control |
+|---|---|---|---|---|---|
+| `kimi-k3` | none | `reasoning_effort low/high/max` | none | always | 服务端固定，无请求字段 |
+| `kimi-k2.7-code` | 不发送 | none | none | always | 服务端固定；可省略 `thinking` |
+| `kimi-k2.7-code-highspeed` | 同上 | none | none | always | 同上 |
+| `kimi-k2.6` | `thinking.type enabled/disabled` | none | none | tool_episode；显式 keep all 时升为 always | `thinking.keep` 可选 |
+| `kimi-k2.5` | `thinking.type enabled/disabled` | none | none | never | none |
+
+官方文档已经明说的形状可标 `verified=true`，并在目录旁留 `source_document`/`checked_at` 的 fixture 或维护记录。聚合 provider 若只“声称兼容”，仍按该 provider 自己的证据标，不可借 Moonshot 直连文档替它盖章。
+
+## 六、compact、恢复与失败边界
+
+### 6.1 回传看模型工作视图，不看整本 Session JSONL
+
+四层账不可混：
+
+```text
+Session JSONL        完整审计与恢复材料
+history_             当前有效 durable history
+request_history_     本轮动态注入后的请求历史
+working_view         compact / artifact / 预算处理后的模型视图
+request.messages     真正序列化出站的消息
+```
+
+`Always` 的意思不是把 Session JSONL 从头到尾重新灌给模型。它只管 `request.messages` 中仍然存在的原始 assistant 消息：消息既然保留，对应 reasoning 就不能剥掉。
+
+compact 若整枚移除旧 Turn，并用宿主摘要替换，那枚旧 assistant 已不在工作视图，不再回传。不可留下 assistant 正文，却单独裁掉与它配套的 ThinkingBlock，再冒充“完整 assistant message”。
+
+### 6.2 session resume
+
+恢复后应走同一条模型方言解析：
+
+```text
+session ThinkingBlock
+  + 当前 active provider/model/wire
+  -> 当前 replay policy
+  -> 下一份 request.messages
+```
+
+不得把“当年生成时用的 provider”与“眼下恢复后切换到的 provider”混在一起。用户若切到不认 reasoning 回传的模型，ThinkingBlock 留本地，不出站。切回 K3/K2.7，现存原始 assistant thinking 再按当前模型契约回传。
+
+### 6.3 打断与坏流
+
+- ESC 前收到的 thinking 仍可存作不完整 ThinkingBlock，审计不能丢。
+- 若同一 assistant 的 tool call 没收完整，沿用现有孤儿 tool_result 修补；不可为了回传 thinking 破坏 tool use/result 配对。
+- 服务端送来坏 UTF-8，继续在进入历史前清洗；回传的是清洗后的稳定字节，不是重新生成的摘要。
+- provider 只回正文 `<think>...</think>`，却没给正式 reasoning 字段时，不把标签内容升级成可回传 ThinkingBlock。
+
+### 6.4 token 与前缀缓存
+
+历史 reasoning 会吃输入 token。这笔账须进：
+
+- 上下文预检；
+- compact 触发判断；
+- prefix fingerprint；
+- provider usage 对账；
+- `/context` 与 `/doctor` 诊断。
+
+同一历史 assistant 的 reasoning 必须保持字节稳定。回传时若加标题、缩进或摘要，会打断前缀缓存，也违背 Kimi 的“完整 assistant message 原样回传”规矩。
+
+## 七、实现分期
+
+### P0：先让 mandatory 契约成立
+
+1. 给 `ReasoningReplayPolicy` 增加 `Always`。
+2. 在 Chat serializer 实现 `Always`，复用 `JoinedThinking()`。
+3. 让 `request.reasoning.dialect.replay/replay_field` 真正驱动 Chat 请求；旧 `ChatRequestOptions` 留作自定义 provider 回落。
+4. 修正 Moonshot 四枚模型的 controls、supported efforts、dialect 与 replay。
+5. K2.6 默认 `ToolEpisode`；K3/K2.7 固定 `Always`；K2.5 固定 `Never`。
+6. 补 catalog、request golden、SSE fixture、loopback HTTP 集成测试。
+7. `/think` 或 `/doctor effort` 显示当前 replay 形状，让用户看见“本轮思考”和“历史回传”不是一件事。
+
+P0 做完，LubanCode 才能声称：K3/K2.7 的 Preserved Thinking 契约已接通，K2.6 多步工具循环不会漏 thinking history。
+
+### P1：开放 K2.6 可选跨轮 Preserved Thinking
+
+1. 给 Agent/RequestProfile 增加 `ReasoningHistoryMode`。
+2. 提供明确配置入口。建议 `/think history default|all`，或等价、可诊断的会话设置；不把它偷塞进 `high/max` 档。
+3. K2.6 选 `all` 时，同时：
+   - 发 `thinking.keep="all"`；
+   - replay 升为 `Always`；
+   - 保持 `thinking.type="enabled"`；若用户又关 thinking，明报冲突，不猜。
+4. K3/K2.7 选 `default` 仍按固定 Always；试图关闭 history 时明报模型不支持关闭。
+5. K2.5 选 `all` 当场报“不支持 Preserved Thinking”。
+6. 会话保存该选择；切模型时重新校验，不把 K2.6 的 keep 状态硬带给 K3/K2.5。
+
+### P2：真机、诊断与长期兼容
+
+1. 增加 `manual.model_probe_kimi_preserved_thinking`，继续 `EXCLUDE_FROM_ALL`。
+2. 探针分三层报账：请求被接受、响应发出 reasoning、下一请求实际回传。三者不可并成“支持”。
+3. 用 K2.6 跑两步工具调用，抓第二份请求，核对 assistant `reasoning_content` 与原响应逐字一致。
+4. 用 K3 跑两轮纯对话，抓第二轮请求，核对第一轮 reasoning 仍在。
+5. 跑一次 session exit/resume 后续聊，核对恢复链。
+6. 记录 usage 与缓存指标；没有分项便写“不可得”，不拿 HTTP 2xx 冒充效果验证。
+7. 官方契约变动时，只改 catalog/fixture 与方言实现；不在 AgentLoop 散落 Kimi 名字判断。
+
+## 八、测试矩阵
+
+### 8.1 单元测试
+
+#### Chat request
+
+- `Never`：历史有 ThinkingBlock，也不写 reasoning 字段。
+- `ToolEpisode`：纯对话段略过；工具段每条 assistant 原样回传。
+- `Always`：纯对话段、工具段、最终总结都回传。
+- 一条 assistant 多枚 ThinkingBlock，按块序拼接，只落一枚字段。
+- 没有 thinking 时不写空 `reasoning_content`。
+- `replay_field=reasoning` 时只写该字段，不同时写 `reasoning_content`。
+- model dialect 与 legacy Chat options 冲突时，正式 model dialect 压过 legacy 回落。
+
+#### Catalog
+
+- Moonshot 四枚模型解析后各得正确 toggle/effort/replay/history control。
+- K3 不支持 `none`，也不生成 `thinking`。
+- K2.6 不生成 `reasoning_effort` 与 budget。
+- K2.7 Code 不生成无须的 `thinking`。
+- K2.5 拒绝 history `all`。
+- `always` 能从 schema、parser 一路到 runtime policy，不再只停在纸面。
+
+#### Session
+
+- ThinkingBlock text/signature 往返不变。
+- exit/resume 后 `Always` 仍能回传。
+- 切到 `Never` 模型后只是不出站，本地 thinking 不被删。
+
+### 8.2 回环集成测试
+
+#### K2.6 工具循环
+
+```text
+Request 1: U1 + tools
+Response 1: reasoning_content + tool_calls
+Request 2: U1 + assistant(reasoning_content + tool_calls) + tool_result
+```
+
+检查第二份请求：reasoning 字节、tool call id、arguments、tool result id 全部对得上；不得带 `reasoning_effort`。
+
+#### K3 跨轮
+
+```text
+Request 1: U1
+Response 1: reasoning_content + content
+Request 2: U1 + assistant(reasoning_content + content) + U2
+```
+
+检查第二份请求：带 `reasoning_effort` 时只认 low/high/max；不出现 `thinking`；历史 reasoning 原样。
+
+#### K2.6 keep all
+
+检查请求同时满足：
+
+```json
+{
+  "thinking": {"type": "enabled", "keep": "all"},
+  "messages": [
+    {"role": "assistant", "reasoning_content": "...", "content": "..."}
+  ]
+}
+```
+
+只发 keep、不带历史，测试应失败；只带历史、不发 keep，也不能算跨轮 Preserved Thinking 已启用。
+
+### 8.3 真机边界
+
+真机探针默认不进 CTest。它须满足：
+
+- 用户显式提供 `MOONSHOT_API_KEY`；
+- 请求与响应日志打码；
+- 不把 reasoning 正文写进普通测试报告，只存 hash、长度与是否逐字相等；
+- 明列模型、base URL、时间、请求参数与官方文档版本；
+- 失败时保留 HTTP status 与脱敏后的 provider message。
+
+## 九、验收
+
+### P0 必过
+
+- 选 `moonshot/kimi-k3`，两轮纯对话的第二份请求带回第一轮 assistant `reasoning_content`，且不发送 `thinking`。
+- 选 `moonshot/kimi-k2.7-code`，工具调用与纯对话都按 `Always` 回传；不发送 `reasoning_effort`。
+- 选 `moonshot/kimi-k2.6`，多步工具循环的后续请求保留本 Turn reasoning；不发送官方不支持的 effort/budget。
+- 选 `moonshot/kimi-k2.5`，不启用 Preserved Thinking，也不误发 `thinking.keep`。
+- `Always`、`ToolEpisode`、`Never` 各有 request golden 与 loopback 覆盖。
+- session 恢复后行为与未退出时相同。
+- 自定义旧 provider 没有 model dialect 时，原有 `reasoning_replay=tool_episode` 配置继续生效。
+- 未跑真机时，发布说明只能写“源码与回环协议已接通”，不能写“Kimi API 已实测通过”。
+
+### P1 必过
+
+- K2.6 开 history all 后，请求同时发 `thinking.keep="all"` 与完整历史 `reasoning_content`。
+- 关回 provider default 后，新请求不再宣称跨 Turn preserved；工具循环仍按 `ToolEpisode` 工作。
+- K3/K2.7 不允许关闭 mandatory preserved thinking；K2.5 不允许开启。
+- `/think`、`/doctor` 或等价诊断能分别显示：本轮开关、effort、replay policy、history mode、最终 wire 字段。
+
+## 十、明确不算完成的做法
+
+- 只把 Moonshot provider 顶层 `replay` 从 `never` 改成 `tool_episode`。
+- 只在 `extra_body` 塞 `thinking.keep="all"`。
+- 只给 enum 添 `Always`，却不让模型级 dialect 驱动 serializer。
+- 按 `model` 字符串写 Kimi 特判。
+- 把正文 `<think>` 抠出来冒充正式 reasoning。
+- 只看 2xx、只看界面出现 thinking、只看 session 里存着 thinking，便宣称“历史回传已支持”。
+- 只跑现有 DeepSeek fixture，不补 Kimi 请求 golden 与两轮回环。
+
+## 十一、实现状态
+
+截至 2026-08-30：
+
+- 已完成：问题定位、官方契约核对、现有源码链审计、现有两项相关测试复跑。
+- 部分具备：reasoning 接收、ThinkingBlock 装配、history/session 持久化、`tool_episode` 原字节回传。
+- 尚未实现：`Always`、`thinking.keep`、模型级 replay 接线、Moonshot 目录校正、Kimi fixtures、Kimi 真机探针。
+- 当前产品结论：LubanCode 有完成此事的底座；内置 Kimi 配置尚未满足 Preserved Thinking 全部契约。
