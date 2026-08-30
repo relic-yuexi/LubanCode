@@ -642,6 +642,30 @@ std::optional<ModeEvent> ParseModeEvent(const std::string& line) {
     return event;
 }
 
+std::string SerializeThinkHistoryEvent(const ThinkHistoryEvent& event, const std::string& ts) {
+    nlohmann::json j;
+    j["type"] = "think_history_v1";
+    j["mode"] = event.mode;
+    j["ts"] = ts;
+    return platform::DumpJsonSanitized(j);
+}
+
+std::optional<ThinkHistoryEvent> ParseThinkHistoryEvent(const std::string& line) {
+    const nlohmann::json j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+    if (!j.is_object() || j.value("type", std::string()) != "think_history_v1") {
+        return std::nullopt;
+    }
+    ThinkHistoryEvent event;
+    if (!j.contains("mode") || !j["mode"].is_string()) {
+        return std::nullopt;
+    }
+    event.mode = j["mode"].get<std::string>();
+    if (event.mode != "default" && event.mode != "all") {
+        return std::nullopt;  // 认不得的档名当坏行,不猜
+    }
+    return event;
+}
+
 std::string SerializePlanEvent(const PlanEvent& event, const std::string& ts) {
     nlohmann::json j;
     j["type"] = "plan_v1";
@@ -1145,6 +1169,17 @@ std::optional<LoadedSession> ParseSessionFile(const std::string& content) {
                 }
                 continue;
             }
+            if (type == "think_history_v1") {
+                // Kimi 保留式思考单 P1:最后一条胜,决定 resume 的跨轮保留
+                // 选择。坏行跳过,按上一条有效档恢复,不废整场。
+                auto history = ParseThinkHistoryEvent(line);
+                if (history.has_value()) {
+                    session.last_think_history = std::move(*history);
+                } else {
+                    session.skipped_lines += 1;
+                }
+                continue;
+            }
             if (type == "plan_v1") {
                 // 计划成品逐稿留账(全部收,/resume 侧按 plan_id 取最高
                 // revision 并对审批做 stale 判定);坏行跳过不废整场。
@@ -1429,6 +1464,15 @@ bool SessionStore::AppendModeEvent(const ModeEvent& event) {
         return false;
     }
     out_ << SerializeModeEvent(event, NowTimestamp()) << "\n";
+    out_.flush();
+    return out_.good();
+}
+
+bool SessionStore::AppendThinkHistoryEvent(const ThinkHistoryEvent& event) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializeThinkHistoryEvent(event, NowTimestamp()) << "\n";
     out_.flush();
     return out_.good();
 }

@@ -74,7 +74,8 @@ std::expected<lubancode::api::ReasoningWireDialect, std::string> ParseReasoningD
     if (!value.is_object()) return std::unexpected(where + " 必须是 object");
     if (auto known = RejectUnknown(value, {"toggle", "toggle_on", "toggle_off", "effort_path",
                                            "effort_param", "budget_path", "delta", "replay",
-                                           "replay_field", "signature_required", "verified"},
+                                           "replay_field", "history_control", "history_all_value",
+                                           "signature_required", "verified"},
                                    where);
         !known.has_value()) return std::unexpected(known.error());
 
@@ -140,6 +141,17 @@ std::expected<lubancode::api::ReasoningWireDialect, std::string> ParseReasoningD
         }
         out.replay_field = value["replay_field"].get<std::string>();
     }
+    // 服务端历史控制(P1):none 显式清掉继承(provider 级声明了 thinking_keep,
+    // 模型级可用 none 拒收——同 provider 里 K2.5/K3 与 K2.6 分家的那道闸)。
+    if (auto parsed = read_enum("history_control", &out.history_control, {"none", "thinking_keep"});
+        !parsed.has_value()) return std::unexpected(parsed.error());
+    if (out.history_control == "none") out.history_control.clear();
+    if (value.contains("history_all_value")) {
+        if (!value["history_all_value"].is_string() || value["history_all_value"].get<std::string>().empty()) {
+            return std::unexpected(where + ".history_all_value 必须是非空字符串");
+        }
+        out.history_all_value = value["history_all_value"].get<std::string>();
+    }
     if (value.contains("signature_required")) {
         if (!value["signature_required"].is_boolean()) {
             return std::unexpected(where + ".signature_required 必须是布尔值");
@@ -170,6 +182,11 @@ std::expected<void, std::string> CheckDialectMatchesWire(const lubancode::api::R
                                             : wire == Wire::Anthropic
                                                   ? "anthropic-messages"
                                                   : "google-generate-content";
+    // history_control=thinking_keep 只有 chat 家认(Kimi 的 thinking.keep);
+    // 其余各家在各自 case 里拒掉,不留到运行时猜。
+    if (dialect.history_control == "thinking_keep" && wire != Wire::ChatCompletions) {
+        return reject(wire_name + " 家没有 thinking.keep 这类服务端历史控制字段");
+    }
     switch (wire) {
     case Wire::ChatCompletions:
         if (dialect.toggle == "include_thoughts") return reject("chat 家没有 include_thoughts 开关");
@@ -747,6 +764,13 @@ std::string DescribeReasoningDialect(const lubancode::api::ReasoningWireDialect&
     if (dialect.replay != "never" || !dialect.replay_field.empty()) {
         parts.push_back("replay:" + dialect.replay +
                         (dialect.replay_field.empty() ? std::string() : "->" + dialect.replay_field));
+    }
+    // 服务端历史控制(P1):可请求保留的模型亮出形状;没有声明就不刷屏
+    // ——"不发请求字段"对 K3/K2.7 是"服务端固定",对 K2.5 是"不支持",
+    // 分野由 /think history 的能力行说,这里只报方言自己声明的形状。
+    if (dialect.history_control == "thinking_keep") {
+        parts.push_back("history:" + dialect.history_control + "=" +
+                        (dialect.history_all_value.empty() ? std::string("all") : dialect.history_all_value));
     }
     std::string out;
     for (const auto& part : parts) {

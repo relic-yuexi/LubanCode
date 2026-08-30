@@ -1,5 +1,5 @@
 # Kimi 保留式思考、工具循环与历史回传兼容设计
-- 状态：P0 已落地（0.26.120：Always 回传、四模型方言定档、loopback 契约钉死）；P1（K2.6 可选跨轮）、P2（真机探针）待实现
+- 状态：P0 已落地（0.26.120：Always 回传、四模型方言定档、loopback 契约钉死）；P1 已落地（K2.6 可选跨轮：ReasoningHistoryMode、/think history、thinking.keep 落线与会话账）；P2（真机探针）待实现
 - 日期：2026-08-30
 - 级别：P0（`kimi-k3`、`kimi-k2.7-code` 协议合规；`kimi-k2.6` 工具循环正确性）
 - 范围：Moonshot OpenAI-compatible Chat API、`reasoning_content` 接收与原样回传、`thinking.keep`、模型级 reasoning 方言、会话恢复、compact 边界、测试与诊断
@@ -501,7 +501,16 @@ Request 2: U1 + assistant(reasoning_content + content) + U2
 - 测试:`unit.api.chat_request` 增 Always/方言压 legacy/多块拼接/字段名单写;`unit.config.provider_catalog` 增四枚契约断言与请求 golden;`unit.api.model_quirks_matrix` A9 改钉零参数契约;`integration.api.wire_replay` 增 K3 跨轮/K2.6 工具循环/K2.5 不回传三幕回环;新 fixtures 三对(`kimi_k3/k26/k25_*`,internal 来源,notes 记官方文档核对日)。
 - `/think` 无参时"本轮思考"与"历史回传"分行亮;`DescribeReasoningDialect` 补 `replay:` 段。
 
-### 尚未实现(P1/P2)
+### P1 已落(2026-08-30,第三笔)
 
-- `thinking.keep`、`ReasoningHistoryMode`、K2.6 可选跨轮、真机探针。
+- `api::ReasoningHistoryMode`(ProviderDefault|All)进 `RequestProfile`/`Request`,`ApplyRequestProfile` 随档覆盖;能力档 `api::ReasoningHistorySupportFor`(None|ServerFixed|RequestControl)由方言推导,不按模型名。
+- 方言扩两字段:`history_control`(none 可清继承)+`history_all_value`(空=all);schema/parser/wire 组合校验(非 chat 家拒 thinking_keep)/描述行一道补齐。K2.6 catalog 落 `thinking_keep`,K3/K2.7/K2.5 显式 `none`。§5.2 的 `history_default` 未做——没有消费方(目录声明"缺省即 all"需要"用户显式选过与否"的状态跟踪),留到有真需求再上,不落纸面字段。
+- Chat serializer:方言声明 thinking_keep + 用户选 All + 思考没关,才落 `thinking:{type:enabled,keep:all}`(档位空着也发);replay 同步升 Always。K3/K2.5/无方言旧端一个 keep 字节不出门。
+- `/think history default|all`:裁决纯函数 `DecideThinkHistorySwitch`(单测钉各案——K2.6 落账/冲突拒绝、K3 兜底+关不掉明报、K2.5 当场拒)落 settings_commands;`/think` 裸敲加"历史保留"与"模型能力"行,历史回传行在 all 时按升级后的 always 报。`/think none` 与 all 冲突时明报拒绝,不猜。
+- 会话账:`think_history_v1` 事件(append-only 最后一条胜),SessionRuntime::RecordThinkHistory 建档前挂起/建档补落;/resume 经回调恢复并按当前模型重校验(`RevalidateThinkHistoryMode`:不支持或与关思考冲突回 default 并明报)。/model 与 /provider 切换同一只重校验,K2.6 的 keep 状态不硬带。
+- 测试:`unit.api.chat_request` 增 keep 各 golden(同发/空档位/关思考防御/K3·K2.5 不漏/default 不变/ApplyRequestProfile);`unit.config.provider_catalog` 增 history_control 契约+K2.6 all golden+解析边界四案;新册 `unit.app.test_reasoning_history`(切换/冲突/重校验各案);`unit.sessions.test_session_store` 增事件往返与折叠;`integration.api.wire_replay` 增 K2.6 all 两轮跨 Turn 回环+切 K3 不误带(新 fixture `kimi_k26_reasoning_text_stream`)。
+
+### 尚未实现(P2)
+
+- 真机探针(`manual.model_probe_kimi_preserved_thinking`)。
 - 未跑真机,只可声称"源码与回环协议已接通",不可写"Kimi API 已实测通过"。

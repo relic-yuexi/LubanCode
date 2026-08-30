@@ -119,6 +119,8 @@ struct SlashDispatchContext {
     RebuildableBackend* real_backend = nullptr;
     std::shared_ptr<std::string> current_model;
     std::shared_ptr<std::string> current_think;
+    // /think history 的会话真值(Kimi 保留式思考单 P1):本体在 SessionStack。
+    std::shared_ptr<lubancode::api::ReasoningHistoryMode> current_think_history;
     std::shared_ptr<std::string> current_model_instructions;
     std::shared_ptr<std::string> current_soul;
     std::string* current_soul_name = nullptr;

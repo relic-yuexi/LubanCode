@@ -133,11 +133,30 @@ ResolvedReplay ResolveReplay(const Request& request, const ChatRequestOptions& o
                       : replay == "tool_episode" ? ReasoningReplayPolicy::ToolEpisode
                                                  : ReasoningReplayPolicy::Never;
         out.field = request.reasoning.dialect.replay_field;
+        // K2.6 开 history all(P1):replay 同步升 Always。客户端带历史
+        // reasoning 与服务端 thinking.keep 是同一份契约的两半——只发 keep
+        // 不带历史,或只带历史不发 keep,都不算跨轮 Preserved Thinking。
+        // 只认方言声明了请求控制(thinking_keep)的模型;K3/K2.7 的固定
+        // always 本来就是全量回传,K2.5 与无方言的旧 provider 一概不升。
+        if (request.reasoning_history == ReasoningHistoryMode::All &&
+            request.reasoning.dialect.history_control == "thinking_keep") {
+            out.policy = ReasoningReplayPolicy::Always;
+        }
         return out;
     }
     out.policy = options.reasoning_replay;
     out.field = options.reasoning_replay_field;
     return out;
+}
+
+// history all 的落线判定(P1):模型方言声明了 thinking_keep 形状、用户
+// 显式选了 All、且思考没被关掉(关了思考还要保留,是配置入口已明报的
+// 冲突;序列化器没有报错通道,到这里只剩"开思考+要保留"一种合法组合,
+// 防御性的关闭态不发 keep——发了也是自相矛盾的请求)。
+bool WantsKeepAll(const Request& request) {
+    return request.reasoning_history == ReasoningHistoryMode::All &&
+           request.reasoning.dialect.history_control == "thinking_keep" &&
+           !ReasoningEffortIsOff(request.reasoning_effort, request.reasoning);
 }
 
 }  // namespace
@@ -290,6 +309,26 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
                 ReasoningBudgetForEffort(request.reasoning, request.reasoning_effort,
                                           request.max_tokens.value_or(0));
         }
+    }
+
+    // K2.6 history all 的请求字段(P1):thinking.keep 与 type 同发。档位
+    // 空着(未设档 = 服务端默认开思考)也要发——跨轮保留不依赖档位声明,
+    // 只有"方言声明了 thinking_keep + 用户显式选 All + 思考没关"才落线。
+    // 不走 extra_body 硬塞:那是 provider 级浅覆盖,切到不该发 thinking 的
+    // 模型仍会带着,恰是本单要堵的漏。
+    if (WantsKeepAll(request)) {
+        const auto& dialect = request.reasoning.dialect;
+        if (!body.contains("thinking")) {
+            body["thinking"] = json::object();
+        }
+        // type 保持 enabled:K2.6 的保留建立在思考开启之上;档位块刚写过
+        // type 就不重写(同值),没写过(空档位)按方言补上。
+        if (!body["thinking"].contains("type")) {
+            body["thinking"]["type"] =
+                dialect.toggle_on.empty() ? std::string("enabled") : dialect.toggle_on;
+        }
+        body["thinking"]["keep"] =
+            dialect.history_all_value.empty() ? std::string("all") : dialect.history_all_value;
     }
 
     if (!request.tools.empty()) {

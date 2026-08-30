@@ -426,6 +426,155 @@ TEST_CASE("Chat request: legacy ChatRequestOptions 也认 always(自定义 provi
     CHECK(body["messages"][1]["reasoning_content"] == "想了一下");
 }
 
+// ---------------------------------------------------------------------------
+// 跨轮保留 history all(Kimi 保留式思考单 P1):用户显式选了 All 且方言声明
+// thinking_keep 形状,才发 thinking.keep;replay 同步升 Always(纯对话段的
+// 思考也回传)。不声明的模型一概不发——不把 K2.6 的 keep 状态硬带给
+// K3/K2.5。
+// ---------------------------------------------------------------------------
+
+// K2.6 形状的方言:toggle thinking_type(继承自 provider 级)、replay=
+// tool_episode、history_control=thinking_keep。
+api::ReasoningConfig KeepAllDialect() {
+    api::ReasoningConfig reasoning;
+    reasoning.supports_toggle = true;
+    reasoning.dialect.toggle = "thinking_type";
+    reasoning.dialect.toggle_on = "enabled";
+    reasoning.dialect.toggle_off = "disabled";
+    reasoning.dialect.delta = "reasoning_content";
+    reasoning.dialect.replay = "tool_episode";
+    reasoning.dialect.history_control = "thinking_keep";
+    reasoning.dialect.verified = true;
+    return reasoning;
+}
+
+api::Request KeepAllHistoryRequest() {
+    api::Request request;
+    request.model = "kimi-k2.6";
+    request.reasoning = KeepAllDialect();
+    request.reasoning_effort = "high";
+    request.reasoning_history = api::ReasoningHistoryMode::All;
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"你好"});
+    request.messages.push_back(user);
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ThinkingBlock{"上一轮的思考", ""});
+    assistant.content.push_back(api::TextBlock{"上一轮的答"});
+    request.messages.push_back(assistant);
+    api::Message next;
+    next.role = api::Role::User;
+    next.content.push_back(api::TextBlock{"再问"});
+    request.messages.push_back(next);
+    return request;
+}
+
+TEST_CASE("Chat request: K2.6 history all——keep 与 type 同发,纯对话段思考也回传") {
+    const auto body = api::chat::BuildRequestJson(KeepAllHistoryRequest());
+    // keep + type 同发:只发 keep 不带类型、或类型不带 keep,都不是跨轮
+    // Preserved Thinking 的请求形状。
+    CHECK(body["thinking"]["type"] == "enabled");
+    CHECK(body["thinking"]["keep"] == "all");
+    // 官方不认的参数照旧不发。
+    CHECK_FALSE(body.contains("reasoning_effort"));
+    CHECK_FALSE(body.contains("thinking_budget"));
+    // replay 升为 always:方言缺省是 tool_episode(纯对话段不回传),开了
+    // history all 之后这段历史的思考原字节随请求送回。
+    CHECK(body["messages"][1]["reasoning_content"] == "上一轮的思考");
+    CHECK(body["messages"][1]["content"] == "上一轮的答");
+}
+
+TEST_CASE("Chat request: K2.6 history all 且档位未设——keep 照发,不偷偷补档") {
+    api::Request request = KeepAllHistoryRequest();
+    request.reasoning_effort.clear();  // 未设档位 = 不发推理档参数
+    const auto body = api::chat::BuildRequestJson(request);
+    CHECK(body["thinking"]["type"] == "enabled");
+    CHECK(body["thinking"]["keep"] == "all");
+    CHECK_FALSE(body.contains("reasoning_effort"));
+    CHECK(body["messages"][1]["reasoning_content"] == "上一轮的思考");
+}
+
+TEST_CASE("Chat request: K2.6 history all 但思考被关——不发 keep(冲突在入口明报)") {
+    api::Request request = KeepAllHistoryRequest();
+    request.reasoning_effort = "none";  // 关思考与保留冲突;配置入口已拒绝
+    const auto body = api::chat::BuildRequestJson(request);
+    CHECK(body["thinking"]["type"] == "disabled");
+    CHECK_FALSE(body["thinking"].contains("keep"));  // 自相矛盾的请求不发
+}
+
+TEST_CASE("Chat request: K3/K2.7 上 history all 不落 keep(固定开启,无请求字段)") {
+    api::Request request;
+    request.model = "kimi-k3";
+    request.reasoning = AlwaysDialect();  // replay=always,无 history_control
+    request.reasoning_effort = "high";
+    request.reasoning_history = api::ReasoningHistoryMode::All;
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"你好"});
+    request.messages.push_back(user);
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ThinkingBlock{"想了一下", ""});
+    assistant.content.push_back(api::TextBlock{"你好!"});
+    request.messages.push_back(assistant);
+
+    const auto body = api::chat::BuildRequestJson(request);
+    CHECK_FALSE(body.contains("thinking"));  // K3 契约:thinking 整个不发
+    CHECK(body["messages"][1]["reasoning_content"] == "想了一下");  // always 照旧
+}
+
+TEST_CASE("Chat request: K2.5 上 history all 不落 keep 也不回传(选择被入口拒绝)") {
+    api::Request request;
+    request.model = "kimi-k2.5";
+    // K2.5 形状:thinking.type 可开关、replay=never、无 history_control。
+    request.reasoning.supports_toggle = true;
+    request.reasoning.dialect.toggle = "thinking_type";
+    request.reasoning.dialect.toggle_on = "enabled";
+    request.reasoning.dialect.toggle_off = "disabled";
+    request.reasoning.dialect.replay = "never";
+    request.reasoning_effort = "high";
+    request.reasoning_history = api::ReasoningHistoryMode::All;
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"你好"});
+    request.messages.push_back(user);
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ThinkingBlock{"想了一下", ""});
+    assistant.content.push_back(api::TextBlock{"你好!"});
+    request.messages.push_back(assistant);
+
+    // 序列化器没有报错通道,但也不漏:不认 keep 的模型一个 keep 字节不出门。
+    const auto body = api::chat::BuildRequestJson(request);
+    CHECK(body["thinking"]["type"] == "enabled");
+    CHECK_FALSE(body["thinking"].contains("keep"));
+    CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
+}
+
+TEST_CASE("Chat request: history ProviderDefault——keep 一概不发(P0 行为不变)") {
+    api::Request request = KeepAllHistoryRequest();
+    request.reasoning_history = api::ReasoningHistoryMode::ProviderDefault;
+    const auto body = api::chat::BuildRequestJson(request);
+    CHECK(body["thinking"]["type"] == "enabled");
+    CHECK_FALSE(body["thinking"].contains("keep"));
+    // 缺省 replay=tool_episode:纯对话段照旧不回传。
+    CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
+}
+
+TEST_CASE("Chat request: ApplyRequestProfile 把 history 模式带进请求") {
+    api::Request request;
+    api::RequestProfile profile;
+    profile.model = "kimi-k2.6";
+    profile.reasoning = KeepAllDialect();
+    profile.reasoning_history = api::ReasoningHistoryMode::All;
+    api::ApplyRequestProfile(request, profile);
+    CHECK(request.reasoning_history == api::ReasoningHistoryMode::All);
+    profile.reasoning_history = api::ReasoningHistoryMode::ProviderDefault;
+    api::ApplyRequestProfile(request, profile);
+    CHECK(request.reasoning_history == api::ReasoningHistoryMode::ProviderDefault);
+}
+
 TEST_CASE("Chat request: 档位参数名按 provider 声明走,空档位字段整个缺席") {
     api::Request request;
     request.model = "qwen";

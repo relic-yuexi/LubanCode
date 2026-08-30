@@ -58,6 +58,11 @@ SessionBeginResult SessionRuntime::EnsureBegun(const std::string& first_text, co
         store_.AppendModeEvent(*pending_mode_event_);
         pending_mode_event_.reset();
     }
+    // /think history 同一道补落(P1):起手切过跨轮保留再开聊,档里也留账。
+    if (pending_think_history_.has_value()) {
+        store_.AppendThinkHistoryEvent(*pending_think_history_);
+        pending_think_history_.reset();
+    }
     return SessionBeginResult::Begun;
 }
 
@@ -132,6 +137,19 @@ bool SessionRuntime::SetCollaborationMode(CollaborationMode mode, const std::str
         pending_mode_event_ = event;
     }
     return true;
+}
+
+void SessionRuntime::RecordThinkHistory(const std::string& mode) {
+    // /think history 的会话账(Kimi 保留式思考单 P1):存档活跃就落
+    // think_history_v1;没建档先挂起(EnsureBegun 补落),写坏不拦切换。
+    // 同档重复落也无害(append-only 最后一条胜),调用方自己省了就不落。
+    sessions::ThinkHistoryEvent event;
+    event.mode = mode;
+    if (store_.active() && !store_broken_) {
+        store_.AppendThinkHistoryEvent(event);
+    } else {
+        pending_think_history_ = event;
+    }
 }
 
 void SessionRuntime::RecordPlanDocument(const PlanDocument& plan) {

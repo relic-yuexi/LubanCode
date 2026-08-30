@@ -100,6 +100,8 @@
         "delta": { "enum": ["none", "reasoning_content", "reasoning", "reasoning_details", "reasoning_summary", "anthropic_thinking_block", "gemini_thought_part"] },
         "replay": { "enum": ["never", "tool_episode", "always"] },
         "replay_field": { "type": "string", "minLength": 1 },
+        "history_control": { "enum": ["none", "thinking_keep"] },
+        "history_all_value": { "type": "string", "minLength": 1 },
         "signature_required": { "type": "boolean" },
         "verified": { "type": "boolean" }
       }

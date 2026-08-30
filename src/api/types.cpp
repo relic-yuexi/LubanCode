@@ -159,6 +159,18 @@ bool ReasoningEffortIsOff(const std::string& effort, const ReasoningConfig& conf
     return !DeclaresEffortLevel(config, "minimal");
 }
 
+ReasoningHistorySupport ReasoningHistorySupportFor(const ReasoningConfig& config) {
+    // 方言声明了请求控制就以它为准(哪怕是 replay=always 的模型——声明
+    // 了 thinking_keep 说明这家的保留要客户端显式请求,与固定开启分家)。
+    if (config.dialect.history_control == "thinking_keep") {
+        return ReasoningHistorySupport::RequestControl;
+    }
+    if (!config.dialect.empty() && config.dialect.replay == "always") {
+        return ReasoningHistorySupport::ServerFixed;
+    }
+    return ReasoningHistorySupport::None;
+}
+
 int ReasoningBudgetForEffort(const ReasoningConfig& config, const std::string& effort,
                              int max_tokens) {
     const std::string lower = LowerReasoningEffort(effort);
@@ -279,6 +291,7 @@ void ApplyRequestProfile(Request& request, const RequestProfile& profile) {
     }
     request.reasoning_effort = profile.reasoning_effort;
     request.reasoning = profile.reasoning;
+    request.reasoning_history = profile.reasoning_history;
 }
 
 void SanitizeRequest(Request& request) {

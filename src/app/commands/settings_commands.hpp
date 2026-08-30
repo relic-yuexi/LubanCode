@@ -35,6 +35,7 @@
 #include "config/skill_store.hpp"
 #include "config/update_checker.hpp"
 #include "runtime/command_service.hpp"
+#include "runtime/session_runtime.hpp"  // RecordThinkHistory:/think history 落会话账
 #include "tools/skill_loader.hpp"
 
 namespace lubancode::app {
@@ -91,6 +92,42 @@ void HandleThinkCommand(const std::string& args, const std::shared_ptr<std::stri
                          const lubancode::config::ModelCatalogEntry* entry = nullptr,
                          const std::vector<std::string>& provider_levels = {},
                          const std::string& think_param = {});
+
+// ---------------------------------------------------------------------------
+// /think history default|all(Kimi 保留式思考单 P1):跨轮保留式思考的
+// 配置入口。它不偷塞进 high/max 档——档位管本轮想多深,history 管跨轮
+// 保留,两笔账分开记。
+// ---------------------------------------------------------------------------
+
+// /think history 的切换裁决(纯函数,单测钉各案):按当前模型方言与档位
+// 判 requested 档能不能落。applied=false 时 mode 原样退回(不落账),notes
+// 带拒绝的明报;applied=true 时 mode 是落定档,notes 带切换后的形状说明。
+// 不猜:冲突(关思考还要保留)与不支持(K2.5/无方言旧端)都当场明报拒绝。
+struct ThinkHistorySwitch {
+    bool applied = false;
+    lubancode::api::ReasoningHistoryMode mode = lubancode::api::ReasoningHistoryMode::ProviderDefault;
+    std::vector<std::string> notes;
+};
+ThinkHistorySwitch DecideThinkHistorySwitch(lubancode::api::ReasoningHistoryMode current,
+                                             lubancode::api::ReasoningHistoryMode requested,
+                                             const lubancode::api::ReasoningConfig& reasoning,
+                                             const std::string& effort);
+
+// 切模型/切 provider/resume 之后重校验当前 history 选择:模型不支持、或与
+// 关思考冲突时回 ProviderDefault 并打一行明报(不把 K2.6 的 keep 状态硬带
+// 给 K3/K2.5)。返回是否发生了回落。entry 为空(模型不在目录)按不支持
+// 处理——没有方言的旧端不猜。
+bool RevalidateThinkHistoryMode(const std::shared_ptr<lubancode::api::ReasoningHistoryMode>& current_think_history,
+                                const std::shared_ptr<std::string>& current_think,
+                                const lubancode::config::ModelCatalogEntry* entry);
+
+// /think history 的会话内执行:value 空 = 亮当前形状;default|all = 切换
+// 并落会话账(think_history_v1 事件行,/resume 恢复)。认不得的值给用法行。
+void HandleThinkHistoryCommand(const std::string& value,
+                               const std::shared_ptr<lubancode::api::ReasoningHistoryMode>& current_think_history,
+                               const std::shared_ptr<std::string>& current_think,
+                               const lubancode::config::ModelCatalogEntry* entry,
+                               lubancode::runtime::SessionRuntime* session_runtime);
 
 
 // 把模型目录条目应用到会话状态:/model 切换(两个 explicit 都传 false,
@@ -150,6 +187,7 @@ bool ExecuteProviderSwitch(const std::string& switch_name, const std::string& sw
                            RebuildableBackend& real_backend, std::string& session_wire,
                            const std::shared_ptr<std::string>& current_model,
                            const std::shared_ptr<std::string>& current_think,
+                           const std::shared_ptr<lubancode::api::ReasoningHistoryMode>& current_think_history,
                            lubancode::cli::ContextTracker& context_tracker,
                            const std::shared_ptr<std::string>& current_model_instructions,
                            const lubancode::config::ModelCatalog& catalog,
@@ -167,6 +205,7 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                            std::string& session_wire,
                            const std::shared_ptr<std::string>& current_model,
                            const std::shared_ptr<std::string>& current_think,
+                           const std::shared_ptr<lubancode::api::ReasoningHistoryMode>& current_think_history,
                            lubancode::cli::ContextTracker& context_tracker,
                            const std::shared_ptr<std::string>& current_model_instructions,
                            const lubancode::config::ModelCatalog& catalog,

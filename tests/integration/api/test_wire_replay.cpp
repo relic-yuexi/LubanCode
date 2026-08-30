@@ -687,6 +687,102 @@ TEST_CASE("wire 回环 chat: Kimi K2.5 不回传历史思考,也不误发 thinki
 }
 
 // ---------------------------------------------------------------------------
+// Kimi 保留式思考单 P1:K2.6 开 history all 的两轮跨 Turn 回环。
+//   Request 1: U1(thinking.keep=all 已在场——第一份请求就得告诉服务端
+//              这场要保留)
+//   Response 1: reasoning_content + content
+//   Request 2: U1 + assistant(reasoning_content 原字节) + U2
+//              (keep 与 type 仍同发)
+// 随后同一场子把模型切成 K3(模拟 /model 切换):keep 不误带,reasoning
+// 照回(always),thinking 整个不发——K2.6 的 keep 状态不硬带。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("wire 回环 chat: Kimi K2.6 history all 两轮跨 Turn——keep 与历史 reasoning 同发,切 K3 不误带") {
+    std::vector<HttpRequest> received;
+    ReplayPlan plan;
+    plan.sse_rounds = {
+        FixtureStream("openai_chat", "kimi_k26_reasoning_text_stream"),
+        FixtureStream("openai_chat", "kimi_k26_reasoning_text_stream"),
+        FixtureStream("openai_chat", "kimi_k3_reasoning_text_stream"),
+    };
+    plan.chunk_seed = 20260830;
+    const int port = StartReplayServer(plan, &received);
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+
+    api::chat::ChatCompletionsBackend backend(base, "test-token", 3000, 30,
+                                              nlohmann::json::object(), {}, api::chat::ChatRequestOptions{});
+
+    // Turn 1:开了 history all 的第一份请求——keep 从第一份就在场。
+    api::Request first;
+    first.model = "kimi-k2.6";
+    first.reasoning = CatalogReasoning("moonshot", "kimi-k2.6");
+    first.reasoning_effort = "high";  // 档位只当开关用:官方不认 effort 参数
+    first.reasoning_history = api::ReasoningHistoryMode::All;
+    first.messages.push_back(UserText("你好"));
+
+    std::string stop;
+    const api::Message assistant = RunRound(backend, first, &stop);
+    CHECK(stop == "end_turn");
+
+    REQUIRE(received.size() == 1);
+    const auto body1 = nlohmann::json::parse(received[0].body);
+    CHECK(body1.at("thinking").at("type") == "enabled");
+    CHECK(body1.at("thinking").at("keep") == "all");  // 第一份请求就声明保留
+    CHECK_FALSE(body1.contains("reasoning_effort"));
+
+    REQUIRE(assistant.content.size() == 2);
+    const auto* thinking = std::get_if<api::ThinkingBlock>(&assistant.content[0]);
+    const auto* text = std::get_if<api::TextBlock>(&assistant.content[1]);
+    REQUIRE(thinking != nullptr);
+    REQUIRE(text != nullptr);
+    CHECK(thinking->text == "这轮想的要跨轮保留");
+
+    // Turn 2:纯对话历史跨轮回传——keep 在场,历史 reasoning 原字节随行
+    //(方言缺省 tool_episode 不回传纯对话段,history all 把 replay 升 always)。
+    api::Request second;
+    second.model = first.model;
+    second.reasoning = first.reasoning;
+    second.reasoning_effort = "high";
+    second.reasoning_history = api::ReasoningHistoryMode::All;
+    second.messages.push_back(UserText("你好"));
+    second.messages.push_back(assistant);
+    second.messages.push_back(UserText("再问一句"));
+
+    std::string final_stop;
+    RunRound(backend, second, &final_stop);
+    REQUIRE(received.size() == 2);
+    const auto body2 = nlohmann::json::parse(received[1].body);
+    CHECK(body2.at("thinking").at("type") == "enabled");
+    CHECK(body2.at("thinking").at("keep") == "all");
+    const auto& replayed = body2.at("messages")[1];
+    CHECK(replayed.at("role") == "assistant");
+    CHECK(replayed.at("reasoning_content") == "这轮想的要跨轮保留");  // 原字节
+    CHECK(replayed.at("content") == "答:你好");
+    CHECK_FALSE(body2.contains("reasoning_effort"));
+
+    // 同一场子切到 K3(模型方言换了,history 选择仍在):thinking 整个不发
+    // ——keep 一个字节不误带;always 回传照旧(固定契约与选择无关)。
+    api::Request third;
+    third.model = "kimi-k3";
+    third.reasoning = CatalogReasoning("moonshot", "kimi-k3");
+    third.reasoning_effort = "high";
+    third.reasoning_history = api::ReasoningHistoryMode::All;  // 选择没清,守门靠方言
+    third.messages.push_back(UserText("你好"));
+    third.messages.push_back(assistant);
+    third.messages.push_back(UserText("切了模型再问"));
+
+    std::string k3_stop;
+    RunRound(backend, third, &k3_stop);
+    REQUIRE(received.size() == 3);
+    const auto body3 = nlohmann::json::parse(received[2].body);
+    CHECK(body3.at("model") == "kimi-k3");
+    CHECK(body3.at("reasoning_effort") == "high");
+    CHECK_FALSE(body3.contains("thinking"));  // keep 不硬带,thinking 整个不发
+    const auto& k3_replayed = body3.at("messages")[1];
+    CHECK(k3_replayed.at("reasoning_content") == "这轮想的要跨轮保留");  // always 照回
+}
+
+// ---------------------------------------------------------------------------
 // openai-responses:reasoning -> function_call -> 回传 -> 终答
 // ---------------------------------------------------------------------------
 

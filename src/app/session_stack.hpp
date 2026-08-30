@@ -18,6 +18,7 @@
 #include <vector>
 
 #include "agent/artifact_store.hpp"
+#include "api/reasoning.hpp"  // ReasoningHistoryMode:current_think_history 的档
 #include "app/backend_stack.hpp"
 #include "app/interactive_session.hpp"  // InteractiveSessionOptions
 #include "app/model_router.hpp"
@@ -96,6 +97,9 @@ struct SessionStack {
     RebuildableBackend real_backend;
     std::shared_ptr<std::string> current_model;
     std::shared_ptr<std::string> current_think;
+    // 跨轮保留式思考的会话选择(Kimi 保留式思考单 P1):/think history
+    // 切换,/resume 恢复,切模型重校验。单一真值与 current_think 同住一排。
+    std::shared_ptr<lubancode::api::ReasoningHistoryMode> current_think_history;
     std::shared_ptr<std::string> current_model_instructions;
     std::string current_soul_name;
     std::shared_ptr<std::string> current_soul;

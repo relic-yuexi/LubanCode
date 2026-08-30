@@ -101,6 +101,10 @@ private:
     // /think、/soul 改完会话状态后把皮上的 request 档案与叠层刷新一遍,
     // 下一份请求即时生效——从前这活是传输层包装器在 send_stream 里干的)。
     void SyncAgentRequestPolicy();
+    // /resume 恢复跨轮保留选择(Kimi 保留式思考单 P1):存档的
+    // think_history 事件落回 current_think_history,再按当前模型重校验
+    // (不认就明说并回 default),顺手同步请求档案。
+    void RestoreThinkHistoryFrom(const std::optional<lubancode::sessions::ThinkHistoryEvent>& event);
     void RefreshSkills();
     void RefreshWorkflowCompletions();
     void RefreshProjectInstructions();
@@ -297,6 +301,8 @@ private:
     RebuildableBackend& real_backend;
     const std::shared_ptr<std::string>& current_model;
     const std::shared_ptr<std::string>& current_think;
+    // 跨轮保留选择(P1):/think history 的会话真值,本体在 stack_。
+    const std::shared_ptr<lubancode::api::ReasoningHistoryMode>& current_think_history;
     std::string& active_provider;
     std::unique_ptr<lubancode::app::ModelRouterService>& model_router;
     std::shared_ptr<lubancode::agent::ContextArtifactStore>& artifact_store;
