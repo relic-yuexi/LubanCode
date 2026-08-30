@@ -16,7 +16,11 @@
 
 ## 问题 1：工具确认判断里揉了终端渲染和配置文件写入
 
-- 状态：待实现
+- 状态：已实现（2026-08-30：判断半边留 turn_runner 的 ConfirmToolUse，只拼
+  cli::ToolConfirmRequest；菜单/diff/[y/a/N]/PrintConfirmDetails/PrintFirstLines 搬
+  src/cli/tool_confirm_ui，"允许并记住"拆成 cli::OnToolAllowedPersist 由终端半边
+  收到用户选择后调用；PromptAskUser 整段搬 src/cli/ask_user_prompt。管道冒烟
+  y/n/a 三幕 + app-server 起停均过，ctest 264 册全绿）
 - 级别：P1
 - 位置：`src/app/turn_runner.cpp:453-633`（`ConfirmToolUse`）、`src/app/turn_runner.cpp:195-382`（`PromptAskUser`）
 
@@ -74,7 +78,14 @@
 
 ## 问题 3：`src/app/wirings/` 不是纯装配根，装配逻辑也没都在里头
 
-- 状态：待实现
+- 状态：已实现（2026-08-30：PumpDueTick/FinishTick/NotePermissionWait 的调度状态机
+  下沉 runtime/loop_tick_driver（LoopTickNotice 产事件、墙钟可注入，独立单测
+  test_loop_tick_driver）；goal 的 Ensure 里 ledger sink 搭建抽成
+  runtime::goal::MakeSessionLedgerSink（单测 test_goal_ledger_sink），goal/loop 两只
+  wiring 的 TermOut 全改经 Host.notify 由 interactive_session_wiring 画；
+  BuildWorkflowExecutors 整段搬 src/app/wirings/workflow_wiring。boundary gate 新增
+  wirings/ 终端 IO 守门（plan/peer 两只 /plan、/peers 命令交互本体挂白名单，另单
+  处理）。ctest 264 册全绿）
 - 级别：P2
 - 位置：`src/app/wirings/loop_session_wiring.cpp:135-189`（`PumpDueTick`）、`:191-246`（`FinishTick`）；`src/app/wirings/goal_session_wiring.cpp:38-80`（`Ensure`）；`src/app/commands/workflow_commands.cpp:1609-1814`（`BuildWorkflowExecutors`）
 

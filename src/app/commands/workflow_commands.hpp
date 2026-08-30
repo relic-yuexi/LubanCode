@@ -171,12 +171,9 @@ struct WorkflowExecutorContext {
     lubancode::workflow::SubagentPromptMaterial subagent_prompt_material;
 };
 
-// 拼执行器表(transform/template/tool/agent/llm/skill/interaction/subflow)。wf_catalog_root 是
-// catalog 锚点(project_root/user_root),prompt 相对路径按 id 对应条目的
-// 目录读。
-std::map<lubancode::workflow::NodeKind, std::shared_ptr<lubancode::workflow::NodeExecutor>>
-BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecutorContext& exec_ctx,
-                       const std::string& workflow_id);
+// BuildWorkflowExecutors(拼执行器表)已搬去 app/wirings/workflow_wiring
+// (骨架拆解反弹·问题 3:装配根归位)——声明与实现在那边,这里只留
+// 材料包。调用方(workflow_commands.cpp 与单测)include 那只头。
 
 // ---------------------------------------------------------------------------
 // 命令分派注册制(会话终章):workflow 域的分派位(/workflow 正门与

@@ -556,6 +556,9 @@ add_library(lubancode_runtime STATIC
   src/runtime/loop_types.cpp
   # /loop 会话定时循环单:内存 scheduler(timer 只发 wake/泵取件/退避/expiry)。
   src/runtime/loop_scheduler.cpp
+  # 骨架拆解反弹·问题 3:loop 单拍执行的调度状态机(自 app/wirings 下沉,
+  # 通知走回调,零终端)。
+  src/runtime/loop_tick_driver.cpp
   # /loop 会话定时循环单:空闲唤醒多路总口(替单枚 SetIdleWakeHook)。
   src/runtime/idle_wake.cpp
   # loop 单:goal 单立的会话工作分流合同在这里实装(公平泵 PumpNextWork)。
@@ -767,6 +770,8 @@ add_library(lubancode_app STATIC
   src/app/wirings/plan_session_wiring.cpp
   src/app/wirings/peer_session_wiring.cpp
   src/app/wirings/record_session_wiring.cpp
+  # 骨架拆解反弹·问题 3:workflow 执行器装配根(自 workflow_commands 搬来)。
+  src/app/wirings/workflow_wiring.cpp
   # 会话终章:组合根装配件(控制器构造函数的装配段外迁,cli_app 调用)。
   src/app/session_stack.cpp
   # 会话终章:控制器的装配半边(构造/析构/接线/材料包;运行半边在
@@ -784,7 +789,12 @@ add_library(lubancode_app STATIC
   src/cli/spinner.cpp
   # 骨架拆解批二:SpinnerBackend 自 backend_stack 挪来(UI 件归显示层)。
   src/cli/spinner_backend.cpp
-  src/cli/record_command.cpp)
+  src/cli/record_command.cpp
+  # 骨架拆解反弹·问题 1:工具确认的终端半边(菜单/diff/[y/a/N]/持久化)
+  # 与 ask_user 问询,自 app/turn_runner.cpp 搬来——真终端 IO 件,随
+  # console_input 住 app target。
+  src/cli/tool_confirm_ui.cpp
+  src/cli/ask_user_prompt.cpp)
 target_link_libraries(lubancode_app PUBLIC lubancode_core)
 # WS 承载的 socket 层在 Windows 走 Winsock2(POSIX 不加东西)。
 if(WIN32)

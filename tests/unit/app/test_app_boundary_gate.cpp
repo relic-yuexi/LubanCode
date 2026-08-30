@@ -24,6 +24,7 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -199,5 +200,43 @@ TEST_CASE("守门:四叶子自身零标准流(i18n/theme/worktree/line_editor)")
         CHECK_MESSAGE(code.find("std::cin") == std::string::npos, (path.string() + " 含 std::cin"));
         CHECK_MESSAGE(code.find("std::cout") == std::string::npos, (path.string() + " 含 std::cout"));
         CHECK_MESSAGE(code.find("std::cerr") == std::string::npos, (path.string() + " 含 std::cerr"));
+    }
+}
+
+// 骨架拆解反弹·问题 3 的验收线:src/app/wirings/ 是纯装配根,目录下的
+// 文件不许有 TermOut()/TermErr()/ReadLine()/ReadChoiceMenu() 这类直接终端
+// IO——要说话就产事件/回调,由装配层(interactive_session_wiring)画。
+// 名单裁量:plan_session_wiring 与 peer_session_wiring 是 /plan、/peers 的
+// 命令交互本体(整改单问题 3 的位置清单不含这两只,另单处理),挂白名单
+// 放行;其余文件(含以后新进的)命中即败,防新代码继续往错的地方搬。
+TEST_CASE("守门:wirings/ 装配根不做直接终端 IO(整改单问题 3)") {
+    const std::filesystem::path wirings = SourceRoot() / "src" / "app" / "wirings";
+    if (!std::filesystem::exists(wirings)) {
+        return;  // 没有源码树(发行包):这只测试不起作用
+    }
+    const std::vector<std::string> allowlist = {
+        "plan_session_wiring.cpp", "plan_session_wiring.hpp",
+        "peer_session_wiring.cpp", "peer_session_wiring.hpp",
+    };
+    for (const auto& entry : std::filesystem::directory_iterator(wirings)) {
+        if (!entry.is_regular_file()) {
+            continue;
+        }
+        const std::string name = entry.path().filename().string();
+        if (name.size() < 5 || (name.substr(name.size() - 4) != ".cpp" && name.substr(name.size() - 4) != ".hpp")) {
+            continue;
+        }
+        if (std::find(allowlist.begin(), allowlist.end(), name) != allowlist.end()) {
+            continue;
+        }
+        const std::string code = StripComments(SlurpFile(entry.path()));
+        CHECK_MESSAGE(code.find("TermOut(") == std::string::npos,
+                      (entry.path().string() + " 调 TermOut(装配根不画终端)"));
+        CHECK_MESSAGE(code.find("TermErr(") == std::string::npos,
+                      (entry.path().string() + " 调 TermErr(装配根不画终端)"));
+        CHECK_MESSAGE(code.find("ReadLine(") == std::string::npos,
+                      (entry.path().string() + " 调 ReadLine(装配根不读终端)"));
+        CHECK_MESSAGE(code.find("ReadChoiceMenu(") == std::string::npos,
+                      (entry.path().string() + " 调 ReadChoiceMenu(装配根不读终端)"));
     }
 }

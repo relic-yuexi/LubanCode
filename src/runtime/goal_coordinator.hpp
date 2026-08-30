@@ -33,6 +33,10 @@
 #include "runtime/goal_types.hpp"
 #include "runtime/id_authority.hpp"
 
+namespace lubancode::sessions {
+class SessionStore;  // MakeSessionLedgerSink 的参数(实现在 .cpp,头只留前向)
+}
+
 namespace lubancode::runtime::goal {
 
 // coordinator 向外发的事件(装配层拿去落 session JSONL / 发 Runtime 事件)。
@@ -275,5 +279,12 @@ private:
     std::vector<GoalCoordinatorEvent> late_arrivals_;  // 审计留账
     std::unordered_map<std::string, GoalEvidence> evidence_;  // 证据账(ev-id → 证据)
 };
+
+// 会话存档的 ledger sink 搭建(骨架拆解反弹·问题 3,自 app/wirings/
+// goal_session_wiring 的 Ensure 抽来):coordinator 事件 -> GoalSessionEvent
+// 行,type 分族(iteration 级事件走 goal_iteration_v1,其余 goal_v1),
+// store 没开张时返回 true(没建档的会话照常吃命令,事件只进内存——建档
+// 后新事件落盘)。纯函数,单测见 tests/unit/runtime/test_goal_ledger_sink.cpp。
+GoalCoordinator::LedgerSink MakeSessionLedgerSink(lubancode::sessions::SessionStore& store);
 
 }  // namespace lubancode::runtime::goal

@@ -414,6 +414,11 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         goal_host.start_turn = [this](const std::string& text, bool* turn_failed) {
             RunSessionTurn(text, TurnSource::User, turn_failed);
         };
+        // 渲染事件出口(骨架拆解反弹·问题 3):goal 接线器不再直接画终端,
+        // 通知从这递出来——is_error 定色,文案由接线器拼好,渲染逐字节照旧。
+        goal_host.notify = [this](bool is_error, const std::string& text) {
+            TermOut() << (is_error ? theme.error : theme.stats) << text << theme.reset << "\n";
+        };
         goal_wiring_.AttachHost(std::move(goal_host));
 
         LoopSessionWiring::Host loop_host;
@@ -426,6 +431,13 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         loop_host.idle_wakes = &idle_wakes_;
         loop_host.start_turn = [this](const std::string& text, bool* turn_failed) {
             RunSessionTurn(text, TurnSource::User, turn_failed);
+        };
+        // 渲染事件出口(骨架拆解反弹·问题 3):单拍状态机(runtime 的
+        // LoopTickDriver)产 LoopTickNotice,接线器只转发,画法在这。
+        loop_host.notify = [this](const lubancode::runtime::loop::LoopTickNotice& notice) {
+            TermOut() << (notice.kind == lubancode::runtime::loop::LoopTickNotice::Kind::Error ? theme.error
+                                                                                              : theme.stats)
+                      << notice.text << theme.reset << "\n";
         };
         loop_wiring_.AttachHost(std::move(loop_host));
 

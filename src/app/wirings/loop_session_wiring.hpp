@@ -1,10 +1,16 @@
-// /loop 子系统接线器(会话终章):loop 的"状态+装配+泵+存档恢复"自
+// /loop 子系统接线器(会话终章):loop 的"状态+装配+存档恢复"自
 // TerminalSessionController 大类外迁,归这一只。控制器持句柄调;泵的公平
 // 仲裁(session_work_scheduler)不动,留控制器——这里出 due 候选与单拍
 // 执行。
 //
+// 骨架拆解反弹·问题 3:单拍执行的调度状态机(PumpDueTick/FinishTick 的
+// 函数体)下沉 runtime::loop::LoopTickDriver(见 runtime/loop_tick_driver.
+// hpp),这里只留"构造+注入":拼 Host、接依赖、转发调用。渲染不在这层
+// ——状态机产 LoopTickNotice,经 Host.notify 递给装配层
+// (interactive_session_wiring)画,wirings 文件里没有直接终端 IO。
+//
 // 状态归属:
-//   - scheduler(内存真值)/due 唤醒 token/活跃 tick 号/loop_control 工具
+//   - scheduler(内存真值)/due 唤醒 token/单拍驱动器/loop_control 工具
 //     账——跟接线器走;
 //   - 空闲唤醒总口(IdleWakeCoordinator)是会话级的(子代理与 loop 两路
 //     并存),借来挂源,token 归接线器;
@@ -23,6 +29,7 @@
 #include "config/config.hpp"
 #include "runtime/idle_wake.hpp"
 #include "runtime/loop_scheduler.hpp"
+#include "runtime/loop_tick_driver.hpp"  // 单拍执行的调度状态机(问题 3 下沉)
 #include "runtime/session_runtime.hpp"
 #include "sessions/session_store.hpp"
 #include "tools/loop_control_tool.hpp"
@@ -49,6 +56,9 @@ public:
         lubancode::runtime::IdleWakeCoordinator* idle_wakes = nullptr;  // due 唤醒多路总口
         // 开一枚 loop tick 轮(scheduled message + 失败出参;单飞,主线程调)。
         std::function<void(const std::string&, bool*)> start_turn;
+        // 渲染事件出口(问题 3 第 2 条):状态机的 LoopTickNotice 从这递
+        // 出,装配层决定怎么画——接线器自己不打终端。
+        std::function<void(const lubancode::runtime::loop::LoopTickNotice&)> notify;
     };
 
     LoopSessionWiring() = default;
@@ -59,10 +69,10 @@ public:
     void RegisterTools(lubancode::tools::ToolRegistry& registry);
 
     // 装配:scheduler 安家(features.loop + env 总闸)+ due 源挂进空闲唤醒
-    // 多路总口 + timer 起动。幂等。
+    // 多路总口 + timer 起动 + 单拍驱动器接线。幂等。
     void Ensure();
 
-    // ---- 泵(主线程安全边界) ----
+    // ---- 泵(主线程安全边界;状态机在 runtime::loop::LoopTickDriver) ----
     // 单拍执行:取一枚 due tick(先落事件再开 turn)、prompt 源每拍现读、
     // scheduled message 开轮、拍收口回写。返回 true = 消费了一拍。
     bool PumpDueTick(std::int64_t now_ms);
@@ -81,7 +91,7 @@ public:
 
     // ---- 查询口(控制器/状态栏用) ----
     lubancode::runtime::loop::LoopScheduler* scheduler();  // ensure 前空
-    bool TickActive() const { return !active_tick_id_.empty(); }
+    bool TickActive() const { return driver_.has_value() && driver_->TickActive(); }
     bool HasActiveTasks();
     // 到点账(泵的候选判定):SweepExpiry + HasDueWork。
     bool SweepAndCheckDue(std::int64_t now_ms);
@@ -90,11 +100,14 @@ public:
 
 private:
     lubancode::app::LoopWiring BuildWiring();
+    // 单拍驱动器的材料拼装(scheduler/每拍 prompt 现读/事件 flush/开轮/
+    // 通知/工具账,全借本接线器)。
+    lubancode::runtime::loop::LoopTickDriver::Host BuildDriverHost();
 
     Host host_;
     std::optional<lubancode::runtime::loop::LoopScheduler> scheduler_;
+    std::optional<lubancode::runtime::loop::LoopTickDriver> driver_;  // 单拍状态机(Ensure 起)
     lubancode::runtime::IdleWakeCoordinator::Subscription wake_token_;
-    std::string active_tick_id_;  // 当前在跑的 tick(收口时清)
     std::shared_ptr<lubancode::tools::LoopControlState> control_state_;
 };
 

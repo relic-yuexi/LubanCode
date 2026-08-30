@@ -54,6 +54,16 @@ using lubancode::cli::trf;
 
 namespace {
 
+// 去首尾空白(原先经 turn_runner.hpp 的公开声明间接可用;骨架拆解反弹·
+// 问题 1 把那族帮手搬走后,这里立自己的文件内副本,与 memory_commands/
+// model_commands 同款)。
+std::string TrimAscii(std::string value) {
+    const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+    value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+    value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+    return value;
+}
+
 // WizardPanel 给选择菜单留 12 行。短菜单至多 11 项再带一行 hint；长菜单
 // 固定拿两行画搜索栏与 hint，中间十行翻页。三处共用一把尺，不能各算各的。
 constexpr int kWizardChoiceReserveRows = 12;

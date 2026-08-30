@@ -11,8 +11,8 @@
 #include "app/commands/settings_commands.hpp"  // PrintBanner/PrintLubanIcon/ApplyModelCatalog
 #include "app/commands/prompt_commands.hpp"    // LoadSoulContentByName(魂内容)
 #include "app/commands/agent_commands.hpp"     // ComputeProjectPromptsRoot(阶段 2 Profile 项目层)
-#include "app/turn_runner.hpp"                 // PromptAskUser(ask_user 工具的问话)
 #include "app/version.hpp"                     // kVersion:包兼容性检查的当前版本
+#include "cli/ask_user_prompt.hpp"         // PromptAskUser(ask_user 工具的问询;骨架拆解反弹·问题 1 搬来)
 #include "cli/i18n.hpp"
 #include "cli/terminal_port.hpp"
 #include "config/model_catalog.hpp"
@@ -331,7 +331,7 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
     runtime_options.with_explore = true;
     runtime_options.with_ask_user = spinner_enabled;
     runtime_options.ask_user_handler = [theme](const lubancode::tools::AskUserQuestion& question) {
-        return PromptAskUser(question, theme);
+        return lubancode::cli::PromptAskUser(question, theme);
     };
     runtime_options.memory = stack->project_memory;
     runtime_options.worktree_session = &stack->worktree_session;
