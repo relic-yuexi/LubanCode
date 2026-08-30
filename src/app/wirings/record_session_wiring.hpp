@@ -24,6 +24,9 @@ public:
         const std::filesystem::path* project_skills_root = nullptr;  // <cwd>/.lubancode/skills
         const std::filesystem::path* global_skills_root = nullptr;   // <主目录>/skills
         std::function<void()> refresh_skills;  // install 后刷新本场技能清单
+        // P0-2 轨迹:flag 开的会话递账本,/record 走选段器(§14.3)。空 =
+        // 旧录音笔路。
+        lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
     };
 
     RecordSessionWiring() = default;

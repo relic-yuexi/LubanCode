@@ -232,6 +232,8 @@ private:
             model_router->ledger().RecordFallback(kind, from, to, reason);
         };
         in.persist_new_messages = [this]() { PersistNewMessages(); };
+        // P0-2 轨迹:flag 开的会话递账本,compact 走 typed 状态机。
+        in.trajectory = session_runtime_.trajectory();
         return in;
     }
     lubancode::app::SessionTailContext MakeTailContext() {

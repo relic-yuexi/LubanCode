@@ -362,6 +362,18 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
               home_lubancode.has_value() ? (*home_lubancode + "/sessions") : std::string();
           runtime_options.wire_name = lubancode::config::ProviderWireName(config.wire);
           runtime_options.start_ts = lubancode::sessions::NowIdTimestamp();
+          // P0-2 轨迹(§十七内部预览):features.trajectory + 环境变量
+          // LUBANCODE_TRAJECTORY 合成。开的会话只写 Trajectory Journal、
+          // 不写旧 SessionStore(禁 dual-write);开张失败在 ctor 后由
+          // trajectory_open_error 报,Run() 入口据此失败启动。
+          runtime_options.trajectory_enabled =
+              lubancode::runtime::ResolveTrajectoryEnabled(config.features_trajectory);
+          if (runtime_options.trajectory_enabled) {
+              runtime_options.trajectory_workspace_root = std::filesystem::current_path();
+              runtime_options.trajectory_workspace_name =
+                  runtime_options.trajectory_workspace_root.filename().generic_string();
+              runtime_options.lubancode_version = std::string(lubancode::app::kVersion);
+          }
           return runtime_options;
       }()),
       wire_str(lubancode::config::ProviderWireName(config.wire)),
@@ -481,6 +493,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         record_host.project_skills_root = &project_skills_root;
         record_host.global_skills_root = &global_skills_root;
         record_host.refresh_skills = [this]() { RefreshSkills(); };
+        // P0-2 轨迹:flag 开的会话,/record 走选段器(轨迹账本在
+        // SessionRuntime;record_session_wiring 只借指针)。
+        record_host.trajectory = session_runtime_.trajectory();
         record_wiring_.AttachHost(std::move(record_host));
     }
     // goal/loop 的窄工具(goal 单第 2 期 + loop 单第 4 期的注册欠账):注册进
@@ -1161,6 +1176,8 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.main_agent = main_agent.has_value() ? &*main_agent : nullptr;
     ctx.session_runtime = &session_runtime_;
     ctx.trace_hub = trace_hub_.has_value() ? &*trace_hub_ : nullptr;
+    // P0-2 轨迹:命令生命周期记账的账本(flag 开才有)。
+    ctx.trajectory = session_runtime_.trajectory();
     ctx.session_events = &session_events_;
     ctx.session_store = &session_store;
     ctx.sessions_dir = &sessions_dir;

@@ -526,6 +526,11 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         started.effect_class = effect_class;
         started.source_kind = source_kind;
         started.source_instance = source_instance;
+        // 实际执行的入参原文(轨迹接线:tool.input.effective 需要正文,
+        // 老路只吃摘要;is_object 守门——null(没改写的空入参)不落)。
+        if (effective_input.is_object()) {
+            started.effective_arguments = effective_input;
+        }
         emit(std::move(started));
     }
     // 副作用闸:started 落不住的副作用工具,这里拦(单子:写不成时,
@@ -977,6 +982,17 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
         }
 
+        // 轨迹边界(P0-2):request prepared 记不住就不发模型(§7.4 耐久
+        // 栅栏);落稳随即记 sent。没接轨迹的会话一字不加。
+        std::string trajectory_request_id;
+        if (wiring.boundary_recorder != nullptr) {
+            trajectory_request_id = wiring.boundary_recorder->OnRequestPrepared(request);
+            if (trajectory_request_id.empty()) {
+                return std::unexpected("轨迹账写盘失败,本轮停在请求边界,未发模型");
+            }
+            wiring.boundary_recorder->OnRequestSent(trajectory_request_id);
+        }
+
         api::MessageAssembler assembler;
         bool stream_error = false;
         std::string stream_error_message;
@@ -1142,6 +1158,13 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     context_.PushMessage(std::move(orphan_message));
                 }
 
+                // 轨迹边界:打断也是一枚明确收口(output.cancelled;usage
+                // 若报了先记 owner)。
+                if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
+                    wiring.boundary_recorder->OnUsageRecorded(
+                        trajectory_request_id, assembler.usage(), assembler.usage_seen(), stream_request_id);
+                    wiring.boundary_recorder->OnOutputCancelled(trajectory_request_id);
+                }
                 return RunOutcome{true, false, false, last_stop_reason, steps_used};
             }
             // 错误的人话收口(ccmoon 巡检单 P1):HTTP 非 2xx 把状态码与
@@ -1149,6 +1172,15 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // 不再把整段 JSON 原样糊脸;网络类人话(连接超时一类)过一遍
             // 同一道打码截短,原文不丢。
             {
+                // 轨迹边界:请求失败是明确收口(output.failed),记的是打码
+                // 截短后的人话,不落原始错误体。
+                if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
+                    std::string fail_reason = err.message;
+                    if (err.kind == api::ErrorKind::HttpStatus && err.http_status != 0) {
+                        fail_reason = "HTTP " + std::to_string(err.http_status);
+                    }
+                    wiring.boundary_recorder->OnOutputFailed(trajectory_request_id, fail_reason);
+                }
                 std::string message = err.message;
                 if (err.kind == api::ErrorKind::HttpStatus && err.http_status != 0) {
                     message = "HTTP " + std::to_string(err.http_status) + ": " +
@@ -1160,6 +1192,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
         }
         if (stream_error) {
+            if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
+                wiring.boundary_recorder->OnOutputFailed(trajectory_request_id, stream_error_message);
+            }
             return std::unexpected("模型返回错误: " + stream_error_message);
         }
 
@@ -1180,6 +1215,17 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 基线此刻还没推进)。
         if (wiring.on_assistant_message_ready) {
             wiring.on_assistant_message_ready(assistant_message);
+        }
+        // 轨迹边界(P0-2):模型输出先记成事实才许跑工具(§15.1"模型输出
+        // 必须先 Record 成功,才许跑工具");usage owner(v2)先行落账。输出
+        // 记不住就明败,不执行工具(§7.4 耐久栅栏)。
+        if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
+            wiring.boundary_recorder->OnUsageRecorded(trajectory_request_id, assembler.usage(),
+                                                      assembler.usage_seen(), stream_request_id);
+            if (!wiring.boundary_recorder->OnOutputCompleted(trajectory_request_id, assistant_message,
+                                                             stop_reason, stream_request_id)) {
+                return std::unexpected("轨迹账写盘失败,模型输出未落账,不执行工具");
+            }
         }
         context_.PushMessage(std::move(assistant_message));
         // usage 是否报告(规格根因四):任一请求带回过非零 usage 就算报告过,

@@ -51,6 +51,9 @@ struct StatusPanelInputs {
     const lubancode::runtime::SessionRuntime* session_runtime = nullptr;  // plan 模式档
     // REC 标记:录制器可空(没在录),空指针按"无录制器"处理。
     const std::optional<lubancode::skills::WorkflowRecorder>* recorder = nullptr;
+    // REC 覆盖(P0-2 轨迹选段器):轨迹档活动选段的 REC 文案由调用方折好
+    // 填这——非空即压过 recorder 标记;空串回落老录制器。
+    std::string rec_override;
     // 每圈刷新的两枚活字段:
     lubancode::runtime::goal::GoalCoordinator* goal = nullptr;
     lubancode::runtime::loop::LoopScheduler* loop_scheduler = nullptr;

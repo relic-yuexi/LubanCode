@@ -57,8 +57,11 @@ lubancode::cli::StatusPanelData BuildStatusPanelData(const StatusPanelInputs& in
         // 重建读同一只 ContextTracker,数字与 ~ 标记完全一致。
         status_data.context_stale = tracker.usage_stale();
     }
-    // REC 标记:录制中恒挂状态行第一段(见 StatusPanelData::rec)。
-    {
+    // REC 标记:录制中恒挂状态行第一段(见 StatusPanelData::rec)。轨迹档
+    // 活动选段的文案(rec_override)压过老录制器标记;空串回落。
+    if (!inputs.rec_override.empty()) {
+        status_data.rec = inputs.rec_override;
+    } else {
         static const std::optional<lubancode::skills::WorkflowRecorder> kNoRecorder;
         status_data.rec = lubancode::cli::RecorderStatusMarker(
             inputs.recorder != nullptr ? *inputs.recorder : kNoRecorder);

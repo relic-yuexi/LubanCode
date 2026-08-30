@@ -23,6 +23,8 @@
 #pragma once
 
 #include <cstdint>
+#include <filesystem>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -33,6 +35,7 @@
 #include "runtime/event_sink.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/plan_mode.hpp"
+#include "runtime/trajectory_session.hpp"
 #include "runtime/turn_event_adapter.hpp"
 
 namespace lubancode::runtime {
@@ -58,6 +61,14 @@ public:
         std::string sessions_dir;  // 空 = 找不到主目录,不落盘
         std::string wire_name;     // meta.wire(provider 协议名)
         std::string start_ts;      // 会话 id 的时间戳底子(NowIdTimestamp)
+        // P0-2 轨迹(flag 开的会话走 Trajectory v1,§十七"内部预览"):
+        // true 时本会话只写 Trajectory Journal,不写旧 SessionStore——
+        // 禁 dual-write;开张失败由 trajectory_open_error 报,装配层须
+        // 让会话启动失败,不许回退旧写口。
+        bool trajectory_enabled = false;
+        std::filesystem::path trajectory_workspace_root;  // 空 = 当前目录
+        std::string trajectory_workspace_name;            // 空 = 目录名
+        std::string lubancode_version;
     };
 
     explicit SessionRuntime(Options options);
@@ -75,6 +86,17 @@ public:
     // 事件出口:不持有,调用方保证存活;可空(终端老路不接)。
     void AttachSink(EventSink* sink) { sink_ = sink; }
     EventSink* sink() const { return sink_; }
+
+    // ---- 轨迹账(P0-2:SessionRuntime 持有 Recorder 所有权) ----------------
+    // flag 开的会话:本类持一场 TrajectorySessionLedger(main recorder +
+    // 目录 + 子代理注册表)。空 = flag 关,旧路照旧。开张失败给
+    // trajectory_open_error(),装配层据此失败会话启动。
+    TrajectorySessionLedger* trajectory() { return trajectory_.has_value() ? &*trajectory_ : nullptr; }
+    const TrajectorySessionLedger* trajectory() const {
+        return trajectory_.has_value() ? &*trajectory_ : nullptr;
+    }
+    bool trajectory_enabled() const { return options_.trajectory_enabled; }
+    const std::string& trajectory_open_error() const { return trajectory_open_error_; }
 
     // 开一轮的事件适配器:把 loop 的回调翻成 ServerEvent 流,落到 AttachSink
     // 挂的那只 sink(没挂就只发号不落笔)。每轮各开一只,轮间不共用状态。
@@ -98,11 +120,16 @@ public:
     // Plan 模式单:建档前切过的协作档(存档未开时 SetCollaborationMode 只
     // 记内存)在这里补落 mode_v1——起手 --mode plan 的场子,档里第一行
     // 用户消息之前就有 mode 账,resume 才接得回档位。
+    // P0-2 轨迹路:trajectory_enabled 的会话不建旧档(单一真账在
+    // Trajectory Journal),直接回 Disabled。
     SessionBeginResult EnsureBegun(const std::string& first_text, const std::string& model,
                                    const std::string& cwd);
 
     // 增量落盘:history 里 persisted_count 之后逐条追加(只增不减);store
     // 还没开张时先按兜底建档(首条用户文本抽出来做 slug)。失败置 broken。
+    // P0-2 轨迹路:轮末补抄这条路整个停用——事实由
+    // input.received/model.output.completed/tool.result.committed 事件
+    // 即时落账,轮末只验状态机,不补抄消息(§15.3)。
     SessionPersistResult PersistNew(const std::vector<api::Message>& history, const std::string& model,
                                     const std::string& cwd);
 
@@ -170,9 +197,16 @@ private:
     sessions::SessionMeta meta_{};
     std::string title_;
     bool title_pending_ = false;
+    // persisted_count_:旧路(轮末按 history 追加补抄)的落盘基线。轨迹路
+    // (P0-2)不读不写它——事实由事件即时落账,这条补抄路停用;flag 关的
+    // 会话照旧。
     std::size_t persisted_count_ = 0;
     int compact_epoch_ = 0;
     bool store_broken_ = false;
+
+    // P0-2 轨迹账:flag 开的会话持一场(可选构造;move-only)。
+    std::optional<TrajectorySessionLedger> trajectory_;
+    std::string trajectory_open_error_;
 
     std::set<std::string> always_allowed_;
 

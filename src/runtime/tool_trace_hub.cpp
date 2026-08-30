@@ -49,12 +49,23 @@ void ToolTraceHub::Install(agent::Agent& loop, agent::TurnWiring& wiring, const 
     // 工具之前 append+flush;五枚结果收齐后 user 消息 append+flush,再补
     // 各枚 result_committed。store 没开张(空指针/没 active)时这两个口
     // 空操作——老路 PersistNewMessages 仍会在轮末兜底,一个不丢。
+    // P0-2 轨迹路(§15.2):挂了轨迹口的会话不写 SessionStore(禁
+    // dual-write)——消息事实由 model.output.completed/tool.result.committed
+    // 事件承载,轨迹桥从下面的批次尾口拿正文。
     wiring.on_assistant_message_ready = [this](const api::Message& message) {
+        if (trajectory_ != nullptr) {
+            return;  // 轨迹路:model.output.completed 已是消息事实,不再落 store
+        }
         if (store_ != nullptr && store_->active()) {
             store_->AppendMessage(message);
         }
     };
     wiring.on_tool_results_committed = [this](const std::string& batch_id, const api::Message& message) {
+        if (trajectory_ != nullptr) {
+            // 轨迹路:正文进 tool.result.committed 事件,不写 store。
+            trajectory_->OnToolResultsCommitted(batch_id, message);
+            return;
+        }
         if (store_ != nullptr && store_->active()) {
             store_->AppendMessage(message);
         }
@@ -110,13 +121,17 @@ void ToolTraceHub::OnTrace(const agent::ToolTraceEvent& event) {
         if (event.tool_name == "agent" || event.tool_name == "agent_dispatch") {
             if (event.kind == agent::ToolTraceEventKind::ExecutionStarted) {
                 current_agent_execution_ = event.execution_id;
+                current_agent_call_id_ = event.tool_use_id;
             } else if (event.kind == agent::ToolTraceEventKind::ExecutionFinished) {
                 current_agent_execution_.clear();
+                current_agent_call_id_.clear();
             }
         }
     }
 
-    // 1) 持久账:关键栅栏 append+flush。started 写失败按 effect class
+    // 1) 持久账:关键栅栏 append+flush。P0-2 起分两路——轨迹路(§15.2
+    //    ToolTraceHub -> TrajectorySink,不写 SessionStore)与旧路
+    //    (SessionStore append+flush)。started 写失败按 effect class
     // 决定拦不拦(拦的信号走 EventSink 的 Error + LogSink,execute 不再
     // 发生——RunOneTool 在 emit(started) 之后、execute 之前没有查询口,
     // 这里用"写失败即置 fail_start_、由下一枚 started 前检查"的口径:
@@ -125,7 +140,27 @@ void ToolTraceHub::OnTrace(const agent::ToolTraceEvent& event) {
     // failed)再投出去,RunOneTool 随后的 execute 照跑——所以真正的闸
     // 在这里:写不落且副作用档时,投一枚 Error 事件并把 finishOutcome
     // 置为 ResultStoreFailed,模型看到的就是"没跑成"。
-    if (store_ != nullptr && store_->active()) {
+    if (trajectory_ != nullptr) {
+        // 轨迹路:先问桥这枚 started 落没落住(桥在 OnToolTrace 里已
+        // 同步提交);落不住且副作用档,同一道闸拦执行。
+        if (event.kind == agent::ToolTraceEventKind::ExecutionStarted &&
+            trajectory_->ShouldBlockExecution(event) && ShouldBlockOnFailedStart(event.effect_class)) {
+            agent::ToolTraceEvent failed = event;
+            failed.kind = agent::ToolTraceEventKind::ExecutionFinished;
+            failed.outcome = agent::ToolOutcome::ResultStoreFailed;
+            failed.error_code = agent::kErrSessionTraceAppendFailed;
+            failed.fallback_message = "轨迹账写盘失败,该工具未执行(副作用档默认拦截)";
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                blocked_executions_.insert(event.execution_id);
+                recent_.push_back(failed);
+            }
+            trajectory_->OnToolTrace(failed);  // 轨迹侧翻 cancelled 落账
+            EmitRuntimeEvent(failed);
+            return;  // 终态已出,不再往下分线
+        }
+        trajectory_->OnToolTrace(event);
+    } else if (store_ != nullptr && store_->active()) {
         const bool durable_ok = store_->AppendToolTraceEvent(event);
         if (!durable_ok) {
             if (event.kind == agent::ToolTraceEventKind::ExecutionStarted &&
@@ -307,6 +342,11 @@ bool ToolTraceHub::IsExecutionBlocked(const std::string& execution_id) const {
 std::string ToolTraceHub::current_agent_execution() const {
     std::lock_guard<std::mutex> lock(mutex_);
     return current_agent_execution_;
+}
+
+std::string ToolTraceHub::current_agent_call_id() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return current_agent_call_id_;
 }
 
 void ToolTraceHub::set_current_agent_execution(std::string execution_id) {

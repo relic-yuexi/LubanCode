@@ -49,6 +49,7 @@
 #include "agent/runtime_profile.hpp"
 #include "api/types.hpp"
 #include "agent/prompt_assembler.hpp"  // PackageProfileRoot:包层 Profile 根(阶段 3)
+#include "runtime/trajectory_session.hpp"  // TrajectorySubagentBridge:P0-2 子代理独立 JSONL
 #include "runtime/worktree.hpp"
 #include "config/project_instructions.hpp"  // ProjectInstructionResolver:AGENTS.md 作用域(作用域单 P0)
 #include "hooks/detached.hpp"
@@ -206,6 +207,17 @@ public:
         // 下,所以是取值函数而非快照;空函数 = 没有这条边(旧调用方),
         // 子代理事件照发,parent 留空。
         std::function<std::string()> parent_execution_id_getter;
+
+        // ---- P0-2 轨迹接线(flag 开的会话;空 = 旧路,行为零变) ----------
+        // 子代理派工的轨迹账申请口:向会话账本要独立 JSONL(scoped
+        // recorder + run.started,relations 带 parent 边)。返回空 = 子账
+        // 没开张(开张失败/没接线),子代理照跑,父账如实缺子边。
+        std::function<std::unique_ptr<runtime::TrajectorySubagentBridge>(const std::string& task_label)>
+            trajectory_spawn;
+        // 子账收口(run terminal + 关柄)后的回填口:父桥记下子账终态
+        // hash,父侧 agent 调用的执行终态事件引用它(§3.5 边界对账)。
+        std::function<void(const std::string& run_id, const std::string& terminal_hash)>
+            trajectory_child_finished;
 
         // ESC/Ctrl+C 打断信号(宿主那份 cancel_flag 的地址)——子代理
         // 内部的 AgentLoop::Run() 原样收这根指针,工具循环里就能跟顶层同一套
@@ -483,7 +495,10 @@ private:
                    const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions = nullptr,
                    const CustomAgentMaterial* custom = nullptr,
                    const agent::ResolvedAgentProfile* resolved = nullptr,
-                   std::optional<agent::AgentPermissionMode> permission_floor = std::nullopt);
+                   std::optional<agent::AgentPermissionMode> permission_floor = std::nullopt,
+                   // P0-2 轨迹:这只子代理的独立 JSONL 桥(前台/后台都在派工
+                   // 线程申请好带进来;空 = flag 关的旧路)。
+                   std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory = nullptr);
 
     Result ExecuteForeground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
                              ToolRegistry& task_registry, const SubagentBudget& budget, bool isolate,

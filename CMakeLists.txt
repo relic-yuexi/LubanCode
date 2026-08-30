@@ -577,6 +577,9 @@ add_library(lubancode_runtime STATIC
   src/runtime/plugin_lua_manifest.cpp
   # 逐枚追踪单:canonical 工具事件的装配层分线器(持久栅栏/UI 投影/录制)。
   src/runtime/tool_trace_hub.cpp
+  # P0-2 轨迹单写口:hub 的轨迹抽象口 + 会话账本/轮次边界桥(flag 门控,
+  # §十五接线。trajectory 纯库在 engine;这层是 runtime 适配)。
+  src/runtime/trajectory_session.cpp
   # /goal 持久目标单:领域类型/状态机转换表/objective 计数/序列化。
   src/runtime/goal_types.cpp
   # /goal 持久目标单:目标状态机唯一写口(命令面/预算闸/防空转/硬门槛/回放)。

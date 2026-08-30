@@ -26,6 +26,7 @@
 #include "runtime/id_authority.hpp"
 #include "runtime/session_command_service.hpp"
 #include "runtime/tool_trace_hub.hpp"
+#include "runtime/trajectory_session.hpp"  // P0-2:app-server 同一口接 Trajectory
 #include "runtime/turn_event_adapter.hpp"
 #include "runtime/turn_item.hpp"
 #include "tools/ask_user.hpp"
@@ -714,7 +715,9 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
         threads_[candidate] = record;
     }
     record->interactions = std::make_unique<InteractionLedger>(record->thread_id);
-    if (!sessions_dir_.empty()) {
+    if (!sessions_dir_.empty() && !options_.features_trajectory) {
+        // P0-2 轨迹:flag 开的 thread 不开旧存档(禁 dual-write)——真账
+        // 在 Trajectory SessionLedger,下面的接线在 SessionRuntime 那节。
         record->store = std::make_unique<sessions::SessionStore>(sessions_dir_);
         sessions::SessionMeta meta;
         // 阶段 3 冻结项:meta 写真值。wire 是协议名(anthropic/responses/
@@ -743,7 +746,27 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
         loop_options.enabled = options_.features_loop;
         record->loop_scheduler = std::make_unique<runtime::loop::LoopScheduler>(loop_options);
         runtime::SessionRuntime::Options runtime_options;  // sessions_dir 空 = 纯内存
-        record->session_runtime = std::make_unique<runtime::SessionRuntime>(runtime_options);
+        // P0-2 轨迹:flag 开的 thread 与终端同走 Trajectory 单写口
+        //(app-server 的存档 record->store 那条不开,禁 dual-write)。
+        runtime_options.trajectory_enabled = options_.features_trajectory;
+        if (runtime_options.trajectory_enabled) {
+            runtime_options.trajectory_workspace_root = std::filesystem::current_path();
+            runtime_options.trajectory_workspace_name =
+                runtime_options.trajectory_workspace_root.filename().generic_string();
+            runtime_options.lubancode_version = options_.lubancode_version;
+        }
+        record->session_runtime = std::make_unique<runtime::SessionRuntime>(std::move(runtime_options));
+        if (options_.features_trajectory && record->session_runtime->trajectory() == nullptr) {
+            // §十七:flag 开了开不出账,thread 明败,不回退旧写口。先把
+            // 刚登记的 thread 撤下来,再交稳定错误码。
+            Diagnose("轨迹账开张失败,thread 不开: " + record->session_runtime->trajectory_open_error());
+            {
+                std::lock_guard<std::mutex> lock(threads_mutex_);
+                threads_.erase(record->thread_id);
+            }
+            out_error_code = "trajectory.open_failed";
+            return nlohmann::json();
+        }
     }
     Diagnose("thread 已建: " + record->thread_id);
     return nlohmann::json{{"threadId", record->thread_id}, {"cwd", record->cwd}};
@@ -1014,6 +1037,8 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         user_message.content.push_back(std::move(block));
     }
     if (record->store != nullptr) {
+        // P0-2 轨迹:flag 开的 thread 只写 Trajectory(禁 dual-write),
+        // 旧存档不 App;store 在 thread/start 就没开,这里到不了。
         record->store->AppendMessage(user_message);
     }
 
@@ -1166,9 +1191,36 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         }
 
         // ---- 跑 ----
+        // P0-2 轨迹:flag 开的 thread 接同一口——hub(工具栅栏 + 落盘关口)
+        // 与轮次边界桥都挂上,与终端 RunTurn 同一形状(§15.5 app-server
+        // 走同一 TrajectorySink)。flag 关不建 hub,app-server 行为零变。
+        std::optional<runtime::ToolTraceHub> trajectory_hub;
+        std::unique_ptr<runtime::TrajectoryTurnBridge> trajectory_bridge;
+        runtime::TrajectorySessionLedger* trajectory_ledger =
+            record->session_runtime != nullptr ? record->session_runtime->trajectory() : nullptr;
+        if (trajectory_ledger != nullptr) {
+            runtime::TrajectoryTurnBridge::Identity identity{std::string(), options_.session_wire,
+                                                             "app_server"};
+            trajectory_bridge = trajectory_ledger->NewTurnBridge(std::move(identity));
+            if (trajectory_bridge != nullptr) {
+                trajectory_hub.emplace(record->session_runtime->ids(), nullptr);
+                trajectory_hub->Install(loop, wiring, thread_id, turn_id);
+                trajectory_hub->AttachTrajectory(trajectory_bridge.get());
+                wiring.boundary_recorder = trajectory_bridge.get();
+                trajectory_bridge->BeginTurn(turn_id, "external_user");
+                trajectory_bridge->RecordInput(user_message);
+            }
+        }
         // 图片走 Message 入口(与字符串入口同义,图片原样入 history)。
         const std::expected<agent::RunOutcome, std::string> outcome =
             loop.Run(user_message, wiring, &record->interrupt_requested);
+        if (trajectory_bridge != nullptr) {
+            trajectory_bridge->EndTurn(outcome.has_value(), outcome.has_value() && outcome->cancelled,
+                                       outcome.has_value() ? std::string() : outcome.error());
+            if (trajectory_hub.has_value()) {
+                trajectory_hub->DetachTrajectory();
+            }
+        }
         // 事件流收口:没收尾的条目(正文/思考/没终态的工具)由适配器统一
         // 按 Cancelled 补账——条目不悬空,前端好对账;终态分型随本地账。
         turn_events.Finish(!outcome.has_value() ? runtime::Outcome::Failed
@@ -1354,6 +1406,13 @@ nlohmann::json Server::HandleTypedDomainCommand(const IncomingRequest& request, 
     }
 
     // 执行:goal/loop/plan 各交各的状态机(实例按 thread 起,读线程单碰)。
+    // P0-2 轨迹:TrajectoryCommandExecutor 包住 app-server 命令入口
+    //(§15.7)——flag 开的 thread 落 command lifecycle。
+    runtime::TrajectorySessionLedger* trajectory_ledger =
+        record->session_runtime != nullptr ? record->session_runtime->trajectory() : nullptr;
+    const std::string command_trajectory_id =
+        trajectory_ledger != nullptr ? trajectory_ledger->BeginCommand(method, method, "session_state")
+                                     : std::string();
     static runtime::CommandService kDomainService(runtime::CommandService::Options{});
     const auto now_ms = [] {
         return std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -1369,6 +1428,10 @@ nlohmann::json Server::HandleTypedDomainCommand(const IncomingRequest& request, 
                                                    record->thread_id, now_ms);
     } else {
         receipt = kDomainService.HandlePlanCommand(command, record->session_runtime.get());
+    }
+    if (trajectory_ledger != nullptr) {
+        trajectory_ledger->EndCommand(command_trajectory_id, receipt.accepted,
+                                      receipt.accepted ? std::string() : receipt.error_code);
     }
     if (!receipt.accepted) {
         out_error = true;

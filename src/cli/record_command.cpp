@@ -8,6 +8,8 @@
 #include <optional>
 #include <sstream>
 #include <system_error>
+#include <utility>
+#include <vector>
 
 #include "skills/skill_drafter.hpp"
 #include "cli/console_input.hpp"
@@ -132,8 +134,132 @@ std::string RecorderStatusMarker(const std::optional<skills::WorkflowRecorder>& 
     return "REC · " + recorder->name();
 }
 
+// P0-2 轨迹选段器(§14.3):flag 开的会话里 /record 的全套动作。选段只圈
+// canonical refs(record.selection.* 事件进 main Journal),不旁听、不复制
+// 事实;草稿由 P0-5 的 SkillDraftCompiler 从同一 selection 确定性重编,
+// 这里 stop 后只报段位,不起草。
+void HandleRecordSelection(const ParsedRecordCommand& command, const std::string& args,
+                           RecordCommandContext& ctx, const Theme& theme) {
+    runtime::RecordSelectionController& selection = *ctx.selection;
+    const auto fail = [&theme](const std::string& code) {
+        TermOut() << theme.error << trf("record.op_failed", code) << theme.reset << "\n";
+    };
+    switch (command.action) {
+        case RecordCommandAction::Status:
+            if (selection.active()) {
+                TermOut() << trf("record.status.recording",
+                                 selection.paused() ? tr("record.status.paused_word")
+                                                    : tr("record.status.recording_word"),
+                                 selection.record_id(), std::string("trajectory"))
+                          << "\n";
+            } else {
+                TermOut() << tr("record.status.idle") << "\n";
+            }
+            return;
+        case RecordCommandAction::Start: {
+            if (selection.active()) {
+                TermOut() << theme.error << trf("record.already_active", selection.record_id()) << theme.reset
+                          << "\n";
+                return;
+            }
+            std::string goal;
+            std::vector<std::string> variables;
+            std::string acceptance;
+            if (const auto asked = Ask(tr("record.ask.goal"), theme); asked.has_value()) {
+                goal = *asked;
+            }
+            if (const auto asked = Ask(tr("record.ask.variables"), theme); asked.has_value() && !asked->empty()) {
+                variables.push_back(*asked);
+            }
+            if (const auto asked = Ask(tr("record.ask.acceptance"), theme); asked.has_value()) {
+                acceptance = *asked;
+            }
+            const std::string error = selection.Start(command.name, goal, variables, acceptance);
+            if (!error.empty()) {
+                fail(error);
+                return;
+            }
+            TermOut() << trf("record.started", selection.record_id(), std::string("trajectory selection"))
+                      << "\n";
+            return;
+        }
+        case RecordCommandAction::Note: {
+            const std::string error = selection.Note(command.text);
+            if (!error.empty()) {
+                fail(error);
+                return;
+            }
+            TermOut() << tr("record.note_saved") << "\n";
+            return;
+        }
+        case RecordCommandAction::Pause: {
+            const std::string error = selection.Pause();
+            if (!error.empty()) {
+                fail(error);
+                return;
+            }
+            TermOut() << tr("record.paused_msg") << "\n";
+            return;
+        }
+        case RecordCommandAction::Resume: {
+            const std::string error = selection.Resume();
+            if (!error.empty()) {
+                fail(error);
+                return;
+            }
+            TermOut() << tr("record.resumed_msg") << "\n";
+            return;
+        }
+        case RecordCommandAction::Stop: {
+            std::string verification;
+            if (const auto asked = Ask(tr("record.ask.verification"), theme); asked.has_value()) {
+                verification = *asked;
+            }
+            const std::string id = selection.record_id();
+            const std::string error = selection.Stop(verification);
+            if (!error.empty()) {
+                fail(error);
+                return;
+            }
+            TermOut() << trf("record.stop_done", id, std::string("trajectory selection")) << "\n";
+            TermOut() << theme.stats
+                      << "选段已封口(canonical 事件段与末 hash 已落 Journal);"
+                         "技能草稿由轨迹导出(P0-5)从同一 selection 确定性重编。"
+                      << theme.reset << "\n";
+            return;
+        }
+        case RecordCommandAction::Cancel: {
+            const std::string error = selection.Cancel();
+            if (!error.empty()) {
+                fail(error);
+                return;
+            }
+            TermOut() << tr("record.cancel_done") << "\n";
+            return;
+        }
+        default:
+            // list/discard/install 仍是 recordings 目录的旧管理面,照旧路走。
+            break;
+    }
+    // 落到旧路(list/discard/install)。
+    RecordCommandContext legacy = ctx;
+    legacy.selection = nullptr;
+    HandleRecordCommand(args, legacy, theme);
+}
+
 void HandleRecordCommand(const std::string& args, RecordCommandContext& ctx, const Theme& theme) {
     const ParsedRecordCommand command = ParseRecordCommand(args);
+
+    // P0-2 轨迹:选段器在位时,record 生命周期动作全走 selection;list/
+    // discard/install(旧录制的管理面)照旧路。
+    if (ctx.selection != nullptr &&
+        (command.action == RecordCommandAction::Start || command.action == RecordCommandAction::Status ||
+         command.action == RecordCommandAction::Note || command.action == RecordCommandAction::Pause ||
+         command.action == RecordCommandAction::Resume || command.action == RecordCommandAction::Stop ||
+         command.action == RecordCommandAction::Cancel)) {
+        HandleRecordSelection(command, args, ctx, theme);
+        return;
+    }
 
     switch (command.action) {
         case RecordCommandAction::Invalid:

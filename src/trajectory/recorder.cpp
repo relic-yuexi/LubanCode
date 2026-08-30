@@ -388,7 +388,13 @@ struct TrajectoryRecorder::Impl {
                 if (it == turn->calls.end()) {
                     return "state.call_unknown";
                 }
-                if (!it->second.started) {
+                // cancelled 是唯一不须 started 的终态:闸前被收掉的调用
+                //(审批拒绝/钩子拦下/Plan 闸/ESC 未轮到)没越过执行边界,
+                // 却仍要落明确 execution 终态(§6.2 约束 16"取消后须落到
+                // 明确 execution/turn/run 终态";约束 12 的悬空检查也靠它
+                // 收口)。finished/failed/unknown 仍须 started——那三态
+                // 声称的是执行边界之后的事实。
+                if (!it->second.started && kind != EventKind::ToolExecutionCancelled) {
                     return "state.tool_not_started";
                 }
                 // 约束 9:四选一,至多一枚。
