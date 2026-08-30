@@ -17,6 +17,8 @@
 #include <atomic>
 #include <cstdint>
 #include <expected>
+#include <functional>
+#include <optional>
 #include <set>
 #include <string>
 #include <vector>
@@ -135,6 +137,9 @@ struct TurnContext {
     lubancode::skills::WorkflowRecorder* recorder = nullptr;   // 生成技能录制(旁听)
     // Plan 模式(只读研究硬闸):ModePolicy 闸,空 = 没装。
     std::function<std::string(const std::string&, const nlohmann::json&)> mode_gate;
+    // 写前作用域闸(AGENTS.md 作用域单 P0):绑定本 Agent 的 resolver 与
+    // 已见指纹账。空 = 没装(旧装配),写工具不过闸。
+    std::function<std::optional<std::string>(const std::string&, const nlohmann::json&)> scope_gate;
     // 审批悬起旁听(loop 单遗留):真要问用户前 asked(true),答完 answered
     //(allowed)——装配层拿它推 loop scheduler 的 WaitingPermission 账。
     std::function<void(bool asked, bool allowed)> approval_observer;

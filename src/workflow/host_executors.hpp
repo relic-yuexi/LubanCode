@@ -36,6 +36,7 @@
 #include "agent/loop.hpp"
 #include "agent/prompt_assembler.hpp"  // PackageProfileRoot:子代理系统提示的包层根
 #include "api/backend.hpp"
+#include "config/project_instructions.hpp"  // ProjectInstructionResolver:AGENTS.md 作用域(作用域单 P0)
 #include "runtime/event_sink.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/interaction_broker.hpp"
@@ -166,6 +167,10 @@ public:
         // agent 的节点报 not_configured,不静默退回 default binding。
         CustomAgentResolver custom_agent_resolver;
         SubagentPromptMaterial subagent_prompt_material;  // 系统提示的会话材料
+        // ---- AGENTS.md 作用域(作用域单 P0)----
+        // 与主代理/agent 工具共用同一只 Resolver(§7.6);每枚 agent 节点
+        // 执行时自起一份已见指纹账。空(旧装配/单测)= 节点不过闸。
+        std::shared_ptr<const lubancode::config::ProjectInstructionResolver> instruction_resolver;
     };
 
     explicit AgentExecutor(Options options);

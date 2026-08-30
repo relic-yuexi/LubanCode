@@ -26,8 +26,10 @@
 #include "cli/spinner_backend.hpp"
 #include "cli/worktree.hpp"
 #include "config/config.hpp"
+#include "config/project_instructions.hpp"  // ProjectInstructionResolver:AGENTS.md 作用域解析(共用一份)
 #include "memory/project_memory.hpp"
 #include "package/mounting.hpp"  // PackageSnapshot:会话钉快照(阶段 3/6)
+#include "tools/instruction_scope.hpp"  // InstructionScopeState:主 Agent 的已见指纹账
 #include "tools/skill_loader.hpp"  // SkillMeta
 
 #include <atomic>
@@ -79,6 +81,12 @@ struct SessionStack {
     const std::optional<std::string> home_lubancode;
     const std::string prompts_dir;
     std::shared_ptr<lubancode::memory::ProjectMemory> project_memory;
+    // ---- AGENTS.md 作用域(作用域单 P0)----
+    // resolver 全会话一份,主代理/AgentTool/Workflow 三路共用(§7.6);
+    // 主 Agent 的已见指纹账自持一份。声明在 project_instructions 之前:
+    // 那截字符串从 resolver 的 baseline 链投影而来(构造序保证)。
+    std::shared_ptr<const lubancode::config::ProjectInstructionResolver> instruction_resolver;
+    std::shared_ptr<lubancode::tools::InstructionScopeState> instruction_scope_state;
     std::string project_instructions;  // /init、AGENTS.md 改动后可刷新
     const std::filesystem::path global_skills_root;
     const std::filesystem::path project_skills_root;

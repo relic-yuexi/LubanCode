@@ -93,6 +93,13 @@ std::shared_ptr<const lubancode::package::PackageSnapshot> BuildStartupPackageSn
 
 }  // namespace
 
+// baseline 指令串(作用域单 P0):Resolver 的链投影。与旧
+// LoadProjectInstructions 同一只手出账,格式逐字节一致。
+static std::string BuildBaselineInstructions(const lubancode::config::ProjectInstructionResolver& resolver,
+                                             const std::filesystem::path& cwd) {
+    return resolver.ResolveForPath(cwd).content;
+}
+
 // 首版语义:启动扫描装配一次,运行中目录变化不热生效——下回启动(或
 // /package reload 重折)才见(单子 §十二)。四层根与 /package 命令的
 // BuildScanOptions 同一套口径:home 的 packages、项目 .lubancode/packages、
@@ -229,8 +236,12 @@ SessionStack::SessionStack(const InteractiveSessionOptions& options)
       home_lubancode(lubancode::config::HomeLubancodeDir()),
       prompts_dir(home_lubancode.has_value() ? (*home_lubancode + "/prompts") : std::string()),
       project_memory(BuildProjectMemory(config_result.config, home_lubancode, options.executable)),
-      project_instructions(
-          lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content),
+      instruction_resolver(std::make_shared<const lubancode::config::ProjectInstructionResolver>()),
+      instruction_scope_state(std::make_shared<lubancode::tools::InstructionScopeState>()),
+      // 作用域单 P0:baseline 字符串改由共用的 Resolver 出账(同一只手,
+      // 零退化——格式与旧 LoadProjectInstructions 逐字节一致,单测钉死)。
+      project_instructions(BuildBaselineInstructions(*instruction_resolver,
+                                                     std::filesystem::current_path())),
       global_skills_root(home_lubancode.has_value()
                              ? lubancode::tools::Utf8ToPath(*home_lubancode) / "skills"
                              : std::filesystem::path()),
@@ -381,6 +392,9 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
         stack->agent_tool()->SetPackageProfileRoots(
             lubancode::package::MountProfileRoots(stack->CurrentPackageSnapshot()->mount()));
         stack->agent_tool()->SetProjectInstructions(stack->project_instructions);
+        // 作用域单 P0:子代理与主代理共用同一只 Resolver;各自自持已见
+        // 指纹账(RunTask 里现起)。
+        stack->agent_tool()->SetInstructionResolver(stack->instruction_resolver);
         if (stack->sub_deferral) {
             stack->agent_tool()->SetToolFilter(stack->sub_tool_filter());
             stack->agent_tool()->SetDeferredIndexProvider([raw = stack.get()]() {
@@ -396,6 +410,11 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
         TermOut() << theme.stats << trf("tool_search.enabled", stack->tool_search_threshold) << theme.reset
                   << "\n";
     }
+
+    // 作用域单 P0(§7.1):root->cwd 基线已拼进主系统提示,同 scope 的写
+    // 不重复拦。内容逐字节对上且未截断才登记——口径见 MarkBaselineSeen。
+    lubancode::tools::MarkBaselineSeen(*stack->instruction_resolver, *stack->instruction_scope_state,
+                                       std::filesystem::current_path(), stack->project_instructions);
     return stack;
 }
 

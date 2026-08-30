@@ -16,6 +16,8 @@
 #include "agent/turn_harness.hpp"  // DriveTurn:agent 节点的 turn 推进正门(批五乙)
 #include "platform/wall_clock.hpp"  // 统一墙钟(批五):trace 批头事件的钟同源
 #include "runtime/turn_event_adapter.hpp"
+#include "tools/instruction_scope.hpp"  // 写前作用域闸(AGENTS.md 作用域单 P0)
+#include "tools/path_utils.hpp"         // Utf8ToPath:材料里的 cwd 串转路径
 
 namespace lubancode::workflow {
 
@@ -252,6 +254,19 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
     // ToolExecutor 的 trace 上下文同口径)。控制口(确认/钩子)原样走
     // TurnWiring。
     agent::TurnWiring wiring = options_.callbacks;
+    // ---- 写前作用域闸(AGENTS.md 作用域单 P0,§7.6)-----------------------
+    // 每枚 agent 节点执行时自起一份已见指纹账(节点跑完即弃,不与兄弟
+    // 节点或主会话共享);Resolver 与主代理/agent 工具同一只。基线按
+    // subagent_prompt_material 里那截串"逐字节对上"预登记。没接 resolver
+    //(旧装配/单测)= 不过闸,行为照旧。
+    if (options_.instruction_resolver != nullptr) {
+        auto node_scope_state = std::make_shared<tools::InstructionScopeState>();
+        tools::MarkBaselineSeen(*options_.instruction_resolver, *node_scope_state,
+                                 tools::Utf8ToPath(options_.subagent_prompt_material.cwd),
+                                 options_.subagent_prompt_material.project_instructions);
+        wiring.on_scope_gate =
+            tools::BuildScopeGateCallback(options_.instruction_resolver, std::move(node_scope_state));
+    }
     runtime::TurnEventAdapter events(!options_.thread_id.empty() ? options_.thread_id : std::string("workflow"),
                                      options_.ids != nullptr ? *options_.ids : runtime::ProcessIdAuthority());
     {

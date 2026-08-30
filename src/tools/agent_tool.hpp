@@ -50,6 +50,7 @@
 #include "api/types.hpp"
 #include "agent/prompt_assembler.hpp"  // PackageProfileRoot:包层 Profile 根(阶段 3)
 #include "cli/worktree.hpp"
+#include "config/project_instructions.hpp"  // ProjectInstructionResolver:AGENTS.md 作用域(作用域单 P0)
 #include "hooks/detached.hpp"
 #include "hooks/dispatcher.hpp"
 #include "tools/isolation.hpp"
@@ -446,6 +447,18 @@ public:
 
     void SetSkillsSegment(std::string skills_segment) { skills_segment_ = std::move(skills_segment); }
     void SetProjectInstructions(std::string instructions) { project_instructions_ = std::move(instructions); }
+
+    // ---- AGENTS.md 作用域(作用域单 P0)----
+    // 与主代理共享同一只 Resolver(全会话一份);每只子代理的已见指纹账
+    // 在 RunTask 里现起、任务结束即弃(§7.6:不复制父 Agent 的最终字符串,
+    // 也不共享父的确认账)。不设(旧调用方/单测)= 子代理不过闸,行为
+    // 与从前一致。只读口给 Workflow 的 agent 节点取同一份,两路不各养一只。
+    void SetInstructionResolver(std::shared_ptr<const lubancode::config::ProjectInstructionResolver> resolver) {
+        instruction_resolver_ = std::move(resolver);
+    }
+    const std::shared_ptr<const lubancode::config::ProjectInstructionResolver>& instruction_resolver() const {
+        return instruction_resolver_;
+    }
     std::string name() const override;
     std::string description() const override;
     nlohmann::json input_schema() const override;
@@ -510,6 +523,9 @@ private:
     std::string project_prompts_dir_;  // Prompt Profile 项目层根(阶段 2):空 = 没有项目层
     std::vector<lubancode::agent::PackageProfileRoot> package_profile_roots_;  // 包层(阶段 3)
     std::string project_instructions_;  // 当前工作目录的 AGENTS.md 分层内容
+    // AGENTS.md 作用域(作用域单 P0):与主会话共享的 Resolver;空 = 旧
+    // 调用方没接,子代理不过闸。并发只读,const 全程安全。
+    std::shared_ptr<const lubancode::config::ProjectInstructionResolver> instruction_resolver_;
     Hooks hooks_;
     bool background_by_default_ = false;
     std::function<DetachedAgentBackend()> detached_backend_factory_;

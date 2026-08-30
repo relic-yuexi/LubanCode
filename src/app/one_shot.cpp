@@ -79,6 +79,7 @@
 #include "config/provider_catalog.hpp"
 #include "config/prompt_files.hpp"
 #include "config/project_instructions.hpp"
+#include "tools/instruction_scope.hpp"  // 写前作用域闸(AGENTS.md 作用域单 P0)
 #include "config/skill_store.hpp"
 #include "config/update_checker.hpp"
 #include "lsp/manager.hpp"
@@ -178,6 +179,12 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         home_lubancode.has_value() ? (*home_lubancode + "/prompts") : std::string();
     const std::string project_instructions =
         lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
+    // 作用域单 P0:单发与交互同一套闸——Resolver 一只、主 Agent 自持一份
+    // 已见指纹账;root->cwd 基线预登记(逐字节对上才算,见 MarkBaselineSeen)。
+    const auto instruction_resolver = std::make_shared<const lubancode::config::ProjectInstructionResolver>();
+    const auto instruction_scope_state = std::make_shared<lubancode::tools::InstructionScopeState>();
+    lubancode::tools::MarkBaselineSeen(*instruction_resolver, *instruction_scope_state,
+                                       std::filesystem::current_path(), project_instructions);
     std::shared_ptr<lubancode::memory::ProjectMemory> project_memory;
     if (home_lubancode.has_value() && config.memory.enabled) {
         auto identity = lubancode::memory::ResolveProjectIdentity(
@@ -223,6 +230,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         // 统一 Package 封装单阶段 3:包层 Profile 根,canonical 名在包里解析。
         agent_tool->SetPackageProfileRoots(lubancode::package::MountProfileRoots(package_snapshot->mount()));
         agent_tool->SetProjectInstructions(project_instructions);
+        // 作用域单 P0:单发的子代理与 main 共用同一只 Resolver。
+        agent_tool->SetInstructionResolver(instruction_resolver);
         // 病十(批三):四段开关随皮走——单发的子代理与 main 同段(mcp/web/
         // lsp 按配置、platforms 按 wire),不再走"四段不传"的薄壳。
         lubancode::agent::AgentProfile subagent_profile;
@@ -360,6 +369,9 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     std::error_code artifacts_ec;
     std::filesystem::create_directories(oneshot_artifacts, artifacts_ec);
     turn.tool_artifact_dir = oneshot_artifacts.generic_string();
+    // 作用域单 P0:单发 main 的写前作用域闸(嵌套 AGENTS.md 首写拦下注入,
+    // 重试放行)。
+    turn.scope_gate = lubancode::tools::BuildScopeGateCallback(instruction_resolver, instruction_scope_state);
     const int status = RunTurn(std::move(turn)).status;
     std::filesystem::remove_all(oneshot_artifacts, artifacts_ec);
     return status;

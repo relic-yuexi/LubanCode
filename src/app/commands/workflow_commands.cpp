@@ -1734,6 +1734,11 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
             };
         }
         agent_options.subagent_prompt_material = exec_ctx.subagent_prompt_material;
+        // 作用域单 P0:Resolver 取会话级 agent 工具那只(与主代理同一份,
+        // 三路不各养一只);没接 agent_tool(headless/旧装配)= 节点不过闸。
+        if (exec_ctx.agent_tool != nullptr) {
+            agent_options.instruction_resolver = exec_ctx.agent_tool->instruction_resolver();
+        }
         agent_options.registry = exec_ctx.registry;
         agent_options.task_loader = workflow_prompt_loader;
         // 批二:agent 节点上事件流(会话 sink,seq 与主回合同源)。

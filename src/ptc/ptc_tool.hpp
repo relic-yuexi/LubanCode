@@ -51,6 +51,10 @@ public:
         // ——单子明令"PTC 生成的调用也走 RunOneTool 与 ModePolicy,不能只
         // 拦 JSON tool calling"。不设 = 不转发(旧行为)。
         std::function<std::string(const std::string& tool_name, const nlohmann::json& input)> on_mode_policy;
+        // 写前作用域闸(AGENTS.md 作用域单 P0):stub 调用同一闸、同一份
+        // 主 Agent 确认账——PTC 不因脚本执行绕开写前门。不设 = 不转发。
+        std::function<std::optional<std::string>(const std::string& tool_name, const nlohmann::json& input)>
+            on_scope_gate;
         // 显示出水口(骨架拆解批二余款):stub 调用的起止上宿主的事件流
         // ——16 枚同构调用逐枚有账;subordinate_stream 恒真(从路):终端只
         // 画一张外层卡,不刷满屏(规格 UI 节)。不设 = 不上事件流(旧行为)。

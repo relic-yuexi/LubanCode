@@ -29,6 +29,7 @@
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:inbox 投递文本的编码关口
 #include "runtime/turn_runtime.hpp"    // MapPreToolDecision:PreToolUse 归并映射与主路径同一颗
+#include "tools/instruction_scope.hpp"  // 写前作用域闸(AGENTS.md 作用域单 P0)
 #include "tools/observation_filter.hpp"  // 观察边界(P2-5):子代理日志目录默认不可搜
 #include "tools/path_utils.hpp"
 #include "tools/subagent_isolation.hpp"
@@ -1863,6 +1864,19 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         turn_wiring.on_tool_phase = foreground_hooks->on_tool_phase;
         turn_wiring.on_post_tool_use_hook = foreground_hooks->on_post_tool_use_hook;
         turn_wiring.on_mode_policy = foreground_hooks->on_mode_policy;
+    }
+
+    // ---- 写前作用域闸(AGENTS.md 作用域单 P0,§7.6)-------------------------
+    // 每只子代理自持一份已见指纹账:任务结束即弃,不继承父 Agent 的确认,
+    // 也不与兄弟任务共享。Resolver 与主会话同一只。基线(root->cwd,拼在
+    // 系统提示里的那截)按"内容逐字节对上"预登记——对不上的(搬房/外部
+    // 改动/截断)首写重新注入。project_instructions 被 Agent 定义 omit 时
+    // 提示里没有那截串,基线自然不登记:首写即拦、规则照注(不能静默绕
+    // 过仓库规矩)。没接 resolver(旧调用方/单测)= 不过闸,行为照旧。
+    if (instruction_resolver_ != nullptr) {
+        auto task_scope_state = std::make_shared<InstructionScopeState>();
+        MarkBaselineSeen(*instruction_resolver_, *task_scope_state, Utf8ToPath(cwd_), project_instructions_);
+        turn_wiring.on_scope_gate = BuildScopeGateCallback(instruction_resolver_, std::move(task_scope_state));
     }
 
     // 打断信号(取消链,与主回合同一份):前台任务有三根——面板 x 置的
