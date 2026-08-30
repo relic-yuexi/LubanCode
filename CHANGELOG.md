@@ -449,7 +449,13 @@
 
 - **轨迹 Replay 与 resume 成真(P0-3)。** ReplayState 纯读折叠(对话投影带来源事件 id 与 origin、宿主注入不冒充 user、工具六事件台账、控制/证据账);state hash 确定性三处钉死(同账折两次同值、checkpoint 续折与整折同值、harness 桩与 exact 折叠同源)。exact 与 harness 两档全落——RecordedModelBackend 指纹比对不合即 divergence 不向后硬找,`trajectory replay|harness-replay|verify` 三命令进 CLI。
 - **resume 七步逐字落**:run.started(start_reason=resume)→resume.source.attached(qualified refs)→跨 session command.completed;新 session id/seq 全新,source Journal 字节数不变永不 reopen append;已完成 child 不内联。拒路齐(活锁/链断/无场),悬空工具三道账分档、unknown 副作用明标不可重跑。`--continue` 与 `/resume` 两口同规;/clear 轨迹档接八步换账(P0-2 遗留顺接);/exit 退出即封口(否则 --continue 永远找不着可恢复场)。
-- verifier 父子边五条交叉核全落(孤儿明报、同一 child 至多接受一次);顺手修 P0-2 真 bug:SpawnSubagent 造了 parent_run_id 却没落进 run.started,owner 边从未进账。flag 关零红,293/293 全绿。
+- verifier 父子边五条交叉核全落(孤儿明报、同一 child 至多接受一次);顺手修 P0-2 真 bug:SpawnSubagent 造了 parent_run_id 却没落进 run.started, owner 边从未进账。flag 关零红,293/293 全绿。
+
+## [v0.26.142] - 2026-08-31
+
+- **后台子代理能再派工了(递归派工单 P0 五批)。** 病灶拆除:转发壳直指主会话 AgentTool 的旧路退役,立 AgentTaskCoordinator(台账/治理/线程唯一 owner)+AgentDispatchHandle(weak 身份+冻结环境)+TLS 执行身份(防表串层);台账一笔写事务"验父→判限额→分 id→落边", children 改派生索引不养第二本账;SubagentScheduler 退纯 admission policy。
+- **结果归父不串线**:DrainCompletionNotices 只提 MainTurnContext 的根任务;嵌套孩子终态进直接父 mailbox(带"外来资料"声明,父亡未送达不 reparent);WaitingChildren+条件变量等待,等待不烧 token;取消级联整树(孩子记 ParentCancelled)。
+- **结构化任务合同**:agent schema 增 task 对象(goal/deliverable 必填、分栏限额、错误带 JSON path),legacy prompt 逐字节兼容;面板详情按栏摆任务合同+lineage 行。后台→前台、后台→后台两路假后端全链真跑通(真线程真引擎),main 只收根。288/288 全绿。
 
 ## [v0.26.65] - 2026-08-27
 
