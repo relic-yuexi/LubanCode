@@ -1,0 +1,327 @@
+# vLLM 本地模型（qwen3.8-27b）四 wire 支持勘察
+
+- 状态：勘察报告/待实现（本单未动任何 src/tests 代码，未做夹具）
+- 日期：2026-08-31
+- 级别：P0（openai-responses 思考事件名一笔 + 三只回归夹具）；P1（chat_template_kwargs 方言形状 + 目录 vLLM 条目）；P2（诊断与文档）
+- 范围：vLLM 0.27.1 @ `http://localhost:8001`（`qwen3.8-27b`，tp8，max_model_len 262144，system_fingerprint `vllm-0.27.1-tp8-e0441ef0`）；`/v1/chat/completions`、`/v1/responses`、`/v1/messages` 三面各两路（流式/非流式）；LubanCode 四家 wire（src/api/ 四目录）逐家对照；tests/fixtures/api 夹具缺口清单
+- 实测方式：真 curl 探测，max_tokens 8–300，请求/响应原文摘录见 §一；源码基准 worktree HEAD `2f0a917`（0.26.138，含 27ea15a「chat 解析兼容 delta.reasoning」与 Kimi 方言单）
+- 不在本单：改任何代码、真做夹具、gemini wire（vLLM 无此路由，不适用）、`/v1/completions` 旧补全面、vLLM 部署调优、模型质量评测
+
+## 一、先下断语
+
+这台 vLLM 三面齐全，帧形状几乎全在 LubanCode 四家 wire 的已知账内。chat 面与 anthropic 面今天配上 provider 就能跑——思考展示、工具循环、思考回传、usage 记账，一样不缺。responses 面差一口气：文本、工具、usage 都通，唯独思考整段被丢——LubanCode 只认 `response.reasoning_summary_text.delta`，vLLM 发的是 `response.reasoning_text.delta`，一字之差，帧帧跳过。
+
+关思考只有一条路真生效：`chat_template_kwargs.enable_thinking`。顶层 `enable_thinking` 这台端不认（发了照想不误）；anthropic 面 `thinking.type=disabled` 也不认（200 收下，思考照吐）。方言枚举里偏偏没有 chat_template_kwargs 这一档——这是第二缺口。
+
+```text
+vLLM qwen3.8-27b 实测形态                 LubanCode 现状
+chat      delta.reasoning                已认（双别名自动兼容，27ea15a）
+chat      tool_calls 流式增量            已认（标准形状）
+chat      assistant.reasoning 回传       不 400，可配 tool_episode
+responses response.reasoning_text.delta 不认 → 思考整段静默丢弃   ← P0
+messages  thinking 块 + signature_delta  已认（全套帧对上）
+三面      chat_template_kwargs 开关      方言枚举无此形状，落不了线 ← P1
+```
+
+## 二、端点实测（§一）
+
+### 2.1 API 面
+
+`/version` → `{"version":"0.27.1"}`。`/v1/models` →
+
+```json
+{"id":"qwen3.8-27b","owned_by":"vllm","max_model_len":262144}
+```
+
+openapi.json 全量路径：`/v1/chat/completions`（+batch/render/derender）、`/v1/responses`（+`{id}` get/cancel）、`/v1/messages`（+count_tokens）、`/v1/completions`（+render/derender）、`/tokenize`、`/detokenize`、`/metrics`、`/health`。三面齐。
+
+### 2.2 reasoning 形态定论
+
+三面三种方言，各有出处：
+
+| 面 | 流式 | 非流式 | 关思考真生效的写法 |
+|---|---|---|---|
+| chat/completions | `delta.reasoning`（每帧一片） | `message.reasoning` | `"chat_template_kwargs":{"enable_thinking":false}` |
+| responses | `response.reasoning_text.delta` 事件 | `output[].content[].type=="reasoning_text"`；`summary` 恒空 | （未单测；chat_template_kwargs 同源推测，未验证不写死） |
+| messages | `thinking_delta` + `signature_delta` | `content[]{type:"thinking",thinking,signature}` | 无——`thinking.type=disabled` 收下但被无视 |
+
+关键负例，都真测过：
+
+- 顶层 `"enable_thinking": false` → 200，思考照吐（思考文照来，content 为 null）。**被无视。**
+- messages 面 `"thinking":{"type":"disabled"}` → 200，思考照吐，stop_reason 撞 max_tokens。**被无视。**
+- `"chat_template_kwargs":{"enable_thinking":false}` → 思考消失，`content:"2"` 干净无前导空行。**唯一生效。**
+
+思考正文里模型偶尔自带 `Thinking:\n\n` 或 `Thinking Process:\n\n` 开头——模型行为，非模板注入，解析侧无需处理。思考转正文后 content 首帧常带 `\n\n` 前导（模板产物），LubanCode 原样透传，属观测记档，不动。
+
+`message.reasoning_content` 这个字段这台端**不发**（非流式与流式都无此键）。vLLM 0.27 用新名 `reasoning`。
+
+### 2.3 chat/completions 实测摘录
+
+非流式（基础，max_tokens=200）：
+
+```json
+{"choices":[{"message":{"role":"assistant","content":"\n\n2","reasoning":"Thinking:\n\n1. **Identify..."},
+  "finish_reason":"stop"}],
+ "usage":{"prompt_tokens":59,"completion_tokens":38}}
+```
+
+流式帧序（截关键帧）：
+
+```text
+data: {"choices":[{"delta":{"role":"assistant","content":""}}]}
+data: {"choices":[{"delta":{"reasoning":"We"}}]}
+data: {"choices":[{"delta":{"reasoning":" need"}}]}          ... (逐 token)
+data: {"choices":[{"delta":{"content":"\n\n2"}}]}
+data: {"choices":[{"delta":{},"finish_reason":"stop"}]}
+data: [DONE]
+```
+
+工具调用，非流式：
+
+```json
+{"choices":[{"message":{"content":null,"reasoning":"用户问北京气温……需要调用工具查询。\\n",
+  "tool_calls":[{"id":"chatcmpl-tool-a0d9a4d1bebbd50a","type":"function",
+    "function":{"name":"get_weather","arguments":"{\"city\": \"北京\"}"}}]},
+  "finish_reason":"tool_calls"}]}
+```
+
+工具调用，流式（标准 OpenAI 增量形状）：
+
+```text
+data: {"choices":[{"delta":{"reasoning":"The"}}]}                 ... 22 帧思考
+data: {"choices":[{"delta":{"tool_calls":[{"id":"chatcmpl-tool-955ccbe40430534b","type":"function","index":0,
+        "function":{"name":"get_weather"}}]}}]}
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\": \""}}]}}]}
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"北京"}}]}}]}
+data: {"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]}}]}
+data: {"choices":[{"delta":{},"finish_reason":"tool_calls"}]}
+data: [DONE]
+```
+
+`stream_options.include_usage:true` → 末尾多一只 usage-only chunk，`choices:[]`（与既有夹具 `vllm_qwen_reasoning_delta` 的 scenario 记账一致）：
+
+```text
+data: {"choices":[],"usage":{"prompt_tokens":59,"total_tokens":91,"completion_tokens":32}}
+data: [DONE]
+```
+
+回合续传（工具循环第二轮，assistant 历史带 `reasoning` 字段 + tool_calls，后接 role:tool）→ 200，模型正确用上工具结果作答。换 `reasoning_content` 字段名回传 → 同样 200 不报错。**两枚字段名都收**（服务端认没认、还是当无关字段丢掉，分不出来——不装懂，记"不拒收"）。
+
+### 2.4 /v1/responses 实测摘录
+
+请求形状（tools 平铺、`max_output_tokens`、`store:false` 200 认下、`input` 收字符串）全兼容。
+
+非流式 output 数组：
+
+```json
+{"output":[
+ {"id":"rs_aeb964886f47be44","type":"reasoning","summary":[],
+  "content":[{"text":"We need answer user: ...","type":"reasoning_text"}],"encrypted_content":null},
+ {"id":"...","type":"message","content":[{"type":"output_text","text":"\n\n2"}]}],
+ "status":"completed","usage":{"input_tokens":59,"output_tokens":38,
+   "output_tokens_details":{"reasoning_tokens":0}}}
+```
+
+思考原文在 `content[].reasoning_text`（vLLM 扩展），`summary` 恒空——OpenAI 官方是 `summary[].summary_text`，两者不同源。
+
+流式事件序（截关键帧）：
+
+```text
+data: {"type":"response.created","response":{...}}
+data: {"type":"response.output_item.added","item":{"type":"reasoning","summary":[],"content":null},"output_index":0}
+data: {"type":"response.reasoning_part.added","part":{"text":"","type":"reasoning_text"},"item_id":"..."}
+data: {"type":"response.reasoning_text.delta","delta":"We","item_id":"...","output_index":0}   ... 逐 token
+data: {"type":"response.reasoning_text.done","text":"We need answer user: ..."}
+data: {"type":"response.reasoning_part.done","part":{"text":"...","type":"reasoning_text"}}
+data: {"type":"response.output_item.done","item":{"type":"reasoning","content":[...]}}
+data: {"type":"response.output_item.added","item":{"type":"message","role":"assistant"},"output_index":1}
+data: {"type":"response.output_text.delta","delta":"\n\n2","output_index":1}
+data: {"type":"response.output_item.done",...}
+data: {"type":"response.completed","response":{...整份 output+usage...}}
+```
+
+工具流：reasoning 项之后——
+
+```text
+data: {"type":"response.output_item.added","item":{"type":"function_call","call_id":"call_b6db57c845012a73",
+        "name":"get_weather","arguments":"","status":"in_progress"},"output_index":1}
+data: {"type":"response.function_call_arguments.delta","delta":"{\"city\": \"","output_index":1}
+data: {"type":"response.function_call_arguments.delta","delta":"北京","output_index":1}
+data: {"type":"response.function_call_arguments.done","arguments":"{\"city\": \"北京\"}"}
+data: {"type":"response.output_item.done","item":{"type":"function_call",...,"status":"completed"}}
+data: {"type":"response.completed",...}
+```
+
+非流式 function_call 项带双 id：`id:"fc_..."` 与 `call_id:"chatcmpl-tool-..."`；流式实测一回 `call_id:"call_..."`——id 生成两副面孔，客户端两副都得吃得下。
+
+### 2.5 /v1/messages（anthropic 兼容层）实测摘录
+
+非流式：
+
+```json
+{"type":"message","role":"assistant","content":[
+ {"type":"thinking","thinking":"We need answer user: ...","signature":"533ec53d66e64b2cb30d34753e2914f8"},
+ {"type":"text","text":"\n\n2"}],
+ "stop_reason":"end_turn","usage":{"input_tokens":59,"output_tokens":34}}
+```
+
+signature 是 32 位 hex 假签（真 Anthropic 是 base64 Ed25519）。工具轮 content 换 `{"type":"tool_use","id":"chatcmpl-tool-...","name":"get_weather","input":{...}}`，`stop_reason:"tool_use"`。
+
+流式帧序（截关键帧，工具轮）：
+
+```text
+data: {"type":"message_start","message":{"id":"chatcmpl-b4f43dae7f10a182","role":"assistant",
+        "content":[],"usage":{"input_tokens":312,"output_tokens":0}}}
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"用户"}}
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"4bbde37d..."}}
+data: {"type":"content_block_stop","index":0}
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"chatcmpl-tool-a31f7da795ee7a5b","name":"get_weather","input":{}}}
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\": \""}}
+data: {"type":"content_block_stop","index":1}
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use"},"usage":{"input_tokens":312,"output_tokens":91}}
+data: {"type":"message_stop"}
+```
+
+无 ping 帧（真 Anthropic 有；parser 不依赖，无碍）。usage 只在 message_start/message_delta 两处，无 cache 字段。
+
+回合续传（assistant 历史带 thinking 块 + hex 假签 + tool_use，后接 tool_result）→ 200，模型接着思考并作答。**完整 agent loop 形状走得通。**
+
+`thinking:{"type":"enabled","budget_tokens":512}` → 200 收下（budget 有没有真被约束，16–300 token 的探测分辨不出，不写死）。`disabled` 无效，见 2.2。
+
+## 三、四家 wire 对照（§二）
+
+| wire | 判决 | 一句话根因 | 缺什么 |
+|---|---|---|---|
+| openai-chat-completions | **能用** | 27ea15a 已认 `delta.reasoning` 双别名；工具帧标准形状原生对上 | 关思考：方言 toggle 无 chat_template_kwargs 形状，/think off 落顶层 `enable_thinking` 被端无视 |
+| openai-responses | **勉强** | parser 只认 `response.reasoning_summary_text.delta`；vLLM 发 `reasoning_text.delta`（src/api/responses/events.cpp:244 只此一枝，其余"reasoning 相关静默跳过"） | 一枚事件名分支：`response.reasoning_text.delta` → ThinkingDelta；`reasoning_part.added/done`、`reasoning_text.done` 继续跳过即可 |
+| anthropic-messages | **能用** | 帧全套对上：thinking_delta/signature_delta/input_json_delta/message_delta(usage) parser 全认（src/api/anthropic/events.cpp） | 无硬缺口。记两笔怪癖：hex 假签回传已验通；`thinking.type=disabled` 端上无效（关不掉，只能靠 chat 面关） |
+| google-generate-content | **不适用** | vLLM 无此路由 | — |
+
+逐项说明：
+
+- **chat**：思考展示 ✓（双别名兼容，声明 `reasoning_delta_field:"reasoning"` 可钉死单字段）；工具循环 ✓（增量累积、finish_reason=tool_calls → stop_reason tool_use）；思考回传 ✓（`reasoning_replay:"tool_episode"` + `reasoning_replay_field:"reasoning"`，§四配置示例）；usage ✓（`stream_usage` 声明后吃 choices:[] 尾帧，`prompt_tokens_details.cached_tokens` 分摊也认）；max_tokens 省略不发 ✓（正合 vLLM 大上限）。唯一缺口是 toggle 形状。
+- **responses**：文本 ✓（`output_text.delta` 同名）；工具 ✓（`output_item.added` 取 `call_id`、`function_call_arguments.delta`、completed 里 output 数组判 function_call → tool_use）；usage ✓（completed 帧摊 input/cached）；`store:false` vLLM 认 ✓；思考 ✗（整段静默丢，见判决）。
+- **anthropic**：全套 ✓，含 `<think>` 裸标签恢复态机（`recover_tagged_thinking`，本机 qwen3.8 用不上——它发正规 thinking 块，正是 minicpm 夹具那只负路径的反面）。请求侧 thinking 块回传带 signature ✓（假签验通）。`max_tokens` 必填由兜底常量顶着 ✓。
+
+## 四、配置现状：今天怎么配上它（§三）
+
+`/provider add` 向导（src/app/commands/settings_commands.cpp:800）或手写全局配置。**无归一化**——chat/responses 两面 base_url 必须写到 `/v1`（client 直拼 `base+"/chat/completions"`、`base+"/responses"`）；anthropic 面写到根（直拼 `base+"/v1/messages"`，恰好对上 vLLM 的 `/v1/messages`）。
+
+主路（chat 面，今天就能跑）：
+
+```json
+{
+  "name": "vllm-local",
+  "base_url": "http://localhost:8001/v1",
+  "wire": "openai-chat-completions",
+  "auth": "none",
+  "model": "qwen3.8-27b",
+  "context_window_tokens": 262144,
+  "stream_usage": true,
+  "reasoning_replay": "tool_episode",
+  "reasoning_replay_field": "reasoning"
+}
+```
+
+- `reasoning_delta_field` 可不写：delta 侧双别名自动兼容。写了（`"reasoning"`）则钉死单字段，镜像字段诊断不再需要。
+- 想静态关思考：加 `"extra_body": {"chat_template_kwargs": {"enable_thinking": false}}`。这是 provider 级浅合并，**改不动 `/think` 档位**——/think off 会落顶层 `enable_thinking:false`，被端无视，UI 不会报错。现状勿用 /think 关，用 extra_body。
+- `/think` 档位表：`supported_think_levels` 不声明则 UI 一律"未经能力验证"。vLLM 这端连 reasoning_effort 参数都不吃（qwen3 走模板开关），建议整段不碰。
+
+anthropic 面（`base_url` 换根、wire 换名）：
+
+```json
+{
+  "name": "vllm-local-msg",
+  "base_url": "http://localhost:8001",
+  "wire": "anthropic-messages",
+  "auth": "none",
+  "model": "qwen3.8-27b",
+  "context_window_tokens": 262144
+}
+```
+
+responses 面（P0 落地前思考不显示，文本工具可用）：
+
+```json
+{
+  "name": "vllm-local-resp",
+  "base_url": "http://localhost:8001/v1",
+  "wire": "openai-responses",
+  "auth": "none",
+  "model": "qwen3.8-27b",
+  "context_window_tokens": 262144
+}
+```
+
+目录缺口：model_catalog/provider_catalog 均无 vLLM 条目、无 qwen 条目（grep 全空）。后果有三——`request.reasoning` 恒空（interactive_session_assembly.cpp:935 只认目录条目），四家 wire 全走 legacy 路径；方言（delta/replay/开关形状）无处声明；`/doctor`、`/model` 的能力展示全按未知算。根目录三份兼容手册（阿里云等）亦无 vLLM 页。
+
+## 五、mock 夹具缺口清单（§四）
+
+现有体系：`tests/fixtures/api/<wire>/` 下 `.json`（manifest：fixture_id/wire/provider/model/scenario/expected_events/expected_replay/usage_expectation/stop_reason）+ `.sse`（原始流），由 `tests/unit/api/test_api_fixture_replay.cpp` 四切法（整帧/单字节/随机小块/并帧）回放对账，`tests/integration/api/test_wire_replay.cpp` 做两轮 HTTP 回环。已有 vLLM 血统两只：
+
+- `openai_chat/vllm_qwen_reasoning_delta`——本机 qwen3.8 思考流 + usage-only 尾帧（27ea15a 落）
+- `anthropic_messages/live_vllm_minicpm5_post_tool_raw_think`——vLLM anthropic 层裸 `<think>` 标签负路径
+
+要"相对完美 mock 出这台 vLLM 四路"，缺四只（gemini 不适用，不列）：
+
+| 待新增文件（同目录成对 .json/.sse） | 场景 | expected_events 要点 |
+|---|---|---|
+| `openai_chat/live_vllm_qwen38_tool_episode_stream` | 思考 → 工具调用流（chatcmpl-tool- id、arguments 分片、finish tool_calls、include_usage 尾帧） | MessageStart / ThinkingDelta×N / ToolUseStart / ToolUseInputDelta / ContentBlockDone / MessageDone(stop=tool_use, usage) |
+| `openai_responses/live_vllm_qwen38_reasoning_text_stream` | response.reasoning_part.added → reasoning_text.delta×N → done → message 项文本（**P0 回归钉**：落地前 parser 丢思考，expected 写 ThinkingDelta×N，先红后绿） | MessageStart / ThinkingDelta×N / TextDelta / MessageDone |
+| `openai_responses/live_vllm_qwen38_function_call_stream` | reasoning 项 → function_call 项 → arguments.delta 分片 → completed(带 usage) | ToolUseStart / ToolUseInputDelta / ContentBlockDone / MessageDone(stop=tool_use, usage) |
+| `anthropic_messages/live_vllm_qwen38_thinking_then_tool_use` | thinking 块 + hex signature_delta → tool_use 块 input_json_delta 分片 → stop_reason tool_use（与 manual_thinking_then_tool_use 成对：那只是真签形状，这只是 vLLM 假签 + chatcmpl-tool- id） | MessageStart / ThinkingDelta / ToolUseStart / ToolUseInputDelta / ContentBlockDone / MessageDone(stop=tool_use) |
+
+manifest 里 `expected_replay` 各写一句：chat 面记"回传字段 reasoning、tool_episode 段标记"；responses 面记"reasoning 一次性不回传（`__thinking_skip__`）"；anthropic 面记"假签回传、不校验格式"。四只齐后，wire_replay 集成册加两轮回环 CASE 各一（chat：第二轮 assistant.reasoning 回传形状；responses：function_call_output 形状）。
+
+## 六、根因与实现分期（§五）
+
+**根因一（responses 思考丢）**：`src/api/responses/events.cpp` 的 `parse_event` 只挂 `response.reasoning_summary_text.delta` 一枝。vLLM 的 `reasoning_text` 系（OpenAI 新版 API 亦同）全部落进"没见过的事件静默跳过"。改动面一枚分支：`response.reasoning_text.delta` 走既有 `HandleReasoningDelta`（同样取 `delta` 字段），`.done`/`reasoning_part.*` 维持跳过。
+
+**根因二（关思考落不了线）**：`ReasoningWireDialect.toggle` 枚举只有 `none | enable_thinking_bool | thinking_type | include_thoughts`（src/api/reasoning.hpp:39）。qwen3 模板要 `chat_template_kwargs.enable_thinking`，枚举里没有。现状三条出路全歪：顶层布尔被端无视；extra_body 是静态 provider 级，/think 切不动；legacy `thinking.type` 更不沾边。
+
+**根因三（目录无名分）**：无 vLLM provider 预设、无 qwen 模型条目 → `request.reasoning` 恒空，方言体系（0.26.126 落的）对本地端全不生效，只能靠 provider 平铺字段（replay/replay_field）撑住 chat 面。toggle 形状就算加了枚举，没有目录条目也没人声明它。
+
+分期：
+
+- **P0（不加新功能让它跑起来）**
+  1. responses parser 补 `response.reasoning_text.delta` → ThinkingDelta（一处分支，约五行）。
+  2. 落 §五 前两只夹具（responses 思考流先红后绿；chat 工具流补全）。
+  3. 文档不待代码：§四 的三份 provider 配置即今日可用指南（chat/anthropic 两面全功能，responses 面文本工具可用）。
+- **P1（方言与目录）**
+  1. 方言 toggle 加形状：`chat_template_kwargs_enable_thinking`（值落 `body["chat_template_kwargs"]["enable_thinking"]`），provider_catalog 校验表同步。
+  2. 目录加 vLLM 预设（provider 级：base_url 占位 https:// 规则需放行 localhost 或留文档示例、stream_usage true、replay tool_episode、replay_field reasoning）与 qwen3.8 模型条目（delta reasoning、toggle chat_template_kwargs_enable_thinking、supports_toggle true）。
+  3. anthropic 面对 `thinking.type=disabled` 无效这事，`/doctor` 真机探针明报（当前会静默收下）。
+- **P2（锦上添花）**
+  1. 根目录补一份「vLLM 兼容」手册（三面帧实录即 §二 底稿），挂进 fixture hash 对账。
+  2. `metrics_url` 指向 vLLM `/metrics`（Prometheus 文本）的 /doctor cache 读数验证。
+  3. responses 非流式 `content[].reasoning_text` 的展开路径（当前全流式，非必需）。
+
+## 七、测试矩阵草案（§六）
+
+| 路 | 场景 | 钉法 |
+|---|---|---|
+| unit.api.fixture_replay | 四只新夹具 × 四切法 | expected_events/usage/stop_reason 与 manifest 对账 |
+| unit.api.responses_events（如无则 fixture_replay 代） | reasoning_text.delta 逐帧/跨 chunk | 与 summary 系并存不串线：两只事件名同帧流各吐各的 ThinkingDelta |
+| integration.api.wire_replay | vLLM-chat 两轮回环 | 第二轮 HTTP 体里 `assistant.reasoning` 原字节 + tool_calls + role:tool |
+| integration.api.wire_replay | vLLM-responses 两轮回环 | 第二轮 function_call_output 形状；思考项不回传 |
+| integration.api.wire_replay | vLLM-messages 两轮回环 | 第二轮 thinking 块带 hex signature 原样回传 |
+| unit.config.provider_catalog | vLLM 预设 + qwen 条目 parse | 方言字段全落、wire 校验过 |
+| unit.api.chat_request | chat_template_kwargs 开关落线 | dialect 声明后 on/off 两态各落各的嵌套键；未声明零污染 |
+| 真机抽验（不进 CTest） | §二 各 curl 复跑 | 三面 × 流/非流 × 思考/工具，max_tokens≤300；配 cpr 驱动四幕的套路灯（memory: cpr 驱动器验收） |
+
+真机抽验命令骨架（Windows 真控制台，注意管道编码——先用 `-o` 落文件再 python 读，勿裸管道）：
+
+```bash
+curl -s http://localhost:8001/v1/models
+curl -s -N http://localhost:8001/v1/chat/completions -H "Content-Type: application/json" \
+  -d @chat_tool_stream.json -o out.sse        # 思考+工具流
+curl -s -N http://localhost:8001/v1/responses -H "Content-Type: application/json" \
+  -d @resp_basic_stream.json -o out2.sse      # reasoning_text.delta 系
+curl -s -N http://localhost:8001/v1/messages -H "Content-Type: application/json" \
+  -d @msg_tool_stream.json -o out3.sse        # thinking/signature_delta/input_json_delta
+```
+
+## 八、实测请求/响应存档
+
+原始探测脚本与响应落在本单撰写时的临时目录（todos/.probe/，随本单清理，不进库）。摘要即 §二 各节引文；复跑按 §七 命令骨架。探测日期 2026-08-31，端点与版本以当日为准——vLLM 小版本间 reasoning 字段名有迁徙史（reasoning_content → reasoning），换版本先重探 §2.2 三桩负例再对表。
