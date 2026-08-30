@@ -466,7 +466,8 @@ nlohmann::json MakeInitializeResult(std::string_view lubancode_version, std::str
         std::string(kMethodLoopResume),      std::string(kMethodLoopCancel),
         std::string(kMethodLoopRunNow),      std::string(kMethodPlanSetMode),
         std::string(kMethodPlanReview),      std::string(kMethodPlanReopen),
-        // 浏览器调试工作台阶段 3:browser 面(方法 18 枚,事件 13 族)。
+        // 浏览器调试工作台阶段 3 + 多前端外壳阶段 B:browser 面(方法
+        // 20 枚,事件 15 族)。
         std::string(kMethodBrowserStart),
         std::string(kMethodBrowserStop),
         std::string(kMethodBrowserStatus),
@@ -482,6 +483,8 @@ nlohmann::json MakeInitializeResult(std::string_view lubancode_version, std::str
         std::string(kMethodBrowserScreenshot),
         std::string(kMethodBrowserAction),
         std::string(kMethodBrowserActionCancel),
+        std::string(kMethodBrowserPause),
+        std::string(kMethodBrowserResume),
         std::string(kMethodBrowserConsoleQuery),
         std::string(kMethodBrowserNetworkQuery),
         std::string(kMethodBrowserDownloadsQuery)};

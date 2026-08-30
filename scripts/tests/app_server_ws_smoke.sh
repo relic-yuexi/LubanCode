@@ -9,7 +9,8 @@ repo="$(cd "$here/../.." && pwd)"
 
 binary="${LUBANCODE_BINARY:-}"
 if [[ -z "$binary" ]]; then
-  for candidate in "$repo/build/debug/lubancode.exe" "$repo/build/lubancode.exe" \
+  for candidate in "$repo/build/debug/lubancode.exe" "$repo/build/debug/Debug/lubancode.exe" \
+                   "$repo/build/lubancode.exe" \
                    "$repo/build/lubancode" "$repo/build/Debug/lubancode.exe" \
                    "$repo/build/Release/lubancode.exe"; do
     if [[ -e "$candidate" ]]; then

@@ -1,5 +1,5 @@
 # 多前端外壳与浏览器 Tab：AppServer 承载设计
-- 状态：阶段 A 已落地（0.26.109 WS 承载）；阶段 B（输入路由与暂停）起待实现
+- 状态：阶段 A 已落地（0.26.109 WS 承载）；阶段 B（输入路由与暂停）已落地（owner 内核裁定、用户优先路、browser/pause|resume，仲裁三案+伪造案进册）；阶段 C（镜像流）起待实现
 - 日期：2026-08-29
 - 前置：`todos/内嵌浏览器调试工作台_BrowserRuntime与Package边界.todo`（阶段 0-3、5 已落）
 - 相关：`src/app_server/`（协议 1.1）、`docs/features/app-server/README.md`、`browser/`（Runtime 与 sidecar）
@@ -138,9 +138,18 @@ WebView，内核谁的都不欠。
 
 ### 阶段 B：用户输入路由与暂停
 
-- [ ] `owner:"user"` 动作路（不排队、递 epoch）。
-- [ ] `browser/pause|resume`，暂停语义如 §4.2。
-- [ ] 仲裁测试：用户让路、Agent stale、暂停受理不执行。
+- [x] `owner:"user"` 动作路（不排队、递 epoch）。owner 由内核按连接裁定
+  （`DispatchContext::principal`，stdio/过门 WS 一律 "user"，外壳报什么不算
+  数——agent 连接假冒 user 报 `browser.owner_denied`）；用户动作不排队
+  （挑队先挑用户，在途的让不了——串行底线）、不带 threadId、执行后 sidecar
+  递 userEpoch（`browser/user_epoch` 事件，Agent 旧 ref 报 `browser.stale_ref`）。
+- [x] `browser/pause|resume`，暂停语义如 §4.2。暂停期间 Agent 动作一律
+  受理不执行、终态 `browser.paused`（不发审批），用户动作照走；终态事件
+  照发；手闸只归用户连接；`browser/status` 带 `paused` 旗。
+- [x] 仲裁测试：用户让路、Agent stale、暂停受理不执行——C++ 册（假
+  sidecar 三案 + owner 伪造/缺省/暂停手闸案）+ WS 独立客户端（免依赖的
+  暂停案 + playwright 在场的真页面三案）+ browser 直调矩阵（owner=user
+  注入动作递观察代案）。
 
 验收：参考前端能安全点页面，Agent 不抢用户的手。
 

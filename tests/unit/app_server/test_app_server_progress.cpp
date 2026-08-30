@@ -550,7 +550,8 @@ TEST_CASE("methods 冻结矩阵:能力表如实报接线面") {
     const nlohmann::json& caps = result["capabilities"];
     // 接线的:握手三件 + thread 六件 + turn 两件 + workflow/query + trace/query
     // (trace 已接线但历史上没进这张矩阵——goal 单合流批补账)+ goal 六件 +
-    // loop 七件 + plan 三件 + browser 十八件(可见调试阶段 3,协议 1.1)。
+    // loop 七件 + plan 三件 + browser 二十件(可见调试阶段 3 的十八件 +
+    // 多前端外壳阶段 B 的 browser/pause|resume 两件,协议 1.1 additive)。
     const std::vector<std::string> expected_methods = {
         "initialize", "initialized",      "shutdown",     "thread/start", "thread/list",
         "thread/stop", "thread/archive",  "thread/unarchive", "thread/delete",
@@ -565,7 +566,8 @@ TEST_CASE("methods 冻结矩阵:能力表如实报接线面") {
         "browser/page/forward", "browser/page/reload",
         "browser/snapshot", "browser/screenshot", "browser/action",
         "browser/action/cancel", "browser/console/query", "browser/network/query",
-        "browser/downloads/query"};
+        "browser/downloads/query",
+        "browser/pause", "browser/resume"};
     std::vector<std::string> actual = caps["methods"];
     std::sort(actual.begin(), actual.end());
     std::vector<std::string> expected = expected_methods;

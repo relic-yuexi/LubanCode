@@ -671,6 +671,9 @@ class BrowserSession {
   // Agent 自家的输入动作(click/type/select 的键盘鼠标段)包一层旗:
   // 期间页面监听到的输入事件不算用户动作,不误递观察代。竞态窗口若仍有
   // 迟到事件溜进来,只会多递一代——方向是"多一次快照",安全侧。
+  // 协议注入的用户动作(多前端外壳单阶段 B)也包这层旗——注入的
+  // pointerdown/keydown 若不遮,监听器会在动作中途多记一代;遮掉之后
+  // 由 observeUserInput 在动作收尾时明递恰一代。
   async withAgentInput(job) {
     this.agentActing = true;
     try {
@@ -678,6 +681,14 @@ class BrowserSession {
     } finally {
       this.agentActing = false;
     }
+  }
+
+  // 用户输入动作的收尾账(阶段 B):owner=user 的注入动作成功了,观察代
+  // 明递一代——Agent 拿旧 snapshot 的 ref 再动作,refLocator 对表即报
+  // stale(仲裁第 4 条,与真手点同一条规矩)。
+  observeUserInput(pageId, entry) {
+    entry.userEpoch += 1;
+    this.emitEvent('user_epoch', { pageId, userEpoch: entry.userEpoch });
   }
 
   // -------------------------------------------------------------------------
@@ -784,6 +795,9 @@ class BrowserSession {
     if (count > 1) throw toolError('browser.target_not_unique', 'ref ' + ref + ' 解析到 ' + count + ' 个目标,拒绝乱点第一个。重新 browser_snapshot 拿唯一 ref。');
     const before = target.entry.generation;
     await this.withAgentInput(() => withDeadline(locator.click({ timeout: timeoutMs }), timeoutMs, '点击 ' + ref));
+    if (options.owner === 'user') {
+      this.observeUserInput(target.id, target.entry); // 用户路:观察代 +1,旧 ref 即 stale
+    }
     // 点击后等"真稳态":framenavigated 异步注册,waitForLoadState 对已
     // 载完的页会立即返回——先给换页一小口气(1.5s 内代数变了才算导航),
     // 再等 domcontentloaded 收尾。
@@ -824,6 +838,9 @@ class BrowserSession {
     }
     if (options.pressEnter) {
       await this.withAgentInput(() => withDeadline(locator.press('Enter', { timeout: timeoutMs }), timeoutMs, '按回车'));
+    }
+    if (options.owner === 'user') {
+      this.observeUserInput(target.id, target.entry); // 用户路:观察代 +1,旧 ref 即 stale
     }
     // 密码值永不出账:typed 只回 '[password]'。
     return {
@@ -893,6 +910,9 @@ class BrowserSession {
       locator.selectOption(picked.map((o) => ({ value: o.value })), { timeout: timeoutMs }),
       timeoutMs, '选 ' + ref,
     ));
+    if (options.owner === 'user') {
+      this.observeUserInput(target.id, target.entry); // 用户路:观察代 +1,旧 ref 即 stale
+    }
     // 选完读回实际选中项:回执以页面为准,不以请求为准。
     const chosen = await withDeadline(
       locator.evaluate((el) => Array.from(el.selectedOptions).map((o) => ({ value: o.value, label: String(o.label || o.text || '').trim() }))),

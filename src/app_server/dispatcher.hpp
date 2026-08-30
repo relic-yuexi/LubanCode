@@ -46,6 +46,14 @@ struct DispatchContext {
     // thread/start 等业务要用的服务句柄(由 server 装配层填)。
     void* service = nullptr;
 
+    // 这条请求打哪儿来(多前端外壳单阶段 B):内核按**连接与鉴权**盖的
+    // 身份章,"user" = 操作者本人的手(stdio 宿主、回环免鉴权的 WS、过了
+    // token 门的 WS),"agent" = 模型的手(内核内部发放;多客户端 §4.4
+    // 的 agent 连接)。缺省 "user" 是兼容口径——今天的协议调用方都是
+    // 操作者。handler 拿它裁定权限(browser 的 owner 仲裁),**外壳在
+    // params 里报什么不算数**(设计单 §六:Agent 假冒不来)。
+    std::string principal = "user";
+
     // 出事件用(事件经这条路走,handler 不直接碰 outbox——保持 dispatcher
     // 纯逻辑可测)。事件一律 must_keep 分型见 outbox.hpp 的 EventMustKeep。
     std::function<void(std::string_view method, const nlohmann::json& params, bool must_keep)> emit_event;
