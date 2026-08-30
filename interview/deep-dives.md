@@ -147,6 +147,26 @@ LubanCode 是一只 C++23 终端 coding agent。它把三家模型协议翻进�
 
 2026-08-30 本机 `0.26.127` Windows Release 主程序为 `11.04 MiB`。`--version` 51 次点测，中位 `211.03 ms`，P95 `853.49 ms`。这只量短命令起进程、输出、退出，不等于交互 ready，也不是受控冷启动。完整发行包还带 skills、文档与安装脚本；“主程序单二进制”和“发行包单文件”不能混叫。
 
+### BM25 参数调过吗
+
+`k1=1.5`、`b=0.75`，取常用档，没有扫参。这里的一篇“文档”其实是一张结构化 `MemoryEntry`：标题、摘要、scope、关键词、路径和 evidence 符号；不是整份源码。现有固定问句量了最终召回，却没报 `doc.len` 分布，也没隔离硬命中对 BM25 参数的遮蔽。故不能说“按代码语料调过”。
+
+### LaTeX 盒子怎样向上冒高度
+
+盒子只存 `rows/width/baseline`；ascent 是 baseline，descent 是余下行数。分式线就是新盒 baseline，`HBox` 按各盒最大 ascent/descent 平移，所以左右文本对齐分数线。嵌套分式先产完整子盒，再把总行数与 baseline 交给父层。括号没有字号档：一行用普通字符，多行用 Unicode 顶、中、底件按实际行数拼。
+
+### compact reduce 到哪一层停
+
+冷区按外层用户输入与 `todo_write` 分 episode，超预算再按整轮切，块数随 token 预算变化。reduce 相邻两两并，最多四轮。四轮后若仍超窗，现版没有本地拒绝，仍发终稿请求；服务端拒绝后旧 history 不动。这是当前终止收口的欠账。
+
+### cancel flag 用什么内存序
+
+轮核与多信号合并口用 release store / acquire load；若干下游裸 `load()` 是默认 `seq_cst`。都安全。单纯停止旗用 relaxed 也够，acquire/release 只有在 true 同时发布别的非原子状态时才必要。`seq_cst` 也不能让阻塞 syscall 自动醒来，更不能替多字段状态机做事务。
+
+### ACP 转码成功等于文字正确吗
+
+不等于。当前先验 UTF-8；非法才试 ACP，转完再验 UTF-8 合法。那只验结构，不验语义。`C2 A1` 在 CP936 是“隆”，在 UTF-8 是“¡”；它本身合法 UTF-8，现版会直接取“¡”。可靠办法是让进程、Hook、HTTP 或文件边界明示编码；来源未知时留标签与原始摘要，不靠猜。
+
 ### JSON Schema 是不是安全边界
 
 不是。schema 只描述输入形状。路径范围、命令危险度、权限、Hook、OS 账户能力另有边界。现版还有一项明确欠账：Hook 给出的 `updatedInput` 会过统一 schema 复检；模型原始入参主要靠 provider 结构化调用与各工具自己的参数检查，尚未在 `RunOneTool` 入口统一验 schema。
@@ -178,6 +198,9 @@ Skill 给模型一份做事说明，靠模型理解后调用普通工具。Hook 
 - 不说“后台命令跨平台完全同语义”。POSIX 探活后拿不到准确退出码，异常退出时收尾也弱于 Windows Job Object。
 - 不说“模型请求会自动重试”。当前网络错、`429`、`5xx` 与流错误都直接返回；continuation 另算。
 - 不说“每一级 compact 都同样强验收”。严格 manifest 与待办守恒在终稿；map 与中间 pair merge 较松。
+- 不说“compact 会无限递归直到装下”。reduce 最多两两归并四轮，四轮后的本地超窗拒绝尚未补。
+- 不说“BM25 参数按代码语料调过”。现版取常用值，固定尺子没有做 `k1/b` 消融。
+- 不说“ACP 转成合法 UTF-8 就证明解码正确”。合法只是一道字节结构检查。
 - 不说“已经接入 OpenCode 或 Models.dev”。当前目录是 LubanCode 自有格式，仓内直接记载借鉴 Codex model-catalog。
 - 不说“模型 capability 都会自动拦截不兼容请求”。若干字段当前只解析、展示或留作后续接线。
 

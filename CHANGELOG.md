@@ -378,6 +378,12 @@
 - **多渠道 ChannelPlugin 单立了合同(阶段 0)。** 六份冻结文档落 docs/architecture/channels/:总览三条水路与六界分账(PluginTool/MCP/ChannelPlugin/Package/AppServer/Peer 各管什么)、channel.yaml schema 1(占位符信任规矩照 Package 先例)、Channel Bridge v1 帧协议(19 枚 method、JSON-RPC 五码+15 个 domain 稳定名)、入站/出站消息契约(17 态状态机、三级去重键、三档回复模式)、四层配置(项目只能收窄、八枚决策码)、安全账(威胁-防线对照、数据保留 14 类、泄露禁令)。
 - 顺手修了单子的状态行事故(§19.2"状态迁移失败"原是不自动重试清单的一项,头部根本没有状态行)。阶段 1 起才动 src/channel/,照 Lua 单先例:合同先行,不接真渠道。
 
+## [v0.26.130] - 2026-08-30
+
+- **Compact 四分区地基落了(单阶段 0+1)。** 三缺口先堵:手工 /compact 接上反涨闸(与自动路同一只压力口径、同一只闸——拒收不换账不落事件不进 epoch);constraints/next_action schema 收紧(坏 manifest 整枚拒收,旧史不动);四份私有 turn splitter 拼成一份(`SplitIntoTurns` 进 context.hpp,空壳 user 不开轮——免得劈开工具原子组)。
+- **TurnPartitionPlan 纯函数**:按 L1 工作视图 token 平衡切 N 份(整数账不引浮点、并列取早界保确定性),边界只落 turn 之间;工具原子组按 tool_use_id 收齐永远整组在一枚 turn 内(orphan/悬空点名不静默)。旧存档剥离不算 turn 不占账。
+- **不调模型就能看账**:`/compact --dry-run` 出四份各有哪些 turn、各占多少 token、外置几枚 ToolResult、预计 map 几次;/context 加策略行。`compact_partition_count` 配置 2..8 可调,越界带文件路径报错。17-turn 冒烟:P1-P4 逐份列出,长 ToolResult 外置后工作视图 4120→1295 token。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。

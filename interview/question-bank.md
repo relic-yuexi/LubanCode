@@ -280,6 +280,180 @@ Windows Defender、文件缓存与调度噪声。故我会说“可执行文件 
 证据：[`version.hpp`](../src/app/version.hpp)、[`release.yml`](../.github/workflows/release.yml)、
 [`portfolio.md`](portfolio.md)。
 
+## D 组：往算法里钻
+
+这组题最忌顺着面试官的话头乱认。实现若与通用教科书不同，先把本项目的数据结构
+画出来。参数没调过，便直说没调过。
+
+### 1. BM25 的 `k1`、`b` 取多少？按代码语料调过吗？
+
+**先答：** 现版 `k1=1.5`，`b=0.75`。这两只数取的是常用档，不是从 LubanCode
+语料上扫参得来。仓库里没有 `k1/b` 参数化入口、网格搜索或消融报告。故“为什么
+这样取”的准确答案是：先用了稳妥默认值，再靠固定检索集守最终指标；不能说成
+“针对代码仓库调优”。
+
+还要纠正一个前提：这里的 BM25 文档不是源码文件，也不是任意 Markdown。每条
+`MemoryEntry` 才是一篇短文档。索引只拼 `title + summary + scope.value + keywords +
+paths + evidence.path/symbol`，连长 `content` 都不放进去。`doc.len` 统计分词器吐出的
+词项次数；中文整词、二元片段、标识符整串与拆词都可能同时入账。它的长度分布更像
+结构化记忆卡，不像新闻语料，也不像整份代码文件。
+
+`k1` 管词频饱和。取 `1.5`，同一词在标题、关键词和路径里反复出现仍会加分，可很快
+收住。`b=0.75` 给了较强长度归一；对短卡未必合适，长卡可能吃亏。更要紧的是，
+系统另有路径 `12` 分、关键词/符号 `8` 分等硬命中，BM25 又乘 `2` 后封顶 `24`
+分。固定尺子全绿，未必说明 `k1/b` 取对了，可能是硬分把参数差异盖住了。
+
+当前 IDF 也不是教科书原式，而是：
+
+```text
+idf = ln(1 + N / df)
+score = weight * idf * tf * (k1 + 1)
+        / (tf + k1 * (1 - b + b * dl / avgdl))
+```
+
+这样做是防小库 `N=1` 时唯一命中词被压到近零。可真正调参还欠三笔账：先报真实
+记忆卡 `doc.len` 的 P50/P95/极值；再扫 `k1={0.8,1.2,1.5,2.0}`、
+`b={0,0.25,0.5,0.75,1}`；最后同时看 Recall@1、误命中率、过注入和长短卡偏置。
+现有 `100` 条中文卡、`127` 条问句能当尺子，却没有做这轮消融。
+
+证据：[`project_memory.cpp`](../src/memory/project_memory.cpp)、
+[`project_memory.hpp`](../src/memory/project_memory.hpp)、
+[`test_memory_retrieval_zh.cpp`](../tests/unit/memory/test_memory_retrieval_zh.cpp)。
+
+### 2. LaTeX 分式、基线、嵌套高度和伸缩括号怎样排？
+
+**先答：** 块级排版器的最小件是 `Box{rows, width, baseline}`。它没有另存
+`ascent/descent`；两者可直接推出：
+
+```text
+ascent  = baseline
+descent = rows.size() - baseline - 1
+```
+
+分式先递归排出 numerator、denominator 两只盒。宽度取两者最大宽再加两格：
+`max(num.width, den.width) + 2`。每一行按终端显示宽度居中。分子各行在上，随后铺一行
+`─`，分母各行在下。分式盒的 `baseline = numerator.rows.size()`，正好落在分数线上。
+
+左右若还有普通文本，`HBox` 先取所有子盒最大 ascent 与最大 descent，再逐盒平移：
+
+```text
+local_row = output_row - (max_ascent - child.baseline)
+```
+
+普通单行盒 baseline 为 `0`，故会同分数线对齐，不会贴着分子顶边走。嵌套分式也不
+另开特判。内层先返回自己的 `rows/baseline`；外层把它当分子或分母整盒堆叠，新的
+总行数与 baseline 再交给上一层。高度便一层层冒上去。
+
+**括号这里不能顺着题面答“几档”。** 现版没有离散字号档，也不挑最近档。内容高
+一行，直接用普通 `(`、`)`。高于一行，圆括号用 `⎛/⎜/⎝`、方括号用
+`⎡/⎢/⎣`，花括号用 `⎧/⎪/⎨/⎩`，按 `inner.rows.size()` 拼出任意整数高度；
+右侧换对应部件。竖线逐行重复。括号 baseline 原样取 inner baseline，再交给
+`HBox` 对齐。这是终端字符拼装，不是字体引擎的离散 glyph size。
+
+现存欠账也要报：终端单元格没有 TeX 字体度量、math axis、kerning 与真正可伸缩
+轮廓；花括号中心只按 `height/2` 取一行。它能把常见公式排齐，不等于实现了 TeX。
+
+证据：[`latex_math.cpp`](../src/cli/latex_math.cpp)、
+[`test_latex_math.cpp`](../tests/unit/cli/test_latex_math.cpp)。
+
+### 3. compact 的 map/reduce 怎样切？第几层终止？
+
+**先答：** 先算压缩模型可用输入：
+
+```text
+input_budget = window_tokens - output_reserve_tokens - protocol_headroom_tokens
+```
+
+整份 history 连同压缩指令装得下，就只发一次，不走分层。装不下，最新外层用户轮
+留作热区，只拿冷区做 map。上一轮 archive 从冷区首条里剥出，只给 reduce 当参考，
+不送回 map，免得摘要再抄摘要。
+
+冷区先按 episode 切。新的外层用户输入开一段，`todo_write` 也开一段；边界只落在
+轮界，绝不劈开 tool use/result。episode 装不下 chunk budget，再按用户轮边界切。
+相邻小段按顺序贪心合并，合到下一段会超预算便收块。故块数不是固定三块，也不由
+配置直接指定；它由冷区 episode、各段 token 估算和压缩模型窗口共同决定。单轮本身
+超预算时仍自成一块，不会从工具对中间硬劈；这只 map 请求也没有更细的本地预检，
+provider 若拒绝，整趟失败，旧 history 不动。
+
+map 为每块产一份局部摘要。reduce 先把所有局部摘要拼起来；仍超窗，便把相邻两份
+两两归并，一轮大约把数量砍半。代码不是无限递归，而是一只循环：
+
+```text
+kMaxReducePasses = 4
+while over_budget and summaries.size() > 1 and passes < 4:
+    pairwise_merge()
+```
+
+四轮最多把摘要份数压到原来的约 `1/16`。这里有一处实打实的欠账：四轮之后若仍
+超预算，现版**不会本地明确放弃**，而是照样发最终 reduce；只剩一份却仍过大时也
+一样。中间 pair merge 请求本身也没逐对做窗口预检。服务端若拒绝，整趟 compact
+报错，旧 history 一字不动；可错误来得太晚。这便是递归终止条件有了，超限终态却
+没收严。
+
+更稳的收口应是：每层归并前先验 pair 输入；四轮后重算最终输入，仍超窗便本地拒绝，
+错误里报块数、估算 token 与上限。若想继续归并，层数应由
+`ceil(log2(chunks))` 和总请求预算共同裁定，不能只把 `4` 改大。最终 manifest 与
+活动待办守恒只在终稿严验；map 和中间归并较松，也要一道算进失真风险。
+
+证据：[`compact.cpp`](../src/agent/compact.cpp)、[`compact.hpp`](../src/agent/compact.hpp)、
+[`test_compact.cpp`](../tests/unit/agent/test_compact.cpp)。
+
+### 4. `atomic<bool>` 用什么 memory order？默认 `seq_cst` 够吗？
+
+**先答：** 先限定到回合取消旗。`TurnRuntime::request_interrupt()` 用
+`store(true, memory_order_release)`；`interrupted()` 用
+`load(memory_order_acquire)`。多信号合并的 `CancelChain` 也用 acquire/release。
+往下走到 `AgentLoop`、HTTP transport 与进程轮询，还有若干裸 `load()`；它们默认
+`seq_cst`。
+
+默认 `seq_cst` 当然够。它比 acquire 更强，读到 release store 写出的 `true` 时，
+仍能建立同步关系。这里没有靠多只原子排一条全局顺序，故那份全序大多没用；相比
+网络、20ms 取消轮询和进程等待，性能代价也不是眼下瓶颈。
+
+再往深处说，若这只原子**只传一位停止信号**，`memory_order_relaxed` 已足以消掉
+data race，并让各线程在该原子的 modification order 上读写一致。现版没有靠
+cancel=true 发布另一块无锁 payload，故 acquire/release 偏保守。源码注释把问题
+只说成“普通 bool 可见性”，不够准：普通 bool 的根病是并发读写形成 data race，
+不是偶尔刷新得慢。
+
+若将来约定“先写 `cancel_reason`，再 release-store true；读线程 acquire-load true
+后读取 reason”，acquire/release 才有明确价值。若要同时维护 cancel、phase、结果
+所有权等多字段不变量，哪怕每只原子都 `seq_cst`，也凑不成一笔事务；该换 mutex 或
+单一状态机原子。内存序同样救不了阻塞系统调用，取消能多快生效仍看 polling 与底层
+可中断点。
+
+证据：[`turn_runtime.hpp`](../src/runtime/turn_runtime.hpp)、
+[`turn_harness.cpp`](../src/agent/turn_harness.cpp)、[`loop.cpp`](../src/agent/loop.cpp)、
+[`http_stream_transport.cpp`](../src/api/http_stream_transport.cpp)。
+
+### 5. UTF-8 清洗怎样判 ACP 重解成功？合法歧义怎么办？
+
+**先答：** `IsValidUtf8` 会拒绝坏续字节、截断、过长编码、代理项与越界码点。
+`SanitizeUtf8` 先看原字节；本来就是合法 UTF-8，立即原样返回。原字节非法时，
+Windows 才整段走 `CP_ACP -> UTF-16 -> UTF-8`，随后再跑一次 `IsValidUtf8`；通过便
+认作重解成功，否则把非法字节逐枚换成 U+FFFD。
+
+这只“成功”是**结构成功**，不是**语义成功**。`AcpBytesToUtf8` 调
+`MultiByteToWideChar(CP_ACP, 0, ...)`，没有 `MB_ERR_INVALID_CHARS`；只要 Win32
+肯转，回到 UTF-8 后通常天然合法。它证明不了原文真是 ACP。外来混合文本稍保守些：
+只有 `invalid_bytes > valid_multibyte_sequences` 才试整段 ACP，否则保留合法 UTF-8
+片段，只换坏字节。可这仍是启发式。
+
+GBK 字节若碰巧也是合法 UTF-8，第一关就会放行，压根儿不试 ACP。例子很直：
+`C2 A1` 按 CP936 解是“隆”，按 UTF-8 解是“¡”；`D0 A1` 按 CP936 是“小”，
+按 UTF-8 却是西里尔字母“С”。现版会取后者。这类歧义只看字节无法可靠判断，
+测试里的“你好”样本 `C4 E3 BA C3` 恰好是非法 UTF-8，没覆盖这道缝。
+
+真正的解法不是再叠一层猜测，而是把编码契约从来源带下来：PowerShell wrapper 明示
+UTF-8，`cmd.exe` 带 console/ACP code page，Hook 候选页用
+`MB_ERR_INVALID_CHARS` 严解并记录 `cp936`，HTTP 看 charset，文件读取则只收 UTF-8。
+来源未知又有歧义时，保留原始字节摘要与编码标签，允许用户指定，不静默改字。
+
+证据：[`text_encoding.cpp`](../src/platform/text_encoding.cpp)、
+[`paths_win.cpp`](../src/platform/paths_win.cpp)、
+[`test_tools.cpp`](../tests/unit/tools/test_tools.cpp)、
+[`test_utf8_boundary.cpp`](../tests/unit/cli/test_utf8_boundary.cpp)。
+
 ## 🧠 模型、Provider 与 Schema
 
 | 追问 | 先答哪句 | 他在验什么 |
