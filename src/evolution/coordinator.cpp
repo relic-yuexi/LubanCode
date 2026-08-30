@@ -19,6 +19,7 @@
 #include "evolution/drafter.hpp"
 #include "evolution/eval.hpp"
 #include "hooks/hash.hpp"
+#include "package/component.hpp"  // ParseMcpComponentYaml(diff 页读 MCP 草稿)
 #include "platform/paths.hpp"
 #include "workflow/parser.hpp"
 
@@ -699,9 +700,9 @@ std::expected<EvolutionCoordinator::ApproveResult, std::string> EvolutionCoordin
         if (code_bearing) {
             return std::unexpected(
                 "候选是 code-bearing 档(带 Plugin/MCP 或新工具/权限差异),首版不走 "
-                "/evolve approve 自动晋升:插件草稿请走 Package trust(/package trust "
-                "<包id>)与人工审查线——人读完 plugin.json 与 runner 再批信任,挂载另有"
-                "沙箱与整包事务把守(与信任门单各管各的账)");
+                "/evolve approve 自动晋升:代码草稿请走 Package trust(/package trust "
+                "<包id>)与人工审查线——人读完 plugin.json/runner.py 或 mcp.yaml/server.py "
+                "再批信任,挂载另有沙箱与整包事务把守(与信任门单各管各的账)");
         }
     }
 
@@ -1009,11 +1010,26 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
             return std::unexpected("写候选包插件草稿失败: " + PathToUtf8(candidate_dir));
         }
     }
+    std::string mcp_rel;  // mcp/<id>/mcp.yaml(MCP 草稿的组件账;与 Plugin 草稿互斥)
+    if (draft->with_mcp_draft && !draft->mcp_id.empty()) {
+        const std::string base = "mcp/" + draft->mcp_id + "/";
+        mcp_rel = base + "mcp.yaml";
+        const std::string server_rel = base + "server.py";
+        const std::string req_rel = base + "requirements.txt";
+        if (!WriteFileBytes(candidate_dir / "package" / lubancode::platform::Utf8ToPath(mcp_rel),
+                            draft->mcp_yaml) ||
+            !WriteFileBytes(candidate_dir / "package" / lubancode::platform::Utf8ToPath(server_rel),
+                            draft->mcp_server) ||
+            !WriteFileBytes(candidate_dir / "package" / lubancode::platform::Utf8ToPath(req_rel),
+                            draft->mcp_requirements)) {
+            return std::unexpected("写候选包 MCP 草稿失败: " + PathToUtf8(candidate_dir));
+        }
+    }
 
     // ---- 组合件/代码件静态门(阶段 5/6):AnalyzePackage + 扫描过了一遍才
-    //      认。过不了就地降回 Skill-only——删掉 workflows/、agents/ 与
-    //      plugins/,诊断进状态账与 ProposeResult,不硬塞。 ----
-    std::string shape = !plugin_rel.empty()
+    //      认。过不了就地降回 Skill-only——删掉 workflows/、agents/、
+    //      plugins/ 与 mcp/,诊断进状态账与 ProposeResult,不硬塞。 ----
+    std::string shape = !plugin_rel.empty() || !mcp_rel.empty()
                             ? "code-draft"
                             : (workflow_rel.empty() && agent_rel.empty() ? "skill-only" : "combination");
     std::string downgrade_note;
@@ -1035,9 +1051,11 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
             std::filesystem::remove_all(candidate_dir / "package" / "workflows", ec);
             std::filesystem::remove_all(candidate_dir / "package" / "agents", ec);
             std::filesystem::remove_all(candidate_dir / "package" / "plugins", ec);
+            std::filesystem::remove_all(candidate_dir / "package" / "mcp", ec);
             workflow_rel.clear();
             agent_rel.clear();
             plugin_rel.clear();
+            mcp_rel.clear();
             shape = "skill-only";
             downgrade_note = "草稿件过不了静态门(引用闭合/canonical 名/越界/安全扫描),已降回 "
                              "Skill-only:" +
@@ -1062,6 +1080,9 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
     if (!plugin_rel.empty()) {
         components.push_back(plugin_rel);
     }
+    if (!mcp_rel.empty()) {
+        components.push_back(mcp_rel);
+    }
 
     // ---- 演化账(schema 1) ----
     EvolutionRecord record;
@@ -1073,6 +1094,8 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
     record.sources.recording_ids = draft->recording_ids;
     if (shape == "combination") {
         record.generator = {"builtin", "combo-drafter", "evolution-stage5"};
+    } else if (shape == "code-draft" && !mcp_rel.empty()) {
+        record.generator = {"builtin", "mcp-drafter", "evolution-stage6-mcp"};
     } else if (shape == "code-draft") {
         record.generator = {"builtin", "plugin-drafter", "evolution-stage6"};
     } else {
@@ -1150,27 +1173,45 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
             // 代码档草稿的评测只有静态检查:草稿永不执行(零进程铁律),
             // acceptance 的 kind 白名单里没有(也不许有)command 项——
             // 草稿要真跑起来,只能走 Package trust 与人工审查后的挂载路。
-            const std::string plugin_dir_rel =
-                plugin_rel.substr(0, plugin_rel.rfind('/'));  // plugins/<id>
             acceptance.push_back(nlohmann::json{{"kind", "file_exists"},
                                                 {"path", "package" + std::string("/") + skill_rel},
                                                 {"note", "SKILL 在包里"}});
-            acceptance.push_back(nlohmann::json{{"kind", "file_exists"},
-                                                {"path", "package/" + plugin_rel},
-                                                {"note", "插件清单在(草稿件,零执行)"}});
-            acceptance.push_back(nlohmann::json{{"kind", "json_parses"},
-                                                {"path", "package/" + plugin_rel},
-                                                {"note", "plugin.json 可解析"}});
-            acceptance.push_back(nlohmann::json{
-                {"kind", "file_contains"}, {"path", "package/" + plugin_rel},
-                {"text", "\"kind\": \"process\""},
-                {"note", "runtime 只认 process(native 一律不生成)"}});
-            acceptance.push_back(nlohmann::json{
-                {"kind", "file_exists"}, {"path", "package/" + plugin_dir_rel + "/runner.py"},
-                {"note", "runner 脚手架在(未实现占位,人工补)"}});
-            acceptance.push_back(nlohmann::json{
-                {"kind", "file_exists"}, {"path", "package/" + plugin_dir_rel + "/requirements.txt"},
-                {"note", "依赖清单在(草稿零依赖)"}});
+            if (!plugin_rel.empty()) {
+                const std::string plugin_dir_rel =
+                    plugin_rel.substr(0, plugin_rel.rfind('/'));  // plugins/<id>
+                acceptance.push_back(nlohmann::json{{"kind", "file_exists"},
+                                                    {"path", "package/" + plugin_rel},
+                                                    {"note", "插件清单在(草稿件,零执行)"}});
+                acceptance.push_back(nlohmann::json{{"kind", "json_parses"},
+                                                    {"path", "package/" + plugin_rel},
+                                                    {"note", "plugin.json 可解析"}});
+                acceptance.push_back(nlohmann::json{
+                    {"kind", "file_contains"}, {"path", "package/" + plugin_rel},
+                    {"text", "\"kind\": \"process\""},
+                    {"note", "runtime 只认 process(native 一律不生成)"}});
+                acceptance.push_back(nlohmann::json{
+                    {"kind", "file_exists"}, {"path", "package/" + plugin_dir_rel + "/runner.py"},
+                    {"note", "runner 脚手架在(未实现占位,人工补)"}});
+                acceptance.push_back(nlohmann::json{
+                    {"kind", "file_exists"}, {"path", "package/" + plugin_dir_rel + "/requirements.txt"},
+                    {"note", "依赖清单在(草稿零依赖)"}});
+            }
+            if (!mcp_rel.empty()) {
+                const std::string mcp_dir_rel = mcp_rel.substr(0, mcp_rel.rfind('/'));  // mcp/<id>
+                acceptance.push_back(nlohmann::json{{"kind", "file_exists"},
+                                                    {"path", "package/" + mcp_rel},
+                                                    {"note", "mcp.yaml 在(草稿件,零执行)"}});
+                acceptance.push_back(nlohmann::json{
+                    {"kind", "file_contains"}, {"path", "package/" + mcp_rel},
+                    {"text", "transport: stdio"},
+                    {"note", "transport 只认 stdio(与官方 mcp 组件同款)"}});
+                acceptance.push_back(nlohmann::json{
+                    {"kind", "file_exists"}, {"path", "package/" + mcp_dir_rel + "/server.py"},
+                    {"note", "server 脚手架在(未实现占位,人工补)"}});
+                acceptance.push_back(nlohmann::json{
+                    {"kind", "file_exists"}, {"path", "package/" + mcp_dir_rel + "/requirements.txt"},
+                    {"note", "依赖清单在(草稿零依赖)"}});
+            }
         }
         nlohmann::json plan;
         plan["schema"] = 1;
@@ -1207,6 +1248,9 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
     if (shape == "code-draft") {
         reason += "(代码档草稿:簇 " + std::to_string(draft->code_signal.tasks_wanting) +
                   " 场同求工具 " + draft->code_signal.wanted_tool +
+                  (mcp_rel.empty() ? std::string("(process Plugin 路)")
+                                   : ("等 " + std::to_string(draft->code_signal.wanted_tools.size()) +
+                                      " 件(MCP server 路)")) +
                   ";零进程零挂载,不自动启用,指路 Package trust 人工审查)";
     }
     if (!downgrade_note.empty()) {
@@ -1231,7 +1275,10 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
     result.agent_drafted = !agent_rel.empty();
     result.downgrade_note = downgrade_note;
     result.code_draft = shape == "code-draft";
+    result.mcp_draft = result.code_draft && !mcp_rel.empty();
     result.wanted_tool = result.code_draft ? draft->code_signal.wanted_tool : std::string();
+    result.wanted_tools = result.mcp_draft ? draft->code_signal.wanted_tools
+                                           : std::vector<std::string>();
     result.permissions_added = record.changes.permissions_added;
     result.tools_added = record.changes.tools_added;
     return result;
@@ -1372,7 +1419,10 @@ std::expected<EvolutionCoordinator::DiffResult, std::string> EvolutionCoordinato
         } else if (rel.rfind("plugins/", 0) == 0 && rel.size() > 19 &&
                    rel.compare(rel.size() - 11, 11, "plugin.json") == 0) {
             file.kind = "plugin";
-        } else if (rel.rfind("plugins/", 0) == 0) {
+        } else if (rel.rfind("mcp/", 0) == 0 && rel.size() > 13 &&
+                   rel.compare(rel.size() - 8, 8, "mcp.yaml") == 0) {
+            file.kind = "mcp_server";
+        } else if (rel.rfind("plugins/", 0) == 0 || rel.rfind("mcp/", 0) == 0) {
             file.kind = "code";
         } else if (rel == "package.yaml") {
             file.kind = "manifest";
@@ -1382,9 +1432,10 @@ std::expected<EvolutionCoordinator::DiffResult, std::string> EvolutionCoordinato
         result.added.push_back(std::move(file));
     }
 
-    // 分档形状:照盘上现状说,不猜——插件草稿在就是代码档,其次组合档。
+    // 分档形状:照盘上现状说,不猜——代码件草稿(Plugin 或 MCP)在就是
+    // 代码档,其次组合档。
     for (const DiffFile& file : result.added) {
-        if (file.kind == "plugin") {
+        if (file.kind == "plugin" || file.kind == "mcp_server") {
             result.shape = "code-draft";
             break;
         }
@@ -1554,6 +1605,43 @@ std::expected<EvolutionCoordinator::DiffResult, std::string> EvolutionCoordinato
                                 ");网络 " + (network ? "开" : "关") + ";env 名 " +
                                 (env_names.empty() ? "(无)" : env_names) +
                                 ";草稿未实现,零执行零挂载";
+        break;
+    }
+    // MCP 草稿摘要:mcp.yaml 用它自己的 parser 读(手改过的草稿逐字段防着
+    // 读,不赌类型);工具账照演化账的 tools_added(mcp.yaml 里没有工具
+    // 清单——工具是起服后 tools/list 报的,草稿的已知面在演化账)。
+    for (const DiffFile& file : result.added) {
+        if (file.kind != "mcp_server") {
+            continue;
+        }
+        const auto text = ReadFileText(package_dir / lubancode::platform::Utf8ToPath(file.rel));
+        if (!text.has_value()) {
+            break;
+        }
+        const auto parsed = lubancode::package::ParseMcpComponentYaml(*text, package_dir);
+        if (!parsed.has_value()) {
+            result.mcp_summary =
+                file.rel + ":mcp.yaml 解析不过(草稿带病,见静态门)";
+            break;
+        }
+        std::string args_note;
+        for (const std::string& arg : parsed->args) {
+            args_note += (args_note.empty() ? " " : "") + arg;
+        }
+        std::string tools_note = "(演化账未记)";
+        if (found->record.has_value() && !found->record->changes.tools_added.empty()) {
+            tools_note = std::to_string(found->record->changes.tools_added.size()) + " 件(";
+            for (std::size_t i = 0; i < found->record->changes.tools_added.size() && i < 4; ++i) {
+                tools_note += (i > 0 ? ", " : "") +
+                              found->record->changes.tools_added[i].substr(
+                                  found->record->changes.tools_added[i].rfind("__") + 2);
+            }
+            tools_note += ")";
+        }
+        result.mcp_summary = file.rel + ":stdio server 命令 " + parsed->command +
+                             TruncateUtf8(args_note, 56) + ";工具 " + tools_note + ";网络 " +
+                             (parsed->network_allowed ? "开" : "关") +
+                             ";草稿未实现,零执行零挂载";
         break;
     }
     if (found->record.has_value()) {

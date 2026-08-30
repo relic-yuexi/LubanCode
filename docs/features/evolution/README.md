@@ -639,8 +639,20 @@ Skill-only）。`approval.json` 的 `tier` 如实写 `process-plugin-or-mcp`，
   Rollback 整包事务）——一道门都不少。
 - native Plugin 一律不生成：drafter 只写 `runtime.kind=process`，
   `native-library` 一字不出现（manifest parser 本就明拒 native-library）。
-- MCP 草稿（mcp.yaml + server 脚手架）与 Plugin 同判据同信任线，首版
-  drafter 只落 process Plugin 一路，MCP 留待后续。
+- MCP 草稿与 Plugin 草稿同判据同信任线，按缺口形状二选一（一只候选只带
+  一种代码件）：簇内同求而无人成功的工具**恰一件**出 process Plugin 草稿
+  （缺一条命令）；**两件及以上**出 MCP server 草稿（缺一项服务，封一只
+  stdio server 合账）。MCP 草稿三件：`mcp/<id>/mcp.yaml`（schema 1，
+  `transport: stdio`，args 走 `${package_dir}` 占位——契约 §5 没有
+  `${plugin_dir}`，`permissions.network` 恒 false，不声明 env）、
+  `server.py`（newline 分隔 JSON-RPC 的诚实"未实现"脚手架，协议铁律同
+  `examples/packages/browser` 的 mcp 组件：一行一信、stdout 只出协议响应、
+  日志只写 stderr、initialize 认客户端的协议版本）、`requirements.txt`
+  （零依赖）。权限差异记 `process:python` 与 `fs_read:workspace`（入参带
+  路径键才记），工具 wire 名一件一个 `mcp__<包段>__<server>__<工具>`；
+  演化账 generator 记 `evolution-stage6-mcp`，tier 照写
+  `process-plugin-or-mcp`。四类安全夹具对 `mcp/` 组件同样生效（依赖清单
+  按文件名认、网络对账认 mcp.yaml）。
 
 **静态门四类安全夹具（发现即 error，与密钥/绝对路径扫描同一道门）**：
 
@@ -661,3 +673,55 @@ wire 名入账）；零进程（计划无 command、`tool_calls` 恒 0、候选�
 偷运进正经层未过信任门连暂存都不进）；四类夹具全拦 + 干净草稿零发现；
 approve 明拒指路 trust；整包事务先例（信任过的包坏一件代码组件，整包
 不挂、ToolRegistry 零残留）。
+
+验收钉子补 MCP 路（单测 `tests/unit/evolution/test_evolution_stage6_mcp.cpp`）：
+选路判据（两件同求出 MCP、恰一件照旧 Plugin）；mcp.yaml 过它自己的严格
+解析器；演化账 `mcp__` wire 名与 `evolution-stage6-mcp` 生成器账；零进程
+（计划无 command、`tool_calls` 恒 0、复杂度 `has_mcp` 照记）；四类夹具对
+`mcp/` 组件同样全拦 + 干净草稿零发现；approve 明拒指路 trust、store 一枚
+不落。
+
+## 有限自动建议（阶段 7 落地）
+
+阶段 7 之前，提炼只有用户明说一条路（`/evolve propose`）。阶段 7 补上
+§七的第二种触发——**同类任务多次成功，系统只提示"发现可复用做法"，
+等用户点头再起草**。缺省关闭是铁律：开关账
+`~/.lubancode/evolution/suggest.json` 缺失、读不动、字段不对，一律当关。
+
+```text
+/evolve suggest            看开关、五门门槛与命中率/接受率账
+/evolve suggest on|off     开/关（开着时 /evolve status 采集后顺手提示一回）
+```
+
+**只提示，不自作主张**：建议引擎（`src/evolution/suggest.cpp`）只读观察
+账与候选仓、只写开关账与命中账——起草、测试、安装的写口仍独归
+`EvolutionCoordinator`。开着时 `/evolve status` 采集落账后按五门判定，过
+门的簇亮一行建议并指路 `/evolve propose <观察id>`；只有本次真进了新观察
+的簇才提示，没新材料不唠叨。关着时不评估建议、不写命中账、不为建议另收
+材料（观察账本身是阶段 1 的显式采集，不是建议引擎的后台）。
+
+**自动提示五条门槛**（§七逐条落，`/evolve suggest` 裸跑可 inspect，判定
+账 `SuggestionVerdict` 逐门带人话 `why_not`）：
+
+| 门 | 检查 | 口径 |
+| --- | --- | --- |
+| 一：独立任务证据 | 同指纹簇内不同 `source_id` 的观察 >= 2 | 同场重试折在同一条观察里，凑不成独立证据 |
+| 二：大体同形 | 指纹同（目标口述 + 验收口述 + 折叠工具序列归一哈希，日期/网址/绝对路径已抽象）且簇里有非空形状 | 空形状无从同形 |
+| 三：非偶然 | 不同 `source_id` 的成功观察 >= 2（recording 的 success 必带验证证据） | 单场成功可能是撞上的，两场各自走通才算路子 |
+| 四：无在途/被拒候选 | 同指纹不在挡门集：观察账 `rejected.jsonl` 的拒绝指纹 + 候选仓既有候选的来源指纹 | 在途不催、已提炼不劝、被拒不再提——拒绝后不死缠 |
+| 五：收益说得清 | 形状步数 >= 1（有整套做法，Memory 装不下的那种） | 一句事实或偏好归 Memory，不劝人封包 |
+
+**命中账与比率**（`~/.lubancode/evolution/suggest.jsonl`，只追加，坏行跳
+过）：过五门亮提示记一笔 `shown`；用户真去 `/evolve propose` 落了候选记
+一笔 `accepted`（同指纹只记头一笔，不灌水）。`/evolve suggest` 现算亮：
+命中率 = 出过提示的指纹数 / 当前账上达到门一的簇数；接受率 = 接受指纹 /
+提示指纹（没提示过显示"不算"，不冒充 0%）。
+
+验收钉子（单测 `tests/unit/evolution/test_evolution_stage7.cpp`）：缺省关
+（缺文件/坏 JSON/字段不对一律当关）；五门各案正反面；不死缠（propose 在
+途挡门、reject 拒绝指纹挡门，且只挡门四不否决别的证据）；命中账只追加、
+坏行跳过、接受率按指纹算；冒烟（假观察簇 → 关时不提示 → 开后过五门 →
+propose 记 accepted → 接受率账出 → 关回去可恢复）。
+
+触发门槛只是起草门，不是安装门——过了五门也只是亮一行字，候选照旧走
+propose → test → approve 的全部门。

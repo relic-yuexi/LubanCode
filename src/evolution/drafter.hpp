@@ -103,17 +103,25 @@ ComboThreshold AssessComboThreshold(const std::vector<ClusterTaskMaterial>& task
 // 无越界);过不了的草稿由 Coordinator 降回 Skill-only,不硬塞。
 //
 // ---------------------------------------------------------------------------
-// 阶段 6:代码档(第三档)——process Plugin 草稿
+// 阶段 6:代码档(第三档)——process Plugin 草稿与 MCP 草稿
 //
 // 判据(todo §3.5"新执行能力"):现有工具压根儿办不了。录制账上看得见的
 // 信号是"模型想用一件不存在的工具"——tool_result 带 registry.unknown_tool
 // 的失败(agent 循环对未注册工具名的实报)。两场以上独立任务都在求同一件
-// 工具、且全簇没人成功用过它(工具不存在,自然无人成功),才起草 process
-// Plugin 草稿;单场偶发不算,工具已存在更不算。
+// 工具、且全簇没人成功用过它(工具不存在,自然无人成功),才起草;单场
+// 偶发不算,工具已存在更不算。
+//
+// 判据过了,选哪一路草稿看缺口的形状(同判据,两选一):
+//   - 簇内同求而无人成功的工具恰一件 -> process Plugin 草稿(缺的是一条
+//     命令:plugin.json + runner 脚手架 + 依赖清单);
+//   - 簇内同求而无人成功的工具 >=2 件 -> MCP server 草稿(缺的是一项
+//     服务:多件工具同一个来源,封一只 stdio server 合账;mcp.yaml +
+//     server 脚手架 + 依赖清单)。协议铁律同 examples/packages/browser
+//     的 mcp 组件:stdio、newline JSON-RPC、日志只走 stderr。
 //
 // 铁律(§十五):
-//   - 只产 process Plugin 草稿:plugin.json + runner 脚手架 + 依赖清单。
-//     runner 是诚实的"未实现"占位——评测零进程,补实现交人工;
+//   - 草稿只产"未实现"占位:脚手架起来了也只能答 draft-not-implemented,
+//     评测零进程,补实现交人工;
 //   - native Plugin 一律不生成(人工构建与审查线外的事);
 //   - 草稿落候选区,永不进挂载事务,不自动启用;启用走 Package trust 与
 //     运行沙箱,不归起草器管。
@@ -122,8 +130,9 @@ ComboThreshold AssessComboThreshold(const std::vector<ClusterTaskMaterial>& task
 // 尺三的判定账(纯函数;人话逐条,给 diff/show 与降档诊断用)。
 struct CodeCapabilitySignal {
     bool eligible = false;
-    std::string wanted_tool;   // 各场想用而不可得的工具名(原名,不洗)
+    std::string wanted_tool;   // 各场想用而不可得的工具名(原名,不洗;单件时的代表)
     int tasks_wanting = 0;     // 有此信号的场数(须 >= 2)
+    std::vector<std::string> wanted_tools;  // 同求而无人成功的全部工具名(首见次序;>=2 件走 MCP 路)
     std::vector<std::string> inputs_note;  // 想要的入参形状(键名,照观察)
     std::vector<std::string> why_not;      // 不够格的人话(逐条;够格则空)
 };
@@ -150,8 +159,16 @@ struct ComboCandidateDraft {
     std::string plugin_json;          // plugins/<id>/plugin.json 全文
     std::string plugin_runner;        // plugins/<id>/runner.py 全文(诚实脚手架)
     std::string plugin_requirements;  // plugins/<id>/requirements.txt 全文(空依赖)
+    // 代码档(阶段 6 收官):MCP server 草稿(簇内同求 >=2 件不存在的
+    // 工具 -> 一只 stdio server 合账)。与 Plugin 草稿互斥——一只候选
+    // 只带一种代码件;信任线同门(approve 明拒,指路 /package trust)。
+    bool with_mcp_draft = false;
+    std::string mcp_id;               // mcp/<id>/ 的 <id>(小写 kebab)
+    std::string mcp_yaml;             // mcp/<id>/mcp.yaml 全文(schema 1,stdio)
+    std::string mcp_server;           // mcp/<id>/server.py 全文(诚实脚手架)
+    std::string mcp_requirements;     // mcp/<id>/requirements.txt 全文(空依赖)
     std::vector<std::string> permissions_added;  // evolution.json 的权限差异
-    std::vector<std::string> tools_added;        // 工具 wire 名(plugin__…)
+    std::vector<std::string> tools_added;        // 工具 wire 名(plugin__…/mcp__…)
     CodeCapabilitySignal code_signal;
     // 起草账
     ComboThreshold threshold;

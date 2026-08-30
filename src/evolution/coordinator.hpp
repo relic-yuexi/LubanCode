@@ -66,8 +66,10 @@ public:
         bool agent_drafted = false;                // 组合包是否带 Agent(尺二)
         std::string downgrade_note;                // 组合降档 Skill-only 的诊断(空=没降)
         // 阶段 6:代码档草稿账(草稿落候选区,零进程零挂载,不自动启用)
-        bool code_draft = false;                   // 是否带 process Plugin 草稿
-        std::string wanted_tool;                   // 各场想用而不可得的工具名
+        bool code_draft = false;                   // 是否带代码件草稿(Plugin 或 MCP)
+        bool mcp_draft = false;                    // 代码件走的是 MCP server 路(缺一项服务)
+        std::string wanted_tool;                   // 各场想用而不可得的工具名(求的人最多那件)
+        std::vector<std::string> wanted_tools;     // 同求而无人成功的全部工具名(MCP 路才有 >=2 件)
         std::vector<std::string> permissions_added;  // 权限差异(一条一权,只记名)
         std::vector<std::string> tools_added;        // 工具 wire 名
     };
@@ -151,7 +153,8 @@ public:
         std::string agent_summary;            // Agent 摘要(工具面 + 预装 Skill)
         // 阶段 6:代码档草稿展示(命令/args/env 名/网络与文件权限差异、
         // 工具 wire 名、人工审查指路)——diff 页如实亮,approve 仍明拒。
-        std::string plugin_summary;                  // 插件草稿摘要一行
+        std::string plugin_summary;                  // 插件草稿摘要一行(空=没带)
+        std::string mcp_summary;                     // MCP server 草稿摘要一行(空=没带)
         std::vector<std::string> permission_lines;   // 权限差异一行一条(含新工具)
     };
 
