@@ -41,23 +41,12 @@ std::size_t MessageChars(const api::Message& message) {
     return total;
 }
 
-// 一条"真正的用户输入"消息:role 是 User,并且内容里带着 TextBlock
-// ——区别于同样顶着 User 角色、但内容全是 ToolResultBlock 的那种
-// "把工具结果喂回去"的中间消息。
-bool IsUserTurnStart(const api::Message& message) {
-    if (message.role != api::Role::User) {
-        return false;
-    }
-    if (message.content.empty()) {
-        return true;  // 理论上不会出现,防御性地当成一轮开始
-    }
-    for (const auto& block : message.content) {
-        if (std::holds_alternative<api::TextBlock>(block) || std::holds_alternative<api::ImageBlock>(block)) {
-            return true;
-        }
-    }
-    return false;
-}
+// (IsUserTurnStart 的私有拷贝已删:判定收拢到本文件下方的公共
+// IsUserTurnStart/SplitIntoTurns,见 context.hpp 注释。旧版把空内容 user
+// 消息防御性地当轮头,新定义按 §二 不认空壳——没有 text/image 不开 turn,
+// 免得插在 tool_use/tool_result 之间的空壳把工具原子组劈开。)
+
+
 
 // 硬上限兜底:轮级裁剪之后仍旧超限(往往是单条工具结果就大得离谱),把
 // 超大的 ToolResultBlock 内容从尾部截短、打上标注。只动 tool_result 的
@@ -216,6 +205,31 @@ std::size_t EstimateHistoryTokens(const std::vector<api::Message>& history) {
     return total;
 }
 
+bool IsUserTurnStart(const api::Message& message) {
+    if (message.role != api::Role::User) {
+        return false;
+    }
+    for (const auto& block : message.content) {
+        if (std::holds_alternative<api::TextBlock>(block) || std::holds_alternative<api::ImageBlock>(block)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::vector<std::pair<std::size_t, std::size_t>> SplitIntoTurns(const std::vector<api::Message>& history) {
+    std::vector<std::pair<std::size_t, std::size_t>> turns;
+    for (std::size_t i = 0; i < history.size(); ++i) {
+        if (IsUserTurnStart(history[i])) {
+            if (!turns.empty()) {
+                turns.back().second = i;
+            }
+            turns.emplace_back(i, history.size());
+        }
+    }
+    return turns;
+}
+
 std::size_t MaxContextCharsFromEnv() {
     std::string value;
 #ifdef _WIN32
@@ -258,16 +272,9 @@ std::vector<api::Message> TrimHistory(const std::vector<api::Message>& history, 
     }
 
     // 把 history 切成"轮":turns[i] = [start, end),含一条 user 输入消息
-    // 和紧跟其后的所有消息,直到下一条 user 输入消息之前。
-    std::vector<std::pair<std::size_t, std::size_t>> turns;
-    for (std::size_t i = 0; i < history.size(); ++i) {
-        if (IsUserTurnStart(history[i])) {
-            if (!turns.empty()) {
-                turns.back().second = i;
-            }
-            turns.emplace_back(i, history.size());
-        }
-    }
+    // 和紧跟其后的所有消息,直到下一条 user 输入消息之前。切法收拢在
+    // SplitIntoTurns(§二 唯一定义),不再自带一份轮界循环。
+    const std::vector<std::pair<std::size_t, std::size_t>> turns = SplitIntoTurns(history);
 
     if (turns.empty()) {
         // 找不到任何一条"真正的用户输入"消息(不应该发生,history 总是从

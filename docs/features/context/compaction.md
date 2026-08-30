@@ -172,11 +172,17 @@ JSON manifest
 
 `/compact --dry-run` 只看结构压缩能省多少、哪些内容被钉住。它不发模型请求，也不改 history。
 
+## turn 分区计划（四分区，阶段 1）
+
+压缩真触发后，先把原始对话按"真正用户输入"收成完整 turn（工具结果回填不开新 turn，工具 use/result 成原子组），再按 L1 工作视图的 token 重量切成 `compact_partition_count` 份连续分区（默认 4，可配 2..8，越界报错）：前 n-1 份是冷区、各 map 一次，末份是热区、保留原文形状。分区边界只落 turn 之间，工具原子组永不拆开。
+
+`/context` 打一行策略（如 `compact turn 策略：按 token 平衡 4 分；前 3 份 map，末份热区`）；`/compact --dry-run` 打完整计划——每份的 turn 范围、token 估算、外置 ToolResult 枚数、预计 map 次数、长结果外置前后的 token 对照，以及分区或单 turn 超压缩模型预算的警告。全部纯计算，不调模型。旧存档（上一轮压缩的 archive）会被剥出单独记账：不算 turn，只作 final reduce 的基线。
+
 ## 源码入口
 
-- `src/agent/compact.cpp`：单次压缩、episode 切分、map/reduce、manifest 校验。
+- `src/agent/compact.cpp`：单次压缩、episode 切分、map/reduce、manifest 校验、`BuildTurnPartitionPlan` 四分区纯计算。
 - `src/agent/loop.cpp`：回合中 projected 估算、结构压缩、硬裁与 cache epoch。
-- `src/agent/context.cpp`：轮级裁剪与工具结果截断。
+- `src/agent/context.cpp`：轮级裁剪与工具结果截断、公共 turn 切分（`IsUserTurnStart` / `SplitIntoTurns`）。
 - `src/sessions/session_store.cpp`：`compact` / `compact_v2` 的写入与回放。
 - `src/agent/context_events.cpp`：L1 结构压缩、artifact/重复/版本视图。
 - `src/agent/microcompact.cpp`：L2 按需局部摘要、输入裁面与格式校验。

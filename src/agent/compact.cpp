@@ -2,6 +2,9 @@
 
 #include <algorithm>
 #include <chrono>
+#include <limits>
+#include <map>
+#include <set>
 #include <type_traits>
 #include <utility>
 #include <variant>
@@ -17,20 +20,9 @@ namespace lubancode::agent {
 
 namespace {
 
-// 跟 agent/context.cpp 里的同名私有 helper 语义一模一样(角色是 user、
-// 且至少带一个 TextBlock 或 ImageBlock 才算"一轮的开头"),那边是匿名命名
-// 空间里的私有函数、没导出,所以这里原样再写一份。
-bool IsUserTurnStart(const api::Message& message) {
-    if (message.role != api::Role::User) {
-        return false;
-    }
-    for (const auto& block : message.content) {
-        if (std::holds_alternative<api::TextBlock>(block) || std::holds_alternative<api::ImageBlock>(block)) {
-            return true;
-        }
-    }
-    return false;
-}
+// (IsUserTurnStart 的私有拷贝已删:判定收拢到 agent/context.hpp 的公共
+// IsUserTurnStart——Compact 四分区单阶段 0,§二 的唯一定义。本文件原先
+// 匿名命名空间里还有一份 IsUserTurnStartMsg,同语义同实现,一并删了。)
 
 // 剥两端空白(空格/制表/回车/换行)。
 std::string TrimWhitespace(const std::string& text) {
@@ -95,7 +87,8 @@ std::string BuildCompactInstruction(const CompactOptions& options) {
         "{\"goal\": \"当前任务目标一句话\", \"constraints\": [\"用户明示的约束或禁止\"], "
         "\"open_items\": [\"未完成事项\"], \"next_action\": \"下一步该做的具体动作\"}\n"
         "```\n"
-        "goal 与 open_items 不许为空数组/空串;constraints 没有就给空数组。"
+        "goal 与 open_items 不许为空数组/空串;constraints 没有就给空数组,元素必须是字符串;"
+        "next_action 不许缺席或为空串。"
         "JSON 必须能直接解析,不要加注释。";
     if (!options.required_open_items.empty()) {
         instruction += "\n\n以下是当前仍未完成的待办,每一项必须逐字(只许调整空白)出现在 open_items 数组里,"
@@ -117,19 +110,6 @@ std::string BuildCompactInstruction(const CompactOptions& options) {
 // ---------------------------------------------------------------------------
 
 namespace {
-
-// 一枚"用户文本输入"消息(与各处同名私有 helper 同语义)。
-bool IsUserTurnStartMsg(const api::Message& message) {
-    if (message.role != api::Role::User) {
-        return false;
-    }
-    for (const auto& block : message.content) {
-        if (std::holds_alternative<api::TextBlock>(block) || std::holds_alternative<api::ImageBlock>(block)) {
-            return true;
-        }
-    }
-    return false;
-}
 
 // 消息里是否带 todo_write 调用(plan 变化的显式信号)。
 bool HasTodoWrite(const api::Message& message) {
@@ -241,7 +221,7 @@ std::string BuildEpisodeInstruction(const CompactOptions& options) {
         "{\"goal\": \"本阶段目标一句话\", \"constraints\": [\"本阶段出现的约束\"], "
         "\"open_items\": [\"本阶段结束时仍未完成的事\"], \"next_action\": \"下步动作\"}\n"
         "```\n"
-        "goal 不许为空;没有未完成事项 open_items 给空数组。";
+        "goal 不许为空;没有未完成事项 open_items 给空数组;next_action 不许缺席或为空串。";
     if (!options.focus.empty()) {
         instruction += "\n重点关注:" + options.focus;
     }
@@ -266,7 +246,8 @@ std::string BuildReduceInstruction(const CompactOptions& options, bool has_prior
         "{\"goal\": \"当前任务目标一句话\", \"constraints\": [\"用户明示的约束或禁止\"], "
         "\"open_items\": [\"未完成事项\"], \"next_action\": \"下一步该做的具体动作\"}\n"
         "```\n"
-        "goal 与 open_items 不许为空数组/空串;constraints 没有就给空数组。";
+        "goal 与 open_items 不许为空数组/空串;constraints 没有就给空数组,元素必须是字符串;"
+        "next_action 不许缺席或为空串。";
     if (has_prior_state) {
         instruction += "\n输入里另有一份**上一轮压缩的存档**:只当参考,凡与局部小结冲突的,"
                        "以局部小结(来自原始事件)为准——不许拿旧摘要复印新摘要。";
@@ -291,7 +272,7 @@ std::vector<std::pair<std::size_t, std::size_t>> SplitEpisodes(const std::vector
     std::size_t start = 0;
     for (std::size_t i = 1; i < history.size(); ++i) {
         // 显式信号:新一条外层用户输入(新要求/纠正)、todo_write(plan 变化)。
-        if (IsUserTurnStartMsg(history[i]) || HasTodoWrite(history[i])) {
+        if (IsUserTurnStart(history[i]) || HasTodoWrite(history[i])) {
             episodes.emplace_back(start, i);
             start = i;
         }
@@ -424,7 +405,7 @@ std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend
                                       cold.begin() + static_cast<std::ptrdiff_t>(ep_to)));
         if (ep_tokens > chunk_budget) {
             for (std::size_t i = ep_from + 1; i < ep_to; ++i) {
-                if (IsUserTurnStartMsg(cold[i])) {
+                if (IsUserTurnStart(cold[i])) {
                     boundaries.push_back(i);
                 }
             }
@@ -618,27 +599,48 @@ std::optional<CompactManifest> ParseCompactManifest(const std::string& summary_t
     } catch (...) {
         return std::nullopt;
     }
+    // schema/type 收紧(Compact 四分区单阶段 0,照 §四 UserContract 的字段
+    // 规矩):早先 constraints 混进非字符串、next_action 缺席或空串时,解析
+    // 一律静默吞掉——摘要看着守恒,字段其实残了。现在类型不对、键缺席、
+    // 字符串剥空白后为空,整枚 manifest 判坏(nullopt),调用方拒收、旧
+    // history 不动;坏值不许半截收编。
     if (!parsed.is_object() || !parsed.contains("goal") || !parsed["goal"].is_string() ||
-        !parsed.contains("open_items") || !parsed["open_items"].is_array()) {
+        !parsed.contains("open_items") || !parsed["open_items"].is_array() ||
+        !parsed.contains("next_action") || !parsed["next_action"].is_string()) {
         return std::nullopt;
+    }
+    if (TrimWhitespace(parsed["goal"].get<std::string>()).empty() ||
+        TrimWhitespace(parsed["next_action"].get<std::string>()).empty()) {
+        return std::nullopt;
+    }
+    // 字符串数组的三道同规矩:必须是数组、元素必须是字符串、元素剥空白后
+    // 非空。constraints 没写合法(等价空数组),写了就不许坏。
+    if (parsed.contains("constraints")) {
+        if (!parsed["constraints"].is_array()) {
+            return std::nullopt;
+        }
+        for (const auto& item : parsed["constraints"]) {
+            if (!item.is_string() || TrimWhitespace(item.get<std::string>()).empty()) {
+                return std::nullopt;
+            }
+        }
+    }
+    for (const auto& item : parsed["open_items"]) {
+        if (!item.is_string() || TrimWhitespace(item.get<std::string>()).empty()) {
+            return std::nullopt;
+        }
     }
     CompactManifest manifest;
     manifest.goal = parsed["goal"].get<std::string>();
     for (const auto& item : parsed["open_items"]) {
-        if (item.is_string()) {
-            manifest.open_items.push_back(item.get<std::string>());
-        }
+        manifest.open_items.push_back(item.get<std::string>());
     }
-    if (parsed.contains("constraints") && parsed["constraints"].is_array()) {
+    if (parsed.contains("constraints")) {
         for (const auto& item : parsed["constraints"]) {
-            if (item.is_string()) {
-                manifest.constraints.push_back(item.get<std::string>());
-            }
+            manifest.constraints.push_back(item.get<std::string>());
         }
     }
-    if (parsed.contains("next_action") && parsed["next_action"].is_string()) {
-        manifest.next_action = parsed["next_action"].get<std::string>();
-    }
+    manifest.next_action = parsed["next_action"].get<std::string>();
     return manifest;
 }
 
@@ -674,17 +676,9 @@ std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>&
                                                 std::vector<std::size_t>* kept_indices_out) {
     std::vector<api::Message> new_history;
 
-    // 按轮切:turns[i] = [start, end),一条用户文本输入领起,直到下一条
-    // 用户文本输入之前。
-    std::vector<std::pair<std::size_t, std::size_t>> turns;
-    for (std::size_t i = 0; i < history.size(); ++i) {
-        if (IsUserTurnStart(history[i])) {
-            if (!turns.empty()) {
-                turns.back().second = i;
-            }
-            turns.emplace_back(i, history.size());
-        }
-    }
+    // 按轮切:turns[i] = [start, end),切法收拢在 SplitIntoTurns(§二 唯一
+    // 定义,磁盘账与内存路共用),不再自带一份轮界循环。
+    const std::vector<std::pair<std::size_t, std::size_t>> turns = SplitIntoTurns(history);
     if (turns.empty()) {
         // 没有可保留的用户轮,存档只能自己单独成一条。
         new_history.push_back(archive);
@@ -921,6 +915,230 @@ std::expected<CompactSummary, api::Error> Compact(api::Backend& backend, const s
     archive.content.push_back(api::TextBlock{
         "[对话存档,此前内容已压缩] " + platform::SanitizeExternalText(summary_text)});
     return CompactSummary{std::move(archive), *manifest};
+}
+
+// ---------------------------------------------------------------------------
+// 四分区(阶段 1):TurnPartitionPlan 纯计算
+// ---------------------------------------------------------------------------
+
+TurnPartitionPlan BuildTurnPartitionPlan(const std::vector<api::Message>& history,
+                                         std::size_t partition_count,
+                                         const TurnPartitionBudgets& budgets) {
+    TurnPartitionPlan plan;
+    plan.requested_partition_count = partition_count;
+    plan.compact_input_budget = CompactInputBudget(budgets.compact_model);
+    if (history.empty()) {
+        return plan;
+    }
+
+    // L1 工作视图(§3.3):分区按结构压缩后的稳定视图计量,长 ToolResult 按
+    // artifact 外置后的重量算,不拿 durable 里的全文虚算。CompressWorkingView
+    // 只重写 tool_result 的 content,消息条数与块序不动,视图与原 history
+    // 逐条对得上;临时 memo/stats/store——不落盘、不定形、不碰会话真账。
+    StructuralCompressionStats stats;
+    ResultViewMemo memo;
+    const std::vector<api::Message> working =
+        CompressWorkingView(history, budgets.structural, stats, memo, /*store=*/nullptr);
+
+    // 旧 archive 剥离(§3.2):只在首条消息的第一枚文本块上找,与分层压缩
+    // 同一只。剥出的文本不算 turn、不占分区账,只作 final reduce 的基线。
+    for (const auto& block : history[0].content) {
+        if (!std::holds_alternative<api::TextBlock>(block)) {
+            continue;
+        }
+        if (auto split = SplitPriorArchive(std::get<api::TextBlock>(block).text)) {
+            plan.has_prior_archive = true;
+            plan.prior_archive_text = split->first;
+            plan.prior_archive_tokens = EstimateUtf8Tokens(plan.prior_archive_text);
+        }
+        break;
+    }
+
+    // 逐条 token:工作视图一把(分区用)、全量一把(对照外置收益)。每条至少
+    // 记 1,空壳消息不白占预算(与 BuildCompactedHistory 同一口径)。
+    std::vector<std::size_t> working_message_tokens(history.size());
+    std::vector<std::size_t> raw_message_tokens(history.size());
+    std::vector<std::size_t> externalized_message(history.size(), 0);
+    for (std::size_t i = 0; i < history.size(); ++i) {
+        working_message_tokens[i] = std::max<std::size_t>(1, EstimateMessageTokens(working[i]));
+        raw_message_tokens[i] = std::max<std::size_t>(1, EstimateMessageTokens(history[i]));
+        for (const auto& block : history[i].content) {
+            if (!std::holds_alternative<api::ToolResultBlock>(block)) {
+                continue;
+            }
+            // 已外置 = 首次定形成 artifact 视图(头尾预览 + 可追回引用)。
+            const std::string& use_id = std::get<api::ToolResultBlock>(block).tool_use_id;
+            if (const auto it = memo.decisions.find(use_id);
+                it != memo.decisions.end() && it->second.kind == ResultViewKind::Artifact) {
+                externalized_message[i] += 1;
+            }
+        }
+    }
+
+    // 按 §二 切 turn。首枚 turn 头之前若有零散消息(旧档外壳、异常形状),
+    // 并入首 turn 记账——plan 的账要盖住整份 history,零散头没有自己的去处。
+    const std::vector<std::pair<std::size_t, std::size_t>> raw_ranges = SplitIntoTurns(history);
+    if (raw_ranges.empty()) {
+        return plan;  // 一条真正用户输入都没有:没有可分区的 turn
+    }
+    std::vector<std::pair<std::size_t, std::size_t>> turn_ranges = raw_ranges;
+    turn_ranges.front().first = 0;
+
+    // 工具原子组(§6.1):按 tool_use_id 收齐本 assistant 消息发出的全部
+    // 调用,不按"下一条 user 消息"猜配对;use 无 result = incomplete,
+    // result 配不上 use = 悬空。todo_write 照样成组,天然随组走不劈开。
+    std::map<std::string, std::size_t> result_message_of;
+    for (std::size_t i = 0; i < history.size(); ++i) {
+        for (const auto& block : history[i].content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block); result != nullptr) {
+                result_message_of.emplace(result->tool_use_id, i);  // 首次出现为准
+            }
+        }
+    }
+    std::set<std::string> matched_uses;
+    for (std::size_t i = 0; i < history.size(); ++i) {
+        if (history[i].role != api::Role::Assistant) {
+            continue;
+        }
+        std::vector<std::string> ids;
+        for (const auto& block : history[i].content) {
+            if (const auto* use = std::get_if<api::ToolUseBlock>(&block); use != nullptr) {
+                ids.push_back(use->id);
+            }
+        }
+        if (ids.empty()) {
+            continue;
+        }
+        ToolExchangeGroupInfo group;
+        group.assistant_message = i;
+        group.from_message = i;
+        group.to_message = i + 1;
+        group.tool_use_ids = ids;
+        for (const auto& id : ids) {
+            const auto it = result_message_of.find(id);
+            if (it == result_message_of.end() || it->second < i) {
+                group.complete = false;  // result 缺失或跑到 use 前头:orphan
+                continue;
+            }
+            matched_uses.insert(id);
+            group.to_message = std::max(group.to_message, it->second + 1);
+        }
+        // 所属 turn:assistant 消息落在哪枚 turn 的区间里。
+        for (std::size_t t = 0; t < turn_ranges.size(); ++t) {
+            if (i >= turn_ranges[t].first && i < turn_ranges[t].second) {
+                group.turn = t;
+                break;
+            }
+        }
+        plan.tool_groups.push_back(std::move(group));
+    }
+    for (const auto& [id, message_index] : result_message_of) {
+        (void)message_index;
+        if (matched_uses.count(id) == 0) {
+            plan.dangling_results += 1;
+        }
+    }
+    plan.has_incomplete_tool_exchange =
+        plan.dangling_results > 0 ||
+        std::any_of(plan.tool_groups.begin(), plan.tool_groups.end(),
+                    [](const ToolExchangeGroupInfo& group) { return !group.complete; });
+
+    // turn 画像:token 按区间累加,首 turn 扣掉已剥离的旧 archive 账。
+    plan.turns.reserve(turn_ranges.size());
+    for (std::size_t t = 0; t < turn_ranges.size(); ++t) {
+        TurnInfo info;
+        info.number = t + 1;
+        info.id = "t" + std::to_string(t + 1);
+        info.from_message = turn_ranges[t].first;
+        info.to_message = turn_ranges[t].second;
+        for (std::size_t i = info.from_message; i < info.to_message; ++i) {
+            info.working_tokens += working_message_tokens[i];
+            info.raw_tokens += raw_message_tokens[i];
+            info.externalized_results += externalized_message[i];
+        }
+        if (t == 0) {
+            info.working_tokens = info.working_tokens > plan.prior_archive_tokens
+                                      ? info.working_tokens - plan.prior_archive_tokens
+                                      : 0;
+            info.raw_tokens = info.raw_tokens > plan.prior_archive_tokens
+                                  ? info.raw_tokens - plan.prior_archive_tokens
+                                  : 0;
+        }
+        info.tool_groups = static_cast<std::size_t>(
+            std::count_if(plan.tool_groups.begin(), plan.tool_groups.end(),
+                          [t](const ToolExchangeGroupInfo& group) { return group.turn == t; }));
+        plan.total_working_tokens += info.working_tokens;
+        plan.total_raw_tokens += info.raw_tokens;
+        plan.externalized_results += info.externalized_results;
+        plan.turns.push_back(std::move(info));
+    }
+
+    // 分区(§3.3):把有序 turns 切成 min(turn 数, partition_count) 份连续
+    // 分区,目标 token 大致相等。切口只落 turn 边界;每份至少一枚 turn。理
+    // 想切点取 total*k/parts,实际边界取前缀和最靠近理想点的那一枚 turn 边
+    // 界(整数账,不引浮点);并列取更早的边界,保证确定性。末份固定热区,
+    // 巨型末 turn 情形(§9.1)天然退成"热区只剩最后一枚 turn,较老的落进
+    // 前一份被总结"。
+    const std::size_t turn_count = plan.turns.size();
+    const std::size_t wanted = partition_count == 0 ? 1 : partition_count;
+    const std::size_t parts = std::min(turn_count, wanted);
+    plan.map_calls = parts > 0 ? parts - 1 : 0;
+
+    std::vector<std::size_t> prefix(turn_count + 1, 0);
+    for (std::size_t t = 0; t < turn_count; ++t) {
+        prefix[t + 1] = prefix[t] + plan.turns[t].working_tokens;
+    }
+    const std::size_t total = prefix[turn_count];
+    std::vector<std::size_t> bounds;
+    bounds.push_back(0);
+    std::size_t previous = 0;
+    for (std::size_t k = 1; k < parts; ++k) {
+        // 理想切点的第 k 份边界:prefix[b]*parts 最接近 total*k 的 b。
+        // 搜索域 [previous+1, turn_count-(parts-k)]:边界严格递增,且给后面
+        // 每份至少留一枚 turn。
+        const std::size_t ideal = total * k;
+        std::size_t best = previous + 1;
+        std::size_t best_diff = std::numeric_limits<std::size_t>::max();
+        for (std::size_t b = previous + 1; b + (parts - k) <= turn_count; ++b) {
+            const std::size_t scaled = prefix[b] * parts;
+            const std::size_t diff = scaled > ideal ? scaled - ideal : ideal - scaled;
+            if (diff < best_diff) {
+                best = b;
+                best_diff = diff;
+            }
+        }
+        bounds.push_back(best);
+        previous = best;
+    }
+    bounds.push_back(turn_count);
+
+    const auto map_budget = plan.compact_input_budget;
+    for (std::size_t p = 0; p + 1 < bounds.size(); ++p) {
+        TurnPartitionInfo partition;
+        partition.label = "P" + std::to_string(p + 1);
+        partition.first_turn = bounds[p];
+        partition.last_turn = bounds[p + 1];
+        partition.is_hot = p + 1 == bounds.size() - 1;
+        for (std::size_t t = partition.first_turn; t < partition.last_turn; ++t) {
+            partition.working_tokens += plan.turns[t].working_tokens;
+            partition.externalized_results += plan.turns[t].externalized_results;
+        }
+        if (map_budget.has_value() &&
+            partition.working_tokens + kTurnPlanPromptOverheadTokens > *map_budget) {
+            partition.over_map_budget = true;
+            plan.any_partition_over_map_budget = true;
+        }
+        plan.partitions.push_back(std::move(partition));
+    }
+    if (map_budget.has_value()) {
+        for (const auto& turn : plan.turns) {
+            if (turn.working_tokens + kTurnPlanPromptOverheadTokens > *map_budget) {
+                plan.any_turn_over_map_budget = true;
+                break;
+            }
+        }
+    }
+    return plan;
 }
 
 }  // namespace lubancode::agent

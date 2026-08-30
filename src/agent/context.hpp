@@ -47,6 +47,30 @@ std::size_t EstimateHistoryTokens(const std::vector<api::Message>& history);
 // 改准了名字。
 std::size_t EstimateHistoryBytes(const std::vector<api::Message>& history);
 
+// ---------------------------------------------------------------------------
+// 公共 turn 切分(Compact 四分区单阶段 0)
+//
+// §二《Turn 怎样算》的唯一定义,全库一份:一枚 turn 从真正的外层用户输入
+// 开始(user 角色 + 至少一枚 TextBlock 或 ImageBlock),到下一枚外层用户
+// 输入之前结束。只带 ToolResultBlock 的 user 消息(工具结果回填)不开新
+// turn;assistant text/thinking/tool_use 归当前 turn。原先 compact.cpp、
+// context.cpp、context_events.cpp 各揣一份私有拷贝,语义靠注释互相押韵,
+// 日后必漂移——现在收拢到这里,磁盘账与内存路共用同一只。
+// (api/chat/request.cpp 那份在 api 层,依赖只许单向,留在原地。)
+// ---------------------------------------------------------------------------
+
+// 判定一条消息是不是"真正的外层用户输入"(一枚 turn 的开头)。
+// user 角色且内容里至少有一枚 TextBlock 或 ImageBlock;空内容不算——
+// 没有 text/image 就没有"用户说了话"的证据,不凭空开 turn(空壳 user
+// 消息若插在 tool_use 与 tool_result 之间,当成轮头会把工具原子组劈开)。
+bool IsUserTurnStart(const api::Message& message);
+
+// 按上式把整份 history 切成连续 turn 区间:turns[i] = [from, to),首条
+// 消息下标是 turn 头,到下一枚 turn 头之前收尾,末段到 history.size()。
+// 真正用户输入之前若有零散消息(旧档外壳、异常形状),不属于任何 turn,
+// 由调用方自行处置;一条用户输入都没有时返回空表。
+std::vector<std::pair<std::size_t, std::size_t>> SplitIntoTurns(const std::vector<api::Message>& history);
+
 // 从环境变量 LUBANCODE_MAX_CONTEXT 读裁剪阈值,没设置、或者设置的不是合法
 // 正整数,就用默认值 kDefaultMaxContextChars。
 std::size_t MaxContextCharsFromEnv();

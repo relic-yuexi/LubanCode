@@ -19,15 +19,24 @@
 #include <expected>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
 #include "api/backend.hpp"
 #include "api/types.hpp"
+#include "agent/context_events.hpp"  // StructuralCompressionOptions(L1 工作视图口径)
 #include "agent/model_router.hpp"  // BackgroundCallAccounting(usage 出账)
 
 namespace lubancode::agent {
+
+// compact_partition_count 的默认值与首版取值域(§八):默认 4,允许 2..8,
+// 越界由配置层报错、不静默夹值。config 层(config.hpp)有同值镜像,依赖只
+// 许单向(config 不牵扯 agent),改时两处一起改。
+constexpr std::size_t kDefaultCompactPartitionCount = 4;
+constexpr std::size_t kMinCompactPartitionCount = 2;
+constexpr std::size_t kMaxCompactPartitionCount = 8;
 
 // 压缩预算:按压缩模型自己的窗口算,不拿主模型 context_window 冒充。
 struct CompactBudget {
@@ -80,6 +89,10 @@ struct CompactOptions {
     // 必须守恒的未完成事项(活动 todo 的 pending/in_progress 条目原文)。
     // 空表 = 没有可钉的待办,manifest 只做结构校验。
     std::vector<std::string> required_open_items;
+    // compact_partition_count(§八):compact 触发后把原始 turns 切成几份,
+    // 末份是热区,前 partition_count-1 份各 map 一次。默认 4;取值域
+    // 2..8 由配置层校验,这里只按收到的数算。
+    std::size_t partition_count = kDefaultCompactPartitionCount;
 };
 
 // 一次压缩的产物:archive 消息(顶进新历史用) + 解析出的 manifest。
@@ -194,5 +207,97 @@ std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend
                                                                      const CompactOptions& options,
                                                                      const std::string& reasoning_effort = std::string(),
                                                                      BackgroundCallAccounting* accounting = nullptr);
+
+// ---------------------------------------------------------------------------
+// 四分区(Compact 四分区单·阶段 1):TurnPartitionPlan 纯计算,不起模型。
+//
+// §三《一次 compact 的完整算法》的切法,先按 turn 收齐、再照 L1 工作视图
+// 的 token 重量切成连续 partition_count 份:边界只落 turn 之间(工具原子组
+// 天然不被劈开——组永远住在一枚 turn 里),前 n-1 份是冷区 map 输入,末份
+// 是热区。plan 只算账:哪些 turn 进哪份、各占多少 token、哪些 ToolResult
+// 已外置成 artifact 视图、分区/单 turn 是否超压缩模型预算。真跑 map/reduce
+// 是阶段 2/3 的事,这里一次模型都不调。
+// ---------------------------------------------------------------------------
+
+// map 输入预算诊断时给压缩指令留的公开估算档(与 /context 预算总账、
+// BuildCompactOptions 里的 compact_prompt_overhead_tokens 同档)。
+constexpr std::size_t kTurnPlanPromptOverheadTokens = 512;
+
+// 一枚原始 turn 的画像(分区用 L1 工作视图那把尺)。
+struct TurnInfo {
+    std::size_t number = 0;  // 1 起的 turn 序号(原始 turns 里第几枚)
+    std::string id;          // "t1","t2"... 宿主生成,给 map/reduce 钉来源
+    std::size_t from_message = 0;  // [from,to) 在原 history 里的消息区间
+    std::size_t to_message = 0;
+    std::size_t working_tokens = 0;  // L1 工作视图 token(长 ToolResult 按外置后算)
+    std::size_t raw_tokens = 0;      // 全量口径 token(对照,看外置省了多少)
+    std::size_t externalized_results = 0;  // 已外置成 artifact 视图的 ToolResult 数
+    std::size_t tool_groups = 0;           // 本 turn 覆盖的工具原子组数
+};
+
+// 一个分区:P1..Pn 连续 turn 段,末份是热区。
+struct TurnPartitionInfo {
+    std::string label;           // "P1".."Pn"
+    std::size_t first_turn = 0;  // [first_turn,last_turn) 的 turn 下标(0 起)
+    std::size_t last_turn = 0;
+    std::size_t working_tokens = 0;
+    std::size_t externalized_results = 0;
+    bool is_hot = false;  // 末分区:保原始消息形状,只进 final reduce
+    bool over_map_budget = false;  // 超压缩模型单次输入预算(map 时须沿 turn 再切)
+};
+
+// 工具原子组(§6.1):一条 assistant 消息(可含并行多枚 tool_use)加上按
+// tool_use_id 收齐的全部配对 result。plan 里只作画像与"不拆"的证据——分
+// 区边界只落 turn 之间,组整组随所属 turn 进退。
+struct ToolExchangeGroupInfo {
+    std::size_t assistant_message = 0;  // 发起调用的 assistant 消息下标
+    std::size_t from_message = 0;       // [from,to) 覆盖 assistant..最后一条配对 result
+    std::size_t to_message = 0;
+    std::vector<std::string> tool_use_ids;  // 本组发出的全部调用(并行调用全在列)
+    std::size_t turn = 0;                   // 所属 turn 下标(0 起)
+    bool complete = true;  // 全部 use 都有配对 result;false = orphan/incomplete
+};
+
+// BuildTurnPartitionPlan 的预算侧输入。
+struct TurnPartitionBudgets {
+    StructuralCompressionOptions structural{};  // L1 工作视图口径(外置/判重)
+    CompactBudget compact_model{};              // 压缩模型自己的窗口(预算诊断)
+};
+
+struct TurnPartitionPlan {
+    // 旧 archive(§3.2):首条 user 文本以上一轮存档开头时剥出,不算 turn、
+    // 不占分区账,只作 final reduce 的既有基线。
+    bool has_prior_archive = false;
+    std::string prior_archive_text;
+    std::size_t prior_archive_tokens = 0;
+
+    std::vector<TurnInfo> turns;             // 全部原始 turn,照原 history 顺序
+    std::vector<TurnPartitionInfo> partitions;  // P1..Pn,连续无缝盖住全部 turn
+    std::size_t requested_partition_count = kDefaultCompactPartitionCount;
+    std::size_t map_calls = 0;  // 冷区 map 次数 = 分区数 - 1(0 = 没有冷区)
+
+    std::vector<ToolExchangeGroupInfo> tool_groups;
+    bool has_incomplete_tool_exchange = false;  // orphan tool_use / 悬空 result
+    std::size_t dangling_results = 0;           // 配不上 use 的 result(异常形状)
+
+    std::size_t total_working_tokens = 0;  // turns 合计(不含 prior archive)
+    std::size_t total_raw_tokens = 0;      // 同口径的全量对照
+    std::size_t externalized_results = 0;  // 全史外置 ToolResult 总数
+
+    // 预算诊断:nullopt = 压缩模型窗口未知,没法校验(不假装核过)。
+    std::optional<std::size_t> compact_input_budget;
+    bool any_partition_over_map_budget = false;
+    bool any_turn_over_map_budget = false;  // 单 turn 装不下:该次 compact 须明确拒绝
+
+    // §9.3:没有冷区(分区数 <= 1)且没有旧存档时,压缩榨不出东西。
+    bool WorthCompacting() const { return partitions.size() > 1 || has_prior_archive; }
+};
+
+// 纯函数:剥旧 archive → 按 §二 切 turn → 按 L1 工作视图 token 平衡切成
+// min(turn 数, partition_count) 份连续分区(边界只落 turn 之间)→ 顺工具
+// 原子组、外置账与预算诊断。不调模型、不改 history、不落盘。
+TurnPartitionPlan BuildTurnPartitionPlan(const std::vector<api::Message>& history,
+                                         std::size_t partition_count,
+                                         const TurnPartitionBudgets& budgets);
 
 }  // namespace lubancode::agent

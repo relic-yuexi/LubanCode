@@ -1053,3 +1053,77 @@ TEST_CASE("TryRunCompact 压缩成功后:下一次模型请求、工具执行、
     CHECK(ledger_exists);
     std::filesystem::remove_all(dir, ec);
 }
+
+// ---------------------------------------------------------------------------
+// 手工 /compact 的反涨闸(Compact 四分区单·阶段 0):手工路此前只换账不
+// 核涨——小史压完并入存档反而更长,照样把旧史顶掉。现在 HandleCompactCommand
+// 与 TryRunCompact 共用 PressureEstimateTokens/RejectGrownCompactHistory,
+// 新史(压力口径)不比旧史小便拒收,历史一字不动、事件不落盘。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("HandleCompactCommand: 手工压缩反涨也拒收,历史一字未动") {
+    lubancode::tools::ToolRegistry registry;
+    ScriptBackend compact_backend;
+    // 摘要本身 ~700 token:压不进一条总共 ~750 token 的小史,并入存档后
+    // 必然反涨。
+    compact_backend.script = TextScript(
+        "## 任务目标\n小史\n## 已证实的事实\n" + std::string(2600, 's') +
+        "\n## 关键决策\n(无)\n## 涉及文件与符号\n(无)\n## 关键命令与结果\n(无)\n## 未完成事项\n(无)\n"
+        "```json\n{\"goal\": \"小史\", \"constraints\": [], \"open_items\": [], \"next_action\": \"收工\"}\n```");
+    lubancode::agent::Agent loop(compact_backend, registry,
+                                 lubancode::agent::AgentProfile{.request{.model = "test-model"},
+                                                                .system_prompt = "sys"});
+    std::vector<lubancode::api::Message> small;
+    lubancode::api::Message u;
+    u.role = lubancode::api::Role::User;
+    u.content.push_back(lubancode::api::TextBlock{std::string(1500, 'u')});
+    small.push_back(u);
+    lubancode::api::Message a;
+    a.role = lubancode::api::Role::Assistant;
+    a.content.push_back(lubancode::api::TextBlock{std::string(1500, 'v')});
+    small.push_back(a);
+    loop.ReplaceHistory(small);
+    const std::size_t size_before = loop.History().size();
+
+    const lubancode::cli::Theme theme;
+    lubancode::agent::ModelRoute route;
+    route.model = "test-model";
+    int compact_epoch = 0;
+    const auto result = HandleCompactCommand(/*args=*/"", loop, compact_backend, route, theme,
+                                             /*spinner_enabled=*/false, lubancode::agent::CompactOptions{},
+                                             compact_epoch);
+
+    // 反涨:拒收——没有事件,epoch 不进,历史原样。
+    CHECK_FALSE(result.event.has_value());
+    CHECK(compact_epoch == 0);
+    REQUIRE(loop.History().size() == size_before);
+    CHECK(std::get<lubancode::api::TextBlock>(loop.History()[0].content[0]).text.size() == 1500);
+    CHECK(result.after_tokens == 0);  // 拒收路不换账,没有"压缩后"那个数
+}
+
+TEST_CASE("HandleCompactCommand: 手工压缩收窄时照常换账,反涨闸不拦正常路") {
+    lubancode::tools::ToolRegistry registry;
+    ScriptBackend compact_backend;
+    compact_backend.script = TextScript(
+        "## 任务目标\n建图书系统\n## 已证实的事实\n规划已出\n## 关键决策\n按层落码\n"
+        "## 涉及文件与符号\nsrc/app.cpp\n## 关键命令与结果\n(无)\n## 未完成事项\n(无)\n"
+        "```json\n{\"goal\": \"建图书系统\", \"constraints\": [], \"open_items\": [], \"next_action\": \"落码\"}\n```");
+    lubancode::agent::Agent loop(compact_backend, registry,
+                                 lubancode::agent::AgentProfile{.request{.model = "test-model"},
+                                                                .system_prompt = "sys"});
+    loop.ReplaceHistory(SyntheticMultiToolHistory());  // ~16k token,压完必收窄
+    const std::size_t size_before = loop.History().size();
+
+    const lubancode::cli::Theme theme;
+    lubancode::agent::ModelRoute route;
+    route.model = "test-model";
+    int compact_epoch = 0;
+    const auto result = HandleCompactCommand(/*args=*/"", loop, compact_backend, route, theme,
+                                             /*spinner_enabled=*/false, lubancode::agent::CompactOptions{},
+                                             compact_epoch);
+
+    REQUIRE(result.event.has_value());
+    CHECK(result.after_tokens < result.before_tokens);
+    CHECK(compact_epoch == 1);
+    CHECK(loop.History().size() < size_before);
+}

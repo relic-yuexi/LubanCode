@@ -98,6 +98,14 @@ constexpr const char* kDefaultTheme = "dark";
 // (字符数、老的硬安全网,单位不同、语义也不同)是两回事。
 constexpr std::size_t kDefaultContextWindowTokens = 256000;
 
+// compact_partition_count(compact 触发后把原始 turns 切成几份,末份热区)
+// 的内置默认值与首版取值域(Compact 四分区单·阶段 1,§八):默认 4,允许
+// 2..8,越界报错、不静默夹值。agent 层(agent/compact.hpp)有同值镜像,
+// 依赖只许单向(config 不牵扯 agent),改时两处一起改。暂不设环境变量。
+constexpr int kDefaultCompactPartitionCount = 4;
+constexpr int kMinCompactPartitionCount = 2;
+constexpr int kMaxCompactPartitionCount = 8;
+
 // max_steps_per_turn(agent 主循环一个 turn 内跟模型来回的步数上限;旧配置
 // 名 max_turns)的内置默认值。数值上跟 agent::Agent 构造函数的默认参数
 // 保持一致,但 config 层不依赖 agent 层(同 kDefaultMaxContextChars 的理由,
@@ -610,6 +618,11 @@ struct Config {
     std::string system_prompt_file;      // --system-prompt / system_prompt_file,没配到就是空串
     std::size_t context_window_tokens = kDefaultContextWindowTokens;  // M6.6:上下文窗口 token 数
     std::string compact_model;  // M6.6:压缩用的模型,空串 = 跟当前会话模型一致(兼容别名,见下)
+    // compact_partition_count(Compact 四分区单·阶段 1):compact 触发后把
+    // 原始 turns 切成几份,末份热区、前 n-1 份各 map 一次。只从配置文件来
+    // (项目级压全局,待遇同 context_window,无环境变量),取值 2..8,越界
+    // 报错不夹值。
+    int compact_partition_count = kDefaultCompactPartitionCount;
     // 三档模型角色(第一期):shorthand 只填模型名,沿用当前 provider;
     // 高级路由走下面的 model_roles 段。空串 = 未配置,走回退链
     // (cheap/lao -> normal -> 会话模型);compact_model 只在 cheap_model
@@ -693,6 +706,7 @@ struct ConfigSources {
     Source system_prompt_file = Source::Default;
     Source context_window_tokens = Source::Default;
     Source compact_model = Source::Default;
+    Source compact_partition_count = Source::Default;  // 四分区:配置文件或默认,只有这两级
     Source normal_model = Source::Default;  // 三角色 shorthand:四级合并,同 compact_model
     Source cheap_model = Source::Default;
     Source lao_model = Source::Default;
@@ -792,6 +806,9 @@ struct FileConfig {
     std::optional<std::string> system_prompt_file;   // 人格文件路径
     std::optional<std::string> context_window;        // "256k"/"512k"/"1m"/裸数字,原始字符串,解析交给 MergeConfig
     std::optional<std::string> compact_model;         // 压缩用的模型(兼容别名)
+    // compact_partition_count:整数 2..8,类型在文件解析时报、范围在合并时
+    // 报(带来源),越界不静默夹值(§八)。
+    std::optional<int> compact_partition_count;
     // 三角色 shorthand(读入即归一:空串/null 都留 nullopt = 未配置)。
     std::optional<std::string> normal_model;
     std::optional<std::string> cheap_model;

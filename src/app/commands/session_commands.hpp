@@ -48,6 +48,18 @@ std::size_t EstimateHistoryChars(const std::vector<lubancode::api::Message>& his
 
 std::size_t EstimateHistoryTokens(const std::vector<lubancode::api::Message>& history);
 
+// 压力口径估算(P1-1,手工/自动压缩共用):任意一份 history 过一遍 L1 无损
+// 结构压缩(临时 memo/stats,不落盘不定形)后按统一 token 口径估。触发线、
+// /context 对话历史、压缩前后账与反涨断言都拿这一把尺。
+std::size_t PressureEstimateTokens(lubancode::agent::Agent& loop,
+                                   const std::vector<lubancode::api::Message>& history);
+
+// 反涨闸(0.26.84 治三,阶段 0 收口):压缩后的新史(压力口径)不比旧史小
+// 时拒收——手工 /compact 与自动 TryRunCompact 共用同一只。返回 true = 拒收
+// (回执已打,调用方就地收场,旧 history 一字不动)。
+bool RejectGrownCompactHistory(const lubancode::cli::Theme& theme, std::size_t before_tokens,
+                               std::size_t new_tokens);
+
 
 // /context 命令:不带参数打分类占用分析(系统提示/工具定义/对话历史三类
 // 统一口径 token 估算 + 条形图,拼装规则全在 FormatContextBreakdown,这里
@@ -82,7 +94,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const lubancode::agent::ModelUsageLedger* usage_ledger = nullptr,
                            const lubancode::agent::ContextArtifactStore* artifact_store = nullptr,
                            const ContextLayersReport* layers = nullptr,
-                           const lubancode::agent::ModelRouteTable* roles_table = nullptr);
+                           const lubancode::agent::ModelRouteTable* roles_table = nullptr,
+                           int compact_partition_count = 0);
 
 // ---- /context 的会话现场收集(终端接线收尾单自大类搬出) ------------------
 //
@@ -108,6 +121,9 @@ struct ContextEstimateInputs {
     const lubancode::agent::ModelRouteTable* roles_table = nullptr;
     const lubancode::agent::ContextArtifactStore* artifact_store = nullptr;  // 可空
     const std::string* last_compact_line = nullptr;
+    // compact_partition_count(§八,Compact 四分区单·阶段 1):/context 展示
+    // "compact turn 策略"一行用;0 = 现场没带到(不打那一行)。
+    int compact_partition_count = 0;
 };
 void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
                        const lubancode::cli::Theme& theme);

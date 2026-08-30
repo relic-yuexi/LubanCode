@@ -1352,6 +1352,83 @@ TEST_CASE("ParseFileConfigJson: think 类型不对报错") {
 }
 
 // ---------------------------------------------------------------------------
+// compact_partition_count(Compact 四分区单·阶段 1):只从配置文件来(项目级
+// 压全局),默认 4,取值域 2..8,越界报错不夹值(§八)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("MergeConfig: compact_partition_count 什么都没设置时用内置默认值 4") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.compact_partition_count == config::kDefaultCompactPartitionCount);
+    CHECK(result->config.compact_partition_count == 4);
+    CHECK(result->sources.compact_partition_count == config::Source::Default);
+}
+
+TEST_CASE("MergeConfig: compact_partition_count 配置文件压过默认值,来源记配置文件") {
+    config::FileConfig file;
+    file.compact_partition_count = 6;
+    file.source_path = "/tmp/.lubancode.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(result.has_value());
+    CHECK(result->config.compact_partition_count == 6);
+    CHECK(result->sources.compact_partition_count == config::Source::ProjectConfigFile);
+}
+
+TEST_CASE("MergeConfig: compact_partition_count 边界值 2 与 8 都合法") {
+    {
+        config::FileConfig file;
+        file.compact_partition_count = config::kMinCompactPartitionCount;
+        file.source_path = "/tmp/.lubancode.json";
+        const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+        REQUIRE(result.has_value());
+        CHECK(result->config.compact_partition_count == 2);
+    }
+    {
+        config::FileConfig file;
+        file.compact_partition_count = config::kMaxCompactPartitionCount;
+        file.source_path = "/tmp/.lubancode.json";
+        const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+        REQUIRE(result.has_value());
+        CHECK(result->config.compact_partition_count == 8);
+    }
+}
+
+TEST_CASE("MergeConfig: compact_partition_count 越界报错,不静默夹值,错误信息带文件路径") {
+    config::FileConfig file;
+    file.compact_partition_count = 9;
+    file.source_path = "/home/user/.lubancode.json";
+
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("compact_partition_count") != std::string::npos);
+    CHECK(result.error().find("/home/user/.lubancode.json") != std::string::npos);
+
+    config::FileConfig zero;
+    zero.compact_partition_count = 1;
+    zero.source_path = "/home/user/.lubancode.json";
+    const auto too_small = config::MergeConfig(EmptyLubancodeEnv(), zero, EmptyGenericEnv());
+    REQUIRE_FALSE(too_small.has_value());
+    CHECK(too_small.error().find("2..8") != std::string::npos);
+}
+
+TEST_CASE("ParseFileConfigJson: compact_partition_count 解出整数;类型不对报错") {
+    {
+        const std::string json = R"({"compact_partition_count": 4})";
+        const auto result = config::ParseFileConfigJson(json, "/tmp/.lubancode.json");
+        REQUIRE(result.has_value());
+        REQUIRE(result->compact_partition_count.has_value());
+        CHECK(*result->compact_partition_count == 4);
+    }
+    {
+        const std::string json = R"({"compact_partition_count": "four"})";
+        const auto result = config::ParseFileConfigJson(json, "/tmp/.lubancode.json");
+        REQUIRE_FALSE(result.has_value());
+        CHECK(result.error().find("compact_partition_count") != std::string::npos);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // ToString(Source):--config 诊断输出用的中文说法,每种来源都要有说法。
 // 配置文件拆成项目级/全局两级,两条都得有独立、非空、彼此不同的说法。
 // ---------------------------------------------------------------------------
