@@ -322,6 +322,10 @@ add_library(lubancode_engine STATIC
   src/platform/dir_fingerprint.cpp
   src/api/sse_framing.cpp
   src/api/http_stream_transport.cpp  # 批六:四家 wire client 共用的 cpr 传输骨架
+  # Lua 受控 HTTP 单·阶段 2:中立非流式传输底座(cpr 一笔完整请求 +
+  # 回调入口落帽/取消 + getaddrinfo DNS seam + 地址安全分类)。plugin
+  # HTTP 先用;provider SSE 路暂不迁(设计单 §8.1)。
+  src/net/http_transport.cpp
   src/api/anthropic/client.cpp
   src/api/anthropic/events.cpp
   src/api/chat/client.cpp
@@ -487,7 +491,9 @@ target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_BINARY_DIR}/generated)
 target_link_libraries(lubancode_engine PUBLIC cpr::cpr nlohmann_json::nlohmann_json)
 if(WIN32)
-  target_link_libraries(lubancode_engine PRIVATE advapi32 windowscodecs)
+  # ws2_32:net/http_transport 的 getaddrinfo 要 Winsock(静态库的 PRIVATE
+  # 系统依赖会以 link-only 形态传给消费方)。
+  target_link_libraries(lubancode_engine PRIVATE advapi32 windowscodecs ws2_32)
 endif()
 target_link_libraries(lubancode_engine PRIVATE lubancode_lua)
 # yaml-cpp 走 PUBLIC:engine 的头(memory/front matter)把 yaml 头递给

@@ -62,6 +62,8 @@ message(STATUS "lubancode: 收录 ${LUBANCODE_TEST_SOURCE_COUNT} 册测试")
 add_executable(lubancode_tests
   support/main.cpp
   support/api_fixture.cpp
+  # Lua 受控 HTTP 单·阶段 2:本机回环假 HTTP 服务(§13.3 假服务矩阵)。
+  support/fake_http_server.cpp
   ${LUBANCODE_TEST_SOURCES}
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
