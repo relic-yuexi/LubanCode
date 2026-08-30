@@ -1141,4 +1141,1222 @@ TurnPartitionPlan BuildTurnPartitionPlan(const std::vector<api::Message>& histor
     return plan;
 }
 
+// ---------------------------------------------------------------------------
+// 四分区·阶段 2-4:TurnGroupSummary map、双账 final reduce、新 history
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// "t7" -> 7;不是合法 turn 号给 nullopt(覆盖方向、证据排序都靠它比先后)。
+std::optional<std::size_t> TurnOrdinal(const std::string& id) {
+    if (id.size() < 2 || id[0] != 't') {
+        return std::nullopt;
+    }
+    std::size_t value = 0;
+    for (std::size_t i = 1; i < id.size(); ++i) {
+        if (id[i] < '0' || id[i] > '9') {
+            return std::nullopt;
+        }
+        value = value * 10 + static_cast<std::size_t>(id[i] - '0');
+        if (value > 100000000) {  // 防溢出的防御闸
+            return std::nullopt;
+        }
+    }
+    return value == 0 ? std::optional<std::size_t>() : value;
+}
+
+// map/reduce 输出的 JSON 提取:优先认单枚 ```json 围栏,认不着就当裸 JSON
+// 整段解析。围栏只是宽容一道(模型手滑加围栏),不改变"只收 JSON"的规矩。
+std::optional<nlohmann::json> ParseJsonObjectLoose(const std::string& text) {
+    std::string body = TrimWhitespace(text);
+    const std::size_t fence = body.find("```json");
+    if (fence != std::string::npos) {
+        const std::size_t body_begin = body.find('\n', fence);
+        const std::size_t fence_end = body_begin == std::string::npos
+                                          ? std::string::npos
+                                          : body.find("```", body_begin + 1);
+        if (body_begin == std::string::npos || fence_end == std::string::npos) {
+            return std::nullopt;
+        }
+        body = TrimWhitespace(body.substr(body_begin + 1, fence_end - body_begin - 1));
+    }
+    if (body.empty() || body.front() != '{') {
+        return std::nullopt;
+    }
+    nlohmann::json parsed;
+    try {
+        parsed = nlohmann::json::parse(body);
+    } catch (...) {
+        return std::nullopt;
+    }
+    if (!parsed.is_object()) {
+        return std::nullopt;
+    }
+    return parsed;
+}
+
+// 字符串数组读档:必须是数组、元素必须是字符串、剥空白非空。
+bool JsonStringArray(const nlohmann::json& json, const char* key, std::vector<std::string>& out) {
+    if (!json.contains(key) || !json[key].is_array()) {
+        return false;
+    }
+    for (const auto& item : json[key]) {
+        if (!item.is_string() || TrimWhitespace(item.get<std::string>()).empty()) {
+            return false;
+        }
+        out.push_back(item.get<std::string>());
+    }
+    return true;
+}
+
+// requirement 读档:{id?, text, source_turns:[...]};id 是否必填由调用方定
+// (goal 不带 id,其余都带)。
+bool ParseRequirement(const nlohmann::json& json, bool require_id, ContractRequirement& out) {
+    if (!json.is_object() || !json.contains("text") || !json["text"].is_string()) {
+        return false;
+    }
+    if (require_id && (!json.contains("id") || !json["id"].is_string())) {
+        return false;
+    }
+    if (TrimWhitespace(json["text"].get<std::string>()).empty()) {
+        return false;
+    }
+    if (require_id && TrimWhitespace(json["id"].get<std::string>()).empty()) {
+        return false;
+    }
+    out.id = require_id ? json["id"].get<std::string>() : std::string();
+    out.text = json["text"].get<std::string>();
+    return JsonStringArray(json, "source_turns", out.source_turns) && !out.source_turns.empty();
+}
+
+}  // namespace
+
+std::optional<TurnGroupSummary> ParseTurnGroupSummary(const std::string& text) {
+    const auto parsed = ParseJsonObjectLoose(text);
+    if (!parsed.has_value()) {
+        return std::nullopt;
+    }
+    TurnGroupSummary summary;
+    if (!JsonStringArray(*parsed, "user_requirement_changes", summary.user_requirement_changes) ||
+        !JsonStringArray(*parsed, "confirmed_facts", summary.confirmed_facts) ||
+        !JsonStringArray(*parsed, "files", summary.files) ||
+        !JsonStringArray(*parsed, "changes_made", summary.changes_made) ||
+        !JsonStringArray(*parsed, "failed_attempts", summary.failed_attempts) ||
+        !JsonStringArray(*parsed, "open_items", summary.open_items) ||
+        !JsonStringArray(*parsed, "next_step_candidates", summary.next_step_candidates)) {
+        return std::nullopt;
+    }
+    if (!parsed->contains("tool_results") || !(*parsed)["tool_results"].is_array()) {
+        return std::nullopt;
+    }
+    for (const auto& item : (*parsed)["tool_results"]) {
+        if (!item.is_object() || !item.contains("tool") || !item["tool"].is_string() ||
+            !item.contains("result") || !item["result"].is_string()) {
+            return std::nullopt;
+        }
+        TurnGroupToolResult note;
+        note.tool = item["tool"].get<std::string>();
+        note.result = item["result"].get<std::string>();
+        if (TrimWhitespace(note.tool).empty() || TrimWhitespace(note.result).empty()) {
+            return std::nullopt;
+        }
+        if (item.contains("evidence")) {
+            if (!item["evidence"].is_string() || TrimWhitespace(item["evidence"].get<std::string>()).empty()) {
+                return std::nullopt;
+            }
+            note.evidence = item["evidence"].get<std::string>();
+        }
+        summary.tool_results.push_back(std::move(note));
+    }
+    return summary;
+}
+
+nlohmann::json ToJson(const UserContract& contract) {
+    nlohmann::json json;
+    nlohmann::json goal;
+    goal["text"] = contract.goal.text;
+    goal["source_turns"] = contract.goal.source_turns;
+    json["goal"] = std::move(goal);
+    const auto dump_requirements = [](const std::vector<ContractRequirement>& requirements) {
+        std::vector<nlohmann::json> items;
+        items.reserve(requirements.size());
+        for (const auto& requirement : requirements) {
+            nlohmann::json item;
+            item["id"] = requirement.id;
+            item["text"] = requirement.text;
+            item["source_turns"] = requirement.source_turns;
+            items.push_back(std::move(item));
+        }
+        return items;
+    };
+    json["active_constraints"] = dump_requirements(contract.active_constraints);
+    json["acceptance_criteria"] = dump_requirements(contract.acceptance_criteria);
+    json["additions"] = dump_requirements(contract.additions);
+    std::vector<nlohmann::json> superseded;
+    superseded.reserve(contract.superseded_requirements.size());
+    for (const auto& item : contract.superseded_requirements) {
+        nlohmann::json entry;
+        entry["id"] = item.id;
+        entry["text"] = item.text;
+        entry["source_turns"] = item.source_turns;
+        entry["superseded_by"] = item.superseded_by;
+        entry["superseded_at_turn"] = item.superseded_at_turn;
+        superseded.push_back(std::move(entry));
+    }
+    json["superseded_requirements"] = std::move(superseded);
+    std::vector<nlohmann::json> questions;
+    questions.reserve(contract.open_questions.size());
+    for (const auto& question : contract.open_questions) {
+        nlohmann::json item;
+        item["text"] = question.text;
+        item["source_turns"] = question.source_turns;
+        questions.push_back(std::move(item));
+    }
+    json["open_questions"] = std::move(questions);
+    return json;
+}
+
+std::optional<UserContract> ParseUserContract(const nlohmann::json& json) {
+    if (!json.is_object() || !json.contains("goal") || !json["goal"].is_object()) {
+        return std::nullopt;
+    }
+    UserContract contract;
+    if (!ParseRequirement(json["goal"], /*require_id=*/false, contract.goal)) {
+        return std::nullopt;
+    }
+    const auto parse_list = [&](const char* key, std::vector<ContractRequirement>& out) {
+        if (!json.contains(key) || !json[key].is_array()) {
+            return false;
+        }
+        for (const auto& item : json[key]) {
+            ContractRequirement requirement;
+            if (!ParseRequirement(item, /*require_id=*/true, requirement)) {
+                return false;
+            }
+            out.push_back(std::move(requirement));
+        }
+        return true;
+    };
+    if (!parse_list("active_constraints", contract.active_constraints) ||
+        !parse_list("acceptance_criteria", contract.acceptance_criteria) ||
+        !parse_list("additions", contract.additions)) {
+        return std::nullopt;
+    }
+    if (!json.contains("superseded_requirements") || !json["superseded_requirements"].is_array()) {
+        return std::nullopt;
+    }
+    for (const auto& item : json["superseded_requirements"]) {
+        if (!item.is_object()) {
+            return std::nullopt;
+        }
+        ContractRequirement base;
+        if (!ParseRequirement(item, /*require_id=*/true, base)) {
+            return std::nullopt;
+        }
+        if (!item.contains("superseded_by") || !item["superseded_by"].is_string() ||
+            TrimWhitespace(item["superseded_by"].get<std::string>()).empty() ||
+            !item.contains("superseded_at_turn") || !item["superseded_at_turn"].is_string() ||
+            TrimWhitespace(item["superseded_at_turn"].get<std::string>()).empty()) {
+            return std::nullopt;
+        }
+        SupersededRequirement requirement;
+        requirement.id = base.id;
+        requirement.text = base.text;
+        requirement.source_turns = base.source_turns;
+        requirement.superseded_by = item["superseded_by"].get<std::string>();
+        requirement.superseded_at_turn = item["superseded_at_turn"].get<std::string>();
+        contract.superseded_requirements.push_back(std::move(requirement));
+    }
+    if (!json.contains("open_questions") || !json["open_questions"].is_array()) {
+        return std::nullopt;
+    }
+    for (const auto& item : json["open_questions"]) {
+        if (!item.is_object()) {
+            return std::nullopt;
+        }
+        ContractOpenQuestion question;
+        if (!item.contains("text") || !item["text"].is_string() ||
+            TrimWhitespace(item["text"].get<std::string>()).empty()) {
+            return std::nullopt;
+        }
+        question.text = item["text"].get<std::string>();
+        if (!JsonStringArray(item, "source_turns", question.source_turns) ||
+            question.source_turns.empty()) {
+            return std::nullopt;
+        }
+        contract.open_questions.push_back(std::move(question));
+    }
+    return contract;
+}
+
+nlohmann::json ToJson(const WorkState& state) {
+    nlohmann::json json;
+    const auto dump_notes = [](const std::vector<StateEvidenceNote>& notes) {
+        std::vector<nlohmann::json> items;
+        items.reserve(notes.size());
+        for (const auto& note : notes) {
+            nlohmann::json item;
+            item["text"] = note.text;
+            item["evidence_refs"] = note.evidence_refs;
+            items.push_back(std::move(item));
+        }
+        return items;
+    };
+    json["confirmed_facts"] = dump_notes(state.confirmed_facts);
+    std::vector<nlohmann::json> tool_results;
+    tool_results.reserve(state.tool_results.size());
+    for (const auto& note : state.tool_results) {
+        nlohmann::json item;
+        item["tool"] = note.tool;
+        item["result"] = note.result;
+        item["evidence_refs"] = note.evidence_refs;
+        tool_results.push_back(std::move(item));
+    }
+    json["tool_results"] = std::move(tool_results);
+    json["files"] = state.files;
+    json["changes_made"] = dump_notes(state.changes_made);
+    json["failed_attempts"] = dump_notes(state.failed_attempts);
+    json["open_items"] = state.open_items;
+    json["next_action"] = state.next_action;
+    return json;
+}
+
+std::optional<WorkState> ParseWorkState(const nlohmann::json& json) {
+    if (!json.is_object() || !json.contains("next_action") || !json["next_action"].is_string() ||
+        TrimWhitespace(json["next_action"].get<std::string>()).empty()) {
+        return std::nullopt;
+    }
+    WorkState state;
+    state.next_action = json["next_action"].get<std::string>();
+    const auto parse_notes = [&](const char* key, std::vector<StateEvidenceNote>& out) {
+        if (!json.contains(key) || !json[key].is_array()) {
+            return false;
+        }
+        for (const auto& item : json[key]) {
+            if (!item.is_object() || !item.contains("text") || !item["text"].is_string()) {
+                return false;
+            }
+            StateEvidenceNote note;
+            note.text = item["text"].get<std::string>();
+            if (TrimWhitespace(note.text).empty()) {
+                return false;
+            }
+            if (!JsonStringArray(item, "evidence_refs", note.evidence_refs)) {
+                return false;
+            }
+            out.push_back(std::move(note));
+        }
+        return true;
+    };
+    if (!parse_notes("confirmed_facts", state.confirmed_facts) ||
+        !parse_notes("changes_made", state.changes_made) ||
+        !parse_notes("failed_attempts", state.failed_attempts)) {
+        return std::nullopt;
+    }
+    if (!json.contains("tool_results") || !json["tool_results"].is_array()) {
+        return std::nullopt;
+    }
+    for (const auto& item : json["tool_results"]) {
+        if (!item.is_object() || !item.contains("tool") || !item["tool"].is_string() ||
+            !item.contains("result") || !item["result"].is_string()) {
+            return std::nullopt;
+        }
+        StateToolResult note;
+        note.tool = item["tool"].get<std::string>();
+        note.result = item["result"].get<std::string>();
+        if (TrimWhitespace(note.tool).empty() || TrimWhitespace(note.result).empty()) {
+            return std::nullopt;
+        }
+        if (!JsonStringArray(item, "evidence_refs", note.evidence_refs)) {
+            return std::nullopt;
+        }
+        state.tool_results.push_back(std::move(note));
+    }
+    if (!JsonStringArray(json, "files", state.files) ||
+        !JsonStringArray(json, "open_items", state.open_items)) {
+        return std::nullopt;
+    }
+    return state;
+}
+
+namespace {
+
+// 一组 turn id 全部有效(存在且真是宿主钉的 turn 号)才收;invalid_out 非空
+// 时顺手记下第一枚不合法的 id(拒收消息点名用)。
+bool AllTurnIdsValid(const std::vector<std::string>& ids, const std::set<std::string>& valid_turn_ids,
+                     std::string* invalid_out = nullptr) {
+    for (const auto& id : ids) {
+        if (valid_turn_ids.count(id) == 0) {
+            if (invalid_out != nullptr) {
+                *invalid_out = id;
+            }
+            return false;
+        }
+    }
+    return true;
+}
+
+// 把一组 id 拼成 "t1,t2"(拒收消息点名用)。
+std::string JoinTurnIds(const std::vector<std::string>& ids) {
+    std::string out;
+    for (std::size_t i = 0; i < ids.size(); ++i) {
+        if (i > 0) {
+            out += ",";
+        }
+        out += ids[i];
+    }
+    return out;
+}
+
+// 一枚 turn 的最晚序号(比覆盖先后用);任一 id 不合法给 nullopt。
+std::optional<std::size_t> LatestTurnOrdinal(const std::vector<std::string>& ids) {
+    std::optional<std::size_t> latest;
+    for (const auto& id : ids) {
+        const auto ordinal = TurnOrdinal(id);
+        if (!ordinal.has_value()) {
+            return std::nullopt;
+        }
+        if (!latest.has_value() || *ordinal > *latest) {
+            latest = ordinal;
+        }
+    }
+    return latest;
+}
+
+}  // namespace
+
+std::vector<std::string> ValidateUserContract(const UserContract& contract,
+                                              const std::set<std::string>& valid_turn_ids) {
+    std::vector<std::string> failures;
+    if (TrimWhitespace(contract.goal.text).empty()) {
+        failures.push_back("用户契约缺目标(goal)");
+    } else if (contract.goal.source_turns.empty()) {
+        failures.push_back("目标缺少来源 turn(source_turns)");
+    } else if (std::string bad_id; !AllTurnIdsValid(contract.goal.source_turns, valid_turn_ids, &bad_id)) {
+        failures.push_back("目标的来源 turn 不存在: " + bad_id);
+    }
+
+    // requirement 总册:id 唯一、文本非空、来源合法。id -> 最晚来源序号,
+    // 覆盖方向校验用。
+    std::map<std::string, std::size_t> requirement_latest_turn;
+    const auto collect = [&](const std::vector<ContractRequirement>& requirements, const char* what) {
+        for (const auto& requirement : requirements) {
+            const std::string label = std::string(what) + "「" + requirement.text.substr(0, 24) + "」";
+            if (TrimWhitespace(requirement.id).empty()) {
+                failures.push_back(std::string(what) + "有条目缺 id");
+                continue;
+            }
+            if (requirement_latest_turn.count(requirement.id) > 0) {
+                failures.push_back("requirement id 重复: " + requirement.id);
+                continue;
+            }
+            if (TrimWhitespace(requirement.text).empty()) {
+                failures.push_back(label + " 缺正文");
+                continue;
+            }
+            if (requirement.source_turns.empty()) {
+                failures.push_back(label + " 缺少来源 turn(source_turns)");
+                continue;
+            }
+            if (std::string bad_id; !AllTurnIdsValid(requirement.source_turns, valid_turn_ids, &bad_id)) {
+                failures.push_back(label + " 的来源 turn 不存在: " + bad_id + "(来源: " +
+                                   JoinTurnIds(requirement.source_turns) + ")");
+                continue;
+            }
+            if (const auto latest = LatestTurnOrdinal(requirement.source_turns)) {
+                requirement_latest_turn[requirement.id] = *latest;
+            }
+        }
+    };
+    collect(contract.active_constraints, "活动约束");
+    collect(contract.acceptance_criteria, "验收条件");
+    collect(contract.additions, "补充要求");
+
+    for (const auto& item : contract.superseded_requirements) {
+        const std::string label = std::string("被废旧要求「") + item.text.substr(0, 24) + "」";
+        if (TrimWhitespace(item.id).empty() || TrimWhitespace(item.text).empty()) {
+            failures.push_back("superseded 列表有条目缺 id 或正文");
+            continue;
+        }
+        if (item.source_turns.empty() || !AllTurnIdsValid(item.source_turns, valid_turn_ids)) {
+            failures.push_back(label + " 缺少合法的来源 turn(source_turns)");
+            continue;
+        }
+        const auto old_latest = LatestTurnOrdinal(item.source_turns);
+        const auto at_turn = TurnOrdinal(item.superseded_at_turn);
+        if (!at_turn.has_value() || valid_turn_ids.count(item.superseded_at_turn) == 0) {
+            failures.push_back(label + " 的 superseded_at_turn 不是合法 turn");
+            continue;
+        }
+        // 覆盖方向:废旧动作必须发生在旧要求成立之后(§四"覆盖方向从旧
+        // turn 指向新 turn")——倒序覆盖整份拒收。
+        if (old_latest.has_value() && *at_turn <= *old_latest) {
+            failures.push_back(label + " 的覆盖方向倒序: superseded_at_turn " + item.superseded_at_turn +
+                               " 不晚于旧要求的最晚来源");
+            continue;
+        }
+        // 替代项必须存在,且不得比旧要求更老。
+        const auto replacement = requirement_latest_turn.find(item.superseded_by);
+        if (replacement == requirement_latest_turn.end()) {
+            // 也允许指向另一条 superseded 项(链式覆盖)。
+            bool chained = false;
+            for (const auto& other : contract.superseded_requirements) {
+                if (other.id == item.superseded_by) {
+                    chained = true;
+                    break;
+                }
+            }
+            if (!chained) {
+                failures.push_back(label + " 的 superseded_by 指向不存在的 requirement: " + item.superseded_by);
+                continue;
+            }
+        } else if (old_latest.has_value() && replacement->second <= *old_latest) {
+            failures.push_back(label + " 的替代项不比旧要求新(倒序覆盖)");
+            continue;
+        }
+    }
+
+    // 覆盖图无环:沿 superseded_by 在 superseded 列表里走,一步一记,走到
+    // 已访问过的 id 即成环(指向活动 requirement 的链自然到头)。
+    for (const auto& item : contract.superseded_requirements) {
+        std::set<std::string> visited{item.id};
+        std::string next = item.superseded_by;
+        bool cycle = false;
+        for (std::size_t steps = 0; steps <= contract.superseded_requirements.size(); ++steps) {
+            const auto it = std::find_if(contract.superseded_requirements.begin(),
+                                         contract.superseded_requirements.end(),
+                                         [&next](const SupersededRequirement& candidate) {
+                                             return candidate.id == next;
+                                         });
+            if (it == contract.superseded_requirements.end()) {
+                break;  // 指向活动 requirement,链到头
+            }
+            if (!visited.insert(next).second) {
+                cycle = true;
+                break;
+            }
+            next = it->superseded_by;
+        }
+        if (cycle) {
+            failures.push_back("覆盖关系成环(从 " + item.id + " 起)");
+        }
+    }
+
+    for (const auto& question : contract.open_questions) {
+        if (TrimWhitespace(question.text).empty()) {
+            failures.push_back("open_questions 有空条目");
+        } else if (question.source_turns.empty() ||
+                   !AllTurnIdsValid(question.source_turns, valid_turn_ids)) {
+            failures.push_back("待澄清问题「" + question.text.substr(0, 24) + "」缺少合法的来源 turn");
+        }
+    }
+    return failures;
+}
+
+std::vector<std::string> ValidateWorkState(const WorkState& state,
+                                           const std::set<std::string>& valid_turn_ids,
+                                           const std::set<std::string>& valid_event_ids,
+                                           const std::vector<std::string>& required_open_items) {
+    std::vector<std::string> failures;
+    const auto check_refs = [&](const std::vector<std::string>& refs, const std::string& label) {
+        if (refs.empty()) {
+            failures.push_back(label + " 没带任何 evidence_refs");
+            return;
+        }
+        for (const auto& ref : refs) {
+            // ref 形如 "t4" 或 "t4:e3":turn 部分必须存在;事件部分(若有)
+            // 也必须在事件账里。
+            const std::size_t colon = ref.find(':');
+            const std::string turn_part = colon == std::string::npos ? ref : ref.substr(0, colon);
+            if (valid_turn_ids.count(turn_part) == 0) {
+                failures.push_back(label + " 的证据 turn 不存在: " + ref);
+                continue;
+            }
+            if (colon != std::string::npos) {
+                const std::string event_part = ref.substr(colon + 1);
+                if (!valid_event_ids.empty() && valid_event_ids.count(event_part) == 0) {
+                    failures.push_back(label + " 的证据事件不存在: " + ref);
+                }
+            }
+        }
+    };
+    for (const auto& note : state.confirmed_facts) {
+        check_refs(note.evidence_refs, "已证实事实「" + note.text.substr(0, 24) + "」");
+    }
+    for (const auto& note : state.tool_results) {
+        check_refs(note.evidence_refs, "工具结果(" + note.tool + ")");
+    }
+    for (const auto& note : state.changes_made) {
+        check_refs(note.evidence_refs, "已做修改「" + note.text.substr(0, 24) + "」");
+    }
+    for (const auto& note : state.failed_attempts) {
+        check_refs(note.evidence_refs, "失败尝试「" + note.text.substr(0, 24) + "」");
+    }
+    // 活动待办逐字守恒(与 manifest 守恒同一把尺:空白归一后在 open_items
+    // 里逐字在场)。
+    for (const auto& required : required_open_items) {
+        const std::string needle = NormalizeForCompare(required);
+        if (needle.empty()) {
+            continue;
+        }
+        bool found = false;
+        for (const auto& item : state.open_items) {
+            if (NormalizeForCompare(item).find(needle) != std::string::npos) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            failures.push_back("工作状态丢了未完成事项: " + required);
+        }
+    }
+    if (TrimWhitespace(state.next_action).empty()) {
+        failures.push_back("工作状态缺下一步(next_action)");
+    }
+    return failures;
+}
+
+namespace {
+
+// ---------------------------------------------------------------------------
+// 双账压缩的指令与材料拼装
+// ---------------------------------------------------------------------------
+
+// map 指令:只收严格 JSON 的 TurnGroupSummary,turn/事件范围宿主已钉。
+std::string BuildTurnGroupMapInstruction(const std::string& turn_range, const std::string& evidence_range,
+                                         const CompactOptions& options) {
+    std::string instruction =
+        "以上是对话历史中的一段(来源 turn " + turn_range + ",来源事件 " +
+        (evidence_range.empty() ? std::string("无") : evidence_range) +
+        ")。请把这段收成一份局部小结。只输出一枚 JSON 对象——不要 Markdown、不要围栏、"
+        "不要任何解释文字,键名与结构逐字照写:\n"
+        "{\"user_requirement_changes\": [\"本段里用户提出/修改/撤销的要求\"], "
+        "\"confirmed_facts\": [\"用户确认或工具证实的事实\"], "
+        "\"tool_results\": [{\"tool\": \"工具名\", \"result\": \"关键结果(错误码/退出码/测试结论;不许只写处理过)\", "
+        "\"evidence\": \"证据入口,如 t6:e2\"}], "
+        "\"files\": [\"涉及文件路径\"], \"changes_made\": [\"已做修改\"], "
+        "\"failed_attempts\": [\"失败尝试,保住失败原因与后来改用的路\"], "
+        "\"open_items\": [\"本段结束时仍未完成的事\"], "
+        "\"next_step_candidates\": [\"下一步候选\"]}\n"
+        "每栏没有内容就给空数组;所有元素必须是非空字符串;只写这段里确证过的内容,不许猜补。"
+        "user_requirement_changes 只收真正的用户输入说了什么,assistant 的猜测不算用户要求。";
+    if (!options.focus.empty()) {
+        instruction += "\n重点关注: " + options.focus;
+    }
+    return instruction;
+}
+
+// reduce 指令:产出 {"user_contract":...,"work_state":...} 严格双账 JSON。
+std::string BuildDualLedgerReduceInstruction(std::size_t summary_count, bool has_prior, bool has_hot,
+                                             const CompactOptions& options) {
+    std::string instruction =
+        "以上是一份任务的压缩材料:上一轮总账(若有)、" +
+        std::to_string(summary_count) + " 份局部小结(各带来源 turn 与事件范围),以及最近热区原文(若有)。"
+        "请把它们归并成两份总账。只输出一枚 JSON 对象——不要 Markdown、不要围栏、不要解释文字,"
+        "键名与结构逐字照写:\n"
+        "{\"user_contract\": {\"goal\": {\"text\": \"当前任务目标\", \"source_turns\": [\"t1\"]}, "
+        "\"active_constraints\": [{\"id\": \"r1\", \"text\": \"当前有效约束\", \"source_turns\": [\"t3\"]}], "
+        "\"acceptance_criteria\": [{\"id\": \"r2\", \"text\": \"验收条件\", \"source_turns\": [\"t7\"]}], "
+        "\"additions\": [{\"id\": \"r3\", \"text\": \"用户后来补充的要求\", \"source_turns\": [\"t8\"]}], "
+        "\"superseded_requirements\": [{\"id\": \"r0\", \"text\": \"已被废掉的旧要求\", \"source_turns\": [\"t2\"], "
+        "\"superseded_by\": \"替代它的新要求 id\", \"superseded_at_turn\": \"覆盖发生在哪枚 turn\"}], "
+        "\"open_questions\": [{\"text\": \"尚待澄清\", \"source_turns\": [\"t9\"]}]}, "
+        "\"work_state\": {\"confirmed_facts\": [{\"text\": \"用户确认或工具证实的事实\", "
+        "\"evidence_refs\": [\"t4:e3\"]}], "
+        "\"tool_results\": [{\"tool\": \"ctest\", \"result\": \"关键结果\", \"evidence_refs\": [\"t6:e2\"]}], "
+        "\"files\": [\"src/x.cpp\"], "
+        "\"changes_made\": [{\"text\": \"已做修改\", \"evidence_refs\": [\"t10\"]}], "
+        "\"failed_attempts\": [{\"text\": \"失败尝试\", \"evidence_refs\": [\"t11:e4\"]}], "
+        "\"open_items\": [\"未完成事项\"], \"next_action\": \"下一步要执行的准确动作\"}}\n"
+        "规矩(违反任一条整份会被拒收,旧历史不动):\n"
+        "1. user_contract 只从真正的用户输入提取;assistant 与 tool_result 永不可成为来源"
+        "(source_turns 只能引用材料里标注的 turn 号)。\n"
+        "2. 每条 active_constraints/acceptance_criteria/additions 都至少有一枚 source_turns;"
+        "id 用 r1、r2…各不相同。\n"
+        "3. 后来的用户要求可覆盖早先用户要求:旧要求移进 superseded_requirements,写明 "
+        "superseded_by(替代项 id)与 superseded_at_turn(不早于旧要求的来源 turn)。\n"
+        "4. 两条要求冲突又找不到明确覆盖关系时,放进 open_questions,不许擅自删一条。\n"
+        "5. confirmed_facts 只收用户确认或工具证实的;assistant 推测不算。每条至少一枚 "
+        "evidence_refs(\"tN\" 或 \"tN:eM\")。\n"
+        "6. 工具错误、退出码、关键路径、测试结果不得只写\"处理过\"。\n"
+        "7. open_items 承接全部仍未完成的待办;next_action 是工作接力,不混进 user_contract。";
+    if (has_prior) {
+        instruction += "\n输入里的上一轮总账只当参考:与局部小结或热区原文冲突时,以后者为准"
+                       "(它们来自原始材料);不许拿旧摘要复印新摘要。";
+    }
+    if (has_hot) {
+        instruction += "\n最近热区原文没有总结过:最新一轮可能刚纠正早先要求,总契约必须吸收它——"
+                       "被纠正的旧约束移进 superseded_requirements,新约束列 active。";
+    }
+    if (!options.required_open_items.empty()) {
+        instruction += "\n\n以下是当前仍未完成的待办,每一项必须逐字(只许调整空白)出现在 work_state 的 "
+                       "open_items 数组里,一项都不许丢、不许改写:\n";
+        for (std::size_t i = 0; i < options.required_open_items.size(); ++i) {
+            instruction += std::to_string(i + 1) + ". " + options.required_open_items[i] + "\n";
+        }
+    }
+    if (!options.focus.empty()) {
+        instruction += "\n重点关注: " + options.focus;
+    }
+    return instruction;
+}
+
+// 热区原文渲染成 reduce 能读的流水(工作视图:长 ToolResult 已是 artifact
+// 预览)。turn 头标号,给 reduce 引 source_turns 用。
+std::string RenderTranscript(const std::vector<api::Message>& messages,
+                             const std::vector<std::pair<std::size_t, std::size_t>>& turn_ranges,
+                             const TurnPartitionPlan& plan, std::size_t first_turn) {
+    std::string body;
+    for (std::size_t t = 0; t < turn_ranges.size(); ++t) {
+        const std::string turn_id =
+            first_turn + t < plan.turns.size() ? plan.turns[first_turn + t].id : std::string("t?");
+        for (std::size_t i = turn_ranges[t].first; i < turn_ranges[t].second; ++i) {
+            const std::string role = messages[i].role == api::Role::User ? "用户" : "助手";
+            for (const auto& block : messages[i].content) {
+                if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
+                    body += "--- turn " + turn_id + " · " + role + " ---\n" + text->text + "\n";
+                } else if (const auto* use = std::get_if<api::ToolUseBlock>(&block); use != nullptr) {
+                    body += "--- turn " + turn_id + " · 助手调用工具 " + use->name + "(" + use->id +
+                            ") ---\n" + use->input.dump() + "\n";
+                } else if (const auto* result = std::get_if<api::ToolResultBlock>(&block);
+                           result != nullptr) {
+                    body += "--- turn " + turn_id + " · 工具结果(" + result->tool_use_id + ") ---\n" +
+                            result->content + "\n";
+                }
+            }
+        }
+    }
+    return body;
+}
+
+// 消息里的全部 tool_use/tool_result 配对完整性:map 请求的任何一块都不许
+// 劈开工具原子组——这里给单测与防御性检查用。
+bool ToolPairsCompleteIn(const std::vector<api::Message>& messages) {
+    std::map<std::string, bool> use_seen;
+    for (const auto& message : messages) {
+        for (const auto& block : message.content) {
+            if (const auto* use = std::get_if<api::ToolUseBlock>(&block); use != nullptr) {
+                use_seen[use->id] = false;
+            } else if (const auto* result = std::get_if<api::ToolResultBlock>(&block);
+                       result != nullptr) {
+                const auto it = use_seen.find(result->tool_use_id);
+                if (it == use_seen.end()) {
+                    return false;  // result 比 use 先出现/没有 use
+                }
+                it->second = true;
+            }
+        }
+    }
+    for (const auto& [id, matched] : use_seen) {
+        (void)id;
+        if (!matched) {
+            return false;
+        }
+    }
+    return true;
+}
+
+// TurnGroupSummary -> json(reduce 材料与两两归并的输入共用一份拼装)。
+nlohmann::json TurnGroupSummaryJson(const TurnGroupSummary& summary) {
+    nlohmann::json json;
+    json["turn_range"] = summary.turn_range;
+    json["evidence_range"] = summary.evidence_range;
+    json["user_requirement_changes"] = summary.user_requirement_changes;
+    json["confirmed_facts"] = summary.confirmed_facts;
+    std::vector<nlohmann::json> tool_results;
+    tool_results.reserve(summary.tool_results.size());
+    for (const auto& note : summary.tool_results) {
+        nlohmann::json item;
+        item["tool"] = note.tool;
+        item["result"] = note.result;
+        if (!note.evidence.empty()) {
+            item["evidence"] = note.evidence;
+        }
+        tool_results.push_back(std::move(item));
+    }
+    json["tool_results"] = std::move(tool_results);
+    json["files"] = summary.files;
+    json["changes_made"] = summary.changes_made;
+    json["failed_attempts"] = summary.failed_attempts;
+    json["open_items"] = summary.open_items;
+    json["next_step_candidates"] = summary.next_step_candidates;
+    return json;
+}
+
+// 范围标签的首/尾 turn id:"t3-t7" -> "t3"/"t7";单枚 "t3" 两头都是它。
+std::string RangeFirst(const std::string& range) {
+    const std::size_t dash = range.find('-');
+    return dash == std::string::npos ? range : range.substr(0, dash);
+}
+
+std::string RangeLast(const std::string& range) {
+    const std::size_t dash = range.rfind('-');
+    return dash == std::string::npos ? range : range.substr(dash + 1);
+}
+
+}  // namespace
+
+std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>& history,
+                                                const api::Message& archive, const TurnPartitionPlan& plan,
+                                                std::vector<std::size_t>* kept_indices_out) {
+    if (history.empty() || plan.partitions.empty()) {
+        if (kept_indices_out != nullptr) {
+            kept_indices_out->clear();
+        }
+        return {archive};
+    }
+    // 热区 = 末分区的原文消息。分区盖住全部 turn,热区必是到尾的连续段。
+    const TurnPartitionInfo& hot = plan.partitions.back();
+    const std::size_t hot_from = plan.turns[hot.first_turn].from_message;
+
+    std::string archive_text;
+    for (const auto& block : archive.content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
+            archive_text += text->text;
+        }
+    }
+
+    std::vector<api::Message> new_history;
+    new_history.reserve(history.size() - hot_from);
+    std::vector<std::size_t> kept_indices;
+    for (std::size_t i = hot_from; i < history.size(); ++i) {
+        api::Message message = history[i];
+        if (kept_indices.empty()) {
+            // 双账并入热区首条 user 消息开头:不单独成一条,相邻两条 user
+            // 违反角色交替(与老 BuildCompactedHistory 同一招)。热区首条
+            // 是 turn 头,必有 TextBlock(防御:没有就补一条)。
+            bool merged = false;
+            for (auto& block : message.content) {
+                if (auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
+                    text->text = archive_text + "\n\n" + text->text;
+                    merged = true;
+                    break;
+                }
+            }
+            if (!merged) {
+                message.content.insert(message.content.begin(), api::TextBlock{archive_text});
+            }
+        }
+        kept_indices.push_back(i);
+        new_history.push_back(std::move(message));
+    }
+    if (kept_indices_out != nullptr) {
+        *kept_indices_out = std::move(kept_indices);
+    }
+    return new_history;
+}
+
+std::optional<PriorLedgers> ParsePriorLedgers(const std::string& prior_archive_text) {
+    // 剥出 json 围栏里的对象(BuildTurnPartitionPlan 剥出的 prior 文本一定
+    // 带围栏;这里不依赖这一点,裸对象也认)。
+    const auto parsed = ParseJsonObjectLoose(prior_archive_text);
+    if (parsed.has_value()) {
+        if (parsed->contains("user_contract") && parsed->contains("work_state")) {
+            const auto contract = ParseUserContract((*parsed)["user_contract"]);
+            const auto state = ParseWorkState((*parsed)["work_state"]);
+            if (contract.has_value() && state.has_value()) {
+                PriorLedgers ledgers;
+                ledgers.dual_ledger = true;
+                ledgers.contract = std::move(*contract);
+                ledgers.state = std::move(*state);
+                ledgers.raw_text = prior_archive_text;
+                return ledgers;
+            }
+            return std::nullopt;  // 声称双账却解析不动:不许当基线蒙混
+        }
+        // 旧 flat manifest:goal/open_items 折成只有 goal 的契约当参考。
+        if (parsed->contains("goal") && parsed->contains("open_items")) {
+            PriorLedgers ledgers;
+            ledgers.contract.goal.text = (*parsed)["goal"].is_string()
+                                             ? (*parsed)["goal"].get<std::string>()
+                                             : std::string();
+            if ((*parsed)["open_items"].is_array()) {
+                for (const auto& item : (*parsed)["open_items"]) {
+                    if (item.is_string()) {
+                        ledgers.state.open_items.push_back(item.get<std::string>());
+                    }
+                }
+            }
+            if ((*parsed).contains("next_action") && (*parsed)["next_action"].is_string()) {
+                ledgers.state.next_action = (*parsed)["next_action"].get<std::string>();
+            }
+            ledgers.raw_text = prior_archive_text;
+            return ledgers;
+        }
+    }
+    // 纯文本旧档(更老的存档形状):只当参考文本,不折结构。
+    if (TrimWhitespace(prior_archive_text).empty()) {
+        return std::nullopt;
+    }
+    PriorLedgers ledgers;
+    ledgers.raw_text = prior_archive_text;
+    return ledgers;
+}
+
+std::expected<DualLedgerCompactResult, api::Error> CompactTurnPartitioned(
+    api::Backend& backend, const std::string& model, const std::vector<api::Message>& history,
+    const CompactOptions& options, const StructuralCompressionOptions& structural,
+    const std::string& reasoning_effort, BackgroundCallAccounting* accounting) {
+    DualLedgerCompactResult result;
+    // 计时守卫:任何 return 路径都把墙钟记进账(与 CompactHierarchical 同
+    // 一口径:duration = 整场压缩的总时)。
+    struct AccountingGuard {
+        BackgroundCallAccounting* accounting;
+        std::chrono::steady_clock::time_point started;
+        ~AccountingGuard() {
+            if (accounting == nullptr) {
+                return;
+            }
+            accounting->duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                          std::chrono::steady_clock::now() - started)
+                                          .count();
+        }
+    } accounting_guard{accounting, std::chrono::steady_clock::now()};
+
+    if (history.empty()) {
+        return std::unexpected(api::Error{api::ErrorKind::Api, "没有对话历史,无需压缩", 0});
+    }
+
+    TurnPartitionBudgets budgets;
+    budgets.structural = structural;
+    budgets.compact_model = options.budget;
+    result.plan = BuildTurnPartitionPlan(history, options.partition_count, budgets);
+
+    // 明确拒绝门(§3.4 第 3 条/§9.3):一次模型都不调,账先说清。
+    if (result.plan.any_turn_over_map_budget) {
+        return std::unexpected(api::Error{
+            api::ErrorKind::Api,
+            "单枚 turn 超过压缩模型输入预算(估 " +
+                std::to_string(result.plan.compact_input_budget.value_or(0)) +
+                " tokens):该次 compact 明确拒绝——不截半条用户输入、不拆工具原子组,历史一字未动。",
+            0});
+    }
+    if (!result.plan.WorthCompacting()) {
+        return std::unexpected(api::Error{
+            api::ErrorKind::Api,
+            "没有冷区" + std::string(result.plan.has_prior_archive ? "" : "也没有旧存档") +
+                ":压缩榨不出收益,拒绝空跑,历史未动。",
+            0});
+    }
+    if (result.plan.has_incomplete_tool_exchange) {
+        // 分区边界只落 turn 之间,工具原子组天然不跨区;不完整组只可能住在
+        // 热区尾(mid-turn 安全点),热区保原文,天然不拆。这里不拦——
+        // plan.has_incomplete_tool_exchange 带在结果里给调用方展示。
+    }
+
+    // ---- 材料准备:map 源(剥旧档)、工作视图、事件账 ----
+    // 旧档不进任何 map 块(阻断摘要复印摘要);它只进 final reduce 当基线。
+    std::vector<api::Message> map_source = history;
+    if (result.plan.has_prior_archive) {
+        for (auto& block : map_source[0].content) {
+            if (auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
+                if (auto split = SplitPriorArchive(text->text)) {
+                    text->text = split->second.empty() ? std::string("[旧档已剥出,此消息无原始正文]")
+                                                       : split->second;
+                }
+                break;
+            }
+        }
+    }
+    // 工作视图一把算(与会话请求同口径:长 ToolResult 已外置成 artifact 预览)。
+    StructuralCompressionStats working_stats;
+    ResultViewMemo working_memo;
+    const std::vector<api::Message> working =
+        CompressWorkingView(map_source, structural, working_stats, working_memo, /*store=*/nullptr);
+    // 事件账(evidence 范围与 WorkState 证据校验的来源):按原 history 算,
+    // id 只随消息结构走,与剥档后的 map_source 逐条对得上。
+    const std::vector<NormalizedEvent> ledger = BuildEventLedger(history);
+    std::set<std::string> event_ids;
+    for (const auto& event : ledger) {
+        event_ids.insert(event.id);
+    }
+
+    const auto input_budget = CompactInputBudget(options.budget);
+    const std::size_t chunk_budget =
+        input_budget.has_value() && *input_budget > kTurnPlanPromptOverheadTokens
+            ? *input_budget - kTurnPlanPromptOverheadTokens
+            : input_budget.value_or(std::numeric_limits<std::size_t>::max());
+
+    // ---- map:冷分区各一次;超预算只递归拆该分区(§3.4 第 2 条) ----
+    struct MapChunk {
+        std::size_t first_turn;
+        std::size_t last_turn;  // [first, last) turn 区间
+    };
+    std::vector<MapChunk> map_chunks;
+    for (std::size_t p = 0; p + 1 < result.plan.partitions.size(); ++p) {
+        const TurnPartitionInfo& partition = result.plan.partitions[p];
+        const bool over_budget =
+            input_budget.has_value() &&
+            partition.working_tokens + kTurnPlanPromptOverheadTokens > *input_budget;
+        if (!over_budget) {
+            map_chunks.push_back({partition.first_turn, partition.last_turn});
+            continue;
+        }
+        // 沿 turn 边界贪心装块:装满一块切一块;单 turn 仍超(理论上前面
+        // 的门已拦)给明确拒绝。
+        std::size_t begin = partition.first_turn;
+        std::size_t used = 0;
+        for (std::size_t t = partition.first_turn; t < partition.last_turn; ++t) {
+            const std::size_t turn_tokens = result.plan.turns[t].working_tokens;
+            if (turn_tokens > chunk_budget) {
+                return std::unexpected(api::Error{
+                    api::ErrorKind::Api,
+                    "turn " + result.plan.turns[t].id + " 超过压缩模型单块输入预算,该次 compact 明确拒绝,历史未动。",
+                    0});
+            }
+            if (used > 0 && used + turn_tokens > chunk_budget) {
+                map_chunks.push_back({begin, t});
+                begin = t;
+                used = 0;
+            }
+            used += turn_tokens;
+        }
+        if (begin < partition.last_turn) {
+            map_chunks.push_back({begin, partition.last_turn});
+        }
+    }
+
+    auto turn_range_label = [&plan = result.plan](std::size_t first, std::size_t last) {
+        if (first + 1 == last) {
+            return plan.turns[first].id;
+        }
+        return plan.turns[first].id + "-" + plan.turns[last - 1].id;
+    };
+
+    std::vector<TurnGroupSummary> summaries;
+    summaries.reserve(map_chunks.size());
+    for (std::size_t c = 0; c < map_chunks.size(); ++c) {
+        const MapChunk& chunk = map_chunks[c];
+        const std::size_t from_message = result.plan.turns[chunk.first_turn].from_message;
+        const std::size_t to_message = result.plan.turns[chunk.last_turn - 1].to_message;
+        std::vector<api::Message> messages(working.begin() + static_cast<std::ptrdiff_t>(from_message),
+                                           working.begin() + static_cast<std::ptrdiff_t>(to_message));
+        const std::string turn_range = turn_range_label(chunk.first_turn, chunk.last_turn);
+        const std::string evidence_range = EventRangeForMessages(ledger, from_message, to_message);
+        // 防御:块内工具原子组必须完整(分区/再切都只落 turn 边界,这里
+        // 不该拦得到;拦到了就是切分 bug,明确失败好过静默劈开)。
+        if (!ToolPairsCompleteIn(messages)) {
+            return std::unexpected(api::Error{
+                api::ErrorKind::Api,
+                "map 块 " + turn_range + " 内工具原子组不完整(切分缺陷),该次 compact 拒绝,历史未动。", 0});
+        }
+        const auto text =
+            RequestSummaryText(backend, model, BuildTurnGroupMapInstruction(turn_range, evidence_range, options),
+                               messages, static_cast<int>(options.budget.output_reserve_tokens),
+                               reasoning_effort, accounting);
+        if (!text.has_value()) {
+            return std::unexpected(text.error());  // map 任一块失败,整次失败(§9.5)
+        }
+        auto summary = ParseTurnGroupSummary(*text);
+        if (!summary.has_value()) {
+            return std::unexpected(api::Error{
+                api::ErrorKind::Api,
+                "turn " + turn_range + " 的局部小结不是合法的严格 JSON TurnGroupSummary,该次 compact 失败,历史未动。",
+                0});
+        }
+        // 宿主钉死来源范围:模型写什么都覆盖。
+        summary->turn_range = turn_range;
+        summary->evidence_range = evidence_range;
+        summaries.push_back(std::move(*summary));
+    }
+    result.group_summaries = summaries;
+
+    // ---- final reduce 输入:prior + summaries + 热区原文 ----
+    const TurnPartitionInfo& hot = result.plan.partitions.back();
+    const std::size_t hot_from_message = result.plan.turns[hot.first_turn].from_message;
+    std::vector<api::Message> hot_working(working.begin() + static_cast<std::ptrdiff_t>(hot_from_message),
+                                          working.end());
+    std::vector<std::pair<std::size_t, std::size_t>> hot_turn_ranges;
+    for (std::size_t t = hot.first_turn; t < hot.last_turn; ++t) {
+        hot_turn_ranges.emplace_back(result.plan.turns[t].from_message - hot_from_message,
+                                     result.plan.turns[t].to_message - hot_from_message);
+    }
+    const std::string hot_transcript = RenderTranscript(hot_working, hot_turn_ranges, result.plan, hot.first_turn);
+    const bool has_hot = !hot_transcript.empty();
+
+    const auto build_reduce_input = [&]() {
+        std::string body;
+        if (result.plan.has_prior_archive) {
+            body += "=== 上一轮压缩的总账(仅供参考;与新材料冲突以新材料为准) ===\n" +
+                    result.plan.prior_archive_text + "\n\n";
+        }
+        for (std::size_t i = 0; i < summaries.size(); ++i) {
+            body += "=== 局部小结 " + std::to_string(i + 1) + "/" + std::to_string(summaries.size()) +
+                    " · 来源 turn " + summaries[i].turn_range + " · 事件 " +
+                    (summaries[i].evidence_range.empty() ? std::string("无") : summaries[i].evidence_range) +
+                    " ===\n" + TurnGroupSummaryJson(summaries[i]).dump() + "\n\n";
+        }
+        if (has_hot) {
+            body += "=== 最近热区原文(未总结;最新用户纠正以此为准) ===\n" + hot_transcript;
+        }
+        api::Message input;
+        input.role = api::Role::User;
+        input.content.push_back(api::TextBlock{body});
+        return std::vector<api::Message>{input};
+    };
+
+    // §9.4:reduce 材料超预算 → 两两归并相邻 summaries(来源范围保住),
+    // 压到装得下为止;次数护栏 4 轮。
+    const int kMaxReducePasses = 4;
+    int passes = 0;
+    while (passes < kMaxReducePasses && summaries.size() > 1) {
+        const std::vector<api::Message> reduce_input = build_reduce_input();
+        const std::size_t reduce_tokens =
+            EstimateUtf8Tokens(BuildDualLedgerReduceInstruction(
+                                   summaries.size(), result.plan.has_prior_archive, has_hot, options)) +
+            EstimateHistoryTokens(reduce_input) + options.budget.protocol_headroom_tokens;
+        if (!input_budget.has_value() || reduce_tokens <= *input_budget) {
+            break;
+        }
+        const std::string merge_instruction =
+            "以上是同一任务相邻两段的局部小结(JSON)。请把它们归并成一份局部小结,只输出一枚 JSON 对象"
+            "(键名结构与输入相同:八栏数组 + tool_results 对象数组),保留两段全部要点(去重,冲突以后段"
+            "为准),不许丢 open_items。不要 Markdown、不要围栏。";
+        std::vector<TurnGroupSummary> merged;
+        for (std::size_t i = 0; i < summaries.size(); i += 2) {
+            if (i + 1 >= summaries.size()) {
+                merged.push_back(summaries[i]);
+                continue;
+            }
+            api::Message pair_message;
+            pair_message.role = api::Role::User;
+            pair_message.content.push_back(api::TextBlock{
+                "=== 小结 A · 来源 turn " + summaries[i].turn_range + " ===\n" +
+                TurnGroupSummaryJson(summaries[i]).dump() + "\n\n=== 小结 B · 来源 turn " +
+                summaries[i + 1].turn_range + " ===\n" + TurnGroupSummaryJson(summaries[i + 1]).dump()});
+            const auto text = RequestSummaryText(backend, model, merge_instruction,
+                                                 std::vector<api::Message>{pair_message},
+                                                 static_cast<int>(options.budget.output_reserve_tokens),
+                                                 reasoning_effort, accounting);
+            if (!text.has_value()) {
+                return std::unexpected(text.error());
+            }
+            auto combined = ParseTurnGroupSummary(*text);
+            if (!combined.has_value()) {
+                return std::unexpected(api::Error{
+                    api::ErrorKind::Api,
+                    "归并 turn " + summaries[i].turn_range + "+" + summaries[i + 1].turn_range +
+                        " 的局部小结不是合法严格 JSON,该次 compact 失败,历史未动。",
+                    0});
+            }
+            // 宿主钉归并后的范围:两份的并集(首段开头-末段结尾);证据范围
+            // 同样取两份的拼接。
+            combined->turn_range = RangeFirst(summaries[i].turn_range) + "-" +
+                                   RangeLast(summaries[i + 1].turn_range);
+            combined->evidence_range = summaries[i].evidence_range + "," + summaries[i + 1].evidence_range;
+            merged.push_back(std::move(*combined));
+        }
+        summaries = std::move(merged);
+        ++passes;
+    }
+    result.group_summaries = summaries;
+
+    // ---- final reduce:严格双账 JSON ----
+    const auto final_text =
+        RequestSummaryText(backend, model,
+                           BuildDualLedgerReduceInstruction(summaries.size(), result.plan.has_prior_archive,
+                                                            has_hot, options),
+                           build_reduce_input(), static_cast<int>(options.budget.output_reserve_tokens),
+                           reasoning_effort, accounting);
+    if (!final_text.has_value()) {
+        return std::unexpected(final_text.error());
+    }
+    const auto final_json = ParseJsonObjectLoose(*final_text);
+    if (!final_json.has_value() || !final_json->contains("user_contract") ||
+        !final_json->contains("work_state")) {
+        return std::unexpected(api::Error{
+            api::ErrorKind::Api,
+            "final reduce 输出不是合法的 {\"user_contract\":...,\"work_state\":...} 严格 JSON,该次 compact 失败,历史未动。",
+            0});
+    }
+    auto contract = ParseUserContract((*final_json)["user_contract"]);
+    auto state = ParseWorkState((*final_json)["work_state"]);
+    if (!contract.has_value() || !state.has_value()) {
+        return std::unexpected(api::Error{
+            api::ErrorKind::Api, "双账 schema 解析未过(user_contract/work_state 键型不合),该次 compact 失败,历史未动。",
+            0});
+    }
+
+    // 宿主校验:来源、覆盖方向、环、证据、待办守恒(§四/§五)。任一失败
+    // 整次 compact 失败,旧 history 不动(§9.5)。
+    std::set<std::string> valid_turn_ids;
+    for (const auto& turn : result.plan.turns) {
+        valid_turn_ids.insert(turn.id);
+    }
+    std::vector<std::string> failures = ValidateUserContract(*contract, valid_turn_ids);
+    for (const auto& failure :
+         ValidateWorkState(*state, valid_turn_ids, event_ids, options.required_open_items)) {
+        failures.push_back(failure);
+    }
+    if (!failures.empty()) {
+        std::string reasons;
+        for (std::size_t i = 0; i < failures.size(); ++i) {
+            if (i > 0) {
+                reasons += ";";
+            }
+            reasons += failures[i];
+        }
+        return std::unexpected(api::Error{api::ErrorKind::Api, "双账校验未过,历史未动: " + reasons, 0});
+    }
+
+    result.contract = std::move(*contract);
+    result.state = std::move(*state);
+
+    // 兼容面:双账折算成旧 manifest(展示/compact_v2 旧读者都不用改)。
+    result.manifest.goal = result.contract.goal.text;
+    for (const auto& requirement : result.contract.active_constraints) {
+        result.manifest.constraints.push_back(requirement.text);
+    }
+    result.manifest.open_items = result.state.open_items;
+    result.manifest.next_action = result.state.next_action;
+
+    // ---- 新 history:[双账][热区原文](§3.5/阶段 4) ----
+    // 双账落进单枚 ```json 围栏:SplitPriorArchive(下一次压缩剥旧档)与
+    // ParsePriorLedgers(下一次压缩认基线)都不用改形状。围栏安全:json
+    // dump 里把反引号换成普通引号,防正文里冒出 ``` 弄破围栏。
+    std::string ledger_dump = nlohmann::json{{"user_contract", ToJson(result.contract)},
+                                             {"work_state", ToJson(result.state)}}
+                                  .dump();
+    for (char& c : ledger_dump) {
+        if (c == '`') {
+            c = '\'';
+        }
+    }
+    api::Message archive;
+    archive.role = api::Role::User;
+    archive.content.push_back(api::TextBlock{
+        platform::SanitizeExternalText("[对话存档,此前内容已压缩] 此前对话已收进两份总账:"
+                                       "用户契约(用户要什么)与工作状态(事情做到哪);此后上下文以此为准。\n"
+                                       "```json\n" +
+                                       ledger_dump + "\n```")});
+    result.archive = archive;
+    result.new_history =
+        BuildCompactedHistory(history, result.archive, result.plan, &result.kept_indices);
+
+    // 指标:map 调用数(再切也全算)、reduce 轮次、分区账。
+    result.metrics.chunks = static_cast<int>(map_chunks.size());
+    result.metrics.reduce_passes = passes;
+    result.metrics.hierarchical = map_chunks.size() > 1;
+    result.metrics.implementation = "turn-partition";
+    result.metrics.schema = "dual-ledger-v1";
+    result.metrics.partition_count = result.plan.partitions.size();
+    result.metrics.total_turns = result.plan.turns.size();
+    result.metrics.hot_turns = hot.last_turn - hot.first_turn;
+    {
+        std::string buffer;
+        for (const auto& message : history) {
+            for (const auto& block : message.content) {
+                if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
+                    buffer += text->text;
+                } else if (const auto* tool_result = std::get_if<api::ToolResultBlock>(&block);
+                           tool_result != nullptr) {
+                    buffer += tool_result->content;
+                }
+            }
+        }
+        result.metrics.source_digest = Fingerprint64(buffer);
+    }
+    return result;
+}
+
 }  // namespace lubancode::agent

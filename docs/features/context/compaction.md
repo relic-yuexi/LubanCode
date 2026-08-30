@@ -172,19 +172,36 @@ JSON manifest
 
 `/compact --dry-run` 只看结构压缩能省多少、哪些内容被钉住。它不发模型请求，也不改 history。
 
-## turn 分区计划（四分区，阶段 1）
+## turn 分区双账压缩（四分区，现行主路）
 
 压缩真触发后，先把原始对话按"真正用户输入"收成完整 turn（工具结果回填不开新 turn，工具 use/result 成原子组），再按 L1 工作视图的 token 重量切成 `compact_partition_count` 份连续分区（默认 4，可配 2..8，越界报错）：前 n-1 份是冷区、各 map 一次，末份是热区、保留原文形状。分区边界只落 turn 之间，工具原子组永不拆开。
 
 `/context` 打一行策略（如 `compact turn 策略：按 token 平衡 4 分；前 3 份 map，末份热区`）；`/compact --dry-run` 打完整计划——每份的 turn 范围、token 估算、外置 ToolResult 枚数、预计 map 次数、长结果外置前后的 token 对照，以及分区或单 turn 超压缩模型预算的警告。全部纯计算，不调模型。旧存档（上一轮压缩的 archive）会被剥出单独记账：不算 turn，只作 final reduce 的基线。
 
+真跑起来是三步：
+
+1. **map**。每个冷分区发一次请求，模型只许回严格 JSON 的 `TurnGroupSummary`（用户需求变化、已证实事实、工具结果、涉及文件、已做修改、失败尝试、未完成事项、下一步候选八栏），turn 范围与事件范围由程序钉死。分区超预算时只沿 turn 边界递归拆这一份（map 次数可多于 n-1）；单枚 turn 仍超预算则整次明确拒绝——不截半条用户输入、不拆工具对。map 任一块失败，整次压缩失败，旧历史一字不动。
+2. **final reduce**。旧档（新双账或旧 manifest，都作结构化基线）+ 全部局部小结 + 热区原文（最近一轮的纠正必须被总账吸收）一道归并，产出严格双账 JSON：
+   - `UserContract`（用户要什么）：目标、当前有效约束、验收条件、后来补充、已被废旧要求（带 `superseded_by` 与 `superseded_at_turn`）、尚待澄清。每条带 `source_turns`，只能指向真正的用户输入轮——assistant 与工具结果永远成不了用户要求的来源；后用户可覆盖前用户，旧要求不消失、进 superseded 留下来源；找不到明确覆盖关系的冲突进 open questions，不许擅自删一条。
+   - `WorkState`（做到哪）：已证实事实、关键工具结果（错误码、退出码、测试结论不许只写"处理过"）、涉及文件、已做修改、失败尝试、未完成事项、下一步。证据用 `evidence_refs`（`t4:e3` 一类），活动待办逐字守恒。
+3. **换账**。程序校验双账（来源存在、覆盖方向从旧指新、无环、证据落账、待办一条不少）；任一不过旧历史不动。新历史固定是：
+
+```text
+[对话存档:用户契约 + 工作状态,单枚 JSON]
+[最近热区原文(末分区,消息形状原样)]
+```
+
+旧档（`compact`、旧 flat `compact_v2`、新双账 `compact_v2`）都能 `/resume` 回放；第二次压缩从旧双账继续归并，旧档不进 map 块，阻断"摘要复印摘要"。`/export` 全量流水照旧可查。
+
+阶段 5 的评测夹具在 `tests/integration/compact_turn_sharding/`：30 道多轮压缩题 × 10 次忠实模型，token 账（FULL/CONCAT/双账对照、P90-P10 分布）与成功账（约束保真、纠正归位、坏模型检测）分开记。管道保真与 token 收益有账；真实模型的语义质量仍须真机评测，本文不越线宣称。
+
 ## 源码入口
 
-- `src/agent/compact.cpp`：单次压缩、episode 切分、map/reduce、manifest 校验、`BuildTurnPartitionPlan` 四分区纯计算。
+- `src/agent/compact.cpp`：单次压缩、episode 切分、map/reduce、manifest 校验、`BuildTurnPartitionPlan` 四分区纯计算、`CompactTurnPartitioned` 双账压缩（TurnGroupSummary map、UserContract/WorkState final reduce、双账校验）。
 - `src/agent/loop.cpp`：回合中 projected 估算、结构压缩、硬裁与 cache epoch。
 - `src/agent/context.cpp`：轮级裁剪与工具结果截断、公共 turn 切分（`IsUserTurnStart` / `SplitIntoTurns`）。
 - `src/sessions/session_store.cpp`：`compact` / `compact_v2` 的写入与回放。
 - `src/agent/context_events.cpp`：L1 结构压缩、artifact/重复/版本视图。
 - `src/agent/microcompact.cpp`：L2 按需局部摘要、输入裁面与格式校验。
 
-相关测试集中在 `tests/unit/agent/test_compact.cpp`、`tests/unit/memory/test_microcompact.cpp`、`tests/unit/api/test_context.cpp`、`tests/unit/api/test_context_events.cpp`、`tests/unit/sessions/test_session_store.cpp`、`tests/unit/api/test_request_prefix.cpp` 与 `tests/unit/memory/test_artifact_store.cpp`。
+相关测试集中在 `tests/unit/agent/test_compact.cpp`、`tests/integration/compact_turn_sharding/`（阶段 5 评测夹具）、`tests/unit/memory/test_microcompact.cpp`、`tests/unit/api/test_context.cpp`、`tests/unit/api/test_context_events.cpp`、`tests/unit/sessions/test_session_store.cpp`、`tests/unit/api/test_request_prefix.cpp` 与 `tests/unit/memory/test_artifact_store.cpp`。

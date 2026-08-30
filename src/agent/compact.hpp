@@ -18,6 +18,7 @@
 #include <cstddef>
 #include <expected>
 #include <optional>
+#include <set>
 #include <string>
 #include <utility>
 #include <vector>
@@ -299,5 +300,180 @@ struct TurnPartitionPlan {
 TurnPartitionPlan BuildTurnPartitionPlan(const std::vector<api::Message>& history,
                                          std::size_t partition_count,
                                          const TurnPartitionBudgets& budgets);
+
+// ---------------------------------------------------------------------------
+// 四分区·阶段 2-4:TurnGroupSummary map、双账 final reduce、新 history。
+//
+// §三《一次 compact 的完整算法》的执行路:BuildTurnPartitionPlan 先算账,
+// 这里照 plan 真跑——前 n-1 份冷分区各发一次 map(严格 JSON 的
+// TurnGroupSummary,turn/事件范围由宿主钉),末份热区保原文;prior archive
+// + 全部 group summaries + 热区原文一道 final reduce,产出严格双账 JSON
+// (UserContract + WorkState);宿主校验后把 [双账][热区原文] 拼成新
+// history。map 任一块失败、reduce 失败、校验不过:整次 compact 失败,
+// 旧 history 一字不动(§9.5)。
+// ---------------------------------------------------------------------------
+
+// §3.4 TurnGroupSummary:一个冷分区(或其再切子块)的 map 产物。map 只写
+// 严格 JSON,不写散文;turn_range/evidence_range 由宿主钉死,模型写什么
+// 都会被覆盖。
+struct TurnGroupToolResult {
+    std::string tool;      // 工具名
+    std::string result;    // 关键结果(错误码/退出码/测试结论,不写"处理过")
+    std::string evidence;  // "t6:e2" 一类证据入口(宿主校验落账)
+};
+
+struct TurnGroupSummary {
+    std::string turn_range;      // "t1-t4"(宿主钉)
+    std::string evidence_range;  // "e3-e21"(宿主钉)
+    std::vector<std::string> user_requirement_changes;  // 本段用户需求的变化
+    std::vector<std::string> confirmed_facts;           // 已证实事实
+    std::vector<TurnGroupToolResult> tool_results;      // 关键工具来回
+    std::vector<std::string> files;                     // 涉及文件
+    std::vector<std::string> changes_made;              // 已做修改
+    std::vector<std::string> failed_attempts;           // 失败尝试(保原因与改用的路)
+    std::vector<std::string> open_items;                // 段末仍未完成
+    std::vector<std::string> next_step_candidates;      // 下一步候选
+};
+
+// 解析 map 输出:只认 JSON(裸对象或单枚 ```json 围栏),不再收任意
+// Markdown。键齐、类型对、字符串剥空白非空才收;坏一处整枚 nullopt。
+std::optional<TurnGroupSummary> ParseTurnGroupSummary(const std::string& text);
+
+// §四 UserContract:用户要什么。每条要求带 source_turns("t3" 一类,须是
+// 真正用户输入领起的 turn);后用户可覆盖前用户,被废旧要求进 superseded
+// 列表留下来源与替代项。assistant/tool 永不可成为来源。
+struct ContractRequirement {
+    std::string id;                    // "r1"
+    std::string text;
+    std::vector<std::string> source_turns;
+};
+
+struct SupersededRequirement {
+    std::string id;
+    std::string text;
+    std::vector<std::string> source_turns;
+    std::string superseded_by;         // 替代它的新 requirement id
+    std::string superseded_at_turn;    // 覆盖发生在哪枚 turn
+};
+
+struct ContractOpenQuestion {
+    std::string text;
+    std::vector<std::string> source_turns;
+};
+
+struct UserContract {
+    ContractRequirement goal;  // 目标(id 留空,schema 里 goal 是独立对象)
+    std::vector<ContractRequirement> active_constraints;
+    std::vector<ContractRequirement> acceptance_criteria;
+    std::vector<ContractRequirement> additions;
+    std::vector<SupersededRequirement> superseded_requirements;
+    std::vector<ContractOpenQuestion> open_questions;
+};
+
+// §五 WorkState:事情做到哪。证据用 evidence_refs("t4:e3":turn 与事件入口)。
+struct StateEvidenceNote {
+    std::string text;
+    std::vector<std::string> evidence_refs;
+};
+
+struct StateToolResult {
+    std::string tool;
+    std::string result;
+    std::vector<std::string> evidence_refs;
+};
+
+struct WorkState {
+    std::vector<StateEvidenceNote> confirmed_facts;
+    std::vector<StateToolResult> tool_results;
+    std::vector<std::string> files;
+    std::vector<StateEvidenceNote> changes_made;
+    std::vector<StateEvidenceNote> failed_attempts;
+    std::vector<std::string> open_items;  // 活动待办逐字守恒
+    std::string next_action;              // 工作接力,不混进 UserContract
+};
+
+// 双账 JSON(到 json / 回结构)。解析只认严格 schema:键齐、类型对、必填
+// 非空;坏一处整份 nullopt(调用方拒收,旧 history 不动)。
+nlohmann::json ToJson(const UserContract& contract);
+nlohmann::json ToJson(const WorkState& state);
+std::optional<UserContract> ParseUserContract(const nlohmann::json& json);
+std::optional<WorkState> ParseWorkState(const nlohmann::json& json);
+
+// 宿主校验(§四"宿主至少校验"/§五规矩),failures 人话逐条列拒收原因:
+//   ValidateUserContract——goal 非空带合法来源;每条要求 source_turns 非空
+//   且全在 valid_turn_ids 里(assistant/tool 事件号不在其中,天然进不来);
+//   id 唯一非空;superseded_by 指向本契约里存在的 requirement;覆盖方向
+//   从旧 turn 指向新 turn(superseded_at_turn 不早于旧要求的最晚来源);
+//   覆盖图无环。
+//   ValidateWorkState——confirmed_facts/tool_results/changes_made/
+//   failed_attempts 每条至少一枚 evidence_ref,ref 的 turn 部分与事件部分
+//   (若有)都存在;open_items 对 required_open_items 逐字守恒;
+//   next_action 非空。
+std::vector<std::string> ValidateUserContract(const UserContract& contract,
+                                              const std::set<std::string>& valid_turn_ids);
+std::vector<std::string> ValidateWorkState(const WorkState& state,
+                                           const std::set<std::string>& valid_turn_ids,
+                                           const std::set<std::string>& valid_event_ids,
+                                           const std::vector<std::string>& required_open_items);
+
+// 双账总管的指标:HierarchicalMetrics 之外补 turn 分区账(compact_v2 事件
+// 记账用,阶段 4 的"manifest 记录双账 schema、turn chunk 配置、总 turn
+// 数、chunk 数、实际 hot turn 数")。
+struct DualLedgerMetrics : HierarchicalMetrics {
+    std::size_t partition_count = 0;  // 实际分区数
+    std::size_t total_turns = 0;      // 本次压缩覆盖的全部原始 turn 数
+    std::size_t hot_turns = 0;        // 热区实际保留的 turn 数
+    std::string schema;               // "dual-ledger-v1";旧路留空
+};
+
+// 一次双账压缩的完整产物。
+struct DualLedgerCompactResult {
+    api::Message archive;             // 双账存档消息(未并进热区前的独立形状)
+    UserContract contract;
+    WorkState state;
+    CompactManifest manifest;         // 折算的兼容面(goal/constraints/open_items/next_action)
+    DualLedgerMetrics metrics;
+    TurnPartitionPlan plan;           // 本次照跑的分区计划(审计/展示)
+    std::vector<TurnGroupSummary> group_summaries;  // 全部 map 产物(含再切子块)
+    std::vector<api::Message> new_history;          // [双账并入热区首条][热区原文...]
+    std::vector<std::size_t> kept_indices;          // 热区消息在原 history 里的下标
+};
+
+// 双账压缩总管(§三 全流程):
+//   1. BuildTurnPartitionPlan 算账;单 turn 超 map 预算/没有冷区也没有旧档
+//      时明确拒绝(§3.4/§9.3),一次模型都不调;
+//   2. 前分区各发一次 map(分区超预算只递归拆该分区,map 次数可多于
+//      n-1);map 输出严格 JSON,turn/事件范围宿主钉;任一块失败整次失败;
+//   3. prior archive(旧双账或旧 flat manifest)+ 全部 summaries + 热区
+//      原文(工作视图)一道 final reduce,产出 {"user_contract":...,
+//      "work_state":...} 严格 JSON;§9.4 装不下时先两两归并 summaries;
+//   4. 校验双账(来源/覆盖/守恒);不过整次失败,旧 history 不动;
+//   5. BuildCompactedHistory(history, archive, plan) 拼 [双账][热区原文]。
+// 结构压缩口径(structural)由调用方带进来——与会话现场触发线、反涨闸同一把尺。
+std::expected<DualLedgerCompactResult, api::Error> CompactTurnPartitioned(
+    api::Backend& backend, const std::string& model, const std::vector<api::Message>& history,
+    const CompactOptions& options, const StructuralCompressionOptions& structural,
+    const std::string& reasoning_effort = std::string(),
+    BackgroundCallAccounting* accounting = nullptr);
+
+// 阶段 4 的新 history:热区 = plan 末分区的原文消息(不按固定 token 掐,
+// 分区本身就是按 token 平衡切出来的);archive 双账并入热区首条 user 消息
+// 开头(角色交替不破),其后热区消息原样。kept_indices 出参:热区消息在
+// 原 history 里的下标(升序,连续段)。
+std::vector<api::Message> BuildCompactedHistory(const std::vector<api::Message>& history,
+                                                const api::Message& archive, const TurnPartitionPlan& plan,
+                                                std::vector<std::size_t>* kept_indices = nullptr);
+
+// 从(压缩后历史的)首条 user 文本里剥出旧存档文本后,识别它carry的双账:
+// 新档是单枚 ```json 围栏里的 {"user_contract":...,"work_state":...};
+// 旧 flat 档(goal/constraints/open_items)折成 goal-only 契约当基线。
+// 认不出给 nullopt(调用方按纯文本基线处理)。
+struct PriorLedgers {
+    bool dual_ledger = false;   // true = 新双账;false = 旧 flat manifest
+    UserContract contract;
+    WorkState state;
+    std::string raw_text;       // 原样文本(reduce 基线输入)
+};
+std::optional<PriorLedgers> ParsePriorLedgers(const std::string& prior_archive_text);
 
 }  // namespace lubancode::agent

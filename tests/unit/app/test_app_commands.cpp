@@ -757,23 +757,11 @@ TEST_CASE("跨家判定:多家已配目录都列同名 → ambiguous,不自动�
 namespace {
 
 // 按脚本吐流的假后端:记下收到的请求(滞回断言"没再发请求"要数它)。
-class ScriptBackend : public lubancode::api::Backend {
-public:
-    std::vector<lubancode::api::StreamEvent> script;
-    std::vector<lubancode::api::Request> captured;
+// 双账压缩路(Compact 四分区单·阶段 2-4)配 map_script/reduce_script 两份
+// 脚本:system 带"两份总账"的是 final reduce,带"局部小结"的是 map。两份
+// 都非空才走分流;只配 script 时维持老行为(每个请求都吐同一份)。
 
-    std::expected<void, lubancode::api::Error> send_stream(
-        const lubancode::api::Request& request,
-        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
-        const std::atomic<bool>* = nullptr) override {
-        captured.push_back(request);
-        for (const auto& event : script) {
-            on_event(event);
-        }
-        return {};
-    }
-};
-
+// 文本脚本(先定义,ScriptBackend::send_stream 分流要用)。
 std::vector<lubancode::api::StreamEvent> TextScript(const std::string& text) {
     return {
         lubancode::api::MessageStart{"msg", "model"},
@@ -781,6 +769,50 @@ std::vector<lubancode::api::StreamEvent> TextScript(const std::string& text) {
         lubancode::api::ContentBlockDone{0},
         lubancode::api::MessageDone{"end_turn", lubancode::api::Usage{}},
     };
+}
+
+class ScriptBackend : public lubancode::api::Backend {
+public:
+    std::vector<lubancode::api::StreamEvent> script;
+    std::string map_script;     // map 请求吐它(严格 JSON TurnGroupSummary)
+    std::string reduce_script;  // reduce 请求吐它(严格双账 JSON)
+    std::vector<lubancode::api::Request> captured;
+
+    std::expected<void, lubancode::api::Error> send_stream(
+        const lubancode::api::Request& request,
+        const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* = nullptr) override {
+        captured.push_back(request);
+        if (!reduce_script.empty()) {
+            const std::string& chosen =
+                request.system.find("两份总账") != std::string::npos ? reduce_script : map_script;
+            for (const auto& event : TextScript(chosen)) {
+                on_event(event);
+            }
+            return {};
+        }
+        for (const auto& event : script) {
+            on_event(event);
+        }
+        return {};
+    }
+};
+
+// 双账路的合法脚本:map = 严格 JSON 局部小结;reduce = 严格双账(goal 可
+// 塞长文,反涨夹具靠它把存档撑大)。
+std::string TurnGroupMapJsonScript() {
+    return "{\"user_requirement_changes\": [\"先规划再读文件落码\"], \"confirmed_facts\": [], "
+           "\"tool_results\": [], \"files\": [\"src/app.cpp\"], \"changes_made\": [], "
+           "\"failed_attempts\": [], \"open_items\": [], \"next_step_candidates\": []}";
+}
+
+std::string DualLedgerJsonScript(const std::string& goal_pad = std::string()) {
+    return "{\"user_contract\": {\"goal\": {\"text\": \"建图书系统" + goal_pad +
+           "\", \"source_turns\": [\"t1\"]}, \"active_constraints\": [], "
+           "\"acceptance_criteria\": [], \"additions\": [], \"superseded_requirements\": [], "
+           "\"open_questions\": []}, \"work_state\": {\"confirmed_facts\": [], \"tool_results\": [], "
+           "\"files\": [], \"changes_made\": [], \"failed_attempts\": [], \"open_items\": [], "
+           "\"next_action\": \"落码\"}}";
 }
 
 std::vector<lubancode::api::StreamEvent> ToolUseScript(const std::string& tool_use_id) {
@@ -839,10 +871,9 @@ TEST_CASE("TryRunCompact: 压缩收窄落档;同一视图无进展的第二次�
     lubancode::sessions::SessionStore store(dir.string());
     lubancode::tools::ToolRegistry registry;
     ScriptBackend compact_backend;
-    compact_backend.script = TextScript(
-        "## 任务目标\n建图书系统\n## 已证实的事实\n规划已出\n## 关键决策\n按层落码\n"
-        "## 涉及文件与符号\nsrc/app.cpp\n## 关键命令与结果\n(无)\n## 未完成事项\n(无)\n"
-        "```json\n{\"goal\": \"建图书系统\", \"constraints\": [], \"open_items\": [], \"next_action\": \"落码\"}\n```");
+    // 双账压缩(阶段 2-4):map 吐严格 JSON 小结,reduce 吐严格双账。
+    compact_backend.map_script = TurnGroupMapJsonScript();
+    compact_backend.reduce_script = DualLedgerJsonScript();
     lubancode::agent::Agent loop(compact_backend, registry,
                                  lubancode::agent::AgentProfile{.request{.model = "test-model"},
                                                                 .system_prompt = "sys"});
@@ -916,23 +947,25 @@ TEST_CASE("TryRunCompact: 压缩结果不降反升时拒收换账,历史一字�
     lubancode::sessions::SessionStore store(dir.string());
     lubancode::tools::ToolRegistry registry;
     ScriptBackend compact_backend;
-    // 摘要本身 ~700 token:压不进一条总共 ~900 token 的小史。
-    compact_backend.script = TextScript(
-        "## 任务目标\n小史\n## 已证实的事实\n" + std::string(2600, 's') +
-        "\n## 关键决策\n(无)\n## 涉及文件与符号\n(无)\n## 关键命令与结果\n(无)\n## 未完成事项\n(无)\n"
-        "```json\n{\"goal\": \"小史\", \"constraints\": [], \"open_items\": [], \"next_action\": \"收工\"}\n```");
+    // 双账存档本身 ~1100 token(goal 塞 4000 字):两轮共 ~1500 token 的小史,
+    // 压完 [双账+末轮热区] 反而更长 → 反涨拒收。
+    compact_backend.map_script = TurnGroupMapJsonScript();
+    compact_backend.reduce_script = DualLedgerJsonScript(std::string(4000, 's'));
     lubancode::agent::Agent loop(compact_backend, registry,
                                  lubancode::agent::AgentProfile{.request{.model = "test-model"},
                                                                 .system_prompt = "sys"});
+    // 两轮小史(单轮会被"没有冷区"更早拒掉,这里要测的是反涨闸本身)。
     std::vector<lubancode::api::Message> small;
-    lubancode::api::Message u;
-    u.role = lubancode::api::Role::User;
-    u.content.push_back(lubancode::api::TextBlock{std::string(1500, 'u')});
-    small.push_back(u);
-    lubancode::api::Message a;
-    a.role = lubancode::api::Role::Assistant;
-    a.content.push_back(lubancode::api::TextBlock{std::string(1500, 'v')});
-    small.push_back(a);
+    for (int turn = 0; turn < 2; ++turn) {
+        lubancode::api::Message u;
+        u.role = lubancode::api::Role::User;
+        u.content.push_back(lubancode::api::TextBlock{std::string(1500, 'u')});
+        small.push_back(u);
+        lubancode::api::Message a;
+        a.role = lubancode::api::Role::Assistant;
+        a.content.push_back(lubancode::api::TextBlock{std::string(1500, 'v')});
+        small.push_back(a);
+    }
     loop.ReplaceHistory(small);
     const std::size_t size_before = loop.History().size();
 
@@ -981,10 +1014,8 @@ TEST_CASE("TryRunCompact 压缩成功后:下一次模型请求、工具执行、
     lubancode::sessions::SessionStore store(dir.string());
     lubancode::tools::ToolRegistry registry;
     ScriptBackend compact_backend;
-    compact_backend.script = TextScript(
-        "## 任务目标\n回归\n## 已证实的事实\n压缩已过\n## 关键决策\n(无)\n"
-        "## 涉及文件与符号\n(无)\n## 关键命令与结果\n(无)\n## 未完成事项\n(无)\n"
-        "```json\n{\"goal\": \"回归\", \"constraints\": [], \"open_items\": [], \"next_action\": \"继续\"}\n```");
+    compact_backend.map_script = TurnGroupMapJsonScript();
+    compact_backend.reduce_script = DualLedgerJsonScript();
     lubancode::agent::Agent loop(compact_backend, registry,
                                  lubancode::agent::AgentProfile{.request{.model = "test-model"},
                                                                 .runtime{.max_steps_per_turn = 2},
@@ -1026,8 +1057,10 @@ TEST_CASE("TryRunCompact 压缩成功后:下一次模型请求、工具执行、
 
     REQUIRE(TryRunCompact(/*midturn=*/true, in));
 
-    // 压缩后的下一次模型请求 + 工具执行:换上带 tool_use 的脚本再跑一轮,
-    // 未知工具也走完整执行链(结果配对入史,请求链路活着)。
+    // 压缩后的下一次模型请求 + 工具执行:清掉双账分流脚本、换上带 tool_use
+    // 的脚本再跑一轮,未知工具也走完整执行链(结果配对入史,请求链路活着)。
+    compact_backend.map_script.clear();
+    compact_backend.reduce_script.clear();
     compact_backend.script = ToolUseScript("post_compact_use");
     const auto outcome = loop.Run("压缩完继续干活", lubancode::agent::TurnWiring{});
     REQUIRE(outcome.has_value());
@@ -1064,24 +1097,24 @@ TEST_CASE("TryRunCompact 压缩成功后:下一次模型请求、工具执行、
 TEST_CASE("HandleCompactCommand: 手工压缩反涨也拒收,历史一字未动") {
     lubancode::tools::ToolRegistry registry;
     ScriptBackend compact_backend;
-    // 摘要本身 ~700 token:压不进一条总共 ~750 token 的小史,并入存档后
-    // 必然反涨。
-    compact_backend.script = TextScript(
-        "## 任务目标\n小史\n## 已证实的事实\n" + std::string(2600, 's') +
-        "\n## 关键决策\n(无)\n## 涉及文件与符号\n(无)\n## 关键命令与结果\n(无)\n## 未完成事项\n(无)\n"
-        "```json\n{\"goal\": \"小史\", \"constraints\": [], \"open_items\": [], \"next_action\": \"收工\"}\n```");
+    // 双账存档 ~1100 token(goal 塞 4000 字):两轮小史 ~1500 token,压完
+    // [双账+末轮热区] 反而更长 → 反涨拒收。
+    compact_backend.map_script = TurnGroupMapJsonScript();
+    compact_backend.reduce_script = DualLedgerJsonScript(std::string(4000, 's'));
     lubancode::agent::Agent loop(compact_backend, registry,
                                  lubancode::agent::AgentProfile{.request{.model = "test-model"},
                                                                 .system_prompt = "sys"});
     std::vector<lubancode::api::Message> small;
-    lubancode::api::Message u;
-    u.role = lubancode::api::Role::User;
-    u.content.push_back(lubancode::api::TextBlock{std::string(1500, 'u')});
-    small.push_back(u);
-    lubancode::api::Message a;
-    a.role = lubancode::api::Role::Assistant;
-    a.content.push_back(lubancode::api::TextBlock{std::string(1500, 'v')});
-    small.push_back(a);
+    for (int turn = 0; turn < 2; ++turn) {
+        lubancode::api::Message u;
+        u.role = lubancode::api::Role::User;
+        u.content.push_back(lubancode::api::TextBlock{std::string(1500, 'u')});
+        small.push_back(u);
+        lubancode::api::Message a;
+        a.role = lubancode::api::Role::Assistant;
+        a.content.push_back(lubancode::api::TextBlock{std::string(1500, 'v')});
+        small.push_back(a);
+    }
     loop.ReplaceHistory(small);
     const std::size_t size_before = loop.History().size();
 
@@ -1104,10 +1137,8 @@ TEST_CASE("HandleCompactCommand: 手工压缩反涨也拒收,历史一字未动"
 TEST_CASE("HandleCompactCommand: 手工压缩收窄时照常换账,反涨闸不拦正常路") {
     lubancode::tools::ToolRegistry registry;
     ScriptBackend compact_backend;
-    compact_backend.script = TextScript(
-        "## 任务目标\n建图书系统\n## 已证实的事实\n规划已出\n## 关键决策\n按层落码\n"
-        "## 涉及文件与符号\nsrc/app.cpp\n## 关键命令与结果\n(无)\n## 未完成事项\n(无)\n"
-        "```json\n{\"goal\": \"建图书系统\", \"constraints\": [], \"open_items\": [], \"next_action\": \"落码\"}\n```");
+    compact_backend.map_script = TurnGroupMapJsonScript();
+    compact_backend.reduce_script = DualLedgerJsonScript();
     lubancode::agent::Agent loop(compact_backend, registry,
                                  lubancode::agent::AgentProfile{.request{.model = "test-model"},
                                                                 .system_prompt = "sys"});

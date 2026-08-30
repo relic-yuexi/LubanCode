@@ -377,8 +377,13 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
     run_options.focus = focus;
 
     lubancode::cli::Spinner spinner(theme, spinner_enabled);
-    const auto result = lubancode::agent::CompactHierarchical(raw_backend, compact_route.model, history,
-                                                              run_options, compact_route.effort, accounting);
+    // 双账压缩(四分区单·阶段 2-4):前分区各一次 map(严格 JSON
+    // TurnGroupSummary),末份热区保原文;prior archive + 全部小结 + 热区
+    // 原文一道 final reduce 出 UserContract + WorkState;校验过后才换账。
+    // 结构压缩口径带会话现场那份(与触发线、反涨闸同一把尺)。
+    const auto result = lubancode::agent::CompactTurnPartitioned(
+        raw_backend, compact_route.model, history, run_options, loop.context().structural_options(),
+        compact_route.effort, accounting);
     spinner.Stop();
 
     if (!result.has_value()) {
@@ -386,26 +391,34 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
         return {};
     }
 
-    std::vector<std::size_t> kept_indices;
-    const auto new_history = lubancode::agent::BuildCompactedHistory(
-        history, result->archive, lubancode::agent::kDefaultHotZoneTokens, &kept_indices);
+    const auto& new_history = result->new_history;
     const std::size_t after_tokens = PressureEstimateTokens(loop, new_history);
     // 反涨闸(阶段 0):手工 /compact 与自动 TryRunCompact 共用同一只——新史
     // (压力口径)不比旧史小便拒收换账,旧 history 一字不动、事件不落盘。
     if (RejectGrownCompactHistory(theme, before_tokens, after_tokens)) {
         return {};
     }
-    const auto base_event = lubancode::sessions::MakeCompactEvent(old_size, new_history, std::move(kept_indices));
+    const auto base_event =
+        lubancode::sessions::MakeCompactEvent(old_size, new_history, result->kept_indices);
     loop.ReplaceHistory(new_history);
 
     // compact_v2 事件:回放语义与 v1 同型,多的 manifest/epoch/metrics 供
-    // 审计与 rebase。
+    // 审计与 rebase。双账路(阶段 4)在 manifest 里记双账 schema、turn
+    // chunk 配置与总/热 turn 数,metrics 里记实现口径与分区账。
     compact_epoch += 1;
     nlohmann::json manifest_json;
     manifest_json["goal"] = result->manifest.goal;
     manifest_json["constraints"] = result->manifest.constraints;
     manifest_json["open_items"] = result->manifest.open_items;
     manifest_json["next_action"] = result->manifest.next_action;
+    if (!result->metrics.schema.empty()) {
+        manifest_json["schema"] = result->metrics.schema;
+        manifest_json["user_contract"] = lubancode::agent::ToJson(result->contract);
+        manifest_json["work_state"] = lubancode::agent::ToJson(result->state);
+        manifest_json["partition_count"] = result->metrics.partition_count;
+        manifest_json["total_turns"] = result->metrics.total_turns;
+        manifest_json["hot_turns"] = result->metrics.hot_turns;
+    }
     nlohmann::json metrics_json;
     metrics_json["chunks"] = result->metrics.chunks;
     metrics_json["reduce_passes"] = result->metrics.reduce_passes;
@@ -1477,7 +1490,7 @@ void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) 
                                 lubancode::cli::FormatTokenCount(compact_result.after_tokens) + " · " +
                                 std::to_string(compact_accounting.duration_ms / 1000) + "." +
                                 std::to_string((compact_accounting.duration_ms % 1000) / 100) +
-                                "s · 校验通过(manifest 守恒)";
+                                "s · 校验通过(双账+守恒)";
     }
     // 压缩把 history 换短了(失败则原样):落盘基线收到新长度,
     // 存档文件保持只追加——全量流水不动,补写一行 compact_v2
@@ -1567,9 +1580,12 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
     // 单次摘要,装不下按 episode 分块 map、归并 reduce。
     lubancode::agent::BackgroundCallAccounting compact_accounting;
     lubancode::agent::ModelRole used_role = lubancode::agent::ModelRole::Cheap;
-    auto result = lubancode::agent::CompactHierarchical(
+    // 双账压缩(四分区单·阶段 2-4):与手工 /compact 同一条路、同一套校验
+    // 与反涨闸;map/reduce 都走压缩路由(cheap)的模型。
+    auto result = lubancode::agent::CompactTurnPartitioned(
         compact_routed.backend != nullptr ? *compact_routed.backend : *in.normal_backend,
-        compact_routed.route.model, loop.History(), options, compact_routed.route.effort, &compact_accounting);
+        compact_routed.route.model, loop.History(), options, loop.context().structural_options(),
+        compact_routed.route.effort, &compact_accounting);
 
     // cheap 失败的回退(规格"失败与安全"):配了独立 cheap 路由(与 normal
     // 不同模型)、而压缩又没成(请求/校验任一环)时,先试 normal 修一次;
@@ -1583,9 +1599,10 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
             << trf("router.fallback_flash", "cheap:" + compact_routed.route.model, "normal:" + repair_routed.route.model)
             << theme.reset << "\n";
         if (repair_routed.backend != nullptr) {
-            result = lubancode::agent::CompactHierarchical(*repair_routed.backend, repair_routed.route.model,
-                                                           loop.History(), options, repair_routed.route.effort,
-                                                           &compact_accounting);
+            result = lubancode::agent::CompactTurnPartitioned(*repair_routed.backend, repair_routed.route.model,
+                                                               loop.History(), options,
+                                                               loop.context().structural_options(),
+                                                               repair_routed.route.effort, &compact_accounting);
             if (result.has_value()) {
                 compact_routed.route = repair_routed.route;
                 used_role = lubancode::agent::ModelRole::Normal;
@@ -1617,9 +1634,7 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
     }
 
     const std::size_t old_size = loop.History().size();
-    std::vector<std::size_t> kept_indices;
-    const auto new_history = lubancode::agent::BuildCompactedHistory(
-        loop.History(), result->archive, lubancode::agent::kDefaultHotZoneTokens, &kept_indices);
+    const auto& new_history = result->new_history;
     const std::size_t new_tokens = PressureEstimateTokens(loop, new_history);
     // 反涨断言(P1-1):压缩后的新历史必须明显小于压缩前,否则换账就是
     // 反涨——存档添在没瘦的热区头上,真机 70.8k 压成 73.7k 还标"校验通过"。
@@ -1632,7 +1647,7 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
         }
         return false;
     }
-    const auto base_event = lubancode::sessions::MakeCompactEvent(old_size, new_history, std::move(kept_indices));
+    const auto base_event = lubancode::sessions::MakeCompactEvent(old_size, new_history, result->kept_indices);
     loop.ReplaceHistory(new_history);
     const std::size_t after_tokens = new_tokens;  // 同一份历史,同一把尺,不重算
     // 成功换账:滞回账记上收口点。
@@ -1653,16 +1668,25 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
         compact_routed.route.model + " · " + lubancode::cli::FormatTokenCount(before_tokens) + "→" +
         lubancode::cli::FormatTokenCount(after_tokens) + " · " +
         std::to_string(compact_accounting.duration_ms / 1000) + "." +
-        std::to_string((compact_accounting.duration_ms % 1000) / 100) + "s · 校验通过(manifest 守恒)";
+        std::to_string((compact_accounting.duration_ms % 1000) / 100) + "s · 校验通过(双账+守恒)";
 
     // compact_v2 事件(第三期):回放与 v1 同型;manifest/epoch/metrics 另记,
-    // 审计与"从原始事件 rebase"都有账可查。
+    // 审计与"从原始事件 rebase"都有账可查。双账路(阶段 4)另记双账 schema
+    // 与 turn 分区账。
     *in.session_compact_epoch += 1;
     nlohmann::json manifest_json;
     manifest_json["goal"] = result->manifest.goal;
     manifest_json["constraints"] = result->manifest.constraints;
     manifest_json["open_items"] = result->manifest.open_items;
     manifest_json["next_action"] = result->manifest.next_action;
+    if (!result->metrics.schema.empty()) {
+        manifest_json["schema"] = result->metrics.schema;
+        manifest_json["user_contract"] = lubancode::agent::ToJson(result->contract);
+        manifest_json["work_state"] = lubancode::agent::ToJson(result->state);
+        manifest_json["partition_count"] = result->metrics.partition_count;
+        manifest_json["total_turns"] = result->metrics.total_turns;
+        manifest_json["hot_turns"] = result->metrics.hot_turns;
+    }
     nlohmann::json metrics_json;
     metrics_json["chunks"] = result->metrics.chunks;
     metrics_json["reduce_passes"] = result->metrics.reduce_passes;
