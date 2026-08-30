@@ -12,7 +12,7 @@
 #include <optional>
 #include <string>
 
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "tools/worktree_tool.hpp"
 
 using namespace lubancode;

@@ -26,7 +26,7 @@
 #include "api/backend.hpp"
 #include "agent/agent_profile_resolver.hpp"  // AgentProfileResolveEnvironment:阶段 3 解析环境
 #include "cli/theme.hpp"
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "config/config.hpp"
 #include "config/plugin_trust.hpp"
 #include "lsp/manager.hpp"

@@ -25,7 +25,7 @@
 #include "app/tool_runtime.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/spinner_backend.hpp"
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "config/config.hpp"
 #include "config/project_instructions.hpp"  // ProjectInstructionResolver:AGENTS.md 作用域解析(共用一份)
 #include "memory/project_memory.hpp"

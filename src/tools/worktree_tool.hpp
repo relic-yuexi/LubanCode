@@ -21,7 +21,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "tools/tool.hpp"
 
 namespace lubancode::tools {

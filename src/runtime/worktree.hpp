@@ -2,6 +2,12 @@
 // 翻译、确认提示留在 interactive_session,这里因此能拿假 GitRunner 做单测,
 // 不必真的建仓库。
 //
+// 骨架拆解反弹·问题 6 自 src/cli/ 迁来:这是领域逻辑(git 房务),不是
+// 展示层代码,住 runtime/ 名正言顺;target 仍编进 engine(engine 的
+// tools 吃它,runtime target 反向链 engine 收不得)。namespace 沿用
+// lubancode::cli 旧名不改——二十来个消费方的 cli:: 前缀不动,纯搬家
+// 不夹带改名。
+//
 // 0.27.x 起 besides /worktree 的三件事也住在这里(模型侧工具薄壳在
 // tools/worktree_tool,子代理房务在 tools/agent_tool,都只调这里的函数):
 //   - 基准:Enter 支持 fresh(远端默认分支,fetch 5 秒封顶失败回落本地

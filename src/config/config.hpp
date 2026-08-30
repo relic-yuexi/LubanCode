@@ -731,32 +731,10 @@ struct ConfigSources {
     Source memory = Source::Default;
 };
 
-// settings.local.json 里的 permissions 段,项目级本地权限(不进版本库)。
-// 位置 <cwd>/.lubancode/settings.local.json,照 Claude Code / Codex 的路数:
-//   - allow_tools:这些工具启动即注入会话"总是允许"集合,直接免确认;
-//   - allow_commands:run_command 命令前缀白名单,auto 档里等价 command_safety
-//     判成 Safe(补充白名单,不改 command_safety.cpp,在 main 的 auto 分流处
-//     叠加判定);
-//   - deny_commands:run_command 命令前缀黑名单,confirm/auto 档里前缀命中就
-//     永远问一句(压过 allow_commands、压过会话"总是允许";yolo/--yes 是显式
-//     全放,deny 不拦);
-//   - default_confirm_mode:起手确认档(auto/yolo/confirm),优先级低于
-//     --yes/LUBANCODE_CONFIRM_MODE,高于内置默认 confirm。
-// 全部字段可选;坏 JSON 只告警跳过,不崩。
-struct SettingsLocal {
-    std::vector<std::string> allow_tools;
-    std::vector<std::string> allow_commands;
-    std::vector<std::string> deny_commands;
-    std::optional<std::string> default_confirm_mode;  // auto / yolo / confirm
-    // Plan 模式单:起手协作档(plan / default)。优先级低于 --mode 与
-    // LUBANCODE_COLLABORATION_MODE(RunCli 的 ResolveStartupPlanMode)。
-    std::optional<std::string> default_collaboration_mode;
-
-    bool Empty() const {
-        return allow_tools.empty() && allow_commands.empty() && deny_commands.empty() &&
-               !default_confirm_mode.has_value() && !default_collaboration_mode.has_value();
-    }
-};
+// settings.local.json(项目级本地权限)的 SettingsLocal 与读写函数住在
+// config/settings_local.hpp,命令放行裁定(ClassifyCommandByPermissions)
+// 住在 config/command_permission.hpp——骨架拆解反弹·问题 7 拆出,主
+// Config/env 解析/provider merge 不再夹带这两摊。
 
 struct ConfigResult {
     Config config;
@@ -1033,6 +1011,32 @@ bool SetProviderExtraHeader(std::vector<ProviderConfig>& providers, const std::s
 bool SetProviderAuthMode(std::vector<ProviderConfig>& providers, const std::string& name,
                          ProviderAuthMode mode);
 
+// 纯函数,不摸文件(骨架拆解反弹·问题 4,鉴权 setter 三件):把 name 对应
+// 那条 provider 的鉴权一次切齐,命令层不再自己 it->auth= 逐字段改内存。
+// 互斥由 auth 模式字段一锤定音——切到哪档,取值就只认那档的字段
+// (ResolveProviderAuth);改法与落盘侧 SetProviderXxxInGlobalConfig 的
+// mutate 逐字对齐,内存与盘上不漂移。校验(空 key/空变量名 = 半截配置,
+// ValidateProviderConfig 同一条规矩)封在 setter 里,调用方不必各自把关。
+
+// 切到明文 key:auth=Inline + api_key 一次写齐。api_key 空串拒绝返回
+// false、原列表不动。key_env 旧值照留(盘上同名函数同款,别单边清)。
+// /provider 补救页"现在输入 API key"、/provider set auth inline 用。
+bool SetProviderAuthInline(std::vector<ProviderConfig>& providers, const std::string& name,
+                           const std::string& api_key);
+
+// 切到环境变量:auth=Env + key_env 一次写齐。key_env 空串拒绝返回 false、
+// 原列表不动。api_key 旧值照留——ResolveProviderAuth 的旧优先级(明文 key
+// 压环境变量)因此照旧生效,与盘上同名函数一致。
+// /provider 补救页"改用另一个环境变量"、/provider set auth env 用。
+bool SetProviderAuthEnv(std::vector<ProviderConfig>& providers, const std::string& name,
+                        const std::string& key_env);
+
+// 切到无需鉴权:auth=None,顺带清 key_env(变量名这会儿没用了)。与盘上
+// SetProviderAuthModeInGlobalConfig(None 分支) 逐字对齐。找不到 name 返回
+// false、原样不动。/provider 补救页"设为无需鉴权"、/provider set auth
+// none 用。
+bool SetProviderAuthNone(std::vector<ProviderConfig>& providers, const std::string& name);
+
 // 纯函数,不摸文件(容错单,/provider edit 用):把 name 对应那条 provider
 // 整条换成 provider(向导不碰的字段——context_window、extra_headers、
 // supported_think_levels 这类——靠调用方传入的这份副本原样带回来)。改名
@@ -1269,53 +1273,5 @@ std::expected<ConfigResult, std::string> LoadFromEnv();
 // 整篇作为字符串返回。文件打不开(不存在、没权限……)或者内容是空的,
 // 都返回带路径的可读错误——语义上这两种情况都没法拿来当人格段用。
 std::expected<std::string, std::string> ReadSystemPromptFile(const std::string& path);
-
-// -------- settings.local.json:项目级本地权限(不进版本库) --------
-
-// <cwd>/.lubancode/settings.local.json 的路径(cwd_dir 传 CurrentDirUtf8())。
-std::string SettingsLocalPath(const std::string& cwd_dir);
-
-// 纯函数,不碰 IO:解析 settings.local.json 文本。顶层要有 "permissions"
-// object(没有就返回空 SettingsLocal,不算错);其中 allow_tools /
-// allow_commands / deny_commands 是字符串数组(非字符串元素跳过),
-// default_confirm_mode 是字符串(auto/yolo/confirm,别的值原样留着交给
-// 调用方判)。全部字段可选。坏 JSON、顶层不是 object 才返回错误(调用方
-// 打一行警告后当没配置,不崩)。
-std::expected<SettingsLocal, std::string> ParseSettingsLocal(const std::string& json_text,
-                                                              const std::string& path_for_error);
-
-// 读 <cwd>/.lubancode/settings.local.json。文件不存在返回 std::nullopt
-// (不算错);读到了就解析。坏 JSON 把可读错误往上抛(调用方告警跳过)。
-std::expected<std::optional<SettingsLocal>, std::string> LoadSettingsLocal(const std::string& cwd_dir);
-
-// 把一个工具名永久写进 <cwd>/.lubancode/settings.local.json 的
-// permissions.allow_tools(去重)。目录/文件不存在则按需创建(项目级
-// .lubancode/ 只在这"首次持久化 permissions"时才落地),已有的别的字段
-// (含不认得的)原样保留。成功返回写入的完整路径;建目录/写文件失败返回
-// 可读错误。gitignore 由调用方另行处理(EnsureGitignoreCoversSettingsLocal),
-// 好把"追加了一行 / 提示手动加"的反馈打给用户看。
-std::expected<std::string, std::string> AddAllowedToolToSettingsLocal(const std::string& cwd_dir,
-                                                                       const std::string& tool_name);
-
-// 一条命令过 settings.local 的 permissions 前缀判定后的裁定。deny 压过 allow
-// (两边都命中时算 Deny)。None = 两个名单都没命中,交给别处(command_safety /
-// 逐个问)决定。
-enum class CommandPermission { None, Allow, Deny };
-
-// 纯函数:命令去掉前导空白后,先看 deny_commands 有没有前缀命中(命中即
-// Deny,压过一切),再看 allow_commands(命中即 Allow),都没命中 None。
-// 空前缀跳过;原始命令串直接比,不做 shell 解析(前缀白/黑名单本就是"这几条
-// 命令开头"的朴素约定,跟 command_safety 的保守解析各管一摊)。main 的 auto
-// 分流处叠加用:Deny → 永远问(mode 门槛在 main 那边),Allow → auto 档等价
-// command_safety 的 Safe。
-CommandPermission ClassifyCommandByPermissions(const std::string& command,
-                                               const std::vector<std::string>& allow_commands,
-                                               const std::vector<std::string>& deny_commands);
-
-// 保证 <cwd>/.gitignore 挡住 .lubancode/settings.local.json:.gitignore 存在
-// 且没挡就追加一行(返回 "appended");已经挡住返回 "already";.gitignore
-// 压根不存在就不硬塞,返回一行给用户看的提示("hint:...",教他手动加)。
-// 纯做文件这一件事,不抛错(读写失败也只是不动 .gitignore)。
-std::string EnsureGitignoreCoversSettingsLocal(const std::string& cwd_dir);
 
 }  // namespace lubancode::config

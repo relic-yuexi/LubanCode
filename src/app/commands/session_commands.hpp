@@ -30,7 +30,7 @@
 #include "cli/context_tracker.hpp"
 #include "cli/i18n.hpp"
 #include "cli/theme.hpp"
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "hooks/dispatcher.hpp"
 #include "platform/paths.hpp"
 #include "tools/tool.hpp"

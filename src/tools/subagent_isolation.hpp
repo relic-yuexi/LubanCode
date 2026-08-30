@@ -15,7 +15,7 @@
 #include <optional>
 #include <string>
 
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "tools/isolation.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"

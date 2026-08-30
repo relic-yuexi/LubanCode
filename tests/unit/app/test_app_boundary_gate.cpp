@@ -15,8 +15,9 @@
 //     cli 与 app 消费它,单子的 platform 归 engine)——它是"终端能力的
 //     平台抽象"不是"画面决策",从名单豁免;
 //   - engine 在编的 cli 叶子白名单:i18n(字符串表)/theme(配色值)/
-//     worktree(git 房务)/line_editor(纯逻辑编辑核)——四个零标准流,
-//     守门测试同钉。runtime 一律不许 include cli/*。
+//     line_editor(纯逻辑编辑核)——三个零标准流,守门测试同钉。
+//     worktree(git 房务)原是第四枚叶子,骨架拆解反弹·问题 6 已迁
+//     src/runtime/,白名单相应缩短一条。runtime 一律不许 include cli/*。
 //
 // 扫描目录:src/runtime(全部)、engine 的目录(api/agent/tools/config/
 // memory/hooks/mcp/lsp/ptc)。platform 只盯 console 之外的文件。新文件进
@@ -121,8 +122,9 @@ TEST_CASE("守门:engine 与 runtime 源码里搜不到终端件(单子验收原
         return;
     }
 
-    // runtime 全目录 + engine 的各目录(i18n/theme/worktree/line_editor 四
-    // 叶子在 cli/ 目录,由第二组单独盯;platform 的 console_* 是终端原语层,
+    // runtime 全目录 + engine 的各目录(i18n/theme/line_editor 三叶子在
+    // cli/ 目录,由第二组单独盯;worktree 已迁 runtime/,随本组扫;platform
+    // 的 console_* 是终端原语层,
     // 豁免——见文件头裁量)。sessions/peers/skills 是骨架拆解批七从 agent/
     // 迁出的 engine 域目录,同入册。
     const std::vector<std::filesystem::path> gate_files = CollectSources({
@@ -153,8 +155,8 @@ TEST_CASE("守门:engine 与 runtime 源码里搜不到终端件(单子验收原
                       (path.string() + " 认 ChoiceMenu"));
         CHECK_MESSAGE(code.find("TranscriptPainter") == std::string::npos,
                       (path.string() + " 认 TranscriptPainter"));
-        // include 边界:runtime 一律不许 include cli/*;engine 只许四叶子
-        // (i18n/theme/worktree/line_editor),其余 cli 头都是终端件。
+        // include 边界:runtime 一律不许 include cli/*;engine 只许三叶子
+        // (i18n/theme/line_editor),其余 cli 头都是终端件。
         const bool is_runtime = path.string().find("src/runtime") != std::string::npos;
         const std::size_t cli_include = code.find("#include \"cli/");
         if (cli_include != std::string::npos) {
@@ -165,7 +167,7 @@ TEST_CASE("守门:engine 与 runtime 源码里搜不到终端件(单子验收原
                 const std::size_t end = code.find('"', start);
                 const std::string header = code.substr(start, end - start);
                 const bool leaf = header == "i18n.hpp" || header == "theme.hpp" ||
-                                  header == "worktree.hpp" || header == "line_editor.hpp";
+                                  header == "line_editor.hpp";
                 CHECK_MESSAGE(!is_runtime, (path.string() + " (runtime) include cli/" + header));
                 CHECK_MESSAGE(leaf, (path.string() + " (engine) include 终端件 cli/" + header));
                 pos = code.find("#include \"cli/", end);
@@ -177,14 +179,14 @@ TEST_CASE("守门:engine 与 runtime 源码里搜不到终端件(单子验收原
     }
 }
 
-TEST_CASE("守门:四叶子自身零标准流(i18n/theme/worktree/line_editor)") {
+TEST_CASE("守门:三叶子自身零标准流(i18n/theme/line_editor)") {
     const std::vector<std::filesystem::path> leaves = [&] {
         std::vector<std::filesystem::path> out;
         const std::filesystem::path root = SourceRoot();
         if (root.empty()) {
             return out;
         }
-        for (const std::string& name : {"i18n", "theme", "worktree", "line_editor"}) {
+        for (const std::string& name : {"i18n", "theme", "line_editor"}) {
             const std::filesystem::path hpp = root / "src" / "cli" / (name + ".hpp");
             const std::filesystem::path cpp = root / "src" / "cli" / (name + ".cpp");
             if (std::filesystem::exists(hpp)) out.push_back(hpp);

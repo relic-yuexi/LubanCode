@@ -112,7 +112,7 @@
 #include "cli/line_editor.hpp"  // DisplayWidthUtf8:查看帧折行记账
 #include "cli/i18n.hpp"
 #include "cli/live_transcript.hpp"
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "cli/markdown.hpp"
 #include "cli/keymap.hpp"
 #include "cli/mention_menu.hpp"

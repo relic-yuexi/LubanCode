@@ -29,7 +29,7 @@
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "cli/i18n.hpp"
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "config/config.hpp"
 #include "lsp/manager.hpp"
 #include "memory/memory_tool.hpp"

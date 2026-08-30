@@ -101,7 +101,7 @@
 #include "cli/line_editor.hpp"  // DisplayWidthUtf8:查看帧折行记账
 #include "cli/i18n.hpp"
 #include "cli/live_transcript.hpp"
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "cli/markdown.hpp"
 #include "cli/keymap.hpp"
 #include "cli/mention_menu.hpp"
@@ -123,6 +123,7 @@
 #include "config/prompt_files.hpp"
 #include "config/project_instructions.hpp"
 #include "tools/instruction_scope.hpp"  // BuildScopeGateCallback/MarkBaselineSeen(作用域单 P0)
+#include "config/settings_local.hpp"
 #include "config/skill_store.hpp"
 #include "lsp/manager.hpp"
 #include "memory/memory_tool.hpp"

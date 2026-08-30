@@ -42,7 +42,7 @@
 #include "cli/session_picker.hpp"
 #include "cli/session_picker_panel.hpp"
 #include "cli/theme.hpp"
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "platform/paths.hpp"
 #include "runtime/session_command_service.hpp"
 

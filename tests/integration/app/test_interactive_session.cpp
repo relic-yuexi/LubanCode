@@ -12,6 +12,7 @@
 #include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
+#include "config/settings_local.hpp"
 
 #if defined(_WIN32)
 const char* kNullDevice = "nul";

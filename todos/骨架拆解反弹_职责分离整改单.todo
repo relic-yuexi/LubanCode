@@ -115,7 +115,13 @@
 
 ## 问题 4：`settings_commands.cpp` 命令处理器里直接改配置内存对象
 
-- 状态：待实现
+- 状态：已实现（2026-08-30：config 补 SetProviderAuthInline/SetProviderAuthEnv/
+  SetProviderAuthNone 三枚纯函数 setter——空 key/空变量名拒收，字段改法与落盘侧
+  SetProviderXxxInGlobalConfig 的 mutate 逐字对齐；HandleProviderCommand 四处内存
+  改写（补救页三处 + /provider set auth 一处）全改走 setter，it->auth= 类直改
+  grep 清零；UI（菜单/ReadLine/TermOut）原地未动。setter 单测 4 例新增；ctest
+  268 册全绿，/provider add + set auth none→env(补变量名)→inline 管道冒烟过，
+  盘上终态与旧语义一致）
 - 级别：P2
 - 位置：`src/app/commands/settings_commands.cpp:746-1436`（`HandleProviderCommand`），具体改字段处见 `:824-831, 859-866, 881-887`
 
@@ -171,7 +177,14 @@
 
 ## 问题 6：`worktree.cpp` 放错了抽屉
 
-- 状态：待实现
+- 状态：已实现（2026-08-30：worktree.cpp/hpp 迁 src/runtime/——它零 runtime 头
+  依赖（只用 platform/process.hpp 与标准库），落 runtime/ 名正言顺；target 照
+  批七 sessions/peers/skills 先例留 lubancode_engine（engine 的 agent_tool/
+  worktree_tool/subagent_isolation 吃它，runtime target 反向链 engine 收不得），
+  namespace 沿用 lubancode::cli 不改（21 个消费文件零 churn，纯搬家不夹带改名）；
+  21 处 include 改 runtime/worktree.hpp；boundary gate 白名单删 worktree.hpp 一
+  条、四叶子守门改三叶子；ctest 268 册全绿，/worktree list 管道冒烟过（真 git
+  列房、当前房带星标））
 - 级别：P3
 - 位置：`src/cli/worktree.cpp`（1062 行）
 
@@ -193,7 +206,15 @@
 
 ## 问题 7：`config.cpp` 夹带了两样不归它管的事
 
-- 状态：待实现
+- 状态：已实现（2026-08-30：ClassifyCommandByPermissions/CommandHasPrefix 拆出
+  src/config/command_permission.hpp/.cpp——没并进 tools/command_safety：那边按
+  命令内容做静态分析，这边按用户手写前缀名单叠加裁定，输入来源与语义都不同，
+  并成一份会让 command_safety 认识 settings.local；SettingsLocal 全家
+  （SettingsLocalPath/Parse/Load/AddAllowedTool/EnsureGitignore）拆出
+  src/config/settings_local.hpp/.cpp；config.cpp 3813→3597 行，只剩 env/文件
+  解析、merge、SetXInGlobalConfig 持久化；调用方（turn_runtime、agent_tool、
+  tool_confirm_ui、cli_app、one_shot、session 各处、测试）include 同步；
+  函数体原样搬，ctest 268 册全绿，管道起会话装载 settings.local 冒烟过）
 - 级别：P3
 - 位置：`src/config/config.cpp:3743-3774`（`ClassifyCommandByPermissions`/`CommandHasPrefix`）、`:3774-3813`（`EnsureGitignoreCoversSettingsLocal`）
 
