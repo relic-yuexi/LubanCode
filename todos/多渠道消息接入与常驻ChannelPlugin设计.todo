@@ -1,6 +1,5 @@
 # 多渠道消息接入与常驻 ChannelPlugin 设计
 
-- 状态：待实现
 - 日期：2026-08-29
 - 范围：常驻渠道插件、平台消息入站、会话路由、Agent 唤起、流式回发、可靠性、安全、Package 挂载、命令与诊断
 - 首批目标：QQ Bot、WeChat；合同同时覆盖 LINE、WeCom、Feishu、Yuanbao、Zalo、Zalo ClawBot、Zalo Personal
