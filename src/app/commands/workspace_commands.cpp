@@ -14,6 +14,7 @@ using lubancode::cli::TermErr;
 #include "cli/console_input.hpp"
 #include "tools/background_tasks.hpp"
 
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -734,6 +735,69 @@ CommandFlow HandleSlashInit(SlashDispatchContext& ctx, const lubancode::cli::Par
                           ? "cmd.init.created"
                           : "cmd.init.exists";
     TermOut() << trf(key, PathToUtf8(result.path)) << "\n";
+    return CommandFlow::Continue;
+}
+
+// /instructions(AGENTS.md 作用域单 P1-1):逐 source 亮账。裸敲看 cwd
+// 基线;path <路径> 看目标链(嵌套 AGENTS.md 从仓库根也能查);reload
+// 显式重载(与 /init 同一条 refresh 线)后亮新基线。Resolver 用会话那只
+// (与写前闸同一份账);没接(旧装配/单测)按 SessionResolverOptions 现
+// 起一只,fallback 名单从当前配置来。
+CommandFlow HandleSlashInstructions(SlashDispatchContext& ctx,
+                                    const lubancode::cli::ParsedSlashCommand& parsed) {
+    const lubancode::cli::Theme& theme = *ctx.theme;
+    const auto cmd = lubancode::cli::ParseInstructionsCommand(parsed.args);
+    if (cmd.action == lubancode::cli::InstructionsCommandAction::Invalid) {
+        TermOut() << theme.error
+                  << "/instructions: 认不得的子命令" + (cmd.bad_word.empty() ? std::string() : " \"" + cmd.bad_word + "\"") +
+                         "。用法: /instructions(看 cwd 基线)| /instructions path <路径>(看目标链)| "
+                         "/instructions reload(重载后看新基线)\n"
+                  << theme.reset;
+        return CommandFlow::Continue;
+    }
+
+    // reload:先走 /init 同一条刷新线(重建提示、重新预登记基线),再亮
+    // 新账;刷新线没接(单测/旧装配)就只亮当前账。
+    if (cmd.action == lubancode::cli::InstructionsCommandAction::Reload) {
+        if (ctx.refresh_project_instructions) {
+            ctx.refresh_project_instructions();
+            TermOut() << "已重载,本会话立即采用。\n";
+        } else {
+            TermOut() << "(本装配没接刷新线,只显示当前账)\n";
+        }
+    }
+
+    std::unique_ptr<const lubancode::config::ProjectInstructionResolver> local_resolver;
+    const lubancode::config::ProjectInstructionResolver* resolver = ctx.instruction_resolver;
+    if (resolver == nullptr) {
+        local_resolver = std::make_unique<const lubancode::config::ProjectInstructionResolver>(
+            lubancode::config::SessionResolverOptions(
+                ctx.config != nullptr ? ctx.config->project_doc_fallback_filenames
+                                      : std::vector<std::string>()));
+        resolver = local_resolver.get();
+    }
+
+    std::filesystem::path target = std::filesystem::current_path();
+    if (cmd.action == lubancode::cli::InstructionsCommandAction::Path) {
+        target = lubancode::tools::Utf8ToPath(cmd.target);
+        if (target.is_relative()) {
+            target = std::filesystem::current_path() / target;
+        }
+    }
+
+    const lubancode::config::InstructionChain chain = resolver->ResolveForPath(target);
+    TermOut() << theme.stats << "AGENTS.md 指令链" << theme.reset << "\n";
+    for (const std::string& line : lubancode::config::FormatInstructionChainLines(chain, resolver->max_bytes())) {
+        TermOut() << line << "\n";
+    }
+    const std::vector<std::string> diagnostics = lubancode::config::FormatInstructionDiagnosticLines(chain);
+    if (!diagnostics.empty()) {
+        TermOut() << "诊断:\n";
+        for (const std::string& line : diagnostics) {
+            TermOut() << line << "\n";
+        }
+    }
+    TermOut().flush();
     return CommandFlow::Continue;
 }
 

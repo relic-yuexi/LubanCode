@@ -202,7 +202,7 @@ The catalog source lives in [`catalog/providers.json`](catalog/providers.json), 
 
 Run `/init` inside a repository. LubanCode creates `AGENTS.md` at the Git root with a practical scaffold for layout, build, tests, and working rules. Existing instructions are never overwritten. The current main agent and sub-agents reload the file immediately.
 
-At startup, LubanCode walks from the Git root to the working directory. Each directory prefers `AGENTS.override.md`, then `AGENTS.md`; nearer files appear later and take precedence. Empty files are skipped, and combined instruction content is capped at 32 KiB. See [Project instructions](docs/features/project-instructions/README.md).
+At startup, LubanCode walks from the Git root to the working directory. Each directory prefers `AGENTS.override.md`, then `AGENTS.md`; nearer files appear later and take precedence. Empty files are skipped; the combined "separator + source heading + body" is capped at 32 KiB (a fixed ~100-byte outer wrapper is added on top). Writes re-resolve the chain for the target file, so nested `AGENTS.md` files apply automatically, and `/instructions` shows the per-file ledger. See [Project instructions](docs/features/project-instructions/README.md).
 
 ## Everyday commands
 

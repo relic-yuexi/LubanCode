@@ -34,6 +34,7 @@
 #include "cli/context_tracker.hpp"
 #include "cli/theme.hpp"
 #include "config/config.hpp"
+#include "config/project_instructions.hpp"  // ProjectInstructionResolver:/doctor instructions
 #include "tools/registry.hpp"
 
 namespace lubancode::app {
@@ -203,6 +204,9 @@ struct DoctorContext {
     const lubancode::tools::ToolRegistry* main_registry = nullptr;
     const lubancode::tools::ToolRegistry* sub_registry = nullptr;
     const lubancode::tools::ToolRegistry* explore_registry = nullptr;
+    // /doctor instructions(AGENTS.md 作用域单 P1-1):与写前闸同一只
+    // Resolver。可空:没接的调用方按 SessionResolverOptions 现起一只。
+    const lubancode::config::ProjectInstructionResolver* instruction_resolver = nullptr;
 };
 
 void HandleDoctorCommand(const std::string& args, const DoctorContext& context);

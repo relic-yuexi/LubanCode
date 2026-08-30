@@ -68,6 +68,7 @@ enum class ToolOutcome {
     PermissionDeclined,
     ModeDenied,           // Plan 模式硬闸拒绝(只读研究单):不冒充用户拒绝
     ScopeGatePending,     // 写前作用域闸首次拦下(AGENTS.md 作用域单):握手待重试,非错误
+    ScopeGateOverBudget,  // 写前作用域闸 fail closed(P1):链装不进预算,拒收;重试不放行
     CancelledBeforeStart, // 未轮到(ESC)或闸前被收掉:没越过执行边界
     CancelledDuringRun,
     SpawnFailed,
@@ -109,6 +110,9 @@ inline constexpr const char* kErrSessionTraceAppendFailed = "session.trace_appen
 inline constexpr const char* kErrSessionResultCommitFailed = "session.result_commit_failed";
 // 写前作用域闸首次拦下(AGENTS.md 作用域单 P0):规则已注入,待重试。
 inline constexpr const char* kErrScopeInstructionsRequired = "scope.instructions_required";
+// 写前作用域闸 fail closed(P1):active write chain 整份装不进预算,拒收
+// ——不是握手,重试不放行,须拆规则或调大预算。
+inline constexpr const char* kErrScopeInstructionsOverBudget = "scope.instructions_over_budget";
 
 // ---------------------------------------------------------------------------
 // canonical 领域事件(一份事件,两路消费:Runtime EventSink 吃投影,

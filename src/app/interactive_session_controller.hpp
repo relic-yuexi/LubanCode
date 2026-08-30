@@ -338,6 +338,9 @@ private:
     const std::string& prompts_dir;
     std::shared_ptr<lubancode::memory::ProjectMemory>& project_memory;
     std::string& project_instructions;
+    // AGENTS.md 逐 source 账(作用域单 P1-2):本体在 stack_,与上面那截
+    // 拼接串同源同刷,喂 prompt_options.project_instruction_sources。
+    std::vector<std::string>& project_instruction_sources;
     const std::filesystem::path& global_skills_root;
     const std::filesystem::path& project_skills_root;
     RebuildableBackend& real_backend;

@@ -414,10 +414,22 @@ std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedge
 
     if (!options.project_instructions.empty()) {
         append(options.project_instructions);
-        PromptSourceLedgerEntry entry;
-        entry.rel_path = "(project instructions)";
-        entry.origin = PromptModuleOrigin::ProjectInstructions;
-        LedgerAdd(ledger, std::move(entry));
+        // P1-2 逐 source 账:装配层递了来源清单就每份文档记一行(不再压成
+        // 一条总项);没递(旧装配/单测)照旧一条总项,零退化。
+        if (!options.project_instruction_sources.empty()) {
+            for (const std::string& source : options.project_instruction_sources) {
+                PromptSourceLedgerEntry entry;
+                entry.rel_path = "(project instructions)";
+                entry.origin = PromptModuleOrigin::ProjectInstructions;
+                entry.file = source;
+                LedgerAdd(ledger, std::move(entry));
+            }
+        } else {
+            PromptSourceLedgerEntry entry;
+            entry.rel_path = "(project instructions)";
+            entry.origin = PromptModuleOrigin::ProjectInstructions;
+            LedgerAdd(ledger, std::move(entry));
+        }
     }
 
     // 基础工具的方针跟着工具走,不跟人格走。自定义 Agent 带了能力推导

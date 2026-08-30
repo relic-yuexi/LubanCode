@@ -46,12 +46,13 @@ LubanCode 从当前目录往上找 `.git`：
 
 ## 3. 查找顺序
 
-程序从项目根一路走到当前工作目录。每层只取一份：
+程序从项目根一路走到目标。启动会话时目标就是当前工作目录；写文件时目标是那个文件——写前闸按文件的祖先链重新解析，嵌套的 `AGENTS.md` 就算在仓库根启动也能生效。每层只取一份：
 
 1. 非空 `AGENTS.override.md`。
 2. 若没有非空 override，再取非空 `AGENTS.md`。
+3. （显式配置 `project_doc_fallback_filenames` 后）两枚主名都没命中时，按名单顺序取第一份非空文件。
 
-根目录先拼，近处目录后拼。越靠近当前目录，越能补充或压过上层规矩。
+根目录先拼，近处目录后拼。越靠近目标，越能补充或压过上层规矩。
 
 ```text
 repo/
@@ -62,7 +63,7 @@ repo/
       AGENTS.md             # parser 再添细则
 ```
 
-若当前目录是 `repo/src/parser`，最终顺序如下：
+改 `repo/src/parser/token.cpp` 时，生效链如下（无论会话从仓库根还是从 `src/parser` 启动）：
 
 ```text
 repo/AGENTS.md
@@ -72,11 +73,43 @@ repo/src/parser/AGENTS.md
 
 `override` 只压过同层 `AGENTS.md`，不会抹掉父目录指令。空文件跳过。路径会写进拼装后的标题，模型知道每段从哪儿来。
 
-## 4. 32 KiB 上限
+首次往一个新作用域写文件时，写前闸先拦一次，把该链的完整规则随工具结果注入，模型读过原样重试即放行——第一次拦住是协议握手，不是错误。`AGENTS.md` 被改动后指纹即变，下一次写会重新握手。
 
-所有项目指令正文与来源标题合计最多 32 KiB。达到上限时，程序沿 UTF-8 字符边界截断，免得切坏中文；后续文件不再读入。
+## 4. 32 KiB 上限与计费口径
+
+上限 32 KiB 管"段间分隔 + 来源标题（`## Instructions from ...`）+ 正文"三样合计。拼完后再在最前头加 `# Project Instructions` 与一行固定说明（约 100 bytes）——这截包装**不计入帽**，最终串可略超 32 KiB，超出量即包装本身。
+
+系统提示里的基线投影沿这条旧口径：达到上限时沿 UTF-8 字符边界截断，免得切坏中文，后续文件不再读入，状态明标"截断"，不冒充"全部已加载"。
+
+写前闸另按"整份文档"计：目标链在预算内装不下时**直接拒写**并说明每份多大、总额多少、怎样拆——不腰斩（截断在半条禁令中间比没有更糟）。
 
 这有个实在后果：根目录若写成万言书，近处模块规矩可能挤不进来。通则写短，细则下沉。大段背景材料放普通文档，再从 `AGENTS.md` 指明何时去读。
+
+## 4b. 查账与诊断
+
+```text
+/instructions                      看 cwd 基线:逐 source 一行(路径/类型/字节数/摘要/最近标注)
+/instructions path src/a.cpp       看目标链(嵌套 AGENTS.md 从仓库根也能查)
+/instructions reload               显式重载,会话立即采用
+/doctor instructions               cwd 基线全账 + 计费口径 + 分型诊断
+```
+
+诊断分型，不再把"打不开"与"空文件"都写成没发现：
+
+| code | 含义 |
+| --- | --- |
+| `empty_skipped` | 文件在但为空，跳过 |
+| `shadowed_same_directory` | 同层非空 override 压住了这份 `AGENTS.md` |
+| `read_error` | 文件在却读不动（权限/短暂 I/O 错） |
+| `invalid_utf8` | 内容不是合法 UTF-8，拒收 |
+| `symlink_outside_project` | 符号链接解析到项目外，拒读 |
+| `symlink_broken` | 符号链接断链或成环 |
+| `symlink_inside_project` | 链到项目内：允许，账里同时记 link 与真实路径 |
+| `over_budget` | 拼装投影撞了字节帽，有文档没装下 |
+| `fallback_used` | 显式配置的 fallback 文件名命中 |
+| `migration_hint` | 发现 `AGENT.md`/`CLAUDE.md`/`GEMINI.md`，只提示不读 |
+
+诊断输出只列路径与状态，不泄正文。
 
 ## 5. 推荐结构
 
@@ -146,8 +179,11 @@ repo/src/parser/AGENTS.md
 | --- | --- |
 | `~/.lubancode/system_prompt.md` 或自定 system prompt | 代理身份与总工作方式 |
 | `~/.lubancode/SOUL.md` | 口吻、措辞、个人偏好 |
+| `~/.lubancode/AGENTS.md` | 跨仓库的通用工作法（全局层，优先级最低，项目层永远能盖过） |
 | `AGENTS.md` | 仓库规矩 |
 | `SKILL.md` | 某类任务的具体流程与资源 |
+
+全局层（`~/.lubancode/AGENTS.md`）与 SOUL 分工明确：SOUL 管"怎么说"，全局 AGENTS 管"怎么干活"（比如"改 POSIX 代码先用 WSL 验证"这类对所有仓库都成立的规矩）。它垫在项目根之前，最先拼进提示、最先被预算挤掉；不创建这份文件就没有这一层，行为与从前一字不差。
 
 项目指令不能越过程序权限。它可以要求模型调用工具，却不能绕开确认、路径校验、命令黑名单和输出上限。
 
@@ -155,20 +191,33 @@ repo/src/parser/AGENTS.md
 
 - 新启动会话：启动时加载。
 - `/init`：无论新建还是发现现有文件，都会重建主代理提示。
+- `/instructions reload`：同 `/init` 的重载线，随后亮出新基线账。
 - `/init` 之后调用子代理：子代理拿到新指令。
-- 在外部编辑器里直接改文件：当前会话不会自动监听；重新执行 `/init` 或重启。
+- 在外部编辑器里直接改文件：系统提示里的基线不自动重读（重跑 `/init`、`/clear` 或重启）；写前闸侧按"惰性发现"办——下一次写文件时先查 mtime，变了就重读规则、重新握手。改的是"确认权"而非"提示词"，所以不需要重启就能挡住没看新规则的写入。
 
 已经写进历史的旧系统提示不会逐条改写。后续请求使用重建后的提示。
 
-## 10. 排错
+## 10. fallback 文件名与迁移
+
+默认只认 `AGENTS.override.md` 与 `AGENTS.md`。想让它顺手读别的文件（比如团队只有一份 `TEAM.md`），在配置文件里显式点名：
+
+```json
+{ "project_doc_fallback_filenames": ["TEAM.md", "CONTRIBUTING.md"] }
+```
+
+每层先按老规矩选主名，两枚主名都没命中（不在/读错/空）才按名单顺序取第一份非空文件，命中记 `fallback_used` 诊断。名单元素必须是纯文件名，不得与主名撞车。默认空 = 不启用——多读规则文件必须用户显式点名。
+
+仓库里若有 `AGENT.md`（少个 S）、`CLAUDE.md`、`GEMINI.md`，`/instructions` 与 `/doctor instructions` 会给一条 `migration_hint`，只提示、不自动读——默认把四五套规则全拼进提示词只会平白制造冲突。要迁移，把规矩并进 `AGENTS.md`。
+
+## 11. 排错
 
 **子目录指令没生效**
 
-先看当前工作目录。程序只从项目根走到 cwd，不会扫描 cwd 下面尚未进入的目录。
+先跑 `/instructions path <文件>` 看目标链。写前闸按目标文件解析，嵌套 `AGENTS.md` 会自动进链；若链上没有，检查文件名与所在层级。
 
 **同层 `AGENTS.md` 没读**
 
-看看同层是否有非空 `AGENTS.override.md`。有它便只取 override。
+看看同层是否有非空 `AGENTS.override.md`。有它便只取 override。`shadowed_same_directory` 诊断会说清。
 
 **`/init` 没覆盖旧文件**
 
@@ -176,7 +225,7 @@ repo/src/parser/AGENTS.md
 
 **近处规矩不见了**
 
-多半撞上 32 KiB。删短根目录长文，把背景移到 `docs/`。
+多半撞上 32 KiB。`/instructions` 会标"截断"并列出没装下的文档；写前闸遇超预算链会拒写并说明每份多大。删短根目录长文，把背景移到 `docs/`。
 
 **找错项目根**
 

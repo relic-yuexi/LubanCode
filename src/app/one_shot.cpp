@@ -178,11 +178,18 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     const auto home_lubancode = lubancode::config::HomeLubancodeDir();
     const std::string prompts_dir =
         home_lubancode.has_value() ? (*home_lubancode + "/prompts") : std::string();
-    const std::string project_instructions =
-        lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
-    // 作用域单 P0:单发与交互同一套闸——Resolver 一只、主 Agent 自持一份
-    // 已见指纹账;root->cwd 基线预登记(逐字节对上才算,见 MarkBaselineSeen)。
-    const auto instruction_resolver = std::make_shared<const lubancode::config::ProjectInstructionResolver>();
+    // 作用域单 P1:单发与交互同一套闸与口径——Resolver 按会话口径装配
+    //(全局层/fallback 名单),root->cwd 基线与逐 source 账一并出。
+    const auto instruction_resolver =
+        std::make_shared<const lubancode::config::ProjectInstructionResolver>(
+            lubancode::config::SessionResolverOptions(config.project_doc_fallback_filenames));
+    const lubancode::config::InstructionChain instruction_baseline =
+        instruction_resolver->ResolveForPath(std::filesystem::current_path());
+    const std::string project_instructions = instruction_baseline.content;
+    std::vector<std::string> project_instruction_sources;
+    for (const std::filesystem::path& source : instruction_baseline.sources) {
+        project_instruction_sources.push_back(lubancode::tools::PathToUtf8(source));
+    }
     const auto instruction_scope_state = std::make_shared<lubancode::tools::InstructionScopeState>();
     lubancode::tools::MarkBaselineSeen(*instruction_resolver, *instruction_scope_state,
                                        std::filesystem::current_path(), project_instructions);
@@ -269,6 +276,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     prompt_options.persona = persona;
     prompt_options.skills_segment = skills_segment;
     prompt_options.project_instructions = project_instructions;
+    prompt_options.project_instruction_sources = project_instruction_sources;
     prompt_options.mcp = !config.mcp_servers.empty();
     prompt_options.web = config.search.Configured();
     prompt_options.lsp = !config.lsp_servers.empty();

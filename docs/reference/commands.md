@@ -92,7 +92,7 @@ lubancode delete <id|标题> [--force]
 
 "不填"是正式状态：请求里没有这个字段，文案写"未发送参数"，不偷偷映射成任何默认档。provider 可在配置里声明 `supported_think_levels`（档位数组）、`think_param`（请求参数名，默认 `reasoning_effort`）、`think_passthrough`（是否原样透传）。
 
-### `/doctor [effort|cache]`
+### `/doctor [effort|cache|instructions|agents|shell]`
 
 本地兼容端诊断（vLLM/Qwen 一类自建端）。裸敲看概要，不发请求。
 
@@ -110,6 +110,9 @@ lubancode delete <id|标题> [--force]
 /doctor cache usage            stream_usage 能力探针:发一只带
                                 stream_options.include_usage 的极小请求,结论
                                 写回 provider 配置。
+/doctor instructions           AGENTS.md cwd 基线全账:逐 source 一行 + 字节帽
+                                计费口径 + fallback 名单 + 缓存口径 + 分型诊断
+                                (不发请求、不泄正文)。
 ```
 
 诊断只对本地兼容端动手：`probe`/`usage` 两个动作挡在"base_url 是本机地址，或 metrics_url 已明配"这道闸后面，公网 provider 不发。密钥与正文不进报告——只摆参数名、档位值、token 数与错误摘要。
@@ -131,6 +134,16 @@ usage 账分四态：`not_reported`（服务端没回 usage）/ `disabled`（met
 ### `/init`
 
 在 Git 根生成 `AGENTS.md`；非 Git 目录写在 cwd。已有 `AGENTS.md` 或 `AGENTS.override.md` 时不覆盖，只重载。详见[项目指令](../features/project-instructions/README.md)。
+
+### `/instructions`
+
+```text
+/instructions
+/instructions path <路径>
+/instructions reload
+```
+
+AGENTS.md 指令链的逐 source 账：项目根、目标、上限、每份文档一行（路径、`AGENTS`/`OVERRIDE`/`FALLBACK`/`GLOBAL` 类型、字节数、摘要前 8 位、离目标最近标注）、合计、指纹与装载状态。`path` 看任意目标链（嵌套 `AGENTS.md` 从仓库根也能查）；`reload` 重载后亮新基线。诊断按 code 分型（空文件/遮蔽/读错/坏 UTF-8/越界 symlink/超预算/fallback/迁移提示），输出不泄正文。诊断全账与计费口径另见 `/doctor instructions`。
 
 ### `/worktree`
 

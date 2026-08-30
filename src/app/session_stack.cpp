@@ -95,6 +95,15 @@ std::shared_ptr<const lubancode::package::PackageSnapshot> BuildStartupPackageSn
 
 // baseline 指令串(作用域单 P0):Resolver 的链投影。与旧
 // LoadProjectInstructions 同一只手出账,格式逐字节一致。
+// P1-2:链上每份文档的路径一并带出(UTF-8),喂 PromptSourceLedger。
+static std::vector<std::string> BuildBaselineSources(const lubancode::config::ProjectInstructionResolver& resolver,
+                                                     const std::filesystem::path& cwd) {
+    std::vector<std::string> sources;
+    for (const std::filesystem::path& source : resolver.ResolveForPath(cwd).sources) {
+        sources.push_back(lubancode::tools::PathToUtf8(source));
+    }
+    return sources;
+}
 static std::string BuildBaselineInstructions(const lubancode::config::ProjectInstructionResolver& resolver,
                                              const std::filesystem::path& cwd) {
     return resolver.ResolveForPath(cwd).content;
@@ -239,12 +248,19 @@ SessionStack::SessionStack(const InteractiveSessionOptions& options)
       home_lubancode(lubancode::config::HomeLubancodeDir()),
       prompts_dir(home_lubancode.has_value() ? (*home_lubancode + "/prompts") : std::string()),
       project_memory(BuildProjectMemory(config_result.config, home_lubancode, options.executable)),
-      instruction_resolver(std::make_shared<const lubancode::config::ProjectInstructionResolver>()),
+      // 作用域单 P1/P2:Resolver 按会话口径装配——全局层(~/.lubancode/
+      // AGENTS.md,存在才生效)与 fallback 名单(project_doc_fallback_
+      // filenames,显式配置才生效)。默认构造不带这两样,行为与从前一致。
+      instruction_resolver(std::make_shared<const lubancode::config::ProjectInstructionResolver>(
+          lubancode::config::SessionResolverOptions(
+              config_result.config.project_doc_fallback_filenames))),
       instruction_scope_state(std::make_shared<lubancode::tools::InstructionScopeState>()),
       // 作用域单 P0:baseline 字符串改由共用的 Resolver 出账(同一只手,
       // 零退化——格式与旧 LoadProjectInstructions 逐字节一致,单测钉死)。
       project_instructions(BuildBaselineInstructions(*instruction_resolver,
                                                      std::filesystem::current_path())),
+      project_instruction_sources(BuildBaselineSources(*instruction_resolver,
+                                                       std::filesystem::current_path())),
       global_skills_root(home_lubancode.has_value()
                              ? lubancode::tools::Utf8ToPath(*home_lubancode) / "skills"
                              : std::filesystem::path()),

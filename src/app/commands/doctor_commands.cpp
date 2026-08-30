@@ -955,6 +955,52 @@ void PrintAgentsMatrix(const DoctorContext& context) {
     TermOut().flush();
 }
 
+// /doctor instructions(AGENTS.md 作用域单 P1-1):cwd 基线的完整诊断——
+// 逐 source 账 + 分型诊断 + 字节帽的真实计费口径。Resolver 用会话那只
+// (与写前闸同一份账);没接(单测/旧装配)按 SessionResolverOptions
+// 现起一只,fallback 名单从当前配置来。
+void PrintInstructionsDoctor(const DoctorContext& context) {
+    std::unique_ptr<const lubancode::config::ProjectInstructionResolver> local_resolver;
+    const lubancode::config::ProjectInstructionResolver* resolver = context.instruction_resolver;
+    if (resolver == nullptr) {
+        local_resolver = std::make_unique<const lubancode::config::ProjectInstructionResolver>(
+            lubancode::config::SessionResolverOptions(context.config.project_doc_fallback_filenames));
+        resolver = local_resolver.get();
+    }
+    const lubancode::config::InstructionChain chain =
+        resolver->ResolveForPath(std::filesystem::current_path());
+
+    TermOut() << context.theme.stats
+              << "AGENTS.md 项目指令诊断(cwd 基线;/instructions path <路径> 看目标链)"
+              << context.theme.reset << "\n";
+    for (const std::string& line :
+         lubancode::config::FormatInstructionChainLines(chain, resolver->max_bytes())) {
+        TermOut() << line << "\n";
+    }
+    TermOut() << lubancode::config::InstructionBudgetAccountingNote(resolver->max_bytes()) << "\n";
+    if (!context.config.project_doc_fallback_filenames.empty()) {
+        std::string names;
+        for (const std::string& name : context.config.project_doc_fallback_filenames) {
+            names += (names.empty() ? "" : ", ") + name;
+        }
+        TermOut() << "fallback 名单(显式配置): " << names << "\n";
+    } else {
+        TermOut() << "fallback 名单: 未配置(只认 AGENTS.override.md / AGENTS.md)\n";
+    }
+    TermOut() << "缓存: 文档正文按 path + size + mtime 快筛,内容摘要落锤;"
+                 "AGENTS.md 被外部编辑后,下一次解析(含写前闸)即重读,无需重启\n";
+    const std::vector<std::string> diagnostics = lubancode::config::FormatInstructionDiagnosticLines(chain);
+    if (diagnostics.empty()) {
+        TermOut() << "诊断: 无\n";
+    } else {
+        TermOut() << "诊断:\n";
+        for (const std::string& line : diagnostics) {
+            TermOut() << line << "\n";
+        }
+    }
+    TermOut().flush();
+}
+
 }  // namespace
 
 void HandleDoctorCommand(const std::string& args, const DoctorContext& context) {
@@ -1014,6 +1060,10 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
         PrintAgentsMatrix(context);
         return;
     }
+    if (subcommand == "instructions") {
+        PrintInstructionsDoctor(context);
+        return;
+    }
     if (subcommand == "shell") {
         // 进程生命线单 P2:shell 方言、版本、profile、TTY 语义明牌。
         // 这些是产品边界,不是 bug——用户拿交互终端(Bash/Zsh/Fish、pwsh)
@@ -1062,7 +1112,8 @@ CommandFlow HandleSlashDoctor(SlashDispatchContext& ctx, const lubancode::cli::P
                                                  ctx.registry,
                                                  ctx.sub_registry,
                                                  ctx.tool_runtime != nullptr ? ctx.tool_runtime->explore_registry()
-                                                                             : nullptr};
+                                                                             : nullptr,
+                                                 ctx.instruction_resolver};
     HandleDoctorCommand(parsed.args, doctor_context);
     ctx.real_backend->Rebuild(*ctx.config);
     return CommandFlow::Continue;

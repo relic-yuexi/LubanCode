@@ -365,3 +365,50 @@ TEST_CASE("项目 AGENTS 指令作为独立段注入") {
     CHECK(prompt.find(options.project_instructions) > prompt.find("# 运行环境"));
     CHECK(prompt.find(options.project_instructions) < prompt.find("# 文件读写"));
 }
+
+// P1-2 逐 source 账:来源清单非空时,账本每份文档一行(哪层哪个文件);
+// 没递清单(旧装配/单测)照旧一条总项——零退化。
+TEST_CASE("项目指令逐 source 记账:清单非空每份一行,空则照旧一条") {
+    PromptOptions options = BaseOptions();
+    options.project_instructions = "# Project Instructions\n\n- run the focused tests";
+
+    // 旧口径:只递拼接串,账本压成一条总项,file 为空。
+    {
+        PromptSourceLedger ledger;
+        AssembleSystemPrompt(options, &ledger);
+        std::size_t count = 0;
+        for (const PromptSourceLedgerEntry& entry : ledger.entries) {
+            if (entry.origin == PromptModuleOrigin::ProjectInstructions) {
+                ++count;
+                CHECK(entry.file.empty());
+            }
+        }
+        CHECK(count == 1);
+    }
+
+    // 新口径:链上两份文档,账本两行,各自带文件来源,FormatLine 亮出来。
+    {
+        options.project_instruction_sources = {"D:/repo/AGENTS.md", "D:/repo/src/AGENTS.md"};
+        PromptSourceLedger ledger;
+        AssembleSystemPrompt(options, &ledger);
+        std::size_t count = 0;
+        std::size_t with_file = 0;
+        bool saw_root_line = false;
+        for (const PromptSourceLedgerEntry& entry : ledger.entries) {
+            if (entry.origin != PromptModuleOrigin::ProjectInstructions) {
+                continue;
+            }
+            ++count;
+            if (!entry.file.empty()) {
+                ++with_file;
+            }
+            if (entry.file == "D:/repo/AGENTS.md") {
+                CHECK(Contains(entry.FormatLine(), "D:/repo/AGENTS.md"));
+                saw_root_line = true;
+            }
+        }
+        CHECK(count == 2);
+        CHECK(with_file == 2);
+        CHECK(saw_root_line);
+    }
+}

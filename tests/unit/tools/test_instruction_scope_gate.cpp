@@ -305,3 +305,84 @@ TEST_CASE("injection fits nearest documents first under budget") {
     CHECK(Contains(injection, "AGENTS.md"));
     CHECK(Contains(injection, "未完整装入"));
 }
+
+// ---------------------------------------------------------------------------
+// P1-4 fail closed:active write chain 按整份文档计,预算内装不下 → 拒收
+// 明说(不注入半截、不登记指纹、重试不放行),零副作用照旧。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("gate fails closed when the active write chain exceeds the budget") {
+    TempProject project;
+    project.Write("AGENTS.md", std::string(5000, 'r'));
+    project.Write("src/AGENTS.md", "src rule");
+
+    const ProjectInstructionResolver resolver(1024);  // 小帽:整链装不下
+    InstructionScopeState state;
+    ScopedInstructionGate gate(resolver, state);
+    const std::string target = project.Utf8("src/a.cpp");
+
+    const auto denial = gate.CheckTargets({target});
+    REQUIRE(denial.has_value());
+    CHECK(denial->over_budget);
+    CHECK(Contains(denial->message, "instructions_over_budget"));
+    CHECK(Contains(denial->message, "重试同一操作不会放行"));
+    // 拆分/调大建议在文案里。
+    CHECK(Contains(denial->message, "拆短"));
+    CHECK(Contains(denial->message, "调大预算"));
+    // fail closed 不发确认权:指纹不登记(模型没见过完整规则)。
+    CHECK(denial->presented_fingerprints.empty());
+    CHECK(!state.Seen(resolver.ResolveForPath(lubancode::tools::Utf8ToPath(target)).fingerprint));
+    // 重试仍拒——与握手的根本区别。零副作用:文件没被建出来。
+    CHECK(gate.CheckTargets({target}).has_value());
+    CHECK(!std::filesystem::exists(project.path / "src/a.cpp"));
+
+    // 同一棵树换只宽帽的 Resolver:恢复握手语义(首拦注入、重试放行)。
+    const ProjectInstructionResolver roomy(64 * 1024);
+    InstructionScopeState fresh_state;
+    ScopedInstructionGate roomy_gate(roomy, fresh_state);
+    const auto handshake = roomy_gate.CheckTargets({target});
+    REQUIRE(handshake.has_value());
+    CHECK_FALSE(handshake->over_budget);
+    CHECK(Contains(handshake->message, "instructions_required"));
+    CHECK(Contains(handshake->message, "src rule"));
+    CHECK_FALSE(roomy_gate.CheckTargets({target}).has_value());
+
+    // ChainInjectionBytes 与注入正文同一把尺:整链字节 ≥ 正文合计。
+    const auto chain = roomy.ResolveForPath(lubancode::tools::Utf8ToPath(target));
+    std::size_t content_total = 0;
+    for (const auto& doc : chain.documents) {
+        content_total += doc.content.size();
+    }
+    CHECK(lubancode::tools::ChainInjectionBytes(chain) >= content_total);
+}
+
+TEST_CASE("run one tool reports over-budget denials with their own stable outcome") {
+    TempProject project;
+    project.Write("AGENTS.md", std::string(5000, 'r'));
+
+    lubancode::tools::ToolRegistry registry;
+    registry.Register(std::make_unique<lubancode::tools::WriteFileTool>());
+
+    const auto resolver = std::make_shared<const ProjectInstructionResolver>(512);
+    const auto state = std::make_shared<InstructionScopeState>();
+    lubancode::agent::TurnWiring wiring;
+    wiring.on_scope_gate = lubancode::tools::BuildScopeGateCallback(resolver, state);
+
+    lubancode::api::ToolUseBlock call;
+    call.id = "budget-1";
+    call.name = "write_file";
+    call.input = nlohmann::json{{"path", project.Utf8("a.cpp")}, {"content", "x"}};
+
+    const auto blocked = lubancode::agent::RunOneTool(registry, call, wiring, nullptr);
+    CHECK(blocked.is_error);
+    CHECK(blocked.outcome == lubancode::agent::ToString(lubancode::agent::ToolOutcome::ScopeGateOverBudget));
+    CHECK(blocked.error_code == lubancode::agent::kErrScopeInstructionsOverBudget);
+    CHECK(Contains(blocked.content, "instructions_over_budget"));
+    CHECK(!std::filesystem::exists(project.path / "a.cpp"));
+
+    // 再试一次:仍是 over_budget(不是握手,重试不放行)。
+    call.id = "budget-2";
+    const auto again = lubancode::agent::RunOneTool(registry, call, wiring, nullptr);
+    CHECK(again.error_code == lubancode::agent::kErrScopeInstructionsOverBudget);
+    CHECK(!std::filesystem::exists(project.path / "a.cpp"));
+}

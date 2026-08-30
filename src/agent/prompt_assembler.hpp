@@ -72,6 +72,10 @@ struct PromptOptions {
     std::string persona;         // 非空 = 法/CLI 人格,整段替换 core 模块
     std::string skills_segment;  // 技能清单段;非空才注 skills 模块 + 清单本身
     std::string project_instructions;  // AGENTS.md 分层内容;非空才注入
+    // AGENTS.md 逐 source 账(P1-2):链上每份文档的 UTF-8 路径。非空时
+    // PromptSourceLedger 不再压成一条总项,而是每份文档一行(哪一层、
+    // 哪个文件一眼可查);空 = 旧装配只递了拼接串,账本照旧一条总项。
+    std::vector<std::string> project_instruction_sources;
     bool mcp = false;            // 配置了 mcpServers
     bool web = false;            // 配置了 search 段(web_search 注册了)
     bool lsp = false;            // 配置了 lsp 段

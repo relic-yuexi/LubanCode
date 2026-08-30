@@ -46,6 +46,7 @@ const std::vector<SlashCommandSpec>& SlashCommandTable() {
         {lubancode::cli::SlashCommand::Config, "config", HandleSlashConfig, false, false},
         {lubancode::cli::SlashCommand::Update, "update", HandleSlashUpdate, false, false},
         {lubancode::cli::SlashCommand::Init, "init", HandleSlashInit, false, false},
+        {lubancode::cli::SlashCommand::Instructions, "instructions", HandleSlashInstructions, false, false},
         {lubancode::cli::SlashCommand::Language, "language", HandleSlashLanguage, false, false},
         {lubancode::cli::SlashCommand::Worktree, "worktree", HandleSlashWorktree, false, false},
         {lubancode::cli::SlashCommand::Clear, "clear", HandleSlashClear, false, false},
@@ -120,7 +121,7 @@ const char* CoarseEffectClass(const std::string& name) {
     static const std::set<std::string> kSessionState = {
         "model",     "provider", "think",  "context", "plan",       "soul",     "prompt",
         "language",  "title",    "keymap", "init",    "worktree",   "config",   "hooks",
-        "compact",   "record",   "memory", "todos"};
+        "compact",   "record",   "memory", "todos",   "instructions"};
     static const std::set<std::string> kExternalWrite = {"skill", "plugin", "package", "send", "peerperm",
                                                          "evolve"};
     static const std::set<std::string> kSpawnRun = {"agent", "workflow", "goal", "loop", "background",
