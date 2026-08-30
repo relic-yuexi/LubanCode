@@ -1,12 +1,15 @@
-// 自进化闭环阶段 2/3/4/5:EvolutionCoordinator——候选状态机的唯一写口。
+// 自进化闭环阶段 2/3/4/5/6:EvolutionCoordinator——候选状态机的唯一写口。
 //
 // 契约铁律(README"候选状态机"):状态只许这一枚改。CLI、TUI、Workflow、
 // Agent 都不得各写一套迁移规矩。本类的职责:
-//   - ProposeFromCluster(阶段 5)/ProposeRecording:一个同 fingerprint 簇
+//   - ProposeFromCluster(阶段 5/6)/ProposeRecording:一个同 fingerprint 簇
 //     -> 候选落盘。簇攒够两把尺的门槛出组合包(Skill+Workflow[+Agent]),
 //     够不着照旧最小 Skill-only 包;组合件落盘后过 AnalyzePackage(引用
 //     闭合、canonical 名、无越界),过不了就地降回 Skill-only,不硬塞
 //     (候选只落 candidate store,不进 PackageCatalog,不进四层扫描目录);
+//     阶段 6 第三档:簇内多场同求一件不存在的工具(§3.5)出 process Plugin
+//     草稿——plugin.json + runner 脚手架 + 依赖清单,权限差异与工具
+//     wire 名全进演化账;草稿零进程零挂载,静态门过不了同样就地降档;
 //   - Reject:任意非终态 -> rejected,approval.json 记 decision(含去重
 //     fingerprint),观察账 MarkRejected(被拒 fingerprint 不再重复进账,
 //     也不可再起草同类);
@@ -57,11 +60,16 @@ public:
         std::filesystem::path candidate_dir;
         std::string skill_rel_path;  // 包内相对路径 skills/<id>/SKILL.md
         // 阶段 5:分档与组合账
-        std::string shape;                        // "combination" / "skill-only"
+        std::string shape;                        // "combination" / "skill-only" / "code-draft"
         std::vector<std::string> component_paths;  // 全部组件(包内相对路径,含 skill)
         int cluster_size = 1;                      // 参与起草的场数
         bool agent_drafted = false;                // 组合包是否带 Agent(尺二)
         std::string downgrade_note;                // 组合降档 Skill-only 的诊断(空=没降)
+        // 阶段 6:代码档草稿账(草稿落候选区,零进程零挂载,不自动启用)
+        bool code_draft = false;                   // 是否带 process Plugin 草稿
+        std::string wanted_tool;                   // 各场想用而不可得的工具名
+        std::vector<std::string> permissions_added;  // 权限差异(一条一权,只记名)
+        std::vector<std::string> tools_added;        // 工具 wire 名
     };
 
     // 起草并落候选(阶段 5 入口):收一个同 fingerprint 簇——首元素是点名
@@ -137,10 +145,14 @@ public:
         std::vector<DiffFile> added;
         std::string skill_summary;  // SKILL 正文摘要(节标题 + 要点行)
         // 阶段 5:分档展示
-        std::string shape;                    // "combination" / "skill-only"
+        std::string shape;                    // "combination" / "skill-only" / "code-draft"
         std::string workflow_summary;         // 节点链一行("read_file -> write_file;…")
         std::vector<std::string> workflow_failures;  // 失败路一行一条(工具: 摘要)
         std::string agent_summary;            // Agent 摘要(工具面 + 预装 Skill)
+        // 阶段 6:代码档草稿展示(命令/args/env 名/网络与文件权限差异、
+        // 工具 wire 名、人工审查指路)——diff 页如实亮,approve 仍明拒。
+        std::string plugin_summary;                  // 插件草稿摘要一行
+        std::vector<std::string> permission_lines;   // 权限差异一行一条(含新工具)
     };
 
     // 与父版或空对照(只读)。阶段 2 候选一律无父,即与空对照,全量列新增。
@@ -186,8 +198,8 @@ public:
     };
 
     // 批准:出材料、验门(哈希绑定 + 档位分类 + 评测账在)、迁状态、装 store。
-    // content-only 直接可批;code-bearing(带 Plugin/MCP)首版明拒,指路
-    // Package trust 流程(与信任门单各管各的账)。
+    // content-only 直接可批;code-bearing(带 Plugin/MCP)首版明拒自动晋升,
+    // 指路 Package trust 与人工审查线(阶段 4 语义不动;阶段 6 的草稿同门)。
     std::expected<ApproveResult, std::string> Approve(const std::string& candidate_id);
 
     struct UseResult {

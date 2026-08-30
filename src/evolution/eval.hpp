@@ -118,7 +118,8 @@ struct CheckResult {
 };
 
 struct ScanFinding {
-    std::string kind;  // secret / absolute-path
+    std::string kind;  // secret / absolute-path / malicious-script / dependency-poisoning /
+                       // path-escape / network-overreach(阶段 6 四类见下)
     std::string path;  // 包内相对路径
     int line = 0;      // 1 起;判不出行给 0
     std::string detail;  // 命中的关键词/路径样子;不回显密钥原文
@@ -134,10 +135,13 @@ struct ScanFinding {
 // 计法:components = 包内 skill + workflow + agent 件数;最小可行包 = 1 件
 // (一份 Skill);files 按包内全部文件对"清单 + 一份 SKILL.md"多出的数。
 // 评测账的静态门行带它,批准页照实亮——不是组件越多越容易晋升。
+// 阶段 6 增补(只增不改):shape 另认 "code-draft",plugins/<id>/plugin.json
+// 计一件组件(has_plugin),维护面含 runner 与依赖清单。
 struct ComplexityCost {
-    std::string shape;          // "combination" / "skill-only"
+    std::string shape;          // "combination" / "skill-only" / "code-draft"
     bool has_workflow = false;
     bool has_agent = false;
+    bool has_plugin = false;    // 阶段 6:process Plugin 草稿一件
     int components = 0;         // skills + workflows + agents
     int minimal_components = 1; // 最小可行包:一份 Skill
     int extra_components = 0;   // components - minimal
@@ -208,6 +212,38 @@ std::vector<ScanFinding> ScanTextForSecrets(const std::string& text);
 std::vector<ScanFinding> ScanTextForAbsolutePaths(const std::string& text);
 // 一个文件该不该按文本扫:头 512 字节里有 NUL 视为二进制,跳过。
 bool LooksBinary(const std::string& text);
+
+// ---------------------------------------------------------------------------
+// 阶段 6 四类安全夹具(代码候选的静态门,发现即 error,与密钥/绝对路径
+// 同一道门)。都是"生成草稿可以,带病草稿就地拦下"的保守扫描:
+//   - 恶意脚本:毁盘/远程拉码执行/反弹 shell 一类的形状命中(注释里出现
+//     也拦——草稿里不该有这些字样,人工审查线自会明辨);
+//   - 依赖投毒:依赖清单(requirements*.txt / pyproject.toml / package.json)
+//     里出现非注册表直链(git+/http/ftp/file)与改信任源的 pip 开关;
+//   - 路径逃逸:路径段里的 ..(含 ${plugin_dir}/.. 形态)——草稿不许伸出包根;
+//   - 网络越权:代码用了网络原语而清单未许,或布尔放行(network: true 的
+//     宽授权)。前两类与路径逃逸是纯文本;网络越权要拿清单与代码对账,
+//     走 ScanPackageNetworkOverreach(包级)。
+// 夹具规矩:测试里的"恶意样张"只写无害的形状(注释/死串),绝不放真
+// 密钥、真命令。
+// ---------------------------------------------------------------------------
+std::vector<ScanFinding> ScanTextForMaliciousScript(const std::string& text);
+std::vector<ScanFinding> ScanTextForDependencyPoisoning(const std::string& rel_path,
+                                                        const std::string& text);
+std::vector<ScanFinding> ScanTextForPathEscape(const std::string& text);
+
+// 代码文件里出现的网络原语(python/node/lua/shell 常见的取网姿势)。
+// 纯文本;命中只说明"代码想用网",准不准要拿清单对账。
+std::vector<ScanFinding> ScanCodeForNetworkUse(const std::string& text);
+
+// 一只包的网络权限对账(包级,RunStaticGate 调):读包内全部 plugin.json /
+// mcp.yaml 的网络声明,与包内代码文件的网络原语碰一碰——
+//   代码用网 + 清单未许(或包内没有清单)   -> network-overreach(越权用网);
+//   清单布尔放行(network: true 宽授权)   -> network-overreach(宽授权,
+//     草稿须落精确声明,交人工审查);
+//   代码带明文 http:// 取数               -> network-overreach(明文外联)。
+// 返回的 finding 已带包内相对路径。
+std::vector<ScanFinding> ScanPackageNetworkOverreach(const std::filesystem::path& package_dir);
 
 // ---------------------------------------------------------------------------
 // 一次任务门(replay/holdout)的确定性执行

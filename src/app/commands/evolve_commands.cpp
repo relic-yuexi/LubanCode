@@ -395,12 +395,15 @@ void RunEvolveShowCandidate(SlashDispatchContext& ctx, const std::string& target
     TermOut() << "  目录: " << lubancode::platform::PathToUtf8(found->dir) << "\n";
     TermOut() << "  整包哈希: " << (found->content_hash.empty() ? "(package/ 缺失)" : found->content_hash)
               << "\n";
-    // 形状照盘上现状说(组合/最小),复杂度顺带亮一笔。
+    // 形状照盘上现状说(代码草稿/组合/最小),复杂度顺带亮一笔。
     {
         const lubancode::evolution::ComplexityCost cost =
             lubancode::evolution::ComputeComplexityCost(found->dir / "package");
         if (!cost.shape.empty()) {
-            TermOut() << "  形状: " << (cost.shape == "combination" ? "组合包" : "最小 Skill-only 包")
+            TermOut() << "  形状: "
+                      << (cost.shape == "code-draft"
+                              ? "code-bearing-draft(process Plugin 草稿 + skill)"
+                              : (cost.shape == "combination" ? "组合包" : "最小 Skill-only 包"))
                       << ";复杂度 " << cost.SummaryLine() << "\n";
         }
     }
@@ -448,6 +451,17 @@ void RunEvolveShowCandidate(SlashDispatchContext& ctx, const std::string& target
         }
         TermOut() << "权限差异 " << record.changes.permissions_added.size() << " 条,新工具 "
                   << record.changes.tools_added.size() << " 件\n";
+        // 阶段 6:代码档草稿的权限差异逐条亮(一条一权,env 只记名)。
+        for (std::size_t i = 0; i < record.changes.tools_added.size() && i < 8; ++i) {
+            TermOut() << "    tool " << record.changes.tools_added[i] << "\n";
+        }
+        for (std::size_t i = 0; i < record.changes.permissions_added.size() && i < 8; ++i) {
+            TermOut() << "    perm " << record.changes.permissions_added[i] << "\n";
+        }
+        if (!record.changes.tools_added.empty() || !record.changes.permissions_added.empty()) {
+            TermOut() << "    code-bearing-draft:零进程零挂载,不自动启用;"
+                      << "补实现走 /package trust 人工审查线\n";
+        }
         TermOut() << "  起草于: " << (record.created_at.empty() ? "(未记)" : record.created_at) << "\n";
     }
     if (found->approval.has_value()) {
@@ -596,8 +610,14 @@ void RunEvolvePropose(SlashDispatchContext& ctx, const std::string& target) {
               << result->candidate_version << "]\n";
     TermOut() << "  整包哈希: " << result->content_hash << "\n";
     TermOut() << "  目录: " << lubancode::platform::PathToUtf8(result->candidate_dir) << "\n";
-    // 分档亮形:组合还是最小包,簇多大,组件几件。
-    if (result->shape == "combination") {
+    // 分档亮形:代码草稿、组合还是最小包,簇多大,组件几件。
+    if (result->code_draft) {
+        TermOut() << "  形状: code-bearing-draft(代码档草稿)——process Plugin 草稿 + Skill,"
+                  << "簇内 " << result->cluster_size << " 场任务同求工具 \"" << result->wanted_tool
+                  << "\"(现有工具办不了,录到的是 registry.unknown_tool 失败)\n";
+        TermOut() << "  草稿规矩: 零进程零挂载,不自动启用;runner 是未实现占位,"
+                  << "补实现走人工审查线\n";
+    } else if (result->shape == "combination") {
         TermOut() << "  形状: 组合候选(簇 " << result->cluster_size
                   << " 场同形任务;两把尺过门)——workflow" << (result->agent_drafted ? " + Agent" : "")
                   << " + Skill\n";
@@ -608,7 +628,20 @@ void RunEvolvePropose(SlashDispatchContext& ctx, const std::string& target) {
     for (std::size_t i = 0; i < result->component_paths.size(); ++i) {
         TermOut() << (i > 0 ? ", " : "") << result->component_paths[i];
     }
-    TermOut() << "(content-only,无进程无网络)\n";
+    if (result->code_draft) {
+        TermOut() << "(code-bearing:新工具 " << result->tools_added.size() << " 件,新权限 "
+                  << result->permissions_added.size() << " 条)\n";
+        for (const std::string& tool : result->tools_added) {
+            TermOut() << "    tool " << tool << "\n";
+        }
+        for (const std::string& perm : result->permissions_added) {
+            TermOut() << "    perm " << perm << "\n";
+        }
+        TermOut() << "  档位门: code-bearing 候选不自动晋升——评测可跑(全静态,零进程),"
+                  << "/evolve approve 会明拒并指路 /package trust 人工审查线\n";
+    } else {
+        TermOut() << "(content-only,无进程无网络)\n";
+    }
     if (!result->downgrade_note.empty()) {
         TermOut() << "  降档: " << Ellipsize(result->downgrade_note, 160) << "\n";
     }
@@ -632,8 +665,11 @@ void RunEvolveDiff(SlashDispatchContext& ctx, const std::string& target) {
     }
     TermOut() << "候选 " << result->candidate_id << "(" << result->package_id << ")对照 "
               << result->baseline << ":\n";
-    TermOut() << "  形状: " << (result->shape == "combination" ? "组合包(workflow/agent + skill)"
-                                                              : "最小 Skill-only 包")
+    TermOut() << "  形状: "
+              << (result->shape == "code-draft"
+                      ? "code-bearing-draft(process Plugin 草稿 + skill)"
+                      : (result->shape == "combination" ? "组合包(workflow/agent + skill)"
+                                                        : "最小 Skill-only 包"))
               << "\n";
     TermOut() << "  新增文件(" << result->added.size() << "):\n";
     for (const lubancode::evolution::EvolutionCoordinator::DiffFile& file : result->added) {
@@ -655,9 +691,23 @@ void RunEvolveDiff(SlashDispatchContext& ctx, const std::string& target) {
     if (!result->agent_summary.empty()) {
         TermOut() << "  Agent:\n    " << result->agent_summary << "\n";
     }
+    // ---- 阶段 6:代码档草稿与权限差异,如实亮 ----
+    if (!result->plugin_summary.empty()) {
+        TermOut() << "  Plugin 草稿:\n    " << result->plugin_summary << "\n";
+    }
+    if (!result->permission_lines.empty()) {
+        TermOut() << "  权限差异(批准页须单列):\n";
+        for (const std::string& line : result->permission_lines) {
+            TermOut() << "    " << line << "\n";
+        }
+    }
     if (result->shape == "combination") {
         TermOut() << "  注: 组合件只经静态校验与来源回放夹具;评测执行不起它"
                      "(评测与被测分家)\n";
+    }
+    if (result->shape == "code-draft") {
+        TermOut() << "  注: 草稿零进程零挂载,评测只有静态检查;启用走 /package trust "
+                     "人工审查线,/evolve approve 首版明拒自动晋升\n";
     }
     TermOut().flush();
 }

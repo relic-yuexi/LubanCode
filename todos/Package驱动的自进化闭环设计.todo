@@ -1,6 +1,6 @@
 # Package 驱动的自进化闭环设计
 
-- 状态：阶段 0/1 已落地（0.26.82），阶段 2 已落地（Skill-only 候选起草），阶段 3 已落地（评测与基线），阶段 4 已落地（批准、安装与回滚），阶段 5 已落地（Workflow 与 Agent 组合包），阶段 6 起待实现
+- 状态：阶段 0/1 已落地（0.26.82），阶段 2 已落地（Skill-only 候选起草），阶段 3 已落地（评测与基线），阶段 4 已落地（批准、安装与回滚），阶段 5 已落地（Workflow 与 Agent 组合包），阶段 6 已落地（代码型候选:process Plugin 草稿,零进程零挂载）,阶段 7 起待实现
 - 日期：2026-08-28
 - 前置：`todos/统一Package封装与组件挂载系统设计.todo`
 - 相关：`todos/自定义Agent与PromptProfile设计.todo`、`/record`、项目记忆、Workflow、`/goal`
@@ -503,13 +503,13 @@ Evolution 层可调用原有 parser、validator 与 runtime，不可复制它们
 
 ### 阶段 6：代码型候选
 
-- [ ] 首版只生成 process Plugin/MCP 草稿，不自动启用。
-- [ ] 生成依赖清单、命令、args、env 名、网络与文件权限差异。
-- [ ] 复用 Package trust、沙箱与整包事务。
-- [ ] 加恶意脚本、依赖投毒、路径逃逸、网络越权夹具。
-- [ ] native Plugin 仍停在人工审查线外。
+- [x] 首版只生成 process Plugin/MCP 草稿，不自动启用。（尺三判据:簇内 >=2 场独立任务同求一件工具名,录到的是 registry.unknown_tool 稳定失败且全簇无人成功用过——现有工具压根办不了,§3.5;过门产 plugin.json + runner.py 未实现脚手架 + requirements.txt 零依赖清单,草稿只落候选区,零进程零挂载。MCP 草稿(mcp.yaml + server 脚手架)同一判据同一信任线,首版 drafter 只落 process Plugin 一路,MCP 留待后续。）
+- [x] 生成依赖清单、命令、args、env 名、网络与文件权限差异。（plugin.json 记 command=python、args=${plugin_dir}/runner.py、env 名 EVOLVE_<ID>_DRY_RUN(只记名不记值)、network 恒关;evolution.json 的 changes.permissions_added 一条一权(process:python/env:…/fs_read:workspace——入参带路径键才记)、tools_added 记 wire 名 plugin__<包段>__<工具>;diff/show/propose 回执照实亮。）
+- [x] 复用 Package trust、沙箱与整包事务。（不另立:草稿永不进挂载事务;人工补实现后走 /package trust 与信任门(code_trust != Trusted 连暂存都不进),挂载走既有 Stage/Publish/Rollback 整包事务;/evolve approve 对 code-bearing 首版仍明拒自动晋升(阶段 4 语义不动),指路人工审查线。）
+- [x] 加恶意脚本、依赖投毒、路径逃逸、网络越权夹具。（静态门新增四类扫描,发现即 error:恶意脚本(毁盘/远程拉码喂 shell/动态执行远文/反弹 shell 形状,注释里出现也拦)、依赖投毒(依赖清单里 git+/明文直链/file:/改信任源开关,注释行跳过)、路径逃逸(整段 .. 与 ${plugin_dir}/.. 形态,省略号不冤枉)、网络越权(代码用网清单未许/布尔放行宽授权/精确声明下明文 http 取数,包级清单对代码对账);夹具全用无害的"假装恶意",测试钉四类全拦+干净草稿零发现。）
+- [x] native Plugin 仍停在人工审查线外。（drafter 只写 runtime.kind=process,native-library 一字不生成;manifest parser 本就明拒 native-library;评测计划的 acceptance kind 白名单钉死没有 command——草稿评测全静态零进程,单测双钉。）
 
-验收：用户不批，零进程；包内一件代码组件失败，整包不挂。
+验收：用户不批，零进程；包内一件代码组件失败，整包不挂。（单测 tests/unit/evolution/test_evolution_stage6.cpp:评测账 tool_calls=0、计划无 command 项、候选仓四层扫描扫不到、偷运进正经层未过信任门连暂存都不进;code-failure 夹具复用挂载事务先例——坏一件整包一件不进,ToolRegistry 零残留。）
 
 ### 阶段 7：有限自动建议
 

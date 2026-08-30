@@ -8,8 +8,10 @@ propose/diff/reject），阶段 3 已落（评测与基线：静态门、确定�
 approve/use/promote/rollback、staging 原子落 version store、点名 canary、
 会话钉快照与哈希失效三处对账），阶段 5 已落（组合包：同指纹簇攒够门槛起
 草 Skill+Workflow[+Agent] 组合候选，静态门过不了就地降档 Skill-only，评测
-与被测 workflow 分家，批准页亮复杂度代价）。代码型候选、自动建议未落，
-命令与行为以实现后的程序为准。设计全文见
+与被测 workflow 分家，批准页亮复杂度代价），阶段 6 已落（代码型候选：
+process Plugin 草稿——判据、形状、四类安全夹具、零进程零挂载，见
+"代码候选草稿（阶段 6 落地）"节）。自动建议未落，命令与行为以实现后的
+程序为准。设计全文见
 `todos/Package驱动的自进化闭环设计.todo`；Package 清单与目录契约见
 `todos/统一Package封装与组件挂载系统设计.todo`。
 
@@ -510,7 +512,8 @@ id、候选版本、父版与内容哈希；来源（run/goal/recording/memory/u
 任务样例；新增工具与权限差异（content-only 明写"无"）；安装位置、灰度
 办法（`/evolve use`）与回滚目标。批准只认当前 content hash——文件变过，
 批准与评测一并作废，重做候选。code-bearing 候选（带 Plugin/MCP 或有
-工具/权限差异）首版明拒，指路 Package trust 流程；native/core patch 永不
+工具/权限差异，含阶段 6 起草的插件草稿）`/evolve approve` 明拒自动晋升，
+指路 Package trust（`/package trust`）与人工审查线；native/core patch 永不
 进 `/evolve approve`。
 
 ## 组合包（阶段 5 落地）
@@ -580,3 +583,81 @@ Skill-only（回执明写"最小 Skill-only 包(默认答案)"）。`/evolve dif
 静态门、diff 见 workflow+agent）；单场或组合不稳 → Skill-only；悬空引用
 的组合 → 降档 Skill-only 带诊断；评测计划只带确定性检查器（分家）；
 复杂度栏组合 > 最小档。
+
+## 代码候选草稿（阶段 6 落地）
+
+阶段 5 之前，代码档（Plugin/MCP）在起草器里没有出口：观察簇再怎么指向
+"需要新工具"，闭环也只能出 Skill 包。阶段 6 补上第三档——**观察簇指向
+新执行能力时，起草 process Plugin 草稿**。契约从"明拒起草"改为"生成
+草稿、永不启用"：用户拿到可查、可扫、可拒的材料，机器仍一枚进程不起。
+
+**判据（尺三，§3.5）**：现有工具压根办不了。录制账上看得见的信号是
+"模型想用一件不存在的工具"——`tool_result` 带 `registry.unknown_tool`
+失败（agent 循环对未注册工具名的实报）。**两场以上独立任务同求同一件
+工具名、且全簇无人成功用过它**（工具不存在，自然无人成功），才起草；
+单场偶发不算，工具在别场成功过（名字撞上现有工具）不算，无信号更不算。
+尺三过门不叠组合档：插件还没真身，编排等它落地后的下一只候选；此刻
+最小答案是 Skill + 插件草稿。
+
+**草稿形状**（够门槛才出；形状照 `examples/packages/gui-agent/` 的
+process 插件与阶段 0 夹具 `candidate-code-rejected`）：
+
+```text
+package/
+  package.yaml                        最小五字段(id 仍 evolve.<slug>)
+  skills/<slug>/SKILL.md              阶段 2 同款(排错节收录 unknown_tool 失败路)
+  plugins/<kebab-id>/
+    plugin.json                       manifest v1:runtime.kind 只写 process,
+                                      command/args(${plugin_dir}/runner.py)/
+                                      timeout;permissions.network 恒 false,
+                                      env 只记名(EVOLVE_<ID>_DRY_RUN)
+    runner.py                         脚手架:协议铁律同 examples 插件,但
+                                      工具处理全是诚实的"未实现"占位——
+                                      起来了也只能答 draft-not-implemented
+    requirements.txt                  依赖清单(草稿零第三方依赖)
+```
+
+权限差异与工具差异全进 `evolution.json` 的 `changes`：`permissions_added`
+一条一权（`process:python`、`env:<名>` 只记名不记值、入参带路径键才记
+`fs_read:workspace`）；`tools_added` 记 wire 名
+`plugin__<包命名空间>.<插件id>__<工具名>`（超 64 字符帽不硬塞，就地回落
+Skill-only）。`approval.json` 的 `tier` 如实写 `process-plugin-or-mcp`，
+不冒充 content-only。`/evolve propose` 回执明标 `code-bearing-draft` 并
+指路人工审查线；`/evolve diff` 分档亮插件摘要（命令/args/env 名/网络）
+与逐条权限差异；`/evolve show` 照演化账逐条亮。
+
+**铁律（零进程、零挂载）**：
+
+- 草稿只落候选区（`package-candidates/`），四层扫描扫不到，不进
+  PackageCatalog，更不进挂载事务——`MountPackageCode` 压根见不到它。
+- 草稿评测只有静态检查：自动生成的 eval-plan 里 acceptance 的 kind 只有
+  `file_exists`/`json_parses`/`file_contains` 与人工验收，**没有（也不许
+  有）`command` 项**——评测账 `tool_calls` 恒 0。
+- `/evolve approve` 对 code-bearing 候选（含草稿）明拒自动晋升（阶段 4
+  语义不动），指路 `/package trust` 与人工审查线。补实现须人工改草稿，
+  改完过四类夹具扫描，再过 Package trust 与运行沙箱（Stage/Publish/
+  Rollback 整包事务）——一道门都不少。
+- native Plugin 一律不生成：drafter 只写 `runtime.kind=process`，
+  `native-library` 一字不出现（manifest parser 本就明拒 native-library）。
+- MCP 草稿（mcp.yaml + server 脚手架）与 Plugin 同判据同信任线，首版
+  drafter 只落 process Plugin 一路，MCP 留待后续。
+
+**静态门四类安全夹具（发现即 error，与密钥/绝对路径扫描同一道门）**：
+
+| 类 | 拦什么 | 口径 |
+| --- | --- | --- |
+| 恶意脚本 | 毁盘（`rm -rf /`、`del /s /q`、`format c:`）、远程拉码喂 shell（下载器与 `\| sh` 同行）、动态执行远文（`Invoke-Expression`/`iex(`）、反弹 shell（`/dev/tcp/`、`nc -e`） | 形状命中即拦，**注释里出现也拦**——草稿里不该有这些字样，误伤的人工审查线自会放行 |
+| 依赖投毒 | 依赖清单（`requirements*.txt`/`pyproject.toml`/`package.json`/`constraints.txt`）里的非注册表来源：`git+`/`svn+`/`hg+`/`bzr+` 直链、`http://`/`ftp://`/`file:` 直链、`--index-url`/`--extra-index-url`/`--trusted-host` 信任源开关 | 只扫依赖清单文件；注释行（`#` 起头）跳过 |
+| 路径逃逸 | 整段 `..`（前后是 `/` `\` 引号或行首行尾才算，省略号与正文两个点不冤枉）与 `${plugin_dir}/..` 形态 | 草稿的路径一律钉在包根里 |
+| 网络越权 | 代码（.py/.js/.ts/.lua/.sh/.ps1 等）带网络原语而清单未许；清单布尔放行（`network: true` 宽授权）；精确声明之下代码仍取明文 `http://` | 包级对账：plugin.json/mcp.yaml 的网络声明 对 代码文件的网络原语 |
+
+复杂度栏（阶段 5 的扩展字段）对代码档照记：`shape=code-draft`、
+`has_plugin`、组件与文件数照实——草稿也比最小 Skill 包贵，批的是这份
+代价换来的新执行能力（虽然批的 action 在 trust 线，不在 approve）。
+
+验收钉子（单测 `tests/unit/evolution/test_evolution_stage6.cpp`）：尺三
+判据正反面；草稿形状（manifest 过原生 parser、native 零出现、权限差异与
+wire 名入账）；零进程（计划无 command、`tool_calls` 恒 0、候选仓扫描不到、
+偷运进正经层未过信任门连暂存都不进）；四类夹具全拦 + 干净草稿零发现；
+approve 明拒指路 trust；整包事务先例（信任过的包坏一件代码组件，整包
+不挂、ToolRegistry 零残留）。
