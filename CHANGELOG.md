@@ -343,6 +343,12 @@
 - **SecretRef 锁成黑匣。** 零字节壳 + 逻辑 id;`tostring` 只得 `<secret:id>`;索引/拼接/遍历走 Lua 原生报错;metatable 锁死;转 JSON 被拒(handler 想把 ref 回给模型即报错);`auth.secret` 字符串糖与 ref 同折同一条注入链。C 函数整件 try/catch,异常不穿 Lua 边界,炸了折 `network_failed`。
 - 取消贯通:hook 管 Lua VM、transport 回调管阻塞 C 边界,同一枚旗。23 案 159 断言:生命周期六案全落(§13.4 对号),同 state 串行/不同插件并行各有计时证据。FAKE_ 原文只活在宿主侧最终头表。
 
+## [v0.26.124] - 2026-08-30
+
+- **manifest-backed Lua 真挂载了(Lua HTTP 单阶段 4)。** `ManifestLuaRuntime` owner:standalone 扫描与 Package 成品接管同一条路;`/plugin trust` 亮 v2 材料——Lua entry 相对路径、精确网络目的地、Secret 逻辑名与 env 名(只亮名字)、资源帽、完整指纹;权限一改旧信任即失效。
+- **Package 第四类 code 组件进事务**:embedded-lua 与 process 探针同构——顶层零副作用加载、handler 对账、配齐 SecretResolver(数据目录 .env)与受控 transport;同包坏一件,Lua state 随暂存 vector 弃置即 lua_close,整包不挂。inspect/doctor 六行照契约(pure + host-http、逐目的地 DNS 安全检查,不带 Secret 发网)。
+- **零执行铁证**:未信任包里放 `error("TOPLEVEL_SHOULD_NOT_RUN")` 的 chunk——零诊断即零执行。裸 .lua/v1 process/native 三条旧路一字未动。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
