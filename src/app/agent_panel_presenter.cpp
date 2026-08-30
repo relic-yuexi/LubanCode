@@ -253,6 +253,67 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
     lines.push_back(std::string("  [") +
                     tr(snapshot->foreground ? "agent_panel.source_foreground" : "agent_panel.source_background") +
                     "]");
+    // 任务合同(P0-1 面板详情分栏):canonical spec 的 goal/scope/constraints/
+    // acceptance/deliverable 逐栏摆——列表标题不变,详情先摆合同再摆消息账
+    //(单子 §13.2)。长段整体折叠成首行,不挤破窄终端。
+    {
+        const auto section = [&lines, &theme](const char* head, const std::string& body) {
+            if (body.empty()) {
+                return;
+            }
+            std::string flat;
+            for (const char c : body) {
+                flat.push_back(c == '\n' || c == '\r' || c == '\t' ? ' ' : c);
+            }
+            lines.push_back("  " + theme.stats + std::string("[") + head + "] " +
+                            lubancode::cli::TruncateUtf8ToDisplayWidth(flat, 200) + theme.reset);
+        };
+        if (snapshot->spec != nullptr) {
+            const auto& spec = *snapshot->spec;
+            section("目标", spec.goal);
+            if (spec.source_request.has_value()) {
+                section("用户原话", *spec.source_request);
+            }
+            if (!spec.context.empty()) {
+                std::string joined;
+                for (const std::string& item : spec.context) {
+                    joined += (joined.empty() ? "" : " | ") + item;
+                }
+                section("上下文", joined);
+            }
+            if (!spec.scope.empty()) {
+                std::string joined;
+                for (const std::string& item : spec.scope.include_paths) {
+                    joined += joined.empty() ? "+" + item : " +" + item;
+                }
+                for (const std::string& item : spec.scope.exclude_paths) {
+                    joined += joined.empty() ? "-" + item : " -" + item;
+                }
+                section("范围", joined);
+            }
+            if (!spec.constraints.empty()) {
+                std::string joined;
+                for (const std::string& item : spec.constraints) {
+                    joined += (joined.empty() ? "" : " | ") + item;
+                }
+                section("约束", joined);
+            }
+            if (!spec.acceptance.empty()) {
+                std::string joined;
+                for (const std::string& item : spec.acceptance) {
+                    joined += (joined.empty() ? "" : " | ") + item;
+                }
+                section("验收", joined);
+            }
+            section("交付", spec.deliverable);
+        }
+        // 父子身份首屏可见(单子 §13.2):直接父/根/深度一行。
+        if (snapshot->parent_task_id != 0 || snapshot->depth > 1) {
+            lines.push_back("  " + theme.stats + "[lineage] 父任务 #" + std::to_string(snapshot->parent_task_id) +
+                            " · 根 #" + std::to_string(snapshot->root_task_id) + " · 深度 " +
+                            std::to_string(snapshot->depth) + theme.reset);
+        }
+    }
     // 统计与当前状态行(规格"现场三"+活跃度单):与导航坞行同一套口径(共用
     // AgentStateWord + agent_status.summary)——agent 视图像 main 一样有
     // 账可查,不只剩一张 tool-use 流水单。运行中的任务用时现算;首字节耗时

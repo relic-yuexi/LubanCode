@@ -228,6 +228,33 @@ std::unique_ptr<lubancode::tools::ToolRegistry> SessionStack::BuildDetachedRegis
     return std::make_unique<lubancode::tools::ToolRegistry>(BuildBaseToolRegistry(detached_skills, detached_search));
 }
 
+std::function<lubancode::tools::DetachedAgentBackend()> SessionStack::BuildFrozenBackendSpawner() const {
+    // P0-3 冻结快照:闭包拷值,不捕会话活引用。model/think/history/指令/魂
+    // 在"这只父任务派出"当刻定格(单子 §4.3:子环境是父环境的冻结快照,
+    // 后台线程不回头读主会话正在变的活账);config 用会话定格份。
+    const auto config = frozen_backend_config;
+    const std::string provider = active_provider;
+    const std::string model = *current_model;
+    const std::string think = *current_think;
+    const auto history = *current_think_history;
+    const std::string instructions = *current_model_instructions;
+    const std::string soul = *current_soul;
+    return [config, provider, model, think, history, instructions, soul]()
+               -> lubancode::tools::DetachedAgentBackend {
+        lubancode::tools::DetachedAgentBackend out;
+        if (config != nullptr) {
+            out.backend = lubancode::app::BuildBackend(*config);
+        }
+        out.provider = provider;
+        out.request_profile.model = model;
+        out.request_profile.reasoning_effort = think;
+        out.request_profile.reasoning_history = history;
+        out.model_instructions = instructions;
+        out.soul = soul;
+        return out;
+    };
+}
+
 // 构造 = 原控制器初始化列表的装配(成员声明序即装配序)。
 SessionStack::SessionStack(const InteractiveSessionOptions& options)
     : config_result(options.config_result),
@@ -266,7 +293,8 @@ SessionStack::SessionStack(const InteractiveSessionOptions& options)
               ? config_result.project_config_file_path
               : std::nullopt),
       detached_skills(skills),
-      detached_search(config_result.config.search) {}
+      detached_search(config_result.config.search),
+      frozen_backend_config(std::make_shared<const lubancode::config::Config>(config_result.config)) {}
 
 std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions& options) {
     std::unique_ptr<SessionStack> stack = std::make_unique<SessionStack>(options);
@@ -382,6 +410,12 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
         });
         stack->agent_tool()->SetDetachedRegistryFactory([raw = stack.get()]() {
             return raw->BuildDetachedRegistry();
+        });
+        // 嵌套后台孩子的冻结后端工厂源(P0-3):每只后台任务起跑当口取一次,
+        // 之后那棵树的后台孩子都用这份定格材料各造独立 client——后台子代理
+        // 真能再派后台,且不读会话活账。
+        stack->agent_tool()->SetFrozenBackendSpawnerSource([raw = stack.get()]() {
+            return raw->BuildFrozenBackendSpawner();
         });
         // 墙钟兜底(规格三):整轮上限从 subagent.wall_clock_timeout_secs 来
         // (项目级压全局,都没写用公开默认 1800s;0 = 不限)。

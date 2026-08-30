@@ -146,6 +146,15 @@ struct SessionStack {
     // 后台子代理的 detached 装配(每个任务各造一份 client 与基础工具表)。
     lubancode::tools::DetachedAgentBackend BuildDetachedBackend() const;
     std::unique_ptr<lubancode::tools::ToolRegistry> BuildDetachedRegistry() const;
+    // 嵌套后台孩子的冻结后端工厂(P0-3"派出时冻结 execution snapshot"):
+    // 每只后台任务起跑当口调一次,返回的闭包拷值定格当刻的 model/think/
+    // 指令/魂——它造的 client 不跟会话活账走,在跑的任务树中途 /model
+    // 换档不受影响。config 一次定格共享(会话期不重读)。
+    std::function<lubancode::tools::DetachedAgentBackend()> BuildFrozenBackendSpawner() const;
+
+    // BuildFrozenBackendSpawner 用的配置定格份(会话期不变;与
+    // BuildDetachedBackend 的活读各走各的,互不影响)。
+    std::shared_ptr<const lubancode::config::Config> frozen_backend_config;
 
     // 构造 = 原控制器初始化列表的装配(成员声明序即装配序)。
     explicit SessionStack(const InteractiveSessionOptions& options);
