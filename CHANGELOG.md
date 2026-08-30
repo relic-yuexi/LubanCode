@@ -355,6 +355,12 @@
 - **wirings/ 归位纯装配根**:loop 的 PumpDueTick/FinishTick 状态机下沉 `runtime/loop_tick_driver`(打印改产 LoopTickNotice 事件,墙钟可注入);goal 的 ledger sink 搭建抽成 `runtime::goal::MakeSessionLedgerSink`(12 处 TermOut 改 Host.notify);BuildWorkflowExecutors 212 行搬进 `wirings/workflow_wiring`。四只 wiring 对照 record_session_wiring 标尺自查:无终端 IO、无业务分支外溢;boundary gate 新增 grep 门钉死。
 - 顺手修一处旧注释谎言:"失源 task 落 Broken"实为 Cancelled,按实改正并单测钉住。
 
+## [v0.26.126] - 2026-08-30
+
+- **K2.6 可以开跨轮保留了(Kimi 单 P1)。** `ReasoningHistoryMode`(default|all) 进 RequestProfile 与 Request,`/think history default|all` 是唯一入口——不偷塞进 high/max 档。选 all 三联动:`thinking.keep="all"` 与 `thinking.type="enabled"` 同发、回传升 Always;思考关着时明报冲突拒绝,不猜。
+- **三模型各有各的嘴**:K3/K2.7 由服务端固定开启,试图关 history 明说"模型不支持关闭";K2.5 选 all 当场报不支持;会话存 think_history 事件,/resume 与 /model、/provider 切换都按当前模型重校验,不把 K2.6 的 keep 状态硬带给别家。
+- 回环三幕钉死:Turn 1 请求即带 keep、Turn 2 跨轮回传原字节"这轮想的要跨轮保留"、切 K3 后 keep 不出门而 reasoning 照回。金测双钉(chat_request+provider_catalog);`/think` 裸敲新增历史保留与模型能力两行。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
