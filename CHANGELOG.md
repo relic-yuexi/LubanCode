@@ -331,6 +331,12 @@
 - **多路径原子**:多目标写按 chain fingerprint 分组,任一 scope 未确认整笔拦,零副作用。主 Agent、子代理、Workflow agent/tool 节点、one-shot 全接同一只 resolver,各 Agent 自持确认账;基线预登记逐字节全等才认(搬房/手改/超帽都重新握手)。
 - **旧行为零退化**:root→cwd baseline 与 AGENTS.override.md 优先照旧,既有四案原样绿;无 AGENTS.md 项目闸全程直行。集成测试真起 RunOneTool:从仓库根写 src/parser 下文件,首发被拦注入 override 压过 AGENTS,重试落盘;根下文件不受嵌套层影响。
 
+## [v0.26.122] - 2026-08-30
+
+- **受控 HTTP 真水管铺好了(Lua HTTP 单阶段 2)。** 中立传输底座 `src/net/http_transport`:完整 GET/POST、连接超时+硬墙钟、双回调取消、响应字节记账、DNS seam(生产 getaddrinfo,测试注假账)。五道网络边界全落:URL 解析禁 userinfo/fragment、scheme/host/port/method 命中声明、非 IP/localhost、DNS 候选逐枚分类(v4 15 段+v6 9 段,混一枚私网整体否决)、**连接钉已验地址防 rebinding**(cpr SetResolves 够用,不必降裸 curl)。
+- **挖出一枚暗雷**:cpr 的 Session 构造器默认跟重定向(Redirect::follow 缺省 true)——不显式关,3xx 会静默跟还拿真 DNS 解析 Location,正好绕过钉地址。本单显式关死;provider SSE 路同患未迁,记账留后。
+- **四处字节帽在数据入口落锤**:URL/请求头(Secret 注入后)/请求体在 cpr 前拒(拒时 DNS 都不问);响应头/体在回调里达帽即掐流不多攒一块;墙钟分型 timeout。取消五段覆盖,timeout 与 cancelled 不串码。回环假服务全矩阵(§13.3 逐案对号)含私网/metadata/rebinding 夹具全拦。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
