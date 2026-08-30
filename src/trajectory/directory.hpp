@@ -96,6 +96,10 @@ public:
         const std::filesystem::path& workspaces_root, const std::string& workspace_key,
         const SessionManifest& manifest);
 
+    // 认领既有 session 目录(恢复器/管理操作用):只回填两段路径,不建
+    // 目录、不验内容——写入合法性由锁与 Journal 状态机把门。
+    static TrajectoryDirectory OpenExisting(const std::filesystem::path& session_dir);
+
     // ---- scoped JSONL 创建器(§3.10 create-new 占位) ----
     // main.jsonl。
     std::expected<std::filesystem::path, std::string> ReserveMainStream() const;

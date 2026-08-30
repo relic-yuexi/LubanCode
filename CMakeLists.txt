@@ -496,6 +496,11 @@ add_library(lubancode_engine STATIC
   src/trajectory/journal.cpp
   src/trajectory/recorder.cpp
   src/trajectory/directory.cpp
+  # P0-1b:session 独占锁(PID+起始 token 身份核)、SessionManager 与
+  # clear 八步换账、生命周期状态机、workspace lifecycle/tombstone 账、
+  # 启动恢复器(Journal 可证事实为准)。
+  src/trajectory/session_lock.cpp
+  src/trajectory/session_manager.cpp
   # Token 账本与使用洞察单 A0(合同与夹具):accounting 是 usage 投影与
   # 计价的纯领域层;insights 是摘要/finding/报告合同与脱敏。都不 include
   # app/cli,不接真实 runtime(A1 再接线)。

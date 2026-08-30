@@ -110,6 +110,16 @@ public:
         EventScope base_scope, RecorderOptions options = RecorderOptions{},
         const RecorderClock* clock = nullptr);
 
+    // 续账(恢复场景):Append 打开已有 JSONL。先整本验账(hash 链/schema/
+    // canonical),再逐行重放状态机账,才许续写;验不过拒开(recorder.
+    // continue_not_clean)。base scope 从首行 run.started 推(workspace/
+    // session/run/kind 与 actor/origin);空文件或无 run.started 拒
+    // (recorder.continue_no_scope)。已封 session.ended 的账本照常可开,
+    // 只是后续提交一律拒——恢复器据此读终态。
+    static std::expected<TrajectoryRecorder, std::string> Continue(
+        const std::filesystem::path& stream_path, const std::filesystem::path& artifact_root,
+        RecorderOptions options = RecorderOptions{}, const RecorderClock* clock = nullptr);
+
     RecordReceipt Record(RecordRequest request, Durability durability) override;
 
     // ---- 封口便捷口(自动带 §8.3 终态封口四件套) ----
