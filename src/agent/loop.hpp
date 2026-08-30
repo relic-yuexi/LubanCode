@@ -183,6 +183,18 @@ struct TurnWiring {
     // 的 shell 细判、agent 的角色细判都在装配层的这枚回调里做)。
     std::function<std::string(const std::string& tool_name, const nlohmann::json& input)> on_mode_policy;
 
+    // ---- 写前作用域闸(AGENTS.md 作用域单 P0) ------------------------------
+    // 紧跟 ModePolicy 之后、PreToolUse Hook 与用户确认之前调用——比打开
+    // 写句柄、建目录、写临时文件都早(单子 §7.3)。返回空串/nullopt = 放行;
+    // 非空 = 拦截文案(instructions_required):该目标的 instruction chain
+    // 本 Agent 尚未确认,完整规则已拼进文案,随 tool_result 进下一份请求,
+    // 模型读后原样重试即放行——第一次拦住是协议握手,不是错误。终态
+    // ScopeGatePending,不冒充"用户拒绝"也不冒充工具失败。回调内部自持
+    // 确认账(InstructionScopeState),装配层负责"谁在调"就绑谁的账。
+    // 不设 = 没装闸(单测/旧装配),行为与从前一字不差。
+    std::function<std::optional<std::string>(const std::string& tool_name, const nlohmann::json& input)>
+        on_scope_gate;
+
     // ---- 逐枚追踪:消息落盘次序的三个关口(单子"消息落盘次序要改") ------
     // 1. assistant 消息组装完、刚入 history:装配层 append+flush 进 session。
     //    不设 = 老路(整轮收口后 PersistNewMessages),行为不变。

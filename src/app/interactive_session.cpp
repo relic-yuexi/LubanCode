@@ -133,6 +133,7 @@
 #include "config/provider_catalog.hpp"
 #include "config/prompt_files.hpp"
 #include "config/project_instructions.hpp"
+#include "tools/instruction_scope.hpp"  // MarkBaselineSeen/BuildScopeGateCallback(作用域单 P0)
 #include "config/skill_store.hpp"
 #include "lsp/manager.hpp"
 #include "memory/memory_tool.hpp"
@@ -625,6 +626,10 @@ void TerminalSessionController::SyncWorktreeDirectory() {
     project_instructions = lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
     prompt_options.project_instructions = project_instructions;
     main_agent->SetSystemPrompt(lubancode::agent::AssembleSystemPrompt(prompt_options));
+    // 作用域单 P0:搬房后基线换了一截——新 root->cwd 链重新预登记(旧指纹
+    // 是内容寻址,留着无害);Resolver 本身无状态,不必换。
+    lubancode::tools::MarkBaselineSeen(*stack_.instruction_resolver, *stack_.instruction_scope_state,
+                                       std::filesystem::current_path(), project_instructions);
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry().Find("agent"));
         agent_tool != nullptr) {
         agent_tool->SetWorkingDirectory(prompt_options.cwd);
@@ -886,6 +891,11 @@ void TerminalSessionController::RunSessionTurn(const std::string& content, TurnS
         turn.mode_gate = [this](const std::string& tool_name, const nlohmann::json& input) {
             return plan_wiring_.EvaluateGate(tool_name, input);
         };
+        // 写前作用域闸(AGENTS.md 作用域单 P0):主 Agent 的账在会话栈上,
+        // Resolver 三路共用同一只。嵌套 AGENTS.md 首次写入前拦下注入,重试
+        // 放行;root->cwd 基线已预登记,同 scope 不重复拦。
+        turn.scope_gate = lubancode::tools::BuildScopeGateCallback(stack_.instruction_resolver,
+                                                                   stack_.instruction_scope_state);
         turn.approval_observer = [this](bool asked, bool allowed) {
             loop_wiring_.NotePermissionWait(asked, allowed);
         };

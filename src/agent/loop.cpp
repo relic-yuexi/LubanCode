@@ -392,6 +392,27 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         }
     }
 
+    // ---- 写前作用域闸(AGENTS.md 作用域单 P0):ModePolicy 之后、PreToolUse
+    // Hook 与用户确认之前——比打开写句柄、建目录、写临时文件都早(单子
+    // §7.3 的次序硬规)。返回非空 = 拦截文案:该目标的 instruction chain
+    // 本 Agent 尚未确认,规则全文已随文案注入,tool_result 落进 history,
+    // 下一份请求模型读后原样重试即放行。第一次拦住是协议握手,不是错误,
+    // 终态 ScopeGatePending + 稳定码 scope.instructions_required——不冒充
+    // "用户拒绝"、不冒充工具失败。不设回调 = 没装闸(单测/旧装配),行为
+    // 与从前一字不差。
+    if (wiring.on_scope_gate) {
+        const std::optional<std::string> scope_denial = wiring.on_scope_gate(call.name, call.input);
+        if (scope_denial.has_value() && !scope_denial->empty()) {
+            phase(runtime::ToolPhase::Blocked);
+            tools::Tool::Result gated{*scope_denial, true};
+            gated.outcome = ToString(ToolOutcome::ScopeGatePending);
+            gated.error_code = kErrScopeInstructionsRequired;
+            gated.details = nlohmann::json{{"gate", "instructions_required"}};
+            finish(gated, source_kind, source_instance, effect_class);
+            return dispatch_done(call.id, call.name, std::move(gated));
+        }
+    }
+
     // ---- PreToolUse:在 UI 标记"真执行"之前、权限确认之前。deny -> 拦;
     // ask -> 即使确认档放行也要问用户;allow -> 跳过用户确认(deny 规则
     // 与权限策略仍在确认回调里,钩子越不了权);updatedInput 只与 allow

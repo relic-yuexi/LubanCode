@@ -122,6 +122,7 @@
 #include "config/provider_catalog.hpp"
 #include "config/prompt_files.hpp"
 #include "config/project_instructions.hpp"
+#include "tools/instruction_scope.hpp"  // BuildScopeGateCallback/MarkBaselineSeen(作用域单 P0)
 #include "config/skill_store.hpp"
 #include "lsp/manager.hpp"
 #include "memory/memory_tool.hpp"
@@ -245,6 +246,11 @@ lubancode::workflow::ToolExecutor::Options TerminalSessionController::BuildWorkf
     options.callbacks.on_mode_policy = [this](const std::string& tool_name, const nlohmann::json& input) {
         return plan_wiring_.EvaluateGate(tool_name, input);
     };
+    // 写前作用域闸(AGENTS.md 作用域单 P0):workflow 的工具节点由宿主会话
+    // 驱动,确认账挂主 Agent 那份(已见过的 scope 不重复拦);agent 节点
+    // 是独立 Agent,在 AgentExecutor 里自起一份,不走这里。
+    options.callbacks.on_scope_gate = lubancode::tools::BuildScopeGateCallback(stack_.instruction_resolver,
+                                                                               stack_.instruction_scope_state);
     return options;
 }
 
@@ -836,6 +842,10 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     // 不必退出进程；provider/技能触发的保历史重建也顺手吃到新内容。
     project_instructions = lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
     prompt_options.project_instructions = project_instructions;
+    // 作用域单 P0:重建时新基线重新预登记(/init 重载、AGENTS.md 手改后
+    // /clear 都走这里)。
+    lubancode::tools::MarkBaselineSeen(*stack_.instruction_resolver, *stack_.instruction_scope_state,
+                                       std::filesystem::current_path(), project_instructions);
     if (auto* agent_tool = dynamic_cast<lubancode::tools::AgentTool*>(registry().Find("agent"));
         agent_tool != nullptr) {
         agent_tool->SetProjectInstructions(project_instructions);

@@ -234,6 +234,8 @@ tools::Tool::Result PtcTool::execute(const nlohmann::json& input) {
     chain.on_post_tool_use_hook = hooks.on_post_tool_use_hook;
     // Plan 模式:stub 调用走同一 ModePolicy(单子明令,不另开旁路)。
     chain.on_mode_policy = hooks.on_mode_policy;
+    // 写前作用域闸(AGENTS.md 作用域单 P0):同一闸、同一份主 Agent 账。
+    chain.on_scope_gate = hooks.on_scope_gate;
     // 显示出水口(批二余款):stub 调用的起止上宿主事件流(从路标恒真,
     // 画屏侧跳过——终端只画一张外层卡)。
     chain.events = hooks.events;

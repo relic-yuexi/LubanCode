@@ -355,6 +355,8 @@ add_library(lubancode_engine STATIC
   src/tools/command_safety.cpp
   src/tools/schema_check.cpp
   src/tools/isolation.cpp
+  # AGENTS.md 作用域单 P0:写前作用域闸与已见指纹账。
+  src/tools/instruction_scope.cpp
   src/tools/worktree_tool.cpp
   src/tools/write_file.cpp
   src/tools/edit_file.cpp

@@ -663,6 +663,11 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
     // on_mode_policy 挂点。空 gate = 没装 Plan 闸(单测/子代理旧路)。
     wiring.on_mode_policy = mode_gate;
 
+    // 写前作用域闸(AGENTS.md 作用域单 P0):同一挂点族。闭包绑着本
+    // Agent 的 resolver(共享一只)与已见指纹账(自持一份);空 = 没装,
+    // 写工具照旧行为。
+    wiring.on_scope_gate = ctx.scope_gate;
+
     // hooks:dispatcher 为空指针或没有工具事件的定义是常态(没配 hooks 的
     // 用户占多数),这时候干脆不设这些回调——跟"没有 hooks 系统"时行为
     // 完全一样。配了就全走 dispatcher:来源相加、信任审查、并发归并都在
@@ -887,6 +892,8 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
         hooks.on_post_tool_use_hook = wiring.on_post_tool_use_hook;
         // Plan 模式:stub 调用同过 ModePolicy(单子明令)。
         hooks.on_mode_policy = wiring.on_mode_policy;
+        // 写前作用域闸(AGENTS.md 作用域单 P0):stub 调用过主 Agent 的闸。
+        hooks.on_scope_gate = wiring.on_scope_gate;
         // stub 调用上事件流(从路):16 枚同构调用在 sink 账上逐枚有起止;
         // 终端画面照旧只画一张外层卡(规格"不刷满屏"是画面的规矩,不是
         // 账的规矩)。
