@@ -361,6 +361,12 @@
 - **三模型各有各的嘴**:K3/K2.7 由服务端固定开启,试图关 history 明说"模型不支持关闭";K2.5 选 all 当场报不支持;会话存 think_history 事件,/resume 与 /model、/provider 切换都按当前模型重校验,不把 K2.6 的 keep 状态硬带给别家。
 - 回环三幕钉死:Turn 1 请求即带 keep、Turn 2 跨轮回传原字节"这轮想的要跨轮保留"、切 K3 后 keep 不出门而 reasoning 照回。金测双钉(chat_request+provider_catalog);`/think` 裸敲新增历史保留与模型能力两行。
 
+## [v0.26.127] - 2026-08-30
+
+- **AnySearch 参考包来了(Lua HTTP 单阶段 5)。** `examples/packages/anysearch`:manifest v2 + 208 行 anysearch.lua,四件工具(get_sub_domains/search/batch_search/extract)只用 Host API——零 Python、零 Node、零 PowerShell。SKILL 只写策略不带 CLI;网络一条精确账(https://api.anysearch.com:443 GET+POST),Secret optional。
+- **Key 铁律落成代码**:服务端返回 auto_registered 时 Lua 就地摘除整字段,只回"服务端提供新 Key,当前宿主不自动保存"的非敏感提示——值不进模型、不落盘(测试钉死 FAKE 原文与字段名都搜不到)。字段名按真 API 实测校准(设计稿的 tag/params 服务端不收)。
+- **假 server 13 案 196 断言**(FakeDns 注入照阶段 2 先例,manifest 原文不动):匿名无 Authorization、keyed 才有 Bearer;401/429/5xx/坏 JSON/超帽/取消各分型对号;batch 串行且取消后余笔不发。**匿名真网一笔实跑通过**(生产构造路+系统 DNS,status 200);keyed 真测按规矩 opt-in 未烧。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
