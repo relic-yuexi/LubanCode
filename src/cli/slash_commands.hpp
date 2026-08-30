@@ -63,6 +63,7 @@ enum class SlashCommand {
     WorkflowAlias,  // /<workflow-alias> <args>:直呼已装 Workflow(运行时查 catalog)
     Agents,   // /agents:列 Agent Catalog(自定义 Agent 单阶段 1,只读)
     Agent,    // /agent doctor <名字>:单 Agent 静态预检(阶段 1 只读骨架)
+    Instructions,  // /instructions [path <路径>|reload]:AGENTS.md 指令链逐 source 账(作用域单 P1)
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 
@@ -200,6 +201,22 @@ struct ParsedGoalCommand {
 };
 
 ParsedGoalCommand ParseGoalCommand(const std::string& args);
+
+// ---------------------------------------------------------------------------
+// /instructions 的二级参数(AGENTS.md 作用域单 P1-1)。纯解析:拆出动作
+// 与目标路径,不管链怎么解析、reload 怎么接线。裸敲看 cwd 基线;path 带
+// 相对/绝对路径(原样递给 Resolver,归一是它的事);reload 显式重载后
+// 亮新基线。认不得的子词、path 后面没路径,一律 Invalid。
+// ---------------------------------------------------------------------------
+enum class InstructionsCommandAction { Invalid, Baseline, Path, Reload };
+
+struct ParsedInstructionsCommand {
+    InstructionsCommandAction action = InstructionsCommandAction::Invalid;
+    std::string target;   // Path 的目标路径(剥两端空白,保留内部字符)
+    std::string bad_word;  // Invalid 时第一词的原始拼写(容错提示用)
+};
+
+ParsedInstructionsCommand ParseInstructionsCommand(const std::string& args);
 
 // ---------------------------------------------------------------------------
 // /loop 的二级参数(loop 单)。纯解析:拆出动作、interval、prompt 正文,

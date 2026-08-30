@@ -333,6 +333,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       prompts_dir(stack_.prompts_dir),
       project_memory(stack_.project_memory),
       project_instructions(stack_.project_instructions),
+      project_instruction_sources(stack_.project_instruction_sources),
       global_skills_root(stack_.global_skills_root),
       project_skills_root(stack_.project_skills_root),
       real_backend(stack_.real_backend),
@@ -672,6 +673,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     prompt_options.persona = persona;
     prompt_options.skills_segment = skills_segment;
     prompt_options.project_instructions = project_instructions;
+    prompt_options.project_instruction_sources = project_instruction_sources;
     prompt_options.mcp = !config.mcp_servers.empty();
     prompt_options.web = config.search.Configured();
     prompt_options.lsp = !config.lsp_servers.empty();
@@ -901,8 +903,17 @@ TerminalSessionController::~TerminalSessionController() {
 void TerminalSessionController::RebuildLoop(bool preserve_history) {
     // 每次真正重建会话都重读项目指令。用户手改 AGENTS.md 后敲 /clear，
     // 不必退出进程；provider/技能触发的保历史重建也顺手吃到新内容。
-    project_instructions = lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
+    // P1 起走会话那只 Resolver(全局层/fallback 名单与启动同一口径),
+    // 顺手带出逐 source 账;读的是同一只实例,stat 快筛直接吃缓存。
+    const lubancode::config::InstructionChain baseline =
+        stack_.instruction_resolver->ResolveForPath(std::filesystem::current_path());
+    project_instructions = baseline.content;
+    project_instruction_sources.clear();
+    for (const std::filesystem::path& source : baseline.sources) {
+        project_instruction_sources.push_back(lubancode::tools::PathToUtf8(source));
+    }
     prompt_options.project_instructions = project_instructions;
+    prompt_options.project_instruction_sources = project_instruction_sources;
     // 作用域单 P0:重建时新基线重新预登记(/init 重载、AGENTS.md 手改后
     // /clear 都走这里)。
     lubancode::tools::MarkBaselineSeen(*stack_.instruction_resolver, *stack_.instruction_scope_state,
@@ -1194,6 +1205,9 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.reload_packages = [this]() { return ReloadPackages(); };
     ctx.refresh_workflow_completions = [this]() { RefreshWorkflowCompletions(); };
     ctx.refresh_project_instructions = [this]() { RefreshProjectInstructions(); };
+    // AGENTS.md 作用域单 P1-1:/instructions 与 /doctor instructions 用会话
+    // 那只 Resolver(与写前闸、基线预登记同一份账)。
+    ctx.instruction_resolver = stack_.instruction_resolver.get();
     ctx.sync_worktree_directory = [this]() { SyncWorktreeDirectory(); };
     ctx.ensure_memory_tool = [this]() { EnsureMemoryTool(); };
     ctx.ensure_goal_coordinator = [this]() { goal_wiring_.Ensure(config); };

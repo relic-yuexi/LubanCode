@@ -620,3 +620,35 @@ TEST_CASE("ParseSlashCommand: /doctor 与子命令参数") {
     CHECK(cache.command == cli::SlashCommand::Doctor);  // 大小写不敏感
     CHECK(cache.args == "cache probe");
 }
+
+// /instructions(AGENTS.md 作用域单 P1-1):词面认领 + 二级纯解析。
+TEST_CASE("ParseSlashCommand: /instructions 认词,二级解析四路分明") {
+    const auto bare = cli::ParseSlashCommand("/instructions");
+    CHECK(bare.command == cli::SlashCommand::Instructions);
+    CHECK(bare.args.empty());
+
+    const auto with_args = cli::ParseSlashCommand("/INSTRUCTIONS path src/a.cpp");
+    CHECK(with_args.command == cli::SlashCommand::Instructions);  // 大小写不敏感
+    CHECK(with_args.args == "path src/a.cpp");
+
+    using IA = cli::InstructionsCommandAction;
+    CHECK(cli::ParseInstructionsCommand("").action == IA::Baseline);
+    CHECK(cli::ParseInstructionsCommand("   ").action == IA::Baseline);
+    CHECK(cli::ParseInstructionsCommand("reload").action == IA::Reload);
+    CHECK(cli::ParseInstructionsCommand("reload now").action == IA::Invalid);  // reload 不带尾巴
+
+    const auto path = cli::ParseInstructionsCommand("path src/parser/token.cpp");
+    CHECK(path.action == IA::Path);
+    CHECK(path.target == "src/parser/token.cpp");
+    // 路径原样保留(含空格的路径也是一条路径,归一是 Resolver 的事)。
+    CHECK(cli::ParseInstructionsCommand("path  my dir/AGENTS notes.md").target ==
+          "my dir/AGENTS notes.md");
+    // path 后面没路径:Invalid,不当基线猜。
+    const auto no_target = cli::ParseInstructionsCommand("path  ");
+    CHECK(no_target.action == IA::Invalid);
+
+    // 认不得的子词:Invalid,bad_word 记原始拼写。
+    const auto bad = cli::ParseInstructionsCommand("Frobnicate x");
+    CHECK(bad.action == IA::Invalid);
+    CHECK(bad.bad_word == "Frobnicate");
+}

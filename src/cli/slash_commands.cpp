@@ -190,6 +190,10 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         // 自定义 Agent 单阶段 1:/agent 的子命令(doctor/...)在
         // app/commands/agent_commands 拆,这里只认词。
         parsed.command = SlashCommand::Agent;
+    } else if (lower == "/instructions") {
+        // AGENTS.md 作用域单 P1:/instructions 是正门(裸敲/path <路径>/
+        // reload 的二级解析在 ParseInstructionsCommand,这里只认词)。
+        parsed.command = SlashCommand::Instructions;
     } else {
         // 不认得的 / 词:仍是 Unknown(语义不变),但把剥掉 / 的原词记在
         // alias_word 里——会话层对 Unknown 先查 WorkflowCatalog,查着了
@@ -535,10 +539,49 @@ ParsedRecordCommand ParseRecordCommand(const std::string& args) {
     return parsed;  // 认不得的动作,保持 Invalid
 }
 
+ParsedInstructionsCommand ParseInstructionsCommand(const std::string& args) {
+    ParsedInstructionsCommand parsed;
+    const std::string trimmed = Trim(args);
+
+    // 裸敲 /instructions:当前 cwd 的基线链。
+    if (trimmed.empty()) {
+        parsed.action = InstructionsCommandAction::Baseline;
+        return parsed;
+    }
+
+    const std::size_t space = trimmed.find_first_of(" \t");
+    const std::string first = (space == std::string::npos) ? trimmed : trimmed.substr(0, space);
+    const std::string rest = (space == std::string::npos) ? std::string() : Trim(trimmed.substr(space + 1));
+    const std::string lower = ToLower(first);
+    parsed.bad_word = first;
+
+    if (lower == "reload") {
+        // reload 无参;带尾巴按 Invalid(同 /goal status 的取舍)。
+        if (!rest.empty()) {
+            parsed.action = InstructionsCommandAction::Invalid;
+            return parsed;
+        }
+        parsed.action = InstructionsCommandAction::Reload;
+        return parsed;
+    }
+    if (lower == "path") {
+        // 目标路径原样递给 Resolver(相对/绝对、文件/目录都认),这里只
+        // 要求非空。
+        if (rest.empty()) {
+            parsed.action = InstructionsCommandAction::Invalid;
+            return parsed;
+        }
+        parsed.action = InstructionsCommandAction::Path;
+        parsed.target = rest;
+        return parsed;
+    }
+    parsed.action = InstructionsCommandAction::Invalid;
+    return parsed;
+}
+
 ParsedGoalCommand ParseGoalCommand(const std::string& args) {
     ParsedGoalCommand parsed;
     const std::string trimmed = Trim(args);
-
     // 裸敲 /goal:看账,不发模型。
     if (trimmed.empty()) {
         parsed.action = GoalCommandAction::View;
@@ -847,6 +890,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/config", tr("slash.desc.config")},
             {"/update", tr("slash.desc.update")},
             {"/init", tr("slash.desc.init")},
+            {"/instructions", tr("slash.desc.instructions")},
             {"/language", tr("slash.desc.language")},
             {"/image", tr("slash.desc.image")},
             {"/clear", tr("slash.desc.clear")},

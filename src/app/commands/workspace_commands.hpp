@@ -105,6 +105,9 @@ CommandFlow HandleWorktreeCommand(WorkspaceCommandState& state, const std::strin
 // ---------------------------------------------------------------------------
 struct SlashDispatchContext;
 CommandFlow HandleSlashInit(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
+// /instructions(AGENTS.md 作用域单 P1-1):逐 source 亮账(裸敲/path/reload)。
+CommandFlow HandleSlashInstructions(SlashDispatchContext& ctx,
+                                    const lubancode::cli::ParsedSlashCommand& parsed);
 CommandFlow HandleSlashWorktree(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 CommandFlow HandleSlashMcp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);
 CommandFlow HandleSlashLsp(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed);

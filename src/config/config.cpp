@@ -1753,6 +1753,49 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected(result.error());
         config.memory = std::move(memory);
     }
+    // project_doc_fallback_filenames(AGENTS.md 作用域单 P2-2):顶层键,
+    // 字符串数组。校验三条:元素非空、是纯文件名(不带路径分隔)、不得
+    // 与两枚主名撞车(AGENTS.md / AGENTS.override.md 是主名,不是 fallback)。
+    // 违者整份报错——这是显式点名要"多读文件"的口子,名字写歪了必须
+    // 当场说清,不能静默吞掉。
+    if (parsed.contains("project_doc_fallback_filenames")) {
+        const auto& field = parsed["project_doc_fallback_filenames"];
+        if (!field.is_array()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 project_doc_fallback_filenames 必须是字符串数组");
+        }
+        std::vector<std::string> names;
+        for (const auto& entry : field) {
+            if (!entry.is_string()) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 project_doc_fallback_filenames 元素必须是字符串");
+            }
+            std::string name = entry.get<std::string>();
+            if (name.empty()) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 project_doc_fallback_filenames 元素不能是空字符串");
+            }
+            if (name.find('/') != std::string::npos || name.find('\\') != std::string::npos) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 project_doc_fallback_filenames 元素必须是纯文件名(不带路径分隔): " +
+                                       name);
+            }
+            // 主名比对按小写(大小写不敏感的文件系统上 AGENTS.MD 也是主名);
+            // 名单本身保留原始大小写——POSIX 上文件名大小写敏感,改了就对不上。
+            std::string lowered = name;
+            for (char& ch : lowered) {
+                ch = static_cast<char>(::tolower(static_cast<unsigned char>(ch)));
+            }
+            if (lowered == "agents.md" || lowered == "agents.override.md") {
+                return std::unexpected(
+                    "配置文件 " + file_path_for_error +
+                    " 里的 project_doc_fallback_filenames 不能列 AGENTS.md / AGENTS.override.md——它们是主名,"
+                    "每层本来就先读,不进 fallback 名单");
+            }
+            names.push_back(std::move(name));
+        }
+        config.project_doc_fallback_filenames = std::move(names);
+    }
     // 持久目标单:features.goals 布尔(段缺 goals 键按未配处理)。
     if (parsed.contains("features")) {
         const auto& field = parsed["features"];
@@ -2693,6 +2736,17 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         }
         // 全局没开时，项目 enabled=true 不生效；enabled=false 仍如实保持关闭。
         result.sources.memory = Source::ProjectConfigFile;
+    }
+
+    // ---- AGENTS.md 作用域单 P2-2:fallback 文件名表,整段回退(项目级压
+    // 全局,待遇同 hooks/mcpServers——显式点名才生效,没有环境变量与
+    // 内置默认这两级)。没配就是空表,Resolver 不启用 fallback。 ----
+    if (project_file.has_value() && project_file->project_doc_fallback_filenames.has_value()) {
+        result.config.project_doc_fallback_filenames = *project_file->project_doc_fallback_filenames;
+        result.sources.project_doc_fallback_filenames = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->project_doc_fallback_filenames.has_value()) {
+        result.config.project_doc_fallback_filenames = *global_file->project_doc_fallback_filenames;
+        result.sources.project_doc_fallback_filenames = Source::GlobalConfigFile;
     }
 
     // ---- M11(网络超时):connect_timeout_ms / stream_idle_timeout_secs /

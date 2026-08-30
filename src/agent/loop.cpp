@@ -25,6 +25,7 @@
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
 #include "platform/wall_clock.hpp"     // trace 与计划动作须共用一枚墙钟
 #include "runtime/plan_mode.hpp"       // kErrModeDenied:Plan 硬闸的稳定码
+#include "tools/instruction_scope.hpp"  // 闸文案两档前缀:握手/超预算的分账
 #include "tools/schema_check.hpp"      // updatedInput 改写后的 schema 复检
 #include "platform/log_sink.hpp"
 
@@ -390,22 +391,31 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         }
     }
 
-    // ---- 写前作用域闸(AGENTS.md 作用域单 P0):ModePolicy 之后、PreToolUse
-    // Hook 与用户确认之前——比打开写句柄、建目录、写临时文件都早(单子
-    // §7.3 的次序硬规)。返回非空 = 拦截文案:该目标的 instruction chain
-    // 本 Agent 尚未确认,规则全文已随文案注入,tool_result 落进 history,
-    // 下一份请求模型读后原样重试即放行。第一次拦住是协议握手,不是错误,
-    // 终态 ScopeGatePending + 稳定码 scope.instructions_required——不冒充
-    // "用户拒绝"、不冒充工具失败。不设回调 = 没装闸(单测/旧装配),行为
-    // 与从前一字不差。
+    // ---- 写前作用域闸(AGENTS.md 作用域单 P0/P1):ModePolicy 之后、
+    // PreToolUse Hook 与用户确认之前——比打开写句柄、建目录、写临时文件
+    // 都早(单子 §7.3 的次序硬规)。返回非空 = 拦截文案,按前缀分两档:
+    //   握手([instructions_required]):该目标的 instruction chain 本 Agent
+    //     尚未确认,规则全文已随文案注入,tool_result 落进 history,下一份
+    //     请求模型读后原样重试即放行。第一次拦住是协议握手,不是错误,
+    //     终态 ScopeGatePending + 稳定码 scope.instructions_required——
+    //     不冒充"用户拒绝"、不冒充工具失败。
+    //   fail closed([instructions_over_budget],P1):链整份装不进预算,
+    //     拒收明说——终态 ScopeGateOverBudget + scope.instructions_over_
+    //     budget,重试不放行,须拆规则或调大预算。
+    // 不设回调 = 没装闸(单测/旧装配),行为与从前一字不差。
     if (wiring.on_scope_gate) {
         const std::optional<std::string> scope_denial = wiring.on_scope_gate(call.name, call.input);
         if (scope_denial.has_value() && !scope_denial->empty()) {
             phase(runtime::ToolPhase::Blocked);
             tools::Tool::Result gated{*scope_denial, true};
-            gated.outcome = ToString(ToolOutcome::ScopeGatePending);
-            gated.error_code = kErrScopeInstructionsRequired;
-            gated.details = nlohmann::json{{"gate", "instructions_required"}};
+            const bool over_budget =
+                scope_denial->rfind(tools::kScopeGateOverBudgetPrefix, 0) == 0;
+            gated.outcome = ToString(over_budget ? ToolOutcome::ScopeGateOverBudget
+                                                 : ToolOutcome::ScopeGatePending);
+            gated.error_code =
+                over_budget ? kErrScopeInstructionsOverBudget : kErrScopeInstructionsRequired;
+            gated.details = nlohmann::json{
+                {"gate", over_budget ? "instructions_over_budget" : "instructions_required"}};
             finish(gated, source_kind, source_instance, effect_class);
             return dispatch_done(call.id, call.name, std::move(gated));
         }

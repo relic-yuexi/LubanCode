@@ -3656,3 +3656,85 @@ TEST_CASE("goals 配置:段类型不对报错") {
     const auto bad4 = config::ParseFileConfigJson(R"({"goals":{"max_iterations":-1}})", "t.json");
     CHECK_FALSE(bad4.has_value());
 }
+
+// ---------------------------------------------------------------------------
+// project_doc_fallback_filenames(AGENTS.md 作用域单 P2-2):指令文档的
+// fallback 文件名表。校验三条(非空/纯文件名/不与主名撞车),合并整段
+// 回退(项目级压全局),没配 = 空表不启用。
+// ---------------------------------------------------------------------------
+TEST_CASE("ParseFileConfigJson: project_doc_fallback_filenames 正常解析") {
+    const auto ok = config::ParseFileConfigJson(
+        R"({"project_doc_fallback_filenames": ["TEAM.md", "CONTRIBUTING.md"]})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->project_doc_fallback_filenames.has_value());
+    REQUIRE(ok->project_doc_fallback_filenames->size() == 2);
+    CHECK((*ok->project_doc_fallback_filenames)[0] == "TEAM.md");
+    CHECK((*ok->project_doc_fallback_filenames)[1] == "CONTRIBUTING.md");
+
+    // 空数组 = 显式清空(合法:全局配了名单,项目级想关掉)。
+    const auto empty = config::ParseFileConfigJson(R"({"project_doc_fallback_filenames": []})", "x.json");
+    REQUIRE(empty.has_value());
+    REQUIRE(empty->project_doc_fallback_filenames.has_value());
+    CHECK(empty->project_doc_fallback_filenames->empty());
+}
+
+TEST_CASE("ParseFileConfigJson: project_doc_fallback_filenames 坏值整份报错") {
+    // 非数组。
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"project_doc_fallback_filenames": "TEAM.md"})", "x.json")
+                    .has_value());
+    // 元素不是字符串。
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"project_doc_fallback_filenames": [3]})", "x.json")
+                    .has_value());
+    // 空串。
+    CHECK_FALSE(
+        config::ParseFileConfigJson(R"({"project_doc_fallback_filenames": [""]})", "x.json").has_value());
+    // 带路径分隔:必须是纯文件名。
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"project_doc_fallback_filenames": ["docs/x.md"]})",
+                                            "x.json")
+                    .has_value());
+    // 主名不进名单(大小写不敏感)。
+    CHECK_FALSE(
+        config::ParseFileConfigJson(R"({"project_doc_fallback_filenames": ["AGENTS.md"]})", "x.json")
+            .has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(
+                    R"({"project_doc_fallback_filenames": ["agents.override.md"]})", "x.json")
+                    .has_value());
+}
+
+TEST_CASE("MergeConfig: project_doc_fallback_filenames 项目级压全局,没配为空") {
+    const auto with_names = config::ParseFileConfigJson(
+        R"({"project_doc_fallback_filenames": ["TEAM.md"]})", "p.json");
+    REQUIRE(with_names.has_value());
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), std::optional(*with_names),
+                                            std::nullopt, EmptyGenericEnv());
+    REQUIRE(merged.has_value());
+    REQUIRE(merged->config.project_doc_fallback_filenames.size() == 1);
+    CHECK(merged->config.project_doc_fallback_filenames[0] == "TEAM.md");
+    CHECK(merged->sources.project_doc_fallback_filenames == config::Source::ProjectConfigFile);
+
+    // 全局配、项目没配:吃全局。
+    config::FileConfig global;
+    global.project_doc_fallback_filenames = std::vector<std::string>{"GLOBAL.md"};
+    const auto from_global =
+        config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global, EmptyGenericEnv());
+    REQUIRE(from_global.has_value());
+    REQUIRE(from_global->config.project_doc_fallback_filenames.size() == 1);
+    CHECK(from_global->config.project_doc_fallback_filenames[0] == "GLOBAL.md");
+    CHECK(from_global->sources.project_doc_fallback_filenames == config::Source::GlobalConfigFile);
+
+    // 项目级显式空数组压过全局名单。
+    const auto project_clear =
+        config::ParseFileConfigJson(R"({"project_doc_fallback_filenames": []})", "p.json");
+    REQUIRE(project_clear.has_value());
+    const auto cleared = config::MergeConfig(EmptyLubancodeEnv(), std::optional(*project_clear),
+                                             global, EmptyGenericEnv());
+    REQUIRE(cleared.has_value());
+    CHECK(cleared->config.project_doc_fallback_filenames.empty());
+
+    // 两级都没配:空表(默认不启用)。
+    const auto none =
+        config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt, EmptyGenericEnv());
+    REQUIRE(none.has_value());
+    CHECK(none->config.project_doc_fallback_filenames.empty());
+    CHECK(none->sources.project_doc_fallback_filenames == config::Source::Default);
+}

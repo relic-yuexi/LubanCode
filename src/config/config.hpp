@@ -698,6 +698,13 @@ struct Config {
     // 段，跟 hooks/mcpServers/lsp 的既有合并法一致。
     std::vector<ProviderConfig> providers;
     MemoryConfig memory;
+    // project_doc_fallback_filenames(AGENTS.md 作用域单 P2-2):指令文档的
+    // fallback 文件名表。每层目录先按老规矩选 AGENTS.override.md /
+    // AGENTS.md;两枚主名都没命中(不在/读错/空)才按这张表顺序取第一份
+    // 非空文件,命中记 fallback_used 诊断。默认空 = 不启用,行为与从前
+    // 一字不差——多读别家规则文件须用户显式点名,不默认开。只从配置文
+    // 件来(项目级压全局),没有环境变量与内置默认这两级。
+    std::vector<std::string> project_doc_fallback_filenames;
 };
 
 // 每个字段最终来自哪一级,跟 Config 里的字段一一对应。
@@ -736,6 +743,7 @@ struct ConfigSources {
     Source ptc = Source::Default;           // PTC 段:配置文件或默认
     Source goals = Source::Default;         // goals 段/features.goals:配置文件或默认
     Source memory = Source::Default;
+    Source project_doc_fallback_filenames = Source::Default;  // AGENTS.md 作用域单 P2-2
 };
 
 // settings.local.json(项目级本地权限)的 SettingsLocal 与读写函数住在
@@ -858,6 +866,9 @@ struct FileConfig {
     std::optional<bool> features_trajectory;
     std::optional<GoalsFileConfig> goals;
     std::optional<MemoryFileConfig> memory;
+    // project_doc_fallback_filenames(AGENTS.md 作用域单 P2-2):顶层键,
+    // 字符串数组。整段回退(项目级压全局),空数组/没写 = 不启用。
+    std::optional<std::vector<std::string>> project_doc_fallback_filenames;
     std::string source_path;
     // 这份 FileConfig 是不是从"旧位置迁移到新位置"这个动作里读出来的;
     // 有值就是要打印给用户看的那一行通知(LoadFileConfig 填,LoadFromEnv

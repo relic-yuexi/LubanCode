@@ -42,6 +42,7 @@
 #include "runtime/worktree.hpp"
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
+#include "config/project_instructions.hpp"  // ProjectInstructionResolver:/instructions 与 /doctor instructions 共用
 #include "config/settings_local.hpp"
 #include "lsp/manager.hpp"
 #include "memory/project_memory.hpp"  // ProjectMemory(/memory 的会话件)
@@ -169,6 +170,10 @@ struct SlashDispatchContext {
     std::string* last_compact_line = nullptr;  // /context 的最近一次 compact 台账
     lubancode::agent::PromptOptions* prompt_options = nullptr;
     lubancode::memory::ProjectMemory* project_memory = nullptr;  // /memory(可空)
+    // AGENTS.md 作用域单 P1:/instructions 与 /doctor instructions 的解析口。
+    // 与主代理/子代理/Workflow 同一只 Resolver(账口径一致);空 = 调用方
+    // 没接(旧装配/单测),命令面自己按 SessionResolverOptions 现起一只。
+    const lubancode::config::ProjectInstructionResolver* instruction_resolver = nullptr;
 
     // ---- 子系统接线器(peer/录制;会话终章外迁后的窄口) ----
     class PeerSessionWiring* peer_wiring = nullptr;    // /peers /send /peerperm

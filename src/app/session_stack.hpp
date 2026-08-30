@@ -89,6 +89,10 @@ struct SessionStack {
     std::shared_ptr<const lubancode::config::ProjectInstructionResolver> instruction_resolver;
     std::shared_ptr<lubancode::tools::InstructionScopeState> instruction_scope_state;
     std::string project_instructions;  // /init、AGENTS.md 改动后可刷新
+    // AGENTS.md 逐 source 账(作用域单 P1-2):baseline 链上每份文档的
+    // UTF-8 路径,与上面那截拼接串同源同刷;喂给 PromptOptions 的
+    // project_instruction_sources,PromptSourceLedger 每份文档记一行。
+    std::vector<std::string> project_instruction_sources;
     const std::filesystem::path global_skills_root;
     const std::filesystem::path project_skills_root;
 

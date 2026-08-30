@@ -200,7 +200,7 @@ git diff --cached | lubancode "替我审一遍这份改动"
 
 进入仓库，敲一声 `/init`。LubanCode 会在 Git 根生成 `AGENTS.md`，填入项目布局、构建测试与改动规矩。已有文件便只读不改。文件写成后，当前会话立刻重载，主代理、子代理一并照办。
 
-启动时，LubanCode 从 Git 根一路走到当前目录。每层先看 `AGENTS.override.md`，再看 `AGENTS.md`；近处内容排在后头，能压过远处。空文件跳过，总量封顶 32 KiB。细则见 [项目指令](docs/features/project-instructions/README.md)。
+启动时，LubanCode 从 Git 根一路走到当前目录。每层先看 `AGENTS.override.md`，再看 `AGENTS.md`；近处内容排在后头，能压过远处。空文件跳过；"分隔 + 来源标题 + 正文"合计封顶 32 KiB（外层约 100 bytes 的固定包装另计）。写文件时按目标文件的祖先链重新解析，嵌套 `AGENTS.md` 自动生效；`/instructions` 逐份亮账。细则见 [项目指令](docs/features/project-instructions/README.md)。
 
 ## 常用命令
 

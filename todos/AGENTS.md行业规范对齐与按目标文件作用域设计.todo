@@ -1,6 +1,6 @@
 # AGENTS.md 行业规范对齐与按目标文件作用域设计
-- 状态：P0 已落地（0.26.121：嵌套作用域按目标文件下钻、写前闸与指纹握手、多路径原子）；P1（诊断命令面、预算 fail-closed、缓存）、P2（跨工具兼容）待实现
-- 日期：2026-08-30
+- 状态：收官。P0 已落地（0.26.121：嵌套作用域按目标文件下钻、写前闸与指纹握手、多路径原子）；P1 七条全落（诊断命令面、逐 source 账、分型诊断、超限 fail closed、stat 快筛缓存、惰性发现、32 KiB 口径修正）；P2 三条全落（全局层实现、fallback 名单配置、迁移提示）
+- 日期：2026-08-30（P0）→ 2026-08-31（P1/P2 收官）
 - 级别：P0（嵌套 `AGENTS.md` 对实际目标文件生效）/ P1（诊断、预算与动态刷新）/ P2（跨工具兼容扩展）
 - 范围：`AGENTS.md` 开放格式、项目根与嵌套作用域、冲突优先级、`AGENTS.override.md`、主代理/子代理/Workflow、文件工具写入门、32 KiB 预算、来源诊断、安全边界与兼容测试
 - 行业依据：
@@ -541,30 +541,30 @@ fingerprint: ...
 
 ### P0：作用域正确
 
-1. 把字符串 loader 升成 `ProjectInstructionResolver`，返回结构化 documents/chain/diagnostics。
-2. 增加 `ResolveForPath(target)`，机械顺序固定为 root -> target parent。
-3. 给 `write_file/edit_file/apply_patch` 等路径可知的写工具接 `ScopedInstructionGate`。
-4. 新 scope 首次出现时先不落盘，把完整规则注入下一请求，模型重试后放行。
-5. 多路径 patch 按 chain fingerprint 分组；任一未确认，整笔不落。
-6. 主 Agent、AgentTool、Workflow 共用 resolver；各 Agent 自持 scope state。
-7. 保留当前 root->cwd baseline 与 `AGENTS.override.md` 行为，旧项目不退化。
+- [x] 把字符串 loader 升成 `ProjectInstructionResolver`，返回结构化 documents/chain/diagnostics。（0.26.121）
+- [x] 增加 `ResolveForPath(target)`，机械顺序固定为 root -> target parent。（0.26.121）
+- [x] 给 `write_file/edit_file/apply_patch` 等路径可知的写工具接 `ScopedInstructionGate`。（0.26.121；P0 名单内 write_file/edit_file 的 "path" 入参）
+- [x] 新 scope 首次出现时先不落盘，把完整规则注入下一请求，模型重试后放行。（0.26.121）
+- [x] 多路径 patch 按 chain fingerprint 分组；任一未确认，整笔不落。（0.26.121）
+- [x] 主 Agent、AgentTool、Workflow 共用 resolver；各 Agent 自持 scope state。（0.26.121）
+- [x] 保留当前 root->cwd baseline 与 `AGENTS.override.md` 行为，旧项目不退化。（0.26.121，单测钉住）
 
 ### P1：可见、完整、可刷新
 
-1. 新增 `/instructions` 与 `/doctor instructions`。
-2. Prompt ledger 从一条总项扩成逐 source 账。
-3. I/O 错、坏 UTF-8、空文件、同层遮蔽、超限分开报。
-4. 不再从文档中腰静默截；active write chain 超限时 fail closed。
-5. 缓存按 path + size + mtime 快筛、内容 hash 落锤；目标解析时发现变化便失效旧 fingerprint。
-6. `/init` 继续做建档与显式 reload；外部编辑不必常驻监听，Resolve 时惰性发现即可。
-7. 修正文档中 32 KiB 的真实计费口径。
+- [x] 新增 `/instructions` 与 `/doctor instructions`（2026-08-31 落地：`/instructions [path <路径>|reload]`，命令注册 51→52 案，账目表与诊断行是 config 层纯函数）。
+- [x] Prompt ledger 从一条总项扩成逐 source 账（PromptOptions.project_instruction_sources；旧装配不递清单时照旧一条，零退化）。
+- [x] I/O 错、坏 UTF-8、空文件、同层遮蔽、超限分开报（诊断 code：read_error / invalid_utf8 / empty_skipped / shadowed_same_directory / over_budget；symlink 侧补 symlink_inside_project / symlink_outside_project / symlink_broken，§10.3 的边界）。outside_project 未单列：目标永远按它自己的项目根解析，"目标在项目外"这条岔路不存在，真正越界的只有 symlink 一途。
+- [x] 不再从文档中腰静默截；active write chain 超限时 fail closed（闸按"整份文档"计，装不下即拒：终态 ScopeGateOverBudget + 稳定码 scope.instructions_over_budget，不注入半截、不登记指纹、重试不放行。基线投影保旧口径零退化，但 truncated + dropped_for_budget + over_budget 三笔账齐上，/instructions 明标"截断(不完整)"，不冒充"全部已加载"）。
+- [x] 缓存按 path + size + mtime 快筛、内容 hash 落锤；目标解析时发现变化便失效旧 fingerprint（Resolver 内置文档缓存，mutex 护表、const 可并跑；指纹只认内容，stat 一变即重读重哈希。快筛的已知盲区：同尺寸同 mtime 的偷改——按常见文件系统 mtime 粒度接受此折衷，缓存只收成功读，空/坏/读错每次现读现报）。
+- [x] `/init` 继续做建档与显式 reload；外部编辑不必常驻监听，Resolve 时惰性发现即可（写前闸侧下一次 Resolve 的 stat 快筛即发现改动并重新握手；系统提示基线仍走 /init、/clear 显式重载，与现文档一致）。
+- [x] 修正文档中 32 KiB 的真实计费口径（帽管"段间分隔 + 来源标题 + 正文"合计；外层 "# Project Instructions" 与一行固定说明约 100 bytes 在帽外另加，最终串可略超帽。README/README.en/feature 文档/`/doctor instructions` 的 InstructionBudgetAccountingNote 与实现同一套话）。
 
 ### P2：兼容扩展
 
-1. 评估全局 `~/.lubancode/AGENTS.md`。它不是开放格式共同本体，须与 system prompt/SOUL 分工后再开。
-2. 评估 `project_doc_fallback_filenames`。默认空，用户显式配置后每层按顺序取第一份非空文件。
-3. 可提供迁移诊断：发现 `AGENT.md`、`CLAUDE.md`、`GEMINI.md` 时只提示，不自动多读。
-4. 记录兼容矩阵与出处；第三方工具语义变动时更新文档，不拿官网 logo 当永久合同。
+- [x] 全局 `~/.lubancode/AGENTS.md`：分工说得清，已实现。定案：system prompt 管身份与协议，SOUL 管口吻风格（"怎么说"），全局 AGENTS 管跨仓库工作法（"怎么干活"）——垫在项目根之前，优先级最低，项目层永远能盖过它；最先拼进提示、最先被预算挤掉。参与链指纹（闸会对它握手一次）。文件不在/为空/坏掉即零层，行为与从前一字不差；只有显式装配（SessionResolverOptions）才带它，默认构造与旧口 LoadProjectInstructions 不带，既有单测不受主目录里有没有这份文件影响。
+- [x] `project_doc_fallback_filenames`：已实现。顶层配置键（字符串数组，项目级压全局整段回退），校验三条——元素非空、纯文件名、不得与主名撞车（大小写不敏感）。每层先选 override/AGENTS 主名，两枚都没命中（不在/读错/空）才按名单取第一份非空，命中记 fallback_used 诊断。默认空 = 不启用。
+- [x] 迁移诊断：已实现。链上每层发现 `AGENT.md`/`CLAUDE.md`/`GEMINI.md` 记 migration_hint（/instructions 与 /doctor instructions 亮出），只提示不自动读。
+- [ ] 记录兼容矩阵与出处；第三方工具语义变动时更新文档（持续性义务，不随本单收官）。
 
 ## 十二、测试矩阵
 
@@ -652,10 +652,11 @@ fingerprint: ...
 
 ## 十五、实现状态
 
-截至 2026-08-30：
+截至 2026-08-31（本单收官）：
 
-- 已实现：`AGENTS.md` 根文件与 root->cwd 分层读取、同层 override、空文件回落、32 KiB 字节帽、`/init` 建档/重载、主代理与子代理 prompt 注入。
-- 已验证：三项相关单测通过。
-- 已确认缺口：只按启动 cwd 取链；没有按目标文件 Resolve；写工具没有 scope gate；子代理继承字符串快照；超限静默截断；逐文件来源与错误不可查。
-- 尚未实现：结构化 Resolver、目标路径 Gate、多 scope 原子写、指纹失效、诊断命令、完整预算语义、fallback/global 扩展。
-- 当前产品结论：LubanCode 已支持 AGENTS.md 基础用法，却尚未完整兑现行业约定中“离实际编辑文件最近者优先”这一条。
+- P0（0.26.121）：嵌套作用域按目标文件下钻、`ResolveForPath`、写前闸与指纹握手、多路径原子、主代理/子代理/Workflow 共用 Resolver。
+- P1：`/instructions`（裸敲/path/reload）与 `/doctor instructions`；Prompt ledger 逐 source 账；分型诊断（read_error/invalid_utf8/empty/shadowed/over_budget/symlink 三档/fallback_used/migration_hint）；写前闸超预算 fail closed（ScopeGateOverBudget + scope.instructions_over_budget，不腰斩、不登记、重试不放行）；文档缓存（path+size+mtime 快筛、内容摘要落锤、只收成功读）；外部编辑惰性发现；32 KiB 计费口径在文档/诊断/实现三处对齐。
+- P2：全局层 `~/.lubancode/AGENTS.md` 落地（分工与优先级见 §十一 P2 定案）；`project_doc_fallback_filenames` 配置落地；AGENT.md/CLAUDE.md/GEMINI.md 迁移提示落地。
+- 基线投影零退化：旧口 LoadProjectInstructions 与默认构造 Resolver 的投影逐字节一致（既有单测钉住）；全局层与 fallback 只经显式装配（SessionResolverOptions）生效，默认行为与从前一字不差。
+- 验证（2026-08-31）：本仓 VS Debug 全量 ctest 287/287 绿（临时 USERPROFILE）；WSL g++-13 -fsyntax-only 过全部新/改文件；真机管道冒烟——临时仓嵌套+override+空文件+CLAUDE.md，`/instructions` 逐 source 亮账（[GLOBAL]/[AGENTS]/[OVERRIDE]/nearest/指纹/合计）、`/instructions path` 出四层链与遮蔽诊断、`/instructions reload` 重载生效、`/doctor instructions` 出计费口径与缓存口径；gate fail closed 与缓存失效由单测端到端钉死（RunOneTool 真起闸：over_budget 两发皆拒、文件零副作用；同进程改 AGENTS.md 后指纹即变）。
+- 当前产品结论：根规则、嵌套按目标生效、最近者优先、写前握手、逐 source 可查、超限拒写、全局/fallback 显式扩展——agents.md 开放格式的核心语义已兑现；跨工具兼容只做显式点名，不默认多读。

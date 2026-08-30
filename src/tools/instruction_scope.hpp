@@ -31,6 +31,11 @@
 
 namespace lubancode::tools {
 
+// 闸文案的两档标记:拦截文案以哪个前缀开头,agent 层就按哪档终态落账
+//(握手待重试 / 超预算拒收)。两处不许各写一份字面量。
+inline constexpr const char* kScopeGateHandshakePrefix = "[instructions_required]";
+inline constexpr const char* kScopeGateOverBudgetPrefix = "[instructions_over_budget]";
+
 // Agent 自持的已见链指纹账。指纹由文档内容摘要合成(见 Resolver 的
 // ChainFingerprint):AGENTS.md 一变,指纹即变,旧确认自然作废——账按
 // 内容寻址,无须主动失效,也不会拿旧指纹错放行新规则。
@@ -53,9 +58,13 @@ std::vector<std::string> CollectWriteTargets(const std::string& tool_name, const
 
 // 拦截回执:message 是给模型看的完整文案(instructions_required + 注入
 // 的规则正文);fingerprints 是本次已出示并登记的链,重试同目标即命中。
+// over_budget = true(P1-4 fail closed)是另一档:active write chain 按
+// 整份文档计,预算内装不下 → 拒收明说,不注入半截、不登记指纹——重试
+// 不会放行,须拆规则或调大预算。
 struct ScopeGateDenial {
     std::vector<std::string> presented_fingerprints;
     std::string message;
+    bool over_budget = false;
 };
 
 // 写前作用域闸。构造只持引用,不拷贝 Resolver(共享同一份);CheckTargets
@@ -79,8 +88,13 @@ private:
 // 一条链的注入正文(单测与拦截文案共用同一份):按"最近文档优先"往
 // budget 里整份装(近处规则永不被根文件挤没,单子 §5.4 的病根),输出
 // 仍按 root -> nearest 排——机械优先级一眼可读。装不下的远端文档点名
-// 列出,不冒充全部已装。
+// 列出,不冒充全部已装。闸路(CheckTargets)先按整链算过预算才走到这,
+// 这里带 dropped 点名只是兜底;直调(单测)才真会掉文档。
 std::string BuildChainInjection(const lubancode::config::InstructionChain& chain, std::size_t budget);
+
+// 一条链整份装进注入要多少字节(与 BuildChainInjection 同一套包装估
+// 算):闸的 fail closed 判据——超过预算即拒,不腰斩(单子 §8.1 方案 A)。
+std::size_t ChainInjectionBytes(const lubancode::config::InstructionChain& chain);
 
 // ---- 装配层共用件 ----------------------------------------------------------
 

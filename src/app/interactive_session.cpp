@@ -603,8 +603,17 @@ void TerminalSessionController::SyncWorktreeDirectory() {
             TermOut() << trf("cmd.memory.switch_failed", updated.error()) << "\n";
         }
     }
-    project_instructions = lubancode::config::LoadProjectInstructions(std::filesystem::current_path()).content;
+    // 作用域单 P1:搬房后基线走会话那只 Resolver(全局层/fallback 与启动
+    // 同一口径),顺手带出逐 source 账。
+    const lubancode::config::InstructionChain moved_baseline =
+        stack_.instruction_resolver->ResolveForPath(std::filesystem::current_path());
+    project_instructions = moved_baseline.content;
+    project_instruction_sources.clear();
+    for (const std::filesystem::path& source : moved_baseline.sources) {
+        project_instruction_sources.push_back(lubancode::tools::PathToUtf8(source));
+    }
     prompt_options.project_instructions = project_instructions;
+    prompt_options.project_instruction_sources = project_instruction_sources;
     main_agent->SetSystemPrompt(lubancode::agent::AssembleSystemPrompt(prompt_options));
     // 作用域单 P0:搬房后基线换了一截——新 root->cwd 链重新预登记(旧指纹
     // 是内容寻址,留着无害);Resolver 本身无状态,不必换。

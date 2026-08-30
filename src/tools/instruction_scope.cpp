@@ -45,6 +45,25 @@ std::vector<std::string> CollectWriteTargets(const std::string& tool_name, const
     return {path};
 }
 
+namespace {
+
+// 每份文档的包装开销估算:作用域标题 + 来源行 + 段间空行。BuildChain
+// Injection 与 ChainInjectionBytes 共用同一把尺,两边不许各算各的。
+std::size_t DocumentWrapperBytes(const lubancode::config::InstructionDocument& doc) {
+    return doc.scope_dir.generic_string().size() + doc.source_path.generic_string().size() +
+           64;  // 标题/来源/空行的固定开销估算
+}
+
+}  // namespace
+
+std::size_t ChainInjectionBytes(const lubancode::config::InstructionChain& chain) {
+    std::size_t total = 0;
+    for (const lubancode::config::InstructionDocument& doc : chain.documents) {
+        total += DocumentWrapperBytes(doc) + doc.content.size() + 2;  // +2: 段间 "\n\n"
+    }
+    return total;
+}
+
 std::string BuildChainInjection(const lubancode::config::InstructionChain& chain, std::size_t budget) {
     // 装配次序与显示次序分开:显示按 root -> nearest(机械优先级原样);
     // 预算从最近那份往回装(近处规则永不让位,单子 §5.4)。
@@ -52,9 +71,7 @@ std::string BuildChainInjection(const lubancode::config::InstructionChain& chain
     std::size_t used = 0;
     for (std::size_t i = chain.documents.size(); i-- > 0;) {
         const lubancode::config::InstructionDocument& doc = chain.documents[i];
-        // 每份的包装:作用域标题 + 来源行 + 正文 + 段间空行。
-        const std::size_t wrapper = doc.scope_dir.generic_string().size() + doc.source_path.generic_string().size() +
-                                    64;  // 标题/来源/空行的固定开销估算
+        const std::size_t wrapper = DocumentWrapperBytes(doc);
         if (used + wrapper + doc.content.size() > budget) {
             continue;
         }
@@ -132,9 +149,44 @@ std::optional<ScopeGateDenial> ScopedInstructionGate::CheckTargets(
         return std::nullopt;  // 全部已确认:放行
     }
 
+    // P1-4 fail closed(单子 §8.1 方案 A):active write chain 按"整份文档"
+    // 计,预算内装不下 → 拒收明说。不当握手(重试不放行)、不注入半截
+    //(腰斩半条禁令比没有更糟)、不登记指纹(模型没见过完整规则,不能
+    // 视作已确认)。零副作用照旧:一个文件都不动。
+    std::vector<const ScopeGroup*> over_budget;
+    for (const ScopeGroup* group : pending) {
+        if (ChainInjectionBytes(group->chain) > resolver_->max_bytes()) {
+            over_budget.push_back(group);
+        }
+    }
+    if (!over_budget.empty()) {
+        std::string message =
+            std::string(kScopeGateOverBudgetPrefix) +
+            " 写入被拒:下列作用域的指令链(AGENTS.md)整份装不进预算"
+            "(预算 " +
+            std::to_string(resolver_->max_bytes()) +
+            " bytes,按整份文档计,不腰斩)。这不是握手,重试同一操作不会放行。\n"
+            "要么把对应 AGENTS.md 拆短(细则下沉到子目录),要么调大预算后重开会话。\n";
+        for (const ScopeGroup* group : over_budget) {
+            for (const std::string& target : group->targets) {
+                message += "- " + target + " <- 链合计 " +
+                           std::to_string(ChainInjectionBytes(group->chain)) + " bytes:\n";
+            }
+            for (const lubancode::config::InstructionDocument& doc : group->chain.documents) {
+                message += "    " + doc.source_path.generic_string() + "  " +
+                           std::to_string(doc.bytes) + " B\n";
+            }
+        }
+        ScopeGateDenial denial;
+        denial.message = std::move(message);
+        denial.over_budget = true;
+        return denial;  // 不 MarkSeen:fail closed 不发确认权
+    }
+
     // 拦截文案:目标 -> 作用域的映射先亮出来,再按组注入规则全文。
     std::string message =
-        "[instructions_required] 写入暂缓:下列目标的项目指令(AGENTS.md 作用域链)尚未经本 Agent 确认。\n"
+        std::string(kScopeGateHandshakePrefix) +
+        " 写入暂缓:下列目标的项目指令(AGENTS.md 作用域链)尚未经本 Agent 确认。\n"
         "这是协议握手,不是错误——细读下面规则后,原样重试同一写操作即可放行。\n\n"
         "目标与作用域(离目标最近的规则优先级最高):\n";
     for (const ScopeGroup* group : pending) {

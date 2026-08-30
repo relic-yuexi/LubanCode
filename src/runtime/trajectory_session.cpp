@@ -86,6 +86,7 @@ bool OutcomeMapsToCancelled(const agent::ToolTraceEvent& event) {
         case agent::ToolOutcome::PermissionDeclined:
         case agent::ToolOutcome::ModeDenied:
         case agent::ToolOutcome::ScopeGatePending:
+        case agent::ToolOutcome::ScopeGateOverBudget:  // fail closed:同样没越过执行边界
         case agent::ToolOutcome::SpawnFailed:
         case agent::ToolOutcome::ResultStoreFailed:
             return true;
