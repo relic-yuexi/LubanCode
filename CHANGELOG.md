@@ -325,6 +325,12 @@
 - **Moonshot 四枚模型各归各位。** kimi-k3(effort only,low/high/max)、kimi-k2.7-code(+highspeed,零参数即思考)固定 Always;kimi-k2.6 只保本枚 Turn 工具循环(ToolEpisode,不发 reasoning_effort);kimi-k2.5 固定 Never 不误开。模型级方言全部标 verified;K3-fast 与聚合端不沾光。
 - **loopback 集成钉死契约**:K3 两轮纯对话第二轮请求体断言第一轮思考原样在场;K2.6 工具循环不发 effort;K2.5 不回传不误发 keep。`/think` 分行亮"本轮思考"与"历史回传"两件事。src/ 无一处模型名特判(铁律核查)。
 
+## [v0.26.121] - 2026-08-30
+
+- **嵌套 AGENTS.md 管到目标文件了(P0)。** `ProjectInstructionResolver::ResolveForPath` 按机械序 root→最近层出结构化 chain(每份文档带 scope/sha/override 记号);写文件(edit_file/write_file)在 PreToolUse、用户确认、任何副作用**之前**过 `ScopedInstructionGate`——新 scope 首写拦下,规则全文随 tool_result 注入下一请求,模型重试放行;指纹登记认 scope 不认文件,规则一改旧确认自然作废。
+- **多路径原子**:多目标写按 chain fingerprint 分组,任一 scope 未确认整笔拦,零副作用。主 Agent、子代理、Workflow agent/tool 节点、one-shot 全接同一只 resolver,各 Agent 自持确认账;基线预登记逐字节全等才认(搬房/手改/超帽都重新握手)。
+- **旧行为零退化**:root→cwd baseline 与 AGENTS.override.md 优先照旧,既有四案原样绿;无 AGENTS.md 项目闸全程直行。集成测试真起 RunOneTool:从仓库根写 src/parser 下文件,首发被拦注入 override 压过 AGENTS,重试落盘;根下文件不受嵌套层影响。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
