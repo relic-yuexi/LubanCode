@@ -285,6 +285,13 @@ std::expected<TrajectoryDirectory, std::string> TrajectoryDirectory::CreateSessi
     return directory;
 }
 
+TrajectoryDirectory TrajectoryDirectory::OpenExisting(const std::filesystem::path& session_dir) {
+    TrajectoryDirectory directory;
+    directory.session_dir_ = session_dir;
+    directory.workspace_dir_ = session_dir.parent_path().parent_path();
+    return directory;
+}
+
 std::expected<std::filesystem::path, std::string> TrajectoryDirectory::ReserveMainStream() const {
     if (session_dir_.empty()) {
         return std::unexpected("session 未开");

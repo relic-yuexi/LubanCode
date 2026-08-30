@@ -486,6 +486,11 @@ add_library(lubancode_engine STATIC
   src/trajectory/journal.cpp
   src/trajectory/recorder.cpp
   src/trajectory/directory.cpp
+  # P0-1b:session 独占锁(PID+起始 token 身份核)、SessionManager 与
+  # clear 八步换账、生命周期状态机、workspace lifecycle/tombstone 账、
+  # 启动恢复器(Journal 可证事实为准)。
+  src/trajectory/session_lock.cpp
+  src/trajectory/session_manager.cpp
 )
 target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

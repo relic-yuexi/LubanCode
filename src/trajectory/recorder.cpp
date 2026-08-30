@@ -82,6 +82,7 @@ std::int64_t RecorderClock::MonotonicNs() const { return DefaultMonotonicNs(); }
 struct TrajectoryRecorder::Impl {
     mutable std::mutex mutex;
     JournalWriter writer;
+    std::filesystem::path stream_path;  // 关柄后 path() 仍可问
     BlobStore blobs;
     EventScope base;
     RecorderOptions options;
@@ -584,11 +585,80 @@ std::expected<TrajectoryRecorder, std::string> TrajectoryRecorder::Start(
     }
     auto impl = std::make_shared<Impl>();
     impl->writer = std::move(*writer);
+    impl->stream_path = stream_path;
     impl->blobs = BlobStore(artifact_root, options.blobs);
     impl->base = std::move(base_scope);
     impl->options = options;
     if (clock != nullptr) {
         impl->clock = clock;
+    }
+    return TrajectoryRecorder(std::move(impl));
+}
+
+std::expected<TrajectoryRecorder, std::string> TrajectoryRecorder::Continue(
+    const std::filesystem::path& stream_path, const std::filesystem::path& artifact_root,
+    RecorderOptions options, const RecorderClock* clock) {
+    // 先整本验账:hash 链、schema、canonical 字节全绿才许续;截断尾/坏行
+    // 一律拒开(§16.3:不伪造终态,交给上层标 incomplete/corrupt)。
+    const JournalVerifyReport report = VerifyJournalFile(stream_path);
+    if (!report.ok) {
+        return std::unexpected("recorder.continue_not_clean: " + report.error_code + ": " +
+                               report.message);
+    }
+    const auto lines = ReadJournalLines(stream_path);
+    if (!lines.has_value() || lines->empty()) {
+        return std::unexpected("recorder.continue_no_scope: 账本没有可推身份的事件: " +
+                               platform::PathToUtf8(stream_path));
+    }
+
+    // base scope 从首行推:身份四件 + actor/origin/visibility 照实取自首事件。
+    const auto first_parsed = nlohmann::json::parse(lines->front(), nullptr, false);
+    EventEnvelope first;
+    if (auto error = ParseAndValidateEventLine(first_parsed, &first)) {
+        return std::unexpected("recorder.continue_no_scope: 首行解析失败: " + error->message);
+    }
+    EventScope base;
+    base.workspace_key = first.workspace_key;
+    base.session_id = first.session_id;
+    base.run_id = first.run_id;
+    base.run_kind = first.run_kind;
+    base.actor = first.actor;
+    base.origin = first.origin;
+    base.visibility = first.visibility;
+    base.training_policy = first.training_policy;
+
+    auto writer = JournalWriter::Open(stream_path, JournalWriter::OpenMode::Append);
+    if (!writer.has_value()) {
+        return std::unexpected(std::move(writer).error());
+    }
+    auto impl = std::make_shared<Impl>();
+    impl->writer = std::move(*writer);
+    impl->stream_path = stream_path;
+    impl->blobs = BlobStore(artifact_root, options.blobs);
+    impl->base = std::move(base);
+    impl->options = options;
+    if (clock != nullptr) {
+        impl->clock = clock;
+    }
+    // 重放状态机账:seq/hash 接链尾,Apply 重建 run/turn/call/queue 全账
+    // (Check 不走——事实已 committed,这里只恢复记忆)。
+    for (const std::string& line : *lines) {
+        EventEnvelope envelope;
+        if (auto error = ParseAndValidateEventLine(
+                nlohmann::json::parse(line, nullptr, false), &envelope)) {
+            return std::unexpected("recorder.continue_not_clean: " + error->error_code + ": " +
+                                   error->message);
+        }
+        RecordRequest replay;
+        replay.kind = envelope.kind;
+        replay.scope = impl->base;
+        replay.scope.turn_id = envelope.turn_id;
+        replay.scope.request_id = envelope.request_id;
+        replay.scope.call_id = envelope.call_id;
+        replay.payload = envelope.payload;
+        impl->next_seq = envelope.seq + 1;
+        impl->last_event_hash = envelope.event_hash;
+        impl->Apply(replay, envelope);
     }
     return TrajectoryRecorder(std::move(impl));
 }
@@ -857,11 +927,15 @@ std::expected<std::string, std::string> TrajectoryRecorder::Close() {
         return std::unexpected("io.closed: 已关柄");
     }
     impl_->closed = true;
-    return JournalWriter::ComputeJournalSha256(impl_->writer.path());
+    // 先算整本 hash(§8.3),再放掉句柄:封了口的账不该再攥着文件——
+    // Windows 下攥着句柄的文件删不掉、搬不动(/delete、/archive 要用)。
+    auto sha = JournalWriter::ComputeJournalSha256(impl_->stream_path);
+    impl_->writer = JournalWriter{};
+    return sha;
 }
 
 const std::filesystem::path& TrajectoryRecorder::stream_path() const {
-    return impl_->writer.path();
+    return impl_->stream_path;
 }
 
 const EventScope& TrajectoryRecorder::base_scope() const {
