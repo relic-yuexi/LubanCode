@@ -26,7 +26,7 @@ namespace lubancode::app {
 GoalSessionWiring::GoalSessionWiring(Host host) : host_(std::move(host)) {}
 
 // 渲染事件出口(问题 3 第 2 条):is_error 定色,text 是纯文案——怎么画
-// 由装配层(interactive_session_wiring 填的 notify)决定。
+// 由装配层(interactive_session_assembly 填的 notify)决定。
 void GoalSessionWiring::Notify(bool is_error, const std::string& text) {
     if (host_.notify) {
         host_.notify(is_error, text);

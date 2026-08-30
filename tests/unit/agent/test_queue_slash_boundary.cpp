@@ -11,7 +11,7 @@
 //   4) /help、/todos、/compact 与 /context 同一条规则;
 //   5) slash 与文字混排各走各:文字按落队顺序注入,slash 留到轮末,互不
 //      拦路。
-// 收件点复刻 interactive_session_wiring.cpp:730-749 的取件核心(Take-
+// 收件点复刻 interactive_session_assembly.cpp 的取件核心(Take-
 // Deliverable + [用户排队消息] 组包就是生产代码本尊,队列层过滤即所测);
 // Echo/Persist 属终端装饰,不进请求内容。队列用局部实例(风格同
 // test_queue_model.cpp,不碰全局 SessionSteeringQueue)。
@@ -101,7 +101,7 @@ std::string AllRequestText(const api::Request& request) {
     return out;
 }
 
-// 生产收件点的取件核心(interactive_session_wiring.cpp:730-749 同款):
+// 生产收件点的取件核心(interactive_session_assembly.cpp 同款):
 // TakeDeliverable 过滤即队列层本尊,组包文案一字不差。
 agent::AgentWiring MakeBoundaryInbox(cli::SteeringQueue& queue) {
     agent::AgentWiring wiring;

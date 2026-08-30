@@ -64,7 +64,7 @@ SessionStack 先构造
 | 文件 | 职分 |
 | --- | --- |
 | `src/app/interactive_session_controller.hpp` | 私有类形状与所有权次序 |
-| `src/app/interactive_session_wiring.cpp` | 构造、析构、恢复、Agent 重建、请求策略同步、dispatch context 装配 |
+| `src/app/interactive_session_assembly.cpp` | 构造、析构、恢复、Agent 重建、请求策略同步、dispatch context 装配 |
 | `src/app/interactive_session.cpp` | `ProcessLine`、`RunSessionTurn`、主循环与公平泵 |
 | `src/app/interactive_session.hpp` | 对外只露 options 与 `RunInteractiveSession` |
 

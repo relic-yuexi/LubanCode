@@ -1,6 +1,26 @@
 # 骨架拆解反弹：职责分离整改单
 
-- 状态：待实现
+- 状态：已实现（2026-08-31 收官,问题 1-7 全落。末两笔:问题 2——
+  interactive_session_wiring.cpp 改名 interactive_session_assembly.cpp
+  (不再与 src/app/wirings/ 撞车);标题判定拆 app/session_title_account
+  (SessionTitleAccount,单测册起,不必起完整 controller)、整轮 usage 折算
+  拆 app/turn_usage_account、状态面板拼装拆 app/status_panel_assembly
+  (各带单测);后台命令完成与子代理回流两处通知改走 SessionNoticeSink
+  (终端实现逐字节照旧画);类头注释补剩余方法与职责清单。问题 5——
+  console_input.cpp(5182 行)按机器拆四文件:composer 主循环
+  (console_input_composer.cpp)、流式 footer(console_input_stream_footer.cpp)、
+  turn 监听线程(console_input_turn_listener.cpp),共享底层留原文件,
+  家族签名收 console_input_internal.hpp;17 枚 XxxSlot 单例归位——独占的
+  13 枚随机器搬进各自文件,跨机器的收主文件显式共享上下文段(逐枚注明
+  使用机器),监听线程摸 footer 状态改走四只窄口;ChoiceMenuSearchCore 与
+  ChoiceMenuCore 合并评估:不合(输入面/键语义双分叉),结论写进
+  console_input.hpp 注释。构建边界不变(新文件随 console_input 住
+  lubancode_app)。ctest 283 册全绿;管道冒烟(临时 USERPROFILE)/help、
+  粘贴、/model、exit 过;刮屏:agent_panel_driver 47 断言全绿、帮助场景
+  --composer-only 64 断言全绿、stream_footer_driver 6 FAIL 与基线逐条
+  相同(假服务时序固有);WSL g++-13 语法验收 12 文件全过;busy_tab/
+  esc_cancel/viewport/history_search 四驱动器需真钥匙/真端点未跑,记
+  真机未验)
 - 日期：2026-08-30
 - 起因：用户问 `src/` 职责分离是不是没搞好，派三路 Explore 分头复审 `src/cli`、`src/app`+`src/agent`、`src/config`+`src/runtime`+`src/tools`+`src/workflow`，对照骨架拆解（0.26.48→0.26.63）当初立的规矩逐条核实
 - 范围：工具确认流程渲染归属、interactive_session/wirings 瘦身账、settings_commands 内存写、console_input 三机合租、worktree.cpp 归属、config.cpp 夹带项
@@ -53,7 +73,19 @@
 
 ## 问题 2：interactive_session 瘦身账面已过期
 
-- 状态：待实现
+- 状态：已实现（2026-08-31：四步全落——①interactive_session_wiring.cpp
+  改名 interactive_session_assembly.cpp,不再与组合根目录 src/app/wirings/
+  撞车;②标题判定/整轮 usage 折算/状态面板拼装拆成
+  session_title_account(SessionTitleAccount 小类,绑 runtime 那份标题真值,
+  判定自四个标题方法逐字搬)、turn_usage_account(RecordTurnUsageSteps 自由
+  函数)、status_panel_assembly(BuildStatusPanelData+StatusPanelInputs),各带
+  单测册(test_session_title_account/test_turn_usage_account/
+  test_status_panel_assembly,不必起完整 controller);③后台命令完成与
+  子代理回流两处非 turn 通知改走 SessionNoticeSink(app/session_notice,
+  终端实现 TerminalSessionNoticeSink 逐字节照旧画,控制器经 notice_sink()
+  基类口递,往后 app-server 挂第二只 sink 零改调用点);④类头注释写清装配
+  半边/运行半边剩余方法与职责清单。管道冒烟"会话标题(取自首问)"实机
+  验证新标题路）
 - 级别：P2
 - 位置：`src/app/interactive_session.cpp`（1304 行）+ `src/app/interactive_session_wiring.cpp`（1229 行），共同实现 `TerminalSessionController`（声明于 `src/app/interactive_session_controller.hpp`，420 行）
 
@@ -143,7 +175,25 @@
 
 ## 问题 5：`console_input.cpp` 一个文件塞了三台不相干的机器
 
-- 状态：待实现
+- 状态：已实现（2026-08-31：两步全落。第一步拆文件不改逻辑——
+  console_input.cpp 5182 行按机器拆四:composer 主循环(ReadLineKeyByKey 一族,
+  console_input_composer.cpp)、流式 footer(Begin/Redraw/Erase 族+心跳线程,
+  console_input_stream_footer.cpp)、turn 监听线程(TurnInputListener,
+  console_input_turn_listener.cpp),共享底层(锁/状态行/面板会话/键位翻译/
+  菜单)留原文件,家族签名收 console_input_internal.hpp(仅四文件用,不进
+  公共接口);函数清单 diff 验证旧文件顶层函数一枚不丢。第二步 Slot 归类
+  ——13 枚机器独占槽随机器搬进各自文件(composer 10 枚/footer 3 枚),
+  跨机器的(SharedEditor/PanelSession/ComposerTarget/ViewFrameLedger/
+  AgentViewSwitchHook 等)收主文件"显式共享上下文"段、逐枚注明使用机器,
+  监听线程摸 footer 状态改走四只窄口(StreamFooterEnabled 等);导出函数
+  签名零改、调用方零 churn。ChoiceMenuSearchCore 与 ChoiceMenuCore 合并
+  评估:不合——输入面(纯索引 vs 持条目文本过滤)与键语义(循环绕圈 vs
+  不绕圈+翻页)双分叉,结论写进 console_input.hpp。构建边界不变(新文件随
+  console_input 住 lubancode_app,boundary gate 照旧绿);ctest 283 册全绿;
+  刮屏:agent_panel_driver 47 断言全绿、帮助场景 --composer-only 64 断言
+  全绿、stream_footer_driver 的 6 FAIL 与基线逐条相同(假服务时序固有);
+  busy_tab/esc_cancel/viewport/history_search 四驱动器需真钥匙或真端点,
+  记真机未验）
 - 级别：P2（长度本身有正当理由，混装才是问题；不必急，但该拆）
 - 位置：`src/cli/console_input.cpp`（5182 行，全仓最大文件）
 

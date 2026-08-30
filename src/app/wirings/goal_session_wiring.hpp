@@ -68,7 +68,7 @@ public:
         // 开一枚 goal 执行轮(text + 失败出参;单飞,主线程调)。
         std::function<void(const std::string&, bool*)> start_turn;
         // 渲染事件出口(问题 3 第 2 条):is_error 定色,text 是纯文案
-        // ——怎么画由装配层(interactive_session_wiring 填)决定。
+        // ——怎么画由装配层(interactive_session_assembly 填)决定。
         std::function<void(bool is_error, const std::string& text)> notify;
     };
 

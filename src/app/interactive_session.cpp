@@ -55,6 +55,9 @@
 #include "app/backend_stack.hpp"
 #include "app/commands/command_registry.hpp"  // 命令注册制:47 案分派的注册表与路由
 #include "app/session_stack.hpp"  // 组合根装配件(会话终章):控制器只收装好的件
+// 骨架拆解反弹·问题 2 拆出的旁挂件:usage 折算(标题账/状态面板/通知口
+// 经 interactive_session_controller.hpp 引入)。
+#include "app/turn_usage_account.hpp"
 // 子系统接线器(会话终章):goal/loop/plan/peer/录制各一只(状态+装配+
 // 泵+存档恢复),控制器持句柄调;会话级状态(theme/config/session_store)
 // 留控制器。
@@ -244,26 +247,20 @@ bool TerminalSessionController::EnsureSessionBegun(const std::string& first_text
 // 不再动标题。已有人工标题(含待建档的 pending)、本场已试过、建档失败,
 // 都直接回——失败时一个后台任务也不起,不留孤儿。
 void TerminalSessionController::BeginSessionTitle(const std::string& first_query) {
-    if (session_title_auto_attempted || session_title_pending || !session_title.empty()) {
-        return;
+    // 判定在 SessionTitleAccount(骨架拆解反弹·问题 2 拆出),这里只管
+    // 打印与发第二层精炼。
+    const auto result = titles_.BeginLocalTitle(first_query);
+    switch (result) {
+        case lubancode::app::SessionTitleAccount::LocalResult::Set:
+            TermOut() << theme.stats << trf("cmd.title.local_set", session_title) << theme.reset << "\n";
+            StartTitleRefinement(first_query);
+            break;
+        case lubancode::app::SessionTitleAccount::LocalResult::WriteFailed:
+            TermOut() << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
+            break;
+        default:
+            break;  // NoNeed/NoUsableText:安静,不打车轮
     }
-    if (session_store_broken || !session_store.active()) {
-        return;  // 没建档就没什么好起名的,/title 的人工路径照旧
-    }
-    session_title_auto_attempted = true;  // 一场只试一次,失败安静降级
-    const std::string local = lubancode::app::LocalSessionTitle(first_query);
-    if (local.empty()) {
-        return;  // 首问没剩可看的字(全空白那类):标题留空,/sessions 用首句
-    }
-    session_title = local;
-    if (!session_store.AppendTitleEvent(session_title)) {
-        // 落不了盘就不占内存标题(老规矩),/sessions 仍用首句摘要。
-        session_title.clear();
-        TermOut() << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
-        return;
-    }
-    TermOut() << theme.stats << trf("cmd.title.local_set", session_title) << theme.reset << "\n";
-    StartTitleRefinement(first_query);
 }
 
 // 第二层:配了独立 cheap 才并行发精炼。判据看路由表自带的回落标记——
@@ -287,8 +284,8 @@ void TerminalSessionController::StartTitleRefinement(const std::string& first_qu
     inputs.model = std::move(detached.route.model);
     inputs.effort = std::move(detached.route.effort);
     inputs.first_query = first_query;
-    inputs.generation = title_epoch_;
-    session_title_refiner_.Start(std::move(inputs));
+    inputs.generation = titles_.generation();
+    titles_.refiner().Start(std::move(inputs));
 }
 
 // resume 换场善后(实测问题 7):翻标题代数、取消在飞的精炼——上一场的
@@ -296,12 +293,6 @@ void TerminalSessionController::StartTitleRefinement(const std::string& first_qu
 // title 事件)不重复起;没标题的老档拿首条用户 query 补一枚本地标题,
 // 零模型 token,不再为老档发精炼请求。
 void TerminalSessionController::BackfillTitleOnResume() {
-    title_epoch_++;
-    session_title_refiner_.RequestCancel();
-    session_title_auto_attempted = true;  // 恢复的场子不走"首问自动起名"路
-    if (!session_title.empty() || session_store_broken || !session_store.active()) {
-        return;
-    }
     // 档里首条用户消息的正文(图片消息拿文件名)——与落盘兜底同一条路。
     std::string first_text;
     for (const auto& message : main_agent->History()) {
@@ -320,16 +311,12 @@ void TerminalSessionController::BackfillTitleOnResume() {
         }
         break;
     }
-    const std::string local = lubancode::app::LocalSessionTitle(first_text);
-    if (local.empty()) {
-        return;  // 老档没有可看的正文:标题留空,/sessions 用首句,不拦人
+    // 判定在 SessionTitleAccount(翻代/取消在飞精炼/补名),失败安静退不
+    // 打扰人;补上了才报一行。
+    if (titles_.BackfillOnResume(first_text) ==
+        lubancode::app::SessionTitleAccount::LocalResult::Set) {
+        TermOut() << theme.stats << trf("cmd.title.local_set", session_title) << theme.reset << "\n";
     }
-    session_title = local;
-    if (!session_store.AppendTitleEvent(session_title)) {
-        session_title.clear();  // 老档补名失败安静退,不占内存标题
-        return;
-    }
-    TermOut() << theme.stats << trf("cmd.title.local_set", session_title) << theme.reset << "\n";
 }
 
 // 会话循环顶的收货点(实测问题 7):精炼任务落地就记 cheap 账、对代替换、
@@ -337,7 +324,7 @@ void TerminalSessionController::BackfillTitleOnResume() {
 // 结果通常在主回合跑着的时候就备好了,回合一收口这里一眼取走。
 void TerminalSessionController::PollSessionTitleRefinement() {
     std::optional<lubancode::app::SessionTitleRefiner::Outcome> outcome =
-        session_title_refiner_.TakeFinished();
+        titles_.refiner().TakeFinished();
     if (!outcome.has_value()) {
         return;
     }
@@ -346,22 +333,15 @@ void TerminalSessionController::PollSessionTitleRefinement() {
     model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, outcome->model,
                                   outcome->accounting.usage, outcome->accounting.duration_ms,
                                   outcome->accounting.usage_reported);
-    if (!outcome->ok || outcome->title.empty()) {
-        return;  // 失败保留本地标题,不重试,不回落 normal
-    }
-    if (outcome->generation != title_epoch_) {
-        return;  // 人工 /title、/clear 或 resume 抢先:迟到的自动结果丢弃
-    }
-    if (session_store_broken || !session_store.active()) {
-        return;  // 场子没了:标题无处落,不追着写
-    }
-    session_title = std::move(outcome->title);
-    if (!session_store.AppendTitleEvent(session_title)) {
-        // 落不了盘就不占内存标题(老规矩),/sessions 仍用首句摘要。
+    // 采纳判定(代数对上/档子活着/落盘成功才换)在 SessionTitleAccount。
+    const auto adopted = titles_.AdoptRefined(*outcome);
+    if (adopted == lubancode::app::SessionTitleAccount::AdoptResult::WriteFailed) {
         std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
         TermOut() << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
-        session_title.clear();
         return;
+    }
+    if (adopted != lubancode::app::SessionTitleAccount::AdoptResult::Adopted) {
+        return;  // 失败/迟到/场子没了:本地标题保住,不重试
     }
     {
         std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
@@ -909,17 +889,10 @@ void TerminalSessionController::RunSessionTurn(const std::string& content, TurnS
         if (autosend_failed != nullptr) {
             *autosend_failed = turn_result.status != 0;  // 取走即消费单:失败信号原样递给会话泵
         }
-        for (const auto& step : turn_usage.steps) {
-            api::Usage step_usage;
-            step_usage.input_tokens = step.input_tokens;
-            step_usage.output_tokens = step.output_tokens;
-            step_usage.cache_read_tokens = step.cache_read_tokens;
-            step_usage.cache_creation_tokens = step.cache_creation_tokens;
-            step_usage.output_reasoning_tokens = step.reasoning_tokens;
-            model_router->ledger().Record(lubancode::agent::ModelRole::Normal,
-                                          step.model.empty() ? *current_model : step.model, step_usage,
-                                          /*duration_ms=*/0, step.reported);
-        }
+        // usage 出账(模型分工第一期):整轮逐步 usage 折进分角色台账
+        // (普通 turn = normal 档);折算在 RecordTurnUsageSteps(骨架拆解
+        // 反弹·问题 2 拆出),compact/抽取的后台采样在各自路径另记。
+        lubancode::app::RecordTurnUsageSteps(model_router->ledger(), turn_usage.steps, *current_model);
         if (spinner_enabled) {
             lubancode::cli::SetTerminalTitle(BuildTerminalTitleText(tr("notify.state_idle")));
             const auto elapsed = std::chrono::steady_clock::now() - turn_started;
@@ -1027,81 +1000,39 @@ void TerminalSessionController::CleanupBackgroundAgents(bool dispose_queue) {
 
 void TerminalSessionController::Run() {
     while (true) {
-        // status panel 每圈都重取 cwd 与 Git 分支。/worktree、run_command
-        // 切目录/分支，或队列紧接着发下一条时，都不会挂着上一帧的旧值。
-        lubancode::cli::StatusPanelData status_data;
-        status_data.model = *current_model;
-        status_data.cwd = CurrentDirUtf8();
-        status_data.git_branch = lubancode::cli::CurrentGitBranch(std::filesystem::current_path());
-        status_data.worktree = worktree_session.active_name();
-        status_data.provider = lubancode::config::EnvironmentOverridesActiveProvider(
-                                   config_result.config, config_result.sources,
-                                   config_result.config.active_provider)
-                                   ? "env override / unbound"
-                                   : active_provider;
-        status_data.effort = *current_think;
-        status_data.context_percent = context_tracker.UsagePercent();
-        status_data.used_tokens = static_cast<long long>(context_tracker.current_tokens());
-        status_data.window_tokens = static_cast<long long>(context_tracker.window_tokens());
-        // 缓存注记(缓存诊断单):与回合内局部更新同一只 helper、同一只
-        // tracker,空闲重建的第一帧不会先新后旧。
-        status_data.cache_note =
-            lubancode::cli::BuildCacheNote(context_tracker, !context_tracker.usage_stale());
-        // 旧值标记同样出自 tracker:回合内 on_usage 局部发布的快照与这里整份
-        // 重建读同一只 ContextTracker,数字与 ~ 标记完全一致,收口后的第一只
-        // composer 不会先新后旧。
-        status_data.context_stale = context_tracker.usage_stale();
-        // REC 标记:录制中恒挂状态行第一段(见 StatusPanelData::rec)。
-        status_data.rec = lubancode::cli::RecorderStatusMarker(record_wiring_.recorder_optional());
-        // 工具调用后端档(PTC 单):json 默认时留空(状态行零变化),
-        // programmatic/auto 时恒亮一段,回落原因写全(规格 UI 节)。
-        if (config.tool_calling != lubancode::config::ToolCallingMode::Json) {
-            status_data.tools = tool_runtime_->ptc_resolution();
-        }
-        // Plan 模式标记(只读研究硬闸单):与 confirm/auto/yolo 并列(规格
-        // "plan · confirm"),不重置确认档。
-        if (session_runtime_.collaboration_mode() == lubancode::runtime::CollaborationMode::Plan) {
-            status_data.plan_mode = tr("plan.mode_label");
-        }
-        // goal/loop 会话状态段(goal 单合流):有常驻自动工作在跑才挂。
-        status_data.goal_loop =
-            lubancode::app::BuildGoalLoopStatusSegment(goal_wiring_.coordinator(), loop_wiring_.scheduler());
-        // 后台命令任务段(background 管理面单):台账里有任务才挂"后台 N 运行
-        // / M 完成"。这里给的是圈边界那份基线;空闲 100ms 拍与流式 footer
-        // 每帧另经 SetBackgroundStatusProvider 现折,后台起/收当场就变。
-        status_data.background = lubancode::app::BuildBackgroundStatusSegment(
-            lubancode::tools::BackgroundTaskRegistry::Instance().List());
-        lubancode::cli::SetStatusLineData(status_data, config.status_panel.items, config.status_panel.separator);
+        // 状态面板数据(骨架拆解反弹·问题 2 拆出 BuildStatusPanelData):每圈
+        // 刷新 goal/loop 两枚活字段再整份重折——cwd/Git 分支随之每圈重取,
+        // /worktree、run_command 切目录/分支,或队列紧接着发下一条时,都不
+        // 会挂着上一帧的旧值。段折叠规则见 app/status_panel_assembly.cpp。
+        status_inputs_.goal = goal_wiring_.coordinator();
+        status_inputs_.loop_scheduler = loop_wiring_.scheduler();
+        lubancode::cli::SetStatusLineData(
+            lubancode::app::BuildStatusPanelData(status_inputs_, config.tool_calling),
+            config.status_panel.items, config.status_panel.separator);
 
         // 两层标题收货点(实测问题 7):首问时异步发出的标题精炼若已落地,
         // 在这里记 cheap 账、原子替换本地临时标题。非阻塞一眼——轮末到
         // 提示符的路上没有一步在等标题;没落地就下圈再看。
         PollSessionTitleRefinement();
 
-        // 后台命令完成通知:每圈开头取一次"新进入终态"的任务,有就打一行淡色
-        // 通知给用户。不插进对话流(不发给模型、不消耗 token)——只让人看见
-        // "后台那条命令跑完了";模型要是需要细节,自己调 background_output 工具查。
-        // 跟 pending_queue 那条路分开:排队消息是用户自己键入的正文,要发给模型;
-        // 后台通知是系统侧的状态播报,只给人看。
+        // 后台命令完成通知:每圈开头取一次"新进入终态"的任务,折成
+        // SessionNotice 走通知口(骨架拆解反弹·问题 2:原先直接 TermOut,
+        // 现由 TerminalSessionNoticeSink 逐字节照旧画,app-server 那路往后
+        // 挂第二只 sink 就能收到)。不插进对话流(不发给模型、不消耗
+        // token)——只让人看见"后台那条命令跑完了";模型要是需要细节,
+        // 自己调 background_output 工具查。跟 pending_queue 那条路分开:
+        // 排队消息是用户自己键入的正文,要发给模型;后台通知是系统侧的
+        // 状态播报,只给人看。
         if (const auto finished = lubancode::tools::BackgroundTaskRegistry::Instance().DrainCompleted();
             !finished.empty()) {
-            std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
             for (const auto& t : finished) {
-                const char* label = "已结束";
-                switch (t.status) {
-                    case lubancode::tools::BackgroundTaskStatus::Completed: label = "完成(退出码 0)"; break;
-                    case lubancode::tools::BackgroundTaskStatus::Failed: label = "失败"; break;
-                    case lubancode::tools::BackgroundTaskStatus::Stopped: label = "已停止"; break;
-                    case lubancode::tools::BackgroundTaskStatus::StopFailed: label = "停止失败"; break;
-                    default: break;
-                }
-                TermOut() << theme.stats << "[后台任务 #" << t.task_id << " " << label << "]";
-                if (t.status != lubancode::tools::BackgroundTaskStatus::Completed) {
-                    TermOut() << " (exit "
-                              << (t.exit.exit_code.has_value() ? std::to_string(*t.exit.exit_code) : "unknown")
-                              << ")";
-                }
-                TermOut() << " " << t.command << theme.reset << "\n";
+                lubancode::app::SessionNotice notice;
+                notice.kind = lubancode::app::SessionNotice::Kind::BackgroundTaskDone;
+                notice.task_id = t.task_id;
+                notice.status = t.status;
+                notice.exit_code = t.exit.exit_code;
+                notice.command = t.command;
+                notice_sink().Emit(notice);
             }
         }
 
@@ -1213,13 +1144,15 @@ void TerminalSessionController::Run() {
                 lubancode::cli::TranscriptItem item = lubancode::cli::MakeNoticeItem(
                     static_cast<int>(transcript.size()) + 1, tr("agent_panel.completion_notice"),
                     lubancode::cli::TranscriptStatus::Ok, notices);
+                // 短进度行走通知口(骨架拆解反弹·问题 2):终端画法在
+                // TerminalSessionNoticeSink,逐字节照旧;查看态(viewing)
+                // 不打裸行——事件照进 main 台账,静默轮零扰动。
                 if (!viewing) {
-                    std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
-                    TermOut() << theme.tool_line << item.title << theme.reset << "\n";
-                    for (const auto& note : notices) {
-                        TermOut() << theme.stats << "  ⎿ " << note << theme.reset << "\n";
-                    }
-                    TermOut().flush();
+                    lubancode::app::SessionNotice notice;
+                    notice.kind = lubancode::app::SessionNotice::Kind::SubagentCompletion;
+                    notice.title = item.title;
+                    notice.notes = notices;
+                    notice_sink().Emit(notice);
                 }
                 transcript.push_back(std::move(item));
             }

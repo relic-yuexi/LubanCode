@@ -92,7 +92,7 @@ main
 
 控制器只借这些件，不再自己造第二套。单测若直接进 `RunInteractiveSession`，函数也会调用同一只 `BuildSessionStack` 兜底。
 
-控制器构造与运行又分两半：`interactive_session_wiring.cpp` 接线、恢复、拆线，`interactive_session.cpp` 读输入、分派、泵活、开 turn。类声明藏在 `interactive_session_controller.hpp`，对外只露 `RunInteractiveSession`。
+控制器构造与运行又分两半：`interactive_session_assembly.cpp` 接线、恢复、拆线，`interactive_session.cpp` 读输入、分派、泵活、开 turn。类声明藏在 `interactive_session_controller.hpp`，对外只露 `RunInteractiveSession`。
 
 ## 4. 会话编排
 

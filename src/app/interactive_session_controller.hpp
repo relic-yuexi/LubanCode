@@ -1,6 +1,6 @@
 // TerminalSessionController 的私头(会话终章):类声明自 interactive_
 // session.cpp 拆出——控制器的"装配半边"(构造/析构/接线/材料包,定义在
-// interactive_session_wiring.cpp)与"运行半边"(主循环/泵仲裁/回合入口,
+// interactive_session_assembly.cpp)与"运行半边"(主循环/泵仲裁/回合入口,
 // 定义在 interactive_session.cpp)共用这一份声明。对外仍只有
 // app/interactive_session.hpp 的 RunInteractiveSession;本头不进任何
 // controller 之外的层。
@@ -33,7 +33,9 @@
 #include "app/memory_extract.hpp"
 #include "app/mention_support.hpp"
 #include "app/session_stack.hpp"
-#include "app/session_title_refiner.hpp"  // SessionTitleRefiner(两层标题第二层)
+#include "app/session_notice.hpp"  // SessionNoticeSink(非 turn 事件的通知口)
+#include "app/session_title_account.hpp"  // SessionTitleAccount(两层标题的账)
+#include "app/status_panel_assembly.hpp"  // StatusPanelInputs(状态面板拼装材料)
 #include "app/turn_runner.hpp"
 #include "app/wirings/goal_session_wiring.hpp"
 #include "app/wirings/loop_session_wiring.hpp"
@@ -69,6 +71,43 @@ namespace lubancode::app {
 // 持一份并按引用续用老名字;存档成员(session_store/session_meta/
 // session_title/...)以引用别名指向 runtime 那份,寿命由 runtime 成员的
 // 声明位保住。工具栈/backend 栈/peer/面板仍住本类,后续批次再搬。
+//
+// ---------------------------------------------------------------------------
+// 剩余方法与职责清单(骨架拆解反弹·问题 2;与实际代码逐条对账,别再靠
+// "曾经瘦身到过 N 行"自证):
+//
+// 装配半边(interactive_session_assembly.cpp)——"把零件接起来"与材料包:
+//   - 构造/析构:组合根件接线(Host 五只/工具注册/钩子挂接/--continue
+//     恢复/peer 起停)与对应收线;
+//   - 工具窄口 11 只(registry()/session_agent_tool()/...):全指 stack_;
+//   - BuildWorkflowToolOptions/BuildWorkflowAgentCallbacks:/workflow 的
+//     工具执行器与审批口装配;
+//   - RebuildLoop/SyncAgentRequestPolicy/RestoreThinkHistoryFrom/
+//     RefreshSkills/RefreshWorkflowCompletions/ReloadPackages/
+//     RefreshProjectInstructions:loop 重建与皮上刷新;
+//   - AssembleDispatchContext/MakeSessionCommandState/BuildCompactOptions/
+//     MakeCompactInputs/MakeTailContext:命令域与压缩路的材料包(内联)。
+//
+// 运行半边(interactive_session.cpp)——会话生命周期与主泵调度:
+//   - Run():主循环(状态面板发布/标题收货/后台通知/排队泵/goal-loop 泵/
+//     peer 来信/子代理回流/ReadLine 分派);
+//   - ProcessLine/DispatchSlashCommand:一行输入的 slash 分流与注册表路由;
+//   - RunSessionTurn:回合入口(User/Incoming 两路保真差异);
+//   - PumpScheduledWork:goal continuation 与 due loop tick 的公平仲裁;
+//   - 存档薄壳四只(EnsureSessionBegun/PersistNewMessages/OpenArtifactStore
+//     + steering 三只):本体在 runtime::SessionRuntime 与 cli 队列层;
+//   - 标题编排四只(BeginSessionTitle/StartTitleRefinement/
+//     BackfillTitleOnResume/PollSessionTitleRefinement):判定在
+//     SessionTitleAccount,这里只管打印/发精炼/同步 peer 名册;
+//   - CollectPromptHistory/BuildTerminalTitleText:Ctrl+R 数据源与终端
+//     标题模板;
+//   - EnsureMemoryTool/SyncWorktreeDirectory/EmitSessionHook/
+//     CleanupBackgroundAgents:工具注册/搬房善后/hooks 发射/清场。
+//
+// 已拆出的旁挂(本类持句柄调,不再自己实现):两层标题的账
+// (SessionTitleAccount)、整轮 usage 记账(RecordTurnUsageSteps)、状态面板
+// 拼装(BuildStatusPanelData)、非 turn 通知口(SessionNoticeSink)。
+// ---------------------------------------------------------------------------
 class TerminalSessionController {
 public:
     explicit TerminalSessionController(const InteractiveSessionOptions& options, SessionStack& stack);
@@ -378,12 +417,13 @@ private:
     bool& session_store_broken;         // 建档失败过,别每轮都再撞一次
     std::string& session_title;         // /title 设的标题;resume 时取存档里最后一条
     bool& session_title_pending;        // 建档前设了标题,建档成功后补写事件行
-    bool session_title_auto_attempted = false;  // 自动起名只试一次,失败不追着重试
-    // 两层标题的活账(实测问题 7):代数在人工 /title、/clear、/resume 时
-    // 翻号——在飞的精炼结果落地对代,对不上就弃(人工优先);精炼器持有
-    // 自己的后台线程,析构自带取消与有界收尾。
-    std::uint64_t title_epoch_ = 0;
-    lubancode::app::SessionTitleRefiner session_title_refiner_;
+    // 两层标题的"账"那半(骨架拆解反弹·问题 2 自本类拆出
+    // app/session_title_account):一场一次/落盘成功才占标题/代数弃迟到
+    // 结果的判定都在它那,本类只留"打印、发精炼、同步 peer 名册"。代数
+    // 在人工 /title、/clear、/resume 时翻号——在飞的精炼结果落地对代,
+    // 对不上就弃(人工优先);精炼器持自己的后台线程,析构自带取消与
+    // 有界收尾。
+    lubancode::app::SessionTitleAccount titles_;
     // 最近一次 compact 的台账(第四期 /context"最近一次 compact 所用角色、
     // 模型、前后 token、耗时和校验结果"):一行人话,由压缩路径写。
     std::string last_compact_line;
@@ -415,6 +455,16 @@ private:
     // 泵的公平仲裁(goal 分流合流):goal ready continuation 与 due loop
     // tick 共用一只泵(单飞),PumpNextWork 按优先级 + 公平账定谁走。
     bool PumpScheduledWork();
+
+    // ---- 骨架拆解反弹·问题 2 拆出的旁挂件 ----
+    // 非 turn 事件(后台命令完成/子代理回流)的通知口:控制器折 SessionNotice
+    // 递进来,终端画法在 TerminalSessionNoticeSink;经 notice_sink() 拿
+    // 基类引用调用,将来 app-server 挂第二只 sink 不用回改这里。
+    lubancode::app::TerminalSessionNoticeSink notice_sink_terminal_;
+    lubancode::app::SessionNoticeSink& notice_sink();
+    // 状态面板拼装材料(骨架拆解反弹·问题 2):指针字段构造尾绑一次,
+    // goal/loop 两枚每圈在 Run() 顶刷新,折数在 app/status_panel_assembly。
+    lubancode::app::StatusPanelInputs status_inputs_;
 
     // ---- 杂项 ----
     // 项目配置若显式钉了 active_provider,后续切换继续写回项目;没钉就

@@ -207,7 +207,7 @@ TEST_CASE("守门:三叶子自身零标准流(i18n/theme/line_editor)") {
 
 // 骨架拆解反弹·问题 3 的验收线:src/app/wirings/ 是纯装配根,目录下的
 // 文件不许有 TermOut()/TermErr()/ReadLine()/ReadChoiceMenu() 这类直接终端
-// IO——要说话就产事件/回调,由装配层(interactive_session_wiring)画。
+// IO——要说话就产事件/回调,由装配层(interactive_session_assembly)画。
 // 名单裁量:plan_session_wiring 与 peer_session_wiring 是 /plan、/peers 的
 // 命令交互本体(整改单问题 3 的位置清单不含这两只,另单处理),挂白名单
 // 放行;其余文件(含以后新进的)命中即败,防新代码继续往错的地方搬。

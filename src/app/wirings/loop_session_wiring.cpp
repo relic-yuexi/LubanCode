@@ -5,7 +5,7 @@
 // 骨架拆解反弹·问题 3:PumpDueTick/FinishTick 的调度状态机下沉
 // runtime::loop::LoopTickDriver(函数体在那边,原文随行),这里只剩拼
 // Host、接依赖、转发;本文件不再有 TermOut——状态机的通知经 Host.notify
-// 递给装配层(interactive_session_wiring)画。
+// 递给装配层(interactive_session_assembly)画。
 #include "app/wirings/loop_session_wiring.hpp"
 
 #include <chrono>

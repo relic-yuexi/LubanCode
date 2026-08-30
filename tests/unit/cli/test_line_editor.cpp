@@ -506,7 +506,7 @@ TEST_CASE("LineEditorCore: 候选超过 6 个,提示区最多 6 行 + 一行汇�
 // 忙碌排队输入框(TurnInputListener 的本地编辑器)的 Tab 补全:候选同样来自
 // BuildSlashCompletionCandidates(),提示直接读 RenderState(接线层不再另算
 // StreamSlashHintLines 那份平行账)。这里用与监听线程同款构造钉死编辑器侧
-// 语义;监听线程"空正文 Tab 明拦 no-op"的接线在 console_input.cpp。
+// 语义;监听线程"空正文 Tab 明拦 no-op"的接线在 console_input_turn_listener.cpp。
 // ---------------------------------------------------------------------------
 
 TEST_CASE("BuildSlashCompletionCandidates: 与 AllSlashCommands 逐条对齐,/think /effort 都在") {
@@ -630,7 +630,7 @@ TEST_CASE("忙碌路同款 editor: 先空输入 Tab,再键入 /eff,第一下 Tab
     LineEditorCore editor(BuildSlashCompletionCandidates());
     editor.BeginLine(/*composer=*/true);
     // 空正文 Tab 若真喂进编辑器,会进焦点态(监听线程在真路径上明拦 no-op,
-    // 见 console_input.cpp);这里故意喂一下,钉死"即便留下焦点态,打字也会
+    // 见 console_input_turn_listener.cpp);这里故意喂一下,钉死"即便留下焦点态,打字也会
     // 把它退干净,后续补全不受暗状态祸害"。
     const RenderState focus = editor.HandleKey(KeyEvent::Simple(KeyKind::Tab));
     CHECK(focus.focus_active);

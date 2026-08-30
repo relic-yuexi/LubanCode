@@ -7,7 +7,7 @@
 // 函数体)下沉 runtime::loop::LoopTickDriver(见 runtime/loop_tick_driver.
 // hpp),这里只留"构造+注入":拼 Host、接依赖、转发调用。渲染不在这层
 // ——状态机产 LoopTickNotice,经 Host.notify 递给装配层
-// (interactive_session_wiring)画,wirings 文件里没有直接终端 IO。
+// (interactive_session_assembly)画,wirings 文件里没有直接终端 IO。
 //
 // 状态归属:
 //   - scheduler(内存真值)/due 唤醒 token/单拍驱动器/loop_control 工具
