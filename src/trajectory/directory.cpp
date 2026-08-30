@@ -142,6 +142,9 @@ nlohmann::json SessionManifest::ToJson() const {
     json["status"] = status;
     json["created_at_ms"] = created_at_ms;
     json["lubancode_version"] = lubancode_version;
+    // event schema major 钉进 manifest(Token 账本单 §6.1.1):v1 老档没这键,
+    // 读侧按默认 1 兜。
+    json["event_schema_version"] = event_schema_version;
     return json;
 }
 
@@ -175,6 +178,9 @@ std::optional<SessionManifest> SessionManifest::FromJson(const nlohmann::json& j
     }
     if (json.contains("created_at_ms") && json.at("created_at_ms").is_number_integer()) {
         manifest.created_at_ms = json.at("created_at_ms").get<std::int64_t>();
+    }
+    if (json.contains("event_schema_version") && json.at("event_schema_version").is_number_integer()) {
+        manifest.event_schema_version = json.at("event_schema_version").get<int>();
     }
     return manifest;
 }

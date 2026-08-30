@@ -159,7 +159,7 @@ int main() {
         log.report.usage.output_reasoning_tokens =
             event.payload.value("reasoning_tokens", std::int64_t{0});
         log.report.step_index = event.payload.value("step_index", 0);
-        log.report.request_id = event.payload.value("request_id", std::string());
+        log.report.provider_response_id = event.payload.value("provider_response_id", std::string());
         log.report.model = event.payload.value("model", std::string());
         steps.push_back(std::move(log));
     });
@@ -203,7 +203,7 @@ int main() {
         const int hit_percent =
             total_input > 0 ? static_cast<int>(step.report.usage.cache_read_tokens * 100 / total_input) : -1;
         std::cout << "  step " << i << " / epoch " << step.report.cache_epoch
-                  << " / request_id=" << (step.report.request_id.empty() ? "(无)" : step.report.request_id)
+                  << " / response_id=" << (step.report.provider_response_id.empty() ? "(无)" : step.report.provider_response_id)
                   << " / read=" << step.report.usage.cache_read_tokens
                   << " miss=" << step.report.usage.input_tokens << " total=" << total_input
                   << " hit=" << (hit_percent < 0 ? std::string("?%") : std::to_string(hit_percent) + "%")
@@ -213,8 +213,8 @@ int main() {
         }
         std::cout << "\n";
         if (i == 0) {
-            first_request_id = step.report.request_id;
-        } else if (step.report.request_id == first_request_id && !first_request_id.empty()) {
+            first_request_id = step.report.provider_response_id;
+        } else if (step.report.provider_response_id == first_request_id && !first_request_id.empty()) {
             std::cout << "    [失败] request_id 与首步相同——解析器把旧 usage 重放了一遍,这绿是假的。\n";
             ++failures;
         }

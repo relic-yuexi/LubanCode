@@ -96,6 +96,9 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
     }
 
     if (auto usage = data.find("usage"); usage != data.end() && usage->is_object()) {
+        // 帧里真有 usage 对象才算 provider 明报(Token 账本单 A0):后面
+        // 凑 MessageDone 时把这位带出去,明报全零与没报分家。
+        usage_reported_ = true;
         usage_ = ParseUsage(*usage);
     }
 
@@ -213,7 +216,11 @@ std::vector<StreamEvent> EventParser::Finish() {
         }
     }
     if (saw_payload_ || started_ || !tool_calls_.empty()) {
-        events.push_back(MessageDone{StopReason(finish_reason_, !tool_calls_.empty()), usage_});
+        MessageDone done;
+        done.stop_reason = StopReason(finish_reason_, !tool_calls_.empty());
+        done.usage = usage_;
+        done.usage_reported = usage_reported_;
+        events.push_back(std::move(done));
     }
     // 结构化 reasoning_details 的留账诊断:不映射(映射另定)但必须说破,
     // 不让"模型回了结构化思考、客户端一个字没接"这件事无声发生。

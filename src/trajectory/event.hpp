@@ -26,6 +26,13 @@ namespace lubancode::trajectory {
 inline constexpr std::string_view kEventSchema = "lubancode.trajectory.event";
 // 本件实现的 envelope schema 版本;只认已实现版本(§4.1)。
 inline constexpr int kEnvelopeSchemaVersion = 1;
+// v2(Token 账本单 §6.1.1):usage 事实从 model.output.completed.payload.usage
+// 迁出,自立 model.usage.recorded 事件为 canonical owner。v1 completed 的
+// usage 只作 legacy read。一条 stream 不混 v1/v2;session manifest 钉
+// event schema major。v2 与 v1 的差异只在:
+//   - 新增 kind model.usage.recorded(v1 stream 拒收);
+//   - model.output.completed 的 payload 不再带 usage 键(v2 拒收该键)。
+inline constexpr int kMaxEnvelopeSchemaVersion = 2;
 
 // ---------------------------------------------------------------------------
 // 枚举(§4.2-4.5)
@@ -83,7 +90,7 @@ const char* DurabilityName(Durability value);
 std::optional<Durability> DurabilityFromName(std::string_view name);
 
 // ---------------------------------------------------------------------------
-// 事件种类(§五全列,67 种)
+// 事件种类(§五全列 67 种 + v2 的 model.usage.recorded,共 68 种)
 // ---------------------------------------------------------------------------
 
 enum class EventKind {
@@ -109,6 +116,9 @@ enum class EventKind {
     ModelOutputCompleted,
     ModelOutputFailed,
     ModelOutputCancelled,
+    // v2(Token 账本单 §6.1.1):一次 request attempt 的 usage canonical
+    // owner。completed/failed/cancelled 都引用它,不复制 usage 正文。
+    ModelUsageRecorded,
     // 5.4 工具调用与结果
     ToolExecutionPlanned,
     ToolInputEffective,

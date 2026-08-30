@@ -86,6 +86,9 @@ std::optional<StreamEvent> HandleMessageDelta(const json& data) {
         event.stop_reason = it->value("stop_reason", "");
     }
     if (auto it = data.find("usage"); it != data.end() && it->is_object()) {
+        // 帧里真有 usage 对象才算 provider 明报(Token 账本单 A0):明报全零
+        // 也是真,没这对象才是没报。
+        event.usage_reported = true;
         event.usage.input_tokens = it->value("input_tokens", static_cast<std::int64_t>(0));
         event.usage.output_tokens = it->value("output_tokens", static_cast<std::int64_t>(0));
         // 实测 MiniMax 在 message_delta 的顶层 usage 里回这两个字段;没有就是 0。

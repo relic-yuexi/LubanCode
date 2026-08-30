@@ -39,6 +39,7 @@ private:
 
     std::map<int, ToolCall> tool_calls_;
     Usage usage_;
+    bool usage_reported_ = false;  // 流里真见过 usage 对象(Token 账本单 A0)
     std::string finish_reason_;
     std::string reasoning_delta_field_;
     bool started_ = false;

@@ -1646,7 +1646,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                         event.payload.value("cache_creation_tokens", std::int64_t{0});
                     report.usage.output_reasoning_tokens = event.payload.value("reasoning_tokens", std::int64_t{0});
                     report.step_index = event.payload.value("step_index", 0);
-                    report.request_id = event.payload.value("request_id", std::string());
+                    report.provider_response_id = event.payload.value("provider_response_id", std::string());
+                    report.reported_by_provider = event.payload.value("reported_by_provider", false);
                     report.model = event.payload.value("model", std::string());
                     report.cache_epoch = event.payload.value("cache_epoch", 1);
                     report.epoch_break_reason = event.payload.value("epoch_break_reason", std::string());

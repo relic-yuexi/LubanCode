@@ -51,6 +51,10 @@ std::string GenerateSessionId(int year, int month, int day, int hour, int minute
 
 struct SessionManifest {
     int schema_version = 1;
+    // 本 session 各 stream 的 event schema major(Token 账本单 §6.1.1):
+    // v2 = usage 走 model.usage.recorded。manifest 钉死 major,旧 manifest
+    // 没写这键按 v1 读。
+    int event_schema_version = 1;
     std::string workspace_key;
     std::string session_id;
     std::string launch_cwd;                 // UTF-8 文本

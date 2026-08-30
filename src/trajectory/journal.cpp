@@ -170,6 +170,9 @@ JournalVerifyReport VerifyJournalFile(const std::filesystem::path& path) {
 
     std::string prev_hash(kGenesisHash);
     std::uint64_t expected_seq = 1;
+    // 一条 stream 只得一个 schema major(Token 账本单 §6.1.1):v1/v2 混写
+    // 的文件整本拒绝,不让读者跳过不认识的 usage 事件后报一只残账。
+    int stream_schema_version = 0;
     std::string line;
     std::uint64_t line_number = 0;
     bool truncated = false;
@@ -209,6 +212,14 @@ JournalVerifyReport VerifyJournalFile(const std::filesystem::path& path) {
             report.error_code = "verify.seq_gap";
             report.message = "第 " + std::to_string(line_number) + " 行 seq 期望 " +
                              std::to_string(expected_seq) + " 实得 " + std::to_string(envelope.seq);
+            return report;
+        }
+        if (stream_schema_version == 0) {
+            stream_schema_version = envelope.schema_version;
+        } else if (stream_schema_version != envelope.schema_version) {
+            report.error_code = "verify.schema_version_mixed";
+            report.message = "第 " + std::to_string(line_number) +
+                             " 行 schema_version 与首行不同:一条 stream 不混 v1/v2";
             return report;
         }
         if (envelope.prev_hash != prev_hash) {

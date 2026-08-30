@@ -94,6 +94,11 @@ struct RecorderClock {
 struct RecorderOptions {
     BlobStoreOptions blobs;
     std::string recorder_version = "trajectory-recorder-v1";
+    // 本 stream 的 event schema major(Token 账本单 §6.1.1):1 = v1(usage
+    // 挂 completed.payload.usage,legacy);2 = v2(usage 走
+    // model.usage.recorded canonical owner,completed 不复制)。一场 run
+    // 一只 recorder,一条 stream 只得一个版本,不混。
+    int event_schema_version = kEnvelopeSchemaVersion;
 };
 
 class TrajectoryRecorder : public TrajectorySink {

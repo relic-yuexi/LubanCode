@@ -296,7 +296,7 @@ TEST_CASE("usage:流水账 append-only,命中率按 token 总和重算,未回报
     stats.Add(unreported);
 
     REQUIRE(stats.steps.size() == 3);
-    CHECK(stats.steps[0].request_id == "req_a");
+    CHECK(stats.steps[0].provider_response_id == "req_a");
     CHECK(stats.steps[1].reported);
     CHECK_FALSE(stats.steps[2].reported);
     CHECK(stats.steps[2].cache_hit_percent() == -1);  // unknown,不是 0

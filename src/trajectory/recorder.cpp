@@ -59,6 +59,9 @@ struct TurnState {
     std::map<std::string, std::string> prepared_events;  // event_id -> request_id
     std::set<std::string> sent_requests;
     std::set<std::string> completed_requests;
+    // v2 model.usage.recorded 的 owner 键("request_id:attempt"):一枚
+    // request attempt 至多一条 usage owner,重复提交拒绝(Token 账本单 §6.1.1)。
+    std::set<std::string> usage_owners;
     std::map<std::string, CallState> calls;
 };
 
@@ -300,6 +303,25 @@ struct TrajectoryRecorder::Impl {
                 }
                 return std::nullopt;
             }
+            case EventKind::ModelUsageRecorded: {
+                // v2 usage owner(Token 账本单 §6.1.1):v1 stream 已在 schema
+                // 层拒收,走到这里必是 v2。usage 必须挂在已发送的 request 上;
+                // 一枚 request_id+attempt 至多一条 owner。
+                if (turn == nullptr) {
+                    return "state.turn_not_started";
+                }
+                if (!envelope.request_id.has_value() ||
+                    !turn->sent_requests.contains(*envelope.request_id)) {
+                    return "state.request_not_sent";
+                }
+                const std::string key = *envelope.request_id + ":" +
+                                        std::to_string(request.payload.value("attempt",
+                                                                              std::uint64_t{1}));
+                if (turn->usage_owners.contains(key)) {
+                    return "state.usage_owner_duplicate";
+                }
+                return std::nullopt;
+            }
             case EventKind::ToolExecutionPlanned: {
                 if (turn == nullptr) {
                     return "state.turn_not_started";
@@ -508,6 +530,12 @@ struct TrajectoryRecorder::Impl {
                 turn->completed_requests.insert(envelope.request_id.value_or(""));
                 return;
             }
+            case EventKind::ModelUsageRecorded: {
+                turn->usage_owners.insert(*envelope.request_id + ":" +
+                                          std::to_string(request.payload.value("attempt",
+                                                                                std::uint64_t{1})));
+                return;
+            }
             case EventKind::ToolExecutionPlanned: {
                 turn->calls[*envelope.call_id].planned = true;
                 return;
@@ -581,6 +609,10 @@ std::expected<TrajectoryRecorder, std::string> TrajectoryRecorder::Start(
     auto writer = JournalWriter::Open(stream_path, JournalWriter::OpenMode::CreateNew);
     if (!writer.has_value()) {
         return std::unexpected(std::move(writer).error());
+    }
+    if (options.event_schema_version < kEnvelopeSchemaVersion ||
+        options.event_schema_version > kMaxEnvelopeSchemaVersion) {
+        return std::unexpected("schema.unsupported_version: event_schema_version 只认 1(v1)或 2(v2 usage owner)");
     }
     auto impl = std::make_shared<Impl>();
     impl->writer = std::move(*writer);
@@ -665,6 +697,7 @@ RecordReceipt TrajectoryRecorder::Record(RecordRequest request, Durability durab
 
     // 信封(schema 前半:类型与结构)。
     EventEnvelope envelope;
+    envelope.schema_version = impl_->options.event_schema_version;
     envelope.workspace_key = request.scope.workspace_key;
     envelope.session_id = request.scope.session_id;
     envelope.run_id = request.scope.run_id;
@@ -717,7 +750,8 @@ RecordReceipt TrajectoryRecorder::Record(RecordRequest request, Durability durab
     if (auto error = ValidateEnvelope(envelope)) {
         return reject(error->error_code);
     }
-    if (auto error = ValidatePayload(request.kind, request.payload)) {
+    if (auto error = ValidatePayloadWithVersion(impl_->options.event_schema_version, request.kind,
+                                                request.payload)) {
         return reject(error->error_code);
     }
 
@@ -821,7 +855,8 @@ RecordReceipt TrajectoryRecorder::FinishRun(EventKind terminal_kind, std::string
     request.scope.call_id = std::nullopt;
     // §8.3 终态封口四件套。
     request.payload = MakeTerminalSealPayload(impl_->first_event_hash,
-                                              impl_->next_seq - 1, kEnvelopeSchemaVersion,
+                                              impl_->next_seq - 1,
+                                              impl_->options.event_schema_version,
                                               impl_->options.recorder_version);
     if (!reason.empty()) {
         request.payload["reason"] = std::move(reason);
@@ -839,7 +874,7 @@ RecordReceipt TrajectoryRecorder::EndSession(std::string reason,
     request.scope.request_id = std::nullopt;
     request.scope.call_id = std::nullopt;
     request.payload = MakeTerminalSealPayload(impl_->first_event_hash, impl_->next_seq - 1,
-                                              kEnvelopeSchemaVersion,
+                                              impl_->options.event_schema_version,
                                               impl_->options.recorder_version);
     request.payload["reason"] = std::move(reason);
     if (next_session_id.has_value()) {

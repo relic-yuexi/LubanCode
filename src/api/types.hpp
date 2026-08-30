@@ -272,14 +272,17 @@ inline std::int64_t TotalInputTokens(const Usage& usage) {
 // usage 之外带上这笔账的身份——第几步、哪个请求、什么模型、哪个缓存
 // epoch、这一步前缀是不是上一份的原样追加版——逐步流水账(StepUsageRecord)
 // 才有键可落,整轮汇总才能按 token 求和而不是拿百分比平均。
-// request_id/model 取流里 MessageStart 的值,provider 不给就是空;
+// provider_response_id/model 取流里 MessageStart 的值,provider 不给就是空。
+// 注意它是 provider 的 response id,只作外部对账;Journal 关联主键用
+// AgentLoop 发请求前铸的 local request id(Token 账本单 §6.1.2),二者不许
+// 混——local id 由 runtime RequestUsageRecord 包着,不塞进 api 层。
 // cache_epoch/epoch_break_reason/prefix_append_only 由 AgentLoop 的前缀
 // 记账(agent/prefix.hpp)在发请求前填:epoch 断不是失败,无名无姓地断
 // 才是失败。
 struct UsageReport {
     Usage usage;
     int step_index = 0;              // Run() 内的步号(0-based,一步一次模型请求)
-    std::string request_id;          // 服务端消息 id(MessageStart.id),可空
+    std::string provider_response_id;  // 服务端消息 id(MessageStart.id),可空
     std::string model;               // MessageStart.model,可空
     int cache_epoch = 1;             // 请求落在哪个缓存 epoch(1 起)
     std::string epoch_break_reason;  // 本步断了 epoch 时的点名(空 = 没断)
@@ -303,8 +306,14 @@ struct UsageReport {
     // 默认关——不做全序列化):-1 = 没开诊断或该 backend 不提供序列化。
     std::int64_t wire_common_prefix_bytes = -1;
 
-    // provider 是否真回报了 usage(五项全零 = 没给,真实请求不可能全零)。
-    // 没回报就记 unknown,不许拿 0 冒充"真未命中"。
+    // provider 是否明报了 usage(Token 账本单 A0 的显式位):四家 wire 看到
+    // usage 帧才置真,明报全零也是真。耐久账(accounting::UsageSample 与
+    // Trajectory v2 model.usage.recorded)只认这一位。
+    bool reported_by_provider = false;
+
+    // legacy 推断 helper(五项任一非零 = 报过):老 UI 流水(TurnUsageStats/
+    // ContextTracker 面板)沿用。provider"明报全零"与"没报"靠它分不开,
+    // 新账路不许再走这只。
     bool reported() const {
         return usage.input_tokens > 0 || usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
                usage.cache_creation_tokens > 0 || usage.output_reasoning_tokens > 0;
@@ -366,9 +375,13 @@ struct BuiltinToolDone {
 };
 
 // 流的最后一个语义事件:消息结束,带上停止原因和用量统计。
+// usage_reported(Token 账本单 A0):provider 是否真回了一帧 usage。四家 wire
+// 只在帧里真的出现 usage 对象时置真——"明报全零"与"压根没报"从这里分家,
+// 下游不许再拿"五项全零"猜。老解析路径没置位的,消费端按 legacy 推断。
 struct MessageDone {
     std::string stop_reason;
     Usage usage;
+    bool usage_reported = false;
 };
 
 // 模型输出的一张图片(Responses 的 image_generation_call.result)。base64
