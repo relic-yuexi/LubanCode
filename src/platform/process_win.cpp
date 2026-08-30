@@ -1338,9 +1338,14 @@ void ChildProcess::Shutdown(int wait_ms) {
         const DWORD wait_result =
             WaitForSingleObject(static_cast<HANDLE>(process_), wait_ms > 0 ? static_cast<DWORD>(wait_ms) : 0);
         if (wait_result != WAIT_OBJECT_0) {
-            // 还没退出:Job Object 连带子子进程一起杀掉;没有 job(创建/绑定
-            // 失败过)就退化成只杀主进程。
+            // 还没退出:主动杀,不赌句柄语义。旧写法只 CloseHandle(job_)——
+            // KILL_ON_JOB_CLOSE 只在"最后一个句柄"关掉时才连带杀,别处若还
+            // 持有同 job 的句柄(或绑定失败的边角),进程就活着,CI 实翻过这车
+            // (package_code_mounting 回滚杀不死)。TerminateJobObject 是显式
+            // 下杀令,连子子进程一起收;没有 job(创建/绑定失败过)就退化成
+            // 只杀主进程。杀完再等,末了才关句柄。
             if (job_ != nullptr) {
+                TerminateJobObject(static_cast<HANDLE>(job_), 1);
                 CloseHandle(static_cast<HANDLE>(job_));
                 job_ = nullptr;
             } else {

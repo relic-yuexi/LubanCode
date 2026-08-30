@@ -211,7 +211,11 @@ TEST_CASE("fixture 回放:每册事件类型序列/usage/stop_reason 与 manifes
         {ChunkMode::RandomFixed, "随机小块"}, {ChunkMode::PairFrames, "并帧"}};
     for (const auto& fixture : *all) {
         for (const auto& [mode, mode_name] : modes) {
-            CAPTURE(fixture.fixture_id, mode_name, kChunkSeed);
+            // doctest 的 CAPTURE 只收一枚实参——MSVC 老预处理器闷声吞多参,
+            // GCC/clang 按规格拒(CI 一日三雷同族);拆成三枚。
+            CAPTURE(fixture.fixture_id);
+            CAPTURE(mode_name);
+            CAPTURE(kChunkSeed);
             const auto events = Replay(fixture, mode);
 
         std::vector<std::string> names;

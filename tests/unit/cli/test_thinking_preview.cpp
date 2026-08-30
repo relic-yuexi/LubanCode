@@ -717,7 +717,9 @@ TEST_CASE("四家 wire fixture:ThinkingDelta 喂同一组显示测试,画面一�
         {"google_generate_content", "internal_thought_part_stream"},
     };
     for (const auto& source : sources) {
-        CAPTURE(source.wire_dir, source.id);
+        // doctest 的 CAPTURE 只收一枚实参(同 test_api_fixture_replay 的雷)。
+        CAPTURE(source.wire_dir);
+        CAPTURE(source.id);
         const auto fixture = lubancode_test::LoadApiFixture(source.wire_dir, source.id);
         REQUIRE(fixture.has_value());
         const WirePicture picture = FeedFixture(*fixture);
