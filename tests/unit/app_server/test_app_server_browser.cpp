@@ -789,23 +789,29 @@ TEST_CASE("阶段B·让路:用户动作不排在 Agent 动作后头") {
     });
 
     // 在途:agent 快照(读动作,不过审批,但占着唯一的动作工位)。
+    // 首笔等待放 40s:慢 runner 上 2s 不够,而 REQUIRE 一 abort,handler
+    // 引用的栈账(sidecar_order/note)还在工作线程手里,拆栈即 SIGSEGV
+    // (CI ubuntu 实翻)。断言改 CHECK+早退,退场前先摘 handler 再拆栈。
     harness.Feed(R"({"id":80,"method":"browser/snapshot","params":{"owner":"agent","threadId":"t-arb"}})");
-    for (int i = 0; i < 400; i++) {
+    for (int i = 0; i < 8000; i++) {
         std::lock_guard<std::mutex> lock(order_mutex);
         if (!sidecar_order.empty()) {
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    REQUIRE([&] {
-        std::lock_guard<std::mutex> lock(order_mutex);
-        return sidecar_order.size();
-    }() == 1);
+    if ([&] {
+            std::lock_guard<std::mutex> lock(order_mutex);
+            return sidecar_order.size();
+        }() != 1) {
+        CHECK_MESSAGE(false, "首笔 agent 快照未在 40s 内进 sidecar(慢 runner 或 dispatch 病)");
+        return; // 早退不 REQUIRE-abort:留给析构安全收线
+    }
 
     // 排队:agent 快照二号,再用户点击。用户点击必须先于 agent 二号跑。
     harness.Feed(R"({"id":81,"method":"browser/snapshot","params":{"owner":"agent","threadId":"t-arb"}})");
     harness.Feed(R"({"id":82,"method":"browser/action","params":{"kind":"click","ref":"e1"}})");
-    for (int i = 0; i < 600; i++) {
+    for (int i = 0; i < 6000; i++) {
         std::lock_guard<std::mutex> lock(order_mutex);
         if (sidecar_order.size() == 3) {
             break;
@@ -817,7 +823,10 @@ TEST_CASE("阶段B·让路:用户动作不排在 Agent 动作后头") {
         std::lock_guard<std::mutex> lock(order_mutex);
         order = sidecar_order;
     }
-    REQUIRE(order.size() == 3);
+    if (order.size() != 3) {
+        CHECK_MESSAGE(false, "三笔未在 60s 内收齐");
+        return; // 早退,别 REQUIRE-abort
+    }
     CHECK(order[0] == "snapshot:agent"); // 在途的让不了(串行底线)
     CHECK(order[1] == "action:user");    // 用户插队,排到 agent 二号前头
     CHECK(order[2] == "snapshot:agent"); // Agent 让路

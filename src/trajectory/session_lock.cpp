@@ -14,6 +14,10 @@
 #endif
 #include <share.h>
 #include <windows.h>
+#elif defined(__APPLE__)
+#include <sys/sysctl.h>
+#include <sys/types.h>
+#include <unistd.h>
 #else
 #include <sys/types.h>
 #include <unistd.h>
@@ -109,6 +113,21 @@ std::string ProcessStartTokenOf(unsigned long pid) {
     const std::string token = StartTokenFromHandle(process);
     CloseHandle(process);
     return token;
+#elif defined(__APPLE__)
+    // macOS 没有 /proc:sysctl KERN_PROC_PID 拿 kinfo_proc 的 p_starttime
+    //(自 boot 的微秒 timeval),折成同一枚十进制文本。拿不到给空串,上层
+    // 保守判活(CI macOS 实翻:/proc 路恒空 → PID 复用案探不到 token,
+    // 锁抢不掉)。
+    int mib[4] = {CTL_KERN, KERN_PROC, KERN_PROC_PID, static_cast<int>(pid)};
+    struct kinfo_proc info;
+    std::size_t size = sizeof(info);
+    if (sysctl(mib, 4, &info, &size, nullptr, 0) != 0 || size < sizeof(info)) {
+        return {};
+    }
+    const std::int64_t micros =
+        static_cast<std::int64_t>(info.kp_proc.p_starttime.tv_sec) * 1000000 +
+        info.kp_proc.p_starttime.tv_usec;
+    return std::to_string(micros);
 #else
     // /proc/<pid>/stat 第 22 字段 starttime(自 boot 的时钟滴答)。comm 字段
     // 可能含空格与括号,先找最后一个 ')' 再从尾巴取。

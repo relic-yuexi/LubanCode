@@ -937,8 +937,10 @@ TEST_CASE("不同插件并行:各有 state,各睡各的,总时长不叠串行") 
     b.join();
     const auto elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
-    // 并行:一笔的睡眠盖住两路(150ms 上下;串行会是 300ms 上下)。
-    CHECK(elapsed_ms < 260);
+    // 并行:一笔的睡眠盖住两路(150ms 上下;串行会是 300ms 上下)。慢
+    // runner(CI macOS 实翻)上调度能吃掉并行红利,帽放到串行线下方一档;
+    // 判"确实并行"的关键是没到 300ms 级,不是毫秒精度。
+    CHECK(elapsed_ms < 290);
     CHECK(transport_a.inner.call_count() == 1);
     CHECK(transport_b.inner.call_count() == 1);
 }

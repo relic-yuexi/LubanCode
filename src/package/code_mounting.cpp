@@ -36,7 +36,21 @@ bool EscapesPackageRoot(const std::filesystem::path& expanded, const std::filesy
         return normalized != root;
     }
     const std::string rel_utf8 = PathToUtf8(rel);
-    return rel_utf8 == ".." || rel_utf8.rfind("../", 0) == 0 || rel_utf8.rfind("..\\", 0) == 0;
+    if (rel_utf8 == ".." || rel_utf8.rfind("../", 0) == 0 || rel_utf8.rfind("..\\", 0) == 0) {
+        return true;
+    }
+    // 词法"前缀裁剪"漏一类:展开值 = 包根/a/包根/b 这类"双绝对占位符拼接"。
+    // POSIX 下 /pkg/a//pkg/b 相对 /pkg 算出 a/pkg/b——没有 .. 段,靠相对
+    // 路径判不出;但整值里包根后头又出现绝对前缀,是垃圾值不是路径(CI
+    // ubuntu/macos 实翻;Windows 盘符版本靠 rel.empty() 兜住了)。补一道:
+    // 相对结果里再出现包根本身的规范化文本,即视为二次拼接,拒。
+    if (!root.empty()) {
+        const std::string root_utf8 = PathToUtf8(root);
+        if (!root_utf8.empty() && rel_utf8.find(root_utf8) != std::string::npos) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // env 缺省取值口:宿主 getenv。Windows 的 _dupenv 报错路不走,直接 getenv
