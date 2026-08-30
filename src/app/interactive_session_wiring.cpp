@@ -1274,6 +1274,9 @@ lubancode::agent::CompactOptions TerminalSessionController::BuildCompactOptions(
             }
         }
     }
+    // compact_partition_count(Compact 四分区单·阶段 1):compact 触发后切
+    // 几份。配置层已在合并时校验 2..8;这里只管带下来。
+    options.partition_count = static_cast<std::size_t>(config.compact_partition_count);
     return options;
 }
 

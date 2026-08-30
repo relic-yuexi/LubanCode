@@ -5,27 +5,16 @@
 #include <variant>
 
 #include "agent/artifact_store.hpp"
+#include "agent/context.hpp"  // IsUserTurnStart:公共 turn 判定(§二 唯一定义)
 #include "platform/text_encoding.hpp"  // Utf8*Boundary:预览头尾不劈半个字
 
 namespace lubancode::agent {
 
 namespace {
 
-// 一条"真正的用户输入"消息:role 是 User,且内容里带着 TextBlock 或
-// ImageBlock——区别于同样顶着 User 角色、内容全是 ToolResultBlock 的那种
-// "把工具结果喂回去"的中间消息。(agent/context.cpp 同名私有函数的又一
-// 份拷贝;三处各自独立演化,语义钉死在这一条注释里。)
-bool IsUserTurnStart(const api::Message& message) {
-    if (message.role != api::Role::User) {
-        return false;
-    }
-    for (const auto& block : message.content) {
-        if (std::holds_alternative<api::TextBlock>(block) || std::holds_alternative<api::ImageBlock>(block)) {
-            return true;
-        }
-    }
-    return false;
-}
+// (IsUserTurnStart 的私有拷贝已删:判定收拢到 agent/context.hpp 的公共
+// IsUserTurnStart——Compact 四分区单阶段 0,§二 的唯一定义,磁盘账与
+// 内存路共用同一只。)
 
 // 只读工具的规范键:同键才谈得上"同一件事再看一遍"。副作用工具
 // (run_command / web_fetch / web_search / agent / ...)一律给空键——命令

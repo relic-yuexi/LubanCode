@@ -64,6 +64,35 @@ std::size_t EstimateHistoryTokens(const std::vector<lubancode::api::Message>& hi
     return lubancode::agent::EstimateHistoryTokens(history);
 }
 
+// 压力口径估算(P1-1 口径统一,Compact 四分区单阶段 0 起为手工/自动两路
+// 共用的一只):把任意一份 history 过一遍 L1 无损结构压缩(临时 memo/stats,
+// 不落盘、不定形),再按统一 token 口径估。触发线、/context 的对话历史、
+// 压缩前后账都拿这一把尺——拿未压缩全量估,重复工具结果全被虚算,压完的
+// "瘦"也是假瘦,反涨断言两边就不可比了。
+std::size_t PressureEstimateTokens(lubancode::agent::Agent& loop,
+                                   const std::vector<lubancode::api::Message>& history) {
+    lubancode::agent::ResultViewMemo scratch_memo;
+    lubancode::agent::StructuralCompressionStats scratch_stats;
+    return lubancode::agent::EstimateHistoryTokens(lubancode::agent::CompressWorkingView(
+        history, loop.context().structural_options(), scratch_stats, scratch_memo, /*store=*/nullptr));
+}
+
+// 反涨闸(0.26.84 治三,阶段 0 收口):压缩后的新史(压力口径)不比旧史小
+// 时拒收换账——存档添在没瘦的热区头上,真机 70.8k 压成 73.7k 还标"校验通
+// 过"。手工 /compact 与自动 TryRunCompact 共用这一只;拒收时旧 history 一
+// 字不动。返回 true = 拒收(调用方就地收场)。
+bool RejectGrownCompactHistory(const lubancode::cli::Theme& theme, std::size_t before_tokens,
+                               std::size_t new_tokens) {
+    if (new_tokens < before_tokens) {
+        return false;
+    }
+    lubancode::cli::TermOut()
+        << theme.error << trf("compact.grew_rejected", lubancode::cli::FormatTokenCount(before_tokens),
+                              lubancode::cli::FormatTokenCount(new_tokens))
+        << theme.reset << tr("compact.grew_rejected_tail") << "\n";
+    return true;
+}
+
 // /context 命令:不带参数打分类占用分析(系统提示/工具定义/对话历史三类
 // 字符数估 token + 条形图,拼装规则全在 FormatContextBreakdown,这里只管
 // 收集与打印);带参数(256k/512k/1m/裸数字)临时改窗口大小,只本会话
@@ -77,7 +106,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const lubancode::agent::ModelUsageLedger* usage_ledger,
                            const lubancode::agent::ContextArtifactStore* artifact_store,
                            const ContextLayersReport* layers,
-                           const lubancode::agent::ModelRouteTable* roles_table) {
+                           const lubancode::agent::ModelRouteTable* roles_table,
+                           int compact_partition_count) {
     if (args.empty()) {
         const auto lines = lubancode::cli::FormatContextBreakdown(
             sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
@@ -174,6 +204,14 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
             } else {
                 TermOut() << "  " << tr("cmd.context.output_budget_unset") << "\n";
             }
+        }
+        // compact turn 策略(§八):compact_partition_count 配成几份、前几份
+        // map、末份热区,一行说清——不调模型,纯配置展示。
+        if (compact_partition_count > 0) {
+            TermOut() << "  "
+                      << trf("cmd.context.compact_turns", compact_partition_count,
+                             compact_partition_count - 1)
+                      << "\n";
         }
         if (layers != nullptr && layers->budget.has_value()) {
             const auto& plan = *layers->budget;
@@ -278,10 +316,61 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
         TermOut() << trf("cmd.compact.dryrun.pinned", lubancode::agent::EstimateHistoryTokens(hot),
                          options.required_open_items.size())
                   << "\n";
+        // ---- turn 分区计划(Compact 四分区单·阶段 1):纯计算,不调模型 ----
+        // 不发请求也能说清"若现在压缩,四份各有哪些 turn、各占多少 token、
+        // 哪些 ToolResult 已外置"。计量用会话现场的结构压缩口径(与触发线、
+        // 压缩前后账同一把尺),预算诊断用压缩路由自己的窗口。
+        lubancode::agent::TurnPartitionBudgets plan_budgets;
+        plan_budgets.structural = loop.context().structural_options();
+        plan_budgets.compact_model = options.budget;
+        const auto plan = lubancode::agent::BuildTurnPartitionPlan(history, options.partition_count, plan_budgets);
+        TermOut() << trf("cmd.compact.dryrun.turnplan", plan.turns.size(), plan.partitions.size(),
+                         plan.map_calls)
+                  << "\n";
+        if (plan.has_prior_archive) {
+            TermOut() << trf("cmd.compact.dryrun.prior",
+                             lubancode::cli::FormatTokenCount(plan.prior_archive_tokens))
+                      << "\n";
+        }
+        for (const auto& partition : plan.partitions) {
+            const std::size_t first_turn =
+                partition.first_turn < plan.turns.size() ? plan.turns[partition.first_turn].number : 0;
+            const std::size_t last_turn =
+                partition.last_turn > 0 && partition.last_turn - 1 < plan.turns.size()
+                    ? plan.turns[partition.last_turn - 1].number
+                    : first_turn;
+            TermOut() << trf("cmd.compact.dryrun.partition", partition.label,
+                             first_turn, last_turn, lubancode::cli::FormatTokenCount(partition.working_tokens),
+                             partition.externalized_results, partition.is_hot ? tr("cmd.compact.dryrun.hot_tag") : std::string())
+                      << (partition.over_map_budget ? tr("cmd.compact.dryrun.over_tag") : std::string()) << "\n";
+        }
+        TermOut() << trf("cmd.compact.dryrun.offload", lubancode::cli::FormatTokenCount(plan.total_raw_tokens),
+                         lubancode::cli::FormatTokenCount(plan.total_working_tokens), plan.externalized_results)
+                  << "\n";
+        if (!plan.compact_input_budget.has_value()) {
+            TermOut() << theme.stats << tr("cmd.compact.window_unknown") << theme.reset << "\n";
+        } else if (plan.any_turn_over_map_budget) {
+            TermOut() << theme.error << trf("cmd.compact.dryrun.over_turn",
+                                            lubancode::cli::FormatTokenCount(*plan.compact_input_budget))
+                      << theme.reset << "\n";
+        } else if (plan.any_partition_over_map_budget) {
+            TermOut() << theme.error << trf("cmd.compact.dryrun.over_partition",
+                                            lubancode::cli::FormatTokenCount(*plan.compact_input_budget))
+                      << theme.reset << "\n";
+        }
+        if (plan.has_incomplete_tool_exchange) {
+            TermOut() << theme.stats << tr("cmd.compact.dryrun.orphan") << theme.reset << "\n";
+        }
+        if (!plan.WorthCompacting()) {
+            TermOut() << theme.error << tr("cmd.compact.dryrun.no_gain") << theme.reset << "\n";
+        }
         return {};
     }
 
-    const std::size_t before_tokens = EstimateHistoryTokens(history);
+    // 压缩前后账走压力口径(P1-1 口径统一):与触发线、自动压缩、反涨闸同
+    // 一把尺——拿未压缩全量估,重复工具结果全被虚算,压完的"瘦"是假瘦,
+    // 反涨断言两边不可比。反涨闸本身见 RejectGrownCompactHistory。
+    const std::size_t before_tokens = PressureEstimateTokens(loop, history);
     const std::size_t old_size = history.size();
 
     lubancode::agent::CompactOptions run_options = options;
@@ -300,9 +389,14 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
     std::vector<std::size_t> kept_indices;
     const auto new_history = lubancode::agent::BuildCompactedHistory(
         history, result->archive, lubancode::agent::kDefaultHotZoneTokens, &kept_indices);
+    const std::size_t after_tokens = PressureEstimateTokens(loop, new_history);
+    // 反涨闸(阶段 0):手工 /compact 与自动 TryRunCompact 共用同一只——新史
+    // (压力口径)不比旧史小便拒收换账,旧 history 一字不动、事件不落盘。
+    if (RejectGrownCompactHistory(theme, before_tokens, after_tokens)) {
+        return {};
+    }
     const auto base_event = lubancode::sessions::MakeCompactEvent(old_size, new_history, std::move(kept_indices));
     loop.ReplaceHistory(new_history);
-    const std::size_t after_tokens = EstimateHistoryTokens(new_history);
 
     // compact_v2 事件:回放语义与 v1 同型,多的 manifest/epoch/metrics 供
     // 审计与 rebase。
@@ -1330,7 +1424,7 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
     }
     HandleContextCommand(args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme,
                          loop.cache_epoch(), &loop.runtime_profile(), in.usage_ledger, in.artifact_store, &layers,
-                         in.roles_table);
+                         in.roles_table, in.compact_partition_count);
 }
 
 void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) {
@@ -1432,15 +1526,9 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
     // 请求同一本——拿未压缩全量估,重复工具结果全被虚算,压完的"瘦"也是
     // 假瘦。/context 的"最近一次压缩"行、compact_v2 的 pre/post_tokens
     // 与状态栏短闪都从这两个数出。换账前对"新历史"也用同一把尺(临时
-    // memo 的 dry-run),反涨断言两边才可比。
-    const auto pressure_estimate_of = [&loop](const std::vector<lubancode::api::Message>& history) {
-        lubancode::agent::ResultViewMemo scratch_memo;
-        lubancode::agent::StructuralCompressionStats scratch_stats;
-        return lubancode::agent::EstimateHistoryTokens(
-            lubancode::agent::CompressWorkingView(history, loop.context().structural_options(), scratch_stats,
-                                                  scratch_memo, /*store=*/nullptr));
-    };
-    const std::size_t before_tokens = pressure_estimate_of(loop.History());
+    // memo 的 dry-run),反涨断言两边才可比。估算与反涨闸都收拢成手工/
+    // 自动共用的一只(PressureEstimateTokens / RejectGrownCompactHistory)。
+    const std::size_t before_tokens = PressureEstimateTokens(loop, loop.History());
 
     // 滞回带(P1-1 连环压缩):上次压缩收口后新增不足滞回带,再压一次榨
     // 不出新空间——热区+存档本身就有十几 k 的底。同一 turn 无进展不得连
@@ -1532,15 +1620,12 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
     std::vector<std::size_t> kept_indices;
     const auto new_history = lubancode::agent::BuildCompactedHistory(
         loop.History(), result->archive, lubancode::agent::kDefaultHotZoneTokens, &kept_indices);
-    const std::size_t new_tokens = pressure_estimate_of(new_history);
+    const std::size_t new_tokens = PressureEstimateTokens(loop, new_history);
     // 反涨断言(P1-1):压缩后的新历史必须明显小于压缩前,否则换账就是
     // 反涨——存档添在没瘦的热区头上,真机 70.8k 压成 73.7k 还标"校验通过"。
-    // 拒收:旧历史不动,滞回账记上,回执讲清"当前轮占大头,压缩收窄不了"。
-    if (new_tokens >= before_tokens) {
-        out << theme.error
-            << trf("compact.grew_rejected", lubancode::cli::FormatTokenCount(before_tokens),
-                   lubancode::cli::FormatTokenCount(new_tokens))
-            << theme.reset << tr("compact.grew_rejected_tail") << "\n";
+    // 闸与手工 /compact 共用(RejectGrownCompactHistory)。拒收:旧历史不动,
+    // 滞回账记上,回执讲清"当前轮占大头,压缩收窄不了"。
+    if (RejectGrownCompactHistory(theme, before_tokens, new_tokens)) {
         if (in.hysteresis != nullptr) {
             in.hysteresis->armed = true;
             in.hysteresis->last_post_tokens = before_tokens;
@@ -1707,6 +1792,9 @@ CommandFlow HandleSlashContext(SlashDispatchContext& ctx, const lubancode::cli::
     }
     context_in.artifact_store = ctx.artifact_store.get();
     context_in.last_compact_line = ctx.last_compact_line;
+    if (ctx.config != nullptr) {
+        context_in.compact_partition_count = ctx.config->compact_partition_count;
+    }
     RunContextCommand(parsed.args, context_in, *ctx.theme);
     return CommandFlow::Continue;
 }

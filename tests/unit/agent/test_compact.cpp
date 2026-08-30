@@ -586,14 +586,85 @@ TEST_CASE("CompactInputBudget: 预算 = 窗口 − 输出预留 − 协议余量
 
 TEST_CASE("ParseCompactManifest: 取末尾最后一个 json 围栏块,前面的不算") {
     const std::string text =
-        "正文里先引用了一枚代码块:\n```json\n{\"goal\": \"旧的\", \"open_items\": [\"旧\"]}\n```\n"
+        "正文里先引用了一枚代码块:\n```json\n{\"goal\": \"旧的\", \"open_items\": [\"旧\"], "
+        "\"next_action\": \"旧的下一步\"}\n```\n"
         "存档正文若干字若干字若干字若干字。\n"
-        "```json\n{\"goal\": \"新的\", \"open_items\": [\"新\"]}\n```";
+        "```json\n{\"goal\": \"新的\", \"open_items\": [\"新\"], \"next_action\": \"新的下一步\"}\n```";
     const auto manifest = agent::ParseCompactManifest(text);
     REQUIRE(manifest.has_value());
     CHECK(manifest->goal == "新的");
     REQUIRE(manifest->open_items.size() == 1);
     CHECK(manifest->open_items[0] == "新");
+    CHECK(manifest->next_action == "新的下一步");
+}
+
+// ---------------------------------------------------------------------------
+// schema/type 收紧(Compact 四分区单·阶段 0):constraints/next_action 的
+// 坏形状整枚 manifest 判坏,不再静默吞掉半截字段。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseCompactManifest: constraints 不是数组 → 整枚判坏") {
+    const std::string text = "正文若干字若干字若干字若干字若干字若干字若干字。\n```json\n" +
+        std::string(R"({"goal": "目标", "constraints": "只许修改 compact", "open_items": [], "next_action": "继续"})") +
+        "\n```";
+    CHECK_FALSE(agent::ParseCompactManifest(text).has_value());
+}
+
+TEST_CASE("ParseCompactManifest: constraints 混进非字符串或空白空串 → 整枚判坏") {
+    const std::string with_number = "正文若干字若干字若干字若干字若干字若干字若干字。\n```json\n" +
+        std::string(R"({"goal": "目标", "constraints": [3], "open_items": [], "next_action": "继续"})") + "\n```";
+    CHECK_FALSE(agent::ParseCompactManifest(with_number).has_value());
+    const std::string with_blank = "正文若干字若干字若干字若干字若干字若干字若干字。\n```json\n" +
+        std::string(R"({"goal": "目标", "constraints": ["  "], "open_items": [], "next_action": "继续"})") + "\n```";
+    CHECK_FALSE(agent::ParseCompactManifest(with_blank).has_value());
+}
+
+TEST_CASE("ParseCompactManifest: constraints 没写或空数组都合法") {
+    const std::string absent = "正文若干字若干字若干字若干字若干字若干字若干字。\n```json\n" +
+        std::string(R"({"goal": "目标", "open_items": ["待办"], "next_action": "继续"})") + "\n```";
+    const auto manifest = agent::ParseCompactManifest(absent);
+    REQUIRE(manifest.has_value());
+    CHECK(manifest->constraints.empty());
+    const std::string empty_array = "正文若干字若干字若干字若干字若干字若干字若干字。\n```json\n" +
+        std::string(R"({"goal": "目标", "constraints": [], "open_items": [], "next_action": "继续"})") + "\n```";
+    REQUIRE(agent::ParseCompactManifest(empty_array).has_value());
+}
+
+TEST_CASE("ParseCompactManifest: next_action 缺席/非字符串/空白空串 → 整枚判坏") {
+    const auto make = [](const std::string& manifest_json) {
+        return "正文若干字若干字若干字若干字若干字若干字若干字。\n```json\n" + manifest_json + "\n```";
+    };
+    CHECK_FALSE(agent::ParseCompactManifest(
+        make(R"({"goal": "目标", "open_items": [], "constraints": []})")).has_value());
+    CHECK_FALSE(agent::ParseCompactManifest(
+        make(R"({"goal": "目标", "open_items": [], "constraints": [], "next_action": 7})")).has_value());
+    CHECK_FALSE(agent::ParseCompactManifest(
+        make(R"({"goal": "目标", "open_items": [], "constraints": [], "next_action": "   "})")).has_value());
+    CHECK_FALSE(agent::ParseCompactManifest(
+        make(R"({"goal": "   ", "open_items": [], "constraints": [], "next_action": "继续"})")).has_value());
+}
+
+TEST_CASE("ParseCompactManifest: open_items 混进非字符串 → 整枚判坏") {
+    const std::string text = "正文若干字若干字若干字若干字若干字若干字若干字。\n```json\n" +
+        std::string(R"({"goal": "目标", "open_items": ["好的", 12], "constraints": [], "next_action": "继续"})") +
+        "\n```";
+    CHECK_FALSE(agent::ParseCompactManifest(text).has_value());
+}
+
+TEST_CASE("Compact: manifest 缺 next_action → 拒收,历史不动(schema 收紧)") {
+    FakeBackend backend;
+    // 正文够长、有 json 围栏、goal/open_items 都在——只缺 next_action。
+    backend.script = SummaryScript(LongSummaryWithManifest(
+        R"({"goal": "实现压缩", "constraints": [], "open_items": ["补测试"]})"));
+
+    std::vector<api::Message> history;
+    history.push_back(UserText("问题 " + std::string(2400, 'x')));
+
+    const auto result = agent::Compact(backend, "test-model", history, PlainOptions());
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("manifest") != std::string::npos);
+    CHECK(result.error().message.find("历史未动") != std::string::npos);
 }
 
 TEST_CASE("Compact: 历史不比摘要大 → 压了反而更长,拒收") {
@@ -1064,5 +1135,310 @@ TEST_CASE("观测钩子: source_digest 同史同值、改一字即变;implementa
         const auto changed_result = agent::CompactHierarchical(backend2, "test-model", changed, SmallWindowOptions());
         REQUIRE(changed_result.has_value());
         CHECK(changed_result->metrics.source_digest != digest_before);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 公共 turn 切分(Compact 四分区单·阶段 0,§二):IsUserTurnStart /
+// SplitIntoTurns 收拢在 agent/context.hpp,compact/context/context_events
+// 共用同一只。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("IsUserTurnStart: ToolResult user 不开 turn,图片 user 开 turn") {
+    CHECK(agent::IsUserTurnStart(UserText("真正的问题")));
+    api::Message image_message;
+    image_message.role = api::Role::User;
+    image_message.content.push_back(api::ImageBlock{"png", "...bytes...", "", 640, 480});
+    CHECK(agent::IsUserTurnStart(image_message));
+    // 只带 ToolResultBlock 的 user 消息是工具回填,不是新 turn。
+    CHECK_FALSE(agent::IsUserTurnStart(UserToolResult("tool_1", "结果")));
+    // assistant 归当前 turn;空内容 user 不凭空开 turn(§二:没有 text/image
+    // 就没有"用户说了话"的证据)。
+    CHECK_FALSE(agent::IsUserTurnStart(AssistantText("回答")));
+    api::Message empty_user;
+    empty_user.role = api::Role::User;
+    CHECK_FALSE(agent::IsUserTurnStart(empty_user));
+}
+
+TEST_CASE("SplitIntoTurns: 区间连续盖满,末段到尾;没有用户输入给空表") {
+    std::vector<api::Message> history;
+    history.push_back(UserText("第一问"));
+    history.push_back(AssistantToolUse("t1", "read_file"));
+    history.push_back(UserToolResult("t1", "结果"));  // 不开新 turn
+    history.push_back(AssistantText("答一"));
+    history.push_back(UserText("第二问"));
+    history.push_back(AssistantToolUse("t2", "search"));
+    history.push_back(UserToolResult("t2", "搜索结果"));
+    history.push_back(AssistantText("答二"));
+
+    const auto turns = agent::SplitIntoTurns(history);
+    REQUIRE(turns.size() == 2);
+    CHECK(turns[0] == std::make_pair(std::size_t{0}, std::size_t{4}));
+    CHECK(turns[1] == std::make_pair(std::size_t{4}, std::size_t{8}));
+
+    // 没有任何真正用户输入:空表。
+    std::vector<api::Message> results_only;
+    results_only.push_back(UserToolResult("t9", "孤立结果"));
+    CHECK(agent::SplitIntoTurns(results_only).empty());
+}
+
+// ---------------------------------------------------------------------------
+// BuildTurnPartitionPlan(Compact 四分区单·阶段 1):纯计算,不调模型。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// n 枚等重 turn:每轮 user 文本 + assistant 文本,token 大致相同。
+std::vector<api::Message> UniformTurns(std::size_t turn_count) {
+    std::vector<api::Message> history;
+    for (std::size_t i = 0; i < turn_count; ++i) {
+        history.push_back(UserText("第 " + std::to_string(i) + " 问 " + std::string(400, 'u')));
+        history.push_back(AssistantText("第 " + std::to_string(i) + " 答 " + std::string(400, 'a')));
+    }
+    return history;
+}
+
+// 分区结构不变量:连续盖满全部 turn、每份至少一枚、末份热区、冷区份数与
+// map_calls 对账、分区 token 加总与全量对账。
+void CheckPartitionInvariants(const agent::TurnPartitionPlan& plan) {
+    REQUIRE_FALSE(plan.partitions.empty());
+    CHECK(plan.partitions.front().first_turn == 0);
+    CHECK(plan.partitions.back().last_turn == plan.turns.size());
+    for (std::size_t p = 0; p < plan.partitions.size(); ++p) {
+        CHECK(plan.partitions[p].first_turn < plan.partitions[p].last_turn);  // 每份至少一枚 turn
+        if (p > 0) {
+            CHECK(plan.partitions[p].first_turn == plan.partitions[p - 1].last_turn);  // 首尾相接
+        }
+    }
+    CHECK(plan.partitions.back().is_hot);
+    for (std::size_t p = 0; p + 1 < plan.partitions.size(); ++p) {
+        CHECK_FALSE(plan.partitions[p].is_hot);
+    }
+    CHECK(plan.map_calls == plan.partitions.size() - 1);
+    std::size_t sum = 0;
+    for (const auto& partition : plan.partitions) {
+        sum += partition.working_tokens;
+    }
+    CHECK(sum == plan.total_working_tokens);
+}
+
+}  // namespace
+
+TEST_CASE("BuildTurnPartitionPlan: 17 枚等重 turn 默认四分,前三份 map,末份热区") {
+    const auto plan = agent::BuildTurnPartitionPlan(UniformTurns(17), 4, agent::TurnPartitionBudgets{});
+    REQUIRE(plan.turns.size() == 17);
+    CHECK(plan.turns[0].id == "t1");
+    CHECK(plan.turns[16].id == "t17");
+    CheckPartitionInvariants(plan);
+    CHECK(plan.partitions.size() == 4);
+    CHECK(plan.map_calls == 3);
+    // 等重轮按 token 大致四等分:每份 4~5 枚 turn(17 = 4+4+4+5 一类切法)。
+    for (const auto& partition : plan.partitions) {
+        const std::size_t count = partition.last_turn - partition.first_turn;
+        CHECK(count >= 4);
+        CHECK(count <= 5);
+    }
+    CHECK_FALSE(plan.has_prior_archive);
+    CHECK(plan.WorthCompacting());
+}
+
+TEST_CASE("BuildTurnPartitionPlan: 0/1/2/3 枚 turn 的边界") {
+    // 空 history:没有 turn,没有分区。
+    {
+        const auto plan = agent::BuildTurnPartitionPlan({}, 4, agent::TurnPartitionBudgets{});
+        CHECK(plan.turns.empty());
+        CHECK(plan.partitions.empty());
+        CHECK(plan.map_calls == 0);
+        CHECK_FALSE(plan.WorthCompacting());
+    }
+    // 1 枚:只有热区,没有冷区,无收益(§9.2/§9.3)。
+    {
+        const auto plan = agent::BuildTurnPartitionPlan(UniformTurns(1), 4, agent::TurnPartitionBudgets{});
+        CheckPartitionInvariants(plan);
+        CHECK(plan.partitions.size() == 1);
+        CHECK(plan.partitions.front().is_hot);
+        CHECK(plan.map_calls == 0);
+        CHECK_FALSE(plan.WorthCompacting());
+    }
+    // 2、3 枚:min(turn, 4) 份,末份热区,其余各 map 一次。
+    for (std::size_t turns : {std::size_t{2}, std::size_t{3}}) {
+        const auto plan = agent::BuildTurnPartitionPlan(UniformTurns(turns), 4, agent::TurnPartitionBudgets{});
+        CheckPartitionInvariants(plan);
+        CHECK(plan.partitions.size() == turns);
+        CHECK(plan.map_calls == turns - 1);
+    }
+}
+
+TEST_CASE("BuildTurnPartitionPlan: 自定义 partition_count 2/3/5/8;turn 不够取 min") {
+    const std::size_t turn_count = 12;
+    for (std::size_t wanted : {std::size_t{2}, std::size_t{3}, std::size_t{5}, std::size_t{8}}) {
+        const auto plan = agent::BuildTurnPartitionPlan(UniformTurns(turn_count), wanted, agent::TurnPartitionBudgets{});
+        CheckPartitionInvariants(plan);
+        CHECK(plan.partitions.size() == wanted);
+        CHECK(plan.map_calls == wanted - 1);
+    }
+    // turn 数 6、7 少于 8 份:实际分区数取 min(6|7, 8)。
+    for (std::size_t turns : {std::size_t{6}, std::size_t{7}}) {
+        const auto plan = agent::BuildTurnPartitionPlan(UniformTurns(turns), 8, agent::TurnPartitionBudgets{});
+        CheckPartitionInvariants(plan);
+        CHECK(plan.partitions.size() == turns);
+    }
+}
+
+TEST_CASE("BuildTurnPartitionPlan: tool-heavy turn 按工作视图 token 挪边界,不按 turn 数硬平分") {
+    // 16 枚轻 turn,T4 里塞一组巨大的工具来回(60k ASCII ≈ 15k token,约
+    // 占全史四分之三):按枚数平分必失衡,token 平衡器得提前收口 P1。
+    std::vector<api::Message> history = UniformTurns(16);
+    const std::string huge_result(60000, 'r');
+    history.insert(history.begin() + 8, AssistantToolUse("big_1", "run_command"));  // 落进 T4
+    history.insert(history.begin() + 9, UserToolResult("big_1", huge_result));
+
+    const auto plan = agent::BuildTurnPartitionPlan(history, 4, agent::TurnPartitionBudgets{});
+    CheckPartitionInvariants(plan);
+    CHECK(plan.partitions.size() == 4);
+    // T4 自己超过四分之一重量:P1 收不满 4 枚便收口。
+    const std::size_t p0_count = plan.partitions[0].last_turn - plan.partitions[0].first_turn;
+    CHECK(p0_count < 4);
+    // 巨轮整枚落在一个分区里(轮界即组界,不劈开)。
+    const std::size_t heavy_turn = 3;  // T4,0 起
+    std::size_t owner = plan.partitions.size();
+    for (std::size_t p = 0; p < plan.partitions.size(); ++p) {
+        if (plan.partitions[p].first_turn <= heavy_turn && heavy_turn < plan.partitions[p].last_turn) {
+            owner = p;
+        }
+    }
+    REQUIRE(owner < plan.partitions.size());
+}
+
+TEST_CASE("BuildTurnPartitionPlan: 并行工具按 tool_use_id 收成一组,组不跨分区") {
+    // 末轮一条 assistant 消息并行发两枚 tool_use,results 分两条 user 消息
+    // 回来——§6.1:按 id 收齐整组,不按"下一条 user 消息"猜配对。
+    std::vector<api::Message> history = UniformTurns(6);
+    api::Message parallel;
+    parallel.role = api::Role::Assistant;
+    parallel.content.push_back(api::ToolUseBlock{"p1", "read_file", nlohmann::json::object()});
+    parallel.content.push_back(api::ToolUseBlock{"p2", "search", nlohmann::json::object()});
+    history.push_back(parallel);
+    history.push_back(UserToolResult("p1", "结果一"));
+    history.push_back(UserToolResult("p2", "结果二"));
+
+    const auto plan = agent::BuildTurnPartitionPlan(history, 3, agent::TurnPartitionBudgets{});
+    CheckPartitionInvariants(plan);
+    const agent::ToolExchangeGroupInfo* group = nullptr;
+    for (const auto& candidate : plan.tool_groups) {
+        if (candidate.tool_use_ids.size() == 2) {
+            group = &candidate;
+        }
+    }
+    REQUIRE(group != nullptr);
+    CHECK(group->complete);
+    CHECK(group->to_message == history.size());  // 区间盖到最后一条 result(+1)
+    CHECK_FALSE(plan.has_incomplete_tool_exchange);
+    // 组不跨分区:组的消息区间整枚落在所属 turn 里,turn 整枚落在一个分区。
+    const agent::TurnInfo& turn = plan.turns[group->turn];
+    CHECK(group->from_message >= turn.from_message);
+    CHECK(group->to_message <= turn.to_message);
+    bool owned_by_one_partition = false;
+    for (const auto& partition : plan.partitions) {
+        if (partition.first_turn <= group->turn && group->turn < partition.last_turn) {
+            owned_by_one_partition = true;
+        }
+    }
+    CHECK(owned_by_one_partition);
+}
+
+TEST_CASE("BuildTurnPartitionPlan: orphan tool_use 与悬空 result 都点名,不静默") {
+    std::vector<api::Message> history = UniformTurns(3);
+    history.push_back(AssistantToolUse("orphan_1", "read_file"));  // 没有回 result
+    history.push_back(UserToolResult("dangling_1", "没人认领"));    // 没有对应 use
+
+    const auto plan = agent::BuildTurnPartitionPlan(history, 2, agent::TurnPartitionBudgets{});
+    CheckPartitionInvariants(plan);
+    CHECK(plan.has_incomplete_tool_exchange);
+    CHECK(plan.dangling_results == 1);
+    bool saw_incomplete = false;
+    for (const auto& candidate : plan.tool_groups) {
+        if (!candidate.complete) {
+            saw_incomplete = true;
+        }
+    }
+    CHECK(saw_incomplete);
+}
+
+TEST_CASE("BuildTurnPartitionPlan: 旧存档剥出不算 turn,不占分区账") {
+    std::vector<api::Message> history = UniformTurns(8);
+    // 首条 user 文本并上旧存档(BuildCompactedHistory 的产出形状)。
+    std::get<api::TextBlock>(history[0].content[0]).text =
+        "[对话存档,此前内容已压缩] 旧存档正文,不算 turn。\n"
+        "```json\n{\"goal\": \"旧目标\", \"constraints\": [], \"open_items\": [], \"next_action\": \"旧的下一步\"}\n```\n\n" +
+        std::get<api::TextBlock>(history[0].content[0]).text;
+
+    const auto plan = agent::BuildTurnPartitionPlan(history, 4, agent::TurnPartitionBudgets{});
+    CHECK(plan.has_prior_archive);
+    CHECK(plan.prior_archive_tokens > 0);
+    CHECK_FALSE(plan.prior_archive_text.empty());
+    // turn 还是 8 枚:旧存档没有多出一枚 turn。
+    REQUIRE(plan.turns.size() == 8);
+    CheckPartitionInvariants(plan);
+    CHECK(plan.partitions.size() == 4);
+    CHECK(plan.map_calls == 3);
+    // 首 turn 的账精确扣掉了旧存档:turn0 + 存档 = 原两条消息的全量口径。
+    CHECK(plan.turns[0].raw_tokens + plan.prior_archive_tokens ==
+          agent::EstimateMessageTokens(history[0]) + agent::EstimateMessageTokens(history[1]));
+}
+
+TEST_CASE("BuildTurnPartitionPlan: 长 ToolResult 外置后计量,外置账点名;原文不动") {
+    std::vector<api::Message> history = UniformTurns(4);
+    // 末轮一枚超长 read_file 结果(默认 long_result_bytes=8192):工作视图
+    // 换 artifact 预览,分区按外置后的重量算,原 history 全文一字不动。
+    const std::string huge = std::string(20000, 'h');
+    history.push_back(AssistantToolUse("big_read", "read_file"));
+    history.push_back(UserToolResult("big_read", huge));
+
+    const auto plan = agent::BuildTurnPartitionPlan(history, 2, agent::TurnPartitionBudgets{});
+    CheckPartitionInvariants(plan);
+    CHECK(plan.externalized_results == 1);
+    CHECK(plan.turns[3].externalized_results == 1);  // 末 turn(0 起 turn 3)里那枚
+    CHECK(plan.total_working_tokens < plan.total_raw_tokens);
+    // 纯函数不改入参。
+    bool original_intact = false;
+    for (const auto& message : history) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block);
+                result != nullptr && result->tool_use_id == "big_read") {
+                original_intact = result->content.size() == huge.size();
+            }
+        }
+    }
+    CHECK(original_intact);
+}
+
+TEST_CASE("BuildTurnPartitionPlan: 预算诊断——分区/单 turn 超 compact 模型预算点名") {
+    const std::vector<api::Message> history = UniformTurns(8);
+    // 窗口未知:不校验,不假装核过。
+    {
+        const auto plan = agent::BuildTurnPartitionPlan(history, 4, agent::TurnPartitionBudgets{});
+        CHECK_FALSE(plan.compact_input_budget.has_value());
+        CHECK_FALSE(plan.any_partition_over_map_budget);
+        CHECK_FALSE(plan.any_turn_over_map_budget);
+    }
+    // 窗口给得极小(连输出预留都盖不住 → 预算 0):单 turn 也超限必须点名
+    // (§3.4:该次 compact 须明确拒绝,不截半条用户输入)。
+    {
+        agent::TurnPartitionBudgets budgets;
+        budgets.compact_model.window_tokens = 64;
+        const auto plan = agent::BuildTurnPartitionPlan(history, 4, budgets);
+        REQUIRE(plan.compact_input_budget.has_value());
+        CHECK(plan.any_turn_over_map_budget);
+        CHECK(plan.any_partition_over_map_budget);
+    }
+    // 窗口装得下单份:无超限。
+    {
+        agent::TurnPartitionBudgets budgets;
+        budgets.compact_model.window_tokens = 1000000;
+        const auto plan = agent::BuildTurnPartitionPlan(history, 4, budgets);
+        REQUIRE(plan.compact_input_budget.has_value());
+        CHECK_FALSE(plan.any_turn_over_map_budget);
+        CHECK_FALSE(plan.any_partition_over_map_budget);
     }
 }

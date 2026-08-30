@@ -1475,6 +1475,16 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.compact_model = parsed["compact_model"].get<std::string>();
     }
+    if (parsed.contains("compact_partition_count")) {
+        // 类型在门口报(待遇同 context_window 的类型检查);取值域 2..8 在
+        // MergeConfig 里带来源报——越界不静默夹值(§八)。
+        const auto& field = parsed["compact_partition_count"];
+        if (!field.is_number_integer() && !field.is_number_unsigned()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                    " 里的 compact_partition_count 字段必须是 2..8 的整数");
+        }
+        config.compact_partition_count = field.get<int>();
+    }
     // 三角色 shorthand:读入即归一——空串当未配置(留 nullopt),不让
     // "写了空字符串"与"压根没写"在合并层分成两种语义(规格:空=缺失/
     // 空串/null 三者归一)。
@@ -2330,6 +2340,36 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     } else {
         result.config.context_window_tokens = kDefaultContextWindowTokens;
         result.sources.context_window_tokens = Source::Default;
+    }
+
+    // ---- compact_partition_count(Compact 四分区单·阶段 1):项目级 > 全局
+    // > 默认值(4),没有环境变量这一级(§八"暂不新增环境变量")。取值域
+    // 2..8,越界直接报错——越界报错,不静默夹值,配错了要让人看见。 ----
+    const std::optional<int>* partition_raw = nullptr;
+    const std::string* partition_path = nullptr;
+    Source partition_source = Source::Default;
+    if (project_file.has_value() && project_file->compact_partition_count.has_value()) {
+        partition_raw = &project_file->compact_partition_count;
+        partition_path = &project_file->source_path;
+        partition_source = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->compact_partition_count.has_value()) {
+        partition_raw = &global_file->compact_partition_count;
+        partition_path = &global_file->source_path;
+        partition_source = Source::GlobalConfigFile;
+    }
+    if (partition_raw != nullptr && partition_raw->has_value()) {
+        const int value = **partition_raw;
+        if (value < kMinCompactPartitionCount || value > kMaxCompactPartitionCount) {
+            return std::unexpected("配置文件 " + *partition_path + " 里的 compact_partition_count 字段必须在 " +
+                                   std::to_string(kMinCompactPartitionCount) + ".." +
+                                   std::to_string(kMaxCompactPartitionCount) + " 之间,当前是 " +
+                                   std::to_string(value));
+        }
+        result.config.compact_partition_count = value;
+        result.sources.compact_partition_count = partition_source;
+    } else {
+        result.config.compact_partition_count = kDefaultCompactPartitionCount;
+        result.sources.compact_partition_count = Source::Default;
     }
 
     // ---- compact_model:env > 项目级 > 全局 > 默认值(空串 = 跟当前会话模型
