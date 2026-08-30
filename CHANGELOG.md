@@ -373,6 +373,11 @@
 - todo §十八终稿:六阶段逐条记账,§十七条完成定义十二条全勾,§5.2 字段名按真 API 实测订正。Debug/Release 双 268/268,focused 12 册 195 案全过,docs check 47 页 605 链接全绿。
 - 自此 LubanCode 有了一条完整的进程内受控联网路:Lua 描述请求,宿主握住水管与钥匙,Secret 原文六处都进不去。
 
+## [v0.26.129] - 2026-08-30
+
+- **多渠道 ChannelPlugin 单立了合同(阶段 0)。** 六份冻结文档落 docs/architecture/channels/:总览三条水路与六界分账(PluginTool/MCP/ChannelPlugin/Package/AppServer/Peer 各管什么)、channel.yaml schema 1(占位符信任规矩照 Package 先例)、Channel Bridge v1 帧协议(19 枚 method、JSON-RPC 五码+15 个 domain 稳定名)、入站/出站消息契约(17 态状态机、三级去重键、三档回复模式)、四层配置(项目只能收窄、八枚决策码)、安全账(威胁-防线对照、数据保留 14 类、泄露禁令)。
+- 顺手修了单子的状态行事故(§19.2"状态迁移失败"原是不自动重试清单的一项,头部根本没有状态行)。阶段 1 起才动 src/channel/,照 Lua 单先例:合同先行,不接真渠道。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
