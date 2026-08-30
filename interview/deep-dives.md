@@ -191,6 +191,26 @@ action；断言它取一次快照，按“擦 footer、废锚点、写详细帧�
 旧参数与结果各出现一次。旧实现若只打印“详细模式”，这条测试当场见红。ConHost
 残影另归真终端驱动。
 
+### 若重来先砍什么
+
+先砍块级 LaTeX。它好玩，也好演示；可 coding agent 先要读准、改对、验完。首版让
+公式退回普通文本，把 parser、盒式布局与终端对齐的工时还给 session 恢复、durable
+queue 和默认 CI。三协议、compact 仍咬着“不绑一家”与长会话主线；LaTeX 不在主线上。
+
+### 为什么不直接改 OpenCode / Codex
+
+只求生产力，直接用现成项目更划算。自建的目标还包括 C++ runtime、原生终端、跨平台
+进程与 C ABI 练习；这是学习项目的 build 理由，不是商业 TCO 已胜。Git 只证明早期
+提交借鉴 Codex model-catalog；OpenCode 是后来的同类对照。更难看的账也要认：仓根
+没有 `LICENSE`，README 却写 Apache-2.0。来源注释有了，许可证闭环没有。
+
+### 最大遗憾是什么
+
+太早把项目当作品集，太晚把它当日用工具。功能越铺越多，连续 dogfooding、coverage、
+默认终端 CI、durable ack 与许可证却落在后头。它们不是五项偶然欠账，是同一股偏心：
+爱做看得见的新增，轻看枯燥收口。若重来，核心闭环站住便冻功能，先拿真实任务和外部
+用户排路线图。
+
 ### JSON Schema 是不是安全边界
 
 不是。schema 只描述输入形状。路径范围、命令危险度、权限、Hook、OS 账户能力另有边界。现版还有一项明确欠账：Hook 给出的 `updatedInput` 会过统一 schema 复检；模型原始入参主要靠 provider 结构化调用与各工具自己的参数检查，尚未在 `RunOneTool` 入口统一验 schema。
@@ -228,6 +248,7 @@ Skill 给模型一份做事说明，靠模型理解后调用普通工具。Hook 
 - 不说“排队消息已经 exactly-once”。现版有快照与失败回队，没有 durable receipt。
 - 不说“Lua pure 画像或调用前确认等于沙箱”。Lua 与 DLL 仍在宿主进程。
 - 不说“已经接入 OpenCode 或 Models.dev”。当前目录是 LubanCode 自有格式，仓内直接记载借鉴 Codex model-catalog。
+- 不说“许可证已经处理妥当”。README 的 Apache-2.0 链接眼下指向不存在的 `LICENSE`。
 - 不说“模型 capability 都会自动拦截不兼容请求”。若干字段当前只解析、展示或留作后续接线。
 
 ## 源码证据总索引

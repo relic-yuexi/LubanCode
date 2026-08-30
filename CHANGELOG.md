@@ -396,6 +396,12 @@
 - 有意留的两笔:worktree 的 namespace 沿用 lubancode::cli(改 runtime 要动 22 文件 150 处,超纯搬家幅度,头注释写明);command_permission 不并入 command_safety(一边按用户手写前缀名单、一边按命令内容静态分析,输入语义都不同)。
 - 既有行为零变:config 219/219、worktree 15/15、turn_runtime 15/15 全绿;/provider 三连切 auth 逐屏对照旧语义严丝合缝(inline 不清 key_env、env 不清 api_key)。
 
+## [v0.26.133] - 2026-08-31
+
+- **Token 账本与 Prompt 审计立了合同(单 A0)。** 五份 schema 冻结(UsageSample/PromptManifest/Finding/SessionSummary/Report,ToJson/FromJsonStrict 双向、未知键拒绝);UsageReport 补显式 reported 位(四家 wire 只在帧里真有 usage 才置——unknown 不再冒充 0)、request_id 迁 provider_response_id;Trajectory v2 增 model.usage.recorded 一类事件(一 attempt 一 owner,verify 拒混版本流)。
+- **十二场合成夹具**:单请求全报/三步工具 cache 递增/失败重试两笔分开/主+双子代理三流分账/workflow 重试/compact map+reduce/v1 legacy/验证失败后修好/用户纠正 partial/active+truncated+corrupt。双目录重建三份 JSON 逐文件字节一致——不接真实 runtime 也能稳定出账。
+- **钱算得干净**:价格表 v1 拆段乘法全程 int64 零浮点(整数 micros),reasoning 不双计;隐私 allowlist 八类 secret 扫描+九种 canary 过脱敏后报告里捞不着。A1 起的真接线压在 Trajectory P0-2 之后,照单子次序不越。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
