@@ -390,6 +390,12 @@
 - **四类安全夹具在静态门**:恶意脚本(rm -rf/下载器/反弹 shell,注释里出现也拦)、依赖投毒(git+/http://直链/--trusted-host)、路径逃逸(`..` 与 ${plugin_dir}/.. 全包扫)、网络越权(代码带网络原语而清单未许)——发现即 error,草稿降档回 Skill-only。零进程铁证:评测计划 acceptance 白名单钉死无 command、偷运进 dev 层信任账空着挂载事务压根不接手、六用例前后 python 进程数不变。
 - 契约从"code-bearing 候选明拒"改为"propose 产草稿永不启用,approve 仍拒自动晋升指路 /package trust 人工线"——安全账从"不生成"变为"生成即受四类扫描+零执行"。MCP 草稿判据已定未落,留下单。
 
+## [v0.26.132] - 2026-08-31
+
+- **骨架整改三桩收口(问题 4+6+7)。** settings_commands 直改内存的四处全走语义化 setter(SetProviderAuthInline/Env/None,互斥由 auth 档一锤定音、校验封进 setter),命令层字段赋值 grep 清零;worktree.cpp 归位 src/runtime/(boundary gate 白名单删一条,21 处 include 同步);config.cpp 拆出 command_permission 与 settings_local 两模块(3813→3597 行,只剩解析/merge/持久化)。
+- 有意留的两笔:worktree 的 namespace 沿用 lubancode::cli(改 runtime 要动 22 文件 150 处,超纯搬家幅度,头注释写明);command_permission 不并入 command_safety(一边按用户手写前缀名单、一边按命令内容静态分析,输入语义都不同)。
+- 既有行为零变:config 219/219、worktree 15/15、turn_runtime 15/15 全绿;/provider 三连切 auth 逐屏对照旧语义严丝合缝(inline 不清 key_env、env 不清 api_key)。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
