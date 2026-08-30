@@ -319,6 +319,12 @@
 - **SecretResolver 全套。** 环境变量 + 插件数据目录窄 .env(BOM/引号/CRLF 收,插值/export/多行/超 1MiB 拒,只装声明过的键);`SecretValue` 编译期禁复制、移动即覆写源、operator<< 删除误用即编译错;`SecretRedactor` 从长到短替换防截断。**源码树 .env 永不读**与**.env 轮换即时生效**各有专测。
 - **假 Key 全链路搜不到原文**:解析→展示→错误文案→打码文本四路泄露扫描回归;inspect/doctor 只报名字与来源。punycode 是 RFC 3492 真实现(标准向量逐字验)。
 
+## [v0.26.120] - 2026-08-30
+
+- **Kimi 保留式思考契约接通(P0)。** `ReasoningReplayPolicy` 新增 `Always`:历史 assistant 的 `reasoning_content` 经 JoinedThinking 块序原字节回传,只认 provider 正式字段产出的 ThinkingBlock——`<think>` 正文、compact 摘要、宿主提示一概不伪造。方言驱动链贯通:模型级 dialect.replay/replay_field 裁决,旧 ChatRequestOptions 留作自定义 provider 回落。
+- **Moonshot 四枚模型各归各位。** kimi-k3(effort only,low/high/max)、kimi-k2.7-code(+highspeed,零参数即思考)固定 Always;kimi-k2.6 只保本枚 Turn 工具循环(ToolEpisode,不发 reasoning_effort);kimi-k2.5 固定 Never 不误开。模型级方言全部标 verified;K3-fast 与聚合端不沾光。
+- **loopback 集成钉死契约**:K3 两轮纯对话第二轮请求体断言第一轮思考原样在场;K2.6 工具循环不发 effort;K2.5 不回传不误发 keep。`/think` 分行亮"本轮思考"与"历史回传"两件事。src/ 无一处模型名特判(铁律核查)。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
