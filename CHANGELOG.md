@@ -427,6 +427,12 @@
 - **骨架整改整单收官(问题 2+5)。** interactive_session_wiring 改名 assembly(不再与 wirings/ 撞车),标题账/整轮 usage 账/状态面板拼装/非 turn 通知各拆独立小类或函数(各有单测);console_input 拆三机(composer 2066 行/footer 1101/turn listener 738,共享底层留主文件),19 枚 Slot 单例归类——独占随机器搬、跨机九枚收显式共享上下文段;ChoiceMenu 评估结论"不合"(输入面与键语义已分叉,代价写明)。类头注释补齐剩余职责清单,与实际逐条对账。
 - 行为零变:283 册全绿含 boundary gate/刮屏对照(与基线逐条相同的 FAIL 系假服务时序固有,无一条归因拆分);管道冒烟帮助面板/多行粘贴/菜单路全过;新文件全住 lubancode_app 不破 CMake 边界。问题 1-7 全落,单子收官。
 
+## [v0.26.138] - 2026-08-31
+
+- **轨迹工程通了运行时单写口(P0-2,flag 门控)。** 配置 `features.trajectory` 默认关、环境变量 LUBANCODE_TRAJECTORY 可救急——开的 session 只写 Trajectory 不碰旧 SessionStore(禁 dual-write),关的 session 一处分支不进、零字节产出。四道边界全接:AgentLoop 的 LoopBoundaryRecorder(prepared 落不住不发模型、output 落不住不执行工具)、ToolTraceHub 三栅栏(Scheduled/Started/Finished→四态终态,result 从批次尾翻译)、SessionRuntime 持 TrajectorySessionLedger、app-server thread/start 同口。
+- **subagent 独立 JSONL 成真**:派工线程 SpawnSubagent 开 subagents/&lt;agent_run_id&gt;.jsonl,子 loop 全落子账,父账只有 relations.child_run_id 与 terminal hash 引用——单测钉死 main 不含子账正文。persisted_count_ 轮末补抄整路停用;TrajectoryCommandExecutor 包住 slash 分派(requested 先 durable,command_name/effect_class 落账);/record 改选段器(轨迹档零旁听)、/compact 落 typed 状态机。
+- 状态机补丁:tool.execution.cancelled 不再要求 started(取消可发生在闸前)。flag 开烟测:main.jsonl 16 事件逐位齐、hash chain 过、/exit 落 command 事件;flag 关烟测:home 下无 trajectories 目录。P0-3(replay/resume)起排队。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
