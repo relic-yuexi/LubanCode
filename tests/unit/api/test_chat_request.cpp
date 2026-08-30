@@ -257,6 +257,175 @@ TEST_CASE("Chat request: 一条 assistant 多枚 tool call,reasoning 只写一�
     CHECK_FALSE(body["messages"][2].contains("reasoning_content"));
 }
 
+// ---------------------------------------------------------------------------
+// reasoning 回传 always(Kimi 保留式思考单 P0):工作视图里每条带
+// ThinkingBlock 的原始 assistant 都回传——纯对话、工具、总结一视同仁。
+// 策略裁决方言优先:request.reasoning.dialect 有正式声明就用它,legacy
+// ChatRequestOptions 只当手写旧 provider 的回落。
+// ---------------------------------------------------------------------------
+
+// Kimi K3 形状的方言:toggle 无、档位顶层 reasoning_effort、replay=always。
+api::ReasoningConfig AlwaysDialect(const std::string& replay = "always",
+                                   const std::string& replay_field = "") {
+    api::ReasoningConfig reasoning;
+    reasoning.supports_effort = true;
+    reasoning.dialect.toggle = "none";
+    reasoning.dialect.effort_path = "reasoning_effort";
+    reasoning.dialect.delta = "reasoning_content";
+    reasoning.dialect.replay = replay;
+    reasoning.dialect.replay_field = replay_field;
+    return reasoning;
+}
+
+TEST_CASE("Chat request: always——纯对话段的思考也原样回传(方言驱动)") {
+    api::Request request;
+    request.model = "kimi-k3";
+    request.reasoning = AlwaysDialect();
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"你好"});
+    request.messages.push_back(user);
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ThinkingBlock{"想了一下怎么答", ""});
+    assistant.content.push_back(api::TextBlock{"你好!"});
+    request.messages.push_back(assistant);
+    api::Message next;
+    next.role = api::Role::User;
+    next.content.push_back(api::TextBlock{"再问"});
+    request.messages.push_back(next);
+
+    // 注意 options 仍是默认 Never:方言压过 legacy 回落。
+    const auto body = api::chat::BuildRequestJson(request);
+    CHECK(body["messages"][1]["reasoning_content"] == "想了一下怎么答");
+    CHECK(body["messages"][1]["content"] == "你好!");
+}
+
+TEST_CASE("Chat request: always——工具段与最终总结的思考都在原位") {
+    api::Request request;
+    request.model = "kimi-k2.7-code";
+    request.reasoning = AlwaysDialect();
+    request.tools.push_back({"read_file", "读文件", nlohmann::json{{"type", "object"}}});
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"查一下"});
+    request.messages.push_back(user);
+    api::Message tool_assistant;
+    tool_assistant.role = api::Role::Assistant;
+    tool_assistant.content.push_back(api::ThinkingBlock{"查哪呢", ""});
+    tool_assistant.content.push_back(api::ToolUseBlock{"call_1", "search", nlohmann::json{{"pattern", "x"}}});
+    request.messages.push_back(tool_assistant);
+    api::Message result;
+    result.role = api::Role::User;
+    result.content.push_back(api::ToolResultBlock{"call_1", "查到了", false});
+    request.messages.push_back(result);
+    api::Message final_assistant;
+    final_assistant.role = api::Role::Assistant;
+    final_assistant.content.push_back(api::ThinkingBlock{"组织一下"});
+    final_assistant.content.push_back(api::TextBlock{"结论是 X"});
+    request.messages.push_back(final_assistant);
+    api::Message next_user;
+    next_user.role = api::Role::User;
+    next_user.content.push_back(api::TextBlock{"那 Y 呢"});
+    request.messages.push_back(next_user);
+
+    const auto body = api::chat::BuildRequestJson(request);
+    // 带 tool call 的 assistant 与只出总结的 assistant,思考都原字节回传。
+    CHECK(body["messages"][1]["reasoning_content"] == "查哪呢");
+    CHECK(body["messages"][3]["reasoning_content"] == "组织一下");
+    CHECK(body["messages"][3]["content"] == "结论是 X");
+}
+
+TEST_CASE("Chat request: always——多枚思考块按块序拼接,只落一枚字段;没思考不造空串") {
+    api::Request request;
+    request.model = "kimi-k3";
+    request.reasoning = AlwaysDialect();
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"先算"});
+    request.messages.push_back(user);
+    api::Message joined;
+    joined.role = api::Role::Assistant;
+    joined.content.push_back(api::ThinkingBlock{"第一段", "sig-a"});
+    joined.content.push_back(api::TextBlock{"插一句"});
+    joined.content.push_back(api::ThinkingBlock{"第二段", "sig-b"});
+    joined.content.push_back(api::TextBlock{"答完了"});
+    request.messages.push_back(joined);
+    api::Message plain_user;
+    plain_user.role = api::Role::User;
+    plain_user.content.push_back(api::TextBlock{"再问"});
+    request.messages.push_back(plain_user);
+    api::Message no_thinking;
+    no_thinking.role = api::Role::Assistant;
+    no_thinking.content.push_back(api::TextBlock{"这轮没思考"});
+    request.messages.push_back(no_thinking);
+
+    const auto body = api::chat::BuildRequestJson(request);
+    const auto& replayed = body["messages"][1];
+    CHECK(replayed["reasoning_content"] == "第一段第二段");  // 块序拼接,不加标签
+    // 没有 ThinkingBlock 的 assistant 不写空 reasoning_content,正文照旧。
+    CHECK_FALSE(body["messages"][3].contains("reasoning_content"));
+    CHECK(body["messages"][3]["content"] == "这轮没思考");
+}
+
+TEST_CASE("Chat request: always——回传字段名听方言声明,不双写") {
+    api::Request request;
+    request.model = "some-vllm-kimi";
+    request.reasoning = AlwaysDialect("always", "reasoning");
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"你好"});
+    request.messages.push_back(user);
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ThinkingBlock{"想了一下", ""});
+    assistant.content.push_back(api::TextBlock{"你好!"});
+    request.messages.push_back(assistant);
+
+    const auto body = api::chat::BuildRequestJson(request);
+    CHECK(body["messages"][1]["reasoning"] == "想了一下");
+    CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
+}
+
+TEST_CASE("Chat request: 方言声明压过 legacy 回落——两头各试一回") {
+    api::Request request;
+    request.model = "kimi-k2.5";
+    request.reasoning = AlwaysDialect("never");
+    request.tools.push_back({"read_file", "读文件", nlohmann::json{{"type", "object"}}});
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"读 a"});
+    request.messages.push_back(user);
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ThinkingBlock{"想", ""});
+    assistant.content.push_back(api::ToolUseBlock{"call_1", "read_file", nlohmann::json{{"path", "a"}}});
+    request.messages.push_back(assistant);
+
+    // 方言说 never,legacy 配了 tool_episode:正式方言赢,一条不回。
+    const auto body = api::chat::BuildRequestJson(request, nlohmann::json::object(), ToolEpisode());
+    CHECK_FALSE(body["messages"][1].contains("reasoning_content"));
+}
+
+TEST_CASE("Chat request: legacy ChatRequestOptions 也认 always(自定义 provider 回落档)") {
+    api::Request request;
+    request.model = "my-private-kimi";
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"你好"});
+    request.messages.push_back(user);
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ThinkingBlock{"想了一下", ""});
+    assistant.content.push_back(api::TextBlock{"你好!"});
+    request.messages.push_back(assistant);
+
+    api::chat::ChatRequestOptions options;
+    options.reasoning_replay = api::chat::ReasoningReplayPolicy::Always;
+    const auto body = api::chat::BuildRequestJson(request, nlohmann::json::object(), options);
+    CHECK(body["messages"][1]["reasoning_content"] == "想了一下");
+}
+
 TEST_CASE("Chat request: 档位参数名按 provider 声明走,空档位字段整个缺席") {
     api::Request request;
     request.model = "qwen";

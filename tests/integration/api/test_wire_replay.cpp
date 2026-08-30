@@ -496,6 +496,197 @@ TEST_CASE("wire 回环 chat: DeepSeek tool_episode 第二轮 reasoning_content �
 }
 
 // ---------------------------------------------------------------------------
+// Kimi 保留式思考单 P0:Moonshot 四枚模型方言驱动(backend options 全默认,
+// 不靠 legacy reasoning_replay——目录方言说了算)。
+//   K3   always:跨轮纯对话,第二轮请求原样带回 reasoning,不发 thinking
+//   K2.6 tool_episode:本 Turn 工具循环回传,不发 reasoning_effort
+//   K2.5 never:思考照收,历史不回传,thinking.keep 一概不发
+// ---------------------------------------------------------------------------
+
+TEST_CASE("wire 回环 chat: Kimi K3 跨轮 always——第二轮请求带回第一轮 reasoning_content,不发 thinking") {
+    std::vector<HttpRequest> received;
+    ReplayPlan plan;
+    plan.sse_rounds = {
+        FixtureStream("openai_chat", "kimi_k3_reasoning_text_stream"),
+        FixtureStream("openai_chat", "kimi_k3_reasoning_text_stream"),
+    };
+    plan.chunk_seed = 20260827;
+    const int port = StartReplayServer(plan, &received);
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+
+    // options 一件不配:replay 全由 request.reasoning.dialect 裁决。
+    api::chat::ChatCompletionsBackend backend(base, "test-token", 3000, 30,
+                                              nlohmann::json::object(), {}, api::chat::ChatRequestOptions{});
+
+    api::Request first;
+    first.model = "kimi-k3";
+    first.reasoning = CatalogReasoning("moonshot", "kimi-k3");
+    first.reasoning_effort = "high";
+    first.messages.push_back(UserText("你好"));
+
+    std::string stop;
+    const api::Message assistant = RunRound(backend, first, &stop);
+    CHECK(stop == "end_turn");
+
+    REQUIRE(received.size() == 1);
+    const auto body1 = nlohmann::json::parse(received[0].body);
+    // K3 契约:顶层 reasoning_effort(low/high/max 档),thinking 整个不发。
+    CHECK(body1.at("reasoning_effort") == "high");
+    CHECK_FALSE(body1.contains("thinking"));
+    CHECK_FALSE(body1.contains("thinking_budget"));
+
+    // 攒出的 assistant:thinking 块 + 正文块。
+    REQUIRE(assistant.content.size() == 2);
+    const auto* thinking = std::get_if<api::ThinkingBlock>(&assistant.content[0]);
+    const auto* text = std::get_if<api::TextBlock>(&assistant.content[1]);
+    REQUIRE(thinking != nullptr);
+    REQUIRE(text != nullptr);
+    CHECK(thinking->text == "先想一句再答");
+
+    // 第二轮:U1 + assistant(完整保留) + U2。Preserved Thinking 是客户端
+    // 责任——assistant 在,reasoning_content 就得在。
+    api::Request second;
+    second.model = first.model;
+    second.reasoning = first.reasoning;
+    second.reasoning_effort = "high";
+    second.messages.push_back(UserText("你好"));
+    second.messages.push_back(assistant);
+    second.messages.push_back(UserText("再问一句"));
+
+    std::string final_stop;
+    RunRound(backend, second, &final_stop);
+    REQUIRE(received.size() == 2);
+    const auto body2 = nlohmann::json::parse(received[1].body);
+    const auto& replayed = body2.at("messages")[1];
+    CHECK(replayed.at("role") == "assistant");
+    CHECK(replayed.at("reasoning_content") == "先想一句再答");  // 原字节
+    CHECK(replayed.at("content") == "答:你好");
+    CHECK_FALSE(body2.contains("thinking"));
+}
+
+TEST_CASE("wire 回环 chat: Kimi K2.6 工具循环——本 Turn reasoning 回传,不发 reasoning_effort") {
+    std::vector<HttpRequest> received;
+    ReplayPlan plan;
+    plan.sse_rounds = {
+        FixtureStream("openai_chat", "kimi_k26_tool_episode_stream"),
+        FixtureStream("openai_chat", "manual_enable_thinking_reasoning_content"),
+    };
+    plan.chunk_seed = 20260827;
+    const int port = StartReplayServer(plan, &received);
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+
+    api::chat::ChatCompletionsBackend backend(base, "test-token", 3000, 30,
+                                              nlohmann::json::object(), {}, api::chat::ChatRequestOptions{});
+
+    api::Request first;
+    first.model = "kimi-k2.6";
+    first.reasoning = CatalogReasoning("moonshot", "kimi-k2.6");
+    first.reasoning_effort = "high";  // 档位只当开关用:官方不认 effort 参数
+    first.tools.push_back({"probe_file", "探针", nlohmann::json{{"type", "object"}}});
+    first.messages.push_back(UserText("读一下探针文件"));
+
+    std::string stop;
+    const api::Message assistant = RunRound(backend, first, &stop);
+    CHECK(stop == "tool_use");
+
+    REQUIRE(received.size() == 1);
+    const auto body1 = nlohmann::json::parse(received[0].body);
+    // K2.6 契约:thinking.type 可开关;reasoning_effort/budget 官方不认。
+    CHECK(body1.at("thinking").at("type") == "enabled");
+    CHECK_FALSE(body1.contains("reasoning_effort"));
+    CHECK_FALSE(body1.contains("thinking_budget"));
+
+    const auto* thinking = std::get_if<api::ThinkingBlock>(&assistant.content.front());
+    const auto* call = std::get_if<api::ToolUseBlock>(&assistant.content.back());
+    REQUIRE(thinking != nullptr);
+    REQUIRE(call != nullptr);
+    CHECK(thinking->text == "先想路径");
+    CHECK(call->name == "probe_file");
+
+    // 第二轮:工具结果拼回历史。同一工具循环的 reasoning 须原字节随行。
+    api::Request second;
+    second.model = first.model;
+    second.reasoning = first.reasoning;
+    second.reasoning_effort = "high";
+    second.tools = first.tools;
+    second.messages.push_back(UserText("读一下探针文件"));
+    second.messages.push_back(assistant);
+    api::Message tool_back;
+    tool_back.role = api::Role::User;
+    tool_back.content.push_back(api::ToolResultBlock{call->id, "2400 字探针正文", false});
+    second.messages.push_back(std::move(tool_back));
+
+    std::string final_stop;
+    RunRound(backend, second, &final_stop);
+    REQUIRE(received.size() == 2);
+    const auto body2 = nlohmann::json::parse(received[1].body);
+    const auto& replayed = body2.at("messages")[1];
+    CHECK(replayed.at("reasoning_content") == "先想路径");
+    REQUIRE(replayed.contains("tool_calls"));
+    CHECK(replayed.at("tool_calls")[0].at("id") == call->id);
+    CHECK(replayed.at("tool_calls")[0].at("function").at("name") == "probe_file");
+    const auto& tool_message = body2.at("messages")[2];
+    CHECK(tool_message.at("role") == "tool");
+    CHECK(tool_message.at("tool_call_id") == call->id);
+    // 跨 Turn 未开 keep(P1):不宣称 Preserved Thinking,thinking 里没有 keep。
+    CHECK_FALSE(body2.at("thinking").contains("keep"));
+    CHECK_FALSE(body2.contains("reasoning_effort"));
+}
+
+TEST_CASE("wire 回环 chat: Kimi K2.5 不回传历史思考,也不误发 thinking.keep") {
+    std::vector<HttpRequest> received;
+    ReplayPlan plan;
+    plan.sse_rounds = {
+        FixtureStream("openai_chat", "kimi_k25_reasoning_text_stream"),
+        FixtureStream("openai_chat", "kimi_k25_reasoning_text_stream"),
+    };
+    plan.chunk_seed = 20260827;
+    const int port = StartReplayServer(plan, &received);
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+
+    api::chat::ChatCompletionsBackend backend(base, "test-token", 3000, 30,
+                                              nlohmann::json::object(), {}, api::chat::ChatRequestOptions{});
+
+    api::Request first;
+    first.model = "kimi-k2.5";
+    first.reasoning = CatalogReasoning("moonshot", "kimi-k2.5");
+    first.reasoning_effort = "high";
+    first.messages.push_back(UserText("你好"));
+
+    std::string stop;
+    const api::Message assistant = RunRound(backend, first, &stop);
+    CHECK(stop == "end_turn");
+
+    REQUIRE(received.size() == 1);
+    const auto body1 = nlohmann::json::parse(received[0].body);
+    CHECK(body1.at("thinking").at("type") == "enabled");
+    CHECK_FALSE(body1.at("thinking").contains("keep"));
+
+    // 思考照收不丢(本地历史与 session 都在),只是不出站。
+    REQUIRE(assistant.content.size() == 2);
+    CHECK(std::get_if<api::ThinkingBlock>(&assistant.content[0]) != nullptr);
+
+    api::Request second;
+    second.model = first.model;
+    second.reasoning = first.reasoning;
+    second.reasoning_effort = "high";
+    second.messages.push_back(UserText("你好"));
+    second.messages.push_back(assistant);
+    second.messages.push_back(UserText("再问一句"));
+
+    std::string final_stop;
+    RunRound(backend, second, &final_stop);
+    REQUIRE(received.size() == 2);
+    const auto body2 = nlohmann::json::parse(received[1].body);
+    // K2.5 不支持 Preserved Thinking:assistant 消息在,reasoning 不回传。
+    const auto& replayed = body2.at("messages")[1];
+    CHECK(replayed.at("role") == "assistant");
+    CHECK_FALSE(replayed.contains("reasoning_content"));
+    CHECK(replayed.at("content") == "答:你好");
+    CHECK_FALSE(body2.at("thinking").contains("keep"));
+}
+
+// ---------------------------------------------------------------------------
 // openai-responses:reasoning -> function_call -> 回传 -> 终答
 // ---------------------------------------------------------------------------
 

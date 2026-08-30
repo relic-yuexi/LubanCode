@@ -13011,42 +13011,16 @@
             "video-recognition": true,
             "file_input": true
           },
-          "default_think": "high",
           "reasoning": {
             "controls": [
               {
-                "kind": "effort",
-                "values": [
-                  "none",
-                  "minimal",
-                  "low",
-                  "medium",
-                  "high",
-                  "xhigh",
-                  "max"
-                ]
-              },
-              {
                 "kind": "toggle"
-              },
-              {
-                "kind": "budget",
-                "max": 30720,
-                "min": 0
               }
             ],
-            "supportedEfforts": [
-              "none",
-              "minimal",
-              "low",
-              "medium",
-              "high",
-              "xhigh",
-              "max"
-            ],
-            "thinkingTokenLimits": {
-              "max": 30720,
-              "min": 0
+            "dialect": {
+              "effort_path": "none",
+              "replay": "tool_episode",
+              "verified": true
             }
           }
         },
@@ -13072,17 +13046,18 @@
                   "high",
                   "max"
                 ]
-              },
-              {
-                "kind": "toggle"
               }
             ],
             "supportedEfforts": [
               "low",
               "high",
-              "max",
-              "none"
-            ]
+              "max"
+            ],
+            "dialect": {
+              "toggle": "none",
+              "replay": "always",
+              "verified": true
+            }
           }
         },
         "kimi-k2": {
@@ -13128,20 +13103,12 @@
             "controls": [
               {
                 "kind": "toggle"
-              },
-              {
-                "kind": "budget",
-                "max": 30720,
-                "min": 0
               }
             ],
-            "supportedEfforts": [
-              "none",
-              "auto"
-            ],
-            "thinkingTokenLimits": {
-              "max": 30720,
-              "min": 0
+            "dialect": {
+              "effort_path": "none",
+              "replay": "never",
+              "verified": true
             }
           }
         },
@@ -13159,16 +13126,12 @@
             "file_input": true
           },
           "reasoning": {
-            "controls": [
-              {
-                "kind": "budget",
-                "max": 30720,
-                "min": 0
-              }
-            ],
-            "thinkingTokenLimits": {
-              "max": 30720,
-              "min": 0
+            "dialect": {
+              "toggle": "none",
+              "effort_path": "none",
+              "budget_path": "none",
+              "replay": "always",
+              "verified": true
             }
           }
         },
@@ -13186,16 +13149,12 @@
             "file_input": true
           },
           "reasoning": {
-            "controls": [
-              {
-                "kind": "budget",
-                "max": 30720,
-                "min": 0
-              }
-            ],
-            "thinkingTokenLimits": {
-              "max": 30720,
-              "min": 0
+            "dialect": {
+              "toggle": "none",
+              "effort_path": "none",
+              "budget_path": "none",
+              "replay": "always",
+              "verified": true
             }
           }
         },

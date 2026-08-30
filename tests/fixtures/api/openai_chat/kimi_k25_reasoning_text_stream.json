@@ -1,0 +1,26 @@
+{
+  "fixture_id": "kimi_k25_reasoning_text_stream",
+  "wire": "openai-chat-completions",
+  "provider": "moonshot",
+  "model": "kimi-k2.5",
+  "scenario": "thinking_text_no_preserved_replay",
+  "source_document": "internal",
+  "captured_at": "2026-08-30",
+  "request_expectation": {
+    "thinking": {
+      "type": "enabled"
+    }
+  },
+  "expected_events": [
+    "MessageStart",
+    "ThinkingDelta",
+    "TextDelta",
+    "MessageDone"
+  ],
+  "expected_replay": [
+    "K2.5 不支持 Preserved Thinking:后续请求不带回 assistant.reasoning_content,也不发送 thinking.keep"
+  ],
+  "usage_expectation": {},
+  "stop_reason": "end_turn",
+  "notes": "Kimi K2.5 纯对话实录缩样:reasoning_content 思考 -> content 正文 -> finish_reason=stop -> [DONE]。形状按官方文档合成(https://platform.kimi.com/docs/guide/use-thinking-models,核对 2026-08-30):K2.5 跨轮 Preserved Thinking 不支持,thinking.keep 不许发。"
+}

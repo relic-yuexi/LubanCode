@@ -14,9 +14,14 @@ namespace lubancode::api::chat {
 //                轮次继续保留,不摘要、不加标签、不混进 content;纯对话段
 //                的思考照旧略过。少了这段回传,DeepSeek 带 tools 的后续
 //                请求可能直接吃 400。
+//   always       工作视图里每条带 ThinkingBlock 的原始 assistant 消息都
+//                回传(Kimi K3/K2.7 Code 的 Preserved Thinking 契约):
+//                纯对话、工具调用、最终总结一视同仁,多枚思考块按块序
+//                原字节拼接,一条消息只写一份字段;没思考不造空串,也不
+//                凭正文猜。消息既然留在请求里,配套思考就不能剥掉。
 // anthropic 走自带 signature 的 thinking 块,responses 走服务端状态/
 // reasoning item,都不套这份 Chat 特判。
-enum class ReasoningReplayPolicy { Never, ToolEpisode };
+enum class ReasoningReplayPolicy { Never, ToolEpisode, Always };
 
 // Chat 请求的 transport 选项(随 provider capability 走,不进中立
 // api::Request——那是三家 wire 共用的形状,这一层是 Chat 私有的):

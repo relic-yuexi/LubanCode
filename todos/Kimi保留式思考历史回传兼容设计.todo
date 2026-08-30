@@ -9,7 +9,7 @@
   - `https://platform.kimi.com/docs/api/chat`
   - `https://platform.kimi.com/docs/api/models-overview`
 - 文档核对日期：2026-08-30
-- 当前验证：`unit.api.chat_request` 与 `integration.api.wire_replay` 通过；只证明现有 Chat `tool_episode` 机关可用，尚未跑 Moonshot 真机
+- 当前验证：P0 已落——`unit.api.chat_request`、`unit.config.provider_catalog`、`unit.api.model_quirks_matrix`、`integration.api.wire_replay`（含 K3 跨轮/K2.6 工具循环/K2.5 不回传三幕回环）通过；尚未跑 Moonshot 真机
 - 不在本单：展示层 thinking 折叠、推理正文脱敏策略、Anthropic wire 通用重构、替厂商编造或摘要 reasoning、Kimi 模型质量评测
 
 ## 一、先下断语
@@ -490,9 +490,19 @@ Request 2: U1 + assistant(reasoning_content + content) + U2
 
 ## 十一、实现状态
 
-截至 2026-08-30：
+### 定位阶段(2026-08-30,第一笔)
 
-- 已完成：问题定位、官方契约核对、现有源码链审计、现有两项相关测试复跑。
-- 部分具备：reasoning 接收、ThinkingBlock 装配、history/session 持久化、`tool_episode` 原字节回传。
-- 尚未实现：`Always`、`thinking.keep`、模型级 replay 接线、Moonshot 目录校正、Kimi fixtures、Kimi 真机探针。
-- 当前产品结论：LubanCode 有完成此事的底座；内置 Kimi 配置尚未满足 Preserved Thinking 全部契约。
+- 已完成:问题定位、官方契约核对、现有源码链审计、现有两项相关测试复跑。
+- 底座确认:reasoning 接收、ThinkingBlock 装配、history/session 持久化、`tool_episode` 原字节回传。
+
+### P0 已落(2026-08-30,第二笔)
+
+- `ReasoningReplayPolicy` 增 `Always`;Chat serializer 按 §5.3 次序裁决(方言 `replay/replay_field` 优先,legacy `ChatRequestOptions` 回落),`Always` 复用 `JoinedThinking()` 原字节回传。
+- Moonshot 四枚模型 catalog 校正:K3 effort low/high/max + replay always(不发 thinking);K2.7-code(+highspeed)零请求参数 + replay always;K2.6 只余 thinking.type + replay tool_episode(effort/budget/default_think 撤);K2.5 只余 thinking.type + replay never。方言标 `verified=true`(聚合端未沾光)。
+- 测试:`unit.api.chat_request` 增 Always/方言压 legacy/多块拼接/字段名单写;`unit.config.provider_catalog` 增四枚契约断言与请求 golden;`unit.api.model_quirks_matrix` A9 改钉零参数契约;`integration.api.wire_replay` 增 K3 跨轮/K2.6 工具循环/K2.5 不回传三幕回环;新 fixtures 三对(`kimi_k3/k26/k25_*`,internal 来源,notes 记官方文档核对日)。
+- `/think` 无参时"本轮思考"与"历史回传"分行亮;`DescribeReasoningDialect` 补 `replay:` 段。
+
+### 尚未实现(P1/P2)
+
+- `thinking.keep`、`ReasoningHistoryMode`、K2.6 可选跨轮、真机探针。
+- 未跑真机,只可声称"源码与回环协议已接通",不可写"Kimi API 已实测通过"。
