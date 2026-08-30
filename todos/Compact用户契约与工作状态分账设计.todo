@@ -1,6 +1,6 @@
 # Compact 四分区、工具原子组与双账总结构设计
 
-- 状态：阶段 0-5 已实现（0-1 于 0.26.130；2-5 于本单：map 严格 JSON、双账 reduce、新 history/回放、评测夹具）。§十三真机验收另跑。
+- 状态：已收官。阶段 0-5 已实现（0-1 于 0.26.130；2-5 于 0.26.136）；§十三真机验收十一案于本单全过（2026-08-31，假后端+管道 stdin 走生产压缩路），Debug/Release ctest 均 287/287。
 - 日期：2026-08-29
 - 范围：达到上下文阈值后的 semantic compact、按 turn 四分区、工具原子组、末区热区、用户契约、工作状态、会话回放与评测
 - 依据：论文《LLMs Get Lost in Multi-Turn Conversation》（arXiv:2505.06120v1）与当前 `src/agent/compact.*` 实现
@@ -791,18 +791,26 @@ tests/integration/compact_turn_sharding/     新增真实多轮夹具
 
 ## 十三、真机验收
 
-- [ ] 配 `context_window: 1m`，确认自动线显示约 80%。
-- [ ] 配默认 partition_count=4，跑足够多 turn 后手工 `/compact --dry-run`，核四分计划与三次 map。
-- [ ] 跑真实 `/compact`，核最终上下文为 UserContract + WorkState + 第四分区原文。
-- [ ] 制造一轮超长工具输出，核模型只看 artifact 视图，session/artifact 全文可追回。
-- [ ] 制造一轮并行多工具调用，核 uses/results 整组留在同一分区。
-- [ ] 最近一轮改掉早先约束，核 active/superseded 正确。
-- [ ] 故意让 compact 模型漏一条 active todo，确认拒收。
-- [ ] 故意让 assistant 猜测冒充用户要求，确认来源校验拒收。
-- [ ] 构造单个超大 turn，确认不拆用户输入与工具对。
-- [ ] compact 后退出再 `/resume`，继续数轮再 compact，核旧双账接力。
-- [ ] `/export` 核原始流水仍全在。
-- [ ] Release 全量 CTest，记真实命令与通过数。
+- [x] 配 `context_window: 1m`，确认自动线显示约 80%。
+- [x] 配默认 partition_count=4，跑足够多 turn 后手工 `/compact --dry-run`，核四分计划与三次 map。
+- [x] 跑真实 `/compact`，核最终上下文为 UserContract + WorkState + 第四分区原文。
+- [x] 制造一轮超长工具输出，核模型只看 artifact 视图，session/artifact 全文可追回。
+- [x] 制造一轮并行多工具调用，核 uses/results 整组留在同一分区。
+- [x] 最近一轮改掉早先约束，核 active/superseded 正确。
+- [x] 故意让 compact 模型漏一条 active todo，确认拒收。
+- [x] 故意让 assistant 猜测冒充用户要求，确认来源校验拒收。
+- [x] 构造单个超大 turn，确认不拆用户输入与工具对。
+- [x] compact 后退出再 `/resume`，继续数轮再 compact，核旧双账接力。
+- [x] `/export` 核原始流水仍全在。
+- [x] Release 全量 CTest，记真实命令与通过数。
+
+验收路数（2026-08-31，真机管道验收）：假 anthropic 后端（本机回环，map/reduce 按
+场景忠实抽取，坏模型两案按剧本吐坏形）+ 管道 stdin 驱动真 exe，压缩走生产代码路
+（BuildTurnPartitionPlan → 3×map 严格 JSON → final reduce 双账 → 校验 → 换账）。
+十一案全过，另有一次性发现：首轮案 3 场景轮次太小时手工 /compact 被反涨闸正确拒收
+（963→1007），与阶段 0"manual/auto 共用反涨闸"的账吻合。Debug 全量 ctest
+287/287 全绿；Release 全量 ctest 287/287 全绿（`ctest --test-dir build/release -C
+Release`，临时 USERPROFILE）。验收脚本在 build/smoke/（不入库）。
 
 ## 十四、完成线
 
