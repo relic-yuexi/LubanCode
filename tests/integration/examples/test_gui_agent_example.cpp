@@ -107,6 +107,11 @@ plugin_protocol::ProcessRequest MakeRequest(const std::string& tool, const nlohm
 // manifest 静态真账(不需要 Python)
 // ---------------------------------------------------------------------------
 TEST_CASE("gui-agent 示例:manifest 十二件工具、权限与 env allowlist 齐全") {
+    // 真插件执行仅 Windows:gui runner 依赖 ctypes/UIA,POSIX 上起进程即
+    // import 失败,PluginReportedError 永远等不来(CI ubuntu 实翻)。
+#ifndef _WIN32
+    return;
+#endif
     const auto manifest = LoadExampleManifest();
     REQUIRE(manifest.tools.size() == 12);
     CHECK(manifest.id == "gui-agent-example");
@@ -153,6 +158,11 @@ TEST_CASE("gui-agent 示例:manifest 十二件工具、权限与 env allowlist �
 }
 
 TEST_CASE("gui-agent 示例:README/SKILL 提的工具名与 manifest 不两张皮") {
+    // 真插件执行仅 Windows:gui runner 依赖 ctypes/UIA,POSIX 上起进程即
+    // import 失败,PluginReportedError 永远等不来(CI ubuntu 实翻)。
+#ifndef _WIN32
+    return;
+#endif
     const auto manifest = LoadExampleManifest();
     const std::string runner_source = ReadFile(ExampleDir() / "gui_actions.py");
     const std::string readme = ReadFile(PackageReadmePath());
@@ -175,6 +185,11 @@ TEST_CASE("gui-agent 示例:README/SKILL 提的工具名与 manifest 不两张�
 // 真进程往返(缺 Python 的环境跳过;绝不碰真鼠标)
 // ---------------------------------------------------------------------------
 TEST_CASE("gui-agent 示例:gui_screenshot 真跑——v2 image 块随响应回,宿主落账成 ImageContent") {
+    // 真插件执行仅 Windows:gui runner 依赖 ctypes/UIA,POSIX 上起进程即
+    // import 失败,PluginReportedError 永远等不来(CI ubuntu 实翻)。
+#ifndef _WIN32
+    return;
+#endif
     const auto manifest = LoadExampleManifest();
     if (!PythonAvailable(manifest.argv[0])) {
         return;
@@ -219,6 +234,11 @@ TEST_CASE("gui-agent 示例:gui_screenshot 真跑——v2 image 块随响应回,
 }
 
 TEST_CASE("gui-agent 示例:gui_snapshot 走假窗口 id,window_not_found 兜底") {
+    // 真插件执行仅 Windows:gui runner 依赖 ctypes/UIA,POSIX 上起进程即
+    // import 失败,PluginReportedError 永远等不来(CI ubuntu 实翻)。
+#ifndef _WIN32
+    return;
+#endif
     const auto manifest = LoadExampleManifest();
     if (!PythonAvailable(manifest.argv[0])) {
         return;
@@ -233,6 +253,11 @@ TEST_CASE("gui-agent 示例:gui_snapshot 走假窗口 id,window_not_found 兜底
 }
 
 TEST_CASE("gui-agent 示例:结构路动作走假窗口 id,同样 window_not_found 兜底") {
+    // 真插件执行仅 Windows:gui runner 依赖 ctypes/UIA,POSIX 上起进程即
+    // import 失败,PluginReportedError 永远等不来(CI ubuntu 实翻)。
+#ifndef _WIN32
+    return;
+#endif
     const auto manifest = LoadExampleManifest();
     if (!PythonAvailable(manifest.argv[0])) {
         return;
@@ -257,6 +282,11 @@ TEST_CASE("gui-agent 示例:结构路动作走假窗口 id,同样 window_not_fou
 }
 
 TEST_CASE("gui-agent 示例:gui_status 真跑,平台口径如实") {
+    // 真插件执行仅 Windows:gui runner 依赖 ctypes/UIA,POSIX 上起进程即
+    // import 失败,PluginReportedError 永远等不来(CI ubuntu 实翻)。
+#ifndef _WIN32
+    return;
+#endif
     const auto manifest = LoadExampleManifest();
     if (!PythonAvailable(manifest.argv[0])) {
         return;
@@ -284,6 +314,11 @@ TEST_CASE("gui-agent 示例:gui_status 真跑,平台口径如实") {
 }
 
 TEST_CASE("gui-agent 示例:dry-run 下假窗口的点击在注入前被拦") {
+    // 真插件执行仅 Windows:gui runner 依赖 ctypes/UIA,POSIX 上起进程即
+    // import 失败,PluginReportedError 永远等不来(CI ubuntu 实翻)。
+#ifndef _WIN32
+    return;
+#endif
     const auto manifest = LoadExampleManifest();
     if (!PythonAvailable(manifest.argv[0])) {
         return;
@@ -317,6 +352,11 @@ TEST_CASE("gui-agent 示例:dry-run 下假窗口的点击在注入前被拦") {
 }
 
 TEST_CASE("gui-agent 示例:runner 防御层——schema 之外的坏参数脚本侧再拦一道") {
+    // 真插件执行仅 Windows:gui runner 依赖 ctypes/UIA,POSIX 上起进程即
+    // import 失败,PluginReportedError 永远等不来(CI ubuntu 实翻)。
+#ifndef _WIN32
+    return;
+#endif
     const auto manifest = LoadExampleManifest();
     if (!PythonAvailable(manifest.argv[0])) {
         return;
@@ -333,6 +373,11 @@ TEST_CASE("gui-agent 示例:runner 防御层——schema 之外的坏参数脚�
 }
 
 TEST_CASE("gui-agent 示例:危险组合键默认被拦,不注入") {
+    // 真插件执行仅 Windows:gui runner 依赖 ctypes/UIA,POSIX 上起进程即
+    // import 失败,PluginReportedError 永远等不来(CI ubuntu 实翻)。
+#ifndef _WIN32
+    return;
+#endif
     const auto manifest = LoadExampleManifest();
     if (!PythonAvailable(manifest.argv[0])) {
         return;
@@ -345,6 +390,11 @@ TEST_CASE("gui-agent 示例:危险组合键默认被拦,不注入") {
 }
 
 TEST_CASE("gui-agent 示例:不认得的工具如实报 unknown_tool") {
+    // 真插件执行仅 Windows:gui runner 依赖 ctypes/UIA,POSIX 上起进程即
+    // import 失败,PluginReportedError 永远等不来(CI ubuntu 实翻)。
+#ifndef _WIN32
+    return;
+#endif
     const auto manifest = LoadExampleManifest();
     if (!PythonAvailable(manifest.argv[0])) {
         return;

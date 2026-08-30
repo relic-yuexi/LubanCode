@@ -796,8 +796,13 @@ bool NodeAvailable() {
 
 TEST_CASE("真进程 sidecar:起、复用、收尸(profile 锁释放)") {
     const std::string script = FindSidecarScript();
-    if (script.empty() || !NodeAvailable()) {
-        return; // 缺 node 或缺脚本:跳过(ctest 裸跑即绿的环境)
+    // browser/node_modules 是本地目录联接,不进 git——CI checkout 没有
+    // playwright 时 sidecar 起不来,15 秒超时红(Windows CI 实翻)。依赖
+    // 缺席按"环境不可跑"跳过;本地装齐(node i)才真起进程。
+    const bool deps_present = std::filesystem::exists(
+        std::filesystem::path(script).parent_path() / "node_modules" / "playwright");
+    if (script.empty() || !NodeAvailable() || !deps_present) {
+        return; // 缺 node/脚本/依赖:跳过(ctest 裸跑即绿的环境)
     }
     // 临时 profile 目录(收尸的判据:锁文件没了)。
     const std::filesystem::path temp_root = std::filesystem::temp_directory_path() /
@@ -842,7 +847,9 @@ TEST_CASE("真进程 sidecar:起、复用、收尸(profile 锁释放)") {
 
 TEST_CASE("真进程 sidecar:崩了(进程被杀),下一笔调用重起") {
     const std::string script = FindSidecarScript();
-    if (script.empty() || !NodeAvailable()) {
+    const bool deps_present = std::filesystem::exists(
+        std::filesystem::path(script).parent_path() / "node_modules" / "playwright");
+    if (script.empty() || !NodeAvailable() || !deps_present) {
         return;
     }
     app_server::BrowserServiceOptions options;
