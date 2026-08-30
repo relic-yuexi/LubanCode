@@ -3,6 +3,9 @@
 
 #include "app/cli_options.hpp"
 
+#include <set>
+#include <string>
+
 namespace lubancode::app {
 
 ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
@@ -119,6 +122,37 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             }
             parsed.action = CliAction::RunEvolveTest;
             parsed.evolve_test = evolve;
+            return parsed;
+        }
+        // P0-3 轨迹子命令:lubancode trajectory <verify|replay|harness-replay>
+        // <session-id>。只认裸词打头且此前没有位置参数;形状不对当场退用法。
+        if (arg == "trajectory" && options.positional.empty()) {
+            static const std::set<std::string> kVerbs = {"verify", "replay", "harness-replay"};
+            const std::size_t rest = args.size() - i - 1;
+            if (rest == 0 || kVerbs.count(args[i + 1]) == 0) {
+                parsed.action = CliAction::BadTrajectory;
+                parsed.error_text =
+                    "用法: lubancode trajectory <verify|replay|harness-replay> <session-id>";
+                return parsed;
+            }
+            if (rest < 2) {
+                parsed.action = CliAction::BadTrajectory;
+                parsed.error_text = "trajectory " + args[i + 1] + " 缺 session id";
+                return parsed;
+            }
+            TrajectoryCliArgs trajectory;
+            trajectory.verb = args[i + 1];
+            trajectory.session_id = args[i + 2];
+            if (trajectory.session_id.rfind("-", 0) != 0 &&
+                trajectory.session_id.find("/") == std::string::npos &&
+                trajectory.session_id.find("..") == std::string::npos) {
+                parsed.action = CliAction::RunTrajectory;
+                parsed.trajectory = trajectory;
+                return parsed;
+            }
+            parsed.action = CliAction::BadTrajectory;
+            parsed.error_text = "trajectory 的 session id 须是单段 id(不带路径): " +
+                                trajectory.session_id;
             return parsed;
         }
         if (arg == "--continue") {

@@ -24,6 +24,7 @@
 
 #include "trajectory/directory.hpp"
 #include "trajectory/recorder.hpp"
+#include "trajectory/replay.hpp"
 #include "trajectory/session_lock.hpp"
 
 namespace lubancode::trajectory {
@@ -280,7 +281,7 @@ struct ClearOutcome {
 };
 
 struct CloseRequest {
-    std::string reason = "exit";  // exit | eof | shutdown
+    std::string reason = "exit";  // exit | eof | shutdown | switch_to_resume
 };
 
 struct CloseOutcome {
@@ -291,6 +292,75 @@ struct CloseOutcome {
     std::string run_terminal_kind;
     std::string close_quality;  // clean | incomplete
     std::string journal_sha256;
+};
+
+// ---------------------------------------------------------------------------
+// resume-as-new(§10.4 七步)
+// ---------------------------------------------------------------------------
+
+// 交互 /resume 的跨 session command 生命周期素材(§14.1:旧 main 写
+// requested 与 session terminal,新 main 在 run.started 之后写 command
+// terminal,qualified ref 指回旧 requested,两边同带 boundary_operation_id)。
+struct ResumeBoundaryCommand {
+    std::string command_id;
+    std::string requested_session_id;  // requested 所在的(刚封口的)session
+    std::string requested_event_id;
+    std::string boundary_operation_id;
+};
+
+struct ResumeRequest {
+    std::string source_session_id;  // 空 = 本 workspace 最近一场可恢复的
+    // 交互 /resume:第 6 步在新 main 补跨 session control.command.completed。
+    // --continue 启动路不写(没有旧 requested 可指)。
+    bool interactive = false;
+    bool user_initiated = true;
+    // 直接前驱 session(交互 /resume 封口的那场);--continue 无前驱,
+    // previous_session_id 落 source。空串 = 让 manager 自取。
+    std::string previous_session_id;
+    ResumeBoundaryCommand boundary_command;  // interactive 时必填
+};
+
+struct ResumeOutcome {
+    // 空 = 成功。稳定码:
+    //   resume.busy                换账掌管中
+    //   resume.source_not_found    指认的 source 不在(或没有可恢复场)
+    //   resume.source_locked       source 仍被别的进程持写锁(§10.4 末段)
+    //   resume.source_corrupt      hash chain/schema/父子边验不过(非截断)
+    //   resume.source_unsupported  折叠 fail-closed(未知关键事件/超前版本)
+    //   resume.step<N>_failed      第 N 步落盘失败
+    std::string error_code;
+    std::string message;
+
+    std::string source_session_id;
+    std::string new_session_id;
+    std::string new_main_run_id;
+    std::string source_main_last_event_hash;
+    std::uint64_t source_event_count = 0;
+    bool source_truncated_tail = false;  // incomplete 前缀恢复(§3.3.2)
+
+    // ---- 七步各自的落盘证据 ----
+    // 第 1 步:source 验账过(链+父子边)。
+    bool source_verified = false;
+    // 第 2 步:checkpoint 高水位;false = 从头折叠。
+    bool from_checkpoint = false;
+    std::uint64_t checkpoint_seq = 0;
+    std::string checkpoint_event_hash;
+    // 第 3 步:折叠出的有效对话与控制态 + imported state hash。
+    std::string replay_version;  // std::to_string(kReplayProjectionVersion)
+    std::string imported_state_hash;
+    std::vector<ReplayMessage> effective_conversation;  // 引用,不复制 child 正文
+    ReplayControlState control;
+    // 第 4 步:悬空工具三道账;unknown 副作用不重跑。
+    std::vector<ReplayDanglingTool> dangling_tools;
+    // 第 5 步:新 session 开张(run.started(start_reason=resume))。
+    std::string new_run_started_event_id;
+    // 第 6 步:resume.source.attached(+ 交互路跨 session command.completed)。
+    std::string resume_attached_event_id;
+    std::string command_completed_event_id;
+    // 第 7 步:session.json running,active 指针已切;新 turn/request/call/
+    // seq 全从新命名空间起号(recorder 新开,天然新号)。
+    bool new_session_running = false;
+    bool active_switched = false;
 };
 
 // ---------------------------------------------------------------------------
@@ -399,7 +469,20 @@ public:
     // 正常封口(/exit 与 EOF,§14.5):cancel + bounded join 收齐活动流,
     // run terminal、session.ended、session.json closed;收不回的执行记
     // unknown,标 incomplete,不写 clean closed(§3.3.2 closed 硬门)。
+    // reason=switch_to_resume 是交互 /resume 封当前场用——封口后由
+    // ResumeAsNew 开新场,本柄不再接活。
     CloseOutcome Close(const CloseRequest& request, ClearParticipant* participant);
+
+    // resume-as-new(§10.4 七步):只读 source(验账→checkpoint/从头折叠
+    // →悬空分档),再开一间新 session(start_reason=resume,resumed_from=
+    // source)。source Journal 永不 reopen append;已完成的 child 只核
+    // terminal hash,不把正文灌进新 main。active session 存在时先由调用方
+    // Close(switch_to_resume)——本口不管封旧场。
+    ResumeOutcome ResumeAsNew(const ResumeRequest& request);
+
+    // 本 workspace 最近一场可恢复的 session(closed/archived/incomplete,
+    // 按创建时间取新);跳过本进程 active 的那场。空串 = 没有。
+    std::string LatestResumableSessionId();
 
     // 启动恢复器:扫 workspace 全部 session,以 Journal 可证事实为准重建
     // session.json;clear 崩在半路的按 next_session_id 与两边终态续办
@@ -436,6 +519,8 @@ private:
     std::string NextMainRunId() const;
     std::string NewStampId() const;  // session_id/operation_id 同形状
     EventScope MainBaseScope(const SessionManifest& manifest) const;
+    // LatestResumableSessionId 的持锁内版本(ResumeAsNew 七步内用)。
+    std::string LatestResumableSessionIdLocked();
 
     // ---- 恢复器内部(RecoverWorkspace 持锁调用) ----
     // 换账新侧续办:空 preparing 开张(Start)或半开的续写(Continue),

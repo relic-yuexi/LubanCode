@@ -8,8 +8,10 @@
 
 #include <cstdlib>
 #include <ctime>
+#include <chrono>
 #include <iostream>
 #include <sstream>
+#include <thread>
 #include <vector>
 
 #include "agent/compact.hpp"
@@ -46,6 +48,8 @@
 #include "runtime/worktree.hpp"
 #include "platform/paths.hpp"
 #include "runtime/session_command_service.hpp"
+// P0-3 轨迹:clear 八步换账 / resume 七步 / export 读 ReplayState 的账本口。
+#include "runtime/trajectory_session.hpp"
 
 namespace lubancode::app {
 
@@ -1838,6 +1842,91 @@ CommandFlow HandleSlashHelp(SlashDispatchContext& ctx, const lubancode::cli::Par
     return CommandFlow::Continue;
 }
 
+// ---------------------------------------------------------------------------
+// P0-3 轨迹档的边界命令:/clear 八步换账、/resume 七步、/export 读 ReplayState
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// /clear 的运行时参与人(§3.3.1 第 3 步):轨迹侧 SessionManager 掌账,
+// 这里只交"事实申报"。后台子代理的收口是 bounded join——CancelAllTasks
+// 后限时等它们把 terminal 写进旧目录;到点仍 running 的记 unknown,不
+// 装成功(closed 硬门,§3.3.2)。
+class TrajectoryClearParticipant : public lubancode::trajectory::ClearParticipant {
+public:
+    TrajectoryClearParticipant(lubancode::runtime::TrajectorySessionLedger* ledger,
+                               lubancode::tools::AgentTool* agent_tool)
+        : ledger_(ledger), agent_tool_(agent_tool) {}
+
+    std::string CancelActiveTurn() override { return {}; }  // slash 只在空闲时分派
+
+    std::vector<ChildClosure> CancelActiveChildren() override {
+        std::vector<ChildClosure> closures;
+        if (agent_tool_ == nullptr) {
+            return closures;
+        }
+        std::vector<int> running;
+        for (const auto& task : agent_tool_->TaskSummaries()) {
+            if (task.state == lubancode::tools::AgentTaskState::Running) {
+                running.push_back(task.id);
+            }
+        }
+        if (running.empty()) {
+            return closures;
+        }
+        (void)agent_tool_->CancelAllTasks();
+        // bounded join:至多等两秒,子代理线程各自在旧目录落 terminal。
+        for (int waited_ms = 0; waited_ms < 2000; waited_ms += 50) {
+            bool any_running = false;
+            for (const auto& task : agent_tool_->TaskSummaries()) {
+                if (task.state == lubancode::tools::AgentTaskState::Running) {
+                    any_running = true;
+                    break;
+                }
+            }
+            if (!any_running) {
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        for (const int task_id : running) {
+            ChildClosure closure;
+            closure.run_id = "task-" + std::to_string(task_id);
+            closure.terminal_written = true;
+            closure.unknown = false;
+            for (const auto& task : agent_tool_->TaskSummaries()) {
+                if (task.id == task_id && task.state == lubancode::tools::AgentTaskState::Running) {
+                    closure.terminal_written = false;  // 等到点还没停:unknown 不装成功
+                    closure.unknown = true;
+                    break;
+                }
+            }
+            closures.push_back(std::move(closure));
+        }
+        return closures;
+    }
+
+    std::vector<std::string> CancelQueuedItems() override {
+        return {};  // 排队账的 control 事件接线随 P0-4;此刻无未送达申报
+    }
+
+    std::string ActiveRecordSelectionId() override {
+        return ledger_ != nullptr && ledger_->record_selection().active()
+                   ? ledger_->record_selection().record_id()
+                   : std::string();
+    }
+
+    void ResetInMemoryState() override {
+        // 第 8 步的清内存由调用方在 ClearSession 返回后办(UI 重建、hooks)。
+    }
+
+private:
+    lubancode::runtime::TrajectorySessionLedger* ledger_ = nullptr;
+    lubancode::tools::AgentTool* agent_tool_ = nullptr;
+};
+
+}  // namespace
+
 CommandFlow HandleSlashClear(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     const lubancode::cli::Theme& theme = *ctx.theme;
@@ -1853,6 +1942,39 @@ CommandFlow HandleSlashClear(SlashDispatchContext& ctx, const lubancode::cli::Pa
     }
     ctx.reset_plan_review();
     SessionCommandState session_state = ctx.make_session_command_state();
+    // P0-3 轨迹档(P0-2 遗留#3 收口):clear 走 SessionManager 八步换账
+    //(§3.3.1)——旧账封口、新账开张,不复用 ID、不继承 history。flag 关
+    // 照旧路,一字不变。
+    if (ctx.trajectory != nullptr) {
+        if (ctx.spinner_enabled) {
+            ClearAndPrintBanner(*ctx.config, theme);
+        }
+        TrajectoryClearParticipant participant(ctx.trajectory, ctx.agent_tool);
+        lubancode::trajectory::ClearRequest request;
+        request.reason = "user_clear";
+        request.user_initiated = true;
+        const auto outcome = ctx.trajectory->ClearSession(request, &participant);
+        if (!outcome.error_code.empty()) {
+            TermOut() << theme.error << "clear 换账失败(" << outcome.error_code << "): "
+                      << outcome.message << theme.reset << "\n";
+            return CommandFlow::Continue;
+        }
+        // 第 8 步:清内存(与旧路同一套善后;store.Reset 无害——轨迹档
+        // 旧档未开,原就是空操作)。
+        session_state.rebuild_loop(false);
+        if (session_state.on_agents_cleanup) {
+            session_state.on_agents_cleanup();
+        }
+        session_state.start_ts = lubancode::sessions::NowIdTimestamp();
+        if (session_state.on_session_restarted) {
+            session_state.on_session_restarted();
+        }
+        session_state.persisted_count = 0;
+        session_state.title.clear();
+        session_state.title_pending = false;
+        TermOut() << tr("cmd.clear.done") << "\n";
+        return CommandFlow::Continue;
+    }
     return HandleClearCommand(session_state, *ctx.config, theme, ctx.spinner_enabled);
 }
 
@@ -1964,11 +2086,92 @@ CommandFlow HandleSlashDelete(SlashDispatchContext& ctx, const lubancode::cli::P
 }
 
 CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    const lubancode::cli::Theme& theme = *ctx.theme;
+    // P0-3 轨迹档(§10.4):resume 走七步——source 只读(验账→折叠→悬空
+    // 分档),当前场以 switch_to_resume 封口,新场 start_reason=resume 开张;
+    // source Journal 永不 reopen append。flag 关照旧 SessionStore 路不动。
+    if (ctx.trajectory != nullptr) {
+        std::string target = parsed.args;
+        if (target.empty()) {
+            target = ctx.trajectory->LatestResumableSessionId();
+            if (target.empty()) {
+                TermOut() << tr("cmd.resume.none") << "\n";
+                return CommandFlow::Continue;
+            }
+        }
+        const auto summary = ctx.trajectory->ResumeInteractive(target, "resume");
+        if (!summary.outcome.error_code.empty()) {
+            TermOut() << theme.error << "resume 失败(" << summary.outcome.error_code
+                      << "): " << summary.outcome.message << theme.reset << "\n";
+            return CommandFlow::Continue;
+        }
+        ctx.main_agent->ReplaceHistory(summary.history);
+        TermOut() << trf("cmd.resume.restored", summary.outcome.source_session_id,
+                         summary.history.size())
+                  << "(新 session " << summary.outcome.new_session_id << ")\n";
+        TermOut() << trf("cmd.resume.estimate", EstimateHistoryTokens(summary.history)) << "\n";
+        if (!summary.outcome.dangling_tools.empty()) {
+            TermOut() << theme.stats << "尾部悬空工具 " << summary.outcome.dangling_tools.size()
+                      << " 道(已按三道账封存,未知副作用不重跑)" << theme.reset << "\n";
+        }
+        SessionCommandState session_state = ctx.make_session_command_state();
+        if (session_state.on_resumed) {
+            session_state.on_resumed();  // SessionStart source=resume
+        }
+        if (session_state.sync_worktree_directory && ctx.worktree_session != nullptr &&
+            ctx.worktree_session->active()) {
+            session_state.sync_worktree_directory();
+        }
+        return CommandFlow::Continue;
+    }
     SessionCommandState session_state = ctx.make_session_command_state();
     return HandleResumeCommand(session_state, parsed.args, *ctx.theme);
 }
 
 CommandFlow HandleSlashExport(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    // P0-3 轨迹档(§14.5:/export 一律读 ReplayState,不从旁路 history 或
+    // SessionStore 取数):折叠本场 main.jsonl 再投影导出。flag 关照旧路。
+    if (ctx.trajectory != nullptr) {
+        const auto fold = ctx.trajectory->FoldMainReplay();
+        if (!fold.ok()) {
+            TermOut() << trf("cmd.resume.read_failed", fold.message) << "\n";
+            return CommandFlow::Continue;
+        }
+        const std::vector<lubancode::api::Message> history =
+            lubancode::runtime::ProjectHistoryFromReplay(fold.state);
+        if (history.empty()) {
+            TermOut() << tr("cmd.export.empty") << "\n";
+            return CommandFlow::Continue;
+        }
+        const std::string id = ctx.trajectory->session_id();
+        std::string out_path = parsed.args;
+        if (out_path.empty()) {
+            if (ctx.sessions_dir->empty()) {
+                TermOut() << tr("cmd.export.need_path") << "\n";
+                return CommandFlow::Continue;
+            }
+            out_path = *ctx.sessions_dir + "/" + id + ".md";
+        }
+        lubancode::sessions::SessionMeta meta;
+        meta.cwd = fold.state.control.cwd.value_or(std::string());
+        const std::string& title = *ctx.session_title;
+        const std::string markdown = lubancode::sessions::ExportSessionMarkdown(
+            meta, history, id, /*max_result_lines=*/30, title);
+        const std::filesystem::path path(
+            std::u8string(reinterpret_cast<const char8_t*>(out_path.data()), out_path.size()));
+        std::error_code ec;
+        if (path.has_parent_path()) {
+            std::filesystem::create_directories(path.parent_path(), ec);
+        }
+        std::ofstream file(path, std::ios::binary | std::ios::trunc);
+        if (!file.is_open()) {
+            TermOut() << trf("cmd.export.write_failed", out_path) << "\n";
+            return CommandFlow::Continue;
+        }
+        file << markdown;
+        TermOut() << trf("cmd.export.done", out_path) << "\n";
+        return CommandFlow::Continue;
+    }
     HandleExportCommand(parsed.args, *ctx.main_agent, *ctx.session_store, *ctx.sessions_dir, *ctx.session_meta,
                         *ctx.session_title, ctx.artifact_store.get());
     return CommandFlow::Continue;

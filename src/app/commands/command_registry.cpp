@@ -157,6 +157,12 @@ CommandFlow ExecuteSessionCommand(SlashDispatchContext& ctx,
             break;
         }
     }
+    // clear/resume 是跨 session 例外(§14.1):requested 落旧 main、terminal
+    // 由新 main 的换账事务写(P0-3 的 SessionManager 八步/七步掌管),不走
+    // 这只"同一 main stream 内 requested/terminal"的通用环。
+    if (spec_name == "clear" || spec_name == "resume") {
+        return DispatchSessionSlashCommand(ctx, parsed);
+    }
     // requested 先 durable(§14.1:有外部写入/派生执行/session 切换时
     // 须先落账再动手),handler 跑完落 terminal。P0-2 的 handler 还没翻成
     // CommandOutcome,status 只按流转给("ok"——failed 分型随 P0-4)。

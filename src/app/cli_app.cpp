@@ -55,6 +55,7 @@
 #include "app/commands/evolve_commands.hpp"  // RunEvolveTestCommand(自进化阶段 3 的 CI 口)
 #include "app/version.hpp"
 #include "cli/console_input.hpp"
+#include "cli/trajectory_command.hpp"  // P0-3:trajectory verify/replay/harness-replay 子命令
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
 #include "cli/divider.hpp"
@@ -530,6 +531,16 @@ int RunCli(const std::vector<std::string>& args) {
             return 1;
         case CliAction::BadEvolveTest:
             // 自进化阶段 3:evolve test 参数不对,明报退出。
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
+        case CliAction::RunTrajectory: {
+            // P0-3 轨迹子命令:只读诊断,跑完就退。
+            cli::TrajectoryCommandArgs trajectory_args;
+            trajectory_args.verb = parsed_cli.trajectory.verb;
+            trajectory_args.session_id = parsed_cli.trajectory.session_id;
+            return cli::RunTrajectoryCommand(trajectory_args);
+        }
+        case CliAction::BadTrajectory:
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::RunEvolveTest:

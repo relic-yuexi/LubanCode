@@ -501,6 +501,10 @@ add_library(lubancode_engine STATIC
   # 启动恢复器(Journal 可证事实为准)。
   src/trajectory/session_lock.cpp
   src/trajectory/session_manager.cpp
+  # P0-3:ReplayState 折叠/exact replay/state hash/checkpoint/session
+  # verifier,与 harness replay 的录制桩(RecordedBackend/RecordedExecutor)。
+  src/trajectory/replay.cpp
+  src/trajectory/harness.cpp
   # Token 账本与使用洞察单 A0(合同与夹具):accounting 是 usage 投影与
   # 计价的纯领域层;insights 是摘要/finding/报告合同与脱敏。都不 include
   # app/cli,不接真实 runtime(A1 再接线)。
@@ -856,6 +860,8 @@ add_library(lubancode_app STATIC
   # 骨架拆解批二:SpinnerBackend 自 backend_stack 挪来(UI 件归显示层)。
   src/cli/spinner_backend.cpp
   src/cli/record_command.cpp
+  # P0-3:`lubancode trajectory <verify|replay|harness-replay>` 只读诊断子命令。
+  src/cli/trajectory_command.cpp
   # 骨架拆解反弹·问题 1:工具确认的终端半边(菜单/diff/[y/a/N]/持久化)
   # 与 ask_user 问询,自 app/turn_runner.cpp 搬来——真终端 IO 件,随
   # console_input 住 app target。

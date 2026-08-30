@@ -12,6 +12,7 @@
 #include "app/runtime_profile.hpp"
 #include "app/turn_runner.hpp"
 #include "platform/paths.hpp"
+#include "runtime/trajectory_session.hpp"  // P0-3:/copy 读 ReplayState 投影
 
 #include <filesystem>
 #include <memory>
@@ -2262,6 +2263,16 @@ CommandFlow HandleSlashKeymap(SlashDispatchContext& ctx, const lubancode::cli::P
 }
 
 CommandFlow HandleSlashCopy(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    // P0-3 轨迹档(§14.5:/copy 一律读 ReplayState):折叠本场 main.jsonl
+    // 投影出 history,再走同一只复制口。flag 关照旧路。
+    if (ctx.trajectory != nullptr) {
+        const auto fold = ctx.trajectory->FoldMainReplay();
+        if (fold.ok()) {
+            HandleCopyCommand(parsed.args, lubancode::runtime::ProjectHistoryFromReplay(fold.state),
+                              *ctx.theme);
+            return CommandFlow::Continue;
+        }
+    }
     HandleCopyCommand(parsed.args, ctx.main_agent->History(), *ctx.theme);
     return CommandFlow::Continue;
 }
