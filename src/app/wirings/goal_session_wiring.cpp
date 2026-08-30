@@ -1,13 +1,16 @@
 // /goal 子系统接线器的实现(会话终章):函数体原样自 interactive_session
-// 大类搬来(EnsureGoalCoordinator/RestoreGoalFromArchive/AttachGoalSnapshot
-// ToCompact/PumpGoalContinuation/CloseGoalIteration/MakeGoalWiring),材料
-// 换经 Host 递入,行为一字未改——注释一并随行。
+// 大类搬来(RestoreGoalFromArchive/AttachGoalSnapshotToCompact/
+// PumpGoalContinuation/CloseGoalIteration/MakeGoalWiring),材料换经 Host
+// 递入,行为一字未改——注释一并随行。
+//
+// 骨架拆解反弹·问题 3:Ensure 里"事件类型分族 + ledger sink 搭建"抽去
+// runtime::goal::MakeSessionLedgerSink(纯函数,单测钉);终端打印改产
+// notify 回调(装配层决定怎么画),本文件不再有 TermOut。
 #include "app/wirings/goal_session_wiring.hpp"
 
 #include <chrono>
 #include <utility>
 
-#include "cli/terminal_port.hpp"
 #include "platform/paths.hpp"
 #include "runtime/goal_compact.hpp"
 #include "runtime/goal_context.hpp"
@@ -20,9 +23,15 @@
 
 namespace lubancode::app {
 
-using lubancode::cli::TermOut;
-
 GoalSessionWiring::GoalSessionWiring(Host host) : host_(std::move(host)) {}
+
+// 渲染事件出口(问题 3 第 2 条):is_error 定色,text 是纯文案——怎么画
+// 由装配层(interactive_session_wiring 填的 notify)决定。
+void GoalSessionWiring::Notify(bool is_error, const std::string& text) {
+    if (host_.notify) {
+        host_.notify(is_error, text);
+    }
+}
 
 lubancode::runtime::goal::GoalCoordinator* GoalSessionWiring::coordinator() {
     return coordinator_.has_value() ? &*coordinator_ : nullptr;
@@ -39,27 +48,10 @@ void GoalSessionWiring::Ensure(const lubancode::config::Config& config) {
     if (coordinator_.has_value()) return;
     auto options = lubancode::app::GoalOptionsFromConfig(config.features_goals, config.goals);
     coordinator_.emplace(std::move(options));
-    // LedgerSink:goal 事件行 append+flush 进 session 存档。store 没开张时
-    // 返回 true(没建档的会话照常吃命令,事件只进内存——建档后新事件落盘;
-    // 单子写盘栅栏管的是"已建档的会话",这里同取舍)。
-    lubancode::sessions::SessionStore& store = *host_.session_store;
-    coordinator_->SetLedgerSink([&store](const lubancode::runtime::goal::GoalCoordinatorEvent& event) {
-        if (!store.active()) return true;
-        lubancode::sessions::GoalSessionEvent line;
-        line.event = event.event;
-        line.goal_id = event.goal_id;
-        line.iteration_id = event.iteration_id;
-        line.revision = event.revision;
-        line.payload = event.payload;
-        line.timestamp_ms = event.timestamp_ms;
-        // type 分族:iteration 级事件走 goal_iteration_v1,其余 goal_v1。
-        if (!event.iteration_id.empty()) {
-            line.type = "goal_iteration_v1";
-        } else {
-            line.type = "goal_v1";
-        }
-        return store.AppendGoalEvent(line);
-    });
+    // LedgerSink:goal 事件行 append+flush 进 session 存档(问题 3:事件
+    // 类型分族与行折算在 runtime::goal::MakeSessionLedgerSink,纯函数)。
+    coordinator_->SetLedgerSink(
+        lubancode::runtime::goal::MakeSessionLedgerSink(*host_.session_store));
     // loop 单分流合流:coordinator 的 ready continuation 经 GoalWorkSource
     // 进泵(泵问 ProbeWork;选中后装配层 TakeReadyIteration 发 synthetic
     // turn)。trigger 各归各(evaluator 判终点 vs 时钟到点),泵共用。
@@ -86,16 +78,14 @@ void GoalSessionWiring::RestoreFromArchive() {
     if (!loaded.has_value() || loaded->goal_events.empty()) return;
     const auto stats = coordinator_->RestoreFromArchive(loaded->goal_events);
     if (stats.replayed == 0 && stats.skipped == 0) return;
-    TermOut() << host_.theme->stats
-              << "目标账已随会话恢复(" << stats.replayed << " 条事件";
+    std::string restored = "目标账已随会话恢复(" + std::to_string(stats.replayed) + " 条事件";
     if (stats.skipped > 0) {
-        TermOut() << "," << stats.skipped << " 条坏行跳过";
+        restored += "," + std::to_string(stats.skipped) + " 条坏行跳过";
     }
-    TermOut() << ")。默认暂停续跑;查看 /goal status,续跑 /goal resume。" << host_.theme->reset << "\n";
+    restored += ")。默认暂停续跑;查看 /goal status,续跑 /goal resume。";
+    Notify(/*is_error=*/false, restored);
     if (stats.suspended_by_policy) {
-        TermOut() << host_.theme->stats
-                  << "goals 功能当前未开启:目标挂起(SuspendedByPolicy),可查、可导出、可 clear,不自动跑。"
-                  << host_.theme->reset << "\n";
+        Notify(/*is_error=*/false, "goals 功能当前未开启:目标挂起(SuspendedByPolicy),可查、可导出、可 clear,不自动跑。");
     }
 }
 
@@ -149,8 +139,8 @@ void GoalSessionWiring::PumpContinuation(std::int64_t now_ms) {
         checkpoint_state_->iteration_id = started.iteration.id;
         checkpoint_state_->entries.clear();
     }
-    TermOut() << host_.theme->stats << "[goal " << started.iteration.goal_id << " iteration "
-              << started.iteration.index << "]" << host_.theme->reset << "\n";
+    Notify(/*is_error=*/false, "[goal " + started.iteration.goal_id + " iteration " +
+                                   std::to_string(started.iteration.index) + "]");
     lubancode::app::EmitGoalHook(
         MakeCommandWiring(host_.agent_tool ? host_.agent_tool() : nullptr,
                           host_.loop_scheduler ? host_.loop_scheduler() : nullptr),
@@ -268,8 +258,7 @@ void GoalSessionWiring::CloseIteration(const std::string& turn_id, bool turn_fai
     }
     const auto checkpoint_result = coordinator_->CheckpointReached(checkpoint, now_ms);
     if (!checkpoint_result.ok) {
-        TermOut() << host_.theme->error << "goal checkpoint 落账失败: "
-                  << checkpoint_result.error_message << host_.theme->reset << "\n";
+        Notify(/*is_error=*/true, "goal checkpoint 落账失败: " + checkpoint_result.error_message);
         return;
     }
     // checkpoint 工具账清零:下一枚 iteration 从头攒(状态是会话级复用的)。
@@ -302,13 +291,10 @@ void GoalSessionWiring::CloseIteration(const std::string& turn_id, bool turn_fai
     if (input.evidence.empty()) {
         // checkpoint 引用的证据一枚都没有:evaluator 没有可判的材料,
         // 记 provider 连败同路的"无材料"分支——判 continue 只会空转。
-        TermOut() << host_.theme->stats
-                  << "goal 轮收口:checkpoint 没有可核证据,不烧 evaluator(下轮先产证据)。"
-                  << host_.theme->reset << "\n";
+        Notify(/*is_error=*/false, "goal 轮收口:checkpoint 没有可核证据,不烧 evaluator(下轮先产证据)。");
         const auto schedule = coordinator_->ScheduleNextIteration(now_ms);
         if (!schedule.ok) {
-            TermOut() << host_.theme->stats << "goal 停排下一轮: " << schedule.error_message
-                      << host_.theme->reset << "\n";
+            Notify(/*is_error=*/false, "goal 停排下一轮: " + schedule.error_message);
         }
         return;
     }
@@ -332,8 +318,7 @@ void GoalSessionWiring::CloseIteration(const std::string& turn_id, bool turn_fai
     if (!evaluation.has_value()) {
         // evaluator 两坏/请求失败:goal 进 Paused(evaluator_failed),
         // 不默认 achieved 也不盲开下一轮(单子"evaluator 失败")。
-        TermOut() << host_.theme->error << "goal evaluator 失败: " << evaluation.error()
-                  << ";目标转暂停(/goal resume 续)。" << host_.theme->reset << "\n";
+        Notify(/*is_error=*/true, "goal evaluator 失败: " + evaluation.error() + ";目标转暂停(/goal resume 续)。");
         (void)coordinator_->NoteEvaluatorFailed(evaluation.error(), now_ms);
         lubancode::app::EmitGoalHook(
             MakeCommandWiring(host_.agent_tool ? host_.agent_tool() : nullptr,
@@ -348,16 +333,14 @@ void GoalSessionWiring::CloseIteration(const std::string& turn_id, bool turn_fai
     // ---- 4) 判词落地:continue 排下一轮,terminal 收账 ----
     const auto applied = coordinator_->ApplyEvaluation(evaluation->evaluation, now_ms);
     if (!applied.ok) {
-        TermOut() << host_.theme->error << "goal 判词落账失败: " << applied.error_message
-                  << host_.theme->reset << "\n";
+        Notify(/*is_error=*/true, "goal 判词落账失败: " + applied.error_message);
         return;
     }
     const std::string decision = applied.payload.value("decision", std::string());
-    TermOut() << host_.theme->stats << "[goal 判词: " << decision << "] "
-              << evaluation->evaluation.summary << host_.theme->reset << "\n";
+    Notify(/*is_error=*/false, "[goal 判词: " + decision + "] " + evaluation->evaluation.summary);
     if (evaluation->evaluation.overridden_achieved) {
-        TermOut() << host_.theme->stats << "  (evaluator 判 achieved 被程序门槛改判 continue: "
-                  << evaluation->evaluation.override_reason << ")" << host_.theme->reset << "\n";
+        Notify(/*is_error=*/false, "  (evaluator 判 achieved 被程序门槛改判 continue: " +
+                                       evaluation->evaluation.override_reason + ")");
     }
     lubancode::app::EmitGoalHook(
         MakeCommandWiring(host_.agent_tool ? host_.agent_tool() : nullptr,
@@ -385,8 +368,7 @@ void GoalSessionWiring::CloseIteration(const std::string& turn_id, bool turn_fai
     if (applied.payload.value("schedule_next", false)) {
         const auto schedule = coordinator_->ScheduleNextIteration(now_ms);
         if (!schedule.ok) {
-            TermOut() << host_.theme->stats << "goal 停排下一轮: " << schedule.error_message
-                      << host_.theme->reset << "\n";
+            Notify(/*is_error=*/false, "goal 停排下一轮: " + schedule.error_message);
         }
     }
 }

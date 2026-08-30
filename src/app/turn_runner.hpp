@@ -1,12 +1,16 @@
 // 一轮问答的执行器:RunTurn(发一轮、起监听线程与状态画板、收排队消息、
-// 打统计行),连带 ask_user 的控制台问询(PromptAskUser)与确认前的参数
-// 摘要(PrintConfirmDetails/PrintFirstLines)。分界线(PrintDivider)只有
-// RunTurn 用,一并住在这。
+// 打统计行)与分界线(PrintDivider)住在这。
 //
 // 骨架拆解批二余款:BuildCallbacks(显示回调装配)随 Callbacks 老路退役。
 // 显示出水只剩一只口——轮内起(或宿主给)一只 TurnEventAdapter,终端画
 // 屏的 TerminalTurnSink 从 sink 侧吃事件流;控制面(确认/钩子/Plan 闸/
 // 逐枚追踪)在 RunTurn 里装配 agent::TurnWiring,递给引擎。
+//
+// 骨架拆解反弹·问题 1:ask_user 的控制台问询(PromptAskUser)整段搬去
+// cli/ask_user_prompt;确认的终端半边(参数详情/diff 预览/三档菜单/
+// [y/a/N]/"允许并记住"的 settings.local.json 持久化)搬去
+// cli/tool_confirm_ui。这里只剩 ConfirmToolUse 的判断半边:裁定 + 拼单
+// (ToolConfirmRequest),真终端 IO 一概不碰。
 //
 // 这一层只认 agent/cli/config/tools/platform 的既有抽象,不 include 会话
 // 层的东西;Interactive 与 OneShot 共用。行为、文案、回调次序与搬家前
@@ -35,7 +39,6 @@
 #include "cli/theme.hpp"
 #include "cli/tool_display.hpp"
 #include "cli/transcript.hpp"
-#include "config/config.hpp"
 #include "hooks/dispatcher.hpp"
 #include "platform/paths.hpp"
 #include "runtime/turn_collector.hpp"
@@ -43,7 +46,6 @@
 #include "runtime/turn_runtime.hpp"
 #include "runtime/tool_trace_hub.hpp"
 #include "tools/agent_tool.hpp"
-#include "tools/ask_user.hpp"
 #include "tools/registry.hpp"
 #include "tools/todo_tool.hpp"
 
@@ -58,7 +60,6 @@ using lubancode::cli::StreamBodyTracker;
 using lubancode::cli::ToolDisplay;
 using lubancode::cli::tr;
 using lubancode::cli::trf;
-using lubancode::platform::CurrentDirUtf8;
 
 // M11(0.10.0):输入/输出分界线。用户回车提交、模型真要开始作答那一刻打
 // 一条,回合结束的统计行之后再打一条,把一问一答从视觉上框出来——纯粹
@@ -72,28 +73,18 @@ void PrintDivider(const lubancode::cli::Theme& theme, bool is_console);
 void PrintTurnFooter(const lubancode::cli::Theme& theme, bool is_console, std::int64_t wall_ms,
                      lubancode::cli::TurnFooterTone tone);
 
-// 打印一段文本的前几行,超过就注明省略了多少行。给确认前的改动摘要用。
-void PrintFirstLines(const std::string& text, int max_lines);
-
-// 确认前把工具的入参打印清楚,好让人一眼看明白将要发生什么:
-// write_file/edit_file 显示路径和内容/改动的前几行摘要,run_command 显示
-// 完整命令,别的按通用 JSON 打印兜底。
-void PrintConfirmDetails(const std::string& name, const nlohmann::json& input);
-
-std::string TrimAscii(std::string value);
-
-std::expected<lubancode::tools::AskUserResponse, std::string> PromptAskUser(
-    const lubancode::tools::AskUserQuestion& question, const lubancode::cli::Theme& theme);
-
-// 工具确认的完整门:裁定半边在 runtime::EvaluatePermission(档位 + 权限
-// 叠加 + 钩子表态,纯逻辑),这里管"落到画面"——diff 预览、三档菜单、
-// "总是允许"落会话账、settings.local.json 追问。主回合之外,workflow 的
-// agent/tool 节点审批口也走这同一颗脑袋(见 interactive_session_wiring 的
-// BuildWorkflowAgentCallbacks),不另开第二套确认逻辑。pre 是 PreToolUse 的
-// 归并决策(调用方没接钩子就给默认空表态);has_permission_hooks 为假时
-// 跳过 PermissionRequest 钩子的发射。permission_floor 是子代理定义带来的
-// 档位下限(自定义 Agent 单·阶段 4:只可收窄):会话档比它宽时向下并到
-// 它,该问就真问;缺省 Yolo = 没有下限,行为与从前一字不差。
+// 工具确认的判断半边(骨架拆解反弹·问题 1):裁定在
+// runtime::EvaluatePermission(档位 + 权限叠加 + 钩子表态,纯逻辑),这里
+// 只拼一份 cli::ToolConfirmRequest 交给终端半边(cli/tool_confirm_ui 的
+// AskToolConfirm)——diff 预览、三档菜单、"总是允许"落会话账、
+// settings.local.json 追问与持久化全在那边,本文件不碰真终端 IO、不写
+// 配置。主回合之外,workflow 的 agent/tool 节点审批口也走这同一颗脑袋
+//(见 interactive_session_wiring 的 BuildWorkflowAgentCallbacks),不另开
+// 第二套确认逻辑。pre 是 PreToolUse 的归并决策(调用方没接钩子就给默认
+// 空表态);has_permission_hooks 为假时跳过 PermissionRequest 钩子的发射。
+// permission_floor 是子代理定义带来的档位下限(自定义 Agent 单·阶段 4:
+// 只可收窄):会话档比它宽时向下并到它,该问就真问;缺省 Yolo = 没有
+// 下限,行为与从前一字不差。
 bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
                     std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                     lubancode::cli::ToolDisplay& display, const std::vector<std::string>& allow_commands,

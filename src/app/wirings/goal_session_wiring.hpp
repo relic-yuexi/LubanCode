@@ -2,6 +2,10 @@
 // TerminalSessionController 大类外迁,归这一只。控制器持句柄调;会话级
 // 状态(theme/config/session_store)仍留控制器,两边不互相摸。
 //
+// 骨架拆解反弹·问题 3:Ensure 里"事件类型分族 + ledger sink 搭建"抽去
+// runtime::goal::MakeSessionLedgerSink(纯函数);终端打印改产 notify 回调
+// (装配层决定怎么画),本文件没有直接终端 IO。
+//
 // 状态归属(单子钉的):
 //   - coordinator(状态机)/checkpoint 工具账/work source/fairness 账/
 //     活跃 iteration 号——全跟接线器走;
@@ -63,6 +67,9 @@ public:
         std::function<lubancode::runtime::loop::LoopScheduler*()> loop_scheduler;
         // 开一枚 goal 执行轮(text + 失败出参;单飞,主线程调)。
         std::function<void(const std::string&, bool*)> start_turn;
+        // 渲染事件出口(问题 3 第 2 条):is_error 定色,text 是纯文案
+        // ——怎么画由装配层(interactive_session_wiring 填)决定。
+        std::function<void(bool is_error, const std::string& text)> notify;
     };
 
     GoalSessionWiring() = default;
@@ -105,6 +112,9 @@ public:
                                                  lubancode::runtime::loop::LoopScheduler* loop_scheduler);
 
 private:
+    // 渲染事件出口的转发(notify 缺位时静默)。
+    void Notify(bool is_error, const std::string& text);
+
     Host host_;
     std::optional<lubancode::runtime::goal::GoalCoordinator> coordinator_;
     std::shared_ptr<lubancode::tools::GoalCheckpointState> checkpoint_state_;

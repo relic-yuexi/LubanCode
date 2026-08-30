@@ -8,6 +8,7 @@
 #include <memory>
 
 #include "app/commands/workflow_commands.hpp"
+#include "app/wirings/workflow_wiring.hpp"  // BuildWorkflowExecutors(问题 3:搬 wirings)
 #include "cli/theme.hpp"
 #include "workflow/compiler.hpp"
 #include "workflow/parser.hpp"
