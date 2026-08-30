@@ -538,6 +538,11 @@ add_library(lubancode_runtime STATIC
   # provider、数据目录与打码器。不接真网(阶段 2)、不碰 Lua state(阶段 3)。
   src/runtime/plugin_http.cpp
   src/runtime/secret_resolver.cpp
+  # 同单阶段 3:Lua Host API(luban.http/luban.secrets)与动态调用上下文
+  # (LuaCallContext RAII、SecretRef userdata、取消接线、manifest-backed
+  # state 的加载/对账/调用机制)。挂载接 manifest 是阶段 4;中立传输底座
+  # 在 engine(src/net/http_transport.cpp,阶段 2 已落)。
+  src/runtime/plugin_lua_host.cpp
   # 逐枚追踪单:canonical 工具事件的装配层分线器(持久栅栏/UI 投影/录制)。
   src/runtime/tool_trace_hub.cpp
   # /goal 持久目标单:领域类型/状态机转换表/objective 计数/序列化。
@@ -580,6 +585,10 @@ target_include_directories(lubancode_runtime PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/include
   ${CMAKE_BINARY_DIR}/generated)
 target_link_libraries(lubancode_runtime PUBLIC lubancode_engine)
+# Lua 受控 HTTP 单·阶段 3:plugin_lua_host.cpp 直碰 lua C API。engine 是
+# PRIVATE 链 lua 的(usage requirement 不外传),这里补一份——只给本 target
+# 的编译用 include 路径与符号,不往 core/app 递。
+target_link_libraries(lubancode_runtime PRIVATE lubancode_lua)
 target_compile_features(lubancode_runtime PUBLIC cxx_std_23)
 target_precompile_headers(lubancode_runtime PRIVATE
   "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
