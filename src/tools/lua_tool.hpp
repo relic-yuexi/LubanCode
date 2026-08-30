@@ -36,9 +36,17 @@ struct lua_State;
 
 namespace lubancode::tools {
 
-// LuaTool 的运行时账(指令/内存/取消):定义在 .cpp(躲 lua 头),这里
-// 只前向声明给 unique_ptr 用。
-struct LuaGuard;
+// 每枚 state 一份的运行时账(指令/内存/取消)。原在 .cpp 藏着;Lua 受控
+// HTTP 单·阶段 3 起,runtime 侧的 Lua Host API 也要造带同款三道墙的
+// state,定义搬进头文件共用(字段就是账本,谁也不许另抄一份)。
+struct LuaGuard {
+    std::uint64_t instructions_used = 0;
+    std::uint64_t instruction_budget = 0;   // 0 = 不设
+    std::size_t memory_used = 0;
+    std::size_t memory_cap = 0;             // 0 = 不设
+    const std::atomic<bool>* cancel = nullptr;
+    bool budget_hit = false;
+};
 
 // Lua 插件的运行画像(plugins 单「核心定案」A 节)。
 struct LuaProfile {
@@ -58,6 +66,17 @@ struct LuaProfile {
     static LuaProfile PureDefault();
     static LuaProfile TrustedDefault();
 };
+
+// 宿主侧共用的 state 构造与转换件(Lua 受控 HTTP 单·阶段 3 起导出;
+// LuaTool 自己也走这些,不留第二份实现):
+//   NewGuardedLuaState  — allocator 内存帽 + instruction hook(预算/取消)
+//   ApplyPureLuaProfile — pure 画像关门(os.execute/io/package.loadlib)
+//   PushJsonToLua       — JSON -> lua 值(字符串按字节原样)
+//   LuaValueToJson      — lua 值 -> JSON(表按 1..n 连续整数判数组)
+lua_State* NewGuardedLuaState(const LuaProfile& profile, std::unique_ptr<LuaGuard>& guard_out);
+void ApplyPureLuaProfile(lua_State* L);
+void PushJsonToLua(lua_State* L, const nlohmann::json& value);
+nlohmann::json LuaValueToJson(lua_State* L, int index, int depth, std::string& error);
 
 class LuaTool : public Tool {
 public:

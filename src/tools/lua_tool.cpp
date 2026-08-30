@@ -24,15 +24,7 @@ constexpr int kMaxDepth = 64;
 
 }  // namespace
 
-// 每枚 state 一份的运行时账(公开给 .hpp 的前向声明兑现)。
-struct LuaGuard {
-    std::uint64_t instructions_used = 0;
-    std::uint64_t instruction_budget = 0;   // 0 = 不设
-    std::size_t memory_used = 0;
-    std::size_t memory_cap = 0;             // 0 = 不设
-    const std::atomic<bool>* cancel = nullptr;
-    bool budget_hit = false;
-};
+// 每枚 state 一份的运行时账:定义已搬进 .hpp(阶段 3 起 runtime 侧共用)。
 
 namespace {
 
@@ -111,10 +103,13 @@ void GuardHook(lua_State* L, lua_Debug*) {
     }
 }
 
+}  // namespace
+
 // 造一枚带三道墙(allocator 内存帽/hook 指令预算/取消链)的 state。
 // 预算与帽由 profile 定;取消旗是每轮执行期才灌的,存 guard 里由 hook 查。
 // guard 的寿命:LuaTool 持 unique_ptr,state close 之后回调面消失,安全。
-lua_State* NewGuardedState(const LuaProfile& profile, std::unique_ptr<LuaGuard>& guard_out) {
+// (阶段 3 起 runtime 侧的 Lua Host API 走同一枚构造——墙只此一份。)
+lua_State* NewGuardedLuaState(const LuaProfile& profile, std::unique_ptr<LuaGuard>& guard_out) {
     auto guard = std::make_unique<LuaGuard>();
     guard->instruction_budget = profile.instruction_budget;
     guard->memory_cap = profile.memory_cap_bytes;
@@ -136,7 +131,7 @@ lua_State* NewGuardedState(const LuaProfile& profile, std::unique_ptr<LuaGuard>&
 // pure 画像关门:os.execute / os.exit / io / package.loadlib 拿掉。
 // luaL_openlibs 开全之后做减法,比挨个 luaopen 少踩内部初始化的坑
 // (io 的 __gc 元方法在关 io 表后照旧有效,文件柄照收)。
-void ApplyPureProfile(lua_State* L) {
+void ApplyPureLuaProfile(lua_State* L) {
     lua_getglobal(L, "os");
     if (lua_istable(L, -1)) {
         lua_pushnil(L);
@@ -155,10 +150,14 @@ void ApplyPureProfile(lua_State* L) {
     lua_pop(L, 1);
 }
 
+namespace {
+
 std::string PathToUtf8(const std::filesystem::path& path) {
     const std::u8string u8 = path.u8string();
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }
+
+}  // namespace
 
 // JSON -> lua 值,压到栈顶。字符串按字节原样搬(lua 字符串就是字节串,
 // UTF-8 中文不过手不转码)。null 压 nil——出现在表值里等于"这个键不存在",
@@ -305,6 +304,8 @@ nlohmann::json LuaValueToJson(lua_State* L, int index, int depth, std::string& e
     }
 }
 
+namespace {
+
 // 读取表字段成字符串(栈顶是那张表)。missing_ok 时字段缺失返回空串。
 std::expected<std::string, std::string> GetStringField(lua_State* L, const char* field, bool missing_ok) {
     lua_getfield(L, -1, field);
@@ -342,7 +343,7 @@ LuaTool::~LuaTool() {
 std::expected<std::unique_ptr<LuaTool>, std::string> LuaTool::LoadFromScript(
     const std::string& script, const std::string& stem, const LuaProfile& profile) {
     std::unique_ptr<LuaGuard> guard;
-    lua_State* L = NewGuardedState(profile, guard);
+    lua_State* L = NewGuardedLuaState(profile, guard);
     if (L == nullptr) {
         return std::unexpected("lua_newstate 失败(内存不够?)");
     }
@@ -355,7 +356,7 @@ std::expected<std::unique_ptr<LuaTool>, std::string> LuaTool::LoadFromScript(
 
     luaL_openlibs(L);
     if (profile.level == LuaProfile::Level::Pure) {
-        ApplyPureProfile(L);
+        ApplyPureLuaProfile(L);
     }
 
     // 编译 + 执行整个 chunk,期望返回一张表。
