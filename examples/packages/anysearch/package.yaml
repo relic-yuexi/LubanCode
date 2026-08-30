@@ -1,0 +1,11 @@
+schema: 1
+id: luban.anysearch
+version: 0.1.0
+name: AnySearch Reference
+description: AnySearch 参考包:manifest v2 embedded-lua 插件四件工具(sub-domains/search/batch_search/extract)加搜索策略 Skill。HTTP、TLS、DNS、字节帽、取消全由宿主执行;API Key 由宿主代填,Lua 与模型都摸不到原文;不装 Python/Node/PowerShell,零外部运行时。
+compatibility:
+  lubancode: ">=0.26.124"
+  platforms:
+    - windows
+    - linux
+    - macos

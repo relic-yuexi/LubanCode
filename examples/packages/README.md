@@ -8,6 +8,7 @@
 | --- | --- | --- |
 | [browser/](browser/README.md) | 内容为主,一件可选 code-bearing | 官方浏览器包(luban.browser):browser-reviewer Agent、操作章法 Skill、四只检查 Workflow 加练习页;mcp/ 里一件可选薄启动器,未过信任不挂。浏览器本体归核心,不在此包 |
 | [gui-agent/](gui-agent/README.md) | code-bearing | Windows 桌面 process 插件(十件工具)加配套 Skill;代码组件默认只被发现不挂载,执行须过信任门 |
+| [anysearch/](anysearch/README.md) | code-bearing,manifest v2 Lua | AnySearch 参考包(luban.anysearch):受控 HTTP 插件四件搜索工具加策略 Skill,零外部运行时;网络精确记账、Key 宿主代填、auto_registered 新 Key 丢弃 |
 
 ## 验一只包(不动配置)
 
