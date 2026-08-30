@@ -138,8 +138,16 @@ bool Socket::SendAll(std::string_view bytes) {
     }
     std::size_t sent = 0;
     while (sent < bytes.size()) {
+#if defined(_WIN32)
         const int chunk = ::send(FromHandle(handle_), bytes.data() + sent,
                                  static_cast<int>(bytes.size() - sent), 0);
+#else
+        // MSG_NOSIGNAL:WS 客户端断线后继续 send,POSIX 默认会递 SIGPIPE 把
+        // 整个测试进程打死(CI ubuntu 的 app_server_ws SIGPIPE 实翻)。Linux
+        // 走 flag;macOS 无此 flag,建 socket 时设 SO_NOSIGPIPE(见下)。
+        const int chunk = ::send(FromHandle(handle_), bytes.data() + sent,
+                                 static_cast<int>(bytes.size() - sent), MSG_NOSIGNAL);
+#endif
         if (chunk <= 0) {
             return false;
         }
@@ -295,6 +303,12 @@ Socket ConnectTcp(const std::string& host, int port, std::string& error) {
 #endif
         return Socket();
     }
+#if defined(__APPLE__)
+    // macOS 无 MSG_NOSIGNAL,逐 socket 关 SIGPIPE(配合 SendAll 的 Linux flag,
+    // 两平台都把"对端断了还 send"从致命信号降回普通错误)。
+    int nosigpipe = 1;
+    ::setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &nosigpipe, sizeof(nosigpipe));
+#endif
     return Socket(ToHandle(fd));
 }
 

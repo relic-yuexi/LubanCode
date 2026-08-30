@@ -410,6 +410,12 @@
 
 另:P0-1b SessionManager 落地(clear 八步换账、生命周期状态机、session 独占锁 PID+起始 token 身份核、崩溃恢复八册——崩在任一半路都能续办不加重复事件)。
 
+## [v0.26.135] - 2026-08-31
+
+- **自进化闭环整单收官(MCP 草稿+阶段 7)。** 缺口选路定死:同求恰一件不存在工具照旧 process Plugin 路径,≥2 件出 MCP server 草稿(缺一项服务封一只 server 合账)——草稿带诚实"未实现"脚手架,四类安全夹具对 mcp/ 组件全拦,零进程零挂载,approve 明拒指路 trust。
+- **有限自动建议五门全落**:缺省关(坏账当关)、只提示不自动(开着时 status 后亮一行指路 propose)、门槛数值面可 inspect、拒绝后同指纹不再提示(接两本既有去重账)、命中率与接受率入账。五门各案+冒烟:关→开→提示→接受→拒绝→不再提示,接受率 100% 出账。
+- **CI 五红+SIGPIPE 齐治**:双 ${package_dir} 拼接越界(词法前缀裁剪漏网,补相对结果含包根文本即拒)、macOS 无 /proc 的进程 token(sysctl KERN_PROC_PID)、让路测试 REQUIRE-abort 拆栈雷(改 CHECK+早退)、计时帽两处放宽;WS 断线后 send 在 POSIX 默认递 SIGPIPE 打死测试进程——Linux 加 MSG_NOSIGNAL、macOS 设 SO_NOSIGPIPE。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
