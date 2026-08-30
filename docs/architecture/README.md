@@ -228,6 +228,8 @@ LUBANCODE_* 环境变量
 
 app-server 走同一套中立事件和交互合同。它从 stdio 收 JSON-RPC，请求审批时登记 future，前端回包后再唤醒执行线程。协议 stdout 与日志分开，免得一行调试字打坏 framing。详情见 [app-server](../features/app-server/README.md)。
 
+再往外一道缝是聊天平台：QQ、微信、飞书这类渠道的常驻接入（ChannelPlugin 与 Channel Bridge）合同已冻结在 [channels/](channels/README.md)，实现批次见该目录的阶段索引。渠道与 app-server 共用 `SessionRuntime` 与 `EventSink`，谁也不包谁。
+
 ## 11. 进程、错误与寿命
 
 - 预期错误用 `std::expected` 往上传；异常留给程序失约。

@@ -33,6 +33,12 @@ DOC reference/workflow-schema.md
 # 架构与内部机理
 DOC architecture/README.md
 DOC architecture/agent-loop/reliability.md
+DOC architecture/channels/README.md
+DOC architecture/channels/bridge-protocol.md
+DOC architecture/channels/channel-manifest.md
+DOC architecture/channels/configuration.md
+DOC architecture/channels/message-contracts.md
+DOC architecture/channels/security.md
 DOC architecture/context/compaction.md
 DOC architecture/extensions/plugin-runtime.md
 DOC architecture/extensions/tool-extension.md

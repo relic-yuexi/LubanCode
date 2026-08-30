@@ -1,6 +1,8 @@
 # 多渠道消息接入与常驻 ChannelPlugin 设计
 
+- 状态：阶段 0（合同冻结）已落地；阶段 1（纯合同与假 sidecar）起待实现
 - 日期：2026-08-29
+- 相关：`docs/architecture/channels/`（阶段 0 冻结文档）、`todos/多前端外壳与浏览器Tab_AppServer承载设计.todo`（AppServer 承载是"外壳连内核"，与本单"消息渠道接入"分界）
 - 范围：常驻渠道插件、平台消息入站、会话路由、Agent 唤起、流式回发、可靠性、安全、Package 挂载、命令与诊断
 - 首批目标：QQ Bot、WeChat；合同同时覆盖 LINE、WeCom、Feishu、Yuanbao、Zalo、Zalo ClawBot、Zalo Personal
 - 不在本单：重写模型 SSE、把 MCP 改成消息总线、实现平台后台审批流程、代用户申请平台账号、绕过平台风控
@@ -1789,12 +1791,12 @@ channel_inbound_completed
 
 ### 阶段 0：冻结合同
 
-- [ ] 把本 TODO 提炼成 `docs/architecture/channels/` 正式文档。
-- [ ] 冻结 `channel.yaml` schema 1。
-- [ ] 冻结 Channel Bridge v1 method、错误码与 framing。
-- [ ] 冻结 ChannelInboundEvent、ReplyAction、MessageProvenance。
-- [ ] 写 threat model 与数据保留表。
-- [ ] 明定 config 层级：项目只能收窄。
+- [x] 把本 TODO 提炼成 `docs/architecture/channels/` 正式文档。
+- [x] 冻结 `channel.yaml` schema 1。
+- [x] 冻结 Channel Bridge v1 method、错误码与 framing。
+- [x] 冻结 ChannelInboundEvent、ReplyAction、MessageProvenance。
+- [x] 写 threat model 与数据保留表。
+- [x] 明定 config 层级：项目只能收窄。
 
 验收：不写平台代码，Reviewer 已能画清入站、turn、出站三条水路，能说清 Plugin/MCP/Channel/Package 边界。
 
