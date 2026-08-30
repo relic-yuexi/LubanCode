@@ -32,6 +32,7 @@
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
+#include "config/settings_local.hpp"
 #include "config/skill_store.hpp"
 #include "config/update_checker.hpp"
 #include "runtime/command_service.hpp"

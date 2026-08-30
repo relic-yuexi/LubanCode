@@ -39,6 +39,7 @@
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
+#include "config/settings_local.hpp"
 #include "config/skill_store.hpp"
 #include "config/update_checker.hpp"
 #include "tools/skill_loader.hpp"
@@ -993,14 +994,10 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     continue;
                 }
                 const bool persist = where_sel->selected_indices.front() == 1;
-                const auto it = std::find_if(config.providers.begin(), config.providers.end(),
-                                             [&](const lubancode::config::ProviderConfig& p) {
-                                                 return p.name == name;
-                                             });
-                if (it != config.providers.end()) {
-                    it->auth = lubancode::config::ProviderAuthMode::Inline;
-                    it->api_key = *key;
-                }
+                // 内存这份走语义化 setter(问题 4):与落盘侧
+                // SetProviderAuthInlineInGlobalConfig 同一套字段改法,不再
+                // find_if 之后逐字段直改。
+                lubancode::config::SetProviderAuthInline(config.providers, name, *key);
                 if (persist) {
                     const auto saved = lubancode::config::SetProviderAuthInlineInGlobalConfig(name, *key);
                     if (!saved.has_value()) {
@@ -1028,14 +1025,8 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return false;
                 }
-                const auto it = std::find_if(config.providers.begin(), config.providers.end(),
-                                             [&](const lubancode::config::ProviderConfig& p) {
-                                                 return p.name == name;
-                                             });
-                if (it != config.providers.end()) {
-                    it->auth = lubancode::config::ProviderAuthMode::Env;
-                    it->key_env = *env_name;
-                }
+                // 内存这份同步换(问题 4:setter 封字段改法,不逐字段直改)。
+                lubancode::config::SetProviderAuthEnv(config.providers, name, *env_name);
                 const std::optional<std::string> value = lubancode::platform::GetEnvVar(env_name->c_str());
                 TermOut() << (value.has_value() && !value->empty()
                                   ? trf("provider_wizard.auth.env.note_set", *env_name)
@@ -1050,14 +1041,8 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     TermOut() << trf("cmd.provider.set_failed", saved.error()) << "\n";
                     return false;
                 }
-                const auto it = std::find_if(config.providers.begin(), config.providers.end(),
-                                             [&](const lubancode::config::ProviderConfig& p) {
-                                                 return p.name == name;
-                                             });
-                if (it != config.providers.end()) {
-                    it->auth = lubancode::config::ProviderAuthMode::None;
-                    it->key_env.clear();
-                }
+                // 内存这份同步换(问题 4:setter 封字段改法,不逐字段直改)。
+                lubancode::config::SetProviderAuthNone(config.providers, name);
                 TermOut() << trf("provider_remedy.none_saved", name, *saved) << "\n";
                 continue;
             }
@@ -1465,30 +1450,29 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     return;
                 }
                 // 内存这份跟着换(补过的变量名/key 一并同步),活跃端立即生效。
-                lubancode::config::SetProviderAuthMode(config.providers, command.name, *mode);
-                const auto fresh_it = std::find_if(
-                    config.providers.begin(), config.providers.end(),
-                    [&](const lubancode::config::ProviderConfig& p) { return p.name == command.name; });
-                if (fresh_it != config.providers.end()) {
-                    if (!prompted_env.empty()) {
-                        fresh_it->key_env = prompted_env;
-                    }
-                    if (!prompted_key.empty()) {
-                        fresh_it->api_key = prompted_key;
-                    }
-                    if (*mode == lubancode::config::ProviderAuthMode::None) {
-                        fresh_it->key_env.clear();
-                    }
-                    if (active_provider == command.name) {
-                        const lubancode::config::ProviderAuthResolution auth =
-                            lubancode::config::ResolveProviderAuth(*fresh_it);
-                        config.auth_mode = fresh_it->auth;
-                        config.auth_token =
-                            auth.status == lubancode::config::ProviderAuthResolution::Status::Ready
-                                ? *auth.key
-                                : std::string();
-                        real_backend.Rebuild(config);
-                    }
+                // 问题 4:按补了什么走对应 setter,auth+字段一次切齐,不再
+                // SetProviderAuthMode 之后 find_if 逐字段补丁。四路与原先的
+                // 终态逐一相同(env/inline 未补 = 只换模式,其余连字段一起)。
+                if (!prompted_env.empty()) {
+                    lubancode::config::SetProviderAuthEnv(config.providers, command.name, prompted_env);
+                } else if (!prompted_key.empty()) {
+                    lubancode::config::SetProviderAuthInline(config.providers, command.name, prompted_key);
+                } else if (*mode == lubancode::config::ProviderAuthMode::None) {
+                    lubancode::config::SetProviderAuthNone(config.providers, command.name);
+                } else {
+                    lubancode::config::SetProviderAuthMode(config.providers, command.name, *mode);
+                }
+                const lubancode::config::ProviderConfig* fresh =
+                    lubancode::config::FindProvider(config.providers, command.name);
+                if (fresh != nullptr && active_provider == command.name) {
+                    const lubancode::config::ProviderAuthResolution auth =
+                        lubancode::config::ResolveProviderAuth(*fresh);
+                    config.auth_mode = fresh->auth;
+                    config.auth_token =
+                        auth.status == lubancode::config::ProviderAuthResolution::Status::Ready
+                            ? *auth.key
+                            : std::string();
+                    real_backend.Rebuild(config);
                 }
                 TermOut() << trf("cmd.provider.set_ok", command.name, command.field,
                                  lubancode::config::ProviderAuthModeName(*mode), *saved)

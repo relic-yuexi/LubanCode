@@ -19,7 +19,7 @@
 
 #include "api/backend.hpp"
 #include "api/types.hpp"
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "platform/process.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/registry.hpp"

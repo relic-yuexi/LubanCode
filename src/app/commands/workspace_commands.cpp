@@ -22,7 +22,7 @@ using lubancode::cli::TermErr;
 #include "app/tool_runtime.hpp"
 #include "cli/i18n.hpp"
 #include "cli/theme.hpp"
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "lsp/manager.hpp"
 #include "platform/process.hpp"
 #include "platform/text_encoding.hpp"

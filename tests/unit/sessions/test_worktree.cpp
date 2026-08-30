@@ -7,7 +7,7 @@
 #include <string>
 #include <vector>
 
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "platform/process.hpp"
 
 using namespace lubancode;

@@ -300,7 +300,8 @@ endif()
 # ---------------------------------------------------------------------------
 # 显示系统剥离单第八步:target 按层拆开,依赖单向(单子"CMake 拆 target"原文)。
 #   lubancode_engine   api + agent + tools + config + memory + hooks + mcp +
-#                      lsp + ptc + platform + i18n/theme/worktree 三个零流叶子
+#                      lsp + ptc + platform + i18n/theme/line_editor 三个
+#                      零流叶子 + runtime/ 目录里的 worktree(git 房务)
 #   lubancode_runtime  合同(Event/Command/Sink/Broker)+ TurnRuntime/SessionRuntime/
 #                      CommandService/TurnItem(事件编排,不认终端)
 #   lubancode_core     engine + runtime + cli 纯逻辑(旧名兼容层,老消费方
@@ -341,6 +342,10 @@ add_library(lubancode_engine STATIC
   src/api/models.cpp
   src/api/types.cpp
   src/config/config.cpp
+  # 骨架拆解反弹·问题 7:settings.local 读写与命令放行裁定自 config.cpp
+  # 拆出的独立小档(纯函数零终端件,同层)。
+  src/config/settings_local.cpp
+  src/config/command_permission.cpp
   src/config/model_catalog.cpp
   src/config/provider_catalog.cpp
   src/config/update_checker.cpp
@@ -466,15 +471,20 @@ add_library(lubancode_engine STATIC
   src/sessions/session_lifecycle.cpp
   src/skills/workflow_recorder.cpp
   src/skills/skill_drafter.cpp
-  # engine 引用的四个 cli 叶子(零标准流、零终端依赖,tools/config 都吃):
-  # i18n(字符串表)、theme(配色值)、worktree(git 房务原语)、line_editor
-  # (纯逻辑编辑核,agent_tool 吃 DisplayWidthUtf8)。它们留在 src/cli/
-  # 目录,但编进 engine——单子守门名单(cin/cout/cerr/ReadLine/ChoiceMenu/
-  # TranscriptPainter)不含这四个文件,守门测试同钉。
+  # engine 引用的三个 cli 叶子(零标准流、零终端依赖,tools/config 都吃):
+  # i18n(字符串表)、theme(配色值)、line_editor(纯逻辑编辑核,agent_tool
+  # 吃 DisplayWidthUtf8)。它们留在 src/cli/ 目录,但编进 engine——单子守门
+  # 名单(cin/cout/cerr/ReadLine/ChoiceMenu/TranscriptPainter)不含这三个
+  # 文件,守门测试同钉。
   src/cli/i18n.cpp
   src/cli/theme.cpp
-  src/cli/worktree.cpp
   src/cli/line_editor.cpp
+  # 骨架拆解反弹·问题 6:worktree(git 房务原语)自 cli/ 迁 runtime/ 目录
+  # (领域逻辑不归展示层抽屉),target 仍挂 engine——engine 的
+  # tools/agent_tool、worktree_tool、subagent_isolation 都吃它,而 runtime
+  # target 反向链 engine,不能收。照批七 sessions/peers/skills 的先例:
+  # 目录归位,target 不动。
+  src/runtime/worktree.cpp
   # P0 新轨迹记录单(P0-1 核心半场):trajectory 事实仓底座——事件合同、
   # schema 强校验、canonical JSON、内容寻址 blob、journal/hash chain、
   # 单写者 recorder 与目录制。纯库,不 include app/cli/runtime;依赖方向

@@ -25,7 +25,7 @@
 
 #include "agent/loop.hpp"      // ToolHookDecision:hooks 决策的中立表态
 #include "api/types.hpp"       // UsageReport/Message:usage 与 prompt 的领域形状
-#include "config/config.hpp"   // ClassifyCommandByPermissions:permissions 叠加
+#include "config/command_permission.hpp"  // ClassifyCommandByPermissions:permissions 叠加(问题 7 拆出,不再借 config.hpp)
 #include "hooks/dispatcher.hpp"
 #include "tools/tool.hpp"      // Tool::Result:PostToolUse 的载荷
 

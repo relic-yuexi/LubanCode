@@ -9,6 +9,7 @@
 
 #include "cli/theme.hpp"
 #include "config/config.hpp"
+#include "config/settings_local.hpp"
 
 namespace lubancode::app {
 

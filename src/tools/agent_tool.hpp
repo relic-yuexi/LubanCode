@@ -49,7 +49,7 @@
 #include "agent/runtime_profile.hpp"
 #include "api/types.hpp"
 #include "agent/prompt_assembler.hpp"  // PackageProfileRoot:包层 Profile 根(阶段 3)
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "config/project_instructions.hpp"  // ProjectInstructionResolver:AGENTS.md 作用域(作用域单 P0)
 #include "hooks/detached.hpp"
 #include "hooks/dispatcher.hpp"

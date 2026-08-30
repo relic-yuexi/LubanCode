@@ -12,7 +12,9 @@
 
 #include <nlohmann/json.hpp>
 
+#include "config/command_permission.hpp"
 #include "config/config.hpp"
+#include "config/settings_local.hpp"
 
 using namespace lubancode;
 
@@ -2865,6 +2867,70 @@ TEST_CASE("SetProviderNativeWebSearch: 名字不存在返回 false,列表原样�
     // 没找到就没改;列表大小、字段都原样,证明不会误伤别的条目。
     REQUIRE(providers.size() == 1);
     CHECK_FALSE(providers[0].native_web_search);
+}
+
+// ---------------------------------------------------------------------------
+// 鉴权 setter 三件(骨架拆解反弹·问题 4):/provider 补救页与
+// /provider set auth 的内存改写全走这三个,字段改法与落盘侧
+// SetProviderXxxInGlobalConfig 逐字对齐,单测不必起完整交互命令。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("SetProviderAuthInline: auth=Inline + api_key 一次切齐,key_env 旧值照留") {
+    std::vector<config::ProviderConfig> providers{
+        {.name = "glm", .base_url = "https://open.bigmodel.cn/api/paas/v4", .wire = config::Wire::Responses},
+    };
+    providers[0].key_env = "GLM_KEY";  // 旧的 env 变量名,切 inline 后照留(盘上同名函数同款)
+
+    CHECK(config::SetProviderAuthInline(providers, "glm", "sk-test-123"));
+    CHECK(providers[0].auth == config::ProviderAuthMode::Inline);
+    CHECK(providers[0].api_key == "sk-test-123");
+    CHECK(providers[0].key_env == "GLM_KEY");  // 不单边清,内存与盘上不漂移
+    // 切过去之后取值就只认 api_key。
+    const auto resolved = config::ResolveProviderAuth(providers[0]);
+    CHECK(resolved.status == config::ProviderAuthResolution::Status::Ready);
+    CHECK(*resolved.key == "sk-test-123");
+}
+
+TEST_CASE("SetProviderAuthEnv: auth=Env + key_env 一次切齐,api_key 旧值照留(旧优先级仍生效)") {
+    std::vector<config::ProviderConfig> providers{
+        {.name = "glm", .base_url = "https://open.bigmodel.cn/api/paas/v4", .wire = config::Wire::Responses},
+    };
+    providers[0].api_key = "sk-old";  // 旧的明文 key,切 env 后照留
+
+    CHECK(config::SetProviderAuthEnv(providers, "glm", "GLM_KEY"));
+    CHECK(providers[0].auth == config::ProviderAuthMode::Env);
+    CHECK(providers[0].key_env == "GLM_KEY");
+    CHECK(providers[0].api_key == "sk-old");  // ResolveProviderAuth 的旧优先级(明文压 env)靠它
+}
+
+TEST_CASE("SetProviderAuthNone: auth=None 并清 key_env;api_key 不动") {
+    std::vector<config::ProviderConfig> providers{
+        {.name = "glm", .base_url = "https://open.bigmodel.cn/api/paas/v4", .wire = config::Wire::Responses},
+    };
+    providers[0].key_env = "GLM_KEY";
+    providers[0].api_key = "sk-old";
+
+    CHECK(config::SetProviderAuthNone(providers, "glm"));
+    CHECK(providers[0].auth == config::ProviderAuthMode::None);
+    CHECK(providers[0].key_env.empty());  // 变量名没用了,收干净(与盘上 None 分支一致)
+    CHECK(providers[0].api_key == "sk-old");
+}
+
+TEST_CASE("鉴权 setter 三件: 空 key/空变量名拒绝,名字不存在返回 false,列表原样不动") {
+    std::vector<config::ProviderConfig> providers{
+        {.name = "glm", .base_url = "https://open.bigmodel.cn/api/paas/v4", .wire = config::Wire::Responses},
+    };
+    // 空 api_key / 空变量名 = 半截配置,拒绝不落(ValidateProviderConfig 同一条规矩)。
+    CHECK_FALSE(config::SetProviderAuthInline(providers, "glm", ""));
+    CHECK_FALSE(config::SetProviderAuthEnv(providers, "glm", ""));
+    CHECK(providers[0].auth == config::ProviderAuthMode::Env);  // 原样,没被半截请求动过
+    CHECK(providers[0].api_key.empty());
+    // 名字不存在:三件都返回 false、原样不动。
+    CHECK_FALSE(config::SetProviderAuthInline(providers, "no-such-provider", "sk-x"));
+    CHECK_FALSE(config::SetProviderAuthEnv(providers, "no-such-provider", "X_KEY"));
+    CHECK_FALSE(config::SetProviderAuthNone(providers, "no-such-provider"));
+    REQUIRE(providers.size() == 1);  // 没误伤、没多没少
+    CHECK(providers[0].name == "glm");
 }
 
 // ---------------------------------------------------------------------------

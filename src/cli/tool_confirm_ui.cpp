@@ -14,7 +14,7 @@
 #include "cli/i18n.hpp"
 #include "cli/terminal_port.hpp"
 #include "cli/tool_display.hpp"
-#include "config/config.hpp"
+#include "config/settings_local.hpp"  // "允许并记住"写 settings.local.json + gitignore(问题 7 拆出,config.hpp 不再捎带)
 #include "platform/console.hpp"
 #include "platform/paths.hpp"
 

@@ -6,7 +6,7 @@
 
 #include "cli/i18n.hpp"
 #include "cli/image_input.hpp"  // MediaTypeForPath(图片提及走视觉附件路)
-#include "cli/worktree.hpp"  // FindRepositoryRoot
+#include "runtime/worktree.hpp"  // FindRepositoryRoot
 #include "sessions/session_store.hpp"  // NormalizePathForCompare
 #include "tools/path_utils.hpp"
 

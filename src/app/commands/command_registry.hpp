@@ -39,9 +39,10 @@
 #include "cli/context_tracker.hpp"
 #include "cli/slash_commands.hpp"
 #include "cli/theme.hpp"
-#include "cli/worktree.hpp"
+#include "runtime/worktree.hpp"
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
+#include "config/settings_local.hpp"
 #include "lsp/manager.hpp"
 #include "memory/project_memory.hpp"  // ProjectMemory(/memory 的会话件)
 #include "package/mounting.hpp"       // PackageMount:会话钉快照(阶段 3 挂载)

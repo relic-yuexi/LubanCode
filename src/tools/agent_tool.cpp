@@ -26,6 +26,7 @@
 #include "agent/turn_harness.hpp"
 #include "cli/i18n.hpp"  // trf:墙钟/预算文案(参数校验的错误文案发给模型看,不走 i18n)
 #include "cli/line_editor.hpp"  // DisplayWidthUtf8:标题宽度(纯逻辑编辑核的零流符号)
+#include "config/command_permission.hpp"  // 后台任务命令的 permissions 前缀裁定(问题 7 拆出)
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:inbox 投递文本的编码关口
 #include "runtime/turn_runtime.hpp"    // MapPreToolDecision:PreToolUse 归并映射与主路径同一颗
