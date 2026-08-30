@@ -1424,9 +1424,12 @@ bool IsProcessAlive(unsigned long pid) {
     }
     const HANDLE process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, static_cast<DWORD>(pid));
     if (process == nullptr) {
-        // 打不开可能是权限不够(别的会话/提权进程),按"活着"算,交给心跳
-        // 过期那条路,不误删。
-        return true;
+        // 打不开分两种:对象还在但够不着(权限/会话隔离,ACCESS_DENIED),
+        // 按"活着"算,交给心跳过期那条路,不误删;pid 压根不存在了
+        //(ERROR_INVALID_PARAMETER——进程死透、句柄全关,内核对象已释放),
+        // 按"死"算。旧写法一律当活,回滚杀进程后句柄一关, WaitFor 永远
+        // 等不到"死"(CI 实翻:package_code_mounting 回滚案)。
+        return GetLastError() == ERROR_ACCESS_DENIED;
     }
     DWORD exit_code = 0;
     const bool got = GetExitCodeProcess(process, &exit_code) != FALSE;

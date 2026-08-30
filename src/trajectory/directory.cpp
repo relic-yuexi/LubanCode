@@ -81,19 +81,20 @@ std::string NormalizeRootPathText(const std::filesystem::path& root) {
 
 std::string ComputeWorkspaceKey(const std::filesystem::path& root) {
     const std::string normalized = NormalizeRootPathText(root);
-    std::string basename = platform::PathToUtf8(root.filename());
-    if (basename.empty() || basename == "." || basename == "..") {
-        // 根目录一类没有 basename 的,用最后一段非空路径;再不行用 "root"。
-        std::istringstream stream(normalized);
-        std::string segment;
-        while (std::getline(stream, segment, '/')) {
-            if (!segment.empty()) {
-                basename = segment;
-            }
+    // basename 一律从规范化文本切最后一段非空路径,不问平台 fs 语义——
+    // POSIX 把反斜杠当普通字符,fs::path("D:\\work\\demo").filename() 在
+    // macOS/Linux 上是整串反斜杠串,workspace_key 就成了"整路径-hash"
+    // (CI 实翻)。规范文本已统一正斜杠,两边同口径。
+    std::string basename;
+    std::istringstream stream(normalized);
+    std::string segment;
+    while (std::getline(stream, segment, '/')) {
+        if (!segment.empty() && segment != "." && segment != "..") {
+            basename = segment;
         }
-        if (basename.empty()) {
-            basename = "root";
-        }
+    }
+    if (basename.empty()) {
+        basename = "root";
     }
     const std::string hash = hooks::Sha256Hex(normalized);
     return basename + "-" + hash.substr(0, 12);

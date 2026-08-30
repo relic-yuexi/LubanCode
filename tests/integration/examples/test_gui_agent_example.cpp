@@ -61,7 +61,10 @@ std::string ReadFile(const std::filesystem::path& path) {
 // Windows 的 Microsoft Store 假 shim 正好被挡掉。
 bool PythonAvailable(const std::string& command) {
     const auto result = platform::RunProcess(std::vector<std::string>{command, "--version"}, 10000);
-    return result.exit_code == 0 && result.output.find("Python") != std::string::npos;
+    // 只认 Python 3:macOS 的 /usr/bin/python 是 Python 2 桩,"Python 2.7" 也
+    // 含 "Python"——旧门放行,py2 跑 py3 代码非零退,REQUIRE(4==13) 就这么
+    // 来的。py2 一律按"不可用"跳过本组真机案。
+    return result.exit_code == 0 && result.output.find("Python 3") != std::string::npos;
 }
 
 // 解析示例的真 manifest。失败即红——示例的 plugin.json 是交付物,不是参考。
