@@ -216,6 +216,9 @@ lubancode::tools::DetachedAgentBackend SessionStack::BuildDetachedBackend() cons
     out.provider = active_provider;
     out.request_profile.model = *current_model;
     out.request_profile.reasoning_effort = *current_think;
+    // 跨轮保留选择随后台快照走(P1):派出那一刻抄一份,与 effort 同一套
+    // 覆盖规矩——后台任务不该中途被会话层的 /think history 改了形状。
+    out.request_profile.reasoning_history = *current_think_history;
     out.model_instructions = *current_model_instructions;
     out.soul = *current_soul;
     return out;
@@ -249,6 +252,9 @@ SessionStack::SessionStack(const InteractiveSessionOptions& options)
       real_backend(config_result.config),
       current_model(std::make_shared<std::string>(config_result.config.model)),
       current_think(std::make_shared<std::string>(config_result.config.think)),
+      // 跨轮保留(P1)起手 ProviderDefault:配置文件不掺和——它是模型
+      // 能力档位的事,选了 all 切到不认的模型要重校验,全局写死反而害事。
+      current_think_history(std::make_shared<lubancode::api::ReasoningHistoryMode>()),
       artifact_store(std::make_shared<lubancode::agent::ContextArtifactStore>()),
       current_model_instructions(std::make_shared<std::string>()),
       current_soul_name(config_result.config.soul.empty() ? "default" : config_result.config.soul),

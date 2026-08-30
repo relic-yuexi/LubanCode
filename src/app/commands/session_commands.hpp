@@ -270,6 +270,9 @@ std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
 // on_mode_restored(可空,Plan 模式单):恢复成功后收存档的 mode/plan/review
 // 账(老档没 mode 行给 Default 与空表),会话层拿它恢复协作模式档位与
 // 最近计划成品。不接照旧丢弃。
+// on_think_history_restored(可空,Kimi 保留式思考单 P1):恢复成功后收存档
+// 最后一条 think_history 事件(老档没这行给 nullopt),会话层拿它恢复
+// /think history 的选择并按当前模型重新校验。不接照旧丢弃(按 default)。
 bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                     lubancode::agent::Agent& loop, lubancode::sessions::SessionStore& store,
                     std::size_t& persisted_count, lubancode::sessions::SessionMeta& session_meta,
@@ -282,7 +285,9 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                     const std::function<void(const std::optional<lubancode::sessions::ModeEvent>&,
                                              const std::vector<lubancode::sessions::PlanEvent>&,
                                              const std::optional<lubancode::sessions::PlanReviewEvent>&)>*
-                        on_mode_restored = nullptr);
+                        on_mode_restored = nullptr,
+                    const std::function<void(const std::optional<lubancode::sessions::ThinkHistoryEvent>&)>*
+                        on_think_history_restored = nullptr);
 
 
 // /export [路径]:当前会话导出 Markdown,默认写 sessions/<id>.md。
@@ -336,6 +341,9 @@ struct SessionCommandState {
                        const std::vector<lubancode::sessions::PlanEvent>&,
                        const std::optional<lubancode::sessions::PlanReviewEvent>&)>
         on_mode_restored;
+    // Kimi 保留式思考单 P1:/resume 成功后的跨轮保留选择恢复。可空(单测
+    // 不接;不接就按 ProviderDefault)。
+    std::function<void(const std::optional<lubancode::sessions::ThinkHistoryEvent>&)> on_think_history_restored;
 };
 
 // /clear:丢历史重建、存档翻篇、标题翻篇。

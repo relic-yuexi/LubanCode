@@ -634,7 +634,9 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                     const std::function<void(const std::optional<lubancode::sessions::ModeEvent>&,
                                              const std::vector<lubancode::sessions::PlanEvent>&,
                                              const std::optional<lubancode::sessions::PlanReviewEvent>&)>*
-                        on_mode_restored) {
+                        on_mode_restored,
+                    const std::function<void(const std::optional<lubancode::sessions::ThinkHistoryEvent>&)>*
+                        on_think_history_restored) {
     if (sessions_dir.empty()) {
         TermOut() << tr("session.no_home") << "\n";
         return false;
@@ -749,6 +751,16 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
                 ? std::nullopt
                 : std::optional<lubancode::sessions::ModeEvent>(session->last_mode_event);
         (*on_mode_restored)(mode_event, session->plan_events, session->last_plan_review);
+    }
+    // 跨轮保留选择(Kimi 保留式思考单 P1):存档最后一条 think_history 交
+    // 还会话层;会话层拿去落 current_think_history 并按当前模型重新校验
+    // (不支持就明说并回 default)。老档没这行给 nullopt(按 ProviderDefault)。
+    if (on_think_history_restored != nullptr && *on_think_history_restored) {
+        const std::optional<lubancode::sessions::ThinkHistoryEvent> history_event =
+            session->last_think_history.mode.empty()
+                ? std::nullopt
+                : std::optional<lubancode::sessions::ThinkHistoryEvent>(session->last_think_history);
+        (*on_think_history_restored)(history_event);
     }
     // context 记账:真实 usage 得等恢复后第一次请求才校准,这里先按字符
     // 粗估打一行,心里有数。
@@ -939,7 +951,8 @@ CommandFlow HandleResumeCommand(SessionCommandState& state, const std::string& a
                       state.meta, state.title, state.wire_str, *state.current_model, theme,
                       /*quiet_if_none=*/false, state.worktree_session, &state.compact_epoch,
                       state.on_queue_restored ? &state.on_queue_restored : nullptr,
-                      state.on_mode_restored ? &state.on_mode_restored : nullptr)) {
+                      state.on_mode_restored ? &state.on_mode_restored : nullptr,
+                      state.on_think_history_restored ? &state.on_think_history_restored : nullptr)) {
         state.store_broken = false;  // 换了场,存档失败的旧账翻篇
         state.title_pending = false;
         if (state.worktree_session != nullptr && state.worktree_session->active()) {

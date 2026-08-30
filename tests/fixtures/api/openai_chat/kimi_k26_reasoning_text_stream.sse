@@ -1,0 +1,7 @@
+data: {"id":"chatcmpl_kimi_k26","object":"chat.completion.chunk","model":"kimi-k2.6","choices":[{"index":0,"delta":{"role":"assistant","reasoning_content":"这轮想的要跨轮保留"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_kimi_k26","choices":[{"index":0,"delta":{"content":"答:你好"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl_kimi_k26","choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}
+
+data: [DONE]

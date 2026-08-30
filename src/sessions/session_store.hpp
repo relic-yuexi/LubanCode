@@ -217,6 +217,25 @@ struct ModeEvent {
 std::string SerializeModeEvent(const ModeEvent& event, const std::string& ts);
 std::optional<ModeEvent> ParseModeEvent(const std::string& line);
 
+// ---------------------------------------------------------------------------
+// think_history 事件(Kimi 保留式思考单 P1):/think history default|all 的
+// 会话账。
+//
+//   {"type":"think_history_v1","mode":"all","ts":"..."}
+//
+// append-only,最后一条胜;/resume 拿它恢复用户的跨轮保留选择,再按当前
+// active provider/model 重新校验(模型不支持就把状态回 default 并明说,
+// 不把 K2.6 的 keep 状态硬带给 K3/K2.5)。老版本读到这行当坏行跳过,
+// 消息账无损(事件行的通用约定);老档没有这行 = 从未选过,按 default。
+// ---------------------------------------------------------------------------
+
+struct ThinkHistoryEvent {
+    std::string mode;  // "default" / "all"(api::ReasoningHistoryMode 的档名)
+};
+
+std::string SerializeThinkHistoryEvent(const ThinkHistoryEvent& event, const std::string& ts);
+std::optional<ThinkHistoryEvent> ParseThinkHistoryEvent(const std::string& line);
+
 struct PlanEvent {
     std::string plan_id;
     std::uint64_t revision = 1;
@@ -332,6 +351,9 @@ struct LoadedSession {
     ModeEvent last_mode_event;
     std::vector<PlanEvent> plan_events;
     std::optional<PlanReviewEvent> last_plan_review;
+    // Kimi 保留式思考单 P1:最后一条 think_history 事件(空 mode = 老档,
+    // 按 ProviderDefault 恢复)。
+    ThinkHistoryEvent last_think_history;
     // trace-aware 修复的分档账(没有 trace 行的档全零):/resume 按它告知
     // 用户"几枚未执行、几枚副作用未知、几枚恢复了原始结果"。
     TraceRepairReport trace_repair;
@@ -412,6 +434,8 @@ public:
     bool AppendModeEvent(const ModeEvent& event);
     bool AppendPlanEvent(const PlanEvent& event);
     bool AppendPlanReviewEvent(const PlanReviewEvent& event);
+    // Kimi 保留式思考单 P1:/think history 的选择落会话账,同 append+flush。
+    bool AppendThinkHistoryEvent(const ThinkHistoryEvent& event);
 
     // /clear:关掉当前文件(留在磁盘上),回到"没有活动会话"状态,下一条
     // 用户消息再 Begin 一场新的。

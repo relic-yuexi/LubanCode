@@ -376,6 +376,59 @@ TEST_CASE("ParseSessionFile: 首行不是 meta 给 nullopt") {
     CHECK_FALSE(sessions::ParseSessionFile("{\"role\":\"user\",\"content\":[]}\n").has_value());
 }
 
+// ---------------------------------------------------------------------------
+// think_history 事件(Kimi 保留式思考单 P1):/think history 的会话账往返
+// 与整文件折叠(最后一条胜);坏行跳过不废整场;老档没有这行按 default。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("think_history 事件: 序列化往返与坏行拒绝") {
+    sessions::ThinkHistoryEvent event;
+    event.mode = "all";
+    const std::string line = sessions::SerializeThinkHistoryEvent(event, "2026-08-30 10:00:00");
+    const auto parsed = sessions::ParseThinkHistoryEvent(line);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->mode == "all");
+
+    // 认不得的档名当坏行,不猜。
+    CHECK_FALSE(sessions::ParseThinkHistoryEvent(R"({"type":"think_history_v1","mode":"everything"})")
+                    .has_value());
+    CHECK_FALSE(sessions::ParseThinkHistoryEvent(R"({"type":"think_history_v1"})").has_value());
+    // 别的事件类型不认。
+    CHECK_FALSE(sessions::ParseThinkHistoryEvent(R"({"type":"mode_v1","mode":"plan"})").has_value());
+    // default 档也走得通往返。
+    sessions::ThinkHistoryEvent off;
+    off.mode = "default";
+    const auto parsed_off = sessions::ParseThinkHistoryEvent(sessions::SerializeThinkHistoryEvent(off, "t"));
+    REQUIRE(parsed_off.has_value());
+    CHECK(parsed_off->mode == "default");
+}
+
+TEST_CASE("ParseSessionFile: think_history 事件最后一条胜,坏行跳过") {
+    sessions::SessionMeta meta;
+    meta.wire = "openai-chat-completions";
+    meta.model = "kimi-k2.6";
+    meta.started_at = "2026-08-30 09:00:00";
+    std::string content = sessions::SerializeSessionMeta(meta) + "\n";
+    content += sessions::SerializeSessionMessage(UserText("你好"), "t1") + "\n";
+    content += sessions::SerializeThinkHistoryEvent({"all"}, "t2") + "\n";
+    content += std::string(R"({"type":"think_history_v1","mode":"everything"})") + "\n";  // 坏行
+    content += sessions::SerializeThinkHistoryEvent({"default"}, "t3") + "\n";
+    content += sessions::SerializeThinkHistoryEvent({"all"}, "t4") + "\n";
+
+    const auto session = sessions::ParseSessionFile(content);
+    REQUIRE(session.has_value());
+    CHECK(session->last_think_history.mode == "all");  // 最后一条有效行胜
+    CHECK(session->skipped_lines == 1);
+    // 消息账不受事件行影响。
+    CHECK(session->messages.size() == 1);
+
+    // 老档没有这行:空 mode,/resume 侧按 ProviderDefault 恢复。
+    const auto old_session = sessions::ParseSessionFile(
+        sessions::SerializeSessionMeta(meta) + "\n" + sessions::SerializeSessionMessage(UserText("旧档"), "t"));
+    REQUIRE(old_session.has_value());
+    CHECK(old_session->last_think_history.mode.empty());
+}
+
 TEST_CASE("ParseSessionFile: 兼容 CRLF 行尾") {
     sessions::SessionMeta meta;
     meta.started_at = "x";

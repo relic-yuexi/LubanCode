@@ -621,6 +621,7 @@ TEST_CASE("ExecuteProviderSwitch:整套连接字段连同 backend/会话状态�
     std::string session_wire = lubancode::config::ProviderWireName(config.wire);
     auto current_model = std::make_shared<std::string>("old-model");
     auto current_think = std::make_shared<std::string>("low");
+    auto current_think_history = std::make_shared<lubancode::api::ReasoningHistoryMode>();
     auto current_instructions = std::make_shared<std::string>("OLD");
     lubancode::cli::ContextTracker tracker(128000);
     lubancode::config::ModelCatalog catalog;  // 空目录:ApplyModelCatalog 全空应用
@@ -634,8 +635,8 @@ TEST_CASE("ExecuteProviderSwitch:整套连接字段连同 backend/会话状态�
     lubancode::config::Source source = lubancode::config::Source::Default;
 
     CHECK(ExecuteProviderSwitch("ccmoon", /*switch_model=*/"", config, active_provider, backend,
-                                session_wire, current_model, current_think, tracker,
-                                current_instructions, catalog, prompt_options, rebuild_loop,
+                                session_wire, current_model, current_think, current_think_history,
+                                tracker, current_instructions, catalog, prompt_options, rebuild_loop,
                                 /*is_console=*/false, theme, /*active_provider_write_path=*/std::nullopt,
                                 source));
 
@@ -664,9 +665,9 @@ TEST_CASE("ExecuteProviderSwitch:整套连接字段连同 backend/会话状态�
     // 名字找不着:报一行、返回 false,任何状态都不动。
     const std::string wire_before = session_wire;
     CHECK_FALSE(ExecuteProviderSwitch("no-such", "", config, active_provider, backend, session_wire,
-                                      current_model, current_think, tracker, current_instructions,
-                                      catalog, prompt_options, rebuild_loop, false, theme,
-                                      std::nullopt, source));
+                                      current_model, current_think, current_think_history, tracker,
+                                      current_instructions, catalog, prompt_options, rebuild_loop,
+                                      false, theme, std::nullopt, source));
     CHECK(session_wire == wire_before);
     CHECK(rebuild_count == 1);
 

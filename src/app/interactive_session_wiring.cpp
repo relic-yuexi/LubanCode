@@ -334,6 +334,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       real_backend(stack_.real_backend),
       current_model(stack_.current_model),
       current_think(stack_.current_think),
+      current_think_history(stack_.current_think_history),
       active_provider(stack_.active_provider),
       model_router(stack_.model_router),
       artifact_store(stack_.artifact_store),
@@ -718,9 +719,14 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
                                    const std::optional<lubancode::sessions::PlanReviewEvent>& review) {
                 plan_wiring_.RestoreFromArchive(mode_event, plans, review);
             };
+        // 跨轮保留选择的恢复口(P1):落回会话真值并按当前模型重校验。
+        const std::function<void(const std::optional<lubancode::sessions::ThinkHistoryEvent>&)>
+            think_history_restorer = [this](const std::optional<lubancode::sessions::ThinkHistoryEvent>& event) {
+                RestoreThinkHistoryFrom(event);
+            };
         if (ResumeSession("", sessions_dir, *main_agent, session_store, persisted_count, session_meta, session_title,
                           wire_str, *current_model, theme, /*quiet_if_none=*/true, &worktree_session,
-                          &session_compact_epoch, &queue_restorer, &mode_restorer)) {
+                          &session_compact_epoch, &queue_restorer, &mode_restorer, &think_history_restorer)) {
             resume_moved_into_worktree = worktree_session.active();
             // 仓按恢复的那场开张(旧档若落过盘,artifact 继续可追)。
             OpenArtifactStore();
@@ -880,6 +886,7 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     main_agent_profile.provider = active_provider;
     main_agent_profile.request.model = *current_model;
     main_agent_profile.request.reasoning_effort = *current_think;
+    main_agent_profile.request.reasoning_history = *current_think_history;
     if (const auto* entry = model_catalog.FindByProviderAndSlug(active_provider, *current_model);
         entry != nullptr) {
         main_agent_profile.request.reasoning = entry->reasoning;
@@ -967,6 +974,7 @@ void TerminalSessionController::SyncAgentRequestPolicy() {
     lubancode::api::RequestProfile request;
     request.model = *current_model;
     request.reasoning_effort = *current_think;
+    request.reasoning_history = *current_think_history;
     if (const auto* entry = model_catalog.FindByProviderAndSlug(active_provider, *current_model);
         entry != nullptr) {
         request.reasoning = entry->reasoning;
@@ -974,6 +982,21 @@ void TerminalSessionController::SyncAgentRequestPolicy() {
     main_agent->SetRequestProfile(std::move(request));
     main_agent->SetModelInstructions(*current_model_instructions);
     main_agent->SetSoul(*current_soul);
+}
+
+void TerminalSessionController::RestoreThinkHistoryFrom(
+    const std::optional<lubancode::sessions::ThinkHistoryEvent>& event) {
+    // 存档的跨轮保留选择落回会话真值,再按当前模型重校验——恢复时用的
+    // 模型未必是存档时的模型,K2.6 存的 all 不能硬带给不认的模型(P1
+    // 第 6 条)。校验回落时自打一行,SyncAgentRequestPolicy 让下一份
+    // 请求立即按新形状走。
+    *current_think_history = event.has_value() && event->mode == "all"
+                                  ? lubancode::api::ReasoningHistoryMode::All
+                                  : lubancode::api::ReasoningHistoryMode::ProviderDefault;
+    lubancode::app::RevalidateThinkHistoryMode(
+        current_think_history, current_think,
+        model_catalog.FindByProviderAndSlug(active_provider, *current_model));
+    SyncAgentRequestPolicy();
 }
 
 void TerminalSessionController::RefreshSkills() {
@@ -1086,6 +1109,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.real_backend = &real_backend;
     ctx.current_model = current_model;
     ctx.current_think = current_think;
+    ctx.current_think_history = current_think_history;
     ctx.current_model_instructions = current_model_instructions;
     ctx.current_soul = current_soul;
     ctx.current_soul_name = &current_soul_name;
@@ -1207,6 +1231,11 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
                const std::vector<lubancode::sessions::PlanEvent>& plans,
                const std::optional<lubancode::sessions::PlanReviewEvent>& review) {
             plan_wiring_.RestoreFromArchive(mode_event, plans, review);
+        },
+        // 跨轮保留选择恢复(P1):存档的 /think history 选择按当前模型
+        // 重校验后落回会话真值。
+        [this](const std::optional<lubancode::sessions::ThinkHistoryEvent>& event) {
+            RestoreThinkHistoryFrom(event);
         }};
 }
 

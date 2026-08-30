@@ -13020,6 +13020,7 @@
             "dialect": {
               "effort_path": "none",
               "replay": "tool_episode",
+              "history_control": "thinking_keep",
               "verified": true
             }
           }
@@ -13056,6 +13057,7 @@
             "dialect": {
               "toggle": "none",
               "replay": "always",
+              "history_control": "none",
               "verified": true
             }
           }
@@ -13108,6 +13110,7 @@
             "dialect": {
               "effort_path": "none",
               "replay": "never",
+              "history_control": "none",
               "verified": true
             }
           }
@@ -13131,6 +13134,7 @@
               "effort_path": "none",
               "budget_path": "none",
               "replay": "always",
+              "history_control": "none",
               "verified": true
             }
           }
@@ -13154,6 +13158,7 @@
               "effort_path": "none",
               "budget_path": "none",
               "replay": "always",
+              "history_control": "none",
               "verified": true
             }
           }

@@ -136,6 +136,12 @@ public:
         mode_state_.revision = revision;
     }
 
+    // ---- 跨轮保留账(Kimi 保留式思考单 P1)-----------------------------------
+    // /think history default|all 的会话账:存档活跃就落 think_history_v1 事件
+    // 行(append+flush),没建档先挂起(EnsureBegun 补落)。mode 是稳定短码
+    // ("default"/"all"),/resume 按"最后一条"恢复并按当前模型重新校验。
+    void RecordThinkHistory(const std::string& mode);
+
     // ---- 计划成品账 -----------------------------------------------------------
     // 最近一份 PlanDocument(按 revision supersede;旧稿仍在 session 事件
     // 行里,/resume 按 plan_v1 行重建全账)。null = 本场还没交过计划。
@@ -174,6 +180,8 @@ private:
     ModeState mode_state_;
     // 存档未开时切过的档(起手 --mode plan):建档那一刻补落。
     std::optional<sessions::ModeEvent> pending_mode_event_;
+    // 存档未开时切过的跨轮保留选择(起手 /think history all):建档补落。
+    std::optional<sessions::ThinkHistoryEvent> pending_think_history_;
     std::optional<PlanDocument> latest_plan_;
 };
 

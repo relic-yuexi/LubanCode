@@ -1,0 +1,27 @@
+{
+  "fixture_id": "kimi_k26_reasoning_text_stream",
+  "wire": "openai-chat-completions",
+  "provider": "moonshot",
+  "model": "kimi-k2.6",
+  "scenario": "thinking_text_keep_all_cross_turn_replay",
+  "source_document": "internal",
+  "captured_at": "2026-08-30",
+  "request_expectation": {
+    "thinking": {
+      "type": "enabled",
+      "keep": "all"
+    }
+  },
+  "expected_events": [
+    "MessageStart",
+    "ThinkingDelta",
+    "TextDelta",
+    "MessageDone"
+  ],
+  "expected_replay": [
+    "K2.6 开 /think history all 后:请求同发 thinking.type=enabled 与 thinking.keep=all,跨 Turn 的 assistant.reasoning_content 原字节回传,replay 升为 always"
+  ],
+  "usage_expectation": {},
+  "stop_reason": "end_turn",
+  "notes": "Kimi K2.6 纯对话实录缩样(P1 跨轮保留档):reasoning_content 思考 -> content 正文 -> finish_reason=stop -> [DONE]。形状按官方文档合成(https://platform.kimi.com/docs/guide/use-thinking-models,核对 2026-08-30):thinking.keep=all 与完整历史 assistant 消息(含 reasoning_content)须同发,只发 keep 不带历史、或只带历史不发 keep,都不算跨轮 Preserved Thinking 已启用。"
+}

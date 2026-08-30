@@ -252,3 +252,127 @@ TEST_CASE("Moonshot 四枚模型的请求 golden:该发的发,不该发的一概
     CHECK_FALSE(k25_body["thinking"].contains("keep"));
     CHECK_FALSE(k25_body["messages"][1].contains("reasoning_content"));
 }
+
+// ---------------------------------------------------------------------------
+// Kimi 保留式思考单 P1:跨轮保留的服务端历史控制(history_control)。
+// K2.6 声明 thinking_keep(可选跨轮保留);K3/K2.7/K2.5 显式 none(同
+// provider 里与 K2.6 分家的那道闸)。history all 的请求 golden:keep 与
+// type 同发、历史 reasoning 原字节回传。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Moonshot history_control: K2.6 可选保留,其余三枚显式不清位") {
+    const auto catalog = config::ParseProviderCatalogJson(
+        config::embedded::kProviderCatalogJson, "<embedded>");
+    REQUIRE(catalog.has_value());
+    const auto* moonshot = catalog->FindProvider("moonshot");
+    REQUIRE(moonshot != nullptr);
+
+    const auto* k26 = moonshot->FindModel("kimi-k2.6");
+    REQUIRE(k26 != nullptr);
+    CHECK(k26->reasoning.dialect.history_control == "thinking_keep");
+    CHECK(k26->reasoning.dialect.history_all_value.empty());  // 空 = "all"(官方唯一值)
+    CHECK(api::ReasoningHistorySupportFor(k26->reasoning) ==
+          api::ReasoningHistorySupport::RequestControl);
+
+    for (const char* id : {"kimi-k3", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"}) {
+        const auto* model = moonshot->FindModel(id);
+        REQUIRE(model != nullptr);
+        // 显式 none 清位:就算 provider 级将来声明了 thinking_keep,这几枚
+        // 也不继承。
+        CHECK(model->reasoning.dialect.history_control.empty());
+        CHECK(api::ReasoningHistorySupportFor(model->reasoning) ==
+              api::ReasoningHistorySupport::ServerFixed);
+    }
+
+    const auto* k25 = moonshot->FindModel("kimi-k2.5");
+    REQUIRE(k25 != nullptr);
+    CHECK(k25->reasoning.dialect.history_control.empty());
+    CHECK(api::ReasoningHistorySupportFor(k25->reasoning) ==
+          api::ReasoningHistorySupport::None);  // replay=never,不认保留
+}
+
+TEST_CASE("Moonshot K2.6 history all 请求 golden: keep 与历史 reasoning 同发") {
+    const auto catalog = config::ParseProviderCatalogJson(
+        config::embedded::kProviderCatalogJson, "<embedded>");
+    REQUIRE(catalog.has_value());
+    const auto* moonshot = catalog->FindProvider("moonshot");
+    REQUIRE(moonshot != nullptr);
+    const auto* k26 = moonshot->FindModel("kimi-k2.6");
+    REQUIRE(k26 != nullptr);
+
+    api::Request request;
+    request.model = "kimi-k2.6";
+    request.reasoning = k26->reasoning;
+    request.reasoning_effort = "high";
+    request.reasoning_history = api::ReasoningHistoryMode::All;
+    api::Message user;
+    user.role = api::Role::User;
+    user.content.push_back(api::TextBlock{"你好"});
+    request.messages.push_back(user);
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    assistant.content.push_back(api::ThinkingBlock{"上一轮的思考", ""});
+    assistant.content.push_back(api::TextBlock{"上一轮的答"});
+    request.messages.push_back(assistant);
+    api::Message next;
+    next.role = api::Role::User;
+    next.content.push_back(api::TextBlock{"再问"});
+    request.messages.push_back(next);
+
+    const auto body = api::chat::BuildRequestJson(request);
+    // 只发 keep、不带历史,或只带历史、不发 keep,都不算跨轮 Preserved
+    // Thinking 已启用——两者必须同时在场。
+    CHECK(body["thinking"]["type"] == "enabled");
+    CHECK(body["thinking"]["keep"] == "all");
+    CHECK(body["messages"][1]["reasoning_content"] == "上一轮的思考");
+    CHECK_FALSE(body.contains("reasoning_effort"));
+}
+
+TEST_CASE("方言 history_control 的解析边界:拼错枚举、错 wire、模型级清继承") {
+    // 拼错的枚举当场报错。
+    CHECK_FALSE(config::ParseProviderCatalogJson(R"({
+      "schema_version": 2, "revision": "2026-08-30",
+      "providers": {"d": {"name": "D", "wire": "chat_completions",
+        "base_url": "https://a.test/v1", "key_env": "D_KEY", "default_model": "m",
+        "reasoning_dialect": {"history_control": "keep_all"},
+        "models": {"m": {"name": "M"}}}}})", "p").has_value());
+    // 认不得的方言字段报错(schema additionalProperties=false 同一口径)。
+    CHECK_FALSE(config::ParseProviderCatalogJson(R"({
+      "schema_version": 2, "revision": "2026-08-30",
+      "providers": {"d": {"name": "D", "wire": "chat_completions",
+        "base_url": "https://a.test/v1", "key_env": "D_KEY", "default_model": "m",
+        "reasoning_dialect": {"history_kontroll": "thinking_keep"},
+        "models": {"m": {"name": "M"}}}}})", "p").has_value());
+    // 非 chat 家不认 thinking_keep:catalog parse 阶段就拒,不留到运行时。
+    CHECK_FALSE(config::ParseProviderCatalogJson(R"({
+      "schema_version": 2, "revision": "2026-08-30",
+      "providers": {"d": {"name": "D", "wire": "anthropic_messages",
+        "base_url": "https://a.test/v1", "key_env": "D_KEY", "default_model": "m",
+        "reasoning_dialect": {"history_control": "thinking_keep"},
+        "models": {"m": {"name": "M"}}}}})", "p").has_value());
+    // history_all_value 空串不是合法声明。
+    CHECK_FALSE(config::ParseProviderCatalogJson(R"({
+      "schema_version": 2, "revision": "2026-08-30",
+      "providers": {"d": {"name": "D", "wire": "chat_completions",
+        "base_url": "https://a.test/v1", "key_env": "D_KEY", "default_model": "m",
+        "reasoning_dialect": {"history_control": "thinking_keep", "history_all_value": ""},
+        "models": {"m": {"name": "M"}}}}})", "p").has_value());
+
+    // provider 级声明 thinking_keep,模型级 none 清掉继承(P1 分家闸)。
+    const auto cleared = config::ParseProviderCatalogJson(R"({
+      "schema_version": 2, "revision": "2026-08-30",
+      "providers": {"d": {"name": "D", "wire": "chat_completions",
+        "base_url": "https://a.test/v1", "key_env": "D_KEY", "default_model": "keeps",
+        "reasoning_dialect": {"history_control": "thinking_keep", "replay": "tool_episode"},
+        "models": {
+          "keeps": {"name": "K", "reasoning": {"controls": [{"kind": "toggle"}]}},
+          "clears": {"name": "C", "reasoning": {"dialect": {"history_control": "none"}}}}}}})",
+        "p");
+    REQUIRE_MESSAGE(cleared.has_value(), cleared.error_or(std::string()));
+    const auto* keeps = cleared->FindProvider("d")->FindModel("keeps");
+    REQUIRE(keeps != nullptr);
+    CHECK(keeps->reasoning.dialect.history_control == "thinking_keep");  // 继承
+    const auto* clears = cleared->FindProvider("d")->FindModel("clears");
+    REQUIRE(clears != nullptr);
+    CHECK(clears->reasoning.dialect.history_control.empty());  // 显式清位
+}

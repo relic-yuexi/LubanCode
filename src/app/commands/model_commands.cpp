@@ -404,10 +404,11 @@ CommandFlow HandleSlashModel(SlashDispatchContext& dispatch, const lubancode::cl
         }
         return ExecuteProviderSwitch(name, "", *dispatch.config, *dispatch.active_provider,
                                      *dispatch.real_backend, *dispatch.wire_str, dispatch.current_model,
-                                     dispatch.current_think, *dispatch.context_tracker,
-                                     dispatch.current_model_instructions, *dispatch.model_catalog,
-                                     *dispatch.prompt_options, dispatch.rebuild_loop, dispatch.spinner_enabled,
-                                     *dispatch.theme, *dispatch.active_provider_write_path,
+                                     dispatch.current_think, dispatch.current_think_history,
+                                     *dispatch.context_tracker, dispatch.current_model_instructions,
+                                     *dispatch.model_catalog, *dispatch.prompt_options,
+                                     dispatch.rebuild_loop, dispatch.spinner_enabled, *dispatch.theme,
+                                     *dispatch.active_provider_write_path,
                                      dispatch.config_result->sources.active_provider);
     };
     // 写回目标默认全局,没有全局文件退 merged 路径(只剩项目级)。
@@ -433,7 +434,17 @@ CommandFlow HandleSlashModel(SlashDispatchContext& dispatch, const lubancode::cl
         }
         return out;
     };
-    model_ctx.sync_request_policy = dispatch.sync_request_policy;
+    // P1(Kimi 保留式思考):切模型后先重校验跨轮保留选择——新模型不认
+    // history all(或思考被目录默认关了)就回落 default 并明说,再刷新请求
+    // 档案。回落要影响的就是"下一份请求",所以校验得压在 sync 前头。
+    model_ctx.sync_request_policy = [&dispatch]() {
+        lubancode::app::RevalidateThinkHistoryMode(
+            dispatch.current_think_history, dispatch.current_think,
+            dispatch.model_catalog->FindByProviderAndSlug(*dispatch.active_provider, *dispatch.current_model));
+        if (dispatch.sync_request_policy) {
+            dispatch.sync_request_policy();
+        }
+    };
     HandleModelCommand(model_ctx, parsed.args);
     return CommandFlow::Continue;
 }
