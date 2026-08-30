@@ -28,6 +28,7 @@ using lubancode::cli::TermErr;
 #include "platform/text_encoding.hpp"
 #include "runtime/plugin_contract.hpp"
 #include "runtime/plugin_tool.hpp"  // 信任流 UI 的账务动作(TrustProjectPluginById 一族)
+#include "runtime/secret_resolver.hpp"  // v2 的 inspect/doctor:Secret 状态探针(§10.3/§10.4)
 #include "tools/path_utils.hpp"
 #include "tools/registry.hpp"
 
@@ -280,6 +281,45 @@ void HandlePluginCommand(const std::string& args,
             for (const auto& tool : manifest->tools) {
                 TermOut() << "  - " << tool.full_name << "\n";
             }
+            // v2(manifest-backed Lua)的权限与帽账(§10.3):只展示声明,
+            // Secret 只报名字与来源类别,不写值、长度、前缀与 fingerprint。
+            if (manifest->manifest_version == 2) {
+                if (!manifest->network_permissions.empty()) {
+                    std::string network_text;
+                    for (const auto& permission : manifest->network_permissions) {
+                        for (const auto& method : permission.methods) {
+                            if (!network_text.empty()) {
+                                network_text += ", ";
+                            }
+                            network_text += method + " " + permission.scheme + "://" + permission.host + ":" +
+                                            std::to_string(permission.port);
+                        }
+                    }
+                    TermOut() << trf("cmd.plugin.inspect.network", network_text) << "\n";
+                }
+                if (!manifest->secret_declarations.empty()) {
+                    // standalone 插件的数据目录(<home>/.lubancode/plugin-data/
+                    // <id>);源码树 .env 永不进这条路(§7.2)。
+                    lubancode::runtime::SecretResolverOptions options;
+                    options.plugin_data_dir = lubancode::runtime::StandalonePluginDataDir(manifest->id);
+                    options.declarations = manifest->secret_declarations;
+                    lubancode::runtime::EnvDotEnvSecretResolver resolver(std::move(options));
+                    std::string secrets_text;
+                    for (const auto& declaration : manifest->secret_declarations) {
+                        if (!secrets_text.empty()) {
+                            secrets_text += "; ";
+                        }
+                        secrets_text += resolver.Describe(declaration).Format();
+                    }
+                    TermOut() << trf("cmd.plugin.inspect.secrets", secrets_text) << "\n";
+                }
+                const auto limits = lubancode::runtime::ApplyHttpLimits(manifest->http_limits);
+                TermOut() << trf("cmd.plugin.inspect.limits",
+                                 "request " + std::to_string(limits.request_body_bytes / 1024) + " KiB, response " +
+                                     std::to_string(limits.response_body_bytes / 1024) + " KiB, timeout " +
+                                     std::to_string(limits.timeout_ms / 1000) + " s")
+                          << "\n";
+            }
             return;
         }
         // native/Lua 的 inspect:mounted 里按前缀找。
@@ -354,6 +394,20 @@ void HandlePluginCommand(const std::string& args,
                 }
             } else {
                 TermOut() << tr("cmd.plugin.doctor.not_process") << "\n";
+                // v2(manifest-backed Lua)的 doctor 侧 Secret 探针(§10.4):
+                // 只读、不带 Secret 发网;只报名字与来源;坏 .env 明报诊断。
+                if (manifest->manifest_version == 2 && !manifest->secret_declarations.empty()) {
+                    lubancode::runtime::SecretResolverOptions options;
+                    options.plugin_data_dir = lubancode::runtime::StandalonePluginDataDir(manifest->id);
+                    options.declarations = manifest->secret_declarations;
+                    lubancode::runtime::EnvDotEnvSecretResolver resolver(std::move(options));
+                    for (const auto& declaration : manifest->secret_declarations) {
+                        TermOut() << "  - " << resolver.Describe(declaration).Format() << "\n";
+                    }
+                    if (!resolver.dotenv_healthy()) {
+                        TermOut() << "  - .env: " << resolver.dotenv_diagnostic() << "\n";
+                    }
+                }
             }
             return;
         }

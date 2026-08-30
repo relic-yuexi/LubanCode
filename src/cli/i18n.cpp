@@ -1036,6 +1036,11 @@ const Entry kZhCN[] = {
     {"cmd.plugin.inspect.timeout", "超时: {0}ms"},
     {"cmd.plugin.inspect.env", "环境变量 allowlist: {0}"},
     {"cmd.plugin.inspect.tools", "工具 {0} 件:"},
+    // Lua 受控 HTTP 单(阶段 1):v2 manifest 的 Secret 状态行——只报名字
+    // 与来源,不写值、长度与前缀(§10.3)。
+    {"cmd.plugin.inspect.secrets", "secrets: {0}"},
+    {"cmd.plugin.inspect.network", "network: {0}"},
+    {"cmd.plugin.inspect.limits", "limits: {0}"},
     {"cmd.plugin.doctor.command_ok", "解释器可用: {0}({1})"},
     {"cmd.plugin.doctor.command_bad", "解释器起不来: {0}({1})——检查 command 或装好解释器。"},
     {"cmd.plugin.doctor.not_process", "这不是 process 插件,doctor 只查 process 的解释器环境。"},

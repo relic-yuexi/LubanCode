@@ -168,6 +168,83 @@ struct PluginDefinition {
     nlohmann::json input_schema;  // 模型可见入参 schema(强校验过的)
 };
 
+// manifest_version 1。将来升版,这个值变了就得明报 legacy/native-v1,不
+// 静默拿错结构体。
+inline constexpr int kPluginManifestVersion = 1;
+// manifest_version 2(Lua 受控 HTTP 与 Secret 宿主能力单):capability-bearing
+// embedded-lua 的合同版本——网络权限精确记账、Secret 声明、可下调资源帽。
+inline constexpr int kPluginManifestVersionV2 = 2;
+
+// ---------------------------------------------------------------------------
+// manifest v2 的三段合同(设计单 §5.3)。字段形状冻结:只增不改。
+// ---------------------------------------------------------------------------
+
+// 一条精确网络权限。第一期只收 https + 443 + GET/POST;host 是规范化后的
+// 精确 DNS 名(小写、去末尾点、IDNA/punycode),不收通配符、IP 字面量与
+// 用户信息段。URL 的 path 与 query 由 Lua 决定,host/scheme/port 必须命中
+// 声明。
+struct NetworkPermission {
+    std::string scheme = "https";            // 只认 "https"
+    std::string host;                        // 已规范化的精确 DNS 名
+    int port = 443;                          // 第一版只认 443
+    std::vector<std::string> methods;        // 大写、去重后的方法表(GET/POST)
+};
+
+// 一条 Secret 声明。id 是 Lua 可见的逻辑名(不得等于真实值);env 是允许
+// 解析的环境变量名(Lua 不可另传名字)。manifest 不收 value/default/
+// ${env:...} 明文展开——Secret 只以逻辑 id 进宿主,值由 SecretResolver 在
+// 工具调用期解析(§5.4)。
+struct SecretDeclaration {
+    std::string id;       // 逻辑名(Lua 侧引用它)
+    std::string env;      // 宿主环境/dotenv 里的变量名
+    bool required = true; // 缺省 true:漏写按必需,作者显式写 false 才可退匿名
+};
+
+// 可下调资源帽(§5.3 的表)。未声明的项 = nullopt,生效值取缺省;声明的
+// 值在解析期验过:正整数且不越宿主硬帽(0 不表示无限,v2 里 0 直接非法;
+// 插件不许突破硬帽)。
+struct HttpLimits {
+    std::optional<std::int64_t> url_bytes;             // manifest 字段 http_url_bytes
+    std::optional<std::int64_t> request_header_bytes;  // http_request_header_bytes
+    std::optional<std::int64_t> request_body_bytes;    // http_request_bytes(§5.2 示例名)
+    std::optional<std::int64_t> response_header_bytes; // http_response_header_bytes
+    std::optional<std::int64_t> response_body_bytes;   // http_response_bytes(§5.2 示例名)
+    std::optional<std::int64_t> timeout_ms;            // http_timeout_ms(§5.2 示例名)
+};
+
+// 六顶帽的缺省与宿主硬上限(§5.3 的表,字节口径;硬帽是墙,插件只能往下调)。
+inline constexpr std::int64_t kHttpUrlDefaultBytes = 8 * 1024;
+inline constexpr std::int64_t kHttpUrlMaxBytes = 16 * 1024;
+inline constexpr std::int64_t kHttpRequestHeaderDefaultBytes = 32 * 1024;
+inline constexpr std::int64_t kHttpRequestHeaderMaxBytes = 64 * 1024;
+inline constexpr std::int64_t kHttpRequestBodyDefaultBytes = 1024 * 1024;
+inline constexpr std::int64_t kHttpRequestBodyMaxBytes = 8 * 1024 * 1024;
+inline constexpr std::int64_t kHttpResponseHeaderDefaultBytes = 64 * 1024;
+inline constexpr std::int64_t kHttpResponseHeaderMaxBytes = 128 * 1024;
+inline constexpr std::int64_t kHttpResponseBodyDefaultBytes = 4 * 1024 * 1024;
+inline constexpr std::int64_t kHttpResponseBodyMaxBytes = 16 * 1024 * 1024;
+inline constexpr std::int64_t kHttpTimeoutDefaultMs = 30'000;
+inline constexpr std::int64_t kHttpTimeoutMaxMs = 120'000;
+
+// 生效帽:未声明的项落缺省。声明值已在解析期验过(>0 且 ≤ 硬帽),这里
+// 不再猜、不再钳——坏值根本到不了这里。
+struct EffectiveHttpLimits {
+    std::int64_t url_bytes = kHttpUrlDefaultBytes;
+    std::int64_t request_header_bytes = kHttpRequestHeaderDefaultBytes;
+    std::int64_t request_body_bytes = kHttpRequestBodyDefaultBytes;
+    std::int64_t response_header_bytes = kHttpResponseHeaderDefaultBytes;
+    std::int64_t response_body_bytes = kHttpResponseBodyDefaultBytes;
+    std::int64_t timeout_ms = kHttpTimeoutDefaultMs;
+};
+EffectiveHttpLimits ApplyHttpLimits(const HttpLimits& declared);
+
+// DNS host 的规范化(§5.3):转小写、去末尾点、IDNA 规范化(非 ASCII 标签
+// 按 RFC 3492 punycode 编码;不含 UTS46 全表映射——受限子集,文档注明)。
+// 拒收:空、通配符、IP 字面量(IPv4 点分/IPv6 冒号与方括号)、userinfo 段
+// (@)、空标签、超 63 字符标签、超 253 总长、单标签名(须至少一段点)、
+// localhost 与 .local。纯函数不接网。失败给人话,调用方折成各自的错误码。
+std::expected<std::string, std::string> NormalizeDnsHost(std::string_view raw_host);
+
 // ---------------------------------------------------------------------------
 // PluginManifest:plugin.json 解析 + 静态校验后的产物。解析失败/校验不过
 // 一律整件拒绝(ManifestInvalid + 人话),绝不部分加载、绝不宽化。
@@ -194,19 +271,67 @@ struct PluginManifest {
     // permissions 段(单子 Manifest v1)。v1 只记账不做执法:cwd 缺省项目根
     // 由运行时保证;network/env 的执法在后续批次接信任账时落。
     bool network_allowed = false;
+
+    // -----------------------------------------------------------------
+    // manifest v2 字段(embedded-lua 合同)。v1 时全是空缺省,老路不动。
+    // -----------------------------------------------------------------
+    int manifest_version = kPluginManifestVersion;     // 解析出的版本号(1 或 2)
+    std::string runtime_entry;                         // v2:runtime.entry(相对插件根)
+    std::vector<NetworkPermission> network_permissions;  // v2:精确网络账(空=禁网)
+    std::vector<SecretDeclaration> secret_declarations;  // v2:Secret 声明(空=无)
+    HttpLimits http_limits;                            // v2:可下调帽(缺省=宿主缺省表)
 };
 
-// manifest_version 1。将来升版,这个值变了就得明报 legacy/native-v1,不
-// 静默拿错结构体。
-inline constexpr int kPluginManifestVersion = 1;
+// ---------------------------------------------------------------------------
+// manifest 校验问题的稳定账:错误码(值即 ABI,只增不改)+ 人话 + 尽力而
+// 为的行列。语法错(JSON 文法)行列精确(解析器的字节偏移);字段级错误
+// 的行列是 best-effort——nlohmann 的 DOM 不存位置,这里在原文里找键名首
+// 现折算,命中不了就置 0(不猜)。测试按 CodeName 断言,不按坐标。
+// ---------------------------------------------------------------------------
+enum class PluginManifestIssueCode {
+    JsonSyntax = 1,        // plugin.json 不是合法 JSON
+    TopLevelNotObject,     // 顶层不是 object
+    VersionMissing,        // 缺 manifest_version 或不是整数
+    VersionUnsupported,    // 版本宿主不认(只认 1 与 2)
+    EmbeddedLuaNeedsV2,    // v1 写 embedded-lua:manifest-backed Lua 需 v2
+    V2KindUnsupported,     // v2 的 runtime.kind 不是 embedded-lua(第一版只收)
+    FieldMissing,          // 缺必填字段
+    FieldInvalid,          // 字段形状/取值不合法
+    EntryInvalid,          // runtime.entry 越界/symlink/缺文件/非 .lua
+    HostInvalid,           // network[].host 不认得
+    LimitInvalid,          // limits 为 0/负数/越硬帽
+    SecretInvalid,         // secrets 声明坏(重名/坏字符/inline value)
+    DuplicateEntry,        // 重名:tool/secret id/secret env/network 声明
+};
 
-// plugin.json 的解析 + 强校验入口。
+std::string_view PluginManifestIssueCodeName(PluginManifestIssueCode code);
+
+struct PluginManifestIssue {
+    PluginManifestIssueCode code = PluginManifestIssueCode::FieldInvalid;
+    std::string message;   // 人话(不含任何 Secret 值)
+    int line = 0;          // 1 起;0 = 定不到
+    int column = 0;        // 1 起;0 = 定不到
+
+    // 一句可打的诊断:"plugin.json:3:17 [host_invalid] ..."(坐标定不到时
+    // 省去坐标段)。
+    std::string Format() const;
+};
+
+// 带稳定错误码与行列的解析入口(阶段 0 起的正式合同)。v1 process 照旧
+// 全收;v1 写 embedded-lua 明报 EmbeddedLuaNeedsV2;v2 只收 embedded-lua,
+// network/secrets/limits 按 §5.3 逐项强校验。
+std::expected<PluginManifest, PluginManifestIssue> ParsePluginManifestDetailed(
+    const std::string& manifest_json, const std::filesystem::path& plugin_dir);
+
+// plugin.json 的解析 + 强校验入口(人话错误版:老调用方与既有测试的口子,
+// 错误文本 = PluginManifestIssue::Format())。
 //   manifest_json:plugin.json 全文。
 //   plugin_dir:该插件目录(canonical 化由这里做;${plugin_dir} 替换后须
 //     仍位于此目录内,逃出去就拒)。
 // 失败返回 ManifestInvalid + 人话(点名哪一项、为什么不悄悄宽化)。
 // 注意:Schema 坏了在这里拒绝整个插件,与 DLL 路径"退化成宽 object"的
 // 老行为刻意相反——宽化会让模型乱传参数,也绕过作者想守的边界。
+// 要稳定错误码与行列的调用方走 ParsePluginManifestDetailed。
 std::expected<PluginManifest, std::string> ParsePluginManifest(const std::string& manifest_json,
                                                                const std::filesystem::path& plugin_dir);
 
