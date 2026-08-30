@@ -1393,3 +1393,151 @@ TEST_CASE("消息序列化往返: assistant 带模型输出图片引用(base64 �
     REQUIRE(salvaged->content.size() == 1);
     CHECK(std::get_if<api::TextBlock>(&salvaged->content[0]) != nullptr);
 }
+
+// ---------------------------------------------------------------------------
+// 双账 compact_v2 回放(Compact 四分区单·阶段 4):旧 compact、旧 flat
+// compact_v2、新双账 compact_v2 混在同一份档里,都能回放;新事件的
+// manifest 里带双账 schema 与 turn 分区账。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 双账压缩用的脚本后端:map 吐严格 JSON 小结,reduce 吐严格双账 JSON。
+class DualLedgerScriptBackend : public api::Backend {
+public:
+    std::size_t map_calls = 0;
+    std::expected<void, api::Error> send_stream(
+        const api::Request& request,
+        const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* /*cancel*/ = nullptr) override {
+        const std::string text =
+            request.system.find("两份总账") != std::string::npos
+                ? std::string(
+                      "{\"user_contract\": {\"goal\": {\"text\": \"双账回放目标\", \"source_turns\": [\"t1\"]}, "
+                      "\"active_constraints\": [], \"acceptance_criteria\": [], \"additions\": [], "
+                      "\"superseded_requirements\": [], \"open_questions\": []}, "
+                      "\"work_state\": {\"confirmed_facts\": [{\"text\": \"旧档被认成基线\", "
+                      "\"evidence_refs\": [\"t1\"]}], \"tool_results\": [], \"files\": [], "
+                      "\"changes_made\": [], \"failed_attempts\": [], \"open_items\": [], "
+                      "\"next_action\": \"继续回放验证\"}}")
+                : std::string("{\"user_requirement_changes\": [\"段要求\"], \"confirmed_facts\": [\"段事实\"], "
+                              "\"tool_results\": [], \"files\": [], \"changes_made\": [], "
+                              "\"failed_attempts\": [], \"open_items\": [], \"next_step_candidates\": []}");
+        on_event(api::MessageStart{"msg", "model"});
+        on_event(api::TextDelta{text});
+        on_event(api::ContentBlockDone{0});
+        on_event(api::MessageDone{"end_turn", api::Usage{}});
+        if (request.system.find("两份总账") == std::string::npos) {
+            map_calls += 1;
+        }
+        return {};
+    }
+};
+
+std::vector<api::Message> RepeatedTurns(std::size_t turn_count, const std::string& tag) {
+    std::vector<api::Message> history;
+    for (std::size_t i = 0; i < turn_count; ++i) {
+        history.push_back(UserText(tag + " 问 " + std::to_string(i) + " " + std::string(400, 'u')));
+        history.push_back(AssistantText(tag + " 答 " + std::to_string(i) + " " + std::string(400, 'a')));
+    }
+    return history;
+}
+
+}  // namespace
+
+TEST_CASE("回放: 双账 compact_v2 与旧 compact/旧 flat compact_v2 混档全可回放") {
+    // 第一段:8 turn,跑一次双账压缩(新 compact_v2)。
+    std::vector<api::Message> effective = RepeatedTurns(8, "一");
+    std::vector<std::string> lines;
+    for (const auto& m : effective) {
+        lines.push_back(sessions::SerializeSessionMessage(m, "t"));
+    }
+    DualLedgerScriptBackend backend;
+    const auto dual = agent::CompactTurnPartitioned(backend, "m", effective, agent::CompactOptions{},
+                                                    agent::StructuralCompressionOptions{});
+    REQUIRE(dual.has_value());
+    CHECK(backend.map_calls == 3);  // 四分区:前 3 份各一次 map
+
+    nlohmann::json manifest;
+    manifest["schema"] = dual->metrics.schema;
+    manifest["user_contract"] = agent::ToJson(dual->contract);
+    manifest["work_state"] = agent::ToJson(dual->state);
+    manifest["total_turns"] = dual->metrics.total_turns;
+    manifest["hot_turns"] = dual->metrics.hot_turns;
+    nlohmann::json metrics;
+    metrics["chunks"] = dual->metrics.chunks;
+    metrics["implementation"] = dual->metrics.implementation;
+    const auto dual_event =
+        sessions::UpgradeToV2(sessions::MakeCompactEvent(effective.size(), dual->new_history, dual->kept_indices),
+                              1, manifest, metrics);
+    lines.push_back(sessions::SerializeCompactV2Event(dual_event, "t"));
+    const std::vector<api::Message> after_dual = dual->new_history;
+
+    // 第二段:续 4 turn,走旧 flat compact_v2(老写档形状)。
+    std::vector<api::Message> grown = after_dual;
+    for (const auto& m : RepeatedTurns(4, "二")) {
+        grown.push_back(m);
+        lines.push_back(sessions::SerializeSessionMessage(m, "t"));
+    }
+    const auto flat_compacted =
+        agent::BuildCompactedHistory(grown, UserText("[对话存档,此前内容已压缩] 旧 flat 存档"), 2000);
+    nlohmann::json flat_manifest;
+    flat_manifest["goal"] = "旧 flat 目标";
+    flat_manifest["open_items"] = nlohmann::json::array();
+    const auto flat_event = sessions::UpgradeToV2(
+        sessions::MakeCompactEvent(grown.size(), flat_compacted), 2, flat_manifest, nlohmann::json::object());
+    lines.push_back(sessions::SerializeCompactV2Event(flat_event, "t"));
+
+    // 第三段:续 2 turn,走最老的 v1 compact 事件。
+    std::vector<api::Message> third = flat_compacted;
+    for (const auto& m : RepeatedTurns(2, "三")) {
+        third.push_back(m);
+        lines.push_back(sessions::SerializeSessionMessage(m, "t"));
+    }
+    const auto v1_compacted =
+        agent::BuildCompactedHistory(third, UserText("[对话存档,此前内容已压缩] v1 存档"), 2000);
+    lines.push_back(sessions::SerializeCompactEvent(
+        sessions::MakeCompactEvent(third.size(), v1_compacted), "t"));
+    // 压缩后再来一条普通消息。
+    lines.push_back(sessions::SerializeSessionMessage(UserText("收尾一句"), "t"));
+
+    const auto session = sessions::ParseSessionFile(JoinLines(lines));
+    REQUIRE(session.has_value());
+    CHECK(session->compact_count == 3);  // 三种事件行都认
+    CHECK(session->skipped_lines == 0);
+    // 全量流水一条不少(8*2 + 4*2 + 2*2 + 1 = 29 条普通消息)。
+    CHECK(session->all_messages.size() == 29);
+    // 有效态 = 内存里逐步演算的最终形状(v1 存档在最前,末条是收尾一句)。
+    std::vector<api::Message> expected = v1_compacted;
+    expected.push_back(UserText("收尾一句"));
+    REQUIRE(session->messages.size() == expected.size());
+    for (std::size_t i = 0; i < expected.size(); ++i) {
+        CHECK(FirstText(session->messages[i]) == FirstText(expected[i]));
+    }
+    CHECK(FirstText(session->messages[0]).find("v1 存档") != std::string::npos);
+    // last_compact_manifest 记的是最后一条 compact_v2/v1 的账:v1 无 manifest
+    // 字段,manifest 判空即可(不崩、不脏)。
+    CHECK(session->last_compact_manifest.is_null());
+}
+
+TEST_CASE("回放: 双账 compact_v2 事件回放出的有效态就是双账新史本身") {
+    std::vector<api::Message> history = RepeatedTurns(9, "甲");
+    DualLedgerScriptBackend backend;
+    const auto dual = agent::CompactTurnPartitioned(backend, "m", history, agent::CompactOptions{},
+                                                    agent::StructuralCompressionOptions{});
+    REQUIRE(dual.has_value());
+    // 双账并存档并入热区首条:新史首条带 user_contract/work_state 围栏。
+    const std::string& first = FirstText(dual->new_history[0]);
+    CHECK(first.find("对话存档") != std::string::npos);
+    CHECK(first.find("\"user_contract\"") != std::string::npos);
+
+    const auto event = sessions::UpgradeToV2(
+        sessions::MakeCompactEvent(history.size(), dual->new_history, dual->kept_indices), 1,
+        nlohmann::json::object(), nlohmann::json::object());
+    // 单独回放一次:ApplyCompactEvent(kept_indices 路)与整文件回放同型。
+    const auto replayed = sessions::ApplyCompactEvent(history, sessions::AsCompactEvent(event));
+    REQUIRE(replayed.size() == dual->new_history.size());
+    for (std::size_t i = 0; i < replayed.size(); ++i) {
+        CHECK(FirstText(replayed[i]) == FirstText(dual->new_history[i]));
+    }
+}

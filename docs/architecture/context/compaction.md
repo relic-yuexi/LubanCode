@@ -285,6 +285,40 @@ map 的宿主验收较轻：去空白后至少 `40` 个 UTF-8 码点。manifest 
 
 final text 过短、manifest 解析失败、goal 空、活动待办漏项，整场 compact 失败。旧 history 保持原样。
 
+## 🧭 turn 四分区双账 compact(现行主路)
+
+上文 episode 分层路(`CompactHierarchical`)保留作兼容与旧档回放;主会话、自动中途压缩与子代理检查点如今都走 `CompactTurnPartitioned`——按《Compact 四分区、工具原子组与双账总结构设计》落的地:
+
+```text
+触发(80% / projected / 手工)
+  -> BuildTurnPartitionPlan:剥旧档 -> 按 turn 收齐 -> 按 L1 工作视图 token
+     平衡切 min(turn 数, compact_partition_count) 份连续分区
+  -> 前 n-1 份各发一次 map:严格 JSON 的 TurnGroupSummary
+     (turn/事件范围由宿主钉;分区超预算只递归拆该分区;单 turn 超预算明确拒绝)
+  -> final reduce:旧档(结构化双账或 legacy manifest)+ 全部 TurnGroupSummary
+     + 末分区热区原文 -> 严格 {"user_contract":..., "work_state":...}
+  -> 宿主校验双账(来源/覆盖方向/环/证据/待办守恒)
+  -> BuildCompactedHistory(history, archive, plan):[双账并入热区首条][热区原文]
+```
+
+与 episode 路的三处大不同:
+
+1. **切法从 episode 换成 turn 分区**。episode 按"新用户输入/todo_write"开段,段数不定;turn 分区按 `compact_partition_count`(默认 4)把全部原始 turn 按 token 重量平衡切块,预算内 map 调用数固定为 `n-1`。边界永远只落 turn 之间,工具原子组天然不劈。
+2. **map 产物从五栏 Markdown + manifest 换成严格 JSON**。`TurnGroupSummary` 八栏(user_requirement_changes/confirmed_facts/tool_results/files/changes_made/failed_attempts/open_items/next_step_candidates),坏一处整块拒收;`turn_range` 与 `evidence_range` 由宿主钉死,模型写什么都不算数。
+3. **终稿从单 manifest 换成双账**。`UserContract`(用户要什么:目标/当前有效约束/验收/补充/已废旧要求/待澄清,每条带 `source_turns`)与 `WorkState`(做到哪:已证实事实/工具结果/文件/改动/失败/待办/下一步,每条带 `evidence_refs`)。热区原文也参加 final reduce——最近一轮刚纠正的旧约束,总契约必须吸收。
+
+宿主校验(不过整次失败,旧 history 不动):
+
+- 每条要求 `source_turns` 非空且全在宿主 turn 号里——assistant/tool 事件号进不来,伪造来源直接拒;
+- `superseded_by` 指向本契约存在的 requirement,覆盖方向从旧 turn 指向新 turn,覆盖图无环;
+- `confirmed_facts`/`tool_results`/`changes_made`/`failed_attempts` 每条至少一枚 `evidence_refs`,turn 部分与事件部分都落账;
+- 活动 todo 逐字守恒(与旧 manifest 守恒同一把尺);
+- 新史(压力口径)不比旧史短——手工/自动共用 `RejectGrownCompactHistory` 反涨闸。
+
+新史首条把双账 JSON 落进单枚 ` ```json ` 围栏并并入热区首条 user 消息:下一次压缩用同一只 `SplitPriorArchive` 剥档,`ParsePriorLedgers` 认出双账(旧 flat manifest 折成 goal-only 基线),只进 final reduce 当参考、绝不进 map 块——阻断摘要复印摘要。`compact_v2` 事件的 manifest 里另记 `schema: dual-ledger-v1`、双账全文、`partition_count`、`total_turns`、`hot_turns`;回放语义与 v1 同型(archive + kept_indices),旧档新档都能 `/resume`。
+
+阶段 5 的评测夹具在 `tests/integration/compact_turn_sharding/`:30 道多轮题 × 10 次忠实模型(token 账:FULL/CONCAT/双账三相对照,P90-P10 分布;成功账:约束保真、纠正归位、坏模型三型检测)。管道保真与 token 收益有账;真实模型的语义质量仍须真机评测,不越线宣称。
+
 ## ✅ 候选怎样验收
 
 ### 五道门

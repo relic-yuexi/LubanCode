@@ -8,6 +8,7 @@
 #include <doctest/doctest.h>
 
 #include <deque>
+#include <map>
 #include <set>
 #include <string>
 #include <vector>
@@ -1441,4 +1442,678 @@ TEST_CASE("BuildTurnPartitionPlan: 预算诊断——分区/单 turn 超 compact
         CHECK_FALSE(plan.any_turn_over_map_budget);
         CHECK_FALSE(plan.any_partition_over_map_budget);
     }
+}
+
+// ---------------------------------------------------------------------------
+// 四分区·阶段 2-4:TurnGroupSummary map、双账 final reduce、新 history。
+// 全部走假后端(按 system 内容分流 map/reduce),不碰真网络。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 双账后端:system 含"两份总账" = reduce,吃 reduce_response;含"局部小结"
+// = map,吃 map_responses 队(用尽或 fail_map_at 命中即失败)。
+class DualLedgerBackend : public api::Backend {
+public:
+    std::deque<std::string> map_responses;
+    std::string reduce_response;
+    int fail_map_at = -1;  // 第几次 map(1 起)直接断流;<0 不失败
+    std::vector<api::Request> captured_requests;
+
+    std::expected<void, api::Error> send_stream(
+        const api::Request& request,
+        const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>* /*cancel*/ = nullptr) override {
+        captured_requests.push_back(request);
+        if (request.system.find("两份总账") != std::string::npos) {
+            if (reduce_response.empty()) {
+                return std::unexpected(api::Error{api::ErrorKind::Api, "reduce 脚本未备", 0});
+            }
+            for (const auto& event : TextScript(reduce_response)) {
+                on_event(event);
+            }
+            return {};
+        }
+        if (fail_map_at == static_cast<int>(captured_requests.size())) {
+            on_event(api::MessageStart{"msg", "model"});
+            on_event(api::StreamError{"map 中途断流"});
+            return {};
+        }
+        if (map_responses.empty()) {
+            return std::unexpected(api::Error{api::ErrorKind::Api, "map 脚本用尽", 0});
+        }
+        const std::string text = map_responses.front();
+        map_responses.pop_front();
+        for (const auto& event : TextScript(text)) {
+            on_event(event);
+        }
+        return {};
+    }
+};
+
+// 一份合法的严格 JSON TurnGroupSummary(map 产物)。
+std::string MapJsonText(const std::string& tag) {
+    return "{\"user_requirement_changes\": [\"" + tag + " 的要求\"], \"confirmed_facts\": [\"" + tag +
+           " 证实的事\"], \"tool_results\": [{\"tool\": \"read_file\", \"result\": \"" + tag +
+           " 读到关键内容\", \"evidence\": \"t1:e1\"}], \"files\": [\"src/" + tag + ".cpp\"], \"changes_made\": [\"改了 " +
+           tag + "\"], \"failed_attempts\": [], \"open_items\": [\"" + tag + " 收尾\"], \"next_step_candidates\": [\"继续\"]}";
+}
+
+// 双账 JSON(reduce 产物)的可定制脚本:正常形与坏形共用一份拼装。默认
+// 形引用到 t10——用默认脚本的夹具至少要 10 turn。
+struct DualLedgerScript {
+    std::string goal_turn = "t1";
+    std::string constraint_turn = "t3";
+    std::string acceptance_turn = "t7";
+    std::string addition_turn = "t8";
+    std::string open_question_turn = "t9";
+    std::string superseded_source_turn = "t2";
+    std::string superseded_at_turn = "t8";
+    std::string fact_evidence = "t4:e1";
+    std::string tool_evidence = "t6:e2";
+    std::string change_evidence = "t10";
+    std::string failed_evidence = "t1:e4";
+    std::string open_items_json = R"(["收尾一","收尾二"])";
+    std::string goal_text = "实现上下文管理与压缩";
+    std::string constraint_text = "只修改 compact,不改 project memory";
+    bool no_superseded = false;  // 单 turn 档:没有旧 turn 可废旧,置空该栏
+    // 坏形注入口:非空则替换对应片段。
+    std::string goal_source_override;
+    std::string superseded_at_override;
+    std::string superseded_by_override;
+    std::string fact_evidence_override;
+    std::string extra_superseded;
+    std::string extra_constraint;
+};
+
+std::string DualJsonText(const DualLedgerScript& script) {
+    const std::string goal_turns =
+        !script.goal_source_override.empty() ? script.goal_source_override : "[\"" + script.goal_turn + "\"]";
+    const std::string superseded_at =
+        !script.superseded_at_override.empty() ? script.superseded_at_override : script.superseded_at_turn;
+    const std::string superseded_by =
+        !script.superseded_by_override.empty() ? script.superseded_by_override : "\"r3\"";
+    const std::string fact_refs = !script.fact_evidence_override.empty() ? script.fact_evidence_override
+                                                                        : "[\"" + script.fact_evidence + "\"]";
+    std::string constraints = "[{\"id\": \"r1\", \"text\": \"" + script.constraint_text + "\", \"source_turns\": [\"" +
+                              script.constraint_turn + "\"]}]";
+    if (!script.extra_constraint.empty()) {
+        constraints.pop_back();  // 去掉尾 ]
+        constraints += ", " + script.extra_constraint + "]";
+    }
+    std::string superseded = "[{\"id\": \"r0\", \"text\": \"旧要求原文\", \"source_turns\": [\"" +
+                             script.superseded_source_turn + "\"], \"superseded_by\": " + superseded_by +
+                             ", \"superseded_at_turn\": \"" + superseded_at + "\"}]";
+    if (script.no_superseded) {
+        superseded = "[]";
+    } else if (!script.extra_superseded.empty()) {
+        superseded.pop_back();
+        superseded += ", " + script.extra_superseded + "]";
+    }
+    return "{\"user_contract\": {\"goal\": {\"text\": \"" + script.goal_text + "\", \"source_turns\": " + goal_turns +
+           "}, \"active_constraints\": " + constraints +
+           ", \"acceptance_criteria\": [{\"id\": \"r2\", \"text\": \"第四分区保留最近 turns 的原始消息形状\", "
+           "\"source_turns\": [\"" +
+           script.acceptance_turn + "\"]}], \"additions\": [{\"id\": \"r3\", \"text\": \"全部 turns 按 token 重量四分\", "
+           "\"source_turns\": [\"" +
+           script.addition_turn + "\"]}], \"superseded_requirements\": " + superseded +
+           ", \"open_questions\": [{\"text\": \"配置是否允许项目级覆盖\", \"source_turns\": [\"" +
+           script.open_question_turn + "\"]}]}, "
+           "\"work_state\": {\"confirmed_facts\": [{\"text\": \"自动 compact 在 80% 触发\", \"evidence_refs\": " +
+           fact_refs +
+           "}], \"tool_results\": [{\"tool\": \"ctest\", \"result\": \"6 项相关测试通过\", \"evidence_refs\": [\"" +
+           script.tool_evidence + "\"]}], \"files\": [\"src/agent/compact.cpp\"], \"changes_made\": [{\"text\": "
+           "\"已接入双账压缩\", \"evidence_refs\": [\"" +
+           script.change_evidence + "\"]}], \"failed_attempts\": [{\"text\": \"某次摘要反涨已拒收\", "
+           "\"evidence_refs\": [\"" +
+           script.failed_evidence + "\"]}], \"open_items\": " + script.open_items_json +
+           ", \"next_action\": \"先统一 turn 切分函数\"}}";
+}
+
+// 备好 N 份 map 脚本 + 一份 reduce 脚本的后端。
+DualLedgerBackend ReadyBackend(std::size_t map_count, const DualLedgerScript& script = DualLedgerScript{}) {
+    DualLedgerBackend backend;
+    for (std::size_t i = 0; i < map_count; ++i) {
+        backend.map_responses.push_back(MapJsonText("段" + std::to_string(i + 1)));
+    }
+    backend.reduce_response = DualJsonText(script);
+    return backend;
+}
+
+}  // namespace
+
+TEST_CASE("ParseTurnGroupSummary: 只收严格 JSON,Markdown/缺键全拒") {
+    const std::string good = MapJsonText("甲");
+    REQUIRE(agent::ParseTurnGroupSummary(good).has_value());
+    // 围栏包裹也认(模型手滑加围栏;内容仍须是合法 JSON)。
+    REQUIRE(agent::ParseTurnGroupSummary("```json\n" + good + "\n```").has_value());
+    // Markdown 散文(旧 episode 路的产出形状)不再收。
+    CHECK_FALSE(agent::ParseTurnGroupSummary("## 阶段目标\n一些散文\n## 未完成事项\n收尾").has_value());
+    // 缺一个键。
+    std::string missing_key = good;
+    const std::size_t pos = missing_key.find("\"failed_attempts\"");
+    missing_key.replace(pos, 19, "\"failed_attempt_x\"");
+    CHECK_FALSE(agent::ParseTurnGroupSummary(missing_key).has_value());
+    // 元素类型不对。
+    CHECK_FALSE(agent::ParseTurnGroupSummary(
+        "{\"user_requirement_changes\": [1], \"confirmed_facts\": [], \"tool_results\": [], \"files\": [], "
+        "\"changes_made\": [], \"failed_attempts\": [], \"open_items\": [], \"next_step_candidates\": []}")
+                    .has_value());
+    // 空串元素。
+    CHECK_FALSE(agent::ParseTurnGroupSummary(
+        "{\"user_requirement_changes\": [\" \"], \"confirmed_facts\": [], \"tool_results\": [], \"files\": [], "
+        "\"changes_made\": [], \"failed_attempts\": [], \"open_items\": [], \"next_step_candidates\": []}")
+                    .has_value());
+}
+
+TEST_CASE("CompactTurnPartitioned: 17 枚等重 turn 固定 3 次 map + 1 次 reduce") {
+    const std::vector<api::Message> history = UniformTurns(17);
+    const auto plan = agent::BuildTurnPartitionPlan(history, 4, agent::TurnPartitionBudgets{});
+    REQUIRE(plan.partitions.size() == 4);
+    REQUIRE(plan.map_calls == 3);
+
+    DualLedgerBackend backend = ReadyBackend(3);
+    agent::CompactOptions options;  // 窗口未知:不拦,照跑
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, options,
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE(result.has_value());
+
+    // 请求形状:恰好 3 map + 1 reduce(预算内固定 N-1 次 map)。
+    REQUIRE(backend.captured_requests.size() == 4);
+    for (std::size_t i = 0; i < 3; ++i) {
+        CHECK(backend.captured_requests[i].system.find("局部小结") != std::string::npos);
+    }
+    CHECK(backend.captured_requests.back().system.find("两份总账") != std::string::npos);
+
+    // 宿主钉 turn 范围:map 指令里的来源 turn 与 plan 分区逐一对上。
+    REQUIRE(result->group_summaries.size() == 3);
+    for (std::size_t p = 0; p + 1 < plan.partitions.size(); ++p) {
+        const std::string& instruction = backend.captured_requests[p].system;
+        const std::string first = plan.turns[plan.partitions[p].first_turn].id;
+        const std::string last = plan.turns[plan.partitions[p].last_turn - 1].id;
+        CHECK(instruction.find("来源 turn " + first + "-" + last) != std::string::npos);
+        CHECK(result->group_summaries[p].turn_range == first + "-" + last);
+    }
+
+    // 指标与分区账。
+    CHECK(result->metrics.chunks == 3);
+    CHECK(result->metrics.schema == "dual-ledger-v1");
+    CHECK(result->metrics.implementation == "turn-partition");
+    CHECK(result->metrics.partition_count == 4);
+    CHECK(result->metrics.total_turns == 17);
+    CHECK(result->metrics.hot_turns ==
+          plan.partitions.back().last_turn - plan.partitions.back().first_turn);
+
+    // 兼容面:双账折算成旧 manifest。
+    CHECK(result->manifest.goal == "实现上下文管理与压缩");
+    REQUIRE(result->manifest.constraints.size() == 1);
+    CHECK(result->manifest.constraints[0] == "只修改 compact,不改 project memory");
+}
+
+TEST_CASE("CompactTurnPartitioned: map 输入不吃热区 turn;reduce 吃热区原文与全部小结") {
+    const std::vector<api::Message> history = UniformTurns(12);
+    const auto plan = agent::BuildTurnPartitionPlan(history, 4, agent::TurnPartitionBudgets{});
+
+    DualLedgerBackend backend = ReadyBackend(3);
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE(result.has_value());
+    REQUIRE(backend.captured_requests.size() == 4);
+
+    // 热区 turn 的正文绝不出现在任何 map 请求里。
+    const std::size_t hot_first_turn = plan.partitions.back().first_turn;
+    for (std::size_t i = 0; i + 1 < backend.captured_requests.size(); ++i) {
+        for (const auto& message : backend.captured_requests[i].messages) {
+            for (const auto& block : message.content) {
+                if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
+                    for (std::size_t t = hot_first_turn; t < plan.turns.size(); ++t) {
+                        CHECK(text->text.find("第 " + std::to_string(t) + " 问") == std::string::npos);
+                    }
+                }
+            }
+        }
+    }
+    // reduce 输入带热区原文与全部小结。
+    const std::string reduce_body =
+        std::get<api::TextBlock>(backend.captured_requests.back().messages[0].content[0]).text;
+    CHECK(reduce_body.find("最近热区原文") != std::string::npos);
+    CHECK(reduce_body.find("局部小结 1/3") != std::string::npos);
+    CHECK(reduce_body.find("段1 的要求") != std::string::npos);
+    CHECK(reduce_body.find("段3 的要求") != std::string::npos);
+}
+
+TEST_CASE("CompactTurnPartitioned: 工具重载夹具按 token 挪边界,原子组无一拆开") {
+    // 16 枚轻 turn,T4 塞一组巨大工具来回(工具重载夹具)。
+    std::vector<api::Message> history = UniformTurns(16);
+    const std::string huge_result(60000, 'r');
+    history.insert(history.begin() + 8, AssistantToolUse("big_1", "run_command"));  // 落进 T4
+    history.insert(history.begin() + 9, UserToolResult("big_1", huge_result));
+
+    const auto plan = agent::BuildTurnPartitionPlan(history, 4, agent::TurnPartitionBudgets{});
+    DualLedgerBackend backend = ReadyBackend(3);
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE(result.has_value());
+    REQUIRE(backend.captured_requests.size() == 4);
+
+    // 每个 map 块内 tool_use/tool_result 全配对(原子组没被任何一块劈开)。
+    for (std::size_t i = 0; i + 1 < backend.captured_requests.size(); ++i) {
+        std::map<std::string, bool> pairs;
+        bool dangling_result = false;
+        for (const auto& message : backend.captured_requests[i].messages) {
+            for (const auto& block : message.content) {
+                if (const auto* use = std::get_if<api::ToolUseBlock>(&block); use != nullptr) {
+                    pairs[use->id] = false;
+                } else if (const auto* tool_result = std::get_if<api::ToolResultBlock>(&block);
+                           tool_result != nullptr) {
+                    if (pairs.count(tool_result->tool_use_id) == 0) {
+                        dangling_result = true;
+                    } else {
+                        pairs[tool_result->tool_use_id] = true;
+                    }
+                }
+            }
+        }
+        CHECK_FALSE(dangling_result);
+        for (const auto& [id, matched] : pairs) {
+            (void)id;
+            CHECK(matched);
+        }
+    }
+    // 巨轮整枚落在一个分区里(工具组没跨区)。
+    bool big_turn_single_partition = false;
+    for (const auto& partition : plan.partitions) {
+        if (partition.first_turn <= 3 && 3 < partition.last_turn) {
+            big_turn_single_partition = true;
+        }
+    }
+    CHECK(big_turn_single_partition);
+}
+
+TEST_CASE("CompactTurnPartitioned: 单分区超预算只递归拆该分区,map 次数可多于 3") {
+    // UniformTurns 每轮约 200 token;窗口给 900(输出预留 100、协议 0):
+    // 单枚 turn 装得下,两轮的分区超预算必须沿 turn 再切。
+    const std::vector<api::Message> history = UniformTurns(8);
+    agent::CompactOptions options;
+    options.budget.window_tokens = 900;
+    options.budget.output_reserve_tokens = 100;
+    options.budget.protocol_headroom_tokens = 0;
+
+    agent::TurnPartitionBudgets budgets;
+    budgets.compact_model = options.budget;
+    const auto plan = agent::BuildTurnPartitionPlan(history, 4, budgets);
+    CHECK(plan.any_partition_over_map_budget);
+    CHECK_FALSE(plan.any_turn_over_map_budget);
+
+    DualLedgerScript script;  // 8 turn 档:引用全部落在 t1..t8
+    script.acceptance_turn = "t6";
+    script.addition_turn = "t7";
+    script.open_question_turn = "t8";
+    script.change_evidence = "t8";
+    // 窗口 800 时 reduce 指令本身超预算:§9.4 会先两两归并 summaries
+    // (6→3→2→1 的归并请求与 map 同吃 map 脚本队列)再终稿 reduce——脚本
+    // 多备 7 份。
+    DualLedgerBackend backend = ReadyBackend(13, script);
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, options,
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE(result.has_value());
+    // 冷区只有 3 份(末份是热区,不 map):每份 2 turn 再切成单 turn 一块
+    // → map 块数 6 > 分区数-1 = 3。
+    CHECK(result->metrics.chunks == 6);
+    CHECK(result->metrics.reduce_passes == 3);  // 6→3→2→1
+    // map 指令(system 带"局部小结"且钉"来源 turn")的请求恰好 8 次,再切
+    // 出来的块都是单 turn 范围(tN,无 '-')。
+    int single_turn_maps = 0;
+    for (const auto& request : backend.captured_requests) {
+        if (request.system.find("局部小结") != std::string::npos &&
+            request.system.find("来源 turn t") != std::string::npos) {
+            const std::size_t pin = request.system.find("来源 turn ");
+            const std::size_t line_end = request.system.find('\n', pin);
+            const std::string range = request.system.substr(
+                pin + 9, (line_end == std::string::npos ? request.system.size() : line_end) - pin - 9);
+            const std::size_t comma = range.find(',');
+            const std::string clean = comma == std::string::npos ? range : range.substr(0, comma);
+            if (clean.find('-') == std::string::npos) {
+                ++single_turn_maps;
+            }
+        }
+    }
+    CHECK(single_turn_maps == 6);
+}
+
+TEST_CASE("CompactTurnPartitioned: 单 turn 超预算明确拒绝,一次请求都不发") {
+    const std::vector<api::Message> history = UniformTurns(4);
+    agent::CompactOptions options;
+    options.budget.window_tokens = 64;  // 连输出预留都盖不住 → 预算 0
+
+    DualLedgerBackend backend;  // 不备脚本:发了请求就是错
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, options,
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("单枚 turn 超") != std::string::npos);
+    CHECK(backend.captured_requests.empty());
+}
+
+TEST_CASE("CompactTurnPartitioned: map 任一块失败,整次失败,旧历史不动") {
+    const std::vector<api::Message> history = UniformTurns(17);
+    DualLedgerBackend backend = ReadyBackend(3);
+    backend.fail_map_at = 2;  // 第 2 次 map 断流
+
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("map 中途断流") != std::string::npos);
+    CHECK(history.size() == 34);  // 原史一字未动
+}
+
+TEST_CASE("CompactTurnPartitioned: map 吐 Markdown 而非严格 JSON,整次失败") {
+    const std::vector<api::Message> history = UniformTurns(8);
+    DualLedgerBackend backend = ReadyBackend(3);
+    backend.map_responses[1] = "## 阶段目标\n散文小结,没有 JSON";
+
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("严格 JSON") != std::string::npos);
+}
+
+TEST_CASE("CompactTurnPartitioned: 没有冷区也没有旧档,拒绝空跑") {
+    // 单 turn:只有热区,没有旧档 → §9.3 无收益。
+    const std::vector<api::Message> history = UniformTurns(1);
+    DualLedgerBackend backend = ReadyBackend(1);
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("没有冷区") != std::string::npos);
+    CHECK(backend.captured_requests.empty());
+}
+
+TEST_CASE("CompactTurnPartitioned: 没有冷区但有旧档,只跑 final reduce") {
+    std::vector<api::Message> history = UniformTurns(1);
+    // 单 turn 档的 reduce 脚本:全部来源只引 t1,且没有可废旧要求。
+    DualLedgerScript single_turn_script;
+    single_turn_script.goal_turn = "t1";
+    single_turn_script.constraint_turn = "t1";
+    single_turn_script.acceptance_turn = "t1";
+    single_turn_script.addition_turn = "t1";
+    single_turn_script.open_question_turn = "t1";
+    single_turn_script.fact_evidence = "t1:e0";
+    single_turn_script.tool_evidence = "t1:e1";
+    single_turn_script.change_evidence = "t1";
+    single_turn_script.failed_evidence = "t1:e1";  // 单 turn 史只有 e0/e1 两枚事件
+    single_turn_script.no_superseded = true;
+    // 首条并上旧双账(BuildCompactedHistory 的产出形状)。
+    std::get<api::TextBlock>(history[0].content[0]).text =
+        "[对话存档,此前内容已压缩] 旧双账存档。\n```json\n" + DualJsonText(single_turn_script) +
+        "\n```\n\n" + std::get<api::TextBlock>(history[0].content[0]).text;
+
+    DualLedgerBackend backend = ReadyBackend(0, single_turn_script);
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE(result.has_value());
+    CHECK(result->metrics.chunks == 0);  // 不跑 map
+    REQUIRE(backend.captured_requests.size() == 1);
+    CHECK(backend.captured_requests[0].system.find("两份总账") != std::string::npos);
+}
+
+TEST_CASE("CompactTurnPartitioned: 热区最后一轮纠正旧约束,新约 active、旧约 superseded") {
+    // 8 turn:T2 立旧约束,末 turn(热区)改成新约束。
+    std::vector<api::Message> history = UniformTurns(8);
+    std::get<api::TextBlock>(history[2].content[0]).text = "约束:注释必须用中文";  // T2 的用户消息
+    std::get<api::TextBlock>(history[14].content[0]).text = "改成:注释改用英文";   // T8 的用户消息
+
+    DualLedgerScript script;
+    script.constraint_text = "注释改用英文";
+    script.constraint_turn = "t8";
+    script.superseded_source_turn = "t2";
+    script.superseded_at_turn = "t8";
+    script.open_question_turn = "t8";   // 8 turn 档:t9 不存在
+    script.change_evidence = "t8";
+    DualLedgerBackend backend = ReadyBackend(3, script);
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE(result.has_value());
+
+    // 总 UserContract:只有新约束列 active。
+    REQUIRE(result->contract.active_constraints.size() == 1);
+    CHECK(result->contract.active_constraints[0].text == "注释改用英文");
+    REQUIRE(result->contract.active_constraints[0].source_turns.size() == 1);
+    CHECK(result->contract.active_constraints[0].source_turns[0] == "t8");
+    // 旧约束有来源地列在 superseded。
+    REQUIRE(result->contract.superseded_requirements.size() == 1);
+    const auto& old = result->contract.superseded_requirements[0];
+    CHECK(old.text == "旧要求原文");
+    REQUIRE(old.source_turns.size() == 1);
+    CHECK(old.source_turns[0] == "t2");
+    CHECK(old.superseded_by == "r3");
+    CHECK(old.superseded_at_turn == "t8");
+
+    // 热区原文参加了 final reduce:纠正语句在 reduce 输入里。
+    const std::string reduce_body =
+        std::get<api::TextBlock>(backend.captured_requests.back().messages[0].content[0]).text;
+    CHECK(reduce_body.find("改成:注释改用英文") != std::string::npos);
+}
+
+TEST_CASE("CompactTurnPartitioned: 新 history = [双账并入热区首条][热区原文],工具对不丢") {
+    std::vector<api::Message> history = UniformTurns(10);
+    // 末轮带工具来回(热区里的 tool pair 必须原样在)。
+    history.push_back(AssistantToolUse("hot_tool", "read_file"));
+    history.push_back(UserToolResult("hot_tool", "热区读到的内容"));
+
+    const auto plan = agent::BuildTurnPartitionPlan(history, 4, agent::TurnPartitionBudgets{});
+    DualLedgerBackend backend = ReadyBackend(3);
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE(result.has_value());
+
+    const auto& new_history = result->new_history;
+    REQUIRE_FALSE(new_history.empty());
+    // 首条 = 双账存档并入热区第一条 user 消息:json 围栏与热区首问都在。
+    REQUIRE(std::holds_alternative<api::TextBlock>(new_history[0].content[0]));
+    const std::string& first_text = std::get<api::TextBlock>(new_history[0].content[0]).text;
+    CHECK(first_text.find("对话存档") != std::string::npos);
+    CHECK(first_text.find("\"user_contract\"") != std::string::npos);
+    CHECK(first_text.find("\"work_state\"") != std::string::npos);
+    CHECK(first_text.find("```json") != std::string::npos);
+    // 热区原文在后面:末轮工具对原样保留。
+    bool hot_tool_use = false;
+    bool hot_tool_result = false;
+    for (const auto& message : new_history) {
+        for (const auto& block : message.content) {
+            if (const auto* use = std::get_if<api::ToolUseBlock>(&block);
+                use != nullptr && use->id == "hot_tool") {
+                hot_tool_use = true;
+            }
+            if (const auto* tool_result = std::get_if<api::ToolResultBlock>(&block);
+                tool_result != nullptr && tool_result->tool_use_id == "hot_tool") {
+                hot_tool_result = true;
+            }
+        }
+    }
+    CHECK(hot_tool_use);
+    CHECK(hot_tool_result);
+    // 角色交替:没有相邻两条 user。
+    for (std::size_t i = 0; i + 1 < new_history.size(); ++i) {
+        const bool both_user = new_history[i].role == api::Role::User && new_history[i + 1].role == api::Role::User;
+        CHECK_FALSE(both_user);
+    }
+    // kept_indices 与新史对账:热区消息下标升序,条数对得上。
+    const std::size_t hot_from = plan.turns[plan.partitions.back().first_turn].from_message;
+    REQUIRE(result->kept_indices.size() == history.size() - hot_from);
+    CHECK(result->kept_indices.front() == hot_from);
+    CHECK(result->kept_indices.back() == history.size() - 1);
+}
+
+TEST_CASE("CompactTurnPartitioned: 双账 JSON 可从新史首条认回(第二次压缩的基线)") {
+    const std::vector<api::Message> history = UniformTurns(12);
+    DualLedgerBackend backend = ReadyBackend(3);
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE(result.has_value());
+
+    // 新史首条能被 BuildTurnPartitionPlan 剥出旧档(prior archive 不算 turn)。
+    const auto plan2 = agent::BuildTurnPartitionPlan(result->new_history, 4, agent::TurnPartitionBudgets{});
+    CHECK(plan2.has_prior_archive);
+
+    // ParsePriorLedgers:新双账认成双账,字段往返无损。
+    const auto ledgers = agent::ParsePriorLedgers(
+        "[对话存档,此前内容已压缩] 头\n```json\n" +
+        nlohmann::json{{"user_contract", agent::ToJson(result->contract)},
+                       {"work_state", agent::ToJson(result->state)}}
+            .dump() +
+        "\n```");
+    REQUIRE(ledgers.has_value());
+    CHECK(ledgers->dual_ledger);
+    CHECK(ledgers->contract.goal.text == result->contract.goal.text);
+    CHECK(ledgers->state.next_action == result->state.next_action);
+
+    // 旧 flat manifest 也认:折成 goal-only 基线(legacy 兼容)。
+    const auto legacy = agent::ParsePriorLedgers(
+        "[对话存档,此前内容已压缩] 旧档\n```json\n{\"goal\": \"旧目标\", \"constraints\": [], \"open_items\": "
+        "[\"旧待办\"], \"next_action\": \"旧下一步\"}\n```");
+    REQUIRE(legacy.has_value());
+    CHECK_FALSE(legacy->dual_ledger);
+    CHECK(legacy->contract.goal.text == "旧目标");
+    REQUIRE(legacy->state.open_items.size() == 1);
+    CHECK(legacy->state.open_items[0] == "旧待办");
+}
+
+TEST_CASE("CompactTurnPartitioned: 第二次压缩从旧双账接力,map 不吃旧档,reduce 当基线") {
+    std::vector<api::Message> history = UniformTurns(12);
+    DualLedgerBackend backend = ReadyBackend(3);
+    const auto first = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                     agent::StructuralCompressionOptions{});
+    REQUIRE(first.has_value());
+    // 接着攒 8 个新 turn(旧热区+新 turn 一起重新四分)。
+    std::vector<api::Message> grown = first->new_history;
+    for (std::size_t i = 0; i < 8; ++i) {
+        grown.push_back(UserText("新问 " + std::to_string(i) + " " + std::string(400, 'n')));
+        grown.push_back(AssistantText("新答 " + std::to_string(i) + " " + std::string(400, 'm')));
+    }
+
+    DualLedgerBackend backend2 = ReadyBackend(3);
+    const auto second = agent::CompactTurnPartitioned(backend2, "test-model", grown, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE(second.has_value());
+
+    // 旧档只进 reduce 当参考:map 请求里没有旧双账正文,reduce 里有。
+    REQUIRE(backend2.captured_requests.size() == 4);
+    for (std::size_t i = 0; i + 1 < backend2.captured_requests.size(); ++i) {
+        for (const auto& message : backend2.captured_requests[i].messages) {
+            for (const auto& block : message.content) {
+                if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr) {
+                    CHECK(text->text.find("user_contract") == std::string::npos);
+                }
+            }
+        }
+    }
+    const std::string reduce_body =
+        std::get<api::TextBlock>(backend2.captured_requests.back().messages[0].content[0]).text;
+    CHECK(reduce_body.find("上一轮压缩的总账") != std::string::npos);
+    CHECK(reduce_body.find("user_contract") != std::string::npos);
+    // 第二次的 plan 认得旧档:不算 turn。
+    CHECK(second->plan.has_prior_archive);
+    // 旧档没冒出新 turn:turn 数 = 旧热区 turn + 新 8 turn。
+    const std::size_t old_hot_turns = first->metrics.hot_turns;
+    CHECK(second->metrics.total_turns == old_hot_turns + 8);
+}
+
+// ---------------------------------------------------------------------------
+// 双账校验:来源、覆盖方向、环、证据、待办守恒。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 带坏形 reduce 脚本跑一次,断言拒收原因里含 needle(旧历史不动)。
+void RequireRejectedWith(const DualLedgerScript& script, const std::string& needle) {
+    const std::vector<api::Message> history = UniformTurns(17);
+    DualLedgerBackend backend = ReadyBackend(3, script);
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, agent::CompactOptions{},
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find(needle) != std::string::npos);
+    CHECK(history.size() == 34);
+}
+
+}  // namespace
+
+TEST_CASE("双账校验: source turn 悬空拒收") {
+    DualLedgerScript script;
+    script.goal_source_override = R"(["t99"])";
+    RequireRejectedWith(script, "t99");
+}
+
+TEST_CASE("双账校验: 事件号冒充用户来源,拒收") {
+    DualLedgerScript script;
+    script.goal_source_override = R"(["e5"])";  // 事件号不是 turn
+    RequireRejectedWith(script, "来源");
+}
+
+TEST_CASE("双账校验: 倒序覆盖拒收(superseded_at_turn 早于旧要求来源)") {
+    DualLedgerScript script;
+    script.superseded_at_override = "t1";  // 旧要求来自 t2,t1 比它还早
+    RequireRejectedWith(script, "倒序");
+}
+
+TEST_CASE("双账校验: superseded_by 指向不存在的 requirement,拒收") {
+    DualLedgerScript script;
+    script.superseded_by_override = "\"r404\"";
+    RequireRejectedWith(script, "不存在的 requirement");
+}
+
+TEST_CASE("双账校验: 覆盖关系成环,拒收") {
+    DualLedgerScript script;
+    // r0 → r5,r5 → r0:方向各自不倒序,但成环。
+    script.superseded_by_override = "\"r5\"";
+    script.extra_superseded =
+        "{\"id\": \"r5\", \"text\": \"另一条旧要求\", \"source_turns\": [\"t3\"], \"superseded_by\": \"r0\", "
+        "\"superseded_at_turn\": \"t4\"}";
+    RequireRejectedWith(script, "成环");
+}
+
+TEST_CASE("双账校验: 已证实事实没带证据,拒收") {
+    DualLedgerScript script;
+    script.fact_evidence_override = "[]";
+    RequireRejectedWith(script, "evidence_refs");
+}
+
+TEST_CASE("双账校验: 证据事件号不存在,拒收") {
+    DualLedgerScript script;
+    script.fact_evidence_override = R"(["t4:e9999"])";
+    RequireRejectedWith(script, "证据事件不存在");
+}
+
+TEST_CASE("双账校验: 活动待办丢一条,拒收(逐字守恒)") {
+    const std::vector<api::Message> history = UniformTurns(17);
+    DualLedgerScript script;
+    script.open_items_json = R"(["只留一条"])";  // 丢掉"补分块预算"
+    DualLedgerBackend backend = ReadyBackend(3, script);
+    agent::CompactOptions options;
+    options.required_open_items = {"补分块预算", "另一件待办"};
+    const auto result = agent::CompactTurnPartitioned(backend, "test-model", history, options,
+                                                      agent::StructuralCompressionOptions{});
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().message.find("补分块预算") != std::string::npos);
+    CHECK(history.size() == 34);  // 校验失败旧史不动
+}
+
+TEST_CASE("双账校验: 活动约束无来源,拒收") {
+    DualLedgerScript script;
+    // source_turns 空数组:解析层就判坏(schema 层拒),不给它混进校验层。
+    script.extra_constraint = "{\"id\": \"r9\", \"text\": \"没有来源的约束\", \"source_turns\": []}";
+    RequireRejectedWith(script, "schema");
+}
+
+TEST_CASE("BuildCompactedHistory(plan): 热区整段保留,存档并入首条") {
+    const std::vector<api::Message> history = UniformTurns(9);
+    const auto plan = agent::BuildTurnPartitionPlan(history, 4, agent::TurnPartitionBudgets{});
+    api::Message archive = UserText("[对话存档,此前内容已压缩] 双账正文");
+    std::vector<std::size_t> kept;
+    const auto new_history = agent::BuildCompactedHistory(history, archive, plan, &kept);
+    const std::size_t hot_from = plan.turns[plan.partitions.back().first_turn].from_message;
+    REQUIRE(new_history.size() == history.size() - hot_from);
+    REQUIRE(kept.size() == new_history.size());
+    CHECK(kept.front() == hot_from);
+    const std::string& first = std::get<api::TextBlock>(new_history[0].content[0]).text;
+    CHECK(first.find("双账正文") != std::string::npos);
 }

@@ -1288,7 +1288,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                          "工作目录、git 改道指回主树的操作都会被拦。改动留在房内,收工自会处置。";
     }
     // 每次 execute() 都是全新的、空历史的子代理——没有跨调用的状态。
-    // 长任务的今天,子代理复用主 compact(CompactHierarchical)与压力通报,
+    // 长任务的今天,子代理复用主 compact(CompactTurnPartitioned)与压力通报,
     // 在"工具结果攒完、请求未发"的安全点把旧探索压成检查点式存档。
     const std::string task_model = detached != nullptr && !detached->request_profile.model.empty()
                                        ? detached->request_profile.model
@@ -1313,7 +1313,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     }
     // 活度账 + 诊断日志的包装后端:子代理的每次模型请求都从这里过。必须
     // 在 sub_agent 之前声明(它引用的寿命盖过 loop);上下文压缩那一路
-    //(CompactHierarchical)仍用原 backend,不混进任务的阶段账。
+    //(CompactTurnPartitioned)仍用原 backend,不混进任务的阶段账。
     std::optional<TraceBackend> traced_storage;
     if (task != nullptr) {
         traced_storage.emplace(backend, ledger_, task);
@@ -1374,11 +1374,14 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             if (pressure.phase != agent::ContextPressure::Phase::PreRequest || !pressure.projected_overflow) {
                 return;  // AfterHardTrim 是纯通报;安全网丢的东西压缩救不回
             }
-            agent::CompactOptions options;  // 子代理没有守恒待办,manifest 只做结构校验
-            if (const auto compacted =
-                    agent::CompactHierarchical(backend, task_model, sub_agent.History(), options);
+            agent::CompactOptions options;  // 子代理没有守恒待办,双账只做结构校验
+            // 与主会话同一条双账路(四分区单·阶段 2-4):turn 分区 map +
+            // final reduce 出 UserContract/WorkState,新历史 [双账][热区原文]。
+            if (const auto compacted = agent::CompactTurnPartitioned(
+                    backend, task_model, sub_agent.History(), options,
+                    sub_agent.context().structural_options());
                 compacted.has_value()) {
-                sub_agent.ReplaceHistory(agent::BuildCompactedHistory(sub_agent.History(), compacted->archive));
+                sub_agent.ReplaceHistory(compacted->new_history);
                 if (task != nullptr) {
                     // 消息账记一枚压缩检查点:查看态里看得到"前情进存档"的
                     // 边界,不是只剩最终一句。
