@@ -1,0 +1,2180 @@
+# LubanCode 端云协同可观测架构与 Telemetry 插件设计
+
+- 状态：调研与详细设计完成，待实现
+- 日期：2026-08-31
+- 级别：P1；P0 Trajectory 单一事实账是前置依赖
+- 范围：端侧轻量采集、本地投影与缓存、OTLP 导出、云端 Gateway、端云策略、TelemetryConnector、全链路关联、故障排查与治理
+- 相关：`todos/P0新轨迹记录_可重放与训练投影设计.todo`
+- 相关：`todos/LubanCode使用洞察_Token账本与Prompt审计设计.todo`
+- 相关：`todos/多渠道消息接入与常驻ChannelPlugin设计.todo`
+- 默认：关闭；零遥测线程、零监听端口、零出站连接、零 spool 文件、零 Collector sidecar
+- 不在本单：自造一整套时序库/日志库/Trace UI；把云端做成 Agent 遥控器；默认上传 prompt、代码或工具正文；拿 C++ 语言本身冒充高并发实测
+
+## 一、先下断语
+
+LubanCode 能做端云协同可观测，而且现有 Core 拆分与 Trajectory 正好托得住它。
+
+做法不是把整本轨迹往云上倒。也不是让 Recorder 在落账时顺手发 HTTP。
+
+正确的水路是：
+
+```text
+Agent / Workflow / Goal / Channel / App Server
+                       |
+                       v
+              TrajectoryRecorder
+              canonical truth
+                       |
+             committed wake/cursor
+                       v
+              TelemetryProjector
+                       |
+             Redactor -> Sampler
+                       |
+                       v
+                TelemetrySpool
+                       |
+                       v
+               OTLP/HTTP Exporter
+                       |
+                       v
+       Local Collector / Regional Gateway
+                       |
+                       v
+     Trace / Metrics / Logs / Alert / Governance
+```
+
+反向只走观测策略：
+
+```text
+云端发现异常
+  -> 生成签名策略
+  -> 端上验签、验版本、验期限、验本地上限
+  -> 临时调高采样或打开受限诊断窗
+  -> 回报策略应用结果
+  -> 云端验证治理是否生效
+```
+
+四件东西各守一摊：
+
+1. `Trajectory Journal` 是黑匣子，管事实、耐久、恢复与审计。
+2. `Telemetry Pipeline` 是仪表盘，管投影、脱敏、采样、聚合与导出。
+3. `Collector/Gateway` 是驿站，管批量、路由、尾采样、租户隔离与后端适配。
+4. 云端控制面只管观测策略。它无权借遥测通道调用工具、改代码或开启 Agent turn。
+
+一句话：端上立账、端上裁剪，云上汇聚、云上关联，策略下发、端上裁决。
+
+## 二、什么叫“端云协同可观测”
+
+### 2.1 不是普通日志上传
+
+普通日志上传只有一条单向水路：
+
+```text
+端 -> 日志文件 -> 云
+```
+
+端云协同多三层意思：
+
+- 端上知道完整执行语义，能在事实出生处钉住身份与因果。
+- 云端看见多端、多服务、多版本的全局图，能做关联、尾采样与容量治理。
+- 云端可下发有界观测策略，端上按本地隐私与资源上限裁决。
+
+### 2.2 两类可观测须分账
+
+系统面回答“机器和管道怎么了”：
+
+- CPU、工作集、私有内存、线程、句柄/FD。
+- 网络连接、DNS、TLS、HTTP 状态、重试。
+- 队列深度、spool 字节、导出延迟、丢弃数。
+- Collector/Gateway 自身健康。
+
+Agent 业务面回答“这一轮为什么慢、为什么错”：
+
+- 哪条用户输入或后台触发开了 turn。
+- 哪次模型请求重试、限流、取消或迟到 usage。
+- 哪件工具等审批、执行、超时或只落了 unknown。
+- 哪只子 Agent、Workflow node、Goal iteration 卡住。
+- 哪个插件、MCP、HTTP 请求或子进程出了故障。
+- compact、verification、outcome 怎样影响最终结果。
+
+两面不混正文，却必须共用 `trace_id`、资源身份与时间线。否则仍是几本散账。
+
+### 2.3 全链路的边界
+
+本单所说的“全链路”是：
+
+```text
+外部输入 / terminal / app-server / channel
+  -> session scheduler
+  -> agent turn
+  -> model request attempt
+  -> provider HTTP/SSE
+  -> model output
+  -> approval
+  -> tool execution
+  -> builtin / process plugin / embedded Lua / MCP / subagent
+  -> filesystem / child process / controlled HTTP
+  -> tool result committed
+  -> verification / outcome
+  -> terminal / app-server / channel delivery
+```
+
+“全”不是把每个 token、每个字节全传上云。它是每层都有稳定身份、开始、终态、耗时、错误与关联边。
+
+## 三、外部调研定下的路
+
+本节按 2026-08-31 查到的官方规范与文档整理。开工前须再核版本与稳定性。
+
+### 3.1 OpenTelemetry Agent + Gateway
+
+OpenTelemetry 官方把 Agent 与 Gateway 分开：
+
+- Agent 靠近应用，收本机遥测，配置轻，资源帽小。
+- Gateway 集中做过滤、转换、批量、尾采样与凭证管理。
+- Agent 到 Gateway 可走内网。Gateway 才是稳定出站点。
+- Gateway 可独立横向扩容。
+
+资料：
+
+- <https://opentelemetry.io/docs/collector/deploy/other/agent-to-gateway/>
+- <https://opentelemetry.io/docs/collector/deploy/agent/>
+- <https://opentelemetry.io/docs/collector/deploy/gateway/>
+
+本单照这个骨架落回 LubanCode：LubanCode Core 是端上语义 Agent；OTel Collector 是可选本地/区域中继；云端 Gateway 不塞进 Core。
+
+### 3.2 OTLP
+
+OTLP/HTTP 支持 Protobuf 二进制与 Protobuf JSON 两种编码。两者共用同一消息 schema。
+
+资料：
+
+- <https://opentelemetry.io/docs/specs/otlp/>
+- <https://opentelemetry.io/docs/specs/otel/protocol/exporter/>
+
+LubanCode 第一版选 `OTLP/HTTP JSON`：
+
+- 可复用现有 `cpr/libcurl`。
+- 不必第一刀就引入 gRPC 与完整 protobuf runtime。
+- wire 可抓、可做 golden fixture、可在假 Collector 上严验。
+- 后续若实测 JSON CPU/带宽不合格，再加 `http/protobuf`，不改上层合同。
+
+不得手搓一套“像 OTLP”的私有 HTTP JSON。要么严格按 OTLP schema 发，要么明确叫 Luban 私有协议，不许混名。
+
+### 3.3 可靠发送
+
+OpenTelemetry Collector 的常见做法：有界 sending queue、指数退避、抖动、持久队列与队列自监控。
+
+资料：
+
+- <https://opentelemetry.io/docs/collector/resiliency/>
+- <https://github.com/open-telemetry/opentelemetry-collector/blob/main/exporter/exporterhelper/README.md>
+
+本单不把 Collector 的持久队列照搬进 Recorder。Telemetry 自有派生 spool。删了可重放，坏了不污染 canonical Journal。
+
+### 3.4 尾采样与分片
+
+尾采样要看见一条 trace 的全部或大多数 span。同一 trace 若散到不同 Gateway，决定会打架。
+
+资料：
+
+- <https://github.com/open-telemetry/opentelemetry-collector-contrib/blob/main/processor/tailsamplingprocessor/README.md>
+- <https://opentelemetry.io/docs/concepts/sampling/>
+
+故而云端 Gateway 以 `tenant_id + trace_id` 作粘性路由键。扩缩容须管重分片与迟到 span，不能拿普通轮询负载均衡顶上。
+
+### 3.5 W3C Trace Context
+
+跨 HTTP、Channel Bridge、远端 MCP 或多进程时，用标准 `traceparent`/`tracestate` 传上下文。
+
+资料：
+
+- <https://www.w3.org/TR/trace-context/>
+
+LubanCode 内部的 `run_id/turn_id/request_id/call_id` 继续保留。标准 Trace Context 是跨边界身份，不替换领域身份。
+
+### 3.6 OpAMP
+
+Open Agent Management Protocol 管 Agent 状态、远端配置与包更新。
+
+资料：
+
+- <https://opentelemetry.io/docs/specs/opamp/>
+
+本单只借它的配置版本、状态回报与回滚思路。首版不承诺完整实现 OpAMP，更不开放远程包更新。遥测控制面只收观测策略。
+
+### 3.7 C++ SDK 与 eBPF 的位置
+
+OpenTelemetry C++ 已有 SDK 与 OTLP exporter：
+
+- <https://opentelemetry.io/docs/languages/cpp/>
+- <https://opentelemetry.io/docs/languages/cpp/exporters/>
+
+本单不先绑死 SDK。先把 LubanCode 自己的领域合同和投影边界钉稳，再比较：
+
+- 直接接 `opentelemetry-cpp`。
+- 自写窄口 OTLP/HTTP JSON exporter。
+- 只落 OTLP file，由 Collector tail。
+
+eBPF 可补 Linux 上进程、网络、系统调用盲区：
+
+- <https://opentelemetry.io/docs/zero-code/obi/>
+
+它看不懂 Agent turn、模型 retry、审批与工具语义，也覆盖不了 Windows/macOS 全部场景。故而只作可选 sidecar，不是核心采集路。
+
+## 四、LubanCode 当前底账
+
+### 4.1 已有可复用件
+
+| 现有件 | 已有本事 | 本单怎样复用 |
+|---|---|---|
+| `trajectory::EventEnvelope` | workspace/session/run/turn/request/call、因果、关联、双时钟、hash chain | 作为业务观测投影的唯一输入 |
+| `TrajectoryRecorder` | 单写者、schema、状态机、blob、三档 durability、终态封口 | 继续写 canonical truth，不直接联网 |
+| `TrajectorySessionLedger` | main/subagent 分账、模型与工具边界、命令、clear/close | 提供 committed cursor 与 session 生命周期 |
+| `TurnEventAdapter` | 统一 ServerEvent、session/turn/item id、usage、工具与 step | live 面板可继续消费；不拿它替代 durable 投影 |
+| `JsonEventSink` | 线程安全 NDJSON 投影 | 可作开发期 live debug sink，不作云端真账 |
+| `BoundedOutbox` | 有界队列、delta 合并、must_keep、overflow 账 | 借分型与测试方法，不直接复用协议队列实例 |
+| `ToolTraceHub` | 工具执行边界、最近 512 枚诊断、关键/非关键分型 | 补工具 span 的领域字段 |
+| `Process Plugin` | 超时、取消、进程树、stdout/stderr 帽、最小环境 | 产工具观测，不承担常驻遥测出口 |
+| `embedded-lua` | manifest、受控 HTTP、SecretResolver、并发帽 | 后期可做受限映射器，不做主 exporter |
+| MCP Client | 常驻 stdio、握手、请求配对、取消与终态 | 产 MCP span，不充当遥测总线 |
+| Package | 发现、信任、事务挂载、快照 | 后期挂 `TelemetryConnector` 描述件 |
+
+### 4.2 当前已实现到哪儿
+
+当前 HEAD 已不是早先的“Trajectory 只有设计稿”：
+
+- `src/trajectory/` 已有 event/schema/journal/blob/recorder/directory/session manager。
+- `src/runtime/trajectory_session.*` 已把模型边界、工具栅栏、子 Agent 与命令接入真实运行时。
+- 新 session 可在 feature flag 开时只走 Trajectory，禁旧 Store 双写。
+- v2 usage 已有独立 `model.usage.recorded` owner。
+- `tests/unit/trajectory/` 与 `tests/integration/trajectory/` 已有合同、恢复与 smoke 覆盖。
+
+不过 `features.trajectory` 仍默认 false，属于内部预览。Telemetry 不能假装它已是稳定、默认可用的产品面。
+
+### 4.3 尚缺
+
+- 没有 `features.telemetry` 与独立启停状态机。
+- 没有标准 `trace_id/span_id/trace_flags/trace_state`。
+- 没有 Trajectory -> OTel trace/log/metric 的确定性投影器。
+- 没有运行进程 CPU、内存、线程、FD/handle、网络与队列采样器。
+- 没有 telemetry spool、cursor、ACK、重试与配额账。
+- 没有 OTLP exporter，也没引入 OTel C++ 依赖。
+- 没有 Collector/Gateway 部署样例、租户认证与粘性路由。
+- 没有云端策略合同、签名、过期、回滚与本地裁决。
+- 没有 TelemetryConnector 生命周期与 Package 合同。
+- 没有遥测开销、吞吐、P95/P99、断网与磁盘故障实测。
+
+### 4.4 两个现成件不能硬凑
+
+现有 Process Plugin 是：
+
+```text
+一笔 tool call -> 一只短命进程 -> 一份 stdin -> 一份 stdout -> 退出
+```
+
+它不能常驻收批次、守 ACK、续 cursor、报自身健康。
+
+现有 MCP 是 Agent 主动发 `tools/call` 的工具协议。它也不是 host 主动推遥测的事件总线。
+
+TelemetryConnector 若要做，必须另立常驻合同。不能把 timeout 设成 0 就说成品了。
+
+## 五、目标与非目标
+
+### 5.1 产品目标
+
+1. 默认关闭时，普通 LubanCode 启动没有任何遥测副作用。
+2. 开启后，能从 session/turn 一路追到模型、工具、插件、MCP、子 Agent 与受控 HTTP。
+3. 本地 Journal 永远先于远端投影；断网、云端故障不拖住 Agent。
+4. 端侧开销有帽、有账、有压测，不靠“C++ 很快”下结论。
+5. 默认只发 metadata。正文、路径、参数与代码另设显式诊断门。
+6. 支持本地 Collector、私有云与 SaaS 后端，不锁死一家厂商。
+7. 云端可做尾采样、跨端关联、告警与有界诊断策略。
+8. 远端配置可验签、可过期、可回滚、可拒绝、可审计。
+9. 观测系统自身也可观测：队列、丢弃、spool、重试、延迟、配置状态都有指标。
+
+### 5.2 工程目标
+
+- Core 只认窄合同，不 include 某家后端 SDK。
+- canonical 与 derived 分仓、分目录、分 writer。
+- 实时通知只负责唤醒；恢复以 durable cursor 与 Journal 为准。
+- 所有队列有界。所有重试有期限。所有磁盘占用有帽。
+- 关键事件与普通样本分级。降级须明写，不许静默。
+- 跨平台基线覆盖 Windows、Linux、macOS。
+
+### 5.3 非目标
+
+- 不在 LubanCode 内实现 Tempo、Prometheus、Loki 或 ClickHouse。
+- 不做通用 APM 前端。
+- 不承诺 exactly-once 云端写入。
+- 不把 raw Trajectory 当 OTLP wire 原样发送。
+- 不默认上传 prompt、response、tool input/output、文件内容与 stderr。
+- 不上传隐藏 reasoning 正文。
+- 不让云端修改 Agent 模式、权限策略、工作区文件或插件启停。
+- 不用 eBPF 代替领域埋点。
+- 不靠遥测结果自动判定任务成功。
+- 不在第一版支持远程安装/升级 Connector 包。
+
+## 六、十五条不变量
+
+1. Trajectory 是业务事实账。Telemetry 只是可删、可重建的投影。
+2. Recorder 不做 DNS、TLS、HTTP、压缩、批量或云端重试。
+3. 远端不可用时 Agent 继续跑。Telemetry 失败不能反写任务终态。
+4. 默认关闭。未显式开启不得生线程、联网、建 spool 或拉 sidecar。
+5. `trajectory=false` 不因 `telemetry=true` 被偷偷改成 true。
+6. `telemetry=false` 时旧 spool 不补传，也不擅自删除。
+7. canonical 内容的脱敏规则仍由 Trajectory 自己管；云端脱敏是第二道门，不能补救本地泄密。
+8. 云端默认只收 metadata。内容档须显式、限时、限域、留审计。
+9. 每条 trace/span/log/metric 都能追到本地来源或明确标记 `source=runtime_sample`。
+10. 同一语义事实不得在 Trajectory、ServerEvent 与 Telemetry 各自生成三份相互打架的真值。
+11. 每只内存队列、磁盘 spool、批次、请求、重试与诊断窗都有硬帽。
+12. 关键终态、错误与治理事件不与 token delta 共用同一丢弃等级。
+13. 远端策略只能收窄或在本地许可范围内临时放宽观测；不能越本地硬上限。
+14. Connector 只见脱敏、采样后的批次；默认见不到 secret、raw prompt 与工作区正文。
+15. 未跑过容量与故障验收前，不宣称“高并发”“全链路无损”或“低开销”。
+
+## 七、总架构
+
+### 7.1 端侧数据面
+
+```text
+                        +----------------------+
+runtime facts -------->| TrajectoryRecorder   |
+                        | canonical JSONL/blob |
+                        +----------+-----------+
+                                   |
+                         committed cursor/wake
+                                   |
+                                   v
+                        +----------------------+
+                        | TelemetryProjector   |
+                        | deterministic read   |
+                        +----------+-----------+
+                                   |
+                  +----------------+----------------+
+                  |                                 |
+                  v                                 v
+        Trace/Log projection               RuntimeMetricsSampler
+                  |                                 |
+                  +----------------+----------------+
+                                   v
+                         Redactor / Aggregator
+                                   |
+                                Sampler
+                                   |
+                                   v
+                         BoundedBatchQueue
+                                   |
+                                   v
+                         TelemetrySpool WAL
+                                   |
+                                   v
+                      OTLP Exporter / Connector
+```
+
+### 7.2 端侧控制面
+
+```text
+local config + CLI + env kill switch
+                  |
+                  v
+        TelemetryActivationResolver
+                  |
+        signed remote policy
+                  |
+                  v
+          TelemetryPolicyEngine
+                  |
+      sampler/redactor/export limits
+```
+
+### 7.3 云端数据面
+
+```text
+Device / Local Collector
+          |
+          v
+Ingress Auth + Tenant Quota
+          |
+          v
+Trace-aware Router
+  hash(tenant_id, trace_id)
+          |
+          v
+Gateway Shards
+  memory limiter / batch / tail sample / transform
+          |
+          +------> Trace backend
+          +------> Metrics backend
+          +------> Logs backend
+          +------> Alert / SLO engine
+```
+
+### 7.4 云端控制面
+
+```text
+SLO / anomaly / operator
+          |
+          v
+Policy Authoring + Approval
+          |
+          v
+Signer + Version Store
+          |
+          v
+Device Poll/Stream
+          |
+          v
+Local verify -> apply/reject -> status receipt
+```
+
+数据面与控制面分端点、分凭证、分限流。不能让一只 token 同时拥有遥测写入与策略签发权。
+
+## 八、默认关闭与激活合同
+
+### 8.1 两只开关分开
+
+```json
+{
+  "features": {
+    "trajectory": false,
+    "telemetry": false
+  }
+}
+```
+
+- `features.trajectory`：是否写本地 canonical Trajectory。
+- `features.telemetry`：是否启动观测投影、采样、spool 与 exporter。
+
+不得写成“开 telemetry 自动开 trajectory”。两只功能有不同隐私与磁盘含义。
+
+### 8.2 激活矩阵
+
+| trajectory | telemetry | 行为 |
+|---:|---:|---|
+| false | false | 旧路；零遥测副作用 |
+| true | false | 只写本地 Trajectory；不采系统指标、不导出 |
+| false | true | 只收 `ServerEvent` 可得的即时业务元数据 + 系统指标；coverage 明写 partial；无 durable catch-up |
+| true | true | 完整模式；Trajectory 投影 + 系统指标 + spool/export |
+
+第一版可收窄：只实现 `true/true`，其余 `telemetry=true && trajectory=false` 明确报 `telemetry.requires_trajectory`。不得暗开。
+
+### 8.3 环境变量
+
+```text
+LUBANCODE_TELEMETRY=1|true
+LUBANCODE_TELEMETRY=0|false
+```
+
+它显式压过配置，与现有 `LUBANCODE_TRAJECTORY` 规矩一致。
+
+另设紧急总闸：
+
+```text
+LUBANCODE_DISABLE_TELEMETRY=1
+```
+
+总闸只关采集与发送，不改配置文件，不删 spool。
+
+### 8.4 公网确认
+
+首次向非回环地址发送前，必须展示：
+
+- endpoint 与协议。
+- 数据等级。
+- resource attributes 摘要。
+- 本地 spool 目录与容量帽。
+- 脱敏规则版本。
+- 凭证来源名，不展示值。
+- 是否允许远端策略。
+
+用户确认后写一枚本地 consent 记录。endpoint、数据等级或 tenant 变了，须重新确认。
+
+回环 Collector 可免公网披露问答，但仍须显式打开 `features.telemetry`。
+
+### 8.5 默认关闭硬验收
+
+fresh user-data 目录下，以普通配置启动后：
+
+- 进程线程数不因 Telemetry 增加。
+- 无 `telemetry/` 目录。
+- 无 spool/cursor/policy 文件。
+- 无 4317/4318 或别的监听端口。
+- 无 DNS 查询与出站 socket。
+- 不扫描旧 Trajectory。
+- 不发现、不挂载、不启动 TelemetryConnector。
+- `/doctor telemetry` 只做本地静态诊断，不主动探公网。
+
+## 九、身份与关联
+
+### 9.1 四层身份
+
+| 层 | 身份 | 用途 |
+|---|---|---|
+| 租户 | `tenant_id` | 云端隔离、配额、分片 |
+| 设备 | `device_instance_id` | 匿名设备实例，不用机器名 |
+| OTel | `trace_id/span_id` | 跨进程、跨网络标准关联 |
+| Luban | session/run/turn/request/call/event id | 领域审计与本地回放 |
+
+### 9.2 Trace ID
+
+- 每场 main run 生成 16 字节随机 `trace_id`，写进 session manifest 的 telemetry 扩展段或独立 projection manifest。
+- 不从 `workspace_key/session_id` 直接 hash 出可预测 trace id。
+- resume-as-new 生成新 trace，保留 `links.resume_source_trace_id`。
+- clear 后新 session 生成新 trace。
+- 子 Agent 默认同 trace，新建 child span；跨进程/跨设备时用 span link。
+- Workflow 可与宿主 turn 同 trace；独立定时 Workflow 可开新 trace，并用 causation link 指回调度事件。
+
+### 9.3 Span ID
+
+- 8 字节随机或按确定性 projector 规则生成。
+- 若要重放后稳定，使用 `HMAC(local_projection_key, event_id + span_role)` 截 8 字节。
+- 不直接截 `event_hash`，免让云端拿 span id 反推本地 hash 链关系。
+- 同一 projector version 对同一 Journal 重建须得同一 span id。
+
+### 9.4 W3C 传播
+
+允许传播：
+
+- provider HTTP：默认只向用户明确允许的自有/兼容网关传播；向第三方模型 API 是否发 `traceparent` 要单独配置。
+- 受控 Lua HTTP：只有 manifest 与策略都许可，才注入 trace context。
+- 远端 MCP/Channel Bridge：协议字段明确支持时传。
+- 本地子进程：以最小环境变量或请求字段传，不能整份环境继承。
+
+不得向任意网站自动注入 `traceparent`。Trace ID 也是关联信息。
+
+### 9.5 时间
+
+- span 时间用现有 `wall_time_ms` 给绝对时间。
+- 同进程耗时优先用 `monotonic_ns`，避系统校时倒退。
+- 跨设备只比较墙钟，并带 `clock_skew_estimate_ms/clock_quality`。
+- 云端不得拿未校时设备的毫秒差下精确因果结论。
+
+## 十、OTel 资源合同
+
+### 10.1 默认 Resource Attributes
+
+```text
+service.name = lubancode
+service.version = <version>
+service.instance.id = <ephemeral process instance>
+deployment.environment.name = local|ci|gateway
+os.type = windows|linux|darwin
+host.arch = amd64|arm64|...
+process.runtime.name = native
+process.runtime.version = c++23
+lubancode.device.instance.id = <pseudonymous id>
+lubancode.workspace.key = <existing pseudonymous workspace key>
+lubancode.frontend = terminal|app_server|channel|embedded
+lubancode.trajectory.schema_version = 1|2
+lubancode.telemetry.schema_version = 1
+```
+
+默认不发：
+
+- 主机名、用户名、HOME 路径。
+- 仓库绝对路径、远端 URL、分支名。
+- API endpoint 中的 query、userinfo 与 secret。
+- 原始 package/plugin 目录。
+
+### 10.2 可选 Resource Attributes
+
+用户显式打开后才发：
+
+- `repository.name`：只发手填别名，不读远端 URL 猜。
+- `team.id/project.id`：由组织配置给。
+- `git.commit.sha`：只在 CI 或用户明配时发。
+- `model.provider/model.name`：可按策略 hash 或别名化。
+
+### 10.3 Cardinality 预算
+
+高基数字段不许进 metrics label：
+
+- session/run/turn/request/call/event id。
+- 文件路径、tool input、错误全文。
+- provider response id。
+- trace id/span id。
+
+它们可进 span/log attribute。Metrics label 只收有界枚举与受控名字。
+
+## 十一、Trace 映射
+
+### 11.1 Span 树
+
+```text
+lubancode.agent.run
+  lubancode.agent.turn
+    gen_ai.request
+      http.client                 optional child
+    lubancode.approval.wait
+    lubancode.tool.execute
+      lubancode.plugin.process
+      lubancode.plugin.lua
+        http.client
+      lubancode.mcp.call
+      lubancode.subagent.run      child/link
+      process.exec / fs.operation optional
+    lubancode.compact
+    lubancode.verification
+  lubancode.session.close
+```
+
+### 11.2 Trajectory 事件到 span
+
+| 起事件 | 终事件 | span |
+|---|---|---|
+| `run.started` | `run.completed/failed/cancelled` | `lubancode.agent.run` |
+| `turn.started` | `turn.completed/failed/cancelled` | `lubancode.agent.turn` |
+| `model.request.sent` | `model.output.completed/failed/cancelled` | `gen_ai.request` |
+| `tool.execution.started` | finished/failed/cancelled/unknown | `lubancode.tool.execute` |
+| `control.approval.requested` | resolved/expired | `lubancode.approval.wait` |
+| `compact.requested` | applied/failed/cancelled/rejected | `lubancode.compact` |
+| `verification.started` | recorded/invalidated | `lubancode.verification` |
+
+`model.request.prepared` 可作 span event，不以它开网络耗时。`model.usage.recorded` 作 request span 属性或 event，不另开 span。
+
+### 11.3 重试
+
+- 一次 local `request_id` 下的每个 attempt 各开一枚 `gen_ai.request` span。
+- attempt 带 `retry_of` link。
+- 父 turn 记录 `retry.count`。
+- 429、网络错、provider 5xx、解析错分型，不把错误字符串当唯一口径。
+- provider response id 只作 attribute，不当 trace/span id。
+
+### 11.4 工具
+
+工具 span 至少带：
+
+```text
+tool.name
+tool.kind = builtin|plugin_process|plugin_lua|mcp|lsp|subagent
+tool.effect_class
+tool.batch_id
+tool.sequence_in_batch
+tool.outcome
+tool.error_code
+tool.cancelled
+tool.timeout
+tool.input_bytes_bucket
+tool.output_bytes_bucket
+```
+
+默认不带 tool input/output 正文。字节数用桶，不发精确大值也可。
+
+### 11.5 子 Agent
+
+- 同进程子 Agent 以 child span 或嵌套 run span 表示。
+- 父 `call_id` 与子 `run_id` 双向关联。
+- 子账终态 hash 不上传原值；可上传 `terminal_hash_present=true`。
+- 跨进程派工用 span link，不能伪造严格父子时序。
+
+### 11.6 ServerEvent 的位置
+
+ServerEvent 适合 live UI、前端断线补账与实时指标。它不是 canonical 投影源。
+
+同一事实若 Trajectory 已有，就从 Trajectory 投影。只有以下即时信号可直接从 ServerEvent 进 live metrics：
+
+- token delta 数与字节数聚合。
+- UI outbox 深度、coalesced、dropped。
+- 首次可见输出时间。
+
+这些即时指标须带 `source=live_runtime`。若以后入 Trajectory，则迁回 canonical projector，不能双计。
+
+## 十二、Metrics 合同
+
+### 12.1 Agent 指标
+
+第一批：
+
+```text
+lubancode.session.started_total
+lubancode.session.completed_total{outcome}
+lubancode.session.active
+lubancode.turn.started_total{trigger}
+lubancode.turn.completed_total{outcome}
+lubancode.turn.duration_ms
+lubancode.turn.first_output_ms
+lubancode.model.request_total{provider,model,outcome}
+lubancode.model.request.duration_ms{provider,model,outcome}
+lubancode.model.retry_total{reason}
+lubancode.model.tokens{kind}
+lubancode.tool.call_total{tool_kind,outcome,effect_class}
+lubancode.tool.duration_ms{tool_kind,outcome}
+lubancode.approval.wait_ms{decision}
+lubancode.subagent.active
+lubancode.compact.total{outcome}
+lubancode.verification.total{outcome}
+```
+
+`tool.name`、`plugin.id`、`model` 是否进 label 由 cardinality budget 决定。默认只进有限白名单或 top-N，其余归 `other`。
+
+### 12.2 进程指标
+
+```text
+process.cpu.time
+process.cpu.utilization
+process.memory.working_set
+process.memory.private
+process.thread.count
+process.open_handles          Windows
+process.open_file_descriptors POSIX
+process.uptime
+```
+
+采样周期默认 10 秒，配置只许在 1 秒至 5 分钟之间。机器指标另设开关，不因业务 trace 自动开启。
+
+### 12.3 管道指标
+
+```text
+lubancode.telemetry.queue.size
+lubancode.telemetry.queue.capacity
+lubancode.telemetry.queue.dropped_total{reason,priority}
+lubancode.telemetry.queue.coalesced_total
+lubancode.telemetry.projector.lag_events
+lubancode.telemetry.projector.lag_ms
+lubancode.telemetry.spool.bytes
+lubancode.telemetry.spool.segments
+lubancode.telemetry.spool.oldest_age_ms
+lubancode.telemetry.export.requests_total{outcome}
+lubancode.telemetry.export.items_total{signal,outcome}
+lubancode.telemetry.export.duration_ms{outcome}
+lubancode.telemetry.export.retry_total{reason}
+lubancode.telemetry.policy.apply_total{outcome}
+lubancode.telemetry.connector.restart_total{reason}
+```
+
+管道指标不可只送远端。`/doctor telemetry` 必须能从本地状态读出来。
+
+### 12.4 Usage
+
+- 只认 `model.usage.recorded` 的 canonical usage。
+- provider 没报，标 `coverage=unknown`，不写 0。
+- reasoning token 是 output 的子集，汇总不再加一遍。
+- 价格估算不进基础 Telemetry 指标。费用属于 `/usage` 派生报告，不冒充账单。
+
+## 十三、Logs 合同
+
+### 13.1 结构化 LogRecord
+
+只收离散诊断：
+
+- 轨迹提交失败码。
+- exporter/connector/collector 错误。
+- 插件非零退出、超时、取消、协议错。
+- MCP 传输终止、握手错、请求超时。
+- HTTP DNS/TLS/timeout/status 分型。
+- 策略验签、过期、拒绝与回滚。
+- 队列溢出与 spool 修复。
+
+每条 log 带 active trace/span context；无 active span 时带 session/run id 的脱敏投影。
+
+### 13.2 stderr
+
+Process Plugin 的 `stderr_tail` 默认只留本地，不上传。
+
+诊断窗允许上传时：
+
+- 先过 secret/path/token redactor。
+- 单条与单窗都有字节帽。
+- 只收指定 plugin id。
+- 明写截断、遗漏与规则版本。
+- 窗口过期立即停。
+
+### 13.3 不收什么
+
+- 隐藏 reasoning 正文。
+- 完整 prompt/response。
+- 工具原始 input/output。
+- 源文件与补丁正文。
+- 环境变量值。
+- Authorization/Cookie/Set-Cookie。
+- shell 整行命令，除非用户显式开诊断且经过参数级脱敏。
+
+## 十四、TelemetryProjector
+
+### 14.1 读路
+
+Projector 不嵌进 Recorder 锁内。它有两条读路：
+
+```text
+fast path:  commit 后 wake -> 从上次 cursor 读新行
+recovery:   启动后按 cursor -> 验证并补读未投影行
+```
+
+wake 只说“有新账”。它不携带唯一事实正文。wake 丢了不要紧；周期扫描或 session close 会补。
+
+### 14.2 Cursor
+
+```json
+{
+  "schema": "lubancode.telemetry.cursor",
+  "version": 1,
+  "workspace_key": "...",
+  "session_id": "...",
+  "stream": "main.jsonl",
+  "last_event_id": "...",
+  "last_event_hash": "...",
+  "projector_version": "telemetry-projector-v1",
+  "updated_at_ms": 0
+}
+```
+
+- cursor 原子替换。
+- cursor 只在派生批次 durable 入 spool 后推进。
+- cursor 超前、hash 不合或 stream 换账，停止并报错，不猜。
+- projector 升级若映射不兼容，另建 generation，旧 spool 按旧版本送完或明确弃置。
+
+cursor 只回答“源事件投影到哪里”。它不回答“云端收到了哪里”。发送侧另有 ACK 水位：
+
+```json
+{
+  "schema": "lubancode.telemetry.export-state",
+  "version": 1,
+  "export_generation": 3,
+  "last_acked_batch_id": "...",
+  "last_acked_at_ms": 0,
+  "pending_segments": [],
+  "tombstones": []
+}
+```
+
+三层账须分开：
+
+```text
+projection cursor   已从 Trajectory 读到哪里
+pending spool       哪些 sealed batch 尚待 ACK
+export ACK state    哪些 batch 已由下游接手
+```
+
+已 ACK segment 删除后，cursor 当然可以领先于现存 spool。只有 cursor 覆盖的区间既不在 pending spool、也不在 ACK/tombstone 水位里，才叫无出处缺口。
+
+### 14.3 多 stream
+
+- main/subagent/workflow/node 各有 cursor。
+- Session manifest 是发现入口，不扫全盘猜文件。
+- 父子 stream 独立读，靠 run/link 关联。
+- 一只 session 可并行投影不同 child stream；同一 stream 内保持 seq 顺序。
+
+### 14.4 开着 Telemetry、关着 Trajectory
+
+若首版支持 partial 模式：
+
+- `LiveTelemetryAdapter` 只吃 ServerEvent 与 RuntimeMetricsSampler。
+- 不写 durable business cursor。
+- 进程崩溃前未送出的 live 事件可丢。
+- resource 带 `lubancode.telemetry.coverage=live_partial`。
+- 云端 UI 不得把它标成完整 trace。
+
+优先建议首版不做 partial，先把一条可信路跑通。
+
+## 十五、脱敏与数据分级
+
+### 15.1 四档数据
+
+| 档 | 名称 | 默认 | 内容 |
+|---|---|---:|---|
+| D0 | off | 是 | 不采、不存、不发 |
+| D1 | metadata | 开启后默认 | id、枚举、耗时、大小桶、错误码、版本 |
+| D2 | diagnostic | 否 | 脱敏后的短错误、选定插件 stderr、有限 URL host |
+| D3 | content | 否 | prompt/tool/file 片段；首版不实现 |
+
+D3 即便以后实现，也须逐次、限时、限 session、限字段确认。不能有永久全开快捷键。
+
+### 15.2 Redactor 顺序
+
+```text
+field allowlist
+ -> secret key/name rules
+ -> URL sanitizer
+ -> path pseudonymizer
+ -> token/credential detector
+ -> content length cap
+ -> final denylist scan
+ -> redaction manifest
+```
+
+先 allowlist，后 denylist。只靠正则找 secret 不够。
+
+### 15.3 RedactionManifest
+
+每批带：
+
+```json
+{
+  "policy_version": "redact-v1",
+  "data_class": "metadata",
+  "removed_fields": 7,
+  "truncated_fields": 0,
+  "path_mode": "workspace_relative_hash",
+  "content_included": false
+}
+```
+
+不能带被删内容的 hash，除非该 hash 无法作字典反查且确有用途。
+
+### 15.4 SecretResolver
+
+- exporter token 走现有 host-owned SecretResolver 思路。
+- 配置只存 `secret_ref` 或 env var 名，不存明文。
+- secret 不进日志、Trajectory、span、Connector 批次与 doctor 输出。
+- Connector 若需凭证，由宿主按 manifest 单独给最小环境或短期 token，不把 LubanCode 主凭证整份递过去。
+
+## 十六、采样与聚合
+
+### 16.1 端侧头采样
+
+端侧先做便宜决定：
+
+- error/cancel/timeout/unknown：100%。
+- 副作用工具：默认 100% metadata。
+- 正常 turn：可配比例。
+- token delta：永不逐条上报，只聚合。
+- health/queue/spool metrics：固定周期聚合。
+
+同一 trace 的概率采样用 trace id + 稳定 seed，避免各端决定打架。
+
+### 16.2 云端尾采样
+
+Gateway 可按完整 trace 再选：
+
+- 任一 span error。
+- turn 超 P95/P99。
+- 模型重试、429、5xx。
+- approval 等待过长。
+- plugin/MCP crash、timeout、unknown。
+- spool 恢复后迟到批次。
+- 用户显式 `force_sample` 的本地诊断窗。
+- 正常流量保小比例作基线。
+
+### 16.3 错误保留不等于正文保留
+
+错误 trace 可以 100% 留 metadata，但仍不代表上传 prompt、tool input 或 stderr。采样决定与内容权限是两只门。
+
+### 16.4 聚合
+
+- 高频计数先在端上按周期聚合。
+- Histogram 用固定 bucket 或 OTel exponential histogram；首版二选一并冻结。
+- 不在端上算跨 session 成功率结论。端上只交事实与 coverage。
+- top-N 插件/工具统计须有 `other`，且 N 有硬帽。
+
+## 十七、内存队列与背压
+
+### 17.1 队列分层
+
+```text
+P0 critical: error、终态、治理回执、spool 损坏
+P1 important: span start/end、usage、approval、side-effect tool
+P2 normal: 正常样本、周期 metrics
+P3 verbose: delta 聚合、debug log
+```
+
+### 17.2 满队列策略
+
+1. 先合并同 series metrics。
+2. 合并同 item 的 delta 聚合。
+3. 丢 P3。
+4. 按采样权重丢 P2。
+5. P1 尽量挤掉低档。
+6. P0 若仍进不去，写一枚本地 emergency counter/file，并让 `/doctor telemetry` 报红。
+
+Telemetry 不得反压 Recorder 或 Agent Loop。即便 P0 也不能无限阻塞业务线程。
+
+### 17.3 并发模型
+
+- Recorder 保持每 stream 一把锁、一个 writer。
+- Projector 每 stream 串行，stream 间可并行。
+- Redactor/Sampler 为纯函数或不可变配置快照。
+- BatchQueue 用有界 MPSC；生产者不做网络 IO。
+- Spool 单 writer，export worker 只读 sealed segment。
+- Exporter 可有 1-N 个 worker；同一 batch id 只准一个 owner。
+- 配置热更新用 generation snapshot，不在热路抢全局大锁。
+
+### 17.4 C++ 优势落在哪儿
+
+- Core 可在 CLI、App Server、Gateway、嵌入式宿主复用同一合同。
+- 原生线程、原子、文件、socket 与进程指标可统一跨平台封装。
+- 有界队列、批量序列化与内存布局可精细控制。
+- 关闭时可做到真正零 runtime。
+
+可这不等于高并发已经成立。锁竞争、JSON 序列化、fsync、spool、TLS 与 Collector 都须实测。
+
+## 十八、TelemetrySpool
+
+### 18.1 目录
+
+```text
+<user-data>/telemetry/
+  consent.json
+  policy.json
+  cursors/
+  spool/
+    active.tmp
+    seg-00000001.otlpjson
+    seg-00000001.meta.json
+  quarantine/
+  state.json
+```
+
+Trajectory 与 Telemetry 不共目录。清理派生 spool 不碰 Journal。
+
+### 18.2 Segment
+
+- active segment 只有 spool writer 可写。
+- 达字节帽、item 帽或时间帽后 seal。
+- seal 用临时文件 + flush + 原子 rename。
+- meta 带 batch 范围、sha256、数据等级、projector/redactor/schema 版本。
+- exporter 只读 sealed segment。
+- ACK 后删 segment；删除失败留 tombstone，防重复无限发。
+
+### 18.3 容量
+
+首版建议默认值，须经压测后再定：
+
+```text
+memory queue:       4-32 MiB
+segment:            1-8 MiB
+total spool:        128-512 MiB
+max age:            24-72 h
+batch flush:        250-1000 ms
+```
+
+这些只是设计起点，不是成品承诺。
+
+### 18.4 满盘
+
+按优先级与年龄清理：
+
+- 先删已 ACK tombstone。
+- 再删过 TTL 的低优先正常样本。
+- 再删最老正常 trace。
+- 错误与治理回执保留更久，但也有总帽。
+- 最后进入 `spool_degraded`，停止新派生，保留本地计数并告警。
+
+绝不为保遥测去挤爆用户磁盘。
+
+### 18.5 Crash Recovery
+
+- `active.tmp` 启动时验逐行/逐帧边界。
+- 完整批次可 seal；半批移 quarantine。
+- cursor 只指向已 durable 入 spool 的源事件。
+- spool 比 cursor 多：允许重发，靠 batch id 去重。
+- cursor 比现存 spool 超前：先查 ACK/tombstone 水位；有账是正常清理，无账才视为损坏，停自动补账并走 doctor/rebuild。
+
+### 18.6 交付语义
+
+承诺 `at-least-once`。不承诺 exactly-once。
+
+- `batch_id` 在同一 projection generation 内稳定。
+- Gateway 维护有限期去重表。
+- 后端仍可能重复，查询/聚合层须按 id 幂等。
+- 超出去重 TTL 的迟到批次可重复，状态里要明写。
+
+## 十九、OTLP Exporter
+
+### 19.1 第一版
+
+```text
+protocol = http/json
+traces endpoint = <base>/v1/traces
+metrics endpoint = <base>/v1/metrics
+logs endpoint = <base>/v1/logs
+compression = gzip optional
+```
+
+现有 cpr/libcurl 传输底座可复用以下机制：
+
+- DNS/TLS/timeout 错误分型。
+- header/body 字节帽。
+- 取消。
+- 代理。
+- 不自动跟不受控重定向。
+
+但不要直接复用 Lua Plugin 的请求权限合同。Telemetry 是 host feature，有独立 endpoint allowlist、凭证与限流。
+
+### 19.2 Retry
+
+- 408、429、502、503、504 与传输临时错可重试。
+- 尊重 `Retry-After`，但仍受本地最大退避帽。
+- 400/401/403/404 等永久错停该 endpoint generation，报 doctor。
+- 指数退避带 jitter。
+- 每段最大尝试次数与最大年龄双限。
+- 进程退出不等远程恢复；flush 只到本地 spool durability。
+
+### 19.3 Partial Success
+
+OTLP response 若报 partial success：
+
+- 记录 rejected count 与 error message 的脱敏摘要。
+- 不盲目整批无限重试。
+- 能按 signal/item 精确拆批时才重试可恢复部分。
+- 不能判定时 quarantine 并告警。
+
+### 19.4 TLS 与认证
+
+- 公网默认 HTTPS。
+- 支持系统 CA；自定义 CA 要明配。
+- mTLS、Bearer、API key 都只以 SecretRef 配。
+- endpoint hostname 校验不可默认关闭。
+- 禁止把 token 放 URL query。
+- Connector 与内置 exporter 分凭证。
+
+### 19.5 Collector 优先
+
+推荐部署：
+
+```text
+LubanCode -> 127.0.0.1:4318 Collector -> cloud
+```
+
+好处：
+
+- LubanCode 不背每家后端 exporter。
+- Collector 统一重试、转换、认证与多后端 fanout。
+- 企业可把公网出口锁在 Collector/Gateway。
+- LubanCode 的 endpoint 可长期稳定。
+
+## 二十、云端 Gateway 与高并发
+
+### 20.1 分层
+
+```text
+L4/L7 ingress
+  -> auth / tenant quota
+  -> stateless pre-router
+  -> trace-aware shard
+  -> sampling/transform workers
+  -> durable message bus optional
+  -> backends
+```
+
+### 20.2 路由键
+
+- trace：`hash(tenant_id, trace_id)`。
+- metrics：`hash(tenant_id, resource identity, metric stream)`，守 single-writer。
+- logs：可按 tenant + time/hash 普通分片。
+
+做 tail sampling 时，同一 trace 的 span 必须落同一 sampler shard。
+
+### 20.3 横向扩容
+
+- 无 tail sampling：普通无状态 Gateway 可横扩。
+- 有 tail sampling：前置 trace-aware router，后置 sampler shard。
+- shard 变更须有 drain/overlap/decision cache 策略。
+- late span 明记，不能静默开第二次相反决定。
+- HPA 不只看 CPU，还看 ingress rate、queue depth、decision latency 与 dropped traces。
+
+### 20.4 租户隔离
+
+- 每 tenant 独立 token/证书、速率、并发、队列与日配额。
+- 资源属性强制覆盖服务端 tenant，不信客户端自报。
+- 单 tenant 洪峰不能吃光全局 tail buffer。
+- 大 trace、大 log、大 cardinality 有硬帽。
+- 拒绝要回稳定错误码与 retryability。
+
+### 20.5 是否要 Kafka/消息总线
+
+第一版单集群、小流量可不加。满足以下任一，再引入：
+
+- Gateway 与后端故障域须彻底解耦。
+- 峰谷差超内存/本地持久队列承受。
+- 多下游需要可重放 fanout。
+- 合规要求云端 durable ingress。
+
+不能为了“高并发架构”先堆 Kafka。先拿负载模型与压测说话。
+
+### 20.6 容量模型
+
+至少估四个量：
+
+```text
+events_per_second
+bytes_per_second before/after compression
+active_traces * spans_per_trace * decision_wait
+tenant_count * series_cardinality
+```
+
+尾采样内存近似：
+
+```text
+active_trace_memory
+  ~= new_traces_per_sec
+   * decision_wait_sec
+   * avg_trace_bytes
+   * overhead_factor
+```
+
+这只是预算式。最终看真实 heap、GC/allocator、late span 与策略耗时。
+
+## 二十一、端云策略
+
+### 21.1 策略合同
+
+```json
+{
+  "schema": "lubancode.telemetry.policy",
+  "version": 1,
+  "policy_id": "pol-...",
+  "generation": 18,
+  "issued_at": "...",
+  "not_before": "...",
+  "expires_at": "...",
+  "tenant_id": "...",
+  "device_selector": {"group": "dev"},
+  "sampling": {
+    "normal_ratio": 0.05,
+    "error_ratio": 1.0,
+    "force_rules": []
+  },
+  "diagnostic_windows": [],
+  "rate_limits": {
+    "events_per_sec": 500,
+    "bytes_per_minute": 10485760
+  },
+  "export": {
+    "paused": false
+  },
+  "key_id": "k-2026-08",
+  "signature": "..."
+}
+```
+
+### 21.2 本地裁决
+
+应用顺序：
+
+1. schema 与未知关键字段。
+2. tenant/device selector。
+3. 签名与 key id。
+4. issued/not-before/expires。
+5. generation 单调。
+6. 本地 consent 与 data class。
+7. 本地 CPU/内存/磁盘/带宽硬帽。
+8. endpoint 与凭证 scope。
+9. 原子写 policy snapshot。
+10. 发布新 generation，旧 worker 自然排空。
+
+任一步失败，保持 last-known-good。若它也过期，回本地静态策略，不无限沿用远端放宽项。
+
+### 21.3 云端能做什么
+
+- 调低/调高本地许可范围内的采样率。
+- 指定错误码、插件 id、provider 类别的临时诊断窗。
+- 暂停出口。
+- 调低速率与批量。
+- 请求一次本地 health snapshot。
+
+### 21.4 云端不能做什么
+
+- 开启本地原本关闭的 Telemetry。
+- 把 metadata 升到 content。
+- 改 endpoint 到未 consent 的域名。
+- 调工具、发 prompt、开 turn。
+- 改权限、模式、工作区或 Git。
+- 安装、升级、启停普通 Package/Plugin。
+- 读取 secret。
+- 删除 Trajectory。
+
+### 21.5 回执
+
+```json
+{
+  "policy_id": "pol-...",
+  "generation": 18,
+  "status": "applied|rejected|expired|rolled_back",
+  "reason_code": "...",
+  "effective_sampling": {},
+  "effective_limits": {},
+  "applied_at": "..."
+}
+```
+
+回执也只发元数据。拒绝理由不能泄漏本地路径或 secret。
+
+## 二十二、故障排查与治理闭环
+
+### 22.1 五步闭环
+
+```text
+Detect -> Correlate -> Diagnose -> Govern -> Verify
+```
+
+### 22.2 Provider 故障
+
+检测：429/5xx/timeout/TLS/DNS、重试率、P95/P99、first output。
+
+关联：provider、model、wire、版本、endpoint 别名、设备组。
+
+治理：
+
+- 本地已有 retry/backoff 继续作执行真值。
+- 云端只可建议/下发采样与出口策略。
+- provider 熔断若要做，另属 runtime 治理合同，不塞 telemetry policy。
+
+验证：重试率、成功率、延迟恢复；coverage 与样本率同屏。
+
+### 22.3 插件/MCP 故障
+
+检测：启动失败、握手错、超时、非零退出、协议坏帧、输出超帽、取消不收口。
+
+诊断窗：只提高指定组件 metadata/error log 采样；stderr 另需 D2 consent。
+
+治理：Connector 可自我重启；普通工具插件自动隔离/禁用须走 Package/Runtime 另案，不由云端遥测直接办。
+
+### 22.4 队列与背压
+
+检测：queue utilization、dropped、coalesced、projector lag、spool oldest age。
+
+治理顺序：
+
+1. 加强聚合。
+2. 降普通采样。
+3. 缩短/暂停 D2 诊断窗。
+4. 降低 exporter 并发或批量，视下游错误而定。
+5. 暂停出口，保本地有限 spool。
+
+### 22.5 Trajectory 故障
+
+Trajectory 写坏时，业务已有副作用栅栏与降级规则。Telemetry 只能报它，不能越过它另造成功事实。
+
+Projector 遇坏链：
+
+- 停该 stream。
+- 记 `source_corrupt`。
+- 不跳过坏行接着猜。
+- 其他 session/stream 可继续。
+- `/doctor telemetry` 给本地修复建议。
+
+### 22.6 治理效果
+
+任何“治理成功”都要有前后窗与 coverage：
+
+- 变更前后错误率。
+- 样本量。
+- 采样率。
+- 设备覆盖。
+- 版本覆盖。
+- 是否有别的发布/配置同时变化。
+
+不能把相关性写成因果。
+
+## 二十三、TelemetryConnector 插件
+
+### 23.1 何时需要
+
+内置 OTLP + Collector 能接住大多数场景。只有以下情况才加 Connector：
+
+- 厂商只收私有协议。
+- 企业已有本地 Agent，需要私有 IPC。
+- 需特殊签名、压缩或硬件密钥。
+- 离线设备要接专用搬运链。
+
+### 23.2 生命周期
+
+`TelemetryConnector` 是常驻 sidecar：
+
+```text
+discover -> validate -> trust -> stage -> handshake -> ready
+        -> batch/ack/health -> drain -> stop
+```
+
+它不注册模型可见工具名，也不进 tool table。
+
+### 23.3 传输
+
+首版只选一种本地 IPC：
+
+- Windows named pipe。
+- POSIX Unix domain socket。
+
+stdio 可作测试传输，但长期常驻的双向 framed 协议须有独立读写线程、心跳与进程监督，不能复用“一问一答”的 Process Plugin executor。
+
+### 23.4 握手
+
+```json
+{
+  "type": "hello",
+  "protocol": "lubancode.telemetry.connector",
+  "version": 1,
+  "connector_id": "vendor-x",
+  "signals": ["traces", "metrics", "logs"],
+  "encodings": ["otlp-http-json", "otlp-protobuf"],
+  "max_batch_bytes": 1048576,
+  "supports_ack": true,
+  "supports_health": true
+}
+```
+
+宿主回 effective limits、data class 与 generation。版本不合，整件 unavailable，不猜兼容。
+
+### 23.5 批次与 ACK
+
+```json
+{
+  "type": "batch",
+  "batch_id": "...",
+  "signal": "traces",
+  "encoding": "otlp-http-json",
+  "data_class": "metadata",
+  "payload_bytes": 12345,
+  "payload": {}
+}
+```
+
+```json
+{
+  "type": "ack",
+  "batch_id": "...",
+  "status": "accepted|retryable|rejected",
+  "reason_code": "...",
+  "retry_after_ms": 0
+}
+```
+
+- ACK 只表示 Connector 接手。是否表示后端 durable，要在 capability 中明写。
+- 重复 batch id 必须幂等。
+- Connector 不得改 batch 内容再回写 LubanCode。
+
+### 23.6 健康与重启
+
+- 心跳有周期与超时。
+- 进程退出分型。
+- 指数退避重启，有次数/时间帽。
+- 连续 crash 进入 quarantined，不无限拉起。
+- Connector 挂了，内置 spool 留批次；Agent 不受牵连。
+- stop 先 drain 有限时间，再杀进程树。
+
+### 23.7 Package 合同
+
+建议目录：
+
+```text
+package-root/
+  package.yaml
+  telemetry-connectors/
+    vendor-x/
+      connector.json
+      bin/...
+```
+
+`connector.json` 至少含：
+
+- id、version、entry、args。
+- protocol version。
+- supported signals/encodings。
+- required secret refs。
+- network destinations。
+- CPU/内存/批次/并发帽。
+- data classes。
+
+Package 只负责发现、信任、事务挂载与快照。普通启动在 Telemetry 关闭时连 Connector manifest 都不执行，更不启动进程。
+
+### 23.8 Lua 的位置
+
+Lua 可做：
+
+- 属性 rename/drop。
+- 有界枚举映射。
+- 厂商字段拼装。
+- 小批次确定性过滤。
+
+Lua 不可做：
+
+- 无限常驻网络循环。
+- 自管 durable queue。
+- 读取任意环境变量。
+- 看 redaction 前正文。
+- 改 batch id、trace id 与 span parent。
+- 静默吞 critical 事件。
+
+Lua 脚本要有 CPU 指令/墙钟/内存帽。超帽则该 processor generation 失败，回 last-known-good。
+
+## 二十四、配置与命令
+
+### 24.1 配置草案
+
+```json
+{
+  "features": {
+    "trajectory": true,
+    "telemetry": false
+  },
+  "telemetry": {
+    "data_class": "metadata",
+    "system_metrics": false,
+    "exporter": {
+      "kind": "otlp-http-json",
+      "endpoint": "http://127.0.0.1:4318",
+      "secret_ref": null,
+      "compression": "none",
+      "timeout_ms": 10000
+    },
+    "queue": {
+      "capacity_items": 8192,
+      "capacity_bytes": 16777216
+    },
+    "spool": {
+      "enabled": true,
+      "max_bytes": 268435456,
+      "max_age_hours": 48
+    },
+    "sampling": {
+      "normal_ratio": 0.1,
+      "error_ratio": 1.0
+    },
+    "remote_policy": {
+      "enabled": false,
+      "endpoint": "",
+      "trusted_key_ids": []
+    }
+  }
+}
+```
+
+字段默认值必须在 `config.hpp` 有一处 canonical 定义。global/project 合并与来源账沿现有 Config 路走。
+
+### 24.2 命令
+
+```text
+/telemetry
+/telemetry status
+/telemetry enable
+/telemetry disable
+/telemetry pause
+/telemetry resume
+/telemetry flush
+/telemetry spool
+/telemetry consent
+/telemetry policy
+/doctor telemetry
+```
+
+行为：
+
+- 裸 `/telemetry` 只显示状态，不改变配置。
+- `enable` 只开当前进程还是改配置，必须让用户明确选，不能暗改项目文件。
+- `disable` 立即停采停发，旧 spool 留着。
+- `pause` 停出口，可继续按本地策略有限落 spool。
+- `flush` 只尝试发送 sealed segment；不强制等公网无限久。
+- `spool clear` 是删除动作，先列路径、字节、批次数与不可恢复性，再确认。
+- `/doctor telemetry` 默认不联网；`--probe` 才对明配 endpoint 发无业务数据的探针。
+
+### 24.3 状态输出
+
+至少显示：
+
+- enabled/effective source。
+- trajectory dependency 与 coverage。
+- data class、consent、redactor version。
+- exporter endpoint（去 query/userinfo）。
+- queue size/capacity/dropped。
+- spool bytes/segments/oldest。
+- projector lag。
+- last export success/error。
+- remote policy generation/expiry/status。
+- Connector 状态与 restart count。
+
+## 二十五、建议源码边界
+
+### 25.1 新目录
+
+```text
+src/telemetry/
+  activation.hpp/.cpp
+  contract.hpp/.cpp
+  identity.hpp/.cpp
+  projector.hpp/.cpp
+  redactor.hpp/.cpp
+  sampler.hpp/.cpp
+  metrics.hpp/.cpp
+  runtime_metrics.hpp/.cpp
+  batch_queue.hpp/.cpp
+  spool.hpp/.cpp
+  otlp_json.hpp/.cpp
+  exporter.hpp/.cpp
+  policy.hpp/.cpp
+  service.hpp/.cpp
+  connector_contract.hpp/.cpp
+  connector_runtime.hpp/.cpp
+```
+
+### 25.2 依赖方向
+
+```text
+trajectory -> 不依赖 telemetry
+runtime    -> 只认 TelemetryWake/RuntimeMetricSink 窄口
+telemetry  -> 可读 trajectory 合同与 platform 抽象
+app        -> 装配 TelemetryService、命令与 consent
+package    -> 后期只产 Connector mount plan
+```
+
+禁止：
+
+- `trajectory/recorder.cpp` include exporter。
+- provider client include 云端 SDK。
+- Connector include Agent Loop。
+- telemetry 回写 Trajectory 业务事件。
+
+### 25.3 窄接口草案
+
+```cpp
+namespace lubancode::telemetry {
+
+struct CommitWake {
+    std::string workspace_key;
+    std::string session_id;
+    std::string stream_id;
+};
+
+class CommitObserver {
+public:
+    virtual ~CommitObserver() = default;
+    virtual void Notify(const CommitWake& wake) noexcept = 0;
+};
+
+class RuntimeMetricSink {
+public:
+    virtual ~RuntimeMetricSink() = default;
+    virtual void Record(RuntimeMetricPoint point) noexcept = 0;
+};
+
+class Exporter {
+public:
+    virtual ~Exporter() = default;
+    virtual ExportReceipt Export(const SealedBatch& batch,
+                                 const std::atomic<bool>* cancel) = 0;
+};
+
+}  // namespace lubancode::telemetry
+```
+
+`Notify()` 必须 noexcept、非阻塞、只投 wake。投不进去只加原子 missed-wake counter，Projector 后续扫描补账。
+
+### 25.4 Recorder 怎样接 wake
+
+两种路评审后二选一：
+
+1. `TrajectorySessionLedger` 在 receipt committed 后通知。改动小，知道 session/stream。
+2. `JournalWriter` 之上加 observer。覆盖全，但容易污染纯 trajectory 层。
+
+推荐第一种。Trajectory 纯库不认 Telemetry，runtime 装配层负责 wake。
+
+### 25.5 平台指标
+
+`src/platform/` 新增窄口：
+
+```text
+process_metrics.hpp/.cpp
+```
+
+Windows 用 Win32 process counters；POSIX 用 `getrusage`、`/proc` 或平台 API。拿不到便 `unsupported`，不返回 0 冒充。
+
+## 二十六、生命周期
+
+### 26.1 启动
+
+```text
+parse config
+ -> ResolveTelemetryActivation
+ -> if disabled: return Disabled, no allocations with side effects
+ -> load consent
+ -> validate endpoint/secret refs
+ -> load last-known-good remote policy
+ -> open spool and recover
+ -> load cursors
+ -> start projector
+ -> start metrics sampler optional
+ -> start exporter/connector
+ -> Ready
+```
+
+开启失败时，不得让普通 Agent 启动失败，除非用户选了 `telemetry.required=true` 的 CI/合规模式。
+
+默认模式下报 degraded，Telemetry 不工作，Agent 继续。
+
+### 26.2 运行
+
+- config/policy generation 不可变快照。
+- 每批钉住生成时的 projector/redactor/sampler generation。
+- endpoint 切换先 seal 旧 segment；旧段仍发旧 endpoint，除非用户明确迁移。
+- consent 降级立即停止产生高档数据；旧高档 spool 不自动发到新策略下。
+
+### 26.3 关闭
+
+```text
+stop accepting wakes
+ -> stop runtime sampler
+ -> projector catch-up to bounded deadline
+ -> seal active spool
+ -> exporter bounded drain optional
+ -> persist cursor/state
+ -> stop connector/process tree
+ -> close handles
+```
+
+普通退出不等待公网无限重试。`--telemetry-flush-timeout` 有硬上限。
+
+### 26.4 disable
+
+- 立即停采样与新导出。
+- 正在传输的请求发取消。
+- seal/close 当前 spool，保留未 ACK 段。
+- 远端策略不再轮询。
+- Connector drain 后停止。
+- 下次 enable 由用户选择 `resume|discard|inspect`。
+
+### 26.5 clear/resume/worktree
+
+- session clear：旧 trace 封口，新 session 新 trace。
+- resume-as-new：新 trace + link。
+- worktree 切换：resource workspace key 随 session snapshot，不在一条 trace 中途偷换。
+- cwd 改变：作 span event/attribute generation，不把绝对路径上传。
+
+## 二十七、版本与兼容
+
+### 27.1 四种版本
+
+- Trajectory schema version。
+- Telemetry projection schema version。
+- OTLP spec/encoding version。
+- Connector protocol version。
+
+四者分开。不能拿 LubanCode 版本替代合同版本。
+
+### 27.2 Projector 升级
+
+- 纯增字段且兼容：同 generation 可继续，但 batch 记新 projector version。
+- span 边界/ID 变化：开新 projection generation。
+- 旧 Journal reader 不支持：明拒并报 coverage gap。
+- 不原地改旧 spool payload。
+
+### 27.3 OTel 语义约定
+
+GenAI semantic conventions 仍在演进。外部标准字段与 Luban 自有字段分开：
+
+```text
+gen_ai.*                 跟官方稳定/实验约定
+lubancode.*              Luban 自有领域字段
+```
+
+实验字段须记 stability，升级时保兼容映射或 schema generation。
+
+## 二十八、安全威胁模型
+
+### 28.1 威胁
+
+- prompt、代码、路径、用户名与 secret 被误发。
+- 恶意 tool/plugin 把 secret 塞进错误文本。
+- endpoint 被配置劫持。
+- 远端策略伪造或回滚攻击。
+- Connector 窃取批次/凭证或无限耗资源。
+- spool 被本机别的用户读取或篡改。
+- trace id 被第三方拿来跨服务关联用户。
+- metrics label 爆炸拖垮端云。
+- 云端 tenant spoofing。
+
+### 28.2 防线
+
+- allowlist-first redaction。
+- endpoint consent + allowlist。
+- SecretRef 与最小凭证 scope。
+- 策略签名、代数单调、期限与 last-known-good。
+- Connector trust、最小环境、进程树、CPU/内存/IO/网络帽。
+- spool 用户私有权限；企业版可选静态加密。
+- device id 随安装/组织 scope，支持 rotate。
+- cardinality limiter。
+- Gateway 覆盖 tenant identity，不信 payload。
+- fuzz OTLP、policy、connector frame 与坏 spool。
+
+### 28.3 数据保留
+
+- 端上 spool TTL 与最大字节双限。
+- 云端按 signal/data class 分保留期。
+- 用户可查本地 pending 数据摘要。
+- 删除本地 spool 是显式动作。
+- 删除云端数据需后端能力与审计，不在 LubanCode 假装办成。
+
+## 二十九、测试矩阵
+
+### 29.1 Contract
+
+- [ ] Telemetry event/span/metric/log schema golden。
+- [ ] OTLP/HTTP JSON 对照官方 proto JSON 规则。
+- [ ] trace/span id 长度、全零、稳定重建。
+- [ ] Resource attribute allowlist 与 cardinality。
+- [ ] Policy schema、未知关键字段、签名与 generation。
+- [ ] Connector hello/batch/ack/health 全合同。
+
+### 29.2 默认关闭
+
+- [ ] 默认 config `features_telemetry == false`。
+- [ ] env 1/0 压配置；disable 总闸压全部。
+- [ ] 关闭时不建目录、不起线程、不解析 Connector executable。
+- [ ] 关闭时 mock DNS/socket 无调用。
+- [ ] 旧 spool 不补传、不删除。
+- [ ] `/doctor telemetry` 无 `--probe` 不联网。
+
+### 29.3 Projector
+
+- [ ] v1/v2 golden Journal 投出稳定 span 树。
+- [ ] model success/fail/cancel/late usage。
+- [ ] tool planned/start/finish/fail/cancel/unknown/result committed。
+- [ ] approval、compact、verification、outcome。
+- [ ] subagent 父子与 terminal link。
+- [ ] clear、resume-as-new、crash recovery。
+- [ ] wake 丢失后 cursor catch-up。
+- [ ] cursor/hash 不合明拒。
+- [ ] 多 stream 并行，单 stream 顺序不乱。
+
+### 29.4 脱敏
+
+- [ ] Authorization/Cookie/API key/JWT/PEM。
+- [ ] Windows/POSIX 路径、用户名、HOME。
+- [ ] URL query/userinfo。
+- [ ] tool input/output 与 provider 错误夹 secret。
+- [ ] Unicode、坏 UTF-8、超长字段、嵌套 JSON。
+- [ ] D1 永不出现正文。
+- [ ] D2 只在 consent + window + scope 三门全开时出现。
+- [ ] 诊断窗过期立停。
+
+### 29.5 Queue/Spool
+
+- [ ] priority、coalesce、drop 规则。
+- [ ] 满队列不阻塞 Agent 线程。
+- [ ] active segment 半写恢复。
+- [ ] seal/rename/flush 故障。
+- [ ] 磁盘满、只读、权限错、路径被占。
+- [ ] TTL 与 max bytes 清理。
+- [ ] cursor 只在 durable spool 后推进。
+- [ ] duplicate batch 与 ACK 幂等。
+- [ ] quarantine 不无限增长。
+
+### 29.6 Exporter
+
+- [ ] 200 success。
+- [ ] 400/401/403 永久错。
+- [ ] 408/429/5xx/网络错重试。
+- [ ] Retry-After、指数退避、jitter。
+- [ ] timeout/cancel/TLS/DNS/proxy。
+- [ ] partial success。
+- [ ] 响应头/体超帽。
+- [ ] endpoint 变更与旧 segment 归属。
+- [ ] 进程关闭有界，不吊死。
+
+### 29.7 Remote Policy
+
+- [ ] 合法签名应用。
+- [ ] 坏签名、未知 key、过期、未来 not-before。
+- [ ] replay/降 generation。
+- [ ] 越本地 data class、速率、磁盘上限被拒。
+- [ ] endpoint 劫持被拒。
+- [ ] last-known-good 回滚。
+- [ ] 配置热切时在途 batch 钉老 generation。
+
+### 29.8 Connector
+
+- [ ] trust 前不执行。
+- [ ] Telemetry 关闭时零进程。
+- [ ] 握手成功/版本不合/能力缺失。
+- [ ] ACK success/retry/reject/duplicate。
+- [ ] 心跳丢失、进程崩溃、退避与 quarantine。
+- [ ] stdout/stderr/内存/CPU/网络帽。
+- [ ] stop/drain/kill process tree。
+- [ ] Connector 看不到 redaction 前数据与无关 secret。
+
+### 29.9 Gateway
+
+- [ ] tenant auth 与 spoof 覆盖。
+- [ ] trace-aware routing。
+- [ ] tail sampling 同 trace 同 shard。
+- [ ] late span、shard 扩缩与 decision cache。
+- [ ] 单 tenant 洪峰隔离。
+- [ ] oversized trace/log/cardinality attack。
+- [ ] backend outage、queue full、重启恢复。
+- [ ] 多后端 fanout 部分失败。
+
+### 29.10 跨平台
+
+- [ ] Windows x64/arm64：线程、handle、named pipe、路径与 FlushFileBuffers。
+- [ ] Linux x64/arm64：FD、UDS、fsync、signal/process group。
+- [ ] macOS arm64/x64：process metrics、UDS、fsync、sandbox 差异。
+- [ ] 不支持的系统指标回 `unsupported`，不写 0。
+
+## 三十、性能与容量验收
+
+### 30.1 必测场景
+
+1. Telemetry off 基线。
+2. Trajectory on、Telemetry off。
+3. D1 metadata，Collector 正常。
+4. D1 metadata，断网 10 分钟。
+5. D1 metadata，Gateway 429/5xx。
+6. D2 指定插件诊断窗。
+7. 100/1k/10k 并发 session 的合成 Gateway ingress。
+8. 大量短 turn、大量 tool batch、深子 Agent。
+9. spool 接近满盘。
+10. tail sampling 高 active trace 与 late span。
+
+### 30.2 端侧指标
+
+- 安装体积增量。
+- 冷启动增量。
+- idle CPU 与内存。
+- 一轮首输出增量。
+- Agent turn 总时延增量。
+- 每事件投影 CPU/分配/字节。
+- queue/spool/export 吞吐。
+- P50/P95/P99 投影 lag。
+- 断网时内存与磁盘增长曲线。
+- disable/exit 收场时延。
+
+### 30.3 云端指标
+
+- events/s、bytes/s。
+- 每 Gateway CPU、内存、连接、queue。
+- trace routing skew。
+- tail sampling decision latency。
+- early drop/late span 比例。
+- backend 写入 P95/P99。
+- tenant noisy-neighbor 影响。
+- 扩缩容时丢失、重复与决定漂移。
+
+### 30.4 初始预算，不作发布结论
+
+以下只作开工预算，必须由实测改写：
+
+- Telemetry off：相对基线零线程、零网络、零磁盘。
+- D1 idle：额外常驻内存目标低于 10 MiB。
+- D1 active：Agent turn P95 增量目标低于 2%。
+- fast wake：业务线程单次通知目标低于 10 微秒，不含 Recorder 原耗时。
+- queue 满：业务线程不得等远端。
+- disable：1 秒内停新采；公网请求按取消/grace 有界收场。
+
+未测前一律写“目标”，不得写“达到”。
+
+## 三十一、实施分期
+
+### 阶段 T0：合同与离线投影
+
+- [ ] 冻结 `features.telemetry`、Activation 与默认关闭测试。
+- [ ] 冻结 trace/span/resource/data class 合同。
+- [ ] 建 `src/telemetry/contract.*`、`identity.*`。
+- [ ] 写纯 `TelemetryProjector`，只吃 golden Journal。
+- [ ] 产本地 OTLP JSON fixture，不联网。
+- [ ] 写 Redactor D1 allowlist 与泄漏测试。
+
+验收：同一 Journal 重放两次，OTel ids/span tree/metrics 完全稳定；D1 fixture 无正文与路径。
+
+### 阶段 T1：本地 Service 与 Spool
+
+- [ ] `TelemetryService` 生命周期。
+- [ ] runtime committed wake 窄口。
+- [ ] cursor 与 catch-up。
+- [ ] bounded queue、优先级与 drop 账。
+- [ ] segmented spool、crash recovery、容量/TTL。
+- [ ] `/telemetry status`、`/doctor telemetry` 本地面。
+
+验收：丢 wake、杀进程、截 active segment、填满磁盘，Agent 仍能运行；投影可补账或明确 quarantine。
+
+### 阶段 T2：OTLP/HTTP 与本地 Collector
+
+- [ ] 严格 OTLP/HTTP JSON encoder。
+- [ ] cpr/libcurl exporter。
+- [ ] retry/partial success/ACK 语义。
+- [ ] consent、SecretRef、TLS 与回环/公网分界。
+- [ ] docker/local Collector 示例。
+- [ ] 一条真实 Agent trace 在开源后端可查。
+
+验收：断网、429、5xx、Collector 重启后补送；重复 batch 可识别；业务线程不等网络。
+
+### 阶段 T3：系统指标与全链路补点
+
+- [ ] RuntimeMetricsSampler 跨平台。
+- [ ] provider HTTP/SSE timing。
+- [ ] Process Plugin、Lua HTTP、MCP span。
+- [ ] App Server outbox 与 Channel ingress/delivery 指标。
+- [ ] first output、approval wait、projector lag。
+- [ ] cardinality guard。
+
+验收：从输入到模型、工具、外部 IO、结果与回发可沿一条 trace 查看；unsupported 指标不冒零。
+
+### 阶段 T4：Gateway 与治理
+
+- [ ] tenant auth/quota。
+- [ ] trace-aware routing 与 tail sampling。
+- [ ] SLO/alert 基线。
+- [ ] signed remote policy、回执与 last-known-good。
+- [ ] 故障注入与前后窗治理报告。
+
+验收：同 trace 同 shard；单 tenant 洪峰隔离；坏策略不生效；云端不能越本地 data class。
+
+### 阶段 T5：TelemetryConnector
+
+- [ ] Connector manifest 与 Package inventory/mount plan。
+- [ ] IPC/framing/hello/batch/ack/health。
+- [ ] supervision、restart、quarantine、drain。
+- [ ] 最小凭证与网络权限。
+- [ ] 假 Connector E2E。
+- [ ] 一家真实私有后端适配验证。
+
+验收：Telemetry 关闭零 sidecar；Connector 崩溃不伤 Agent；重启后不丢 durable batch，重复可去重。
+
+### 阶段 T6：容量与发布
+
+- [ ] Windows/Linux/macOS 性能矩阵。
+- [ ] 端侧 30/60/180 分钟稳定性。
+- [ ] Gateway 负载、扩缩与后端故障。
+- [ ] 隐私审计、模糊测试、依赖/SBOM。
+- [ ] 文档、迁移、回滚、运维手册。
+- [ ] 决定是否从 internal preview 升 beta；仍不默认开启。
+
+## 三十二、发布门
+
+只有下列各项全过，才可说“LubanCode 支持端云协同可观测”：
+
+| 门 | 必须证明 |
+|---|---|
+| 默认关闭 | 零线程、零端口、零出站、零 spool、零 sidecar |
+| 单一真账 | Telemetry 可删重建，不回写、不改写 Trajectory |
+| 全链路身份 | session/run/turn/request/call 与 trace/span 可双向定位 |
+| 可靠性 | 断网、重启、429/5xx、满盘有明确恢复/降级 |
+| 隐私 | D1 无正文、路径、secret；公网 consent 生效 |
+| 背压 | 队列全有界，云端慢不堵 Agent |
+| 高并发 | 有端侧开销与 Gateway 容量曲线，不靠语言推断 |
+| 尾采样 | 同 trace 同 shard，late span 与扩缩容有账 |
+| 端云策略 | 签名、过期、回滚、本地裁决、越权拒绝 |
+| 插件 | Connector 独立常驻合同，关闭时零进程 |
+| 跨平台 | 三平台真实测试，不支持项明写 |
+| 治理 | 故障发现、诊断、动作、验证与 coverage 完整 |
+
+措辞分三档：
+
+- T0-T1：可说“已有本地可重建观测投影原型”。
+- T2-T3：可说“已打通 OTLP 与单机全链路观测”。
+- T4-T6 全过：才可说“具备端云协同、可扩展与治理闭环”。
+
+“高并发支撑”必须附机器、配置、负载模型、P95/P99、丢弃率与资源曲线。
+
+## 三十三、风险与待拍板
+
+### 33.1 第一版是否强依赖 Trajectory
+
+建议：强依赖。先做 `trajectory=true && telemetry=true` 完整路。
+
+理由：
+
+- 事实来源干净。
+- crash 后能补。
+- 不必让 ServerEvent 再长成第二本业务账。
+
+代价：Trajectory 尚默认关闭，Telemetry 试用门高。等完整路稳定，再评估 partial live 模式。
+
+### 33.2 自写 OTLP JSON 还是接 OTel C++ SDK
+
+须做小型 spike，对比：
+
+- 二进制与安装增量。
+- 编译时长与跨平台依赖。
+- OTLP 规范正确性。
+- traces/metrics/logs 覆盖。
+- 批量、重试与 resource 管理。
+- 内存与 CPU。
+
+若 SDK 增量可接受，优先用成熟 SDK。若过重，可保留 Luban 领域 projector，自写窄 exporter。无论哪条路，上层合同不变。
+
+### 33.3 Spool 放端上还是全交 Collector
+
+建议：
+
+- 回环 Collector 且用户信任其持久队列时，可把 Luban spool 设小或关闭。
+- 直连云端时，Luban spool 默认开。
+- 两级持久队列同时开要防放大、重复与磁盘双占。
+
+### 33.4 是否上传 workspace key
+
+现有 workspace key 已是本地身份，但仍可能稳定关联。云端可再以 tenant-scoped HMAC 派生 `cloud_workspace_id`，不直接发送本地值。此项须隐私评审拍板。
+
+### 33.5 内容诊断
+
+首版不做 D3。D2 只收选定错误与 stderr 短段。先把 metadata 做准，莫拿“排障需要”开一扇永久大门。
+
+### 33.6 云端治理边界
+
+Telemetry policy 只管观测。Provider 熔断、插件隔离、自动回滚属于运行时治理。它们可以吃 Telemetry 告警，却须另有本地权限、状态机与审计合同。
+
+## 三十四、最终检查单
+
+### 合同
+
+- [ ] Trajectory 唯一真账未破。
+- [ ] Telemetry 是纯投影与系统采样。
+- [ ] trace/span/Luban ids 分层清楚。
+- [ ] OTLP、policy、Connector 各有独立版本。
+
+### 默认关闭
+
+- [ ] 配置默认 false。
+- [ ] 关闭零线程、零网络、零目录、零 sidecar。
+- [ ] 云端不能远程打开。
+- [ ] 旧 spool 关闭时不动。
+
+### 轻量
+
+- [ ] wake 非阻塞。
+- [ ] queue、spool、retry、batch 全有帽。
+- [ ] delta 只聚合。
+- [ ] 端侧开销有实测。
+
+### 全链路
+
+- [ ] input/session/turn/model/tool/plugin/MCP/subagent/IO/result/delivery 可关联。
+- [ ] start/terminal/error/duration 齐。
+- [ ] retry/unknown/late span 不冒 success。
+- [ ] Logs、Metrics 与 Trace 共享 context。
+
+### 端云
+
+- [ ] Collector/Gateway 分层。
+- [ ] tenant + trace 粘性路由。
+- [ ] signed policy 与本地裁决。
+- [ ] 治理前后有 coverage 与验证。
+
+### 插件
+
+- [ ] 不复用短命 Process Plugin 冒充常驻。
+- [ ] 不复用 MCP 冒充事件总线。
+- [ ] Connector 只见 redaction 后批次。
+- [ ] trust、凭证、网络、资源、崩溃与 drain 全有界。
+
+### 安全
+
+- [ ] allowlist-first。
+- [ ] D1 不含正文、路径、secret。
+- [ ] endpoint consent 与 TLS。
+- [ ] policy 防伪、防重放、防越权。
+- [ ] spool 权限、TTL、清理与 quarantine 有账。
+
+### 发布
+
+- [ ] 单元、集成、E2E、故障注入、模糊测试齐。
+- [ ] Windows/Linux/macOS 过门。
+- [ ] 高并发结论附实测环境与曲线。
+- [ ] 默认仍关闭。
+
+## 三十五、收口
+
+LubanCode 最值钱的不是“又能发一份日志”。
+
+它已有 Agent 运行时、统一事件、工具栅栏、子 Agent、插件、MCP、进程与 Trajectory。只要守住单一真账，再从账边拉出一条有界、异步、可重建的 Telemetry 支流，端上便能采得轻，云上也能看得全。
+
+Core 拆出来后，这条观测合同还能跟着 CLI、App Server、Gateway 与嵌入式宿主一道走。C++ 能把常驻开销、队列、文件、进程和跨平台边界攥在手里。可高并发仍要靠分片、批量、背压、采样、租户隔离与实测，不靠一句“原生性能好”。
+
+最后仍是那句：
+
+```text
+Trajectory 是黑匣子。
+Telemetry 是仪表盘。
+Collector 是驿站。
+云端是总控台。
+```
+
+四家各守门户，水路才不会乱。
