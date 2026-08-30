@@ -469,6 +469,17 @@ add_library(lubancode_engine STATIC
   src/cli/theme.cpp
   src/cli/worktree.cpp
   src/cli/line_editor.cpp
+  # P0 新轨迹记录单(P0-1 核心半场):trajectory 事实仓底座——事件合同、
+  # schema 强校验、canonical JSON、内容寻址 blob、journal/hash chain、
+  # 单写者 recorder 与目录制。纯库,不 include app/cli/runtime;依赖方向
+  # 见 todos/P0新轨迹记录_可重放与训练投影设计.todo §十八。
+  src/trajectory/event.cpp
+  src/trajectory/canonical_json.cpp
+  src/trajectory/schema.cpp
+  src/trajectory/blob_store.cpp
+  src/trajectory/journal.cpp
+  src/trajectory/recorder.cpp
+  src/trajectory/directory.cpp
 )
 target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
