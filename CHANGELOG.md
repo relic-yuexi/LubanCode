@@ -307,6 +307,12 @@
 - **公网探针过确认门。** /doctor cache probe 对公网端点先亮牌——发几轮、每轮上限、目标端点,答 y 才发;回环与明配 metrics_url 照旧直发。多组分型五档判词:稳定命中/固定阈值命中(如恒 1024)/间歇 miss/完全未见命中,证据边界如实写。
 - 顺手修 CI:POSIX 册 Register 调用补 cwd 参(0.26.112 添参时 #ifndef _WIN32 段没跟上,MSVC 编不到)。
 
+## [v0.26.118] - 2026-08-30
+
+- **轨迹事实仓打了地基(P0-1a)。** 新 `src/trajectory/` 模块七件:EventEnvelope 全字段与 67 种事件强类型(每 kind 钉死 plane 与三档 id 要求)、schema 强校验、CanonicalJsonDump(key 递归字节序排序,跨 Windows/Linux 字节一致,Grisu2 浮点)、内容寻址 BlobStore(临时→hash→fsync→原子 rename)、Journal(SHA256 hash chain、durability 三档、终态封口)、Recorder(单锁串行,18 条状态机硬约束提交时即时检查,违例回稳定错误码)、workspace/session 目录制。
+- **golden fixture 钉死字节。** 19 枚合成全流固化为 v1 golden:新写字节逐字一致、同流两遍录制整本同 hash、旧读 round-trip 过;截断尾行 verify 明报、前面事件照常可数。37 册单测把 18 条约束各钉一案(含审批 deny 后拒、queue 双终态拒、session.ended 后拒写)。
+- 这是 P0 轨迹工程的第一批(合同与最小仓);后续 SessionManager 换账、运行时单写口接线、replay/resume、训练导出依序接上。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
