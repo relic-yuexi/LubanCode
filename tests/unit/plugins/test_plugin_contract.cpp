@@ -128,9 +128,12 @@ TEST_CASE("ResolvePluginSelfTest: runner.py(不带 test_)不算自测入口") {
 TEST_CASE("ResolvePluginSelfTest: embedded-lua 插件一律无自测入口") {
     TempDir dir;
     std::ofstream(dir.path / "test_runner.py", std::ios::binary) << "# t\n";
+    // manifest-backed Lua 走 v2 合同(v1 写 embedded-lua 已明拒,见
+    // test_plugin_manifest_v2.cpp)。
+    std::ofstream(dir.path / "probe.lua", std::ios::binary) << "return {}\n";
     const std::string lua_manifest = R"json({
-  "manifest_version": 1, "id": "lua-probe", "version": "1.0.0",
-  "runtime": {"kind": "embedded-lua"},
+  "manifest_version": 2, "id": "lua-probe", "version": "1.0.0",
+  "runtime": {"kind": "embedded-lua", "entry": "probe.lua"},
   "tools": [{"name": "echo", "description": "d", "input_schema": {"type": "object"}}]
 })json";
     auto manifest = ParsePluginManifest(lua_manifest, dir.path);
@@ -208,9 +211,9 @@ TEST_CASE("坏 JSON / 坏形状 / 版本不合各拒其名") {
     auto r2 = ParsePluginManifest("[1,2]", dir.path);
     REQUIRE_FALSE(r2.has_value());
 
-    // manifest_version 不合
+    // manifest_version 不合(v2 已是合法合同,版本墙改用 v3 钉)
     auto r3 = ParsePluginManifest(
-        R"({"manifest_version":2,"id":"a","version":"1","runtime":{"kind":"process","command":"x"},"tools":[]})",
+        R"({"manifest_version":3,"id":"a","version":"1","runtime":{"kind":"process","command":"x"},"tools":[]})",
         dir.path);
     REQUIRE_FALSE(r3.has_value());
     CHECK(r3.error().find("manifest_version") != std::string::npos);

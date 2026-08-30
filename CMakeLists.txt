@@ -525,6 +525,11 @@ add_library(lubancode_runtime STATIC
   src/runtime/plugin_tool.cpp
   # plugins 第 4 步:内嵌 Lua 进 RuntimeManager(三道软墙)。
   src/runtime/plugin_lua.cpp
+  # Lua 受控 HTTP 与 Secret 宿主能力(阶段 0+1):错误码总表、URL 规范化、
+  # transport seam 与 fake;SecretValue RAII、窄 dotenv parser、env
+  # provider、数据目录与打码器。不接真网(阶段 2)、不碰 Lua state(阶段 3)。
+  src/runtime/plugin_http.cpp
+  src/runtime/secret_resolver.cpp
   # 逐枚追踪单:canonical 工具事件的装配层分线器(持久栅栏/UI 投影/录制)。
   src/runtime/tool_trace_hub.cpp
   # /goal 持久目标单:领域类型/状态机转换表/objective 计数/序列化。
