@@ -1,0 +1,1393 @@
+# LubanCode 使用洞察、Token 账本与 Prompt 审计设计
+
+- 状态：待实现
+- 级别：P1；其中 Usage 事实入账随 Trajectory P0 一道落地
+- 日期：2026-08-30
+- 范围：本机 LubanCode 新轨迹、当前工作区与显式选择的跨工作区报告
+- 依赖：`P0新轨迹记录_可重放与训练投影设计.todo`
+- 目标：让用户看清“做了什么、哪里卡住、prompt 哪里费劲、token 花到哪儿”
+- 默认：只读本地轨迹；不常驻；不上传；不调用模型；不打开浏览器
+
+## 一、定案
+
+LubanCode 要补三件东西：
+
+```text
+/usage
+  查 token、cache、模型请求、用途与估算费用
+
+/prompt audit
+  查 prompt 组成、冲突、重复、膨胀、缓存抖动与结果信号
+
+/insights
+  汇总近期工作区、交互习惯、摩擦点、失败形状与可执行建议
+```
+
+凡牵涉运行历史，三条命令共用一份事实源：`Trajectory Journal`。`/prompt audit static` 另读当前
+Prompt 文件与来源 ledger，只审眼前配置，不冒充历史事实。
+
+```text
+Runtime facts
+  model request / output / usage / tool / verification / outcome
+                             |
+                             v
+                    Trajectory Journal
+                       canonical truth
+                             |
+             +---------------+----------------+
+             |               |                |
+             v               v                v
+        UsageProjector  PromptAuditor   SessionInsightAnalyzer
+             |               |                |
+             +---------------+----------------+
+                             |
+                             v
+                 derived JSON summaries
+                             |
+                    +--------+--------+
+                    |                 |
+                    v                 v
+              terminal view      HTML / JSON report
+```
+
+Usage、Prompt Audit、Insights 都是投影。删掉便可重算。它们无权回写 Journal，也无权
+补造事实。
+
+先由本地确定性分析器收账。用户显式加 `--model-review`，才把脱敏材料交给当前 provider，
+请模型写一层语义评议。模型评议只作建议，不改本地统计，也不替证据下结论。
+
+## 二、借鉴 Claude Code，落回 LubanCode
+
+2026-08-30 查到的 Claude Code 官方行为如下：
+
+| Claude Code | 官方口径 | LubanCode 对应设计 |
+|---|---|---|
+| `/insights` | 分析本机近期 session，写 HTML，讲项目、习惯、摩擦与建议 | `/insights`，默认只看当前 workspace；`--all-workspaces` 才跨仓 |
+| `/usage` | 看当前 session token；订阅档还能看近期归因与行为旗 | `/usage`，从 Journal 投影请求级、session 级、工作区级账 |
+| `/context` | 看当前 context 里 system、tool、memory、message 等占用 | 保留现有 `/context`，只讲“下一请求眼前装了什么” |
+| `/claude-api prompt-audit` | 审 API 项目 prompt | `/prompt audit`，同时审 LubanCode 自身 PromptAssembler 与真实运行结果 |
+
+参考链接：
+
+- https://code.claude.com/docs/en/commands
+- https://code.claude.com/docs/en/costs
+- https://code.claude.com/docs/en/debug-your-config
+
+只借产品问题，不照抄数据路。
+
+Claude Code 的 session 格式、计费系统、账号面板都不归 LubanCode 管。LubanCode 已有
+provider-neutral `api::UsageReport`、`TurnEventAdapter`、Prompt 模块树、Prompt Profile、
+ContextTracker 与 Trajectory v1。设计须沿这些边界走。
+
+## 三、先回答四个不同问题
+
+四本账容易混。先拆开。
+
+| 问题 | 命令 | 时间范围 | 事实口径 |
+|---|---|---|---|
+| 下一次请求快装满了吗 | `/context` | 当前会话、最近请求 | system/tools/messages/output reserve 的当前占用 |
+| 这一场究竟花了多少 token | `/usage session` | 当前或指定 session | provider 每次请求回报的 usage 求和 |
+| prompt 哪一层长、抖、重、打架 | `/prompt audit` | 静态文件或真实请求 | resolved prompt manifest + 运行信号 |
+| 近来怎么工作，哪里总卡 | `/insights` | 多 session | 轨迹、usage、工具、验收、结果的聚合 |
+
+`/context` 的 100k 不等于累计花了 100k。多步工具回合会反复发送历史。累计 usage 可能远高于
+某一刻 context。反过来，provider 若没回 usage，context 估算也不能冒充实测账。
+
+### 3.1 不在本单
+
+- 不做权威账单。官方账单仍看 provider 或网关。
+- 不做团队排行榜。
+- 不上传 session、prompt 或源文件。
+- 不录隐藏思维正文。
+- 不靠几条启发式自动改 prompt。
+- 不把“token 少”判成“效果好”。
+- 不把相关性写成因果。
+- 不救旧 Session JSONL 的重复账。
+- 不在普通 `lubancode` 启动时拉起分析 sidecar。
+- 不做每轮自动模型复盘。
+
+## 四、十条不变量
+
+1. Journal 是事实账。派生索引、统计 JSON、HTML 全可删。
+2. 一次 provider 请求只认一枚 local `request_id`。重试另起 attempt，不覆盖旧账。
+3. provider 没报 usage，字段记 `unknown`。绝不拿 `0` 顶上。
+4. reasoning token 含在 output token 里。汇总时不再加一遍。
+5. context 估算、provider usage、价格估算、实际账单分栏摆放。
+6. 主会话、subagent、workflow、compact、标题与诊断探针逐笔归因。
+7. prompt 正文默认不进报告。报告只放来源、hash、token、规则命中与短证据。
+8. 本地规则先跑。模型评议须显式开关，并把预计送出范围、token 与费用说清。
+9. active、incomplete、corrupt session 不悄悄混入完成率。覆盖率单列。
+10. 每条建议都带证据、置信档与适用范围。没有证据便不下诊断。
+
+## 五、现状盘点
+
+### 5.1 已有
+
+当前源码已有这些砖：
+
+| 能力 | 现有落点 | 可复用处 |
+|---|---|---|
+| 中立 usage | `src/api/types.hpp` 的 `Usage`、`UsageReport`、`TotalInputTokens()` | 五项 token、reported 三态、request/model/cache 身份 |
+| 单轮 usage | `src/runtime/turn_runtime.hpp` 的 `StepUsageRecord`、`TurnUsageStats` | 一轮多请求求和、cache 命中、逐步流水 |
+| usage 事件 | `src/runtime/turn_event_adapter.hpp::OnUsage()` | 统一 `UsageUpdated` 事件，不再接 provider 私有回调 |
+| 当前 context | `src/cli/context_tracker.*`、`FormatContextBreakdown()` | system/tools/history/cache 的当前面板 |
+| prompt 模块 | `src/agent/prompt_assembler.*` | core/features/platform/profile 五层拼装与来源 |
+| prompt 管理 | `src/app/commands/prompt_commands.*` | 现有 `/prompt` 裸敲与 `reset`，可加 `audit` 子命令 |
+| 轨迹合同 | `src/trajectory/event.*`、`schema.*` | request/output/tool/evidence/outcome 的强类型事件 |
+| 轨迹仓 | `src/trajectory/directory.*`、`journal.*`、`recorder.*` | workspace/session 分账、hash chain、原子目录、单写者 |
+| 轨迹测试 | `tests/unit/trajectory/`、`tests/integration/trajectory/test_trajectory_smoke.cpp` | v1 golden、截断、坏链、目录、子流 |
+
+### 5.2 尚缺
+
+当前 HEAD 的 Trajectory 是 P0-1 核心半场。它已能写合成 Journal，也有 fixture。主运行时尚未把
+每场真实会话接到 `TrajectoryRecorder`。故而眼下还做不出可信的跨 session Insights。
+
+另有几处空位：
+
+- `/usage` 尚未注册成独立 slash command。
+- `TurnUsageStats` 随一轮结束便散，没成为跨轮耐久账。
+- `ContextTracker` 看当前请求，不能回答 session 累计消费。
+- `/prompt` 只看来源、字数和 reset，还不产 resolved manifest。
+- `model.output.completed.payload.usage` 只约束为 object，嵌套字段合同仍松。
+- Trajectory v1 没有独立 `model.usage.recorded`。usage 只挂 completed output，失败、取消、
+  流中断后的迟到 usage 没有稳妥 owner。
+- `model.request.prepared` 已有 `system_ref`、`toolset_ref`、`request_snapshot_ref`、`purpose`，
+  但真实装配尚未填满。
+- `api::UsageReport::request_id` 眼下取 `MessageStart.id`，实际是 provider response id。它不是
+  AgentLoop 在发请求前铸的本地 request id，不能拿来作 Journal 关联主键。
+- `verification.recorded`、`outcome.assessed` 已进 schema，真实任务链还未普遍接齐。
+- 没有 session summary、workspace aggregate、report renderer 与分析版本账。
+
+本单实施不能越过这道事实。P0 接线没落稳前，只能用合成 fixture 开发投影器，不能宣称产品已能
+分析真实使用情况。
+
+## 六、数据合同
+
+### 6.1 请求级 UsageSample
+
+每次本地 request attempt 最多投出一条 `UsageSample`：
+
+```json
+{
+  "schema": "lubancode.usage.sample",
+  "schema_version": 1,
+  "workspace_key": "lubancode-...",
+  "session_id": "20260830-...",
+  "run_id": "main-0001",
+  "run_kind": "main_session",
+  "turn_id": "turn-0007",
+  "request_id": "req-0012",
+  "provider_response_id": "resp_x7",
+  "attempt": 1,
+  "purpose": "main_turn",
+  "provider": "ccmoon",
+  "wire": "responses",
+  "model": "gpt-5.6-sol",
+  "usage_source": "provider_reported",
+  "usage": {
+    "input_tokens": 1200,
+    "cache_read_tokens": 48000,
+    "cache_creation_tokens": 0,
+    "output_tokens": 1800,
+    "reasoning_tokens": 900
+  },
+  "total_input_tokens": 49200,
+  "total_billed_shape_tokens": 51000,
+  "cache_epoch": 3,
+  "prefix_append_only": true,
+  "cost": {
+    "status": "estimated",
+    "currency": "USD",
+    "micros": 284000,
+    "price_table_id": "user-list-price-2026-08-30"
+  },
+  "source_event": {
+    "stream": "main",
+    "event_id": "main-0001:evt-00000129",
+    "event_hash": "..."
+  }
+}
+```
+
+字段规矩：
+
+- `input_tokens`：未从缓存读出的普通输入。
+- `cache_read_tokens`：缓存命中输入。
+- `cache_creation_tokens`：provider 明报的缓存写入输入。
+- `output_tokens`：全部输出。
+- `reasoning_tokens`：输出中的子集，只作拆账。
+- `total_input_tokens`：只调 `api::TotalInputTokens()`。
+- `total_billed_shape_tokens`：输入总数加输出，用来比较规模，不等于某家账单算法。
+- `usage_source`：`provider_reported`、`estimated`、`unknown` 三选一。
+- `cost.status`：`estimated`、`provider_reported`、`not_priced`、`not_applicable`。
+
+provider 没回 usage 时仍投一条 sample：
+
+```json
+{
+  "usage_source": "unknown",
+  "usage": null,
+  "cost": {"status": "not_priced"}
+}
+```
+
+这样才能数出 coverage。若干请求没有账，报告会写“17/20 请求有 provider usage”，不会给出一只
+貌似完整的总数。
+
+#### 6.1.1 Usage 的 canonical owner
+
+Trajectory v1 把 usage 塞在 `model.output.completed`。这只能照顾顺利收尾。首个正式接入 Insights 的
+新 session 要用 Trajectory schema v2，加一类事件：
+
+```text
+model.usage.recorded
+```
+
+合同：
+
+```json
+{
+  "kind": "model.usage.recorded",
+  "turn_id": "turn-0007",
+  "request_id": "req-0012",
+  "payload": {
+    "attempt": 1,
+    "provider_response_id": "resp_x7",
+    "reported_by_provider": true,
+    "input_tokens": 1200,
+    "cache_read_tokens": 48000,
+    "cache_creation_tokens": 0,
+    "output_tokens": 1800,
+    "reasoning_tokens": 900,
+    "cache_epoch": 3,
+    "prefix_append_only": true
+  }
+}
+```
+
+规矩：
+
+- 一枚 local `request_id + attempt` 最多一条 usage owner event。
+- completed、failed、cancelled 都能各自引用同一 request usage。
+- provider 没报，仍写 `reported_by_provider=false`，token 字段不出现。
+- v2 的 `model.output.completed` 不再复制 usage 正文。
+- v1 projector 只为旧 fixture 读 `model.output.completed.usage`，并标 `legacy_owner`。
+- 一条 stream 不混 v1/v2。session manifest 钉 event schema major。
+- 旧 v1 reader 遇 v2 明拒。不能静默跳过 usage event 后继续报一只残账。
+
+P0-1 的 v1 golden 继续留着，供旧读测试。v2 另建 fixture。若项目决定在 Trajectory 尚未对外启用前
+直接重做 v1，也须先改 P0 设计与 fixture；不能由本单暗改既有合同。
+
+#### 6.1.2 两种 request id
+
+```text
+local request_id
+  AgentLoop 发请求前由 IdAuthority 铸号
+  用于 prepared/sent/output/usage 的 envelope 关联
+
+provider_response_id
+  provider 在 MessageStart / response.created 一类事件里返回
+  可空，只作外部对账
+```
+
+`step_index` 只在一场 run 内帮人看次序，也不能顶 local request id。实现时把现有
+`UsageReport::request_id` 迁成 `provider_response_id`，再由 runtime `RequestUsageRecord` 包住 local id、
+attempt 与 provider usage。不能只换注释、仍让调用点混用。
+
+### 6.2 请求用途 purpose
+
+`model.request.prepared.payload.purpose` 必填入真实接线。枚举先收紧为：
+
+```text
+main_turn
+subagent_turn
+workflow_node
+compact_map
+compact_reduce
+memory_extract
+title_refine
+doctor_probe
+goal_continue
+loop_iteration
+insights_model_review
+other_host_request
+```
+
+调用方不知道用途便拒绝 `model.request.prepared`，不能全塞 `main_turn`。
+
+usage event 按 local `request_id + attempt` 与 prepared event 合账。prepared 有 purpose、provider、wire、
+model、prompt refs；usage event 有 provider 回账。二者缺一，sample 标 `incomplete_linkage`，不可猜。
+
+### 6.3 价格表
+
+价格会变，也会因合同、provider、缓存档位而变。代码不能写死“当前价格”。
+
+```json
+{
+  "schema": "lubancode.pricing.table",
+  "schema_version": 1,
+  "id": "user-list-price-2026-08-30",
+  "currency": "USD",
+  "effective_from": "2026-08-30",
+  "source": "user_config",
+  "models": {
+    "provider/model": {
+      "input_per_million": 0,
+      "cache_read_per_million": 0,
+      "cache_creation_per_million": 0,
+      "output_per_million": 0
+    }
+  }
+}
+```
+
+四条线钉死：
+
+1. 用户没配价格表，照样报 token；费用写 `not_priced`。
+2. reasoning 不另乘一次 output 单价。
+3. 订阅额度与 API 花费分开。订阅档可写 `not_applicable`。
+4. HTML 页眉写“本地估算；实际账单看 provider”。
+
+### 6.4 PromptManifest
+
+现有 `PromptSourceLedger` 已能记模块来源，却只管 `AssembleSystemPrompt()` 里面那一段。AgentLoop 随后还会
+叠 deferred tool index、model instructions 与 soul。新建 `ResolvedPromptBuilder`，把这些后叠层也收进
+同一次解析。它每次拼完最终 system prompt，都产一份 manifest。manifest 不靠 analyzer 事后拆字符串。
+
+```json
+{
+  "schema": "lubancode.prompt.manifest",
+  "schema_version": 1,
+  "assembly_version": "prompt-assembler-v1",
+  "resolved_prompt_hash": "...",
+  "resolved_prompt_tokens_estimated": 18420,
+  "stable_prefix_hash": "...",
+  "segments": [
+    {
+      "segment_id": "core/10-identity.md",
+      "role": "core",
+      "source_kind": "embedded",
+      "source_ref": "embedded:core/10-identity.md",
+      "source_hash": "...",
+      "rendered_hash": "...",
+      "rendered_tokens_estimated": 1320,
+      "order": 10,
+      "volatile": false,
+      "overrides": []
+    },
+    {
+      "segment_id": "runtime/environment",
+      "role": "runtime",
+      "source_kind": "host_generated",
+      "source_ref": "runtime:environment",
+      "source_hash": null,
+      "rendered_hash": "...",
+      "rendered_tokens_estimated": 180,
+      "order": 90,
+      "volatile": true,
+      "overrides": []
+    }
+  ],
+  "layers": [
+    "embedded",
+    "user_prompt_dir",
+    "package",
+    "prompt_profile",
+    "agent_inline"
+  ],
+  "soul": {"name": "default", "hash": "...", "tokens_estimated": 0},
+  "model_instructions": {"hash": "...", "tokens_estimated": 220}
+}
+```
+
+manifest 记 system 来源、次序、hash、token、override。request snapshot builder 再补 toolset hash、工具
+定义 token 与 message shape。默认不记正文。
+
+它随 provider-neutral request snapshot 一道落 artifact，再由现有
+`model.request.prepared.payload.request_snapshot_ref` 引用。这样不必在刚冻结的 Trajectory v1 顶层
+硬塞新字段。request snapshot artifact 自立 schema：
+
+```json
+{
+  "schema": "lubancode.request.snapshot",
+  "schema_version": 1,
+  "request_shape": {
+    "model": "...",
+    "message_count": 17,
+    "tool_count": 42,
+    "parameters_hash": "...",
+    "toolset_hash": "...",
+    "tool_definition_tokens_estimated": 9200
+  },
+  "prompt_manifest": {},
+  "content_policy": "metadata_only"
+}
+```
+
+若 P0 最终决定保存完整 request snapshot，正文与 metadata 仍要分块。分析器只读 metadata。需要看正文的
+审计须显式请求，另过脱敏与权限闸。
+
+### 6.5 SessionInsightSummary
+
+每间封口 session 产一份摘要：
+
+```json
+{
+  "schema": "lubancode.insights.session_summary",
+  "schema_version": 1,
+  "analyzer_version": "insights-v1",
+  "source": {
+    "session_id": "...",
+    "stream_terminal_hashes": {},
+    "integrity": "verified"
+  },
+  "coverage": {
+    "runs_total": 4,
+    "runs_analyzed": 4,
+    "requests_total": 23,
+    "requests_with_usage": 21,
+    "outcomes_assessed": 1
+  },
+  "work": {
+    "turns": 8,
+    "tool_calls": 19,
+    "files_touched": 6,
+    "verifications": 3,
+    "outcome": "partial"
+  },
+  "usage": {},
+  "prompt_findings": [],
+  "friction_events": [],
+  "feature_signals": []
+}
+```
+
+源 terminal hash、analyzer version 任一变化，摘要判 stale，删掉重算。
+
+## 七、Usage 账怎么收
+
+### 7.1 请求、回合、运行、Session、Workspace 五层
+
+```text
+UsageSample(request)
+  -> TurnUsageSummary(turn)
+  -> RunUsageSummary(main/subagent/workflow/compact/...)
+  -> SessionUsageSummary
+  -> WorkspaceUsageSummary
+```
+
+每层只求和下一层，不另扫文本估 token。
+
+聚合维度：
+
+- provider / wire / model；
+- purpose；
+- run_kind；
+- main 与 subordinate；
+- reported / unknown；
+- cache epoch 与 append-only；
+- 日、周、session、workspace；
+- 成功、失败、取消、未知；
+- 有验收、无验收。
+
+### 7.2 cache 指标
+
+```text
+cache_input_base = input + cache_read + cache_creation
+cache_read_ratio = cache_read / cache_input_base
+```
+
+分母为 0 或 usage 未报，比例为 unknown。
+
+另报三种行为：
+
+- `expected_rebuild`：compact、显式清理或 toolset 改变引起；
+- `unexpected_miss`：稳定前缀本应追加，provider 却没读 cache；
+- `prefix_churn`：system/tools hash 或消息稳定前缀频繁变。
+
+“没 cache_read”不自动等于 bug。provider 可能没支持、没回报、TTL 已过。报告须把 capability、reported
+与 observed 分栏。
+
+### 7.3 重试与失败
+
+一次失败请求若 provider 已回 usage，照记。重试是新 sample。
+
+报告同时列：
+
+```text
+productive tokens
+retry tokens
+cancelled-run tokens
+doctor/probe tokens
+compact tokens
+insights-review tokens
+```
+
+`productive` 只是用途分类，不含价值判断。最终任务失败，main token 仍不凭空改名。
+
+### 7.4 `/usage` 默认画面
+
+```text
+Usage · current session
+  覆盖       21/23 requests reported · 2 unknown
+  输入       812k · cache read 691k (85.1%) · cache write 18k
+  输出       42k · reasoning 17k（已含在输出）
+  模型       gpt-5.6-sol 78% · local-model 22%
+  用途       main 62% · subagent 18% · compact 12% · other 8%
+  估算费用   $x.xx · price table ... · 非账单
+  异常       3 次 unexpected cache miss · 1 次 usage 未回报
+```
+
+任何比例都要注明分母。任何金额都要带价格表与口径。
+
+## 八、Prompt Audit 三层审法
+
+“prompt 不好”太虚。审计拆三层。
+
+### 8.1 Static：看组成
+
+输入：Prompt 模块、Prompt Profile、AgentDefinition、SOUL、模型指令、工具描述与 JSON Schema。
+
+本地规则先查：
+
+1. 同一模块被多层覆盖，却没有清楚的最终来源。
+2. 两层正文 hash 相同，白白重复。
+3. 大段 n-gram 高重合。
+4. 单模块或总 system prompt 超过预算占比。
+5. tool description 过长、重复、缺动作边界。
+6. 工具 schema 缺 `type=object`、字段说明、required，或形状过深。
+7. 同名工具从 builtin、plugin、MCP 多路撞车。
+8. 绝对禁令互相撞，如一处要求“总先问”，一处要求“直接做”。
+9. 指令只写抽象口号，缺触发条件、动作、停止线与验收。
+10. 动态时间、cwd、工具清单插进稳定前缀中段，容易打断 cache。
+11. 整份 MCP schema 常驻，却从未调用。
+12. 用户改过的 prompt 模块已落后于 embedded 版本，且差异未审。
+
+第 8、9 条含语义判断。本地规则只抓明显模式，给 `suspected`。用户开 `--model-review` 后，模型可
+复核。模型也只能给 `reviewed_suggestion`，不能把怀疑升成事实。
+
+### 8.2 Runtime：看真实请求
+
+输入：PromptManifest、request snapshot metadata、prefix/cache 账。
+
+检查：
+
+- system、tools、messages 各占多少；
+- 哪一层在连续请求间变化；
+- toolset hash 为何换；
+- stable prefix 到哪儿断；
+- 哪些模块从未随能力开关裁掉；
+- 哪次 `/soul`、`/prompt reset`、agent/profile 切换改变了 prompt；
+- compact 前后 prompt 与 history 如何挪动；
+- subagent 是否背上主 Agent 用不到的工具和指令；
+- workflow node 是否收到越界上下文；
+- system prompt 增长是否伴随 cache miss 与输入 token 上扬。
+
+这层只说“发生了什么”。例如：
+
+```text
+P-AUD-017 · high evidence
+连续 8 次 main request 中，tools_hash 变了 6 次。
+5 次变化来自延迟工具索引顺序不稳。
+cache read 从 91% 落到 34%。
+建议：固定工具排序，并把动态索引放到稳定前缀尾部。
+```
+
+### 8.3 Outcome-linked：看结果信号
+
+输入：工具终态、verification、outcome、用户后续纠正、取消、重试与 UsageSample。
+
+摩擦信号：
+
+| 信号 | 证据 | 不能越界说什么 |
+|---|---|---|
+| 反复澄清 | 同一 turn 前后出现 ask_user，用户补充缺失约束 | 不能直接说首个 prompt 错 |
+| 用户纠正 | 新输入明确否定上一结果，并引用同一目标 | 不能只凭“不是”二字判断 |
+| 工具参数重试 | 同工具、近似参数、失败后短时重发 | 可能是外部故障，不一定是 prompt |
+| 越权尝试 | permission rejected、路径越界、危险动作被拦 | 要分模型行为与策略配置 |
+| 假完成 | assistant 宣称完成，outcome 缺 verification 或后续被 invalidated | 只能说证据不足 |
+| 上下文遗失 | 用户重申旧约束，manifest 显示该约束已不在工作视图 | 可指向 compact/retrieval，不先怪 system prompt |
+| 返工 | 同文件区域短时多次反向修改，最后才通过验证 | 可能是探索，需结合结果 |
+| 空转 | token、工具、墙钟大涨，work/evidence 不动 | 需列阈值与样本，不给人格评价 |
+
+### 8.4 Finding 合同
+
+每条发现统一长这样：
+
+```json
+{
+  "finding_id": "P-AUD-017",
+  "category": "cache.prefix_churn",
+  "severity": "warning",
+  "confidence": "high",
+  "scope": "workspace",
+  "evidence": [
+    {"session_id": "...", "event_id": "...", "metric": "tools_hash_changes", "value": 6}
+  ],
+  "counter_evidence": [
+    {"metric": "provider_cache_capability", "value": "reported_supported"}
+  ],
+  "summary": "工具表在连续请求间频繁变化",
+  "recommendation": "固定注册与序列化次序；动态索引后置",
+  "origin": "deterministic_rule",
+  "rule_version": "prompt-audit-v1:P017"
+}
+```
+
+严重度讲影响：`info`、`warning`、`high`。置信讲证据：`low`、`medium`、`high`。两者不能混。
+
+## 九、Insights 怎样生报告
+
+### 9.1 默认选账范围
+
+`/insights` 默认：
+
+- 当前 workspace；
+- 最近 30 天；
+- 只纳入已封口且 verify 通过的 session；
+- 最多处理 200 间尚未由当前 analyzer 版本分析的 session；按结束时间从新到旧，时间相同按
+  session id 排，不能靠未排序目录遍历选号；
+- 少于 2 个 completed turn，且没有 tool、verification、outcome 的，算 micro session；usage 照收，
+  交互习惯与摩擦频率不拿它作样本；
+- 不调用模型；
+- 生成 JSON 与 HTML，打印路径，不自动打开。
+
+显式参数可改：
+
+```text
+/insights --since 7d
+/insights --sessions 50
+/insights --all-workspaces
+/insights --include-active
+/insights --model-review
+/insights --open
+/insights --json
+```
+
+`--all-workspaces` 需要用户明说。工作区名与路径可能敏感，默认报告只显示 readable name 与
+workspace key 短码。`--show-paths` 才显绝对路径。
+
+一轮只处理 200 间，不等于只汇总这 200 间。已经有 fresh summary、又落在时间范围内的 session 一并
+进入 aggregate。还有未分析 session 时，报告页眉写 pending 数；用户再跑一回，继续收下一批。
+
+### 9.2 增量分析
+
+按 session 封口 hash 去重：
+
+```text
+discover sessions
+  -> verify journal and parent/child edges
+  -> compare terminal hashes + analyzer version
+  -> skip fresh derived summary
+  -> analyze stale/missing summary
+  -> atomic write session-summary.json
+  -> stream aggregate selected summaries
+  -> write report.json
+  -> render report.html
+```
+
+不先上 SQLite。P0 已把 SQLite 放到后续。首版用一间 session 一份 JSON 摘要；跨工作区时流式扫摘要。
+日后加 SQLite，也只作可重建查询缓存。
+
+派生目录：
+
+```text
+<session>/derived/insights-v1/session-summary.json
+
+~/.lubancode/insights/
+  reports/
+    20260830-154200-lubancode-7d.json
+    20260830-154200-lubancode-7d.html
+  latest.json
+  latest.html
+```
+
+`latest.*` 用临时文件加原子替换。历史报告按配置清理。清理只删 derived/report，不碰 Journal。
+
+### 9.3 本地分析器
+
+本地分析器分六步：
+
+1. `IntegrityGate`：验 schema、hash chain、父子边、封口。
+2. `UsageProjector`：投请求级 usage 与 coverage。
+3. `PromptAuditor`：跑 static/runtime/outcome-linked 规则。
+4. `FrictionClassifier`：按事件证据归摩擦类。
+5. `FeatureSignalEngine`：找“可能少走弯路”的现成功能。
+6. `WorkspaceAggregator`：按时间、模型、用途、结果聚合。
+
+摩擦分类先定这一组：
+
+```text
+request.ambiguity
+instruction.conflict
+context.loss
+context.churn
+tool.invalid_input
+tool.execution_failure
+tool.repeated_retry
+verification.failure
+verification.missing
+user.correction
+permission.denied
+approval.wait
+provider.failure
+budget.limit
+cancelled
+unknown
+```
+
+分类器允许一件事挂多类。它不能为凑百分比强行单选。
+
+### 9.4 可选模型评议
+
+`--model-review` 只吃这些材料：
+
+- 本地统计；
+- finding 摘要与 event refs；
+- 用户显式允许的 prompt 模块正文；
+- 默认不含对话原文、工具结果全文、绝对路径、secret。
+
+发请求前先打印：
+
+```text
+将向 <provider/model> 发送 18 份 prompt 模块与 42 条脱敏 finding，估算 31k input token。
+这会计入 usage，purpose=insights_model_review。继续吗？[y/N]
+```
+
+非交互模式须带 `--yes`。没带便拒绝，不默认同意。
+
+模型输出写：
+
+```text
+report.model-review.json
+```
+
+其中每条建议必须引用 finding id。引用不存在，renderer 丢弃该条并记 validation error。模型不能新增
+“事实”。它只能重排、归纳、写建议。
+
+模型请求也进 Journal，purpose 写 `insights_model_review`。如此 `/usage` 能看见分析本身花了多少。
+
+### 9.5 报告章节
+
+HTML 首屏先放事实边界：
+
+```text
+范围       当前 workspace · 2026-08-01 至 2026-08-30
+样本       83 sessions found · 71 verified · 68 analyzed
+Usage      1,204/1,267 requests reported
+Outcome    42 sessions 有 outcome.assessed
+分析方式   local deterministic · model review off
+```
+
+正文七节：
+
+1. 工作概览：session、turn、工具、文件、验收、结果。
+2. Token 与 Cache：模型、用途、主/子执行、重试、compact、cache。
+3. Prompt 构成：system/tool/messages 占比、模块、覆盖、变化。
+4. 摩擦点：按影响、频次、证据列出。
+5. 交互形状：澄清、取消、返工、验证习惯；不做人身评价。
+6. 建议：每条连回 finding 与受影响 session。
+7. 覆盖与限制：缺 usage、缺 outcome、坏账、active、排除理由。
+
+页面须能筛 workspace/session/model/purpose/category。首版用内联少量 JS；不开网络，不拉 CDN。
+
+### 9.6 HTML 安全
+
+- 所有文本 HTML escape。
+- 加严格 CSP；默认 `default-src 'none'`。
+- CSS、JS 内联并带本地 hash 或 nonce；不访问网络。
+- 不把 raw prompt、tool input、tool result 塞进 DOM 后再用 CSS 藏。
+- snippet 默认关闭。`--include-snippets` 也要先脱敏，再限长。
+- 本地路径默认折成 workspace 相对路径。
+- secret 扫描命中后，整个字段替成 `[REDACTED:<kind>]`，不保留前后几位。
+- 报告文件权限跟 Trajectory 用户私有权限一致。
+
+## 十、命令合同
+
+### 10.1 `/usage`
+
+```text
+/usage
+/usage session [<session-id>]
+/usage day
+/usage week
+/usage workspace [--since 30d]
+/usage all --since 7d
+/usage --by model|purpose|run|outcome
+/usage --json
+```
+
+默认 `/usage` 等于 `/usage session <active>`。
+
+读 active session 时，先读 Recorder 的只读 snapshot 或已提交高水位；不得为看面板 flush 全仓。未封口数据
+标 `provisional`。若 Trajectory 尚未启用，退回当前内存 `TurnUsageStats`，同时明写“只含当前 turn，非
+session 累计”。不能悄悄换口径。
+
+### 10.2 `/prompt audit`
+
+保留现有：
+
+```text
+/prompt
+/prompt reset
+```
+
+新增：
+
+```text
+/prompt audit static
+/prompt audit runtime [session-id]
+/prompt audit outcome [--since 30d]
+/prompt audit all [--model-review]
+/prompt audit explain <finding-id>
+/prompt audit --json
+```
+
+`static` 不需 Journal。它可先落地。`runtime` 依赖 PromptManifest。`outcome` 依赖真实 verification/outcome
+接线。
+
+### 10.3 `/insights`
+
+```text
+/insights [--since 30d] [--sessions 200]
+/insights --all-workspaces
+/insights --model-review
+/insights --open
+/insights status
+/insights clean --derived-only
+```
+
+`clean --derived-only` 先列将删的文件与字节，二次确认后才删。它不碰 canonical Journal。
+
+### 10.4 `/context` 与 `/doctor`
+
+`/context` 保持现义。只补两行跳转：
+
+```text
+累计 token：看 /usage
+Prompt 组成：看 /prompt audit runtime
+```
+
+`/doctor insights` 查：
+
+- Trajectory 是否启用、reader 版本是否支持；
+- 派生目录权限与磁盘；
+- 最近 analyzer 版本、最后成功报告；
+- stale/corrupt summary 数；
+- price table 合法性；
+- HTML renderer 自检；
+- model review 默认是否关闭。
+
+它不调模型，也不重建报告。
+
+## 十一、代码边界
+
+### 11.1 新模块
+
+```text
+src/accounting/
+  usage_sample.hpp/.cpp
+  usage_projector.hpp/.cpp
+  usage_aggregate.hpp/.cpp
+  pricing_table.hpp/.cpp
+  cost_estimator.hpp/.cpp
+
+src/agent/
+  prompt_manifest.hpp/.cpp
+  resolved_prompt_builder.hpp/.cpp
+
+src/insights/
+  session_summary.hpp/.cpp
+  integrity_gate.hpp/.cpp
+  prompt_auditor.hpp/.cpp
+  friction_classifier.hpp/.cpp
+  feature_signal.hpp/.cpp
+  workspace_aggregator.hpp/.cpp
+  derived_store.hpp/.cpp
+  report_model.hpp/.cpp
+  html_renderer.hpp/.cpp
+  model_review.hpp/.cpp
+  redaction.hpp/.cpp
+
+src/app/commands/
+  usage_commands.hpp/.cpp
+  insights_commands.hpp/.cpp
+  prompt_commands.cpp          # 只加 audit 分派壳
+  doctor_commands.cpp          # 只加 insights 健康检查
+```
+
+`accounting`、`insights` 都不 include `app/cli`。领域层返回 typed result。终端、app-server 各自 presenter。
+
+### 11.2 现有代码接线
+
+#### `api::UsageReport`
+
+保留五项 token 语义。补 `reported_by_provider`，把现有 `request_id` 明确迁成
+`provider_response_id`，再补序列化 helper。各 provider parser 仍只负责翻译，不负责累计与计价。
+
+local request id 不塞进 api 层。runtime 新设：
+
+```cpp
+struct RequestUsageRecord {
+    std::string local_request_id;
+    int attempt = 1;
+    api::UsageReport provider_usage;
+};
+```
+
+AgentLoop/ModelRequestRecorder 铸 local id，再包住 provider usage。如此 api 不倒认 runtime 身份。
+
+#### `TurnEventAdapter`
+
+`UsageUpdated` 继续给 UI 画当前轮。`TurnEventAdapter::OnUsage()` 迁到 `RequestUsageRecord`，给 UI payload
+同时带 local request id 与 provider response id。Trajectory 接线须从同一 record 提交
+`model.usage.recorded`。不能从 UI ServerEvent 反推 canonical usage。
+
+#### `AgentLoop`
+
+每次发请求前：
+
+1. `ResolvedPromptBuilder` 调现有 PromptAssembler，再叠 deferred index、model instructions、soul，返回
+   `text + PromptManifest`。
+2. 生成 provider-neutral request snapshot metadata。
+3. 先提交 `model.request.prepared`。
+4. durable `model.request.sent` 后才真发。
+5. 收到 provider usage，提交 `model.usage.recorded`；没报也在 request terminal 时写 unknown owner。
+6. output 按 completed/failed/cancelled 自己收口，不复制 usage。
+
+标题、memory、compact、doctor 等旁路请求也走公共 `ModelRequestRecorder`，并填 purpose。
+
+#### `PromptAssembler` 与最终 resolver
+
+新增：
+
+```cpp
+struct AssembledPrompt {
+    std::string text;
+    agent::PromptManifest manifest;
+};
+```
+
+`PromptSourceLedger` 留着，作为模块来源底账。`ResolvedPromptBuilder` 把 ledger 条目补成 hash/token/order，
+再追加 deferred index、model instructions、soul。旧调用点在迁移期可取 `.text`。产品切 Trajectory 默认
+前，全仓真实 model request 必须拿 manifest。不得由 analyzer 再按标题猜模块边界。
+
+#### `Trajectory`
+
+Prompt manifest 首版可复用 v1 顶层字段：
+
+- request manifest 放 `request_snapshot_ref` artifact；
+- system/tool 正文照 `system_ref`、`toolset_ref`；
+- purpose 放 `model.request.prepared.payload.purpose`。
+
+Usage 事实改走 v2 `model.usage.recorded`。v1 completed payload 的 usage 只作 legacy read。需要新增其他
+顶层字段时，也另升 schema。不能往 v1 payload 偷塞 unknown key，毁掉 fail-closed reader。
+
+#### `SlashCommandTable`
+
+新增 `Usage`、`Insights`。为二者补 P0 命令元数据：
+
+| 命令 | effect | session policy | durability | replay | redaction |
+|---|---|---|---|---|---|
+| `/usage` | read_only | active_or_selected | none | deterministic | metadata_only |
+| `/prompt audit static` | read_only | none | none | deterministic | local_prompt |
+| `/prompt audit runtime` | read_only | selected | none | deterministic | metadata_only |
+| `/insights` | derived_write | multi_session | atomic_derived | deterministic_local | report_safe |
+| `/insights --model-review` | model_request + derived_write | new_analysis_run | journaled | replay_from_refs | strict_redaction |
+
+### 11.3 App-server
+
+加中立方法：
+
+```text
+usage/read
+promptAudit/run
+promptAudit/explain
+insights/generate
+insights/status
+insights/openReport
+```
+
+长分析发进度事件：discover、verify、project、aggregate、render。取消只停派生任务，不动 Journal。GUI 与
+terminal 读同一 typed report，不各算一套。
+
+## 十二、建议引擎
+
+建议不能只写“prompt 再清楚些”。每条要能动手。
+
+### 12.1 建议格式
+
+```text
+发现
+  哪个规则命中，影响多大
+
+证据
+  哪些 session / event / metric 支撑
+
+边界
+  哪些材料缺着，尚不能断什么
+
+动作
+  改哪个模块、配置或工作习惯
+
+验法
+  改后看哪一项指标，跑哪组冻结任务
+```
+
+### 12.2 功能建议映射
+
+| 信号 | 可建议功能 | 先决条件 |
+|---|---|---|
+| 无关任务挤在一场，context/token 连涨 | `/clear` 或另开 session | 任务边界证据明确 |
+| 长 ToolResult 反复进上下文 | artifact + `context_read` | 已确认工作视图仍带全文 |
+| system/tool 占比过高 | Prompt Profile、延迟工具、裁 MCP | 模块占比可定位 |
+| 反复查相同仓库事实 | project memory / skill | 查询确实重复，事实相对稳定 |
+| 同一验收步骤反复手敲 | skill / workflow | 步骤稳定且权限边界清楚 |
+| 大任务中途丢约束 | compact 用户契约与工作状态分账 | manifest/compact 证据指向 |
+| subagent token 暴涨 | 收窄工具、prompt、并发与任务 | 子流 usage 已独立 |
+| cache 前缀抖 | 固定排序、稳定段前置、动态段后置 | provider 明报 cache 或有诊断证据 |
+
+建议引擎只推荐仓库已经支持的能力。尚在 TODO 的功能要标“设计中”，不可写成现成功能。
+
+## 十三、隐私、权限与保留
+
+### 13.1 三档内容策略
+
+```text
+metadata_only       默认；hash、token、来源、计数、事件引用
+redacted_snippets   用户显式要短证据；脱敏后限长
+full_local_review   用户显式审本地 prompt；不写 HTML，不送模型
+```
+
+`--model-review` 不能自动升到 `full_local_review`。
+
+### 13.2 脱敏顺序
+
+```text
+canonical recorder pre-write redaction
+  -> analyzer defensive redaction
+  -> report field allowlist
+  -> HTML escape
+  -> optional model-review allowlist
+```
+
+常见 secret：Authorization、Cookie、API key、private key、连接串、access token、context token、环境变量
+值。绝对路径、用户名、仓库 remote 也按隐私字段看待。
+
+### 13.3 保留
+
+配置示意：
+
+```json
+{
+  "insights": {
+    "enabled": true,
+    "auto_generate": false,
+    "default_scope": "workspace",
+    "default_since_days": 30,
+    "max_sessions_per_run": 200,
+    "retain_reports_days": 30,
+    "retain_session_summaries": true,
+    "include_snippets": false,
+    "model_review": false,
+    "show_absolute_paths": false
+  }
+}
+```
+
+`enabled=true` 只表示命令可用。普通启动仍不自动扫盘、不起线程、不调模型。
+
+## 十四、失败与恢复
+
+### 14.1 Journal 坏
+
+verify 不过便排除。报告列 session id、错误码与排除数。`--include-corrupt` 也只许 inspect 已验过的完整
+前缀，不能把它混进成功率或总 usage。
+
+### 14.2 Session 未封口
+
+默认跳过。`--include-active` 可读 committed 高水位，摘要标 `provisional`。active session 不写长期
+session-summary，免得与 writer 争。
+
+### 14.3 Usage 缺失
+
+统计 request coverage。金额与 token 总数标下界：
+
+```text
+已报告请求合计 812k token；另有 2/23 请求 usage unknown。
+```
+
+不得估一只数补进“实测总计”。若另跑 tokenizer 估算，放 estimated 栏。
+
+### 14.4 模型评议失败
+
+本地 JSON/HTML 照常交付。报告写 model review failed 与错误摘要。不得删本地结果后整单失败。
+
+### 14.5 磁盘不足
+
+先保 Journal。派生写失败便停，删临时文件，返回 `insights.storage_exhausted`。不触碰 canonical blob，不
+为了腾地方自动删 session。
+
+### 14.6 Analyzer 升级
+
+摘要带 analyzer/rule/redaction/renderer 四个版本。规则升级后旧摘要 stale。重算用临时文件原子替换。
+旧报告留着，并在页眉标旧版本。
+
+## 十五、测试设计
+
+### 15.1 Contract
+
+- `UsageSample` round-trip；unknown 与 0 分开。
+- v2 `model.usage.recorded` 一请求一 owner；重复提交拒绝。
+- completed/failed/cancelled 三条路都能关联 usage 或显式 unknown。
+- v1 completed.usage 只走 legacy projector；v1/v2 stream 不混。
+- local request id 与 provider response id 不能串。
+- reasoning 是 output 子集；非法 `reasoning > output` 拒绝。
+- `TotalInputTokens()` 与 projector 同口径。
+- purpose 枚举齐全；unknown purpose 明报。
+- PromptManifest 顺序稳定；来源、override、hash、token 字段齐。
+- Finding severity/confidence 分开。
+- Session summary 引 terminal hash 与 analyzer version。
+
+### 15.2 Golden fixtures
+
+至少备十二场合成轨迹：
+
+1. 单请求纯文本，usage 全报。
+2. 一轮三步工具，cache 逐步命中。
+3. provider 不报 usage。
+4. 失败后重试，前后都花 token。
+5. main 派两只 subagent，各自独立账。
+6. workflow parallel + retry。
+7. compact map/reduce 独立 purpose。
+8. toolset 排序抖，cache miss。
+9. prompt 多层重复与 override。
+10. verification fail 后修好。
+11. 用户纠正、任务 partial。
+12. active、truncated、corrupt 各一份。
+
+同一 fixture 重跑，`session-summary.json` 与 `report.json` 字节一致。HTML 中只有生成时间等获准的非决定
+字段；最好也把时间注入，做到 golden 可比。
+
+### 15.3 Usage 数学
+
+- 多请求求和。
+- cache read/write/uncached 各档。
+- reasoning 不双计。
+- reported=false 的全零不冒充真零。
+- 真实零输出的失败请求若 provider 明示 reported，要靠显式 `reported`，不能再拿“五项全零”推断。
+- 价格表命中、缺失、跨生效日、模型别名、合同倍率。
+- 金额用整数 micros，禁 float 漂移。
+
+这里暴露一个现有债：`UsageReport::reported()` 目前以“五项任一非零”判断。新合同须补显式
+`reported_by_provider`，否则“provider 明报全零”与“没报”无法分。迁移时保留旧 helper 兼容，projector
+只认显式位；旧事件没有该位则用 legacy 推断并标 `legacy_inferred`。
+
+### 15.4 Prompt Audit
+
+- 同文 hash 重复。
+- 高 n-gram 重合。
+- 五层 override 链。
+- user module 与 embedded drift。
+- 动态段插中间导致 stable prefix 断。
+- tool schema 无 type/properties。
+- 同名 builtin/plugin/MCP 工具。
+- 模型评议引用不存在 finding id 时拒绝。
+- prompt 正文默认不进 report JSON/HTML。
+
+### 15.5 Insights 分类
+
+- 每类 friction 都有正例、反例、边界例。
+- 单事件可挂多类。
+- 缺 outcome 时不算 success/failure。
+- assistant 自称完成不生成 passed outcome。
+- verification invalidated 后旧 passed 不再作当前证据。
+- active/corrupt session 不进完成率分母。
+- 建议只指现成功能；TODO 能力打“设计中”。
+
+### 15.6 安全
+
+- prompt、工具入参、工具结果、路径、环境变量各埋 secret canary。
+- report JSON、HTML、model-review request、日志全扫 canary。
+- HTML 注入、`</script>`、恶意 Markdown、超长单词、坏 UTF-8。
+- symlink/reparse point 逃逸。
+- derived clean 只删允许根下文件。
+- `--open` 只打开刚生成且 containment 通过的 HTML。
+
+### 15.7 集成与真机
+
+1. 在临时仓跑三轮真实 main turn，查 `/usage session`。
+2. 派 subagent，确认主/子账相加又能分开。
+3. 跑 compact，确认 purpose 与 token 独立。
+4. 改一层 Prompt Profile，查 manifest override。
+5. 造一次工具失败与一次验证失败，查 friction。
+6. 生成本地 HTML，浏览器看 desktop/mobile，无空白、无重叠、无网络请求。
+7. 开 `--model-review`，确认事前询问、usage 入账、失败降级。
+8. 跑 full CTest。
+
+### 15.8 性能
+
+基准场景：
+
+- 200 sessions、1 万 request、10 万 event；
+- 单 session 100 MiB Journal；
+- main + 8 child；
+- 500 prompt modules/tool definitions；
+- 跨 20 workspace 聚合。
+
+量：发现、verify、投影、聚合、render 的墙钟、CPU、峰值内存、读字节、写字节。预算由首轮实测写进
+benchmark config。文档不先拍数字。
+
+## 十六、实施批次
+
+依赖次序：
+
+```text
+Trajectory P0-2 真接线
+        |
+        +----------> A1 Usage facts / PromptManifest
+                              |
+                 +------------+------------+
+                 |                         |
+                 v                         v
+             A2 /usage              A3 /prompt audit
+                 |                         |
+                 +------------+------------+
+                              v
+                     A4 Session analyzer
+                              |
+                              v
+                     A5 /insights report
+                              |
+                    +---------+---------+
+                    |                   |
+                    v                   v
+             A6 model review      A7 app-server/GUI
+```
+
+### A0 合同与夹具
+
+- [ ] 冻结 UsageSample、PromptManifest、Finding、SessionSummary、Report schema。
+- [ ] 给 `UsageReport` 补显式 reported 来源位，并把旧 request_id 迁成 provider response id。
+- [ ] 新建 runtime `RequestUsageRecord`，分开 local request id 与 provider response id。
+- [ ] 冻结 Trajectory v2 `model.usage.recorded` 与 v1 legacy read 规则。
+- [ ] 冻结 purpose 枚举。
+- [ ] 定 request snapshot metadata schema。
+- [ ] 做十二场 synthetic trajectory fixtures。
+- [ ] 做价格表 schema 与整数 micros 算法。
+- [ ] 写 privacy allowlist 与 canary 夹具。
+
+验收：不接真实 runtime，也能从合成 Journal 稳定产出 usage/session/report JSON。
+
+### A1 事实接线
+
+- [ ] `ResolvedPromptBuilder` 包住 PromptAssembler 与三层后叠，返回 `AssembledPrompt{text, manifest}`。
+- [ ] main/subagent/workflow/compact/memory/title/doctor 全填 purpose。
+- [ ] 公共 ModelRequestRecorder 写 request prepared/sent/output。
+- [ ] ModelRequestRecorder 写 v2 usage owner；completed/failed/cancelled 不复制 usage。
+- [ ] usage payload 强校验与一请求一 owner 状态机。
+- [ ] request snapshot artifact 存 metadata manifest。
+- [ ] provider reported/unknown 显式落账。
+- [ ] 不从 ServerEvent、终端文本或旧 SessionStore 反推 canonical usage。
+
+验收：一场真实工具回合每次 request 都能按 request_id 对上 prepared、sent、output、usage、purpose。
+
+### A2 `/usage`
+
+- [ ] 实现 UsageProjector 与五层 aggregate。
+- [ ] 实现 cache 行为分类。
+- [ ] 实现 price table 与 cost estimator。
+- [ ] 注册 `/usage` 与 JSON 输出。
+- [ ] active session provisional snapshot。
+- [ ] 旧内存账降级时明示口径。
+
+验收：用户能分别看 current request context、current session cumulative、subagent、compact 与 unknown
+coverage，几本账不串。
+
+### A3 `/prompt audit`
+
+- [ ] static source/override/token/schema 检查。
+- [ ] runtime manifest/prefix/cache 检查。
+- [ ] outcome-linked finding。
+- [ ] finding explain 与 event refs。
+- [ ] 扩展现有 `/prompt`，保住裸敲/reset 行为。
+- [ ] JSON 输出与隐私扫描。
+
+验收：给定 fixture，规则命中稳定；报告不含 prompt 正文；每条 finding 能回到 source/event。
+
+### A4 Session Analyzer
+
+- [ ] IntegrityGate。
+- [ ] FrictionClassifier。
+- [ ] FeatureSignalEngine。
+- [ ] session summary 原子写与 stale 判定。
+- [ ] active/incomplete/corrupt coverage。
+- [ ] analyzer/rule/redaction 版本账。
+
+验收：同一封口 session 重算字节相同；坏账排除且理由可见。
+
+### A5 `/insights`
+
+- [ ] session discover 与 current-workspace 默认范围。
+- [ ] 跨 workspace 显式开关。
+- [ ] 增量聚合。
+- [ ] report JSON。
+- [ ] 自包含 HTML renderer、CSP、筛选。
+- [ ] latest 原子替换、历史保留与 derived-only clean。
+- [ ] `/doctor insights`。
+
+验收：200-session fixture 能生成可读报告；coverage、usage、prompt、friction、建议、限制七节齐。
+
+### A6 可选模型评议
+
+- [ ] review input allowlist。
+- [ ] token/cost 预估与确认。
+- [ ] `purpose=insights_model_review` 入账。
+- [ ] finding-id 引用校验。
+- [ ] 本地报告与模型评议分层保存。
+- [ ] provider 失败降级。
+
+验收：默认零模型请求；显式开启才发；发送材料与终端披露一致；评议失败不伤本地报告。
+
+### A7 App-server 与 GUI
+
+- [ ] 六个中立 RPC/notification。
+- [ ] 进度、取消、错误合同。
+- [ ] terminal/GUI 同 report model。
+- [ ] desktop/mobile 视觉回归。
+- [ ] 大表虚拟化或分页。
+- [ ] report 文件打开 containment。
+
+验收：两端数字逐项相等；取消分析不动 Journal；页面无网络请求、无正文泄露。
+
+## 十七、发布门
+
+| 门 | 必须满足 |
+|---|---|
+| 事实 | usage 与 request/purpose 一一对上；unknown 不作 0 |
+| 单一来源 | Usage/Insights 只读 Journal；无第二只业务真账 |
+| Prompt | manifest 来自 assembler；不事后拆字符串猜来源 |
+| 归因 | main/subagent/workflow/compact/host request 分账 |
+| 结果 | tool 成功、verification、outcome 三层分清 |
+| 隐私 | 默认 metadata-only；HTML/model review 无 canary |
+| 成本 | 本地分析零模型 token；模型评议显式确认并反向入账 |
+| 范围 | 默认当前 workspace；跨仓须显式开 |
+| 可靠 | active/corrupt/incomplete 单列；报告写 coverage |
+| 可重建 | 删 derived 后可从 Journal 重算，字节稳定 |
+| 安全 | clean/open 路径 containment；报告 CSP 与 escape 过 |
+| 性能 | 200-session 基线达门，数值来自实测配置 |
+| 验证 | focused、golden、security、真机、full CTest 全过 |
+
+## 十八、最终产品口径
+
+做成后，用户敲 `/usage`，看见一笔明账。哪家模型，哪类任务，主会话还是子代理，cache 吃了多少，
+compact 又花多少，全摆出来。provider 没报，纸上便写“未知”。
+
+用户敲 `/prompt audit`，看见哪层 prompt 盖了哪层，哪段太长，哪张工具表总在抖，哪条怀疑有冲突。
+每句话都牵着 source hash 或 event ref，不凭空议论。
+
+用户敲 `/insights`，LubanCode 扫当前仓近期新轨迹，验账、收数、归类、出 HTML。报告先讲样本与缺口，
+再讲 token、prompt、摩擦与建议。用户愿意多花一笔，才开模型评议。模型只替事实排次序、写人话，
+不篡账，也不充裁判。
+
+这才算 LubanCode 自己的使用洞察。底下有真账，中间有规则，上头有报告。三层各守本分。
