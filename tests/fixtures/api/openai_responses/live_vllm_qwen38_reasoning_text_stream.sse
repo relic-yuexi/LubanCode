@@ -1,0 +1,32 @@
+data: {"type":"response.created","response":{"id":"resp_aeb964886f47be44","output":[],"created_at":1756631049,"model":"qwen3.8-27b","status":"in_progress","system_fingerprint":"vllm-0.27.1-tp8-e0441ef0"}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_aeb964886f47be44","type":"reasoning","summary":[],"content":null}}
+
+data: {"type":"response.reasoning_part.added","item_id":"rs_aeb964886f47be44","output_index":0,"part":{"text":"","type":"reasoning_text"}}
+
+data: {"type":"response.reasoning_text.delta","item_id":"rs_aeb964886f47be44","output_index":0,"delta":"We"}
+
+data: {"type":"response.reasoning_text.delta","item_id":"rs_aeb964886f47be44","output_index":0,"delta":" need"}
+
+data: {"type":"response.reasoning_text.delta","item_id":"rs_aeb964886f47be44","output_index":0,"delta":" answer"}
+
+data: {"type":"response.reasoning_text.delta","item_id":"rs_aeb964886f47be44","output_index":0,"delta":" user:"}
+
+data: {"type":"response.reasoning_text.delta","item_id":"rs_aeb964886f47be44","output_index":0,"delta":" 2+2=4."}
+
+data: {"type":"response.reasoning_text.done","item_id":"rs_aeb964886f47be44","output_index":0,"text":"We need answer user: 2+2=4."}
+
+data: {"type":"response.reasoning_part.done","item_id":"rs_aeb964886f47be44","output_index":0,"part":{"text":"We need answer user: 2+2=4.","type":"reasoning_text"}}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_aeb964886f47be44","type":"reasoning","summary":[],"content":[{"text":"We need answer user: 2+2=4.","type":"reasoning_text"}],"encrypted_content":null}}
+
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"msg_5c31e0a2f8b7d902","type":"message","role":"assistant","content":[],"status":"in_progress"}}
+
+data: {"type":"response.output_text.delta","item_id":"msg_5c31e0a2f8b7d902","output_index":1,"delta":"\n\n2"}
+
+data: {"type":"response.output_text.done","item_id":"msg_5c31e0a2f8b7d902","output_index":1,"text":"\n\n2"}
+
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"msg_5c31e0a2f8b7d902","type":"message","role":"assistant","content":[{"type":"output_text","text":"\n\n2"}],"status":"completed"}}
+
+data: {"type":"response.completed","response":{"id":"resp_aeb964886f47be44","status":"completed","output":[{"id":"rs_aeb964886f47be44","type":"reasoning","summary":[],"content":[{"text":"We need answer user: 2+2=4.","type":"reasoning_text"}],"encrypted_content":null},{"id":"msg_5c31e0a2f8b7d902","type":"message","role":"assistant","content":[{"type":"output_text","text":"\n\n2"}],"status":"completed"}],"usage":{"input_tokens":59,"output_tokens":38,"total_tokens":97,"output_tokens_details":{"reasoning_tokens":0}},"system_fingerprint":"vllm-0.27.1-tp8-e0441ef0"}}
+

@@ -49262,6 +49262,77 @@
           }
         }
       }
+    },
+    "vllm": {
+      "name": "vLLM (本地)",
+      "description": "vLLM 本地推理服务 OpenAI 兼容 Chat API。base_url 写到 /v1,端口按本机部署改;无鉴权部署用 /provider 把 auth 切成 none。方言以 vLLM 0.27.1 + qwen3.8-27b 真机实测为准。",
+      "wire": "openai-chat-completions",
+      "base_url": "http://localhost:8001/v1",
+      "key_env": "VLLM_API_KEY",
+      "default_model": "qwen3.8-27b",
+      "stream_usage": true,
+      "reasoning_replay": "tool_episode",
+      "reasoning_delta_field": "reasoning",
+      "reasoning_replay_field": "reasoning",
+      "reasoning_dialect": {
+        "toggle": "chat_template_kwargs_enable_thinking",
+        "toggle_on": "true",
+        "toggle_off": "false",
+        "delta": "reasoning",
+        "replay": "tool_episode",
+        "replay_field": "reasoning",
+        "verified": true
+      },
+      "docs_url": "https://docs.vllm.ai/",
+      "models": {
+        "qwen3.8-27b": {
+          "name": "Qwen3.8 27B (vLLM)",
+          "description": "思考模型。开关只有 chat_template_kwargs.enable_thinking 真生效(顶层 enable_thinking 被端无视);思考增量字段叫 reasoning。",
+          "context_window": 262144,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true,
+            "structured_output": true
+          },
+          "reasoning": {
+            "controls": [
+              {
+                "kind": "toggle"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "vllm-anthropic": {
+      "name": "vLLM (本地, Messages)",
+      "description": "vLLM 本地推理服务 Anthropic 兼容层 /v1/messages。base_url 写根(不带 /v1);thinking.type=disabled 端上无效(思考关不掉),要关思考走 vllm(chat 面)。",
+      "wire": "anthropic-messages",
+      "base_url": "http://localhost:8001",
+      "key_env": "VLLM_API_KEY",
+      "default_model": "qwen3.8-27b",
+      "reasoning_dialect": {
+        "toggle": "none",
+        "delta": "anthropic_thinking_block",
+        "replay": "always",
+        "signature_required": true,
+        "verified": true
+      },
+      "docs_url": "https://docs.vllm.ai/",
+      "models": {
+        "qwen3.8-27b": {
+          "name": "Qwen3.8 27B (vLLM Messages)",
+          "description": "思考块带 32 位 hex 假签(signature),回传原样带走;工具轮 thinking + tool_use 完整走得通。",
+          "context_window": 262144,
+          "capabilities": {
+            "tools": true,
+            "reasoning": true
+          },
+          "reasoning": {
+            "controls": []
+          }
+        }
+      }
     }
   }
 }

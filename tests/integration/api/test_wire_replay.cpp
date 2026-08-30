@@ -687,6 +687,101 @@ TEST_CASE("wire 回环 chat: Kimi K2.5 不回传历史思考,也不误发 thinki
 }
 
 // ---------------------------------------------------------------------------
+// vLLM 本地模型四 wire 支持勘察单 P0/P1:目录 vllm 预设驱动(backend options
+// 只配 stream_usage,回传策略全由方言裁决)。qwen3 模板开关唯一生效路是
+// chat_template_kwargs.enable_thinking(顶层布尔被端无视);工具段 reasoning
+// 回传走 vLLM 0.27 新名字 reasoning,tool_call id 是 chatcmpl-tool- 前缀。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("wire 回环 chat: vLLM qwen3.8 工具循环——chat_template_kwargs 开关落线,reasoning 字段回传") {
+    std::vector<HttpRequest> received;
+    ReplayPlan plan;
+    plan.sse_rounds = {
+        FixtureStream("openai_chat", "live_vllm_qwen38_tool_episode_stream"),
+        FixtureStream("openai_chat", "vllm_qwen_reasoning_delta"),
+    };
+    plan.chunk_seed = 20260831;
+    const int port = StartReplayServer(plan, &received);
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+
+    api::chat::ChatRequestOptions options;
+    options.stream_usage = true;  // 目录镜像进配置的路,这里手动带上
+    api::chat::ChatCompletionsBackend backend(base, "test-token", 3000, 30,
+                                              nlohmann::json::object(), {}, options);
+
+    api::Request first;
+    first.model = "qwen3.8-27b";
+    first.reasoning = CatalogReasoning("vllm", "qwen3.8-27b");
+    first.reasoning_effort = "high";  // 档位只当开关用:qwen3 不吃 effort 参数
+    first.tools.push_back({"get_weather", "查天气", nlohmann::json{{"type", "object"}}});
+    first.messages.push_back(UserText("北京天气怎么样"));
+
+    std::string stop;
+    const api::Message assistant = RunRound(backend, first, &stop);
+    CHECK(stop == "tool_use");
+
+    REQUIRE(received.size() == 1);
+    CHECK(received[0].path == "/chat/completions");
+    const auto body1 = nlohmann::json::parse(received[0].body);
+    // vLLM/qwen3 契约:开关唯一生效路是嵌套键;顶层 enable_thinking、
+    // thinking、reasoning_effort 都不是这家的形状,一个不发。
+    CHECK(body1.at("chat_template_kwargs").at("enable_thinking") == true);
+    CHECK_FALSE(body1.contains("enable_thinking"));
+    CHECK_FALSE(body1.contains("thinking"));
+    CHECK_FALSE(body1.contains("reasoning_effort"));
+    CHECK(body1.at("stream_options").at("include_usage") == true);
+    // max_tokens 未声明就不发,交服务端默认(vLLM 上限 262144,思考不撞墙)。
+    CHECK_FALSE(body1.contains("max_tokens"));
+
+    const auto* thinking = std::get_if<api::ThinkingBlock>(&assistant.content.front());
+    const auto* call = std::get_if<api::ToolUseBlock>(&assistant.content.back());
+    REQUIRE(thinking != nullptr);
+    REQUIRE(call != nullptr);
+    CHECK(thinking->text == "用户问北京气温，需要调用工具查询。");
+    CHECK(call->name == "get_weather");
+    CHECK(call->id == "chatcmpl-tool-955ccbe40430534b");  // vLLM 前缀,非 call_
+    CHECK(call->input.dump() == "{\"city\":\"北京\"}");
+
+    // 第二轮:工具结果拼回历史。工具段 reasoning 按方言声明的字段名回传。
+    api::Request second;
+    second.model = first.model;
+    second.reasoning = first.reasoning;
+    second.reasoning_effort = "high";
+    second.tools = first.tools;
+    second.messages.push_back(UserText("北京天气怎么样"));
+    second.messages.push_back(assistant);
+    api::Message tool_back;
+    tool_back.role = api::Role::User;
+    tool_back.content.push_back(
+        api::ToolResultBlock{call->id, R"({"temp":"31C"})", false});
+    second.messages.push_back(std::move(tool_back));
+
+    std::string final_stop;
+    const api::Message final_message = RunRound(backend, second, &final_stop);
+    CHECK(final_stop == "end_turn");
+    REQUIRE(received.size() == 2);
+    const auto body2 = nlohmann::json::parse(received[1].body);
+    const auto& replayed = body2.at("messages")[1];
+    // vLLM 0.27 新名 reasoning(不是 DeepSeek 的 reasoning_content),原字节。
+    CHECK(replayed.at("reasoning") == "用户问北京气温，需要调用工具查询。");
+    CHECK_FALSE(replayed.contains("reasoning_content"));
+    REQUIRE(replayed.contains("tool_calls"));
+    CHECK(replayed.at("tool_calls")[0].at("id") == call->id);
+    CHECK(replayed.at("tool_calls")[0].at("function").at("name") == "get_weather");
+    CHECK(replayed.at("tool_calls")[0].at("function").at("arguments") == "{\"city\":\"北京\"}");
+    const auto& tool_message = body2.at("messages")[2];
+    CHECK(tool_message.at("role") == "tool");
+    CHECK(tool_message.at("tool_call_id") == call->id);
+    // 工具循环里开关照旧落嵌套键,形状不因轮次变脸。
+    CHECK(body2.at("chat_template_kwargs").at("enable_thinking") == true);
+
+    // 终答(既有 vLLM 思考流夹具):思考块与正文块都在,usage 尾帧记账。
+    REQUIRE(final_message.content.size() == 2);
+    CHECK(std::holds_alternative<api::ThinkingBlock>(final_message.content[0]));
+    CHECK_FALSE(std::get<api::TextBlock>(final_message.content[1]).text.empty());
+}
+
+// ---------------------------------------------------------------------------
 // Kimi 保留式思考单 P1:K2.6 开 history all 的两轮跨 Turn 回环。
 //   Request 1: U1(thinking.keep=all 已在场——第一份请求就得告诉服务端
 //              这场要保留)

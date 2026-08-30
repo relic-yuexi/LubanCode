@@ -1,0 +1,24 @@
+data: {"id":"chatcmpl-e3f81c0a5b7d42f9","object":"chat.completion.chunk","created":1756630831,"model":"qwen3.8-27b","system_fingerprint":"vllm-0.27.1-tp8-e0441ef0","choices":[{"index":0,"delta":{"role":"assistant","content":""},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-e3f81c0a5b7d42f9","object":"chat.completion.chunk","model":"qwen3.8-27b","choices":[{"index":0,"delta":{"reasoning":"用户"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-e3f81c0a5b7d42f9","object":"chat.completion.chunk","model":"qwen3.8-27b","choices":[{"index":0,"delta":{"reasoning":"问北京"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-e3f81c0a5b7d42f9","object":"chat.completion.chunk","model":"qwen3.8-27b","choices":[{"index":0,"delta":{"reasoning":"气温，"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-e3f81c0a5b7d42f9","object":"chat.completion.chunk","model":"qwen3.8-27b","choices":[{"index":0,"delta":{"reasoning":"需要调用工具"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-e3f81c0a5b7d42f9","object":"chat.completion.chunk","model":"qwen3.8-27b","choices":[{"index":0,"delta":{"reasoning":"查询。"},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-e3f81c0a5b7d42f9","object":"chat.completion.chunk","model":"qwen3.8-27b","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"id":"chatcmpl-tool-955ccbe40430534b","type":"function","function":{"name":"get_weather"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-e3f81c0a5b7d42f9","object":"chat.completion.chunk","model":"qwen3.8-27b","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"city\": \""}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-e3f81c0a5b7d42f9","object":"chat.completion.chunk","model":"qwen3.8-27b","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"北京"}}]},"finish_reason":null}]}
+
+data: {"id":"chatcmpl-e3f81c0a5b7d42f9","object":"chat.completion.chunk","model":"qwen3.8-27b","choices":[{"index":0,"delta":{"tool_calls":[{"index":0,"function":{"arguments":"\"}"}}]},"finish_reason":"tool_calls"}]}
+
+data: {"id":"chatcmpl-e3f81c0a5b7d42f9","object":"chat.completion.chunk","model":"qwen3.8-27b","choices":[],"usage":{"prompt_tokens":59,"total_tokens":91,"completion_tokens":32}}
+
+data: [DONE]
+

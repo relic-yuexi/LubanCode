@@ -265,7 +265,8 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
         const bool off = ReasoningEffortIsOff(request.reasoning_effort, request.reasoning);
         const auto& dialect = request.reasoning.dialect;
         const bool dialect_toggle = dialect.toggle == "enable_thinking_bool" ||
-                                    dialect.toggle == "thinking_type";
+                                    dialect.toggle == "thinking_type" ||
+                                    dialect.toggle == "chat_template_kwargs_enable_thinking";
 
         // 档位:方言声明了 effort_path 才按形状落,落不落仍看模型声明没声明
         // effort 档;没方言走 legacy(参数名按 provider 本地声明)。
@@ -293,6 +294,11 @@ nlohmann::json BuildRequestJson(const Request& request, const nlohmann::json& ex
         if (dialect_toggle && request.reasoning.supports_toggle) {
             if (dialect.toggle == "enable_thinking_bool") {
                 body["enable_thinking"] = !off;
+            } else if (dialect.toggle == "chat_template_kwargs_enable_thinking") {
+                // vLLM/qwen 模板开关:嵌套键。extra_body 的浅合并规矩照旧——
+                // 用户显式写了顶层 chat_template_kwargs 就整个压过这里(想带
+                // 别的模板参数得整份写,同 stream_options 的待遇)。
+                body["chat_template_kwargs"] = json{{"enable_thinking", !off}};
             } else {
                 body["thinking"] = json{{"type", off ? dialect.toggle_off : dialect.toggle_on}};
             }

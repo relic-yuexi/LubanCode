@@ -1,0 +1,24 @@
+{
+  "fixture_id": "live_vllm_qwen38_reasoning_text_stream",
+  "wire": "openai-responses",
+  "provider": "vllm",
+  "model": "qwen3.8-27b",
+  "scenario": "reasoning_item_reasoning_text_delta_then_message",
+  "source_document": "internal",
+  "captured_at": "2026-08-31",
+  "request_expectation": {"store": false},
+  "expected_events": [
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "TextDelta",
+    "ContentBlockDone",
+    "MessageDone"
+  ],
+  "expected_replay": ["reasoning 项不回传(vLLM responses 面思考一次性,无 reasoning 回传形状;output_item.added(reasoning)/reasoning_part.*/reasoning_text.done 全部静默跳过)"],
+  "usage_expectation": {"input_tokens": 59, "output_tokens": 38, "cache_read_tokens": 0, "cache_creation_tokens": 0, "output_reasoning_tokens": 0},
+  "stop_reason": "end_turn",
+  "notes": "vLLM 0.27.1 + qwen3.8-27b /v1/responses 真机实录缩样(vLLM 本地模型四 wire 支持勘察单 P0)。思考正文走 response.reasoning_text.delta(vLLM 扩展,OpenAI 新版 API 同名),summary 恒空——与 summary 系(reasoning_summary_text.delta)不同源。落地前 parser 只认 summary 系,本册 expected_events 记 ThinkingDelta×5 即先红后绿的回归钉。正文首帧 \\n\\n 前导是模板产物,原样透传。"
+}

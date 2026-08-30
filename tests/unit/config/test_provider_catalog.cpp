@@ -376,3 +376,119 @@ TEST_CASE("方言 history_control 的解析边界:拼错枚举、错 wire、模�
     REQUIRE(clears != nullptr);
     CHECK(clears->reasoning.dialect.history_control.empty());  // 显式清位
 }
+
+// ---------------------------------------------------------------------------
+// vLLM 本地模型四 wire 支持勘察单 P1:chat_template_kwargs_enable_thinking
+// 形状与本地端点的目录名分。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("方言 toggle chat_template_kwargs_enable_thinking:chat 家认,别家 parse 阶段拒") {
+    const auto chat_ok = config::ParseProviderCatalogJson(R"({
+      "schema_version": 2, "revision": "2026-08-31",
+      "providers": {"d": {"name": "D", "wire": "chat_completions",
+        "base_url": "https://a.test/v1", "key_env": "D_KEY", "default_model": "m",
+        "reasoning_dialect": {"toggle": "chat_template_kwargs_enable_thinking",
+          "toggle_on": "true", "toggle_off": "false"},
+        "models": {"m": {"name": "M"}}}}})", "p");
+    REQUIRE_MESSAGE(chat_ok.has_value(), chat_ok.error_or(std::string()));
+    const auto& dialect = chat_ok->FindProvider("d")->reasoning_dialect;
+    CHECK(dialect.toggle == "chat_template_kwargs_enable_thinking");
+    CHECK(dialect.toggle_on == "true");
+    CHECK(dialect.toggle_off == "false");
+
+    // responses 家:勘察单明说未实测(同源推测不写死),parse 阶段就拒。
+    const auto responses_bad = config::ParseProviderCatalogJson(R"({
+      "schema_version": 2, "revision": "2026-08-31",
+      "providers": {"d": {"name": "D", "wire": "responses",
+        "base_url": "https://a.test/v1", "key_env": "D_KEY", "default_model": "m",
+        "reasoning_dialect": {"toggle": "chat_template_kwargs_enable_thinking"},
+        "models": {"m": {"name": "M"}}}}})", "p");
+    CHECK_FALSE(responses_bad.has_value());
+
+    // anthropic 家:开关只认 thinking_type,同样拒。
+    const auto anthropic_bad = config::ParseProviderCatalogJson(R"({
+      "schema_version": 2, "revision": "2026-08-31",
+      "providers": {"d": {"name": "D", "wire": "anthropic_messages",
+        "base_url": "https://a.test/v1", "key_env": "D_KEY", "default_model": "m",
+        "reasoning_dialect": {"toggle": "chat_template_kwargs_enable_thinking"},
+        "models": {"m": {"name": "M"}}}}})", "p");
+    CHECK_FALSE(anthropic_bad.has_value());
+
+    // toggle_on 拿 thinking_type 的值(非 true/false)也报错。
+    const auto bad_value = config::ParseProviderCatalogJson(R"({
+      "schema_version": 2, "revision": "2026-08-31",
+      "providers": {"d": {"name": "D", "wire": "chat_completions",
+        "base_url": "https://a.test/v1", "key_env": "D_KEY", "default_model": "m",
+        "reasoning_dialect": {"toggle": "chat_template_kwargs_enable_thinking",
+          "toggle_on": "enabled"},
+        "models": {"m": {"name": "M"}}}}})", "p");
+    CHECK_FALSE(bad_value.has_value());
+
+    // 人话描述:chat_template_kwargs.enable_thinking=true/false。
+    CHECK(config::DescribeReasoningDialect(dialect) ==
+          "chat_template_kwargs.enable_thinking=true/false");
+}
+
+TEST_CASE("base_url 本地端点放行:localhost/127.0.0.1 回环可 http,假回环域名仍拒") {
+    const auto body = [](const std::string& base_url) {
+        return std::string(R"({"schema_version": 2, "revision": "2026-08-31",
+      "providers": {"d": {"name": "D", "wire": "chat_completions",
+        "base_url": ")") + base_url +
+               R"(", "key_env": "D_KEY", "default_model": "m",
+        "models": {"m": {"name": "M"}}}}})";
+    };
+    // 回环两种写法(带端口/带路径)都放行。
+    CHECK(config::ParseProviderCatalogJson(body("http://localhost:8001/v1"), "p").has_value());
+    CHECK(config::ParseProviderCatalogJson(body("http://127.0.0.1:11434/v1"), "p").has_value());
+    CHECK(config::ParseProviderCatalogJson(body("http://localhost"), "p").has_value());
+    // 假回环域名(localhost.evil.com)、普通明文 http、别的主机名仍拒。
+    CHECK_FALSE(config::ParseProviderCatalogJson(body("http://localhost.evil.com/v1"), "p").has_value());
+    CHECK_FALSE(config::ParseProviderCatalogJson(body("http://192.168.1.5:8001/v1"), "p").has_value());
+    CHECK_FALSE(config::ParseProviderCatalogJson(body("http://api.example.test/v1"), "p").has_value());
+}
+
+TEST_CASE("内置 vLLM 双预设:chat 面模板开关方言,messages 面假签回传账") {
+    const auto catalog = config::ParseProviderCatalogJson(
+        config::embedded::kProviderCatalogJson, "<embedded>");
+    REQUIRE(catalog.has_value());
+
+    const auto* vllm = catalog->FindProvider("vllm");
+    REQUIRE(vllm != nullptr);
+    CHECK(vllm->wire == config::Wire::ChatCompletions);
+    CHECK(vllm->base_url == "http://localhost:8001/v1");
+    CHECK(vllm->stream_usage);
+    CHECK(vllm->reasoning_replay == "tool_episode");
+    CHECK(vllm->reasoning_delta_field == "reasoning");
+    CHECK(vllm->reasoning_replay_field == "reasoning");
+    CHECK(vllm->reasoning_dialect.toggle == "chat_template_kwargs_enable_thinking");
+    CHECK(vllm->reasoning_dialect.delta == "reasoning");
+    CHECK(vllm->reasoning_dialect.replay == "tool_episode");
+    CHECK(vllm->reasoning_dialect.replay_field == "reasoning");
+    CHECK(vllm->reasoning_dialect.verified);
+    const auto* qwen = vllm->FindModel("qwen3.8-27b");
+    REQUIRE(qwen != nullptr);
+    CHECK(qwen->reasoning.supports_toggle);
+    CHECK(qwen->reasoning.dialect.toggle == "chat_template_kwargs_enable_thinking");  // 继承
+    CHECK(qwen->context_window_tokens == std::size_t{262144});
+    // preset -> 本地配置镜像:回传策略与字段名一并带走。
+    const auto provider = config::ProviderConfigFromPreset(*vllm);
+    CHECK(provider.reasoning_replay == "tool_episode");
+    CHECK(provider.reasoning_replay_field == "reasoning");
+    CHECK(provider.reasoning_delta_field == "reasoning");
+    CHECK(provider.stream_usage);
+
+    const auto* messages = catalog->FindProvider("vllm-anthropic");
+    REQUIRE(messages != nullptr);
+    CHECK(messages->wire == config::Wire::Anthropic);
+    CHECK(messages->base_url == "http://localhost:8001");
+    CHECK(messages->reasoning_dialect.toggle == "none");  // thinking.type=disabled 端上无效,不声明
+    CHECK(messages->reasoning_dialect.delta == "anthropic_thinking_block");
+    CHECK(messages->reasoning_dialect.signature_required);  // hex 假签回传,实测走得通
+    CHECK(messages->reasoning_dialect.replay == "always");  // 思考关不掉,服务端固定
+    const auto* qwen_msg = messages->FindModel("qwen3.8-27b");
+    REQUIRE(qwen_msg != nullptr);
+    CHECK(qwen_msg->reasoning.dialect.signature_required);  // 继承
+    // 服务端固定开启/关不掉:replay=always 且无请求控制 -> ServerFixed。
+    CHECK(api::ReasoningHistorySupportFor(qwen_msg->reasoning) ==
+          api::ReasoningHistorySupport::ServerFixed);
+}

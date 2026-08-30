@@ -38,10 +38,13 @@ enum class ReasoningHistorySupport {
 struct ReasoningWireDialect {
     // 开关怎么写:none(不发) | enable_thinking_bool(顶层布尔) |
     // thinking_type({"thinking":{"type":...}})| include_thoughts
-    // (Gemini thinkingConfig.includeThoughts,budget=0 表关)
+    // (Gemini thinkingConfig.includeThoughts,budget=0 表关) |
+    // chat_template_kwargs_enable_thinking(嵌套
+    // body["chat_template_kwargs"]["enable_thinking"],vLLM/qwen 模板开关——
+    // 本机 vLLM 0.27.1 实测顶层 enable_thinking 被无视,唯一生效路)
     std::string toggle = "none";
-    // 开/关的值:enable_thinking_bool 用 "true"/"false";thinking_type 用
-    // "enabled"/"adaptive"/"disabled"。
+    // 开/关的值:enable_thinking_bool 与 chat_template_kwargs_enable_thinking
+    // 用 "true"/"false";thinking_type 用 "enabled"/"adaptive"/"disabled"。
     std::string toggle_on = "true";
     std::string toggle_off = "false";
     // 档位怎么写:空 = none | "reasoning.effort" | "reasoning_effort"

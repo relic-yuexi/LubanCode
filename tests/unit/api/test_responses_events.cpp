@@ -120,6 +120,47 @@ TEST_CASE("response.reasoning_summary_text.delta 映射出 ThinkingDelta,done �
     CHECK_FALSE(done_event.has_value());
 }
 
+// vLLM 本地模型四 wire 支持勘察单 P0:思考正文走 reasoning_text 系
+// (vLLM 扩展,OpenAI 新版 API 同名),与 summary 系(服务端摘要)不同源。
+// 落地前 parser 只认 summary 系,reasoning_text.delta 帧帧静默跳过,
+// 思考整段丢——这两册就是那道回归钉。
+TEST_CASE("response.reasoning_text.delta 映射出 ThinkingDelta,done/part 系静默跳过") {
+    auto delta_event = parse_event(Frame(
+        R"({"delta":"We","item_id":"rs_aeb964886f47be44","output_index":0,"type":"response.reasoning_text.delta"})"));
+    REQUIRE(delta_event.has_value());
+    REQUIRE(std::holds_alternative<ThinkingDelta>(*delta_event));
+    CHECK(std::get<ThinkingDelta>(*delta_event).text == "We");
+
+    auto done_event = parse_event(Frame(
+        R"({"text":"We need answer user: 2+2=4.","item_id":"rs_aeb964886f47be44","output_index":0,"type":"response.reasoning_text.done"})"));
+    CHECK_FALSE(done_event.has_value());
+
+    auto part_added = parse_event(Frame(
+        R"({"item_id":"rs_aeb964886f47be44","output_index":0,"part":{"text":"","type":"reasoning_text"},"type":"response.reasoning_part.added"})"));
+    CHECK_FALSE(part_added.has_value());
+
+    auto part_done = parse_event(Frame(
+        R"({"item_id":"rs_aeb964886f47be44","output_index":0,"part":{"text":"We need answer user: 2+2=4.","type":"reasoning_text"},"type":"response.reasoning_part.done"})"));
+    CHECK_FALSE(part_done.has_value());
+}
+
+TEST_CASE("summary 系与 reasoning_text 系并存不串线:两只事件名同帧流各吐各的 ThinkingDelta") {
+    auto summary_delta = parse_event(Frame(
+        R"({"delta":"摘要一片","output_index":0,"type":"response.reasoning_summary_text.delta","item_id":"rs_x","summary_index":0})"));
+    REQUIRE(summary_delta.has_value());
+    CHECK(std::get<ThinkingDelta>(*summary_delta).text == "摘要一片");
+
+    auto text_delta = parse_event(Frame(
+        R"({"delta":"思考一片","output_index":0,"type":"response.reasoning_text.delta","item_id":"rs_y"})"));
+    REQUIRE(text_delta.has_value());
+    CHECK(std::get<ThinkingDelta>(*text_delta).text == "思考一片");
+
+    // 空 delta 不发空事件(与 summary 系同一道闸)。
+    auto empty_delta = parse_event(Frame(
+        R"({"delta":"","output_index":0,"type":"response.reasoning_text.delta","item_id":"rs_y"})"));
+    CHECK_FALSE(empty_delta.has_value());
+}
+
 TEST_CASE("response.completed:纯文本回复,output 里没有 function_call,stop_reason 是 end_turn") {
     auto event = parse_event(Frame(
         R"({"type":"response.completed","response":{"id":"428c90e9-9cd6-90a6-9726-c02b08ebexxx","status":"completed","output":[{"type":"message","id":"msg_1","role":"assistant","status":"completed","content":[{"type":"output_text","text":"你好"}]}],"usage":{"input_tokens":37,"output_tokens":243,"total_tokens":280}},"sequence_number":56})"));
