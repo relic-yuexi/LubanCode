@@ -8,7 +8,7 @@
 
 ## param.prompt
 
-交给子代理的任务描述,必须自包含——子代理看不见主对话历史,任务目标、范围、期望的输出形式都要写清楚。
+(兼容旧参)交给子代理的任务描述,必须自包含——子代理看不见主对话历史,任务目标、范围、期望的输出形式都要写清楚。新调用建议改用 task 对象:goal/context/scope/constraints/acceptance/deliverable 分栏,宿主可校验、面板可分栏展示。task 与 prompt 同时给会直接拒绝。
 
 ## param.agent_type
 
@@ -21,6 +21,50 @@
 ## param.run_in_background
 
 (兼容旧参)是否放到会话后台运行:true 等价 execution_mode=background,false 等价 foreground。新调用建议用 execution_mode。
+
+## param.task
+
+结构化任务合同:goal 与 deliverable 必填,其余可选。与 prompt 二选一(同给即拒)。新调用优先用它——目标、范围、约束、验收、交付分栏放好,子代理、面板与轨迹都从这一份 canonical 合同投影。
+
+## param.task.goal
+
+必填。子代理要达成什么:一件事,不把整段对话倒进来。
+
+## param.task.source_request
+
+可选。只放用户原话摘录;派工者自己的猜测与归纳放 context,不冒充用户要求。
+
+## param.task.context
+
+子代理看不见却真必须知道的事实与背景:已查到的源码边界、上游决定、错误原文。至多 16 条。
+
+## param.task.scope
+
+任务范围(仓库任务才填,非文件任务可省)。
+
+## param.task.scope.include_paths
+
+任务要看的路径范围(是任务边界,不是权限边界)。
+
+## param.task.scope.exclude_paths
+
+明确排除的路径。
+
+## param.task.constraints
+
+限制项:不改哪里、不 commit、只读等。不靠它放宽沙箱。至多 16 条。
+
+## param.task.acceptance
+
+验收条件,一条一个可查条件。调研任务也可写"给文件与行号,把已实现与 TODO 分开"。
+
+## param.task.deliverable
+
+必填。要回什么:结论/修复/表格/证据等。子代理收工时按它交付,不自行换成长篇汇报。
+
+## param.task.schema_version
+
+合同版本,当前 1(可省)。
 
 ## param.isolation
 

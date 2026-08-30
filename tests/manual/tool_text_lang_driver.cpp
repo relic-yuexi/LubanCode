@@ -19,6 +19,7 @@
 #include <filesystem>
 #include <functional>
 #include <iostream>
+#include <sstream>
 #include <memory>
 #include <set>
 #include <string>
@@ -70,9 +71,23 @@ struct NullBackend : lubancode::api::Backend {
     }
 };
 
-void DumpParam(const nlohmann::json& schema, const char* prop, const char* tag) {
-    std::cout << "== " << tag << " ==\n"
-              << schema["properties"][prop]["description"].get<std::string>() << "\n";
+void DumpParam(const nlohmann::json& schema, const std::string& prop, const char* tag) {
+    // prop 支持点分段:顶层 "prompt" 或嵌套 "task.goal"/"task.scope.include_paths"
+    // ——逐段下钻,非末段先落对象本身再进它的 properties 字段表。
+    nlohmann::json node = schema["properties"];
+    std::vector<std::string> segments;
+    std::string segment;
+    std::istringstream path(prop);
+    while (std::getline(path, segment, '.')) {
+        segments.push_back(segment);
+    }
+    for (std::size_t i = 0; i < segments.size(); ++i) {
+        node = node[segments[i]];
+        if (i + 1 < segments.size()) {
+            node = node["properties"];
+        }
+    }
+    std::cout << "== " << tag << " ==\n" << node["description"].get<std::string>() << "\n";
 }
 
 }  // namespace
@@ -109,6 +124,18 @@ int main() {
     const nlohmann::json as = agent.input_schema();
     DumpParam(as, "title", "agent.param.title");
     DumpParam(as, "prompt", "agent.param.prompt");
+    // P0-1 结构化任务合同:task 对象与各分栏一并转录,两语言档对账。
+    DumpParam(as, "task", "agent.param.task");
+    DumpParam(as, "task.goal", "agent.param.task.goal");
+    DumpParam(as, "task.source_request", "agent.param.task.source_request");
+    DumpParam(as, "task.context", "agent.param.task.context");
+    DumpParam(as, "task.scope", "agent.param.task.scope");
+    DumpParam(as, "task.scope.include_paths", "agent.param.task.scope.include_paths");
+    DumpParam(as, "task.scope.exclude_paths", "agent.param.task.scope.exclude_paths");
+    DumpParam(as, "task.constraints", "agent.param.task.constraints");
+    DumpParam(as, "task.acceptance", "agent.param.task.acceptance");
+    DumpParam(as, "task.deliverable", "agent.param.task.deliverable");
+    DumpParam(as, "task.schema_version", "agent.param.task.schema_version");
     // max_steps_per_turn 不再出 schema(限步走配置,不给模型旋钮),故不转录。
     DumpParam(as, "agent_type", "agent.param.agent_type");
     DumpParam(as, "execution_mode", "agent.param.execution_mode");

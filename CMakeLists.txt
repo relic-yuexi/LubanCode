@@ -384,6 +384,8 @@ add_library(lubancode_engine STATIC
   # 骨架拆解批三·病十四:AgentTool 六职拆分出的台账/调度/隔间三件。
   src/tools/task_ledger.cpp
   src/tools/subagent_scheduler.cpp
+  # 递归派工单 P0-3:会话级派工协调器(台账/治理/线程表/closing 唯一 owner)。
+  src/tools/agent_task_coordinator.cpp
   src/tools/subagent_isolation.cpp
   src/tools/agent_message_tool.cpp
   src/tools/hooks.cpp
@@ -423,6 +425,8 @@ add_library(lubancode_engine STATIC
   # 骨架拆解批三·harness 合流:主回合与子代理共用的续投外环/取消链/
   # 收场分型/Stop 续跑环。
   src/agent/turn_harness.cpp
+  # 递归派工单 P0-1:结构化任务合同(parse/validate/canonicalize/render)。
+  src/agent/task_spec.cpp
   # 骨架拆解批七·病十五:peer 域/会话域/技能域物件迁出 agent/(目录归位,
   # target 不动——engine 的 tool_trace/artifact_store 仍引它们的纯函数)。
   src/peers/peer_registry.cpp

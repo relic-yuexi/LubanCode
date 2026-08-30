@@ -12,6 +12,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <deque>
 #include <memory>
@@ -24,7 +25,9 @@
 #include <nlohmann/json.hpp>
 
 #include "agent/loop.hpp"  // ToolTraceEvent 等转发类型(与拆分前同一份引用)
+#include "agent/task_spec.hpp"  // AgentTaskSpec:P0-1 canonical 任务合同
 #include "api/types.hpp"
+#include "tools/subagent_scheduler.hpp"  // SubagentGovernance/AgentLedgerStats:P0-2 纯 admission
 
 namespace lubancode::tools {
 
@@ -36,7 +39,27 @@ class AgentTool;
 // 默认住一起;宽限是实现细节,住这边。
 constexpr int kDefaultSubagentWallClockGraceSecs = 30;
 
-enum class AgentTaskState { Running, Done, Failed, Cancelled, BudgetExhausted };
+// 运行态扩充(递归派工单 §八):WaitingChildren = 自己已写完、正等孩子;
+// Completing = 活孩子清零、正在收口。两者都算"活"——占并发槽、可传话、
+// 可取消;终态四枚一字不动。
+enum class AgentTaskState { Running, WaitingChildren, Completing, Done, Failed, Cancelled, BudgetExhausted };
+
+// 活态判定:所有"还占着资源、还可能翻终态"的状态。台账里凡是先前拿
+// `state == Running` 当"还在跑"的口子,一律换这一枚——WaitingChildren 的
+// 父任务不许被当成已收尾(否则 attached 孩子成孤儿)。
+inline bool IsAliveTaskState(AgentTaskState state) {
+    return state == AgentTaskState::Running || state == AgentTaskState::WaitingChildren ||
+           state == AgentTaskState::Completing;
+}
+
+// 完成结果的送达去处(递归派工单 §7.1):前台结果走当前工具调用直接回
+// 调用者(台账仍记 parent 便于对账);后台结果要么进 main 回合上下文,
+// 要么进直接父任务的 mailbox——绝不跨级飞 main。
+enum class TaskDeliveryTarget {
+    ForegroundCaller,   // 前台:作为当前 agent 工具调用的 Tool::Result 回调用者
+    MainTurnContext,    // 后台根任务:main 的下一轮请求里送达(DrainCompletionNotices)
+    ParentTaskInbox,    // 后台嵌套:直接父任务的 mailbox(continuation 取件)
+};
 
 // ---------------------------------------------------------------------------
 // 子代理的结构化结果(规格"现场三"):子代理不得只交 text + is_error。
@@ -62,6 +85,12 @@ enum class TaskOutcomeReason {
     UserStop,      // 用户中止
     WallClockTimeout,  // 整轮墙钟上限兜底(subagent.wall_clock_timeout_secs)
     ProtocolError, // 会话协议异常(连历史都没有等)
+    // ---- 收场原因补齐(递归派工单 §8.3):注册后才会撞上的收场细分 ----
+    InitializationFailed,  // 注册后的 backend/registry/worker 构造失败(Failed)
+    ParentCancelled,       // 父任务取消引发的级联(子记 Cancelled,不冒充 UserStop)
+    SessionClosing,        // 会话收场向下取消整树(Cancelled)
+    HookDenied,            // hook 拒绝派工(Failed;拒绝发生在注册前则不造 TaskOutcome)
+    ShutdownTimeoutUnknown,  // 停机超时未证实结束(映射 Failed,不冒充已收净)
 };
 
 // ---------------------------------------------------------------------------
@@ -137,8 +166,19 @@ struct AgentTaskSnapshot {
     std::string agent_type;
     // 真正短标题(人看的语义字段,与 prompt 分家)。新建任务必填;旧任务
     // 没有就空着,显示层退"未命名子代理 #N",绝不回退到 prompt 前若干字。
+    // P0-1 起 title 是 canonical spec 的读投影——真值在 spec->title,这里
+    // 拷一份给旧消费方(面板/通知),两边由注册口一次写齐。
     std::string title;
     std::string prompt;
+    // ---- 显式 lineage(递归派工单 §7.1):parent 只认 child 记录上的
+    // parent_task_id;root/depth 注册时从父边一次算出,之后不可改。----
+    int parent_task_id = 0;  // 0 = main 派出
+    int root_task_id = 0;    // 根子任务自己的 id(根任务上 == 自己的 id)
+    int depth = 1;           // main=0,子=1,孙=2
+    TaskDeliveryTarget delivery_target = TaskDeliveryTarget::MainTurnContext;
+    // canonical 任务合同(P0-1):不可变 shared 对象;title/prompt 是它的
+    // 读投影。空(旧调用方直建快照)= 走 legacy prompt 账。
+    std::shared_ptr<const agent::AgentTaskSpec> spec;
     // 前台(阻塞父级调用)还是后台(独立线程)。详情可看,列表不必铺。
     bool foreground = false;
     AgentTaskState state = AgentTaskState::Running;
@@ -217,6 +257,11 @@ struct AgentTaskSummary {
     std::string agent_type;
     std::string title;  // 真正短标题;空 = 旧任务,显示层退"未命名子代理 #N"
     std::string prompt;
+    // lineage 投影(P0-2):Dock 画树、通知认父子都从这几枚读,不另养账。
+    int parent_task_id = 0;
+    int root_task_id = 0;
+    int depth = 1;
+    TaskDeliveryTarget delivery_target = TaskDeliveryTarget::MainTurnContext;
     bool foreground = false;
     AgentTaskState state = AgentTaskState::Running;
     // 停止信号已发、任务线程还没报终态(Running && stop_requested = 面板行
@@ -258,6 +303,15 @@ enum class TaskMessageStatus {
 // agent_message 工具转交是 MainAgent。
 enum class TaskMessageSource { User, MainAgent };
 
+// mailbox 分型(递归派工单 §9.2):ChildCompletion 带结构化头(子任务结果
+// 是外来资料,给模型的投影一律带来路声明),其余三型走原有文案。
+enum class TaskMailboxKind {
+    UserSteering,      // 用户/查看态介入(旧 InboxItem 缺省型)
+    ParentSteering,    // 父代理经 agent_message 转交(MainAgent 的 lineage 化名)
+    ChildCompletion,   // 直接子任务的结构化完成结果
+    HostNotice,        // 宿主通知(收场提醒等)
+};
+
 // ---------------------------------------------------------------------------
 // TaskRecord:一只任务的全套账。从前是 AgentTool 的私有嵌套,拆出随台账
 // 走(TraceBackend/看门狗闭包要 shared_ptr 自保)。
@@ -267,10 +321,15 @@ struct TaskRecord {
     // inbox 轮询)都拿 inbox_mutex;终态判定+投递在台账锁内成对完成,任务
     // 收尾后不可能再排进新信。delivered 标记:轮次边界取走的那条不再重发;
     // 未送达的留给详情展示与收场报告。
+    // P0-4 起 mailbox 分型:ChildCompletion 项带 child_task_id——restore
+    // (父续投失败退信)时要把那只子任务的 delivered 一并退回,"读出来了
+    // 不等于送达了"。
     struct InboxItem {
         std::string text;
         bool delivered = false;
         TaskMessageSource source = TaskMessageSource::User;
+        TaskMailboxKind kind = TaskMailboxKind::UserSteering;
+        int child_task_id = 0;  // ChildCompletion 型:来源子任务的 id
     };
     AgentTaskSnapshot snapshot;
     std::atomic<bool> cancel{false};
@@ -300,6 +359,9 @@ struct TaskRecord {
     // 看门狗强制收账后置位:任务线程晚到的收尾不得再把台账翻回去
     //(状态/结果/outcome 一律保持强制收账那份)。
     bool force_finalized = false;
+    // 父任务取消引发的级联(P0-2 取消树):收尾分型据此把孩子记成
+    // Cancelled/ParentCancelled,不冒充它自己收到了 UserStop。
+    bool cancelled_by_parent = false;
     // 墙钟看门狗线程(RunTask 起,收尾块 join):闭包另握一份 record 的
     // shared_ptr 自保——任务线程卡死的绝境下 record 不悬垂。
     std::thread watchdog;
@@ -312,11 +374,14 @@ struct TaskRecord {
 
 // 续投交接的取件批次:SealOrContinueInbox 取走未送项时记下标与原文;续跑
 // 若失败(取消/provider 错误),按 indices 把这批退回未送,收场报告照列
-// 原文——不能"取走了就当送到了"。
+// 原文——不能"取走了就当送到了"。P0-4:批次里的 ChildCompletion 项带
+// child_task_id,restore 时连子任务的 delivered 一起退。
 struct DrainedInbox {
     std::vector<std::size_t> indices;
     std::vector<std::string> texts;
     std::vector<TaskMessageSource> sources;
+    std::vector<TaskMailboxKind> kinds;  // 与 indices 按位对齐(ChildCompletion 的投递格式不同)
+    std::vector<int> child_task_ids;  // 与 indices 按位对齐;非子完成项为 0
 };
 
 // ---------------------------------------------------------------------------
@@ -331,8 +396,27 @@ public:
 
     // 注册一只新任务:snapshot 的 id 在这里发,start_time/cancel 派生字段
     // 由调用方先填好。返回 TaskRecord 的 shared_ptr(看门狗/任务线程闭包
-    // 自持自保)。
+    // 自持自保)。P0-2 起这是不走 admission 的旧口(测试/兼容);真派工走
+    // TryRegisterChild。
     std::shared_ptr<TaskRecord> Register(AgentTaskSnapshot snapshot);
+
+    // ---- lineage 注册事务(P0-2:一笔写事务"验父->判限额->分 id->注册
+    // child")。父终态与孩子派出可能在两条线程同时撞上,"先查父再注册"若
+    // 松锁必留缝,故而全在同一锁域做完。proto 需先填好 parent_task_id 与
+    // delivery_target;requested_depth 由调用方按 caller.depth+1 递进,这里
+    // 对账父记录。拒绝返回 nullptr 并把模型可见文案写进 error_out——不注册
+    // 半条任务,不发 provider 请求。
+    std::shared_ptr<TaskRecord> TryRegisterChild(AgentTaskSnapshot proto, int requested_depth,
+                                                 const SubagentGovernance& governance,
+                                                 std::string* error_out);
+
+    // ---- lineage 查询(children 只是派生索引,从 parent_task_id 重建)----
+    std::vector<int> ChildTaskIds(int parent_task_id) const;
+    std::size_t AliveChildCount(int parent_task_id) const;
+    // 一棵根树的累计节点数(终态也算,max_tree_nodes 的口径)。
+    std::size_t TreeNodesCount(int root_task_id) const;
+    // admission 用的锁内快照(活跃数含等孩子的父节点,单子 §7.3)。
+    AgentLedgerStats StatsForAdmission(int parent_task_id, int root_task_id) const;
 
     // 修订号 +1(面板/查看态按它决定重画)。原子,任何线程可调。
     void Touch() { revision_.fetch_add(1, std::memory_order_release); }
@@ -353,12 +437,14 @@ public:
     std::vector<std::string> PendingMessages(int task_id) const;
 
     // ---- 介入/取消/清理 ----
-    // 定向介入:终态明确拒收(不改投 main)。
+    // 定向介入:非活态(终态/封账)明确拒收(不改投 main)。
     TaskMessageStatus SendMessage(int task_id, const std::string& text,
                                   TaskMessageSource source = TaskMessageSource::User);
-    // 正式取消(面板 x):只发停止信号,等任务线程报出终态。
+    // 正式取消(面板 x / agent 取消口):父停则向下取消整棵子树(单子不变量
+    // 5)——后代各发停止信号并记 cancelled_by_parent,收尾按
+    // Cancelled/ParentCancelled 分型。只发信号,等各任务线程自己报终态。
     bool CancelTask(int task_id);
-    // 停全部运行中任务,返回发了停止信号的任务数。
+    // 停全部活任务(含向下级联),返回发了停止信号的任务数。
     int CancelAllTasks();
     // 把一条终态任务从面板/台账清掉(顺带清它的介入消息)。运行中不给清。
     bool ClearFinishedTask(int task_id);
@@ -368,7 +454,10 @@ public:
 
     // ---- 投递口(主循环轮询)----
     bool HasRunningTasks() const;
-    std::size_t RunningCount() const;  // 后台启动前的同步先手检查用
+    std::size_t RunningCount() const;  // 后台启动前的同步先手检查用(活态计数)
+    // main 回合上下文里还有没有未送达的完成结果:只认 delivery_target ==
+    // MainTurnContext 的根子任务——ParentTaskInbox 的账归直接父,main 不
+    // 跨级提走(P0-4)。
     bool HasUndeliveredCompletions() const;
     // 旧线程收柄探测:这只任务(按 id)是否已进终态、它的线程可以收柄。
     // 认不出(没这只任务——比如已被 ClearFinishedTask 清掉)也按已收尾
@@ -380,8 +469,20 @@ public:
     void BroadcastCancel();
     std::vector<std::string> CompletionNoticeLines() const;
     std::vector<int> UndeliveredCompletionTaskIds() const;
-    // 取走攒着的后台完成通知(结果全文,交回主模型)。
+    // 取走攒着的后台完成通知(结果全文,交回主模型)。P0-4 起按送达去处
+    // 取:无参缺省只取 MainTurnContext(根子任务);嵌套子任务的完成走
+    // 直接父 mailbox(DeliverChildCompletion),不在这里被 main 一把提走。
     std::string DrainCompletionNotices();
+
+    // ---- 后台递归的结果归父(P0-4)----
+    // 子任务线程收尾后调:delivery=ParentTaskInbox 且父仍活,则把结构化
+    // ChildCompletion 项排进父 mailbox(带"外来资料"来路声明),子任务的
+    // delivered 翻真,并唤醒等孩子的父。父已不活(看门狗强收的绝境)则
+    // 保持未送达,收场报告照列——不 reparent,不悄悄改投 main。
+    bool DeliverChildCompletion(const std::shared_ptr<TaskRecord>& child);
+    // ChildCompletion 项的模型侧投影(来路声明 + 状态 + 结果),续投拼批
+    // 与 mailbox 详情共用同一只 formatter(单子 §9.2)。
+    static std::string FormatChildCompletion(const AgentTaskSnapshot& child);
     // 取走攒着的后台权限拒绝通知(每条一行,取走即清)。
     std::vector<std::string> TakePermissionDenialNotices();
     // 运行中子代理名册(给主模型的动态 context 用)。
@@ -391,12 +492,25 @@ public:
     void AppendEventLocked(const std::shared_ptr<TaskRecord>& task, AgentTaskEvent event);
     void FlushPendingTextLocked(const std::shared_ptr<TaskRecord>& task);
 
+    // 活态内的状态翻页(WaitingChildren <-> Running,面板"等 N 只子任务"
+    // 用):只许活态内翻,终态不动——迟到线程不许翻账。
+    void SetLiveTaskState(const std::shared_ptr<TaskRecord>& task, AgentTaskState state);
+
     // ---- inbox 原子交接 ----
-    // 一轮 Run 正常收口后调。inbox 空 -> 置 inbox_closed 封账(sealed=true,
-    // 后续 SendMessage 拒收);有未送项 -> 取走标 delivered(sealed=false),
-    // 调用方必须把它们注入再续跑一轮——"Queued 是交付承诺"。
+    // 一轮 Run 正常收口后调。有未送项 -> 取走标 delivered(sealed=false),
+    // 调用方必须把它们注入再续跑一轮——"Queued 是交付承诺"。inbox 空且
+    // 这只任务还有活孩子 -> 不封账(sealed=false,调用方去等孩子,
+    // WaitingChildren);inbox 空且无活孩子 -> 置 inbox_closed 封账
+    //(sealed=true,后续 SendMessage 拒收)。
     DrainedInbox SealOrContinueInbox(const std::shared_ptr<TaskRecord>& task, bool& sealed);
-    // 续跑失败时把取件批次退回未送(按下标回滚,不整箱回退)。
+    // WaitingChildren 的等待口(P0-4):阻塞到"有未送 inbox 项 / 无活孩子 /
+    // 取消信号 / 强制收账"任一成立。不占 provider 请求,不烧 token;取消
+    // 与孩子终态都经同一枚条件变量唤醒,不忙轮询。醒来后调用方再查一遍
+    // SealOrContinueInbox。
+    void WaitForKeyChange(const std::shared_ptr<TaskRecord>& task);
+    // 续跑失败时把取件批次退回未送(按下标回滚,不整箱回退)。批次里的
+    // ChildCompletion 项连来源子任务的 delivered 一起退——"读出来了不等
+    // 于送达了",退信后孩子重新挂未送达,收场报告照列。
     void RestoreDrainedInbox(const std::shared_ptr<TaskRecord>& task, const DrainedInbox& drained);
     // 收尾账注:还有未送介入消息时,给结果文本追加"N 条未送达 + 逐条
     // 首行原文"的附言。
@@ -418,10 +532,19 @@ public:
     void PushPermissionDenialNotice(std::string notice);
 
 private:
+    // 台账锁内的派生查询(公开口都在锁外套这层):
+    bool HasUndeliveredInboxLocked(const TaskRecord& task) const;
+    std::size_t AliveChildCountLocked(int parent_task_id) const;
+    void NotifyStateChangeLocked();
+
     std::vector<std::shared_ptr<TaskRecord>> tasks_;
     int next_task_id_ = 1;
     std::atomic<std::uint64_t> revision_{0};
     std::vector<std::string> permission_denial_notices_;
+    // WaitingChildren 的唤醒源:inbox 入项/孩子终态/取消/强收都在台账锁内
+    // 记账,松锁前 notify_all(单子 §6.3 第 7 条)。一把全局 cv 足够——
+    // 谓词按各自 task 记录判,虚醒只是再查一遍。
+    std::condition_variable state_cv_;
 };
 
 // ---- 台账侧的文本小件(自 agent_tool.cpp 搬来,行为一字不改)----

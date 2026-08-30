@@ -1,52 +1,67 @@
-// SubagentScheduler(骨架拆解批三·病十四:AgentTool 六职拆分之调度件)。
-// 派工治理(规格"递归派工不能再靠拿掉工具解决")的并发槽与前台深度账:
-//   max_active  全局并发槽:同时跑着的子代理任务(前台 + 后台)上限,
-//               超过就明报"等一项收尾",不再每层各算各的;
-//   max_depth   前台派工嵌套深度上限(main=0,子=1,孙=2……),超过明报。
-// 两者都来自配置(subagent.max_active / subagent.max_depth),默认值公开
-// (config.hpp 的 kDefaultSubagentMaxActive/MaxDepth)。
-// 计数是 RAII:出入各一笔,拒绝路径也照退。递归失控不靠"子表拿掉 agent
-// 工具"防——子表挂的是 AgentDispatchTool 转发壳,真闸在这里。
+// SubagentScheduler(骨架拆解批三拆出;递归派工单 P0-2 改成纯 admission
+// policy)。从前的"全局并发原子 + 前台深度原子"是两本野账:
+//   active_           两只并行根任务互不相扰没错,但它复制了台账已有的
+//                     "谁还在跑"——同一笔账两处记,迟早漂;
+//   foreground_depth_ 算的是"此刻同步栈上有几层",两只并行根会互相抬数,
+//                     后台任务压根不记——放开后台递归后这本账立刻失真
+//                     (单子缺口 B)。
+// 现在两者都删了。深度与活跃数只有一处真账:TaskLedger 的 lineage
+// (parent/root/depth)与活态计数。本文件只剩判决函数:
+//   EvaluateAdmission(request, stats, governance) -> allow/deny + 稳定文案
+// 它不自存任何状态、不摸锁——吃调用方在台账锁内拍好的快照,只在注册
+// 事务(TaskLedger::TryRegisterChild)的那一笔里用,不拿出去排队后再落账
+// (admission 结果出了事务就作废)。
 #pragma once
 
-#include <atomic>
-#include <memory>
+#include <cstddef>
 #include <string>
 
 namespace lubancode::tools {
 
-class SubagentScheduler {
-public:
-    // 占住的槽,RAII:析构时把占过的账各退一笔(异常路径也退)。
-    class Slot {
-    public:
-        ~Slot();
-        Slot(const Slot&) = delete;
-        Slot& operator=(const Slot&) = delete;
-
-    private:
-        friend class SubagentScheduler;
-        Slot(std::atomic<int>* active, std::atomic<int>* depth);
-        std::atomic<int>* active_ = nullptr;
-        std::atomic<int>* depth_ = nullptr;
-    };
-
-    // 会话层从配置灌(SetDispatchGovernance 的旧口转这);非正值按 1 收。
-    void SetGovernance(int max_active, int max_depth);
-
-    int max_active() const { return max_active_; }
-
-    // 占槽:全局并发先占上(前台 + 后台都算),满了明报等收尾;foreground
-    // 再记一层嵌套深度,超限明报。成功返回 RAII 守卫;超限返回 nullptr 并把
-    // 模型可见的错误文案写进 error_out(空指针 = 只报 nullptr,不拼文案)。
-    // 两笔账都是先占后查——拒绝路径靠守卫析构照退,不漏账。
-    std::unique_ptr<Slot> Enter(bool foreground, std::string* error_out = nullptr);
-
-private:
-    int max_active_ = 8;  // 与 kDefaultSubagentMaxActive 同值;会话层从配置灌
-    int max_depth_ = 3;   // 与 kDefaultSubagentMaxDepth 同值;1 = 子代理不再往下派
-    std::atomic<int> active_{0};        // 当前跑着的任务总数(前台+后台)
-    std::atomic<int> foreground_depth_{0};  // 前台嵌套深度(同步栈上的一层算一层)
+// 派工治理配置(单子 §7.4/§14.1):前两枚是既有配置,后两枚给 0 = 不设
+// (P1-2 才接配置解析,这里先把判决口备好)。
+struct SubagentGovernance {
+    int max_active = 8;             // 同时存活的子任务节点上限(含等孩子的父)
+    int max_depth = 3;              // lineage 深度上限(main=0,子=1……)
+    int max_children_per_task = 0;  // 一只父任务累计可派孩子数;0 = 不设
+    int max_tree_nodes = 0;         // 一棵根树累计节点上限;0 = 不设
 };
+
+// admission 请求:显式 lineage(单子 §7.2)。requested_depth 由宿主按
+// caller.depth + 1 算,模型不得自报。
+struct AgentAdmissionRequest {
+    int parent_task_id = 0;     // 0 = main 派出
+    int requested_depth = 1;    // 必须等于 parent.depth + 1(事务里对账)
+    int root_task_id = 0;       // 父的 root;根任务派出时为 0(分 id 后即自 root)
+    bool parent_alive = true;   // 父任务存在且仍在运行(事务里验)
+    bool coordinator_closing = false;  // 会话收场,拒收新派工
+};
+
+// 台账锁内快照:EvaluateAdmission 只吃这份,不回头查台账。
+struct AgentLedgerStats {
+    std::size_t alive_count = 0;           // 活任务数(Running/WaitingChildren/Completing)
+    std::size_t parent_children_count = 0; // 该父累计已派孩子数(终态也算)
+    std::size_t tree_nodes_count = 0;      // 该根树累计节点数(终态也算)
+};
+
+// 判决结果:allowed 为假时 message 是模型可见文案(含限额与可行去路),
+// error_code 是稳定标识(测试与诊断用)。
+struct AgentAdmission {
+    bool allowed = false;
+    std::string error_code;
+    std::string message;
+
+    static AgentAdmission Allow() { return AgentAdmission{true, std::string(), std::string()}; }
+    static AgentAdmission Deny(std::string code, std::string message) {
+        return AgentAdmission{false, std::move(code), std::move(message)};
+    }
+};
+
+// 审查次序(单子 §7.2):closing -> 父活 -> 深度对账 -> 深度上限 -> 活跃
+// 槽 -> 每父孩子数 -> 树节点数。任一门不过即拒;文案与旧调度器逐字兼容
+// ("子代理并发槽已满…"、"已达子代理派工深度上限…"),既有测试与模型
+// 引导不漂移。
+AgentAdmission EvaluateAdmission(const AgentAdmissionRequest& request, const AgentLedgerStats& stats,
+                                 const SubagentGovernance& governance);
 
 }  // namespace lubancode::tools

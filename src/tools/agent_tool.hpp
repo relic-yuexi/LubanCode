@@ -49,11 +49,13 @@
 #include "agent/runtime_profile.hpp"
 #include "api/types.hpp"
 #include "agent/prompt_assembler.hpp"  // PackageProfileRoot:包层 Profile 根(阶段 3)
+#include "agent/task_spec.hpp"  // AgentTaskSpec:P0-1 canonical 任务合同
 #include "runtime/trajectory_session.hpp"  // TrajectorySubagentBridge:P0-2 子代理独立 JSONL
 #include "runtime/worktree.hpp"
 #include "config/project_instructions.hpp"  // ProjectInstructionResolver:AGENTS.md 作用域(作用域单 P0)
 #include "hooks/detached.hpp"
 #include "hooks/dispatcher.hpp"
+#include "tools/agent_task_coordinator.hpp"  // P0-3:协调器/scoped handle/冻结环境
 #include "tools/isolation.hpp"
 #include "tools/registry.hpp"
 #include "tools/subagent_scheduler.hpp"
@@ -61,31 +63,6 @@
 #include "tools/tool.hpp"
 
 namespace lubancode::tools {
-
-// 后台子代理不能借主回合那条 Backend：主回合会重画 spinner，切 provider
-// 时还会替换内部 client。工厂在 launch 当口造一份独立快照，线程随后只
-// 握自己的 client、请求档案和提示词叠加层。它跑的仍是 agent::Agent；
-// 此结构只管跨线程所需的不可变材料，不是另一种 Agent。
-struct DetachedAgentBackend {
-    std::unique_ptr<api::Backend> backend;
-    std::string provider;
-    api::RequestProfile request_profile;
-    std::string model_instructions;
-    std::string soul;
-};
-
-// 后台子代理的放行账快照(修"后台审批不查放行账",2026-08):主会话的
-// "总是允许"账(settings.local.json 的 allow_tools + 会话内按 a 落的集合)
-// 与 allow/deny 命令前缀,由装配层经 SetBackgroundPermissionSource 递进来。
-// LaunchBackground 在主线程(工具执行链)调源拷一份定格,带进任务线程——
-// 后台任务寿命跨轮、无人看守,账若跟着主会话活涨(用户中途 /permissions
-// 又放行了新工具),任务会在用户看不见的时刻突然拿到新写权限,权限语义
-// 漂移;定格成"派出时刻用户已知的账",任务线程只读,线程也安全。
-struct BackgroundPermissionLedger {
-    std::set<std::string> always_allowed;      // 工具名账(allow_tools + 按 a 落的)
-    std::vector<std::string> allow_commands;   // run_command 前缀白名单
-    std::vector<std::string> deny_commands;    // run_command 前缀黑名单(压过 allow)
-};
 
 // 自定义 Agent 的派发材料(真机实测 P2-1/P2-2):宿主(会话装配层)从
 // AgentCatalog 按名解析一份定义交进来。preloaded_skills 与 definition.
@@ -122,16 +99,21 @@ struct SubagentBudget {
     int soft_percent = agent::kDefaultBudgetSoftPercent;
 };
 
-// 同级派工的转发壳(规格"递归派工不能再靠拿掉工具解决"):子代理工具表
-// 里的 "agent" 工具,目标就是主 AgentTool 实例——子代理默认与 main 同
-// 能力,能再拆任务。递归失控不靠"子表没有 agent"防,改由全局并发槽 +
-// 显式深度上限治理。后台(detached)注册表不挂这枚壳:后台线程不能同步
-// 跑前台任务(UI 回调线程模型不允许)。
+// 同级派工的薄壳(P0-3 重写):子代理工具表里的 "agent" 工具不再是直指
+// 主 AgentTool 的转发壳——那枚壳把活 hooks、线程表、台账与工厂全数暴露给
+// 后台线程(单子 §一的病灶)。新壳只握一枚绑定 caller identity 的
+// AgentDispatchHandle:协调器 weak_ptr + 身份 + 冻结环境,执行时锁出短命
+// 强引用。后台(detached)注册表也挂它:前后台同一条派工路,资格由
+// 工具面与 lineage 深度决定,不由"前台/后台"决定(单子不变量 1)。
 class AgentTool;
 
 class AgentDispatchTool : public Tool {
 public:
-    explicit AgentDispatchTool(AgentTool& target) : target_(target) {}
+    // 主路:各自身份的 handle(main/每只任务各一枚,RunTask 派生)。
+    explicit AgentDispatchTool(AgentDispatchHandle handle) : handle_(std::move(handle)) {}
+    // 兼容门面(旧装配/测试):从 AgentTool 拿它的 main handle——行为与
+    // 旧转发壳等价(execute 直通,name/schema 同源),但真规则在协调器。
+    explicit AgentDispatchTool(AgentTool& target);
 
     std::string name() const override;
     std::string description() const override;
@@ -141,7 +123,7 @@ public:
     Result execute(const nlohmann::json& input, const ToolExecutionContext& context) override;
 
 private:
-    AgentTool& target_;
+    AgentDispatchHandle handle_;
 };
 
 class AgentTool : public Tool {
@@ -276,8 +258,10 @@ public:
     // 现扫现查,两头不脱节太久;/agents 仍是权威清单)。
     void SetHooks(Hooks hooks) {
         hooks_ = std::move(hooks);
-        param_fail_cause_.clear();
-        param_fail_streak_ = 0;
+        // main handle 的连败账随回合清(任务 handle 的账随任务寿命,任务
+        // 内本就只有一个回合)。
+        main_handle_.set_param_fail_cause(std::string());
+        main_handle_.set_param_fail_streak(0);
         {
             std::lock_guard<std::mutex> lock(agent_types_cache_.mutex);
             agent_types_cache_.loaded = false;
@@ -340,6 +324,16 @@ public:
         detached_registry_factory_ = std::move(factory);
     }
 
+    // 嵌套后台孩子的后端工厂源(P0-3"派出时冻结 execution snapshot"):
+    // 每只后台任务起跑当口调一次,返回一份闭包拷值的冻结工厂——它造的
+    // client 用的是父任务派出时刻的 model/think/指令/魂,任务树中途
+    // /model 换档不影响在跑的树。没设(旧调用方/单测)= 嵌套后台派工回
+    // 稳定错(那只树没有后台再派后台的资格),不影响 main 直派。
+    void SetFrozenBackendSpawnerSource(
+        std::function<std::function<DetachedAgentBackend()>()> source) {
+        frozen_backend_spawner_source_ = std::move(source);
+    }
+
     // 后台子代理的放行账源(修"后台审批不查放行账"):LaunchBackground 在
     // 主线程调它取一份快照(见 BackgroundPermissionLedger 的定格理由)。
     // 没设 = 空账,后台需确认工具照旧全拒(旧行为)。闭包按 Hooks 同一
@@ -348,30 +342,47 @@ public:
         background_permission_source_ = std::move(source);
     }
 
-    // ---- 台账口(门面转发,本体在 TaskLedger)----
+    // ---- 台账口(门面转发,本体在 TaskLedger;P0-3 起台账归协调器所有)----
+    std::shared_ptr<AgentTaskCoordinator> coordinator() const { return coordinator_; }
+    // main 身份的派工句柄:main 工具表挂的壳用它(参数连败账也随它走)。
+    AgentDispatchHandle main_dispatch_handle() const { return main_handle_; }
+    TaskLedger& ledger() { return coordinator_->ledger(); }
+    const TaskLedger& ledger() const { return coordinator_->ledger(); }
     std::vector<AgentTaskSnapshot> TaskSnapshots(std::size_t max_entries = 0) const {
-        return ledger_.Snapshots(max_entries);
+        return coordinator_->ledger().Snapshots(max_entries);
     }
-    std::uint64_t TaskRevision() const { return ledger_.revision(); }
-    std::string DrainCompletionNotices() { return ledger_.DrainCompletionNotices(); }
-    bool HasRunningTasks() const { return ledger_.HasRunningTasks(); }
-    std::vector<AgentTaskSummary> TaskSummaries() const { return ledger_.Summaries(); }
-    std::optional<AgentTaskSnapshot> TaskDetail(int task_id) const { return ledger_.Detail(task_id); }
-    std::vector<AgentTaskEvent> TaskEvents(int task_id) const { return ledger_.Events(task_id); }
-    std::vector<std::string> PendingTaskMessages(int task_id) const { return ledger_.PendingMessages(task_id); }
+    std::uint64_t TaskRevision() const { return coordinator_->ledger().revision(); }
+    std::string DrainCompletionNotices() { return coordinator_->ledger().DrainCompletionNotices(); }
+    bool HasRunningTasks() const { return coordinator_->ledger().HasRunningTasks(); }
+    std::vector<AgentTaskSummary> TaskSummaries() const { return coordinator_->ledger().Summaries(); }
+    std::optional<AgentTaskSnapshot> TaskDetail(int task_id) const {
+        return coordinator_->ledger().Detail(task_id);
+    }
+    std::vector<AgentTaskEvent> TaskEvents(int task_id) const { return coordinator_->ledger().Events(task_id); }
+    std::vector<std::string> PendingTaskMessages(int task_id) const {
+        return coordinator_->ledger().PendingMessages(task_id);
+    }
     TaskMessageStatus SendTaskMessage(int task_id, const std::string& text,
                                       TaskMessageSource source = TaskMessageSource::User) {
-        return ledger_.SendMessage(task_id, text, source);
+        return coordinator_->ledger().SendMessage(task_id, text, source);
     }
-    std::string RunningTasksRoster() const { return ledger_.RunningTasksRoster(); }
-    bool CancelTask(int task_id) { return ledger_.CancelTask(task_id); }
-    int CancelAllTasks() { return ledger_.CancelAllTasks(); }
-    bool ClearFinishedTask(int task_id) { return ledger_.ClearFinishedTask(task_id); }
-    std::vector<std::string> TakeUndeliveredInboxReport() { return ledger_.TakeUndeliveredInboxReport(); }
-    bool HasUndeliveredCompletions() const { return ledger_.HasUndeliveredCompletions(); }
-    std::vector<std::string> CompletionNoticeLines() const { return ledger_.CompletionNoticeLines(); }
-    std::vector<int> UndeliveredCompletionTaskIds() const { return ledger_.UndeliveredCompletionTaskIds(); }
-    std::vector<std::string> TakePermissionDenialNotices() { return ledger_.TakePermissionDenialNotices(); }
+    std::string RunningTasksRoster() const { return coordinator_->ledger().RunningTasksRoster(); }
+    bool CancelTask(int task_id) { return coordinator_->ledger().CancelTask(task_id); }
+    int CancelAllTasks() { return coordinator_->ledger().CancelAllTasks(); }
+    bool ClearFinishedTask(int task_id) { return coordinator_->ledger().ClearFinishedTask(task_id); }
+    std::vector<std::string> TakeUndeliveredInboxReport() {
+        return coordinator_->ledger().TakeUndeliveredInboxReport();
+    }
+    bool HasUndeliveredCompletions() const { return coordinator_->ledger().HasUndeliveredCompletions(); }
+    std::vector<std::string> CompletionNoticeLines() const {
+        return coordinator_->ledger().CompletionNoticeLines();
+    }
+    std::vector<int> UndeliveredCompletionTaskIds() const {
+        return coordinator_->ledger().UndeliveredCompletionTaskIds();
+    }
+    std::vector<std::string> TakePermissionDenialNotices() {
+        return coordinator_->ledger().TakePermissionDenialNotices();
+    }
 
     // 主会话切进 /worktree 后，子代理也得看见同一处工作目录。
     void SetWorkingDirectory(std::string cwd) { cwd_ = std::move(cwd); }
@@ -407,9 +418,12 @@ public:
         }
     }
 
-    // 派工治理(转发 SubagentScheduler;max_active/max_depth 语义见那头)。
+    // 派工治理(转发协调器;max_active/max_depth 语义见 SubagentGovernance)。
     void SetDispatchGovernance(int max_active, int max_depth) {
-        scheduler_.SetGovernance(max_active, max_depth);
+        SubagentGovernance governance = coordinator_->governance();
+        governance.max_active = max_active;
+        governance.max_depth = max_depth;
+        coordinator_->SetGovernance(governance);
     }
 
     // 墙钟兜底(规格"detached 超时链路核查与兜底"):一只任务整轮的墙钟
@@ -482,6 +496,26 @@ public:
     using Tool::execute;
 
 private:
+    // P0-3 的 typed 派工入口:execute()/AgentDispatchHandle 都汇到这。caller
+    // 是校准过的派工者身份;env 为空 = main 直派(引擎读自家活账,调用在
+    // main 线程),非空 = 嵌套(只吃冻结材料)。input 的校验、连败账、
+    // legacy/structured 分岔都在这层做,后续函数全部吃 typed 值。
+    Result ExecuteDispatch(const AgentDispatchRequest& request, AgentDispatchHandle& fail_account);
+
+    // 一次派工的 typed 合同(P0-1):入参解析一次成型,后续不再 input.at()。
+    struct DispatchRequest {
+        std::string title;                     // canonical 标题(spec->title)
+        std::shared_ptr<const agent::AgentTaskSpec> spec;  // canonical 合同(含 legacy 归一)
+        std::string task_input_text;           // 首轮输入:structured=渲染,legacy=原 prompt
+        std::string agent_type;
+        bool background = false;
+        bool isolate = false;
+        SubagentBudget budget;
+        std::optional<CustomAgentMaterial> custom;
+        std::optional<agent::ResolvedAgentProfile> resolved;
+        std::optional<agent::AgentPermissionMode> permission_floor;
+    };
+
     // background_hooks:后台任务的只读 hooks 会话(LaunchBackground 在主线程
     // 造好带进来;前台路径为空)。RunTask 拿它在后台线程发 SubagentStart/Stop
     // 与工具事件——记录只投递,主会话安全点归并。
@@ -498,18 +532,15 @@ private:
                    std::optional<agent::AgentPermissionMode> permission_floor = std::nullopt,
                    // P0-2 轨迹:这只子代理的独立 JSONL 桥(前台/后台都在派工
                    // 线程申请好带进来;空 = flag 关的旧路)。
-                   std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory = nullptr);
+                   std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory = nullptr,
+                   // P0-3:派工者环境(main 直派为空;嵌套带冻结材料,孩子的
+                   // scoped agent 工具从这派生)。
+                   const std::shared_ptr<const SubagentDispatchEnv>& env = nullptr);
 
-    Result ExecuteForeground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
-                             ToolRegistry& task_registry, const SubagentBudget& budget, bool isolate,
-                             const CustomAgentMaterial* custom = nullptr,
-                             const agent::ResolvedAgentProfile* resolved = nullptr,
-                             std::optional<agent::AgentPermissionMode> permission_floor = std::nullopt);
-    Result LaunchBackground(const nlohmann::json& input, const std::string& title, const std::string& agent_type,
-                            ToolRegistry& task_registry, const SubagentBudget& budget, bool isolate,
-                            const CustomAgentMaterial* custom = nullptr,
-                            const agent::ResolvedAgentProfile* resolved = nullptr,
-                            std::optional<agent::AgentPermissionMode> permission_floor = std::nullopt);
+    Result ExecuteForeground(const DispatchRequest& request, ToolRegistry& task_registry,
+                             const AgentRunIdentity& caller, const std::shared_ptr<const SubagentDispatchEnv>& env);
+    Result LaunchBackground(const DispatchRequest& request, ToolRegistry& task_registry,
+                            const AgentRunIdentity& caller, const std::shared_ptr<const SubagentDispatchEnv>& env);
 
     // 类型清单缓存(阶段 4·动态 schema):provider 的快照 + 回合边界翻新。
     // input_schema() 是 const 且会被后台任务的派工壳跨线程调——整只缓存
@@ -545,19 +576,12 @@ private:
     bool background_by_default_ = false;
     std::function<DetachedAgentBackend()> detached_backend_factory_;
     std::function<std::unique_ptr<ToolRegistry>()> detached_registry_factory_;
+    std::function<std::function<DetachedAgentBackend()>()> frozen_backend_spawner_source_;  // P0-3 冻结工厂源
     std::function<BackgroundPermissionLedger()> background_permission_source_;  // 后台放行账源;空 = 全拒(旧行为)
-    // 六职拆分(批三):台账与调度各归各家,门面只转不发。
-    TaskLedger ledger_;
-    SubagentScheduler scheduler_;
-    // 后台任务线程表(线程 + 自家任务号):已收尾的 join 回收
-    // (LaunchBackground 顺带按任务号对账,见那处注释),析构再兜底
-    //(有界 join,detach 绝不冻退出——见析构注释)。挂任务号是因为台账
-    // 里混着无线程的前台任务,按下标对齐会把旧任务的终态安到活线程头上。
-    struct TaskThreadEntry {
-        int task_id = 0;
-        std::thread thread;
-    };
-    std::vector<TaskThreadEntry> task_threads_;
+    // 六职拆分批三立账,P0-3 迁完:台账/治理/线程表归协调器(唯一 owner),
+    // 本类只剩装配与执行。main_handle_ 是 main 工具表那枚壳的身份+连败账。
+    std::shared_ptr<AgentTaskCoordinator> coordinator_;
+    AgentDispatchHandle main_handle_;
     std::function<bool(const Tool&)> tool_filter_;            // tool_search:空 = 不过滤
     std::function<std::string()> deferred_index_provider_;    // tool_search:空 = 不注索引段
     // 自定义 Agent 解析口(P2-2):空 = 只认内置两枚(旧行为)。宿主在会话
@@ -579,14 +603,12 @@ private:
     int wall_clock_grace_secs_ = kDefaultSubagentWallClockGraceSecs;
     std::function<std::string(const std::string&)> turn_context_provider_;  // 子代理记忆召回;空 = 不召回
     // ---- 连败保险(缺 title 无限重试拖死主循环单)----
-    // 同一回合内本工具因同一入参错误连续被拒,到 kParamFailLimit 次就明拒
-    // 收场,不再无限喂重试。计数归回合:宿主每轮 RunTurn 重灌 Hooks
-    // (SetHooks 即回合边界)、入参一旦过检(execute 尾段)都清零;换一个
-    // 错误原因各自重新起算。execute() 只在宿主回合线程被调(后台任务的
-    // 独立表不挂派工壳),无锁访问。
+    // 账随 handle 走(P0-3:main 那枚常驻 main_handle_,每只任务那枚随
+    // 私有表):同一回合内同一入参错误连拒到 kParamFailLimit 次就明拒收场,
+    // 不再无限喂重试。计数归回合:宿主每轮 RunTurn 重灌 Hooks(main handle
+    // 的账随 SetHooks 清)、入参一旦过检都清零;换一个错误原因各自重新
+    // 起算。一只 handle 只被一条线程使用,无锁访问。
     static constexpr int kParamFailLimit = 3;
-    std::string param_fail_cause_;  // 最近一次参数错的原因标识;空 = 无账
-    int param_fail_streak_ = 0;     // 同因连续被拒次数
 };
 
 // 子代理系统提示的统一装配口(自定义 Agent 单·阶段 5 从匿名 namespace

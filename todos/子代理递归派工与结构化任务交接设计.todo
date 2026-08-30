@@ -872,45 +872,46 @@ warning: max_active(2) < max_depth(3), deepest chain may be rejected
 
 ### P0-0：先铆现场
 
-- [ ] 加一枚回归：交互 `auto` 后台子代理的工具表没有 `agent`。这是当前缺口证据，实现后翻成期望有。
-- [ ] 加一枚回归：两只并行根前台子任务不应互相抬高 lineage depth。
-- [ ] 加一枚回归：后台 child completion 现在只能被 main drain。
-- [ ] 测试注释明写“当前缺口”，不拿预期失败塞进默认 CTest。可先做纯结构断言或待实现 fixture。
+- [x] 加一枚回归：交互 `auto` 后台子代理的工具表没有 `agent`。这是当前缺口证据，实现后翻成期望有。
+- [x] 加一枚回归：两只并行根前台子任务不应互相抬高 lineage depth。
+- [x] 加一枚回归：后台 child completion 现在只能被 main drain。
+- [x] 测试注释明写“当前缺口”，不拿预期失败塞进默认 CTest。可先做纯结构断言或待实现 fixture。
+  （落点：tests/unit/agent/test_subagent_recursion.cpp——三枚先铆后翻，缺口断言原文留注在各 TEST_CASE 头部。）
 
 ### P0-1：结构化任务合同
 
-- [ ] 实现 `AgentTaskSpec` 的 parse/validate/canonicalize/render。
-- [ ] `agent` schema 接 `task` 对象，保留 legacy `prompt`。
-- [ ] 派工主路从 JSON 尽早变 typed request，后续函数不再反复 `input.at()`。
-- [ ] `AgentTaskSnapshot` 存 canonical spec（或其不可变 shared object/ref），`title/prompt` 降为兼容读投影。
-- [ ] 面板详情按栏显示，列表标题不变。
-- [ ] 中英工具文案同步，`tool_text_lang_driver` 补输出对账。
+- [x] 实现 `AgentTaskSpec` 的 parse/validate/canonicalize/render。（src/agent/task_spec.*）
+- [x] `agent` schema 接 `task` 对象，保留 legacy `prompt`。（required 只钉 title，二选一执法在宿主侧）
+- [x] 派工主路从 JSON 尽早变 typed request，后续函数不再反复 `input.at()`。（AgentTool::DispatchRequest + ExecuteDispatch）
+- [x] `AgentTaskSnapshot` 存 canonical spec（或其不可变 shared object/ref），`title/prompt` 降为兼容读投影。（spec 为 shared_ptr<const>；legacy 路投影保持原 prompt 字节，旧行为对账）
+- [x] 面板详情按栏显示，列表标题不变。（agent_panel_presenter 的任务合同分栏 + lineage 行）
+- [x] 中英工具文案同步，`tool_text_lang_driver` 补输出对账。（zh/en 两档 12 节逐字节对账通过）
 
 ### P0-2：显式 lineage 与一本台账
 
-- [ ] `TaskLedger` 增 parent/root/depth/delivery target；children 只作从 `parent_task_id` 重建的派生索引。
-- [ ] `SubagentScheduler` 改成纯 admission policy，删 `active_` 与 `foreground_depth_`。
-- [ ] `TaskLedger` 用一笔写事务完成“验父 -> 判限额 -> 分 id -> 注册 child”；补父终态与 child 注册并发回归。
-- [ ] 增父子查询、直接子名册、根树节点计数。
-- [ ] 先让现有前台递归全走新 lineage，行为不退化。
-- [ ] hook 与 tool trace 改用新 identity，前后台不分两套 parent 规则。
+- [x] `TaskLedger` 增 parent/root/depth/delivery target；children 只作从 `parent_task_id` 重建的派生索引。（ChildTaskIds/AliveChildCount/TreeNodesCount 全部现算，不养第二本账）
+- [x] `SubagentScheduler` 改成纯 admission policy，删 `active_` 与 `foreground_depth_`。（只剩 EvaluateAdmission 判决函数；深度与活跃数唯一真账在台账）
+- [x] `TaskLedger` 用一笔写事务完成“验父 -> 判限额 -> 分 id -> 注册 child”；补父终态与 child 注册并发回归。（TryRegisterChild；200 轮并发回归在册）
+- [x] 增父子查询、直接子名册、根树节点计数。（直接子名册的消费口归 P1-1 的 turn context，查询口已备）
+- [x] 先让现有前台递归全走新 lineage，行为不退化。（既有 agent 册全绿；拒绝文案与旧口径逐字兼容）
+- [x] hook 与 tool trace 改用新 identity，前后台不分两套 parent 规则。（SubagentStart 带 task_id/parent_task_id/root/depth/task_spec_hash/execution_mode；后台嵌套的 parent_agent_id 不再一律 null）
 
 ### P0-3：协调器与 scoped dispatch handle
 
-- [ ] 实现 `AgentTaskCoordinator`、`AgentDispatchHandle`、薄 `AgentDispatchTool`。
-- [ ] main 与前台 subagent 改用各自身份的 handle。
-- [ ] `AgentTool` 里的 ledger/scheduler/thread ownership 分期迁出，每一步都保持单一 writer/owner。
-- [ ] 不让 worker 直读主会话活状态；派出时冻结 execution snapshot。
-- [ ] 先跑通 subagent -> foreground child，结果回直接父亲。
+- [x] 实现 `AgentTaskCoordinator`、`AgentDispatchHandle`、薄 `AgentDispatchTool`。（src/tools/agent_task_coordinator.*；壳持 handle，不再持 AgentTool&）
+- [x] main 与前台 subagent 改用各自身份的 handle。（RunTask 里 BuildTaskScopedRegistry 两段式换壳；TLS 执行身份兜底旧转发壳）
+- [x] `AgentTool` 里的 ledger/scheduler/thread ownership 分期迁出，每一步都保持单一 writer/owner。（台账/治理/线程表/closing 归协调器，一步迁清，AgentTool 只剩装配与执行）
+- [x] 不让 worker 直读主会话活状态；派出时冻结 execution snapshot。（SubagentDispatchEnv：冻结后端工厂/放行账/dispatcher/解析账；SessionStack 的 BuildFrozenBackendSpawner 定格 model/think/指令/魂）
+- [x] 先跑通 subagent -> foreground child，结果回直接父亲。（后台根->前台孩子回归在册：结果作 Tool::Result 回父，delivery=ForegroundCaller）
 
 ### P0-4：后台递归与结果归父
 
-- [ ] `BuildDetachedRegistry()` 按任务快照构造私有表，挂 scoped `agent`。
-- [ ] 后台 subagent -> foreground child 真跑通，不弹 UI 确认。
-- [ ] 后台 subagent -> background child 真跑通，completion 进直接父 mailbox。
-- [ ] 增 `WaitingChildren`、condition variable 等待、完成唤醒与 cancel 唤醒。
-- [ ] 父收场前等 attached child；不 reparent，不跨级 main drain。
-- [ ] `DrainCompletionNotices()` 改为按 delivery target 取，不再一把提所有终态任务。
+- [x] `BuildDetachedRegistry()` 按任务快照构造私有表，挂 scoped `agent`。（LaunchBackground 起线程前造独立表；RunTask 的两段式私有表挂本任务身份的壳）
+- [x] 后台 subagent -> foreground child 真跑通，不弹 UI 确认。（嵌套前台走 headless 路径：确认只查冻结放行账，无终端回调）
+- [x] 后台 subagent -> background child 真跑通，completion 进直接父 mailbox。（回归在册：父吸收孩子结果后收口，main 只收根）
+- [x] 增 `WaitingChildren`、condition variable 等待、完成唤醒与 cancel 唤醒。（台账 state_cv + WaitForKeyChange；取消树/强收/入信/孩子终态都唤醒）
+- [x] 父收场前等 attached child；不 reparent，不跨级 main drain。（DeliverChildCompletion 只投活父；父亡则保持未送达，收场报告照列）
+- [x] `DrainCompletionNotices()` 改为按 delivery target 取，不再一把提所有终态任务。（只提 MainTurnContext；ParentTaskInbox 归父 continuation）
 
 ### P1-1：传话、Dock 与诊断
 
