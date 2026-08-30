@@ -439,6 +439,12 @@
 - **关思考方言落线**:新形状 `chat_template_kwargs_enable_thinking`(嵌套键,vLLM 唯一真生效路——顶层 enable_thinking 实测被无视);目录双预设 `vllm`(chat 面,base_url 到 /v1)+ `vllm-anthropic`(messages 面,base_url 到根,signature_required 真,"关不掉"账面如实判 ServerFixed);为本地端放行回环 http base_url(假回环域名与普通 http 仍拒,六桩单测钉死)。
 - providers 手册新增「本地端点」小节,chat/anthropic 两份手写配置样例全文(报告样例的 context_window_tokens 错键已核正为 context_window)。真机冒烟:responses 面 88 帧思考解析、关思考后 reasoning 落 null 正文直出。
 
+## [v0.26.140] - 2026-08-31
+
+- **Compact 整单收官(§十三真机验收十一案全过)。** 假后端走真压缩生产路(分区→3×map→reduce→双账校验→换账→落盘),零产品 bug;两案首红皆为场景构造(轮次太小反涨闸拒收——恰是阶段 0 反涨闸的真机印证;压缩窗口未配则明说"未核"不装)。接力案验实:resume 后二次压缩带"上一轮总账"头、旧档不进 map、epoch 计账吻合。Debug/Release 双 287/287 全绿。
+- **AGENTS.md 整单收官(P1+P2)。** `/instructions` 与 `/doctor instructions`(52 案钉子),逐 source 账带 sha/大小/离目标最近箭头;十型分账诊断(坏 UTF-8/同层遮蔽/迁移提示各归各);active write chain 超帽 fail closed——不注入半截、不发指纹、重试仍拒(与握手的根本区别);缓存 path+size+mtime 快筛、内容摘要落锤、外部编辑惰性发现。全局 ~/.lubancode/AGENTS.md 落地(身份/怎么说/怎么干活三层分工,预算最先挤掉)。
+- `project_doc_fallback_filenames` 可配回退名单(默认空);发现 CLAUDE.md/GEMINI.md 只提示不读。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
