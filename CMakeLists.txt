@@ -725,6 +725,10 @@ add_library(lubancode_core STATIC
   # 指针账(active/canary)、install-log 只追加事件账与 PackageSnapshot
   # (路径+哈希,装配折算)。store 机械归它;迁状态的笔仍在 Coordinator。
   src/evolution/promoter.cpp
+  # 自进化闭环阶段 7:有限自动建议——五门判定(纯函数)、缺省关闭的
+  # 开关账与只追加命中账(命中率/接受率)。只提示不起草,写口仍是
+  # EvolutionCoordinator。
+  src/evolution/suggest.cpp
 )
 target_include_directories(lubancode_core PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

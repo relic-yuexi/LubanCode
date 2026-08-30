@@ -6,10 +6,12 @@
 #include <algorithm>
 #include <cstdint>
 #include <cstdio>
+#include <filesystem>
 #include <map>
 #include <set>
 
 #include "evolution/observation.hpp"
+#include "package/component.hpp"  // ParseMcpComponentYaml(MCP 草稿落盘前自验)
 #include "package/manifest.hpp"
 #include "runtime/plugin_contract.hpp"
 #include "skills/skill_drafter.hpp"
@@ -772,6 +774,151 @@ std::string ComposeRequirementsTxt(const std::string& plugin_dir_name) {
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// 阶段 6 收官:MCP server 草稿的三份文本。同尺三判据,选路的形状是
+// "簇内同求而无人成功的工具 >=2 件"——缺的是一项服务,不是一条命令,
+// 封一只 stdio server 合账。协议铁律同 examples/packages/browser 的
+// mcp 组件:stdio、newline 分隔 JSON-RPC、stdout 只出协议信、日志走
+// stderr。草稿同样零进程零挂载,工具处理全是诚实的"未实现"占位。
+// ---------------------------------------------------------------------------
+
+// mcp.yaml(schema 1,契约 §5 的形状)。command 用 python + ${package_dir}
+// 占位(契约只认 ${package_dir}/${package_data},没有 ${plugin_dir});
+// permissions.network 恒 false(草稿不开网);不声明 env(占位 server
+// 不需要)。落盘前过 ParseMcpComponentYaml,过不了就地回落 Skill-only。
+std::string ComposeMcpYamlText(const std::string& server_id, const std::string& description,
+                               int tasks_wanting, int tool_count) {
+    std::string out;
+    out += "# " + server_id + ":自进化闭环阶段 6 起草的 MCP server 草稿(stdio)。\n";
+    out += "# 簇内 " + std::to_string(tasks_wanting) + " 场任务同求 " + std::to_string(tool_count) +
+           " 件不存在的工具——缺的是\n";
+    out += "# 一项服务,封一只 server 合账。草稿零执行零挂载:server.py 是未实现\n";
+    out += "# 占位,补实现须人工;启用走 Package trust 与人工审查线。\n";
+    out += "schema: 1\n";
+    out += "id: " + server_id + "\n";
+    out += "description: " + YamlDoubleQuote(description) + "\n";
+    out += "transport: stdio\n";
+    out += "runtime:\n";
+    out += "  command: python\n";
+    out += "  args:\n";
+    out += "    - \"${package_dir}/mcp/" + server_id + "/server.py\"\n";
+    out += "  timeout_ms: 30000\n";
+    out += "permissions:\n";
+    out += "  network: false\n";
+    return out;
+}
+
+// server.py 脚手架。stdio 上 newline 分隔的 JSON-RPC(与 LubanCode 的 MCP
+// transport 同款框架):一行一信;stdout 只写协议响应,日志只写 stderr;
+// notification(无 id)不答。initialize 认客户端给的协议版本(不猜);
+// tools/list 如实亮草稿工具;tools/call 全是 draft-not-implemented 占位。
+std::string ComposeMcpServerPy(const std::string& server_id,
+                               const std::vector<nlohmann::json>& draft_tools, int tasks_wanting) {
+    std::string names;
+    for (const nlohmann::json& tool : draft_tools) {
+        names += (names.empty() ? "" : ", ") + tool.value("name", std::string());
+    }
+    std::string out;
+    out += "# -*- coding: utf-8 -*-\n";
+    out += "\"\"\"" + server_id + " MCP server 脚手架(自进化闭环阶段 6 草稿)。\n";
+    out += "\n";
+    out += "这份文件是草稿,不是成品:\n";
+    out += "  - tools/call 全是诚实的\"未实现\"占位,补实现须人工完成;\n";
+    out += "  - 人工审查线:除 Package trust 外,还须人读一遍本文件与 mcp.yaml;\n";
+    out += "  - 协议铁律(同 examples/packages/browser 的 mcp 组件):stdio 上\n";
+    out += "    newline 分隔的 JSON-RPC,一行一信;stdout 只写协议响应,日志只\n";
+    out += "    写 stderr;notification(无 id)不答;initialize 回认客户端的\n";
+    out += "    协议版本,不猜。\n";
+    out += "\n";
+    out += "来源:" + std::to_string(tasks_wanting) + " 场任务想用工具 " + names +
+           "(现有工具办不了,录到的是\n";
+    out += "registry.unknown_tool 失败);同求多件,封一只 server 合账。\n";
+    out += "\"\"\"\n";
+    out += "from __future__ import annotations\n";
+    out += "\n";
+    out += "import json\n";
+    out += "import sys\n";
+    out += "\n";
+    out += "\n";
+    out += "DRAFT_TOOLS = ";
+    out += nlohmann::json(draft_tools).dump(2, ' ', false, nlohmann::json::error_handler_t::replace);
+    out += "\n";
+    out += "\n";
+    out += "\n";
+    out += "def reply(message):\n";
+    out += "    sys.stdout.write(json.dumps(message, ensure_ascii=False) + \"\\n\")\n";
+    out += "    sys.stdout.flush()\n";
+    out += "\n";
+    out += "\n";
+    out += "def not_implemented(call_id, tool):\n";
+    out += "    return {\n";
+    out += "        \"jsonrpc\": \"2.0\",\n";
+    out += "        \"id\": call_id,\n";
+    out += "        \"result\": {\n";
+    out += "            \"content\": [{\"type\": \"text\",\n";
+    out += "                          \"text\": \"draft-not-implemented: 阶段 6 草稿,须人工补实现\"}],\n";
+    out += "            \"isError\": True,\n";
+    out += "        },\n";
+    out += "    }\n";
+    out += "\n";
+    out += "\n";
+    out += "def handle(request):\n";
+    out += "    method = str(request.get(\"method\", \"\"))\n";
+    out += "    call_id = request.get(\"id\")\n";
+    out += "    if method == \"initialize\":\n";
+    out += "        params = request.get(\"params\") or {}\n";
+    out += "        return {\n";
+    out += "            \"jsonrpc\": \"2.0\",\n";
+    out += "            \"id\": call_id,\n";
+    out += "            \"result\": {\n";
+    out += "                \"protocolVersion\": str(params.get(\"protocolVersion\", \"\")),\n";
+    out += "                \"capabilities\": {},\n";
+    out += "                \"serverInfo\": {\"name\": \"" + server_id + "\", \"version\": \"0.1.0\"},\n";
+    out += "            },\n";
+    out += "        }\n";
+    out += "    if method == \"tools/list\":\n";
+    out += "        return {\"jsonrpc\": \"2.0\", \"id\": call_id, \"result\": {\"tools\": DRAFT_TOOLS}}\n";
+    out += "    if method == \"tools/call\":\n";
+    out += "        params = request.get(\"params\") or {}\n";
+    out += "        return not_implemented(call_id, str(params.get(\"name\", \"\")))\n";
+    out += "    if call_id is None:\n";
+    out += "        return None\n";
+    out += "    return {\"jsonrpc\": \"2.0\", \"id\": call_id,\n";
+    out += "            \"error\": {\"code\": -32601, \"message\": \"method not found: \" + method}}\n";
+    out += "\n";
+    out += "\n";
+    out += "def main():\n";
+    out += "    for line in sys.stdin:\n";
+    out += "        line = line.strip()\n";
+    out += "        if not line:\n";
+    out += "            continue\n";
+    out += "        try:\n";
+    out += "            request = json.loads(line)\n";
+    out += "        except ValueError:\n";
+    out += "            sys.stderr.write(\"bad json line\\n\")\n";
+    out += "            continue\n";
+    out += "        response = handle(request) if isinstance(request, dict) else None\n";
+    out += "        if response is not None:\n";
+    out += "            reply(response)\n";
+    out += "    return 0\n";
+    out += "\n";
+    out += "\n";
+    out += "if __name__ == \"__main__\":\n";
+    out += "    raise SystemExit(main())\n";
+    return out;
+}
+
+// MCP 草稿的 requirements.txt(与 Plugin 草稿同款:零依赖,给补实现的
+// 人一个显眼的登记位;非注册表来源过不了静态门)。
+std::string ComposeMcpRequirementsTxt(const std::string& server_id) {
+    std::string out;
+    out += "# " + server_id + " MCP server 的依赖清单(自进化闭环阶段 6 草稿)。\n";
+    out += "# 草稿零第三方依赖(stdio 上的 JSON-RPC 只用标准库)。补实现时按需\n";
+    out += "# 登记:只许默认注册表来源,版本库直链、明文直链、本地路径与改信任\n";
+    out += "# 源的开关一律过不了静态门。\n";
+    return out;
+}
+
 }  // namespace
 
 std::vector<SequencedToolStep> SuccessPathSteps(const std::vector<skills::RecordEvent>& events) {
@@ -969,7 +1116,14 @@ CodeCapabilitySignal AssessCodeCapability(const std::vector<ClusterTaskMaterial>
                                  "(>=2 场才起草插件草稿;单场偶发照旧 Skill-only)");
         return signal;
     }
-    // 入参形状:各场首枚入参的键,按首见次序(给 runner 脚手架的文档行)。
+    // 判据过了:同求而无人成功的全部工具名(首见次序)。>=2 件是"缺一项
+    // 服务"的形状,走 MCP 路合账;恰一件走 process Plugin 路。
+    for (const std::string& tool : order) {
+        if (ever_succeeded.count(tool) == 0 && wanting[tool] >= 1) {
+            signal.wanted_tools.push_back(tool);
+        }
+    }
+    // 入参形状:各场首枚入参的键,按首见次序(给 runner/server 脚手架的文档行)。
     std::vector<std::string> keys;
     for (const nlohmann::json& input : inputs[best]) {
         if (!input.is_object()) {
@@ -1078,6 +1232,138 @@ bool ComposePluginDraft(ComboCandidateDraft& draft, const std::vector<ClusterTas
     return true;
 }
 
+// 一件工具的 input schema:照各场实录的入参形状(键 -> 类型),全簇都在
+// 的键 required(与 Plugin 草稿同一口径,单件工具版)。
+nlohmann::json BuildToolInputSchema(const std::vector<ClusterTaskMaterial>& tasks,
+                                    const std::string& wanted_tool) {
+    nlohmann::json schema;
+    schema["type"] = "object";
+    nlohmann::json properties = nlohmann::json::object();
+    nlohmann::json required = nlohmann::json::array();
+    std::map<std::string, int> key_tasks;
+    std::vector<nlohmann::json> observed;
+    for (const ClusterTaskMaterial& task : tasks) {
+        for (const WantedToolCall& call : CollectWantedToolCalls(task.events)) {
+            if (call.tool != wanted_tool || !call.first_input.is_object()) {
+                continue;
+            }
+            observed.push_back(call.first_input);
+            break;  // 一场一枚
+        }
+    }
+    for (const nlohmann::json& input : observed) {
+        for (auto it = input.begin(); it != input.end(); ++it) {
+            key_tasks[it.key()] += 1;
+            if (properties.contains(it.key())) {
+                continue;
+            }
+            nlohmann::json property;
+            if (it.value().is_number_integer()) {
+                property["type"] = "integer";
+            } else if (it.value().is_number_float()) {
+                property["type"] = "number";
+            } else if (it.value().is_boolean()) {
+                property["type"] = "boolean";
+            } else {
+                property["type"] = "string";
+                property["description"] = "观察到的入参(草稿按各场实录记形状)";
+            }
+            properties[it.key()] = property;
+        }
+    }
+    for (const auto& [key, count] : key_tasks) {
+        if (!observed.empty() && count >= static_cast<int>(observed.size())) {
+            required.push_back(key);
+        }
+    }
+    schema["properties"] = properties;
+    if (!required.empty()) {
+        schema["required"] = required;
+    }
+    schema["additionalProperties"] = false;
+    return schema;
+}
+
+// 组装 MCP server 草稿三份文本与权限差异。落不成(wire 名超帽、名字洗
+// 不出、mcp.yaml 过不了解析)给 false,why_not 记话,候选照旧走组合档/
+// 最小档——不硬塞。MCP 草稿与 Plugin 草稿互斥:一只候选只带一种代码件。
+bool ComposeMcpDraft(ComboCandidateDraft& draft, const std::vector<ClusterTaskMaterial>& tasks) {
+    const CodeCapabilitySignal& signal = draft.code_signal;
+    if (signal.wanted_tools.size() < 2) {
+        draft.code_signal.why_not.push_back("同求而无人成功的工具不足两件——缺的是一条命令,"
+                                            "不封 server(process Plugin 路)");
+        return false;
+    }
+    // server 名照求的人最多的那件(与 Plugin 路同名同源,账好对)。
+    const std::string server_id = SanitizePluginDirName(signal.wanted_tool);
+    if (server_id.empty()) {
+        draft.code_signal.why_not.push_back("想要的工具名洗不成合法 server 名,草稿不硬塞");
+        return false;
+    }
+    // 先验 wire 名帽(mcp__<包段>__<server>__<工具>):超帽的草稿落了也
+    // 过不了 doctor,在这里就收掉。
+    for (const std::string& wanted : signal.wanted_tools) {
+        const std::string wire = lubancode::runtime::BuildPackagedToolWireName(
+            "mcp", draft.package_id, server_id, SanitizeToolName(wanted));
+        if (wire.size() > lubancode::runtime::kToolWireNameMaxLength) {
+            draft.code_signal.why_not.push_back("工具 wire 名 \"" + wire + "\" 超 " +
+                                                std::to_string(
+                                                    lubancode::runtime::kToolWireNameMaxLength) +
+                                                " 字符帽,MCP 草稿不硬塞(改名重试)");
+            return false;
+        }
+    }
+    // tools/list 的草稿工具账:一件一行,入参形状照各场实录。
+    std::vector<nlohmann::json> draft_tools;
+    std::vector<std::string> tool_names;
+    for (const std::string& wanted : signal.wanted_tools) {
+        const std::string tool_name = SanitizeToolName(wanted);
+        nlohmann::json tool;
+        tool["name"] = tool_name;
+        tool["description"] = "MCP server 草稿工具:源自 " + TruncateChars(wanted, 40) +
+                              " 的稳定需求;脚手架未实现,补实现须过人工审查";
+        tool["inputSchema"] = BuildToolInputSchema(tasks, wanted);
+        draft_tools.push_back(std::move(tool));
+        tool_names.push_back(tool_name);
+    }
+
+    std::string names_note;
+    for (const std::string& name : tool_names) {
+        names_note += (names_note.empty() ? "" : ", ") + name;
+    }
+    const std::string description = "从 " + std::to_string(signal.tasks_wanting) +
+                                    " 场任务观察到的执行能力需求(" + TruncateChars(names_note, 60) +
+                                    ");现有工具办不了,同求多件封一只 server";
+    draft.mcp_id = server_id;
+    draft.mcp_yaml = ComposeMcpYamlText(server_id, description, signal.tasks_wanting,
+                                        static_cast<int>(tool_names.size()));
+    // mcp.yaml 落盘前过严格解析(占位符/越界/字段形状;与盘上同一枚 parser,
+    // 不另立规矩)。占位检查要包根,草稿层给字面占位即可。
+    if (!lubancode::package::ParseMcpComponentYaml(
+             draft.mcp_yaml, std::filesystem::path("package"))
+             .has_value()) {
+        draft.code_signal.why_not.push_back("mcp.yaml 草稿过不了严格解析,不硬塞");
+        return false;
+    }
+    draft.mcp_server = ComposeMcpServerPy(server_id, draft_tools, signal.tasks_wanting);
+    draft.mcp_requirements = ComposeMcpRequirementsTxt(server_id);
+    // 权限差异(evolution.json 的 changes;一条一权,只记名不记值)。
+    draft.permissions_added.push_back("process:python");
+    for (const std::string& key : signal.inputs_note) {
+        if (key == "path" || key == "file" || key == "dir" || key == "filename" ||
+            key == "root" || key == "directory") {
+            draft.permissions_added.push_back("fs_read:workspace");
+            break;
+        }
+    }
+    for (const std::string& tool_name : tool_names) {
+        draft.tools_added.push_back(lubancode::runtime::BuildPackagedToolWireName(
+            "mcp", draft.package_id, server_id, tool_name));
+    }
+    draft.with_mcp_draft = true;
+    return true;
+}
+
 std::expected<ComboCandidateDraft, std::string> DraftEvolutionCandidate(
     const std::vector<ClusterTaskMaterial>& tasks) {
     if (tasks.empty()) {
@@ -1112,10 +1398,15 @@ std::expected<ComboCandidateDraft, std::string> DraftEvolutionCandidate(
         draft.recording_ids.push_back(task.status.id);
     }
 
-    // ---- 尺三(代码档,§3.5):多场同求一件不存在的工具 -> process Plugin
-    //      草稿。代码档不叠组合档:插件还没真身,编排等它落地后的下一只
-    //      候选;此刻最小答案是 Skill + 草稿。 ----
+    // ---- 尺三(代码档,§3.5):判据过了选路——同求而无人成功的工具
+    //      >=2 件封 MCP server 草稿(缺一项服务),恰一件落 process Plugin
+    //      草稿(缺一条命令)。代码档不叠组合档:代码件还没真身,编排等
+    //      它落地后的下一只候选;此刻最小答案是 Skill + 草稿。 ----
     draft.code_signal = AssessCodeCapability(tasks);
+    if (draft.code_signal.eligible && draft.code_signal.wanted_tools.size() >= 2 &&
+        ComposeMcpDraft(draft, tasks)) {
+        return draft;
+    }
     if (draft.code_signal.eligible && ComposePluginDraft(draft, tasks)) {
         return draft;
     }

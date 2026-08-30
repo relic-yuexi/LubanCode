@@ -142,7 +142,8 @@ struct ComplexityCost {
     bool has_workflow = false;
     bool has_agent = false;
     bool has_plugin = false;    // 阶段 6:process Plugin 草稿一件
-    int components = 0;         // skills + workflows + agents
+    bool has_mcp = false;       // 阶段 6:MCP server 草稿一件(与 Plugin 草稿互斥)
+    int components = 0;         // skills + workflows + agents + 代码件草稿
     int minimal_components = 1; // 最小可行包:一份 Skill
     int extra_components = 0;   // components - minimal
     int files = 0;              // 包内全部文件(含 package.yaml)

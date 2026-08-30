@@ -406,6 +406,7 @@ nlohmann::json ComplexityCost::ToJson() const {
     out["has_workflow"] = has_workflow;
     out["has_agent"] = has_agent;
     out["has_plugin"] = has_plugin;
+    out["has_mcp"] = has_mcp;
     out["components"] = components;
     out["minimal_components"] = minimal_components;
     out["extra_components"] = extra_components;
@@ -427,6 +428,7 @@ std::optional<ComplexityCost> ComplexityCost::FromJson(const nlohmann::json& jso
     cost.has_workflow = json.value("has_workflow", false);
     cost.has_agent = json.value("has_agent", false);
     cost.has_plugin = json.value("has_plugin", false);
+    cost.has_mcp = json.value("has_mcp", false);
     cost.components = static_cast<int>(GetInt(json, "components"));
     cost.minimal_components = static_cast<int>(GetInt(json, "minimal_components"));
     cost.extra_components = static_cast<int>(GetInt(json, "extra_components"));
@@ -445,7 +447,8 @@ std::string ComplexityCost::SummaryLine() const {
                std::to_string(files) + " 个文件;与最小档持平)";
     }
     if (shape == "code-draft") {
-        return "代码候选草稿(Skill + process Plugin 草稿," + std::to_string(components) +
+        std::string kind = has_mcp ? "MCP server 草稿" : "process Plugin 草稿";
+        return "代码候选草稿(Skill + " + kind + "," + std::to_string(components) +
                " 件组件、" + std::to_string(files) +
                " 个文件;零执行零挂载,指路 Package trust 人工审查)";
     }
@@ -469,6 +472,7 @@ ComplexityCost ComputeComplexityCost(const fs::path& package_dir) {
     int workflows = 0;
     int agents = 0;
     int plugins = 0;
+    int mcp_servers = 0;
     int files = 0;
     for (auto it = std::filesystem::recursive_directory_iterator(package_dir, ec);
          it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
@@ -496,17 +500,23 @@ ComplexityCost ComputeComplexityCost(const fs::path& package_dir) {
                    rel.compare(rel.size() - 11, 11, "plugin.json") == 0 &&
                    std::count(rel.begin(), rel.end(), '/') == 2) {
             ++plugins;  // plugins/<id>/plugin.json(阶段 6 草稿一件)
+        } else if (rel.rfind("mcp/", 0) == 0 && rel.size() > 13 &&
+                   rel.compare(rel.size() - 8, 8, "mcp.yaml") == 0 &&
+                   std::count(rel.begin(), rel.end(), '/') == 2) {
+            ++mcp_servers;  // mcp/<id>/mcp.yaml(阶段 6 MCP 草稿一件)
         }
     }
     cost.has_workflow = workflows > 0;
     cost.has_agent = agents > 0;
     cost.has_plugin = plugins > 0;
-    cost.components = skills + workflows + agents + plugins;
+    cost.has_mcp = mcp_servers > 0;
+    cost.components = skills + workflows + agents + plugins + mcp_servers;
     cost.extra_components = std::max(0, cost.components - cost.minimal_components);
     cost.files = files;
     cost.extra_files = std::max(0, files - cost.minimal_files);
-    cost.shape = plugins > 0 ? "code-draft"
-                             : ((workflows > 0 || agents > 0) ? "combination" : "skill-only");
+    cost.shape = plugins > 0 || mcp_servers > 0
+                     ? "code-draft"
+                     : ((workflows > 0 || agents > 0) ? "combination" : "skill-only");
     return cost;
 }
 

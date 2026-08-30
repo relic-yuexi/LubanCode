@@ -11,10 +11,12 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <filesystem>
 #include <iostream>
 #include <map>
 #include <optional>
+#include <set>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -26,6 +28,7 @@
 #include "evolution/coordinator.hpp"
 #include "evolution/eval.hpp"
 #include "evolution/observation_store.hpp"
+#include "evolution/suggest.hpp"  // 阶段 7:五门判定、开关账、命中账
 #include "platform/paths.hpp"
 #include "skills/workflow_recorder.hpp"
 
@@ -61,6 +64,15 @@ std::filesystem::path BuildStoreRoot(SlashDispatchContext& ctx) {
         return std::filesystem::path();
     }
     return lubancode::platform::Utf8ToPath(**ctx.home_lubancode) / "evolution" / "observations";
+}
+
+// evolution 根:<home>/.lubancode/evolution——观察账在它的 observations/
+// 里,阶段 7 的开关账(suggest.json)与命中账(suggest.jsonl)落在它根上。
+std::filesystem::path BuildEvolutionRoot(SlashDispatchContext& ctx) {
+    if (ctx.home_lubancode == nullptr || !ctx.home_lubancode->has_value()) {
+        return std::filesystem::path();
+    }
+    return lubancode::platform::Utf8ToPath(**ctx.home_lubancode) / "evolution";
 }
 
 // 候选仓根:<home>/.lubancode/package-candidates(README"候选目录"节)。
@@ -139,6 +151,7 @@ void PrintUsage() {
                  "      /evolve use <candidate-id>\n"
                  "      /evolve promote <candidate-id>\n"
                  "      /evolve rollback <package-id> [version]\n"
+                 "      /evolve suggest [on|off]\n"
                  "阶段 1 只读观察;阶段 2 从录制起草最小 content-only 候选(propose)、看\n"
                  "diff、拒绝(reject);阶段 3 评测(test):静态门+回放+留出+基线对照,账只追加;\n"
                  "阶段 4 批准与灰度(approve/use/promote/rollback):批准只认当前哈希,批准后\n"
@@ -146,13 +159,78 @@ void PrintUsage() {
                  "阶段 5 propose 升级:同指纹簇攒够门槛(>=2 场独立任务且成功路序列同形)出\n"
                  "组合候选(Skill+Workflow,全场工具面同形再加 Agent),否则照旧最小 Skill-only\n"
                  "包;组合件须过 AnalyzePackage,过不了降档 Skill-only,不硬塞;评测与被测\n"
-                 "workflow 分家,批准页亮复杂度代价。\n"
+                 "workflow 分家,批准页亮复杂度代价;阶段 6 代码档草稿:簇内同求而无人成功的\n"
+                 "工具恰一件出 process Plugin 草稿、>=2 件出 MCP server 草稿(同判据两路,\n"
+                 "零进程零挂载);阶段 7 有限自动建议(suggest,缺省关):开着时 status 采集后\n"
+                 "按五门判定亮一行建议,只提示不自动起草,拒绝后不死缠,命中率与接受率可查。\n"
                  "code-bearing 候选(带 Plugin/MCP)不走 approve,另过 Package trust。CI 入口:\n"
                  "  lubancode evolve test <候选目录> --baseline <父包目录> --json\n";
     TermOut().flush();
 }
 
-// ---- status:采集 + 落账 + 账面 ----
+// ---- 阶段 7:有限自动建议的提示回合(只提示,不起草) ----
+// 开着才跑:聚同指纹簇 -> 挡门指纹集(观察账拒绝指纹 + 候选仓既有候选)
+// -> 五门判定 -> 过门的亮一行建议、记一笔 shown。只有本次采集真进了
+// 新观察的簇才提示——没新材料不唠叨;关着的时候这本账一字不写。
+void RunSuggestionPass(SlashDispatchContext& ctx,
+                       const std::vector<std::string>& new_observation_ids) {
+    const std::filesystem::path store_root = BuildStoreRoot(ctx);
+    const std::filesystem::path evolution_root = BuildEvolutionRoot(ctx);
+    if (store_root.empty() || evolution_root.empty()) {
+        return;
+    }
+    lubancode::evolution::ObservationStore observations(store_root);
+    std::map<std::string, std::vector<const lubancode::evolution::EvolutionObservation*>> clusters;
+    for (const lubancode::evolution::EvolutionObservation& observation : observations.Load()) {
+        clusters[observation.fingerprint].push_back(&observation);
+    }
+    const std::vector<std::string> blocked = lubancode::evolution::CollectBlockedFingerprints(
+        observations, lubancode::evolution::CandidateStore(BuildCandidateRoot(ctx)));
+    lubancode::evolution::SuggestLedger suggest_ledger(evolution_root / "suggest.jsonl");
+    int shown = 0;
+    for (const auto& [fingerprint, cluster] : clusters) {
+        bool has_new = false;
+        for (const lubancode::evolution::EvolutionObservation* observation : cluster) {
+            if (std::find(new_observation_ids.begin(), new_observation_ids.end(),
+                          observation->id) != new_observation_ids.end()) {
+                has_new = true;
+                break;
+            }
+        }
+        if (!has_new) {
+            continue;  // 没进新材料的簇不提示:拒绝后不死缠之外的第二道安静门
+        }
+        std::vector<lubancode::evolution::EvolutionObservation> members;
+        for (const lubancode::evolution::EvolutionObservation* observation : cluster) {
+            members.push_back(*observation);
+        }
+        const lubancode::evolution::SuggestionVerdict verdict =
+            lubancode::evolution::AssessSuggestion(members, blocked);
+        if (!verdict.eligible) {
+            continue;
+        }
+        TermOut() << "建议(阶段 7,只提示不自动起草):指纹 " << fingerprint << " 已有 "
+                  << verdict.independent_tasks << " 场独立任务同形走通("
+                  << Ellipsize(verdict.summary, 56) << ")。" << verdict.benefit_line << "\n";
+        TermOut() << "  点头起草: /evolve propose " << verdict.representative_obs_id
+                  << "(照旧走候选/评测/批准,一道门都不少)\n";
+        lubancode::evolution::SuggestEvent event;
+        event.type = "shown";
+        event.fingerprint = verdict.fingerprint;
+        event.cluster_size = verdict.cluster_size;
+        event.benefit = verdict.benefit_line;
+        event.obs_id = verdict.representative_obs_id;
+        if (const auto append_error = suggest_ledger.Append(event); append_error.has_value()) {
+            TermOut() << "  警告: 命中账没记上(" << *append_error << ")\n";
+        }
+        ++shown;
+    }
+    if (shown == 0) {
+        TermOut() << "建议(阶段 7):本次新材料里没有过五门的簇,不提示。\n";
+    }
+}
+
+// ---- status:采集 + 落账 + 账面(+ 阶段 7:开着时顺手提示一回) ----
 void RunEvolveStatus(SlashDispatchContext& ctx) {
     const std::filesystem::path store_root = BuildStoreRoot(ctx);
     if (store_root.empty()) {
@@ -171,6 +249,7 @@ void RunEvolveStatus(SlashDispatchContext& ctx) {
     std::size_t duplicates = 0;
     std::size_t suppressed = 0;
     std::string error;
+    std::vector<std::string> new_observation_ids;  // 本次真落账的观察(建议回合用)
     for (const lubancode::evolution::EvolutionObservation& observation : collected) {
         const auto result = store.Append(observation);
         if (!result.has_value()) {
@@ -178,7 +257,10 @@ void RunEvolveStatus(SlashDispatchContext& ctx) {
             continue;
         }
         switch (*result) {
-            case lubancode::evolution::ObservationStore::AppendStatus::Appended: ++appended; break;
+            case lubancode::evolution::ObservationStore::AppendStatus::Appended:
+                ++appended;
+                new_observation_ids.push_back(observation.id);
+                break;
             case lubancode::evolution::ObservationStore::AppendStatus::DuplicateId: ++duplicates; break;
             case lubancode::evolution::ObservationStore::AppendStatus::SuppressedRejected:
                 ++suppressed;
@@ -209,6 +291,81 @@ void RunEvolveStatus(SlashDispatchContext& ctx) {
     TermOut() << "  账本: " << lubancode::platform::PathToUtf8(store.observations_file()) << "\n";
     if (!error.empty()) {
         TermOut() << "  警告: 有观察没落住账(" << error << ")\n";
+    }
+    // 阶段 7:开着才提示(缺省关;关着时连命中账都不写,更不另收材料)。
+    if (lubancode::evolution::LoadSuggestEnabled(BuildEvolutionRoot(ctx))) {
+        RunSuggestionPass(ctx, new_observation_ids);
+    }
+    TermOut().flush();
+}
+
+// ---- suggest:看/开关有限自动建议(阶段 7;缺省关闭是铁律) ----
+void RunEvolveSuggest(SlashDispatchContext& ctx, const std::string& arg) {
+    const std::filesystem::path evolution_root = BuildEvolutionRoot(ctx);
+    if (evolution_root.empty()) {
+        TermOut() << "没有主目录(.lubancode),建议开关无处落。\n";
+        TermOut().flush();
+        return;
+    }
+    if (arg == "on" || arg == "off") {
+        const bool enabling = arg == "on";
+        if (const auto error =
+                lubancode::evolution::SaveSuggestEnabled(evolution_root, enabling);
+            error.has_value()) {
+            TermOut() << *error << "\n";
+            TermOut().flush();
+            return;
+        }
+        TermOut() << (enabling ? "有限自动建议已开。" : "有限自动建议已关(缺省态)。") << "\n";
+        TermOut() << "  语义: 开着时 /evolve status 采集后按五门判定亮一行建议——只提示"
+                     "候选机会,不自动起草、测试或安装;点头才走 /evolve propose。\n";
+        TermOut() << "  关着时:不评估建议、不写命中账,不为建议另收材料(观察账照旧,"
+                     "那是阶段 1 的显式采集)。\n";
+        TermOut().flush();
+        return;
+    }
+    // 裸跑:开关状态 + 门槛(可 inspect)+ 命中率与接受率账(现算)。
+    const bool enabled = lubancode::evolution::LoadSuggestEnabled(evolution_root);
+    const lubancode::evolution::SuggestThresholds thresholds;
+    TermOut() << "有限自动建议(阶段 7):" << (enabled ? "开" : "关(缺省)") << "\n";
+    TermOut() << "  五门门槛(inspect):独立任务 >= " << thresholds.min_independent_tasks
+              << ";带验证证据的独立成功 >= " << thresholds.min_independent_successes
+              << ";形状步数 >= " << thresholds.min_shape_steps
+              << ";同指纹无在途/被拒候选;收益说得清(Memory 装不下的整套做法)\n";
+    const lubancode::evolution::SuggestLedger ledger(evolution_root / "suggest.jsonl");
+    const lubancode::evolution::SuggestLedger::Stats stats = ledger.ComputeStats();
+    // 命中率的分母:观察账上当前达到门一的簇数(现状口径,inspect 时现算)。
+    int opportunities = 0;
+    {
+        std::map<std::string, std::set<std::string>> cluster_sources;
+        for (const lubancode::evolution::EvolutionObservation& observation :
+             lubancode::evolution::ObservationStore(BuildStoreRoot(ctx)).Load()) {
+            cluster_sources[observation.fingerprint].insert(observation.source_id);
+        }
+        for (const auto& [fingerprint, sources] : cluster_sources) {
+            if (static_cast<int>(sources.size()) >= thresholds.min_independent_tasks) {
+                ++opportunities;
+            }
+        }
+    }
+    TermOut() << "  命中账: 提示 " << stats.shown_events << " 笔/" << stats.shown_fingerprints
+              << " 指纹;接受 " << stats.accepted_events << " 笔/" << stats.accepted_fingerprints
+              << " 指纹\n";
+    TermOut() << "  命中率: " << stats.shown_fingerprints << " / " << opportunities
+              << "(出过提示的指纹 / 当前账上达到门一的簇数)\n";
+    if (stats.acceptance_rate < 0.0) {
+        TermOut() << "  接受率: (还没出过提示,不算)\n";
+    } else {
+        char rate[32]{};
+        std::snprintf(rate, sizeof(rate), "%.0f%%", stats.acceptance_rate * 100.0);
+        TermOut() << "  接受率: " << stats.accepted_fingerprints << " / "
+                  << stats.shown_fingerprints << " = " << rate
+                  << "(出过提示又真起草的指纹 / 出过提示的指纹)\n";
+    }
+    TermOut() << "  账本: " << lubancode::platform::PathToUtf8(evolution_root / "suggest.jsonl")
+              << "\n";
+    if (!enabled) {
+        TermOut() << "  注: 当前关着——上面的账是历史累计,新提示不再产生。\n";
     }
     TermOut().flush();
 }
@@ -395,14 +552,15 @@ void RunEvolveShowCandidate(SlashDispatchContext& ctx, const std::string& target
     TermOut() << "  目录: " << lubancode::platform::PathToUtf8(found->dir) << "\n";
     TermOut() << "  整包哈希: " << (found->content_hash.empty() ? "(package/ 缺失)" : found->content_hash)
               << "\n";
-    // 形状照盘上现状说(代码草稿/组合/最小),复杂度顺带亮一笔。
+    // 形状照盘上现状说(代码草稿[Plugin 或 MCP]/组合/最小),复杂度顺带亮一笔。
     {
         const lubancode::evolution::ComplexityCost cost =
             lubancode::evolution::ComputeComplexityCost(found->dir / "package");
         if (!cost.shape.empty()) {
             TermOut() << "  形状: "
                       << (cost.shape == "code-draft"
-                              ? "code-bearing-draft(process Plugin 草稿 + skill)"
+                              ? (cost.has_mcp ? "code-bearing-draft(MCP server 草稿 + skill)"
+                                              : "code-bearing-draft(process Plugin 草稿 + skill)")
                               : (cost.shape == "combination" ? "组合包" : "最小 Skill-only 包"))
                       << ";复杂度 " << cost.SummaryLine() << "\n";
         }
@@ -610,13 +768,24 @@ void RunEvolvePropose(SlashDispatchContext& ctx, const std::string& target) {
               << result->candidate_version << "]\n";
     TermOut() << "  整包哈希: " << result->content_hash << "\n";
     TermOut() << "  目录: " << lubancode::platform::PathToUtf8(result->candidate_dir) << "\n";
-    // 分档亮形:代码草稿、组合还是最小包,簇多大,组件几件。
+    // 分档亮形:代码草稿(Plugin 或 MCP)、组合还是最小包,簇多大,组件几件。
     if (result->code_draft) {
-        TermOut() << "  形状: code-bearing-draft(代码档草稿)——process Plugin 草稿 + Skill,"
-                  << "簇内 " << result->cluster_size << " 场任务同求工具 \"" << result->wanted_tool
-                  << "\"(现有工具办不了,录到的是 registry.unknown_tool 失败)\n";
-        TermOut() << "  草稿规矩: 零进程零挂载,不自动启用;runner 是未实现占位,"
-                  << "补实现走人工审查线\n";
+        if (result->mcp_draft) {
+            TermOut() << "  形状: code-bearing-draft(MCP server 草稿)——mcp.yaml + server 脚手架"
+                      << " + Skill,簇内 " << result->cluster_size << " 场任务同求 "
+                      << result->wanted_tools.size() << " 件不存在的工具(\""
+                      << result->wanted_tool << "\" 等;现有工具办不了,录到的是 "
+                      << "registry.unknown_tool 失败;同求多件,封一只 server 合账)\n";
+            TermOut() << "  草稿规矩: 零进程零挂载,不自动启用;server 是未实现占位,"
+                      << "补实现走人工审查线\n";
+        } else {
+            TermOut() << "  形状: code-bearing-draft(process Plugin 草稿)——plugin.json + runner"
+                      << " 脚手架 + Skill,簇内 " << result->cluster_size << " 场任务同求工具 \""
+                      << result->wanted_tool
+                      << "\"(现有工具办不了,录到的是 registry.unknown_tool 失败)\n";
+            TermOut() << "  草稿规矩: 零进程零挂载,不自动启用;runner 是未实现占位,"
+                      << "补实现走人工审查线\n";
+        }
     } else if (result->shape == "combination") {
         TermOut() << "  形状: 组合候选(簇 " << result->cluster_size
                   << " 场同形任务;两把尺过门)——workflow" << (result->agent_drafted ? " + Agent" : "")
@@ -649,6 +818,20 @@ void RunEvolvePropose(SlashDispatchContext& ctx, const std::string& target) {
         TermOut() << "  注: 簇外另有 " << cluster_skipped
                   << " 条同指纹观察找不到可读录制件,未进簇\n";
     }
+    // 阶段 7:点了头的建议记一笔接受账(同一指纹只记头一笔;接受是真动作,
+    // 与建议开关无关——关着建议也能起草,账照实记)。
+    if (!fingerprint.empty()) {
+        lubancode::evolution::SuggestLedger suggest_ledger(BuildEvolutionRoot(ctx) / "suggest.jsonl");
+        if (suggest_ledger.HasOpenSuggestion(fingerprint)) {
+            lubancode::evolution::SuggestEvent event;
+            event.type = "accepted";
+            event.fingerprint = fingerprint;
+            event.candidate_id = result->candidate_id;
+            if (const auto append_error = suggest_ledger.Append(event); append_error.has_value()) {
+                TermOut() << "  警告: 接受账没记上(" << *append_error << ")\n";
+            }
+        }
+    }
     TermOut() << "  下一步: /evolve diff " << result->candidate_id << "(分档看形状)或 /evolve test "
               << result->candidate_id << "(评测五道门)\n";
     TermOut().flush();
@@ -667,7 +850,8 @@ void RunEvolveDiff(SlashDispatchContext& ctx, const std::string& target) {
               << result->baseline << ":\n";
     TermOut() << "  形状: "
               << (result->shape == "code-draft"
-                      ? "code-bearing-draft(process Plugin 草稿 + skill)"
+                      ? (result->mcp_summary.empty() ? "code-bearing-draft(process Plugin 草稿 + skill)"
+                                                     : "code-bearing-draft(MCP server 草稿 + skill)")
                       : (result->shape == "combination" ? "组合包(workflow/agent + skill)"
                                                         : "最小 Skill-only 包"))
               << "\n";
@@ -694,6 +878,9 @@ void RunEvolveDiff(SlashDispatchContext& ctx, const std::string& target) {
     // ---- 阶段 6:代码档草稿与权限差异,如实亮 ----
     if (!result->plugin_summary.empty()) {
         TermOut() << "  Plugin 草稿:\n    " << result->plugin_summary << "\n";
+    }
+    if (!result->mcp_summary.empty()) {
+        TermOut() << "  MCP 草稿:\n    " << result->mcp_summary << "\n";
     }
     if (!result->permission_lines.empty()) {
         TermOut() << "  权限差异(批准页须单列):\n";
@@ -1035,6 +1222,20 @@ ParsedEvolveCommand ParseEvolveCommand(const std::string& args) {
             target_space == std::string::npos ? std::string() : Trimmed(rest.substr(target_space + 1));
         return parsed;
     }
+    if (lower == "suggest") {
+        // suggest [on|off]:裸跑 = 看状态、门槛与命中账;on/off = 开关。
+        parsed.action = EvolveCommandAction::Suggest;
+        if (!rest.empty()) {
+            const std::string flag = ToLowerAscii(rest);
+            if (flag == "on" || flag == "off") {
+                parsed.suggest_arg = flag;
+            } else {
+                parsed.action = EvolveCommandAction::Invalid;
+                parsed.bad_word = rest;
+            }
+        }
+        return parsed;
+    }
     parsed.action = EvolveCommandAction::Invalid;
     parsed.bad_word = word;
     return parsed;
@@ -1078,6 +1279,9 @@ CommandFlow HandleSlashEvolve(SlashDispatchContext& ctx,
             return CommandFlow::Continue;
         case EvolveCommandAction::Rollback:
             RunEvolveRollback(ctx, command.target, command.target_extra);
+            return CommandFlow::Continue;
+        case EvolveCommandAction::Suggest:
+            RunEvolveSuggest(ctx, command.suggest_arg);
             return CommandFlow::Continue;
         case EvolveCommandAction::Invalid:
             TermOut() << "认不得 \"" << command.bad_word << "\"。\n";

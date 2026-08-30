@@ -28,6 +28,7 @@ enum class EvolveCommandAction {
     Use,      // /evolve use <candidate-id>:点名 canary(阶段 4)
     Promote,  // /evolve promote <candidate-id>:canary -> active(阶段 4)
     Rollback, // /evolve rollback <package-id> [version]:切回父版或指定版(阶段 4)
+    Suggest,  // /evolve suggest [on|off]:看/开关有限自动建议(阶段 7,缺省关)
 };
 
 struct ParsedEvolveCommand {
@@ -36,6 +37,7 @@ struct ParsedEvolveCommand {
     std::string target;         // Show/Propose/Diff/Reject/Test/Approve/Use/Promote/Rollback 的目标 id
     std::string target_extra;   // Rollback 的可选版本号
     std::string reason;         // Reject 的理由(可省)
+    std::string suggest_arg;    // Suggest 时:on / off;空串 = 看状态与门槛账
     std::string bad_word;       // Invalid 时第一词的原始拼写(提示用)
 };
 
