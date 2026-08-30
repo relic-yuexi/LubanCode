@@ -30,7 +30,8 @@ Lua 与 C ABI 走的是短路：
 | --- | --- | --- |
 | 只教模型一套做法 | Skill | 不需执行代码 |
 | 拦工具、记审计、发通知 | Hook | 由宿主事件触发，不等模型挑工具 |
-| 一枚可信本地函数 | Lua 插件 | 一份脚本，启动即挂载 |
+| 一枚可信本地函数 | 裸 Lua 插件 | 一份脚本，启动即挂载 |
+| 确定的 HTTPS 调用，Secret 不进脚本 | manifest v2 Lua 插件 | 宿主握水管与钥匙，Lua 只描述请求 |
 | 接 C 库、系统 API、重计算 | C ABI 插件 | 同进程调用，少一层复制与 RPC |
 | 接数据库、浏览器、云服务 | MCP | 服务有独立状态与生命周期 |
 | 代码不可信，须隔离崩溃 | MCP 或独立进程宿主 | Lua/DLL 会连宿主一起拖下水 |
@@ -39,7 +40,7 @@ Lua 与 C ABI 走的是短路：
 ```mermaid
 flowchart TB
     accTitle: 扩展方式选择路径
-    accDescr: 按需求是否执行代码、是否已有独立服务、是否需要进程隔离和原生性能，选择 Skill、Hook、Lua、C ABI、MCP 或内置工具。
+    accDescr: 按需求是否执行代码、是否已有独立服务、是否需要进程隔离、原生性能与联网，选择 Skill、Hook、裸 Lua、manifest v2 Lua、C ABI、MCP 或内置工具。
 
     need{要执行代码吗}
 
@@ -55,7 +56,9 @@ flowchart TB
         service -->|没有| trust{代码可信且可同进程吗}
         trust -->|不可信| isolated_host[独立进程宿主]
         trust -->|可信| native{要原生库或高性能吗}
-        native -->|不要| lua[Lua 插件]
+        native -->|不要| net{要联网吗}
+        net -->|不要| lua[裸 Lua 插件]
+        net -->|受控 HTTPS 与 Secret| mlua[manifest v2 Lua 插件]
         native -->|要| cabi[C ABI 插件]
     end
 
@@ -66,12 +69,12 @@ flowchart TB
     classDef process fill:#dbeafe,stroke:#2563eb,stroke-width:2px,color:#1e3a5f
     classDef warning fill:#fee2e2,stroke:#dc2626,stroke-width:2px,color:#7f1d1d
 
-    class need,teach,service,trust,native decision
-    class skill,hook,mcp,lua,cabi process
+    class need,teach,service,trust,native,net decision
+    class skill,hook,mcp,lua,mlua,cabi process
     class isolated_host warning
 ```
 
-这张图只管主选择。现实里还能混用。比如 MCP server 内部可调 C 库；Hook 也能调用一段 Lua。先认清信任边界，再谈省不省事。
+这张图只管主选择。现实里还能混用。比如 MCP server 内部可调 C 库；Hook 也能调用一段 Lua。先认清信任边界，再谈省不省事。manifest v2 Lua 与裸 Lua 是同一只解释器：差别只在 `plugin.json` 声明了网络账与 Secret 后，宿主才往 state 里注册 `luban` 模块。
 
 ## 📦 能不能真装上
 
@@ -119,7 +122,7 @@ plugin__word_count__word_count  (lua)
 
 ### 安装 C ABI 示例
 
-原生插件现版只支持 Windows DLL。先在仓库根目录构建：
+原生插件三平台都认（Windows `.dll`、Linux `.so`、macOS `.dylib`）。下面拿 Windows 举例，先在仓库根目录构建：
 
 ```powershell
 cmake -S .\examples\plugins\hello_plugin -B .\build\hello-plugin
@@ -164,7 +167,7 @@ plugin__hello_plugin__reverse_text  (DLL)
 ```mermaid
 flowchart LR
     accTitle: 插件工具挂载与调用链
-    accDescr: Lua 文件或 Windows DLL 在启动时被扫描、校验并适配成统一 Tool，随后经过延迟挂载、模型调用、Hook、权限与结果回填。
+    accDescr: Lua 文件或平台 DLL 在启动时被扫描、校验并适配成统一 Tool，随后经过延迟挂载、模型调用、Hook、权限与结果回填。
 
     subgraph startup ["启动发现"]
         file[插件文件] --> load{扫描并按类型加载}
@@ -217,7 +220,7 @@ plugin__<文件 stem>__<工具短名>
 
 ## 🌙 Lua 插件契约
 
-每个 `.lua` 文件只能交出一件工具。脚本顶层须返回一张表：
+Lua 插件有两副面孔。裸 `.lua` 一文件只交一件工具，顶层返回一张表；manifest v2（`plugin.json` + `runtime.kind=embedded-lua`）一插件可交多件工具，顶层返回 handler 表，键名与 `tools[].entry` 一一对应，另注册 `luban.http`/`luban.secrets` 宿主 API（见[扩展指南第 5.3 节](../../features/extensions/README.md)）。两副面孔同一只解释器、同一个 pure 画像。裸脚本的样子：
 
 ```lua
 return {
@@ -278,7 +281,7 @@ table 转 JSON 时，键恰好是 `1..n` 的连续整数才认作数组；其余
 
 脚本编译错、顶层执行错、`execute` 里的普通 `error()` 都由 `lua_pcall` 接住，翻成 `is_error=true`。一个坏 Lua 文件只留一条启动警告，其余插件照挂。
 
-可别把 `pcall` 当沙箱。宿主调用了 `luaL_openlibs`，标准库全开。脚本可用 `io` 读写文件，可用 `os.execute` 起命令，也可用 `os.exit` 直接结束进程。死循环没有 instruction hook，内存分配也没有自定义上限。
+可别把 `pcall` 当沙箱。`luaL_openlibs` 之后确有标准库，但 pure 画像缺省生效：`io`、`os.execute`、`os.exit`、`package.loadlib` 被摘掉或关门，指令预算（缺省 2 亿条）在 hook 里落锤并顺带查 ESC 取消，自定义 allocator 限内存。三道墙都是软的——拦跑野的脚本，不是对抗恶意绕洞；`trusted` 画像（标准库全开）须显式批准。manifest v2 Lua 永远走 pure 画像，再叠一层动态调用上下文：顶层加载期调 `luban.http`/`luban.secrets` 一律报 `no_active_tool_call`，零网络、零 Secret 解析。
 
 ## 🔩 C ABI 插件契约
 
@@ -341,7 +344,7 @@ Lua 的坏 Schema 会拒绝整份脚本；C 插件却退成宽 Schema。这是�
 
 C 插件若用全局变量、静态缓存或第三方库，须自己保证并发安全。宿主不会替 `execute` 加全局锁。
 
-Lua 侧每个工具对象有独立 `lua_State`，不同文件不串全局变量。同一工具另有 per-state mutex。多只后台子代理同拍调用时，会在这把锁前排队；不同 Lua 工具仍可并行。锁护住 Lua 栈，不替脚本限制总耗时。
+Lua 侧每个工具对象有独立 `lua_State`，不同文件不串全局变量（manifest v2 Lua 则一插件一只 state，多件工具共用）。同一 state 另有 per-state mutex。多只后台子代理同拍调用时，会在这把锁前排队；不同 Lua 插件仍可并行。锁护住 Lua 栈，不替脚本限制总耗时。
 
 DLL 生命周期由 `PluginHost` 扛住。主表与子代理表各有一层 `PluginTool`，底下共用一枚按路径幂等加载的模块。`PluginTool` 只借用 DLL 里的静态 `tool_def`。两张 registry 必须先析构，模块随后 `FreeLibrary`。顺序一反，函数指针和静态字符串便全悬空。
 
@@ -356,10 +359,10 @@ Lua 与 DLL 工具都把 `needs_confirm()` 固定为 true。调用前会走 PreT
 它管不住三件事：
 
 1. DLL 在 `LoadLibraryW` 的 `DllMain` 里就能做事。
-2. Lua 文件顶层在启动加载时已经执行，尚未轮到工具确认。
+2. Lua 文件顶层在启动加载时已经执行，尚未轮到工具确认。manifest v2 Lua 在这补了一道闸：顶层执行时宿主 API 结构性不可用（`no_active_tool_call`），零网络、零 Secret 解析。
 3. 用户一旦放行，插件拿的是宿主进程权限，不是某套收窄能力。
 
-所以，陌生插件不能靠“反正会弹确认”来壮胆。插件目录是代码执行目录。Lua 可读写文件、起命令；DLL 能碰宿主地址空间、密钥与网络。
+所以，陌生插件不能靠“反正会弹确认”来壮胆。插件目录是代码执行目录。Lua 走 pure 画像时摸不到 `io` 与 `os.execute`（`trusted` 画像须显式批准才能全开）；DLL 能碰宿主地址空间、密钥与网络。
 
 这也说明 MCP 并非白费进程。进程边界至少能隔开崩溃与地址空间，还能单独限权、杀进程、看 stderr。若扩展来自第三方，隔离常比那点 RPC 成本值钱。
 
@@ -381,7 +384,7 @@ Schema 首要用途是告诉模型怎样构造参数。原始模型入参不会�
 
 ### 大输入、大输出
 
-插件桥本身没有独立的输入、输出字节上限。结果进 Agent Loop 后会过 UTF-8 清洗，后续 context 管理也可能裁剪；这不能替代执行时的资源限制。插件若一口吐几百 MiB，宿主会先吃下它。
+裸 Lua 与 C ABI 的插件桥本身没有独立的输入、输出字节上限。结果进 Agent Loop 后会过 UTF-8 清洗，后续 context 管理也可能裁剪；这不能替代执行时的资源限制。插件若一口吐几百 MiB，宿主会先吃下它。manifest v2 Lua 的 HTTP 收发另有六处帽（URL/请求头/请求体/响应头/响应体/墙钟），全部在数据入口处掐断；但 Lua 工具的返回值本身仍走这条老路，脚本要自己克制。
 
 ### 热更新
 
@@ -436,11 +439,11 @@ process 插件每次调用起一只短命进程,"冷启动很贵"的担心要拿
 
 ### “插件安全吗？”
 
-> 不安全。确认只挡调用，不挡加载期代码；Lua 标准库全开，DLL 与宿主同地址空间。只装可信插件。不可信扩展应走独立进程，MCP 反倒更合适。
+> 不安全。确认只挡调用，不挡加载期代码；Lua 有 pure 画像、指令预算与内存帽三道软墙，但都是进程内软限制，不是沙箱；DLL 与宿主同地址空间。只装可信插件。不可信扩展应走独立进程，MCP 反倒更合适。联网的 Lua 走 manifest v2：网络、Secret、字节帽由宿主代管，边界比裸 Lua 收得窄。
 
 ### “这套系统还欠什么？”
 
-> 欠包管理、签名与版本锁；C 插件还只支持 Windows；Lua 没 CPU 与内存墙；注册表也该拒绝重名。若要面向第三方生态，我会先做进程外 plugin host，而不是先做市场页面。
+> 欠包管理、签名与版本锁；Lua 有指令预算与内存帽，但没有进程隔离与强化沙箱；注册表也该拒绝重名。若要面向第三方生态，我会先做进程外 plugin host，而不是先做市场页面。
 
 ## 🔗 源码、示例与测试
 
@@ -448,11 +451,17 @@ process 插件每次调用起一只短命进程,"冷启动很贵"的担心要拿
 | --- | --- |
 | 统一工具接口 | `src/tools/tool.hpp`、`src/tools/registry.cpp` |
 | Lua bridge | `src/tools/lua_tool.hpp`、`src/tools/lua_tool.cpp` |
+| manifest v2 Lua runtime | `src/runtime/plugin_lua_manifest.hpp`、`src/runtime/plugin_lua_manifest.cpp` |
+| 插件 Secret（env + 数据目录 `.env`） | `src/runtime/secret_resolver.hpp`、`src/runtime/secret_resolver.cpp` |
+| 受控 HTTP（权限、注入、错误码） | `src/runtime/plugin_http.hpp`、`src/runtime/plugin_http.cpp` |
+| 中立 HTTP 传输底座 | `src/net/http_transport.hpp`、`src/net/http_transport.cpp` |
 | C ABI 头 | `include/luban_plugin.h` |
 | DLL loader | `src/tools/plugin_loader.hpp`、`src/tools/plugin_loader.cpp` |
 | 启动挂载 | `src/app/tool_runtime.cpp` |
 | Lua 示例 | `examples/plugins/word_count.lua` |
+| manifest v2 Lua 参考包 | `examples/packages/anysearch` |
 | C 示例 | `examples/plugins/hello_plugin/hello_plugin.c`、`examples/plugins/hello_plugin/CMakeLists.txt` |
 | 真加载与转换测试 | `tests/integration/plugins/test_plugins.cpp`、`tests/CMakeLists.txt` |
+| 受控 HTTP/Secret 测试 | `tests/unit/runtime/test_secret_resolver.cpp`、`tests/unit/runtime/test_plugin_http_transport.cpp`、`tests/unit/runtime/test_plugin_lua_host.cpp`、`tests/integration/plugins/test_anysearch_package.cpp` |
 
 往提交史追，可从 `7fb871d` 看初版全貌，从 `cf1e4ae` 看插件排序为何牵动请求前缀缓存。用户手册只看安装与字段，回[扩展指南](../../features/extensions/README.md)；要看插件与 MCP、Skill、Hook 怎样共用工具流水，接着读[工具协议与扩展运行时](tool-extension.md)。

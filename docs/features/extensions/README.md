@@ -11,17 +11,19 @@ LubanCode 留了七扇门：Skill、MCP、LSP、Lua、process 插件、native �
 | Skill | 教模型一套章法，附范例、模板、脚本 | 提示上下文；附带脚本另算 | 否 | 中 |
 | MCP | 长驻服务、数据库连接池、已有 MCP 生态 | 独立 stdio 子进程 + JSON-RPC | 否 | 中至高 |
 | LSP | 查定义、引用、符号、诊断 | 语言服务器子进程 | 否 | 中 |
-| Lua | 写轻量本地工具，零依赖零编译 | LubanCode 进程内 | 否 | 高 |
+| Lua（裸 `.lua`） | 纯本地计算：改文本、算数、查表 | LubanCode 进程内 | 否 | 高 |
+| Lua（manifest v2） | 确定的 HTTPS 调用，Secret 由宿主代填 | LubanCode 进程内 | 否 | 中 |
 | process 插件 | Python/Rust/Go/Node/C++ 可执行程序当工具 | 短命子进程（stdin/stdout JSON） | 否 | 中 |
 | native 插件 | 接原生库、极低延迟、大数据量 | LubanCode 进程内（.dll/.so/.dylib） | 插件要编，主程序不用 | 最高 |
 | Hooks | 会话或工具前后跑命令，做审计与拦截 | 平台默认 shell 子进程 | 否 | 高 |
 
-只要是“告诉模型该怎么做”，先用 Skill。要把独立服务暴露成工具，用 MCP。只查代码语义，用 LSP。Lua 和原生插件都进宿主进程，须当可执行代码审查。
+只要是“告诉模型该怎么做”，先用 Skill。要把独立服务暴露成工具，用 MCP。只查代码语义，用 LSP。要调 HTTPS API 又不想拖运行时，用 manifest v2 Lua。Lua 和原生插件都进宿主进程，须当可执行代码审查。
 
-若功能只有一枚可信本地函数，不必硬搭 MCP server。三条短路按风险从低到高挑：
+若功能只有一枚可信本地函数，不必硬搭 MCP server。四条短路按风险从低到高挑：
 
 - **process 插件**（默认主路）：任何能从 stdin 读 JSON、往 stdout 写 JSON 的程序都能挂。Python 冷启动毫秒级，进程崩了只坏当次调用。写法见第 6 节。
-- **Lua**：零依赖零编译，`~/.lubancode/plugins/` 丢一枚 `.lua` 即挂。pure 画像缺省关 `io`/`os.execute`，死循环有指令预算落锤。见第 5 节。
+- **Lua（裸 `.lua`）**：零依赖零编译，`~/.lubancode/plugins/` 丢一枚 `.lua` 即挂。pure 画像缺省关 `io`/`os.execute`，死循环有指令预算落锤。纯计算，没有联网能力——裸 `.lua` 里不存在 `luban` 模块。见第 5 节。
+- **Lua（manifest v2）**：联网的 Lua 必须带 `plugin.json`（`manifest_version: 2`）。HTTP、TLS、DNS、取消、字节帽全由 C++ 宿主执行，Lua 只描述请求；Secret 只拿不透明引用，看不见原文。零外部运行时——不装 Python、Node、第三方 Lua 模块。见第 5.3 节。
 - **native 插件**：极低延迟、大数据不搬进程时才用；加载即执行库 constructor，崩了带倒宿主。ABI v2 三平台（Windows .dll / Linux .so / macOS .dylib）。见第 7 节。
 
 设计动机、安装实证、ABI、并发与 corner case 见[进程内插件系统深挖](../../architecture/extensions/plugin-runtime.md)。
@@ -180,6 +182,10 @@ LSP 不是另一套代码搜索。它问语言服务器，拿编译语义回答�
 
 ## 5. Lua 插件
 
+Lua 有两副面孔：裸 `.lua` 只做纯计算；要联网，必须带 `plugin.json`（`manifest_version: 2`）。两副面孔同一只解释器、同一个 pure 画像，差别只在有没有宿主 API。
+
+### 5.1 裸 `.lua`：纯计算，零 Host API
+
 把 `.lua` 放进：
 
 ```text
@@ -226,6 +232,10 @@ plugin__word_count__word_count
 
 完整示例见 [examples/plugins/word_count.lua](../../../examples/plugins/word_count.lua)。插件在启动时扫描。改完 `.lua` 后要重启 LubanCode。
 
+**裸 `.lua` 没有 Host API。** `luban` 模块只在 manifest v2 插件里注册——裸脚本调 `luban.http.request` 就是调 nil，结构性碰不到网络与 Secret。要联网，写 manifest（5.3 节）；要文件与命令能力，改走 process 插件（进程隔离）。
+
+### 5.2 三道软墙（两副面孔共用）
+
 Lua 与宿主同进程，风险用三道软墙兜底（`pure` 画像缺省生效）：
 
 - **库关门**：`os.execute`、`os.exit`、`io`、`package.loadlib` 拿不到——要文件与命令能力的，改走 process 插件（进程隔离），不要悄悄开 trusted。
@@ -233,6 +243,92 @@ Lua 与宿主同进程，风险用三道软墙兜底（`pure` 画像缺省生效
 - **内存帽**：狂吃内存按 OOM 报脚本错误，宿主堆不破。
 
 三道墙都是软的：拦跑野的脚本，不是恶意绕洞。真不可信代码走 process 隔离。`trusted` 画像（全开）须显式批准。插件工具默认需要确认，但确认只能挡“是否调用”，挡不住插件内部写坏内存。
+
+### 5.3 manifest v2 Lua：受控 HTTP 与 Secret
+
+一句话：**Lua 只描述请求，宿主握住水管和钥匙。** HTTP、TLS、代理、DNS、取消和字节帽都由 C++ 宿主执行，Lua 不碰 socket；Secret 由宿主解析并代填请求头，Lua 只拿不透明引用。零外部运行时——用户不用装 Python、Node 或第三方 Lua 模块。
+
+目录一插件一目录：
+
+```text
+~/.lubancode/plugins/my-api/
+  plugin.json      # manifest v2：工具、网络账、Secret、帽
+  my-api.lua       # runtime.entry 指的脚本
+```
+
+`plugin.json` 最小样例（全字段规矩见 `src/runtime/plugin_contract.hpp` 注释）：
+
+```json
+{
+  "manifest_version": 2,
+  "id": "my-api",
+  "version": "0.1.0",
+  "language": "lua",
+  "runtime": {"kind": "embedded-lua", "entry": "my-api.lua"},
+  "permissions": {
+    "network": [
+      {"scheme": "https", "host": "api.example.com", "port": 443,
+       "methods": ["GET", "POST"]}
+    ],
+    "secrets": [
+      {"id": "api_key", "env": "MY_API_KEY", "required": false}
+    ]
+  },
+  "limits": {"http_timeout_ms": 20000, "http_response_bytes": 4194304},
+  "tools": [
+    {"name": "search", "entry": "search", "description": "……",
+     "input_schema": {"type": "object", "properties": {}}}
+  ]
+}
+```
+
+Lua 脚本只返回 handler 表，键名与 `tools[].entry` 一一对应；工具合同只认 manifest，不在 Lua 里抄第二份 schema：
+
+```lua
+return {
+  search = function(input)
+    local response, err = luban.http.request({
+      method = "POST",
+      url = "https://api.example.com/v1/search",
+      headers = { Accept = "application/json" },
+      json = input,
+      auth = { type = "bearer", secret = "api_key", optional = true },
+      timeout_ms = 20000,
+    })
+    if err ~= nil then
+      error(err.code .. ": " .. err.message)
+    end
+    return { status = response.status, body = response.json }
+  end,
+}
+```
+
+宿主代管的账：
+
+| 账 | 规矩 |
+| --- | --- |
+| 网络 | 只收 `https` + 精确 DNS host + 443 端口 + `GET`/`POST`。通配符、IP 字面量、明文 HTTP 一概不收。manifest 没声明网络，`luban.http.request` 永远报 `network_not_declared` |
+| 边界 | URL 解析、目的地命中、DNS 私网/metadata 段、连接期钉地址防 rebinding、重定向一概不跟（3xx 原样交 Lua）——五道边界全在宿主 |
+| Secret | 按逻辑 id 声明。宿主环境变量优先，其次插件数据目录的 `.env`；Lua 用 `luban.secrets.available("api_key")` 探有无，拿不到明文，`tostring` 只得 `<secret:api_key>` |
+| 禁写头 | Lua 自写 `Authorization`、`Cookie`、`Host`、`Content-Length` 直接拒——这些由宿主代填 |
+| 帽 | URL/请求头/请求体/响应头/响应体/墙钟六处落锤，全部在数据入口处掐，不先收完再看。`limits` 只许下调宿主硬上限；0 不是无限，是非法 |
+| 时机 | 启动加载期（顶层代码）调任何 Host API 一律报 `no_active_tool_call`——零网络、零 Secret 解析。只有工具 `execute` 的动态作用域里可用 |
+| 错误 | 17 枚稳定错误码（`network_target_denied`、`response_too_large`、`cancelled`、`timeout`……），Lua 与测试都按码判断；HTTP 非 2xx 不冒充网络错，status 原样带回 |
+
+`.env` 放数据目录，永不放插件源码树（那会进内容指纹，还容易打包带走）：
+
+```text
+standalone：~/.lubancode/plugin-data/<plugin-id>/.env
+packaged：  ~/.lubancode/package-data/<package-id>/plugins/<local-id>/.env
+```
+
+Windows 的 `~` 取 `%USERPROFILE%`。文件是窄语法（`KEY=value`、引号包值、`#` 注释，不做插值与命令替换），只装 manifest 声明过的键。
+
+信任与诊断：项目目录与 Package 里的 v2 插件是外来代码，过内容指纹信任门——`/plugin trust` 亮全份材料（Lua entry、精确网络目的地、Secret 逻辑名与 env 名、资源帽、指纹），权限一改旧信任即失效。`/plugin inspect` 看权限真账，`/plugin doctor` 只读体检（含逐目的地 DNS 安全检查），不带 Secret 发网。安全边界的全份规矩见[安全模型](../../development/security.md)。
+
+完整参考实现见 [examples/packages/anysearch](../../../examples/packages/anysearch/README.md)：一只 manifest + 208 行 Lua，四件搜索工具，零 Python、零 Node。
+
+v1 manifest 写 `embedded-lua` 会明报“manifest-backed Lua 需 v2”；旧裸 `.lua`、v1 process、native 三条旧路行为不变。
 
 ## 6. process 插件（默认主路）
 
@@ -520,7 +616,9 @@ Hooks 在会话或工具边界跑外部命令。适合审计、格式检查、�
 
 **Lua**
 
-一文件一工具最省事。文件名别轻易改；一改，命名空间也跟着变。声明只用 pure 画像认的库（string/table/math/os.time 之类），用户挂上即用，不必开 trusted。
+裸 `.lua` 一文件一工具最省事。文件名别轻易改；一改，命名空间也跟着变。声明只用 pure 画像认的库（string/table/math/os.time 之类），用户挂上即用，不必开 trusted。
+
+manifest v2 Lua 联网插件：网络账只写用得上的精确 host，别多报；`limits` 只许下调。Key 不进包——`.env` 放数据目录（第 5.3 节），包里只带 `docs/.env.example` 占位样板。照抄骨架见 [examples/packages/anysearch](../../../examples/packages/anysearch/README.md)。
 
 **process 插件**
 
@@ -539,10 +637,12 @@ Hooks 在会话或工具边界跑外部命令。适合审计、格式检查、�
 - 工具名稳定，说明与 schema 对得上。
 - 参数缺失、坏类型、外部服务退出都有清楚错误。
 - 没把 API key 写进源码、示例、Skill、日志或目录。
+- 联网插件只声明用得上的精确 host；`.env` 与 Key 不进包，样板用 `.env.example` 占位（第 5.3 节）。
 - 写操作会触发正确确认。
 - 输出设了上限，不把几百兆数据塞回模型。
 - MCP stdout 没有日志；process 插件 stdout 恰好一份 JSON、日志全在 stderr。
 - Lua/native 经坏输入、重复调用与退出清理测试；native 另在独立进程里测过崩溃路径。
+- manifest v2 Lua 另过一遍：顶层不调 Host API、越权 host 有拒绝测试、响应超帽立刻断（照 `tests/integration/plugins/test_anysearch_package.cpp` 的假服务架子，不烧真网）。
 - process 插件带 `test_runner.py`（或同位自测脚本），作者本地能一条命令自测。
 - 文档写明安装路径、重载方式和卸载办法。
 
@@ -565,6 +665,10 @@ Hooks 在会话或工具边界跑外部命令。适合审计、格式检查、�
 | Python 报缺依赖 | venv/依赖没装 | 插件自带 venv 并把 `command` 指到 venv 解释器;LubanCode 不代装 |
 | Lua 脚本用 io/os.execute 报 nil | pure 画像关了这些库 | 确要文件/命令能力:改走 process 插件(隔离),不悄悄开 trusted |
 | Lua 死循环被掐断 | 指令预算落锤(默认 2 亿条) | 拆小任务;报错文案自带预算数 |
+| v2 Lua 工具报 network_not_declared | manifest 没写 permissions.network | 补网络账再重批信任(第 5.3 节);没声明的 host 一概拒发 |
+| v2 Lua 报 no_active_tool_call | 顶层/加载期调了 luban.http 或 luban.secrets | Host API 只在工具 execute 里可用;顶层只返回 handler 表 |
+| v2 Lua 报 secret_missing | required Secret 环境变量与 .env 都没配 | 配环境变量,或写数据目录 .env(第 5.3 节;源码树里的 .env 宿主不读) |
+| v2 Lua 报 network_target_denied | scheme/host/port/method 不命中声明 | url 只写声明过的精确 host;越权 URL 宿主拒发 |
 | native 库没挂上 | 扩展名/架构/ABI 不合 | 启动警告给 `abi_tag` 与错误码;`.dll`/`.so`/`.dylib` 按平台放(第 7 节) |
 | native 库挂上但调用崩宿主 | 插件野指针/ABI 错配 | native 插件崩了带倒宿主——先在独立进程里测插件本体 |
 | 项目插件没挂上 | 未经信任 | 警告给内容指纹;批准走 `~/.lubancode/plugin-trust.json`(第 6.5 节) |

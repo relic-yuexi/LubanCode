@@ -74,6 +74,8 @@ Provider 鉴权用三态：
 
 搜索服务、MCP 环境与 Hook 子进程也可能拿环境变量。只传所需变量，不把整套凭据随手灌给第三方程序。
 
+Lua 插件的 Secret 另走一条路：manifest 声明逻辑 id 与 env 名，宿主解析并代填请求头，Lua 与模型都摸不到明文（见 9.1 节）。
+
 ## 7. 项目配置
 
 项目 `.lubancode/config.json` 可压过部分全局字段。几道硬闸：
@@ -106,10 +108,48 @@ Hook 会执行程序，风险等同本地脚本。优先 exec form 的 `command 
 | Skill | 提示与文件材料 | 读完 `SKILL.md` 和脚本再用 |
 | MCP | 独立子进程/服务 | 限环境变量，审工具 schema 与服务来源 |
 | LSP | 独立语言服务器 | 固定命令与版本，留意它会读项目文件 |
-| Lua | 宿主进程内 | 只装可信源码，防死循环与越权 IO |
+| Lua（裸 `.lua`） | 宿主进程内，纯计算无 Host API | 只装可信源码；pure 画像三道软墙拦跑野脚本，不是沙箱 |
+| Lua（manifest v2） | 宿主进程内，网络与 Secret 由宿主代管 | 只批精确网络账；`.env` 放数据目录，别放源码树 |
 | C ABI | 宿主进程内 | 固定 ABI、架构、依赖与来源 |
 
 不可信原生能力优先改走 MCP，让崩溃与内存边界留在子进程。进程隔离仍不限制文件和网络；需要时再套 OS sandbox。
+
+### 9.1 manifest v2 Lua：Secret 与受控 HTTP
+
+联网的 Lua 插件必须带 `plugin.json`（`manifest_version: 2`）。一句话：Lua 只描述请求，宿主握住水管和钥匙。裸 `.lua` 里不存在 `luban` 模块，结构性碰不到网络与 Secret。
+
+**Secret 来源与优先级。** 同一逻辑 Secret 按序取第一份非空值：
+
+```text
+宿主进程环境中 manifest 声明的 env 名
+-> 插件专属 .env
+-> 未找到
+```
+
+第一期不接 OS Keychain；接口留了 provider seam，日后可加 Windows Credential Manager、macOS Keychain、Linux Secret Service，Lua 合同不变。
+
+**`.env` 住数据目录。** 源码树里的 `.env` 永不自动读取——它会进插件/Package 内容指纹，改 Key 就撞掉信任，打包分享还容易捎走 Secret：
+
+```text
+standalone 插件：~/.lubancode/plugin-data/<plugin-id>/.env
+packaged 插件：  ~/.lubancode/package-data/<package-id>/plugins/<local-id>/.env
+```
+
+Windows 的 `~` 取 `%USERPROFILE%`，POSIX 取 `$HOME`；路径由宿主算，不交 Lua 猜。文件走窄语法（UTF-8 可带 BOM、`KEY=value`、引号包值、`#` 注释；不做插值与命令替换，超 1 MiB 拒读），只装 manifest 声明过的键。`.env` 改动不改代码指纹，下一次调用读到新值——轮换 Key 无须重启。
+
+**五道网络边界。** 发请求前依次落闸，任一不过即拒发：
+
+1. URL 完整解析；禁 fragment 与 userinfo。
+2. scheme/host/port/method 精确命中 manifest 声明（只收 `https` + 精确 DNS host + 443 + `GET`/`POST`；通配符、IP 字面量、私网地址、任意端口不收）。
+3. host 不是 IP 字面量、`localhost` 或 `.local`。
+4. DNS 候选逐枚分类：loopback、link-local、RFC1918、CGNAT、组播、保留段、云 metadata 段，混一枚整体否决。
+5. 连接期钉住已验地址，防 DNS rebinding。
+
+**重定向一概不跟。** 3xx 原样作为 HTTP 响应交 Lua。顺带一记：cpr 的 Session 默认跟随重定向（`Redirect::follow` 缺省 true），插件 HTTP 传输已用 `cpr::Redirect(false)` 显式关死——不关的话，3xx 会静默跟还拿真 DNS 解析 Location，绕过钉地址。provider SSE 路同一患，尚未迁移，已记账留后（0.26.122）。
+
+**日志打码。** 错误、日志、trace、inspect、doctor 只记 Secret 逻辑 id、来源类别与 available/missing，不写值、长度、前后缀与 fingerprint。宿主侧 `SecretValue` 禁复制、移动即覆写、析构 best-effort 清 buffer；上游错误体若回显 Secret，落日志与模型结果前替换 `[REDACTED]`。best-effort 覆写不是绝对保密证明——优化器、TLS 库与系统缓冲仍可能留副本。Secret 明文从未进入 Lua、工具入参、模型上下文、session、trace 与 Hook payload；Lua 拿到的只是不透明引用（`tostring` 只得 `<secret:id>`）。
+
+字节帽（URL/请求头/请求体/响应头/响应体/墙钟）全部在数据入口处落锤；manifest `limits` 只许下调宿主硬上限。选型与写法见[扩展指南第 5.3 节](../features/extensions/README.md)。
 
 ## 10. 子代理与跨会话
 
@@ -150,6 +190,7 @@ PTC 允许模型写受限 Python，再经 RPC 调宿主白名单工具。它能�
 - Provider 请求会发送 system prompt、相关 history、工具 schema 与本轮材料。
 - `web_fetch`/`web_search` 会把 URL 或查询发给外部服务。
 - MCP 可自带网络能力，LubanCode 无法替它证明去向。
+- 插件 HTTP 只走 manifest 声明的精确 HTTPS 目的地，五道边界与字节帽由宿主落闸；重定向不跟（见 9.1 节）。
 - 诊断端点如 `metrics_url` 只在用户显式配置后访问，不从公网 base URL 擅自猜。
 - HTTP 重定向、代理与自定义 header 都可能改变数据去向，配置时要审。
 
@@ -168,7 +209,9 @@ PTC 允许模型写受限 Python，再经 RPC 调宿主白名单工具。它能�
 ## 15. 已知边界
 
 - 仓库尚无公开的强化 sandbox 方案。
-- Lua/C ABI 插件没有进程隔离。
+- Lua/C ABI 插件没有进程隔离；Lua 三道软墙（pure 画像、指令预算、内存帽）拦跑野脚本，不拦恶意绕洞。
+- 插件 Secret 第一期不接 OS Keychain，只收环境变量与数据目录 `.env`。
+- cpr 默认跟随重定向：插件 HTTP 路已显式关死，provider SSE 路同患未迁（0.26.122 记账留后）。
 - MCP/LSP 子进程仍以当前用户权限运行。
 - 模型与外部服务的数据保留由各服务条款决定。
 - 终端打码不能追回已经写入外部日志或 session 的秘密。
