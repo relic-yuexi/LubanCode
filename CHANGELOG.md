@@ -433,6 +433,12 @@
 - **subagent 独立 JSONL 成真**:派工线程 SpawnSubagent 开 subagents/&lt;agent_run_id&gt;.jsonl,子 loop 全落子账,父账只有 relations.child_run_id 与 terminal hash 引用——单测钉死 main 不含子账正文。persisted_count_ 轮末补抄整路停用;TrajectoryCommandExecutor 包住 slash 分派(requested 先 durable,command_name/effect_class 落账);/record 改选段器(轨迹档零旁听)、/compact 落 typed 状态机。
 - 状态机补丁:tool.execution.cancelled 不再要求 started(取消可发生在闸前)。flag 开烟测:main.jsonl 16 事件逐位齐、hash chain 过、/exit 落 command 事件;flag 关烟测:home 下无 trajectories 目录。P0-3(replay/resume)起排队。
 
+## [v0.26.139] - 2026-08-31
+
+- **vLLM 本地模型四 wire 修正(P0+P1)。** responses parser 补 `response.reasoning_text.delta` 分支——vLLM 0.27.x 的思考从这走,此前整段静默丢(先红后绿实证:撤掉分支夹具红 3/8,恢复绿);两只真机实录夹具进 wire replay 体系(88 帧思考流 + chat 面工具增量含 chatcmpl-tool- 前缀首帧形状)。
+- **关思考方言落线**:新形状 `chat_template_kwargs_enable_thinking`(嵌套键,vLLM 唯一真生效路——顶层 enable_thinking 实测被无视);目录双预设 `vllm`(chat 面,base_url 到 /v1)+ `vllm-anthropic`(messages 面,base_url 到根,signature_required 真,"关不掉"账面如实判 ServerFixed);为本地端放行回环 http base_url(假回环域名与普通 http 仍拒,六桩单测钉死)。
+- providers 手册新增「本地端点」小节,chat/anthropic 两份手写配置样例全文(报告样例的 context_window_tokens 错键已核正为 context_window)。真机冒烟:responses 面 88 帧思考解析、关思考后 reasoning 落 null 正文直出。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
