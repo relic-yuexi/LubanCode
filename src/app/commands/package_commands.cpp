@@ -186,7 +186,7 @@ std::string DescribePackage(const lubancode::package::PackageInventory& inventor
             if (mounted->code_trust == lubancode::package::CodeTrustStatus::PendingTrust) {
                 out << ";Plugin/MCP 待信任门";
             } else if (mounted->code_trust == lubancode::package::CodeTrustStatus::Trusted) {
-                out << ";Plugin/MCP 已过信任门(挂载事务在下一阶段)";
+                out << ";Plugin/MCP 已过信任门(挂载事务随会话启动跑,整包成整包败)";
             }
         } else if (inventory.valid) {
             out << (disabled ? "  已停用(挂载跳过,连内容组件一件不挂)"
@@ -515,7 +515,7 @@ void RunPackageShow(const lubancode::package::ScanOptions& options, const std::s
             if (mounted->code_trust == lubancode::package::CodeTrustStatus::PendingTrust) {
                 TermOut() << ";Plugin/MCP 待信任门,一件不挂不执行";
             } else if (mounted->code_trust == lubancode::package::CodeTrustStatus::Trusted) {
-                TermOut() << ";Plugin/MCP 已过信任门(挂载事务在下一阶段)";
+                TermOut() << ";Plugin/MCP 已过信任门(挂载事务随会话启动跑,整包成整包败)";
             }
             if (disabled) {
                 TermOut() << ";已停用,本会话照旧跑完,下回装配不再挂";
@@ -558,6 +558,13 @@ void PrintAnalyzedComponents(const lubancode::package::PackageRecord& record) {
                   << component.rel_path;
         if (component.kind == lubancode::package::ComponentKind::Plugin && component.plugin.has_value()) {
             TermOut() << "  (" << component.plugin->tools.size() << " 件工具)";
+            // v2 embedded-lua 的权限概要(§13.5:/plugin 与 /package 摆同一份
+            // 权限真账;完整材料看 /package trust 的审批页)。
+            if (component.plugin->manifest_version == lubancode::runtime::kPluginManifestVersionV2) {
+                TermOut() << "  [embedded-lua entry " << component.plugin->runtime_entry << ";网络 "
+                          << component.plugin->network_permissions.size() << " 目的地;Secret "
+                          << component.plugin->secret_declarations.size() << " 件]";
+            }
         }
         if (component.kind == lubancode::package::ComponentKind::PromptProfile &&
             !component.profile_files.empty()) {

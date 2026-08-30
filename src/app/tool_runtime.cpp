@@ -201,7 +201,36 @@ void PublishPackagedPlugins(const lubancode::package::PackageCodeMountResult& st
     }
 }
 
+void PublishPackagedLuaPlugins(const std::vector<lubancode::runtime::ManifestLuaPlugin*>& plugins,
+                               lubancode::tools::ToolRegistry& registry, std::vector<PluginMountInfo>& mounted,
+                               bool report) {
+    for (lubancode::runtime::ManifestLuaPlugin* const plugin : plugins) {
+        for (const auto& tool : plugin->manifest->tools) {
+            const std::string wire_name = lubancode::runtime::BuildPackagedToolWireName(
+                "plugin", plugin->package_id, plugin->local_id, tool.name);
+            const std::string display_name = lubancode::runtime::BuildPackagedToolDisplayName(
+                "plugin", plugin->package_id, plugin->local_id, tool.name);
+            lubancode::tools::ToolRegistration registration;
+            registration.tool = std::make_unique<lubancode::runtime::ManifestLuaToolAdapter>(plugin, &tool);
+            registration.source_kind = lubancode::tools::ToolSourceKind::PluginLua;
+            registration.source_instance = plugin->manifest->id;
+            registration.package_origin = lubancode::tools::ToolOrigin{
+                plugin->package_id, plugin->package_version,
+                plugin->package_id + ":" + plugin->local_id};
+            registry.Register(std::move(registration));
+            if (report) {
+                PluginMountInfo info;
+                info.tool_name = display_name;
+                info.kind = "package-embedded-lua";
+                info.package_origin = registration.package_origin;
+                mounted.push_back(std::move(info));
+            }
+        }
+    }
+}
+
 void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime::EmbeddedLuaRuntime& lua_runtime,
+                  lubancode::runtime::ManifestLuaRuntime& manifest_lua_runtime,
                   lubancode::tools::ToolRegistry& registry, const lubancode::cli::Theme& theme,
                   std::vector<PluginMountInfo>& mounted, std::vector<std::string>& warnings, bool report,
                   std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& process_manifests,
@@ -259,7 +288,8 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime:
     // 一次(manifest 钉 shared_ptr),每张 registry 各造一枚 adapter。挂载
     // 行/警告只在 report 遍打;manifests 由调用方持有,两张表共享同一批。
     // 第 8 步:项目级 <cwd>/.lubancode/plugins/ 一并扫——先过信任门(内容
-    // hash 审批),未信任的跳过并警告。
+    // hash 审批),未信任的跳过并警告(manifest-backed Lua 同一道门:未信任
+    // 的 v2 件连 Lua state 都不建,chunk 一字不跑)。
     if (process_manifests.empty()) {
         const auto scan = lubancode::runtime::ScanPluginDirectories(plugins_dir);
         process_manifests = scan.manifests;
@@ -282,12 +312,44 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime:
         process_warnings.insert(process_warnings.end(), project_scan.warnings.begin(),
                                 project_scan.warnings.end());
     }
+    // manifest-backed Lua(阶段 4):扫描账里的 v2 embedded-lua 件挂进
+    // ManifestLuaRuntime(幂等——第二遍只造 adapter)。顶层零副作用加载与
+    // handler 对账在 Load 里;单件坏一条警告跳过,不连累其余。
+    {
+        const std::vector<std::string> lua_manifest_warnings =
+            manifest_lua_runtime.LoadFromManifests(process_manifests);
+        if (report) {
+            for (const std::string& warning : lua_manifest_warnings) {
+                std::cout << theme.error << warning << theme.reset << "\n";
+                warnings.push_back(warning);
+            }
+            for (const auto& plugin : manifest_lua_runtime.plugins()) {
+                if (!plugin->package_id.empty()) {
+                    continue;  // packaged 件的挂载行走 Package 事务那边,不在此打
+                }
+                std::cout << trf("plugin.mounted_line", plugin->manifest->id,
+                                 plugin->manifest->tools.size())
+                          << "\n";
+                for (const auto& tool : plugin->manifest->tools) {
+                    mounted.push_back({plugin->ToolWireName(tool.name), "embedded-lua"});
+                }
+            }
+        }
+    }
+    for (auto& adapter : manifest_lua_runtime.MakeAdapters()) {
+        // 只收 standalone 件(packaged 件由 PublishPackagedLuaPlugins 发布,
+        // 两边各注册会撞名);MakeAdapters 内部已按 package_id 过滤。
+        registry.Register(std::move(adapter));
+    }
     if (report) {
         for (const auto& warning : process_warnings) {
             std::cout << theme.error << warning << theme.reset << "\n";
             warnings.push_back(warning);
         }
         for (const auto& manifest : process_manifests) {
+            if (manifest->kind == lubancode::runtime::RuntimeKind::EmbeddedLua) {
+                continue;  // v2 件的账在 manifest_lua_runtime 那边记过了
+            }
             std::cout << trf("plugin.mounted_line", manifest->id, manifest->tools.size()) << "\n";
             for (const auto& tool : manifest->tools) {
                 mounted.push_back(
@@ -296,6 +358,9 @@ void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime:
         }
     }
     for (const auto& manifest : process_manifests) {
+        if (manifest->kind == lubancode::runtime::RuntimeKind::EmbeddedLua) {
+            continue;  // v2 embedded-lua 走 ManifestLuaToolAdapter(上面已注册)
+        }
         for (const auto& tool : manifest->tools) {
             registry.Register(std::make_unique<lubancode::runtime::PluginToolAdapter>(manifest, &tool));
         }
@@ -389,10 +454,16 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
             runtime.client = std::move(staged.client);
             mcp_servers_.push_back(std::move(runtime));
         }
-        for (const auto& plugin : package_code_.plugins) {
-            std::cout << trf("package.code.mounted_plugin", plugin.canonical_id,
-                             plugin.manifest->tools.size(),
-                             plugin.package_id + " " + plugin.package_version)
+        for (auto& staged : package_code_.plugins) {
+            const bool is_lua = staged.lua != nullptr;
+            if (is_lua) {
+                // v2 embedded-lua(阶段 4):暂存 state 移交 owner(Adopt),
+                // 发布段造 wire adapter——回滚路的 state 根本到不了这里。
+                packaged_lua_plugins_.push_back(manifest_lua_runtime_.Adopt(std::move(staged.lua)));
+            }
+            std::cout << trf(is_lua ? "package.code.mounted_plugin_lua" : "package.code.mounted_plugin",
+                             staged.canonical_id, staged.manifest->tools.size(),
+                             staged.package_id + " " + staged.package_version)
                       << "\n";
         }
         for (const auto& note : package_code_.notes) {
@@ -577,10 +648,12 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         }
         project_plugin_trust_ = std::move(store);
     }
-    MountPlugins(plugin_host_, lua_runtime_, main_registry_, theme, plugin_mounted_, plugin_warnings_,
+    MountPlugins(plugin_host_, lua_runtime_, manifest_lua_runtime_, main_registry_, theme, plugin_mounted_,
+                 plugin_warnings_,
                  /*report=*/true, process_manifests_, process_plugin_warnings_, cwd_utf8,
                  project_plugin_trust_.has_value() ? &*project_plugin_trust_ : nullptr);
-    MountPlugins(plugin_host_, lua_runtime_, sub_registry_, theme, plugin_mounted_, plugin_warnings_,
+    MountPlugins(plugin_host_, lua_runtime_, manifest_lua_runtime_, sub_registry_, theme, plugin_mounted_,
+                 plugin_warnings_,
                  /*report=*/false, process_manifests_, process_plugin_warnings_, cwd_utf8,
                  project_plugin_trust_.has_value() ? &*project_plugin_trust_ : nullptr);
     // 阶段 5 发布段 plugin 半边:事务暂存的 plugin 造 adapter(wire 覆盖名
@@ -588,6 +661,9 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     // RegisterMcpTools。放在 SetCwd 循环前,packaged adapter 同吃项目根。
     PublishPackagedPlugins(package_code_, main_registry_, plugin_mounted_, /*report=*/true);
     PublishPackagedPlugins(package_code_, sub_registry_, plugin_mounted_, /*report=*/false);
+    // 阶段 4:packaged v2 embedded-lua 的发布半边(wire 名 + 来源账)。
+    PublishPackagedLuaPlugins(packaged_lua_plugins_, main_registry_, plugin_mounted_, /*report=*/true);
+    PublishPackagedLuaPlugins(packaged_lua_plugins_, sub_registry_, plugin_mounted_, /*report=*/false);
     for (const auto& adapter : main_registry_.All()) {
         if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(adapter.get());
             plugin_adapter != nullptr) {
@@ -721,9 +797,12 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
 
 void ToolRuntime::SetPluginCancel(const std::atomic<bool>* cancel) {
     // 三路插件都要:process(adapter 的进程超时/取消同一落锤路)、Lua(hook
-    // 里查这面旗掐死循环)。turn_runner 每轮灌(plugins 单第 7 步的 ESC 链)。
-    // run_command 同链(进程生命线单 P1:前台命令的取消通道)。
+    // 里查这面旗掐死循环)、manifest-backed Lua(owner 灌给 state 的
+    // instruction hook 与受控 HTTP 回调——同一枚旗,§8.4)。turn_runner 每轮
+    // 灌(plugins 单第 7 步的 ESC 链)。run_command 同链(进程生命线单 P1:
+    // 前台命令的取消通道)。
     lua_runtime_.SetCancel(cancel);
+    manifest_lua_runtime_.SetCancel(cancel);
     for (const auto& adapter : main_registry_.All()) {
         if (auto* plugin_adapter = dynamic_cast<lubancode::runtime::PluginToolAdapter*>(adapter.get());
             plugin_adapter != nullptr) {

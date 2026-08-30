@@ -245,12 +245,49 @@ std::vector<std::string> BuildPackageApprovalLines(const PackageRecord& record) 
             }
             if (component.plugin.has_value()) {
                 const runtime::PluginManifest& manifest = *component.plugin;
-                lines.push_back("    命令: " + JoinArgs(manifest.argv) + "(不经 shell,argv 直递)");
-                lines.push_back(std::string("    网络: ") +
-                                (manifest.network_allowed ? "声明出网" : "不出网") + ";env 递给: " +
-                                (manifest.env_allowlist.empty()
-                                     ? std::string("无")
-                                     : JoinArgs(manifest.env_allowlist)));
+                if (manifest.manifest_version == runtime::kPluginManifestVersionV2) {
+                    // v2 embedded-lua 的审批材料(设计单 §10.1):Lua entry、
+                    // 精确 scheme/host/port/method、Secret 逻辑 id 与 env 名
+                    //(只亮名字)、资源帽。Secret 或 host 权限一变,manifest
+                    // 哈希就变,这枚信任立即失效。
+                    lines.push_back("    Lua entry: " + manifest.runtime_entry + "(相对插件根)");
+                    if (manifest.network_permissions.empty()) {
+                        lines.push_back("    网络: 未声明(luban.http.request 一律 network_not_declared)");
+                    } else {
+                        std::string network;
+                        for (const auto& permission : manifest.network_permissions) {
+                            for (const auto& method : permission.methods) {
+                                if (!network.empty()) network += "、";
+                                network += method + " " + permission.scheme + "://" + permission.host +
+                                           ":" + std::to_string(permission.port);
+                            }
+                        }
+                        lines.push_back("    网络(精确 scheme/host/port,无通配): " + network);
+                    }
+                    if (manifest.secret_declarations.empty()) {
+                        lines.push_back("    Secret: 未声明(Lua 取不到任何环境变量值)");
+                    } else {
+                        for (const auto& declaration : manifest.secret_declarations) {
+                            lines.push_back("    Secret: " + declaration.id + " <- " + declaration.env +
+                                            "(" + (declaration.required ? "required" : "optional") +
+                                            ";只亮名字,值由宿主在调用期解析)");
+                        }
+                    }
+                    const runtime::EffectiveHttpLimits limits =
+                        runtime::ApplyHttpLimits(manifest.http_limits);
+                    lines.push_back("    资源帽: request " + std::to_string(limits.request_body_bytes / 1024) +
+                                    " KiB, response " +
+                                    std::to_string(limits.response_body_bytes / 1024) + " KiB, timeout " +
+                                    std::to_string(limits.timeout_ms / 1000) +
+                                    " s(只许下调,不越宿主硬帽)");
+                } else {
+                    lines.push_back("    命令: " + JoinArgs(manifest.argv) + "(不经 shell,argv 直递)");
+                    lines.push_back(std::string("    网络: ") +
+                                    (manifest.network_allowed ? "声明出网" : "不出网") + ";env 递给: " +
+                                    (manifest.env_allowlist.empty()
+                                         ? std::string("无")
+                                         : JoinArgs(manifest.env_allowlist)));
+                }
                 lines.push_back("    工具 " + std::to_string(manifest.tools.size()) + " 件:");
                 if (record.mount_plan.has_value()) {
                     for (const auto& entry : record.mount_plan->entries) {

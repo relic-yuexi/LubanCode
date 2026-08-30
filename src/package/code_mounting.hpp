@@ -3,12 +3,15 @@
 //
 //   Stage(暂存)   包内全部 code 组件逐件起:plugin 起一只探针进程走一遍
 //                   协议(process 插件本就一调用一进程,探针证明命令起得来、
-//                   协议说得上);MCP 起服 + initialize 握手 + tools/list。
+//                   协议说得上);v2 embedded-lua 起一只 Lua state 走一遍
+//                   顶层零副作用加载 + handler 对账(与 process 探针同构);
+//                   MCP 起服 + initialize 握手 + tools/list。
 //   Publish(发布) 全件起得来,暂存材料移交调用方:MCP client(已握手)
 //                   与 plugin manifest(已验)由装配方并进正式 McpServer-
 //                   Runtime 与 ToolRegistry(带 ToolOrigin 来源账)。
 //   Rollback(回滚)任何一件起不来,已起的 MCP 进程全停(Shutdown 杀进
-//                   程),插件探针进程短命已自退,暂存表整包丢弃——三件都
+//                   程),插件探针进程短命已自退,暂存 Lua state 整包关闭
+//                   (unique_ptr 一弃即 lua_close),暂存表整包丢弃——三件都
 //                   不进正式账,诊断指到坏件。
 //
 // 事务单位是包:一只包里的 plugin 与 MCP 同生共死;两只包互不连坐(各自
@@ -36,6 +39,7 @@
 #include "package/component.hpp"    // McpComponentDefinition/ComponentKind
 #include "package/mounting.hpp"     // PackageMount(会话钉快照)
 #include "runtime/plugin_contract.hpp"  // PluginManifest
+#include "runtime/plugin_lua_manifest.hpp"  // ManifestLuaPlugin(第四类 code 组件的暂存成品)
 
 namespace lubancode::package {
 
@@ -102,13 +106,19 @@ struct StagedPackageMcp {
     std::vector<mcp::ToolInfo> tools;
 };
 
-// 暂存成品:plugin 一件(探针已过;manifest 的 argv 原封,协议帧用本地
-// id——注册名由装配方按 wire 编码另起,见 PluginToolAdapter 的覆盖名)。
+// 暂存成品:plugin 一件(process:探针已过,manifest 的 argv 原封,协议帧
+// 用本地 id——注册名由装配方按 wire 编码另起;embedded-lua(v2):Lua state
+// 已顶层零副作用加载 + handler 对账过,与 process 探针同构——都证明
+// "起得来、说得上话",§10.2 事务次序的暂存一步)。lua 非空 = v2 件;发布
+// 段由装配方移交 ManifestLuaRuntime 接管(owner 语义见 plugin_lua_manifest.hpp)。
 struct StagedPackagePlugin {
     std::string package_id;
     std::string package_version;
     std::string canonical_id;
     std::shared_ptr<const runtime::PluginManifest> manifest;
+    // v2 embedded-lua 的暂存 state(resolver/transport/limits 配齐);回滚路
+    // 上 unique_ptr 一弃即关——同包坏一件,Lua state 一并回滚,零残留。
+    std::unique_ptr<runtime::ManifestLuaPlugin> lua;
 };
 
 // 一条事务诊断:指到坏件(canonical id + 人话)。包级问题(整包没有可用的

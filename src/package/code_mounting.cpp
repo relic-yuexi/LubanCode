@@ -256,14 +256,50 @@ PackageCodeMountResult MountPackageCode(const PackageMount& mount, const Package
                     break;
                 }
                 const runtime::PluginManifest& manifest = *component.plugin;
+                if (manifest.kind == runtime::RuntimeKind::EmbeddedLua) {
+                    // v2 embedded-lua(阶段 4):与 process 探针同构的暂存
+                    // 一步——LoadManifestLuaPlugin 读 entry、LuaHostState::
+                    // Load 顶层零副作用加载 + handler 对账,再配齐 resolver/
+                    // transport/limits(数据目录:<package-data>/<pkg>/plugins/
+                    // <local>,§7.2)。任一步坏即诊断回滚,暂存 state 不留。
+                    auto staged_manifest = std::make_shared<const runtime::PluginManifest>(manifest);
+                    runtime::ManifestLuaLoadOptions lua_options;
+                    if (expansion_ctx.package_data.empty()) {
+                        // 拿不到持久数据目录时不硬造:无 dotenv 来源,只查宿主
+                        // 环境(与 MCP 的 ${package_data} 同一条规矩)。
+                        lua_options.plugin_data_dir = std::nullopt;
+                    } else {
+                        lua_options.plugin_data_dir =
+                            expansion_ctx.package_data / "plugins" /
+                            platform::Utf8ToPath(component.local_id);
+                    }
+                    lua_options.env_lookup = lookup;
+                    lua_options.package_id = package_id;
+                    lua_options.local_id = component.local_id;
+                    lua_options.package_version = version;
+                    auto staged_lua =
+                        runtime::LoadManifestLuaPlugin(std::move(staged_manifest), std::move(lua_options));
+                    if (!staged_lua.has_value()) {
+                        failure = PackageCodeDiagnostic{package_id, component.canonical_id, "plugin",
+                                                        "Lua 挂载失败: " + staged_lua.error()};
+                        break;
+                    }
+                    StagedPackagePlugin staged;
+                    staged.package_id = package_id;
+                    staged.package_version = version;
+                    staged.canonical_id = component.canonical_id;
+                    staged.manifest = (*staged_lua)->manifest;  // shared_ptr 拷贝(adapter 共享)
+                    staged.lua = std::move(*staged_lua);
+                    staged_plugins.push_back(std::move(staged));
+                    continue;
+                }
                 if (manifest.kind != runtime::RuntimeKind::Process) {
-                    // 契约 §10 的退出码里有"runtime 不支持"一档:packaged
-                    // 插件首版只收 process(embedded-lua/native-library 的
-                    // manifest 化挂载另开单),明说不猜。
+                    // 契约 §10 的退出码里有"runtime 不支持"一档:native-library
+                    // 的 manifest 化挂载另开单,明说不猜。
                     failure = PackageCodeDiagnostic{
                         package_id, component.canonical_id, "plugin",
                         "runtime 不支持: kind=" + std::string(runtime::RuntimeKindName(manifest.kind)) +
-                            "(packaged 插件首版只收 process)"};
+                            "(packaged 插件现收 process 与 embedded-lua)"};
                     break;
                 }
                 const PluginProbeReport probe = ProbeProcessPlugin(manifest, options.cwd_utf8);
@@ -328,7 +364,9 @@ PackageCodeMountResult MountPackageCode(const PackageMount& mount, const Package
         // ---- Rollback 或 Publish ----
         if (failure.has_value()) {
             // 回滚:已握手的 MCP 进程全停(Shutdown 杀进程;析构另有一道,
-            // 这里显式走是为了跟失败诊断同帧)。插件探针进程短命,已自退。
+            // 这里显式走是为了跟失败诊断同帧)。插件探针进程短命,已自退;
+            // 暂存 Lua state 随 staged_plugins 弃置一并 lua_close(§10.2:
+            // 任一步失败关掉暂存 state,整包不挂)。
             for (auto& staged : staged_mcp) {
                 if (staged.client != nullptr) {
                     staged.client->Shutdown();

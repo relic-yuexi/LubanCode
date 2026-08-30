@@ -413,6 +413,9 @@ std::expected<ProjectPluginTrustInfo, std::string> FindTrustCandidate(
 
 // 概要行:id、版本、runtime、目录、工具清单、文件数、完整指纹。用户批的
 // 是看得见的东西——指纹全量打出,不拿 12 位短码让人抄。
+// v2(manifest-backed Lua)另亮 §10.1 的权限真账:Lua entry 相对路径、
+// 精确 scheme/host/port/method、Secret 逻辑 id 与 env 名(只亮名字)、资源
+// 帽——Secret 声明或 host 权限一变,manifest 哈希就变,旧信任失效须重批。
 void AppendTrustSummaryLines(const ProjectPluginTrustInfo& info, std::vector<std::string>& lines) {
     const PluginManifest& manifest = *info.manifest;
     lines.push_back("插件 " + manifest.id + " v" + manifest.version + "(" +
@@ -424,6 +427,37 @@ void AppendTrustSummaryLines(const ProjectPluginTrustInfo& info, std::vector<std
         tools += tools.empty() ? tool.full_name : ("、" + tool.full_name);
     }
     lines.push_back("工具 " + std::to_string(manifest.tools.size()) + " 件:" + tools);
+    if (manifest.manifest_version == kPluginManifestVersionV2) {
+        lines.push_back("Lua entry: " + manifest.runtime_entry + "(相对插件根;顶层零副作用加载)");
+        if (manifest.network_permissions.empty()) {
+            lines.push_back("网络: 未声明(luban.http.request 一律 network_not_declared)");
+        } else {
+            std::string network;
+            for (const auto& permission : manifest.network_permissions) {
+                for (const auto& method : permission.methods) {
+                    if (!network.empty()) {
+                        network += "、";
+                    }
+                    network += method + " " + permission.scheme + "://" + permission.host + ":" +
+                               std::to_string(permission.port);
+                }
+            }
+            lines.push_back("网络(精确 scheme/host/port,无通配): " + network);
+        }
+        if (manifest.secret_declarations.empty()) {
+            lines.push_back("Secret: 未声明(Lua 取不到任何环境变量值)");
+        } else {
+            for (const auto& declaration : manifest.secret_declarations) {
+                lines.push_back("Secret: " + declaration.id + " <- " + declaration.env + "(" +
+                                (declaration.required ? "required" : "optional") +
+                                ";只亮名字,值由宿主在调用期解析)");
+            }
+        }
+        const EffectiveHttpLimits limits = ApplyHttpLimits(manifest.http_limits);
+        lines.push_back("资源帽: request " + std::to_string(limits.request_body_bytes / 1024) + " KiB, response " +
+                        std::to_string(limits.response_body_bytes / 1024) + " KiB, timeout " +
+                        std::to_string(limits.timeout_ms / 1000) + " s(只许下调,不越宿主硬帽)");
+    }
     lines.push_back("文件 " + std::to_string(info.file_count) + " 个,完整内容指纹:");
     lines.push_back("  " + info.content_hash);
 }

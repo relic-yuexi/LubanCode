@@ -543,6 +543,10 @@ add_library(lubancode_runtime STATIC
   # state 的加载/对账/调用机制)。挂载接 manifest 是阶段 4;中立传输底座
   # 在 engine(src/net/http_transport.cpp,阶段 2 已落)。
   src/runtime/plugin_lua_host.cpp
+  # 同单阶段 4:manifest-backed Lua 的挂载 owner(ManifestLuaRuntime)——
+  # v2 manifest 接 LuaHostState、SecretResolver 与受控传输,standalone 扫描
+  # 挂载 + Package 事务成品接管 + 模型侧 adapter。裸 .lua 不经这里。
+  src/runtime/plugin_lua_manifest.cpp
   # 逐枚追踪单:canonical 工具事件的装配层分线器(持久栅栏/UI 投影/录制)。
   src/runtime/tool_trace_hub.cpp
   # /goal 持久目标单:领域类型/状态机转换表/objective 计数/序列化。

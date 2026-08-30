@@ -36,6 +36,7 @@
 #include "package/mounting.hpp"       // PackageMount:会话钉快照(阶段 3 挂载)
 #include "ptc/ptc_tool.hpp"
 #include "runtime/plugin_lua.hpp"
+#include "runtime/plugin_lua_manifest.hpp"  // ManifestLuaRuntime:manifest-backed Lua 的 owner(阶段 4)
 #include "runtime/tool_trace_hub.hpp"
 #include "runtime/plugin_tool.hpp"
 #include "tools/agent_tool.hpp"
@@ -128,7 +129,8 @@ void RegisterMcpTools(std::vector<McpServerRuntime>& mcp_servers, lubancode::too
 // M7:一条插件工具的挂载记录,/plugins 命令展示用。
 struct PluginMountInfo {
     std::string tool_name;  // 完整名(plugin__<名>__<工具>),跟模型看到的一致
-    std::string kind;       // "DLL"、"lua"、"process" 或 "package-process"
+    std::string kind;       // "DLL"、"lua"、"process"、"embedded-lua"(v2 manifest
+                            // Lua)或 "package-process"/"package-embedded-lua"
     // 阶段 5:packaged 插件的来源账(展示名换成带点 canonical 段);standalone 空。
     std::optional<lubancode::tools::ToolOrigin> package_origin;
 };
@@ -139,9 +141,19 @@ struct PluginMountInfo {
 // mounted 里记 /plugins 的账(packaged 展示名带点,kind 记 package-process)。
 // MCP 半边不用这里管:事务成品在构造早期就并进 mcp_servers_,RegisterMcpTools
 // 一并覆盖。
+// v2 embedded-lua 的发布走 PublishPackagedLuaPlugins(第四类 code 组件,
+// 阶段 4):adapter 引用 ManifestLuaRuntime 接管的 state,不走 process 帧。
 void PublishPackagedPlugins(const lubancode::package::PackageCodeMountResult& staged,
                             lubancode::tools::ToolRegistry& registry, std::vector<PluginMountInfo>& mounted,
                             bool report);
+
+// 发布段的 embedded-lua 半边(阶段 4):Package 事务暂存、已被 owner 接管
+// (Adopt)的 Lua 插件逐件工具造 ManifestLuaToolAdapter(wire 覆盖名 +
+// ToolOrigin)注册进 registry。主表与子表各调一遍;report 时往 mounted
+// 里记账(kind 记 package-embedded-lua)。
+void PublishPackagedLuaPlugins(const std::vector<lubancode::runtime::ManifestLuaPlugin*>& plugins,
+                               lubancode::tools::ToolRegistry& registry, std::vector<PluginMountInfo>& mounted,
+                               bool report);
 
 // M7:扫两类插件(<主目录>/.lubancode/plugins 下的 *.dll 和 *.lua),挂进
 // 目标 registry——主表与子代理表都挂(子代理与 main 同能力,独立任务
@@ -151,9 +163,13 @@ void PublishPackagedPlugins(const lubancode::package::PackageCodeMountResult& st
 // plugin_host 由调用方持有,且必须声明在 registry 之前(PluginTool 手中的
 // luban_tool_def* 指向 DLL 静态数据,模块要活得比 registry 久,析构反序那
 // 一套,理由同 mcp_servers);Lua 侧第 4 步起走 EmbeddedLuaRuntime(与
-// LegacyLuaTool 同一份 state 引擎,profile/预算/帽/取消链见 plugin_lua.hpp)。
+// LegacyLuaTool 同一份 state 引擎,profile/预算/帽/取消链见 plugin_lua.hpp);
+// v2 manifest-backed Lua(plugin.json embedded-lua)另走 ManifestLuaRuntime
+// (阶段 4:扫描账里的 v2 件挂进 owner,state/SecretResolver/受控 HTTP 全在
+// 那边,工具定义只认 manifest)。
 // mounted/warnings 由调用方持有,交互模式给 /plugins 命令用。
 void MountPlugins(lubancode::tools::PluginHost& plugin_host, lubancode::runtime::EmbeddedLuaRuntime& lua_runtime,
+                  lubancode::runtime::ManifestLuaRuntime& manifest_lua_runtime,
                   lubancode::tools::ToolRegistry& registry, const lubancode::cli::Theme& theme,
                   std::vector<PluginMountInfo>& mounted, std::vector<std::string>& warnings, bool report = true,
                   std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>>& process_manifests =
@@ -273,6 +289,13 @@ private:
     std::vector<McpServerRuntime> mcp_servers_;
     lubancode::tools::PluginHost plugin_host_;
     lubancode::runtime::EmbeddedLuaRuntime lua_runtime_;
+    // manifest-backed Lua(v2 embedded-lua)的 owner(阶段 4):standalone
+    // 扫描挂载 + Package 事务成品接管;adapter 引用这里的 state,声明在
+    // registry 之前(析构反序,同上一行那条规矩)。
+    lubancode::runtime::ManifestLuaRuntime manifest_lua_runtime_;
+    // Package 事务里被 owner 接管的 Lua 插件(发布段造 wire adapter 用;
+    // 指针归 manifest_lua_runtime_,这里只留账)。
+    std::vector<lubancode::runtime::ManifestLuaPlugin*> packaged_lua_plugins_;
     // process 插件(plugin.json)的清单与 adapter(plugins 单第 7 步挂进
     // MountPlugins):manifest 由 shared_ptr 钉住,adapter 进各张 registry。
     std::vector<std::shared_ptr<const lubancode::runtime::PluginManifest>> process_manifests_;

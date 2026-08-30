@@ -184,6 +184,123 @@ TEST_CASE("TrustProjectPluginById:概要齐全、落账、幂等;信任后重扫
 }
 
 // ---------------------------------------------------------------------------
+// v2(manifest-backed Lua):/plugin trust 亮 §10.1 权限真账;未信任零执行
+// ---------------------------------------------------------------------------
+
+TEST_CASE("v2 Lua 插件:trust 材料亮 entry/网络/Secret 名/资源帽;未信任 chunk 一字不跑") {
+    TempDir project;
+    const std::filesystem::path plugin_dir =
+        project.path / ".lubancode" / "plugins" / "lua-trust-probe";
+    std::filesystem::create_directories(plugin_dir);
+    {
+        std::ofstream out(plugin_dir / "plugin.json", std::ios::binary);
+        out << R"json({
+  "manifest_version": 2, "id": "lua-trust-probe", "version": "0.3.0",
+  "language": "lua",
+  "runtime": {"kind": "embedded-lua", "entry": "probe.lua"},
+  "permissions": {
+    "network": [
+      {"scheme": "https", "host": "api.example.com", "port": 443, "methods": ["GET", "POST"]}
+    ],
+    "secrets": [{"id": "api_key", "env": "LUA_TRUST_PROBE_KEY", "required": false}]
+  },
+  "limits": {"http_request_bytes": 65536, "http_response_bytes": 262144, "http_timeout_ms": 10000},
+  "tools": [{"name": "search", "entry": "search", "description": "d",
+             "input_schema": {"type": "object"}}]
+})json";
+        // 顶层 error():信任门若失守、chunk 跑了一行,加载失败即露馅。
+        std::ofstream lua_out(plugin_dir / "probe.lua", std::ios::binary);
+        lua_out << "error(\"TOPLEVEL_RAN\")\nreturn { search = function(input) return \"ok\" end }\n";
+    }
+    const auto content_hash = ComputePluginContentHash(plugin_dir);
+    REQUIRE(content_hash.has_value());
+
+    // 未信任:重扫只给警告,manifest 不进账(Lua state 建都不建)。
+    {
+        const auto scan = ScanProjectPluginDirectories(project.path, nullptr);
+        CHECK(scan.manifests.empty());
+        REQUIRE(scan.warnings.size() == 1);
+        CHECK(scan.warnings[0].find("未经信任") != std::string::npos);
+    }
+
+    PluginTrustStore store;  // 纯内存
+    const auto report = TrustProjectPluginById(project.path, &store, "lua-trust-probe");
+    REQUIRE(report.ok);
+    const std::string text = JoinLines(report.lines);
+    // §10.1 材料逐样:Lua entry 相对路径、精确 scheme/host/port/method、
+    // Secret 逻辑 id 与 env 名(只亮名字)、资源帽、完整指纹。
+    CHECK(text.find("Lua entry: probe.lua") != std::string::npos);
+    CHECK(text.find("GET https://api.example.com:443") != std::string::npos);
+    CHECK(text.find("POST https://api.example.com:443") != std::string::npos);
+    CHECK(text.find("api_key <- LUA_TRUST_PROBE_KEY") != std::string::npos);
+    CHECK(text.find("optional") != std::string::npos);
+    CHECK(text.find("request 64 KiB") != std::string::npos);
+    CHECK(text.find("response 256 KiB") != std::string::npos);
+    CHECK(text.find("timeout 10 s") != std::string::npos);
+    CHECK(text.find(*content_hash) != std::string::npos);
+    CHECK(text.find("plugin__lua-trust-probe__search") != std::string::npos);
+    // 材料里不该有任何 Secret 值的影子(本来也没有,钉住这条纪律)。
+    CHECK(text.find("value") == std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// v2 的 /plugin inspect:六行权限真账(§10.3)与 doctor 探针(§10.4)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("HandlePluginCommand:v2 inspect 六行 runtime/entry/profile/network/secrets/limits") {
+    TempDir project;
+    const std::filesystem::path plugin_dir =
+        project.path / ".lubancode" / "plugins" / "lua-inspect-probe";
+    std::filesystem::create_directories(plugin_dir);
+    {
+        std::ofstream out(plugin_dir / "plugin.json", std::ios::binary);
+        out << R"json({
+  "manifest_version": 2, "id": "lua-inspect-probe", "version": "0.4.0",
+  "language": "lua",
+  "runtime": {"kind": "embedded-lua", "entry": "probe.lua"},
+  "permissions": {
+    "network": [
+      {"scheme": "https", "host": "api.example.com", "port": 443, "methods": ["POST"]}
+    ],
+    "secrets": [{"id": "api_key", "env": "LUA_INSPECT_PROBE_KEY", "required": false}]
+  },
+  "limits": {"http_request_bytes": 65536, "http_response_bytes": 262144, "http_timeout_ms": 10000},
+  "tools": [{"name": "search", "entry": "search", "description": "d",
+             "input_schema": {"type": "object"}}]
+})json";
+        std::ofstream lua_out(plugin_dir / "probe.lua", std::ios::binary);
+        lua_out << "return { search = function(input) return \"ok\" end }\n";
+    }
+    // manifests 是挂载后的账(信任门已过):这里直接给解析产物,inspector 只读。
+    const std::string manifest_text = [&] {
+        std::ifstream in(plugin_dir / "plugin.json", std::ios::binary);
+        return std::string((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }();
+    auto parsed = ParsePluginManifest(manifest_text, plugin_dir);
+    REQUIRE(parsed.has_value());
+    std::vector<std::shared_ptr<const PluginManifest>> manifests;
+    manifests.push_back(std::make_shared<const PluginManifest>(std::move(*parsed)));
+
+    std::ostringstream out;
+    std::ostringstream err;
+    lubancode::cli::TermPort().Redirect(&out, &err);
+    struct PortGuard {
+        ~PortGuard() { lubancode::cli::TermPort().Reset(); }
+    } port_guard;
+
+    app::HandlePluginCommand("inspect lua-inspect-probe", {}, manifests, std::string(), nullptr);
+    out.flush();
+    const std::string text = out.str();
+    // §10.3 的六行。
+    CHECK(text.find("runtime: embedded-lua") != std::string::npos);
+    CHECK(text.find("entry: probe.lua") != std::string::npos);
+    CHECK(text.find("profile: pure + host-http") != std::string::npos);
+    CHECK(text.find("network: POST https://api.example.com:443") != std::string::npos);
+    CHECK(text.find("secrets: api_key <- LUA_INSPECT_PROBE_KEY (optional, missing") != std::string::npos);
+    CHECK(text.find("limits: request 64 KiB, response 256 KiB, timeout 10 s") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
 // untrust:销账、再跳过、幂等
 // ---------------------------------------------------------------------------
 

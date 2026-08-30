@@ -969,6 +969,7 @@ const Entry kZhCN[] = {
     // 统一 Package 封装单阶段 5:挂载事务的发布行(packaged 组件带包来源)。
     {"package.code.mounted_mcp", "[package] {0}: {1} 个工具已挂载(来自 {2})"},
     {"package.code.mounted_plugin", "[package] {0}: {1} 个工具(来自 {2},process)"},
+    {"package.code.mounted_plugin_lua", "[package] {0}: {1} 个工具(来自 {2},embedded-lua)"},
     {"ptc.fallback_line", "[ptc] programmatic 工具调用未启用,回落 JSON: {0}"},
     {"ptc.probe_failed", "[ptc] Python 探测失败: {0}"},
     {"tool_search.enabled", "[tool_search] 工具超过阈值 {0},MCP/插件等外挂工具改为延迟挂载(/tools 看三态)"},
@@ -1037,13 +1038,17 @@ const Entry kZhCN[] = {
     {"cmd.plugin.inspect.env", "环境变量 allowlist: {0}"},
     {"cmd.plugin.inspect.tools", "工具 {0} 件:"},
     // Lua 受控 HTTP 单(阶段 1):v2 manifest 的 Secret 状态行——只报名字
-    // 与来源,不写值、长度与前缀(§10.3)。
+    // 与来源,不写值、长度与前缀(§10.3)。阶段 4 补齐六行形状的
+    // runtime/entry/profile 三行。
     {"cmd.plugin.inspect.secrets", "secrets: {0}"},
     {"cmd.plugin.inspect.network", "network: {0}"},
     {"cmd.plugin.inspect.limits", "limits: {0}"},
+    {"cmd.plugin.inspect.runtime", "runtime: {0}"},
+    {"cmd.plugin.inspect.entry", "entry: {0}"},
+    {"cmd.plugin.inspect.profile", "profile: {0}"},
     {"cmd.plugin.doctor.command_ok", "解释器可用: {0}({1})"},
     {"cmd.plugin.doctor.command_bad", "解释器起不来: {0}({1})——检查 command 或装好解释器。"},
-    {"cmd.plugin.doctor.not_process", "这不是 process 插件,doctor 只查 process 的解释器环境。"},
+    {"cmd.plugin.doctor.embedded_lua", "manifest-backed Lua 插件:entry {0},目录 {1}。"},
     {"cmd.plugin.doctor.legacy_ok", "{0} 插件在挂载账上(内嵌运行时,无外部环境依赖)。"},
     // ---- /plugin test(P3-1:真跑 manifest 声明的自测,回执带 exit code/耗时/摘要) ----
     {"cmd.plugin.test.no_entry",

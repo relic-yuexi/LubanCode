@@ -598,3 +598,213 @@ TEST_CASE("store 选中版本同路:scope=Store 的候选照走同一事务") {
     CHECK(result.mcp_servers.size() == 1);
     CHECK(result.diagnostics.empty());
 }
+
+// ---------------------------------------------------------------------------
+// 第四类 code 组件:embedded-lua(Lua 受控 HTTP 单·阶段 4,设计单 §13.5)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 一只 v2 embedded-lua 插件目录(纯计算 handler,不碰网——事务与 wire 名
+// 的账在这里,受控 HTTP 的行为账在 test_plugin_lua_manifest.cpp)。
+void WriteLuaPlugin(const fs::path& plugin_dir, const std::string& lua_script,
+                    const std::string& extra_permissions = std::string()) {
+    const std::string manifest_text = R"json({
+  "manifest_version": 2,
+  "id": "lua-tools",
+  "version": "0.1.0",
+  "language": "lua",
+  "runtime": {"kind": "embedded-lua", "entry": "demo.lua"},
+  "permissions": {)json" + extra_permissions + R"json(
+    "secrets": []
+  },
+  "tools": [
+    {
+      "name": "echo",
+      "entry": "echo",
+      "description": "Echo the text back.",
+      "input_schema": {
+        "type": "object",
+        "properties": {"text": {"type": "string"}},
+        "required": ["text"],
+        "additionalProperties": false
+      }
+    }
+  ]
+})json";
+    WriteFile(plugin_dir / "plugin.json", manifest_text);
+    WriteFile(plugin_dir / "demo.lua", lua_script);
+}
+
+}  // namespace
+
+TEST_CASE("Package Lua 第四类:整包挂载,owner 接管,wire 名注册,真跑一件") {
+    TempDir temp;
+    const fs::path layer = temp.Get() / "dev-packages";
+    const fs::path root = layer / "lua-only";
+    WriteFile(root / "package.yaml",
+              "schema: 1\nid: test.lua-only\nversion: 0.1.0\nname: LO\ndescription: Lua 单件测试包。\n");
+    WriteLuaPlugin(root / "plugins" / "lua-tools",
+                   "return {\n  echo = function(input) return \"echo:\" .. tostring(input.text or \"\") end,\n}\n");
+
+    const PackageMount mount = MountTrustedDev(layer);
+    REQUIRE(mount.entries.size() == 1);
+    REQUIRE(mount.entries[0].code_trust == CodeTrustStatus::Trusted);
+
+    PackageCodeMountOptions options;
+    options.cwd_utf8 = temp.Get().string();
+    options.package_data_root = temp.Get() / "package-data";
+    PackageCodeMountResult result = MountPackageCode(mount, options);
+
+    CHECK(result.attempted_packages == 1);
+    REQUIRE(result.plugins.size() == 1);
+    CHECK(result.diagnostics.empty());
+    CHECK(result.plugins[0].canonical_id == "test.lua-only:lua-tools");
+    REQUIRE(result.plugins[0].lua != nullptr);  // 第四类成品:暂存 Lua state
+    CHECK(result.plugins[0].lua->state != nullptr);
+    CHECK(result.plugins[0].lua->package_id == "test.lua-only");
+    CHECK(result.plugins[0].lua->local_id == "lua-tools");
+    CHECK(result.plugins[0].manifest == result.plugins[0].lua->manifest);
+
+    // 发布段:与 ToolRuntime 构造同一形状——owner 接管,wire 名 + 来源账。
+    lubancode::runtime::ManifestLuaRuntime lua_runtime;
+    std::vector<lubancode::runtime::ManifestLuaPlugin*> adopted;
+    for (auto& staged : result.plugins) {
+        adopted.push_back(lua_runtime.Adopt(std::move(staged.lua)));
+    }
+    lubancode::tools::ToolRegistry registry;
+    std::vector<lubancode::app::PluginMountInfo> mounted;
+    lubancode::app::PublishPackagedLuaPlugins(adopted, registry, mounted, /*report=*/true);
+
+    const std::string echo_wire = lubancode::runtime::BuildPackagedToolWireName(
+        "plugin", "test.lua-only", "lua-tools", "echo");
+    CHECK(echo_wire == "plugin__test%2Elua-only%2Elua-tools__echo");
+    REQUIRE(registry.Find(echo_wire) != nullptr);
+    const auto* registration = registry.RegistrationOf(echo_wire);
+    REQUIRE(registration != nullptr);
+    REQUIRE(registration->package_origin.has_value());
+    CHECK(registration->package_origin->package_id == "test.lua-only");
+    CHECK(registration->package_origin->component_id == "test.lua-only:lua-tools");
+    CHECK(registration->source_kind == lubancode::tools::ToolSourceKind::PluginLua);
+
+    // /plugins 的账:展示名带点,kind 记 package-embedded-lua。
+    REQUIRE(mounted.size() == 1);
+    CHECK(mounted[0].tool_name == "plugin__test.lua-only.lua-tools__echo");
+    CHECK(mounted[0].kind == "package-embedded-lua");
+
+    // 真跑一件:manifest schema 门 + 动态作用域调用,全程零进程零网络。
+    const auto echoed = registry.Find(echo_wire)->execute({{"text", "hi"}});
+    CHECK_FALSE(echoed.is_error);
+    CHECK(echoed.content == "echo:hi");
+}
+
+TEST_CASE("Package Lua 同包坏件:整包回滚,Lua state 一并关,一件不发布") {
+    TempDir temp;
+    const fs::path layer = temp.Get() / "dev-packages";
+    const fs::path root = layer / "lua-rollback";
+    WriteFile(root / "package.yaml",
+              "schema: 1\nid: test.lua-rollback\nversion: 0.1.0\nname: LR\ndescription: 整包回滚测试件。\n");
+    // 好的 Lua 件排在前(component 序:plugins 在 mcp 前),先暂存;
+    // 坏 MCP 排在后:命令不存在,StartProcess 失败 -> 整包回滚。
+    WriteLuaPlugin(root / "plugins" / "lua-tools",
+                   "return {\n  echo = function(input) return \"echo:\" .. tostring(input.text or \"\") end,\n}\n");
+    WriteFile(root / "mcp" / "bad-mcp" / "mcp.yaml",
+              "schema: 1\nid: bad-mcp\ndescription: 坏。\ntransport: stdio\nruntime:\n  command: "
+              "lubancode-no-such-command-xyz\npermissions:\n  network: false\n");
+
+    const PackageMount mount = MountTrustedDev(layer);
+    REQUIRE(mount.entries.size() == 1);
+    REQUIRE(mount.entries[0].code_trust == CodeTrustStatus::Trusted);
+
+    PackageCodeMountOptions options;
+    options.cwd_utf8 = temp.Get().string();
+    const PackageCodeMountResult result = MountPackageCode(mount, options);
+
+    CHECK(result.attempted_packages == 1);
+    CHECK(result.plugins.empty());  // 已暂存的 Lua state 随回滚弃置,一件不发布
+    CHECK(result.mcp_servers.empty());
+    REQUIRE(result.diagnostics.size() == 1);
+    CHECK(result.diagnostics[0].component_id == "test.lua-rollback:bad-mcp");
+    CHECK(result.diagnostics[0].kind_text == "mcp_server");
+
+    // 发布段没东西可发:正式表一件不进。
+    lubancode::runtime::ManifestLuaRuntime lua_runtime;
+    std::vector<lubancode::runtime::ManifestLuaPlugin*> adopted;  // 空:暂存件全数回滚
+    lubancode::tools::ToolRegistry registry;
+    std::vector<lubancode::app::PluginMountInfo> mounted;
+    lubancode::app::PublishPackagedLuaPlugins(adopted, registry, mounted, /*report=*/true);
+    CHECK(registry.Find(lubancode::runtime::BuildPackagedToolWireName(
+               "plugin", "test.lua-rollback", "lua-tools", "echo")) == nullptr);
+    CHECK(mounted.empty());
+}
+
+TEST_CASE("未信任项目 Package:Lua chunk 一字不跑(顶层 error 无声无息)") {
+    TempDir temp;
+    const fs::path layer = temp.Get() / "dev-packages";
+    const fs::path root = layer / "lua-untrusted";
+    WriteFile(root / "package.yaml",
+              "schema: 1\nid: test.lua-untrusted\nversion: 0.1.0\nname: LU\ndescription: 未信任测试件。\n");
+    // 顶层 error():chunk 若跑过哪怕一行,加载即失败、诊断即点名——这是
+    // "一字不跑"的可观察标记(真跑过则 diagnostics 非空)。
+    WriteLuaPlugin(root / "plugins" / "lua-tools",
+                   "error(\"TOPLEVEL_SHOULD_NOT_RUN\")\nreturn { echo = function(input) return \"ok\" end }\n");
+
+    PackageMountInput input;  // 不喂信任账:一律待信任
+    input.scan.dev_roots.push_back(layer);
+    const PackageMount mount = BuildPackageMount(input);
+    REQUIRE(mount.entries.size() == 1);
+    CHECK(mount.entries[0].code_trust == CodeTrustStatus::PendingTrust);
+
+    PackageCodeMountOptions options;
+    options.cwd_utf8 = temp.Get().string();
+    const PackageCodeMountResult result = MountPackageCode(mount, options);
+    CHECK(result.attempted_packages == 0);  // 连事务都不进,更别提建 state
+    CHECK(result.empty());
+    CHECK(result.diagnostics.empty());  // 若 chunk 跑过,这里会有 TOPLEVEL 诊断
+}
+
+TEST_CASE("manifest 权限变更后旧信任失效:network 一改,code_trust 回待信任") {
+    TempDir temp;
+    const fs::path layer = temp.Get() / "dev-packages";
+    const fs::path root = layer / "lua-permission-change";
+    WriteFile(root / "package.yaml",
+              "schema: 1\nid: test.lua-perm\nversion: 0.1.0\nname: LP\ndescription: 权限变更测试件。\n");
+    const fs::path plugin_dir = root / "plugins" / "lua-tools";
+    const std::string good_script = "return { echo = function(input) return \"ok\" end }\n";
+    // 第一版:不声明网络。
+    WriteLuaPlugin(plugin_dir, good_script);
+
+    // 第一次扫,按当时的哈希落一枚信任。
+    PackageMountInput pending_input;
+    pending_input.scan.dev_roots.push_back(layer);
+    const PackageMount pending = BuildPackageMount(pending_input);
+    REQUIRE(pending.entries.size() == 1);
+    PackageTrustSnapshot snapshot;
+    snapshot.keys.insert(pending.entries[0].package_id + "\n" + pending.entries[0].content_hash);
+    {
+        PackageMountInput trusted_input;
+        trusted_input.scan.dev_roots.push_back(layer);
+        trusted_input.trust = snapshot;
+        const PackageMount trusted = BuildPackageMount(trusted_input);
+        REQUIRE(trusted.entries[0].code_trust == CodeTrustStatus::Trusted);
+    }
+
+    // 改 manifest:多声明一条 network 权限(§10.1:权限一变,manifest 哈希
+    // 变,旧信任立即失效)。
+    WriteLuaPlugin(plugin_dir, good_script,
+                   "\n    \"network\": [{\"scheme\": \"https\", \"host\": \"api.example.com\", "
+                   "\"port\": 443, \"methods\": [\"GET\"]}],");
+
+    PackageMountInput stale_input;
+    stale_input.scan.dev_roots.push_back(layer);
+    stale_input.trust = snapshot;  // 旧账
+    const PackageMount remounted = BuildPackageMount(stale_input);
+    REQUIRE(remounted.entries.size() == 1);
+    CHECK(remounted.entries[0].code_trust == CodeTrustStatus::PendingTrust);
+
+    PackageCodeMountOptions options;
+    options.cwd_utf8 = temp.Get().string();
+    const PackageCodeMountResult result = MountPackageCode(remounted, options);
+    CHECK(result.attempted_packages == 0);
+    CHECK(result.empty());
+}

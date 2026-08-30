@@ -27,8 +27,10 @@ using lubancode::cli::TermErr;
 #include "platform/process.hpp"
 #include "platform/text_encoding.hpp"
 #include "runtime/plugin_contract.hpp"
+#include "runtime/plugin_lua_manifest.hpp"  // v2 doctor:Lua 编译与 handler 对账探针(§10.4)
 #include "runtime/plugin_tool.hpp"  // 信任流 UI 的账务动作(TrustProjectPluginById 一族)
 #include "runtime/secret_resolver.hpp"  // v2 的 inspect/doctor:Secret 状态探针(§10.3/§10.4)
+#include "net/http_transport.hpp"  // v2 doctor:DNS 安全检查的 seam(§10.4)
 #include "tools/path_utils.hpp"
 #include "tools/registry.hpp"
 
@@ -281,9 +283,15 @@ void HandlePluginCommand(const std::string& args,
             for (const auto& tool : manifest->tools) {
                 TermOut() << "  - " << tool.full_name << "\n";
             }
-            // v2(manifest-backed Lua)的权限与帽账(§10.3):只展示声明,
-            // Secret 只报名字与来源类别,不写值、长度、前缀与 fingerprint。
+            // v2(manifest-backed Lua)的六行权限真账(§10.3:runtime/entry/
+            // profile/network/secrets/limits)。只展示声明与状态:Secret 只报
+            // 名字与来源类别,不写值、长度、前缀与 fingerprint。
             if (manifest->manifest_version == 2) {
+                TermOut() << trf("cmd.plugin.inspect.runtime",
+                                 std::string(lubancode::runtime::RuntimeKindName(manifest->kind)))
+                          << "\n";
+                TermOut() << trf("cmd.plugin.inspect.entry", manifest->runtime_entry) << "\n";
+                TermOut() << trf("cmd.plugin.inspect.profile", "pure + host-http") << "\n";
                 if (!manifest->network_permissions.empty()) {
                     std::string network_text;
                     for (const auto& permission : manifest->network_permissions) {
@@ -296,6 +304,8 @@ void HandlePluginCommand(const std::string& args,
                         }
                     }
                     TermOut() << trf("cmd.plugin.inspect.network", network_text) << "\n";
+                } else {
+                    TermOut() << trf("cmd.plugin.inspect.network", "(未声明,禁网)") << "\n";
                 }
                 if (!manifest->secret_declarations.empty()) {
                     // standalone 插件的数据目录(<home>/.lubancode/plugin-data/
@@ -342,7 +352,9 @@ void HandlePluginCommand(const std::string& args,
     }
 
     if (action == "doctor") {
-        // doctor:process 查解释器起不起得来;native/Lua 只报在不在账上。
+        // doctor:process 查解释器起不起得来;v2 manifest-backed Lua 走只读
+        // 探针(编译/对账/DNS/Secret 状态/帽,§10.4);legacy Lua/native 只报
+        // 在不在账上。
         if (manifest != nullptr) {
             if (manifest->kind == lubancode::runtime::RuntimeKind::Process) {
                 const auto result = lubancode::platform::RunProcess({manifest->argv[0], "--version"}, 15000);
@@ -393,10 +405,52 @@ void HandlePluginCommand(const std::string& args,
                     }
                 }
             } else {
-                TermOut() << tr("cmd.plugin.doctor.not_process") << "\n";
-                // v2(manifest-backed Lua)的 doctor 侧 Secret 探针(§10.4):
-                // 只读、不带 Secret 发网;只报名字与来源;坏 .env 明报诊断。
-                if (manifest->manifest_version == 2 && !manifest->secret_declarations.empty()) {
+                // v2(manifest-backed Lua)的 doctor(§10.4):默认只读,不带
+                // Secret 发网。清单:Lua 编译与 handler 对账(顶层零副作用
+                // 探针)、Pure 画像、网络目的地 DNS 安全检查、Secret 声明
+                // (只报名字与来源)、生效帽。真网自测不在此做——doctor 不拿
+                // 用户 Key 偷打一枪。
+                TermOut() << trf("cmd.plugin.doctor.embedded_lua", manifest->runtime_entry,
+                                 lubancode::tools::PathToUtf8(manifest->plugin_dir))
+                          << "\n";
+                const auto probe = lubancode::runtime::DoctorProbeManifestLua(*manifest);
+                if (!probe.has_value()) {
+                    TermOut() << "  - Lua 编译与 handler 对账: 通过(顶层零副作用探针,未触发网络与 Secret 解析)\n";
+                } else {
+                    TermOut() << "  - Lua 编译与 handler 对账: 失败——" << *probe << "\n";
+                }
+                TermOut() << "  - profile: pure(io/os.execute 关门)+ host-http(仅声明目的地)\n";
+                for (const auto& permission : manifest->network_permissions) {
+                    // DNS 安全检查(§10.4):只解析不定连接,不带 Secret。
+                    lubancode::net::SystemDnsResolver dns;
+                    const auto addresses = dns.Resolve(permission.host);
+                    if (!addresses.has_value()) {
+                        TermOut() << "  - network " << permission.scheme << "://" << permission.host << ":"
+                                  << permission.port << " DNS 解析失败(" << addresses.error()
+                                  << ";网络不可用时此项无结论,doctor 不发请求)\n";
+                        continue;
+                    }
+                    std::string address_text;
+                    bool blocked = false;
+                    for (const auto& address : *addresses) {
+                        if (!address_text.empty()) {
+                            address_text += ", ";
+                        }
+                        address_text += address;
+                        if (const auto range = lubancode::net::BlockedAddressRange(address);
+                            range.has_value()) {
+                            blocked = true;
+                            address_text += "(落禁连段 " + *range + ")";
+                        }
+                    }
+                    TermOut() << "  - network " << permission.scheme << "://" << permission.host << ":"
+                              << permission.port << " -> " << address_text
+                              << (blocked ? " [禁连段:调用期会被拦]" : "") << "\n";
+                }
+                if (manifest->network_permissions.empty()) {
+                    TermOut() << "  - network: 未声明(luban.http.request 一律 network_not_declared)\n";
+                }
+                if (!manifest->secret_declarations.empty()) {
                     lubancode::runtime::SecretResolverOptions options;
                     options.plugin_data_dir = lubancode::runtime::StandalonePluginDataDir(manifest->id);
                     options.declarations = manifest->secret_declarations;
@@ -408,6 +462,10 @@ void HandlePluginCommand(const std::string& args,
                         TermOut() << "  - .env: " << resolver.dotenv_diagnostic() << "\n";
                     }
                 }
+                const auto limits = lubancode::runtime::ApplyHttpLimits(manifest->http_limits);
+                TermOut() << "  - limits: request " << limits.request_body_bytes / 1024 << " KiB, response "
+                          << limits.response_body_bytes / 1024 << " KiB, timeout " << limits.timeout_ms / 1000
+                          << " s(解析期已核,不越宿主硬帽)\n";
             }
             return;
         }
