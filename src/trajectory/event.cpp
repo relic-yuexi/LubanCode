@@ -100,7 +100,7 @@ constexpr std::array<std::pair<Durability, const char*>, 3> kDurabilityNames{{
 // 顺序与 EventKind 枚举声明一致,两处对不上会在启动断言里炸出来。
 // plane 归面照 §4.2:conversation=输入/宿主注入/模型输出/回喂结果;
 // execution=provider 请求与工具执行;evidence=验证与终裁;其余 control。
-constexpr std::array<EventKindInfo, 67> kKindInfos{{
+constexpr std::array<EventKindInfo, 68> kKindInfos{{
     {"run.started", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden, IdNeed::Forbidden, false},
     {"run.environment.captured", Plane::Execution, IdNeed::Optional, IdNeed::Optional, IdNeed::Forbidden,
      false},
@@ -129,6 +129,8 @@ constexpr std::array<EventKindInfo, 67> kKindInfos{{
     {"model.output.failed", Plane::Conversation, IdNeed::Required, IdNeed::Required, IdNeed::Forbidden,
      false},
     {"model.output.cancelled", Plane::Conversation, IdNeed::Required, IdNeed::Required,
+     IdNeed::Forbidden, false},
+    {"model.usage.recorded", Plane::Execution, IdNeed::Required, IdNeed::Required,
      IdNeed::Forbidden, false},
     {"tool.execution.planned", Plane::Execution, IdNeed::Required, IdNeed::Required, IdNeed::Required,
      false},
@@ -226,7 +228,7 @@ constexpr std::array<EventKindInfo, 67> kKindInfos{{
      false},
 }};
 
-static_assert(kKindInfos.size() == 67, "kind 信息表与枚举须同长");
+static_assert(kKindInfos.size() == 68, "kind 信息表与枚举须同长");
 static_assert(static_cast<std::size_t>(EventKind::OutcomeAssessed) + 1 == kKindInfos.size(),
               "kind 信息表顺序须与枚举声明一致");
 
@@ -476,8 +478,10 @@ std::optional<EventEnvelope> EventEnvelope::FromJsonStrict(const nlohmann::json&
             return std::nullopt;
         }
         const int version = it->get<int>();
-        if (version != kEnvelopeSchemaVersion) {
-            // 不支持的版本明拒,不猜着读(§2.7 第 8 条)。
+        if (version < kEnvelopeSchemaVersion || version > kMaxEnvelopeSchemaVersion) {
+            // 不支持的版本明拒,不猜着读(§2.7 第 8 条)。v2 只多
+            // model.usage.recorded 一族与 completed 去 usage 一条,别的合同
+            // 与 v1 同裁(schema.cpp 按版本分表)。
             *error_code = "schema.unsupported_version";
             *message = "不支持的 schema_version: " + std::to_string(version);
             return std::nullopt;

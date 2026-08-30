@@ -151,6 +151,8 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::ModelOutputCompleted, "output_id", "s", true},
     {EventKind::ModelOutputCompleted, "blocks", "a", true},
     {EventKind::ModelOutputCompleted, "stop_reason", "s", true},
+    // usage 只在 v1 stream 里随 completed 走(v2 的 canonical owner 是
+    // model.usage.recorded;v2 校验在 ValidatePayloadWithVersion 拒这键)。
     {EventKind::ModelOutputCompleted, "usage", "o", false},
     {EventKind::ModelOutputCompleted, "provider_response_id", "s", false},
     {EventKind::ModelOutputFailed, "reason", "s", true},
@@ -158,6 +160,20 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::ModelOutputFailed, "attempt", "u", false},
     {EventKind::ModelOutputCancelled, "reason", "s", true},
     {EventKind::ModelOutputCancelled, "error_code", "s", false},
+    // v2 model.usage.recorded(Token 账本单 §6.1.1):attempt 必须,token
+    // 五项与 cache_epoch/prefix_append_only 只在 reported_by_provider=true
+    // 时必填、false 时禁现——"没报"不许拿 0 顶上。条件硬约束在
+    // ValidatePayloadWithVersion 里逐条裁。
+    {EventKind::ModelUsageRecorded, "attempt", "u", true},
+    {EventKind::ModelUsageRecorded, "provider_response_id", "s", false},
+    {EventKind::ModelUsageRecorded, "reported_by_provider", "b", true},
+    {EventKind::ModelUsageRecorded, "input_tokens", "i", false},
+    {EventKind::ModelUsageRecorded, "cache_read_tokens", "i", false},
+    {EventKind::ModelUsageRecorded, "cache_creation_tokens", "i", false},
+    {EventKind::ModelUsageRecorded, "output_tokens", "i", false},
+    {EventKind::ModelUsageRecorded, "reasoning_tokens", "i", false},
+    {EventKind::ModelUsageRecorded, "cache_epoch", "u", false},
+    {EventKind::ModelUsageRecorded, "prefix_append_only", "b", false},
     {EventKind::ToolExecutionPlanned, "call_id", "s", true},
     {EventKind::ToolExecutionPlanned, "tool_name", "s", true},
     {EventKind::ToolExecutionPlanned, "provider_call_id", "s", false},
@@ -348,6 +364,64 @@ constexpr PayloadField kPayloadFields[] = {
 
 }  // namespace
 
+std::optional<SchemaError> ValidatePayloadWithVersion(int schema_version, EventKind kind,
+                                                      const nlohmann::json& payload) {
+    // 版本无关的表裁(必填/类型/未知键)先过,再叠版本差异。
+    if (auto error = ValidatePayload(kind, payload)) {
+        return error;
+    }
+    if (schema_version < kEnvelopeSchemaVersion || schema_version > kMaxEnvelopeSchemaVersion) {
+        return SchemaError{"schema.unsupported_version",
+                           "不支持的 schema_version: " + std::to_string(schema_version)};
+    }
+    if (schema_version == kEnvelopeSchemaVersion) {
+        // v1:usage 正文只认 completed.payload.usage(legacy);v2 新事件
+        // 不得混进 v1 stream。
+        if (kind == EventKind::ModelUsageRecorded) {
+            return SchemaError{"schema.kind_not_in_version",
+                               "model.usage.recorded 只在 schema v2 出现;v1 stream 拒收"};
+        }
+        return std::nullopt;
+    }
+    // v2。
+    if (kind == EventKind::ModelOutputCompleted && payload.contains("usage")) {
+        return SchemaError{"schema.payload_unknown_field",
+                           "v2 completed 不带 usage 正文;canonical owner 是 model.usage.recorded"};
+    }
+    if (kind == EventKind::ModelUsageRecorded) {
+        const bool reported = payload.at("reported_by_provider").get<bool>();
+        static constexpr const char* kTokenFields[] = {"input_tokens", "cache_read_tokens",
+                                                       "cache_creation_tokens", "output_tokens",
+                                                       "reasoning_tokens"};
+        for (const char* name : kTokenFields) {
+            if (reported && !payload.contains(name)) {
+                return SchemaError{"schema.payload_missing_field",
+                                   std::string("provider 明报时 token 字段必填: ") + name};
+            }
+            if (!reported && payload.contains(name)) {
+                return SchemaError{"schema.payload_forbidden_field",
+                                   std::string("provider 没报时不得拿 token 字段顶上: ") + name};
+            }
+        }
+        if (reported) {
+            std::int64_t values[5] = {0, 0, 0, 0, 0};
+            for (std::size_t i = 0; i < 5; ++i) {
+                values[i] = payload.at(kTokenFields[i]).get<std::int64_t>();
+                if (values[i] < 0) {
+                    return SchemaError{"schema.usage_negative_tokens",
+                                       std::string("token 字段不得为负: ") + kTokenFields[i]};
+                }
+            }
+            // reasoning 是 output 的子集(Token 账本单 §6.1/§15.1)。
+            if (values[4] > values[3]) {
+                return SchemaError{"schema.usage_reasoning_exceeds_output",
+                                   "reasoning_tokens 不得大于 output_tokens"};
+            }
+        }
+    }
+    return std::nullopt;
+}
+
 std::optional<SchemaError> ValidateEnvelope(const EventEnvelope& envelope) {
     const EventKindInfo& info = EventKindInfoOf(envelope.kind);
 
@@ -453,7 +527,8 @@ std::optional<SchemaError> ParseAndValidateEventLine(const nlohmann::json& line,
     if (auto error = ValidateEnvelope(*envelope)) {
         return error;
     }
-    if (auto error = ValidatePayload(envelope->kind, envelope->payload)) {
+    if (auto error = ValidatePayloadWithVersion(envelope->schema_version, envelope->kind,
+                                                envelope->payload)) {
         return error;
     }
     if (out != nullptr) {

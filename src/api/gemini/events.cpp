@@ -92,6 +92,8 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
     }
 
     if (auto usage = data.find("usageMetadata"); usage != data.end() && usage->is_object()) {
+        // 帧里真有 usageMetadata 才算 provider 明报(Token 账本单 A0)。
+        usage_reported_ = true;
         usage_ = ParseUsage(*usage);
     }
 
@@ -179,7 +181,11 @@ std::vector<StreamEvent> EventParser::Flush() {
         }
     }
     if (saw_payload_ || started_ || !calls_.empty()) {
-        events.push_back(MessageDone{StopReason(finish_reason_, !calls_.empty()), usage_});
+        MessageDone done;
+        done.stop_reason = StopReason(finish_reason_, !calls_.empty());
+        done.usage = usage_;
+        done.usage_reported = usage_reported_;
+        events.push_back(std::move(done));
     }
     return events;
 }

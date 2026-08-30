@@ -486,6 +486,19 @@ add_library(lubancode_engine STATIC
   src/trajectory/journal.cpp
   src/trajectory/recorder.cpp
   src/trajectory/directory.cpp
+  # Token 账本与使用洞察单 A0(合同与夹具):accounting 是 usage 投影与
+  # 计价的纯领域层;insights 是摘要/finding/报告合同与脱敏。都不 include
+  # app/cli,不接真实 runtime(A1 再接线)。
+  src/accounting/purpose.cpp
+  src/accounting/usage_sample.cpp
+  src/accounting/pricing_table.cpp
+  src/accounting/cost_estimator.cpp
+  src/accounting/usage_projector.cpp
+  src/agent/prompt_manifest.cpp
+  src/insights/finding.cpp
+  src/insights/session_summary.cpp
+  src/insights/report_model.cpp
+  src/insights/redaction.cpp
 )
 target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

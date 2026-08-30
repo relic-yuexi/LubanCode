@@ -149,7 +149,7 @@ public:
                 report.usage.input_tokens = event.payload.value("input_tokens", std::int64_t{0});
                 report.usage.output_tokens = event.payload.value("output_tokens", std::int64_t{0});
                 report.step_index = event.payload.value("step_index", 0);
-                report.request_id = event.payload.value("request_id", std::string());
+                report.provider_response_id = event.payload.value("provider_response_id", std::string());
                 report.model = event.payload.value("model", std::string());
                 reports.push_back(report);
                 break;
@@ -652,10 +652,10 @@ TEST_CASE("on_usage: 一次 Run() 内多次请求(工具调用来回),每次 Mes
     REQUIRE(reports.size() == 2);
     // 逐笔带身份:步号、请求 id、模型——逐步流水账有键可落。
     CHECK(reports[0].step_index == 0);
-    CHECK(reports[0].request_id == "msg");
+    CHECK(reports[0].provider_response_id == "msg");
     CHECK(reports[0].model == "model");
     CHECK(reports[1].step_index == 1);
-    CHECK(reports[1].request_id == "msg2");
+    CHECK(reports[1].provider_response_id == "msg2");
     CHECK(reports[0].usage.input_tokens == 100);
     CHECK(reports[0].usage.output_tokens == 20);
     CHECK(reports[1].usage.input_tokens == 50);

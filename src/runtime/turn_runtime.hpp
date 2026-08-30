@@ -120,7 +120,7 @@ runtime::ToolHookDecision MapPreToolDecision(const hooks::HookEventResult& merge
 // 一次落一笔,append-only,不拿整轮平均数盖过去。
 struct StepUsageRecord {
     int step_index = 0;
-    std::string request_id;
+    std::string provider_response_id;  // provider 的 response id,非本地 request id
     std::string model;
     int cache_epoch = 1;            // 请求落在哪个缓存 epoch(1 起)
     std::int64_t input_tokens = 0;
@@ -128,7 +128,7 @@ struct StepUsageRecord {
     std::int64_t cache_creation_tokens = 0;
     std::int64_t output_tokens = 0;
     std::int64_t reasoning_tokens = 0;  // output 里的 reasoning 拆账(含在 output_tokens)
-    bool reported = false;             // provider 是否回报了 usage
+    bool reported = false;             // legacy 推断(五项任一非零);耐久账认显式位
     std::string epoch_break_reason;    // 空 = 本步没断 epoch
 
     std::int64_t total_input_tokens() const {
@@ -157,7 +157,7 @@ struct TurnUsageStats {
     void Add(const api::UsageReport& report) {
         StepUsageRecord record;
         record.step_index = report.step_index;
-        record.request_id = report.request_id;
+        record.provider_response_id = report.provider_response_id;
         record.model = report.model;
         record.cache_epoch = report.cache_epoch;
         record.input_tokens = report.usage.input_tokens;

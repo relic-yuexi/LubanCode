@@ -150,6 +150,8 @@ std::optional<StreamEvent> HandleCompleted(const json& data) {
     }
 
     if (auto usage_it = response.find("usage"); usage_it != response.end() && usage_it->is_object()) {
+        // completed 帧里真有 usage 对象才算 provider 明报(Token 账本单 A0)。
+        event.usage_reported = true;
         // 统一口径(api::Usage 文件头):input_tokens 总数已含 cached_tokens,
         // 摊开成 input=total-cached、cache_read=cached,消费端不再加两遍。
         // responses wire 没有"缓存写入"概念,cache_creation_tokens 恒为 0。

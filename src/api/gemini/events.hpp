@@ -37,6 +37,7 @@ private:
 
     std::vector<PendingCall> calls_;
     Usage usage_;
+    bool usage_reported_ = false;  // 流里真见过 usageMetadata(Token 账本单 A0)
     std::string finish_reason_;
     std::string model_;
     bool started_ = false;

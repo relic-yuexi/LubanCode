@@ -259,7 +259,7 @@ TEST_CASE("TerminalTurnSink::usage: 主请求 usage 更新 tracker 并发布状�
     // 逐步流水账:每笔 UsageUpdated 落一条 StepUsageRecord,身份齐。
     REQUIRE(stats.steps.size() == 1);
     CHECK(stats.steps[0].step_index == 0);
-    CHECK(stats.steps[0].request_id == "msg_1");
+    CHECK(stats.steps[0].provider_response_id == "msg_1");
     CHECK(stats.steps[0].model == "test-model");
     CHECK(stats.steps[0].reported);
 
@@ -593,9 +593,9 @@ TEST_CASE("UsageStats: 逐步流水账——三笔各有 step/request id,命中�
     CHECK(stats.steps[0].step_index == 0);
     CHECK(stats.steps[1].step_index == 1);
     CHECK(stats.steps[2].step_index == 2);
-    CHECK(stats.steps[0].request_id == "req_a");
-    CHECK(stats.steps[1].request_id == "req_b");
-    CHECK(stats.steps[2].request_id == "req_c");
+    CHECK(stats.steps[0].provider_response_id == "req_a");
+    CHECK(stats.steps[1].provider_response_id == "req_b");
+    CHECK(stats.steps[2].provider_response_id == "req_c");
     CHECK(stats.steps[2].epoch_break_reason == "tools_changed");
 
     // 第二笔命中率单独显示,不被整轮平均吞掉。

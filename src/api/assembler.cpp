@@ -71,6 +71,7 @@ void MessageAssembler::Feed(const StreamEvent& event) {
                 FinalizeCurrent();  // 防御性收尾:正常流程里 ContentBlockDone 应该已经收过了
                 stop_reason_ = e.stop_reason;
                 usage_ = e.usage;
+                usage_seen_ = e.usage_reported;  // 显式位:wire 见没见过 usage 帧
             }
             // MessageStart / StreamError:不影响攒出来的内容。
         },

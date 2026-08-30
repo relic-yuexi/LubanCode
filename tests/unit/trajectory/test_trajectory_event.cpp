@@ -41,7 +41,7 @@ EventEnvelope MakeValidEnvelope() {
 
 }  // namespace
 
-TEST_CASE("event: 全部 67 种 kind 名字往返") {
+TEST_CASE("event: 全部 68 种 kind 名字往返") {
     int count = 0;
     for (const EventKind kind : AllEventKinds()) {
         const char* name = EventKindName(kind);
@@ -52,7 +52,9 @@ TEST_CASE("event: 全部 67 种 kind 名字往返") {
         CHECK(*back == kind);
         ++count;
     }
-    CHECK(count == 67);
+    CHECK(count == 68);
+    // v2 新事件(Token 账本单 §6.1.1):usage 的 canonical owner。
+    CHECK(EventKindFromName("model.usage.recorded").has_value());
     CHECK_FALSE(EventKindFromName("no.such.kind").has_value());
     CHECK(EventKindName(static_cast<EventKind>(999))[0] == '\0');
 }
@@ -148,13 +150,29 @@ TEST_CASE("event: FromJsonStrict 拒未知信封字段") {
     CHECK(error_code == "schema.unknown_field");
 }
 
-TEST_CASE("event: FromJsonStrict 拒不支持的 schema_version") {
-    nlohmann::json json = MakeValidEnvelope().ToJson();
-    json["schema_version"] = 2;
+TEST_CASE("event: FromJsonStrict 只认已实现 schema_version(1=v1,2=v2)") {
     std::string error_code;
     std::string message;
-    CHECK_FALSE(EventEnvelope::FromJsonStrict(json, &error_code, &message).has_value());
-    CHECK(error_code == "schema.unsupported_version");
+    for (const int supported : {1, 2}) {
+        nlohmann::json json = MakeValidEnvelope().ToJson();
+        json["schema_version"] = supported;
+        // v2 事件的 completed payload 带 usage 会被版本裁拒,这里只验信封
+        // 版本位本身:1/2 都放行(usage 一类差异归 ValidatePayloadWithVersion)。
+        json["kind"] = "run.started";
+        json["payload"] = nlohmann::json{{"run_kind", "main_session"}};
+        auto envelope = EventEnvelope::FromJsonStrict(json, &error_code, &message);
+        INFO(supported);
+        CHECK(envelope.has_value());
+        if (envelope.has_value()) {
+            CHECK(envelope->schema_version == supported);
+        }
+    }
+    for (const int unsupported : {0, 3, 99}) {
+        nlohmann::json json = MakeValidEnvelope().ToJson();
+        json["schema_version"] = unsupported;
+        CHECK_FALSE(EventEnvelope::FromJsonStrict(json, &error_code, &message).has_value());
+        CHECK(error_code == "schema.unsupported_version");
+    }
 }
 
 TEST_CASE("event: FromJsonStrict 拒坏 schema 名与缺字段") {

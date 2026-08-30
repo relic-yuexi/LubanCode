@@ -656,7 +656,7 @@ int main() {
         log.output = event.payload.value("output_tokens", std::int64_t{0});
         log.cache_read = event.payload.value("cache_read_tokens", std::int64_t{0});
         log.reasoning = event.payload.value("reasoning_tokens", std::int64_t{0});
-        log.request_id = event.payload.value("request_id", std::string());
+        log.request_id = event.payload.value("provider_response_id", std::string());
         steps.push_back(std::move(log));
     });
     events.Start();

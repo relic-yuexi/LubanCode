@@ -1200,11 +1200,14 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             api::UsageReport report;
             report.usage = assembler.usage();
             report.step_index = step_index;
-            report.request_id = stream_request_id;
+            report.provider_response_id = stream_request_id;
             report.model = stream_model;
             report.cache_epoch = context_.cache_epoch();
             report.epoch_break_reason = step_epoch_break_reason;
             report.prefix_append_only = step_prefix_append_only;
+            // provider 明报位(Token 账本单 A0):wire 见过 usage 帧才算,
+            // 明报全零也是真,没报不许拿 0 冒充。
+            report.reported_by_provider = assembler.usage_seen();
             // 每请求缓存诊断账(问题 9):本地前缀视角全量带出——epoch 首请
             // 求、system/tools/稳定前缀指纹与长度、wire 公共前缀字节(诊断
             // 模式才有,-1 = 不可得)。只留短 hash 与长度,不落正文。
