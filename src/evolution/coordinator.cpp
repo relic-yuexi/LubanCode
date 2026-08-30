@@ -699,7 +699,9 @@ std::expected<EvolutionCoordinator::ApproveResult, std::string> EvolutionCoordin
         if (code_bearing) {
             return std::unexpected(
                 "候选是 code-bearing 档(带 Plugin/MCP 或新工具/权限差异),首版不走 "
-                "/evolve approve:另过 Package trust 与运行沙箱流程(与信任门单各管各的账)");
+                "/evolve approve 自动晋升:插件草稿请走 Package trust(/package trust "
+                "<包id>)与人工审查线——人读完 plugin.json 与 runner 再批信任,挂载另有"
+                "沙箱与整包事务把守(与信任门单各管各的账)");
         }
     }
 
@@ -970,6 +972,7 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
     const std::string skill_rel = "skills/" + draft->skill_slug + "/SKILL.md";
     std::string workflow_rel;
     std::string agent_rel;
+    std::string plugin_rel;  // plugins/<id>/plugin.json(代码档草稿的组件账)
     if (!WriteFileBytes(candidate_dir / "package" / "package.yaml", draft->package_yaml) ||
         !WriteFileBytes(candidate_dir / "package" / lubancode::platform::Utf8ToPath(skill_rel),
                         draft->skill_markdown)) {
@@ -989,13 +992,32 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
             return std::unexpected("写候选包 Agent 失败: " + PathToUtf8(candidate_dir));
         }
     }
+    // 阶段 6:代码档草稿三件(plugin.json + runner 脚手架 + 依赖清单)。
+    // 草稿只落候选区——不进挂载事务、不自动启用;静态门过不了就地降档
+    // (下一段),与组合件同一条路。
+    if (draft->with_plugin_draft && !draft->plugin_id.empty()) {
+        const std::string base = "plugins/" + draft->plugin_id + "/";
+        plugin_rel = base + "plugin.json";
+        const std::string runner_rel = base + "runner.py";
+        const std::string req_rel = base + "requirements.txt";
+        if (!WriteFileBytes(candidate_dir / "package" / lubancode::platform::Utf8ToPath(plugin_rel),
+                            draft->plugin_json) ||
+            !WriteFileBytes(candidate_dir / "package" / lubancode::platform::Utf8ToPath(runner_rel),
+                            draft->plugin_runner) ||
+            !WriteFileBytes(candidate_dir / "package" / lubancode::platform::Utf8ToPath(req_rel),
+                            draft->plugin_requirements)) {
+            return std::unexpected("写候选包插件草稿失败: " + PathToUtf8(candidate_dir));
+        }
+    }
 
-    // ---- 组合件静态门(阶段 5):AnalyzePackage + 扫描过了一遍才认。
-    //      过不了就地降回 Skill-only——删掉 workflows/ 与 agents/,诊断进
-    //      状态账与 ProposeResult,不硬塞。 ----
-    std::string shape = workflow_rel.empty() && agent_rel.empty() ? "skill-only" : "combination";
+    // ---- 组合件/代码件静态门(阶段 5/6):AnalyzePackage + 扫描过了一遍才
+    //      认。过不了就地降回 Skill-only——删掉 workflows/、agents/ 与
+    //      plugins/,诊断进状态账与 ProposeResult,不硬塞。 ----
+    std::string shape = !plugin_rel.empty()
+                            ? "code-draft"
+                            : (workflow_rel.empty() && agent_rel.empty() ? "skill-only" : "combination");
     std::string downgrade_note;
-    if (shape == "combination") {
+    if (shape != "skill-only") {
         const StaticGateResult combo_gate = RunStaticGate(candidate_dir / "package");
         if (!combo_gate.pass()) {
             std::string diagnostics;
@@ -1012,10 +1034,12 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
             std::error_code ec;
             std::filesystem::remove_all(candidate_dir / "package" / "workflows", ec);
             std::filesystem::remove_all(candidate_dir / "package" / "agents", ec);
+            std::filesystem::remove_all(candidate_dir / "package" / "plugins", ec);
             workflow_rel.clear();
             agent_rel.clear();
+            plugin_rel.clear();
             shape = "skill-only";
-            downgrade_note = "组合草稿过不了静态门(引用闭合/canonical 名/越界/扫描),已降回 "
+            downgrade_note = "草稿件过不了静态门(引用闭合/canonical 名/越界/安全扫描),已降回 "
                              "Skill-only:" +
                              (diagnostics.empty() ? "见 /evolve test 静态门" : diagnostics);
         }
@@ -1035,6 +1059,9 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
     if (!agent_rel.empty()) {
         components.push_back(agent_rel);
     }
+    if (!plugin_rel.empty()) {
+        components.push_back(plugin_rel);
+    }
 
     // ---- 演化账(schema 1) ----
     EvolutionRecord record;
@@ -1046,11 +1073,22 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
     record.sources.recording_ids = draft->recording_ids;
     if (shape == "combination") {
         record.generator = {"builtin", "combo-drafter", "evolution-stage5"};
+    } else if (shape == "code-draft") {
+        record.generator = {"builtin", "plugin-drafter", "evolution-stage6"};
     } else {
         record.generator = {"builtin", "skill-drafter",
-                             downgrade_note.empty() ? "evolution-stage2" : "evolution-stage5-downgraded"};
+                             downgrade_note.empty()
+                                 ? "evolution-stage2"
+                                 : (draft->code_signal.eligible ? "evolution-stage6-downgraded"
+                                                                : "evolution-stage5-downgraded")};
     }
     record.changes.components_added = components;
+    if (shape == "code-draft") {
+        // 代码档:权限差异与工具差异单列(一条一权,env 只记名不记值)——
+        // 批准页与 diff 页照这份账亮,approve 的档位门照它明拒。
+        record.changes.permissions_added = draft->permissions_added;
+        record.changes.tools_added = draft->tools_added;
+    }
     record.created_at = IsoNowUtc();
     if (!WriteFileBytes(candidate_dir / "evolution.json", SerializeEvolutionRecord(record))) {
         return std::unexpected("写演化账失败: " + PathToUtf8(candidate_dir / "evolution.json"));
@@ -1062,7 +1100,9 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
     approval.package_id = draft->package_id;
     approval.candidate_version = record.candidate_version;
     approval.content_hash = content_hash;
-    approval.tier = "content-only";
+    // 代码档草稿如实落档:approve 的档位门照 tier 明拒自动晋升,指路
+    // Package trust 与人工审查线(阶段 4 语义不动)。
+    approval.tier = shape == "code-draft" ? "process-plugin-or-mcp" : "content-only";
     approval.status = "awaiting_approval";
     approval.requested_at = IsoNowUtc();
     if (!WriteFileBytes(candidate_dir / "approval.json", SerializeApprovalRecord(approval))) {
@@ -1106,6 +1146,32 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
                     {"note", "Agent 组件在(tools.allow 照观察到的实际面)"}});
             }
         }
+        if (shape == "code-draft") {
+            // 代码档草稿的评测只有静态检查:草稿永不执行(零进程铁律),
+            // acceptance 的 kind 白名单里没有(也不许有)command 项——
+            // 草稿要真跑起来,只能走 Package trust 与人工审查后的挂载路。
+            const std::string plugin_dir_rel =
+                plugin_rel.substr(0, plugin_rel.rfind('/'));  // plugins/<id>
+            acceptance.push_back(nlohmann::json{{"kind", "file_exists"},
+                                                {"path", "package" + std::string("/") + skill_rel},
+                                                {"note", "SKILL 在包里"}});
+            acceptance.push_back(nlohmann::json{{"kind", "file_exists"},
+                                                {"path", "package/" + plugin_rel},
+                                                {"note", "插件清单在(草稿件,零执行)"}});
+            acceptance.push_back(nlohmann::json{{"kind", "json_parses"},
+                                                {"path", "package/" + plugin_rel},
+                                                {"note", "plugin.json 可解析"}});
+            acceptance.push_back(nlohmann::json{
+                {"kind", "file_contains"}, {"path", "package/" + plugin_rel},
+                {"text", "\"kind\": \"process\""},
+                {"note", "runtime 只认 process(native 一律不生成)"}});
+            acceptance.push_back(nlohmann::json{
+                {"kind", "file_exists"}, {"path", "package/" + plugin_dir_rel + "/runner.py"},
+                {"note", "runner 脚手架在(未实现占位,人工补)"}});
+            acceptance.push_back(nlohmann::json{
+                {"kind", "file_exists"}, {"path", "package/" + plugin_dir_rel + "/requirements.txt"},
+                {"note", "依赖清单在(草稿零依赖)"}});
+        }
         nlohmann::json plan;
         plan["schema"] = 1;
         plan["candidate_id"] = candidate_id;
@@ -1113,7 +1179,7 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
         plan["replay"] = nlohmann::json::array({nlohmann::json{
             {"source_id", tasks.front().status.id},
             {"task", draft->objective},
-            {"workspace", shape == "combination" ? std::string(".") : std::string("")},
+            {"workspace", shape == "skill-only" ? std::string("") : std::string(".")},
             {"acceptance", acceptance},
         }});
         plan["holdout"] = nlohmann::json::array();
@@ -1138,6 +1204,11 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
     if (shape == "combination") {
         reason += "(组合候选:簇 " + std::to_string(tasks.size()) + " 场,两把尺过门)";
     }
+    if (shape == "code-draft") {
+        reason += "(代码档草稿:簇 " + std::to_string(draft->code_signal.tasks_wanting) +
+                  " 场同求工具 " + draft->code_signal.wanted_tool +
+                  ";零进程零挂载,不自动启用,指路 Package trust 人工审查)";
+    }
     if (!downgrade_note.empty()) {
         reason += "(降档: " + TruncateUtf8(downgrade_note, 240) + ")";
     }
@@ -1159,6 +1230,10 @@ EvolutionCoordinator::ProposeFromCluster(const std::vector<ClusterTaskMaterial>&
     result.cluster_size = static_cast<int>(tasks.size());
     result.agent_drafted = !agent_rel.empty();
     result.downgrade_note = downgrade_note;
+    result.code_draft = shape == "code-draft";
+    result.wanted_tool = result.code_draft ? draft->code_signal.wanted_tool : std::string();
+    result.permissions_added = record.changes.permissions_added;
+    result.tools_added = record.changes.tools_added;
     return result;
 }
 
@@ -1294,6 +1369,11 @@ std::expected<EvolutionCoordinator::DiffResult, std::string> EvolutionCoordinato
         } else if (rel.rfind("agents/", 0) == 0 && rel.size() > 5 &&
                    rel.compare(rel.size() - 5, 5, ".yaml") == 0) {
             file.kind = "agent";
+        } else if (rel.rfind("plugins/", 0) == 0 && rel.size() > 19 &&
+                   rel.compare(rel.size() - 11, 11, "plugin.json") == 0) {
+            file.kind = "plugin";
+        } else if (rel.rfind("plugins/", 0) == 0) {
+            file.kind = "code";
         } else if (rel == "package.yaml") {
             file.kind = "manifest";
         } else {
@@ -1302,11 +1382,19 @@ std::expected<EvolutionCoordinator::DiffResult, std::string> EvolutionCoordinato
         result.added.push_back(std::move(file));
     }
 
-    // 分档形状:包里有 workflow 或 agent 就是组合档(照盘上现状说,不猜)。
+    // 分档形状:照盘上现状说,不猜——插件草稿在就是代码档,其次组合档。
     for (const DiffFile& file : result.added) {
-        if (file.kind == "workflow" || file.kind == "agent") {
-            result.shape = "combination";
+        if (file.kind == "plugin") {
+            result.shape = "code-draft";
             break;
+        }
+    }
+    if (result.shape.empty()) {
+        for (const DiffFile& file : result.added) {
+            if (file.kind == "workflow" || file.kind == "agent") {
+                result.shape = "combination";
+                break;
+            }
         }
     }
     if (result.shape.empty()) {
@@ -1398,6 +1486,84 @@ std::expected<EvolutionCoordinator::DiffResult, std::string> EvolutionCoordinato
             result.agent_summary += ";预装 Skill " + parsed.definition->skills_preload.front();
         }
         break;
+    }
+
+    // ---- 阶段 6:代码档草稿摘要与权限差异(diff 页如实亮,approve 仍明拒)----
+    for (const DiffFile& file : result.added) {
+        if (file.kind != "plugin") {
+            continue;
+        }
+        const auto text = ReadFileText(package_dir / lubancode::platform::Utf8ToPath(file.rel));
+        if (!text.has_value()) {
+            break;
+        }
+        const nlohmann::json manifest = nlohmann::json::parse(*text, nullptr, false);
+        if (manifest.is_discarded() || !manifest.is_object()) {
+            result.plugin_summary = file.rel + ":plugin.json 解析不过(草稿带病,见静态门)";
+            break;
+        }
+        // 手改过的草稿什么形状都可能有,逐字段防着读,不赌类型。
+        const nlohmann::json empty_object = nlohmann::json::object();
+        const nlohmann::json empty_array = nlohmann::json::array();
+        const nlohmann::json runtime =
+            manifest.contains("runtime") && manifest.at("runtime").is_object()
+                ? manifest.at("runtime")
+                : empty_object;
+        std::string command;
+        if (runtime.contains("command") && runtime.at("command").is_string()) {
+            command = runtime.at("command").get<std::string>();
+        }
+        const nlohmann::json args =
+            runtime.contains("args") && runtime.at("args").is_array() ? runtime.at("args") : empty_array;
+        std::string tool_names;
+        int tool_count = 0;
+        const nlohmann::json tools =
+            manifest.contains("tools") && manifest.at("tools").is_array() ? manifest.at("tools")
+                                                                           : empty_array;
+        for (const nlohmann::json& tool : tools) {
+            if (!tool.is_object() || !tool.contains("name") || !tool.at("name").is_string()) {
+                continue;
+            }
+            ++tool_count;
+            tool_names += (tool_names.empty() ? "" : ", ") + tool.at("name").get<std::string>();
+        }
+        const nlohmann::json perms =
+            manifest.contains("permissions") && manifest.at("permissions").is_object()
+                ? manifest.at("permissions")
+                : nlohmann::json::object();
+        bool network = false;
+        if (perms.contains("network") && perms.at("network").is_boolean()) {
+            network = perms.at("network").get<bool>();
+        }
+        std::string env_names;
+        if (perms.is_object() && perms.contains("env") && perms.at("env").is_array()) {
+            for (const nlohmann::json& name : perms.at("env")) {
+                if (name.is_string()) {
+                    env_names += (env_names.empty() ? "" : ", ") + name.get<std::string>();
+                }
+            }
+        }
+        std::string args_note;
+        for (const nlohmann::json& arg : args) {
+            if (arg.is_string()) {
+                args_note += (args_note.empty() ? "" : " ") + arg.get<std::string>();
+            }
+        }
+        result.plugin_summary = file.rel + ":process 命令 " + command + " " + TruncateUtf8(args_note, 48) +
+                                ";工具 " + std::to_string(tool_count) + " 件(" + TruncateUtf8(tool_names, 72) +
+                                ");网络 " + (network ? "开" : "关") + ";env 名 " +
+                                (env_names.empty() ? "(无)" : env_names) +
+                                ";草稿未实现,零执行零挂载";
+        break;
+    }
+    if (found->record.has_value()) {
+        const EvolutionRecordChanges& changes = found->record->changes;
+        for (const std::string& tool : changes.tools_added) {
+            result.permission_lines.push_back("新工具 " + tool);
+        }
+        for (const std::string& perm : changes.permissions_added) {
+            result.permission_lines.push_back("新权限 " + perm);
+        }
     }
     return result;
 }

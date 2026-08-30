@@ -1,4 +1,4 @@
-// EvolutionDrafter 的实现(自进化闭环阶段 2/5)。全文纯函数:输入一场录制
+// EvolutionDrafter 的实现(自进化闭环阶段 2/5/6)。全文纯函数:输入一场录制
 // (或一个同形簇),输出文本。密钥这道门由录制件本身把守(入盘前已过
 // SanitizeToolInput/RedactSecrets),这里再过一遍 skills::RedactSecrets 兜底。
 #include "evolution/drafter.hpp"
@@ -11,6 +11,7 @@
 
 #include "evolution/observation.hpp"
 #include "package/manifest.hpp"
+#include "runtime/plugin_contract.hpp"
 #include "skills/skill_drafter.hpp"
 
 namespace lubancode::evolution {
@@ -591,6 +592,186 @@ std::string ComposeAgentYaml(const std::string& agent_name, const std::string& d
     return out;
 }
 
+// ---------------------------------------------------------------------------
+// 阶段 6:代码档——process Plugin 草稿的三份文本
+//
+// 草稿三份文本都按"静态门能过、评测零进程"来写:不带网络原语、不带
+// 路径逃逸、不带恶意形状、依赖清单为空。想干这些事的人得手工改草稿,
+// 改完过四类夹具扫描,再走人工审查线——那正是设计要的摩擦。
+// ---------------------------------------------------------------------------
+
+// 工具名洗净成合法标识([A-Za-z0-9_],字母数字起头;空了落 tool)。
+std::string SanitizeToolName(std::string name) {
+    std::string out;
+    for (const unsigned char raw : name) {
+        const char c = static_cast<char>(raw);
+        if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') ||
+            c == '_') {
+            out.push_back(c);
+        } else {
+            out.push_back('_');
+        }
+    }
+    while (!out.empty() && out.front() == '_') {
+        out.erase(out.begin());
+    }
+    while (!out.empty() && out.back() == '_') {
+        out.pop_back();
+    }
+    if (out.empty() || (out.front() >= '0' && out.front() <= '9')) {
+        out = "tool_" + out;
+    }
+    if (out.size() > 64) {
+        out.resize(64);
+    }
+    return out;
+}
+
+// 工具名 -> 插件目录名(小写 kebab):pdf_extract -> pdf-extract。
+std::string SanitizePluginDirName(const std::string& tool_name) {
+    std::string out;
+    bool last_dash = true;  // 顶头横线剥掉
+    for (const unsigned char raw : tool_name) {
+        const char c = static_cast<char>(raw);
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            out.push_back(c);
+            last_dash = false;
+        } else if (c >= 'A' && c <= 'Z') {
+            out.push_back(static_cast<char>(c - 'A' + 'a'));
+            last_dash = false;
+        } else if (!out.empty() && !last_dash) {
+            out.push_back('-');
+            last_dash = true;
+        }
+    }
+    while (!out.empty() && out.back() == '-') {
+        out.pop_back();
+    }
+    return out;
+}
+
+// 大写下划线环境变量名:pdf-extract -> EVOLVE_PDF_EXTRACT_DRY_RUN。
+std::string MakeDraftEnvName(const std::string& plugin_dir_name) {
+    std::string upper;
+    for (const unsigned char raw : plugin_dir_name) {
+        const char c = static_cast<char>(raw);
+        if ((c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')) {
+            upper.push_back(static_cast<char>(c >= 'a' && c <= 'z' ? c - 'a' + 'A' : c));
+        } else {
+            upper.push_back('_');
+        }
+    }
+    return "EVOLVE_" + upper + "_DRY_RUN";
+}
+
+// plugin.json(manifest v1,process)。形状照官方样例
+// examples/packages/gui-agent/plugins/*/plugin.json 与阶段 0 夹具
+// candidate-code-rejected:runtime.kind 只写 process,permissions.network
+// 恒 false(草稿不开网),env 只记名不记值。
+std::string ComposePluginJson(const std::string& plugin_dir_name, const std::string& tool_name,
+                              const std::string& tool_description, const nlohmann::json& schema,
+                              const std::string& env_name, int tasks_wanting) {
+    nlohmann::json manifest;
+    manifest["manifest_version"] = 1;
+    manifest["id"] = plugin_dir_name;
+    manifest["version"] = "0.1.0";
+    manifest["language"] = "python";
+    nlohmann::json runtime;
+    runtime["kind"] = "process";
+    runtime["command"] = "python";
+    runtime["args"] = nlohmann::json::array({"${plugin_dir}/runner.py"});
+    runtime["timeout_ms"] = 30000;
+    manifest["runtime"] = runtime;
+    nlohmann::json tool;
+    tool["name"] = tool_name;
+    tool["description"] = tool_description + "(process Plugin 草稿:源自 " +
+                          std::to_string(tasks_wanting) +
+                          " 场任务对同一件不存在工具的稳定需求;脚手架未实现,"
+                          "补实现须过人工审查)";
+    tool["input_schema"] = schema;
+    manifest["tools"] = nlohmann::json::array({tool});
+    nlohmann::json permissions;
+    permissions["network"] = false;
+    permissions["env"] = nlohmann::json::array({env_name});
+    manifest["permissions"] = permissions;
+    return manifest.dump(2) + "\n";
+}
+
+// runner.py 脚手架。协议铁律与 examples/plugins/local_math 同源:stdin 恰好
+// 一份 JSON 请求,stdout 恰好一份 JSON 响应,日志只写 stderr。草稿的处理
+// 函数全是诚实的"未实现"占位——它被起起来也只能说"没实现",干不了任何
+// 事;评测也不起它(零进程)。
+std::string ComposeRunnerPy(const std::string& plugin_dir_name, const std::string& tool_name,
+                            const std::vector<std::string>& input_keys, int tasks_wanting) {
+    std::string args_doc;
+    for (const std::string& key : input_keys) {
+        args_doc += (args_doc.empty() ? "" : ", ") + key;
+    }
+    if (args_doc.empty()) {
+        args_doc = "(观察账里没记到入参)";
+    }
+    std::string out;
+    out += "# -*- coding: utf-8 -*-\n";
+    out += "\"\"\"" + plugin_dir_name + " process 插件 runner 脚手架(自进化闭环阶段 6 草稿)。\n";
+    out += "\n";
+    out += "这份文件是草稿,不是成品:\n";
+    out += "  - 工具处理函数全是诚实的\"未实现\"占位,补实现须人工完成;\n";
+    out += "  - 人工审查线:除 Package trust 外,还须人读一遍本文件与 plugin.json;\n";
+    out += "  - 协议铁律:stdin 恰好一份 JSON 请求,读尽即答;stdout 恰好一份\n";
+    out += "    JSON 响应,前后不许混任何字节;日志只写 stderr。\n";
+    out += "\n";
+    out += "来源:" + std::to_string(tasks_wanting) + " 场任务想用工具 " + tool_name +
+           "(现有工具办不了,录到的是 registry.unknown_tool 失败)。\n";
+    out += "观察到的入参键:" + args_doc + "。\n";
+    out += "\"\"\"\n";
+    out += "from __future__ import annotations\n";
+    out += "\n";
+    out += "import json\n";
+    out += "import sys\n";
+    out += "\n";
+    out += "\n";
+    out += "def draft_not_implemented(call_id: str, tool: str) -> dict:\n";
+    out += "    return {\n";
+    out += "        \"call_id\": call_id,\n";
+    out += "        \"plugin\": \"" + plugin_dir_name + "\",\n";
+    out += "        \"tool\": tool,\n";
+    out += "        \"ok\": False,\n";
+    out += "        \"error\": {\n";
+    out += "            \"code\": \"execution_failed\",\n";
+    out += "            \"message\": \"draft-not-implemented: 阶段 6 草稿,须人工补实现\",\n";
+    out += "        },\n";
+    out += "    }\n";
+    out += "\n";
+    out += "\n";
+    out += "def main() -> int:\n";
+    out += "    raw = sys.stdin.read()\n";
+    out += "    try:\n";
+    out += "        request = json.loads(raw)\n";
+    out += "    except ValueError:\n";
+    out += "        sys.stdout.write(json.dumps(draft_not_implemented(\"\", \"(bad-json)\"), ensure_ascii=False))\n";
+    out += "        return 0\n";
+    out += "    tool = str(request.get(\"tool\", \"\"))\n";
+    out += "    call_id = str(request.get(\"call_id\", \"\"))\n";
+    out += "    sys.stdout.write(json.dumps(draft_not_implemented(call_id, tool), ensure_ascii=False))\n";
+    out += "    return 0\n";
+    out += "\n";
+    out += "\n";
+    out += "if __name__ == \"__main__\":\n";
+    out += "    raise SystemExit(main())\n";
+    return out;
+}
+
+// requirements.txt 依赖清单。草稿不添任何第三方依赖:补实现时按需登记,
+// 非注册表来源的依赖会被静态门的依赖投毒扫描拦下,再走人工审查。
+// 注释行在扫描里跳过,但这里也只字面提到"直链",不摆形状。
+std::string ComposeRequirementsTxt(const std::string& plugin_dir_name) {
+    std::string out;
+    out += "# " + plugin_dir_name + " 的依赖清单(自进化闭环阶段 6 草稿)。\n";
+    out += "# 草稿零第三方依赖。补实现时按需登记:只许默认注册表来源,\n";
+    out += "# 版本库直链、明文直链、本地路径与改信任源的开关一律过不了静态门。\n";
+    return out;
+}
+
 }  // namespace
 
 std::vector<SequencedToolStep> SuccessPathSteps(const std::vector<skills::RecordEvent>& events) {
@@ -668,6 +849,235 @@ ComboThreshold AssessComboThreshold(const std::vector<ClusterTaskMaterial>& task
     return verdict;
 }
 
+// ---------------------------------------------------------------------------
+// 阶段 6:尺三(代码档)判定与草稿组装
+// ---------------------------------------------------------------------------
+
+// 一场里"想用而不可得"的工具名与首次入参(ok=false 且 error_code 是
+// registry.unknown_tool 的 tool_result 所配对的 tool_call)。
+struct WantedToolCall {
+    std::string tool;
+    nlohmann::json first_input;
+};
+
+std::vector<WantedToolCall> CollectWantedToolCalls(const std::vector<skills::RecordEvent>& events) {
+    // 配对口径与 CollectFoldedRuns 同款:录制件是串行工具循环,结果挂回
+    // 最近一枚同名待配对调用(挂上即闭,不重复配)。
+    struct Pending {
+        std::string tool;
+        nlohmann::json input;
+        bool pending = true;
+    };
+    std::vector<Pending> pending;
+    std::vector<WantedToolCall> wanted;
+    for (const skills::RecordEvent& event : events) {
+        if (event.type == skills::kEventToolCall) {
+            const auto tool_it = event.data.find("tool");
+            if (tool_it == event.data.end() || !tool_it->is_string()) {
+                continue;
+            }
+            Pending item;
+            item.tool = tool_it->get<std::string>();
+            if (const auto input_it = event.data.find("input");
+                input_it != event.data.end() && input_it->is_object()) {
+                item.input = input_it.value();
+            }
+            pending.push_back(std::move(item));
+        } else if (event.type == skills::kEventToolResult) {
+            const auto tool_it = event.data.find("tool");
+            if (tool_it == event.data.end() || !tool_it->is_string()) {
+                continue;
+            }
+            const bool ok = event.data.contains("ok") && event.data.at("ok").is_boolean() &&
+                            event.data.at("ok").get<bool>();
+            const auto code_it = event.data.find("error_code");
+            const bool unknown = !ok && code_it != event.data.end() && code_it->is_string() &&
+                                 code_it->get<std::string>() == kUnknownToolErrorCode;
+            if (!unknown) {
+                continue;
+            }
+            for (std::size_t i = pending.size(); i > 0; --i) {
+                Pending& item = pending[i - 1];
+                if (item.tool != tool_it->get<std::string>() || !item.pending) {
+                    continue;
+                }
+                item.pending = false;
+                WantedToolCall call;
+                call.tool = item.tool;
+                call.first_input = item.input;
+                wanted.push_back(std::move(call));
+                break;
+            }
+        }
+    }
+    return wanted;
+}
+
+CodeCapabilitySignal AssessCodeCapability(const std::vector<ClusterTaskMaterial>& tasks) {
+    CodeCapabilitySignal signal;
+    std::map<std::string, int> wanting;   // 工具名 -> 有信号的场数(同场去重)
+    std::vector<std::string> order;       // 首见次序(稳定挑选)
+    std::map<std::string, std::vector<nlohmann::json>> inputs;  // 工具名 -> 各场首枚入参
+    std::set<std::string> ever_succeeded;  // 全簇里成功过的工具名
+    for (const ClusterTaskMaterial& task : tasks) {
+        std::set<std::string> wanted_this_task;
+        for (const WantedToolCall& call : CollectWantedToolCalls(task.events)) {
+            if (wanting.find(call.tool) == wanting.end()) {
+                order.push_back(call.tool);
+            }
+            if (wanted_this_task.insert(call.tool).second) {
+                wanting[call.tool] += 1;
+                inputs[call.tool].push_back(call.first_input);
+            }
+        }
+        for (const skills::RecordEvent& event : task.events) {
+            if (event.type != skills::kEventToolResult ||
+                !(event.data.contains("ok") && event.data.at("ok").is_boolean() &&
+                  event.data.at("ok").get<bool>())) {
+                continue;
+            }
+            if (const auto tool_it = event.data.find("tool");
+                tool_it != event.data.end() && tool_it->is_string()) {
+                ever_succeeded.insert(tool_it->get<std::string>());
+            }
+        }
+    }
+    // 挑场数最多的那件(并列取首见)。
+    std::string best;
+    int best_count = 0;
+    for (const std::string& tool : order) {
+        if (wanting[tool] > best_count) {
+            best = tool;
+            best_count = wanting[tool];
+        }
+    }
+    if (best.empty()) {
+        signal.why_not.push_back("簇内没有 registry.unknown_tool 的稳定失败——现有工具够用,"
+                                 "不生 Plugin(§3.5:现有工具能办,只是提示词没写好)");
+        return signal;
+    }
+    signal.wanted_tool = best;
+    signal.tasks_wanting = best_count;
+    // 全簇没人成功用过它(工具不存在,自然无人成功;有成功记录就不算新能力)。
+    if (ever_succeeded.count(best) != 0) {
+        signal.why_not.push_back("工具 " + best + " 在簇内成功过——现有工具办得了,不生 Plugin");
+        return signal;
+    }
+    if (best_count < 2) {
+        signal.why_not.push_back("只有 " + std::to_string(best_count) +
+                                 " 场任务想用工具 " + best +
+                                 "(>=2 场才起草插件草稿;单场偶发照旧 Skill-only)");
+        return signal;
+    }
+    // 入参形状:各场首枚入参的键,按首见次序(给 runner 脚手架的文档行)。
+    std::vector<std::string> keys;
+    for (const nlohmann::json& input : inputs[best]) {
+        if (!input.is_object()) {
+            continue;
+        }
+        for (auto it = input.begin(); it != input.end(); ++it) {
+            if (std::find(keys.begin(), keys.end(), it.key()) == keys.end()) {
+                keys.push_back(it.key());
+            }
+        }
+    }
+    signal.inputs_note = keys;
+    signal.eligible = true;
+    return signal;
+}
+
+// 组装草稿三份文本与权限差异。落不成(wire 名超帽、名字洗不出)给 false,
+// why_not 记话,候选照旧走组合档/最小档——不硬塞。
+bool ComposePluginDraft(ComboCandidateDraft& draft, const std::vector<ClusterTaskMaterial>& tasks) {
+    const CodeCapabilitySignal& signal = draft.code_signal;
+    const std::string tool_name = SanitizeToolName(signal.wanted_tool);
+    const std::string plugin_dir = SanitizePluginDirName(signal.wanted_tool);
+    if (tool_name.empty() || plugin_dir.empty()) {
+        draft.code_signal.why_not.push_back("想要的工具名洗不成合法插件名,草稿不硬塞");
+        return false;
+    }
+    // wire 名(plugin__<包段>__<工具>)有 64 字符帽,超帽的草稿落了也过不了
+    // doctor——在这里就收掉。
+    const std::string wire = lubancode::runtime::BuildPackagedToolWireName(
+        "plugin", draft.package_id, plugin_dir, tool_name);
+    if (wire.size() > lubancode::runtime::kToolWireNameMaxLength) {
+        draft.code_signal.why_not.push_back("工具 wire 名 \"" + wire + "\" 超 " +
+                                            std::to_string(lubancode::runtime::kToolWireNameMaxLength) +
+                                            " 字符帽,插件草稿不硬塞(改名重试)");
+        return false;
+    }
+    // input schema:照观察到的入参形状(键 -> 类型);全簇都在的键 required。
+    nlohmann::json schema;
+    schema["type"] = "object";
+    nlohmann::json properties = nlohmann::json::object();
+    nlohmann::json required = nlohmann::json::array();
+    std::map<std::string, int> key_tasks;  // 键 -> 出现场数
+    std::vector<nlohmann::json> observed;  // 各场首枚入参
+    for (const ClusterTaskMaterial& task : tasks) {
+        for (const WantedToolCall& call : CollectWantedToolCalls(task.events)) {
+            if (call.tool != signal.wanted_tool || !call.first_input.is_object()) {
+                continue;
+            }
+            observed.push_back(call.first_input);
+            break;  // 一场一枚
+        }
+    }
+    for (const nlohmann::json& input : observed) {
+        for (auto it = input.begin(); it != input.end(); ++it) {
+            key_tasks[it.key()] += 1;
+            if (properties.contains(it.key())) {
+                continue;
+            }
+            nlohmann::json property;
+            if (it.value().is_number_integer()) {
+                property["type"] = "integer";
+            } else if (it.value().is_number_float()) {
+                property["type"] = "number";
+            } else if (it.value().is_boolean()) {
+                property["type"] = "boolean";
+            } else {
+                property["type"] = "string";
+                property["description"] = "观察到的入参(草稿按各场实录记形状)";
+            }
+            properties[it.key()] = property;
+        }
+    }
+    for (const auto& [key, count] : key_tasks) {
+        if (count >= static_cast<int>(observed.size()) && !observed.empty()) {
+            required.push_back(key);
+        }
+    }
+    schema["properties"] = properties;
+    if (!required.empty()) {
+        schema["required"] = required;
+    }
+    schema["additionalProperties"] = false;
+
+    const std::string env_name = MakeDraftEnvName(plugin_dir);
+    std::string description = "从 " + std::to_string(signal.tasks_wanting) +
+                              " 场任务观察到的执行能力需求(" + TruncateChars(signal.wanted_tool, 40) +
+                              ");现有工具办不了";
+    draft.plugin_id = plugin_dir;
+    draft.plugin_json = ComposePluginJson(plugin_dir, tool_name, description, schema, env_name,
+                                          signal.tasks_wanting);
+    draft.plugin_runner = ComposeRunnerPy(plugin_dir, tool_name, signal.inputs_note,
+                                          signal.tasks_wanting);
+    draft.plugin_requirements = ComposeRequirementsTxt(plugin_dir);
+    // 权限差异(evolution.json 的 changes;一条一权,只记名不记值)。
+    draft.permissions_added.push_back("process:python");
+    draft.permissions_added.push_back("env:" + env_name);
+    for (const std::string& key : signal.inputs_note) {
+        if (key == "path" || key == "file" || key == "dir" || key == "filename" ||
+            key == "root" || key == "directory") {
+            draft.permissions_added.push_back("fs_read:workspace");
+            break;
+        }
+    }
+    draft.tools_added.push_back(wire);
+    draft.with_plugin_draft = true;
+    return true;
+}
+
 std::expected<ComboCandidateDraft, std::string> DraftEvolutionCandidate(
     const std::vector<ClusterTaskMaterial>& tasks) {
     if (tasks.empty()) {
@@ -700,6 +1110,14 @@ std::expected<ComboCandidateDraft, std::string> DraftEvolutionCandidate(
     draft.objective = base->objective;
     for (const ClusterTaskMaterial& task : tasks) {
         draft.recording_ids.push_back(task.status.id);
+    }
+
+    // ---- 尺三(代码档,§3.5):多场同求一件不存在的工具 -> process Plugin
+    //      草稿。代码档不叠组合档:插件还没真身,编排等它落地后的下一只
+    //      候选;此刻最小答案是 Skill + 草稿。 ----
+    draft.code_signal = AssessCodeCapability(tasks);
+    if (draft.code_signal.eligible && ComposePluginDraft(draft, tasks)) {
+        return draft;
     }
 
     // ---- 两把尺 ----

@@ -405,6 +405,7 @@ nlohmann::json ComplexityCost::ToJson() const {
     out["shape"] = shape;
     out["has_workflow"] = has_workflow;
     out["has_agent"] = has_agent;
+    out["has_plugin"] = has_plugin;
     out["components"] = components;
     out["minimal_components"] = minimal_components;
     out["extra_components"] = extra_components;
@@ -425,6 +426,7 @@ std::optional<ComplexityCost> ComplexityCost::FromJson(const nlohmann::json& jso
     }
     cost.has_workflow = json.value("has_workflow", false);
     cost.has_agent = json.value("has_agent", false);
+    cost.has_plugin = json.value("has_plugin", false);
     cost.components = static_cast<int>(GetInt(json, "components"));
     cost.minimal_components = static_cast<int>(GetInt(json, "minimal_components"));
     cost.extra_components = static_cast<int>(GetInt(json, "extra_components"));
@@ -441,6 +443,11 @@ std::string ComplexityCost::SummaryLine() const {
     if (shape == "skill-only") {
         return "最小可行包(Skill-only," + std::to_string(components) + " 件组件," +
                std::to_string(files) + " 个文件;与最小档持平)";
+    }
+    if (shape == "code-draft") {
+        return "代码候选草稿(Skill + process Plugin 草稿," + std::to_string(components) +
+               " 件组件、" + std::to_string(files) +
+               " 个文件;零执行零挂载,指路 Package trust 人工审查)";
     }
     std::string line = "组合包(";
     line += has_workflow ? "带 workflow" : "无 workflow";
@@ -461,6 +468,7 @@ ComplexityCost ComputeComplexityCost(const fs::path& package_dir) {
     int skills = 0;
     int workflows = 0;
     int agents = 0;
+    int plugins = 0;
     int files = 0;
     for (auto it = std::filesystem::recursive_directory_iterator(package_dir, ec);
          it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
@@ -484,15 +492,21 @@ ComplexityCost ComputeComplexityCost(const fs::path& package_dir) {
         } else if (rel.rfind("agents/", 0) == 0 && rel.size() > 12 &&
                    rel.find('/', 7) == std::string::npos && rel.substr(rel.size() - 5) == ".yaml") {
             ++agents;
+        } else if (rel.rfind("plugins/", 0) == 0 && rel.size() > 19 &&
+                   rel.compare(rel.size() - 11, 11, "plugin.json") == 0 &&
+                   std::count(rel.begin(), rel.end(), '/') == 2) {
+            ++plugins;  // plugins/<id>/plugin.json(阶段 6 草稿一件)
         }
     }
     cost.has_workflow = workflows > 0;
     cost.has_agent = agents > 0;
-    cost.components = skills + workflows + agents;
+    cost.has_plugin = plugins > 0;
+    cost.components = skills + workflows + agents + plugins;
     cost.extra_components = std::max(0, cost.components - cost.minimal_components);
     cost.files = files;
     cost.extra_files = std::max(0, files - cost.minimal_files);
-    cost.shape = (workflows > 0 || agents > 0) ? "combination" : "skill-only";
+    cost.shape = plugins > 0 ? "code-draft"
+                             : ((workflows > 0 || agents > 0) ? "combination" : "skill-only");
     return cost;
 }
 
@@ -861,6 +875,368 @@ std::vector<ScanFinding> ScanTextForAbsolutePaths(const std::string& text) {
 }
 
 // ---------------------------------------------------------------------------
+// 阶段 6 四类安全夹具(代码候选的静态门)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 一行文本的小写化(匹配用)。
+std::string LowerCopy(const std::string& text) {
+    std::string lower;
+    lower.reserve(text.size());
+    for (const char c : text) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    return lower;
+}
+
+}  // namespace
+
+// 恶意脚本:毁盘、远程拉码执行、反弹 shell 一类的形状。命中即报——注释里
+// 出现也拦(草稿里不该有这些字样;误伤的人工审查线自会放行,这道门宁紧
+// 不松)。夹具与样张一律用无害的"假装恶意"(只写注释/死串)。
+std::vector<ScanFinding> ScanTextForMaliciousScript(const std::string& text) {
+    std::vector<ScanFinding> out;
+    std::istringstream stream(text);
+    std::string line_text;
+    int line_number = 0;
+    while (std::getline(stream, line_text)) {
+        ++line_number;
+        const std::string lower = LowerCopy(line_text);
+        const auto hit = [&](const char* detail) {
+            ScanFinding finding;
+            finding.kind = "malicious-script";
+            finding.line = line_number;
+            finding.detail = detail;
+            out.push_back(std::move(finding));
+        };
+        // 1) 毁盘形状:rm -rf / 一类连根拔、Windows 的 del/format 全卷。
+        if (lower.find("rm -rf /") != std::string::npos ||
+            lower.find("rm -rf ~") != std::string::npos ||
+            lower.find("rm -fr /") != std::string::npos ||
+            lower.find("del /f /s /q") != std::string::npos ||
+            lower.find("del /s /q") != std::string::npos ||
+            lower.find("format c:") != std::string::npos) {
+            hit("毁盘命令形状(值已隐去)");
+            continue;
+        }
+        // 2) 远程拉码执行:下载器(curl/wget/iwr/Invoke-WebRequest)与
+        //    "| sh"/"| bash" 同行——拉下来就喂 shell。
+        const bool has_fetcher = lower.find("curl") != std::string::npos ||
+                                 lower.find("wget") != std::string::npos ||
+                                 lower.find("invoke-webrequest") != std::string::npos ||
+                                 lower.find("iwr ") != std::string::npos;
+        const bool feeds_shell = lower.find("| sh") != std::string::npos ||
+                                 lower.find("|sh") != std::string::npos ||
+                                 lower.find("| bash") != std::string::npos ||
+                                 lower.find("|bash") != std::string::npos ||
+                                 lower.find("| zsh") != std::string::npos;
+        if (has_fetcher && feeds_shell) {
+            hit("远程拉码直接喂 shell 的形状");
+            continue;
+        }
+        // 3) 动态执行远文:PowerShell 的 Invoke-Expression / iex(。
+        if (lower.find("invoke-expression") != std::string::npos ||
+            lower.find("iex (") != std::string::npos || lower.find("iex(") != std::string::npos) {
+            hit("动态执行远文的形状(Invoke-Expression/iex)");
+            continue;
+        }
+        // 4) 反弹 shell 帗见姿势:/dev/tcp/、bash -i >&、nc -e。
+        if (lower.find("/dev/tcp/") != std::string::npos ||
+            lower.find("bash -i >&") != std::string::npos ||
+            lower.find("nc -e ") != std::string::npos) {
+            hit("反弹 shell 的形状");
+            continue;
+        }
+    }
+    return out;
+}
+
+// 依赖投毒:只扫依赖清单文件(按文件名认),注释行(#)跳过。非注册表
+// 直链(git+/svn+/hg+/bzr+/http/ftp/file)与改信任源的 pip 开关
+// (--index-url/--extra-index-url/--trusted-host)一律拦——草稿的依赖只许
+// 从默认注册表来,别的来源交人工审查。
+std::vector<ScanFinding> ScanTextForDependencyPoisoning(const std::string& rel_path,
+                                                        const std::string& text) {
+    std::vector<ScanFinding> out;
+    // 文件名认依赖清单:requirements*.txt、pyproject.toml、package.json。
+    std::string name = rel_path;
+    if (const std::size_t slash = name.rfind('/'); slash != std::string::npos) {
+        name = name.substr(slash + 1);
+    }
+    const bool is_dep_manifest =
+        (name.rfind("requirements", 0) == 0 && name.find(".txt") != std::string::npos) ||
+        name == "pyproject.toml" || name == "package.json" || name == "constraints.txt";
+    if (!is_dep_manifest) {
+        return out;
+    }
+    std::istringstream stream(text);
+    std::string line_text;
+    int line_number = 0;
+    while (std::getline(stream, line_text)) {
+        ++line_number;
+        const std::size_t first = line_text.find_first_not_of(" \t\r");
+        if (first == std::string::npos || line_text[first] == '#') {
+            continue;  // 空行/注释:依赖清单自己的说明不拦
+        }
+        const std::string lower = LowerCopy(line_text);
+        const auto hit = [&](const char* detail) {
+            ScanFinding finding;
+            finding.kind = "dependency-poisoning";
+            finding.line = line_number;
+            finding.detail = detail;
+            out.push_back(std::move(finding));
+        };
+        if (lower.find("git+") != std::string::npos || lower.find("svn+") != std::string::npos ||
+            lower.find("hg+") != std::string::npos || lower.find("bzr+") != std::string::npos) {
+            hit("依赖来自版本库直链(不走注册表,须人工审查)");
+            continue;
+        }
+        if (lower.find("http://") != std::string::npos || lower.find("ftp://") != std::string::npos ||
+            lower.find("file:") != std::string::npos) {
+            hit("依赖来自明文/本地直链(不走注册表,须人工审查)");
+            continue;
+        }
+        if (lower.find("--index-url") != std::string::npos ||
+            lower.find("--extra-index-url") != std::string::npos ||
+            lower.find("--trusted-host") != std::string::npos) {
+            hit("依赖安装改了信任源(pip 开关,须人工审查)");
+            continue;
+        }
+    }
+    return out;
+}
+
+// 路径逃逸:路径段里的 ..(前有 / \ " 或行首、后有 / \ " 或行尾才算整段,
+// 省略号与正文里的两个点不冤枉),另认 ${plugin_dir}/.. 形态。草稿的路径
+// 一律钉在包根里。
+std::vector<ScanFinding> ScanTextForPathEscape(const std::string& text) {
+    std::vector<ScanFinding> out;
+    std::istringstream stream(text);
+    std::string line_text;
+    int line_number = 0;
+    while (std::getline(stream, line_text)) {
+        ++line_number;
+        for (std::size_t i = 0; i + 1 < line_text.size(); ++i) {
+            if (line_text[i] != '.' || line_text[i + 1] != '.') {
+                continue;
+            }
+            const bool head_ok = i == 0 || line_text[i - 1] == '/' || line_text[i - 1] == '\\' ||
+                                 line_text[i - 1] == '"' || line_text[i - 1] == '\'';
+            const std::size_t after = i + 2;
+            const bool tail_ok = after == line_text.size() || line_text[after] == '/' ||
+                                 line_text[after] == '\\' || line_text[after] == '"' ||
+                                 line_text[after] == '\'';
+            if (!head_ok || !tail_ok) {
+                continue;  // 不是整段 ..(省略号/正文两个点),不冤枉
+            }
+            ScanFinding finding;
+            finding.kind = "path-escape";
+            finding.line = line_number;
+            finding.detail = "路径段里的 ..(伸出包根的逃逸形状)";
+            out.push_back(std::move(finding));
+            break;  // 一行报一次
+        }
+        if (line_text.find("${plugin_dir}/..") != std::string::npos) {
+            ScanFinding finding;
+            finding.kind = "path-escape";
+            finding.line = line_number;
+            finding.detail = "${plugin_dir} 后跟 ..(插件目录逃逸形状)";
+            out.push_back(std::move(finding));
+        }
+    }
+    return out;
+}
+
+// 代码文件的网络原语:python/node/lua/shell 常见的取网姿势。命中只说明
+// "代码想用网",准不准由包级对账(ScanPackageNetworkOverreach)说了算。
+std::vector<ScanFinding> ScanCodeForNetworkUse(const std::string& text) {
+    std::vector<ScanFinding> out;
+    std::istringstream stream(text);
+    std::string line_text;
+    int line_number = 0;
+    static constexpr const char* kPrimitives[] = {
+        "urllib",     "requests.",    "http.client", "httpx",
+        "socket.",    "aiohttp",      "fetch(",      "axios",
+        "net.Socket", "http.request", "http.get",    "http.post",
+        "curl ",      "wget ",        "wget\t",      "resty.http",
+        "lua-socket", "nc ",          "nc\t",
+    };
+    while (std::getline(stream, line_text)) {
+        ++line_number;
+        for (const char* primitive : kPrimitives) {
+            if (line_text.find(primitive) != std::string::npos) {
+                ScanFinding finding;
+                finding.kind = "network-overreach";
+                finding.line = line_number;
+                finding.detail = std::string("代码带网络原语(") + primitive + ")";
+                out.push_back(std::move(finding));
+                break;  // 一行报一次
+            }
+        }
+    }
+    return out;
+}
+
+// 包级网络对账:清单(plugin.json/mcp.yaml 的网络声明)对代码(网络原语)。
+namespace {
+
+// 一只包的网络立场:包内全部清单并起来的最宽面。
+//   Denied  全部清单都未许(或包内没有清单);
+//   Broad   有清单布尔放行(network: true 的宽授权);
+//   Precise 有清单落了精确声明(v2 network[] 数组)。
+enum class NetworkStance { Denied, Broad, Precise };
+
+NetworkStance StanceOfManifestText(const std::string& text, bool is_json) {
+    // plugin.json 是 JSON,走 nlohmann;mcp.yaml 走行扫(permissions 段的
+    // network 行)。两处都只问一件事:网络是关、是布尔开、还是精确开。
+    if (is_json) {
+        const nlohmann::json parsed = nlohmann::json::parse(text, nullptr, false);
+        if (!parsed.is_discarded() && parsed.is_object() && parsed.contains("permissions") &&
+            parsed.at("permissions").is_object()) {
+            const nlohmann::json& perms = parsed.at("permissions");
+            if (perms.contains("network") && !perms.at("network").is_null()) {
+                if (perms.at("network").is_boolean()) {
+                    return perms.at("network").get<bool>() ? NetworkStance::Broad
+                                                           : NetworkStance::Denied;
+                }
+                if (perms.at("network").is_array()) {
+                    return NetworkStance::Precise;
+                }
+            }
+        }
+        return NetworkStance::Denied;
+    }
+    // YAML:认 permissions 段之后的 network: 行(v1 布尔;数组起头即精确)。
+    std::istringstream stream(text);
+    std::string line_text;
+    bool in_permissions = false;
+    while (std::getline(stream, line_text)) {
+        if (line_text.rfind("permissions:", 0) == 0) {
+            in_permissions = true;
+            continue;
+        }
+        if (!line_text.empty() && line_text[0] != ' ' && line_text[0] != '\t' &&
+            line_text.rfind("permissions:", 0) != 0) {
+            in_permissions = false;  // 出了段
+        }
+        if (!in_permissions) {
+            continue;
+        }
+        const std::size_t at = line_text.find("network:");
+        if (at == std::string::npos) {
+            continue;
+        }
+        std::string value = line_text.substr(at + 8);
+        const std::size_t first = value.find_first_not_of(" \t");
+        value = first == std::string::npos ? "" : value.substr(first);
+        if (value.rfind("true", 0) == 0) {
+            return NetworkStance::Broad;
+        }
+        if (value.rfind('[', 0) == 0 || value.rfind("-", 0) == 0) {
+            return NetworkStance::Precise;
+        }
+        return NetworkStance::Denied;
+    }
+    return NetworkStance::Denied;
+}
+
+// 代码文件后缀(网络原语只扫代码;SKILL/workflow 文本里的"curl"是文档)。
+bool IsCodeFile(const std::string& rel_path) {
+    static constexpr const char* kCodeExts[] = {".py", ".js",   ".mjs", ".ts",
+                                                ".lua", ".sh",  ".bash", ".ps1",
+                                                ".rb",  ".pl"};
+    for (const char* ext : kCodeExts) {
+        if (rel_path.size() >= std::strlen(ext) &&
+            rel_path.compare(rel_path.size() - std::strlen(ext), std::strlen(ext), ext) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+}  // namespace
+
+std::vector<ScanFinding> ScanPackageNetworkOverreach(const fs::path& package_dir) {
+    std::vector<ScanFinding> out;
+    std::error_code ec;
+    if (!std::filesystem::is_directory(package_dir, ec) || ec) {
+        return out;
+    }
+    NetworkStance stance = NetworkStance::Denied;  // 没有清单 = 未许
+    bool saw_manifest = false;
+    std::vector<std::pair<std::string, std::string>> code_files;  // (rel, text)
+    for (auto it = std::filesystem::recursive_directory_iterator(package_dir, ec);
+         it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        if (ec || !it->is_regular_file()) {
+            continue;
+        }
+        std::string rel = lubancode::platform::PathToUtf8(it->path().lexically_relative(package_dir));
+        std::replace(rel.begin(), rel.end(), '\\', '/');
+        const std::string name = rel.rfind('/') == std::string::npos
+                                     ? rel
+                                     : rel.substr(rel.rfind('/') + 1);
+        if (name != "plugin.json" && name != "mcp.yaml") {
+            if (IsCodeFile(rel)) {
+                if (const auto text = ReadTextFile(it->path()); text.has_value()) {
+                    code_files.emplace_back(rel, std::move(*text));
+                }
+            }
+            continue;
+        }
+        saw_manifest = true;
+        const auto text = ReadTextFile(it->path());
+        if (!text.has_value()) {
+            continue;
+        }
+        const NetworkStance here = StanceOfManifestText(*text, name == "plugin.json");
+        if (here == NetworkStance::Broad || (here == NetworkStance::Precise &&
+                                             stance != NetworkStance::Broad)) {
+            stance = here == NetworkStance::Broad ? NetworkStance::Broad : NetworkStance::Precise;
+        }
+    }
+    // 1) 宽授权:布尔放行本身即越权形状(草稿须落精确声明)。
+    if (saw_manifest && stance == NetworkStance::Broad) {
+        ScanFinding finding;
+        finding.kind = "network-overreach";
+        finding.path = "(manifest)";
+        finding.detail = "清单布尔放行 network: true(宽授权)——草稿须落精确网络"
+                         "声明,交人工审查";
+        out.push_back(std::move(finding));
+    }
+    // 2) 代码用网,清单未许(或包内没有清单)。
+    if (stance != NetworkStance::Precise) {
+        for (const auto& [rel, text] : code_files) {
+            for (ScanFinding finding : ScanCodeForNetworkUse(text)) {
+                finding.path = rel;
+                finding.detail = "代码用网而清单未许:" + finding.detail;
+                out.push_back(std::move(finding));
+            }
+        }
+        return out;
+    }
+    // 3) 精确声明之下:明文 http:// 取数仍是越权(只许 https)。
+    for (const auto& [rel, text] : code_files) {
+        std::istringstream stream(text);
+        std::string line_text;
+        int line_number = 0;
+        while (std::getline(stream, line_text)) {
+            ++line_number;
+            if (line_text.find("http://") == std::string::npos) {
+                continue;
+            }
+            ScanFinding finding;
+            finding.kind = "network-overreach";
+            finding.path = rel;
+            finding.line = line_number;
+            finding.detail = "明文 http:// 取数(精确声明也只许 https)";
+            out.push_back(std::move(finding));
+        }
+    }
+    return out;
+}
+
+// ---------------------------------------------------------------------------
 // 静态门:Package doctor + 两道扫描
 // ---------------------------------------------------------------------------
 
@@ -912,6 +1288,8 @@ StaticGateResult RunStaticGate(const fs::path& package_dir) {
     }
 
     // ---- 密钥扫描 + 绝对路径扫描:候选包全文(含 SKILL 正文)----
+    // ---- 阶段 6 四类安全夹具:恶意脚本/依赖投毒/路径逃逸逐文件;网络
+    //      越权是清单与代码的对账,包级跑一遍。----
     for (auto it = std::filesystem::recursive_directory_iterator(package_dir, ec);
          it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
         if (ec || !it->is_regular_file()) {
@@ -931,6 +1309,21 @@ StaticGateResult RunStaticGate(const fs::path& package_dir) {
             finding.path = rel;
             result.findings.push_back(std::move(finding));
         }
+        for (ScanFinding finding : ScanTextForMaliciousScript(*text)) {
+            finding.path = rel;
+            result.findings.push_back(std::move(finding));
+        }
+        for (ScanFinding finding : ScanTextForDependencyPoisoning(rel, *text)) {
+            finding.path = rel;
+            result.findings.push_back(std::move(finding));
+        }
+        for (ScanFinding finding : ScanTextForPathEscape(*text)) {
+            finding.path = rel;
+            result.findings.push_back(std::move(finding));
+        }
+    }
+    for (ScanFinding finding : ScanPackageNetworkOverreach(package_dir)) {
+        result.findings.push_back(std::move(finding));
     }
     return result;
 }
