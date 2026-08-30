@@ -313,6 +313,12 @@
 - **golden fixture 钉死字节。** 19 枚合成全流固化为 v1 golden:新写字节逐字一致、同流两遍录制整本同 hash、旧读 round-trip 过;截断尾行 verify 明报、前面事件照常可数。37 册单测把 18 条约束各钉一案(含审批 deny 后拒、queue 双终态拒、session.ended 后拒写)。
 - 这是 P0 轨迹工程的第一批(合同与最小仓);后续 SessionManager 换账、运行时单写口接线、replay/resume、训练导出依序接上。
 
+## [v0.26.119] - 2026-08-30
+
+- **Lua 插件的合同与钥匙仓打了地基(Lua HTTP 单阶段 0+1)。** `plugin.json` v2 冻结:manifest_version 版本墙(v1 只收 process、embedded-lua 明报需 v2)、NetworkPermission(https/精确 host/443/GET,POST)、SecretDeclaration、HttpLimits 六帽只许下调——13 枚稳定错误码带行列。宿主错误总表 17 枚照设计全表落。
+- **SecretResolver 全套。** 环境变量 + 插件数据目录窄 .env(BOM/引号/CRLF 收,插值/export/多行/超 1MiB 拒,只装声明过的键);`SecretValue` 编译期禁复制、移动即覆写源、operator<< 删除误用即编译错;`SecretRedactor` 从长到短替换防截断。**源码树 .env 永不读**与**.env 轮换即时生效**各有专测。
+- **假 Key 全链路搜不到原文**:解析→展示→错误文案→打码文本四路泄露扫描回归;inspect/doctor 只报名字与来源。punycode 是 RFC 3492 真实现(标准向量逐字验)。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
