@@ -1,0 +1,212 @@
+# 骨架拆解反弹：职责分离整改单
+
+- 状态：待实现
+- 日期：2026-08-30
+- 起因：用户问 `src/` 职责分离是不是没搞好，派三路 Explore 分头复审 `src/cli`、`src/app`+`src/agent`、`src/config`+`src/runtime`+`src/tools`+`src/workflow`，对照骨架拆解（0.26.48→0.26.63）当初立的规矩逐条核实
+- 范围：工具确认流程渲染归属、interactive_session/wirings 瘦身账、settings_commands 内存写、console_input 三机合租、worktree.cpp 归属、config.cpp 夹带项
+- 不在本单：新功能、GUI 改版、`console_input.cpp` 之外的终端渲染细节调整
+
+## 先把话说清楚
+
+七批骨架拆解把"回合怎么跑"这条主线啃透了：`agent/loop.cpp`、`agent.hpp` 干净，`TurnHarness` 三家（主循环/子代理/workflow）真共用，分层方向没反，还有 CI 门 `tests/unit/app/test_app_boundary_gate.cpp` 常年盯着。这几处不用动。
+
+漏的是"UI 渲染跟业务判断分家"这条支线。它只在流式输出那半条路上落地（`TerminalTurnSink`/`TurnEventAdapter`），工具确认弹窗、`wirings/` 装配这半条路没跟上——尤其 `wirings/` 里的文件，代码注释自己都写着"函数体原样搬来，一字未改"。
+
+以下逐条列位置、现状、怎么改、怎么验。
+
+## 问题 1：工具确认判断里揉了终端渲染和配置文件写入
+
+- 状态：待实现
+- 级别：P1
+- 位置：`src/app/turn_runner.cpp:453-633`（`ConfirmToolUse`）、`src/app/turn_runner.cpp:195-382`（`PromptAskUser`）
+
+### 现状
+
+`ConfirmToolUse` 名义上只该判断"这个工具批不批"，手却伸得老长：
+
+- 直接画终端选择菜单（`ReadChoiceMenu`，`turn_runner.cpp:554-572, 598-608`）。
+- 直接印 diff 预览（`display.ShowDiffPreview`）与确认详情（`PrintConfirmDetails`，`turn_runner.cpp:133-169`）。
+- 直接读控制台一行（`ReadLine`）。
+- 用户选"允许并记住"后，直接调 `config::AddAllowedToolToSettingsLocal(cwd, name)` 和 `EnsureGitignoreCoversSettingsLocal(cwd)`（`turn_runner.cpp:615-630`），把配置文件写入这种持久化动作也揽进了确认流程。
+
+`PromptAskUser`（195-382，约 190 行）是一段独立的终端菜单/读行逻辑，同样杵在这个该管"驱动一回合"的文件里。
+
+纯判断逻辑（`EvaluatePermission`/`EmitPermissionRequest`）确实已经抽到 `runtime/` 了，可判断之外的"画什么、写什么"没跟着搬。
+
+### 怎么改
+
+1. `ConfirmToolUse` 只留：拼装一份 `ToolConfirmRequest`（要不要问、问什么、候选项是什么），交给 `TurnEventAdapter`/`TerminalTurnSink` 走事件流去渲染，跟流式正文走同一条出水口。
+2. 菜单渲染、diff 预览、`ReadChoiceMenu`、`ReadLine` 这些真终端 IO，整体挪到 `src/cli/`（或已有的 sink 实现里），`turn_runner.cpp` 不再直接碰。
+3. "允许并记住"这类配置持久化，从确认流程里拆成一个显式的回调/命令（比如 `OnToolAllowedPersist(name)`），由 sink 收到用户选择后再调，`turn_runner.cpp` 不直接 `#include "config/config.hpp"` 去写文件。
+4. `PromptAskUser` 整段搬进 `src/cli/`，`turn_runner.cpp` 只调用其接口。
+
+### 验收
+
+- `turn_runner.cpp` 不再直接调用 `ReadChoiceMenu`/`ReadLine`/`display.ShowDiffPreview`。
+- `grep '#include "config/config.hpp"' src/app/turn_runner.cpp` 应为空，或至少确认写入不再在这个文件里直接发生。
+- App Server / 无终端场景下跑工具确认流程，不因缺终端而崩或行为分叉——这是最能验出"渲染真的从判断里分离了"的场景。
+- 现有工具确认相关手测/driver 断言全绿，行为不变，只是代码位置变了。
+
+## 问题 2：interactive_session 瘦身账面已过期
+
+- 状态：待实现
+- 级别：P2
+- 位置：`src/app/interactive_session.cpp`（1304 行）+ `src/app/interactive_session_wiring.cpp`（1229 行），共同实现 `TerminalSessionController`（声明于 `src/app/interactive_session_controller.hpp`，420 行）
+
+### 现状
+
+骨架拆解台账记的是"瘦身到 1114 行"，但那只是 `interactive_session.cpp` 一个文件当时的数字。今天算总账，同一个类摊在两个 `.cpp` 里，合计 2533 行——`interactive_session_wiring.cpp` 这个名字还跟真正的组合根目录 `src/app/wirings/` 撞车，容易让人以为它是装配代码，实际是这同一个大类的另一半方法实现。
+
+`TerminalSessionController` 目前仍直接管：会话标题生成轮询、steering 队列持久化、mention 账校验、memory 上下文拼装、plan-mode 提案收集、model-usage 记账、终端标题格式化、worktree 同步、后台任务通知（直接 `TermOut()`，不走 sink，见 `interactive_session.cpp:1088-1094, 1208-1213`）、状态面板数据拼装、主循环泵调度。
+
+### 怎么改
+
+1. 先做名字上的止血：`interactive_session_wiring.cpp` 改名（比如 `interactive_session_impl2.cpp` 或按内容拆文件名），不再叫"wiring"，别跟 `src/app/wirings/` 混淆。
+2. 把"会话标题生成""model-usage 记账""状态面板数据拼装"这几块拆成独立的小类/自由函数，各自有名字和头文件，`TerminalSessionController` 改成调用它们，而不是自己实现。这几块本身内聚，拆出去成本不高。
+3. 后台任务通知、完成提示这类非 turn 事件的终端输出，改走 `TerminalTurnSink` 或专门的 `SessionNoticeSink`，别直接 `TermOut()`。
+4. 目标不是硬凑一个行数，是让 `TerminalSessionController` 剩下的部分（会话生命周期、主泵调度）跟"标题怎么起""状态面板长什么样"这类可独立测试的逻辑分开。
+
+### 验收
+
+- `TerminalSessionController` 剩余方法数量、职责列表写进类头注释，跟实际代码对得上——不再靠"曾经瘦身到过 N 行"这种过期数字自证。
+- 拆出去的小类/函数各有单测，不必再起一个完整 `TerminalSessionController` 才能测标题生成逻辑。
+- 后台通知改走 sink 后，终端场景手测行为不变。
+
+## 问题 3：`src/app/wirings/` 不是纯装配根，装配逻辑也没都在里头
+
+- 状态：待实现
+- 级别：P2
+- 位置：`src/app/wirings/loop_session_wiring.cpp:135-189`（`PumpDueTick`）、`:191-246`（`FinishTick`）；`src/app/wirings/goal_session_wiring.cpp:38-80`（`Ensure`）；`src/app/commands/workflow_commands.cpp:1609-1814`（`BuildWorkflowExecutors`）
+
+### 现状
+
+`wirings/` 目录本该只管"把零件接起来"，可两头都错位：
+
+- `loop_session_wiring.cpp` 的 `PumpDueTick`/`FinishTick` 直接跑调度状态机（读取 prompt 来源、拼装定时消息文本、驱动 `scheduler_->Complete/Pause/FinishTick`），还直接 `TermOut()` 打印（`:160-164, 183-184, 226-227, 234-235`）——这是业务逻辑和渲染，不是装配。文件自己的头注释写着"函数体原样从 interactive_session 大类搬来，行为一字未改"，等于承认只是搬家，没有重新设计。
+- `goal_session_wiring.cpp` 的 `Ensure` 同样在判断事件类型（`goal_iteration_v1` vs `goal_v1`）、搭 ledger sink 的分支逻辑，不只是"把指针接起来"。
+- 反过来，真正该属于装配根的 `BuildWorkflowExecutors`（约 200 行，装配 `AgentProfile` 解析、backend、registry、event sink、自定义 agent resolver、子流程 runtime）却留在 `src/app/commands/workflow_commands.cpp` 里，没搬进 `wirings/`。
+
+`src/app/wirings/record_session_wiring.cpp`（25 行）是这个目录里唯一名副其实的纯装配文件，可以当参照样板。
+
+### 怎么改
+
+1. 把 `PumpDueTick`/`FinishTick` 里的调度状态机判断，下沉到 `src/runtime/`（或已有的 loop-scheduler 相关模块），`wirings/` 里只留"构造 `LoopSessionWiring` 对象、注入依赖"这一层。
+2. 状态机跑完后要不要打印，改成产出一个事件/回调，由调用方（原本该走 sink 的地方）决定怎么渲染，`wirings/` 文件里不再有 `TermOut()`。
+3. `goal_session_wiring.cpp` 的 `Ensure` 里"判断事件类型、搭 ledger sink"这段逻辑，抽成 `runtime::goal` 下的一个纯函数/小类，`Ensure` 改成调用它。
+4. `BuildWorkflowExecutors` 整段搬进 `src/app/wirings/workflow_wiring.cpp`（新建），`workflow_commands.cpp` 改成调用它。
+5. 搬完之后，拿 `record_session_wiring.cpp` 当标尺检查：`wirings/` 下每个文件是不是都只剩"构造+注入"，没有独立的业务判断分支、没有直接 IO。
+
+### 验收
+
+- `wirings/` 目录下每个文件不再包含 `TermOut()`/`ReadLine()` 等直接终端 IO（可仿照 `test_app_boundary_gate.cpp` 的思路加一条针对 `wirings/` 的 grep 检查）。
+- `BuildWorkflowExecutors` 搬家后，workflow 相关命令手测/单测行为不变。
+- `loop_session_wiring.cpp`/`goal_session_wiring.cpp` 抽出的状态机逻辑各自有独立单测，不必起整个 session 才能测。
+
+## 问题 4：`settings_commands.cpp` 命令处理器里直接改配置内存对象
+
+- 状态：待实现
+- 级别：P2
+- 位置：`src/app/commands/settings_commands.cpp:746-1436`（`HandleProviderCommand`），具体改字段处见 `:824-831, 859-866, 881-887`
+
+### 现状
+
+`HandleProviderCommand`（约 690 行）里混了交互向导 UI（`ReadChoiceMenu`、`TermOut` 提示）和对 `config::ProviderConfig` 的直接内存改写：`std::find_if` 在 `config.providers` 里找到目标 provider，然后 `it->auth = ...`、`it->api_key = *key`、`it->key_env = *env_name` 直接改字段。持久化那步是对的（走 `SetProviderAuthInlineInGlobalConfig` 等），内存改写这步没走同等的边界。
+
+### 怎么改
+
+1. 在 `src/config/` 里补一组 `ProviderConfig` 的语义化 setter（比如 `SetAuthInline(provider, key)`、`SetAuthEnv(provider, env_name)`），把校验规则（比如互斥关系、格式检查）封进 setter，不留给调用方各自判断。
+2. `HandleProviderCommand` 改成只调用这些 setter，自己不再直接碰 `it->auth =` 这类字段赋值。
+3 UI 部分（`ReadChoiceMenu`/`TermOut`）保留在命令文件里，属于命令层该管的事，不用搬。
+
+### 验收
+
+- `grep -n 'it->auth\|it->api_key\|it->key_env' src/app/commands/settings_commands.cpp` 之类的直接字段赋值应清零，全部换成 setter 调用。
+- `/provider` 相关交互手测（切换认证方式、改 key）行为不变。
+- 新增的 setter 有单测覆盖，不必走完整交互命令才能测校验规则。
+
+## 问题 5：`console_input.cpp` 一个文件塞了三台不相干的机器
+
+- 状态：待实现
+- 级别：P2（长度本身有正当理由，混装才是问题；不必急，但该拆）
+- 位置：`src/cli/console_input.cpp`（5182 行，全仓最大文件）
+
+### 现状
+
+它长得有理由——CMake 里明摆着这是唯一被准许碰真终端 IO 的 `.cpp`（`lubancode_core`/`lubancode_engine`/`lubancode_runtime` 都不含它），`test_app_boundary_gate.cpp` 专门拦别处伸手碰真 IO。可长归长，里头至少糊了三台不相干的机器：
+
+- 前台行编辑器/composer 主循环：`ReadLineKeyByKey`（约 `1003-2667`，全文件最大函数，约 1660 行）。
+- 后台"流式 footer"渲染引擎：`BeginStreamFooter/EndStreamFooter/RedrawStreamFooterLocked/PrepareStreamBodyWriteLocked/EraseStreamFooterLocked`（约 `3600-4300`）。
+- 两条后台线程：`StreamFooterHeartbeat`（`4401-4490`）、`TurnInputListener`（`4537-4665+`）。
+- 外加 17 个模块级 `XxxSlot()` 函数局部单例（`AdditionalSlashCandidatesSlot`、`ViewFrameLedgerSlot`、`PanelSessionSlot` 等），各属不同子系统，却都用全局单例而非注入对象来传状态——这本身就是"该分家却没分家"的证据。
+
+另外，`ChoiceMenuSearchCore`（`2822-2992`）跟已经独立成文件的 `cli/choice_menu.hpp/.cpp`（`ChoiceMenuCore`）是同一概念的第二份实现，代码注释承认是"语言/语义复用，不是同一份实例"，属历史遗留的重复，不是设计。
+
+### 怎么改（分阶段，别一口吃成胖子）
+
+1. 第一步，先把三台机器按文件拆开，逻辑先不动：
+   - `console_input_composer.cpp`：`ReadLineKeyByKey` 及其直接辅助函数。
+   - `console_input_stream_footer.cpp`：`BeginStreamFooter` 一族 + `StreamFooterHeartbeat` 线程。
+   - `console_input_turn_listener.cpp`：`TurnInputListener` 线程。
+   - 原 `console_input.cpp` 保留真正跨这几台机器共享的底层（比如控制台句柄、互斥锁）。
+2. 第二步，把那 17 个 `XxxSlot()` 单例归类：凡是只被上面某一台机器用到的，改成该机器自己的成员/静态局部，别继续摆在文件作用域当全局用；真正需要跨机器共享的，收进一个显式的"共享上下文"结构体传进去，别继续用函数指针 Slot 模式。
+3. `ChoiceMenuSearchCore` 跟 `cli/choice_menu.hpp` 的 `ChoiceMenuCore` 做一次合并评估：能直接复用就删掉重复实现；如果两边语义已经分叉走远，至少把重复的原因写进注释，别让下一个人以为是笔误。
+
+### 验收
+
+- 拆分后每个新文件职责单一，能各自写一段"这个文件是干什么的"注释，不用再说"这是那个大杂烩文件的一部分"。
+- CMake 构建边界（这几个新文件仍不进 `lubancode_core`）测试照旧通过。
+- 拆分前后终端手测行为不变：composer 输入、流式 footer、Alt+O 续刷、Ctrl+R 历史搜索、忙时排队都要过一遍。
+- 这条工程量最大，可以按"先拆文件不改逻辑"和"再合并 Slot/去重复"两个提交分开做，别一次性大改。
+
+## 问题 6：`worktree.cpp` 放错了抽屉
+
+- 状态：待实现
+- 级别：P3
+- 位置：`src/cli/worktree.cpp`（1062 行）
+
+### 现状
+
+躺在 `src/cli/` 下，实际是 `tools/agent_tool.cpp`、`tools/worktree_tool.hpp` 在用的领域逻辑（git worktree 创建/进入/退出/清理），不是展示层代码。项目自己的边界测试 `test_app_boundary_gate.cpp` 得专门给 `worktree.hpp` 开白名单放行，说明连测试自己都承认它站错了地方。
+
+### 怎么改
+
+把 `worktree.cpp`/`worktree.hpp` 整体挪到 `src/runtime/` 或新建 `src/vcs/`（哪个更合适取决于它跟 `runtime` 现有内容的耦合程度，建议先看它现在依赖了哪些 `runtime/` 头文件再定）。挪完后：
+
+- `test_app_boundary_gate.cpp` 里 `worktree.hpp` 的白名单可以删掉，因为它不再挂在 `cli/` 下。
+- `tools/agent_tool.cpp`、`tools/worktree_tool.hpp`、`/worktree` 命令三处的 include 路径同步改。
+
+### 验收
+
+- `worktree` 相关命令、子代理房务（`tools/agent_tool.cpp` 里用到的部分）手测/单测行为不变。
+- `test_app_boundary_gate.cpp` 的白名单缩短一条，边界规则更干净。
+
+## 问题 7：`config.cpp` 夹带了两样不归它管的事
+
+- 状态：待实现
+- 级别：P3
+- 位置：`src/config/config.cpp:3743-3774`（`ClassifyCommandByPermissions`/`CommandHasPrefix`）、`:3774-3813`（`EnsureGitignoreCoversSettingsLocal`）
+
+### 现状
+
+`config.cpp` 本身 3813 行不算错位——大头是 env/文件解析、merge 逻辑（约 2100 行）和十几个 `SetXInGlobalConfig` 持久化函数，都是配置该管的事，provider 目录、prompt 拼装这些外行活确实没往里塞。但夹了两样：
+
+- `ClassifyCommandByPermissions`/`CommandHasPrefix`：这是"这条 shell 命令该不该自动放行"的安全决策逻辑，不是配置读写。
+- `EnsureGitignoreCoversSettingsLocal`：改用户 `.gitignore` 文件，是项目初始化/文件系统housekeeping，不是配置模块该管的事。
+
+（另外，十几个 `SetXInGlobalConfig` 样板函数重复劳动，是啰嗦不是错位，本单不强求处理，顺手做数据驱动化也可以，不算硬指标。）
+
+### 怎么改
+
+1. `ClassifyCommandByPermissions`/`CommandHasPrefix` 挪到一个新的 `src/config/command_permission.hpp/.cpp`，或者如果项目日后有 `src/security/` 之类的模块，挪过去更合适。`turn_runner.cpp` 等调用方的 include 同步改。
+2. `EnsureGitignoreCoversSettingsLocal` 挪到跟 `settings.local.json` 相关的模块里（`config.cpp` 里已有 `SettingsLocalPath`/`ParseSettingsLocal` 那一段，`:3600-3762`，可以合并成一个独立的 `settings_local.hpp/.cpp`），跟主 `Config`/provider merge 逻辑分开。
+
+### 验收
+
+- 挪动后 `config.cpp` 只剩 env/文件解析、merge、`SetXInGlobalConfig` 持久化、`settings.local.json` 处理这几类，不再有命令权限分类和 `.gitignore` 写入。
+- 相关手测（工具确认时的命令自动放行判断、`settings.local.json` 写入后 `.gitignore` 检查）行为不变。
+
+## 排序建议
+
+1（P1，工具确认渲染分离）最值得先动，因为它是"事件流是唯一出水口"这条骨架拆解核心规矩上唯一真正没兑现的地方，且改完能直接受益于未来任何新前端（App Server、Channel 等）。
+3（P2，wirings/ 归位）次之，因为它污染了"装配根"这个抽象，越晚改，越多新代码会继续往错的地方搬。
+2、4、5、6、7 按各自 P2/P3 顺序，视人力排期即可，互相不卡依赖。
