@@ -167,6 +167,30 @@ LubanCode 是一只 C++23 终端 coding agent。它把三家模型协议翻进�
 
 不等于。当前先验 UTF-8；非法才试 ACP，转完再验 UTF-8 合法。那只验结构，不验语义。`C2 A1` 在 CP936 是“隆”，在 UTF-8 是“¡”；它本身合法 UTF-8，现版会直接取“¡”。可靠办法是让进程、Hook、HTTP 或文件边界明示编码；来源未知时留标签与原始摘要，不靠猜。
 
+### 排队消息怎样画 durable ack
+
+三态足够起笔：`pending -> inflight -> acked`。入队先写稳 pending，再回显；dispatcher
+先写稳带 lease 的 inflight，再投递；目标把 `queue_id` 与 user message 同笔落账，才算
+acked。ack 只认目标耐久收下，不等模型答完。目标 receipt 已写、源 ack 未写时，恢复
+按 `queue_id + delivery_id` 对账补齐；次序倒过来会丢消息。现版已有 queue 快照、resume
+与失败回队，尚无这笔原子收据。
+
+### 不可信 Lua / DLL 怎样隔离
+
+核心不再 `luaL_newstate` 或 `LoadLibrary`。一件插件占一只受限
+`lubancode-plugin-host`，用带长度、版本、request id 与字节帽的 IPC 收发。文件权限取
+`manifest 声明 ∩ 工具策略 ∩ 用户批准 ∩ worktree`，发短命 grant；插件只向 broker
+报 grant 与相对路径，由核心规范路径、亲手开文件、分块回字节。OS 还须默认封住
+工作区、网络、环境与继承句柄。少了 OS 拒权，capability RPC 只是一纸约定。
+
+### 不用真终端怎样钉住 Ctrl+O 补画
+
+纯测 `FormatTranscriptItems` 不够。要把生产 Ctrl+O 分支抽成无平台 action，注入
+`SnapshotSource`、`RenderSink` 与固定 width。先在紧凑档完成一枚历史子工具，再调同一
+action；断言它取一次快照，按“擦 footer、废锚点、写详细帧、重画 footer”落笔，且
+旧参数与结果各出现一次。旧实现若只打印“详细模式”，这条测试当场见红。ConHost
+残影另归真终端驱动。
+
 ### JSON Schema 是不是安全边界
 
 不是。schema 只描述输入形状。路径范围、命令危险度、权限、Hook、OS 账户能力另有边界。现版还有一项明确欠账：Hook 给出的 `updatedInput` 会过统一 schema 复检；模型原始入参主要靠 provider 结构化调用与各工具自己的参数检查，尚未在 `RunOneTool` 入口统一验 schema。
@@ -201,6 +225,8 @@ Skill 给模型一份做事说明，靠模型理解后调用普通工具。Hook 
 - 不说“compact 会无限递归直到装下”。reduce 最多两两归并四轮，四轮后的本地超窗拒绝尚未补。
 - 不说“BM25 参数按代码语料调过”。现版取常用值，固定尺子没有做 `k1/b` 消融。
 - 不说“ACP 转成合法 UTF-8 就证明解码正确”。合法只是一道字节结构检查。
+- 不说“排队消息已经 exactly-once”。现版有快照与失败回队，没有 durable receipt。
+- 不说“Lua pure 画像或调用前确认等于沙箱”。Lua 与 DLL 仍在宿主进程。
 - 不说“已经接入 OpenCode 或 Models.dev”。当前目录是 LubanCode 自有格式，仓内直接记载借鉴 Codex model-catalog。
 - 不说“模型 capability 都会自动拦截不兼容请求”。若干字段当前只解析、展示或留作后续接线。
 
@@ -217,6 +243,9 @@ Skill 给模型一份做事说明，靠模型理解后调用普通工具。Hook 
 | context / compact | `src/agent/context*.cpp`、`compact.cpp`、`microcompact.cpp` | `tests/test_context*.cpp`、`test_compact.cpp`、`test_microcompact.cpp` |
 | memory | `src/memory/project_memory.cpp`、`src/app/memory_extract.cpp` | `tests/unit/memory/test_project_memory.cpp`、`test_memory_retrieval.cpp` |
 | MCP | `src/mcp/client.cpp`、`transport.cpp`、`mcp_tool.cpp` | `tests/integration/protocols/test_mcp_client.cpp`、`test_mcp_tool.cpp` |
+| 排队与 durable ack | `src/cli/queue_model.cpp`、`src/app/interactive_session.cpp`、`src/sessions/session_store.cpp` | `tests/unit/agent/test_queue_model.cpp`、`tests/unit/sessions/test_session_store.cpp` |
+| Ctrl+O 转录重铺 | `src/cli/console_input.cpp`、`src/cli/tool_display.hpp`、`src/cli/transcript.cpp` | `tests/unit/cli/test_transcript.cpp`；toggle action 单测待补 |
+| Lua / DLL 插件 | `src/runtime/plugin_lua_host.cpp`、`src/tools/lua_tool.cpp`、`src/tools/plugin_loader.cpp` | `tests/integration/plugins/test_plugin_lua.cpp`、`test_plugins.cpp` |
 | Skill | `src/tools/skill_loader.cpp`、`skill_tool.cpp` | `tests/unit/config/test_skills.cpp` |
 | Hook | `src/hooks/dispatcher.cpp`、`protocol.cpp` | `tests/unit/hooks/test_hooks.cpp` |
 

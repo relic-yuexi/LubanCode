@@ -40,7 +40,8 @@ flowchart LR
 
 ## 🔍 十件真实难题总览
 
-下表都能在提交、源码或测试里对上。九件已修。排队消息仍在待办，不能说成已落地。
+下表都能在提交、源码或测试里对上。前九件已修。排队消息已补落盘、恢复与失败
+回队，durable ack 仍在待办；不能把“有快照”说成“交付原子”。
 
 | 难题 | 表面症状 | 真正根因 | 状态 |
 | --- | --- | --- | --- |
@@ -53,7 +54,7 @@ flowchart LR
 | 查看态退场花屏 | 后台任务结束后整屏空白，像是卡死 | console 与 app 各记一本擦屏账，先后擦了两遍 | 已修 |
 | 后台拒权没有告知 | 子代理烧了许多 token，最后才说写入失败 | 后台不能弹确认，却把系统拒绝说成“用户拒绝” | 已修 |
 | 插件重复挂载与 Lua 竞态 | `/plugins` 重复记账；后台同拍调用可能撞 state | 发现、资源所有权与 registry wrapper 混成一步 | 已修 |
-| 排队消息无声丢失 | 回合中排了一句话，失败或重启后不见了 | 取走即消费，队列又只活在内存 | 待修 |
+| 排队消息交付裂口 | 消息能落盘、能失败回队，却仍可能卡在“已取走、未成账”之间 | 活队列快照与目标 history 不是一笔原子提交 | 部分修，ack 待补 |
 
 ### AI 归因补记
 
@@ -281,33 +282,40 @@ Lua 走的是另一条险路。每个 registry 确有独立 `LuaTool`，可多�
 
 > wrapper 可以复制，底下资源未必能复制；资源可以共享，调用协议未必线程安全。装配代码须把定义、实例、所有权与展示账分开。
 
-## 📬 难题十：排队消息为何“发过”却没有留下任何账
+## 📬 难题十：排队消息有了账，为何仍不算可靠交付
 
-这件事截至当前仍在待办。面试时只能讲诊断与方案，不能说“已经修好”。
+旧现场已经补过一轮。面试时要把“已补的护栏”与“尚缺的 ack”分开讲。
 
-### 现场与四条丢失路
+### 旧现场
 
-`SessionSteeringQueue` 只活在内存。回合收尾时，主会话用 `TakeFirstDeliverable` 取走队头，拿它开下一轮。若那轮请求失败，消息已经出队，不会自动还回。
+早先 `SessionSteeringQueue` 只活在内存。回合收尾取走队头，拿它开下一轮。若那轮
+请求失败，消息已经出队；进程一退，session 也没有 queue 事件可恢复。
 
-另有三条路：
+### 眼下已经补了什么
 
-- 排队后进程崩了或退出，session 存档没有 queue 事件，resume 无从重建。
-- `/clear` 与退场会倒掉队列，只留一行短提示。
-- 目标子代理已结束，消息留成失败项，却不容易被用户看见。
+- 每条消息有稳定 id、目标、状态与 attempt 计数。
+- 队列变动会向 session JSONL 追加整表快照；`/resume` 可重建。
+- 自动发送失败会 `ReturnToFront()`；达到上限后留给用户处置，不死循环。
+- 清场与退场会报未送条数和首条预览；子代理消失会留 `TargetGone`，不暗投 main。
 
-### 候选修法
+### 还欠哪一刀
 
-- 取走不等于确认。先标 `inflight`，待用户消息确实入 history、回合拿到终态，再 ack。
-- 请求失败则回队首，带 attempt 计数，防止自动死循环。
-- session JSONL 增 queue 事件；resume 重建 pending 与 inflight。
-- 清场时列出未送达条数与首条预览。
-- 子代理目标消失时，允许改投 main 或手动重投。
+`TakeFirstAutoSendable()` 仍会把条目从活队列摘走；外层稍后才把它变成目标 user
+message。两步之间若倒下，最后一份 queue 快照可能已不含它，history 又尚未成账。
+反过来，目标已经收下，源 queue 的清账快照若没写成，恢复后又可能重送。
+
+下一版须把状态写成 `pending -> inflight -> acked`。`pending` 与 `inflight` 各先写稳
+再回显或投递；`acked` 的边界是目标耐久收下，不等模型跑完。主会话可用一条同时
+携带 `queue_id` 与 user message 的 `queue.accepted` 事件原子收账。子代理分两本账时，
+先写目标 receipt，再写源 ack；恢复靠 `queue_id + delivery_id` 对账补齐。
 
 ### 为什么不该仓促“自动重试”
 
 排队消息可能触发写文件、发请求或启动命令。宿主若不知道上一轮是否已产生副作用，盲重发会重复执行。恢复协议须先定义 durable state 与 ack 边界。
 
-当前代码在 `src/cli/queue_model.hpp`、`src/app/interactive_session.cpp`；已有内存队列测试在 `tests/unit/agent/test_queue_model.cpp`，耐久化与失败回队尚待补齐。
+当前代码在 `src/cli/queue_model.hpp`、`src/app/interactive_session.cpp` 与
+`src/sessions/session_store.cpp`；内存状态机、queue 事件回放与失败回队已有测试。三态
+receipt、崩溃点注入与 OS 级 flush 尚待补齐。
 
 ## 🧪 怎样把一次修复变成工程能力
 

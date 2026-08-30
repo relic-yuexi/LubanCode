@@ -384,6 +384,12 @@
 - **TurnPartitionPlan 纯函数**:按 L1 工作视图 token 平衡切 N 份(整数账不引浮点、并列取早界保确定性),边界只落 turn 之间;工具原子组按 tool_use_id 收齐永远整组在一枚 turn 内(orphan/悬空点名不静默)。旧存档剥离不算 turn 不占账。
 - **不调模型就能看账**:`/compact --dry-run` 出四份各有哪些 turn、各占多少 token、外置几枚 ToolResult、预计 map 几次;/context 加策略行。`compact_partition_count` 配置 2..8 可调,越界带文件路径报错。17-turn 冒烟:P1-P4 逐份列出,长 ToolResult 外置后工作视图 4120→1295 token。
 
+## [v0.26.131] - 2026-08-31
+
+- **自进化学会起草新工具了(阶段 6)。** 第三档判据:簇内 ≥2 场独立任务同求同一件不存在的工具名(registry.unknown_tool 实报为号),且全簇无人成功用过——才起草 process Plugin 草稿;单场偶发、撞现有工具名、无信号三种照旧 Skill-only,理由逐条给人话。草稿含 plugin.json(manifest v1+env 名+timeout)、脚手架 runner(协议铁律同 examples)、requirements 清单、逐项权限差异进演化账。
+- **四类安全夹具在静态门**:恶意脚本(rm -rf/下载器/反弹 shell,注释里出现也拦)、依赖投毒(git+/http://直链/--trusted-host)、路径逃逸(`..` 与 ${plugin_dir}/.. 全包扫)、网络越权(代码带网络原语而清单未许)——发现即 error,草稿降档回 Skill-only。零进程铁证:评测计划 acceptance 白名单钉死无 command、偷运进 dev 层信任账空着挂载事务压根不接手、六用例前后 python 进程数不变。
+- 契约从"code-bearing 候选明拒"改为"propose 产草稿永不启用,approve 仍拒自动晋升指路 /package trust 人工线"——安全账从"不生成"变为"生成即受四类扫描+零执行"。MCP 草稿判据已定未落,留下单。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。

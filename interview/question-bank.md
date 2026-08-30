@@ -454,6 +454,196 @@ UTF-8，`cmd.exe` 带 console/ACP code page，Hook 候选页用
 [`test_tools.cpp`](../tests/unit/tools/test_tools.cpp)、
 [`test_utf8_boundary.cpp`](../tests/unit/cli/test_utf8_boundary.cpp)。
 
+## E 组：现场白板
+
+这组不能只报类名。先画状态，再落崩溃点；先圈信任边界，再画 IPC；测试则要穿过
+生产控制流，不能只验最底下一只格式化函数。
+
+### 1. 把排队消息改成 durable ack 协议，三态怎样走？
+
+**先答：** 现版已经有稳定 `queue_id`、session queue 快照、失败回队和 attempt
+上限。它能扛一部分失败，却还不是 durable ack。`TakeFirstAutoSendable()` 仍会先把
+条目移出活队列，再靠外层失败分支 `ReturnToFront()` 补救；queue 快照与目标 history
+也不是一笔原子提交。
+
+白板先画这张图：
+
+```text
+             claim + durable write        accept + durable receipt
+    pending ----------------------> inflight ----------------------> acked
+       ^                              |
+       | lease 到期，且目标无 receipt   |
+       +------------------------------+
+```
+
+三态各管一件事：
+
+| 状态 | 含义 | 何时落盘 |
+| --- | --- | --- |
+| `pending` | 宿主已经收下，尚未交给目标 | 先追加 `queue.enqueued`，再 `fsync` / `FlushFileBuffers`；写稳后才在屏上说“已排队” |
+| `inflight` | 某个 dispatcher 已认领，目标尚未留下耐久收据 | 追加 `queue.claimed{delivery_id, owner, lease_until, attempt}` 并写稳，而后才投递 |
+| `acked` | 目标已把这条输入纳入自己的耐久账 | 目标写 `queue.accepted{queue_id, delivery_id, message}`；这同一条记录既是 user message，也是 receipt |
+
+`acked` 只表示“目标耐久收下”，不表示“模型答完”，更不表示“工具副作用成功”。这条
+边界要早定。若一直等到回合终态才 ack，模型已经跑过命令、进程却在收尾前倒下，恢复
+时再把原输入重排一遍，反而会重做副作用。
+
+主会话最好只留一本 append-only journal。`queue.accepted` 事件里直接嵌 user message；
+回放这同一行时，一边把消息放进 history，一边把 queue 折成 `acked`。这样没有“消息
+已入 history，ack 还没写”的双写裂口。子代理若另有任务账，做不到跨文件原子提交，
+便按这条次序走：
+
+```text
+先写目标 inbox receipt -> 再写源队列 ack
+```
+
+两边都带 `queue_id + delivery_id + payload_hash`。若进程倒在两写之间，恢复器先扫目标
+receipt，再替源队列补 ack。次序不能倒。先写源 ack，后写目标 inbox，中间一倒就会
+永久丢消息。
+
+白板上要把裂口逐条圈出来：
+
+1. `enqueue` 尚未写稳便崩：宿主没有收下，界面不得先报成功。
+2. `enqueue` 已写稳，回显前崩：消息还在；客户端重提时靠稳定 `queue_id` 去重。
+3. `claimed` 已写稳，尚未投递便崩：lease 到期后回 `pending`。
+4. 已递进目标内存，receipt 尚未写便崩：仍按未送达处理。故目标必须先记收据，再让模型或工具看见。
+5. 目标 receipt 已写，源 ack 尚未写便崩：按 `queue_id` 对账，补成 `acked`，不可重投。
+6. ack 后，模型请求途中崩：队列不回滚。用户输入已经成账；恢复时报告这轮未完成，让用户续跑。
+7. journal 尾行只写了一半：带长度或 checksum，回放只认完整前缀；坏尾截掉，不能猜半条状态。
+
+多 dispatcher 还要一枚 lease。`owner_generation` 防旧进程复活后交迟到结果；
+`delivery_id` 防同一 queue item 两次认领混账。`acked` 事件可长期留在 journal，活队列
+只展示 `pending/inflight`。这给的是 at-least-once transport 加 idempotent accept，
+不是凭空许诺 exactly-once 副作用。
+
+现版 `SessionStore::AppendQueueEvent()` 只是 `ostream.flush()` 后的整表快照。若口径要
+扛断电，还须补 OS 级 flush；只扛进程崩溃与扛掉电，不能混叫。
+
+证据：[`queue_model.hpp`](../src/cli/queue_model.hpp)、
+[`interactive_session.cpp`](../src/app/interactive_session.cpp)、
+[`session_store.cpp`](../src/sessions/session_store.cpp)、
+[`test_queue_model.cpp`](../tests/unit/agent/test_queue_model.cpp)。
+
+### 2. Lua / DLL 插件怎样搬到进程外？文件权限怎样传？
+
+**先答：** 当前边界先说准。Lua 与 DLL 都在 LubanCode 进程里。Lua 有内存、指令预算，
+pure 画像会收掉 `io`、`os.execute`、`package.loadlib`；manifest v2 的网络又走受控 HTTP。
+这些能减攻击面，却不是 OS 沙箱。DLL 一进 `LoadLibrary`，`DllMain` 已拿到宿主权限；
+访问越界也会拖倒主程序。
+
+我要另起 `lubancode-plugin-host`。一件不可信插件占一只 host，不跟别的插件合住。核心
+进程不加载 DLL，也不建 Lua state。host 在受限进程里加载插件，崩了只折这一件工具：
+
+```text
+AgentLoop / ToolRegistry
+          |
+          | invoke / cancel / result
+          v
+   PluginBroker (可信，主进程)
+          |
+          | 长度前缀帧：JSON 或 CBOR
+          v
+ lubancode-plugin-host (受限进程)
+          |
+          +-- Lua VM
+          `-- LoadLibrary / dlopen
+
+插件若要文件、网络、Secret：
+host -- broker request --> PluginBroker -- policy + user grant --> 代办 I/O
+```
+
+现有 process plugin 是“一次调用起一只进程，stdin/stdout 各一份 JSON”。新 host 若要
+保 Lua state 与 DLL 静态状态，须用长命协议；可借它的请求/响应形状，不该硬拿
+newline 当长期分帧。stdout 混一行日志就会拆坏协议。我的帧头至少有
+`magic/version/length/type/request_id`，正文设字节帽；stderr 单走日志管道。起服先做
+`hello`，核对协议版本、插件 id、内容哈希与随机 nonce。每次调用带 deadline、取消 id
+和 host generation。host 崩溃后，本批调用全收成 `plugin_host_crashed`；有副作用的调用
+不自动重放。
+
+文件权限不传一只 `allowed=true`，也不把工作区路径和宿主 token 整包塞给插件。分三步：
+
+1. manifest 声明上限，如 `fs.read:${workspace}/docs/**`、`fs.write:${workspace}/out/**`。
+2. 调用时求交集：`声明权限 ∩ 工具策略 ∩ 本场确认 ∩ 当前 worktree`。
+3. broker 发短命 capability：绑定 `plugin_hash + invocation_id + op + canonical_root +
+   expiry + max_bytes`。host 只拿一枚不透明 `grant_id`。
+
+插件读文件时发：
+
+```json
+{
+  "type": "broker.fs_read",
+  "request_id": 17,
+  "grant_id": "g-...",
+  "relative_path": "docs/plan.md",
+  "offset": 0,
+  "limit": 65536
+}
+```
+
+主进程逐次验 grant，拼规范路径，拦 `..`、绝对路径、设备名与 reparse/symlink 逃逸。
+随后由 broker 自己开文件，再把字节或一只受限流句柄送回。不能先校验字符串，再让
+插件自己 `open(path)`；两步之间可换 symlink，且恶意 DLL 压根儿能绕过这条 API。大文件
+走 opaque handle 分块读，handle 同样绑 invocation。写文件则由 broker 落临时文件、
+算 diff、走确认，再原子替换。
+
+这套 capability 只有配上 OS 拒权才算数。Windows 侧用 restricted token 或 AppContainer，
+再套 Job Object：不继承宿主句柄，空环境，单独临时目录，默认无工作区与网络权限，
+限制进程数、内存、CPU 和墙钟。Linux 侧用 user/mount/network namespace、只读根、
+`no_new_privs`、seccomp 与 rlimit。若宿主进程本身还能随手读工作区，broker 协议只是
+君子协定，不是沙箱。
+
+Secret 也照同一规矩：插件只声明名字，核心按调用解析，最好代签 HTTP 或传短命凭据，
+不把整份环境变量继承过去。每次 broker I/O 都落审计：谁、哪次调用、哪枚 grant、
+哪条规范路径、多少字节、结果怎样。插件 host 的确认只能收窄能力，不能自行扩权。
+
+证据：[`plugin_process.cpp`](../src/runtime/plugin_process.cpp)、
+[`plugin_lua_host.cpp`](../src/runtime/plugin_lua_host.cpp)、
+[`lua_tool.cpp`](../src/tools/lua_tool.cpp)、[`plugin_loader.cpp`](../src/tools/plugin_loader.cpp)、
+[`plugin-runtime.md`](../docs/architecture/extensions/plugin-runtime.md)。进程外 host 与文件
+broker 是设计稿，现版尚未实现。
+
+### 3. 不碰真终端，怎样证明 `Ctrl+O` 会补画历史工具？
+
+**先答：** 不能只测 `FormatTranscriptItems(items, expanded=true)`。现有测试已经证明
+formatter 会铺子工具；旧 bug 坏在上游：Ctrl+O 只翻 atomic、打一行“详细模式”，
+没有把历史快照交给 formatter。测试若绕过按键 action，旧实现照样全绿。
+
+我会把 Ctrl+O 分支抽成一只不认 Win32 的 `HandleTranscriptToggle`。它只依赖四个口：
+
+```text
+ExpandedState   读写紧凑/详细
+SnapshotSource  取当前不可变 transcript snapshot
+RenderSink      记 clear / forget-anchor / write / redraw-footer
+WidthSource     本测固定返回 80
+```
+
+真终端 adapter 仍负责把 `KeyInput::CtrlO` 翻成这枚 action。单测直接调同一 action，用
+`FakeRenderSink` 收命令，不造控制台，也不比 ANSI 光标串。
+
+故障形状要这样摆：
+
+1. 初始为紧凑档。
+2. 依次送 `agent start -> subtool read_file start -> subtool done -> agent done`。子工具须在
+   按 Ctrl+O **之前**已经结束，参数放 `{"path":"old.txt"}`，结果放 `OLD_RESULT`。
+3. 先断言紧凑投影没有 `old.txt` 与 `OLD_RESULT`。
+4. 调生产同款 `HandleTranscriptToggle(CtrlO)`。
+5. 断言 action 把状态翻成 expanded，只取一次快照，并按
+   `clear footer -> forget anchors -> write snapshot -> redraw footer` 排序。
+6. 断言最终语义帧等于 `FormatTranscriptItems(snapshot, expanded=true)`；历史 `read_file`、
+   参数与结果各出现一次，不能只有“详细模式”。
+7. 再切回紧凑、再展开，结果须幂等；其间添一枚新工具，下一次展开须同时含新旧两枚，
+   顺序不变。
+
+这条测试在旧代码上会红：若 `expand_renderer_` 没接，或 snapshot 没在工具落定时更新，
+输出里只剩模式行，`OLD_RESULT` 找不到。它还不验证 ConHost 的滚屏与残影；那层仍归
+真终端驱动。这里专钉业务合同：“一次 Ctrl+O action 必须拿当前历史快照重铺”。
+
+落点可放 `tests/unit/cli/test_transcript_toggle.cpp`。现有
+[`test_transcript.cpp`](../tests/unit/cli/test_transcript.cpp) 留作纯投影测试；新测试穿过
+[`console_input.cpp`](../src/cli/console_input.cpp) 抽出的 action 与
+[`tool_display.hpp`](../src/cli/tool_display.hpp) 的快照源。这比真实终端更稳，也比只测
+formatter 更接近那次病根；目前仍是待补测试设计，不能说已经进 CTest。
+
 ## 🧠 模型、Provider 与 Schema
 
 | 追问 | 先答哪句 | 他在验什么 |
@@ -691,7 +881,7 @@ UTF-8，`cmd.exe` 带 console/ACP code page，Hook 候选页用
 | 遇过资源泄漏或退出挂死吗 | 后台请求永挂加无界 join，须给请求与退出各设边界 | 生命周期治理 |
 | 怎样设计故障回归 | 不测抽象“超时”；真起装死 socket，不回响应头 | 测试质量 |
 | 修完 bug 还要做什么 | 补 fixture、注释、错误文案、排障文档与回归 | 工程闭环 |
-| 现在还有什么已知问题 | 排队消息尚无 durable ack，失败与重启可能丢 | 边界诚实 |
+| 现在还有什么已知问题 | 排队已有快照与失败回队，尚无 durable receipt，双写裂口仍在 | 边界诚实 |
 | 若重做一次先改什么 | 先把 queue 变成 pending/inflight/acked 的耐久协议 | 优先级判断 |
 
 深读：[开发难题与故障复盘](retrospectives/development-challenges.md)。每件事都照“现场 → 误判 → 根因 → 修法 → 验收”拆开。
