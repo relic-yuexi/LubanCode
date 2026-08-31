@@ -27,6 +27,12 @@
 //   download/event {...下载账单条}
 //   journal/console {pageId,entries:[...],dropped,lastSeq}   批量,溢出丢老明记
 //   journal/network {pageId,entries:[...],dropped,lastSeq}
+//   screencast/frame {pageId,frameSeq,format,sha256,dataBase64}  镜像流单帧
+//     (阶段 C):帧率帽在 session.js 里按墙钟节流(默认 5fps,browser/
+//     screencast/start 的 fps 参数可调);host 侧再兜一层有界队列,落盘
+//     跟不上就丢最老帧、dropped 计账(见 app_server/browser_service.cpp
+//     的 HandleScreencastFrame)。字节走同一条截图 artifact 链,协议上
+//     只有引用。
 //
 // journal 批量规矩:session 每递一条 console/network entry,先攒进该页的
 // pending 账;40ms 一冲(或攒满 kJournalBatchCap 即冲)。冲出去的批次再排
@@ -347,6 +353,17 @@ const methods = {
     limit: params.limit,
   }),
   'downloads/query': () => session.listDownloads(),
+  // 镜像流(多前端外壳单阶段 C):起停走请求/响应(快,不排进 journal 那
+  // 套批量);帧本身走 emitEvent('screencast/frame', ...) 直发,不经这张
+  // 方法表——见 session.js 的 cdp.on('Page.screencastFrame', ...)。
+  'screencast/start': (params) => session.startScreencast(params.pageId || null, {
+    fps: params.fps,
+    format: params.format,
+    quality: params.quality,
+    maxWidth: params.maxWidth,
+    maxHeight: params.maxHeight,
+  }),
+  'screencast/stop': (params) => session.stopScreencast(params.pageId || null, {}),
 };
 
 // ---------------------------------------------------------------------------

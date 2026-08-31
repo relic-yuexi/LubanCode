@@ -56,6 +56,7 @@ lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
 | `1.1` | 浏览器调试工作台阶段 3:additive 新增 `browser/*` 方法 18 枚与 `browser/*` 事件 13 族(见下两节)。老方法老事件形状一字未动。 |
 | `1.1`(承载注) | WS 传输层(2026-08 起):同一条报文线的第二副面孔,报文形状零改动,不 bump 版本。连接级握手(`initialize`)每条连接各来一遍;首帧鉴权消息 `app_server/auth` 只在 WS 且配了 token 时出现,不算协议方法面。 |
 | `1.1`(阶段 B 注) | 用户输入路由与暂停(2026-08 起,additive):新增 `browser/pause`/`browser/resume` 方法与 `browser/paused`/`browser/resumed` 事件;`browser/status` 的 result 增可选布尔 `paused`;`browser/action/completed` 增稳定错误码 `browser.paused`。**owner 仲裁升级**:`owner` 由内核按连接与鉴权裁定(见《owner 仲裁》),外壳报的只是意向;`owner` 缺省值从写死 `user` 改为连接的裁定身份。老报文形状零改动。 |
+| `1.1`(阶段 C 注) | 镜像流(2026-08 起,additive):新增 `browser/screencast/start`/`browser/screencast/stop` 方法与 `browser/screencast/frame` 事件。只读、不问审批(与 `snapshot`/`screenshot` 同档);帧字节走同一条截图 artifact 链落盘,协议上只有引用与 `pageId`,绝不出现 base64。老报文形状零改动。 |
 
 ## 方法面
 
@@ -121,6 +122,8 @@ C++ 这层是协议转发层:真 Runtime 在 Node sidecar(`browser/sidecar.js`,�
 | `browser/downloads/query` | 同步 | 无 | 下载账(id/state/filename/mime/bytes/sha256/path)。 |
 | `browser/pause` | 同步 | 无 | 拨暂停旗(1.1 阶段 B 注起)。暂停期间 `owner=agent` 的动作一律**受理不执行**,终态 `error.code=browser.paused`;用户动作照走;终态事件照发。回 `{paused:true}`,另发 `browser/paused` 事件(must_keep)。手闸只归用户连接。 |
 | `browser/resume` | 同步 | 无 | 落暂停旗。回 `{paused:false}`,另发 `browser/resumed` 事件。 |
+| `browser/screencast/start` | 异步 | `pageId?, fps?`(1-30,缺省 5)、`format?`(jpeg\|png,缺省 jpeg)、`quality?`(1-100)、`maxWidth?/maxHeight?` | 起镜像流(1.1 阶段 C 注起)。只有 chromium 引擎支持(靠 CDP `Page.startScreencast`),webkit 报 `browser.screencast_unsupported`。帧率帽在 sidecar 侧按墙钟节流,不是 CDP 的跳帧参数。只读,不问审批。 |
+| `browser/screencast/stop` | 异步 | `pageId?` | 停镜像流。没在跑报 `browser.screencast_not_running`。页面关闭/崩溃时 sidecar 自动收尾,不必显式 stop。 |
 
 **owner 仲裁**(1.1 阶段 B 注起,内核说了算):写动作(`page/*` 导航族、`page/select`、`page/close`、`action`)可带 `owner`("agent"|"user"),但 **`owner` 由内核按连接与鉴权裁定,外壳报什么不算数**——stdio 宿主与过门的 WS 连接(回环免鉴权或 token)裁定为操作者本人(`user`),内核内部的 agent 发放路(回合驱动的浏览器工具,与多客户端阶段的 agent 连接)裁定为 `agent`。规则:
 
@@ -129,7 +132,7 @@ C++ 这层是协议转发层:真 Runtime 在 Node sidecar(`browser/sidecar.js`,�
 - `owner=user`(用户路):不带 `threadId`(带了也被内核摘掉——用户不是 Agent)、不问审批、**不排队**——排队时先挑用户动作,Agent 动作让路(在途的那只让不了:一份浏览器状态一位主人,动作串行是底线);输入动作(click/type/select)执行成功后 sidecar 递 `userEpoch` 并发 `browser/user_epoch` 事件,Agent 拿旧 snapshot 的 ref 再动作即报 `browser.stale_ref`(仲裁第 4 条原样复用)。
 - `owner=agent`:须带 `threadId`,先过 `permission/request` 审批(`acceptForSession` 按方法名记会话级放行账),decline/cancel/超时/打断按拒绝收口;暂停期间按 `browser.paused` 收口(不问审批)。
 
-browser 错误走 `error.data.reason` 带稳定串(`browser.not_configured`/`browser.sidecar_spawn_failed`/`browser.sidecar_dead`/`browser.sidecar_timeout`/`browser.session_running`/`browser.permission_denied`/`browser.approval_cancelled`/`browser.artifact_unavailable`/`browser.thread_required`/`browser.stale_action`/`browser.owner_denied` 等;`browser.paused` 是暂停期间 agent 动作的**终态**错误码,走 `browser/action/completed` 的 `error.code`),sidecar 侧的浏览器码(`browser.stale_ref`、`browser.unknown_page`、`browser.page_closed`、`browser.timeout` 等)原样透传。
+browser 错误走 `error.data.reason` 带稳定串(`browser.not_configured`/`browser.sidecar_spawn_failed`/`browser.sidecar_dead`/`browser.sidecar_timeout`/`browser.session_running`/`browser.permission_denied`/`browser.approval_cancelled`/`browser.artifact_unavailable`/`browser.thread_required`/`browser.stale_action`/`browser.owner_denied` 等;`browser.paused` 是暂停期间 agent 动作的**终态**错误码,走 `browser/action/completed` 的 `error.code`),sidecar 侧的浏览器码(`browser.stale_ref`、`browser.unknown_page`、`browser.page_closed`、`browser.timeout`、`browser.screencast_unsupported`、`browser.screencast_running`、`browser.screencast_not_running`、`browser.screencast_start_failed` 等)原样透传。
 
 ## 事件账
 
@@ -165,8 +168,11 @@ browser 错误走 `error.data.reason` 带稳定串(`browser.not_configured`/`bro
 | `browser/action/completed` | 动作终态:`actionId, method, owner, ok, result?\|error?{code,message}, cancelled?, durationMs`。must_keep。暂停期间 agent 动作的终态是 `ok=false, error.code=browser.paused`。 |
 | `browser/user_epoch` | `pageId, userEpoch`——用户动了页面(手点/按键,或经协议注入的 `owner=user` 输入动作),观察代递增,旧 ref 按仲裁规矩报 stale。 |
 | `browser/paused` / `browser/resumed` | 暂停旗拨动:`paused`。must_keep(1.1 阶段 B 注起)。 |
+| `browser/screencast/frame` | 镜像流单帧(1.1 阶段 C 注起):`pageId, frameSeq, width, height, dropped, artifact`。**只发 artifact 引用**(与截图同形,不递 base64)。可丢——`dropped` 是这一帧之前、这一页因队满丢了几帧,报完清零。 |
 
 **高频事件的有界规矩**(console/network):sidecar 源头批量(单批帽 200 条、40ms 一冲;在飞批数帽 64,撞帽丢最老整批并计数),App Server 出站队列再兜一层有界(撞满先合并同页批量——entries 拼接、dropped 求和——再丢可丢事件并补 `queue/overflow` 通报)。丢了不要紧:`browser/console/query` / `browser/network/query` 凭 `sinceSeq` 补账,`dropped` 明说丢过多少,不冒充全账。
+
+**镜像流的有界规矩**(1.1 阶段 C 注起):帧率帽在 sidecar 侧按墙钟节流(`browser/screencast/start` 的 `fps`,缺省 5,夹 [1,30])——节流丢的帧不计 `dropped`(设计内,不是消费者跟不上)。帧到达后落 artifact 这一步可能比帧到达慢(磁盘、host 读得慢),App Server 侧另开一条有界队列(缺省容量 8)+ 专职工作线程消化;队满丢队首最老那帧,按其 `pageId` 记账,下一帧成功报出时把这页累计的 `dropped` 带上再清零——不阻塞 sidecar 的事件读线程,也不会无限攒内存。`browser/screencast/frame` 不是 must_keep:丢了不必补账,前端要的是"现在",不是补全过去的每一帧。
 
 条目类型(`item.type`):`text`、`thinking`、`tool`、`command`、`file_change`(留位)、`question`(留位)、`agent`(留位)、`error`。
 

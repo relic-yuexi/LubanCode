@@ -232,6 +232,14 @@ ParamsCheck CheckBrowserActionParams(const nlohmann::json& params, std::string& 
 // browser/action/cancel:actionId 必填。
 ParamsCheck CheckBrowserActionCancelParams(const nlohmann::json& params, std::string& out_action_id);
 
+// browser/screencast/start(阶段 C):全可选。pageId(字符串,缺省活动
+// 页);fps(正整数,sidecar 再夹 [1,30]);format(jpeg|png);quality(正
+// 整数,sidecar 再夹 [1,100]);maxWidth/maxHeight(正整数)。
+ParamsCheck CheckBrowserScreencastStartParams(const nlohmann::json& params);
+
+// browser/screencast/stop:pageId 可选(缺省活动页)。
+ParamsCheck CheckBrowserScreencastStopParams(const nlohmann::json& params);
+
 // ---------------------------------------------------------------------------
 // 出站事件参数的拼装助手(一处拼、处处用,字段名冻结前不许散着抄)
 // ---------------------------------------------------------------------------

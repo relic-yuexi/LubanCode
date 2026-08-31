@@ -173,7 +173,9 @@ struct BrowserHarness {
     std::unique_ptr<app_server::Server> server;
     std::string artifact_dir;
 
-    BrowserHarness() {
+    // screencast_queue_capacity:0 = 用 BrowserService 缺省(8);测试想逼出
+    // "慢消费者丢帧"时传个小数,确定性地撞满。
+    explicit BrowserHarness(int screencast_queue_capacity = 0) {
         // 截图 artifact 落临时目录(测试自己收尾)。
         const std::filesystem::path temp = std::filesystem::temp_directory_path() /
                                            ("lubancode-browser-test-" +
@@ -186,6 +188,7 @@ struct BrowserHarness {
         options.cwd = "/test/cwd";
         options.browser_sidecar_command = "node"; // 有命令才会走 EnsureSidecar 的成功路(测试注入 transport 后不 spawn)
         options.browser_artifact_dir = artifact_dir;
+        options.browser_screencast_queue_capacity = screencast_queue_capacity;
         server = std::make_unique<app_server::Server>(
             std::move(options), []() -> std::unique_ptr<api::Backend> { return nullptr; }, nullptr);
         server->browser_service().AttachTransportForTest(&sidecar);
@@ -1070,6 +1073,208 @@ TEST_CASE("outbox:撞满时同页 journal 批并成一条,dropped 求和") {
     other["params"]["pageId"] = "p2";
     CHECK_FALSE(outbox.Push(app_server::SerializeMessage(other)));
     CHECK(outbox.dropped() == 1);
+}
+
+// ---------------------------------------------------------------------------
+// 镜像流(多前端外壳单阶段 C)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("镜像流:协议方法进能力表,frame 事件可丢") {
+    BrowserHarness harness;
+    const std::optional<nlohmann::json> init = harness.FindResponse(1);
+    REQUIRE(init.has_value());
+    const nlohmann::json& methods = (*init)["result"]["capabilities"]["methods"];
+    bool has_start = false;
+    bool has_stop = false;
+    for (const auto& m : methods) {
+        if (m == "browser/screencast/start") has_start = true;
+        if (m == "browser/screencast/stop") has_stop = true;
+    }
+    CHECK(has_start);
+    CHECK(has_stop);
+    // 帧不是必保事件:队满就该丢,前端要"现在"不要补全历史。
+    CHECK_FALSE(app_server::EventMustKeep("browser/screencast/frame"));
+}
+
+TEST_CASE("镜像流:start/stop 走异步动作管线,只读不问审批") {
+    BrowserHarness harness;
+    harness.sidecar.SetHandler("screencast/start", [](const nlohmann::json&) {
+        return nlohmann::json{{"pageId", "p1"}, {"fps", 5}, {"format", "jpeg"}, {"quality", 80},
+                              {"maxWidth", 1280}, {"maxHeight", 720}};
+    });
+    harness.sidecar.SetHandler("screencast/stop", [](const nlohmann::json&) {
+        return nlohmann::json{{"pageId", "p1"}, {"stopped", true}};
+    });
+
+    // owner=agent、没带 threadId:MethodNeedsApproval 没收录 screencast,
+    // 不问审批也不要求 threadId(与 snapshot/screenshot 同档)。
+    harness.Feed(R"({"id":70,"method":"browser/screencast/start","params":{"pageId":"p1","fps":5,"owner":"agent"}})",
+                "agent");
+    const auto accepted = harness.FindResponse(70);
+    REQUIRE(accepted.has_value());
+    REQUIRE(accepted->contains("result"));
+    const std::string action_id = (*accepted)["result"]["actionId"];
+    const auto completed = harness.WaitForActionCompleted(action_id);
+    REQUIRE(completed.has_value());
+    CHECK((*completed)["params"]["ok"] == true);
+    // sidecar 收到的方法名折算:browser/screencast/start -> screencast/start。
+    bool saw_start_request = false;
+    for (const nlohmann::json& request : harness.sidecar.TakeRequests()) {
+        if (request.value("method", std::string()) == "screencast/start") {
+            saw_start_request = true;
+            CHECK(request["params"]["pageId"] == "p1");
+            CHECK(request["params"]["fps"] == 5);
+        }
+    }
+    CHECK(saw_start_request);
+    // 没有 permission/request 反向请求:只读不问审批。
+    CHECK_FALSE(harness.FindEvent("permission/request").has_value());
+
+    harness.Feed(R"({"id":71,"method":"browser/screencast/stop","params":{"pageId":"p1"}})");
+    const auto stop_accepted = harness.FindResponse(71);
+    REQUIRE(stop_accepted.has_value());
+    const std::string stop_action_id = (*stop_accepted)["result"]["actionId"];
+    const auto stop_completed = harness.WaitForActionCompleted(stop_action_id);
+    REQUIRE(stop_completed.has_value());
+    CHECK((*stop_completed)["params"]["ok"] == true);
+}
+
+TEST_CASE("镜像流:sidecar 报不支持时折成 completed 错误") {
+    BrowserHarness harness;
+    harness.sidecar.SetHandler("screencast/start", [](const nlohmann::json&) {
+        return nlohmann::json{{"__error__", "browser.screencast_unsupported"},
+                              {"__message__", "screencast 只有 chromium 引擎支持"}};
+    });
+    harness.Feed(R"({"id":72,"method":"browser/screencast/start","params":{}})");
+    const auto accepted = harness.FindResponse(72);
+    REQUIRE(accepted.has_value());
+    const std::string action_id = (*accepted)["result"]["actionId"];
+    const auto completed = harness.WaitForActionCompleted(action_id);
+    REQUIRE(completed.has_value());
+    CHECK((*completed)["params"]["ok"] == false);
+    CHECK((*completed)["params"]["error"]["code"] == "browser.screencast_unsupported");
+}
+
+TEST_CASE("镜像流:帧只发 artifact 引用,同截图链落盘") {
+    BrowserHarness harness;
+    const std::string expected_sha = [&] {
+        const auto decoded = agent::DecodeBase64Strict(kTinyPngBase64, 1024);
+        REQUIRE(decoded.has_value());
+        return hooks::Sha256Hex(*decoded);
+    }();
+    harness.sidecar.PushEvent(nlohmann::json{{"type", "screencast/frame"},
+                                             {"pageId", "p1"},
+                                             {"frameSeq", 1},
+                                             {"format", "png"},
+                                             {"sha256", expected_sha},
+                                             {"dataBase64", kTinyPngBase64}});
+    const auto frame = harness.WaitForEvent("browser/screencast/frame");
+    REQUIRE(frame.has_value());
+    const nlohmann::json& params = (*frame)["params"];
+    CHECK(params["pageId"] == "p1");
+    CHECK(params["frameSeq"] == 1);
+    CHECK(params["width"] == 1);
+    CHECK(params["height"] == 1);
+    CHECK(params["dropped"] == 0);
+    CHECK(params["artifact"]["stored"] == true);
+    CHECK(params["artifact"]["sha256"] == expected_sha);
+    const std::string path = params["artifact"]["path"];
+    CHECK(path.find("art-") != std::string::npos);
+    CHECK(std::filesystem::exists(platform::Utf8ToPath(path)));
+
+    // 出站行没有 base64 正文(与截图链同一条纪律)。
+    harness.PumpOutbox();
+    for (const std::string& line : harness.io.written) {
+        CHECK(line.find("dataBase64") == std::string::npos);
+        CHECK(line.find(kTinyPngBase64) == std::string::npos);
+    }
+}
+
+TEST_CASE("镜像流:sha256 对不上就丢帧,不落盘不冒充可取") {
+    BrowserHarness harness;
+    harness.sidecar.PushEvent(nlohmann::json{{"type", "screencast/frame"},
+                                             {"pageId", "p1"},
+                                             {"frameSeq", 1},
+                                             {"format", "png"},
+                                             {"sha256", "not-the-real-sha"},
+                                             {"dataBase64", kTinyPngBase64}});
+    // 坏账悄悄吞掉(诊断到 stderr),协议上没有这条帧——短超时够了,
+    // 事件从来不会来。
+    CHECK_FALSE(harness.WaitForEvent("browser/screencast/frame", 300).has_value());
+    CHECK(harness.server->browser_service().screencast_queue_depth() == 0);
+}
+
+TEST_CASE("镜像流:慢消费者——队满丢最老帧,dropped 计账,不炸内存不断连") {
+    // 容量夹到 1:任意两帧背靠背推进来,若工作线程没抢到时间片落掉
+    // 第一帧,第二帧推入时前一帧就被淘汰——逼真实机器上也能稳定复现。
+    BrowserHarness harness(/*screencast_queue_capacity=*/1);
+    harness.sidecar.SetHandler("screencast/stop", [](const nlohmann::json&) {
+        return nlohmann::json{{"pageId", "p1"}, {"stopped", true}};
+    });
+
+    // 连推一大批帧(同页):Push 只挪指针不落盘,比工作线程"解码+算
+    // sha256+写文件+拼 JSON+Emit"这一整套快得多,容量=1 时几乎必然
+    // 撞满淘汰。不给 sha256(不比对),减少每次推送的计算,把"生产远快
+    // 于消费"的比例拉得更悬殊。
+    constexpr int kFrameCount = 400;
+    for (int i = 0; i < kFrameCount; ++i) {
+        harness.sidecar.PushEvent(nlohmann::json{{"type", "screencast/frame"},
+                                                 {"pageId", "p1"},
+                                                 {"frameSeq", i + 1},
+                                                 {"format", "png"},
+                                                 {"dataBase64", kTinyPngBase64}});
+        // 队列任何时刻都不许超过容量——这是设计不变式,不是"多数情况下"。
+        CHECK(harness.server->browser_service().screencast_queue_depth() <= 1);
+    }
+    CHECK(harness.server->browser_service().screencast_dropped_total_for_test("p1") > 0);
+
+    // 工作线程仍在活着干活:等得到至少一条落盘完的帧,证明没有死锁、
+    // 没有崩溃,队列这条流还通着。第一条报出的帧不一定 dropped>0(它
+    // 可能是工作线程抢在淘汰前就捞走的头一帧,那时账还是 0,如实);
+    // 真正的断言是"账进了协议"——多条 frame 事件的 dropped 求和必须
+    // 等于淘汰总数(内部账与协议账对得上,谁也没把丢的账吞了)。
+    const auto frame = harness.WaitForEvent("browser/screencast/frame", 5000);
+    REQUIRE(frame.has_value());
+
+    // 队列排空后应当回落到 0(不是"泄漏式"越攒越多);且协议账要追平
+    // 内部账——每条 browser/screencast/frame 的 dropped 是"报完清零"的,
+    // 全部加起来该等于这一页的累计丢帧数,一条不许被吞。队空 ≠ 最后
+    // 一帧已经落盘发完事件(worker 弹出队尾之后还要解码/写盘/Emit),
+    // 故这里直接轮询"账追平"这个终态,不靠队深度这个中间信号。
+    std::uint64_t reported_dropped_sum = 0;
+    int frame_event_count = 0;
+    bool settled = false;
+    for (int i = 0; i < 400 && !settled; ++i) {
+        harness.PumpOutbox();
+        reported_dropped_sum = 0;
+        frame_event_count = 0;
+        for (const std::string& line : harness.io.written) {
+            const nlohmann::json parsed = nlohmann::json::parse(line);
+            if (parsed.value("method", std::string()) == "browser/screencast/frame" &&
+                parsed["params"].value("pageId", std::string()) == "p1") {
+                ++frame_event_count;
+                reported_dropped_sum += parsed["params"].value("dropped", std::uint64_t{0});
+            }
+        }
+        if (harness.server->browser_service().screencast_queue_depth() == 0 &&
+            reported_dropped_sum == harness.server->browser_service().screencast_dropped_total_for_test("p1")) {
+            settled = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(5));
+    }
+    CHECK(settled);
+    CHECK(frame_event_count > 0);
+    CHECK(reported_dropped_sum == harness.server->browser_service().screencast_dropped_total_for_test("p1"));
+
+    // 服务没断:烧穿一大批帧之后,普通异步动作照样能受理、能收口。
+    harness.Feed(R"({"id":80,"method":"browser/screencast/stop","params":{"pageId":"p1"}})");
+    const auto stop_accepted = harness.FindResponse(80);
+    REQUIRE(stop_accepted.has_value());
+    const std::string stop_action_id = (*stop_accepted)["result"]["actionId"];
+    const auto stop_completed = harness.WaitForActionCompleted(stop_action_id);
+    REQUIRE(stop_completed.has_value());
+    CHECK((*stop_completed)["params"]["ok"] == true);
 }
 
 // ---------------------------------------------------------------------------

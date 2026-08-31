@@ -18,6 +18,12 @@
 //      记会话级放行账;
 //   5. 截图 artifact:sidecar 回的字节只在内部通道走,这边落
 //      artifact(内容寻址)后只发引用,协议上绝不出现 base64;
+//   5.5 镜像流(多前端外壳单阶段 C):sidecar 用 CDP screencast 把帧率帽
+//      后的帧以 dataBase64 事件推过来(与截图同一条 artifact 落盘规矩)。
+//      落盘这一步可能比帧到达慢(磁盘、host 读得慢),故另开一条有界
+//      队列 + 专职工作线程——排不下就丢队里最老那帧,按它的 pageId 记
+//      dropped,下一帧报完清零(与 sidecar 侧 journal 批量的"丢老明记"
+//      同一个规矩,只是这层的"消费者"是 artifact 落盘而非 stdout 管道);
 //   6. 用户输入路由与暂停(多前端外壳单阶段 B):owner 由内核按连接
 //      裁定(DispatchContext::principal,外壳报什么不算数——非用户
 //      连接假冒 owner=user 一律 browser.owner_denied 明拒);用户动作
@@ -89,6 +95,10 @@ struct BrowserServiceOptions {
     int action_deadline_ms = 90000;
     // 取消后的宽限:sidecar 收到 cancelled 通知后多久没终态就按取消收口。
     int cancel_grace_ms = 3000;
+    // 镜像流(阶段 C):在飞待落盘帧的有界队列容量。帧率帽已在 sidecar
+    // 侧夹过(缺省 5fps),这里的帽兜的是"artifact 落盘跟不上"这一段——
+    // 容量小是有意的:帧是重活(整张图落盘),攒多了不如干脆丢旧要新。
+    int screencast_queue_capacity = 8;
 };
 
 // 一只在飞的异步浏览器动作。
@@ -105,6 +115,16 @@ struct BrowserAction {
     std::atomic<bool> finished{false};
     std::atomic<std::int64_t> sidecar_request_id{0}; // >0 = sidecar 调用已发出
     std::chrono::steady_clock::time_point started_at;
+};
+
+// 一枚待落盘的镜像流帧(阶段 C):sidecar 的 screencast/frame 事件原样
+// 摘出来的字段,排进 BrowserService 的有界队列等落盘。
+struct PendingScreencastFrame {
+    std::string page_id;
+    std::string data_base64;  // sidecar 递的帧字节(CDP screencastFrame.data)
+    std::string mime_type;    // "image/jpeg" | "image/png"
+    std::string claimed_sha256; // sidecar 报的校验值(空 = 不比对)
+    std::uint64_t frame_seq = 0; // 页内单调(sidecar 侧发号,帧率帽后的序号)
 };
 
 class BrowserService {
@@ -204,6 +224,16 @@ private:
     nlohmann::json FinishScreenshot(const nlohmann::json& sidecar_result, std::string& out_error_code,
                                     std::string& out_error_message);
 
+    // ---- 镜像流(阶段 C) ----
+    // sidecar 的 screencast/frame 事件入口:排进有界队列,满了丢最老帧
+    // (按其 pageId 记 dropped)。真正的落盘与出事件在 ScreencastWorkerLoop。
+    void HandleScreencastFrame(const nlohmann::json& payload);
+    void ScreencastWorkerLoop();
+    // 落一帧 artifact、拼 browser/screencast/frame 的 params 并 Emit;
+    // 解码/校验失败只诊断丢弃(镜像帧不是必保事件,不值得为一帧的坏账
+    // 打断整条流)。
+    void EmitScreencastFrame(const PendingScreencastFrame& frame);
+
     void Emit(std::string_view method, const nlohmann::json& params);
 
     BrowserServiceOptions options_;
@@ -236,6 +266,26 @@ private:
     // 暂停旗(阶段 B):browser/pause 置位、browser/resume 清零。动作
     // 工作线程在跑 owner=agent 的动作前看它一眼。
     std::atomic<bool> paused_{false};
+
+    // ---- 镜像流账(阶段 C) ----
+    std::mutex screencast_mutex_;
+    std::condition_variable screencast_cv_;
+    std::deque<PendingScreencastFrame> screencast_queue_;
+    // pageId -> 自上次成功报出以来、这一页丢了几帧(队满淘汰的账);
+    // EmitScreencastFrame 报完清零(与 journal 批量的 dropped 同口径)。
+    std::map<std::string, std::uint64_t> screencast_dropped_;
+    // pageId -> 累计丢帧数(测试断言用,不清零)。
+    std::map<std::string, std::uint64_t> screencast_dropped_total_;
+    std::thread screencast_worker_;
+    std::atomic<bool> screencast_worker_started_{false};
+
+public:
+    // ---- 测试口(镜像流) ----
+    // 在飞待落盘帧数(断言慢消费者场景用)。
+    std::size_t screencast_queue_depth();
+    // 某页累计丢过几帧(EmitScreencastFrame 清零前的值;测试专用累计口,
+    // 不受清零影响——内部另计一份累计数,不影响协议里报的"since last"账)。
+    std::uint64_t screencast_dropped_total_for_test(const std::string& page_id);
 };
 
 }  // namespace lubancode::app_server
