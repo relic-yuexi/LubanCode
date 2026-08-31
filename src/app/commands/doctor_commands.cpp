@@ -48,6 +48,7 @@ using lubancode::cli::TermErr;
 #include "tools/search_ripgrep.hpp"  // BundledRipgrepLocator/RunRipgrepSmoke:search 后端诊断(ripgrep 迁移 P0-2)
 #include "tools/shell_info.hpp"
 #include "trajectory/metrics.hpp"  // FormatWorkspaceDoctorReport:/doctor trajectory(P0-4)
+#include "telemetry/service.hpp"  // FormatTelemetryDoctorLines:/doctor telemetry(T1)
 
 namespace lubancode::app {
 
@@ -1224,6 +1225,23 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
         PrintInstructionsDoctor(context);
         return;
     }
+    if (subcommand == "telemetry") {
+        // 端云协同可观测单 T1:/doctor telemetry 只读本地状态(§24.2 默认
+        // 不联网;--probe 属 T2 exporter 面)。遥测没开就明说,零副作用。
+        TermOut() << context.theme.stats << "遥测(/doctor telemetry):" << context.theme.reset << "\n";
+        if (context.telemetry_service == nullptr) {
+            TermOut() << "  未装配(features.telemetry 默认关;须与 features.trajectory 同开)。\n";
+            TermOut().flush();
+            return;
+        }
+        for (const std::string& line : lubancode::telemetry::FormatTelemetryDoctorLines(
+                 context.telemetry_service->Status())) {
+            TermOut() << "  " << line << "\n";
+        }
+        TermOut() << "  注:本批只有本地投影与 spool;exporter/联网属 T2,本面不发请求。\n";
+        TermOut().flush();
+        return;
+    }
     if (subcommand == "search") {
         // ripgrep 迁移单 P0-2(设计单 7.2):search 后端诊断。生产只认
         // exe-dir/libexec 一条路——这里不查 PATH、不列 PATH 候选;smoke 真
@@ -1306,7 +1324,8 @@ CommandFlow HandleSlashDoctor(SlashDispatchContext& ctx, const lubancode::cli::P
                                                  ctx.session_runtime != nullptr
                                                      ? ctx.session_runtime->wire_name()
                                                      : std::string(),
-                                                 ctx.trajectory};
+                                                 ctx.trajectory,
+                                                 ctx.telemetry_service};
     HandleDoctorCommand(parsed.args, doctor_context);
     ctx.real_backend->Rebuild(*ctx.config);
     return CommandFlow::Continue;

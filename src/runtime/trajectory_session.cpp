@@ -136,7 +136,17 @@ RecordReceipt TrajectoryTurnBridge::Put(EventKind kind, std::optional<std::strin
     request.scope.origin = origin;
     request.links = std::move(links);
     request.payload = std::move(payload);
-    return recorder_.Record(std::move(request), durability);
+    const trajectory::RecordReceipt receipt = recorder_.Record(std::move(request), durability);
+    // T1 committed wake(§25.3):committed 才投;只投身份,不投正文。
+    if (receipt.status == trajectory::RecordReceipt::Status::Committed &&
+        commit_wake_ != nullptr) {
+        telemetry::CommitWake wake;
+        wake.workspace_key = base_scope_.workspace_key;
+        wake.session_id = base_scope_.session_id;
+        wake.stream_id = wake_stream_id_;
+        commit_wake_->Notify(wake);
+    }
+    return receipt;
 }
 
 void TrajectoryTurnBridge::NoteError(const RecordReceipt& receipt, const char* where) {
@@ -787,7 +797,17 @@ RecordReceipt TrajectoryBypassBridge::Put(EventKind kind, std::optional<std::str
     request.scope.actor = actor;
     request.scope.origin = origin;
     request.payload = std::move(payload);
-    return recorder_.Record(std::move(request), durability);
+    const trajectory::RecordReceipt receipt = recorder_.Record(std::move(request), durability);
+    // T1 committed wake(与主桥同款)。
+    if (receipt.status == trajectory::RecordReceipt::Status::Committed &&
+        commit_wake_ != nullptr) {
+        telemetry::CommitWake wake;
+        wake.workspace_key = base_scope_.workspace_key;
+        wake.session_id = base_scope_.session_id;
+        wake.stream_id = wake_stream_id_;
+        commit_wake_->Notify(wake);
+    }
+    return receipt;
 }
 
 void TrajectoryBypassBridge::NoteError(const RecordReceipt& receipt, const char* where) {
@@ -1238,6 +1258,8 @@ struct TrajectorySessionLedger::Impl {
     // --continue 启动路的 resume 投影(没 resume 为空)。
     bool launch_resumed = false;
     std::vector<api::Message> launch_resume_history;
+    // T1 committed wake(§25.4):装配层挂 TelemetryService;默认空。
+    telemetry::CommitObserver* telemetry_wake = nullptr;
 };
 
 // §12.1 user-only 权限:workspace 层与 session 层目录都收紧;设不住须
@@ -1352,6 +1374,10 @@ std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
                                                          std::move(identity));
     // 桥按轮把落账错误推进账本的共享环(/doctor trajectory 从这读)。
     bridge->SetErrorSink(&io_errors_);
+    // T1 committed wake:挂上后 main stream 每笔提交都投 wake(默认空)。
+    if (impl_ != nullptr && impl_->telemetry_wake != nullptr) {
+        bridge->SetCommitWake(impl_->telemetry_wake, "main.jsonl");
+    }
     return bridge;
 }
 
@@ -1364,7 +1390,30 @@ std::unique_ptr<TrajectoryBypassBridge> TrajectorySessionLedger::NewBypassBridge
     trajectory::EventScope scope = impl_->active->main->base_scope();
     scope.visibility = {Visibility::HostOnly};
     scope.training_policy = TrainingPolicy::Metadata;
-    return std::make_unique<TrajectoryBypassBridge>(*recorder, std::move(scope), std::move(identity));
+    auto bridge =
+        std::make_unique<TrajectoryBypassBridge>(*recorder, std::move(scope), std::move(identity));
+    if (impl_->telemetry_wake != nullptr) {
+        bridge->SetCommitWake(impl_->telemetry_wake, "main.jsonl");
+    }
+    return bridge;
+}
+
+void TrajectorySessionLedger::SetTelemetryWake(telemetry::CommitObserver* wake) {
+    if (impl_ != nullptr) {
+        impl_->telemetry_wake = wake;
+    }
+}
+
+void TrajectorySessionLedger::NotifyCommitted_() const {
+    if (impl_ == nullptr || impl_->telemetry_wake == nullptr || impl_->active == nullptr) {
+        return;
+    }
+    telemetry::CommitWake wake;
+    const trajectory::EventScope& scope = impl_->active->main->base_scope();
+    wake.workspace_key = scope.workspace_key;
+    wake.session_id = scope.session_id;
+    wake.stream_id = "main.jsonl";
+    impl_->telemetry_wake->Notify(wake);
 }
 
 namespace {
@@ -1469,6 +1518,12 @@ TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const 
     identity.wire = "subagent";
     identity.channel = "subagent";
     auto bridge = std::make_unique<TrajectoryTurnBridge>(*recorder_owner, scope, identity);
+    // T1 committed wake:子账 stream 也投(subagents/<run>.jsonl,§14.3 多
+    // stream 各自 cursor)。
+    if (impl_->telemetry_wake != nullptr) {
+        bridge->SetCommitWake(impl_->telemetry_wake,
+                              "subagents/" + std::filesystem::path(*stream).filename().generic_string());
+    }
     return std::unique_ptr<TrajectorySubagentBridge>(new SubagentBridgeImpl(
         std::move(recorder_owner), std::move(bridge), agent_run_id, &impl_->child_terminal_hashes));
 }
@@ -1727,7 +1782,9 @@ void TrajectorySessionLedger::PutControl_(trajectory::EventKind kind, nlohmann::
     if (receipt.status != trajectory::RecordReceipt::Status::Committed) {
         platform::LogSink::Instance().Error(
             "trajectory", std::string("control 落账失败: ") + receipt.error_code);
+        return;
     }
+    NotifyCommitted_();
 }
 
 void TrajectorySessionLedger::RecordCompactRequested(const std::string& trigger, int old_epoch,
@@ -1781,7 +1838,9 @@ void TrajectorySessionLedger::PutUserCommand_(trajectory::EventKind kind, nlohma
     if (receipt.status != trajectory::RecordReceipt::Status::Committed) {
         platform::LogSink::Instance().Error(
             "trajectory", std::string("command 落账失败: ") + receipt.error_code);
+        return;
     }
+    NotifyCommitted_();
 }
 
 std::string TrajectorySessionLedger::BeginCommand(const std::string& command_name,
@@ -2161,6 +2220,13 @@ std::filesystem::path TrajectorySessionLedger::session_dir() const {
     static const std::filesystem::path empty;
     // ActiveSession::session_dir() 按值回(const ref 会接到临时上)。
     return impl_ != nullptr && impl_->active != nullptr ? impl_->active->session_dir() : empty;
+}
+
+std::string TrajectorySessionLedger::workspace_key() const {
+    return impl_ != nullptr && impl_->active != nullptr &&
+                   impl_->active->main.has_value()
+               ? impl_->active->main->base_scope().workspace_key
+               : std::string();
 }
 
 }  // namespace lubancode::runtime

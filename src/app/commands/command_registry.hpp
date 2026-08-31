@@ -49,6 +49,7 @@
 #include "memory/project_memory.hpp"  // ProjectMemory(/memory 的会话件)
 #include "package/mounting.hpp"       // PackageMount:会话钉快照(阶段 3 挂载)
 #include "peers/peer_session.hpp"
+#include "telemetry/service.hpp"  // TelemetryService(/telemetry status 的状态面)
 #include "runtime/event_sinks.hpp"
 #include "runtime/session_runtime.hpp"
 #include "runtime/tool_trace_hub.hpp"
@@ -167,6 +168,9 @@ struct SlashDispatchContext {
     // P0-2 轨迹:flag 开的会话递账本,TrajectoryCommandExecutor 包住分派
     // 入口记 command lifecycle。空 = 旧路零变。
     lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
+    // 端云协同可观测单 T1:本地遥测服务(/telemetry status 的状态面)。
+    // 空 = 遥测未开,命令面打"未开启",不发任何请求。
+    lubancode::telemetry::TelemetryService* telemetry_service = nullptr;
     lubancode::runtime::FanoutEventSink* session_events = nullptr;
     lubancode::sessions::SessionStore* session_store = nullptr;
     const std::string* sessions_dir = nullptr;

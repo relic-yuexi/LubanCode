@@ -5,7 +5,9 @@
 //      53:自定义 Agent 单阶段 1 添 /agents、/agent 两案,Package 单
 //      阶段 1 添 /package 一案,自进化闭环阶段 1 添 /evolve 一案,
 //      AGENTS.md 作用域单 P1 添 /instructions 一案,Token 账本单 A2 添
-//      /usage 一案);
+//      /usage 一案;
+//      55:多渠道单阶段 2 添 /channels、/channel 两案;
+//      56:端云协同可观测单 T1 添 /telemetry 一案(只读状态面);
 //   2. 枚举无重复、无遗漏(死案 Image/NotSlash 也留名,handler 为空);
 //   3. 活案(有 handler)的名字与 cli::AllSlashCommands 的帮助面逐一对应
 //      ——已知差异如实记:/effort 是 /think 的别名(帮助面有、分派面归
@@ -65,9 +67,9 @@ const std::vector<lubancode::cli::SlashCommand>& AllCommandEnums() {
 
 }  // namespace
 
-TEST_CASE("命令注册表:55 案齐整,枚举可对") {
+TEST_CASE("命令注册表:56 案齐整,枚举可对") {
     const std::vector<lubancode::app::SlashCommandSpec>& table = lubancode::app::SlashCommandTable();
-    REQUIRE(table.size() == 55);
+    REQUIRE(table.size() == 56);
 
     SUBCASE("枚举逐一在表,无重复") {
         std::set<int> seen;

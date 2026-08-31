@@ -67,6 +67,7 @@ enum class SlashCommand {
     Instructions,  // /instructions [path <路径>|reload]:AGENTS.md 指令链逐 source 账(作用域单 P1)
     Channels,  // /channels:列渠道账号配置与运行态(多渠道单阶段 2,只读)
     Channel,  // /channel show|doctor|start|stop|restart <渠道> [账号]:单渠道账号面
+    Telemetry,  // /telemetry [status]:本地遥测状态面(端云协同可观测单 T1,只读)
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 

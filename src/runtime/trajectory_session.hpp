@@ -36,6 +36,7 @@
 #include "api/types.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/tool_trajectory_sink.hpp"
+#include "telemetry/wake.hpp"
 #include "trajectory/directory.hpp"
 #include "trajectory/environment.hpp"
 #include "trajectory/metrics.hpp"
@@ -137,6 +138,14 @@ public:
     // 从这取;桥按轮把错误推进来)。
     void SetErrorSink(std::vector<std::string>* sink) { error_sink_ = sink; }
 
+    // 端云协同可观测单 T1(§25.3/§25.4):committed wake 窄口。账本侧在
+    // receipt committed 后通知;空(默认)= 零行为,trajectory 老路一字
+    // 不变。wake 只投"哪条 stream 有新账",不携正文,不阻塞落账路径。
+    void SetCommitWake(telemetry::CommitObserver* wake, std::string stream_id) {
+        commit_wake_ = wake;
+        wake_stream_id_ = std::move(stream_id);
+    }
+
 private:
     struct CallBook {
         std::string request_id;         // 声明它的 model output 所属请求
@@ -211,6 +220,8 @@ private:
     std::uint64_t verification_counter_ = 0;
     std::vector<std::string> recent_errors_;
     std::vector<std::string>* error_sink_ = nullptr;  // 账本持有的共享汇
+    telemetry::CommitObserver* commit_wake_ = nullptr;  // T1 committed wake(默认空)
+    std::string wake_stream_id_;                        // session 相对 stream 路径
 };
 
 // ---------------------------------------------------------------------------
@@ -249,6 +260,11 @@ public:
 
     // 诊断:最近一枚提交失败 receipts 的稳定码。
     std::vector<std::string> recent_errors() const { return recent_errors_; }
+    // T1 committed wake(与主桥同款;默认空 = 零行为)。
+    void SetCommitWake(telemetry::CommitObserver* wake, std::string stream_id) {
+        commit_wake_ = wake;
+        wake_stream_id_ = std::move(stream_id);
+    }
 
 private:
     trajectory::RecordReceipt Put(trajectory::EventKind kind, std::optional<std::string> request_id,
@@ -274,6 +290,8 @@ private:
     std::uint64_t input_counter_ = 0;
     std::uint64_t output_counter_ = 0;
     std::vector<std::string> recent_errors_;
+    telemetry::CommitObserver* commit_wake_ = nullptr;  // T1 committed wake(默认空)
+    std::string wake_stream_id_;
 };
 
 // ---------------------------------------------------------------------------
@@ -511,6 +529,13 @@ public:
 
     const std::string& session_id() const;
     std::filesystem::path session_dir() const;
+    // T1 遥测注册用:本场 workspace 的假名 key(与 wake/cursor 同一口径)。
+    std::string workspace_key() const;
+
+    // 端云协同可观测单 T1(§25.4 路 1):装配层把 TelemetryService 挂上,
+    // 之后本账本铸的每只桥与每笔会话级控制事件提交后都投 committed wake。
+    // 空(默认)= 零行为,老路一字不变;Notify 端承诺非阻塞(§25.3)。
+    void SetTelemetryWake(telemetry::CommitObserver* wake);
 
 private:
     TrajectorySessionLedger() = default;
@@ -521,6 +546,9 @@ private:
     // P0-4:落账错误共享环(桥逐轮推进;doctor 从这读,见 recent_io_errors)。
     std::vector<std::string> io_errors_;
     bool environment_captured_ = false;
+
+    // committed wake 的账本侧漏斗:main stream 上的提交经这投。
+    void NotifyCommitted_() const;
 
     // 会话级控制事件(compact 一族)的公共落账口(Host/CompactRuntime)。
     void PutControl_(trajectory::EventKind kind, nlohmann::json payload);

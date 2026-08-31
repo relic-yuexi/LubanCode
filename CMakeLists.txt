@@ -604,6 +604,13 @@ add_library(lubancode_engine STATIC
   src/telemetry/redactor.cpp
   src/telemetry/projector.cpp
   src/telemetry/otlp_json.cpp
+  # T1(本地 Service 与 Spool):committed wake 窄口、cursor 与 catch-up、
+  # 有界优先级队列、segmented spool 与崩溃恢复、TelemetryService 生命周期
+  # 与 /telemetry、/doctor telemetry 本地面。仍是纯本地件:T2 才有 exporter。
+  src/telemetry/cursor.cpp
+  src/telemetry/batch_queue.cpp
+  src/telemetry/spool.cpp
+  src/telemetry/service.cpp
 )
 target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -881,6 +888,7 @@ add_library(lubancode_app STATIC
   src/app/commands/hook_commands.cpp
   src/app/commands/peer_commands.cpp
   src/app/commands/doctor_commands.cpp
+  src/app/commands/telemetry_commands.cpp  # /telemetry(端云协同可观测单 T1)
   # 自定义 Agent 单阶段 1:/agents 与 /agent doctor 的只读骨架。
   src/app/commands/agent_commands.cpp
   # /goal 持久目标单:终端 slash 的排版/gate/二次确认文案。

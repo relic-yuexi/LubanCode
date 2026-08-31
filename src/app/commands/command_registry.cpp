@@ -19,6 +19,7 @@
 #include "app/commands/peer_commands.hpp"
 #include "app/commands/prompt_commands.hpp"
 #include "app/commands/session_commands.hpp"
+#include "app/commands/telemetry_commands.hpp"  // /telemetry(端云协同可观测单 T1)
 #include "app/commands/settings_commands.hpp"
 #include "app/commands/trace_commands.hpp"
 #include "app/commands/usage_commands.hpp"
@@ -78,6 +79,7 @@ const std::vector<SlashCommandSpec>& SlashCommandTable() {
         {lubancode::cli::SlashCommand::Evolve, "evolve", HandleSlashEvolve, false, false},
         {lubancode::cli::SlashCommand::Trace, "trace", HandleSlashTrace, false, false},
         {lubancode::cli::SlashCommand::Doctor, "doctor", HandleSlashDoctor, false, false},
+        {lubancode::cli::SlashCommand::Telemetry, "telemetry", HandleSlashTelemetry, false, false},
         {lubancode::cli::SlashCommand::Goal, "goal", HandleSlashGoal, false, false},
         {lubancode::cli::SlashCommand::Loop, "loop", HandleSlashLoop, false, false},
         {lubancode::cli::SlashCommand::Memory, "memory", HandleSlashMemory, false, false},

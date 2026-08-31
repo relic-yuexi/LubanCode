@@ -459,6 +459,38 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     session_runtime_.AttachSink(&session_events_);
     trace_hub_->AttachSink(&session_events_);
 
+    // 端云协同可观测单 T1:features.telemetry 激活(且轨迹真开了)才装
+    // 本地遥测服务——TryAssemble 非 Active 一律 nullptr,零目录零线程
+    // (§8.5);开了则注册本场 session 并把 committed wake 挂到账本。
+    if (auto* ledger = session_runtime_.trajectory()) {
+        lubancode::telemetry::TelemetryAssemblyInputs telemetry_inputs;
+        telemetry_inputs.config_telemetry = config.features_telemetry;
+        telemetry_inputs.config_trajectory = session_runtime_.trajectory_enabled();
+        if (home_lubancode.has_value()) {
+            telemetry_inputs.options.telemetry_root =
+                lubancode::tools::Utf8ToPath(*home_lubancode) / "telemetry";
+            telemetry_inputs.options.resource.service_version =
+                std::string(lubancode::app::kVersion);
+            telemetry_inputs.options.resource.frontend = "terminal";
+        }
+        std::string telemetry_note;
+        telemetry_service_ = lubancode::telemetry::TryAssembleTelemetryService(
+            telemetry_inputs, &telemetry_note);
+        if (telemetry_service_ != nullptr) {
+            telemetry_service_->RegisterSession(ledger->workspace_key(), ledger->session_id(),
+                                                ledger->session_dir());
+            ledger->SetTelemetryWake(telemetry_service_.get());
+        } else if (lubancode::telemetry::ResolveTelemetryActivation(
+                       telemetry_inputs.config_telemetry, telemetry_inputs.config_trajectory)
+                       .status ==
+                   lubancode::telemetry::TelemetryActivationStatus::RequiresTrajectory) {
+            // §8.2:telemetry 开了 trajectory 没开——明说,不暗开。
+            TermErr() << theme.error << tr("error.prefix")
+                      << "遥测需要轨迹账(features.trajectory)同开,本次未启用: "
+                      << telemetry_note << theme.reset << "\n";
+        }
+    }
+
     // 工具全栈在组合根已装好(stack_.tool_runtime);逐枚追踪单第四期:
     // hub 已安家,挂 undo_file_edit(条件式撤销:凭
     // hub 的账本翻凭据,走与 write/edit 同一道确认门)。
@@ -1401,6 +1433,8 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.trace_hub = trace_hub_.has_value() ? &*trace_hub_ : nullptr;
     // P0-2 轨迹:命令生命周期记账的账本(flag 开才有)。
     ctx.trajectory = session_runtime_.trajectory();
+    // T1 遥测:/telemetry 与 /doctor telemetry 的本地状态面(可空 = 未开)。
+    ctx.telemetry_service = telemetry_service_.get();
     ctx.session_events = &session_events_;
     ctx.session_store = &session_store;
     ctx.sessions_dir = &sessions_dir;

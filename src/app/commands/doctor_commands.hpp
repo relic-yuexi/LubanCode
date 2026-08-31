@@ -36,6 +36,7 @@
 #include "config/config.hpp"
 #include "config/project_instructions.hpp"  // ProjectInstructionResolver:/doctor instructions
 #include "runtime/trajectory_session.hpp"    // /doctor trajectory 的账本口(P0-4)
+#include "telemetry/service.hpp"  // /doctor telemetry 的状态面(T1)
 #include "tools/registry.hpp"
 
 namespace lubancode::runtime {
@@ -231,6 +232,9 @@ struct DoctorContext {
     // /doctor trajectory(P0-4 §13.1):flag 开的会话的轨迹账本。可空 =
     // 轨迹没开,那节明说"轨迹未开"。(与上 trajectory 同一对象,只读视角。)
     const lubancode::runtime::TrajectorySessionLedger* trajectory_ledger = nullptr;
+    // /doctor telemetry(端云协同可观测单 T1):本地遥测服务的状态面。
+    // 可空 = 遥测未装配(默认关),那节只说未开,不发任何请求。
+    const lubancode::telemetry::TelemetryService* telemetry_service = nullptr;
 };
 
 void HandleDoctorCommand(const std::string& args, const DoctorContext& context);
