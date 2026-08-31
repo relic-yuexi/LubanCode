@@ -696,11 +696,23 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     // 代理引用路:tool_search 铸 ref 不写 loaded,tool_invoke 常驻顶层,
     // 延迟工具永远不进顶层 tools(单子 §5.1);disabled 连延迟都关掉。
     // 先 opt-in:配置不写就是现状。
+    //
+    // 动态工具 P3:装配层过完两道门的有效模式经 Options.deferred_mode 压过
+    // config;没给(nullopt)时照旧只认 config 的旧三档——config 里写
+    // native_reference 不在此开门,原生档只信装配层(直构路给一个 config
+    // 串就开 native 等于绕过目录能力判定,单子红线 2)。原生路:不挂本地
+    // tool_search/tool_invoke(发现由 provider 的服务端搜索做),延迟定义
+    // 照常进顶层 tools 但由 Agent 标 load_mode=Deferred;loaded 集合在这条
+    // 路上不翻页。
     const int tool_search_threshold = config.tool_search_threshold;
-    const auto configured_mode =
-        lubancode::tools::ParseDeferredToolMode(config.deferred_tool_mode);
-    const lubancode::tools::DeferredToolMode mode =
-        configured_mode.value_or(lubancode::tools::DeferredToolMode::LegacyExpand);
+    lubancode::tools::DeferredToolMode mode = lubancode::tools::DeferredToolMode::LegacyExpand;
+    if (const auto configured = lubancode::tools::ParseDeferredToolMode(config.deferred_tool_mode);
+        configured.has_value() && *configured != lubancode::tools::DeferredToolMode::NativeReference) {
+        mode = *configured;
+    }
+    if (options.deferred_mode.has_value()) {
+        mode = *options.deferred_mode;
+    }
     main_mode_ = mode;
     sub_mode_ = mode;
     main_deferral_ = lubancode::tools::DeferralEnabled(main_registry_.All().size(), tool_search_threshold);
@@ -713,6 +725,9 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     }
     main_proxy_ = main_deferral_ && main_mode_ == lubancode::tools::DeferredToolMode::ProxyReference;
     sub_proxy_ = sub_deferral_ && sub_mode_ == lubancode::tools::DeferredToolMode::ProxyReference;
+    main_native_ = main_deferral_ && main_mode_ == lubancode::tools::DeferredToolMode::NativeReference;
+    sub_native_ = sub_deferral_ && sub_mode_ == lubancode::tools::DeferredToolMode::NativeReference;
+    native_server_tool_search_ = options.native_server_tool_search;
     if (main_proxy_) {
         main_resolver_ = std::make_shared<lubancode::tools::DeferredToolResolver>("main");
     }
@@ -720,13 +735,14 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         sub_resolver_ = std::make_shared<lubancode::tools::DeferredToolResolver>("sub");
     }
     // 注册次序钉死:tool_search 之后紧跟 tool_invoke——同一会话内顶层
-    // tools 数组的数量与次序都不许动(单子 §5.1)。
+    // tools 数组的数量与次序都不许动(单子 §5.1)。原生路不挂这两枚:发现
+    // 是 provider 服务端搜索的事,模型发现后直接调真实工具(P3·§四)。
     if (main_deferral_) {
         if (main_proxy_) {
             main_registry_.Register(
                 std::make_unique<lubancode::tools::ToolSearchTool>(main_registry_, main_resolver_));
             main_registry_.Register(std::make_unique<lubancode::tools::ToolInvokeTool>());
-        } else {
+        } else if (!main_native_) {
             main_registry_.Register(
                 std::make_unique<lubancode::tools::ToolSearchTool>(main_registry_, loaded_tools_));
         }
@@ -736,7 +752,7 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
             sub_registry_.Register(
                 std::make_unique<lubancode::tools::ToolSearchTool>(sub_registry_, sub_resolver_));
             sub_registry_.Register(std::make_unique<lubancode::tools::ToolInvokeTool>());
-        } else {
+        } else if (!sub_native_) {
             sub_registry_.Register(
                 std::make_unique<lubancode::tools::ToolSearchTool>(sub_registry_, loaded_tools_));
         }
@@ -750,11 +766,15 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     // 交给执行侧——直名调用被 MemorySaveTool::execute 拒("本场记忆写入
     // 未开启"),proxy 路被下面的 main_execution_policy_ 拒
     //(proxy.tool_not_allowed),两道都是稳定错,模型看得懂。
-    main_tool_filter_ = [loaded = loaded_tools_, deferral = main_deferral_](const lubancode::tools::Tool& tool) {
-        return !deferral || !tool.deferred() || loaded->count(tool.name()) != 0;
+    // P3 原生路:延迟工具照发(defer_loading 由 provider 排出缓存前缀),
+    // loaded 不再是可见性的钥匙——定义常驻,发现走服务端。
+    main_tool_filter_ = [loaded = loaded_tools_, deferral = main_deferral_,
+                         native = main_native_](const lubancode::tools::Tool& tool) {
+        return !deferral || native || !tool.deferred() || loaded->count(tool.name()) != 0;
     };
-    sub_tool_filter_ = [loaded = loaded_tools_, deferral = sub_deferral_](const lubancode::tools::Tool& tool) {
-        return !deferral || !tool.deferred() || loaded->count(tool.name()) != 0;
+    sub_tool_filter_ = [loaded = loaded_tools_, deferral = sub_deferral_,
+                        native = sub_native_](const lubancode::tools::Tool& tool) {
+        return !deferral || native || !tool.deferred() || loaded->count(tool.name()) != 0;
     };
     // proxy 模式的执行资格(单子 §5.5):只作用于经 tool_invoke 解引用来的
     // 调用。exposure 过滤(上面的 tool_filter)不动——延迟工具照旧不进顶层

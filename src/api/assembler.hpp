@@ -57,6 +57,11 @@ private:
         std::string id;
         std::string name;
         std::string partial_json;
+        std::string caller;
+        // 服务端工具搜索的调用(动态工具 P3):入参照走 input_json_delta 累积,
+        // 收尾攒成 ServerToolUseBlock——那是 provider 执行过的事实,不是本地
+        // 待执行的调用,与普通 ToolUseBlock 分家。
+        bool is_server = false;
     };
     struct OpenThinking {
         std::string text;

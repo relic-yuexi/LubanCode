@@ -21,12 +21,44 @@ std::optional<StreamEvent> HandleMessageStart(const json& data) {
     return event;
 }
 
-std::optional<StreamEvent> HandleContentBlockStart(const json& data) {
+std::optional<StreamEvent> HandleContentBlockStart(const json& data, bool parse_server_tool_search) {
     auto it = data.find("content_block");
     if (it == data.end() || !it->is_object()) {
         return std::nullopt;
     }
     const std::string type = it->value("type", "");
+    if (type == "server_tool_use") {
+        // 服务端执行的工具调用(动态工具 P3)。只在开了 server_tool_search 门
+        // 且名字是我们声明的那两枚搜索工具时解析——web_search 等其他 server
+        // tool 的块照旧跳过,旧路行为一字不动。入参照样走 input_json_delta
+        // 增量,assembler 按"is_server"累积成 ServerToolUseBlock。
+        if (!parse_server_tool_search) {
+            return std::nullopt;
+        }
+        const std::string name = it->value("name", "");
+        if (name != "tool_search_tool_regex" && name != "tool_search_tool_bm25") {
+            return std::nullopt;
+        }
+        ServerToolUseStart event;
+        event.index = data.value("index", 0);
+        event.id = it->value("id", "");
+        event.name = name;
+        return event;
+    }
+    if (type == "tool_search_tool_result") {
+        // 搜索结果块:官方流样例里整只(含嵌套 content)随 content_block_start
+        // 一次到齐,没有增量。无损保存 tool_references / error,不压文本。
+        if (!parse_server_tool_search) {
+            return std::nullopt;
+        }
+        ServerToolResult event;
+        event.index = data.value("index", 0);
+        event.tool_use_id = it->value("tool_use_id", "");
+        if (auto content = it->find("content"); content != it->end() && content->is_object()) {
+            event.content = *content;
+        }
+        return event;
+    }
     if (type != "tool_use") {
         // text / thinking 块的起始不单独发事件,文本内容靠后续
         // content_block_delta 里的 text_delta 一段段拼出来。
@@ -36,6 +68,9 @@ std::optional<StreamEvent> HandleContentBlockStart(const json& data) {
     event.index = data.value("index", 0);
     event.id = it->value("id", "");
     event.name = it->value("name", "");
+    // PTC 的调用方标识(§7.2 "对应 id / caller / error"):wire 给了就带上,
+    // 没给是空串——绝大多数请求都没有。
+    event.caller = it->value("caller", "");
     return event;
 }
 
@@ -110,7 +145,7 @@ std::optional<StreamEvent> HandleError(const json& data) {
 
 }  // namespace
 
-std::optional<StreamEvent> parse_event(const SseFrame& frame) try {
+std::optional<StreamEvent> parse_event(const SseFrame& frame, bool parse_server_tool_search) try {
     json data;
     try {
         data = json::parse(frame.data);
@@ -132,7 +167,7 @@ std::optional<StreamEvent> parse_event(const SseFrame& frame) try {
         return HandleMessageStart(data);
     }
     if (type == "content_block_start") {
-        return HandleContentBlockStart(data);
+        return HandleContentBlockStart(data, parse_server_tool_search);
     }
     if (type == "content_block_delta") {
         return HandleContentBlockDelta(data);
@@ -164,7 +199,7 @@ std::optional<StreamEvent> parse_event(const SseFrame& frame) try {
 }
 
 std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) {
-    auto event = parse_event(frame);
+    auto event = parse_event(frame, parse_server_tool_search_);
     if (!event.has_value()) {
         return {};
     }

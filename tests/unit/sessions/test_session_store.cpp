@@ -167,6 +167,88 @@ TEST_CASE("消息序列化往返: 富 tool_result 的 blocks/structuredContent �
     CHECK(got->content == result.content);  // 投影不变
 }
 
+// ---------------------------------------------------------------------------
+// 动态工具 P3(Claude NativeReference·§7.2):原生块的无损存档与恢复。
+// server_tool_use / tool_search_tool_result(含嵌套 tool_reference 与 error
+// 变体)往返逐字段一致;tool_use 的 caller(PTC 调用方标识)也照带;坏块
+// 弃块不弃消息。恢复出的历史喂回下一轮请求时由 anthropic client 原样
+// 回传,不压文本(单子红线 9)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("消息序列化往返: 服务端工具搜索的原生块逐字段无损(动态工具 P3)") {
+    api::Message original;
+    original.role = api::Role::Assistant;
+    api::ServerToolUseBlock server_use;
+    server_use.id = "srvtoolu_01ABC";
+    server_use.name = "tool_search_tool_regex";
+    server_use.input = nlohmann::json{{"pattern", "weather"}, {"limit", 10}};
+    original.content.push_back(server_use);
+    api::ServerToolResultBlock server_result;
+    server_result.tool_use_id = "srvtoolu_01ABC";
+    server_result.content = nlohmann::json{
+        {"type", "tool_search_tool_search_result"},
+        {"tool_references", nlohmann::json::array({nlohmann::json{{"type", "tool_reference"},
+                                                                  {"tool_name", "get_weather"}}})}};
+    original.content.push_back(server_result);
+    api::ToolUseBlock real_call;
+    real_call.id = "toolu_01XYZ";
+    real_call.name = "get_weather";
+    real_call.input = nlohmann::json{{"location", "San Francisco"}};
+    real_call.caller = "code_execution_20260120";
+    original.content.push_back(real_call);
+
+    const auto parsed = sessions::DeserializeSessionMessage(sessions::SerializeSessionMessage(original, "ts"));
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->role == api::Role::Assistant);
+    REQUIRE(parsed->content.size() == 3);
+
+    const auto* use_back = std::get_if<api::ServerToolUseBlock>(&parsed->content[0]);
+    REQUIRE(use_back != nullptr);
+    CHECK(use_back->id == "srvtoolu_01ABC");
+    CHECK(use_back->name == "tool_search_tool_regex");
+    CHECK(use_back->input == server_use.input);
+
+    const auto* result_back = std::get_if<api::ServerToolResultBlock>(&parsed->content[1]);
+    REQUIRE(result_back != nullptr);
+    CHECK(result_back->tool_use_id == "srvtoolu_01ABC");
+    CHECK(result_back->content == server_result.content);
+
+    const auto* call_back = std::get_if<api::ToolUseBlock>(&parsed->content[2]);
+    REQUIRE(call_back != nullptr);
+    CHECK(call_back->caller == "code_execution_20260120");
+    CHECK(call_back->input.at("location") == "San Francisco");
+}
+
+TEST_CASE("消息序列化往返: 搜索结果 error 变体照存,坏块弃块不弃消息(动态工具 P3)") {
+    api::Message original;
+    original.role = api::Role::Assistant;
+    api::ServerToolResultBlock error_result;
+    error_result.tool_use_id = "srvtoolu_err";
+    error_result.content = nlohmann::json{{"type", "tool_search_tool_result_error"},
+                                          {"error_code", "invalid_tool_input"},
+                                          {"error_message", "bad regex"}};
+    original.content.push_back(error_result);
+    original.content.push_back(api::TextBlock{"搜索坏了,我直说。"});
+
+    const auto parsed = sessions::DeserializeSessionMessage(sessions::SerializeSessionMessage(original, "ts"));
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->content.size() == 2);
+    const auto* error_back = std::get_if<api::ServerToolResultBlock>(&parsed->content[0]);
+    REQUIRE(error_back != nullptr);
+    CHECK(error_back->content.at("error_code") == "invalid_tool_input");
+
+    // 坏块(缺 tool_use_id)弃掉,同一条消息里的好块照收。
+    const std::string bad_line = nlohmann::json{
+        {"ts", "ts"}, {"role", "assistant"},
+        {"content", nlohmann::json::array({nlohmann::json{{"type", "tool_search_tool_result"}},
+                                           nlohmann::json{{"type", "text"}, {"text", "还好"}}})}}
+        .dump();
+    const auto salvaged = sessions::DeserializeSessionMessage(bad_line);
+    REQUIRE(salvaged.has_value());
+    REQUIRE(salvaged->content.size() == 1);
+    CHECK(std::holds_alternative<api::TextBlock>(salvaged->content[0]));
+}
+
 TEST_CASE("消息序列化往返: assistant 带 thinking(signature 也要往返)") {
     api::Message original;
     original.role = api::Role::Assistant;

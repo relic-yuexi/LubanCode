@@ -1623,26 +1623,23 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         config.tool_search_threshold = static_cast<int>(value);
     }
     // 动态工具 P1:延迟工具模式。认不得的值报错——这个字段没法静默落默认,
-    // 下游不知道该走哪条路;native_reference 是 P3 的活,显式拒绝,不开
-    // 空承诺。
+    // 下游不知道该走哪条路。P3 起 native_reference 放行:配置层只收字符串,
+    // 生效与否由装配期 ResolveDeferredToolMode 过 wire+目录能力两道门
+    //(单子红线 2:兼容端不得误开;门不开时大声回落,不悄悄换路)。
     if (parsed.contains("deferred_tool_mode")) {
         const auto& field = parsed["deferred_tool_mode"];
         if (!field.is_string()) {
             return std::unexpected("配置文件 " + file_path_for_error +
-                                   " 里的 deferred_tool_mode 字段必须是字符串(disabled|proxy_reference|legacy_"
-                                   "expand)");
+                                   " 里的 deferred_tool_mode 字段必须是字符串(disabled|proxy_reference|"
+                                   "native_reference|legacy_expand)");
         }
         const std::string text = field.get<std::string>();
-        const bool allowed = text == "disabled" || text == "proxy_reference" || text == "legacy_expand";
+        const bool allowed =
+            text == "disabled" || text == "proxy_reference" || text == "native_reference" || text == "legacy_expand";
         if (!text.empty() && !allowed) {
-            if (text == "native_reference") {
-                return std::unexpected("配置文件 " + file_path_for_error +
-                                       " 里的 deferred_tool_mode=native_reference 尚未实现(P3 单子的活),"
-                                       "当前可用:disabled|proxy_reference|legacy_expand");
-            }
             return std::unexpected("配置文件 " + file_path_for_error +
                                    " 里的 deferred_tool_mode 认不得: " + text +
-                                   "(可用:disabled|proxy_reference|legacy_expand)");
+                                   "(可用:disabled|proxy_reference|native_reference|legacy_expand)");
         }
         config.deferred_tool_mode = text;
     }

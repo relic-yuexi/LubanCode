@@ -492,3 +492,76 @@ TEST_CASE("内置 vLLM 双预设:chat 面模板开关方言,messages 面假签�
     CHECK(api::ReasoningHistorySupportFor(qwen_msg->reasoning) ==
           api::ReasoningHistorySupport::ServerFixed);
 }
+
+
+// ---------------------------------------------------------------------------
+// 动态工具 P3(Claude NativeReference):模型级 deferred_tools 能力声明。
+// 字段形状严格(mode 只认 native_reference,server_tool_search 只认
+// regex|bm25);写歪了整份拒收——目录是能力事实源,不带病生效。内置快照
+// 里官方表确认的 Claude 模型带声明,第三方 Anthropic 兼容端不带(不按厂
+// 名猜)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("provider catalog: deferred_tools 声明逐字段解析,坏形状整份拒绝(P3)") {
+    const std::string base = R"({"schema_version":2,"revision":"2026-07-25","providers":{"a":{
+      "name":"A","wire":"anthropic-messages","base_url":"https://api.a.test",
+      "key_env":"A_KEY","default_model":"a-1",
+      "models":{"a-1":{{MODEL}}}}}})";
+    const auto with_model = [&base](const std::string& model) {
+        std::string out = base;
+        out.replace(out.find("{{MODEL}}"), 9, model);
+        return out;
+    };
+
+    // 合规声明:逐字段进解析体。
+    const auto good = config::ParseProviderCatalogJson(
+        with_model(R"({"name":"A1","deferred_tools":{"mode":"native_reference","tool_reference":true,"server_tool_search":"bm25"}})"), "p");
+        REQUIRE(good.has_value());
+    const auto* model = good->FindProvider("a")->FindModel("a-1");
+    REQUIRE(model != nullptr);
+    CHECK(model->deferred_tools.declared);
+    CHECK(model->deferred_tools.tool_reference);
+    CHECK(model->deferred_tools.server_tool_search == "bm25");
+
+    // 不写 = 不声明(默认),这是兼容端的常态。
+    const auto absent = config::ParseProviderCatalogJson(with_model(R"({"name":"A1"})"), "p");
+    REQUIRE(absent.has_value());
+    CHECK_FALSE(absent->FindProvider("a")->FindModel("a-1")->deferred_tools.declared);
+
+    // 坏形状逐个拒:mode 不认 / server_tool_search 不认 / 类型不对 / 未知字段。
+    CHECK_FALSE(config::ParseProviderCatalogJson(
+        with_model(R"({"name":"A1","deferred_tools":{"mode":"proxy"}})"), "p").has_value());
+    CHECK_FALSE(config::ParseProviderCatalogJson(
+        with_model(R"({"name":"A1","deferred_tools":{"mode":"native_reference","server_tool_search":"向量"}})"), "p").has_value());
+    CHECK_FALSE(config::ParseProviderCatalogJson(
+        with_model(R"({"name":"A1","deferred_tools":{"mode":"native_reference","tool_reference":"yes"}})"), "p").has_value());
+    CHECK_FALSE(config::ParseProviderCatalogJson(
+        with_model(R"({"name":"A1","deferred_tools":{"mode":"native_reference","extra":1}})"), "p").has_value());
+    CHECK_FALSE(config::ParseProviderCatalogJson(
+        with_model(R"({"name":"A1","deferred_tools":[]})"), "p").has_value());
+}
+
+TEST_CASE("内置目录快照: 官方表确认的 Claude 模型带 deferred_tools,兼容端不带(P3)") {
+    const auto catalog = config::ParseProviderCatalogJson(config::embedded::kProviderCatalogJson, "embedded");
+    REQUIRE(catalog.has_value());
+    const auto* anthropic = catalog->FindProvider("anthropic");
+    REQUIRE(anthropic != nullptr);
+    // 官方 Model compatibility 表(Fable 5/Opus 5/4.8/4.7/4.6/Sonnet 4.6/
+    // Opus 4.5/Sonnet 4.5/Haiku 4.5)确认支持,目录如实声明。
+    for (const char* slug : {"claude-fable-5", "claude-opus-5", "claude-opus-4-8", "claude-opus-4-7",
+                             "claude-opus-4-6", "claude-sonnet-4-6", "claude-opus-4-5",
+                             "claude-sonnet-4-5", "claude-haiku-4-5"}) {
+        const auto* model = anthropic->FindModel(slug);
+        REQUIRE_MESSAGE(model != nullptr, slug);
+        CHECK_MESSAGE(model->deferred_tools.declared, slug);
+        CHECK_MESSAGE(model->deferred_tools.tool_reference, slug);
+        CHECK_MESSAGE(model->deferred_tools.server_tool_search == "regex", slug);
+    }
+    // 表外的(Claude Opus 4.1 及更早)与第三方兼容端一律不声明——不按厂
+    // 名猜,目录没写就是没声明。
+    for (const char* slug : {"claude-opus-4-1", "claude-opus-4", "claude-3-haiku"}) {
+        const auto* model = anthropic->FindModel(slug);
+        REQUIRE_MESSAGE(model != nullptr, slug);
+        CHECK_MESSAGE(!model->deferred_tools.declared, slug);
+    }
+}

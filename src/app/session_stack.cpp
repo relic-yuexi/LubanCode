@@ -413,6 +413,28 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
             raw->after_worktree_moved();
         }
     };
+    // 动态工具 P3(Claude NativeReference·§四/红线 2):有效模式在装配层
+    // 判——wire=anthropic + 目录 deferred_tools 声明两道门都过才算 native,
+    // 不按厂名猜;门不开而配置点名要 native 时大声报 denial 并回落
+    // legacy_expand(不悄悄换路)。解析结果整份递给 ToolRuntime。
+    {
+        const lubancode::config::ModelCatalogEntry* model_entry =
+            options.model_catalog.FindByProviderAndSlug(stack->active_provider, *stack->current_model);
+        if (model_entry == nullptr) {
+            model_entry = options.model_catalog.FindBySlug(*stack->current_model);
+        }
+        const lubancode::config::DeferredToolsCapability native_capability =
+            lubancode::config::ClassifyNativeToolSearch(model_entry);
+        const lubancode::tools::DeferredToolModeResolution resolution = lubancode::tools::ResolveDeferredToolMode(
+            config.deferred_tool_mode, config.wire == lubancode::config::Wire::Anthropic,
+            native_capability.declared && native_capability.tool_reference,
+            native_capability.server_tool_search);
+        if (!resolution.native_denial.empty()) {
+            TermOut() << theme.error << "[tool_search] " << resolution.native_denial << theme.reset << "\n";
+        }
+        runtime_options.deferred_mode = resolution.mode;
+        runtime_options.native_server_tool_search = resolution.server_tool_search;
+    }
     stack->tool_runtime.emplace(config, theme, stack->wrapped_backend, stack->skills, stack->skills_segment,
                                 CurrentDirUtf8(), std::move(runtime_options));
 
@@ -424,6 +446,9 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
     stack->sub_deferral = stack->tool_runtime->sub_deferral();
     stack->main_proxy = stack->tool_runtime->main_proxy_enabled();
     stack->sub_proxy = stack->tool_runtime->sub_proxy_enabled();
+    stack->main_native = stack->tool_runtime->main_native_enabled();
+    stack->sub_native = stack->tool_runtime->sub_native_enabled();
+    stack->native_server_tool_search = stack->tool_runtime->native_server_tool_search();
     stack->tool_search_threshold = config.tool_search_threshold;
 
     if (stack->agent_tool() != nullptr) {
@@ -466,10 +491,11 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
         stack->agent_tool()->SetInstructionResolver(stack->instruction_resolver);
         if (stack->sub_deferral) {
             stack->agent_tool()->SetToolFilter(stack->sub_tool_filter());
-            // 动态工具 P1:legacy 路才注逐请求刷新的延迟索引段;proxy 路
-            // 的索引段恒空(单子 §8.1——不把"尚未 loaded 的全部名字"拼进
-            // system,tool_search 自己握 catalog),绝不给 system 塞动态段。
-            if (!stack->sub_proxy) {
+            // 动态工具 P1:legacy 路才注逐请求刷新的延迟索引段;proxy/native
+            // 路的索引段恒空(单子 §8.1——不把"尚未 loaded 的全部名字"拼进
+            // system,proxy 的 tool_search 自己握 catalog,native 的发现走
+            // provider 服务端搜索),绝不给 system 塞动态段。
+            if (!stack->sub_proxy && !stack->sub_native) {
                 stack->agent_tool()->SetDeferredIndexProvider([raw = stack.get()]() {
                     return lubancode::tools::BuildDeferredToolsIndexSegment(raw->sub_registry(),
                                                                             *raw->loaded_tools());
@@ -477,7 +503,9 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
             }
         }
         // 子代理侧的 proxy 接线(resolver + 执行资格):AgentTool 逐任务灌进
-        // 子代理的皮。proxy 没开时不设,子代理行为与从前一字不差。
+        // 子代理的皮。proxy 没开时不设,子代理行为与从前一字不差。native 路
+        // 不设 resolver(没有本地 tool_ref);子代理皮从 main 拷贝时带上
+        // native_deferred_tools 与 request.server_tool_search(RebuildLoop)。
         if (stack->sub_proxy) {
             stack->agent_tool()->SetToolRefResolver(stack->tool_runtime->sub_tool_ref_resolver());
             stack->agent_tool()->SetToolExecutionPolicy(stack->tool_runtime->sub_execution_policy(),
@@ -485,8 +513,11 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
         }
     }
     if (stack->main_deferral) {
-        TermOut() << theme.stats << trf(stack->main_proxy ? "tool_search.proxy_enabled" : "tool_search.enabled",
-                                        stack->tool_search_threshold)
+        TermOut() << theme.stats
+                  << trf(stack->main_native ? "tool_search.native_enabled"
+                          : stack->main_proxy ? "tool_search.proxy_enabled"
+                                              : "tool_search.enabled",
+                          stack->tool_search_threshold)
                   << theme.reset << "\n";
     }
 

@@ -84,14 +84,14 @@ struct ContextLayersReport {
 };
 
 // 动态工具 PromptCache 守恒单 P0(§十三):/context 的 deferred_tool_mode
-// 展示位——只留够打一行的三个数,不提前塞 proxy_reference/native_reference
-// 才需要的字段(那是 P1/P3 的活)。enabled 对应
-// tools::DeferredToolModeLabel(disabled/legacy_expand);pending/total 是
-// "待检索/全部延迟工具"枚数,由 RunContextCommand 现场扫 registry 算。
+// 展示位。enabled 对应 tools::DeferredToolModeLabel(disabled/legacy_expand);
+// pending/total 是"待检索/全部延迟工具"枚数,由 RunContextCommand 现场扫
+// registry 算。P1 起 mode_label 带 proxy 档;P3 起 native 档的提示行按
+// mode_label=="native_reference" 分档。
 struct DeferredToolModeSummary {
     bool enabled = false;
-    // 动态工具 P1:模式标签(DeferredToolModeLabel 的产物);proxy 模式的
-    // 提示行与 legacy 的断前缀提示按它分档。
+    // 动态工具 P1:模式标签(DeferredToolModeLabel 的产物);proxy/native/
+    // legacy 的提示行按它分档。
     std::string mode_label;
     std::size_t pending = 0;
     std::size_t total = 0;
@@ -130,6 +130,8 @@ struct ContextEstimateInputs {
     // 动态工具 P1:proxy_reference 开没开(deferred_tool_mode 展示与提示行
     // 按它分档;false = disabled/legacy_expand 两档老口径)。
     bool proxy_reference = false;
+    // 动态工具 P3:native_reference 开没开(展示分档;false = 老口径)。
+    bool native_reference = false;
     const std::set<std::string>* loaded_tools = nullptr;
     lubancode::agent::Agent* agent = nullptr;  // 活 loop(要能会话路由)
     lubancode::cli::ContextTracker* context_tracker = nullptr;

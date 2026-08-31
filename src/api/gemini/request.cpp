@@ -147,6 +147,14 @@ nlohmann::json BuildRequestJson(const Request& request, const json& extra_body) 
                     } else if constexpr (std::is_same_v<T, ModelImageBlock>) {
                         // 模型输出图片的替身:引用翻短文本标记,base64 不回传。
                         parts.push_back(json{{"text", ModelImageReplayText(b)}});
+                    } else if constexpr (std::is_same_v<T, ServerToolUseBlock>) {
+                        // anthropic 原生工具搜索块(动态工具 P3)在 Gemini wire
+                        // 的明降级:翻成一句事实文本,不悄悄丢块。
+                        parts.push_back(json{{"text", "[服务端工具搜索(anthropic 原生): " + b.name +
+                                                           " 已由 provider 执行]"}});
+                    } else if constexpr (std::is_same_v<T, ServerToolResultBlock>) {
+                        parts.push_back(json{{"text", "[服务端工具搜索结果(anthropic 原生): " + b.content.dump() +
+                                                           "]"}});
                     } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
                         flush_parts();
                         contents.push_back(

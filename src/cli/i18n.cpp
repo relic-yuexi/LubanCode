@@ -996,6 +996,10 @@ const Entry kZhCN[] = {
     // 动态工具 P1:proxy_reference 档的启动横幅——发现走引用、前缀不断。
     {"tool_search.proxy_enabled",
      "[tool_search] 工具超过阈值 {0},外挂工具走 proxy_reference:tool_search 发 tool_ref、tool_invoke 执行,前缀缓存不断"},
+    // 动态工具 P3:native_reference 档的启动横幅——发现走 provider 服务端
+    // 搜索、defer_loading 保前缀,模型直调真实工具仍过本地正门。
+    {"tool_search.native_enabled",
+     "[tool_search] 工具超过阈值 {0},外挂工具走 native_reference:定义带 defer_loading 常驻,发现走 provider 服务端工具搜索,前缀缓存不断"},
     {"catalog.warning", "[models.json 警告] {0}"},
     {"settings.local.warning", "[settings.local.json 警告] {0}"},
     {"settings.local.persist_prompt", "也永久写进项目 settings.local.json?[y/N] "},
@@ -1028,6 +1032,9 @@ const Entry kZhCN[] = {
     // 动态工具 P1:/tools 的 proxy 档口径说明。
     {"cmd.tools.proxy_mode",
      "  proxy_reference 档:下列延迟工具经 tool_search 发现(结果带 tool_ref 与完整 schema)、tool_invoke 执行;不扩写进顶层 tools,前缀缓存不断。"},
+    // 动态工具 P3:/tools 的 native 档口径说明。
+    {"cmd.tools.native_mode",
+     "  native_reference 档:下列延迟工具的定义带 defer_loading 常驻声明,由 provider 服务端工具搜索发现后模型直接调用;loaded 集合在这条路上不翻页。"},
     {"cmd.tools.core", "核心工具(恒在){0} 个:"},
     {"cmd.tools.loaded", "已加载的延迟工具 {0} 个:"},
     {"cmd.tools.none_loaded", "  (还没有,模型用 tool_search 命中后会出现在这里)"},
@@ -1279,6 +1286,8 @@ const Entry kZhCN[] = {
      "  legacy_expand 命中后会同时改写 system 索引段与顶层 tools 数组,断前缀(设计单:动态工具 PromptCache 守恒与按需调用设计)"},
     {"cmd.context.deferred_tool_mode.proxy_hint",
      "  proxy_reference:发现走 tool_search(结果带 tool_ref 与完整 schema)、调用走 tool_invoke,顶层 tools 与 system 恒定,前缀缓存不断(设计单:动态工具 PromptCache 守恒与按需调用设计 P1)"},
+    {"cmd.context.deferred_tool_mode.native_hint",
+     "  native_reference:延迟定义带 defer_loading 常驻声明,发现走 provider 服务端工具搜索(tool_reference 原生展开),模型直接调用真实工具;provider 侧保前缀,本地执行仍走安全正门(设计单:动态工具 PromptCache 守恒与按需调用设计 P3)"},
 
     // ---- ContextBudgetPlan 与分层占用(第四期,/context 展示) ----
     {"cmd.context.layers", "分层占用:inline 全文 {0} 枚 · artifact 预览(L1){1} 枚"},

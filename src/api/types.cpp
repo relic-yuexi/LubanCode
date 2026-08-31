@@ -245,6 +245,7 @@ void SanitizeContentBlock(ContentBlock& block) {
             } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
                 b.id = platform::SanitizeExternalText(b.id);
                 b.name = platform::SanitizeExternalText(b.name);
+                b.caller = platform::SanitizeExternalText(b.caller);
                 SanitizeJsonTree(b.input);
             } else if constexpr (std::is_same_v<T, ToolResultBlock>) {
                 b.tool_use_id = platform::SanitizeExternalText(b.tool_use_id);
@@ -274,6 +275,17 @@ void SanitizeContentBlock(ContentBlock& block) {
                 b.path = platform::SanitizeExternalText(b.path);
                 b.mime_type = platform::SanitizeExternalText(b.mime_type);
                 b.sha256 = platform::SanitizeExternalText(b.sha256);
+            } else if constexpr (std::is_same_v<T, ServerToolUseBlock>) {
+                // 服务端工具搜索的调用块(动态工具 P3):id/name 与搜索入参
+                // 都来自 wire,历史里原样回传前照过编码关。
+                b.id = platform::SanitizeExternalText(b.id);
+                b.name = platform::SanitizeExternalText(b.name);
+                SanitizeJsonTree(b.input);
+            } else if constexpr (std::is_same_v<T, ServerToolResultBlock>) {
+                // 搜索结果块:tool_use_id 与整棵嵌套 content(含 tool_reference
+                // 名单 / error 文案)递归清洗,无损语义不变。
+                b.tool_use_id = platform::SanitizeExternalText(b.tool_use_id);
+                SanitizeJsonTree(b.content);
             }
         },
         block);
@@ -292,12 +304,14 @@ void ApplyRequestProfile(Request& request, const RequestProfile& profile) {
     request.reasoning_effort = profile.reasoning_effort;
     request.reasoning = profile.reasoning;
     request.reasoning_history = profile.reasoning_history;
+    request.server_tool_search = profile.server_tool_search;
 }
 
 void SanitizeRequest(Request& request) {
     request.model = platform::SanitizeExternalText(request.model);
     request.system = platform::SanitizeExternalText(request.system);
     request.reasoning_effort = platform::SanitizeExternalText(request.reasoning_effort);
+    request.server_tool_search = platform::SanitizeExternalText(request.server_tool_search);
     for (auto& message : request.messages) {
         SanitizeMessage(message);
     }

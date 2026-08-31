@@ -1677,6 +1677,11 @@
             "dialect": {
               "effort_path": "output_config.effort"
             }
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
           }
         },
         "claude-fable-latest": {
@@ -1744,6 +1749,11 @@
               "min": 1024
             },
             "wireDialect": "budget"
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
           }
         },
         "claude-haiku-latest": {
@@ -1889,6 +1899,11 @@
               "min": 1024
             },
             "wireDialect": "budget"
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
           }
         },
         "claude-opus-4-6": {
@@ -1937,6 +1952,11 @@
             "dialect": {
               "effort_path": "output_config.effort"
             }
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
           }
         },
         "claude-opus-4-6-v1": {
@@ -2031,6 +2051,11 @@
             "dialect": {
               "effort_path": "output_config.effort"
             }
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
           }
         },
         "claude-opus-4-7-fast": {
@@ -2119,6 +2144,11 @@
             "dialect": {
               "effort_path": "output_config.effort"
             }
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
           }
         },
         "claude-opus-4-8-fast": {
@@ -2196,6 +2226,11 @@
             "dialect": {
               "effort_path": "output_config.effort"
             }
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
           }
         },
         "claude-opus-5-fast": {
@@ -2336,6 +2371,11 @@
               "min": 1024
             },
             "wireDialect": "budget"
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
           }
         },
         "claude-sonnet-4-6": {
@@ -2384,6 +2424,11 @@
             "dialect": {
               "effort_path": "output_config.effort"
             }
+          },
+          "deferred_tools": {
+            "mode": "native_reference",
+            "tool_reference": true,
+            "server_tool_search": "regex"
           }
         },
         "claude-sonnet-5": {

@@ -82,17 +82,59 @@ api::Message UserToolResult(const std::string& id, const std::string& content, b
 // 模式解析(§四)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("DeferredToolMode: 配置词与枚举对上,native_reference 不放行") {
+TEST_CASE("DeferredToolMode: 配置词与枚举对上(P3 起 native 放行)") {
     CHECK(tools::ParseDeferredToolMode("") == tools::DeferredToolMode::LegacyExpand);
     CHECK(tools::ParseDeferredToolMode("legacy_expand") == tools::DeferredToolMode::LegacyExpand);
     CHECK(tools::ParseDeferredToolMode("disabled") == tools::DeferredToolMode::Disabled);
     CHECK(tools::ParseDeferredToolMode("proxy_reference") == tools::DeferredToolMode::ProxyReference);
-    // P3 未落地:native_reference 显式拒绝,不悄悄开路。
-    CHECK(tools::ParseDeferredToolMode("native_reference") == std::nullopt);
+    // P3:native_reference 放行——配置层收下,生效过装配期两道门。
+    CHECK(tools::ParseDeferredToolMode("native_reference") == tools::DeferredToolMode::NativeReference);
     CHECK(tools::ParseDeferredToolMode("垃圾值") == std::nullopt);
     CHECK(tools::DeferredToolModeName(tools::DeferredToolMode::ProxyReference) == "proxy_reference");
     CHECK(tools::DeferredToolModeName(tools::DeferredToolMode::LegacyExpand) == "legacy_expand");
     CHECK(tools::DeferredToolModeName(tools::DeferredToolMode::Disabled) == "disabled");
+    CHECK(tools::DeferredToolModeName(tools::DeferredToolMode::NativeReference) == "native_reference");
+}
+
+// ---------------------------------------------------------------------------
+// 有效模式判定(P3·§四/§七:wire + 目录能力两道门,兼容端不得误开)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ResolveDeferredToolMode: 两道门全开才 native,门不开大声回落") {
+    // 门全开:配置 native + anthropic wire + 目录声明 -> native + 变体递进。
+    const auto native = tools::ResolveDeferredToolMode("native_reference", /*wire_is_anthropic=*/true,
+                                                        /*catalog_native_declared=*/true, "regex");
+    CHECK(native.mode == tools::DeferredToolMode::NativeReference);
+    CHECK(native.server_tool_search == "regex");
+    CHECK(native.native_denial.empty());
+
+    // 门一(非 anthropic wire):回落 legacy,denial 点名 wire。
+    const auto wrong_wire = tools::ResolveDeferredToolMode("native_reference", /*wire_is_anthropic=*/false,
+                                                           /*catalog_native_declared=*/true, "regex");
+    CHECK(wrong_wire.mode == tools::DeferredToolMode::LegacyExpand);
+    REQUIRE_FALSE(wrong_wire.native_denial.empty());
+    CHECK(wrong_wire.native_denial.find("anthropic wire") != std::string::npos);
+
+    // 门二(目录没声明):回落 legacy,denial 点名目录声明——第三方 Anthropic
+    // 兼容端点(不声明)天然不开,不按厂名猜。
+    const auto no_catalog = tools::ResolveDeferredToolMode("native_reference", /*wire_is_anthropic=*/true,
+                                                           /*catalog_native_declared=*/false, "");
+    CHECK(no_catalog.mode == tools::DeferredToolMode::LegacyExpand);
+    REQUIRE_FALSE(no_catalog.native_denial.empty());
+    CHECK(no_catalog.native_denial.find("deferred_tools") != std::string::npos);
+
+    // 目录声明了但配置没点名 native:照配置走(默认回落 proxy 是 P4 的活,
+    // 现状空配置 = legacy_expand)。
+    const auto not_requested =
+        tools::ResolveDeferredToolMode("", /*wire_is_anthropic=*/true, /*catalog_native_declared=*/true, "regex");
+    CHECK(not_requested.mode == tools::DeferredToolMode::LegacyExpand);
+    CHECK(not_requested.native_denial.empty());
+
+    // 非三值的旧档照旧,不受两道门影响。
+    const auto proxy = tools::ResolveDeferredToolMode("proxy_reference", /*wire_is_anthropic=*/false,
+                                                      /*catalog_native_declared=*/false, "");
+    CHECK(proxy.mode == tools::DeferredToolMode::ProxyReference);
+    CHECK(proxy.native_denial.empty());
 }
 
 // ---------------------------------------------------------------------------

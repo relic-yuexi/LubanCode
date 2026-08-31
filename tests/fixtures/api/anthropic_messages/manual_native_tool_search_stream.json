@@ -1,0 +1,33 @@
+{
+  "fixture_id": "manual_native_tool_search_stream",
+  "wire": "anthropic-messages",
+  "provider": "anthropic",
+  "model": "claude-opus-5",
+  "scenario": "server_tool_search_then_tool_use",
+  "source_document": "internal",
+  "captured_at": "2026-08-31",
+  "request_expectation": {
+    "server_tool_search": "regex",
+    "tools": [{"name": "tool_search_tool_regex_20251119"}, {"name": "mcp__github__search_issues", "defer_loading": true}]
+  },
+  "expected_events": [
+    "MessageStart",
+    "TextDelta",
+    "ContentBlockDone",
+    "ServerToolUseStart",
+    "ToolUseInputDelta",
+    "ContentBlockDone",
+    "ServerToolResult",
+    "ContentBlockDone",
+    "ToolUseStart",
+    "ToolUseInputDelta",
+    "ContentBlockDone",
+    "MessageDone"
+  ],
+  "expected_replay": [
+    "第二轮回传 server_tool_use + tool_search_tool_result 原样块(不配 tool_result),tool_use 配 tool_result"
+  ],
+  "usage_expectation": {"input_tokens": 25, "output_tokens": 40, "cache_read_tokens": 0, "cache_creation_tokens": 0},
+  "stop_reason": "tool_use",
+  "notes": "手工转写自官方文档(platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool 的 Streaming 节,2026-08-31 核对):四枚原生字段名与嵌套形状按文档逐字,正文与 id 为短合成字样;手册来源不在登记的四份之内,故记 internal。真机核对未做(本机无钥匙),对照脚本在 tests/manual/native_tool_search_cache_compare.py。"
+}

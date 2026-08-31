@@ -205,9 +205,10 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
             TermOut() << "\n── " << trf("cmd.context.group.structure") << " ──\n";
         }
         // deferred_tool_mode(动态工具 PromptCache 守恒单 P0 起;P1 补
-        // proxy_reference 档):如实展示当前这一档。proxy 路提示"发现走
-        // tool_search、调用走 tool_invoke,前缀不断";legacy 路照旧提示
-        // 断前缀(cache-hostile 兼容路)。
+        // proxy_reference 档,P3 补 native_reference 档):如实展示当前这一
+        // 档。proxy 路提示"发现走 tool_search、调用走 tool_invoke,前缀不断";
+        // native 路提示"发现走 provider 服务端搜索、defer_loading 保前缀";
+        // legacy 路照旧提示断前缀(cache-hostile 兼容路)。
         if (deferred_tool_summary != nullptr) {
             TermOut() << "  "
                       << trf("cmd.context.deferred_tool_mode", deferred_tool_summary->mode_label,
@@ -215,8 +216,10 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                       << "\n";
             if (deferred_tool_summary->enabled) {
                 TermOut() << tr(deferred_tool_summary->mode_label == "proxy_reference"
-                                     ? "cmd.context.deferred_tool_mode.proxy_hint"
-                                     : "cmd.context.deferred_tool_mode.legacy_hint")
+                                    ? "cmd.context.deferred_tool_mode.proxy_hint"
+                                    : deferred_tool_summary->mode_label == "native_reference"
+                                          ? "cmd.context.deferred_tool_mode.native_hint"
+                                          : "cmd.context.deferred_tool_mode.legacy_hint")
                           << "\n";
             }
         }
@@ -1518,7 +1521,10 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
             in.proxy_reference
                 ? lubancode::tools::DeferredToolModeLabel(lubancode::tools::DeferredToolMode::ProxyReference,
                                                           /*deferral_enabled=*/true)
-                : lubancode::tools::DeferredToolModeLabel(in.tool_deferral);
+                : in.native_reference
+                      ? lubancode::tools::DeferredToolModeLabel(
+                            lubancode::tools::DeferredToolMode::NativeReference, /*deferral_enabled=*/true)
+                      : lubancode::tools::DeferredToolModeLabel(in.tool_deferral);
         for (const auto& tool : in.registry->All()) {
             if (!tool->deferred()) {
                 continue;
@@ -2072,6 +2078,7 @@ CommandFlow HandleSlashContext(SlashDispatchContext& ctx, const lubancode::cli::
     context_in.tool_filter = ctx.main_tool_filter;
     context_in.tool_deferral = ctx.main_deferral;
     context_in.proxy_reference = ctx.main_proxy_reference;
+    context_in.native_reference = ctx.main_native_reference;
     context_in.loaded_tools = &**ctx.loaded_tools;
     context_in.agent = ctx.main_agent;
     context_in.context_tracker = ctx.context_tracker;

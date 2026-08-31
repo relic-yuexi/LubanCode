@@ -31,6 +31,7 @@
 #include <nlohmann/json.hpp>
 
 #include "api/reasoning.hpp"
+#include "config/provider_catalog.hpp"  // DeferredToolsCapability:原生引用能力的解析体(providers.json 与 models.json 同一款)
 
 namespace lubancode::config {
 
@@ -66,7 +67,16 @@ struct ModelCatalogEntry {
     //(realtime/image-generation/reasoning/...),目录没写的键当没声明。
     // 这不是"模型会不会干活"的判词,只给 /model 的端点相性提示用。
     std::map<std::string, bool> capabilities;
+    // 原生引用能力(动态工具 P3):deferred_tools 段,providers.json 内置
+    // 条目抄来或用户 models.json 自写。declared=false(没写)= 不开
+    // native,不按厂名猜。
+    DeferredToolsCapability deferred_tools;
 };
+
+// 动态工具 P3:目录条目是否声明了原生引用能力。declared 且
+// tool_reference=true 才算全套声明(server_tool_search 空 = 只声明引用
+// 能力,装配层那头按"无服务端搜索"处理)。纯函数,好单测。
+DeferredToolsCapability ClassifyNativeToolSearch(const ModelCatalogEntry* entry);
 
 // 模型与请求端点的相性分类(纯函数):catalog 条目的 capabilities 与模型
 // 名合判。Realtime 模型(gpt-*-realtime-* 一类)吃的是 Realtime/WebSocket

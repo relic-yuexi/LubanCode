@@ -380,7 +380,8 @@ std::expected<ProviderCatalogModel, std::string> ParseModel(const std::string& i
                                                             Wire wire) {
     if (!value.is_object()) return std::unexpected(where + " 必须是 JSON object");
     if (auto known = RejectUnknown(value, {"name", "description", "context_window", "max_output",
-                                           "default_think", "capabilities", "reasoning"}, where);
+                                           "default_think", "capabilities", "deferred_tools", "reasoning"},
+                                   where);
         !known.has_value()) return std::unexpected(known.error());
     ProviderCatalogModel model;
     model.id = id;
@@ -409,6 +410,38 @@ std::expected<ProviderCatalogModel, std::string> ParseModel(const std::string& i
             }
             model.capabilities[it.key()] = it.value().get<bool>();
         }
+    }
+    if (value.contains("deferred_tools")) {
+        // 动态工具 P3:模型级原生引用能力。字段形状严格(与 schema 的
+        // additionalProperties=false 同一口径):mode 只认 native_reference,
+        // server_tool_search 只认 regex/bm25——目录是能力事实源,写歪了整份
+        // 拒收,不带病生效。
+        const json& deferred = value["deferred_tools"];
+        if (!deferred.is_object()) return std::unexpected(where + ".deferred_tools 必须是 object");
+        if (auto known = RejectUnknown(deferred, {"mode", "tool_reference", "server_tool_search"},
+                                       where + ".deferred_tools");
+            !known.has_value())
+            return std::unexpected(known.error());
+        const std::string mode = deferred.value("mode", std::string());
+        if (mode != "native_reference") {
+            return std::unexpected(where + ".deferred_tools.mode 只认 native_reference(当前: " + mode + ")");
+        }
+        if (deferred.contains("tool_reference") && !deferred["tool_reference"].is_boolean()) {
+            return std::unexpected(where + ".deferred_tools.tool_reference 必须是布尔值");
+        }
+        if (deferred.contains("server_tool_search")) {
+            if (!deferred["server_tool_search"].is_string()) {
+                return std::unexpected(where + ".deferred_tools.server_tool_search 必须是字符串");
+            }
+            const std::string variant = deferred["server_tool_search"].get<std::string>();
+            if (variant != "regex" && variant != "bm25") {
+                return std::unexpected(where + ".deferred_tools.server_tool_search 只认 regex|bm25(当前: " +
+                                        variant + ")");
+            }
+            model.deferred_tools.server_tool_search = variant;
+        }
+        model.deferred_tools.declared = true;
+        model.deferred_tools.tool_reference = deferred.value("tool_reference", false);
     }
     if (value.contains("reasoning")) {
         auto reasoning = ParseReasoning(value["reasoning"], where + ".reasoning", provider_dialect);
