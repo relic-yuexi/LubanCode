@@ -1,6 +1,6 @@
 # 动态工具 Prompt Cache 守恒与按需调用设计
 
-- 状态：P0 已落（a6c48f7，2026-08-31 补账）；P1 通用 ProxyReference 已落（2026-08-31，待主控验收）；P2 条件工具也守恒已落（2026-08-31，待主控验收）；P3/P4 未动
+- 状态：P0 已落（a6c48f7，2026-08-31 补账）；P1 通用 ProxyReference 已落（2026-08-31，待主控验收）；P2 条件工具也守恒已落（2026-08-31，待主控验收）；P3 Claude NativeReference 已落（2026-09-01，待主控验收；真机 cache usage 一栏未验——本机无钥匙，对照脚本已备）；P4 未动
 - 日期：2026-08-31
 - 级别：P1（长会话成本、首 token 延迟与工具扩展性的共同底座）
 - 范围：`tool_search`、延迟工具、条件工具、四条 wire、前缀账、会话恢复、compact、工具执行正门
@@ -651,13 +651,14 @@ proxy 多走一步，未必总比全量 tools 便宜。短会话、少工具时�
 
 ### P3：Claude NativeReference
 
-- [ ] 扩 `api::ToolDefinition::load_mode`。
-- [ ] Anthropic request 映射 `defer_loading` 与 server tool search。
-- [ ] 解析、保存、恢复 `tool_reference` 等原生块。
-- [ ] capability catalog 接线；兼容端不得误开。
-- [ ] 跑 Claude 真机 cache usage 对照。
+- [x] 扩 `api::ToolDefinition::load_mode`。（api/types.hpp:ToolLoadMode{Eager,Deferred}+ToolDefinition.load_mode 缺省 Eager,旧聚合初始化不动;agent.cpp 的 BuildToolDefinitions 在皮上 native_deferred_tools 时给 deferred() 定义标 Deferred——定义照发全文,只改暴露方式(§7.1);prefix.cpp 的 SameTools/FingerprintRequest 把 load_mode 计入指纹(同枚定义翻档=请求字节翻动,epoch 如实断);chat/responses/gemini 三 wire 不认该概念,照旧全量发定义不丢块(红线 3"不得擅自丢定义"的反面钉在三家 request.cpp 注释里),内容块侧则给两枚原生块留了明降级文本路,不悄悄丢)
+- [x] Anthropic request 映射 `defer_loading` 与 server tool search。（client.cpp 的 BuildRequestJson:Deferred 定义加 "defer_loading":true,Eager 不带字段(与从前逐字节一致);request.server_tool_search 非空时 tools 追加 {"type":"tool_search_tool_regex_20251119","name":"tool_search_tool_regex"}(bm25 同款)——变体是同日发布的算法变体,由目录声明不在这头猜;搜索工具自身绝不 defer(官方明令);全表 deferred 的防御降级(官方 400 合同)。声明走请求档案不走 backend 构造:模型级能力,/model 切档即随换。§7.3 落地:端点 4xx 提及 defer_loading/tool_search_tool/tool_reference/server_tool_use 时错误文案点名"目录声明与端点能力不符+指路 proxy_reference",本轮不自动改发)
+- [x] 解析、保存、恢复 `tool_reference` 等原生块。（中立层两枚新块:ServerToolUseBlock{id,name,input} 与 ServerToolResultBlock{tool_use_id,content 原始 JSON 无损},ToolUseBlock 补 caller(§7.2"对应 id/caller/error");anthropic 解析门只对本请求声明过 server_tool_search 的流开,且只认 tool_search 两枚名字——web_search 等其他 server tool 照旧静默跳过,旧行为一字不动;流式入参照官方样例(input_json_delta 增量、结果块随 start 整只到齐);session JSONL 存档/恢复逐字段往返,坏块弃块不弃消息;显示走 BuiltinTool 卡(发现 N 枚工具: 名单 / error_code);compact/恢复/重放同一形状;tests:anthropic_events 五册(开关门/完整官方流/error 变体/assembler 攒块)+session_store 两册+wire_replay 回环一册(原生对块原样回传、srvtoolu 绝不配 tool_result、发现的工具照配)+夹具 manual_native_tool_search_stream(手工转写官方 Streaming 节,记 internal 并注明真机未核))
+- [x] capability catalog 接线；兼容端不得误开。（providers.json/providers.schema.json 模型级新段 deferred_tools{mode,tool_reference,server_tool_search},形状严格(坏段整份拒);providers.json 给官方表确认的九枚模型落声明(Fable5/Opus5/4.8/4.7/4.6/Sonnet4.6/Opus4.5/Sonnet4.5/Haiku4.5,-fast/-latest/v1/更早世代不在表内不标);ProviderCatalogModel 与 ModelCatalogEntry(用户 models.json 可自写)都带该段;ClassifyNativeToolSearch 判读(declared+tool_reference 齐了才算,半截不认);tools::ResolveDeferredToolMode 纯函数收两道门——wire=anthropic 且目录显式声明才 native,门不开而配置点名时大声报 denial 回落 legacy_expand 不悄悄换路(红线 2);交互/单发两路装配(session_stack/one_shot)同款接线;/model 切到未声明模型时停发声明并大声提示,切回自动恢复;config 的 deferred_tool_mode 放行 native_reference 四值;册:test_deferred_tool_resolver 两册/test_config 一册/test_provider_catalog 两册/test_model_catalog 两册)
+- [ ] 跑 Claude 真机 cache usage 对照。（**未验**——本机无 Anthropic 钥匙/真机,P3 落地日(2026-09-01)如实留空:结构侧三拍前缀合同已由单测钉死(test_request_prefix"P3三拍前缀合同"册:发现与直调前后 system/tools 指纹逐位不变、messages 只追加、原生块无损重放、真工具恰执行一次走正门、wire 落形三样俱全);provider_reported 一栏的对照夹具已备好——tests/manual/native_tool_search_cache_compare.py(Disabled/NativeReference 两档三拍对话,逐请求记 input/cache_read/cache_write/output/块型,两栏口径按 §11.2,无 usage 写 unknown 不写 0)+夹具 manual_native_tool_search_stream;钥匙到位后跑脚本补测,不冒充已实测)
 
 验收：官方原生链无损走通；发现前后旧前缀守恒；模型直接调用真实工具仍走本地安全正门。
+（2026-09-01 P3 验收账:原生链无损在 wire_replay"原生工具搜索"回环册钉绿——server_tool_use/tool_search_tool_result(含嵌套 tool_reference 与 error 变体)解析/攒块/存档/回传逐字段一致,srvtoolu id 绝不配 tool_result,发现的工具照常配;前缀守恒在 test_request_prefix"P3三拍前缀合同"册钉绿;安全正门在 P1/P2 既有册(直名调用的 filter/turn 闸/确认/Hook 全套)之上叠加"真工具恰执行一次、服务端搜索不在本地执行"的账;真机 cache usage 一栏未验(无钥匙),对照脚本与夹具已备,如实留白。）
 
 ### P4：默认切换与旧路退场
 

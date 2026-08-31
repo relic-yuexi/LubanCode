@@ -27,6 +27,7 @@
 #include "turn_event_recorder.hpp"
 #include "agent/loop.hpp"
 #include "agent/prefix.hpp"
+#include "api/anthropic/client.hpp"  // P3:native 三拍合同的 wire 落形(defer_loading/服务端声明/原生块回传)
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "tools/registry.hpp"
@@ -1060,4 +1061,174 @@ TEST_CASE("P2三回合前缀合同: 普通/goal/loop 三种回合 tools 与 syst
     CHECK(refused->is_error);
     CHECK(refused->content.find("goal_checkpoint") != std::string::npos);
     CHECK(refused->content.find("等相应轮次") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 动态工具 PromptCache 守恒单 P3(Claude NativeReference·§十三 P3 验收):
+// 原生路三拍前缀合同。接线是生产同款(interactive_session_assembly 的 P3
+// 分支同一套形状):皮上 native_deferred_tools + 请求档案 server_tool_search,
+// 暴露过滤放行延迟工具(定义照发、标 load_mode=Deferred),不挂本地
+// tool_search/tool_invoke,system 无动态索引段。
+// 三拍:R1 用户问 -> 响应里 provider 已做完搜索(server_tool_use +
+// tool_search_tool_result,本地不执行)并直调真实工具 -> 宿主过 RunOneTool
+// 正门执行 -> R2 回喂结果收口。逐拍验:
+//   1. system/tools/model 指纹逐位不变(延迟定义每轮同一 catalog 生成,
+//      发现不进 loaded、不改 tools);
+//   2. messages 只追加——原生对块(server_tool_use/tool_search_tool_result)
+//      原样随历史重放,不压文本、不追改;
+//   3. 延迟目标每份请求都在顶层 tools 且 load_mode=Deferred(defer_loading);
+//   4. 服务端搜索绝不在本地执行,真实工具恰好执行一次、走正门;
+//   5. 捕获的请求经 anthropic BuildRequestJson 落成官方 wire:defer_loading、
+//      server tool 声明、原生块回传三样俱全(与 test_anthropic_request 的
+//      纯映射册互为表里)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("P3三拍前缀合同: native_reference 发现与直调前后 system/tools 指纹不变,原生块无损重放") {
+    CaptureBackend backend;
+    class CountingTarget : public tools::Tool {
+    public:
+        std::string name() const override { return "mcp__github__search_issues"; }
+        std::string description() const override { return "Search issues in a GitHub repository."; }
+        nlohmann::json input_schema() const override {
+            return nlohmann::json{{"type", "object"},
+                                  {"properties", {{"query", {{"type", "string"}}}}},
+                                  {"required", nlohmann::json::array({"query"})}};
+        }
+        bool deferred() const override { return true; }
+        bool needs_confirm() const override { return false; }
+        tools::Tool::Result execute(const nlohmann::json& input) override {
+            ++calls;
+            return {"命中结果:" + input.value("query", std::string()), false};
+        }
+        int calls = 0;
+    };
+    auto target = std::make_unique<CountingTarget>();
+    CountingTarget* target_ptr = target.get();
+
+    // 一枚核心(eager)工具 + 延迟目标:官方约束"至少一枚非 deferred"由
+    // 核心工具天然满足。
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FixedTool>("read_file", "file body"));
+    registry.Register(std::move(target));
+
+    // 生产同款 native 接线:皮上 native_deferred_tools,请求档案带
+    // server_tool_search;暴露过滤全放行(延迟定义照发);无 resolver、无
+    // deferred_index_provider(system 恒定)。
+    agent::AgentProfile profile{.request{.model = "claude-opus-5"}, .system_prompt = "system prompt"};
+    profile.request.server_tool_search = "regex";
+    profile.native_deferred_tools = true;
+    profile.tool_filter = [](const tools::Tool&) { return true; };
+
+    agent::Agent loop(backend, registry, std::move(profile));
+    agent::TurnWiring callbacks;
+
+    // R1:provider 服务端搜索 + 直调真实工具。server 块是中性事件,假后端
+    // 直接吐(anthropic parser 的逐帧解析在 test_anthropic_events 册钉着)。
+    backend.scripts = {
+        {
+            api::MessageStart{"msg_1", "claude-opus-5"},
+            api::ServerToolUseStart{0, "srvtoolu_01ABC", "tool_search_tool_regex"},
+            api::ToolUseInputDelta{0, R"({"pattern":"github issue","limit":5})"},
+            api::ContentBlockDone{0},
+            api::ServerToolResult{
+                1, "srvtoolu_01ABC",
+                nlohmann::json{{"type", "tool_search_tool_search_result"},
+                               {"tool_references", nlohmann::json::array({nlohmann::json{
+                                                      {"type", "tool_reference"},
+                                                      {"tool_name", "mcp__github__search_issues"}}})}}},
+            api::ContentBlockDone{1},
+            api::ToolUseStart{2, "toolu_01XYZ", "mcp__github__search_issues"},
+            api::ToolUseInputDelta{2, R"({"query":"repo:lubancode cache"})"},
+            api::ContentBlockDone{2},
+            api::MessageDone{"tool_use", api::Usage{}},
+        },
+        TextScript("搜到了,也调了。"),
+    };
+    REQUIRE(loop.Run("帮我查 lubancode 的 issue", callbacks).has_value());
+    REQUIRE(backend.captured.size() == 2);
+    REQUIRE(target_ptr->calls == 1);  // 真实工具恰好执行一次,本地正门
+
+    // ---- 合同一:system/tools/model 指纹逐位不变 --------------------------
+    const agent::PrefixFingerprint first = agent::FingerprintRequest(backend.captured[0]);
+    const agent::PrefixFingerprint second = agent::FingerprintRequest(backend.captured[1]);
+    CHECK(second.system_hash == first.system_hash);
+    CHECK(second.tools_hash == first.tools_hash);
+    CHECK(backend.captured[1].model == backend.captured[0].model);
+
+    // ---- 合同二:messages 只追加,原生对块原样随历史重放 ------------------
+    CHECK(agent::IsAppendOnlySuccessor(backend.captured[0], backend.captured[1]));
+    bool replayed_use = false;
+    bool replayed_result = false;
+    for (const auto& message : backend.captured[1].messages) {
+        for (const auto& block : message.content) {
+            if (const auto* use = std::get_if<api::ServerToolUseBlock>(&block);
+                use != nullptr && use->id == "srvtoolu_01ABC") {
+                replayed_use = use->input.at("pattern") == "github issue";
+            }
+            if (const auto* result = std::get_if<api::ServerToolResultBlock>(&block);
+                result != nullptr && result->tool_use_id == "srvtoolu_01ABC") {
+                replayed_result =
+                    result->content.at("tool_references").at(0).at("tool_name") == "mcp__github__search_issues";
+            }
+        }
+    }
+    CHECK(replayed_use);
+    CHECK(replayed_result);
+
+    // ---- 合同三:每份请求的顶层 tools 里延迟目标常驻且 Deferred -----------
+    // (核心工具恒 Eager;没有本地 tool_search/tool_invoke。)
+    for (const auto& request : backend.captured) {
+        bool saw_target = false;
+        bool saw_core = false;
+        for (const auto& def : request.tools) {
+            if (def.name == "mcp__github__search_issues") {
+                saw_target = true;
+                CHECK(def.load_mode == api::ToolLoadMode::Deferred);
+            } else if (def.name == "read_file") {
+                saw_core = true;
+                CHECK(def.load_mode == api::ToolLoadMode::Eager);
+            }
+            CHECK_MESSAGE(def.name != "tool_search", "native 路不挂本地 tool_search");
+            CHECK_MESSAGE(def.name != "tool_invoke", "native 路不挂本地 tool_invoke");
+        }
+        CHECK(saw_target);
+        CHECK(saw_core);
+        CHECK(request.system.find("mcp__github__search_issues") == std::string::npos);
+    }
+
+    // ---- 合同四:服务端搜索声明随每份请求(请求档案带过去) ---------------
+    for (const auto& request : backend.captured) {
+        CHECK(request.server_tool_search == "regex");
+    }
+
+    // ---- 合同五:捕获的 R2 落成官方 wire(与 anthropic 映射册互为表里) ---
+    const nlohmann::json wire =
+        api::anthropic::BuildRequestJson(backend.captured[1], /*native_web_search=*/false,
+                                         nlohmann::json::object());
+    bool saw_defer = false;
+    bool saw_declaration = false;
+    for (const auto& tool : wire.at("tools")) {
+        if (tool.at("name") == "mcp__github__search_issues") {
+            saw_defer = tool.value("defer_loading", false) == true;
+        }
+        if (tool.value("type", std::string()) == "tool_search_tool_regex_20251119") {
+            saw_declaration = true;
+        }
+    }
+    CHECK(saw_defer);
+    CHECK(saw_declaration);
+    bool wire_replayed_result = false;
+    for (const auto& message : wire.at("messages")) {
+        for (const auto& block : message.at("content")) {
+            if (block.value("type", std::string()) == "tool_search_tool_result" &&
+                block.at("tool_use_id") == "srvtoolu_01ABC") {
+                wire_replayed_result = block.at("content")
+                                           .at("tool_references")
+                                           .at(0)
+                                           .at("tool_name")
+                                           .get<std::string>() == "mcp__github__search_issues";
+            }
+        }
+    }
+    CHECK(wire_replayed_result);
 }

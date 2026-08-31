@@ -189,6 +189,27 @@ std::optional<ModelCatalogEntry> ParseEntry(const nlohmann::json& item, std::str
         }
     }
 
+    // deferred_tools(动态工具 P3):模型级原生引用能力,与 providers.json
+    // 的段同一形状。校验从宽(目录是锦上添花:坏段跳条目并记警告,不拦
+    // 启动——与整个 ParseEntry 的规矩一致);mode 只认 native_reference。
+    if (item.contains("deferred_tools")) {
+        const nlohmann::json& deferred = item["deferred_tools"];
+        if (!deferred.is_object()) {
+            error_out = "deferred_tools 字段必须是 object";
+            return std::nullopt;
+        }
+        const std::string mode = deferred.value("mode", std::string());
+        const std::string variant = deferred.value("server_tool_search", std::string());
+        const bool tool_reference = deferred.value("tool_reference", false);
+        if (mode != "native_reference" || (!variant.empty() && variant != "regex" && variant != "bm25")) {
+            error_out = "deferred_tools 段不合规(mode 须 native_reference,server_tool_search 须 regex|bm25)";
+            return std::nullopt;
+        }
+        entry.deferred_tools.declared = true;
+        entry.deferred_tools.tool_reference = tool_reference;
+        entry.deferred_tools.server_tool_search = variant;
+    }
+
     return entry;
 }
 
@@ -209,6 +230,9 @@ ModelCatalog BuiltinModelsFromProviderCatalog() {
             entry.max_output_tokens = model.max_output_tokens;
             entry.reasoning = model.reasoning;
             entry.capabilities = model.capabilities;
+            // 动态工具 P3:原生引用能力随模型条目抄进目录(用户 models.json
+            // 的同 slug 条目在合并时压过内置份,能力声明一起换)。
+            entry.deferred_tools = model.deferred_tools;
             // 巡检单 P2(推理档位边界):目录声明"只出图、不吃推理"的模型
             //(image-generation=true 且 reasoning 不在能力表),推理档案
             // 显式落 declined——四家 wire 一律停发推理参数;用户档位
@@ -233,6 +257,18 @@ ModelCatalog BuiltinModelsFromProviderCatalog() {
 }
 
 }  // namespace
+
+DeferredToolsCapability ClassifyNativeToolSearch(const ModelCatalogEntry* entry) {
+    // 动态工具 P3:目录没声明(或条目不在目录)就是"不开",不猜。声明了
+    // 但 tool_reference=false 是自相矛盾的半截声明,也当没声明——引用能力
+    // 是原生路的最低门槛。
+    DeferredToolsCapability out;
+    if (entry == nullptr || !entry->deferred_tools.declared || !entry->deferred_tools.tool_reference) {
+        return out;
+    }
+    out = entry->deferred_tools;
+    return out;
+}
 
 ModelEndpointKind ClassifyModelEndpoint(const ModelCatalogEntry* entry, const std::string& model_id) {
     const auto cap = [entry](const char* key) {

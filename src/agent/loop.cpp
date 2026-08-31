@@ -677,6 +677,43 @@ std::string BuildLengthContinuationText() {
            "要么用不超过五行给出检查点(已确认的事实、下一步)。不要再继续推理。";
 }
 
+// ---------------------------------------------------------------------------
+// 服务端工具搜索(动态工具 P3):结果块内容 -> 显示卡的摘要与错误位。
+// content 是 wire 的嵌套原文:tool_search_tool_search_result(tool_references
+// 名单)或 tool_search_tool_result_error(error_code/error_message)。这里只折
+// 给人看的一句,历史块本身一行不动(单子 §7.2 无损保存)。
+// ---------------------------------------------------------------------------
+std::string ServerToolSearchSummary(const nlohmann::json& content) {
+    if (!content.is_object()) {
+        return "服务端工具搜索完成";
+    }
+    const std::string type = content.value("type", std::string());
+    if (type == "tool_search_tool_result_error") {
+        return "服务端工具搜索失败: " + content.value("error_code", std::string("unknown")) + " " +
+               content.value("error_message", std::string());
+    }
+    if (content.contains("tool_references") && content["tool_references"].is_array()) {
+        std::string names;
+        for (const auto& reference : content["tool_references"]) {
+            if (reference.is_object() && reference.contains("tool_name") && reference["tool_name"].is_string()) {
+                if (!names.empty()) {
+                    names += ", ";
+                }
+                names += reference["tool_name"].get<std::string>();
+            }
+        }
+        if (names.empty()) {
+            return "服务端工具搜索:没有命中的工具";
+        }
+        return "服务端工具搜索发现 " + std::to_string(content["tool_references"].size()) + " 枚工具: " + names;
+    }
+    return "服务端工具搜索完成";
+}
+
+bool ServerToolSearchFailed(const nlohmann::json& content) {
+    return content.is_object() && content.value("type", std::string()) == "tool_search_tool_result_error";
+}
+
 // 前缀 debug 开关(环境变量 LUBANCODE_DEBUG_PREFIX 任意非空值打开):
 // 每次请求跟上一份比,打一行断因与追加律。只打断因、位置与 hash,不打
 // system 正文、工具参数、记忆正文(前缀缓存守恒单"不做"节)。
@@ -1226,6 +1263,20 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                         } else if constexpr (std::is_same_v<T, api::BuiltinToolDone>) {
                             if (wiring.events != nullptr) {
                                 wiring.events->OnBuiltinToolDone(e.id, e.name, e.input, e.summary, e.is_error);
+                            }
+                        } else if constexpr (std::is_same_v<T, api::ServerToolUseStart>) {
+                            // 服务端工具搜索(动态工具 P3):provider 执行的搜索,
+                            // 复用服务端内置工具的显示卡——只画轨迹,绝不在本地
+                            // 执行。入参还在后头的增量里,这里先起卡。
+                            if (wiring.events != nullptr) {
+                                wiring.events->OnBuiltinToolStart(e.id, e.name, nlohmann::json::object());
+                            }
+                        } else if constexpr (std::is_same_v<T, api::ServerToolResult>) {
+                            if (wiring.events != nullptr) {
+                                wiring.events->OnBuiltinToolDone(e.tool_use_id, "tool_search",
+                                                                 nlohmann::json::object(),
+                                                                 ServerToolSearchSummary(e.content),
+                                                                 ServerToolSearchFailed(e.content));
                             }
                         }
                     },

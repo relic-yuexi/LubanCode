@@ -489,3 +489,63 @@ TEST_CASE("ClassifyImageInputSupport:input_modalities 与 capabilities 合判,�
     conflict.capabilities["image"] = true;
     CHECK(config::ClassifyImageInputSupport(&conflict) == config::ImageInputSupport::TextOnly);
 }
+
+
+// ---------------------------------------------------------------------------
+// 动态工具 P3(Claude NativeReference):models.json 条目的 deferred_tools
+// 声明与 ClassifyNativeToolSearch 判读。目录不写 = 不声明,不按厂名猜
+//(单子红线 2:兼容端不得误开)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("models.json 条目可写 deferred_tools,坏段按坏条目拒(P3)") {
+    const auto parsed = config::ParseModelCatalogJson(
+        R"({"models":[)"
+        R"({"slug":"claude-x","deferred_tools":{"mode":"native_reference","tool_reference":true,"server_tool_search":"regex"}},)"
+        R"({"slug":"compat-y"})"
+        R"(]})",
+        "test-models.json");
+    REQUIRE(parsed.models.size() == 2);
+    CHECK(parsed.models[0].deferred_tools.declared);
+    CHECK(parsed.models[0].deferred_tools.tool_reference);
+    CHECK(parsed.models[0].deferred_tools.server_tool_search == "regex");
+    CHECK_FALSE(parsed.models[1].deferred_tools.declared);  // 没写 = 不声明
+
+    // 坏段跳条目并记警告:mode 不认 / server_tool_search 不认。
+    const auto bad_mode = config::ParseModelCatalogJson(
+        R"({"models":[{"slug":"bad","deferred_tools":{"mode":"proxy"}}]})", "t.json");
+    CHECK(bad_mode.models.empty());
+    CHECK(bad_mode.warnings.size() == 1);
+    const auto bad_variant = config::ParseModelCatalogJson(
+        R"({"models":[{"slug":"bad","deferred_tools":{"mode":"native_reference","server_tool_search":"向量"}}]})",
+        "t.json");
+    CHECK(bad_variant.models.empty());
+    CHECK(bad_variant.warnings.size() == 1);
+}
+
+TEST_CASE("ClassifyNativeToolSearch:声明与 tool_reference 齐了才算,半截声明不认(P3)") {
+    // 没条目 / 没声明:一律不开,不猜。
+    CHECK_FALSE(config::ClassifyNativeToolSearch(nullptr).declared);
+    config::ModelCatalogEntry plain;
+    plain.slug = "plain";
+    CHECK_FALSE(config::ClassifyNativeToolSearch(&plain).declared);
+
+    // 声明了但 tool_reference=false:自相矛盾的半截,当没声明。
+    config::ModelCatalogEntry half;
+    half.deferred_tools.declared = true;
+    half.deferred_tools.tool_reference = false;
+    CHECK_FALSE(config::ClassifyNativeToolSearch(&half).declared);
+
+    // 全套声明:逐字段递进(变体原样带出,空串 = 只声明引用能力)。
+    config::ModelCatalogEntry full;
+    full.deferred_tools.declared = true;
+    full.deferred_tools.tool_reference = true;
+    full.deferred_tools.server_tool_search = "bm25";
+    const auto capability = config::ClassifyNativeToolSearch(&full);
+    CHECK(capability.declared);
+    CHECK(capability.tool_reference);
+    CHECK(capability.server_tool_search == "bm25");
+    config::ModelCatalogEntry no_search;
+    no_search.deferred_tools.declared = true;
+    no_search.deferred_tools.tool_reference = true;
+    CHECK(config::ClassifyNativeToolSearch(&no_search).server_tool_search.empty());
+}

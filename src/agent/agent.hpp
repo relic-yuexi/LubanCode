@@ -149,6 +149,17 @@ struct AgentProfile {
     // 两截,装配层给 turn.tool_not_active(单子 §十:等相应轮次或换路径)。
     std::function<bool(const tools::Tool&)> tool_turn_gate;
     std::string tool_turn_gate_denial;
+
+    // ---- 动态工具 PromptCache 守恒单 P3(Claude NativeReference·§7.1)-----
+    // 原生延迟声明:真时 BuildToolDefinitions 把 deferred() 工具的定义照发
+    //(暴露过滤须放行),但标 load_mode=Deferred——anthropic wire 映成
+    // defer_loading:true,provider 把这批定义排除在缓存前缀外,发现/调用
+    // 都不断前缀;模型经服务端工具搜索发现后直接按名调用真实工具,本地照
+    // 走 RunOneTool 正门(暴露过滤之外的一切闸都照过)。配套的服务端搜索
+    // 声明在 request.server_tool_search(随请求档案走,/model 切档即随换)。
+    // 假 = 本 Agent 不走原生路(Disabled/LegacyExpand/ProxyReference 行为
+    // 与从前一字不差)。
+    bool native_deferred_tools = false;
 };
 
 // 环境接线(批四·病十二:接线类的门收成一只)。这些都是"宿主把外面的
@@ -185,6 +196,10 @@ public:
     void SetModelInstructions(std::string instructions) { profile_.model_instructions = std::move(instructions); }
     // 魂的会话级同步(/soul、/soul off)。
     void SetSoul(std::string soul) { profile_.soul = std::move(soul); }
+    // 原生延迟声明的会话级同步(动态工具 P3):/model 切到目录未声明
+    // deferred_tools 能力的模型时,装配层关掉它——defer_loading 发给不认的
+    // 模型是必 400 的空承诺;声明与能力随模型走,不做会话级钉死。
+    void SetNativeDeferredTools(bool enabled) { profile_.native_deferred_tools = enabled; }
 
     // 只读访问:运行期诊断(/context、agent 查看态)要展示"这份 loop 实际
     // 吃到的预算与来源",不再让各处自己猜。

@@ -34,7 +34,13 @@ json ContentBlockToJson(const ContentBlock& block) {
                 return json{{"type", "image"},
                             {"source", json{{"type", "base64"}, {"media_type", b.media_type}, {"data", b.data}}}};
             } else if constexpr (std::is_same_v<T, ToolUseBlock>) {
-                return json{{"type", "tool_use"}, {"id", b.id}, {"name", b.name}, {"input", b.input}};
+                json j{{"type", "tool_use"}, {"id", b.id}, {"name", b.name}, {"input", b.input}};
+                // PTC 的调用方标识(动态工具 P3·§7.2):wire 给过的照原样带回,
+                // 没给不造字段。
+                if (!b.caller.empty()) {
+                    j["caller"] = b.caller;
+                }
+                return j;
             } else if constexpr (std::is_same_v<T, ToolResultBlock>) {
                 // 工具结果图片回喂(协议原生):tool_result 的 content 可以是
                 // 块数组,内嵌 image 块——出处 platform.claude.com/docs/en/
@@ -76,6 +82,17 @@ json ContentBlockToJson(const ContentBlock& block) {
             } else if constexpr (std::is_same_v<T, ModelImageBlock>) {
                 // 模型输出图片的替身:引用翻短文本标记,base64 不回传。
                 return json{{"type", "text"}, {"text", ModelImageReplayText(b)}};
+            } else if constexpr (std::is_same_v<T, ServerToolUseBlock>) {
+                // 服务端工具搜索(动态工具 P3·§7.2):provider 执行过的调用事实,
+                // 下一轮原样回传(官方要求 assistant content 不改,含这对块)。
+                // 绝不给它的 srvtoolu_ id 配 tool_result——服务端会 400。
+                return json{{"type", "server_tool_use"}, {"id", b.id}, {"name", b.name}, {"input", b.input}};
+            } else if constexpr (std::is_same_v<T, ServerToolResultBlock>) {
+                // 搜索结果块:嵌套 content(含 tool_reference / error)原样回传,
+                // 不压文本(单子红线 9:不把原生块压成普通文字假称支持)。
+                return json{{"type", "tool_search_tool_result"},
+                            {"tool_use_id", b.tool_use_id},
+                            {"content", b.content}};
             }
         },
         block);
@@ -183,15 +200,29 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
     // native_web_search 是服务端原生能力声明,跟 request.tools(本地函数
     // 工具)是两码事——就算本地工具表是空的,只要开关开着也要能声明,所以
     // 这里不能再用 "!request.tools.empty()" 当建不建 tools 字段的唯一门槛
-    // (跟 Responses 那边 M12 的改法同一个道理)。
-    if (!request.tools.empty() || native_web_search) {
+    // (跟 Responses 那边 M12 的改法同一个道理)。server_tool_search(动态
+    // 工具 P3)同一条道理:它是请求级的模型能力声明,空串 = 不声明。
+    if (!request.tools.empty() || native_web_search || !request.server_tool_search.empty()) {
         json tools = json::array();
+        std::size_t eager_tools = 0;
         for (const auto& tool : request.tools) {
-            tools.push_back(json{
+            json item{
                 {"name", tool.name},
                 {"description", tool.description},
                 {"input_schema", ToolSchemaForWire(tool.input_schema)},
-            });
+            };
+            // 动态工具 P3(§7.1):Deferred 定义照发全文(provider 要拿它跑搜索、
+            // 展开 tool_reference),只标 defer_loading:true——服务端把这批定义
+            // 排除在缓存前缀外,发现/调用都不破前缀。Eager 定义不带这个字段,
+            // 与从前逐字节一致。官方约束:至少一枚非 deferred 工具(核心工具
+            // 恒 eager,天然满足);deferred 定义不得再挂 cache_control——本仓
+            // 从不在工具上发 cache_control,无冲突。
+            if (tool.load_mode == ToolLoadMode::Deferred) {
+                item["defer_loading"] = true;
+            } else {
+                ++eager_tools;
+            }
+            tools.push_back(std::move(item));
         }
         if (native_web_search) {
             // Anthropic 的 server tool 声明形状跟本地函数工具不一样:只有
@@ -202,6 +233,29 @@ json BuildRequestJson(const Request& request, bool native_web_search, const json
             // 额外 beta header,直接可用;旧版本 web_search_20250305 仍受
             // 支持,但新请求没有理由不用当前版本。
             tools.push_back(json{{"type", "web_search_20260209"}, {"name", "web_search"}});
+            ++eager_tools;
+        }
+        if (!request.server_tool_search.empty()) {
+            // 服务端工具搜索(动态工具 P3):regex 与 bm25 是同日发布的两个
+            // 算法变体,不是新旧版(官方 Tool reference:Variant, not
+            // version)。变体由模型目录声明(deferred_tools.server_tool_search),
+            // 不在这头猜;声明形状与 web_search 同款(type + name,无
+            // schema),搜索工具自身绝不 defer_loading(官方明令)。
+            if (request.server_tool_search == "bm25") {
+                tools.push_back(
+                    json{{"type", "tool_search_tool_bm25_20251119"}, {"name", "tool_search_tool_bm25"}});
+            } else {
+                tools.push_back(
+                    json{{"type", "tool_search_tool_regex_20251119"}, {"name", "tool_search_tool_regex"}});
+            }
+            ++eager_tools;
+        }
+        // 防御(官方 400 合同 "At least one tool must have defer_loading
+        // =false. All tools cannot be deferred."):全表 deferred 时把首枚降回
+        // eager——正常装配不会走到这(核心工具恒 eager),纯工具表被外部
+        // 掏空的场合也别发一份必被拒的请求。
+        if (eager_tools == 0 && !tools.empty()) {
+            tools.front().erase("defer_loading");
         }
         body["tools"] = tools;
     }
@@ -280,11 +334,14 @@ std::expected<void, Error> AnthropicBackend::send_stream(
     SanitizeRequest(sanitized_request);
     const json body = BuildRequestJson(sanitized_request, native_web_search_, extra_body_);
     const std::string body_str = DumpRequestBody("anthropic", body);
+    // 动态工具 P3:本请求声明了 server_tool_search 才解析服务端搜索的原生块
+    // (server_tool_use / tool_search_tool_result)——没声明的流照旧行为。
+    const bool parse_server_tool_search = !sanitized_request.server_tool_search.empty();
 
     // 2xx 响应体 -> 分帧 -> 事件。终止事件/流错误两枚标志给收尾那段检查:
     // 流走完却一枚没见着,按协议错误报(见函数尾注释)。
     SseFramer framer;
-    EventParser parser(ShouldRecoverTaggedThinking(sanitized_request));
+    EventParser parser(ShouldRecoverTaggedThinking(sanitized_request), parse_server_tool_search);
     bool saw_message_done = false;
     bool saw_stream_error = false;
     bool tagged_thinking_warning_logged = false;
@@ -323,6 +380,27 @@ std::expected<void, Error> AnthropicBackend::send_stream(
 
     auto streamed = PostSseStream(call, sink, cancel);
     if (!streamed.has_value()) {
+        // 动态工具 P3(§7.3 原生失败便明退):目录声明了能力、端点却不认
+        // defer_loading / server tool search 时,错误信息里点名这两枚词——
+        // 报清是端点能力缺失,不是请求拼坏;指路:换模型/端点,或把
+        // deferred_tool_mode 退回 proxy_reference(下一轮生效,本轮不自动改
+        // 发,免得一轮被执行两遍)。
+        if (parse_server_tool_search) {
+            api::Error err = std::move(streamed.error());
+            const std::string& message = err.message;
+            const bool mentions_capability =
+                message.find("defer_loading") != std::string::npos ||
+                message.find("tool_search_tool") != std::string::npos ||
+                message.find("tool_reference") != std::string::npos ||
+                message.find("server_tool_use") != std::string::npos;
+            if (mentions_capability) {
+                err.message = message + "\n[原生工具搜索] 端点(" + request.model +
+                              ")拒绝 defer_loading/服务端工具搜索声明:目录声明与端点实际能力不符。"
+                              "本次请求不自动改发;可换端点/模型,或将配置 deferred_tool_mode 改为 "
+                              "proxy_reference(下一轮生效,切换会开新 cache epoch)。";
+            }
+            return std::unexpected(std::move(err));
+        }
         return std::unexpected(std::move(streamed.error()));
     }
 

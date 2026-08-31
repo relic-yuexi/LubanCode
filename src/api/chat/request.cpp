@@ -43,6 +43,19 @@ std::string JoinedText(const Message& message) {
                 text += "\n";
             }
             text += ModelImageReplayText(*image);
+        } else if (const auto* server_use = std::get_if<ServerToolUseBlock>(&block)) {
+            // anthropic 原生工具搜索块(动态工具 P3)在 chat wire 的明降级:
+            // 这条 wire 没有 server tool 的形状,翻成一句事实文本,不悄悄丢块
+            // ——历史里发生过什么,下一轮还看得见。
+            if (!text.empty()) {
+                text += "\n";
+            }
+            text += "[服务端工具搜索(anthropic 原生): " + server_use->name + " 已由 provider 执行]";
+        } else if (const auto* server_result = std::get_if<ServerToolResultBlock>(&block)) {
+            if (!text.empty()) {
+                text += "\n";
+            }
+            text += "[服务端工具搜索结果(anthropic 原生): " + server_result->content.dump() + "]";
         }
     }
     return text;

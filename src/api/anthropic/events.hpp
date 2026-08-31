@@ -16,20 +16,30 @@ namespace lubancode::api::anthropic {
 // 解析一帧 SSE 数据。判定事件种类靠 data 里的 "type" 字段(不看 SSE 的
 // event: 字段名——真机上两者应该一致,但只信一份权威来源更稳)。
 //
+// parse_server_tool_search(动态工具 P3):真时解析服务端工具搜索的原生块
+// (server_tool_use / tool_search_tool_result),假时照旧跳过——只有本请求
+// 声明过 server_tool_search 的流才该传真。
+//
 // 返回 std::nullopt 表示这一帧不需要往上抛任何 StreamEvent,可能是:
 //   - JSON 解析失败(数据坏了,跳过而不是崩溃);
 //   - 认得种类但语义上不需要单独发事件(比如 ping、text 内容块的起始);
 //   - 完全没见过的事件类型。
-std::optional<StreamEvent> parse_event(const SseFrame& frame);
+std::optional<StreamEvent> parse_event(const SseFrame& frame, bool parse_server_tool_search = false);
 
 // 少数 Messages 兼容端会在工具续轮里把本该是 thinking_delta 的内容包成
 // `<think>...</think>`，却仍塞进 text_delta。EventParser 只在调用方明确
 // 开门时修这一个形状；普通响应照旧走 parse_event，不会把用户要求输出的
 // XML/代码标签一概删掉。
+//
+// parse_server_tool_search(动态工具 P3):开门解析服务端工具搜索的原生块
+// (server_tool_use / tool_search_tool_result)。这枚门只对本请求自己声明过
+// server_tool_search 的流开——没声明的请求里冒出来的 server 块(兼容端的
+// 杂音、别的 server tool)照旧行为:静默跳过,一块不解析。
 class EventParser {
 public:
-    explicit EventParser(bool recover_tagged_thinking = false)
-        : recover_tagged_thinking_(recover_tagged_thinking) {}
+    explicit EventParser(bool recover_tagged_thinking = false, bool parse_server_tool_search = false)
+        : recover_tagged_thinking_(recover_tagged_thinking),
+          parse_server_tool_search_(parse_server_tool_search) {}
 
     std::vector<StreamEvent> Consume(const SseFrame& frame);
     std::vector<StreamEvent> Finish();
@@ -43,6 +53,7 @@ private:
     std::vector<StreamEvent> CloseOpenProbe();
 
     bool recover_tagged_thinking_ = false;
+    bool parse_server_tool_search_ = false;
     bool recovered_tagged_thinking_ = false;
     TaggedThinkingState tagged_state_ = TaggedThinkingState::Probe;
     std::string pending_;

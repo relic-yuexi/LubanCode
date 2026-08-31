@@ -68,6 +68,11 @@ struct ToolUseBlock {
     std::string id;
     std::string name;
     nlohmann::json input;  // 工具入参,一个 JSON 对象
+    // 调用方标识(动态工具 P3·§7.2):Anthropic 的 programmatic tool calling
+    // 会在 tool_use 块上带 caller(如 "code_execution_20260120"),标记这枚
+    // 调用发自服务端沙箱而非模型直呼。中立层只保存不解释;空 = wire 没给
+    //(绝大多数请求都没有),四家 wire 里只有 anthropic 会填。
+    std::string caller;
 };
 
 // 工具执行完,把结果回传给模型。MCP 富结果单起 blocks/structured_content
@@ -91,7 +96,29 @@ struct ThinkingBlock {
     std::string signature;
 };
 
-using ContentBlock = std::variant<TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock, ModelImageBlock>;
+// 服务端执行的工具调用(动态工具 P3·Claude NativeReference)。Anthropic 的
+// server tool(工具搜索等)由 provider 自己执行,响应里给的是 server_tool_use
+// 块 + 对应的 ServerToolResultBlock;宿主只保存事实、原样回传,绝不在本地
+// 再执行一遍(与 BuiltinToolStart 同一条纪律)。web_search 一类 server tool
+// 的块不在此列——只有本单声明的工具搜索链路解析进这只块,其余照旧忽略。
+struct ServerToolUseBlock {
+    std::string id;    // "srvtoolu_..."(与 result 的 tool_use_id 配对)
+    std::string name;  // "tool_search_tool_regex" / "tool_search_tool_bm25"
+    nlohmann::json input = nlohmann::json::object();  // 搜索入参(pattern/query/limit)
+};
+
+// 服务端工具搜索的搜索结果块(wire 名 tool_search_tool_result)。content 存
+// 原始嵌套 JSON——tool_search_tool_search_result.tool_references[](内含
+// tool_reference)或 tool_search_tool_result_error(error_code/error_message),
+// 无损保存、无损回传(单子 §7.2:不压成普通文本再让下一轮猜回来)。
+struct ServerToolResultBlock {
+    std::string tool_use_id;  // 对应 ServerToolUseBlock.id
+    nlohmann::json content = nlohmann::json::object();
+};
+
+using ContentBlock =
+    std::variant<TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock, ModelImageBlock,
+                 ServerToolUseBlock, ServerToolResultBlock>;
 
 // 历史重放时模型输出图片的替身文案(四家 wire 共用):让模型记得自己
 // 出过一张图,但不把 base64 塞回请求。
@@ -131,12 +158,20 @@ void SanitizeContentBlock(ContentBlock& block);
 // 等 JSON 树字段的递归清洗)。合法时零成本,不会改动任何内容。
 void SanitizeMessage(Message& message);
 
+// 工具定义的暴露方式(动态工具 P3·§7.1):Deferred 表示这枚定义走 provider
+// 的按需加载——完整定义仍随每份请求发出(目录/catalog 仍是唯一事实源),
+// 但 anthropic wire 会标 defer_loading:true,provider 把它排除在缓存前缀
+// 之外,模型须经服务端工具搜索发现后才见全文。中立层不掺厂商字眼;不认这
+// 个概念的 wire(chat/responses/gemini)照旧全量发送,不得擅自丢定义。
+enum class ToolLoadMode { Eager, Deferred };
+
 // 工具定义,交给模型看的 JSON Schema。M1 阶段 Request::tools 恒为空,
 // 这里先把形状定好,留给 M2 用。
 struct ToolDefinition {
     std::string name;
     std::string description;
     nlohmann::json input_schema;
+    ToolLoadMode load_mode = ToolLoadMode::Eager;
 };
 
 // 工具 schema 上 wire 前的归一化。四家 wire(chat/responses/gemini/anthropic)
@@ -184,6 +219,14 @@ struct Request {
     // 配置 agent.max_output_tokens / 模型目录声明,不走改源码。
     std::optional<int> max_tokens;
     std::vector<ToolDefinition> tools;  // M1 先留空位,不填
+    // 服务端工具搜索声明(动态工具 P3):非空("regex"/"bm25")= 请求的 tools
+    // 里声明一枚由 provider 执行的工具搜索工具,anthropic wire 映成
+    // tool_search_tool_regex_20251119 / tool_search_tool_bm25_20251119。
+    // 这是模型级能力(目录声明 deferred_tools + deferred_tool_mode=
+    // native_reference 才置),跟请求档案走(/model 切档即随换),不进
+    // backend 构造参数——同一 provider 的模型清单里支持的与不支持的各有
+    // 各的判词。其他 wire 不认这个字段,恒空。
+    std::string server_tool_search;
     // M6.6:推理强度,none/low/medium/high,空串 = 不发这个参数(维持原有
     // 行为)。responses wire 翻成 "reasoning":{"effort":...};anthropic wire
     // 翻成 "thinking":{"type":"enabled","budget_tokens":...}(none 翻成
@@ -215,6 +258,10 @@ struct RequestProfile {
     // SyncAgentRequestPolicy 落进来,下一份请求即时生效;子代理/后台任务
     // 派出时抄成快照,与 effort 同一套覆盖规矩。
     ReasoningHistoryMode reasoning_history = ReasoningHistoryMode::ProviderDefault;
+    // 服务端工具搜索的变体声明(动态工具 P3):随档案走,与 Request 同名
+    // 字同一语义——模型级能力,/model 切档时由装配层按目录重算后随
+    // SyncAgentRequestPolicy 整份刷新,空 = 本模型不声明。
+    std::string server_tool_search;
 };
 
 // model 为空时保留 Request 原值（后台测试和少数调用方会沿用 loop 模型）；
@@ -345,6 +392,25 @@ struct ToolUseStart {
     int index = 0;
     std::string id;
     std::string name;
+    std::string caller;  // PTC 的调用方标识(anthropic wire 才有,空 = 没给)
+};
+
+// 服务端工具搜索的调用开始(动态工具 P3):provider 执行的搜索,宿主只攒
+// 事实(入参走 ToolUseInputDelta 按 index 累积),不在本地执行。收到即知
+// 这枚 tool_use 是服务端的,与本地执行的 ToolUseStart 分家。
+struct ServerToolUseStart {
+    int index = 0;
+    std::string id;
+    std::string name;
+};
+
+// 服务端工具搜索的搜索结果(动态工具 P3):流式下整只块随 content_block_start
+// 一次到齐(官方流样例如此),没有增量;content 是嵌套结果的原始 JSON
+//(tool_references 或 error),无损入历史。
+struct ServerToolResult {
+    int index = 0;
+    std::string tool_use_id;
+    nlohmann::json content = nlohmann::json::object();
 };
 
 // 工具调用入参的增量片段(JSON 字符串,要靠调用方自己拼完整再解析)。
@@ -401,7 +467,7 @@ struct StreamError {
 
 using StreamEvent = std::variant<MessageStart, TextDelta, ThinkingDelta, ToolUseStart, ToolUseInputDelta,
                                  ContentBlockDone, BuiltinToolStart, BuiltinToolDone, MessageDone, ImageOutput,
-                                 StreamError>;
+                                 ServerToolUseStart, ServerToolResult, StreamError>;
 
 // ---------------------------------------------------------------------------
 // 错误

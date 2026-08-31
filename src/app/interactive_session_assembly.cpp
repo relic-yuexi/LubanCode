@@ -397,6 +397,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       sub_deferral(stack_.sub_deferral),
       main_proxy(stack_.main_proxy),
       sub_proxy(stack_.sub_proxy),
+      main_native(stack_.main_native),
+      sub_native(stack_.sub_native),
+      native_server_tool_search(stack_.native_server_tool_search),
       tool_search_threshold(stack_.tool_search_threshold),
       config_file_path(stack_.config_result.config_file_path),
       always_allowed_tools(session_runtime_.always_allowed()),
@@ -1075,10 +1078,21 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     // DeferredIndex 三只包装后端现拼,现在 Agent 拼请求时就地生效)。
     main_agent_profile.model_instructions = *current_model_instructions;
     main_agent_profile.soul = *current_soul;
+    // 动态工具 P3(Claude NativeReference·§7.1):原生路的双字段——皮上
+    // native_deferred_tools 让 BuildToolDefinitions 给延迟定义标
+    // load_mode=Deferred;request.server_tool_search(请求档案)让 anthropic
+    // wire 声明服务端搜索工具。子代理皮从这份拷贝,两字段自然继承(子表
+    // 的暴露过滤在 native 档同样放行延迟工具)。
+    if (main_native) {
+        main_agent_profile.native_deferred_tools = true;
+        main_agent_profile.request.server_tool_search = native_server_tool_search;
+    }
     // 动态工具 P1:proxy_reference 模式不注逐请求刷新的延迟索引段(单子
     // §8.1——索引按 loaded 集合删行,每删一行 system 就断一次;proxy 路
     // 的 tool_search 自己握 catalog,system 恒定)。legacy 路照旧现查现拼。
-    if (!main_proxy) {
+    // P3:native 同理不注——发现走 provider 服务端搜索,system 恒定,延迟
+    // 定义照发由 provider 排出缓存前缀(§7.1)。
+    if (!main_proxy && !main_native) {
         main_agent_profile.deferred_index_provider = [this]() {
             // 发请求前现查现拼:tool_search 命中后的下一份请求,新挂载的工具
             // 自然从索引段里消失;未启用时恒给空串,等于不注。
@@ -1121,8 +1135,11 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
             ? "延迟工具不能按名直调(发现不等于授权):请先用 tool_search 检索拿到 tool_ref,再以 "
               "tool_invoke({tool_ref, arguments}) 调用。goal/loop 窄工具定义常驻,但只在对应轮次可执行,"
               "普通轮调用会被执行门以 turn.tool_not_active 拒绝。"
-            : "这只工具当前不可见:延迟工具须先经 tool_search 挂载;goal/loop 窄工具须先开启对应功能"
-              "(features.goals/features.loop)。";
+            : main_native
+                  ? "这只工具当前不可见:goal/loop 窄工具须先开启对应功能(features.goals/features.loop)。"
+                    "延迟工具的定义已随 defer_loading 常驻声明,可先经服务端工具搜索发现后直接调用。"
+                  : "这只工具当前不可见:延迟工具须先经 tool_search 挂载;goal/loop 窄工具须先开启对应功能"
+                    "(features.goals/features.loop)。";
     main_agent_profile.tool_turn_gate = [this](const lubancode::tools::Tool& tool) {
         // 名字先认:子代理表里没有这两枚工具,别的名字一律放行,免得主侧
         // 的轮次状态被无关调用摸到。
@@ -1202,6 +1219,29 @@ void TerminalSessionController::SyncAgentRequestPolicy() {
     if (const auto* entry = model_catalog.FindByProviderAndSlug(active_provider, *current_model);
         entry != nullptr) {
         request.reasoning = entry->reasoning;
+    }
+    // 动态工具 P3:原生声明随模型能力重算——/model 切到目录未声明
+    // deferred_tools 的模型时,defer_loading 与服务端搜索声明一并停发
+    //(给不认的模型发是必 400 的空承诺),大声提示;切回有声明的模型即恢复。
+    // 延迟定义照常全量发送(不丢定义),tools hash 变动由前缀账如实记
+    // epoch 断(§7.3 同款口径)。
+    if (main_native) {
+        const lubancode::config::DeferredToolsCapability capability = lubancode::config::ClassifyNativeToolSearch(
+            model_catalog.FindByProviderAndSlug(active_provider, *current_model) != nullptr
+                ? model_catalog.FindByProviderAndSlug(active_provider, *current_model)
+                : model_catalog.FindBySlug(*current_model));
+        if (capability.declared && capability.tool_reference) {
+            request.server_tool_search =
+                capability.server_tool_search.empty() ? native_server_tool_search : capability.server_tool_search;
+            main_agent->SetNativeDeferredTools(true);
+        } else {
+            request.server_tool_search.clear();
+            main_agent->SetNativeDeferredTools(false);
+            TermOut() << theme.error
+                      << "[tool_search] 当前模型未声明 deferred_tools 能力,已停发 defer_loading/服务端"
+                         "工具搜索声明(延迟工具定义照常全量发送);切回有声明的模型自动恢复。"
+                      << theme.reset << "\n";
+        }
     }
     main_agent->SetRequestProfile(std::move(request));
     main_agent->SetModelInstructions(*current_model_instructions);
@@ -1352,6 +1392,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.main_tool_filter = &main_tool_filter();
     ctx.main_deferral = main_deferral;
     ctx.main_proxy_reference = main_proxy;
+    ctx.main_native_reference = main_native;
     ctx.tool_search_threshold = tool_search_threshold;
     ctx.tool_runtime = tool_runtime_.has_value() ? &*tool_runtime_ : nullptr;
     ctx.worktree_session = &worktree_session;

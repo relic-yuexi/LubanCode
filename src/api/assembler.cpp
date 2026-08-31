@@ -22,7 +22,17 @@ void MessageAssembler::FinalizeCurrent() {
                 input = nlohmann::json::object();
             }
         }
-        content_.push_back(ToolUseBlock{open_tool_->id, open_tool_->name, std::move(input)});
+        if (open_tool_->is_server) {
+            // 服务端工具搜索(动态工具 P3):攒成 provider 事实块,本地不执行。
+            ServerToolUseBlock block;
+            block.id = open_tool_->id;
+            block.name = open_tool_->name;
+            block.input = std::move(input);
+            content_.push_back(std::move(block));
+        } else {
+            content_.push_back(
+                ToolUseBlock{open_tool_->id, open_tool_->name, std::move(input), open_tool_->caller});
+        }
         open_tool_.reset();
     } else if (open_thinking_.has_value()) {
         // 模型流里的思考正文/签名可能带坏串(服务端或中转的问题),进历史
@@ -59,7 +69,7 @@ void MessageAssembler::Feed(const StreamEvent& event) {
                 open_thinking_->signature += e.signature;
             } else if constexpr (std::is_same_v<T, ToolUseStart>) {
                 FinalizeCurrent();  // 上一个块(多半是文本)先收尾
-                open_tool_ = OpenToolUse{e.id, e.name, std::string{}};
+                open_tool_ = OpenToolUse{e.id, e.name, std::string{}, e.caller, /*is_server=*/false};
             } else if constexpr (std::is_same_v<T, ToolUseInputDelta>) {
                 if (open_tool_.has_value()) {
                     open_tool_->partial_json += e.partial_json;
@@ -67,6 +77,24 @@ void MessageAssembler::Feed(const StreamEvent& event) {
                 // 没有正在累积的 tool_use 块却来了输入片段:协议乱了,静默丢弃,不崩。
             } else if constexpr (std::is_same_v<T, ContentBlockDone>) {
                 FinalizeCurrent();
+            } else if constexpr (std::is_same_v<T, ServerToolUseStart>) {
+                // 服务端工具搜索(动态工具 P3):开服务端累积器,后续的
+                // ToolUseInputDelta 按 index 归它——assembler 本就只持一只开着的
+                // tool 累积器(块序即流序),不必再按 index 分桶。
+                FinalizeCurrent();
+                OpenToolUse open;
+                open.id = e.id;
+                open.name = e.name;
+                open.is_server = true;
+                open_tool_ = std::move(open);
+            } else if constexpr (std::is_same_v<T, ServerToolResult>) {
+                // 搜索结果整块到齐(官方流里随 content_block_start 一次给完,
+                // 没有增量):前一块先收尾,然后直接落事实块。
+                FinalizeCurrent();
+                ServerToolResultBlock block;
+                block.tool_use_id = e.tool_use_id;
+                block.content = e.content;
+                content_.push_back(std::move(block));
             } else if constexpr (std::is_same_v<T, MessageDone>) {
                 FinalizeCurrent();  // 防御性收尾:正常流程里 ContentBlockDone 应该已经收过了
                 stop_reason_ = e.stop_reason;

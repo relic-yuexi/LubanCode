@@ -36,24 +36,42 @@ namespace lubancode::tools {
 
 // ---------------------------------------------------------------------------
 // 模式(单子 §四的定案表)。模式由配置/模型能力决定,不认 provider 名字。
-// NativeReference 是 P3 的活,枚举先立位,解析层暂不放行——不许悄悄开一条
-// 没实现的路。
+// NativeReference(P3 已落):defer_loading 常驻声明 + provider 服务端搜索,
+// 生效与否由装配期 ResolveDeferredToolMode 过 wire+目录能力两道门——本
+// 文件仍是 proxy 路的家,native 路没有本地 ref/ledger 可管。
 // ---------------------------------------------------------------------------
 enum class DeferredToolMode {
     Disabled,        // 全量工具照旧常驻
     ProxyReference,  // 本地 search + invoke(P1)
-    NativeReference, // provider defer_loading + tool_reference(P3,未实现)
+    NativeReference, // provider defer_loading + tool_reference(P3)
     LegacyExpand,    // 旧路:发现后扩写目标 schema,只作兼容
 };
 
 // ""(未配)= nullopt,由装配层落 LegacyExpand(现状);认不得的值也回
-// nullopt,调用方负责把人话报清。native_reference 显式拒绝:P3 没落地前
-// 不许配置层收一个空承诺。
+// nullopt,调用方负责把人话报清。P3 起 native_reference 放行——但配置层
+// 收下不等于生效:装配期还要过 wire 与目录能力两道门
+//(ResolveDeferredToolMode)。
 std::optional<DeferredToolMode> ParseDeferredToolMode(const std::string& text);
 
 // 稳定名字(disabled/proxy_reference/native_reference/legacy_expand),展示
 // 与 /context 共用;与配置字符串同一套词。
 std::string DeferredToolModeName(DeferredToolMode mode);
+
+// ---------------------------------------------------------------------------
+// 有效模式判定(动态工具 P3·§四/§七):配置串 + wire + 目录能力声明 ->
+// 有效模式。native_reference 只在 wire=anthropic 且目录显式声明
+// deferred_tools 能力时生效,不按厂名猜(单子红线 2:兼容端不得误开)。
+// 两道门任一不开而配置又点名要 native:落 LegacyExpand,native_denial 带
+// 人话由装配层大声报出——不悄悄换路。纯函数,好单测。
+// ---------------------------------------------------------------------------
+struct DeferredToolModeResolution {
+    DeferredToolMode mode = DeferredToolMode::LegacyExpand;
+    std::string server_tool_search;  // native 生效时的搜索变体("regex"/"bm25")
+    std::string native_denial;       // 非空 = native 被拒的人话(含建议配置)
+};
+DeferredToolModeResolution ResolveDeferredToolMode(const std::string& configured_text, bool wire_is_anthropic,
+                                                   bool catalog_native_declared,
+                                                   const std::string& catalog_server_tool_search);
 
 // ---------------------------------------------------------------------------
 // 稳定错误码(单子 §十的错误合同)。错误 result 仍用原 wire tool_use_id

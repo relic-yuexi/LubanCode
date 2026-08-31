@@ -13,7 +13,11 @@
 //     扩写回顶层 tools+system——断前缀,cache-hostile,P0 回归册钉着现状;
 //   - proxy_reference(P1):命中只把结构化 schema/tool_ref 放进 tool result
 //     追加到历史尾部,顶层 tools 恒为 core+tool_search+tool_invoke,前缀
-//     缓存不断;调用走 tool_invoke,由 AgentLoop 解引用后过 RunOneTool 正门。
+//     缓存不断;调用走 tool_invoke,由 AgentLoop 解引用后过 RunOneTool 正门;
+//   - native_reference(P3,anthropic wire + 目录声明才开):本地不挂这两枚
+//     工具——发现由 provider 的服务端 tool_search_tool_regex/bm25 做,延迟
+//     定义照发但标 defer_loading,模型发现后直接调用真实工具,本地照走
+//     RunOneTool 正门(接线在 ToolRuntime/装配层,不在本文件)。
 //
 // 阈值开关:注册表总工具数 ≤ 阈值(config.tool_search_threshold,默认 20,
 // 0 = 永不延迟)时一切照旧,现状行为零变化;超阈值才启用。启用与否、
@@ -46,8 +50,8 @@ inline std::string DeferredToolModeLabel(bool deferral_enabled) {
 }
 
 // P1:模式版标签。deferral 关着时无论配了什么都是 disabled(没有延迟工具
-// 就没有模式可言);native_reference 枚举立位但 P3 未落地,装配层不该把
-// 它递进来——真收到了也如实显示,不冒充已支持。
+// 就没有模式可言);P3 起 native_reference 落地(发现走 provider 服务端
+// 搜索,本地不挂 tool_search/tool_invoke),装配层过完两道门才递它进来。
 inline std::string DeferredToolModeLabel(DeferredToolMode mode, bool deferral_enabled) {
     if (!deferral_enabled) {
         return "disabled";

@@ -19,6 +19,20 @@ inline constexpr std::size_t kProviderCatalogMaxBytes = 2 * 1024 * 1024;
 inline constexpr const char* kProviderCatalogUrl =
     "https://raw.githubusercontent.com/relic-yuexi/LubanCode/main/catalog/providers.json";
 
+// 模型级原生引用能力(动态工具 P3·§四):目录 deferred_tools 段的解析体。
+// 声明形状(providers.json / models.json 同一款):
+//   "deferred_tools": {"mode": "native_reference", "tool_reference": true,
+//                      "server_tool_search": "regex"}
+// declared=true 才算声明了原生路(tool_reference=true 表示 wire 认
+// defer_loading/tool_reference);server_tool_search 是搜索变体("regex"/
+// "bm25",空 = 只声明引用能力、没声明服务端搜索)。目录不写 = 不声明,
+// 装配层不开 native——不按厂名猜(单子红线 2)。
+struct DeferredToolsCapability {
+    bool declared = false;
+    bool tool_reference = false;
+    std::string server_tool_search;
+};
+
 struct ProviderCatalogModel {
     std::string id;
     std::string name;
@@ -27,6 +41,7 @@ struct ProviderCatalogModel {
     std::optional<std::size_t> max_output_tokens;
     std::string default_think;
     std::map<std::string, bool> capabilities;
+    DeferredToolsCapability deferred_tools;
     lubancode::api::ReasoningConfig reasoning;
 };
 

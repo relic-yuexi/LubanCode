@@ -214,6 +214,16 @@ public:
         // 每派发现取——reload 换档后下一次装配即见新账,在跑的照旧用旧折。
         // 空 = 没有包,行为与从前一致。
         std::function<std::shared_ptr<const lubancode::package::PackageSnapshot>()> package_snapshot;
+        // 动态工具 P3(Claude NativeReference):装配层已经过完两道门
+        //(wire=anthropic + 目录声明 deferred_tools)的有效模式,nullopt =
+        // 调用方没判(单测/旧路),ToolRuntime 自行解析 config 的旧三档
+        //(disabled/proxy_reference/legacy_expand,P1 的直构册钉着这条)。
+        // 注意:config 里写 native_reference 而这里没给 nullopt 压过时,不认
+        // ——原生档只信装配层过完门的判定,直构路给一个 config 串就开
+        // native 等于绕过目录能力判定(单子红线 2)。
+        std::optional<lubancode::tools::DeferredToolMode> deferred_mode;
+        // 原生路的搜索变体("regex"/"bm25";目录声明,装配层原样递进)。
+        std::string native_server_tool_search;
     };
 
     ToolRuntime(const lubancode::config::Config& config, const lubancode::cli::Theme& theme,
@@ -250,6 +260,13 @@ public:
     lubancode::tools::DeferredToolMode sub_tool_mode() const { return sub_mode_; }
     bool main_proxy_enabled() const { return main_proxy_; }
     bool sub_proxy_enabled() const { return sub_proxy_; }
+    // 动态工具 P3:原生路旗标(deferral 开着且模式是 NativeReference)与
+    // 服务端搜索变体。原生路不挂本地 tool_search/tool_invoke,延迟定义照发
+    // 但由 Agent 标 load_mode=Deferred;装配层据此给皮上 native_deferred_
+    // tools 与 request.server_tool_search。
+    bool main_native_enabled() const { return main_native_; }
+    bool sub_native_enabled() const { return sub_native_; }
+    const std::string& native_server_tool_search() const { return native_server_tool_search_; }
     const std::shared_ptr<lubancode::tools::DeferredToolResolver>& main_tool_ref_resolver() const {
         return main_resolver_;
     }
@@ -356,6 +373,10 @@ private:
     lubancode::tools::DeferredToolMode sub_mode_ = lubancode::tools::DeferredToolMode::LegacyExpand;
     bool main_proxy_ = false;
     bool sub_proxy_ = false;
+    // 动态工具 P3:原生路旗标与搜索变体(目录声明递进)。
+    bool main_native_ = false;
+    bool sub_native_ = false;
+    std::string native_server_tool_search_;
     std::shared_ptr<lubancode::tools::DeferredToolResolver> main_resolver_;
     std::shared_ptr<lubancode::tools::DeferredToolResolver> sub_resolver_;
     std::function<bool(const lubancode::tools::Tool&)> main_execution_policy_;

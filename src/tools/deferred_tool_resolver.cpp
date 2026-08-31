@@ -21,9 +21,56 @@ std::optional<DeferredToolMode> ParseDeferredToolMode(const std::string& text) {
     if (text == "proxy_reference") {
         return DeferredToolMode::ProxyReference;
     }
-    // native_reference 是 P3 的活:枚举立了位,解析层不放行——配置写了它,
-    // 返回 nullopt 让配置层报清"P3 未落地",不悄悄换路也不开空承诺。
+    if (text == "native_reference") {
+        return DeferredToolMode::NativeReference;
+    }
     return std::nullopt;
+}
+
+DeferredToolModeResolution ResolveDeferredToolMode(const std::string& configured_text, bool wire_is_anthropic,
+                                                   bool catalog_native_declared,
+                                                   const std::string& catalog_server_tool_search) {
+    // 纯函数(动态工具 P3·§四/§7):配置串 + wire + 目录能力声明 -> 有效模式。
+    // native_reference 的两道门(单子红线 2):
+    //   1. wire 必须是 anthropic——兼容端(chat/responses/gemini)没有
+    //      defer_loading/server tool 的形状,绝不误开;
+    //   2. 模型目录必须显式声明 deferred_tools 能力——不按厂名猜,第三方
+    //      Anthropic 兼容端点(目录没写)天然不开。
+    // 两道门任一不开而配置又点名要 native:落 LegacyExpand(现状路),native_denial
+    // 带人话——装配层大声报出来,不悄悄换路(§四"不得悄悄换路")。
+    const auto configured = ParseDeferredToolMode(configured_text);
+    if (!configured.has_value()) {
+        // 认不得的值:也落现状,denial 说明配置错在哪。配置层在解析期已拦过
+        // 认不得的串,这是装配期的兜底。
+        DeferredToolModeResolution out;
+        out.mode = DeferredToolMode::LegacyExpand;
+        out.native_denial = "deferred_tool_mode 配置值认不得: " + configured_text +
+                            "(可用:disabled|proxy_reference|native_reference|legacy_expand);已回落 legacy_expand。";
+        return out;
+    }
+    DeferredToolModeResolution out;
+    if (*configured != DeferredToolMode::NativeReference) {
+        out.mode = *configured;
+        return out;
+    }
+    if (!wire_is_anthropic) {
+        out.mode = DeferredToolMode::LegacyExpand;
+        out.native_denial =
+            "deferred_tool_mode=native_reference 只在 anthropic wire 下可用(defer_loading/服务端工具搜索是 "
+            "Anthropic Messages 的原生能力);当前 wire 不认这组形状,已回落 legacy_expand。";
+        return out;
+    }
+    if (!catalog_native_declared) {
+        out.mode = DeferredToolMode::LegacyExpand;
+        out.native_denial =
+            "当前模型在目录里没有声明 deferred_tools 能力(deferred_tools.mode=native_reference)。原生引用"
+            "只对目录明确声明的模型启用,不按 provider 名猜——第三方 Anthropic 兼容端点不声明即不开。"
+            "已回落 legacy_expand;要开就在 models.json/providers 目录给该模型补声明。";
+        return out;
+    }
+    out.mode = DeferredToolMode::NativeReference;
+    out.server_tool_search = catalog_server_tool_search;
+    return out;
 }
 
 std::string DeferredToolModeName(DeferredToolMode mode) {

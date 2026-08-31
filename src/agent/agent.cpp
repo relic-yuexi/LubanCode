@@ -18,11 +18,19 @@ std::vector<api::ToolDefinition> Agent::BuildToolDefinitions() const {
         // tool_search(延迟挂载):谓词不放行的工具(延迟且未挂载)不进
         // tools 数组。没设谓词就是全量,跟从前一样。每轮现拼而不是构造时
         // 定死,是因为 tool_search 命中会在一次 Run() 中途改变 loaded 集合,
-        // 下一轮请求就得看到新挂载的工具。
+        // 下一轮请求就得看到新挂载的工具。原生路(动态工具 P3)例外:
+        // 暴露过滤放行 deferred 工具(定义照发,只是标 Deferred),发现
+        // 由 provider 的服务端搜索做,loaded 集合在这条路上不翻页。
         if (profile_.tool_filter && !profile_.tool_filter(*tool)) {
             continue;
         }
-        defs.push_back(api::ToolDefinition{tool->name(), tool->description(), tool->input_schema()});
+        api::ToolDefinition def{tool->name(), tool->description(), tool->input_schema()};
+        if (profile_.native_deferred_tools && tool->deferred()) {
+            // §7.1:deferred 定义每轮仍从同一稳定 catalog 生成,数量、顺序与
+            // digest 不变;Deferred 只改暴露方式,不改定义正文。
+            def.load_mode = api::ToolLoadMode::Deferred;
+        }
+        defs.push_back(std::move(def));
     }
     return defs;
 }

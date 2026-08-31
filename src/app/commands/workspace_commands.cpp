@@ -848,7 +848,9 @@ CommandFlow HandleSlashPlugin(SlashDispatchContext& ctx, const lubancode::cli::P
 CommandFlow HandleSlashTools(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     PrintToolsCommand(*ctx.registry, **ctx.loaded_tools, ctx.main_deferral, ctx.tool_search_threshold,
-                      ctx.main_proxy_reference ? tr("cmd.tools.proxy_mode") : std::string());
+                      ctx.main_proxy_reference
+                          ? tr("cmd.tools.proxy_mode")
+                          : ctx.main_native_reference ? tr("cmd.tools.native_mode") : std::string());
     return CommandFlow::Continue;
 }
 

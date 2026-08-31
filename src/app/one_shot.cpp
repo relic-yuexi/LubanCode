@@ -222,6 +222,29 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 声明在前、活得比 tool_runtime 久。
     runtime_options.package_snapshot =
         [snapshot = package_snapshot]() { return snapshot; };
+    // 动态工具 P3:有效模式装配期判(wire + 目录声明两道门,与交互路
+    // BuildSessionStack 同一只纯函数);门不开而配置点名 native 时大声报
+    // 并回落 legacy_expand,不悄悄换路。
+    {
+        const std::string bound_provider_for_mode =
+            lubancode::config::BoundProviderName(config, config.active_provider);
+        const lubancode::config::ModelCatalogEntry* model_entry =
+            once_catalog.FindByProviderAndSlug(bound_provider_for_mode, config.model);
+        if (model_entry == nullptr) {
+            model_entry = once_catalog.FindBySlug(config.model);
+        }
+        const lubancode::config::DeferredToolsCapability native_capability =
+            lubancode::config::ClassifyNativeToolSearch(model_entry);
+        const lubancode::tools::DeferredToolModeResolution resolution = lubancode::tools::ResolveDeferredToolMode(
+            config.deferred_tool_mode, config.wire == lubancode::config::Wire::Anthropic,
+            native_capability.declared && native_capability.tool_reference,
+            native_capability.server_tool_search);
+        if (!resolution.native_denial.empty()) {
+            std::cout << theme.error << "[tool_search] " << resolution.native_denial << theme.reset << "\n";
+        }
+        runtime_options.deferred_mode = resolution.mode;
+        runtime_options.native_server_tool_search = resolution.server_tool_search;
+    }
     lubancode::app::ToolRuntime tool_runtime(config, theme, wrapped_backend, skills, skills_segment,
                                              CurrentDirUtf8(), std::move(runtime_options));
     auto& registry = tool_runtime.main_registry();
@@ -232,6 +255,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     const bool sub_deferral = tool_runtime.sub_deferral();
     const bool main_proxy = tool_runtime.main_proxy_enabled();
     const bool sub_proxy = tool_runtime.sub_proxy_enabled();
+    const bool main_native = tool_runtime.main_native_enabled();
+    const bool sub_native = tool_runtime.sub_native_enabled();
     const auto sub_tool_filter = tool_runtime.sub_tool_filter();
     if (auto* agent_tool = tool_runtime.agent_tool(); agent_tool != nullptr) {
         agent_tool->SetPromptsDir(prompts_dir);  // 子代理系统提示同机制
@@ -266,11 +291,12 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         if (sub_deferral) {
             agent_tool->SetToolFilter(sub_tool_filter);
             // 动态工具 P1:legacy 才注索引段;proxy 走 resolver(索引恒空)。
+            // P3:native 也不注(发现走 provider 服务端搜索,system 恒定)。
             if (sub_proxy) {
                 agent_tool->SetToolRefResolver(tool_runtime.sub_tool_ref_resolver());
                 agent_tool->SetToolExecutionPolicy(tool_runtime.sub_execution_policy(),
                                                    tool_runtime.sub_execution_denial());
-            } else {
+            } else if (!sub_native) {
                 agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
                     return lubancode::tools::BuildDeferredToolsIndexSegment(sub_registry, *loaded_tools);
                 });
@@ -323,12 +349,17 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // tool_search 的索引段(从前由 DeferredIndexBackend 现拼):皮上的活口,
     // Agent 拼请求时现查;单发只跑一轮,行为与从前逐字节一致。动态工具 P1:
     // proxy 模式不注索引段(system 恒定,§8.1),改灌解引用器与执行资格。
+    // P3:native 同理不注,改灌原生双字段(皮上 native_deferred_tools +
+    // 请求档案 server_tool_search)。
     if (main_deferral) {
         once_agent_profile.tool_filter = tool_runtime.main_tool_filter();
         if (main_proxy) {
             once_agent_profile.tool_ref_resolver = tool_runtime.main_tool_ref_resolver();
             once_agent_profile.tool_execution_policy = tool_runtime.main_execution_policy();
             once_agent_profile.tool_execution_denial = tool_runtime.main_execution_denial();
+        } else if (main_native) {
+            once_agent_profile.native_deferred_tools = true;
+            once_agent_profile.request.server_tool_search = tool_runtime.native_server_tool_search();
         } else {
             once_agent_profile.deferred_index_provider = [&registry, loaded_tools]() {
                 return lubancode::tools::BuildDeferredToolsIndexSegment(registry, *loaded_tools);

@@ -502,3 +502,154 @@ TEST_CASE("Anthropic proxy replay: tool_search+tool_invoke 定义恒在,代理�
     }
     CHECK(saw_proxy);
 }
+
+// ---------------------------------------------------------------------------
+// 动态工具 P3(Claude NativeReference·§7.1):defer_loading 与服务端工具
+// 搜索声明的请求映射。Eager 定义不写 defer_loading 字段(与从前逐字节
+// 一致);Deferred 定义照发全文、只加 defer_loading:true;server_tool_search
+// 非空时 tools 追加对应变体的 server tool 声明(regex 与 bm25 是同日发布的
+// 两个算法变体,不是新旧版)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("P3 defer_loading: Eager 不写字段,Deferred 照发全文只加 defer_loading=true") {
+    Request request;
+    ToolDefinition eager;
+    eager.name = "read_file";
+    eager.description = "读文件";
+    eager.input_schema = nlohmann::json{{"type", "object"}};
+    ToolDefinition deferred;
+    deferred.name = "mcp__github__search_issues";
+    deferred.description = "搜 issue";
+    deferred.input_schema = nlohmann::json{{"type", "object"}, {"properties", nlohmann::json::object()}};
+    deferred.load_mode = ToolLoadMode::Deferred;
+    request.tools.push_back(eager);
+    request.tools.push_back(deferred);
+
+    const auto body = BuildRequestJson(request);
+    REQUIRE(body["tools"].size() == 2);
+    CHECK_FALSE(body["tools"][0].contains("defer_loading"));
+    REQUIRE(body["tools"][1].contains("defer_loading"));
+    CHECK(body["tools"][1]["defer_loading"] == true);
+    // 全文照发:provider 要拿它跑搜索、展开 tool_reference,不是只发名字。
+    CHECK(body["tools"][1]["name"] == "mcp__github__search_issues");
+    CHECK(body["tools"][1]["description"] == "搜 issue");
+    CHECK(body["tools"][1].contains("input_schema"));
+}
+
+TEST_CASE("P3 server_tool_search: regex/bm25 各映射成对应变体声明,空串不声明") {
+    Request request;
+    ToolDefinition core;
+    core.name = "read_file";
+    core.description = "读文件";
+    core.input_schema = nlohmann::json{{"type", "object"}};
+    request.tools.push_back(core);
+
+    // 空串(缺省):不声明,tools 只剩本地工具——与从前一字不差。
+    const auto body_off = BuildRequestJson(request);
+    REQUIRE(body_off["tools"].size() == 1);
+    CHECK(body_off["tools"][0]["name"] == "read_file");
+
+    // regex 变体。
+    request.server_tool_search = "regex";
+    const auto body_regex = BuildRequestJson(request);
+    REQUIRE(body_regex["tools"].size() == 2);
+    CHECK(body_regex["tools"][1]["type"] == "tool_search_tool_regex_20251119");
+    CHECK(body_regex["tools"][1]["name"] == "tool_search_tool_regex");
+    CHECK_FALSE(body_regex["tools"][1].contains("input_schema"));
+    CHECK_FALSE(body_regex["tools"][1].contains("defer_loading"));  // 搜索工具自身绝不 defer
+
+    // bm25 变体。
+    request.server_tool_search = "bm25";
+    const auto body_bm25 = BuildRequestJson(request);
+    REQUIRE(body_bm25["tools"].size() == 2);
+    CHECK(body_bm25["tools"][1]["type"] == "tool_search_tool_bm25_20251119");
+    CHECK(body_bm25["tools"][1]["name"] == "tool_search_tool_bm25");
+}
+
+TEST_CASE("P3 server_tool_search: 本地工具表为空也能单独声明(与 native_web_search 同一条理)") {
+    Request request;
+    request.server_tool_search = "regex";
+    const auto body = BuildRequestJson(request);
+    REQUIRE(body.contains("tools"));
+    REQUIRE(body["tools"].size() == 1);
+    CHECK(body["tools"][0]["type"] == "tool_search_tool_regex_20251119");
+}
+
+TEST_CASE("P3 防御: 全表 deferred 时首枚降回 eager(官方 400 合同)") {
+    Request request;
+    ToolDefinition deferred;
+    deferred.name = "only_deferred";
+    deferred.description = "全表只有它";
+    deferred.input_schema = nlohmann::json{{"type", "object"}};
+    deferred.load_mode = ToolLoadMode::Deferred;
+    request.tools.push_back(deferred);
+
+    const auto body = BuildRequestJson(request);
+    REQUIRE(body["tools"].size() == 1);
+    CHECK_FALSE(body["tools"][0].contains("defer_loading"));
+}
+
+// ---------------------------------------------------------------------------
+// 动态工具 P3(§7.2):原生块的无损回传。server_tool_use /
+// tool_search_tool_result(含嵌套 tool_reference / error)原样回放,
+// 绝不压成普通文本(单子红线 9);caller 给过的照带。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("P3 原生块回传: server_tool_use/tool_search_tool_result 逐字段无损,caller 照带") {
+    Request request;
+    request.model = "claude-opus-5";
+
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    api::ServerToolUseBlock server_use;
+    server_use.id = "srvtoolu_01ABC";
+    server_use.name = "tool_search_tool_regex";
+    server_use.input = nlohmann::json{{"pattern", "weather"}, {"limit", 10}};
+    assistant.content.push_back(server_use);
+    const nlohmann::json result_content = nlohmann::json{
+        {"type", "tool_search_tool_search_result"},
+        {"tool_references", nlohmann::json::array({nlohmann::json{{"type", "tool_reference"},
+                                                                  {"tool_name", "get_weather"}}})}};
+    api::ServerToolResultBlock server_result;
+    server_result.tool_use_id = "srvtoolu_01ABC";
+    server_result.content = result_content;
+    assistant.content.push_back(server_result);
+    api::ToolUseBlock real_call;
+    real_call.id = "toolu_01XYZ";
+    real_call.name = "get_weather";
+    real_call.input = nlohmann::json{{"location", "San Francisco"}};
+    real_call.caller = "code_execution_20260120";
+    assistant.content.push_back(real_call);
+    request.messages.push_back(assistant);
+
+    const auto body = BuildRequestJson(request);
+    const auto& content = body.at("messages").at(0).at("content");
+    REQUIRE(content.size() == 3);
+
+    CHECK(content.at(0).at("type") == "server_tool_use");
+    CHECK(content.at(0).at("id") == "srvtoolu_01ABC");
+    CHECK(content.at(0).at("name") == "tool_search_tool_regex");
+    CHECK(content.at(0).at("input") == server_use.input);
+
+    CHECK(content.at(1).at("type") == "tool_search_tool_result");
+    CHECK(content.at(1).at("tool_use_id") == "srvtoolu_01ABC");
+    CHECK(content.at(1).at("content") == result_content);  // 嵌套 tool_reference 无损,不压文本
+
+    CHECK(content.at(2).at("type") == "tool_use");
+    CHECK(content.at(2).at("caller") == "code_execution_20260120");
+}
+
+TEST_CASE("P3 原生块回传: caller 缺省不造字段(旧档形状不变)") {
+    Request request;
+    api::Message assistant;
+    assistant.role = api::Role::Assistant;
+    api::ToolUseBlock call;
+    call.id = "toolu_1";
+    call.name = "read_file";
+    call.input = nlohmann::json::object();
+    assistant.content.push_back(call);
+    request.messages.push_back(assistant);
+
+    const auto body = BuildRequestJson(request);
+    CHECK_FALSE(body.at("messages").at(0).at("content").at(0).contains("caller"));
+}

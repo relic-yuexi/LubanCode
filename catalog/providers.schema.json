@@ -54,7 +54,19 @@
         "max_output": { "type": "integer", "minimum": 1 },
         "default_think": { "type": "string" },
         "capabilities": { "type": "object", "additionalProperties": { "type": "boolean" } },
+        "deferred_tools": { "$ref": "#/$defs/deferred_tools" },
         "reasoning": { "$ref": "#/$defs/reasoning" }
+      }
+    },
+    "deferred_tools": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "模型级原生引用能力(动态工具 P3):declared 才允许装配层开 deferred_tool_mode=native_reference。目录不写 = 不声明,不按厂名猜。",
+      "required": ["mode"],
+      "properties": {
+        "mode": { "enum": ["native_reference"] },
+        "tool_reference": { "type": "boolean" },
+        "server_tool_search": { "enum": ["regex", "bm25"] }
       }
     },
     "reasoning": {

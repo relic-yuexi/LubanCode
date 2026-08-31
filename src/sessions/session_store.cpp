@@ -88,6 +88,11 @@ nlohmann::json BlockToJson(const api::ContentBlock& block) {
                 j["id"] = b.id;
                 j["name"] = b.name;
                 j["input"] = b.input;
+                // PTC 调用方标识(动态工具 P3·§7.2):wire 给过的存档带上,
+                // 恢复后原样回传;没给不造字段,旧档形状不变。
+                if (!b.caller.empty()) {
+                    j["caller"] = b.caller;
+                }
             } else if constexpr (std::is_same_v<T, api::ToolResultBlock>) {
                 j["type"] = "tool_result";
                 j["tool_use_id"] = b.tool_use_id;
@@ -122,6 +127,17 @@ nlohmann::json BlockToJson(const api::ContentBlock& block) {
                 j["height"] = b.height;
                 j["bytes"] = b.bytes;
                 j["sha256"] = b.sha256;
+            } else if constexpr (std::is_same_v<T, api::ServerToolUseBlock>) {
+                // 服务端工具搜索(动态工具 P3·§7.2):wire 事实块无损入档,
+                // 恢复后原样回传,不压文本。
+                j["type"] = "server_tool_use";
+                j["id"] = b.id;
+                j["name"] = b.name;
+                j["input"] = b.input;
+            } else if constexpr (std::is_same_v<T, api::ServerToolResultBlock>) {
+                j["type"] = "tool_search_tool_result";
+                j["tool_use_id"] = b.tool_use_id;
+                j["content"] = b.content;
             }
         },
         block);
@@ -159,6 +175,9 @@ std::optional<api::ContentBlock> BlockFromJson(const nlohmann::json& j) {
         // 带进来的),免得漏到 wire 上触发 316 兜底。
         if (!SanitizeJsonTree(b.input)) {
             b.input = nlohmann::json::object();
+        }
+        if (j.contains("caller") && j["caller"].is_string()) {
+            b.caller = platform::SanitizeExternalText(j["caller"].get<std::string>());
         }
         return api::ContentBlock{std::move(b)};
     }
@@ -203,6 +222,32 @@ std::optional<api::ContentBlock> BlockFromJson(const nlohmann::json& j) {
         b.sha256 = platform::SanitizeExternalText(j.value("sha256", std::string()));
         if (b.filename.empty() || b.path.empty()) {
             return std::nullopt;  // 引用块没了落点就是坏块
+        }
+        return api::ContentBlock{std::move(b)};
+    }
+    // 服务端工具搜索的原生块(动态工具 P3·§7.2):恢复时无损读回。id 与
+    // tool_use_id 是配对键,缺了就是坏块,弃块不弃消息;input/content 是
+    // 任意 JSON,照 tool_use.input 同一道递归清洗。
+    if (type == "server_tool_use") {
+        api::ServerToolUseBlock b;
+        b.id = platform::SanitizeExternalText(j.value("id", std::string()));
+        b.name = platform::SanitizeExternalText(j.value("name", std::string()));
+        b.input = j.contains("input") ? j["input"] : nlohmann::json::object();
+        if (!SanitizeJsonTree(b.input)) {
+            b.input = nlohmann::json::object();
+        }
+        if (b.id.empty() || b.name.empty()) {
+            return std::nullopt;
+        }
+        return api::ContentBlock{std::move(b)};
+    }
+    if (type == "tool_search_tool_result") {
+        api::ServerToolResultBlock b;
+        b.tool_use_id = platform::SanitizeExternalText(j.value("tool_use_id", std::string()));
+        b.content = j.contains("content") && j["content"].is_object() ? j["content"] : nlohmann::json::object();
+        SanitizeJsonTree(b.content);
+        if (b.tool_use_id.empty()) {
+            return std::nullopt;
         }
         return api::ContentBlock{std::move(b)};
     }

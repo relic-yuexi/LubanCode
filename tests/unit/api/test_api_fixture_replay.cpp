@@ -91,6 +91,9 @@ std::string EventName(const api::StreamEvent& event) {
     case 7: return "BuiltinToolDone";
     case 8: return "MessageDone";
     case 9: return "ImageOutput";
+    // 动态工具 P3:服务端工具搜索的两枚事件(原生块解析开门时才有)。
+    case 10: return "ServerToolUseStart";
+    case 11: return "ServerToolResult";
     default: return "StreamError";
     }
 }
@@ -112,7 +115,15 @@ std::vector<api::StreamEvent> Replay(const ApiFixture& fixture, ChunkMode mode) 
         return raw;
     }();
     if (fixture.wire == "anthropic-messages") {
-        api::anthropic::EventParser parser(fixture.scenario == "post_tool_raw_think_tags_in_text_delta");
+        // 动态工具 P3:manifest 的 request_expectation 声明了 server_tool_search
+        // 的册,按生产同款开门解析服务端搜索的原生块(没声明的册照旧关着,
+        // server 块静默跳过)。
+        const bool server_tool_search =
+            fixture.request_expectation.is_object() &&
+            fixture.request_expectation.contains("server_tool_search") &&
+            fixture.request_expectation["server_tool_search"].is_string();
+        api::anthropic::EventParser parser(fixture.scenario == "post_tool_raw_think_tags_in_text_delta",
+                                           server_tool_search);
         for (const auto& raw : raw_frames) {
             for (auto& event : parser.Consume(Frame(raw))) {
                 events.push_back(std::move(event));

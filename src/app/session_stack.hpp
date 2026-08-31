@@ -123,6 +123,12 @@ struct SessionStack {
     // 动态工具 P1:延迟工具模式(proxy 路开没开看 main_proxy/sub_proxy)。
     bool main_proxy = false;
     bool sub_proxy = false;
+    // 动态工具 P3:原生路旗标与搜索变体。native 开时本地不挂
+    // tool_search/tool_invoke,延迟定义照发但标 defer_loading,发现走
+    // provider 服务端搜索;变体("regex"/"bm25")自模型目录声明递进。
+    bool main_native = false;
+    bool sub_native = false;
+    std::string native_server_tool_search;
     int tool_search_threshold = 0;
     // 后台任务 detached registry 的注册时点快照(不追 /skill 安装)。
     const std::vector<lubancode::tools::SkillMeta> detached_skills;

@@ -1295,3 +1295,117 @@ TEST_CASE("wire 回环: 半路断流必须报错,2xx 不是绿") {
     // MessageDone——绝不允许"HTTP 200 = 一切正常"糊过去。
     CHECK((!result.has_value() || !saw_done));
 }
+
+
+// ---------------------------------------------------------------------------
+// anthropic-messages:动态工具 P3(原生工具搜索)。服务端搜索 -> 结果块 ->
+// 模型直调发现的工具;第二轮原生对块原样回传(不配 tool_result),发现的
+// 工具照常配 tool_result。夹具手工转写自官方 Streaming 样例(真机核对未
+// 做,本机无钥匙——对照脚本在 tests/manual/native_tool_search_cache_compare.py)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("wire 回环 anthropic: 原生工具搜索无损解析与回传,server 块不配 tool_result(P3)") {
+    std::vector<HttpRequest> received;
+    ReplayPlan plan;
+    plan.sse_rounds = {
+        FixtureStream("anthropic_messages", "manual_native_tool_search_stream"),
+        FixtureStream("anthropic_messages", "manual_thinking_enabled_stream"),
+    };
+    plan.chunk_seed = 20260831;
+    const int port = StartReplayServer(plan, &received);
+    const std::string base = "http://127.0.0.1:" + std::to_string(port);
+
+    api::anthropic::AnthropicBackend backend(base, "test-token", 3000, 30);
+    // 生产同款 native 请求:server_tool_search 声明 + 延迟定义标 defer_loading。
+    api::Request first;
+    first.model = "claude-opus-5";
+    first.max_tokens = 2048;
+    first.server_tool_search = "regex";
+    api::ToolDefinition deferred;
+    deferred.name = "mcp__github__search_issues";
+    deferred.description = "Search issues in a GitHub repository.";
+    deferred.input_schema = nlohmann::json{{"type", "object"}};
+    deferred.load_mode = api::ToolLoadMode::Deferred;
+    first.tools.push_back(deferred);
+    first.messages.push_back(UserText("帮我查 LubanCode 的 issue"));
+
+    std::string stop;
+    const api::Message assistant = RunRound(backend, first, &stop);
+    CHECK(stop == "tool_use");
+
+    // 请求侧:本地延迟定义在前(带 defer_loading),服务端搜索声明追加在后
+    //(server tool 声明永远排在本地函数工具之后)。
+    REQUIRE(received.size() == 1);
+    const auto body1 = nlohmann::json::parse(received[0].body);
+    REQUIRE(body1.at("tools").size() == 2);
+    CHECK(body1["tools"][0].at("name") == "mcp__github__search_issues");
+    CHECK(body1["tools"][0].at("defer_loading") == true);
+    CHECK(body1["tools"][1].at("type") == "tool_search_tool_regex_20251119");
+    CHECK(body1["tools"][1].at("name") == "tool_search_tool_regex");
+
+    // 攒出的 assistant:正文 + server_tool_use + tool_search_tool_result + 真实 tool_use。
+    REQUIRE(assistant.content.size() == 4);
+    CHECK(std::holds_alternative<api::TextBlock>(assistant.content[0]));
+    const auto* server_use = std::get_if<api::ServerToolUseBlock>(&assistant.content[1]);
+    const auto* server_result = std::get_if<api::ServerToolResultBlock>(&assistant.content[2]);
+    const auto* real_call = std::get_if<api::ToolUseBlock>(&assistant.content[3]);
+    REQUIRE(server_use != nullptr);
+    REQUIRE(server_result != nullptr);
+    REQUIRE(real_call != nullptr);
+    CHECK(server_use->id == "srvtoolu_01ABC123");
+    CHECK(server_use->name == "tool_search_tool_regex");
+    CHECK(server_use->input.at("pattern") == "github issue");
+    CHECK(server_result->tool_use_id == "srvtoolu_01ABC123");
+    CHECK(server_result->content.at("tool_references").at(0).at("tool_name") ==
+          "mcp__github__search_issues");
+    CHECK(real_call->name == "mcp__github__search_issues");
+    CHECK(real_call->input.at("query") == "repo:relic-yuexi/LubanCode cache");
+
+    // 第二轮:原生对块原样回传(server 的 srvtoolu id 绝不配 tool_result),
+    // 真实工具照常配 tool_result;server_tool_search 与 defer_loading 再发。
+    api::Request second;
+    second.model = first.model;
+    second.max_tokens = 2048;
+    second.server_tool_search = "regex";
+    second.tools = first.tools;
+    second.messages.push_back(UserText("帮我查 LubanCode 的 issue"));
+    second.messages.push_back(assistant);
+    api::Message tool_back;
+    tool_back.role = api::Role::User;
+    tool_back.content.push_back(api::ToolResultBlock{real_call->id, "issue #42", false});
+    second.messages.push_back(std::move(tool_back));
+
+    std::string final_stop;
+    const api::Message final_message = RunRound(backend, second, &final_stop);
+    CHECK(final_stop == "end_turn");
+    CHECK_FALSE(final_message.content.empty());
+    REQUIRE(received.size() == 2);
+    const auto body2 = nlohmann::json::parse(received[1].body);
+    REQUIRE(body2.at("tools").size() == 2);
+    CHECK(body2["tools"][0].at("defer_loading") == true);
+
+    const auto& replayed = body2.at("messages")[1].at("content");
+    REQUIRE(replayed.size() == 4);
+    CHECK(replayed[1].at("type") == "server_tool_use");
+    CHECK(replayed[1].at("id") == "srvtoolu_01ABC123");
+    CHECK(replayed[1].at("input").at("pattern") == "github issue");
+    CHECK(replayed[2].at("type") == "tool_search_tool_result");
+    CHECK(replayed[2].at("tool_use_id") == "srvtoolu_01ABC123");
+    CHECK(replayed[2].at("content").at("tool_references").at(0).at("tool_name") ==
+          "mcp__github__search_issues");
+    CHECK(replayed[3].at("type") == "tool_use");
+    CHECK(replayed[3].at("id") == real_call->id);
+    // tool_result 只配真实工具那枚 id;整份回传体里没有给 srvtoolu 的
+    // tool_result(官方:给服务端 id 配 tool_result 会被拒)。
+    const auto& tool_result = body2.at("messages")[2].at("content");
+    REQUIRE(tool_result.size() == 1);
+    CHECK(tool_result[0].at("type") == "tool_result");
+    CHECK(tool_result[0].at("tool_use_id") == real_call->id);
+    for (const auto& message : body2.at("messages")) {
+        for (const auto& block : message.at("content")) {
+            if (block.value("type", std::string()) == "tool_result") {
+                CHECK(block.at("tool_use_id").get<std::string>().rfind("srvtoolu", 0) != 0);
+            }
+        }
+    }
+}

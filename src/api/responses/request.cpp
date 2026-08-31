@@ -47,6 +47,20 @@ json ContentBlockToItem(const ContentBlock& block, Role role) {
                             {"content", json::array({json{{"type", role == Role::User ? "input_text"
                                                                                        : "output_text"},
                                                        {"text", ModelImageReplayText(b)}}})}};
+            } else if constexpr (std::is_same_v<T, ServerToolUseBlock>) {
+                // anthropic 原生工具搜索块(动态工具 P3)在 responses wire 的
+                // 明降级:翻成一句事实文本,不悄悄丢块。
+                return json{{"type", "message"},
+                            {"role", WireRole(role)},
+                            {"content", json::array({json{
+                                {"type", role == Role::User ? "input_text" : "output_text"},
+                                {"text", "[服务端工具搜索(anthropic 原生): " + b.name + " 已由 provider 执行]"}}})}};
+            } else if constexpr (std::is_same_v<T, ServerToolResultBlock>) {
+                return json{{"type", "message"},
+                            {"role", WireRole(role)},
+                            {"content", json::array({json{
+                                {"type", role == Role::User ? "input_text" : "output_text"},
+                                {"text", "[服务端工具搜索结果(anthropic 原生): " + b.content.dump() + "]"}}})}};
             } else {
                 // 工具结果图片回喂(协议原生):function_call_output.output
                 // 可为 "an array of image or file objects instead of a

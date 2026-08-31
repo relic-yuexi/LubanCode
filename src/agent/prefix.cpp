@@ -23,7 +23,7 @@ bool SameBlock(const api::ContentBlock& left, const api::ContentBlock& right) {
                 return l.media_type == r.media_type && l.data == r.data && l.filename == r.filename &&
                        l.width == r.width && l.height == r.height;
             } else if constexpr (std::is_same_v<T, api::ToolUseBlock>) {
-                return l.id == r.id && l.name == r.name && l.input == r.input;
+                return l.id == r.id && l.name == r.name && l.input == r.input && l.caller == r.caller;
             } else if constexpr (std::is_same_v<T, api::ToolResultBlock>) {
                 // MCP 富结果单 P0.3:富块在身时块序与 structuredContent 都算
                 // ——图片引用的 MIME/sha/尺寸在块里逐字段比,structured 用
@@ -39,6 +39,11 @@ bool SameBlock(const api::ContentBlock& left, const api::ContentBlock& right) {
                 // 引用块全字段比(路径/尺寸/sha 都是请求可见面,一个不放过)。
                 return l.id == r.id && l.filename == r.filename && l.path == r.path && l.mime_type == r.mime_type &&
                        l.width == r.width && l.height == r.height && l.bytes == r.bytes && l.sha256 == r.sha256;
+            } else if constexpr (std::is_same_v<T, api::ServerToolUseBlock>) {
+                // 服务端工具搜索(动态工具 P3):id/name/入参都是回传面,逐项比。
+                return l.id == r.id && l.name == r.name && l.input == r.input;
+            } else if constexpr (std::is_same_v<T, api::ServerToolResultBlock>) {
+                return l.tool_use_id == r.tool_use_id && l.content == r.content;
             } else {
                 return l.text == r.text && l.signature == r.signature;
             }
@@ -63,8 +68,10 @@ bool SameTools(const std::vector<api::ToolDefinition>& left, const std::vector<a
         return false;
     }
     for (std::size_t i = 0; i < left.size(); ++i) {
+        // load_mode(动态工具 P3)也算:同一枚定义 eager/deferred 的翻动就是
+        // 请求字节翻动(defer_loading 字段进出),指纹必须看得见。
         if (left[i].name != right[i].name || left[i].description != right[i].description ||
-            left[i].input_schema != right[i].input_schema) {
+            left[i].input_schema != right[i].input_schema || left[i].load_mode != right[i].load_mode) {
             return false;
         }
     }
@@ -99,6 +106,7 @@ void HashMixBlock(std::uint64_t& hash, const api::ContentBlock& block) {
                 HashMix(hash, b.id);
                 HashMix(hash, b.name);
                 HashMix(hash, b.input.dump());
+                HashMix(hash, b.caller);
             } else if constexpr (std::is_same_v<T, api::ToolResultBlock>) {
                 HashMix(hash, "r:");
                 HashMix(hash, b.tool_use_id);
@@ -126,6 +134,17 @@ void HashMixBlock(std::uint64_t& hash, const api::ContentBlock& block) {
                 hash ^= static_cast<std::uint64_t>(b.height) << 5;
                 hash ^= static_cast<std::uint64_t>(b.bytes) << 7;
                 hash *= 1099511628211ULL;
+            } else if constexpr (std::is_same_v<T, api::ServerToolUseBlock>) {
+                // 服务端工具搜索(动态工具 P3):这对块原样回传,进指纹——
+                // 块变了请求字节就变,追加律判定必须看得见。
+                HashMix(hash, "su:");
+                HashMix(hash, b.id);
+                HashMix(hash, b.name);
+                HashMix(hash, b.input.dump());
+            } else if constexpr (std::is_same_v<T, api::ServerToolResultBlock>) {
+                HashMix(hash, "sr:");
+                HashMix(hash, b.tool_use_id);
+                HashMix(hash, b.content.dump());
             } else {
                 HashMix(hash, "h:");
                 HashMix(hash, b.text);
@@ -188,6 +207,9 @@ PrefixFingerprint FingerprintRequest(const api::Request& request) {
         HashMix(tools_hash, tool.name);
         HashMix(tools_hash, tool.description);
         HashMix(tools_hash, tool.input_schema.dump());
+        // 动态工具 P3:load_mode 决定 wire 上有没有 defer_loading 字段,同一
+        // 枚定义翻档就是请求字节翻动,指纹一并混入。
+        HashMix(tools_hash, tool.load_mode == api::ToolLoadMode::Deferred ? "deferred" : "eager");
     }
     out.tools_hash = HashFinish(tools_hash);
     out.message_hashes.reserve(request.messages.size());

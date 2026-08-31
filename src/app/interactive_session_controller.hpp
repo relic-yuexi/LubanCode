@@ -370,6 +370,12 @@ private:
     // 与 /context 展示都吃这份)。
     bool main_proxy;
     bool sub_proxy;
+    // 动态工具 P3:native_reference 开没开 + 服务端搜索变体(同源拷贝;
+    // 皮上的 native_deferred_tools 与 request.server_tool_search 都从这份
+    // 折)。
+    bool main_native;
+    bool sub_native;
+    std::string native_server_tool_search;
     int tool_search_threshold;
 
     // ---- UI 状态 ----
