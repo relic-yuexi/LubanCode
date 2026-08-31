@@ -45,6 +45,7 @@ using lubancode::cli::TermErr;
 #include "config/provider_catalog.hpp"
 #include "runtime/trajectory_session.hpp"  // TrajectoryBypassBridge(Token 账本单 A1)
 #include "tools/shell_info.hpp"
+#include "trajectory/metrics.hpp"  // FormatWorkspaceDoctorReport:/doctor trajectory(P0-4)
 
 namespace lubancode::app {
 
@@ -1139,6 +1140,23 @@ void PrintInstructionsDoctor(const DoctorContext& context) {
 
 }  // namespace
 
+// /doctor trajectory(P0-4 §13.1):只读聚合,不造第二本账——现扫
+// session.json + 各 JSONL + 磁盘余量,现折现报。轨迹没开的那句明说。
+void PrintTrajectoryDoctor(const DoctorContext& context) {
+    TermOut() << context.theme.stats << "轨迹账(/doctor trajectory):" << context.theme.reset << "\n";
+    if (context.trajectory_ledger == nullptr) {
+        TermOut() << "  轨迹未开(features.trajectory 关)。副作用工具的可恢复保证"
+                     "按降级口径执行,无审计账可查。\n";
+        TermOut().flush();
+        return;
+    }
+    const auto report = context.trajectory_ledger->BuildDoctorReport();
+    for (const std::string& line : lubancode::trajectory::FormatWorkspaceDoctorReport(report)) {
+        TermOut() << "  " << line << "\n";
+    }
+    TermOut().flush();
+}
+
 void HandleDoctorCommand(const std::string& args, const DoctorContext& context) {
     std::istringstream input(args);
     std::string subcommand;
@@ -1194,6 +1212,10 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
     }
     if (subcommand == "agents") {
         PrintAgentsMatrix(context);
+        return;
+    }
+    if (subcommand == "trajectory") {
+        PrintTrajectoryDoctor(context);
         return;
     }
     if (subcommand == "instructions") {
@@ -1253,7 +1275,8 @@ CommandFlow HandleSlashDoctor(SlashDispatchContext& ctx, const lubancode::cli::P
                                                  ctx.trajectory,
                                                  ctx.session_runtime != nullptr
                                                      ? ctx.session_runtime->wire_name()
-                                                     : std::string()};
+                                                     : std::string(),
+                                                 ctx.trajectory};
     HandleDoctorCommand(parsed.args, doctor_context);
     ctx.real_backend->Rebuild(*ctx.config);
     return CommandFlow::Continue;

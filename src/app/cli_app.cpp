@@ -534,10 +534,12 @@ int RunCli(const std::vector<std::string>& args) {
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::RunTrajectory: {
-            // P0-3 轨迹子命令:只读诊断,跑完就退。
+            // P0-3/P0-4 轨迹子命令:只读诊断(verify/replay/usage/doctor)
+            // 与 derived-only GC,跑完就退。
             cli::TrajectoryCommandArgs trajectory_args;
             trajectory_args.verb = parsed_cli.trajectory.verb;
             trajectory_args.session_id = parsed_cli.trajectory.session_id;
+            trajectory_args.gc_derived_only = parsed_cli.trajectory.gc_derived_only;
             return cli::RunTrajectoryCommand(trajectory_args);
         }
         case CliAction::BadTrajectory:

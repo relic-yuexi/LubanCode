@@ -35,6 +35,7 @@
 #include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "config/project_instructions.hpp"  // ProjectInstructionResolver:/doctor instructions
+#include "runtime/trajectory_session.hpp"    // /doctor trajectory 的账本口(P0-4)
 #include "tools/registry.hpp"
 
 namespace lubancode::runtime {
@@ -227,6 +228,9 @@ struct DoctorContext {
     //(与主 turn 桥同源)。
     lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
     std::string trajectory_wire;
+    // /doctor trajectory(P0-4 §13.1):flag 开的会话的轨迹账本。可空 =
+    // 轨迹没开,那节明说"轨迹未开"。(与上 trajectory 同一对象,只读视角。)
+    const lubancode::runtime::TrajectorySessionLedger* trajectory_ledger = nullptr;
 };
 
 void HandleDoctorCommand(const std::string& args, const DoctorContext& context);

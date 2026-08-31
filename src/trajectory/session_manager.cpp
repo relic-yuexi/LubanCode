@@ -13,6 +13,7 @@
 
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
+#include "trajectory/safety.hpp"
 
 namespace lubancode::trajectory {
 namespace {
@@ -1278,6 +1279,10 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
             return fail("resume.source_not_found", "本 workspace 没有可恢复的 session");
         }
     }
+    // §12.1:用户递进来的 session ref 先过单段名校验,拒绝路径逃逸。
+    if (!IsSafeSingleSegment(source_id)) {
+        return fail("resume.source_invalid_ref", "session id 须是单段名(不带路径): " + source_id);
+    }
     outcome.source_session_id = source_id;
     const auto source_dir = SessionDirOf(source_id);
     if (!std::filesystem::is_directory(source_dir)) {
@@ -1985,6 +1990,10 @@ WorkspaceRecoveryReport SessionManager::RecoverWorkspace(ClearRecoveryPolicy pol
 
 std::expected<void, std::string> SessionManager::ArchiveSession(const std::string& session_id) {
     std::lock_guard<std::mutex> lock(mutex_);
+    // §12.1:归档也是目录管理操作,先过单段名校验。
+    if (!IsSafeSingleSegment(session_id)) {
+        return std::unexpected("session.invalid_ref: session id 须是单段名(不带路径)");
+    }
     if (active_.has_value() && active_->session_id() == session_id &&
         active_->status == SessionStatus::Running) {
         return std::unexpected("session.archive_active: active session 先 close 再归档");
@@ -2012,6 +2021,10 @@ std::expected<void, std::string> SessionManager::ArchiveSession(const std::strin
 std::expected<void, std::string> SessionManager::DeleteSession(const std::string& session_id,
                                                                const std::string& reason) {
     std::lock_guard<std::mutex> lock(mutex_);
+    // §12.1:删除是毁档操作,用户递的名字先过单段名校验再拼路径。
+    if (!IsSafeSingleSegment(session_id)) {
+        return std::unexpected("session.invalid_ref: session id 须是单段名(不带路径)");
+    }
     if (active_.has_value() && active_->session_id() == session_id &&
         active_->status == SessionStatus::Running) {
         return std::unexpected("session.delete_active: active session 不得删");
