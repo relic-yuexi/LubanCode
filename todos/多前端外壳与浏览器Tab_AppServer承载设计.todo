@@ -1,5 +1,5 @@
 # 多前端外壳与浏览器 Tab：AppServer 承载设计
-- 状态：阶段 A 已落地（0.26.109 WS 承载）；阶段 B（输入路由与暂停）已落地（owner 内核裁定、用户优先路、browser/pause|resume，仲裁三案+伪造案进册）；阶段 C（镜像流）已落地（browser/screencast/start|stop + browser/screencast/frame，sidecar 侧 CDP 帧率帽、内核侧有界队列丢帧记账、同截图链 artifact 落盘）；阶段 D（参考前端）起待实现
+- 状态：阶段 A 已落地（0.26.109 WS 承载，勾账 2026-09-01 补——commit 9648cb8 实物在，ws_* 六文件）；阶段 B（输入路由与暂停）已落地（owner 内核裁定、用户优先路、browser/pause|resume，仲裁三案+伪造案进册）；阶段 C（镜像流）已落地（browser/screencast/start|stop + browser/screencast/frame，sidecar 侧 CDP 帧率帽、内核侧有界队列丢帧记账、同截图链 artifact 落盘）；阶段 D（参考前端）已落地（examples/web-console 四件套，全程只走协议；写它暴露的缝——artifact 只有引用没有字节口子——以承载面 GET /artifact/<名> 补上：与 WS 同端口同 token 门，单测+参考前端冒烟进册）；阶段 E（外壳孵化）起待实现
 - 日期：2026-08-29
 - 前置：`todos/内嵌浏览器调试工作台_BrowserRuntime与Package边界.todo`（阶段 0-3、5 已落）
 - 相关：`src/app_server/`（协议 1.1）、`docs/features/app-server/README.md`、`browser/`（Runtime 与 sidecar）
@@ -130,9 +130,12 @@ WebView，内核谁的都不欠。
 
 ### 阶段 A：WS 承载
 
-- [ ] app_server 加 WebSocket 传输，与 stdio 同协议同 dispatcher。
-- [ ] 回环绑定 + token 开关（非回环）。
-- [ ] 连接层 seq/补账在 WS 上逐条对账。
+- [x] app_server 加 WebSocket 传输，与 stdio 同协议同 dispatcher。
+- [x] 回环绑定 + token 开关（非回环）。
+- [x] 连接层 seq/补账在 WS 上逐条对账。
+  （0.26.109 落地，commit 9648cb8；勾账 2026-09-01 对账补记——单测
+  test_app_server_ws.cpp + 冒烟 app_server_ws_client.js 当时已进册，
+  本批只补勾，零代码改动。）
 
 验收：独立 WS 客户端跑通浏览器冒烟二十六项的等价集。
 
@@ -163,8 +166,21 @@ WebView，内核谁的都不欠。
 
 ### 阶段 D：参考前端
 
-- [ ] 最小 Web 页四件套（聊天/页签/面板/镜像 + 审批弹层）。
-- [ ] 全程只走协议，不 import 内核头文件。
+- [x] 最小 Web 页四件套（聊天/页签/面板/镜像 + 审批弹层）。落
+  `examples/web-console/`：core（零 DOM 协议内核，浏览器/Node 同一份）
+  + app（渲染层）+ 页壳；聊天走 thread/turn/item 事件，页签账与
+  Console/Network/Downloads 面板走 browser/* 方法与 query 补账，镜像走
+  screencast 帧事件 + artifact 口子取字节，输入注入按快照 ref 元素清单
+  （协议 1.1 无坐标，不添内核能力），审批弹层吃 permission/request。
+- [x] 全程只走协议，不 import 内核头文件。冒烟
+  `scripts/tests/app_server_web_console_smoke.js` 直接 require 前端内核
+  驱真 app-server——页上怎么走，冒烟就怎么验；端到端一幕（开页→看账→
+  点镜像→Agent 收 stale）+ token 门 + artifact 口子负例全进册。写它
+  暴露的缝已补两处：其一 GET /artifact/<内容寻址名>（WS 同端口同 token
+  门的只读承载面，base64 仍永不进协议；test_app_server_ws_artifact.cpp
+  进册）；其二 WS 承载的串行 accept 堵死并发取字节——RunWsLoop 改专职
+  accept 线程（GET 即到即答、与会话并发，会话仍一条一条服务，阶段 A
+  语义不动），三册冒烟（ws/browser/web-console）全绿作证。
 
 验收：换掉这页的渲染层（换个框架重写）不动内核一行——缝够宽。
 

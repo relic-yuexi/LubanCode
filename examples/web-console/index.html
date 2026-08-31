@@ -1,0 +1,105 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <title>LubanCode 参考前端(多前端外壳·阶段 D)</title>
+  <link rel="stylesheet" href="web_console.css" />
+</head>
+<body>
+  <header id="topbar">
+    <span class="brand">LubanCode 参考前端</span>
+    <form id="connect-form">
+      <label>端口 <input id="port-input" type="number" value="8765" min="1" max="65535" /></label>
+      <label>token <input id="token-input" type="password" placeholder="回环免鉴权可空" /></label>
+      <button type="submit" id="connect-button">连接</button>
+      <button type="button" id="disconnect-button" hidden>断开</button>
+      <span id="conn-state" class="state off">未连接</span>
+      <span id="base64-state" class="state" hidden>⚠ 协议里出现 base64</span>
+    </form>
+  </header>
+
+  <main id="layout">
+    <!-- 四件套之一:聊天流(thread/turn/item 事件) -->
+    <section id="chat-panel" class="panel">
+      <h2>聊天</h2>
+      <div class="toolbar">
+        <button id="new-thread-button">新会话</button>
+        <span id="thread-id-label"></span>
+        <span id="turn-status-label"></span>
+        <span id="usage-label"></span>
+      </div>
+      <ol id="transcript"></ol>
+      <form id="composer">
+        <input id="say-input" type="text" placeholder="问一句(走 turn/start)" autocomplete="off" />
+        <button type="submit">发送</button>
+        <button type="button" id="interrupt-button">打断</button>
+      </form>
+    </section>
+
+    <!-- 四件套之二:页签账 + Console/Network/Downloads 面板 -->
+    <section id="browser-panel" class="panel">
+      <h2>浏览器</h2>
+      <div class="toolbar">
+        <button id="browser-start-button">起场</button>
+        <button id="browser-stop-button">收场</button>
+        <button id="browser-pause-button">暂停</button>
+        <button id="browser-resume-button">恢复</button>
+        <span id="browser-state-label"></span>
+      </div>
+      <ul id="page-list"></ul>
+      <form id="navigate-form">
+        <input id="url-input" type="text" placeholder="http://127.0.0.1:…/page.html(owner=user,不问审批)" />
+        <button type="submit">导航</button>
+        <button type="button" id="open-new-button">开新页</button>
+      </form>
+      <div id="panel-tabs">
+        <button data-tab="console" class="active">Console</button>
+        <button data-tab="network">Network</button>
+        <button data-tab="downloads">Downloads</button>
+      </div>
+      <div id="console-view" class="journal"></div>
+      <div id="network-view" class="journal" hidden></div>
+      <div id="downloads-view" class="journal" hidden></div>
+    </section>
+
+    <!-- 四件套之三:镜像流 + 输入注入 -->
+    <section id="mirror-panel" class="panel">
+      <h2>镜像</h2>
+      <div class="toolbar">
+        <button id="screencast-start-button">开镜像流</button>
+        <button id="screencast-stop-button">停镜像流</button>
+        <button id="snapshot-button">快照</button>
+        <button id="screenshot-button">截图</button>
+        <span id="mirror-state-label"></span>
+      </div>
+      <img id="mirror-image" alt="镜像帧(artifact 字节,经 /artifact 口子)" hidden />
+      <img id="screenshot-image" alt="单发截图" hidden />
+      <div id="element-picker">
+        <p class="hint">协议 1.1 的快照没有坐标——"点镜像"=点元素清单的一行(动作走 browser/action,owner 由内核裁定为 user)。选中后可在下框输入文字注入 type。</p>
+        <ul id="element-list"></ul>
+        <form id="type-form" hidden>
+          <input id="type-input" type="text" placeholder="对选中元素输入文字(type)" />
+          <button type="submit">注入</button>
+        </form>
+      </div>
+    </section>
+
+    <!-- 事件流水(验收工具的底账) -->
+    <section id="log-panel" class="panel">
+      <h2>事件流水</h2>
+      <ol id="event-log"></ol>
+    </section>
+  </main>
+
+  <!-- 四件套之四:审批弹层(permission/request 反向请求) -->
+  <div id="approval-overlay" hidden>
+    <div id="approval-box">
+      <h3>审批</h3>
+      <ul id="approval-list"></ul>
+    </div>
+  </div>
+
+  <script src="web_console_core.js"></script>
+  <script src="web_console_app.js"></script>
+</body>
+</html>

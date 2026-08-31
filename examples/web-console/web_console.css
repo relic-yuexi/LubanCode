@@ -1,0 +1,95 @@
+/* LubanCode 参考前端(阶段 D)——验收工具的皮,不追好看,追账清。 */
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font: 13px/1.5 "Segoe UI", "Microsoft YaHei", sans-serif;
+  color: #222;
+  background: #f5f5f3;
+}
+#topbar {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  padding: 8px 16px;
+  background: #2b2b2b;
+  color: #eee;
+}
+#topbar .brand { font-weight: 600; }
+#connect-form { display: flex; align-items: center; gap: 8px; }
+#connect-form input { width: 110px; padding: 3px 6px; }
+.state { padding: 2px 10px; border-radius: 10px; font-size: 12px; }
+.state.on { background: #2e7d32; color: #fff; }
+.state.off { background: #777; color: #fff; }
+.state.warn { background: #b3401f; color: #fff; }
+
+#layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding: 10px;
+}
+.panel {
+  background: #fff;
+  border: 1px solid #ddd;
+  border-radius: 6px;
+  padding: 10px 12px;
+  min-height: 220px;
+}
+.panel h2 { margin: 0 0 8px; font-size: 14px; }
+.toolbar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-bottom: 8px; }
+.toolbar span { color: #666; }
+button { padding: 3px 10px; cursor: pointer; }
+button:disabled { opacity: .45; cursor: default; }
+
+#transcript { list-style: none; margin: 0; padding: 0; max-height: 46vh; overflow-y: auto; }
+#transcript li { margin: 4px 0; padding: 4px 8px; border-radius: 4px; }
+#transcript li.user { background: #e8f0fe; }
+#transcript li.thinking { color: #7a6a53; background: #faf6ef; font-style: italic; }
+#transcript li.tool { background: #f0f7f0; font-family: Consolas, monospace; font-size: 12px; }
+#transcript li.error-item { background: #fdecea; }
+#composer { display: flex; gap: 6px; margin-top: 8px; }
+#composer input { flex: 1; padding: 5px 8px; }
+
+#page-list { list-style: none; margin: 0 0 6px; padding: 0; }
+#page-list li { display: flex; align-items: center; gap: 8px; padding: 2px 4px; }
+#page-list li.active { background: #eef7ee; }
+#page-list .page-title { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#page-list .epoch { color: #2e7d32; font-size: 12px; }
+#navigate-form { display: flex; gap: 6px; margin-bottom: 8px; }
+#navigate-form input { flex: 1; padding: 4px 8px; }
+
+#panel-tabs button { margin-right: 4px; }
+.journal { max-height: 26vh; overflow-y: auto; font-family: Consolas, monospace; font-size: 12px; }
+.journal table { border-collapse: collapse; width: 100%; }
+.journal td, .journal th { text-align: left; padding: 1px 6px; border-bottom: 1px solid #eee; white-space: nowrap; }
+.journal td.wide { white-space: normal; word-break: break-all; }
+.lvl-error { color: #b3401f; }
+.lvl-warning { color: #a1680f; }
+.failed { color: #b3401f; }
+.dropped-note { color: #a1680f; }
+
+#mirror-image, #screenshot-image { max-width: 100%; border: 1px solid #ccc; margin: 6px 0; }
+#element-list { list-style: none; margin: 0; padding: 0; max-height: 18vh; overflow-y: auto; }
+#element-list li { padding: 2px 6px; cursor: pointer; font-family: Consolas, monospace; font-size: 12px; }
+#element-list li:hover { background: #f0f0ee; }
+#element-list li.selected { background: #e8f0fe; }
+#element-list .ref { color: #2e7d32; margin-right: 6px; }
+#type-form { display: flex; gap: 6px; margin-top: 6px; }
+#type-form input { flex: 1; padding: 4px 8px; }
+.hint { color: #777; font-size: 12px; }
+
+#log-panel { grid-column: 1 / -1; }
+#event-log { list-style: none; margin: 0; padding: 0; max-height: 22vh; overflow-y: auto; font-family: Consolas, monospace; font-size: 12px; color: #555; }
+#event-log li { padding: 1px 6px; }
+#event-log .m { color: #1a5276; }
+
+#approval-overlay {
+  position: fixed; inset: 0; background: rgba(0, 0, 0, .35);
+  display: flex; align-items: flex-start; justify-content: center; padding-top: 10vh;
+}
+#approval-box { background: #fff; border-radius: 8px; padding: 14px 18px; min-width: 420px; max-width: 640px; }
+#approval-box h3 { margin: 0 0 8px; }
+#approval-list { list-style: none; margin: 0; padding: 0; }
+#approval-list li { border: 1px solid #e2c9c9; background: #fdf6f6; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
+#approval-list .tool-name { font-weight: 600; }
+#approval-list .actions { margin-top: 6px; display: flex; gap: 6px; }

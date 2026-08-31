@@ -37,6 +37,11 @@ namespace lubancode::app_server {
 //          引用与 pageId,绝不出现 base64。frame 事件带 dropped(内核侧
 //          落盘赶不上帧速时,丢最老帧计的账,下一帧报完清零)。老报文
 //          形状零改动。
+//   1.1(阶段 D 注,承载面)—— WS 端口的只读 HTTP artifact 口子:
+//          GET /artifact/<内容寻址名> 回截图/镜像帧的字节(与 WS 同端口、
+//          同 token 门)。写参考前端时暴露的缝:事件里只有引用,Web 外壳
+//          没有取字节的口子就画不出图。与 app_server/auth 同属承载面,
+//          不是协议方法面,报文形状零改动,不 bump 版本。
 inline constexpr std::string_view kProtocolVersion = "1.1";
 
 // jsonrpc:"2.0" 字段去留已冻结(阶段 3,schema 定案):

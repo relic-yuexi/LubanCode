@@ -32,6 +32,9 @@ struct WsOptions {
     int port = 0;                         // 0 = 系统分配(测试)
     std::string token;                    // 空 = 免鉴权;非空 = 首帧门
     int accept_poll_ms = 200;             // accept 轮询粒度(叫停响应速度)
+    // artifact 字节口子(阶段 D):GET /artifact/<内容寻址名> 只在这个目录
+    // 里取文件(浏览器截图/镜像帧的落盘处)。空 = 口子不开(404)。
+    std::string artifact_dir;
 };
 
 class WsTransport {
@@ -80,7 +83,16 @@ public:
     // 鉴权不过/升级失败/对端跑了:对端已断,返回 nullopt(不算监听层错,
     // 继续等下一条);监听被叫停或监听层真错也返回 nullopt——调用方看
     // stopped 与 last_error 分辨。
+    //
+    // 只读 GET(阶段 D):`GET /artifact/<内容寻址名>` 在这层就地应答并
+    // 继续等下一条连接(不占 Session,不进协议线)。token 门与 WS 同
+    // 规矩——配了 token 的服务,GET 也要票(Bearer 头或 ?token=,恒时
+    // 比较,不落日志)。
     std::unique_ptr<Session> Accept();
+
+    // GET /artifact 的执行体:token 门 → 名字形状 → 目录内读文件 → 应答。
+    // 应答完连接即关(Connection: close),不污染 WS 面。
+    void ServeArtifactGet(net::Socket& socket, const ws::HttpRequestHead& head) const;
 
 private:
     WsOptions options_;

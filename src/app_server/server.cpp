@@ -1504,20 +1504,65 @@ int Server::Run() {
     return code;
 }
 
-// WS 承载主循环:一条一条接连接服务。纯断线(Disconnected)接着等重连;
+// WS 承载主循环(阶段 D 起):专职 accept 线程一条一条接连接——升级的
+// Session 进队等伺候(会话服务仍串行,阶段 A 语义不变),artifact GET 在
+// accept 线程上就地应答。改动的由头:参考前端开着 WS 会话的同时要经
+// HTTP 取截图/镜像帧的字节,accept 被在服务的会话堵死就两头死锁(写
+// 参考前端时暴露的缝,单子 §五)。纯断线(Disconnected)接着等重连;
 // 对端 exit/shutdown(ExitRequested)整场收线;监听收摊(ListenerStopped)
 // 同样收线——监听层错没有自愈路,赖活着只会空转。
 int Server::RunWsLoop() {
-    WsTransport transport(*options_.ws);
+    // 阶段 D:artifact 字节口子与 WS 同端口——协议事件里截图/镜像帧只有
+    // 引用(base64 永不进协议),Web 外壳凭 GET /artifact/<名> 取字节。
+    // 目录与浏览器面同源(BrowserServiceOptions.artifact_dir 一处配置)。
+    WsOptions ws_options = *options_.ws;
+    ws_options.artifact_dir = options_.browser_artifact_dir;
+    WsTransport transport(ws_options);
     if (!transport.Start()) {
         return 1;
     }
+    std::mutex sessions_mutex;
+    std::condition_variable sessions_cv;
+    std::deque<std::unique_ptr<WsTransport::Session>> pending_sessions;
+    bool acceptor_done = false;
+    std::thread accept_thread([&] {
+        while (true) {
+            // artifact GET 在 Accept 里就地应答继续等;升级的 Session 交出去。
+            std::unique_ptr<WsTransport::Session> session = transport.Accept();
+            if (session == nullptr) {
+                break; // 监听叫停/监听层错
+            }
+            {
+                std::lock_guard<std::mutex> lock(sessions_mutex);
+                pending_sessions.push_back(std::move(session));
+            }
+            sessions_cv.notify_one();
+        }
+        {
+            std::lock_guard<std::mutex> lock(sessions_mutex);
+            acceptor_done = true;
+        }
+        sessions_cv.notify_all();
+    });
+    WsServeOutcome outcome = WsServeOutcome::Disconnected;
     while (true) {
-        const WsServeOutcome outcome = ServeWsConnection(transport);
+        std::unique_ptr<WsTransport::Session> session;
+        {
+            std::unique_lock<std::mutex> lock(sessions_mutex);
+            sessions_cv.wait(lock, [&] { return acceptor_done || !pending_sessions.empty(); });
+            if (pending_sessions.empty()) {
+                break; // 收摊:没有后续连接了
+            }
+            session = std::move(pending_sessions.front());
+            pending_sessions.pop_front();
+        }
+        outcome = ServeWsSession(std::move(session));
         if (outcome != WsServeOutcome::Disconnected) {
             break;
         }
     }
+    transport.Stop(); // 叫停 accept 线程(等连接的那一趟 select 超时内回来)
+    accept_thread.join();
     Shutdown();
     return 0;
 }
@@ -1527,6 +1572,10 @@ Server::WsServeOutcome Server::ServeWsConnection(WsTransport& transport) {
     if (session == nullptr) {
         return WsServeOutcome::ListenerStopped; // 监听叫停/监听层错:没有连接可服务
     }
+    return ServeWsSession(std::move(session));
+}
+
+Server::WsServeOutcome Server::ServeWsSession(std::unique_ptr<WsTransport::Session> session) {
     // 每条连接新铸 dispatcher:握手状态机(先 initialize 才放业务)是
     // 连接级的,跨连接复用会把第二条连接卡死在 kErrNotInitialized 之外
     // 的所有岔路上。

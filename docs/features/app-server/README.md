@@ -39,9 +39,17 @@ lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
 - **token 门**:`--app-server-ws-token` 或环境变量 `LUBANCODE_APPSERVER_TOKEN` 配了就启用——HTTP 升级完成后**第一条文本帧**必须是 `{"method":"app_server/auth","params":{"token":...}}`,不过即断(连接关闭,不回协议错误)。token 恒时比较,不落任何日志。回环 + 没配 token = 免鉴权(本机首版口径)。
 - **连接生命周期**:TCP 断开只收那条连接(进程活着等重连——与 stdio 的"EOF 自退"不同);对端发 `exit`/`shutdown` 才整场收线、进程退出。断线后:thread 账与浏览器会话(sidecar)不收尸,重连的壳凭 cursor(`browser/console/query`、`browser/network/query`、`trace/query`、`workflow/query` 的 `lastSeq`/`sinceSeq`)补账,老 threadId 继续用。
 - **seq**:事件序号进程级单调(`ProcessIdAuthority` 唯一发号),每条连接看到的是自己的单调子序列;重连不回卷、永不复用,cursor 补账不撞号。
-- **多连接**:阶段 A 一条一条串行服务(同拍一条活连接);同拍多客户端是 §4.4 的活,不在本阶段。
+- **多连接**:会话一条一条串行服务(同拍一条活连接,后来者升级完排队等)——同拍多客户端是 §4.4 的活,不在本单阶段。阶段 D 起 accept 由专职线程做(不被在服务的会话堵死):artifact GET 即到即答,与会话并发;WS 会话仍串行。
 - **实现**:服务端 WS(握手算料、帧编解码、回环 TCP)是仓内自带的极小实现(`src/app_server/ws_frames.*`、`ws_sockets.*`、`ws_transport.*`),零第三方依赖——不谈压缩扩展、不收 binary 帧、客户端帧必须掩码;不引依赖巨兽。
 - 验证口径:单测 `tests/unit/app_server/test_app_server_ws.cpp`(握手算料 RFC 向量、帧编解码分型、token 门、回环真监听一幕幕:事件 seq、断线重连、exit 收线);冒烟 `scripts/tests/app_server_ws_smoke.sh`(独立客户端 `app_server_ws_client.js`:本地假 Anthropic 后端跑一 turn、断线重连、cursor 补账、token 门;浏览器面等价集要 playwright)。
+
+## 参考前端(多前端外壳单阶段 D)
+
+`examples/web-console/`:一只最小 localhost Web 页,**不是产品,是验收工具**——协议面缺什么,写它的时候全暴露。四件套:聊天流(thread/turn/item 事件)、页签账 + Console/Network/Downloads 面板(query 补账)、镜像流 + 输入注入(screencast 帧经 artifact 口子取字节;快照没有坐标,"点镜像"=点元素清单一行,`browser/action` 走用户路)、审批弹层(`permission/request` 反向请求)。
+
+- 全程只走协议与承载面:WS 文本帧 + `GET /artifact/<名>`;不 import 内核头文件、不读内核盘上账、不碰 sidecar。
+- 内核(`web_console_core.js`,纯逻辑零 DOM)与 Node 冒烟 `scripts/tests/app_server_web_console_smoke.js` 同一份——页上怎么走协议,冒烟就怎么验(端到端一幕:开页 → 看账 → 点镜像 → Agent 收 `browser.stale_ref`)。
+- 跑法见 `examples/web-console/README.md`;全链路本地回环。
 
 ## 协议版本
 
@@ -57,6 +65,7 @@ lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
 | `1.1`(承载注) | WS 传输层(2026-08 起):同一条报文线的第二副面孔,报文形状零改动,不 bump 版本。连接级握手(`initialize`)每条连接各来一遍;首帧鉴权消息 `app_server/auth` 只在 WS 且配了 token 时出现,不算协议方法面。 |
 | `1.1`(阶段 B 注) | 用户输入路由与暂停(2026-08 起,additive):新增 `browser/pause`/`browser/resume` 方法与 `browser/paused`/`browser/resumed` 事件;`browser/status` 的 result 增可选布尔 `paused`;`browser/action/completed` 增稳定错误码 `browser.paused`。**owner 仲裁升级**:`owner` 由内核按连接与鉴权裁定(见《owner 仲裁》),外壳报的只是意向;`owner` 缺省值从写死 `user` 改为连接的裁定身份。老报文形状零改动。 |
 | `1.1`(阶段 C 注) | 镜像流(2026-08 起,additive):新增 `browser/screencast/start`/`browser/screencast/stop` 方法与 `browser/screencast/frame` 事件。只读、不问审批(与 `snapshot`/`screenshot` 同档);帧字节走同一条截图 artifact 链落盘,协议上只有引用与 `pageId`,绝不出现 base64。老报文形状零改动。 |
+| `1.1`(阶段 D 注) | 参考前端(2026-09 起):WS 端口的只读 HTTP artifact 口子 `GET /artifact/<内容寻址名>`(与 WS 同端口、同 token 门)——事件里只有引用,字节走这条口子,base64 仍永不进协议。承载面(与 `app_server/auth` 同级),不是协议方法面,报文形状零改动,不 bump 版本。 |
 
 ## 方法面
 

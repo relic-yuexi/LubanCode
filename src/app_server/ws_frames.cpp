@@ -264,6 +264,172 @@ std::string MakeUpgradeResponse(std::string_view accept_key) {
     return response;
 }
 
+// ---- HTTP 只读面(阶段 D) ----
+
+HttpRequestHead ParseHttpRequestHead(std::string_view request_bytes) {
+    HttpRequestHead head;
+    // 请求行:METHOD SP TARGET SP VERSION。TARGET 劈出查询串(? 后头)。
+    const std::size_t line_end = request_bytes.find("\r\n");
+    const std::string_view first_line =
+        request_bytes.substr(0, line_end == std::string_view::npos ? request_bytes.size() : line_end);
+    std::size_t cursor = 0;
+    const auto skip_spaces = [&] {
+        while (cursor < first_line.size() && first_line[cursor] == ' ') {
+            ++cursor;
+        }
+    };
+    const auto read_token = [&] {
+        const std::size_t start = cursor;
+        while (cursor < first_line.size() && first_line[cursor] != ' ') {
+            ++cursor;
+        }
+        return first_line.substr(start, cursor - start);
+    };
+    skip_spaces();
+    head.method = std::string(read_token());
+    skip_spaces();
+    std::string raw_target(read_token());
+    const std::size_t question = raw_target.find('?');
+    if (question == std::string::npos) {
+        head.target = std::move(raw_target);
+    } else {
+        head.target = raw_target.substr(0, question);
+        head.query = raw_target.substr(question + 1);
+    }
+    // 头部逐行扫,只挑Authorization(不区分大小写;值两侧空白宽容)。
+    std::size_t pos = line_end == std::string_view::npos ? std::string_view::npos : line_end + 2;
+    while (pos < request_bytes.size()) {
+        const std::size_t next = request_bytes.find("\r\n", pos);
+        const std::string_view line = request_bytes.substr(
+            pos, next == std::string_view::npos ? request_bytes.size() - pos : next - pos);
+        pos = next == std::string_view::npos ? request_bytes.size() : next + 2;
+        const std::size_t colon = line.find(':');
+        if (colon == std::string_view::npos) {
+            continue;
+        }
+        std::string name(line.substr(0, colon));
+        for (char& c : name) {
+            c = c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+        }
+        std::size_t value_start = colon + 1;
+        while (value_start < line.size() && (line[value_start] == ' ' || line[value_start] == '\t')) {
+            ++value_start;
+        }
+        std::size_t value_end = line.size();
+        while (value_end > value_start && (line[value_end - 1] == ' ' || line[value_end - 1] == '\t')) {
+            --value_end;
+        }
+        const std::string_view value = line.substr(value_start, value_end - value_start);
+        if (name == "authorization") {
+            // Bearer 方案名不区分大小写(RFC 9110 的 auth-scheme);凭据
+            // 本体原样,不做任何解码。
+            constexpr std::string_view kBearer = "bearer ";
+            bool scheme_match = value.size() > kBearer.size();
+            for (std::size_t i = 0; scheme_match && i < kBearer.size(); ++i) {
+                const char c = value[i];
+                const char lowered = c >= 'A' && c <= 'Z' ? static_cast<char>(c - 'A' + 'a') : c;
+                scheme_match = lowered == kBearer[i];
+            }
+            if (scheme_match) {
+                head.bearer_token = std::string(value.substr(kBearer.size()));
+            }
+        }
+        if (line.empty()) {
+            break; // 头部收尾,后面不该再有(有也不认)
+        }
+    }
+    return head;
+}
+
+namespace {
+
+// 百分号解码:%XX(两位十六进制)解码,别的 % 原样保留。编码怪也不报错
+// ——查不着参数就是查不着,调用方按"没带 token"落 403。
+int HexValue(char c) {
+    if (c >= '0' && c <= '9') {
+        return c - '0';
+    }
+    if (c >= 'a' && c <= 'f') {
+        return c - 'a' + 10;
+    }
+    if (c >= 'A' && c <= 'F') {
+        return c - 'A' + 10;
+    }
+    return -1;
+}
+
+}  // namespace
+
+std::string QueryParam(const std::string& query, std::string_view name) {
+    std::size_t pos = 0;
+    while (pos <= query.size()) {
+        const std::size_t amp = query.find('&', pos);
+        const std::string pair =
+            query.substr(pos, amp == std::string::npos ? std::string::npos : amp - pos);
+        const std::size_t eq = pair.find('=');
+        if (eq != std::string::npos && std::string_view(pair).substr(0, eq) == name) {
+            const std::string raw = pair.substr(eq + 1);
+            std::string decoded;
+            decoded.reserve(raw.size());
+            for (std::size_t i = 0; i < raw.size(); ++i) {
+                if (raw[i] == '%' && i + 2 < raw.size() &&
+                    HexValue(raw[i + 1]) >= 0 && HexValue(raw[i + 2]) >= 0) {
+                    decoded.push_back(static_cast<char>((HexValue(raw[i + 1]) << 4) | HexValue(raw[i + 2])));
+                    i += 2;
+                } else {
+                    decoded.push_back(raw[i] == '+' ? ' ' : raw[i]);
+                }
+            }
+            return decoded;
+        }
+        if (amp == std::string::npos) {
+            break;
+        }
+        pos = amp + 1;
+    }
+    return std::string();
+}
+
+bool IsValidArtifactName(std::string_view name) {
+    constexpr std::string_view kPrefix = "art-";
+    if (name.size() <= kPrefix.size() || name.substr(0, kPrefix.size()) != kPrefix) {
+        return false;
+    }
+    const std::size_t dot = name.rfind('.');
+    // 名形如 art-<hex>.(png|jpeg|jpg):hex 段 8..64 位,点号只许出现一次。
+    if (dot == std::string_view::npos || name.find('.') != dot) {
+        return false;
+    }
+    const std::size_t hex_len = dot - kPrefix.size();
+    if (hex_len < 8 || hex_len > 64) {
+        return false;
+    }
+    for (std::size_t i = kPrefix.size(); i < dot; ++i) {
+        if (HexValue(name[i]) < 0) {
+            return false;
+        }
+    }
+    const std::string_view extension = name.substr(dot + 1);
+    return extension == "png" || extension == "jpeg" || extension == "jpg";
+}
+
+std::string MakeHttpResponse(std::string_view status_line, std::string_view content_type,
+                             std::string_view body, std::string_view extra_headers) {
+    std::string response;
+    response.reserve(body.size() + 256);
+    response += "HTTP/1.1 ";
+    response += status_line;
+    response += "\r\nConnection: close\r\nContent-Type: ";
+    response += content_type;
+    response += "\r\nContent-Length: ";
+    response += std::to_string(body.size());
+    response += "\r\n";
+    response += extra_headers; // 每行自带 \r\n
+    response += "\r\n";
+    response += body;
+    return response;
+}
+
 namespace {
 
 // 出帧共体:FIN=1、不掩码、指定 opcode。长度按 RFC 三档。

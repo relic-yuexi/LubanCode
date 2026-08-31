@@ -48,6 +48,37 @@ UpgradeParseResult ParseUpgradeRequest(std::string_view request_bytes);
 // 101 应答整包(不含后续帧)。
 std::string MakeUpgradeResponse(std::string_view accept_key);
 
+// ---- HTTP 只读面(多前端外壳单阶段 D:artifact 字节口子) ----
+//
+// WS 端口的升级握手本来就是一段 HTTP,同一只监听顺手认一类普通 GET:
+// `GET /artifact/<内容寻址名>`——镜像帧/截图在协议事件里只有 artifact
+// 引用(base64 永不进协议),Web 外壳要有取字节的口子才画得出图。这不是
+// 协议方法面(与 app_server/auth 同属承载面),报文形状零改动,不 bump
+// 版本。除这一类 GET 外,其余非升级请求照旧 400。
+
+// 普通请求头解析(只服务上面那一类 GET,别的方法不认)。头部名不区分
+// 大小写;值两侧空白宽容。坏形状(不是请求行开头/没有行尾)给空 method,
+// 调用方按"非 GET"落 400。
+struct HttpRequestHead {
+    std::string method;        // 请求行的方法(原文,约定大写)
+    std::string target;        // 目标路径(不含查询串)
+    std::string query;         // 查询串(去开头的 ?;没有则空)
+    std::string bearer_token;  // Authorization: Bearer <token>(没有则空)
+};
+HttpRequestHead ParseHttpRequestHead(std::string_view request_bytes);
+
+// 查询串取参数值(?token=... 用;百分号解码,%XX 之外的 % 原样保留)。
+std::string QueryParam(const std::string& query, std::string_view name);
+
+// 内容寻址 artifact 名:art-<十六进制 8..64 位>.(png|jpeg|jpg)。只认这
+// 一个形状——路径分隔、别的扩展名、百分号编码一律不认,穿越无从谈起。
+bool IsValidArtifactName(std::string_view name);
+
+// 简单 HTTP 应答:状态行 + Connection: close + Content-Type/Length + 可选
+// 头(每行自带 \r\n)+ 正文字节。只给只读面用。
+std::string MakeHttpResponse(std::string_view status_line, std::string_view content_type,
+                             std::string_view body, std::string_view extra_headers = {});
+
 // ---- 帧 ----
 
 inline constexpr std::size_t kMaxMessageBytes = 8 * 1024 * 1024;  // 与 LineFramer 上限对齐
