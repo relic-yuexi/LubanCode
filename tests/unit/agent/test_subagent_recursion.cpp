@@ -179,127 +179,92 @@ bool WaitForSettled(const tools::AgentTool& tool, int max_ms = 15000) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// P0-1:AgentTaskSpec 合同
+// P1-0:扁平 prompt 合同
 // ---------------------------------------------------------------------------
-TEST_CASE("AgentTaskSpec:最小合法形状可 parse,canonical JSON 稳定,渲染分栏") {
-    const nlohmann::json task = nlohmann::json{
-        {"goal", "查清后台子代理为何不能再调 agent"},
-        {"deliverable", "一份简明源码调查报告"},
-    };
-    const auto parsed = agent::ParseAgentTaskSpec(task, "查清后台派工");
-    REQUIRE(parsed.ok());
-    CHECK(parsed.spec->title == "查清后台派工");
-    CHECK(parsed.spec->goal == "查清后台子代理为何不能再调 agent");
-    CHECK_FALSE(parsed.spec->legacy_prompt);
-    // canonical:同输入两次 dump 逐字节一致;空段不进 JSON。
-    const nlohmann::json canonical = agent::CanonicalSpecJson(*parsed.spec);
-    CHECK(canonical.dump() == agent::CanonicalSpecJson(*parsed.spec).dump());
-    CHECK_FALSE(canonical.contains("context"));
-    CHECK_FALSE(canonical.contains("scope"));
-    // 渲染:标题/目标/交付在,空段(上下文/范围/约束/验收)不渲染。
-    const std::string rendered = agent::RenderDelegatedTask(*parsed.spec);
-    CHECK(rendered.find("[委派任务 v1]") == 0);
-    CHECK(rendered.find("标题:查清后台派工") != std::string::npos);
-    CHECK(rendered.find("目标") != std::string::npos);
-    CHECK(rendered.find("交付") != std::string::npos);
-    CHECK(rendered.find("已知上下文") == std::string::npos);
-    CHECK(rendered.find("验收") == std::string::npos);
-    // hash 稳定且随内容变。
-    CHECK(agent::TaskSpecHash(*parsed.spec) == agent::TaskSpecHash(*parsed.spec));
-    agent::AgentTaskSpec mutated = *parsed.spec;
-    mutated.goal = "换一件事";
-    CHECK(agent::TaskSpecHash(mutated) != agent::TaskSpecHash(*parsed.spec));
+TEST_CASE("AgentTaskSpec:v2 只存 title + instructions,正文逐字保留,hash 随语义而变") {
+    const std::string prompt = "背景\r\n\r\n## 任务\r\n查清取消链。\r\n\r\n```cpp\r\nx();\r\n```";
+    const agent::AgentTaskSpec spec = agent::MakeAgentTaskSpec("查清取消链", prompt);
+    CHECK(spec.schema_version == 2);
+    CHECK(spec.title == "查清取消链");
+    CHECK(spec.instructions == prompt);
+    const nlohmann::json canonical = agent::CanonicalSpecJson(spec);
+    CHECK(canonical == nlohmann::json{{"schema_version", 2},
+                                      {"title", "查清取消链"},
+                                      {"instructions", prompt}});
+    CHECK(agent::TaskSpecHash(spec) == agent::TaskSpecHash(spec));
+    agent::AgentTaskSpec mutated = spec;
+    mutated.instructions += "\n补一条";
+    CHECK(agent::TaskSpecHash(mutated) != agent::TaskSpecHash(spec));
 }
 
-TEST_CASE("AgentTaskSpec:缺必填/空串/错类型/超限/NUL 按稳定 JSON path 报错") {
-    const nlohmann::json title_only = nlohmann::json{{"goal", "g"}};
-    CHECK(agent::ParseAgentTaskSpec(title_only, "t").error.find("task.deliverable") != std::string::npos);
-    const nlohmann::json missing_goal = nlohmann::json{{"deliverable", "d"}};
-    CHECK(agent::ParseAgentTaskSpec(missing_goal, "t").error.find("task.goal") != std::string::npos);
-    const nlohmann::json bad_array = nlohmann::json{{"goal", "g"},
-                                                    {"deliverable", "d"},
-                                                    {"acceptance", nlohmann::json::array({"", "x"})}};
-    CHECK(agent::ParseAgentTaskSpec(bad_array, "t").error.find("task.acceptance[0]") != std::string::npos);
-    const nlohmann::json wrong_type = nlohmann::json{{"goal", "g"}, {"deliverable", "d"}, {"context", 3}};
-    CHECK(agent::ParseAgentTaskSpec(wrong_type, "t").error.find("task.context 必须是字符串数组") !=
+TEST_CASE("AgentTaskSpec:空白、NUL 与总字节帽稳定拒绝") {
+    CHECK(agent::ValidateAgentTaskSpec(agent::MakeAgentTaskSpec("标题", " \r\n\t")).find("prompt") !=
           std::string::npos);
-    const nlohmann::json with_nul = nlohmann::json{{"goal", std::string("g\0", 2)}, {"deliverable", "d"}};
-    CHECK(agent::ParseAgentTaskSpec(with_nul, "t").error.find("NUL") != std::string::npos);
-    std::vector<std::string> too_many(17, "条");
-    const nlohmann::json over_count = nlohmann::json{{"goal", "g"}, {"deliverable", "d"}, {"context", too_many}};
-    CHECK(agent::ParseAgentTaskSpec(over_count, "t").error.find("条数超限") != std::string::npos);
-    const nlohmann::json bad_scope = nlohmann::json{{"goal", "g"},
-                                                    {"deliverable", "d"},
-                                                    {"scope", nlohmann::json{{"include_paths", 5}}}};
-    CHECK(agent::ParseAgentTaskSpec(bad_scope, "t").error.find("task.scope.include_paths") != std::string::npos);
+    CHECK(agent::ValidateAgentTaskSpec(agent::MakeAgentTaskSpec("标题", std::string("x\0y", 3))).find("NUL") !=
+          std::string::npos);
+    CHECK(agent::ValidateAgentTaskSpec(
+              agent::MakeAgentTaskSpec("标题", std::string(agent::kMaxTaskSpecBytes, 'x')))
+              .empty());
+    CHECK(agent::ValidateAgentTaskSpec(
+              agent::MakeAgentTaskSpec("标题", std::string(agent::kMaxTaskSpecBytes + 1, 'x')))
+              .find("超长") != std::string::npos);
 }
 
-TEST_CASE("AgentTaskSpec:legacy prompt 归一(goal=prompt、占位交付、legacy 记号)") {
-    const agent::AgentTaskSpec spec = agent::CanonicalizeLegacyPrompt("检索阈值", "去查 subagent 段配置");
-    CHECK(spec.legacy_prompt);
-    CHECK(spec.goal == "去查 subagent 段配置");
-    CHECK(spec.deliverable == "按任务说明交付结果");
-    CHECK(spec.title == "检索阈值");
-}
-
-TEST_CASE("agent 工具:task 与 prompt 同给即拒;legacy prompt 照旧可用") {
+TEST_CASE("agent 工具:schema 只露扁平 title + prompt 任务合同") {
     FakeBackend backend;
-    backend.scripts = {TextOnlyScript("旧路照跑")};
     tools::ToolRegistry sub_registry;
     tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
-    sub_registry.Register(std::make_unique<tools::AgentDispatchTool>(agent_tool));
-
-    const auto both = agent_tool.execute(nlohmann::json{
-        {"title", "二选一"},
-        {"prompt", "旧说明"},
-        {"task", nlohmann::json{{"goal", "g"}, {"deliverable", "d"}}},
-    });
-    CHECK(both.is_error);
-    CHECK(both.content.find("同时给") != std::string::npos);
-
-    const auto legacy = agent_tool.execute(nlohmann::json{{"title", "旧路"}, {"prompt", "旧说明"}});
-    CHECK_FALSE(legacy.is_error);
-    CHECK(legacy.content == "旧路照跑");
-    const auto snapshots = agent_tool.TaskSnapshots();
-    REQUIRE(snapshots.size() == 1);
-    // legacy:prompt 原样入账(旧行为对账),canonical spec 同步在账。
-    CHECK(snapshots[0].prompt == "旧说明");
-    REQUIRE(snapshots[0].spec != nullptr);
-    CHECK(snapshots[0].spec->legacy_prompt);
-    CHECK(snapshots[0].spec->goal == "旧说明");
+    const nlohmann::json schema = agent_tool.input_schema();
+    CHECK(schema["required"] == nlohmann::json::array({"title", "prompt"}));
+    CHECK_FALSE(schema["properties"].contains("task"));
 }
 
-TEST_CASE("agent 工具:结构化 task 的首轮输入是渲染文本,快照存 canonical spec") {
+TEST_CASE("agent 工具:prompt 错型、空白、NUL、超帽都在模型请求前拒绝") {
     FakeBackend backend;
-    backend.scripts = {TextOnlyScript("结构化结论")};
     tools::ToolRegistry sub_registry;
     tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
 
-    const auto result = agent_tool.execute(nlohmann::json{
-        {"title", "查调度器"},
-        {"task",
-         nlohmann::json{{"goal", "查清调度器的深度账"},
-                        {"context", nlohmann::json::array({"旧账用全局原子"})},
-                        {"constraints", nlohmann::json::array({"只读源码"})},
-                        {"acceptance", nlohmann::json::array({"给出文件与符号"})},
-                        {"deliverable", "一页调查报告"}}},
-    });
+    CHECK(agent_tool.execute(nlohmann::json{{"title", "错型"}, {"prompt", 7}}).is_error);
+    CHECK(agent_tool.execute(nlohmann::json{{"title", "空白"}, {"prompt", " \r\n\t"}}).is_error);
+    CHECK(agent_tool.execute(
+                        nlohmann::json{{"title", "空字节"}, {"prompt", std::string("x\0y", 3)}})
+              .is_error);
+    CHECK(agent_tool.execute(nlohmann::json{
+                                 {"title", "超长"},
+                                 {"prompt", std::string(agent::kMaxTaskSpecBytes + 1, 'x')},
+                             })
+              .is_error);
+    CHECK(backend.request_count() == 0);
+}
+
+TEST_CASE("agent 工具:软结构 prompt 原样成为首轮 user message,运行事实只在 system 与快照") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("结论")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    const std::string prompt =
+        "背景：旧账用全局原子。\r\n\r\n## 任务\r\n查清调度器的深度账。\r\n\r\n```cpp\r\nx();\r\n```\r\n\r\n## 报告\r\n给出文件与符号。";
+    const auto result =
+        agent_tool.execute(nlohmann::json{{"title", "查调度器"}, {"prompt", prompt}});
     CHECK_FALSE(result.is_error);
     REQUIRE(backend.request_count() == 1);
+    const api::Request request = backend.requests_copy()[0];
     std::string first_user_text;
-    for (const auto& block : backend.requests_copy()[0].messages.front().content) {
+    for (const auto& block : request.messages.front().content) {
         if (const auto* text = std::get_if<api::TextBlock>(&block)) {
             first_user_text = text->text;
         }
     }
-    CHECK(first_user_text.find("[委派任务 v1]") == 0);
-    CHECK(first_user_text.find("验收") != std::string::npos);
+    CHECK(first_user_text == prompt);
+    CHECK(request.system.find("- 工作目录: /work/dir") != std::string::npos);
+    CHECK(request.system.find(prompt) == std::string::npos);
     const auto snapshots = agent_tool.TaskSnapshots();
     REQUIRE(snapshots.size() == 1);
-    CHECK(snapshots[0].prompt == first_user_text);  // 投影即渲染文本
+    CHECK(snapshots[0].prompt == prompt);
+    CHECK(snapshots[0].effective_cwd == "/work/dir");
     REQUIRE(snapshots[0].spec != nullptr);
-    CHECK(snapshots[0].spec->acceptance.size() == 1);
-    CHECK(snapshots[0].spec->deliverable == "一页调查报告");
+    CHECK(snapshots[0].spec->instructions == prompt);
 }
 
 // ---------------------------------------------------------------------------

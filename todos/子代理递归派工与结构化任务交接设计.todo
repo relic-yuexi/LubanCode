@@ -1,6 +1,6 @@
 # 子代理递归派工与结构化任务交接设计
 
-- 状态：P0 五批 + P1-1/P1-2 已落地（2026-08-31：AgentTaskCoordinator、结构化任务合同、显式 lineage、后台递归两路、结果归父、scoped agent_message、直接子名册、Dock 缩进画树、/doctor agents 递归可观测性、防扇出配置接线、嵌套轨迹边）；§十七/§十八见文末自查表，真机三场景与 ThreadSanitizer 未验（本机无 Linux/TSan 环境），已如实标注。新增 P1-0”软结构 Prompt 收口”（不再强迫模型填写嵌套 task，改回扁平 title+prompt），待实现，与已落地的 P1-1/P1-2 不冲突——P1-1/P1-2 是在现有 P0 双路（task/legacy prompt 并存）之上做的可观测性与预算收口，P1-0 落地后仍继续生效，只是模型入口那半会从”双路”收成”单路”
+- 状态：P0 五批 + P1-0/P1-1/P1-2 已落地（2026-08-31：AgentTaskCoordinator、扁平 `title + prompt` 活合同、显式 lineage、后台递归两路、结果归父、scoped agent_message、直接子名册、Dock 缩进画树、/doctor agents 递归可观测性、防扇出配置接线、嵌套轨迹边）；P1-0 删除模型可见嵌套 task，以双语 `agent.md` 教父代理临场写自包含派工信，首轮 user message 原样递交，cwd/角色/隔离归 system 运行环境与执行快照。§十七/§十八见文末自查表；真机三场景与 ThreadSanitizer 未验，已如实标注
 - 级别：P1；其中“后台子代理能再派工”与“父子归属不串线”为 P0 正确性门
 - 日期：2026-08-31
 - 基线：`7c0bea5` (`main`)
@@ -27,7 +27,7 @@ main
 正路有两条：
 
 1. 立一枚会话级、线程安全的 `AgentTaskCoordinator`。主代理与每只子代理只拿一枚带运行身份的窄句柄，不相互摸 `AgentTool` 内部。
-2. 立一份规整的 `AgentTaskSpec`。目标、上下文、范围、约束、验收与交付形式分栏放好。控制参数与父子运行身份另放，不再全塞进一段自由 `prompt`。
+2. 只留一份扁平 `AgentTaskSpec(title, instructions)`。父代理先吃派工写作提示，再临场写一段自包含 `prompt`；宿主不拆语义栏目，只另管控制参数、父子身份与运行环境。
 
 最终要得到这条路：
 
@@ -137,7 +137,7 @@ todos: 销子代理同级单(ask_user 路由与后台再派后台留后续)
 5. 父任务取消、墙钟超时、session clear 或退出，都向下取消整棵子树。子任务失败不反向强杀父任务。
 6. 权限、工具、工作区、指令与预算沿父子链只能相等或收窄，不得放宽。
 7. 后台任务仍不能弹交互确认。它再派出的子任务，也只能吃派出时已有的放行账。
-8. 任务语义与执行控制分开。`goal/context/scope/acceptance/deliverable` 不与 `execution_mode/isolation/budget` 混成一层。
+8. 任务语义与执行控制分开。`title + instructions(prompt)` 不与 `execution_mode/isolation/budget/effective_cwd` 混成一层。
 9. `TaskLedger` 继续作运行时真账。Agent Dock、通知、roster 与轨迹只做投影，不另养一本父子账。
 10. 前台与后台交的 `TaskOutcome` 同型。一边不许只回文本，另一边却有状态、原因、usage 与部分结果。
 11. 子代理结果是外来资料。宿主标清来路，不将结果里的命令当成新权限。
@@ -480,7 +480,7 @@ std::string RenderDelegatedTask(const AgentTaskSpec& spec,
 | 模型可见 schema | 只留 `title + prompt`；没有嵌套 `task` |
 | `prompt` 内容 | 一段自由文本；说明书建议按“工作背景—任务—报告要求”写，不强验标题 |
 | 宿主硬校验 | 只查字符串、非空、NUL、总字节帽；不查有没有三节，不解析 Markdown |
-| 真实 cwd/角色/隔离 | 宿主在首轮信封开头注入，派工模型不用猜 worktree 路径 |
+| 真实 cwd/角色/隔离 | 宿主写进子代理 system 运行环境与执行快照；不包进任务正文 |
 | 任务账 | canonical 保存 `title + instructions(prompt)`；不从正文反向抽 goal/context/deliverable |
 | 旧结构化 task | 新调用不再暴露；旧 session/trajectory 原样可读、可画、可导出 |
 
@@ -503,26 +503,20 @@ std::string RenderDelegatedTask(const AgentTaskSpec& spec,
 - 宿主不替 prompt 补造验收条件，也不拿正则拆 Markdown。
 - title 仍只给面板看，保持短小；prompt 才是完整任务正文。
 
-宿主首轮统一包一层很薄的权威信封：
+2026-08-31 对照 Claude Code 的上下文合同与现行派工写作提示后，再收一刀：宿主不包任务信封。固定信封会把父模型已经写好的自然派工信再裹一层，也会让“任务正文”和“运行事实”互相串味。
 
 ```text
-[子代理任务]
-你在 D:/repo/.lubancode/worktrees/agent-123 中干活。
-角色：Explore（只读）。
-
-以下是派工说明：
-<prompt 原文>
-
-按派工说明收工，直接交回结果，不要寒暄。
+system: 身份、工具、权限、真实 effective_cwd、角色、隔离规则
+user:   <prompt 原文>
 ```
 
-信封只补宿主独占的事实，不重写 prompt：
+两层各守一亩地：
 
-1. cwd 来自最终 `WorkspaceScope`，全篇只报一次。
+1. cwd 来自最终 `WorkspaceScope`/冻结的 `effective_cwd`，只在 system 运行环境段报一次。
 2. 角色来自实际解析结果；Explore 的只读规则仍由工具策略执法。
-3. prompt 原文字节只做换行归一与安全清洗，不改标题、不重排段落。
-4. worktree 安全规则仍在 system prompt；任务信封不复制一遍。
-5. 中文会话用中文信封，英文会话用英文信封。
+3. prompt 原文字节直接成为首轮 user message；不换行归一，不改标题，不重排段落。
+4. worktree 安全规则仍在 system prompt，不复制进任务正文。
+5. Agent Dock 从执行快照读 cwd/角色，从 spec 读原始 instructions，不从 prompt 猜分栏。
 
 内部合同随之瘦成：
 
@@ -1024,7 +1018,7 @@ lineage depth: explicit task lineage
 max depth / active / children / tree nodes: 3 / 8 / 8 / 16
 detached registry agent tool: yes (scoped handle)
 completion routing: direct parent
-task spec: v1 structured + legacy prompt compatible
+task spec: v2 title + instructions; nested task read-only history
 warning: max_active(2) < max_depth(3), deepest chain may be rejected
 ```
 
@@ -1034,9 +1028,9 @@ warning: max_active(2) < max_depth(3), deepest chain may be rejected
 
 | 文件/模块 | 实施职责 |
 |---|---|
-| `src/agent/task_spec.*` | typed spec、解析、校验、canonical JSON、稳定模型渲染 |
-| `src/agent/prompt_assembler.*` / `src/agent/prompts.hpp` | main 环境段照旧；子代理环境段可省 cwd，避免与首轮信封复读 |
-| `src/tools/agent_dispatch_tool.*` | 薄工具适配、新旧 schema、稳定错误 |
+| `src/agent/task_spec.*` | 扁平 typed spec、机械校验、canonical JSON 与 hash；不渲染任务正文 |
+| `src/agent/prompt_assembler.*` / `src/agent/prompts.hpp` | main/子代理都装运行环境段；子代理传最终 `effective_cwd` |
+| `src/tools/agent_dispatch_tool.*` | 薄工具适配、扁平 schema 与 prompt 机械校验；不设旧 task 特判 |
 | `src/tools/agent_task_coordinator.*` | 会话级派工、lineage、生命周期、结果路由、取消树 |
 | `src/tools/agent_tool.*` | 分期瘦身；保留子 Agent 装配/RunTask 兼容口，业务规则外迁 |
 | `src/tools/task_ledger.*` | 父子字段、mailbox 分型、WaitingChildren、子树查询、按直接父送达 |
@@ -1112,17 +1106,17 @@ warning: max_active(2) < max_depth(3), deepest chain may be rejected
 
 ### P1-0：软结构 Prompt 收口
 
-- [ ] 重写 `src/prompts/tools/{zh-CN,en}/agent.md`：只教 `title + prompt`；给“背景—任务—报告”推荐骨架，同时明说普通自包含任务句也合法。
-- [ ] `AgentTool::input_schema()` 删除嵌套 `task`，`required` 只钉 `title + prompt`；不再让模型填写 goal/context/scope/constraints/acceptance/deliverable。
-- [ ] `ExecuteDispatch()` 对 prompt 只做类型、非空、NUL 与总字节帽校验；不解析 Markdown，不因缺章节拒绝。
-- [ ] 将 runtime canonical 合同瘦成 `title + instructions`（建议 schema v2）；删除 `legacy_prompt` 与“从 prompt 补占位 deliverable”的归一逻辑。
-- [ ] 新增 `DelegatedTaskRuntimeContext`（或同义宿主类型），由最终 `WorkspaceScope` 投影 `effective_cwd/isolation/agent_type`，模型无权填写。
-- [ ] 新增薄 `RenderDelegatedPromptEnvelope()`：注入真实 cwd、角色与 prompt 原文；中英文各一份稳定信封，不重排正文。
-- [ ] 子代理系统环境段省掉 cwd，任务信封从 `WorkspaceScope` 读取唯一 `effective_cwd`；隔离 worktree 不再先报主 cwd、后报房路径。main 系统 prompt 行为不变。
-- [ ] 拆掉 `RunTask()` 末尾重复路径文案；安全规则仍留 system prompt，路径只在首轮信封出现。
-- [ ] Agent Dock 详情显示 title、原始派工说明、运行目录与角色；不从 prompt 猜分栏。
-- [ ] 仓内结构化 task 测试迁到 `PromptInput(title, instructions, ...)` 夹具；Workflow 自己的 prompt 字段不动。
-- [ ] 文档与变更说明写清：嵌套 task 新调用退场；旧 session/trajectory 中 task/prompt 两种历史参数都可读、可画、可导出，不可重放执行。
+- [x] 重写 `src/prompts/tools/{zh-CN,en}/agent.md`：只教 `title + prompt`；把子代理当“刚走进屋子的聪明同事”，写清目的、已知/排除、路径/错误/命令、边界与报告；三段骨架只作推荐，普通自包含任务句也合法。
+- [x] `AgentTool::input_schema()` 删除嵌套 `task`，`required` 只钉 `title + prompt`；不再让模型填写 goal/context/scope/constraints/acceptance/deliverable。
+- [x] `ExecuteDispatch()` 对 prompt 只做类型、非空、NUL 与总字节帽校验；不解析 Markdown，不因缺章节拒绝。
+- [x] runtime canonical 合同瘦成 schema v2 `title + instructions`；删除 `legacy_prompt` 与“从 prompt 补占位 deliverable”的归一逻辑。
+- [x] `AgentTaskSnapshot/SubagentDispatchEnv` 冻结宿主独占的 `effective_cwd`；模型无权填写，字段不进 task hash。
+- [x] 取消 `RenderDelegatedPromptEnvelope()`；首轮 user message 原样递交 prompt，宿主不包信封、不重排正文。
+- [x] 子代理 system 运行环境段从最终/继承的 `effective_cwd` 取目录；隔离 worktree 不再先报主 cwd、后报房路径。main system prompt 行为不变。
+- [x] `RunTask()` 的隔离安全文案只讲规则，路径认 system 运行环境段，不复制任务正文。
+- [x] Agent Dock 详情显示 title、原始派工说明、运行目录与角色；不从 prompt 猜分栏。
+- [x] 仓内结构化 task 合同测试迁到 `MakeAgentTaskSpec(title, instructions)` 与扁平工具调用；Workflow 自己的 prompt 字段不动。
+- [x] 文档写清：嵌套 task 新调用退场；旧 session/trajectory 中 task/prompt 两种历史参数只作历史数据读取、展示与导出，不可重放执行。
 
 ### P1-1：传话、Dock 与诊断
 
@@ -1142,7 +1136,7 @@ warning: max_active(2) < max_depth(3), deepest chain may be rejected
 
 ## 十七、测试设计
 
-### 17.1 `AgentTaskSpec` 合同测试
+### 17.1 P0 结构化 `AgentTaskSpec` 历史测试（P1-0 后退出活合同）
 
 - [x] 新 `task` 最小合法形状可 parse，canonical JSON 稳定。（test_subagent_recursion.cpp「AgentTaskSpec:最小合法形状可 parse,canonical JSON 稳定,渲染分栏」）
 - [x] 缺 `goal/deliverable`、空数组项、错类型、超长、NUL 按稳定 JSON path 报错。（同文件「AgentTaskSpec:缺必填/空串/错类型/超限/NUL 按稳定 JSON path 报错」）
@@ -1152,22 +1146,22 @@ warning: max_active(2) < max_depth(3), deepest chain may be rejected
 - [ ] `source_request` 与 `context` 分栏，不会把派工者说明标成用户原话。（未见以 source_request 为断言目标的用例，如实留空）
 - [ ] task spec 内写”忽略安全规则”不会改变有效权限与工具集。（未见专门的注入抗性用例，如实留空——属产品不变量 11 的验证缺口，非本单新增代码引入）
 
-> 上面七条测的是 P0 现状（`task`/legacy `prompt` 双路并存）。P1-0 落地后 `task` 入口整个下线，届时这份清单里”`task + prompt` 同给拒绝”一条随之作废，由 17.1A 的”新调用带嵌套 `task` 稳定拒绝并指向 prompt”接手；其余六条不受影响。
+> 上面七条记录 P0 当时的已验事实，不再是 HEAD 的活合同测试。P1-0 删除 parser、renderer 与 legacy 归一夹具；旧 session/trajectory 的 JSON 仍由历史读取层按原字节保管。当前执行合同只看 17.1A。
 
 ### 17.1A 软结构 Prompt 收口测试
 
-- [ ] 模型可见 schema 只有并必填 `title + prompt`，没有嵌套 `task`。
-- [ ] 中英文工具说明给推荐三段骨架，也明说普通自包含任务句可用；文案与 schema 同源。
-- [ ] 一句短 prompt、完整三段 prompt、多行代码块 prompt 都能派出；缺“背景/报告”标题不拒绝。
-- [ ] 空 prompt、错类型、NUL、超字节帽稳定拒绝，且不发模型请求。
-- [ ] 所有成功派出的首轮都以薄信封开头，随后保留 prompt 正文顺序与内容。
+- [x] 模型可见 schema 只有并必填 `title + prompt`，没有嵌套 `task`。
+- [x] 中英文工具说明给“聪明同事刚进屋”的自包含派工指点、推荐三段骨架，也明说普通任务句可用；文案与 schema 同源。
+- [x] 一句短 prompt、完整三段 prompt、多行代码块 prompt 都能派出；缺“背景/报告”标题不拒绝。
+- [x] 空 prompt、错类型、NUL、超字节帽稳定拒绝，且不发模型请求。
+- [x] 所有成功派出的首轮 user message 都与 prompt 原文逐字相等，不加信封、不重排正文。
 - [ ] 普通 cwd、主会话 worktree、新建隔离房、继承父房四景中，system prompt + 首轮消息合看都只报一次真实 `effective_cwd`。
 - [ ] 隔离任务首轮与工具包装读同一房路径；主 checkout 路径不得冒充执行目录。
 - [ ] `effective_cwd/isolation/agent_type` 不进 canonical task hash；同一 prompt 换房后 hash 不变，execution snapshot 另有房账。
-- [ ] prompt 内含 `##`、代码围栏、列表与多行文本时不被 parser 拆解或重排。
-- [ ] CRLF/LF 归一规则稳定；中文与英文信封各有 golden。
+- [x] prompt 内含 `##`、代码围栏、列表与多行文本时不被 parser 拆解或重排。
+- [x] CRLF/LF 都按原字节保留；任务正文没有中英文宿主信封。
 - [ ] prepared/frozen system prompt 在工作区决议后生成；后台隔离任务不留主 cwd 陈值。
-- [ ] 新调用带嵌套 `task` 稳定拒绝并指向 prompt；连续参数错仍走既有连败保险。
+- [x] 活执行只按 `title + prompt` 正门取值；不为 schema 外的旧 `task` 另设识别与拒绝分支。
 - [ ] 旧 session/transcript/trajectory 中的 task/prompt tool args 都能读、能画、能导出；恢复后不能把历史调用重放。
 - [ ] provider 兼容回归覆盖 Anthropic Messages、OpenAI Responses、Chat Completions；至少证明扁平 `title + prompt` 三路都能调 `agent`。
 
@@ -1268,9 +1262,9 @@ main -> parent -> child -> 尝试 grandchild(应被深度拒绝)
 - [x] 后台私有 registry 能挂带身份的 `agent`，又不能直调终端/UI hooks。（P0-4 落地；本单同一道资格门下追加挂了带身份的 `agent_message`）
 - [x] main 只 drain 直接根子任务结果；subagent 收自己直接孩子。（P0-4 落地 delivery_target 路由；本单在此基础上把”名册”也做成同样的直接子过滤，之前名册仍是全局平铺的——见 P1-1 第 2 条）
 - [x] 父子取消、墙钟、session close 与迟到线程有一套可证明收场。（P0-4 落地，本单未改动这部分逻辑）
-- [ ] 模型侧与宿主执行侧都只有扁平 `title + prompt` 一条派工正门；嵌套 task 只停在历史读取层。（P1-0 未实现，现状仍是 task/legacy prompt 双路并存，见上方 18.1 六条与 §5.10）
-- [ ] `WorkspaceScope` 是真实执行目录唯一 writer；system prompt、任务信封、工具包装与轨迹不各养一份 cwd。（P1-0 未实现）
-- [ ] 首轮只有薄 prompt envelope；宿主不解析、不重排派工正文。（P1-0 未实现）
+- [x] 模型侧与宿主执行侧都只有扁平 `title + prompt` 一条派工正门；嵌套 task 只停在历史读取层。
+- [x] 最终/继承的 `effective_cwd` 是真实执行目录投影；system prompt、工具包装、Dock 与轨迹不从 prompt 猜 cwd。
+- [x] 首轮 user message 只放 prompt 原文；宿主不包信封、不解析、不重排派工正文。
 
 ### 18.2 产品门
 
@@ -1280,8 +1274,8 @@ main -> parent -> child -> 尝试 grandchild(应被深度拒绝)
 - [x] legacy `prompt` 仍可用，新 `task` 有强校验，两路结果都能在 Agent Dock 查。（P0-1 落地——P1-0 落地后此门作废，由下一条”一句普通 prompt 与三段式 prompt 都能开工”接手）
 - [x] Explore 继续只读且无派工权；自定义 Agent 不能递归放大工具或权限。（P0 落地；本单 agent_message 挂载复用同一道 `agent_type != “Explore”` 资格门，不额外放宽）
 - [x] 限额、等孩子、失败、取消与未送达结果在面板与诊断里都看得见。（等孩子/失败/取消/未送达 P0-4 已落面板；本单补上 WaitingChildren/Completing 两态此前会显示成假失败的 bug，并把 max_children_per_task/max_tree_nodes 两项限额接进 `/doctor agents`）
-- [ ] 一句普通 prompt 与三段式 prompt 都能开工；Agent Dock 能看原文、真实 cwd 与角色。（P1-0 未实现）
-- [ ] 子代理开工先看见真实工作目录与工作背景，随后看”任务/验收/报告要求”；不再一头主 cwd、一头 worktree 房路径。（P1-0 未实现）
+- [x] 一句普通 prompt 与三段式 prompt 都能开工；Agent Dock 能看原文、真实 cwd 与角色。
+- [x] 子代理从 system 先得真实工作目录与运行规矩，从首轮 user message 得父代理临场写成的完整任务；不再一头主 cwd、一头 worktree 房路径。
 
 ### 18.3 验证门
 
@@ -1290,7 +1284,7 @@ main -> parent -> child -> 尝试 grandchild(应被深度拒绝)
 - [ ] 三场真机验收都留原始输出/轨迹与任务树证据。（§17.7 已注明未跑，如实留空）
 - [ ] 用 ThreadSanitizer（Linux）或可用线程检查手段跑协调器压力夹具；至少 1000 轮并发派工/完成/取消不死锁、不重复送达。（本机 Windows 隔离 worktree 没有 Linux/TSan 环境；WSL 侧本单只做了 `-fsyntax-only` 语法验，没有起 TSan 构建跑压力夹具，如实留空——不冒领”已验”）
 - [ ] Release 全量 CTest 全绿后，才能把交互后台递归称为已支持。（本单按派工指令跑的是 `ctest -C Debug`（294 册 100% passed），这是本单构建铁律明确要求的配置；Release 单独 configure+build+ctest 一遍本单未做——如实留空，不拿 Debug 全绿代签 Release 全绿）
-- [ ] 新增软结构 Prompt 信封 golden、task 历史只读、四类工作区、三类 provider schema 回归全绿。（P1-0 未实现）
+- [ ] 新增软结构 prompt 原文投递、task 历史只读、四类工作区、三类 provider schema 回归全绿。（本轮已补原文投递与普通 cwd；其余仍待验证）
 
 ## 十九、风险与对策
 
@@ -1305,7 +1299,7 @@ main -> parent -> child -> 尝试 grandchild(应被深度拒绝)
 | 树节点数合规却烧穿预算 | 只管 active/depth，不管累计节点与 token | children/tree node 硬帽；usage 接稳后加 tree token 门 |
 | 结构化 spec 太重，模型频繁填错 | 嵌套 schema 太深，字段太多 | 活入口退回扁平 prompt；三段式只作说明书引导，不作 parser 语法 |
 | 软 prompt 写得含糊 | 宿主不再强验 goal/deliverable | 工具文案给短模板与好坏示例；不因追求机器整齐拦住派工 |
-| 模型仍试旧 task | 恢复上下文里见过旧调用 | schema 只露 prompt；稳定错误给一枚 prompt 改写例，不暗中代填 |
+| 模型漏填 prompt | 没按当前扁平合同调用 | 走既有必填参数错误；不另识别旧 task，不暗中代填 |
 | 删除 task 活入口后旧会话打不开 | 把历史读取误绑到活执行 parser | session/transcript/trajectory reader 原样读旧 task/prompt args；执行口只接 prompt |
 | 隔离任务看见两个 cwd | system prompt 先按主 cwd 拼好，房路径后补 | 先决议 WorkspaceScope，再共同投影 effective_cwd |
 | prompt 内标题被误当宿主字段 | 宿主拿正则拆“背景/任务/报告” | 永不解析 Markdown；正文整段原样交给子代理 |

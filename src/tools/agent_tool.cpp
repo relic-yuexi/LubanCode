@@ -633,87 +633,12 @@ nlohmann::json AgentTool::input_schema() const {
     prompt_prop["type"] = "string";
     prompt_prop["description"] =
         ToolText("agent", "param.prompt",
-                 "(兼容旧参)交给子代理的任务描述,必须自包含——子代理看不见主对话历史,任务目标、范围、期望的"
-                 "输出形式都要写清楚。新调用建议改用 task 对象:goal/context/scope/constraints/acceptance/"
-                 "deliverable 分栏,宿主可校验、面板可分栏展示。task 与 prompt 同时给会直接拒绝。");
+                 "交给子代理的完整任务说明。LubanCode 每只子代理进场时都没有父会话上下文。把它当作刚走进"
+                 "屋子的聪明同事来交代:说清想办成什么、为何要办,已经查明或排除了什么,并给出必要的文件、"
+                 "行号、错误、命令、边界与报告要求。绝不要把理解也甩给子代理,别只写‘根据发现修复问题’。"
+                 "推荐按背景、任务、报告排布,普通自包含任务句也合法。宿主不解析 Markdown,不补造栏目,不重写"
+                 "正文;只校验字符串、非空、NUL 与 32 KiB 总帽。");
     properties["prompt"] = prompt_prop;
-
-    // 结构化任务合同(P0-1):title + task 是新路,goal/deliverable 必填。
-    // schema_check 对嵌套对象的校验不完整,宿主侧 AgentTaskSpec::Validate
-    // 再做一遍强校验(单子 §5.2)——schema 里只摆形状与字段说明。
-    nlohmann::json task_prop = nlohmann::json::object();
-    task_prop["type"] = "object";
-    {
-        nlohmann::json task_props = nlohmann::json::object();
-        nlohmann::json goal_prop = nlohmann::json::object();
-        goal_prop["type"] = "string";
-        goal_prop["description"] = ToolText("agent", "param.task.goal",
-                                            "必填。子代理要达成什么:一件事,不把整段对话倒进来。");
-        task_props["goal"] = goal_prop;
-        nlohmann::json source_prop = nlohmann::json::object();
-        source_prop["type"] = "string";
-        source_prop["description"] =
-            ToolText("agent", "param.task.source_request",
-                     "可选。只放用户原话摘录;派工者自己的猜测与归纳放 context,不冒充用户要求。");
-        task_props["source_request"] = source_prop;
-        nlohmann::json context_prop = nlohmann::json::object();
-        context_prop["type"] = "array";
-        context_prop["items"] = nlohmann::json{{"type", "string"}};
-        context_prop["description"] =
-            ToolText("agent", "param.task.context",
-                     "子代理看不见却真必须知道的事实与背景:已查到的源码边界、上游决定、错误原文。至多 16 条。");
-        task_props["context"] = context_prop;
-        nlohmann::json scope_prop = nlohmann::json::object();
-        scope_prop["type"] = "object";
-        {
-            nlohmann::json scope_props = nlohmann::json::object();
-            for (const char* key : {"include_paths", "exclude_paths"}) {
-                nlohmann::json paths_prop = nlohmann::json::object();
-                paths_prop["type"] = "array";
-                paths_prop["items"] = nlohmann::json{{"type", "string"}};
-                paths_prop["description"] = ToolText("agent", std::string("param.task.scope.") + key,
-                                                     key == std::string_view("include_paths")
-                                                         ? "任务要看的路径范围(是任务边界,不是权限边界)。"
-                                                         : "明确排除的路径。");
-                scope_props[key] = paths_prop;
-            }
-            scope_prop["properties"] = scope_props;
-        }
-        scope_prop["description"] =
-            ToolText("agent", "param.task.scope", "任务范围(仓库任务才填,非文件任务可省)。");
-        task_props["scope"] = scope_prop;
-        nlohmann::json constraints_prop = nlohmann::json::object();
-        constraints_prop["type"] = "array";
-        constraints_prop["items"] = nlohmann::json{{"type", "string"}};
-        constraints_prop["description"] =
-            ToolText("agent", "param.task.constraints",
-                     "限制项:不改哪里、不 commit、只读等。不靠它放宽沙箱。至多 16 条。");
-        task_props["constraints"] = constraints_prop;
-        nlohmann::json acceptance_prop = nlohmann::json::object();
-        acceptance_prop["type"] = "array";
-        acceptance_prop["items"] = nlohmann::json{{"type", "string"}};
-        acceptance_prop["description"] =
-            ToolText("agent", "param.task.acceptance",
-                     "验收条件,一条一个可查条件。调研任务也可写\"给文件与行号,把已实现与 TODO 分开\"。");
-        task_props["acceptance"] = acceptance_prop;
-        nlohmann::json deliverable_prop = nlohmann::json::object();
-        deliverable_prop["type"] = "string";
-        deliverable_prop["description"] =
-            ToolText("agent", "param.task.deliverable",
-                     "必填。要回什么:结论/修复/表格/证据等。子代理收工时按它交付,不自行换成长篇汇报。");
-        task_props["deliverable"] = deliverable_prop;
-        nlohmann::json version_prop = nlohmann::json::object();
-        version_prop["type"] = "integer";
-        version_prop["description"] = ToolText("agent", "param.task.schema_version", "合同版本,当前 1(可省)。");
-        task_props["schema_version"] = version_prop;
-        task_prop["properties"] = task_props;
-    }
-    task_prop["description"] =
-        ToolText("agent", "param.task",
-                 "结构化任务合同:goal 与 deliverable 必填,其余可选。与 prompt 二选一(同给即拒)。新调用优先"
-                 "用它——目标、范围、约束、验收、交付分栏放好,子代理、面板与轨迹都从这一份 canonical 合同"
-                 "投影。");
-    properties["task"] = task_prop;
 
     // 步数预算不出 schema(规格"现场四"收尾):默认 0 = 不限步是产品判断——
     // 限步不是常态,不该摆在模型每次派工都要过一遍的参数表里。解析层仍收
@@ -773,10 +698,7 @@ nlohmann::json AgentTool::input_schema() const {
     properties["isolation"] = isolation_prop;
 
     schema["properties"] = properties;
-    // task 与 prompt 二选一:schema_check 对嵌套校验不完整,oneOf 在部分
-    // 端点会被当成硬 schema 报错,故 required 只钉 title,二选一的执法在
-    // 宿主侧(AgentTaskSpec 解析 + task/prompt 同给即拒),单子 §5.2。
-    schema["required"] = nlohmann::json::array({"title"});
+    schema["required"] = nlohmann::json::array({"title", "prompt"});
 
     return schema;
 }
@@ -865,50 +787,19 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
         return reject("title 格式不合要求", title_bad_hint);
     }
 
-    // ---- 任务合同(P0-1):task 新路 / prompt legacy 路,同给即拒 ----------
-    const bool has_task = input.contains("task") && !input.at("task").is_null();
-    const bool has_prompt = input.contains("prompt") && !input.at("prompt").is_null();
     DispatchRequest request;
-    if (has_task && has_prompt) {
-        return reject("task 与 prompt 只能给一个",
-                      "task 对象与 legacy prompt 同时给了,不猜谁压谁。结构化新调用只填 task(goal 与 "
-                      "deliverable 必填,其余可选);旧脚本只填 prompt。请删掉其中一个后重新调用。");
+    if (!input.contains("prompt") || !input.at("prompt").is_string()) {
+        return reject("缺少必填参数 prompt",
+                      "prompt 是必填字符串。把背景、任务和报告要求写进一段自包含说明；普通的一句话任务也"
+                      "合法。示例:prompt=\"检查 src 里的取消链，报告文件、行号和风险\"。");
     }
-    if (has_task) {
-        const agent::AgentTaskSpecParseResult parsed = agent::ParseAgentTaskSpec(input.at("task"), title);
-        if (!parsed.ok()) {
-            return reject("task 合同不合法:" + parsed.error,
-                          "task 对象不合要求: " + parsed.error +
-                              "。结构化合同:goal 与 deliverable 必填(非空字符串);context/constraints/"
-                              "acceptance 是字符串数组,每组至多 16 条、单条至多 4 KiB;整份至多 32 KiB;不允许 "
-                              "NUL。请按 JSON path 修好对应字段后重试。");
-        }
-        request.spec = std::make_shared<const agent::AgentTaskSpec>(std::move(*parsed.spec));
-        request.task_input_text = agent::RenderDelegatedTask(*request.spec);
-    } else if (has_prompt) {
-        if (!input.at("prompt").is_string()) {
-            return reject("prompt 类型不对",
-                          "prompt 得是字符串(完整任务说明)。新调用建议改用 task 对象分栏写。");
-        }
-        const std::string prompt_text = input.at("prompt").get<std::string>();
-        if (prompt_text.empty()) {
-            return reject("prompt 为空字符串",
-                          "prompt 不能是空字符串:子代理需要完整的任务说明(目标、范围、期望产出),它看不见"
-                          "调用方的对话历史。示例:prompt=\"统计 src 目录下 .cpp 文件总数并回报\"。请写明任务"
-                          "后重新调用 agent 工具。");
-        }
-        // legacy 归一(单子 §5.2):goal=prompt、deliverable=占位句。首条输入与
-        // 台账 prompt 投影保持原样(旧行为对账),canonical 合同进快照。
-        request.spec = std::make_shared<const agent::AgentTaskSpec>(
-            agent::CanonicalizeLegacyPrompt(title, prompt_text));
-        request.task_input_text = prompt_text;
-    } else {
-        return reject("缺少任务说明",
-                      "缺少任务说明,task 对象与 prompt 字符串二选一:新调用填 task(goal 与 deliverable 必填,"
-                      "可选 context/scope/constraints/acceptance 分栏);旧脚本填 prompt,必须自包含。"
-                      "示例:prompt=\"在 D:/repo/src 里找到解析命令行参数的函数,报告文件路径与行号\"。"
-                      "请补上后重新调用 agent 工具。");
+    request.spec = std::make_shared<const agent::AgentTaskSpec>(
+        agent::MakeAgentTaskSpec(title, input.at("prompt").get<std::string>()));
+    if (const std::string error = agent::ValidateAgentTaskSpec(*request.spec); !error.empty()) {
+        return reject("prompt 不合法:" + error,
+                      error + "。prompt 只须是一段自包含任务说明；宿主不要求固定章节，也不解析 Markdown。");
     }
+    request.task_input_text = request.spec->instructions;
     request.title = request.spec->title;
 
     if (const auto it = input.find("agent_type"); it != input.end() && !it->is_string()) {
@@ -1208,6 +1099,9 @@ Tool::Result AgentTool::ExecuteForeground(const DispatchRequest& request, ToolRe
     snapshot.agent_type = agent_type;
     snapshot.title = request.title;
     snapshot.prompt = request.task_input_text;
+    snapshot.effective_cwd = scope_storage.has_value()
+                                 ? scope_storage->base_dir
+                                 : (env != nullptr && !env->effective_cwd.empty() ? env->effective_cwd : cwd_);
     snapshot.spec = request.spec;
     snapshot.parent_task_id = caller.task_id;
     snapshot.foreground = true;
@@ -1367,6 +1261,9 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
     snapshot.agent_type = agent_type;
     snapshot.title = request.title;
     snapshot.prompt = request.task_input_text;
+    snapshot.effective_cwd = room.has_value()
+                                 ? PathToUtf8(room->room_path)
+                                 : (env != nullptr && !env->effective_cwd.empty() ? env->effective_cwd : cwd_);
     snapshot.spec = request.spec;
     snapshot.parent_task_id = caller.task_id;
     // 送达去处(单子 §7.1):根任务进 main 回合上下文;嵌套任务进直接父的
@@ -1392,14 +1289,14 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
     // 与能力推导,阶段 3 起三笔决议从 ResolvedAgentProfile 来(见
     // BuildSubagentPromptOptions)。
     agent::PromptOptions prompt_options = BuildSubagentPromptOptions(
-        cwd_, agent_type, prompts_dir_, project_prompts_dir_, project_instructions_,
+        task->snapshot.effective_cwd, agent_type, prompts_dir_, project_prompts_dir_, project_instructions_,
         skills_segment_, agent_profile_, custom, resolved, package_profile_roots_);
     std::string system_prompt = agent::AssembleSystemPrompt(prompt_options);
     if (custom != nullptr) {
         system_prompt += AppendPreloadedSkills(custom->definition.skills_preload, custom->preloaded_skills);
     }
-    system_prompt += "\n\n这是后台任务。启动目录是 " + cwd_ +
-                     "。调用文件与搜索工具时一律传绝对路径;不要依赖进程当前目录,它可能随主会话切换。";
+    system_prompt += "\n\n这是后台任务。调用文件与搜索工具时以运行环境段里的工作目录为准;"
+                     "不要依赖进程当前目录,它可能随主会话切换。";
     system_prompt = agent::WithModelInstructions(system_prompt, detached->model_instructions);
     if (resolved == nullptr || resolved->soul) {
         system_prompt = agent::WithSoul(system_prompt, detached->soul);
@@ -1473,7 +1370,8 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
     }
     child_env->detached_shared = detached;
     child_env->base_registry = nullptr;   // RunTask 里按这只任务自己的生效表填
-    child_env->parent_in_isolation = room.has_value();
+    child_env->parent_in_isolation = room.has_value() || (env != nullptr && env->parent_in_isolation);
+    child_env->effective_cwd = task->snapshot.effective_cwd;
     child_env->headless = true;
     coordinator_->TrackThread(
         id, std::thread([this, task, registry, prompt, agent_type, budget,
@@ -1587,7 +1485,10 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         child_env->headless = false;
     }
     child_env->base_registry = &effective_registry;
-    child_env->parent_in_isolation = isolation_scope != nullptr;
+    child_env->parent_in_isolation = isolation_scope != nullptr || (env != nullptr && env->parent_in_isolation);
+    child_env->effective_cwd = task != nullptr && !task->snapshot.effective_cwd.empty()
+                                   ? task->snapshot.effective_cwd
+                                   : (isolation_scope != nullptr ? isolation_scope->base_dir : cwd_);
     if (detached != nullptr) {
         // 后台/嵌套前台任务:孩子的前台调用与自己的请求共用这份材料(自己
         // 阻塞等孩子,无并发;main 直派的前台任务没有 detached,走主回合)。
@@ -1631,7 +1532,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         system_prompt = *prepared_system_prompt;
     } else {
         agent::PromptOptions prompt_options = BuildSubagentPromptOptions(
-            cwd_, agent_type, prompts_dir_, project_prompts_dir_, project_instructions_,
+            task != nullptr && !task->snapshot.effective_cwd.empty() ? task->snapshot.effective_cwd : cwd_,
+            agent_type, prompts_dir_, project_prompts_dir_, project_instructions_,
             skills_segment_, agent_profile_, custom, resolved, package_profile_roots_);
         system_prompt = agent::WithDeferredToolsIndex(
             agent::AssembleSystemPrompt(prompt_options),
@@ -1641,9 +1543,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             system_prompt += AppendPreloadedSkills(custom->definition.skills_preload, custom->preloaded_skills);
         }
     }
-    if (isolation_scope != nullptr) {
-        system_prompt += "\n\n本次任务运行在隔离的 git worktree 里: " + isolation_scope->base_dir +
-                         "。相对路径一律以这间房为基准(包装层会自动解析);主 checkout 只读——写入、命令"
+    if (isolation_scope != nullptr || (env != nullptr && env->parent_in_isolation)) {
+        system_prompt += "\n\n本次任务运行在隔离的 git worktree 里。相对路径一律以运行环境段里的工作目录"
+                         "为基准(包装层会自动解析);主 checkout 只读——写入、命令"
                          "工作目录、git 改道指回主树的操作都会被拦。改动留在房内,收工自会处置。";
     }
     // 每次 execute() 都是全新的、空历史的子代理——没有跨调用的状态。
@@ -2496,8 +2398,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             }
         };
     }
-    // 首轮输入:任务说明(与 Agent::Run 的字符串重载同一包装——user 消息
-    // + TextBlock)。
+    // 首轮 user message 只放父代理写下的派工原文。cwd、角色与隔离规则归
+    // system 运行环境；两层各守本分，宿主不包信封、不重排正文。
     api::Message initial_input;
     initial_input.role = api::Role::User;
     initial_input.content.push_back(api::TextBlock{prompt});

@@ -49,7 +49,7 @@
 #include "agent/runtime_profile.hpp"
 #include "api/types.hpp"
 #include "agent/prompt_assembler.hpp"  // PackageProfileRoot:包层 Profile 根(阶段 3)
-#include "agent/task_spec.hpp"  // AgentTaskSpec:P0-1 canonical 任务合同
+#include "agent/task_spec.hpp"  // AgentTaskSpec:扁平 title + instructions 合同
 #include "runtime/trajectory_session.hpp"  // TrajectorySubagentBridge:P0-2 子代理独立 JSONL
 #include "runtime/worktree.hpp"
 #include "config/project_instructions.hpp"  // ProjectInstructionResolver:AGENTS.md 作用域(作用域单 P0)
@@ -510,14 +510,14 @@ private:
     // P0-3 的 typed 派工入口:execute()/AgentDispatchHandle 都汇到这。caller
     // 是校准过的派工者身份;env 为空 = main 直派(引擎读自家活账,调用在
     // main 线程),非空 = 嵌套(只吃冻结材料)。input 的校验、连败账、
-    // legacy/structured 分岔都在这层做,后续函数全部吃 typed 值。
+    // title/prompt 校验都在这层做,后续函数全部吃 typed 值。
     Result ExecuteDispatch(const AgentDispatchRequest& request, AgentDispatchHandle& fail_account);
 
-    // 一次派工的 typed 合同(P0-1):入参解析一次成型,后续不再 input.at()。
+    // 一次派工的 typed 合同：入参解析一次成型，后续不再 input.at()。
     struct DispatchRequest {
         std::string title;                     // canonical 标题(spec->title)
-        std::shared_ptr<const agent::AgentTaskSpec> spec;  // canonical 合同(含 legacy 归一)
-        std::string task_input_text;           // 首轮输入:structured=渲染,legacy=原 prompt
+        std::shared_ptr<const agent::AgentTaskSpec> spec;
+        std::string task_input_text;           // 原始派工说明；首轮 user message 原样投递
         std::string agent_type;
         bool background = false;
         bool isolate = false;

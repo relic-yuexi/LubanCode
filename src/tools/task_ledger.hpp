@@ -25,7 +25,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agent/loop.hpp"  // ToolTraceEvent 等转发类型(与拆分前同一份引用)
-#include "agent/task_spec.hpp"  // AgentTaskSpec:P0-1 canonical 任务合同
+#include "agent/task_spec.hpp"  // AgentTaskSpec v2 canonical task contract
 #include "api/types.hpp"
 #include "tools/subagent_scheduler.hpp"  // SubagentGovernance/AgentLedgerStats:P0-2 纯 admission
 
@@ -169,7 +169,8 @@ struct AgentTaskSnapshot {
     // P0-1 起 title 是 canonical spec 的读投影——真值在 spec->title,这里
     // 拷一份给旧消费方(面板/通知),两边由注册口一次写齐。
     std::string title;
-    std::string prompt;
+    std::string prompt;  // 原始派工说明，不含宿主运行信封
+    std::string effective_cwd;  // 派出后冻结；Dock 与 system 运行环境段共用
     // ---- 显式 lineage(递归派工单 §7.1):parent 只认 child 记录上的
     // parent_task_id;root/depth 注册时从父边一次算出,之后不可改。----
     int parent_task_id = 0;  // 0 = main 派出
@@ -182,8 +183,7 @@ struct AgentTaskSnapshot {
     // 任务派孩子时,子账的 relations.parent_run_id 认它,不冒充 main。
     std::string agent_run_id;
     TaskDeliveryTarget delivery_target = TaskDeliveryTarget::MainTurnContext;
-    // canonical 任务合同(P0-1):不可变 shared 对象;title/prompt 是它的
-    // 读投影。空(旧调用方直建快照)= 走 legacy prompt 账。
+    // canonical 活执行合同：title + instructions。空只供旧调用方直建快照。
     std::shared_ptr<const agent::AgentTaskSpec> spec;
     // 前台(阻塞父级调用)还是后台(独立线程)。详情可看,列表不必铺。
     bool foreground = false;

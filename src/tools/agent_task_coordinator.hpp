@@ -102,6 +102,9 @@ struct SubagentDispatchEnv {
     std::optional<agent::AgentProfileResolveEnvironment> resolve_environment;
     // 父任务此刻是否在隔离房里(嵌套 worktree 首版稳定拒绝,单子 §11.3)。
     bool parent_in_isolation = false;
+    // 父任务工具真正认的工作目录。只由宿主冻结，嵌套孩子据此生成自己的
+    // system 运行环境段；模型不填写，也不混进任务语义合同。
+    std::string effective_cwd;
     // 真 = 无 UI 的派工(后台父任务的孩子们):确认一律走放行账,不弹终端。
     bool headless = false;
 };

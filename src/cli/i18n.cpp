@@ -1324,7 +1324,7 @@ const Entry kZhCN[] = {
      "completion routing: direct parent(前台走 Tool::Result,后台走父 mailbox;main 只收根子任务结果,"
      "不跨级提孙任务)"},
     {"doctor.agents.task_spec",
-     "task spec: v1 structured + legacy prompt compatible(旧 title+prompt 自动归一,不强制迁移)"},
+     "task spec: v2 title + instructions(扁平 title + prompt)"},
     {"doctor.agents.warning_active_lt_depth",
      "警告:max_active({0}) < max_depth({1}),最深一条链路可能在并发槽处被拒(调大 subagent.max_active 或"
      "收窄 subagent.max_depth)"},
@@ -2673,8 +2673,7 @@ const Entry kEn[] = {
      "completion routing: direct parent (foreground returns via Tool::Result, background delivers to the parent's "
      "mailbox; main only drains root-task results, never pulls grandchild results across levels)"},
     {"doctor.agents.task_spec",
-     "task spec: v1 structured + legacy prompt compatible (old title+prompt calls are normalized automatically, "
-     "no forced migration)"},
+     "task spec: v2 title + instructions (flat title + prompt)"},
     {"doctor.agents.warning_active_lt_depth",
      "warning: max_active({0}) < max_depth({1}), the deepest chain may be rejected at the concurrency slot (raise "
      "subagent.max_active or lower subagent.max_depth)"},

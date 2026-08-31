@@ -124,18 +124,6 @@ int main() {
     const nlohmann::json as = agent.input_schema();
     DumpParam(as, "title", "agent.param.title");
     DumpParam(as, "prompt", "agent.param.prompt");
-    // P0-1 结构化任务合同:task 对象与各分栏一并转录,两语言档对账。
-    DumpParam(as, "task", "agent.param.task");
-    DumpParam(as, "task.goal", "agent.param.task.goal");
-    DumpParam(as, "task.source_request", "agent.param.task.source_request");
-    DumpParam(as, "task.context", "agent.param.task.context");
-    DumpParam(as, "task.scope", "agent.param.task.scope");
-    DumpParam(as, "task.scope.include_paths", "agent.param.task.scope.include_paths");
-    DumpParam(as, "task.scope.exclude_paths", "agent.param.task.scope.exclude_paths");
-    DumpParam(as, "task.constraints", "agent.param.task.constraints");
-    DumpParam(as, "task.acceptance", "agent.param.task.acceptance");
-    DumpParam(as, "task.deliverable", "agent.param.task.deliverable");
-    DumpParam(as, "task.schema_version", "agent.param.task.schema_version");
     // max_steps_per_turn 不再出 schema(限步走配置,不给模型旋钮),故不转录。
     DumpParam(as, "agent_type", "agent.param.agent_type");
     DumpParam(as, "execution_mode", "agent.param.execution_mode");

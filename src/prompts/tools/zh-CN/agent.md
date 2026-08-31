@@ -8,7 +8,16 @@
 
 ## param.prompt
 
-(兼容旧参)交给子代理的任务描述,必须自包含——子代理看不见主对话历史,任务目标、范围、期望的输出形式都要写清楚。新调用建议改用 task 对象:goal/context/scope/constraints/acceptance/deliverable 分栏,宿主可校验、面板可分栏展示。task 与 prompt 同时给会直接拒绝。
+交给子代理的完整任务说明。LubanCode 每只子代理进场时都没有父会话上下文。把它当作刚走进屋子的聪明同事来交代:它没看过当前对话,不知道你试过什么,也不知道这件事为何要紧。
+
+- 说清想办成什么,为何要办。
+- 写出已经查明什么,又排除了什么。
+- 补足周边事实,让它能自行判断,不只会照令行事。
+- 给出必须知道的文件路径、行号、错误原文、准确命令与边界。
+- 若只要短答,明说篇幅;收工要带回结论、改动、测试或风险,也要明说。
+- 查东西就交出准确命令;做调查就交出真正问题,别拿一串死步骤遮住问题。
+
+绝不要把理解也甩给子代理。别只写“根据发现修复问题”;派工说明本身应证明你已经弄懂,写清究竟要改什么。推荐按“背景—任务—报告”排布,普通自包含任务句也合法。宿主不解析 Markdown,不补造栏目,不重写正文;只校验字符串、非空、NUL 与 32 KiB 总帽。
 
 ## param.agent_type
 
@@ -21,50 +30,6 @@
 ## param.run_in_background
 
 (兼容旧参)是否放到会话后台运行:true 等价 execution_mode=background,false 等价 foreground。新调用建议用 execution_mode。
-
-## param.task
-
-结构化任务合同:goal 与 deliverable 必填,其余可选。与 prompt 二选一(同给即拒)。新调用优先用它——目标、范围、约束、验收、交付分栏放好,子代理、面板与轨迹都从这一份 canonical 合同投影。
-
-## param.task.goal
-
-必填。子代理要达成什么:一件事,不把整段对话倒进来。
-
-## param.task.source_request
-
-可选。只放用户原话摘录;派工者自己的猜测与归纳放 context,不冒充用户要求。
-
-## param.task.context
-
-子代理看不见却真必须知道的事实与背景:已查到的源码边界、上游决定、错误原文。至多 16 条。
-
-## param.task.scope
-
-任务范围(仓库任务才填,非文件任务可省)。
-
-## param.task.scope.include_paths
-
-任务要看的路径范围(是任务边界,不是权限边界)。
-
-## param.task.scope.exclude_paths
-
-明确排除的路径。
-
-## param.task.constraints
-
-限制项:不改哪里、不 commit、只读等。不靠它放宽沙箱。至多 16 条。
-
-## param.task.acceptance
-
-验收条件,一条一个可查条件。调研任务也可写"给文件与行号,把已实现与 TODO 分开"。
-
-## param.task.deliverable
-
-必填。要回什么:结论/修复/表格/证据等。子代理收工时按它交付,不自行换成长篇汇报。
-
-## param.task.schema_version
-
-合同版本,当前 1(可省)。
 
 ## param.isolation
 

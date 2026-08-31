@@ -8,7 +8,16 @@ Short task title, required. A semantic field for humans: 4~16 Chinese characters
 
 ## param.prompt
 
-(Legacy parameter) The task description handed to the subagent; it must be self-contained—the subagent cannot see the main conversation history, so the goal, the scope, and the expected output form must all be spelled out. New calls should use the task object instead: goal/context/scope/constraints/acceptance/deliverable in separate fields, which the host can validate and the panel can display in sections. Giving both task and prompt at once is rejected outright.
+The complete task instructions handed to the subagent. Every LubanCode subagent starts without the parent conversation context. Brief it like a smart colleague who just walked into the room: it has not seen the conversation, does not know what you tried, and does not know why the task matters.
+
+- Explain what you want to accomplish and why.
+- State what you already learned or ruled out.
+- Give enough surrounding context for judgment, not merely rote execution.
+- Include necessary file paths, line numbers, exact errors, commands, and boundaries.
+- Say when the response must be short and what result, change, test evidence, or risk report to return.
+- For a lookup, hand over the exact command; for an investigation, hand over the real question instead of dead steps.
+
+Never delegate understanding. Do not merely say "fix the bug based on your findings"; the briefing itself should prove what you understood and say what specifically must change. Background, Task, and Report is a recommended shape, but a single self-contained task sentence is valid. The host does not parse Markdown, invent sections, or rewrite the body; it checks only string type, non-empty text, NUL, and the 32 KiB cap.
 
 ## param.agent_type
 
@@ -21,50 +30,6 @@ Execution mode, default auto. auto: in interactive sessions the task runs indepe
 ## param.run_in_background
 
 (Legacy parameter) Whether to run in the session background: true is equivalent to execution_mode=background, false to foreground. New calls should use execution_mode.
-
-## param.task
-
-Structured task contract: goal and deliverable are required, everything else is optional. Mutually exclusive with prompt (giving both is rejected). Prefer it for new calls—goal, scope, constraints, acceptance, and deliverable sit in separate fields, and the subagent, the panel, and trajectories all project from this one canonical contract.
-
-## param.task.goal
-
-Required. What the subagent is to achieve: one thing, not a dump of the whole conversation.
-
-## param.task.source_request
-
-Optional. Verbatim quotes of the user's words only; the dispatcher's own guesses and summaries belong in context, never impersonating the user.
-
-## param.task.context
-
-Facts and background the subagent cannot see but genuinely needs: source boundaries already found, upstream decisions, error verbatim. At most 16 items.
-
-## param.task.scope
-
-Task scope (only for repository tasks; file-less tasks may omit it).
-
-## param.task.scope.include_paths
-
-Path range the task looks at (a task boundary, not a permission boundary).
-
-## param.task.scope.exclude_paths
-
-Paths explicitly excluded.
-
-## param.task.constraints
-
-Restrictions: what not to touch, no commits, read-only, etc. They never widen the sandbox. At most 16 items.
-
-## param.task.acceptance
-
-Acceptance criteria, one checkable condition per item. Survey tasks may write things like "give file and line numbers; separate implemented from TODO".
-
-## param.task.deliverable
-
-Required. What to return: a conclusion, a fix, a table, evidence, and so on. The subagent delivers against it and does not swap it for a long report.
-
-## param.task.schema_version
-
-Contract version, currently 1 (may be omitted).
 
 ## param.isolation
 

@@ -417,14 +417,12 @@ TEST_CASE("批3 代理族: 缺省(zh-CN)description 与 persona 逐字节回到�
     CHECK(schema["properties"]["title"]["description"] ==
           "任务短标题,必填。给人看的语义字段:中文 4~16 字、英文 2~6 个词,名词短语或短命令,能与其他任务区分。"
           "不得照抄 prompt 首句,不得含路径清单/验收全文/换行/制表符,硬上限 40 显示列。先概括 title,再写完整 prompt。");
-    CHECK(schema["properties"]["prompt"]["description"] ==
-          "(兼容旧参)交给子代理的任务描述,必须自包含——子代理看不见主对话历史,任务目标、范围、期望的输出形式都要"
-          "写清楚。新调用建议改用 task 对象:goal/context/scope/constraints/acceptance/deliverable 分栏,宿主可校验、"
-          "面板可分栏展示。task 与 prompt 同时给会直接拒绝。");
-    // P0-1 结构化任务合同:required 只钉 title(task/prompt 二选一的执法在宿主侧)。
-    CHECK(schema["properties"]["task"]["description"] ==
-          "结构化任务合同:goal 与 deliverable 必填,其余可选。与 prompt 二选一(同给即拒)。新调用优先"
-          "用它——目标、范围、约束、验收、交付分栏放好,子代理、面板与轨迹都从这一份 canonical 合同投影。");
+    const std::string prompt_help = schema["properties"]["prompt"]["description"].get<std::string>();
+    CHECK(prompt_help.find("刚走进屋子的聪明同事") != std::string::npos);
+    CHECK(prompt_help.find("已经查明什么,又排除了什么") != std::string::npos);
+    CHECK(prompt_help.find("普通自包含任务句也合法") != std::string::npos);
+    CHECK(prompt_help.find("不重写正文") != std::string::npos);
+    CHECK_FALSE(schema["properties"].contains("task"));
     CHECK(schema["properties"]["agent_type"]["description"] ==
           "子代理类型:Explore 只读搜索分析;general-purpose 可做多步操作(默认);或 /agents 清单里的自定义 "
           "Agent 名(各自带工具边界、预装技能与预算,清单以 /agents 实时输出为准)。");
@@ -432,7 +430,7 @@ TEST_CASE("批3 代理族: 缺省(zh-CN)description 与 persona 逐字节回到�
           "worktree = 给子代理单独开一间 git worktree 隔离房干活:写不碰主 checkout(文件/命令/git 三道闸拦),"
           "干完没改动房自动删,有改动则保留并在结果里附房路径与分支,由主代理或用户收尾。"
           "改代码的多步任务建议带上;只读摸排不必。缺省 none。");
-    CHECK(schema["required"] == nlohmann::json::array({"title"}));
+    CHECK(schema["required"] == nlohmann::json::array({"title", "prompt"}));
 
     AgentMessageTool message(nullptr);
     CHECK(message.description() == kAgentMessageDescBefore);

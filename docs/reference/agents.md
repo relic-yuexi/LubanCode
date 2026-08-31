@@ -42,6 +42,29 @@ Model catalog ----------------+
 一句话：Agent 选能力，也选 Prompt；Skill 教它办事；MCP 给它工具；Workflow
 排它出场。
 
+### 1.1 父代理怎样交任务
+
+`agent` 工具的新调用只收一条任务正门：
+
+```json
+{
+  "title": "复核迁移安全",
+  "prompt": "背景：……\n\n## 任务\n……\n\n## 报告\n……",
+  "agent_type": "general-purpose"
+}
+```
+
+`title` 给面板与日志看，须短小；`prompt` 给子代理干活，由父代理临场写成。
+子代理看不见父会话，父代理须把它当作刚走进屋子的聪明同事：交代目的与缘由、
+已经查明或排除的事、必要路径/行号/错误/命令、任务边界，以及收工要带回什么。
+“背景—任务—报告”只是一副推荐骨架，一句自包含任务也能派出。宿主不解析
+Markdown，不把正文拆成 `goal/context/scope/acceptance/deliverable`，也不拿模板
+重写它。
+
+角色、工具、权限、模型、预算、`effective_cwd` 与 worktree 隔离另属宿主运行账，
+进 system 环境与执行快照，不混进任务语义合同。旧 session/trajectory 里的嵌套
+`task` 参数仍可读取、展示与导出，但不可重放成新调用。
+
 `solutions/` 只作教程、配方、样例集合，不进运行时类型系统。Package 外壳见
 `todos/统一Package封装与组件挂载系统设计.todo`（`docs/packages.md` 落纸后以它为准）。
 
