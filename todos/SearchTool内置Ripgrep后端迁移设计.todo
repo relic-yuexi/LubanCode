@@ -1,7 +1,7 @@
 # SearchTool 内置 Ripgrep 后端迁移设计
 
-- 状态：P0-1 已落（`2ffa1dc`）；P0-2/P0-3 已落（本批）：manifest/定位器/runner 合同/argv 纯函数/打包脚本与全套单测在位，`search` 生产仍走旧 std::regex 内核（一字未动），P0-4 起接进程真执行。rg 二进制本批未随包（脚本与哈希已备，真机 fetch 实测通过，入包归 P0-6）。
-- 日期：2026-08-31
+- 状态：P0-1 已落（`2ffa1dc`）；P0-2/P0-3 已落；P0-4/P0-5/P0-6 已落（本批，2026-09-01）：流式 runner（ChildProcess 起 rg、JSONL/NUL 分帧、四道墙、终态裁决）在 `src/tools/search_ripgrep_run.cpp`，真实 rg 差分 17 全等/7 批准迁移/0 未批准，SearchTool 已切随包 ripgrep 主路且旧 std::regex 内核整段删除，发行链（release.yml 抓取+验包、安装脚本三件套、check_release、README 口径）齐。P0-7（性能与稳定门）与 P0-8（发布收口余项）未动。真机验：Windows 全链 + WSL 侧 POSIX 收树夹具与 Linux 包/安装/离线搜；macOS 无本机环境，release.yml 矩阵已写入待 CI。
+- 日期：2026-08-31（P0-4~P0-6 批 2026-09-01）
 - 级别：P0（核心只读工具的速度、正确性、取消与发行完整性）
 - 范围：`src/tools/search.*`、`src/platform/process.*`、观察边界、工具文案、安装脚本、Release 包、三平台 CI、第三方许可证、性能基准
 - 依赖：`ToolExecutionContext.cancel`、`platform::ChildProcess`、`ObservationBoundary`、`Tool::Result`、现有 `search` grep/glob 合同
@@ -611,43 +611,43 @@ lubancode/
 
 ### P0-4：流式 runner 与解析器
 
-- [ ] ChildProcess 起 rg，stdout/stderr 分流。
-- [ ] grep JSONL 分帧；glob NUL 分帧。
-- [ ] `text/bytes(base64)` 两路解析。
-- [ ] 100 条、512 KiB、16 KiB 单行、1 MiB 协议帧四道墙。
-- [ ] 命中满额主动停树，记 truncated，不借退出码冒充失败。
-- [ ] cancel/timeout/protocol error 各自收树、各自终态。
-- [ ] no-match exit 1 走成功；invalid regex exit 2 走稳定错误。
-- [ ] stdout 尾帧、stderr 洪水、坏 JSON、进程半途死、回调与 Shutdown 竞态全测。
-- [ ] Windows Job Object 与 POSIX 进程组各做一只“rg 再生孩子”的夹具，证明取消不留孤儿。
+- [x] ChildProcess 起 rg，stdout/stderr 分流。→ `src/tools/search_ripgrep_run.cpp`（ChildProcess 双管道，stdout/stderr 各自读线程；会话状态的写者分工在文件头逐条对齐 §6.7）
+- [x] grep JSONL 分帧；glob NUL 分帧。→ `RipgrepStreamFramer`（'\n'/'\0' 一枚分帧器两用；未完成帧超帽停读、EOF 后 FlushTail 补尾帧）
+- [x] `text/bytes(base64)` 两路解析。→ `DecodeTextOrBytes` + `DecodeBase64`，bytes 解码后过 SanitizeExternalText；实测样例 `Y2Fm6SBuZWVkbGUK` 进单测
+- [x] 100 条、512 KiB、16 KiB 单行、1 MiB 协议帧四道墙。→ `RipgrepStreamLimits`（另 stderr 64 KiB 帽、墙钟 120s）；512 KiB 墙单测钉死第 32 条触发
+- [x] 命中满额主动停树，记 truncated，不借退出码冒充失败。→ StopReason::LimitReached 终态优先于退出码；`@many-hits` 场景以"marker 文件没写成"证明没跑完全程
+- [x] cancel/timeout/protocol error 各自收树、各自终态。→ 起跑前/运行中 cancel、注入小 timeout、坏 JSON、大帧四路各有稳定码单测
+- [x] no-match exit 1 走成功；invalid regex exit 2 走稳定错误。→ exit 1 成功；exit 2 零命中=search_pattern_invalid（stderr 洗成首行短句）；exit 2 有命中=IO 噪声保结果（裁决记入实现注释）；信号/其他码=search_backend_run_failed
+- [x] stdout 尾帧、stderr 洪水、坏 JSON、进程半途死、回调与 Shutdown 竞态全测。→ `tests/support/fake_ripgrep.cpp` 场景件 + `test_search_ripgrep_run.cpp`（竞态高压 1000 轮，每轮满额触发停读/收树赛跑）
+- [x] Windows Job Object 与 POSIX 进程组各做一只“rg 再生孩子”的夹具，证明取消不留孤儿。→ Windows：单测 `@spawn-child` 场景（CreateProcess 孩子继承 Job，TerminateJobObject 连坐，IsProcessAlive 验尸）；POSIX：`tests/manual/wsl_tree_kill_driver.cpp` WSL 真跑过（fork 孩子同进程组，killpg 连坐 + WaitForExit cancel 204ms 一拍返回）
 
-验收：搜满 100 条后不再遍历余下大树；按停后进程表无残留。
+验收：搜满 100 条后不再遍历余下大树；按停后进程表无残留。→ 两枚 marker 夹具 + 验尸轮询均绿（Windows 真机 + WSL 双侧）
 
 ### P0-5：真实 rg 差分与切主路
 
-- [ ] CI 下载并校验三平台候选资产。
-- [ ] 跑 fixture corpus，比较旧内核与新后端。
-- [ ] “必须保留”全等；“有意迁移”只准落在批准表里。
-- [ ] SearchTool 默认切到 BundledRipgrepRunner。
-- [ ] 更新中英文 prompt、fallback 文案、schema 与 tool_text tests。
-- [ ] （2026-08-31 补）`max_results` 事前声明参数落地：schema、四道墙只降不升的钳制、truncated 口径、中英文文案齐改（语义见 §5.1 补段）。
-- [ ] （2026-08-31 补）search 工具中英文文案加 NEVER 句式：“搜索一律用 search 工具，不要在 run_command 里跑 rg/grep"（§7.3 补条）。
-- [ ] 更新 CHANGELOG，写清 regex/ignore 迁移。
-- [ ] PTC `search` 调用照跑；Plan/Explore 注册面不变。
+- [x] CI 下载并校验三平台候选资产。→ `ci.yml` 三平台矩阵先跑 `fetch_ripgrep.py`（哈希/版本双对账）再 configure（`-DLUBANCODE_BUNDLED_RG_DIR`）；Windows/Linux-x64 资产本机真拉实测（含 deb 解包），macOS 资产与 CI 流水线本身无本机环境，矩阵已写入待 CI 真跑——如实标注
+- [x] 跑 fixture corpus，比较旧内核与新后端。→ `search_golden_driver diff` 子命令（复用 P0-1 场景表与归一化），rg 15.2.0 真机跑
+- [x] “必须保留”全等；“有意迁移”只准落在批准表里。→ **全等 17 / 批准迁移 7 / 未批准出入 0 / 基线缺失 0**；批准表在 driver 源码与迁移文档 §十（新批准一笔：显式 include glob 压过 ignore 规则，rg 优先级合同，已记档并钉单测）
+- [x] SearchTool 默认切到 BundledRipgrepRunner。→ 默认构造即生产装配；execute 主路 解析→策略→runner→投影；旧内核（WalkFiles/GlobMatches/LooksBinary/std::regex 搜索）整段删除；单文件 glob 闸门由宿主守（rg 对显式文件参数绕过一切 glob，A 类 #9/#10 合同）
+- [x] 更新中英文 prompt、fallback 文案、schema 与 tool_text tests。→ `src/prompts/tools/{zh-CN,en}/search.md` 重写（Rust regex/ignore/NEVER 句式），schema 加 `fixed_strings`/`max_results`，`test_tool_text.cpp` 钉值同步
+- [x] （2026-08-31 补）`max_results` 事前声明参数落地。→ schema/钳制（`MakeRipgrepStreamLimits` 只降不升）/truncated 口径/中英文文案齐；grep 按行计、glob 按文件计各有单测
+- [x] （2026-08-31 补）search 工具中英文文案加 NEVER 句式。→ 中文"搜索一律用本工具，不要在 run_command 里跑 rg 或 grep"；英文 "Always use this tool for searching; NEVER invoke rg or grep via run_command"（test_tool_text 有断言）
+- [x] 更新 CHANGELOG，写清 regex/ignore 迁移。→ v0.26.152 三条（引擎/ignore/发行包），版本号 bump 归主控
+- [x] PTC `search` 调用照跑；Plan/Explore 注册面不变。→ 工具名/EffectClass/Idempotency/required 面不变，schema 只增两枚可选字段；tool_runtime 基础表/Explore 表注册面不动
 
-验收：模型仍调用 `search`，调用形状除批准新增字段外不变。
+验收：模型仍调用 `search`，调用形状除批准新增字段外不变。→ 过
 
 ### P0-6：发行包、安装与许可证
 
-- [ ] Release 三矩阵随包带 `libexec/rg`。（2026-08-31 勘察补记：**release.yml 现未调用抓取脚本，推 tag 包里无 rg——此条即修它**，在打包前补 `python scripts/fetch_ripgrep.py --target dist/lubancode --platform <matrix> --cache build/rg-cache`。另裁决：三份上游归档**不进 Git**——离线重打能力以镜像到自家 GitHub Release/对象存储实现，哈希照核，Git 历史不装二进制。）
-- [ ] archive hash、member path、版本、执行位全校。
-- [ ] Windows/Linux/macOS 安装后离线可搜。
-- [ ] 更新安装能原子替换 rg；卸载只删 LubanCode 安装目录内副本。（2026-08-31 勘察补记：**install.ps1（搬主程序/skills/docs 处）与 install.sh 现不搬 `libexec/`、`licenses/`、`THIRD_PARTY_NOTICES.md`——装完 rg 丢在原包**，两套安装脚本同步补这三样。）
-- [ ] notices/license 入包，README 改掉“单文件”失实说法。
-- [ ] `scripts/check_release.sh` 与安装脚本测试全过。
-- [ ] 在断网环境解包运行，不触发下载、不查包管理器。
+- [x] Release 三矩阵随包带 `libexec/rg`。（2026-08-31 勘察补记落实：**release.yml 已在打包前接 `fetch_ripgrep.py --target dist/lubancode --platform <matrix> --cache build/rg-cache`**；上游归档不进 Git——`dist/`、`rg-stage/`、`rg-cache/` 入 .gitignore，离线重打走自家镜像的裁决照旧。）
+- [x] archive hash、member path、版本、执行位全校。→ fetch 脚本内建（哈希重算+member 精取+--version 精确校）+ release.yml 打包后重解 archive 验件与最小搜索 smoke；本地按同口径实测 Windows zip 与 Linux tar.gz 双路（build/verify_dist.py、build/verify_linux_install.sh）
+- [x] Windows/Linux/macOS 安装后离线可搜。→ Windows 真机：install.ps1 断网模拟（坏代理）装完，用**已安装的 rg** 跑 24 条 golden 差分全过；Linux 走 WSL：解 tar.gz、install.sh 断网装、安装位 rg 五步 smoke 全过（主程序用桩替身——本机无 Linux 版 exe，验的是包装与安装层，如实标注）；macOS 无本机环境，release.yml 矩阵已写入待 CI，如实标注
+- [x] 更新安装能原子替换 rg；卸载只删 LubanCode 安装目录内副本。（2026-08-31 勘察补记落实：**install.ps1 与 install.sh 已补 `libexec/`、`licenses/`、`THIRD_PARTY_NOTICES.md` 三样**，目录级 staging 原子换入，libexec 永远贴 exe 不走 share；升级换新 rg、用户旁文件不删、卸载只删安装目录——三笔均有实测。）
+- [x] notices/license 入包，README 改掉“单文件”失实说法。→ fetch 脚本随包带 licenses/ripgrep-MIT.txt + THIRD_PARTY_NOTICES.md；README 中英双语改"一套免安装原生发行包"
+- [x] `scripts/check_release.sh` 与安装脚本测试全过。→ check_release 补 manifest 三平台哈希无占位/license/notices/代码版本对账（本机实测过；仓里现存一笔**先于本批**的红：vcpkg.json 0.26.149 对不上 version.hpp 0.26.151，主链旧账归主控，此处如实记账）；install.tests.ps1 27 项全绿（含新增 libexec/licenses/notices 一节）
+- [x] 在断网环境解包运行，不触发下载、不查包管理器。→ 两平台安装均以 `HTTP(S)_PROXY=http://127.0.0.1:9` 断代理模拟：包内本地件齐、安装走本地 exe 路径零网络请求、搜索离线全过（方法如实记录）
 
-验收：Release 包缺 rg 或 license，流水线必红；不能发半套。
+验收：Release 包缺 rg 或 license，流水线必红；不能发半套。→ release.yml 验包步骤缺件即 exit 1；CI/release 流水线本身无本机环境跑不了，改动已写入待真跑——如实标注
 
 ### P0-7：性能与稳定门
 

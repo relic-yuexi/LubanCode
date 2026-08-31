@@ -2,6 +2,12 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.152] - 2026-08-31
+
+- **`search` 换上 ripgrep 内核。** grep 正则从 ECMAScript 换成 Rust regex（随包内置 ripgrep 15.2.0，MIT 协议）：不再支持 backreference 与 lookahead，新增 `\p{Han}` 等 Unicode 属性转义，`\w`/`\d`/`\s` 默认按 Unicode 判定——中文算单词字符，旧内核下匹配会在中文处断开；glob 语法换成 ripgrep globset 同款，`*.ext`、`**/*.ext`、`dir/**` 常见写法行为不变。旧自研 std::regex/walker 内核整段删除，生产只有一条执行路；随包 rg 缺件即稳定报错 `search_backend_missing`，不静默退回慢内核。
+- **搜索默认遵守 ignore 文件。** `.gitignore`/`.ignore`/`.rgignore` 生效，被忽略的文件（生成物、依赖、本地密钥）默认不再被搜到；要搜它们，把 `path` 逐字点名到具体文件或目录（显式 glob 过滤会把配得上的被忽略文件带回来，与 ripgrep 自身的优先级一致）。隐藏的项目文件（`.github/` 等）仍可搜，`.git`/`build`/`node_modules`/`.evidence` 照旧硬排除。新增 `fixed_strings`（pattern 按字面量逐字搜）与 `max_results`（事前声明要多少条，只能调低）两枚参数；结果 100 条封顶、单条命中行 16 KiB 截断、命中满额主动收树不再遍历余下大树，取消/超时/坏正则各有稳定终态。
+- **发行包带齐随包 rg 与许可证。** Release 三平台包内新增 `libexec/rg`、`licenses/ripgrep-MIT.txt` 与 `THIRD_PARTY_NOTICES.md`，版本与 SHA-256 按 `third_party/ripgrep/manifest.json` 钉死，缺 rg 或缺 license 流水线必红，不发半套；安装脚本同步这三样（更新安装时旧 rg 原子换新），装完离线即可搜。
+
 ## [v0.26.151] - 2026-08-31
 
 - **延迟工具不再斩断缓存前缀（需手动开启）。** 新配置 `deferred_tool_mode: proxy_reference` 下，`tool_search` 发现工具改发引用凭证，`tool_invoke` 持凭证执行——发现与调用前后请求的 system/tools 指纹逐位不变，长会话不再因翻工具列表整段重付 token。默认仍走旧路，行为一字不变。

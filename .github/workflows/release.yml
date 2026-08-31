@@ -1,8 +1,13 @@
 # 发布流水线:推 v* tag 时三平台各打一个包挂上
 # GitHub Release。构建走 FetchContent(-DLUBANCODE_USE_CODELOAD=OFF,CI 网络
 # 直通 github 官方地址),静态链接。产物包结构(都跟 exe 平级,包根目录):
-#   windows-x64.zip  ->  lubancode.exe、LICENSE、skills/、双语 README、docs/、安装/卸载脚本
-#   linux/macos.tar.gz -> lubancode、LICENSE、skills/、双语 README、docs/、install.sh
+#   windows-x64.zip  ->  lubancode.exe、libexec/rg.exe、LICENSE、licenses/
+#                        ripgrep-MIT.txt、THIRD_PARTY_NOTICES.md、skills/、
+#                        双语 README、docs/、安装/卸载脚本
+#   linux/macos.tar.gz -> lubancode、libexec/rg、LICENSE、licenses/、
+#                         THIRD_PARTY_NOTICES.md、skills/、双语 README、docs/、install.sh
+# libexec/rg 由 scripts/fetch_ripgrep.py 按 third_party/ripgrep/manifest.json
+# 钉死的哈希/版本拉取(缺 rg 或缺 license 流水线必红,不发半套)。
 # 装/卸载脚本源码在仓库 scripts/ 目录,详见脚本内注释。
 name: release
 
@@ -64,6 +69,17 @@ jobs:
             exit 1
           }
 
+      # 随包 ripgrep(SearchTool 内置 Ripgrep 后端迁移单 P0-6):按 committed
+      # manifest 拉固定版本资产——下载固定 URL、重算 SHA-256 对账、只解
+      # manifest 指定成员、落 dist/lubancode/libexec/、--version 精确校版本、
+      # MIT license 与 notices 一并就位。任何一步不合脚本即非零退出,流水线
+      # 红——不能发缺 rg 或缺 license 的半套包。
+      - name: Fetch bundled ripgrep (manifest-pinned)
+        shell: bash
+        run: |
+          python3 scripts/fetch_ripgrep.py --target dist/lubancode --platform ${{ matrix.name }} --cache build/rg-cache \
+            || python scripts/fetch_ripgrep.py --target dist/lubancode --platform ${{ matrix.name }} --cache build/rg-cache
+
       - name: Package
         shell: bash
         run: |
@@ -90,6 +106,59 @@ jobs:
             *.zip)    7z a "../${{ matrix.archive }}" lubancode ;;
             *.tar.gz) tar czf "../${{ matrix.archive }}" lubancode ;;
           esac
+
+      # 打包后重新解 archive 验包内件(设计单 8.2 第 9/10 步):rg 在包内
+      # libexec/、执行位在(非 Windows)、license/notices 都在,包内两枚
+      # 可执行的 --version 都对得上,再跑一把最小搜索 smoke(中文/regex/
+      # glob/ignore/无命中退出 1)。缺件必红。
+      - name: Verify archive contents (rg, license, notices, smoke)
+        shell: bash
+        run: |
+          rm -rf dist/verify && mkdir -p dist/verify
+          case "${{ matrix.archive }}" in
+            *.zip)    7z x "${{ matrix.archive }}" -odist/verify ;;
+            *.tar.gz) tar xzf "${{ matrix.archive }}" -C dist/verify ;;
+          esac
+          root=dist/verify/lubancode
+          test -f "$root/THIRD_PARTY_NOTICES.md" || { echo "包里缺 THIRD_PARTY_NOTICES.md" >&2; exit 1; }
+          test -f "$root/licenses/ripgrep-MIT.txt" || { echo "包里缺 licenses/ripgrep-MIT.txt" >&2; exit 1; }
+          test -f "$root/LICENSE" || { echo "包里缺 LICENSE" >&2; exit 1; }
+          case "${{ matrix.name }}" in
+            windows-x64)
+              test -f "$root/libexec/rg.exe" || { echo "包里缺 libexec/rg.exe" >&2; exit 1; }
+              "$root/lubancode.exe" --version
+              "$root/libexec/rg.exe" --version | head -1
+              ;;
+            *)
+              test -x "$root/libexec/rg" || { echo "包里缺 libexec/rg 或没有执行位" >&2; exit 1; }
+              "$root/lubancode" --version
+              "$root/libexec/rg" --version | head -1
+              ;;
+          esac
+          # 最小搜索 smoke:中文字面量、Rust regex、glob、ignore 生效、无命中退出 1。
+          # .git 标记必不可少:rg 只在 git 仓库里认 .gitignore(require-git
+          # 语义),临时目录不是仓库,不放标记 ignore 那步会假红。
+          smoke=$(mktemp -d)
+          mkdir -p "$smoke/.git"
+          printf 'ref: refs/heads/main\n' > "$smoke/.git/HEAD"
+          printf '关键词 needle\nplain\n' > "$smoke/zh.txt"
+          printf 'skip.log\n' > "$smoke/.gitignore"
+          printf 'ignored needle\n' > "$smoke/skip.log"
+          RG="$root/libexec/rg${{ matrix.name == 'windows-x64' && '.exe' || '' }}"
+          "$RG" --no-config --hidden -g '!**/build/**' -- 关键词 "$smoke" >/dev/null || { echo "smoke: 中文字面量失败" >&2; exit 1; }
+          "$RG" --no-config --hidden -- 'needle|关键词' "$smoke/zh.txt" >/dev/null || { echo "smoke: regex 失败" >&2; exit 1; }
+          "$RG" --no-config --files --null --hidden -g '*.txt' -- "$smoke" | tr '\0' '\n' | grep -q 'zh.txt' || { echo "smoke: glob 失败" >&2; exit 1; }
+          if "$RG" --no-config --hidden -- 'ignored needle' "$smoke" >/dev/null 2>&1; then
+            echo "smoke: ignored 文件不该被搜到" >&2; exit 1
+          fi
+          # 无命中退出 1:bash -e 下先摘 -e 再收状态码,别让脚本自己先死。
+          set +e
+          "$RG" --no-config --hidden -- 'zzz_definitely_absent' "$smoke" >/dev/null 2>&1
+          no_match_status=$?
+          set -e
+          test "$no_match_status" = "1" || { echo "smoke: 无命中应退出 1,实得 $no_match_status" >&2; exit 1; }
+          rm -rf "$smoke"
+          echo "archive verify passed: ${{ matrix.archive }}"
 
       - name: Upload to Release
         uses: softprops/action-gh-release@v3

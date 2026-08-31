@@ -9,6 +9,9 @@
 
     不需要管理员权限。目录本来就不存在时,视为"本来就没装",不当错误处理,
     但仍会顺手检查一下 PATH 里有没有残留条目并清掉(除非 -SkipPath)。
+    只删 LubanCode 安装目录内的东西——含随包 ripgrep(安装目录 libexec\
+    rg.exe)与 licenses/、THIRD_PARTY_NOTICES.md;用户装在别处的 rg(比如
+    scoop/winget 装的)一概不碰。
 #>
 [CmdletBinding()]
 param(

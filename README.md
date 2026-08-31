@@ -43,7 +43,7 @@ LubanCode 原生支持 Anthropic Messages、OpenAI Responses 与 Chat Completion
 
 ### 1. 下载即用，不用另装运行时
 
-不需要 Node.js。不需要 Python。不需要 `npm install`。Windows x64 Release 主程序约 8.2 MiB，一份原生二进制便能起跑。Windows 一行命令安装，Linux / macOS 解压即用。官方 skills、文档与许可证另随发行包一道带上。
+不需要 Node.js。不需要 Python。不需要 `npm install`。Windows x64 Release 主程序约 8.2 MiB，一套免安装的原生发行包解压便能起跑。Windows 一行命令安装，Linux / macOS 解压即用。发行包除主程序外，还带 `libexec/rg`（内置 ripgrep 搜索后端，MIT 协议，`search` 工具就靠它）、官方 skills、文档与许可证（含第三方声明），离线环境装完即可搜。
 
 ### 2. 忙时也能接着输入
 

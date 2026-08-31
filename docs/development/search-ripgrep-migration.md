@@ -1,8 +1,8 @@
 # search 内置 Ripgrep 后端迁移:P0-1 冻结旧合同与差分语料
 
 对应设计单:`todos/SearchTool内置Ripgrep后端迁移设计.todo`(完整背景、
-合同、批次划分见那份原始设计文档,本文档只承载 P0-1 这一批的具体产出,
-不复述设计单已经写清楚的东西)。
+合同、批次划分见那份原始设计文档,本文档承载各批次的具体产出账,从
+"每批一账"的 P0-1 起,P0-2/3 账在第九节,P0-4/5/6 账在第十节)。
 
 本批**不接 ripgrep,不改 `src/tools/search.cpp` 的生产行为**,纯粹是给
 后续 P0-2 起的真迁移打地基:把旧内核(`std::regex` ECMAScript +
@@ -406,3 +406,107 @@ argv);`--follow/--text/--no-ignore` 有 policy 开关、生产 policy 恒默认�
   流式分帧时换掉这个尾巴,P0-5 切主路。
 - **README"一份原生二进制"口径不改**:rg 未真入包前改口径反而失实,归
   P0-6(rg 真随包时一并改)。
+
+## 十、P0-4/P0-5/P0-6 账(流式执行、切主路、发行)
+
+P0-4~P0-6 一批落地:流式 runner、真实 rg 差分、生产切换与发行链。
+旧 std::regex/walker 内核按设计单 §2.1 裁决整段删除,生产只有一条执行路。
+
+### P0-4 落了什么(流式 runner 与解析器)
+
+| 件 | 位置 | 说明 |
+|---|---|---|
+| 有界等待 | `src/platform/process.*`(WaitForExit) | ChildProcess 补通用 `WaitForExit(timeout, cancel)`:Windows WaitForSingleObject 分片、POSIX waitpid(WNOHANG)+10ms 分片,10ms 一拍查 cancel——不在调用方复制平台等待代码 |
+| 流式执行 | `src/tools/search_ripgrep_run.cpp` | BundledRipgrepRunner::Run 真实现:前置 smoke -> ChildProcess 起 rg(argv 直起、cwd 走 OS 参数)-> stdout 读线程分帧解析 -> 主线程有界等 -> Shutdown 收树(唯一 owner) -> 终态裁决 |
+| 分帧器 | `RipgrepStreamFramer` | grep 按 `\n`、glob 按 `\0`;未完成帧超 1 MiB 返回 false,会话补置协议错停因;EOF 后 FlushTail 补交尾帧(无尾换行合同) |
+| JSONL 解析 | `ParseGrepEventLine` | match/begin/end/summary;path/lines 的 `text` 与 `bytes(base64)` 两路,bytes 解码后过 SanitizeExternalText;坏 JSON -> Invalid -> 协议错收树,绝不装作无命中 |
+| 四道墙 | `RipgrepStreamLimits` | 100 条(与 max_results 软请求取 min,只降不升)/512 KiB 总量/16 KiB 单行(UTF-8 码点边界截断)/1 MiB 协议帧;stderr 另有 64 KiB 帽;墙钟 120s |
+| 终态裁决 | Run 尾部 | 本地原因旗(cancel/timeout/limit/protocol)优先;自然完成按退出码:0/1 成功、2 零命中=pattern_invalid(2 有命中=IO 噪声保结果)、信号/其他码=search_backend_run_failed |
+| 假 rg 夹具 | `tests/support/fake_ripgrep.cpp` | 按 pattern 里的 `@场景名` 伪造输出:坏 JSON/2 MiB 大帧/拒退/stderr 洪水/尾帧无换行/满额 marker/再生孩子(Windows Job 连坐、POSIX fork 同组) |
+
+P0-2 起埋的两枚暗雷在本批现形并修掉,记录在案:
+
+1. **`BundledRipgrepRunner` 默认构造的空路径覆盖**:`exe_override = {}`
+   的缺省实参让 optional 处于"有值但为空"态,EnsureSmoke 优先消费它,
+   默认构造永远报缺件。P0-2 的测试只断言"缺件也算诚实终态"没炸出来,
+   P0-5 默认构造接上生产才现形。修法:构造器把空路径按"没注入"算。
+2. **硬排除四目录漏了 `!` 前缀**:P0-3 的 BuildSearchPolicy 存的是裸
+   `**/.git/**`,BuildGrepArgv 原样给 `-g`——裸 glob 在 rg 眼里是"只搜
+   这些目录"的包含项,真机差分实翻:搜出来的命中恰好只剩 .git/build 里
+   的。修法:排除项统一带 `!`(`!**/<名>/**`),与观察边界排除项同一口径;
+   P0-3 的钉值测试同步改。
+
+### P0-5 差分对账(2026-09-01 真机实测,rg 15.2.0)
+
+驱动:`search_golden_driver diff <基线> <rg>`(本批新增的 diff 子命令,
+复用 P0-1 的场景表与归一化)。结果:**全等 17 / 批准迁移 7 / 未批准出入
+0 / 基线缺失 0**。
+
+批准迁移逐条(与第一节分栏表的对应关系):
+
+| 场景 | 旧内核 | 新后端 | 批准依据 |
+|---|---|---|---|
+| `grep_chinese` 等 17 条 | — | 全等 | A 类 9 条与 B 类 8 条全部复核通过,B 类就此转正 |
+| `grep_ignore_files_not_respected` | 4 命中 | 1 命中(kept.txt) | §5.3 有意迁移:被 ignore 的默认不搜 |
+| `glob_ignore_files_not_respected` | 4 命中 | 4 命中 | **新批准**:rg 优先级合同——显式 include glob 压过 ignore 规则(见下节) |
+| `grep_ecmascript_backreference`/`lookahead` | 命中 | `search_pattern_invalid` | §四迁移表预告:Rust regex 不认这两门语法 |
+| `grep_invalid_regex` | 报错 | 报错(文案不同) | 错误口径一致即可,文案不是合同 |
+| `grep_long_line_anchor` | 整行 20 万字符 | 截到 16 KiB | §6.5 第三道墙 |
+| `grep_illegal_utf8_content` | 原字节 | base64 解码后清洗 | §6.5 bytes 路合同 |
+
+### rg 优先级合同:显式 include glob 压过 ignore 规则
+
+真机实测(rg 15.2.0,`tests/fixtures/search/corpus/ignore` 夹具):
+不带 `-g` 时 `.gitignore`/`.ignore`/`.rgignore` 全部生效;一旦带上
+`-g '*.txt'` 这类**包含** glob,配得上的被忽略文件全部回来;`!` 排除项
+(宿主的 `!**/.git/**` 等)不受影响。这是 rg 自身文档化的优先级设计
+(显式 glob > ignore 规则),Claude Code 的 Grep 工具同款行为。压住它
+只能在宿主里重长一个 ignore 引擎——那正是本单删掉的东西。**裁决:如实
+采纳 rg 语义,批准入迁移表**;单测钉死(`test_search_ripgrep_run.cpp`
+"ignore 文件默认遵守"用例的 glob_override 段)。
+
+另两笔 rg 行为实测入账:
+
+- **显式文件参数绕过一切 glob**(include 与 exclude 都不生效):旧合同
+  "单文件 path 照样吃 glob 过滤,配不上就不搜"(A 类 #9/#10)由宿主的
+  **单文件 glob 闸门**保住(`search.cpp` 的 SingleFileGlobGateBlocks,
+  匹配器是旧内核那枚状态表原样复活,只做这一道闸,不参与目录递归)。
+- **require-git 语义**:不在 git 仓库里时 `.gitignore` 不生效(`.ignore`
+  与 `.rgignore` 不受此限)。单测的临时目录里放一枚 `.git/HEAD` 让 rg
+  认账;真实项目天然在仓库里,不受影响。
+
+### P0-5 切主路
+
+- `SearchTool` 默认构造即持生产 `BundledRipgrepRunner`;execute 主路
+  ParseSearchRequest -> BuildSearchPolicy -> runner->Run -> FormatSearchOutput。
+  旧内核(WalkFiles/GlobMatches/LooksBinary/std::regex)整段删除(单文件
+  闸门那枚状态表匹配器除外——它是产品合同闸,不是内核)。
+- schema 新增 `fixed_strings` 与 `max_results`(事前声明,只降不升);
+  中英文 prompt 重写(Rust regex 口径、ignore 语义、NEVER 句式"搜索一律
+  用 search 工具,不要在 run_command 里跑 rg 或 grep"),`test_tool_text`
+  的钉值同步。
+- `search_backend_not_wired` 枚举移除(流式执行已接,没有这一站);
+  新增 `search_backend_run_failed`(进程半途死,不冒充无命中)。
+- CI 三平台矩阵先跑 `fetch_ripgrep.py`(哈希/版本双对账)再 configure
+  (`-DLUBANCODE_BUNDLED_RG_DIR`),真 rg 集成组随 CI 常跑。
+
+### P0-6 发行链
+
+- `release.yml` 打包前接 `fetch_ripgrep.py --target dist/lubancode
+  --platform <matrix>`;打包后重新解 archive 验 `libexec/rg`、执行位、
+  `licenses/ripgrep-MIT.txt`、`THIRD_PARTY_NOTICES.md`、`LICENSE`,并跑
+  包内 rg 的最小搜索 smoke(中文/regex/glob/ignore/无命中退出 1)。缺件
+  必红,不发半套。
+- `install.ps1`/`install.sh` 同步 `libexec/`、`licenses/`、
+  `THIRD_PARTY_NOTICES.md` 三样(原子换入;libexec 永远贴着可执行文件,
+  不走 share——生产定位只有 ExecutableDir/libexec 一条);卸载只删安装
+  目录内的副本。`install.tests.ps1` 补:陈旧 rg 整目录换新、来源缺件不动
+  现有、用户旁文件不删。
+- `check_release.sh` 补:manifest 三平台哈希齐全且无占位、MIT license 与
+  notices 在、代码钉死的 kBundledRipgrepVersion 与 manifest 对账。
+- README 中英双语把"一份原生二进制"改成"一套免安装原生发行包"
+  (带 libexec/rg、licenses、notices)。
+- 2026-08-31 勘察补记两条均落实:release.yml 原先未调抓取脚本(已接);
+  安装脚本原先不搬 libexec/licenses/notices(已补)。上游归档不进 Git,
+  离线重打走自家 Release 镜像(裁决照旧),`dist/`、`rg-stage/`、
+  `rg-cache/` 入 .gitignore。

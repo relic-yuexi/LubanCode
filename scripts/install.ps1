@@ -10,7 +10,9 @@
         .\install.ps1 -SkipPath                 不写用户 PATH(测试/CI 用,避免污染真实环境)
 
     不需要管理员权限——只动当前用户的安装目录和 HKCU 用户级 PATH,不碰系统级 PATH。
-    重复跑等价于覆盖升级(幂等)。
+    重复跑等价于覆盖升级(幂等)。随包资源(exe 同目录)整目录原子同步:
+    skills/、docs/、libexec/(随包 ripgrep,search 后端唯一认的家)、licenses/、
+    THIRD_PARTY_NOTICES.md——更新安装时旧 rg 一并换新,不留半套。
 #>
 [CmdletBinding()]
 param(
@@ -293,6 +295,55 @@ function Sync-OfficialDocs {
     Sync-OfficialDirectory -SourceExe $SourceExe -InstallDir $InstallDir -DirectoryName 'docs' -DisplayName '官方文档'
 }
 
+# 随包 ripgrep 与许可证(ripgrep 迁移单 P0-6):libexec/ 里住着 search 工具
+# 唯一认的后端(定位 = exe 同目录 libexec\rg.exe),licenses/ 与
+# THIRD_PARTY_NOTICES.md 是 MIT 分发的法定件。三样缺席或陈旧都算"装了半
+# 套",与 skills/docs 同一套原子换入(staging 过门再整体替换),更新安装
+# 时旧 rg 整目录被一次性换掉,不出现"删了旧的、新的没到"的窗口。
+function Sync-OfficialLibexec {
+    param(
+        [string]$SourceExe,
+        [string]$InstallDir
+    )
+    Sync-OfficialDirectory -SourceExe $SourceExe -InstallDir $InstallDir -DirectoryName 'libexec' -DisplayName '随包 ripgrep(libexec)'
+}
+
+function Sync-OfficialLicenses {
+    param(
+        [string]$SourceExe,
+        [string]$InstallDir
+    )
+    Sync-OfficialDirectory -SourceExe $SourceExe -InstallDir $InstallDir -DirectoryName 'licenses' -DisplayName '第三方许可证(licenses)'
+}
+
+function Sync-OfficialNotices {
+    param(
+        [string]$SourceExe,
+        [string]$InstallDir
+    )
+    $sourceFile = Join-Path (Split-Path -Parent $SourceExe) 'THIRD_PARTY_NOTICES.md'
+    if (-not (Test-Path -LiteralPath $sourceFile -PathType Leaf)) {
+        Write-Host "提示:安装来源里没有 THIRD_PARTY_NOTICES.md,保留现有第三方声明不动。" -ForegroundColor Yellow
+        return
+    }
+    $installRoot = [IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
+    $destFile = [IO.Path]::GetFullPath((Join-Path $installRoot 'THIRD_PARTY_NOTICES.md'))
+    if (-not $destFile.StartsWith($installRoot + '\', [StringComparison]::OrdinalIgnoreCase)) {
+        throw "第三方声明目标越出安装目录:$destFile"
+    }
+    # 单文件也走 staging:拷到临时名再原子换入,不在安装目录里留半截文件。
+    $staging = Join-Path $installRoot ('.THIRD_PARTY_NOTICES-new-' + [Guid]::NewGuid().ToString('N'))
+    try {
+        Copy-Item -LiteralPath $sourceFile -Destination $staging -Force
+        Move-Item -LiteralPath $staging -Destination $destFile -Force
+    } finally {
+        if (Test-Path -LiteralPath $staging) {
+            Remove-Item -LiteralPath $staging -Force -ErrorAction SilentlyContinue
+        }
+    }
+    Write-Step "已同步第三方声明:$destFile"
+}
+
 # ===================== 主流程 =====================
 
 function Invoke-Install {
@@ -347,6 +398,11 @@ function Invoke-Install {
         }
         Sync-OfficialSkills -SourceExe $exeToInstall -InstallDir $InstallDir
         Sync-OfficialDocs -SourceExe $exeToInstall -InstallDir $InstallDir
+        # ripgrep 迁移单 P0-6:随包 rg、许可证、第三方声明三样同步到位——
+        # search 的后端就住 libexec\rg.exe,缺了它 search 即稳定报缺件。
+        Sync-OfficialLibexec -SourceExe $exeToInstall -InstallDir $InstallDir
+        Sync-OfficialLicenses -SourceExe $exeToInstall -InstallDir $InstallDir
+        Sync-OfficialNotices -SourceExe $exeToInstall -InstallDir $InstallDir
     } catch {
         Write-ErrStep "同步程序、官方技能或文档失败(是不是有旧的 lubancode 进程占着文件?先关掉再重试):$($_.Exception.Message)"
         exit 1
