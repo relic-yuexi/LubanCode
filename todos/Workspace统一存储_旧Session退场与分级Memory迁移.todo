@@ -1,0 +1,722 @@
+# Workspace 统一存储、旧 Session 退场与分级 Memory 迁移
+
+- 状态：待实现
+- 日期：2026-09-01
+- 级别：P0（持久化唯一真账、项目身份、恢复正确性与用户数据安全）
+- 范围：`src/sessions/`、`src/trajectory/`、`src/runtime/session_runtime.*`、`src/runtime/trajectory_session.*`、`src/memory/`、`src/app/commands/session_commands.*`、`src/app/commands/memory_commands.*`、`src/tools/agent_tool.*`、配置/CLI/app-server、测试、文档与旧数据迁移
+- 依赖：`P0新轨迹记录_可重放与训练投影设计.todo` 已落的 Trajectory Journal、Replay、SessionManager、父子 run 关系与训练投影
+- 关联：`持久Agent_Gateway自动任务与可靠恢复总装计划.todo`、`端云协同可观测架构与Telemetry插件设计.todo`
+- 不在本单：远端同步、团队共享记忆、用 Git remote URL 合并不同 clone、向量数据库、把整份 Memory 抄进每场 Session、自动删除未经用户确认的旧档
+
+## 一、先下断语
+
+旧 `~/.lubancode/sessions/` 格式彻底退出 LubanCode。最终产物不得再创建、扫描、恢复、归档、导出或写入旧 SessionStore JSONL，也不得保留“新路失败便退回旧路”的暗门。
+
+新格式只有一棵持久化目录：
+
+```text
+~/.lubancode/workspaces/<workspace_key>/
+```
+
+一只 workspace 收住同一项目的会话、子代理、工作流、项目记忆、生命周期账与可重建索引。全局记忆不归任何项目，另住用户级目录，只收用户主动沉淀的内容。
+
+```text
+~/.lubancode/memory/user/
+```
+
+项目身份只由一只 `WorkspaceIdentityResolver` 裁决。Trajectory、Memory、配置、命令、app-server 与子代理不得各算各的 key。
+
+> 一份事实一个归宿，一种身份一把钥匙，一条生产写路。
+
+“删旧格式”是删产品运行时、删双轨、删兼容分支，不是静默抹掉用户磁盘上的旧档。旧数据须先显式迁移或导出；任何删除都要用户确认，且有可核验回执。
+
+## 二、当前真相
+
+### 2.1 旧会话仍是一只跨项目总筐
+
+现有旧路由 `src/sessions/session_store.*` 管理：
+
+```text
+~/.lubancode/sessions/<session_id>.jsonl
+~/.lubancode/sessions/<session_id>/context/
+~/.lubancode/sessions/<session_id>/mcp-artifacts/
+~/.lubancode/sessions/archive/
+```
+
+项目归属藏在首行 `meta.cwd`。`/sessions` 先扫总目录，再按 cwd 筛。工具调用、工具结果、compact、title、queue、mode 等也写在这本旧账里。
+
+`SessionRuntime::PersistNew()` 仍保留旧消息增量落盘；`features.trajectory=false` 又是当前默认。故而用户平日所见仍是旧格式，新 Trajectory 尚未接管唯一生产路。
+
+### 2.2 新 Trajectory 已有 workspace/session 两层
+
+现有新路在：
+
+```text
+~/.lubancode/trajectories/workspaces/<workspace_key>/sessions/<session_id>/
+```
+
+它已经具备：
+
+- `session.json` 与 `main.jsonl`；
+- `subagents/<agent_run_id>.jsonl`；
+- workflow、goal、loop、checkpoint、artifact、derived 与 export；
+- 父账 `child_run_id`、子账 terminal hash 与跨文件校验；
+- clear 换账、resume-as-new、hash chain、Replay 与 SessionManager。
+
+这批不另造第三套 Journal。只把现有 `trajectories/workspaces` 提升为产品唯一 workspace 根，并补齐 Memory、命令与迁移。
+
+### 2.3 Memory 仍在另一棵项目树
+
+现有项目记忆住：
+
+```text
+~/.lubancode/projects/<project_key>/memory/
+```
+
+用户级记忆住：
+
+```text
+~/.lubancode/memory/user/
+```
+
+项目记忆用 Git common dir 算 `project_key`；Trajectory 目前用 checkout 仓库根算 `workspace_key`。linked worktree 因而会出现：记忆共用，Trajectory 分房。两边名字相似，身份合同却不同。
+
+### 2.4 子代理在新路中已有正确骨架
+
+Trajectory 开启时，每只子代理已有自己的 `agent_run_id` 与 scoped JSONL：
+
+```text
+sessions/<session_id>/subagents/<agent_run_id>.jsonl
+```
+
+父轨迹只写派发、接受、完成、`child_run_id` 与子账 terminal hash，不复制整本子账。旧 SessionStore 则只在主 history 里留下 agent 工具调用及最终 tool result，子代理内部翻找不成独立耐久账。
+
+本单保留新路的父子分账，删除旧路的“只留最终回话”持久化语义。
+
+## 三、目标目录
+
+最终只认下列布局：
+
+```text
+~/.lubancode/
+  workspaces/
+    <workspace_key>/
+      workspace.json
+      sessions/
+        <session_id>/
+          session.json
+          main.jsonl
+          subagents/
+            <agent_run_id>.jsonl
+          workflows/
+          goals/
+          loops/
+          checkpoints/
+          artifacts/
+            sha256/
+          indexes/
+          derived/
+          exports/
+      memory/
+        facts/
+        preferences/
+        feedback/
+        archive/
+        memory-candidates/
+        index.md
+        .state/
+          catalog.json
+          recall-traces/
+      lifecycle/
+      tombstones/
+      .locks/
+  memory/
+    user/
+      preferences/
+      feedback/
+      archive/
+      index.md
+      .state/
+        catalog.json
+  memory-jobs/
+    pending/
+    running/
+    failed/
+  migrations/
+    storage-v2/
+      <operation_id>/
+        intent.json
+        progress.json
+        result.json
+```
+
+硬规矩：
+
+1. 不再有生产目录 `~/.lubancode/sessions/`。
+2. 不再有生产目录 `~/.lubancode/trajectories/`。
+3. 不再有项目目录 `~/.lubancode/projects/`。
+4. session、项目 Memory 与 workspace 生命周期共用同一 `workspace_key`。
+5. 用户级 Memory 没有 `workspace_key`，也不假借某一项目作归属。
+6. 索引、导出、摘要皆可重建；Journal、Memory Markdown 正文与用户确认过的迁移回执才是真本。
+
+## 四、LubanCode 怎样认出当前项目
+
+### 4.1 唯一入口
+
+新增中立模块：
+
+```cpp
+WorkspaceIdentity ResolveWorkspaceIdentity(
+    const std::filesystem::path& cwd,
+    const std::filesystem::path& home_lubancode);
+```
+
+建议归 `src/workspace/identity.*`。`trajectory/` 与 `memory/` 都只吃结果，不反向各自探 Git。
+
+返回值至少含：
+
+```text
+workspace_key
+display_name
+identity_kind          git_common | explicit_marker | config_root | cwd_fallback
+project_root           用户眼前的项目根
+identity_root          算 key 的规范根
+checkout_root          当前 checkout 根；非 Git 时等于 project_root
+git_common_dir         非 Git 时为空
+launch_cwd
+```
+
+### 4.2 裁决顺序
+
+从当前 cwd 向上走，按以下顺序定界：
+
+1. 遇见最近的 Git 仓库，解析 `.git` 目录或 `.git` 文件，再解析 `commondir`。
+2. Git 项目的 `identity_root` 取 common git dir；主工作树与 linked worktree 因而共享一只 workspace。
+3. 不在 Git 内，遇见最近的 `.lubancode/workspace.json`，以它声明的根与稳定 id 定界。
+4. 没有 marker，再取最近的 `.lubancode/config.json` 所在目录。
+5. 四处皆无，退回启动 cwd，标 `identity_kind=cwd_fallback`；不得一路爬到用户主目录猜成大项目。
+
+最近边界胜。嵌套 Git 仓、submodule 与内嵌项目不得被外层仓库吞掉。
+
+### 4.3 workspace_key
+
+Git 项目：
+
+```text
+seed = "git:" + normalized_absolute_common_git_dir
+workspace_key = <safe-display-name>-<first16(SHA256(seed))>
+```
+
+显式 marker：
+
+```text
+seed = "marker:" + marker.workspace_id
+```
+
+配置根或 cwd fallback：
+
+```text
+seed = "path:" + normalized_absolute_project_root
+```
+
+Windows 折叠 ASCII 大小写、统一斜杠并解绝对规范路径；POSIX 保留大小写。basename 只给人看，不参与唯一性裁决。Git remote URL 不作身份：它会泄露地址，也不能区分两份独立 clone。
+
+### 4.4 workspace.json
+
+首次开仓原子写：
+
+```json
+{
+  "schema": "lubancode.workspace",
+  "version": 2,
+  "workspace_key": "lubancode-...",
+  "display_name": "lubancode",
+  "identity_kind": "git_common",
+  "identity_root": "D:/lubancode/.git",
+  "created_at_ms": 0,
+  "last_opened_at_ms": 0,
+  "checkouts": [
+    {"root": "D:/lubancode", "first_seen_at_ms": 0, "last_seen_at_ms": 0}
+  ]
+}
+```
+
+`checkouts` 只是可重建登记，不是身份源。路径搬家后不凭同名目录自动合并。用户须跑显式 `lubancode workspace migrate/move`，工具核旧 manifest、目标路径与 session hash 后再改 alias。
+
+### 4.5 cwd 与 workspace 切换
+
+- 同一 Git common dir 内从主树走到 linked worktree：workspace 不变；session 写 `cwd.changed`，并更新 checkout 登记。
+- 从一个仓库走进另一个仓库：不得继续往旧 workspace 写。先封当前 session，再在新 workspace 开新 session，写跨 workspace switch 回执。
+- 子代理继承派工时冻结的 `WorkspaceIdentity`。它不得按自己的临时 cwd 另算一把 key。
+- workflow、goal、loop、Gateway 恢复也只认冻结身份与 manifest；运行途中发现 cwd 漂出边界，要报错或显式切换，不能偷偷搬账。
+
+## 五、Session 与子代理唯一真账
+
+### 5.1 Trajectory 永远开启
+
+删除 `features.trajectory` 与 `LUBANCODE_TRAJECTORY` 这道生产开关。Trajectory 不再是预览特性，而是 Session 的定义本身。
+
+程序若建不起 workspace/session、拿不到锁或写不稳关键事件，须明确失败。不得回退到内存会话后仍冒充可恢复，也不得重启旧 SessionStore。
+
+### 5.2 主会话
+
+所有用户输入、模型请求/输出、工具调用/结果、usage、compact、title、queue、mode、cwd、memory recall、验证与终态，只写 `main.jsonl` 及内容寻址 artifact。
+
+`/sessions`、`/resume`、`/archive`、`/delete`、`/export`、`--continue` 与 app-server thread API 全从 workspace SessionManager、Replay 与索引投影读取。
+
+默认 `/sessions` 只列当前 workspace。显式 `all` 才扫 `~/.lubancode/workspaces/*/sessions/`，且优先读可重建 workspace/session 索引，不为每次列表重放所有 Journal。
+
+### 5.3 子代理
+
+每只子代理必须留下：
+
+- 自己的 `agent_run_id`、父 `run_id`、父 `call_id` 与 task id；
+- agent 类型、冻结 profile、prompt/task 摘要与输入证据引用；
+- 模型请求、工具输入、工具结果、usage、取消与终态；
+- 最终输出正文或 artifact ref；
+- terminal event hash。
+
+父 `main.jsonl` 只留派工边、接收边、`child_run_id`、最终结果引用与 terminal hash。父子双向校验不合时，Session 标 incomplete/corrupt，不拿父侧一句“已完成”遮过去。
+
+嵌套子代理仍写同一 `subagents/` 目录；靠 `parent_run_id` 组成树，不按层级套无限目录。取消、崩溃、超时与父进程退出都要有 terminal/unknown 账。
+
+## 六、Memory 与 Workspace 合账
+
+### 6.1 两级记忆
+
+项目级：
+
+```text
+~/.lubancode/workspaces/<workspace_key>/memory/
+```
+
+只写当前项目的可核验事实、项目技术偏好与项目内反馈。它跟 workspace 走，不再另算 `project_key`。
+
+全局级：
+
+```text
+~/.lubancode/memory/user/
+```
+
+只收用户主动沉淀的跨项目偏好与反馈。禁止回合尾自动抽取写入全局层；禁止模型凭推断写入；禁止项目 `.lubancode/config.json` 开启、扩权或改写全局层。
+
+全局写入口只认：
+
+```text
+/memory remember global preference <标题> :: <正文>
+/memory remember global feedback <标题> :: <正文>
+```
+
+若保留 `memory_save`，其 scope 只能是 project。模型提议升为 global 时只能生成候选并请用户显式确认，不能自行提交。
+
+### 6.2 召回顺序
+
+每条外层用户输入前：
+
+1. 从冻结 `WorkspaceIdentity` 打开项目 Memory。
+2. 若用户全局配置允许召回，再读用户级 Memory。
+3. 同 id、同证据、同正文去重；项目层同主题压过全局层。
+4. 共用一份总条数与总字节预算，不因两层翻倍。
+5. 过期、scope 不符、文件指纹漂移或敏感项不注正文，并在 recall trace 记缘由。
+
+子代理不自动扫整库。父代理派工时，只把这项任务所需的 memory refs/content snapshot 写进 child 的 `run.started`/context injection。将来若允许子代理独立召回，须另开显式能力与预算，不能暗中放开。
+
+### 6.3 Memory 与 Session 怎样“绑定”
+
+Memory 正文不抄进 session history，也不随 `/export` 默认导出。但每次真正注入模型的记忆，`main.jsonl` 必须落一枚 `context.injected(kind=memory_recall)`，至少记：
+
+```text
+workspace_key
+turn_id / request_id
+memory_level           project | user
+memory_id
+memory_schema
+memory_updated_at
+content_sha256
+source_evidence_refs
+injected_bytes
+snapshot_ref           指向本 session artifact；或小内容内联
+```
+
+如此，Memory 后来改了，旧 Session 仍能重建“当时模型究竟看见哪一版”。只记 `memory_id` 不够；Replay 时回头读今天的 Memory，会改写历史。
+
+Memory 写入也须留因果边：
+
+```text
+memory.save.requested  -> source session/run/turn/event refs
+memory.save.committed  -> memory id/version/content hash/path
+memory.save.failed     -> stable error code
+```
+
+后台 worker 可以异步写 Markdown，但提交回执须落 workspace lifecycle 或下一次开场补记，不能只在临时 job 队列里无声消失。项目 Memory 的 `source_sessions` 改成全限定引用：`workspace_key + session_id + run_id + event_id/hash`。
+
+### 6.4 删除与归档边界
+
+- 删除 Session 不连坐删除项目 Memory；Memory 可能已有多场证据。
+- `/memory forget` 只把主题移进同层 `archive/`，不改 Journal 旧事件。
+- 删除 workspace 必须分别列 session 数、Memory 条目数、artifact 字节与 tombstone 计划，二次确认后才动。
+- 删除全局 Memory 只认用户级命令；项目配置、Hook、Skill 与仓库内容都无权代办。
+
+## 七、旧数据迁移与彻底删码
+
+### 7.1 迁移原则
+
+迁移分“读取旧档”和“新运行时”两件事。过渡期可有一次性迁移器，新运行时仍只写新格式。最终收官时，旧 reader、writer、目录扫描与兼容测试一并删掉。
+
+不得原地改旧文件。流程固定：
+
+1. 扫描并生成 `intent.json`，列出每个源文件、字节数与 SHA-256。
+2. 按旧 session `meta.cwd` 调唯一 WorkspaceIdentityResolver。
+3. 在目标 workspace 建 `start_reason=legacy_import` 的新 session。
+4. 导入能确认的消息、tool use/result、title、compact 与 usage；不能还原的执行边界标 `legacy_partial`。
+5. 训练策略固定 `exclude`，复现等级不得高于 `partial`。
+6. 跑 schema、hash、Replay、父子配对与消息配对校验。
+7. 原子写 `result.json`，逐项记目标 session id 与 terminal hash。
+8. 只有用户另给 `--delete-source` 且再次确认，才删除已核验源档；默认原样保留，LubanCode 新运行时不再扫描它。
+
+迁移可重复执行。同一 source SHA 已成功导入时返回既有目标，不得再造一份。
+
+### 7.2 旧 Session 的信息上限
+
+旧主 history 中的 agent tool result 可以导入父账，却不能伪造完整子代理 Journal。没有子账的旧场必须明确标：
+
+```text
+subagent_detail = unavailable_legacy
+```
+
+旧工具结果只代表当时存下的模型可见结果；工具自身早先截掉的原始 stdout 不得冒充已恢复。缺 rich block、artifact 或 trace 时照实列缺口。
+
+### 7.3 旧 Memory 迁移
+
+当前 workspace 第一次打开时，可由旧 `ResolveProjectIdentity` 只算一次旧 key，读取：
+
+```text
+~/.lubancode/projects/<old_project_key>/memory/
+```
+
+逐主题校验 front matter、正文 hash、证据路径与层级，再写入新 workspace Memory。用户级 `~/.lubancode/memory/user/` 路径不搬，只升级 schema/权限合同。
+
+迁移成功后留下 source/target hash 对照。最终删码前，提供 `lubancode migrate-storage status` 列出未迁项目；不能因某个旧 project 眼下没打开，就说全机迁完。
+
+### 7.4 最终必须删除的旧件
+
+迁移窗口结束后，至少删除或改造：
+
+- `src/sessions/session_store.*` 及旧消息 JSONL parser/serializer；
+- `SessionRuntime` 内 `sessions_dir`、`SessionStore`、`persisted_count` 与 `PersistNew()`；
+- `features.trajectory`、`LUBANCODE_TRAJECTORY` 及所有双路分支；
+- 旧 `SessionCatalog`/`SessionLifecycle` 对平铺目录的扫描、archive/delete；
+- `<sessions_dir>/<session-id>/context` 与 `mcp-artifacts` 路径拼接；
+- 文档里 `~/.lubancode/sessions/`、`~/.lubancode/trajectories/`、`~/.lubancode/projects/` 的生产说明；
+- 只验证旧格式继续可写/可恢复的测试与 fixture。
+
+若某个纯函数仍被一次性迁移器需要，迁移器须隔离在 `tools/legacy-storage-migrator/` 或最后一个过渡发行分支，不得继续混在生产 SessionRuntime。
+
+## 八、命令与用户界面
+
+### 8.1 Workspace
+
+新增或统一：
+
+```text
+/workspace
+lubancode workspace list
+lubancode workspace inspect <key>
+lubancode workspace migrate <old-root> <new-root>
+lubancode workspace doctor [key]
+lubancode migrate-storage plan|run|status
+```
+
+`/workspace` 至少显示 key、识别来源、项目根、当前 checkout、session 数、项目 Memory 数与目录。路径显示须可读，遥测/日志输出按隐私策略脱敏。
+
+### 8.2 Session
+
+原有 `/sessions`、`/resume`、`/archive`、`/delete`、`/export` 命令名可保留，底座全部换成 Workspace SessionManager。错误须分清：workspace 不存在、session 不存在、锁被占、Journal 坏、父子边坏、迁移未完成、权限不足。
+
+### 8.3 Memory
+
+明确层级：
+
+```text
+/memory                         # 当前 workspace + 用户层总览
+/memory list project|global
+/memory show project|global <id>
+/memory remember project ...
+/memory remember global ...    # 只认用户主动命令
+/memory forget project|global <id>
+/memory why <id>
+```
+
+旧的不带层级写法可在过渡期默认 `project` 并打印一次迁移提示；最终文档只教显式层级。`global` 与 `user` 内部统一一个术语，界面用“全局”，schema 用 `level=user` 或升版改成 `global`，不可两套词来回漂。
+
+## 九、并发、故障与安全
+
+### 9.1 锁与写者
+
+- 每个 session stream 单写者；main、subagent、workflow 各写各账。
+- workspace manifest/lifecycle、Memory topic、catalog 各有窄锁，不设一把全局大锁堵住所有项目。
+- Memory Markdown 原子替换；catalog/index 可重建。
+- 同 workspace 两个 LubanCode 进程可以各开 session，不可抢写同一 session。
+- migration operation 以 create-new intent 抢占，同 source SHA 只许一个 committed 结果。
+
+### 9.2 失败合同
+
+| 故障 | 必须怎样办 |
+|---|---|
+| workspace 身份算不出 | 启动失败并点明路径；不得落进 `unknown/` 总筐 |
+| workspace manifest 与算法 key 不合 | 隔离并跑 doctor；不得自动改名合并 |
+| session 关键事件写不稳 | 停在耐久边界，不发下一请求/不越下一副作用 |
+| 子代理终态写不稳 | 父账记 unknown，不冒充 completed |
+| Memory recall snapshot 写不稳 | 本轮不注入该记忆，或明确阻断；不得注了却无账 |
+| 项目 Memory 写失败 | job 进 failed，有稳定错误与可重试回执 |
+| 全局 Memory 未获用户主动授权 | 拒绝写入，项目配置不得提权 |
+| 迁移中断 | 旧源不动；下次按 progress/hash 幂等续跑 |
+| 磁盘不足 | 预留空间后再越副作用边界；禁止回退旧 SessionStore |
+
+### 9.3 路径与信任
+
+- `workspace_key`、session id、run id 只认合法单段名。
+- 所有删除、归档、迁移目标须 canonicalize 后验明仍在指定根内。
+- 拒绝 symlink/junction 把 Memory、artifact、tombstone 引出 workspace。
+- 仓库内 `.lubancode/workspace.json` 只负责定界与稳定 id，不得借此开启全局 Memory、改变用户目录或越过权限策略。
+- 全局 Memory 默认关闭召回；写入永远须用户级授权与主动命令。
+
+## 十、分期落地
+
+次序不可打乱。每批落地后更新本单状态、实际测试与 commit；未测不得写“完成”。
+
+### P0-0：冻结合同与盘点旧写口
+
+- [ ] 列尽所有 `SessionStore`、`sessions_dir`、`features.trajectory`、旧 artifact 路径与旧 SessionCatalog 调用点。
+- [ ] 列尽 `project_key` 与 `workspace_key` 的全部生成者和消费者。
+- [ ] 建一组真实脱敏夹具：普通会话、工具结果、MCP rich result、前后台子代理、compact、resume、linked worktree、项目/全局 Memory。
+- [ ] 冻结 workspace v2 manifest、目录布局、迁移 receipt 与 memory recall snapshot schema。
+- [ ] 给新事件/schema 定 reader 最低版本与稳定错误码。
+
+验收：仓库里每一只旧写手、每一把身份钥匙、每一种用户旧数据都有迁移归宿；没有“实现时再看”的黑箱。
+
+### P0-1：收拢 WorkspaceIdentityResolver
+
+- [ ] 新增 `src/workspace/identity.*`，实现 Git common dir、marker、config root、cwd fallback 四级裁决。
+- [ ] 让 Trajectory、Memory、Session 命令、app-server、Gateway 与子代理都改吃 `WorkspaceIdentity`。
+- [ ] 删除 `trajectory::FindWorkspaceRoot/ComputeWorkspaceKey` 与 `memory::ResolveProjectIdentity` 的平级生产身份逻辑，必要纯函数降为新 resolver 内部件。
+- [ ] 实现 workspace v2 manifest、checkout 登记与 doctor 对账。
+- [ ] 实现同 workspace cwd change 与跨 workspace session switch。
+
+验收：同一 cwd 从任一入口所得 key 逐字相同；linked worktree 共 workspace，独立 clone 不共享，嵌套仓最近者胜。
+
+### P0-2：把 Trajectory 提升为唯一 Session
+
+- [ ] 把根从 `~/.lubancode/trajectories/workspaces` 迁到 `~/.lubancode/workspaces`。
+- [ ] 默认且强制启用 Trajectory，删除 feature/env 分支。
+- [ ] 将 `/sessions`、resume、archive、delete、export、continue 与 app-server 全接 Replay/SessionManager。
+- [ ] 把 context artifact、MCP artifact、图片与导出统一放进 session `artifacts/`/`exports/`。
+- [ ] 补齐 `tool.result.committed` 对 structured content、图片/音频 artifact ref 的无损投影。
+- [ ] 保住父子 run 独立 Journal、双向引用、终态 hash 与恢复校验。
+
+验收：全新主目录跑完整交互后，只出现 `workspaces/` 新账；普通/富工具结果、子代理与 resume 都能从 Journal 重建。
+
+### P0-3：项目 Memory 搬进 Workspace
+
+- [ ] 把项目 Memory 根改为 `<workspace>/memory/`，删 `project_dir/project_key` 生产字段。
+- [ ] 统一 project Memory 的 source refs 为 workspace/session/run/event 全限定引用。
+- [ ] 把 recall snapshot 作为 typed trajectory event/artifact 落账，Replay 不读“今天的 Memory”冒充旧输入。
+- [ ] 把 save requested/committed/failed 与异步 worker 回执接进 workspace lifecycle/Trajectory。
+- [ ] 让 `/memory`, `memory_save`, review/accept/reject, stale/verify/refresh/rebuild 全走 WorkspaceIdentity。
+- [ ] 子代理只收父任务显式下发的 memory snapshot/ref，不自动扫整库。
+
+验收：改动或删除当前 Memory 后，旧 session 仍可重建当时注入版本；项目 Memory 不再在 `~/.lubancode/projects/` 新建文件。
+
+### P0-4：收紧全局 Memory
+
+- [ ] 保留 `~/.lubancode/memory/user/`，明确 UI 名称“全局记忆”。
+- [ ] 禁止回合尾抽取、`memory_save` 与项目配置直接写全局层。
+- [ ] 新增显式 global remember/list/show/forget 命令与逐次用户确认合同。
+- [ ] 保留项目层覆盖全局层、统一预算、去重、过期与证据漂移规则。
+- [ ] 给全局目录加 user-only 权限检查与 doctor 项。
+
+验收：没有用户主动命令便永不新增全局主题；陌生仓库、Skill、Hook、子代理与模型调用都提不了权。
+
+### P0-5：迁移旧 Session 与旧 Project Memory
+
+- [ ] 实现只写新格式的幂等 storage-v2 migrator。
+- [ ] 迁移旧 SessionStore 消息与可确认事件，缺口标 `legacy_partial/training=exclude`。
+- [ ] 迁移旧 `projects/<key>/memory` 到新 workspace memory，逐主题对 hash。
+- [ ] 实现 plan/run/status、崩溃续跑、重复 source 去重、源/目标审计报告。
+- [ ] 默认保留源档；`--delete-source` 单独确认，只删已 committed 且复验通过的源。
+- [ ] 发布迁移说明与最后兼容版本边界。
+
+验收：故障注入打断迁移一百次，旧源无损；续跑不重复；成功目标全部可 Replay/rebuild。
+
+### P0-6：彻底删除旧格式代码
+
+- [ ] 删除 `src/sessions/session_store.*` 及其 CMake 项。
+- [ ] 删除 `SessionRuntime::PersistNew`、旧 store 成员、旧 persisted_count 与双路 wiring。
+- [ ] 删除旧平铺 SessionCatalog/Lifecycle 实现或改造成纯 Workspace 投影，不留旧目录扫描。
+- [ ] 删除 `features.trajectory`、环境变量、配置文档与关闭态降级文案。
+- [ ] 删除旧 projects memory root 与旧 key 生产代码。
+- [ ] 删除生产二进制里的旧 JSONL reader/writer；迁移器在收官发行前独立封存或移出生产构建。
+- [ ] 加静态审计：源码与文档除迁移说明外，不得再出现生产路径 `~/.lubancode/sessions`、`~/.lubancode/trajectories`、`~/.lubancode/projects`。
+
+验收：删掉上述旧目录后程序照常工作；手工造旧目录也不会被扫描；新路故障时明确失败，绝不回退。
+
+### P0-7：测试、性能与发布门
+
+- [ ] Windows/Linux 跑 workspace identity、路径大小写、symlink/junction、锁与原子迁移测试。
+- [ ] macOS 由 CI 跑 identity、权限、锁、崩溃恢复与 release 包测试；无真机处如实标 CI。
+- [ ] 跑主会话 + 四只并行子代理 + 嵌套 child + workflow + Memory recall/save 的综合恢复测试。
+- [ ] 跑 linked worktree 共 Memory/共 workspace、session 各带 checkout 现场的测试。
+- [ ] 跑跨 workspace `/worktree` 切换、封旧开新与回执测试。
+- [ ] 跑全局 Memory 越权攻击：项目配置、恶意 marker、Hook、Skill、subagent、模型工具均不得写。
+- [ ] 建 1/1k/10k session 与 1/1k/10k Memory 条目的 list/recall/replay 基线，记录冷/热耗时和峰值内存，不拍脑袋填预算。
+- [ ] 更新配置、会话、Memory、安全、命令、故障排查、目录一览与发布迁移文档。
+- [ ] 全量 CTest、打包验收、空主目录 E2E、带旧数据升级 E2E 全绿。
+
+验收：三平台发行包只会生产新 workspace 树；旧数据升级有实测报告；性能数字注明机器、数据量与冷热态。
+
+## 十一、测试矩阵
+
+### 11.1 身份
+
+| 场景 | 预期 |
+|---|---|
+| Git 根与任意子目录启动 | 同一 workspace key |
+| 主工作树与 linked worktree | 同一 workspace key，不同 checkout root |
+| 两份独立 clone | 不同 key |
+| 同名但不同路径目录 | 不同 key |
+| Windows 盘符/大小写/斜杠变化 | 同 key |
+| POSIX 大小写不同路径 | 不同 key |
+| nested repo/submodule | 最近 Git 边界胜 |
+| 非 Git + workspace marker | marker 定界 |
+| 非 Git + project config | config 所在目录定界 |
+| 两者皆无 | 启动 cwd，标 fallback |
+| symlink/junction 绕路 | 规范化后不裂 key、不越根 |
+
+### 11.2 Session 与子代理
+
+- 主 Journal 尾行截断仍能停在最后完整事件。
+- child started 后崩溃，恢复为 unknown，不冒充未执行。
+- child 已终态、父未 accepted，Replay 能凭双边 hash 说明卡在哪。
+- 父写了 child hash、子文件缺失或被改，doctor 报 corrupt。
+- rich tool result 的 text、structured content 与 media artifact ref 可重建。
+- archive/delete 不在 child 尚活时越过安全门。
+
+### 11.3 Memory
+
+- 项目事实只进当前 workspace。
+- linked worktree 召回同一项目 Memory。
+- 独立 clone 不误共享。
+- 全局记忆只有用户命令可写。
+- 项目同主题压过全局主题。
+- Memory 更新后，旧 session recall snapshot hash/正文不变。
+- 删除 session 不删 Memory；forget Memory 不改旧 Journal。
+- worker 在 intent 后崩溃可续跑，重复 commit 幂等。
+
+### 11.4 迁移与退场
+
+- 旧消息、工具配对、title、compact 与 usage 可导入。
+- 旧 agent 最终结果可导入，但无子账时明确标缺。
+- 迁移目标写坏不动源。
+- 相同 source SHA 重跑不重复。
+- 默认不删源；删除需二次确认。
+- 最终生产程序对旧目录零读、零写、零副作用。
+
+## 十二、改动边界（预计）
+
+新增：
+
+```text
+src/workspace/identity.hpp
+src/workspace/identity.cpp
+src/workspace/manifest.hpp
+src/workspace/manifest.cpp
+src/workspace/storage_migrator.hpp
+src/workspace/storage_migrator.cpp
+tests/unit/workspace/
+tests/integration/workspace/
+docs/architecture/workspace-storage.md
+docs/getting-started/storage-migration.md
+```
+
+重点改造：
+
+```text
+src/trajectory/directory.*
+src/trajectory/session_manager.*
+src/trajectory/replay.*
+src/runtime/trajectory_session.*
+src/runtime/session_runtime.*
+src/memory/project_memory.*
+src/memory/memory_tool.*
+src/tools/agent_tool.*
+src/app/interactive_session_assembly.cpp
+src/app/commands/session_commands.*
+src/app/commands/memory_commands.*
+src/cli/trajectory_command.*
+src/app_server/
+src/config/
+docs/features/sessions/README.md
+docs/architecture/memory/
+docs/reference/configuration.md
+docs/reference/commands.md
+```
+
+最终删除：
+
+```text
+src/sessions/session_store.hpp
+src/sessions/session_store.cpp
+旧格式专属测试与 fixture
+旧目录专属文档
+```
+
+`src/sessions/` 下若有与旧格式无关的 goal/catalog 抽象，须逐件判归宿，不能因目录同名一锅删；该迁 `trajectory/`、`workspace/` 或 `runtime/` 的先迁，末后再收空目录。
+
+## 十三、不采用的方案
+
+### 13.1 不采用：继续保留 `features.trajectory=false`
+
+两本真账迟早再漂。新路写坏便退旧路，还会把“不可恢复”涂成“似乎存过”。
+
+### 13.2 不采用：只把旧 JSONL 搬进 workspace
+
+目录整齐了，双 writer、旧回放、子代理缺账与 Memory 身份分裂仍在。搬箱子不算换账。
+
+### 13.3 不采用：workspace 按项目 basename
+
+两个 `demo` 当场撞车。目录名可读，不可作身份。
+
+### 13.4 不采用：workspace 按 Git remote URL
+
+remote 会改、会缺、会带用户名或内网地址；两份独立 clone 也未必该共享本地状态。
+
+### 13.5 不采用：项目 Memory 与全局 Memory 混在 workspace
+
+全局偏好会随项目删除、迁移或分享，归属全乱。用户层须独立，且只有用户能写。
+
+### 13.6 不采用：Session 只记 memory id
+
+Memory 会更新。只留 id，旧 Replay 读到的是新正文，历史就被悄悄改写。必须留注入快照或内容寻址 artifact。
+
+### 13.7 不采用：父 Journal 内联整本子代理日志
+
+会膨胀、重复、争写，也破坏各 stream 自己的 seq/hash chain。父子靠全限定引用与终态 hash 对账。
+
+### 13.8 不采用：升级时自动删除旧目录
+
+迁移器也会有 bug。未核验、未确认便删用户历史，不可接受。
+
+## 十四、最终验收门
+
+收官必须同时满足：
+
+1. 生产代码只有 `~/.lubancode/workspaces/<key>/` 一条项目持久化根。
+2. 旧 SessionStore reader/writer、双路开关与 fallback 全删。
+3. 主会话、工具结果、子代理、workflow、resume 与训练投影均从新 Journal 工作。
+4. 项目 Memory 住 workspace，且与 Session 共用唯一 `workspace_key`。
+5. 全局 Memory 独立，只能由用户主动沉淀。
+6. 每次 memory recall 都有版本/hash/snapshot，可重建当时模型输入。
+7. linked worktree、独立 clone、非 Git 项目、跨 workspace 切换皆过身份测试。
+8. 旧 Session 与旧 Project Memory 的迁移经过真数据、崩溃注入与幂等验证。
+9. 新运行时对旧目录零读、零写；旧源是否删除只听用户明确命令。
+10. 全量 CTest 与三平台发行门通过；未跑的真机项逐条写“未验”，不拿 CI 或设计稿冒充。
