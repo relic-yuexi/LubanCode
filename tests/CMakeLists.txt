@@ -216,6 +216,29 @@ set_tests_properties(manual.model_probe_stub PROPERTIES
   LABELS "manual;api;manual.api"
   TIMEOUT 120)
 
+# Kimi 保留式思考真机探针(Kimi 保留式思考历史回传兼容设计单 P2,
+# opt-in,EXCLUDE_FROM_ALL 不进 ctest——没钥匙自己 SKIP 退 0):
+#   direct  直打 Moonshot 真端点四案(K3 两轮纯对话/K2.6 两步工具/
+#           K2.6 keep=all/K2.7-code 两轮)+ GET /models 对账 catalog
+#   resume  真 lubancode.exe + 临时 USERPROFILE(只带 moonshot 一个
+#           provider)+ 本地录制代理:/exit 后 --continue 续聊,抓第二笔
+#           请求体核对 reasoning_content 逐字回传
+# 手动跑法(带钥匙指环境变量):
+#   python tests/manual/model_probe_kimi_preserved_thinking.py direct
+#   python tests/manual/model_probe_kimi_preserved_thinking.py resume
+# 钥匙只认 env MOONSHOT_API_KEY 或用户 config,驱动/报告/证据里都不落。
+find_program(LUBANCODE_PYTHON_EXECUTABLE python)
+if(LUBANCODE_PYTHON_EXECUTABLE)
+  add_custom_target(model_probe_kimi_preserved_thinking
+    COMMAND "${LUBANCODE_PYTHON_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/manual/model_probe_kimi_preserved_thinking.py" direct
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+    COMMENT "Kimi preserved thinking live probe (direct; SKIPs without MOONSHOT_API_KEY)"
+    EXCLUDE_FROM_ALL VERBATIM)
+else()
+  message(STATUS "python 未找到: model_probe_kimi_preserved_thinking 探针靶子不注册")
+endif()
+
 # 多行字符公式的视觉小样：直连正式渲染器，不进 ctest。
 add_executable(latex_box_experiment EXCLUDE_FROM_ALL manual/latex_box_experiment.cpp)
 target_link_libraries(latex_box_experiment PRIVATE lubancode_core)
