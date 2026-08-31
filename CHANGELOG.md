@@ -457,6 +457,11 @@
 - **结果归父不串线**:DrainCompletionNotices 只提 MainTurnContext 的根任务;嵌套孩子终态进直接父 mailbox(带"外来资料"声明,父亡未送达不 reparent);WaitingChildren+条件变量等待,等待不烧 token;取消级联整树(孩子记 ParentCancelled)。
 - **结构化任务合同**:agent schema 增 task 对象(goal/deliverable 必填、分栏限额、错误带 JSON path),legacy prompt 逐字节兼容;面板详情按栏摆任务合同+lineage 行。后台→前台、后台→后台两路假后端全链真跑通(真线程真引擎),main 只收根。288/288 全绿。
 
+## [v0.26.143] - 2026-08-31
+
+- **vLLM 四 wire 单收官(P2+夹具补遗)。** docs/features/providers/vllm.md 手册落册并挂 fixture hash 对账(手册字节一动即红,四只 qwen3.8 夹具全数指向它);/metrics 认两代名(v0 prefix_cache_* 与 v1 gpu_/cpu_ 双前缀,旧名在场以总数为准),doctor cache 读数多一句负载语境;responses 非流式展开——output 按数组位置编号(vLLM 非流式条目没有 output_index)、reasoning 认 reasoning_text 与官方 summary 两形状,2xx 无 SSE 终止帧时走非流式回退不再误报"流意外结束"。
+- **三案 wire_replay 回环**:responses 两轮(function_call 与 output 成对、思考项不回传)、messages 两轮(thinking 假签逐字节原样回传)、非 SSE JSON 裸体回退端到端。顺手修好 main 上 check_docs 旧账(README 指着从未进库的 LICENSE——按徽章声明补全文;清仓死链改指 git 历史)。294/294 全绿。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
