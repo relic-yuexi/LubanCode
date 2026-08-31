@@ -50,6 +50,7 @@
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
 #include "config/settings_local.hpp"
+#include "telemetry/service.hpp"
 #include "memory/project_memory.hpp"
 #include "peers/peer_session.hpp"
 #include "runtime/event_sinks.hpp"
@@ -397,6 +398,10 @@ private:
     std::optional<std::string> config_file_path;  // /model、/language 可写回配置文件路径
 
     // ---- 会话存档与权限账(P6:本体在 runtime::SessionRuntime,这里引用) ----
+    // 端云协同可观测单 T1:本地遥测服务(features.telemetry 激活才造;
+    // 默认 nullptr,零线程零目录零副作用,§8.5)。声明在 session_runtime_
+    // 之前 = 析构在后:账本里的 wake 裸指针先随账本退场,不悬垂。
+    std::unique_ptr<lubancode::telemetry::TelemetryService> telemetry_service_;
     // runtime 声明在前(先析构引用别名,本体后析构),引用一律指它。
     lubancode::runtime::SessionRuntime session_runtime_;
     // P6:本体在 SessionRuntime.always_allowed(),这里引用别名(按 a 落

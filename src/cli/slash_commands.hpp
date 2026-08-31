@@ -64,6 +64,7 @@ enum class SlashCommand {
     Agents,   // /agents:列 Agent Catalog(自定义 Agent 单阶段 1,只读)
     Agent,    // /agent doctor <名字>:单 Agent 静态预检(阶段 1 只读骨架)
     Instructions,  // /instructions [path <路径>|reload]:AGENTS.md 指令链逐 source 账(作用域单 P1)
+    Telemetry,  // /telemetry [status]:本地遥测状态面(端云协同可观测单 T1,只读)
     Unknown,  // 以 / 开头,但不认得这个命令
 };
 

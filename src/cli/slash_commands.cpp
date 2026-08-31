@@ -156,6 +156,9 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Peerperm;
     } else if (lower == "/doctor") {
         parsed.command = SlashCommand::Doctor;
+    } else if (lower == "/telemetry") {
+        // 端云协同可观测单 T1:只读状态面(裸敲 = status)。
+        parsed.command = SlashCommand::Telemetry;
     } else if (lower == "/keymap") {
         parsed.command = SlashCommand::Keymap;
     } else if (lower == "/trace") {
@@ -932,6 +935,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/plan", tr("slash.desc.plan")},
             {"/package", tr("slash.desc.package")},
             {"/evolve", tr("slash.desc.evolve")},
+            {"/telemetry", tr("slash.desc.telemetry")},
         };
     }
     return commands;

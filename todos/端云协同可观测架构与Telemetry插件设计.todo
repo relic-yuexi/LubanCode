@@ -1,6 +1,6 @@
 # LubanCode 端云协同可观测架构与 Telemetry 插件设计
 
-- 状态：调研与详细设计完成，待实现
+- 状态：实现中——T0（合同与离线投影）、T1（本地 Service 与 Spool）已落地；T2（OTLP/HTTP 出口）起待做
 - 日期：2026-08-31
 - 级别：P1；P0 Trajectory 单一事实账是前置依赖
 - 范围：端侧轻量采集、本地投影与缓存、OTLP 导出、云端 Gateway、端云策略、TelemetryConnector、全链路关联、故障排查与治理
@@ -1955,25 +1955,25 @@ lubancode.*              Luban 自有领域字段
 
 ### 阶段 T0：合同与离线投影
 
-- [ ] 冻结 `features.telemetry`、Activation 与默认关闭测试。
-- [ ] 冻结 trace/span/resource/data class 合同。
-- [ ] 建 `src/telemetry/contract.*`、`identity.*`。
-- [ ] 写纯 `TelemetryProjector`，只吃 golden Journal。
-- [ ] 产本地 OTLP JSON fixture，不联网。
-- [ ] 写 Redactor D1 allowlist 与泄漏测试。
+- [x] 冻结 `features.telemetry`、Activation 与默认关闭测试。
+- [x] 冻结 trace/span/resource/data class 合同。
+- [x] 建 `src/telemetry/contract.*`、`identity.*`。
+- [x] 写纯 `TelemetryProjector`，只吃 golden Journal。
+- [x] 产本地 OTLP JSON fixture，不联网。
+- [x] 写 Redactor D1 allowlist 与泄漏测试。
 
 验收：同一 Journal 重放两次，OTel ids/span tree/metrics 完全稳定；D1 fixture 无正文与路径。
 
 ### 阶段 T1：本地 Service 与 Spool
 
-- [ ] `TelemetryService` 生命周期。
-- [ ] runtime committed wake 窄口。
-- [ ] cursor 与 catch-up。
-- [ ] bounded queue、优先级与 drop 账。
-- [ ] segmented spool、crash recovery、容量/TTL。
-- [ ] `/telemetry status`、`/doctor telemetry` 本地面。
+- [x] `TelemetryService` 生命周期。（src/telemetry/service.*：Start/Stop 有界收场、降级不拖死 Agent、state.json 持 projection_key 与 generation 账；装配工厂 TryAssembleTelemetryService 非 Active 零副作用）
+- [x] runtime committed wake 窄口。（src/telemetry/wake.hpp 的 CommitWake/CommitObserver（§25.3）；TrajectorySessionLedger/SetCommitWake 在 receipt committed 后通知，默认空指针零行为（§25.4 路 1））
+- [x] cursor 与 catch-up。（src/telemetry/cursor.*：§14.2 合同 + 原子替换 + generation；service 增量读 Journal，cursor 只在批 durable 入 spool 后推进；丢 wake 由周期 tick 补账；崩溃后按 spool 覆盖修前推、batch id 去重）
+- [x] bounded queue、优先级与 drop 账。（src/telemetry/batch_queue.*：P0-P3、§17.2 满队收缩次序、metrics 并系合并、emergency/P0 回绝账）
+- [x] segmented spool、crash recovery、容量/TTL。（src/telemetry/spool.*：active.tmp/seal/meta/quarantine、半批隔离、orphan 段重造 meta、§18.4 容量清理与 degraded、ACK/tombstone 原语）
+- [x] `/telemetry status`、`/doctor telemetry` 本地面。（/telemetry [status] 与 /doctor telemetry 只读本地状态，不发请求；enable/disable/flush/spool 等留 T2）
 
-验收：丢 wake、杀进程、截 active segment、填满磁盘，Agent 仍能运行；投影可补账或明确 quarantine。
+验收：丢 wake、杀进程、截 active segment、填满磁盘，Agent 仍能运行；投影可补账或明确 quarantine。（tests/unit/telemetry/test_telemetry_service.cpp：丢 wake tick 补账、cursor 文件丢修前推不重投、active.tmp 截断隔离、spool IO 坏 degraded 后 Notify 照常、cursor 孤儿停投报错不倒服务）
 
 ### 阶段 T2：OTLP/HTTP 与本地 Collector
 
