@@ -4,6 +4,7 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -168,6 +169,34 @@ TEST_CASE("search grep: 中文内容命中") {
     CHECK(result.content.find("chinese.txt:2:这里有关键词") != std::string::npos);
 }
 
+TEST_CASE("search grep: 正则仍按旧合同工作") {
+    TempDir dir;
+    dir.WriteFile("regex.txt", "alpha 17\nalpha xx\n");
+
+    SearchTool tool;
+    const Tool::Result result = tool.execute(
+        nlohmann::json{{"mode", "grep"}, {"pattern", R"(alpha [0-9]+)"}, {"path", dir.Utf8Path()}});
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("alpha 17") != std::string::npos);
+    CHECK(result.content.find("alpha xx") == std::string::npos);
+}
+
+TEST_CASE("search: 已取消的长搜索立刻收口") {
+    TempDir dir;
+    dir.WriteFile("a.txt", "needle\n");
+    std::atomic<bool> cancel{true};
+    lubancode::tools::ToolExecutionContext context;
+    context.cancel = &cancel;
+
+    SearchTool tool;
+    const Tool::Result result = tool.execute(
+        nlohmann::json{{"mode", "grep"}, {"pattern", "needle"}, {"path", dir.Utf8Path()}}, context);
+
+    CHECK(result.is_error);
+    CHECK(result.content.find("取消") != std::string::npos);
+}
+
 TEST_CASE("search glob: 按文件名通配找文件") {
     TempDir dir;
     dir.WriteFile("foo.cpp", "");
@@ -253,6 +282,18 @@ TEST_CASE("search glob: **/*.md 既中根目录文件,也中子目录文件") {
     CHECK(result.content.find("a.md") != std::string::npos);
     CHECK(result.content.find("b.md") != std::string::npos);
     CHECK(result.content.find("c.txt") == std::string::npos);
+}
+
+TEST_CASE("search glob: 末尾 /** 保留目录本身语义") {
+    TempDir dir;
+    dir.WriteFile("docs", "");
+
+    SearchTool tool;
+    const Tool::Result result = tool.execute(
+        nlohmann::json{{"mode", "glob"}, {"pattern", "docs/**"}, {"path", dir.Utf8Path("docs")}});
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("docs") != std::string::npos);
 }
 
 TEST_CASE("search glob: *.md 按文件名匹配,根目录和子目录都中") {
