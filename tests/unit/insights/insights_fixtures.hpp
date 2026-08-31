@@ -16,6 +16,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "trajectory/directory.hpp"
 #include "trajectory/recorder.hpp"
 
 namespace lubancode::insights_fixtures {
@@ -295,6 +296,21 @@ inline std::filesystem::path PrepareDir(const std::filesystem::path& dir) {
     std::filesystem::remove_all(dir, ec);
     std::filesystem::create_directories(dir / "artifacts", ec);
     return dir;
+}
+
+// 补写 session.json(A4 起 IntegrityGate 要读封口口径)。fixtures 直写
+// recorder 不经 session_manager,manifest 由本册按场景补——产品接线写口
+// 的行为由 trajectory 侧自己的册钉,这里只造分析器的输入。
+inline void WriteFixtureSessionJson(const std::filesystem::path& dir,
+                                    const std::string& workspace_key,
+                                    const std::string& session_id, const std::string& status) {
+    trajectory::SessionManifest manifest;
+    manifest.workspace_key = workspace_key;
+    manifest.session_id = session_id;
+    manifest.main_run_id = "main-0001";
+    manifest.status = status;
+    manifest.created_at_ms = 1759000000000LL;
+    REQUIRE(trajectory::WriteSessionJsonAtomic(dir, manifest).has_value());
 }
 
 }  // namespace lubancode::insights_fixtures

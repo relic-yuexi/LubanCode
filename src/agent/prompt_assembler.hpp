@@ -136,6 +136,11 @@ struct PromptSourceLedgerEntry {
     std::string content_hash;             // 本段渲染正文的 SHA-256(空 = 未记)
     std::int64_t content_tokens_estimated = 0;  // 本段渲染正文的估算 token
     int order = 0;                        // 本段在最终拼装里的次序(0 起,稳定)
+    // Token 账本单 A3(/prompt audit static):本段渲染正文的内存账——只活在
+    // 进程内,ledger 不序列化、不进 Journal、不进任何报告(prompt 正文默认
+    // 不出域,§四.7)。静态审计的重复/n-gram/明显冲突检查读它,读到的与
+    // 真实拼装一字不差;报告里只落 hash/token/规则命中,不落这段文本。
+    std::string content_text;
     // 本段压掉了哪些下层同 id 段(ResolveModule 解析现场如实记的来源标签,
     // 如 "embedded default"/"user global default";§8.1 静态规则第 1 条的
     // 地基)。空 = 只有一层给出内容,没被覆盖。

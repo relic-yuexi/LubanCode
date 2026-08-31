@@ -265,6 +265,8 @@ void LedgerAdd(PromptSourceLedger* ledger, PromptSourceLedgerEntry entry, const 
         entry.content_hash = hooks::Sha256Hex(content);
         entry.content_tokens_estimated = static_cast<std::int64_t>(EstimateUtf8Tokens(content));
         entry.order = order;
+        // A3 静态审计的内存账:正文就地留一份(不序列化、不进报告)。
+        entry.content_text = content;
         ledger->entries.push_back(std::move(entry));
     }
 }

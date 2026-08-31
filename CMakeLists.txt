@@ -565,6 +565,18 @@ add_library(lubancode_engine STATIC
   src/insights/session_summary.cpp
   src/insights/report_model.cpp
   src/insights/redaction.cpp
+  # Token 账本单 A3(/prompt audit):static/runtime 两层审法 + runtime 读侧
+  # 装配(纯规则零 IO;CollectRuntimeRequests 只读 Journal)。正文不进
+  # 任何输出,证据只落 hash/token/计数/段名/事件引用。
+  src/insights/prompt_auditor.cpp
+  # Token 账本单 A4(Session Analyzer):验账闸、摩擦归类、功能信号、
+  # 摘要派生仓(原子写/stale 判定)与一间 session 的分析管线。坏账整间
+  # 排除且理由可见;同一封口 session 重算字节相同。
+  src/insights/integrity_gate.cpp
+  src/insights/friction_classifier.cpp
+  src/insights/feature_signal.cpp
+  src/insights/derived_store.cpp
+  src/insights/session_analyzer.cpp
   # 端云协同可观测架构与 Telemetry 插件设计单 T0(合同与离线投影):
   # features.telemetry Activation、trace/span/resource/data class 合同、
   # 确定性 trace/span id、纯 TelemetryProjector(只吃 Journal,不联网)、
@@ -877,6 +889,10 @@ add_library(lubancode_app STATIC
   # 价格表装载、终端渲染与 JSON 输出;纯领域件在 accounting(usage_aggregate/
   # session_usage_reader,engine 库)。
   src/app/commands/usage_commands.cpp
+  # Token 账本单 A3(/prompt audit):三层审法的终端面——解析/事实账渲染/
+  # JSON 输出;纯领域件在 insights(prompt_auditor/session_analyzer,
+  # engine 库)。prompt_commands.cpp 只留分派壳。
+  src/app/commands/prompt_audit_commands.cpp
   # 会话终章:命令分派注册制(47 案 switch 换注册表,路由与门)。
   src/app/commands/command_registry.cpp
   # 会话终章:子系统接线器(goal/loop/plan/peer/录制,状态+装配+泵+存档恢复)。

@@ -597,7 +597,7 @@ const Entry kZhCN[] = {
     {"slash.desc.export", "当前会话导出 Markdown;/export 路径 可指定输出文件"},
     {"slash.desc.title", "看当前会话标题;/title 标题 给本场起名,/sessions 列表和导出都用它"},
     {"slash.desc.soul", "看当前魂;/soul 内容 写进 SOUL.md,/soul clear 还原默认；名字仍可切换备选魂"},
-    {"slash.desc.prompt", "看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md"},
+    {"slash.desc.prompt", "看当前法(系统提示词)的来源和字数;/prompt reset 还原 system_prompt.md;/prompt audit 出 prompt 三层审计账(static/runtime/outcome)"},
     {"slash.desc.background", "后台命令任务管理面:列清单,show <id> 详情,logs <id> 查看日志,stop <id>|all 停止;run_command run_in_background 起的那些"},
     {"slash.desc.record", "录一遍生成技能;/record start 名字 开录,stop 出草稿,确认后安装"},
     {"slash.desc.plan", "只读研究并提交计划;/plan 正文 开始规划,status 看状态,off 退出,review 重开审阅"},
@@ -1569,6 +1569,16 @@ const Entry kZhCN[] = {
      "  字数: {1}\n"
      "用法:/prompt reset 把 system_prompt.md 还原成内置默认(旧文件留 .bak)。"},
     {"cmd.prompt.usage", "用法:/prompt 看当前法的来源;/prompt reset 还原 system_prompt.md。"},
+    // ---- /prompt audit(Token 账本单 A3) ----
+    {"cmd.prompt.audit.usage_line",
+     "用法: /prompt audit static | runtime [session-id] | outcome [--since 30d] | all | explain "
+     "<finding-id> [--json]"},
+    {"cmd.prompt.audit.unknown_arg", "认不得的参数: [{0}]"},
+    {"cmd.prompt.audit.session_not_found", "本 workspace 没有这场 session: {0}"},
+    {"cmd.prompt.audit.finding_not_found",
+     "没有这条 finding: {0}(explain 按当前输入重跑三层,id 稳定;先跑一遍 all 看现有 id)"},
+    {"cmd.prompt.audit.later_model_review",
+     "--model-review 属后续批次(A6):本批只有本地确定性检查,模型评议不在这版。"},
     {"cmd.prompt.confirm", "确定还原? [y/N]: "},
     {"cmd.prompt.cancelled", "取消还原。"},
     {"cmd.prompt.no_home", "找不到用户主目录,没法还原。"},
@@ -2372,7 +2382,7 @@ const Entry kEn[] = {
     {"slash.desc.export", "export this session as Markdown; /export <path> picks the output file"},
     {"slash.desc.title", "show the session title; /title <title> names this session"},
     {"slash.desc.soul", "show the current soul; /soul <text> writes SOUL.md; /soul clear restores default; a name switches souls"},
-    {"slash.desc.prompt", "show the persona source/length; /prompt reset restores system_prompt.md"},
+    {"slash.desc.prompt", "show the persona source/length; /prompt reset restores system_prompt.md; /prompt audit runs the three-layer prompt audit (static/runtime/outcome)"},
     {"slash.desc.background", "background command tasks: list, show <id>, logs <id>, stop <id>|all; from run_command run_in_background"},
     {"slash.desc.record", "record a workflow into a skill; /record start <name> to begin, stop drafts SKILL.md, install after review"},
     {"slash.desc.plan", "read-only research then a reviewable plan; /plan <task> to plan, status, off exits, review reopens"},
@@ -2476,6 +2486,17 @@ const Entry kEn[] = {
     {"cmd.usage.memory_caveat",
      "Caveat: the in-memory tally has no purpose split, no per-request coverage, and is not the full bypass ledger. Enable features.trajectory for the per-request journal report."},
     {"cmd.usage.session_not_found", "No such session in this workspace: {0}"},
+    // ---- /prompt audit (Token ledger batch A3) ----
+    {"cmd.prompt.audit.usage_line",
+     "Usage: /prompt audit static | runtime [session-id] | outcome [--since 30d] | all | explain "
+     "<finding-id> [--json]"},
+    {"cmd.prompt.audit.unknown_arg", "Unrecognized argument: [{0}]"},
+    {"cmd.prompt.audit.session_not_found", "No such session in this workspace: {0}"},
+    {"cmd.prompt.audit.finding_not_found",
+     "No such finding: {0} (explain re-runs all three layers on current input; ids are stable — "
+     "run all once to see what exists)"},
+    {"cmd.prompt.audit.later_model_review",
+     "--model-review ships in a later batch (A6): this batch is local deterministic checks only."},
 
     {"cmd.update.usage", "Usage: /update or /update check"},
     {"cmd.update.checking", "Checking the latest GitHub Release..."},

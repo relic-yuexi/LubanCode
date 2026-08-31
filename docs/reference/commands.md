@@ -262,6 +262,10 @@ Token 账本报告（只读，只摆事实）。裸敲看当前会话：coverage
 
 裸敲显示人格来源和字数。`reset` 恢复 `system_prompt.md` 内置脚手架，并保留备份。人格只替换 core；环境、工具和协议段仍在。
 
+### `/prompt audit static | runtime [session-id] | outcome [--since 30d] | all | explain <finding-id> [--json]`
+
+Prompt 三层审计（只读，只摆事实，主人裁决）。`static` 审眼前配置：五层来源与 override 链、同文重复（hash 相同）、n-gram 高重合、token 占比、工具描述与 schema 形状、动态段插中段、用户模块漂移——不碰 Journal。`runtime [session-id]` 审真实请求：Journal 里 `model.request.prepared` 的 request snapshot（manifest+toolset+形状）逐请求对账，看 toolset 抖动、稳定前缀断在哪、system 增长与 cache 命中的同向观察。`outcome [--since Nd]` 扫当前 workspace 的封口 session，把工具终态/验证/结果的摩擦抬成 finding（措辞只说信号，不断言 prompt 错；active/incomplete/corrupt 单列排除）。`all` 三层一起；`explain <finding-id>` 按稳定 id 重跑并打一条 finding 的全账（证据/反证/规则版本）。`--json` 出机器可读账（`lubancode.prompt.audit` v1）。报告不含 prompt 正文与绝对路径；语义类检查（疑似指令冲突/口号段）只给 `suspected`（confidence=low），复核才作数。`features.trajectory` 关时 static 照常，runtime/outcome 明说"账未开"。`--model-review` 属后续批次，敲了明说。裸敲 `/prompt` 与 `reset` 行为不变。
+
 ### `/language [语言码]`
 
 裸敲列语言并选择；带语言码直接切。切换即时作用于命令说明与界面，可写回配置。内置 `zh-CN`、`en`，其余来自 `languages/*.json`。
