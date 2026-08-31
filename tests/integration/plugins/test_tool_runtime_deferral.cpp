@@ -190,3 +190,93 @@ TEST_CASE("全局插件数与 tool deferral:0、1 枚不触发,10 枚越线触�
     CheckDeferralForPluginCount(1);
     CheckDeferralForPluginCount(10);
 }
+
+// ---------------------------------------------------------------------------
+// 动态工具 PromptCache 守恒单 P1:配置开 proxy_reference 后的装配落位。
+// 越线 + proxy 档:tool_search/tool_invoke 双双常驻两表、两侧 resolver 各
+// 一只(scope 不串)、执行资格与 exposure 分家(deferred 工具按名不进
+// 顶层、经 tool_invoke 的执行资格放行);disabled 档压过阈值强制全量;
+// 不写(默认 legacy)没有 tool_invoke。这是"配置 → 装配"那一拍的对账,
+// 发现/调用/前缀三拍在单测册(test_request_prefix/test_loop)钉。
+// ---------------------------------------------------------------------------
+TEST_CASE("deferred_tool_mode=proxy_reference: 装配落位——双壳常驻、双 resolver、闸分家") {
+    const std::filesystem::path home =
+        std::filesystem::temp_directory_path() / "lubancode_deferral_home_proxy";
+    InstallGlobalPlugins(home, /*count=*/10, /*tools_per_plugin=*/3);  // 30 枚插件工具,越线
+    ScopedHomeEnv home_guard(home);
+    NullBackend backend;
+
+    // ---- proxy 档 ----
+    {
+        lubancode::config::Config config = EmptyConfig();
+        config.deferred_tool_mode = "proxy_reference";
+        ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
+                            /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", ToolRuntime::Options{});
+        CHECK(runtime.main_deferral());
+        CHECK(runtime.main_proxy_enabled());
+        CHECK(runtime.sub_proxy_enabled());
+        CHECK(runtime.main_tool_mode() == lubancode::tools::DeferredToolMode::ProxyReference);
+
+        // 双壳常驻两表,tool_invoke 紧跟 tool_search(注册次序即顶层 tools 次序)。
+        for (lubancode::tools::ToolRegistry* registry : {&runtime.main_registry(), &runtime.sub_registry()}) {
+            REQUIRE(registry->Find("tool_search") != nullptr);
+            REQUIRE(registry->Find("tool_invoke") != nullptr);
+            int search_at = -1;
+            int invoke_at = -1;
+            const auto& all = registry->All();
+            for (std::size_t i = 0; i < all.size(); ++i) {
+                if (all[i]->name() == "tool_search") search_at = static_cast<int>(i);
+                if (all[i]->name() == "tool_invoke") invoke_at = static_cast<int>(i);
+            }
+            CHECK(invoke_at == search_at + 1);
+        }
+
+        // 两侧 resolver 各一只,scope 分明(main 的 ref 进不了 sub 的账)。
+        REQUIRE(runtime.main_tool_ref_resolver() != nullptr);
+        REQUIRE(runtime.sub_tool_ref_resolver() != nullptr);
+        CHECK(runtime.main_tool_ref_resolver()->session_scope() == "main");
+        CHECK(runtime.sub_tool_ref_resolver()->session_scope() == "sub");
+
+        // 闸分家:exposure 过滤把延迟工具拦在顶层外;执行资格(经 tool_invoke
+        // 解引用来的调用)放行——发现不等于授权,授权也不等于直名可调。
+        lubancode::tools::Tool* plugin_tool = runtime.main_registry().Find("plugin__defl_1__t0");
+        REQUIRE(plugin_tool != nullptr);
+        CHECK(plugin_tool->deferred());
+        CHECK_FALSE(runtime.main_tool_filter()(*plugin_tool));
+        REQUIRE(runtime.main_execution_policy() != nullptr);
+        CHECK(runtime.main_execution_policy()(*plugin_tool));
+        CHECK(runtime.main_execution_denial().find(lubancode::tools::kErrToolRefNotAllowed) !=
+              std::string::npos);
+    }
+
+    // ---- disabled 档:压过阈值,强制全量常驻 ----
+    {
+        lubancode::config::Config config = EmptyConfig();
+        config.deferred_tool_mode = "disabled";
+        ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
+                            /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", ToolRuntime::Options{});
+        CHECK_FALSE(runtime.main_deferral());
+        CHECK_FALSE(runtime.sub_deferral());
+        CHECK(runtime.main_registry().Find("tool_search") == nullptr);
+        CHECK(runtime.main_registry().Find("tool_invoke") == nullptr);
+        // 全量常驻:延迟工具照样进顶层(没有延迟这回事了)。
+        lubancode::tools::Tool* plugin_tool = runtime.main_registry().Find("plugin__defl_1__t0");
+        REQUIRE(plugin_tool != nullptr);
+        CHECK(runtime.main_tool_filter()(*plugin_tool));
+    }
+
+    // ---- 默认(不写)= legacy_expand 现状:没有 tool_invoke,没有 resolver ----
+    {
+        lubancode::config::Config config = EmptyConfig();
+        ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
+                            /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", ToolRuntime::Options{});
+        CHECK(runtime.main_deferral());
+        CHECK_FALSE(runtime.main_proxy_enabled());
+        CHECK(runtime.main_registry().Find("tool_search") != nullptr);
+        CHECK(runtime.main_registry().Find("tool_invoke") == nullptr);
+        CHECK(runtime.main_tool_ref_resolver() == nullptr);
+    }
+
+    std::error_code ec;
+    std::filesystem::remove_all(home, ec);
+}

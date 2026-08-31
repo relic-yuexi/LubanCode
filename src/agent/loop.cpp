@@ -140,7 +140,8 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
                                 const std::function<bool(const tools::Tool&)>& tool_filter,
                                 const std::string& filter_denial,
                                 const ToolTraceContext* trace,
-                                const std::atomic<bool>* cancel) {
+                                const std::atomic<bool>* cancel,
+                                const tools::ProxyCallContext* proxy) {
     // 每条收尾路共用的分发口:先清洗,再 on_tool_done,清洗版随返回值交给
     // 调用方(进 history / 下一轮请求)。日志只记字段名、长度、坏字节位置
     // 与前后几个十六进制字节,不倒正文。
@@ -198,6 +199,16 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         }
         // trace 与其余台账须同用一枚墙钟,否则跨账对时会生偏差。
         event.timestamp_ms = NowMsEpoch();
+        // 动态工具 P1:经 tool_invoke 代理调用的两层事实(单子 §6.2)。事件
+        // 的一等字段 tool_name 画的是真实目标(协议证据的另一半),这里补
+        // 的是 transport 那一层——两层都留,不拿 tool_invoke 糊账,也不丢
+        // 引用与摘要的凭据。
+        if (!trace->transport_tool.empty()) {
+            event.details["transport_tool"] = trace->transport_tool;
+            event.details["resolved_tool"] = call.name;
+            event.details["tool_ref"] = trace->tool_ref;
+            event.details["schema_digest"] = trace->schema_digest;
+        }
         if (event.kind == ToolTraceEventKind::ExecutionStarted) {
             fired_started = event;
             crossed_start = true;
@@ -353,14 +364,23 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     // 还没挂载,或者这个角色用不上它(Explore 只读那类)。不当"未知工具"
     // 糊弄,给一条指路的友好错误:默认说"尚未挂载,先 tool_search";调用
     // 方另给了 filter_denial(角色限制)就照说——限制来自哪里,得看得见。
+    // denial 支持 "稳定码|人话" 两截(动态工具 P1 起,proxy 模式用它报
+    // tool_not_allowed 一类稳定码;老文案没有 '|' 走老口径,一字不差)。
     if (tool_filter && !tool_filter(*tool)) {
+        std::string code = kErrRegistryNotMounted;
+        std::string reason = filter_denial;
+        const std::size_t code_split = filter_denial.find('|');
+        if (code_split != std::string::npos && !filter_denial.substr(0, code_split).empty()) {
+            code = filter_denial.substr(0, code_split);
+            reason = filter_denial.substr(code_split + 1);
+        }
         const std::string denial =
-            filter_denial.empty()
+            reason.empty()
                 ? "工具 " + call.name + " 存在但尚未挂载:请先用 tool_search 检索挂载,再调用。"
-                : "工具 " + call.name + ": " + filter_denial;
+                : "工具 " + call.name + ": " + reason;
         tools::Tool::Result unavailable{denial, true};
         unavailable.outcome = ToString(ToolOutcome::Unavailable);
-        unavailable.error_code = kErrRegistryNotMounted;
+        unavailable.error_code = code;
         finish(unavailable, source_kind, source_instance, effect_class);
         return dispatch_done(call.id, call.name, std::move(unavailable));
     }
@@ -419,6 +439,28 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
                 {"gate", over_budget ? "instructions_over_budget" : "instructions_required"}};
             finish(gated, source_kind, source_instance, effect_class);
             return dispatch_done(call.id, call.name, std::move(gated));
+        }
+    }
+
+    // ---- 动态工具 P1(proxy 调用的参数先验,单子 §5.5):tool_invoke 的
+    // 顶层 schema 只声明 arguments 是个宽对象,细校验在这里做——拿目标工
+    // 具当下那份真 schema 验一遍。不过 = invalid_target_arguments 稳定拒绝,
+    // 不执行目标;模型该按发现结果里的 schema 修参数。普通调用不走这段
+    //(工具自验的老合同不动),PreToolUse 改写后的复检也照旧在下面。
+    if (proxy != nullptr) {
+        if (const auto schema_error = tools::ValidateInputAgainstSchema(call.input, tool->input_schema());
+            schema_error.has_value()) {
+            phase(runtime::ToolPhase::Blocked);
+            tools::Tool::Result rejected{"tool_invoke 的 arguments 未通过目标工具的真实 schema,已拒绝执行: " +
+                                             *schema_error + "\n请按 tool_search 结果里的 input_schema 修正参数后重试。",
+                                         true};
+            rejected.outcome = ToString(ToolOutcome::SchemaRejected);
+            rejected.error_code = tools::kErrToolRefInvalidArguments;
+            rejected.details["transport_tool"] = proxy->transport_name;
+            rejected.details["resolved_tool"] = call.name;
+            rejected.details["tool_ref"] = proxy->tool_ref;
+            finish(rejected, source_kind, source_instance, effect_class);
+            return dispatch_done(call.id, call.name, std::move(rejected));
         }
     }
 
@@ -683,6 +725,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
     ContextManager& context_ = agent.context_;
     const std::function<bool(const tools::Tool&)>& tool_filter_ = agent.profile_.tool_filter;
     const std::string& tool_filter_denial_ = agent.profile_.tool_filter_denial;
+    // 动态工具 P1(通用 ProxyReference):代理引用的解引用器与执行资格。
+    // resolver 为空 = 本 Agent 没开 proxy 模式,tool_invoke 调用照"未知/
+    // 注册表里的壳工具"处理,行为与从前一字不差。
+    const std::shared_ptr<tools::DeferredToolResolver>& tool_ref_resolver_ = agent.profile_.tool_ref_resolver;
+    const std::function<bool(const tools::Tool&)>& tool_execution_policy_ = agent.profile_.tool_execution_policy;
     const AgentWiring& wiring_ = agent.wiring_;
     int& batch_counter_ = agent.batch_counter_;
     const auto BuildToolDefinitions = [&agent]() { return agent.BuildToolDefinitions(); };
@@ -1399,6 +1446,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 scheduled.tool_use_id = call.id;
                 scheduled.tool_name = call.name;
                 scheduled.timestamp_ms = NowMsEpoch();
+                // 动态工具 P1:scheduled 是 wire 事实——经代理壳发起的调用
+                // 此刻只知道 transport 那层,解出的真实目标等执行事件报
+                //(resolved 那层由 RunOneTool 的 emit 补),两层不混写。
+                if (tool_ref_resolver_ != nullptr && call.name == "tool_invoke") {
+                    scheduled.details["transport_tool"] = call.name;
+                }
                 wiring.on_tool_trace(scheduled);
                 scheduled_ids.push_back(scheduled.execution_id);
                 scheduled_tool_use_ids.push_back(call.id);
@@ -1460,6 +1513,77 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 trace_ctx.batch_id = batch_id;
                 trace_ctx.sequence_in_batch = tool_index;
                 trace_ctx.provider_request_id = stream_request_id;
+            }
+            // ---- 动态工具 P1(通用 ProxyReference):tool_invoke 的规范化
+            //(单子 §6.1)。在进入 RunOneTool 之前把 wire 调用解引用成真实
+            // 目标调用——只对 target_call 调一次 RunOneTool,tool_use_id 沿用
+            // wire call 的 id,assistant tool call 与 user tool result 仍一一
+            // 配对。解不开(伪拼/跨会话/stale/工具没了)就地落稳定错误码
+            // 的 tool_result(仍用原 wire id),并补终态栅栏——不是无 id 的
+            // assistant 文本。直接按名调用延迟工具不走这条:tool_filter 照拦
+            //(发现不等于授权,模型不能凭名字穿代理)。
+            if (tool_ref_resolver_ != nullptr && call.name == "tool_invoke") {
+                const auto resolved = tool_ref_resolver_->Resolve(registry_, call);
+                if (!resolved.has_value()) {
+                    const tools::DeferredToolResolver::Refusal& refusal = resolved.error();
+                    if (trace_armed) {
+                        ToolTraceEvent refused;
+                        refused.kind = ToolTraceEventKind::ExecutionFinished;
+                        refused.outcome = ToolOutcome::ToolError;
+                        refused.error_code = refusal.code;
+                        refused.fallback_message =
+                            refusal.message.size() <= 200
+                                ? refusal.message
+                                : refusal.message.substr(0, platform::Utf8PrefixBoundary(refusal.message, 200));
+                        refused.batch_id = batch_id;
+                        refused.sequence_in_batch = tool_index;
+                        refused.execution_id = scheduled_ids[tool_index];
+                        refused.tool_use_id = call.id;
+                        refused.tool_name = call.name;  // 解引用失败:只有 wire 那层可报
+                        refused.details = nlohmann::json{{"transport_tool", call.name}};
+                        refused.timestamp_ms = NowMsEpoch();
+                        wiring.on_tool_trace(refused);
+                    }
+                    tool_results.push_back(
+                        api::ToolResultBlock{call.id, platform::SanitizeUtf8(refusal.message), true});
+                    continue;
+                }
+                // 规范化后的真实目标调用:id 沿用 wire call 的,名字与入参
+                // 换成解出来的那枚。执行资格经 tool_execution_policy(空 =
+                // 装配层未给限制,各项闸照走);普通工具过滤不套在代理调用
+                // 上——延迟工具本就不在顶层 tools,套了会把正路堵死。
+                api::ToolUseBlock target_call = call;
+                target_call.name = resolved->target_name;
+                target_call.input = resolved->arguments;
+                tools::ProxyCallContext proxy_ctx;
+                proxy_ctx.transport_name = call.name;
+                proxy_ctx.tool_ref = resolved->tool_ref;
+                proxy_ctx.schema_digest = resolved->schema_digest;
+                trace_ctx.transport_tool = call.name;
+                trace_ctx.tool_ref = resolved->tool_ref;
+                trace_ctx.schema_digest = resolved->schema_digest;
+                const std::string execution_denial =
+                    agent.profile_.tool_execution_denial.empty()
+                        ? std::string(tools::kErrToolRefNotAllowed) + "|该工具不在当前会话的执行策略内,不得重试同一调用。"
+                        : agent.profile_.tool_execution_denial;
+                const tools::Tool::Result result =
+                    RunOneTool(registry_, target_call, wiring, tool_execution_policy_, execution_denial,
+                               trace_armed ? &trace_ctx : nullptr, cancel, &proxy_ctx);
+                {
+                    api::ToolResultBlock block;
+                    block.tool_use_id = call.id;  // 配对的是 wire 那枚 tool_invoke 的 id
+                    block.content = platform::SanitizeUtf8(result.content);
+                    block.is_error = result.is_error;
+                    if (!result.payload.empty()) {
+                        block.blocks = result.payload.content;
+                        block.structured_content = result.payload.structured_content;
+                    }
+                    tool_results.push_back(std::move(block));
+                }
+                if (cancel != nullptr && cancel->load()) {
+                    interrupted = true;
+                }
+                continue;
             }
             const tools::Tool::Result result =
                 RunOneTool(registry_, call, wiring, tool_filter_, tool_filter_denial_,

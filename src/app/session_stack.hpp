@@ -120,6 +120,9 @@ struct SessionStack {
     std::optional<lubancode::app::ToolRuntime> tool_runtime;
     bool main_deferral = false;
     bool sub_deferral = false;
+    // 动态工具 P1:延迟工具模式(proxy 路开没开看 main_proxy/sub_proxy)。
+    bool main_proxy = false;
+    bool sub_proxy = false;
     int tool_search_threshold = 0;
     // 后台任务 detached registry 的注册时点快照(不追 /skill 安装)。
     const std::vector<lubancode::tools::SkillMeta> detached_skills;

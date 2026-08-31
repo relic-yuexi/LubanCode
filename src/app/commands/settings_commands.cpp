@@ -1765,6 +1765,11 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     TermOut() << "  tool_search_threshold = " << config.tool_search_threshold
               << (config.tool_search_threshold == 0 ? tr("config.threshold.never") : "") << "  ["
               << lubancode::config::ToString(sources.tool_search_threshold) << "]\n";
+    // 动态工具 P1:延迟工具模式(空 = legacy_expand 现状;proxy_reference
+    // 是 P1 新路,disabled 全量常驻)。
+    TermOut() << "  deferred_tool_mode = "
+              << (config.deferred_tool_mode.empty() ? "legacy_expand(默认)" : config.deferred_tool_mode)
+              << "  [" << lubancode::config::ToString(sources.deferred_tool_mode) << "]\n";
     TermOut() << "  memory            = " << (config.memory.enabled ? "on" : "off")
               << " (use=" << (config.memory.use ? "on" : "off")
               << ", generate=" << (config.memory.generate ? "on" : "off") << ")  ["

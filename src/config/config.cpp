@@ -1622,6 +1622,30 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.tool_search_threshold = static_cast<int>(value);
     }
+    // 动态工具 P1:延迟工具模式。认不得的值报错——这个字段没法静默落默认,
+    // 下游不知道该走哪条路;native_reference 是 P3 的活,显式拒绝,不开
+    // 空承诺。
+    if (parsed.contains("deferred_tool_mode")) {
+        const auto& field = parsed["deferred_tool_mode"];
+        if (!field.is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 deferred_tool_mode 字段必须是字符串(disabled|proxy_reference|legacy_"
+                                   "expand)");
+        }
+        const std::string text = field.get<std::string>();
+        const bool allowed = text == "disabled" || text == "proxy_reference" || text == "legacy_expand";
+        if (!text.empty() && !allowed) {
+            if (text == "native_reference") {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 deferred_tool_mode=native_reference 尚未实现(P3 单子的活),"
+                                       "当前可用:disabled|proxy_reference|legacy_expand");
+            }
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 deferred_tool_mode 认不得: " + text +
+                                   "(可用:disabled|proxy_reference|legacy_expand)");
+        }
+        config.deferred_tool_mode = text;
+    }
     // PTC:调用档(json|programmatic|auto)。认不得的值报错——这个字段
     // 没法静默落默认,下游不知道走哪个后端。
     if (parsed.contains("tool_calling")) {
@@ -2599,6 +2623,20 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     } else {
         result.config.tool_search_threshold = kDefaultToolSearchThreshold;
         result.sources.tool_search_threshold = Source::Default;
+    }
+
+    // ---- deferred_tool_mode(动态工具 P1):项目级 > 全局 > 默认(空 =
+    // legacy_expand 现状),没有环境变量这一级。取值校验在
+    // ParseFileConfigJson 里做过了;先 opt-in,不默认换路。 ----
+    if (project_file.has_value() && project_file->deferred_tool_mode.has_value()) {
+        result.config.deferred_tool_mode = *project_file->deferred_tool_mode;
+        result.sources.deferred_tool_mode = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->deferred_tool_mode.has_value()) {
+        result.config.deferred_tool_mode = *global_file->deferred_tool_mode;
+        result.sources.deferred_tool_mode = Source::GlobalConfigFile;
+    } else {
+        result.config.deferred_tool_mode.clear();
+        result.sources.deferred_tool_mode = Source::Default;
     }
 
     // ---- PTC 调用档与限额段:项目级 > 全局 > 默认(json),没有环境变量

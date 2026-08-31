@@ -413,6 +413,16 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
     stack->tool_runtime.emplace(config, theme, stack->wrapped_backend, stack->skills, stack->skills_segment,
                                 CurrentDirUtf8(), std::move(runtime_options));
 
+    // 动态工具 P1 修的装配次序 bug:延迟启停/模式先落账、再接子代理的线。
+    // 从前 sub_deferral 在赋值之前就被下面的接线块读走(恒 false),子代理
+    // 的延迟过滤与索引段在交互路从未生效——proxy 模式的子代理接线也必须
+    // 落在活账上,这里把赋值提到接线之前,legacy 路按它自家注释的意图生效。
+    stack->main_deferral = stack->tool_runtime->main_deferral();
+    stack->sub_deferral = stack->tool_runtime->sub_deferral();
+    stack->main_proxy = stack->tool_runtime->main_proxy_enabled();
+    stack->sub_proxy = stack->tool_runtime->sub_proxy_enabled();
+    stack->tool_search_threshold = config.tool_search_threshold;
+
     if (stack->agent_tool() != nullptr) {
         // execution_mode=auto 的缺省走向:交互会话里独立探索型任务默认后台
         // (结论稍后送达),模型非等结果不可时显式写 foreground。管道/单发
@@ -453,18 +463,28 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
         stack->agent_tool()->SetInstructionResolver(stack->instruction_resolver);
         if (stack->sub_deferral) {
             stack->agent_tool()->SetToolFilter(stack->sub_tool_filter());
-            stack->agent_tool()->SetDeferredIndexProvider([raw = stack.get()]() {
-                return lubancode::tools::BuildDeferredToolsIndexSegment(raw->sub_registry(),
-                                                                        *raw->loaded_tools());
-            });
+            // 动态工具 P1:legacy 路才注逐请求刷新的延迟索引段;proxy 路
+            // 的索引段恒空(单子 §8.1——不把"尚未 loaded 的全部名字"拼进
+            // system,tool_search 自己握 catalog),绝不给 system 塞动态段。
+            if (!stack->sub_proxy) {
+                stack->agent_tool()->SetDeferredIndexProvider([raw = stack.get()]() {
+                    return lubancode::tools::BuildDeferredToolsIndexSegment(raw->sub_registry(),
+                                                                            *raw->loaded_tools());
+                });
+            }
+        }
+        // 子代理侧的 proxy 接线(resolver + 执行资格):AgentTool 逐任务灌进
+        // 子代理的皮。proxy 没开时不设,子代理行为与从前一字不差。
+        if (stack->sub_proxy) {
+            stack->agent_tool()->SetToolRefResolver(stack->tool_runtime->sub_tool_ref_resolver());
+            stack->agent_tool()->SetToolExecutionPolicy(stack->tool_runtime->sub_execution_policy(),
+                                                        stack->tool_runtime->sub_execution_denial());
         }
     }
-    stack->main_deferral = stack->tool_runtime->main_deferral();
-    stack->sub_deferral = stack->tool_runtime->sub_deferral();
-    stack->tool_search_threshold = config.tool_search_threshold;
     if (stack->main_deferral) {
-        TermOut() << theme.stats << trf("tool_search.enabled", stack->tool_search_threshold) << theme.reset
-                  << "\n";
+        TermOut() << theme.stats << trf(stack->main_proxy ? "tool_search.proxy_enabled" : "tool_search.enabled",
+                                        stack->tool_search_threshold)
+                  << theme.reset << "\n";
     }
 
     // 作用域单 P0(§7.1):root->cwd 基线已拼进主系统提示,同 scope 的写

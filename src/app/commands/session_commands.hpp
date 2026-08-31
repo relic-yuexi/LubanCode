@@ -90,6 +90,9 @@ struct ContextLayersReport {
 // "待检索/全部延迟工具"枚数,由 RunContextCommand 现场扫 registry 算。
 struct DeferredToolModeSummary {
     bool enabled = false;
+    // 动态工具 P1:模式标签(DeferredToolModeLabel 的产物);proxy 模式的
+    // 提示行与 legacy 的断前缀提示按它分档。
+    std::string mode_label;
     std::size_t pending = 0;
     std::size_t total = 0;
 };
@@ -124,6 +127,9 @@ struct ContextEstimateInputs {
     lubancode::tools::ToolRegistry* registry = nullptr;
     const std::function<bool(const lubancode::tools::Tool&)>* tool_filter = nullptr;  // 延迟挂载谓词
     bool tool_deferral = false;
+    // 动态工具 P1:proxy_reference 开没开(deferred_tool_mode 展示与提示行
+    // 按它分档;false = disabled/legacy_expand 两档老口径)。
+    bool proxy_reference = false;
     const std::set<std::string>* loaded_tools = nullptr;
     lubancode::agent::Agent* agent = nullptr;  // 活 loop(要能会话路由)
     lubancode::cli::ContextTracker* context_tracker = nullptr;

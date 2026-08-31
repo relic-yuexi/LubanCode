@@ -47,7 +47,7 @@ using lubancode::cli::trf;
 // "(包 <canonical 组件名> <版本>)"——wire 名给人看费眼,canonical 名 +
 // 包版本才是对得上的账(契约 packages.md §6.1:展示名用 canonical)。
 void PrintToolsCommand(const lubancode::tools::ToolRegistry& registry, const std::set<std::string>& loaded,
-                        bool deferral_enabled, int threshold) {
+                        bool deferral_enabled, int threshold, const std::string& mode_hint) {
     const auto print_tool_line = [](const lubancode::tools::Tool& tool,
                                     const lubancode::tools::ToolRegistry& reg) {
         const lubancode::tools::ToolRegistration* registration = reg.RegistrationOf(tool.name());
@@ -81,6 +81,11 @@ void PrintToolsCommand(const lubancode::tools::ToolRegistry& registry, const std
         return;
     }
     TermOut() << trf("cmd.tools.enabled", threshold) << "\n";
+    // 动态工具 P1:proxy 档下"已挂载"恒空(发现不进 loaded),这行把口径
+    // 说清——pending 是"经 tool_search 可发现",不是"搜完就扩写进 tools"。
+    if (!mode_hint.empty()) {
+        TermOut() << mode_hint << "\n";
+    }
     TermOut() << trf("cmd.tools.core", core.size()) << "\n";
     for (const auto* tool : core) {
         print_tool_line(*tool, registry);
@@ -842,7 +847,8 @@ CommandFlow HandleSlashPlugin(SlashDispatchContext& ctx, const lubancode::cli::P
 
 CommandFlow HandleSlashTools(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
-    PrintToolsCommand(*ctx.registry, **ctx.loaded_tools, ctx.main_deferral, ctx.tool_search_threshold);
+    PrintToolsCommand(*ctx.registry, **ctx.loaded_tools, ctx.main_deferral, ctx.tool_search_threshold,
+                      ctx.main_proxy_reference ? tr("cmd.tools.proxy_mode") : std::string());
     return CommandFlow::Continue;
 }
 

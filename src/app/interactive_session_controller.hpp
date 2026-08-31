@@ -366,6 +366,10 @@ private:
     std::optional<lubancode::app::ToolRuntime>& tool_runtime_;
     bool main_deferral;
     bool sub_deferral;
+    // 动态工具 P1:proxy_reference 开没开(两值拷贝自 SessionStack,装配
+    // 与 /context 展示都吃这份)。
+    bool main_proxy;
+    bool sub_proxy;
     int tool_search_threshold;
 
     // ---- UI 状态 ----

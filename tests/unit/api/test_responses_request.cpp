@@ -6,6 +6,11 @@
 #include "api/responses/client.hpp"
 #include "api/responses/request.hpp"
 #include "api/types.hpp"
+#include <memory>
+#include <set>
+
+#include "tools/registry.hpp"
+#include "tools/tool_search.hpp"
 
 using namespace lubancode::api;
 using lubancode::api::responses::BuildRequestJson;
@@ -532,4 +537,68 @@ TEST_CASE("工具结果图片: 未重灌的图照旧字符串投影,不硬造数
     REQUIRE(output_item.at("type") == "function_call_output");
     CHECK(output_item.at("output").is_string());
     CHECK(output_item.at("output") == rich.content);
+}
+
+// 动态工具 PromptCache 守恒单 P1:Responses wire 的 proxy_reference
+// replay。顶层只见固定的 tool_search + tool_invoke;function_call 的
+// arguments 是字符串化 JSON,解析回来逐字段无损。
+TEST_CASE("Responses proxy replay: tool_search+tool_invoke 定义恒在,arguments 往返无损") {
+    lubancode::tools::ToolRegistry dummy_registry;
+    auto loaded = std::make_shared<std::set<std::string>>();
+    lubancode::tools::ToolSearchTool search(dummy_registry, loaded);
+    lubancode::tools::ToolInvokeTool invoke;
+
+    Request request;
+    request.model = "gpt-test";
+    request.tools.push_back({"tool_search", search.description(), search.input_schema()});
+    request.tools.push_back({"tool_invoke", invoke.description(), invoke.input_schema()});
+
+    Message search_result;
+    search_result.role = Role::User;
+    const std::string discovery_json =
+        nlohmann::json{{"catalog_revision", "sha256:abc"},
+                       {"matches", nlohmann::json::array({nlohmann::json{
+                                       {"tool_ref", "dt_0123456789_1"},
+                                       {"name", "mcp__github__search_issues"},
+                                       {"schema_digest", "sha256:def"},
+                                       {"input_schema", nlohmann::json{{"type", "object"}}}}})}}
+            .dump();
+    search_result.content.push_back(ToolResultBlock{"call_search", discovery_json, false});
+
+    Message proxy_call;
+    proxy_call.role = Role::Assistant;
+    proxy_call.content.push_back(ToolUseBlock{
+        "call_invoke", "tool_invoke",
+        nlohmann::json{{"tool_ref", "dt_0123456789_1"},
+                       {"arguments", nlohmann::json{{"query", "repo:lubancode cache"}, {"per_page", 50}}}}});
+    Message proxy_result;
+    proxy_result.role = Role::User;
+    proxy_result.content.push_back(ToolResultBlock{"call_invoke", "issue #42", false});
+    request.messages.push_back(search_result);
+    request.messages.push_back(proxy_call);
+    request.messages.push_back(proxy_result);
+
+    const auto body = BuildRequestJson(request);
+    REQUIRE(body["tools"].size() == 2);
+    CHECK(body["tools"][0]["name"] == "tool_search");
+    CHECK(body["tools"][1]["name"] == "tool_invoke");
+    CHECK(body["tools"][1]["parameters"]["additionalProperties"] == false);
+
+    bool saw_discovery = false;
+    bool saw_proxy = false;
+    for (const auto& item : body["input"]) {
+        const std::string type = item.value("type", std::string());
+        if (type == "function_call" && item["name"] == "tool_invoke") {
+            saw_proxy = true;
+            CHECK(item["call_id"] == "call_invoke");
+            const nlohmann::json parsed_args = nlohmann::json::parse(item["arguments"].get<std::string>());
+            CHECK(parsed_args["tool_ref"] == "dt_0123456789_1");
+            CHECK(parsed_args["arguments"]["query"] == "repo:lubancode cache");
+            CHECK(parsed_args["arguments"]["per_page"] == 50);
+        } else if (type == "function_call_output" && item["call_id"] == "call_search") {
+            saw_discovery = item["output"].get<std::string>() == discovery_json;
+        }
+    }
+    CHECK(saw_discovery);
+    CHECK(saw_proxy);
 }

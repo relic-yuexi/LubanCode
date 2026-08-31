@@ -417,6 +417,11 @@ public:
         agent_profile_.deferred_index_provider = nullptr;
         agent_profile_.tool_filter = nullptr;
         agent_profile_.tool_filter_denial.clear();
+        // 动态工具 P1:main 的代理引用账也一并剥掉——子代理用自己的 resolver
+        //(SetToolRefResolver 灌的子侧账),不拷贝 main 的活接线。
+        agent_profile_.tool_ref_resolver = nullptr;
+        agent_profile_.tool_execution_policy = nullptr;
+        agent_profile_.tool_execution_denial.clear();
         runtime_profile_ = agent_profile_.runtime;
         if (!agent_profile_.request.model.empty()) {
             model_ = agent_profile_.request.model;
@@ -458,6 +463,16 @@ public:
     void SetToolFilter(std::function<bool(const Tool&)> filter) { tool_filter_ = std::move(filter); }
     void SetDeferredIndexProvider(std::function<std::string()> provider) {
         deferred_index_provider_ = std::move(provider);
+    }
+
+    // 动态工具 P1(通用 ProxyReference):子代理侧的引用解析器与执行资格。
+    // resolver 是子侧那只(独立 ledger,与 main 不串);policy 只作用于经
+    // tool_invoke 解引用来的调用,直接按名调用仍走 SetToolFilter 那道
+    // exposure 过滤。都不设(默认)= 子代理不开 proxy 路,行为与从前一致。
+    void SetToolRefResolver(std::shared_ptr<DeferredToolResolver> resolver) { tool_ref_resolver_ = std::move(resolver); }
+    void SetToolExecutionPolicy(std::function<bool(const Tool&)> policy, std::string denial) {
+        sub_execution_policy_ = std::move(policy);
+        sub_execution_denial_ = std::move(denial);
     }
 
     // 提示词运行时化(0.21.x):用户模块目录(~/.lubancode/prompts)。设了
@@ -595,6 +610,10 @@ private:
     AgentDispatchHandle main_handle_;
     std::function<bool(const Tool&)> tool_filter_;            // tool_search:空 = 不过滤
     std::function<std::string()> deferred_index_provider_;    // tool_search:空 = 不注索引段
+    // 动态工具 P1:子侧 proxy 接线(resolver 空则整路不开)。
+    std::shared_ptr<DeferredToolResolver> tool_ref_resolver_;
+    std::function<bool(const Tool&)> sub_execution_policy_;
+    std::string sub_execution_denial_;
     // 自定义 Agent 解析口(P2-2):空 = 只认内置两枚(旧行为)。宿主在会话
     // 装配时灌入;回调在 execute() 的宿主线程被调,内部自管线程安全。
     std::function<std::optional<CustomAgentMaterial>(const std::string&)> custom_agent_resolver_;

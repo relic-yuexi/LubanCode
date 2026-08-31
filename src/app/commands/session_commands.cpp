@@ -204,17 +204,20 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
         if (artifact_store != nullptr || layers != nullptr || deferred_tool_summary != nullptr) {
             TermOut() << "\n── " << trf("cmd.context.group.structure") << " ──\n";
         }
-        // deferred_tool_mode(动态工具 PromptCache 守恒单 P0):现状只有
-        // disabled/legacy_expand 两档,如实展示当前这一档,不提前展示成
-        // proxy_reference/native_reference(那是 P1/P3 才落地的新路)。
+        // deferred_tool_mode(动态工具 PromptCache 守恒单 P0 起;P1 补
+        // proxy_reference 档):如实展示当前这一档。proxy 路提示"发现走
+        // tool_search、调用走 tool_invoke,前缀不断";legacy 路照旧提示
+        // 断前缀(cache-hostile 兼容路)。
         if (deferred_tool_summary != nullptr) {
             TermOut() << "  "
-                      << trf("cmd.context.deferred_tool_mode",
-                             lubancode::tools::DeferredToolModeLabel(deferred_tool_summary->enabled),
+                      << trf("cmd.context.deferred_tool_mode", deferred_tool_summary->mode_label,
                              deferred_tool_summary->pending, deferred_tool_summary->total)
                       << "\n";
             if (deferred_tool_summary->enabled) {
-                TermOut() << tr("cmd.context.deferred_tool_mode.legacy_hint") << "\n";
+                TermOut() << tr(deferred_tool_summary->mode_label == "proxy_reference"
+                                     ? "cmd.context.deferred_tool_mode.proxy_hint"
+                                     : "cmd.context.deferred_tool_mode.legacy_hint")
+                          << "\n";
             }
         }
         if (artifact_store != nullptr && artifact_store->active()) {
@@ -872,7 +875,10 @@ bool ResumeSession(const std::string& target, const std::string& sessions_dir,
         return false;
     }
 
-    loop.ReplaceHistory(session->messages);
+    // 动态工具 P1:恢复走 RestoreSessionHistory——从正式 discovery event
+    // 重建 DiscoveryLedger(单子 §9.2);未开 proxy 的会话里它等价于
+    // ReplaceHistory(resolver 为空不重建)。
+    loop.RestoreSessionHistory(session->messages);
     persisted_count = session->messages.size();
     if (!store.ResumeAt(file_path, id)) {
         TermOut() << theme.error << trf("cmd.resume.takeover_failed", file_path) << theme.reset << "\n";
@@ -1499,13 +1505,20 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
         layers.budget = lubancode::agent::BuildContextBudgetPlan(budget_inputs);
         layers.last_compact_line = *in.last_compact_line;
     }
-    // deferred_tool_mode(动态工具 PromptCache 守恒单 P0):裸敲才现场扫
-    // registry 数待检索/全部延迟工具枚数,带参数分支(切窗口)不打这行,
-    // 跟其余三类 token 收集同一个 args.empty() 闸门。
+    // deferred_tool_mode(动态工具 PromptCache 守恒单 P0 起;P1 补 proxy
+    // 档):裸敲才现场扫 registry 数待检索/全部延迟工具枚数,带参数分支
+    //(切窗口)不打这行,跟其余三类 token 收集同一个 args.empty() 闸门。
+    // proxy 模式下 loaded 集合恒空(tool_search 不再写它),待检索枚数
+    // 就是全部延迟工具——如实数,不另造口径。
     DeferredToolModeSummary deferred_tool_summary;
     const DeferredToolModeSummary* deferred_tool_summary_ptr = nullptr;
     if (args.empty() && in.registry != nullptr) {
         deferred_tool_summary.enabled = in.tool_deferral;
+        deferred_tool_summary.mode_label =
+            in.proxy_reference
+                ? lubancode::tools::DeferredToolModeLabel(lubancode::tools::DeferredToolMode::ProxyReference,
+                                                          /*deferral_enabled=*/true)
+                : lubancode::tools::DeferredToolModeLabel(in.tool_deferral);
         for (const auto& tool : in.registry->All()) {
             if (!tool->deferred()) {
                 continue;
@@ -2058,6 +2071,7 @@ CommandFlow HandleSlashContext(SlashDispatchContext& ctx, const lubancode::cli::
     context_in.registry = ctx.registry;
     context_in.tool_filter = ctx.main_tool_filter;
     context_in.tool_deferral = ctx.main_deferral;
+    context_in.proxy_reference = ctx.main_proxy_reference;
     context_in.loaded_tools = &**ctx.loaded_tools;
     context_in.agent = ctx.main_agent;
     context_in.context_tracker = ctx.context_tracker;
@@ -2175,7 +2189,7 @@ CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::P
                       << "): " << summary.outcome.message << theme.reset << "\n";
             return CommandFlow::Continue;
         }
-        ctx.main_agent->ReplaceHistory(summary.history);
+        ctx.main_agent->RestoreSessionHistory(summary.history);
         TermOut() << trf("cmd.resume.restored", summary.outcome.source_session_id,
                          summary.history.size())
                   << "(新 session " << summary.outcome.new_session_id << ")\n";

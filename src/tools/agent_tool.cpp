@@ -1624,6 +1624,30 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     } else if (detached == nullptr && tool_filter_) {
         task_agent_profile.tool_filter = tool_filter_;
     }
+    // 动态工具 P1(通用 ProxyReference):子代理的代理引用接线。resolver
+    // 用子侧那只(装配层 SetToolRefResolver 灌的,独立 ledger——main 铸的
+    // ref 到子代理的账里就是 unknown_tool_ref,不串);没灌(legacy/
+    // disabled)则显式清空,防 resolved/主皮拷贝把别家的账带进来。
+    // 执行资格:内置/后台子代理吃装配层给的子侧策略;自定义 Agent 的
+    // allow/deny 谓词本身就是它的执行资格(单子 §5.5"effective policy"),
+    // 拿来当 policy,拒绝文案沿用其角色限制说明。Explore 一律不开:它的
+    // 只读表没有 tool_search,铸不出合法 ref,开了只会给"借来的 ref 穿
+    // 只读边界"留门。
+    task_agent_profile.tool_ref_resolver = tool_ref_resolver_;
+    task_agent_profile.tool_execution_policy = sub_execution_policy_;
+    task_agent_profile.tool_execution_denial = sub_execution_denial_;
+    if (agent_type == "Explore") {
+        task_agent_profile.tool_ref_resolver = nullptr;
+        task_agent_profile.tool_execution_policy = nullptr;
+        task_agent_profile.tool_execution_denial.clear();
+    } else if (resolved != nullptr && resolved->profile.tool_filter != nullptr) {
+        task_agent_profile.tool_execution_policy = resolved->profile.tool_filter;
+        task_agent_profile.tool_execution_denial =
+            std::string(tools::kErrToolRefNotAllowed) + "|" +
+            (resolved->profile.tool_filter_denial.empty()
+                 ? std::string("此工具不在该自定义 Agent 的 tools 允许面内,不得重试同一调用。")
+                 : resolved->profile.tool_filter_denial);
+    }
     // 阶段 2:prompt.soul: off 的自定义 Agent 不带魂(契约 §4.2——Soul 只
     // 许继承或关,不许在 Agent 文件里另塞正文)。前台任务的魂从皮
     //(AgentProfile::soul,请求期由 AgentLoop 注入)继承,这里只关不添

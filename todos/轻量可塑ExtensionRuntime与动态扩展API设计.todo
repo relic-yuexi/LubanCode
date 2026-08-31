@@ -1,0 +1,1484 @@
+# 轻量可塑 Extension Runtime 与动态扩展 API 设计
+
+- 状态：待实现
+- 日期：2026-08-31
+- 级别：P0（宿主合同、权限、快照、生命周期）+ P1（命令、上下文、压缩、声明式 UI）+ P2（自定义 Provider、生态工具）
+- 范围：`src/extension/`（新增）、`src/package/`、`src/tools/`、`src/hooks/`、`src/runtime/`、`src/agent/`、`src/api/`、`src/app/commands/`、`src/cli/`、`include/`、`docs/`、`tests/`
+- 依赖：现有 Package 快照/信任/挂载、ToolRegistry、Hooks v2、Agent/Prompt Profile、Workflow、App Server、Trajectory、权限三档
+- 关联：`动态工具PromptCache守恒与按需调用设计.todo`、`多前端外壳与浏览器Tab_AppServer承载设计.todo`、`多渠道消息接入与常驻ChannelPlugin设计.todo`、`端云协同可观测架构与Telemetry插件设计.todo`
+- 不在本单：插件市场、云端商店、远程任意代码下发、操作系统级通用沙箱、Channel/Telemetry 专用长驻协议、重写 TUI、删除现有插件兼容路
+
+## 一、先下断语
+
+LubanCode 要守住一枚轻巧的 C++ 内核，不能把每项新能力都焊进主程序。
+
+本单把现有“能加工具”抬成“能改产品行为”。扩展可登记工具、命令、事件处理器、上下文贡献、压缩策略、Provider 适配器与声明式 UI；宿主仍独占权限、会话真账、轨迹、预算、取消、密钥与终端绘制。
+
+三条铁律先钉死：
+
+1. **扩展改投影，不改真账。** 会话 JSONL、Trajectory、TaskLedger、权限与 Package 信任仍由宿主写。扩展只能交提案，宿主校验后采用。
+2. **注册不是授权。** manifest 写了能力，只算申请。有效能力等于“声明 ∩ 用户授予 ∩ 宿主支持 ∩ 当前模式允许”。
+3. **轻量须量，不凭语言猜。** C++、Lua、进程插件谁轻谁重，都看二进制、冷启动、私有工作集、子进程、网络与延迟实测。
+
+本单不把 Pi 的 TypeScript 内部 API 照搬进 C++。要学的是它的可塑性，不是它的进程模型。LubanCode 采用三层扩展面：
+
+```text
+C++ Host Kernel
+  权限 / 会话 / Agent Loop / ToolRegistry / Trajectory / Budget / Cancel
+        |
+        +-- Embedded Lua Extension
+        |     轻工具、命令、事件观察、上下文贡献、声明式 UI
+        |
+        +-- Process Extension Host
+        |     复杂 SDK、长驻状态、自定义 Provider、隔离崩溃
+        |
+        +-- Native C ABI
+              原生库、低延迟、大数据；首版仍只扩工具，不扩宿主控制面
+```
+
+不让原生 DLL 注册 UI、命令、Provider 与通用宿主生命周期处理器；现有 ABI v2 的插件级 `shutdown` 回调照旧保留。C ABI 一旦铺满，内部结构便给 ABI 绑住，往后寸步难移。控制面先走版本化数据协议；原生 ABI 只守性能窄门。
+
+## 二、这单所说的“可塑性”
+
+可塑性不是“配置项多”，也不是“插件能执行任意代码”。本单按六个平面验收：
+
+| 平面 | 扩展要能做什么 | 宿主绝不让出的权力 |
+| --- | --- | --- |
+| 工具 Tool | 登记 schema、执行、富结果、取消 | schema 复核、权限、Hook、审计、结果帽 |
+| 命令 Command | 加 slash 命令、参数、补全、结构化结果 | 核心命令覆盖、直接改会话真账、绕过确认 |
+| 事件 Event | 观察生命周期；在少数决策点交提案 | 事件顺序、最终裁决、轨迹写入 |
+| 上下文 Context | 按轮添有来源、有预算的上下文；提出请求投影 | system/mode/权限段、项目指令真源、历史真账 |
+| Provider | 接新协议、模型目录、流事件、取消 | 密钥授权、请求总预算、中立事件校验、usage 口径 |
+| UI | 加状态段、面板、表单、通知、快捷键 | 原始终端句柄、任意 ANSI、用户身份、命令执行 |
+
+另有两项横切能力：
+
+- **分发**：Package 装 Agent、Prompt、Skill、Workflow、Extension；Package 仍只是箱子。
+- **热重载**：按 generation 建新快照；在飞调用钉旧代；成功才原子换新代。
+
+做到“能加一件工具”只算第一层。六面都有稳定合同、诊断与验收，才算接近 Pi 那种“改宿主而不用 fork”的可塑性。
+
+## 三、现状证据：已有的砖与缺的门
+
+### 3.1 已落地，可直接复用
+
+| 现有底座 | 当前落点 | 本单怎样复用 |
+| --- | --- | --- |
+| Tool 抽象与注册表 | `src/tools/tool.hpp`、`registry.*` | 动态工具仍适配成同一 Tool，不另造旁路 |
+| Lua 工具 | `src/tools/lua_tool.*` | 扩成 `LuaExtensionInstance`，保留旧裸 Lua 适配器 |
+| manifest v2 Lua | `src/runtime/plugin_lua_manifest.*` | 复用 Host HTTP、Secret、取消、资源帽 |
+| process Plugin | `src/tools/plugin_loader.*` 及 manifest | 旧“一调一进程”照旧；另加 long-lived extension runtime |
+| native C ABI v2 | `include/luban_plugin.h` | 保持工具窄 ABI，不塞宿主内部类型 |
+| MCP/LSP | `src/mcp/`、`src/lsp/` | 仍是专用协议，不冒充通用 Extension Runtime |
+| Hooks v2 | `src/hooks/` | 事件名、信任、决策归并可抽公共语义；不直接复用 command handler 当运行时 |
+| Package | `src/package/` | 复用清单、信任、启停、快照、原子 reload、canonical id |
+| Agent/Prompt Profile | `src/agent/`、`src/prompts/` | 自定义主体与提示覆盖仍归各自 Catalog |
+| Compact | `src/agent/compact.*` | 内置策略保留；外部只交候选结果，宿主过守恒验证 |
+| Slash 命令 | `src/app/commands/`、`src/cli/slash_commands.*` | 抽成动态 CommandCatalog，不复制命令表 |
+| TUI 纯逻辑件 | `src/cli/*panel*`、`line_editor*`、`theme*` | 声明式 UI 编译到现有布局/按键模型 |
+| App Server | `src/app_server/` | 同一 UI/命令贡献投到外壳协议，不做终端专属插件 |
+| Trajectory | `src/trajectory/` | 扩展生命周期、决策、资源与故障都落投影事件 |
+
+### 3.2 当前断口
+
+1. 插件主要只注册 Tool。它不能稳妥注册 slash 命令、面板、快捷键、上下文策略或 Provider。
+2. Hooks 有丰富事件，却只认外部命令 handler；观察、决策、UI 与持久状态没有统一 Extension 身份。
+3. Package `/reload` 能重折内容快照，代码组件仍须新会话。Lua、process、native 没有统一 generation、drain 与回收合同。
+4. Slash 命令清单与执行分散在静态代码。动态候选只补全名字，不能携带执行合同。
+5. TUI 虽有纯逻辑面板，却没有跨前端的 UI IR。插件若直接画 ANSI，App Server、Windows Console、重绘与可访问性全会散架。
+6. Compact 允许 Hook 在前后审计或拦截，却不能选择可验证的替代策略。
+7. Provider 只能走宿主内置 wire 或兼容配置。新协议、OAuth 与自定义流帧仍要改 C++。
+8. 现有 process Plugin 一调一进程，接不住长驻状态、双向事件与流式 Provider；硬拖成常驻会破坏旧协议。
+9. 轻量只有发布包大小说法，缺一套固定的空载/挂载/调用三档资源基线。
+
+### 3.3 不把已有专用协议拧成万能协议
+
+- MCP 管模型主动调用工具，不管 slash 命令、宿主 UI 与会话投影。
+- Hook 管边界触发与策略，不管长驻双向 RPC、组件登记与 UI 状态。
+- process Plugin 管一次工具调用，不管常驻生命周期。
+- ChannelPlugin 管消息入口，不管本地 Agent 扩展。
+- TelemetryConnector 管异步投影出口，不管执行控制。
+- App Server 管外壳，不执行第三方扩展代码。
+
+这些东西可以共用 `ExtensionIdentity`、进程监督、Secret、资源帽与事件 envelope；不能偷懒合成一套含混协议。
+
+## 四、目标与非目标
+
+### 4.1 目标
+
+- 不改 C++ 主程序，便能装一只 Package，加工具、命令、上下文、面板与压缩策略。
+- 外部扩展可在 Lua 与独立进程间选路；宿主不强迫所有人安装 Node/Python。
+- 新能力默认懒加载。没启用时不启动进程、不建线程、不发网络。
+- 所有动态能力有来源、版本、generation、权限、预算、诊断与轨迹。
+- `/reload` 折好才换；旧调用与旧会话不踩空函数指针。
+- TUI 与 App Server 吃同一份声明式贡献，不生两套插件生态。
+- 内置功能也可逐步反向适配同一 SPI，验证合同不是“只给第三方的残版”。
+- 任何失败都有稳定错误码；不得静默降权、静默放宽或静默回旧实现。
+
+### 4.2 非目标
+
+- 不允许扩展替换 `ModePolicy`、权限裁决、Tool schema 复核与命令安全分类。
+- 不允许扩展删除、改写 canonical session/trajectory/task ledger。
+- 不提供浏览器式 DOM，也不允许扩展写原始 ANSI/Win32 Console。
+- 不在首版开放任意 C++ callback ABI。
+- 不承诺恶意 Lua 的强化沙箱；pure 画像仍只是软墙。
+- 不让 Package manifest 直接授予网络、文件、Secret 或自动确认。
+- 不把动态 Provider 说成“密钥永不进扩展”。自定义签名协议若由进程执行，可信进程终究会接触短寿命凭据；信任页须明说。
+- 不先做市场、评分、自动更新与远程安装。合同没稳，市场只会放大破口。
+
+## 五、不可破的宿主合同
+
+以下每条都须有自动测试：
+
+1. 核心命令、工具、Provider 与 UI id 不可让扩展覆盖。
+2. 扩展 id、组件 id、注册项 id 全部 canonical 化，冲突即整件扩展拒挂。
+3. 项目/Package 代码未经当前指纹信任，不加载、不起进程、不执行顶层 Lua。
+4. 扩展声明的 capability 不会自行生效；授权账须另存用户目录。
+5. `confirm/auto/yolo` 与项目 allow/deny 继续在动态工具和命令上生效。
+6. 扩展发出的“执行某命令”只是一份 CommandRequest，仍走 `CommandService` 与权限门。
+7. UI action 不得直接调用 shell、写文件、改 session；它只能投递注册命令或宿主 action。
+8. Context Extension 不得删改系统、模式、权限、模型指令与项目指令段。
+9. History Filter 只改本次 provider request 的投影，不改历史真账。
+10. Compact Extension 的结果须过角色、工具对、活跃任务、用户合同、UTF-8、预算与反涨校验。
+11. Provider Extension 只能吐中立 `api::StreamEvent`；宿主校验事件状态机后才交 Agent Loop。
+12. usage 缺失须写 `usage_reported=false`，不得拿估算冒充服务端实报。
+13. 在飞调用持有 generation 强引用；reload 不卸它脚下的代码与状态。
+14. reload 任一必需组件失败，当前 generation 一分不动。
+15. disabled 扩展零代码执行、零进程、零网络；只允许 Package Catalog 读静态 manifest。
+16. 扩展 stdout/stderr、错误、UI 文本、Context 与 Tool 结果全过 UTF-8 清洗、Secret 脱敏和字节帽。
+17. 后台子代理与 Workflow 节点拿派出时快照，不追随主会话中途 reload。
+18. App Server 远端调用动态命令时，与 TUI 同权限、同 id、同回执，不开第二条捷径。
+19. Feature gate 关闭时，新增 Runtime 不起线程、不监听目录、不探网。
+20. 旧 Skill、Lua、process、native、MCP、Hook 目录与语义保持兼容。
+
+## 六、总架构与依赖方向
+
+### 6.1 分层
+
+```text
+Package Catalog / Standalone Discovery
+          |
+          v
+ExtensionManifestParser ----> ExtensionGrantResolver
+          |                          |
+          +------------+-------------+
+                       v
+              ExtensionMountPlan
+                       |
+                       v
+              ExtensionSupervisor
+             /          |           \
+       LuaInstance   ProcessClient   LegacyAdapter
+             \          |           /
+              +---------+----------+
+                        v
+               ExtensionRegistrySet
+     Tool / Command / Event / Context / Compact / Provider / UI
+                        |
+                        v
+                 ExtensionSnapshot
+                        |
+       +----------------+------------------+
+       v                v                  v
+   Agent Turn       Interactive UI      App Server
+```
+
+### 6.2 依赖铁律
+
+- `src/extension/` 只依赖中立 DTO、标准库、JSON 与少量既有公共接口。
+- `src/extension/` 不 include `src/cli/`；UI 只产中立 IR。
+- `src/cli/` 与 `src/app_server/` 各自消费 UI IR。
+- `src/agent/` 只看 `ContextRegistry`、`CompactRegistry` 与 `ProviderRegistry` 接口，不看 Lua/进程实现。
+- `src/package/` 只产挂载计划与快照，不执行 Extension。
+- `src/app/` 负责装配 Supervisor、权限、Secret、Trajectory 与各 Registry。
+- 协议 DTO 不携带裸指针、`std::function`、终端对象、Backend 具体类或 SessionStore 写句柄。
+
+### 6.3 建议新增目录
+
+```text
+src/extension/
+  identity.hpp/.cpp
+  manifest.hpp/.cpp
+  capabilities.hpp/.cpp
+  grants.hpp/.cpp
+  protocol.hpp/.cpp
+  framing.hpp/.cpp
+  state.hpp/.cpp
+  supervisor.hpp/.cpp
+  snapshot.hpp/.cpp
+  registry_set.hpp/.cpp
+  event_bus.hpp/.cpp
+  context_registry.hpp/.cpp
+  compact_registry.hpp/.cpp
+  command_registry.hpp/.cpp
+  provider_registry.hpp/.cpp
+  ui_ir.hpp/.cpp
+  ui_registry.hpp/.cpp
+  lua_runtime.hpp/.cpp
+  process_runtime.hpp/.cpp
+  legacy_adapter.hpp/.cpp
+  diagnostics.hpp/.cpp
+```
+
+名字可按现有骨架拆解规矩再收细，职责不可重新揉回 `interactive_session.cpp`。
+
+## 七、身份、名字与来源
+
+### 7.1 ExtensionIdentity
+
+```cpp
+struct ExtensionIdentity {
+    std::string canonical_id;   // publisher.package:extension
+    std::string version;        // manifest 原文，SemVer 校验
+    std::string source_scope;   // builtin/user/project/package
+    std::string source_path;    // 仅诊断，不进模型
+    std::string content_sha256;
+    int manifest_version = 1;
+    int protocol_min = 1;
+    int protocol_max = 1;
+};
+```
+
+规则：
+
+- Package 内 id：`<package-id>:<local-id>`。
+- standalone 旧插件经适配器登记为 `legacy:<kind>:<old-id>`，展示旧名，内部不混。
+- 注册项 wire name：`ext__<escaped-extension-id>__<local-id>`。
+- slash 命令展示可用短别名 `/x:y`，内部仍存 canonical id。
+- 内置 id 使用保留前缀 `builtin:`；外部不可声明。
+- 名字只认 ASCII 小写 kebab-case；显示名另设 `display_name`，不得参与寻址。
+
+### 7.2 来源账
+
+每个注册项须能回答：
+
+```text
+谁登记的
+来自哪只 Package/目录
+哪一代 generation
+声明了什么能力
+用户批了什么能力
+当前为何可用/不可用
+有几只会话钉着旧代
+最近一次调用结果与资源账
+```
+
+`/extension inspect` 与轨迹都从同一份 `ExtensionRegistrationLedger` 读，不临时拼猜。
+
+## 八、manifest 合同
+
+### 8.1 Package 目录
+
+```text
+extensions/<local-id>/
+  extension.json
+  main.lua                 # runtime.kind=embedded-lua
+  runner                   # runtime.kind=process
+  docs/
+  assets/
+  migrations/
+```
+
+旧 `plugins/` 目录继续装 Tool Plugin。新 `extensions/` 明说它可触及宿主控制面，两者不能只换名字混用。
+
+### 8.2 extension.json 示例
+
+```json
+{
+  "manifest_version": 1,
+  "id": "review-workbench",
+  "version": "1.2.0",
+  "description": "Adds review commands, context checks and a review panel.",
+  "protocol": {"min": 1, "max": 1},
+  "runtime": {
+    "kind": "embedded-lua",
+    "entry": "main.lua",
+    "activation": "on-demand"
+  },
+  "contributes": {
+    "tools": ["review_diff"],
+    "commands": ["review.open", "review.run"],
+    "events": ["turn.completed", "file.changed"],
+    "context_providers": ["review.rules"],
+    "views": ["review.findings"],
+    "keybindings": ["ctrl+alt+r"]
+  },
+  "capabilities": {
+    "required": ["command.register", "context.provide"],
+    "optional": ["ui.view", "tool.register", "event.observe"]
+  },
+  "limits": {
+    "memory_bytes": 33554432,
+    "call_timeout_ms": 30000,
+    "result_bytes": 1048576,
+    "event_queue": 256
+  }
+}
+```
+
+### 8.3 严格解析
+
+- 未知顶层字段拒绝；`x-` 实验字段可保留但不生效。
+- `contributes` 只作静态盘点，运行期 `register` 不得超出清单。
+- required capability 少一项，整件不可用；optional 少一项，只裁对应贡献。
+- `limits` 只许比宿主默认更紧。写大不算授权，按宿主帽裁并明报。
+- 路径须在 extension root 内，经过规范化、符号链接与重解析检查。
+- `runtime.kind` 首版只认 `embedded-lua`、`process`；`native-control` 明拒。
+- manifest 与入口、资源一起算内容指纹；`.env`、数据目录、缓存不进指纹也不进包。
+
+## 九、能力模型
+
+### 9.1 能力名
+
+首版能力至少包括：
+
+```text
+tool.register
+command.register
+event.observe
+event.decide.tool
+context.provide
+context.project_history
+compact.propose
+ui.status
+ui.view
+ui.form
+ui.notification
+keybinding.register
+provider.register
+storage.read
+storage.write
+network.declared
+secret.use
+```
+
+`shell.execute`、`filesystem.write` 不作为 Extension Runtime 原语。扩展要做这些事，注册 Tool/Command，让请求走宿主既有权限面；或在可信 process 内自行做，并在信任页明报该进程拥有当前用户权限。不得假装后者受宿主文件沙箱控制。
+
+process-backed Tool/Command 即使自报 `side_effect=none/read`，首版仍按外部可执行代码进入确认与信任面。声明只供展示、排序与策略收窄，不是强制隔离证据。日后若接入可证明的 OS sandbox/ExecutionProvider，宿主才可按实际 capability 降档；不能靠 manifest 自述免确认。
+
+### 9.2 有效能力
+
+```text
+effective = declared_required_or_optional
+          ∩ host_supported(protocol, platform, frontend)
+          ∩ user_grants(content_sha256)
+          ∩ session_mode_policy
+          ∩ agent_tool_filter_if_model_facing
+```
+
+Grant 以“extension canonical id + content hash + capability + scope”记账。入口、manifest 或权限声明一变，旧 Grant 失效。用户可批：
+
+- once：只给本次动作。
+- session：只给当前 ExtensionSnapshot。
+- content-hash：同一份代码往后可用。
+- deny：明确拒绝，更新代码也不自动翻成 allow。
+
+### 9.3 决策能力比观察能力更窄
+
+- `event.observe` 只能看脱敏事件，不能阻断。
+- `event.decide.tool` 只在 PreToolUse/PermissionRequest 交 `allow/deny/ask/updated_input` 提案。
+- 多扩展归并沿用“deny 胜、ask 次、allow 不扩权”。
+- 决策 handler 必须同步、有短超时；超时走 manifest 明写的 `failure_policy`，默认 deny 只用于安全门，默认 warn 只用于观察器。
+- Context、Compact、Provider 与 UI 各有专用 registry，不把它们塞进万能 `on_event` 返回值。
+
+## 十、运行时协议
+
+### 10.1 公共 envelope
+
+Lua 内部调用与 process JSON-RPC 在语义上共用：
+
+```json
+{
+  "protocol": 1,
+  "extensionId": "acme.review:review-workbench",
+  "generation": 3,
+  "requestId": "extreq_...",
+  "method": "command/execute",
+  "deadlineMs": 30000,
+  "cancelId": "cancel_...",
+  "params": {}
+}
+```
+
+响应：
+
+```json
+{
+  "protocol": 1,
+  "requestId": "extreq_...",
+  "ok": false,
+  "error": {
+    "code": "extension.capability_denied",
+    "message": "context.provide 未获授权",
+    "retryable": false
+  }
+}
+```
+
+### 10.2 初始化握手
+
+顺序定死：
+
+```text
+spawn/create Lua state
+-> extension/hello(host version, protocol range, granted capabilities, limits)
+-> extension/ready(actual protocol, registrations digest)
+-> host compares static manifest and dynamic registrations
+-> stage registrations
+-> health probe
+-> publish generation atomically
+```
+
+动态登记多一项、少一项都报：
+
+- 多于 manifest：整件拒挂，`extension.registration_undeclared`。
+- manifest required 项未登记：整件拒挂，`extension.registration_missing`。
+- optional 项未登记：裁掉并警告。
+
+### 10.3 process framing
+
+常驻 process runtime 不复用旧 process Plugin 的“一份 stdin、一份 stdout”。新协议采用 4 字节大端长度 + UTF-8 JSON：
+
+```text
+[u32 length][JSON bytes]
+```
+
+理由：JSONL 会让嵌入换行与通用 line reader 生歧义；Content-Length 又要另写头解析。长度帧简单、可限长、可二进制扩展。
+
+规矩：
+
+- stdout 只写协议帧；stderr 写日志。
+- 单帧上限默认 4 MiB；大 artifact 走内容寻址文件，不塞帧。
+- request/response 可乱序，用 requestId 对账。
+- `$/cancel` 可随时发；扩展须回终态，迟到结果丢弃并记账。
+- ping/pong 只作健康，不当业务 ACK。
+- EOF、坏长度、坏 JSON、超帽、心跳失联都进入明确状态机。
+
+### 10.4 Lua API
+
+Lua 不拿 C++ 对象。宿主注入一张窄表：
+
+```lua
+return function(luban)
+  luban.commands.register({...})
+  luban.events.observe("turn.completed", handler)
+  luban.context.register({...})
+  luban.ui.register_view({...})
+  return { shutdown = function() ... end }
+end
+```
+
+每个 API 先查 capability 与 active call context。顶层初始化只许登记；网络、Secret、存储与命令执行须在具体 handler 上下文里调用。沿用 manifest v2 Lua 的“宿主握水管和钥匙”。
+
+## 十一、生命周期与状态机
+
+### 11.1 ExtensionState
+
+```text
+Discovered
+  -> AwaitingTrust
+  -> Disabled
+  -> Staging
+  -> Ready
+  -> Active
+  -> Draining
+  -> Stopped
+
+Staging/Active/Draining -> Failed
+Failed -> Quarantined（同指纹连续崩溃越帽）
+Quarantined -> Staging（用户显式 retry 或代码指纹变化）
+```
+
+状态只许由 `ExtensionSupervisor` 写。UI、命令与 runtime adapter 都读快照。
+
+### 11.2 激活策略
+
+| activation | 何时起 | 适合 |
+| --- | --- | --- |
+| startup | 会话装配后 | 状态栏、命令、事件观察器 |
+| on-command | 首次调用扩展命令 | 低频工作台 |
+| on-tool | 模型首次调扩展工具 | 普通工具 |
+| on-context | 该 provider 命中作用域 | 动态上下文 |
+| on-provider | 选中该 Provider | 自定义 wire |
+
+`on-demand` 在解析时须展开成具体触发集合，不留含混值。
+
+### 11.3 disabled 的零副作用
+
+禁用时可读 manifest 做列表；不得：
+
+- 执行 Lua 顶层。
+- 加载 DLL。
+- spawn process/MCP。
+- 解析 Secret 或 `.env`。
+- 发 DNS、HTTP、更新检查、遥测。
+- 创建线程、定时器、数据目录。
+- 注册命令、工具、按键或 UI。
+
+这条写三平台测试，不能只靠代码审查。
+
+### 11.4 shutdown
+
+收线次序：
+
+```text
+mark Draining
+-> stop new dispatch
+-> cancel cancellable calls
+-> wait drain_timeout
+-> detach registries
+-> handler shutdown
+-> close process/Lua state
+-> write terminal state and trajectory
+```
+
+Native 旧插件不能安全热卸。只停新调用，库句柄留到进程退出；诊断明写 `restart_required`。
+
+## 十二、快照与热重载
+
+### 12.1 两层快照
+
+```cpp
+struct ExtensionCodeGeneration; // 活实例、注册项、资源账
+struct ExtensionSnapshot {       // 一场会话可见的 generation 集合
+    int generation;
+    std::map<std::string, std::shared_ptr<const ExtensionCodeGeneration>> entries;
+};
+```
+
+PackageSnapshot 说“有哪些组件”；ExtensionSnapshot 说“哪些代码实例与注册项正在服务”。两者不可混成一只对象：前者可纯函数重折，后者有进程、Lua state、在飞调用与回收。
+
+### 12.2 `/extension reload` 事务
+
+```text
+1. 重扫静态 Package/standalone manifests
+2. 重算 trust/grants，不沿用变指纹授权
+3. 为变更项建 staging generation
+4. 起实例、握手、注册、探活
+5. 校验全部 required 项与冲突
+6. 原子发布新 ExtensionSnapshot
+7. 旧代进 Draining
+8. 无引用后回收；native 标 restart_required
+```
+
+任一步失败：销毁 staging，旧代照常服务。回执列出 `added/updated/removed/unchanged/restart_required/failed`。
+
+### 12.3 在飞安全
+
+- 每次调用拿 `shared_ptr<const ExtensionCodeGeneration>`。
+- Command、Tool、Context、Compact、Provider stream 都持到终态。
+- reload 不改调用对象里的函数表、process client、Lua state 与 grant snapshot。
+- 子代理、Workflow 节点派出时钉当前 ExtensionSnapshot；父会话 reload 不追进去。
+- UI 可切到新代；旧代 view 若仍有未提交表单，先提示关闭或迁移，不暗丢输入。
+
+### 12.4 状态迁移
+
+扩展可带纯数据 migration：
+
+```text
+migrations/1-to-2.json 或 extension 自己的 storage/migrate handler
+```
+
+- 迁移只作用扩展私有数据目录的临时副本。
+- 成功后原子换目录；失败保旧数据、拒新代。
+- migration 不拿网络、Tool、UI 与 session 写权限。
+- 降级时若无 backward migration，旧版本须明报不可读，不猜。
+
+## 十三、Command SPI
+
+### 13.1 CommandDefinition
+
+```cpp
+struct ExtensionCommandDefinition {
+    std::string canonical_id;
+    std::vector<std::string> aliases;
+    std::string title;
+    std::string description;
+    nlohmann::json args_schema;
+    CommandSideEffect side_effect; // none/read/write/process/network
+    std::vector<std::string> modes;
+    bool interactive_only = false;
+};
+```
+
+### 13.2 执行链
+
+```text
+slash/input/AppServer/UI action
+-> CommandCatalog resolve
+-> parse args to typed JSON
+-> mode + capability + trust
+-> permission/confirmation
+-> extension command/execute
+-> structured CommandResult
+-> host applies declared effects or renders result
+-> trajectory
+```
+
+CommandResult 可含：
+
+- `message`：普通文本。
+- `notification`：短通知。
+- `open_view`：打开已登记 view id。
+- `refresh_context`：让指定 ContextProvider 下轮重算。
+- `data`：App Server 可读结构化结果。
+
+不能含“直接执行 shell 字符串”“任意改 Theme”“替换 history”。要做写操作，命令 handler 调宿主受控 API 或注册 Tool。
+
+### 13.3 命名与冲突
+
+- `/help`、`/model` 等内置词保留。
+- 扩展默认用 `/ext-id.command`；Package 可申请短 alias。
+- alias 冲突时都不占短名，用户仍可用 canonical 命令。
+- 补全、帮助、命令面板与 App Server capabilities 都从 CommandCatalog 投影。
+
+## 十四、Event SPI
+
+### 14.1 事件分两类
+
+**ObservationEvent**：只看，不改。
+
+```text
+session.started/stopped
+turn.started/completed
+tool.started/completed
+subagent.started/stopped
+compact.started/completed
+file.changed
+model.usage
+extension.state_changed
+```
+
+**DecisionPoint**：交提案，宿主裁决。
+
+```text
+tool.pre_use
+permission.request
+command.pre_execute
+context.before_request
+compact.select_strategy
+```
+
+### 14.2 EventEnvelope
+
+```cpp
+struct ExtensionEventEnvelope {
+    std::string event_id;
+    std::string type;
+    std::int64_t seq;
+    std::int64_t timestamp_ms;
+    std::string session_id;
+    std::optional<std::string> turn_id;
+    std::optional<int> agent_task_id;
+    nlohmann::json payload;
+    RedactionLevel redaction;
+};
+```
+
+事件 id 可幂等。process 重连后宿主只在有 durable cursor 的事件类补发；普通 UI/观察事件不保证补发，`dropped` 明写。
+
+### 14.3 背压
+
+- 每扩展一只有界队列，不共用全局无界 vector。
+- 决策事件不进异步队列，现场短调。
+- 观察队列满时按 manifest `drop_policy`：`drop_oldest` 或 `coalesce_by_key`。
+- 终态、权限与故障事件不可丢；队满则断开该扩展并记 `extension.backpressure_terminal`。
+- 丢了几件，下一事件带 `dropped_since_last`。
+
+## 十五、Context SPI
+
+### 15.1 ContextContribution
+
+```cpp
+struct ContextContribution {
+    std::string provider_id;
+    std::string contribution_id;
+    std::string section;       // project_fact/tool_hint/task_state/user_note
+    std::string content;
+    int priority = 0;
+    ContextLifetime lifetime;  // request/turn/session
+    ContextCachePolicy cache;  // stable/epoch/volatile
+    std::string fingerprint;
+    std::size_t max_chars;
+    bool sensitive = false;
+};
+```
+
+### 15.2 调用输入
+
+ContextProvider 只拿最小视图：
+
+```text
+cwd identity
+git identity（若有）
+user prompt 摘要或原文（按 grant）
+有效 Agent/Profile id
+可用工具 id
+上一轮稳定结果摘要
+provider/model/context budget
+```
+
+默认不给完整历史、Secret、环境变量与文件内容。想读文件，注册受控 Tool 或声明具体只读资源范围。
+
+### 15.3 拼装次序
+
+```text
+host core/mode/model invariants
+-> project instructions
+-> Agent + Prompt Profile
+-> stable extension context（按 id/fingerprint 稳定排序）
+-> session/turn extension context
+-> volatile request context
+-> tool index
+-> Soul
+```
+
+实际次序须与现有 PromptAssembler 的缓存前缀约束合案；若动态工具设计另有最终裁决，以“固定前缀先、易变尾段后”为铁律。
+
+### 15.4 Prompt Cache 守恒
+
+- `stable` 贡献内容与排序不变时，fingerprint 必须不变。
+- `epoch` 只在显式 invalidation 后变化。
+- `volatile` 永远排在稳定前缀之后。
+- 扩展谎报 stable 而内容变了，宿主发现 hash 不合时改判 volatile，并记诊断。
+- 同一 contribution id 每轮重复只留一份，不靠字符串去重。
+- 总预算先按宿主保底，再按优先级分配；扩展无权挤掉用户 prompt、工具对与活跃任务状态。
+
+### 15.5 History Projection
+
+`context.project_history` 是高风险能力，只允许 process runtime，首版实验 gate 默认关。
+
+- 输入是不可变 message snapshot，敏感块可先脱敏。
+- 输出只许 `keep/drop/replace_with_reference` 提案，不许造 system message。
+- tool_use/tool_result 成对保留。
+- 最近用户输入、活跃 TODO、未交付子任务与当前 turn 不可删。
+- 投影只活一请求，不写回 session。
+- 宿主生成 projection manifest，记录每条为何留/删。
+
+## 十六、Compact SPI
+
+### 16.1 不是让扩展随便重写 history
+
+扩展只实现 `compact/propose`：
+
+```text
+输入：冻结 history、分区、预算、宿主保留集、artifact 引用、用户自定义指令
+输出：archive summary、plan/work-state、kept message ids、artifact refs、claims
+```
+
+宿主仍调用现有 CompactValidation：
+
+- UTF-8 合法。
+- 工具调用配对。
+- 用户合同与下一步不丢。
+- 活跃 TODO、Goal、子代理等待态不丢。
+- kept ids 真实存在且次序不乱。
+- 新史不超过预算，不反涨。
+- provider/tool 特殊消息角色合法。
+- manifest 与实际 history 一致。
+
+### 16.2 策略选择
+
+配置示例：
+
+```json
+{
+  "compact": {
+    "strategy": "acme.context:topic-aware",
+    "on_failure": "builtin"
+  }
+}
+```
+
+`on_failure` 只认：
+
+- `builtin`：明示回内置，并在 UI/trajectory 报一笔。
+- `abort`：保旧 history，压缩失败。
+
+没有静默 fallback。自动压缩若选 `abort` 且已临窗口绝壁，Agent Loop 明报 context exhaustion，不偷偷换策略。
+
+### 16.3 防恶意摘要
+
+- Compact Extension 输出视为不可信数据，不视为宿主指令。
+- claims 中引用的文件、命令与状态须能指回 message/artifact id。
+- 不允许输出新的权限、capability grant、system instruction。
+- 敏感内容沿用输入红线；扩展没有 `sensitive.read` 时先脱敏。
+
+## 十七、Provider SPI
+
+### 17.1 分两档
+
+**Declarative Provider**：只配置宿主已有 wire、模型目录、headers/body、OAuth helper。无需代码，优先走这档。
+
+**Protocol Provider Extension**：真正的新 wire。首版只许 long-lived process runtime，不许 Lua/native 控制面。
+
+### 17.2 ProviderDefinition
+
+```cpp
+struct ExtensionProviderDefinition {
+    std::string id;
+    std::string display_name;
+    std::vector<std::string> auth_methods;
+    std::vector<std::string> capabilities;
+    bool supports_stream = true;
+    bool supports_tools = false;
+    bool supports_images = false;
+    bool supports_reasoning = false;
+    bool supports_usage = false;
+};
+```
+
+### 17.3 调用协议
+
+```text
+provider/list_models
+provider/start(request profile + messages + tools + opaque auth lease)
+provider/cancel(request id)
+provider/event(normalized StreamEvent)
+provider/complete
+```
+
+扩展吐出的中立事件只能来自白名单：message start、text/thinking delta、tool start/input delta、image、usage、message stop、error。宿主跑与内置 wire 同一套 assembler 状态机。
+
+### 17.4 Secret 与信任真话
+
+- 兼容内置 wire 时，宿主独占 Key，扩展不见。
+- 自定义 wire 若必须签名，process 会拿一份短寿命 auth lease，可能最终接触明文凭据。
+- 信任页须列 Secret 逻辑名、来源、传递方式、目标 host 与进程路径。
+- 优先用匿名 pipe/继承句柄传一次凭据，不写 argv、不写日志、不写长期 env。
+- 扩展进程拥有当前用户 OS 权限；这不是密钥防泄漏沙箱。只给可信代码。
+
+### 17.5 Provider 失败合同
+
+- 坏事件序列：`provider.invalid_event_sequence`，终止请求。
+- 工具 schema 能力谎报：请求前拒绝，不降成纯文本。
+- usage 未报：保留 `usage_reported=false`。
+- 取消迟到：丢迟到 delta，终态只认 cancelled。
+- process 崩：当前 turn error；Supervisor 计崩溃，不自动重放有副作用请求。
+- 重试只由宿主按幂等与 provider policy 决定，扩展不得暗重试收费请求。
+
+## 十八、声明式 UI SPI
+
+### 18.1 为何不能给原始绘制回调
+
+原始终端绘制会把扩展绑死在 ANSI、光标、宽字符与某一壳。LubanCode 还有 App Server，往后也会有别的前端。故而扩展只交 UI IR，前端自己画。
+
+### 18.2 首版组件
+
+```text
+status_segment   状态栏短段
+list_view        可筛选列表
+detail_view      文本/Markdown/键值详情
+form_view        输入、单选、多选、确认
+progress_view    有界任务进度
+notification     info/warn/error
+action_bar       按钮到注册 Command
+```
+
+不收自由 HTML、脚本、CSS、ANSI、Win32 HANDLE 与任意 SVG。图片只走 ArtifactRef。
+
+### 18.3 UI IR 示例
+
+```json
+{
+  "viewId": "acme.review:findings",
+  "kind": "list_view",
+  "title": "Review findings",
+  "revision": 7,
+  "items": [
+    {"id": "F1", "label": "Null dereference", "severity": "error"}
+  ],
+  "actions": [
+    {"id": "fix", "label": "Fix", "command": "acme.review:review.fix",
+     "args": {"findingId": "${selection.id}"}}
+  ]
+}
+```
+
+宿主校验 action 只能指向同扩展已登记命令或公开宿主 action。模板只许取当前 view model 白名单字段，不 eval。
+
+### 18.4 状态与修订
+
+- view model 用 `viewId + revision` 乐观并发。
+- 用户动作带 `expectedRevision`；旧 revision 报 `extension.ui.stale_view`。
+- UI 草稿归前端；Extension reload 前若 view 有脏草稿，前端提示保留/丢弃。
+- 扩展只能更新自己 view，不能覆盖核心 Agent Dock、审批、ask_user 与输入框。
+- status segment 有宽度、优先级与刷新下限；不得每 token 刷一次。
+
+### 18.5 快捷键
+
+```json
+{
+  "key": "ctrl+alt+r",
+  "command": "acme.review:review.open",
+  "when": "editorFocus && !modalOpen"
+}
+```
+
+- `when` 只认宿主布尔上下文键，不执行表达式语言。
+- 核心安全键不可覆盖：Esc、Ctrl+C、审批确认、紧急停止。
+- 冲突时核心胜；外部同优先级冲突则两边都禁，诊断列出。
+- Windows Terminal 吃掉的键须在 `/extension doctor` 明报不可达。
+
+### 18.6 App Server 投影
+
+- `initialize.capabilities` 新增 `extensionCommands`、`extensionViews`。
+- 新事件：`extension/registryChanged`、`extension/viewChanged`、`extension/notification`。
+- 新方法：`extension/command/execute`、`extension/view/query`、`extension/view/action`。
+- 仍走现有 owner、审批、thread 与 cursor 合同。
+- 客户端不支持某 UI kind 时，退成结构化 detail view；不可把扩展代码发到客户端执行。
+
+## 十九、存储与状态
+
+### 19.1 目录
+
+```text
+~/.lubancode/extension-data/<canonical-id>/
+  state.json
+  data/
+  cache/
+  logs/
+```
+
+项目源码树、Package 根与数据目录分开。扩展升级、指纹、打包不扫数据目录。
+
+### 19.2 Storage API
+
+- `storage.read(key)` / `storage.write(key, json)` 只认相对逻辑 key。
+- 单值与总量各有帽；写入临时文件后原子 replace。
+- 并发写用 expected revision；冲突返回 `storage.conflict`。
+- Secret 不进普通 storage；另走 SecretResolver。
+- cache 可删，state 不可悄删。
+- Session scoped state 可挂 session id，但 canonical session 文件只存引用与 extension id，不存任意大 blob。
+
+## 二十、资源、线程与取消
+
+### 20.1 空载预算
+
+以下是实现门槛，不是现状成绩。先在 P0 固定基线，再逐批对账：
+
+- Release 主二进制相对基线增量不超过 1 MiB；超了须拆资源或解释批准。
+- 零启用扩展时，不新增常驻子进程与后台线程。
+- 零启用扩展时，私有工作集 P50 相对基线增加不超过 2 MiB。
+- 冷启动 P50 不劣化超过 15%，且绝对增量不超过 50 ms；两门取严者。
+- Catalog 静态扫描须有文件数、字节数与墙钟账；不执行代码。
+
+测法：每平台 Release，预热文件缓存与冷缓存分开；各跑 20 次，报 P50/P95、二进制、working set/private memory、进程树峰值。Windows、Ubuntu、macOS 各有脚本，结果随 CI artifact 保存。
+
+### 20.2 启用后的账
+
+每 extension 记录：
+
+```text
+startup_ms
+calls / failures / timeouts / cancellations
+inflight
+queue_depth / dropped
+input_bytes / output_bytes
+cpu_ms（能取则取）
+working_set/private_bytes（process 能取则取）
+lua_allocator_bytes
+last_error
+```
+
+取不到的写 unknown，不填 0。
+
+### 20.3 线程规矩
+
+- ExtensionSupervisor 独占状态迁移；不让各前端各写一份。
+- process reader/writer 分线程或异步泵，业务回调不在读线程执行。
+- Lua state 一实例一串行执行器；多实例可并行。
+- 观察事件排队；决策事件现场短调。
+- 回调不得持有 TUI 锁、TaskLedger 锁、SessionStore 写锁再等扩展。
+- 进程回调回宿主时，走受控 dispatcher，不重入原调用栈。
+
+### 20.4 取消
+
+- 每次调用有 `CancellationToken + deadline`。
+- Host 取消先标终态，再发 runtime cancel；迟到结果不翻案。
+- Lua 指令 hook 同时查取消与预算。
+- process 收 `$/cancel`；越过 grace period 后杀进程树。
+- Provider stream、Context、Compact、Command、Tool 各写取消测试。
+- shutdown 不是 cancel 的别名；shutdown 会拒新调用并 drain 全部。
+
+## 二十一、安全与信任页
+
+### 21.1 安装/信任时展示
+
+```text
+扩展 id / version / source / sha256
+runtime kind 与可执行路径
+required/optional capabilities
+注册的工具、命令、事件、Provider、UI
+精确网络目标与方法
+Secret 逻辑名及传递方式
+数据目录与资源帽
+是否长驻、何时启动
+是否会看到 prompt/history/file content
+是否能阻断工具或压缩
+native/process 的 OS 权限真相
+```
+
+用户批准的是这份指纹与能力集合。增能力、换入口、换网络目标、换 Secret 声明都须重批。
+
+### 21.2 输入输出红线
+
+- prompt/history 默认脱敏；申请原文须单列 capability。
+- Tool input/result 按事件最小化，不给无关观察器。
+- Secret 值不进 JSON envelope、日志、trajectory、UI、错误与 context。
+- Provider auth lease 只给目标 process，生命周期跟请求走。
+- UI Markdown 走现有安全渲染，不认终端 escape。
+- 扩展产路径须经 canonicalize、root containment、reparse/symlink 检查。
+
+### 21.3 隔离等级如实标
+
+| runtime | 崩溃隔离 | 文件/网络隔离 | 密钥可见性 |
+| --- | --- | --- | --- |
+| embedded Lua pure | 无进程隔离；pcall/预算软墙 | Host API 可控，恶意绕洞不作强保证 | 默认 SecretRef，不见明文 |
+| process | 崩溃不带倒宿主 | 默认仍是当前用户 OS 权限 | 按 capability，Provider 可能见短寿命凭据 |
+| native | 崩溃可带倒宿主 | 无 | 可读宿主地址空间，视为完全可信 |
+
+不许把“独立进程”写成“安全沙箱”。OS 沙箱另立单，接入时作为 `ExecutionProvider` 能力，不在此假装已有。
+
+## 二十二、错误合同与诊断
+
+### 22.1 稳定错误码
+
+至少包括：
+
+```text
+extension.manifest_invalid
+extension.protocol_incompatible
+extension.untrusted
+extension.disabled
+extension.capability_denied
+extension.registration_undeclared
+extension.registration_missing
+extension.registration_conflict
+extension.spawn_failed
+extension.handshake_timeout
+extension.bad_frame
+extension.frame_too_large
+extension.backpressure_terminal
+extension.call_timeout
+extension.cancelled
+extension.crashed
+extension.quarantined
+extension.reload_failed
+extension.restart_required
+extension.context_over_budget
+extension.context_invalid
+extension.compact_invalid
+extension.provider_invalid_event
+extension.ui.stale_view
+extension.ui.unsupported
+extension.storage_conflict
+```
+
+用户文案可本地化，错误码不可随翻译变化。
+
+### 22.2 命令面
+
+```text
+/extensions
+/extension inspect <id>
+/extension doctor <id>
+/extension trust <id>
+/extension untrust <id>
+/extension grant <id> <capability>
+/extension deny <id> <capability>
+/extension enable <id>
+/extension disable <id>
+/extension reload [id]
+/extension retry <id>
+/extension logs <id> [N]
+/extension resources <id>
+```
+
+`/plugins` 保持旧三路工具插件视图；可加迁移提示，不立即改名。`/package` 看箱子，`/extension` 看运行体，`/tools` 看模型工具，三本账不可混。
+
+### 22.3 doctor 只读原则
+
+默认 doctor：
+
+- 解析 manifest、路径、协议区间。
+- 查 runtime 可执行、平台、架构、签名/hash。
+- 查 capability/grant 差额。
+- 查 id 冲突、快捷键冲突、UI 前端支持。
+- 查网络目的地 DNS 安全，但不带 Secret 发业务请求。
+- process 可跑 `--extension-probe`，须明确提示会起进程；不执行业务 handler。
+
+## 二十三、兼容与迁移
+
+### 23.1 旧路全保留
+
+- 裸 Lua：仍是一文件一 Tool。
+- manifest v2 Lua Plugin：仍按 Plugin 工具协议。
+- process Plugin：仍一调用一进程。
+- native ABI v1/v2：仍只注册 Tool。
+- MCP/LSP/Hooks：配置与命令不变。
+- Package 旧六类组件不改 schema。
+
+### 23.2 LegacyAdapter
+
+LegacyAdapter 只做统一诊断与注册账：
+
+```text
+legacy Lua/process/native Tool
+-> ExtensionIdentity(legacy namespace)
+-> ToolRegistration
+-> existing ToolRegistry
+```
+
+它不凭空给旧插件 lifecycle、UI、Context、Provider 能力。旧插件继续要求重启，直到作者迁到 `extensions/`。
+
+### 23.3 Package schema 演进
+
+Package 新增 `extensions/` ComponentKind，属于 additive schema 升版。老程序遇新 kind 须拒并提示升级，不静默忽略代码组件。
+
+Package 清单只列组件与版本约束，不重复 extension.json 的 capability、网络与 limits。每项语义只留一处 writer。
+
+## 二十四、内置能力反向狗粮
+
+合同若只跑 hello-world，迟早变成残接口。分批选内置件反向适配：
+
+1. 一只只读 slash 命令走 Command SPI。
+2. 状态栏一枚非关键段走 UI status contribution。
+3. 项目记忆召回的只读投影走 Context SPI（真账仍内置）。
+4. 内置 Compact 包一层 BuiltinCompactStrategy，与外部同 Registry。
+5. 一只假 Provider 走 process Provider SPI，真 provider 暂不迁。
+
+狗粮不等于删旧路。先双跑对账，结果一致后才收一个 writer。
+
+## 二十五、测试体系
+
+### 25.1 纯单测
+
+- manifest：好坏字段、未知版本、路径越界、重复 id、capability 差额。
+- grants：hash 变化、scope、deny 胜、权限只能收窄。
+- framing：拆包、粘包、零长、超帽、坏 UTF-8、乱序 response。
+- state machine：每条合法/非法迁移、quarantine、retry。
+- registry：冲突、原子发布、generation 钉住、builtin 保留。
+- command：schema、alias、权限、App Server/TUI 同结果。
+- event：顺序、归并、超时、背压、dropped、终态不丢。
+- context：排序、预算、fingerprint、stable 谎报、敏感脱敏。
+- history projection：工具对、当前 turn、活跃任务守恒。
+- compact：好提案、反涨、伪 id、丢合同、坏角色、fallback 明报。
+- provider：中立事件状态机、usage 缺失、取消迟到、坏 tool delta。
+- UI IR：坏 action、stale revision、冲突键、宽度、文本帽、降级。
+- storage：原子写、revision 冲突、迁移回滚。
+
+### 25.2 Runtime 夹具
+
+建立 `tests/fixtures/extensions/`：
+
+```text
+lua-minimal/
+lua-command-ui/
+lua-context/
+process-minimal/
+process-out-of-order/
+process-crash/
+process-hang/
+process-bad-frame/
+process-provider/
+reload-v1/
+reload-v2/
+capability-escalation/
+path-escape/
+secret-leak-canary/
+```
+
+### 25.3 集成场景
+
+1. 装扩展但不信任：零执行、零进程、零网络。
+2. 信任后挂 command/tool/view；TUI 与 App Server 均可见。
+3. Extension Command 请求写文件：权限门出现，拒绝后零副作用。
+4. ContextProvider 每轮回稳定段，前缀 hash 不抖。
+5. 恶意 Context 想写 system/mode 段，宿主拒。
+6. Compact Extension 丢 tool_result，校验拒，按配置明示 fallback/abort。
+7. Provider Extension 流一轮 tool call，Assembler 与内置 wire 同形。
+8. reload v1 -> v2：新调用走 v2，在飞 v1 收完才退。
+9. reload v2 坏握手：v1 一分不动。
+10. process 崩溃连续越帽：进 quarantine，不无限重启。
+11. UI revision 过期：动作拒绝，不误操作新选择。
+12. 子代理派出后主会话 reload：子代理仍用旧快照。
+13. App Server 断线重连：view/query 能补当前快照，瞬时通知不冒充全收。
+14. Secret canary 不出现在 stdout/stderr/session/trajectory/UI/tool result。
+
+### 25.4 三平台与真终端
+
+- Windows MSVC + Windows Terminal：键位、UTF-8、进程树、DLL restart_required。
+- Ubuntu GCC：进程 framing、信号取消、路径与 symlink。
+- macOS Clang：进程收尸、dylib 兼容账、终端宽字符。
+- 真终端脚本另测 slash 补全、view 重绘、窗口缩窄、表单草稿与 reload 提示。
+- App Server 用独立客户端，不调用同进程内部函数冒充 E2E。
+
+### 25.5 资源基准
+
+固定三档：
+
+```text
+A. baseline：无 Extension Runtime feature
+B. runtime-empty：Runtime 开，零启用扩展
+C. one-lua / one-process / one-provider：各挂一只参考扩展
+```
+
+采集安装体积、主二进制、启动 P50/P95、首命令、首工具、idle private memory、调用峰值、进程树峰值、取消 P50/P95。C 档不能反推 A/B；报告逐档列。
+
+## 二十六、分期落地
+
+批次不可越。P0 合同没钉住之前，不做花哨 UI 与 Provider。
+
+### P0-0：现状基线与 ADR
+
+- [ ] 固定三平台 Release 空载体积、冷启动、私有工作集、进程/线程数测法与脚本。
+- [ ] 写 ADR：Extension、Plugin、MCP、Hook、Package、Channel、Telemetry 的边界。
+- [ ] 冻结 ExtensionIdentity、capability、generation、错误码命名。
+- [ ] 列出现有动态注册、静态槽、全局 callback 与 CLI 直接耦合点。
+
+验收：有可重复基线与依赖图；没有性能数字便不许写“轻量无损”。
+
+### P0-1：Manifest、Grant 与静态盘点
+
+- [ ] 新增严格 `extension.json` parser 与 schema tests。
+- [ ] Package 新增 Extension ComponentKind、inventory、canonical id 与 mount plan。
+- [ ] 新增 ExtensionGrantStore，按内容 hash 记能力授权。
+- [ ] `/extension inspect/doctor/trust/grant/deny` 先做只读/账务面，不执行扩展。
+- [ ] disabled/untrusted 零副作用夹具三平台跑通。
+
+验收：能列清“它想要什么、批了什么、为何没挂”，未信任代码零执行。
+
+### P0-2：RegistrySet、Snapshot 与 Supervisor
+
+- [ ] 建 ExtensionState 状态机与非法迁移测试。
+- [ ] 建 ExtensionRegistrySet 与 staging/publish 原子事务。
+- [ ] 建 ExtensionSnapshot、generation 强引用与在飞调用模型。
+- [ ] 把 PackageSnapshot 与 ExtensionSnapshot 分层接进 SessionStack。
+- [ ] 轨迹记录状态、generation、故障与资源未知值。
+
+验收：假 runtime 可原子挂/撤；失败不动旧代；在飞引用不悬空。
+
+### P0-3：Process Runtime 协议
+
+- [ ] 实现长度帧、hello/ready、乱序 request、cancel、ping/pong。
+- [ ] 实现 stderr 帽、帧帽、队列帽、deadline、进程树回收。
+- [ ] 实现 crash quarantine 与显式 retry。
+- [ ] 给 Windows/POSIX 各写真子进程夹具。
+- [ ] 不改旧 process Plugin executor。
+
+验收：坏帧、挂死、崩溃、取消、背压均有唯一终态，无线程/进程泄漏。
+
+### P0-4：Lua Extension Runtime
+
+- [ ] 把 manifest v2 Lua Host API 抽成可复用窄接口。
+- [ ] 顶层只准登记，具体调用才开 active context。
+- [ ] 实现 capability、指令、内存、结果与取消帽。
+- [ ] 实现 shutdown 与 generation 独立 Lua state。
+- [ ] 旧裸 Lua/manifest Plugin 走 LegacyAdapter，不改语义。
+
+验收：一份 Lua 能注册假 command/event，越权 API 结构性不可达。
+
+### P0-5：统一 Tool 与决策事件
+
+- [ ] Extension Tool 注册适配现有 ToolRegistry。
+- [ ] 动态 Tool 继续过 schema、Hook、权限、取消、审计与延迟挂载。
+- [ ] EventBus 区分 observe/decide，复用 Hooks 决策语义而非执行壳。
+- [ ] 后台子代理拿冻结 event policy 与 ExtensionSnapshot。
+- [ ] 与动态工具 Prompt Cache 设计合案，工具 identity 不随 reload 无故抖。
+
+验收：模型调用扩展 Tool 与内置 Tool 走同一条 `RunOneTool` 生命线。
+
+### P1-1：Command SPI
+
+- [ ] 抽动态 CommandCatalog，静态命令先适配不迁所有实现。
+- [ ] 接 slash 解析、补全、帮助、命令面板与 App Server。
+- [ ] 实现 args schema、side effect、权限、结构化结果。
+- [ ] 加一只内置只读命令狗粮。
+
+验收：同一扩展命令从 TUI/App Server 调，回执与权限一致。
+
+### P1-2：Context SPI
+
+- [ ] 实现 ContextProvider registry、最小输入、Contribution DTO。
+- [ ] 实现 stable/epoch/volatile、fingerprint 与预算排序。
+- [ ] 接 PromptAssembler 的明确扩展段，不让扩展碰 mode/system 真段。
+- [ ] 输出 Context source ledger 与 `/context` 诊断。
+- [ ] 项目记忆只读召回做狗粮，不迁真账 writer。
+
+验收：稳定扩展段不破缓存前缀；超预算、谎报稳定、敏感文本都有诊断。
+
+### P1-3：Compact SPI
+
+- [ ] 把内置 Compact 包成 BuiltinCompactStrategy。
+- [ ] 实现 process `compact/propose` 与宿主守恒验证。
+- [ ] 实现 `on_failure=builtin|abort` 明示策略。
+- [ ] 写恶意/残缺摘要夹具与反涨门。
+
+验收：外部策略只能交候选，无法绕过现有 compact_v2 守恒与反涨合同。
+
+### P1-4：声明式 UI 与快捷键
+
+- [ ] 冻结 UI IR schema、revision、action 与降级合同。
+- [ ] TUI 实现 status/list/detail/form/progress/notification。
+- [ ] App Server 实现相同贡献的 query/event/action。
+- [ ] 实现键位冲突、核心保留键与 when 白名单。
+- [ ] 加真终端窄屏、宽字符、重绘、草稿、reload 测试。
+
+验收：扩展能添一座工作面板，却拿不到终端句柄，也绕不过 CommandService。
+
+### P1-5：代码热重载
+
+- [ ] `/extension reload [id]` staging、探活、原子 publish。
+- [ ] Lua/process 旧代 drain 与超时回收。
+- [ ] native 明示 restart_required，不尝试危险卸载。
+- [ ] UI 脏草稿、子代理旧快照、Provider 在飞流各写测试。
+- [ ] `/package reload` 与 `/extension reload` 回执分工写清。
+
+验收：v2 起不来时 v1 照跑；v2 成功后新调用走新代，旧调用自然收口。
+
+### P2-1：Provider SPI
+
+- [ ] 先落 Declarative Provider contribution，不写代码能挂已有 wire。
+- [ ] 落 process Provider protocol、normalized StreamEvent 与 assembler 校验。
+- [ ] 落短寿命 auth lease、取消、usage 与收费重试边界。
+- [ ] 用本地假 provider E2E，不先接真钱服务。
+- [ ] 真 provider 探针另列凭据、成本与删账流程。
+
+验收：假新 wire 跑完文本+工具一轮；坏事件、崩溃、迟到取消都明收口。
+
+### P2-2：History Projection 实验档
+
+- [ ] 默认 feature gate 关闭。
+- [ ] 实现只读 snapshot、keep/drop/reference 提案与 manifest。
+- [ ] 保住工具对、当前轮、活跃任务与用户合同。
+- [ ] 与 Compact/Memory/Artifact 边界对账，不另造第四本 history。
+
+验收：projection 只影响单次请求；session/trajectory 字节一字不改。
+
+### P2-3：开发者体验与参考包
+
+- [ ] `lubancode extension init lua|process` 脚手架。
+- [ ] `extension validate/test/pack` 本地工具。
+- [ ] 参考包：review workbench、topic compact、fake provider。
+- [ ] 版本锁、协议兼容表、迁移指南与故障手册。
+- [ ] 再评估是否需要签名/索引；市场另立单。
+
+验收：第三方只读文档便能写、验、装一只扩展，不需 include LubanCode C++ 内部头。
+
+## 二十七、预计改动边界
+
+### 新增
+
+- `src/extension/*`
+- `tests/unit/extensions/*`
+- `tests/integration/extensions/*`
+- `tests/fixtures/extensions/*`
+- `docs/reference/extensions-runtime.md`
+- `docs/features/extensions/commands.md`
+- `docs/features/extensions/context.md`
+- `docs/features/extensions/ui.md`
+- `docs/features/extensions/providers.md`
+- `scripts/bench/extension_footprint.*`
+
+### 修改
+
+- `src/package/component.*`、`inventory.*`、`catalog.*`、`mounting.*`
+- `src/app/session_stack.*` 与装配 wiring
+- `src/tools/registry.*`、动态工具挂载接线
+- `src/hooks/events.*` 与公共决策 DTO（只抽语义，不硬并 runtime）
+- `src/app/commands/command_registry.*`、`slash_dispatch.*`
+- `src/agent/prompt_assembler.*`、`compact.*`
+- `src/api/backend.hpp`、assembler 与 BackendStack 工厂口
+- `src/cli/` 的 UI IR adapter，不把 runtime 逻辑塞进绘制层
+- `src/app_server/` 的 extension 方法/事件
+- `CMakeLists.txt`、测试清单、i18n 与文档目录
+
+### 不应修改
+
+- 不为这单改 Provider 现有 wire JSON 语义。
+- 不改 MCP/Channel/Telemetry 业务协议来迎合通用扩展。
+- 不让 Package 层执行代码。
+- 不把 ExtensionSupervisor 塞进 `interactive_session.cpp` 成新总管。
+
+超出这些边界，先补 ADR 或另立单。
+
+## 二十八、不采用的路
+
+### 28.1 “所有功能继续写 C++ 内置”
+
+不采用。二进制未必立刻变大，编译、发布、回归与所有权却会越滚越重。用户每添一项能力都要 fork 主仓，谈不上可塑。
+
+### 28.2 “把 C++ 内部对象全暴给 DLL”
+
+不采用。STL ABI、编译器、CRT、对象生命周期与线程模型都会锁死；第三方插件一崩便带倒宿主。C ABI 保持工具窄口。
+
+### 28.3 “嵌一套 Node/V8，照抄 Pi Extension”
+
+不采用。它会直接改变空载体积、内存与发布链。复杂扩展可自行带 process runtime，宿主只守协议。
+
+### 28.4 “只用 Lua，什么都在进程内跑”
+
+不采用。Lua 适合轻逻辑，不适合大型 SDK、浏览器、任意 OAuth 与不可信代码。复杂能力走进程。
+
+### 28.5 “把 MCP 当万能插件协议”
+
+不采用。MCP 的主体是模型调工具；命令、UI、Context、Provider 与宿主生命周期不该伪装成 Tool。
+
+### 28.6 “让扩展直接改 history 与 session 文件”
+
+不采用。真账多 writer 后无法恢复、重放、审计。扩展只交 request projection 或 compact proposal。
+
+### 28.7 “热重载就是先卸旧 DLL再装新 DLL”
+
+不采用。函数指针、线程、对象与在飞调用都可能踩空。native 只提示重启；Lua/process 走 generation drain。
+
+### 28.8 “扩展失败便悄悄回内置”
+
+不采用。可配置 fallback 可以有，须明写、明报、落轨迹。没有配置便按失败收口。
+
+### 28.9 “先做市场，再补信任与版本”
+
+不采用。传播面先于安全合同，只会把一次本地故障变成生态事故。
+
+## 二十九、最终验收门
+
+### 合同门
+
+- 六平面都有 schema、版本、错误码、权限、资源帽、取消与来源账。
+- Package、Extension、Plugin、MCP、Hook、Channel、Telemetry 边界文档互相不打架。
+- 动态能力没有第二条权限、会话、轨迹与工具执行旁路。
+
+### 安全门
+
+- 未信任/disabled 扩展三平台证实零代码执行、零进程、零网络。
+- Secret canary 不出现在 session、trajectory、日志、UI、Context、Tool result。
+- 目录穿越、symlink/reparse、坏帧、超帽、权限升级夹具全拒。
+- process/native 隔离等级文档如实，不把当前用户进程冒充沙箱。
+
+### 生命周期门
+
+- reload 折好才换；坏新代不伤旧代。
+- 在飞 Tool/Command/Context/Compact/Provider/子代理各有旧代钉住测试。
+- shutdown、cancel、crash、timeout、quarantine 各有唯一终态，无孤儿进程。
+
+### 体验门
+
+- 一只参考扩展能同时交 Tool、Command、Context、View，并从 TUI/App Server 操作。
+- 核心快捷键、审批、ask_user、Agent Dock 不让扩展覆盖。
+- 窄屏、宽字符、无颜色、Windows Terminal 键位均有真机记录。
+
+### 轻量门
+
+- A/B/C 三档资源报告齐全，三平台均有 CI artifact。
+- B 档空 runtime 满足：主二进制增量 <= 1 MiB、idle private P50 增量 <= 2 MiB、无新增常驻进程/线程、冷启动过预算门。
+- 超预算不能拿“C++ 总归轻”搪塞；须拆件、懒加载或经主人明批改预算。
+
+### 工程门
+
+- 全量 CTest 三平台绿；手工/真终端项另列，不拿单测冒充。
+- App Server 用独立客户端冒烟；process runtime 用真子进程。
+- 文档、配置 schema、i18n、CHANGELOG、迁移指南同批落地。
+- 参考扩展在空白用户目录可安装、信任、运行、reload、禁用、删除，不留进程与脏状态。
+
+收官时删本单或由主人决定留档。没有资源实测、三平台与真子进程证据，不得写“达到 Pi 同等级可塑性”；最多写“Extension Runtime 合同与六平面实现已落地”。

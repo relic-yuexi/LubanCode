@@ -41,6 +41,7 @@
 #include "runtime/plugin_tool.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/ask_user.hpp"
+#include "tools/deferred_tool_resolver.hpp"  // DeferredToolMode/DeferredToolResolver:动态工具 P1 的模式与引用账
 #include "tools/plugin_loader.hpp"
 #include "tools/registry.hpp"
 #include "tools/skill_loader.hpp"
@@ -241,6 +242,32 @@ public:
     const std::shared_ptr<std::set<std::string>>& loaded_tools() const { return loaded_tools_; }
     bool main_deferral() const { return main_deferral_; }
     bool sub_deferral() const { return sub_deferral_; }
+    // 动态工具 P1(通用 ProxyReference):延迟工具模式与两侧的引用解析器。
+    // 模式 Disabled 或 deferral 没开时恒 Disabled;resolver 为空 = proxy 路
+    // 没开(legacy/disabled),装配层据此跳过代理接线。main/sub 各一只
+    // resolver——账不互通,父亲的 ref 不给儿子当通行牌(单子 §5.5)。
+    lubancode::tools::DeferredToolMode main_tool_mode() const { return main_mode_; }
+    lubancode::tools::DeferredToolMode sub_tool_mode() const { return sub_mode_; }
+    bool main_proxy_enabled() const { return main_proxy_; }
+    bool sub_proxy_enabled() const { return sub_proxy_; }
+    const std::shared_ptr<lubancode::tools::DeferredToolResolver>& main_tool_ref_resolver() const {
+        return main_resolver_;
+    }
+    const std::shared_ptr<lubancode::tools::DeferredToolResolver>& sub_tool_ref_resolver() const {
+        return sub_resolver_;
+    }
+    // proxy 模式的执行资格(单子 §5.5"effective policy allows target"):
+    // 只作用于经 tool_invoke 解引用来的调用;直接按名调用仍走 tool_filter。
+    // main 侧带 memory gate(与主过滤同一道),sub 侧无额外闸(与子过滤
+    // 同一口径——延迟/loaded 那半在 exposure 侧,不进执行闸)。
+    const std::function<bool(const lubancode::tools::Tool&)>& main_execution_policy() const {
+        return main_execution_policy_;
+    }
+    const std::function<bool(const lubancode::tools::Tool&)>& sub_execution_policy() const {
+        return sub_execution_policy_;
+    }
+    const std::string& main_execution_denial() const { return main_execution_denial_; }
+    const std::string& sub_execution_denial() const { return sub_execution_denial_; }
     const std::function<bool(const lubancode::tools::Tool&)>& main_tool_filter() const { return main_tool_filter_; }
     const std::function<bool(const lubancode::tools::Tool&)>& sub_tool_filter() const { return sub_tool_filter_; }
     const std::vector<PluginMountInfo>& plugin_mounted() const { return plugin_mounted_; }
@@ -324,6 +351,17 @@ private:
     std::shared_ptr<std::set<std::string>> loaded_tools_ = std::make_shared<std::set<std::string>>();
     bool main_deferral_ = false;
     bool sub_deferral_ = false;
+    // 动态工具 P1:模式、两侧 resolver(proxy 路才有)与执行资格。
+    lubancode::tools::DeferredToolMode main_mode_ = lubancode::tools::DeferredToolMode::LegacyExpand;
+    lubancode::tools::DeferredToolMode sub_mode_ = lubancode::tools::DeferredToolMode::LegacyExpand;
+    bool main_proxy_ = false;
+    bool sub_proxy_ = false;
+    std::shared_ptr<lubancode::tools::DeferredToolResolver> main_resolver_;
+    std::shared_ptr<lubancode::tools::DeferredToolResolver> sub_resolver_;
+    std::function<bool(const lubancode::tools::Tool&)> main_execution_policy_;
+    std::function<bool(const lubancode::tools::Tool&)> sub_execution_policy_;
+    std::string main_execution_denial_;
+    std::string sub_execution_denial_;
     std::function<bool(const lubancode::tools::Tool&)> main_tool_filter_;
     std::function<bool(const lubancode::tools::Tool&)> sub_tool_filter_;
     std::vector<PluginMountInfo> plugin_mounted_;

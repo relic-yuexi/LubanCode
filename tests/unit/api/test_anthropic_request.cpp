@@ -14,6 +14,11 @@
 #include "api/anthropic/client.hpp"
 #include "api/types.hpp"
 #include "platform/log_sink.hpp"
+#include <memory>
+#include <set>
+
+#include "tools/registry.hpp"
+#include "tools/tool_search.hpp"
 
 using namespace lubancode::api;
 namespace platform = lubancode::platform;
@@ -423,4 +428,77 @@ TEST_CASE("ModelImageBlock 重放:翻 text 短标记,不带 base64") {
     CHECK(dumped.find("[模型已生成图片: img-abcd12.png (512x512)]") != std::string::npos);
     CHECK(dumped.find("images/img-abcd12.png") == std::string::npos);
     CHECK(dumped.find("\"image\"") == std::string::npos);
+}
+
+// 动态工具 PromptCache 守恒单 P1:Anthropic 兼容端的 proxy_reference
+// replay(通用代理路,不是 P3 的 defer_loading/native)。顶层只见固定的
+// tool_search + tool_invoke;代理调用的 input 是原生 JSON 对象,往返
+// 逐字段无损。
+TEST_CASE("Anthropic proxy replay: tool_search+tool_invoke 定义恒在,代理调用 input 无损") {
+    lubancode::tools::ToolRegistry dummy_registry;
+    auto loaded = std::make_shared<std::set<std::string>>();
+    lubancode::tools::ToolSearchTool search(dummy_registry, loaded);
+    lubancode::tools::ToolInvokeTool invoke;
+
+    api::Request request;
+    request.model = "claude-sonnet";
+    request.tools.push_back({"tool_search", search.description(), search.input_schema()});
+    request.tools.push_back({"tool_invoke", invoke.description(), invoke.input_schema()});
+
+    api::Message search_result;
+    search_result.role = api::Role::User;
+    const std::string discovery_json =
+        nlohmann::json{{"catalog_revision", "sha256:abc"},
+                       {"matches", nlohmann::json::array({nlohmann::json{
+                                       {"tool_ref", "dt_0123456789_1"},
+                                       {"name", "mcp__github__search_issues"},
+                                       {"schema_digest", "sha256:def"},
+                                       {"input_schema", nlohmann::json{{"type", "object"}}}}})}}
+            .dump();
+    search_result.content.push_back(api::ToolResultBlock{"call_search", discovery_json, false});
+
+    api::Message proxy_call;
+    proxy_call.role = api::Role::Assistant;
+    proxy_call.content.push_back(api::ToolUseBlock{
+        "call_invoke", "tool_invoke",
+        nlohmann::json{{"tool_ref", "dt_0123456789_1"},
+                       {"arguments", nlohmann::json{{"query", "repo:lubancode cache"}, {"per_page", 50}}}}});
+    api::Message proxy_result;
+    proxy_result.role = api::Role::User;
+    proxy_result.content.push_back(api::ToolResultBlock{"call_invoke", "issue #42", false});
+    request.messages.push_back(search_result);
+    request.messages.push_back(proxy_call);
+    request.messages.push_back(proxy_result);
+
+    const auto body = BuildRequestJson(request, /*native_web_search=*/false, nlohmann::json::object());
+    REQUIRE(body["tools"].size() == 2);
+    CHECK(body["tools"][0]["name"] == "tool_search");
+    CHECK(body["tools"][1]["name"] == "tool_invoke");
+    CHECK(body["tools"][1]["input_schema"]["additionalProperties"] == false);
+
+    // 发现结果 JSON 正文原样重放(Anthropic tool_result 的 content 字符串)。
+    bool saw_discovery = false;
+    for (const auto& message : body["messages"]) {
+        for (const auto& block : message["content"]) {
+            if (block.value("type", std::string()) == "tool_result" && block["tool_use_id"] == "call_search") {
+                saw_discovery = block["content"].get<std::string>() == discovery_json;
+            }
+        }
+    }
+    CHECK(saw_discovery);
+
+    // 代理调用:tool_use 的 input 是对象,逐字段无损。
+    bool saw_proxy = false;
+    for (const auto& message : body["messages"]) {
+        for (const auto& block : message["content"]) {
+            if (block.value("type", std::string()) == "tool_use" && block["name"] == "tool_invoke") {
+                saw_proxy = true;
+                CHECK(block["id"] == "call_invoke");
+                CHECK(block["input"]["tool_ref"] == "dt_0123456789_1");
+                CHECK(block["input"]["arguments"]["query"] == "repo:lubancode cache");
+                CHECK(block["input"]["arguments"]["per_page"] == 50);
+            }
+        }
+    }
+    CHECK(saw_proxy);
 }

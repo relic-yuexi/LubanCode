@@ -32,7 +32,7 @@ using lubancode::cli::trf;
 // 各带计数。没启用延迟机制(总数没超阈值,或阈值是 0)时说明一句,不摆
 // 三态的空架子。
 void PrintToolsCommand(const lubancode::tools::ToolRegistry& registry, const std::set<std::string>& loaded,
-                        bool deferral_enabled, int threshold);
+                        bool deferral_enabled, int threshold, const std::string& mode_hint = std::string());
 
 std::string PathToUtf8(const std::filesystem::path& path);
 bool SameFilesystemPath(const std::filesystem::path& left, const std::filesystem::path& right);
