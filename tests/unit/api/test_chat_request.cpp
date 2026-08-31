@@ -2,6 +2,12 @@
 
 #include "api/chat/request.hpp"
 
+#include <memory>
+#include <set>
+
+#include "tools/registry.hpp"
+#include "tools/tool_search.hpp"
+
 using namespace lubancode;
 
 TEST_CASE("Chat request: system、图片、工具调用和工具结果翻成兼容消息") {
@@ -832,4 +838,71 @@ TEST_CASE("工具结果图片: chat wire 的 tool 消息明降级——附注指
     plain.messages.push_back(plain_result);
     const auto plain_body = api::chat::BuildRequestJson(plain);
     CHECK(plain_body["messages"][0]["content"] == "正文");
+}
+
+// 动态工具 PromptCache 守恒单 P1:四 wire 的 proxy_reference replay。顶层
+// 只见固定的 tool_search + tool_invoke;发现结果(JSON 正文)与代理调用
+// 的 arguments 往返无损——chat 的 arguments 是字符串化的 JSON,解析回
+// 来逐字节等才算数。
+TEST_CASE("Chat proxy replay: tool_search+tool_invoke 定义恒在,arguments JSON 往返无损") {
+    tools::ToolRegistry dummy_registry;
+    auto loaded = std::make_shared<std::set<std::string>>();
+    tools::ToolSearchTool search(dummy_registry, loaded);
+    tools::ToolInvokeTool invoke;
+
+    api::Request request;
+    request.model = "glm-5.2";
+    request.tools.push_back({"tool_search", search.description(), search.input_schema()});
+    request.tools.push_back({"tool_invoke", invoke.description(), invoke.input_schema()});
+
+    // 历史尾部:tool_search 的结构化结果 + tool_invoke 的代理调用与回执。
+    api::Message search_result;
+    search_result.role = api::Role::User;
+    const std::string discovery_json =
+        nlohmann::json{{"catalog_revision", "sha256:abc"},
+                       {"matches", nlohmann::json::array({nlohmann::json{
+                                       {"tool_ref", "dt_0123456789_1"},
+                                       {"name", "mcp__github__search_issues"},
+                                       {"schema_digest", "sha256:def"},
+                                       {"input_schema", nlohmann::json{{"type", "object"}}}}})}}
+            .dump();
+    search_result.content.push_back(api::ToolResultBlock{"call_search", discovery_json, false});
+
+    api::Message proxy_call;
+    proxy_call.role = api::Role::Assistant;
+    proxy_call.content.push_back(api::ToolUseBlock{
+        "call_invoke", "tool_invoke",
+        nlohmann::json{{"tool_ref", "dt_0123456789_1"},
+                       {"arguments", nlohmann::json{{"query", "repo:lubancode cache"}, {"per_page", 50}}}}});
+    api::Message proxy_result;
+    proxy_result.role = api::Role::User;
+    proxy_result.content.push_back(api::ToolResultBlock{"call_invoke", "issue #42", false});
+    request.messages.push_back(search_result);
+    request.messages.push_back(proxy_call);
+    request.messages.push_back(proxy_result);
+
+    const auto body = api::chat::BuildRequestJson(request, nlohmann::json::object());
+    // 固定两枚定义都在;没有第三枚(延迟目标绝不进顶层)。
+    REQUIRE(body["tools"].size() == 2);
+    CHECK(body["tools"][0]["function"]["name"] == "tool_search");
+    CHECK(body["tools"][1]["function"]["name"] == "tool_invoke");
+    CHECK(body["tools"][1]["function"]["parameters"]["additionalProperties"] == false);
+
+    // 发现结果正文无损进 tool 消息(模型重放时读的还是同一份 JSON)。
+    const auto& tool_msg = body["messages"][0];
+    REQUIRE(tool_msg["role"] == "tool");
+    CHECK(tool_msg["tool_call_id"] == "call_search");
+    CHECK(tool_msg["content"].get<std::string>() == discovery_json);
+
+    // 代理调用:tool_calls 指名 tool_invoke,arguments 字符串化后解析
+    // 回来与原 JSON 深等(往返无损)。
+    const auto& call_msg = body["messages"][1];
+    REQUIRE(call_msg["tool_calls"].size() == 1);
+    CHECK(call_msg["tool_calls"][0]["function"]["name"] == "tool_invoke");
+    const nlohmann::json parsed_args =
+        nlohmann::json::parse(call_msg["tool_calls"][0]["function"]["arguments"].get<std::string>());
+    CHECK(parsed_args["tool_ref"] == "dt_0123456789_1");
+    CHECK(parsed_args["arguments"]["query"] == "repo:lubancode cache");
+    CHECK(parsed_args["arguments"]["per_page"] == 50);
+    CHECK(body["messages"][2]["tool_call_id"] == "call_invoke");
 }

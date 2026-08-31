@@ -684,16 +684,56 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     // tool_search(延迟挂载):全部工具(MCP/插件/LSP/agent/todo)都注册
     // 完了才数总数、定启停。loaded 集合是会话级的(/clear 不清),主会话
     // 与子代理共享同一份;主表/子表各自按各自的总数判定,同一阈值。
+    //
+    // 动态工具 P1:deferred_tool_mode 决定命中之后怎么走——legacy_expand
+    //(默认)沿用 loaded 扩写路,行为与从前一字不差;proxy_reference 换
+    // 代理引用路:tool_search 铸 ref 不写 loaded,tool_invoke 常驻顶层,
+    // 延迟工具永远不进顶层 tools(单子 §5.1);disabled 连延迟都关掉。
+    // 先 opt-in:配置不写就是现状。
     const int tool_search_threshold = config.tool_search_threshold;
+    const auto configured_mode =
+        lubancode::tools::ParseDeferredToolMode(config.deferred_tool_mode);
+    const lubancode::tools::DeferredToolMode mode =
+        configured_mode.value_or(lubancode::tools::DeferredToolMode::LegacyExpand);
+    main_mode_ = mode;
+    sub_mode_ = mode;
     main_deferral_ = lubancode::tools::DeferralEnabled(main_registry_.All().size(), tool_search_threshold);
     sub_deferral_ = lubancode::tools::DeferralEnabled(sub_registry_.All().size(), tool_search_threshold);
+    if (main_mode_ == lubancode::tools::DeferredToolMode::Disabled) {
+        main_deferral_ = false;
+    }
+    if (sub_mode_ == lubancode::tools::DeferredToolMode::Disabled) {
+        sub_deferral_ = false;
+    }
+    main_proxy_ = main_deferral_ && main_mode_ == lubancode::tools::DeferredToolMode::ProxyReference;
+    sub_proxy_ = sub_deferral_ && sub_mode_ == lubancode::tools::DeferredToolMode::ProxyReference;
+    if (main_proxy_) {
+        main_resolver_ = std::make_shared<lubancode::tools::DeferredToolResolver>("main");
+    }
+    if (sub_proxy_) {
+        sub_resolver_ = std::make_shared<lubancode::tools::DeferredToolResolver>("sub");
+    }
+    // 注册次序钉死:tool_search 之后紧跟 tool_invoke——同一会话内顶层
+    // tools 数组的数量与次序都不许动(单子 §5.1)。
     if (main_deferral_) {
-        main_registry_.Register(
-            std::make_unique<lubancode::tools::ToolSearchTool>(main_registry_, loaded_tools_));
+        if (main_proxy_) {
+            main_registry_.Register(
+                std::make_unique<lubancode::tools::ToolSearchTool>(main_registry_, main_resolver_));
+            main_registry_.Register(std::make_unique<lubancode::tools::ToolInvokeTool>());
+        } else {
+            main_registry_.Register(
+                std::make_unique<lubancode::tools::ToolSearchTool>(main_registry_, loaded_tools_));
+        }
     }
     if (sub_deferral_) {
-        sub_registry_.Register(
-            std::make_unique<lubancode::tools::ToolSearchTool>(sub_registry_, loaded_tools_));
+        if (sub_proxy_) {
+            sub_registry_.Register(
+                std::make_unique<lubancode::tools::ToolSearchTool>(sub_registry_, sub_resolver_));
+            sub_registry_.Register(std::make_unique<lubancode::tools::ToolInvokeTool>());
+        } else {
+            sub_registry_.Register(
+                std::make_unique<lubancode::tools::ToolSearchTool>(sub_registry_, loaded_tools_));
+        }
     }
     main_tool_filter_ = [loaded = loaded_tools_, deferral = main_deferral_, memory = options.memory](
                             const lubancode::tools::Tool& tool) {
@@ -705,6 +745,27 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     sub_tool_filter_ = [loaded = loaded_tools_, deferral = sub_deferral_](const lubancode::tools::Tool& tool) {
         return !deferral || !tool.deferred() || loaded->count(tool.name()) != 0;
     };
+    // proxy 模式的执行资格(单子 §5.5):只作用于经 tool_invoke 解引用来的
+    // 调用。exposure 过滤(上面的 tool_filter)不动——延迟工具照旧不进顶层
+    // tools、直接按名调用照旧被拦(发现不等于授权)。main 侧保留 memory
+    // gate(与主过滤同一道闸);sub 侧与子过滤同一口径,无额外闸。
+    // denial 走 "稳定码|人话" 两截(RunOneTool 的解析口径),报
+    // proxy.tool_not_allowed,模型不得重试同一调用。
+    if (main_proxy_) {
+        main_execution_policy_ = [memory = options.memory](const lubancode::tools::Tool& tool) {
+            if (tool.name() == "memory_save") {
+                return memory != nullptr && memory->generate_enabled();
+            }
+            return true;
+        };
+        main_execution_denial_ = std::string(lubancode::tools::kErrToolRefNotAllowed) +
+                                 "|该工具不在当前会话的执行策略内(角色/权限限制),不得重试同一调用。";
+    }
+    if (sub_proxy_) {
+        sub_execution_policy_ = [](const lubancode::tools::Tool&) { return true; };
+        sub_execution_denial_ = std::string(lubancode::tools::kErrToolRefNotAllowed) +
+                                "|该工具不在当前会话的执行策略内(角色/权限限制),不得重试同一调用。";
+    }
 
     // ---- PTC 装配(tool_calling 配置档 + 五条硬条件 + auto 门槛)----
     // json(默认):什么都不挂,行为与从前逐字节一致。

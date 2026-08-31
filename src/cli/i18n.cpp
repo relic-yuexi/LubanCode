@@ -978,6 +978,9 @@ const Entry kZhCN[] = {
     {"ptc.fallback_line", "[ptc] programmatic 工具调用未启用,回落 JSON: {0}"},
     {"ptc.probe_failed", "[ptc] Python 探测失败: {0}"},
     {"tool_search.enabled", "[tool_search] 工具超过阈值 {0},MCP/插件等外挂工具改为延迟挂载(/tools 看三态)"},
+    // 动态工具 P1:proxy_reference 档的启动横幅——发现走引用、前缀不断。
+    {"tool_search.proxy_enabled",
+     "[tool_search] 工具超过阈值 {0},外挂工具走 proxy_reference:tool_search 发 tool_ref、tool_invoke 执行,前缀缓存不断"},
     {"catalog.warning", "[models.json 警告] {0}"},
     {"settings.local.warning", "[settings.local.json 警告] {0}"},
     {"settings.local.persist_prompt", "也永久写进项目 settings.local.json?[y/N] "},
@@ -1007,6 +1010,9 @@ const Entry kZhCN[] = {
     {"cmd.tools.threshold_zero", "阈值 0(永不延迟)"},
     {"cmd.tools.below_threshold", "低于阈值 {0}"},
     {"cmd.tools.enabled", "tool_search 延迟挂载已启用(阈值 {0},loaded 集合会话级,/clear 不清)。"},
+    // 动态工具 P1:/tools 的 proxy 档口径说明。
+    {"cmd.tools.proxy_mode",
+     "  proxy_reference 档:下列延迟工具经 tool_search 发现(结果带 tool_ref 与完整 schema)、tool_invoke 执行;不扩写进顶层 tools,前缀缓存不断。"},
     {"cmd.tools.core", "核心工具(恒在){0} 个:"},
     {"cmd.tools.loaded", "已加载的延迟工具 {0} 个:"},
     {"cmd.tools.none_loaded", "  (还没有,模型用 tool_search 命中后会出现在这里)"},
@@ -1252,10 +1258,12 @@ const Entry kZhCN[] = {
     {"artifact.store_open_failed", "[artifact] 上下文仓开不了({0}),超长结果退回内存全文,不产生假引用。"},
     {"cmd.context.artifacts", "artifact 层:{0} 枚落盘 · 全文共 {1} 字节可追回(context_search/context_read 按 id 检索)"},
     {"cmd.context.artifacts_none", "artifact 层:本会话尚无落盘的超长工具结果。"},
-    // ---- 动态工具 PromptCache 守恒单 P0:deferred_tool_mode 展示位 ----
+    // ---- 动态工具 PromptCache 守恒单 P0:deferred_tool_mode 展示位(P1 补 proxy 档) ----
     {"cmd.context.deferred_tool_mode", "deferred_tool_mode = {0}(待检索 {1}/{2} 枚延迟工具)"},
     {"cmd.context.deferred_tool_mode.legacy_hint",
      "  legacy_expand 命中后会同时改写 system 索引段与顶层 tools 数组,断前缀(设计单:动态工具 PromptCache 守恒与按需调用设计)"},
+    {"cmd.context.deferred_tool_mode.proxy_hint",
+     "  proxy_reference:发现走 tool_search(结果带 tool_ref 与完整 schema)、调用走 tool_invoke,顶层 tools 与 system 恒定,前缀缓存不断(设计单:动态工具 PromptCache 守恒与按需调用设计 P1)"},
 
     // ---- ContextBudgetPlan 与分层占用(第四期,/context 展示) ----
     {"cmd.context.layers", "分层占用:inline 全文 {0} 枚 · artifact 预览(L1){1} 枚"},

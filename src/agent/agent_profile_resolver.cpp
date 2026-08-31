@@ -96,6 +96,11 @@ ResolvedAgentProfile ResolveAgentProfile(const AgentProfileResolveRequest& reque
     resolved.profile.deferred_index_provider = nullptr;
     resolved.profile.tool_filter = nullptr;
     resolved.profile.tool_filter_denial.clear();
+    // 动态工具 P1:代理引用的活接线同属宿主注入,不随 Agent 文件解析搬运
+    //——派发处(AgentTool::RunTask)按子侧自己的账另灌。
+    resolved.profile.tool_ref_resolver = nullptr;
+    resolved.profile.tool_execution_policy = nullptr;
+    resolved.profile.tool_execution_denial.clear();
 
     // ---- 2. 模型角色与 effort -----------------------------------------------
     // 回落链照现有路由链(契约 §4.3):normal ?? 父模型;cheap ?? normal;

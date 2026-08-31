@@ -662,6 +662,13 @@ struct Config {
     // tool_search:延迟挂载的启用阈值,0 = 永不延迟。只从配置文件读
     // (没有环境变量这一级),没配就是默认 20。
     int tool_search_threshold = kDefaultToolSearchThreshold;
+    // 动态工具 PromptCache 守恒单 P1:延迟工具命中之后的走法。空 = 现状
+    // (legacy_expand,发现后扩写回顶层 tools,cache-hostile 兼容路);
+    // "disabled" 强制全量常驻(压过阈值);"proxy_reference" 是 P1 新路
+    // (发现发 ref、调用走 tool_invoke,前缀缓存不断);legacy_expand 可
+    // 显式写回。先 opt-in,不默认换路。native_reference 是 P3 的活,写了
+    // 报错不悄悄放行。只从配置文件读(项目级压全局),没有环境变量。
+    std::string deferred_tool_mode;
     // PTC:工具调用后端档。默认 json(行为与从前逐字节一致)。只从配置
     // 文件读(项目级压全局),环境变量不认——强开 PTC 是须看清后果的动作。
     ToolCallingMode tool_calling = ToolCallingMode::Json;
@@ -734,6 +741,7 @@ struct ConfigSources {
     Source think = Source::Default;
     Source soul = Source::Default;
     Source tool_search_threshold = Source::Default;  // tool_search:配置文件或默认,只有这两级
+    Source deferred_tool_mode = Source::Default;     // 动态工具 P1:配置文件或默认(空 = legacy)
     Source connect_timeout_ms = Source::Default;        // M11:配置文件或默认,只有这两级
     Source stream_idle_timeout_secs = Source::Default;   // 同上
     Source request_timeout_secs = Source::Default;       // 同上
@@ -856,6 +864,8 @@ struct FileConfig {
     std::optional<std::map<std::string, std::string>> extra_headers;
     // tool_search:延迟挂载阈值,非负整数(0 = 永不延迟)。
     std::optional<int> tool_search_threshold;
+    // 动态工具 P1:延迟工具模式(disabled|proxy_reference|legacy_expand)。
+    std::optional<std::string> deferred_tool_mode;
     // PTC:调用档字符串(json|programmatic|auto)与 ptc 段(整段回退)。
     std::optional<std::string> tool_calling;
     std::optional<PtcFileConfig> ptc;

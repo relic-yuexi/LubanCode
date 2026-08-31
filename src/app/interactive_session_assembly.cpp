@@ -352,6 +352,8 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       tool_runtime_(stack_.tool_runtime),
       main_deferral(stack_.main_deferral),
       sub_deferral(stack_.sub_deferral),
+      main_proxy(stack_.main_proxy),
+      sub_proxy(stack_.sub_proxy),
       tool_search_threshold(stack_.tool_search_threshold),
       config_file_path(stack_.config_result.config_file_path),
       always_allowed_tools(session_runtime_.always_allowed()),
@@ -742,7 +744,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         if (session_runtime_.trajectory()->resumed_at_launch()) {
             const std::vector<lubancode::api::Message> resumed =
                 session_runtime_.trajectory()->LaunchResumeHistory();
-            main_agent->ReplaceHistory(resumed);
+            // 动态工具 P1:恢复走 RestoreSessionHistory——历史进账的同时从
+            // 正式 discovery event 重建 DiscoveryLedger(单子 §9.2);compact
+            // 那一路仍走 ReplaceHistory,引用账不丢(§9.3)。
+            main_agent->RestoreSessionHistory(resumed);
             TermOut() << theme.banner
                       << trf("cmd.resume.restored", session_runtime_.trajectory()->session_id(),
                              resumed.size())
@@ -976,12 +981,24 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     // DeferredIndex 三只包装后端现拼,现在 Agent 拼请求时就地生效)。
     main_agent_profile.model_instructions = *current_model_instructions;
     main_agent_profile.soul = *current_soul;
-    main_agent_profile.deferred_index_provider = [this]() {
-        // 发请求前现查现拼:tool_search 命中后的下一份请求,新挂载的工具
-        // 自然从索引段里消失;未启用时恒给空串,等于不注。
-        return main_deferral ? lubancode::tools::BuildDeferredToolsIndexSegment(registry(), *loaded_tools())
-                             : std::string();
-    };
+    // 动态工具 P1:proxy_reference 模式不注逐请求刷新的延迟索引段(单子
+    // §8.1——索引按 loaded 集合删行,每删一行 system 就断一次;proxy 路
+    // 的 tool_search 自己握 catalog,system 恒定)。legacy 路照旧现查现拼。
+    if (!main_proxy) {
+        main_agent_profile.deferred_index_provider = [this]() {
+            // 发请求前现查现拼:tool_search 命中后的下一份请求,新挂载的工具
+            // 自然从索引段里消失;未启用时恒给空串,等于不注。
+            return main_deferral
+                       ? lubancode::tools::BuildDeferredToolsIndexSegment(registry(), *loaded_tools())
+                       : std::string();
+        };
+    } else if (tool_runtime_.has_value()) {
+        // proxy 三件套:解引用器(主侧账)+ 执行资格(只作用于经 tool_invoke
+        // 解引用来的调用;直接按名调延迟工具仍被 exposure 过滤拦下)。
+        main_agent_profile.tool_ref_resolver = tool_runtime_->main_tool_ref_resolver();
+        main_agent_profile.tool_execution_policy = tool_runtime_->main_execution_policy();
+        main_agent_profile.tool_execution_denial = tool_runtime_->main_execution_denial();
+    }
     // 工具可见性(病十三的方向):goal/loop 窄工具的 turn 级放行(单子:
     // goal_checkpoint 只在 goal execution turn 动态露面,loop_control 只在
     // scheduled tick 的 turn 里;普通 turn 一概看不见)。goal_active_
@@ -998,7 +1015,10 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
         return main_tool_filter()(tool);
     };
     main_agent_profile.tool_filter_denial =
-        "这只工具只在对应的 goal 执行轮/loop 定时拍里可用,当前轮不是。";
+        main_proxy
+            ? "延迟工具不能按名直调(发现不等于授权):请先用 tool_search 检索拿到 tool_ref,再以 "
+              "tool_invoke({tool_ref, arguments}) 调用;goal/loop 窄工具只在对应轮次可用。"
+            : "这只工具只在对应的 goal 执行轮/loop 定时拍里可用,当前轮不是。";
     // 病十(批三):四段开关写进皮——与 prompt_options 同源(配置),子代理
     // 派生时同段拷贝,不再有"主代理有、子代理无"的隐性分叉。
     main_agent_profile.prompt_sections.mcp = prompt_options.mcp;
@@ -1206,6 +1226,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.plugin_warnings = &plugin_warnings();
     ctx.main_tool_filter = &main_tool_filter();
     ctx.main_deferral = main_deferral;
+    ctx.main_proxy_reference = main_proxy;
     ctx.tool_search_threshold = tool_search_threshold;
     ctx.tool_runtime = tool_runtime_.has_value() ? &*tool_runtime_ : nullptr;
     ctx.worktree_session = &worktree_session;

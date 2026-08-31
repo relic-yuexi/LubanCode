@@ -34,6 +34,7 @@
 #include "api/types.hpp"
 #include "runtime/interaction.hpp"
 #include "runtime/turn_event_adapter.hpp"
+#include "tools/deferred_tool_resolver.hpp"  // ProxyCallContext:tool_invoke 规范化调用的协议证据
 #include "tools/tool.hpp"
 #include "tools/registry.hpp"
 
@@ -341,18 +342,27 @@ public:
 // 确认档(needs_confirm + PermissionRequest)-> 执行 -> PostToolUse -> 编码
 // 清洗 -> 工具终态上事件流。JSON 后端的工具循环与 PTC 的每一枚 stub 调用共用
 // 这一条路,不许有第二条绕过 hooks/权限的暗门。
-// filter_denial:过滤谓词不放行时的说明文案。默认空 = tool_search 的
-// "尚未挂载"说法;Explore 这类角色限制的调用方另给一句写明"角色限制"
-// 的文案——限制须来自角色并看得见,不许含糊成"子代理无权限"(规格)。
+// filter_denial:过滤谓词不放行时的说明文案。支持 "稳定码|人话" 两截
+//(同 on_mode_policy 的口径):有 '|' 且前截非空时,前截进 error_code、
+// 后截给模型;无 '|' = 老口径(码退 registry.not_mounted)。默认空 =
+// tool_search 的"尚未挂载"说法;Explore 这类角色限制的调用方另给一句
+// 写明"角色限制"的文案——限制须来自角色并看得见,不许含糊成"子代理
+// 无权限"(规格)。
 // trace:逐枚追踪的执行上下文;nullptr = 不追踪(旧行为)。
 // cancel:本次调用的取消旗(子代理 x 停止失效单:贯通到工具进程)。经
 // ToolExecutionContext 递进 execute;肯合作取消的工具(run_command 收进程
 // 树、Lua 掐指令钩子)置位即收,不肯的照旧等它跑完——不硬杀线程。null =
 // 没有取消源(旧调用方),行为与从前一字不差。
+// proxy:非空 = 本枚调用是 tool_invoke 解引用来的规范化调用(call 已是
+// 真实目标)。RunOneTool 据此做两件事(单子 §5.5/§6.2):入参先按目标
+// 当下那份真 schema 验一遍(不过 = invalid_target_arguments 稳定拒绝,不
+// 执行);trace 的每枚事件补 transport/resolved 两层事实。null = 普通调用
+//(旧调用方,PTC/单测),行为与从前一字不差。
 tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const TurnWiring& wiring,
                                 const std::function<bool(const tools::Tool&)>& tool_filter,
                                 const std::string& filter_denial = std::string(),
                                 const ToolTraceContext* trace = nullptr,
-                                const std::atomic<bool>* cancel = nullptr);
+                                const std::atomic<bool>* cancel = nullptr,
+                                const tools::ProxyCallContext* proxy = nullptr);
 
 }  // namespace lubancode::agent

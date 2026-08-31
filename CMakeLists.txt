@@ -399,6 +399,7 @@ add_library(lubancode_engine STATIC
   src/tools/skill_tool.cpp
   src/tools/todo_tool.cpp
   src/tools/tool_search.cpp
+  src/tools/deferred_tool_resolver.cpp
   src/tools/context_tools.cpp
   src/tools/plugin_loader.cpp
   src/tools/lua_tool.cpp

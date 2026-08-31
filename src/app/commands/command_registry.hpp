@@ -151,6 +151,8 @@ struct SlashDispatchContext {
     const std::function<bool(const lubancode::tools::Tool&)>* main_tool_filter = nullptr;
     const std::function<bool(const lubancode::tools::Tool&)>* sub_tool_filter = nullptr;
     bool main_deferral = false;
+    // 动态工具 P1:proxy_reference 开没开(/tools、/context 展示分档用)。
+    bool main_proxy_reference = false;
     int tool_search_threshold = 0;
     lubancode::app::ToolRuntime* tool_runtime = nullptr;  // process_manifests/explore_registry
     lubancode::cli::WorktreeSession* worktree_session = nullptr;

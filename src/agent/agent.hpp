@@ -100,6 +100,21 @@ struct AgentProfile {
     // 自己不懂什么叫"延迟"。----
     std::function<bool(const tools::Tool&)> tool_filter;
     std::string tool_filter_denial;
+
+    // ---- 动态工具 PromptCache 守恒单 P1(通用 ProxyReference)-------------
+    // 代理引用三件套。空 resolver = 不做代理规范化(Disabled/LegacyExpand
+    // 旧路,行为与从前一字不差);设了之后 AgentLoop 收到 name=="tool_invoke"
+    // 的调用先解引用,只对真实目标走一次 RunOneTool(单子 §6.1)。
+    // resolver 与 ledger 按代理侧绑定:main 一只、子代理侧一只,账不互通
+    //(父亲的 ref 不给儿子当通行牌,单子 §5.5)。
+    std::shared_ptr<tools::DeferredToolResolver> tool_ref_resolver;
+    // 执行资格判(单子 §5.5 链里的"effective role/tool policy allows
+    // target"):只对经 tool_invoke 解引用来的调用生效——直接按名调用仍走
+    // 上面的 tool_filter(延迟工具照旧被拦,不许凭名字穿代理)。空 = 装配
+    // 层没另给限制。denial 支持 "稳定码|人话" 两截(同 on_mode_policy 的
+    // 口径),装配层在 proxy 模式给 proxy.tool_not_allowed 码。
+    std::function<bool(const tools::Tool&)> tool_execution_policy;
+    std::string tool_execution_denial;
 };
 
 // 环境接线(批四·病十二:接线类的门收成一只)。这些都是"宿主把外面的
@@ -201,6 +216,19 @@ public:
         // 已经开了,补在最新消息尾部即可,不追改旧请求。
         if (run_active_ && !active_turn_context_.empty()) {
             context_.AppendToLastRequest(api::TextBlock{active_turn_context_});
+        }
+    }
+
+    // 会话恢复专用换史(动态工具 PromptCache 守恒单 P1·§9.2):与
+    // ReplaceHistory 的差别只在 DiscoveryLedger——compact 换史不许动引用账
+    //(单子 §9.3"宿主 ledger 不因 compact 丢账"),恢复从盘上读回历史时
+    // 才从正式 discovery event(tool_search 的 tool_use/tool_result 对)重建。
+    // 旧引用对应的工具未注册或 digest 已变时,记录留账、解析时报
+    // unavailable/stale,不把旧 schema 反向注册成可执行工具。
+    void RestoreSessionHistory(std::vector<api::Message> restored_history) {
+        ReplaceHistory(std::move(restored_history));
+        if (profile_.tool_ref_resolver != nullptr) {
+            profile_.tool_ref_resolver->RebuildFromHistory(context_.durable_history());
         }
     }
 

@@ -230,6 +230,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     const auto loaded_tools = tool_runtime.loaded_tools();
     const bool main_deferral = tool_runtime.main_deferral();
     const bool sub_deferral = tool_runtime.sub_deferral();
+    const bool main_proxy = tool_runtime.main_proxy_enabled();
+    const bool sub_proxy = tool_runtime.sub_proxy_enabled();
     const auto sub_tool_filter = tool_runtime.sub_tool_filter();
     if (auto* agent_tool = tool_runtime.agent_tool(); agent_tool != nullptr) {
         agent_tool->SetPromptsDir(prompts_dir);  // 子代理系统提示同机制
@@ -263,9 +265,16 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         }
         if (sub_deferral) {
             agent_tool->SetToolFilter(sub_tool_filter);
-            agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
-                return lubancode::tools::BuildDeferredToolsIndexSegment(sub_registry, *loaded_tools);
-            });
+            // 动态工具 P1:legacy 才注索引段;proxy 走 resolver(索引恒空)。
+            if (sub_proxy) {
+                agent_tool->SetToolRefResolver(tool_runtime.sub_tool_ref_resolver());
+                agent_tool->SetToolExecutionPolicy(tool_runtime.sub_execution_policy(),
+                                                   tool_runtime.sub_execution_denial());
+            } else {
+                agent_tool->SetDeferredIndexProvider([&sub_registry, loaded_tools]() {
+                    return lubancode::tools::BuildDeferredToolsIndexSegment(sub_registry, *loaded_tools);
+                });
+            }
         }
     }
 
@@ -312,12 +321,19 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
             lubancode::agent::AssembleSystemPrompt(prompt_options), model_instructions),
         soul_content);
     // tool_search 的索引段(从前由 DeferredIndexBackend 现拼):皮上的活口,
-    // Agent 拼请求时现查;单发只跑一轮,行为与从前逐字节一致。
+    // Agent 拼请求时现查;单发只跑一轮,行为与从前逐字节一致。动态工具 P1:
+    // proxy 模式不注索引段(system 恒定,§8.1),改灌解引用器与执行资格。
     if (main_deferral) {
-        once_agent_profile.deferred_index_provider = [&registry, loaded_tools]() {
-            return lubancode::tools::BuildDeferredToolsIndexSegment(registry, *loaded_tools);
-        };
         once_agent_profile.tool_filter = tool_runtime.main_tool_filter();
+        if (main_proxy) {
+            once_agent_profile.tool_ref_resolver = tool_runtime.main_tool_ref_resolver();
+            once_agent_profile.tool_execution_policy = tool_runtime.main_execution_policy();
+            once_agent_profile.tool_execution_denial = tool_runtime.main_execution_denial();
+        } else {
+            once_agent_profile.deferred_index_provider = [&registry, loaded_tools]() {
+                return lubancode::tools::BuildDeferredToolsIndexSegment(registry, *loaded_tools);
+            };
+        }
     }
     lubancode::agent::Agent loop(wrapped_backend, registry, std::move(once_agent_profile));
     std::string turn_context;

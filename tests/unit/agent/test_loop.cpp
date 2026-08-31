@@ -20,6 +20,7 @@
 #include "api/types.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
+#include "tools/tool_search.hpp"  // ToolSearchTool/ToolInvokeTool:P1 代理对的两枚壳
 
 using namespace lubancode;
 
@@ -1270,4 +1271,533 @@ TEST_CASE("生成中断:ESC 掐在正文之前,没到 ImageOutput 就没有图,�
         has_image = has_image || std::holds_alternative<api::ModelImageBlock>(block);
     }
     CHECK_FALSE(has_image);
+}
+
+// ---------------------------------------------------------------------------
+// 动态工具 PromptCache 守恒单 P1(通用 ProxyReference):AgentLoop 的代理
+// 调用规范化(单子 §6.1/§6.2/§12.1/§12.4)——tool_invoke 解引用后只对真实
+// 目标走一次 RunOneTool;Hook/确认/执行资格/取消全落在真实目标;发现
+// 不等于授权,直接按名调用延迟工具照旧被拦;伪拼 ref、越权策略、坏参数
+// 各有稳定拒绝码。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// proxy 测试的计数延迟工具:记下每次执行的入参(断言"只执行一次、参数
+// 不串"全靠它)。
+class CountingDeferredTool : public tools::Tool {
+public:
+    CountingDeferredTool(std::string name, nlohmann::json schema, bool confirm = false)
+        : name_(std::move(name)), schema_(std::move(schema)), confirm_(confirm) {}
+
+    std::string name() const override { return name_; }
+    std::string description() const override { return "counting deferred tool for proxy tests"; }
+    nlohmann::json input_schema() const override { return schema_; }
+    bool deferred() const override { return true; }
+    bool needs_confirm() const override { return confirm_; }
+
+    tools::Tool::Result execute(const nlohmann::json& input) override {
+        ++call_count;
+        last_input = input;
+        return {"执行了 " + name_, false};
+    }
+
+    int call_count = 0;
+    nlohmann::json last_input;
+
+private:
+    std::string name_;
+    nlohmann::json schema_;
+    bool confirm_;
+};
+
+std::vector<api::StreamEvent> ProxyToolCallScript(const std::string& id, const std::string& name,
+                                                  const std::string& input_json) {
+    return {
+        api::MessageStart{"msg", "model"},
+        api::ToolUseStart{0, id, name},
+        api::ToolUseInputDelta{0, input_json},
+        api::ContentBlockDone{0},
+        api::MessageDone{"tool_use", api::Usage{}},
+    };
+}
+
+// proxy 模式的生产同款皮:resolver + exposure 过滤(延迟工具恒不进顶层
+// tools,loaded 集合不参与)。
+agent::AgentProfile ProxyProfile(std::shared_ptr<tools::DeferredToolResolver> resolver) {
+    agent::AgentProfile profile{.request{.model = "test-model"}, .system_prompt = "system prompt"};
+    profile.tool_ref_resolver = std::move(resolver);
+    profile.tool_filter = [](const tools::Tool& tool) { return !tool.deferred(); };
+    profile.tool_filter_denial =
+        "延迟工具不能按名直调:请先用 tool_search 检索拿到 tool_ref,再以 tool_invoke 调用。";
+    return profile;
+}
+
+// 从历史里抠出 tool_search 结果 JSON 里的第一枚 tool_ref(脚本没法预知
+// 运行时铸出来的号,跑完第一轮再取)。
+std::string FirstToolRefFromHistory(const agent::Agent& loop) {
+    for (const auto& message : loop.history()) {
+        for (const auto& block : message.content) {
+            const auto* result = std::get_if<api::ToolResultBlock>(&block);
+            if (result == nullptr) {
+                continue;
+            }
+            const nlohmann::json parsed =
+                nlohmann::json::parse(result->content, nullptr, /*allow_exceptions=*/false);
+            if (parsed.is_object() && parsed.contains("matches") && parsed["matches"].is_array() &&
+                !parsed["matches"].empty() && parsed["matches"][0].contains("tool_ref")) {
+                return parsed["matches"][0]["tool_ref"].get<std::string>();
+            }
+        }
+    }
+    return std::string();
+}
+
+struct TraceCollector {
+    std::vector<agent::ToolTraceEvent> events;
+    void Wire(agent::TurnWiring& callbacks) {
+        callbacks.on_tool_trace = [this](const agent::ToolTraceEvent& event) { events.push_back(event); };
+    }
+    const agent::ToolTraceEvent* Find(agent::ToolTraceEventKind kind, const std::string& tool_name) const {
+        for (const auto& event : events) {
+            if (event.kind == kind && event.tool_name == tool_name) {
+                return &event;
+            }
+        }
+        return nullptr;
+    }
+};
+
+// 按 wire id 全历史找 tool_result:轮末最后一条是收尾正文,别赌消息位次。
+const api::ToolResultBlock* FindToolResult(const agent::Agent& loop, const std::string& tool_use_id) {
+    for (const auto& message : loop.history()) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block);
+                result != nullptr && result->tool_use_id == tool_use_id) {
+                return result;
+            }
+        }
+    }
+    return nullptr;
+}
+
+}  // namespace
+
+TEST_CASE("P1 proxy: 解引用后真实工具只执行一次,trace 记 transport/resolved 两层") {
+    FakeBackend backend;
+    backend.scripts = {
+        ProxyToolCallScript("call_search", "tool_search", R"({"query":"counting"})"),
+        TextOnlyScript("搜到了"),
+        ProxyToolCallScript("call_invoke", "tool_invoke", R"(PLACEHOLDER)"),
+        TextOnlyScript("完成"),
+    };
+    backend.scripts[2][2] = api::ToolUseInputDelta{0, R"({"tool_ref":"REF","arguments":{"q":"cache"}})"};
+
+    tools::ToolRegistry registry;
+    auto target = std::make_unique<CountingDeferredTool>(
+        "mcp__db__query",
+        nlohmann::json{{"type", "object"},
+                       {"properties", {{"q", {{"type", "string"}}}}},
+                       {"required", nlohmann::json::array({"q"})}});
+    CountingDeferredTool* target_ptr = target.get();
+    registry.Register(std::move(target));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    registry.Register(std::make_unique<tools::ToolSearchTool>(registry, resolver));
+    registry.Register(std::make_unique<tools::ToolInvokeTool>());
+
+    agent::Agent loop(backend, registry, ProxyProfile(resolver));
+    agent::TurnWiring callbacks;
+    TraceCollector trace;
+    trace.Wire(callbacks);
+
+    // 第一轮:tool_search 发现目标,拿到 ref。
+    REQUIRE(loop.Run("帮我查", callbacks).has_value());
+    const std::string tool_ref = FirstToolRefFromHistory(loop);
+    REQUIRE_FALSE(tool_ref.empty());
+    CHECK(target_ptr->call_count == 0);  // 搜索只读,不执行目标
+
+    // 第二轮:tool_invoke 走 ref。脚本里的占位 ref 换成真号(模型侧无从
+    // 预知宿主铸的号,测试也一样——先发现后调用)。
+    backend.scripts[2][2] = api::ToolUseInputDelta{
+        0, R"({"tool_ref":")" + tool_ref + R"(","arguments":{"q":"cache"}})"};
+    REQUIRE(loop.Run("调用它", callbacks).has_value());
+
+    // 真实目标只执行一次,入参是解包后的 arguments(不是 {tool_ref,...} 壳)。
+    REQUIRE(target_ptr->call_count == 1);
+    CHECK(target_ptr->last_input == nlohmann::json{{"q", "cache"}});
+
+    // tool_result 与 wire 上那枚 tool_invoke call id 配对(不是目标名)。
+    // 末条消息是收尾正文,tool_result 在倒数第二条——按 id 全历史找,别赌位次。
+    bool paired = false;
+    for (const auto& message : loop.history()) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block);
+                result != nullptr && result->tool_use_id == "call_invoke") {
+                paired = true;
+                CHECK_FALSE(result->is_error);
+                CHECK(result->content.find("执行了 mcp__db__query") != std::string::npos);
+            }
+        }
+    }
+    CHECK(paired);
+
+    // trace 两层事实(§6.2):scheduled 是 wire 事实(tool_invoke),执行
+    // 事件的一等名是真实目标,details 里 transport/resolved/tool_ref 齐。
+    const auto* scheduled = trace.Find(agent::ToolTraceEventKind::Scheduled, "tool_invoke");
+    REQUIRE(scheduled != nullptr);
+    CHECK(scheduled->details.value("transport_tool", std::string()) == "tool_invoke");
+    const auto* started = trace.Find(agent::ToolTraceEventKind::ExecutionStarted, "mcp__db__query");
+    REQUIRE(started != nullptr);
+    CHECK(started->details.value("transport_tool", std::string()) == "tool_invoke");
+    CHECK(started->details.value("resolved_tool", std::string()) == "mcp__db__query");
+    CHECK(started->details.value("tool_ref", std::string()) == tool_ref);
+    CHECK_FALSE(started->details.value("schema_digest", std::string()).empty());
+    const auto* finished = trace.Find(agent::ToolTraceEventKind::ExecutionFinished, "mcp__db__query");
+    REQUIRE(finished != nullptr);
+    CHECK(finished->details.value("transport_tool", std::string()) == "tool_invoke");
+
+    // 顶层 tools 恒为 core + tool_search + tool_invoke:目标工具从没进过
+    // 任何一份请求的 tools 数组(§5.1)。
+    REQUIRE(backend.captured_requests.size() == 4);
+    for (const auto& request : backend.captured_requests) {
+        bool has_search = false;
+        bool has_invoke = false;
+        bool has_target = false;
+        for (const auto& def : request.tools) {
+            has_search = has_search || def.name == "tool_search";
+            has_invoke = has_invoke || def.name == "tool_invoke";
+            has_target = has_target || def.name == "mcp__db__query";
+        }
+        CHECK(has_search);
+        CHECK(has_invoke);
+        CHECK_FALSE(has_target);
+    }
+}
+
+TEST_CASE("P1 proxy: 直接按名调用延迟工具被拦——发现不等于授权") {
+    FakeBackend backend;
+    backend.scripts = {
+        ProxyToolCallScript("call_direct", "mcp__db__query", R"({"q":"直调"})"),
+        TextOnlyScript("收下拒绝"),
+    };
+    tools::ToolRegistry registry;
+    auto target = std::make_unique<CountingDeferredTool>(
+        "mcp__db__query", nlohmann::json{{"type", "object"}, {"properties", {{"q", {{"type", "string"}}}}}});
+    CountingDeferredTool* target_ptr = target.get();
+    registry.Register(std::move(target));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    registry.Register(std::make_unique<tools::ToolSearchTool>(registry, resolver));
+    registry.Register(std::make_unique<tools::ToolInvokeTool>());
+
+    agent::Agent loop(backend, registry, ProxyProfile(resolver));
+    agent::TurnWiring callbacks;
+    TraceCollector trace;
+    trace.Wire(callbacks);
+
+    REQUIRE(loop.Run("直接调", callbacks).has_value());
+    CHECK(target_ptr->call_count == 0);  // 没执行
+
+    const api::ToolResultBlock* result = FindToolResult(loop, "call_direct");
+    REQUIRE(result != nullptr);
+    CHECK(result->is_error);
+    CHECK(result->content.find("tool_search") != std::string::npos);
+    CHECK(result->content.find("tool_invoke") != std::string::npos);
+    // 拒绝也留终态栅栏,不冒充没发生过。
+    const auto* finished = trace.Find(agent::ToolTraceEventKind::ExecutionFinished, "mcp__db__query");
+    REQUIRE(finished != nullptr);
+    CHECK(finished->error_code == agent::kErrRegistryNotMounted);
+}
+
+TEST_CASE("P1 proxy: 伪拼/跨账 ref 报 unknown_tool_ref,不执行") {
+    FakeBackend backend;
+    backend.scripts = {
+        ProxyToolCallScript("call_fake", "tool_invoke", R"({"tool_ref":"dt_deadbeef_1","arguments":{}})"),
+        TextOnlyScript("收下拒绝"),
+    };
+    tools::ToolRegistry registry;
+    auto target = std::make_unique<CountingDeferredTool>(
+        "mcp__db__query", nlohmann::json{{"type", "object"}, {"properties", nlohmann::json::object()}});
+    CountingDeferredTool* target_ptr = target.get();
+    registry.Register(std::move(target));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    registry.Register(std::make_unique<tools::ToolSearchTool>(registry, resolver));
+    registry.Register(std::make_unique<tools::ToolInvokeTool>());
+
+    agent::Agent loop(backend, registry, ProxyProfile(resolver));
+    agent::TurnWiring callbacks;
+    TraceCollector trace;
+    trace.Wire(callbacks);
+
+    REQUIRE(loop.Run("拿假引用调", callbacks).has_value());
+    CHECK(target_ptr->call_count == 0);
+    const api::ToolResultBlock* result = FindToolResult(loop, "call_fake");
+    REQUIRE(result != nullptr);                  // 仍用 wire id 配对(§十)
+    CHECK(result->is_error);
+    CHECK(result->content.find("重新 tool_search") != std::string::npos);
+    const auto* finished = trace.Find(agent::ToolTraceEventKind::ExecutionFinished, "tool_invoke");
+    REQUIRE(finished != nullptr);
+    CHECK(finished->error_code == tools::kErrToolRefUnknown);
+}
+
+TEST_CASE("P1 proxy: 入参不合真实 schema 报 invalid_target_arguments,不执行") {
+    FakeBackend backend;
+    backend.scripts = {
+        ProxyToolCallScript("call_search", "tool_search", R"({"query":"counting"})"),
+        TextOnlyScript("x"),
+        ProxyToolCallScript("call_bad_args", "tool_invoke", R"(PLACEHOLDER)"),
+        TextOnlyScript("y"),
+    };
+    tools::ToolRegistry registry;
+    auto target = std::make_unique<CountingDeferredTool>(
+        "mcp__db__query",
+        nlohmann::json{{"type", "object"},
+                       {"properties", {{"q", {{"type", "string"}}}}},
+                       {"required", nlohmann::json::array({"q"})}});
+    CountingDeferredTool* target_ptr = target.get();
+    registry.Register(std::move(target));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    registry.Register(std::make_unique<tools::ToolSearchTool>(registry, resolver));
+    registry.Register(std::make_unique<tools::ToolInvokeTool>());
+
+    agent::Agent loop(backend, registry, ProxyProfile(resolver));
+    agent::TurnWiring callbacks;
+    TraceCollector trace;
+    trace.Wire(callbacks);
+
+    REQUIRE(loop.Run("先搜", callbacks).has_value());
+    const std::string tool_ref = FirstToolRefFromHistory(loop);
+    REQUIRE_FALSE(tool_ref.empty());
+    // 少了必填的 q:宽 schema(tool_invoke 顶层)拦不住,真 schema 拦得住。
+    backend.scripts[2][2] = api::ToolUseInputDelta{
+        0, R"({"tool_ref":")" + tool_ref + R"(","arguments":{"别的东西":1}})"};
+    REQUIRE(loop.Run("坏参数调", callbacks).has_value());
+
+    CHECK(target_ptr->call_count == 0);
+    const auto* finished = trace.Find(agent::ToolTraceEventKind::ExecutionFinished, "mcp__db__query");
+    REQUIRE(finished != nullptr);
+    CHECK(finished->error_code == tools::kErrToolRefInvalidArguments);
+    CHECK(finished->details.value("transport_tool", std::string()) == "tool_invoke");
+}
+
+TEST_CASE("P1 proxy: 执行策略拒绝报 tool_not_allowed,不得重试") {
+    FakeBackend backend;
+    backend.scripts = {
+        ProxyToolCallScript("call_search", "tool_search", R"({"query":"counting"})"),
+        TextOnlyScript("x"),
+        ProxyToolCallScript("call_denied", "tool_invoke", R"(PLACEHOLDER)"),
+        TextOnlyScript("y"),
+    };
+    tools::ToolRegistry registry;
+    auto target = std::make_unique<CountingDeferredTool>(
+        "mcp__db__query", nlohmann::json{{"type", "object"}, {"properties", nlohmann::json::object()}});
+    CountingDeferredTool* target_ptr = target.get();
+    registry.Register(std::move(target));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    registry.Register(std::make_unique<tools::ToolSearchTool>(registry, resolver));
+    registry.Register(std::make_unique<tools::ToolInvokeTool>());
+
+    agent::AgentProfile profile = ProxyProfile(resolver);
+    // 执行资格拒绝(单子 §十 tool_not_allowed):deny 一切目标(模拟角色
+    // 闸/deny policy)。ref 有效也放不了行。
+    profile.tool_execution_policy = [](const tools::Tool& tool) { return tool.name() != "mcp__db__query"; };
+    profile.tool_execution_denial =
+        std::string(tools::kErrToolRefNotAllowed) + "|当前角色不许调用该工具,不得重试同一调用。";
+    agent::Agent loop(backend, registry, std::move(profile));
+    agent::TurnWiring callbacks;
+    TraceCollector trace;
+    trace.Wire(callbacks);
+
+    REQUIRE(loop.Run("先搜", callbacks).has_value());
+    const std::string tool_ref = FirstToolRefFromHistory(loop);
+    REQUIRE_FALSE(tool_ref.empty());
+    backend.scripts[2][2] = api::ToolUseInputDelta{
+        0, R"({"tool_ref":")" + tool_ref + R"(","arguments":{}})"};
+    REQUIRE(loop.Run("越权调", callbacks).has_value());
+
+    CHECK(target_ptr->call_count == 0);
+    const auto* finished = trace.Find(agent::ToolTraceEventKind::ExecutionFinished, "mcp__db__query");
+    REQUIRE(finished != nullptr);
+    CHECK(finished->error_code == tools::kErrToolRefNotAllowed);
+    const api::ToolResultBlock* result = FindToolResult(loop, "call_denied");
+    REQUIRE(result != nullptr);
+    CHECK(result->is_error);
+    CHECK(result->content.find("不得重试") != std::string::npos);
+}
+
+TEST_CASE("P1 proxy: 钩子与确认看真实目标——真名一次、真参数、真确认") {
+    FakeBackend backend;
+    backend.scripts = {
+        ProxyToolCallScript("call_search", "tool_search", R"({"query":"counting"})"),
+        TextOnlyScript("x"),
+        ProxyToolCallScript("call_gate", "tool_invoke", R"(PLACEHOLDER)"),
+        TextOnlyScript("y"),
+    };
+    tools::ToolRegistry registry;
+    auto target = std::make_unique<CountingDeferredTool>(
+        "mcp__db__query",
+        nlohmann::json{{"type", "object"},
+                       {"properties", {{"q", {{"type", "string"}}}}},
+                       {"required", nlohmann::json::array({"q"})}},
+        /*confirm=*/true);
+    CountingDeferredTool* target_ptr = target.get();
+    registry.Register(std::move(target));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    registry.Register(std::make_unique<tools::ToolSearchTool>(registry, resolver));
+    registry.Register(std::make_unique<tools::ToolInvokeTool>());
+
+    agent::Agent loop(backend, registry, ProxyProfile(resolver));
+    agent::TurnWiring callbacks;
+    std::vector<std::string> hook_names;
+    std::vector<nlohmann::json> hook_inputs;
+    callbacks.on_pre_tool_use_hook = [&](const std::string& /*id*/, const std::string& name,
+                                         const nlohmann::json& input) {
+        hook_names.push_back(name);
+        hook_inputs.push_back(input);
+        return runtime::ToolHookDecision{};  // 不表态
+    };
+    std::vector<std::string> confirm_names;
+    std::vector<nlohmann::json> confirm_inputs;
+    callbacks.on_tool_confirm = [&](const std::string& /*id*/, const std::string& name,
+                                    const nlohmann::json& input) {
+        confirm_names.push_back(name);
+        confirm_inputs.push_back(input);
+        return true;
+    };
+
+    REQUIRE(loop.Run("先搜", callbacks).has_value());
+    const std::string tool_ref = FirstToolRefFromHistory(loop);
+    REQUIRE_FALSE(tool_ref.empty());
+    backend.scripts[2][2] = api::ToolUseInputDelta{
+        0, R"({"tool_ref":")" + tool_ref + R"(","arguments":{"q":"hook 看"}})"};
+    REQUIRE(loop.Run("确认路调用", callbacks).has_value());
+
+    // 钩子每枚调用都过一遍(先 tool_search、后真实目标);确认只问
+    // needs_confirm 的那一枚——真实目标一次、真名真参,不是 tool_invoke
+    // 那层壳,外层壳的 {tool_ref,...} 不许漏进确认文案。
+    REQUIRE(hook_names.size() == 2);
+    CHECK(hook_names[0] == "tool_search");
+    CHECK(hook_names[1] == "mcp__db__query");
+    CHECK(hook_inputs[1] == nlohmann::json{{"q", "hook 看"}});
+    REQUIRE(confirm_names.size() == 1);
+    CHECK(confirm_names[0] == "mcp__db__query");
+    CHECK(confirm_inputs[0] == nlohmann::json{{"q", "hook 看"}});
+    CHECK(target_ptr->call_count == 1);
+}
+
+TEST_CASE("P1 proxy: PreToolUse 改写入参后用真实 schema 复验,改坏即拦") {
+    FakeBackend backend;
+    backend.scripts = {
+        ProxyToolCallScript("call_search", "tool_search", R"({"query":"counting"})"),
+        TextOnlyScript("x"),
+        ProxyToolCallScript("call_rewrite", "tool_invoke", R"(PLACEHOLDER)"),
+        TextOnlyScript("y"),
+    };
+    tools::ToolRegistry registry;
+    auto target = std::make_unique<CountingDeferredTool>(
+        "mcp__db__query",
+        nlohmann::json{{"type", "object"},
+                       {"properties", {{"q", {{"type", "string"}}}}},
+                       {"required", nlohmann::json::array({"q"})}});
+    CountingDeferredTool* target_ptr = target.get();
+    registry.Register(std::move(target));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    registry.Register(std::make_unique<tools::ToolSearchTool>(registry, resolver));
+    registry.Register(std::make_unique<tools::ToolInvokeTool>());
+
+    agent::Agent loop(backend, registry, ProxyProfile(resolver));
+    agent::TurnWiring callbacks;
+    TraceCollector trace;
+    trace.Wire(callbacks);
+    callbacks.on_pre_tool_use_hook = [](const std::string&, const std::string& name,
+                                        const nlohmann::json&) {
+        runtime::ToolHookDecision decision;
+        // 只改写真实目标的入参——tool_search 那枚照常跑(改了它,发现这步
+        // 就先失败了)。
+        if (name == "mcp__db__query") {
+            decision.decision = runtime::ToolHookDecision::Decision::Allow;
+            // 改写成丢掉必填 q 的形状:真 schema 复检必须拦(§5.5 链末段)。
+            decision.updated_input = nlohmann::json{{"not_q", 1}};
+        }
+        return decision;
+    };
+
+    REQUIRE(loop.Run("先搜", callbacks).has_value());
+    const std::string tool_ref = FirstToolRefFromHistory(loop);
+    REQUIRE_FALSE(tool_ref.empty());
+    backend.scripts[2][2] = api::ToolUseInputDelta{
+        0, R"({"tool_ref":")" + tool_ref + R"(","arguments":{"q":"本来合法"}})"};
+    REQUIRE(loop.Run("改坏参", callbacks).has_value());
+
+    CHECK(target_ptr->call_count == 0);  // 改坏的形状不许跑
+    const auto* finished = trace.Find(agent::ToolTraceEventKind::ExecutionFinished, "mcp__db__query");
+    REQUIRE(finished != nullptr);
+    CHECK(finished->error_code == agent::kErrHookUpdatedInputInvalid);
+}
+
+TEST_CASE("P1 proxy: 同批两枚 tool_invoke 各自解引用,参数不串") {
+    FakeBackend backend;
+    tools::ToolRegistry registry;
+    auto target_a = std::make_unique<CountingDeferredTool>(
+        "mcp__alpha__do", nlohmann::json{{"type", "object"}, {"properties", nlohmann::json::object()}});
+    auto target_b = std::make_unique<CountingDeferredTool>(
+        "mcp__beta__do", nlohmann::json{{"type", "object"}, {"properties", nlohmann::json::object()}});
+    CountingDeferredTool* a_ptr = target_a.get();
+    CountingDeferredTool* b_ptr = target_b.get();
+    registry.Register(std::move(target_a));
+    registry.Register(std::move(target_b));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    registry.Register(std::make_unique<tools::ToolSearchTool>(registry, resolver));
+    registry.Register(std::make_unique<tools::ToolInvokeTool>());
+
+    agent::Agent loop(backend, registry, ProxyProfile(resolver));
+    agent::TurnWiring callbacks;
+
+    // 第一轮:搜 alpha 拿 ref_a。FakeBackend 的脚本按下标全局累进,后两轮
+    // 只能追加、不能整份换(换了就下标越界)。
+    backend.scripts.push_back(ProxyToolCallScript("call_search_a", "tool_search", R"({"query":"alpha"})"));
+    backend.scripts.push_back(TextOnlyScript("x"));
+    REQUIRE(loop.Run("搜 alpha", callbacks).has_value());
+    const std::string ref_a = FirstToolRefFromHistory(loop);
+    REQUIRE_FALSE(ref_a.empty());
+
+    // 第二轮:搜 beta 拿 ref_b(历史按序收两枚 ref)。
+    backend.scripts.push_back(ProxyToolCallScript("call_search_b", "tool_search", R"({"query":"beta"})"));
+    backend.scripts.push_back(TextOnlyScript("y"));
+    REQUIRE(loop.Run("搜 beta", callbacks).has_value());
+    std::vector<std::string> refs;
+    for (const auto& message : loop.history()) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block); result != nullptr) {
+                const nlohmann::json parsed =
+                    nlohmann::json::parse(result->content, nullptr, /*allow_exceptions=*/false);
+                if (parsed.is_object() && parsed.contains("matches") && !parsed["matches"].empty() &&
+                    parsed["matches"][0].contains("tool_ref")) {
+                    refs.push_back(parsed["matches"][0]["tool_ref"].get<std::string>());
+                }
+            }
+        }
+    }
+    REQUIRE(refs.size() == 2);
+    const std::string ref_b = refs[1];
+    CHECK(ref_a != ref_b);
+
+    // 第三轮:同一条 assistant 消息里两枚 tool_invoke(并行工具调用)——
+    // 各自解引用、各拿各的参数,不串。
+    backend.scripts.push_back(std::vector<api::StreamEvent>{
+        api::MessageStart{"msg", "model"},
+        api::ToolUseStart{0, "invoke_a", "tool_invoke"},
+        api::ToolUseInputDelta{0, R"({"tool_ref":")" + ref_a + R"(","arguments":{"who":"a"}})"},
+        api::ContentBlockDone{0},
+        api::ToolUseStart{1, "invoke_b", "tool_invoke"},
+        api::ToolUseInputDelta{1, R"({"tool_ref":")" + ref_b + R"(","arguments":{"who":"b"}})"},
+        api::ContentBlockDone{1},
+        api::MessageDone{"tool_use", api::Usage{}},
+    });
+    backend.scripts.push_back(TextOnlyScript("z"));
+    REQUIRE(loop.Run("双调", callbacks).has_value());
+
+    REQUIRE(a_ptr->call_count == 1);
+    CHECK(a_ptr->last_input == nlohmann::json{{"who", "a"}});
+    REQUIRE(b_ptr->call_count == 1);
+    CHECK(b_ptr->last_input == nlohmann::json{{"who", "b"}});
 }

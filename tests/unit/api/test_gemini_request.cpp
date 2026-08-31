@@ -4,6 +4,11 @@
 #include <doctest/doctest.h>
 
 #include "api/gemini/request.hpp"
+#include <memory>
+#include <set>
+
+#include "tools/registry.hpp"
+#include "tools/tool_search.hpp"
 
 using namespace lubancode;
 
@@ -363,4 +368,77 @@ TEST_CASE("ModelImageBlock 重放:翻 text part 短标记,不带 base64") {
     CHECK(dumped.find("[模型已生成图片: img-abcd12.png (512x512)]") != std::string::npos);
     CHECK(dumped.find("images/img-abcd12.png") == std::string::npos);
     CHECK(dumped.find("inlineData") == std::string::npos);
+}
+
+// 动态工具 PromptCache 守恒单 P1:Gemini wire 的 proxy_reference replay。
+// 顶层只见固定的 tool_search + tool_invoke;functionCall.args 是原生对象,
+// 往返逐字段无损。
+TEST_CASE("Gemini proxy replay: tool_search+tool_invoke 定义恒在,代理调用 args 无损") {
+    tools::ToolRegistry dummy_registry;
+    auto loaded = std::make_shared<std::set<std::string>>();
+    tools::ToolSearchTool search(dummy_registry, loaded);
+    tools::ToolInvokeTool invoke;
+
+    api::Request request;
+    request.model = "gemini-test";
+    request.tools.push_back({"tool_search", search.description(), search.input_schema()});
+    request.tools.push_back({"tool_invoke", invoke.description(), invoke.input_schema()});
+
+    api::Message search_result;
+    search_result.role = api::Role::User;
+    const std::string discovery_json =
+        nlohmann::json{{"catalog_revision", "sha256:abc"},
+                       {"matches", nlohmann::json::array({nlohmann::json{
+                                       {"tool_ref", "dt_0123456789_1"},
+                                       {"name", "mcp__github__search_issues"},
+                                       {"schema_digest", "sha256:def"},
+                                       {"input_schema", nlohmann::json{{"type", "object"}}}}})}}
+            .dump();
+    search_result.content.push_back(api::ToolResultBlock{"call_search", discovery_json, false});
+
+    api::Message proxy_call;
+    proxy_call.role = api::Role::Assistant;
+    proxy_call.content.push_back(api::ToolUseBlock{
+        "call_invoke", "tool_invoke",
+        nlohmann::json{{"tool_ref", "dt_0123456789_1"},
+                       {"arguments", nlohmann::json{{"query", "repo:lubancode cache"}, {"per_page", 50}}}}});
+    api::Message proxy_result;
+    proxy_result.role = api::Role::User;
+    proxy_result.content.push_back(api::ToolResultBlock{"call_invoke", "issue #42", false});
+    request.messages.push_back(search_result);
+    request.messages.push_back(proxy_call);
+    request.messages.push_back(proxy_result);
+
+    const auto body = api::gemini::BuildRequestJson(request, nlohmann::json::object());
+    REQUIRE(body["tools"].size() == 1);
+    const auto& declarations = body["tools"][0]["functionDeclarations"];
+    REQUIRE(declarations.size() == 2);
+    CHECK(declarations[0]["name"] == "tool_search");
+    CHECK(declarations[1]["name"] == "tool_invoke");
+    CHECK(declarations[1]["parameters"]["additionalProperties"] == false);
+
+    bool saw_discovery = false;
+    bool saw_proxy = false;
+    for (const auto& content : body["contents"]) {
+        for (const auto& part : content["parts"]) {
+            if (part.contains("functionCall")) {
+                const auto& call = part["functionCall"];
+                if (call["name"] == "tool_invoke") {
+                    saw_proxy = true;
+                    const auto& args = call["args"];
+                    CHECK(args["tool_ref"] == "dt_0123456789_1");
+                    CHECK(args["arguments"]["query"] == "repo:lubancode cache");
+                    CHECK(args["arguments"]["per_page"] == 50);
+                }
+            } else if (part.contains("functionResponse")) {
+                const auto& response = part["functionResponse"];
+                if (response.value("name", std::string()) == "tool_search" ||
+                    response.dump().find("call_search") != std::string::npos) {
+                    saw_discovery = response.dump().find("dt_0123456789_1") != std::string::npos;
+                }
+            }
+        }
+    }
+    CHECK(saw_proxy);
+    CHECK(saw_discovery);
 }

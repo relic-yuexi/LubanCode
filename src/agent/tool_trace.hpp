@@ -368,6 +368,14 @@ struct ToolTraceContext {
     std::string retry_of;              // 显式重试关系;可空
     std::string blocked_by;            // 宿主因前置失败明确跳过;可空
     std::string compensates;           // 补偿哪枚调用;可空
+    // ---- 动态工具 PromptCache 守恒单 P1:经 tool_invoke 代理调用的两层事实。
+    // transport_tool 非空 = 本枚调用走代理;RunOneTool 的 emit 会把四件套补进
+    // 每枚事件的 details(transport_tool/resolved_tool/tool_ref/schema_digest,
+    // 单子 §6.2)——事件的一等字段 tool_name 画的是真实目标,协议证据在
+    // details 里,不丢任何一层。
+    std::string transport_tool;  // wire 上那只壳("tool_invoke");空 = 非代理调用
+    std::string tool_ref;        // 解引用用的那枚引用
+    std::string schema_digest;   // 发现那刻的 schema 摘要
 };
 
 }  // namespace lubancode::agent

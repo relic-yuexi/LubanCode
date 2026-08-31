@@ -1976,6 +1976,61 @@ TEST_CASE("MergeConfig: tool_search_threshold 配置文件压过默认值,没写
 }
 
 // ---------------------------------------------------------------------------
+// 动态工具 PromptCache 守恒单 P1:deferred_tool_mode(延迟工具命中后的走
+// 法)。先 opt-in——没写走 legacy_expand 现状;认不得的值报错,不静默
+// 换路;native_reference 是 P3 的活,显式拒绝。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseFileConfigJson: deferred_tool_mode 三档认得,native_reference/垃圾值报错") {
+    const auto proxy = config::ParseFileConfigJson(R"({"deferred_tool_mode": "proxy_reference"})", "x.json");
+    REQUIRE(proxy.has_value());
+    REQUIRE(proxy->deferred_tool_mode.has_value());
+    CHECK(*proxy->deferred_tool_mode == "proxy_reference");
+
+    const auto legacy = config::ParseFileConfigJson(R"({"deferred_tool_mode": "legacy_expand"})", "x.json");
+    REQUIRE(legacy.has_value());
+    CHECK(*legacy->deferred_tool_mode == "legacy_expand");
+
+    const auto disabled = config::ParseFileConfigJson(R"({"deferred_tool_mode": "disabled"})", "x.json");
+    REQUIRE(disabled.has_value());
+    CHECK(*disabled->deferred_tool_mode == "disabled");
+
+    const auto missing = config::ParseFileConfigJson(R"({})", "x.json");
+    REQUIRE(missing.has_value());
+    CHECK_FALSE(missing->deferred_tool_mode.has_value());
+
+    // P3 未落地:显式拒绝,不开空承诺、不悄悄换路。
+    const auto native = config::ParseFileConfigJson(R"({"deferred_tool_mode": "native_reference"})", "x.json");
+    REQUIRE_FALSE(native.has_value());
+    CHECK(native.error().find("native_reference") != std::string::npos);
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"deferred_tool_mode": "chaos"})", "x.json").has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"deferred_tool_mode": 42})", "x.json").has_value());
+}
+
+TEST_CASE("MergeConfig: deferred_tool_mode 项目级压全局,没写落空(= legacy 现状)") {
+    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(defaulted.has_value());
+    CHECK(defaulted->config.deferred_tool_mode.empty());
+    CHECK(defaulted->sources.deferred_tool_mode == config::Source::Default);
+
+    config::FileConfig global_file;
+    global_file.deferred_tool_mode = "legacy_expand";
+    const auto from_global =
+        config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global_file, EmptyGenericEnv());
+    REQUIRE(from_global.has_value());
+    CHECK(from_global->config.deferred_tool_mode == "legacy_expand");
+    CHECK(from_global->sources.deferred_tool_mode == config::Source::GlobalConfigFile);
+
+    config::FileConfig project_file;
+    project_file.deferred_tool_mode = "proxy_reference";
+    const auto from_project =
+        config::MergeConfig(EmptyLubancodeEnv(), project_file, global_file, EmptyGenericEnv());
+    REQUIRE(from_project.has_value());
+    CHECK(from_project->config.deferred_tool_mode == "proxy_reference");
+    CHECK(from_project->sources.deferred_tool_mode == config::Source::ProjectConfigFile);
+}
+
+// ---------------------------------------------------------------------------
 // M11(网络超时):connect_timeout_ms / stream_idle_timeout_secs /
 // request_timeout_secs 三个字段,待遇跟 tool_search_threshold 一样——只有
 // 配置文件(项目级 > 全局)和内置默认值两级,没有环境变量这一级。

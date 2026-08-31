@@ -723,3 +723,152 @@ TEST_CASE("P0基线: 干净命中 vs 误选的往返步数——legacy_expand �
     CHECK(search_result.content.find("mcp__billing__charge_card") != std::string::npos);
     CHECK(search_result.content.find("mcp__billing__charge_card_test") != std::string::npos);
 }
+
+// ---------------------------------------------------------------------------
+// 动态工具 PromptCache 守恒单 P1:proxy_reference 路。tool_search 收紧合同
+// (§5.2/§5.3)——结构化 JSON 结果带 tool_ref/完整 schema/digest/source,
+// 不写 loaded 集合、不碰顶层 tools;limit 硬上限 20;同 digest 重搜回短
+// 引用;schema 超单项上限报 schema_too_large 不铸 ref。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("P1 proxy: tool_search 返回结构化 schema/ref,不写 loaded 集合") {
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<StubTool>(
+        "mcp__github__search_issues", "Search issues in a GitHub repository.", true,
+        nlohmann::json{{"type", "object"},
+                       {"properties", {{"query", {{"type", "string"}}}}},
+                       {"required", nlohmann::json::array({"query"})}}));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    tools::ToolSearchTool search(registry, resolver);
+
+    const auto result = search.execute(nlohmann::json{{"query", "github issue"}});
+    CHECK_FALSE(result.is_error);
+    CHECK(result.details["deferred_tool_mode"] == "proxy_reference");
+
+    // 结果是机器可解析的结构化 JSON(§5.3):catalog_revision + matches[]。
+    const nlohmann::json parsed = nlohmann::json::parse(result.content);
+    REQUIRE(parsed.contains("catalog_revision"));
+    REQUIRE(parsed["matches"].is_array());
+    REQUIRE(parsed["matches"].size() == 1);
+    const auto& match = parsed["matches"][0];
+    CHECK(match["name"] == "mcp__github__search_issues");
+    CHECK(match["tool_ref"].get<std::string>().rfind("dt_", 0) == 0);
+    CHECK(match["schema_digest"].get<std::string>().size() == 64);
+    CHECK(match["description"] == "Search issues in a GitHub repository.");
+    CHECK(match["input_schema"]["properties"].contains("query"));
+    CHECK(match["input_schema"]["required"] == nlohmann::json::array({"query"}));
+    CHECK(match["source"] == "builtin");  // 没带注册元数据按 builtin 记,如实
+
+    // 搜索只读:不写 loaded(顶层 tools 与 exposure 过滤一概不动),发现
+    // 不等于授权。
+    const std::set<std::string> empty_loaded;
+    CHECK(tools::BuildDeferredToolsIndexSegment(registry, empty_loaded).find(
+              "mcp__github__search_issues") != std::string::npos);
+}
+
+TEST_CASE("P1 proxy: 同 digest 重搜回短引用,tool_ref 复用同一枚") {
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<StubTool>("mcp__db__query", "查询数据库", true));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    tools::ToolSearchTool search(registry, resolver);
+
+    const nlohmann::json first =
+        nlohmann::json::parse(search.execute(nlohmann::json{{"query", "db"}}).content);
+    const nlohmann::json second =
+        nlohmann::json::parse(search.execute(nlohmann::json{{"query", "db"}}).content);
+
+    REQUIRE(first["matches"].size() == 1);
+    REQUIRE(second["matches"].size() == 1);
+    CHECK(first["matches"][0]["tool_ref"] == second["matches"][0]["tool_ref"]);  // 复用
+    CHECK(first["matches"][0].contains("input_schema"));
+    CHECK(second["matches"][0]["repeat"] == true);  // 第二次不塞正文
+    CHECK_FALSE(second["matches"][0].contains("input_schema"));
+    CHECK(resolver->ledger().Size() == 1);
+}
+
+TEST_CASE("P1 proxy: limit 默认 5、硬上限 20,同分保持注册顺序") {
+    tools::ToolRegistry registry;
+    for (int i = 0; i < 30; ++i) {
+        registry.Register(std::make_unique<StubTool>("mcp__bulk__tool_" + std::to_string(i),
+                                                     "bulk search target", true));
+    }
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    tools::ToolSearchTool search(registry, resolver);
+
+    const nlohmann::json capped =
+        nlohmann::json::parse(search.execute(nlohmann::json{{"query", "bulk"}, {"limit", 50}}).content);
+    CHECK(capped["matches"].size() == 20);  // 硬上限(§5.2)
+    CHECK(capped["matches"][0]["name"] == "mcp__bulk__tool_0");  // 注册顺序稳定
+
+    const nlohmann::json small =
+        nlohmann::json::parse(search.execute(nlohmann::json{{"query", "bulk"}, {"limit", 3}}).content);
+    CHECK(small["matches"].size() == 3);
+}
+
+TEST_CASE("P1 proxy: 无命中/空 query/UTF-8 的口径") {
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<StubTool>("mcp__论文__检索", "按关键词检索论文库", true));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    tools::ToolSearchTool search(registry, resolver);
+
+    // UTF-8 关键词照常命中(legacy 路同款分词/子串,不因代理路搅坏编码)。
+    const nlohmann::json hit = nlohmann::json::parse(search.execute(nlohmann::json{{"query", "论文"}}).content);
+    REQUIRE(hit["matches"].size() == 1);
+    CHECK(hit["matches"][0]["name"] == "mcp__论文__检索");
+
+    // 无命中:结构化 note,不是错误。
+    const auto miss = search.execute(nlohmann::json{{"query", "不存在的词"}});
+    CHECK_FALSE(miss.is_error);
+    const nlohmann::json parsed = nlohmann::json::parse(miss.content);
+    CHECK(parsed["matches"].empty());
+    CHECK(parsed.contains("note"));
+
+    // 空/空白 query:稳定错误。
+    const auto blank = search.execute(nlohmann::json{{"query", "   "}});
+    CHECK(blank.is_error);
+    CHECK(blank.details["deferred_tool_mode"] == "proxy_reference");
+}
+
+TEST_CASE("P1 proxy: 单项 schema 超上限报 schema_too_large,不铸 ref、不截断") {
+    tools::ToolRegistry registry;
+    nlohmann::json heavy = nlohmann::json{{"type", "object"}, {"properties", nlohmann::json::object()}};
+    for (int i = 0; i < 900; ++i) {
+        heavy["properties"]["prop_" + std::to_string(i)] =
+            nlohmann::json{{"type", "string"}, {"description", std::string(64, 'x')}};
+    }
+    registry.Register(std::make_unique<StubTool>("mcp__huge__tool", "巨大 schema 工具", true, heavy));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    tools::ToolSearchTool search(registry, resolver);
+
+    const auto result = search.execute(nlohmann::json{{"query", "huge"}});
+    CHECK_FALSE(result.is_error);  // 搜索本身没失败;单项摊不开是如实分型
+    const nlohmann::json parsed = nlohmann::json::parse(result.content);
+    REQUIRE(parsed["matches"].size() == 1);
+    CHECK(parsed["matches"][0]["error"] == "schema_too_large");
+    CHECK_FALSE(parsed["matches"][0].contains("tool_ref"));
+    CHECK(resolver->ledger().Size() == 0);  // 没铸 ref:发现没成立,无引用可发
+}
+
+TEST_CASE("P1 proxy: tool_invoke 壳定义恒定,直调壳得稳定拒绝不执行目标") {
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<StubTool>("mcp__x__y", "延迟目标", true));
+    registry.Register(std::make_unique<tools::ToolInvokeTool>());
+
+    // 顶层 schema 逐字节钉死(§5.4):同 epoch 内一个字节不变。
+    tools::ToolInvokeTool invoke;
+    const nlohmann::json schema = invoke.input_schema();
+    CHECK(invoke.name() == "tool_invoke");
+    CHECK(invoke.input_schema() == schema);
+    CHECK(schema["type"] == "object");
+    CHECK(schema["required"] == nlohmann::json::array({"tool_ref", "arguments"}));
+    CHECK(schema["additionalProperties"] == false);
+    CHECK(schema["properties"]["tool_ref"]["type"] == "string");
+    CHECK(schema["properties"]["arguments"]["type"] == "object");
+
+    // 直调壳(未经 AgentLoop 规范化的入口,如 PTC):稳定拒绝,绝不执行。
+    const auto refused =
+        invoke.execute(nlohmann::json{{"tool_ref", "dt_x"}, {"arguments", nlohmann::json::object()}});
+    CHECK(refused.is_error);
+    CHECK(refused.error_code == tools::kErrToolInvokeDirectCall);
+    CHECK(refused.outcome == "host_error");
+}

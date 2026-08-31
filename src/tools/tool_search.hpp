@@ -6,12 +6,18 @@
 //     恒在,照旧全量直挂;
 //   - 延迟工具(McpTool 经 DeferredTool 包装、PluginTool、LuaTool,
 //     deferred()==true)不进 tools 数组,只在系统提示的紧凑索引段里露
-//     "名字 + 一句截断的描述";模型用 tool_search 按关键词检索,命中即
-//     挂载(进 loaded 集合),下一轮请求它们的完整 schema 就在 tools 里了。
+//     "名字 + 一句截断的描述";模型用 tool_search 按关键词检索。
+//
+// 命中之后怎么走,看 deferred_tool_mode(动态工具 PromptCache 守恒单 §四):
+//   - legacy_expand(默认/兼容):命中进 loaded 集合,下一轮完整 schema
+//     扩写回顶层 tools+system——断前缀,cache-hostile,P0 回归册钉着现状;
+//   - proxy_reference(P1):命中只把结构化 schema/tool_ref 放进 tool result
+//     追加到历史尾部,顶层 tools 恒为 core+tool_search+tool_invoke,前缀
+//     缓存不断;调用走 tool_invoke,由 AgentLoop 解引用后过 RunOneTool 正门。
 //
 // 阈值开关:注册表总工具数 ≤ 阈值(config.tool_search_threshold,默认 20,
 // 0 = 永不延迟)时一切照旧,现状行为零变化;超阈值才启用。启用与否、
-// loaded 集合都由 main.cpp 持有(会话级,/clear 不清——工具挂载与对话
+// loaded 集合都由装配层持有(会话级,/clear 不清——工具挂载与对话
 // 历史无关),这里只提供纯逻辑:判定、索引段、检索工具、延迟包装。
 #pragma once
 
@@ -20,6 +26,7 @@
 #include <set>
 #include <string>
 
+#include "tools/deferred_tool_resolver.hpp"  // DeferredToolMode/DeferredToolResolver:proxy 路的账与解析
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
 
@@ -32,13 +39,20 @@ inline bool DeferralEnabled(std::size_t total_tools, int threshold) {
 }
 
 // P0(动态工具 PromptCache 守恒单·§十三):/context 与 trace 的
-// deferred_tool_mode 展示位。现状只有两档——deferral 关着时全量定义常驻
-// (disabled),开着时 tool_search 命中把 schema 直接扩写回顶层 tools/
-// system(legacy_expand,§四定案表标"cache-hostile"的那条兼容路)。
-// proxy_reference/native_reference 是 P1/P3 才落地的新路,现在没有,不能
-// 提前展示成"已支持"——按名字就能看出这只是诊断标签,不是新枚举类型。
+// deferred_tool_mode 展示位。P1 起 proxy_reference 落地,标签按模式给;
+// bool 版保留给 P0 的既有调用(等价于 disabled/legacy_expand 两档)。
 inline std::string DeferredToolModeLabel(bool deferral_enabled) {
     return deferral_enabled ? "legacy_expand" : "disabled";
+}
+
+// P1:模式版标签。deferral 关着时无论配了什么都是 disabled(没有延迟工具
+// 就没有模式可言);native_reference 枚举立位但 P3 未落地,装配层不该把
+// 它递进来——真收到了也如实显示,不冒充已支持。
+inline std::string DeferredToolModeLabel(DeferredToolMode mode, bool deferral_enabled) {
+    if (!deferral_enabled) {
+        return "disabled";
+    }
+    return DeferredToolModeName(mode);
 }
 
 // 延迟包装:把任意工具标成 deferred=true,其余行为原样转发。给 McpTool 用
@@ -78,14 +92,21 @@ private:
 // 延迟、或全加载了)返回空串,调用方不注段,一个字符都不多。
 std::string BuildDeferredToolsIndexSegment(const ToolRegistry& registry, const std::set<std::string>& loaded);
 
-// tool_search 工具本体。持有注册表引用(检索它里面的延迟工具)和 loaded
-// 集合的 shared_ptr(命中即写入——main.cpp 持同一份,主会话/子代理共享,
-// 挂载一次两边可用)。registry 的生命周期由 main.cpp 的声明顺序保证
+// tool_search 工具本体。两副构造,对应单子 §四的两条活路:
+//   - legacy 构造(registry + loaded):命中即写 loaded 集合,下一轮 schema
+//     扩写回顶层 tools——兼容路,cache-hostile,明标不洗白。
+//   - proxy 构造(registry + resolver):命中只把结构化 schema/ref 放进
+//     tool result 追加到历史尾部,不碰 loaded、不碰顶层 tools(单子 §5.3)。
+// 搜索本身只读 catalog,不授予权限、不执行目标工具——发现不等于授权。
+// registry 的生命周期由装配层(main.cpp/ToolRuntime)的声明顺序保证
 // (工具就注册在这张表里,表活着工具就活着)。
 class ToolSearchTool : public Tool {
 public:
     ToolSearchTool(const ToolRegistry& registry, std::shared_ptr<std::set<std::string>> loaded)
         : registry_(registry), loaded_(std::move(loaded)) {}
+
+    ToolSearchTool(const ToolRegistry& registry, std::shared_ptr<DeferredToolResolver> resolver)
+        : registry_(registry), resolver_(std::move(resolver)) {}
 
     std::string name() const override;
     std::string description() const override;
@@ -93,8 +114,28 @@ public:
     Result execute(const nlohmann::json& input) override;
 
 private:
+    Result ExecuteLegacy(const nlohmann::json& input);
+    Result ExecuteProxy(const nlohmann::json& input);
+
     const ToolRegistry& registry_;
-    std::shared_ptr<std::set<std::string>> loaded_;
+    std::shared_ptr<std::set<std::string>> loaded_;          // legacy 路:命中写挂载
+    std::shared_ptr<DeferredToolResolver> resolver_;         // proxy 路:命中铸 ref
+};
+
+// tool_invoke 的固定 wire 定义(单子 §5.4)。顶层 schema 一个字节不变:
+// {tool_ref: string, arguments: object};arguments 的细校验不靠这层宽
+// schema——宿主解引用后拿目标工具当下那份真 schema 再验(单子 §5.5)。
+//
+// 注意:这个 execute() 不是执行口!AgentLoop 收到 tool_invoke 调用后先规范
+// 化成真实目标调用、只对目标走一次 RunOneTool(单子 §6.1);直接调到这只
+// 壳(PTC/未接规范化的入口)会得到稳定拒绝,绝不在壳里 target->execute()
+// ——那会绕过确认、Hook、取消与 Trace,养出第二条执行暗道(单子红线 5)。
+class ToolInvokeTool : public Tool {
+public:
+    std::string name() const override;
+    std::string description() const override;
+    nlohmann::json input_schema() const override;
+    Result execute(const nlohmann::json& input) override;
 };
 
 }  // namespace lubancode::tools

@@ -784,3 +784,128 @@ TEST_CASE("P0现状证据: 假后端确定性账——discovery 前长历史高�
     CHECK(hit_percent(reports[2]) > 80.0);   // discovery 前:6200/7700 ≈ 80.5%
     CHECK(hit_percent(reports[3]) == 0.0);   // discovery 那一拍:硬归零
 }
+
+// ---------------------------------------------------------------------------
+// 动态工具 PromptCache 守恒单 P1:客户端三拍前缀合同(§11.1)。proxy_
+// reference 必须满足 R1/R2/R3 的 model/system/tools 指纹全等、messages 只
+// 追加、cache epoch 不因发现或调用而断——只要其中一条不成,P1 不算落地。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("P1三拍前缀合同: proxy_reference 发现与调用前后 system/tools 指纹不变,messages 只追加") {
+    CaptureBackend backend;
+    // 计数延迟目标:发现与调用各拍是否真的动了目标工具,一眼可查。
+    class CountingTarget : public tools::Tool {
+    public:
+        std::string name() const override { return "mcp__github__search_issues"; }
+        std::string description() const override { return "Search issues in a GitHub repository."; }
+        nlohmann::json input_schema() const override {
+            return nlohmann::json{{"type", "object"},
+                                  {"properties", {{"query", {{"type", "string"}}}}},
+                                  {"required", nlohmann::json::array({"query"})}};
+        }
+        bool deferred() const override { return true; }
+        tools::Tool::Result execute(const nlohmann::json&) override {
+            ++calls;
+            return {"命中结果:issue #42", false};
+        }
+        int calls = 0;
+    };
+    auto target = std::make_unique<CountingTarget>();
+    CountingTarget* target_ptr = target.get();
+
+    tools::ToolRegistry registry;
+    registry.Register(std::move(target));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    registry.Register(std::make_unique<tools::ToolSearchTool>(registry, resolver));
+    registry.Register(std::make_unique<tools::ToolInvokeTool>());
+
+    // 生产同款 proxy 接线(interactive_session_assembly 的 P1 分支同一套):
+    // resolver + 执行资格 + exposure 过滤(延迟工具恒不进顶层);没有
+    // deferred_index_provider——proxy 路的 system 恒定(§8.1)。
+    agent::AgentProfile profile{.request{.model = "test-model"}, .system_prompt = "system prompt"};
+    profile.tool_ref_resolver = resolver;
+    profile.tool_filter = [](const tools::Tool& tool) { return !tool.deferred(); };
+    profile.tool_filter_denial = "延迟工具不能按名直调:请先用 tool_search,再以 tool_invoke 调用。";
+    profile.tool_execution_policy = [](const tools::Tool&) { return true; };
+
+    agent::Agent loop(backend, registry, std::move(profile));
+    agent::TurnWiring callbacks;
+
+    // R1(发现前)-> R2(追加 tool_search call/result)。
+    backend.scripts = {
+        {
+            api::MessageStart{"msg", "test-model"},
+            api::ToolUseStart{0, "call_search", "tool_search"},
+            api::ToolUseInputDelta{0, R"({"query":"github issue search"})"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"tool_use", api::Usage{}},
+        },
+        TextScript("搜到了"),
+    };
+    REQUIRE(loop.Run("帮我搜一下 github issue", callbacks).has_value());
+    REQUIRE(backend.captured.size() == 2);
+    REQUIRE(target_ptr->calls == 0);
+
+    // 取出 tool_search 结果里的 tool_ref(宿主运行时铸的号,测前不可知)。
+    std::string tool_ref;
+    for (const auto& message : loop.history()) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block); result != nullptr) {
+                const nlohmann::json parsed =
+                    nlohmann::json::parse(result->content, nullptr, /*allow_exceptions=*/false);
+                if (parsed.is_object() && parsed.contains("matches") && !parsed["matches"].empty() &&
+                    parsed["matches"][0].contains("tool_ref")) {
+                    tool_ref = parsed["matches"][0]["tool_ref"].get<std::string>();
+                }
+            }
+        }
+    }
+    REQUIRE_FALSE(tool_ref.empty());
+
+    // R2(调用前)-> R3(追加 tool_invoke call/result)-> 收尾。CaptureBackend
+    // 的脚本按下标全局累进,第二轮只能追加、不能整份换(换了就下标越界)。
+    backend.scripts.push_back({
+        api::MessageStart{"msg", "test-model"},
+        api::ToolUseStart{0, "call_invoke", "tool_invoke"},
+        api::ToolUseInputDelta{0,
+                               R"({"tool_ref":")" + tool_ref + R"(","arguments":{"query":"repo:lubancode cache"}})"},
+        api::ContentBlockDone{0},
+        api::MessageDone{"tool_use", api::Usage{}},
+    });
+    backend.scripts.push_back(TextScript("完成"));
+    REQUIRE(loop.Run("调用它", callbacks).has_value());
+    REQUIRE(backend.captured.size() == 4);
+    REQUIRE(target_ptr->calls == 1);  // 调用真实发生(发现那拍没有)
+
+    // ---- 合同逐条验(§11.1)------------------------------------------------
+    auto hash_of = [](const api::Request& req) {
+        const agent::PrefixFingerprint fp = agent::FingerprintRequest(req);
+        return std::pair<std::string, std::string>{fp.system_hash, fp.tools_hash};
+    };
+    const auto [system_1, tools_1] = hash_of(backend.captured[0]);
+    for (std::size_t i = 1; i < backend.captured.size(); ++i) {
+        const auto [system_i, tools_i] = hash_of(backend.captured[i]);
+        CHECK(system_i == system_1);
+        CHECK(tools_i == tools_1);
+        CHECK(backend.captured[i - 1].model == backend.captured[i].model);
+    }
+    // messages 逐份严格前缀追加(R1⊂R2⊂R3⊂收尾)。
+    for (std::size_t i = 1; i < backend.captured.size(); ++i) {
+        CHECK(agent::IsAppendOnlySuccessor(backend.captured[i - 1], backend.captured[i]));
+    }
+    // 顶层 tools 恒为 core + tool_search + tool_invoke;目标工具从不进
+    // 任何一份请求的 tools,system 里也没有延迟索引段。
+    for (const auto& request : backend.captured) {
+        bool has_search = false;
+        bool has_invoke = false;
+        for (const auto& def : request.tools) {
+            has_search = has_search || def.name == "tool_search";
+            has_invoke = has_invoke || def.name == "tool_invoke";
+            CHECK_MESSAGE(def.name != "mcp__github__search_issues", "延迟目标进了顶层 tools");
+        }
+        CHECK(has_search);
+        CHECK(has_invoke);
+        CHECK_MESSAGE(request.system.find("mcp__github__search_issues") == std::string::npos,
+                      "proxy 路的 system 里不该出现延迟索引段");
+    }
+}

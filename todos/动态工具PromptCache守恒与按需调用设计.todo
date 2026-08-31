@@ -1,6 +1,6 @@
 # 动态工具 Prompt Cache 守恒与按需调用设计
 
-- 状态：待实现（设计单；本文所写协议与类型尚未落地）
+- 状态：P0 已落（a6c48f7，2026-08-31 补账）；P1 通用 ProxyReference 已落（2026-08-31，待主控验收）；P2/P3/P4 未动
 - 日期：2026-08-31
 - 级别：P1（长会话成本、首 token 延迟与工具扩展性的共同底座）
 - 范围：`tool_search`、延迟工具、条件工具、四条 wire、前缀账、会话恢复、compact、工具执行正门
@@ -619,24 +619,25 @@ proxy 多走一步，未必总比全量 tools 便宜。短会话、少工具时�
 
 ### P0：把问题钉死，不改产品行为
 
-- [ ] 加一组现状回归，证明 legacy search 后 `system_changed + tools_changed`。
-- [ ] 保存一次长历史真机 usage，量出 discovery 前后的 cached tokens 变化。
-- [ ] 给 `/context` 与 trace 补 `deferred_tool_mode` 展示。
-- [ ] 以现有 20 阈值跑 baseline：成功、token、cache、延迟、误选。
+- [x] 加一组现状回归，证明 legacy search 后 `system_changed + tools_changed`。（2026-08-31 P0 已落（a6c48f7）补账；tests/unit/api/test_request_prefix.cpp:589-664，生产同款接线钉死两根梁同拍一起断，break_reason 只报第一根的口径缺口也留了交接备注）
+- [x] 保存一次长历史真机 usage，量出 discovery 前后的 cached tokens 变化。（同上 commit:675-786——真机无钥匙，落的是假后端确定性 usage 账，复现"discovery 那拍 cache 归零重付"的力学关系；数字是脚本喂的、用例内如实标注非实测，真机一栏待钥匙补测，不冒充已实测）
+- [x] 给 `/context` 与 trace 补 `deferred_tool_mode` 展示。（同上 commit：src/app/commands/session_commands.cpp 的 deferred_tool_mode 行 + src/cli/i18n.cpp 两键 + src/tools/tool_search.cpp details 透传；2026-08-31 P1 起 /context 增补 proxy_reference 档与提示行）
+- [x] 以现有 20 阈值跑 baseline：成功、token、cache、延迟、误选。（同上 commit：tests/unit/tools/test_tool_search.cpp P0 基线三册——轻/重 schema 两形状字节账、干净命中 vs 误选往返步数账；延迟在假后端退化为 0，如实标 N/A 不拿假数冒充）
 
 验收：能复现，能分清客户端断前缀与 provider 未命中；尚不宣称修好。
 
 ### P1：通用 ProxyReference
 
-- [ ] 新增 `DeferredToolResolver` 与 `DiscoveryLedger`。
-- [ ] 改 `tool_search`，返回结构化 schema/ref，不再写 loaded 集合。
-- [ ] 新增稳定 `tool_invoke` wire 定义。
-- [ ] 在 `RunOneTool` 前规范化代理调用，只执行真实目标一次。
-- [ ] proxy 模式移除动态 deferred index。
-- [ ] 接主 Agent、子 Agent、session 恢复、compact 与 trace。
-- [ ] 配置先 opt-in；保留 `Disabled`、`LegacyExpand` 回退。
+- [x] 新增 `DeferredToolResolver` 与 `DiscoveryLedger`。（src/tools/deferred_tool_resolver.hpp/.cpp：DeferredToolMode 四枚枚举+解析、稳定错误码、DeferredToolRefRecord、DiscoveryLedger（只增不删、线程安全）、resolver 的 Discover/Resolve/RebuildFromHistory；tests/unit/tools/test_deferred_tool_resolver.cpp 九册钉 ref 绑定/跨侧不串/stale/unavailable/恢复账）
+- [x] 改 `tool_search`，返回结构化 schema/ref，不再写 loaded 集合。（src/tools/tool_search.cpp：proxy 构造走 ExecuteProxy——结构化 JSON 结果带 tool_ref/name/description/input_schema/schema_digest/source；limit 硬上限 20；同 digest 重搜回短引用；单项超 32KiB 报 schema_too_large 不铸 ref；legacy 构造一字不动，P0 现状回归册照绿）
+- [x] 新增稳定 `tool_invoke` wire 定义。（src/tools/tool_search.hpp/.cpp 的 ToolInvokeTool：顶层 schema 逐字节恒定（§5.4 原文），execute 只回稳定拒绝码不执行目标——真执行在 AgentLoop 规范化后的 RunOneTool；注册次序 tool_search 之后紧跟，tool_runtime.cpp 钉死）
+- [x] 在 `RunOneTool` 前规范化代理调用，只执行真实目标一次。（src/agent/loop.cpp 工具循环：name==tool_invoke 先解引用，失败就地落稳定码 tool_result（原 wire id 配对）+终态栅栏；成功则改写为真实目标调用、id 沿用、只调一次 RunOneTool；RunOneTool 尾参 ProxyCallContext——目标参数按真 schema 先验（invalid_target_arguments）、filter_denial 支持"稳定码|人话"两截、trace 每枚事件补 transport/resolved 两层；tests/unit/agent/test_loop.cpp 七册：只执行一次/直名被拦/伪拼 ref/坏参数/越权策略/Hook 与确认看真目标/updatedInput 复验/并行两枚不串）
+- [x] proxy 模式移除动态 deferred index。（§8.1：interactive_session_assembly.cpp / session_stack.cpp / one_shot.cpp 三处装配只在 legacy 档注 deferred_index_provider，proxy 档恒空；顺手修了 session_stack 的装配次序 bug——sub_deferral 原在赋值前被读走，子代理延迟接线在交互路从未生效）
+- [x] 接主 Agent、子 Agent、session 恢复、compact 与 trace。（主/子 AgentProfile 各挂 resolver+执行资格（AgentProfile 三新字段）；子代理经 AgentTool::SetToolRefResolver（子侧独立 ledger，main 的 ref 不串；Explore 不开，只读边界不留借 ref 穿越的门；自定义 Agent 的 allow/deny 即其执行资格）；恢复走 Agent::RestoreSessionHistory 从正式 discovery event 重建账（三处恢复点：/resume、--continue 启动、trajectory resume），compact 走 ReplaceHistory 不动账；trace 两层事实进 ToolTraceContext+emit，/tools、/context、/config 增补展示位）
+- [x] 配置先 opt-in；保留 `Disabled`、`LegacyExpand` 回退。（config.deferred_tool_mode：空=legacy_expand 现状、disabled 全量常驻压过阈值、proxy_reference 新路、legacy_expand 显式可写回；native_reference 显式报错不开空承诺（P3）；项目级压全局；tests/unit/config/test_config.cpp 两册）
 
 验收：客户端三拍前缀合同全过；安全回归全过；四 wire proxy replay 全过；质量对照不差到触发回退门。
+（2026-08-31 P1 验收账：三拍前缀合同在 tests/unit/api/test_request_prefix.cpp"P1三拍前缀合同"册钉绿（发现/调用前后 system/tools 指纹全等、messages 只追加、相邻请求断因全空）；安全回归在 test_loop.cpp 四册（直名被拦/伪拼 ref/越权策略/坏参数各有稳定码，Hook 与确认看真实目标）+ test_deferred_tool_resolver.cpp（跨侧不串/stale/unavailable）；四 wire replay 在 test_chat/anthropic/responses/gemini_request.cpp 各一册；§12.5 质量对照（同模型三档跑分）未做——无真机钥匙，proxy 保持 opt-in 不默认，不因结构验收绿就宣称质量门已过。）
 
 ### P2：条件工具也守恒
 
