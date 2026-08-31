@@ -1,6 +1,6 @@
 # Kimi 保留式思考、工具循环与历史回传兼容设计
-- 状态：P0 已落地（0.26.120：Always 回传、四模型方言定档、loopback 契约钉死）；P1 已落地（K2.6 可选跨轮：ReasoningHistoryMode、/think history、thinking.keep 落线与会话账）；P2（真机探针）待实现
-- 日期：2026-08-30
+- 状态：P0 已落地（0.26.120：Always 回传、四模型方言定档、loopback 契约钉死）；P1 已落地（K2.6 可选跨轮：ReasoningHistoryMode、/think history、thinking.keep 落线与会话账）；P2 已落地（真机探针三层账全过、契约对账清九枚陈档）——单子收官
+- 日期：2026-08-30（P2 收官 2026-08-31）
 - 级别：P0（`kimi-k3`、`kimi-k2.7-code` 协议合规；`kimi-k2.6` 工具循环正确性）
 - 范围：Moonshot OpenAI-compatible Chat API、`reasoning_content` 接收与原样回传、`thinking.keep`、模型级 reasoning 方言、会话恢复、compact 边界、测试与诊断
 - 官方依据：
@@ -8,7 +8,7 @@
   - `https://platform.kimi.com/docs/api/chat`
   - `https://platform.kimi.com/docs/api/models-overview`
 - 文档核对日期：2026-08-30
-- 当前验证：P0 已落——`unit.api.chat_request`、`unit.config.provider_catalog`、`unit.api.model_quirks_matrix`、`integration.api.wire_replay`（含 K3 跨轮/K2.6 工具循环/K2.5 不回传三幕回环）通过；尚未跑 Moonshot 真机
+- 当前验证：P0 已落——`unit.api.chat_request`、`unit.config.provider_catalog`、`unit.api.model_quirks_matrix`、`integration.api.wire_replay`（含 K3 跨轮/K2.6 工具循环/K2.5 不回传三幕回环）通过；P2 已跑 Moonshot 真机（api.moonshot.cn/v1，五案三层账全过，证据 build/smoke/kimi-preserved-thinking/，Kimi API 已实测通过）
 - 不在本单：展示层 thinking 折叠、推理正文脱敏策略、Anthropic wire 通用重构、替厂商编造或摘要 reasoning、Kimi 模型质量评测
 
 ## 一、先下断语
@@ -373,13 +373,13 @@ P0 做完，LubanCode 才能声称：K3/K2.7 的 Preserved Thinking 契约已接
 
 ### P2：真机、诊断与长期兼容
 
-1. 增加 `manual.model_probe_kimi_preserved_thinking`，继续 `EXCLUDE_FROM_ALL`。
-2. 探针分三层报账：请求被接受、响应发出 reasoning、下一请求实际回传。三者不可并成“支持”。
-3. 用 K2.6 跑两步工具调用，抓第二份请求，核对 assistant `reasoning_content` 与原响应逐字一致。
-4. 用 K3 跑两轮纯对话，抓第二轮请求，核对第一轮 reasoning 仍在。
-5. 跑一次 session exit/resume 后续聊，核对恢复链。
-6. 记录 usage 与缓存指标；没有分项便写“不可得”，不拿 HTTP 2xx 冒充效果验证。
-7. 官方契约变动时，只改 catalog/fixture 与方言实现；不在 AgentLoop 散落 Kimi 名字判断。
+1. [x] 增加 `manual.model_probe_kimi_preserved_thinking`，继续 `EXCLUDE_FROM_ALL`。
+2. [x] 探针分三层报账：请求被接受、响应发出 reasoning、下一请求实际回传。三者不可并成“支持”。
+3. [x] 用 K2.6 跑两步工具调用，抓第二份请求，核对 assistant `reasoning_content` 与原响应逐字一致。
+4. [x] 用 K3 跑两轮纯对话，抓第二轮请求，核对第一轮 reasoning 仍在。
+5. [x] 跑一次 session exit/resume 后续聊，核对恢复链。
+6. [x] 记录 usage 与缓存指标；没有分项便写“不可得”，不拿 HTTP 2xx 冒充效果验证。
+7. [x] 官方契约变动时，只改 catalog/fixture 与方言实现；不在 AgentLoop 散落 Kimi 名字判断。
 
 ## 八、测试矩阵
 
@@ -510,7 +510,10 @@ Request 2: U1 + assistant(reasoning_content + content) + U2
 - 会话账:`think_history_v1` 事件(append-only 最后一条胜),SessionRuntime::RecordThinkHistory 建档前挂起/建档补落;/resume 经回调恢复并按当前模型重校验(`RevalidateThinkHistoryMode`:不支持或与关思考冲突回 default 并明报)。/model 与 /provider 切换同一只重校验,K2.6 的 keep 状态不硬带。
 - 测试:`unit.api.chat_request` 增 keep 各 golden(同发/空档位/关思考防御/K3·K2.5 不漏/default 不变/ApplyRequestProfile);`unit.config.provider_catalog` 增 history_control 契约+K2.6 all golden+解析边界四案;新册 `unit.app.test_reasoning_history`(切换/冲突/重校验各案);`unit.sessions.test_session_store` 增事件往返与折叠;`integration.api.wire_replay` 增 K2.6 all 两轮跨 Turn 回环+切 K3 不误带(新 fixture `kimi_k26_reasoning_text_stream`)。
 
-### 尚未实现(P2)
+### P2 已落(2026-08-31,第四笔,收官)
 
-- 真机探针(`manual.model_probe_kimi_preserved_thinking`)。
-- 未跑真机,只可声称"源码与回环协议已接通",不可写"Kimi API 已实测通过"。
+- 探针 `tests/manual/model_probe_kimi_preserved_thinking.py`(direct / resume / resume --analyze-only 三态);CMake 注册 `model_probe_kimi_preserved_thinking`(EXCLUDE_FROM_ALL,不进 ctest;没钥匙 SKIP 退 0)。钥匙只认 env `MOONSHOT_API_KEY` 或用户 config,驱动/报告/证据全不落 key(报告一律 sk-***)。原始报文落 build/smoke/kimi-preserved-thinking/(gitignore);summary/resume_summary 只存 hash/长度/逐字相等/usage,不含 reasoning 正文。
+- direct 五案真机(api.moonshot.cn/v1,全部 max_tokens≤200,每案一两发):K3 两轮纯对话、K2.6 两步工具循环、K2.6 keep=all、K2.7-code 两轮纯对话、GET /models 对账。三层账全部 PASS——四案第二笔请求体 assistant.reasoning_content 与原响应逐字一致(len/sha256 全对上);K3 带 reasoning_effort=low 不带 thinking;K2.6 不带 reasoning_effort、finish=tool_calls 后第二笔正常收口;keep=all 服务端照收。K2.5 未直探:"不支持 Preserved Thinking"无干净正反向判据,契约仍以官方文档为准。
+- resume 链:真 lubancode.exe + 临时 USERPROFILE(只带 moonshot 一枚 provider,config 里假钥匙)+ 本地录制代理(代理出口换真钥匙)。一轮 /exit、--continue 续聊:会话档 type=thinking 在场;续聊第二笔请求体 assistant.reasoning_content 与第一轮流式响应逐字一致(真 serializer、真恢复路,Always 生效);K3 契约下不发 thinking 键。流内 usage 复析:turn2 prompt 6428 中 cached_tokens=6144(95.6% 命中)——Always 回传字节稳定,不吃前缀缓存。Moonshot 流式 usage 藏在 choices[0].usage(与 OpenAI 顶层口径不同),探针两处都收。
+- 契约对账(§二 五枚模型):实测与契约表、catalog 现值全部一致。GET /models 恰好供五枚(kimi-k3/k2.7-code/k2.7-code-highspeed/k2.6/k2.5);catalog 里九枚陈档(kimi-k2、kimi-k2.0711-preview、kimi-k2.0905-preview、kimi-k2-instruct、kimi-k2-thinking-maas、kimi-k2-thinking-turbo、kimi-k2-turbo-preview、kimi-k3-fast、kimi-latest)真端点已不供——chat 与 anthropic 两侧一并清掉(anthropic 侧 /models 404 无独立证据,按同平台同档清理)。只动 config 域,AgentLoop 一行没碰。
+- 真机新发现(session 层旧疾,不属本单、未修):会话档每轮把 assistant 消息落两笔,一笔挤在 user 前——`on_assistant_message_ready` 增量落盘先于 user 消息首刷(档序成 A1,U1,A1),resume 忠实回放,下一份请求体带重复 assistant;服务端照收,缓存仍命中。待另开单修落盘次序。

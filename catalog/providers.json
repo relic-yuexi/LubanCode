@@ -13062,32 +13062,6 @@
             }
           }
         },
-        "kimi-k2": {
-          "name": "Kimi K2 Thinking",
-          "context_window": 262144,
-          "max_output": 262144,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true
-          }
-        },
-        "kimi-k2.0711-preview": {
-          "name": "Kimi K2 0711",
-          "context_window": 131072,
-          "max_output": 16384,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "kimi-k2.0905-preview": {
-          "name": "Kimi K2 0905",
-          "context_window": 262144,
-          "max_output": 262144,
-          "capabilities": {
-            "tools": true
-          }
-        },
         "kimi-k2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
@@ -13161,82 +13135,6 @@
               "history_control": "none",
               "verified": true
             }
-          }
-        },
-        "kimi-k2-instruct": {
-          "name": "Kimi K2 0905",
-          "context_window": 262144,
-          "max_output": 262144,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "kimi-k2-thinking-maas": {
-          "name": "Kimi K2 Thinking",
-          "context_window": 262144,
-          "max_output": 262144,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true
-          }
-        },
-        "kimi-k2-thinking-turbo": {
-          "name": "Kimi K2 Thinking Turbo",
-          "context_window": 262144,
-          "max_output": 262144,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          }
-        },
-        "kimi-k2-turbo-preview": {
-          "name": "Kimi K2 Turbo",
-          "context_window": 262144,
-          "max_output": 262144,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "kimi-k3-fast": {
-          "name": "Kimi K3 Fast",
-          "context_window": 1000000,
-          "max_output": 131072,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "low",
-                  "high",
-                  "max"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "low",
-              "high",
-              "max"
-            ]
-          }
-        },
-        "kimi-latest": {
-          "name": "MoonshotAI Kimi Latest",
-          "context_window": 1048576,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "video": true,
-            "video-recognition": true
           }
         }
       }
@@ -13352,32 +13250,6 @@
             ]
           }
         },
-        "kimi-k2": {
-          "name": "Kimi K2 Thinking",
-          "context_window": 262144,
-          "max_output": 262144,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true
-          }
-        },
-        "kimi-k2.0711-preview": {
-          "name": "Kimi K2 0711",
-          "context_window": 131072,
-          "max_output": 16384,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "kimi-k2.0905-preview": {
-          "name": "Kimi K2 0905",
-          "context_window": 262144,
-          "max_output": 262144,
-          "capabilities": {
-            "tools": true
-          }
-        },
         "kimi-k2.5": {
           "name": "Kimi K2.5",
           "context_window": 262144,
@@ -13464,82 +13336,6 @@
               "max": 30720,
               "min": 0
             }
-          }
-        },
-        "kimi-k2-instruct": {
-          "name": "Kimi K2 0905",
-          "context_window": 262144,
-          "max_output": 262144,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "kimi-k2-thinking-maas": {
-          "name": "Kimi K2 Thinking",
-          "context_window": 262144,
-          "max_output": 262144,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true
-          }
-        },
-        "kimi-k2-thinking-turbo": {
-          "name": "Kimi K2 Thinking Turbo",
-          "context_window": 262144,
-          "max_output": 262144,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true
-          }
-        },
-        "kimi-k2-turbo-preview": {
-          "name": "Kimi K2 Turbo",
-          "context_window": 262144,
-          "max_output": 262144,
-          "capabilities": {
-            "tools": true
-          }
-        },
-        "kimi-k3-fast": {
-          "name": "Kimi K3 Fast",
-          "context_window": 1000000,
-          "max_output": 131072,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "file_input": true
-          },
-          "reasoning": {
-            "controls": [
-              {
-                "kind": "effort",
-                "values": [
-                  "low",
-                  "high",
-                  "max"
-                ]
-              }
-            ],
-            "supportedEfforts": [
-              "low",
-              "high",
-              "max"
-            ]
-          }
-        },
-        "kimi-latest": {
-          "name": "MoonshotAI Kimi Latest",
-          "context_window": 1048576,
-          "capabilities": {
-            "tools": true,
-            "reasoning": true,
-            "structured_output": true,
-            "image": true,
-            "video": true,
-            "video-recognition": true
           }
         }
       }
