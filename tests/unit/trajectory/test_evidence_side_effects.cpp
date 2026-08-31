@@ -12,6 +12,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/loop.hpp"  // RequestPreparedContext(合并缝合:P0-4 测试补 A1 新增的 ctx 参)
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 #include "runtime/trajectory_session.hpp"
@@ -147,7 +148,7 @@ TEST_CASE("side-effect 细账:file 的 pre/post hash 与 undo、command 的 argv
 
     // ---- 文件工具:write_file 带 undo token ----
     const std::string file_call = "call-file";
-    const std::string file_request = bridge->OnRequestPrepared(api::Request{});
+    const std::string file_request = bridge->OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
     REQUIRE_FALSE(file_request.empty());
     bridge->OnRequestSent(file_request);
     REQUIRE(bridge->OnOutputCompleted(file_request, AssistantWithToolCall(file_call, "write_file"),
@@ -171,7 +172,7 @@ TEST_CASE("side-effect 细账:file 的 pre/post hash 与 undo、command 的 argv
 
     // ---- 命令工具:run_command 带 exit code ----
     const std::string cmd_call = "call-cmd";
-    const std::string cmd_request = bridge->OnRequestPrepared(api::Request{});
+    const std::string cmd_request = bridge->OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
     REQUIRE_FALSE(cmd_request.empty());
     bridge->OnRequestSent(cmd_request);
     REQUIRE(bridge->OnOutputCompleted(cmd_request, AssistantWithToolCall(cmd_call, "run_command"),
@@ -191,7 +192,7 @@ TEST_CASE("side-effect 细账:file 的 pre/post hash 与 undo、command 的 argv
 
     // ---- MCP 调用:server 身份与 jsonrpc id ----
     const std::string mcp_call = "call-mcp";
-    const std::string mcp_request = bridge->OnRequestPrepared(api::Request{});
+    const std::string mcp_request = bridge->OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
     REQUIRE_FALSE(mcp_request.empty());
     bridge->OnRequestSent(mcp_request);
     REQUIRE(bridge->OnOutputCompleted(mcp_request, AssistantWithToolCall(mcp_call, "mcp_query"),
@@ -297,7 +298,7 @@ TEST_CASE("verification 链:recorded → 改文件 invalidated → outcome.asses
     // 模型改了 stale 验证盯着的文件:undo token 带 path,终态落稳后宿主
     // 自动落 verification.invalidated(§5.5)。
     const std::string call_id = "call-edit";
-    const std::string edit_request = bridge->OnRequestPrepared(api::Request{});
+    const std::string edit_request = bridge->OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
     REQUIRE_FALSE(edit_request.empty());
     bridge->OnRequestSent(edit_request);
     REQUIRE(bridge->OnOutputCompleted(edit_request, AssistantWithToolCall(call_id, "edit_file"),
@@ -365,7 +366,7 @@ TEST_CASE("没验过的 turn 不落 outcome.assessed(§11.5 成功门的账面�
                                                          TrajectoryTurnBridge::Identity{});
     bridge->BeginTurn("turn-1", "external_user");
     bridge->RecordInput(UserMessage("聊两句"));
-    const std::string request_id = bridge->OnRequestPrepared(api::Request{});
+    const std::string request_id = bridge->OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
     REQUIRE_FALSE(request_id.empty());
     bridge->OnRequestSent(request_id);
     REQUIRE(bridge->OnOutputCompleted(request_id, UserMessage("好。"), "end_turn", "resp-1"));
