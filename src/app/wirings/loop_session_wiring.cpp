@@ -21,6 +21,19 @@ lubancode::runtime::loop::LoopScheduler* LoopSessionWiring::scheduler() {
     return scheduler_.has_value() ? &*scheduler_ : nullptr;
 }
 
+bool LoopSessionWiring::ToolExposed() const {
+    // 会话级条件(features.loop 正门 + env 总闸),与 Ensure 里给 scheduler
+    // 的 enabled 同一条判式(动态工具 P2 的 ToolExposurePolicy):暴露位
+    // 与调度器同源,会话内恒定,tools hash 不随 tick 进出抖。
+    return host_.config != nullptr && host_.config->features_loop && !lubancode::app::LoopDisabledByEnv();
+}
+
+std::string LoopSessionWiring::ActiveLoopTaskId() const {
+    // loop_control 工具账里的 task_id 就是"当前这一拍属于谁"的真值:驱动器
+    // 开轮前灌、FinishTick 后清,与 TickActive 的窗口一致。
+    return control_state_ != nullptr ? control_state_->task_id : std::string();
+}
+
 void LoopSessionWiring::RegisterTools(lubancode::tools::ToolRegistry& registry) {
     if (!control_state_) {
         control_state_ = std::make_shared<lubancode::tools::LoopControlState>();

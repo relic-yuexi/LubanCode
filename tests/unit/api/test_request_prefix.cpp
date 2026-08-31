@@ -909,3 +909,155 @@ TEST_CASE("P1三拍前缀合同: proxy_reference 发现与调用前后 system/to
                       "proxy 路的 system 里不该出现延迟索引段");
     }
 }
+
+// ---------------------------------------------------------------------------
+// 动态工具 PromptCache 守恒单 P2(条件工具也守恒·§十三 P2 验收):
+// 普通 turn → goal turn → loop tick 三种回合序列,tools/system hash 逐位
+// 不变,messages 只追加。接线是生产同款(interactive_session_assembly 的
+// RebuildLoop 同一套形状):goal_checkpoint/loop_control 的定义经暴露策略
+// 常驻(谓词只认会话级条件,恒 true),逐轮变化的生命周期走 tool_turn_gate
+// (RunOneTool 调用当口现判)+ turn context 尾部的 [turn capabilities] 段。
+// 越界调用照样硬拦:普通轮里调 goal_checkpoint 被执行门以 turn.tool_not_
+// active 拒(稳定错),那一拍的 tools hash 仍与前拍逐位相等。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// P2 册的条件工具:记调用次数——"定义常驻但没到轮次就该被拦"全靠它对账。
+class CountingConditionalTool : public tools::Tool {
+public:
+    CountingConditionalTool(std::string name) : name_(std::move(name)) {}
+
+    std::string name() const override { return name_; }
+    std::string description() const override { return "conditional tool for P2 prefix tests"; }
+    nlohmann::json input_schema() const override { return nlohmann::json::object(); }
+
+    tools::Tool::Result execute(const nlohmann::json&) override {
+        ++calls;
+        return {name_ + " 执行了", false};
+    }
+
+    int calls = 0;
+
+private:
+    std::string name_;
+};
+
+// 主侧 turn 状态的替身:goal/loop 泵发轮前置、收口清的那两笔账,测试里
+// 用普通 bool 拨(生产里是 GoalSessionWiring::HasActiveIteration /
+// LoopSessionWiring::TickActive,同源真值)。
+struct TurnState {
+    bool goal_iteration_active = false;
+    bool loop_tick_active = false;
+};
+
+}  // namespace
+
+TEST_CASE("P2三回合前缀合同: 普通/goal/loop 三种回合 tools 与 system 指纹逐位不变") {
+    CaptureBackend backend;
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FixedTool>("read_file", "正文"));
+    auto goal_tool = std::make_unique<CountingConditionalTool>("goal_checkpoint");
+    auto loop_tool = std::make_unique<CountingConditionalTool>("loop_control");
+    CountingConditionalTool* goal_ptr = goal_tool.get();
+    CountingConditionalTool* loop_ptr = loop_tool.get();
+    registry.Register(std::move(goal_tool));
+    registry.Register(std::move(loop_tool));
+
+    TurnState state;
+    // 生产同款 P2 接线(interactive_session_assembly.cpp 的 RebuildLoop):
+    // 暴露策略只认会话级条件(这里 features 全开,恒 true——定义常驻);
+    // turn 闸现判生命周期;denial 两截给稳定码。
+    agent::AgentProfile profile{.request{.model = "test-model"}, .system_prompt = "system prompt"};
+    profile.tool_filter = [](const tools::Tool&) { return true; };
+    profile.tool_turn_gate = [&state](const tools::Tool& tool) {
+        if (tool.name() == "goal_checkpoint") {
+            return state.goal_iteration_active;
+        }
+        if (tool.name() == "loop_control") {
+            return state.loop_tick_active;
+        }
+        return true;
+    };
+    profile.tool_turn_gate_denial = std::string(agent::kErrTurnToolNotActive) +
+                                    "|goal_checkpoint/loop_control 只在对应的 goal 执行轮/loop 定时拍里可执行;"
+                                    "当前轮不是——等相应轮次或换路径,不要重试同一调用。";
+    agent::Agent loop(backend, registry, std::move(profile));
+    agent::TurnWiring callbacks;
+
+    // R1:普通 turn(两枚条件工具都不在该轮的执行期)。
+    backend.scripts = {TextScript("普通答")};
+    state.goal_iteration_active = false;
+    state.loop_tick_active = false;
+    REQUIRE(loop.Run("普通的一轮", callbacks).has_value());
+
+    // R2:goal turn(goal 泵已置位)——模型按轮次提示调 goal_checkpoint。
+    state.goal_iteration_active = true;
+    backend.scripts.push_back(ToolUseScript("call_goal", "goal_checkpoint"));
+    backend.scripts.push_back(TextScript("goal 收口"));
+    REQUIRE(loop.Run("[goal g-7 iteration 3]", callbacks).has_value());
+    state.goal_iteration_active = false;  // CloseIteration 清账
+
+    // R3:loop tick(loop 泵已置位)——模型声明本拍走向。
+    state.loop_tick_active = true;
+    backend.scripts.push_back(ToolUseScript("call_loop", "loop_control"));
+    backend.scripts.push_back(TextScript("tick 收口"));
+    REQUIRE(loop.Run("[定时循环 tick] task_id: t-3", callbacks).has_value());
+    state.loop_tick_active = false;  // FinishTick 清账
+
+    // R4:回到普通 turn,模型硬叫了 goal_checkpoint(轮次状态段只是通报,
+    // 不是安全边界)——执行门必须硬拦,且那一拍 hash 仍与 R1 逐位相等。
+    backend.scripts.push_back(ToolUseScript("call_oop", "goal_checkpoint"));
+    backend.scripts.push_back(TextScript("误调后收口"));
+    REQUIRE(loop.Run("又一轮普通", callbacks).has_value());
+
+    // 请求数:R1 一拍(纯文本)+ R2/R3/R4 各两拍(tool_use 一拍、结果回喂
+    // 后的收口一拍),共 7 拍——四种回合全在这 7 份请求里对指纹。
+    REQUIRE(backend.captured.size() == 7);
+
+    // ---- 合同一:四种回合的 system/tools 指纹逐位不变(§十三 P2 验收) --
+    const agent::PrefixFingerprint first = agent::FingerprintRequest(backend.captured[0]);
+    for (std::size_t i = 1; i < backend.captured.size(); ++i) {
+        const agent::PrefixFingerprint fp = agent::FingerprintRequest(backend.captured[i]);
+        CHECK_MESSAGE(fp.system_hash == first.system_hash, "回合类型一换 system 就变");
+        CHECK_MESSAGE(fp.tools_hash == first.tools_hash, "回合类型一换 tools hash 就变");
+        CHECK_MESSAGE(backend.captured[i].model == backend.captured[0].model, "model 不许动");
+    }
+    // 两枚条件工具的定义在每一份请求的 tools 里都常驻(定义不随轮次进出)。
+    for (const auto& request : backend.captured) {
+        bool has_goal = false;
+        bool has_loop = false;
+        for (const auto& def : request.tools) {
+            has_goal = has_goal || def.name == "goal_checkpoint";
+            has_loop = has_loop || def.name == "loop_control";
+        }
+        CHECK(has_goal);
+        CHECK(has_loop);
+    }
+
+    // ---- 合同二:messages 只追加(相邻请求两两原样前缀) ------------------
+    for (std::size_t i = 1; i < backend.captured.size(); ++i) {
+        CHECK(agent::IsAppendOnlySuccessor(backend.captured[i - 1], backend.captured[i]));
+    }
+
+    // ---- 合同三:执行门认真实状态 --------------------------------------
+    // goal 轮里调成功(loop_control 在 goal 轮被拦,同一道闸);tick 里
+    // loop_control 成功;普通轮的误调被硬拦。
+    CHECK(goal_ptr->calls == 1);  // 只有 goal turn 那次执行了
+    CHECK(loop_ptr->calls == 1);  // 只有 loop tick 那次执行了
+    const auto* refused = [&loop](const std::string& id) -> const api::ToolResultBlock* {
+        for (const auto& message : loop.history()) {
+            for (const auto& block : message.content) {
+                if (const auto* result = std::get_if<api::ToolResultBlock>(&block);
+                    result != nullptr && result->tool_use_id == id) {
+                    return result;
+                }
+            }
+        }
+        return nullptr;
+    }("call_oop");
+    REQUIRE(refused != nullptr);
+    CHECK(refused->is_error);
+    CHECK(refused->content.find("goal_checkpoint") != std::string::npos);
+    CHECK(refused->content.find("等相应轮次") != std::string::npos);
+}

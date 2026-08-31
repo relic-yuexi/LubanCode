@@ -37,6 +37,22 @@ lubancode::runtime::goal::GoalCoordinator* GoalSessionWiring::coordinator() {
     return coordinator_.has_value() ? &*coordinator_ : nullptr;
 }
 
+bool GoalSessionWiring::ToolExposed() const {
+    // 会话级条件(features.goals 正门 + env 总闸),与 GoalOptionsFromConfig
+    // 给 coordinator 的 goals_enabled 同一条判式——暴露位与"真跑不跑"同源,
+    // 不会出现"看得见工具却永远等不到轮次"之外的第三种状态。config 在
+    // 会话启动定死,此值会话内恒定(动态工具 P2 的 ToolExposurePolicy)。
+    return host_.config != nullptr && host_.config->features_goals && !lubancode::app::GoalsDisabledByEnv();
+}
+
+std::string GoalSessionWiring::ActiveGoalId() const {
+    // checkpoint 工具账里的 goal_id 就是"当前在跑哪只 goal"的真值:Pump
+    // 开轮前灌(goal iteration 的 id),收口后账面留着、下一次 Pump 重灌。
+    // 能力段只在 HasActiveIteration 为真时才带这条注,收口后的旧值不会被
+    // 念出来——判"在不在 goal 轮"永远以 HasActiveIteration 为准。
+    return checkpoint_state_ != nullptr ? checkpoint_state_->goal_id : std::string();
+}
+
 void GoalSessionWiring::RegisterTools(lubancode::tools::ToolRegistry& registry) {
     if (!checkpoint_state_) {
         checkpoint_state_ = std::make_shared<lubancode::tools::GoalCheckpointState>();

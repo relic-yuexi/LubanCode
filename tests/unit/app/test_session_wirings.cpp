@@ -306,4 +306,89 @@ TEST_CASE("record 接线器:材料包装配独立起,没在录给 nullptr") {
     CHECK(refreshed);
 }
 
+// ---------------------------------------------------------------------------
+// 动态工具 PromptCache 守恒单 P2(条件工具也守恒·§8.2):goal/loop 窄工具
+// 的暴露位自接线器出——只认会话级条件(features 正门 + env 总闸),与
+// "本轮可不可用"(HasActiveIteration/TickActive,执行门那半边)分家。
+// 暴露恒定,tools hash 才不随 goal 轮/loop 拍的进出抖。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("P2 暴露位: goal_checkpoint 只认会话级条件,与轮次活跃账分家") {
+    TempCwd cwd_guard;
+    lubancode::runtime::SessionRuntime runtime({std::string(), "anthropic", "test"});
+
+    // features.goals 关:定义不进 tools(暴露位假)。
+    {
+        lubancode::config::Config config;
+        config.features_goals = false;
+        static lubancode::cli::Theme theme;
+        GoalSessionWiring::Host host;
+        host.theme = &theme;
+        host.config = &config;
+        host.session_store = &runtime.store();
+        GoalSessionWiring wiring(host);
+        CHECK_FALSE(wiring.ToolExposed());
+    }
+    // features.goals 开:定义常驻(暴露位真)——但"本轮可不可用"另算,
+    // 没在 goal 执行轮时 HasActiveIteration 照样假(执行门那半边)。
+    {
+        lubancode::config::Config config;
+        config.features_goals = true;
+        static lubancode::cli::Theme theme;
+        GoalSessionWiring::Host host;
+        host.theme = &theme;
+        host.config = &config;
+        host.session_store = &runtime.store();
+        GoalSessionWiring wiring(host);
+        CHECK(wiring.ToolExposed());
+        CHECK_FALSE(wiring.HasActiveIteration());
+        CHECK(wiring.ActiveGoalId().empty());
+    }
+    // host 没配 config(防御):不给暴露,不给状态。
+    {
+        GoalSessionWiring wiring;
+        CHECK_FALSE(wiring.ToolExposed());
+        CHECK(wiring.ActiveGoalId().empty());
+    }
+}
+
+TEST_CASE("P2 暴露位: loop_control 只认会话级条件,与拍活跃账分家") {
+    TempCwd cwd_guard;
+    lubancode::runtime::SessionRuntime runtime({std::string(), "anthropic", "test"});
+    lubancode::runtime::IdleWakeCoordinator wakes;
+
+    // features.loop 关:暴露位假。
+    {
+        lubancode::config::Config config;
+        config.features_loop = false;
+        static lubancode::cli::Theme theme;
+        LoopSessionWiring::Host host;
+        host.theme = &theme;
+        host.interactive = false;
+        host.config = &config;
+        host.session_store = &runtime.store();
+        host.idle_wakes = &wakes;
+        LoopSessionWiring wiring(host);
+        CHECK_FALSE(wiring.ToolExposed());
+    }
+    // features.loop 开:暴露位真;没在拍上时 TickActive 假、任务注空
+    //(执行门那半边另算)。
+    {
+        lubancode::config::Config config;
+        config.features_loop = true;
+        static lubancode::cli::Theme theme;
+        LoopSessionWiring::Host host;
+        host.theme = &theme;
+        host.interactive = false;
+        host.config = &config;
+        host.session_store = &runtime.store();
+        host.idle_wakes = &wakes;
+        LoopSessionWiring wiring(host);
+        CHECK(wiring.ToolExposed());
+        CHECK_FALSE(wiring.TickActive());
+        CHECK(wiring.ActiveLoopTaskId().empty());
+        wiring.Shutdown();
+    }
+}
+
 }  // namespace lubancode::app

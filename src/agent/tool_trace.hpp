@@ -67,6 +67,8 @@ enum class ToolOutcome {
     HookDenied,
     PermissionDeclined,
     ModeDenied,           // Plan 模式硬闸拒绝(只读研究单):不冒充用户拒绝
+    TurnGateDenied,       // 条件工具的 turn 级闸拒绝(动态工具 P2):定义常驻,
+                          // 本轮生命周期不对——不冒充没挂载,也不冒充用户拒绝
     ScopeGatePending,     // 写前作用域闸首次拦下(AGENTS.md 作用域单):握手待重试,非错误
     ScopeGateOverBudget,  // 写前作用域闸 fail closed(P1):链装不进预算,拒收;重试不放行
     CancelledBeforeStart, // 未轮到(ESC)或闸前被收掉:没越过执行边界
@@ -113,6 +115,12 @@ inline constexpr const char* kErrScopeInstructionsRequired = "scope.instructions
 // 写前作用域闸 fail closed(P1):active write chain 整份装不进预算,拒收
 // ——不是握手,重试不放行,须拆规则或调大预算。
 inline constexpr const char* kErrScopeInstructionsOverBudget = "scope.instructions_over_budget";
+// 条件工具的 turn 级执行闸(动态工具 PromptCache 守恒单 P2·§8.2/§十):
+// goal_checkpoint/loop_control 一类的定义常驻 tools 数组(保 tools hash),
+// "这一轮可不可用"由执行门现判真实生命周期。拒绝即此码——模型该等相应
+// 轮次或换路径,不得重试同一调用。与 registry.not_mounted(没暴露)分账:
+// 一枚是"看不见",一枚是"看得见、这轮不许动"。
+inline constexpr const char* kErrTurnToolNotActive = "turn.tool_not_active";
 
 // ---------------------------------------------------------------------------
 // canonical 领域事件(一份事件,两路消费:Runtime EventSink 吃投影,

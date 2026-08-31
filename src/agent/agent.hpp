@@ -100,6 +100,12 @@ struct AgentProfile {
     // 谓词不放行"的工具时,回 filter_denial 的文案(空 = "尚未挂载"的
     // 默认说法)。谓词由装配层注入(按 loaded 集合/角色过滤),AgentLoop
     // 自己不懂什么叫"延迟"。----
+    // 动态工具 PromptCache 守恒单 P2(§8.2)起这只谓词易名为暴露策略
+    //(ToolExposurePolicy):决定会话起手放哪些固定定义进 tools 数组,
+    // 会话内必须恒定——goal_checkpoint/loop_control 一类条件工具的定义
+    // 常驻,不随轮次进出(暴露面一抖,tools hash 断,前缀缓存跟着断)。
+    // 会话级条件(features 开没开、角色 allow/deny、注册了没)可以进来;
+    // 逐轮变化的生命周期状态不行,那归下面的 tool_turn_gate。
     std::function<bool(const tools::Tool&)> tool_filter;
     std::string tool_filter_denial;
 
@@ -130,6 +136,19 @@ struct AgentProfile {
     // 口径),装配层在 proxy 模式给 proxy.tool_not_allowed 码。
     std::function<bool(const tools::Tool&)> tool_execution_policy;
     std::string tool_execution_denial;
+
+    // ---- 动态工具 PromptCache 守恒单 P2(条件工具也守恒·§8.2)-------------
+    // ToolExecutionPolicy 的生命周期半边:每次调用时现判"这一轮可不可用"
+    //(goal iteration 活着?loop tick 在拍上?),直名调用与经 tool_invoke
+    // 解引用来的调用同一道闸(RunOneTool 在暴露过滤之后、Plan 闸之前调)。
+    // 与 tool_filter 的分工是 P2 的本命:定义常驻保 tools hash,执行资格
+    // 另判——不是把开关藏进别处糊弄 hash。轮次变化给模型看的提示走 turn
+    // context 尾部的短状态段(装配层拼),那段不是安全边界,硬拦全靠这枚
+    // 谓词在调用当口验真实状态。空谓词 = 本 Agent 没有 turn 级条件工具
+    //(子代理/单发/旧装配),行为与从前一字不差。denial 支持"稳定码|人话"
+    // 两截,装配层给 turn.tool_not_active(单子 §十:等相应轮次或换路径)。
+    std::function<bool(const tools::Tool&)> tool_turn_gate;
+    std::string tool_turn_gate_denial;
 };
 
 // 环境接线(批四·病十二:接线类的门收成一只)。这些都是"宿主把外面的

@@ -883,6 +883,9 @@ add_library(lubancode_app STATIC
   src/app/session_notice.cpp
   # 会话终章:@ 提及支件(索引缓存 + 提交前校验/账单,自大类搬出)。
   src/app/mention_support.cpp
+  # 动工具 P2(条件工具也守恒):[turn capabilities] 段的纯函数拼装——
+  # goal/loop 窄工具定义常驻后,本轮可不可用走 turn context 短状态。
+  src/app/turn_capabilities.cpp
   src/app/interactive_session.cpp
   src/app/one_shot.cpp
   src/app/cli_options.cpp

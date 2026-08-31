@@ -1801,3 +1801,172 @@ TEST_CASE("P1 proxy: 同批两枚 tool_invoke 各自解引用,参数不串") {
     REQUIRE(b_ptr->call_count == 1);
     CHECK(b_ptr->last_input == nlohmann::json{{"who", "b"}});
 }
+
+// ---------------------------------------------------------------------------
+// 动态工具 PromptCache 守恒单 P2(条件工具也守恒·§8.2/§12.1):
+// goal_checkpoint/loop_control 一类条件工具的定义常驻 tools 数组(暴露
+// 策略会话内恒定,保 tools hash),"这一轮可不可用"由 AgentProfile.
+// tool_turn_gate 在 RunOneTool 调用当口现判——直名调用与经 tool_invoke
+// 解引用的调用同一道闸,拒绝给 turn.tool_not_active 稳定码、终态
+// TurnGateDenied。轮次状态段([turn capabilities])只是通报,不是安全
+// 边界:模型硬叫了,执行门照样硬拦。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// P2 册的条件工具替身:非延迟(常驻顶层 tools,goal/loop 窄工具的真实
+// 形状),记调用次数。
+class CountingConditionalTool : public tools::Tool {
+public:
+    explicit CountingConditionalTool(std::string name) : name_(std::move(name)) {}
+
+    std::string name() const override { return name_; }
+    std::string description() const override { return "conditional tool for turn gate tests"; }
+    nlohmann::json input_schema() const override { return nlohmann::json::object(); }
+
+    tools::Tool::Result execute(const nlohmann::json&) override {
+        ++calls;
+        return {name_ + " 执行了", false};
+    }
+
+    int calls = 0;
+
+private:
+    std::string name_;
+};
+
+// P2 的生产同款皮:暴露恒 true(条件工具定义常驻),turn 闸现判。
+agent::AgentProfile TurnGateProfile(bool* goal_active) {
+    agent::AgentProfile profile{.request{.model = "test-model"}, .system_prompt = "system prompt"};
+    profile.tool_filter = [](const tools::Tool&) { return true; };
+    profile.tool_turn_gate = [goal_active](const tools::Tool& tool) {
+        if (tool.name() == "goal_checkpoint") {
+            return *goal_active;
+        }
+        return true;
+    };
+    profile.tool_turn_gate_denial = std::string(agent::kErrTurnToolNotActive) +
+                                    "|goal_checkpoint 只在 goal 执行轮可用;当前轮不是——等相应轮次或换路径,"
+                                    "不要重试同一调用。";
+    return profile;
+}
+
+}  // namespace
+
+TEST_CASE("P2 turn 闸: goal 未激活时直名调用被硬拦,稳定码 turn.tool_not_active") {
+    FakeBackend backend;
+    backend.scripts = {
+        ToolUseScript("call_oop", "goal_checkpoint"),
+        TextOnlyScript("收下拒绝"),
+    };
+    tools::ToolRegistry registry;
+    auto goal_tool = std::make_unique<CountingConditionalTool>("goal_checkpoint");
+    CountingConditionalTool* goal_ptr = goal_tool.get();
+    registry.Register(std::make_unique<FakeTool>("read_file", tools::Tool::Result{"正文", false}, false));
+    registry.Register(std::move(goal_tool));
+
+    bool goal_active = false;  // 普通轮:goal 泵没置位
+    agent::Agent loop(backend, registry, TurnGateProfile(&goal_active));
+    agent::TurnWiring callbacks;
+    TraceCollector trace;
+    trace.Wire(callbacks);
+
+    REQUIRE(loop.Run("普通轮硬叫窄工具", callbacks).has_value());
+    CHECK(goal_ptr->calls == 0);  // 没执行
+
+    // 拒绝:is_error、人话带指路,终态栅栏的稳定码与 outcome 都钉死。
+    const api::ToolResultBlock* result = FindToolResult(loop, "call_oop");
+    REQUIRE(result != nullptr);
+    CHECK(result->is_error);
+    CHECK(result->content.find("等相应轮次") != std::string::npos);
+    const auto* finished = trace.Find(agent::ToolTraceEventKind::ExecutionFinished, "goal_checkpoint");
+    REQUIRE(finished != nullptr);
+    CHECK(finished->error_code == agent::kErrTurnToolNotActive);
+    CHECK(finished->outcome == agent::ToolOutcome::TurnGateDenied);
+    // turn 闸拦下的调用确定没越过执行边界(恢复语义)。
+    CHECK(agent::OutcomeNeverStarted(finished->outcome));
+    CHECK(agent::ToString(finished->outcome) == "turn_gate_denied");
+    agent::ToolOutcome parsed = agent::ToolOutcome::ToolError;
+    CHECK(agent::ParseToolOutcome("turn_gate_denied", parsed));
+    CHECK(parsed == agent::ToolOutcome::TurnGateDenied);
+}
+
+TEST_CASE("P2 turn 闸: goal 轮里同一次调用放行——闸认真实状态,不是常闭") {
+    FakeBackend backend;
+    backend.scripts = {
+        ToolUseScript("call_ok", "goal_checkpoint"),
+        TextOnlyScript("写完检查点"),
+    };
+    tools::ToolRegistry registry;
+    auto goal_tool = std::make_unique<CountingConditionalTool>("goal_checkpoint");
+    CountingConditionalTool* goal_ptr = goal_tool.get();
+    registry.Register(std::move(goal_tool));
+
+    bool goal_active = true;  // goal 泵已置位:goal 执行轮
+    agent::Agent loop(backend, registry, TurnGateProfile(&goal_active));
+    agent::TurnWiring callbacks;
+    TraceCollector trace;
+    trace.Wire(callbacks);
+
+    REQUIRE(loop.Run("goal 执行轮", callbacks).has_value());
+    CHECK(goal_ptr->calls == 1);
+    const api::ToolResultBlock* result = FindToolResult(loop, "call_ok");
+    REQUIRE(result != nullptr);
+    CHECK_FALSE(result->is_error);
+    const auto* finished = trace.Find(agent::ToolTraceEventKind::ExecutionFinished, "goal_checkpoint");
+    REQUIRE(finished != nullptr);
+    CHECK(finished->outcome == agent::ToolOutcome::Succeeded);
+}
+
+TEST_CASE("P2 turn 闸: proxy 解引用来的调用同一道闸,不在轮次照样拦") {
+    FakeBackend backend;
+    backend.scripts = {
+        ProxyToolCallScript("call_search", "tool_search", R"({"query":"counting"})"),
+        TextOnlyScript("x"),
+        ProxyToolCallScript("call_invoke", "tool_invoke", R"(PLACEHOLDER)"),
+        TextOnlyScript("y"),
+    };
+    tools::ToolRegistry registry;
+    // 延迟的条件工具:定义不进顶层(暴露策略对延迟工具照旧拦),经
+    // tool_invoke 解引用后仍要过 turn 闸——两条路不许一松一紧。
+    auto target = std::make_unique<CountingDeferredTool>(
+        "mcp__goal__checkpoint", nlohmann::json{{"type", "object"}, {"properties", nlohmann::json::object()}});
+    CountingDeferredTool* target_ptr = target.get();
+    registry.Register(std::move(target));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    registry.Register(std::make_unique<tools::ToolSearchTool>(registry, resolver));
+    registry.Register(std::make_unique<tools::ToolInvokeTool>());
+
+    agent::AgentProfile profile = ProxyProfile(resolver);
+    bool goal_active = false;
+    profile.tool_turn_gate = [&goal_active](const tools::Tool& tool) {
+        if (tool.name() == "mcp__goal__checkpoint") {
+            return goal_active;
+        }
+        return true;
+    };
+    profile.tool_turn_gate_denial = std::string(agent::kErrTurnToolNotActive) +
+                                    "|该工具只在 goal 执行轮可用;当前轮不是——等相应轮次或换路径,不要重试同一调用。";
+    agent::Agent loop(backend, registry, std::move(profile));
+    agent::TurnWiring callbacks;
+    TraceCollector trace;
+    trace.Wire(callbacks);
+
+    REQUIRE(loop.Run("先搜", callbacks).has_value());
+    const std::string tool_ref = FirstToolRefFromHistory(loop);
+    REQUIRE_FALSE(tool_ref.empty());
+    backend.scripts[2][2] = api::ToolUseInputDelta{0, R"({"tool_ref":")" + tool_ref + R"(","arguments":{}})"};
+    REQUIRE(loop.Run("越轮调", callbacks).has_value());
+
+    CHECK(target_ptr->call_count == 0);  // 执行门拦下,目标没跑
+    const auto* finished = trace.Find(agent::ToolTraceEventKind::ExecutionFinished, "mcp__goal__checkpoint");
+    REQUIRE(finished != nullptr);
+    CHECK(finished->error_code == agent::kErrTurnToolNotActive);
+    CHECK(finished->outcome == agent::ToolOutcome::TurnGateDenied);
+    // 代理壳那层的事实仍留账(transport/resolved 两层,§6.2)。
+    CHECK(finished->details.value("transport_tool", std::string()) == "tool_invoke");
+    const api::ToolResultBlock* result = FindToolResult(loop, "call_invoke");
+    REQUIRE(result != nullptr);
+    CHECK(result->is_error);
+    CHECK(result->content.find("等相应轮次") != std::string::npos);
+}

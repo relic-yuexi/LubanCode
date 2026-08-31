@@ -78,6 +78,7 @@ std::string ToString(ToolOutcome outcome) {
         case ToolOutcome::HookDenied: return "hook_denied";
         case ToolOutcome::PermissionDeclined: return "permission_declined";
         case ToolOutcome::ModeDenied: return "mode_denied";
+        case ToolOutcome::TurnGateDenied: return "turn_gate_denied";
         case ToolOutcome::ScopeGatePending: return "scope_gate_pending";
         case ToolOutcome::ScopeGateOverBudget: return "scope_gate_over_budget";
         case ToolOutcome::CancelledBeforeStart: return "cancelled_before_start";
@@ -106,6 +107,7 @@ bool ParseToolOutcome(const std::string& s, ToolOutcome& out) {
         {"hook_denied", ToolOutcome::HookDenied},
         {"permission_declined", ToolOutcome::PermissionDeclined},
         {"mode_denied", ToolOutcome::ModeDenied},
+        {"turn_gate_denied", ToolOutcome::TurnGateDenied},
         {"scope_gate_pending", ToolOutcome::ScopeGatePending},
         {"scope_gate_over_budget", ToolOutcome::ScopeGateOverBudget},
         {"cancelled_before_start", ToolOutcome::CancelledBeforeStart},
@@ -135,6 +137,7 @@ bool OutcomeNeverStarted(ToolOutcome outcome) {
         case ToolOutcome::HookDenied:
         case ToolOutcome::PermissionDeclined:
         case ToolOutcome::ModeDenied:
+        case ToolOutcome::TurnGateDenied:  // turn 闸在 execute 之前拦:确定没执行
         case ToolOutcome::ScopeGatePending:
         case ToolOutcome::ScopeGateOverBudget:
         case ToolOutcome::CancelledBeforeStart:

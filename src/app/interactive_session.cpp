@@ -53,6 +53,7 @@
 #include "api/backend.hpp"
 #include "api/models.hpp"
 #include "app/backend_stack.hpp"
+#include "app/turn_capabilities.hpp"  // 动工具 P2:条件工具的本轮能力段
 #include "app/commands/command_registry.hpp"  // 命令注册制:47 案分派的注册表与路由
 #include "app/session_stack.hpp"  // 组合根装配件(会话终章):控制器只收装好的件
 // 骨架拆解反弹·问题 2 拆出的旁挂件:usage 折算(标题账/状态面板/通知口
@@ -816,6 +817,21 @@ void TerminalSessionController::RunSessionTurn(const std::string& content, TurnS
     // 下一轮这里自动带上新签名。
     if (tool_runtime_->ptc_tool() != nullptr) {
         turn_suffix += tool_runtime_->ptc_tool()->GuideSegment();
+    }
+    // 条件工具的本轮能力段(动态工具 P2·§8.2):goal/loop 窄工具的定义
+    // 常驻 tools(tools hash 恒定),"这一轮可不可用"给模型看的短状态从
+    // 这走——随本轮 user 消息尾部追加,不进 system、不追改旧前缀。判
+    // "在不在轮"的可用位与执行门同源(goal/loop 泵发轮前置、收口清);
+    // 段本身明写"以执行门为准",不是安全边界。
+    {
+        lubancode::app::TurnCapabilities caps;
+        caps.goal_checkpoint.shown = goal_wiring_.ToolExposed();
+        caps.goal_checkpoint.available = goal_wiring_.HasActiveIteration();
+        caps.goal_checkpoint.note = goal_wiring_.ActiveGoalId();
+        caps.loop_control.shown = loop_wiring_.ToolExposed();
+        caps.loop_control.available = loop_wiring_.TickActive();
+        caps.loop_control.note = loop_wiring_.ActiveLoopTaskId();
+        turn_suffix += lubancode::app::BuildTurnCapabilitiesSegment(caps);
     }
     main_agent->SetTurnContext(std::move(turn_suffix));
     std::size_t history_before = 0;
