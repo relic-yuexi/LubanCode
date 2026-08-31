@@ -489,15 +489,24 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
             lubancode::runtime::TrajectorySessionLedger* ledger = ctx.trajectory_ledger;
             lubancode::runtime::ToolTraceHub* hub = trace_hub;
             lubancode::runtime::TrajectoryTurnBridge* main_bridge = trajectory_bridge;
+            // parent_run_id(递归派工单 P1-2 嵌套轨迹边):main 直派传空串
+            // (SpawnSubagent 落回 main_run_id,行为不变);嵌套 headless 路
+            // 传派工者自己的 agent_run_id——它的父亲是父任务的 run,不是
+            // main。call-boundary 回填(AttachChildRun/NoteChildTerminal)
+            // 仍只挂在 main_bridge 上——那是 main 自己 calls_ 表的 call_id
+            // 命名空间,嵌套派工的 parent_call_id 出自派工者自己的表,挂错
+            // 桥会污染 main 的账,故只在 main 直派(parent_run_id 为空)时
+            // 才回填;嵌套层自己的调用边界回填是另一件未接的活,不在本单
+            // 里顺手做错。
             hooks.trajectory_spawn = [ledger, hub, main_bridge](
-                                         const std::string& task_label)
+                                         const std::string& task_label, const std::string& parent_run_id)
                                         -> std::unique_ptr<lubancode::runtime::TrajectorySubagentBridge> {
                 const std::string parent_call_id = hub->current_agent_call_id();
-                auto child = ledger->SpawnSubagent(parent_call_id, task_label);
+                auto child = ledger->SpawnSubagent(parent_call_id, task_label, parent_run_id);
                 if (!child.has_value()) {
                     return nullptr;  // 子账开张失败:子代理照跑,父账如实缺子边
                 }
-                if (!parent_call_id.empty()) {
+                if (parent_run_id.empty() && !parent_call_id.empty()) {
                     main_bridge->AttachChildRun(parent_call_id, (*child)->run_id());
                 }
                 return std::move(*child);

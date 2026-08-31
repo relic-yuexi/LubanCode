@@ -439,6 +439,61 @@ TEST_CASE("渲染:自定义 Agent 身份整名在行,窄屏截的是任务摘要
     }
 }
 
+TEST_CASE("Dock 画树(P1-1):depth 缩进身份列,深度 1(main 直派)不缩进,选中/停止仍按 task_id") {
+    SetLanguage("zh");
+    // #1 main 直派(depth=1,不缩进);#2 是 #1 的孩子(depth=2,缩进 2 格);
+    // #3 是 #2 的孩子——#1 的孙子(depth=3,缩进 4 格)。lineage 字段只影响
+    // 身份列前缀,不改 task_id/排序/折叠逻辑。
+    AgentPanelEntry root;
+    root.task_id = 1;
+    root.name = "general-purpose #1";
+    root.title = "根任务";
+    root.state = "运行中";
+    root.running = true;
+    root.depth = 1;
+    root.parent_task_id = 0;
+
+    AgentPanelEntry child;
+    child.task_id = 2;
+    child.name = "Explore #2";
+    child.title = "子任务";
+    child.state = "运行中";
+    child.running = true;
+    child.depth = 2;
+    child.parent_task_id = 1;
+
+    AgentPanelEntry grandchild;
+    grandchild.task_id = 3;
+    grandchild.name = "Explore #3";
+    grandchild.title = "孙任务";
+    grandchild.state = "运行中";
+    grandchild.running = true;
+    grandchild.depth = 3;
+    grandchild.parent_task_id = 2;
+
+    const auto layout = LayoutAgentDock({root, child, grandchild}, 1, true, 0, 0, 120, false, false, false);
+    const auto lines = RenderAgentDockLines(layout, 120);
+    REQUIRE(lines.size() == 5);  // 提示 + main + 3 只
+    // root(depth=1):身份列紧跟 marker/lamp,不带缩进前缀。
+    CHECK(Contains(lines[2], "general-purpose #1"));
+    CHECK_FALSE(Contains(lines[2], "  general-purpose #1"));
+    // child(depth=2):前缀 2 格缩进。
+    CHECK(Contains(lines[3], "  Explore #2"));
+    // grandchild(depth=3):前缀 4 格缩进,比 child 更深一档。
+    CHECK(Contains(lines[4], "    Explore #3"));
+    // 旧调用方(depth=0 默认值,不接 lineage)的行为不变:不缩进。
+    AgentPanelEntry legacy;
+    legacy.task_id = 9;
+    legacy.name = "general-purpose #9";
+    legacy.title = "旧调用方";
+    legacy.state = "运行中";
+    legacy.running = true;
+    const auto legacy_layout = LayoutAgentDock({legacy}, 1, true, 0, 0, 120, false, false, false);
+    const auto legacy_lines = RenderAgentDockLines(legacy_layout, 120);
+    REQUIRE(legacy_lines.size() == 3);  // 提示 + main + 1 只
+    CHECK_FALSE(Contains(legacy_lines[2], "  general-purpose #9"));
+}
+
 // -----------------------------------------------------------------------
 // 按键状态机
 // -----------------------------------------------------------------------

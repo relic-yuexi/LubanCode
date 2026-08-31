@@ -407,6 +407,56 @@ TEST_CASE("EvaluateAdmission 纯函数面:closing/children_limit/tree_nodes_limi
     CHECK(tools::EvaluateAdmission(request, stats, governance).error_code == "parent_finished");
 }
 
+TEST_CASE("台账整合:max_children_per_task/max_tree_nodes 超限稳定拒绝,拒绝后计数不泄漏(§17.2)") {
+    tools::TaskLedger ledger;
+    tools::SubagentGovernance governance;
+    governance.max_active = 8;
+    governance.max_depth = 3;
+    governance.max_children_per_task = 1;
+    governance.max_tree_nodes = 2;
+    std::string error;
+
+    tools::AgentTaskSnapshot root_proto;
+    root_proto.title = "根";
+    root_proto.parent_task_id = 0;
+    auto root = ledger.TryRegisterChild(root_proto, 1, governance, &error);
+    REQUIRE(root != nullptr);
+    CHECK(ledger.TreeNodesCount(root->snapshot.id) == 1);
+
+    // 第一只孩子:树节点数还没到 2(max_tree_nodes),按 children_limit 拒——
+    // max_children_per_task=1,根还没派过孩子,先注册一只用满这道门。
+    tools::AgentTaskSnapshot child_proto;
+    child_proto.title = "子";
+    child_proto.parent_task_id = root->snapshot.id;
+    auto child = ledger.TryRegisterChild(child_proto, 2, governance, &error);
+    REQUIRE(child != nullptr);
+    CHECK(ledger.TreeNodesCount(root->snapshot.id) == 2);
+    CHECK(ledger.ChildTaskIds(root->snapshot.id).size() == 1);
+
+    // 第二只孩子:children_limit(该父已派满 1 个)先拒——拒绝后 ChildTaskIds/
+    // TreeNodesCount 都不许多算这只未注册成功的任务,"半条任务"绝不留痕。
+    tools::AgentTaskSnapshot second_proto;
+    second_proto.title = "第二只孩子";
+    second_proto.parent_task_id = root->snapshot.id;
+    CHECK(ledger.TryRegisterChild(second_proto, 2, governance, &error) == nullptr);
+    CHECK(error.find("children_limit") == std::string::npos);  // 文案是人话,不是 code
+    CHECK(error.find("已派满") != std::string::npos);
+    CHECK(error.find("subagent.max_children_per_task") != std::string::npos);
+    CHECK(ledger.ChildTaskIds(root->snapshot.id).size() == 1);  // 没泄漏成 2
+    CHECK(ledger.TreeNodesCount(root->snapshot.id) == 2);       // 仍是 2,没多算
+
+    // 换一个不同父(不撞 children_limit),验 tree_nodes_limit:树已有 2 个
+    // 节点(root+child),max_tree_nodes=2,再派任何一只(不论挂哪个父)都拒。
+    tools::AgentTaskSnapshot third_proto;
+    third_proto.title = "挂在孙子层的第三只";
+    third_proto.parent_task_id = child->snapshot.id;
+    CHECK(ledger.TryRegisterChild(third_proto, 3, governance, &error) == nullptr);
+    CHECK(error.find("已满") != std::string::npos);
+    CHECK(error.find("subagent.max_tree_nodes") != std::string::npos);
+    CHECK(ledger.TreeNodesCount(root->snapshot.id) == 2);  // 仍是 2,拒绝不占树节点账
+    CHECK(ledger.AliveChildCount(child->snapshot.id) == 0);  // 子没有多出一个孩子
+}
+
 // ---------------------------------------------------------------------------
 // P0-0 回归二(翻好):并行根前台任务互不抬深度
 // 铆现场时的缺口断言(先红):

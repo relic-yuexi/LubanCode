@@ -41,6 +41,12 @@ struct AgentPanelEntry {
     // "正查看的运行中子代理又在出活",到 1s 节流拍就重铺查看帧——终端层
     // 只比数字,不复制内容。0 = 无实时流(演示假代理/终态)。
     std::uint64_t content_revision = 0;
+    // lineage 投影(递归派工单 P1-1"Dock 画树"):直接父任务号(0=main 派出)
+    // 与深度(main=0,子=1,孙=2……)——布局层据此给身份列加缩进,不改排序
+    // /折叠/选中语义,查看与停止仍按 task_id。旧调用方(demo/未接线)留
+    // 0/0,画树时按无缩进的平铺处理,行为与从前一致。
+    int parent_task_id = 0;
+    int depth = 0;
 };
 
 // 面板动作,由应用层(InteractiveSession)接线到 AgentTool 的正式取消/清理

@@ -288,3 +288,72 @@ TEST_CASE("集成:假 main 发 agent_message,目标 inbox 收到,子代理下一
     CHECK(sub_dump.find("[主会话用户介入]") == std::string::npos);
     CHECK(agent_tool->PendingTaskMessages(1).empty());
 }
+
+TEST_CASE("agent_message scoped(P1-1):main 无限定,子代理窄实例只能投自己直接孩子") {
+    tools::ToolRegistry sub_registry;
+    ScriptBackend foreground_backend;
+    tools::AgentTool agent_tool(foreground_backend, sub_registry, "/work/dir");
+
+    // 手工挂三只任务的 lineage(不走真派工,直接用台账的旧注册口摆好
+    // parent_task_id,专测 scoped 校验这一层):#1 母任务(parent=0),
+    // #2 母任务的直接孩子(parent=1),#3 跟母任务同级、不是它孩子的
+    // 旁系任务(parent=0)。
+    tools::AgentTaskSnapshot parent_snap;
+    parent_snap.agent_type = "general-purpose";
+    parent_snap.title = "母任务";
+    parent_snap.parent_task_id = 0;
+    parent_snap.depth = 1;
+    parent_snap.state = tools::AgentTaskState::Running;
+    const auto parent_record = agent_tool.ledger().Register(parent_snap);
+    const int parent_id = parent_record->snapshot.id;
+
+    tools::AgentTaskSnapshot child_snap;
+    child_snap.agent_type = "Explore";
+    child_snap.title = "自己的孩子";
+    child_snap.parent_task_id = parent_id;
+    child_snap.depth = 2;
+    child_snap.state = tools::AgentTaskState::Running;
+    const auto child_record = agent_tool.ledger().Register(child_snap);
+    const int child_id = child_record->snapshot.id;
+
+    tools::AgentTaskSnapshot sibling_snap;
+    sibling_snap.agent_type = "Explore";
+    sibling_snap.title = "旁系任务";
+    sibling_snap.parent_task_id = 0;
+    sibling_snap.depth = 1;
+    sibling_snap.state = tools::AgentTaskState::Running;
+    const auto sibling_record = agent_tool.ledger().Register(sibling_snap);
+    const int sibling_id = sibling_record->snapshot.id;
+
+    // main(caller_task_id=0,默认值)不受限:能投任意存活任务,含孙辈。
+    tools::AgentMessageTool main_tool(&agent_tool, 0);
+    {
+        const auto result =
+            main_tool.execute(nlohmann::json{{"task_id", child_id}, {"message", "main 直投孙任务"}});
+        CHECK_FALSE(result.is_error);
+        CHECK(result.content.find("\"status\":\"queued\"") != std::string::npos);
+    }
+
+    // 母任务挂的窄实例(caller_task_id=parent_id):能投自己的直接孩子……
+    tools::AgentMessageTool scoped_tool(&agent_tool, parent_id);
+    {
+        const auto ok = scoped_tool.execute(nlohmann::json{{"task_id", child_id}, {"message", "母投子"}});
+        CHECK_FALSE(ok.is_error);
+        CHECK(ok.content.find("\"status\":\"queued\"") != std::string::npos);
+    }
+    // ……但不能投旁系任务(同级、不是它的孩子)——稳定拒绝,不碰 ledger
+    // 的 SendMessage(旁系的 inbox 不会真的多一条)。
+    {
+        const auto denied = scoped_tool.execute(nlohmann::json{{"task_id", sibling_id}, {"message", "母投旁系"}});
+        CHECK(denied.is_error);
+        CHECK(denied.content.find("\"status\":\"not_child\"") != std::string::npos);
+    }
+    CHECK(agent_tool.PendingTaskMessages(sibling_id).empty());
+    // 也不能投自己(caller 本身不是自己的父)。
+    {
+        const auto self_denied =
+            scoped_tool.execute(nlohmann::json{{"task_id", parent_id}, {"message", "母投自己"}});
+        CHECK(self_denied.is_error);
+        CHECK(self_denied.content.find("\"status\":\"not_child\"") != std::string::npos);
+    }
+}

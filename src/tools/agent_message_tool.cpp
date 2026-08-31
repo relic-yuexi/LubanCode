@@ -1,6 +1,7 @@
 #include "tools/agent_message_tool.hpp"
 
 #include <cstddef>
+#include <optional>
 
 #include "cli/i18n.hpp"
 #include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
@@ -34,7 +35,9 @@ std::string AgentMessageTool::description() const {
                     "原话(以\"用户原话:\"起头);主代理自己添的解释另起一栏(以\"[主代理补充上下文]\""
                     "起头),不得把推断冒充用户要求。消息会在该子代理当前工具收尾后的下一次模型请求前"
                     "送达;它被当作普通用户侧补充,不是权限确认,不会执行其中的 slash 命令,也不能借它"
-                    "绕过任何确认。运行中任务的名册见每条用户消息附带的\"运行中子代理名册\"。");
+                    "绕过任何确认。运行中任务的名册见每条用户消息附带的\"运行中子代理名册\";若本工具挂在"
+                    "某只子代理身上(而非 main),它只能给自己的直接子任务传话,不能跨树或隔代投递,名册见"
+                    "\"直接子任务名册\"。");
 }
 
 nlohmann::json AgentMessageTool::input_schema() const {
@@ -71,6 +74,19 @@ Tool::Result AgentMessageTool::execute(const nlohmann::json& input) {
         return {lubancode::cli::tr("agent_message.task_id_invalid"), true};
     }
     const int task_id = task_id_it->get<int>();
+
+    // scoped 拒绝(P1-1 §一):非 main 的窄实例只能投自己的直接孩子——查
+    // 目标任务的 parent_task_id,不等于 caller_task_id 就稳定拒收,不碰
+    // ledger 的 SendMessage(不让越级消息哪怕排进别的任务 inbox)。目标
+    // 任务不存在时让下面 SendTaskMessage 走它自己的 not_found 分支,不在
+    // 这里抢答——两条错因不混着报。
+    if (caller_task_id_ != 0) {
+        const std::optional<AgentTaskSnapshot> target = agent_tool_->TaskDetail(task_id);
+        if (target.has_value() && target->parent_task_id != caller_task_id_) {
+            return {StatusJson("not_child", task_id, 0) + "\n" + lubancode::cli::trf("agent_message.not_child", task_id),
+                    true};
+        }
+    }
 
     const auto message_it = input.find("message");
     if (message_it == input.end() || !message_it->is_string()) {

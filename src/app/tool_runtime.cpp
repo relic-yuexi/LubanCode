@@ -590,8 +590,10 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         agent_tool_->SetContextWindowTokens(config.context_window_tokens);
         // 派工治理(规格"递归派工不能再靠拿掉工具解决"):并发槽与深度上限
         // 都从配置来,没写用公开默认值(config.hpp)。
-        agent_tool_->SetDispatchGovernance(config.subagent.max_active.value_or(lubancode::config::kDefaultSubagentMaxActive),
-                                           config.subagent.max_depth.value_or(lubancode::config::kDefaultSubagentMaxDepth));
+        agent_tool_->SetDispatchGovernance(
+            config.subagent.max_active.value_or(lubancode::config::kDefaultSubagentMaxActive),
+            config.subagent.max_depth.value_or(lubancode::config::kDefaultSubagentMaxDepth),
+            config.subagent.max_children_per_task.value_or(0), config.subagent.max_tree_nodes.value_or(0));
     }
     // 同级派工:子表也挂 agent(转发壳,目标是上面那只 AgentTool)。后台
     // 的独立注册表(BuildDetachedRegistry)不挂——后台线程不能同步跑前台
@@ -599,10 +601,12 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     if (agent_tool_ != nullptr) {
         sub_registry_.Register(std::make_unique<lubancode::tools::AgentDispatchTool>(*agent_tool_));
     }
-    // agent_message:主模型给运行中子代理传增量的窄工具(只挂主表——深度
-    // 超限的孙代理不该再往下传话;主表那枚是 main 用的)。execute 只调
-    // AgentTool::SendTaskMessage,与查看态传话、排队转投共用同一本
-    // TaskRecord::inbox。
+    // agent_message:main 挂 caller_task_id=0 的无限定实例——可投任意存活
+    // 任务(规格 §9.3 末两行)。子代理挂的是绑定各自 task_id 的窄实例,由
+    // AgentTool::RunTask 的第二段随 scoped agent 一并现挂(同一道资格门,
+    // P1-1),不在 sub_registry_/detached 源表里预置——每只任务的窄实例都
+    // 是运行期现造,不能共享一份。execute 只调 AgentTool::SendTaskMessage,
+    // 与查看态传话、排队转投共用同一本 TaskRecord::inbox。
     if (agent_tool_ != nullptr) {
         main_registry_.Register(std::make_unique<lubancode::tools::AgentMessageTool>(agent_tool_));
     }

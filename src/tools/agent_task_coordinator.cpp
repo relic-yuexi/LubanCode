@@ -30,6 +30,9 @@ AgentRunIdentity IdentityOfSnapshot(const AgentTaskSnapshot& snapshot) {
     identity.task_id = snapshot.id;
     identity.root_task_id = snapshot.root_task_id;
     identity.depth = snapshot.depth;
+    // 轨迹嵌套边(P1-2):这只任务自己的 run id 投进身份,它派孩子时
+    // (TLS CurrentDispatchIdentity 走这份投影)子账的 parent_run_id 认它。
+    identity.agent_run_id = snapshot.agent_run_id;
     return identity;
 }
 
