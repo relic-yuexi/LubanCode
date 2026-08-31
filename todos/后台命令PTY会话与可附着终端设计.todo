@@ -1,0 +1,987 @@
+# 后台命令 PTY 会话与可附着终端设计
+
+- 状态：待实现
+- 日期：2026-08-31
+- 级别：P0（进程、终端与输入生命周期正确性）；P1（屏幕投影、人工附着与诊断体验）
+- 基线：`ec1b320`（撰写时 HEAD；实施前须重查）
+- 范围：`run_command` 后台模式、`platform/process`、`BackgroundTaskRegistry`、终端输入/输出/resize 工具、`/background` 管理面、Windows ConPTY、POSIX PTY、相关配置/Prompt/测试/文档
+- 依赖：现有 `BackgroundProcessHandle`、每任务 Job Object/POSIX 进程组、后台 watcher、`background_output`、`stop_background`、终端帧与输入所有权基建
+- 关联：`持久Agent_Gateway自动任务与可靠恢复总装计划.todo` §11.4、`子代理递归派工与结构化任务交接设计.todo`
+- 不在本单：后台 Agent 调度重做、任意 OS 进程跨宿主重启接管、远程 SSH 终端、多人协同终端、完整 shell 历史产品、IDE 内嵌终端替代品、未经选型验收自研 VT 解析器
+
+## 一、先下断语
+
+现有 `run_command(run_in_background=true)` 是一条好用的“日志后台”路。它适合 dev server、构建、测试与 watcher。它不是终端会话：子进程没有可写 stdin，也没有 TTY 身份；输出只往日志文件落，窗口不能 resize，人和 Agent 都不能 attach。
+
+本单不推翻旧路。要在旧路旁边添一条显式的“PTY 后台”路：
+
+```text
+run_command background
+  io_mode=log       -> 现有 LogSession，默认，快，稳定
+  io_mode=terminal  -> 新 TerminalSession，可写、可读、可 resize、可 attach
+```
+
+首版不做 `auto` 猜测。宿主不能看见 `npm`、`python`、`vim` 几个字，便私自决定要不要 PTY。猜错会改颜色、缓冲、信号、提示词与退出行为，叫同一条命令生出两副脾气。
+
+PTY 也不是“把 stdout 管道换个名字”。它是一项长命资源，须有：
+
+- 独立终端尺寸；
+- 持续输入与持续输出；
+- 唯一输入租约；
+- 原始 VT 流与当前屏幕两份账；
+- resize、EOF、Ctrl+C、停止、退出与关闭次序；
+- 有界缓冲、日志轮转、权限继承与审计；
+- Windows ConPTY 与 POSIX PTY 对齐后的共同合同。
+
+后台 Agent 本身不靠 PTY 才能活。Agent 推理、读文件、跑非交互命令，照旧可用。本单只补“子进程终端能力”，不把它写成 Agent 调度修复。
+
+## 二、现状证据：眼下到底有什么
+
+### 2.1 日志后台的真实调用链
+
+```text
+RunCommandTool::Run
+  -> RunProcessBackground / RunShellCommandBackground
+  -> BackgroundSpawnResult(pid, log_path, BackgroundProcessHandle)
+  -> BackgroundTaskRegistry::Register
+  -> watcher Wait/Peek
+  -> background_output / /background logs
+  -> stop_background / /background stop
+```
+
+关键落点：
+
+| 能力 | 当前源码 | 现行语义 |
+|---|---|---|
+| 工具分流 | `src/tools/run_command.cpp:551-587,632-654` | 后台 spawn 后立即返回 task id、PID 与日志路径 |
+| 公共结果 | `src/platform/process.hpp:73-140` | `BackgroundSpawnResult` 只带日志路径与生命句柄 |
+| Windows 起进程 | `src/platform/process_win.cpp:878-1027` | stdin=`NUL`，stdout/stderr=同一日志文件，`CREATE_NO_WINDOW` |
+| POSIX 起进程 | `src/platform/process_posix.cpp:969-1119` | `setsid()`，stdin=`/dev/null`，stdout/stderr=同一日志文件 |
+| 任务台账 | `src/tools/background_tasks.*` | 登记、探活、尾读日志、完成通知、停止与裁剪 |
+| 本地管理面 | `src/app/commands/background_commands.*` | list/show/logs/stop；明写 logs 不是进入终端 |
+| 进程树收口 | `BackgroundProcessHandle::TerminateTree()` | Windows 每任务 Job；POSIX 进程组 SIGTERM→SIGKILL |
+
+这条路已经解决了几桩难事：原生 cwd、输出边跑边落盘、PID 之外的可等待句柄、退出码唯一收尸、停止整棵树、宿主退出兜底、日志并发读取与后台完成通知。新路须复用这些砖，不得另起一份后台任务表。
+
+### 2.2 它能做什么
+
+- 起 dev server，让主回合继续走；
+- 后台编译、测试、打包；
+- 起不读 stdin 的 watcher；
+- 按 task id 看状态、读尾部、停整棵进程树；
+- Windows 与 POSIX 都能在主进程退出时尽量收口。
+
+### 2.3 它做不了什么
+
+以下不是“体验差一点”，而是合同上没有：
+
+1. **没有输入。** Windows stdin 接 `NUL`，POSIX 接 `/dev/null`。提示程序会立刻读到 EOF，或走错分支。
+2. **没有 TTY 身份。** `isatty()` / `GetConsoleMode()` 一类探测失败。程序会关颜色、改缓冲、拒跑或换输出格式。
+3. **不能应答提示。** 密码、确认、选择菜单、REPL 都无处接字节。
+4. **不能跑 TUI。** `vim`、`top`、`fzf`、交互式安装器会吐 VT 控制序列，却没有终端屏幕承接。
+5. **不能 resize。** 子程序永远拿不到新的行列数；换行、全屏布局、进度条会错位。
+6. **不能 attach/detach。** `/background logs` 只读文本文件，不能把键盘交给任务。
+7. **没有终端信号语义。** “写字节 `\x03`”“发 console control event”“杀进程树”不是一回事，眼下只有最后一项。
+8. **stdout/stderr 合流却没明示能力差异。** 日志模式主动合流；PTY 天生通常只见一条终端流。调用方不能再假装能稳定拆回两路。
+
+### 2.4 后台 Agent 与后台命令不可混名
+
+仓库里有两本不同的账：
+
+| 名字 | 主体 | 台账 | PTY 是否必要 |
+|---|---|---|---|
+| 后台 Agent | 一只模型任务 | `TaskLedger` / `AgentTaskCoordinator` | 推理不需要；它所起的交互子进程才需要 |
+| 后台命令 | 一棵 OS 进程树 | `BackgroundTaskRegistry` | 非交互不需要；REPL/TUI/提示程序需要 |
+
+文案、诊断与测试必须写全“后台 Agent”或“后台命令”，不得只写“后台任务”叫人猜。
+
+## 三、问题清单：若只接一枚 ConPTY 会坏在哪里
+
+### 3.1 进程接口太窄
+
+`BackgroundProcessHandle` 只管 `Wait/Peek/IsAlive/TerminateTree`。它不该硬塞进 Write、Read、Resize、Screen、Attach 等十来种职责。否则一枚生命句柄会长成跨平台终端、日志、UI 与台账的总管。
+
+裁决：保留生命句柄；另立 `TerminalSession`。`BackgroundTaskRegistry` 的每条记录组合持有两者。
+
+### 3.2 输出不再是“行日志”
+
+PTY 会吐：
+
+- 普通 UTF-8 文本；
+- CR、BS、BEL；
+- CSI/OSC/DCS 等 VT 序列；
+- 光标移动、清屏、覆写、备用屏；
+- 同一进度行反复改写；
+- 程序退出前的最后一帧。
+
+拿现有 `tail_lines` 生切，会截在一条 VT 序列、一个 UTF-8 字符或一帧中间。把原始流直接送进主终端，还可能清掉 LubanCode 自己的画面、改标题、打开鼠标模式。
+
+裁决：原始流不得直接写进宿主终端；先经受控解析。原始事件流与屏幕投影分账。
+
+### 3.3 ConPTY 有阻塞与关闭死锁
+
+微软文档明示：ConPTY 用同步 I/O；输入、输出宜由不同线程持续服务。若单线程一边阻塞写、一边不读满掉的输出，双方会抱死。`ClosePseudoConsole` 还可能吐最后一帧，关闭时仍须有人排水。
+
+裁决：Windows 后端至少有独立 output drain；input writer 走自己的队列与线程。关闭动作由生命周期线程发起，output drain 未退前不得在同一线程阻塞等待它自己。
+
+### 3.4 POSIX `fork` 处在多线程宿主里
+
+LubanCode 是多线程程序。`forkpty()` 后、`exec` 前，子进程只能走经过审计的最小系统调用路径，不能碰 C++ 堆锁、日志器、locale、共享 mutex。现有 POSIX spawn 已有类似约束，新实现不能因图省事把字符串拼接、错误格式化放进 fork 后子进程。
+
+裁决：父进程预先备齐 argv/env/cwd/尺寸；子进程只做 PTY/session/fd/chdir/exec 与错误管道写入。实施时须单列 fork-child async-signal-safe 审计。
+
+### 3.5 输入会争抢
+
+Agent 可能正写 `yes\n`，用户此时 attach 又按下一串键。两股字节交错，命令收到的既不是 Agent 的话，也不是用户的话。
+
+裁决：一只 TerminalSession 同时只准一位输入 owner。owner 可为 `agent:<task_id>`、`human:<session_id>` 或空。人工 attach 默认抢占 Agent；抢占写审计事件。没有租约，写入稳定失败。
+
+### 3.6 尺寸也会争抢
+
+Agent 读取 120x30 屏幕，用户在 80x24 面板 attach；双方轮流 resize，TUI 会不停重画。
+
+裁决：尺寸归当前 attach owner；无人 attach 时用任务创建尺寸。模型只可在无人类 owner 时 resize。尺寸每次变化写 revision。
+
+### 3.7 Ctrl+C 不是 stop
+
+终端内 Ctrl+C 是给前台进程组的输入/信号；`stop_background` 是宿主收整棵树。前者容许 shell 活着、当前命令退出；后者终结整项任务。两者不得共用一个按钮、一个工具名或一个终态。
+
+裁决：
+
+- `terminal_input(keys=["CTRL_C"])`：终端交互；任务仍可 Running；
+- `stop_background(task_id)`：生命周期取消；最终进 Stopped/StopFailed；
+- EOF：独立动作，关输入方向，不等于杀进程。
+
+### 3.8 “按键”与“原始字节”不是同一层
+
+模型若任意拼 ESC 序列，容易写错平台、键盘模式与粘贴边界，也给 Prompt 注入式终端控制留出大口子。
+
+裁决：模型工具首版只收 `text` 与受限 `keys` 枚举。宿主把 Enter、Tab、Escape、方向键、Ctrl+C、Ctrl+D/EOF 等编码成当前终端协议。任意 raw bytes 不进模型 schema；开发诊断若要，另走本地、显式高权限入口。
+
+### 3.9 PTY 改变命令行为
+
+接上 PTY 后，程序可能打开颜色、行缓冲、分页器与交互提示。同一命令会与日志模式吐出不同内容，甚至等一枚永远没人答的确认。
+
+裁决：`io_mode=terminal` 必须显式。首版无 `auto`。结果、清单、诊断都回显实际 I/O 模式。
+
+### 3.10 资源会涨
+
+一只 TUI 可每秒重画许多帧。若把所有 VT 流、屏幕快照、索引与日志都无限留在内存，几只后台任务便能拖垮宿主。
+
+裁决：
+
+- 原始 spool 落磁盘，按字节上限轮转；
+- 内存只留有界增量环与当前屏幕；
+- 输入队列、输出队列、屏幕行列都有硬帽；
+- 超帽须分型：截断、丢旧增量、暂停写入或终止，不能静默吞；
+- 默认值先从真实压力测试量，不在设计单里拍脑袋写数。
+
+### 3.11 权限不能只在 spawn 那一刻算
+
+起一只安装器时看似无害，后续往终端写 `y` 才真正准许它改系统。把 terminal input 当“纯文本工具”会绕过本来应有的本地进程副作用边界。
+
+裁决：TerminalSession 继承创建时冻结的 workspace、permission 与 owner identity。每次模型输入走任务资格校验与工具审计；不能凭 task id 操纵别的会话、别的工作区或已转交人工的终端。
+
+### 3.12 退出、EOF、关闭、停止容易串账
+
+至少有这些不同事件：
+
+```text
+process exited
+terminal output EOF
+input closed
+PTY backend closed
+output drain completed
+stop requested
+process tree terminated
+watcher finalized
+```
+
+它们到达次序并不固定。若 output EOF 一到便写 Completed，可能漏掉退出码；若进程一退便关 PTY，可能漏最后一帧；若 close 先堵住 output drain，可能死锁。
+
+裁决：进程终态仍由 `BackgroundProcessHandle` 唯一收尸。TerminalSession 只记 I/O 状态。`BackgroundTaskRegistry` 等到“进程终态已知 + 输出已排尽或明确超时分型”才发最终完成通知。
+
+### 3.13 编码合同须改
+
+现有 Windows 日志后台会按 PowerShell UTF-8、cmd OEM/ACP 分别清洗。ConPTY 的宿主通道按微软合同走 UTF-8 加 VT。POSIX PTY 通常依赖 locale，却不能假定任意程序都吐合法 UTF-8。
+
+裁决：原始流按 bytes 保存；解析器入口做增量 UTF-8 解码并保留替换/坏字节计数。Windows ConPTY 标 `utf-8-vt`；POSIX 标 `locale-vt/unknown`，不得借一枚字符串冒充已验证编码。
+
+### 3.14 人工 attach 会碰主界面所有权
+
+LubanCode 自己有 composer、viewport、footer、粘贴与重绘状态。把 PTY 原始流直接 `TermOut()`，会让子程序的清屏、鼠标模式、光标显隐撞上主界面。
+
+裁决：首版 attach 必须在受控全屏/面板模式里呈现屏幕投影。进入前保存宿主终端模式；退出时无论正常、异常、resize 还是任务结束，都恢复光标、鼠标、bracketed paste、颜色与主界面全量重绘。不得拿“跑通了 cmd”冒充 UI 收口。
+
+### 3.15 持久恢复是另一张单
+
+PTY master/HPCON、管道句柄、解析器状态与输入租约都是进程内资源。Gateway 重启后不能凭 PID 重新造回同一终端。
+
+裁决：本单只做当前宿主寿命内的 TerminalSession。Gateway 单只记 intent、pid/start token、输出工件与 `ProcessOwnershipUnknown`；不承诺重建活 PTY。日后若要跨进程接管，须另立 sidecar/daemon 所有权方案。
+
+## 四、外部合同与平台裁决
+
+### 4.1 Windows：ConPTY
+
+依据：
+
+- `CreatePseudoConsole`：<https://learn.microsoft.com/en-us/windows/console/createpseudoconsole>
+- 创建会话全流程：<https://learn.microsoft.com/en-us/windows/console/creating-a-pseudoconsole-session>
+- Microsoft Terminal samples：<https://github.com/microsoft/terminal/tree/main/samples/ConPTY>
+
+实施合同：
+
+1. 最低 API 是 Windows 10 1809 / Windows Server 2019。项目若仍支持更老系统，须运行期探测并回稳定 `PtyUnsupported`，不得链接后启动即崩。
+2. 建两条同步通道：host→ConPTY input、ConPTY output→host。
+3. `CreatePseudoConsole(COORD, input_read, output_write, 0, &hpcon)` 成功后，再以 `PROC_THREAD_ATTRIBUTE_PSEUDOCONSOLE` 填入 `STARTUPINFOEX`。
+4. `CreateProcessW` 带 `EXTENDED_STARTUPINFO_PRESENT`。不得把日志模式的 `STARTF_USESTDHANDLES + NUL/log_file` 原封不动混进来。
+5. 创建完子进程，及时关闭 host 不再持有的 pipe ends，免得 EOF 永远不来。
+6. input writer 与 output reader 分线程/队列，output 必须常排水。
+7. resize 只走 `ResizePseudoConsole`，先校验 rows/cols 可转成 `SHORT` 且均大于 0。
+8. 关闭时保持 output drain 活着，再从别的线程 `ClosePseudoConsole`；收完最后一帧后 join。
+9. 现有每任务 Job Object 与 session Job 继续管进程树。须真机裁决 `ClosePseudoConsole` 与 `TerminateJobObject` 的先后，按“无死锁、无孤儿、终态唯一”定序。
+10. ConPTY 输出按 UTF-8 + VT 处理。不得再走 cmd OEM/ACP 日志清洗路。
+
+### 4.2 Linux/macOS：PTY
+
+依据：
+
+- Linux `openpty/forkpty/login_tty`：<https://man7.org/linux/man-pages/man3/openpty.3.html>
+- Linux PTY 总览：<https://man7.org/linux/man-pages/man7/pty.7.html>
+
+实施合同：
+
+1. 用 `openpty()` 或等价 UNIX 98 PTY 路径取得 master/slave；平台差异封在 `process_pty_posix.cpp`。
+2. 子进程成为新 session，并让 slave 成为 controlling terminal；stdin/stdout/stderr 全指 slave。
+3. 父进程只持 master 与生命句柄；slave 及无用 fd 全关。
+4. resize 用 `ioctl(TIOCSWINSZ)`；成功后按平台合同向前台进程组送 `SIGWINCH`，真机验证 shell/TUI 可见。
+5. 终端信号优先写 control character，让 line discipline 送给前台组；stop 仍走现有整树收口。
+6. Linux master 在 slave 全关后可能以 `EIO` 收尾；须按“正常 PTY EOF 候选”分型，不一概报读失败。macOS 行为单列测试。
+7. 编译链接差异须进 CMake 探测。Linux 常需 `libutil`；macOS 头文件/库按 CI 真相裁决，不写死猜测。
+8. fork-child 路径另列审计表；不得在子进程调用非 async-signal-safe 的 C++ 设施。
+
+### 4.3 共同语义，不强求共同实现
+
+两端必须对齐：
+
+- spawn 成功/失败；
+- task id、pid、cwd、command、I/O mode；
+- Write、CloseInput、Resize、ReadEvents、ScreenSnapshot；
+- Wait、Exit、StopTree；
+- 输出排尽后完成；
+- 输入租约与审计；
+- 有界缓冲与稳定错误。
+
+两端不必伪装一致：
+
+- Windows 没有 POSIX signal number；
+- ConPTY 的 Ctrl+C 与 POSIX line discipline 实现不同；
+- Job Object 与进程组收树不同；
+- ConPTY 明定 UTF-8 VT，POSIX 受 locale 与程序字节影响；
+- 平台错误码保留在 detail，外层 error kind 对齐。
+
+## 五、不可破的产品合同
+
+1. `io_mode` 缺席时仍走现有 `log`；升级后普通后台命令行为不变。
+2. `io_mode=terminal` 只在 `run_in_background=true` 下生效；首版其余组合稳定拒绝，不悄悄换前台或日志模式。
+3. 日志任务继续用 `background_output`、`stop_background` 与 `/background`；旧 task id、状态、通知与清理规矩不变。
+4. PTY 任务也进同一本 `BackgroundTaskRegistry`，不另造 `TerminalTaskRegistry` 双账。
+5. 每条任务必须回显实际 `io_mode`，不能只凭参数猜。
+6. PTY 不保证拆分 stdout/stderr；对外明确只有一条 terminal stream。
+7. 进程终态仍由生命句柄唯一收尸；I/O reader 不写业务退出码。
+8. `stop_background` 必须收整棵树，并叫 TerminalSession 完成关闭；不得留下 reader/writer 线程。
+9. attach/detach 只改展示与输入租约，不改进程身份，不重启 shell。
+10. 人工输入与 Agent 输入不得交错；每笔写入都有 owner、sequence、字节数与时间账。
+11. 终端原始流不得未经解析写入 LubanCode 主终端。
+12. 所有队列、spool、屏幕尺寸与任务数有硬界；超界如实分型。
+13. 权限只可继承或收窄，不因换成 PTY 放宽。
+14. 不支持 PTY 的平台/版本给稳定错误；不得静默退回 log 后继续跑。
+15. 设计、单测、集成测试、真机 TUI 与压力数据分开记账；没有真机证据不写“可交互终端已完成”。
+
+## 六、对外工具与命令合同
+
+### 6.1 `run_command`
+
+新增字段草案：
+
+```json
+{
+  "command": "python -i",
+  "run_in_background": true,
+  "io_mode": "terminal",
+  "terminal_size": {
+    "cols": 120,
+    "rows": 30
+  }
+}
+```
+
+字段裁决：
+
+| 字段 | 语义 |
+|---|---|
+| `io_mode` 缺席/`log` | 现有日志后台 |
+| `io_mode=terminal` | 起 PTY/ConPTY 会话 |
+| `terminal_size` 缺席 | 用经测试后定下的固定默认值；不得偷读瞬时主窗口后不记账 |
+| rows/cols 非整数、<=0、平台溢出 | `InvalidTerminalSize`，spawn 前拒绝 |
+| terminal + 非后台 | `TerminalModeRequiresBackground`，首版拒绝 |
+| terminal + 平台不支持 | `PtyUnsupported`，不降级 |
+
+成功结果至少列：task id、PID、`io_mode=terminal`、初始尺寸、查看/输入/attach/停止入口。
+
+### 6.2 `background_output`
+
+旧调用不改。PTY 任务新增 view：
+
+```json
+{
+  "task_id": "7",
+  "view": "screen",
+  "since_seq": 1024,
+  "max_bytes": 32768
+}
+```
+
+| view | 返回 |
+|---|---|
+| 缺席/`log` | 日志任务沿用现状；PTY 任务返回经清洗的可读文本尾，不冒充屏幕 |
+| `events` | seq 之后的有界终端输出事件；带截断旗与 next_seq |
+| `screen` | 当前 rows×cols 屏幕投影、cursor、title、alternate-screen、screen_revision |
+
+首版若 VT 解析器尚未过选型门，`screen` 不得用正则剥 ANSI 冒充。应稳定报 `ScreenProjectionUnavailable`，直到该批落地。
+
+### 6.3 `terminal_input`
+
+模型可见草案：
+
+```json
+{
+  "task_id": "7",
+  "expected_owner_revision": 4,
+  "text": "print(1)\n"
+}
+```
+
+或：
+
+```json
+{
+  "task_id": "7",
+  "expected_owner_revision": 4,
+  "keys": ["CTRL_C"]
+}
+```
+
+规矩：
+
+- `text` 与 `keys` 二选一；
+- keys 首版只收有限枚举：Enter、Tab、Escape、Backspace、方向键、Home、End、PageUp、PageDown、Ctrl+C、Ctrl+D/EOF；平台差异由后端编码；
+- 单次字节数有硬帽；超帽整笔拒绝，不写一半；
+- 写入前 CAS 校验 owner revision，防刚被人工抢占还把旧输入塞进去；
+- 成功只说明字节已交给 session 队列/后端，不说明子程序已处理；
+- 任务已终态、输入已关、非 PTY、无租约、租约过期、队列满各有稳定错误。
+
+### 6.4 `terminal_resize`
+
+```json
+{
+  "task_id": "7",
+  "cols": 100,
+  "rows": 28,
+  "expected_owner_revision": 4
+}
+```
+
+成功返回新 size revision。重复设同尺寸幂等，不额外发 resize。用户 attach 期间模型 resize 返回 `TerminalOwnedByHuman`。
+
+### 6.5 `/background attach <id>`
+
+本地命令草案：
+
+```text
+/background attach 7
+```
+
+进入前：
+
+- 查 task 存在、Running、io_mode=terminal；
+- 申请 human input lease；
+- 保存宿主 UI/console 模式；
+- 把当前屏幕投影完整画一遍；
+- 将后续按键交给 session，保留一枚宿主 escape chord 用于 detach；
+- 窗口变化递给 session。
+
+退出时：
+
+- release lease；
+- 恢复宿主 console mode；
+- 清理 child 留下的 mouse/bracketed-paste/cursor mode；
+- 清 viewport/cursor/anchor，完整重画主界面；
+- 任务继续跑，除非用户另发 stop。
+
+detach chord 不能抢 Ctrl+C。具体键位须经过 Windows Terminal、VS Code/ConPTY、Linux/macOS 真机试用再定，并写进 `?` 帮助与 i18n。
+
+### 6.6 `/background show` 与 list
+
+PTY 任务多列：
+
+- I/O：terminal；
+- size：120x30，revision；
+- input owner：none/agent/human（不泄露敏感身份正文）；
+- input open/closed；
+- output seq、spool bytes、truncated/rotated；
+- screen parser：ready/unavailable/failed；
+- attached：yes/no；
+- backend：ConPTY/POSIX PTY；
+- 最后 I/O 错误与进程终态分开列。
+
+## 七、内部结构
+
+### 7.1 不造大一统句柄
+
+建议结构：
+
+```cpp
+enum class BackgroundIoMode { Log, Terminal };
+
+struct TerminalSize {
+    std::uint16_t cols;
+    std::uint16_t rows;
+};
+
+class TerminalSession {
+public:
+    virtual TerminalWriteResult Write(const TerminalInput&) = 0;
+    virtual TerminalResizeResult Resize(TerminalSize) = 0;
+    virtual TerminalReadResult ReadSince(std::uint64_t seq,
+                                         std::size_t max_bytes) = 0;
+    virtual TerminalScreenSnapshot Screen() const = 0;
+    virtual void CloseInput() = 0;
+    virtual TerminalIoSnapshot Snapshot() const = 0;
+    virtual void BeginClose() = 0;
+    virtual bool Join(int timeout_ms) = 0;
+    virtual ~TerminalSession() = default;
+};
+
+struct BackgroundTaskRuntime {
+    std::shared_ptr<BackgroundProcessHandle> process;
+    std::shared_ptr<TerminalSession> terminal; // log 模式为空
+};
+```
+
+`TerminalSession` 不负责：task id、用户文案、权限决策、完成通知、任务裁剪。那些仍归 `BackgroundTaskRegistry`/工具层。
+
+### 7.2 创建结果
+
+不要继续往 `BackgroundSpawnResult` 塞十几个字段。可演进成：
+
+```cpp
+struct BackgroundSpawnResult {
+    bool success;
+    SpawnError error;
+    unsigned long pid;
+    std::string log_path; // log 模式有值
+    BackgroundIoMode io_mode;
+    BackgroundTaskRuntime runtime;
+};
+```
+
+若兼容成本太高，可先新增 `TerminalSpawnResult`，但两者最终须经同一 `Register(BackgroundTaskSpec, BackgroundTaskRuntime)` 入账。不能让 registry 猜“有 log_path 就是 log，没有便是 terminal”。
+
+### 7.3 平台文件边界
+
+预计新增：
+
+```text
+src/platform/process_pty.hpp
+src/platform/process_pty_win.cpp
+src/platform/process_pty_posix.cpp
+src/tools/terminal_session.*
+src/tools/terminal_input.*
+src/tools/terminal_resize.*
+```
+
+`process_win.cpp/process_posix.cpp` 继续管普通 pipe/log/ChildProcess。PTY 若硬塞进去，会把已很长的文件再搅成一锅。公共 task 注册与生命句柄仍在原文件复用。
+
+### 7.4 I/O 线程与队列
+
+每只 TerminalSession 至少有：
+
+```text
+output reader
+  -> append raw spool
+  -> append bounded event ring(seq)
+  -> feed VT parser
+  -> bump screen revision
+  -> wake readers/UI
+
+input API
+  -> validate owner/revision/size
+  -> enqueue one atomic input record
+  -> input writer drains in order
+```
+
+不得在 output reader 回调里：
+
+- 调模型；
+- 画主 UI；
+- 拿 registry 总锁后做磁盘阻塞 I/O；
+- 等 input writer；
+- 等 `ClosePseudoConsole`。
+
+回调只写 session 私账、投递轻量 wake。UI、工具与 watcher 各自拉快照。
+
+### 7.5 原始流、事件环、屏幕投影
+
+三层各有一份职责：
+
+| 层 | 作用 | 是否权威 |
+|---|---|---|
+| raw spool | 审计、复现、故障排查；原始 bytes | 对“收到过哪些字节”权威 |
+| event ring | 模型/UI 增量读取；有 seq、有界 | 运行期投影，可丢旧段但须报 gap |
+| screen state | 当前可见终端画面、cursor/modes/title | 从连续流构建的投影 |
+
+不得把屏幕文本反推回原始日志。备用屏切换、覆写进度条与滚屏历史会丢语义。
+
+### 7.6 VT 解析器选型门
+
+在引入依赖或写解析器前，先做一张短选型记录，至少比较：
+
+- Windows/Linux/macOS 构建与 C++ 接口；
+- UTF-8 增量输入；
+- 主屏/备用屏、scrollback、cursor、SGR、OSC title；
+- bracketed paste、mouse mode、DECCKM 等输入所需模式；
+- resize 行为；
+- fuzz/安全记录；
+- license 与仓库分发方式；
+- 维护活跃度、体积、异常输入上限；
+- snapshot/restore 是否需要。
+
+裁决：不凭几十行正则剥 ANSI；也不为一枚功能贸然搬进整套 GUI terminal。选型未过，底层 PTY 可先合入隐藏实验开关，模型与正式 attach 不宣称可用。
+
+### 7.7 输入租约
+
+```cpp
+enum class TerminalOwnerKind { None, Agent, Human };
+
+struct TerminalOwner {
+    TerminalOwnerKind kind;
+    std::string owner_id;
+    std::uint64_t revision;
+};
+```
+
+规则：
+
+- owner 变更必增 revision；
+- Write/Resize 带 expected revision；
+- human acquire 可抢 agent；agent 不可抢 human；
+- human 异常断开由 attach scope guard 释放；
+- owner 消失不自动关 stdin；
+- task terminal 后 owner 清空；
+- 输入记录写 task id、owner kind/id、revision、sequence、byte_count、key kinds；敏感正文按轨迹隐私策略裁剪，不默认全文抄入遥测。
+
+### 7.8 状态机
+
+进程状态沿用现账。另添 I/O 子状态：
+
+```text
+Creating
+  -> Open
+       -> InputClosed
+       -> Closing
+  -> Failed
+
+Closing
+  -> Draining
+  -> Closed
+  -> CloseTimedOut
+```
+
+任务完成判定：
+
+```text
+process terminal
+AND terminal in Closed | CloseTimedOut | Failed
+-> finalize BackgroundTaskInfo
+-> enqueue one completion notice
+```
+
+`CloseTimedOut` 不改已知 exit code，但须在 task detail 留 warning。若进程仍活，单独 I/O Failed 不得冒充 Completed；按策略继续可 stop，或自动触发 stop，实施前须在错误表逐类裁决。
+
+## 八、错误合同
+
+首版稳定 kind 草案：
+
+| kind | 时机 | 是否起过进程 |
+|---|---|---|
+| `PtyUnsupported` | OS/API/CMake 不支持 | 否 |
+| `InvalidTerminalSize` | rows/cols 不合法 | 否 |
+| `TerminalModeRequiresBackground` | 参数组合不支持 | 否 |
+| `PtyChannelCreateFailed` | pipe/openpty 失败 | 否 |
+| `PtyCreateFailed` | CreatePseudoConsole/login_tty 等失败 | 否或已清理 |
+| `PtyProcessSpawnFailed` | PTY 已建、CreateProcess/exec 失败 | 否；资源全清 |
+| `TerminalNotFound` | task id 不存在 | 不适用 |
+| `TaskIsNotTerminal` | 对 log task 调终端动作 | 不适用 |
+| `TerminalNotRunning` | 已终态/正在关 | 是 |
+| `TerminalInputClosed` | stdin 已关 | 是 |
+| `TerminalOwnedByHuman` | 模型写入/resize 撞租约 | 是 |
+| `TerminalOwnerChanged` | expected revision 过期 | 是 |
+| `TerminalInputTooLarge` | 单笔过帽 | 是；整笔未写 |
+| `TerminalInputBackpressure` | 队列满 | 是；整笔未写 |
+| `TerminalOutputGap` | since_seq 已被环覆盖 | 是；回 earliest seq |
+| `ScreenProjectionUnavailable` | parser 未装/失败 | 是；raw/events 仍可查 |
+| `TerminalResizeFailed` | OS resize 失败 | 是；旧尺寸仍权威 |
+| `TerminalIoFailed` | reader/writer 持续错误 | 是 |
+| `TerminalCloseTimedOut` | 关闭未收口 | 可能已退 |
+
+外层 kind 跨平台稳定；detail 可带 HRESULT/GetLastError/errno。用户文案不得只吐数字。
+
+## 九、安全、隐私与容量
+
+### 9.1 权限
+
+- PTY spawn 与日志 spawn 同属本地未知进程副作用，沿用 `run_command` 确认门；
+- terminal input 是同一进程会话的后续副作用，不得降成 ReadOnly；
+- Agent 只能写自己权限快照允许、自己任务可见的 terminal；
+- human attach 走本地明确动作，仍须显示 command/cwd/task id，防附错；
+- task id 不是授权令牌。所有操作还查 session/workspace/owner identity。
+
+### 9.2 终端控制序列
+
+- OSC 8 链接、OSC 52 剪贴板、title、mouse、device query 各自列策略；
+- 首版屏幕投影默认不执行剪贴板写入、不自动打开链接、不把 OSC 当宿主命令；
+- 对未知/超长序列设长度帽，解析器不能无限攒半条序列；
+- child 发出的 device query 是否应答，按最小白名单实现；不认识便忽略并记计数。
+
+### 9.3 日志与隐私
+
+- raw spool 可能含密码与 token；路径、权限、清理周期沿现有后台日志策略收紧；
+- password prompt 下用户输入默认不回显，不等于宿主可以把输入全文另记一遍；
+- 输入审计默认记元数据与 key kind，正文是否保存服从现有 trajectory secret/redaction 合同；
+- `/background show` 不打印输入正文；
+- 崩溃包、遥测与导出默认不携 raw spool，除非用户明确选取。
+
+### 9.4 容量与反压
+
+实施前须测并定：
+
+- 每任务 input queue bytes/records；
+- event ring bytes/events；
+- raw spool 单文件与轮转总量；
+- 最大 rows/cols/cells；
+- 单次 ReadSince/max_bytes；
+- 同时活跃 TerminalSession 数；
+- close/join 超时；
+- parser 每批处理上限与 wake 合并窗口。
+
+默认值须有测量记录。配置可收窄；放宽须过全局硬帽。不得拿 `0=无限` 放在对抗性输出面。
+
+## 十、可观测性与轨迹
+
+至少记录这些本地事件；是否投影到外部遥测另受默认关闭合同约束：
+
+```text
+terminal.spawn.requested
+terminal.spawn.started
+terminal.spawn.failed
+terminal.output.chunk        # 默认只记 bytes/seq，不记正文
+terminal.output.gap
+terminal.screen.revision
+terminal.input.lease_changed
+terminal.input.enqueued
+terminal.input.failed
+terminal.resize
+terminal.input_closed
+terminal.io_failed
+terminal.close_started
+terminal.close_finished
+terminal.close_timed_out
+```
+
+每笔带 task id、platform/backend、io mode、sequence/revision 与时间。进程 exit/stop 仍走现有后台任务事件，不复制一套终态。
+
+`/doctor tools` 或新的后台诊断段须列：
+
+- ConPTY/PTY 是否可用；
+- 运行期 API/编译探测结果；
+- VT parser 名称与版本；
+- 默认/硬帽尺寸与缓冲；
+- 当前 session 数、reader/writer 活性；
+- 最近关闭超时与 I/O 错误计数。
+
+不得为 doctor 探测随手起一只常驻 PTY。深探针须用户显式触发，跑完收净。
+
+## 十一、测试矩阵
+
+### 11.1 纯单测
+
+- schema：`io_mode` 缺席仍是 log；terminal 参数组合、类型与尺寸校验；
+- error kind 到中英文文案；
+- task info 的 io mode、size、owner、I/O state 投影；
+- owner acquire/release/preempt/CAS revision；
+- human owner 时 agent write/resize 拒绝；
+- 单笔输入原子性与 queue backpressure；
+- output seq、gap、截断、UTF-8 半字符；
+- screen revision 与 snapshot 并发一致；
+- process terminal + I/O drain 的完成闸；
+- stop、exit、reader EOF、close timeout 各种到达次序；
+- raw spool 轮转与清理，不跟错 task；
+- OSC/超长 VT/坏 UTF-8 fuzz corpus；
+- `/background` parse/show/list/attach 前置检查。
+
+### 11.2 平台集成测试：共同场景
+
+写一枚仓库自带、无第三方依赖的 PTY fixture。它可：
+
+- 打印 `isatty(stdin/stdout/stderr)`；
+- 打印 rows/cols；
+- 无回显/有回显读取输入；
+- 收 Enter、Ctrl+C、EOF；
+- 输出 UTF-8 与 VT 光标控制；
+- 进入备用屏再退出；
+- fork/spawn 子孙进程；
+- 快速海量重画；
+- 按命令退出指定 code。
+
+共同验收：
+
+- log 模式下 isatty=false，行为维持旧真相；
+- terminal 模式下三路终端探测符合平台合同；
+- 写一段文本后 fixture 原样应答；
+- resize 后 fixture 读到新尺寸；
+- output seq 单调，无重复、无无声缺口；
+- 进程 exit 后最后一帧仍可读；
+- stop 收净根、子、孙；
+- 任务完成只通知一次；
+- 连起数百只快 PTY，无永久 Running、无句柄/fd/线程线性泄漏。
+
+### 11.3 Windows 专项
+
+- Windows 10/11 真 ConPTY；CI 若版本不够，测试明确 skip 原因；
+- 动态 API 不可用返回 `PtyUnsupported`，不崩、不降级；
+- CreatePseudoConsole 后 CreateProcess 失败，HPCON/pipe/attribute list 全清；
+- input/output 两边同时灌满，不死锁；
+- ClosePseudoConsole 期间继续排最后一帧；
+- Job stop 与 close 多种竞态，无孤儿、无双关句柄；
+- cmd、PowerShell 5.1、pwsh（装了才测）交互；
+- Windows Terminal 与 VS Code/ConPTY 宿主下 attach/detach 恢复画面；
+- resize 风暴与最小/最大合法 COORD；
+- process handle、job、pipe、HPCON 数量压力前后对账。
+
+### 11.4 Linux 专项
+
+- `openpty/forkpty` 或选定实现真链；
+- master EOF/EIO 分型；
+- TIOCSWINSZ + SIGWINCH；
+- Ctrl+C 只中断前台命令，shell 仍活；stop 才收整树；
+- fork-child async-signal-safe 路径审计；
+- fd close-on-exec 与无关 fd 不泄漏；
+- sanitizer：ASan/UBSan；线程竞态能跑 TSan 的夹具单列。
+
+### 11.5 macOS 专项
+
+- 头文件、链接库、forkpty/openpty 差异由真 CI 钉住；
+- EOF、resize、signal、shell 行为真机验；
+- attach/detach 后 termios、cursor、mouse、paste 模式恢复；
+- 进程组与子孙收口，不套用 Linux EIO 结论。
+
+### 11.6 真 TUI 冒烟
+
+工具存在才跑，缺件明写 skip：
+
+- Python/Node REPL：输入、输出、Ctrl+C、EOF；
+- shell 提示符：连续命令与退出码；
+- `top`/`htop` 或等价 TUI：备用屏、resize、退出；
+- `vim` 或等价编辑器：打开、输入、保存到临时目录、退出；
+- `fzf` 或选择菜单：方向键、Enter；
+- 密码/隐藏输入 fixture：屏幕不回显，轨迹不泄正文。
+
+这些是真机/集成证据，不放进每次最小单测。发布门须列跑了哪台、哪种宿主、哪几个程序。
+
+### 11.7 故障注入
+
+- pipe/openpty/CreatePseudoConsole 每一步失败；
+- spawn 前/后取消；
+- output reader 提前死；
+- input writer 阻塞；
+- spool 磁盘满/路径被删/权限改变；
+- parser 抛错或拒绝超长序列；
+- 用户 attach 时任务恰好退出；
+- Agent enqueue 后、writer 写前被 human 抢占；
+- close 期间 resize/input；
+- watcher 与 stop 同时收尸；
+- 宿主正常退出与强杀后的孤儿检查。
+
+## 十二、分期落地
+
+不越次序。每批合入后回写本单状态、勾选项、commit 与真实测试。未跑的门不打勾。
+
+### P0-0：合同、探针与测试夹具
+
+- [ ] 冻结 `io_mode=log|terminal` schema、稳定 error kind 与 task info 字段。
+- [ ] 写跨平台 PTY fixture，先钉 isatty、尺寸、输入、VT、子孙与 exit code。
+- [ ] 给现有 log 模式补回归，证明缺席 `io_mode` 无行为变化。
+- [ ] 加 Windows ConPTY 运行期能力探测与 POSIX CMake/link 探测。
+- [ ] 写 VT 解析器选型记录，完成 license、三平台构建、fuzz 与功能门。
+- [ ] 定首轮容量实验方法，不先拍默认数。
+
+验收：尚不对用户开放 terminal；合同与夹具先绿，旧日志后台全绿。
+
+### P0-1：平台 PTY 与生命线
+
+- [ ] 新增 `process_pty.hpp` 与 Windows/POSIX 后端。
+- [ ] Windows 接 CreatePseudoConsole、STARTUPINFOEX、双 I/O 服务线程与 Job Object。
+- [ ] POSIX 接 PTY master/slave、controlling terminal、exec error pipe 与现有进程组收口。
+- [ ] 实现 Write、CloseInput、Resize、Wait/Stop 协作与有界 input queue。
+- [ ] 钉关闭次序：进程终态、最后一帧、Close/Join、超时分型。
+- [ ] 过平台故障注入与句柄/fd/线程泄漏测试。
+
+验收：底层 fixture 可在三平台真 PTY 中交互、resize、退出、停止；尚不宣称 Agent 可读 TUI 屏幕。
+
+### P0-2：统一入 `BackgroundTaskRegistry`
+
+- [ ] 引入 `BackgroundIoMode`、`BackgroundTaskRuntime` 与 I/O 子状态。
+- [ ] 改 `Register` 为 typed spec/runtime，不靠空路径猜模式。
+- [ ] 复用现有 task id、watcher、完成通知、Stop、Prune 与宿主退出清理。
+- [ ] 完成闸等待 process terminal 与 output drain，保证最后一帧在通知前可见。
+- [ ] list/show/status footer 区分 log/terminal，不把两本账揉成一句。
+- [ ] spool 路径、权限、轮转、删除与 task prune 同寿命。
+
+验收：日志与 PTY 同一本台账；任何竞态只收尸一次、只通知一次、无资源遗留。
+
+### P0-3：工具入口与权限
+
+- [ ] 给 `run_command` 接 `io_mode`/`terminal_size`，缺席保持 log。
+- [ ] 实现 `terminal_input` 有限 keys/text、输入租约与 owner revision。
+- [ ] 实现 `terminal_resize` 与尺寸 revision。
+- [ ] 扩展 `background_output(events)`，带 seq/gap/truncation。
+- [ ] 把 terminal input 标成本地进程副作用，接权限、取消、轨迹与隐私裁剪。
+- [ ] 更新中英文 Prompt、schema、tool confirmation 与 `/doctor tools`。
+
+验收：Agent 能显式起 REPL，按序读增量、写输入、resize、Ctrl+C/EOF、stop；不能越任务、越租约或越权限。
+
+### P1-0：VT 屏幕投影
+
+- [ ] 按 P0-0 选型接成熟 VT parser，不用正则剥 ANSI。
+- [ ] 实现主屏/备用屏、cursor、SGR、scrollback、title、resize 与坏序列上限。
+- [ ] 实现 `background_output(view=screen)` 与 screen revision。
+- [ ] 裁决 OSC 8/52、mouse、bracketed paste、device query 的安全策略。
+- [ ] 加 corpus/fuzz、海量重画、超大尺寸与 parser 故障降级。
+
+验收：TUI 当前画面可稳定投给 Agent/UI；parser 坏掉不拖死进程，raw/events 仍可查并如实报警。
+
+### P1-1：人工 attach/detach
+
+- [ ] 实现 `/background attach <id>` 与 human lease 抢占/释放。
+- [ ] 接窗口 resize、键盘编码、粘贴与保留 detach chord。
+- [ ] 在受控全屏/面板里画 screen，不直灌 child VT。
+- [ ] 退出/异常/任务完成时恢复 console modes、viewport、cursor、anchor 与全量重绘。
+- [ ] 更新 `?` 帮助、i18n、清单与状态提示。
+- [ ] 过 Windows Terminal、VS Code、Linux、macOS 真机画面测试。
+
+验收：用户可进可退；Ctrl+C 交给 child；detach 不杀任务；回主界面无残行、无输入串线、无模式遗留。
+
+### P1-2：容量、诊断与发布收口
+
+- [ ] 跑输出洪水、慢消费者、resize 风暴、数百快任务与多长命任务压力。
+- [ ] 按数据钉 input/event/spool/screen/session 硬帽与默认值。
+- [ ] doctor 列 backend/parser/资源/错误；不靠常驻探针。
+- [ ] 补用户文档：何时用 log，何时用 terminal，PTY 不拆 stdout/stderr。
+- [ ] 更新 CHANGELOG、配置参考、工具 Prompt 与平台支持表。
+- [ ] 跑全量 Release CTest、三平台 CI、真 TUI 冒烟；逐项记证据与未验边界。
+
+验收：容量有数字，错误可诊断，三平台合同无暗降级；发布文案不把底层 fixture 说成完整真机体验。
+
+## 十三、预计改动边界
+
+新增候选：
+
+```text
+src/platform/process_pty.hpp
+src/platform/process_pty_win.cpp
+src/platform/process_pty_posix.cpp
+src/tools/terminal_session.hpp
+src/tools/terminal_session.cpp
+src/tools/terminal_input.hpp
+src/tools/terminal_input.cpp
+src/tools/terminal_resize.hpp
+src/tools/terminal_resize.cpp
+tests/fixtures/pty_fixture.*
+tests/unit/tools/test_terminal_session.cpp
+tests/integration/process/test_pty_process.cpp
+docs/reference/background-terminal.md
+```
+
+修改候选：
+
+```text
+CMakeLists.txt / cmake 测试清单
+src/platform/process.hpp
+src/tools/run_command.*
+src/tools/background_tasks.*
+src/tools/background_output.*
+src/app/tool_runtime.cpp
+src/app/commands/background_commands.*
+src/app/status_panel_assembly.*
+src/cli/i18n.cpp
+src/prompts/tools/{zh,en}/*
+src/trajectory/*（只加事件投影，不另造终态）
+tests/integration/process/test_run_command_process.cpp
+tests/integration/process/test_background_tasks.cpp
+docs/reference/configuration.md
+CHANGELOG.md
+```
+
+若实施触到 Agent 调度、Gateway durable store、远程 transport 或浏览器 AppServer，先停手拆单，不借 PTY 顺便改架构。
+
+## 十四、不采用的路
+
+### 14.1 不把父进程真控制台直接继承给后台任务
+
+它会与 LubanCode 抢 stdin、光标、窗口模式与 Ctrl+C。多只任务也无法各有尺寸。后台之所以要 PTY，正为隔开这几份状态。
+
+### 14.2 不把 `ChildProcess` 三管道当 PTY
+
+`ChildProcess` 可持续 Write/Read，却仍是 pipe。`isatty()` 仍为 false，TUI 与 line discipline 仍不成立。它可复用线程、Job、env、cwd 等做法，不能冒充终端。
+
+### 14.3 不默认所有后台命令都用 PTY
+
+PTY 会改程序行为、合并输出、增加线程与解析成本。dev server/编译日志无须为交互能力交这笔账。
+
+### 14.4 不首发 `auto`
+
+按命令名猜会漏脚本包装、子进程与运行期提示。以后若做，也只能是可解释策略：宿主说明为何选、用户可覆盖、失败不暗重启。
+
+### 14.5 不用正则清 ANSI 当屏幕
+
+清屏、光标移动、备用屏与宽字符都不是“删 ESC 到字母”能还原的。正则只能做日志可读性清洗，不能产出 screen contract。
+
+### 14.6 不让 PTY 自己另立任务表
+
+两张表会叫 list/stop/通知/清理各算各的。I/O backend 是任务属性，不是另一种任务身份。
+
+### 14.7 不承诺重启后重新 attach 活 PTY
+
+没有长驻 sidecar 持 master/HPCON，宿主一死，句柄与 parser 状态便断。凭 PID 认亲既不可靠，也接不回终端通道。
+
+## 十五、最终验收门
+
+全部满足才可把状态改成“已收官”：
+
+- [ ] `io_mode` 缺席的日志后台回归全绿，行为与输出合同未变。
+- [ ] Windows ConPTY、Linux PTY、macOS PTY 各有真 CI/真机证据；缺平台便明写未验，不用别台替它盖章。
+- [ ] PTY fixture 证明 isatty、输入、resize、Ctrl+C/EOF、exit code、最后一帧与整树停止。
+- [ ] input/output 并发灌满与 close 故障注入无死锁。
+- [ ] 数百快任务与长命输出压力后，无句柄/fd/线程/任务记录线性泄漏。
+- [ ] VT parser 过 license、安全、坏序列、宽字符、备用屏与 resize 门。
+- [ ] Agent 与 human 输入租约不串字节；人工抢占有审计，旧 revision 写入稳定失败。
+- [ ] attach/detach 在 Windows Terminal、VS Code、Linux/macOS 终端下无残行、无光标/鼠标/paste 模式遗留。
+- [ ] raw spool、输入队列、事件环、屏幕与 session 数都有测量后的硬帽。
+- [ ] 密码/secret fixture 不在默认轨迹、doctor、show 或遥测里泄出输入正文。
+- [ ] Stop、自然退出、I/O 错误、关闭超时各有稳定状态与中英文说明；完成通知恰好一次。
+- [ ] Release 全量 CTest、三平台 CI、真 TUI 冒烟结果写回本单；任何 skip 都列原因。
+- [ ] 配置参考、工具 Prompt、`?` 帮助、后台管理文档与 CHANGELOG 同步。
+- [ ] Gateway 文档仍如实说明：当前宿主退出后不保证重新接管活 PTY。
+
+收官时须附：实现 commits、测试命令与计数、真机平台/终端/TUI 清单、容量数字、已知限制。只合了 `CreatePseudoConsole` 或 `forkpty()`，不算收官。
