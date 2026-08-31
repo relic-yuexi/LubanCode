@@ -509,6 +509,11 @@ add_library(lubancode_engine STATIC
   # verifier,与 harness replay 的录制桩(RecordedBackend/RecordedExecutor)。
   src/trajectory/replay.cpp
   src/trajectory/harness.cpp
+  # P0-4:环境快照(git/dirty patch/工具集摘要)与 §9.2 重现等级、容量/
+  # GC 账本、聚合指标。
+  src/trajectory/environment.cpp
+  src/trajectory/usage_gc.cpp
+  src/trajectory/metrics.cpp
   # Token 账本与使用洞察单 A0(合同与夹具):accounting 是 usage 投影与
   # 计价的纯领域层;insights 是摘要/finding/报告合同与脱敏。都不 include
   # app/cli,不接真实 runtime(A1 再接线)。
