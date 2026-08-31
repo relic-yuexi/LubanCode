@@ -15,8 +15,10 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstddef>
 #include <cstdio>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
@@ -158,6 +160,12 @@ public:
     // 收线后打断在跑的回合(浏览器会话与 thread 账不动——重连续用)。
     // 单测直驱也走它(一条一条喂连接,不进死循环)。
     WsServeOutcome ServeWsConnection(WsTransport& transport);
+
+    // 服务一条已接好的 WS 会话(ServeWsConnection 的内核)。RunWsLoop 的
+    // 专职 accept 线程把升级好的 Session 递进来——会话仍一条一条服务
+    //(阶段 A 语义),但 accept 不再被在服务的会话堵死:参考前端(阶段 D)
+    // 开着 WS 的同时经 HTTP 取 artifact 字节,两头并发。
+    WsServeOutcome ServeWsSession(std::unique_ptr<WsTransport::Session> session);
 
     // 喂给 ServeWsConnection 的 dispatcher 工厂:每条 WS 连接新铸一只,
     // 方法表与 stdio 那只同源(RegisterMethods + browser 面 + 能力表)。
