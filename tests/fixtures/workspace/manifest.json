@@ -1,0 +1,19 @@
+{
+  "schema": "lubancode.workspace-fixtures",
+  "version": 1,
+  "purpose": "P0-0 冻结的真实脱敏夹具:九种用户旧数据场景,给 P0-5 迁移器与 P0-2/P0-3 投影改造当输入。路径、hash、id、时间戳全是占位形状,不含真实凭据与真实机器路径。",
+  "mapping_note": "legacy/*.jsonl 对应旧生产目录 ~/.lubancode/sessions/<session_id>.jsonl;mcp-rich-result.mcp-artifacts/ 对应 sessions/<session_id>/mcp-artifacts/;memory/project/* 对应 ~/.lubancode/projects/<project_key>/ 的 memory 与 memory-candidates;memory/user/* 对应 ~/.lubancode/memory/user/;memory-jobs/pending/* 对应 ~/.lubancode/memory-jobs/pending/。",
+  "scenarios": [
+    {"id": "plain-conversation", "file": "legacy/plain-conversation.jsonl", "covers": "普通会话:meta + user/assistant 文本往返", "migration_target": "main.jsonl(start_reason=legacy_import)"},
+    {"id": "tool-roundtrip", "file": "legacy/tool-roundtrip.jsonl", "covers": "工具结果:tool_use/tool_result 成对,两次往返", "migration_target": "tool.use/tool.result typed 事件"},
+    {"id": "mcp-rich-result", "file": "legacy/mcp-rich-result.jsonl", "covers": "MCP rich result:text/image/audio/resource_link/resource_text 五种块 + structured_content;audio 未落盘(stored=false)当缺口样本", "migration_target": "tool.result.committed 无损投影 + artifacts/sha256/"},
+    {"id": "subagent-foreground", "file": "legacy/subagent-foreground.jsonl", "covers": "前台子代理:agent tool_use + 最终回话,无子账", "migration_target": "父账导入,subagent_detail=unavailable_legacy"},
+    {"id": "subagent-background", "file": "legacy/subagent-background.jsonl", "covers": "后台子代理:受理回执 + queue 事件快照 + 完成通知", "migration_target": "父账导入 + queue 投影,子账标缺"},
+    {"id": "compact", "file": "legacy/compact.jsonl", "covers": "压缩:compact_v2 事件(manifest/metrics/epoch/kept_from)", "migration_target": "compact typed 事件,回放语义保真"},
+    {"id": "resume", "file": "legacy/resume.jsonl", "covers": "续聊:title/cwd 事件 + 次日续写尾巴(ts 跳变)", "migration_target": "title/cwd.changed 事件 + 消息全量"},
+    {"id": "linked-worktree", "file": "legacy/linked-worktree.jsonl", "covers": "linked worktree:主树 -> worktree -> 主树的 cwd 事件序列", "migration_target": "同一 workspace(同 common dir),两 checkout 登记"},
+    {"id": "memory-project", "file": "memory/project/", "covers": "项目 Memory:三种 kind 主题(front matter schema 3)+ catalog.json + recall-trace + memory-candidates", "migration_target": "<workspace>/memory/,逐主题对 hash"},
+    {"id": "memory-user", "file": "memory/user/", "covers": "全局 Memory:preference/feedback 各一 + catalog.json", "migration_target": "路径不动,升 schema/权限合同"},
+    {"id": "memory-job", "file": "memory-jobs/pending/20260115-101500-abc123.json", "covers": "待处理 memory job(pending 态,upsert)", "migration_target": "P0-3 起项目类 job 按 project_key 路由进 workspace"}
+  ]
+}

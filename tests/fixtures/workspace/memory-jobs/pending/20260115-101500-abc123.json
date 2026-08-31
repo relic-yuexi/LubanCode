@@ -1,0 +1,21 @@
+{
+  "schema": 1,
+  "operation": "upsert",
+  "project_key": "demo-repo-1a2b3c4d5e6f7088",
+  "display_name": "demo-repo",
+  "project_root": "C:/Users/sandbox/work/demo-repo",
+  "project_dir": "C:/Users/sandbox/.lubancode/projects/demo-repo-1a2b3c4d5e6f7088",
+  "memory_dir": "C:/Users/sandbox/.lubancode/projects/demo-repo-1a2b3c4d5e6f7088/memory",
+  "created_at": "2026-01-15T10:15:00Z",
+  "id": "preference.tooling-001",
+  "kind": "preference",
+  "title": "文字语言偏好",
+  "summary": "本项目示例偏好:说明文字用中文,代码注释用英文",
+  "content": "说明文字、README、提交信息用中文;代码注释与标识符用英文。",
+  "keywords": ["language", "docs"],
+  "paths": [],
+  "source_session": "20260115-093005-plain-conversation",
+  "confidence": "user-stated",
+  "scope": {"level": "project", "kind": "project", "value": ""},
+  "evidence": [{"path": "CONTRIBUTING.md", "symbol": ""}]
+}

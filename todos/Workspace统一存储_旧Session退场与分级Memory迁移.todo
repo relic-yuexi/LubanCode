@@ -1,6 +1,6 @@
 # Workspace 统一存储、旧 Session 退场与分级 Memory 迁移
 
-- 状态：待实现
+- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 起待实现
 - 日期：2026-09-01
 - 级别：P0（持久化唯一真账、项目身份、恢复正确性与用户数据安全）
 - 范围：`src/sessions/`、`src/trajectory/`、`src/runtime/session_runtime.*`、`src/runtime/trajectory_session.*`、`src/memory/`、`src/app/commands/session_commands.*`、`src/app/commands/memory_commands.*`、`src/tools/agent_tool.*`、配置/CLI/app-server、测试、文档与旧数据迁移
@@ -485,13 +485,13 @@ lubancode migrate-storage plan|run|status
 
 次序不可打乱。每批落地后更新本单状态、实际测试与 commit；未测不得写“完成”。
 
-### P0-0：冻结合同与盘点旧写口
+### P0-0：冻结合同与盘点旧写口（2026-09-01 已落，全量 ctest 330 册绿）
 
-- [ ] 列尽所有 `SessionStore`、`sessions_dir`、`features.trajectory`、旧 artifact 路径与旧 SessionCatalog 调用点。
-- [ ] 列尽 `project_key` 与 `workspace_key` 的全部生成者和消费者。
-- [ ] 建一组真实脱敏夹具：普通会话、工具结果、MCP rich result、前后台子代理、compact、resume、linked worktree、项目/全局 Memory。
-- [ ] 冻结 workspace v2 manifest、目录布局、迁移 receipt 与 memory recall snapshot schema。
-- [ ] 给新事件/schema 定 reader 最低版本与稳定错误码。
+- [x] 列尽所有 `SessionStore`、`sessions_dir`、`features.trajectory`、旧 artifact 路径与旧 SessionCatalog 调用点。（docs/development/workspace-storage-v2/P0-0-inventory.md 表一/表三）
+- [x] 列尽 `project_key` 与 `workspace_key` 的全部生成者和消费者。（同文档表二；含 NormalizePathForCompare 与 thread_id 两把同形钥匙）
+- [x] 建一组真实脱敏夹具：普通会话、工具结果、MCP rich result、前后台子代理、compact、resume、linked worktree、项目/全局 Memory。（tests/fixtures/workspace/，九种场景 + memory job；防漂移断言进册 unit.workspace.test_workspace_fixtures）
+- [x] 冻结 workspace v2 manifest、目录布局、迁移 receipt 与 memory recall snapshot schema。（docs/development/workspace-storage-v2/P0-0-contracts.md + src/workspace/storage_contracts.hpp 纯头常量，未接线）
+- [x] 给新事件/schema 定 reader 最低版本与稳定错误码。（同合同文档 §七/§八：版本协商四规矩、新增 22 枚错误码、沿用码清单）
 
 验收：仓库里每一只旧写手、每一把身份钥匙、每一种用户旧数据都有迁移归宿；没有“实现时再看”的黑箱。
 

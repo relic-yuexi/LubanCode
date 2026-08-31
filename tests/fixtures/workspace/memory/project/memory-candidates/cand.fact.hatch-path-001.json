@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "fact.hatch-path-001",
+  "kind": "fact",
+  "title": "测试产物目录是 build/hatch",
+  "summary": "本项目的测试产物统一落在 build/hatch,不在 build 根",
+  "content": "测试产物目录是 build/hatch,含 fixture 与临时册;清理时只删 hatch 子目录。",
+  "keywords": ["build", "hatch", "test"],
+  "paths": ["tests/CMakeLists.txt"],
+  "confidence": "inferred",
+  "task_type": "code_edit",
+  "created_at": "2026-01-19T11:03:00Z"
+}

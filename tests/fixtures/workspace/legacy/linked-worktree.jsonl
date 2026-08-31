@@ -1,0 +1,9 @@
+{"version":1,"wire":"anthropic","model":"claude-sonnet-4-5","cwd":"C:/Users/sandbox/work/demo-repo","started_at":"2026-01-23 13:00:00"}
+{"role":"user","content":[{"type":"text","text":"在主树看一眼 README 的版本号"}],"ts":"2026-01-23 13:00:03"}
+{"role":"assistant","content":[{"type":"text","text":"README 写的是 0.3.0,与 CHANGELOG 一致。"}],"ts":"2026-01-23 13:00:09"}
+{"type":"cwd","cwd":"C:/Users/sandbox/work/.wt/demo-repo-feature","ts":"2026-01-23 13:00:30"}
+{"role":"user","content":[{"type":"text","text":"进 worktree 房了:这边的 README 版本号是多少"}],"ts":"2026-01-23 13:00:33"}
+{"role":"assistant","content":[{"type":"text","text":"worktree 这边 README 已改 0.4.0-dev。旧账里 cwd 事件决定 resume 回哪个房;迁移后同一 Git common dir 归同一 workspace,两处 checkout 分记。"}],"ts":"2026-01-23 13:00:40"}
+{"type":"cwd","cwd":"C:/Users/sandbox/work/demo-repo","ts":"2026-01-23 13:01:10"}
+{"role":"user","content":[{"type":"text","text":"回主树了,收尾"}],"ts":"2026-01-23 13:01:12"}
+{"role":"assistant","content":[{"type":"text","text":"好,主树 0.3.0、worktree 0.4.0-dev,一处会话两处现场都有账。"}],"ts":"2026-01-23 13:01:18"}

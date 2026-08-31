@@ -1,0 +1,18 @@
+{
+  "schema": 2,
+  "at": "2026-01-16T10:00:03Z",
+  "project_key": "demo-repo-1a2b3c4d5e6f7088",
+  "query_origin": "user",
+  "skipped": false,
+  "terms": [
+    {"text": "构建", "source": "query", "kind": "gram", "weight": 0.8},
+    {"text": "cmake", "source": "query", "kind": "word", "weight": 1.0}
+  ],
+  "injected_count": 1,
+  "injected_bytes": 412,
+  "entries": [
+    {"id": "fact.build-cmd-001", "layer": "project", "score": 14, "hard_hits": 2, "term_hits": 2, "injected": true, "stale_blocked": false, "below_threshold": false, "budget_dropped": false, "scope_blocked": false, "expired": false, "duplicate_dropped": false, "layer_superseded": false, "bytes": 412},
+    {"id": "preference.tooling-001", "layer": "project", "score": 3, "hard_hits": 0, "term_hits": 1, "injected": false, "stale_blocked": false, "below_threshold": true, "budget_dropped": false, "scope_blocked": false, "expired": false, "duplicate_dropped": false, "layer_superseded": false, "bytes": 188},
+    {"id": "preference.reply-style-001", "layer": "user", "score": 3, "hard_hits": 0, "term_hits": 1, "injected": false, "stale_blocked": false, "below_threshold": true, "budget_dropped": false, "scope_blocked": false, "expired": false, "duplicate_dropped": false, "layer_superseded": true, "bytes": 170}
+  ]
+}

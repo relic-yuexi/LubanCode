@@ -1,0 +1,46 @@
+{
+  "entries": [
+    {
+      "schema": 3,
+      "id": "preference.reply-style-001",
+      "name": "preference.reply-style-001",
+      "title": "回答风格",
+      "summary": "用户全局偏好:回答先给结论,再给依据",
+      "file": "preferences/preference.reply-style-001.md",
+      "kind": "preference",
+      "status": "active",
+      "updated_at": "2026-01-15T09:32:00Z",
+      "created_at": "2026-01-15T09:32:00Z",
+      "keywords": ["style", "answer"],
+      "paths": [],
+      "source_sessions": ["20260115-093005-plain-conversation"],
+      "confidence": "user-stated",
+      "scope": {"level": "user", "kind": "user", "value": ""},
+      "evidence": [],
+      "last_verified_at": "2026-01-15T09:32:00Z",
+      "expires_at": "",
+      "fingerprints": {}
+    },
+    {
+      "schema": 3,
+      "id": "feedback.report-tone-001",
+      "name": "feedback.report-tone-001",
+      "title": "报告口径",
+      "summary": "用户全局纠正:报告不写空话,数字注明口径",
+      "file": "feedback/feedback.report-tone-001.md",
+      "kind": "feedback",
+      "status": "active",
+      "updated_at": "2026-01-20T15:05:00Z",
+      "created_at": "2026-01-20T15:05:00Z",
+      "keywords": ["report", "numbers"],
+      "paths": [],
+      "source_sessions": ["20260120-150003-compact"],
+      "confidence": "user-stated",
+      "scope": {"level": "user", "kind": "user", "value": ""},
+      "evidence": [],
+      "last_verified_at": "2026-01-20T15:05:00Z",
+      "expires_at": "",
+      "fingerprints": {}
+    }
+  ]
+}
