@@ -117,6 +117,7 @@
 | Lua | 返回工具表的 `.lua` | 宿主进程内 |
 | C ABI 插件 | `luban_plugin_entry` DLL | 宿主进程内，仅 Windows |
 | hooks | session/tool 前后执行命令 | 外部子进程 |
+| 渠道插件 | `channel.yaml`（Package 第七类组件） | 常驻 sidecar 进程，Bridge v1 双向协议；阶段 2 已落管理面（状态机/journal 去重/队列背压/pairing），真平台适配器按阶段推进，见[渠道架构](../architecture/channels/README.md) |
 | Prompt 模块 | `prompts/core|features|platforms/*.md` | 构建嵌入，运行时文件可覆盖 |
 | 法与魂 | `system_prompt.md` 与 `SOUL.md` | 人格替换与风格叠加分开 |
 | 主题/i18n | 内置主题、`languages/*.json` | 本地资源 |

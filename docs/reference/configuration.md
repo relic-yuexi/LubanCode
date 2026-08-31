@@ -135,6 +135,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `mcpServers` | JSON object | 空 object | MCP stdio 服务器表,详见下节。 |
 | `search` | JSON object | 未配置 | 搜索服务;不写时 `web_search` 工具不注册。 |
 | `lsp` | JSON object | 空 object | 语言服务器表;不写时 `lsp` 工具不注册。 |
+| `channels` | JSON object | 未配置 | 聊天平台渠道账号(QQ Bot/微信等)。**只认全局配置**——项目级出现 `channels` 段整份加载明拒;没写时零行为变化,不起线程不开端口。字段与策略见[渠道配置冻结](../architecture/channels/configuration.md)。 |
 | `extra_body` | JSON object | 空 object | 顶层单 provider 写法下,每次请求浅合并进请求体顶层的额外字段,详见下节。 |
 | `extra_headers` | JSON object(字符串到字符串) | 空 | 每次请求附带的额外 HTTP 头,详见下节。 |
 | `providers` | 数组,每项见下方 provider 字段表 | 空 | 多端模型配置,详见"provider 实战"一节。 |

@@ -195,8 +195,8 @@ Agent reply -> platform：幂等尽力；平台支持 client id 时用 client id
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |
 | 0 | 冻结合同（本目录文档） | 已落地 |
-| 1 | 纯合同代码与假 sidecar：`src/channel/types.*`、channel.yaml parser、ComponentKind 追加 Channel、帧编解码、双向 router、`fake-channel-sidecar`、错误码 | 待实现 |
-| 2 | ChannelManager 与入站耐久：状态机、journal、去重、队列背压、pairing、`/channels` 命令 | 待实现 |
+| 1 | 纯合同代码与假 sidecar：`src/channel/types.*`、channel.yaml parser、ComponentKind 追加 Channel、帧编解码、双向 router、`fake-channel-sidecar`、错误码 | 已落地 |
+| 2 | ChannelManager 与入站耐久：状态机、journal、去重、队列背压、pairing、`/channels` 命令 | 已落地 |
 | 3 | Headless Session 与路由：TurnIngress、provenance、router、session host、ChannelTurn | 待实现 |
 | 4 | ReplyAssembler 与 outbox：final/block/native、分块、preview/committed 分账 | 待实现 |
 | 5 | QQ Bot 参考适配器 | 待实现 |

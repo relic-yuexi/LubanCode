@@ -208,6 +208,8 @@ AGENTS.md 指令链的逐 source 账：项目根、目标、上限、每份文�
 | `/lsp` | 列语言服务器的未启动、运行、闲置关闭状态。 |
 | `/plugins` | 列三路插件（native/Lua/process）的工具与加载警告。 |
 | `/plugin` | 管单枚插件：`inspect <id>` 看详情、`doctor <id>` 探环境（不执行工具）、`reload`/`enable`/`disable` 以重启为口径。 |
+| `/channels` | 列渠道账号：全局配置里的渠道 × 本进程运行态。渠道默认关闭，普通交互进程不启 sidecar，只显示 `gateway not running` 与引导。 |
+| `/channel` | 管单渠道账号：`show <渠道> [账号]` 看状态机/水位/迁移账，`doctor <渠道> [账号]` 体检（密钥只报来源不报值，不发平台请求），`start`/`stop`/`restart` 在普通交互进程只给 `lubancode gateway run` 引导，不改变进程形态。 |
 
 `/skill install` 可收 HTTP(S) 地址、本地目录、`SKILL.md` 或独立 Markdown。安装统一落到 `~/.lubancode/skills/<name>`，成功后本场立即刷新。
 

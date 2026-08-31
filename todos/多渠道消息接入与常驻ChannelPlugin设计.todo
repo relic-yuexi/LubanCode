@@ -1,6 +1,6 @@
 # 多渠道消息接入与常驻 ChannelPlugin 设计
 
-- 状态：阶段 0（合同冻结）已落地；阶段 1（纯合同与假 sidecar）起待实现
+- 状态：阶段 0-2 已落地（0 合同冻结；1 纯合同与假 sidecar，0887a13；2 ChannelManager 与入站耐久）；阶段 3（Headless Session 与路由）起待实现
 - 日期：2026-08-29
 - 相关：`docs/architecture/channels/`（阶段 0 冻结文档）、`todos/多前端外壳与浏览器Tab_AppServer承载设计.todo`（AppServer 承载是"外壳连内核"，与本单"消息渠道接入"分界）
 - 范围：常驻渠道插件、平台消息入站、会话路由、Agent 唤起、流式回发、可靠性、安全、Package 挂载、命令与诊断
@@ -1802,25 +1802,25 @@ channel_inbound_completed
 
 ### 阶段 1：纯合同与假 sidecar
 
-- [ ] 新建 `src/channel/types.*`。
-- [ ] 新建严格 `channel.yaml` parser。
-- [ ] 在 Package ComponentKind 追加 Channel。
-- [ ] 实现 4-byte frame decoder/encoder，覆盖拆包、粘包、超帽、坏 UTF-8。
-- [ ] 实现双向 request/response/notification router。
-- [ ] 做 `fake-channel-sidecar`：能 start、发假消息、收 send、断线、重放。
-- [ ] 立稳定错误码。
+- [x] 新建 `src/channel/types.*`。
+- [x] 新建严格 `channel.yaml` parser。
+- [x] 在 Package ComponentKind 追加 Channel。
+- [x] 实现 4-byte frame decoder/encoder，覆盖拆包、粘包、超帽、坏 UTF-8。
+- [x] 实现双向 request/response/notification router。
+- [x] 做 `fake-channel-sidecar`：能 start、发假消息、收 send、断线、重放。
+- [x] 立稳定错误码。
 
 验收：不启模型，宿主能与假 sidecar 握手、收三封来信、ack、发两块回复、优雅停进程。
 
 ### 阶段 2：ChannelManager 与入站耐久
 
-- [ ] 实现账号状态机、generation、退避与锁。
-- [ ] 实现 ChannelIngressStore append-only journal 与 replay。
-- [ ] 实现 provider event id 去重。
-- [ ] 实现每账号/每 conversation 队列与背压。
-- [ ] 实现 pairing pending/approve/reject/expiry。
-- [ ] 接 IdleWakeCoordinator。
-- [ ] 加 `/channels`、`/channel show/doctor/start/stop/restart`。
+- [x] 实现账号状态机、generation、退避与锁。
+- [x] 实现 ChannelIngressStore append-only journal 与 replay。
+- [x] 实现 provider event id 去重。
+- [x] 实现每账号/每 conversation 队列与背压。
+- [x] 实现 pairing pending/approve/reject/expiry。
+- [x] 接 IdleWakeCoordinator。
+- [x] 加 `/channels`、`/channel show/doctor/start/stop/restart`。
 
 验收：在 ack 前杀宿主，重启后假 sidecar 重送，宿主只留一枚 durable 事件；队列满不默丢。
 

@@ -1956,6 +1956,18 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.search = std::move(*search_result);
     }
+    if (parsed.contains("channels")) {
+        // 渠道段(多渠道消息接入单阶段 2):严格解析,错就明报——渠道是
+        // 全局网络能力,配置写错不静默跳过。
+        std::string channels_error;
+        auto channels_result = channel::ParseChannelsUserConfig(parsed["channels"],
+                                                                 file_path_for_error,
+                                                                 &channels_error);
+        if (!channels_result.has_value()) {
+            return std::unexpected(channels_error);
+        }
+        config.channels = std::move(*channels_result);
+    }
     if (parsed.contains("lsp")) {
         auto lsp_result = ParseLspServersConfig(parsed["lsp"], file_path_for_error);
         if (!lsp_result.has_value()) {
@@ -2927,6 +2939,20 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.config.mcp_servers = *project_file->mcp_servers;
     } else if (global_file.has_value() && global_file->mcp_servers.has_value()) {
         result.config.mcp_servers = *global_file->mcp_servers;
+    }
+
+    // 渠道段(多渠道消息接入单阶段 2):只认全局。项目级出现 channels 是
+    // 违规配置(configuration.md §2:项目 config 无权开启账号、读全局密
+    // 钥)——明拒整份加载,不悄悄忽略,也不给"项目压全局"的旧待遇。
+    if (project_file.has_value() && project_file->channels.has_value()) {
+        return std::unexpected(
+            "项目级配置 " + project_file->source_path +
+            " 里出现了 channels 段。渠道是全局网络能力:账号启用、凭据与最大"
+            "权限只写在全局 ~/.lubancode/config.json;项目配置只能绑定本项目"
+            " Agent 与收窄策略(且收窄段在阶段 3 才开)。请删掉项目级的 channels 段。");
+    }
+    if (global_file.has_value() && global_file->channels.has_value()) {
+        result.config.channels = *global_file->channels;
     }
 
     if (project_file.has_value() && project_file->search.has_value()) {
