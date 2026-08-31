@@ -8,8 +8,9 @@
 //     用户正向 glob 的 `!` 转义;
 //   - 策略构造器:硬排除、观察边界登记目录 -> root-relative 排除 glob、
 //     显式点名两路对账;
-//   - SearchTool 注入口:注入 fake 后行为与默认构造一字不差(P0-5 前
-//     execute 不消费 runner)。
+//   - SearchTool 主路(P0-5 起):注入的 runner 被 execute 真调用,后端
+//     错误投影成稳定码文本。流式执行与终态裁决的测试在
+//     test_search_ripgrep_run.cpp(假 rg 夹具 + 真 rg 分期两组)。
 
 #include <doctest/doctest.h>
 
@@ -465,10 +466,10 @@ TEST_CASE("ripgrep runner: 默认构造走生产唯一路径") {
 }
 
 // ---------------------------------------------------------------------------
-// P0-2:SearchTool 注入口——行为一字不差
+// P0-5:SearchTool 主路已切 ripgrep——注入的 runner 是唯一执行路
 // ---------------------------------------------------------------------------
 
-TEST_CASE("search 注入口: 注入 fake runner 后 execute 行为与默认构造一致,fake 不被调") {
+TEST_CASE("search 主路: 注入的 runner 被 execute 真调用,fake 的结果照单投影") {
     const TempDir dir;
     dir.WriteFile("a.txt", "needle here\nplain line\n");
 
@@ -477,23 +478,40 @@ TEST_CASE("search 注入口: 注入 fake runner 后 execute 行为与默认构�
     input["pattern"] = "needle";
     input["path"] = dir.Utf8Path();
 
-    SearchTool default_tool;
-    const Tool::Result default_result = default_tool.execute(input);
-
     auto runner = std::make_shared<RecordingRunner>();
     SearchTool injected_tool(runner);
     const Tool::Result injected_result = injected_tool.execute(input);
 
-    CHECK_FALSE(default_result.is_error);
+    CHECK(runner->calls == 1);  // P0-5 起主路消费 runner(旧批钉的是 calls==0)
     CHECK_FALSE(injected_result.is_error);
-    CHECK(injected_result.content.find("a.txt:1:needle here") != std::string::npos);
-    CHECK(injected_result.content == default_result.content);  // 一字不差
-    CHECK(runner->calls == 0);  // P0-5 切主路之前 execute 不消费 runner
+    CHECK(injected_result.content.find("没搜到匹配的内容") != std::string::npos);  // fake 回空结果
 
     // 工具身份合同不动:名字、schema、effect class 照旧。
     CHECK(injected_tool.name() == "search");
     CHECK(injected_tool.effect_class() == lubancode::tools::EffectClass::ReadOnlyLocal);
     CHECK(injected_tool.idempotency() == lubancode::tools::Idempotency::Idempotent);
+
+    // schema 新增两枚批准字段(P0-5):fixed_strings 与 max_results。
+    const nlohmann::json schema = injected_tool.input_schema();
+    CHECK(schema["properties"].contains("fixed_strings"));
+    CHECK(schema["properties"].contains("max_results"));
+    CHECK(schema["required"] == nlohmann::json::array({"mode", "pattern"}));
+}
+
+TEST_CASE("search 主路: 后端错误投影成稳定码文本,不带堆栈/argv") {
+    const TempDir dir;
+    struct FailingRunner : IRipgrepRunner {
+        std::expected<RipgrepRunResult, SearchBackendErrorInfo>
+        Run(const SearchRequest&, const SearchPolicy&, const ToolExecutionContext&) override {
+            return std::unexpected(
+                SearchBackendErrorInfo{SearchBackendError::BackendMissing, "随包 ripgrep 缺件"});
+        }
+    };
+    SearchTool tool(std::make_shared<FailingRunner>());
+    const Tool::Result result = tool.execute(nlohmann::json{
+        {"mode", "grep"}, {"pattern", "x"}, {"path", dir.Utf8Path()}});
+    CHECK(result.is_error);
+    CHECK(result.content.find("search_backend_missing") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------

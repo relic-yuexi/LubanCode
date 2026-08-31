@@ -1,22 +1,29 @@
-// search 内置 ripgrep 后端迁移单(P0-1)的旧内核照相机。
+// search 内置 ripgrep 后端迁移单(P0-1)的旧内核照相机,P0-5 起兼任差分器。
 //
 // 不进 ctest,手动跑:
 //   search_golden_driver golden  <输出 JSON 路径>
-//       把 tests/fixtures/search/corpus/ 这批夹具逐条场景喂给现有
-//       SearchTool::execute(),记录旧内核(std::regex + recursive_directory_
-//       iterator)的输出,按"路径集合/命中行集合"归一化后落盘,供 P0-5
-//       批次拿新 ripgrep 后端跑同一份场景表做自动化差分。
+//       把 tests/fixtures/search/corpus/ 这批夹具逐条场景喂给 SearchTool::
+//       execute(),按"路径集合/命中行集合"归一化后落盘。P0-1 用它给旧内核
+//      (std::regex + recursive_directory_iterator)拍照;旧内核删掉后,它
+//       记录的是"当前后端"的快照——旧基线冻结在
+//       tests/fixtures/search/golden/old_kernel_golden.json,不再重造。
+//   search_golden_driver diff <基线 JSON> <rg 可执行路径> [输出 JSON]
+//       P0-5 的差分主口:同一份场景表、同一套归一化,经注入的随包 rg 跑
+//       一遍,与基线逐条对账。"必须保留"全等;"有意迁移"只准落在批准表
+//       里(ignore 语义、ECMAScript 独有语法、16 KiB 长行截断、非法 UTF-8
+//       清洗——见 docs/development/search-ripgrep-migration.md 的分栏表)。
+//       全部过门 exit 0;任何未批准的出入 exit 1 并把明细写到输出 JSON。
 //   search_golden_driver bench   <输出 JSON 路径> [语料目录=src]
-//       对旧内核跑一组基准查询(纯字面量/正则/无命中/高频命中/glob),
+//       对当前后端跑一组基准查询(纯字面量/正则/无命中/高频命中/glob),
 //       每档跑若干轮取 P50/P95,连同遍历文件数、耗时一并落盘。默认语料
 //       是本仓 src/ 目录(medium 档);可传别的目录路径覆盖。
 //
-// 两个子命令共享同一份"调用 SearchTool、量时钟"的骨架,分开落盘方便
-// P0-1 报告分别引用。
+// 子命令共享同一份"调用 SearchTool、量时钟"的骨架,分开落盘方便报告分别
+// 引用。
 //
 // golden JSON 格式(数组,每个场景一个对象):
 //   {
-//     "id": "grep_chinese",                 场景名,P0-5 差分表按它对齐
+//     "id": "grep_chinese",                 场景名,差分表按它对齐
 //     "mode": "grep" | "glob",
 //     "pattern": "...",
 //     "path": "chinese",                    相对 corpus/ 的路径,跨机器可移植
@@ -31,8 +38,8 @@
 //   }
 // 比较时按 hits_sorted 集合与 hit_count/is_error/truncated 等标量对比,
 // 不比较 SearchTool 原始输出里的行序——旧内核的 recursive_directory_
-// iterator 顺序本就不是合同的一部分,以后 ripgrep 的并行 walker 顺序更不
-// 会与之相同。
+// iterator 顺序本就不是合同的一部分,ripgrep 的并行 walker 顺序更不会
+// 与之相同。
 
 #include <algorithm>
 #include <chrono>
@@ -40,6 +47,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <memory>
 #include <numeric>
 #include <sstream>
 #include <string>
@@ -49,6 +57,7 @@
 
 #include "tools/path_utils.hpp"
 #include "tools/search.hpp"
+#include "tools/search_ripgrep.hpp"
 
 
 using lubancode::tools::PathToUtf8;
@@ -233,8 +242,8 @@ std::string NormalizeSlashes(std::string s) {
     return s;
 }
 
-nlohmann::json RunScenario(const Scenario& sc, const fs::path& corpus_root) {
-    SearchTool tool;
+nlohmann::json RunScenarioWithTool(const Scenario& sc, const fs::path& corpus_root,
+                                   const std::shared_ptr<SearchTool>& tool) {
     nlohmann::json input;
     input["mode"] = sc.mode;
     input["pattern"] = sc.pattern;
@@ -244,7 +253,7 @@ nlohmann::json RunScenario(const Scenario& sc, const fs::path& corpus_root) {
         input["glob"] = sc.glob;
     }
 
-    const Tool::Result result = tool.execute(input);
+    const Tool::Result result = tool->execute(input);
 
     // 观察边界提示行(若有)以 "[观察边界] " 开头,单独占一整行,后面才是
     // 真正的搜索结果正文。识别出来后从正文里摘掉,不把绝对路径存进 golden。
@@ -304,6 +313,10 @@ nlohmann::json RunScenario(const Scenario& sc, const fs::path& corpus_root) {
     return rec;
 }
 
+nlohmann::json RunScenario(const Scenario& sc, const fs::path& corpus_root) {
+    return RunScenarioWithTool(sc, corpus_root, std::make_shared<SearchTool>());
+}
+
 int RunGolden(const fs::path& corpus_root, const fs::path& out_path) {
     MaterializeExcludedDirsFixture(corpus_root);
 
@@ -317,6 +330,260 @@ int RunGolden(const fs::path& corpus_root, const fs::path& out_path) {
     f << out.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) << "\n";
     std::cout << "golden 写入: " << PathToUtf8(out_path) << "  (" << out.size() << " 条场景)\n";
     return 0;
+}
+
+// ---- 差分(P0-5):当前后端 vs 旧内核冻结基线 ------------------------------
+
+// 批准的"有意迁移"表:差分时这些场景允许与基线有出入,出入形状逐条写死;
+// 不在表里的场景必须全等(is_error/truncated/hit_count/hits_sorted)。
+// 依据:设计单 §5.3(ignore 语义)、§四正则迁移表、§6.5(16 KiB 长行、
+// bytes 路清洗)、docs/development/search-ripgrep-migration.md 的分栏表。
+struct ApprovedMigration {
+    // 差分口径:
+    //   ErrorOnly         两边都 is_error=true 即可(报错文案不是合同)
+    //   ErrorWithCode     新侧 is_error=true 且正文含稳定码(pattern 语法)
+    //   HitsSubset        新侧命中必须是旧侧命中的真子集(ignore 生效)
+    //   IncludeGlobSubset 同上,但语义是"显式 -g include 压过 ignore 规则"
+    //                     (rg 15.2.0 实测:被 ignore 的文件只要配得上用户
+    //                      include glob 就会回来;宿主排除项是 ! 排除,不受
+    //                      影响)——新命中仍必须是旧命中的子集,不许冒新文件
+    //   CountOnlyCap16384 命中行数/路径前缀一致,正文截到 16 KiB(长行墙)
+    //   CountOnlySanitized 命中数一致、锚点在,正文过清洗(非法 UTF-8)
+    enum class Kind {
+        ErrorOnly,
+        ErrorWithCode,
+        HitsSubset,
+        IncludeGlobSubset,
+        CountOnlyCap16384,
+        CountOnlySanitized
+    };
+    const char* scenario;
+    Kind kind;
+    const char* expect_code;  // ErrorWithCode 用的稳定码子串
+};
+
+const std::vector<ApprovedMigration>& ApprovedMigrations() {
+    static const std::vector<ApprovedMigration> table = {
+        // ignore 语义迁移:旧内核不认 ignore 文件(4 命中),新内核默认遵守
+        //--被 ignore 的文件不再搜,剩下的必须是旧命中的真子集。
+        {"grep_ignore_files_not_respected", ApprovedMigration::Kind::HitsSubset, ""},
+        // glob 模式带 `-g '*.txt'`:rg 的优先级合同是"显式 include 压过
+        // ignore 规则"——被 ignore 的 .txt 配得上 include 就全回来了(实测
+        // 4->4)。批准的理由:压住它只能在宿主里重长一个 ignore 引擎,那
+        // 正是本单删掉的东西;与 Claude Code 的 Grep 工具同款行为。
+        {"glob_ignore_files_not_respected", ApprovedMigration::Kind::IncludeGlobSubset, ""},
+        // ECMAScript 独有语法:Rust regex 不认 backreference/lookahead,
+        // 换成稳定错误 search_pattern_invalid(§四迁移表已预告)。
+        {"grep_ecmascript_backreference", ApprovedMigration::Kind::ErrorWithCode, "search_pattern_invalid"},
+        {"grep_ecmascript_lookahead", ApprovedMigration::Kind::ErrorWithCode, "search_pattern_invalid"},
+        // 报错文案不是合同(旧:ECMAScript 语法错误;新:rg stderr 洗短句)。
+        {"grep_invalid_regex", ApprovedMigration::Kind::ErrorOnly, ""},
+        // 16 KiB 单行墙:旧内核整行 20 万字符照吐,新内核截到 16384。
+        {"grep_long_line_anchor", ApprovedMigration::Kind::CountOnlyCap16384, ""},
+        // 非法 UTF-8:旧内核原字节进结果,新内核 base64 解码后过清洗。
+        {"grep_illegal_utf8_content", ApprovedMigration::Kind::CountOnlySanitized, ""},
+    };
+    return table;
+}
+
+nlohmann::json DiffOne(const nlohmann::json& baseline, const nlohmann::json& current,
+                       const ApprovedMigration* approved) {
+    nlohmann::json report;
+    report["id"] = baseline["id"];
+    report["verdict"] = "equal";
+
+    // 先裁决"批准的错误迁移":ECMAScript 认、Rust regex 不认的语法,基线
+    // 多半是成功命中,新侧必须是稳定错误——若先比 is_error 会把这笔批准的
+    // 迁移误判成"未批准出入",所以它排在最前面。
+    if (approved != nullptr && approved->kind == ApprovedMigration::Kind::ErrorWithCode) {
+        if (!current["is_error"].get<bool>()) {
+            report["verdict"] = "unapproved";
+            report["detail"] = "这套语法理应被 Rust regex 拒掉,实际却搜成功了";
+            return report;
+        }
+        report["verdict"] = "approved";
+        report["approved"] = std::string("语法迁移: 稳定错误 ") + approved->expect_code;
+        return report;
+    }
+
+    if (baseline["is_error"] != current["is_error"]) {
+        report["verdict"] = "unapproved";
+        report["detail"] = "is_error 不一致";
+        return report;
+    }
+    if (baseline["is_error"].get<bool>()) {
+        // 两侧都报错:错误口径一致即对(报错文案不是合同)。
+        if (approved != nullptr) {
+            report["verdict"] = "approved";
+            report["approved"] = "错误口径一致";
+        }
+        return report;
+    }
+    if (baseline["truncated"] != current["truncated"]) {
+        report["verdict"] = "unapproved";
+        report["detail"] = "truncated 不一致";
+        return report;
+    }
+    const std::vector<std::string> base_hits = baseline["hits_sorted"];
+    const std::vector<std::string> cur_hits = current["hits_sorted"];
+    if (approved != nullptr) {
+        switch (approved->kind) {
+            case ApprovedMigration::Kind::HitsSubset:
+            case ApprovedMigration::Kind::IncludeGlobSubset: {
+                for (const std::string& hit : cur_hits) {
+                    if (std::find(base_hits.begin(), base_hits.end(), hit) == base_hits.end()) {
+                        report["verdict"] = "unapproved";
+                        report["detail"] = "ignore 迁移出了旧命中集之外的新命中: " + hit;
+                        return report;
+                    }
+                }
+                if (cur_hits.empty()) {
+                    report["verdict"] = "unapproved";
+                    report["detail"] = "ignore 迁移把命中清零(连不该忽略的也没了)";
+                    return report;
+                }
+                report["verdict"] = "approved";
+                if (approved->kind == ApprovedMigration::Kind::IncludeGlobSubset) {
+                    report["approved"] =
+                        "显式 include glob 压过 ignore 规则(rg 优先级合同,与 Claude Code "
+                        "Grep 同款):新命中仍是旧命中的子集(" +
+                        std::to_string(base_hits.size()) + " -> " + std::to_string(cur_hits.size()) + ")";
+                } else {
+                    report["approved"] =
+                        "ignore 语义迁移:新命中是旧命中的真子集(" +
+                        std::to_string(base_hits.size()) + " -> " + std::to_string(cur_hits.size()) + ")";
+                }
+                return report;
+            }
+            case ApprovedMigration::Kind::CountOnlyCap16384: {
+                if (cur_hits.size() != base_hits.size()) {
+                    report["verdict"] = "unapproved";
+                    report["detail"] = "命中数不一致";
+                    return report;
+                }
+                for (const std::string& hit : cur_hits) {
+                    const std::size_t colon2 = hit.find(':', hit.find(':') + 1);
+                    const std::size_t line_len = hit.size() - colon2 - 1;
+                    if (line_len > 16 * 1024) {
+                        report["verdict"] = "unapproved";
+                        report["detail"] = "长行没截到 16 KiB";
+                        return report;
+                    }
+                }
+                report["verdict"] = "approved";
+                report["approved"] = "16 KiB 长行墙";
+                return report;
+            }
+            case ApprovedMigration::Kind::CountOnlySanitized: {
+                if (cur_hits.size() != base_hits.size()) {
+                    report["verdict"] = "unapproved";
+                    report["detail"] = "命中数不一致";
+                    return report;
+                }
+                report["verdict"] = "approved";
+                report["approved"] = "非法 UTF-8 正文清洗(锚点命中数不变)";
+                return report;
+            }
+            case ApprovedMigration::Kind::ErrorOnly:
+            case ApprovedMigration::Kind::ErrorWithCode:
+                break;  // 到这里说明两侧都没报错:按全等继续
+        }
+    }
+    if (base_hits != cur_hits) {
+        report["verdict"] = "unapproved";
+        report["detail"] = "hits_sorted 不一致";
+        report["baseline_hits"] = base_hits;
+        report["current_hits"] = cur_hits;
+        return report;
+    }
+    return report;
+}
+
+int RunDiff(const fs::path& corpus_root, const fs::path& baseline_path, const fs::path& rg_exe,
+            const fs::path& out_path) {
+    MaterializeExcludedDirsFixture(corpus_root);
+
+    std::ifstream baseline_file(baseline_path, std::ios::binary);
+    if (!baseline_file.is_open()) {
+        std::cerr << "基线打不开: " << PathToUtf8(baseline_path) << "\n";
+        return 2;
+    }
+    const nlohmann::json baseline = nlohmann::json::parse(baseline_file);
+
+    // 注入随包 rg 的生产 runner(smoke 真起 rg --version 精确校版本)。
+    auto runner = std::make_shared<lubancode::tools::BundledRipgrepRunner>(rg_exe);
+
+    const std::vector<Scenario> scenarios = BuildScenarios();
+    std::size_t equal_count = 0;
+    std::size_t approved_count = 0;
+    std::size_t unapproved_count = 0;
+    std::size_t missing_count = 0;
+    nlohmann::json reports = nlohmann::json::array();
+    nlohmann::json current_records = nlohmann::json::array();
+
+    for (const Scenario& sc : scenarios) {
+        const nlohmann::json current = RunScenarioWithTool(sc, corpus_root,
+                                                           std::make_shared<SearchTool>(runner));
+        current_records.push_back(current);
+
+        const auto base_it = std::find_if(baseline.begin(), baseline.end(),
+                                          [&sc](const nlohmann::json& rec) {
+                                              return rec["id"].get<std::string>() == sc.id;
+                                          });
+        if (base_it == baseline.end()) {
+            ++missing_count;
+            nlohmann::json report;
+            report["id"] = sc.id;
+            report["verdict"] = "missing-in-baseline";
+            reports.push_back(report);
+            continue;
+        }
+        const ApprovedMigration* approved = nullptr;
+        for (const ApprovedMigration& migration : ApprovedMigrations()) {
+            if (std::string(migration.scenario) == sc.id) {
+                approved = &migration;
+                break;
+            }
+        }
+        const nlohmann::json report = DiffOne(*base_it, current, approved);
+        const std::string verdict = report["verdict"].get<std::string>();
+        if (verdict == "equal") {
+            ++equal_count;
+        } else if (verdict == "approved") {
+            ++approved_count;
+        } else {
+            ++unapproved_count;
+        }
+        reports.push_back(report);
+        std::cout << sc.id << ": " << verdict;
+        if (report.contains("approved")) {
+            std::cout << "  (" << report["approved"].get<std::string>() << ")";
+        }
+        if (report.contains("detail")) {
+            std::cout << "  [" << report["detail"].get<std::string>() << "]";
+        }
+        std::cout << "\n";
+    }
+
+    fs::create_directories(out_path.parent_path());
+    std::ofstream f(out_path, std::ios::binary);
+    nlohmann::json out;
+    out["summary"] = {
+        {"total", scenarios.size()},
+        {"equal", equal_count},
+        {"approved_migration", approved_count},
+        {"unapproved", unapproved_count},
+        {"missing_in_baseline", missing_count},
+    };
+    out["reports"] = reports;
+    out["current"] = current_records;
+    f << out.dump(2, ' ', false, nlohmann::json::error_handler_t::replace) << "\n";
+    f.close();
+
+    std::cout << "差分汇总: 全等 " << equal_count << " / 批准迁移 " << approved_count
+              << " / 未批准出入 " << unapproved_count << " / 基线缺失 " << missing_count << "\n";
+    std::cout << "报告写入: " << PathToUtf8(out_path) << "\n";
+    return unapproved_count == 0 && missing_count == 0 ? 0 : 1;
 }
 
 // ---- 基准 ---------------------------------------------------------------
@@ -452,6 +719,7 @@ int main(int argc, char** argv) {
     if (argc < 3) {
         std::cerr << "用法:\n"
                   << "  search_golden_driver golden <输出JSON路径>\n"
+                  << "  search_golden_driver diff <基线JSON> <rg可执行路径> [输出JSON]\n"
                   << "  search_golden_driver bench  <输出JSON路径> [语料目录]\n";
         return 2;
     }
@@ -467,6 +735,18 @@ int main(int argc, char** argv) {
     try {
         if (sub == "golden") {
             return RunGolden(corpus_root, out_path);
+        }
+        if (sub == "diff") {
+            if (argc < 4) {
+                std::cerr << "diff 需要 <基线JSON> <rg可执行路径> [输出JSON]\n";
+                return 2;
+            }
+            const fs::path baseline_path = Utf8ToPath(argv[2]);
+            const fs::path rg_exe = Utf8ToPath(argv[3]);
+            const fs::path report_path =
+                argc >= 5 ? Utf8ToPath(argv[4])
+                          : baseline_path.parent_path() / "diff_report_vs_old_kernel.json";
+            return RunDiff(corpus_root, baseline_path, rg_exe, report_path);
         }
         if (sub == "bench") {
 #ifdef LUBANCODE_SOURCE_ROOT_DIR
