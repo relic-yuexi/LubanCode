@@ -42,6 +42,12 @@ public:
     // 只清登记账(测试隔离用);.evidence 名字口径不随账清。
     void Reset();
 
+    // 登记账快照(ripgrep 迁移单 P0-3):规范化过的绝对目录,拷贝一份走。
+    // search 的新后端拿它生成 walker 排除 glob,让子代理日志目录真被剪枝
+    // 而不是解析后丢命中。只含运行时登记的目录;.evidence 名字口径不走账
+    // (那是硬排除表的事,与 Contains 的名字口径分工一致)。线程安全。
+    std::vector<std::filesystem::path> ExcludedDirsSnapshot() const;
+
     // abs_path(绝对路径)是否落在观察边界内:任一路径段叫 .evidence,
     // 或落在某枚已登记目录之下(含目录本身)。
     bool Contains(const std::filesystem::path& abs_path) const;

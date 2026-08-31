@@ -9,6 +9,12 @@
 `std::filesystem::recursive_directory_iterator`)的行为拍照存证,列清楚
 换后端时哪些是绝不能变的产品合同、哪些是允许变但要走批准流程的实现细节。
 
+> **P0-2/P0-3 交接注(后续批次落,本节先立账)**:P0-2(manifest/定位器/
+> runner 合同/装配注入口)与 P0-3(argv 纯函数/边界策略)落地时,本文档
+> 追加对应小节,保持"每批一账"。P0-1 的 golden 与 bench 是活参照物——
+> 后续批次改了 `search.cpp` 任何行为,先跑 `search_golden_driver golden`
+> 比对 24 条场景。
+
 ## 一、`tests/unit/tools/test_search.cpp` 用例分栏表
 
 现有 17 条 `TEST_CASE` 按"换后端后必须逐字节/逐集合保持一致"(A 类,
@@ -317,3 +323,86 @@ iterator` 立刻停止遍历,不再碰后面的文件;但只要命中数没到 1
    润色,不应该改字段名或语义。
 6. **内存基准这块欠账,P0-7 接手时排查 `psapi.h` 编译问题**(或换路子),
    不要假设这是"已经测过、只是数字不好看"——是压根没采集到。
+
+## 九、P0-2/P0-3 交接账(manifest、定位器、runner 合同、argv 与边界策略)
+
+P0-2/P0-3 落地(同一批),生产行为仍一字不动:旧内核照跑,落的清单如下。
+
+### 落了什么
+
+| 件 | 位置 | 说明 |
+|---|---|---|
+| manifest(三平台真哈希) | `third_party/ripgrep/manifest.json` | Windows/macOS 与上游 `.sha256` 双对;Linux deb 原占位格已按上游 `.sha256` + 本机下载重算填入 |
+| MIT license 原文 | `third_party/ripgrep/LICENSE-MIT` | 上游 15.2.0 tag 逐字节(1081 字节) |
+| 第三方声明 | `THIRD_PARTY_NOTICES.md`(仓根) | 组件/版本/上游/许可/打包位置五项 + Linux 取 .deb 的取舍 + 构建期依赖不随包的分界 |
+| 打包脚本 | `scripts/fetch_ripgrep.py` | 只读 manifest、固定 URL、重算哈希、只解指定 member(ar/tar/zip/deb 四路,deb 的 `./` 前缀剥掉对账)、staging 过门原子换入、跑 `--version` 精确校版本;Windows 资产真机全链路实测过,deb/tar.gz 解成员逻辑本地实测(ELF/Mach-O 魔数对上) |
+| 合同头/源 | `src/tools/search_ripgrep.hpp/.cpp` | typed request/policy/result、十枚稳定错误码(`search_*`)、`BundledRipgrepLocator`(只认 `ExecutableDir()/libexec`)、`IRipgrepRunner`/`BundledRipgrepRunner`、`BuildGrepArgv`/`BuildGlobArgv` 纯函数、`BuildSearchPolicy`/`BuildObservationExcludes` |
+| 观察边界快照 | `src/tools/observation_filter.hpp/.cpp` | `ExcludedDirsSnapshot()`:线程安全拷贝,只含运行时登记账(`.evidence` 名字口径仍走硬排除表) |
+| 注入口 | `src/tools/search.hpp/.cpp` + `src/app/tool_runtime.cpp` | `SearchTool(shared_ptr<IRipgrepRunner>)`;基础表/Explore 表两处装配注默认 runner。**execute 不消费**——P0-5 切主路才接线,故意不写"看后端在不在再选路"的分支(那会开出 rg 缺件静默退回慢内核的禁路) |
+| doctor | `src/app/commands/doctor_commands.cpp` | `/doctor search`:真起 `rg --version` 精确校版本(版本记号精确相等;首行实测 `ripgrep 15.2.0 (rev …)`,rev 不钉),不列 PATH 候选 |
+| 单测 | `tests/unit/tools/test_search_ripgrep.cpp` | 24 条 TEST_CASE,全注入式(假路径+假探针),不起真进程 |
+
+### 版本精确校验的实测形状
+
+上游 15.2.0 的 `rg --version` 首行是 `ripgrep 15.2.0 (rev e89fff89ac)`——
+**不是**裸 `ripgrep 15.2.0`(设计单 §8.2 的措辞按"版本记号精确"执行:
+首行程序名记号 == `ripgrep` 且版本记号 == `15.2.0`,rev 段随构建变,不钉)。
+`ParseRipgrepVersion` 按此解析,单测含 rev/CRLF/垃圾输出/认不出各路。
+
+### PATH 防劫持的三面证据
+
+1. **定位面**:`BundledRipgrepPath()` 只由 `platform::ExecutablePath()` 拼
+   `libexec/rg(.exe)`,源码没有读 PATH/环境变量的分支;PATH 前置假 rg 目录
+   后,定位结果不含该目录(单测)。
+2. **执行面**:smoke/将来 P0-4 的执行都拿绝对路径给 `RunProcess` 的
+   argv[0]——Windows `CreateProcessW`(应用名空,但命令行首 token 含目录
+   路径)不搜 PATH,POSIX `execvp` 对含 `/` 的名字不搜 PATH。POSIX 单测造
+   一枚会写 marker 的假 rg 脚本放 PATH 最前,smoke 后 marker 不存在。
+3. **环境面**:`LUBANCODE_RG_PATH` 之类的口子设计单明令禁止,定位器不读;
+   单测设了该变量,定位结果与不设一字不差。
+
+另有**真机四幕**(WSL 下临时驱动链 `search_ripgrep.cpp + process_posix.cpp`
+直跑 `RunRipgrepSmoke`,非单测假件):deb 内真 GNU rg → `ready`/版本 15.2.0
+精确对上;假版本脚本 → `version_mismatch` + 稳定码;缺件 → `missing` +
+稳定码;PATH 前放会写 marker 的假 rg、smoke 真 rg → 照常 `ready` 且
+marker 不存在。真探针(`DefaultRipgrepVersionProbe` → `RunProcess` →
+`ParseRipgrepVersion` → 精确比对)全链路真机验过。
+
+### 排除账与旧内核的对账表(P0-3)
+
+| 旧内核(search.cpp) | 新策略(P0-3) | 对齐点 |
+|---|---|---|
+| `SkipDirNames` 无条件跳 `.git/build/node_modules/.evidence`(任意深度) | 硬排除 `**/<名>/**` 四条,无条件 | 同一张表、同语义(ripgrep walker 对整棵被排除目录剪枝) |
+| `root_in_boundary=true` 不做边界过滤 | root 在观察边界内不生观察排除(登记账与 `.evidence` 名字口径都算) | 同一分支 |
+| 点名 `build/` 等目录照常搜 | 排除 glob 按 root-relative 语义天然不咬根下文件 | 同一行为(测试注释钉死推理) |
+| 默认递归时边界内文件/目录不进结果 | `BuildObservationExcludes` 只收落在 root 下的登记目录,逐条 `!<rel>/**` 让 walker 真剪枝 | 从"解析后丢命中"升级成"walker 剪枝"(设计单 §5.4 的要求) |
+
+### argv 基线(逐元素,单测钉死)
+
+```text
+grep: --no-config --json --line-buffered --color=never --hidden
+      --engine=default --no-multiline [--fixed-strings]
+      [-g <用户 glob,首 ! 转义 [!]>] [-g !<排除>]...
+      -- <pattern> <scope>
+glob: --no-config --files --null --hidden
+      [-g <用户正向 glob,首 ! 转义 [!]>] [-g !<排除>]...
+      -- <scope>
+```
+
+scope:目录 root 恒 `.`;单文件 root 用文件名,cwd=父目录。flag 墙:
+`--pre/--pre-glob/--search-zip/--pcre2/--auto-hybrid-regex/--type-add/
+-u/--unrestricted/--engine(裸)` 无任何输入面(源码无生成分支,测试扫
+argv);`--follow/--text/--no-ignore` 有 policy 开关、生产 policy 恒默认。
+
+### 本批没做的(归后续批次)
+
+- **rg 二进制未随包**:`libexec/` 里没有真 rg,doctor 如实报 missing。脚本
+  与哈希已备(真机 fetch Windows 资产全链路通过),入包、安装、Release 门
+  是 P0-6。
+- **启动 smoke 不做**:P0-4 前不动启动行为,smoke 由 `/doctor search` 明
+  触发。
+- **`BundledRipgrepRunner` 的流式执行**:前置校验(缺件/不可执行/版本/
+  spawn)真做,之后如实回 `search_backend_not_wired`——P0-4 接 ChildProcess
+  流式分帧时换掉这个尾巴,P0-5 切主路。
+- **README"一份原生二进制"口径不改**:rg 未真入包前改口径反而失实,归
+  P0-6(rg 真随包时一并改)。

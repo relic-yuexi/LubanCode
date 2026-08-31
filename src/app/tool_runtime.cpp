@@ -29,6 +29,7 @@
 #include "tools/read_file.hpp"
 #include "tools/run_command.hpp"
 #include "tools/search.hpp"
+#include "tools/search_ripgrep.hpp"  // BundledRipgrepRunner:SearchTool 的 P0-2 装配注入口
 #include "tools/skill_tool.hpp"
 #include "tools/tool_search.hpp"
 #include "tools/web_fetch.hpp"
@@ -86,7 +87,11 @@ lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode
     registry.Register(std::make_unique<lubancode::tools::StopBackgroundTool>());
     registry.Register(std::make_unique<lubancode::tools::WriteFileTool>());
     registry.Register(std::make_unique<lubancode::tools::EditFileTool>());
-    registry.Register(std::make_unique<lubancode::tools::SearchTool>());
+    // ripgrep 迁移单 P0-2:装配层注入默认 runner(定位只认 exe-dir/libexec;
+    // 构造零动作,smoke 懒做)。P0-5 切主路之前 SearchTool::execute 仍走
+    // 内置 std::regex 内核——这里只是把注入口接到生产装配上。
+    registry.Register(std::make_unique<lubancode::tools::SearchTool>(
+        std::make_shared<lubancode::tools::BundledRipgrepRunner>()));
     registry.Register(std::make_unique<lubancode::tools::SkillTool>(skills));
     registry.Register(std::make_unique<lubancode::tools::WebFetchTool>("lubancode/" + std::string(kVersion)));
     if (search_config.Configured()) {
@@ -98,7 +103,9 @@ lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode
 lubancode::tools::ToolRegistry BuildExploreToolRegistry(const lubancode::config::SearchConfig& search_config) {
     lubancode::tools::ToolRegistry registry;
     registry.Register(std::make_unique<lubancode::tools::ReadFileTool>());
-    registry.Register(std::make_unique<lubancode::tools::SearchTool>());
+    // 同基础表:Explore 表的 search 也注入同一款默认 runner。
+    registry.Register(std::make_unique<lubancode::tools::SearchTool>(
+        std::make_shared<lubancode::tools::BundledRipgrepRunner>()));
     registry.Register(std::make_unique<lubancode::tools::WebFetchTool>("lubancode/" + std::string(kVersion)));
     if (search_config.Configured()) {
         registry.Register(std::make_unique<lubancode::tools::WebSearchTool>(search_config));
