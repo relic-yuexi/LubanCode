@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- 零依赖壳:不引 appcompat,直接用系统 Material 主题去掉标题栏。 -->
+    <style name="Theme.LubanConsole" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#10141C</item>
+    </style>
+</resources>

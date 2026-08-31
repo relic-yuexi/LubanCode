@@ -1,5 +1,5 @@
 # 多前端外壳与浏览器 Tab：AppServer 承载设计
-- 状态：阶段 A 已落地（0.26.109 WS 承载，勾账 2026-09-01 补——commit 9648cb8 实物在，ws_* 六文件）；阶段 B（输入路由与暂停）已落地（owner 内核裁定、用户优先路、browser/pause|resume，仲裁三案+伪造案进册）；阶段 C（镜像流）已落地（browser/screencast/start|stop + browser/screencast/frame，sidecar 侧 CDP 帧率帽、内核侧有界队列丢帧记账、同截图链 artifact 落盘）；阶段 D（参考前端）已落地（examples/web-console 四件套，全程只走协议；写它暴露的缝——artifact 只有引用没有字节口子——以承载面 GET /artifact/<名> 补上：与 WS 同端口同 token 门，单测+参考前端冒烟进册）；阶段 E（外壳孵化）起待实现
+- 状态：阶段 A 已落地（0.26.109 WS 承载，勾账 2026-09-01 补——commit 9648cb8 实物在，ws_* 六文件）；阶段 B（输入路由与暂停）已落地（owner 内核裁定、用户优先路、browser/pause|resume，仲裁三案+伪造案进册）；阶段 C（镜像流）已落地（browser/screencast/start|stop + browser/screencast/frame，sidecar 侧 CDP 帧率帽、内核侧有界队列丢帧记账、同截图链 artifact 落盘）；阶段 D（参考前端）已落地（examples/web-console 四件套，全程只走协议；写它暴露的缝——artifact 只有引用没有字节口子——以承载面 GET /artifact/<名> 补上：与 WS 同端口同 token 门，单测+参考前端冒烟进册）；阶段 E（外壳孵化）已落地（examples/shells/ 两家壳 + web-console 触屏外套，cargo check/build 双绿出真二进制，Android 侧 JDK/SDK 未装只验到脚手架+静态账；冒烟 app_shell_smoke.js 41 案进册；打包发布账另立单）。全单阶段齐——完成线四条里多客户端（§4.4）原单就没排阶段（阶段 A 注明"不在本单阶段"），如实留白，见 §九。
 - 日期：2026-08-29
 - 前置：`todos/内嵌浏览器调试工作台_BrowserRuntime与Package边界.todo`（阶段 0-3、5 已落）
 - 相关：`src/app_server/`（协议 1.1）、`docs/features/app-server/README.md`、`browser/`（Runtime 与 sidecar）
@@ -186,11 +186,32 @@ WebView，内核谁的都不欠。
 
 ### 阶段 E：外壳孵化（按需）
 
-- [ ] Tauri 包装参考前端（镜像路）。
-- [ ] Android WebView 壳（触屏手势折输入）。
-- [ ] 各自的打包与发布账另立单。
+- [x] Tauri 包装参考前端（镜像路）。落 `examples/shells/tauri/`：
+  `tauri.conf.json` 的 `frontendDist` 直指 `../../web-console`（编译期
+  嵌入，零复制单一事实源）；CSP 只给回环开口（`ws://127.0.0.1:*`、
+  `http://127.0.0.1:*`——WS 无 CORS、artifact 字节走 `<img src>`，照
+  阶段 D 留的口，壳不另做协议适配）；图标由 `icons/make_icons.js` 零
+  依赖手搓 PNG/BMP-ICO。工具链齐（rustc 1.89），`cargo check` +
+  `cargo build` 双绿，debug 二进制真出炉（`lubancode-console-shell.exe`）；
+  开窗一幕归打包发布账单。Rust 侧仅标准 Tauri 引导，零内核引用。
+- [x] Android WebView 壳（触屏手势折输入）。落 `examples/shells/android/`：
+  零依赖壳（纯 Java Activity + 全屏 WebView + NSC 回环明文放行——NSC
+  的 `<domain>` 不认 IP 字面量，放不了小灶，账记 README）；Gradle
+  `assets.srcDir` 直指 `examples/web-console`（打包期打进 APK，零复制）。
+  触屏折算层落参考前端 `web_console_touch.js`（纯逻辑
+  classifyTouch/mapGesture 零 DOM，Node 冒烟与页上同一份）：tap→原生
+  click、double-tap→合成 dblclick→`browser/action click`（owner=user）、
+  long-press→选中+聚焦 type 注入、swipe **不折协议**（协议 1.1 动作面
+  无 scroll，壳不冒充，滚动归原生）。本机 JDK/Android SDK 未装：
+  Gradle 构建与真机一幕**未验**（脚手架与静态账由冒烟册验，如实记账
+  不伪造）。
+- [x] 各自的打包与发布账另立单。`todos/Tauri与Android外壳打包与发布账.todo`
+  已立：签名、CI 矩阵、版本对齐、自动升级、Tauri 直连 Playwright 调试
+  端口的路、局域网发现配对（原单 §十的相关条目归口过去）。
 
-验收：三家外壳零内核改动。
+验收：三家外壳零内核改动——壳目录与触屏外套零内核引用由
+`scripts/tests/app_shell_smoke.js` 机械断言（41 案：触屏折算 19、Tauri
+静态账 8、Android 静态账 7、纪律 7）；阶段 D 既有册照跑不红。
 
 ## 八、测试账
 

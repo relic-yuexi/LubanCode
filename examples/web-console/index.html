@@ -2,6 +2,7 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
   <title>LubanCode 参考前端(多前端外壳·阶段 D)</title>
   <link rel="stylesheet" href="web_console.css" />
 </head>
@@ -101,5 +102,8 @@
 
   <script src="web_console_core.js"></script>
   <script src="web_console_app.js"></script>
+  <!-- 触屏外套(阶段 E):桌面浏览器没有它照活;Android WebView 壳靠它把
+       手势折成动作。加载失败(本地被删)静默,不掀页。 -->
+  <script src="web_console_touch.js"></script>
 </body>
 </html>

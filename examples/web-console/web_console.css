@@ -93,3 +93,19 @@ button:disabled { opacity: .45; cursor: default; }
 #approval-list li { border: 1px solid #e2c9c9; background: #fdf6f6; border-radius: 6px; padding: 8px 10px; margin-bottom: 8px; }
 #approval-list .tool-name { font-weight: 600; }
 #approval-list .actions { margin-top: 6px; display: flex; gap: 6px; }
+
+/* 触屏外套(阶段 E):手指点得住,提示飘得稳。 */
+@media (pointer: coarse) {
+  #element-list li { min-height: 44px; display: flex; align-items: center; }
+  #page-list li { min-height: 44px; }
+  #panel-tabs button { min-height: 44px; }
+  .toolbar button { min-height: 44px; }
+  body { font-size: 14px; }
+}
+#touch-hint {
+  position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
+  max-width: 86vw; padding: 8px 14px; border-radius: 8px;
+  background: rgba(43, 43, 43, .92); color: #fff; font-size: 13px;
+  z-index: 50; pointer-events: none;
+}
+#touch-hint[hidden] { display: none; }

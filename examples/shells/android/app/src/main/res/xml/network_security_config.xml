@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 回环明文放行(WS 与 artifact 字节口子都是 ws://127.0.0.1、
+     http://127.0.0.1,Android 9+ 视为明文流量会拦)。NSC 的 <domain>
+     条目按主机名匹配、不认 IP 字面量,回环放不了小灶,只能全局放行
+     明文——参考壳不连任何非回环明文服务,这笔账如实记在 README。
+     真产品壳要另立单收紧(打包与发布账里有这条)。 -->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true" />
+</network-security-config>
