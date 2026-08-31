@@ -1,6 +1,6 @@
 # LubanCode 使用洞察、Token 账本与 Prompt 审计设计
 
-- 状态：待实现
+- 状态：A0/A1/A2 已落 main（A0=accounting/insights 合同与十二场夹具；A1=事实接线与旁路桥；A2=/usage 报告命令面）；A3(/prompt audit)起待实现
 - 级别：P1；其中 Usage 事实入账随 Trajectory P0 一道落地
 - 日期：2026-08-30
 - 范围：本机 LubanCode 新轨迹、当前工作区与显式选择的跨工作区报告
@@ -1267,42 +1267,44 @@ Trajectory P0-2 真接线
 
 ### A0 合同与夹具
 
-- [ ] 冻结 UsageSample、PromptManifest、Finding、SessionSummary、Report schema。
-- [ ] 给 `UsageReport` 补显式 reported 来源位，并把旧 request_id 迁成 provider response id。
-- [ ] 新建 runtime `RequestUsageRecord`，分开 local request id 与 provider response id。
-- [ ] 冻结 Trajectory v2 `model.usage.recorded` 与 v1 legacy read 规则。
-- [ ] 冻结 purpose 枚举。
-- [ ] 定 request snapshot metadata schema。
-- [ ] 做十二场 synthetic trajectory fixtures。
-- [ ] 做价格表 schema 与整数 micros 算法。
-- [ ] 写 privacy allowlist 与 canary 夹具。
+- [x] 冻结 UsageSample、PromptManifest、Finding、SessionSummary、Report schema。（`src/accounting/usage_sample.*`、`src/agent/prompt_manifest.*`、`src/insights/finding.*`、`src/insights/session_summary.*`、`src/insights/report_model.*`；测试 `tests/unit/accounting/test_usage_contracts.cpp`、`tests/unit/insights/test_insights_contracts.cpp`）
+- [x] 给 `UsageReport` 补显式 reported 来源位，并把旧 request_id 迁成 provider response id。（`src/api/types.hpp`：`reported_by_provider` 显式位 + `provider_response_id` 改名，注释钉死"local id 不塞进 api 层"）
+- [x] 新建 runtime `RequestUsageRecord`，分开 local request id 与 provider response id。（`src/runtime/request_usage_record.hpp`）
+- [x] 冻结 Trajectory v2 `model.usage.recorded` 与 v1 legacy read 规则。（`EventKind::ModelUsageRecorded` v2 owner；`usage_projector.cpp` 的 v1 `completed.payload.usage` legacy 路标 `legacy_owner/legacy_inferred`；一条 stream 混 v1/v2 拒绝）
+- [x] 冻结 purpose 枚举。（`src/accounting/purpose.*`，12 值封闭表，严格解析认不得给 nullopt）
+- [x] 定 request snapshot metadata schema。（`src/agent/prompt_manifest.hpp` 的 `kRequestSnapshotSchema`；`src/runtime/trajectory_session.cpp` 构造 metadata_only 底账进 `model.request.prepared.payload.request_snapshot_ref`）
+- [x] 做十二场 synthetic trajectory fixtures。（`tests/unit/insights/insights_fixtures.hpp` + `test_usage_fixture_pipeline.cpp`：F1–F12 双目录字节一致 + 事实断言）
+- [x] 做价格表 schema 与整数 micros 算法。（`src/accounting/pricing_table.*`、`src/accounting/cost_estimator.*`；`tests/unit/accounting/test_pricing_cost.cpp`）
+- [x] 写 privacy allowlist 与 canary 夹具。（`src/insights/redaction.*`、`tests/unit/insights/test_redaction_canary.cpp`）
 
-验收：不接真实 runtime，也能从合成 Journal 稳定产出 usage/session/report JSON。
+验收：不接真实 runtime，也能从合成 Journal 稳定产出 usage/session/report JSON。（`test_usage_fixture_pipeline.cpp` 两目录产物字节一致）
 
 ### A1 事实接线
 
-- [ ] `ResolvedPromptBuilder` 包住 PromptAssembler 与三层后叠，返回 `AssembledPrompt{text, manifest}`。
-- [ ] main/subagent/workflow/compact/memory/title/doctor 全填 purpose。
-- [ ] 公共 ModelRequestRecorder 写 request prepared/sent/output。
-- [ ] ModelRequestRecorder 写 v2 usage owner；completed/failed/cancelled 不复制 usage。
-- [ ] usage payload 强校验与一请求一 owner 状态机。
-- [ ] request snapshot artifact 存 metadata manifest。
-- [ ] provider reported/unknown 显式落账。
-- [ ] 不从 ServerEvent、终端文本或旧 SessionStore 反推 canonical usage。
+- [x] `ResolvedPromptBuilder` 包住 PromptAssembler 与三层后叠，返回 `AssembledPrompt{text, manifest}`。（`src/agent/resolved_prompt_builder.*`；`tests/unit/agent/test_resolved_prompt_builder.cpp`）
+- [x] main/subagent/workflow/compact/memory/title/doctor 全填 purpose。（七处显式接线：`agent/loop.hpp`(main_turn)、`tools/agent_tool.cpp`(subagent_turn)、`workflow/host_executors.cpp`(workflow_node)、`agent/microcompact.cpp`(compact_map)、`agent/compact.cpp`(compact_reduce)、`app/session_title.cpp`(title_refine)、`app/commands/doctor_commands.cpp`(doctor_probe)；memory 抽取走 `agent/sample_model.hpp` 兜底 `other_host_request`——`memory_extract` 枚举值在册，显式接线留 A4 分析器需要时再收口）
+- [x] 公共 ModelRequestRecorder 写 request prepared/sent/output。（`TrajectoryTurnBridge`/`TrajectoryBypassBridge` 同一只 `LoopBoundaryRecorder` 接口，`src/runtime/trajectory_session.*`）
+- [x] ModelRequestRecorder 写 v2 usage owner；completed/failed/cancelled 不复制 usage。（`OnUsageRecorded` 落 `model.usage.recorded`；output 三态不复制）
+- [x] usage payload 强校验与一请求一 owner 状态机。（recorder 侧重复 owner 拒；projector 撞重复 owner 明报 `usage.owner_duplicate` 不静默覆盖）
+- [x] request snapshot artifact 存 metadata manifest。（`trajectory_session.cpp` 的 request_snapshot 构造，manifest 缺席如实标）
+- [x] provider reported/unknown 显式落账。（`reported_by_provider` 位进 v2 owner payload；没报也写 owner 事件，token 字段缺席）
+- [x] 不从 ServerEvent、终端文本或旧 SessionStore 反推 canonical usage。（usage 只走 `LoopBoundaryRecorder::OnUsageRecorded` 一条路）
 
-验收：一场真实工具回合每次 request 都能按 request_id 对上 prepared、sent、output、usage、purpose。
+验收：一场真实工具回合每次 request 都能按 request_id 对上 prepared、sent、output、usage、purpose。（`tests/unit/trajectory/test_a1_smoke_wiring.cpp` 真循环+假后端；旁路 `test_bypass_recorder.cpp`）
 
 ### A2 `/usage`
 
-- [ ] 实现 UsageProjector 与五层 aggregate。
-- [ ] 实现 cache 行为分类。
-- [ ] 实现 price table 与 cost estimator。
-- [ ] 注册 `/usage` 与 JSON 输出。
-- [ ] active session provisional snapshot。
-- [ ] 旧内存账降级时明示口径。
+- [x] 实现 UsageProjector 与五层 aggregate。（projector 本体 A0 已落 `src/accounting/usage_projector.*`；A2 补五层聚合 `src/accounting/usage_aggregate.*` 与 session 读侧 `src/accounting/session_usage_reader.*`——main/subagents/workflows 各 stream 逐条投、逐层求和）
+- [x] 实现 cache 行为分类。（`usage_aggregate` 的 `CacheBehavior`：epoch 重建/前缀改写/疑似未命中（候选，措辞不判罪——TTL 过期也长这模样）/无 epoch 标注；命中率分母=实测输入合计，全 unknown 给 unknown 不给 0%）
+- [x] 实现 price table 与 cost estimator。（合同与整数 micros 算法 A0 已落 `pricing_table.*`/`cost_estimator.*`；A2 接进 /usage：`LoadPricingTable` 读 `<home>/.lubancode/pricing.json`（坏表按未配处理，token 照报不炸命令）+ `ApplyCostEstimates` 逐笔贴价，request_day 取 session id 头 8 位）
+- [x] 注册 `/usage` 与 JSON 输出。（`cli::SlashCommand::Usage` + `command_registry.cpp` 注册行（read_only）+ `app/commands/usage_commands.*`；JSON 面 schema `lubancode.usage.report` v1：coverage/purpose/model/run/outcome 分账与成色；`--by model|purpose|run|outcome` 换分账表。day/week/workspace/all 跨场汇总是 A5 的活，敲了明说后续批次，不冒充）
+- [x] active session provisional snapshot。（`ReadSessionUsage` 纯读已提交高水位——journal 共享读开、writer 持柄照读、不 flush；active/未封口恒标 provisional，session.json status 如实入报告）
+- [x] 旧内存账降级时明示口径。（flag 关：明说"账未开（features.trajectory 关）"，降级打 `ModelUsageLedger` 角色粗账 + 口径说明（无 purpose 分账、无逐请求 coverage、重启即清），`--json` 出 `source=memory_fallback`；不悄悄换口径）
 
 验收：用户能分别看 current request context、current session cumulative、subagent、compact 与 unknown
-coverage，几本账不串。
+coverage，几本账不串。（`tests/unit/accounting/test_usage_aggregate.cpp`：分账/unknown/重试/明报全零分开
++ 真 Journal 读回对账；`tests/unit/app/test_usage_command.cpp`：解析/整数 micros 金额/贴价/渲染/JSON。
+"当前请求快照"归 /context，与累计账分家——§三 四本账表钉死，本批不串）
 
 ### A3 `/prompt audit`
 
