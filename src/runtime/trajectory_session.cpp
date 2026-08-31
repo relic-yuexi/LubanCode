@@ -737,7 +737,8 @@ private:
 }  // namespace
 
 std::expected<std::unique_ptr<TrajectorySubagentBridge>, std::string>
-TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const std::string& task_label) {
+TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const std::string& task_label,
+                                       const std::string& parent_run_id) {
     if (impl_ == nullptr || impl_->active == nullptr) {
         return std::unexpected("trajectory.no_active_session");
     }
@@ -773,7 +774,10 @@ TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const 
         payload["task_ref"] = task_label;
     }
     trajectory::EventLinks links;
-    links.parent_run_id = impl_->main_run_id;
+    // 嵌套轨迹边(递归派工单 P1-2):parent_run_id 非空 = 嵌套派工——它的
+    // 父亲是派出它的那只子代理自己的 run,不是 main;空串(main 直派)按
+    // 从前行为落回本场 main_run_id。
+    links.parent_run_id = parent_run_id.empty() ? impl_->main_run_id : parent_run_id;
     if (!parent_call_id.empty()) {
         links.parent_call_id = parent_call_id;
     }

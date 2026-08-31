@@ -190,11 +190,16 @@ public:
         // 子代理事件照发,parent 留空。
         std::function<std::string()> parent_execution_id_getter;
 
-        // ---- P0-2 轨迹接线(flag 开的会话;空 = 旧路,行为零变) ----------
+        // ---- P0-2/P1-2 轨迹接线(flag 开的会话;空 = 旧路,行为零变) ------
         // 子代理派工的轨迹账申请口:向会话账本要独立 JSONL(scoped
         // recorder + run.started,relations 带 parent 边)。返回空 = 子账
         // 没开张(开张失败/没接线),子代理照跑,父账如实缺子边。
-        std::function<std::unique_ptr<runtime::TrajectorySubagentBridge>(const std::string& task_label)>
+        // parent_run_id(P1-2 嵌套轨迹边):派工者自己的 agent_run_id;main
+        // 直派传空串(SpawnSubagent 内部按空串落回 main_run_id,旧行为不
+        // 变)。嵌套 headless 路必须传父任务自己的 run id——它的父亲是
+        // 派出它的那只子代理,不是 main(单子 §12.3 第一条)。
+        std::function<std::unique_ptr<runtime::TrajectorySubagentBridge>(const std::string& task_label,
+                                                                        const std::string& parent_run_id)>
             trajectory_spawn;
         // 子账收口(run terminal + 关柄)后的回填口:父桥记下子账终态
         // hash,父侧 agent 调用的执行终态事件引用它(§3.5 边界对账)。
@@ -418,11 +423,17 @@ public:
         }
     }
 
-    // 派工治理(转发协调器;max_active/max_depth 语义见 SubagentGovernance)。
-    void SetDispatchGovernance(int max_active, int max_depth) {
+    // 派工治理(转发协调器;各字段语义见 SubagentGovernance)。P1-2 起补
+    // max_children_per_task/max_tree_nodes——判决门(EvaluateAdmission)
+    // P0 已备,这里只是把配置接进来;0 = 不设(与 SubagentGovernance 默认
+    // 一致),旧调用方两参数版仍可用,树级两门维持不设。
+    void SetDispatchGovernance(int max_active, int max_depth, int max_children_per_task = 0,
+                               int max_tree_nodes = 0) {
         SubagentGovernance governance = coordinator_->governance();
         governance.max_active = max_active;
         governance.max_depth = max_depth;
+        governance.max_children_per_task = max_children_per_task;
+        governance.max_tree_nodes = max_tree_nodes;
         coordinator_->SetGovernance(governance);
     }
 

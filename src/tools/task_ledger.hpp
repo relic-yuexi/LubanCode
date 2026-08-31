@@ -175,6 +175,12 @@ struct AgentTaskSnapshot {
     int parent_task_id = 0;  // 0 = main 派出
     int root_task_id = 0;    // 根子任务自己的 id(根任务上 == 自己的 id)
     int depth = 1;           // main=0,子=1,孙=2
+    // 轨迹子账 run id(递归派工单 P1-2 嵌套轨迹边):这只任务自己的
+    // subagents/<agent_run_id>.jsonl 开张后回填(RunTask 里,trajectory
+    // 桥申请成功即写);空 = 没开轨迹账(flag 关/开张失败/旧调用方)。
+    // IdentityOfSnapshot 把它投进 AgentRunIdentity::agent_run_id——这只
+    // 任务派孩子时,子账的 relations.parent_run_id 认它,不冒充 main。
+    std::string agent_run_id;
     TaskDeliveryTarget delivery_target = TaskDeliveryTarget::MainTurnContext;
     // canonical 任务合同(P0-1):不可变 shared 对象;title/prompt 是它的
     // 读投影。空(旧调用方直建快照)= 走 legacy prompt 账。
@@ -485,8 +491,11 @@ public:
     static std::string FormatChildCompletion(const AgentTaskSnapshot& child);
     // 取走攒着的后台权限拒绝通知(每条一行,取走即清)。
     std::vector<std::string> TakePermissionDenialNotices();
-    // 运行中子代理名册(给主模型的动态 context 用)。
-    std::string RunningTasksRoster() const;
+    // 运行中子代理名册(给主模型/子代理的动态 context 用;递归派工单 §13.3):
+    // caller_task_id=0(main)只列直接子任务(parent_task_id==0),不铺全局
+    // 整棵树——Agent Dock 才展开孙辈;非 0 只列该任务自己的直接孩子
+    //(parent_task_id==caller_task_id)。不把孙辈塞进每一轮 prompt。
+    std::string RunningTasksRoster(int caller_task_id = 0) const;
 
     // ---- 消息账写口(Locked = 调用方已持 mutex)----
     void AppendEventLocked(const std::shared_ptr<TaskRecord>& task, AgentTaskEvent event);

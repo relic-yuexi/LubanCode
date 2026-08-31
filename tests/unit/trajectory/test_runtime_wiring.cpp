@@ -361,6 +361,60 @@ TEST_CASE("ledger:开账出 main.jsonl,子代理拿独立 JSONL 与父边界") {
     CHECK(main_kinds[6] == "tool.execution.planned");
 }
 
+// 读一份子账 run.started 的 relations.parent_run_id(P1-2 嵌套轨迹边测试用)。
+std::string ParentRunIdOf(const std::filesystem::path& stream) {
+    const auto lines = trajectory::ReadJournalLines(stream);
+    if (!lines.has_value() || lines->empty()) {
+        return std::string();
+    }
+    const auto parsed = nlohmann::json::parse(lines->front(), nullptr, false);
+    if (parsed.is_discarded()) {
+        return std::string();
+    }
+    return parsed.value("relations", nlohmann::json::object()).value("parent_run_id", std::string());
+}
+
+TEST_CASE("SpawnSubagent:嵌套派工的 parent_run_id 指向父任务自己的 run,不冒充 main(P1-2)") {
+    const auto root = FreshDir("lubancode-traj-p1-2-nested");
+    TrajectorySessionLedger::Options options;
+    options.trajectories_root = root / "trajectories";
+    options.workspace_root = root / "repo";
+    options.readable_workspace_name = "demo";
+    options.lubancode_version = "test";
+    std::error_code ec;
+    std::filesystem::create_directories(root / "repo", ec);
+    auto ledger = TrajectorySessionLedger::Open(options);
+    REQUIRE(ledger.has_value());
+
+    // main 自己的 run id(main.jsonl 首行 run.started 的顶层 run_id)。
+    const auto main_lines = trajectory::ReadJournalLines(ledger->session_dir() / "main.jsonl");
+    REQUIRE(main_lines.has_value());
+    REQUIRE_FALSE(main_lines->empty());
+    const auto main_started = nlohmann::json::parse(main_lines->front(), nullptr, false);
+    REQUIRE_FALSE(main_started.is_discarded());
+    const std::string main_run_id = main_started.value("run_id", std::string());
+    REQUIRE_FALSE(main_run_id.empty());
+
+    // main 直派(parent_run_id 缺省 = 空串):relations.parent_run_id 落回
+    // main_run_id——旧行为一字不改。
+    auto direct_child = ledger->SpawnSubagent("toolu-1", "main 直派的孩子");
+    REQUIRE(direct_child.has_value());
+    const auto direct_path = ledger->session_dir() / "subagents" / ((*direct_child)->run_id() + ".jsonl");
+    CHECK(ParentRunIdOf(direct_path) == main_run_id);
+
+    // 嵌套派工:parent_run_id 显式传"直派孩子"自己的 run id——它是派出
+    // 孙任务的那只子代理,relations.parent_run_id 必须认它,不能冒充 main
+    //(单子 §12.3 第一条,"嵌套 headless 路的父亲是父任务的 run,不是 main")。
+    auto grandchild = ledger->SpawnSubagent(/*parent_call_id=*/std::string(), "孙任务",
+                                            (*direct_child)->run_id());
+    REQUIRE(grandchild.has_value());
+    CHECK((*grandchild)->run_id() != (*direct_child)->run_id());
+    const auto grandchild_path = ledger->session_dir() / "subagents" / ((*grandchild)->run_id() + ".jsonl");
+    const std::string grandchild_parent = ParentRunIdOf(grandchild_path);
+    CHECK(grandchild_parent == (*direct_child)->run_id());
+    CHECK(grandchild_parent != main_run_id);
+}
+
 TEST_CASE("SessionRuntime 轨迹档:旧档不建、轮末补抄停用") {
     // flag 开:ledger 在 SessionRuntime 手里,EnsureBegun/PersistNew 全走
     // Disabled/Nothing(轮末补抄这条路停用,15.3)。

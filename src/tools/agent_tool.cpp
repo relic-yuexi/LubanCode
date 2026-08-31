@@ -30,6 +30,7 @@
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:inbox 投递文本的编码关口
 #include "runtime/turn_runtime.hpp"    // MapPreToolDecision:PreToolUse 归并映射与主路径同一颗
+#include "tools/agent_message_tool.hpp"  // scoped agent_message(P1-1:子代理只投自己直接孩子)
 #include "tools/instruction_scope.hpp"  // 写前作用域闸(AGENTS.md 作用域单 P0)
 #include "tools/observation_filter.hpp"  // 观察边界(P2-5):子代理日志目录默认不可搜
 #include "tools/path_utils.hpp"
@@ -231,8 +232,8 @@ TaskScopedRegistry BuildTaskScopedRegistry(ToolRegistry& source) {
         const std::string name = tool->name();
         if (name == "todo_write") {
             out->Register(std::make_unique<TodoWriteTool>(std::make_shared<TodoListState>()));
-        } else if (name == "agent") {
-            continue;  // 第二段换 scoped 壳
+        } else if (name == "agent" || name == "agent_message") {
+            continue;  // 第二段换 scoped 壳(P1-1:agent_message 同 agent 一并收窄)
         } else {
             out->Register(std::make_unique<ForwardingTool>(*tool));
         }
@@ -1238,12 +1239,25 @@ Tool::Result AgentTool::ExecuteForeground(const DispatchRequest& request, ToolRe
                 env->hook_dispatcher, env->hook_dispatcher->context());
         }
     }
-    // P0-2 轨迹:前台派工在父线程申请子账——此刻父桥活着,父子边挂得上。
-    // 嵌套(headless)路不申请:spawn 钩子的父边是 main 的回合,嵌套子账
-    // 会把 parent 挂错成 main(轨迹 lineage 的接线归轨迹单,这里不越界)。
+    // P0-2/P1-2 轨迹:前台派工在父线程申请子账——此刻父桥活着,父子边挂
+    // 得上。嵌套(headless)路现在也申请:parent_run_id 传派工者自己的
+    // agent_run_id(caller.agent_run_id),不再让 SpawnSubagent 把
+    // relations.parent_run_id 落回 main——它的父亲是父任务的 run(单子
+    // §12.3 第一条)。caller.agent_run_id 空(父任务自己没开轨迹账,或
+    // main 直派)时,SpawnSubagent 按空串落回本场 main_run_id,行为与从前
+    // main 直派一致。
     std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory;
-    if (!headless && hooks.trajectory_spawn) {
-        trajectory = hooks.trajectory_spawn(agent_type + ": " + task->snapshot.prompt.substr(0, 120));
+    if (hooks.trajectory_spawn) {
+        trajectory =
+            hooks.trajectory_spawn(agent_type + ": " + task->snapshot.prompt.substr(0, 120), caller.agent_run_id);
+    }
+    if (trajectory != nullptr) {
+        // 回填自己的 run id(P1-2):这只任务若再往下派孩子,RunTask 顶部的
+        // ScopedDispatchIdentity 从这份快照投影身份——必须先写好才能被
+        // 正确继承(单一写者:注册后只有这里改这个字段一次)。
+        std::lock_guard<std::mutex> lock(coordinator_->ledger().mutex);
+        task->snapshot.agent_run_id = trajectory->run_id();
+        coordinator_->ledger().Touch();
     }
     // 嵌套前台的 backend:与父共用同一份 detached 材料(父阻塞等它,无并发;
     // profile 用冻结的 provider/model)。main 直派照旧用主回合那条。
@@ -1421,12 +1435,22 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
         background_permissions =
             std::make_shared<BackgroundPermissionLedger>(background_permission_source_());
     }
-    // P0-2 轨迹:main 直派的后台派工在派工线程申请子账(spawn 钩子引用的
-    // 父桥此刻活着);子账随线程走,收口在 RunTask 里办。嵌套路不申请
-    //(父边是父任务的子账,接线归轨迹单,不越界改语义)。
+    // P0-2/P1-2 轨迹:main 直派的后台派工在派工线程申请子账(spawn 钩子
+    // 引用的父桥此刻活着);子账随线程走,收口在 RunTask 里办。嵌套路
+    // (parent 是某只子代理,不论它自己前台/后台)现在也申请——parent_run_id
+    // 传 caller.agent_run_id,不冒充 main(单子 §12.3 第一条)。caller 空
+    // (main 直派,或父任务自己没开轨迹账)时按空串落回本场 main_run_id。
     std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory;
-    if (!nested && hooks_.trajectory_spawn) {
-        trajectory = hooks_.trajectory_spawn(agent_type + ": " + prompt.substr(0, 120));
+    if (hooks_.trajectory_spawn) {
+        trajectory = hooks_.trajectory_spawn(agent_type + ": " + prompt.substr(0, 120), caller.agent_run_id);
+    }
+    if (trajectory != nullptr) {
+        // 回填自己的 run id(P1-2,与前台路同一规矩):写在起线程之前——
+        // std::thread 构造自带 happens-before,线程内 RunTask 读到的是这次
+        // 写入之后的值,不需要额外同步。
+        std::lock_guard<std::mutex> lock(coordinator_->ledger().mutex);
+        task->snapshot.agent_run_id = trajectory->run_id();
+        coordinator_->ledger().Touch();
     }
     // 孩子的派工环境:后台任务开跑即冻结——嵌套任务原样继承祖先环境的材料
     // (backend 工厂/放行账/dispatcher/解析账),main 直派按会话当下活账
@@ -1585,6 +1609,12 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         if (custom_allows && child_depth <= coordinator_->governance().max_depth) {
             scoped_registry.registry->Register(std::make_unique<AgentDispatchTool>(AgentDispatchHandle(
                 coordinator_, IdentityOfSnapshot(task->snapshot), child_env)));
+            // scoped agent_message(P1-1 §一):与 agent 同一道资格门——这只
+            // 任务能派孩子才有孩子可传话,窄实例只认自己的 task_id 为
+            // caller,execute() 里逐条核对目标的 parent_task_id(单子 §9.3
+            // "首版只放直接孩子")。main 那份不受此门(main 不经这条 RunTask
+            // 路径,main_registry_ 装配时直挂 caller_task_id=0 的无限定实例)。
+            scoped_registry.registry->Register(std::make_unique<AgentMessageTool>(this, task->snapshot.id));
         }
     }
 
@@ -2425,6 +2455,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                             ? drained.texts[i]
                                             : FormatInboxDelivery(drained.texts[i], drained.sources[i]);
                     }
+                    // 直接子任务名册(单子 §9.3/§13.3):每次续投这只子代理都是
+                    // 一次"轮次边界"(与 main 每条用户消息前重算名册同一时机)
+                    // ——附上此刻它自己直接孩子的最新快照,不塞孙辈。task 为
+                    // 空(旧调用方/单测直调)不会走到这个 continuation 分支。
+                    continuation += ledger().RunningTasksRoster(task->snapshot.id);
                     // 消息账:介入按收到次序记 steering_message——"main/用户
                     // 何时补了话"在查看态里看得见落点,不沉进黑洞(规格
                     // transcript 单测第 3 条)。cancel 已置位的短路归 harness

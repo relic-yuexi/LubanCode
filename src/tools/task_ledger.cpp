@@ -684,29 +684,47 @@ std::string TaskLedger::UndeliveredInboxNote(const std::shared_ptr<TaskRecord>& 
     return note;
 }
 
-std::string TaskLedger::RunningTasksRoster() const {
+std::string TaskLedger::RunningTasksRoster(int caller_task_id) const {
+    // 直接子名册(单子 §13.3):main(caller=0)只列 parent_task_id==0 的
+    // 根子任务;子代理(caller!=0)只列自己派出的 parent_task_id==caller
+    // 的孩子。不铺全局整棵树——孙辈只在 Agent Dock 展开看,不塞进每一轮
+    // prompt(单子 §9.3/§13.3)。
     std::vector<AgentTaskSummary> summaries = Summaries();
     std::string out;
+    const bool is_main = caller_task_id == 0;
     for (const auto& summary : summaries) {
         if (!IsAliveTaskState(summary.state)) {
             continue;
         }
+        if (summary.parent_task_id != caller_task_id) {
+            continue;
+        }
         if (out.empty()) {
-            out = "\n\n[运行中子代理名册] 以下子代理在附上本条消息的那一刻仍在运行。名册是随本条"
-                  "消息的快照,以最新一条消息所附的快照为准,不要依赖更早的快照。给某只转交增量用"
-                  " agent_message 工具,task_id 用下面列出的号:\n";
+            out = is_main
+                      ? "\n\n[运行中子代理名册] 以下是你直接派出的子代理,在附上本条消息的那一刻仍在"
+                        "运行(孙辈请到 Agent Dock 展开查看)。名册是随本条消息的快照,以最新一条消息"
+                        "所附的快照为准,不要依赖更早的快照。给某只转交增量用 agent_message 工具,"
+                        "task_id 用下面列出的号:\n"
+                      : "\n\n[直接子任务名册] 以下是你自己直接派出的子任务,在附上本条消息的那一刻仍在"
+                        "运行。agent_message 只能投给这份名册里的 task_id——不能跨树、不能投给隔代"
+                        "任务(它们的结果会先回到它们各自的直接父亲,再由父亲整合转告你)。名册是随本条"
+                        "消息的快照,以最新一条消息所附的快照为准:\n";
         }
         out += "#" + std::to_string(summary.id) + "  " +
                (summary.title.empty() ? "未命名子代理 #" + std::to_string(summary.id) : summary.title) +
                "  · " + summary.agent_type + (summary.foreground ? " · 前台" : " · 后台") +
                " · 待送达消息 " + std::to_string(summary.pending_message_count) + " 条\n";
     }
-    if (!out.empty()) {
+    if (!out.empty() && is_main) {
         out +=
             "何时必须转交:用户补充、修改或撤回的要求若影响其中某只,先调 agent_message 把增量发给它,"
             "再继续回答;影响多只就逐只各发一条(没有广播);用户点名某只任务时按 task_id 精确投递;"
             "目标不清先问用户,不要凭标题相近乱投;只传增量,不重复整份任务说明;不要因为主代理自己也"
             "记住了就省掉转交——子代理有独立上下文,看不见主会话新消息;工具返回 queued 后才算已传到。";
+    } else if (!out.empty()) {
+        out +=
+            "用户/上级补充的要求若影响其中某只,先调 agent_message 把增量发给它,再继续;目标不清先问,"
+            "不要凭标题相近乱投;只传增量,不重复整份任务说明。";
     }
     return out;
 }
@@ -851,6 +869,13 @@ bool TaskLedger::HasUndeliveredCompletions() const {
     });
 }
 
+// P1-1 §一末条("完成通知显示直接父子关系,不把孙任务正文另打到 main 屏")
+// 落点:下面这行 delivery_target 过滤是唯一执法点。MainTurnContext 只有
+// main 直派的根子任务才会拿到(P0-4 注册时按 caller.task_id==0 判定,见
+// LaunchBackground/ExecuteForeground);嵌套孙任务恒为 ParentTaskInbox,
+// 走各自直接父的 mailbox(DeliverChildCompletion),main 侧这几个查询口
+// 天然摸不到——不需要另设"孙任务"分支去过滤,因为它们从未落进这份查询
+// 范围。main 屏上出现的任一条完成通知,其 parent_task_id 恒为 0。
 std::vector<std::string> TaskLedger::CompletionNoticeLines() const {
     std::vector<std::string> out;
     std::lock_guard<std::mutex> lock(mutex);

@@ -1978,6 +1978,21 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
                 config.subagent_max_active = static_cast<int>(active);
             }
         }
+        // 防扇出与整树烧 token 的两道硬帽(P1-2):正整数,坏值静默跳过。
+        // 上限口径与 max_active 同一挡(256/1024),够用又不给荒唐大数开口子。
+        if (subagent.contains("max_children_per_task") &&
+            subagent["max_children_per_task"].is_number_integer()) {
+            const long long children = subagent["max_children_per_task"].get<long long>();
+            if (children > 0 && children <= 256) {
+                config.subagent_max_children_per_task = static_cast<int>(children);
+            }
+        }
+        if (subagent.contains("max_tree_nodes") && subagent["max_tree_nodes"].is_number_integer()) {
+            const long long nodes = subagent["max_tree_nodes"].get<long long>();
+            if (nodes > 0 && nodes <= 1024) {
+                config.subagent_max_tree_nodes = static_cast<int>(nodes);
+            }
+        }
         // 整轮墙钟兜底:非负整数(0 = 不限,其余坏值静默跳过)。
         if (subagent.contains("wall_clock_timeout_secs") &&
             subagent["wall_clock_timeout_secs"].is_number_integer()) {
@@ -2916,6 +2931,18 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.config.subagent.max_active = project_file->subagent_max_active;
     } else if (global_file.has_value() && global_file->subagent_max_active.has_value()) {
         result.config.subagent.max_active = global_file->subagent_max_active;
+    }
+    // 防扇出与整树烧 token 两道硬帽(P1-2):项目级压全局,都没写 = nullopt
+    // (SubagentGovernance 默认 0 = 不设)。
+    if (project_file.has_value() && project_file->subagent_max_children_per_task.has_value()) {
+        result.config.subagent.max_children_per_task = project_file->subagent_max_children_per_task;
+    } else if (global_file.has_value() && global_file->subagent_max_children_per_task.has_value()) {
+        result.config.subagent.max_children_per_task = global_file->subagent_max_children_per_task;
+    }
+    if (project_file.has_value() && project_file->subagent_max_tree_nodes.has_value()) {
+        result.config.subagent.max_tree_nodes = project_file->subagent_max_tree_nodes;
+    } else if (global_file.has_value() && global_file->subagent_max_tree_nodes.has_value()) {
+        result.config.subagent.max_tree_nodes = global_file->subagent_max_tree_nodes;
     }
     // 整轮墙钟兜底:项目级压全局,都没写 = 公开默认值(1800s;0 = 不限)。
     if (project_file.has_value() && project_file->subagent_wall_clock_timeout_secs.has_value()) {

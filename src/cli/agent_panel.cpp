@@ -453,10 +453,15 @@ AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int 
             } else {
                 row.lamp = entry->failed ? "\xC3\x97 " : "\xE2\x97\x8B ";  // × 失败 / ○ 完成
             }
-            row.identity = entry->name;
+            // Dock 画树(递归派工单 P1-1):深度 1(main 直派)不缩进,与从前
+            // 平铺一致;深度 >=2(孙、曾孙……)按 (depth-1)*2 空格缩进身份列
+            // ——纯前缀字符串,不改排序/折叠/选中语义(仍按 task_id),窄屏
+            // 挤爆时与其余内容一起走既有截断规矩。
+            const std::string indent = entry->depth > 1 ? std::string(static_cast<std::size_t>(entry->depth - 1) * 2, ' ') : std::string();
+            row.identity = indent + entry->name;
             row.middle = entry->title;
             row.status = entry->state;
-            identity_max = (std::max)(identity_max, static_cast<int>(DisplayWidthUtf8(entry->name)));
+            identity_max = (std::max)(identity_max, static_cast<int>(DisplayWidthUtf8(row.identity)));
             status_max = (std::max)(status_max, static_cast<int>(DisplayWidthUtf8(entry->state)));
         }
         return row;

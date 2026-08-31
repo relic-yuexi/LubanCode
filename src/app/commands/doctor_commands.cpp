@@ -997,6 +997,26 @@ void PrintAgentsMatrix(const DoctorContext& context) {
                          context.config.subagent.max_active.value_or(lubancode::config::kDefaultSubagentMaxActive),
                          context.config.subagent.max_depth.value_or(lubancode::config::kDefaultSubagentMaxDepth))
                   << "\n";
+        // 递归派工可观测性(递归派工单 §14.2):后台 registry 没挂带 identity
+        // 的 agent 就该直接红,不能用"前台子表有 agent"冒充整体支持——这里
+        // 打印的是已实测落地的架构事实(P0-3/P0-4 scoped handle + P0-4 后台
+        // 私有表),不是配置开关的回显。
+        const int active_limit = context.config.subagent.max_active.value_or(lubancode::config::kDefaultSubagentMaxActive);
+        const int depth_limit = context.config.subagent.max_depth.value_or(lubancode::config::kDefaultSubagentMaxDepth);
+        const int children_limit = context.config.subagent.max_children_per_task.value_or(0);
+        const int tree_nodes_limit = context.config.subagent.max_tree_nodes.value_or(0);
+        TermOut() << tr("doctor.agents.recursive_dispatch") << "\n";
+        TermOut() << tr("doctor.agents.lineage") << "\n";
+        TermOut() << trf("doctor.agents.limits", active_limit, depth_limit, children_limit, tree_nodes_limit)
+                  << "\n";
+        TermOut() << tr("doctor.agents.detached_registry") << "\n";
+        TermOut() << tr("doctor.agents.completion_routing") << "\n";
+        TermOut() << tr("doctor.agents.task_spec") << "\n";
+        // 异常配置提醒(单子 §7.3 末句):max_active < max_depth 时最深链路
+        // 可能在并发槽处被拒——doctor 提前说破,不等用户真机踩坑才发现。
+        if (active_limit < depth_limit) {
+            TermOut() << trf("doctor.agents.warning_active_lt_depth", active_limit, depth_limit) << "\n";
+        }
     }
     if (context.main_registry != nullptr) {
         TermOut() << trf("doctor.agents.row_main", tool_count(context.main_registry)) << "\n";

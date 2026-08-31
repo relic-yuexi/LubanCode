@@ -266,9 +266,13 @@ public:
     // 子代理 scoped JSONL(§3.5 subagents/<agent_run_id>.jsonl):目录占位
     // + 独立 recorder + run.started(run_kind=subagent,relations 带
     // parent_run_id/parent_call_id)。子 Agent 只拿自己的桥;父拿不到子
-    // recorder 的写权限。
+    // recorder 的写权限。parent_run_id(递归派工单 P1-2 嵌套轨迹边):空串
+    // = main 直派(落回本场 main_run_id,行为与从前一致);非空 = 嵌套
+    // 派工——派工者自己的 agent_run_id,relations.parent_run_id 记它,不
+    // 冒充 main("嵌套 headless 路的父亲是父任务的 run,不是 main")。
     std::expected<std::unique_ptr<TrajectorySubagentBridge>, std::string> SpawnSubagent(
-        const std::string& parent_call_id, const std::string& task_label);
+        const std::string& parent_call_id, const std::string& task_label,
+        const std::string& parent_run_id = std::string());
 
     // 父账边界:子代理 finished 时补的边界引用(child run id + 子账终态
     // hash),由主桥的 OnToolTrace 落——这里只给查口。

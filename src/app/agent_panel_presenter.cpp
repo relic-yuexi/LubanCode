@@ -90,20 +90,29 @@ std::string AgentActivityWord(const lubancode::tools::AgentTaskActivity& activit
     return std::string();
 }
 
-// 状态短话(规格"现场三"):导航坞行与查看态统计行共用的一套拼装——
-// 运行中优先出实时活跃短语(治"死秒表"),没进流的空档退回"运行中";停止
-// 信号已发还没收口时(面板 x /停全部)压上"停止中"前缀,不当死 Running
-//(子代理 x 停止失效单的可见回执);终态带短因。一处写死,两处口径永远
+// 状态短话(规格"现场三"+P0-4 状态机+P1-1 Dock 等子任务态):导航坞行与
+// 查看态统计行共用的一套拼装——运行中优先出实时活跃短语(治"死秒表"),
+// 没进流的空档退回"运行中";停止信号已发还没收口时(面板 x /停全部)压上
+// "停止中"前缀,不当死 Running(子代理 x 停止失效单的可见回执);终态带
+// 短因。WaitingChildren/Completing 是 P0-4 补的活态(自己已写完、正等/正
+// 收口孩子)——从前这两态漏在 switch 外,会掉进末尾的"失败 · 未注明原因"
+// 假象(单子 §13.1"等子任务态"落点);现在与 Running 同一支路处理,只是
+// 不发活跃短语(没有请求在飞),换一句专属短话。一处写死,两处口径永远
 // 一致。
 std::string AgentStateWord(lubancode::tools::AgentTaskState state, int steps_used, int step_limit,
                            lubancode::tools::TaskOutcomeReason outcome_reason,
                            const lubancode::tools::AgentTaskActivity* activity,
-                           std::chrono::steady_clock::time_point now, bool stop_requested = false) {
+                           std::chrono::steady_clock::time_point now, bool stop_requested = false,
+                           std::size_t waiting_children = 0) {
     using S = lubancode::tools::AgentTaskState;
-    if (state == S::Running) {
+    if (state == S::Running || state == S::WaitingChildren || state == S::Completing) {
         std::string word;
         if (stop_requested) {
             word = tr("agent_status.state_stopping");
+        } else if (state == S::WaitingChildren) {
+            word = trf("agent_status.state_waiting_children", static_cast<int>(waiting_children));
+        } else if (state == S::Completing) {
+            word = tr("agent_status.state_completing");
         } else if (activity != nullptr) {
             word = AgentActivityWord(*activity, now);
         }
@@ -139,6 +148,8 @@ std::string AgentStateWord(lubancode::tools::AgentTaskState state, int steps_use
             return trf("agent_status.state_stopped_reason", OutcomeReasonText(outcome_reason));
         case S::Failed:
         case S::Running:
+        case S::WaitingChildren:
+        case S::Completing:
             return trf("agent_status.state_failed_reason", OutcomeReasonText(outcome_reason));
     }
     return trf("agent_status.state_failed_reason", OutcomeReasonText(outcome_reason));
@@ -167,10 +178,16 @@ std::vector<lubancode::cli::AgentPanelEntry> AgentPanelPresenter::Entries(
         lubancode::cli::AgentPanelEntry entry;
         entry.task_id = task.id;
         entry.name = task.agent_type + " #" + std::to_string(task.id);
-        entry.running = task.state == lubancode::tools::AgentTaskState::Running;
+        // 活态判定(P1-1 Dock 等子任务态):WaitingChildren/Completing 与
+        // Running 同算"在跑"——否则这两态会被折进闲置汇总、状态词也会掉进
+        // "失败 · 未注明原因"的假象(单子 §13.1)。
+        entry.running = lubancode::tools::IsAliveTaskState(task.state);
         entry.failed = task.state == lubancode::tools::AgentTaskState::Failed ||
                        task.state == lubancode::tools::AgentTaskState::BudgetExhausted;
         entry.cancelled = task.state == lubancode::tools::AgentTaskState::Cancelled;
+        // Dock 画树(单子 §13.1):lineage 投影直读 TaskSummaries,不另养账。
+        entry.parent_task_id = task.parent_task_id;
+        entry.depth = task.depth;
         // 活动坞退场账(规格"现场一"新规矩):done 且结果已交回 main、或被
         // 用户中止——从导航坞退场;失败/耗尽留短错。台账(TaskDetail)照查,
         // 这里只标退场,不清任何数据。done 未投递是过渡态,留在坞里等投递。
@@ -191,10 +208,13 @@ std::vector<lubancode::cli::AgentPanelEntry> AgentPanelPresenter::Entries(
         // (Enter 查看)。运行中优先出实时活跃短语(思考中·N 字/工具 名·M 秒),
         // 长思考任务的坞行秒级跳动,不再是死秒表。正数预算派出即可见:运行中
         // 带"N/M 步",不等撞墙才揭晓。
+        const std::size_t waiting_children = task.state == lubancode::tools::AgentTaskState::WaitingChildren
+                                                 ? agent_tool->ledger().AliveChildCount(task.id)
+                                                 : 0;
         const std::string state_word =
             AgentStateWord(task.state, task.steps_used, task.step_limit, task.outcome_reason,
                            task.state == lubancode::tools::AgentTaskState::Running ? &task.activity : nullptr, now,
-                           task.stop_requested);
+                           task.stop_requested, waiting_children);
         entry.state = trf("agent_status.summary", state_word, task.tool_call_count, token_text,
                           lubancode::cli::FormatSeconds(seconds));  // 列表行只认真正短 title;旧任务没有 title 就显示"未命名子代理 #N"
         // ——绝不回退到 prompt 前若干字(prompt 只在详情里出现)。
@@ -320,9 +340,14 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
     // (当前这轮请求从发出到首个流事件)一并写在这行,长任务分得清"在想"
     // 还是"没来"。
     {
+        // alive(P1-1 Dock 等子任务态):WaitingChildren/Completing 也还在
+        // 占资源、用时仍在走——end_time 还没落(任务没收尾),用 now 现算。
+        // running 单指严格 Running(有活跃请求飞着):只有它才画首字节/活跃
+        // 短语,WaitingChildren/Completing 换专属短话(见 AgentStateWord)。
+        const bool alive = lubancode::tools::IsAliveTaskState(snapshot->state);
         const bool running = snapshot->state == lubancode::tools::AgentTaskState::Running;
         const auto now = std::chrono::steady_clock::now();
-        const auto end = running ? now : snapshot->end_time;
+        const auto end = alive ? now : snapshot->end_time;
         const double seconds = end > snapshot->start_time
                                    ? std::chrono::duration<double>(end - snapshot->start_time).count()
                                    : 0.0;
@@ -333,12 +358,17 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
             snapshot->usage_reported || snapshot->steps_used == 0
                 ? lubancode::cli::FormatTokenCount(tokens)
                 : tr("agent_status.tokens_not_reported");
+        const std::size_t waiting_children = snapshot->state == lubancode::tools::AgentTaskState::WaitingChildren &&
+                                                     agent_tool != nullptr
+                                                 ? agent_tool->ledger().AliveChildCount(snapshot->id)
+                                                 : 0;
         std::string stats_line =
             "  " + theme.stats +
             trf("agent_status.summary",
                 AgentStateWord(snapshot->state, snapshot->steps_used, snapshot->step_limit,
                                snapshot->outcome.reason,
-                               running ? &snapshot->activity : nullptr, now, snapshot->stop_requested),
+                               running ? &snapshot->activity : nullptr, now, snapshot->stop_requested,
+                               waiting_children),
                 static_cast<int>(snapshot->tool_calls.size()), token_text,
                 lubancode::cli::FormatSeconds(seconds));
         if (running && snapshot->activity.first_byte_ms >= 0) {

@@ -629,6 +629,43 @@ TEST_CASE("ParseFileConfigJson/MergeConfig: subagent.max_depth 与 max_active(�
     CHECK(merged->config.subagent.max_active == std::nullopt);
 }
 
+TEST_CASE("ParseFileConfigJson/MergeConfig: subagent.max_children_per_task 与 max_tree_nodes(P1-2 防扇出硬帽)") {
+    const auto ok = config::ParseFileConfigJson(
+        R"({"subagent": {"max_children_per_task": 6, "max_tree_nodes": 12}})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->subagent_max_children_per_task.has_value());
+    CHECK(*ok->subagent_max_children_per_task == 6);
+    REQUIRE(ok->subagent_max_tree_nodes.has_value());
+    CHECK(*ok->subagent_max_tree_nodes == 12);
+    // 坏值(0/负数/超界)静默跳过——救命阀,待遇同 max_depth/max_active。
+    const auto bad = config::ParseFileConfigJson(
+        R"({"subagent": {"max_children_per_task": 0, "max_tree_nodes": -1}})", "x.json");
+    REQUIRE(bad.has_value());
+    CHECK_FALSE(bad->subagent_max_children_per_task.has_value());
+    CHECK_FALSE(bad->subagent_max_tree_nodes.has_value());
+
+    // 合并:项目级压全局,没写 = nullopt(运行时 SetDispatchGovernance 落 0 = 不设)。
+    config::FileConfig project;
+    project.subagent_max_children_per_task = 4;
+    project.source_path = "/tmp/proj/.lubancode/config.json";
+    config::FileConfig global;
+    global.subagent_max_children_per_task = 8;
+    global.subagent_max_tree_nodes = 16;
+    global.source_path = "/tmp/home/.lubancode/config.json";
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    REQUIRE(merged.has_value());
+    REQUIRE(merged->config.subagent.max_children_per_task.has_value());
+    CHECK(*merged->config.subagent.max_children_per_task == 4);  // 项目级压全局
+    REQUIRE(merged->config.subagent.max_tree_nodes.has_value());
+    CHECK(*merged->config.subagent.max_tree_nodes == 16);  // 项目没写,落全局
+
+    // 都没写 = nullopt(不设)。
+    const auto unset_governance = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt, EmptyGenericEnv());
+    REQUIRE(unset_governance.has_value());
+    CHECK(unset_governance->config.subagent.max_children_per_task == std::nullopt);
+    CHECK(unset_governance->config.subagent.max_tree_nodes == std::nullopt);
+}
+
 // ---------------------------------------------------------------------------
 // subagent.wall_clock_timeout_secs(规格《子代理活跃度不可见与疑似挂死》):
 // 整轮墙钟兜底,0 = 不限;坏值静默跳过,合并项目级压全局,没写 = nullopt

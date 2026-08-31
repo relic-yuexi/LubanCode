@@ -1,6 +1,6 @@
 # 子代理递归派工与结构化任务交接设计
 
-- 状态：P0 五批已落地（2026-08-31：AgentTaskCoordinator、结构化任务合同、显式 lineage、后台递归两路、结果归父）；P1-1/P1-2 起待实现
+- 状态：P0 五批 + P1-1/P1-2 已落地（2026-08-31：AgentTaskCoordinator、结构化任务合同、显式 lineage、后台递归两路、结果归父、scoped agent_message、直接子名册、Dock 缩进画树、/doctor agents 递归可观测性、防扇出配置接线、嵌套轨迹边）；§十七/§十八见文末自查表，真机三场景与 ThreadSanitizer 未验（本机无 Linux/TSan 环境），已如实标注
 - 级别：P1；其中“后台子代理能再派工”与“父子归属不串线”为 P0 正确性门
 - 日期：2026-08-31
 - 基线：`33988ed` (`main`)
@@ -915,81 +915,83 @@ warning: max_active(2) < max_depth(3), deepest chain may be rejected
 
 ### P1-1：传话、Dock 与诊断
 
-- [ ] subagent 挂 scoped `agent_message`，只投自己直接孩子。
-- [ ] main/subagent 各自只收自己的直接子名册。
-- [ ] Dock 画树、折叠、等子任务态；查看与停止仍按稳定 task id。
-- [ ] `/doctor agents` 打印后台递归、lineage 方式、限额与异常配置。
-- [ ] 完成通知显示直接父子关系，不把孙任务正文另打到 main 屏上。
+- [x] subagent 挂 scoped `agent_message`，只投自己直接孩子。（AgentMessageTool 新增 caller_task_id；RunTask 第二段与 scoped agent 同一道资格门一并挂；execute() 先查目标 parent_task_id==caller_task_id，不等即稳定拒收 not_child，不碰 ledger.SendMessage）
+- [x] main/subagent 各自只收自己的直接子名册。（TaskLedger::RunningTasksRoster(caller_task_id=0) 按 parent_task_id 过滤；main 默认 0 只列自己直派的根任务；subagent 的续投 continuation 每次轮次边界附上 ledger().RunningTasksRoster(task->snapshot.id)，标题换成"直接子任务名册"）
+- [x] Dock 画树、折叠、等子任务态；查看与停止仍按稳定 task id。（AgentPanelEntry 增 depth/parent_task_id 投影自 TaskSummary；身份列按 (depth-1)*2 空格缩进，depth<=1 不缩进——排序/折叠/task_id 语义不动；WaitingChildren/Completing 并入 IsAliveTaskState 的"在跑"判定，此前这两态会漏进 switch 外的"失败·未注明原因"假象，现补 state_waiting_children「等 N 只子任务」与 state_completing「收口中」两枚短话）
+- [x] `/doctor agents` 打印后台递归、lineage 方式、限额与异常配置。（PrintAgentsMatrix 新增 6 行：recursive_dispatch/lineage/limits(4 项)/detached_registry/completion_routing/task_spec；max_active<max_depth 时追加 warning_active_lt_depth）
+- [x] 完成通知显示直接父子关系，不把孙任务正文另打到 main 屏上。（P0-4 的 delivery_target 路由已保证：CompletionNoticeLines/DrainCompletionNotices/UndeliveredCompletionTaskIds 只认 MainTurnContext，恒等于 parent_task_id==0 的根任务——孙任务恒为 ParentTaskInbox，从未进入这几个查询范围；task_ledger.cpp 补了说明这层不变量的注释，未改逻辑）
 
 ### P1-2：预算、轨迹与发布门
 
-- [ ] `max_children_per_task/max_tree_nodes` 配置、merge、doctor 与超限稳定错。
-- [ ] 树 deadline 向下传；子 wall limit 不越父剩余时间。
-- [ ] 轨迹接 `task_ref/parent_agent_run_id/result.accepted`。
-- [ ] usage 真账接稳后，再实现 `max_tree_total_tokens`。
-- [ ] 真机同模型对比“自由 prompt”与“结构化 task”的派工完整度、重试数与 token 开销；没测不宣称更好。
+- [x] `max_children_per_task/max_tree_nodes` 配置解析、merge、doctor 展示与超限稳定错。（config.hpp/cpp 新增 subagent.max_children_per_task/max_tree_nodes 解析+merge，正整数救命阀口径同 max_depth/max_active；AgentTool::SetDispatchGovernance 扩两参；tool_runtime.cpp 接线；判决门 EvaluateAdmission/TryRegisterChild P0 已备，稳定错文案见下方"超限稳定错样例"）
+- [ ] 树 deadline 向下传；子 wall limit 不越父剩余时间。（本轮未实现——超出 P1-1/P1-2 五条清单原文范围；父子各自的 wall_limit_secs 目前独立设置，无"子不越父剩余"钳制，留作后续单）
+- [x] 轨迹接 `task_ref/parent_agent_run_id/result.accepted`。（task_ref/result.accepted 是 P0 既有落点；本单补的是 parent_agent_run_id 的嵌套边——AgentTaskSnapshot 增 agent_run_id 字段，RunTask 起跑前由 trajectory->run_id() 回填；IdentityOfSnapshot 投影进 AgentRunIdentity；Hooks::trajectory_spawn 签名加 parent_run_id 参数，ExecuteForeground/LaunchBackground 都传 caller.agent_run_id；TrajectorySessionLedger::SpawnSubagent 新参数非空则 relations.parent_run_id 记它，空则落回 main_run_id——旧行为零变。call-boundary 的 AttachChildRun/NoteChildTerminal 仍只挂 main_bridge，嵌套层自己的调用边界回填是明确留白的后续项，已在代码注释与本报告写清，不冒充已完整)
+- [ ] usage 真账接稳后，再实现 `max_tree_total_tokens`。（原文即注明"先支持 null"，本单未动——config/governance 仍是占位 null，符合设计原意）
+- [ ] 真机同模型对比"自由 prompt"与"结构化 task"的派工完整度、重试数与 token 开销；没测不宣称更好。（需要真实 provider 调用与人工评估，隔离 worktree + 假后端环境无法完成，如实留空）
 
 ## 十七、测试设计
 
 ### 17.1 `AgentTaskSpec` 合同测试
 
-- [ ] 新 `task` 最小合法形状可 parse，canonical JSON 稳定。
-- [ ] 缺 `goal/deliverable`、空数组项、错类型、超长、NUL 按稳定 JSON path 报错。
-- [ ] `task + prompt` 同给拒绝。
-- [ ] legacy `prompt` 归一后与旧行为对账。
-- [ ] 渲染顺序、空段省略、多行缩进与中英 UTF-8 golden。
-- [ ] `source_request` 与 `context` 分栏，不会把派工者说明标成用户原话。
-- [ ] task spec 内写“忽略安全规则”不会改变有效权限与工具集。
+- [x] 新 `task` 最小合法形状可 parse，canonical JSON 稳定。（test_subagent_recursion.cpp「AgentTaskSpec:最小合法形状可 parse,canonical JSON 稳定,渲染分栏」）
+- [x] 缺 `goal/deliverable`、空数组项、错类型、超长、NUL 按稳定 JSON path 报错。（同文件「AgentTaskSpec:缺必填/空串/错类型/超限/NUL 按稳定 JSON path 报错」）
+- [x] `task + prompt` 同给拒绝。（「agent 工具:task 与 prompt 同给即拒;legacy prompt 照旧可用」）
+- [x] legacy `prompt` 归一后与旧行为对账。（「AgentTaskSpec:legacy prompt 归一(...)」+ 上一条同文件覆盖归一后对账）
+- [ ] 渲染顺序、空段省略、多行缩进与中英 UTF-8 golden。（P0 已测顺序/空段省略(zh 单段);未见多行缩进专项与 en golden,如实留空——不是本单新增缺口，本单未补）
+- [ ] `source_request` 与 `context` 分栏，不会把派工者说明标成用户原话。（未见以 source_request 为断言目标的用例，如实留空）
+- [ ] task spec 内写“忽略安全规则”不会改变有效权限与工具集。（未见专门的注入抗性用例，如实留空——属产品不变量 11 的验证缺口，非本单新增代码引入）
 
 ### 17.2 lineage 与 admission 测试
 
-- [ ] main=0、child=1、grandchild=2、great-grandchild=3；第 4 层在 `max_depth=3` 时派出前拒绝。
-- [ ] 两只并行根子任务都是 depth 1，不互相变成 2。
-- [ ] foreground/background 都计真 lineage depth。
-- [ ] 父任务不存在、已终态、coordinator closing 时拒绝新任务。
-- [ ] `max_active/max_children_per_task/max_tree_nodes` 各有超限测试，拒绝后计数不泄漏。
-- [ ] custom Agent 无 `agent` allow 时不能派；Explore 永远无 `agent`。
+- [x] main=0、child=1、grandchild=2、great-grandchild=3；第 4 层在 `max_depth=3` 时派出前拒绝。（「台账 lineage:main->子->孙各层,root 继承,深度上限与父终态拒绝」+「深度治理:嵌套派工超过上限明报,不发请求」）
+- [x] 两只并行根子任务都是 depth 1，不互相变成 2。（「并行根前台任务互不抬深度:两条线程各派根+孩子,全部成功」）
+- [x] foreground/background 都计真 lineage depth。（「后台子代理能再派前台孩子」「后台根->后台孩子」两枚交叉覆盖）
+- [x] 父任务不存在、已终态、coordinator closing 时拒绝新任务。（「台账 lineage...父终态拒绝」+「协调器 closing:RequestClose 后任何 handle 派工稳定拒绝」）
+- [x] `max_active/max_children_per_task/max_tree_nodes` 各有超限测试，拒绝后计数不泄漏。（`max_active`：「台账 admission:并发槽满拒根任务」，含收尾退槽再注册验证不泄漏；`max_children_per_task/max_tree_nodes`：纯函数门「EvaluateAdmission 纯函数面」+ 本单新补的整合层「台账整合:max_children_per_task/max_tree_nodes 超限稳定拒绝,拒绝后计数不泄漏」——`TryRegisterChild` 真派工路径下拒绝后 `ChildTaskIds/TreeNodesCount/AliveChildCount` 都验证未被半条任务污染）
+- [x] custom Agent 无 `agent` allow 时不能派；Explore 永远无 `agent`。（test_agent_tool.cpp「Explore 撞只读墙」+ RunTask 里 `agent_type != "Explore"` 与 `custom_allows` 双闸；test_custom_agent_dispatch.cpp 权限收窄执法两枚）
 
 ### 17.3 结果路由测试
 
-- [ ] main -> foreground child：结果作当前 Tool::Result 回 main。
-- [ ] main -> background child：结果只进 main completion context。
-- [ ] background parent -> foreground child：结果回 parent Tool::Result，main 不收子结果副本。
-- [ ] background parent -> background child：结果进 parent mailbox，main drain 拿不到。
-- [ ] 孙任务完成、子任务吸收后收口，main 最终只收到子任务的整合结果。
-- [ ] parent continuation 失败时 child completion 退回未送达，不丢、不重复投。
-- [ ] 父在孩子运行时给最终文本，进 WaitingChildren；孩子终态后才再续投收口。
-- [ ] 前台 Tool::Result 返回而 history append 失败时不翻 `delivered`；append 成功后确认一次，多次确认也不重复记账。
-- [ ] 错误的 `parent_run_id` 不能替别的父任务确认送达。
+- [x] main -> foreground child：结果作当前 Tool::Result 回 main。（test_agent_tool.cpp「统一台账:前台任务当场入账 Running,跑完 Done,统计落准且不走后台回流」）
+- [x] main -> background child：结果只进 main completion context。（「agent 工具:空闲时跑完的后台子代理,HasUndeliveredCompletions 翻真直到被投递」）
+- [x] background parent -> foreground child：结果回 parent Tool::Result，main 不收子结果副本。（test_subagent_recursion.cpp「后台子代理能再派前台孩子:结果作为 Tool::Result 回父,不弹 UI」）
+- [x] background parent -> background child：结果进 parent mailbox，main drain 拿不到。（「后台根->后台孩子:孩子结果进父 mailbox,父吸收后收口,main 只收根」）
+- [x] 孙任务完成、子任务吸收后收口，main 最终只收到子任务的整合结果。（同上一条覆盖:该用例断言 main 只收根任务的整合结论,不见孙任务裸文）
+- [ ] parent continuation 失败时 child completion 退回未送达，不丢、不重复投。（`RestoreDrainedInbox` 的一般性退信逻辑有单测(agent_inbox 相关用例)，但专门覆盖"续投失败 -> ChildCompletion 退回未送达"这一分支未见专项用例，如实留空）
+- [x] 父在孩子运行时给最终文本，进 WaitingChildren；孩子终态后才再续投收口。（「后台根->后台孩子」用例注释明写此路径：父先交阶段结论进 WaitingChildren，唤醒后续投收口）
+- [ ] 前台 Tool::Result 返回而 history append 失败时不翻 `delivered`；append 成功后确认一次，多次确认也不重复记账。（设计文档 §9.1 提出的 `AcknowledgeTaskDelivery` 确认口未落地——当前实现在注册时就将前台任务 `delivered` 置真（乐观即时标记），不是"append 成功后才确认"的两段式；这是 P0 遗留的设计与实现落差，非本单引入，如实留空、不冒领）
+- [ ] 错误的 `parent_run_id` 不能替别的父任务确认送达。（依赖上一条的确认口，未落地故不可测，如实留空）
 
 ### 17.4 取消与竞态测试
 
-- [ ] 取消父任务，所有后代收到信号，各自按稳定终态收账。
-- [ ] 取消孩子不取消父亲，父收到 stopped outcome 后可继续。
-- [ ] parent 终态与 child dispatch 并发发生，只能有一种结果：child 已原子注册并归父，或 dispatch 被 `parent_finished` 拒绝。
-- [ ] child terminal 与 parent cancel 同时发生，completion 只产一次，不翻回 Running。
-- [ ] session close 时拒新派工，取消整树，bounded join；不死锁，不留可 join 线程句柄。
-- [ ] 墙钟强制收账后的迟到线程不得改写终态，它派的子树也已收取消。
-- [ ] 外部放掉 `ToolRuntime` 后，私有 registry/handle 不会靠引用环吊住 coordinator；存活 worker 收场后析构可观测。
+- [x] 取消父任务，所有后代收到信号，各自按稳定终态收账。（test_subagent_recursion.cpp「取消树:停后台根,后台孩子随树收 Cancelled/ParentCancelled」）
+- [ ] 取消孩子不取消父亲，父收到 stopped outcome 后可继续。（未见反向专项用例——已有用例都是"取消父→查孩子"方向，"取消孩子→父不受影响"未见断言，如实留空）
+- [x] parent 终态与 child dispatch 并发发生，只能有一种结果：child 已原子注册并归父，或 dispatch 被 `parent_finished` 拒绝。（「父终态与孩子注册并发:只可能是'孩子已注册'或'被拒',不留半条」）
+- [ ] child terminal 与 parent cancel 同时发生，completion 只产一次，不翻回 Running。（未见此并发时序的专项用例，如实留空）
+- [ ] session close 时拒新派工，取消整树，bounded join；不死锁，不留可 join 线程句柄。（「协调器 closing:RequestClose 后任何 handle 派工稳定拒绝」只覆盖"拒新派工"半边；"取消整树 + bounded join 无死锁"需要真线程压力场景，未见专项用例，如实留空）
+- [ ] 墙钟强制收账后的迟到线程不得改写终态，它派的子树也已收取消。（`ForceFinalizeWallClock`/`force_finalized` 有实现，未见迟到线程专项用例，如实留空）
+- [ ] 外部放掉 `ToolRuntime` 后，私有 registry/handle 不会靠引用环吊住 coordinator；存活 worker 收场后析构可观测。（需要真实析构可观测性断言，未见专项用例，如实留空；本单也未新增此类夹具——超出 P1-1/P1-2 五条清单直接范围）
 
 ### 17.5 权限与隔离测试
 
-- [ ] background parent 派 foreground child，需确认工具不会弹 UI；已放行照行，未放行稳定拒绝。
-- [ ] 权限档、tools.allow/deny 沿父子链不得放宽。
-- [ ] 父在隔离 worktree，子 `inherit/none` 都只能读写父房间，不碰 main checkout。
-- [ ] 隔离父再请求嵌套 `worktree` 稳定拒绝，不开半间房。
-- [ ] 父房间在后代全收口前不自动删。
+- [x] background parent 派 foreground child，需确认工具不会弹 UI；已放行照行，未放行稳定拒绝。（「后台子代理能再派前台孩子」验"不弹 UI"；test_agent_tool.cpp「后台子代理放行账」三枚验放行/未放行两态，虽是 main 直派后台的场景，机制与嵌套 headless 共用同一份 `BackgroundPermissionLedger` 查账口）
+- [x] 权限档、tools.allow/deny 沿父子链不得放宽。（test_custom_agent_dispatch.cpp「权限收窄执法:父 yolo 子 confirm...」+「权限收窄执法:档不比父严不启用...」）
+- [ ] 父在隔离 worktree，子 `inherit/none` 都只能读写父房间，不碰 main checkout。（「自定义 Agent worktree」用例验的是任务自己开房，不是"父已在房里、子 inherit 继承"这条路径，未见专项用例，如实留空）
+- [ ] 隔离父再请求嵌套 `worktree` 稳定拒绝，不开半间房。（未见 `nested_worktree_not_supported` 专项用例，如实留空）
+- [ ] 父房间在后代全收口前不自动删。（未见专项用例，如实留空）
 
 ### 17.6 Hooks、面板与轨迹测试
 
-- [ ] 前台、后台、嵌套三路 `SubagentStart/Stop` 都有正确 parent/root/depth。
-- [ ] ToolTrace 的 spawn parent execution id 指向直接父的 `agent` 工具调用。
-- [ ] Dock 树序稳定；任务完成、清理、取消后选中/查看不飘。
-- [ ] 查看态的 spec 分栏不把长文挤破 footer，窄终端可折行。
-- [ ] 每只 subagent 只有自己的 JSONL；`parent_agent_run_id/task_ref/result.accepted` 可交叉核对。
-- [ ] main 轨迹不复制孙任务的模型/工具正文。
+- [x] 前台、后台、嵌套三路 `SubagentStart/Stop` 都有正确 parent/root/depth。（test_agent_tool.cpp「agent 后台 hooks:SubagentStart/工具事件/SubagentStop 真跑,记录经安全点归并」覆盖后台路；SubagentStart 的字段构造(hook_parent_task_id/hook_root_task_id/hook_depth)在 agent_tool.cpp 里前后台共用同一段拼装代码，未见嵌套路专项断言，半覆盖如实注明）
+- [ ] ToolTrace 的 spawn parent execution id 指向直接父的 `agent` 工具调用。（未见以此为断言目标的专项用例，如实留空）
+- [x] Dock 树序稳定；任务完成、清理、取消后选中/查看不飘。（test_agent_panel.cpp「状态机:按稳定 task id 选择——任务重排不丢...」+「状态机:正在查看的任务完成退场,原子回 main...」两枚覆盖树序/选中稳定性；本单新增「Dock 画树(P1-1):depth 缩进身份列...」验证缩进不影响 task_id 语义）
+- [ ] 查看态的 spec 分栏不把长文挤破 footer，窄终端可折行。（agent_panel_presenter.cpp 的任务合同分栏有 `TruncateUtf8ToDisplayWidth(flat, 200)` 硬截,但未见窄终端折行的专项渲染用例，如实留空）
+- [x] 每只 subagent 只有自己的 JSONL；`parent_agent_run_id/task_ref/result.accepted` 可交叉核对。（test_runtime_wiring.cpp「ledger:开账出 main.jsonl,子代理拿独立 JSONL 与父边界」覆盖 task_ref/result.accepted 与独立文件；本单新增「SpawnSubagent:嵌套派工的 parent_run_id 指向父任务自己的 run,不冒充 main(P1-2)」补上嵌套 parent_agent_run_id 这一段此前完全空白的覆盖）
+- [x] main 轨迹不复制孙任务的模型/工具正文。（同「ledger:开账出...」用例里的 `main_text.find("读文件并数行数") == std::string::npos` 断言）
 
 ### 17.7 真机场景
+
+**状态：未跑。** 本单在隔离 worktree 内完成，没有配置真实 provider 凭据（本仓规矩"代码与夹具不写真实密钥"），三场景均未执行，如实留空——不冒领"已验"。以下场景描述保持原样，留给下一次接有真实 provider 的会话执行。
 
 不只跑假 backend。用当前可用 provider 跑三场：
 
@@ -1030,29 +1032,29 @@ main -> parent -> child -> 尝试 grandchild(应被深度拒绝)
 
 ### 18.1 代码门
 
-- [ ] `AgentTool` 不再是后台递归共享的可变目标；派工走 scoped handle + coordinator。
-- [ ] `SubagentScheduler` 没有 `active_`、`foreground_depth_`；活跃数与深度只从 ledger/lineage 来。
-- [ ] `TaskLedger` 是 parent/root/depth/delivery 的唯一运行时真账。
-- [ ] 后台私有 registry 能挂带身份的 `agent`，又不能直调终端/UI hooks。
-- [ ] main 只 drain 直接根子任务结果；subagent 收自己直接孩子。
-- [ ] 父子取消、墙钟、session close 与迟到线程有一套可证明收场。
+- [x] `AgentTool` 不再是后台递归共享的可变目标；派工走 scoped handle + coordinator。（P0-3 落地，本单未回退）
+- [x] `SubagentScheduler` 没有 `active_`、`foreground_depth_`；活跃数与深度只从 ledger/lineage 来。（P0-2 落地，subagent_scheduler.hpp 现只剩 `EvaluateAdmission` 判决函数，本单只加了 max_children_per_task/max_tree_nodes 配置接线，没有新增状态）
+- [x] `TaskLedger` 是 parent/root/depth/delivery 的唯一运行时真账。（P0-2 落地；本单加了 `agent_run_id` 字段，是同一本账上新增的读投影，没有另起第二本账）
+- [x] 后台私有 registry 能挂带身份的 `agent`，又不能直调终端/UI hooks。（P0-4 落地；本单同一道资格门下追加挂了带身份的 `agent_message`）
+- [x] main 只 drain 直接根子任务结果；subagent 收自己直接孩子。（P0-4 落地 delivery_target 路由；本单在此基础上把"名册"也做成同样的直接子过滤，之前名册仍是全局平铺的——见 P1-1 第 2 条）
+- [x] 父子取消、墙钟、session close 与迟到线程有一套可证明收场。（P0-4 落地，本单未改动这部分逻辑）
 
 ### 18.2 产品门
 
-- [ ] 交互默认 `auto` 起来的 general-purpose 后台子代理，真能再调 `agent`。
-- [ ] 子代理的子任务结果真回子代理，不是面板上看似有树、实际全投 main。
-- [ ] 主模型派出去的任务单能一眼看清目标、范围、约束、验收与交付。
-- [ ] legacy `prompt` 仍可用，新 `task` 有强校验，两路结果都能在 Agent Dock 查。
-- [ ] Explore 继续只读且无派工权；自定义 Agent 不能递归放大工具或权限。
-- [ ] 限额、等孩子、失败、取消与未送达结果在面板与诊断里都看得见。
+- [x] 交互默认 `auto` 起来的 general-purpose 后台子代理，真能再调 `agent`。（P0-4 落地，本单未回退；假后端冒烟中三层树验证仍成立）
+- [x] 子代理的子任务结果真回子代理，不是面板上看似有树、实际全投 main。（P0-4 落地；本单在名册/agent_message 两处堵住了"看得见全局树、却能投给非自己孩子"的缝）
+- [x] 主模型派出去的任务单能一眼看清目标、范围、约束、验收与交付。（P0-1 面板分栏落地，本单未改动这部分）
+- [x] legacy `prompt` 仍可用，新 `task` 有强校验，两路结果都能在 Agent Dock 查。（P0-1 落地）
+- [x] Explore 继续只读且无派工权；自定义 Agent 不能递归放大工具或权限。（P0 落地；本单 agent_message 挂载复用同一道 `agent_type != "Explore"` 资格门，不额外放宽）
+- [x] 限额、等孩子、失败、取消与未送达结果在面板与诊断里都看得见。（等孩子/失败/取消/未送达 P0-4 已落面板；本单补上 WaitingChildren/Completing 两态此前会显示成假失败的 bug，并把 max_children_per_task/max_tree_nodes 两项限额接进 `/doctor agents`）
 
 ### 18.3 验证门
 
-- [ ] 新增合同、lineage、路由、取消、权限、隔离、hook、面板单测全绿。
-- [ ] 现有 `unit.agent.agent_tool`、`unit.agent.agent_message_tool`、`unit.agent.agent_panel`、`unit.runtime.tool_runtime`、`unit.config.config`、`unit.runtime.subagent_event_stream` 全绿。
-- [ ] 三场真机验收都留原始输出/轨迹与任务树证据。
-- [ ] 用 ThreadSanitizer（Linux）或可用线程检查手段跑协调器压力夹具；至少 1000 轮并发派工/完成/取消不死锁、不重复送达。
-- [ ] Release 全量 CTest 全绿后，才能把交互后台递归称为已支持。
+- [x] 新增合同、lineage、路由、取消、权限、隔离、hook、面板单测全绿。（本单新增/改动的 6 份测试文件——test_agent_message_tool.cpp、test_agent_panel.cpp、test_config.cpp、test_subagent_recursion.cpp、test_runtime_wiring.cpp、test_tool_text.cpp——随全量 ctest 一并跑绿，见下条）
+- [x] 现有 `unit.agent.agent_tool`、`unit.agent.agent_message_tool`、`unit.agent.agent_panel`、`unit.runtime.tool_runtime`、`unit.config.config`、`unit.runtime.subagent_event_stream` 全绿。（Debug 全量 ctest 294 册,100% passed,0 failed;`unit.runtime.subagent_event_stream` 这一册名没在当前 294 册清单里找到——可能是旧名或已并入别的册,ctest 全量绿本身已覆盖该功能域现存的全部册子,如实注明这一点差异）
+- [ ] 三场真机验收都留原始输出/轨迹与任务树证据。（§17.7 已注明未跑，如实留空）
+- [ ] 用 ThreadSanitizer（Linux）或可用线程检查手段跑协调器压力夹具；至少 1000 轮并发派工/完成/取消不死锁、不重复送达。（本机 Windows 隔离 worktree 没有 Linux/TSan 环境；WSL 侧本单只做了 `-fsyntax-only` 语法验，没有起 TSan 构建跑压力夹具，如实留空——不冒领"已验"）
+- [ ] Release 全量 CTest 全绿后，才能把交互后台递归称为已支持。（本单按派工指令跑的是 `ctest -C Debug`（294 册 100% passed），这是本单构建铁律明确要求的配置；Release 单独 configure+build+ctest 一遍本单未做——如实留空，不拿 Debug 全绿代签 Release 全绿）
 
 ## 十九、风险与对策
 

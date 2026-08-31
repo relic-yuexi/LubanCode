@@ -456,6 +456,12 @@ struct SubagentConfig {
     // kDefaultSubagentMaxDepth / kDefaultSubagentMaxActive(默认值公开)。
     std::optional<int> max_depth;
     std::optional<int> max_active;
+    // 防扇出与整树烧 token 的两道硬帽(递归派工单 §7.4/P1-2):nullopt = 不设
+    // (SubagentGovernance 默认 0)。判决口(EvaluateAdmission)P0 已备,这里
+    // 只接配置——一只父任务累计可派孩子数(终态也算)、一棵根树累计节点数
+    //(终态也算)。
+    std::optional<int> max_children_per_task;
+    std::optional<int> max_tree_nodes;
     // 整轮墙钟兜底(秒):nullopt = kDefaultSubagentWallClockTimeoutSecs;
     // 显式 0 = 不限。到点先走正常取消链,宽限期内不收口就强制收账。
     std::optional<int> wall_clock_timeout_secs;
@@ -831,6 +837,10 @@ struct FileConfig {
     // subagent 段的 max_depth / max_active:正整数;坏值静默跳过(救命阀)。
     std::optional<int> subagent_max_depth;
     std::optional<int> subagent_max_active;
+    // subagent 段的 max_children_per_task / max_tree_nodes(P1-2):正整数;
+    // 坏值静默跳过(救命阀,待遇同 max_depth/max_active)。
+    std::optional<int> subagent_max_children_per_task;
+    std::optional<int> subagent_max_tree_nodes;
     // subagent 段的 wall_clock_timeout_secs:非负整数(0 = 不限),坏值跳过。
     std::optional<int> subagent_wall_clock_timeout_secs;
     // agent 段:{"agent": {"max_output_tokens": N, "length_continuations": N}}。

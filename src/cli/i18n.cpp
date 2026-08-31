@@ -202,6 +202,8 @@ const Entry kZhCN[] = {
     // ---- 子代理状态条(#52,#三:凑齐工具次数/token/耗时三个数字) ----
     {"agent_status.state_running", "运行中"},
     {"agent_status.state_stopping", "停止中(等当前操作收口)"},
+    {"agent_status.state_waiting_children", "等 {0} 只子任务"},
+    {"agent_status.state_completing", "收口中"},
     {"agent_status.state_done", "完成"},
     {"agent_status.state_failed", "失败"},
     {"agent_status.state_failed_reason", "失败 · {0}"},
@@ -260,6 +262,8 @@ const Entry kZhCN[] = {
     {"agent_message.finished",
      "子代理 #{0} 已结束,不收插话(不改投 main、不自动复活;需要续跑请另派新任务)。"},
     {"agent_message.not_found", "没有任务号 #{0} 的子代理(可能已被清理或从未存在);请核对运行中子代理名册里的 task id。"},
+    {"agent_message.not_child",
+     "任务 #{0} 不是你直接派出的子任务(子代理只能给自己的直接孩子传话,不能跨树/隔代投递);请核对你自己的\"直接子任务名册\"。"},
     {"agent_message.invalid", "message 不能为空(且必须是字符串);只传增量要求,先逐字引用户原话。"},
     {"agent_message.task_id_invalid", "task_id 必须是整数(运行中子代理名册里列出的任务号)。"},
     {"agent_message.unavailable", "当前会话没有可用的子代理运行时,无法投递。"},
@@ -1302,6 +1306,24 @@ const Entry kZhCN[] = {
     {"doctor.agents.budget",
      "共用运行策略:输出上限 {0}(0 = unset,交服务端默认) · 步数 {1} · length 续跑 {2} 次"},
     {"doctor.agents.governance", "派工治理:并发槽 ≤ {0}(subagent.max_active) · 深度 ≤ {1}(subagent.max_depth)"},
+    {"doctor.agents.recursive_dispatch",
+     "recursive dispatch: foreground=yes, background=yes(scoped handle,前后台同一套 admission,不由前台/"
+     "后台决定资格)"},
+    {"doctor.agents.lineage",
+     "lineage depth: explicit task lineage(TaskLedger 的 parent/root/depth 字段,不靠全局原子猜)"},
+    {"doctor.agents.limits",
+     "max depth / active / children / tree nodes: {0} / {1} / {2} / {3}(children/tree nodes 为 0 = 不设,"
+     "subagent.max_children_per_task/max_tree_nodes 可调)"},
+    {"doctor.agents.detached_registry",
+     "detached registry agent tool: yes(scoped handle;每任务运行期现挂,不摸活 hooks/线程表/主 registry)"},
+    {"doctor.agents.completion_routing",
+     "completion routing: direct parent(前台走 Tool::Result,后台走父 mailbox;main 只收根子任务结果,"
+     "不跨级提孙任务)"},
+    {"doctor.agents.task_spec",
+     "task spec: v1 structured + legacy prompt compatible(旧 title+prompt 自动归一,不强制迁移)"},
+    {"doctor.agents.warning_active_lt_depth",
+     "警告:max_active({0}) < max_depth({1}),最深一条链路可能在并发槽处被拒(调大 subagent.max_active 或"
+     "收窄 subagent.max_depth)"},
     {"doctor.agents.row_main", "main        :{0} 枚工具(含 agent/todo/ask_user)"},
     {"doctor.agents.row_sub",
      "general-purpose:{0} 枚工具(与 main 同能力;todo 为每任务私有实例,可再派 agent)"},
@@ -1911,6 +1933,8 @@ const Entry kEn[] = {
     // ---- subagent status board (#52, #three: tool calls/tokens/duration) ----
     {"agent_status.state_running", "Running"},
     {"agent_status.state_stopping", "stopping (waiting for current operation)"},
+    {"agent_status.state_waiting_children", "waiting on {0} child task(s)"},
+    {"agent_status.state_completing", "wrapping up"},
     {"agent_status.state_done", "Done"},
     {"agent_status.state_failed", "Failed"},
     {"agent_status.state_failed_reason", "failed · {0}"},
@@ -1980,6 +2004,9 @@ const Entry kEn[] = {
      "instead)."},
     {"agent_message.not_found",
      "No agent with task id #{0} (cleared or never existed); check the running-agent roster for valid ids."},
+    {"agent_message.not_child",
+     "Task #{0} is not your direct child (a subagent may only message its own direct children, never across "
+     "trees or grandchildren); check your own \"direct child task roster\"."},
     {"agent_message.invalid", "message must be a non-empty string; relay the user's exact words first, deltas only."},
     {"agent_message.task_id_invalid", "task_id must be an integer from the running-agent roster."},
     {"agent_message.unavailable", "No agent runtime available in this session; message not delivered."},
@@ -2627,6 +2654,26 @@ const Entry kEn[] = {
      "shared runtime profile: output budget {0} (0 = unset, server default) · steps {1} · length continuations {2}"},
     {"doctor.agents.governance",
      "dispatch governance: concurrency slots ≤ {0} (subagent.max_active) · depth ≤ {1} (subagent.max_depth)"},
+    {"doctor.agents.recursive_dispatch",
+     "recursive dispatch: foreground=yes, background=yes (scoped handle; same admission path for foreground and "
+     "background, eligibility is never decided by foreground/background)"},
+    {"doctor.agents.lineage",
+     "lineage depth: explicit task lineage (TaskLedger's parent/root/depth fields, not a global atomic guess)"},
+    {"doctor.agents.limits",
+     "max depth / active / children / tree nodes: {0} / {1} / {2} / {3} (children/tree nodes = 0 means unset; "
+     "tune via subagent.max_children_per_task/max_tree_nodes)"},
+    {"doctor.agents.detached_registry",
+     "detached registry agent tool: yes (scoped handle; mounted per task at runtime, never touches live hooks/"
+     "thread table/main registry)"},
+    {"doctor.agents.completion_routing",
+     "completion routing: direct parent (foreground returns via Tool::Result, background delivers to the parent's "
+     "mailbox; main only drains root-task results, never pulls grandchild results across levels)"},
+    {"doctor.agents.task_spec",
+     "task spec: v1 structured + legacy prompt compatible (old title+prompt calls are normalized automatically, "
+     "no forced migration)"},
+    {"doctor.agents.warning_active_lt_depth",
+     "warning: max_active({0}) < max_depth({1}), the deepest chain may be rejected at the concurrency slot (raise "
+     "subagent.max_active or lower subagent.max_depth)"},
     {"doctor.agents.row_main", "main        : {0} tools (incl. agent/todo/ask_user)"},
     {"doctor.agents.row_sub",
      "general-purpose: {0} tools (same capabilities as main; per-task private todo; may dispatch further agents)"},
