@@ -267,6 +267,9 @@ Server::Server(ServerOptions options, BackendFactory backend_factory, RegistryFa
         browser_options.sidecar_command = options_.browser_sidecar_command;
         browser_options.sidecar_args = options_.browser_sidecar_args;
         browser_options.artifact_dir = options_.browser_artifact_dir;
+        if (options_.browser_screencast_queue_capacity > 0) {
+            browser_options.screencast_queue_capacity = options_.browser_screencast_queue_capacity;
+        }
         browser_ = std::make_unique<BrowserService>(
             std::move(browser_options),
             [this](std::string_view method, const nlohmann::json& params) {

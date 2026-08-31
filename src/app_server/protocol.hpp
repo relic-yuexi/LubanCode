@@ -30,6 +30,13 @@ namespace lubancode::app_server {
 //          内核按连接裁定(外壳报的 owner 只是意向,内核说了算——伪造
 //          owner:"user" 的非用户连接被 browser.owner_denied 明拒);owner
 //          缺省不再是写死的 "user",而是连接的裁定身份。老报文形状零改动。
+//   1.1(阶段 C 注,additive)—— 镜像流:新增 browser/screencast/start|
+//          browser/screencast/stop 两枚方法与 browser/screencast/frame
+//          事件。screencast 只读(不改页面状态)、不问审批,与 snapshot/
+//          screenshot 同档;字节走同一条截图 artifact 链落盘,协议上只见
+//          引用与 pageId,绝不出现 base64。frame 事件带 dropped(内核侧
+//          落盘赶不上帧速时,丢最老帧计的账,下一帧报完清零)。老报文
+//          形状零改动。
 inline constexpr std::string_view kProtocolVersion = "1.1";
 
 // jsonrpc:"2.0" 字段去留已冻结(阶段 3,schema 定案):
@@ -176,6 +183,10 @@ inline constexpr std::string_view kMethodBrowserResume = "browser/resume";
 inline constexpr std::string_view kMethodBrowserConsoleQuery = "browser/console/query";
 inline constexpr std::string_view kMethodBrowserNetworkQuery = "browser/network/query";
 inline constexpr std::string_view kMethodBrowserDownloadsQuery = "browser/downloads/query";
+// 镜像流(阶段 C):起停 Playwright/CDP screencast。只读,不问审批
+//(与 snapshot/screenshot 同档);pageId 缺省 = 活动页。
+inline constexpr std::string_view kMethodBrowserScreencastStart = "browser/screencast/start";
+inline constexpr std::string_view kMethodBrowserScreencastStop = "browser/screencast/stop";
 
 // ---------------------------------------------------------------------------
 // browser 事件族(阶段 3)。params 一律带 seq(连接层统一盖)。高频的
@@ -202,6 +213,11 @@ inline constexpr std::string_view kEventBrowserUserEpoch = "browser/user_epoch";
 // 的暂停灯就与内核拧着。
 inline constexpr std::string_view kEventBrowserPaused = "browser/paused";
 inline constexpr std::string_view kEventBrowserResumed = "browser/resumed";
+// 镜像流帧(阶段 C):params {pageId, frameSeq, width, height, dropped,
+// artifact}——字节落同一条截图 artifact 链,协议上只有引用。可丢(慢
+// 消费者场景下队满丢最老帧);dropped 是这一帧之前、这一页丢了几帧,
+// 报完清零(与 journal 批量的 dropped 同口径)。
+inline constexpr std::string_view kEventBrowserScreencastFrame = "browser/screencast/frame";
 
 // ---------------------------------------------------------------------------
 // 服务端反向请求(骨架期只留名字与形状,不接线)

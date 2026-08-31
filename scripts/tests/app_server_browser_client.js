@@ -13,6 +13,9 @@
 //      acceptForSession → 同法子二次免问;
 //   6. 截图:browser/screenshot → browser/screenshot/ready 只带 artifact
 //      引用,字节落盘;整条出站流里没有 base64;
+//   6.5 镜像流(多前端外壳单阶段 C):browser/screencast/start → 收
+//      browser/screencast/frame(同截图链落 artifact,只带引用)→
+//      browser/screencast/stop;chromium 引擎才有(CDP screencast)。
 //   7. 断线重连的边界(阶段 3 的口径):app-server 是 stdio 进程,断线即
 //      EOF 退场,sidecar 随之收尸;重连=新 app-server + 新 sidecar,
 //      browser/status 如实报新场——页面状态不跨 app-server 重启存活
@@ -313,6 +316,32 @@ async function main() {
     }
     const pngBase64Head = 'iVBORw0KGgo';
     ok('整条出站流没有 base64 图片正文',
+      client.lines.every((line) => !line.includes('dataBase64') && !line.includes(pngBase64Head)));
+
+    // ---- 6.5 镜像流(阶段 C):start → 收 frame 事件 → artifact 落盘可读 → stop ----
+    ok('能力表里有 browser/screencast/start|stop',
+      browserMethods.includes('browser/screencast/start') && browserMethods.includes('browser/screencast/stop'));
+    const screencastStart = await client.request('browser/screencast/start', { pageId, fps: 5 });
+    const screencastStartDone = await client.waitForEvent('browser/action/completed',
+      (e) => e.params.actionId === screencastStart.result.actionId, 15000);
+    ok('screencast/start 完成', Boolean(screencastStartDone) && screencastStartDone.params.ok === true,
+      JSON.stringify(screencastStartDone && screencastStartDone.params.error));
+    if (screencastStartDone && screencastStartDone.params.ok) {
+      const frame = await client.waitForEvent('browser/screencast/frame', (e) => e.params.pageId === pageId, 8000);
+      ok('收到 browser/screencast/frame(只带 artifact 引用)',
+        Boolean(frame) && frame.params.artifact && frame.params.artifact.stored === true,
+        JSON.stringify(frame && frame.params));
+      if (frame) {
+        ok('frame 的 artifact 字节真落盘(同截图链)', fs.existsSync(frame.params.artifact.path), frame.params.artifact.path);
+        ok('frame 带 pageId 与 dropped 账', typeof frame.params.pageId === 'string' && Number.isFinite(frame.params.dropped));
+      }
+    }
+    const screencastStop = await client.request('browser/screencast/stop', { pageId });
+    const screencastStopDone = await client.waitForEvent('browser/action/completed',
+      (e) => e.params.actionId === screencastStop.result.actionId, 15000);
+    ok('screencast/stop 完成', Boolean(screencastStopDone) && screencastStopDone.params.ok === true,
+      JSON.stringify(screencastStopDone && screencastStopDone.params.error));
+    ok('镜像流帧不含 base64(同截图链的出站纪律)',
       client.lines.every((line) => !line.includes('dataBase64') && !line.includes(pngBase64Head)));
 
     // ---- 7. 断线重连的边界 ----
