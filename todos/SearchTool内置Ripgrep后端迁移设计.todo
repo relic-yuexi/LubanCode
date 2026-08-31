@@ -639,10 +639,10 @@ lubancode/
 
 ### P0-6：发行包、安装与许可证
 
-- [ ] Release 三矩阵随包带 `libexec/rg`。
+- [ ] Release 三矩阵随包带 `libexec/rg`。（2026-08-31 勘察补记：**release.yml 现未调用抓取脚本，推 tag 包里无 rg——此条即修它**，在打包前补 `python scripts/fetch_ripgrep.py --target dist/lubancode --platform <matrix> --cache build/rg-cache`。另裁决：三份上游归档**不进 Git**——离线重打能力以镜像到自家 GitHub Release/对象存储实现，哈希照核，Git 历史不装二进制。）
 - [ ] archive hash、member path、版本、执行位全校。
 - [ ] Windows/Linux/macOS 安装后离线可搜。
-- [ ] 更新安装能原子替换 rg；卸载只删 LubanCode 安装目录内副本。
+- [ ] 更新安装能原子替换 rg；卸载只删 LubanCode 安装目录内副本。（2026-08-31 勘察补记：**install.ps1（搬主程序/skills/docs 处）与 install.sh 现不搬 `libexec/`、`licenses/`、`THIRD_PARTY_NOTICES.md`——装完 rg 丢在原包**，两套安装脚本同步补这三样。）
 - [ ] notices/license 入包，README 改掉“单文件”失实说法。
 - [ ] `scripts/check_release.sh` 与安装脚本测试全过。
 - [ ] 在断网环境解包运行，不触发下载、不查包管理器。
