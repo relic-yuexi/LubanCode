@@ -20,6 +20,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <mutex>
 #include <optional>
 #include <string>
@@ -108,6 +109,16 @@ struct QueuedMessage {
 // 会话层队列(线程安全)
 // -----------------------------------------------------------------------
 
+// 状态可见变化的观察口(P0-4 轨迹接线,§5.5 control.queue.item.*):
+//   Enqueued   新条目落队(监听线程在忙,cli 层够不着账本——从这广播);
+//   UserRemoved 用户删除(编辑事务里的 Del;终态安全,进 cancelled)。
+// 取走类操作(TakeDeliverable 一族)与 Remove 故意不广播:投递成败在
+// 调用方手上,dequeued 事件由调用方在落锤点(注入请求成功/转投 inbox
+// 成功之后)直接进账本——取走又退还(ReturnToFront)的窗口里发 dequeued
+// 会造出"账已终态、队里还躺着"的两本账。
+enum class QueueChangeKind { Enqueued, UserRemoved };
+using QueueChangeObserver = std::function<void(QueueChangeKind kind, const QueuedMessage& item)>;
+
 class SteeringQueue {
 public:
     // 自动发送的重试上限(取走即消费单):同一条消息最多自动送 kMax-
@@ -129,6 +140,9 @@ public:
     // ---- 落队 / 查询 ----
     // 新消息入队(排队顺序 = 落队顺序)。空文本拒收,返回 0。
     QueueId Enqueue(MessageTarget target, std::string text);
+    // P0-4 轨迹观察口:enqueue/user_removed 两类终态安全的变化从这广播
+    //(锁外回调,观察器不得回调本队列)。置空摘除。
+    void SetChangeObserver(QueueChangeObserver observer);
     // resume 重建队列用(会话存档 queue 事件行):带着原 id/正文/目标/尝试
     // 次数整条放回,保留存档里的排队次序。只在会话起头(队列还空着)整批
     // 灌;id 撞了或队列非空就不收——运行中的队列只归运行中的账本管。
@@ -197,6 +211,7 @@ private:
     std::vector<QueuedMessage> items_;
     QueueId next_id_ = 1;
     bool immediate_ = false;
+    QueueChangeObserver observer_;  // 锁外拷出再调,防死锁
 };
 
 // 进程内唯一的交互会话实例。一次进程只有一场交互会话,账本挂在这里,
@@ -204,6 +219,10 @@ private:
 // /clear 与会话析构时 TakeAllForDisposal 清账。单测自建局部 SteeringQueue,
 // 不碰这份全局。
 SteeringQueue& SessionSteeringQueue();
+
+// P0-4 轨迹账的条目 id("q-<n>"):排队消息在 control.queue.item.* 事件里
+// 的稳定身份(item_id 与 input_id 同用这一枚——排队消息本身就是输入身份)。
+inline std::string QueueItemId(QueueId id) { return "q-" + std::to_string(id); }
 
 // ---------------------------------------------------------------------------
 // 忙碌期排队的 slash 命令(问题二:排队的 /context 被包成 [用户排队消息]

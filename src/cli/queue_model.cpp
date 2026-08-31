@@ -80,15 +80,28 @@ QueueId SteeringQueue::Enqueue(MessageTarget target, std::string text) {
     if (text.empty()) {
         return 0;
     }
-    std::lock_guard<std::mutex> lock(mutex_);
-    const QueueId id = next_id_++;
-    QueuedMessage item;
-    item.id = id;
-    item.target = target;
-    item.text = std::move(text);
-    item.delivery = immediate_ ? DeliveryMode::Immediate : DeliveryMode::AfterNextToolBoundary;
-    items_.push_back(std::move(item));
+    QueuedMessage delivered;
+    QueueId id = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        id = next_id_++;
+        QueuedMessage item;
+        item.id = id;
+        item.target = target;
+        item.text = text;
+        item.delivery = immediate_ ? DeliveryMode::Immediate : DeliveryMode::AfterNextToolBoundary;
+        items_.push_back(item);
+        delivered = item;  // 锁外再广播,观察器不得回调本队列
+    }
+    if (observer_ && id != 0) {
+        observer_(QueueChangeKind::Enqueued, delivered);
+    }
     return id;
+}
+
+void SteeringQueue::SetChangeObserver(QueueChangeObserver observer) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    observer_ = std::move(observer);
 }
 
 bool SteeringQueue::RestoreFromArchive(std::vector<QueuedMessage> items) {
@@ -283,18 +296,28 @@ SteeringQueue::CommitStatus SteeringQueue::CancelEdit(const EditHandle& handle) 
 }
 
 SteeringQueue::CommitStatus SteeringQueue::DeleteMessage(const EditHandle& handle) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    for (auto it = items_.begin(); it != items_.end(); ++it) {
-        if (it->id != handle.id) {
-            continue;
+    QueuedMessage removed;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        for (auto it = items_.begin(); it != items_.end(); ++it) {
+            if (it->id != handle.id) {
+                continue;
+            }
+            if (!it->edit_open) {
+                return CommitStatus::Conflict;
+            }
+            removed = *it;
+            items_.erase(it);
+            break;
         }
-        if (!it->edit_open) {
-            return CommitStatus::Conflict;
-        }
-        items_.erase(it);
-        return CommitStatus::Ok;
     }
-    return CommitStatus::NotFound;
+    if (removed.id == 0) {
+        return CommitStatus::NotFound;
+    }
+    if (observer_) {
+        observer_(QueueChangeKind::UserRemoved, removed);  // 锁外广播
+    }
+    return CommitStatus::Ok;
 }
 
 bool SteeringQueue::Remove(QueueId id) {

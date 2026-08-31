@@ -42,6 +42,7 @@
 #include "tools/tool_search.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/i18n.hpp"
+#include "cli/queue_model.hpp"  // SessionSteeringQueue/QueueItemId:clear 的排队账申报
 #include "cli/session_picker.hpp"
 #include "cli/session_picker_panel.hpp"
 #include "cli/theme.hpp"
@@ -1939,7 +1940,15 @@ public:
     }
 
     std::vector<std::string> CancelQueuedItems() override {
-        return {};  // 排队账的 control 事件接线随 P0-4;此刻无未送达申报
+        // P0-4 排队账顺接:活队列里所有"等下一轮"的条目逐枚申报,clear
+        // 八步在旧账里落 control.queue.item.cancelled(reason=clear)。id 用
+        // 轨迹口径的 "q-<n>",与 enqueue 时记下的一致,对账才对得上。
+        // TargetGone/Failed(等用户处置的)也一并算未送达——清场就是全清。
+        std::vector<std::string> ids;
+        for (const auto& item : lubancode::cli::SessionSteeringQueue().Snapshot()) {
+            ids.push_back(lubancode::cli::QueueItemId(item.id));
+        }
+        return ids;
     }
 
     std::string ActiveRecordSelectionId() override {

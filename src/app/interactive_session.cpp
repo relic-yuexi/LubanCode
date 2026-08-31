@@ -436,8 +436,14 @@ void TerminalSessionController::PumpSteeringToSubagents() {
         const lubancode::tools::TaskMessageStatus status =
             agent_tool->SendTaskMessage(item.target.task_id, item.text);
         if (status == lubancode::tools::TaskMessageStatus::Queued) {
-            // 已进任务 inbox,活队列退场(那边轮次边界自会送达)。
+            // 已进任务 inbox,活队列退场(那边轮次边界自会送达)。P0-4
+            // 排队账:转投落锤,dequeued 在这进 Journal(Remove 不广播,
+            // 投递成败只有调用方知道)。
             SessionSteeringQueue().Remove(item.id);
+            if (session_runtime_.trajectory() != nullptr) {
+                session_runtime_.trajectory()->NoteQueueDequeued(
+                    lubancode::cli::QueueItemId(item.id), "forwarded_to_subagent");
+            }
             queue_changed = true;
         } else {
             // 终态(Finished)或任务号认不出(NotFound):一律按"目标已结束"
@@ -1109,6 +1115,11 @@ void TerminalSessionController::Run() {
                     preview.resize(preview_cut);
                 }
                 TermOut() << theme.error << trf("queue.autosend_returned", preview) << theme.reset << "\n";
+            } else if (session_runtime_.trajectory() != nullptr) {
+                // P0-4 排队账:泵的自动发送没有失败退还,dequeued 落锤
+                //(失败退还的那支不落——条目还在队里,账没终态)。
+                session_runtime_.trajectory()->NoteQueueDequeued(
+                    lubancode::cli::QueueItemId(head->id), "end_of_turn_delivery");
             }
             PersistSteeringQueue();
             if (flow == CommandFlow::Exit) {

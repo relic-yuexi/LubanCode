@@ -514,6 +514,9 @@ add_library(lubancode_engine STATIC
   src/trajectory/environment.cpp
   src/trajectory/usage_gc.cpp
   src/trajectory/metrics.cpp
+  # P0-4 §12.1:单段名校验/canonical containment/重解析点防逃逸与
+  # user-only 权限(POSIX 0700/0600,Windows PROTECTED DACL)。
+  src/trajectory/safety.cpp
   # Token 账本与使用洞察单 A0(合同与夹具):accounting 是 usage 投影与
   # 计价的纯领域层;insights 是摘要/finding/报告合同与脱敏。都不 include
   # app/cli,不接真实 runtime(A1 再接线)。

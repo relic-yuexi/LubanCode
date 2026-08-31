@@ -141,15 +141,19 @@ void ToolTraceHub::OnTrace(const agent::ToolTraceEvent& event) {
     // 在这里:写不落且副作用档时,投一枚 Error 事件并把 finishOutcome
     // 置为 ResultStoreFailed,模型看到的就是"没跑成"。
     if (trajectory_ != nullptr) {
-        // 轨迹路:先问桥这枚 started 落没落住(桥在 OnToolTrace 里已
-        // 同步提交);落不住且副作用档,同一道闸拦执行。
+        // 轨迹路:started 先同步提交(桥在 OnToolTrace 里落账;写不住或
+        // §12.2 磁盘 reserve 不足,桥把 execution_id 记进自己的拦截集合),
+        // 提交完再问一次 ShouldBlockExecution——集合在提交时才填得上,
+        // 先问后提交永远问着空集(P0-4 修的次序缺陷)。拦下且副作用档,
+        // 同一道闸拦执行。
+        trajectory_->OnToolTrace(event);
         if (event.kind == agent::ToolTraceEventKind::ExecutionStarted &&
             trajectory_->ShouldBlockExecution(event) && ShouldBlockOnFailedStart(event.effect_class)) {
             agent::ToolTraceEvent failed = event;
             failed.kind = agent::ToolTraceEventKind::ExecutionFinished;
             failed.outcome = agent::ToolOutcome::ResultStoreFailed;
             failed.error_code = agent::kErrSessionTraceAppendFailed;
-            failed.fallback_message = "轨迹账写盘失败,该工具未执行(副作用档默认拦截)";
+            failed.fallback_message = "轨迹账写盘失败或磁盘 reserve 不足,该工具未执行(副作用档默认拦截)";
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 blocked_executions_.insert(event.execution_id);
@@ -159,7 +163,6 @@ void ToolTraceHub::OnTrace(const agent::ToolTraceEvent& event) {
             EmitRuntimeEvent(failed);
             return;  // 终态已出,不再往下分线
         }
-        trajectory_->OnToolTrace(event);
     } else if (store_ != nullptr && store_->active()) {
         const bool durable_ok = store_->AppendToolTraceEvent(event);
         if (!durable_ok) {

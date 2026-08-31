@@ -37,8 +37,11 @@
 #include "runtime/id_authority.hpp"
 #include "runtime/tool_trajectory_sink.hpp"
 #include "trajectory/directory.hpp"
+#include "trajectory/environment.hpp"
+#include "trajectory/metrics.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/session_manager.hpp"
+#include "trajectory/usage_gc.hpp"
 
 namespace lubancode::runtime {
 
@@ -111,8 +114,27 @@ public:
     // child_run_id 与 child_terminal_event_hash(双向对账的父侧)。
     void NoteChildTerminal(const std::string& agent_run_id, const std::string& terminal_event_hash);
 
+    // ---- P0-4:verification 与 outcome(§5.5/§五 5.5) ----
+    // 验证点落账:started+recorded 两枚,observed_after_seq 钉在当前账尾。
+    // 回 verification_id(空 = 落账失败,§7.4"verification 记不住,不得
+    // 判 verified success"——调用方不得据此宣称已验)。
+    std::string BeginVerification(const std::string& kind, const std::string& subject,
+                                  const std::string& producer);
+    void FinishVerification(const std::string& verification_id, bool passed,
+                            const nlohmann::json& facts, const nlohmann::json& command_ref = nlohmann::json(),
+                            const std::vector<std::string>& artifact_paths = {});
+
+    // ---- P0-4:存储门(§12.2 storage_exhausted) ----
+    // 磁盘余量低于 journal emergency reserve 时给 false。副作用栅栏
+    //(OnToolTrace 的 started 路)与装配层据此拒绝新的副作用;大模型请求
+    // 的拒绝门属 P0-6 回退门,本批明留缺口。
+    bool StorageAvailable() const;
+
     // 诊断:最近一枚提交失败 receipts 的稳定码(测试与 /doctor 用)。
     std::vector<std::string> recent_errors() const { return recent_errors_; }
+    // 落账错误的共享汇(账本持有,/doctor trajectory 的"最近 I/O 错误"
+    // 从这取;桥按轮把错误推进来)。
+    void SetErrorSink(std::vector<std::string>* sink) { error_sink_ = sink; }
 
 private:
     struct CallBook {
@@ -125,6 +147,22 @@ private:
         bool result_committed = false;
         bool terminal_cancelled = false;  // 终态是 cancelled(免 result)
         std::string child_run_id;         // agent 工具派出的子 run(§3.5)
+        // P0-4 细账料:started 时留下的实际入参与来源(命令的 argv/shell、
+        // MCP 的 server 身份从这翻,§9.3)。
+        nlohmann::json effective_arguments = nlohmann::json::object();
+        std::string source_instance;
+    };
+
+    // 验证点在账(§5.5):本轮 recorded 的验证,文件被改动时逐枚判 stale。
+    struct VerificationBook {
+        std::string verification_id;
+        std::string kind;
+        std::string subject;
+        std::string producer;
+        bool passed = false;
+        bool recorded = false;   // recorded 事件已落(started 之后)
+        bool invalidated = false;
+        std::string recorded_event_id;
     };
 
     trajectory::RecordReceipt Put(trajectory::EventKind kind, std::optional<std::string> request_id,
@@ -136,8 +174,20 @@ private:
     std::string NextRequestId();
     std::string NextInputId();
     std::string NextOutputId();
+    std::string NextVerificationId();
     // 悬空收口:turn 终态前把已声明未收口的调用补 tool.cancelled。
     void CancelDanglingCalls(const std::string& reason);
+    // §9.3 side-effect 细账:file(undo token)/command(有效入参 + exit
+    // code)/mcp(server 身份 + jsonrpc id)三形,按事件里实际有的料拼。
+    nlohmann::json BuildSideEffects(const agent::ToolTraceEvent& event, const CallBook& book,
+                                    bool* has_exit_code, std::int64_t* exit_code) const;
+    // §5.5 stale invalidation:本次改动的文件路径逐枚对账,recorded 未
+    // invalidated 且 subject 命中的落 verification.invalidated。
+    void InvalidateStaleVerifications(const std::string& mutated_path,
+                                      const std::string& invalidated_by_event);
+    // turn 收口的证据裁断(§5.5 outcome.assessed):有 fresh 证据才落,
+    // 引用未失效的 verification.recorded 事件 id。
+    void AssessOutcome(bool ok, bool cancelled);
     // 消息 content -> 规范 blocks 数组(模型中立;大正文交 blob,由
     // recorder 的 offload 上限管)。
     static nlohmann::json MessageToBlocks(const api::Message& message);
@@ -151,11 +201,15 @@ private:
     std::map<std::string, std::string> request_prepared_;  // request_id -> prepared event id
     std::map<std::string, std::string> child_terminal_hashes_;  // agent_run_id -> hash
     std::set<std::string> started_io_failed_;  // started 落不住被拦的 execution
+    std::set<std::string> storage_blocked_;    // 磁盘 reserve 不足被拦的 execution
+    std::vector<VerificationBook> verifications_;
     std::string last_input_event_id_;
     std::uint64_t request_counter_ = 0;
     std::uint64_t input_counter_ = 0;
     std::uint64_t output_counter_ = 0;
+    std::uint64_t verification_counter_ = 0;
     std::vector<std::string> recent_errors_;
+    std::vector<std::string>* error_sink_ = nullptr;  // 账本持有的共享汇
 };
 
 // ---------------------------------------------------------------------------
@@ -321,6 +375,47 @@ public:
     // /record 选段器(一场 session 一只)。
     RecordSelectionController& record_selection();
 
+    // ---- P0-4:环境快照(§9.1/§9.2) ----
+    // 会话侧身份与材料由装配层采好递进;git/cwd/os 由账本现取。落
+    // run.environment.captured(snapshot blob + replay_level + gaps)。
+    // 一场 run 只落一次,重复调用是幂等 no-op。回空串 = 成功,否则稳定码。
+    struct EnvironmentFacts {
+        std::string provider;
+        std::string wire;
+        std::string model;
+        nlohmann::json model_parameters = nlohmann::json::object();
+        std::string system_prompt;  // 非空则先落 blob 得 system_prompt_ref
+        trajectory::ToolsetSummary toolset;
+        std::vector<std::string> project_instruction_refs;
+        std::vector<std::string> loaded_skill_refs;
+        nlohmann::json plugin_refs = nlohmann::json::array();
+        nlohmann::json config_snapshot_redacted = nlohmann::json::object();
+        std::vector<std::pair<std::string, std::string>> allowlisted_env;
+    };
+    std::string CaptureEnvironment(const EnvironmentFacts& facts);
+
+    // ---- P0-4:排队账(§5.5 control.queue.item.*) ----
+    // steering queue 的状态可见变化经这四枚口进 Journal。item_id 用队列
+    // 的稳定 id("q-<n>"),input_id 同 item_id——排队消息本身就是输入身份,
+    // 真正触发 turn 时 input.received 另发新 id,两账以 item_id 关联。
+    void NoteQueueEnqueued(const std::string& item_id, const std::string& target_label,
+                           const std::string& reason = {});
+    void NoteQueueDequeued(const std::string& item_id, const std::string& reason = {});
+    void NoteQueueCancelled(const std::string& item_id, const std::string& reason);
+    void NoteQueueExpired(const std::string& item_id, const std::string& reason = {});
+
+    // ---- P0-4:容量与存储(§12.2) ----
+    // 磁盘 reserve 门(storage_exhausted 的判据)。reserve 字节数用 §13
+    // 首版起始值 16 MiB(journal_emergency_reserve_bytes 的本批缺省)。
+    bool StorageAvailable() const;
+    // workspace 容量账(lubancode trajectory usage 的引擎体)。
+    trajectory::WorkspaceUsageReport WorkspaceUsage() const;
+    // /doctor trajectory 的引擎体(§13.1 只读聚合):active session 各
+    // stream 验链 + 容量四笔 + 磁盘余量 + 最近 I/O 错误。
+    trajectory::WorkspaceDoctorReport BuildDoctorReport() const;
+    // 最近落账错误(桥逐轮推进来;doctor 的"最近 I/O 错误"从这取)。
+    std::vector<std::string> recent_io_errors() const;
+
     // 命令生命周期(§14.1/§15.7 TrajectoryCommandExecutor 的落账半场):
     // BeginCommand 在 handler 前 durable 落 control.command.requested
     //(真人敲 slash:actor=user/origin=external_user),回 command_id;
@@ -348,6 +443,9 @@ private:
     std::unique_ptr<Impl> impl_;
     std::unique_ptr<RecordSelectionController> record_selection_;
     std::uint64_t command_counter_ = 0;
+    // P0-4:落账错误共享环(桥逐轮推进;doctor 从这读,见 recent_io_errors)。
+    std::vector<std::string> io_errors_;
+    bool environment_captured_ = false;
 
     // 会话级控制事件(compact 一族)的公共落账口(Host/CompactRuntime)。
     void PutControl_(trajectory::EventKind kind, nlohmann::json payload);

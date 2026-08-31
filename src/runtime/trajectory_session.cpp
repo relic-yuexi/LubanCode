@@ -4,6 +4,9 @@
 
 #include "runtime/trajectory_session.hpp"
 
+#include <algorithm>
+#include <chrono>
+#include <clocale>
 #include <cstdlib>
 #include <utility>
 
@@ -12,6 +15,7 @@
 #include "platform/paths.hpp"
 #include "tools/path_utils.hpp"     // Utf8ToPath:主目录文本转路径
 #include "tools/tool_content.hpp"   // TextContent:富结果块的文本投影
+#include "trajectory/safety.hpp"
 
 namespace lubancode::runtime {
 
@@ -56,6 +60,11 @@ bool ResolveTrajectoryEnabled(bool config_flag) {
     const std::optional<bool> env = TrajectoryEnvOpinion();
     return env.has_value() ? *env : config_flag;
 }
+
+// §12.2/§13 journal emergency reserve 首版起始值(16 MiB)。配置面
+//(trajectory.journal_emergency_reserve_bytes)随 P0-6 的配置档落,本批
+// 用起始常量并在 /doctor trajectory 里如实展示。
+constexpr std::uint64_t kJournalEmergencyReserveBytes = 16ULL * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
 // TrajectoryTurnBridge
@@ -128,7 +137,11 @@ RecordReceipt TrajectoryTurnBridge::Put(EventKind kind, std::optional<std::strin
 }
 
 void TrajectoryTurnBridge::NoteError(const RecordReceipt& receipt, const char* where) {
-    recent_errors_.push_back(std::string(where) + ":" + receipt.error_code);
+    const std::string note = std::string(where) + ":" + receipt.error_code;
+    recent_errors_.push_back(note);
+    if (error_sink_ != nullptr) {
+        error_sink_->push_back(note);
+    }
     platform::LogSink::Instance().Error("trajectory",
                                         std::string(where) + " 落账失败: " + receipt.error_code);
 }
@@ -143,6 +156,10 @@ std::string TrajectoryTurnBridge::NextInputId() {
 
 std::string TrajectoryTurnBridge::NextOutputId() {
     return "output-" + std::to_string(++output_counter_);
+}
+
+std::string TrajectoryTurnBridge::NextVerificationId() {
+    return "verify-" + std::to_string(++verification_counter_);
 }
 
 void TrajectoryTurnBridge::BeginTurn(const std::string& turn_id, const std::string& trigger) {
@@ -224,6 +241,9 @@ void TrajectoryTurnBridge::EndTurn(bool ok, bool cancelled, const std::string& r
         return;
     }
     CancelDanglingCalls("turn_closed_unresolved");
+    // §5.5 outcome.assessed:turn 终态前的证据裁断。本轮录过验证才落——
+    // 没验证的 turn 没有可引的证据,训练侧自然进不了 success 门。
+    AssessOutcome(ok, cancelled);
     RecordReceipt receipt;
     if (cancelled) {
         receipt = Put(EventKind::TurnCancelled, std::nullopt, std::nullopt, Actor::Host,
@@ -434,6 +454,12 @@ void TrajectoryTurnBridge::OnToolTrace(const agent::ToolTraceEvent& event) {
                     NoteError(receipt, "tool.input.effective");
                 }
             }
+            // P0-4 细账料(§9.3):started 留下实际入参与来源,finished 拼
+            // command/mcp 细账时从这翻。
+            book.effective_arguments =
+                event.effective_arguments.is_object() ? event.effective_arguments
+                                                      : nlohmann::json::object();
+            book.source_instance = event.source_instance;
             // 副作用边界:started 走 PowerLoss 栅栏(§7.4/§5.4)。
             nlohmann::json payload = nlohmann::json{{"call_id", event.tool_use_id},
                                                     {"attempt", std::uint64_t{1}}};
@@ -455,6 +481,22 @@ void TrajectoryTurnBridge::OnToolTrace(const agent::ToolTraceEvent& event) {
                 NoteError(receipt, "tool.execution.started");
                 started_io_failed_.insert(event.execution_id);
             }
+            // P0-4 存储门(§12.2 storage_exhausted):副作用工具在 started
+            // 落稳之后、execute 之前问一次磁盘 reserve;不足则把这只执行
+            // 记入 storage_blocked_,ShouldBlockExecution 据此拦下——工具
+            // 不跑,免得"跑完工具才悄悄丢结果"。
+            const bool side_effect = event.effect_class != agent::EffectClass::ReadOnlyLocal &&
+                                     event.effect_class != agent::EffectClass::ReadOnlyRemote;
+            if (side_effect && !StorageAvailable()) {
+                storage_blocked_.insert(event.execution_id);
+                const std::string note = "storage_exhausted:" + event.tool_name;
+                recent_errors_.push_back(note);
+                if (error_sink_ != nullptr) {
+                    error_sink_->push_back(note);
+                }
+                platform::LogSink::Instance().Error(
+                    "trajectory", "磁盘 reserve 不足,拦下副作用工具: " + event.tool_name);
+            }
             return;
         }
         case agent::ToolTraceEventKind::ExecutionFinished: {
@@ -472,7 +514,14 @@ void TrajectoryTurnBridge::OnToolTrace(const agent::ToolTraceEvent& event) {
                                                     {"bytes", event.result_ref.bytes},
                                                     {"kind", agent::ToString(event.result_ref.kind)}};
                 payload["result_ref"] = std::move(ref);
-                payload["side_effects"] = nlohmann::json::array();
+                // P0-4 §9.3 side-effect 细账:file(undo token)/command(有效
+                // 入参 + exit code)/mcp(server 身份 + jsonrpc id)。
+                bool has_exit_code = false;
+                std::int64_t exit_code = 0;
+                payload["side_effects"] = BuildSideEffects(event, book, &has_exit_code, &exit_code);
+                if (has_exit_code) {
+                    payload["exit_code"] = exit_code;
+                }
             } else if (event.outcome == agent::ToolOutcome::UnknownAfterStart) {
                 kind = EventKind::ToolExecutionUnknown;
                 payload["reason"] = event.error_code.empty() ? "unknown_after_start" : event.error_code;
@@ -517,17 +566,60 @@ void TrajectoryTurnBridge::OnToolTrace(const agent::ToolTraceEvent& event) {
                 book.terminal = true;
                 book.terminal_cancelled = kind == EventKind::ToolExecutionCancelled;
                 book.terminal_event_id = receipt.event_id;
+                // §5.5 stale invalidation:改动了文件就逐枚对账已录验证,
+                // subject 命中的落 verification.invalidated(训练集不能拿
+                // 旧测试给新代码作证)。
+                if (!event.undo.path.empty()) {
+                    InvalidateStaleVerifications(event.undo.path, receipt.event_id);
+                }
             } else {
                 NoteError(receipt, "tool.terminal");
             }
             return;
         }
+        case agent::ToolTraceEventKind::Verification: {
+            // hub 侧显式验证点(逐枚追踪单的 postcondition 证据):翻成
+            // verification.recorded(§5.5)。label 兼作 kind,after_execution_
+            // id 挂 causation,验证正文经 verify_detail 现折 facts。
+            if (!turn_open_) {
+                return;
+            }
+            nlohmann::json payload{{"verification_id", NextVerificationId()},
+                                   {"kind", event.label.empty() ? "tool_postcondition" : event.label},
+                                   {"passed", event.passed},
+                                   {"producer", "tool_trace"}};
+            if (!event.after_execution_id.empty()) {
+                payload["subject"] = event.after_execution_id;
+            }
+            if (!event.verify_detail.empty()) {
+                payload["facts"] = nlohmann::json{{"detail", event.verify_detail}};
+            }
+            payload["observed_after_seq"] = recorder_.next_seq() - 1;
+            const std::string verification_id = payload.value("verification_id", std::string());
+            const std::string kind = payload.value("kind", std::string());
+            const std::string subject = payload.value("subject", std::string());
+            const auto receipt = Put(EventKind::VerificationRecorded, std::nullopt, std::nullopt,
+                                     Actor::Verifier, Origin::VerifierHost, std::move(payload),
+                                     Durability::ProcessCrash);
+            if (receipt.status != RecordReceipt::Status::Committed) {
+                NoteError(receipt, "verification.recorded");
+                return;
+            }
+            VerificationBook book;
+            book.verification_id = verification_id;
+            book.kind = kind;
+            book.subject = subject;
+            book.passed = event.passed;
+            book.recorded = true;
+            book.recorded_event_id = receipt.event_id;
+            verifications_.push_back(std::move(book));
+            return;
+        }
         case agent::ToolTraceEventKind::ResultCommitted:
-        case agent::ToolTraceEventKind::Verification:
         case agent::ToolTraceEventKind::RecoveryMarker:
         case agent::ToolTraceEventKind::McpLateResponse:
             return;  // result.committed 从消息正文翻(OnToolResultsCommitted);
-                     // verification 是 P0-4 的账,迟到响应/恢复注记不进轨迹。
+                     // 迟到响应/恢复注记不进轨迹。
     }
 }
 
@@ -572,7 +664,8 @@ void TrajectoryTurnBridge::OnToolResultsCommitted(const std::string& batch_id, c
 }
 
 bool TrajectoryTurnBridge::ShouldBlockExecution(const agent::ToolTraceEvent& started) {
-    return started_io_failed_.count(started.execution_id) != 0;
+    return started_io_failed_.count(started.execution_id) != 0 ||
+           storage_blocked_.count(started.execution_id) != 0;
 }
 
 void TrajectoryTurnBridge::AttachChildRun(const std::string& call_id, const std::string& agent_run_id) {
@@ -585,6 +678,253 @@ void TrajectoryTurnBridge::NoteChildTerminal(const std::string& agent_run_id,
 }
 
 // ---------------------------------------------------------------------------
+// P0-4:side-effect 细账 / verification / outcome(§9.3/§5.5)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 路径比对的规范形:统一正斜杠、去尾斜杠、Windows 大小写不敏感。
+std::string NormalizeSubjectPath(std::string path) {
+    std::replace(path.begin(), path.end(), '\\', '/');
+    while (path.size() > 1 && path.back() == '/') {
+        path.pop_back();
+    }
+#ifdef _WIN32
+    for (char& c : path) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+#endif
+    return path;
+}
+
+}  // namespace
+
+nlohmann::json TrajectoryTurnBridge::BuildSideEffects(const agent::ToolTraceEvent& event,
+                                                      const CallBook& book, bool* has_exit_code,
+                                                      std::int64_t* exit_code) const {
+    *has_exit_code = false;
+    *exit_code = 0;
+    nlohmann::json effects = nlohmann::json::array();
+    const nlohmann::json& args = book.effective_arguments;
+    // 入参字段取值的守门:类型不合就如实缺省,不让 value() 抛异常砸了终态
+    // 事件的落账(细账是补充事实,不该绑架 canonical 终态)。
+    const auto string_of = [&args](const char* key) -> std::string {
+        const auto it = args.find(key);
+        return it != args.end() && it->is_string() ? it->get<std::string>() : std::string();
+    };
+
+    // 文件工具(§9.3):path、preimage hash、postimage hash、undo ref。
+    // undo 原文挂在 "text" 键下,超内联上限由 recorder 换成 BlobRef。
+    if (!event.undo.path.empty()) {
+        nlohmann::json file_effect;
+        file_effect["kind"] = "file";
+        file_effect["path"] = event.undo.path;
+        file_effect["preimage_sha256"] = event.undo.preimage_sha256;
+        file_effect["postimage_sha256"] = event.undo.postimage_sha256;
+        file_effect["created_new_file"] = event.undo.created_new_file;
+        file_effect["undo_ref"] = nlohmann::json{{"path", event.undo.path},
+                                                 {"preimage_sha256", event.undo.preimage_sha256},
+                                                 {"postimage_sha256", event.undo.postimage_sha256},
+                                                 {"created_new_file", event.undo.created_new_file},
+                                                 {"preimage_bytes", event.undo.preimage.size()},
+                                                 {"text", event.undo.preimage}};
+        effects.push_back(std::move(file_effect));
+    }
+
+    // 命令工具(§9.3):argv/shell mode、cwd、exit code、timeout/cancel。
+    // run_command 合并 stdout/stderr 出一份输出,不拆谎称两流——合并结果
+    // 由顶层 result_ref 与 tool.result.committed 承载,这里只记执行形状。
+    const std::string command_text = string_of("command");
+    if (!command_text.empty()) {
+        nlohmann::json command_effect;
+        command_effect["kind"] = "command";
+        command_effect["command"] = command_text;
+        const std::string shell = string_of("shell");
+        if (!shell.empty()) {
+            command_effect["shell_mode"] = shell;
+        }
+        const std::string cwd = string_of("cwd");
+        if (!cwd.empty()) {
+            command_effect["cwd"] = cwd;
+        }
+        const auto timeout = args.find("timeout_ms");
+        if (timeout != args.end() && timeout->is_number_integer()) {
+            command_effect["timeout_ms"] = timeout->get<std::int64_t>();
+        }
+        command_effect["combined_output_ref"] =
+            nlohmann::json{{"sha256", event.result_ref.sha256},
+                           {"bytes", event.result_ref.bytes}};
+        if (event.details.contains("exit_code") && event.details.at("exit_code").is_number_integer()) {
+            *has_exit_code = true;
+            *exit_code = event.details.at("exit_code").get<std::int64_t>();
+            command_effect["exit_code"] = *exit_code;
+        }
+        effects.push_back(std::move(command_effect));
+    }
+
+    // MCP(§9.3):server 身份、effective arguments 在 tool.input.effective、
+    // response 由 result_ref 承载、latency 在顶层 duration_ms;这里补
+    // jsonrpc 关联与来源档。
+    if (event.source_kind == agent::ToolSourceKind::Mcp) {
+        nlohmann::json mcp_effect;
+        mcp_effect["kind"] = "mcp_call";
+        mcp_effect["server"] =
+            event.source_instance.empty() ? book.source_instance : event.source_instance;
+        if (event.jsonrpc_request_id >= 0) {
+            mcp_effect["jsonrpc_request_id"] = event.jsonrpc_request_id;
+        }
+        effects.push_back(std::move(mcp_effect));
+    }
+    return effects;
+}
+
+void TrajectoryTurnBridge::InvalidateStaleVerifications(const std::string& mutated_path,
+                                                        const std::string& invalidated_by_event) {
+    const std::string mutated = NormalizeSubjectPath(mutated_path);
+    if (mutated.empty()) {
+        return;
+    }
+    for (VerificationBook& book : verifications_) {
+        if (!book.recorded || book.invalidated || book.subject.empty()) {
+            continue;
+        }
+        if (NormalizeSubjectPath(book.subject) != mutated) {
+            continue;
+        }
+        const auto receipt =
+            Put(EventKind::VerificationInvalidated, std::nullopt, std::nullopt, Actor::Verifier,
+                Origin::VerifierHost,
+                nlohmann::json{{"verification_id", book.verification_id},
+                               {"reason", "subject_modified"},
+                               {"invalidated_by_event", invalidated_by_event}},
+                Durability::ProcessCrash);
+        if (receipt.status == RecordReceipt::Status::Committed) {
+            book.invalidated = true;
+        } else {
+            NoteError(receipt, "verification.invalidated");
+        }
+    }
+}
+
+void TrajectoryTurnBridge::AssessOutcome(bool ok, bool cancelled) {
+    // 只引 fresh(fresh=recorded 且未被 invalidated)的验证;没录过验证
+    // 的 turn 不落 outcome.assessed(§11.5 的成功门自然把它挡在外面)。
+    nlohmann::json evidence_refs = nlohmann::json::array();
+    nlohmann::json criteria = nlohmann::json::array();
+    bool any_recorded = false;
+    for (const VerificationBook& book : verifications_) {
+        if (!book.recorded || book.invalidated) {
+            continue;
+        }
+        any_recorded = true;
+        evidence_refs.push_back(nlohmann::json{{"verification_id", book.verification_id},
+                                               {"event_id", book.recorded_event_id},
+                                               {"kind", book.kind},
+                                               {"passed", book.passed},
+                                               {"fresh", true}});
+        criteria.push_back(book.kind);
+    }
+    if (!any_recorded) {
+        return;
+    }
+    const char* outcome = cancelled ? "cancelled" : (ok ? "succeeded" : "failed");
+    const auto receipt =
+        Put(EventKind::OutcomeAssessed, std::nullopt, std::nullopt, Actor::Verifier,
+            Origin::VerifierHost,
+            nlohmann::json{{"outcome", outcome},
+                           {"evidence_refs", std::move(evidence_refs)},
+                           {"criteria", std::move(criteria)}},
+            Durability::ProcessCrash);
+    if (receipt.status != RecordReceipt::Status::Committed) {
+        NoteError(receipt, "outcome.assessed");
+    }
+}
+
+std::string TrajectoryTurnBridge::BeginVerification(const std::string& kind, const std::string& subject,
+                                                    const std::string& producer) {
+    if (!turn_open_) {
+        return std::string();
+    }
+    VerificationBook book;
+    book.verification_id = NextVerificationId();
+    book.kind = kind;
+    book.subject = subject;
+    book.producer = producer;
+    // schema 钉死:verification.started 只认 verification_id/kind/subject 三键,
+    // producer 留给 recorded(那边是必填)。
+    nlohmann::json payload{{"verification_id", book.verification_id}, {"kind", kind}};
+    if (!subject.empty()) {
+        payload["subject"] = subject;
+    }
+    const auto started =
+        Put(EventKind::VerificationStarted, std::nullopt, std::nullopt, Actor::Verifier,
+            Origin::VerifierHost, std::move(payload), Durability::ProcessCrash);
+    if (started.status != RecordReceipt::Status::Committed) {
+        NoteError(started, "verification.started");
+        return std::string();  // §7.4:verification 记不住,不得判 verified
+    }
+    verifications_.push_back(std::move(book));
+    return verifications_.back().verification_id;
+}
+
+void TrajectoryTurnBridge::FinishVerification(const std::string& verification_id, bool passed,
+                                              const nlohmann::json& facts,
+                                              const nlohmann::json& command_ref,
+                                              const std::vector<std::string>& artifact_paths) {
+    if (!turn_open_) {
+        return;
+    }
+    VerificationBook* target = nullptr;
+    for (VerificationBook& book : verifications_) {
+        if (book.verification_id == verification_id && !book.recorded) {
+            target = &book;
+            break;
+        }
+    }
+    if (target == nullptr) {
+        return;
+    }
+    nlohmann::json payload{{"verification_id", verification_id},
+                           {"kind", target->kind},
+                           {"passed", passed},
+                           {"producer", target->producer.empty() ? std::string("host") : target->producer}};
+    if (!target->subject.empty()) {
+        payload["subject"] = target->subject;
+    }
+    if (command_ref.is_object() && !command_ref.empty()) {
+        payload["command_ref"] = command_ref;
+    }
+    if (facts.is_object() && !facts.empty()) {
+        payload["facts"] = facts;
+    }
+    nlohmann::json refs = nlohmann::json::array();
+    for (const std::string& path : artifact_paths) {
+        refs.push_back(nlohmann::json{{"path", path}});
+    }
+    if (!refs.empty()) {
+        payload["artifact_refs"] = std::move(refs);
+    }
+    payload["observed_after_seq"] = recorder_.next_seq() - 1;
+    payload["fresh"] = true;
+    const auto receipt = Put(EventKind::VerificationRecorded, std::nullopt, std::nullopt,
+                             Actor::Verifier, Origin::VerifierHost, std::move(payload),
+                             Durability::ProcessCrash);
+    if (receipt.status == RecordReceipt::Status::Committed) {
+        target->recorded = true;
+        target->passed = passed;
+        target->recorded_event_id = receipt.event_id;
+    } else {
+        NoteError(receipt, "verification.recorded");
+    }
+}
+
+bool TrajectoryTurnBridge::StorageAvailable() const {
+    // 保守门:recorder 坏了/账房路径未知时不放行副作用(§12.2 宁可拒写)。
+    return trajectory::HasDiskReserve(recorder_.stream_path().parent_path(),
+                                      kJournalEmergencyReserveBytes);
+}
+
+// ---------------------------------------------------------------------------
 // TrajectorySessionLedger
 // ---------------------------------------------------------------------------
 
@@ -593,6 +933,8 @@ struct TrajectorySessionLedger::Impl {
     trajectory::ActiveSession* active = nullptr;
     trajectory::RecorderOptions recorder_options;
     std::string main_run_id;
+    std::string lubancode_version;
+    std::string workspace_root_text;  // UTF-8,环境快照与 git 状态取材用
     // 子代理账:run_id -> 终态 hash(Finish 时填,父账边界引用用)。
     std::map<std::string, std::string> child_terminal_hashes;
     std::uint64_t subagent_counter = 0;
@@ -600,6 +942,23 @@ struct TrajectorySessionLedger::Impl {
     bool launch_resumed = false;
     std::vector<api::Message> launch_resume_history;
 };
+
+// §12.1 user-only 权限:workspace 层与 session 层目录都收紧;设不住须
+// 告警(errors 进 /doctor trajectory 的"最近 I/O 错误"账)。
+void HardenLedgerDirectories(const trajectory::TrajectoryDirectory& directory,
+                             std::vector<std::string>* errors) {
+    if (trajectory::HardenDirectoryUserOnly(directory.workspace_dir())) {
+        if (!trajectory::HardenDirectoryUserOnly(directory.session_dir())) {
+            errors->push_back("permissions:session_dir_harden_failed");
+            platform::LogSink::Instance().Error(
+                "trajectory", "session 目录无法收紧为 user-only,敏感内容记录有泄露面");
+        }
+        return;
+    }
+    errors->push_back("permissions:workspace_dir_harden_failed");
+    platform::LogSink::Instance().Error("trajectory",
+                                        "workspace 目录无法收紧为 user-only,敏感内容记录有泄露面");
+}
 
 std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Open(Options options) {
     if (options.trajectories_root.empty()) {
@@ -625,6 +984,8 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
 
     Impl impl;
     impl.recorder_options.event_schema_version = options.event_schema_version;
+    impl.lubancode_version = options.lubancode_version;
+    impl.workspace_root_text = platform::PathToUtf8(options.workspace_root);
     impl.manager = std::make_unique<trajectory::SessionManager>(std::move(manager_options));
 
     // --continue 启动路(§10.4):直接建 start_reason=resume 的新 session,
@@ -652,6 +1013,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
                     }());
                 TrajectorySessionLedger ledger;
                 ledger.impl_ = std::make_unique<Impl>(std::move(impl));
+                HardenLedgerDirectories(ledger.impl_->active->directory, &ledger.io_errors_);
                 return ledger;
             }
             // resume 失败回落普通开张:源场坏不拦人开新会话(明错留给
@@ -667,6 +1029,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
 
     TrajectorySessionLedger ledger;
     ledger.impl_ = std::make_unique<Impl>(std::move(impl));
+    HardenLedgerDirectories(ledger.impl_->active->directory, &ledger.io_errors_);
     return ledger;
 }
 
@@ -688,7 +1051,11 @@ std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
     trajectory::EventScope scope = impl_->active->main->base_scope();
     scope.visibility = {Visibility::HostOnly};
     scope.training_policy = TrainingPolicy::Metadata;
-    return std::make_unique<TrajectoryTurnBridge>(*recorder, std::move(scope), std::move(identity));
+    auto bridge = std::make_unique<TrajectoryTurnBridge>(*recorder, std::move(scope),
+                                                         std::move(identity));
+    // 桥按轮把落账错误推进账本的共享环(/doctor trajectory 从这读)。
+    bridge->SetErrorSink(&io_errors_);
+    return bridge;
 }
 
 namespace {
@@ -890,6 +1257,7 @@ trajectory::ClearOutcome TrajectorySessionLedger::ClearSession(
         }
         impl_->child_terminal_hashes.clear();
         record_selection_ = nullptr;  // 惰性重建(RecordSelectionController)
+        environment_captured_ = false;  // 新 run 须重采环境快照
     }
     return outcome;
 }
@@ -970,6 +1338,7 @@ TrajectoryResumeSummary TrajectorySessionLedger::ResumeInteractive(const std::st
     }
     impl_->child_terminal_hashes.clear();
     record_selection_ = nullptr;
+    environment_captured_ = false;
     trajectory::ReplayState projection_state;
     // 投影只需要 effective conversation;从 outcome 的引用直接翻。
     projection_state.effective_conversation = summary.outcome.effective_conversation;
@@ -1124,6 +1493,216 @@ void TrajectorySessionLedger::EndCommand(const std::string& command_id, bool ok,
     }
     payload["reason"] = reason.empty() ? "command_failed" : reason;
     PutUserCommand_(trajectory::EventKind::ControlCommandFailed, std::move(payload));
+}
+
+// ---------------------------------------------------------------------------
+// P0-4:环境快照 / 排队账 / 容量与存储(§9.1/§5.5/§12.2)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// §9.1 的平台静态材料:os/arch 按 compile target 报,locale/timezone 现读
+// (读不出就空串,由 gaps 如实记账,不造假)。
+std::string DetectOsName() {
+#if defined(_WIN32)
+    return "windows";
+#elif defined(__APPLE__)
+    return "macos";
+#else
+    return "linux";
+#endif
+}
+
+std::string DetectArch() {
+#if defined(_M_X64) || defined(__x86_64__)
+    return "x86_64";
+#elif defined(_M_ARM64) || defined(__aarch64__)
+    return "arm64";
+#elif defined(_M_IX86) || defined(__i386__)
+    return "x86";
+#else
+    return std::string();
+#endif
+}
+
+std::string DetectLocale() {
+    const char* current = std::setlocale(LC_ALL, nullptr);
+    return current != nullptr ? current : std::string();
+}
+
+std::string DetectTimezone() {
+    try {
+        const std::chrono::time_zone* zone = std::chrono::current_zone();
+        if (zone != nullptr) {
+            return std::string(zone->name());
+        }
+    } catch (...) {
+        // 无 tzdata 的机器:空串,gaps 里记"不可知",不猜。
+    }
+    return std::string();
+}
+
+}  // namespace
+
+std::string TrajectorySessionLedger::CaptureEnvironment(const EnvironmentFacts& facts) {
+    if (environment_captured_) {
+        return std::string();  // 一场 run 一次,幂等
+    }
+    trajectory::TrajectoryRecorder* recorder = main();
+    if (recorder == nullptr) {
+        return "trajectory.no_recorder";
+    }
+    trajectory::BlobStore blobs(impl_->active->directory.artifacts_root());
+    trajectory::EnvironmentSnapshotInput input;
+    input.lubancode_version = impl_->lubancode_version;
+    input.os_name = DetectOsName();
+    input.arch = DetectArch();
+    input.locale = DetectLocale();
+    input.timezone = DetectTimezone();
+    input.cwd = platform::PathToUtf8(std::filesystem::current_path());
+    // §3.2:仓库根从账本开张时的 workspace_root 递进(空 = 启动 cwd,如实
+    // 记 in_repo=false 的缺口)。
+    input.repository_root = impl_->workspace_root_text;
+    input.git = trajectory::GatherGitStatus(impl_->workspace_root_text);
+    input.provider = facts.provider;
+    input.wire = facts.wire;
+    input.model = facts.model;
+    input.model_parameters = facts.model_parameters;
+    if (!facts.system_prompt.empty()) {
+        const auto prompt_ref =
+            blobs.Store(facts.system_prompt, "text/markdown", trajectory::Durability::PowerLoss);
+        if (prompt_ref.has_value()) {
+            input.system_prompt_ref = *prompt_ref;
+        }
+    }
+    input.toolset = facts.toolset;
+    input.project_instruction_refs = facts.project_instruction_refs;
+    input.loaded_skill_refs = facts.loaded_skill_refs;
+    input.plugin_refs = facts.plugin_refs;
+    input.config_snapshot_redacted = facts.config_snapshot_redacted;
+    input.allowlisted_env = facts.allowlisted_env;
+
+    const auto capture =
+        trajectory::BuildEnvironmentCapturePayload(input, blobs, trajectory::Durability::PowerLoss);
+    if (!capture.has_value()) {
+        const std::string error = capture.error();
+        io_errors_.push_back(error);
+        platform::LogSink::Instance().Error("trajectory", "环境快照落盘失败: " + error);
+        return error;
+    }
+    trajectory::RecordRequest request;
+    request.kind = trajectory::EventKind::RunEnvironmentCaptured;
+    request.scope = recorder->base_scope();
+    request.scope.actor = trajectory::Actor::Host;
+    request.scope.origin = trajectory::Origin::RecoveryRuntime;
+    request.scope.visibility = {trajectory::Visibility::HostOnly};
+    request.scope.training_policy = trajectory::TrainingPolicy::Metadata;
+    request.payload = capture->event_payload;
+    const auto receipt = recorder->Record(std::move(request), trajectory::Durability::PowerLoss);
+    if (receipt.status != trajectory::RecordReceipt::Status::Committed) {
+        io_errors_.push_back("run.environment.captured:" + receipt.error_code);
+        return receipt.error_code;
+    }
+    environment_captured_ = true;
+    return std::string();
+}
+
+void TrajectorySessionLedger::NoteQueueEnqueued(const std::string& item_id,
+                                                const std::string& target_label,
+                                                const std::string& reason) {
+    nlohmann::json payload{{"item_id", item_id}, {"input_id", item_id}};
+    if (!target_label.empty()) {
+        payload["enqueue_reason"] = target_label;
+    } else if (!reason.empty()) {
+        payload["enqueue_reason"] = reason;
+    }
+    PutUserCommand_(trajectory::EventKind::ControlQueueItemEnqueued, std::move(payload));
+}
+
+void TrajectorySessionLedger::NoteQueueDequeued(const std::string& item_id, const std::string& reason) {
+    // dequeue 是宿主泵的活(§5.5:宿主落下状态变更,actor=host),不冒充
+    // 用户动作。
+    trajectory::TrajectoryRecorder* recorder = main();
+    if (recorder == nullptr) {
+        return;
+    }
+    nlohmann::json payload{{"item_id", item_id}, {"input_id", item_id}};
+    if (!reason.empty()) {
+        payload["reason"] = reason;
+    }
+    trajectory::RecordRequest request;
+    request.kind = trajectory::EventKind::ControlQueueItemDequeued;
+    request.scope = recorder->base_scope();
+    request.scope.actor = trajectory::Actor::Host;
+    request.scope.origin = trajectory::Origin::ScheduledHost;
+    request.scope.visibility = {trajectory::Visibility::HostOnly};
+    request.scope.training_policy = trajectory::TrainingPolicy::Exclude;
+    request.payload = std::move(payload);
+    const auto receipt = recorder->Record(std::move(request), trajectory::Durability::ProcessCrash);
+    if (receipt.status != trajectory::RecordReceipt::Status::Committed) {
+        io_errors_.push_back("control.queue.item.dequeued:" + receipt.error_code);
+    }
+}
+
+void TrajectorySessionLedger::NoteQueueCancelled(const std::string& item_id, const std::string& reason) {
+    PutUserCommand_(trajectory::EventKind::ControlQueueItemCancelled,
+                    nlohmann::json{{"item_id", item_id},
+                                   {"reason", reason.empty() ? "user_removed" : reason}});
+}
+
+void TrajectorySessionLedger::NoteQueueExpired(const std::string& item_id, const std::string& reason) {
+    // 过期也是宿主判的(泵的防死循环闸),actor=host。
+    trajectory::TrajectoryRecorder* recorder = main();
+    if (recorder == nullptr) {
+        return;
+    }
+    nlohmann::json payload{{"item_id", item_id}};
+    if (!reason.empty()) {
+        payload["reason"] = reason;
+    }
+    trajectory::RecordRequest request;
+    request.kind = trajectory::EventKind::ControlQueueItemExpired;
+    request.scope = recorder->base_scope();
+    request.scope.actor = trajectory::Actor::Host;
+    request.scope.origin = trajectory::Origin::ScheduledHost;
+    request.scope.visibility = {trajectory::Visibility::HostOnly};
+    request.scope.training_policy = trajectory::TrainingPolicy::Exclude;
+    request.payload = std::move(payload);
+    const auto receipt = recorder->Record(std::move(request), trajectory::Durability::ProcessCrash);
+    if (receipt.status != trajectory::RecordReceipt::Status::Committed) {
+        io_errors_.push_back("control.queue.item.expired:" + receipt.error_code);
+    }
+}
+
+bool TrajectorySessionLedger::StorageAvailable() const {
+    if (impl_ == nullptr || impl_->active == nullptr) {
+        return false;
+    }
+    return trajectory::HasDiskReserve(impl_->active->directory.session_dir(),
+                                      kJournalEmergencyReserveBytes);
+}
+
+trajectory::WorkspaceUsageReport TrajectorySessionLedger::WorkspaceUsage() const {
+    if (impl_ == nullptr || impl_->active == nullptr) {
+        return trajectory::WorkspaceUsageReport{};
+    }
+    const std::filesystem::path workspace_dir = impl_->active->directory.workspace_dir();
+    return trajectory::ScanWorkspaceUsage(workspace_dir / "sessions",
+                                          workspace_dir.filename().string());
+}
+
+trajectory::WorkspaceDoctorReport TrajectorySessionLedger::BuildDoctorReport() const {
+    if (impl_ == nullptr || impl_->active == nullptr) {
+        return trajectory::WorkspaceDoctorReport{};
+    }
+    const trajectory::TrajectoryDirectory& directory = impl_->active->directory;
+    return trajectory::BuildWorkspaceDoctorReport(
+        directory.workspace_dir().parent_path(), directory.workspace_dir(),
+        directory.workspace_dir().filename().string(), impl_->active->session_id(), io_errors_);
+}
+
+std::vector<std::string> TrajectorySessionLedger::recent_io_errors() const {
+    return io_errors_;
 }
 
 // ---------------------------------------------------------------------------

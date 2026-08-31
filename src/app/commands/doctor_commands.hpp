@@ -35,6 +35,7 @@
 #include "cli/theme.hpp"
 #include "config/config.hpp"
 #include "config/project_instructions.hpp"  // ProjectInstructionResolver:/doctor instructions
+#include "runtime/trajectory_session.hpp"    // /doctor trajectory 的账本口(P0-4)
 #include "tools/registry.hpp"
 
 namespace lubancode::app {
@@ -217,6 +218,9 @@ struct DoctorContext {
     // /doctor instructions(AGENTS.md 作用域单 P1-1):与写前闸同一只
     // Resolver。可空:没接的调用方按 SessionResolverOptions 现起一只。
     const lubancode::config::ProjectInstructionResolver* instruction_resolver = nullptr;
+    // /doctor trajectory(P0-4 §13.1):flag 开的会话的轨迹账本。可空 =
+    // 轨迹没开,那节明说"轨迹未开"。
+    const lubancode::runtime::TrajectorySessionLedger* trajectory_ledger = nullptr;
 };
 
 void HandleDoctorCommand(const std::string& args, const DoctorContext& context);

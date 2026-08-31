@@ -179,6 +179,48 @@ using lubancode::cli::TermErr;
 // 会话层排队消息账本(0.28.x):流式监听线程落队、会话泵投递,共用这一只。
 using lubancode::cli::SessionSteeringQueue;
 
+// ---------------------------------------------------------------------------
+// P0-4 环境快照的取材件(§9.1):工具集规范摘要与脱敏配置快照。
+// ---------------------------------------------------------------------------
+
+// 工具定义集合的规范摘要:工具名 + input_schema 按名排序拼数组,整份
+// sha256 + 计数(environment.hpp 的 ToolsetSummary 口径)。同 registry
+// 必得同摘要——摘要变即工具面变,重放侧据此判环境是否漂移。
+lubancode::trajectory::ToolsetSummary BuildToolsetSummary(
+    const std::vector<std::unique_ptr<lubancode::tools::Tool>>& tools) {
+    std::vector<const lubancode::tools::Tool*> ordered;
+    ordered.reserve(tools.size());
+    for (const auto& tool : tools) {
+        ordered.push_back(tool.get());
+    }
+    std::sort(ordered.begin(), ordered.end(),
+              [](const lubancode::tools::Tool* a, const lubancode::tools::Tool* b) {
+                  return a->name() < b->name();
+              });
+    nlohmann::json definitions = nlohmann::json::array();
+    for (const lubancode::tools::Tool* tool : ordered) {
+        definitions.push_back(nlohmann::json{{"name", tool->name()},
+                                             {"input_schema", tool->input_schema()}});
+    }
+    lubancode::trajectory::ToolsetSummary summary;
+    summary.toolset_sha256 = lubancode::hooks::Sha256Hex(definitions.dump());
+    summary.tool_count = ordered.size();
+    return summary;
+}
+
+// 脱敏配置快照:只挑非敏感键,密钥/token/base_url 一概不进(§十二:
+// 脱敏在落盘前做)。键集刻意收窄——将来要加,先过"这键泄不泄密"一问。
+nlohmann::json BuildRedactedConfigSnapshot(const lubancode::config::Config& config) {
+    return nlohmann::json{
+        {"language", config.language},
+        {"features",
+         {{"goals", config.features_goals},
+          {"loop", config.features_loop},
+          {"trajectory", config.features_trajectory}}},
+        {"connect_timeout_ms", config.connect_timeout_ms},
+        {"request_timeout_secs", config.request_timeout_secs}};
+}
+
 // 窄口全指组合根装好的 ToolRuntime(stack_ 里的那份);控制器方法名沿用,
 // 方法体原样。
 lubancode::tools::ToolRegistry& TerminalSessionController::registry() { return stack_.registry(); }
@@ -844,6 +886,14 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
                 // 不在里头,resume 不复活已送出的消息。崩在这之后的半轮里,
                 // 消息本体也已在 history 落盘路上(PersistNewMessages)。
                 PersistSteeringQueue();
+                // P0-4 排队账(§5.5):注入消息已成形,dequeued 在这落锤
+                //(取走即消费,不会再退还)。
+                if (session_runtime_.trajectory() != nullptr) {
+                    for (const auto& item : queued) {
+                        session_runtime_.trajectory()->NoteQueueDequeued(
+                            lubancode::cli::QueueItemId(item.id), "tool_boundary_delivery");
+                    }
+                }
                 return inject;
             }
             if (peer_inbox_poll) {
@@ -854,6 +904,24 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         main_agent->SetWiring(std::move(wiring));
     };
     reapply_peer_inbox();
+    // P0-4 排队账(§5.5):队列的终态安全变化(enqueue/用户删除)从队列
+    // 层广播,这里接进轨迹账本——监听线程落队时 cli 层够不着账本,观察
+    // 口是唯一不破坏分层的路。flag 关的会话不挂,零开销。
+    if (session_runtime_.trajectory() != nullptr) {
+        SessionSteeringQueue().SetChangeObserver(
+            [this](lubancode::cli::QueueChangeKind kind, const lubancode::cli::QueuedMessage& item) {
+                lubancode::runtime::TrajectorySessionLedger* ledger = session_runtime_.trajectory();
+                if (ledger == nullptr) {
+                    return;  // /clear 换账后的空窗:没有账可落,如实跳过
+                }
+                if (kind == lubancode::cli::QueueChangeKind::Enqueued) {
+                    ledger->NoteQueueEnqueued(lubancode::cli::QueueItemId(item.id),
+                                              item.target.short_label(), "busy_enqueue");
+                } else {
+                    ledger->NoteQueueCancelled(lubancode::cli::QueueItemId(item.id), "user_removed");
+                }
+            });
+    }
     // loop 已就位,把 worktree 工具 enter/exit 的善后接到这条 sync 上。
     stack_.after_worktree_moved = [this]() { SyncWorktreeDirectory(); };
     // --continue 若把会话搬回了存档里的房,提示词与子代理 cwd 跟着同步。
@@ -972,6 +1040,25 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
     }
     main_agent_profile.runtime = main_profile;
     main_agent_profile.system_prompt = lubancode::agent::AssembleSystemPrompt(prompt_options);
+    // P0-4 环境快照(§9.1/§9.2):flag 开的会话在 profile 定型后采一次
+    //——system prompt 全文、工具集规范摘要、脱敏配置快照从这取得到
+    // 真值;git/cwd/os 由账本现取。落不进账只是缺口(DetermineReplayLevel
+    // 如实降档),不拦会话。
+    if (session_runtime_.trajectory() != nullptr) {
+        lubancode::runtime::TrajectorySessionLedger::EnvironmentFacts environment_facts;
+        environment_facts.provider = active_provider;
+        environment_facts.wire = session_runtime_.wire_name();
+        environment_facts.model = *current_model;
+        environment_facts.system_prompt = main_agent_profile.system_prompt;
+        environment_facts.toolset = BuildToolsetSummary(registry().All());
+        environment_facts.project_instruction_refs = prompt_options.project_instruction_sources;
+        environment_facts.config_snapshot_redacted = BuildRedactedConfigSnapshot(config);
+        if (!main_agent_profile.request.reasoning_effort.empty()) {
+            environment_facts.model_parameters["reasoning_effort"] =
+                main_agent_profile.request.reasoning_effort;
+        }
+        (void)session_runtime_.trajectory()->CaptureEnvironment(environment_facts);
+    }
     // 皮上的叠层(从前由传输层的 ModelInstructions/SoulOverlay/
     // DeferredIndex 三只包装后端现拼,现在 Agent 拼请求时就地生效)。
     main_agent_profile.model_instructions = *current_model_instructions;

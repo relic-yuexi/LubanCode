@@ -10,9 +10,13 @@
 namespace lubancode::cli {
 
 struct TrajectoryCommandArgs {
-    std::string verb;        // verify | replay | harness-replay
-    std::string session_id;  // trajectory session id(trajectories/ 下那层)
+    std::string verb;        // verify | replay | harness-replay | usage | gc | doctor
+    std::string session_id;  // trajectory session id(trajectories/ 下那层);
+                             // usage/gc/doctor 档当 workspace-key 用
     std::string trajectories_root;  // 空 = <home>/.lubancode/trajectories
+    // gc 档:DryRun 只报账(默认);DerivedOnly 真删可重建/派生物(§12.2
+    // 次序 temp→index→checkpoint→derived;canonical 与 artifacts 永不进候选)。
+    bool gc_derived_only = false;
 };
 
 // 返回进程退出码:0 = 过;1 = 用法/找不到;2 = 验账/replay 未过。

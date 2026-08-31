@@ -11,7 +11,10 @@
 #include "platform/paths.hpp"
 #include "tools/path_utils.hpp"
 #include "trajectory/harness.hpp"
+#include "trajectory/metrics.hpp"
 #include "trajectory/replay.hpp"
+#include "trajectory/safety.hpp"
+#include "trajectory/usage_gc.hpp"
 
 namespace lubancode::cli {
 
@@ -43,9 +46,117 @@ std::filesystem::path FindSessionDir(const std::filesystem::path& root, const st
 
 }  // namespace
 
+// §12.2 容量/CI 档:usage / gc / doctor 吃 workspace-key(单段名,先过
+// 安全校验再拼路径)。workspaces/<key> 找不到给空。
+std::filesystem::path FindWorkspaceDir(const std::filesystem::path& root, const std::string& key) {
+    if (!trajectory::IsSafeSingleSegment(key)) {
+        return {};
+    }
+    std::error_code ec;
+    const auto candidate = root / "workspaces" / platform::Utf8ToPath(key);
+    if (std::filesystem::is_directory(candidate, ec)) {
+        return candidate;
+    }
+    return {};
+}
+
+// usage:workspace 四笔容量账逐 session 报(只报账,不动文件系统)。
+int RunUsageReport(const std::filesystem::path& workspace_dir, const std::string& key) {
+    const auto report = trajectory::ScanWorkspaceUsage(workspace_dir / "sessions", key);
+    std::cout << "workspace " << key << " —— " << report.sessions.size() << " 场 session, 共 "
+              << (report.total_bytes / (1024 * 1024)) << " MiB\n";
+    for (const auto& session : report.sessions) {
+        std::cout << "  " << session.session_id << "  journal=" << session.journal_bytes << "B"
+                  << "  blobs=" << session.referenced_blob_bytes << "B"
+                  << "  rebuildable=" << session.rebuildable_bytes << "B"
+                  << "  derived=" << session.derived_bytes << "B"
+                  << "  文件 " << session.total_files() << " 个\n";
+    }
+    std::cout << "canonical JSONL 与 artifacts/ 引用 blob 不在自动清理面;"
+                 "删它们只走显式的 session delete。\n";
+    return 0;
+}
+
+// gc:§12.2 定死次序 temp→index→checkpoint→derived;--derived-only 才真删,
+// 默认 dry-run 只报账。
+int RunGc(const std::filesystem::path& workspace_dir, const std::string& key, bool derived_only) {
+    const auto sessions_dir = workspace_dir / "sessions";
+    std::error_code ec;
+    if (!std::filesystem::is_directory(sessions_dir, ec)) {
+        std::cerr << "workspace " << key << " 没有 sessions 目录\n";
+        return 1;
+    }
+    int exit_code = 0;
+    for (const auto& entry : std::filesystem::directory_iterator(sessions_dir, ec)) {
+        if (ec) break;
+        std::error_code dir_ec;
+        if (!entry.is_directory(dir_ec) || dir_ec) {
+            continue;
+        }
+        const auto result = trajectory::RunSessionGc(
+            entry.path(), derived_only ? trajectory::GcScope::DerivedOnly
+                                       : trajectory::GcScope::DryRun);
+        std::cout << "  " << entry.path().filename().string() << "  可回收 "
+                  << (result.plan.reclaimable_bytes / 1024) << " KiB("
+                  << result.plan.items.size() << " 项)";
+        if (result.applied) {
+            std::cout << "  已删 " << (result.deleted_bytes / 1024) << " KiB / "
+                      << result.deleted_files << " 个文件";
+            if (!result.errors.empty()) {
+                std::cout << "  失败 " << result.errors.size() << " 项";
+                exit_code = 2;
+            }
+        }
+        std::cout << "\n";
+        for (const auto& error : result.errors) {
+            std::cout << "    [!!] " << error << "\n";
+        }
+    }
+    if (!derived_only) {
+        std::cout << "dry-run 只报账;真清加 --derived-only。\n";
+    }
+    return exit_code;
+}
+
+// doctor:与 /doctor trajectory 同一份只读聚合(metrics.hpp 的共用格式)。
+int RunDoctor(const std::filesystem::path& workspace_dir, const std::string& key) {
+    const auto report = trajectory::BuildWorkspaceDoctorReport(
+        workspace_dir.parent_path(), workspace_dir, key, std::nullopt, {});
+    for (const std::string& line : trajectory::FormatWorkspaceDoctorReport(report)) {
+        std::cout << line << "\n";
+    }
+    return 0;
+}
+
 int RunTrajectoryCommand(const TrajectoryCommandArgs& args) {
+    if (args.verb == "usage" || args.verb == "gc" || args.verb == "doctor") {
+        if (args.session_id.empty()) {
+            std::cerr << "缺 workspace key: lubancode trajectory " << args.verb
+                      << " <workspace-key>\n";
+            return 1;
+        }
+        const auto root = args.trajectories_root.empty() ? DefaultTrajectoriesRoot()
+                                                         : tools::Utf8ToPath(args.trajectories_root);
+        if (root.empty()) {
+            std::cerr << "找不到主目录,轨迹账无处寻\n";
+            return 1;
+        }
+        const auto workspace_dir = FindWorkspaceDir(root, args.session_id);
+        if (workspace_dir.empty()) {
+            std::cerr << "找不到 workspace " << args.session_id << "(单段名,不带路径)\n";
+            return 1;
+        }
+        if (args.verb == "usage") {
+            return RunUsageReport(workspace_dir, args.session_id);
+        }
+        if (args.verb == "gc") {
+            return RunGc(workspace_dir, args.session_id, args.gc_derived_only);
+        }
+        return RunDoctor(workspace_dir, args.session_id);
+    }
     if (args.verb != "verify" && args.verb != "replay" && args.verb != "harness-replay") {
-        std::cerr << "用法: lubancode trajectory <verify|replay|harness-replay> <session-id>\n";
+        std::cerr << "用法: lubancode trajectory "
+                     "<verify|replay|harness-replay|usage|gc|doctor> <session-id|workspace-key>\n";
         return 1;
     }
     if (args.session_id.empty()) {

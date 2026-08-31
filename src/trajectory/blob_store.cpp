@@ -6,6 +6,7 @@
 
 #include "hooks/hash.hpp"
 #include "platform/paths.hpp"
+#include "trajectory/safety.hpp"
 
 #ifdef _WIN32
 #ifndef WIN32_LEAN_AND_MEAN
@@ -16,6 +17,7 @@
 #include <windows.h>
 #else
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <unistd.h>
 #endif
 
@@ -117,6 +119,10 @@ bool BlobRef::MatchesShape(const nlohmann::json& json) {
 std::expected<BlobRef, std::string> BlobStore::Store(std::string_view data, std::string media_type,
                                                      Durability durability) {
     const std::string hash = hooks::Sha256Hex(data);
+    if (!IsHex64(hash)) {
+        // 防御性:hash 出自自家的 Sha256Hex,这条真触发说明哈希层坏了。
+        return std::unexpected("blob hash 形状不合法");
+    }
     const std::filesystem::path target = PathFor(hash);
     if (std::filesystem::exists(target)) {
         // 内容寻址幂等:同 hash 直接复用既有 blob。
@@ -131,20 +137,28 @@ std::expected<BlobRef, std::string> BlobStore::Store(std::string_view data, std:
                                ": " + ec.message());
     }
 
-    // 临时文件同目录,保证 rename 不跨文件系统。
+    // 临时文件同目录,保证 rename 不跨文件系统。create-new 语义:占位成功
+    // 才写(碰撞给唯一计数器名,理论不可达);POSIX 侧直接以 0600 落地,
+    // Windows 侧由 session 根的 PROTECTED user-only DACL 继承(§12.1)。
     std::filesystem::path tmp = target;
     tmp += ".tmp-" + std::to_string(static_cast<unsigned long long>(NextTmpCounter()));
     {
         std::FILE* file = nullptr;
 #ifdef _WIN32
         // _SH_DENYNO:同 fopen_s 默认不共享的坑,写入期间允许只读探测。
-        file = _wfsopen(tmp.c_str(), L"wb", _SH_DENYNO);
+        // "wbx"(create-new):已被预置的临时名直接失败,不覆盖(§12.1)。
+        file = _wfsopen(tmp.c_str(), L"wbx", _SH_DENYNO);
         if (file == nullptr) {
             return std::unexpected("blob 临时文件打不开: " + platform::PathToUtf8(tmp));
         }
 #else
-        file = std::fopen(tmp.c_str(), "wb");
+        const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600);
+        if (fd < 0) {
+            return std::unexpected("blob 临时文件打不开: " + platform::PathToUtf8(tmp));
+        }
+        file = ::fdopen(fd, "wb");
         if (file == nullptr) {
+            ::close(fd);
             return std::unexpected("blob 临时文件打不开: " + platform::PathToUtf8(tmp));
         }
 #endif
@@ -162,6 +176,12 @@ std::expected<BlobRef, std::string> BlobStore::Store(std::string_view data, std:
         }
     }
 
+    // rename 前再核目标仍在仓根内(§12.1"rename 前再核"):目标虽由合法
+    // hash 拼出,分桶目录若被换成重解析点,这里当场拦下。
+    if (!IsSafeContainedPath(target, root_)) {
+        std::filesystem::remove(tmp, ec);
+        return std::unexpected("blob 目标路径越界: " + platform::PathToUtf8(target));
+    }
     std::filesystem::rename(tmp, target, ec);
     if (ec) {
         std::filesystem::remove(tmp, ec);

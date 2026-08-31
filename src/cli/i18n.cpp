@@ -1277,7 +1277,7 @@ const Entry kZhCN[] = {
 
     // ---- /doctor:本地兼容端 Effort 与前缀缓存诊断(2026-08 单) ----
     {"doctor.usage.usage_line",
-     "用法: /doctor effort [档位|unset] | /doctor cache [probe [轮数]|usage] | /doctor agents | /doctor shell"},
+     "用法: /doctor effort [档位|unset] | /doctor cache [probe [轮数]|usage] | /doctor agents | /doctor shell | /doctor trajectory"},
     {"doctor.overview.header", "诊断概览(不发请求,只看当前声明与结论):"},
     {"doctor.overview.effort", "  当前档位: "},
     {"doctor.overview.declared", "  档位声明: "},
