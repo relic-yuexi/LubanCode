@@ -31,6 +31,16 @@ inline bool DeferralEnabled(std::size_t total_tools, int threshold) {
     return threshold > 0 && total_tools > static_cast<std::size_t>(threshold);
 }
 
+// P0(动态工具 PromptCache 守恒单·§十三):/context 与 trace 的
+// deferred_tool_mode 展示位。现状只有两档——deferral 关着时全量定义常驻
+// (disabled),开着时 tool_search 命中把 schema 直接扩写回顶层 tools/
+// system(legacy_expand,§四定案表标"cache-hostile"的那条兼容路)。
+// proxy_reference/native_reference 是 P1/P3 才落地的新路,现在没有,不能
+// 提前展示成"已支持"——按名字就能看出这只是诊断标签,不是新枚举类型。
+inline std::string DeferredToolModeLabel(bool deferral_enabled) {
+    return deferral_enabled ? "legacy_expand" : "disabled";
+}
+
 // 延迟包装:把任意工具标成 deferred=true,其余行为原样转发。给 McpTool 用
 // ——mcp/ 目录不动(任务规矩),没法直接在 McpTool 上加 override,main.cpp
 // 注册 MCP 工具时裹一层这个。PluginTool/LuaTool 在 tools/ 里,直接 override,

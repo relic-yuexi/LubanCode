@@ -1248,6 +1248,10 @@ const Entry kZhCN[] = {
     {"artifact.store_open_failed", "[artifact] 上下文仓开不了({0}),超长结果退回内存全文,不产生假引用。"},
     {"cmd.context.artifacts", "artifact 层:{0} 枚落盘 · 全文共 {1} 字节可追回(context_search/context_read 按 id 检索)"},
     {"cmd.context.artifacts_none", "artifact 层:本会话尚无落盘的超长工具结果。"},
+    // ---- 动态工具 PromptCache 守恒单 P0:deferred_tool_mode 展示位 ----
+    {"cmd.context.deferred_tool_mode", "deferred_tool_mode = {0}(待检索 {1}/{2} 枚延迟工具)"},
+    {"cmd.context.deferred_tool_mode.legacy_hint",
+     "  legacy_expand 命中后会同时改写 system 索引段与顶层 tools 数组,断前缀(设计单:动态工具 PromptCache 守恒与按需调用设计)"},
 
     // ---- ContextBudgetPlan 与分层占用(第四期,/context 展示) ----
     {"cmd.context.layers", "分层占用:inline 全文 {0} 枚 · artifact 预览(L1){1} 枚"},

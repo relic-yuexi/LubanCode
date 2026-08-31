@@ -522,6 +522,16 @@ add_library(lubancode_engine STATIC
   # (延迟工具索引/模型目录指令/魂)收进同一次解析,产 AssembledPrompt{text,
   # manifest}。
   src/agent/resolved_prompt_builder.cpp
+  # 多渠道消息接入与常驻 ChannelPlugin 单阶段 1:纯合同与假 sidecar。
+  # types(ChannelInboundEvent/MessageProvenance/ReplyAction)、
+  # channel.yaml schema 1 parser、Bridge v1 帧编解码与双向 router 骨架。
+  # 唯一真源 docs/architecture/channels/*;纯库,不 include app/cli/
+  # runtime/agent/package(package 反过来吃它,见 package/component.cpp)。
+  src/channel/types.cpp
+  src/channel/manifest.cpp
+  src/channel/frame.cpp
+  src/channel/bridge_protocol.cpp
+  src/channel/router.cpp
   src/insights/finding.cpp
   src/insights/session_summary.cpp
   src/insights/report_model.cpp

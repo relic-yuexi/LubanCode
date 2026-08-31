@@ -12,7 +12,9 @@
 #include <vector>
 
 #include "agent/agent.hpp"
+#include "agent/context.hpp"
 #include "agent/loop.hpp"
+#include "agent/prefix.hpp"
 #include "agent/prompts.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
@@ -435,4 +437,289 @@ TEST_CASE("不设过滤谓词: 全量直挂,延迟标记不影响任何行为(�
     CHECK(HasToolDef(backend.captured_requests[0], "mcp__test__echo"));
     const auto& tool_result = std::get<api::ToolResultBlock>(loop.history()[2].content[0]);
     CHECK_FALSE(tool_result.is_error);
+}
+
+// ---------------------------------------------------------------------------
+// 动态工具 PromptCache 守恒单 P0(§十三):以现有 20 阈值跑 baseline。
+// 假后端确定性场景,量的是"结构性"账(声明字节、往返步数),不是真机延迟
+// (无钥匙测不了,老实标 N/A,不拿假数冒充)。数字表见 P0 报告。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 往返步数场景(干净命中/误选)公用的示例 schema——那两个场景不比字节账,
+// 随手给个能通过校验的形状即可。
+nlohmann::json BaselineSchema() {
+    return nlohmann::json::parse(R"({
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+        "required": ["a"]
+    })");
+}
+
+// tools 数组的声明字节账(名字+描述+schema,统一 token 口径,跟
+// /context 的 tools_tokens 同一把尺——agent/context.hpp::EstimateUtf8Tokens)。
+std::size_t ToolDefsTokens(const std::vector<api::ToolDefinition>& defs) {
+    std::size_t total = 0;
+    for (const auto& def : defs) {
+        total += agent::EstimateUtf8Tokens(def.name) + agent::EstimateUtf8Tokens(def.description) +
+                 agent::EstimateUtf8Tokens(def.input_schema.dump());
+    }
+    return total;
+}
+
+// 阈值边界(20 vs 21)首份请求的工具声明字节账,四个数一次量全:
+//   disabled_tools_tokens             阈值内(20 枚)全量常驻的 tools 字节
+//   enabled_first_request_tools_tokens 越阈值(21 枚)首份请求 tools 字节
+//                                      (3 核心 + tool_search)
+//   enabled_index_segment_tokens       同一份请求 system 尾部索引段字节
+//   enabled_fully_mounted_tools_tokens 18 枚延迟工具全部搜完挂载后的 tools
+//                                      字节(worst case:这一轮最终全用上)
+// 拆成参数化 helper,好让"轻 schema/长描述"与"重 schema/短描述"两种工具
+// 形状各跑一遍——阈值省不省钱要看工具长什么样,不是恒真(§十一·11.3)。
+struct ThresholdByteAccounting {
+    std::size_t disabled_tools_tokens = 0;
+    std::size_t enabled_first_request_tools_tokens = 0;
+    std::size_t enabled_index_segment_tokens = 0;
+    std::size_t enabled_fully_mounted_tools_tokens = 0;
+    std::size_t enabled_first_request_total() const {
+        return enabled_first_request_tools_tokens + enabled_index_segment_tokens;
+    }
+};
+
+ThresholdByteAccounting MeasureThresholdByteAccounting(const std::string& description,
+                                                        const nlohmann::json& schema) {
+    ThresholdByteAccounting acc;
+
+    // 20 枚(3 核心 + 17 延迟):DeferralEnabled(20,20)==false,阈值内不启用,
+    // 全量常驻——现状回归(阈值等于总数不触发)。
+    tools::ToolRegistry disabled_registry;
+    disabled_registry.Register(std::make_unique<StubTool>("read_file", "读取本地文件的完整内容", false));
+    disabled_registry.Register(std::make_unique<StubTool>("write_file", "把内容写入本地文件", false));
+    disabled_registry.Register(std::make_unique<StubTool>("run_command", "执行一条 shell 命令并回收输出", false));
+    for (int i = 0; i < 17; ++i) {
+        disabled_registry.Register(
+            std::make_unique<StubTool>("mcp__vendor__op" + std::to_string(i), description, true, schema));
+    }
+    REQUIRE(disabled_registry.All().size() == 20);
+    REQUIRE_FALSE(tools::DeferralEnabled(disabled_registry.All().size(), 20));
+
+    // 走真实 Agent::Run() 拿"实际发出的请求.tools",不越权碰
+    // Agent::BuildToolDefinitions()(私有,只对 AgentLoop 开放友元)——跟
+    // 生产代码同一条路径,不重实现一遍过滤逻辑。
+    ScriptBackend disabled_probe_backend;
+    disabled_probe_backend.scripts = {TextScript("好")};
+    agent::Agent disabled_loop(disabled_probe_backend, disabled_registry,
+                                agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
+    agent::TurnWiring disabled_probe_callbacks;
+    REQUIRE(disabled_loop.Run("你好", disabled_probe_callbacks).has_value());
+    acc.disabled_tools_tokens = ToolDefsTokens(disabled_probe_backend.captured_requests[0].tools);
+
+    // 再添 1 枚,总数 21,越过阈值,启用 legacy_expand:首份请求只剩
+    // 3 核心 + tool_search,17+1=18 枚延迟工具全部退到 system 尾部的索引段。
+    tools::ToolRegistry enabled_registry;
+    enabled_registry.Register(std::make_unique<StubTool>("read_file", "读取本地文件的完整内容", false));
+    enabled_registry.Register(std::make_unique<StubTool>("write_file", "把内容写入本地文件", false));
+    enabled_registry.Register(std::make_unique<StubTool>("run_command", "执行一条 shell 命令并回收输出", false));
+    for (int i = 0; i < 18; ++i) {
+        enabled_registry.Register(
+            std::make_unique<StubTool>("mcp__vendor__op" + std::to_string(i), description, true, schema));
+    }
+    auto enabled_loaded = std::make_shared<std::set<std::string>>();
+    enabled_registry.Register(std::make_unique<tools::ToolSearchTool>(enabled_registry, enabled_loaded));
+    REQUIRE(enabled_registry.All().size() == 22);  // 3 核心 + 18 延迟 + tool_search
+    REQUIRE(tools::DeferralEnabled(enabled_registry.All().size() - 1, 20));  // 不含 tool_search 自身数
+
+    agent::AgentProfile enabled_profile{.request{.model = "m"}, .system_prompt = "sys"};
+    enabled_profile.tool_filter = [enabled_loaded](const tools::Tool& tool) {
+        return !tool.deferred() || enabled_loaded->count(tool.name()) != 0;
+    };
+    ScriptBackend enabled_probe_backend;
+    enabled_probe_backend.scripts = {TextScript("好")};
+    agent::Agent enabled_loop(enabled_probe_backend, enabled_registry, std::move(enabled_profile));
+    agent::TurnWiring enabled_probe_callbacks;
+    REQUIRE(enabled_loop.Run("你好", enabled_probe_callbacks).has_value());
+    acc.enabled_first_request_tools_tokens = ToolDefsTokens(enabled_probe_backend.captured_requests[0].tools);
+    acc.enabled_index_segment_tokens =
+        agent::EstimateUtf8Tokens(tools::BuildDeferredToolsIndexSegment(enabled_registry, *enabled_loaded));
+
+    // 反面账:若这一轮最终要用到全部 18 枚延迟工具(不是"用不上大半"的
+    // 理想场景),legacy_expand 每断一次前缀多付一次代价;这里只量最终
+    // 挂满时的静态字节(往返步数的账另在下一个 TEST_CASE)。
+    for (int i = 0; i < 18; ++i) {
+        enabled_loaded->insert("mcp__vendor__op" + std::to_string(i));
+    }
+    ScriptBackend fully_mounted_probe_backend;
+    fully_mounted_probe_backend.scripts = {TextScript("好")};
+    agent::AgentProfile fully_mounted_profile{.request{.model = "m"}, .system_prompt = "sys"};
+    fully_mounted_profile.tool_filter = [enabled_loaded](const tools::Tool& tool) {
+        return !tool.deferred() || enabled_loaded->count(tool.name()) != 0;
+    };
+    agent::Agent fully_mounted_loop(fully_mounted_probe_backend, enabled_registry,
+                                    std::move(fully_mounted_profile));
+    agent::TurnWiring fully_mounted_probe_callbacks;
+    REQUIRE(fully_mounted_loop.Run("你好", fully_mounted_probe_callbacks).has_value());
+    acc.enabled_fully_mounted_tools_tokens =
+        ToolDefsTokens(fully_mounted_probe_backend.captured_requests[0].tools);
+
+    return acc;
+}
+
+}  // namespace
+
+TEST_CASE("P0基线: 阈值边界(20 vs 21)首份请求的工具声明字节账——轻 schema/长描述,索引段不省反赔") {
+    // MCP 工具常见的一种形状:参数简单(schema 小),但描述写得啰嗦
+    // (中文长句)。EstimateUtf8Tokens 给非 ASCII 字符 1.5 token/字的权重,
+    // 描述占的字节远比 schema 贵——索引段里描述原样全文照抄(没超 80 字
+    // 不截断),schema 省下来的那点字节根本抵不过 tool_search 自身定义 +
+    // 索引段前言那句"另有 N 个延迟挂载的工具……"的固定开销。
+    const auto acc = MeasureThresholdByteAccounting("远程服务里的示例只读工具,用于基线场景的字节测量",
+                                                     nlohmann::json::parse(R"({
+        "type": "object",
+        "properties": {"a": {"type": "string"}, "b": {"type": "string"}},
+        "required": ["a"]
+    })"));
+    MESSAGE("baseline[轻schema/长描述].disabled_tools_tokens = ", acc.disabled_tools_tokens);
+    MESSAGE("baseline[轻schema/长描述].enabled_first_request_tools_tokens = ",
+            acc.enabled_first_request_tools_tokens);
+    MESSAGE("baseline[轻schema/长描述].enabled_index_segment_tokens = ", acc.enabled_index_segment_tokens);
+    MESSAGE("baseline[轻schema/长描述].enabled_first_request_total = ", acc.enabled_first_request_total());
+    MESSAGE("baseline[轻schema/长描述].enabled_fully_mounted_tools_tokens = ",
+            acc.enabled_fully_mounted_tools_tokens);
+    // 如实记账:这个形状下,legacy_expand 首份请求反而比全量常驻更贵——
+    // "阈值一定省"是假设,不是恒真;这正是本单要钉的现状,不是把断言凑
+    // 成好看数字。
+    CHECK(acc.enabled_first_request_total() > acc.disabled_tools_tokens);
+    CHECK(acc.enabled_fully_mounted_tools_tokens > acc.disabled_tools_tokens);
+}
+
+TEST_CASE("P0基线: 阈值边界(20 vs 21)首份请求的工具声明字节账——重 schema/短描述,首份请求确有节省") {
+    // 另一种常见形状:参数结构深(嵌套 object/array/enum,真实 MCP 工具
+    // 常见),描述反而写得简短。这时 schema 才是成本大头,延迟挂载省下的
+    // 才是真金白银——两种形状对照着看,才是"阈值该怎么定"该问的问题
+    // (§十一·11.3:不能把 20 原封不动当最佳线)。
+    const auto acc = MeasureThresholdByteAccounting("远程检索", nlohmann::json::parse(R"({
+        "type": "object",
+        "properties": {
+            "query": {"type": "string"},
+            "filters": {
+                "type": "object",
+                "properties": {
+                    "status": {"type": "string", "enum": ["open", "closed", "merged", "draft"]},
+                    "labels": {"type": "array", "items": {"type": "string"}},
+                    "assignee": {"type": "string"},
+                    "date_range": {
+                        "type": "object",
+                        "properties": {"from": {"type": "string"}, "to": {"type": "string"}}
+                    }
+                }
+            },
+            "sort": {"type": "string", "enum": ["created", "updated", "relevance"]},
+            "page": {"type": "integer"},
+            "page_size": {"type": "integer"}
+        },
+        "required": ["query"]
+    })"));
+    MESSAGE("baseline[重schema/短描述].disabled_tools_tokens = ", acc.disabled_tools_tokens);
+    MESSAGE("baseline[重schema/短描述].enabled_first_request_tools_tokens = ",
+            acc.enabled_first_request_tools_tokens);
+    MESSAGE("baseline[重schema/短描述].enabled_index_segment_tokens = ", acc.enabled_index_segment_tokens);
+    MESSAGE("baseline[重schema/短描述].enabled_first_request_total = ", acc.enabled_first_request_total());
+    MESSAGE("baseline[重schema/短描述].enabled_fully_mounted_tools_tokens = ",
+            acc.enabled_fully_mounted_tools_tokens);
+    // 首份请求确有节省(schema 是成本大头时,不进 tools 数组才省得下来)。
+    CHECK(acc.enabled_first_request_total() < acc.disabled_tools_tokens);
+    // 但用到用完(worst case),还是比从不延迟贵一截(tool_search 自身
+    // 定义的常驻成本 + 期间断前缀的代价,后者见下一个 TEST_CASE 的往返
+    // 步数账)——"阈值省钱"只在"这一轮用不完大部分工具"时成立。
+    CHECK(acc.enabled_fully_mounted_tools_tokens > acc.disabled_tools_tokens);
+}
+
+TEST_CASE("P0基线: 干净命中 vs 误选的往返步数——legacy_expand 每断一次前缀多付一步") {
+    // 干净命中:关键词唯一,tool_search 一次命中目标,模型直接调用,没有
+    // 走弯路。往返步数 = search + invoke + 收尾 = 3 步。
+    tools::ToolRegistry clean_registry;
+    clean_registry.Register(std::make_unique<StubTool>("read_file", "读文件", false));
+    clean_registry.Register(
+        std::make_unique<StubTool>("mcp__billing__charge_card", "对信用卡发起一次扣款", true, BaselineSchema()));
+    auto clean_loaded = std::make_shared<std::set<std::string>>();
+    clean_registry.Register(std::make_unique<tools::ToolSearchTool>(clean_registry, clean_loaded));
+
+    ScriptBackend clean_backend;
+    clean_backend.scripts = {
+        ToolCallScript("s1", "tool_search", R"({"query":"扣款"})"),
+        ToolCallScript("c1", "mcp__billing__charge_card", R"({"a":"tok_123"})"),
+        TextScript("扣款完成"),
+    };
+    agent::AgentProfile clean_profile{.request{.model = "m"}, .system_prompt = "sys"};
+    clean_profile.tool_filter = [clean_loaded](const tools::Tool& tool) {
+        return !tool.deferred() || clean_loaded->count(tool.name()) != 0;
+    };
+    agent::Agent clean_loop(clean_backend, clean_registry, std::move(clean_profile));
+    agent::TurnWiring clean_callbacks;
+    REQUIRE(clean_loop.Run("帮用户扣款", clean_callbacks).has_value());
+    const std::size_t clean_steps = clean_backend.captured_requests.size();
+    MESSAGE("baseline[round-trip].clean_hit_steps = ", clean_steps);
+    CHECK(clean_steps == 3);
+
+    // 对照组:同一目标工具在阈值内全量常驻(disabled),不用搜,直接调用,
+    // 往返步数 = invoke + 收尾 = 2 步——legacy_expand 干净命中也要多付
+    // 一步搜索开销,不是零成本。
+    tools::ToolRegistry disabled_registry;
+    disabled_registry.Register(std::make_unique<StubTool>("read_file", "读文件", false));
+    disabled_registry.Register(
+        std::make_unique<StubTool>("mcp__billing__charge_card", "对信用卡发起一次扣款", false, BaselineSchema()));
+    ScriptBackend disabled_backend;
+    disabled_backend.scripts = {
+        ToolCallScript("c1", "mcp__billing__charge_card", R"({"a":"tok_123"})"),
+        TextScript("扣款完成"),
+    };
+    agent::Agent disabled_loop(disabled_backend, disabled_registry,
+                               agent::AgentProfile{.request{.model = "m"}, .system_prompt = "sys"});
+    agent::TurnWiring disabled_callbacks;
+    REQUIRE(disabled_loop.Run("帮用户扣款", disabled_callbacks).has_value());
+    const std::size_t disabled_steps = disabled_backend.captured_requests.size();
+    MESSAGE("baseline[round-trip].disabled_direct_steps = ", disabled_steps);
+    CHECK(disabled_steps == 2);
+    CHECK(clean_steps == disabled_steps + 1);  // 干净命中也要多付一步搜索
+
+    // 误选场景:两枚近名延迟工具共享关键词("扣款"),tool_search 一次命中
+    // 两个(下面的独立断言会验证这一步确有双命中,不是脚本硬凑的前提)。
+    // 固定脚本复现"先调错、再改调对"的往返形状(StubTool 不作语义分级,
+    // 这里只量步数,不量模型怎么判断对错):search + 误调 + 改调 + 收尾
+    // = 4 步——比干净命中多 1 步,比阈值内直调多 2 步。
+    tools::ToolRegistry misselect_registry;
+    misselect_registry.Register(std::make_unique<StubTool>("read_file", "读文件", false));
+    misselect_registry.Register(
+        std::make_unique<StubTool>("mcp__billing__charge_card", "对信用卡发起一次扣款", true, BaselineSchema()));
+    misselect_registry.Register(std::make_unique<StubTool>(
+        "mcp__billing__charge_card_test", "沙箱扣款测试端点,不产生真实扣款", true, BaselineSchema()));
+    auto misselect_loaded = std::make_shared<std::set<std::string>>();
+    misselect_registry.Register(std::make_unique<tools::ToolSearchTool>(misselect_registry, misselect_loaded));
+
+    ScriptBackend misselect_backend;
+    misselect_backend.scripts = {
+        ToolCallScript("s1", "tool_search", R"({"query":"扣款"})"),
+        ToolCallScript("wrong", "mcp__billing__charge_card_test", R"({"a":"tok_123"})"),  // 误选
+        ToolCallScript("right", "mcp__billing__charge_card", R"({"a":"tok_123"})"),       // 改调正确的
+        TextScript("扣款完成"),
+    };
+    agent::AgentProfile misselect_profile{.request{.model = "m"}, .system_prompt = "sys"};
+    misselect_profile.tool_filter = [misselect_loaded](const tools::Tool& tool) {
+        return !tool.deferred() || misselect_loaded->count(tool.name()) != 0;
+    };
+    agent::Agent misselect_loop(misselect_backend, misselect_registry, std::move(misselect_profile));
+    agent::TurnWiring misselect_callbacks;
+    REQUIRE(misselect_loop.Run("帮用户扣款", misselect_callbacks).has_value());
+    const std::size_t misselect_steps = misselect_backend.captured_requests.size();
+    MESSAGE("baseline[round-trip].misselection_steps = ", misselect_steps);
+    CHECK(misselect_steps == 4);
+    CHECK(misselect_steps == clean_steps + 1);
+    CHECK(misselect_steps == disabled_steps + 2);
+
+    // tool_search 一次确有命中两枚近名工具(误选的前提条件,不是脚本硬凑)。
+    const auto search_result = tools::ToolSearchTool(misselect_registry, misselect_loaded)
+                                    .execute(nlohmann::json{{"query", "扣款"}, {"limit", 5}});
+    CHECK(search_result.content.find("mcp__billing__charge_card") != std::string::npos);
+    CHECK(search_result.content.find("mcp__billing__charge_card_test") != std::string::npos);
 }
