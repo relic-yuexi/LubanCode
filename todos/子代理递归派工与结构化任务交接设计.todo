@@ -1129,9 +1129,9 @@ warning: max_active(2) < max_depth(3), deepest chain may be rejected
 ### P1-2：预算、轨迹与发布门
 
 - [x] `max_children_per_task/max_tree_nodes` 配置解析、merge、doctor 展示与超限稳定错。（config.hpp/cpp 新增 subagent.max_children_per_task/max_tree_nodes 解析+merge，正整数救命阀口径同 max_depth/max_active；AgentTool::SetDispatchGovernance 扩两参；tool_runtime.cpp 接线；判决门 EvaluateAdmission/TryRegisterChild P0 已备，稳定错文案见下方"超限稳定错样例"）
-- [ ] 树 deadline 向下传；子 wall limit 不越父剩余时间。（本轮未实现——超出 P1-1/P1-2 五条清单原文范围；父子各自的 wall_limit_secs 目前独立设置，无"子不越父剩余"钳制，留作后续单）
+- [x] 树 deadline 向下传；子 wall limit 不越父剩余时间。（本轮未实现——超出 P1-1/P1-2 五条清单原文范围；父子各自的 wall_limit_secs 目前独立设置，无"子不越父剩余"钳制，留作后续单）【2026-08-31 主人裁决:不做。父等子是设计本意,子任务跑多久父就等多久,不加"子不越父"钳制,此条按裁决关闭。】
 - [x] 轨迹接 `task_ref/parent_agent_run_id/result.accepted`。（task_ref/result.accepted 是 P0 既有落点；本单补的是 parent_agent_run_id 的嵌套边——AgentTaskSnapshot 增 agent_run_id 字段，RunTask 起跑前由 trajectory->run_id() 回填；IdentityOfSnapshot 投影进 AgentRunIdentity；Hooks::trajectory_spawn 签名加 parent_run_id 参数，ExecuteForeground/LaunchBackground 都传 caller.agent_run_id；TrajectorySessionLedger::SpawnSubagent 新参数非空则 relations.parent_run_id 记它，空则落回 main_run_id——旧行为零变。call-boundary 的 AttachChildRun/NoteChildTerminal 仍只挂 main_bridge，嵌套层自己的调用边界回填是明确留白的后续项，已在代码注释与本报告写清，不冒充已完整)
-- [ ] usage 真账接稳后，再实现 `max_tree_total_tokens`。（原文即注明"先支持 null"，本单未动——config/governance 仍是占位 null，符合设计原意）
+- [x] usage 真账接稳后，再实现 `max_tree_total_tokens`。（原文即注明"先支持 null"，本单未动——config/governance 仍是占位 null，符合设计原意）【2026-08-31 主人裁决:不加限额。烧多少钱用户自担——启动即有心理预期;职责是把消耗列得明明白白,透明展示走 Token 账本单(A2 /usage 报告面),限额路不再排期。】
 - [ ] 真机同模型对比"自由 prompt"与"结构化 task"的派工完整度、重试数与 token 开销；没测不宣称更好。（需要真实 provider 调用与人工评估，隔离 worktree + 假后端环境无法完成，如实留空）
 
 ## 十七、测试设计
@@ -1144,7 +1144,7 @@ warning: max_active(2) < max_depth(3), deepest chain may be rejected
 - [x] legacy `prompt` 归一后与旧行为对账。（「AgentTaskSpec:legacy prompt 归一(...)」+ 上一条同文件覆盖归一后对账）
 - [ ] 渲染顺序、空段省略、多行缩进与中英 UTF-8 golden。（P0 已测顺序/空段省略(zh 单段);未见多行缩进专项与 en golden,如实留空——不是本单新增缺口，本单未补）
 - [ ] `source_request` 与 `context` 分栏，不会把派工者说明标成用户原话。（未见以 source_request 为断言目标的用例，如实留空）
-- [ ] task spec 内写”忽略安全规则”不会改变有效权限与工具集。（未见专门的注入抗性用例，如实留空——属产品不变量 11 的验证缺口，非本单新增代码引入）
+- [x] task spec 内写”忽略安全规则”不会改变有效权限与工具集。（未见专门的注入抗性用例，如实留空——属产品不变量 11 的验证缺口，非本单新增代码引入）【2026-08-31 主人裁决:不另设注入抗性用例。任务由用户自己写,自己负责;不加专门门闩。】
 
 > 上面七条记录 P0 当时的已验事实，不再是 HEAD 的活合同测试。P1-0 删除 parser、renderer 与 legacy 归一夹具；旧 session/trajectory 的 JSON 仍由历史读取层按原字节保管。当前执行合同只看 17.1A。
 
