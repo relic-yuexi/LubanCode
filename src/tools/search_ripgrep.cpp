@@ -1,6 +1,6 @@
-// search 工具 ripgrep 后端合同的实现(P0-2/P0-3)。头文件(search_ripgrep.hpp)
-// 记合同与取舍,这里只落机制。本批不改 SearchTool 生产行为:`search` 仍走
-// 旧 std::regex 内核,本文件只提供装配注入口、诊断真账与 argv/策略纯函数。
+// search 工具 ripgrep 后端合同的实现(P0-2/P0-3 部分):定位器、文件校验、
+// 版本 smoke、argv 纯函数构造器与边界策略。流式执行(ChildProcess 起真 rg、
+// JSONL/NUL 分帧、四道墙、终态裁决)在 search_ripgrep_run.cpp。
 
 #include "tools/search_ripgrep.hpp"
 
@@ -45,8 +45,8 @@ std::string_view ToString(SearchBackendError error) {
             return "search_timeout";
         case SearchBackendError::OutputLimit:
             return "search_output_limit";
-        case SearchBackendError::NotWired:
-            return "search_backend_not_wired";
+        case SearchBackendError::RunFailed:
+            return "search_backend_run_failed";
     }
     return "search_backend_unknown";
 }
@@ -217,63 +217,9 @@ RipgrepSmokeResult RunRipgrepSmoke(const std::filesystem::path& exe, const Ripgr
     return out;
 }
 
-// ---- 生产 runner(P0-4 前流式执行未接,前置校验真做) -----------------------
-
-BundledRipgrepRunner::BundledRipgrepRunner(std::filesystem::path exe_override,
-                                           RipgrepVersionProbe version_probe)
-    : exe_override_(std::move(exe_override)), version_probe_(std::move(version_probe)) {}
-
-RipgrepSmokeResult BundledRipgrepRunner::smoke_result() const {
-    std::lock_guard<std::mutex> lock(smoke_mutex_);
-    return smoke_result_;
-}
-
-void BundledRipgrepRunner::EnsureSmoke() {
-    std::lock_guard<std::mutex> lock(smoke_mutex_);
-    if (smoke_done_) {
-        return;  // 每实例只 smoke 一次(工具实例是共享的,别让并发调用各起一遍进程)
-    }
-    // 定位:注入路径优先(测试),否则生产唯一路径。拿不到路径本身就是缺件。
-    const std::optional<std::filesystem::path> exe =
-        exe_override_.has_value() ? exe_override_ : BundledRipgrepLocator::BundledRipgrepPath();
-    if (!exe.has_value()) {
-        smoke_result_.status = RipgrepSmokeStatus::Missing;
-        smoke_result_.code = SearchBackendError::BackendMissing;
-        smoke_result_.message = "解析不到本程序可执行目录,定位不了随包 ripgrep";
-    } else {
-        smoke_result_ = RunRipgrepSmoke(*exe, version_probe_);
-    }
-    smoke_done_ = true;
-}
-
-std::expected<RipgrepRunResult, SearchBackendErrorInfo>
-BundledRipgrepRunner::Run(const SearchRequest& request, const SearchPolicy& policy,
-                          const ToolExecutionContext& context) {
-    EnsureSmoke();
-    RipgrepSmokeStatus status;
-    std::optional<SearchBackendError> code;
-    std::string message;
-    {
-        std::lock_guard<std::mutex> lock(smoke_mutex_);
-        status = smoke_result_.status;
-        code = smoke_result_.code;
-        message = smoke_result_.message;
-    }
-    if (status != RipgrepSmokeStatus::Ready) {
-        return std::unexpected(
-            SearchBackendErrorInfo{code.value_or(SearchBackendError::BackendMissing), std::move(message)});
-    }
-    // 前置校验全过。流式执行(ChildProcess 起 rg、JSONL/NUL 分帧、满额收树、
-    // 取消/超时终态)是 P0-4——这里如实回 NotWired,不冒充缺件,更不静默
-    // 退回旧内核(设计单一的红线)。SearchTool::execute 在 P0-5 切主路之前
-    // 不走这条路,生产搜索行为与从前一字不差。
-    (void)request;
-    (void)policy;
-    (void)context;
-    return std::unexpected(SearchBackendErrorInfo{
-        SearchBackendError::NotWired,
-        "ripgrep 流式执行尚未接线(迁移单 P0-4);本批 SearchTool 仍走内置内核"});
-}
+// ---- 生产 runner 的流式执行在 search_ripgrep_run.cpp(P0-4):这里只留
+// 定位/smoke/argv/策略;runner 的构造、smoke 缓存与 Run 挪去那边,与
+// ChildProcess 分帧、终态裁决住一处。
 
 // ---- argv 纯函数构造器 ------------------------------------------------------
 
@@ -526,12 +472,14 @@ SearchPolicy BuildSearchPolicy(const SearchRequest& request) {
     SearchPolicy policy;  // NSDMI 即生产值:--hidden、尊重 ignore、不跟链接、跳二进制
 
     // 硬排除:任意深度的 .git/build/node_modules/.evidence 目录——与旧内核
-    // SkipDirNames 同一张表。globset 语义:**/<名>/** 在任意深度命中该名字
-    // 目录下的所有文件,rg walker 对整棵被排除的目录直接剪枝。
+    // SkipDirNames 同一张表。globset 语义:排除项必须带 `!` 前缀
+    // (`-g '!**/<名>/**'`);裸 `**/<名>/**` 在 rg 眼里是"只搜这些目录"的
+    // 包含项,P0-4 真机差分实翻过这车(搜出来的命中恰好只剩 .git/build
+    // 里的)——观察边界的排除项一直是带 ! 的,硬排除这四条当年漏了前缀。
     // .evidence 在这里承担"名字口径"(与 ObservationBoundary 的登记账口径
     // 分工一致:名字不走账,天然常开)。
     for (const char* name : {".git", "build", "node_modules", ".evidence"}) {
-        policy.exclude_globs.push_back(std::string("**/") + name + "/**");
+        policy.exclude_globs.push_back(std::string("!**/") + name + "/**");
     }
 
     // 观察边界:root 本身在边界内 = path 显式点名到证据区,不生观察排除,

@@ -1,6 +1,11 @@
 // search 工具:grep 模式命中带行号、glob 过滤、上限截断注明、跳过
 // build/.git、二进制跳过、中文内容命中;glob 模式按文件名找文件;
 // path 给单个文件时只搜这一个。
+//
+// ripgrep 迁移单 P0-5 起这些是端到端用例:真跑随包 rg(CMake 把已校验的
+// rg 分期入测试运行目录 libexec/,SearchTool 默认构造走生产同一条定位路)。
+// 没分期入位的构建里,真搜索的用例如实跳过(设计单 4.3:不为跑测试开
+// 环境变量的洞);纯参数校验用例不需要 rg,照常跑。
 
 #include <doctest/doctest.h>
 
@@ -18,6 +23,21 @@ using lubancode::tools::Tool;
 using lubancode::tools::Utf8ToPath;
 
 namespace {
+
+#ifdef LUBANCODE_TEST_HAS_BUNDLED_RG
+constexpr bool kHasBundledRg = true;
+#else
+constexpr bool kHasBundledRg = false;
+#endif
+
+// 真搜索用例的门:没分期入位真 rg 就如实跳过,不冒充通过。
+#define SEARCH_REQUIRE_RG()                                              \
+    do {                                                                 \
+        if (!kHasBundledRg) {                                            \
+            MESSAGE("LUBANCODE_BUNDLED_RG_DIR 未设置,真 rg 用例跳过");  \
+            return;                                                      \
+        }                                                                \
+    } while (false)
 
 // 系统临时目录下一个独立的子目录,用完即删,给单测隔离用。
 class TempDir {
@@ -60,6 +80,7 @@ private:
 }  // namespace
 
 TEST_CASE("search grep: 命中带文件名、行号") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("a.txt", "line one\nneedle here\nline three\n");
 
@@ -75,6 +96,7 @@ TEST_CASE("search grep: 命中带文件名、行号") {
 }
 
 TEST_CASE("search grep: glob 过滤只搜指定扩展名的文件") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("keep.cpp", "target_word here\n");
     dir.WriteFile("skip.txt", "target_word here too\n");
@@ -93,6 +115,7 @@ TEST_CASE("search grep: glob 过滤只搜指定扩展名的文件") {
 }
 
 TEST_CASE("search grep: 命中超过上限,截断并注明") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     std::string content;
     for (int i = 0; i < 150; ++i) {
@@ -120,6 +143,7 @@ TEST_CASE("search grep: 命中超过上限,截断并注明") {
 }
 
 TEST_CASE("search grep: 跳过 build/ 和 .git/ 目录") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("build/generated.txt", "secret_marker\n");
     dir.WriteFile(".git/objects/whatever", "secret_marker\n");
@@ -139,6 +163,7 @@ TEST_CASE("search grep: 跳过 build/ 和 .git/ 目录") {
 }
 
 TEST_CASE("search grep: 二进制文件被跳过,不报错也不崩") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteBinaryFile("blob.bin");
     dir.WriteFile("text.txt", "normal text\n");
@@ -155,6 +180,7 @@ TEST_CASE("search grep: 二进制文件被跳过,不报错也不崩") {
 }
 
 TEST_CASE("search grep: 中文内容命中") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("chinese.txt", "第一行\n这里有关键词\n第三行\n");
 
@@ -170,6 +196,7 @@ TEST_CASE("search grep: 中文内容命中") {
 }
 
 TEST_CASE("search grep: 正则仍按旧合同工作") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("regex.txt", "alpha 17\nalpha xx\n");
 
@@ -183,6 +210,7 @@ TEST_CASE("search grep: 正则仍按旧合同工作") {
 }
 
 TEST_CASE("search: 已取消的长搜索立刻收口") {
+    // 取消在起进程之前就被 Run 收口,不需要真 rg 在位。
     TempDir dir;
     dir.WriteFile("a.txt", "needle\n");
     std::atomic<bool> cancel{true};
@@ -195,9 +223,11 @@ TEST_CASE("search: 已取消的长搜索立刻收口") {
 
     CHECK(result.is_error);
     CHECK(result.content.find("取消") != std::string::npos);
+    CHECK(result.content.find("search_cancelled") != std::string::npos);
 }
 
 TEST_CASE("search glob: 按文件名通配找文件") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("foo.cpp", "");
     dir.WriteFile("bar.hpp", "");
@@ -217,6 +247,7 @@ TEST_CASE("search glob: 按文件名通配找文件") {
 }
 
 TEST_CASE("search grep: path 给单个文件,只搜这一个") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("a.txt", "needle here\n");
     dir.WriteFile("b.txt", "needle elsewhere\n");
@@ -234,6 +265,7 @@ TEST_CASE("search grep: path 给单个文件,只搜这一个") {
 }
 
 TEST_CASE("search grep: 单文件 path 照样吃 glob 过滤,配不上就不搜") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("keep.cpp", "target_word\n");
 
@@ -251,6 +283,7 @@ TEST_CASE("search grep: 单文件 path 照样吃 glob 过滤,配不上就不搜"
 }
 
 TEST_CASE("search glob: path 给单个文件,文件名配得上就返回它") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("foo.cpp", "");
 
@@ -266,6 +299,7 @@ TEST_CASE("search glob: path 给单个文件,文件名配得上就返回它") {
 }
 
 TEST_CASE("search glob: **/*.md 既中根目录文件,也中子目录文件") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("a.md", "");
     dir.WriteFile("sub/b.md", "");
@@ -285,6 +319,7 @@ TEST_CASE("search glob: **/*.md 既中根目录文件,也中子目录文件") {
 }
 
 TEST_CASE("search glob: 末尾 /** 保留目录本身语义") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("docs", "");
 
@@ -297,6 +332,7 @@ TEST_CASE("search glob: 末尾 /** 保留目录本身语义") {
 }
 
 TEST_CASE("search glob: *.md 按文件名匹配,根目录和子目录都中") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("a.md", "");
     dir.WriteFile("sub/b.md", "");
@@ -316,6 +352,7 @@ TEST_CASE("search glob: *.md 按文件名匹配,根目录和子目录都中") {
 }
 
 TEST_CASE("search glob: sub/*.md 只中 sub 目录下一层,不中根目录也不中更深子目录") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("a.md", "");
     dir.WriteFile("sub/b.md", "");
@@ -336,6 +373,7 @@ TEST_CASE("search glob: sub/*.md 只中 sub 目录下一层,不中根目录也�
 }
 
 TEST_CASE("search glob: docs/** 中 docs 目录下所有文件,不管深浅") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("docs/a.md", "");
     dir.WriteFile("docs/sub/b.txt", "");
@@ -355,6 +393,7 @@ TEST_CASE("search glob: docs/** 中 docs 目录下所有文件,不管深浅") {
 }
 
 TEST_CASE("search grep: glob 过滤参数同样支持 **/ 语义,根目录和子目录文件都搜") {
+    SEARCH_REQUIRE_RG();
     TempDir dir;
     dir.WriteFile("root.md", "needle_word\n");
     dir.WriteFile("sub/nested.md", "needle_word\n");
@@ -375,6 +414,7 @@ TEST_CASE("search grep: glob 过滤参数同样支持 **/ 语义,根目录和子
 }
 
 TEST_CASE("search: mode 不合法,报错不崩") {
+    // 参数校验在起 rg 之前,不需要真 rg。
     SearchTool tool;
     nlohmann::json input;
     input["mode"] = "nonsense";

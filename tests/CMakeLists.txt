@@ -123,6 +123,67 @@ add_dependencies(lubancode_tests hello_plugin_fixture bad_version_plugin)
 target_compile_definitions(lubancode_tests PRIVATE
   LUBANCODE_TEST_PLUGIN_DIR="$<TARGET_FILE_DIR:hello_plugin_fixture>")
 
+# ---- ripgrep 迁移单 P0-4/P0-5:流式 runner 的两只夹具 ----------------------
+#
+# 1) fake_ripgrep:跨平台小可执行,按 pattern 里的 @场景名 伪造 rg 的
+#    stdout/stderr/退出码(坏 JSON、2 MiB 大帧、拒退、stderr 洪水、再生
+#    孩子……),BundledRipgrepRunner 经 exe_override 起它——真 rg 不肯
+#    配合的路径全靠它。不依赖任何仓库头,独立编。
+add_executable(fake_ripgrep support/fake_ripgrep.cpp)
+target_compile_features(fake_ripgrep PRIVATE cxx_std_20)
+add_dependencies(lubancode_tests fake_ripgrep)
+target_compile_definitions(lubancode_tests PRIVATE
+  LUBANCODE_FAKE_RG_EXE="$<TARGET_FILE:fake_ripgrep>")
+
+# 2) 真 rg 分期入位:LUBANCODE_BUNDLED_RG_DIR 指向已过哈希/版本门的 rg
+#    目录(scripts/fetch_ripgrep.py 的产物,如 build/rg-stage/libexec)。
+#    configure 时校一遍版本(与 third_party/ripgrep/manifest.json 对账),
+#    再复制进测试运行目录的 libexec/——集成测试走生产同一条定位路
+#    (ExecutableDir/libexec)。没设则真 rg 集成组如实跳过,纯单测照跑
+#    (设计单 4.3/8.4:不为跑测试开环境变量的洞,也不暗中联网)。
+if(LUBANCODE_BUNDLED_RG_DIR)
+  if(WIN32)
+    set(LUBANCODE_RG_EXE "${LUBANCODE_BUNDLED_RG_DIR}/rg.exe")
+    set(LUBANCODE_RG_OUTPUT_NAME "rg.exe")
+  else()
+    set(LUBANCODE_RG_EXE "${LUBANCODE_BUNDLED_RG_DIR}/rg")
+    set(LUBANCODE_RG_OUTPUT_NAME "rg")
+  endif()
+  if(NOT EXISTS "${LUBANCODE_RG_EXE}")
+    message(FATAL_ERROR
+      "LUBANCODE_BUNDLED_RG_DIR 指了,但里面没有 rg 可执行文件: ${LUBANCODE_RG_EXE}\n"
+      "先跑: python scripts/fetch_ripgrep.py --target build/rg-stage --platform <平台>")
+  endif()
+  # 配置时校版本:首行 "ripgrep <版本>" 与 manifest 对账(不钉 rev 段)。
+  file(READ "${CMAKE_SOURCE_DIR}/third_party/ripgrep/manifest.json" _rg_manifest)
+  string(REGEX MATCH "\"version\"[ \t]*:[ \t]*\"([0-9]+\\.[0-9]+\\.[0-9]+)\"" _rg_m "${_rg_manifest}")
+  if(NOT _rg_m)
+    message(FATAL_ERROR "third_party/ripgrep/manifest.json 里读不出 version")
+  endif()
+  set(LUBANCODE_RG_VERSION "${CMAKE_MATCH_1}")
+  if(NOT CMAKE_CROSSCOMPILING)
+    execute_process(
+      COMMAND "${LUBANCODE_RG_EXE}" --version
+      OUTPUT_VARIABLE _rg_version_out OUTPUT_STRIP_TRAILING_WHITESPACE
+      ERROR_QUIET TIMEOUT 30)
+    if(NOT _rg_version_out MATCHES "^ripgrep ${LUBANCODE_RG_VERSION}")
+      message(FATAL_ERROR
+        "随包 rg 版本不合: 期望首行 'ripgrep ${LUBANCODE_RG_VERSION}', 实得 '${_rg_version_out}'")
+    endif()
+  endif()
+  add_custom_command(TARGET lubancode_tests POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:lubancode_tests>/libexec"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${LUBANCODE_RG_EXE}"
+            "$<TARGET_FILE_DIR:lubancode_tests>/libexec/${LUBANCODE_RG_OUTPUT_NAME}"
+    COMMENT "Staging bundled ripgrep ${LUBANCODE_RG_VERSION} into test libexec/"
+    VERBATIM)
+  target_compile_definitions(lubancode_tests PRIVATE
+    LUBANCODE_TEST_HAS_BUNDLED_RG=1)
+  message(STATUS "tests: 真 ripgrep ${LUBANCODE_RG_VERSION} 入位 ${LUBANCODE_BUNDLED_RG_DIR} (集成测试启用)")
+else()
+  message(STATUS "tests: 未设 LUBANCODE_BUNDLED_RG_DIR —— 真 rg 集成组将跳过 (纯单测照跑)")
+endif()
+
 # 一册源码一条 CTest。仍只编一只 lubancode_tests，免去重复链接；运行时靠
 # doctest 的 source-file 过滤隔离。CI 失败会直报
 # integration.process.run_command_process，不再只剩一行 lubancode_tests。

@@ -87,9 +87,8 @@ lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode
     registry.Register(std::make_unique<lubancode::tools::StopBackgroundTool>());
     registry.Register(std::make_unique<lubancode::tools::WriteFileTool>());
     registry.Register(std::make_unique<lubancode::tools::EditFileTool>());
-    // ripgrep 迁移单 P0-2:装配层注入默认 runner(定位只认 exe-dir/libexec;
-    // 构造零动作,smoke 懒做)。P0-5 切主路之前 SearchTool::execute 仍走
-    // 内置 std::regex 内核——这里只是把注入口接到生产装配上。
+    // ripgrep 迁移单 P0-5:search 生产主路(装配与 SearchTool 默认构造同一款
+    // runner,定位只认 exe-dir/libexec,缺件即稳定错,无本地内核 fallback)。
     registry.Register(std::make_unique<lubancode::tools::SearchTool>(
         std::make_shared<lubancode::tools::BundledRipgrepRunner>()));
     registry.Register(std::make_unique<lubancode::tools::SkillTool>(skills));
@@ -103,7 +102,7 @@ lubancode::tools::ToolRegistry BuildBaseToolRegistry(const std::vector<lubancode
 lubancode::tools::ToolRegistry BuildExploreToolRegistry(const lubancode::config::SearchConfig& search_config) {
     lubancode::tools::ToolRegistry registry;
     registry.Register(std::make_unique<lubancode::tools::ReadFileTool>());
-    // 同基础表:Explore 表的 search 也注入同一款默认 runner。
+    // 同基础表:Explore 表的 search 也注入同一款默认 runner(P0-5 主路)。
     registry.Register(std::make_unique<lubancode::tools::SearchTool>(
         std::make_shared<lubancode::tools::BundledRipgrepRunner>()));
     registry.Register(std::make_unique<lubancode::tools::WebFetchTool>("lubancode/" + std::string(kVersion)));

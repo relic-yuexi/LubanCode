@@ -80,7 +80,13 @@ def fetch_archive(url: str, cache_dir: str | None, archive: str, sha256: str, pr
         if os.path.exists(cached) and sha256_file(cached) == sha256:
             print(f"缓存命中: {cached}")
             return cached
-    tmp = tempfile.mktemp(suffix=".download")
+    # 临时文件必须与最终落点同盘:Windows 上 os.replace 不跨卷(实测:
+    # 系统 temp 在 C:,仓库缓存在 D: 时 WinError 17)。有缓存目录就先落
+    # 缓存目录里的临时名,哈希过门后再原子换名;没有缓存目录同理落系统
+    # temp 同目录。
+    dest_dir = cache_dir if cache_dir else tempfile.gettempdir()
+    dest = os.path.join(dest_dir, archive)
+    tmp = os.path.join(dest_dir, "." + archive + ".download")
     try:
         download(url, tmp, proxy)
         actual = sha256_file(tmp)
@@ -88,7 +94,6 @@ def fetch_archive(url: str, cache_dir: str | None, archive: str, sha256: str, pr
             raise SystemExit(
                 f"SHA-256 不合,停:\n  manifest: {sha256}\n  实测:    {actual}\n上游资产与 manifest 不一致,不许入库/入包。"
             )
-        dest = os.path.join(cache_dir, archive) if cache_dir else os.path.join(tempfile.gettempdir(), archive)
         os.replace(tmp, dest)
         return dest
     finally:

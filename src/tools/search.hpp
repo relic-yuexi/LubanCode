@@ -8,19 +8,18 @@
 namespace lubancode::tools {
 
 // 项目内搜索,合成一个工具、按 mode 分两种玩法(理由见 search.cpp 顶部注释):
-//   mode = "grep":按正则(ECMAScript 语法)搜文件内容,返回 文件:行号:行内容。
-//   mode = "glob":按文件名通配找文件,返回相对路径列表。
-// 两种模式共用同一套目录遍历/跳过规则(跳过 .git/、build/、node_modules/、
-// 跳过二进制文件)。只读操作,不需要用户确认。
+//   mode = "grep":按正则(Rust regex 语法,ripgrep 同款)搜文件内容,返回 文件:行号:行内容。
+//   mode = "glob":按文件名通配(ripgrep globset 语法)找文件,返回相对路径列表。
+// 两种模式共用同一套策略(遵守 ignore 文件、硬排除 .git/build/node_modules/
+// .evidence、跳过二进制)与同一条后端执行路(随包 ripgrep,设计单迁移 P0-5
+// 切主路后唯一一条,无 fallback)。只读操作,不需要用户确认。
 class SearchTool : public Tool {
 public:
-    // 默认构造:走内置 std::regex 内核(ripgrep 迁移 P0-4 之前的唯一生产
-    // 路径,行为与从前一字不差)。
-    SearchTool() = default;
+    // 默认构造即生产装配:持随包 BundledRipgrepRunner(定位只认
+    // exe-dir/libexec,缺件即稳定错 search_backend_missing,不退本地内核)。
+    SearchTool();
 
-    // ripgrep 迁移单 P0-2 的装配注入口:注入 ripgrep runner(生产装默认
-    // BundledRipgrepRunner,单测装 fake)。P0-5 切主路之前 execute 不消费
-    // 它——本口只是把"用什么后端"从工具内部挪到装配层,生产搜索行为不变。
+    // 装配注入口:生产传默认 runner(默认构造已带),单测传 fake。
     explicit SearchTool(std::shared_ptr<IRipgrepRunner> ripgrep_runner);
 
     // 逐枚追踪单:注册元数据声明。
@@ -34,8 +33,7 @@ public:
     Result execute(const nlohmann::json& input, const ToolExecutionContext& context) override;
 
 private:
-    // P0-2 注入口持有的后端(可能为空 = 默认构造)。execute 暂不消费;
-    // P0-5 切主路时这里是 BundledRipgrepRunner 的真调用点。
+    // 执行后端(P0-5 起唯一生产路)。execute 之外不许挪用/置空。
     std::shared_ptr<IRipgrepRunner> ripgrep_runner_;
 };
 

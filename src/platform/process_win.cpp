@@ -1415,6 +1415,29 @@ bool ChildProcess::IsAlive() const {
     return exit_code == STILL_ACTIVE;
 }
 
+bool ChildProcess::WaitForExit(int timeout_ms, const std::atomic<bool>* cancel) {
+    if (!started_ || process_ == nullptr) {
+        return true;  // 没起过/已收尸:没有可等的
+    }
+    // WaitForSingleObject 分片阻塞等(不忙转),每片醒来查一眼 cancel;
+    // 片宽 10ms——SearchTool 的取消延迟以十毫秒计,足够灵。
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 0);
+    while (true) {
+        if (!IsAlive()) {
+            return true;
+        }
+        if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) {
+            return false;
+        }
+        if (timeout_ms > 0 && std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        const DWORD slice = 10;
+        WaitForSingleObject(static_cast<HANDLE>(process_), slice);
+    }
+}
+
 bool IsProcessAlive(unsigned long pid) {
     if (pid == 0) {
         return false;

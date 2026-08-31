@@ -1248,7 +1248,7 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
         TermOut() << "  regex: Rust regex (default engine)\n";
         TermOut() << "  ignore files: on\n";
         TermOut() << "  注:生产只认随包 libexec/rg,不搜 PATH、不读环境变量;\n"
-                     "      当前版本 search 仍走内置 std::regex 内核(ripgrep 迁移 P0-4/P0-5 接管)。\n";
+                     "      search 已切随包 ripgrep 主路(无本地内核 fallback,缺件即稳定错)。\n";
         TermOut().flush();
         return;
     }

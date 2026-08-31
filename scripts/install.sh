@@ -18,6 +18,10 @@
 #
 # 幂等:重复跑 = 直接覆盖安装。
 # 官方 skills 与 docs 随包同行；重复安装时整包同步，不碰 ~/.lubancode/skills。
+# 随包 ripgrep(ripgrep 迁移单 P0-6)三样也同步:libexec/、licenses/、
+# THIRD_PARTY_NOTICES.md。libexec 永远装在可执行文件旁边(生产定位是
+# ExecutableDir/libexec,不走 share),licenses 与声明跟着它,卸载只删
+# LubanCode 自己目录里的,用户别处的 rg 不碰。
 
 set -eu
 
@@ -130,6 +134,60 @@ sync_official_tree() {
 
 sync_official_tree skills "官方技能"
 sync_official_tree docs "官方文档"
+
+# libexec/(随包 ripgrep)必须贴着可执行文件住:search 的生产定位只有一条
+# ExecutableDir/libexec/rg,装去 share 它就找不着了。licenses/ 与
+# THIRD_PARTY_NOTICES.md 同样贴着装(§8.1 平铺布局,卸载整目录一并带走)。
+# 与 skills/docs 一样走 staging 原子换入:更新安装先整目录换新,再删旧,
+# 不出现"旧 rg 删了、新 rg 没到"的半套窗口;rg 的执行位显式补一道。
+sync_beside_exe_tree() {
+    tree_name=$1
+    display_name=$2
+    source_tree="$SCRIPT_DIR/$tree_name"
+
+    if [ ! -d "$source_tree" ]; then
+        info "安装包里没有 $tree_name 目录,保留已有$display_name 不动。"
+        return
+    fi
+
+    # 注意:不走 skills/docs 那条 share/ 分支——这两棵树永远在 exe 旁边。
+    destination="$INSTALL_DIR/$tree_name"
+    stage="$INSTALL_DIR/.$tree_name-new-$$"
+    rm -rf "$stage"
+    if ! cp -R "$source_tree" "$stage"; then
+        rm -rf "$stage"
+        err "复制$display_name 失败。"
+    fi
+    rm -rf "$destination"
+    if ! mv "$stage" "$destination"; then
+        rm -rf "$stage"
+        err "替换$display_name 目录 $destination 失败。"
+    fi
+    info "已同步$display_name:$destination"
+}
+
+sync_beside_exe_tree libexec "随包 ripgrep(libexec)"
+if [ -f "$INSTALL_DIR/libexec/rg" ]; then
+    chmod +x "$INSTALL_DIR/libexec/rg" 2>/dev/null || true
+fi
+sync_beside_exe_tree licenses "第三方许可证(licenses)"
+
+notices_src="$SCRIPT_DIR/THIRD_PARTY_NOTICES.md"
+if [ -f "$notices_src" ]; then
+    notices_stage="$INSTALL_DIR/.THIRD_PARTY_NOTICES-new-$$"
+    rm -f "$notices_stage"
+    if ! cp "$notices_src" "$notices_stage"; then
+        rm -f "$notices_stage"
+        err "复制第三方声明失败。"
+    fi
+    if ! mv -f "$notices_stage" "$INSTALL_DIR/THIRD_PARTY_NOTICES.md"; then
+        rm -f "$notices_stage"
+        err "替换第三方声明失败。"
+    fi
+    info "已同步第三方声明:$INSTALL_DIR/THIRD_PARTY_NOTICES.md"
+else
+    info "安装包里没有 THIRD_PARTY_NOTICES.md,保留已有第三方声明不动。"
+fi
 
 info "安装完成:$DEST"
 

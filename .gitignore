@@ -12,6 +12,12 @@
 build/
 out/
 
+# ripgrep 迁移单:随包 rg 的分期/缓存/发行拼包目录——二进制与上游归档
+# 绝不进 Git(单子裁决:归档离线重打走自家 Release 镜像,哈希照核)。
+dist/
+rg-stage/
+rg-cache/
+
 # IDE / 工具生成物
 .vs/
 .cache/

@@ -8,8 +8,9 @@
 //     用户正向 glob 的 `!` 转义;
 //   - 策略构造器:硬排除、观察边界登记目录 -> root-relative 排除 glob、
 //     显式点名两路对账;
-//   - SearchTool 注入口:注入 fake 后行为与默认构造一字不差(P0-5 前
-//     execute 不消费 runner)。
+//   - SearchTool 主路(P0-5 起):注入的 runner 被 execute 真调用,后端
+//     错误投影成稳定码文本。流式执行与终态裁决的测试在
+//     test_search_ripgrep_run.cpp(假 rg 夹具 + 真 rg 分期两组)。
 
 #include <doctest/doctest.h>
 
@@ -384,7 +385,7 @@ TEST_CASE("ripgrep smoke: 版本精确校验(过/错/认不出)") {
 }
 
 // ---------------------------------------------------------------------------
-// P0-2:runner——四路稳定错误 + P0-4 前的 NotWired + smoke 只做一次
+// P0-2/P0-4:runner——四路稳定错误 + 真起进程 + smoke 只做一次
 // ---------------------------------------------------------------------------
 
 TEST_CASE("ripgrep runner: 缺件/不可执行/版本错/spawn fail 四路稳定错误") {
@@ -421,15 +422,19 @@ TEST_CASE("ripgrep runner: 缺件/不可执行/版本错/spawn fail 四路稳定
     CHECK(ToString(result.error().code) == "search_backend_spawn_failed");
 }
 
-TEST_CASE("ripgrep runner: 前置全过后如实回 NotWired(P0-4 前流式执行未接)") {
+TEST_CASE("ripgrep runner: 前置全过后真起进程,假件起不来报 spawn failed") {
+    // P0-4 起流式执行已接线:前置(缺件/不可执行/版本)全过的下一站是
+    // ChildProcess 真起进程。形态可执行但不是真 exe 的假件在这里如实报
+    // spawn 失败——没有 NotWired 这一站,也没有本地内核可退。
     const TempDir dir;
     FakeProbe probe;
     BundledRipgrepRunner runner(MakeFakeRg(dir, "rg_ok.exe", "x"), probe.AsProbe());
     const auto result = runner.Run(GrepRequest("x", dir.Path()), SearchPolicy{}, ToolExecutionContext{});
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().code == SearchBackendError::NotWired);
-    CHECK(ToString(result.error().code) == "search_backend_not_wired");
-    CHECK(runner.smoke_result().status == RipgrepSmokeStatus::Ready);
+    const bool spawn_failed = result.error().code == SearchBackendError::SpawnFailed;
+    CHECK(spawn_failed);
+    CHECK(ToString(result.error().code) == "search_backend_spawn_failed");
+    CHECK(runner.smoke_result().status == RipgrepSmokeStatus::Ready);  // smoke 过了,死在起进程
 }
 
 TEST_CASE("ripgrep runner: smoke 每实例只做一次(缓存)") {
@@ -444,25 +449,27 @@ TEST_CASE("ripgrep runner: smoke 每实例只做一次(缓存)") {
 }
 
 TEST_CASE("ripgrep runner: 默认构造走生产唯一路径") {
-    // 不注入任何东西:定位只能来自 ExecutableDir/libexec。本机 libexec 通常
-    // 无 rg -> 缺件;这条钉的是"默认构造绝不改道 PATH/环境变量"。
+    // 不注入任何东西:定位只能来自 ExecutableDir/libexec。开发构建的运行
+    // 目录 libexec 通常无 rg -> 缺件;分期入位(CTest 目录里有 rg)时搜索
+    // 照常。这条钉的是"默认构造绝不改道 PATH/环境变量",两态都不冒充。
     BundledRipgrepRunner runner;
     const auto result = runner.Run(GrepRequest("x", std::filesystem::temp_directory_path()), SearchPolicy{},
                                    ToolExecutionContext{});
-    REQUIRE_FALSE(result.has_value());
-    // 本机(开发构建,包里还没带 rg)必然缺件;将来 Release 包带上后这条会
-    // 变 Ready->NotWired,断言两态都不冒充成功。(doctest 禁复合表达式,
-    // 先折成布尔再 CHECK。)
+    if (result.has_value()) {
+        // rg 在位:真搜了一把(temp 目录里搜 "x"),成功即对。
+        CHECK(runner.smoke_result().status == RipgrepSmokeStatus::Ready);
+        return;
+    }
     const bool honest_terminal_state = result.error().code == SearchBackendError::BackendMissing ||
-                                       result.error().code == SearchBackendError::NotWired;
+                                       result.error().code == SearchBackendError::NotExecutable;
     CHECK(honest_terminal_state);
 }
 
 // ---------------------------------------------------------------------------
-// P0-2:SearchTool 注入口——行为一字不差
+// P0-5:SearchTool 主路已切 ripgrep——注入的 runner 是唯一执行路
 // ---------------------------------------------------------------------------
 
-TEST_CASE("search 注入口: 注入 fake runner 后 execute 行为与默认构造一致,fake 不被调") {
+TEST_CASE("search 主路: 注入的 runner 被 execute 真调用,fake 的结果照单投影") {
     const TempDir dir;
     dir.WriteFile("a.txt", "needle here\nplain line\n");
 
@@ -471,23 +478,40 @@ TEST_CASE("search 注入口: 注入 fake runner 后 execute 行为与默认构�
     input["pattern"] = "needle";
     input["path"] = dir.Utf8Path();
 
-    SearchTool default_tool;
-    const Tool::Result default_result = default_tool.execute(input);
-
     auto runner = std::make_shared<RecordingRunner>();
     SearchTool injected_tool(runner);
     const Tool::Result injected_result = injected_tool.execute(input);
 
-    CHECK_FALSE(default_result.is_error);
+    CHECK(runner->calls == 1);  // P0-5 起主路消费 runner(旧批钉的是 calls==0)
     CHECK_FALSE(injected_result.is_error);
-    CHECK(injected_result.content.find("a.txt:1:needle here") != std::string::npos);
-    CHECK(injected_result.content == default_result.content);  // 一字不差
-    CHECK(runner->calls == 0);  // P0-5 切主路之前 execute 不消费 runner
+    CHECK(injected_result.content.find("没搜到匹配的内容") != std::string::npos);  // fake 回空结果
 
     // 工具身份合同不动:名字、schema、effect class 照旧。
     CHECK(injected_tool.name() == "search");
     CHECK(injected_tool.effect_class() == lubancode::tools::EffectClass::ReadOnlyLocal);
     CHECK(injected_tool.idempotency() == lubancode::tools::Idempotency::Idempotent);
+
+    // schema 新增两枚批准字段(P0-5):fixed_strings 与 max_results。
+    const nlohmann::json schema = injected_tool.input_schema();
+    CHECK(schema["properties"].contains("fixed_strings"));
+    CHECK(schema["properties"].contains("max_results"));
+    CHECK(schema["required"] == nlohmann::json::array({"mode", "pattern"}));
+}
+
+TEST_CASE("search 主路: 后端错误投影成稳定码文本,不带堆栈/argv") {
+    const TempDir dir;
+    struct FailingRunner : IRipgrepRunner {
+        std::expected<RipgrepRunResult, SearchBackendErrorInfo>
+        Run(const SearchRequest&, const SearchPolicy&, const ToolExecutionContext&) override {
+            return std::unexpected(
+                SearchBackendErrorInfo{SearchBackendError::BackendMissing, "随包 ripgrep 缺件"});
+        }
+    };
+    SearchTool tool(std::make_shared<FailingRunner>());
+    const Tool::Result result = tool.execute(nlohmann::json{
+        {"mode", "grep"}, {"pattern", "x"}, {"path", dir.Utf8Path()}});
+    CHECK(result.is_error);
+    CHECK(result.content.find("search_backend_missing") != std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -766,11 +790,13 @@ TEST_CASE("argv 三平台同语义: scope 恒 '.' 或文件名字面,不含平�
 // P0-3:策略构造器——硬排除、观察边界、显式点名两路对账
 // ---------------------------------------------------------------------------
 
-TEST_CASE("policy: 默认硬排除四目录,任意深度(**/<名>/**)") {
+TEST_CASE("policy: 默认硬排除四目录,任意深度(!**/<名>/**)") {
     BoundaryResetGuard boundary;
     const SearchPolicy policy = BuildSearchPolicy(GrepRequest("x", Utf8ToPath("/proj")));
+    // 排除项必须带 ! 前缀:裸 glob 在 rg 眼里是包含项(P0-4 真机差分翻过
+    // 这车),钉死带 ! 的四条。
     const std::vector<std::string> expected = {
-        "**/.git/**", "**/build/**", "**/node_modules/**", "**/.evidence/**",
+        "!**/.git/**", "!**/build/**", "!**/node_modules/**", "!**/.evidence/**",
     };
     CHECK(policy.include_hidden);
     CHECK(policy.respect_ignore_files);
@@ -815,7 +841,7 @@ TEST_CASE("policy: root 本身是登记目录 = 显式点名,不生观察排除"
     const SearchPolicy policy = BuildSearchPolicy(GrepRequest("x", logs));
     CHECK(std::find(policy.exclude_globs.begin(), policy.exclude_globs.end(), "!logs/**") ==
           policy.exclude_globs.end());
-    CHECK(std::find(policy.exclude_globs.begin(), policy.exclude_globs.end(), "**/.git/**") !=
+    CHECK(std::find(policy.exclude_globs.begin(), policy.exclude_globs.end(), "!**/.git/**") !=
           policy.exclude_globs.end());
 }
 

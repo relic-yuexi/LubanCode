@@ -185,6 +185,56 @@ try {
     }
 }
 
+# ---- ripgrep 迁移单 P0-6:libexec/licenses/THIRD_PARTY_NOTICES.md 三样同步 --
+# 覆盖:新装到位、旧版升级(陈旧 rg 整目录换新)、来源缺件不动现有、用户
+# 放在安装目录里的旁文件不被官方同步误删。
+Write-Host "==== Sync-Official libexec/licenses/notices ====" -ForegroundColor Cyan
+
+$rgRoot = Join-Path $env:TEMP ("lubancode-rgsync-test-" + [Guid]::NewGuid().ToString('N'))
+try {
+    $sourceDir = Join-Path $rgRoot 'source'
+    $installDir = Join-Path $rgRoot 'install'
+    New-Item -ItemType Directory -Path (Join-Path $sourceDir 'libexec') -Force | Out-Null
+    New-Item -ItemType Directory -Path (Join-Path $sourceDir 'licenses') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $sourceDir 'lubancode.exe') -Value 'fake exe' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $sourceDir 'libexec\rg.exe') -Value 'ripgrep 15.2.0 new' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $sourceDir 'licenses\ripgrep-MIT.txt') -Value 'MIT license text' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $sourceDir 'THIRD_PARTY_NOTICES.md') -Value 'notices new' -Encoding UTF8
+
+    # 旧安装:陈旧 rg(内容与新版不同)+ 一枚用户自己放的旁文件。
+    New-Item -ItemType Directory -Path (Join-Path $installDir 'libexec') -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $installDir 'libexec\rg.exe') -Value 'ripgrep 13.0.0 stale' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $installDir 'user-notes.txt') -Value 'user keeps this' -Encoding UTF8
+
+    $exe = Join-Path $sourceDir 'lubancode.exe'
+    Sync-OfficialLibexec -SourceExe $exe -InstallDir $installDir
+    Sync-OfficialLicenses -SourceExe $exe -InstallDir $installDir
+    Sync-OfficialNotices -SourceExe $exe -InstallDir $installDir
+
+    $syncedRg = Get-Content -LiteralPath (Join-Path $installDir 'libexec\rg.exe') -Raw
+    Assert-True -Name '陈旧 rg 被新版整目录换掉' `
+        -Actual ($syncedRg -match '15\.2\.0')
+    Assert-True -Name 'licenses/ripgrep-MIT.txt 入位' `
+        -Actual (Test-Path -LiteralPath (Join-Path $installDir 'licenses\ripgrep-MIT.txt') -PathType Leaf)
+    $syncedNotices = Get-Content -LiteralPath (Join-Path $installDir 'THIRD_PARTY_NOTICES.md') -Raw
+    Assert-True -Name 'THIRD_PARTY_NOTICES.md 换新' `
+        -Actual ($syncedNotices -match 'notices new')
+    Assert-True -Name '安装目录里的用户旁文件不被删' `
+        -Actual (Test-Path -LiteralPath (Join-Path $installDir 'user-notes.txt') -PathType Leaf)
+
+    # 来源缺件:提示不动现有(陈旧 rg 保留,不误删成"半套")。
+    $bareRoot = Join-Path $rgRoot 'bare-source'
+    New-Item -ItemType Directory -Path $bareRoot -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $bareRoot 'lubancode.exe') -Value 'fake exe' -Encoding UTF8
+    Sync-OfficialLibexec -SourceExe (Join-Path $bareRoot 'lubancode.exe') -InstallDir $installDir
+    Assert-True -Name '来源缺 libexec 时现有 rg 不动' `
+        -Actual (Test-Path -LiteralPath (Join-Path $installDir 'libexec\rg.exe') -PathType Leaf)
+} finally {
+    if (Test-Path -LiteralPath $rgRoot) {
+        Remove-Item -LiteralPath $rgRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+}
+
 Write-Host ""
 Write-Host "共 $($script:passCount + $script:failCount) 项,通过 $($script:passCount),失败 $($script:failCount)" -ForegroundColor $(if ($script:failCount -eq 0) { 'Green' } else { 'Red' })
 

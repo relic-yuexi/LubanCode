@@ -43,7 +43,7 @@ Five things worth putting up front.
 
 ### 1. Download and run — no separate runtime
 
-No Node.js. No Python. No `npm install`. The Windows x64 Release executable is about 8.2 MiB. One native binary is enough to start; the release archive carries the official skills, documentation, and license beside it.
+No Node.js. No Python. No `npm install`. The Windows x64 Release executable is about 8.2 MiB, shipped as an install-free native package you can unzip and run. One command installs it on Windows; on Linux / macOS, unpack and go. Beside the main executable, the release archive carries `libexec/rg` (the bundled ripgrep search engine, MIT licensed, which powers the `search` tool), the official skills, documentation, and licenses (including third-party notices) — search works offline right after install.
 
 ### 2. Keep typing while work is in flight
 
