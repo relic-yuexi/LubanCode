@@ -518,6 +518,10 @@ add_library(lubancode_engine STATIC
   src/accounting/cost_estimator.cpp
   src/accounting/usage_projector.cpp
   src/agent/prompt_manifest.cpp
+  # A1(事实接线):ResolvedPromptBuilder 把 PromptAssembler 与三层后叠
+  # (延迟工具索引/模型目录指令/魂)收进同一次解析,产 AssembledPrompt{text,
+  # manifest}。
+  src/agent/resolved_prompt_builder.cpp
   src/insights/finding.cpp
   src/insights/session_summary.cpp
   src/insights/report_model.cpp

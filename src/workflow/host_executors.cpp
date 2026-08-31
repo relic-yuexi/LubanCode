@@ -223,6 +223,14 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
     } else {
         binding.profile.system_prompt = task_prompt;
     }
+    // Token 账本单 A1:agent 节点的请求用途是 workflow_node,不是从
+    // default_binding/resolve_binding/自定义 Agent 解析继承来的默认值
+    //(那些口径没人替 workflow 显式设过,恒是 AgentProfile 的默认
+    // MainTurn)——显式覆盖。resolved_prompt_base 一并清:两条系统提示
+    // 装配路(自定义走 AssembleSystemPrompt、非自定义直接拿 task 文件当
+    // 提示)都不经 ResolvedPromptBuilder,没有底账可用,manifest 缺席。
+    binding.profile.purpose = accounting::RequestPurpose::WorkflowNode;
+    binding.profile.resolved_prompt_base.reset();
     if (!is_custom && request.node->step_limit > 0) {
         // 自定义路的步数在 Resolver 里并过(节点 step_limit 走 overrides
         // 三级:入参 > YAML > 父步数),这里不重设,免得两笔账打架。

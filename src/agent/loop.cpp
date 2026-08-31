@@ -19,6 +19,7 @@
 #include "agent/context_events.hpp"
 #include "agent/prefix.hpp"
 #include "agent/prompts.hpp"
+#include "agent/resolved_prompt_builder.hpp"  // Token 账本单 A1:三层后叠 + manifest 同一次解析
 #include "agent/tool_result_images.hpp"  // 工具结果图片回喂:请求出门前的 base64 重灌
 #include "api/assembler.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:trace 的入参/结果摘要锚
@@ -790,12 +791,32 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 包装的次序一字不差(索引在前、指令居中、魂压轴)。从前这些改动
         // 发生在指纹算完之后,前缀账看不见;现在进了指纹,model/system 一
         // 动 epoch 如实断,账不再瞎。
-        if (agent.profile_.deferred_index_provider) {
-            request.system =
-                WithDeferredToolsIndex(request.system, agent.profile_.deferred_index_provider());
+        // Token 账本单 A1(ResolvedPromptBuilder):接了底账(construction/
+        // /clear 重拼时一并算,见 agent/agent.hpp 的 AgentProfile.
+        // resolved_prompt_base)且底账文本仍与 system_prompt_ 同步(没被
+        // SetSystemPrompt 之类的活口越过 ResolvedPromptBuilder 直改),就
+        // 走完整解析产 manifest;否则走原三行——不接线的路径、或底账已
+        // 与当前系统提示错位的少数口(如 /worktree 重拼),文本与从前
+        // 逐字节一致,只是没有 manifest。
+        std::optional<PromptManifest> request_prompt_manifest;
+        const bool resolved_prompt_in_sync = agent.profile_.resolved_prompt_base.has_value() &&
+                                             agent.profile_.resolved_prompt_base->text == system_prompt_;
+        if (resolved_prompt_in_sync) {
+            const std::string deferred_index_segment =
+                agent.profile_.deferred_index_provider ? agent.profile_.deferred_index_provider() : std::string();
+            AssembledPrompt assembled = ResolveFinalPrompt(
+                *agent.profile_.resolved_prompt_base, deferred_index_segment, agent.profile_.model_instructions,
+                agent.profile_.soul, agent.profile_.soul.empty() ? std::string() : std::string("custom"));
+            request.system = std::move(assembled.text);
+            request_prompt_manifest = std::move(assembled.manifest);
+        } else {
+            if (agent.profile_.deferred_index_provider) {
+                request.system =
+                    WithDeferredToolsIndex(request.system, agent.profile_.deferred_index_provider());
+            }
+            request.system = WithModelInstructions(request.system, agent.profile_.model_instructions);
+            request.system = WithSoul(request.system, agent.profile_.soul);
         }
-        request.system = WithModelInstructions(request.system, agent.profile_.model_instructions);
-        request.system = WithSoul(request.system, agent.profile_.soul);
         api::ApplyRequestProfile(request, agent.profile_.request);
         // 每轮现拼:tool_search 可能刚在上一拍挂载新工具。压力预估与最终
         // 发送必须吃同一份定义，免得先估旧表、后发新表。
@@ -994,9 +1015,23 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
 
         // 轨迹边界(P0-2):request prepared 记不住就不发模型(§7.4 耐久
         // 栅栏);落稳随即记 sent。没接轨迹的会话一字不加。
+        // Token 账本单 A1:purpose 恒有效(AgentProfile.purpose 默认值),
+        // manifest/前缀账各自看 has_* 位——没接 ResolvedPromptBuilder 的
+        // 会话如实报 has_prompt_manifest=false,不拿空 manifest 冒充。
         std::string trajectory_request_id;
         if (wiring.boundary_recorder != nullptr) {
-            trajectory_request_id = wiring.boundary_recorder->OnRequestPrepared(request);
+            RequestPreparedContext prepared_ctx;
+            prepared_ctx.purpose = agent.profile_.purpose;
+            if (request_prompt_manifest.has_value()) {
+                prepared_ctx.has_prompt_manifest = true;
+                prepared_ctx.prompt_manifest = *request_prompt_manifest;
+            }
+            prepared_ctx.has_prefix_account = true;
+            prepared_ctx.system_hash = step_prefix_account.system_hash;
+            prepared_ctx.tools_hash = step_prefix_account.tools_hash;
+            prepared_ctx.cache_epoch = step_prefix_account.cache_epoch;
+            prepared_ctx.prefix_append_only = step_prefix_account.append_only;
+            trajectory_request_id = wiring.boundary_recorder->OnRequestPrepared(request, prepared_ctx);
             if (trajectory_request_id.empty()) {
                 return std::unexpected("轨迹账写盘失败,本轮停在请求边界,未发模型");
             }
@@ -1172,7 +1207,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 // 若报了先记 owner)。
                 if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
                     wiring.boundary_recorder->OnUsageRecorded(
-                        trajectory_request_id, assembler.usage(), assembler.usage_seen(), stream_request_id);
+                        trajectory_request_id, assembler.usage(), assembler.usage_seen(), stream_request_id,
+                        step_prefix_account.cache_epoch, step_prefix_account.append_only);
                     wiring.boundary_recorder->OnOutputCancelled(trajectory_request_id);
                 }
                 return RunOutcome{true, false, false, last_stop_reason, steps_used};
@@ -1231,7 +1267,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 记不住就明败,不执行工具(§7.4 耐久栅栏)。
         if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
             wiring.boundary_recorder->OnUsageRecorded(trajectory_request_id, assembler.usage(),
-                                                      assembler.usage_seen(), stream_request_id);
+                                                      assembler.usage_seen(), stream_request_id,
+                                                      step_prefix_account.cache_epoch,
+                                                      step_prefix_account.append_only);
             if (!wiring.boundary_recorder->OnOutputCompleted(trajectory_request_id, assistant_message,
                                                              stop_reason, stream_request_id)) {
                 return std::unexpected("轨迹账写盘失败,模型输出未落账,不执行工具");

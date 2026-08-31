@@ -88,10 +88,11 @@ public:
     void EndTurn(bool ok, bool cancelled, const std::string& reason);
 
     // ---- agent::LoopBoundaryRecorder(loop 在模型边界调) ----
-    std::string OnRequestPrepared(const api::Request& request) override;
+    std::string OnRequestPrepared(const api::Request& request, const agent::RequestPreparedContext& ctx) override;
     void OnRequestSent(const std::string& request_id) override;
     void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
-                         bool reported_by_provider, const std::string& provider_response_id) override;
+                         bool reported_by_provider, const std::string& provider_response_id,
+                         int cache_epoch = 0, bool prefix_append_only = true) override;
     bool OnOutputCompleted(const std::string& request_id, const api::Message& assistant,
                            const std::string& stop_reason,
                            const std::string& provider_response_id) override;

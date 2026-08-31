@@ -1651,6 +1651,16 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     agent::AgentProfile task_agent_profile = resolved != nullptr ? resolved->profile : agent_profile_;
     task_agent_profile.runtime = std::move(task_profile);
     task_agent_profile.system_prompt = system_prompt;
+    // Token 账本单 A1:子代理(前台 RunTask 与后台 detached 任务共用这一
+    // 处)的请求用途是 subagent_turn,不是从 agent_profile_/resolved->profile
+    // 继承来的主会话 MainTurn——显式覆盖。resolved_prompt_base 也一并清空:
+    // 子代理系统提示的拼装次序(部分路径把延迟索引/魂/模型指令直接烤进
+    // system_prompt 文本,不走 profile 三层后叠)与主会话不同,继承来的
+    // 底账文本对不上这里的 system_prompt,AgentLoop 的 sync 闸本会自动
+    // 退回旧路,这里显式清是让"没有 manifest"这件事在源头就说清楚,不靠
+    // 隐式的文本比对兜底。
+    task_agent_profile.purpose = accounting::RequestPurpose::SubagentTurn;
+    task_agent_profile.resolved_prompt_base.reset();
     if (detached != nullptr) {
         task_agent_profile.provider = detached->provider;
         task_agent_profile.request = detached->request_profile;

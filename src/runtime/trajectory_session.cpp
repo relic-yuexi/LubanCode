@@ -7,7 +7,10 @@
 #include <cstdlib>
 #include <utility>
 
+#include "accounting/purpose.hpp"   // PurposeName(Token 账本单 A1)
+#include "agent/context.hpp"        // EstimateUtf8Tokens:request_snapshot 的 token 估算
 #include "config/config.hpp"
+#include "hooks/hash.hpp"           // Sha256Hex:request_snapshot 的 parameters_hash
 #include "platform/log_sink.hpp"
 #include "platform/paths.hpp"
 #include "tools/path_utils.hpp"     // Utf8ToPath:主目录文本转路径
@@ -250,14 +253,53 @@ void TrajectoryTurnBridge::EndTurn(bool ok, bool cancelled, const std::string& r
     turn_open_ = false;
 }
 
-std::string TrajectoryTurnBridge::OnRequestPrepared(const api::Request& request) {
+namespace {
+
+// request_snapshot_ref 的 metadata_only 底账(Token 账本单 §6.4)。ctx 的
+// prefix 账缺席(has_prefix_account=false)时 toolset_hash 留空——不拿
+// 假 hash 冒充,消费侧按空串识别"这份没有前缀账可对"。
+agent::RequestSnapshotMetadata BuildRequestSnapshot(const api::Request& request,
+                                                    const agent::RequestPreparedContext& ctx) {
+    agent::RequestSnapshotMetadata snapshot;
+    snapshot.request_shape.model = request.model;
+    snapshot.request_shape.message_count = request.messages.size();
+    snapshot.request_shape.tool_count = request.tools.size();
+    snapshot.request_shape.toolset_hash = ctx.has_prefix_account ? ctx.tools_hash : std::string();
+    std::int64_t tool_tokens = 0;
+    nlohmann::json params_shape = nlohmann::json{{"model", request.model},
+                                                 {"reasoning_effort", request.reasoning_effort}};
+    if (request.max_tokens.has_value()) {
+        params_shape["max_output_tokens"] = *request.max_tokens;
+    }
+    for (const api::ToolDefinition& tool : request.tools) {
+        tool_tokens += static_cast<std::int64_t>(agent::EstimateUtf8Tokens(tool.name)) +
+                       static_cast<std::int64_t>(agent::EstimateUtf8Tokens(tool.description)) +
+                       static_cast<std::int64_t>(agent::EstimateUtf8Tokens(tool.input_schema.dump()));
+    }
+    snapshot.request_shape.tool_definition_tokens_estimated = tool_tokens;
+    snapshot.request_shape.parameters_hash = hooks::Sha256Hex(params_shape.dump());
+    if (ctx.has_prompt_manifest) {
+        snapshot.prompt_manifest = ctx.prompt_manifest;
+    }
+    snapshot.content_policy = "metadata_only";
+    return snapshot;
+}
+
+}  // namespace
+
+std::string TrajectoryTurnBridge::OnRequestPrepared(const api::Request& request,
+                                                     const agent::RequestPreparedContext& ctx) {
     if (!turn_open_) {
         return std::string();
     }
     const std::string request_id = NextRequestId();
     nlohmann::json payload = nlohmann::json{{"model", request.model},
                                             {"provider", identity_.provider},
-                                            {"wire", identity_.wire}};
+                                            {"wire", identity_.wire},
+                                            // Token 账本单 A1:purpose 恒有效(AgentProfile.purpose
+                                            // 默认值),不是"没接线就漏字段"——真实运行时路径
+                                            // 永远给出诚实的枚举名。
+                                            {"purpose", accounting::PurposeName(ctx.purpose)}};
     nlohmann::json message_refs = nlohmann::json::array();
     if (!last_input_event_id_.empty()) {
         message_refs.push_back(last_input_event_id_);
@@ -265,6 +307,25 @@ std::string TrajectoryTurnBridge::OnRequestPrepared(const api::Request& request)
     payload["message_refs"] = std::move(message_refs);
     if (request.max_tokens.has_value()) {
         payload["parameters"] = nlohmann::json{{"max_output_tokens", *request.max_tokens}};
+    }
+    if (ctx.has_prefix_account && ctx.cache_epoch > 0) {
+        payload["cache_epoch"] = static_cast<std::uint64_t>(ctx.cache_epoch);
+    }
+    // system/toolset 正文照 system_ref(§11.2):recorder 按字段名自动
+    // offload 超限正文成 blob(schema.cpp 的可 offload 字段集已含
+    // system_ref),这里只管递字符串,不管落盘细节。toolset_ref 递的是
+    // 工具定义的规范化摘要(名字+描述+schema),不是完整 wire 请求体。
+    if (!request.system.empty()) {
+        payload["system_ref"] = request.system;
+    }
+    // request_snapshot_ref:metadata_only 的形状账(§6.4),manifest 缺席
+    // (没接 ResolvedPromptBuilder)时 prompt_manifest 是一份空壳——仍然
+    // 写,因为 request_shape(model/tool 计数/token 估算)本身是独立于
+    // manifest 的事实,不该因为 manifest 缺席就整份不落。
+    {
+        const agent::RequestSnapshotMetadata snapshot = BuildRequestSnapshot(request, ctx);
+        payload["request_snapshot_ref"] = snapshot.ToJson();
+        payload["request_snapshot_sha256"] = hooks::Sha256Hex(payload["request_snapshot_ref"].dump());
     }
     const auto receipt = Put(EventKind::ModelRequestPrepared, request_id, std::nullopt, Actor::Host,
                              Origin::RecoveryRuntime, std::move(payload), Durability::ProcessCrash);
@@ -292,7 +353,8 @@ void TrajectoryTurnBridge::OnRequestSent(const std::string& request_id) {
 
 void TrajectoryTurnBridge::OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                                            bool reported_by_provider,
-                                           const std::string& provider_response_id) {
+                                           const std::string& provider_response_id, int cache_epoch,
+                                           bool prefix_append_only) {
     nlohmann::json payload = nlohmann::json{{"attempt", std::uint64_t{1}},
                                             {"reported_by_provider", reported_by_provider}};
     if (!provider_response_id.empty()) {
@@ -305,6 +367,12 @@ void TrajectoryTurnBridge::OnUsageRecorded(const std::string& request_id, const 
         payload["cache_creation_tokens"] = usage.cache_creation_tokens;
         payload["output_tokens"] = usage.output_tokens;
         payload["reasoning_tokens"] = usage.output_reasoning_tokens;
+    }
+    // 前缀账(Token 账本单 A1,§7.2 cache 指标的地基):cache_epoch=0 表示
+    // 这次调用没带前缀账(旧调用方/单测),不落——真实 epoch 从 1 起。
+    if (cache_epoch > 0) {
+        payload["cache_epoch"] = static_cast<std::uint64_t>(cache_epoch);
+        payload["prefix_append_only"] = prefix_append_only;
     }
     const auto receipt =
         Put(EventKind::ModelUsageRecorded, request_id, std::nullopt, Actor::Host,

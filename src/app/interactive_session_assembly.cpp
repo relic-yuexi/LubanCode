@@ -40,6 +40,7 @@
 #include "agent/loop.hpp"
 #include "peers/peer_session.hpp"
 #include "agent/prompts.hpp"
+#include "agent/resolved_prompt_builder.hpp"
 #include "sessions/session_store.hpp"
 #include "skills/workflow_recorder.hpp"
 #include "api/backend.hpp"
@@ -971,7 +972,13 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
         main_agent_profile.request.reasoning = entry->reasoning;
     }
     main_agent_profile.runtime = main_profile;
-    main_agent_profile.system_prompt = lubancode::agent::AssembleSystemPrompt(prompt_options);
+    // Token 账本单 A1:ResolvedPromptBuilder 底账与 system_prompt 同一次
+    // 拼装产出(purpose 缺省即 MainTurn,主会话不必显式复述)。
+    {
+        lubancode::agent::ResolvedPromptBase base = lubancode::agent::BuildResolvedPromptBase(prompt_options);
+        main_agent_profile.system_prompt = base.text;
+        main_agent_profile.resolved_prompt_base = std::move(base);
+    }
     // 皮上的叠层(从前由传输层的 ModelInstructions/SoulOverlay/
     // DeferredIndex 三只包装后端现拼,现在 Agent 拼请求时就地生效)。
     main_agent_profile.model_instructions = *current_model_instructions;
