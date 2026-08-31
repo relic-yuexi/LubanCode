@@ -1,0 +1,716 @@
+# 动态工具 Prompt Cache 守恒与按需调用设计
+
+- 状态：待实现（设计单；本文所写协议与类型尚未落地）
+- 日期：2026-08-31
+- 级别：P1（长会话成本、首 token 延迟与工具扩展性的共同底座）
+- 范围：`tool_search`、延迟工具、条件工具、四条 wire、前缀账、会话恢复、compact、工具执行正门
+- 依赖：现有 `ToolRegistry`、`AgentLoop`、`RunOneTool`、请求前缀指纹与 Usage cache 账
+- 关联：`LubanCode使用洞察_Token账本与Prompt审计设计.todo`
+- 不在本单：改造全部核心工具、替 provider 承诺一定命中 cache、拿“模型看不见”冒充权限隔离
+
+## 一、先下断语
+
+动态能力可以有，动态前缀不能有。
+
+LubanCode 眼下的延迟挂载省了本轮 schema token，却会在发现工具后同时改两处旧前缀：
+
+```text
+Request N
+  system = base + pending deferred index(A, B, C) + model instructions + soul
+  tools  = core + tool_search
+  messages = H
+
+tool_search("B")
+
+Request N+1
+  system = base + pending deferred index(A, C) + model instructions + soul   <- 变
+  tools  = core + B(full schema) + tool_search                              <- 变
+  messages = H + tool_search call/result                                    <- 本可只追加
+```
+
+`system` 与 `tools` 都排在旧消息前头。前头一改，长会话攒下的消息 cache 便接不上。严格说，
+provider 仍可能复用首个差异之前那一截；可最值钱的长历史已经落在差异之后。把这事只记作一次
+`cache epoch` 切换，账虽清楚，病并未治。
+
+本单定案：
+
+1. 通用路径只向模型常驻两枚稳定工具：`tool_search` 与 `tool_invoke`。
+2. `tool_search` 把命中工具的名字、说明、完整 schema 与不透明 `tool_ref` 放进 tool result，追加到历史尾部。
+3. 模型随后调用固定的 `tool_invoke({tool_ref, arguments})`；顶层 `request.tools` 不再扩写。
+4. 宿主按 `tool_ref` 找回真工具，用真 schema 复验参数，再从 `RunOneTool` 正门执行。
+5. Claude 若具备正式 `defer_loading + tool_reference` 能力，走 provider 原生路径；不靠 provider 名硬猜。
+6. 不具备原生引用的 Chat、Responses、Gemini、Anthropic 兼容端，走通用代理路径。
+7. 旧的“搜到后把 schema 塞回顶层 tools”留作兼容模式，明标 `cache-hostile`，迁移完成后不再默认。
+8. `goal_checkpoint`、`loop_control` 一类条件工具不再随轮次从定义表里忽隐忽现。定义常驻，执行资格另判。
+
+目标不是让 `tools_hash` 看着不变。目标是守住真实请求前缀：
+
+```text
+stable tool definitions
+stable system
+old messages byte-for-byte unchanged
+new discovery / invocation facts append at the tail
+```
+
+## 二、现状证据
+
+### 2.1 当前工具定义逐 step 重建
+
+`src/agent/agent.cpp::Agent::BuildToolDefinitions()` 每次扫 `ToolRegistry::All()`，再过
+`profile_.tool_filter`。延迟工具尚未挂载时不进 `request.tools`；`tool_search` 往 `loaded` 集合塞名字，
+下一 step 便出现完整定义。
+
+`src/agent/loop.cpp` 每 step 先现拼 deferred index，再执行：
+
+```cpp
+request.tools = BuildToolDefinitions();
+```
+
+这不是偶发排序抖动。它是当前产品合同。
+
+### 2.2 当前 deferred index 也会跟着变
+
+`src/tools/tool_search.cpp::BuildDeferredToolsIndexSegment()` 只列“延迟且未 loaded”的工具。
+命中后，工具从 system 尾部的索引段消失。`AgentProfile` 又把 model instructions 与 soul 接在该段后头，
+故索引里删一行，后面几段也一并移位。
+
+### 2.3 当前前缀账能看见断点
+
+`src/agent/prefix.cpp` 分别比较：
+
+- model；
+- system；
+- tools 的名字、说明、schema 与顺序；
+- 旧 messages 是否只追加。
+
+所以现有诊断会如实报 `system_changed`、`tools_changed`。这套账应保留，并拿来钉新设计；不另造一套
+只对代理工具有利的假指标。
+
+### 2.4 当前执行已有正门
+
+`agent::RunOneTool` 已承接：
+
+- registry 查找；
+- 延迟可见性与 mode policy；
+- schema 校验；
+- PreToolUse 与 updated input 复验；
+- 用户确认；
+- PostToolUse；
+- 取消信号；
+- trace 与结果清洗。
+
+新代理不可在 `ToolInvokeTool::execute()` 里直接 `target->execute()`。那会绕过确认、Hook、取消与 Trace，
+又养出第二条执行暗道。
+
+## 三、外部协议依据
+
+核对日期：2026-08-31。
+
+### 3.1 Claude 原生 deferred tools
+
+Anthropic 已给工具定义加 `defer_loading`。被延迟的定义不进入缓存前缀；工具搜索命中后，服务端把
+完整定义作为 `tool_reference` 插在对话正文当时的位置。旧前缀不改，cache 得以续用。
+
+官方资料：
+
+- https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-use-with-prompt-caching
+- https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-search-tool
+- https://platform.claude.com/docs/en/agents-and-tools/tool-use/tool-reference
+
+本单只在模型目录明确声明能力时启用。第三方 Anthropic-compatible 端点即便收同一 wire，也不能假定
+实现了 server tool、`defer_loading` 或 `tool_reference`。
+
+### 3.2 其他 provider 的共同底线
+
+OpenAI、Gemini 等服务会演进，各家 cache 细节也不同。通用路径只依赖一条最小公理：大段稳定内容放在
+前头，动态内容往尾部追加，更有利于前缀复用。哪家未回报 cache usage，便记 `unknown`，不可写成 0，
+也不可宣称命中。
+
+参考：
+
+- https://developers.openai.com/api/docs/guides/latest-model
+- https://ai.google.dev/gemini-api/docs/generate-content/caching
+
+OpenAI 的 `allowed_tools`、显式 cache breakpoint，Gemini 的 explicit cache 可另做 provider 优化；它们不
+替代本单的宿主合同。尤其“全量 schema 常驻、只改 allowlist”虽能稳住定义，却没有缩小 context 固定账。
+
+## 四、三条路，不能混作一条
+
+| 路径 | 顶层定义 | 发现结果 | 执行形状 | cache 口径 | 用途 |
+|---|---|---|---|---|---|
+| `native_reference` | 核心工具 + 全量 deferred 声明（wire 标 `defer_loading`） | provider 原生 `tool_reference` | 模型直接调用目标工具 | provider 保证 deferred 定义不改缓存前缀 | 明确支持该能力的 Claude 模型 |
+| `proxy_reference` | 核心工具 + 固定 `tool_search` + 固定 `tool_invoke` | 本地 tool result 内嵌 schema + `tool_ref` | 模型调用 `tool_invoke` | system/tools 不变，只在 history 尾部追加 | 默认跨 provider 路径 |
+| `legacy_expand` | 核心工具；发现后扩写目标 schema | 本地文字结果 + loaded 集合 | 模型直接调用目标工具 | 显式开新 epoch，`cache-hostile` | 兼容、对照实验、紧急回退 |
+
+模式由模型级 capability 决定，不认 provider 名字：
+
+```cpp
+enum class DeferredToolMode {
+    Disabled,         // 全量工具照旧常驻
+    ProxyReference,   // 本地 search + invoke
+    NativeReference,  // provider defer_loading + tool_reference
+    LegacyExpand,     // 旧路，只作兼容
+};
+```
+
+建议在 model catalog 落声明：
+
+```json
+{
+  "deferred_tools": {
+    "mode": "native_reference",
+    "tool_reference": true,
+    "server_tool_search": "regex"
+  }
+}
+```
+
+目录不写时按 `proxy_reference`；用户可显式退回 `disabled` 或 `legacy_expand`。若 proxy 所需的结构化
+arguments 也不受该模型支持，则启动时退到 `disabled`，并把理由说清；不得悄悄换路。
+
+## 五、通用代理协议
+
+### 5.1 顶层工具表
+
+启用 `proxy_reference` 后，延迟工具永远不进入 `Agent::BuildToolDefinitions()` 的顶层结果。固定部分为：
+
+```text
+always-loaded core tools
+tool_search
+tool_invoke
+```
+
+同一 cache epoch 内，三件事必须成立：
+
+1. 数量不变；
+2. 次序不变；
+3. name、description、input schema 一个字节不变。
+
+工具注册表可在后台增删，MCP 也可重连；这些变化只改 catalog revision，不改已经发出的顶层定义。
+
+### 5.2 `tool_search` 请求
+
+沿用现有名字，收紧合同：
+
+```json
+{
+  "query": "github issue search",
+  "limit": 5
+}
+```
+
+`limit` 仍须有限上界。建议默认 5，硬上限 20。搜索只读 catalog，不授予权限，不执行目标工具。
+
+### 5.3 `tool_search` 结果
+
+结果须有结构化字段；给人看的短文只是展示，不作恢复事实源：
+
+```json
+{
+  "catalog_revision": "sha256:...",
+  "matches": [
+    {
+      "tool_ref": "dt_01K...",
+      "name": "mcp__github__search_issues",
+      "description": "Search issues in a GitHub repository.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "query": {"type": "string"}
+        },
+        "required": ["query"]
+      },
+      "schema_digest": "sha256:...",
+      "source": "mcp",
+      "source_instance": "github"
+    }
+  ]
+}
+```
+
+规矩如下：
+
+- `tool_ref` 是不透明引用。模型不可自行拼装。
+- 引用绑定 `session_id + canonical tool name + source instance + schema digest`。
+- `description` 与 `input_schema` 取执行时同一枚 `Tool`，不可另养搜索专用副本。
+- `source` 只供诊断。不能据此放宽权限。
+- 搜索结果是首次出现的完整 schema。往后同一 digest 再搜，可回短引用，免得反复塞正文。
+- schema 很大时也不能悄悄截断。超过单项上限便返回 `schema_too_large`，让模型改走专用方案或旧路。
+
+### 5.4 `tool_invoke` 请求
+
+顶层 schema 永远固定：
+
+```json
+{
+  "tool_ref": "dt_01K...",
+  "arguments": {
+    "query": "repo:relic-yuexi/LubanCode cache"
+  }
+}
+```
+
+固定定义只声明：
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "tool_ref": {"type": "string"},
+    "arguments": {"type": "object"}
+  },
+  "required": ["tool_ref", "arguments"],
+  "additionalProperties": false
+}
+```
+
+`arguments` 的细校验不靠这层宽 schema。宿主解引用后，必须拿目标工具当下那份真 schema 再验一次。
+
+### 5.5 引用不是权限
+
+`tool_ref` 只回答两件事：
+
+1. 模型看过哪枚工具；
+2. 当时看过哪版 schema。
+
+它不回答“现在能不能执行”。执行时仍须重走：
+
+```text
+resolve ref
+  -> target still registered?
+  -> schema digest still equal?
+  -> effective role/tool policy allows target?
+  -> current lifecycle allows target?
+  -> validate target arguments
+  -> PreToolUse hook
+  -> validate updated arguments again
+  -> confirmation / mode policy
+  -> target execute(context)
+  -> PostToolUse / trace / result
+```
+
+拿到旧引用，不得越过后来收紧的权限。父子 Agent 共用 catalog 时，子 Agent 的引用仍绑定它自己的
+effective policy；父亲的 `tool_ref` 不可直接给儿子当通行牌。
+
+## 六、执行正门怎样接
+
+### 6.1 不把代理做成套娃工具
+
+若 `ToolInvokeTool::execute()` 里再调 `target->execute()`，外层 Hook 只看见 `tool_invoke`，目标工具的
+风险、确认档与来源全被洗掉。若外层、内层各跑一遍 `RunOneTool`，又会双记 Hook、双问确认。
+
+因此在 `AgentLoop` 收到模型工具调用后、进入 `RunOneTool` 前，先做一次规范化：
+
+```cpp
+struct ResolvedToolCall {
+    api::ToolUseBlock wire_call;      // name=tool_invoke，留作协议证据
+    api::ToolUseBlock target_call;    // name=真实工具，input=arguments
+    std::string tool_ref;
+    std::string schema_digest;
+};
+```
+
+随后只对 `target_call` 调一次 `RunOneTool`。`tool_use_id` 沿用 wire call 的 id，故 assistant tool call 与
+user tool result 仍能一一配对。
+
+### 6.2 Hook、确认与 Trace 看谁
+
+所有安全与执行判断看真实目标：
+
+- PreToolUse `tool_name` = 真实目标名；
+- confirm 文案 = 真实目标名与真实参数；
+- mode policy = 真实目标；
+- effect class / idempotency / recovery = 真实目标 registration；
+- cancellation context 原样下传目标；
+- PostToolUse = 真实结果。
+
+Trace 同时记两层，不丢协议证据：
+
+```json
+{
+  "transport_tool": "tool_invoke",
+  "resolved_tool": "mcp__github__search_issues",
+  "tool_ref": "dt_01K...",
+  "schema_digest": "sha256:..."
+}
+```
+
+终端工具卡主标题画真实目标。角注可写“经按需引用调用”，不拿 `tool_invoke` 糊住用户。
+
+### 6.3 其他调用入口
+
+首期先接主 Agent 与子 Agent。随后对齐 PTC、Workflow 与任何直接吃 `ToolRegistry` 的入口：
+
+- 已拿真实工具名和强 schema 的宿主入口，可继续直走 `RunOneTool`；
+- 只有模型代理引用的入口，必须先经同一 `DeferredToolResolver`；
+- 不许 PTC 自己解一套 ref，AgentLoop 又解一套。
+
+`DeferredToolResolver` 只管引用与版本，不管执行。`RunOneTool` 仍是唯一执行正门。
+
+## 七、Claude 原生路径
+
+### 7.1 provider-neutral 类型
+
+`api::ToolDefinition` 需表达暴露方式，不把 Anthropic 字段漏进公共层：
+
+```cpp
+enum class ToolLoadMode { Eager, Deferred };
+
+struct ToolDefinition {
+    std::string name;
+    std::string description;
+    nlohmann::json input_schema;
+    ToolLoadMode load_mode = ToolLoadMode::Eager;
+};
+```
+
+原生模式下，deferred 定义每轮仍从同一稳定 catalog 生成，数量、顺序与 digest 不变。Anthropic wire 把
+`Deferred` 映成 `defer_loading: true`。其他 wire 不认识该能力时不得擅自丢定义。
+
+### 7.2 原生内容块
+
+Anthropic client 还须正式解析并保存：
+
+- server tool use；
+- tool search result；
+- `tool_reference`；
+- 对应 id / caller / error。
+
+这些块要进统一 `api::ContentBlock` 或一种可无损保存的 provider block。不能把整段压成普通文字，再让
+下一轮猜回来。session JSONL、恢复、compact、wire replay 都要认同一形状。
+
+### 7.3 原生失败便明退
+
+模型目录虽声明支持，端点却回 4xx capability error 时：
+
+1. 本次请求不自动改成 proxy 重发，免得一轮被执行两遍；
+2. 报清 endpoint、model、缺失能力与建议配置；
+3. 用户或预先配置的 fallback 才能在下一轮切 `proxy_reference`；
+4. 切换模式开新 cache epoch，断因 `deferred_tool_mode_changed`。
+
+## 八、system prompt 与条件工具
+
+### 8.1 删除动态 deferred index
+
+`proxy_reference` 下，不再把“尚未 loaded 的全部名字”拼进 system。`tool_search` 自己握 catalog；模型按
+用户任务里的词去搜。若产品仍要给能力概览，只能放一段会话启动时定形、整场不改的静态分类摘要，
+不得按 loaded 集合删行。
+
+原有 `deferred_index_provider` 在新模式下应为空。旧模式才保留。
+
+### 8.2 条件工具定义常驻
+
+当前 `goal_checkpoint`、`loop_control` 会随活动轮次过 `tool_filter`，也会改 tools 指纹。新设计把
+“模型可见”与“此刻可执行”拆开：
+
+```text
+ToolExposurePolicy   决定会话起手放哪些固定定义
+ToolExecutionPolicy  每次调用时判当前角色、模式、goal/loop 生命周期
+```
+
+轮次变化只在新 user/turn context 尾部追加一句短状态。例如：
+
+```text
+[turn capabilities]
+- goal_checkpoint: available for goal iteration g_17
+- loop_control: unavailable outside a scheduled tick
+```
+
+这段不是安全边界。模型硬叫了，执行门仍须拒绝，返回稳定错误。
+
+### 8.3 注册表变化不追改旧消息
+
+MCP 重连、插件热加载、LSP 起停时：
+
+- catalog revision 增长；
+- 新搜索看见新版本；
+- 旧 `tool_ref` 若 digest 不符，返回 `stale_tool_ref`；
+- 不回头修改旧搜索结果；
+- 不偷偷把新 schema 塞进 system 或 tools；
+- 模型重新 `tool_search`，新事实自然追加到尾部。
+
+## 九、会话、恢复与 compact
+
+### 9.1 `DiscoveryLedger`
+
+会话须有一份轻账：
+
+```cpp
+struct DeferredToolRefRecord {
+    std::string tool_ref;
+    std::string canonical_name;
+    std::string source_instance;
+    std::string schema_digest;
+    std::string catalog_revision;
+    std::string discovered_event_id;
+};
+```
+
+它只作解析账，不复制 schema 正文。schema 仍归 `ToolRegistry` 当前工具所有。
+
+### 9.2 恢复
+
+恢复 session 时，从正式 discovery event 重建 ledger。若对应工具未注册、MCP 未连上或 digest 已变，记录
+保持可审计，却标成 unavailable/stale。不得把旧 session 里的 schema 反向注册成可执行工具。
+
+### 9.3 compact
+
+compact 可以改 history，本就会开新 cache epoch。它对动态工具另守三条：
+
+1. 不需要把所有发现过的 schema 塞进摘要；那会重新膨胀。
+2. 正在使用、下一步明确要调用的 `tool_ref + name + digest` 可进 WorkState。
+3. 模型忘了引用便重新搜索；宿主 ledger 不因 compact 丢账。
+
+compact 后若旧引用仍有效，可照常调用。若 schema 变了，仍报 `stale_tool_ref`，不能因摘要写着旧参数便
+放行。
+
+## 十、错误合同
+
+错误须稳定、可分型，并告诉模型下一步做什么：
+
+| code | 情形 | 是否执行目标 | 模型下一步 |
+|---|---|---:|---|
+| `unknown_tool_ref` | 引用不存在或不属本 session | 否 | 重新 `tool_search` |
+| `stale_tool_ref` | 工具仍在，schema/source digest 已变 | 否 | 重新 `tool_search` |
+| `tool_unavailable` | MCP 断开、插件卸载、实例消失 | 否 | 可稍后重搜或换工具 |
+| `tool_not_allowed` | 当前角色或 tools policy 不许 | 否 | 不得重试同一调用 |
+| `tool_not_active` | goal/loop 生命周期不对 | 否 | 等相应轮次或换路径 |
+| `invalid_target_arguments` | 不合真实目标 schema | 否 | 按搜索结果 schema 修参数 |
+| `confirmation_denied` | 用户或 mode policy 拒绝 | 否 | 收口或换无副作用方案 |
+| `schema_too_large` | 无法在 discovery result 安全展开 | 否 | 用专用路径或显式 legacy |
+
+错误 result 仍用原 wire `tool_use_id` 配对。不得抛成一条无 id 的 assistant 文本。
+
+## 十一、缓存账怎样验
+
+### 11.1 客户端确定性合同
+
+同一 session、model、mode 下跑三拍：
+
+```text
+R1: user asks for capability
+R2: append tool_search call/result
+R3: append tool_invoke call/result
+```
+
+`proxy_reference` 必须满足：
+
+```text
+R1.model_hash  == R2.model_hash  == R3.model_hash
+R1.system_hash == R2.system_hash == R3.system_hash
+R1.tools_hash  == R2.tools_hash  == R3.tools_hash
+R1.messages is an exact prefix of R2.messages
+R2.messages is an exact prefix of R3.messages
+cache epoch does not change because a tool was discovered or invoked
+```
+
+只要其中一条不成，P1 不算落地。
+
+### 11.2 provider 真机账
+
+服务端 cache 是尽力而为。真机测试分两栏：
+
+- `structural_expected`：客户端前缀确实守恒；
+- `provider_reported`：usage 是否报 cache read/write/cached tokens。
+
+没有 usage 便写 `unknown`。结构守恒也不等于 provider 一定命中。至少选一枚能回 cache usage 的
+Responses/Chat 模型与一枚 Claude 模型，跑固定长前缀、多 step 搜索调用，保存脱敏请求 hash 与 usage。
+
+### 11.3 成本不能只看 cached ratio
+
+对照须同时报：
+
+- 完整 input tokens；
+- cache read / creation；
+- 非缓存 input；
+- output；
+- tool search 额外轮次；
+- schema discovery result token；
+- 首 token 延迟与总墙钟；
+- 任务是否做成；
+- 参数首发合格率；
+- 工具误选与重搜次数。
+
+proxy 多走一步，未必总比全量 tools 便宜。短会话、少工具时应允许 `Disabled` 全量常驻。阈值要靠对照
+数据定，不能把旧的 `tool_search_threshold=20` 原封不动当成新模式最佳线。
+
+## 十二、测试矩阵
+
+### 12.1 单元测试
+
+`tests/unit/tools/test_tool_search.cpp`
+
+- 搜索结果带完整 schema、digest、ref、source；
+- 同 digest 重搜给稳定短引用；
+- limit 上界、空 query、UTF-8、同分顺序稳定；
+- 搜索不改顶层 loaded/tool definitions；
+- catalog revision 改变后旧 ref 变 stale。
+
+新增 `tests/unit/tools/test_deferred_tool_resolver.cpp`
+
+- ref 绑定 session；
+- 父子 session 不串；
+- source instance/schema digest 任一变化都拒；
+- registry 缺工具时只报 unavailable，不解引用悬空指针；
+- ledger 恢复后有效/失效两路。
+
+`tests/unit/agent/test_loop.cpp`
+
+- proxy 调用只执行真实工具一次；
+- Hook 只看真实名，只跑一次；
+- updated input 用真实 schema 复验；
+- confirm、mode policy、cancel、trace 全落到真实工具；
+- tool result id 与外层 `tool_invoke` call id 配对；
+- 并行两枚 proxy call 各自解引用，不串参数；
+- 条件工具不活动时定义不变、执行被拒。
+
+`tests/unit/api/test_request_prefix.cpp`
+
+- discovery 前后 system/tools hash 不变；
+- invocation 前后仍只追加 messages；
+- legacy 模式照旧报 `tools_changed`，不把兼容行为洗白；
+- mode 切换明确开 epoch。
+
+### 12.2 wire 测试
+
+- Chat/Responses/Gemini：只见固定 `tool_search + tool_invoke`，arguments JSON 往返无损；
+- Anthropic proxy：同上；
+- Anthropic native：`defer_loading` 发出，server search/result/reference 无损解析、保存、重放；
+- 不支持 native 的兼容端按 capability 拒绝，不按 provider 名误开；
+- 四 wire 的普通 eager tools 行为不退化。
+
+### 12.3 session 与 compact
+
+- 保存、退出、恢复后，未漂移 ref 可调用；
+- MCP 未重连时旧 ref 报 unavailable；
+- MCP 同名 schema 改变时报 stale；
+- compact 不丢 DiscoveryLedger；
+- compact 摘要不复制全部 schema；
+- compact 自己开 epoch，动态工具不再多开第二次。
+
+### 12.4 安全回归
+
+- ref 不等于 allow；
+- 子 Agent 不能借父 Agent ref 扩权；
+- deny policy、Plan 闸、PreToolUse deny 都拦住真实目标；
+- dangerous tool 仍问真实工具那次确认；
+- 伪造 ref、跨 session ref、改 arguments 都不能绕 schema；
+- tool_search 只读，不触发目标副作用。
+
+### 12.5 质量对照
+
+准备一组含以下形状的任务：
+
+- 名字直白、参数简单；
+- 名字相近、容易误选；
+- schema 有嵌套 object/array/enum；
+- MCP 长命名；
+- 工具有副作用；
+- 一轮搜一枚、多枚；
+- 搜后隔数轮再调；
+- schema 中途漂移；
+- 子 Agent 调用；
+- compact 后再调。
+
+同模型、同任务、同温度跑 `Disabled / ProxyReference / LegacyExpand`。实现前先落 baseline，再定允许的
+质量差。若 proxy 的任务成功、参数首发合格或误选显著退步，就先保留 opt-in，不因 cache 好看便默认。
+
+## 十三、分期落地
+
+### P0：把问题钉死，不改产品行为
+
+- [ ] 加一组现状回归，证明 legacy search 后 `system_changed + tools_changed`。
+- [ ] 保存一次长历史真机 usage，量出 discovery 前后的 cached tokens 变化。
+- [ ] 给 `/context` 与 trace 补 `deferred_tool_mode` 展示。
+- [ ] 以现有 20 阈值跑 baseline：成功、token、cache、延迟、误选。
+
+验收：能复现，能分清客户端断前缀与 provider 未命中；尚不宣称修好。
+
+### P1：通用 ProxyReference
+
+- [ ] 新增 `DeferredToolResolver` 与 `DiscoveryLedger`。
+- [ ] 改 `tool_search`，返回结构化 schema/ref，不再写 loaded 集合。
+- [ ] 新增稳定 `tool_invoke` wire 定义。
+- [ ] 在 `RunOneTool` 前规范化代理调用，只执行真实目标一次。
+- [ ] proxy 模式移除动态 deferred index。
+- [ ] 接主 Agent、子 Agent、session 恢复、compact 与 trace。
+- [ ] 配置先 opt-in；保留 `Disabled`、`LegacyExpand` 回退。
+
+验收：客户端三拍前缀合同全过；安全回归全过；四 wire proxy replay 全过；质量对照不差到触发回退门。
+
+### P2：条件工具也守恒
+
+- [ ] 拆 `ToolExposurePolicy` 与 `ToolExecutionPolicy`。
+- [ ] `goal_checkpoint`、`loop_control` 定义会话内固定。
+- [ ] 生命周期状态走 turn context，执行门认真实状态。
+- [ ] memory gate、角色 tools.allow/deny 等动态过滤逐项清账。
+
+验收：普通 turn、goal turn、loop tick 之间 tools hash 不变；越界调用照样被硬拦。
+
+### P3：Claude NativeReference
+
+- [ ] 扩 `api::ToolDefinition::load_mode`。
+- [ ] Anthropic request 映射 `defer_loading` 与 server tool search。
+- [ ] 解析、保存、恢复 `tool_reference` 等原生块。
+- [ ] capability catalog 接线；兼容端不得误开。
+- [ ] 跑 Claude 真机 cache usage 对照。
+
+验收：官方原生链无损走通；发现前后旧前缀守恒；模型直接调用真实工具仍走本地安全正门。
+
+### P4：默认切换与旧路退场
+
+- [ ] 按 baseline 重定 `tool_search_threshold` 或换成 token-aware 决策。
+- [ ] 满足质量、缓存、延迟与安全门后，proxy 成为非原生 provider 默认。
+- [ ] native 成为明确支持模型的默认。
+- [ ] legacy 留一版迁移窗，启动与文档明标 cache-hostile。
+- [ ] 迁移窗结束后删 loaded 集合驱动的 schema 扩写路。
+
+验收：默认路径不再因发现/调用动态工具开 cache epoch；旧配置有清楚迁移提示与可控回退。
+
+## 十四、预计改动边界
+
+| 层 | 主要文件 | 责任 |
+|---|---|---|
+| 公共 API | `src/api/types.*` | tool load mode、原生引用内容块（P3） |
+| Agent | `src/agent/agent.*`、`loop.*`、`prefix.*` | 固定定义、代理调用规范化、前缀验收 |
+| Tools | `src/tools/tool_search.*`、新增 resolver/ledger/invoke 定义 | 搜索、引用、版本账；不执行目标 |
+| Runtime | `src/app/tool_runtime.*`、`session_stack.*` | 模式选择、registry revision、主子装配 |
+| Profile | `src/config/model_catalog.*`、相关 schema/docs | capability-driven mode，不按厂名猜 |
+| Anthropic | `src/api/anthropic/client.*`、events/parser | `defer_loading`、server search、reference（P3） |
+| Session | session serializer / restore / compact work state | 引用账恢复、stale 判定 |
+| Trace/UI | turn event、tool trace、`/tools`、`/context` | 展示 transport 与 resolved 两层事实 |
+| Tests | tools/agent/api/session/wire/manual | 前缀、安全、恢复、真机 usage、质量对照 |
+
+实际开工前须再以 `rg` 核准文件归属。若届时 AgentLoop 已继续拆分，责任落在新 owner，不为迁就本文路径
+把代码塞回旧文件。
+
+## 十五、不做什么
+
+1. 不靠把动态 schema 塞进 system 解决。system 一样在旧消息前头，照样破 cache。
+2. 不以“新增工具总追加在 tools 尾部”自欺。messages 仍在 tools 后头，旧历史仍会移位。
+3. 不让模型凭工具名直接穿过代理。须拿搜索发出的 ref，且执行时重验权限与 schema。
+4. 不把发现当授权，不把隐藏当沙箱。
+5. 不在代理壳里直接调用 `Tool::execute()`。
+6. 不把 provider 未回 cache usage 写成 0。
+7. 不拿一次 cached ratio 上升便宣称总成本下降。
+8. 不在未跑质量对照前把 proxy 强推为默认。
+9. 不把 Claude 私有块压成普通文本后假称“已支持原生引用”。
+10. 不因本单顺手重构无关工具、MCP 生命周期或整套会话格式。
+
+## 十六、最终验收门
+
+全部满足，方可把本单标成落地：
+
+- [ ] `ProxyReference` 发现、调用前后 model/system/tools 指纹不变，messages 只追加。
+- [ ] 动态工具不再触发 `tools_changed` 或 `system_changed` cache epoch。
+- [ ] 真目标只执行一次；Hook、确认、mode policy、cancel、trace 一个不少。
+- [ ] schema 漂移、MCP 断线、跨 session/跨 Agent 引用都有稳定拒绝。
+- [ ] session 恢复与 compact 后引用账不乱，旧 schema 不复活成工具。
+- [ ] 四 wire 通用代理链通过；不支持原生的端点不误开 native。
+- [ ] Claude 原生 reference 块无损保存与重放，并有真机 usage 证据。
+- [ ] 条件工具轮次切换不再改 tools hash，执行资格仍硬拦。
+- [ ] 对照报告同时给成功、参数质量、token、cache、延迟与成本，不只挑好看的数。
+- [ ] 文档明确区分已实现、provider 回报、结构预期与未测结论。
+
+到这里，LubanCode 才算把动态工具从“省眼前几页 schema，丢身后一库 cache”，改成真正的按需发现：
+工具来得迟，旧账却不翻。
