@@ -1148,7 +1148,7 @@ Package 清单只列组件与版本约束，不重复 extension.json 的 capabil
 4. 内置 Compact 包一层 BuiltinCompactStrategy，与外部同 Registry。
 5. 一只假 Provider 走 process Provider SPI，真 provider 暂不迁。
 
-狗粮不等于删旧路。先双跑对账，结果一致后才收一个 writer。
+狗粮不等于删旧路。先双跑对账，结果一致后才收成一处 writer。
 
 ## 二十五、测试体系
 
