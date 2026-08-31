@@ -1,0 +1,1 @@
+hidden_dir_needle nested under dot-dir
