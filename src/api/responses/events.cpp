@@ -114,13 +114,9 @@ std::optional<StreamEvent> HandleOutputItemDone(const json& data) {
     return event;
 }
 
-std::optional<StreamEvent> HandleCompleted(const json& data) {
-    auto it = data.find("response");
-    if (it == data.end() || !it->is_object()) {
-        return std::nullopt;
-    }
-    const json& response = *it;
-
+// 收尾事件(response.completed 帧里的 response 对象,或非流式响应体顶层):
+// stop_reason 三态 + usage 摊法,流式/非流式两路共用同一口径。
+MessageDone DoneFromResponseObject(const json& response) {
     bool has_pending_function_call = false;
     if (auto output_it = response.find("output"); output_it != response.end() && output_it->is_array()) {
         for (const auto& item : *output_it) {
@@ -132,13 +128,6 @@ std::optional<StreamEvent> HandleCompleted(const json& data) {
             }
         }
     }
-
-    // 图片正文只认 output_item.done 那一路——本函数单一返回值,发不出
-    // "ImageOutput + MessageDone" 两枚,completed 里的 image_generation_call
-    // 条目在收尾判定里当普通非工具条目看(不带 stop_reason 变化)。吞图
-    // 冒充成功的防线在宿主端:ImageOutput 事件没人接、解码或落盘失败,
-    // agent 层都会把回合明败,见 agent/loop.cpp 的 on_model_image 口。
-    // 重复终帧(同一 completed 到两遍)也由宿主按 item id 去重。
 
     MessageDone event;
     const std::string status = response.value("status", "");
@@ -176,6 +165,22 @@ std::optional<StreamEvent> HandleCompleted(const json& data) {
     }
 
     return event;
+}
+
+std::optional<StreamEvent> HandleCompleted(const json& data) {
+    auto it = data.find("response");
+    if (it == data.end() || !it->is_object()) {
+        return std::nullopt;
+    }
+
+    // 图片正文只认 output_item.done 那一路——本函数单一返回值,发不出
+    // "ImageOutput + MessageDone" 两枚,completed 里的 image_generation_call
+    // 条目在收尾判定里当普通非工具条目看(不带 stop_reason 变化)。吞图
+    // 冒充成功的防线在宿主端:ImageOutput 事件没人接、解码或落盘失败,
+    // agent 层都会把回合明败,见 agent/loop.cpp 的 on_model_image 口。
+    // 重复终帧(同一 completed 到两遍)也由宿主按 item id 去重。
+
+    return DoneFromResponseObject(*it);
 }
 
 // 错误体的人话拼装(ccmoon 真机巡检单 P1):message 为主,type/code 有就
@@ -280,6 +285,81 @@ std::optional<StreamEvent> parse_event(const SseFrame& frame) try {
     // 就是未定义行为/进程崩溃。坏帧一律当没看见;整条流缺了 MessageDone
     // 的兜底在 client 层(send_stream 末尾检查)。
     return std::nullopt;
+}
+
+std::vector<StreamEvent> ExpandNonStreamResponse(const std::string& body) try {
+    json response = json::parse(body);
+    if (!response.is_object()) {
+        return {};
+    }
+    std::vector<StreamEvent> events;
+    auto output_it = response.find("output");
+    if (output_it == response.end() || !output_it->is_array()) {
+        return {};
+    }
+    // 非流式条目身上没有 output_index(那是流式帧的字段),编号按数组位置
+    // ——与流式路的 output_index 同一语义(条目在 output 里的下标)。
+    for (std::size_t i = 0; i < output_it->size(); ++i) {
+        const json& item = (*output_it)[i];
+        if (!item.is_object()) {
+            continue;
+        }
+        const std::string type = item.value("type", "");
+        const int index = static_cast<int>(i);
+        if (type == "reasoning") {
+            // vLLM:思考正文在 content[].reasoning_text(summary 恒空);
+            // OpenAI 官方:summary[].summary_text。两边各取在场的那种,
+            // 逐非空段一枚 ThinkingDelta(与流式路 done/part 系不发事件的
+            // 口径对齐:这里也没有开块/收块事件)。
+            if (auto content = item.find("content"); content != item.end() && content->is_array()) {
+                for (const auto& part : *content) {
+                    if (part.value("type", "") == "reasoning_text") {
+                        const std::string text = part.value("text", "");
+                        if (!text.empty()) {
+                            events.push_back(ThinkingDelta{text});
+                        }
+                    }
+                }
+            } else if (auto summary = item.find("summary"); summary != item.end() &&
+                                                          summary->is_array() && !summary->empty()) {
+                for (const auto& part : *summary) {
+                    // OpenAI 官方形状:{"type":"summary_text","text":"..."}
+                    // ——段类型叫 summary_text,正文键还是 text。
+                    const std::string text = part.value("text", "");
+                    if (!text.empty()) {
+                        events.push_back(ThinkingDelta{text});
+                    }
+                }
+            }
+        } else if (type == "message") {
+            if (auto content = item.find("content"); content != item.end() && content->is_array()) {
+                for (const auto& part : *content) {
+                    if (part.value("type", "") == "output_text") {
+                        events.push_back(TextDelta{part.value("text", "")});
+                    }
+                }
+            }
+            events.push_back(ContentBlockDone{index});
+        } else if (type == "function_call") {
+            ToolUseStart start;
+            start.index = index;
+            start.id = item.value("call_id", "");
+            start.name = item.value("name", "");
+            events.push_back(std::move(start));
+            const std::string arguments = item.value("arguments", "");
+            if (!arguments.empty()) {
+                events.push_back(ToolUseInputDelta{index, arguments});
+            }
+            events.push_back(ContentBlockDone{index});
+        }
+        // 别的条目类型(web_search_call 等)非流式不接线:流式路怎么翻,
+        // 这路将来照着补;眼下静默跳过,收尾事件照发。
+    }
+    events.push_back(DoneFromResponseObject(response));
+    return events;
+} catch (const json::exception&) {
+    // 坏 JSON/坏形状:当"没有 MessageDone 的不完整响应"处理,不抛。
+    return {};
 }
 
 }  // namespace lubancode::api::responses

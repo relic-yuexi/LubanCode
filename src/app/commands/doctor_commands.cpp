@@ -118,18 +118,27 @@ std::expected<std::string, std::string> FetchMetricsText(const std::string& metr
     return response.text;
 }
 
-// 一行 metrics 的数值尾巴("prefix_cache_queries_total 12.0" 的 12.0)。
+// 一行 metrics 的数值("prefix_cache_queries_total 12.0" 的 12.0)。取名字
+//(或标签块)之后的第一枚数值记号——Prometheus 文本还允许跟第二枚时间戳
+// 记号("name 12.0 1699999999"),取尾巴会把时间戳当读数。
 std::optional<std::int64_t> MetricValueFromLine(const std::string& line, std::size_t name_end) {
-    const std::size_t last = line.find_last_not_of(" \t");
-    if (last == std::string::npos || last < name_end) {
+    std::size_t pos = name_end;
+    if (pos < line.size() && line[pos] == '{') {
+        const std::size_t close = line.find('}', pos);
+        if (close == std::string::npos) {
+            return std::nullopt;  // 标签块没闭合,这行坏了
+        }
+        pos = close + 1;
+    }
+    pos = line.find_first_not_of(" \t", pos);
+    if (pos == std::string::npos) {
         return std::nullopt;
     }
-    std::size_t value_begin = line.find_last_of(" \t", last);
-    value_begin = value_begin == std::string::npos ? 0 : value_begin + 1;
-    if (value_begin < name_end) {
-        return std::nullopt;
+    std::size_t token_end = line.find_first_of(" \t", pos);
+    if (token_end == std::string::npos) {
+        token_end = line.size();
     }
-    const std::string value_text = line.substr(value_begin, last - value_begin + 1);
+    const std::string value_text = line.substr(pos, token_end - pos);
     try {
         const double value = std::stod(value_text);
         return static_cast<std::int64_t>(std::llround(value));
@@ -234,6 +243,9 @@ std::string DescribeRequestEffort(lubancode::config::Wire wire, const api::Reque
 
 PrefixCacheMetrics ParsePrefixCacheMetrics(const std::string& text) {
     PrefixCacheMetrics out;
+    // v1 引擎把前缀缓存按层拆成 gpu_/cpu_ 两族(旧名缺席才用);各族内
+    // 同名多行(带 label)取末行——vLLM 输出的末行是总计。
+    std::optional<std::int64_t> gpu_queries, gpu_hits, cpu_queries, cpu_hits;
     std::istringstream lines(text);
     std::string line;
     while (std::getline(lines, line)) {
@@ -276,10 +288,33 @@ PrefixCacheMetrics ParsePrefixCacheMetrics(const std::string& text) {
             out.queries_total = *value;
         } else if (name == "prefix_cache_hits_total") {
             out.hits_total = *value;
+        } else if (name == "gpu_prefix_cache_queries_total") {
+            gpu_queries = *value;
+        } else if (name == "gpu_prefix_cache_hits_total") {
+            gpu_hits = *value;
+        } else if (name == "cpu_prefix_cache_queries_total") {
+            cpu_queries = *value;
+        } else if (name == "cpu_prefix_cache_hits_total") {
+            cpu_hits = *value;
         } else if (name == "prompt_tokens_cached_total") {
             out.prompt_tokens_cached_total = *value;
+        } else if (name == "num_requests_running") {
+            out.num_requests_running = *value;
+        } else if (name == "num_requests_waiting") {
+            out.num_requests_waiting = *value;
         }
     }
+    const auto merge = [](std::optional<std::int64_t>& total, std::optional<std::int64_t> gpu,
+                          std::optional<std::int64_t> cpu) {
+        if (total.has_value()) {
+            return;  // v0 旧名在场就是总数,不与分层数叠加
+        }
+        if (gpu.has_value() || cpu.has_value()) {
+            total = gpu.value_or(0) + cpu.value_or(0);
+        }
+    };
+    merge(out.queries_total, gpu_queries, cpu_queries);
+    merge(out.hits_total, gpu_hits, cpu_hits);
     return out;
 }
 
@@ -297,7 +332,8 @@ CacheObservation ClassifyCacheObservation(bool usage_reported, std::int64_t cach
     return CacheObservation::EnabledNoHit;
 }
 
-std::vector<std::string> SummarizeEffortProbeRounds(const std::vector<EffortProbeRoundResult>& rounds) {
+std::vector<std::string> SummarizeEffortProbeRounds(const std::vector<EffortProbeRoundResult>& rounds,
+                                                    bool off_requested) {
     // 四账分开(MiniCPM5 真机巡检单 P1):HTTP 接受、thinking 产出、正文
     // 产出、终止原因分布——一眼能看出"2xx 收了但思考照发"这种方言不生效。
     // 判词只陈述观察,不拿 2xx 当行为支持;预算被思考耗尽的回只进
@@ -365,6 +401,14 @@ std::vector<std::string> SummarizeEffortProbeRounds(const std::vector<EffortProb
                     " 回产出思考、" + std::to_string(effective_text) +
                     " 回产出正文。这是行为观察,不替服务端背书档位语义;"
                     "/think none 档若仍见思考产出,即关闭未被端点证实。");
+    if (off_requested && effective_thinking > 0) {
+        // 明报(勘察单 P1 补账):关闭档的请求被端 2xx 收下不等于生效——
+        // 有效回里仍有思考,就是"当没看见"。判词点名,不藏在条件句里。
+        lines.push_back("判词:本档是关闭档,请求端 2xx 收下,但 " + std::to_string(effective_thinking) +
+                        "/" + std::to_string(effective) +
+                        " 有效回仍产出思考——关闭未被端点证实,这端把关闭参数当没看见;"
+                        "要真关思考,走实测生效的那条路(如 chat 面的 chat_template_kwargs)。");
+    }
     return lines;
 }
 
@@ -658,7 +702,11 @@ void RunEffortProbe(const std::string& level, const DoctorContext& context) {
         TermOut().flush();
     }
 
-    for (const std::string& line : SummarizeEffortProbeRounds(rounds)) {
+    // 关闭档探针的判词要明报"收下但无效"(SummarizeEffortProbeRounds 注释):
+    // 档位按模型方言折算(none/off 类都算关闭档)。
+    const bool off_requested =
+        !level.empty() && ReasoningEffortIsOff(level, probe.reasoning);
+    for (const std::string& line : SummarizeEffortProbeRounds(rounds, off_requested)) {
         TermOut() << line << "\n";
     }
     TermOut().flush();
@@ -694,6 +742,17 @@ std::optional<PrefixCacheMetrics> ReadAndReportMetrics(const DoctorContext& cont
                          ? std::to_string(*metrics.prompt_tokens_cached_total)
                          : std::string(tr("doctor.value.absent")))
               << "\n";
+    // vLLM 常见负载 gauge(现场语境,不是缓存指标):任一在场才报这一行。
+    if (metrics.num_requests_running.has_value() || metrics.num_requests_waiting.has_value()) {
+        TermOut() << trf("doctor.cache.metrics_load",
+                         metrics.num_requests_running.has_value()
+                             ? std::to_string(*metrics.num_requests_running)
+                             : std::string(tr("doctor.value.absent")),
+                         metrics.num_requests_waiting.has_value()
+                             ? std::to_string(*metrics.num_requests_waiting)
+                             : std::string(tr("doctor.value.absent")))
+                  << "\n";
+    }
     return metrics;
 }
 

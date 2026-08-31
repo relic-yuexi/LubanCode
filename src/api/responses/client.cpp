@@ -46,12 +46,22 @@ std::expected<void, Error> ResponsesBackend::send_stream(
     // 那段检查(图片在途:单帧超限时报错要指名是图片帧超限,不甩含混的
     // 传输错——gpt-image 的 base64 result 一帧就几 MB,是最容易撞
     // SseFramer::kMaxFrameBytes 的载荷)。
+    // raw_body 是非流式回退的底稿:还没解出任何 SSE 帧时把原文攒着——
+    // 有些兼容端把 stream 请求当非流式答(整只 JSON 对象,一行 data: 都
+    // 没有),流式路到收尾会一帧都解不出。真出了帧就不再攒,峰值内存
+    // 与分帧器自身的缓冲同量级(vLLM 本地模型勘察单 P2)。
     SseFramer framer;
     bool saw_message_done = false;
     bool saw_stream_error = false;
     bool saw_image_generation = false;
+    bool saw_any_frame = false;
+    std::string raw_body;
     const StreamDataSink sink = [&](std::string_view data) -> bool {
+        if (!saw_any_frame) {
+            raw_body.append(data);
+        }
         for (const SseFrame& frame : framer.feed(data)) {
+            saw_any_frame = true;
             if (auto event = parse_event(frame); event.has_value()) {
                 if (std::holds_alternative<MessageDone>(*event)) {
                     saw_message_done = true;
@@ -99,9 +109,21 @@ std::expected<void, Error> ResponsesBackend::send_stream(
 
     // 流"正常"走完却没等到 response.completed 翻出来的 MessageDone:响应不
     // 完整,当成功返回会把半截消息(空 stop_reason)当 end_turn 入历史,里头
-    // 若有 tool_use,下一轮请求就 400。宁可明确报错。
+    // 若有 tool_use,下一轮请求就 400。宁可明确报错。报错前先试一手非流式
+    // 回退:兼容端把 stream 请求当非流式答时,响应体是整只 JSON 对象
+    // (output 数组逐项),ExpandNonStreamResponse 展得开就当正常回合走。
     if (!saw_message_done && !saw_stream_error) {
-        return std::unexpected(Error{ErrorKind::Parse, "流意外结束:未收到消息终止事件,响应不完整", 0});
+        bool fallback_done = false;
+        for (const StreamEvent& event : ExpandNonStreamResponse(raw_body)) {
+            if (std::holds_alternative<MessageDone>(event)) {
+                fallback_done = true;
+            }
+            on_event(event);
+        }
+        if (!fallback_done) {
+            return std::unexpected(
+                Error{ErrorKind::Parse, "流意外结束:未收到消息终止事件,响应不完整", 0});
+        }
     }
 
     return {};

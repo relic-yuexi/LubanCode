@@ -13,6 +13,7 @@ DOC features/extensions/README.md
 DOC features/extensions/hooks.md
 DOC features/project-instructions/README.md
 DOC features/providers/catalog.md
+DOC features/providers/vllm.md
 DOC features/sessions/README.md
 DOC features/terminal/README.md
 DOC features/tools/ptc.md

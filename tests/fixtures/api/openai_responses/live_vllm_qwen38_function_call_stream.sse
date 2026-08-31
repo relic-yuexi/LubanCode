@@ -1,0 +1,32 @@
+data: {"type":"response.created","response":{"id":"resp_9c2f10ab77e3d5c1","output":[],"created_at":1756631402,"model":"qwen3.8-27b","status":"in_progress","system_fingerprint":"vllm-0.27.1-tp8-e0441ef0"}}
+
+data: {"type":"response.output_item.added","output_index":0,"item":{"id":"rs_9c2f10ab77e3d5c1","type":"reasoning","summary":[],"content":null}}
+
+data: {"type":"response.reasoning_part.added","item_id":"rs_9c2f10ab77e3d5c1","output_index":0,"part":{"text":"","type":"reasoning_text"}}
+
+data: {"type":"response.reasoning_text.delta","item_id":"rs_9c2f10ab77e3d5c1","output_index":0,"delta":"The"}
+
+data: {"type":"response.reasoning_text.delta","item_id":"rs_9c2f10ab77e3d5c1","output_index":0,"delta":" user asks Beijing weather,"}
+
+data: {"type":"response.reasoning_text.delta","item_id":"rs_9c2f10ab77e3d5c1","output_index":0,"delta":" call get_weather."}
+
+data: {"type":"response.reasoning_text.done","item_id":"rs_9c2f10ab77e3d5c1","output_index":0,"text":"The user asks Beijing weather, call get_weather."}
+
+data: {"type":"response.reasoning_part.done","item_id":"rs_9c2f10ab77e3d5c1","output_index":0,"part":{"text":"The user asks Beijing weather, call get_weather.","type":"reasoning_text"}}
+
+data: {"type":"response.output_item.done","output_index":0,"item":{"id":"rs_9c2f10ab77e3d5c1","type":"reasoning","summary":[],"content":[{"text":"The user asks Beijing weather, call get_weather.","type":"reasoning_text"}],"encrypted_content":null}}
+
+data: {"type":"response.output_item.added","output_index":1,"item":{"id":"fc_5d81c0aa92f3e70b","type":"function_call","call_id":"call_b6db57c845012a73","name":"get_weather","arguments":"","status":"in_progress"}}
+
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_5d81c0aa92f3e70b","output_index":1,"delta":"{\"city\": \""}
+
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_5d81c0aa92f3e70b","output_index":1,"delta":"北京"}
+
+data: {"type":"response.function_call_arguments.delta","item_id":"fc_5d81c0aa92f3e70b","output_index":1,"delta":"\"}"}
+
+data: {"type":"response.function_call_arguments.done","item_id":"fc_5d81c0aa92f3e70b","output_index":1,"arguments":"{\"city\": \"北京\"}"}
+
+data: {"type":"response.output_item.done","output_index":1,"item":{"id":"fc_5d81c0aa92f3e70b","type":"function_call","call_id":"call_b6db57c845012a73","name":"get_weather","arguments":"{\"city\": \"北京\"}","status":"completed"}}
+
+data: {"type":"response.completed","response":{"id":"resp_9c2f10ab77e3d5c1","status":"completed","output":[{"id":"rs_9c2f10ab77e3d5c1","type":"reasoning","summary":[],"content":[{"text":"The user asks Beijing weather, call get_weather.","type":"reasoning_text"}],"encrypted_content":null},{"id":"fc_5d81c0aa92f3e70b","type":"function_call","call_id":"call_b6db57c845012a73","name":"get_weather","arguments":"{\"city\": \"北京\"}","status":"completed"}],"usage":{"input_tokens":63,"output_tokens":45,"total_tokens":108,"output_tokens_details":{"reasoning_tokens":0}},"system_fingerprint":"vllm-0.27.1-tp8-e0441ef0"}}
+

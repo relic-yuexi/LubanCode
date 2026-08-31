@@ -67,8 +67,12 @@ struct EffortProbeRoundResult {
 // 三回对照的聚合报告(纯函数,单测直接钉):返回若干行人话,依次是
 // HTTP 接受、thinking 产出、正文产出、终止原因分布,末尾跟判词
 //(inconclusive / none 档仍产出思考 / 观察到的事实陈述)。空表 = 调用方
-// 没发探针,返回一行"未发出"。
-std::vector<std::string> SummarizeEffortProbeRounds(const std::vector<EffortProbeRoundResult>& rounds);
+// 没发探针,返回一行"未发出"。off_requested = 探针发的是关闭档(none/
+// off 类):有效回里仍见思考时,判词明说"关闭请求被 2xx 收下但未被端点
+// 证实"——vLLM anthropic 面 thinking.type=disabled 被无视就是这形状
+//(勘察单 P1 补账),别让"收下了"糊成"生效了"。
+std::vector<std::string> SummarizeEffortProbeRounds(const std::vector<EffortProbeRoundResult>& rounds,
+                                                    bool off_requested = false);
 
 // 按当前 wire 把请求体翻出来,报告"实际发送值"一行。chat wire 的参数名听
 // provider 声明(think_param,空 = reasoning_effort);responses 报
@@ -80,12 +84,18 @@ std::string DescribeRequestEffort(lubancode::config::Wire wire, const api::Reque
 
 // vLLM /metrics(Prometheus 文本)里的前缀缓存指标。哪个名字没出现就留
 // nullopt,不拿 0 冒充"确实为零"——诊断端最忌把"没报告"与"报告为零"糊成
-// 同一个 0。
+// 同一个 0。queries/hits 两项认两代名字:v0 引擎的 prefix_cache_* 与
+// v1 引擎的 gpu_prefix_cache_* / cpu_prefix_cache_*(v1 把缓存按层拆开,
+// 旧名缺席时按 gpu+cpu 合并读;两代同名在场以 v0 总数为准)。
+// num_requests_running/waiting 是 vLLM 常见负载 gauge,不是缓存指标——
+// 读数行带一句现场语境,缺席照旧 nullopt。
 struct PrefixCacheMetrics {
     std::optional<bool> enabled;                      // enable_prefix_caching label
-    std::optional<std::int64_t> queries_total;        // prefix_cache_queries_total
-    std::optional<std::int64_t> hits_total;           // prefix_cache_hits_total
+    std::optional<std::int64_t> queries_total;        // prefix_cache_queries_total(或 gpu_+cpu_)
+    std::optional<std::int64_t> hits_total;           // prefix_cache_hits_total(或 gpu_+cpu_)
     std::optional<std::int64_t> prompt_tokens_cached_total;  // prompt_tokens_cached_total
+    std::optional<std::int64_t> num_requests_running;  // vllm:num_requests_running
+    std::optional<std::int64_t> num_requests_waiting;  // vllm:num_requests_waiting
 };
 PrefixCacheMetrics ParsePrefixCacheMetrics(const std::string& text);
 

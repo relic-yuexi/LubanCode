@@ -25,6 +25,7 @@
 | Gemini Generate Content | 原生 `streamGenerateContent`、工具调用与 thinking | `wire=google-generate-content` |
 | 多 provider | 每条保存协议、地址、密钥来源、模型、窗口与私有参数 | `/provider`、[配置手册](configuration.md) |
 | Provider 目录 | 内置快照、在线缓存、ETag、断网回退 | `/provider add`、`/provider refresh`、[Provider 目录](../features/providers/catalog.md) |
+| 本地端点兼容 | 自建 vLLM 三面（chat/responses/messages）帧实录与配置口径 | [vLLM 兼容手册](../features/providers/vllm.md) |
 | 模型目录 | 展示名、上下文窗口、推理档位、模型指令与 variant 参数 | `~/.lubancode/models.json` |
 | 模型切换 | 拉端点模型列表；当前模型作默认项；Esc 取消 | `/model` |
 | 推理档位 | 会话级切换；具体档位由 provider/模型声明 | `/think`，`/effort` 同义 |

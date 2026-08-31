@@ -50,7 +50,7 @@ Provider 目录是一册“厂家与模型默认值”。它替向导备好地�
 
 目录的 `base_url` 规则给本地端点留了门：回环地址（`http://localhost` / `http://127.0.0.1`，可带端口）可以走明文 HTTP，其余地址仍必须 HTTPS——回环不出网，明文无险。
 
-以 vLLM 0.27 起 qwen3 系思考模型为例（真机实测口径，2026-08-31）。用 `/provider add` 从目录选 vLLM 预设最省事；手写的话，下面两份样例最实用，落进 `~/.lubancode/config.json` 的 `providers` 数组即可。
+以 vLLM 0.27 起 qwen3 系思考模型为例（真机实测口径，2026-08-31）。用 `/provider add` 从目录选 vLLM 预设最省事；手写的话，下面两份样例最实用，落进 `~/.lubancode/config.json` 的 `providers` 数组即可。三面帧实录（流式/非流式逐帧摘录）另立一册：[vLLM 兼容手册](vllm.md)。
 
 主路走 Chat 面（思考展示、工具循环、思考回传、usage 记账一样不缺）：
 

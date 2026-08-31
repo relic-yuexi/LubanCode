@@ -118,7 +118,7 @@ backend 驱动纳入 Windows CI；依赖真模型的探针继续 opt-in。
 这才算 dogfooding 故事：先报现场与代价，再说根因、修法和回归。若面试官追问
 连续使用天数、日均会话数、失败率，现有账答不上来，就直说没量。
 
-证据：[`LubanCode 真实实测问题记录`](../todos/LubanCode真实实测问题记录_20260829.todo)、
+证据：`LubanCode 真实实测问题记录`（清仓时删档，查 git 历史）、
 [`session_title_refiner.cpp`](../src/app/session_title_refiner.cpp)、
 [`interactive_session.cpp`](../src/app/interactive_session.cpp)。
 

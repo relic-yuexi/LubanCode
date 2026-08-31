@@ -1,0 +1,28 @@
+{
+  "fixture_id": "live_vllm_qwen38_thinking_then_tool_use_stream",
+  "wire": "anthropic-messages",
+  "provider": "vllm",
+  "model": "qwen3.8-27b",
+  "scenario": "thinking_hex_signature_then_tool_use_input_json_delta",
+  "source_document": "docs/features/providers/vllm.md",
+  "source_section": "6. Messages 面帧实录",
+  "captured_at": "2026-08-31",
+  "doc_snapshot_hash": "854c754263e6557e112678f3d45d19ff7d23e4aecdab1dab7bf9418efa2e9b03",
+  "expected_events": [
+    "MessageStart",
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "ContentBlockDone",
+    "ToolUseStart",
+    "ToolUseInputDelta",
+    "ToolUseInputDelta",
+    "ToolUseInputDelta",
+    "ContentBlockDone",
+    "MessageDone"
+  ],
+  "expected_replay": ["第二轮 assistant 历史回传 thinking 块 + 32 位 hex 假签原样(signature 字段逐字节,不验格式);tool_use id 是 chatcmpl-tool- 前缀,原样回传"],
+  "usage_expectation": {"input_tokens": 312, "output_tokens": 91, "cache_read_tokens": 0, "cache_creation_tokens": 0},
+  "stop_reason": "tool_use",
+  "notes": "vLLM 0.27.1 + qwen3.8-27b /v1/messages 真机实录缩样(vLLM 本地模型四 wire 支持勘察单 P2 夹具补遗)。与 manual_thinking_then_tool_use 成对:那只是真签形状,这只是 vLLM 32 位 hex 假签 + chatcmpl-tool- 前缀 id。无 ping 帧;usage 只在 message_start/message_delta 两处,无 cache 字段。"
+}

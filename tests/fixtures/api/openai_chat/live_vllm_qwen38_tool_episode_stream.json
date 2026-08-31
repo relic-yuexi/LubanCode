@@ -4,8 +4,10 @@
   "provider": "vllm",
   "model": "qwen3.8-27b",
   "scenario": "reasoning_then_tool_calls_with_usage_chunk",
-  "source_document": "internal",
+  "source_document": "docs/features/providers/vllm.md",
+  "source_section": "4. Chat 面帧实录",
   "captured_at": "2026-08-31",
+  "doc_snapshot_hash": "854c754263e6557e112678f3d45d19ff7d23e4aecdab1dab7bf9418efa2e9b03",
   "request_expectation": {
     "stream_options": {"include_usage": true},
     "chat_template_kwargs": {"enable_thinking": true}

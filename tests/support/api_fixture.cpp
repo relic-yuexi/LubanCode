@@ -207,10 +207,12 @@ std::filesystem::path ManualPath(const std::string& filename) {
 }
 
 const std::vector<std::string>& ManualSourceDocuments() {
-    // 三份本地兼容手册(仓库根),fixture manifest 的 source_document 只认
-    // 这三份(或 internal)。
+    // 三份 wire 兼容手册(仓库根)+ 一份端点兼容手册(docs/features/providers/,
+    // vLLM 三面帧实录),fixture manifest 的 source_document 只认这四份
+    //(或 internal)。带斜杠的按源码根相对路径解析。
     static const std::vector<std::string> kManuals = {
-        "OpenAI兼容-Responses.md", "OpenAI兼容-Chat.md", "Anthropic兼容-Messages.md"};
+        "OpenAI兼容-Responses.md", "OpenAI兼容-Chat.md", "Anthropic兼容-Messages.md",
+        "docs/features/providers/vllm.md"};
     return kManuals;
 }
 
@@ -276,7 +278,7 @@ std::expected<ApiFixture, std::string> LoadApiFixture(const std::string& wire_di
                   fixture.source_document) != ManualSourceDocuments().end();
     if (fixture.source_document != "internal") {
         if (!manual_source) {
-            return std::unexpected(where + ".source_document 不是三份手册之一,也不是 internal: " +
+            return std::unexpected(where + ".source_document 不是登记在册的手册之一,也不是 internal: " +
                                    fixture.source_document);
         }
         if (manifest.contains("doc_snapshot_hash") &&

@@ -1,6 +1,6 @@
 # vLLM 本地模型（qwen3.8-27b）四 wire 支持勘察
 
-- 状态：P0 三条已落（responses parser 补 reasoning_text.delta；responses/chat 两只回归夹具；catalog.md 本地端点小节）。P1 两条已落（chat_template_kwargs_enable_thinking 方言形状 + 单测；目录 vllm/vllm-anthropic 双预设）。P2 未动。
+- 状态：收官（2026-08-31）。P0 三条、P1 三条、P2 三条全落：responses 认 reasoning_text.delta；六只 vLLM 夹具全齐（openai_chat ×2、openai_responses ×2、anthropic_messages ×2）+ wire_replay 三面两轮回环与非 SSE JSON 回退案；方言 chat_template_kwargs 开关、目录 vllm/vllm-anthropic 双预设、vllm-anthropic 模型 off_unsupported 声明；手册 docs/features/providers/vllm.md 落 docs 索引并挂 fixture hash 对账；/doctor cache 认 v1 引擎 gpu_/cpu_ 计数与负载 gauge（tests/fixtures/metrics 样张回归）；/doctor effort 关闭档明报；responses 非流式 content[].reasoning_text 展开路径（ExpandNonStreamResponse + client 非 SSE 回退）。
 - 日期：2026-08-31
 - 级别：P0（openai-responses 思考事件名一笔 + 三只回归夹具）；P1（chat_template_kwargs 方言形状 + 目录 vLLM 条目）；P2（诊断与文档）
 - 范围：vLLM 0.27.1 @ `http://localhost:8001`（`qwen3.8-27b`，tp8，max_model_len 262144，system_fingerprint `vllm-0.27.1-tp8-e0441ef0`）；`/v1/chat/completions`、`/v1/responses`、`/v1/messages` 三面各两路（流式/非流式）；LubanCode 四家 wire（src/api/ 四目录）逐家对照；tests/fixtures/api 夹具缺口清单
@@ -291,11 +291,11 @@ manifest 里 `expected_replay` 各写一句：chat 面记"回传字段 reasoning
 - **P1（方言与目录）**
   - [x] 方言 toggle 加形状：`chat_template_kwargs_enable_thinking`（值落 `body["chat_template_kwargs"]["enable_thinking"]`），provider_catalog 校验表同步。（reasoning.hpp/chat request.cpp 枚举与落线；provider_catalog 解析枚举、responses/anthropic 家拒收、DescribeReasoningDialect 人话；单测 test_chat_request + test_provider_catalog）
   - [x] 目录加 vLLM 预设（provider 级：base_url 占位 https:// 规则需放行 localhost 或留文档示例、stream_usage true、replay tool_episode、replay_field reasoning）与 qwen3.8 模型条目（delta reasoning、toggle chat_template_kwargs_enable_thinking、supports_toggle true）。（base_url 回环放行 localhost/127.0.0.1（假回环域名仍拒）；catalog/providers.json 加 vllm + vllm-anthropic 双预设；schema 同步）
-  - [ ] anthropic 面对 `thinking.type=disabled` 无效这事，`/doctor` 真机探针明报（当前会静默收下）。
+  - [x] anthropic 面对 `thinking.type=disabled` 无效这事，`/doctor` 真机探针明报（当前会静默收下）。（SummarizeEffortProbeRounds 加 off_requested：关闭档探针 2xx 收下仍吐思考时判词单独点名"关闭未被端点证实"并指路；vllm-anthropic 模型条目加 off_unsupported 能力声明，/doctor effort 先印"目录声明:此模型关不掉"再让三回对照说话）
 - **P2（锦上添花）**
-  1. 根目录补一份「vLLM 兼容」手册（三面帧实录即 §二 底稿），挂进 fixture hash 对账。
-  2. `metrics_url` 指向 vLLM `/metrics`（Prometheus 文本）的 /doctor cache 读数验证。
-  3. responses 非流式 `content[].reasoning_text` 的展开路径（当前全流式，非必需）。
+  1. [x] 根目录补一份「vLLM 兼容」手册（三面帧实录即 §二 底稿），挂进 fixture hash 对账。（落 docs/features/providers/vllm.md——按 check_docs 规矩挂 docs/catalog.txt 与 catalog.md/feature-index 索引；ManualSourceDocuments 登记第四册，四只 qwen3.8 夹具 source_document 指它、hash 对账进 test_api_fixture_replay）
+  2. [x] `metrics_url` 指向 vLLM `/metrics`（Prometheus 文本）的 /doctor cache 读数验证。（ParsePrefixCacheMetrics 认 v1 引擎 gpu_/cpu_prefix_cache_* 两代名（旧名在场不叠加）、vllm:num_requests_running/waiting 负载 gauge、时间戳尾巴行；样张 tests/fixtures/metrics/live_vllm_qwen38_prometheus.txt 回归；读数行多一句负载语境）
+  3. [x] responses 非流式 `content[].reasoning_text` 的展开路径（当前全流式，非必需）。（responses/events 增 ExpandNonStreamResponse：output[] 逐项翻中立事件，收尾与 completed 同口径；client send_stream 在 2xx 无 SSE 终止帧时以非 SSE JSON 体回退，wire_replay 有端到端案）
 
 ## 七、测试矩阵草案（§六）
 

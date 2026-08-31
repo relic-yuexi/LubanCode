@@ -1,0 +1,26 @@
+data: {"type":"message_start","message":{"id":"chatcmpl-b4f43dae7f10a182","type":"message","role":"assistant","model":"qwen3.8-27b","content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":312,"output_tokens":0}}}
+
+data: {"type":"content_block_start","index":0,"content_block":{"type":"thinking","thinking":""}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"用户"}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"问北京气温,需要调用工具查询。"}}
+
+data: {"type":"content_block_delta","index":0,"delta":{"type":"signature_delta","signature":"4bbde37d9a1f60c2e8d5a3b41f07c6d2"}}
+
+data: {"type":"content_block_stop","index":0}
+
+data: {"type":"content_block_start","index":1,"content_block":{"type":"tool_use","id":"chatcmpl-tool-a31f7da795ee7a5b","name":"get_weather","input":{}}}
+
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"{\"city\": \""}}
+
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"北京"}}
+
+data: {"type":"content_block_delta","index":1,"delta":{"type":"input_json_delta","partial_json":"\"}"}}
+
+data: {"type":"content_block_stop","index":1}
+
+data: {"type":"message_delta","delta":{"stop_reason":"tool_use","stop_sequence":null},"usage":{"input_tokens":312,"output_tokens":91}}
+
+data: {"type":"message_stop"}
+

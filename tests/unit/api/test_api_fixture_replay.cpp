@@ -1,6 +1,7 @@
 // wire fixture 库对账与回放(模型协议兼容实录矩阵单,P0):
-//   1) 手册 snapshot hash:三份本地兼容手册的 sha256 与 fixture manifest
-//      里记的对账——手册一变,这里红,提醒人核对 fixture 后更新 hash;
+//   1) 手册 snapshot hash:登记在册的手册(三份根下 wire 手册 + docs 下
+//      vLLM 端点手册)的 sha256 与 fixture manifest 里记的对账——手册一变,
+//      这里红,提醒人核对 fixture 后更新 hash;
 //   2) loader 全量校验:manifest 必填齐、id 不重、四家 wire 各有册;
 //   3) 逐册回放:按 fixture 的 wire 喂对应 parser(整帧,与迁出前
 //      inline 测试同一喂法,行为不改),事件类型序列/usage/stop_reason
@@ -159,13 +160,16 @@ const api::MessageDone* FinalDone(const std::vector<api::StreamEvent>& events) {
 
 }  // namespace
 
-TEST_CASE("fixture 手册 hash 对账:三份手册的 sha256 与 manifest 记录一致") {
+TEST_CASE("fixture 手册 hash 对账:四份手册的 sha256 与 manifest 记录一致") {
     // 手册字节一变(哪怕只加一段无关内容),这里就红:对账的人去核对
     // 引它的 fixture 是否还成立,成立才更新 manifest 里的 hash。
+    // 前三份在仓库根(wire 兼容手册),第四份在 docs/features/providers/
+    //(vLLM 端点兼容手册,docs/catalog.txt 里也挂着页)。
     const std::map<std::string, std::string> hashes = {
         {"OpenAI兼容-Responses.md", "6917b0a1aad63824c585bfe0cb22c392795a3605c992f5886fb120765c37ad54"},
         {"OpenAI兼容-Chat.md", "0a4ae02111e2f6fdca649f49b09ce09ea57e51122b38971cc8ee2df2e068fbab"},
         {"Anthropic兼容-Messages.md", "7e35698415e8c7ff5dac8f3b49faedd1bf659bda7d1abd2fe2f401daf8118fcc"},
+        {"docs/features/providers/vllm.md", "854c754263e6557e112678f3d45d19ff7d23e4aecdab1dab7bf9418efa2e9b03"},
     };
     for (const auto& [manual, expected] : hashes) {
         const std::string actual = lubancode_test::Sha256File(lubancode_test::ManualPath(manual));

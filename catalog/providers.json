@@ -49326,7 +49326,8 @@
           "context_window": 262144,
           "capabilities": {
             "tools": true,
-            "reasoning": true
+            "reasoning": true,
+            "off_unsupported": true
           },
           "reasoning": {
             "controls": []

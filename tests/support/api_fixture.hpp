@@ -8,9 +8,10 @@
 //     形状不得改;
 //   - 钥匙、request id、业务正文一律脱敏;
 //   - 读不动、缺 manifest、重复 id,测试当场红;
-//   - source_document 是三份本地兼容手册之一时,doc_snapshot_hash 必填且
-//     须与当前手册文件的 sha256 一致——手册一变,对账测试红,提醒人核对
-//     fixture 后更新 hash。internal 来源(仓库缩样/合成)不记手册 hash。
+//   - source_document 是登记在册的手册(三份根下 wire 兼容手册 + docs 下
+//     端点兼容手册)之一时,doc_snapshot_hash 必填且须与当前手册文件的
+//     sha256 一致——手册一变,对账测试红,提醒人核对 fixture 后更新 hash。
+//     internal 来源(仓库缩样/合成)不记手册 hash。
 
 #pragma once
 
@@ -59,8 +60,9 @@ std::expected<std::vector<ApiFixture>, std::string> LoadAllApiFixtures();
 // 文件 sha256(小写 hex)。文件读不动返回空串。
 std::string Sha256File(const std::filesystem::path& path);
 
-// 三份手册的绝对路径(LUBANCODE_SOURCE_DIR 根下)。文件名带中文,Windows
-// 下必须走宽路径(fs::path(narrow) 会过 ACP,打不开)。
+// 手册的绝对路径(LUBANCODE_SOURCE_DIR 根下,可带相对子路径如
+// docs/features/providers/vllm.md)。文件名带中文,Windows 下必须走宽路径
+// (fs::path(narrow) 会过 ACP,打不开)。
 std::filesystem::path ManualPath(const std::string& filename);
 
 // 手册 fixture 来源登记:手册文件名 -> 首批来源段清单(fixture 对账测试

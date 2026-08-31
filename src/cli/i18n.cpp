@@ -1317,6 +1317,7 @@ const Entry kZhCN[] = {
     {"doctor.cache.metrics_disabled", "enable_prefix_caching = False:服务端未启用前缀缓存——\"缓存利用率 0%\" 是服务端没开,不是提示词没守住前缀。"},
     {"doctor.cache.metrics_enabled_unknown", "指标里没有 enable_prefix_caching 标签,启用状态未知。"},
     {"doctor.cache.metrics_counters", "prefix_cache_queries_total = {0} · prefix_cache_hits_total = {1} · prompt_tokens_cached_total = {2}"},
+    {"doctor.cache.metrics_load", "负载(现场语境):num_requests_running = {0} · num_requests_waiting = {1}"},
     {"doctor.cache.metrics_read_failed", "{0}"},
     {"doctor.cache.state.unverified", "未验证(没读过服务端指标)"},
     {"doctor.cache.probe_gate", "当前端不是本机地址且未明配 metrics_url,不发探针——公网 provider 不擅自发请求。确属自有端,请在 provider 配置里写 metrics_url 后重试。"},

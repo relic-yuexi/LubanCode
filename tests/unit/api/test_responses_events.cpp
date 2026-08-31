@@ -534,3 +534,84 @@ TEST_CASE("Responses 内置搜索起点缺 action 时，终点参数仍可回填
     REQUIRE(std::holds_alternative<BuiltinToolDone>(*done));
     CHECK(std::get<BuiltinToolDone>(*done).input["query"] == "OPD 强化学习");
 }
+
+// vLLM 本地模型勘察单 P2:非流式响应体(POST /responses 不带 stream,一次
+// JSON 对象)的展开路径。思考原文在 output[].content[].reasoning_text
+//(vLLM 扩展;OpenAI 官方是 summary[].summary_text,这台端 summary 恒空),
+// 与流式路 reasoning_text.delta 同源——两路翻出的中立事件同一形状。
+TEST_CASE("ExpandNonStreamResponse: reasoning 项 + message 项展开成中立事件") {
+    const auto events = responses::ExpandNonStreamResponse(
+        R"({"id":"resp_aeb964886f47be44","object":"response","status":"completed","model":"qwen3.8-27b",)"
+        R"("output":[{"id":"rs_aeb964886f47be44","type":"reasoning","summary":[],)"
+        R"("content":[{"text":"We need answer user: 2+2=4.","type":"reasoning_text"}],"encrypted_content":null},)"
+        R"({"id":"msg_5c31e0a2f8b7d902","type":"message","role":"assistant","status":"completed",)"
+        R"("content":[{"type":"output_text","text":"\n\n2"}]}],)"
+        R"("usage":{"input_tokens":100,"output_tokens":38,"output_tokens_details":{"reasoning_tokens":0},)"
+        R"("input_tokens_details":{"cached_tokens":40}}})");
+    REQUIRE(events.size() == 4);
+    REQUIRE(std::holds_alternative<ThinkingDelta>(events[0]));
+    CHECK(std::get<ThinkingDelta>(events[0]).text == "We need answer user: 2+2=4.");
+    REQUIRE(std::holds_alternative<TextDelta>(events[1]));
+    CHECK(std::get<TextDelta>(events[1]).text == "\n\n2");
+    REQUIRE(std::holds_alternative<ContentBlockDone>(events[2]));
+    CHECK(std::get<ContentBlockDone>(events[2]).index == 1);
+    REQUIRE(std::holds_alternative<MessageDone>(events[3]));
+    const auto& done = std::get<MessageDone>(events[3]);
+    CHECK(done.stop_reason == "end_turn");
+    CHECK(done.usage_reported);
+    // usage 摊法与 response.completed 同一口径:input=100-40、cache_read=40。
+    CHECK(done.usage.input_tokens == 60);
+    CHECK(done.usage.cache_read_tokens == 40);
+    CHECK(done.usage.output_tokens == 38);
+    CHECK(TotalInputTokens(done.usage) == 100);
+}
+
+TEST_CASE("ExpandNonStreamResponse: function_call 项带双 id,认 call_id,整段 arguments 一枚入参增量") {
+    const auto events = responses::ExpandNonStreamResponse(
+        R"({"id":"resp_fc","status":"completed","output":[)"
+        R"({"id":"fc_5d81c0aa92f3e70b","type":"function_call","call_id":"chatcmpl-tool-a0d9a4d1bebbd50a",)"
+        R"("name":"get_weather","arguments":"{\"city\": \"北京\"}","status":"completed"}],)"
+        R"("usage":{"input_tokens":59,"output_tokens":38}})");
+    REQUIRE(events.size() == 4);
+    REQUIRE(std::holds_alternative<ToolUseStart>(events[0]));
+    const auto& start = std::get<ToolUseStart>(events[0]);
+    CHECK(start.id == "chatcmpl-tool-a0d9a4d1bebbd50a");  // 双 id 取 call_id
+    CHECK(start.name == "get_weather");
+    CHECK(start.index == 0);
+    REQUIRE(std::holds_alternative<ToolUseInputDelta>(events[1]));
+    CHECK(std::get<ToolUseInputDelta>(events[1]).partial_json == R"({"city": "北京"})");
+    REQUIRE(std::holds_alternative<ContentBlockDone>(events[2]));
+    REQUIRE(std::holds_alternative<MessageDone>(events[3]));
+    CHECK(std::get<MessageDone>(events[3]).stop_reason == "tool_use");
+}
+
+TEST_CASE("ExpandNonStreamResponse: OpenAI 官方 summary 系也能展开(vLLM 端 summary 恒空,两者不同源)") {
+    const auto events = responses::ExpandNonStreamResponse(
+        R"({"id":"resp_sum","status":"completed","output":[)"
+        R"({"id":"rs_1","type":"reasoning","summary":[{"type":"summary_text","text":"摘要一片"}]},)"
+        R"({"id":"msg_1","type":"message","role":"assistant","content":[{"type":"output_text","text":"答"}]})"
+        R"(]})");
+    REQUIRE(events.size() == 4);
+    REQUIRE(std::holds_alternative<ThinkingDelta>(events[0]));
+    CHECK(std::get<ThinkingDelta>(events[0]).text == "摘要一片");
+    REQUIRE(std::holds_alternative<TextDelta>(events[1]));
+    REQUIRE(std::holds_alternative<ContentBlockDone>(events[2]));
+    REQUIRE(std::holds_alternative<MessageDone>(events[3]));
+    CHECK_FALSE(std::get<MessageDone>(events[3]).usage_reported);  // 没 usage 对象就不冒充
+}
+
+TEST_CASE("ExpandNonStreamResponse: 坏 JSON / 缺 output / 空数组,不抛不崩") {
+    CHECK(responses::ExpandNonStreamResponse("not json {").empty());
+    CHECK(responses::ExpandNonStreamResponse(R"({"status":"completed"})").empty());  // 没有 output 数组
+    CHECK(responses::ExpandNonStreamResponse(R"({"output":[]})").size() == 1);  // 只有 MessageDone
+    CHECK_NOTHROW(responses::ExpandNonStreamResponse(R"({"output":[{"type":"reasoning","content":42}]})"));
+}
+
+TEST_CASE("ExpandNonStreamResponse: incomplete 状态映射 max_tokens,与流式 completed 同口径") {
+    const auto events = responses::ExpandNonStreamResponse(
+        R"({"id":"resp_cut","status":"incomplete","incomplete_details":{"reason":"max_output_tokens"},)"
+        R"("output":[{"type":"message","role":"assistant","content":[{"type":"output_text","text":"半截"}]}]})");
+    REQUIRE(events.size() == 3);
+    REQUIRE(std::holds_alternative<MessageDone>(events[2]));
+    CHECK(std::get<MessageDone>(events[2]).stop_reason == "max_tokens");
+}

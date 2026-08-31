@@ -1,0 +1,27 @@
+{
+  "fixture_id": "live_vllm_qwen38_function_call_stream",
+  "wire": "openai-responses",
+  "provider": "vllm",
+  "model": "qwen3.8-27b",
+  "scenario": "reasoning_item_then_function_call_arguments_delta",
+  "source_document": "docs/features/providers/vllm.md",
+  "source_section": "5. Responses 面帧实录",
+  "captured_at": "2026-08-31",
+  "doc_snapshot_hash": "854c754263e6557e112678f3d45d19ff7d23e4aecdab1dab7bf9418efa2e9b03",
+  "request_expectation": {"store": false},
+  "expected_events": [
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "ThinkingDelta",
+    "ToolUseStart",
+    "ToolUseInputDelta",
+    "ToolUseInputDelta",
+    "ToolUseInputDelta",
+    "ContentBlockDone",
+    "MessageDone"
+  ],
+  "expected_replay": ["第二轮 input 里 function_call(call_id 原样)+ function_call_output 成对;reasoning 项一次性不回传(vLLM responses 面无 reasoning 回传形状)。流式 call_id 是 call_ 前缀,非流式 function_call 项带 fc_/chatcmpl-tool- 双 id——客户端两副都吃"],
+  "usage_expectation": {"input_tokens": 63, "output_tokens": 45, "cache_read_tokens": 0, "cache_creation_tokens": 0, "output_reasoning_tokens": 0},
+  "stop_reason": "tool_use",
+  "notes": "vLLM 0.27.1 + qwen3.8-27b /v1/responses 真机实录缩样(vLLM 本地模型四 wire 支持勘察单 P2 夹具补遗)。reasoning 项先行(reasoning_text.delta ×3),后随 function_call 项与 arguments 分片;completed 帧 output 数组带 function_call → stop_reason tool_use。"
+}

@@ -11,6 +11,8 @@
 
 #include <doctest/doctest.h>
 
+#include <filesystem>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -110,6 +112,43 @@ TEST_CASE("SummarizeEffortProbeRounds: 四账分开,预算耗尽只判 inconclus
         CHECK(lines[0].find("HTTP 接受:1/2") != std::string::npos);
         CHECK(lines[3].find("(未回) ×1") != std::string::npos);
     }
+    SUBCASE("关闭档明报(off_requested):2xx 收下仍吐思考,判词单独点名") {
+        std::vector<app::EffortProbeRoundResult> rounds(3);
+        for (auto& r : rounds) {
+            r.http_ok = true;
+            r.thinking_chars = 150;
+            r.text_chars = 40;
+            r.stop_reason = "end_turn";
+        }
+        const auto lines = app::SummarizeEffortProbeRounds(rounds, /*off_requested=*/true);
+        // 明报那行(vLLM 勘察单 P1 补账):点明本档是关闭档、给出 3/3 的账
+        // 与出路,不藏在"/think none 若仍见思考"的条件句里。
+        bool saw_explicit = false;
+        for (const auto& line : lines) {
+            if (line.find("本档是关闭档") != std::string::npos && line.find("3/3") != std::string::npos) {
+                saw_explicit = true;
+            }
+        }
+        CHECK(saw_explicit);
+        // 不带 off_requested 的同一份回账没有这行——报文不因入参多话。
+        bool plain_has = false;
+        for (const auto& line : app::SummarizeEffortProbeRounds(rounds)) {
+            plain_has = plain_has || line.find("本档是关闭档") != std::string::npos;
+        }
+        CHECK_FALSE(plain_has);
+    }
+    SUBCASE("关闭档探针但思考真关掉了:不误报") {
+        std::vector<app::EffortProbeRoundResult> rounds(3);
+        for (auto& r : rounds) {
+            r.http_ok = true;
+            r.thinking_chars = 0;
+            r.text_chars = 40;
+            r.stop_reason = "end_turn";
+        }
+        for (const auto& line : app::SummarizeEffortProbeRounds(rounds, /*off_requested=*/true)) {
+            CHECK(line.find("本档是关闭档") == std::string::npos);
+        }
+    }
 }
 
 TEST_CASE("DescribeRequestEffort: chat wire 四种档位与不填,实际发送值如实报") {
@@ -206,6 +245,75 @@ TEST_CASE("ParsePrefixCacheMetrics: label 形式的 enable_prefix_caching 判得
     // 没出现的计数器留 nullopt,不拿 0 冒充。
     CHECK_FALSE(on.queries_total.has_value());
     CHECK_FALSE(on.hits_total.has_value());
+}
+
+TEST_CASE("ParsePrefixCacheMetrics: v1 引擎 gpu_/cpu_ 分层计数合并,旧名在场时不叠加") {
+    SUBCASE("只有 gpu_:直接当总数") {
+        const auto metrics = app::ParsePrefixCacheMetrics(
+            "vllm:gpu_prefix_cache_queries_total{model_name=\"m\"} 12.0\n"
+            "vllm:gpu_prefix_cache_hits_total{model_name=\"m\"} 5.0\n");
+        REQUIRE(metrics.queries_total.has_value());
+        CHECK(*metrics.queries_total == 12);
+        REQUIRE(metrics.hits_total.has_value());
+        CHECK(*metrics.hits_total == 5);
+    }
+    SUBCASE("gpu_+cpu_ 两层:相加(两层各记各的查询)") {
+        const auto metrics = app::ParsePrefixCacheMetrics(
+            "vllm:gpu_prefix_cache_queries_total 12.0\n"
+            "vllm:cpu_prefix_cache_queries_total 3.0\n"
+            "vllm:gpu_prefix_cache_hits_total 5.0\n"
+            "vllm:cpu_prefix_cache_hits_total 3.0\n");
+        REQUIRE(metrics.queries_total.has_value());
+        CHECK(*metrics.queries_total == 15);
+        REQUIRE(metrics.hits_total.has_value());
+        CHECK(*metrics.hits_total == 8);
+    }
+    SUBCASE("旧名(v0 总数)在场:以旧名为准,不与分层数叠加") {
+        const auto metrics = app::ParsePrefixCacheMetrics(
+            "vllm:prefix_cache_queries_total 20.0\n"
+            "vllm:gpu_prefix_cache_queries_total 12.0\n"
+            "vllm:cpu_prefix_cache_queries_total 3.0\n");
+        REQUIRE(metrics.queries_total.has_value());
+        CHECK(*metrics.queries_total == 20);
+    }
+    SUBCASE("一族都没有:留 nullopt,不拿 0 冒充") {
+        const auto metrics = app::ParsePrefixCacheMetrics(
+            "vllm:num_requests_running{model_name=\"m\"} 1.0\n");
+        CHECK_FALSE(metrics.queries_total.has_value());
+        CHECK_FALSE(metrics.hits_total.has_value());
+        REQUIRE(metrics.num_requests_running.has_value());
+        CHECK(*metrics.num_requests_running == 1);
+        CHECK_FALSE(metrics.num_requests_waiting.has_value());
+    }
+}
+
+TEST_CASE("ParsePrefixCacheMetrics: vLLM 0.27 /metrics 实录样张(gpu_ 计数、负载 gauge、时间戳行)") {
+    // 样张:tests/fixtures/metrics/live_vllm_qwen38_prometheus.txt——Prometheus
+    // 文本全形状:HELP/TYPE 注释、标签块 gauge、直方图 bucket/sum/count、
+    // 带时间戳尾巴的行。缓存读数与负载 gauge 各认各的名,别的一律跳过
+    //(vLLM 本地模型勘察单 P2)。
+    std::ifstream file(std::filesystem::path(LUBANCODE_TEST_FIXTURES_DIR) / "metrics" /
+                           "live_vllm_qwen38_prometheus.txt",
+                       std::ios::binary);
+    REQUIRE(file.is_open());
+    std::ostringstream buffer;
+    buffer << file.rdbuf();
+    const auto metrics = app::ParsePrefixCacheMetrics(buffer.str());
+
+    REQUIRE(metrics.enabled.has_value());
+    CHECK(*metrics.enabled == true);  // cache_config_info 的 label
+    CHECK(metrics.queries_total.has_value());
+    CHECK(*metrics.queries_total == 12);  // gpu_prefix_cache_queries_total
+    CHECK(metrics.hits_total.has_value());
+    CHECK(*metrics.hits_total == 5);  // gpu_prefix_cache_hits_total
+    CHECK(metrics.prompt_tokens_cached_total.has_value());
+    CHECK(*metrics.prompt_tokens_cached_total == 8192);
+    // 负载 gauge:waiting 那行带时间戳尾巴("0.0 1756631402341"),取值
+    // 认第一枚数值记号,不被时间戳劫走。
+    REQUIRE(metrics.num_requests_running.has_value());
+    CHECK(*metrics.num_requests_running == 1);
+    REQUIRE(metrics.num_requests_waiting.has_value());
+    CHECK(*metrics.num_requests_waiting == 0);
 }
 
 TEST_CASE("ClassifyCacheObservation: 四态同一个 0 不糊") {
