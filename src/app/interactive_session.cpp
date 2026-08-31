@@ -264,14 +264,13 @@ void TerminalSessionController::BeginSessionTitle(const std::string& first_query
     }
 }
 
-// 第二层:配了独立 cheap 才并行发精炼。判据看路由表自带的回落标记——
-// cheap 未单配时整体回落 normal(fell_back_to_normal),低价值标题不值得
-// 再打一次主模型:直接留本地标题,一个请求也不发(模型调用账里标题
-// 记 0 次)。发了也只喂首问,与 normal 主请求各走各的独占 client,不抢
-// 流式回调,不占主会话 context。
+// 第二层:并行发精炼(2026-09-01 主人裁决:cheap/lao 未特殊配置时默认
+// 走 normal——标题精炼照发,不再因"回落 normal"短路。低价值标题不值得
+// 打主模型的旧取舍作废)。只喂首问,与 normal 主请求各走各的独占
+// client,不抢流式回调,不占主会话 context。
 void TerminalSessionController::StartTitleRefinement(const std::string& first_query) {
     const auto info = model_router->RouteInfo(lubancode::agent::TaskKind::SessionTitle);
-    if (info.model.empty() || info.fell_back_to_normal) {
+    if (info.model.empty()) {
         return;
     }
     // 独占裸 backend(RouteDetached):不与主会话共用 client,也不借同步

@@ -29,6 +29,7 @@
 #include "agent/prompt_assembler.hpp"
 #include "app/backend_stack.hpp"
 #include "app/commands/command_flow.hpp"
+#include "channel/manager.hpp"  // ChannelManager:/channels、/channel 的运行态来源(可空)
 #include "app/commands/goal_commands.hpp"    // GoalWiring
 #include "app/commands/loop_commands.hpp"    // LoopWiring
 #include "app/commands/session_commands.hpp"  // SessionCommandState/CompactSessionInputs
@@ -180,6 +181,11 @@ struct SlashDispatchContext {
     // ---- 子系统接线器(peer/录制;会话终章外迁后的窄口) ----
     class PeerSessionWiring* peer_wiring = nullptr;    // /peers /send /peerperm
     class RecordSessionWiring* record_wiring = nullptr;  // /record
+    // 多渠道消息接入单阶段 2:/channels、/channel 的运行态来源。空 = 本
+    // 进程没挂 ChannelManager(普通交互形态的铁律,configuration.md §3),
+    // 命令面只显示配置侧与 gateway 引导,不产生任何后台动作。Gateway
+    // 装配(阶段 9)与测试 wiring 才填这个口。
+    lubancode::channel::ChannelManager* channel_manager = nullptr;
 
     // ---- 会话回调(控制器递进来的活口) ----
     std::function<void(bool)> rebuild_loop;               // /provider 切换后的重建

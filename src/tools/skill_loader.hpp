@@ -87,7 +87,8 @@ std::vector<SkillMeta> ScanSkillsDir(const std::filesystem::path& skills_root, c
 // 撞车只在两包同 id 时发生,那在扫描层已按四层优先级定过胜者。
 std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::optional<std::string>& home_dir,
                                   const std::optional<std::string>& official_skills_dir = std::nullopt,
-                                  const std::vector<PackagedSkillRoot>& package_roots = {});
+                                  const std::vector<PackagedSkillRoot>& package_roots = {},
+                                  bool report_collisions = true);
 
 // 系统提示词里"可用技能"这一段。skills 为空时返回空串——一个字都不注入,
 // 不影响没配技能的既有场景。

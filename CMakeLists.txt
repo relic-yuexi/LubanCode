@@ -561,6 +561,21 @@ add_library(lubancode_engine STATIC
   src/channel/frame.cpp
   src/channel/bridge_protocol.cpp
   src/channel/router.cpp
+  # 多渠道消息接入单阶段 2:ChannelManager 与入站耐久。账号状态机+
+  # generation+退避+锁(account_state/account_lock)、append-only journal
+  # 与三级去重(ingress_store)、每账号每会话队列与背压(inbox)、pairing
+  # (pairing)、channels 配置段解析(channel_config)、多账号生命周期与桥
+  # 接线(manager,Transport 抽象注入,真进程 stdio 留阶段 5)。唤醒经
+  # ChannelWakeCoordinator 小口由装配层适配 runtime 的 IdleWakeCoordinator
+  #(依赖方向:runtime -> engine,channel 不能反向 include)。
+  src/channel/digest.cpp
+  src/channel/account_state.cpp
+  src/channel/account_lock.cpp
+  src/channel/channel_config.cpp
+  src/channel/ingress_store.cpp
+  src/channel/inbox.cpp
+  src/channel/pairing.cpp
+  src/channel/manager.cpp
   src/insights/finding.cpp
   src/insights/session_summary.cpp
   src/insights/report_model.cpp
@@ -895,6 +910,9 @@ add_library(lubancode_app STATIC
   src/app/commands/prompt_audit_commands.cpp
   # 会话终章:命令分派注册制(47 案 switch 换注册表,路由与门)。
   src/app/commands/command_registry.cpp
+  # 多渠道消息接入单阶段 2:/channels 与 /channel(show/doctor/start/
+  # stop/restart)的域 handler;格式化走纯函数,单测直接钉。
+  src/app/commands/channel_commands.cpp
   # 会话终章:子系统接线器(goal/loop/plan/peer/录制,状态+装配+泵+存档恢复)。
   src/app/wirings/goal_session_wiring.cpp
   src/app/wirings/loop_session_wiring.cpp

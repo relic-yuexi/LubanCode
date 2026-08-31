@@ -56,6 +56,7 @@ const std::vector<lubancode::cli::SlashCommand>& AllCommandEnums() {
         lubancode::cli::SlashCommand::Peerperm,   lubancode::cli::SlashCommand::Workflow,
         lubancode::cli::SlashCommand::Agents,     lubancode::cli::SlashCommand::Agent,
         lubancode::cli::SlashCommand::Instructions,
+        lubancode::cli::SlashCommand::Channels,   lubancode::cli::SlashCommand::Channel,
         lubancode::cli::SlashCommand::Exit,       lubancode::cli::SlashCommand::Unknown,
         lubancode::cli::SlashCommand::NotSlash,
     };
@@ -64,9 +65,9 @@ const std::vector<lubancode::cli::SlashCommand>& AllCommandEnums() {
 
 }  // namespace
 
-TEST_CASE("命令注册表:53 案齐整,枚举可对") {
+TEST_CASE("命令注册表:55 案齐整,枚举可对") {
     const std::vector<lubancode::app::SlashCommandSpec>& table = lubancode::app::SlashCommandTable();
-    REQUIRE(table.size() == 53);
+    REQUIRE(table.size() == 55);
 
     SUBCASE("枚举逐一在表,无重复") {
         std::set<int> seen;

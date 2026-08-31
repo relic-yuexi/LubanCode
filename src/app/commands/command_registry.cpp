@@ -7,6 +7,7 @@
 
 #include "app/commands/agent_commands.hpp"
 #include "app/commands/background_commands.hpp"
+#include "app/commands/channel_commands.hpp"
 #include "app/commands/doctor_commands.hpp"
 #include "app/commands/evolve_commands.hpp"
 #include "app/commands/goal_commands.hpp"
@@ -70,6 +71,10 @@ const std::vector<SlashCommandSpec>& SlashCommandTable() {
         {lubancode::cli::SlashCommand::Keymap, "keymap", HandleSlashKeymap, false, false},
         {lubancode::cli::SlashCommand::Plan, "plan", HandleSlashPlan, false, true},
         {lubancode::cli::SlashCommand::Package, "package", HandleSlashPackage, false, false},
+        // 多渠道消息接入单阶段 2:渠道账号面(只读 + 管理动作;普通交互
+        // 进程没挂 ChannelManager 时 handler 只给 gateway 引导)。
+        {lubancode::cli::SlashCommand::Channels, "channels", HandleSlashChannels, false, false},
+        {lubancode::cli::SlashCommand::Channel, "channel", HandleSlashChannel, false, false},
         {lubancode::cli::SlashCommand::Evolve, "evolve", HandleSlashEvolve, false, false},
         {lubancode::cli::SlashCommand::Trace, "trace", HandleSlashTrace, false, false},
         {lubancode::cli::SlashCommand::Doctor, "doctor", HandleSlashDoctor, false, false},

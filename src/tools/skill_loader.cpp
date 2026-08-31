@@ -288,13 +288,16 @@ std::vector<SkillMeta> ScanPackagedSkillsDir(const PackagedSkillRoot& root) {
 
 std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::optional<std::string>& home_dir,
                                   const std::optional<std::string>& official_skills_dir,
-                                  const std::vector<PackagedSkillRoot>& package_roots) {
+                                  const std::vector<PackagedSkillRoot>& package_roots,
+                                  bool report_collisions) {
     std::map<std::string, SkillMeta> merged;  // std::map 天然按 key 排序,输出顺序稳定
 
     const auto merge = [&](std::vector<SkillMeta> incoming) {
         for (auto& meta : incoming) {
             if (const auto previous = merged.find(meta.name); previous != merged.end()) {
-                WarnCollision(previous->second, meta);
+                if (report_collisions) {
+                    WarnCollision(previous->second, meta);
+                }
             }
             merged[meta.name] = std::move(meta);
         }
@@ -314,7 +317,9 @@ std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::opt
                 continue;
             }
             if (const auto previous = merged.find(meta.name); previous != merged.end()) {
-                WarnCollision(previous->second, meta);
+                if (report_collisions) {
+                    WarnCollision(previous->second, meta);
+                }
             }
             merged[meta.name] = std::move(meta);
         }

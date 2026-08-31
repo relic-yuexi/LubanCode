@@ -39,6 +39,11 @@
 // 依赖,不会把 hooks 层的执行逻辑拖进 config。
 #include "hooks/events.hpp"
 
+// 渠道配置段(多渠道消息接入单阶段 2):channels 顶层段的结构体与严格
+// 解析住在 channel 纯合同库,这里只引用(依赖方向:config -> channel,
+// channel 不反向 include config)。
+#include "channel/channel_config.hpp"
+
 namespace lubancode::config {
 
 // 说哪种"方言"跟模型对话:Anthropic 的 Messages API、OpenAI 的 Responses
@@ -726,6 +731,11 @@ struct Config {
     // 一字不差——多读别家规则文件须用户显式点名,不默认开。只从配置文
     // 件来(项目级压全局),没有环境变量与内置默认这两级。
     std::vector<std::string> project_doc_fallback_filenames;
+    // 多渠道消息接入单阶段 2:channels 段的合并结果。空 map = 没配渠道,
+    // 零行为变化(不起线程、不开端口)。只从全局配置文件来——项目级写
+    // channels 会在 MergeConfig 明拒(configuration.md §2"项目 config
+    // 只可绑定本项目 Agent、收窄策略",开启账号的权力只在全局)。
+    std::map<std::string, channel::ChannelUserConfig> channels;
 };
 
 // 每个字段最终来自哪一级,跟 Config 里的字段一一对应。
@@ -899,6 +909,11 @@ struct FileConfig {
     // project_doc_fallback_filenames(AGENTS.md 作用域单 P2-2):顶层键,
     // 字符串数组。整段回退(项目级压全局),空数组/没写 = 不启用。
     std::optional<std::vector<std::string>> project_doc_fallback_filenames;
+    // 多渠道消息接入单阶段 2:channels 顶层段(渠道账号/策略/密钥来源)。
+    // 层级规矩(configuration.md §2):只认全局——项目级出现 channels 段
+    // 一律明拒(MergeConfig 里拦),项目无权开账号。没写 = nullopt,零行为
+    // 变化,不起线程不开端口。
+    std::optional<std::map<std::string, channel::ChannelUserConfig>> channels;
     std::string source_path;
     // 这份 FileConfig 是不是从"旧位置迁移到新位置"这个动作里读出来的;
     // 有值就是要打印给用户看的那一行通知(LoadFileConfig 填,LoadFromEnv

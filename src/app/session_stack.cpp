@@ -149,8 +149,11 @@ lubancode::package::PackageMountInput BuildSessionPackageMountInput(
     }
     input.external.agents.insert("general-purpose");
     input.external.agents.insert("Explore");
+    // 只取名单喂信任扫描输入——冲突播报归正式装配那一趟(RefreshSkills/
+    // LoadSessionSkills),这里静默,否则同名冲突每扫一遍播一遍。
     for (const auto& meta : lubancode::tools::LoadSkills(CurrentDirUtf8(), lubancode::config::HomeDir(),
-                                                         lubancode::platform::OfficialSkillsDir())) {
+                                                         lubancode::platform::OfficialSkillsDir(), {},
+                                                         /*report_collisions=*/false)) {
         input.external.skills.insert(meta.name);
     }
     input.trust = pinned_trust;

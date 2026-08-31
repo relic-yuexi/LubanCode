@@ -198,6 +198,13 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         // AGENTS.md 作用域单 P1:/instructions 是正门(裸敲/path <路径>/
         // reload 的二级解析在 ParseInstructionsCommand,这里只认词)。
         parsed.command = SlashCommand::Instructions;
+    } else if (lower == "/channels") {
+        // 多渠道消息接入单阶段 2:/channels 只读列渠道账号(配置 × 运行态)。
+        parsed.command = SlashCommand::Channels;
+    } else if (lower == "/channel") {
+        // 多渠道消息接入单阶段 2:/channel 的子命令(show/doctor/start/
+        // stop/restart)在 app/commands/channel_commands 拆,这里只认词。
+        parsed.command = SlashCommand::Channel;
     } else {
         // 不认得的 / 词:仍是 Unknown(语义不变),但把剥掉 / 的原词记在
         // alias_word 里——会话层对 Unknown 先查 WorkflowCatalog,查着了
@@ -937,6 +944,8 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/plan", tr("slash.desc.plan")},
             {"/package", tr("slash.desc.package")},
             {"/evolve", tr("slash.desc.evolve")},
+            {"/channels", tr("slash.desc.channels")},
+            {"/channel", tr("slash.desc.channel")},
         };
     }
     return commands;
