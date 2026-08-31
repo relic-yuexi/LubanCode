@@ -2,8 +2,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <functional>
 #include <limits>
 #include <map>
+#include <memory>
 #include <set>
 #include <type_traits>
 #include <utility>
@@ -11,6 +13,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "accounting/purpose.hpp"  // RequestPurpose(Token 账本单 A1:compact 子请求的 purpose)
 #include "agent/context.hpp"       // 统一 token 估算口径
 #include "agent/context_events.hpp"  // 事件账:evidence_refs 的来源区间
 #include "agent/sample_model.hpp"  // SampleModel 原语:两处采样的公共路(批一·病四)
@@ -133,7 +136,11 @@ std::expected<std::string, api::Error> RequestSummaryText(api::Backend& backend,
                                                           const std::vector<api::Message>& messages,
                                                           int max_tokens,
                                                           const std::string& reasoning_effort = std::string(),
-                                                          BackgroundCallAccounting* accounting = nullptr) {
+                                                          BackgroundCallAccounting* accounting = nullptr,
+                                                          const std::function<std::unique_ptr<LoopBoundaryRecorder>()>&
+                                                              recorder_factory = {},
+                                                          accounting::RequestPurpose purpose =
+                                                              accounting::RequestPurpose::CompactMap) {
     SampleRequest sample;
     sample.model = model;
     sample.system = system;
@@ -148,7 +155,18 @@ std::expected<std::string, api::Error> RequestSummaryText(api::Backend& backend,
     }
     sample.max_tokens = max_tokens;
 
-    const SampleResult result = SampleModel(backend, sample);
+    // Token 账本单 A1:一次子请求一只旁路桥(prepared/sent/usage/output
+    // 连同 purpose=compact_map/compact_reduce 落 Journal)。工厂空
+    //(没接轨迹的会话/单测)一笔不落,行为与从前一致。
+    std::unique_ptr<LoopBoundaryRecorder> recorder;
+    if (recorder_factory != nullptr) {
+        recorder = recorder_factory();
+    }
+    SampleOptions sample_options;
+    sample_options.boundary_recorder = recorder.get();
+    sample_options.purpose = purpose;
+
+    const SampleResult result = SampleModel(backend, sample, sample_options);
     AddSampleAccounting(accounting, result);
     if (!result.ok) {
         return std::unexpected(result.error);
@@ -439,7 +457,8 @@ std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend
                                            cold.begin() + static_cast<std::ptrdiff_t>(chunk.to));
         const auto text = RequestSummaryText(backend, model, map_instruction, messages,
                                              static_cast<int>(options.budget.output_reserve_tokens),
-                                             reasoning_effort, map_accounting);
+                                             reasoning_effort, map_accounting, options.bypass_recorder,
+                                             accounting::RequestPurpose::CompactMap);
         if (!text.has_value()) {
             return std::unexpected(text.error());
         }
@@ -508,7 +527,8 @@ std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend
             const auto text = RequestSummaryText(backend, model, merge_instruction,
                                                  std::vector<api::Message>{pair_message},
                                                  static_cast<int>(options.budget.output_reserve_tokens),
-                                                 reasoning_effort, map_accounting);
+                                                 reasoning_effort, map_accounting, options.bypass_recorder,
+                                                 accounting::RequestPurpose::CompactReduce);
             if (!text.has_value()) {
                 return std::unexpected(text.error());
             }
@@ -530,7 +550,8 @@ std::expected<LayeredCompactResult, api::Error> CompactHierarchical(api::Backend
     const auto final_text =
         RequestSummaryText(backend, model, BuildReduceInstruction(options, !prior_state.empty()),
                            build_reduce_input(), static_cast<int>(options.budget.output_reserve_tokens),
-                           reasoning_effort, map_accounting);
+                           reasoning_effort, map_accounting, options.bypass_recorder,
+                           accounting::RequestPurpose::CompactReduce);
     if (!final_text.has_value()) {
         return std::unexpected(final_text.error());
     }
@@ -858,7 +879,16 @@ std::expected<CompactSummary, api::Error> Compact(api::Backend& backend, const s
     }
     sample.max_tokens = static_cast<int>(options.budget.output_reserve_tokens);
 
-    const SampleResult sampled = SampleModel(backend, sample);
+    // Token 账本单 A1:单发全量压缩也是一次旁路模型请求,落账带上
+    // purpose=compact_reduce(一次出终稿,不走 map 分块)。
+    std::unique_ptr<LoopBoundaryRecorder> compact_recorder;
+    if (options.bypass_recorder != nullptr) {
+        compact_recorder = options.bypass_recorder();
+    }
+    SampleOptions compact_sample_options;
+    compact_sample_options.boundary_recorder = compact_recorder.get();
+    compact_sample_options.purpose = accounting::RequestPurpose::CompactReduce;
+    const SampleResult sampled = SampleModel(backend, sample, compact_sample_options);
 
     // usage 出账(分角色记账):压缩额外花的这轮采样不混进普通 turn 的账,
     // 交给调用方记进 ModelUsageLedger。
@@ -2143,7 +2173,8 @@ std::expected<DualLedgerCompactResult, api::Error> CompactTurnPartitioned(
         const auto text =
             RequestSummaryText(backend, model, BuildTurnGroupMapInstruction(turn_range, evidence_range, options),
                                messages, static_cast<int>(options.budget.output_reserve_tokens),
-                               reasoning_effort, accounting);
+                               reasoning_effort, accounting, options.bypass_recorder,
+                               accounting::RequestPurpose::CompactMap);
         if (!text.has_value()) {
             return std::unexpected(text.error());  // map 任一块失败,整次失败(§9.5)
         }
@@ -2227,7 +2258,8 @@ std::expected<DualLedgerCompactResult, api::Error> CompactTurnPartitioned(
             const auto text = RequestSummaryText(backend, model, merge_instruction,
                                                  std::vector<api::Message>{pair_message},
                                                  static_cast<int>(options.budget.output_reserve_tokens),
-                                                 reasoning_effort, accounting);
+                                                 reasoning_effort, accounting, options.bypass_recorder,
+                                                 accounting::RequestPurpose::CompactReduce);
             if (!text.has_value()) {
                 return std::unexpected(text.error());
             }
@@ -2257,7 +2289,8 @@ std::expected<DualLedgerCompactResult, api::Error> CompactTurnPartitioned(
                            BuildDualLedgerReduceInstruction(summaries.size(), result.plan.has_prior_archive,
                                                             has_hot, options),
                            build_reduce_input(), static_cast<int>(options.budget.output_reserve_tokens),
-                           reasoning_effort, accounting);
+                           reasoning_effort, accounting, options.bypass_recorder,
+                           accounting::RequestPurpose::CompactReduce);
     if (!final_text.has_value()) {
         return std::unexpected(final_text.error());
     }

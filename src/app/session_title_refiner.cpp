@@ -7,6 +7,7 @@
 #include <utility>
 
 #include "app/session_title.hpp"  // RefineSessionTitle/kTitleRefineTimeoutSecs
+#include "runtime/trajectory_session.hpp"  // TrajectoryBypassBridge(Token 账本单 A1)
 
 namespace lubancode::app {
 namespace {
@@ -42,10 +43,21 @@ bool SessionTitleRefiner::Start(Inputs&& inputs) {
     // 闭包只持值与 shared 槽:不引用本对象,detach 晚归也不悬垂。
     worker_ = std::thread(
         [shared, backend = std::move(inputs.backend), model = std::move(inputs.model),
-         effort = std::move(inputs.effort), first_query = std::move(inputs.first_query)]() mutable {
+         effort = std::move(inputs.effort), first_query = std::move(inputs.first_query),
+         trajectory = inputs.trajectory, trajectory_wire = std::move(inputs.trajectory_wire),
+         provider = std::move(inputs.provider)]() mutable {
             Outcome outcome;
             outcome.model = model;
             outcome.generation = shared->generation;
+            // Token 账本单 A1:本线程自铸旁路桥(purpose=title_refine)。
+            // recorder 提交全程持锁,与主线程的写在盘上串行;桥随本栈
+            // 生灭,detach 晚归也不悬垂。没接轨迹(空)一笔不落。
+            std::unique_ptr<lubancode::runtime::TrajectoryBypassBridge> bypass;
+            if (trajectory != nullptr) {
+                lubancode::runtime::TrajectoryTurnBridge::Identity identity{provider, trajectory_wire,
+                                                                            "host"};
+                bypass = trajectory->NewBypassBridge(std::move(identity));
+            }
             // 看门狗:到点拉取消旗。SampleModel 的口径是外部取消链优先、
             // 自带看门狗退位——超时必须自己管,5 秒是硬上限。
             std::atomic<bool> watch_done{false};
@@ -61,7 +73,8 @@ bool SessionTitleRefiner::Start(Inputs&& inputs) {
             });
             lubancode::agent::BackgroundCallAccounting accounting;
             const auto title = RefineSessionTitle(*backend, model, effort, first_query,
-                                                  /*timeout_secs=*/0, &shared->cancel, &accounting);
+                                                  /*timeout_secs=*/0, &shared->cancel, &accounting,
+                                                  bypass.get());
             watch_done.store(true);
             watcher.join();
             // 失败半截也出账(旧口径:先记账再判错)。

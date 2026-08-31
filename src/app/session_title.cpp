@@ -4,6 +4,7 @@
 #include <utility>
 #include <variant>
 
+#include "accounting/purpose.hpp"  // RequestPurpose(Token 账本单 A1)
 #include "agent/sample_model.hpp"  // SampleModel 原语:采样的公共路(批一·病四)
 #include "platform/text_encoding.hpp"
 
@@ -118,7 +119,8 @@ std::expected<std::string, std::string> RefineSessionTitle(lubancode::api::Backe
                                                            const std::string& reasoning_effort,
                                                            const std::string& first_query,
                                                            int timeout_secs, const std::atomic<bool>* cancel,
-                                                           lubancode::agent::BackgroundCallAccounting* accounting) {
+                                                           lubancode::agent::BackgroundCallAccounting* accounting,
+                                                           lubancode::agent::LoopBoundaryRecorder* boundary_recorder) {
     // 只喂首问(实测问题 7):输入不随首轮工具数量增长,也不等首轮回复。
     // 刀口必须在原串上算(600 字节刀口不留下半个汉字的老规矩)。
     constexpr std::size_t kQueryMaxBytes = 600;
@@ -147,6 +149,10 @@ std::expected<std::string, std::string> RefineSessionTitle(lubancode::api::Backe
     lubancode::agent::SampleOptions sample_options;
     sample_options.timeout_secs = timeout_secs;
     sample_options.cancel = cancel;
+    // Token 账本单 A1(旁路落账):递了桥就把这次精炼请求落成 Journal 里
+    // 的 prepared/sent/usage/output(purpose=title_refine)。
+    sample_options.boundary_recorder = boundary_recorder;
+    sample_options.purpose = lubancode::accounting::RequestPurpose::TitleRefine;
     const lubancode::agent::SampleResult sampled =
         lubancode::agent::SampleModel(backend, sample, sample_options);
 

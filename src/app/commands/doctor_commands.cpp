@@ -28,7 +28,9 @@ using lubancode::cli::TermErr;
 
 #include <cpr/cpr.h>
 
+#include "accounting/purpose.hpp"  // RequestPurpose(Token 账本单 A1:探针落账)
 #include "agent/context.hpp"  // EstimateUtf8Tokens:设计前缀 token 估算的统一口径
+#include "agent/loop.hpp"  // LoopBoundaryRecorder/RequestPreparedContext(旁路落账)
 #include "api/anthropic/client.hpp"
 #include "api/chat/client.hpp"
 #include "api/chat/request.hpp"
@@ -41,6 +43,7 @@ using lubancode::cli::TermErr;
 #include "cli/i18n.hpp"
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
+#include "runtime/trajectory_session.hpp"  // TrajectoryBypassBridge(Token 账本单 A1)
 #include "tools/shell_info.hpp"
 
 namespace lubancode::app {
@@ -70,18 +73,36 @@ struct ProbeOutcome {
     }
 };
 
-ProbeOutcome RunProbe(api::Backend& backend, const api::Request& request) {
+ProbeOutcome RunProbe(api::Backend& backend, const api::Request& request,
+                      agent::LoopBoundaryRecorder* boundary_recorder) {
     ProbeOutcome out;
+    // Token 账本单 A1(旁路落账):探针请求与 AgentLoop 同一套模型边界,
+    // purpose=doctor_probe。prepared 记不住就停在边界不发(§7.4)——诊断
+    // 报错一条,不偷烧 token。
+    std::string recorded_request_id;
+    if (boundary_recorder != nullptr) {
+        agent::RequestPreparedContext prepared_ctx;
+        prepared_ctx.purpose = accounting::RequestPurpose::DoctorProbe;
+        recorded_request_id = boundary_recorder->OnRequestPrepared(request, prepared_ctx);
+        if (recorded_request_id.empty()) {
+            out.error = "轨迹账写盘失败,探针停在请求边界,未发模型";
+            return out;
+        }
+        boundary_recorder->OnRequestSent(recorded_request_id);
+    }
+    std::string provider_response_id;
     const auto send = backend.send_stream(
         request,
-        [&out](const api::StreamEvent& event) {
+        [&out, &provider_response_id](const api::StreamEvent& event) {
             std::visit(
-                [&out](const auto& e) {
+                [&out, &provider_response_id](const auto& e) {
                     using T = std::decay_t<decltype(e)>;
                     if constexpr (std::is_same_v<T, api::TextDelta>) {
                         out.text_chars += static_cast<std::int64_t>(e.text.size());
                     } else if constexpr (std::is_same_v<T, api::ThinkingDelta>) {
                         out.thinking_chars += static_cast<std::int64_t>(e.text.size());
+                    } else if constexpr (std::is_same_v<T, api::MessageStart>) {
+                        provider_response_id = e.id;
                     } else if constexpr (std::is_same_v<T, api::MessageDone>) {
                         out.stop_reason = e.stop_reason;
                         out.usage = e.usage;
@@ -95,10 +116,24 @@ ProbeOutcome RunProbe(api::Backend& backend, const api::Request& request) {
     if (!send.has_value()) {
         out.http_status = send.error().http_status;
         out.error = send.error().message;
-        return out;
     }
     out.usage_reported = out.usage_any();
     out.ok = out.error.empty();
+    // 轨迹收口:usage owner 先落(没报也落 owner),output 三态自己收口。
+    if (boundary_recorder != nullptr && !recorded_request_id.empty()) {
+        boundary_recorder->OnUsageRecorded(recorded_request_id, out.usage, out.usage_reported,
+                                           provider_response_id);
+        api::Message assistant;
+        assistant.role = api::Role::Assistant;
+        assistant.content.push_back(api::TextBlock{out.ok ? "ok" : "error"});
+        if (out.ok) {
+            boundary_recorder->OnOutputCompleted(recorded_request_id, assistant,
+                                                 out.stop_reason.empty() ? "end_turn" : out.stop_reason,
+                                                 provider_response_id);
+        } else {
+            boundary_recorder->OnOutputFailed(recorded_request_id, out.error);
+        }
+    }
     return out;
 }
 
@@ -682,7 +717,14 @@ void RunEffortProbe(const std::string& level, const DoctorContext& context) {
     auto backend = BuildBackend(config);
     std::vector<EffortProbeRoundResult> rounds;
     for (int round = 1; round <= kEffortProbeRepeats; ++round) {
-        const ProbeOutcome outcome = RunProbe(*backend, probe);
+        // Token 账本单 A1:一回探针一只旁路桥(purpose=doctor_probe)。
+        std::unique_ptr<runtime::TrajectoryBypassBridge> probe_bridge;
+        if (context.trajectory != nullptr) {
+            runtime::TrajectoryTurnBridge::Identity identity{context.active_provider,
+                                                             context.trajectory_wire, "host"};
+            probe_bridge = context.trajectory->NewBypassBridge(std::move(identity));
+        }
+        const ProbeOutcome outcome = RunProbe(*backend, probe, probe_bridge.get());
         EffortProbeRoundResult result;
         result.http_ok = outcome.error.empty();
         result.thinking_chars = outcome.thinking_chars;
@@ -816,7 +858,14 @@ void RunCacheProbe(const DoctorContext& context, int rounds) {
     };
 
     for (std::size_t i = 0; i < probes.requests.size(); ++i) {
-        const ProbeOutcome outcome = RunProbe(*backend, probes.requests[i]);
+        // Token 账本单 A1:一轮前缀探针一只旁路桥(purpose=doctor_probe)。
+        std::unique_ptr<runtime::TrajectoryBypassBridge> probe_bridge;
+        if (context.trajectory != nullptr) {
+            runtime::TrajectoryTurnBridge::Identity identity{context.active_provider,
+                                                             context.trajectory_wire, "host"};
+            probe_bridge = context.trajectory->NewBypassBridge(std::move(identity));
+        }
+        const ProbeOutcome outcome = RunProbe(*backend, probes.requests[i], probe_bridge.get());
         describe_round(static_cast<int>(i) + 1, outcome);
         CacheProbeRoundResult result;
         result.http_ok = outcome.error.empty();
@@ -923,7 +972,15 @@ void RunStreamUsageProbe(const DoctorContext& context) {
                                                          headers, std::move(options),
                                                          config.request_hard_timeout_secs);
     const api::Request probe = BuildEffortProbeRequest(context.current_model, context.current_think);
-    const ProbeOutcome outcome = RunProbe(backend, probe);
+    // Token 账本单 A1:能力探针也是一次真请求,旁路桥照落(purpose=
+    // doctor_probe)。
+    std::unique_ptr<runtime::TrajectoryBypassBridge> probe_bridge;
+    if (context.trajectory != nullptr) {
+        runtime::TrajectoryTurnBridge::Identity identity{context.active_provider, context.trajectory_wire,
+                                                         "host"};
+        probe_bridge = context.trajectory->NewBypassBridge(std::move(identity));
+    }
+    const ProbeOutcome outcome = RunProbe(backend, probe, probe_bridge.get());
     if (!outcome.error.empty()) {
         TermOut() << trf("doctor.effort.http_error", outcome.http_status > 0
                                                          ? std::to_string(outcome.http_status)
@@ -1172,7 +1229,11 @@ CommandFlow HandleSlashDoctor(SlashDispatchContext& ctx, const lubancode::cli::P
                                                  ctx.sub_registry,
                                                  ctx.tool_runtime != nullptr ? ctx.tool_runtime->explore_registry()
                                                                              : nullptr,
-                                                 ctx.instruction_resolver};
+                                                 ctx.instruction_resolver,
+                                                 ctx.trajectory,
+                                                 ctx.session_runtime != nullptr
+                                                     ? ctx.session_runtime->wire_name()
+                                                     : std::string()};
     HandleDoctorCommand(parsed.args, doctor_context);
     ctx.real_backend->Rebuild(*ctx.config);
     return CommandFlow::Continue;

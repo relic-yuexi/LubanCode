@@ -17,6 +17,8 @@
 
 #include <cstddef>
 #include <expected>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <set>
 #include <string>
@@ -28,6 +30,7 @@
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "agent/context_events.hpp"  // StructuralCompressionOptions(L1 工作视图口径)
+#include "agent/loop.hpp"  // LoopBoundaryRecorder(Token 账本单 A1:compact 子请求的旁路落账)
 #include "agent/model_router.hpp"  // BackgroundCallAccounting(usage 出账)
 
 namespace lubancode::agent {
@@ -94,6 +97,12 @@ struct CompactOptions {
     // 末份是热区,前 partition_count-1 份各 map 一次。默认 4;取值域
     // 2..8 由配置层校验,这里只按收到的数算。
     std::size_t partition_count = kDefaultCompactPartitionCount;
+    // Token 账本单 A1(旁路落账):compact 子请求的轨迹桥工厂。每次采样
+    // 现调一只,桥由会话现场的闭包铸出来(provider/wire 在路由解完后烤进
+    // 闭包,compact 内部不知路由);空 = 没接轨迹的会话/单测,一次采样
+    // 一笔不落,行为与从前一致。purpose 在各采样点显式给
+    //(compact_map/compact_reduce),不在这里猜。
+    std::function<std::unique_ptr<LoopBoundaryRecorder>()> bypass_recorder;
 };
 
 // 一次压缩的产物:archive 消息(顶进新历史用) + 解析出的 manifest。

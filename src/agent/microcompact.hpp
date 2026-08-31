@@ -19,11 +19,14 @@
 
 #include <atomic>
 #include <cstddef>
+#include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
 
 #include "agent/artifact_store.hpp"
+#include "agent/loop.hpp"  // LoopBoundaryRecorder(Token 账本单 A1:旁路落账)
 #include "agent/model_router.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
@@ -36,6 +39,10 @@ struct MicrocompactOptions {
     std::size_t input_cap_bytes = 24 * 1024;
     // cheap 调用超时(秒)。
     int timeout_secs = 45;
+    // Token 账本单 A1(旁路落账):一次 L2 请求一只轨迹桥;空 = 没接
+    // 轨迹的会话/单测,行为与从前一致。purpose 固定 compact_map(点名
+    // 一枚 artifact 的分块摘要,map 型小请求)。
+    std::function<std::unique_ptr<LoopBoundaryRecorder>()> bypass_recorder;
 };
 
 // 一枚 L2 产物:versioned summary,source artifact 钉牢(规格 L2 节)。

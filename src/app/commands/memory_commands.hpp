@@ -29,6 +29,9 @@ class SessionStore;
 namespace lubancode::cli {
 struct Theme;
 }
+namespace lubancode::runtime {
+class TrajectorySessionLedger;
+}
 
 namespace lubancode::app {
 
@@ -60,6 +63,12 @@ struct SessionTailContext {
     lubancode::agent::ContextArtifactStore* artifact_store = nullptr;  // 可空
     lubancode::sessions::SessionStore* session_store = nullptr;
     const lubancode::cli::Theme* theme = nullptr;
+    // Token 账本单 A1(旁路落账):flag 开的会话递账本,回合收尾的抽取与
+    // artifact 按需摘要各自铸旁路桥落 Journal(purpose=memory_extract/
+    // compact_map)。空 = 没接轨迹,行为与从前一致。wire 是桥 identity 的
+    // 渠道名(与主 turn 桥同源)。
+    lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
+    std::string trajectory_wire;
 };
 
 // 回合收尾抽取:只看本轮增量,借 cheap 路由产严格 JSON;候选进待审区

@@ -34,6 +34,8 @@
 #include <string>
 #include <vector>
 
+#include "accounting/purpose.hpp"  // RequestPurpose(Token 账本单 A1:旁路请求的用途)
+#include "agent/loop.hpp"          // LoopBoundaryRecorder(Token 账本单 A1:公共 ModelRequestRecorder 口)
 #include "agent/model_router.hpp"  // BackgroundCallAccounting:usage 出账的统一口径
 #include "api/assembler.hpp"
 #include "api/backend.hpp"
@@ -66,6 +68,16 @@ struct SampleOptions {
     // > 0 起看门狗:到点拉本地取消旗(与旧六处同一形状:steady clock 差 +
     // 100ms 轮询)。0 = 不起(compact 两处的旧路)。
     int timeout_secs = 0;
+    // ---- Token 账本单 A1(公共 ModelRequestRecorder,§11.2) ----
+    // 非空时本次采样按 AgentLoop 同一套边界落账:prepared(带 purpose)
+    // -> sent -> usage owner -> output 三态。旁路请求(compact 的
+    // map/reduce、记忆抽取、会话起名、doctor 探针)从前只有内存账,
+    // Journal 里一笔没有;接了这只口,usage 与 purpose 才有真账可对。
+    // recorder 归调用方所有(轨迹会话的旁路桥),采样只借不持。
+    LoopBoundaryRecorder* boundary_recorder = nullptr;
+    // 本采样的请求用途(§6.2 十二值枚举)。recorder 为空时不读;调用方
+    // 不知道用途就不许接 recorder——没有"全塞 main_turn"的路。
+    accounting::RequestPurpose purpose = accounting::RequestPurpose::OtherHostRequest;
 };
 
 // 一次采样的产物。失败(!ok)时 text/usage 也照带回——半截流的账不许丢。
@@ -76,6 +88,9 @@ struct SampleResult {
     api::Usage usage;  // assembler 的账(MessageDone 为准)
     // 服务端是否真回报过 usage(五项全零 = 没给,不拿 0 冒充)。
     bool usage_reported = false;
+    // provider 在 MessageStart 一类帧里回的外部号(§6.1.2;空 = 没回)。
+    // 只作对账,不顶 local request id。
+    std::string provider_response_id;
     // 起跑到收工的墙钟(含看门狗全程);不计时口径的调用方(compact 的
     // map/reduce)不吃它。
     std::int64_t duration_ms = 0;

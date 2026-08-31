@@ -8,9 +8,11 @@
 
 #include <algorithm>
 #include <cctype>
+#include <memory>
 #include <sstream>
 #include <utility>
 
+#include "accounting/purpose.hpp"  // RequestPurpose(Token 账本单 A1)
 #include "agent/microcompact.hpp"  // RunMicrocompact(按需摘要)
 #include "app/memory_extract.hpp"  // ClassifyTaskType/BuildTurnTranscript 一族
 #include "app/model_router.hpp"
@@ -19,6 +21,7 @@
 #include "cli/terminal_port.hpp"
 #include "cli/theme.hpp"
 #include "memory/project_memory.hpp"
+#include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger(旁路桥)
 #include "sessions/session_store.hpp"
 #include "tools/path_utils.hpp"
 
@@ -486,6 +489,17 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     }
     lubancode::agent::SampleOptions sample_options;
     sample_options.timeout_secs = 45;
+    // Token 账本单 A1(旁路落账):抽取请求铸一只旁路桥,prepared/sent/
+    // usage/output 连同 purpose=memory_extract 落 Journal。flag 关的会话
+    //(trajectory 空)一笔不落,行为与从前一致。
+    std::unique_ptr<lubancode::agent::LoopBoundaryRecorder> extract_recorder;
+    if (ctx.trajectory != nullptr) {
+        lubancode::runtime::TrajectoryTurnBridge::Identity identity{extract_route.provider, ctx.trajectory_wire,
+                                                                    "host"};
+        extract_recorder = ctx.trajectory->NewBypassBridge(std::move(identity));
+        sample_options.boundary_recorder = extract_recorder.get();
+        sample_options.purpose = lubancode::accounting::RequestPurpose::MemoryExtract;
+    }
     const auto sampled =
         model_router.Sample(lubancode::agent::TaskKind::MemoryExtract, sample_call, sample_options);
     std::expected<MemoryExtraction, std::string> extraction;
@@ -570,9 +584,21 @@ std::expected<std::string, std::string> SummarizeArtifactOnDemand(const SessionT
         return std::unexpected("按需摘要暂不可用:cheap provider 找不到");
     }
     lubancode::agent::BackgroundCallAccounting accounting;
+    // Token 账本单 A1:按需摘要(L2)也走旁路桥(purpose=compact_map)。
+    lubancode::agent::MicrocompactOptions micro_options;
+    if (ctx.trajectory != nullptr) {
+        lubancode::runtime::TrajectorySessionLedger* ledger = ctx.trajectory;
+        const std::string wire = ctx.trajectory_wire;
+        const std::string provider = routed.route.provider;
+        micro_options.bypass_recorder = [ledger, wire, provider]()
+                                            -> std::unique_ptr<lubancode::agent::LoopBoundaryRecorder> {
+            lubancode::runtime::TrajectoryTurnBridge::Identity identity{provider, wire, "host"};
+            return ledger->NewBypassBridge(std::move(identity));
+        };
+    }
     auto summary = lubancode::agent::RunMicrocompact(
         *routed.backend, routed.route.model, routed.route.effort, *ctx.artifact_store, ref,
-        lubancode::agent::MicrocompactOptions{}, &accounting);
+        std::move(micro_options), &accounting);
     ctx.model_router->ledger().Record(lubancode::agent::ModelRole::Cheap, routed.route.model,
                                       accounting.usage, accounting.duration_ms,
                                       accounting.usage_reported);
