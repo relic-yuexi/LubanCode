@@ -1,0 +1,1303 @@
+# 持久 Agent：Gateway、自动任务与可靠恢复总装计划
+
+- 状态：待实现（G0 现状冻结与合同补齐起）
+- 日期：2026-08-31
+- 级别：P0
+- 范围：`src/app`、`src/runtime`、`src/trajectory`、`src/workflow`、`src/tools`、`src/channel`、`src/sessions`、`src/platform`、`src/cli`、`tests/`
+- 依赖：`todos/P0新轨迹记录_可重放与训练投影设计.todo`、`todos/多渠道消息接入与常驻ChannelPlugin设计.todo`、`todos/子代理递归派工与结构化任务交接设计.todo`
+- 关联：`todos/子代理监督器_agent_watch与停滞恢复设计.todo`、`todos/端云协同可观测架构与Telemetry插件设计.todo`、`docs/architecture/channels/`
+- 不在本单：首期多机集群、跨主机任务迁移、未经确认的任意工具自动重做、替平台许诺 exactly-once、云端托管调度服务、重写 AgentLoop、同时铺开所有聊天平台
+
+## 一、先下断语
+
+LubanCode 已有不少耐久零件。会话能落盘，Trajectory 能验账，Workflow 能从 checkpoint 接续，Goal 与 Loop 能记事件，子代理能排活，Channel 也有了合同、manifest、帧与 router。
+
+这些还不是一只持久 Agent。
+
+持久 Agent 须把五件事接成闭环：
+
+```text
+状态落盘
+  + 宿主常驻
+  + 到点或来信能唤醒
+  + 崩溃后能裁决从哪道栅栏接
+  + 回复与副作用不因重启而乱跑
+```
+
+本单只做总装。最终只留一条生产水路：
+
+```text
+OS Supervisor
+  -> lubancode gateway run
+  -> durable ingress / durable automation
+  -> SessionWorkScheduler
+  -> HeadlessSessionHost
+  -> Agent + RunTurn
+  -> Trajectory Journal
+  -> durable outbox
+  -> channel / webhook / local delivery
+```
+
+五条定案：
+
+1. `Gateway` 是显式进程形态。普通 `lubancode` 不因读到配置便起线程、开端口、连平台或烧模型 token。
+2. Trajectory 仍是一次 Agent 运行的 canonical fact ledger。Automation、Ingress、Outbox、Task 各守自己的领域账，不抄模型正文，不另造第二份会话真值。
+3. 重启恢复的是已提交事实与可判状态，不是 C++ 调用栈。`running` 不等于可重跑；见过未知副作用，便停在 `NeedsReview`。
+4. 外送失败只重试 delivery，不重跑 Agent。平台来信重复只走去重，不重复开 turn。
+5. 先打通一条假渠道 + 一只自动任务 + 一场 headless turn。杀进程验过，再接 QQ、微信，再谈规模。
+
+## 二、眼下真相
+
+本节照 2026-08-31 工作树写。开每一批前都须重新查源码；表中“已有”不等于已过真机常驻验收。
+
+### 2.1 已落地的底座
+
+| 能力 | 当前落点 | 能拿来做什么 | 不能冒充什么 |
+|---|---|---|---|
+| 新轨迹账 | `src/trajectory/`、`src/runtime/trajectory_session.*` | 单写、哈希链、ReplayState、checkpoint、verify、resume-as-new、崩溃收口 | 尚未覆盖全部常驻领域；feature 默认关闭 |
+| 会话恢复 | `SessionRuntime`、`/resume`、`--continue` | 恢复 history、mode、queue、goal、旧 loop 事件 | 不是无人值守服务；两套存档路尚未完全收一 |
+| Workflow | `src/workflow/runtime.*`、`RunJournal` | 节点终态后 checkpoint，`Resume(run_dir)` 接续 | 没有全局到点触发与进程监督 |
+| Goal | `GoalSessionWiring`、goal 事件账 | 恢复目标状态，默认暂停 | 不是 cron，也不是服务级 heartbeat |
+| Loop | `LoopScheduler`、`LoopTickDriver`、loop 事件账 | 会话内 timer、due wake、事件回放、错过合并、恢复暂停 | timer 依附当前进程；Trajectory resume 路尚未同样恢复 loop |
+| 会话排活 | `SessionWorkScheduler`、`IdleWakeCoordinator` | timer/transport 只投 wake，主泵单飞开 turn | 没有跨进程 durable queue |
+| 子代理 | `TaskLedger`、`AgentTaskCoordinator`、`SubagentScheduler` | 父子边、mailbox、取消、预算、后台线程、完成回流 | `tasks_` 与线程句柄仍在内存；进程死后不能续 |
+| 后台命令 | `BackgroundTaskRegistry` | 进程、日志、停止、完成通知 | 进程级单例，不是 durable job manager |
+| Channel 合同 | `src/channel/types.*`、`manifest.*`、`frame.*`、`bridge_protocol.*`、`router.*` | 冻结消息形状、manifest、framing、双向配对 | 目前不 spawn sidecar，不接真网络，无 durable ingress/outbox |
+| App Server | `src/app_server/` 与中立事件合同 | 控制面、远端前端、SessionRuntime 复用底子 | 不自动等于 Gateway，不管公网渠道账号 |
+
+### 2.2 当前断口
+
+#### 断口 A：有恢复，没有常驻
+
+`--continue` 要有人重新起进程。`LoopScheduler` 的 timer 也住在交互进程里。进程一退，到点无人敲门。
+
+#### 断口 B：有会话账，没有服务级任务账
+
+旧 loop 事件写进 SessionStore。Trajectory 新路按 session 分账，却还没把所有 scheduler 状态接齐。后台子代理与后台命令又各有内存表。三处都能“看见活”，没有一份跨进程的 job occurrence 状态机。
+
+#### 断口 C：有 Channel 协议，没有 Channel Runtime
+
+`BridgeRouter` 只排 JSON-RPC 消息。缺 `ChannelManager`、sidecar 监督、账号锁、`ChannelIngressStore`、Headless Session、ReplyAssembler、Outbox 与服务入口。
+
+#### 断口 D：能重放事实，不能一概重做动作
+
+Trajectory 已能指出工具开始、终态与结果。可“进程崩后自动从哪儿接”还须按副作用分档。模型请求、shell、文件写、MCP、HTTP、平台发送，各有不同重做门，不能用一只 `retry=true` 糊住。
+
+#### 断口 E：组件状态有几本，所有权尚未总收
+
+SessionStore、Trajectory、Workflow Journal、Goal/Loop 事件、TaskLedger、Channel 将各有账。要先定谁写事实，谁只作投影。否则 Gateway 一落地，又会长出“两只手同写一本账”。
+
+### 2.3 当前测试证据边界
+
+截至本单落笔，以下 focused Release 用例通过：
+
+```text
+integration.loop.loop_persistence
+unit.loop.loop_scheduler
+unit.loop.session_work_scheduler
+unit.trajectory.resume_as_new
+unit.trajectory.resume_wiring
+unit.trajectory.session_manager_recovery
+unit.channel.channel_manifest
+unit.channel.channel_types
+```
+
+这八项只证明相关合同与局部恢复。它们不证明：
+
+- Gateway 已存在；
+- 系统服务能自动拉起；
+- 真实平台能收发；
+- 崩在工具副作用后能自动续；
+- 长时常驻没有泄漏；
+- 高并发或低磁盘已经量过。
+
+## 三、外部参照与裁决
+
+本节只取产品形态，不照抄实现。
+
+### 3.1 Hermes
+
+Hermes 把 messaging gateway 做成单只后台进程。它管平台连接、session、cron 与 delivery。Cron job 原子写进独立 jobs store；Gateway 内 ticker 到点起 fresh session，再把结果送往平台。
+
+资料：
+
+- <https://github.com/NousResearch/hermes-agent>
+- <https://hermes-agent.nousresearch.com/docs/user-guide/messaging/>
+- <https://hermes-agent.nousresearch.com/docs/developer-guide/cron-internals>
+
+可取三笔：
+
+1. 调度账独立于某场聊天历史。
+2. Gateway 是持久触发器；普通 CLI 活着时才 tick，不算真正无人值守。
+3. Cron run 用 fresh session，persistent memory 可进，前次临时对话不暗混。
+
+### 3.2 OpenClaw
+
+OpenClaw 用 always-on Gateway 管路由、控制面与渠道连接，再用 supervisor 保活。Automations 持久保存 one-shot、interval、cron 与 webhook trigger；Heartbeat 是系统自有 monitor job。Detached task 另有任务账，和 scheduler 分开。
+
+资料：
+
+- <https://github.com/openclaw/openclaw>
+- <https://docs.openclaw.ai/gateway>
+- <https://docs.openclaw.ai/automation>
+- <https://docs.openclaw.ai/gateway/heartbeat>
+
+可取四笔：
+
+1. “任务记录”与“何时触发”分账。Task 不是 scheduler。
+2. Heartbeat 也归 scheduler，不靠一张文件被运行时反复猜。
+3. systemd、launchd、Windows Scheduled Task 只管拉起进程，不碰业务账。
+4. delivery queue 接手后，只重试传输，不重跑 earlier agent turn。
+
+### 3.3 LubanCode 自己的路
+
+不照抄两家目录，也不把 C++ 改成 Python/Node 架子。LubanCode 已有更细的 Trajectory 与恢复合同，正好拿它守执行事实；另立薄而明确的 Gateway 领域账，补上常驻触发与可靠投递。
+
+## 四、产品定义
+
+### 4.1 “持久”分五层
+
+| 层 | 承诺 | 首版放行门 |
+|---|---|---|
+| P1 状态持久 | 已接受的输入、job、运行事实、回复、投递状态可从盘重建 | 进程重启后 state hash 与崩前 durable prefix 一致 |
+| P2 触发持久 | 进程活着时到点必醒；进程死后由 OS supervisor 拉起，再扫 due | 不依赖终端、UI 或用户按键 |
+| P3 执行持久 | 能从安全栅栏继续；不能安全继续时明标 unknown/needs review | 不盲重跑已开始的未知副作用 |
+| P4 投递持久 | 已提交回复进 outbox；发送失败可续，不重跑模型 | turn 后、send 前杀进程，重启只续 send |
+| P5 运维持久 | 有 install/start/stop/status/doctor/logs，坏配置不重启风暴 | 三平台各有受支持的监督路径 |
+
+少一层，便只可说“有落盘”或“有定时器”，不可说“持久 Agent”。
+
+### 4.2 首版用户故事
+
+1. 用户建一只每小时检查仓库状态的 automation，关掉终端。到点后 Gateway 自己开 headless turn，把结果写本地或送往假渠道。
+2. 平台来一封消息。Gateway 先落 ingress，再 ACK，再排 turn。进程若中途崩，重启后不会丢掉已接受消息，也不会平白多开第二轮。
+3. Agent 已生成回复，尚未发出时进程崩。重启后只从 outbox 续送，不再调用模型。
+4. 工具已开始，终态不明时进程崩。重启后任务停在 `NeedsReview`，`status/doctor` 说明工具、call id、最后 durable event 与处置入口。
+5. 用户没有运行 Gateway。普通 `lubancode` 即使看见 enabled job/channel，也只显示状态，不起后台活。
+
+### 4.3 非目标
+
+- 首版不做多节点抢任务。
+- 不把一枚运行中的 C++ stack 序列化后复活。
+- 不默认 catch up 每一枚错过的周期；默认合并成一拍。
+- 不替无幂等键的平台承诺绝不重复送达。
+- 不让 heartbeat 自动取得比普通 owner 更宽的工具权限。
+- 不让 cron run 递归创建无上限 cron。
+- 不把 hidden thinking 送渠道。
+- 不因 Gateway 上线便废掉终端模式。
+
+## 五、总架构
+
+```text
+                     OS Supervisor
+                  launchd/systemd/schtasks
+                           |
+                           v
+                 +-------------------+
+                 | GatewayProcess    |
+                 | lock / health     |
+                 +---------+---------+
+                           |
+       +-------------------+-------------------+
+       |                   |                   |
+       v                   v                   v
++--------------+   +---------------+   +----------------+
+| Automation   |   | ChannelManager|   | Control Server |
+| Scheduler    |   | adapters      |   | status/doctor  |
++------+-------+   +-------+-------+   +----------------+
+       |                   |
+       v                   v
++--------------+   +-------------------+
+| JobStore     |   | ChannelIngressStore|
+| due / claim  |   | durable / dedupe   |
++------+-------+   +---------+---------+
+       |                     |
+       +----------+----------+
+                  v
+        +---------------------+
+        | GatewayWorkQueue    |
+        | bounded / fair      |
+        +----------+----------+
+                   v
+        +---------------------+
+        | HeadlessSessionHost |
+        | SessionRuntime      |
+        | Agent + RunTurn     |
+        +----------+----------+
+                   v
+        +---------------------+
+        | Trajectory Journal  |
+        | canonical run facts |
+        +----------+----------+
+                   v
+        +---------------------+
+        | Reply Projector     |
+        | deterministic id    |
+        +----------+----------+
+                   v
+        +---------------------+
+        | Durable Outbox      |
+        | retry / receipt / DLQ|
+        +---------------------+
+```
+
+### 5.1 依赖方向
+
+```text
+platform adapters
+    -> channel protocol/runtime
+        -> gateway work contracts
+            -> headless session runtime
+                -> agent
+
+automation scheduler
+    -> gateway work contracts
+
+agent/runtime facts
+    -> trajectory
+
+trajectory reply projection
+    -> outbox
+        -> channel delivery
+```
+
+`agent`、`trajectory`、`workflow` 不反向 include Gateway、QQ、微信或 OS service installer。
+
+### 5.2 线程规矩
+
+- Channel transport thread 只解帧、验签、落 ingress、投 wake。
+- Timer thread 只算最近 deadline、投 wake。
+- Outbox worker 只取已提交 delivery、调用 adapter、落 receipt。
+- Agent turn 只由 Gateway 主调度面开；同一 session 单飞。
+- Recorder 仍按 run 单写。任何 worker 不跨 writer 直写别人的 Journal。
+- shutdown 先停止接活，再摘 wake，再收 turn，再关 outbox/adapter，最后释放 workspace/account lock。
+
+## 六、六本账与唯一所有者
+
+### 6.1 账本表
+
+| 账 | 唯一所有者 | 存什么 | 不存什么 |
+|---|---|---|---|
+| Gateway Registry | `GatewayRegistryStore` | instance、workspace/agent binding、启停与配置 generation | 会话正文、密钥明文 |
+| Automation | `AutomationStore` | job spec、schedule、occurrence、claim、next fire、run ref | 模型输出正文 |
+| Ingress | `ChannelIngressStore` | provider event、去重键、路由状态、turn ref、dead letter | 整份 session history |
+| Execution | `TrajectoryRecorder` | input/model/tool/control/terminal canonical facts | scheduler 的 next fire、平台 transport retry |
+| Task | `DurableTaskStore` | detached task spec、parent、state、mailbox refs、run refs | backend 指针、thread handle、重复的 child 正文 |
+| Delivery | `OutboxStore` | reply artifact ref、target、attempt、receipt、dead letter | 重新拼一份 Agent history |
+
+### 6.2 跨账只传引用
+
+统一引用形状：
+
+```json
+{
+  "workspace_key": "...",
+  "session_id": "...",
+  "run_id": "...",
+  "event_id": "...",
+  "event_hash": "..."
+}
+```
+
+Automation occurrence 只记 `run_ref`。Ingress 只记 `turn_ref`。Outbox 只记 committed response artifact 与 event ref。谁也不抄 canonical payload。
+
+### 6.3 提交次序
+
+入站：
+
+```text
+validate/auth
+-> ingress.received durable
+-> dedupe decision durable
+-> platform ACK
+-> queue claim durable
+-> open Agent turn
+```
+
+回复：
+
+```text
+model output committed
+-> reply artifact committed
+-> delivery.enqueued durable
+-> turn terminal
+-> adapter send
+-> delivery receipt durable
+```
+
+若进程崩在 reply artifact 与 outbox enqueue 之间，RecoveryProjector 按稳定 `delivery_id` 从 committed response 补出同一条 outbox item。它只作确定性投影，不重跑 Agent。
+
+`delivery_id` 首版定为：
+
+```text
+hash(channel_account_id, conversation_id, turn_id, reply_ordinal, committed_event_hash)
+```
+
+## 七、进程形态与默认关闭
+
+### 7.1 进程模式
+
+```cpp
+enum class ProcessMode {
+    Interactive,
+    Pipe,
+    AppServer,
+    Gateway,
+};
+```
+
+只有 `ProcessMode::Gateway` 能：
+
+- 起 AutomationScheduler；
+- 起 ChannelManager；
+- 开 Gateway control endpoint；
+- 持 workspace/channel account lock；
+- 接受 webhook；
+- 拉起 headless session；
+- 续 durable outbox。
+
+### 7.2 命令
+
+```text
+lubancode gateway run [--profile <name>]
+lubancode gateway install [--profile <name>]
+lubancode gateway start [--profile <name>]
+lubancode gateway stop [--profile <name>]
+lubancode gateway restart [--profile <name>]
+lubancode gateway status [--json] [--deep]
+lubancode gateway doctor [--json]
+lubancode gateway logs [--follow]
+```
+
+`run` 是前台真进程。`install/start/stop/restart` 只管 supervisor。CLI 不另养一只暗 daemon。
+
+### 7.3 零副作用合同
+
+Gateway 未显式启动时：
+
+- 零 Channel sidecar；
+- 零 scheduler timer thread；
+- 零 webhook listener；
+- 零平台连接；
+- 零模型调用；
+- 零 Gateway state 写入；
+- 不抢 account/workspace lock；
+- 可只读展示“已配置，Gateway 未运行”。
+
+这条须有进程级测试。不能只测某个 `enabled` bool。
+
+## 八、目录与存储
+
+### 8.1 建议目录
+
+```text
+~/.lubancode/gateway/
+  profiles/<profile>/
+    gateway.json
+    gateway.lock
+    control.json
+    boot-history.jsonl
+    logs/
+    automations/
+      jobs/<job_id>/spec.json
+      events/<shard>.jsonl
+      occurrences/<occurrence_id>.json
+    tasks/
+      events/<shard>.jsonl
+      snapshots/
+    channels/
+      <channel>/<account>/
+        account.json
+        account.lock
+        ingress/
+        outbox/
+        dead-letter/
+        adapter-state/
+```
+
+Agent 运行事实仍住：
+
+```text
+~/.lubancode/trajectories/workspaces/<workspace_key>/sessions/<session_id>/
+```
+
+Gateway 不把 Trajectory 搬进自己的目录。
+
+### 8.2 首版存储裁决
+
+首版沿用“append-only event + 原子 snapshot/manifest”。不先引 SQLite。
+
+理由：
+
+- 现有 Journal、canonical JSON、hash、原子文件与锁可复用；
+- 单机首版不需要多写者 SQL 事务；
+- 崩溃测试能直接查字节与状态迁移；
+- 待容量基准证明目录扫描、索引或 compaction 成瓶颈，再立 SQLite 迁移单。
+
+不可把 JSON 文件当共享可变 map 反复整份覆盖。spec 可原子换代；事实事件只追加。
+
+### 8.3 文件权限
+
+- Gateway profile、job、task、ingress、outbox 默认 user-only。
+- secret 只存 SecretRef。token、cookie、context token 不进事件正文。
+- adapter state 若不得不存敏感票据，另入 secret store 或 OS credential store；普通日志只记引用与 redaction reason。
+- 控制 endpoint 默认 loopback/local IPC，并要求本机身份或 token。
+
+## 九、Automation 与 Heartbeat
+
+### 9.1 Job 与 occurrence 分开
+
+```cpp
+struct AutomationJob {
+    JobId id;
+    JobOwner owner;
+    JobSchedule schedule;
+    PromptRef prompt;
+    AgentBinding agent;
+    SessionPolicy session_policy;
+    DeliveryPolicy delivery;
+    PermissionPolicy permissions;
+    MissedFirePolicy missed_fire;
+    bool enabled;
+    std::uint64_t revision;
+};
+
+struct JobOccurrence {
+    OccurrenceId id;
+    JobId job_id;
+    WallTime scheduled_at;
+    OccurrenceState state;
+    ClaimLease claim;
+    std::optional<RunRef> run_ref;
+    std::optional<DeliveryRef> delivery_ref;
+};
+```
+
+Job 是长期规则。Occurrence 是这一次该跑的事实。不可拿 `run_count + next_due` 一行同时冒充两者。
+
+### 9.2 调度类型
+
+首版支持：
+
+- `at`：一次绝对时间；
+- `after`：一次相对时间，创建时折成绝对时间；
+- `every`：固定 interval；
+- `cron`：五字段表达式 + 明确 timezone；
+- `event`：只收 Gateway 内部显式事件或 authenticated webhook，不收任意文本触发。
+
+### 9.3 错过策略
+
+```cpp
+enum class MissedFirePolicy {
+    Skip,
+    CoalesceOnce,   // 默认：错过多拍只补一拍，附 missed_count
+    CatchUpBounded, // 最多 N 拍
+};
+```
+
+默认不用无限 catch-up。关机三天后若一口气补 8640 拍，既烧 token，也可能打爆外部服务。
+
+### 9.4 claim 与 lease
+
+单机也要有 claim。原因不是集群，是防 Gateway 重启与手动 `run-now` 撞在一起。
+
+```text
+scheduled
+-> claimed(lease_id, owner_instance, expires_at)
+-> starting
+-> running(run_ref)
+-> succeeded | failed | cancelled | needs_review
+```
+
+恢复时：
+
+- `claimed` 且没有 `run.started`：lease 过期后可重新 claim；
+- 已有 `run.started`、没有模型请求：可按 RecoveryDecision 再开新 run，并引用旧 incomplete run；
+- 已发送模型请求：不假装同一 attempt 可续，转 `InterruptedAfterRequest`；
+- 已有 committed response：只补 outbox；
+- 工具 started 无 terminal：`NeedsReview`；
+- terminal 已齐：重建 occurrence terminal，不再跑。
+
+### 9.5 Heartbeat
+
+Heartbeat 不另写一只 timer。它是一枚 system-owned automation job：
+
+- 默认关闭；
+- 显式 cadence、active hours、model、session policy、delivery target；
+- busy 时延后，不与同 session 正在跑的 turn 并发；
+- scratch/context 另有小额、有界、可审计的输入；
+- 空 scratch 可按配置跳过，免烧 token；
+- quiet success 可不出站，alert 才投 delivery；
+- 不因 heartbeat 更新而延长真人 session 的 idle 生命周期；
+- heartbeat run 禁止创建无限递归 automation。
+
+### 9.6 `/loop` 迁移
+
+新建 loop 不再只写旧 SessionStore 事件。迁移规矩：
+
+1. `AutomationStore` 成为新 scheduler job 唯一真账。
+2. `/loop` 保留用户入口，内部创建 `owner=session` 的 automation job。
+3. Trajectory 只写 `automation.*` 引用事件，供审计与 replay，不抄 job spec 全文。
+4. 老 SessionStore 的 `loop_task_v1/loop_tick_v1` 只读兼容；用户显式 `/loop import-legacy` 才转新 job。
+5. 不静默迁移老 active loop。导入后默认 paused，用户确认才启。
+6. Trajectory resume、旧 SessionStore resume、Gateway restart 最终都调用同一 `AutomationRecoveryService`，不再各写一套暂停逻辑。
+
+## 十、Headless Session 与执行恢复
+
+### 10.1 `HeadlessSessionHost`
+
+它复用：
+
+- `SessionStack`；
+- `SessionRuntime`；
+- `Agent`；
+- `RunTurn`；
+- ToolRegistry / Package snapshot；
+- Trajectory bridge；
+- EventSink。
+
+它不持：
+
+- LineEditor；
+- TUI panel；
+- stdin reader；
+- 终端确认框；
+- 任意平台 SDK。
+
+### 10.2 会话策略
+
+```cpp
+enum class HeadlessSessionPolicy {
+    Fresh,          // cron/report 默认
+    ResumeNamed,    // 明确绑定某场长期 session
+    MainSession,    // owner heartbeat 可选
+};
+```
+
+Fresh session 可读明确授权的 durable memory 与 workspace instructions，不暗带别场临时 history。`ResumeNamed` 必须走 resume-as-new，source Journal 永不 reopen append。
+
+### 10.3 无人审批
+
+Headless turn 没有终端确认框。工具决策只取冻结的 `PermissionPolicy`：
+
+- allowlist 命中才可跑；
+- denylist 永远优先；
+- 未决权限 `FailClosed`；
+- 可选 `NeedsApproval` 投控制面，但 job 不占住 worker 无限等；
+- approval 带 job/occurrence/run/call/generation，过期或配置换代即失效；
+- 项目配置只能收窄全局权限，不能放宽。
+
+### 10.4 恢复裁决器
+
+新增纯函数 `BuildRecoveryDecision(ReplayState, DomainState)`：
+
+```cpp
+enum class RecoveryAction {
+    NoWork,
+    StartNewRun,
+    ContinueProjection,
+    ContinueDelivery,
+    PauseForApproval,
+    NeedsReview,
+    QuarantineCorrupt,
+};
+```
+
+它只读账，不执行动作。Gateway 恢复器按决定办事，并另落 recovery intent/result。
+
+### 10.5 Workflow
+
+Automation job 可把一份 Workflow 当 payload。执行时：
+
+- occurrence 引用 workflow definition hash；
+- WorkflowRuntime 继续用自己的 RunJournal 与 checkpoint；
+- workflow node 的 Agent run 写独立 Trajectory stream；
+- crash 后先调 `WorkflowRuntime::Resume` 重建已完成节点；
+- 未知副作用 node 不自动重跑；
+- definition hash 变了，旧 run 拒绝按新图续，须 fork/new occurrence。
+
+## 十一、Durable TaskLedger 与子代理
+
+### 11.1 所有权
+
+现有 `TaskLedger` 仍是运行时真值接口。加 `DurableTaskStore` 后，状态改变先提交 store，再更新内存投影；不得反过来“线程跑完后有空再补盘”。
+
+持久字段：
+
+- task id、parent/root/depth；
+- immutable TaskSpec hash；
+- owner session/run；
+- state/revision；
+- mailbox item refs 与 delivery；
+- child completion refs；
+- cancellation intent/result；
+- trajectory run ref；
+- terminal result artifact ref；
+- last activity summary 与 watchdog fact。
+
+不持久：
+
+- `std::thread`；
+- backend 指针；
+- lambda/callback；
+- registry 原始指针；
+- 未冻结的共享可变配置。
+
+### 11.2 重启规则
+
+| 崩前状态 | 重启裁决 |
+|---|---|
+| queued，尚未开 run | 可重新 admission，仍受最新硬安全闸与原 spec 限额 |
+| starting，无 run.started | 回 queued，revision + 1 |
+| running，无外部副作用 | 新 run 接续，并引用旧 incomplete run |
+| model request sent，无输出终态 | interrupted，不重发同一请求；按 task policy 由新 turn总结或人工续 |
+| tool started，无 terminal | needs_review，绝不自动重跑 |
+| waiting_children | 从 child durable states 重建；全终态才唤醒 parent |
+| cancelling | 续取消与进程树清理；清不清楚则 terminal unknown |
+| terminal | 只重建投影与未送达 completion，不再执行 |
+
+### 11.3 mailbox
+
+mailbox 取出不等于送达。状态走：
+
+```text
+queued -> claimed -> injected -> acknowledged
+                 \-> returned
+```
+
+父任务崩在 claimed/injected 后，按 turn ledger 判断：已写 `input.received` 才算 injected；否则 returned。ChildCompletion 只送直接父，不一股脑排给 main。
+
+### 11.4 后台命令
+
+首版不承诺把任意 OS child process 跨 Gateway 重启重新接管。规则：
+
+- 起进程前落 durable intent、command hash、cwd identity、permission decision；
+- 记 pid + process start token，防 PID 复用；
+- Gateway 重启后若能证明仍是同一进程，可只读探活与收日志；
+- 不能证明便记 `ProcessOwnershipUnknown`，不得凭 PID 杀；
+- 已死且终态不明，记 unknown；
+- 只有工具合同明示 idempotent/restartable，才可新起替代进程。
+
+## 十二、Channel 入站与 Outbox
+
+平台细节照 `多渠道消息接入与常驻ChannelPlugin设计.todo`。本节只钉总装边界。
+
+### 12.1 入站状态机
+
+```text
+received
+-> authenticated
+-> persisted
+-> deduplicated
+-> routed
+-> queued
+-> claimed
+-> turn_started
+-> turn_terminal
+-> reply_enqueued
+-> completed
+
+任一步 -> rejected | dead_letter | needs_review
+```
+
+provider event id 可用便做主去重键；没有时用平台规定字段与有限窗口 fingerprint。fingerprint 只作去重推断，不能冒充永久业务身份。
+
+### 12.2 ACK 规矩
+
+- Webhook：验签、最小解析、durable persist 成功后再 2xx。
+- WebSocket/长轮询：persist 后才推进 cursor/sequence。
+- persist 失败：NACK、断连或不推进 cursor，让平台重送。
+- queue 满：已 durable 的进 dead letter/backpressure，不默丢；未 durable 的不 ACK。
+
+### 12.3 Outbox 状态机
+
+```text
+pending
+-> claimed
+-> sending
+-> delivered
+-> acknowledged
+
+sending -> retry_wait | delivery_unknown | dead_letter
+```
+
+`sending` 后崩溃，若平台支持 client id / query receipt，先查再重发。平台不支持时，标 `delivery_unknown`；可按策略重发，但账上明示“可能重复”。
+
+### 12.4 ReplyAssembler
+
+- 只消费 committed `ServerEvent` / Trajectory projection；
+- thinking、usage、secret、内部工具参数默认不出站；
+- preview 与 committed 分账；
+- Unicode、Markdown、引用、媒体按 channel capability 分块；
+- delivery 失败不回头改 Agent history；
+- 同一 committed response 重建出相同 `delivery_id` 与相同 payload hash。
+
+## 十三、系统服务与进程监督
+
+### 13.1 Windows
+
+首选 per-user Scheduled Task：
+
+- 登录时或开机后按支持范围启动；
+- working directory、profile、state dir 写死为解析后的绝对路径；
+- 日志落 profile logs；
+- 不把 secret 展开进任务命令行；
+- `status --deep` 能查任务存在、最近结果、实际 pid 与 control probe；
+- uninstall 只删本 profile 所属任务，不扫宽目录。
+
+若 Scheduled Task 权限不足，首版明报错，不暗塞 Startup 文件夹。是否做受控 fallback 另在真机后裁决。
+
+### 13.2 Linux
+
+首选 systemd user service：
+
+- `Restart=on-failure`；
+- 明定启动限速；
+- headless 主机的 lingering 只给提示，不代用户 sudo；
+- stop 先走 control graceful shutdown，超时才由 systemd 收进程组；
+- 坏配置用稳定退出码，避免无限拉起。
+
+### 13.3 macOS
+
+首选 per-user LaunchAgent：
+
+- profile 对应唯一 label；
+- KeepAlive 只接非用户主动退出；
+- 同 label/system daemon 冲突 fail closed；
+- plist 原子写，安装前后可对账；
+- 不装 system LaunchDaemon。
+
+### 13.4 启动风暴保险
+
+Gateway 维护短期 boot history。连续非干净启动越过阈值后：
+
+- 控制面仍可起；
+- 自动 job、channel account、outbox worker 暂停；
+- 状态为 `SafeMode`；
+- `doctor` 指出第一处坏配置/坏账；
+- 用户显式 repair/ack 后再开业务面。
+
+## 十四、配置与命令合同
+
+### 14.1 配置草案
+
+```toml
+[gateway]
+profile = "default"
+control = "local"
+shutdown_grace_secs = 30
+max_concurrent_sessions = 4
+
+[automations]
+enabled = true
+max_queued_occurrences = 256
+default_missed_policy = "coalesce_once"
+
+[heartbeat]
+enabled = false
+
+[channels.qqbot.accounts.main]
+enabled = false
+secret_ref = "..."
+```
+
+配置只决定许可与上限。Job spec、next fire、occurrence state 不塞配置文件。
+
+### 14.2 管理命令
+
+```text
+/automation create|list|show|pause|resume|run|remove|history
+/heartbeat status|enable|disable|run
+/tasks list|show|cancel|retry-safe|audit
+/channels
+/channel show|doctor|login|start|stop|restart
+```
+
+交互 CLI 若 Gateway 已运行，管理命令走 control plane。没运行时只允许纯本地读与配置准备；不得暗起常驻进程。
+
+### 14.3 revision 与并发修改
+
+Job、binding、account config、approval 都带 revision。更新须 compare-and-swap：
+
+```text
+expected_revision != current_revision
+-> gateway.conflict
+```
+
+不要后写静默盖掉先写。
+
+## 十五、稳定错误码与诊断
+
+首批错误码：
+
+```text
+gateway.already_running
+gateway.not_running
+gateway.lock_stale
+gateway.safe_mode
+gateway.config_invalid
+gateway.control_unreachable
+gateway.shutdown_timeout
+
+automation.store_unavailable
+automation.job_not_found
+automation.revision_conflict
+automation.claim_busy
+automation.schedule_invalid
+automation.timezone_invalid
+automation.recovery_needs_review
+
+task.store_unavailable
+task.spec_mismatch
+task.side_effect_unknown
+task.process_ownership_unknown
+
+channel.account_in_use
+channel.credentials_missing
+channel.ingress_store_full
+channel.ingress_corrupt
+channel.delivery_unknown
+channel.outbox_full
+
+recovery.source_corrupt
+recovery.source_unsupported
+recovery.action_forbidden
+```
+
+`gateway status --json` 至少给：
+
+- pid、start token、uptime、mode、version、profile；
+- control endpoint 与 probe；
+- safe mode；
+- active/queued sessions；
+- due/claimed/running/needs-review occurrences；
+- task 各状态计数；
+- channel account 状态；
+- ingress/outbox/dead-letter 深度；
+- 最老 pending 年龄；
+- 最后 clean shutdown 与 recovery summary；
+- trajectory recorder/store 健康。
+
+`doctor` 按第一处故障给修法，不只堆一页 bool。
+
+## 十六、失败矩阵
+
+| 崩溃/故障点 | 重启后裁决 | 禁止动作 |
+|---|---|---|
+| ingress persist 前 | 等平台重送 | 不 ACK |
+| ingress persist 后、ACK 前 | 去重后 ACK，仍只排一轮 | 不开第二 turn |
+| queued 后、claim 前 | 重新入公平队列 | 不改原 event id |
+| claim 后、run.started 前 | lease 过期可重 claim | 不并发开两轮 |
+| run.started 后、model.request 前 | 新 run 引旧 incomplete ref | 不 reopen 旧 Journal |
+| model.request 发出、首字节前 | 记 interrupted；仅显式策略可新请求 | 不冒充同一 attempt 重试 |
+| partial model output 后 | 保已成账片段，needs review/新 turn 续 | 不抹掉片段重发原请求 |
+| tool planned 后、started 前 | 依工具幂等合同判 safe start | 不仅凭名字猜幂等 |
+| tool started 后、terminal 前 | needs review / unknown | 绝不自动重跑 |
+| tool terminal 后、result commit 前 | 从 terminal artifact/ref 修复 result 投影 | 不再执行工具 |
+| response committed 后、outbox 前 | 确定性补 outbox | 不重跑模型 |
+| outbox pending 后、send 前 | 续 send | 不重跑 Agent |
+| send 后、receipt 前 | 查平台回执；查不到则 delivery_unknown | 不宣称 exactly-once |
+| 磁盘满 | 停接新活，保控制面与诊断 | 不继续做外部副作用 |
+| Journal hash 坏 | quarantine session/run | 不猜着读、不自动续 |
+| adapter 反复崩 | 退避、熔断、NeedsLogin/Failed | 不重启风暴 |
+| provider 429 | occurrence 按预算退避或失败 | 不重复已执行工具 |
+| shutdown 超时 | 留 incomplete/unknown 与进程树证据 | 不假写 clean |
+
+## 十七、容量、背压与公平
+
+### 17.1 队列有界
+
+每层各有帽：
+
+- ingress 每账号、每 conversation、全局；
+- automation occurrence 全局与每 job；
+- headless session 并发；
+- TaskLedger alive/queued；
+- outbox 每账号与全局；
+- dead letter 磁盘预算；
+- Trajectory commit queue 与 blob 配额。
+
+帽满时要么拒收且不 ACK，要么已 durable 后转 dead letter。不可静默 drop canonical event。
+
+### 17.2 公平
+
+首版优先级：
+
+```text
+用户/Channel 直接来信
+  > 已到点 one-shot 与人工 run-now
+  > 普通 recurring automation
+  > heartbeat
+  > maintenance
+```
+
+同级轮转；每 agent、session、account 有并发帽。Heartbeat 不能饿死真人消息。
+
+### 17.3 时间
+
+- 内部 deadline 用 monotonic clock；持久 schedule 用 wall clock + timezone。
+- DST 的重复/跳过小时要有固定裁决与 fixture。
+- 系统时间倒拨不重放已 terminal occurrence。
+- 系统时间前跳按 missed policy 办。
+- timer 不 busy poll，睡到最近 deadline 或 wake signal。
+
+### 17.4 首版量测目标
+
+以下是放行目标，不是已有成绩：
+
+- disabled：相对普通 CLI 零新增线程、子进程、socket、Gateway 写盘；
+- enabled idle：10 分钟内零模型调用、无持续 busy loop，平均单核 CPU 目标低于 0.5%；
+- due jitter：无负载本机 p99 目标低于 1 秒；
+- ingress：10,000 枚合成重复事件只开 1 枚对应 turn；
+- fault sweep：每个提交栅栏前后各杀一次，已接受输入零静默丢失；
+- outbox：支持幂等键的假平台重复发送计数为 0；不支持者须能识别 delivery_unknown；
+- 72 小时 soak：线程、句柄、RSS、目录文件数有曲线，无单调无界增长。
+
+达不到便记录实数、剖析瓶颈、重定预算。不可删掉量测只写“性能良好”。
+
+## 十八、安全与隐私
+
+### 18.1 信任边界
+
+- 平台 sender、webhook、sidecar frame 一律外部输入。
+- Channel Package 先安装、签名/来源、信任、版本 pin，再可启动。
+- sidecar 最小环境，不继承整份宿主 env。
+- Gateway 不把 SecretRef 解出的明文交给模型、Trajectory、日志、TaskSpec。
+- 外来消息只作 user/channel provenance，不可变 system/developer。
+- group、owner、non-owner 的 Agent binding、memory 与 tool policy 分开。
+
+### 18.2 重放攻击
+
+- webhook timestamp/nonce 按平台能力校验；
+- provider event id 持久去重；
+- control request 带 auth、revision、nonce/expiry；
+- approval 与 occurrence/call/generation 绑定；
+- 旧 generation 的 adapter frame 直接拒绝。
+
+### 18.3 数据保留
+
+分别配置：
+
+- canonical Trajectory；
+- ingress envelope/body；
+- outbox payload/artifact；
+- adapter diagnostics；
+- dead letter；
+- aggregate metrics。
+
+删除 session 不自动删平台审计账；删除 channel account 也不暗删 Trajectory。跨账删除须列清引用、保 tombstone，并说明哪些正文已擦、哪些最小审计仍留。
+
+## 十九、实现批次
+
+批次按序走。前一批验收没过，后一批不可拿 mock 掩过去。每落一批，更新本单状态、勾选落点、附 focused 测试与尚未验证项。
+
+### G0：现状冻结与总合同
+
+- [ ] 逐项审 `SessionRuntime`、Trajectory resume、Goal/Loop restore、Workflow Resume、TaskLedger、BackgroundTaskRegistry、Channel phase 1 与 App Server。
+- [ ] 画出当前真实写盘图，列每本账的 writer 与 direct write call site。
+- [ ] 冻结 `ProcessMode::Gateway`、六本账所有权、cross-ledger ref、stable error code。
+- [ ] 冻结 Automation Job/Occurrence、Task、Ingress、Delivery 状态机。
+- [ ] 冻结 RecoveryAction 与失败矩阵。
+- [ ] 冻结 disabled 零副作用合同。
+- [ ] 把本单核心合同提炼进 `docs/architecture/gateway/`。
+- [ ] 修正 `多渠道消息接入与常驻ChannelPlugin设计.todo` 阶段 1 的真实勾选状态；已写源码却未勾的逐项对账，未实现的不得借文件名算完成。
+
+验收：Reviewer 能从源码指到每本真账与唯一 writer；能回答任一崩溃点是 retry、resume、projection、delivery 还是 needs review。
+
+### G1：前台 Gateway 骨架与控制面
+
+- [ ] 新建 `GatewayProcess`、profile、instance id、pid/start-token lock。
+- [ ] 实现 `lubancode gateway run/status/stop`。
+- [ ] 起 local-only control endpoint、health/readiness、graceful shutdown。
+- [ ] 接统一日志目录与 JSON status。
+- [ ] 实现 boot history 与 SafeMode 骨架。
+- [ ] 普通 CLI 只读 probe 已运行 Gateway，不暗起它。
+- [ ] 加第二实例抢锁、陈旧锁、坏 control endpoint、关机超时测试。
+
+验收：前台 Gateway 不接模型、不接渠道也能守住唯一实例；外部 CLI 可查、可停；杀进程后陈旧锁能按 pid + start token 安全裁决。
+
+### G2：AutomationStore、Scheduler 与系统服务
+
+- [ ] 实现 Job/Occurrence append-only 事件与原子 spec revision。
+- [ ] 实现 at/after/every/cron、timezone、DST fixtures。
+- [ ] 实现 due scan、claim lease、missed policy、run-now、pause/resume/remove。
+- [ ] 将 Heartbeat 做成 system-owned automation。
+- [ ] 实现 Windows Scheduled Task、systemd user、LaunchAgent installer/doctor。
+- [ ] 实现 `install/start/restart/logs` 与 `status --deep`。
+- [ ] 加 supervisor 拉起、坏配置退避、SafeMode 测试。
+
+验收：不用 Agent，建一只写本地 marker 的 deterministic job；关终端、杀 Gateway、由 supervisor 拉起后，due occurrence 恰好落一枚 terminal 账。
+
+### G3：Headless Session 与 Trajectory 收口
+
+- [ ] 实现 `HeadlessSessionHost`，复用 SessionStack/Runtime/Agent/RunTurn。
+- [ ] Gateway persistent work 强制走 Trajectory；开账失败即拒绝运行，不退旧 SessionStore。
+- [ ] 实现 fresh/resume-named/main session policy。
+- [ ] 接冻结 permission policy 与无人审批 fail-closed。
+- [ ] 实现 `BuildRecoveryDecision` 纯函数与 recovery intent/result。
+- [ ] 将 Goal/Loop/Workflow 的恢复入口接到同一 headless recovery service。
+- [ ] `/loop` 新写口迁到 AutomationStore；老 loop 只读兼容与显式 import。
+- [ ] 接 committed response -> deterministic reply artifact/outbox projection 边界。
+
+验收：假 provider 跑一只 scheduled headless turn。分别杀在 run started、request sent、output committed 后；重启后的动作与失败矩阵逐格一致。
+
+### G4：Durable TaskLedger 与 detached work
+
+- [ ] 实现 DurableTaskStore 与 TaskLedger 内存投影。
+- [ ] 注册、状态迁移、mailbox claim/inject/ack、child completion 全部先 durable。
+- [ ] 冻结 TaskSpec snapshot/hash，禁止恢复时偷换 prompt、cwd、tool policy。
+- [ ] 实现 queued/starting/running/waiting-children/cancelling/terminal 恢复。
+- [ ] 工具 started 无 terminal 一律 needs review。
+- [ ] 后台命令落 intent、pid/start token、process ownership 裁决。
+- [ ] Dock、通知、roster 只读同一 TaskLedger 投影。
+
+验收：父派子、子派孙，三处各杀一次。重启后直系 delivery 不串门；queued 可续；未知工具不重跑；terminal completion 仍能送到直接父。
+
+### G5：ChannelManager 与 durable ingress
+
+- [ ] 对齐并完成 Channel phase 1：fake sidecar、framed transport、BridgeProcess、稳定错误码。
+- [ ] 实现 ChannelManager、账号状态机、generation、account lock、退避熔断。
+- [ ] 实现 ChannelIngressStore、去重、cursor/ACK、背压、dead letter。
+- [ ] 实现 ChannelRouter、binding、provenance、GatewayWorkQueue。
+- [ ] 接 HeadlessSessionHost 与 SessionWorkScheduler。
+- [ ] 实现 authenticated local webhook/fake channel 参考入口。
+- [ ] `/channels` 与 `/channel doctor` 接 Gateway control plane。
+
+验收：假平台重复送 10,000 次同一 event，只开一枚 turn。分别杀在 persist 前、persist 后 ACK 前、claim 后，重启后无已接受消息静默丢失。
+
+### G6：ReplyAssembler、Outbox 与可靠投递
+
+- [ ] 实现 ReplyAssembler final/block/native 投影与稳定 payload hash。
+- [ ] 实现 OutboxStore、claim、attempt、Retry-After、receipt、dead letter。
+- [ ] thinking/usage/secret 默认不出站。
+- [ ] 实现 client id/receipt query 能力合同。
+- [ ] 实现 committed response 缺 outbox 的 RecoveryProjector。
+- [ ] ArtifactRef -> media upload 另走有界流程。
+- [ ] delivery failure 只重试发送，不重跑 Agent。
+
+验收：杀在 response commit 后、outbox enqueue 后、adapter send 后、receipt 前。支持幂等键的假平台只收一份；不支持者进入 delivery_unknown，不虚报成功。
+
+### G7：首只真渠道与生产运维
+
+- [ ] 先落 QQ Bot 参考 adapter，协议细节照 Channel 单阶段 5。
+- [ ] 真机验证登录、心跳、重连、cursor、文本/媒体、群聊准入。
+- [ ] 跑 Windows Scheduled Task 真机；Linux systemd user；macOS LaunchAgent。
+- [ ] 补配置 reload：安全字段原子换 snapshot，需重启字段明报。
+- [ ] 补 secret reload、账号凭据失效、NeedsLogin 与退避。
+- [ ] 补 operator runbook、备份/恢复、升级/回滚。
+
+验收：无人守终端跑 24 小时；断网、重连、杀进程、重启系统各走一回。账号、cursor、session、task、outbox 都能对账。
+
+### G8：故障扫点、容量与发布
+
+- [ ] 为失败矩阵每一行做 deterministic fault injection。
+- [ ] 跑 72 小时 soak，记录 CPU、RSS、线程、句柄、队列、文件、fsync、token。
+- [ ] 跑 10k 重复 ingress、并发 conversation、outbox 429/5xx、低磁盘。
+- [ ] 跑 terminal/app-server/gateway 共存与账号锁冲突。
+- [ ] 跑 focused tests、Release full CTest、三平台构建。
+- [ ] 跑 opt-in 真 provider；与 fake provider 证据分开。
+- [ ] 安全审计：SecretRef、日志、Trajectory、dead letter、控制面 auth、Package trust。
+- [ ] 更新 README、CHANGELOG、配置参考与升级说明。
+- [ ] 只有全部放行门过后，才把“persistent Gateway/automation/channel”写进公开能力表。
+
+验收：发布报告逐项给命令、环境、结果与未测边界。没有实测数字的地方仍写目标，不改口冒充成绩。
+
+## 二十、预计代码边界
+
+### 20.1 新增
+
+```text
+src/gateway/
+  process.*
+  profile.*
+  control_server.*
+  registry_store.*
+  recovery_service.*
+  status.*
+  service_manager.*
+
+src/automation/
+  types.*
+  store.*
+  scheduler.*
+  occurrence.*
+  heartbeat.*
+
+src/runtime/
+  headless_session_host.*
+  recovery_decision.*
+
+src/tools/
+  durable_task_store.*
+
+src/channel/
+  manager.*
+  bridge_process.*
+  ingress_store.*
+  session_host.*
+  reply_assembler.*
+  outbox_store.*
+  delivery_driver.*
+
+src/platform/
+  service_supervisor.*
+  windows_scheduled_task.*
+  systemd_user.*
+  launch_agent.*
+```
+
+目录名可在 G0 评审时微调。所有权与依赖方向不可借改名翻案。
+
+### 20.2 修改
+
+```text
+src/app/cli_options.*
+src/app/cli_app.*
+src/app/session_stack.*
+src/runtime/session_runtime.*
+src/runtime/session_work_scheduler.*
+src/runtime/loop_scheduler.*
+src/trajectory/*
+src/workflow/runtime.*
+src/tools/task_ledger.*
+src/tools/agent_task_coordinator.*
+src/config/config.*
+src/package/*
+tests/CMakeLists.txt
+```
+
+### 20.3 不该修改
+
+- 不为 Gateway 另抄一份 AgentLoop。
+- 不把平台 SDK 塞进 `src/agent` 或 `src/runtime`。
+- 不让 OS supervisor 读写 job/trajectory/outbox 业务账。
+- 不让 Channel sidecar 直写 Trajectory。
+- 不让 TaskLedger 保存 backend 指针的序列化假象。
+
+## 二十一、测试架构
+
+### 21.1 纯单测
+
+- 状态机非法边；
+- canonical JSON 与 hash；
+- schedule/timezone/DST；
+- claim lease；
+- recovery decision 全矩阵；
+- deterministic delivery id；
+- dedupe；
+- revision CAS；
+- permission fail-closed；
+- redaction。
+
+### 21.2 磁盘集成
+
+- 坏尾行、半截 manifest、原子 rename 失败；
+- hash chain 坏；
+- checkpoint 落后/超前；
+- 磁盘满、只读目录、权限错；
+- stale lock、PID 复用；
+- compaction/index 可删重建；
+- old loop explicit import。
+
+### 21.3 进程级驱动
+
+写 `gateway_fault_driver`，每道栅栏支持 `--crash-at <name>`：
+
+```text
+ingress.before_commit
+ingress.after_commit
+occurrence.after_claim
+run.after_started
+model.after_request_sent
+model.after_output_committed
+tool.after_started
+tool.after_terminal
+reply.after_artifact
+outbox.after_enqueue
+delivery.after_send
+shutdown.mid_close
+```
+
+驱动负责：起 Gateway、投事件、等栅栏、硬杀、重启、读账、核最终副作用计数。
+
+### 21.4 假件
+
+- FakeClock：墙钟、单调钟、倒拨、前跳、DST；
+- FakeProvider：首字节前挂、partial、tool call、429、5xx；
+- FakeTool：无副作用、幂等、有副作用、started 后挂；
+- FakeChannelSidecar：重复入站、断线、cursor、ACK 丢失；
+- FakeDeliveryEndpoint：client id、receipt query、429、永久 4xx；
+- FakeSupervisor：启动失败、快速崩、主动 stop。
+
+假件只能证明合同。真实 provider、真实 QQ、真实 supervisor 另列真机证据。
+
+### 21.5 静态检查
+
+```powershell
+rg -n "AppendMessage\(|AppendRawLine\(|TrajectoryRecorder::Start\(" src
+rg -n "std::thread|detach\(" src/gateway src/automation src/channel src/tools
+rg -n "token|secret|cookie|context_token" src/gateway src/automation src/channel
+rg -n "ProcessMode::Gateway|ResolveChannelActivation" src
+```
+
+检查目的不是逢词报错，而是逐个确认 writer、线程寿命、secret 投影与激活闸。
+
+## 二十二、最终验收门
+
+### A. 默认关闭
+
+- [ ] 普通 `lubancode` 不起 Gateway 线程、sidecar、listener、timer。
+- [ ] 配置存在 enabled account/job 也不暗开。
+- [ ] disabled 路不新增 state 写盘。
+
+### B. 耐久与恢复
+
+- [ ] 已 ACK ingress 不静默丢。
+- [ ] duplicate ingress 不重复开 turn。
+- [ ] source Journal 永不 reopen append。
+- [ ] unknown side effect 不自动重跑。
+- [ ] committed reply 缺 outbox 可确定性补出。
+- [ ] delivery retry 不重跑 Agent。
+
+### C. 常驻与运维
+
+- [ ] `run/install/start/stop/restart/status/doctor/logs` 齐。
+- [ ] Windows、Linux、macOS 各有真机证据。
+- [ ] 快速崩溃进 SafeMode，不起重启风暴。
+- [ ] graceful shutdown 与硬杀两路都有恢复报告。
+
+### D. 安全
+
+- [ ] 项目配置只能收窄权限。
+- [ ] Headless 未决审批 fail closed。
+- [ ] secret 不进模型、日志、Trajectory、TaskSpec、dead letter。
+- [ ] control endpoint 有认证与 revision 防覆盖。
+- [ ] Channel Package 未信任绝不起。
+
+### E. 质量与容量
+
+- [ ] focused Release tests 全绿。
+- [ ] full Release CTest 全绿。
+- [ ] fault matrix 全扫。
+- [ ] 72 小时 soak 有原始曲线。
+- [ ] 低磁盘、429、断网、坏账、PID 复用都跑。
+- [ ] 真 provider/真渠道与 fake 证据分开写。
+
+## 二十三、最后定案
+
+LubanCode 不缺会做事的手。缺的是一间常开的值房，一本到点能翻、崩后能续、送达能查的总账。
+
+这间值房不该另养一只 Agent，也不该重写现有 loop。它只把已有本事排成一条路：
+
+```text
+Gateway 守门
+-> Automation / Channel 叫醒
+-> Scheduler 排活
+-> Headless Session 开轮
+-> Trajectory 记事实
+-> Recovery 裁决断点
+-> Outbox 送结果
+-> Supervisor 管生死
+```
+
+先拿假渠道和假 provider 杀十二回进程。十二回都能把账说圆，再接真平台。到了那时，LubanCode 才不是“能恢复的终端 Agent”，而是一只真能长住、能守夜、能接事的持久 Agent。
