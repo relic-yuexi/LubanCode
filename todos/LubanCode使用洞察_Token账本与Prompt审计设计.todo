@@ -1,6 +1,6 @@
 # LubanCode 使用洞察、Token 账本与 Prompt 审计设计
 
-- 状态：A0/A1/A2 已落 main（A0=accounting/insights 合同与十二场夹具；A1=事实接线与旁路桥；A2=/usage 报告命令面）；A3(/prompt audit)起待实现
+- 状态：A0–A4 已落 main（A0=accounting/insights 合同与十二场夹具；A1=事实接线与旁路桥；A2=/usage 报告命令面；A3=/prompt audit 三层审法；A4=Session Analyzer：IntegrityGate/FrictionClassifier/FeatureSignal/派生仓）；A5(/insights 报告)起待实现
 - 级别：P1；其中 Usage 事实入账随 Trajectory P0 一道落地
 - 日期：2026-08-30
 - 范围：本机 LubanCode 新轨迹、当前工作区与显式选择的跨工作区报告
@@ -1308,25 +1308,25 @@ coverage，几本账不串。（`tests/unit/accounting/test_usage_aggregate.cpp`
 
 ### A3 `/prompt audit`
 
-- [ ] static source/override/token/schema 检查。
-- [ ] runtime manifest/prefix/cache 检查。
-- [ ] outcome-linked finding。
-- [ ] finding explain 与 event refs。
-- [ ] 扩展现有 `/prompt`，保住裸敲/reset 行为。
-- [ ] JSON 输出与隐私扫描。
+- [x] static source/override/token/schema 检查。（`src/insights/prompt_auditor.*` 的 `AuditPromptStatic`：§8.1 十二条落 S01–S13——override 链/同文 hash 重复/n-gram Jaccard 重合/预算占比（预算未知不判）/工具描述过长与同文/schema 缺 type=object、properties/缺 required/过深/同名撞车/疑似绝对冲突与口号段（confidence=low 只给 suspected）/动态段插中段/用户模块漂移/MCP 常驻占比。段级正文账来自 A1 `PromptSourceLedgerEntry` 新补的 `content_text`（内存账，不序列化不进报告），测量与真实拼装一字不差）
+- [x] runtime manifest/prefix/cache 检查。（`AuditPromptRuntime` + `SummarizeRuntimeChanges` + 读侧 `CollectRuntimeRequests(FromStreams)`：Journal `model.request.prepared.payload.request_snapshot_ref` 逐请求解析 RequestSnapshotMetadata，与 ProjectUsage 的 sample 按 run+request+attempt 对账；R01 缺 snapshot 点名/R02 toolset 抖动/R03 同 epoch 前缀断/R04 稳定段逐请求变/R05 system 增长与 cache 命中同向观察（只说同向不写因果，反证栏注明 TTL/波动也长这模样））
+- [x] outcome-linked finding。（`session_analyzer.cpp` 的 `AuditPromptOutcome`：吃 A4 分析结果的摩擦折叠账，抬 O01–O05——passed 缺验证（只说证据缺失不断言假完成）/同工具反复重试（注明可能是外部故障）/验证失败/provider 失败/取消；证据落场次与事件引用，§8.3 措辞戒律逐条守）
+- [x] finding explain 与 event refs。（`/prompt audit explain <finding-id>`：按稳定 id（P-AUD-S02/R03/O01 按规则码钉死，换 mode 重跑不挪窝）重跑三层挑一条打全账——证据/反证/建议/规则版本；runtime finding 的证据回引 prepared 事件 id）
+- [x] 扩展现有 `/prompt`，保住裸敲/reset 行为。（`prompt_commands.cpp` 只加分派壳：args 以 "audit" 起头剥前缀递 `HandleSlashPromptAudit`，裸敲/reset 路一行未动；命令体在 `app/commands/prompt_audit_commands.*`，§11.1 的"只加 audit 分派壳"字面照办）
+- [x] JSON 输出与隐私扫描。（`BuildPromptAuditJson`：`lubancode.prompt.audit` v1，`privacy.content_policy=metadata_only` 自描述；打印前过 `RedactSecrets` 兜底。测试 `test_prompt_auditor.cpp` 埋 `sk-CANARY` 进段正文与 manifest，断言 finding/事实账/JSON 全不带 canary；绝对路径不落，证据只落 hash/token/计数/段名/事件引用）
 
-验收：给定 fixture，规则命中稳定；报告不含 prompt 正文；每条 finding 能回到 source/event。
+验收：给定 fixture，规则命中稳定；报告不含 prompt 正文；每条 finding 能回到 source/event。（`tests/unit/insights/test_prompt_auditor.cpp`：S01–S12 正反例+同 fixture 稳定 id；`tests/unit/app/test_prompt_audit_command.cpp`：解析/渲染/JSON schema/canary）
 
 ### A4 Session Analyzer
 
-- [ ] IntegrityGate。
-- [ ] FrictionClassifier。
-- [ ] FeatureSignalEngine。
-- [ ] session summary 原子写与 stale 判定。
-- [ ] active/incomplete/corrupt coverage。
-- [ ] analyzer/rule/redaction 版本账。
+- [x] IntegrityGate。（`src/insights/integrity_gate.*`：五态 Missing/Active/Incomplete/Corrupt/Analyzed；链与父子边委托 trajectory `VerifySessionDir`（同一只引擎不另写一套），截断与坏链靠逐文件 `VerifyJournalFile` 的 `truncated_tail` 分型——纯截断判 incomplete，链断/坏行/边不对一律 corrupt，坏账整间排除且 notes 点名理由；`tests/unit/insights/test_integrity_gate.cpp` 五态各一例）
+- [x] FrictionClassifier。（`src/insights/friction_classifier.*`：§9.3 十六类封闭表在册，v1 判 Journal 里有确凿证据的九类（工具失败按 reason 词表细分 invalid_input/permission.denied、同 turn 同工具 ≥2 次挂 repeated_retry、验证失败/缺失、provider 失败、取消、审批等待）；一件事可挂多类；语义类（ambiguity/user.correction/context.loss 等）单凭 Journal 断不了——不硬猜，`tests/unit/insights/test_friction_classifier.cpp` 正反例钉死）
+- [x] FeatureSignalEngine。（`src/insights/feature_signal.*`：§12.2 映射落 FS-01–FS-04——同类验证 ≥3 次固化 skill/workflow、工具定义占实测输入 ≥40% 收窄工具面、同 epoch 前缀断+疑似未命中候选、子执行 token 超主会话收窄任务；只推仓库现成功能，每条带证据与先决条件，先决不满足不出）
+- [x] session summary 原子写与 stale 判定。（`src/insights/derived_store.*`：`<session>/derived/insights-v1/session-summary.json` tmp+rename 原子替换（Windows 不覆盖 rename 先挪 .old 再换，全程不留半截）；stale = analyzer 版本或任一 stream terminal hash 变了；fresh 摘要直接复用不重写，stale 删掉重算。`tests/unit/insights/test_session_analyzer.cpp`：删 derived 重跑字节相同、fresh 复用、篡改版本判 stale 重算回真值）
+- [x] active/incomplete/corrupt coverage。（`session_analyzer.cpp` 的 `ScanWorkspaceSessions`：目录名头 8 位日期窗过滤（形状不合不猜日期，收进扫描靠 gate 说话），status_counts 单列五态；`AnalyzeSession` active 默认跳过、include_active 才读已提交高水位且恒标 provisional、不写长期摘要（§14.2 不与 writer 争）；测试钉 4 场 mixed fixture 的 counts 与排除理由）
+- [x] analyzer/rule/redaction 版本账。（summary 带 `analyzer_version`（schema 冻结字段）；rule 版本逐 finding 带（`prompt-audit-v1:S02`/`friction-v1:F03`/`feature-signal-v1`），redaction 版本沿用 A0 `redaction.*` 的实现账。**缺口如实记**：§14.6 想要摘要级的 analyzer/rule/redaction/renderer 四版本，A0 冻结的 SessionInsightSummary schema 只有 analyzer_version 一栏——本批不改冻结 schema，rule/redaction 升版靠 analyzer 版本号联动（stale 判定随动）；要独立四栏须另升 schema 版本，归后续批次）
 
-验收：同一封口 session 重算字节相同；坏账排除且理由可见。
+验收：同一封口 session 重算字节相同；坏账排除且理由可见。（`tests/unit/insights/test_session_analyzer.cpp`：字节稳定/fresh 复用/stale 重算/摘要合同/active 不写摘要/workspace 扫描 coverage/功能信号/outcome 抬升）
 
 ### A5 `/insights`
 

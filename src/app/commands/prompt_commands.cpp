@@ -2,6 +2,7 @@
 #include "app/commands/prompt_commands.hpp"
 
 #include "app/commands/command_registry.hpp"  // SlashDispatchContext(分派注册制)
+#include "app/commands/prompt_audit_commands.hpp"  // /prompt audit 的分派壳递这(A3)
 #include "cli/terminal_port.hpp"  // TermOut/TermErr:散打 std::cout 清零,统一走输出端口
 
 using lubancode::cli::TermOut;
@@ -281,6 +282,12 @@ CommandFlow HandleSlashSoul(SlashDispatchContext& ctx, const lubancode::cli::Par
 }
 
 CommandFlow HandleSlashPrompt(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
+    // Token 账本单 A3:/prompt audit … 递给审计件;裸敲与 reset 行为不动。
+    if (parsed.args.rfind("audit", 0) == 0 &&
+        (parsed.args.size() == 5 || parsed.args[5] == ' ' || parsed.args[5] == '\t')) {
+        std::string audit_args = parsed.args.size() > 5 ? parsed.args.substr(5) : std::string();
+        return HandleSlashPromptAudit(ctx, audit_args);
+    }
     HandlePromptCommand(parsed.args, ctx.opts->law_source, *ctx.persona, *ctx.prompts_dir);
     return CommandFlow::Continue;
 }
