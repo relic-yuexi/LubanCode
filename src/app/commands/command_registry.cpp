@@ -20,6 +20,7 @@
 #include "app/commands/session_commands.hpp"
 #include "app/commands/settings_commands.hpp"
 #include "app/commands/trace_commands.hpp"
+#include "app/commands/usage_commands.hpp"
 #include "app/commands/workflow_commands.hpp"
 #include "app/commands/workspace_commands.hpp"
 
@@ -51,6 +52,7 @@ const std::vector<SlashCommandSpec>& SlashCommandTable() {
         {lubancode::cli::SlashCommand::Worktree, "worktree", HandleSlashWorktree, false, false},
         {lubancode::cli::SlashCommand::Clear, "clear", HandleSlashClear, false, false},
         {lubancode::cli::SlashCommand::Context, "context", HandleSlashContext, false, false},
+        {lubancode::cli::SlashCommand::Usage, "usage", HandleSlashUsage, false, false},
         {lubancode::cli::SlashCommand::Compact, "compact", HandleSlashCompact, false, false},
         {lubancode::cli::SlashCommand::Think, "think", HandleSlashThink, false, false},
         {lubancode::cli::SlashCommand::Skills, "skills", HandleSlashSkills, false, false},

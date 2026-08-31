@@ -261,6 +261,14 @@ add_executable(latex_box_experiment EXCLUDE_FROM_ALL manual/latex_box_experiment
 target_link_libraries(latex_box_experiment PRIVATE lubancode_core)
 target_compile_features(latex_box_experiment PRIVATE cxx_std_23)
 
+# Token 账本单 A2:/usage 端到端冒烟(不进 ctest,验收手动跑):
+#   usage_smoke_driver <临时目录>
+# flag 开:真账本+假后端回合+旁路桥,/usage 三种形态打给肉眼对账,数字与
+# 假后端钉死的 usage 逐笔核对;flag 关:降级内存粗账,明说"账未开"。
+add_executable(usage_smoke_driver EXCLUDE_FROM_ALL manual/usage_smoke_driver.cpp)
+target_link_libraries(usage_smoke_driver PRIVATE lubancode_app)
+target_compile_features(usage_smoke_driver PRIVATE cxx_std_23)
+
 # 可追回 artifact(第二期)的布局实测驱动器:手动跑,验收记录用。
 #   artifact_layout_dump <输出根目录>
 add_executable(artifact_layout_dump EXCLUDE_FROM_ALL manual/artifact_layout_dump.cpp)

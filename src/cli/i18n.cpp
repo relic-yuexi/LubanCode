@@ -690,6 +690,19 @@ const Entry kZhCN[] = {
     {"slash.desc.send", "/send <名字或短id> <话>:给另一场会话递一张字条"},
     {"slash.desc.peerperm", "/peerperm auto|accept|hold|refuse:跨会话来信的收件档"},
     {"slash.desc.doctor", "/doctor effort|cache:本地兼容端 Effort 档位与前缀缓存诊断(探针要发请求)"},
+    {"slash.desc.usage", "/usage [session <id>] [--by model|purpose|run|outcome] [--json]:Token 账本报告——coverage、按用途/模型分账、cache 与估算费用(只读,只摆事实)"},
+
+    // ---- /usage(Token 账本单 A2) ----
+    {"cmd.usage.usage_line",
+     "用法: /usage | /usage session <id> | /usage --by model|purpose|run|outcome | /usage --json"},
+    {"cmd.usage.unknown_arg", "认不得的参数。"},
+    {"cmd.usage.later_scope",
+     "跨场汇总(day/week/workspace/all)属后续批次,本批只有会话级账;先开 features.trajectory 攒真账。"},
+    {"cmd.usage.flag_off",
+     "Token 账本未开(features.trajectory 关):Journal 一笔没记,下面是本会话内存粗账(按角色累计,含当前回合,重启即清):"},
+    {"cmd.usage.memory_caveat",
+     "口径说明:内存粗账没有 purpose 分账、没有逐请求 coverage,也不含旁路请求全账;开 features.trajectory 后 /usage 出逐请求实测账。"},
+    {"cmd.usage.session_not_found", "本 workspace 没有这场 session: {0}"},
 
     // ---- /update ----
     {"cmd.update.usage", "用法: /update 或 /update check"},
@@ -2103,6 +2116,7 @@ const Entry kEn[] = {
     {"keymap.unbound_suffix", " (unbound)"},
     {"slash.desc.keymap", "Show or rebind keys (/keymap set action chord; saved user-level)"},
     {"slash.desc.doctor", "/doctor effort|cache: local-compat effort levels and prefix-cache diagnostics (probes send requests)"},
+    {"slash.desc.usage", "/usage [session <id>] [--by model|purpose|run|outcome] [--json]: token ledger report -- coverage, purpose/model splits, cache and estimated cost (read-only, facts only)"},
     {"slash.desc.workflow", "Reusable workflow graphs: list/show/graph/validate/run/resume/cancel"},
     {"slash.desc.goal", "Durable goal: objective/status/edit/pause/resume/clear (multi-turn until verifiable end)"},
     {"slash.desc.loop", "session-scoped recurring loop: /loop [interval] [prompt] creates, list/pause/resume/stop manage, run dispatches now"},
@@ -2452,6 +2466,17 @@ const Entry kEn[] = {
     {"slash.desc.peerperm", "/peerperm auto|accept|hold|refuse: how incoming peer messages are received"},
 
     // ---- /update ----
+    {"cmd.usage.usage_line",
+     "Usage: /usage | /usage session <id> | /usage --by model|purpose|run|outcome | /usage --json"},
+    {"cmd.usage.unknown_arg", "Unrecognized argument."},
+    {"cmd.usage.later_scope",
+     "Cross-session rollups (day/week/workspace/all) ship in a later batch; this batch is per-session only. Enable features.trajectory to start collecting the ledger."},
+    {"cmd.usage.flag_off",
+     "Token ledger is off (features.trajectory disabled): nothing is journaled. Below is the in-memory tally for this session (per-role, includes the current turn, lost on restart):"},
+    {"cmd.usage.memory_caveat",
+     "Caveat: the in-memory tally has no purpose split, no per-request coverage, and is not the full bypass ledger. Enable features.trajectory for the per-request journal report."},
+    {"cmd.usage.session_not_found", "No such session in this workspace: {0}"},
+
     {"cmd.update.usage", "Usage: /update or /update check"},
     {"cmd.update.checking", "Checking the latest GitHub Release..."},
     {"cmd.update.failed", "Update check failed: {0}"},

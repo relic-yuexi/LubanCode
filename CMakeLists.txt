@@ -529,6 +529,10 @@ add_library(lubancode_engine STATIC
   src/accounting/pricing_table.cpp
   src/accounting/cost_estimator.cpp
   src/accounting/usage_projector.cpp
+  # Token 账本单 A2(/usage):五层聚合与 cache 行为观察(纯求和,零 IO)、
+  # 一场 session 的 Journal -> UsageSample 读侧装配(纯读,不回写)。
+  src/accounting/usage_aggregate.cpp
+  src/accounting/session_usage_reader.cpp
   src/agent/prompt_manifest.cpp
   # A1(事实接线):ResolvedPromptBuilder 把 PromptAssembler 与三层后叠
   # (延迟工具索引/模型目录指令/魂)收进同一次解析,产 AssembledPrompt{text,
@@ -856,6 +860,10 @@ add_library(lubancode_app STATIC
   src/app/commands/trace_commands.cpp
   # 终端接线收尾单:/model 命令 presenter(自大类搬出)。
   src/app/commands/model_commands.cpp
+  # Token 账本单 A2(/usage):Journal 实测账的用户报告面——降级内存粗账、
+  # 价格表装载、终端渲染与 JSON 输出;纯领域件在 accounting(usage_aggregate/
+  # session_usage_reader,engine 库)。
+  src/app/commands/usage_commands.cpp
   # 会话终章:命令分派注册制(47 案 switch 换注册表,路由与门)。
   src/app/commands/command_registry.cpp
   # 会话终章:子系统接线器(goal/loop/plan/peer/录制,状态+装配+泵+存档恢复)。

@@ -166,6 +166,10 @@ AGENTS.md 指令链的逐 source 账：项目根、目标、上限、每份文�
 
 裸敲展示系统提示、工具 schema、历史与总占用。带 `256k`、`512k`、`1m` 或正整数时，只改本场 token 窗口。
 
+### `/usage [session <id>] [--by model|purpose|run|outcome] [--json]`
+
+Token 账本报告（只读，只摆事实）。裸敲看当前会话：coverage（几笔有 provider usage、几笔 unknown）、输入与 cache 读写、输出（reasoning 注明已含在内）、按模型/用途的 token 占比、估算费用、cache 行为观察与账的成色。`session <id>` 看同 workspace 的指定场；`--by` 换分账表；`--json` 出机器可读账（`lubancode.usage.report` v1）。当前会话恒标 `provisional`（未封口，读已提交高水位）。费用来自 `~/.lubancode/pricing.json` 价格表（没配则 token 照报、费用 `not_priced`；本地估算，非账单）。`features.trajectory` 关时账未开：明说之后降级给内存角色粗账并注明口径差异。`day`/`week`/`workspace`/`all` 跨场汇总属后续批次。累计账与 `/context` 的"下一请求快照"是两本账，不混。
+
 ### `/compact [重点说明]`
 
 立刻压缩旧历史。可在参数里补一句“这次必须保住什么”。压缩模型由 `compact_model` 决定，留空沿用会话模型。
