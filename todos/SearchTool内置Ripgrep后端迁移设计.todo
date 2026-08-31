@@ -242,6 +242,16 @@ tools/search.cpp:332:std::string SearchTool::name() const {
 
 100 条上限按“命中行”计。JSON `match` event 一条算一条；同一行含多个 submatch 仍只算一条，与旧工具“返回命中行”口径一致。
 
+（2026-08-31 补）新增 `max_results` 事前声明参数（软请求）：
+
+```json
+"max_results": 50
+```
+
+- 模型侧事前声明“这次要多少”，搜索侧到数即停、如实标 `truncated`——把“往 context 灌多少”变成模型可决策的显式参数，不靠四道墙事后硬截（Claude Code `head_limit` 同款路数）。
+- 与四道墙并存：`max_results` 是软请求，只能**调低**不能调高——超过 100 条硬帽一律按帽截。缺省不填走 100 条帽，行为与旧合同对齐。
+- grep 按“命中行”计，glob 按文件计；token 账（使用洞察单的 purpose 账）后续可按此参数对账搜索输出体量。
+
 ### 5.2 glob 模式
 
 保留：
@@ -498,7 +508,9 @@ ignore files: on
 - 隐藏项目文件仍搜；
 - `fixed_strings=true` 的用途；
 - 显式 path 可搜 ignored/观察区；
-- 100 条与长行截断。
+- 100 条与长行截断；
+- `max_results` 事前声明（软请求，只降不升）；
+- （2026-08-31 补）搜索只走 `search` 工具，明写“不要用 run_command 跑 rg/grep"——学 Claude Code 的 NEVER 句式（"NEVER invoke `grep` or `rg` as a Bash command"），不是 prefer 是 never：两门都在，但搜索这门里不分岔（呼应 §一断语）。
 
 ## 八、发行与安装
 
@@ -618,6 +630,8 @@ lubancode/
 - [ ] “必须保留”全等；“有意迁移”只准落在批准表里。
 - [ ] SearchTool 默认切到 BundledRipgrepRunner。
 - [ ] 更新中英文 prompt、fallback 文案、schema 与 tool_text tests。
+- [ ] （2026-08-31 补）`max_results` 事前声明参数落地：schema、四道墙只降不升的钳制、truncated 口径、中英文文案齐改（语义见 §5.1 补段）。
+- [ ] （2026-08-31 补）search 工具中英文文案加 NEVER 句式：“搜索一律用 search 工具，不要在 run_command 里跑 rg/grep"（§7.3 补条）。
 - [ ] 更新 CHANGELOG，写清 regex/ignore 迁移。
 - [ ] PTC `search` 调用照跑；Plan/Explore 注册面不变。
 
