@@ -9,9 +9,12 @@
 #include <cstdlib>
 #include <ctime>
 #include <chrono>
+#include <functional>
 #include <iostream>
+#include <memory>
 #include <sstream>
 #include <thread>
+#include <utility>
 #include <vector>
 
 #include "agent/compact.hpp"
@@ -319,6 +322,22 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
     }
     context_tracker.set_window_tokens(*parsed);
     TermOut() << trf("cmd.context.window_changed", *parsed) << "\n";
+}
+
+// Token 账本单 A1:compact 子请求(map/reduce)的旁路桥工厂。路由解完才
+// 知道 provider,各路由点各自烤;trajectory 空(flag 关/单测)给空工厂,
+// 一次采样一笔不落,行为与从前一致。
+std::function<std::unique_ptr<lubancode::agent::LoopBoundaryRecorder>()> CompactBypassFactory(
+    const CompactSessionInputs& in, const std::string& provider) {
+    if (in.trajectory == nullptr) {
+        return {};
+    }
+    lubancode::runtime::TrajectorySessionLedger* ledger = in.trajectory;
+    const std::string wire = in.trajectory_wire;
+    return [ledger, wire, provider]() -> std::unique_ptr<lubancode::agent::LoopBoundaryRecorder> {
+        lubancode::runtime::TrajectoryTurnBridge::Identity identity{provider, wire, "host"};
+        return ledger->NewBypassBridge(std::move(identity));
+    };
 }
 
 // /compact 命令:窗口预算 + manifest 守恒校验 + 热区保留,一条路走到底。
@@ -1541,9 +1560,12 @@ void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) 
     if (in.trajectory != nullptr) {
         in.trajectory->RecordCompactRequested("manual", *in.session_compact_epoch, trajectory_state_before);
     }
+    // Token 账本单 A1:compact 子请求的旁路桥工厂随路由烤进 options。
+    lubancode::agent::CompactOptions compact_options = in.build_compact_options();
+    compact_options.bypass_recorder = CompactBypassFactory(in, compact_routed.route.provider);
     const auto compact_result =
         HandleCompactCommand(args, loop, *compact_routed.backend, compact_routed.route, theme,
-                             in.spinner_enabled, in.build_compact_options(), *in.session_compact_epoch,
+                             in.spinner_enabled, std::move(compact_options), *in.session_compact_epoch,
                              &compact_accounting);
     // 分角色记账 + 状态栏短闪:压缩用了谁、前后多少,一行交代。
     in.record_usage(lubancode::agent::ModelRole::Cheap, compact_routed.route, compact_accounting);
@@ -1614,7 +1636,10 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
     // 压缩路由(模型分工第一期):cheap 角色的有效值;跨 provider 拿不到
     // backend 就直接走 normal 修一次的路(同一只),失败再报,不静默截史。
     auto compact_routed = in.route_compact();
-    const lubancode::agent::CompactOptions options = in.build_compact_options();
+    // Token 账本单 A1:子请求旁路桥工厂随 cheap 路由烤进 options;回退
+    // 修一次时换 normal 路由重烤(见下)。
+    lubancode::agent::CompactOptions options = in.build_compact_options();
+    options.bypass_recorder = CompactBypassFactory(in, compact_routed.route.provider);
     // 压缩前后账走压力 dry-run 口径(P1-1 口径统一):与触发线、下一次真实
     // 请求同一本——拿未压缩全量估,重复工具结果全被虚算,压完的"瘦"也是
     // 假瘦。/context 的"最近一次压缩"行、compact_v2 的 pre/post_tokens
@@ -1686,8 +1711,12 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
             << trf("router.fallback_flash", "cheap:" + compact_routed.route.model, "normal:" + repair_routed.route.model)
             << theme.reset << "\n";
         if (repair_routed.backend != nullptr) {
+            // 回退换 normal 路由:旁路桥的 identity(provider)重烤,不拿
+            // cheap 的名头记 normal 的请求。
+            lubancode::agent::CompactOptions repair_options = options;
+            repair_options.bypass_recorder = CompactBypassFactory(in, repair_routed.route.provider);
             result = lubancode::agent::CompactTurnPartitioned(*repair_routed.backend, repair_routed.route.model,
-                                                               loop.History(), options,
+                                                               loop.History(), repair_options,
                                                                loop.context().structural_options(),
                                                                repair_routed.route.effort, &compact_accounting);
             if (result.has_value()) {

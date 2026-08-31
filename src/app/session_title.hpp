@@ -14,6 +14,7 @@
 #include <expected>
 #include <string>
 
+#include "agent/loop.hpp"  // LoopBoundaryRecorder(Token 账本单 A1:旁路落账口)
 #include "agent/model_router.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
@@ -42,7 +43,8 @@ std::expected<std::string, std::string> RefineSessionTitle(lubancode::api::Backe
                                                            const std::string& reasoning_effort,
                                                            const std::string& first_query, int timeout_secs = 0,
                                                            const std::atomic<bool>* cancel = nullptr,
-                                                           lubancode::agent::BackgroundCallAccounting* accounting = nullptr);
+                                                           lubancode::agent::BackgroundCallAccounting* accounting = nullptr,
+                                                           lubancode::agent::LoopBoundaryRecorder* boundary_recorder = nullptr);
 
 // 标题清洗(纯函数,单测钉):剥代码围栏与首尾引号、压连续空白成单空格、
 // 限 max_chars 个 UTF-8 码点(绝不从码点中腰劈开)、剥两端空白。全空给

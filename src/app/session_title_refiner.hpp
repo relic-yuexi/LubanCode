@@ -26,6 +26,10 @@
 #include "agent/model_router.hpp"  // BackgroundCallAccounting
 #include "api/backend.hpp"
 
+namespace lubancode::runtime {
+class TrajectorySessionLedger;
+}
+
 namespace lubancode::app {
 
 class SessionTitleRefiner {
@@ -36,6 +40,13 @@ public:
         std::string effort;         // 路由档位;空 = 精炼请求自带最低档
         std::string first_query;    // 首问原文(线程内截 600 字节)
         std::uint64_t generation = 0;  // 起飞时的标题代数,落地对代
+        // Token 账本单 A1(旁路落账):flag 开的会话递账本,精炼请求在
+        // worker 线程自铸旁路桥落 Journal(purpose=title_refine)。
+        // recorder 提交全程持锁,后台线程与主线程的写在盘上串行;线程
+        // 只持这只裸指针+值拷贝,不引用会话其它共享态。空 = 没接轨迹。
+        lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
+        std::string trajectory_wire;  // 桥 identity 的渠道名(与主 turn 桥同源)
+        std::string provider;         // 精炼路由的 provider(桥 identity)
     };
     struct Outcome {
         bool ok = false;         // 采样成功且清洗后非空

@@ -1,10 +1,12 @@
 #include "agent/microcompact.hpp"
 
 #include <atomic>
+#include <memory>
 #include <sstream>
 #include <utility>
 #include <variant>
 
+#include "accounting/purpose.hpp"  // RequestPurpose(Token 账本单 A1)
 #include "agent/context.hpp"  // EstimateUtf8Tokens(输入估算用)
 #include "agent/sample_model.hpp"  // SampleModel 原语:采样的公共路(批一·病四)
 
@@ -122,6 +124,14 @@ std::expected<MicrocompactSummary, std::string> RunMicrocompact(
     SampleOptions sample_options;
     sample_options.cancel = external_cancel;
     sample_options.timeout_secs = options.timeout_secs;
+    // Token 账本单 A1:旁路桥在场就把这次 L2 请求落成 Journal 里的
+    // prepared/sent/usage/output(purpose=compact_map)。
+    std::unique_ptr<LoopBoundaryRecorder> recorder;
+    if (options.bypass_recorder != nullptr) {
+        recorder = options.bypass_recorder();
+        sample_options.boundary_recorder = recorder.get();
+        sample_options.purpose = accounting::RequestPurpose::CompactMap;
+    }
     const SampleResult sampled = SampleModel(backend, sample, sample_options);
 
     if (accounting != nullptr) {

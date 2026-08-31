@@ -31,6 +31,24 @@ bool GetBool(const nlohmann::json& payload, const char* key) {
     return it != payload.end() && it->is_boolean() ? it->get<bool>() : false;
 }
 
+}  // namespace
+
+// 对话轮的 purpose 白名单(Token 账本单 A1,§6.2 十二值的分家):main/
+// subagent/goal 续跑/循环迭代是"与用户/目标对话"的轮,输出是会话历史;
+// 其余(compact_map/compact_reduce/memory_extract/title_refine/doctor_probe/
+// insights_model_review/other_host_request/workflow_node 的 SampleModel 路)
+// 是回合外的宿主工作请求,输出由宿主消费,不折进 effective_conversation。
+// purpose 为空(v1 旧账/未标号的旧 v2 账)按对话轮处理——老行为零变。
+bool PurposeFoldsIntoConversation(const std::string& purpose) {
+    if (purpose.empty() || purpose == "main_turn" || purpose == "subagent_turn" ||
+        purpose == "goal_continue" || purpose == "loop_iteration") {
+        return true;
+    }
+    return false;
+}
+
+namespace {
+
 std::uint64_t GetUint(const nlohmann::json& payload, const char* key) {
     const auto it = payload.find(key);
     if (it == payload.end()) {
@@ -51,12 +69,19 @@ struct FoldIndex {
     std::map<std::string, std::size_t> calls;
     std::map<std::string, std::size_t> requests;
     std::map<std::string, std::size_t> turns;
+    // turn 内已折进 effective_conversation 的 input 消息位次(Token 账本单
+    // A1):旁路用途的 turn(compact/抽取/起名一类)整 turn 的 input 也是
+    // 宿主材料,prepared 的 purpose 一到就回溯剔除——input.received 先于
+    // prepared 落账(状态机约束 3),折的时候 purpose 还没见着,只能记账
+    // 后裁。折叠局部账,不进 ReplayState 序列化。
+    std::map<std::string, std::vector<std::size_t>> turn_input_slots;
 };
 
 void RebuildIndex(const ReplayState& state, FoldIndex* index) {
     index->calls.clear();
     index->requests.clear();
     index->turns.clear();
+    index->turn_input_slots.clear();
     for (std::size_t i = 0; i < state.tools.size(); ++i) {
         index->calls[state.tools[i].call_id] = i;
     }
@@ -145,6 +170,12 @@ bool FoldEvent(const EventEnvelope& envelope, ReplayState* state, FoldIndex* ind
             message.source_event_id = envelope.event_id;
             message.source_event_hash = envelope.event_hash;
             state->effective_conversation.push_back(std::move(message));
+            // 记进 turn 的 input 位次账:turn 若被旁路用途的 prepared 认领,
+            // 这些 input 回溯剔除(见 ModelRequestPrepared)。
+            if (envelope.turn_id.has_value()) {
+                index->turn_input_slots[*envelope.turn_id].push_back(
+                    state->effective_conversation.size() - 1);
+            }
             return true;
         }
         case EventKind::ContextAttached:
@@ -160,6 +191,23 @@ bool FoldEvent(const EventEnvelope& envelope, ReplayState* state, FoldIndex* ind
             step.model = GetString(payload, "model");
             step.provider = GetString(payload, "provider");
             step.wire = GetString(payload, "wire");
+            step.purpose = GetString(payload, "purpose");
+            // 旁路用途(Token 账本单 A1):本 turn 是回合外的宿主小请求,
+            // 已折进去的 input 是宿主喂的材料,回溯剔出会话历史(input
+            // 落在 prepared 之前,折的时候 purpose 还没见着)。
+            if (envelope.turn_id.has_value() && !PurposeFoldsIntoConversation(step.purpose)) {
+                const auto slots = index->turn_input_slots.find(*envelope.turn_id);
+                if (slots != index->turn_input_slots.end()) {
+                    for (auto it = slots->second.rbegin(); it != slots->second.rend(); ++it) {
+                        if (*it < state->effective_conversation.size()) {
+                            state->effective_conversation.erase(
+                                state->effective_conversation.begin() +
+                                static_cast<std::ptrdiff_t>(*it));
+                        }
+                    }
+                    slots->second.clear();
+                }
+            }
             if (payload.contains("parameters") && payload["parameters"].is_object()) {
                 step.parameters = payload["parameters"];
             }
@@ -197,14 +245,18 @@ bool FoldEvent(const EventEnvelope& envelope, ReplayState* state, FoldIndex* ind
                                          : nlohmann::json::array();
                 step.stop_reason = GetString(payload, "stop_reason");
                 // §5.3:同一份输出不另落 assistant message——会话历史由这枚
-                // 事件投影。
-                ReplayMessage message;
-                message.role = ReplayMessage::Role::Assistant;
-                message.origin = OriginName(envelope.origin);
-                message.blocks = step.output_blocks;
-                message.source_event_id = envelope.event_id;
-                message.source_event_hash = envelope.event_hash;
-                state->effective_conversation.push_back(std::move(message));
+                // 事件投影。宿主旁路用途(Token 账本单 A1)例外:compact/
+                // 起名/抽取的输出是宿主吃掉的工作产物,折进去会污染 resume
+                // 的会话历史——账照记在 step 里,人不进对话。
+                if (PurposeFoldsIntoConversation(step.purpose)) {
+                    ReplayMessage message;
+                    message.role = ReplayMessage::Role::Assistant;
+                    message.origin = OriginName(envelope.origin);
+                    message.blocks = step.output_blocks;
+                    message.source_event_id = envelope.event_id;
+                    message.source_event_hash = envelope.event_hash;
+                    state->effective_conversation.push_back(std::move(message));
+                }
             } else {
                 step.output_state = envelope.kind == EventKind::ModelOutputFailed ? "failed" : "cancelled";
                 step.output_event_id = envelope.event_id;
@@ -534,6 +586,7 @@ nlohmann::json ReplayRequestStep::ToJson() const {
                           {"model", model},
                           {"provider", provider},
                           {"wire", wire},
+                          {"purpose", purpose},
                           {"parameters", parameters},
                           {"message_refs", message_refs},
                           {"sent", sent},
@@ -554,6 +607,7 @@ std::optional<ReplayRequestStep> ReplayRequestStep::FromJson(const nlohmann::jso
     step.model = GetString(json, "model");
     step.provider = GetString(json, "provider");
     step.wire = GetString(json, "wire");
+    step.purpose = GetString(json, "purpose");
     if (json.contains("parameters") && json["parameters"].is_object()) {
         step.parameters = json["parameters"];
     }

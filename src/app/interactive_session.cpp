@@ -285,6 +285,10 @@ void TerminalSessionController::StartTitleRefinement(const std::string& first_qu
     inputs.effort = std::move(detached.route.effort);
     inputs.first_query = first_query;
     inputs.generation = titles_.generation();
+    // Token 账本单 A1:精炼请求的旁路桥材料(purpose=title_refine)。
+    inputs.trajectory = session_runtime_.trajectory();
+    inputs.trajectory_wire = session_runtime_.wire_name();
+    inputs.provider = detached.route.provider;
     titles_.refiner().Start(std::move(inputs));
 }
 

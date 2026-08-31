@@ -29,6 +29,7 @@
 
 #pragma once
 
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
@@ -127,6 +128,18 @@ struct PromptSourceLedgerEntry {
     PromptModuleOrigin origin = PromptModuleOrigin::EmbeddedDefault;
     std::string profile;   // 选中 Profile 时记名;default 上下文为空
     std::string file;      // 磁盘来源的 UTF-8 全路径;嵌入/现填段为空
+    // Token 账本单 A1(ResolvedPromptBuilder 的地基):AssembleSystemPrompt
+    // 在拼装现场就地记这段渲染正文的 hash/token 估算/拼装次序——不靠
+    // analyzer 事后按 rel_path 回查文件再猜一遍(源文件可能已被改动,
+    // 猜出来的账会跟真实拼出来的文本对不上)。BuildPromptProfileLedger
+    // (纯审计路,不渲染)不填这三项,恒为空/0。
+    std::string content_hash;             // 本段渲染正文的 SHA-256(空 = 未记)
+    std::int64_t content_tokens_estimated = 0;  // 本段渲染正文的估算 token
+    int order = 0;                        // 本段在最终拼装里的次序(0 起,稳定)
+    // 本段压掉了哪些下层同 id 段(ResolveModule 解析现场如实记的来源标签,
+    // 如 "embedded default"/"user global default";§8.1 静态规则第 1 条的
+    // 地基)。空 = 只有一层给出内容,没被覆盖。
+    std::vector<std::string> overrides;
 
     // 契约 §6.5 口径的一行:"<相对路径> <- <来源标签>"。
     std::string FormatLine() const;

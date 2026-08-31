@@ -234,6 +234,9 @@ private:
         in.persist_new_messages = [this]() { PersistNewMessages(); };
         // P0-2 轨迹:flag 开的会话递账本,compact 走 typed 状态机。
         in.trajectory = session_runtime_.trajectory();
+        // Token 账本单 A1:compact 子请求旁路桥的 wire(与主 turn 桥同源,
+        // interactive_session.cpp 的 ctx.trajectory_wire)。
+        in.trajectory_wire = session_runtime_.wire_name();
         return in;
     }
     lubancode::app::SessionTailContext MakeTailContext() {
@@ -245,6 +248,9 @@ private:
         tail.artifact_store = artifact_store.get();
         tail.session_store = &session_store;
         tail.theme = &theme;
+        // Token 账本单 A1:回合收尾的抽取/按需摘要走旁路桥落轨迹。
+        tail.trajectory = session_runtime_.trajectory();
+        tail.trajectory_wire = session_runtime_.wire_name();
         return tail;
     }
     void EnsureMemoryTool();

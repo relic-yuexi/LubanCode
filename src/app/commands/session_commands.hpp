@@ -196,6 +196,9 @@ struct CompactSessionInputs {
     //(compact.requested/applied/failed 落 Journal),不再走
     // AppendCompactV2Event 旁路(§14.4)。空 = 旧路。
     lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
+    // Token 账本单 A1:主会话的 wire 名(compact 子请求旁路桥的 identity;
+    // 主 turn 桥的 ctx.trajectory_wire 同源)。trajectory 空 时不用。
+    std::string trajectory_wire;
 };
 void RunCompactCommand(const std::string& args, const CompactSessionInputs& in);
 

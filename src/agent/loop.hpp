@@ -30,6 +30,8 @@
 
 #include <nlohmann/json.hpp>
 
+#include "accounting/purpose.hpp"  // RequestPurpose(Token 账本单 A1:model.request.prepared 的 purpose)
+#include "agent/prompt_manifest.hpp"  // PromptManifest(Token 账本单 A1:request_snapshot_ref 的地基)
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 #include "runtime/interaction.hpp"
@@ -42,16 +44,37 @@
 
 namespace lubancode::agent {
 
+// OnRequestPrepared 随请求一并递的账(Token 账本单 A1)。purpose 是唯一
+// 恒有效的字段(AgentProfile.purpose 总有默认值,§6.2"调用方不知道用途
+// 便拒绝"在真实运行时路径上不会发生——没显式设时的默认就是 MainTurn,
+// 不是"不知道");manifest/前缀四项是否可用各自看 has_prompt_manifest /
+// has_prefix_account,没接 ResolvedPromptBuilder 或前缀账不可用时如实
+// 置 false,不拿默认值冒充。
+struct RequestPreparedContext {
+    accounting::RequestPurpose purpose = accounting::RequestPurpose::MainTurn;
+    bool has_prompt_manifest = false;
+    PromptManifest prompt_manifest;  // has_prompt_manifest=false 时内容无意义
+    bool has_prefix_account = false;
+    std::string system_hash;   // agent/prefix.hpp 的指纹 hash(FNV-1a,诊断口径同源)
+    std::string tools_hash;
+    int cache_epoch = 0;
+    bool prefix_append_only = true;
+};
+
 // 轮次边界的轨迹记录口(P0-2 轨迹接线:AgentLoop 接 input/request/output
 // 边界)。AgentLoop 只在模型请求/输出这些边界上问宿主;落盘与状态机校验
 // 全在实现侧(TrajectoryRecorder),loop 不碰文件。语义:
 //   OnRequestPrepared —— 请求拼好、即将上 wire。返回 request_id;空串 =
 //                        账写不住,loop 本步明败不发模型(§7.4"request
-//                        prepared 记不住,不发模型")。
+//                        prepared 记不住,不发模型")。ctx 带 purpose/
+//                        manifest/前缀账(Token 账本单 A1)。
 //   OnRequestSent     —— prepared 落稳后随发随记(prepared_event_id 由实现
 //                        侧在 OnRequestPrepared 里落好,这里只报发出去)。
 //   OnUsageRecorded   —— v2 usage owner(一 request attempt 一 owner;wire
-//                        见没见过 usage 帧如实报)。
+//                        见没见过 usage 帧如实报)。cache_epoch/
+//                        prefix_append_only 随本步前缀账一并交(0/true 起点
+//                        表示当步没有前缀账可交,与"epoch=0"没有歧义——
+//                        真实 epoch 从 1 起,recorder 侧把 0 当"未知不落")。
 //   OnOutput*         —— 收口三态:completed(带规范消息与 stop_reason)、
 //                        failed、cancelled。
 // 不设(空指针)= 会话没接轨迹(flag 关的老路),一处不调,行为与从前
@@ -59,10 +82,11 @@ namespace lubancode::agent {
 class LoopBoundaryRecorder {
 public:
     virtual ~LoopBoundaryRecorder() = default;
-    virtual std::string OnRequestPrepared(const api::Request& request) = 0;
+    virtual std::string OnRequestPrepared(const api::Request& request, const RequestPreparedContext& ctx) = 0;
     virtual void OnRequestSent(const std::string& request_id) = 0;
     virtual void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
-                                 bool reported_by_provider, const std::string& provider_response_id) = 0;
+                                 bool reported_by_provider, const std::string& provider_response_id,
+                                 int cache_epoch = 0, bool prefix_append_only = true) = 0;
     // 返回 false = 输出事实没写稳,loop 不执行工具(§7.4"model output
     // 记不住,不执行工具"),本步明败。
     virtual bool OnOutputCompleted(const std::string& request_id, const api::Message& assistant,

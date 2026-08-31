@@ -34,7 +34,10 @@ namespace lubancode::trajectory {
 
 // 折叠器的投影版本。改动折叠形状(加减折叠字段、改投影规则)必须升这枚
 // 版本;升版后旧 checkpoint 全数作废(重算),state hash 换新值。
-inline constexpr int kReplayProjectionVersion = 1;
+// v2(Token 账本单 A1):ReplayRequestStep 加 purpose 折叠字段;宿主旁路
+// 用途(compact/memory/title/doctor/insights/other_host)的模型输出不再
+// 折进 effective_conversation——它们是工作产物,不是会话历史。
+inline constexpr int kReplayProjectionVersion = 2;
 
 // ---------------------------------------------------------------------------
 // 折叠账(ReplayState 的零件)
@@ -62,6 +65,11 @@ struct ReplayRequestStep {
     std::string model;
     std::string provider;
     std::string wire;
+    // 请求用途(model.request.prepared.payload.purpose;空 = 事件没带,
+    // v1 旧账与不带 purpose 的旧 v2 账都是空)。折叠与投影按它分"对话
+    // 轮"与"回合外的宿主小请求"(Token 账本单 A1):compact/起名/抽取
+    // 一类的输出是宿主吃掉的工作产物,不是会话历史。
+    std::string purpose;
     nlohmann::json parameters = nlohmann::json::object();
     std::vector<std::string> message_refs;
     bool sent = false;
@@ -74,6 +82,13 @@ struct ReplayRequestStep {
     nlohmann::json ToJson() const;
     static std::optional<ReplayRequestStep> FromJson(const nlohmann::json& json);
 };
+
+// 该 purpose 的模型输出算不算会话历史(Token 账本单 A1):main_turn/
+// subagent_turn/goal_continue/loop_iteration 是对话轮,照旧折叠;compact/
+// memory/title/doctor/insights/other_host 一类宿主旁路请求的输出是工作
+// 产物,不进 effective_conversation(purpose 为空的旧账照旧折叠——不因
+// 新字段改老行为)。
+bool PurposeFoldsIntoConversation(const std::string& purpose);
 
 // 工具台账一条(§5.4 六事件折叠;悬空按 started/finished/result 三道账分档)。
 struct ReplayToolEntry {

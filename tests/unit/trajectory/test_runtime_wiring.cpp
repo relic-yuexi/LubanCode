@@ -162,7 +162,7 @@ TEST_CASE("状态机补丁:cancelled 不须 started,failed 仍须") {
     auto bridge = OpenBridge(*recorder);
     bridge.BeginTurn("turn-1", "external_user");
     bridge.RecordInput(UserMessage("读一下"));
-    const std::string request_id = bridge.OnRequestPrepared(api::Request{});
+    const std::string request_id = bridge.OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
     REQUIRE_FALSE(request_id.empty());
     bridge.OnRequestSent(request_id);
     REQUIRE(bridge.OnOutputCompleted(request_id, AssistantWithToolCall("call-1"), "tool_use", "resp-1"));
@@ -207,7 +207,7 @@ TEST_CASE("bridge 一轮全流:请求/输出/工具三道栅栏齐,verify 过") 
     bridge.RecordInput(UserMessage("读一下 README 并数行数"));
 
     // 第一请求:输出带工具。
-    const std::string req1 = bridge.OnRequestPrepared(api::Request{});
+    const std::string req1 = bridge.OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
     REQUIRE_FALSE(req1.empty());
     bridge.OnRequestSent(req1);
     api::Usage usage;
@@ -225,7 +225,7 @@ TEST_CASE("bridge 一轮全流:请求/输出/工具三道栅栏齐,verify 过") 
     bridge.OnToolResultsCommitted("batch-1", results);
 
     // 第二请求:纯文本收口。
-    const std::string req2 = bridge.OnRequestPrepared(api::Request{});
+    const std::string req2 = bridge.OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
     REQUIRE_FALSE(req2.empty());
     bridge.OnRequestSent(req2);
     REQUIRE(bridge.OnOutputCompleted(req2, UserMessage("不是 user,这里只是复用文本形状"), "end_turn", "resp-2"));
@@ -286,7 +286,7 @@ TEST_CASE("ledger:开账出 main.jsonl,子代理拿独立 JSONL 与父边界") {
     auto& child_bridge = (*child)->turn_bridge();
     child_bridge.BeginTurn("turn-1", "external_user");
     child_bridge.RecordInput(UserMessage("读文件并数行数"));
-    const std::string req = child_bridge.OnRequestPrepared(api::Request{});
+    const std::string req = child_bridge.OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
     REQUIRE_FALSE(req.empty());
     child_bridge.OnRequestSent(req);
     REQUIRE(child_bridge.OnOutputCompleted(req, UserMessage("报告:42 行"), "end_turn", "resp-c"));
@@ -306,7 +306,7 @@ TEST_CASE("ledger:开账出 main.jsonl,子代理拿独立 JSONL 与父边界") {
     // 父账:边界引用落在 agent 调用的执行终态上。
     main_bridge->BeginTurn("turn-1", "external_user");
     main_bridge->RecordInput(UserMessage("去读文件"));
-    const std::string parent_req = main_bridge->OnRequestPrepared(api::Request{});
+    const std::string parent_req = main_bridge->OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
     main_bridge->OnRequestSent(parent_req);
     api::Message with_agent = AssistantWithToolCall("toolu-1");
     std::get<api::ToolUseBlock>(with_agent.content.back()).name = "agent";

@@ -24,10 +24,12 @@
 #include <string>
 #include <vector>
 
+#include "accounting/purpose.hpp"  // RequestPurpose(Token 账本单 A1)
 #include "agent/context.hpp"
 #include "agent/context_events.hpp"
 #include "agent/context_manager.hpp"
 #include "agent/loop.hpp"
+#include "agent/resolved_prompt_builder.hpp"  // ResolvedPromptBase(Token 账本单 A1)
 #include "agent/runtime_profile.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
@@ -100,6 +102,19 @@ struct AgentProfile {
     // 自己不懂什么叫"延迟"。----
     std::function<bool(const tools::Tool&)> tool_filter;
     std::string tool_filter_denial;
+
+    // ---- Token 账本单 A1(事实接线) ----
+    // 这份 Agent 实例对应的请求用途:main_turn/subagent_turn/workflow_node/
+    // …(§6.2 十二值枚举)。装配层按调用场合显式设(主会话/AgentTool 子
+    // 代理/workflow agent 节点各自的构造点);默认 MainTurn 是主会话的
+    // 真实值,不是"漏填的占位"。
+    accounting::RequestPurpose purpose = accounting::RequestPurpose::MainTurn;
+    // ResolvedPromptBuilder 的底账(§6.4):装配层用 BuildResolvedPromptBase
+    // 替代裸调 AssembleSystemPrompt 时才有值,连同 system_prompt 一并从
+    // 同一次拼装产出。空 = 这份皮的系统提示未接 ResolvedPromptBuilder
+    //(旧调用方/未迁移路径),AgentLoop 落 model.request.prepared 时不带
+    // manifest,文本组装退回原 With* 三连,行为与接线前逐字节一致。
+    std::optional<ResolvedPromptBase> resolved_prompt_base;
 };
 
 // 环境接线(批四·病十二:接线类的门收成一只)。这些都是"宿主把外面的

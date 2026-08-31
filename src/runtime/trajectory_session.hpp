@@ -88,10 +88,11 @@ public:
     void EndTurn(bool ok, bool cancelled, const std::string& reason);
 
     // ---- agent::LoopBoundaryRecorder(loop 在模型边界调) ----
-    std::string OnRequestPrepared(const api::Request& request) override;
+    std::string OnRequestPrepared(const api::Request& request, const agent::RequestPreparedContext& ctx) override;
     void OnRequestSent(const std::string& request_id) override;
     void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
-                         bool reported_by_provider, const std::string& provider_response_id) override;
+                         bool reported_by_provider, const std::string& provider_response_id,
+                         int cache_epoch = 0, bool prefix_append_only = true) override;
     bool OnOutputCompleted(const std::string& request_id, const api::Message& assistant,
                            const std::string& stop_reason,
                            const std::string& provider_response_id) override;
@@ -153,6 +154,69 @@ private:
     std::set<std::string> started_io_failed_;  // started 落不住被拦的 execution
     std::string last_input_event_id_;
     std::uint64_t request_counter_ = 0;
+    std::uint64_t input_counter_ = 0;
+    std::uint64_t output_counter_ = 0;
+    std::vector<std::string> recent_errors_;
+};
+
+// ---------------------------------------------------------------------------
+// 旁路模型请求桥(Token 账本单 A1):compact 的 map/reduce、记忆抽取、
+// 会话起名、doctor 探针这类"回合外的宿主小请求"的模型边界 -> trajectory
+// 事件。§11.2"旁路请求也走公共 ModelRequestRecorder"落在它身上:接口
+// 与主桥同一只(agent::LoopBoundaryRecorder),SampleModel/探针只认接口。
+//
+// 与主桥的差异:没有工具栅栏簿记,每次 OnRequestPrepared 自开一只
+// scheduled_host 小 turn 并把请求的首条 user 消息记作 input(recorder
+// 状态机约束:sent/output 须落 turn 内,首 sent 前须有 input),output
+// 三态收口时把 turn 一并收掉。一只桥一次采样用完即弃,不跨线程共享
+// ——每处调用自己造(recorder 提交全程持锁,多桥并发在盘上仍串行)。
+// ---------------------------------------------------------------------------
+class TrajectoryBypassBridge : public agent::LoopBoundaryRecorder {
+public:
+    TrajectoryBypassBridge(trajectory::TrajectoryRecorder& recorder, trajectory::EventScope base_scope,
+                           TrajectoryTurnBridge::Identity identity);
+    ~TrajectoryBypassBridge() override;
+
+    TrajectoryBypassBridge(const TrajectoryBypassBridge&) = delete;
+    TrajectoryBypassBridge& operator=(const TrajectoryBypassBridge&) = delete;
+
+    // ---- agent::LoopBoundaryRecorder(采样/探针在模型边界调) ----
+    std::string OnRequestPrepared(const api::Request& request,
+                                  const agent::RequestPreparedContext& ctx) override;
+    void OnRequestSent(const std::string& request_id) override;
+    void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
+                         bool reported_by_provider, const std::string& provider_response_id,
+                         int cache_epoch = 0, bool prefix_append_only = true) override;
+    bool OnOutputCompleted(const std::string& request_id, const api::Message& assistant,
+                           const std::string& stop_reason,
+                           const std::string& provider_response_id) override;
+    void OnOutputFailed(const std::string& request_id, const std::string& reason) override;
+    void OnOutputCancelled(const std::string& request_id) override;
+
+    // 诊断:最近一枚提交失败 receipts 的稳定码。
+    std::vector<std::string> recent_errors() const { return recent_errors_; }
+
+private:
+    trajectory::RecordReceipt Put(trajectory::EventKind kind, std::optional<std::string> request_id,
+                                  trajectory::Actor actor, trajectory::Origin origin, nlohmann::json payload,
+                                  trajectory::Durability durability = trajectory::Durability::ProcessCrash);
+    void NoteError(const trajectory::RecordReceipt& receipt, const char* where);
+    void OpenTurn();
+    void CloseTurn(bool ok, bool cancelled, const std::string& reason);
+    std::string NextRequestId();
+    std::string NextTurnId();
+    std::string NextInputId();
+    std::string NextOutputId();
+
+    trajectory::TrajectoryRecorder& recorder_;
+    trajectory::EventScope base_scope_;
+    TrajectoryTurnBridge::Identity identity_;
+    std::string turn_id_;
+    bool turn_open_ = false;
+    std::map<std::string, std::string> request_prepared_;  // request_id -> prepared event id
+    std::string last_input_event_id_;
+    std::uint64_t request_counter_ = 0;
+    std::uint64_t turn_counter_ = 0;
     std::uint64_t input_counter_ = 0;
     std::uint64_t output_counter_ = 0;
     std::vector<std::string> recent_errors_;
@@ -273,6 +337,13 @@ public:
     std::expected<std::unique_ptr<TrajectorySubagentBridge>, std::string> SpawnSubagent(
         const std::string& parent_call_id, const std::string& task_label,
         const std::string& parent_run_id = std::string());
+
+    // 旁路模型请求桥(Token 账本单 A1):compact/起名/抽取/doctor 等回合外
+    // 小请求落 main stream。每次采样现造一只,用完即弃;账开不出(main
+    // recorder 不在)给 nullptr,调用方按"没接轨迹"走旧路。identity 的
+    // provider/wire 照实填该次请求真用的端(compact 的 cheap 路由可能跨
+    // provider,与主会话端不是一家);channel 建议 "host"。
+    std::unique_ptr<TrajectoryBypassBridge> NewBypassBridge(TrajectoryTurnBridge::Identity identity);
 
     // 父账边界:子代理 finished 时补的边界引用(child run id + 子账终态
     // hash),由主桥的 OnToolTrace 落——这里只给查口。

@@ -518,6 +518,10 @@ add_library(lubancode_engine STATIC
   src/accounting/cost_estimator.cpp
   src/accounting/usage_projector.cpp
   src/agent/prompt_manifest.cpp
+  # A1(事实接线):ResolvedPromptBuilder 把 PromptAssembler 与三层后叠
+  # (延迟工具索引/模型目录指令/魂)收进同一次解析,产 AssembledPrompt{text,
+  # manifest}。
+  src/agent/resolved_prompt_builder.cpp
   # 多渠道消息接入与常驻 ChannelPlugin 单阶段 1:纯合同与假 sidecar。
   # types(ChannelInboundEvent/MessageProvenance/ReplyAction)、
   # channel.yaml schema 1 parser、Bridge v1 帧编解码与双向 router 骨架。

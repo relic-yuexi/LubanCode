@@ -7,7 +7,10 @@
 #include <cstdlib>
 #include <utility>
 
+#include "accounting/purpose.hpp"   // PurposeName(Token 账本单 A1)
+#include "agent/context.hpp"        // EstimateUtf8Tokens:request_snapshot 的 token 估算
 #include "config/config.hpp"
+#include "hooks/hash.hpp"           // Sha256Hex:request_snapshot 的 parameters_hash
 #include "platform/log_sink.hpp"
 #include "platform/paths.hpp"
 #include "tools/path_utils.hpp"     // Utf8ToPath:主目录文本转路径
@@ -250,22 +253,116 @@ void TrajectoryTurnBridge::EndTurn(bool ok, bool cancelled, const std::string& r
     turn_open_ = false;
 }
 
-std::string TrajectoryTurnBridge::OnRequestPrepared(const api::Request& request) {
-    if (!turn_open_) {
-        return std::string();
+namespace {
+
+// request_snapshot_ref 的 metadata_only 底账(Token 账本单 §6.4)。ctx 的
+// prefix 账缺席(has_prefix_account=false)时 toolset_hash 留空——不拿
+// 假 hash 冒充,消费侧按空串识别"这份没有前缀账可对"。
+agent::RequestSnapshotMetadata BuildRequestSnapshot(const api::Request& request,
+                                                    const agent::RequestPreparedContext& ctx) {
+    agent::RequestSnapshotMetadata snapshot;
+    snapshot.request_shape.model = request.model;
+    snapshot.request_shape.message_count = request.messages.size();
+    snapshot.request_shape.tool_count = request.tools.size();
+    snapshot.request_shape.toolset_hash = ctx.has_prefix_account ? ctx.tools_hash : std::string();
+    std::int64_t tool_tokens = 0;
+    nlohmann::json params_shape = nlohmann::json{{"model", request.model},
+                                                 {"reasoning_effort", request.reasoning_effort}};
+    if (request.max_tokens.has_value()) {
+        params_shape["max_output_tokens"] = *request.max_tokens;
     }
-    const std::string request_id = NextRequestId();
+    for (const api::ToolDefinition& tool : request.tools) {
+        tool_tokens += static_cast<std::int64_t>(agent::EstimateUtf8Tokens(tool.name)) +
+                       static_cast<std::int64_t>(agent::EstimateUtf8Tokens(tool.description)) +
+                       static_cast<std::int64_t>(agent::EstimateUtf8Tokens(tool.input_schema.dump()));
+    }
+    snapshot.request_shape.tool_definition_tokens_estimated = tool_tokens;
+    snapshot.request_shape.parameters_hash = hooks::Sha256Hex(params_shape.dump());
+    if (ctx.has_prompt_manifest) {
+        snapshot.prompt_manifest = ctx.prompt_manifest;
+    }
+    snapshot.content_policy = "metadata_only";
+    return snapshot;
+}
+
+// 消息 content -> 规范 blocks 数组(主桥与旁路桥共用;模型中立,大正文
+// 交 blob,由 recorder 的 offload 上限管)。
+nlohmann::json MessageToBlocksJson(const api::Message& message) {
+    nlohmann::json blocks = nlohmann::json::array();
+    for (const auto& block : message.content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+            blocks.push_back(nlohmann::json{{"type", "text"}, {"text", text->text}});
+        } else if (const auto* thinking = std::get_if<api::ThinkingBlock>(&block)) {
+            blocks.push_back(nlohmann::json{{"type", "thinking"}, {"text", thinking->text}});
+        } else if (const auto* image = std::get_if<api::ModelImageBlock>(&block)) {
+            // 图片正文永不内联:只落引用块(sha/path),base64 不进 Journal。
+            blocks.push_back(nlohmann::json{{"type", "image_ref"},
+                                            {"mime_type", image->mime_type},
+                                            {"sha256", image->sha256},
+                                            {"path", image->path}});
+        } else if (const auto* call = std::get_if<api::ToolUseBlock>(&block)) {
+            blocks.push_back(nlohmann::json{{"type", "tool_call"},
+                                            {"call_id", call->id},
+                                            {"provider_call_id", call->id},
+                                            {"name", call->name},
+                                            {"arguments", call->input}});
+        }
+    }
+    return blocks;
+}
+
+// model.request.prepared 的 payload(Token 账本单 A1):主桥与旁路桥共用
+// 一份构造——purpose/system_ref/request_snapshot_ref 的事实口径只此一处,
+// 两只桥不许各写各的。
+nlohmann::json BuildPreparedPayload(const api::Request& request, const agent::RequestPreparedContext& ctx,
+                                    const TrajectoryTurnBridge::Identity& identity,
+                                    const std::string& last_input_event_id) {
     nlohmann::json payload = nlohmann::json{{"model", request.model},
-                                            {"provider", identity_.provider},
-                                            {"wire", identity_.wire}};
+                                            {"provider", identity.provider},
+                                            {"wire", identity.wire},
+                                            // Token 账本单 A1:purpose 恒有效(AgentProfile.purpose
+                                            // 默认值),不是"没接线就漏字段"——真实运行时路径
+                                            // 永远给出诚实的枚举名。
+                                            {"purpose", accounting::PurposeName(ctx.purpose)}};
     nlohmann::json message_refs = nlohmann::json::array();
-    if (!last_input_event_id_.empty()) {
-        message_refs.push_back(last_input_event_id_);
+    if (!last_input_event_id.empty()) {
+        message_refs.push_back(last_input_event_id);
     }
     payload["message_refs"] = std::move(message_refs);
     if (request.max_tokens.has_value()) {
         payload["parameters"] = nlohmann::json{{"max_output_tokens", *request.max_tokens}};
     }
+    if (ctx.has_prefix_account && ctx.cache_epoch > 0) {
+        payload["cache_epoch"] = static_cast<std::uint64_t>(ctx.cache_epoch);
+    }
+    // system/toolset 正文照 system_ref(§11.2):recorder 按字段名自动
+    // offload 超限正文成 blob(schema.cpp 的可 offload 字段集已含
+    // system_ref),这里只管递字符串,不管落盘细节。toolset_ref 递的是
+    // 工具定义的规范化摘要(名字+描述+schema),不是完整 wire 请求体。
+    if (!request.system.empty()) {
+        payload["system_ref"] = request.system;
+    }
+    // request_snapshot_ref:metadata_only 的形状账(§6.4),manifest 缺席
+    // (没接 ResolvedPromptBuilder)时 prompt_manifest 是一份空壳——仍然
+    // 写,因为 request_shape(model/tool 计数/token 估算)本身是独立于
+    // manifest 的事实,不该因为 manifest 缺席就整份不落。
+    {
+        const agent::RequestSnapshotMetadata snapshot = BuildRequestSnapshot(request, ctx);
+        payload["request_snapshot_ref"] = snapshot.ToJson();
+        payload["request_snapshot_sha256"] = hooks::Sha256Hex(payload["request_snapshot_ref"].dump());
+    }
+    return payload;
+}
+
+}  // namespace
+
+std::string TrajectoryTurnBridge::OnRequestPrepared(const api::Request& request,
+                                                     const agent::RequestPreparedContext& ctx) {
+    if (!turn_open_) {
+        return std::string();
+    }
+    const std::string request_id = NextRequestId();
+    nlohmann::json payload = BuildPreparedPayload(request, ctx, identity_, last_input_event_id_);
     const auto receipt = Put(EventKind::ModelRequestPrepared, request_id, std::nullopt, Actor::Host,
                              Origin::RecoveryRuntime, std::move(payload), Durability::ProcessCrash);
     if (receipt.status != RecordReceipt::Status::Committed) {
@@ -292,7 +389,8 @@ void TrajectoryTurnBridge::OnRequestSent(const std::string& request_id) {
 
 void TrajectoryTurnBridge::OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                                            bool reported_by_provider,
-                                           const std::string& provider_response_id) {
+                                           const std::string& provider_response_id, int cache_epoch,
+                                           bool prefix_append_only) {
     nlohmann::json payload = nlohmann::json{{"attempt", std::uint64_t{1}},
                                             {"reported_by_provider", reported_by_provider}};
     if (!provider_response_id.empty()) {
@@ -306,6 +404,12 @@ void TrajectoryTurnBridge::OnUsageRecorded(const std::string& request_id, const 
         payload["output_tokens"] = usage.output_tokens;
         payload["reasoning_tokens"] = usage.output_reasoning_tokens;
     }
+    // 前缀账(Token 账本单 A1,§7.2 cache 指标的地基):cache_epoch=0 表示
+    // 这次调用没带前缀账(旧调用方/单测),不落——真实 epoch 从 1 起。
+    if (cache_epoch > 0) {
+        payload["cache_epoch"] = static_cast<std::uint64_t>(cache_epoch);
+        payload["prefix_append_only"] = prefix_append_only;
+    }
     const auto receipt =
         Put(EventKind::ModelUsageRecorded, request_id, std::nullopt, Actor::Host,
             Origin::RecoveryRuntime, std::move(payload), Durability::ProcessCrash);
@@ -315,27 +419,8 @@ void TrajectoryTurnBridge::OnUsageRecorded(const std::string& request_id, const 
 }
 
 nlohmann::json TrajectoryTurnBridge::MessageToBlocks(const api::Message& message) {
-    nlohmann::json blocks = nlohmann::json::array();
-    for (const auto& block : message.content) {
-        if (const auto* text = std::get_if<api::TextBlock>(&block)) {
-            blocks.push_back(nlohmann::json{{"type", "text"}, {"text", text->text}});
-        } else if (const auto* thinking = std::get_if<api::ThinkingBlock>(&block)) {
-            blocks.push_back(nlohmann::json{{"type", "thinking"}, {"text", thinking->text}});
-        } else if (const auto* image = std::get_if<api::ModelImageBlock>(&block)) {
-            // 图片正文永不内联:只落引用块(sha/path),base64 不进 Journal。
-            blocks.push_back(nlohmann::json{{"type", "image_ref"},
-                                            {"mime_type", image->mime_type},
-                                            {"sha256", image->sha256},
-                                            {"path", image->path}});
-        } else if (const auto* call = std::get_if<api::ToolUseBlock>(&block)) {
-            blocks.push_back(nlohmann::json{{"type", "tool_call"},
-                                            {"call_id", call->id},
-                                            {"provider_call_id", call->id},
-                                            {"name", call->name},
-                                            {"arguments", call->input}});
-        }
-    }
-    return blocks;
+    // 实现住在文件局部 MessageToBlocksJson(旁路桥同吃一份,口径只此一处)。
+    return MessageToBlocksJson(message);
 }
 
 bool TrajectoryTurnBridge::OnOutputCompleted(const std::string& request_id, const api::Message& assistant,
@@ -585,6 +670,218 @@ void TrajectoryTurnBridge::NoteChildTerminal(const std::string& agent_run_id,
 }
 
 // ---------------------------------------------------------------------------
+// TrajectoryBypassBridge(Token 账本单 A1)
+// ---------------------------------------------------------------------------
+
+TrajectoryBypassBridge::TrajectoryBypassBridge(trajectory::TrajectoryRecorder& recorder,
+                                               trajectory::EventScope base_scope,
+                                               TrajectoryTurnBridge::Identity identity)
+    : recorder_(recorder), base_scope_(std::move(base_scope)), identity_(std::move(identity)) {}
+
+TrajectoryBypassBridge::~TrajectoryBypassBridge() = default;
+
+RecordReceipt TrajectoryBypassBridge::Put(EventKind kind, std::optional<std::string> request_id, Actor actor,
+                                          Origin origin, nlohmann::json payload, Durability durability) {
+    trajectory::RecordRequest request;
+    request.kind = kind;
+    request.scope = base_scope_;
+    request.scope.turn_id = turn_id_;
+    request.scope.request_id = std::move(request_id);
+    request.scope.call_id.reset();  // 旁路请求没有工具调用
+    if (request.scope.request_id.has_value() && request.scope.request_id->empty()) {
+        request.scope.request_id.reset();
+    }
+    request.scope.actor = actor;
+    request.scope.origin = origin;
+    request.payload = std::move(payload);
+    return recorder_.Record(std::move(request), durability);
+}
+
+void TrajectoryBypassBridge::NoteError(const RecordReceipt& receipt, const char* where) {
+    recent_errors_.push_back(std::string(where) + ":" + receipt.error_code);
+    platform::LogSink::Instance().Error("trajectory",
+                                        std::string(where) + " 落账失败: " + receipt.error_code);
+}
+
+std::string TrajectoryBypassBridge::NextRequestId() {
+    return "bypass-req-" + std::to_string(++request_counter_);
+}
+
+std::string TrajectoryBypassBridge::NextTurnId() {
+    return "bypass-" + std::to_string(++turn_counter_);
+}
+
+std::string TrajectoryBypassBridge::NextInputId() {
+    return "bypass-input-" + std::to_string(++input_counter_);
+}
+
+std::string TrajectoryBypassBridge::NextOutputId() {
+    return "bypass-output-" + std::to_string(++output_counter_);
+}
+
+void TrajectoryBypassBridge::OpenTurn() {
+    if (turn_open_) {
+        return;
+    }
+    turn_id_ = NextTurnId();
+    turn_open_ = true;
+    // scheduled_host 小 turn:宿主自己起的后台活,不是真人回合。约束 18
+    // 的 actor/origin 组合里 Host+ScheduledHost 合法(主桥 BeginTurn 同款)。
+    const auto receipt =
+        Put(EventKind::TurnStarted, std::nullopt, Actor::Host, Origin::ScheduledHost,
+            nlohmann::json{{"trigger", "scheduled_host"}}, Durability::ProcessCrash);
+    if (receipt.status != RecordReceipt::Status::Committed) {
+        NoteError(receipt, "turn.started(bypass)");
+    }
+}
+
+void TrajectoryBypassBridge::CloseTurn(bool ok, bool cancelled, const std::string& reason) {
+    if (!turn_open_) {
+        return;
+    }
+    RecordReceipt receipt;
+    if (cancelled) {
+        receipt = Put(EventKind::TurnCancelled, std::nullopt, Actor::Host, Origin::ScheduledHost,
+                      nlohmann::json{{"reason", reason.empty() ? "cancelled" : reason}});
+    } else if (ok) {
+        receipt = Put(EventKind::TurnCompleted, std::nullopt, Actor::Host, Origin::ScheduledHost,
+                      nlohmann::json{{"outcome", "succeeded"}});
+    } else {
+        receipt = Put(EventKind::TurnFailed, std::nullopt, Actor::Host, Origin::ScheduledHost,
+                      nlohmann::json{{"reason", reason.empty() ? "failed" : reason}});
+    }
+    if (receipt.status != RecordReceipt::Status::Committed) {
+        NoteError(receipt, "turn.terminal(bypass)");
+    }
+    turn_open_ = false;
+}
+
+std::string TrajectoryBypassBridge::OnRequestPrepared(const api::Request& request,
+                                                      const agent::RequestPreparedContext& ctx) {
+    if (turn_open_) {
+        // 一桥一采样:上一只小 turn 没收口又来一枚 prepared,是调用方把
+        // 桥当长命对象复用了。拒收,不往同一 turn 里混两笔请求账。
+        return std::string();
+    }
+    OpenTurn();
+    // 状态机约束 3:首 sent 前须有 input.received。旁路请求的 input 就是
+    // 请求自己的首条 user 消息(压缩材料/抽取转写/标题问句),照实记。
+    last_input_event_id_.clear();
+    if (!request.messages.empty()) {
+        nlohmann::json content = nlohmann::json::array();
+        for (const auto& block : request.messages.front().content) {
+            if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+                content.push_back(nlohmann::json{{"type", "text"}, {"text", text->text}});
+            }
+        }
+        const auto receipt =
+            Put(EventKind::InputReceived, std::nullopt, Actor::Host, Origin::ScheduledHost,
+                nlohmann::json{{"input_id", NextInputId()},
+                               {"content", std::move(content)},
+                               {"channel", identity_.channel},
+                               {"sender", nlohmann::json{{"kind", "host"}}}},
+                Durability::ProcessCrash);
+        if (receipt.status == RecordReceipt::Status::Committed) {
+            last_input_event_id_ = receipt.event_id;
+        } else {
+            NoteError(receipt, "input.received(bypass)");
+        }
+    }
+    const std::string request_id = NextRequestId();
+    nlohmann::json payload = BuildPreparedPayload(request, ctx, identity_, last_input_event_id_);
+    const auto receipt = Put(EventKind::ModelRequestPrepared, request_id, Actor::Host,
+                             Origin::ScheduledHost, std::move(payload), Durability::ProcessCrash);
+    if (receipt.status != RecordReceipt::Status::Committed) {
+        NoteError(receipt, "model.request.prepared(bypass)");
+        CloseTurn(false, false, "prepared_not_committed");
+        return std::string();  // §7.4:prepared 记不住,不发模型
+    }
+    request_prepared_[request_id] = receipt.event_id;
+    return request_id;
+}
+
+void TrajectoryBypassBridge::OnRequestSent(const std::string& request_id) {
+    const auto it = request_prepared_.find(request_id);
+    if (it == request_prepared_.end()) {
+        return;
+    }
+    const auto receipt =
+        Put(EventKind::ModelRequestSent, request_id, Actor::Host, Origin::ScheduledHost,
+            nlohmann::json{{"prepared_event_id", it->second}}, Durability::ProcessCrash);
+    if (receipt.status != RecordReceipt::Status::Committed) {
+        NoteError(receipt, "model.request.sent(bypass)");
+    }
+}
+
+void TrajectoryBypassBridge::OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
+                                             bool reported_by_provider,
+                                             const std::string& provider_response_id, int cache_epoch,
+                                             bool prefix_append_only) {
+    nlohmann::json payload = nlohmann::json{{"attempt", std::uint64_t{1}},
+                                            {"reported_by_provider", reported_by_provider}};
+    if (!provider_response_id.empty()) {
+        payload["provider_response_id"] = provider_response_id;
+    }
+    // 数字只在 provider 明报时才算事实;没报不拿 0 冒充(与主桥同一条)。
+    if (reported_by_provider) {
+        payload["input_tokens"] = usage.input_tokens;
+        payload["cache_read_tokens"] = usage.cache_read_tokens;
+        payload["cache_creation_tokens"] = usage.cache_creation_tokens;
+        payload["output_tokens"] = usage.output_tokens;
+        payload["reasoning_tokens"] = usage.output_reasoning_tokens;
+    }
+    if (cache_epoch > 0) {
+        payload["cache_epoch"] = static_cast<std::uint64_t>(cache_epoch);
+        payload["prefix_append_only"] = prefix_append_only;
+    }
+    const auto receipt = Put(EventKind::ModelUsageRecorded, request_id, Actor::Host,
+                             Origin::ScheduledHost, std::move(payload), Durability::ProcessCrash);
+    if (receipt.status != RecordReceipt::Status::Committed) {
+        NoteError(receipt, "model.usage.recorded(bypass)");
+    }
+}
+
+bool TrajectoryBypassBridge::OnOutputCompleted(const std::string& request_id, const api::Message& assistant,
+                                               const std::string& stop_reason,
+                                               const std::string& provider_response_id) {
+    nlohmann::json payload = nlohmann::json{{"output_id", NextOutputId()},
+                                            {"blocks", MessageToBlocksJson(assistant)},
+                                            {"stop_reason", stop_reason.empty() ? "end_turn" : stop_reason}};
+    if (!provider_response_id.empty()) {
+        payload["provider_response_id"] = provider_response_id;
+    }
+    const auto receipt = Put(EventKind::ModelOutputCompleted, request_id, Actor::Model,
+                             Origin::ProviderModel, std::move(payload), Durability::ProcessCrash);
+    if (receipt.status != RecordReceipt::Status::Committed) {
+        NoteError(receipt, "model.output.completed(bypass)");
+        CloseTurn(false, false, "output_not_committed");
+        return false;
+    }
+    CloseTurn(true, false, "done");
+    return true;
+}
+
+void TrajectoryBypassBridge::OnOutputFailed(const std::string& request_id, const std::string& reason) {
+    const auto receipt =
+        Put(EventKind::ModelOutputFailed, request_id, Actor::Model, Origin::ProviderModel,
+            nlohmann::json{{"reason", reason.empty() ? "failed" : reason}}, Durability::ProcessCrash);
+    if (receipt.status != RecordReceipt::Status::Committed) {
+        NoteError(receipt, "model.output.failed(bypass)");
+    }
+    CloseTurn(false, false, reason);
+}
+
+void TrajectoryBypassBridge::OnOutputCancelled(const std::string& request_id) {
+    const auto receipt = Put(EventKind::ModelOutputCancelled, request_id, Actor::Model,
+                             Origin::ProviderModel, nlohmann::json{{"reason", "cancelled"}},
+                             Durability::ProcessCrash);
+    if (receipt.status != RecordReceipt::Status::Committed) {
+        NoteError(receipt, "model.output.cancelled(bypass)");
+    }
+    CloseTurn(false, true, "cancelled");
+}
+
+// ---------------------------------------------------------------------------
 // TrajectorySessionLedger
 // ---------------------------------------------------------------------------
 
@@ -689,6 +986,18 @@ std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
     scope.visibility = {Visibility::HostOnly};
     scope.training_policy = TrainingPolicy::Metadata;
     return std::make_unique<TrajectoryTurnBridge>(*recorder, std::move(scope), std::move(identity));
+}
+
+std::unique_ptr<TrajectoryBypassBridge> TrajectorySessionLedger::NewBypassBridge(
+    TrajectoryTurnBridge::Identity identity) {
+    trajectory::TrajectoryRecorder* recorder = main();
+    if (recorder == nullptr || impl_ == nullptr || impl_->active == nullptr) {
+        return nullptr;
+    }
+    trajectory::EventScope scope = impl_->active->main->base_scope();
+    scope.visibility = {Visibility::HostOnly};
+    scope.training_policy = TrainingPolicy::Metadata;
+    return std::make_unique<TrajectoryBypassBridge>(*recorder, std::move(scope), std::move(identity));
 }
 
 namespace {

@@ -9,7 +9,9 @@
 #include <system_error>
 #include <utility>
 
+#include "agent/context.hpp"     // EstimateUtf8Tokens:ledger 段级 token 估算(Token 账本单 A1)
 #include "embedded_prompts.hpp"  // 构建期生成:<build>/generated/embedded_prompts.hpp
+#include "hooks/hash.hpp"        // Sha256Hex:ledger 段级 content_hash(与 trajectory 同一把 SHA-256)
 #include "platform/paths.hpp"    // PathToUtf8:账本里的文件路径不走 ACP 窄口
 
 namespace lubancode::agent {
@@ -170,45 +172,66 @@ ResolvedModule ResolveModule(const std::string& profile, const std::string& prom
                              std::string_view rel_path) {
     ResolvedModule out;
     out.entry.rel_path = std::string(rel_path);
+    // overrides 账(Token 账本单 A1,§8.1 静态规则第 1 条的地基):五层依次
+    // 探,后一层真找到内容才压前一层——record_override 在覆盖发生的那一刻
+    // 把"被压掉的上一层来源"记进 entry.overrides,不是猜出来的,是解析
+    // 现场如实记的。没被压过的模块 overrides 恒空。
+    bool has_content = false;
+    const auto record_override = [&](PromptModuleOrigin previous) {
+        if (has_content) {
+            out.entry.overrides.push_back(ToString(previous));
+        }
+    };
     if (const embedded::EmbeddedModule* module = FindModule(rel_path); module != nullptr) {
         out.content = module->content;
         out.entry.origin = PromptModuleOrigin::EmbeddedDefault;
+        has_content = true;
     }
     if (auto user = ReadModuleFile(prompts_dir, out.entry.rel_path); user.has_value()) {
+        record_override(out.entry.origin);
         out.content = std::move(user->content);
         out.entry.origin = PromptModuleOrigin::UserDefault;
         out.entry.file = std::move(user->path_utf8);
+        has_content = true;
     }
     if (IsPromptProfileActive(profile)) {
         if (IsCanonicalProfileName(profile)) {
             // canonical 名:只走包层(命名空间不相交,见上注)。
             if (auto packaged = ReadPackagedProfileModule(package_roots, profile, rel_path);
                 packaged.has_value()) {
+                record_override(out.entry.origin);
                 out.content = std::move(packaged->content);
                 out.entry.origin = PromptModuleOrigin::PackageProfile;
                 out.entry.profile = profile;
                 out.entry.file = std::move(packaged->path_utf8);
+                has_content = true;
             }
             return out;
         }
         const std::string profile_rel = "profiles/" + profile + "/" + out.entry.rel_path;
         if (const embedded::EmbeddedModule* module = FindProfileModule(profile_rel); module != nullptr) {
+            record_override(out.entry.origin);
             out.content = module->content;
             out.entry.origin = PromptModuleOrigin::EmbeddedProfile;
             out.entry.profile = profile;
             out.entry.file.clear();
+            has_content = true;
         }
         if (auto user = ReadModuleFile(prompts_dir, profile_rel); user.has_value()) {
+            record_override(out.entry.origin);
             out.content = std::move(user->content);
             out.entry.origin = PromptModuleOrigin::UserProfile;
             out.entry.profile = profile;
             out.entry.file = std::move(user->path_utf8);
+            has_content = true;
         }
         if (auto project = ReadModuleFile(project_prompts_dir, profile_rel); project.has_value()) {
+            record_override(out.entry.origin);
             out.content = std::move(project->content);
             out.entry.origin = PromptModuleOrigin::ProjectProfile;
             out.entry.profile = profile;
             out.entry.file = std::move(project->path_utf8);
+            has_content = true;
         }
     }
     return out;
@@ -232,9 +255,16 @@ std::string ModuleByPath(const std::string& prompts_dir, std::string_view rel_pa
     return ModuleText(prompts_dir, *module);
 }
 
-// 账本里塞一条的顺手封装。
-void LedgerAdd(PromptSourceLedger* ledger, PromptSourceLedgerEntry entry) {
+// 账本里塞一条的顺手封装(Token 账本单 A1):content 是这段刚拼进最终
+// 提示词的渲染正文——就地记 hash/token 估算,不等 analyzer 事后按 rel_path
+// 回查文件再猜一遍(源文件可能已被后续改动,猜出来的账会跟真实拼出来的
+// 文本对不上)。order 是本段在这次拼装里的次序,调用方按拼装顺序递增。
+void LedgerAdd(PromptSourceLedger* ledger, PromptSourceLedgerEntry entry, const std::string& content,
+               int order) {
     if (ledger != nullptr) {
+        entry.content_hash = hooks::Sha256Hex(content);
+        entry.content_tokens_estimated = static_cast<std::int64_t>(EstimateUtf8Tokens(content));
+        entry.order = order;
         ledger->entries.push_back(std::move(entry));
     }
 }
@@ -367,6 +397,10 @@ std::string BuildEnvironmentSegment(const std::string& cwd, const std::string& c
 }
 
 std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedger* ledger) {
+    // 拼装次序账(ResolvedPromptBuilder 的 order 字段来源):每条 LedgerAdd
+    // 按拼进最终提示词的先后递增,ledger==nullptr 时也照样递增——调用方
+    // 若日后补记账,次序不因这次没记而错位。
+    int ledger_order = 0;
     // 人格:法/CLI 非空整段替换 core(账本记一条 persona,替掉的是整个
     // core 组);空串走 core 模块逐个过五层回路(default 上下文 = 用户文件
     // 优先、嵌入回退,与 0.21.x 同路)。
@@ -376,7 +410,7 @@ std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedge
         PromptSourceLedgerEntry entry;
         entry.rel_path = "core/*";
         entry.origin = PromptModuleOrigin::Persona;
-        LedgerAdd(ledger, std::move(entry));
+        LedgerAdd(ledger, std::move(entry), options.persona, ledger_order++);
     } else {
         for (const auto& module : embedded::kAllModules) {
             if (std::string_view(module.rel_path).substr(0, 5) != "core/") {
@@ -389,7 +423,8 @@ std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedge
                 prompt += "\n\n";
             }
             prompt += resolved.content;
-            LedgerAdd(ledger, std::move(resolved.entry));
+            const std::string content = resolved.content;
+            LedgerAdd(ledger, std::move(resolved.entry), content, ledger_order++);
         }
     }
     const auto append = [&prompt](const std::string& segment) {
@@ -401,34 +436,38 @@ std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedge
                                                 options.project_prompts_dir,
                                                 options.package_profile_roots, rel_path);
         append(resolved.content);
-        LedgerAdd(ledger, std::move(resolved.entry));
+        const std::string content = resolved.content;
+        LedgerAdd(ledger, std::move(resolved.entry), content, ledger_order++);
     };
 
-    append(BuildEnvironmentSegment(options.cwd, options.current_date));
     {
+        const std::string environment_segment = BuildEnvironmentSegment(options.cwd, options.current_date);
+        append(environment_segment);
         PromptSourceLedgerEntry entry;
         entry.rel_path = "(runtime environment)";
         entry.origin = PromptModuleOrigin::RuntimeEnvironment;
-        LedgerAdd(ledger, std::move(entry));
+        LedgerAdd(ledger, std::move(entry), environment_segment, ledger_order++);
     }
 
     if (!options.project_instructions.empty()) {
         append(options.project_instructions);
         // P1-2 逐 source 账:装配层递了来源清单就每份文档记一行(不再压成
-        // 一条总项);没递(旧装配/单测)照旧一条总项,零退化。
+        // 一条总项);没递(旧装配/单测)照旧一条总项,零退化。content_hash
+        // 每行记的是拼进提示词的整段合并正文(装配层只递了合并结果,没
+        // 递每份文档的独立切片,分不出谁占几个 token——先如实合记一份)。
         if (!options.project_instruction_sources.empty()) {
             for (const std::string& source : options.project_instruction_sources) {
                 PromptSourceLedgerEntry entry;
                 entry.rel_path = "(project instructions)";
                 entry.origin = PromptModuleOrigin::ProjectInstructions;
                 entry.file = source;
-                LedgerAdd(ledger, std::move(entry));
+                LedgerAdd(ledger, std::move(entry), options.project_instructions, ledger_order++);
             }
         } else {
             PromptSourceLedgerEntry entry;
             entry.rel_path = "(project instructions)";
             entry.origin = PromptModuleOrigin::ProjectInstructions;
-            LedgerAdd(ledger, std::move(entry));
+            LedgerAdd(ledger, std::move(entry), options.project_instructions, ledger_order++);
         }
     }
 
@@ -489,12 +528,13 @@ std::string AssembleSystemPrompt(const PromptOptions& options, PromptSourceLedge
     // 模式段殿后(Plan 模式单):宿主内置,不看用户目录。Default 也注——
     // 模板里明说"旧 Plan 指令已结束",防模型带着上一档的规矩跑(单子:
     // Codex 公开 issue 出过这类残留)。
-    append(ModeInstructionSegment(options.plan_mode));
     {
+        const std::string mode_segment = ModeInstructionSegment(options.plan_mode);
+        append(mode_segment);
         PromptSourceLedgerEntry entry;
         entry.rel_path = options.plan_mode ? "modes/plan.md" : "modes/default.md";
         entry.origin = PromptModuleOrigin::EmbeddedHostPolicy;
-        LedgerAdd(ledger, std::move(entry));
+        LedgerAdd(ledger, std::move(entry), mode_segment, ledger_order++);
     }
     return prompt;
 }

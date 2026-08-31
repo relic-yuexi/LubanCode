@@ -37,6 +37,10 @@
 #include "config/project_instructions.hpp"  // ProjectInstructionResolver:/doctor instructions
 #include "tools/registry.hpp"
 
+namespace lubancode::runtime {
+class TrajectorySessionLedger;
+}
+
 namespace lubancode::app {
 
 // ---------------- 纯函数(单测钉住) ----------------
@@ -217,6 +221,12 @@ struct DoctorContext {
     // /doctor instructions(AGENTS.md 作用域单 P1-1):与写前闸同一只
     // Resolver。可空:没接的调用方按 SessionResolverOptions 现起一只。
     const lubancode::config::ProjectInstructionResolver* instruction_resolver = nullptr;
+    // Token 账本单 A1(旁路落账):flag 开的会话递账本,effort/cache 探针
+    // 各铸旁路桥落 Journal(purpose=doctor_probe)。空 = 没接轨迹/单测,
+    // 一个探针请求一笔不落,行为与从前一致。wire 是桥 identity 的渠道名
+    //(与主 turn 桥同源)。
+    lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
+    std::string trajectory_wire;
 };
 
 void HandleDoctorCommand(const std::string& args, const DoctorContext& context);

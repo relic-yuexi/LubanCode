@@ -55,7 +55,7 @@ void DriveOneTurn(TrajectorySessionLedger& ledger) {
     bridge->RecordInput(user);
     api::Request request;
     request.model = "demo-model";
-    const std::string request_id = bridge->OnRequestPrepared(request);
+    const std::string request_id = bridge->OnRequestPrepared(request, agent::RequestPreparedContext{});
     REQUIRE_FALSE(request_id.empty());
     bridge->OnRequestSent(request_id);
     api::Message assistant;

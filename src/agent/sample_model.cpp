@@ -19,6 +19,27 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
 
     const auto started = std::chrono::steady_clock::now();
 
+    // Token 账本单 A1(公共 ModelRequestRecorder,§11.2):旁路采样与
+    // AgentLoop 走同一套模型边界。prepared 记不住就停在边界不发模型
+    // (§7.4 耐久栅栏;旁路小活各自的旧兜底照走——标题不起、压缩报错,
+    // 与"账写不住"同一档)。usage owner 与 output 三态收口在采样终态处。
+    std::string recorded_request_id;
+    if (options.boundary_recorder != nullptr) {
+        RequestPreparedContext prepared_ctx;
+        prepared_ctx.purpose = options.purpose;
+        recorded_request_id = options.boundary_recorder->OnRequestPrepared(wire, prepared_ctx);
+        if (recorded_request_id.empty()) {
+            SampleResult blocked;
+            blocked.ok = false;
+            blocked.error = api::Error{api::ErrorKind::Api, "轨迹账写盘失败,采样停在请求边界,未发模型", 0};
+            blocked.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                      std::chrono::steady_clock::now() - started)
+                                      .count();
+            return blocked;
+        }
+        options.boundary_recorder->OnRequestSent(recorded_request_id);
+    }
+
     // 看门狗(与旧六处同一形状:steady clock 差 + 100ms 轮询,到点拉本地
     // 旗)。外部取消链在场时 send_stream 只吃外部链——本地旗没人读,超时
     // 不抢断,goal evaluator 的旧口径如实保留。join 必须有:本地旗活在
@@ -39,16 +60,26 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     api::MessageAssembler assembler;
     bool stream_error = false;
     std::string stream_error_message;
+    std::string assembler_response_id;
     const std::atomic<bool>* effective_cancel =
         options.cancel != nullptr ? options.cancel : (options.timeout_secs > 0 ? &local_cancel : nullptr);
     const auto sent = backend.send_stream(
         wire,
         [&](const api::StreamEvent& event) {
             assembler.Feed(event);
-            if (const auto* error = std::get_if<api::StreamError>(&event)) {
-                stream_error = true;
-                stream_error_message = error->message;
-            }
+            std::visit(
+                [&](const auto& e) {
+                    using T = std::decay_t<decltype(e)>;
+                    if constexpr (std::is_same_v<T, api::MessageStart>) {
+                        // provider 回的外部号(§6.1.2):只作对账,不铸本地
+                        // 身份。AgentLoop 侧同源同口径。
+                        assembler_response_id = e.id;
+                    } else if constexpr (std::is_same_v<T, api::StreamError>) {
+                        stream_error = true;
+                        stream_error_message = e.message;
+                    }
+                },
+                event);
         },
         effective_cancel);
     done = true;
@@ -74,6 +105,31 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     result.duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                              std::chrono::steady_clock::now() - started)
                              .count();
+    result.provider_response_id = assembler_response_id;
+
+    // 轨迹收口(Token 账本单 A1,§6.1.1/§7.3):usage owner 先落(没报也
+    // 落 owner,token 字段不现),output 随后按三态自己收口,不复制
+    // usage。半截流的账照样落——usage 半截也出账是本原语的旧口径,
+    // 轨迹同账。
+    if (options.boundary_recorder != nullptr && !recorded_request_id.empty()) {
+        options.boundary_recorder->OnUsageRecorded(recorded_request_id, usage, result.usage_reported,
+                                                   result.provider_response_id);
+        api::Message assistant;
+        assistant.role = api::Role::Assistant;
+        assistant.content = assembler.BuildMessage().content;
+        if (!sent.has_value()) {
+            if (sent.error().kind == api::ErrorKind::Cancelled) {
+                options.boundary_recorder->OnOutputCancelled(recorded_request_id);
+            } else {
+                options.boundary_recorder->OnOutputFailed(recorded_request_id, sent.error().message);
+            }
+        } else if (stream_error) {
+            options.boundary_recorder->OnOutputFailed(recorded_request_id, stream_error_message);
+        } else {
+            options.boundary_recorder->OnOutputCompleted(recorded_request_id, assistant, "end_turn",
+                                                         result.provider_response_id);
+        }
+    }
 
     if (!sent.has_value()) {
         result.ok = false;
