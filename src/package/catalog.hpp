@@ -37,6 +37,7 @@ struct PackageComponentSet {
     std::set<std::string> workflows;
     std::set<std::string> plugins;
     std::set<std::string> mcp_servers;
+    std::set<std::string> channels;
 
     bool Has(ComponentKind kind, const std::string& local_id) const;
 };

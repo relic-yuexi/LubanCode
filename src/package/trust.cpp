@@ -322,6 +322,33 @@ std::vector<std::string> BuildPackageApprovalLines(const PackageRecord& record) 
                                 ";超时 " + std::to_string(mcp.timeout_ms) + "ms");
                 lines.push_back("    工具: 握手后才知道");
             }
+        } else if (component.kind == ComponentKind::Channel) {
+            // 多渠道消息接入单阶段 1:Channel 也是 code 组件(声明
+            // runtime.command,常驻 sidecar),审批材料照 Plugin/MCP 同款
+            // 口径——命令、能力声明,manifest 本就不许放 token/allowlist/
+            // webhook URL(channel-manifest.md §3.6),这里如实展示即可。
+            ++code_count;
+            lines.push_back("  Channel " + component.canonical_id);
+            if (component.channel.has_value()) {
+                const channel::ChannelManifest& manifest = *component.channel;
+                std::string command = manifest.runtime.command;
+                if (!manifest.runtime.args.empty()) command += " " + JoinArgs(manifest.runtime.args);
+                lines.push_back("    命令: " + command + "(process,不经 shell)");
+                lines.push_back("    协议: " + manifest.runtime.protocol);
+                const auto join = [](const std::vector<std::string>& values) {
+                    std::string out;
+                    for (const auto& value : values) {
+                        if (!out.empty()) out += ", ";
+                        out += value;
+                    }
+                    return out.empty() ? std::string("(无)") : out;
+                };
+                lines.push_back("    声明能力: transports=" + join(manifest.capabilities.transports) +
+                                "; delivery=" + join(manifest.capabilities.delivery));
+                if (manifest.risk.has_value()) {
+                    lines.push_back("    风险标注: " + *manifest.risk);
+                }
+            }
         }
     }
     if (code_count == 0) {

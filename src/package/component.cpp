@@ -68,6 +68,7 @@ std::string_view ComponentKindName(ComponentKind kind) {
         case ComponentKind::Workflow: return "workflow";
         case ComponentKind::Plugin: return "plugin";
         case ComponentKind::McpServer: return "mcp_server";
+        case ComponentKind::Channel: return "channel";
     }
     return "?";
 }
@@ -80,6 +81,7 @@ std::string_view ComponentKindDir(ComponentKind kind) {
         case ComponentKind::Workflow: return "workflows";
         case ComponentKind::Plugin: return "plugins";
         case ComponentKind::McpServer: return "mcp";
+        case ComponentKind::Channel: return "channels";
     }
     return "?";
 }
@@ -564,6 +566,52 @@ ParsedComponent ParseMcpComponent(const ComponentSourceRoot& source) {
     return out;
 }
 
+// channel.yaml(多渠道消息接入单阶段 1;契约 docs/architecture/channels/
+// channel-manifest.md)。与 ParseMcpComponent 同一件事的另一份:local id
+// 规矩 + 名字一致性(channel.yaml:id 与目录名一致——冻结文档没有明文要求
+// 这条,但同一渠道 id 全局唯一、canonical id 由目录名给出,两边不一致会
+// 让"对外渠道 id"与"包内引用名"永久错位,照 Plugin/MCP 先例一并拦。
+// runtime.command 是否可执行、账号凭据、Package 信任门——这些不是静态
+// 解析管的账,阶段 1 只诊不执行(channel-manifest.md §5 十关,这里只占
+// "static parse"一关)。
+ParsedComponent ParseChannelComponent(const ComponentSourceRoot& source) {
+    ParsedComponent out;
+    out.kind = ComponentKind::Channel;
+    out.local_id = source.local_id;
+    out.canonical_id = source.package_id + ":" + source.local_id;
+    out.rel_path = source.rel_path;
+
+    if (!IsKebabCaseLocalId(source.local_id)) {
+        out.issues.push_back(ComponentIssue{true, source.rel_path, -1, -1, "(local id)",
+                                            "id_invalid: 目录名须小写 kebab-case,给了 " + source.local_id});
+    }
+
+    const std::filesystem::path manifest_path = source.component_path / "channel.yaml";
+    const auto text = ReadFileBytes(manifest_path);
+    if (!text.has_value()) {
+        out.issues.push_back(ComponentIssue{true, source.rel_path + "/channel.yaml", -1, -1, "(file)",
+                                            "读不动(权限或占用)"});
+        return out;
+    }
+    auto parsed =
+        channel::ParseChannelManifestYaml(*text, source.package_root, source.component_path);
+    if (!parsed.has_value()) {
+        for (const auto& error : parsed.error()) {
+            out.issues.push_back(ComponentIssue{true, source.rel_path + "/channel.yaml", error.line, -1,
+                                                error.field, error.detail});
+        }
+        return out;
+    }
+    if (!parsed->id.empty() && parsed->id != source.local_id) {
+        out.issues.push_back(ComponentIssue{true, source.rel_path + "/channel.yaml", -1, -1, "id",
+                                            "name_mismatch: channel.yaml id " + parsed->id + " 与目录名 " +
+                                                source.local_id + " 不一致(契约:须与目录名一致)"});
+    }
+    out.channel = std::move(*parsed);
+    out.ok = true;
+    return out;
+}
+
 // Prompt Profile:目录整体即组件,无单一入口。原生规矩(agents.md §6.3)
 // 是"core/features/platforms 可换,modes 不可"。逐文件记账;local id 规矩
 // 同其余五类。
@@ -641,6 +689,7 @@ ParsedComponent ParsePackageComponent(const ComponentSourceRoot& source) {
             case ComponentKind::Workflow: return ParseWorkflowComponent(source);
             case ComponentKind::Plugin: return ParsePluginComponent(source);
             case ComponentKind::McpServer: return ParseMcpComponent(source);
+            case ComponentKind::Channel: return ParseChannelComponent(source);
         }
         return ParsedComponent{};
     }();
