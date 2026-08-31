@@ -384,7 +384,7 @@ TEST_CASE("ripgrep smoke: 版本精确校验(过/错/认不出)") {
 }
 
 // ---------------------------------------------------------------------------
-// P0-2:runner——四路稳定错误 + P0-4 前的 NotWired + smoke 只做一次
+// P0-2/P0-4:runner——四路稳定错误 + 真起进程 + smoke 只做一次
 // ---------------------------------------------------------------------------
 
 TEST_CASE("ripgrep runner: 缺件/不可执行/版本错/spawn fail 四路稳定错误") {
@@ -421,15 +421,19 @@ TEST_CASE("ripgrep runner: 缺件/不可执行/版本错/spawn fail 四路稳定
     CHECK(ToString(result.error().code) == "search_backend_spawn_failed");
 }
 
-TEST_CASE("ripgrep runner: 前置全过后如实回 NotWired(P0-4 前流式执行未接)") {
+TEST_CASE("ripgrep runner: 前置全过后真起进程,假件起不来报 spawn failed") {
+    // P0-4 起流式执行已接线:前置(缺件/不可执行/版本)全过的下一站是
+    // ChildProcess 真起进程。形态可执行但不是真 exe 的假件在这里如实报
+    // spawn 失败——没有 NotWired 这一站,也没有本地内核可退。
     const TempDir dir;
     FakeProbe probe;
     BundledRipgrepRunner runner(MakeFakeRg(dir, "rg_ok.exe", "x"), probe.AsProbe());
     const auto result = runner.Run(GrepRequest("x", dir.Path()), SearchPolicy{}, ToolExecutionContext{});
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().code == SearchBackendError::NotWired);
-    CHECK(ToString(result.error().code) == "search_backend_not_wired");
-    CHECK(runner.smoke_result().status == RipgrepSmokeStatus::Ready);
+    const bool spawn_failed = result.error().code == SearchBackendError::SpawnFailed;
+    CHECK(spawn_failed);
+    CHECK(ToString(result.error().code) == "search_backend_spawn_failed");
+    CHECK(runner.smoke_result().status == RipgrepSmokeStatus::Ready);  // smoke 过了,死在起进程
 }
 
 TEST_CASE("ripgrep runner: smoke 每实例只做一次(缓存)") {
@@ -444,17 +448,19 @@ TEST_CASE("ripgrep runner: smoke 每实例只做一次(缓存)") {
 }
 
 TEST_CASE("ripgrep runner: 默认构造走生产唯一路径") {
-    // 不注入任何东西:定位只能来自 ExecutableDir/libexec。本机 libexec 通常
-    // 无 rg -> 缺件;这条钉的是"默认构造绝不改道 PATH/环境变量"。
+    // 不注入任何东西:定位只能来自 ExecutableDir/libexec。开发构建的运行
+    // 目录 libexec 通常无 rg -> 缺件;分期入位(CTest 目录里有 rg)时搜索
+    // 照常。这条钉的是"默认构造绝不改道 PATH/环境变量",两态都不冒充。
     BundledRipgrepRunner runner;
     const auto result = runner.Run(GrepRequest("x", std::filesystem::temp_directory_path()), SearchPolicy{},
                                    ToolExecutionContext{});
-    REQUIRE_FALSE(result.has_value());
-    // 本机(开发构建,包里还没带 rg)必然缺件;将来 Release 包带上后这条会
-    // 变 Ready->NotWired,断言两态都不冒充成功。(doctest 禁复合表达式,
-    // 先折成布尔再 CHECK。)
+    if (result.has_value()) {
+        // rg 在位:真搜了一把(temp 目录里搜 "x"),成功即对。
+        CHECK(runner.smoke_result().status == RipgrepSmokeStatus::Ready);
+        return;
+    }
     const bool honest_terminal_state = result.error().code == SearchBackendError::BackendMissing ||
-                                       result.error().code == SearchBackendError::NotWired;
+                                       result.error().code == SearchBackendError::NotExecutable;
     CHECK(honest_terminal_state);
 }
 
@@ -766,11 +772,13 @@ TEST_CASE("argv 三平台同语义: scope 恒 '.' 或文件名字面,不含平�
 // P0-3:策略构造器——硬排除、观察边界、显式点名两路对账
 // ---------------------------------------------------------------------------
 
-TEST_CASE("policy: 默认硬排除四目录,任意深度(**/<名>/**)") {
+TEST_CASE("policy: 默认硬排除四目录,任意深度(!**/<名>/**)") {
     BoundaryResetGuard boundary;
     const SearchPolicy policy = BuildSearchPolicy(GrepRequest("x", Utf8ToPath("/proj")));
+    // 排除项必须带 ! 前缀:裸 glob 在 rg 眼里是包含项(P0-4 真机差分翻过
+    // 这车),钉死带 ! 的四条。
     const std::vector<std::string> expected = {
-        "**/.git/**", "**/build/**", "**/node_modules/**", "**/.evidence/**",
+        "!**/.git/**", "!**/build/**", "!**/node_modules/**", "!**/.evidence/**",
     };
     CHECK(policy.include_hidden);
     CHECK(policy.respect_ignore_files);
@@ -815,7 +823,7 @@ TEST_CASE("policy: root 本身是登记目录 = 显式点名,不生观察排除"
     const SearchPolicy policy = BuildSearchPolicy(GrepRequest("x", logs));
     CHECK(std::find(policy.exclude_globs.begin(), policy.exclude_globs.end(), "!logs/**") ==
           policy.exclude_globs.end());
-    CHECK(std::find(policy.exclude_globs.begin(), policy.exclude_globs.end(), "**/.git/**") !=
+    CHECK(std::find(policy.exclude_globs.begin(), policy.exclude_globs.end(), "!**/.git/**") !=
           policy.exclude_globs.end());
 }
 

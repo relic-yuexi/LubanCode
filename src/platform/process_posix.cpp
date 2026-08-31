@@ -1435,6 +1435,28 @@ bool ChildProcess::IsAlive() const {
     return r == 0;  // 0 = 还活着;-1 = 查不到,当死了算
 }
 
+bool ChildProcess::WaitForExit(int timeout_ms, const std::atomic<bool>* cancel) {
+    if (!started_ || pid_ <= 0) {
+        return true;  // 没起过/已收尸:没有可等的
+    }
+    // 与 RunProcess 的等待循环同一副骨架:waitpid(WNOHANG) + 10ms 分片,
+    // 每片查 cancel。cancel 置位后最多一片内返回,不吊死。
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms > 0 ? timeout_ms : 0);
+    while (true) {
+        if (!IsAlive()) {
+            return true;
+        }
+        if (cancel != nullptr && cancel->load(std::memory_order_relaxed)) {
+            return false;
+        }
+        if (timeout_ms > 0 && std::chrono::steady_clock::now() >= deadline) {
+            return false;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
 ChildResourceUsage ChildProcess::ResourceUsageSnapshot() const {
     // POSIX:RUSAGE_CHILDREN 混着后台命令的账,拆不出这家子进程自己的数,
     // 如实返回未知(全零);撞线归因走 exit_code 的负数信号编码。

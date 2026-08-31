@@ -59,6 +59,13 @@ endif()
 # ---------------------------------------------------------------------------
 option(LUBANCODE_USE_CODELOAD
        "用 codeload.github.com 镜像拉 FetchContent 依赖(github 主站不通的网络环境用)" ON)
+# 随包 ripgrep 分期目录(SearchTool 内置 Ripgrep 后端迁移单,设计单 8.4):
+# 指向 scripts/fetch_ripgrep.py 过完哈希/版本门的产物目录(内含 rg[.exe])。
+# 设了则:configure 校版本(与 third_party/ripgrep/manifest.json 对账)、
+# 构建后复制进主程序与测试运行目录的 libexec/(search 生产定位是
+# ExecutableDir/libexec,同一条路);没设则主程序 search 明报缺件、真 rg
+# 集成测试跳过——绝不暗中联网,依赖获取永远显式、可缓存、可校验。
+set(LUBANCODE_BUNDLED_RG_DIR "" CACHE PATH "已校验的随包 ripgrep 目录(内含 rg[.exe];由 scripts/fetch_ripgrep.py 产出)")
 # _lubancode_tarball(<out_var> <owner/repo> <tag>):按开关拼 tarball 地址。
 function(_lubancode_tarball out_var repo tag)
   if(LUBANCODE_USE_CODELOAD)
@@ -378,8 +385,10 @@ add_library(lubancode_engine STATIC
   src/tools/ask_user.cpp
   src/tools/search.cpp
   # ripgrep 迁移单 P0-2/P0-3:随包定位器/runner 合同/argv 纯函数构造器。
-  # P0-4 之前不改 search 生产行为,只提供装配注入口与诊断真账。
+  # P0-4/P0-5:流式执行(ChildProcess 起 rg、JSONL/NUL 分帧、四道墙、
+  # 终态裁决)在 search_ripgrep_run.cpp,search 生产主路已切过去。
   src/tools/search_ripgrep.cpp
+  src/tools/search_ripgrep_run.cpp
   # 观察边界(真机实测 P2-5):search/read_file 默认不吞子代理日志与
   # .evidence 运行时证据,显式点名才放行并告知体积。
   src/tools/observation_filter.cpp
@@ -924,6 +933,25 @@ endif()
 add_executable(lubancode src/main.cpp)
 target_link_libraries(lubancode PRIVATE lubancode_app)
 target_compile_features(lubancode PRIVATE cxx_std_23)
+
+# 随包 rg 落到主程序旁的 libexec/(迁移单 8.4:构建后复制)。Release 包
+# 的 rg 由 scripts/fetch_ripgrep.py 在打包阶段直接放 dist/lubancode/libexec,
+# 这条只服务本地/CI 构建出来的 exe 也能跑真 search。
+if(LUBANCODE_BUNDLED_RG_DIR AND EXISTS "${LUBANCODE_BUNDLED_RG_DIR}")
+  if(WIN32)
+    set(LUBANCODE_MAIN_RG_EXE "${LUBANCODE_BUNDLED_RG_DIR}/rg.exe")
+    set(LUBANCODE_MAIN_RG_OUTPUT "rg.exe")
+  else()
+    set(LUBANCODE_MAIN_RG_EXE "${LUBANCODE_BUNDLED_RG_DIR}/rg")
+    set(LUBANCODE_MAIN_RG_OUTPUT "rg")
+  endif()
+  add_custom_command(TARGET lubancode POST_BUILD
+    COMMAND "${CMAKE_COMMAND}" -E make_directory "$<TARGET_FILE_DIR:lubancode>/libexec"
+    COMMAND "${CMAKE_COMMAND}" -E copy_if_different "${LUBANCODE_MAIN_RG_EXE}"
+            "$<TARGET_FILE_DIR:lubancode>/libexec/${LUBANCODE_MAIN_RG_OUTPUT}"
+    COMMENT "Staging bundled ripgrep beside lubancode executable"
+    VERBATIM)
+endif()
 
 install(TARGETS lubancode RUNTIME DESTINATION bin)
 install(DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}/skills/" DESTINATION share/lubancode/skills)

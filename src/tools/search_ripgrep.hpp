@@ -1,12 +1,12 @@
 // search 工具的 ripgrep 后端合同(SearchTool 内置 Ripgrep 后端迁移单
-// P0-2/P0-3):typed 请求/策略/结果/错误、随包定位器、runner 接口、argv
-// 纯函数构造器与观察边界→排除 glob 的策略构造器。
+// P0-2~P0-5):typed 请求/策略/结果/错误、随包定位器、runner 接口、argv
+// 纯函数构造器、观察边界→排除 glob 的策略构造器,与 P0-4 的流式分帧/
+// 解析合同(四道墙、JSONL/NUL 分帧、text/bytes 两路)。
 //
-// 本批的红线:SearchTool 的生产行为一字不差——`search` 仍走内置
-// std::regex 内核(P0-4 前唯一生产路径),这里落的只是装配注入口与合同。
 // 生产定位只有一条:ExecutableDir()/libexec/rg(.exe)。不搜 PATH、不读
 // LUBANCODE_RG_PATH、不运行时下载——search 是免确认只读工具,能从 PATH
-// 或环境变量捡一枚任意程序,就等于开了一个不经确认的代码执行口。
+// 或环境变量捡一枚任意程序,就等于开了一个不经确认的代码执行口。缺件即
+// 稳定错 search_backend_missing,不退回任何自研内核(迁移单一的红线)。
 //
 // argv 约定(设计单 4.2/6.3/6.4):
 //   - argv 数组直起进程,不经过 cmd.exe/PowerShell//bin/sh,无转义层;
@@ -20,6 +20,7 @@
 #include <expected>
 #include <filesystem>
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -38,13 +39,13 @@ enum class SearchBackendError {
     NotExecutable,    // search_backend_not_executable:件在,不是可执行文件
     VersionMismatch,  // search_backend_version_mismatch:--version 对不上钉死版本
     SpawnFailed,      // search_backend_spawn_failed:起进程失败
-    ProtocolError,    // search_backend_protocol_error(P0-4 接)
-    PatternInvalid,   // search_pattern_invalid(P0-4 接)
-    Cancelled,        // search_cancelled(P0-4 接)
-    Timeout,          // search_timeout(P0-4 接)
-    OutputLimit,      // search_output_limit(P0-4 接)
-    NotWired,         // search_backend_not_wired:本批专用——流式执行是 P0-4,
-                      // 前置校验全过之后如实回这枚,不冒充缺件、不偷偷退回旧内核
+    ProtocolError,    // search_backend_protocol_error:stdout 协议坏/未完成帧超帽
+    PatternInvalid,   // search_pattern_invalid:rg 退出码 2(pattern/glob 不合法)
+    Cancelled,        // search_cancelled:取消令牌置位收树
+    Timeout,          // search_timeout:墙钟超时收树
+    OutputLimit,      // search_output_limit:保留码(四道墙全部走 success+truncated,
+                      // 不作错误;枚举留住,错误面不缺位)
+    RunFailed,        // search_backend_run_failed:进程半途死/意外退出码,不冒充无命中
 };
 
 // 稳定字符串码(error_code 落 Tool::Result 用),如 "search_backend_missing"。
@@ -189,17 +190,92 @@ struct RipgrepSmokeResult {
 // 真探针;单测传假探针(不起进程)。
 RipgrepSmokeResult RunRipgrepSmoke(const std::filesystem::path& exe, const RipgrepVersionProbe& probe = nullptr);
 
-// ---- 生产 runner(装配注入口;流式执行是 P0-4) -----------------------------
-// Run 的前置段本批就真做:定位 -> 缺件/不可执行/版本 smoke,四路各有稳定
-// 错误码;前置全过之后流式执行未接,如实回 NotWired(P0-4 换实现,P0-5 切
-// 主路)。SearchTool::execute 在 P0-5 之前不调用本类——生产路径与从前一字
-// 不差,本类是装配口与 doctor 诊断的真账。
+// ---- 流式执行的四道墙与 stderr 帽(设计单 6.5,P0-4) ------------------------
+// 四道墙:100 条命中(软请求 max_results 只能调低)、512 KiB 结果正文、
+// 16 KiB 单条模型可见行、1 MiB 未完成协议帧。前两道触发主动收树(success +
+// truncated);第三道只截该行;第四道是协议错(kill + search_backend_protocol_error)。
+// stderr 另有 64 KiB 捕获帽,超出截断注明。墙钟 timeout 是终态裁决的一员,
+// 缺省 120s——rg 扫大仓也是秒级的事,两分钟还不回便是病,如实报 search_timeout。
+struct RipgrepStreamLimits {
+    std::size_t max_hits = 100;                 // 全局命中数帽(grep 按命中行,glob 按文件)
+    std::size_t max_total_result_bytes = 512 * 1024;  // 结果正文总字节帽
+    std::size_t max_hit_line_bytes = 16 * 1024;       // 单条命中行帽(截断,不是错)
+    std::size_t max_frame_bytes = 1024 * 1024;        // 未完成协议帧帽(超=协议错)
+    std::size_t max_stderr_bytes = 64 * 1024;         // stderr 捕获帽(截断注明)
+    int timeout_ms = 120'000;                    // 墙钟帽
+};
+
+// 由请求侧的 max_results(软请求,只降不升)算流式帽:钳进 [1, 100]。
+RipgrepStreamLimits MakeRipgrepStreamLimits(std::size_t requested_max_results);
+
+// ---- 分帧器(P0-4):原始字节块 -> 按分隔符切帧 -------------------------------
+// grep 按 '\n' 分帧(JSON Lines),glob 按 '\0' 分帧(--files --null,POSIX
+// 文件名可含换行)。未完成帧留在内部缓冲;缓冲超过 max_frame_bytes 即协议错
+// (Feed 返回 false),调用方停读、收树、报 search_backend_protocol_error。
+// 流到 EOF 后调 FlushTail:残留非空未闭帧按最后一帧补交(尾帧无换行合同,
+// 设计单 6.5"最后一帧无换行也要处理")。
+class RipgrepStreamFramer {
+public:
+    using FrameCallback = std::function<bool(std::string_view)>;
+
+    RipgrepStreamFramer(char delimiter, std::size_t max_frame_bytes);
+
+    // 喂一块原始字节。返回 false = 协议帧超帽,调用方停读(帧回调返回 false
+    // 也算停读信号,由本函数原样透传)。
+    bool Feed(std::string_view chunk, const FrameCallback& on_frame);
+
+    // EOF 冲刷:缓冲里还有非空尾巴就交最后一帧。返回值同 Feed。
+    bool FlushTail(const FrameCallback& on_frame);
+
+    std::size_t pending_bytes() const { return pending_.size(); }
+
+private:
+    bool DeliverPending(const FrameCallback& on_frame);
+
+    char delimiter_;
+    std::size_t max_frame_bytes_;
+    std::string pending_;
+};
+
+// ---- grep JSON Lines 事件解析(设计单 6.5,P0-4) -----------------------------
+// 只认上游稳定事件:begin/end 忽略(Kind=Other),match 产一条 SearchHit,
+// summary 抽诊断字段(elapsed_total/searches/searches_with_match/matched_lines,
+// 不拿它改命中正文)。path/lines 两路:text 直用;bytes(base64)解码后过
+// SanitizeExternalText,非法字节不直接塞进 JSON/history。坏 JSON -> Kind=Invalid,
+// 调用方按协议错收树,绝不吞掉装作无命中。
+struct ParsedGrepEvent {
+    enum class Kind { Match, Summary, Other, Invalid };
+    Kind kind = Kind::Other;
+    SearchHit hit;       // Kind==Match 有效
+    RipgrepStats stats;  // Kind==Summary 有效
+};
+
+ParsedGrepEvent ParseGrepEventLine(std::string_view line);
+
+// base64 解码(ripgrep --json 的 bytes 字段)。输入不是合法 base64 返回空串。
+std::string DecodeBase64(std::string_view text);
+
+// rg 输出路径的规整:反斜杠统一 '/',剥掉开头的 "./"(目录 root 下 scope="."
+// 的天然前缀)。单文件 root(scope=文件名)无前缀,同样安全。
+std::string NormalizeRipgrepPath(std::string_view path_utf8);
+
+// 命中行按 UTF-8 码点边界截到 max_bytes(第三道墙):从尾部往回收敛,绝不
+// 切出半个多字节字符。空入参原样返回。
+std::string TruncateUtf8Boundary(std::string_view text, std::size_t max_bytes);
+
+// ---- 生产 runner(P0-4 起真流式执行) ---------------------------------------
+// Run 全程:定位 -> 缺件/不可执行/版本 smoke(四路稳定错误) -> ChildProcess
+// 起 rg(argv 直起、cwd 走 OS 参数、绝对路径不经 PATH)-> stdout 读线程分帧
+// 解析(四道墙在帧回调里判)-> 主线程 WaitForExit 有界等(cancel/timeout/
+// 满额停三者各自收树)-> Shutdown 收整棵树(唯一 owner 调,读线程不自 join)
+// -> 终态裁决(设计单 6.6 的表:本地原因旗优先,退出码只兜自然完成那条)。
 class BundledRipgrepRunner : public IRipgrepRunner {
 public:
-    // exe_override/probe 均为测试注入口(fake filesystem/假探针);生产构造
-    // 全默认:定位走 BundledRipgrepPath(),探针走真进程。
+    // exe_override/probe/limits 均为测试注入口(fake filesystem/假探针/小帽快测);
+    // 生产构造全默认:定位走 BundledRipgrepPath(),探针走真进程,帽走合同值。
     explicit BundledRipgrepRunner(std::filesystem::path exe_override = {},
-                                  RipgrepVersionProbe version_probe = nullptr);
+                                  RipgrepVersionProbe version_probe = nullptr,
+                                  RipgrepStreamLimits limits = {});
 
     std::expected<RipgrepRunResult, SearchBackendErrorInfo>
     Run(const SearchRequest& request, const SearchPolicy& policy,
@@ -214,6 +290,7 @@ private:
 
     std::optional<std::filesystem::path> exe_override_;
     RipgrepVersionProbe version_probe_;
+    RipgrepStreamLimits limits_;
     mutable std::mutex smoke_mutex_;
     RipgrepSmokeResult smoke_result_;
     bool smoke_done_ = false;

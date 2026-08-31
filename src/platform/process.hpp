@@ -361,6 +361,16 @@ public:
     // 进程是否还活着。
     bool IsAlive() const;
 
+    // 有界等待进程退出(设计单迁移 P0-4 给 SearchTool 流式 runner 用的通用口,
+    // 不在调用方复制 Windows/POSIX 等待代码):
+    //   - 返回 true  = 进程已退出(退出码经 exit_code() 取,Shutdown 之后更稳);
+    //   - 返回 false = 还活着——timeout_ms 用尽或 cancel 置位(调用方随后
+    //     Shutdown 收树,自己裁决终态);
+    //   - timeout_ms<=0 只查一眼;cancel 为空时行为等同纯超时等待;
+    //   - 内部按小分片等待/轮询,cancel 置位后最多一个分片内返回,不吊死。
+    // 没起过进程(started_=false)恒 true——没有可等的。
+    bool WaitForExit(int timeout_ms, const std::atomic<bool>* cancel = nullptr);
+
     // PTC 沙箱:退出后的资源快照(撞线归因用)。没起过/平台没实现那一路
     // 返回全零。可在 Shutdown 之后调,job 句柄关掉前读到的值缓存于此。
     ChildResourceUsage ResourceUsageSnapshot() const;
