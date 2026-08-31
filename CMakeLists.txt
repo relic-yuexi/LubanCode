@@ -522,6 +522,18 @@ add_library(lubancode_engine STATIC
   src/insights/session_summary.cpp
   src/insights/report_model.cpp
   src/insights/redaction.cpp
+  # 端云协同可观测架构与 Telemetry 插件设计单 T0(合同与离线投影):
+  # features.telemetry Activation、trace/span/resource/data class 合同、
+  # 确定性 trace/span id、纯 TelemetryProjector(只吃 Journal,不联网)、
+  # D1 allowlist-first Redactor、离线 OTLP/HTTP JSON encoder。纯库,不
+  # include app/cli/exporter/云端 SDK;只读 trajectory 合同与 platform
+  # 抽象(依赖方向见该单 §25.2)。
+  src/telemetry/activation.cpp
+  src/telemetry/contract.cpp
+  src/telemetry/identity.cpp
+  src/telemetry/redactor.cpp
+  src/telemetry/projector.cpp
+  src/telemetry/otlp_json.cpp
 )
 target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

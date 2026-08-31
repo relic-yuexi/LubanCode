@@ -676,6 +676,14 @@ struct Config {
     // Trajectory Journal、不写旧 SessionStore(禁 dual-write);关的
     // 会话行为与从前一字不差。
     bool features_trajectory = false;
+    // 端云协同可观测单 T0:features.telemetry(默认 false,内部预览)。
+    // 只从配置文件来(项目级压全局),环境变量 LUBANCODE_TELEMETRY=1/0
+    // 显式压一头(telemetry::ResolveTelemetryActivation 合成);紧急总闸
+    // LUBANCODE_DISABLE_TELEMETRY=1 只关采集发送,不改本字段。首版收窄:
+    // 只支持 trajectory=true && telemetry=true 完整路,telemetry=true &&
+    // trajectory=false 由 Activation 报 telemetry.requires_trajectory,
+    // 不暗开 trajectory。
+    bool features_telemetry = false;
     // goals 段:预算默认值(只从配置文件来,项目级压全局;CLI /goal 首版
     // 不塞 budget flag,全从这读)。没配的字段落 GoalsConfig 里的内置默认。
     GoalsConfig goals;
@@ -864,6 +872,8 @@ struct FileConfig {
     std::optional<bool> features_loop;
     // P0-2 轨迹:features.trajectory(布尔)。
     std::optional<bool> features_trajectory;
+    // 端云协同可观测单 T0:features.telemetry(布尔)。
+    std::optional<bool> features_telemetry;
     std::optional<GoalsFileConfig> goals;
     std::optional<MemoryFileConfig> memory;
     // project_doc_fallback_filenames(AGENTS.md 作用域单 P2-2):顶层键,

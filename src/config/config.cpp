@@ -1824,6 +1824,13 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             }
             config.features_trajectory = field["trajectory"].get<bool>();
         }
+        if (field.contains("telemetry")) {
+            if (!field["telemetry"].is_boolean()) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 features.telemetry 必须是布尔值");
+            }
+            config.features_telemetry = field["telemetry"].get<bool>();
+        }
     }
     // goals 段:预算默认值(整段回退;duration 收原始字符串)。
     if (parsed.contains("goals")) {
@@ -2647,6 +2654,16 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
                                                                                        : nullptr);
         if (trajectory_file != nullptr) {
             result.config.features_trajectory = *trajectory_file->features_trajectory;
+        }
+        // 端云协同可观测单 T0:同一待遇(项目级压全局,环境变量在
+        // telemetry::ResolveTelemetryActivation 里合成)。
+        const FileConfig* telemetry_file =
+            project_ptr != nullptr && project_ptr->features_telemetry.has_value()
+                ? project_ptr
+                : (global_ptr != nullptr && global_ptr->features_telemetry.has_value() ? global_ptr
+                                                                                       : nullptr);
+        if (telemetry_file != nullptr) {
+            result.config.features_telemetry = *telemetry_file->features_telemetry;
         }
         const FileConfig* goals_file = project_ptr != nullptr && project_ptr->goals.has_value()
                                            ? project_ptr
