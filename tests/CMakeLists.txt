@@ -64,6 +64,9 @@ add_executable(lubancode_tests
   support/api_fixture.cpp
   # Lua 受控 HTTP 单·阶段 2:本机回环假 HTTP 服务(§13.3 假服务矩阵)。
   support/fake_http_server.cpp
+  # 多渠道消息接入单阶段 1:纯内存 Channel Bridge v1 假 sidecar,供
+  # tests/unit/channel 冒烟测试与未来真渠道适配器 conformance suite 复用。
+  support/fake_channel_sidecar.cpp
   ${LUBANCODE_TEST_SOURCES}
 )
 target_link_libraries(lubancode_tests PRIVATE lubancode_app doctest::doctest)
