@@ -126,16 +126,19 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
         }
         // P0-3 轨迹子命令:lubancode trajectory <verify|replay|harness-replay>
         // <session-id>;P0-4 增 usage|gc|doctor <workspace-key> 与 gc 的
-        // --dry-run/--derived-only。只认裸词打头且此前没有位置参数;形状
+        // --dry-run/--derived-only;P0-5 增 export/export-workspace 与
+        // --format training-v1。只认裸词打头且此前没有位置参数;形状
         // 不对当场退用法。
         if (arg == "trajectory" && options.positional.empty()) {
-            static const std::set<std::string> kVerbs = {"verify",     "replay", "harness-replay",
-                                                         "usage",      "gc",     "doctor"};
+            static const std::set<std::string> kVerbs = {
+                "verify", "replay", "harness-replay", "usage",
+                "gc",     "doctor", "export",         "export-workspace"};
             const std::size_t rest = args.size() - i - 1;
             if (rest == 0 || kVerbs.count(args[i + 1]) == 0) {
                 parsed.action = CliAction::BadTrajectory;
                 parsed.error_text =
-                    "用法: lubancode trajectory <verify|replay|harness-replay|usage|gc|doctor> "
+                    "用法: lubancode trajectory "
+                    "<verify|replay|harness-replay|usage|gc|doctor|export|export-workspace> "
                     "<session-id|workspace-key>";
                 return parsed;
             }
@@ -147,7 +150,9 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             TrajectoryCliArgs trajectory;
             trajectory.verb = args[i + 1];
             trajectory.session_id = args[i + 2];
-            // gc 的修饰词只能跟在 workspace-key 之后(--derived-only 真删)。
+            trajectory.format = "training-v1";  // 唯一实现的目标格式(§十四)
+            // 修饰词只能跟在 id 之后:gc 的 --dry-run/--derived-only 与
+            // export 的 --format <名>。
             for (std::size_t extra = i + 3; extra < args.size(); ++extra) {
                 if (args[extra] == "--dry-run") {
                     continue;  // 默认档,明写也认
@@ -156,9 +161,27 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                     trajectory.gc_derived_only = true;
                     continue;
                 }
+                if (args[extra] == "--format") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadTrajectory;
+                        parsed.error_text = "trajectory " + trajectory.verb +
+                                            " 的 --format 需要一个值(当前只认 training-v1)";
+                        return parsed;
+                    }
+                    trajectory.format = args[++extra];
+                    continue;
+                }
                 parsed.action = CliAction::BadTrajectory;
                 parsed.error_text = "trajectory " + trajectory.verb + " 认不得参数 \"" + args[extra] +
-                                    "\":只认 --dry-run / --derived-only";
+                                    "\":只认 --dry-run / --derived-only / --format <名>";
+                return parsed;
+            }
+            if ((trajectory.verb == "export" || trajectory.verb == "export-workspace") &&
+                trajectory.format != "training-v1") {
+                parsed.action = CliAction::BadTrajectory;
+                parsed.error_text =
+                    "trajectory " + trajectory.verb + " 只认 --format training-v1,不认 \"" +
+                    trajectory.format + "\"";
                 return parsed;
             }
             if (trajectory.session_id.rfind("-", 0) != 0 &&

@@ -540,6 +540,7 @@ int RunCli(const std::vector<std::string>& args) {
             trajectory_args.verb = parsed_cli.trajectory.verb;
             trajectory_args.session_id = parsed_cli.trajectory.session_id;
             trajectory_args.gc_derived_only = parsed_cli.trajectory.gc_derived_only;
+            trajectory_args.format = parsed_cli.trajectory.format;
             return cli::RunTrajectoryCommand(trajectory_args);
         }
         case CliAction::BadTrajectory:

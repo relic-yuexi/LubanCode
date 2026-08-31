@@ -66,9 +66,12 @@ struct EvolveTestArgs {
 // P0-3 轨迹子命令:`lubancode trajectory <verify|replay|harness-replay>
 // <session-id>`。只读诊断,不进会话;退出码 0/1/2(过/用法/验账未过)。
 struct TrajectoryCliArgs {
-    std::string verb;        // verify | replay | harness-replay | usage | gc | doctor
-    std::string session_id;  // trajectory session id(usage/gc/doctor 档当 workspace-key)
+    std::string verb;        // verify | replay | harness-replay | usage | gc | doctor |
+                             // export | export-workspace
+    std::string session_id;  // trajectory session id(usage/gc/doctor/export-workspace 档当
+                             // workspace-key)
     bool gc_derived_only = false;  // gc --derived-only:真删可重建/派生物(默认 dry-run)
+    std::string format;             // export/export-workspace 的 --format;唯一认 training-v1
 };
 
 // 解析结果:action 不是 Proceed 时,RunCli 兑现完动作就退,不进会话。

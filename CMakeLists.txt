@@ -521,6 +521,10 @@ add_library(lubancode_engine STATIC
   # P0-4 §12.1:单段名校验/canonical containment/重解析点防逃逸与
   # user-only 权限(POSIX 0700/0600,Windows PROTECTED DACL)。
   src/trajectory/safety.cpp
+  # P0-5:Training Exporter——Journal 只读投影成 provider-neutral 训练
+  # 样本(§十一):episode schema/四路/origin 映射/质量轴/隐私扫描/
+  # manifest 与确定性 fingerprint。纯派生,不回写 Journal。
+  src/trajectory/training_exporter.cpp
   # Token 账本与使用洞察单 A0(合同与夹具):accounting 是 usage 投影与
   # 计价的纯领域层;insights 是摘要/finding/报告合同与脱敏。都不 include
   # app/cli,不接真实 runtime(A1 再接线)。

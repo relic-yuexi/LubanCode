@@ -14,6 +14,7 @@
 #include "trajectory/metrics.hpp"
 #include "trajectory/replay.hpp"
 #include "trajectory/safety.hpp"
+#include "trajectory/training_exporter.hpp"
 #include "trajectory/usage_gc.hpp"
 
 namespace lubancode::cli {
@@ -128,7 +129,66 @@ int RunDoctor(const std::filesystem::path& workspace_dir, const std::string& key
     return 0;
 }
 
+// export/export-workspace(P0-5 §十一/§十四):Journal 只读投影成 training-v1
+// 数据集。trajectory 关的会话没账可导——报空退 1,不造假。
+int RunExport(const std::filesystem::path& root, const TrajectoryCommandArgs& args) {
+    if (args.format != "training-v1") {
+        std::cerr << "只认 --format training-v1,不认 \"" << args.format << "\"\n";
+        return 1;
+    }
+    const trajectory::TrainingExportOptions options;  // 默认档:reasoning 剔除、
+    // blob 回读 1 MiB 帽、写盘 16 MiB 磁盘门(§11.6/§12.2)。
+    const auto report = args.verb == "export"
+                            ? trajectory::ExportSessionTrainingV1(
+                                  FindSessionDir(root, args.session_id), options)
+                            : trajectory::ExportWorkspaceTrainingV1(
+                                  FindWorkspaceDir(root, args.session_id), options);
+    if (!report.ok()) {
+        std::cerr << "training-v1 导出未过(" << report.error_code << "): " << report.message
+                  << "\n";
+        return report.error_code == "export.no_session_dir" ||
+                       report.error_code == "export.no_streams"
+                   ? 1
+                   : 2;
+    }
+    std::cout << "training-v1 导出完成 —— " << report.episodes << " 枚 episode / "
+              << report.streams << " 份 stream\n";
+    for (const char* route : {"success", "failure", "partial", "excluded"}) {
+        const auto it = report.counts.find(route);
+        std::cout << "  " << route << ".jsonl  " << (it != report.counts.end() ? it->second : 0)
+                  << " 枚\n";
+    }
+    if (!report.exclusion_reasons.empty()) {
+        std::cout << "  排除缘由:\n";
+        for (const auto& [reason, count] : report.exclusion_reasons) {
+            std::cout << "    " << reason << "  ×" << count << "\n";
+        }
+    }
+    std::cout << "  落盘 " << platform::PathToUtf8(report.export_dir)
+              << (args.verb == "export-workspace" ? "(逐 session 各自落,此为末场;manifest.json 记 "
+                                                     "config hash、过滤规则与逐文件 sha256)"
+                                                  : "(manifest.json 记 config hash、过滤规则与逐文件 "
+                                                    "sha256)")
+              << "(派生物,可删可重算)\n";
+    return 0;
+}
+
 int RunTrajectoryCommand(const TrajectoryCommandArgs& args) {
+    if (args.verb == "export" || args.verb == "export-workspace") {
+        if (args.session_id.empty()) {
+            std::cerr << "缺 id: lubancode trajectory " << args.verb
+                      << (args.verb == "export" ? " <session-id>" : " <workspace-key>")
+                      << " --format training-v1\n";
+            return 1;
+        }
+        const auto root = args.trajectories_root.empty() ? DefaultTrajectoriesRoot()
+                                                         : tools::Utf8ToPath(args.trajectories_root);
+        if (root.empty()) {
+            std::cerr << "找不到主目录,轨迹账无处寻\n";
+            return 1;
+        }
+        return RunExport(root, args);
+    }
     if (args.verb == "usage" || args.verb == "gc" || args.verb == "doctor") {
         if (args.session_id.empty()) {
             std::cerr << "缺 workspace key: lubancode trajectory " << args.verb
@@ -156,7 +216,8 @@ int RunTrajectoryCommand(const TrajectoryCommandArgs& args) {
     }
     if (args.verb != "verify" && args.verb != "replay" && args.verb != "harness-replay") {
         std::cerr << "用法: lubancode trajectory "
-                     "<verify|replay|harness-replay|usage|gc|doctor> <session-id|workspace-key>\n";
+                     "<verify|replay|harness-replay|usage|gc|doctor|export|export-workspace> "
+                     "<session-id|workspace-key>\n";
         return 1;
     }
     if (args.session_id.empty()) {
