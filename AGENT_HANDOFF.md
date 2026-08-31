@@ -76,3 +76,9 @@
 - 先读一遍 `todos/端云协同可观测架构与Telemetry插件设计.todo` 全文（尤其 §25.2 依赖方向、第一批次的具体清单条目），核对上面「已完成的工作」是否踩在单子的第一批范围内，再决定是继续按原计划把六个 .cpp 写出来，还是调整方向。
 - 完工后按老规矩：单笔 commit，中文提交信息，末尾 `Co-Authored-By: Claude <noreply@anthropic.com>`；**不 push**，落本地即可，由主控会话统一验收合并。
 - 验证铁律：`ctest -C Debug` 全绿 + WSL `g++-13 -fsyntax-only` 语法验 + 解冲突先 `grep -c '<<<<<<<'` 点数、解完全仓验零残留 + 合并后亲核 exe 时间戳防陈旧假绿。
+
+## 接手后收尾记录（2026-08-31，第二任 agent）
+
+- 已按序完成：封存 WIP（commit 8f1f167）→ `git merge main --no-edit`（自动合并成功，唯一 `<<<<<<<` 命中是本文件引用的命令文本，代码零冲突残留）→ 通读设计单全文。
+- T0 六件已落齐：`src/telemetry/{activation,contract,identity,redactor,projector,otlp_json}.{hpp,cpp}`，测试六册在 `tests/unit/telemetry/`，OTLP golden 夹具在 `tests/fixtures/telemetry/v1/`。
+- 构建细节：本 worktree configure 时 curl 下载被网络卡死，已把主仓 `build/release/_deps/*-src` 与 `_vendor/curl-curl-8_10_1` 拷进 `build/debug/`，配 `FETCHCONTENT_SOURCE_DIR_*` 指过去（见 build/wsl_telemetry_syntax.sh 旁的 configure 命令史）。后续重新 configure 记得带同样参数。
