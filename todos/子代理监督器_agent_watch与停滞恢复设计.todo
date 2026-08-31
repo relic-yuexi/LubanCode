@@ -1,0 +1,659 @@
+# 子代理监督器、agent_watch 与停滞恢复设计
+
+- 状态：待实现
+- 级别：P0 可靠性；模型侧 `agent_watch` 为 P1 控制面
+- 日期：2026-08-31
+- 基线：`7c0bea5` (`main`)
+- 范围：子代理活度账、请求流、工具执行、停滞判定、自动恢复、查看与人工收杀
+- 依赖：`子代理递归派工与结构化任务交接设计.todo`、`端云协同可观测架构与Telemetry插件设计.todo`
+- 本单性质：设计与实施计划；除“当前真相”列出的能力外，不代表 LubanCode 已实现本单方案
+
+## 一、先下断语
+
+Agent 应当有监控。可“监控”不是再开一只模型，盯着别的模型猜死活。正路分两层：
+
+1. 宿主内立 `AgentSupervisor`。它吃结构化事件，分清等首字节、流式输出、工具执行、等孩子、真停滞与网络断流。该重试便重试，该提醒便提醒，该收杀才收杀。
+2. 模型侧添只读 `agent_watch`。主代理或直接父代理可查任务，也可等修订号变化。它不负责心跳，不靠忙轮询维持任务。
+
+现有 `agent_message` 继续管中途传话。Agent Dock 的 `x` 继续管人工停止。总墙钟继续兜底。三者不并进一枚万能工具。
+
+报错：
+
+```text
+Agent stalled: no progress for 600s (stream watchdog did not recover)
+```
+
+已经说了两件事：看门狗看见十分钟无流；恢复没成。它没证明 Agent 在偷懒。也可能是下一次请求没连上、SSE 半道断了、工具子进程不回、机器睡眠后时钟猛跳，或活度事件漏记。
+
+故而本单铁律只有一句：
+
+> 先判哪一层断了，再动哪一层；不可把“没收到流”径直写成“Agent 没进展”。
+
+## 二、当前真相
+
+### 2.1 LubanCode 已有的砖
+
+| 能力 | 当前落点 | 已能证明什么 |
+|---|---|---|
+| 子代理统一台账 | `src/tools/task_ledger.*` | 有任务 id、状态、事件、结果、取消、父子归属与 inbox |
+| 实时活度 | `AgentTaskActivity`、`content_revision` | 能看思考/正文/工具阶段，流式修订号持续增长 |
+| 查看态与轻量列表 | `TaskSummaries/TaskDetail/TaskEvents`、Agent Dock | 用户能看运行任务、展开流水、按 `x` 停止 |
+| 中途传话 | `agent_message`、`TaskLedger::SendMessage` | 主模型可在安全轮次给运行任务递话 |
+| 流空闲超时 | `HttpStreamTransport`、`stream_idle_timeout_secs` | SSE 持续低速或静默可按网络错误收口；缺省 60 秒 |
+| 请求硬墙与任务总墙钟 | API hard timeout、`SetWallClockTimeout` | 单请求与整只任务都有最终上限；子代理缺省总墙钟 1800 秒 |
+| 强制收账与晚归不翻案 | `ForceFinalizeWallClock` | 后端不理取消时，也能在宽限后腾出任务槽；晚到线程不改终态 |
+| 结构化收场原因 | `TaskOutcomeReason`、`TurnVerdict` | 用户停止、墙钟、API 错、预算等不必混成一团文字 |
+| 生命周期 hooks | `SubagentStart/SubagentStop` | 外部可在起止点留账，但还不是逐拍监督协议 |
+| 防空转判据 | Goal 的 progress fingerprint | Goal 外环已有“连续轮次无进展”概念，可借思想，不可直接套字段 |
+
+这些不是“没有监控”。它们已够一套活度显示与硬兜底。缺的是把散落信号合成诊断，再接上有限恢复。
+
+### 2.2 眼下缺口
+
+1. `AgentTaskActivity` 偏显示。它写阶段、字节数、工具名，却没把“最后收到传输字节”“最后提交完整模型消息”“最后完成工具”“最后产生可验证成果”分开。
+2. 增量能抬 `content_revision`。这只能证明流在动，不能证明任务在推进。反过来，长工具静默跑测试时，流不动也未必坏。
+3. 流空闲超时会报网络错，总墙钟会收杀。两者中间没有统一 `suspect -> probe -> recover -> fail` 状态机。
+4. 没有请求级恢复账。看不出重试了几次、从哪个提交边界重放、是否见过部分流、为何放弃。
+5. 主模型可 `agent_message`，却没有有界等待与变更快照工具。它若想等，只能继续说话或靠提示中的名册猜。
+6. Agent Dock 能停任务，却没显出“等首字节 42s”“工具已跑 3m”“第 1 次重连”等诊断。
+7. `SubagentStop` 只在终点响。它能审计收口，救不了半路断流。
+
+## 三、Claude Code 对照
+
+查到的公开材料，分三层看。
+
+### 3.1 它有通用 Monitor 工具
+
+Claude Code 的 `Monitor` 在后台跑命令，把 stdout 每行或 WebSocket 每条消息送回模型。它适合盯日志、文件变化与外部状态。`TaskStop` 可停后台任务。见：
+
+- https://code.claude.com/docs/en/tools-reference#monitor-tool
+- https://code.claude.com/docs/en/tools-reference
+
+这枚工具不是“子代理生命探针”。拿 shell 命令去轮询内部任务，会生两本状态账，还会让权限、Windows 进程树与会话寿命缠作一处。LubanCode 不照抄这层来救子代理。
+
+### 3.2 它有 Agent 控制面
+
+官方文档列出：
+
+- 后台子代理可保留 `Monitor`、`TaskStop`、`SendMessage`；
+- `TaskStop` 能按任务 id、Agent id 或名字停后台 Agent；
+- `SendMessage` 可给子代理续发消息，恢复旧上下文；
+- `SubagentStart/SubagentStop` hooks 可记生命周期。
+
+见：
+
+- https://code.claude.com/docs/en/sub-agents
+- https://code.claude.com/docs/en/hooks
+- https://code.claude.com/docs/en/tools-reference#agent-tool-behavior
+
+这说明“查看、传话、停止、续跑”应当有正式控制面。LubanCode 已有其中大半，只差有界 watch 与恢复账。
+
+### 3.3 它的 600 秒 watchdog 也会误判
+
+公开 issue 给了两份反例：
+
+1. `#87987`：工具结果已交给模型，下一次流式请求恰遇瞬时网络错。之后零事件，600 秒才杀。主会话同窗错误能重试，子代理这条路没重试。人工 `SendMessage` 恢复后，15/15 都跑完。
+2. `#85615`：Agent 已改完代码，测试也过了，正在写结论。返回文本断在半句话上，600 秒后仍被判 stalled。问题在流，不在任务。
+
+见：
+
+- https://github.com/anthropics/claude-code/issues/87987
+- https://github.com/anthropics/claude-code/issues/85615
+
+两份 issue 是用户报告，不是官方架构承诺。可它们足够钉住反设计：
+
+- 不拿单一 `last_stream_event_at` 代表任务进展；
+- 不把断流径直归到 Agent；
+- watchdog 必须接恢复路径；
+- 已落盘成果、已完成工具与部分输出要留住；
+- 恢复同一任务，优先于另派一只任务抢同一工作区。
+
+## 四、边界：两种 Monitor 不混名
+
+将来 LubanCode 若另做通用命令监控，可叫 `monitor`，归 Process/Channel 工具域。本单模型工具叫 `agent_watch`，只读 Agent 台账。
+
+```text
+monitor
+  看外部命令 / 日志 / WebSocket
+  数据源是进程或网络
+  有命令执行权限
+
+agent_watch
+  看 LubanCode 内部 AgentTask
+  数据源只认 TaskLedger + AgentSupervisor
+  只读，不起进程，不碰网络
+```
+
+宿主监督器则叫 `AgentSupervisor`。它不是模型工具，不吃 token，不等模型记得调用。
+
+## 五、核心不变量
+
+1. `TaskLedger` 仍是任务真账。Supervisor 只写监督字段与事件，不另养一份任务状态。
+2. 观察时间、传输活度、执行活度、语义进展分账记。任何一个都不得冒充另一个。
+3. 心跳只证明观察链还活。心跳不刷新 `last_meaningful_progress_at`。
+4. 等首字节、流中静默、工具静默、等孩子，尺子各不相同。
+5. 先做便宜、幂等、同身份恢复。后做取消。自动重派新 Agent 首版不做。
+6. 工具调用只有拿到完整、可解析的模型消息后才执行。半截 tool JSON 不落地。
+7. 已执行工具的结果一旦进 canonical history，恢复从其后请求起跑，不重放工具。
+8. 恢复不得改 `task_id/root_task_id/parent_task_id`，不得借重试放宽工具、权限、工作区或预算。
+9. 总墙钟包括重试与退避。恢复不能偷偷续命。
+10. 用户停止、父取消、session close 压过自动恢复。收到这些信号，立即停重试。
+11. 监督事件不得落思考正文、正文内容、Secret 与完整工具输出。只留类型、计数、散列、时刻与稳定错误码。
+12. UI、模型工具、hooks、Telemetry 都读同一投影，不各自猜 stalled。
+
+## 六、进展合同
+
+### 6.1 四本时钟
+
+给 `TaskRecord` 添一份 `AgentProgressClock`：
+
+```cpp
+struct AgentProgressClock {
+    std::chrono::steady_clock::time_point last_observed_at;
+    std::chrono::steady_clock::time_point last_transport_at;
+    std::chrono::steady_clock::time_point last_execution_at;
+    std::chrono::steady_clock::time_point last_meaningful_progress_at;
+
+    std::chrono::steady_clock::time_point request_started_at;
+    std::optional<std::chrono::steady_clock::time_point> first_stream_event_at;
+    std::optional<std::chrono::steady_clock::time_point> tool_started_at;
+
+    std::uint64_t progress_revision = 0;
+    std::uint64_t transport_revision = 0;
+    std::string progress_fingerprint;
+};
+```
+
+口径如下：
+
+| 字段 | 何时刷新 | 不因什么刷新 |
+|---|---|---|
+| `last_observed_at` | supervisor tick、状态查询、底层心跳 | 不拿来判任务有进展 |
+| `last_transport_at` | SSE 帧、HTTP 明确状态、进程 stdout/stderr 字节 | 单纯 supervisor tick |
+| `last_execution_at` | 工具开/闭、完整模型消息提交、child terminal、inbox 安全送达 | thinking/text 每个 token |
+| `last_meaningful_progress_at` | 完整消息提交、工具收口、文件/测试/checkpoint 摘要变化、孩子交付 | keepalive、重复相同错误、只增长空白或协议噪声 |
+
+`content_revision` 继续服务 UI 流式渲染。`progress_revision` 服务监督与 `agent_watch`。两者不得合并。
+
+### 6.2 阶段枚举
+
+现有 `AgentTaskActivity::Stage` 扩成监督所需相位，显示层再折短：
+
+```text
+Queued
+Preparing
+AwaitingFirstByte
+StreamingThinking
+StreamingText
+AwaitingToolInputComplete
+RunningTool
+AwaitingNextModelTurn
+WaitingChildren
+Recovering
+Completing
+Terminal
+```
+
+`RunningTool` 另带：
+
+- `tool_name`；
+- `execution_id`；
+- `started_at`；
+- `declared_timeout_at`，若该工具有时限；
+- `emits_progress`；
+- `last_tool_progress_at`。
+
+没有 progress 回调的工具，宿主只说“静默”，不说“卡死”。
+
+### 6.3 什么算 meaningful progress
+
+首版用宿主可证事实，不让模型自报“我有进展”：
+
+- 一份完整 assistant message 提交进该任务 history；
+- 一次工具执行收口，结果散列与上一笔不同；
+- 文件变更摘要变化：路径集合、大小、mtime/hash 的有界摘要；
+- 测试/构建产生新终态；
+- 子任务交付进父 mailbox；
+- checkpoint id 或任务计划中已完成项变化。
+
+thinking/text token 只算 transport activity。正文完整提交后才算一次 meaningful progress。如此可免“流一直吐套话，永不超时”。
+
+## 七、监督状态机
+
+Supervisor 不改 `AgentTaskState` 的业务终态。它另挂 `AgentHealthState`：
+
+```text
+Healthy
+Quiet
+SuspectTransport
+SuspectTool
+SuspectAgent
+Recovering
+Degraded
+Terminal
+```
+
+流转大意：
+
+```text
+Healthy
+  -> 超过阶段软线 -> Quiet
+
+Quiet
+  -> 新进展 -> Healthy
+  -> 等首字节/流中断有网络证据 -> SuspectTransport
+  -> 工具越过声明期限或进程死 -> SuspectTool
+  -> 多轮重复同一指纹 -> SuspectAgent
+
+SuspectTransport
+  -> 可安全重放 -> Recovering -> Healthy
+  -> 重试用尽 -> Degraded -> Failed/ApiError
+
+SuspectTool
+  -> 工具取消/进程树收净 -> 父 Agent 收到结构化 tool error，继续或收场
+  -> 收不净 -> Degraded -> Failed/ToolTimeout
+
+SuspectAgent
+  -> 投递一次 host notice，给一轮自救上下文
+  -> 指纹仍不变 -> Failed/NoMeaningfulProgress
+```
+
+### 7.1 默认尺子
+
+默认值只作初稿，实施时须用测试与真实 provider 数据校准：
+
+| 相位 | 软线 | 硬线/动作 |
+|---|---:|---|
+| `AwaitingFirstByte` | 20s 显黄 | 沿现有 connect/request timeout；瞬时网络错进恢复 |
+| `Streaming*` | 30s 显静默 | 沿现有 `stream_idle_timeout_secs`，缺省 60s |
+| `RunningTool` 有声明 timeout | 80% 显黄 | 工具自己的 timeout 到点取消 |
+| `RunningTool` 无声明 timeout | 120s 显静默 | 不自动杀；总墙钟兜底，UI 允许停 |
+| 连续完整轮无 meaningful progress | 2 轮提醒 | 3 轮 `NoMeaningfulProgress` |
+| 整只任务 | 80% 显黄 | 沿现有总墙钟，缺省 1800s |
+
+不用一枚“600 秒无任何事件”横切所有阶段。
+
+### 7.2 睡眠与时钟跳变
+
+Windows、macOS 合盖后，steady clock 的表现与网络连接都可能变。Supervisor 每拍同时留 wall time 与 steady delta：
+
+- 若一次 tick 跳过 `max(2 * interval, 30s)`，先记 `host_resume_suspected`；
+- 恢复网络连接，重新算阶段软线；
+- 不因睡眠跨度立即判 `SuspectAgent`；
+- 总墙钟是否包含休眠沿现有合同，不暗改。若将来要排除，另加显式配置与迁移说明。
+
+## 八、恢复协议
+
+### 8.1 请求提交边界
+
+每次模型请求立 `ModelRequestAttempt`：
+
+```cpp
+struct ModelRequestAttempt {
+    std::string logical_request_id;
+    int attempt = 1;
+    std::string history_commit_hash;
+    bool saw_headers = false;
+    bool saw_stream_event = false;
+    bool committed_assistant_message = false;
+    std::string error_code;
+};
+```
+
+一轮模型输出先入临时 assembler。只有见到合法终止、内容块闭合、tool use JSON 可解析，才原子提交进 Agent history。断在半途的正文可进诊断摘要与部分结果，却不当作下一轮 canonical message。
+
+### 8.2 可自动重试的现场
+
+首版白名单：
+
+- DNS、connect refused/reset、TLS 瞬时失败；
+- 408、429、502、503、504；
+- 首字节前 request timeout；
+- stream idle，且本次 assistant message 尚未提交；
+- provider 明示 retryable。
+
+策略：
+
+```text
+attempt 1 fail
+  -> 250~750ms jitter
+attempt 2 fail
+  -> 1~2s jitter
+attempt 3 fail
+  -> 结构化 ApiError 收口
+```
+
+当前 LubanCode 主、子请求都没有一条通用 provider 重试链。P0-1 要从 API 错误分型处抽出共用 `ModelRequestRecovery`，主路与子路一起接入，不许先在 `AgentTool` 里抄一份私货。provider 给 `Retry-After` 时尊重，但不得越过任务总墙钟。
+
+### 8.3 重放规矩
+
+- 零 stream event：从同一 `history_commit_hash` 重发。
+- 有部分 text/thinking、未提交：丢弃临时 assembler，从同一提交边界重发；UI 留“上一流中断，正在重取”，不拼两段正文。
+- 完整 tool call 已提交但尚未执行：按正常工具链执行一次。
+- 工具已执行且 ToolResult 已提交：绝不重跑工具；只重发下一次模型请求。
+- 不清楚工具是否产生副作用：不自动重放。收作 `IndeterminateToolOutcome`，请用户或父 Agent核对。
+
+### 8.4 不自动重派新 Agent
+
+同身份、同 history 的请求恢复，风险可控。另开一只 Agent 则可能：
+
+- 在同一 checkout 重改文件；
+- 重跑发布、删除、外部写入；
+- 与晚归旧线程同时落笔；
+- 丢掉父子 mailbox 与 delivery 确认。
+
+故 P0 不做 replacement Agent。P2 若要做，须满足：旧任务已证实收净、工作区隔离、checkpoint 可复用、副作用幂等、用户或策略明确授权。
+
+## 九、模型工具 `agent_watch`
+
+### 9.1 为什么要有
+
+主 Agent 有时真要等两只孩子，又不该靠自然语言追问“好了吗”。`agent_watch` 给它一份短快照，也可睡到任务变化。它不承担故障检测；Supervisor 一直在宿主里跑。
+
+### 9.2 schema
+
+```json
+{
+  "type": "object",
+  "properties": {
+    "task_ids": {
+      "type": "array",
+      "items": {"type": "integer", "minimum": 1},
+      "maxItems": 16
+    },
+    "after_revision": {"type": "integer", "minimum": 0},
+    "wait_ms": {"type": "integer", "minimum": 0, "maximum": 30000},
+    "include": {
+      "type": "string",
+      "enum": ["summary", "events", "diagnostic"]
+    }
+  },
+  "additionalProperties": false
+}
+```
+
+规矩：
+
+- `task_ids` 空：main 看全部未终态根任务；子代理只看直接孩子。
+- main 可看整棵会话树。子代理不得越 lineage 偷看兄弟任务。
+- `after_revision` 已是最新且 `wait_ms > 0`：condition variable 等变化或超时。
+- 最多等 30 秒。用户输入、父取消、session close 会提前唤醒。
+- `summary` 缺省，只回状态、阶段、健康、耗时、进展龄、工具、重试数。
+- `events` 只回 `after_revision` 后至多 50 枚结构化事件。
+- `diagnostic` 只给 main，仍不含正文、thinking、Secret 与完整工具参数。
+
+示例输出：
+
+```json
+{
+  "revision": 184,
+  "timed_out": false,
+  "tasks": [
+    {
+      "task_id": 7,
+      "title": "多前端阶段C 镜像流",
+      "state": "running",
+      "health": "recovering",
+      "stage": "awaiting_first_byte",
+      "elapsed_ms": 712430,
+      "last_transport_age_ms": 61320,
+      "last_progress_age_ms": 94880,
+      "attempt": 2,
+      "reason": "network.connection_reset"
+    }
+  ]
+}
+```
+
+### 9.3 与现有工具分工
+
+| 意图 | 入口 |
+|---|---|
+| 看状态、等变化 | `agent_watch` |
+| 补充或纠正任务 | 现有 `agent_message` |
+| 用户手动停一只 | Agent Dock `x` |
+| 用户停全部 | 现有 stop-all 键 |
+| 宿主判病与重试 | `AgentSupervisor` |
+| 通用命令/日志监控 | 将来的 `monitor`，不属本单 |
+
+P1 暂不开放模型侧 `agent_cancel`。模型误杀成本高，且父任务本可用 `agent_message` 要孩子收口。若实测确需，再立窄工具，只许取消自己的直接后代，并把理由送进台账。
+
+## 十、UI 与通知
+
+Agent Dock 每行只添一小截，不堆诊断报告：
+
+```text
+#7 镜像流  重连 2/3 · 静默 1m02s · 总 11m52s
+#8 测试    工具 ctest · 3m14s · 总 8m09s
+#9 调研    等首字节 · 18s
+```
+
+颜色只作辅助手段：
+
+- `Healthy`：常色；
+- `Quiet`：黄；
+- `Recovering`：青，并写第几次；
+- `Degraded`：红；
+- 用户停止：灰。
+
+通知去重：同一 `task_id + health_epoch + reason` 只弹一次。恢复成功再弹一条短报。不得每 tick 刷 transcript。
+
+查看态增加“监督”折叠行：
+
+- 最后传输；
+- 最后完整提交；
+- 最后 meaningful progress；
+- 当前请求 attempt；
+- 最近错误码；
+- 下一动作与截止时刻。
+
+## 十一、hooks 与 Telemetry
+
+### 11.1 内部事件
+
+```text
+agent.health.changed
+agent.stall.suspected
+agent.recovery.started
+agent.recovery.succeeded
+agent.recovery.exhausted
+agent.tool.indeterminate
+agent.wall_clock.warning
+```
+
+共同字段：
+
+```text
+session_id, task_id, parent_task_id, root_task_id
+stage, old_health, new_health, reason_code
+progress_revision, attempt, elapsed_ms
+transport_idle_ms, progress_idle_ms
+```
+
+### 11.2 hooks
+
+P0 不让外部 hook 改恢复决定。只投只读 `AgentHealthChanged`，后台安全队列送达。hook 慢、坏、超时，不得反过来卡 Supervisor。
+
+P2 才考虑策略 hook。即便开放，也只准：
+
+- `notify`；
+- `suppress_auto_retry`；
+- `shorten_retry_budget`。
+
+不准放宽总墙钟，不准强行重放不明副作用工具，不准越权重派。
+
+### 11.3 Telemetry
+
+指标可投现有 Telemetry 设计：
+
+```text
+agent_active{stage,health}
+agent_transport_idle_seconds
+agent_progress_idle_seconds
+agent_recovery_attempts_total{reason,outcome}
+agent_stall_total{layer,reason}
+agent_force_finalize_total{reason}
+```
+
+基数闸：不拿 `task_id/title/tool_input/error_message` 做 label。它们只进本地受控事件，且文字过脱敏。
+
+## 十二、建议源码落点
+
+```text
+src/agent/agent_progress.hpp/.cpp
+  AgentProgressClock、阶段与 fingerprint
+
+src/runtime/agent_supervisor.hpp/.cpp
+  健康状态机、定时拍、恢复预算、通知去重
+
+src/api/model_request_recovery.hpp/.cpp
+  logical request attempt、提交边界、retry classifier
+
+src/tools/task_ledger.hpp/.cpp
+  监督字段、progress revision、WaitForRevision、事件
+
+src/tools/agent_watch_tool.hpp/.cpp
+  lineage 鉴权、有界快照与长等
+
+src/tools/agent_tool.cpp
+  在完整消息、工具起止、child delivery 处报进展；不再自己养第二只 watchdog
+
+src/app/agent_panel_presenter.cpp
+src/cli/agent_panel.*
+  health 投影与查看态监督行
+
+src/app/tool_runtime.cpp
+  main 与合格父子表挂 agent_watch
+```
+
+Supervisor 最好由会话级 `AgentTaskCoordinator` 持有。它与 TaskLedger 同寿，不绑 Agent Dock，也不绑某轮 UI。
+
+## 十三、分阶段落地
+
+### P0-0：先补账，不改行为
+
+- [ ] 添四本时钟、阶段、health、request attempt 与稳定 reason code。
+- [ ] 完整消息提交、工具起止、child delivery 接进展事件。
+- [ ] `content_revision` 与 `progress_revision` 分家。
+- [ ] Agent Dock 只展示，不自动重试。
+
+验收：旧任务行为不变；现有 `test_agent_activity` 全过；新增 fake clock 测试能分清 token 活动、工具活动与 meaningful progress。
+
+### P0-1：请求级恢复
+
+- [ ] 抽出主/子共用 retry classifier 与 backoff。
+- [ ] 给请求立 logical id、attempt 与 history commit hash。
+- [ ] 首字节前失败、未提交断流可安全重发。
+- [ ] 部分 tool JSON 不执行；已提交 ToolResult 不重放。
+- [ ] 总墙钟、用户取消可打断退避。
+
+验收：本地假服务分别造 connect reset、首字节挂起、半截 text、半截 tool JSON、tool result 后下一请求挂起；每路都按合同收口。
+
+### P0-2：Supervisor 状态机
+
+- [ ] 会话级单线程/定时器驱动，不为每任务再起 watchdog 线程。
+- [ ] 按阶段软线判 `Quiet/Suspect*`。
+- [ ] 恢复通知去重，force finalize 留账。
+- [ ] 机器睡眠/长 tick 不误判 Agent。
+- [ ] 现有 `SetWallClockTimeout` 迁入统一 deadline heap 或 timer queue。
+
+验收：100 只 fake task 不生 100 根 watchdog 线程；取消、终态与 session close 都及时移除 deadline；TSAN 可跑平台无竞态。
+
+### P1-0：`agent_watch`
+
+- [ ] typed schema 与输出上限。
+- [ ] `WaitForRevision` 用 condition variable，不忙轮询。
+- [ ] main/直接父 lineage 鉴权。
+- [ ] 用户输入与取消提前唤醒。
+- [ ] 工具描述明写“状态变化才再等，不要短周期轮询”。
+
+验收：无变化时 30 秒内零 CPU 忙转；变化一到立即醒；兄弟 Agent 看不到彼此详情；输出不泄 thinking 与 Secret。
+
+### P1-1：面板与通知
+
+- [ ] Dock 显阶段、静默龄与恢复次数。
+- [ ] 查看态显监督折叠行。
+- [ ] 恢复成功、用尽、工具结果不明各一条通知。
+- [ ] 终端窄宽、中文/英文文案与无色模式。
+
+### P2：策略、遥测与可选 replacement
+
+- [ ] `AgentHealthChanged` 只读 hook。
+- [ ] OpenTelemetry 指标与低基数字段。
+- [ ] 真实 provider 长跑统计，校准默认软线。
+- [ ] 另审 replacement Agent；没有隔离、checkpoint 与副作用证明便不做。
+
+## 十四、测试矩阵
+
+### 14.1 单元
+
+- 四种时钟各自刷新，互不串账。
+- keepalive 只抬 transport，不抬 progress。
+- 完整消息、工具完成、child delivery 抬 progress。
+- 重复相同 fingerprint 连续计数；新成果归零。
+- `after_revision` 命中、超时、取消、伪唤醒。
+- reason code 到 health/state/outcome 的映射。
+- 通知按 epoch 去重。
+
+### 14.2 集成
+
+- HTTP accept 后不吐首字节。
+- 吐一帧后静默。
+- 正文半句话断流。
+- tool use JSON 半截断流，断言工具零执行。
+- 工具已完成，下一次模型请求断；断言工具只执行一次。
+- `run_command` 长静默但最终成功；未过工具 timeout 不误杀。
+- 工具超时后进程树在 Windows/Ubuntu/macOS 都收净。
+- 父取消时，孩子恢复退避立即停。
+- session close 时，watcher 与 waiter 都醒，台账有终态。
+
+### 14.3 E2E
+
+- 三只并行子代理：一只正常、一只网络断流后恢复、一只工具超时。Dock、结果回流与父任务判断都对。
+- 在 Windows 睡眠/唤醒可控测试里，先记 host resume，不立刻报 Agent stalled。
+- 人工进入 Agent 查看态，流式内容照走；`agent_watch` 同时等修订，不抢 UI 锁。
+- 真实 Anthropic/OpenAI-compatible/Gemini 各跑一轮长任务。只能声称“在已测 provider 上通过”，不可拿 fake server 冒充真网恢复。
+
+## 十五、跨平台与成本
+
+| 项 | Windows | Ubuntu | macOS |
+|---|---|---|---|
+| 时钟 | `steady_clock`，另防睡眠跳变 | 同左 | 同左，合盖尤须验 |
+| 工具收杀 | Job Object/现有进程树能力 | process group/cgroup 若已有 | process group |
+| 事件等待 | condition variable | 同左 | 同左 |
+| 网络恢复 | 复用 libcurl/cpr 错误分型 | 同左 | 同左 |
+| 安装成本 | 无新依赖 | 无新依赖 | 无新依赖 |
+
+不引新 daemon，不要求 Redis，不开本地端口。单会话一只 Supervisor 足矣。任务多时用 deadline heap，莫每只任务一根 250ms 轮询线程。
+
+## 十六、不做什么
+
+- 不开“监工 Agent”读别的 Agent thinking。
+- 不把 thinking 内容拿来算进展。
+- 不用 shell `monitor` 轮询 TaskLedger。
+- 不把每次 token 当 meaningful progress。
+- 不在断流后拼接两次半截 assistant 文本。
+- 不自动重跑结果不明的写操作。
+- 不在同一 checkout 自动另派替身。
+- 不让 `agent_watch` 带 cancel/message 副作用。
+- 不把 600 秒写死成跨阶段唯一尺子。
+- 不用 hook 或 Telemetry 当运行真账。
+
+## 十七、完成门
+
+以下全过，本单才可销：
+
+- [ ] 能从台账说清一只任务此刻在等什么、多久没传输、多久没实质推进。
+- [ ] 网络断流与 Agent 空转分型不同，错误码稳定。
+- [ ] 可安全请求自动恢复；不安全工具绝不盲重放。
+- [ ] 恢复用尽后保留部分成果、最后完整 checkpoint 与明确原因。
+- [ ] `agent_watch` 有界、可取消、无忙轮询、守 lineage、无内容泄漏。
+- [ ] 用户停止与 session close 压过重试，线程和进程都收净。
+- [ ] Agent Dock 能显 quiet/recovering/degraded，不刷屏。
+- [ ] Windows、Ubuntu、macOS 各过对应进程与时钟测试。
+- [ ] fake server 故障矩阵全过；至少两类真实 provider 长跑留证。
+- [ ] README/帮助只在实现后更新，不把本设计写成已发布能力。
+
+## 十八、实施次序一句话
+
+先把四本时钟记准，再把请求恢复接稳；随后立 Supervisor，末了才给模型 `agent_watch`。账没记准，工具越多，误判越快。
