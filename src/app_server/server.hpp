@@ -123,6 +123,9 @@ struct ServerOptions {
     std::string browser_sidecar_command;
     std::vector<std::string> browser_sidecar_args;
     std::string browser_artifact_dir;
+    // 镜像流(阶段 C):在飞待落盘帧的有界队列容量,0 = 用 BrowserService
+    // 的缺省(8)。测试用小容量逼出"慢消费者丢帧"确定性地发生。
+    int browser_screencast_queue_capacity = 0;
     // WS 承载(多前端外壳单阶段 A):有值 = Run() 走 WS 监听而不是 stdio
     // (两承载按需起一种,不并跑——stdio 的"EOF 即进程收线"与 WS 的
     // "断线只收连接、进程等重连"语义不同,混跑两头都拧巴)。

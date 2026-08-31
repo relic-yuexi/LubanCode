@@ -93,6 +93,9 @@ struct PackageInventory {
     std::vector<PackageComponent> workflows;
     std::vector<PackageComponent> plugins;
     std::vector<PackageComponent> mcp_servers;
+    // 多渠道消息接入单阶段 1 追加第七类组件:channels/<local-id>/
+    // channel.yaml(契约 docs/architecture/channels/channel-manifest.md §5)。
+    std::vector<PackageComponent> channels;
     std::size_t assets_file_count = 0;
     std::size_t docs_file_count = 0;
     std::size_t code_bearing_file_count = 0;  // 单子 §9.2 的静态版:按目录与扩展名认
@@ -103,7 +106,8 @@ struct PackageInventory {
     bool code_bearing() const { return code_bearing_file_count > 0; }
 };
 
-// 六类标准组件目录名(单子 §四:必须在包根,不递归猜)。
+// 七类标准组件目录名(单子 §四:必须在包根,不递归猜;channels/ 是多渠道
+// 消息接入单阶段 1 追加的第七档)。
 std::vector<std::string> StandardComponentDirs();
 // 顶层保留名单:标准组件目录 + assets/docs + 根文件(package.yaml、
 // README.md、LICENSE)。名单外的是"未知顶层目录",给 doctor 提示。

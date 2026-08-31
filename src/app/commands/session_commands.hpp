@@ -83,6 +83,17 @@ struct ContextLayersReport {
     std::string last_compact_line;
 };
 
+// 动态工具 PromptCache 守恒单 P0(§十三):/context 的 deferred_tool_mode
+// 展示位——只留够打一行的三个数,不提前塞 proxy_reference/native_reference
+// 才需要的字段(那是 P1/P3 的活)。enabled 对应
+// tools::DeferredToolModeLabel(disabled/legacy_expand);pending/total 是
+// "待检索/全部延迟工具"枚数,由 RunContextCommand 现场扫 registry 算。
+struct DeferredToolModeSummary {
+    bool enabled = false;
+    std::size_t pending = 0;
+    std::size_t total = 0;
+};
+
 // usage_ledger(可空,模型分工第一期):分角色 usage 台账,非空时列一节
 // "模型调用分角色账"——普通 turn 归 normal,压缩/抽取/标题归 cheap,
 // 回退另有留痕(规格"路由看得见")。roles_table(可空,问题 6):三角色
@@ -96,7 +107,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const lubancode::agent::ContextArtifactStore* artifact_store = nullptr,
                            const ContextLayersReport* layers = nullptr,
                            const lubancode::agent::ModelRouteTable* roles_table = nullptr,
-                           int compact_partition_count = 0);
+                           int compact_partition_count = 0,
+                           const DeferredToolModeSummary* deferred_tool_summary = nullptr);
 
 // ---- /context 的会话现场收集(终端接线收尾单自大类搬出) ------------------
 //

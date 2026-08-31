@@ -1,12 +1,12 @@
 # 子代理递归派工与结构化任务交接设计
 
-- 状态：P0 五批已落地（2026-08-31：AgentTaskCoordinator、结构化任务合同、显式 lineage、后台递归两路、结果归父）；P1-1/P1-2 起待实现
+- 状态：P0 五批已落地（2026-08-31：AgentTaskCoordinator、结构化任务合同、显式 lineage、后台递归两路、结果归父）；新增 P1-0“软结构 Prompt 收口”，不再强迫模型填写嵌套 task，P1-0/P1-1/P1-2 待实现
 - 级别：P1；其中“后台子代理能再派工”与“父子归属不串线”为 P0 正确性门
 - 日期：2026-08-31
-- 基线：`33988ed` (`main`)
+- 基线：`7c0bea5` (`main`)
 - 范围：`agent` / `agent_message` 模型工具、子代理台账、调度、后台执行、任务交接、父子结果回流、Agent Dock 与轨迹边界
 - 依赖：`P0新轨迹记录_可重放与训练投影设计.todo` 里已定下的 `parent_agent_run_id` 与单写者规矩
-- 本单性质：设计与实施计划；不代表当前 LubanCode 已支持后台递归派工
+- 本单性质：设计、已落地账与后续实施计划并存；P0 已实现不等于 P1 的 Prompt 收口、诊断、预算与发布门已经完成
 
 ## 一、先下断语
 
@@ -276,23 +276,11 @@ struct AgentDispatchContext {
 }
 ```
 
-### 5.2 兼容旧 `prompt`
+### 5.2 P0 已落地的双入口（当前事实，不是最终裁决）
 
-不一刀斩断旧脚本。过渡规则：
+P0 为了平移旧测试，同时接 `title + prompt` 与 `title + task`。前者归一成 `goal=prompt`、占位 `deliverable`、`legacy_prompt=true`；后者走嵌套强校验。两路已经实现，也正是本次冲突的来源。
 
-1. `title + task` 是新路。
-2. `title + prompt` 继续收，规范化成：
-
-```text
-goal       = prompt
-deliverable = "按任务说明交付结果"
-legacy_prompt = true
-```
-
-3. `task` 与 `prompt` 同时给，直接拒绝，不猜谁压谁。
-4. 工具 schema 用 `oneOf` 或等价说明表达“二选一”。由于当前 `schema_check` 对嵌套 schema 的校验不完整，`AgentTaskSpec::Validate()` 必须再做一遍宿主侧强校验。
-5. 过渡期运行一个小版本系列。`/doctor agents` 统计 legacy 派工次数，但不记 prompt 正文。
-6. 未经专门发布说明，不删 `prompt`。
+P1-0 不在这两路里再挑一条硬协议。最终裁决见 5.10：只留扁平 `title + prompt`，结构靠说明书软引导，宿主不解析 Markdown。
 
 ### 5.3 长度与安全门
 
@@ -341,6 +329,212 @@ legacy_prompt = true
 - 首轮 `api::Message` 仍可用 User role，但 TextBlock 放渲染结果，不再直接放裸 `prompt`。
 - 系统 prompt 只教“怎样执行委派任务”，不复制任务正文。
 - trajectory 保存 canonical spec 的 blob ref/hash。渲染文本是派生品，可重建。
+
+### 5.5 2026-08-31 回查：合同已经有了，模型入口仍有冲突
+
+当前实现不是“没有结构化任务”。`AgentTaskSpec`、宿主强校验、canonical JSON、稳定渲染、面板分栏与首轮投递都已落地，相关单测也在册。眼下缺口出在模型怎样走到这条路，以及真实工作区怎样只说一遍。
+
+四处冲突须一起收：
+
+1. `src/prompts/tools/zh-CN/agent.md` 与英文同档的总说明，开头仍教模型“先写 title，再把完整任务说明写进 prompt”；后面的 `param.prompt`、`param.task` 才说新调用宜用 `task`。模型先读到旧路，常会顺手照旧。
+2. `AgentTool::input_schema()` 同时把 `prompt` 与 `task` 暴露给模型，只在说明里说二选一。宿主虽会拒绝同给，却没有替模型裁掉岔路。
+3. 结构化路把 `task` 渲染成分栏工作单；legacy 路虽归一成 `AgentTaskSpec`，首轮仍投裸 `prompt`。于是同一只子代理有两种任务语法，系统 prompt 无法只教一套读法。
+4. 普通 cwd 在系统 prompt 的 `# 运行环境`；隔离 worktree 真路径又在 `RunTask()` 末段补一句。隔离任务会先看见主 cwd，后看见房路径。工具包装认房路径，模型文字却有两处目录，容易看岔。
+
+另有一处实现与注释不合：`AppendBulletSection()` 目前只给每个数组项开头加一次 `- `。若某项内含换行，后续行没有继续缩进，能伪造 `## 报告要求` 一类新栏。设计里已经写了“逐行加 `- `”，代码尚未兑现。
+
+P0 的 `AgentTaskSpec` 是已落地事实，不在回查段里假装没做过；P1-0 是否保留其嵌套字段，须服从“先把任务发出去”这条产品线。最终裁决见 5.10。
+
+### 5.6 中间方案：活入口只认 `task`（不采用）
+
+2026-08-31 再查仓内调用点：生产代码外，没有脚本、示例或公开 API 在调用子代理的 `prompt` 入参。现存调用几乎全在 `tests/unit/agent/*`、状态刷新与事件流测试里；它们是旧协议夹具，不是必须保住的外部合同。Workflow 定义里的 `prompt` 是节点模板引用，另有 parser 与语义，跟 `agent` 工具入参不是一回事，不能拿来替子代理 legacy 续命。
+
+曾考虑这样收口：
+
+| 边界 | 新规 | 理由 |
+|---|---|---|
+| 模型可见 tool schema | 只暴露并要求 `title + task` | 模型只走一条正门，不在两种语法间猜 |
+| 模型可见工具文案 | 总说明从第一句就教 `task`；删除 `param.prompt` | schema 与说明同口径 |
+| 宿主新调用解析 | 不再接受 `prompt`；出现就回稳定 `legacy_agent_prompt_removed` | 不养暗门，不让旧语法继续制造参数错 |
+| runtime typed 合同 | 删除 `legacy_prompt` 与 `CanonicalizeLegacyPrompt()` | canonical 真账只留一种形状 |
+| 旧 session/trajectory 读取 | 仍能读、画、导出历史 tool args；绝不重新执行 | 兼容旧数据，不兼容旧写法 |
+
+这套方案能让机器账整齐，却把派工者绑在嵌套 schema 上。用户实测出现连续参数错后，本案否决，不进入 P1-0 实施。下面 5.7-5.9 只保留为决策过程与可复用的 cwd 分账材料；真正的模型入口、信封与内部合同以 5.10 为准。
+
+若采用本案，原拟这样迁移（现不执行）：
+
+1. schema 的 `required` 改成 `title + task`，properties 删除 `prompt`。
+2. 中英文工具文案删除 `param.prompt`，总说明只给一份结构化示例。
+3. `ExecuteDispatch()` 见 `prompt` 就拒，错误回一份最小 `task` 改写示例；不再归一、不再派出。
+4. 仓内测试调用统一迁成 `TaskInput(title, goal, deliverable, ...)` 夹具；测试任务本身不靠旧协议偷跑。
+5. session/transcript/trajectory 的历史读取夹具保留几枚 `prompt` 旧记录，只验证“能读能画，不能执行”。
+
+### 5.7 统一首轮信封：工作背景 -> 任务 -> 报告要求
+
+新增宿主派生的运行上下文，不把 cwd 塞进用户可填的 `AgentTaskSpec`：
+
+```cpp
+struct DelegatedTaskRuntimeContext {
+    std::string effective_cwd;       // 工具真正执行的基准目录
+    std::string workspace_root;      // 可空；仓库/工作区身份
+    std::string isolation;           // none / inherited / worktree
+    std::string agent_type;          // 实际解析后的类型
+};
+```
+
+`effective_cwd` 只认 `WorkspaceScope` / 隔离房务算出的最终值：
+
+- 普通根任务：当前会话 cwd。
+- 主会话已在 worktree：当前房路径。
+- `isolation=worktree`：新建房的 `room_path`。
+- 子任务继承父房：父 `WorkspaceScope.base_dir`。
+- 绝不从模型填的 `scope.include_paths` 猜 cwd；那是任务边界，不是执行位置。
+
+统一 renderer 建议改成：
+
+```cpp
+std::string RenderDelegatedTask(const AgentTaskSpec& spec,
+                                const DelegatedTaskRuntimeContext& runtime,
+                                TaskRenderLanguage language);
+```
+
+中文首轮固定长成：
+
+```text
+[子代理工作单 v1]
+你在 D:/repo/.lubancode/worktrees/agent-123 中干活。
+角色：Explore（只读）。
+
+## 工作背景
+- 用户原话摘录：……                 # 有才显示
+- 已知事实：……
+- 工作范围包含：src/tools
+- 工作范围排除：browser
+- 约束：只读源码，不改文件
+
+## 任务
+查清后台子代理为何不能再调 agent，给出可实现边界。
+
+## 验收
+- 指出前台与后台工具表的差异
+- 给出文件与符号
+
+## 报告要求
+交回一份简明源码调查报告，附实施切入点。
+```
+
+渲染规矩：
+
+1. 第一段只报真实 `effective_cwd` 与实际角色。路径全篇只出现一次。
+2. `context/source_request/scope/constraints` 归进“工作背景”，各自带稳定标签，不混淆用户原话与派工者归纳。
+3. `goal` 独占“任务”。一句是一件事；宿主只验非空，不妄猜语义好坏。
+4. `acceptance` 独占“验收”。空则整栏省略。
+5. `deliverable` 独占“报告要求”。无论调研、改码、制表，都说明收工要交什么。
+6. 每个外来字符串按行缩进。字段内的 `#`、`##`、代码围栏都只能活在本栏正文里，不能顶到栏首伪造新节。
+7. 中文会话用中文模板，英文会话用英文模板。不能让英文 Agent 吃一张中文工作单。
+8. canonical spec/hash 不含 `effective_cwd`、agent type 或 isolation。这些是运行快照，另进 trajectory execution snapshot；换房不应改写任务语义指纹。
+
+### 5.8 系统 prompt 与任务信封各管一件事
+
+系统 prompt 只讲长期规矩：身份、工具、权限、干活方式。首轮 user message 才讲这次任务。两边不复读路径。
+
+改造次序：
+
+```text
+先解析 Agent 类型与执行选项
+  -> 建/继承 WorkspaceScope
+  -> 得到 effective_cwd
+  -> 子代理系统 prompt 的运行环境段省掉 cwd（main 仍照旧显示）
+  -> 用 effective_cwd 渲染任务信封开头
+  -> 构造首轮 User message
+  -> 发请求
+```
+
+`RunTask()` 现有的 worktree 尾注要拆开：
+
+- “真实房路径”删掉，只在任务信封开头显示。子代理系统环境段保留机器、日期等常量，省掉 cwd 行；main 系统 prompt 的 cwd 行不变。
+- “主 checkout 只读、写与命令会被拦”仍属运行安全规矩，可留在系统 prompt，但只说规则，不再另报路径。
+- `PromptOptions` 增一枚只供子代理装配的“环境段不显示 cwd”开关（或同义结构化选项）；不得靠传空字符串拼出 `- 工作目录: `。`BuildSubagentPromptOptions()` 不再把 `AgentTool::cwd_` 渲染进子代理系统 prompt。
+- 后台任务若提前冻结 system prompt，冻结点必须挪到工作区决议之后。不得先用主 cwd 拼好，再进隔离房。
+
+`WorkspaceScope` 是这笔事实的唯一 writer。工具包装、system prompt、首轮信封、面板与轨迹都读它的投影，不各自拼路径。
+
+### 5.9 历史账读取边界
+
+旧 session、trajectory 与 transcript 里已经落下的 `prompt` 或结构化 `task` 参数：
+
+```json
+{"name":"agent","arguments":{"title":"查构建配置","prompt":"检查 CMake 构建目录"}}
+```
+
+仍按原字节展示、校验配对、导出。读取层不强行互相转换，也不补造字段。P1-0 后，新调用只写扁平 `title + prompt`；历史 `task` 记录能看，不能拿来自动重放。兼容的是旧账，不是第二条活执行协议。
+
+### 5.10 最终裁决：不强求“完美结构化”，改走一段软结构 `prompt`
+
+5.6 的“只认嵌套 task”仍会把派工者卡在 JSON 合同上。`goal/deliverable` 必填，数组又分 context、constraints、acceptance、scope；字段一错，子代理尚未起身，派工已经失败。机器账规整，不等于活办得成。用户实测已出现连续参数错，本批不再拿真实派工替 schema 练兵。
+
+本节覆盖 5.6 关于**新调用只认 task**的裁决。P0 已落地事实仍保留，P1-0 改为回收过度结构化：
+
+| 边界 | 最终新规 |
+|---|---|
+| 模型可见 schema | 只留 `title + prompt`；没有嵌套 `task` |
+| `prompt` 内容 | 一段自由文本；说明书建议按“工作背景—任务—报告要求”写，不强验标题 |
+| 宿主硬校验 | 只查字符串、非空、NUL、总字节帽；不查有没有三节，不解析 Markdown |
+| 真实 cwd/角色/隔离 | 宿主在首轮信封开头注入，派工模型不用猜 worktree 路径 |
+| 任务账 | canonical 保存 `title + instructions(prompt)`；不从正文反向抽 goal/context/deliverable |
+| 旧结构化 task | 新调用不再暴露；旧 session/trajectory 原样可读、可画、可导出 |
+
+模型说明给一副推荐骨架：
+
+```text
+背景写清子代理看不见却必须知道的事。
+
+## 任务
+写清要办哪件事、到哪里办、哪些边界别碰。
+
+## 报告
+写清收工要带回什么：结论、文件与行号、改动、测试结果或风险。
+```
+
+这只是引导，不是语法：
+
+- 一句“查清 `AgentTool` 在哪里组装 schema，带回文件与行号”也合法。
+- 没写 `## 报告` 不拒绝，子代理照样开工。
+- 宿主不替 prompt 补造验收条件，也不拿正则拆 Markdown。
+- title 仍只给面板看，保持短小；prompt 才是完整任务正文。
+
+宿主首轮统一包一层很薄的权威信封：
+
+```text
+[子代理任务]
+你在 D:/repo/.lubancode/worktrees/agent-123 中干活。
+角色：Explore（只读）。
+
+以下是派工说明：
+<prompt 原文>
+
+按派工说明收工，直接交回结果，不要寒暄。
+```
+
+信封只补宿主独占的事实，不重写 prompt：
+
+1. cwd 来自最终 `WorkspaceScope`，全篇只报一次。
+2. 角色来自实际解析结果；Explore 的只读规则仍由工具策略执法。
+3. prompt 原文字节只做换行归一与安全清洗，不改标题、不重排段落。
+4. worktree 安全规则仍在 system prompt；任务信封不复制一遍。
+5. 中文会话用中文信封，英文会话用英文信封。
+
+内部合同随之瘦成：
+
+```cpp
+struct AgentTaskSpec {
+    int schema_version = 2;
+    std::string title;
+    std::string instructions;  // prompt 原文；唯一任务正文
+};
+```
+
+若不愿立刻升 v2，也可先保留类名，删掉强制 `goal/deliverable` 的 parser 与模型 schema；但真账只能有一份 `instructions`，不可一边存 raw prompt，一边再养一套猜出来的字段。
 
 ## 六、会话级派工协调器
 
@@ -841,6 +1035,7 @@ warning: max_active(2) < max_depth(3), deepest chain may be rejected
 | 文件/模块 | 实施职责 |
 |---|---|
 | `src/agent/task_spec.*` | typed spec、解析、校验、canonical JSON、稳定模型渲染 |
+| `src/agent/prompt_assembler.*` / `src/agent/prompts.hpp` | main 环境段照旧；子代理环境段可省 cwd，避免与首轮信封复读 |
 | `src/tools/agent_dispatch_tool.*` | 薄工具适配、新旧 schema、稳定错误 |
 | `src/tools/agent_task_coordinator.*` | 会话级派工、lineage、生命周期、结果路由、取消树 |
 | `src/tools/agent_tool.*` | 分期瘦身；保留子 Agent 装配/RunTask 兼容口，业务规则外迁 |
@@ -858,6 +1053,8 @@ warning: max_active(2) < max_depth(3), deepest chain may be rejected
 | `src/config/config.*` | 新配置解析、merge、硬帽与诊断 |
 | `src/prompts/tools/{zh-CN,en}/agent.md` | 教模型填结构化 task，写清直接父子回调 |
 | `src/prompts/tools/{zh-CN,en}/agent_message.md` | 写清 caller scope 与直接子任务名册 |
+| `tests/unit/agent/test_subagent_recursion.cpp` | 单一软结构 prompt 信封、旧 task 历史只读、工作区四景与 hash 分账 |
+| `tests/unit/config/test_prompt_assembler.cpp` / `tests/unit/tools/test_tool_text.cpp` | 子代理 cwd 去重、中英文工具文案与 schema 对账 |
 
 ### 15.1 不该趁机做的事
 
@@ -883,7 +1080,7 @@ warning: max_active(2) < max_depth(3), deepest chain may be rejected
 - [x] 实现 `AgentTaskSpec` 的 parse/validate/canonicalize/render。（src/agent/task_spec.*）
 - [x] `agent` schema 接 `task` 对象，保留 legacy `prompt`。（required 只钉 title，二选一执法在宿主侧）
 - [x] 派工主路从 JSON 尽早变 typed request，后续函数不再反复 `input.at()`。（AgentTool::DispatchRequest + ExecuteDispatch）
-- [x] `AgentTaskSnapshot` 存 canonical spec（或其不可变 shared object/ref），`title/prompt` 降为兼容读投影。（spec 为 shared_ptr<const>；legacy 路投影保持原 prompt 字节，旧行为对账）
+- [x] `AgentTaskSnapshot` 存 canonical spec（或其不可变 shared object/ref），`title/prompt` 降为兼容读投影。（spec 为 shared_ptr<const>；P0 legacy 路投影保持原 prompt 字节，P1-0 将删除这条活执行分支，旧字节只留历史读取层）
 - [x] 面板详情按栏显示，列表标题不变。（agent_panel_presenter 的任务合同分栏 + lineage 行）
 - [x] 中英工具文案同步，`tool_text_lang_driver` 补输出对账。（zh/en 两档 12 节逐字节对账通过）
 
@@ -913,6 +1110,20 @@ warning: max_active(2) < max_depth(3), deepest chain may be rejected
 - [x] 父收场前等 attached child；不 reparent，不跨级 main drain。（DeliverChildCompletion 只投活父；父亡则保持未送达，收场报告照列）
 - [x] `DrainCompletionNotices()` 改为按 delivery target 取，不再一把提所有终态任务。（只提 MainTurnContext；ParentTaskInbox 归父 continuation）
 
+### P1-0：软结构 Prompt 收口
+
+- [ ] 重写 `src/prompts/tools/{zh-CN,en}/agent.md`：只教 `title + prompt`；给“背景—任务—报告”推荐骨架，同时明说普通自包含任务句也合法。
+- [ ] `AgentTool::input_schema()` 删除嵌套 `task`，`required` 只钉 `title + prompt`；不再让模型填写 goal/context/scope/constraints/acceptance/deliverable。
+- [ ] `ExecuteDispatch()` 对 prompt 只做类型、非空、NUL 与总字节帽校验；不解析 Markdown，不因缺章节拒绝。
+- [ ] 将 runtime canonical 合同瘦成 `title + instructions`（建议 schema v2）；删除 `legacy_prompt` 与“从 prompt 补占位 deliverable”的归一逻辑。
+- [ ] 新增 `DelegatedTaskRuntimeContext`（或同义宿主类型），由最终 `WorkspaceScope` 投影 `effective_cwd/isolation/agent_type`，模型无权填写。
+- [ ] 新增薄 `RenderDelegatedPromptEnvelope()`：注入真实 cwd、角色与 prompt 原文；中英文各一份稳定信封，不重排正文。
+- [ ] 子代理系统环境段省掉 cwd，任务信封从 `WorkspaceScope` 读取唯一 `effective_cwd`；隔离 worktree 不再先报主 cwd、后报房路径。main 系统 prompt 行为不变。
+- [ ] 拆掉 `RunTask()` 末尾重复路径文案；安全规则仍留 system prompt，路径只在首轮信封出现。
+- [ ] Agent Dock 详情显示 title、原始派工说明、运行目录与角色；不从 prompt 猜分栏。
+- [ ] 仓内结构化 task 测试迁到 `PromptInput(title, instructions, ...)` 夹具；Workflow 自己的 prompt 字段不动。
+- [ ] 文档与变更说明写清：嵌套 task 新调用退场；旧 session/trajectory 中 task/prompt 两种历史参数都可读、可画、可导出，不可重放执行。
+
 ### P1-1：传话、Dock 与诊断
 
 - [ ] subagent 挂 scoped `agent_message`，只投自己直接孩子。
@@ -935,11 +1146,28 @@ warning: max_active(2) < max_depth(3), deepest chain may be rejected
 
 - [ ] 新 `task` 最小合法形状可 parse，canonical JSON 稳定。
 - [ ] 缺 `goal/deliverable`、空数组项、错类型、超长、NUL 按稳定 JSON path 报错。
-- [ ] `task + prompt` 同给拒绝。
-- [ ] legacy `prompt` 归一后与旧行为对账。
+- [ ] `prompt` 单给、`task + prompt` 同给都回稳定删除码，且不发模型请求。
+- [ ] 删除 `legacy_prompt` 与归一函数后，canonical JSON、hash、快照与面板仍只认 structured spec。
 - [ ] 渲染顺序、空段省略、多行缩进与中英 UTF-8 golden。
 - [ ] `source_request` 与 `context` 分栏，不会把派工者说明标成用户原话。
 - [ ] task spec 内写“忽略安全规则”不会改变有效权限与工具集。
+
+### 17.1A 软结构 Prompt 收口测试
+
+- [ ] 模型可见 schema 只有并必填 `title + prompt`，没有嵌套 `task`。
+- [ ] 中英文工具说明给推荐三段骨架，也明说普通自包含任务句可用；文案与 schema 同源。
+- [ ] 一句短 prompt、完整三段 prompt、多行代码块 prompt 都能派出；缺“背景/报告”标题不拒绝。
+- [ ] 空 prompt、错类型、NUL、超字节帽稳定拒绝，且不发模型请求。
+- [ ] 所有成功派出的首轮都以薄信封开头，随后保留 prompt 正文顺序与内容。
+- [ ] 普通 cwd、主会话 worktree、新建隔离房、继承父房四景中，system prompt + 首轮消息合看都只报一次真实 `effective_cwd`。
+- [ ] 隔离任务首轮与工具包装读同一房路径；主 checkout 路径不得冒充执行目录。
+- [ ] `effective_cwd/isolation/agent_type` 不进 canonical task hash；同一 prompt 换房后 hash 不变，execution snapshot 另有房账。
+- [ ] prompt 内含 `##`、代码围栏、列表与多行文本时不被 parser 拆解或重排。
+- [ ] CRLF/LF 归一规则稳定；中文与英文信封各有 golden。
+- [ ] prepared/frozen system prompt 在工作区决议后生成；后台隔离任务不留主 cwd 陈值。
+- [ ] 新调用带嵌套 `task` 稳定拒绝并指向 prompt；连续参数错仍走既有连败保险。
+- [ ] 旧 session/transcript/trajectory 中的 task/prompt tool args 都能读、能画、能导出；恢复后不能把历史调用重放。
+- [ ] provider 兼容回归覆盖 Anthropic Messages、OpenAI Responses、Chat Completions；至少证明扁平 `title + prompt` 三路都能调 `agent`。
 
 ### 17.2 lineage 与 admission 测试
 
@@ -1036,19 +1264,24 @@ main -> parent -> child -> 尝试 grandchild(应被深度拒绝)
 - [ ] 后台私有 registry 能挂带身份的 `agent`，又不能直调终端/UI hooks。
 - [ ] main 只 drain 直接根子任务结果；subagent 收自己直接孩子。
 - [ ] 父子取消、墙钟、session close 与迟到线程有一套可证明收场。
+- [ ] 模型侧与宿主执行侧都只有扁平 `title + prompt` 一条派工正门；嵌套 task 只停在历史读取层。
+- [ ] `WorkspaceScope` 是真实执行目录唯一 writer；system prompt、任务信封、工具包装与轨迹不各养一份 cwd。
+- [ ] 首轮只有薄 prompt envelope；宿主不解析、不重排派工正文。
 
 ### 18.2 产品门
 
 - [ ] 交互默认 `auto` 起来的 general-purpose 后台子代理，真能再调 `agent`。
 - [ ] 子代理的子任务结果真回子代理，不是面板上看似有树、实际全投 main。
 - [ ] 主模型派出去的任务单能一眼看清目标、范围、约束、验收与交付。
-- [ ] legacy `prompt` 仍可用，新 `task` 有强校验，两路结果都能在 Agent Dock 查。
+- [ ] 一句普通 prompt 与三段式 prompt 都能开工；Agent Dock 能看原文、真实 cwd 与角色。
+- [ ] 子代理开工先看见真实工作目录与工作背景，随后看“任务/验收/报告要求”；不再一头主 cwd、一头 worktree 房路径。
 - [ ] Explore 继续只读且无派工权；自定义 Agent 不能递归放大工具或权限。
 - [ ] 限额、等孩子、失败、取消与未送达结果在面板与诊断里都看得见。
 
 ### 18.3 验证门
 
 - [ ] 新增合同、lineage、路由、取消、权限、隔离、hook、面板单测全绿。
+- [ ] 新增软结构 Prompt 信封 golden、task 历史只读、四类工作区、三类 provider schema 回归全绿。
 - [ ] 现有 `unit.agent.agent_tool`、`unit.agent.agent_message_tool`、`unit.agent.agent_panel`、`unit.runtime.tool_runtime`、`unit.config.config`、`unit.runtime.subagent_event_stream` 全绿。
 - [ ] 三场真机验收都留原始输出/轨迹与任务树证据。
 - [ ] 用 ThreadSanitizer（Linux）或可用线程检查手段跑协调器压力夹具；至少 1000 轮并发派工/完成/取消不死锁、不重复送达。
@@ -1065,8 +1298,13 @@ main -> parent -> child -> 尝试 grandchild(应被深度拒绝)
 | 工作树从父房跳回 main | 线程局部隔离范围没传给子线程 | `WorkspaceScope` 显式继承，none 在嵌套路解为 inherit |
 | 全局深度在并行时误判 | `foreground_depth_` 不是 lineage | 宿主依 parent.depth 计算，调度器只验证 |
 | 树节点数合规却烧穿预算 | 只管 active/depth，不管累计节点与 token | children/tree node 硬帽；usage 接稳后加 tree token 门 |
-| 结构化 spec 太重，模型频繁填错 | 嵌套 schema 太深，字段太多 | 只强制 goal/deliverable，其余可选；稳定错误指引；legacy prompt 过渡 |
-| 结构化文案漂亮，任务依旧含糊 | 宿主只验字段，不能验语义真假 | 不宣称必然提质；用真机对比完整度、重试与验收命中 |
+| 结构化 spec 太重，模型频繁填错 | 嵌套 schema 太深，字段太多 | 活入口退回扁平 prompt；三段式只作说明书引导，不作 parser 语法 |
+| 软 prompt 写得含糊 | 宿主不再强验 goal/deliverable | 工具文案给短模板与好坏示例；不因追求机器整齐拦住派工 |
+| 模型仍试旧 task | 恢复上下文里见过旧调用 | schema 只露 prompt；稳定错误给一枚 prompt 改写例，不暗中代填 |
+| 删除 task 活入口后旧会话打不开 | 把历史读取误绑到活执行 parser | session/transcript/trajectory reader 原样读旧 task/prompt args；执行口只接 prompt |
+| 隔离任务看见两个 cwd | system prompt 先按主 cwd 拼好，房路径后补 | 先决议 WorkspaceScope，再共同投影 effective_cwd |
+| prompt 内标题被误当宿主字段 | 宿主拿正则拆“背景/任务/报告” | 永不解析 Markdown；正文整段原样交给子代理 |
+| 路径写进 task hash，换房就成另一任务 | 把运行上下文混进语义合同 | runtime context/trajectory snapshot 分账，canonical spec 不含 cwd |
 
 ## 二十、最终完成线
 

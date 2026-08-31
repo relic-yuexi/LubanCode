@@ -184,9 +184,9 @@ std::string DescribePackage(const lubancode::package::PackageInventory& inventor
                 out << "(已停用;本会话快照钉着启动那折,在跑的不拆,下回装配不再挂)";
             }
             if (mounted->code_trust == lubancode::package::CodeTrustStatus::PendingTrust) {
-                out << ";Plugin/MCP 待信任门";
+                out << ";Plugin/MCP/Channel 待信任门";
             } else if (mounted->code_trust == lubancode::package::CodeTrustStatus::Trusted) {
-                out << ";Plugin/MCP 已过信任门(挂载事务随会话启动跑,整包成整包败)";
+                out << ";Plugin/MCP/Channel 已过信任门(挂载事务随会话启动跑,整包成整包败)";
             }
         } else if (inventory.valid) {
             out << (disabled ? "  已停用(挂载跳过,连内容组件一件不挂)"
@@ -198,7 +198,8 @@ std::string DescribePackage(const lubancode::package::PackageInventory& inventor
         << " skills:" << inventory.skills.size()
         << " workflows:" << inventory.workflows.size()
         << " plugins:" << inventory.plugins.size()
-        << " mcp:" << inventory.mcp_servers.size();
+        << " mcp:" << inventory.mcp_servers.size()
+        << " channels:" << inventory.channels.size();
     if (inventory.code_bearing()) {
         out << "  [code-bearing]";
     }
@@ -230,6 +231,7 @@ void PrintComponents(const lubancode::package::PackageInventory& inventory) {
         {"workflows", &inventory.workflows},
         {"plugins", &inventory.plugins},
         {"mcp_servers", &inventory.mcp_servers},
+        {"channels", &inventory.channels},
     };
     for (const auto& group : groups) {
         TermOut() << "  " << group.label << "(" << group.items->size() << "):";
@@ -547,7 +549,7 @@ void PrintAnalyzedComponents(const lubancode::package::PackageRecord& record) {
     TermOut() << "  组件(" << record.components.size()
               << " 件,逐件过原生 parser;坏件照列,不因第一个错停):\n";
     if (record.components.empty()) {
-        TermOut() << "    (没有组件;六类目录里没有可认的件)\n";
+        TermOut() << "    (没有组件;七类目录里没有可认的件)\n";
         return;
     }
     for (const auto& component : record.components) {
@@ -600,7 +602,8 @@ void PrintMountPlan(const lubancode::package::PackageRecord& record) {
               << " / skill " << plan.CountKind(lubancode::package::ComponentKind::Skill)
               << " / workflow " << plan.CountKind(lubancode::package::ComponentKind::Workflow)
               << " / plugin " << plan.CountKind(lubancode::package::ComponentKind::Plugin)
-              << " / mcp " << plan.CountKind(lubancode::package::ComponentKind::McpServer);
+              << " / mcp " << plan.CountKind(lubancode::package::ComponentKind::McpServer)
+              << " / channel " << plan.CountKind(lubancode::package::ComponentKind::Channel);
     if (plan.HasCodeBearing()) {
         TermOut() << "  [code-bearing," << lubancode::package::CodeTrustStatusText(plan.code_trust)
                   << "]";

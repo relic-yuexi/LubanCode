@@ -1,5 +1,5 @@
 # 多前端外壳与浏览器 Tab：AppServer 承载设计
-- 状态：阶段 A 已落地（0.26.109 WS 承载）；阶段 B（输入路由与暂停）已落地（owner 内核裁定、用户优先路、browser/pause|resume，仲裁三案+伪造案进册）；阶段 C（镜像流）起待实现
+- 状态：阶段 A 已落地（0.26.109 WS 承载）；阶段 B（输入路由与暂停）已落地（owner 内核裁定、用户优先路、browser/pause|resume，仲裁三案+伪造案进册）；阶段 C（镜像流）已落地（browser/screencast/start|stop + browser/screencast/frame，sidecar 侧 CDP 帧率帽、内核侧有界队列丢帧记账、同截图链 artifact 落盘）；阶段 D（参考前端）起待实现
 - 日期：2026-08-29
 - 前置：`todos/内嵌浏览器调试工作台_BrowserRuntime与Package边界.todo`（阶段 0-3、5 已落）
 - 相关：`src/app_server/`（协议 1.1）、`docs/features/app-server/README.md`、`browser/`（Runtime 与 sidecar）
@@ -155,9 +155,9 @@ WebView，内核谁的都不欠。
 
 ### 阶段 C：镜像流
 
-- [ ] screencast 起停与帧事件（artifact 引用）。
-- [ ] 帧率帽、有界、丢帧明记。
-- [ ] 慢消费者测试。
+- [x] screencast 起停与帧事件（artifact 引用）。
+- [x] 帧率帽、有界、丢帧明记。
+- [x] 慢消费者测试。
 
 验收：低配消费者不掉线、不炸内存，丢帧有账。
 

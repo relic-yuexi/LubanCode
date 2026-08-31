@@ -115,11 +115,11 @@ bool IsSuspiciousLink(const std::filesystem::path& path) {
 }  // namespace
 
 std::vector<std::string> StandardComponentDirs() {
-    return {"agents", "prompts", "skills", "workflows", "plugins", "mcp"};
+    return {"agents", "prompts", "skills", "workflows", "plugins", "mcp", "channels"};
 }
 
 std::vector<std::string> ReservedTopLevelNames() {
-    return {"agents", "prompts", "skills", "workflows", "plugins", "mcp", "assets", "docs",
+    return {"agents", "prompts", "skills", "workflows", "plugins", "mcp", "channels", "assets", "docs",
             "package.yaml", "README.md", "LICENSE"};
 }
 
@@ -282,7 +282,7 @@ std::string NearMissStandardDir(std::string_view dir_name) {
     std::string best;
     std::size_t best_distance = 3;  // 距离 > 2 不报
     for (const std::string& candidate :
-         {"agents", "prompts", "skills", "workflows", "plugins", "mcp", "assets", "docs"}) {
+         {"agents", "prompts", "skills", "workflows", "plugins", "mcp", "channels", "assets", "docs"}) {
         const std::size_t distance = EditDistance(lower, candidate);
         if (distance < best_distance) {
             best_distance = distance;
@@ -358,8 +358,11 @@ void CollectFiles(const std::filesystem::path& root, std::vector<InventoryFile>&
                 file.size = 0;
                 entry_ec.clear();
             }
+            // channels/ 与 plugins//mcp/ 同罪:channel.yaml 的 runtime.command
+            // 也声明了要 spawn 的可执行文件,走同一道信任门
+            // (channel-manifest.md §5;catalog.cpp 的 code_trust 判定同款)。
             file.code_bearing = HasCodeExtension(file.rel) || file.rel.rfind("plugins/", 0) == 0 ||
-                                file.rel.rfind("mcp/", 0) == 0;
+                                file.rel.rfind("mcp/", 0) == 0 || file.rel.rfind("channels/", 0) == 0;
             files.push_back(std::move(file));
         } else if (status.type() != std::filesystem::file_type::directory) {
             diagnostics.push_back({PackageDiagnostic::Kind::Warning, RelUtf8(root, current),
@@ -381,7 +384,7 @@ void CollectFiles(const std::filesystem::path& root, std::vector<InventoryFile>&
 std::vector<PackageComponent> ListPackageComponents(const std::filesystem::path& root,
                                                     const std::string& package_id,
                                                     std::vector<PackageDiagnostic>* diagnostics) {
-    std::vector<PackageComponent> skills, workflows, plugins, mcp_servers, agents, profiles;
+    std::vector<PackageComponent> skills, workflows, plugins, mcp_servers, agents, profiles, channels;
 
     const auto scan_dir_components = [&](const char* dir_name, const char* entry_file,
                                          std::vector<PackageComponent>& out,
@@ -416,6 +419,8 @@ std::vector<PackageComponent> ListPackageComponents(const std::filesystem::path&
     scan_dir_components("workflows", "workflow.yaml", workflows, true);
     scan_dir_components("plugins", "plugin.json", plugins, true);
     scan_dir_components("mcp", "mcp.yaml", mcp_servers, true);
+    // 多渠道消息接入单阶段 1 追加第七类:channels/<local-id>/channel.yaml。
+    scan_dir_components("channels", "channel.yaml", channels, true);
 
     // agents/*.yaml:根下的一层文件即一份 Agent 定义(单子 §四)。
     {
@@ -463,16 +468,17 @@ std::vector<PackageComponent> ListPackageComponents(const std::filesystem::path&
     }
 
     // 并成一份账,次序固定:agents, prompt_profiles, skills, workflows,
-    // plugins, mcp_servers(与 PackageInventory 的字段序一致)。
+    // plugins, mcp_servers, channels(与 PackageInventory 的字段序一致)。
     std::vector<PackageComponent> out;
     out.reserve(agents.size() + profiles.size() + skills.size() + workflows.size() +
-                plugins.size() + mcp_servers.size());
+                plugins.size() + mcp_servers.size() + channels.size());
     out.insert(out.end(), agents.begin(), agents.end());
     out.insert(out.end(), profiles.begin(), profiles.end());
     out.insert(out.end(), skills.begin(), skills.end());
     out.insert(out.end(), workflows.begin(), workflows.end());
     out.insert(out.end(), plugins.begin(), plugins.end());
     out.insert(out.end(), mcp_servers.begin(), mcp_servers.end());
+    out.insert(out.end(), channels.begin(), channels.end());
     return out;
 }
 
@@ -496,6 +502,8 @@ void CollectComponents(const std::filesystem::path& root, const std::string& pac
             inventory.plugins.push_back(std::move(component));
         } else if (prefix == "mcp") {
             inventory.mcp_servers.push_back(std::move(component));
+        } else if (prefix == "channels") {
+            inventory.channels.push_back(std::move(component));
         }
     }
 }

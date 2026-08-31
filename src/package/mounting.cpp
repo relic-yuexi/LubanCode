@@ -178,9 +178,11 @@ PackageMount BuildPackageMount(const PackageMountInput& input) {
         entry.content_hash = record.inventory.content_hash;
         entry.code_trust = record.code_trust;
         for (const auto& plan_entry : record.mount_plan->entries) {
-            // 清账只收真挂了的内容组件;plugin/mcp 走 code_trust 那一笔
-            //(PendingTrust 一件不挂;Trusted 也只记账,挂载事务在阶段 5)。
-            if (plan_entry.kind == ComponentKind::Plugin || plan_entry.kind == ComponentKind::McpServer) {
+            // 清账只收真挂了的内容组件;plugin/mcp/channel 走 code_trust 那
+            // 一笔(PendingTrust 一件不挂;Trusted 也只记账,channel 的挂载
+            // 事务在阶段 2 起的 ChannelManager,这里不提前算作"已挂")。
+            if (plan_entry.kind == ComponentKind::Plugin || plan_entry.kind == ComponentKind::McpServer ||
+                plan_entry.kind == ComponentKind::Channel) {
                 continue;
             }
             entry.mounted_canonical_ids.push_back(plan_entry.canonical_id);
@@ -188,6 +190,68 @@ PackageMount BuildPackageMount(const PackageMountInput& input) {
         mount.entries.push_back(std::move(entry));
         mount.records.push_back(std::move(record));
     }
+
+    // Channel 对外渠道 id(channel.yaml:id,不是 local id/canonical id)全局
+    // 唯一(channel-manifest.md §3.1/§5:"同一时刻只许一份已挂载实现占用
+    // 同一渠道 id;冲突按 Package 原子挂载失败,不临时挑一份")。这条对账
+    // 只能在全部包都分析完、跨包视野齐了才做——单包分析(AnalyzePackage)
+    // 看不见别的包。"不临时挑一份"读作:谁也不许悄悄当赢家——冲突涉及
+    // 的全部包一并退回 rejected_ids(哪怕是同一个包里两份 channel.yaml
+    // 撞了同一个对外 id,那个包自己也算冲突方),不是"先到者留、后到者
+    // 让"的仲裁。诊断落在各自 rejected_ids 账上,详情走 /package doctor。
+    {
+        std::map<std::string, std::set<std::string>> channel_id_owners;  // channel.yaml:id -> 涉及的 package_id 集
+        for (const auto& record : mount.records) {
+            for (const auto& component : record.components) {
+                if (component.kind != ComponentKind::Channel || !component.channel.has_value()) continue;
+                const std::string& external_id = component.channel->id;
+                if (external_id.empty()) continue;  // 静态解析已在 AnalyzePackage 报过,这里不重复
+                channel_id_owners[external_id].insert(record.inventory.package_id);
+            }
+        }
+        std::set<std::string> conflicted;
+        for (const auto& [external_id, owners] : channel_id_owners) {
+            (void)external_id;
+            if (owners.size() > 1) conflicted.insert(owners.begin(), owners.end());
+        }
+        // 同一个包里两份 channel.yaml 撞了同一个对外 id(owners 集合只会有
+        // 一个 package_id,插入两次也只留一份)也要挡——单独再扫一遍逐
+        // component 计数,owners.size()==1 但同 id 出现 >1 次的场景。
+        {
+            std::map<std::string, std::map<std::string, int>> per_package_id_counts;  // package_id -> external_id -> 次数
+            for (const auto& record : mount.records) {
+                for (const auto& component : record.components) {
+                    if (component.kind != ComponentKind::Channel || !component.channel.has_value()) continue;
+                    if (component.channel->id.empty()) continue;
+                    ++per_package_id_counts[record.inventory.package_id][component.channel->id];
+                }
+            }
+            for (const auto& [package_id, counts] : per_package_id_counts) {
+                for (const auto& [external_id, count] : counts) {
+                    (void)external_id;
+                    if (count > 1) conflicted.insert(package_id);
+                }
+            }
+        }
+        if (!conflicted.empty()) {
+            mount.entries.erase(
+                std::remove_if(mount.entries.begin(), mount.entries.end(),
+                               [&](const PackageMountEntry& entry) {
+                                   return conflicted.count(entry.package_id) > 0;
+                               }),
+                mount.entries.end());
+            mount.records.erase(
+                std::remove_if(mount.records.begin(), mount.records.end(),
+                               [&](const PackageRecord& record) {
+                                   return conflicted.count(record.inventory.package_id) > 0;
+                               }),
+                mount.records.end());
+            for (const std::string& package_id : conflicted) {
+                mount.rejected_ids.push_back(package_id);
+            }
+        }
+    }
+
     // 一件不挂的账按 id 字节序排稳(清单坏的在前面按扫描序攒的,这里统一)。
     std::sort(mount.rejected_ids.begin(), mount.rejected_ids.end());
     return mount;

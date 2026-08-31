@@ -487,7 +487,9 @@ nlohmann::json MakeInitializeResult(std::string_view lubancode_version, std::str
         std::string(kMethodBrowserResume),
         std::string(kMethodBrowserConsoleQuery),
         std::string(kMethodBrowserNetworkQuery),
-        std::string(kMethodBrowserDownloadsQuery)};
+        std::string(kMethodBrowserDownloadsQuery),
+        std::string(kMethodBrowserScreencastStart),
+        std::string(kMethodBrowserScreencastStop)};
     capabilities["pending"] = std::vector<std::string>{
         std::string(kMethodThreadResume),    std::string(kMethodThreadRead),
         std::string(kMethodTurnSteer),       std::string(kMethodModelList),
@@ -801,6 +803,49 @@ ParamsCheck CheckBrowserActionCancelParams(const nlohmann::json& params, std::st
         return base;
     }
     return RequireString(params, "actionId", kMethodBrowserActionCancel, out_action_id);
+}
+
+ParamsCheck CheckBrowserScreencastStartParams(const nlohmann::json& params) {
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodBrowserScreencastStart);
+    if (!base.ok) {
+        return base;
+    }
+    if (params.contains("pageId") && !params["pageId"].is_null() && !params["pageId"].is_string()) {
+        return ParamsCheck{false, kErrInvalidParams,
+                           std::string(kMethodBrowserScreencastStart) + ": pageId 给了须是字符串"};
+    }
+    if (params.contains("format") && !params["format"].is_null()) {
+        const std::string format = params.value("format", std::string());
+        if (format != "jpeg" && format != "png") {
+            return ParamsCheck{false, kErrInvalidParams,
+                               std::string(kMethodBrowserScreencastStart) + ": format 只认 jpeg|png"};
+        }
+    }
+    ParamsCheck check = OptionalPositiveInt(params, "fps", kMethodBrowserScreencastStart);
+    if (!check.ok) {
+        return check;
+    }
+    check = OptionalPositiveInt(params, "quality", kMethodBrowserScreencastStart);
+    if (!check.ok) {
+        return check;
+    }
+    check = OptionalPositiveInt(params, "maxWidth", kMethodBrowserScreencastStart);
+    if (!check.ok) {
+        return check;
+    }
+    return OptionalPositiveInt(params, "maxHeight", kMethodBrowserScreencastStart);
+}
+
+ParamsCheck CheckBrowserScreencastStopParams(const nlohmann::json& params) {
+    const ParamsCheck base = CheckParamsIsObject(params, kMethodBrowserScreencastStop);
+    if (!base.ok) {
+        return base;
+    }
+    if (params.contains("pageId") && !params["pageId"].is_null() && !params["pageId"].is_string()) {
+        return ParamsCheck{false, kErrInvalidParams,
+                           std::string(kMethodBrowserScreencastStop) + ": pageId 给了须是字符串"};
+    }
+    return ParamsCheck{};
 }
 
 }  // namespace lubancode::app_server
