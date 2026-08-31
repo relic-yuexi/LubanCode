@@ -35,7 +35,8 @@ std::string SidecarMethodFor(std::string_view method) {
 }
 
 // 写动作才过审批(读动作 snapshot/screenshot 不问;start/stop 是宿主自己
-// 的生命周期,也不问)。
+// 的生命周期,也不问)。screencast/start|stop(阶段 C)同归只读一档:
+// 起停镜像流不改页面状态,与 snapshot/screenshot 同判——不问审批。
 bool MethodNeedsApproval(std::string_view method) {
     return method == kMethodBrowserPageOpen || method == kMethodBrowserPageNavigate ||
            method == kMethodBrowserPageBack || method == kMethodBrowserPageForward ||
@@ -316,6 +317,10 @@ void BrowserService::HandleSidecarEvent(const nlohmann::json& params) {
         Emit(kEventBrowserConsoleEvent, shaped);
     } else if (type == "journal/network") {
         Emit(kEventBrowserNetworkEvent, shaped);
+    } else if (type == "screencast/frame") {
+        // 镜像流帧(阶段 C):不直接 Emit——落盘可能比帧到达慢,排进有界
+        // 队列由专职工作线程消化(见 HandleScreencastFrame 文件头注)。
+        HandleScreencastFrame(shaped);
     } else {
         Diagnose("未知 sidecar 事件(丢弃): " + type);
     }
@@ -569,6 +574,128 @@ nlohmann::json BrowserService::FinishScreenshot(const nlohmann::json& sidecar_re
 }
 
 // ---------------------------------------------------------------------------
+// 镜像流(阶段 C):有界队列 + 专职工作线程,落盘赶不上帧到达就丢最老帧
+// ---------------------------------------------------------------------------
+
+void BrowserService::HandleScreencastFrame(const nlohmann::json& payload) {
+    if (shutting_down_.load()) {
+        return; // 收线途中不再受理新帧
+    }
+    PendingScreencastFrame frame;
+    frame.page_id = payload.value("pageId", std::string());
+    frame.data_base64 = payload.value("dataBase64", std::string());
+    const std::string format = payload.value("format", std::string("jpeg"));
+    frame.mime_type = format == "png" ? "image/png" : "image/jpeg";
+    frame.claimed_sha256 = payload.value("sha256", std::string());
+    frame.frame_seq = payload.value("frameSeq", std::uint64_t{0});
+
+    bool spawn_worker = false;
+    {
+        std::lock_guard<std::mutex> lock(screencast_mutex_);
+        const std::size_t capacity = static_cast<std::size_t>(std::max(options_.screencast_queue_capacity, 1));
+        if (screencast_queue_.size() >= capacity) {
+            // 队满:丢队首(最老那帧),按它的 pageId 记账——丢旧留新是
+            // 镜像流的方向(前端要的是"现在的页面",不是补全历史)。
+            const std::string evicted_page = screencast_queue_.front().page_id;
+            screencast_queue_.pop_front();
+            screencast_dropped_[evicted_page] += 1;
+            screencast_dropped_total_[evicted_page] += 1;
+        }
+        screencast_queue_.push_back(std::move(frame));
+        if (!screencast_worker_started_.exchange(true)) {
+            spawn_worker = true;
+        }
+    }
+    if (spawn_worker) {
+        screencast_worker_ = std::thread([this] { ScreencastWorkerLoop(); });
+    }
+    screencast_cv_.notify_all();
+}
+
+void BrowserService::ScreencastWorkerLoop() {
+    while (true) {
+        PendingScreencastFrame frame;
+        {
+            std::unique_lock<std::mutex> lock(screencast_mutex_);
+            screencast_cv_.wait_for(lock, std::chrono::milliseconds(100),
+                                    [this] { return !screencast_queue_.empty() || shutting_down_.load(); });
+            if (screencast_queue_.empty()) {
+                if (shutting_down_.load()) {
+                    return;
+                }
+                continue;
+            }
+            frame = std::move(screencast_queue_.front());
+            screencast_queue_.pop_front();
+        }
+        EmitScreencastFrame(frame);
+    }
+}
+
+void BrowserService::EmitScreencastFrame(const PendingScreencastFrame& frame) {
+    std::uint64_t dropped = 0;
+    {
+        std::lock_guard<std::mutex> lock(screencast_mutex_);
+        const auto it = screencast_dropped_.find(frame.page_id);
+        if (it != screencast_dropped_.end()) {
+            dropped = it->second;
+            it->second = 0; // 报完清零(journal 批量的 dropped 同口径)
+        }
+    }
+    if (options_.artifact_dir.empty()) {
+        Diagnose("镜像流帧丢弃(没配 artifact_dir,字节无处落): pageId=" + frame.page_id);
+        return;
+    }
+    const std::expected<std::string, std::string> decoded =
+        agent::DecodeBase64Strict(frame.data_base64, 20 * 1024 * 1024);
+    if (!decoded.has_value()) {
+        Diagnose("镜像流帧解码失败(丢弃): " + decoded.error());
+        return;
+    }
+    const std::string sha256 = hooks::Sha256Hex(*decoded);
+    if (!frame.claimed_sha256.empty() && frame.claimed_sha256 != sha256) {
+        Diagnose("镜像流帧与 sidecar 报的 sha256 对不上(丢弃): pageId=" + frame.page_id);
+        return;
+    }
+    const std::string extension = frame.mime_type == "image/png" ? "png" : "jpeg";
+    const std::string relative = mcp::LandToolArtifact(options_.artifact_dir, *decoded, extension);
+    if (relative.empty()) {
+        Diagnose("镜像流帧落盘失败: " + options_.artifact_dir);
+        return;
+    }
+    const agent::ImageDimensions dims = agent::ReadImageDimensions(*decoded, frame.mime_type);
+    nlohmann::json artifact;
+    artifact["id"] = "art-" + sha256.substr(0, 8);
+    artifact["filename"] = "art-" + sha256.substr(0, 8) + "." + extension;
+    artifact["path"] = relative;
+    artifact["mime_type"] = frame.mime_type;
+    artifact["bytes"] = decoded->size();
+    artifact["sha256"] = sha256;
+    artifact["stored"] = true;
+
+    // frame 事件只带引用与 page_id(§4.3):同截图链,不递 base64。
+    nlohmann::json params;
+    params["pageId"] = frame.page_id;
+    params["frameSeq"] = frame.frame_seq;
+    params["width"] = dims.width;
+    params["height"] = dims.height;
+    params["dropped"] = dropped;
+    params["artifact"] = std::move(artifact);
+    Emit(kEventBrowserScreencastFrame, params);
+}
+
+std::size_t BrowserService::screencast_queue_depth() {
+    std::lock_guard<std::mutex> lock(screencast_mutex_);
+    return screencast_queue_.size();
+}
+
+std::uint64_t BrowserService::screencast_dropped_total_for_test(const std::string& page_id) {
+    std::lock_guard<std::mutex> lock(screencast_mutex_);
+    const auto it = screencast_dropped_total_.find(page_id);
+    return it == screencast_dropped_total_.end() ? 0 : it->second;
+}
+
+// ---------------------------------------------------------------------------
 // 方法注册
 // ---------------------------------------------------------------------------
 
@@ -705,6 +832,16 @@ void BrowserService::RegisterMethods(
     register_async(kMethodBrowserAction, [](const nlohmann::json& params) {
         std::string kind;
         return CheckBrowserActionParams(params, kind);
+    });
+    // 镜像流起停(阶段 C):只读,不问审批(MethodNeedsApproval 未收录);
+    // 走同一条异步动作管线只为复用受理/owner 裁定/sidecar 往返的现成
+    // 骨架——起停本身很快,不必单独开路。真正的帧不经这条管线,见
+    // HandleScreencastFrame。
+    register_async(kMethodBrowserScreencastStart, [](const nlohmann::json& params) {
+        return CheckBrowserScreencastStartParams(params);
+    });
+    register_async(kMethodBrowserScreencastStop, [](const nlohmann::json& params) {
+        return CheckBrowserScreencastStopParams(params);
     });
 
     // ---- 同步查询面(读线程直答;错误折 error.data.reason 稳定码) ----
@@ -881,6 +1018,11 @@ void BrowserService::Shutdown() {
     action_cv_.notify_all();
     if (action_worker_.joinable()) {
         action_worker_.join();
+    }
+    // 镜像流工作线程同样收线(队里剩的帧不再落盘,进程都要退了没意义)。
+    screencast_cv_.notify_all();
+    if (screencast_worker_.joinable()) {
+        screencast_worker_.join();
     }
     // 收尸:杀 sidecar 进程树(profile 锁由 sidecar 的退出钩子释放)。
     if (owned_transport_ != nullptr) {

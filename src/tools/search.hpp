@@ -20,6 +20,7 @@ public:
     std::string description() const override;
     nlohmann::json input_schema() const override;
     Result execute(const nlohmann::json& input) override;
+    Result execute(const nlohmann::json& input, const ToolExecutionContext& context) override;
 };
 
 }  // namespace lubancode::tools

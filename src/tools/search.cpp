@@ -12,6 +12,7 @@
 #include "tools/search.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <filesystem>
 #include <fstream>
 #include <optional>
@@ -45,11 +46,7 @@ bool ShouldSkipDir(const std::filesystem::path& dir_name) {
 }
 
 // 读文件头 8KB,含 \0 就当二进制文件,跳过不搜。
-bool LooksBinary(const std::filesystem::path& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        return true;  // 打不开就别搜了,当它是"不能搜"处理
-    }
+bool LooksBinary(std::ifstream& file) {
     char buf[8192];
     file.read(buf, sizeof(buf));
     const std::streamsize n = file.gcount();
@@ -58,67 +55,61 @@ bool LooksBinary(const std::filesystem::path& path) {
             return true;
         }
     }
+    file.clear();
+    file.seekg(0, std::ios::beg);
     return false;
 }
 
-// 把简单通配符转成 std::regex(ECMAScript),语义照 gitignore/ripgrep 那一套:
+// 简单通配匹配,语义照 gitignore/ripgrep 常用的那一套:
 //   *     匹配任意长度但不跨目录(不匹配 '/')
 //   ?     匹配单个非 '/' 字符
 //   **/   出现在开头或紧跟在 '/' 后面、后面又跟着 '/' 时,当"零层或多层目录"
 //         整体处理,比如 "**/*.md" 既要中根目录的 a.md,也要中 sub/b.md。
 //   /**   出现在结尾、前面是 '/' 时,当"这层目录本身,或者它底下任意深度"处理。
 //   其余出现的 "**"(前后凑不成上面两种干净边界的)退化成普通的 "任意字符"(.*)。
-// 其余字符按字面量转义。
-std::regex GlobToRegex(const std::string& glob_pattern) {
-    std::string regex_str = "^";
-    const std::size_t n = glob_pattern.size();
-    std::size_t i = 0;
-    while (i < n) {
-        const char c = glob_pattern[i];
-        if (c == '*' && i + 1 < n && glob_pattern[i + 1] == '*') {
-            const std::size_t after = i + 2;
-            const bool prev_boundary = (i == 0) || (glob_pattern[i - 1] == '/');
-            const bool next_slash = (after < n) && (glob_pattern[after] == '/');
-            const bool next_end = (after == n);
+// 用状态表吃掉 *,** 带来的分支,每个(pattern,text)位置只算一回。这样
+// 不靠 std::regex 回溯,长路径与成串星号也有确定上界。
+bool GlobMatches(const std::string& pattern, const std::string& text) {
+    const std::size_t rows = pattern.size() + 1;
+    const std::size_t cols = text.size() + 1;
+    std::vector<unsigned char> matched(rows * cols, 0);
+    const auto at = [&](std::size_t p, std::size_t s) -> unsigned char& {
+        return matched[p * cols + s];
+    };
+    at(pattern.size(), text.size()) = 1;
 
-            if (prev_boundary && next_slash) {
-                // "**/" 在开头,或紧跟在 '/' 后面:零层或多层目录都算数
-                regex_str += "(?:.*/)?";
-                i = after + 1;  // 把 "**" 后面那个 '/' 也一起吃掉
-                continue;
-            }
-            if (i > 0 && glob_pattern[i - 1] == '/' && next_end) {
-                // 路径末尾的 "/**":吞掉前面已经写进去的那个字面 '/',
-                // 换成"这层目录本身,或者它底下任意内容"
-                if (!regex_str.empty() && regex_str.back() == '/') {
-                    regex_str.pop_back();
+    for (std::size_t p = pattern.size(); p-- > 0;) {
+        for (std::size_t s = text.size() + 1; s-- > 0;) {
+            if (pattern[p] == '*' && p + 1 < pattern.size() && pattern[p + 1] == '*') {
+                const bool boundary = p == 0 || pattern[p - 1] == '/';
+                const bool slash_after = p + 2 < pattern.size() && pattern[p + 2] == '/';
+                if (boundary && slash_after) {
+                    at(p, s) = at(p + 3, s) || (s < text.size() && at(p, s + 1));
+                } else {
+                    at(p, s) = at(p + 2, s) || (s < text.size() && at(p, s + 1));
                 }
-                regex_str += "(?:/.*)?";
-                i = after;
-                continue;
+            } else if (pattern[p] == '*') {
+                at(p, s) = at(p + 1, s) ||
+                           (s < text.size() && text[s] != '/' && at(p, s + 1));
+            } else if (pattern[p] == '?') {
+                at(p, s) = s < text.size() && text[s] != '/' && at(p + 1, s + 1);
+            } else {
+                const bool trailing_globstar = pattern[p] == '/' && p + 3 == pattern.size() &&
+                                               pattern[p + 1] == '*' && pattern[p + 2] == '*';
+                at(p, s) = (trailing_globstar && s == text.size()) ||
+                           (s < text.size() && pattern[p] == text[s] && at(p + 1, s + 1));
             }
-            // 孤立的 "**"(前后不构成上面两种干净边界),退化成普通任意匹配
-            regex_str += ".*";
-            i = after;
-            continue;
-        }
-        if (c == '*') {
-            regex_str += "[^/]*";
-            ++i;
-        } else if (c == '?') {
-            regex_str += "[^/]";
-            ++i;
-        } else if (std::string(".^$+(){}|[]\\").find(c) != std::string::npos) {
-            regex_str += '\\';
-            regex_str += c;
-            ++i;
-        } else {
-            regex_str += c;
-            ++i;
         }
     }
-    regex_str += "$";
-    return std::regex(regex_str, std::regex::ECMAScript);
+    return at(0, 0) != 0;
+}
+
+bool IsPlainLiteral(const std::string& pattern) {
+    return pattern.find_first_of(".^$*+?()[]{}|\\") == std::string::npos;
+}
+
+bool Cancelled(const std::atomic<bool>* cancel) {
+    return cancel != nullptr && cancel->load(std::memory_order_relaxed);
 }
 
 std::string NormalizeSlashes(std::string s) {
@@ -134,7 +125,7 @@ std::string NormalizeSlashes(std::string s) {
 // .evidence 产物、运行时登记的日志目录)默认不进结果;root 本身在边界内
 // = path 显式点名到了证据区,照常搜——默认过滤只挡"无意间搜到"。
 template <typename Visit>
-void WalkFiles(const std::filesystem::path& root, const Visit& visit) {
+void WalkFiles(const std::filesystem::path& root, const std::atomic<bool>* cancel, const Visit& visit) {
     std::error_code ec;
     if (!std::filesystem::exists(root, ec) || !std::filesystem::is_directory(root, ec)) {
         return;
@@ -149,6 +140,9 @@ void WalkFiles(const std::filesystem::path& root, const Visit& visit) {
     const std::filesystem::recursive_directory_iterator end;
 
     while (it != end) {
+        if (Cancelled(cancel)) {
+            return;
+        }
         const std::filesystem::directory_entry entry = *it;
 
         std::error_code entry_ec;
@@ -186,39 +180,35 @@ void WalkFiles(const std::filesystem::path& root, const Visit& visit) {
 // rg pattern file.cpp),与其报错把人挡回去,不如把单文件当作"只含它自己的
 // 搜索范围"。grep/glob 两种模式共用这一套分发。
 template <typename Visit>
-void CollectSearchFiles(const std::filesystem::path& root, const Visit& visit) {
+void CollectSearchFiles(const std::filesystem::path& root, const std::atomic<bool>* cancel, const Visit& visit) {
     std::error_code ec;
     if (std::filesystem::is_regular_file(root, ec)) {
         visit(root, root.filename());
         return;
     }
-    WalkFiles(root, visit);
+    WalkFiles(root, cancel, visit);
 }
 
-Tool::Result RunGrep(const std::filesystem::path& root, const std::string& pattern_str, const std::string& glob_filter) {
-    std::regex pattern;
-    try {
-        pattern = std::regex(pattern_str, std::regex::ECMAScript);
-    } catch (const std::regex_error& e) {
-        return {"pattern 不是合法的正则表达式(ECMAScript 语法): " + std::string(e.what()), true};
+Tool::Result RunGrep(const std::filesystem::path& root, const std::string& pattern_str,
+                     const std::string& glob_filter, const std::atomic<bool>* cancel) {
+    const bool plain_literal = IsPlainLiteral(pattern_str);
+    std::optional<std::regex> pattern;
+    if (!plain_literal) {
+        try {
+            pattern.emplace(pattern_str, std::regex::ECMAScript);
+        } catch (const std::regex_error& e) {
+            return {"pattern 不是合法的正则表达式(ECMAScript 语法): " + std::string(e.what()), true};
+        }
     }
 
-    std::optional<std::regex> filter_regex;
     // 跟 glob 模式一致:filter 里不带 '/' 就只拿文件名(basename)去配,
     // 这样 "*.cpp" 才能递归找到所有目录下的 .cpp,不用非得写成 "**/*.cpp"。
     // filter 里带 '/' 才拿相对 root 的完整路径去配。
     const bool filter_basename_only = glob_filter.find('/') == std::string::npos;
-    if (!glob_filter.empty()) {
-        try {
-            filter_regex = GlobToRegex(glob_filter);
-        } catch (const std::regex_error& e) {
-            return {"glob 过滤表达式不合法: " + std::string(e.what()), true};
-        }
-    }
-
     std::ostringstream out;
     std::size_t hit_count = 0;
     bool truncated = false;
+    bool cancelled = false;
 
     // P2-5:单文件点名到观察边界内 = 显式点名,照常搜,但正文前给一行
     // 体积提示(超过 256KB 劝阻)。目录根不用提示——过滤逻辑在 WalkFiles
@@ -235,34 +225,41 @@ Tool::Result RunGrep(const std::filesystem::path& root, const std::string& patte
         }
     }
 
-    CollectSearchFiles(root, [&](const std::filesystem::path& abs_path, const std::filesystem::path& rel_path) -> bool {
+    CollectSearchFiles(root, cancel, [&](const std::filesystem::path& abs_path, const std::filesystem::path& rel_path) -> bool {
+        if (Cancelled(cancel)) {
+            cancelled = true;
+            return false;
+        }
         if (hit_count >= kMaxResults) {
             truncated = true;
             return false;
         }
         const std::string rel_utf8 = NormalizeSlashes(PathToUtf8(rel_path));
-        if (filter_regex.has_value()) {
+        if (!glob_filter.empty()) {
             const std::string match_target = filter_basename_only ? PathToUtf8(abs_path.filename()) : rel_utf8;
-            if (!std::regex_match(match_target, *filter_regex)) {
+            if (!GlobMatches(glob_filter, match_target)) {
                 return true;
             }
         }
-        if (LooksBinary(abs_path)) {
-            return true;
-        }
 
         std::ifstream file(abs_path, std::ios::binary);
-        if (!file.is_open()) {
+        if (!file.is_open() || LooksBinary(file)) {
             return true;
         }
         std::string line;
         long long line_no = 0;
         while (std::getline(file, line)) {
+            if (Cancelled(cancel)) {
+                cancelled = true;
+                return false;
+            }
             ++line_no;
             if (!line.empty() && line.back() == '\r') {
                 line.pop_back();
             }
-            if (std::regex_search(line, pattern)) {
+            const bool matches = plain_literal ? line.find(pattern_str) != std::string::npos
+                                               : std::regex_search(line, *pattern);
+            if (matches) {
                 out << rel_utf8 << ":" << line_no << ":" << line << "\n";
                 ++hit_count;
                 if (hit_count >= kMaxResults) {
@@ -274,6 +271,10 @@ Tool::Result RunGrep(const std::filesystem::path& root, const std::string& patte
         return true;
     });
 
+    if (cancelled || Cancelled(cancel)) {
+        return {"搜索已取消", true};
+    }
+
     if (hit_count == 0) {
         return {notice + "没搜到匹配的内容", false};
     }
@@ -284,30 +285,34 @@ Tool::Result RunGrep(const std::filesystem::path& root, const std::string& patte
     return {content, false};
 }
 
-Tool::Result RunGlobSearch(const std::filesystem::path& root, const std::string& pattern_str) {
-    std::regex pattern;
+Tool::Result RunGlobSearch(const std::filesystem::path& root, const std::string& pattern_str,
+                           const std::atomic<bool>* cancel) {
     const bool match_basename_only = pattern_str.find('/') == std::string::npos;
-    try {
-        pattern = GlobToRegex(pattern_str);
-    } catch (const std::regex_error& e) {
-        return {"pattern 不是合法的通配符表达式: " + std::string(e.what()), true};
-    }
 
     std::vector<std::string> hits;
     bool truncated = false;
+    bool cancelled = false;
 
-    CollectSearchFiles(root, [&](const std::filesystem::path& abs_path, const std::filesystem::path& rel_path) -> bool {
+    CollectSearchFiles(root, cancel, [&](const std::filesystem::path& abs_path, const std::filesystem::path& rel_path) -> bool {
+        if (Cancelled(cancel)) {
+            cancelled = true;
+            return false;
+        }
         if (hits.size() >= kMaxResults) {
             truncated = true;
             return false;
         }
         const std::string rel_utf8 = NormalizeSlashes(PathToUtf8(rel_path));
         const std::string match_target = match_basename_only ? PathToUtf8(abs_path.filename()) : rel_utf8;
-        if (std::regex_match(match_target, pattern)) {
+        if (GlobMatches(pattern_str, match_target)) {
             hits.push_back(rel_utf8);
         }
         return true;
     });
+
+    if (cancelled || Cancelled(cancel)) {
+        return {"搜索已取消", true};
+    }
 
     if (hits.empty()) {
         return {"没找到匹配的文件", false};
@@ -383,7 +388,7 @@ nlohmann::json SearchTool::input_schema() const {
     return schema;
 }
 
-Tool::Result SearchTool::execute(const nlohmann::json& input) {
+static Tool::Result ExecuteSearch(const nlohmann::json& input, const std::atomic<bool>* cancel) {
     if (!input.contains("mode") || !input.at("mode").is_string()) {
         return {"缺少必填参数 mode(字符串,\"grep\" 或 \"glob\")", true};
     }
@@ -415,12 +420,20 @@ Tool::Result SearchTool::execute(const nlohmann::json& input) {
         if (auto it = input.find("glob"); it != input.end() && !it->is_null() && it->is_string()) {
             glob_filter = it->get<std::string>();
         }
-        return RunGrep(root, pattern, glob_filter);
+        return RunGrep(root, pattern, glob_filter, cancel);
     }
     if (mode == "glob") {
-        return RunGlobSearch(root, pattern);
+        return RunGlobSearch(root, pattern, cancel);
     }
     return {"mode 只认 \"grep\" 或 \"glob\",你写的是: " + mode, true};
+}
+
+Tool::Result SearchTool::execute(const nlohmann::json& input) {
+    return ExecuteSearch(input, nullptr);
+}
+
+Tool::Result SearchTool::execute(const nlohmann::json& input, const ToolExecutionContext& context) {
+    return ExecuteSearch(input, context.cancel);
 }
 
 }  // namespace lubancode::tools

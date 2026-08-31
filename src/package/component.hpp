@@ -1,15 +1,26 @@
-// 组件解析(统一 Package 封装单阶段 2):ComponentSourceRoot 与六类组件
-// loader。规矩一条:Package 层不复制任何组件的 schema——Skill frontmatter
-// 归 tools::ParseSkillMarkdown,Workflow 归 workflow::ParseWorkflowYaml,
-// Agent 归 agent::ParseAgentDefinitionYaml,plugin.json 归
-// runtime::ParsePluginManifest;这里只把"包根 + 组件相对目录"递给原生
-// parser,把原生错误透传出来,再按包的规矩补三样原生 parser 管不到的账:
+// 组件解析(统一 Package 封装单阶段 2;多渠道消息接入单阶段 1 追加第七类
+// Channel):ComponentSourceRoot 与七类组件 loader。规矩一条:Package 层
+// 不复制任何组件的 schema——Skill frontmatter 归 tools::ParseSkillMarkdown,
+// Workflow 归 workflow::ParseWorkflowYaml,Agent 归
+// agent::ParseAgentDefinitionYaml,plugin.json 归
+// runtime::ParsePluginManifest,channel.yaml 归
+// channel::ParseChannelManifestYaml(阶段 0 冻结件
+// docs/architecture/channels/channel-manifest.md);这里只把"包根 + 组件
+// 相对目录"递给原生 parser,把原生错误透传出来,再按包的规矩补三样原生
+// parser 管不到的账:
 //   1. local id 规矩(目录名/文件名是否小写 kebab-case,契约 packages.md §2);
 //   2. 名字一致性(local id 与 frontmatter/manifest id 是否一致);
 //   3. mcp.yaml——它是 Package 自己的格式(契约 §5),原生 parser 就是
 //      本文件里的 ParseMcpComponentYaml,阶段 5 再映射到 McpServerConfig。
 // Prompt Profile 无单一入口(目录整体即组件),这里的"原生规矩"是模块树
 // 覆盖范围(core/features/platforms 可换,modes 不可,契约 agents.md §6.3)。
+//
+// Channel 走"发现不等于运行"的口径(channel-manifest.md §5):这里只做
+// 静态解析与 local id/名字一致性检查,不 spawn sidecar、不查凭据、不查
+// 账号锁——那些是 channel-manifest.md §5 十关里 Package 之后的关,阶段 2
+// 起的 ChannelManager 才管。Channel 与 Plugin/McpServer 同属"code 组件"
+// (声明了要 spawn 的 runtime.command),同走信任门,catalog.cpp/mounting.cpp
+// 里凡是按 kind 分派 Plugin/McpServer 的地方一并追加 Channel 分支。
 #pragma once
 
 #include <expected>
@@ -20,6 +31,7 @@
 #include <vector>
 
 #include "agent/agent_definition.hpp"
+#include "channel/manifest.hpp"
 #include "package/inventory.hpp"  // PackageScope
 #include "runtime/plugin_contract.hpp"
 #include "tools/skill_loader.hpp"
@@ -27,10 +39,11 @@
 
 namespace lubancode::package {
 
-// 六类组件(契约 packages.md §2 的 ComponentKind)。
-enum class ComponentKind { Agent, PromptProfile, Skill, Workflow, Plugin, McpServer };
+// 七类组件(契约 packages.md §2 的 ComponentKind;Channel 是多渠道消息
+// 接入单阶段 1 追加的第七档,目录名固定 channels/)。
+enum class ComponentKind { Agent, PromptProfile, Skill, Workflow, Plugin, McpServer, Channel };
 std::string_view ComponentKindName(ComponentKind kind);
-// doctor/清单展示用的目录名("agents"/"mcp"...)。
+// doctor/清单展示用的目录名("agents"/"mcp"/"channels"...)。
 std::string_view ComponentKindDir(ComponentKind kind);
 
 // 一件组件的来源描述(单子 §十一):包根 + 组件相对位置 + 归属。各组件
@@ -105,6 +118,7 @@ struct ParsedComponent {
     std::optional<runtime::PluginManifest> plugin;
     std::optional<McpComponentDefinition> mcp;
     std::optional<tools::ParsedSkillFile> skill;
+    std::optional<channel::ChannelManifest> channel;
     std::vector<std::string> profile_files;  // Prompt Profile 的覆盖文件(包内相对)
 
     bool HasError() const;

@@ -303,6 +303,7 @@ class BrowserSession {
     this.pages = new Map(); // page_id -> { page, generation, snapshotSeq, closed }
     this.nextPageNumber = 1;
     this.downloads = [];    // { id, state, suggested, filename, path, mime, bytes, sha256 }
+    this.screencasts = new Map(); // page_id -> { cdp, active, frameSeq, lastEmitAt, minIntervalMs, format }
     this.crashed = false;
     this.crashReason = '';
     this.queue = Promise.resolve(); // actor 队列:并发动作串行
@@ -447,6 +448,7 @@ class BrowserSession {
     this.context = null;
     this.browser = null;
     this.pages.clear();
+    this.screencasts.clear(); // CDP 会话随 context/browser 一起没了,这里只清账
     this.releaseLockNow();
     if (errors.length > 0) log('shutdown 清理有失败项:', errors.join('; '));
   }
@@ -585,10 +587,12 @@ class BrowserSession {
     page.evaluate(USER_INPUT_WATCH_SCRIPT).catch(() => { /* about:blank 等挂不上就算了 */ });
     page.on('close', () => {
       entry.closed = true;
+      this.stopScreencastQuiet(id); // 页关了,镜像流(若开着)跟着收
       this.emitEvent('page/closed', { pageId: id, reason: 'closed' });
     });
     page.on('crash', () => {
       entry.closed = true;
+      this.stopScreencastQuiet(id);
       this.emitEvent('page/closed', { pageId: id, reason: 'crashed' });
     });
     this.emitEvent('page/created', { pageId: id });
@@ -1084,6 +1088,120 @@ class BrowserSession {
       buffer,
       sha256,
     };
+  }
+
+  // ---------------------------------------------------------------------------
+  // 镜像流(多前端外壳单阶段 C):Playwright 只有 chromium 引擎能拿到 CDP
+  // 会话(context.newCDPSession),screencast 是 CDP 独有的 Page.startScreencast
+  // / Page.screencastFrame / Page.screencastFrameAck 三部曲——webkit/firefox
+  // 没有对应能力,直接明报不支持,不装样子。
+  //
+  // 帧率帽在这里做(而不是 host 那边):CDP 只给 everyNthFrame 这种"跳帧"
+  // 参数,不是时间维度的 fps;真要 5fps 这种时间帽,得自己在收到帧时按
+  // 墙钟节流——够 5fps 间隔才转发,不够就丢(不计 dropped:这是设计内
+  // 节流,不是消费者跟不上,两件事账不能混)。转发前一定先 ack,不然
+  // CDP 不再送新帧(哪怕这帧被节流丢掉也要 ack)。
+  // ---------------------------------------------------------------------------
+
+  async startScreencast(pageId, options) {
+    options = options || {};
+    await this.ensureLaunched();
+    const target = await this.target(pageId);
+    const id = target.id;
+    if (this.screencasts.has(id)) {
+      throw toolError('browser.screencast_running', '页面 ' + id + ' 已在跑镜像流,先 browser/screencast/stop 再 start。');
+    }
+    if (this.config.engine !== 'chromium') {
+      throw toolError('browser.screencast_unsupported', '镜像流只有 chromium 引擎支持(靠 CDP Page.startScreencast);当前 engine=' + this.config.engine + '。');
+    }
+    const fps = Math.min(Math.max(Math.trunc(Number(options.fps)) || 5, 1), 30);
+    const format = options.format === 'png' ? 'png' : 'jpeg';
+    const quality = Math.min(Math.max(Math.trunc(Number(options.quality)) || 80, 1), 100);
+    const maxWidth = Math.min(Math.max(Math.trunc(Number(options.maxWidth)) || this.config.viewport.width, 64), 3840);
+    const maxHeight = Math.min(Math.max(Math.trunc(Number(options.maxHeight)) || this.config.viewport.height, 64), 4320);
+    const page = target.entry.page;
+    let cdp;
+    try {
+      cdp = await page.context().newCDPSession(page);
+    } catch (error) {
+      throw toolError('browser.screencast_unsupported', 'CDP 会话建不了,镜像流只在 chromium 上可用:' + describeError(error));
+    }
+    const state = {
+      cdp,
+      active: true,
+      frameSeq: 0,
+      lastEmitAt: 0,
+      minIntervalMs: Math.floor(1000 / fps),
+      fps,
+      format,
+    };
+    this.screencasts.set(id, state);
+    cdp.on('Page.screencastFrame', (frame) => {
+      const current = this.screencasts.get(id);
+      if (!current || current !== state || !current.active) return;
+      // ack 不等结果(会话关了就吞掉,不拖流);不 ack 就收不到下一帧。
+      cdp.send('Page.screencastFrameAck', { sessionId: frame.sessionId }).catch(() => { /* 会话已关就算了 */ });
+      const now = Date.now();
+      if (now - current.lastEmitAt < current.minIntervalMs) {
+        return; // 帧率帽:间隔不够,丢(节流,不计 dropped)
+      }
+      current.lastEmitAt = now;
+      current.frameSeq += 1;
+      let sha256 = '';
+      try {
+        sha256 = crypto.createHash('sha256').update(Buffer.from(frame.data, 'base64')).digest('hex');
+      } catch (_) { /* 算不出就不带,host 侧不比对 */ }
+      this.emitEvent('screencast/frame', {
+        pageId: id,
+        frameSeq: current.frameSeq,
+        format: current.format,
+        sha256,
+        dataBase64: frame.data,
+      });
+    });
+    cdp.on('detached', () => {
+      const current = this.screencasts.get(id);
+      if (current === state) current.active = false;
+    });
+    try {
+      await cdp.send('Page.startScreencast', { format, quality, maxWidth, maxHeight, everyNthFrame: 1 });
+    } catch (error) {
+      this.screencasts.delete(id);
+      try { await cdp.detach(); } catch (_) { /* 起不来就算了 */ }
+      throw toolError('browser.screencast_start_failed', '镜像流起不来:' + describeError(error));
+    }
+    return { pageId: id, fps, format, quality, maxWidth, maxHeight };
+  }
+
+  async stopScreencast(pageId, options) {
+    options = options || {};
+    await this.ensureLaunched();
+    const target = await this.target(pageId);
+    const id = target.id;
+    const state = this.screencasts.get(id);
+    if (!state) {
+      throw toolError('browser.screencast_not_running', '页面 ' + id + ' 没有在跑的镜像流。');
+    }
+    state.active = false;
+    this.screencasts.delete(id);
+    try {
+      await state.cdp.send('Page.stopScreencast');
+    } catch (_) { /* 页面/会话已经没了就算了 */ }
+    try {
+      await state.cdp.detach();
+    } catch (_) { /* 同上 */ }
+    return { pageId: id, stopped: true };
+  }
+
+  // 页关闭/崩溃时的静默收尾:不抛错(收尸路不该被镜像流的状态卡住)。
+  stopScreencastQuiet(pageId) {
+    const state = this.screencasts.get(pageId);
+    if (!state) return;
+    state.active = false;
+    this.screencasts.delete(pageId);
+    Promise.resolve()
+      .then(() => state.cdp.send('Page.stopScreencast').catch(() => {}))
+      .then(() => state.cdp.detach().catch(() => {}));
   }
 
   // Console journal 查询(阶段 2):page_id 对账(unknown_page 明报),

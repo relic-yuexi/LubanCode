@@ -51,6 +51,7 @@ bool PackageComponentSet::Has(ComponentKind kind, const std::string& local_id) c
         case ComponentKind::Workflow: return workflows.count(local_id) > 0;
         case ComponentKind::Plugin: return plugins.count(local_id) > 0;
         case ComponentKind::McpServer: return mcp_servers.count(local_id) > 0;
+        case ComponentKind::Channel: return channels.count(local_id) > 0;
     }
     return false;
 }
@@ -82,6 +83,8 @@ PackageRefIndex BuildPackageRefIndex(const std::vector<PackageCandidate>& candid
                 set.plugins.insert(component.local_id);
             } else if (prefix == "mcp") {
                 set.mcp_servers.insert(component.local_id);
+            } else if (prefix == "channels") {
+                set.channels.insert(component.local_id);
             }
         }
         // 同 id 多候选:ScanPackages 已按优先级从高到低排,先到的胜;后来
@@ -112,7 +115,7 @@ namespace {
 
 // 本包组件账(解析阶段攒的;坏的也在——引用指得到,账上就有名)。
 struct OwnComponents {
-    std::set<std::string> agents, prompt_profiles, skills, workflows, plugins, mcp_servers;
+    std::set<std::string> agents, prompt_profiles, skills, workflows, plugins, mcp_servers, channels;
 
     bool Has(ComponentKind kind, const std::string& local_id) const {
         switch (kind) {
@@ -122,6 +125,7 @@ struct OwnComponents {
             case ComponentKind::Workflow: return workflows.count(local_id) > 0;
             case ComponentKind::Plugin: return plugins.count(local_id) > 0;
             case ComponentKind::McpServer: return mcp_servers.count(local_id) > 0;
+            case ComponentKind::Channel: return channels.count(local_id) > 0;
         }
         return false;
     }
@@ -134,6 +138,7 @@ struct OwnComponents {
             case ComponentKind::Workflow: workflows.insert(local_id); break;
             case ComponentKind::Plugin: plugins.insert(local_id); break;
             case ComponentKind::McpServer: mcp_servers.insert(local_id); break;
+            case ComponentKind::Channel: channels.insert(local_id); break;
         }
     }
 };
@@ -168,6 +173,7 @@ const char* KindLabel(ComponentKind kind) {
         case ComponentKind::Workflow: return "workflow";
         case ComponentKind::Plugin: return "plugin";
         case ComponentKind::McpServer: return "mcp server";
+        case ComponentKind::Channel: return "channel";
     }
     return "?";
 }
@@ -527,6 +533,7 @@ std::string MountTargetTable(ComponentKind kind) {
         case ComponentKind::Workflow: return "WorkflowCatalog source roots";
         case ComponentKind::Plugin: return "Plugin runtime(manifest 入口)";
         case ComponentKind::McpServer: return "MCP config sources(mcp.yaml)";
+        case ComponentKind::Channel: return "ChannelManager sources(channel.yaml;阶段 2 起挂载)";
     }
     return "?";
 }
@@ -584,6 +591,9 @@ PackageRecord AnalyzePackage(const PackageCandidate& candidate, const ScanOption
         {&record.inventory.workflows, ComponentKind::Workflow},
         {&record.inventory.plugins, ComponentKind::Plugin},
         {&record.inventory.mcp_servers, ComponentKind::McpServer},
+        // 多渠道消息接入单阶段 1 追加第七类:走同一条组件解析/引用/
+        // MountPlan 流水线,不另起(channel-manifest.md §5"发现不等于运行")。
+        {&record.inventory.channels, ComponentKind::Channel},
     };
     ResolveCtx ctx;
     ctx.package_id = record.inventory.package_id;
@@ -597,7 +607,8 @@ PackageRecord AnalyzePackage(const PackageCandidate& candidate, const ScanOption
     // code_trust 同一式:免审层放置即信任;外来层只认账上那枚哈希。
     const CodeTrustStatus code_trust =
         [&] {
-            if (record.inventory.plugins.empty() && record.inventory.mcp_servers.empty()) {
+            if (record.inventory.plugins.empty() && record.inventory.mcp_servers.empty() &&
+                record.inventory.channels.empty()) {
                 return CodeTrustStatus::NoCode;
             }
             if (!ScopeRequiresTrust(record.inventory.scope)) {
@@ -673,8 +684,12 @@ PackageRecord AnalyzePackage(const PackageCandidate& candidate, const ScanOption
             entry.rel_path = component.rel_path;
             entry.target_table = MountTargetTable(component.kind);
             entry.source_root = component.rel_path;
-            entry.code_bearing =
-                component.kind == ComponentKind::Plugin || component.kind == ComponentKind::McpServer;
+            // Channel 也是 code-bearing(声明 runtime.command,同走信任门),
+            // 但没有 tools[] 概念,不折 wire_component_id(那是给 Plugin/MCP
+            // 的工具名编码用)。
+            entry.code_bearing = component.kind == ComponentKind::Plugin ||
+                                 component.kind == ComponentKind::McpServer ||
+                                 component.kind == ComponentKind::Channel;
             if (component.kind == ComponentKind::Plugin || component.kind == ComponentKind::McpServer) {
                 entry.wire_component_id = runtime::EncodeToolWireId(
                     record.inventory.package_id + "." + component.local_id);
