@@ -1,0 +1,21 @@
+[package]
+name = "lubancode-console-shell"
+version = "0.1.0"
+description = "LubanCode 参考前端的 Tauri 桌面壳(多前端外壳单·阶段 E)"
+edition = "2021"
+rust-version = "1.77.2"
+publish = false
+
+# 壳就是壳:装页、开窗,不碰 LubanCode 内核(协议面之外零依赖)。
+# 参考前端不复制——tauri.conf.json 的 build.frontendDist 直指
+# ../../web-console,单一事实源。
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+
+[profile.release]
+codegen-units = 1
+lto = true

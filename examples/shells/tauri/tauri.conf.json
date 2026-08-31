@@ -1,0 +1,31 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "LubanCode Console",
+  "version": "0.1.0",
+  "identifier": "dev.lubancode.console",
+  "build": {
+    "frontendDist": "../../web-console"
+  },
+  "app": {
+    "windows": [
+      {
+        "title": "LubanCode 控制台(参考壳·镜像路)",
+        "width": 1280,
+        "height": 840,
+        "minWidth": 960,
+        "minHeight": 600
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' http://127.0.0.1:* http://localhost:* data:; connect-src 'self' ws://127.0.0.1:* ws://localhost:*"
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "category": "DeveloperTool",
+    "shortDescription": "LubanCode 参考前端的桌面壳",
+    "longDescription": "LubanCode 参考前端(examples/web-console)的 Tauri 桌面壳:装同一页、走同一协议(app-server WS 承载),浏览器 Tab 走镜像路。验收工具,不是产品。",
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"]
+  }
+}

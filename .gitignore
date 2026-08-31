@@ -41,3 +41,13 @@ __pycache__/
 # (仓库边界保留字),故只在本地/运行时生成,不进版本库。见
 # tests/fixtures/search/build_corpus.sh 与 tests/fixtures/search/README.md。
 tests/fixtures/search/corpus/excluded_dirs/
+
+# 外壳孵化(阶段 E)的构建产物:Tauri Rust 构建树与生成的移动端骨架、
+# Android gradle 构建树与本地配置。Cargo.lock 照应用工程惯例进仓
+# (可复现构建),壳二进制绝不进仓。
+examples/shells/tauri/target/
+examples/shells/tauri/gen/
+examples/shells/android/.gradle/
+examples/shells/android/build/
+examples/shells/android/app/build/
+examples/shells/android/local.properties

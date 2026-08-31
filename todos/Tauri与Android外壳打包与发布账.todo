@@ -1,0 +1,71 @@
+# Tauri 与 Android 外壳打包与发布账
+- 状态：待实现（本单由《多前端外壳与浏览器 Tab：AppServer 承载设计》阶段 E 立账——壳本体已孵化进 examples/shells/，打包发布另立此单）
+- 日期：2026-09-01
+- 前置：`todos/多前端外壳与浏览器Tab_AppServer承载设计.todo`（阶段 A-E 已落）
+- 相关：`examples/shells/`（两家壳）、`examples/web-console/`（参考前端，唯一前端事实源）、`docs/features/app-server/README.md`
+- 范围：两只壳从"能跑"到"能发"——打包、签名、分发、升级；外加原单 §十留后头的两条外壳能力路
+- 不在本单：内核协议面改动；参考前端功能扩展；钦点唯一外壳（原单明说不在）
+
+## 一、先下断语
+
+壳能编译不等于能发布。孵化单（阶段 E）把两家壳的**代码与接线**做实了：
+Tauri 壳 cargo build 双绿出真二进制，Android 壳脚手架齐、真机一幕因
+JDK/SDK 未装如实未验。但发布是另一门账：签名、版本对齐、升级通道、
+CI 矩阵——这些一件都没做，全在本单。
+
+## 二、Tauri 桌面壳的打包账
+
+- [ ] NSIS 安装包真出一枚（`bundle.targets=["nsis"]` 已配，未跑
+      `cargo tauri build`——需要 tauri-cli；产物与安装体验要真机验）。
+- [ ] 三平台矩阵定界：首版只 Windows（WebView2 系统自带）？mac/Linux
+      进不进首批，定了写死在 bundle 配置里（icon.icns 等资源按需生成，
+      `make_icons.js` 可扩）。
+- [ ] 代码签名：Windows Authenticode 证书的采买与 CI 注入方案（无证书
+      的 SmartScreen 警告如实告知用户，不冒充）。
+- [ ] 窗口一幕真机验收：开窗 → 连 8765 → 四件套 + 触屏外套全走一遍
+      （镜像路），对照 web-console 冒烟的端到端一幕。
+- [ ] 升级通道：tauri-plugin-updater 进不进首版？进了要配更新源与签名
+      公钥（原单 §十"外壳自动升级与版本协商"在此归口）。
+
+## 三、Android 壳的打包账
+
+- [ ] 工具链补齐（JDK 17 + Android SDK 34 + platform-tools），装好后
+      `gradle :app:assembleDebug` 先绿——孵化单留下的"未验"销账。
+- [ ] 真机一幕：`adb reverse tcp:8765 tcp:8765` → 壳连本机 app-server →
+      四件套 + 手势折输入（tap/双击/长按）真走一遍。
+- [ ] release 构建 + 签名：keystore 生成与保管方案、`signingConfigs`
+      接线（密钥绝不进仓，`.gitignore` 已挡 local.properties）。
+- [ ] 分发口径：APK 直装（侧载）还是 Play？侧载要写明回环连接的安全
+      账（NSC 全局放行明文是孵化单的权宜，发布版要收紧——NSC 不认
+      IP 字面量，要么提 issue 等平台，要么壳内加一层本机代理转 TLS）。
+- [ ] 触屏手势的真机调校：阈值（tapSlopPx/longPressMs/doubleTapMs）
+      在真机密度下要不要分档，`web_console_touch.js` 的 THRESHOLDS
+      留了口。
+
+## 四、两家壳共用的发布账
+
+- [ ] 版本对齐策略：壳版本（现都是 0.1.0）与 lubancode 内核版本解耦
+      还是同发？协议版本（1.1）协商已有 initialize 口，发布节奏定了
+      写进壳 README。
+- [ ] CI：GH Actions 矩阵（Windows x64 出 NSIS；Android 出 APK），产物
+      挂 release。注意本仓惯例"壳构建产物不进 git"——CI 产物走
+      release artifacts。
+- [ ] 发布前回归：`scripts/tests/app_shell_smoke.js`（41 案静态+折算）
+      与 `scripts/tests/app_server_web_console_smoke.js`（参考前端端到
+      端）进 CI 必跑。
+
+## 五、外壳能力路（原单 §十归口）
+
+- [ ] Tauri 直连 Playwright 调试端口的真页面路（多 WebView，输入直通，
+      镜像流兜底不变）。
+- [ ] 局域网发现与配对（mDNS/二维码）——牵 token 的传递与保管，安全
+      账先立后做。
+
+## 六、完成线
+
+- [ ] 两家壳各有能装的发布物（安装包/APK），签名与来源可验。
+- [ ] 真机一幕全绿：Tauri 开窗一幕、Android 手势一幕。
+- [ ] CI 矩阵出产物，发布流程一条命令。
+- [ ] 内核零改动复核：壳升级不碰 src/ 一行。
+
+缝还是那条缝：协议。壳怎么发，内核不挪窝。

@@ -308,6 +308,7 @@
       if (row.ref === session.selectedRef) {
         li.className = 'selected';
       }
+      li.dataset.ref = row.ref; // 触屏外套(阶段 E)按 DOM 命中点取 ref 用
       const ref = document.createElement('span');
       ref.className = 'ref';
       text(ref, row.ref);
