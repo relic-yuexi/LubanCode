@@ -100,6 +100,19 @@ std::string SummarizeSchema(const nlohmann::json& schema) {
     return out;
 }
 
+// P0(动态工具 PromptCache 守恒单·§十三):trace 展示位——tool_search 只在
+// legacy_expand 模式下才会被注册/调用(main_deferral_ 开着时,见
+// app/tool_runtime.cpp:686-692),proxy_reference/native_reference 是 P1/P3
+// 的活,现在还没有实现;这里如实标现状,不是抢先宣称已支持。details 走
+// Tool::Result 已有的结构化诊断字段(逐枚追踪单),ExecutionFinished 栅栏
+// 原样透传成 ToolTraceEvent.details,/trace 与 export 都看得到,不改
+// content 正文、不改任何执行判断。
+Tool::Result MakeSearchResult(std::string text, bool is_error) {
+    Tool::Result result(std::move(text), is_error);
+    result.details["deferred_tool_mode"] = "legacy_expand";
+    return result;
+}
+
 }  // namespace
 
 std::string BuildDeferredToolsIndexSegment(const ToolRegistry& registry, const std::set<std::string>& loaded) {
@@ -160,17 +173,17 @@ nlohmann::json ToolSearchTool::input_schema() const {
 
 Tool::Result ToolSearchTool::execute(const nlohmann::json& input) {
     if (!input.contains("query") || !input.at("query").is_string()) {
-        return {"缺少必填参数 query(字符串)", true};
+        return MakeSearchResult("缺少必填参数 query(字符串)", true);
     }
     const std::vector<std::string> tokens = Tokenize(input.at("query").get<std::string>());
     if (tokens.empty()) {
-        return {"query 不能是空白字符串,给几个关键词(空格分隔)", true};
+        return MakeSearchResult("query 不能是空白字符串,给几个关键词(空格分隔)", true);
     }
 
     std::size_t limit = 5;
     if (const auto it = input.find("limit"); it != input.end() && !it->is_null()) {
         if (!it->is_number_integer() || it->get<int>() < 1) {
-            return {"limit 得是正整数", true};
+            return MakeSearchResult("limit 得是正整数", true);
         }
         limit = static_cast<std::size_t>(it->get<int>());
     }
@@ -232,7 +245,7 @@ Tool::Result ToolSearchTool::execute(const nlohmann::json& input) {
             out += "换个关键词试试(共 " + std::to_string(deferred_tools.size()) +
                    " 个延迟工具,系统提示的索引段里有全部名字)。";
         }
-        return {out, false};
+        return MakeSearchResult(out, false);
     }
 
     std::string out = "命中 " + std::to_string(hits.size()) + " 个工具:\n";
@@ -242,7 +255,7 @@ Tool::Result ToolSearchTool::execute(const nlohmann::json& input) {
         out += "  参数: " + SummarizeSchema(hit.tool->input_schema()) + "\n";
     }
     out += "以上工具已挂载,可直接调用。";
-    return {out, false};
+    return MakeSearchResult(out, false);
 }
 
 }  // namespace lubancode::tools

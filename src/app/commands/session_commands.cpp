@@ -137,7 +137,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const lubancode::agent::ContextArtifactStore* artifact_store,
                            const ContextLayersReport* layers,
                            const lubancode::agent::ModelRouteTable* roles_table,
-                           int compact_partition_count) {
+                           int compact_partition_count,
+                           const DeferredToolModeSummary* deferred_tool_summary) {
     if (args.empty()) {
         const auto lines = lubancode::cli::FormatContextBreakdown(
             sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
@@ -196,8 +197,21 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
 
         // 结构与回收卡片(第三组):artifact 层、分层占用、回收字节、最近
         // compact——"原文还能去哪找、token 花在哪、何时会压"一张单子。
-        if (artifact_store != nullptr || layers != nullptr) {
+        if (artifact_store != nullptr || layers != nullptr || deferred_tool_summary != nullptr) {
             TermOut() << "\n── " << trf("cmd.context.group.structure") << " ──\n";
+        }
+        // deferred_tool_mode(动态工具 PromptCache 守恒单 P0):现状只有
+        // disabled/legacy_expand 两档,如实展示当前这一档,不提前展示成
+        // proxy_reference/native_reference(那是 P1/P3 才落地的新路)。
+        if (deferred_tool_summary != nullptr) {
+            TermOut() << "  "
+                      << trf("cmd.context.deferred_tool_mode",
+                             lubancode::tools::DeferredToolModeLabel(deferred_tool_summary->enabled),
+                             deferred_tool_summary->pending, deferred_tool_summary->total)
+                      << "\n";
+            if (deferred_tool_summary->enabled) {
+                TermOut() << tr("cmd.context.deferred_tool_mode.legacy_hint") << "\n";
+            }
         }
         if (artifact_store != nullptr && artifact_store->active()) {
             const auto stats = artifact_store->StatsOf();
@@ -1465,9 +1479,27 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
         layers.budget = lubancode::agent::BuildContextBudgetPlan(budget_inputs);
         layers.last_compact_line = *in.last_compact_line;
     }
+    // deferred_tool_mode(动态工具 PromptCache 守恒单 P0):裸敲才现场扫
+    // registry 数待检索/全部延迟工具枚数,带参数分支(切窗口)不打这行,
+    // 跟其余三类 token 收集同一个 args.empty() 闸门。
+    DeferredToolModeSummary deferred_tool_summary;
+    const DeferredToolModeSummary* deferred_tool_summary_ptr = nullptr;
+    if (args.empty() && in.registry != nullptr) {
+        deferred_tool_summary.enabled = in.tool_deferral;
+        for (const auto& tool : in.registry->All()) {
+            if (!tool->deferred()) {
+                continue;
+            }
+            ++deferred_tool_summary.total;
+            if (in.loaded_tools == nullptr || in.loaded_tools->count(tool->name()) == 0) {
+                ++deferred_tool_summary.pending;
+            }
+        }
+        deferred_tool_summary_ptr = &deferred_tool_summary;
+    }
     HandleContextCommand(args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme,
                          loop.cache_epoch(), &loop.runtime_profile(), in.usage_ledger, in.artifact_store, &layers,
-                         in.roles_table, in.compact_partition_count);
+                         in.roles_table, in.compact_partition_count, deferred_tool_summary_ptr);
 }
 
 void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) {

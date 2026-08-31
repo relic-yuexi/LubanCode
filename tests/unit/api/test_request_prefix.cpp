@@ -31,6 +31,7 @@
 #include "api/types.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
+#include "tools/tool_search.hpp"
 
 using namespace lubancode;
 using lubancode::agent::IsAppendOnlySuccessor;
@@ -569,4 +570,217 @@ TEST_CASE("前缀: hard trim 后 sticky view 钉住,后续请求不再滑窗") {
     CHECK(diff.appended_messages == 2);
     CHECK(reports[first_trimmed + 1].epoch_break_reason.empty());
     CHECK(reports[first_trimmed + 1].prefix_append_only);
+}
+
+// ---------------------------------------------------------------------------
+// 动态工具 PromptCache 守恒单 P0(把问题钉死,不改产品行为):
+//
+// 断裂源三的用例拿合成探针(MountingTool 直接改 loaded 集合、system 全程
+// 一字不变)只证明了"tools 会断"。生产真实接线还多一根梁——
+// AgentProfile.deferred_index_provider 随 loaded 集合现查现拼延迟索引段
+// (interactive_session_assembly.cpp / one_shot.cpp 同款接线)。真实
+// tool_search 命中会同时改两处旧前缀:tools 数组多一枚完整 schema,system
+// 尾部的索引段少一行。这里用生产同款接线 + 真 ToolSearchTool /
+// BuildDeferredToolsIndexSegment(不是合成探针)复现规格 §一/§2.1/§2.2 的
+// 断语:legacy 路径的这一断,是 system_changed 与 tools_changed 同一拍
+// 一起断,不是分两拍各断一次。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("P0现状证据: legacy tool_search 真实机制命中后,system_changed 与 tools_changed 同拍一起断") {
+    CaptureBackend backend;
+    backend.scripts = {
+        // P1 -> 模型先搜:tool_search("github issue search")。
+        {
+            api::MessageStart{"msg", "test-model"},
+            api::ToolUseStart{0, "call_search", "tool_search"},
+            api::ToolUseInputDelta{0, R"({"query":"github issue search"})"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"tool_use", api::Usage{}},
+        },
+        // P2 -> 搜索命中已挂载,模型直接调用目标工具。
+        {
+            api::MessageStart{"msg", "test-model"},
+            api::ToolUseStart{0, "call_target", "mcp__github__search_issues"},
+            api::ToolUseInputDelta{0, R"({"query":"repo:lubancode cache"})"},
+            api::ContentBlockDone{0},
+            api::MessageDone{"tool_use", api::Usage{}},
+        },
+        // P3 -> 收尾。
+        TextScript("收到"),
+    };
+
+    tools::ToolRegistry registry;
+    auto loaded = std::make_shared<std::set<std::string>>();
+    registry.Register(std::make_unique<tools::DeferredTool>(
+        std::make_unique<FixedTool>("mcp__github__search_issues", "命中结果:issue #42")));
+    registry.Register(std::make_unique<tools::ToolSearchTool>(registry, loaded));
+
+    // 生产同款接线(interactive_session_assembly.cpp:979-999 同一套):
+    // deferred_index_provider 与 tool_filter 共享同一份 loaded 集合。
+    agent::AgentProfile profile{.request{.model = "test-model"}, .system_prompt = "system prompt"};
+    profile.deferred_index_provider = [&registry, loaded]() {
+        return tools::BuildDeferredToolsIndexSegment(registry, *loaded);
+    };
+    profile.tool_filter = [loaded](const tools::Tool& tool) {
+        return !tool.deferred() || loaded->count(tool.name()) != 0;
+    };
+
+    agent::Agent loop(backend, registry, std::move(profile));
+    agent::TurnWiring callbacks;
+
+    REQUIRE(loop.Run("帮我搜一下 github issue", callbacks).has_value());
+    REQUIRE(backend.captured.size() == 3);
+
+    // P1(搜索前):索引段带着待检索工具那一行;tools 数组里没有它的完整
+    // schema。
+    CHECK(backend.captured[0].system.find("mcp__github__search_issues") != std::string::npos);
+    auto has_tool = [](const api::Request& req, const std::string& name) {
+        for (const auto& t : req.tools) {
+            if (t.name == name) return true;
+        }
+        return false;
+    };
+    CHECK_FALSE(has_tool(backend.captured[0], "mcp__github__search_issues"));
+
+    // P2(命中之后发出的那份请求):索引段那一行消失(system_changed),
+    // tools 数组多了完整 schema(tools_changed)——两根梁同一拍一起断。
+    CHECK(backend.captured[1].system.find("mcp__github__search_issues") == std::string::npos);
+    CHECK(has_tool(backend.captured[1], "mcp__github__search_issues"));
+
+    const agent::PrefixDiff diff_12 = agent::DiffRequests(backend.captured[0], backend.captured[1]);
+    CHECK(diff_12.system_changed);
+    CHECK(diff_12.tools_changed);
+    CHECK_FALSE(diff_12.append_only());
+    // 断因点名口径(agent/prefix.hpp 的 break_reason 排序 model > system >
+    // tools):两根梁同断时只报第一根,tools_changed 那半被"吃掉"、不出现
+    // 在单一字符串断因里——PrefixDiff 结构体本身两个布尔都真,但下游只取
+    // break_reason() 字符串(如 UsageReport.epoch_break_reason)的账本会
+    // 漏记 tools 那一半。P1 记账/展示补强时要留意这处口径缺口。
+    CHECK(diff_12.break_reason() == "system_changed");
+
+    // loaded 集合此后不再变,追加律恢复——生产合同里"只断一次"成立,但
+    // 那一次断的是复合断(system + tools),不是账面上的孤立小抖动。
+    CHECK(IsAppendOnlySuccessor(backend.captured[1], backend.captured[2]));
+}
+
+// ---------------------------------------------------------------------------
+// 动态工具 PromptCache 守恒单 P0:现状证据二——discovery 前后的 cached
+// tokens 账。真机没有钥匙,这里用确定性假后端复现"长历史攒着高命中率,
+// tool_search 命中那一拍 cache_read 归零、cache_creation 整段重付"的
+// 力学关系;Usage 数字是本用例手写喂给 CaptureBackend 的确定性脚本
+// (不是真机实测),但账目结构(哪一步归零、哪一步重新爬升)如实反映
+// §一断语"最值钱的长历史落在差异之后"。真机数字见 P0 报告另一栏。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("P0现状证据: 假后端确定性账——discovery 前长历史高命中,discovery 那拍 cache 归零重付") {
+    CaptureBackend backend;
+    // input_tokens 恒 0:这批确定性脚本里,每步的完整输入全由"读缓存"与
+    // "新写缓存"两笔账付清(api::TotalInputTokens 的口径:input_tokens 是
+    // 二者之外的第三笔"既不命中也不新写"的量,这里不构造那种情形,免得
+    // 跟 cache_read/cache_creation 重复计成两份)。
+    auto usage_step = [](std::int64_t cache_read, std::int64_t cache_creation) {
+        api::Usage u;
+        u.input_tokens = 0;
+        u.output_tokens = 40;
+        u.cache_read_tokens = cache_read;
+        u.cache_creation_tokens = cache_creation;
+        return u;
+    };
+    auto text_with_usage = [](const std::string& text, api::Usage usage) {
+        return std::vector<api::StreamEvent>{
+            api::MessageStart{"msg", "test-model"},
+            api::TextDelta{text},
+            api::ContentBlockDone{0},
+            api::MessageDone{"end_turn", usage},
+        };
+    };
+    auto tool_use_with_usage = [](const std::string& id, const std::string& name, const std::string& input_json,
+                                  api::Usage usage) {
+        return std::vector<api::StreamEvent>{
+            api::MessageStart{"msg", "test-model"},
+            api::ToolUseStart{0, id, name},
+            api::ToolUseInputDelta{0, input_json},
+            api::ContentBlockDone{0},
+            api::MessageDone{"tool_use", usage},
+        };
+    };
+
+    backend.scripts = {
+        // 轮 1、2:长历史攒起来,前缀命中率越垒越高(典型长会话力学)。
+        text_with_usage("答一", usage_step(0, 5000)),      // epoch 1 首份请求:全款重付
+        text_with_usage("答二", usage_step(5000, 1200)),   // 上一份系统+历史整段命中,只新付本轮
+        // 轮 3:模型先搜,这一步仍在旧 epoch 上,继续吃历史命中。
+        tool_use_with_usage("call_search", "tool_search", R"({"query":"github issue search"})",
+                            usage_step(6200, 1500)),
+        // 命中后紧跟这一步:system 少一行、tools 多一枚 schema——旧前缀
+        // 在服务端也对不上号,cache_read 归零,cache_creation 重付整段。
+        tool_use_with_usage("call_target", "mcp__github__search_issues", R"({"query":"repo:lubancode cache"})",
+                            usage_step(0, 9200)),
+        // 新 epoch 站稳:后续步骤重新爬命中率。
+        text_with_usage("收到", usage_step(9200, 600)),
+        // 轮 4(下一个外层 user 轮):新 epoch 延续,不再归零。
+        text_with_usage("答四", usage_step(9800, 700)),
+    };
+
+    tools::ToolRegistry registry;
+    auto loaded = std::make_shared<std::set<std::string>>();
+    registry.Register(std::make_unique<tools::DeferredTool>(
+        std::make_unique<FixedTool>("mcp__github__search_issues", "命中结果:issue #42")));
+    registry.Register(std::make_unique<tools::ToolSearchTool>(registry, loaded));
+
+    agent::AgentProfile profile{.request{.model = "test-model"}, .system_prompt = "system prompt"};
+    profile.deferred_index_provider = [&registry, loaded]() {
+        return tools::BuildDeferredToolsIndexSegment(registry, *loaded);
+    };
+    profile.tool_filter = [loaded](const tools::Tool& tool) {
+        return !tool.deferred() || loaded->count(tool.name()) != 0;
+    };
+
+    agent::Agent loop(backend, registry, std::move(profile));
+    agent::TurnWiring callbacks;
+    lubancode::test::RecordedTurn turn;
+    callbacks.events = &turn.adapter;
+    const std::vector<api::UsageReport>& reports = turn.recorder.usage_reports;
+
+    REQUIRE(loop.Run("先聊两句", callbacks).has_value());   // 轮 1
+    REQUIRE(loop.Run("再聊一句", callbacks).has_value());   // 轮 2
+    REQUIRE(loop.Run("帮我搜一下 github issue", callbacks).has_value());  // 轮 3(内含 search+invoke+收尾三步)
+    REQUIRE(loop.Run("还有别的吗", callbacks).has_value());  // 轮 4
+    REQUIRE(backend.captured.size() == 6);
+    REQUIRE(reports.size() == 6);
+
+    // discovery 前(下标 0..2):同一 epoch,cache_read 逐步爬升,命中率
+    // 越垒越高——长历史最值钱的那部分正在这里。
+    CHECK(reports[0].cache_epoch == 1);
+    CHECK(reports[1].cache_epoch == 1);
+    CHECK(reports[2].cache_epoch == 1);
+    CHECK(reports[0].usage.cache_read_tokens == 0);
+    CHECK(reports[1].usage.cache_read_tokens == 5000);
+    CHECK(reports[2].usage.cache_read_tokens == 6200);
+
+    // discovery 命中后紧跟那一步(下标 3):epoch 断到 2,cache_read 归零,
+    // 全段按 cache_creation 重付——正是规格断语"最值钱的长历史落在差异
+    // 之后"的账面证据。
+    CHECK(reports[3].cache_epoch == 2);
+    CHECK_FALSE(reports[3].prefix_append_only);
+    CHECK(reports[3].usage.cache_read_tokens == 0);
+    CHECK(reports[3].usage.cache_creation_tokens == 9200);
+
+    // 新 epoch 站稳后(下标 4、5):命中率重新爬升,但爬升是从零开始的
+    // 第二次——旧 epoch 攒的那笔命中率账白付了一次重建成本。
+    CHECK(reports[4].cache_epoch == 2);
+    CHECK(reports[4].usage.cache_read_tokens == 9200);
+    CHECK(reports[5].cache_epoch == 2);
+    CHECK(reports[5].usage.cache_read_tokens == 9800);
+
+    // 完整口径对照(§十一·11.3 不能只看 cached ratio):discovery 前最后
+    // 一步的命中率,与 discovery 那一步的命中率,两者都要摆出来,不能只
+    // 挑好看的那一个。
+    const auto hit_percent = [](const api::UsageReport& r) -> double {
+        const std::int64_t total = api::TotalInputTokens(r.usage);
+        if (total <= 0) return 0.0;
+        return 100.0 * static_cast<double>(r.usage.cache_read_tokens) / static_cast<double>(total);
+    };
+    CHECK(hit_percent(reports[2]) > 80.0);   // discovery 前:6200/7700 ≈ 80.5%
+    CHECK(hit_percent(reports[3]) == 0.0);   // discovery 那一拍:硬归零
 }
