@@ -1,6 +1,6 @@
 # 动态工具 Prompt Cache 守恒与按需调用设计
 
-- 状态：P0 已落（a6c48f7，2026-08-31 补账）；P1 通用 ProxyReference 已落（2026-08-31，待主控验收）；P2/P3/P4 未动
+- 状态：P0 已落（a6c48f7，2026-08-31 补账）；P1 通用 ProxyReference 已落（2026-08-31，待主控验收）；P2 条件工具也守恒已落（2026-08-31，待主控验收）；P3/P4 未动
 - 日期：2026-08-31
 - 级别：P1（长会话成本、首 token 延迟与工具扩展性的共同底座）
 - 范围：`tool_search`、延迟工具、条件工具、四条 wire、前缀账、会话恢复、compact、工具执行正门
@@ -641,12 +641,13 @@ proxy 多走一步，未必总比全量 tools 便宜。短会话、少工具时�
 
 ### P2：条件工具也守恒
 
-- [ ] 拆 `ToolExposurePolicy` 与 `ToolExecutionPolicy`。
-- [ ] `goal_checkpoint`、`loop_control` 定义会话内固定。
-- [ ] 生命周期状态走 turn context，执行门认真实状态。
-- [ ] memory gate、角色 tools.allow/deny 等动态过滤逐项清账。
+- [x] 拆 `ToolExposurePolicy` 与 `ToolExecutionPolicy`。（agent/agent.hpp 的 AgentProfile 注释定契约：tool_filter 即暴露策略,只认会话级条件,会话内必须恒定;P1 的 tool_execution_policy 是执行策略的角色/权限半边(proxy 路);P2 新增 tool_turn_gate + tool_turn_gate_denial 是执行策略的生命周期半边——RunOneTool 在暴露过滤之后、Plan 闸之前现判,直名调用与经 tool_invoke 解引用的调用同一道闸(loop.cpp 两处调用点都递),拒绝给 turn.tool_not_active 稳定码 + 新终态 TurnGateDenied(ToString/Parse/NeverStarted 三处同步,tool_trace.hpp/.cpp))
+- [x] `goal_checkpoint`、`loop_control` 定义会话内固定。（wirings 各出 ToolExposed():只认会话级条件(features.goals/features.loop 正门 + env 总闸,与 coordinator/scheduler 的 enabled 同一条判式);assembly 的 tool_filter 不再按 HasActiveIteration/TickActive 现放行——旧路每翻一轮 goal/loop,tools hash 就断一次,三种回合各是一副工具表;子代理皮拷贝时显式清 turn 闸(goal/loop 生命周期是主会话的轮次账))
+- [x] 生命周期状态走 turn context，执行门认真实状态。（新件 app/turn_capabilities.*:BuildTurnCapabilitiesSegment 纯函数拼 [turn capabilities] 段,两行全隐藏给空串;RunSessionTurn 在 turn context 尾部追加(不进 system、不追改旧前缀),真值与执行门同源(goal/loop 泵发轮前置、收口清);段头明写"以执行门为准"——模型硬叫了,tool_turn_gate 照样硬拦)
+- [x] memory gate、角色 tools.allow/deny 等动态过滤逐项清账。（memory gate:tool_runtime 的主过滤不再现查 generate_enabled(),暴露只认注册(/memory on 补挂才是注册变化,hash 断得有名有姓);运行档全在执行侧——MemorySaveTool::execute 自拒 + proxy 路 main_execution_policy_ 的活闸。角色 tools.allow/deny:Resolver 折出的谓词任务内恒定,无逐轮抖动,exposure 与执行两侧都有闸(P1 已接),不动。Explore 硬边界在独立表,恒定;deferred/loaded 只在 legacy 档(P1 的 cache-hostile 兼容路,不动,proxy 档已治))
 
 验收：普通 turn、goal turn、loop tick 之间 tools hash 不变；越界调用照样被硬拦。
+（2026-08-31 P2 验收账：三回合合同在 tests/unit/api/test_request_prefix.cpp"P2三回合前缀合同"册钉绿——普通→goal→loop→普通(含一次越界误调)四拍 system/tools 指纹逐位相等、messages 只追加、两枚条件工具定义每拍常驻;执行门拦截在 test_loop.cpp 三册(普通轮直名调用 turn.tool_not_active/TurnGateDenied/确定没越过执行边界;goal 轮同款调用放行;proxy 解引用路同一道闸且 transport/resolved 两层留账)+ goal_checkpoint_tool/loop_control_tool 各自 execute 里的 in-execute 自拒保底(workflow 等未接闸的入口吃这道);暴露位在 test_session_wirings.cpp 两册;能力段在 test_turn_capabilities.cpp 五册;memory 清账在 test_tool_runtime.cpp 一册(翻档后定义照旧常驻、execute 拒"未开启")。)
 
 ### P3：Claude NativeReference
 

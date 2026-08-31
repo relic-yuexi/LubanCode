@@ -1093,26 +1093,51 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
         main_agent_profile.tool_execution_policy = tool_runtime_->main_execution_policy();
         main_agent_profile.tool_execution_denial = tool_runtime_->main_execution_denial();
     }
-    // 工具可见性(病十三的方向):goal/loop 窄工具的 turn 级放行(单子:
-    // goal_checkpoint 只在 goal execution turn 动态露面,loop_control 只在
-    // scheduled tick 的 turn 里;普通 turn 一概看不见)。goal_active_
-    // iteration_/loop_active_tick_id_ 是会话泵发 turn 前置、turn 收口清的
-    // 活跃账,恰是"这一轮是谁的轮"的真值。其余工具走 ToolRuntime 的主
-    // 过滤(延迟挂载/memory gate 原样)。
+    // 工具可见性(动态工具 PromptCache 守恒单 P2·§8.2 拆两家):
+    //   - 暴露策略(tool_filter = ToolExposurePolicy):goal/loop 窄工具的
+    //     定义常驻 tools 数组,只认会话级条件(features 开没开)——旧路按
+    //     "这一轮是谁的轮"现放行,每翻一轮 goal/loop,tools hash 就断一次,
+    //     普通 turn→goal turn→loop tick 三种回合各是一副工具表,同一类病
+    //     (单子 §一/§8.2)。定义不再随轮次进出,hash 恒定;
+    //   - 执行策略的生命周期半边(tool_turn_gate = ToolExecutionPolicy):
+    //     调用当口现判真实状态(goal iteration 活着?loop tick 在拍上?),
+    //     直名调用与经 tool_invoke 解引用的调用同一道闸,拒绝给
+    //     turn.tool_not_active 稳定码;
+    //   - 给模型看的轮次提示走 RunSessionTurn 的 [turn capabilities] 段
+    //     (turn context 尾部追加,不进 system)。
+    // 其余工具照旧走 ToolRuntime 的主过滤(延迟挂载原样;memory gate 的
+    // 清账见 tool_runtime.cpp——P2 起它也只认注册,不再现查运行档)。
     main_agent_profile.tool_filter = [this](const lubancode::tools::Tool& tool) {
         if (tool.name() == "goal_checkpoint") {
-            return goal_wiring_.HasActiveIteration();
+            return goal_wiring_.ToolExposed();
         }
         if (tool.name() == "loop_control") {
-            return loop_wiring_.TickActive();
+            return loop_wiring_.ToolExposed();
         }
         return main_tool_filter()(tool);
     };
     main_agent_profile.tool_filter_denial =
         main_proxy
             ? "延迟工具不能按名直调(发现不等于授权):请先用 tool_search 检索拿到 tool_ref,再以 "
-              "tool_invoke({tool_ref, arguments}) 调用;goal/loop 窄工具只在对应轮次可用。"
-            : "这只工具只在对应的 goal 执行轮/loop 定时拍里可用,当前轮不是。";
+              "tool_invoke({tool_ref, arguments}) 调用。goal/loop 窄工具定义常驻,但只在对应轮次可执行,"
+              "普通轮调用会被执行门以 turn.tool_not_active 拒绝。"
+            : "这只工具当前不可见:延迟工具须先经 tool_search 挂载;goal/loop 窄工具须先开启对应功能"
+              "(features.goals/features.loop)。";
+    main_agent_profile.tool_turn_gate = [this](const lubancode::tools::Tool& tool) {
+        // 名字先认:子代理表里没有这两枚工具,别的名字一律放行,免得主侧
+        // 的轮次状态被无关调用摸到。
+        if (tool.name() == "goal_checkpoint") {
+            return goal_wiring_.HasActiveIteration();
+        }
+        if (tool.name() == "loop_control") {
+            return loop_wiring_.TickActive();
+        }
+        return true;
+    };
+    main_agent_profile.tool_turn_gate_denial =
+        std::string(lubancode::agent::kErrTurnToolNotActive) +
+        "|goal_checkpoint/loop_control 的定义常驻工具表,但只在对应的 goal 执行轮/loop 定时拍里可执行;"
+        "当前轮不是——等相应轮次或换路径,不要重试同一调用。";
     // 病十(批三):四段开关写进皮——与 prompt_options 同源(配置),子代理
     // 派生时同段拷贝,不再有"主代理有、子代理无"的隐性分叉。
     main_agent_profile.prompt_sections.mcp = prompt_options.mcp;
@@ -1124,6 +1149,12 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
         agent_tool != nullptr) {
         lubancode::agent::AgentProfile subagent_profile = main_agent_profile;
         subagent_profile.runtime = lubancode::app::BuildSubagentRuntimeProfile(main_profile, config);
+        // 动态工具 P2:turn 闸不随皮拷给子代理——goal/loop 的生命周期是主
+        // 会话的轮次账,子代理表里没有这两枚工具,闸在那边只会白摸主侧
+        // 状态;子代理自己的执行资格照旧走 tool_filter(角色 allow/deny)
+        // 与 tool_execution_policy(P1 的 sub 侧策略)。
+        subagent_profile.tool_turn_gate = nullptr;
+        subagent_profile.tool_turn_gate_denial.clear();
         agent_tool->SetAgentProfile(std::move(subagent_profile));
         // 子代理记忆召回(规格"同级能力审计"):按子任务 prompt 独立检索,
         // 同预算同安全声明;与 main 的召回同一只 ProjectMemory。关着

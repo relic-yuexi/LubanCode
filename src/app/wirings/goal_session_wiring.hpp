@@ -104,6 +104,14 @@ public:
     // ---- 查询口(控制器/状态栏用) ----
     lubancode::runtime::goal::GoalCoordinator* coordinator();  // ensure 前空
     bool HasActiveIteration() const { return !active_iteration_.empty(); }
+    // goal_checkpoint 的暴露位(动态工具 P2·§8.2):只认会话级条件
+    //(features.goals 开且 env 总闸未关),与"本轮可不可用"
+    //(HasActiveIteration,执行门那半边)分家——暴露恒定,tools hash
+    // 不随 goal 轮的进出抖。config 是会话启动定死的,此值会话内恒定。
+    bool ToolExposed() const;
+    // 当前活跃 iteration 所属的 goal id(不在 goal 轮给空串;本轮能力段
+    // 的注脚用,不给模型当调用凭据)。
+    std::string ActiveGoalId() const;
     // 公平账(泵的仲裁用;GoalWorkSource 的候选也在)。
     lubancode::runtime::GoalWorkSource& work_source() { return work_source_; }
     lubancode::runtime::FairnessCounter& fairness() { return fairness_; }

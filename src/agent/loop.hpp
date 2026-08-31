@@ -382,11 +382,19 @@ public:
 // 当下那份真 schema 验一遍(不过 = invalid_target_arguments 稳定拒绝,不
 // 执行);trace 的每枚事件补 transport/resolved 两层事实。null = 普通调用
 //(旧调用方,PTC/单测),行为与从前一字不差。
+// turn_gate:条件工具的 turn 级执行闸(动态工具 P2·§8.2),在 tool_filter
+//(暴露策略)之后、Plan 闸之前现判"这一轮可不可用"——直名调用与经
+// tool_invoke 解引用的调用同一道。拒绝 = turn.tool_not_active 稳定码、终态
+// TurnGateDenied,不执行。空谓词 = 没有 turn 级条件工具(子代理/单测/
+// workflow/PTC/旧装配),行为与从前一字不差。turn_gate_denial 同
+// filter_denial 的"稳定码|人话"两截口径。
 tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUseBlock& call, const TurnWiring& wiring,
                                 const std::function<bool(const tools::Tool&)>& tool_filter,
                                 const std::string& filter_denial = std::string(),
                                 const ToolTraceContext* trace = nullptr,
                                 const std::atomic<bool>* cancel = nullptr,
-                                const tools::ProxyCallContext* proxy = nullptr);
+                                const tools::ProxyCallContext* proxy = nullptr,
+                                const std::function<bool(const tools::Tool&)>& turn_gate = {},
+                                const std::string& turn_gate_denial = std::string());
 
 }  // namespace lubancode::agent

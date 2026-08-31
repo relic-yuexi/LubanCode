@@ -18,9 +18,11 @@
 #include <set>
 #include <string>
 #include <vector>
+#include <nlohmann/json.hpp>
 
 #include "api/backend.hpp"
 #include "app/tool_runtime.hpp"
+#include "memory/project_memory.hpp"  // P2 memory gate 清账:真 ProjectMemory 翻档
 #include "platform/paths.hpp"
 
 namespace {
@@ -190,4 +192,54 @@ TEST_CASE("寿命:构造-查询-析构全程不崩,表地址稳定") {
     CHECK(&runtime->main_registry() == main_before);
     CHECK(&runtime->sub_registry() == sub_before);
     runtime.reset();  // 真析构:表先亡、拥有者后亡
+}
+
+// 动态工具 PromptCache 守恒单 P2(§十三 P2 第四条:memory gate 清账):
+// memory_save 的暴露只认注册(能力变化,hash 断得有名有姓),不再现查
+// 运行档——/memory off、/memory learn off 翻档后定义照旧常驻,tools hash
+// 不白断;运行档全在执行侧(MemorySaveTool::execute 自拒 + proxy 路的
+// main_execution_policy_)。册里拿真 ProjectMemory 翻档对账。
+TEST_CASE("P2 清账: memory_save 暴露只认注册,运行档翻面不收定义") {
+    ScopedHomeEnv home_guard;
+    lubancode::config::Config config = EmptyConfig();
+    NullBackend backend;
+
+    lubancode::memory::ProjectIdentity identity;
+    identity.project_root = std::filesystem::temp_directory_path() / "lubancode_p2_memory_project";
+    identity.project_dir = identity.project_root;
+    identity.key = "p2-memory-test";
+    lubancode::memory::Options memory_options;
+    memory_options.global_allowed = true;
+    memory_options.enabled = true;
+    memory_options.learn = lubancode::memory::LearnMode::Review;
+    memory_options.learn_ceiling = lubancode::memory::LearnMode::Review;
+    auto memory = std::make_shared<lubancode::memory::ProjectMemory>(
+        identity, std::filesystem::temp_directory_path() / "lubancode_p2_memory_home", memory_options);
+
+    ToolRuntime::Options options;
+    options.memory = memory;
+    ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
+                        /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", std::move(options));
+
+    lubancode::tools::Tool* memory_save = runtime.main_registry().Find("memory_save");
+    REQUIRE(memory_save != nullptr);
+    CHECK(memory->generate_enabled());
+    CHECK(runtime.main_tool_filter()(*memory_save));  // 注册即常驻
+
+    // 用户翻档:/memory off → 本场总开关关。旧路这里定义会从 tools 里
+    // 消失(hash 白断);P2 起照旧常驻,执行侧自拒。
+    REQUIRE(memory->set_enabled(false).has_value());
+    CHECK_FALSE(memory->generate_enabled());
+    CHECK(runtime.main_tool_filter()(*memory_save));  // 定义不收
+
+    // 再翻:/memory learn off(档位语义同效)。
+    REQUIRE(memory->set_enabled(true).has_value());
+    REQUIRE(memory->set_learn(lubancode::memory::LearnMode::Off).has_value());
+    CHECK_FALSE(memory->generate_enabled());
+    CHECK(runtime.main_tool_filter()(*memory_save));  // 定义还是不收
+
+    // 执行侧真拦:直名调用被工具自己的运行时判定拒掉,稳定文案,不装成功。
+    const auto refused = memory_save->execute(nlohmann::json{{"kind", "fact"}, {"topic", "x"}, {"content", "y"}});
+    CHECK(refused.is_error);
+    CHECK(refused.content.find("未开启") != std::string::npos);
 }

@@ -93,6 +93,12 @@ public:
     lubancode::runtime::loop::LoopScheduler* scheduler();  // ensure 前空
     bool TickActive() const { return driver_.has_value() && driver_->TickActive(); }
     bool HasActiveTasks();
+    // loop_control 的暴露位(动态工具 P2·§8.2):只认会话级条件
+    //(features.loop 开且 env 总闸未关),与"本拍可不可用"(TickActive,
+    // 执行门那半边)分家——暴露恒定,tools hash 不随 tick 的进出抖。
+    bool ToolExposed() const;
+    // 当前拍所属的 loop 任务 id(不在拍上给空串;本轮能力段的注脚用)。
+    std::string ActiveLoopTaskId() const;
     // 到点账(泵的候选判定):SweepExpiry + HasDueWork。
     bool SweepAndCheckDue(std::int64_t now_ms);
     // 命令材料包(HandleLoopCommand/事件账落盘/存档恢复共用)。

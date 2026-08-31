@@ -141,7 +141,9 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
                                 const std::string& filter_denial,
                                 const ToolTraceContext* trace,
                                 const std::atomic<bool>* cancel,
-                                const tools::ProxyCallContext* proxy) {
+                                const tools::ProxyCallContext* proxy,
+                                const std::function<bool(const tools::Tool&)>& turn_gate,
+                                const std::string& turn_gate_denial) {
     // 每条收尾路共用的分发口:先清洗,再 on_tool_done,清洗版随返回值交给
     // 调用方(进 history / 下一轮请求)。日志只记字段名、长度、坏字节位置
     // 与前后几个十六进制字节,不倒正文。
@@ -383,6 +385,33 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         unavailable.error_code = code;
         finish(unavailable, source_kind, source_instance, effect_class);
         return dispatch_done(call.id, call.name, std::move(unavailable));
+    }
+
+    // ---- 条件工具的 turn 级执行闸(动态工具 P2·§8.2):定义常驻 tools
+    // 数组,不随轮次进出(tools hash 恒定);"这一轮可不可用"在此调用当口
+    // 现判真实生命周期(goal iteration 活着?loop tick 在拍上?)。直名
+    // 调用与经 tool_invoke 解引用来的调用同一道闸——工具不在暴露面之外
+    // 不等于调用它会被放过。拒绝 = turn.tool_not_active 稳定码、终态
+    // TurnGateDenied(单子 §十:等相应轮次或换路径,不得重试同一调用),
+    // 不冒充"没挂载"、不冒充"用户拒绝"。空谓词 = 没有 turn 级条件工具
+    //(子代理/单测/workflow/PTC/旧装配),行为与从前一字不差。
+    if (turn_gate && !turn_gate(*tool)) {
+        phase(runtime::ToolPhase::Blocked);
+        std::string code = kErrTurnToolNotActive;
+        std::string reason = turn_gate_denial;
+        const std::size_t gate_split = turn_gate_denial.find('|');
+        if (gate_split != std::string::npos && !turn_gate_denial.substr(0, gate_split).empty()) {
+            code = turn_gate_denial.substr(0, gate_split);
+            reason = turn_gate_denial.substr(gate_split + 1);
+        }
+        if (reason.empty()) {
+            reason = "工具 " + call.name + " 的定义常驻,但只在对应的执行轮次里可用;当前轮不是。";
+        }
+        tools::Tool::Result inactive{reason, true};
+        inactive.outcome = ToString(ToolOutcome::TurnGateDenied);
+        inactive.error_code = code;
+        finish(inactive, source_kind, source_instance, effect_class);
+        return dispatch_done(call.id, call.name, std::move(inactive));
     }
 
     // ---- Plan 模式(只读研究硬闸单):ModePolicy 在 PreToolUse Hook 之前。
@@ -730,6 +759,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
     // 注册表里的壳工具"处理,行为与从前一字不差。
     const std::shared_ptr<tools::DeferredToolResolver>& tool_ref_resolver_ = agent.profile_.tool_ref_resolver;
     const std::function<bool(const tools::Tool&)>& tool_execution_policy_ = agent.profile_.tool_execution_policy;
+    // 动态工具 P2(条件工具也守恒):turn 级执行闸。直名调用与代理解引用
+    // 调用同一道;空 = 本 Agent 没有 turn 级条件工具,两处调用照旧。
+    const std::function<bool(const tools::Tool&)>& tool_turn_gate_ = agent.profile_.tool_turn_gate;
+    const std::string& tool_turn_gate_denial_ = agent.profile_.tool_turn_gate_denial;
     const AgentWiring& wiring_ = agent.wiring_;
     int& batch_counter_ = agent.batch_counter_;
     const auto BuildToolDefinitions = [&agent]() { return agent.BuildToolDefinitions(); };
@@ -1568,7 +1601,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                         : agent.profile_.tool_execution_denial;
                 const tools::Tool::Result result =
                     RunOneTool(registry_, target_call, wiring, tool_execution_policy_, execution_denial,
-                               trace_armed ? &trace_ctx : nullptr, cancel, &proxy_ctx);
+                               trace_armed ? &trace_ctx : nullptr, cancel, &proxy_ctx, tool_turn_gate_,
+                               tool_turn_gate_denial_);
                 {
                     api::ToolResultBlock block;
                     block.tool_use_id = call.id;  // 配对的是 wire 那枚 tool_invoke 的 id
@@ -1587,7 +1621,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
             const tools::Tool::Result result =
                 RunOneTool(registry_, call, wiring, tool_filter_, tool_filter_denial_,
-                           trace_armed ? &trace_ctx : nullptr, cancel);
+                           trace_armed ? &trace_ctx : nullptr, cancel, /*proxy=*/nullptr, tool_turn_gate_,
+                           tool_turn_gate_denial_);
             // 断言式兜底:RunOneTool 出口已经规范化过(见它文件头的信任边界
             // 注释),这里再过一遍 SanitizeUtf8 只为防将来有人在 Run() 之外
             // 绕路改历史——已经合法的内容是原样穿透的空操作。

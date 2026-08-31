@@ -742,11 +742,16 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
                 std::make_unique<lubancode::tools::ToolSearchTool>(sub_registry_, loaded_tools_));
         }
     }
-    main_tool_filter_ = [loaded = loaded_tools_, deferral = main_deferral_, memory = options.memory](
-                            const lubancode::tools::Tool& tool) {
-        if (tool.name() == "memory_save") {
-            return memory != nullptr && memory->generate_enabled();
-        }
+    // 暴露策略(动态工具 P2·§8.2 的 ToolExposurePolicy):只认注册表与
+    // 延迟挂载账,不再现查运行档。memory gate 的清账在此——旧路把
+    // `memory->generate_enabled()`(随 /memory on|off、/memory learn 翻)
+    // 现查进过滤谓词,用户一关学习,memory_save 的定义就从 tools 数组里
+    // 消失,tools hash 白断一次。P2 起:注册了就常驻(注册本身只认构造时
+    // 或 /memory on 补挂那两处能力变化,变了 hash 断得有名有姓),运行档
+    // 交给执行侧——直名调用被 MemorySaveTool::execute 拒("本场记忆写入
+    // 未开启"),proxy 路被下面的 main_execution_policy_ 拒
+    //(proxy.tool_not_allowed),两道都是稳定错,模型看得懂。
+    main_tool_filter_ = [loaded = loaded_tools_, deferral = main_deferral_](const lubancode::tools::Tool& tool) {
         return !deferral || !tool.deferred() || loaded->count(tool.name()) != 0;
     };
     sub_tool_filter_ = [loaded = loaded_tools_, deferral = sub_deferral_](const lubancode::tools::Tool& tool) {
@@ -754,10 +759,11 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     };
     // proxy 模式的执行资格(单子 §5.5):只作用于经 tool_invoke 解引用来的
     // 调用。exposure 过滤(上面的 tool_filter)不动——延迟工具照旧不进顶层
-    // tools、直接按名调用照旧被拦(发现不等于授权)。main 侧保留 memory
-    // gate(与主过滤同一道闸);sub 侧与子过滤同一口径,无额外闸。
-    // denial 走 "稳定码|人话" 两截(RunOneTool 的解析口径),报
-    // proxy.tool_not_allowed,模型不得重试同一调用。
+    // tools、直接按名调用照旧被拦(发现不等于授权)。main 侧带 memory 的
+    // 运行档闸(P2 清账:暴露只认注册,运行档全在执行侧——这道闸与
+    // MemorySaveTool::execute 的自拒是同一状态的两道口);sub 侧与子过滤同
+    // 一口径,无额外闸。denial 走 "稳定码|人话" 两截(RunOneTool 的解析
+    // 口径),报 proxy.tool_not_allowed,模型不得重试同一调用。
     if (main_proxy_) {
         main_execution_policy_ = [memory = options.memory](const lubancode::tools::Tool& tool) {
             if (tool.name() == "memory_save") {
