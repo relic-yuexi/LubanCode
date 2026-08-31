@@ -41,6 +41,8 @@ using lubancode::cli::TermErr;
 #include "cli/i18n.hpp"
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
+#include "tools/path_utils.hpp"  // PathToUtf8:诊断路径显示
+#include "tools/search_ripgrep.hpp"  // BundledRipgrepLocator/RunRipgrepSmoke:search 后端诊断(ripgrep 迁移 P0-2)
 #include "tools/shell_info.hpp"
 
 namespace lubancode::app {
@@ -1141,6 +1143,34 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
     }
     if (subcommand == "instructions") {
         PrintInstructionsDoctor(context);
+        return;
+    }
+    if (subcommand == "search") {
+        // ripgrep 迁移单 P0-2(设计单 7.2):search 后端诊断。生产只认
+        // exe-dir/libexec 一条路——这里不查 PATH、不列 PATH 候选;smoke 真
+        // 起 rg --version 精确校版本(单次,doctest 不进这条路)。
+        TermOut() << context.theme.stats << "search 后端(内置 ripgrep):" << context.theme.reset << "\n";
+        const std::optional<std::filesystem::path> exe = lubancode::tools::BundledRipgrepLocator::BundledRipgrepPath();
+        if (!exe.has_value()) {
+            TermOut() << "  path: (解析不到可执行目录)\n  status: missing\n";
+        } else {
+            const lubancode::tools::RipgrepSmokeResult smoke = lubancode::tools::RunRipgrepSmoke(*exe);
+            TermOut() << "  search backend: bundled ripgrep " << lubancode::tools::kBundledRipgrepVersion << "\n";
+            TermOut() << "  path: " << lubancode::tools::PathToUtf8(*exe) << "\n";
+            TermOut() << "  status: " << lubancode::tools::ToString(smoke.status);
+            if (!smoke.found_version.empty()) {
+                TermOut() << " (实测 " << smoke.found_version << ")";
+            }
+            TermOut() << "\n";
+            if (smoke.status != lubancode::tools::RipgrepSmokeStatus::Ready) {
+                TermOut() << "  " << smoke.message << "\n";
+            }
+        }
+        TermOut() << "  regex: Rust regex (default engine)\n";
+        TermOut() << "  ignore files: on\n";
+        TermOut() << "  注:生产只认随包 libexec/rg,不搜 PATH、不读环境变量;\n"
+                     "      当前版本 search 仍走内置 std::regex 内核(ripgrep 迁移 P0-4/P0-5 接管)。\n";
+        TermOut().flush();
         return;
     }
     if (subcommand == "shell") {

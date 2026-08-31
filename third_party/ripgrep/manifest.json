@@ -1,0 +1,38 @@
+{
+  "name": "ripgrep",
+  "version": "15.2.0",
+  "license": "MIT",
+  "upstream": "https://github.com/BurntSushi/ripgrep",
+  "release_tag": "15.2.0",
+  "download_url_template": "https://github.com/BurntSushi/ripgrep/releases/download/{release_tag}/{archive}",
+  "license_file": "LICENSE-MIT",
+  "version_check": {
+    "argv": ["--version"],
+    "first_line_program": "ripgrep",
+    "first_line_version": "15.2.0"
+  },
+  "notes": "上游 MIT OR UNLICENSE 双许可,LubanCode 按 MIT 路分发(third_party/ripgrep/LICENSE-MIT 为上游 15.2.0 tag 原文)。哈希于 2026-08-31 由上游同版 .sha256 资产与本机下载实测重算双对;Release 流水线须再重算一遍,不一致即红。Linux 取 amd64 .deb 内 GNU/glibc usr/bin/rg,不用 musl 预编译包(超大目录高并发偶发 SIGSEGV 的公开报告 BurntSushi/ripgrep#3494,见设计单 3.2);.deb 成员路径在包内带 ./ 前缀,按 member 相对路径匹配时剥掉。",
+  "assets": {
+    "windows-x64": {
+      "archive": "ripgrep-15.2.0-x86_64-pc-windows-msvc.zip",
+      "archive_format": "zip",
+      "sha256": "71b2fef860abe467217a538ff31de02f5258807c0129f771846f87bd029aafc5",
+      "member": "ripgrep-15.2.0-x86_64-pc-windows-msvc/rg.exe",
+      "output": "rg.exe"
+    },
+    "macos-arm64": {
+      "archive": "ripgrep-15.2.0-aarch64-apple-darwin.tar.gz",
+      "archive_format": "tar.gz",
+      "sha256": "3750b2e93f37e0c692657da574d7019a101c0084da05a790c83fd335bad973e4",
+      "member": "ripgrep-15.2.0-aarch64-apple-darwin/rg",
+      "output": "rg"
+    },
+    "linux-x64": {
+      "archive": "ripgrep_15.2.0-1_amd64.deb",
+      "archive_format": "deb",
+      "sha256": "5af93eebe4c352474632cf1d28523b0e98bcd4e2f115a249a713b8d8c7d1d01c",
+      "member": "usr/bin/rg",
+      "output": "rg"
+    }
+  }
+}

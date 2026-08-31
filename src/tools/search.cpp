@@ -333,6 +333,13 @@ std::string SearchTool::name() const {
     return "search";
 }
 
+SearchTool::SearchTool(std::shared_ptr<IRipgrepRunner> ripgrep_runner)
+    : ripgrep_runner_(std::move(ripgrep_runner)) {
+    // P0-2 装配注入口:只存指针,不在此起进程、不做任何前置动作。execute
+    // 在 P0-5 切主路之前不消费它(见 execute 注释),生产搜索路径与从前一字
+    // 不差。
+}
+
 std::string SearchTool::description() const {
     // 文案在 src/prompts/tools/<语言>/search.md,兜底与 zh-CN 档同文。
     return ToolText("search", "description",
@@ -429,6 +436,11 @@ static Tool::Result ExecuteSearch(const nlohmann::json& input, const std::atomic
 }
 
 Tool::Result SearchTool::execute(const nlohmann::json& input) {
+    // P0-2 注入口说明:ripgrep_runner_ 在 P0-5 切主路之前不参与执行——
+    // 这两个 execute 仍走下面的内置 std::regex 内核,生产路径与从前一字
+    // 不差。刻意不在这里写 if (ripgrep_runner_) 分支:留一个"看后端在不在
+    // 再选路"的口子,就会长出 rg 缺件时静默退回慢内核的那条禁路(设计单
+    // 一的红线)。切主路是 P0-5 一刀切的事。
     return ExecuteSearch(input, nullptr);
 }
 

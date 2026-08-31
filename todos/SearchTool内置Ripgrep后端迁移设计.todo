@@ -1,6 +1,6 @@
 # SearchTool 内置 Ripgrep 后端迁移设计
 
-- 状态：待实现（设计单；不代表当前 LubanCode 已随包携带或调用 ripgrep）
+- 状态：P0-1 已落（`2ffa1dc`）；P0-2/P0-3 已落（本批）：manifest/定位器/runner 合同/argv 纯函数/打包脚本与全套单测在位，`search` 生产仍走旧 std::regex 内核（一字未动），P0-4 起接进程真执行。rg 二进制本批未随包（脚本与哈希已备，真机 fetch 实测通过，入包归 P0-6）。
 - 日期：2026-08-31
 - 级别：P0（核心只读工具的速度、正确性、取消与发行完整性）
 - 范围：`src/tools/search.*`、`src/platform/process.*`、观察边界、工具文案、安装脚本、Release 包、三平台 CI、第三方许可证、性能基准
@@ -144,9 +144,9 @@ Linux 资产门：
 
 ### 3.3 许可证与署名
 
-- [ ] 选择 MIT 许可，不混写“MIT/Unlicense，随便算”。
-- [ ] 原样带 `third_party/ripgrep/LICENSE-MIT`。
-- [ ] `THIRD_PARTY_NOTICES.md` 写组件名、版本、上游地址、所选许可证与打包位置。
+- [x] 选择 MIT 许可，不混写“MIT/Unlicense，随便算”。→ P0-2 落：manifest `"license": "MIT"` 单选，notices 明写“按 MIT 路分发”。
+- [x] 原样带 `third_party/ripgrep/LICENSE-MIT`。→ P0-2 落：上游 15.2.0 tag 的 LICENSE-MIT 原文逐字节入库（1081 字节）。
+- [x] `THIRD_PARTY_NOTICES.md` 写组件名、版本、上游地址、所选许可证与打包位置。→ P0-2 落：仓根 THIRD_PARTY_NOTICES.md，五项俱全，另记 Linux 取 .deb 的取舍与构建期依赖不随包的分界。
 - [ ] Release 包同时带 LubanCode `LICENSE` 与第三方 notices/license。
 - [ ] `scripts/check_release.sh` 查版本、manifest、license 文件与 Release 包布局。
 - [ ] README 的“一份原生二进制”改成“一套免安装原生发行包”；不能明明多了 `libexec/rg` 还说只有一枚文件。
@@ -575,27 +575,27 @@ lubancode/
 
 ### P0-2：manifest、定位器与假 runner
 
-- [ ] 加 `third_party/ripgrep/manifest.json`、MIT license、notices。
-- [ ] 实现 `BundledRipgrepLocator`，只认 `ExecutableDir()/libexec`。
-- [ ] 启动/doctor smoke 执行 `--version`，精确校版本。
-- [ ] 定义 `IRipgrepRunner`、typed request/policy/result/error。
-- [ ] SearchTool 构造器可注入 fake；生产装配注默认 runner。
-- [ ] 缺件、不可执行、版本错、spawn fail 各有稳定单测。
-- [ ] 证明 PATH 上放一枚假 `rg` 也绝不执行。
+- [x] 加 `third_party/ripgrep/manifest.json`、MIT license、notices。→ manifest 三平台哈希全为真值（Windows/macOS 与上游 .sha256 双对；Linux deb 的占位格已按上游 .sha256 + 本机下载实测重算填入 `5af93eeb…`）；`scripts/fetch_ripgrep.py` 只读 manifest、下载固定 URL、重算 SHA-256、只解指定 member、staging 过门后原子换入，真机 Windows 资产全链路实测通过。
+- [x] 实现 `BundledRipgrepLocator`，只认 `ExecutableDir()/libexec`。→ `src/tools/search_ripgrep.hpp/.cpp`：不搜 PATH、不读环境变量、不下载；ExecutablePath 拿不到即缺件，不猜 cwd。
+- [x] 启动/doctor smoke 执行 `--version`，精确校版本。→ `/doctor search` 子命令（doctor_commands.cpp）：真起 `rg --version`，首行版本记号精确等于 15.2.0（首行实测形状 `ripgrep 15.2.0 (rev …)`，rev 段不钉）。启动路径不碰——P0-4 前不动启动行为，smoke 由 doctor 明触发。
+- [x] 定义 `IRipgrepRunner`、typed request/policy/result/error。→ SearchMode/SearchRequest/SearchPolicy/SearchHit/RipgrepRunResult + SearchBackendError 十枚稳定码（`search_*` 字符串经 ToString 落 error_code），形状照 §6.1/6.2 建议原样。
+- [x] SearchTool 构造器可注入 fake；生产装配注默认 runner。→ `SearchTool(shared_ptr<IRipgrepRunner>)` 注入口；tool_runtime.cpp 两处装配（基础表/Explore 表）注 BundledRipgrepRunner。P0-5 前 execute 不消费它——刻意不写“看后端在不在再选路”的分支，不给静默退回留缝。旧 std::regex 内核一字未动。
+- [x] 缺件、不可执行、版本错、spawn fail 各有稳定单测。→ 全注入式：exe_override 注假路径 + RipgrepVersionProbe 假探针，不起真进程不依赖真 rg；前置校验全过后如实回 `search_backend_not_wired`（P0-4 接流式执行），smoke 每实例只做一次。
+- [x] 证明 PATH 上放一枚假 `rg` 也绝不执行。→ 单测 PATH 前置假 rg 后定位不落假目录、smoke 明报缺件；POSIX 下假 rg 是会写 marker 的脚本，smoke 后 marker 不存在（铁证）；`LUBANCODE_RG_PATH` 设了不读。技术根基：RunProcess 的 argv[0] 给绝对路径，Windows CreateProcessW（命令行首 token 含目录路径）不搜 PATH，POSIX execvp 对含 `/` 的名字不搜 PATH。
 
-验收：读工具不能借 PATH/env 变成任意执行口。
+验收：读工具不能借 PATH/env 变成任意执行口。→ 得证（单测钉死三面：PATH 假件、env 后门、定位不回退）。
 
 ### P0-3：argv builder 与边界策略
 
-- [ ] grep/glob argv builder 写成纯函数。
-- [ ] `--no-config`、`--hidden`、默认 regex engine、无 shell、参数边界入测试。
-- [ ] pattern/path/glob 以 `-` 开头不串成 flag。
-- [ ] 空格、单双引号、中文、`[]{}!*?\`、Windows 盘符都逐项测。
-- [ ] 用户正向 glob 不可偷变排除规则。
-- [ ] `ObservationBoundary::ExcludedDirsSnapshot()` 与相对排除 glob 落地。
-- [ ] 显式点名 ignored/隐藏/边界目录与默认递归排除两路对账。
+- [x] grep/glob argv builder 写成纯函数。→ `BuildGrepArgv`/`BuildGlobArgv`：不读全局状态、不碰盘、不看环境；单文件/目录分发用 request 的 `root_is_single_file` 字段（盘上判断归请求解析层）。
+- [x] `--no-config`、`--hidden`、默认 regex engine、无 shell、参数边界入测试。→ 基线 argv 逐元素钉；flag 墙测试扫整条 argv：`--pre/--pre-glob/--search-zip/--pcre2/--auto-hybrid-regex/--type-add/-u/--unrestricted/--engine(裸)` 无任何输入面，`--follow/--text/--no-ignore` 有 policy 开关但默认 policy 下不出现。
+- [x] pattern/path/glob 以 `-` 开头不串成 flag。→ 定案 `--` 分隔：pattern 与 scope 落在 `--` 之后；glob 作 `-g` 的独立值元素（argv 直传无 shell，值不会被解析成 flag）。
+- [x] 空格、单双引号、中文、`[]{}!*?\`、Windows 盘符都逐项测。→ pattern 与单文件 scope（文件名）两个面逐项钉，argv 元素逐字节原样；盘符路径 cwd 走 OS 参数不拼命令行。
+- [x] 用户正向 glob 不可偷变排除规则。→ 首字符 `!` 转义为 `[!]`（globset 只在开头认排除义）；grep 的 glob 过滤与 glob 模式的 pattern 两路过同一道转义，原样 `!secret` 不许出现在 argv（有断言）。
+- [x] `ObservationBoundary::ExcludedDirsSnapshot()` 与相对排除 glob 落地。→ 快照线程安全拷贝；`BuildObservationExcludes` 只收落在 root 之下的登记目录，root-relative、统一 `/`、globset 元字符字面转义，逐条 `!<rel>/**` 让 walker 真剪枝；排序去重保 argv 确定。
+- [x] 显式点名 ignored/隐藏/边界目录与默认递归排除两路对账。→ 与旧内核逐条对账：硬排除 `**/{.git,build,node_modules,.evidence}/**`（=旧 ShouldSkipDir，无条件、任意深度）；root 在观察边界内（显式点名，含 .evidence 名字口径）不生观察排除（=旧 root_in_boundary 分支）；点名 build/ 等目录时排除 glob 按 root-relative 语义天然不咬根下文件（=旧点名行为）；默认递归时登记目录才生成排除。
 
-验收：给同一 typed request，三平台生成同一语义 argv；差别只在 exe 后缀与路径编码。
+验收：给同一 typed request，三平台生成同一语义 argv；差别只在 exe 后缀与路径编码。→ builder 无平台分支（#ifdef 只在 exe 后缀的定位器里）；测试钉 scope 恒 `.` 或文件名字面、argv 不含 root 绝对路径拼装。
 
 ### P0-4：流式 runner 与解析器
 

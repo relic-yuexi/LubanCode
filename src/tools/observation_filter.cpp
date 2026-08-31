@@ -62,6 +62,11 @@ void ObservationBoundary::Reset() {
     dirs_.clear();
 }
 
+std::vector<std::filesystem::path> ObservationBoundary::ExcludedDirsSnapshot() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return dirs_;
+}
+
 bool ObservationBoundary::Contains(const std::filesystem::path& abs_path) const {
     // 名字口径:任一路径段叫 .evidence(大小写敏感——Windows 目录虽不分
     // 大小写,证据目录约定就是小写,不放大匹配面)。走原文即可,目录迭代

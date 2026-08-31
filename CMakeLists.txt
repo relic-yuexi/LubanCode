@@ -377,6 +377,9 @@ add_library(lubancode_engine STATIC
   src/tools/loop_control_tool.cpp
   src/tools/ask_user.cpp
   src/tools/search.cpp
+  # ripgrep 迁移单 P0-2/P0-3:随包定位器/runner 合同/argv 纯函数构造器。
+  # P0-4 之前不改 search 生产行为,只提供装配注入口与诊断真账。
+  src/tools/search_ripgrep.cpp
   # 观察边界(真机实测 P2-5):search/read_file 默认不吞子代理日志与
   # .evidence 运行时证据,显式点名才放行并告知体积。
   src/tools/observation_filter.cpp
