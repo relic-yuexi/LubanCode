@@ -1,0 +1,3 @@
+valid line before
+utf8_needle_anchor €ÿÀ¯ trailing
+valid line after

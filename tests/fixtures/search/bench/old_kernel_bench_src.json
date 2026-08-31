@@ -1,0 +1,132 @@
+{
+  "file_count_scanned": 768,
+  "queries": [
+    {
+      "glob": "",
+      "id": "literal_common_word",
+      "is_error": false,
+      "mode": "grep",
+      "note": "字面量,若干处命中",
+      "output_lines_last_run": 32,
+      "pattern": "SearchTool",
+      "process_peak_working_set_bytes_after_query": -1,
+      "wall_ms_first_round": 1768.0059,
+      "wall_ms_max": 5788.8722,
+      "wall_ms_min": 1768.0059,
+      "wall_ms_p50": 5167.5999,
+      "wall_ms_p50_excluding_first_round": 5167.5999,
+      "wall_ms_p95": 5560.193,
+      "wall_ms_samples": [
+        1768.0059,
+        2902.9653,
+        5788.8722,
+        5560.193,
+        5147.5477,
+        5297.2205,
+        5167.5999
+      ]
+    },
+    {
+      "glob": "",
+      "id": "regex_moderate",
+      "is_error": false,
+      "mode": "grep",
+      "note": "普通正则(模板类型)",
+      "output_lines_last_run": 101,
+      "pattern": "std::[A-Za-z_]+<",
+      "process_peak_working_set_bytes_after_query": -1,
+      "wall_ms_first_round": 88.0681,
+      "wall_ms_max": 88.0681,
+      "wall_ms_min": 79.259,
+      "wall_ms_p50": 83.4687,
+      "wall_ms_p50_excluding_first_round": 81.2855,
+      "wall_ms_p95": 87.2136,
+      "wall_ms_samples": [
+        88.0681,
+        83.4687,
+        86.1503,
+        80.7117,
+        81.2855,
+        87.2136,
+        79.259
+      ]
+    },
+    {
+      "glob": "",
+      "id": "no_match",
+      "is_error": false,
+      "mode": "grep",
+      "note": "全仓无命中",
+      "output_lines_last_run": 0,
+      "pattern": "definitely_absent_zzz_token_12345",
+      "process_peak_working_set_bytes_after_query": -1,
+      "wall_ms_first_round": 6596.5626,
+      "wall_ms_max": 6596.5626,
+      "wall_ms_min": 6211.5158,
+      "wall_ms_p50": 6327.1153,
+      "wall_ms_p50_excluding_first_round": 6288.8562,
+      "wall_ms_p95": 6385.7808,
+      "wall_ms_samples": [
+        6596.5626,
+        6366.3303,
+        6288.8562,
+        6327.1153,
+        6385.7808,
+        6248.4075,
+        6211.5158
+      ]
+    },
+    {
+      "glob": "",
+      "id": "high_frequency",
+      "is_error": false,
+      "mode": "grep",
+      "note": "高频命中,触发 100 条截断",
+      "output_lines_last_run": 101,
+      "pattern": "the",
+      "process_peak_working_set_bytes_after_query": -1,
+      "wall_ms_first_round": 883.4044,
+      "wall_ms_max": 954.669,
+      "wall_ms_min": 883.4044,
+      "wall_ms_p50": 902.4237,
+      "wall_ms_p50_excluding_first_round": 902.4237,
+      "wall_ms_p95": 925.7828,
+      "wall_ms_samples": [
+        883.4044,
+        902.4237,
+        925.7828,
+        909.2867,
+        889.3231,
+        885.352,
+        954.669
+      ]
+    },
+    {
+      "glob": "",
+      "id": "glob_enum_cpp",
+      "is_error": false,
+      "mode": "glob",
+      "note": "glob 枚举 .cpp",
+      "output_lines_last_run": 101,
+      "pattern": "*.cpp",
+      "process_peak_working_set_bytes_after_query": -1,
+      "wall_ms_first_round": 107.3427,
+      "wall_ms_max": 107.3427,
+      "wall_ms_min": 86.4417,
+      "wall_ms_p50": 101.1471,
+      "wall_ms_p50_excluding_first_round": 91.9568,
+      "wall_ms_p95": 105.1117,
+      "wall_ms_samples": [
+        107.3427,
+        91.9568,
+        101.1471,
+        86.4417,
+        87.8801,
+        105.1117,
+        102.5111
+      ]
+    }
+  ],
+  "rounds_per_query": 7,
+  "target_dir": "src"
+}

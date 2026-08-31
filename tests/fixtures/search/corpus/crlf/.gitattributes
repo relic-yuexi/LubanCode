@@ -1,0 +1,6 @@
+# 这份夹具的存在意义就是"必须是 CRLF"(search 迁移单 P0-1,验证旧内核对
+# \r\n 行结尾的处理)。仓库根 .gitattributes 的 `* text=auto eol=lf` 会在
+# add/checkout 时把它悄悄转成 LF,变成"CRLF 测试用例其实测的是 LF"这种
+# 自相矛盾的东西。这里用 -text 让 git 把它当不透明字节,不做任何行尾归一,
+# 保证提交进去的、以及任何平台检出出来的字节跟本机造出来的分毫不差。
+crlf.txt -text

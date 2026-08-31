@@ -35,3 +35,9 @@ __pycache__/
 
 # GUI Agent 真机证据目录(桌面截图,绝不入库)
 .gui-evidence/
+
+# search 迁移单 P0-1:硬排除目录夹具本地生成物——这组必须含一个字面量
+# 叫 ".git" 的子目录才能验真宿主硬排除,git 没法把它当常规内容提交
+# (仓库边界保留字),故只在本地/运行时生成,不进版本库。见
+# tests/fixtures/search/build_corpus.sh 与 tests/fixtures/search/README.md。
+tests/fixtures/search/corpus/excluded_dirs/

@@ -564,14 +564,14 @@ lubancode/
 
 ### P0-1：冻结旧合同与差分语料
 
-- [ ] 把现有 `tests/unit/tools/test_search.cpp` 用例按“必须保留/有意迁移”分栏。
-- [ ] 建 `tests/fixtures/search/`：中文、CRLF、空文件、二进制、超长行、100+ 命中、隐藏文件、ignored 文件、`.git/build/node_modules/.evidence`、嵌套 glob、非法 UTF-8 文件名/正文（POSIX）。
-- [ ] 记录旧内核输出 golden；不把 filesystem 遍历顺序钉成合同，比较路径集合与行集合。
-- [ ] 给 ECMAScript 与 Rust regex 差异列迁移表：look-around、backreference、Unicode class、转义、非法模式。
-- [ ] 决定 `fixed_strings` schema；中英文一起审。
-- [ ] 跑当前内核基准，留 raw JSON/CSV，不只写一行“慢”。
+- [x] 把现有 `tests/unit/tools/test_search.cpp` 用例按“必须保留/有意迁移”分栏。→ A 类 9 条／B 类 8 条，表见 `docs/development/search-ripgrep-migration.md` §一。
+- [x] 建 `tests/fixtures/search/`：中文、CRLF、空文件、二进制、超长行、100+ 命中、隐藏文件、ignored 文件、`.git/build/node_modules/.evidence`、嵌套 glob、非法 UTF-8 文件名/正文（POSIX）。→ 清单与构造理由见 `tests/fixtures/search/README.md`；非法 UTF-8 文件名 Windows worktree 下如实标注不可测（含本机 MSYS 实测现象），脚本已交付给 POSIX 环境用。
+- [x] 记录旧内核输出 golden；不把 filesystem 遍历顺序钉成合同，比较路径集合与行集合。→ `tests/manual/search_golden_driver.cpp`（golden 子命令）产出 `tests/fixtures/search/golden/old_kernel_golden.json`，24 条场景，按排序后的命中集合 + sha256 摘要比对，不钉行序。
+- [x] 给 ECMAScript 与 Rust regex 差异列迁移表：look-around、backreference、Unicode class、转义、非法模式。→ `docs/development/search-ripgrep-migration.md` §四，本批不联网核实，标注了哪些是稳定架构事实、哪些“待 P0-5 真机差分核实”。
+- [x] 决定 `fixed_strings` schema；中英文一起审。→ 采纳原建议形状不变（`{"fixed_strings": false}`），理由与中英文文案草稿见 `docs/development/search-ripgrep-migration.md` §五。
+- [x] 跑当前内核基准，留 raw JSON/CSV，不只写一行“慢”。→ `tests/manual/search_golden_driver.cpp`（bench 子命令）产出 `tests/fixtures/search/bench/old_kernel_bench_src.json`（本仓 `src/` 768 文件，5 类查询各 7 轮 P50/P95）；结构性发现（命中密度决定截断早晚，进而决定耗时差一到两个数量级）见 `docs/development/search-ripgrep-migration.md` §六。内存占用因 Windows psapi.h 编译问题本批未采集，留白交 P0-7。
 
-验收：每一处行为变化都有表、有测试、有 CHANGELOG 落点。
+验收：每一处行为变化都有表、有测试、有 CHANGELOG 落点。→ 用例分栏表（§一）、fixtures 覆盖表（§二）、正则迁移表（§四）、CHANGELOG 落点表（§七）均在 `docs/development/search-ripgrep-migration.md`；P0-1 本身不改生产行为，故本批没有新增测试断言变化，现有 `test_search.cpp` 17 条原样全绿。
 
 ### P0-2：manifest、定位器与假 runner
 
