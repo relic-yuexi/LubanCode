@@ -462,6 +462,12 @@
 - **vLLM 四 wire 单收官(P2+夹具补遗)。** docs/features/providers/vllm.md 手册落册并挂 fixture hash 对账(手册字节一动即红,四只 qwen3.8 夹具全数指向它);/metrics 认两代名(v0 prefix_cache_* 与 v1 gpu_/cpu_ 双前缀,旧名在场以总数为准),doctor cache 读数多一句负载语境;responses 非流式展开——output 按数组位置编号(vLLM 非流式条目没有 output_index)、reasoning 认 reasoning_text 与官方 summary 两形状,2xx 无 SSE 终止帧时走非流式回退不再误报"流意外结束"。
 - **三案 wire_replay 回环**:responses 两轮(function_call 与 output 成对、思考项不回传)、messages 两轮(thinking 假签逐字节原样回传)、非 SSE JSON 裸体回退端到端。顺手修好 main 上 check_docs 旧账(README 指着从未进库的 LICENSE——按徽章声明补全文;清仓死链改指 git 历史)。294/294 全绿。
 
+## [v0.26.144] - 2026-08-31
+
+- **Kimi 保留式思考整单收官(P2 真机三层账)。** 五案真机(K3 两轮/K2.7 零参/K2.6 工具循环两轮/逐字回传/exit-resume 续聊)全过:请求被接受、响应发出 reasoning、下一请求实际回传,三层各自记录不并一句"支持";L3 对准实际发出的 wire 字节(解析回读+sha256),不是内存同源自欺。K2.6 工具循环第二笔请求 assistant.reasoning_content 与原响应逐字一致、无 reasoning_effort;K3 带 effort 无 thinking 键;K2.7 顶层零参数照回传。
+- **缓存命中的硬证据**:流式 turn2 cached_tokens 6144/6428(95.6%)——Always 回传字节稳定不吃前缀缓存。流式 usage 藏在 choices[0].usage(与 OpenAI 顶层不同,两处都收);429 时记暂不可测 SKIP 不冒充。真机消耗约 2k completion,纪律守住。
+- 探针驱动 model_probe_kimi_preserved_thinking(EXCLUDE_FROM_ALL,零钥匙入库——驱动/报告全用 sk-***);GET /models 对账清掉 catalog 九枚陈档。todo §十一落账、状态行收官。真机新发现(旧疾另开单):会话档每轮 assistant 落两笔,次序 [A1,U1,A1],resume 忠实回放带重复——待修。
+
 ## [v0.26.65] - 2026-08-27
 
 - **九只刮屏验收器全绿。** 终端、流式页脚、忙碌页签、视口、子代理面板等九只驱动器从烂账重钉到全过;视口驱动从 18 挂修到零,顺带揪出假服务三病(JSON 不转义、缺 Content-Length、分账锚咬错)。
