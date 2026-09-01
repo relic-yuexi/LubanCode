@@ -55,6 +55,7 @@
 #include "app/commands/evolve_commands.hpp"  // RunEvolveTestCommand(自进化阶段 3 的 CI 口)
 #include "app/version.hpp"
 #include "cli/console_input.hpp"
+#include "cli/gateway_command.hpp"  // 总装单 G1:gateway run/status/stop 子命令
 #include "cli/trajectory_command.hpp"  // P0-3:trajectory verify/replay/harness-replay 子命令
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
@@ -545,6 +546,19 @@ int RunCli(const std::vector<std::string>& args) {
             return cli::RunTrajectoryCommand(trajectory_args);
         }
         case CliAction::BadTrajectory:
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
+        case CliAction::RunGateway: {
+            // 总装单 G1:gateway run/status/stop。run 是前台真进程;status
+            // 是只读 probe(零写盘零建目录,不暗起 Gateway);stop 投本地
+            // 控制命令。退出码合同见 docs/architecture/gateway/README.md §5。
+            cli::GatewayCommandArgs gateway_args;
+            gateway_args.verb = parsed_cli.gateway.verb;
+            gateway_args.profile = parsed_cli.gateway.profile;
+            gateway_args.json = parsed_cli.gateway.json;
+            return cli::RunGatewayCommand(gateway_args);
+        }
+        case CliAction::BadGateway:
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::RunEvolveTest:

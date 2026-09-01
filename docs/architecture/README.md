@@ -1,6 +1,6 @@
 # LubanCode 架构
 
-[文档首页](../README.md) · [会话编排](session-orchestration.md) · [Query 数据流](query-data-flow.md) · [Workflow 运行时](workflow-runtime.md) · [工具手册](../reference/tools.md) · [配置手册](../reference/configuration.md)
+[文档首页](../README.md) · [会话编排](session-orchestration.md) · [Query 数据流](query-data-flow.md) · [Workflow 运行时](workflow-runtime.md) · [Gateway 总装](gateway/README.md) · [工具手册](../reference/tools.md) · [配置手册](../reference/configuration.md)
 
 LubanCode 是一支 C++23 命令行程序。入口收参数，组合根装部件，会话层排活，Agent 推模型 step，工具层办本机差事，协议层翻各家 JSON。这里看全局；会话怎样拆，另见[会话编排](session-orchestration.md)。版本号只认 `src/app/version.hpp`，测试口径看[测试指南](../development/testing.md)。
 

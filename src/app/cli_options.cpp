@@ -6,6 +6,8 @@
 #include <set>
 #include <string>
 
+#include "gateway/profile.hpp"
+
 namespace lubancode::app {
 
 ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
@@ -195,6 +197,54 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             parsed.action = CliAction::BadTrajectory;
             parsed.error_text = "trajectory 的 id 须是单段名(不带路径): " +
                                 trajectory.session_id;
+            return parsed;
+        }
+        // Gateway 子命令(总装单 G1):lubancode gateway <run|status|stop>
+        // [--profile <名>] [--json 只 status 认]。只认裸词打头且此前没有
+        // 位置参数;形状不对当场退用法,不静默当普通位置参数走单发问句。
+        if (arg == "gateway" && options.positional.empty()) {
+            static const std::set<std::string> kVerbs = {"run", "status", "stop"};
+            const std::size_t rest = args.size() - i - 1;
+            if (rest == 0 || kVerbs.count(args[i + 1]) == 0) {
+                parsed.action = CliAction::BadGateway;
+                parsed.error_text =
+                    "用法: lubancode gateway <run|status|stop> [--profile <名>] [--json]"
+                    "(install/start/restart/doctor/logs 是后续批次的口,G1 未实现)";
+                return parsed;
+            }
+            GatewayCliArgs gateway;
+            gateway.verb = args[i + 1];
+            for (std::size_t extra = i + 2; extra < args.size(); ++extra) {
+                if (args[extra] == "--json") {
+                    if (gateway.verb != "status") {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--json 只在 gateway status 下有效";
+                        return parsed;
+                    }
+                    gateway.json = true;
+                    continue;
+                }
+                if (args[extra] == "--profile") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadGateway;
+                        parsed.error_text = "--profile 需要一个名字(单段名,如 default)";
+                        return parsed;
+                    }
+                    gateway.profile = args[++extra];
+                    continue;
+                }
+                parsed.action = CliAction::BadGateway;
+                parsed.error_text = "gateway " + gateway.verb + " 认不得参数 \"" + args[extra] +
+                                    "\":只认 --profile <名> --json";
+                return parsed;
+            }
+            if (!gateway.profile.empty() && !lubancode::gateway::IsValidGatewayProfileName(gateway.profile)) {
+                parsed.action = CliAction::BadGateway;
+                parsed.error_text = "profile 名须是单段名(不带路径): " + gateway.profile;
+                return parsed;
+            }
+            parsed.action = CliAction::RunGateway;
+            parsed.gateway = gateway;
             return parsed;
         }
         if (arg == "--continue") {
