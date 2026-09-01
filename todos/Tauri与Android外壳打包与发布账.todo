@@ -1,6 +1,8 @@
 # Tauri 与 Android 外壳打包与发布账
-- 状态：待实现（本单由《多前端外壳与浏览器 Tab：AppServer 承载设计》阶段 E 立账——壳本体已孵化进 examples/shells/，打包发布另立此单）
-- 日期：2026-09-01
+- 状态：第一批已落（2026-09-02）——NSIS 出包+真机装验四步过、版本对齐声明进码、
+  CI 壳流水线与冒烟挂钩落、Android signingConfigs 接线落、README 实账齐；
+  交互一幕/Android 真机/签名证书未验，各注原因。第二批待排。
+- 日期：2026-09-01（立单），2026-09-02（第一批勾账）
 - 前置：`todos/多前端外壳与浏览器Tab_AppServer承载设计.todo`（阶段 A-E 已落）
 - 相关：`examples/shells/`（两家壳）、`examples/web-console/`（参考前端，唯一前端事实源）、`docs/features/app-server/README.md`
 - 范围：两只壳从"能跑"到"能发"——打包、签名、分发、升级；外加原单 §十留后头的两条外壳能力路
@@ -15,26 +17,49 @@ CI 矩阵——这些一件都没做，全在本单。
 
 ## 二、Tauri 桌面壳的打包账
 
-- [ ] NSIS 安装包真出一枚（`bundle.targets=["nsis"]` 已配，未跑
+- [x] NSIS 安装包真出一枚（`bundle.targets=["nsis"]` 已配，未跑
       `cargo tauri build`——需要 tauri-cli；产物与安装体验要真机验）。
-- [ ] 三平台矩阵定界：首版只 Windows（WebView2 系统自带）？mac/Linux
+      第一批销账：`npx @tauri-apps/cli build` 全量编过出
+      `LubanCode Console_0.1.0_x64-setup.exe`（1,759,966 B）；
+      真机装验四步全过（静默装 /S 收 0 → 验文件与 HKCU 卸载项 →
+      起进程窗口真开 → 卸干净零残留），实录见 shells README。
+- [x] 三平台矩阵定界：首版只 Windows（WebView2 系统自带）？mac/Linux
       进不进首批，定了写死在 bundle 配置里（icon.icns 等资源按需生成，
       `make_icons.js` 可扩）。
+      定界：首版只 Windows x64，`targets=["nsis"]` 写死；mac/Linux
+      后议，扩平台路（make_icons/targets/CI 腿）写进 shells README。
 - [ ] 代码签名：Windows Authenticode 证书的采买与 CI 注入方案（无证书
       的 SmartScreen 警告如实告知用户，不冒充）。
+      状态：无证书可签——SmartScreen 拦截已如实写进 shells README；
+      证书到位后的 CI 注入路（WINDOWS_CERTIFICATE_THUMBPRINT 等
+      环境变量）也已写档，流水线结构不用改。采买归主人。
 - [ ] 窗口一幕真机验收：开窗 → 连 8765 → 四件套 + 触屏外套全走一遍
       （镜像路），对照 web-console 冒烟的端到端一幕。
-- [ ] 升级通道：tauri-plugin-updater 进不进首版？进了要配更新源与签名
+      状态：装验时起进程验到窗口真开（MainWindowTitle 对上），但页面
+      要人手点"连接"，连 8765 走四件套的交互一幕未走——无 UI 自动化
+      工具，不冒充。协议路本身已被 web-console 冒烟钉死。
+- [x] 升级通道：tauri-plugin-updater 进不进首版？进了要配更新源与签名
       公钥（原单 §十"外壳自动升级与版本协商"在此归口）。
+      裁决：首版不进（`createUpdaterArtifacts:false`）；后补路
+      （signer keygen、TAURI_SIGNING_PRIVATE_KEY 注入、latest.json
+      静态托管）写进 shells README《升级通道》。
 
 ## 三、Android 壳的打包账
 
 - [ ] 工具链补齐（JDK 17 + Android SDK 34 + platform-tools），装好后
       `gradle :app:assembleDebug` 先绿——孵化单留下的"未验"销账。
+      状态：开发机（含 2026-09-02 换机复勘）无 JDK/SDK——assembleDebug
+      归 CI（shells.yml ubuntu 腿，runner 自带 JDK17+SDK34、gradle 8.9
+      钉版本）。流水线已落但未真跑，跑绿前不销账。
 - [ ] 真机一幕：`adb reverse tcp:8765 tcp:8765` → 壳连本机 app-server →
       四件套 + 手势折输入（tap/双击/长按）真走一遍。
+      状态：无 Android 设备/模拟器，未验。
 - [ ] release 构建 + 签名：keystore 生成与保管方案、`signingConfigs`
       接线（密钥绝不进仓，`.gitignore` 已挡 local.properties）。
+      状态：接线第一批已落——`signingConfigs` 读 keystore.properties
+      （不在则退 debug 签名打横幅）、keystore.properties/jks/keystore
+      入 .gitignore、keytool 生成命令写 shells README；release 构建
+      本机没工具链没跑，未验不勾。
 - [ ] 分发口径：APK 直装（侧载）还是 Play？侧载要写明回环连接的安全
       账（NSC 全局放行明文是孵化单的权宜，发布版要收紧——NSC 不认
       IP 字面量，要么提 issue 等平台，要么壳内加一层本机代理转 TLS）。
@@ -44,15 +69,25 @@ CI 矩阵——这些一件都没做，全在本单。
 
 ## 四、两家壳共用的发布账
 
-- [ ] 版本对齐策略：壳版本（现都是 0.1.0）与 lubancode 内核版本解耦
+- [x] 版本对齐策略：壳版本（现都是 0.1.0）与 lubancode 内核版本解耦
       还是同发？协议版本（1.1）协商已有 initialize 口，发布节奏定了
       写进壳 README。
-- [ ] CI：GH Actions 矩阵（Windows x64 出 NSIS；Android 出 APK），产物
+      第一批销账：解耦各发各的；对齐靠 `PROTOCOL_COMPAT`
+      （1.1~1.1 闭区间）握手对表，不合 warn 提示不拦截，三前端同一份
+      声明；节奏与口径写进 shells README《版本对齐》。
+- [x] CI：GH Actions 矩阵（Windows x64 出 NSIS；Android 出 APK），产物
       挂 release。注意本仓惯例"壳构建产物不进 git"——CI 产物走
       release artifacts。
-- [ ] 发布前回归：`scripts/tests/app_shell_smoke.js`（41 案静态+折算）
+      第一批销账：`shells.yml` 两腿（windows NSIS / ubuntu APK），静态
+      冒烟先门，产物走 workflow artifacts，`shell-v*` tag 附 GitHub
+      Release（与内核 `v*` 分流）；AGP 钉 settings.gradle.kts、gradle
+      钉 setup-gradle。未真跑（GitHub 直连不通，主控统一推后见分晓），
+      跑绿前算"已接线"。
+- [x] 发布前回归：`scripts/tests/app_shell_smoke.js`（41 案静态+折算）
       与 `scripts/tests/app_server_web_console_smoke.js`（参考前端端到
       端）进 CI 必跑。
+      第一批销账：两册挂进 ci.yml windows 腿，复用现建 exe；本机实录
+      49/49 与 20 过 0 挂 1 跳（playwright 未装按设计跳）。
 
 ## 五、外壳能力路（原单 §十归口）
 

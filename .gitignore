@@ -58,5 +58,12 @@ examples/shells/android/build/
 examples/shells/android/app/build/
 examples/shells/android/local.properties
 
+# Android 壳签名材料(打包发布账 §三):keystore.properties 与密钥库
+# 本身绝不进仓——keytool 生成命令与接线见 examples/shells/README.md
+# 《Android 签名》;CI 只出 debug APK,release 签名在本机配好再出。
+examples/shells/android/keystore.properties
+examples/shells/android/*.jks
+examples/shells/android/*.keystore
+
 # Agent 会话交接档:随机器走的临时产物,绝不入库(557c62e7 曾误入后移出)
 AGENT_HANDOFF.md
