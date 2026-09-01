@@ -1,0 +1,70 @@
+# LubanCore 与 LubanCode-CLI 分离：核心库独立成宿主底座
+
+- 状态：待实现（2026-09-01 主人立单）
+- 日期：2026-09-01
+- 级别：P1（架构分界；多前端/多渠道/自举的共同底座）
+- 范围：CMake 目标重组、core/cli 边界、头文件与依赖方向、入口壳、发行与安装形态
+- 依赖：既有分层现状（lubancode_engine 等目标已分层）、AppServer（已是"另一种宿主"的先例）、多前端外壳单（阶段 A-E 已落）
+- 关联：`多前端外壳与浏览器Tab_AppServer承载设计.todo`、`持久Agent_Gateway自动任务与可靠恢复总装计划.todo`、`Workspace统一存储_旧Session退场与分级Memory迁移.todo`
+- 不在本单：给某个具体前端加功能；改 core 内业务逻辑；拆 Git 仓库（先库分离，仓库拆不拆另议）
+
+## 一、先下断语
+
+CLI 就是 CLI，core 就是 core。core 是引擎（agent/loop、api、tools、trajectory、memory、workspace、channel、telemetry、insights），CLI 是它的一层皮。皮可以换（终端、Web、Tauri、Gateway、渠道宿主），心只有一颗。**分离的判据：换皮不许动心，加宿主不许改 core 的入口文件。**
+
+## 二、当前真相（开工先核）
+
+1. CMake 已有 `lubancode_core/engine/lua/runtime/app` 等目标分层（见 build/release/*.dir），但**边界是编译层的，不是合同层的**——app/cli 层的文件仍与 core 混在 `src/` 同一棵树，依赖方向靠自觉。
+2. AppServer（src/app_server/）与 one_shot 已是"core 的第二种消费者"先例；多渠道 ChannelSessionHost 是第三种。分离是把这些既有事实**钉成合同**，不是推倒重来。
+3. 待盘点：core 侧还有哪些文件 include 了 cli/app 的头（反向依赖，分离的死敌）；slash 命令/i18n/主题/终端渲染这些"皮件"与 core 的耦合点。
+
+## 三、目标形态
+
+```text
+lubancode_core（纯库,零终端/零入口）
+  agent / api / tools / trajectory / memory / workspace / channel / telemetry / insights / runtime
+宿主（各吃同一颗 core）
+  lubancode-cli     终端交互宿主(现 src/app+src/cli 的大部)
+  lubancode app-server   已有
+  gateway / channel-host / tauri-side   既有与未来
+```
+
+- 依赖方向铁律：core 不 include 任何 cli/app/app_server 头；宿主间互不引用。
+- core 对外只露稳定头（public API 面）+ 回调/事件口（把"打印到终端"这类倒过来递进宿主）。
+- 一个可执行一个入口；发行包 CLI 为主件，其余宿主按需。
+
+## 四、不可破的合同
+
+1. 分离是搬界不是重写——core 内部一行行为不变，全量 ctest 既有册零红。
+2. 反向依赖清零可证：core 目标编译单元 grep 不到 cli/app/app_server 的 include（进检查脚本）。
+3. CLI 的用户体验逐字节不变（键位/渲染/命令面）。
+
+## 五、分期落地
+
+### P0-0：盘点与边界冻结
+- [ ] 全仓依赖方向盘点：core→cli/app 反向 include 清单、宿主间引用清单、隐式耦合（单例/全局/环境变量）。
+- [ ] 定 core public API 面清单（哪些头是对外合同、哪些是内部自由改）。
+- [ ] 冻结目标重组方案（CMake 目标/目录/命名）与迁移次序。
+验收：反向依赖清单全数有归宿（删/倒转/升为回调），无"实现时再看"。
+
+### P0-1：core 成纯库
+- [ ] 反向依赖逐条拆（打印/交互倒转为回调或事件口，配置读取归 core 侧接口）。
+- [ ] CMake 重组：lubancode_core 独立目标，cli/app 收进宿主目标；依赖方向进检查（脚本或 CMake 断言）。
+- [ ] 全量 ctest 零红；CLI 行为对照不变。
+验收：core 目标可被新宿主仅以头+库接走，无终端残留。
+
+### P0-2：宿主壳收拢
+- [ ] CLI 入口瘦身成薄壳（装配 core + 终端皮）。
+- [ ] app-server/one_shot 校验同吃新边界。
+- [ ] 文档：宿主接入指南（"怎么用 core 造一个新宿主"）。
+验收：新增一个最小示例宿主（如 headless echo 宿主）只写装配层、零 core 改动。
+
+## 六、不做什么
+
+1. 不拆 Git 仓库/不造 monorepo——先库分离，物理拆仓另立单。
+2. 不趁分离顺手重构 core 内部模块（另单干，本单只动边界）。
+3. 不改任何 wire 协议与数据格式。
+
+## 七、最终验收门
+
+全量 ctest 零红；core 反向依赖检查绿；CLI 行为对照（键位/命令/渲染）不变；新宿主示例可编译运行。
