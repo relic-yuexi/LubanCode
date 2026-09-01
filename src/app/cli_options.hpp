@@ -83,6 +83,16 @@ struct GatewayCliArgs {
     bool json = false;   // status --json:机器可读快照
 };
 
+// 存储 v2 P0-5 子命令:`lubancode migrate-storage plan|run|status`
+// [--operation <id>] [--project-root <路径>] [--delete-source --yes]。
+struct MigrateStorageCliArgs {
+    std::string verb;                      // plan | run | status
+    std::string operation_id;              // run 续跑指认;空 = 自动续跑
+    std::vector<std::string> project_roots; // --project-root(可多枚)
+    bool delete_source = false;            // 须配 --yes 才生效
+    bool confirm_delete = false;           // --yes
+};
+
 // 解析结果:action 不是 Proceed 时,RunCli 兑现完动作就退,不进会话。
 enum class CliAction {
     Proceed,                  // 正常路径:按 options 继续启动
@@ -104,6 +114,8 @@ enum class CliAction {
     BadTrajectory,            // trajectory 参数不对:人话已塞进 error_text
     RunGateway,               // gateway 子命令:run/status/stop(总装单 G1)
     BadGateway,               // gateway 参数不对:人话已塞进 error_text
+    RunMigrateStorage,        // migrate-storage 子命令:plan/run/status(存储 v2 P0-5)
+    BadMigrateStorage,        // migrate-storage 参数不对:人话已塞进 error_text
 };
 
 struct ParsedCliArgs {
@@ -115,6 +127,7 @@ struct ParsedCliArgs {
     EvolveTestArgs evolve_test;  // action == RunEvolveTest 时有效
     TrajectoryCliArgs trajectory;  // action == RunTrajectory 时有效
     GatewayCliArgs gateway;  // action == RunGateway 时有效
+    MigrateStorageCliArgs migrate_storage;  // action == RunMigrateStorage 时有效
 };
 
 // args[0] 是程序名,实参从 args[1] 起。多个早退参数同时出现时,按扫描

@@ -630,9 +630,7 @@ void HandleThinkHistoryCommand(const std::string& value,
         return;  // 拒绝或同档重复:不落账
     }
     *current_think_history = decision.mode;
-    if (session_runtime != nullptr) {
-        session_runtime->RecordThinkHistory(ThinkHistoryModeName(decision.mode));
-    }
+    // (P0-6:旧存档的 think_history_v1 事件行已删;选择只进会话活值。)
 }
 
 // 把模型目录条目应用到会话状态:/model 切换(两个 explicit 都传 false,

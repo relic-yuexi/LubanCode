@@ -14,8 +14,8 @@
 //
 // 口径戒律:
 //   - 报告不含 prompt 正文;证据只落 hash/token/计数/段名/事件引用;
-//   - flag(features.trajectory)关:static 照常(不碰 Journal),
-//     runtime/outcome 明说"账未开",不猜;
+//   - Journal 不可得时:static 照常(不碰 Journal),runtime/outcome
+//     明说"账不可得",不猜;
 //   - 语义类检查只给 suspected(confidence=low),复核才作数。
 #pragma once
 

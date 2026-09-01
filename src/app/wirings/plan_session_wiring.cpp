@@ -27,76 +27,9 @@ using lubancode::cli::TermOut;
 
 PlanSessionWiring::PlanSessionWiring(Host host) : host_(std::move(host)) {}
 
-void PlanSessionWiring::RestoreFromArchive(
-    const std::optional<lubancode::sessions::ModeEvent>& mode_event,
-    const std::vector<lubancode::sessions::PlanEvent>& plans,
-    const std::optional<lubancode::sessions::PlanReviewEvent>& review) {
-    using lubancode::runtime::CollaborationMode;
-    using lubancode::runtime::PlanDocument;
-    using lubancode::runtime::PlanReviewState;
-    // 计划账:按 plan_id 取最高 revision(逐稿都在,取最新);审批只认与
-    // 最新稿匹配的 approved(单子:批准须同时匹配 id/revision/hash)。
-    std::map<std::string, const lubancode::sessions::PlanEvent*> latest_by_id;
-    for (const auto& event : plans) {
-        const auto it = latest_by_id.find(event.plan_id);
-        if (it == latest_by_id.end() || event.revision >= it->second->revision) {
-            latest_by_id[event.plan_id] = &event;
-        }
-    }
-    std::optional<PlanDocument> restored_plan;
-    for (const auto& [id, event] : latest_by_id) {
-        (void)id;
-        PlanDocument plan;
-        plan.plan_id = event->plan_id;
-        plan.revision = event->revision;
-        if (!lubancode::runtime::ParsePlanReviewState(event->state, plan.state)) {
-            plan.state = PlanReviewState::Presented;
-        }
-        plan.content_sha256 = event->sha256;
-        plan.markdown = event->markdown;
-        plan.artifact_ref = event->artifact_ref;
-        plan.source_turn_id = event->turn_id;
-        // 审批回放:匹配最新稿的 approved/rejected 盖掉 presented。
-        if (review.has_value() && review->plan_id == plan.plan_id && review->revision == plan.revision) {
-            if (review->decision == "approved") {
-                plan.state = PlanReviewState::Approved;
-            } else if (review->decision == "rejected") {
-                plan.state = PlanReviewState::Rejected;
-            }
-        }
-        restored_plan = plan;  // map 按序遍历,留下的是最后一个(多稿计划取最新 plan_id)
-    }
-    // mode 回放:最后一条 mode 事件决定档位;老档没行按 Default。恢复只
-    // 回内存真值与提示段,不落 mode 事件(档位是回放出来的,再落一行会把
-    // resume 当一次切换记账)。
-    CollaborationMode restored_mode = CollaborationMode::Default;
-    std::uint64_t restored_revision = 0;
-    if (mode_event.has_value()) {
-        lubancode::runtime::ParseCollaborationMode(mode_event->mode, restored_mode);
-        restored_revision = mode_event->revision;
-        restored_from_archive_ = true;  // 旧账有真值,起手档不再插手
-    }
-    // 崩溃恢复的事务规则(单子):Approved 已落、Default mode 未落——按
-    // 事务恢复规则完成 mode 切换,但不自动重跑 implementation turn。
-    if (restored_plan.has_value() && restored_plan->state == PlanReviewState::Approved &&
-        restored_mode == CollaborationMode::Plan) {
-        restored_mode = CollaborationMode::Default;
-        TermOut() << host_.theme->stats << tr("plan.resume.approved_pending") << host_.theme->reset << "\n";
-    }
-    host_.session_runtime->RestoreCollaborationMode(restored_mode, restored_revision);
-    host_.prompt_options->plan_mode = restored_mode == CollaborationMode::Plan;
-    if (restored_mode == CollaborationMode::Plan) {
-        TermOut() << host_.theme->stats << tr("plan.status.in_plan") << host_.theme->reset << "\n";
-    }
-    if (restored_plan.has_value()) {
-        if (restored_plan->state == PlanReviewState::Presented) {
-            review_pending_ = *restored_plan;  // 半路退出:审阅框可重开
-        }
-        host_.session_runtime->RestorePlanDocument(*restored_plan);
-    }
-    // 提示段跟着档位走:重拼(保历史)。
-    host_.rebuild_preserving();
-}
+// (P0-6:RestoreFromArchive——旧存档 mode/plan/review 账的回放——已删;
+// 调用点随 resume 旧路退场。mode 与计划成品的持久账在 trajectory,
+// resume 档位回放属 Plan 模式单后续波次。)
 
 void PlanSessionWiring::SwitchMode(lubancode::runtime::CollaborationMode mode, const std::string& reason) {
     using lubancode::runtime::CollaborationMode;

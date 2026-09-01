@@ -22,7 +22,6 @@
 #include "cli/theme.hpp"
 #include "memory/project_memory.hpp"
 #include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger(旁路桥)
-#include "sessions/session_store.hpp"
 #include "tools/path_utils.hpp"
 
 namespace lubancode::app {

@@ -53,7 +53,6 @@
 #include "runtime/event_sinks.hpp"
 #include "runtime/session_runtime.hpp"
 #include "runtime/tool_trace_hub.hpp"
-#include "sessions/session_store.hpp"
 #include "workflow/host_executors.hpp"
 
 namespace lubancode::app {
@@ -179,9 +178,6 @@ struct SlashDispatchContext {
     // 命令面明说接不上,不装样子。回一组要打印的行。
     std::function<std::vector<std::string>()> enable_telemetry_session;
     lubancode::runtime::FanoutEventSink* session_events = nullptr;
-    lubancode::sessions::SessionStore* session_store = nullptr;
-    const std::string* sessions_dir = nullptr;
-    lubancode::sessions::SessionMeta* session_meta = nullptr;  // /export 用
     std::string* session_title = nullptr;
     std::string* last_compact_line = nullptr;  // /context 的最近一次 compact 台账
     lubancode::agent::PromptOptions* prompt_options = nullptr;

@@ -594,7 +594,7 @@ api::Message{
 交互模式随后把这四条新增消息逐条 append + flush 到：
 
 ```text
-~/.lubancode/sessions/<session-id>.jsonl
+<workspaces>/<workspace>/sessions/<id>/main.jsonl(P0-2 起唯一会话账)
 ```
 
 文件首行是会话 meta，往后每行一条中立消息。上面的模拟落盘后，大致如下；`ts`、model 与工具正文按实值写：

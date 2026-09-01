@@ -184,7 +184,6 @@ struct BrowserHarness {
         artifact_dir = platform::PathToUtf8(temp);
 
         app_server::ServerOptions options;
-        options.sessions_dir = std::string(); // 不落盘
         options.cwd = "/test/cwd";
         options.browser_sidecar_command = "node"; // 有命令才会走 EnsureSidecar 的成功路(测试注入 transport 后不 spawn)
         options.browser_artifact_dir = artifact_dir;

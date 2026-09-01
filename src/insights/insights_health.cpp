@@ -36,12 +36,8 @@ std::vector<InsightsHealthLine> CheckInsightsHealth(const InsightsHealthInput& i
         lines.push_back(std::move(line));
     };
 
-    // 1/2 轨迹与 reader 口径。
-    if (input.trajectory_on) {
-        add("trajectory", ' ', "已开(features.trajectory on),Journal 是唯一事实账");
-    } else {
-        add("trajectory", 'x', "未开(features.trajectory 关):/insights 没有账可扫");
-    }
+    // 1/2 轨迹与 reader 口径(P0-6:开关已删,账恒开)。
+    add("trajectory", ' ', "Journal 恒开,唯一事实账");
     add("reader", ' ', "Trajectory event schema v2(usage owner)+ v1 legacy read;混写 stream 拒收");
 
     // 3 派生目录权限与磁盘。

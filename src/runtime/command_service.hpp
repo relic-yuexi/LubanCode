@@ -35,7 +35,6 @@
 
 #include "agent/loop.hpp"
 #include "agent/model_router.hpp"
-#include "sessions/session_store.hpp"
 #include "config/config.hpp"
 #include "config/model_catalog.hpp"
 #include "runtime/command.hpp"
@@ -178,7 +177,7 @@ public:
                                     bool write_config);
 
     // ---- ResumeThread ---------------------------------------------------------
-    // 列档(sessions_dir 从 runtime 来;limit 常规 20)。
+    // 列档(workspace 会话索引;limit 常规 20)。
     std::vector<ThreadListEntry> ListThreads(std::size_t limit = 20) const;
 
     // 恢复:thread_ref 是列表序号(1 起,倒序)或会话 id 或空串(最近一场)。

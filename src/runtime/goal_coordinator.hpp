@@ -280,11 +280,8 @@ private:
     std::unordered_map<std::string, GoalEvidence> evidence_;  // 证据账(ev-id → 证据)
 };
 
-// 会话存档的 ledger sink 搭建(骨架拆解反弹·问题 3,自 app/wirings/
-// goal_session_wiring 的 Ensure 抽来):coordinator 事件 -> GoalSessionEvent
-// 行,type 分族(iteration 级事件走 goal_iteration_v1,其余 goal_v1),
-// store 没开张时返回 true(没建档的会话照常吃命令,事件只进内存——建档
-// 后新事件落盘)。纯函数,单测见 tests/unit/runtime/test_goal_ledger_sink.cpp。
-GoalCoordinator::LedgerSink MakeSessionLedgerSink(lubancode::sessions::SessionStore& store);
+// (P0-6:MakeSessionLedgerSink——旧 SessionStore 的 goal 事件行 sink——
+// 已删;goal 事件的持久账走 trajectory Journal,goal_ledger_sink 单测
+// 随删。)
 
 }  // namespace lubancode::runtime::goal

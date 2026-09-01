@@ -1,5 +1,7 @@
 // 会话类 slash 命令:/sessions 列档、/resume 恢复、/export 导出 Markdown。
-// 底层读写在 sessions/session_store,这里只管选择交互与输出拼装。
+// 底层账本自 P0-2 起是 workspace trajectory Journal;旧 sessions/ 读写
+// 件已随 P0-6 删除,纯工具(截断/时间戳/引用消歧/Markdown 导出)在
+// tools/session_utils。
 //
 // 搬家自 main.cpp,行为一字未改;依赖只认 agent/cli/platform。
 
@@ -19,8 +21,7 @@
 #include "agent/loop.hpp"
 #include "agent/prompt_assembler.hpp"  // PromptOptions(/context 的系统提示估算)
 #include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger:P0-2 compact typed 状态机
-#include "sessions/session_store.hpp"
-#include "sessions/session_lifecycle.hpp"
+#include "tools/session_utils.hpp"  // 时间戳/截断/引用消歧/Markdown 导出(P0-6 自 sessions 迁来)
 #include "api/backend.hpp"
 #include "app/commands/command_flow.hpp"
 #include "cli/slash_commands.hpp"  // ParsedSlashCommand(分派注册制)
@@ -169,17 +170,11 @@ struct CompactSessionInputs {
     bool spinner_enabled = false;
     int* session_compact_epoch = nullptr;          // 本场第几次压缩(递给正戏)
     std::string* last_compact_line = nullptr;      // /context 的台账行(写出)
-    std::size_t* persisted_count = nullptr;        // 落盘基线(压缩后收缩)
-    lubancode::sessions::SessionStore* session_store = nullptr;
-    bool session_store_broken = false;
     // 压缩滞回活账(可空 = 单测/无状态场景,不设防)。
     CompactHysteresis* hysteresis = nullptr;
     // 压缩参数现场收集(compact 的窗口预算/守恒校验材料)。BuildCompactOptions
     // 的现算(路由声明/目录条目/活动待办守恒)全在里面。
     std::function<lubancode::agent::CompactOptions()> build_compact_options;
-    // compact_v2 事件落盘前补 goal/loop snapshot(有才带;manifest 守恒面)。
-    std::function<void(lubancode::sessions::CompactV2Event&)> attach_goal_snapshot;
-    std::function<void(lubancode::sessions::CompactV2Event&)> attach_loop_snapshot;
     // PostCompact/SessionStart 审计钩子的会话级发射口。
     std::function<void(lubancode::hooks::HookEvent, nlohmann::json, const std::string&)> emit_session_hook;
     // 压缩路由:cheap 角色的 backend + route(会话侧的 ModelRouterService)。
@@ -198,11 +193,8 @@ struct CompactSessionInputs {
     std::function<void(lubancode::agent::TaskKind kind, lubancode::agent::ModelRole from,
                        lubancode::agent::ModelRole to, const std::string& reason)>
         record_fallback;
-    // mid-turn 压缩前补全量落盘(JSONL 一字不丢)。
-    std::function<void()> persist_new_messages;
-    // P0-2 轨迹:flag 开的会话递账本进来,compact 走 typed 状态机
-    //(compact.requested/applied/failed 落 Journal),不再走
-    // AppendCompactV2Event 旁路(§14.4)。空 = 旧路。
+    // 轨迹账本:compact 走 typed 状态机(compact.requested/applied/failed
+    // 落 Journal)。空 = 单测/无账场景(只压不记账)。
     lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
     // Token 账本单 A1:主会话的 wire 名(compact 子请求旁路桥的 identity;
     // 主 turn 桥的 ctx.trajectory_wire 同源)。trajectory 空 时不用。
@@ -221,13 +213,12 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in);
 void HandleContextPressure(const lubancode::agent::ContextPressure& pressure, const CompactSessionInputs& in);
 
 
-// /compact 命令的结果:event 是 compact_v2 压缩事件(archive + kept_from +
-// manifest + metrics),成功时调用方追加写进存档流水,/resume 才能回放出
-// 压缩后的活状态;失败/没得压给 nullopt。before/after tokens 用统一估算
-// 口径;manifest_* 是摘要 manifest 里守住的目标数,供成功提示带一句
-// "保留了几条约束/待办"。
+// /compact 命令的结果:applied = 压缩是否生效换账(P0-6 起 compact 的
+// 持久账只有 trajectory 的 compact.applied,旧 compact_v2 事件行随
+// SessionStore 删除)。before/after tokens 用统一估算口径;manifest_* 是
+// 摘要 manifest 里守住的目标数,供成功提示带一句"保留了几条约束/待办"。
 struct CompactCommandResult {
-    std::optional<lubancode::sessions::CompactV2Event> event;
+    bool applied = false;
     std::size_t before_tokens = 0;
     std::size_t after_tokens = 0;
     std::size_t manifest_constraints = 0;
@@ -258,13 +249,14 @@ void PrintSessionsCommand(const lubancode::runtime::TrajectorySessionLedger* led
 
 // ---------------------------------------------------------------------------
 // 归档与永久删除(会话管理器单第四、五步)。搬与删全经
-// sessions::SessionLifecycle——这里是接活的人:解析引用、列重名、走确认屏、
-// 报结果,不直接碰 filesystem。
+// trajectory 的 SessionAdminOutcome 自由函数——这里是接活的人:解析引用、
+// 列重名、走确认屏、报结果,不直接碰 filesystem。
 // ---------------------------------------------------------------------------
 
-// 引用解析 + 消歧的共用壳:candidates 归 lifecycle 出,标题由 SessionCatalog
-// 补;重名列短 id 叫用户点明,绝不猜一场。命中唯一时填 out_id/out_title。
-// 返回 false = 没解出(人话已打好,调用方直接印)。include_archived 版
+// 引用解析 + 消歧的共用壳:candidates 出自 workspace 会话索引,消歧走
+// tools::ResolveSessionRef;重名列短 id 叫用户点明,绝不猜一场。命中唯一
+// 时填 out_id/out_title。返回 false = 没解出(人话已打好,调用方直接印)。
+// include_archived 版
 // 连归档场一起列候选(unarchive 的目标恰是归档场)。
 bool ResolveSessionReference(const std::filesystem::path& workspaces_root, const std::string& ref,
                              const std::function<std::string()>& stdin_line, bool include_archived,
@@ -297,54 +289,9 @@ std::optional<std::string> PromptResumeTarget(const lubancode::runtime::Trajecto
                                               const lubancode::cli::Theme& theme);
 
 
-// /resume <编号或id> 和 --continue 共用的执行逻辑。target 是编号(按
-// ListSessions 的倒序编号)、会话 id、或空串(--continue:最近一场)。
-// 编号和"最近一场"都只在**本目录**(meta.cwd == 当前 cwd)的场子里数;
-// 直接给 id 的仍然全局能找(拼路径兜底),跨目录恢复留了这条明路。
-// 成功:回放事件 + 成对修补 + ReplaceHistory + 接管文件继续追加,返回 true;
-// session_title 同步成存档里最后一条 title 事件(没有就清空)。
-// quiet_if_none:--continue 本目录找不到任何存档时不报错、安静开新会话。
-// worktree_session(0.27.x,可空):会话档 meta.cwd(含 cwd 事件回放)若指向
-// 一间还在的 worktree 房,验明正身后把会话搬回去;房没了回落启动目录并
-// 说一声;马甲房(.git 指回主仓那类)拒进并报原因。非空时成功恢复后由
-// 调用方做一次目录善后同步(重拼系统提示那条路)。
-// on_queue_restored(可空,取走即消费单路径二):恢复成功后收一份存档里
-// 最后一条 queue 事件快照(没排过队就是空表),会话层拿它重建
-// SessionSteeringQueue。不接就照旧丢弃(单测/旧调用点)。
-// on_mode_restored(可空,Plan 模式单):恢复成功后收存档的 mode/plan/review
-// 账(老档没 mode 行给 Default 与空表),会话层拿它恢复协作模式档位与
-// 最近计划成品。不接照旧丢弃。
-// on_think_history_restored(可空,Kimi 保留式思考单 P1):恢复成功后收存档
-// 最后一条 think_history 事件(老档没这行给 nullopt),会话层拿它恢复
-// /think history 的选择并按当前模型重新校验。不接照旧丢弃(按 default)。
-bool ResumeSession(const std::string& target, const std::string& sessions_dir,
-                    lubancode::agent::Agent& loop, lubancode::sessions::SessionStore& store,
-                    std::size_t& persisted_count, lubancode::sessions::SessionMeta& session_meta,
-                    std::string& session_title, const std::string& wire_str, const std::string& current_model,
-                    const lubancode::cli::Theme& theme, bool quiet_if_none,
-                    lubancode::cli::WorktreeSession* worktree_session = nullptr,
-                    int* compact_epoch_out = nullptr,
-                    const std::function<void(const std::vector<lubancode::sessions::ArchivedQueueItem>&)>*
-                        on_queue_restored = nullptr,
-                    const std::function<void(const std::optional<lubancode::sessions::ModeEvent>&,
-                                             const std::vector<lubancode::sessions::PlanEvent>&,
-                                             const std::optional<lubancode::sessions::PlanReviewEvent>&)>*
-                        on_mode_restored = nullptr,
-                    const std::function<void(const std::optional<lubancode::sessions::ThinkHistoryEvent>&)>*
-                        on_think_history_restored = nullptr);
-
-
-// /export [路径]:当前会话导出 Markdown,默认写 sessions/<id>.md。
-// 有存档文件就从文件读**全量流水**导出(压缩不丢内容,发生点插一行标注);
-// 没有存档文件(没落过盘)退回导内存里这份历史。/title 设过的标题当大标题。
-// artifact_store(可空,第二期):非空且有落盘时追加"可追回 artifact"附录
-// ——id/工具/字节/sha 指纹/真本路径,导出内容里被折叠的结果按 id 对得上
-// 真本(规格"/export 必须说明哪些内容来自 artifact")。
-void HandleExportCommand(const std::string& args, const lubancode::agent::Agent& loop,
-                          const lubancode::sessions::SessionStore& store, const std::string& sessions_dir,
-                          const lubancode::sessions::SessionMeta& session_meta, const std::string& session_title,
-                          const lubancode::agent::ContextArtifactStore* artifact_store = nullptr);
-
+// (P0-6:旧 SessionStore 的 ResumeSession/HandleExportCommand 已删;
+// /resume 走 trajectory 的 resume-as-new 七步,/export 走 ReplayState
+// 折叠投影——两条新路都在本文件分派位里。旧声明的长注释随之退场。)
 
 // ---------------------------------------------------------------------------
 // 会话命令的窄状态:handler 只借引用干活,不拥有会话资源。
@@ -354,14 +301,9 @@ void HandleExportCommand(const std::string& args, const lubancode::agent::Agent&
 // (InteractiveSession)在命令执行期间保证存活。
 struct SessionCommandState {
     std::function<void(bool)> rebuild_loop;  // /clear 传 false = 丢历史重建
-    lubancode::agent::Agent& loop;        // /compact /resume /export 用
-    lubancode::sessions::SessionStore& store;
-    std::size_t& persisted_count;             // 落盘基线
-    int& compact_epoch;                       // 压缩序号(/resume 接旧账,/compact 进出两头用)
-    lubancode::sessions::SessionMeta& meta;
+    lubancode::agent::Agent& loop;        // /compact 用
+    int& compact_epoch;                       // 压缩序号(/compact 进出两头用)
     std::string& title;
-    bool& title_pending;
-    bool& store_broken;
     std::string& start_ts;                   // /clear 翻新会话 id 时间戳
     std::function<void()> on_session_restarted;  // /clear 善后(project memory 源)
     std::function<void(const std::string&)> on_title_changed;  // peer 名册改名,可空
@@ -370,37 +312,18 @@ struct SessionCommandState {
     // 报给人看——面板规格"清场不能无声遗失"的一条。可空(单测不接)。
     std::function<void()> on_agents_cleanup;
     lubancode::cli::WorktreeSession* worktree_session = nullptr;  // 可空
-    const std::string& sessions_dir;
     const std::string& wire_str;
     const std::shared_ptr<std::string>& current_model;
     // hooks 框架:/resume 成功后回调(SessionStart source=resume 的发射口,
     // 会话层接)。可空(单测不接)。
     std::function<void()> on_resumed;
-    // /resume 成功后的排队账重建(取走即消费单路径二):收存档最后一条
-    // queue 快照,会话层灌回 SessionSteeringQueue。可空(单测不接)。
-    std::function<void(const std::vector<lubancode::sessions::ArchivedQueueItem>&)> on_queue_restored;
-    // Plan 模式单:/resume 成功后的 mode/plan/review 账恢复。可空(单测
-    // 不接;不接就丢弃,老档行为)。
-    std::function<void(const std::optional<lubancode::sessions::ModeEvent>&,
-                       const std::vector<lubancode::sessions::PlanEvent>&,
-                       const std::optional<lubancode::sessions::PlanReviewEvent>&)>
-        on_mode_restored;
-    // Kimi 保留式思考单 P1:/resume 成功后的跨轮保留选择恢复。可空(单测
-    // 不接;不接就按 ProviderDefault)。
-    std::function<void(const std::optional<lubancode::sessions::ThinkHistoryEvent>&)> on_think_history_restored;
 };
 
-// /clear:丢历史重建、存档翻篇、标题翻篇。
-CommandFlow HandleClearCommand(SessionCommandState& state, const lubancode::config::Config& config,
-                               const lubancode::cli::Theme& theme, bool spinner_enabled);
-
-// /title [标题]:看/设标题;建档前设的先挂起,建档成功由落盘路径补写事件行。
-CommandFlow HandleTitleCommand(SessionCommandState& state, const std::string& args,
-                               const lubancode::cli::Theme& theme);
-
-// /resume [编号或id]:裸敲弹最近 20 场菜单;成功后接管存档继续追加。
-CommandFlow HandleResumeCommand(SessionCommandState& state, const std::string& args,
-                                const lubancode::cli::Theme& theme);
+// (P0-6:HandleClearCommand/HandleTitleCommand/HandleResumeCommand 的旧
+// 存档实现已删——/clear /title /resume 的现行路都在本文件分派位里,
+// 分别走 trajectory 的新场、control.title.changed 与 resume-as-new 七步;
+// 旧存档字段 store/persisted_count/meta/title_pending/store_broken/
+// sessions_dir 与 queue/mode/think 恢复回调一并退场。)
 
 // ---------------------------------------------------------------------------
 // 命令分派注册制(会话终章):会话域的分派位。旧 interactive_session 大

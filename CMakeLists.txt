@@ -487,14 +487,14 @@ add_library(lubancode_engine STATIC
   src/agent/compact.cpp
   src/agent/context_budget.cpp
   src/agent/microcompact.cpp
-  src/sessions/session_store.cpp
+  # 存储 v2 P0-6:旧 SessionStore/Catalog/Lifecycle(平铺目录读写)已删,
+  # 仍被生产消费的纯工具(时间戳/UTF-8 截断/id 拼装/路径归一/引用消歧)
+  # 迁 tools/session_utils;旧格式解析只活在迁移器独立 target。
+  src/tools/session_utils.cpp
   # 持久目标单:goal 事件行(goal_v1 族)的 serialize/parse 纯函数。
   src/sessions/goal_session.cpp
   # 逐枚追踪单:工具生命周期栅栏事件、恢复账本(纯函数)。
   src/agent/tool_trace.cpp
-  src/sessions/session_catalog.cpp
-  # 会话管理器单第四五步:SessionLifecycle 搬与删的唯一收口(纯磁盘薄壳)。
-  src/sessions/session_lifecycle.cpp
   src/skills/workflow_recorder.cpp
   src/skills/skill_drafter.cpp
   # engine 引用的三个 cli 叶子(零标准流、零终端依赖,tools/config 都吃):
@@ -1027,6 +1027,11 @@ add_library(lubancode_app STATIC
   src/cli/record_command.cpp
   # P0-3:`lubancode trajectory <verify|replay|harness-replay>` 只读诊断子命令。
   src/cli/trajectory_command.cpp
+  # 存储 v2 P0-5:`lubancode migrate-storage <plan|run|status>` 过渡窗命令面
+  # (引擎在 lubancode_storage_migrator 独立 target;收官发行摘除入口后
+  # 只剩 tools/legacy-storage-migrator 独立件,见 docs/getting-started/
+  # storage-migration.md 的版本边界)。
+  src/cli/migrate_storage_command.cpp
   # 持久 Agent 总装单 G1:`lubancode gateway run|status|stop` 子命令面。
   src/cli/gateway_command.cpp
   # 骨架拆解反弹·问题 1:工具确认的终端半边(菜单/diff/[y/a/N]/持久化)
@@ -1049,6 +1054,30 @@ endif()
 add_executable(lubancode src/main.cpp)
 target_link_libraries(lubancode PRIVATE lubancode_app)
 target_compile_features(lubancode PRIVATE cxx_std_23)
+
+# ---------------------------------------------------------------------------
+# 存储 v2 P0-5:一次性迁移器(独立 target;旧格式解析只活在里面,不进
+# 生产 runtime。lubancode 的 migrate-storage 子命令经 app 链进来;独立
+# 可执行 legacy-storage-migrator 是封存体,不随发行包安装——收官发行把
+# app 的这条链接摘掉即完成"移出生产构建"(单子 §7.4/P0-6)。
+# ---------------------------------------------------------------------------
+add_library(lubancode_storage_migrator STATIC
+  src/workspace/storage_migrator.cpp)
+target_include_directories(lubancode_storage_migrator PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_link_libraries(lubancode_storage_migrator PUBLIC lubancode_engine)
+target_compile_features(lubancode_storage_migrator PUBLIC cxx_std_23)
+target_precompile_headers(lubancode_storage_migrator PRIVATE
+  "${CMAKE_CURRENT_SOURCE_DIR}/src/pch.hpp")
+if(MSVC)
+  target_compile_options(lubancode_storage_migrator PRIVATE /MP)
+endif()
+
+target_link_libraries(lubancode_app PUBLIC lubancode_storage_migrator)
+
+add_executable(legacy-storage-migrator tools/legacy-storage-migrator/main.cpp)
+target_link_libraries(legacy-storage-migrator PRIVATE lubancode_storage_migrator)
+target_compile_features(legacy-storage-migrator PRIVATE cxx_std_23)
 
 # 随包 rg 落到主程序旁的 libexec/(迁移单 8.4:构建后复制)。Release 包
 # 的 rg 由 scripts/fetch_ripgrep.py 在打包阶段直接放 dist/lubancode/libexec,

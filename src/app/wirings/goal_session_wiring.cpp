@@ -17,7 +17,6 @@
 #include "runtime/goal_evidence.hpp"
 #include "runtime/goal_evaluator.hpp"
 #include "runtime/tool_trace_hub.hpp"
-#include "sessions/session_store.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/registry.hpp"
 
@@ -64,10 +63,8 @@ void GoalSessionWiring::Ensure(const lubancode::config::Config& config) {
     if (coordinator_.has_value()) return;
     auto options = lubancode::app::GoalOptionsFromConfig(config.features_goals, config.goals);
     coordinator_.emplace(std::move(options));
-    // LedgerSink:goal 事件行 append+flush 进 session 存档(问题 3:事件
-    // 类型分族与行折算在 runtime::goal::MakeSessionLedgerSink,纯函数)。
-    coordinator_->SetLedgerSink(
-        lubancode::runtime::goal::MakeSessionLedgerSink(*host_.session_store));
+    // P0-6:旧存档的 LedgerSink 已删;goal 事件持久账接 trajectory 属
+    // goal 单后续波次(不接 sink = 事件只进内存,现状自 P0-2 起即如此)。
     // loop 单分流合流:coordinator 的 ready continuation 经 GoalWorkSource
     // 进泵(泵问 ProbeWork;选中后装配层 TakeReadyIteration 发 synthetic
     // turn)。trigger 各归各(evaluator 判终点 vs 时钟到点),泵共用。
@@ -86,23 +83,9 @@ void GoalSessionWiring::Ensure(const lubancode::config::Config& config) {
 }
 
 void GoalSessionWiring::RestoreFromArchive() {
+    // P0-6:旧存档 goal 事件账的回放路已删(store 恒不 active,P0-2 起此
+    // 路恒早退);goal 的持久账接 trajectory 属 goal 单后续波次。
     Ensure(*host_.config);
-    if (!host_.session_store->active()) return;  // 没档可恢复
-    const auto bytes = lubancode::sessions::ReadSessionFileBytes(host_.session_store->file_path());
-    if (!bytes.has_value()) return;
-    const auto loaded = lubancode::sessions::ParseSessionFile(*bytes);
-    if (!loaded.has_value() || loaded->goal_events.empty()) return;
-    const auto stats = coordinator_->RestoreFromArchive(loaded->goal_events);
-    if (stats.replayed == 0 && stats.skipped == 0) return;
-    std::string restored = "目标账已随会话恢复(" + std::to_string(stats.replayed) + " 条事件";
-    if (stats.skipped > 0) {
-        restored += "," + std::to_string(stats.skipped) + " 条坏行跳过";
-    }
-    restored += ")。默认暂停续跑;查看 /goal status,续跑 /goal resume。";
-    Notify(/*is_error=*/false, restored);
-    if (stats.suspended_by_policy) {
-        Notify(/*is_error=*/false, "goals 功能当前未开启:目标挂起(SuspendedByPolicy),可查、可导出、可 clear,不自动跑。");
-    }
 }
 
 lubancode::app::GoalWiring GoalSessionWiring::MakeCommandWiring(
@@ -110,22 +93,15 @@ lubancode::app::GoalWiring GoalSessionWiring::MakeCommandWiring(
     lubancode::app::GoalWiring wiring;
     wiring.theme = host_.theme;
     wiring.coordinator = coordinator_.has_value() ? &*coordinator_ : nullptr;
-    wiring.session_store = host_.session_store;
     wiring.agent_tool = agent_tool;
     wiring.checkpoint_state = checkpoint_state_.get();
     wiring.loop_scheduler = loop_scheduler;
     return wiring;
 }
 
-void GoalSessionWiring::AttachSnapshotToCompact(lubancode::sessions::CompactV2Event& event) {
-    Ensure(*host_.config);
-    const auto snapshot = lubancode::runtime::goal::BuildGoalSnapshot(*coordinator_);
-    if (!snapshot.has_value()) return;  // 没 goal:不带,普通会话照旧
-    nlohmann::json goal_metrics;
-    goal_metrics["snapshot"] = snapshot->to_json();
-    goal_metrics["conservation_sha256"] = lubancode::runtime::goal::GoalSnapshotConservationSha256(*snapshot);
-    event.metrics["goal"] = std::move(goal_metrics);
-}
+// (P0-6:AttachSnapshotToCompact——compact_v2 事件的 goal 快照附带——
+// 已删;compact 的持久账是 trajectory 的 compact.applied,goal 守恒快照
+// 的接续属 goal 单后续波次。)
 
 void GoalSessionWiring::NoteSubagentCompletion() {
     lubancode::app::NoteSubagentCompletionForGoal(
@@ -213,20 +189,8 @@ void GoalSessionWiring::CloseIteration(const std::string& turn_id, bool turn_fai
             if (!evidence.has_value()) {
                 continue;
             }
-            // 事件行(goal_evidence_v1)先落:证据账是 hard gate 的查表底。
-            lubancode::sessions::GoalSessionEvent line;
-            line.type = "goal_evidence_v1";
-            line.event = "observed";
-            line.goal_id = evidence->goal_id;
-            line.iteration_id = evidence->iteration_id;
-            line.revision = task->revision;
-            nlohmann::json payload;
-            payload["evidence"] = evidence->to_json();
-            line.payload = std::move(payload);
-            line.timestamp_ms = now_ms;
-            if (host_.session_store->active()) {
-                (void)host_.session_store->AppendGoalEvent(line);
-            }
+            // P0-6:旧存档的 goal_evidence_v1 行已删;证据账进 coordinator
+            //(进程内),持久化接 trajectory 属 goal 单后续波次。
             coordinator_->RecordEvidence(*evidence);
             fresh_ids.push_back(evidence->id);
             // 写盘级工具落完:旧验证证据按分档翻 stale(单子"证据涉及改动

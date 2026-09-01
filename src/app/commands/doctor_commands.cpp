@@ -1151,8 +1151,8 @@ void PrintInstructionsDoctor(const DoctorContext& context) {
 void PrintTrajectoryDoctor(const DoctorContext& context) {
     TermOut() << context.theme.stats << "轨迹账(/doctor trajectory):" << context.theme.reset << "\n";
     if (context.trajectory_ledger == nullptr) {
-        TermOut() << "  轨迹未开(features.trajectory 关)。副作用工具的可恢复保证"
-                     "按降级口径执行,无审计账可查。\n";
+        TermOut() << "  轨迹账未装配(会话启动时开张失败)。无审计账可查,"
+                     "详见启动错误。\n";
         TermOut().flush();
         return;
     }
@@ -1304,7 +1304,7 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
         // 默认不联网);--probe 才对明配 endpoint 发无业务数据的探针。
         TermOut() << context.theme.stats << "遥测(/doctor telemetry):" << context.theme.reset << "\n";
         if (context.telemetry_service == nullptr) {
-            TermOut() << "  未装配(features.telemetry 默认关;须与 features.trajectory 同开)。\n";
+            TermOut() << "  未装配(features.telemetry 默认关)。\n";
             TermOut().flush();
             return;
         }

@@ -25,7 +25,6 @@ std::uintptr_t SymbolAddressSum() {
            reinterpret_cast<std::uintptr_t>(&lubancode::app::PrintDivider) +
            reinterpret_cast<std::uintptr_t>(&lubancode::app::RunTurn) +
            reinterpret_cast<std::uintptr_t>(&lubancode::app::HandlePromptCommand) +
-           reinterpret_cast<std::uintptr_t>(&lubancode::app::ResumeSession) +
            reinterpret_cast<std::uintptr_t>(&lubancode::app::ChooseModelId) +
            reinterpret_cast<std::uintptr_t>(&lubancode::app::PrintToolsCommand) +
            reinterpret_cast<std::uintptr_t>(&lubancode::app::RunInteractiveSession) +
