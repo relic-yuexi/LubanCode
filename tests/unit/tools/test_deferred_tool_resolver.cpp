@@ -89,6 +89,9 @@ TEST_CASE("DeferredToolMode: 配置词与枚举对上(P3 起 native 放行)") {
     CHECK(tools::ParseDeferredToolMode("proxy_reference") == tools::DeferredToolMode::ProxyReference);
     // P3:native_reference 放行——配置层收下,生效过装配期两道门。
     CHECK(tools::ParseDeferredToolMode("native_reference") == tools::DeferredToolMode::NativeReference);
+    // P4:"auto" 是解析策略不是一档模式,不从 Parse 出(由 ResolveDeferred
+    // ToolMode 单独判,见下一册)——这里钉着它不悄悄变成哪一档。
+    CHECK(tools::ParseDeferredToolMode("auto") == std::nullopt);
     CHECK(tools::ParseDeferredToolMode("垃圾值") == std::nullopt);
     CHECK(tools::DeferredToolModeName(tools::DeferredToolMode::ProxyReference) == "proxy_reference");
     CHECK(tools::DeferredToolModeName(tools::DeferredToolMode::LegacyExpand) == "legacy_expand");
@@ -135,6 +138,48 @@ TEST_CASE("ResolveDeferredToolMode: 两道门全开才 native,门不开大声回
                                                       /*catalog_native_declared=*/false, "");
     CHECK(proxy.mode == tools::DeferredToolMode::ProxyReference);
     CHECK(proxy.native_denial.empty());
+}
+
+// ---------------------------------------------------------------------------
+// "auto" 档(动态工具 P4·§十三 P4-2/P4-3 的机制半边):能力驱动——两道门
+// 都开走 native(P4-3"native 成为明确支持模型的默认"的机制),门不开落
+// 宿主推荐档(kRecommendedDeferredToolMode,当前 legacy,真机质量对照过门
+// 后翻 proxy——单子红线 8,机制就位、默认值不动)。与"点名 native 被拒"
+// 的待遇不同:点名的回落是意外要大声报,auto 的回落是合同行为静默落,只
+// 在落 native 时给一行 mode_note。
+// ---------------------------------------------------------------------------
+TEST_CASE("ResolveDeferredToolMode: auto 档能力驱动——门开走原生带说明,门不开静默落推荐档") {
+    // 门全开:auto -> native + 变体递进 + mode_note 告知生效档与退路。
+    const auto native = tools::ResolveDeferredToolMode("auto", /*wire_is_anthropic=*/true,
+                                                       /*catalog_native_declared=*/true, "bm25");
+    CHECK(native.mode == tools::DeferredToolMode::NativeReference);
+    CHECK(native.server_tool_search == "bm25");
+    CHECK(native.native_denial.empty());
+    REQUIRE_FALSE(native.mode_note.empty());
+    CHECK(native.mode_note.find("native_reference") != std::string::npos);
+    CHECK(native.mode_note.find("proxy_reference") != std::string::npos);  // 指明强制通用路的退路
+
+    // 门一不开(非 anthropic wire):静默落推荐档,不响 denial 也不响 note
+    // ——auto 的回落是合同行为,不是意外。
+    const auto wrong_wire =
+        tools::ResolveDeferredToolMode("auto", /*wire_is_anthropic=*/false, /*catalog_native_declared=*/true, "regex");
+    CHECK(wrong_wire.mode == tools::kRecommendedDeferredToolMode);
+    CHECK(wrong_wire.mode == tools::DeferredToolMode::LegacyExpand);  // 推荐档当前钉在 legacy(现状零变化)
+    CHECK(wrong_wire.native_denial.empty());
+    CHECK(wrong_wire.mode_note.empty());
+
+    // 门二不开(目录没声明,第三方兼容端点):同上静默落推荐档。
+    const auto no_catalog =
+        tools::ResolveDeferredToolMode("auto", /*wire_is_anthropic=*/true, /*catalog_native_declared=*/false, "");
+    CHECK(no_catalog.mode == tools::kRecommendedDeferredToolMode);
+    CHECK(no_catalog.native_denial.empty());
+    CHECK(no_catalog.mode_note.empty());
+
+    // 对照:点名 native 门不开仍是大声 denial(P3 既有合同,auto 不洗白它)。
+    const auto named = tools::ResolveDeferredToolMode("native_reference", /*wire_is_anthropic=*/false,
+                                                       /*catalog_native_declared=*/true, "");
+    CHECK(named.mode == tools::DeferredToolMode::LegacyExpand);
+    CHECK_FALSE(named.native_denial.empty());
 }
 
 // ---------------------------------------------------------------------------

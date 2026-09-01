@@ -47,7 +47,7 @@ using lubancode::cli::trf;
 // "(包 <canonical 组件名> <版本>)"——wire 名给人看费眼,canonical 名 +
 // 包版本才是对得上的账(契约 packages.md §6.1:展示名用 canonical)。
 void PrintToolsCommand(const lubancode::tools::ToolRegistry& registry, const std::set<std::string>& loaded,
-                        bool deferral_enabled, int threshold, const std::string& mode_hint) {
+                        bool deferral_enabled, int threshold, int token_floor, const std::string& mode_hint) {
     const auto print_tool_line = [](const lubancode::tools::Tool& tool,
                                     const lubancode::tools::ToolRegistry& reg) {
         const lubancode::tools::ToolRegistration* registration = reg.RegistrationOf(tool.name());
@@ -71,10 +71,19 @@ void PrintToolsCommand(const lubancode::tools::ToolRegistry& registry, const std
         }
     }
     if (!deferral_enabled) {
-        TermOut() << trf("cmd.tools.no_deferral", registry.All().size(),
-                          threshold == 0 ? tr("cmd.tools.threshold_zero")
-                                          : trf("cmd.tools.below_threshold", threshold))
-                   << "\n";
+        // 动态工具 P4:没启用延迟的缘由分三样——阈值 0、枚数没过线、枚数
+        // 过了但预算门拦下(延迟工具声明 token 本金太小,启用必赔,依据见
+        // kDefaultToolSearchTokenFloor 注)。第三样是新面孔,得说清调哪里。
+        std::string reason;
+        if (threshold == 0) {
+            reason = tr("cmd.tools.threshold_zero");
+        } else if (static_cast<int>(registry.All().size()) <= threshold) {
+            reason = trf("cmd.tools.below_threshold", threshold);
+        } else {
+            reason = token_floor > 0 ? trf("cmd.tools.floor_blocked", threshold, token_floor)
+                                     : trf("cmd.tools.below_threshold", threshold);
+        }
+        TermOut() << trf("cmd.tools.no_deferral", registry.All().size(), reason) << "\n";
         for (const auto& tool : registry.All()) {
             print_tool_line(*tool, registry);
         }
@@ -848,6 +857,7 @@ CommandFlow HandleSlashPlugin(SlashDispatchContext& ctx, const lubancode::cli::P
 CommandFlow HandleSlashTools(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
     (void)parsed;
     PrintToolsCommand(*ctx.registry, **ctx.loaded_tools, ctx.main_deferral, ctx.tool_search_threshold,
+                      ctx.tool_search_token_floor,
                       ctx.main_proxy_reference
                           ? tr("cmd.tools.proxy_mode")
                           : ctx.main_native_reference ? tr("cmd.tools.native_mode") : std::string());

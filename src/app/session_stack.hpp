@@ -130,6 +130,8 @@ struct SessionStack {
     bool sub_native = false;
     std::string native_server_tool_search;
     int tool_search_threshold = 0;
+    // 动态工具 P4:延迟挂载的 token 预算门(与 threshold 同一条灌线)。
+    int tool_search_token_floor = 0;
     // 后台任务 detached registry 的注册时点快照(不追 /skill 安装)。
     const std::vector<lubancode::tools::SkillMeta> detached_skills;
     const lubancode::config::SearchConfig detached_search;

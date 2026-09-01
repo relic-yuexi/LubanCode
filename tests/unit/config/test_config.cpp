@@ -1976,6 +1976,48 @@ TEST_CASE("MergeConfig: tool_search_threshold 配置文件压过默认值,没写
 }
 
 // ---------------------------------------------------------------------------
+// 动态工具 P4(§十三 P4-1):tool_search_token_floor(延迟挂载的 token 预算
+// 门)。待遇跟 tool_search_threshold 一样——只有配置文件(项目级 > 全局)
+// 和内置默认值两级,没有环境变量这一级。默认值 1500 的依据见
+// kDefaultToolSearchTokenFloor 注(只引 P0 baseline 册实测)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseFileConfigJson: tool_search_token_floor 正常解析,0 也认(关预算门),负数/非整数报错") {
+    const auto ok = config::ParseFileConfigJson(R"({"tool_search_token_floor": 3000})", "x.json");
+    REQUIRE(ok.has_value());
+    REQUIRE(ok->tool_search_token_floor.has_value());
+    CHECK(*ok->tool_search_token_floor == 3000);
+
+    // 0 合法:显式关掉预算门,只看枚数(P4 之前的现状,用户可控回退)。
+    const auto zero = config::ParseFileConfigJson(R"({"tool_search_token_floor": 0})", "x.json");
+    REQUIRE(zero.has_value());
+    CHECK(*zero->tool_search_token_floor == 0);
+
+    const auto missing = config::ParseFileConfigJson(R"({})", "x.json");
+    REQUIRE(missing.has_value());
+    CHECK_FALSE(missing->tool_search_token_floor.has_value());
+
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"tool_search_token_floor": -1})", "x.json").has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"tool_search_token_floor": "1500"})", "x.json").has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"tool_search_token_floor": 1.5})", "x.json").has_value());
+}
+
+TEST_CASE("MergeConfig: tool_search_token_floor 配置文件压过默认值,没写走默认 1500") {
+    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(defaulted.has_value());
+    CHECK(defaulted->config.tool_search_token_floor == config::kDefaultToolSearchTokenFloor);
+    CHECK(defaulted->config.tool_search_token_floor == 1500);
+    CHECK(defaulted->sources.tool_search_token_floor == config::Source::Default);
+
+    config::FileConfig file;
+    file.tool_search_token_floor = 0;
+    const auto from_file = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    REQUIRE(from_file.has_value());
+    CHECK(from_file->config.tool_search_token_floor == 0);
+    CHECK(from_file->sources.tool_search_token_floor == config::Source::ProjectConfigFile);
+}
+
+// ---------------------------------------------------------------------------
 // 动态工具 PromptCache 守恒单 P1:deferred_tool_mode(延迟工具命中后的走
 // 法)。先 opt-in——没写走 legacy_expand 现状;认不得的值报错,不静默
 // 换路。P3 起 native_reference 放行:配置层只收字符串,生效与否由装配期
@@ -2001,6 +2043,13 @@ TEST_CASE("ParseFileConfigJson: deferred_tool_mode 四档认得,垃圾值报错"
     REQUIRE(native.has_value());
     REQUIRE(native->deferred_tool_mode.has_value());
     CHECK(*native->deferred_tool_mode == "native_reference");
+
+    // P4:"auto"(能力驱动)放行——解析归装配期 ResolveDeferredToolMode
+    //(native 门开走原生,门不开落宿主推荐档),配置层只收字符串。
+    const auto auto_mode = config::ParseFileConfigJson(R"({"deferred_tool_mode": "auto"})", "x.json");
+    REQUIRE(auto_mode.has_value());
+    REQUIRE(auto_mode->deferred_tool_mode.has_value());
+    CHECK(*auto_mode->deferred_tool_mode == "auto");
 
     const auto missing = config::ParseFileConfigJson(R"({})", "x.json");
     REQUIRE(missing.has_value());

@@ -1050,6 +1050,9 @@ const Entry kZhCN[] = {
     {"cmd.tools.no_deferral", "工具共 {0} 个,{1},全量直挂,tool_search 延迟机制未启用。"},
     {"cmd.tools.threshold_zero", "阈值 0(永不延迟)"},
     {"cmd.tools.below_threshold", "低于阈值 {0}"},
+    // 动态工具 P4:枚数过了、预算门拦下(延迟工具声明 token 本金低于
+    // floor,启用必赔——P0 baseline 册实测,见 kDefaultToolSearchTokenFloor)。
+    {"cmd.tools.floor_blocked", "枚数已过阈值 {0},但延迟工具声明 token 本金低于预算门 {1}(本金太小省不出固定开销),全量常驻"},
     {"cmd.tools.enabled", "tool_search 延迟挂载已启用(阈值 {0},loaded 集合会话级,/clear 不清)。"},
     // 动态工具 P1:/tools 的 proxy 档口径说明。
     {"cmd.tools.proxy_mode",

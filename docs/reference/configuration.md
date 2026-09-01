@@ -34,6 +34,8 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
   "max_context_chars": 600000,
   "max_steps_per_turn": 0,
   "tool_search_threshold": 20,
+  "tool_search_token_floor": 1500,
+  "deferred_tool_mode": "",
   "connect_timeout_ms": 15000,
   "stream_idle_timeout_secs": 60,
   "request_timeout_secs": 30,
@@ -95,7 +97,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 4. **通用环境变量**(向后兼容,跟 Claude Code、Codex 等工具共用同名变量容易撞车,建议改用第 1 级):`wire=anthropic-messages` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;其余 wire 读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`。Gemini 预设另可用自己的 `key_env`，内置目录写的是 `GEMINI_API_KEY`。
 5. **内置默认值**。
 
-逐字段合并:项目级写了某字段就用项目级那一份,项目级缺的字段回退全局,全局也缺再往下一级找。`mcpServers`、`search`、`lsp`、`status_panel` 这几段是**整段回退**(不做键级混合)——项目级写了就用项目级那一整段,否则用全局那一整段。例外是 `hooks`:全局与项目两层**相加**(两层都跑,项目级删不掉全局的钩子;项目级钩子须经信任审查,见 [Hooks 手册](../features/extensions/hooks.md))。`tool_search_threshold`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs`、`request_hard_timeout_secs` 只从配置文件(项目级 > 全局)或内置默认值来,没有环境变量这一级。
+逐字段合并:项目级写了某字段就用项目级那一份,项目级缺的字段回退全局,全局也缺再往下一级找。`mcpServers`、`search`、`lsp`、`status_panel` 这几段是**整段回退**(不做键级混合)——项目级写了就用项目级那一整段,否则用全局那一整段。例外是 `hooks`:全局与项目两层**相加**(两层都跑,项目级删不掉全局的钩子;项目级钩子须经信任审查,见 [Hooks 手册](../features/extensions/hooks.md))。`tool_search_threshold`、`tool_search_token_floor`、`deferred_tool_mode`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs`、`request_hard_timeout_secs` 只从配置文件(项目级 > 全局)或内置默认值来,没有环境变量这一级。
 
 `/config`(或 `lubancode --config`)会打出每个字段最终来自哪一级,排查配置问题用。
 
@@ -127,6 +129,8 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `max_steps_per_turn` | 非负整数 | `0`(无上限) | agent 主循环一个 turn 内的步数上限:一步 = 一次模型请求,一步可含多枚工具调用。不配或配 `0` = 不设上限,防跑飞靠 ESC/Ctrl+C;配正整数才是硬上限,超过就按预算耗尽收场。负数或非法值静默忽略。旧名 `max_turns` 仍可读入(兼容期,读到会打弃用提示);两者同现且值不同会明报冲突并采用新名。 |
 | `system_prompt_file` | 字符串,UTF-8 文本路径 | 无 | 人格段文件路径;没配就用内置人格,`--system-prompt` 命令行参数会压过它。 |
 | `tool_search_threshold` | 非负整数 | `20` | 注册工具总数超过此数才启用延迟挂载(工具搜索);`0` 永不延迟。 |
+| `tool_search_token_floor` | 非负整数 | `1500` | 延迟挂载的 token 预算门:延迟工具全量常驻的声明 token 本金(名字+描述+schema)低于此值时,总数过了阈值也不启用——本金太小,启用反比全量常驻贵(依据 P0 baseline 实测,见 [工具参考·延迟挂载](tools.md#延迟挂载与工具搜索))。`0` 关掉这道门,只看枚数。 |
+| `deferred_tool_mode` | `auto` / `disabled` / `proxy_reference` / `native_reference` / `legacy_expand`,可留空 | 空 = `legacy_expand` | 延迟工具命中之后的走法。空与 `legacy_expand` 都是兼容档,**cache-hostile**(命中后 schema 扩写回顶层,断前缀缓存),迁移窗内的默认档,启动横幅会明标;`proxy_reference` 是通用代理路(前缀缓存不断);`native_reference` 只对 anthropic wire 且模型目录声明 `deferred_tools` 的模型生效,写了但门不开会大声回落;`disabled` 全量常驻,压过两道闸;`auto` 能力驱动——明确支持原生引用的模型走 `native_reference`,其余落宿主推荐档(当前仍是 `legacy_expand`,真机质量对照过门后翻 `proxy_reference`)。详见 [工具参考·延迟挂载](tools.md#延迟挂载与工具搜索)。 |
 | `tool_calling` | `json` / `programmatic` / `auto` | `json` | 工具调用后端。`json` 保持现状；`programmatic` 强制 PTC，条件不满足时启动明报回落；`auto` 按能力画像与任务形状选，当前恒落 `json`。只从配置文件读，环境变量不认。见 [PTC 手册](../features/tools/ptc.md)。 |
 | `ptc` | JSON object | 见 [PTC 手册](../features/tools/ptc.md) | Python 解释器、资源上限、调用/并发上限、受限 token 与入选工具白名单。项目级整段压过全局。 |
 | `memory` | JSON object | `enabled=false` | 项目记忆开关、读写子开关与召回预算，见下节。只能由全局配置打开。 |
@@ -298,7 +302,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 | `LUBANCODE_FORCE_COLOR` | 终端颜色开关 | 设为 `1` 时,管道/重定向也强制尝试输出颜色;不写入 `config.json`。 |
 | `LUBANCODE_CONFIRM_MODE` | 会话起手确认档 | `confirm`、`auto` 或 `yolo`；不写入 `config.json`，优先级低于 `--yes`，高于 `settings.local.json`。 |
 
-环境变量设为空串,按没设处理。`hooks`、`mcpServers`、`search`、`lsp`、`tool_search_threshold`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs`、`request_hard_timeout_secs` 没有对应的 `LUBANCODE_*` 变量,只能写配置文件。
+环境变量设为空串,按没设处理。`hooks`、`mcpServers`、`search`、`lsp`、`tool_search_threshold`、`tool_search_token_floor`、`deferred_tool_mode`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs`、`request_hard_timeout_secs` 没有对应的 `LUBANCODE_*` 变量,只能写配置文件。
 
 交互命令 `/update` 使用当前配置的 `connect_timeout_ms` 与 `request_timeout_secs`。启动参数 `--check-update` 在加载配置前执行，故用内置默认超时。两者都只访问 GitHub Release API，不带模型密钥。
 

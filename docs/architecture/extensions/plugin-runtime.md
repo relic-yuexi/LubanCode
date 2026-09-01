@@ -208,7 +208,7 @@ flowchart LR
 4. 每件外部工具适配成 `Tool`。
 5. 主会话与普通子代理都挂；Explore 只读角色不挂。
 6. DLL 按路径只载一次，两张 registry 各拿一层 wrapper；`/plugins` 只记一份用户可见账。
-7. 工具总数超过 `tool_search_threshold` 时，插件先只露名称与短说明。
+7. 工具总数超过 `tool_search_threshold` 且延迟声明 token 本金过 `tool_search_token_floor` 时，插件先只露名称与短说明（命中后的走法由 `deferred_tool_mode` 定，见[工具参考](../../reference/tools.md#延迟挂载与工具搜索)）。
 
 插件工具的统一名字是：
 

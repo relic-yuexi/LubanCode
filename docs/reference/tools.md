@@ -10,9 +10,51 @@
 2. `search`、`lsp`、MCP 等按配置决定是否注册。
 3. Agent、Todo、交互提问和项目记忆按运行模式再补。
 4. Lua、DLL 与 MCP 工具动态挂载。
-5. 总数超过 `tool_search_threshold` 时，延迟工具只留下索引；模型先调 `tool_search`，命中后下一轮请求才带完整 schema。
+5. 总数超过 `tool_search_threshold` 且延迟工具声明 token 本金过 `tool_search_token_floor` 时，延迟工具不进顶层 `tools`；模型先调 `tool_search` 发现，走法看下节 `deferred_tool_mode`。
 
 主代理与子代理各有一张 registry。MCP、LSP、Skill 和读写搜索等可进两边；`agent`、`todo_write`、`ask_user` 只属于主代理，免得递归失控或子代理抢终端。
+
+## 延迟挂载与工具搜索
+
+延迟挂载（MCP、插件这类外挂工具不进请求的 `tools` 数组，模型按需发现）由两道闸决定开不开：
+
+1. **枚数门** `tool_search_threshold`（默认 20，`0` 永不延迟）：注册表总数（不含 `tool_search` 自身）严格大于阈值才候选。
+2. **token 预算门** `tool_search_token_floor`（默认 1500，`0` 关掉这道门只看枚数）：延迟工具全量常驻的声明 token 本金（名字+描述+schema，与 `/context` 的 tools_tokens 同一把尺）低于此值时，枚数过了也不启用——本金太小，省出的 schema 抵不过 `tool_search` 自身定义与索引段的固定开销，启用反而更贵。依据是 P0 baseline 实测（`tests/unit/tools/test_tool_search.cpp` "P0基线"三册）：轻 schema/长描述形状 18 枚本金约 1080 token 时，启用后首份请求 1151 比全量常驻 1089 还贵；重 schema/短描述形状本金约 2220 才有真省（634 对 2296）。默认线 1500 落在两实测点之间。
+
+两道闸都过了，命中之后的走法由 `deferred_tool_mode` 定：
+
+| 档 | 顶层定义 | 发现结果 | 缓存口径 | 状态 |
+| --- | --- | --- | --- | --- |
+| `legacy_expand` | 命中后 schema 扩写回顶层 `tools` + 延迟索引删行 | 文字结果 + loaded 集合 | **cache-hostile**：每次命中断一次前缀 | 兼容档，当前默认（未配置即此档），迁移窗内保留 |
+| `proxy_reference` | 恒为 `tool_search` + `tool_invoke` | 结构化 schema + `tool_ref` 追加到历史尾部 | system/tools 指纹不变，messages 只追加 | P1 新路，opt-in |
+| `native_reference` | 延迟定义照发但标 `defer_loading` | provider 服务端 `tool_reference` | provider 保证 deferred 定义不改缓存前缀 | P3，仅 anthropic wire + 模型目录声明 `deferred_tools` 时生效 |
+| `disabled` | 全量常驻 | — | 恒定 | 压过两道闸，强制全量 |
+| `auto` | 同命中档 | 同命中档 | 同命中档 | 能力驱动：明确支持原生引用的模型走 `native_reference`，其余落宿主推荐档（当前仍是 `legacy_expand`） |
+
+`legacy_expand` 是 **cache-hostile** 的：发现一次工具，`system`（延迟索引删行）与 `tools`（schema 扩写）两处旧前缀同时改，长会话攒下的消息缓存接不上。启动时若在此档运行（含未配置的默认档），横幅会明标这一条。
+
+### 切默认与迁移窗（P4）
+
+真机质量对照（同模型、同任务、同温度跑 `disabled`/`proxy_reference`/`legacy_expand` 三档，单子 §12.5）跑完并过门之前，默认档保持 `legacy_expand` 不动——**未跑质量对照不把 proxy 强推为默认**。对照过门后切默认只动三处，机制已就位：
+
+1. `src/tools/deferred_tool_resolver.hpp` 的 `kRecommendedDeferredToolMode` 从 `LegacyExpand` 翻成 `ProxyReference`（`auto` 档与直构路的回落点）；
+2. `ParseDeferredToolMode` 的空串分支从 `LegacyExpand` 改为按 `auto` 档解析（未配置用户：明确支持模型落 `native_reference`，其余落 `proxy_reference`）；
+3. [配置手册](configuration.md)字段表里 `deferred_tool_mode` 的默认值行同步改。
+
+回退无需改码：配置文件显式写 `legacy_expand`、`disabled`、`proxy_reference` 任一即压过默认；`auto` 落 `native_reference` 后想强制通用路，显式写 `proxy_reference`。
+
+### 迁移窗结束后删什么（清单，届时一并动手）
+
+迁移窗结束后，loaded 集合驱动的 schema 扩写路整条退场：
+
+- `src/tools/tool_search.hpp/.cpp`：`ToolSearchTool` 的 legacy 构造（registry + loaded）与 `ExecuteLegacy`、`BuildDeferredToolsIndexSegment`；
+- `src/app/tool_runtime.cpp`：`loaded_tools_` 集合与 tool_filter 里的 loaded 判断（proxy/native 档用不到它）；
+- 装配层注索引段的三处（`interactive_session_assembly.cpp`、`session_stack.cpp`、`one_shot.cpp` 的 `deferred_index_provider`）；
+- `AgentProfile::deferred_index_provider` 与 prompt 拼装的 `WithDeferredToolsIndex`；
+- 配置 `legacy_expand` 字面量改为报错指路（`proxy_reference` 或 `disabled`）；
+- 测试：`test_tool_search.cpp` 的 legacy 册、`test_request_prefix.cpp` 的 P0 现状回归册（使命是钉住现状，路删了它随之改判成"确认已删"）、`test_tool_runtime_deferral.cpp` 的 loaded 断言。
+
+这份清单同时钉在 `todos/动态工具PromptCache守恒与按需调用设计.todo` 的 P4 条目上。
 
 ## 可用性总表
 

@@ -38,6 +38,26 @@ DeferredToolModeResolution ResolveDeferredToolMode(const std::string& configured
     //      Anthropic 兼容端点(目录没写)天然不开。
     // 两道门任一不开而配置又点名要 native:落 LegacyExpand(现状路),native_denial
     // 带人话——装配层大声报出来,不悄悄换路(§四"不得悄悄换路")。
+    //
+    // "auto"(P4·§十三 P4-2/P4-3 的机制半边):能力驱动档,用户把选择权交给
+    // 宿主——两道门都开走原生(P4-3"native 成为明确支持模型的默认"的
+    // 机制),门不开落 kRecommendedDeferredToolMode(当前 legacy,翻 P4-2
+    // 时同笔翻成 proxy)。与"点名 native 被拒"待遇不同:点名的回落是意外,
+    // 大声报;auto 的回落是合同行为,静默落(只在落 native 时给一行 mode_note
+    // 告知生效档,不吵)。
+    if (configured_text == "auto") {
+        DeferredToolModeResolution out;
+        if (wire_is_anthropic && catalog_native_declared) {
+            out.mode = DeferredToolMode::NativeReference;
+            out.server_tool_search = catalog_server_tool_search;
+            out.mode_note =
+                "deferred_tool_mode=auto:模型目录声明 deferred_tools 能力,已走 native_reference(provider "
+                "服务端工具搜索 + defer_loading 保前缀);要强制通用路就显式写 proxy_reference。";
+        } else {
+            out.mode = kRecommendedDeferredToolMode;
+        }
+        return out;
+    }
     const auto configured = ParseDeferredToolMode(configured_text);
     if (!configured.has_value()) {
         // 认不得的值:也落现状,denial 说明配置错在哪。配置层在解析期已拦过
@@ -45,7 +65,8 @@ DeferredToolModeResolution ResolveDeferredToolMode(const std::string& configured
         DeferredToolModeResolution out;
         out.mode = DeferredToolMode::LegacyExpand;
         out.native_denial = "deferred_tool_mode 配置值认不得: " + configured_text +
-                            "(可用:disabled|proxy_reference|native_reference|legacy_expand);已回落 legacy_expand。";
+                            "(可用:auto|disabled|proxy_reference|native_reference|legacy_expand);已回落 "
+                            "legacy_expand。";
         return out;
     }
     DeferredToolModeResolution out;

@@ -242,6 +242,10 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         if (!resolution.native_denial.empty()) {
             std::cout << theme.error << "[tool_search] " << resolution.native_denial << theme.reset << "\n";
         }
+        // 动态工具 P4:"auto" 档落 native 的生效说明(与交互路同款文案通道)。
+        if (!resolution.mode_note.empty()) {
+            std::cout << theme.stats << "[tool_search] " << resolution.mode_note << theme.reset << "\n";
+        }
         runtime_options.deferred_mode = resolution.mode;
         runtime_options.native_server_tool_search = resolution.server_tool_search;
     }
@@ -257,6 +261,14 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     const bool sub_proxy = tool_runtime.sub_proxy_enabled();
     const bool main_native = tool_runtime.main_native_enabled();
     const bool sub_native = tool_runtime.sub_native_enabled();
+    // 动态工具 P4·§十三 P4-4:legacy 档明标 cache-hostile,文案与交互路
+    //(session_stack.cpp)逐字一致。deferral 没启用不标。
+    if (main_deferral && tool_runtime.main_tool_mode() == lubancode::tools::DeferredToolMode::LegacyExpand) {
+        std::cout << theme.stats
+                  << "[tool_search] legacy_expand 档:命中后 schema 扩写回顶层 tools 与延迟索引,断前缀缓存"
+                     "(cache-hostile);迁移窗内可改 proxy_reference(前缀不断),见 docs/reference/tools.md。"
+                  << theme.reset << "\n";
+    }
     const auto sub_tool_filter = tool_runtime.sub_tool_filter();
     if (auto* agent_tool = tool_runtime.agent_tool(); agent_tool != nullptr) {
         agent_tool->SetPromptsDir(prompts_dir);  // 子代理系统提示同机制

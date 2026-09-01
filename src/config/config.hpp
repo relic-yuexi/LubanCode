@@ -296,6 +296,19 @@ struct ProviderConfig {
 // 外挂工具的用户永远走不到延迟这条路,现状行为零变化。
 constexpr int kDefaultToolSearchThreshold = 20;
 
+// 动态工具 PromptCache 守恒单 P4(§十三 P4-1):延迟挂载的 token 预算门
+// 默认值——延迟工具全量常驻的声明 token 本金(名字+描述+schema,统一
+// EstimateUtf8Tokens 口径)低于此值时,枚数过了阈值也不启用,全量常驻
+// 反而更便宜。依据只引 P0 baseline 册实测(tests/unit/tools/
+// test_tool_search.cpp "P0基线"三册,2026-08-31 跑数):轻 schema/长描述
+// 形状 18 枚延迟本金约 1080 token,启用后首份请求 1151 > 全量常驻 1089,
+// 反赔(索引段照抄全文描述 + tool_search 自身定义的固定开销吃掉省出的
+// 小 schema);重 schema/短描述形状本金约 2220,首份请求 634 < 2296,才有
+// 真省。默认线取 1500:反赔点上 39%、有省点下 32%,两边留余;中间区间
+// baseline 册没有实测点,floor 只在"实测反赔"的区域把延迟关掉,不在
+// "实测有省"的区域多管闲事。0 = 关掉这道门,只看枚数(P4 之前的现状)。
+constexpr int kDefaultToolSearchTokenFloor = 1500;
+
 // M11(网络超时):两个 API 客户端(anthropic/responses)以及 ListModels 共用
 // 的超时默认值,毫秒/秒两种单位混用是因为对应的 cpr 选项本身单位不同
 // (ConnectTimeout 认毫秒,LowSpeed::time 和 cpr::Timeout 的语义按秒/毫秒
@@ -673,12 +686,21 @@ struct Config {
     // tool_search:延迟挂载的启用阈值,0 = 永不延迟。只从配置文件读
     // (没有环境变量这一级),没配就是默认 20。
     int tool_search_threshold = kDefaultToolSearchThreshold;
+    // 动态工具 P4(§十三 P4-1):延迟挂载的 token 预算门——延迟工具全量
+    // 常驻的声明 token 本金低于此值时,枚数过了阈值也不启用(全量常驻更
+    // 便宜,依据见 kDefaultToolSearchTokenFloor 注)。0 = 关掉这道门,只看
+    // 枚数(P4 之前的现状)。只从配置文件读(项目级压全局),没有环境变量。
+    int tool_search_token_floor = kDefaultToolSearchTokenFloor;
     // 动态工具 PromptCache 守恒单 P1:延迟工具命中之后的走法。空 = 现状
+    // 默认(legacy_expand,P4 迁移窗内保持,启动横幅明标 cache-hostile);
     // (legacy_expand,发现后扩写回顶层 tools,cache-hostile 兼容路);
     // "disabled" 强制全量常驻(压过阈值);"proxy_reference" 是 P1 新路
     // (发现发 ref、调用走 tool_invoke,前缀缓存不断);legacy_expand 可
-    // 显式写回。先 opt-in,不默认换路。native_reference 是 P3 的活,写了
-    // 报错不悄悄放行。只从配置文件读(项目级压全局),没有环境变量。
+    // 显式写回。P4 起新增 "auto"(能力驱动档):明确支持原生引用的模型
+    //(anthropic wire + 目录声明 deferred_tools)走 native_reference,其余
+    // 落宿主推荐档(当前仍是 legacy——真机质量对照过门后才翻 proxy,单子
+    // 红线 8;机制就位、默认值不动)。回退:显式写四值任一压过 auto。
+    // 只从配置文件读(项目级压全局),没有环境变量。
     std::string deferred_tool_mode;
     // PTC:工具调用后端档。默认 json(行为与从前逐字节一致)。只从配置
     // 文件读(项目级压全局),环境变量不认——强开 PTC 是须看清后果的动作。
@@ -765,6 +787,7 @@ struct ConfigSources {
     Source think = Source::Default;
     Source soul = Source::Default;
     Source tool_search_threshold = Source::Default;  // tool_search:配置文件或默认,只有这两级
+    Source tool_search_token_floor = Source::Default;  // 动态工具 P4:配置文件或默认,只有这两级
     Source deferred_tool_mode = Source::Default;     // 动态工具 P1:配置文件或默认(空 = legacy)
     Source connect_timeout_ms = Source::Default;        // M11:配置文件或默认,只有这两级
     Source stream_idle_timeout_secs = Source::Default;   // 同上
@@ -889,6 +912,9 @@ struct FileConfig {
     std::optional<std::map<std::string, std::string>> extra_headers;
     // tool_search:延迟挂载阈值,非负整数(0 = 永不延迟)。
     std::optional<int> tool_search_threshold;
+    // 动态工具 P4:延迟挂载的 token 预算门,非负整数(0 = 关掉这道门,
+    // 只看枚数)。
+    std::optional<int> tool_search_token_floor;
     // 动态工具 P1:延迟工具模式(disabled|proxy_reference|legacy_expand)。
     std::optional<std::string> deferred_tool_mode;
     // PTC:调用档字符串(json|programmatic|auto)与 ptc 段(整段回退)。

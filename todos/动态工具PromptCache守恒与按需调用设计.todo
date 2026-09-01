@@ -1,6 +1,6 @@
 # 动态工具 Prompt Cache 守恒与按需调用设计
 
-- 状态：P0 已落（a6c48f7，2026-08-31 补账）；P1 通用 ProxyReference 已落（2026-08-31，待主控验收）；P2 条件工具也守恒已落（2026-08-31，待主控验收）；P3 Claude NativeReference 已落（2026-09-01，待主控验收；真机 cache usage 一栏未验——本机无钥匙，对照脚本已备）；P4 未动
+- 状态：P0 已落（a6c48f7，2026-08-31 补账）；P1 通用 ProxyReference 已落（2026-08-31，待主控验收）；P2 条件工具也守恒已落（2026-08-31，待主控验收）；P3 Claude NativeReference 已落（2026-09-01，待主控验收；真机 cache usage 一栏未验——本机无钥匙，对照脚本已备）；P4 红线内部分已落（2026-09-01，待主控验收——token 预算门/legacy 横幅/auto 档机制/删除清单；proxy 与 native 切默认两条被质量对照红线拦住留白，待真机）
 - 日期：2026-08-31
 - 级别：P1（长会话成本、首 token 延迟与工具扩展性的共同底座）
 - 范围：`tool_search`、延迟工具、条件工具、四条 wire、前缀账、会话恢复、compact、工具执行正门
@@ -662,13 +662,14 @@ proxy 多走一步，未必总比全量 tools 便宜。短会话、少工具时�
 
 ### P4：默认切换与旧路退场
 
-- [ ] 按 baseline 重定 `tool_search_threshold` 或换成 token-aware 决策。
-- [ ] 满足质量、缓存、延迟与安全门后，proxy 成为非原生 provider 默认。
-- [ ] native 成为明确支持模型的默认。
-- [ ] legacy 留一版迁移窗，启动与文档明标 cache-hostile。
-- [ ] 迁移窗结束后删 loaded 集合驱动的 schema 扩写路。
+- [x] 按 baseline 重定 `tool_search_threshold` 或换成 token-aware 决策。（2026-09-01 落"换 token-aware"一路：枚数默认 20 不动——P0 baseline 册没有支持改枚数的实测数，它证明的恰是枚数口径不分辨工具形状；补第二道闸 `tool_search_token_floor`（默认 1500，0=关掉只看枚数），依据只引 P0 baseline 册实测：轻 schema/长描述形状 18 枚延迟本金约 1080 token，启用后首份请求 1151 > 全量常驻 1089，反赔；重 schema/短描述形状本金约 2220，首份 634 < 2296 才有真省；1500 落两实测点之间（反赔点上 39%、有省点下 32%）。落点：tools/tool_search.hpp 的 DeferralBudgetOk/ShouldDeferTools 纯函数 + tool_runtime.cpp 的 DeferredDeclarationTokens（EstimateUtf8Tokens 同 /context 一把尺）+ config 的 tool_search_token_floor（项目级压全局）；/tools 与 /config 补展示与"枚数过了没延迟"的缘由话术。册：test_tool_search 纯函数册、test_tool_runtime_deferral 产品行为册（薄描述拦下/肥描述放行/floor=0 关门）、test_config 解析与 merge 册）
+- [ ] 满足质量、缓存、延迟与安全门后，proxy 成为非原生 provider 默认。（**留白，待真机质量对照**——§12.5 同模型同任务同温度跑三档须真机，本机无钥匙未跑，红线 8 拦着默认值不动：未配置仍落 legacy_expand。本批落的是"切默认的开关与回退机制"：`deferred_tool_mode` 新值 `"auto"`（能力驱动档）与 `kRecommendedDeferredToolMode` 常量（现值 LegacyExpand，deferred_tool_resolver.hpp）；切默认 SOP 三步钉在 docs/reference/tools.md"切默认与迁移窗"；回退=配置显式写四值任一压过默认，无格式迁移。册：test_deferred_tool_resolver 的 auto 册、test_config 的 auto 放行册）
+- [ ] native 成为明确支持模型的默认。（**留白，同上**——机制半边已落：auto 档在 anthropic wire + 目录声明 deferred_tools 两道门都开时落 native_reference（ResolveDeferredToolMode 的 auto 分支），生效时 mode_note 打一行告知"已走原生、要强制通用路写 proxy_reference"；门不开静默落推荐档（合同行为不响 denial，与"点名 native 被拒"待遇分开）。直构路（ToolRuntime 无目录可判）落推荐档，与 native_reference 不在直构路开同一待遇。真机对照过门后，未配置空串的解析改走 auto，即成本条）
+- [x] legacy 留一版迁移窗，启动与文档明标 cache-hostile。（启动横幅：session_stack.cpp 交互路（紧跟"延迟挂载已启用"行）与 one_shot.cpp 单发路同款文案，deferral 启用且有效档 legacy 时打"命中后 schema 扩写回顶层 tools 与延迟索引，断前缀缓存(cache-hostile)；迁移窗内可改 proxy_reference"；未配置的默认档也是 legacy，一样标。文档：docs/reference/tools.md"延迟挂载与工具搜索"节五档表标 cache-hostile + configuration.md 的 deferred_tool_mode 字段行与 tool_search_token_floor 行）
+- [ ] 迁移窗结束后删 loaded 集合驱动的 schema 扩写路。（**本批不删**——迁移窗未过，红线内只做清单。删除清单钉在 docs/reference/tools.md"迁移窗结束后删什么"节：① ToolSearchTool 的 legacy 构造与 ExecuteLegacy、BuildDeferredToolsIndexSegment；② tool_runtime.cpp 的 loaded_tools_ 与 tool_filter 的 loaded 判断；③ 装配层注索引段三处（interactive_session_assembly/session_stack/one_shot 的 deferred_index_provider）；④ AgentProfile::deferred_index_provider 与 prompt 的 WithDeferredToolsIndex；⑤ config 的 legacy_expand 字面量改报错指路；⑥ test_tool_search 的 legacy 册、test_request_prefix 的 P0 现状回归册（改判成"确认已删"）、test_tool_runtime_deferral 的 loaded 断言。届时一并动手）
 
 验收：默认路径不再因发现/调用动态工具开 cache epoch；旧配置有清楚迁移提示与可控回退。
+（2026-09-01 P4 验收账：后半句已落——legacy 默认档启动横幅明标 cache-hostile 并指路，回退=显式写四值任一（proxy/native/disabled/legacy），auto 档给能力驱动的第三种写法；token 预算门把"枚数到就开"的必赔场景（P0 baseline 册轻 schema 形状实测）拦在全量常驻。前半句的"默认路径守恒"**未达**——默认仍是 legacy_expand，proxy/native 默认两条被质量对照红线（§十五·8）拦住留白，真机钥匙到位跑完 §12.5 三档对照后按 tools.md 的 SOP 三步切默认。）
 
 ## 十四、预计改动边界
 
