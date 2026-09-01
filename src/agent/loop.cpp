@@ -1225,7 +1225,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         platform::Utf8DeltaGate text_delta_gate;
         platform::Utf8DeltaGate thinking_delta_gate;
         // 轨迹请求 id 与恢复账:每枚尝试各自重置(尝试内记 prepared/sent)。
-        std::string trajectory_request_id;
+        // trajectory_request_id 复用外层(轨迹边界 P0-2/A1)那枚声明——
+        // 恢复环每趟 clear() 后由各尝试的 prepared 重新赋值,不再重声明。
         const std::string history_commit_hash = api::HistoryCommitHashOf(request);
         bool trajectory_write_failed = false;
         int recovery_attempts_used = 0;
