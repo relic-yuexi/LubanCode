@@ -269,7 +269,10 @@ void TerminalSessionController::BeginSessionTitle(const std::string& first_query
     switch (result) {
         case lubancode::app::SessionTitleAccount::LocalResult::Set:
             TermOut() << theme.stats << trf("cmd.title.local_set", session_title) << theme.reset << "\n";
-            StartTitleRefinement(first_query);
+            // P0-2:精炼不在回合里发——旁路小 turn 与主 turn 不能同流并存
+            //(状态机一 stream 一 open turn),首问回合正要开,现在发必撞
+            // 车。挂账,回合收口后的收货点再发。
+            pending_title_refinement_query_ = first_query;
             break;
         case lubancode::app::SessionTitleAccount::LocalResult::WriteFailed:
             TermOut() << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
@@ -342,6 +345,14 @@ void TerminalSessionController::BackfillTitleOnResume() {
 // 上屏。非阻塞——没完工直接回,轮末到提示符的路上没有一步在等标题;
 // 结果通常在主回合跑着的时候就备好了,回合一收口这里一眼取走。
 void TerminalSessionController::PollSessionTitleRefinement() {
+    // P0-2:回合已收口(这里只在轮末/空闲进),挂账的标题精炼现在发才不
+    // 与主 turn 抢流。发完照旧走非阻塞收货。
+    if (!pending_title_refinement_query_.empty()) {
+        const std::string query = std::move(pending_title_refinement_query_);
+        pending_title_refinement_query_.clear();
+        StartTitleRefinement(query);
+        return;  // 本圈先发货,结果下圈收
+    }
     std::optional<lubancode::app::SessionTitleRefiner::Outcome> outcome =
         titles_.refiner().TakeFinished();
     if (!outcome.has_value()) {

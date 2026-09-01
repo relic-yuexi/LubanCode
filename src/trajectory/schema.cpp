@@ -207,6 +207,11 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::ToolExecutionFailed, "error_code", "s", false},
     {EventKind::ToolExecutionFailed, "stdout_ref", "o|", false},
     {EventKind::ToolExecutionFailed, "stderr_ref", "o|", false},
+    // P0-2(子代理失败路补列):agent 工具的执行终态带 child_run_id 时,
+    // result_ref(child_stream:子账终态 hash 对账)与 side_effects 随行——
+    // 与 Finished 同一形状,失败也不丢父子边。
+    {EventKind::ToolExecutionFailed, "result_ref", "o", false},
+    {EventKind::ToolExecutionFailed, "side_effects", "a", false},
     {EventKind::ToolExecutionCancelled, "reason", "s", true},
     {EventKind::ToolExecutionCancelled, "duration_ms", "i", false},
     {EventKind::ToolExecutionUnknown, "reason", "s", true},

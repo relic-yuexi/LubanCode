@@ -275,6 +275,7 @@ private:
     TrajectoryTurnBridge::Identity identity_;
     std::string turn_id_;
     bool turn_open_ = false;
+    bool dead_ = false;  // 开不了小 turn(主 turn 在开着)后哑火,不再连发
     std::map<std::string, std::string> request_prepared_;  // request_id -> prepared event id
     std::string last_input_event_id_;
     std::uint64_t request_counter_ = 0;

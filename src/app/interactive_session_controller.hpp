@@ -167,6 +167,8 @@ private:
     void BackfillTitleOnResume();
     // 会话循环顶的非阻塞收货点:精炼落地记 cheap 账、对代替换、上屏。
     void PollSessionTitleRefinement();
+    // P0-2:待发的标题精炼首问(回合内不与主 turn 抢流,收口后补发)。
+    std::string pending_title_refinement_query_;
     void OpenArtifactStore();
     // 外来消息轮:peer 来信是 user 语义(另一会话的用户正文);后台完成
     // 唤醒是宿主合成控制消息,传 BackgroundCompletion——检索整轮跳过,

@@ -1196,6 +1196,7 @@ nlohmann::json ChildEdgeReport::ToJson() const {
                           {"parent_recorded_hash", parent_recorded_hash},
                           {"owner_matches", owner_matches},
                           {"spawn_reference_found", spawn_reference_found},
+                          {"dispatch_on_started", dispatch_on_started},
                           {"hash_matches", hash_matches},
                           {"accepted_once", accepted_once},
                           {"error_code", error_code}};
@@ -1383,7 +1384,14 @@ SessionVerifyReport VerifySessionDir(const std::filesystem::path& session_dir) {
         if (parent_exists) {
             const auto dispatch = parent_it->second.dispatches.find(run_id);
             if (dispatch != parent_it->second.dispatches.end()) {
-                edge.spawn_reference_found = dispatch->second.started_seen;
+                // P0-2(生产时序收口):父侧派发引用认"任何带
+                // relations.child_run_id 的事件"——started 先于派工落地是
+                // 生产时序的常态(agent 工具的子 run id 在 execute 里才
+                // 出生,AttachChildRun 只来得及挂在终态上)。started_seen
+                // 仍如实上报;双向引用(parent_call_id/child hash)照旧逐位
+                // 对账,不因挂点后移而放松。
+                edge.spawn_reference_found = true;
+                edge.dispatch_on_started = dispatch->second.started_seen;
                 if (edge.parent_call_id.empty()) {
                     edge.parent_call_id = dispatch->second.call_id;
                 }

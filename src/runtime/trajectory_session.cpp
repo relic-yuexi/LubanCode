@@ -866,6 +866,13 @@ TrajectoryBypassBridge::~TrajectoryBypassBridge() = default;
 
 RecordReceipt TrajectoryBypassBridge::Put(EventKind kind, std::optional<std::string> request_id, Actor actor,
                                           Origin origin, nlohmann::json payload, Durability durability) {
+    if (dead_) {
+        // 哑火桥:小 turn 开不成(主 turn 占着 stream),本枚采样不入账。
+        RecordReceipt receipt;
+        receipt.status = RecordReceipt::Status::Rejected;
+        receipt.error_code = "state.turn_overlap";
+        return receipt;
+    }
     trajectory::RecordRequest request;
     request.kind = kind;
     request.scope = base_scope_;
@@ -925,7 +932,13 @@ void TrajectoryBypassBridge::OpenTurn() {
         Put(EventKind::TurnStarted, std::nullopt, Actor::Host, Origin::ScheduledHost,
             nlohmann::json{{"trigger", "scheduled_host"}}, Durability::ProcessCrash);
     if (receipt.status != RecordReceipt::Status::Committed) {
+        // 开不了小 turn(典型:主 turn 还开着,状态机一 stream 一 open
+        // turn)——本桥哑火:后续事件一概不发,只记一笔缺口,不连环报
+        // 错吓人。旁路采样本体照跑(调用方不依赖桥的成败),丢的只是
+        // 这枚采样的 usage 细账。
         NoteError(receipt, "turn.started(bypass)");
+        turn_open_ = false;
+        dead_ = true;
     }
 }
 

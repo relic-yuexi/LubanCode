@@ -1,6 +1,6 @@
 # Workspace 统一存储、旧 Session 退场与分级 Memory 迁移
 
-- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 已落（WorkspaceIdentityResolver 四级裁决+统一 key+两把旧钥匙退役+v2 manifest/checkout/doctor+cwd change/跨 workspace 换场，全量 ctest 339 册绿，2026-09-01）；P0-2 起待实现
+- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 已落（WorkspaceIdentityResolver 四级裁决+统一 key+两把旧钥匙退役+v2 manifest/checkout/doctor+cwd change/跨 workspace 换场，全量 ctest 339 册绿，2026-09-01）；P0-2 已落（Trajectory 升唯一 Session:根迁 workspaces/、开关退役、命令面/app-server/渠道全换账、artifact 归拢、无损投影、父子账保住;全量 ctest 357 册绿+真机冒烟过，2026-09-01）；P0-3 起待实现
 - 日期：2026-09-01
 - 级别：P0（持久化唯一真账、项目身份、恢复正确性与用户数据安全）
 - 范围：`src/sessions/`、`src/trajectory/`、`src/runtime/session_runtime.*`、`src/runtime/trajectory_session.*`、`src/memory/`、`src/app/commands/session_commands.*`、`src/app/commands/memory_commands.*`、`src/tools/agent_tool.*`、配置/CLI/app-server、测试、文档与旧数据迁移
@@ -507,14 +507,14 @@ lubancode migrate-storage plan|run|status
 
 ### P0-2：把 Trajectory 提升为唯一 Session
 
-- [ ] 把根从 `~/.lubancode/trajectories/workspaces` 迁到 `~/.lubancode/workspaces`。
-- [ ] 默认且强制启用 Trajectory，删除 feature/env 分支。
-- [ ] 将 `/sessions`、resume、archive、delete、export、continue 与 app-server 全接 Replay/SessionManager。
-- [ ] 把 context artifact、MCP artifact、图片与导出统一放进 session `artifacts/`/`exports/`。
-- [ ] 补齐 `tool.result.committed` 对 structured content、图片/音频 artifact ref 的无损投影。
-- [ ] 保住父子 run 独立 Journal、双向引用、终态 hash 与恢复校验。
+- [x] 把根从 `~/.lubancode/trajectories/workspaces` 迁到 `~/.lubancode/workspaces`。（2026-09-01;workspaces_root 语义直递,旧根零读零写;session.json 升 v2,新根下 v1=旧档搬错家由索引标 damaged）
+- [x] 默认且强制启用 Trajectory，删除 feature/env 分支。（2026-09-01;ResolveTrajectoryEnabled/LUBANCODE_TRAJECTORY 删,SessionRuntime 恒开账本,开不出账会话明败不回退;one_shot 不建会话是设计而非开关）
+- [x] 将 `/sessions`、resume、archive、delete、export、continue 与 app-server 全接 Replay/SessionManager。（2026-09-01;新增 trajectory/session_index 可重建索引,/sessions、/resume picker+编号、/archive|unarchive|delete、/export(出档进 exports/)、--continue、Ctrl+R、thread/list|archive|unarchive|delete、trace/query、渠道引擎全换账）
+- [x] 把 context artifact、MCP artifact、图片与导出统一放进 session `artifacts/`/`exports/`。（2026-09-01;上下文仓 blob 进 artifacts/sha256/,MCP rich/模型图片/插件图同层内容寻址(文件名=全 hash)）
+- [x] 补齐 `tool.result.committed` 对 structured content、图片/音频 artifact ref 的无损投影。（2026-09-01;structured_content 随行,富块投影 image_ref/audio_ref/blob_ref/resource_link/embedded_text/unknown,字节永不内联）
+- [x] 保住父子 run 独立 Journal、双向引用、终态 hash 与恢复校验。（2026-09-01;派发引用认任何父侧带 child_run_id 事件(生产时序常落终态,dispatch_on_started 如实上报),hash 逐位对账不放松;真机冒烟 verify 通过）
 
-验收：全新主目录跑完整交互后，只出现 `workspaces/` 新账；普通/富工具结果、子代理与 resume 都能从 Journal 重建。
+验收：全新主目录跑完整交互后，只出现 `workspaces/` 新账；普通/富工具结果、子代理与 resume 都能从 Journal 重建。（2026-09-01 真机冒烟过:临时主目录假 anthropic 服务跑 run_command+agent 子代理+read_file 全链,只出 workspaces/ 树,父账 child_run_id+子终态 hash 对上,trajectory verify 过;第二进程 --continue "已恢复 N 条(resume-as-new)";/sessions 出标题与计数）
 
 ### P0-3：项目 Memory 搬进 Workspace
 
