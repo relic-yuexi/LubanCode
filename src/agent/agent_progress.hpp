@@ -126,6 +126,40 @@ struct TaskVitals {
     int stale_rounds = 0;
     bool host_notice_sent = false;
     int wall_limit_secs = 0;  // 0 = 不设
+    std::uint64_t progress_revision = 0;  // P2:AgentSupervisionEvent 的共同字段
+    int request_attempt = 0;
+    std::string reason_code;  // 最近一枚稳定错误码(事件里带上,不留正文)
+};
+
+// 监督事件(P2,单子 §11.1 的共同字段):健康翻页、恢复起讫、工具结果
+// 不明、强收——宿主侧只读 hook(AgentHealthChanged 那一路)与指标计数共
+// 用这份形状。只带 id/枚举/计数/时长与稳定码,不带 thinking、正文、Secret
+// 与完整工具参数(单子 §五·11)。
+enum class AgentSupervisionEventKind {
+    HealthChanged,       // 健康翻页(含 Quiet/Suspect*/Recovered/Terminal)
+    RecoveryStarted,     // 请求重试决定(退避后重发)
+    RecoverySucceeded,   // 重试后传输侧自愈
+    RecoveryExhausted,   // 重试链用尽,按错误收口
+    ToolIndeterminate,   // 工具被取消后结果不明(不自动重跑)
+    ForceFinalized,      // 墙钟/空转强收
+};
+
+const char* SupervisionEventTag(AgentSupervisionEventKind kind);
+
+struct AgentSupervisionEvent {
+    AgentSupervisionEventKind kind = AgentSupervisionEventKind::HealthChanged;
+    int task_id = 0;
+    int parent_task_id = 0;
+    int root_task_id = 0;
+    AgentSupervisionStage stage = AgentSupervisionStage::Queued;
+    AgentHealthState old_health = AgentHealthState::Healthy;
+    AgentHealthState new_health = AgentHealthState::Healthy;
+    std::string reason_code;  // 稳定码;工具不明事件带工具名前缀
+    std::uint64_t progress_revision = 0;
+    int attempt = 0;
+    std::int64_t elapsed_ms = 0;
+    std::int64_t transport_idle_ms = -1;  // -1 = 从未有过传输
+    std::int64_t progress_idle_ms = -1;   // -1 = 从未有过实质进展
 };
 
 // 监督拍的裁决动作(单子 §七的流转,纯函数可假钟单测)。

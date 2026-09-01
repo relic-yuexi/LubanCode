@@ -22,6 +22,7 @@
 #include "agent/agent_profile_resolver.hpp"  // AgentProfileResolveEnvironment:阶段 3 解析环境
 #include "agent/context.hpp"  // EstimateUtf8Tokens:P4 延迟本金与 /context 同一把尺
 #include "tools/agent_message_tool.hpp"
+#include "tools/agent_watch_tool.hpp"  // 监督器单 P1-0:main 的 agent_watch(整棵树 + diagnostic)
 #include "tools/background_output.hpp"
 #include "tools/edit_file.hpp"
 #include "tools/lua_tool.hpp"
@@ -637,6 +638,11 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     // 与查看态传话、排队转投共用同一本 TaskRecord::inbox。
     if (agent_tool_ != nullptr) {
         main_registry_.Register(std::make_unique<lubancode::tools::AgentMessageTool>(agent_tool_));
+        // agent_watch(监督器单 P1-0):main 挂 caller_task_id=0 的实例——可看
+        // 整棵会话树、独享 diagnostic 档;有界只读等待,与 agent_message 的
+        // 分工见工具描述(看状态/等变化找它,传话找 agent_message)。
+        // 子代理的窄实例由 AgentTool::RunTask 第二段随 scoped agent 一并现挂。
+        main_registry_.Register(std::make_unique<lubancode::tools::AgentWatchTool>(agent_tool_));
     }
     if (agent_tool_ != nullptr && explore_registry_.has_value()) {
         agent_tool_->SetExploreRegistry(&*explore_registry_);

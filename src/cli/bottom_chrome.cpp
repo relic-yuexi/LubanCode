@@ -266,6 +266,26 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     const auto tinted = [&](const std::string& text) {
         return theme.stats + TruncateUtf8ToDisplayWidth(text, width - 1) + theme.reset;
     };
+    // 坞行的监督色辅助(监督器单 P1-1 §十):颜色只作辅助——行文本自身已
+    // 带阶段/静默龄/重连次数。映射只用既有主题档(黄=tool_line,青=
+    // spinner,红=error),plain 主题这些全是空串,自动退回默认淡色,无色
+    // 模式不丢信息。
+    const auto dock_tint_of = [&theme, &model](std::size_t index) -> const std::string& {
+        const AgentHealthTint tint = index < model.agent_dock_tints.size()
+                                         ? model.agent_dock_tints[index]
+                                         : AgentHealthTint::Normal;
+        switch (tint) {
+            case AgentHealthTint::Quiet:
+                return theme.tool_line;  // 黄(两个内置主题里都是黄系)
+            case AgentHealthTint::Recovering:
+                return theme.spinner;    // 青
+            case AgentHealthTint::Degraded:
+                return theme.error;      // 红
+            case AgentHealthTint::Normal:
+                break;
+        }
+        return theme.stats;
+    };
     const auto push = [&layout, width](bool hard, std::string text) {
         layout.frame.rows.push_back(InlineFrameRow{0, width, hard, std::move(text)});
     };
@@ -323,7 +343,8 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
         }
     }
     for (std::size_t i = 0; i < dock_count; ++i) {
-        push(false, tinted(model.agent_dock_rows[i]));
+        push(false, dock_tint_of(i) + TruncateUtf8ToDisplayWidth(model.agent_dock_rows[i], width - 1) +
+                        theme.reset);
     }
     for (std::size_t i = 0; i < transient_count; ++i) {
         // slash 提示与搜索/提及行:调用方拼好的短命 UI,按屏宽截断(与

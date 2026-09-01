@@ -778,6 +778,16 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
 
     // Ctrl+R 提问历史搜索的数据源(0.30.x 第二批):只读 session 事件账,
     // 打开搜索框时取一次(范围轮换在终端层本地过滤,不反复读盘)。
+    // 轮次打断/用户排队的唤醒广播(监督器单 P1-0):ESC 打断或用户往待发
+    // 队列排消息那一刻,叫醒睡在 agent_watch 有界等待里的 watcher——单子
+    // §9.2"用户输入、父取消、session close 提前唤醒"。只做唤醒(台账推一
+    // 代监督可见修订),在监听线程上被调,零重活。
+    lubancode::cli::SetTurnInterruptBroadcast([this]() {
+        if (session_agent_tool() != nullptr) {
+            session_agent_tool()->ledger().NotifyExternalWake();
+        }
+    });
+
     lubancode::cli::SetPromptHistoryProvider([this]() { return CollectPromptHistory(); });
 
     // @ 文件提及菜单的数据源(0.30.x 第三批):按 Git 根(没有就 cwd)扫
@@ -1102,6 +1112,7 @@ TerminalSessionController::~TerminalSessionController() {
     lubancode::cli::SetIdleWakeHook(nullptr);
     lubancode::cli::SetBackgroundNoticeHook(nullptr);
     lubancode::cli::SetBackgroundStatusProvider(nullptr);
+    lubancode::cli::SetTurnInterruptBroadcast(nullptr);
     lubancode::cli::SetPromptHistoryProvider(nullptr);
     lubancode::cli::SetFileMentionProvider(nullptr);
     lubancode::cli::SetAdditionalSlashCompletionCandidates({});

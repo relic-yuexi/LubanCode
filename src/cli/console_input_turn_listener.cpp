@@ -336,6 +336,9 @@ void TurnInputListener::ThreadMain() {
     // 置 cancel_flag、擦脚注、打一行 "[已打断]"、通知正文块作废锚点、关脚注。
     auto interrupt_turn = [&] {
         cancel_flag_.store(true);
+        // 用户打断广播(监督器单 P1-0):叫醒可能睡在 agent_watch 等待里的
+        // watcher——取消旗它们看得见,但没有这声 notify 就要等到超时。
+        BroadcastTurnInterrupted();
         std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
         EraseStreamFooterLocked();  // 先把脚注那行擦掉,[已打断] 才打得干净
         TermOut() << "\n" << theme_.stats << tr("input.interrupted") << theme_.reset << "\n";
@@ -672,6 +675,9 @@ void TurnInputListener::ThreadMain() {
                     }
                 } else {
                     steering.Enqueue(target, text);
+                    // 用户排入待发消息也是"用户输入到了"(监督器单 P1-0):
+                    // 叫醒睡在 agent_watch 等待里的 watcher,单子 §9.2。
+                    BroadcastTurnInterrupted();
                     editor.BeginLine(/*composer=*/true);
                 }
             }

@@ -20,6 +20,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <string>
 #include <thread>
 #include <vector>
@@ -277,6 +278,10 @@ struct AgentTaskEvent {
     // "正在累积、尚未切段"的正文/思考带这面旗——查看态据此画"思考中 · N 字"
     // 的 Running 条目(与 main 流式思考同款折叠),封卷事件恒 false。
     bool streaming = false;
+    // 事件号(监督器单 P1-0):从台账的 watch_generation 同一枚单调计数发
+    // ——与 agent_watch 顶层的 revision 同一数轴,"after_revision 之后的事件"
+    // 才对得齐(各任务自己的序列仍严格递增)。显示层不认它(照旧全量拼)。
+    std::uint64_t revision = 0;
 };
 
 // 轻量列表条目(0.28.x 面板全量化):列表每 100ms 刷新一次,不再复制
@@ -318,6 +323,10 @@ struct AgentTaskSummary {
     std::size_t pending_message_count = 0;  // 已排队未送达的介入消息数
     AgentTaskActivity activity;
     std::uint64_t content_revision = 0;
+    // 监督投影(监督器单 P1-1):Dock 行的"重连 N/3 · 静默 XmYs"与查看态的
+    // 监督折叠行从这份账现算——真账仍在 TaskRecord.progress,这里只是
+    // Summaries 拷出时的投影,与 activity 同一条路。
+    agent::AgentProgressClock progress;
     // 结果是否已交回主会话(DrainCompletionNotices 置位)。
     bool delivered = false;
 
@@ -498,10 +507,31 @@ public:
     // 某只任务的消息账(按时间序,查看态的会话视口用):运行中也可调,
     // 读到的是已封口事件 + 正在累积的正文/思考尾巴(各切一段带出)。
     std::vector<AgentTaskEvent> Events(int task_id) const;
+    // 事件号过滤口(监督器单 P1-0,agent_watch 的 include=events 档):回
+    // revision > after_event_revision 的最多 max_events 枚(从旧到新)。
+    // 只拷贝结构化字段(kind/tool/is_error/streaming/revision),text/result/
+    // input_json 一律不带——模型侧的 watch 输出不泄正文与工具参数。
+    std::vector<AgentTaskEvent> EventsSince(int task_id, std::uint64_t after_event_revision,
+                                            std::size_t max_events) const;
     // 某只任务已排队未送达的介入消息原文(详情展示/测试用)。
     std::vector<std::string> PendingMessages(int task_id) const;
     // 某只任务的进展合同快照(测试与 agent_watch 的读口;认不出返回空钟)。
     agent::AgentProgressClock ProgressOf(int task_id) const;
+
+    // ---- agent_watch 的等待口(监督器单 P1-0)--------------------------------
+    // 监督可见修订:健康/相位/进展/重试/收发消息/生命周期任一动了 +1。token
+    // 级传输流量不抬它——"流在动"与"任务有变化"分账(单子 §6.1)。
+    std::uint64_t watch_generation() const;
+    // condition variable 睡到:监督可见修订前进 / 到 deadline / extra_wake
+    // 为真(取消旗那一类,置位方须另经台账路径 notify,见 NotifyExternalWake)。
+    // 回 true = 修订前进了;false = 超时或被 extra_wake 叫醒。不忙轮询:
+    // 没人动账时这条线程零 CPU 挂在 cv 上(单子 §9.2)。
+    bool WaitForWatchChange(std::uint64_t after_generation, std::chrono::steady_clock::time_point deadline,
+                            const std::function<bool()>& extra_wake = nullptr);
+    // 外部事件唤醒(单子 §9.2"用户输入、父取消、session close 提前唤醒"):
+    // ESC 打断/用户排入待发消息那类不经过台账写口的动作,由会话侧在这里
+    // 叫醒所有等修订的 watcher。会推一代修订(醒来方拿到的是快照,不吃亏)。
+    void NotifyExternalWake();
 
     // ---- 介入/取消/清理 ----
     // 定向介入:非活态(终态/封账)明确拒收(不改投 main)。
@@ -624,7 +654,32 @@ public:
     void ForceFinalizeNoProgress(const std::shared_ptr<TaskRecord>& task, int stale_rounds);
     // 监督通知(去重由监督器按 task+epoch+reason 把):主会话空闲拍取走。
     void PushSupervisorNotice(std::string notice);
+    // 去重版(单子 §十:同一 task_id + health_epoch + reason 只弹一次):
+    // 监督器与台账侧(恢复成功/用尽/工具结果不明)共用这一只去重口,键
+    // 账在台账里,谁发都走同一本。epoch=0 不弹。
+    void PushSupervisorNoticeDeduped(const std::shared_ptr<TaskRecord>& task, std::uint64_t health_epoch,
+                                     const std::string& reason_key, std::string notice);
     std::vector<std::string> TakeSupervisorNotices();
+
+    // ---- 恢复账与工具不明账的台账侧事件(P1-1/P2)--------------------------
+    // 重试链用尽(P1-1 通知"用尽"):AgentTool 的 on_request_attempt 在
+    // Exhausted 相位调。记一笔 deduped 通知 + 监督事件投递。
+    void RecordRecoveryExhausted(const std::shared_ptr<TaskRecord>& task, const std::string& reason_code);
+    // 工具被取消后结果不明(P1-1 通知"工具结果不明",单子 §8.3
+    // IndeterminateToolOutcome):已在执行边界后的工具被取消,副作用是否
+    // 落地无从证实——消息账补一张明确的结果卡(不冒充成功),tool_calls
+    // 对账收口,通知请用户/父代理核对。绝不自动重跑。调用方须已持 mutex。
+    void RecordToolIndeterminateLocked(const std::shared_ptr<TaskRecord>& task, const std::string& tool_name,
+                                       const std::string& tool_use_id);
+
+    // ---- 监督事件投递口(P2:AgentHealthChanged 只读 hook 的进料)----------
+    // 台账侧发生的恢复/不明/强收事件(recovery.started/succeeded/exhausted、
+    // tool.indeterminate、force_finalize)经这枚 sink 递给监督器(它再投
+    // 后台安全队列与指标计数)。sink 在台账锁内被调,只许入队,不许回头
+    // 拿台账锁。空(默认)= 没人接,事件照常进通知,只是不出钩子。
+    void SetSupervisionEventSink(std::function<void(const agent::AgentSupervisionEvent&)> sink) {
+        supervision_event_sink_ = std::move(sink);
+    }
 
     // ---- inbox 原子交接 ----
     // 一轮 Run 正常收口后调。有未送项 -> 取走标 delivered(sealed=false),
@@ -666,16 +721,34 @@ private:
     bool HasUndeliveredInboxLocked(const TaskRecord& task) const;
     std::size_t AliveChildCountLocked(int parent_task_id) const;
     void NotifyStateChangeLocked();
+    // agent_watch 的唤醒源(P1-0):监督可见修订动一笔就 ++ 并 notify。
+    // 调用方须已持 mutex(谓词同锁读,无丢醒)。
+    void NotifyWatchChangeLocked();
+    // 去重通知的锁内版(调用方已持 mutex)。
+    void PushSupervisorNoticeDedupedLocked(const std::shared_ptr<TaskRecord>& task, std::uint64_t health_epoch,
+                                           const std::string& reason_key, const std::string& notice);
+    // 监督事件投递(锁内调,空 sink 零开销)。
+    void EmitSupervisionEventLocked(const std::shared_ptr<TaskRecord>& task, agent::AgentSupervisionEventKind kind,
+                                    agent::AgentHealthState old_health, agent::AgentHealthState new_health,
+                                    const std::string& reason_code);
 
     std::vector<std::shared_ptr<TaskRecord>> tasks_;
     int next_task_id_ = 1;
     std::atomic<std::uint64_t> revision_{0};
     std::vector<std::string> permission_denial_notices_;
     std::vector<std::string> supervisor_notices_;
+    // 监督通知去重键(P1-0 起与监督器共用这一本):task_id:epoch:reason。
+    std::set<std::string> supervisor_notice_keys_;
+    // 监督事件 sink(P2):台账侧事件 -> 监督器的钩子总线/指标。锁内调。
+    std::function<void(const agent::AgentSupervisionEvent&)> supervision_event_sink_;
     // WaitingChildren 的唤醒源:inbox 入项/孩子终态/取消/强收都在台账锁内
     // 记账,松锁前 notify_all(单子 §6.3 第 7 条)。一把全局 cv 足够——
     // 谓词按各自 task 记录判,虚醒只是再查一遍。
     std::condition_variable state_cv_;
+    // agent_watch 的等待口(P1-0):与 state_cv_ 分开——watcher 不必被
+    // WaitingChildren 的每次虚醒搅醒,反之监督可见修订也不必动 state 谓词。
+    std::condition_variable watch_cv_;
+    std::uint64_t watch_generation_ = 0;
 };
 
 // ---- 台账侧的文本小件(自 agent_tool.cpp 搬来,行为一字不改)----

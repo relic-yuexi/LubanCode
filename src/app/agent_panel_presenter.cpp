@@ -7,7 +7,10 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstdio>
+#include <string>
 #include <utility>
+#include <vector>
 
 #include "cli/agent_panel.hpp"
 #include "cli/format_utils.hpp"
@@ -23,6 +26,101 @@ using lubancode::cli::tr;
 using lubancode::cli::trf;
 
 namespace {
+
+// 紧凑时长(监督器单 P1-1 的坞行口径):"45s" / "1m02s" / "11m52s" /
+// "1h02m"。负数/零给 "0s"。不含 ANSI,窄宽截断交给坞行的既有裁剪。
+std::string FormatDurationCompact(std::int64_t ms) {
+    if (ms < 0) {
+        ms = 0;
+    }
+    const std::int64_t total_seconds = ms / 1000;
+    if (total_seconds < 60) {
+        return std::to_string(total_seconds) + "s";
+    }
+    if (total_seconds < 3600) {
+        char buf[16];
+        std::snprintf(buf, sizeof(buf), "%dm%02llds", static_cast<int>(total_seconds / 60),
+                      static_cast<long long>(total_seconds % 60));
+        return buf;
+    }
+    char buf[16];
+    std::snprintf(buf, sizeof(buf), "%dh%02dm", static_cast<int>(total_seconds / 3600),
+                  static_cast<long long>((total_seconds % 3600) / 60));
+    return buf;
+}
+
+// ms 龄;从未发生过(时刻为零)回 -1。
+std::int64_t AgeMsOf(std::chrono::steady_clock::time_point now, std::chrono::steady_clock::time_point at) {
+    if (at.time_since_epoch().count() == 0) {
+        return -1;
+    }
+    const auto delta = std::chrono::duration_cast<std::chrono::milliseconds>(now - at).count();
+    return delta < 0 ? 0 : delta;
+}
+
+// 监督小截(监督器单 P1-1 §十,Dock 每行只添一小截):重连次数/静默龄。
+// 尺子与监督拍同一套(单子 §7.1:各相位各用各的钟)——流式/等首字节看
+// 传输静默,等下一轮/等孩子看执行静默;跑工具的静默由活度短语
+// ("工具 x · Ns")自己报,这里不重复。Healthy/已收场不出段。
+std::string SupervisionSegment(const agent::AgentProgressClock& progress,
+                               const lubancode::tools::AgentTaskActivity* activity,
+                               std::chrono::steady_clock::time_point now) {
+    using H = agent::AgentHealthState;
+    using S = agent::AgentSupervisionStage;
+    if (progress.health == H::Healthy || progress.health == H::Terminal) {
+        return std::string();
+    }
+    std::vector<std::string> parts;
+    if (progress.health == H::Recovering) {
+        // "重连 2/3":自动重试次数/上限(单子 §十样例)。上限是请求恢复链
+        // 的常量(api::kMaxRequestAttempts),这里不引 api 头,按同一数值写死
+        // 并注释拴住——两处不同步时以 api 侧为准。
+        parts.push_back(trf("agent_supervision.recovering", progress.retry_count, 3));
+    } else if (progress.health == H::Degraded) {
+        parts.push_back(tr("agent_supervision.degraded"));
+    }
+    // 静默龄:与监督拍同钟。跑工具时活度短语已带工具龄,不重复报。
+    const bool tool_age_already_shown =
+        activity != nullptr && activity->stage == lubancode::tools::AgentTaskActivity::Stage::Tool;
+    if (!tool_age_already_shown) {
+        std::int64_t silence_ms = -1;
+        switch (progress.stage) {
+            case S::Queued:
+            case S::Preparing:
+            case S::Completing:
+            case S::Terminal:
+                break;  // 收口相位本来就该安静,不报静默
+            case S::AwaitingFirstByte:
+            case S::StreamingThinking:
+            case S::StreamingText:
+            case S::AwaitingToolInputComplete:
+            case S::Recovering:
+                silence_ms = AgeMsOf(now, progress.last_transport_at);
+                break;
+            case S::RunningTool:
+            case S::AwaitingNextModelTurn:
+            case S::WaitingChildren:
+                silence_ms = AgeMsOf(now, progress.last_execution_at);
+                break;
+        }
+        if (silence_ms < 0 && progress.stage != S::RunningTool) {
+            // 没有可量的钟(还没收过传输/执行):用任务耗时兜底——"出生至今
+            // 没动静"也是静默。
+            silence_ms = AgeMsOf(now, progress.request_started_at);
+        }
+        if (silence_ms >= 0) {
+            parts.push_back(trf("agent_supervision.silent", FormatDurationCompact(silence_ms)));
+        }
+    }
+    std::string joined;
+    for (std::size_t i = 0; i < parts.size(); ++i) {
+        if (i != 0) {
+            joined += " · ";
+        }
+        joined += parts[i];
+    }
+    return joined;
+}
 
 // 面板短因文案(规格"现场三"):失败须分得出接口错/工具错/空结论——导航
 // 坞只放短因,完整错误进 transcript(Enter 切进该会话再看)。
@@ -103,7 +201,8 @@ std::string AgentStateWord(lubancode::tools::AgentTaskState state, int steps_use
                            lubancode::tools::TaskOutcomeReason outcome_reason,
                            const lubancode::tools::AgentTaskActivity* activity,
                            std::chrono::steady_clock::time_point now, bool stop_requested = false,
-                           std::size_t waiting_children = 0) {
+                           std::size_t waiting_children = 0,
+                           const agent::AgentProgressClock* progress = nullptr) {
     using S = lubancode::tools::AgentTaskState;
     if (state == S::Running || state == S::WaitingChildren || state == S::Completing) {
         std::string word;
@@ -118,6 +217,14 @@ std::string AgentStateWord(lubancode::tools::AgentTaskState state, int steps_use
         }
         if (word.empty()) {
             word = tr("agent_status.state_running");
+        }
+        // 监督小截(P1-1):阶段静默/重连次数,排在活度短语之后、步数账之前
+        // ——"#7 镜像流 重连 2/3 · 静默 1m02s · 总 11m52s"的那一小截。
+        if (progress != nullptr) {
+            const std::string supervision = SupervisionSegment(*progress, activity, now);
+            if (!supervision.empty()) {
+                word += " · " + supervision;
+            }
         }
         // 步数常驻可见(真机实测 P2-1:Dock 要"已用步数、上限、累计 token、
         // 最后一次工具"四样都看得到):有上限带 N/M,没上限跑过步数也带 N。
@@ -214,7 +321,29 @@ std::vector<lubancode::cli::AgentPanelEntry> AgentPanelPresenter::Entries(
         const std::string state_word =
             AgentStateWord(task.state, task.steps_used, task.step_limit, task.outcome_reason,
                            task.state == lubancode::tools::AgentTaskState::Running ? &task.activity : nullptr, now,
-                           task.stop_requested, waiting_children);
+                           task.stop_requested, waiting_children, &task.progress);
+        // 监督色辅助(P1-1):颜色只作辅助,行文本已带语义;plain 主题渲染处
+        // 自动退默认淡色。
+        if (entry.running) {
+            using H = agent::AgentHealthState;
+            switch (task.progress.health) {
+                case H::Quiet:
+                case H::SuspectTransport:
+                case H::SuspectTool:
+                case H::SuspectAgent:
+                    entry.health_tint = lubancode::cli::AgentHealthTint::Quiet;
+                    break;
+                case H::Recovering:
+                    entry.health_tint = lubancode::cli::AgentHealthTint::Recovering;
+                    break;
+                case H::Degraded:
+                    entry.health_tint = lubancode::cli::AgentHealthTint::Degraded;
+                    break;
+                case H::Healthy:
+                case H::Terminal:
+                    break;
+            }
+        }
         entry.state = trf("agent_status.summary", state_word, task.tool_call_count, token_text,
                           lubancode::cli::FormatSeconds(seconds));  // 列表行只认真正短 title;旧任务没有 title 就显示"未命名子代理 #N"
         // ——绝不回退到 prompt 前若干字(prompt 只在详情里出现)。
@@ -324,13 +453,17 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
                                                      agent_tool != nullptr
                                                  ? agent_tool->ledger().AliveChildCount(snapshot->id)
                                                  : 0;
+        // 监督账(P1-1):统计行的监督小截与查看态的监督折叠行共用这一份
+        // 现值(真账在 TaskRecord.progress)。
+        const agent::AgentProgressClock progress =
+            agent_tool != nullptr ? agent_tool->ledger().ProgressOf(snapshot->id) : agent::AgentProgressClock{};
         std::string stats_line =
             "  " + theme.stats +
             trf("agent_status.summary",
                 AgentStateWord(snapshot->state, snapshot->steps_used, snapshot->step_limit,
                                snapshot->outcome.reason,
                                running ? &snapshot->activity : nullptr, now, snapshot->stop_requested,
-                               waiting_children),
+                               waiting_children, &progress),
                 static_cast<int>(snapshot->tool_calls.size()), token_text,
                 lubancode::cli::FormatSeconds(seconds));
         if (running && snapshot->activity.first_byte_ms >= 0) {
@@ -360,6 +493,32 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
                 }
                 lines.push_back("  " + theme.stats + trf("agent_panel.budget_head", joined) + theme.reset);
             }
+        }
+        // 监督折叠行(监督器单 P1-1 §十):一行小截,不堆诊断报告——最后
+        // 传输/最后完整提交/最后实质进展/当前请求尝试/最近错误码/下一动作
+        // 与截止(墙钟是唯一有明确截止的硬线;软线归监督拍,这里只报账)。
+        // 终态任务不出这行(账已收进 outcome)。
+        if (alive) {
+            const auto age_text = [&now](std::chrono::steady_clock::time_point at) {
+                const std::int64_t age = AgeMsOf(now, at);
+                return age < 0 ? tr("agent_supervision.age_never") : FormatDurationCompact(age);
+            };
+            std::string wall_text = tr("agent_supervision.wall_none");
+            if (snapshot->wall_limit_secs > 0) {
+                const auto wall_deadline =
+                    snapshot->start_time + std::chrono::seconds(snapshot->wall_limit_secs);
+                wall_text = wall_deadline > now ? FormatDurationCompact(std::chrono::duration_cast<
+                                                    std::chrono::milliseconds>(wall_deadline - now)
+                                                    .count())
+                                                : tr("agent_supervision.wall_over");
+            }
+            const std::string reason_text =
+                progress.last_reason_code.empty() ? tr("agent_supervision.no_reason") : progress.last_reason_code;
+            lines.push_back("  " + theme.stats +
+                            trf("agent_supervision.detail", age_text(progress.last_transport_at),
+                                age_text(progress.last_execution_at), age_text(progress.last_meaningful_progress_at),
+                                progress.request_attempt, reason_text, wall_text) +
+                            theme.reset);
         }
     }
 

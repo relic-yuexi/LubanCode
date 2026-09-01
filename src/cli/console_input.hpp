@@ -334,6 +334,14 @@ void SetIdleWakeHook(std::function<bool()> hook);
 // 不让位、不起轮,纯通知。传空钩子即清除;管道/重定向走不到逐键路径。
 void SetBackgroundNoticeHook(std::function<void()> hook);
 
+// 轮次打断/用户排队的广播(监督器单 P1-0):ESC/Ctrl+C 打断当前轮、用户
+// 往待发队列排入消息那一刻,监听线程调 BroadcastTurnInterrupted——应用层
+// 用 SetTurnInterruptBroadcast 挂的钩子去唤醒睡在 agent_watch 等待里的
+// watcher(单子 §9.2"用户输入、取消提前唤醒")。钩子在监听线程上被调,
+// 须自备线程安全、只做唤醒不做重活。传空钩子即清除。
+void SetTurnInterruptBroadcast(std::function<void()> hook);
+void BroadcastTurnInterrupted();
+
 // 状态行"后台任务"段的数据源(background 管理面单):BuildStatusLine 组行
 // 前现叫一次,拿最新段文本(形如 "后台 2 运行 / 1 完成";空串 = 没任务,
 // 段收起)。空闲 100ms 拍与流式 footer 每帧都会问——后台起/收那一刻底栏

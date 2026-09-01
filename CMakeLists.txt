@@ -403,6 +403,8 @@ add_library(lubancode_engine STATIC
   src/tools/agent_task_coordinator.cpp
   src/tools/subagent_isolation.cpp
   src/tools/agent_message_tool.cpp
+  # 监督器单 P1-0:agent_watch 模型工具(lineage 鉴权、有界快照与 cv 长等)。
+  src/tools/agent_watch_tool.cpp
   src/tools/hooks.cpp
   src/hooks/hash.cpp
   src/hooks/protocol.cpp
@@ -758,6 +760,10 @@ add_library(lubancode_runtime STATIC
   # 监督器单 P0-2:会话级单线程监督器(健康拍 + 期限表 + 通知去重),
   # 墙钟看门狗自每任务一线迁入。
   src/runtime/agent_supervisor.cpp
+  # 监督器单 P2:AgentHealthChanged 只读钩子总线(后台安全队列)与六枚
+  # 低基数 OTel 指标聚合。
+  src/runtime/agent_health_hooks.cpp
+  src/runtime/agent_supervisor_metrics.cpp
   # 统一回放接口只收信封、次序与坏行恢复规矩;loop/goal/workflow
   # 各自保留域编解码与折叠口。
   src/runtime/replay.cpp

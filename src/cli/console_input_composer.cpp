@@ -74,6 +74,16 @@ std::function<void()>& BackgroundNoticeHookSlot() {
     return hook;
 }
 
+// 轮次打断/用户排队的广播(监督器单 P1-0):ESC 或 Ctrl+C 打断当前轮、
+// 以及用户往待发队列里排队消息的那一刻叫一声——应用层拿它去唤醒正睡在
+// agent_watch 等待里的 watcher(台账 NotifyExternalWake),单子 §9.2 的
+// "用户输入、取消提前唤醒"。在监听线程上被调,钩子须自备线程安全、只做
+// 唤醒不做重活。
+std::function<void()>& TurnInterruptBroadcastSlot() {
+    static std::function<void()> hook;
+    return hook;
+}
+
 // 状态行"后台任务"段的现折数据源(background 管理面单):BuildStatusLine
 // 每次组行前叫一声,拿最新段文本(应用层从 BackgroundTaskRegistry 折,
 // 空串 = 没任务,段收起)。空闲路在主线程、footer 路在 StdoutWriteMutex
@@ -467,9 +477,13 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     // 导航坞帧:折叠+窗口化布局(纯函数)+ 输入框上横线右端短标签 + composer
     // 收件目标。0.29.x 起坞画在状态行之下贴底(rows_below),空闲与流式共用
     // 同一套纯逻辑;导航坞只放导航,查看态长正文走视图切换钩子进上方视口。
+    // dock_tints(监督器单 P1-1):与返回行按位对齐的监督色;toast/提示行
+    // 插入时同步补 Normal,build_model 原样带走。
+    std::vector<AgentHealthTint> dock_tints;
     const auto build_dock = [&](const std::vector<AgentPanelEntry>& entries,
                                 std::string& tag_out) -> std::vector<std::string> {
         tag_out.clear();
+        dock_tints.clear();
         if (!composer || entries.empty()) {
             if (composer && entries.empty()) {
                 panel_session.OnEntriesChanged({});  // 子代理全没了:焦点/查看态收干净
@@ -506,15 +520,17 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             SetComposerTarget(std::nullopt);
         }
         std::vector<std::string> lines = RenderAgentDockLines(layout, width);
+        dock_tints = DockRowTints(layout);
         // 小提示挂点:插在首行(操作提示)之下,只认非空坞。全部条目退场
         // (done+delivered/cancelled)或矮屏摆不下时 LayoutAgentDock 整坞
         // 不出场,lines 是空的——begin()+1 已越过 end(),insert 属未定义
         // 行为:MSVC 在新配的 1 格缓冲之外落笔,写出堆外。查看态完成退场
         // 一拍(结果交回 main、toast 刚挂上、场上再无活动代理)正踩中这条。
         // 空坞连提示一起不挂:没有可挂的帧,按过期自收,绝不越界落笔。
-        const auto hang_dock_notice_row = [&lines](std::string row) {
+        const auto hang_dock_notice_row = [&lines, &tints = dock_tints](std::string row) {
             if (!lines.empty()) {
                 lines.insert(lines.begin() + 1, std::move(row));
+                tints.insert(tints.begin() + 1, AgentHealthTint::Normal);  // 行与色按位对齐
             }
         };
         if (!panel_notice.empty()) {
@@ -615,6 +631,7 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
         model.queue_rows = queue_rows;
         model.agent_dock_rows = dock;
+        model.agent_dock_tints = dock_tints;  // build_dock 刚写的那份,按位对齐
         model.transient_rows = state.hint_lines;
         model.rule_tag = tag;
         model.selected_task_id = selected_task_id;
@@ -2055,6 +2072,14 @@ void ShowPanelToast(const std::string& text) {
 void SetIdleWakeHook(std::function<bool()> hook) { IdleWakeHookSlot() = std::move(hook); }
 
 void SetBackgroundNoticeHook(std::function<void()> hook) { BackgroundNoticeHookSlot() = std::move(hook); }
+
+void SetTurnInterruptBroadcast(std::function<void()> hook) { TurnInterruptBroadcastSlot() = std::move(hook); }
+
+void BroadcastTurnInterrupted() {
+    if (const auto& broadcast = TurnInterruptBroadcastSlot()) {
+        broadcast();
+    }
+}
 
 void SetPromptHistoryProvider(PromptHistoryProvider provider) {
     PromptHistoryProviderSlot() = std::move(provider);

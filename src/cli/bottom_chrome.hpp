@@ -96,6 +96,9 @@ struct BottomChromeModel {
     ComposerViewModel composer;
     std::vector<std::string> status_rows;      // 状态栏(调用方拼好的整行)
     std::vector<std::string> agent_dock_rows;  // 导航坞(无子代理零行)
+    // 坞行的监督色辅助(监督器单 P1-1):与 agent_dock_rows 按位对齐,可短
+    //(不足位按 Normal);行文本保持纯文本,颜色由布局在这包 ANSI。
+    std::vector<AgentHealthTint> agent_dock_tints;
     std::vector<std::string> transient_rows;   // slash 提示等(常态零行)
     std::string rule_tag;                      // 上横线右端短标签(查看态)
     int selected_task_id = 0;                  // 导航当前选中(0=main)
