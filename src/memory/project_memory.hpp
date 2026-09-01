@@ -53,19 +53,65 @@ struct Options {
 
 struct ProjectIdentity {
     std::filesystem::path project_root;
-    std::filesystem::path common_root;
-    std::filesystem::path project_dir;
-    std::string key;
+    std::filesystem::path identity_root;
+    // P0-3:项目记忆搬进 workspace——不再有 <home>/projects/<key>/ 的
+    // project_dir,记忆根是 <home>/workspaces/<workspace_key>/memory/。
+    std::filesystem::path workspace_dir;
+    std::string workspace_key;
     std::string display_name;
     bool git = false;
 };
 
 // P0-1 起这是形状适配,不是身份算法:裁决(commondir→marker→config→cwd
 // 四级 + 统一 workspace_key)只在 workspace::ResolveWorkspaceIdentity 一处,
-// 这里把结果折成 memory 域的 ProjectIdentity。key 即统一 workspace_key;
-// project_dir 仍住 <home>/projects/<key>/(P0-3 才搬进 workspace)。
+// 这里把结果折成 memory 域的 ProjectIdentity,并按 P0-3 把根挪进
+// <home>/workspaces/<workspace_key>/(首次开仓由 workspace manifest 原子写)。
 std::expected<ProjectIdentity, std::string> ResolveProjectIdentity(
     const std::filesystem::path& cwd, const std::filesystem::path& home_lubancode);
+
+// ---------------------------------------------------------------------------
+// P0-3:memory 的落账口(召回快照与写入因果边)。memory 域只认这只纯接口,
+// trajectory 侧的实现在装配层(app/memory_ledger_bridge),memory 不反向
+// include trajectory。
+// ---------------------------------------------------------------------------
+
+// 一条真正注入模型的记忆(合同 §四 context.injected 的载荷)。content 只
+// 用来算 hash 与落快照,不进 trace、不进 memory 自身账。
+struct InjectedMemoryRecord {
+    std::string target_run_id;  // 空=主会话;非空=派工进该子代理的冻结快照
+    std::string memory_level;   // project | user
+    std::string memory_id;
+    int memory_schema = 0;
+    std::string memory_updated_at;
+    std::string content;
+    std::string content_sha256;                    // hooks::Sha256Hex(content)
+    std::vector<std::string> source_evidence_refs; // 全限定引用
+    std::size_t injected_bytes = 0;
+};
+
+// memory.save.requested 的申报材料(合同 §四因果边)。
+struct SaveLedgerNote {
+    std::string operation;       // upsert | forget | verify | rebuild
+    std::string layer;           // project | user
+    std::string kind;            // fact | preference | feedback(空=非 upsert)
+    std::string memory_id;       // 空=自动起 id
+    std::string title;
+    std::string source_session;  // 裸 session id(全限定由落账方拼)
+    std::string originator;      // user_command | model_tool | auto_extraction
+};
+
+class MemoryAccounting {
+public:
+    virtual ~MemoryAccounting() = default;
+    // 落一枚 context.injected(快照 artifact 先行写稳)。失败=快照写不稳
+    // (§9.2 memory.recall_snapshot_failed),调用方本轮不注入该条。
+    virtual std::expected<void, std::string> RecordRecallInjection(const InjectedMemoryRecord& record) = 0;
+    // 落 memory.save.requested,回该事件的全限定引用(workspace/session/
+    // run/event);失败回空串,调用方用无轨迹的兜底引用。
+    virtual std::string RecordSaveRequested(const SaveLedgerNote& note) = 0;
+    // 当前落账的 session id(clear 换账后跟着走)。没有账的场合回空串。
+    virtual std::string current_session_id() const { return std::string(); }
+};
 
 // fact=可核验的项目事实;preference=用户主动选定的项目技术偏好;
 // feedback=用户对 LubanCode 行事方式的明确纠正(版本节奏、验收习惯、提交
@@ -201,12 +247,13 @@ struct RuntimeStatus {
     bool generate = false;
     bool user_enabled = false;  // 用户级记忆(全局授权另设)
     std::string learn;   // off | review | auto(本场档位)
-    std::string project_key;
+    std::string workspace_key;  // P0-3:与 session 共用的统一钥匙
     std::filesystem::path memory_dir;
     std::filesystem::path user_memory_dir;
     std::size_t entry_count = 0;
     std::size_t user_entry_count = 0;
     std::size_t pending_jobs = 0;
+    std::size_t failed_jobs = 0;  // P0-3:worker 挪进 failed 的(job 回执有账)
     std::size_t pending_candidates = 0;
 };
 
@@ -232,13 +279,17 @@ struct RecallTraceEntry {
     bool expired = false;         // 已过 expires_at,不召回
     bool duplicate_dropped = false;  // 同一事实/相同证据,去重让位
     bool layer_superseded = false;   // 用户层同主题被项目层压过
+    // P0-3:召回快照落不稳(§9.2)——本轮没注入该条,不得"注了却无账"。
+    bool snapshot_failed = false;
     std::size_t bytes = 0;
 };
 
 struct RecallTrace {
     bool valid = false;
     std::string at;
-    std::string project_key;
+    // P0-3:键名随统一身份换 workspace_key(schema 3;旧档的 project_key
+    // 读回时兜底认)。
+    std::string workspace_key;
     std::string query_origin = "user";  // user | background_completion | hook | compact | system
     bool skipped = false;               // 合成控制消息:本轮没跑检索
     std::vector<TraceTerm> terms;
@@ -270,8 +321,16 @@ public:
     std::expected<void, std::string> set_learn(LearnMode mode);
     void set_source_session(std::string id) { source_session_ = std::move(id); }
 
+    // P0-3:落账口挂接(召回快照 + 写入因果边)。空(默认)= 没接轨迹的
+    // 场合(单发/单测),一笔不落,行为与从前一致。归装配层所有,这里只
+    // 借指针,不接管寿命。
+    void set_accounting(MemoryAccounting* accounting) { accounting_ = accounting; }
+
     const ProjectIdentity& identity() const { return identity_; }
     const std::filesystem::path& memory_dir() const { return memory_dir_; }
+    // P0-3:项目记忆住 <workspace>/memory/,与 session 共一棵 workspace 树;
+    // 不再新建 <home>/projects/ 下任何文件。
+    const std::filesystem::path& workspace_dir() const { return identity_.workspace_dir; }
     // 用户级记忆目录:<主目录>/memory/user/。与项目记忆分账,各自一份
     // index.md 与 .state/catalog.json。
     std::filesystem::path user_memory_dir() const { return home_lubancode_ / "memory" / "user"; }
@@ -285,6 +344,14 @@ public:
     [[nodiscard]] std::string BuildTurnContext(const std::string& query, const std::filesystem::path& cwd,
                                                QueryOrigin origin = QueryOrigin::User,
                                                bool force_retrieval = false) const;
+
+    // P0-3(§6.2):子代理派工的冻结召回——父任务派工当刻按 task prompt
+    // 检索一次,结果整段冻结下发,子代理不再自己扫库。target_run_id 是
+    // 子代理的 agent_run_id(没有轨迹账时给空串),快照事件以
+    // relations.child_run_id 记在父账上。
+    [[nodiscard]] std::string BuildTurnContextForDispatch(const std::string& task_prompt,
+                                                          const std::filesystem::path& cwd,
+                                                          const std::string& target_run_id) const;
 
     // 上一轮召回的 trace(读 .state/trace-last.json)。没有记录时
     // valid=false。/memory why 用。
@@ -363,7 +430,11 @@ public:
     };
     std::expected<MigrationResult, std::string> RunMigration() const;
 
-    std::expected<std::string, std::string> EnqueueSave(const SaveRequest& request);
+    // user_initiated=true 只服务显式用户命令(/memory remember):因果边
+    // (memory.save.requested)按 user 记;模型工具与回合尾抽取走默认 false。
+    // P0-4 起全局层写入也只认 user_initiated=true 的路。
+    std::expected<std::string, std::string> EnqueueSave(const SaveRequest& request,
+                                                        bool user_initiated = false);
     std::expected<std::string, std::string> EnqueueForget(const std::string& id);
     std::expected<std::string, std::string> EnqueueRebuild();
     // 核验:原 id 复活——重算指纹、盖 last_verified_at、status 回 active。
@@ -386,10 +457,14 @@ public:
     std::expected<void, std::string> LaunchWorker() const;
 
 private:
+    std::string BuildTurnContextImpl(const std::string& query, const std::filesystem::path& cwd,
+                                     QueryOrigin origin, bool force_retrieval,
+                                     const std::string& target_run_id) const;
     std::expected<std::string, std::string> EnqueueJob(const std::string& operation,
                                                        const SaveRequest* request,
                                                        const std::string& id,
-                                                       nlohmann::json extra = nlohmann::json::object());
+                                                       nlohmann::json extra = nlohmann::json::object(),
+                                                       bool user_initiated = false);
     std::filesystem::path CandidatesDir() const;
 
     ProjectIdentity identity_;
@@ -398,6 +473,7 @@ private:
     Options options_;
     std::string executable_;
     std::string source_session_;
+    MemoryAccounting* accounting_ = nullptr;  // P0-3:装配层挂的落账口
     // 回合总结产出的检索扩展词(下一轮 BuildTurnContext 合并进查询)。
     std::vector<std::string> retrieval_hints_;
 };

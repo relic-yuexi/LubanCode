@@ -253,13 +253,15 @@ TEST_CASE("身份:两把旧钥匙已统一——memory 侧 ProjectIdentity 同 k
     const auto identity = workspace::ResolveWorkspaceIdentity(root / "demo-repo" / "src", {}).value();
     const auto memory_identity =
         memory::ResolveProjectIdentity(root / "demo-repo" / "src", root / "home").value();
-    CHECK(memory_identity.key == identity.workspace_key);
+    CHECK(memory_identity.workspace_key == identity.workspace_key);
     CHECK(memory_identity.project_root == identity.project_root);
-    CHECK(memory_identity.common_root == identity.identity_root);
+    CHECK(memory_identity.identity_root == identity.identity_root);
     CHECK(memory_identity.git);
 
     // linked worktree:memory 侧也共 key(旧算法修过的裂口,新算法天然不裂)。
     const auto wt_memory = memory::ResolveProjectIdentity(root / "demo-repo-wt", root / "home").value();
-    CHECK(wt_memory.key == memory_identity.key);
-    CHECK(wt_memory.project_dir == memory_identity.project_dir);  // 换钥匙不换房:projects/<key>/
+    CHECK(wt_memory.workspace_key == memory_identity.workspace_key);
+    // P0-3:换钥匙也换房——记忆根进 <home>/workspaces/<workspace_key>/,
+    // 与 session 同一棵 workspace 树。
+    CHECK(wt_memory.workspace_dir == memory_identity.workspace_dir);
 }

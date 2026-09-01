@@ -423,6 +423,8 @@ add_library(lubancode_engine STATIC
   src/memory/project_memory.cpp
   src/memory/frontmatter.cpp
   src/memory/memory_tool.cpp
+  # 存储 v2 P0-3:memory 落账口在 Trajectory 账上的桥(召回快照+写入因果边)。
+  src/app/memory_ledger_bridge.cpp
   src/mcp/transport.cpp
   src/mcp/client.cpp
   src/mcp/rich_result.cpp  # MCP 富结果:tools/call 全块型解析与 artifact 落盘

@@ -292,13 +292,14 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         subagent_profile.runtime = lubancode::app::BuildSubagentRuntimeProfile(
             lubancode::app::BuildMainRuntimeProfile(config, &once_catalog, config.model), config);
         agent_tool->SetAgentProfile(std::move(subagent_profile));
-        // 单发模式的子代理记忆召回:按任务 prompt 独立检索(与 main 同一只
-        // ProjectMemory;关着就不注)。
+        // 单发模式的子代理记忆召回(存储 v2 P0-3):派工当刻检索一次,整段
+        // 冻结下发,子代理不自动扫整库。单发没有轨迹账,child_run_id 空。
         if (project_memory != nullptr && config.memory.use) {
-            agent_tool->SetTurnContextProvider([memory = project_memory](const std::string& task_prompt) {
-                return memory->BuildTurnContext(task_prompt, std::filesystem::current_path(),
-                                                lubancode::memory::QueryOrigin::User);
-            });
+            agent_tool->SetTurnContextProvider(
+                [memory = project_memory](const std::string& task_prompt, const std::string& child_run_id) {
+                    return memory->BuildTurnContextForDispatch(task_prompt, std::filesystem::current_path(),
+                                                               child_run_id);
+                });
         }
         if (sub_deferral) {
             agent_tool->SetToolFilter(sub_tool_filter);

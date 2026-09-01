@@ -184,6 +184,22 @@ bool FoldEvent(const EventEnvelope& envelope, ReplayState* state, FoldIndex* ind
             // 内容 ref 进 artifact 账。
             CollectArtifactRefs(payload.value("content_ref", nlohmann::json()), &state->artifact_refs);
             return true;
+        case EventKind::ContextInjected: {
+            // 存储 v2 P0-3:记忆召回快照。不进 effective conversation(正文
+            // 已经活在当轮 input 里);快照是内容寻址 blob,content_sha256 即
+            // 文件名,进 artifact 账——Replay 重建"当时模型看见哪一版"凭
+            // 这枚 hash 去仓里取,不读今天的 Memory。
+            const auto content_hash = payload.find("content_sha256");
+            if (content_hash != payload.end() && content_hash->is_string()) {
+                state->artifact_refs.push_back(content_hash->get<std::string>());
+            }
+            return true;
+        }
+        case EventKind::MemorySaveRequested:
+        case EventKind::MemorySaveCommitted:
+        case EventKind::MemorySaveFailed:
+            // Memory 写入因果边:纯账目,不参与会话投影。
+            return true;
         case EventKind::ModelRequestPrepared: {
             ReplayRequestStep step;
             step.request_id = envelope.request_id.value_or(std::string());

@@ -72,7 +72,7 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
                          toggle_word(status.generate))
                   << "\n"
                   << trf("cmd.memory.learn_status", status.learn) << "\n"
-                  << trf("cmd.memory.project", status.project_key) << "\n"
+                  << trf("cmd.memory.project", status.workspace_key) << "\n"
                   << trf("cmd.memory.directory", lubancode::tools::PathToUtf8(status.memory_dir)) << "\n"
                   << trf("cmd.memory.counts", status.entry_count, status.pending_jobs) << "\n";
         if (status.user_enabled) {
@@ -245,6 +245,7 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             if (entry.expired) reason = tr("cmd.memory.why.expired");
             else if (entry.scope_blocked) reason = tr("cmd.memory.why.scope");
             else if (entry.stale_blocked) reason = tr("cmd.memory.why.stale");
+            else if (entry.snapshot_failed) reason = tr("cmd.memory.why.snapshot_failed");
             else if (entry.layer_superseded) reason = tr("cmd.memory.why.superseded");
             else if (entry.duplicate_dropped) reason = tr("cmd.memory.why.duplicate");
             else if (entry.below_threshold) reason = tr("cmd.memory.why.below_threshold");
@@ -323,7 +324,7 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             PrintMemoryUsage();
             return;
         }
-        const auto queued = project_memory->EnqueueSave(request);
+        const auto queued = project_memory->EnqueueSave(request, /*user_initiated=*/true);
         TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
                                          : trf("cmd.memory.queue_failed", queued.error()))
                   << "\n";

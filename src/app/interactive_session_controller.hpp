@@ -51,6 +51,7 @@
 #include "config/model_catalog.hpp"
 #include "config/settings_local.hpp"
 #include "telemetry/service.hpp"
+#include "app/memory_ledger_bridge.hpp"
 #include "memory/project_memory.hpp"
 #include "peers/peer_session.hpp"
 #include "runtime/event_sinks.hpp"
@@ -351,6 +352,9 @@ private:
     const std::optional<std::string>& home_lubancode;
     const std::string& prompts_dir;
     std::shared_ptr<lubancode::memory::ProjectMemory>& project_memory;
+    // 存储 v2 P0-3:memory 落账桥(召回快照+写入因果边)。轨迹账开着的
+    // 会话在装配尾声构造并挂进 project_memory;没有轨迹账时保持空。
+    std::unique_ptr<lubancode::app::MemoryLedgerBridge> memory_ledger_bridge_;
     std::string& project_instructions;
     // AGENTS.md 逐 source 账(作用域单 P1-2):本体在 stack_,与上面那截
     // 拼接串同源同刷,喂 prompt_options.project_instruction_sources。

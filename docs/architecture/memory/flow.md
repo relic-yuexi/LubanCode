@@ -58,17 +58,17 @@ flowchart TD
 
 ## 第二道门：认出这是哪个项目
 
-Git 仓库按 common git dir 算 project key。主工作树与 linked worktree 共用一份记忆；两份独立 clone 路径不同，不会误共享。
+身份由 `workspace::ResolveWorkspaceIdentity` 统一裁决（Git common dir → marker → config → cwd 四级，存储 v2 P0-1）。主工作树与 linked worktree 共用一份记忆；两份独立 clone 路径不同，不会误共享。
 
-非 Git 目录向上找最近的 `.lubancode/config.json`；找不到便以启动 cwd 为根。`/worktree` 改 cwd 后，运行对象会重新算身份和目录。
+非 Git 目录向上找最近的 `.lubancode/workspace.json` 或 `.lubancode/config.json`；找不到便以启动 cwd 为根。`/worktree` 改 cwd 后，运行对象会重新算身份和目录。
 
-身份定下，项目记忆落在：
+身份定下，项目记忆落在（存储 v2 P0-3 起与 session 同一棵 workspace 树）：
 
 ```text
-~/.lubancode/projects/<project-key>/memory/
+~/.lubancode/workspaces/<workspace-key>/memory/
 ```
 
-用户级记忆另住 `~/.lubancode/memory/user/`。
+用户级记忆另住 `~/.lubancode/memory/user/`。旧 `~/.lubancode/projects/` 树的迁移归 P0-5。
 
 ## 召回读路
 
