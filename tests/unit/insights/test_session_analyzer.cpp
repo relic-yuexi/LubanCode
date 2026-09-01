@@ -278,7 +278,9 @@ TEST_CASE("功能信号:同类验证反复与子代理 token 超主会话") {
         input.subagent_tokens = 5000;
         const std::vector<FeatureSignal> signals = DetectFeatureSignals(input);
         REQUIRE(signals.size() == 1);
-        CHECK(signals[0].signal_id == "FS-01");  // 只此一条,编号从头起
+        // A5 起 id 按规则钉死(跨场可比):子代理收窄的本命 id 是 FS-04,
+        // 只开这一条时也不从 1 重编。
+        CHECK(signals[0].signal_id == "FS-04");
         CHECK(signals[0].feature.find("子代理") != std::string::npos);
     }
     SUBCASE("证据不足就不出:全零输入零信号") {

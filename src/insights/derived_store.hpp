@@ -16,7 +16,9 @@
 namespace lubancode::insights {
 
 // 摘要落位的目录名(与 analyzer 版本同名;升版本另起目录,旧摘要留给
-// 历史报告页眉标旧版本用,§14.6)。
+// 历史报告页眉标旧版本用,§14.6)。kDerivedAnalyzerDir 是 <session>/
+// derived/ 下那一层的名字(A5 的 clean/doctor 按它定位派生层)。
+inline constexpr const char* kDerivedAnalyzerDir = "insights-v1";
 inline constexpr const char* kDerivedSummaryDir = "derived/insights-v1";
 
 std::filesystem::path SessionSummaryPath(const std::filesystem::path& session_dir);

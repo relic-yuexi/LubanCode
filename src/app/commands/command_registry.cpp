@@ -12,6 +12,7 @@
 #include "app/commands/evolve_commands.hpp"
 #include "app/commands/goal_commands.hpp"
 #include "app/commands/hook_commands.hpp"
+#include "app/commands/insights_commands.hpp"
 #include "app/commands/loop_commands.hpp"
 #include "app/commands/memory_commands.hpp"
 #include "app/commands/model_commands.hpp"
@@ -55,6 +56,7 @@ const std::vector<SlashCommandSpec>& SlashCommandTable() {
         {lubancode::cli::SlashCommand::Clear, "clear", HandleSlashClear, false, false},
         {lubancode::cli::SlashCommand::Context, "context", HandleSlashContext, false, false},
         {lubancode::cli::SlashCommand::Usage, "usage", HandleSlashUsage, false, false},
+        {lubancode::cli::SlashCommand::Insights, "insights", HandleSlashInsights, false, false},
         {lubancode::cli::SlashCommand::Compact, "compact", HandleSlashCompact, false, false},
         {lubancode::cli::SlashCommand::Think, "think", HandleSlashThink, false, false},
         {lubancode::cli::SlashCommand::Skills, "skills", HandleSlashSkills, false, false},
@@ -136,6 +138,12 @@ const char* CoarseEffectClass(const std::string& name) {
     static const std::set<std::string> kSpawnRun = {"agent", "workflow", "goal", "loop", "background",
                                                     "doctor"};
     static const std::set<std::string> kSessionBoundary = {"clear", "resume", "exit", "archive", "delete"};
+    // Token 账本单 A5:/insights 写派生摘要与报告(§11.2 effect=derived_write);
+    // status 是只读面,粗分按命令名给执行档,报告路径的细分留给后续注册表
+    // 元数据。
+    if (name == "insights") {
+        return "derived_write";
+    }
     if (kSessionBoundary.count(name) != 0) {
         return name == "delete" ? "destructive" : "session_boundary";
     }

@@ -23,6 +23,7 @@ enum class SlashCommand {
     Exit,
     Context,  // /context [档位]:看当前上下文占用,或临时改窗口大小
     Usage,  // /usage [session <id>] [--by model|purpose|run|outcome] [--json]:Token 账本报告(账本单 A2)
+    Insights,  // /insights [--since 30d] [--sessions 200]|status|clean --derived-only:跨会话洞察报告(账本单 A5)
     Compact,  // /compact [重点说明]:手动触发一次历史压缩
     Think,    // /think [档位]:看/改推理强度
     Skills,   // /skills:列出扫描到的技能(M9)

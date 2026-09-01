@@ -601,6 +601,15 @@ add_library(lubancode_engine STATIC
   src/insights/feature_signal.cpp
   src/insights/derived_store.cpp
   src/insights/session_analyzer.cpp
+  # Token 账本单 A5(/insights):摘要聚合(七节材料)、生成管线
+  # (discover/verify/增量判定/汇总)、报告仓(原子写 + latest 替换 +
+  # derived-only clean)与自包含 HTML renderer(CSP/转义/筛选)。
+  # 纯领域件,不 include app/cli。
+  src/insights/workspace_aggregator.cpp
+  src/insights/insights_generate.cpp
+  src/insights/report_store.cpp
+  src/insights/html_renderer.cpp
+  src/insights/insights_health.cpp
   # 端云协同可观测架构与 Telemetry 插件设计单 T0(合同与离线投影):
   # features.telemetry Activation、trace/span/resource/data class 合同、
   # 确定性 trace/span id、纯 TelemetryProjector(只吃 Journal,不联网)、
@@ -931,6 +940,10 @@ add_library(lubancode_app STATIC
   # JSON 输出;纯领域件在 insights(prompt_auditor/session_analyzer,
   # engine 库)。prompt_commands.cpp 只留分派壳。
   src/app/commands/prompt_audit_commands.cpp
+  # Token 账本单 A5(/insights):跨会话/跨工作区总报告的命令面——解析/
+  # 七节摘要渲染/status 与 clean 的列账确认;生成管线与 renderer 在
+  # insights(engine 库)。doctor_commands.cpp 只加 insights 健康检查。
+  src/app/commands/insights_commands.cpp
   # 会话终章:命令分派注册制(47 案 switch 换注册表,路由与门)。
   src/app/commands/command_registry.cpp
   # 多渠道消息接入单阶段 2:/channels 与 /channel(show/doctor/start/

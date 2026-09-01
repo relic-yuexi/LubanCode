@@ -19,7 +19,11 @@ namespace lubancode::insights {
 
 inline constexpr const char* kInsightsReportSchema = "lubancode.insights.report";
 inline constexpr int kInsightsReportSchemaVersion = 1;
-inline constexpr const char* kInsightsAnalyzerVersion = "insights-v1";
+// v1.1(A5):FeatureSignal 的 id 从"场内序号"改成"规则钉死"(FS-01 验证
+// 固化 / FS-02 工具面 / FS-03 cache 前缀 / FS-04 子代理),跨场可比、
+// 聚合层能按 id 汇总。旧摘要存的是序号 id,含义不可比——版本一抬,按
+// §14.6 判 stale 重算一次,schema 形状不动(A0 冻结不破)。
+inline constexpr const char* kInsightsAnalyzerVersion = "insights-v1.1";
 
 struct InsightsReport {
     std::string generated_at;  // "YYYY-MM-DDTHH:MM:SSZ",调用方注入

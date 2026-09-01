@@ -37,7 +37,9 @@ struct SummaryUsage {
 };
 
 struct SessionInsightSummary {
-    std::string analyzer_version = "insights-v1";
+    // 与 kInsightsAnalyzerVersion 同步(A5 抬到 insights-v1.1:信号 id 改
+    // 规则钉死,旧摘要判 stale 重算)。
+    std::string analyzer_version = "insights-v1.1";
     struct Source {
         std::string session_id;
         // stream run_id -> terminal event hash;任一变化即 stale。
