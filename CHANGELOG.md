@@ -2,6 +2,11 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.163] - 2026-09-02
+
+- **输入区的提示各归各位了。** 模式行常驻输入框正上方（`<mode> shift+tab to <next> mode`，右端带 `<N> skills`）；thinking 行在其上——`esc to cancel` 加计时在左，`? for shortcuts` 在最右端。thinking 不在场整行隐藏，快捷键提示随之隐去。`yolo` 档名用危险红色，一眼分清。
+- **窄屏不折行。** 宽度不够时优先保右端信息（快捷键/技能数），左侧按显示宽度截断；中英文词条成对补齐。本单由 LubanCode 自家实战完成——它读单、写码、构建、361 册测试全绿、落 commit，53 分钟自走到底。
+
 ## [v0.26.162] - 2026-09-02
 
 - **子代理预算的兼容迁移收官（P1）。** Agent YAML 的 `runtime.max_turns`（任务总 turn）与弃用的 `max_steps_per_turn`（每输入轮步数）同现时明拒（`agent.turn_budget_conflict`），不静默选边；旧字段单独使用仍按旧义生效，但加载即给 `agent.legacy_step_budget` 弃用警告。`agent` 工具 JSON 入参的 `max_steps_per_turn` / 旧别名 `max_turns` 保持旧义，用了会随结果带回一行 `[弃用提示]`。`/agent doctor`、`/agent inspect` 与 `/doctor agents` 列明生效的是哪条路，并给可复制的迁移片段。示例、夹具与文档全改写新字段。
