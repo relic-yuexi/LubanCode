@@ -75,7 +75,8 @@
 | `todo_write` | 主代理 | 改会话内清单 | 否 |
 | `ask_user` | 真交互入口 | 等用户选择 | 否 |
 | `memory_save` | 项目记忆 generate 开启 | 排后台写入 | 否 |
-| `tool_search` | 存在延迟工具 | 改本场挂载集合 | 否 |
+| `tool_search` | 存在延迟工具 | 改本场挂载集合（legacy 档）；proxy 档只读 | 否 |
+| `tool_invoke` | `proxy_reference` 档且延迟已启用 | 经宿主解引用执行目标工具 | 跟随真实目标 |
 | `mcp__*` | MCP 握手成功 | 由服务决定 | 是 |
 | `plugin__*` | Lua/DLL 加载成功 | 由插件决定 | 是 |
 
@@ -221,7 +222,17 @@
 
 ### `tool_search`
 
-参数 `query` 是空格分隔关键词，`limit` 默认 5。它在延迟工具的名字和说明里评分，命中后把这些工具加入本场 loaded 集合；下一轮请求便带完整 schema。没命中时会给名字前缀建议。
+参数 `query` 是空格分隔关键词，`limit` 默认 5（`proxy_reference` 档硬上限 20）。它在延迟工具的名字和说明里评分。命中之后怎么走看 `deferred_tool_mode`：
+
+- `legacy_expand`：命中工具加入本场 loaded 集合，下一轮请求带完整 schema（断前缀缓存，见上表）；
+- `proxy_reference`：搜索只读，不碰 loaded、不碰顶层 `tools`；命中工具的完整 schema 与一枚不透明 `tool_ref` 放进 tool result 追加到历史尾部。同一 digest 重搜回短引用；单项 schema 超过 32 KiB 报 `schema_too_large`，不铸 ref、不截断；
+- `native_reference`：本地不挂这枚工具，发现由 provider 的服务端搜索（`tool_search_tool_regex`/`bm25`）完成。
+
+没命中时会给名字前缀建议（legacy 档）或空 matches（proxy 档）。
+
+### `tool_invoke`
+
+只在 `proxy_reference` 档存在，定义常驻顶层 `tools`、一个字节不变。参数是 `tool_ref`（`tool_search` 结果里发出的引用，不可自行拼装）与 `arguments`（要传给目标工具的参数对象）。宿主按 `tool_ref` 找回真实工具，校验 schema 仍与发现时一致，再从统一执行正门跑：确认、Hook、取消与审计都落在真实目标上，终端工具卡也画真实目标名。引用过期（`stale_tool_ref`）、工具消失（`tool_unavailable`）、越权（`tool_not_allowed`）等各有稳定错误码，模型照码决定重搜还是换路。
 
 ### `programmatic_tool_calling`
 

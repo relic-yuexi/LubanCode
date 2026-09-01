@@ -103,10 +103,6 @@ def run_track(base_url: str, api_key: str, model: str, native: bool) -> list:
             "tools": tools,
             "messages": messages,
         }
-        if native and step >= 1:
-            # 第二拍起,把第一拍响应里的原生对块原样塞回 assistant content
-            # (server_tool_use + tool_search_tool_result 不配 tool_result)。
-            pass
         answer = post(base_url, api_key, model, body)
         usage = answer.get("usage", {})
         records.append(
@@ -119,6 +115,9 @@ def run_track(base_url: str, api_key: str, model: str, native: bool) -> list:
                 "content_types": [block.get("type", "") for block in answer.get("content", [])],
             }
         )
+        # assistant content 原样整段回传:第二拍起,第一拍响应里的原生对块
+        # (server_tool_use + tool_search_tool_result)就这样无损回到请求里,
+        # 不给 server 块配 tool_result(只有本地 tool_use 才配,见下)。
         messages.append({"role": "assistant", "content": answer.get("content", [])})
         # 停止即收:没有 tool_use 就不必再发。
         if answer.get("stop_reason") != "tool_use":

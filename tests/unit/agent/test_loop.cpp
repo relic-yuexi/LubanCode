@@ -1802,6 +1802,78 @@ TEST_CASE("P1 proxy: 同批两枚 tool_invoke 各自解引用,参数不串") {
     CHECK(b_ptr->last_input == nlohmann::json{{"who", "b"}});
 }
 
+// 单子 §9.3/§12.3:compact 换史不许动 DiscoveryLedger——账跟 resolver
+// 走,不跟 history 走。compact 后旧 ref 若仍有效,可照常调用;若 schema
+// 变了才报 stale,不能因摘要写着旧参数便放行。实现上是"不作为"(Agent::
+// ReplaceHistory 只换史、不碰账),不作为恰恰最怕没人看着:这里钉一册,
+// 将来谁在换史路上顺手清账,测试当场翻红。
+TEST_CASE("P1 proxy: compact 换史不丢 DiscoveryLedger,旧 ref 照常可调") {
+    FakeBackend backend;
+    tools::ToolRegistry registry;
+    auto target = std::make_unique<CountingDeferredTool>(
+        "mcp__db__query",
+        nlohmann::json{{"type", "object"},
+                       {"properties", {{"q", {{"type", "string"}}}}},
+                       {"required", nlohmann::json::array({"q"})}});
+    CountingDeferredTool* target_ptr = target.get();
+    registry.Register(std::move(target));
+    auto resolver = std::make_shared<tools::DeferredToolResolver>("main");
+    registry.Register(std::make_unique<tools::ToolSearchTool>(registry, resolver));
+    registry.Register(std::make_unique<tools::ToolInvokeTool>());
+
+    agent::Agent loop(backend, registry, ProxyProfile(resolver));
+    agent::TurnWiring callbacks;
+
+    // 第一轮:发现目标,拿 ref。
+    backend.scripts.push_back(ProxyToolCallScript("call_search", "tool_search", R"({"query":"counting"})"));
+    backend.scripts.push_back(TextOnlyScript("搜到了"));
+    REQUIRE(loop.Run("帮我查", callbacks).has_value());
+    const std::string tool_ref = FirstToolRefFromHistory(loop);
+    REQUIRE_FALSE(tool_ref.empty());
+    REQUIRE(resolver->ledger().Size() == 1);
+
+    // compact:历史换成摘要版(archive + 新起点的 user 问话)。真实 /compact
+    // 的新历史由 BuildCompactedHistory 算,这里只要"整份换掉"这个动作本身。
+    const int epoch_before = loop.cache_epoch();
+    std::vector<api::Message> compacted;
+    api::Message archive;
+    archive.role = api::Role::User;
+    archive.content.push_back(api::TextBlock{"[compact 摘要] 此前发现过 mcp__db__query。"});
+    compacted.push_back(std::move(archive));
+    loop.ReplaceHistory(std::move(compacted));
+
+    // 换史开新 epoch(compact 本就是有意的 epoch break),但账不动:resolver
+    // 里那枚 ref 还在、还能解——模型 compact 后凭旧 ref 继续调用,照常走
+    // 正门执行,不必重新 tool_search(单子 §9.3 第 3 条)。
+    CHECK(loop.cache_epoch() != epoch_before);
+    REQUIRE(resolver->ledger().Size() == 1);
+    const auto resolved = resolver->Resolve(registry, [&] {
+        api::ToolUseBlock call;
+        call.id = "recheck";
+        call.name = "tool_invoke";
+        call.input = nlohmann::json{{"tool_ref", tool_ref}, {"arguments", nlohmann::json{{"q", "x"}}}};
+        return call;
+    }());
+    REQUIRE(resolved.has_value());
+    CHECK(resolved->target_name == "mcp__db__query");
+
+    // compact 后的调用照常走通:同一枚 ref 再执行一次真目标。
+    backend.scripts.push_back(std::vector<api::StreamEvent>{
+        api::MessageStart{"msg", "model"},
+        api::ToolUseStart{0, "call_after_compact", "tool_invoke"},
+        api::ToolUseInputDelta{0, R"({"tool_ref":")" + tool_ref + R"(","arguments":{"q":"after"}})"},
+        api::ContentBlockDone{0},
+        api::MessageDone{"tool_use", api::Usage{}},
+    });
+    backend.scripts.push_back(TextOnlyScript("compact 后照调"));
+    REQUIRE(loop.Run("再调一次", callbacks).has_value());
+    REQUIRE(target_ptr->call_count == 1);
+    CHECK(target_ptr->last_input == nlohmann::json{{"q", "after"}});
+    const api::ToolResultBlock* after = FindToolResult(loop, "call_after_compact");
+    REQUIRE(after != nullptr);
+    CHECK_FALSE(after->is_error);
+}
+
 // ---------------------------------------------------------------------------
 // 动态工具 PromptCache 守恒单 P2(条件工具也守恒·§8.2/§12.1):
 // goal_checkpoint/loop_control 一类条件工具的定义常驻 tools 数组(暴露
