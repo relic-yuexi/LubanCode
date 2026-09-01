@@ -510,3 +510,87 @@ P0-2 起埋的两枚暗雷在本批现形并修掉,记录在案:
   安装脚本原先不搬 libexec/licenses/notices(已补)。上游归档不进 Git,
   离线重打走自家 Release 镜像(裁决照旧),`dist/`、`rg-stage/`、
   `rg-cache/` 入 .gitignore。
+
+## 十一、P0-7 账:性能与稳定门(2026-09-01 真机实测)
+
+驱动:`tests/manual/search_perf_driver.cpp`(bench/stress/cancel/report 四
+子命令,不进 ctest)。语料:small(单文件 + fixtures 25 文件)/medium(本仓
+`src/` 819 文件)/medium_p01_snapshot(P0-1 提交 `2ffa1dc` 时点的 `src/`
+快照,768 文件,与旧内核基准账面严丝合缝)/large(`scripts/
+gen_search_bench_corpus.py` 造的 100,002 文件确定性大树,含 5,000 文件
+ignored 生成树)。平台:Windows x64 真机 + WSL Ubuntu x64(musl 资产);
+macOS 无本机环境,待 CI。raw 账全部落
+`tests/fixtures/search/bench/p07_*.{json,csv}`,复现命令见
+`tests/fixtures/search/README.md`。
+
+### 旧内核对账(同语料 medium_p01_snapshot,P50,Windows)
+
+| 查询 | 旧内核 | 新后端 | direct rg | 提速 |
+|---|---:|---:|---:|---:|
+| `no_match` | 6327.1ms | 48.2ms | 47.9ms | **131.2x** |
+| `literal_common_word` | 5167.6ms | 48.8ms | 49.1ms | **105.8x** |
+| `high_frequency`(截断) | 902.4ms | 251.9ms | 48.5ms | 3.6x |
+| `regex_moderate`(截断) | 83.5ms | 252.3ms | 49.4ms | 0.3x(反慢,见下) |
+| `glob_enum_cpp`(截断) | 101.1ms | 249.5ms | 36.3ms | 0.4x(反慢,见下) |
+
+全文扫描档(no hit/低命中)提速两个数量级;截断档反慢的病根见下节,去掉
+那 ~200ms 后 tool 即贴着 direct(49/36ms),届时对旧内核是 1.7~2.8x。
+
+### 包装开销门(超 max(20%, 20ms) 记红)
+
+- **自然完成档全过,开销≈0**:Windows medium no_match 52.0 vs direct
+  49.9ms、literal 49.9 vs 49.1;Windows large no_match 1845.4 vs 1829.0
+  (+0.9%);Linux medium/large no_match 两列差 ±0.2ms。
+- **截断档红:满额停树固定多付 ~200ms**(Linux 截断档 p50 一律 244.5ms,
+  Windows 250~267ms)。病根:`ChildProcess::Shutdown(200)` 先关 stdin 等
+  子进程自愿退出再硬杀——rg 以显式路径参数跑、从不读 stdin,stdout 停读
+  后 rg 只会在管道写满处阻塞,自愿退出等不来,grace 每次白等满。佐证:
+  rg 能在 200ms 内自然跑完的小语料截断查询就不付这笔(Linux medium glob
+  11.0ms、small_file literal 10.9ms)。取消路径同病。本批红线只测不改,
+  修复(满额/取消停树跳过或缩短 grace)另批。
+
+### 大树截断亚线性(门 2,过)
+
+medium→large 文件比 122x;高频截断查询耗时比 Windows 1.06x、Linux 1.00x;
+同口径 full-scan `no_match` 是 35x(Win)/6.6x(Linux)——扫描随语料长,
+截断不随。
+
+### 稳定门(两平台各 1000 短搜 + 大树 100 轮,全过)
+
+Windows:1000 轮 p50=163ms(实测窗与同机其他会话共享,绝对值偏高),
+0 报错、句柄 65→65 零涨、线程归位、rg 残留 0(逐 100 轮查进程表 10 次
+全净);大树 100 轮(截断 80 轮,符合查询轮换)0 崩 0 挂 0 残留。
+WSL:同口径 1000 轮 p50=11.0ms、大树 100 轮 0 崩 0 挂 0 残留。采样与
+残留检测按"exe 名 + 父进程 == 驱动"归属,同机其他会话的 rg 不串账。
+
+### 取消响应延迟(大树无命中长查,中途按停)
+
+- Windows(delay 200ms,10 轮):按停→execute 返回 219~1183ms,p50≈300ms;
+  返回时进程表已无 rg(Run 返回前必先收树,实测无残留)。大头是同一条
+  200ms 体面等待。
+- WSL(delay 20ms,10 轮):按停→返回 52~62ms——Linux 全树扫仅 ~72ms,
+  rg 在 grace 内自然跑完抢先,非杀路径。
+- 起跑前取消:两平台 <0.2ms,不起进程。
+
+### 内存(P0-1 留白的交账)
+
+- P0-1 的 psapi.h 编译冲突在独立驱动文件里以 `NOMINMAX` +
+  `WIN32_LEAN_AND_MEAN` + windows.h 先行直含解决——那是 include 序/宏
+  污染,不是工具链不兼容;生产代码零改动。
+- rg 子进程峰值,两把尺子分记(口径不同,不冒充互等):采样账
+  (2ms 进程表采样,PeakWorkingSetSize/VmHWM,驻留集峰)大树档
+  9.6~13.9MB(glob 档最高)、medium 6.5~9.2MB;direct 列 Windows Job
+  Object 精确账(PeakProcessMemoryUsed,提交内存峰)大树档 5.7~6.6MB。
+- 宿主(驱动进程)全程峰值 <9MB,句柄/线程账见 stress 账(零涨)。
+
+### 资产事实发现:上游 `.deb` 的 rg 本就是 musl 静态构建
+
+§3.2 "deb 内是 GNU/glibc rg" 的前提不成立:上游 `release.yml` 的
+`build-release-deb` job 钉死 `TARGET: x86_64-unknown-linux-musl`(为发行
+面广、PCRE2 静态进二进制);实测 deb 的 `usr/bin/rg` 是 ELF static-pie,
+`ldd` 报 `statically linked`,与 musl tarball 里的 rg 字节不同(单独
+构建,非重打包)。也就是说随包资产自 P0-2 起就是 musl,§3.2 想绕开的
+那份风险一直在包里。实测账:musl rg 在 WSL 大树 100 轮 0 崩 0 挂,
+no_match 全树扫 72ms、基准/取消全跑通——本仓压力门这侧是绿的;上游
+#3494(超大目录偶发 SIGSEGV)是否有结论未查证。改源码构建 GNU 版 or
+接受 musl(压力门背书),归主控/P0-8 裁决,本批未动 manifest 与发行链。
