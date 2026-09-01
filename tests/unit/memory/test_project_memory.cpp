@@ -77,8 +77,10 @@ TEST_CASE("ProjectIdentity: Git 子目录归到仓库根") {
     REQUIRE(identity.has_value());
     CHECK(identity->git);
     CHECK(identity->project_root == fs::weakly_canonical(repo));
-    CHECK(identity->common_root == fs::weakly_canonical(repo / ".git"));
-    CHECK(identity->project_dir.parent_path() == fs::weakly_canonical(root / "home") / "projects");
+    CHECK(identity->identity_root == fs::weakly_canonical(repo / ".git"));
+    // P0-3:记忆根进 workspace 树——<home>/workspaces/<workspace_key>/。
+    CHECK(identity->workspace_dir.parent_path() == fs::weakly_canonical(root / "home") / "workspaces");
+    CHECK(identity->workspace_dir.filename() == fs::path(identity->workspace_key));
 }
 
 TEST_CASE("ProjectIdentity: 主目录与 linked worktree 共用 key") {
@@ -96,8 +98,8 @@ TEST_CASE("ProjectIdentity: 主目录与 linked worktree 共用 key") {
     const auto wt_identity = memory::ResolveProjectIdentity(worktree, root / "home");
     REQUIRE(main_identity.has_value());
     REQUIRE(wt_identity.has_value());
-    CHECK(main_identity->key == wt_identity->key);
-    CHECK(main_identity->project_dir == wt_identity->project_dir);
+    CHECK(main_identity->workspace_key == wt_identity->workspace_key);
+    CHECK(main_identity->workspace_dir == wt_identity->workspace_dir);
     CHECK(wt_identity->project_root == fs::weakly_canonical(worktree));
 }
 
@@ -1077,7 +1079,7 @@ TEST_CASE("ProjectMemory: schema 1/2/3 混放,list/rebuild/召回都工作") {
     Write(repo / "panel.cpp", "new\n");
     const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
     REQUIRE(identity.has_value());
-    const fs::path memory_dir = identity->project_dir / "memory";
+    const fs::path memory_dir = identity->workspace_dir / "memory";
 
     // schema 1 旧主题:没有 scope/evidence/confidence。
     fs::create_directories(memory_dir / "facts");
@@ -1150,7 +1152,7 @@ TEST_CASE("ProjectMemory: 旧主题同 id 更新只迁那一份,正文原样带�
     Write(repo / "loop.cpp", "void AgentLoopRun() {}\n");
     const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
     REQUIRE(identity.has_value());
-    const fs::path memory_dir = identity->project_dir / "memory";
+    const fs::path memory_dir = identity->workspace_dir / "memory";
     fs::create_directories(memory_dir / "facts");
     Write(memory_dir / "facts" / "old-name.md",
           "<!-- lubancode-memory\n"
@@ -1272,7 +1274,7 @@ TEST_CASE("ProjectMemory: 两个文件撞同一 id 停为 conflict,不偷偷选�
     const fs::path repo = SetupRepo(root, "repo");
     const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
     REQUIRE(identity.has_value());
-    const fs::path memory_dir = identity->project_dir / "memory";
+    const fs::path memory_dir = identity->workspace_dir / "memory";
     fs::create_directories(memory_dir / "facts");
     for (const char* name : {"dup-a.md", "dup-b.md"}) {
         Write(memory_dir / "facts" / name,
@@ -1325,7 +1327,7 @@ TEST_CASE("ProjectMemory migrate: 列账、批迁、备份与重跑不重复") {
     const fs::path repo = SetupRepo(root, "repo");
     const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
     REQUIRE(identity.has_value());
-    const fs::path memory_dir = identity->project_dir / "memory";
+    const fs::path memory_dir = identity->workspace_dir / "memory";
     WriteLegacyTopic(memory_dir, "facts/legacy-a.md", "fact.legacy-a", "甲主题", "甲的正文。", "[\"sess-a\"]");
     WriteLegacyTopic(memory_dir, "preferences/legacy-b.md", "preference.legacy-b", "乙主题", "乙的正文。", "[\"sess-b\"]");
     // 一份已是 schema 3:跳过。
@@ -1435,7 +1437,7 @@ TEST_CASE("ProjectMemory 用户层: 两层各查,同 id 只注一份,项目层�
     WriteUserTopic(root / "home", "preferences/reply-language.md", "preference.reply-language",
                   "回答语言", "一律用中文回答", "无论哪个项目,回答一律用中文。\n\n## Why\n\n用户明说。\n");
     // 项目层也有同 id 一份(更具体)。
-    const fs::path memory_dir = identity->project_dir / "memory";
+    const fs::path memory_dir = identity->workspace_dir / "memory";
     fs::create_directories(memory_dir / "preferences");
     Write(memory_dir / "preferences" / "reply-language.md",
           "---\n"
@@ -1519,7 +1521,9 @@ TEST_CASE("ProjectMemory 用户层: 写入走全局授权,项目证据不得混�
     request.content = "所有前端项目一律用 pnpm。";
     request.scope.level = "user";
     request.scope.kind = "user";
-    REQUIRE(store.EnqueueSave(request).has_value());
+    // 存储 v2 P0-4:用户层只认用户命令路(user_initiated);裸路(模型工具/
+    // 回合尾抽取)在这里就得起用户命令语义。
+    REQUIRE(store.EnqueueSave(request, /*user_initiated=*/true).has_value());
     REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
     const fs::path user_topic = root / "home" / "memory" / "user" / "preferences" / "global-pnpm.md";
     REQUIRE(fs::exists(user_topic));
@@ -1532,16 +1536,18 @@ TEST_CASE("ProjectMemory 用户层: 写入走全局授权,项目证据不得混�
     memory::SaveRequest bad_fact = request;
     bad_fact.kind = memory::MemoryKind::Fact;
     bad_fact.id = "fact.no-user-facts";
-    CHECK_FALSE(store.EnqueueSave(bad_fact).has_value());
+    CHECK_FALSE(store.EnqueueSave(bad_fact, /*user_initiated=*/true).has_value());
     memory::SaveRequest bad_paths = request;
     bad_paths.paths = {"package.json"};
-    CHECK_FALSE(store.EnqueueSave(bad_paths).has_value());
+    CHECK_FALSE(store.EnqueueSave(bad_paths, /*user_initiated=*/true).has_value());
+    // P0-4:不带 user_initiated 的裸路(模型工具/回合尾抽取)连门都进不了。
+    CHECK_FALSE(store.EnqueueSave(request).has_value());
 
     // 全局没授权时,用户层写入被拒(项目配置无权开)。
     memory::Options ungranted = options;
     ungranted.user_enabled = false;
     memory::ProjectMemory plain_store(*identity, root / "home", ungranted);
-    CHECK_FALSE(plain_store.EnqueueSave(request).has_value());
+    CHECK_FALSE(plain_store.EnqueueSave(request, /*user_initiated=*/true).has_value());
     // 授权关着时召回也只查项目层。
     CHECK(plain_store.ListUserEntries().empty());
 
@@ -1636,7 +1642,7 @@ TEST_CASE("ProjectMemory migrate: 中途失败旧主题与 catalog 仍可用") {
     const fs::path repo = SetupRepo(root, "repo");
     const auto identity = memory::ResolveProjectIdentity(repo, root / "home");
     REQUIRE(identity.has_value());
-    const fs::path memory_dir = identity->project_dir / "memory";
+    const fs::path memory_dir = identity->workspace_dir / "memory";
     WriteLegacyTopic(memory_dir, "facts/first.md", "fact.first", "第一份", "第一份正文。", "[]");
     WriteLegacyTopic(memory_dir, "facts/old-second.md", "fact.second", "第二份", "第二份正文。", "[]");
     // 在第二份的规范名位置立一堵墙:写入失败,迁移须回退。

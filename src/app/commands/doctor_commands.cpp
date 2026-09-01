@@ -45,6 +45,7 @@ using lubancode::cli::TermErr;
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
 #include "insights/insights_health.hpp"  // CheckInsightsHealth:/doctor insights(Token 账本单 A5)
+#include "memory/project_memory.hpp"  // CheckGlobalMemoryHealth:/doctor memory(存储 v2 P0-4)
 #include "runtime/trajectory_session.hpp"  // TrajectoryBypassBridge(Token 账本单 A1)
 #include "tools/path_utils.hpp"  // PathToUtf8:诊断路径显示
 #include "tools/search_ripgrep.hpp"  // BundledRipgrepLocator/RunRipgrepSmoke:search 后端诊断(ripgrep 迁移 P0-2)
@@ -1162,6 +1163,25 @@ void PrintTrajectoryDoctor(const DoctorContext& context) {
     TermOut().flush();
 }
 
+// /doctor memory(存储 v2 P0-4):全局记忆目录的 user-only 权限、symlink
+// 越根、job 失败积压与旧 projects/ 遗留。引擎体在 memory 域
+//(CheckGlobalMemoryHealth),这里只装配材料与打印;不发请求、不改账
+//(user-only 复紧是幂等修复)。
+void PrintMemoryDoctor(const DoctorContext& context) {
+    TermOut() << context.theme.stats << "记忆存储(/doctor memory):" << context.theme.reset << "\n";
+    if (!context.home_lubancode.has_value()) {
+        TermOut() << "  [!!] 找不到 LubanCode 主目录,记忆存储无从检查\n";
+        TermOut().flush();
+        return;
+    }
+    for (const std::string& line :
+         lubancode::memory::CheckGlobalMemoryHealth(lubancode::tools::Utf8ToPath(*context.home_lubancode))) {
+        TermOut() << "  " << line << "\n";
+    }
+    TermOut() << "  口径:全局记忆只认用户命令写入;陌生仓库、Skill、Hook、子代理与模型调用都提不了权。\n";
+    TermOut().flush();
+}
+
 // /doctor insights(Token 账本单 A5):insights 管线的健康检查(§10.4)。
 // 检查体在领域层(insights/insights_health),这里只装配材料与打印;
 // 不调模型、不重建报告。
@@ -1269,6 +1289,10 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
     }
     if (subcommand == "insights") {
         PrintInsightsDoctor(context);
+        return;
+    }
+    if (subcommand == "memory") {
+        PrintMemoryDoctor(context);
         return;
     }
     if (subcommand == "instructions") {

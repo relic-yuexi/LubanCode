@@ -1695,10 +1695,13 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         task_agent_profile.soul.clear();
     }
     agent::Agent sub_agent(loop_backend, effective_registry, std::move(task_agent_profile));
-    // 子代理的项目记忆召回:按这只任务的 prompt 独立检索,同预算同安全
-    // 声明;provider 没设(旧调用方)就不注入,行为不变。
+    // 子代理的项目记忆召回(存储 v2 P0-3 §6.2):派工当刻检索一次,整段
+    // 冻结下发——子代理不自动扫整库;child_run_id 进快照事件的
+    // relations.child_run_id,父账说得清发给了哪只孩子。provider 没设
+    //(旧调用方)就不注入,行为不变。
     if (turn_context_provider_) {
-        sub_agent.SetTurnContext(turn_context_provider_(prompt));
+        sub_agent.SetTurnContext(turn_context_provider_(
+            prompt, trajectory != nullptr ? trajectory->run_id() : std::string()));
     }
     // 接线(批四·病十二):压力钩与收件口整份进 AgentWiring。
     agent::AgentWiring sub_wiring;

@@ -1,6 +1,6 @@
 # Workspace 统一存储、旧 Session 退场与分级 Memory 迁移
 
-- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 已落（WorkspaceIdentityResolver 四级裁决+统一 key+两把旧钥匙退役+v2 manifest/checkout/doctor+cwd change/跨 workspace 换场，全量 ctest 339 册绿，2026-09-01）；P0-2 已落（Trajectory 升唯一 Session:根迁 workspaces/、开关退役、命令面/app-server/渠道全换账、artifact 归拢、无损投影、父子账保住;全量 ctest 357 册绿+真机冒烟过，2026-09-01）；P0-3 起待实现
+- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 已落（WorkspaceIdentityResolver 四级裁决+统一 key+两把旧钥匙退役+v2 manifest/checkout/doctor+cwd change/跨 workspace 换场，2026-09-01）；P0-2 已落（Trajectory 升唯一 Session:根迁 workspaces/、开关退役、命令面/app-server/渠道全换账、artifact 归拢、无损投影、父子账保住+真机冒烟，2026-09-01）；P0-3 已落（项目 Memory 搬进 workspace 树+召回快照 typed 事件+worker lifecycle 回执+子代理冻结快照，2026-09-01）；P0-4 已落（全局记忆收紧：命令面显式层级+逐次确认+写通道闸+user-only/doctor 项，2026-09-01）。**P0-5（迁移器）与 P0-6（删旧码）待实现。**
 - 日期：2026-09-01
 - 级别：P0（持久化唯一真账、项目身份、恢复正确性与用户数据安全）
 - 范围：`src/sessions/`、`src/trajectory/`、`src/runtime/session_runtime.*`、`src/runtime/trajectory_session.*`、`src/memory/`、`src/app/commands/session_commands.*`、`src/app/commands/memory_commands.*`、`src/tools/agent_tool.*`、配置/CLI/app-server、测试、文档与旧数据迁移
@@ -518,24 +518,24 @@ lubancode migrate-storage plan|run|status
 
 ### P0-3：项目 Memory 搬进 Workspace
 
-- [ ] 把项目 Memory 根改为 `<workspace>/memory/`，删 `project_dir/project_key` 生产字段。
-- [ ] 统一 project Memory 的 source refs 为 workspace/session/run/event 全限定引用。
-- [ ] 把 recall snapshot 作为 typed trajectory event/artifact 落账，Replay 不读“今天的 Memory”冒充旧输入。
-- [ ] 把 save requested/committed/failed 与异步 worker 回执接进 workspace lifecycle/Trajectory。
-- [ ] 让 `/memory`, `memory_save`, review/accept/reject, stale/verify/refresh/rebuild 全走 WorkspaceIdentity。
-- [ ] 子代理只收父任务显式下发的 memory snapshot/ref，不自动扫整库。
+- [x] 把项目 Memory 根改为 `<workspace>/memory/`，删 `project_dir/project_key` 生产字段。（2026-09-01；根住 `<home>/workspaces/<key>/memory/`，首仓经 `workspace::OpenOrRegisterWorkspace` 原子写 manifest；`ProjectIdentity` 字段改 `workspace_key/identity_root/workspace_dir`，candidates 挪 `memory/memory-candidates/`，旧 `project.json` 不再造，指旧 projects/ 的存量 job 拒办挪 failed）
+- [x] 统一 project Memory 的 source refs 为 workspace/session/run/event 全限定引用。（EnqueueSave 先落 `memory.save.requested`，事件 id 进 job 的 `source_event_ref` 与主题 `source_sessions`；无轨迹账时 `run_id/event_id=none` 兜底段，不再落裸 session id）
+- [x] 把 recall snapshot 作为 typed trajectory event/artifact 落账，Replay 不读“今天的 Memory”冒充旧输入。（新 EventKind `context.injected`，payload 按合同 §四九键；正文 >512B 落 session `artifacts/sha256/` 内容寻址 blob 出 `snapshot_ref`，小内容 `snapshot_inline`；落不稳本轮不注入该条，trace 记 `snapshot_failed`；桥在 `src/app/memory_ledger_bridge.*`，memory 侧只认 `MemoryAccounting` 纯接口）
+- [x] 把 save requested/committed/failed 与异步 worker 回执接进 workspace lifecycle/Trajectory。（requested 落 main stream；worker 写 `<workspace>/lifecycle/memsave-<job>/{intent,result}.json`，同形 trajectory lifecycle，重复 commit 幂等；`memory.save.committed/failed` 事件种类先入合同，worker 侧回执暂走 lifecycle，事件化补记留后续波次）
+- [x] 让 `/memory`, `memory_save`, review/accept/reject, stale/verify/refresh/rebuild 全走 WorkspaceIdentity。（构造即吃 `ResolveProjectIdentity`→统一 workspace 身份；trace/状态页/job 字段全换 `workspace_key`，recall trace schema 3）
+- [x] 子代理只收父任务显式下发的 memory snapshot/ref，不自动扫整库。（派工当刻 `BuildTurnContextForDispatch` 检索一次整段冻结，provider 签名带 child_run_id；快照事件以 `relations.child_run_id` 记在父账——子账 stream 无通用落账口子，属 P0-2 接缝，如实记缺口）
 
-验收：改动或删除当前 Memory 后，旧 session 仍可重建当时注入版本；项目 Memory 不再在 `~/.lubancode/projects/` 新建文件。
+验收：改动或删除当前 Memory 后，旧 session 仍可重建当时注入版本；项目 Memory 不再在 `~/.lubancode/projects/` 新建文件。（tests/unit/app/test_memory_ledger_bridge.cpp 钉：改 Memory 后旧事件逐字节不动、新事件新 hash、blob 可读回；tests/unit/memory/test_memory_workspace_storage.cpp 钉：全程 `projects/` 零新建）
 
 ### P0-4：收紧全局 Memory
 
-- [ ] 保留 `~/.lubancode/memory/user/`，明确 UI 名称“全局记忆”。
-- [ ] 禁止回合尾抽取、`memory_save` 与项目配置直接写全局层。
-- [ ] 新增显式 global remember/list/show/forget 命令与逐次用户确认合同。
-- [ ] 保留项目层覆盖全局层、统一预算、去重、过期与证据漂移规则。
-- [ ] 给全局目录加 user-only 权限检查与 doctor 项。
+- [x] 保留 `~/.lubancode/memory/user/`，明确 UI 名称“全局记忆”。（路径不动;i18n 文案与 why 标注换“全局记忆”，schema 仍 level=user，两套词不混）
+- [x] 禁止回合尾抽取、`memory_save` 与项目配置直接写全局层。（memory_save 见 scope=user 即拒并指路用户命令;EnqueueSave 的 user 层请求须 user_initiated=true——回合尾抽取/候选 accept/工具路全不带,一律 `memory.global_unauthorized`;项目配置开 user_enabled 本就只认全局授权,config merge 层已有测试钉住）
+- [x] 新增显式 global remember/list/show/forget 命令与逐次用户确认合同。（`/memory remember|list|show|forget|verify [project|global]`,user 为过渡期别名;remember/forget global 每次 y/N 确认;旧的不带层级写法默认 project,每进程提示一次迁移;list/show global 走管理读口,不看召回授权）
+- [x] 保留项目层覆盖全局层、统一预算、去重、过期与证据漂移规则。（P0-3 迁根不动排级/预算/指纹逻辑,检索评测册全绿）
+- [x] 给全局目录加 user-only 权限检查与 doctor 项。（构造时与 worker 写后幂等复紧 `HardenDirectoryUserOnly`(0700/PROTECTED DACL);`/doctor memory` 走 memory::CheckGlobalMemoryHealth:越根/symlink/权限/failed job/旧 projects/ 遗留逐项报）
 
-验收：没有用户主动命令便永不新增全局主题；陌生仓库、Skill、Hook、子代理与模型调用都提不了权。
+验收：没有用户主动命令便永不新增全局主题；陌生仓库、Skill、Hook、子代理与模型调用都提不了权。（tests/unit/memory/test_memory_global_gate.cpp:工具路拒、裸 EnqueueSave 拒、授权关着连用户命令也拒且零 pending job;Skill/Hook/子代理都借工具路,同闸）
 
 ### P0-5：迁移旧 Session 与旧 Project Memory
 

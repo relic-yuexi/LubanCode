@@ -878,6 +878,15 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // -----------------------------------------------------------------------
     if (project_memory != nullptr) {
         project_memory->set_source_session(session_start_ts);
+        // 存储 v2 P0-3:轨迹账开着就把 memory 的落账桥挂上——召回快照与
+        // 写入因果边进本场 Journal;source session 用轨迹场的 session id
+        // (全限定引用的 session 段与 Journal 同源)。flag 关的会话不挂,
+        // 一笔不落,行为与从前一致。
+        if (auto* memory_ledger = session_runtime_.trajectory()) {
+            memory_ledger_bridge_ = std::make_unique<lubancode::app::MemoryLedgerBridge>(*memory_ledger);
+            project_memory->set_accounting(memory_ledger_bridge_.get());
+            project_memory->set_source_session(memory_ledger->session_id());
+        }
     }
 
     // --continue:等价开场自动 /resume 本目录最近一场;本目录没有存档就
@@ -1274,14 +1283,14 @@ void TerminalSessionController::RebuildLoop(bool preserve_history) {
         subagent_profile.tool_turn_gate = nullptr;
         subagent_profile.tool_turn_gate_denial.clear();
         agent_tool->SetAgentProfile(std::move(subagent_profile));
-        // 子代理记忆召回(规格"同级能力审计"):按子任务 prompt 独立检索,
-        // 同预算同安全声明;与 main 的召回同一只 ProjectMemory。关着
-        // (use=false)就不注。
+        // 子代理记忆召回(存储 v2 P0-3 §6.2):派工当刻检索一次,整段冻结
+        // 下发,子代理不自动扫整库;快照经落账桥进本场 Journal,relations
+        // .child_run_id 指向那只孩子。关着(use=false)就不注。
         if (project_memory != nullptr && config.memory.use) {
             agent_tool->SetTurnContextProvider(
-                [memory = project_memory](const std::string& task_prompt) {
-                    return memory->BuildTurnContext(task_prompt, std::filesystem::current_path(),
-                                                    lubancode::memory::QueryOrigin::User);
+                [memory = project_memory](const std::string& task_prompt, const std::string& child_run_id) {
+                    return memory->BuildTurnContextForDispatch(task_prompt, std::filesystem::current_path(),
+                                                               child_run_id);
                 });
         }
     }
@@ -1566,7 +1575,10 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "clear"}},
                             "clear");
             if (project_memory != nullptr) {
-                project_memory->set_source_session(session_start_ts);
+                // P0-3:换账后 source session 跟轨迹场走(clear 后是新场 id)。
+                project_memory->set_source_session(session_runtime_.trajectory() != nullptr
+                                                       ? session_runtime_.trajectory()->session_id()
+                                                       : session_start_ts);
             }
             // 两层标题(实测问题 7):翻场翻代,上一场在飞的精炼落地即弃;
             // 新场子的下一问重走本地起名 + 精炼(判定本体在 titles_)。

@@ -462,9 +462,13 @@ public:
         wall_clock_grace_secs_ = grace_secs > 0 ? grace_secs : 1;
     }
 
-    // 子代理的项目记忆召回:按子任务 prompt 独立检索,同预算同安全声明。
-    // 由会话层灌(闭包着 ProjectMemory),不设 = 子代理不召回(旧行为)。
-    void SetTurnContextProvider(std::function<std::string(const std::string&)> provider) {
+    // 子代理的项目记忆召回(存储 v2 P0-3 §6.2):派工当刻按子任务 prompt
+    // 检索一次,结果整段冻结下发——子代理不再自己扫库。child_run_id 是
+    // 派给它的 agent_run_id(没有轨迹账时为空串),召回快照事件的
+    // relations.child_run_id 靠它记账。由会话层灌(闭包着 ProjectMemory),
+    // 不设 = 子代理不召回(旧行为)。
+    void SetTurnContextProvider(
+        std::function<std::string(const std::string&, const std::string&)> provider) {
         turn_context_provider_ = std::move(provider);
     }
 
@@ -653,7 +657,8 @@ private:
     // 墙钟兜底:整轮上限与收杀宽限(秒;0 = 不限)。
     int wall_clock_timeout_secs_ = 0;
     int wall_clock_grace_secs_ = kDefaultSubagentWallClockGraceSecs;
-    std::function<std::string(const std::string&)> turn_context_provider_;  // 子代理记忆召回;空 = 不召回
+    // 子代理记忆召回(冻结快照);空 = 不召回。参数:任务 prompt + 子 run id。
+    std::function<std::string(const std::string&, const std::string&)> turn_context_provider_;
     // ---- 连败保险(缺 title 无限重试拖死主循环单)----
     // 账随 handle 走(P0-3:main 那枚常驻 main_handle_,每只任务那枚随
     // 私有表):同一回合内同一入参错误连拒到 kParamFailLimit 次就明拒收场,
