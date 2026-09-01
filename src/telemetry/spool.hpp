@@ -123,6 +123,7 @@ struct SpoolStats {
     std::size_t segments = 0;
     std::int64_t oldest_age_ms = -1;   // -1 = 无段
     std::uint64_t active_batches = 0;  // active.tmp 里未 seal 的批
+    std::uint64_t sealed_batches = 0;  // sealed 段里的批(待出口)
     std::uint64_t quarantined_total = 0;
     std::uint64_t cleaned_segments_total = 0;
     std::uint64_t cleaned_bytes_total = 0;
@@ -167,8 +168,18 @@ public:
     //(调用方记 tombstone,防重复无限发——§18.2)。
     std::vector<std::uint64_t> AckBatches(const std::vector<std::string>& batch_ids);
 
+    // 读回一只已封段的全部批(T2 exporter 出队取货:payload 已是 T0 编码器
+    // 产好的 OTLP JSON,直接上 HTTP,不重编码)。nullopt = 段不在册/读失
+    // 败(对账时按"段已退场"处理,不猜)。
+    std::optional<std::vector<SpoolBatchRecord>> ReadSealedBatches(std::uint64_t segment_id) const;
+
     // 容量/TTL 清理(§18.4)。开张与每次 seal 后调。
     void Cleanup(std::int64_t now_ms);
+
+    // spool clear(§24.2 删除动作,命令面两步确认后调):清掉全部 sealed 段
+    // 与 active.tmp,回被清掉的段账(调用方据此记 retired watermark 与
+    // tombstone,免得 cursor 对账报孤儿——§18.5 同一笔账)。
+    std::vector<SealedSegment> PurgeAll();
 
     // stream -> durable 覆盖端点(cursor 对账与 batch id 去重用)。
     std::map<std::string, StreamCoverage> Coverage() const;  // 键 = ws|session|stream

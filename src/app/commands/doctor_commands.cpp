@@ -1276,8 +1276,8 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
         return;
     }
     if (subcommand == "telemetry") {
-        // 端云协同可观测单 T1:/doctor telemetry 只读本地状态(§24.2 默认
-        // 不联网;--probe 属 T2 exporter 面)。遥测没开就明说,零副作用。
+        // 端云协同可观测单 T1/T2:/doctor telemetry 默认只读本地状态(§24.2
+        // 默认不联网);--probe 才对明配 endpoint 发无业务数据的探针。
         TermOut() << context.theme.stats << "遥测(/doctor telemetry):" << context.theme.reset << "\n";
         if (context.telemetry_service == nullptr) {
             TermOut() << "  未装配(features.telemetry 默认关;须与 features.trajectory 同开)。\n";
@@ -1288,7 +1288,22 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
                  context.telemetry_service->Status())) {
             TermOut() << "  " << line << "\n";
         }
-        TermOut() << "  注:本批只有本地投影与 spool;exporter/联网属 T2,本面不发请求。\n";
+        if (rest == "--probe") {
+            const auto attempt = context.telemetry_service->ProbeEndpoint();
+            if (!attempt.has_value()) {
+                TermOut() << "  --probe: 出口未配置(telemetry.exporter.endpoint 空),无探针可发。\n";
+            } else if (attempt->kind == lubancode::telemetry::ExportOutcomeKind::Accepted ||
+                       attempt->kind == lubancode::telemetry::ExportOutcomeKind::Partial) {
+                TermOut() << "  --probe: 通(HTTP " << attempt->http_status << ",无业务数据)。\n";
+            } else {
+                TermOut() << "  --probe: 不通(" << attempt->error_code << " HTTP "
+                          << attempt->http_status
+                          << (attempt->detail.empty() ? std::string() : (" " + attempt->detail))
+                          << ")\n";
+            }
+        } else {
+            TermOut() << "  注:本面默认不联网;探针走 /doctor telemetry --probe(无业务数据)。\n";
+        }
         TermOut().flush();
         return;
     }

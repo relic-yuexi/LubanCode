@@ -726,6 +726,29 @@ std::vector<std::uint64_t> TelemetrySpool::AckBatches(
     return deleted;
 }
 
+std::vector<SealedSegment> TelemetrySpool::PurgeAll() {
+    std::vector<SealedSegment> purged = std::move(sealed_);
+    sealed_.clear();
+    std::error_code ec;
+    for (const SealedSegment& segment : purged) {
+        std::filesystem::remove(spool_dir_ / (SegmentStem(segment.segment_id) + ".otlpjson"), ec);
+        std::filesystem::remove(spool_dir_ / (SegmentStem(segment.segment_id) + ".meta.json"), ec);
+    }
+    // active.tmp:关柄删文件重开(批账回收由调用方记,§24.2)。
+    if (active_ != nullptr) {
+        std::fclose(active_);
+        active_ = nullptr;
+        std::filesystem::remove(spool_dir_ / "active.tmp", ec);
+        active_bytes_ = 0;
+        active_items_ = 0;
+        active_opened_ms_ = 0;
+        OpenActive();
+    }
+    RebuildCoverage();
+    RecomputeBytes();
+    return purged;
+}
+
 void TelemetrySpool::Cleanup(std::int64_t now_ms) {
     // §18.4:先删过 TTL 的,再删最老的,直到回帽;仍超 → degraded。
     std::error_code ec;
@@ -771,6 +794,42 @@ void TelemetrySpool::Cleanup(std::int64_t now_ms) {
 
 std::map<std::string, StreamCoverage> TelemetrySpool::Coverage() const { return coverage_; }
 
+std::optional<std::vector<SpoolBatchRecord>> TelemetrySpool::ReadSealedBatches(
+    std::uint64_t segment_id) const {
+    bool in_ledger = false;
+    for (const SealedSegment& segment : sealed_) {
+        if (segment.segment_id == segment_id) {
+            in_ledger = true;
+            break;
+        }
+    }
+    if (!in_ledger) {
+        return std::nullopt;  // 段不在册:已 ACK 删除或 TTL 清理退场
+    }
+    const auto content = ReadTextFile(spool_dir_ / (SegmentStem(segment_id) + ".otlpjson"));
+    if (!content.has_value()) {
+        return std::nullopt;
+    }
+    std::vector<SpoolBatchRecord> records;
+    std::istringstream stream(*content);
+    std::string line;
+    while (std::getline(stream, line)) {
+        if (line.empty()) {
+            continue;
+        }
+        const nlohmann::json json = nlohmann::json::parse(line, nullptr, false);
+        if (json.is_discarded()) {
+            continue;  // 单行坏不殃及整段:行级账在 meta,坏行走 quarantine 的旧规矩
+        }
+        auto record = SpoolBatchRecord::FromJson(json);
+        if (record.has_value()) {
+            records.push_back(std::move(*record));
+        }
+    }
+    return records;
+}
+
+
 bool TelemetrySpool::HasBatch(const std::string& batch_id) const {
     for (const SealedSegment& segment : sealed_) {
         for (const SegmentBatchIndex& batch : segment.batches) {
@@ -787,6 +846,9 @@ SpoolStats TelemetrySpool::Stats(std::int64_t now_ms) const {
     stats.bytes = total_bytes_;
     stats.segments = sealed_.size();
     stats.active_batches = active_items_;
+    for (const SealedSegment& segment : sealed_) {
+        stats.sealed_batches += segment.batches.size();
+    }
     if (!sealed_.empty()) {
         std::int64_t oldest = sealed_.front().created_at_ms;
         for (const SealedSegment& segment : sealed_) {
@@ -803,6 +865,7 @@ nlohmann::json SpoolStats::ToJson() const {
     out["segments"] = segments;
     out["oldest_age_ms"] = oldest_age_ms;
     out["active_batches"] = active_batches;
+    out["sealed_batches"] = sealed_batches;
     out["quarantined_total"] = quarantined_total;
     out["cleaned_segments_total"] = cleaned_segments_total;
     out["cleaned_bytes_total"] = cleaned_bytes_total;

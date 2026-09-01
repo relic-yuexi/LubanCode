@@ -1,11 +1,14 @@
 // /telemetry(端云协同可观测架构与 Telemetry 插件设计单 §24.2,实施分期
-// T1"/telemetry status、/doctor telemetry 本地面"):
-//   /telemetry          只显示本地状态,不改变配置,不发任何请求(§24.2
-//                       "裸 /telemetry 只显示状态")
-//   /telemetry status   同上
-// enable/disable/pause/resume/flush/spool/consent/policy 是 §24.2 的完整
-// 命令族,按分期落在 T2(exporter/consent 进来才有意义);T1 敲了明说
-// 未实现,不装样子。
+// T1 status 先行、T2 补 enable/disable/pause/resume/flush/spool/consent):
+//   /telemetry [status]   只显示状态,不改变配置不发请求
+//   enable|disable session|config  裸敲只给选项;用户明确选才动手
+//                         (session = 当前进程;config = 写全局配置一枚布尔,
+//                          项目配置永不暗改)
+//   pause|resume          停/复出口(投影/spool 照常)
+//   flush [毫秒]          seal + 有界赶发
+//   spool [clear --confirm]  列账/两步确认删除
+//   consent [grant|revoke]   §8.4 公网确认(回环免)
+//   policy                T4 未落地,明说
 #pragma once
 
 #include "app/commands/command_flow.hpp"   // CommandFlow
