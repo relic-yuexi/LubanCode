@@ -1,6 +1,6 @@
 # 多渠道消息接入与常驻 ChannelPlugin 设计
 
-- 状态：阶段 0-3 已落地（0 合同冻结；1 纯合同与假 sidecar，0887a13；2 ChannelManager 与入站耐久；3 Headless Session 与路由——TurnIngress/Provenance 落档、ChannelRouter 与 binding、ChannelSessionHost、ChannelTurn 同档、单飞限额、confirm fail closed、memory 隔离、pairing 命令）；阶段 4（ReplyAssembler 与 outbox）起待实现
+- 状态：阶段 0-3 已落地（0 合同冻结；1 纯合同与假 sidecar，0887a13；2 ChannelManager 与入站耐久；3 Headless Session 与路由——TurnIngress/Provenance 落档、ChannelRouter 与 binding、ChannelSessionHost、ChannelTurn 同档、单飞限额、confirm fail closed、memory 隔离、pairing 命令）；阶段 4（ReplyAssembler 与 outbox）起待实现。2026-09-01 总装单 G0 对账：阶段 1 七项勾选与源码逐项相符；ChannelManager 仍无生产宿主，第一个宿主是总装单 G5 的 Gateway
 - 日期：2026-08-29
 - 相关：`docs/architecture/channels/`（阶段 0 冻结文档）、`todos/多前端外壳与浏览器Tab_AppServer承载设计.todo`（AppServer 承载是"外壳连内核"，与本单"消息渠道接入"分界）
 - 范围：常驻渠道插件、平台消息入站、会话路由、Agent 唤起、流式回发、可靠性、安全、Package 挂载、命令与诊断
