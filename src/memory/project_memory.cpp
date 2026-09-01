@@ -22,6 +22,7 @@
 #include "hooks/hash.hpp"  // Sha256Hex:召回快照与证据引用的指纹
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
+#include "trajectory/safety.hpp"    // P0-4:全局目录 user-only 收紧与越根检查
 #include "workspace/identity.hpp"   // P0-1:身份裁决唯一入口
 #include "workspace/manifest.hpp"   // P0-3:memory 根进 workspace 树,首仓原子写
 #include "platform/text_encoding.hpp"
@@ -1664,6 +1665,10 @@ std::expected<void, std::string> ProcessJob(const fs::path& job_path,
 
     DirectoryLock project_lock(memory_dir / ".state" / "memory.lock");
     if (!project_lock.acquired()) return std::unexpected("项目记忆正由另一个 worker 更新");
+    // P0-4:全局层写后复紧 user-only(目录可能刚建出来)。
+    if (user_job) {
+        (void)trajectory::HardenDirectoryUserOnly(memory_dir);
+    }
 
     const std::string operation = job.value("operation", std::string());
     std::expected<MemoryWriteOutcome, std::string> upsert;
@@ -1964,7 +1969,14 @@ ProjectMemory::ProjectMemory(ProjectIdentity identity, fs::path home_lubancode,
       home_lubancode_(AbsoluteNormal(home_lubancode)),
       memory_dir_(identity_.workspace_dir / "memory"),
       options_(options),
-      executable_(std::move(executable)) {}
+      executable_(std::move(executable)) {
+    // P0-4:全局目录已是 user-only(§9.3);已存在的目录顺手复紧一遍
+    //(幂等,失败留给 /doctor memory 报)。
+    std::error_code ec;
+    if (fs::is_directory(user_memory_dir(), ec)) {
+        (void)trajectory::HardenDirectoryUserOnly(user_memory_dir());
+    }
+}
 
 std::expected<void, std::string> ProjectMemory::SetWorkingDirectory(const fs::path& cwd) {
     auto identity = ResolveProjectIdentity(cwd, home_lubancode_);
@@ -2223,6 +2235,14 @@ std::expected<void, std::string> ProjectMemory::set_learn(LearnMode mode) {
 std::expected<std::string, std::string> ProjectMemory::EnqueueSave(const SaveRequest& request,
                                                                     bool user_initiated) {
     if (!generate_enabled()) return std::unexpected("本场记忆写入未开启");
+    // 存储 v2 P0-4(§6.1):全局层只认用户主动命令——memory_save 工具、
+    // 回合尾抽取、候选 accept 都不带 user_initiated,一律拒;项目配置也
+    // 开不了这道口(config merge 层只认全局授权)。
+    if (request.scope.level == "user" && !user_initiated) {
+        return std::unexpected(
+            "memory.global_unauthorized: 全局记忆只认用户主动命令(/memory remember global ...),"
+            "模型工具与回合尾抽取不得直写");
+    }
     // 用户级记忆的授权另设一道:项目配置无权开启或写入(规格"用户层必须
     // 另设全局授权")。
     if (request.scope.level == "user" && !options_.user_enabled) {
@@ -2234,16 +2254,24 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueSave(const SaveReq
     return EnqueueJob("upsert", &with_source, with_source.id, nlohmann::json::object(), user_initiated);
 }
 
-std::expected<std::string, std::string> ProjectMemory::EnqueueForget(const std::string& id) {
+std::expected<std::string, std::string> ProjectMemory::EnqueueForget(const std::string& id,
+                                                                      const std::string& layer) {
     if (!options_.global_allowed || !options_.enabled) return std::unexpected("本场记忆未开启");
     if (!IsValidId(id)) return std::unexpected("记忆 id 不合法");
-    // id 住在哪一层就忘了哪一层:用户层开着且在那边找得到,job 落到用户目录。
+    // 显式层(P0-4 的 forget global|project)路由到指定层;没给层的旧写法
+    // 保持自动:id 住在哪一层就忘了哪一层(用户层开着且在那边找得到,job
+    // 落到用户目录)。全局层的删除只认用户命令(§6.4),这里本就是命令口。
     nlohmann::json extra;
-    if (options_.user_enabled && LayerHasEntry(user_memory_dir(), id)) {
+    const bool to_user = layer == "user" || (layer.empty() && options_.user_enabled &&
+                                             LayerHasEntry(user_memory_dir(), id));
+    if (layer == "user" && !options_.user_enabled) {
+        return std::unexpected("用户级记忆未在全局配置授权(memory.user_enabled),本场命令开不了");
+    }
+    if (to_user) {
         extra["layer"] = "user";
         extra["memory_dir"] = PathUtf8(user_memory_dir());
     }
-    return EnqueueJob("forget", nullptr, id, extra);
+    return EnqueueJob("forget", nullptr, id, extra, /*user_initiated=*/true);
 }
 
 std::expected<std::string, std::string> ProjectMemory::EnqueueRebuild() {
@@ -2251,15 +2279,22 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueRebuild() {
     return EnqueueJob("rebuild", nullptr, std::string());
 }
 
-std::expected<std::string, std::string> ProjectMemory::EnqueueVerify(const std::string& id, bool refresh) {
+std::expected<std::string, std::string> ProjectMemory::EnqueueVerify(const std::string& id, bool refresh,
+                                                                      const std::string& layer) {
     if (!options_.global_allowed || !options_.enabled) return std::unexpected("本场记忆未开启");
     if (!IsValidId(id)) return std::unexpected("记忆 id 不合法");
+    // 显式层路由同 forget(P0-4);旧写法按 id 自动认层。
     nlohmann::json extra{{"refresh", refresh}};
-    if (options_.user_enabled && LayerHasEntry(user_memory_dir(), id)) {
+    const bool to_user = layer == "user" || (layer.empty() && options_.user_enabled &&
+                                             LayerHasEntry(user_memory_dir(), id));
+    if (layer == "user" && !options_.user_enabled) {
+        return std::unexpected("用户级记忆未在全局配置授权(memory.user_enabled),本场命令开不了");
+    }
+    if (to_user) {
         extra["layer"] = "user";
         extra["memory_dir"] = PathUtf8(user_memory_dir());
     }
-    return EnqueueJob("verify", nullptr, id, extra);
+    return EnqueueJob("verify", nullptr, id, extra, /*user_initiated=*/true);
 }
 
 std::vector<ProjectMemory::StaleEntry> ProjectMemory::ListStaleEntries() const {
@@ -2387,6 +2422,15 @@ std::vector<MemoryEntry> ProjectMemory::ListEntries(std::string* error) const {
 std::vector<MemoryEntry> ProjectMemory::ListUserEntries(std::string* error) const {
     std::vector<MemoryEntry> out;
     if (!options_.user_enabled) return out;
+    for (const auto& entry : LoadCatalog(user_memory_dir(), error, "user")) {
+        out.push_back(entry.public_entry);
+    }
+    return out;
+}
+
+std::vector<MemoryEntry> ProjectMemory::ListGlobalEntriesForManagement(std::string* error) const {
+    // P0-4:管理读口不吃召回授权——用户看自己的全局库不需要开召回。
+    std::vector<MemoryEntry> out;
     for (const auto& entry : LoadCatalog(user_memory_dir(), error, "user")) {
         out.push_back(entry.public_entry);
     }
@@ -2688,15 +2732,15 @@ void ProjectMemory::SetRetrievalHints(std::vector<std::string> hints) {
     retrieval_hints_ = std::move(hints);
 }
 
-// 按 id 在两层里找主题。show/open 共用;返回 <条目, 所在目录>。
+// 按 id 在两层里找主题。show/open 共用;返回 <条目, 所在目录>。P0-4 起
+// 管理命令不看召回授权:用户看/编自己的全局主题不须先开 user_enabled
+//(召回闸在 BuildTurnContext,不在这)。
 std::optional<std::pair<MemoryEntry, fs::path>> ProjectMemory::FindTopic(const std::string& id) const {
     for (const auto& entry : ListEntries()) {
         if (entry.id == id) return std::make_pair(entry, memory_dir_);
     }
-    if (options_.user_enabled) {
-        for (const auto& entry : ListUserEntries()) {
-            if (entry.id == id) return std::make_pair(entry, user_memory_dir());
-        }
+    for (const auto& entry : LoadCatalog(user_memory_dir(), nullptr, "user")) {
+        if (entry.public_entry.id == id) return std::make_pair(entry.public_entry, user_memory_dir());
     }
     return std::nullopt;
 }
@@ -2968,6 +3012,56 @@ std::expected<void, std::string> RebuildMemoryIndex(const fs::path& memory_dir, 
     auto catalog_write = AtomicWrite(memory_dir / ".state" / "catalog.json", catalog.dump(2) + "\n");
     if (!catalog_write.has_value()) return catalog_write;
     return AtomicWrite(memory_dir / "index.md", BuildIndex(entries, layer));
+}
+
+std::vector<std::string> CheckGlobalMemoryHealth(const fs::path& home_lubancode) {
+    // /doctor memory 的引擎体(§9.3/P0-4):只读为主,复紧幂等。
+    std::vector<std::string> lines;
+    const fs::path home = AbsoluteNormal(home_lubancode);
+    if (home.empty()) {
+        lines.push_back("[!!] 找不到 LubanCode 主目录,全局记忆无从检查");
+        return lines;
+    }
+    const fs::path user_root = home / "memory" / "user";
+    std::error_code ec;
+    if (!fs::exists(user_root, ec)) {
+        lines.push_back("[ok] 全局记忆目录尚未创建(还没有全局主题)");
+    } else {
+        if (trajectory::ContainsSymlinkOrReparse(home, user_root)) {
+            lines.push_back("[!!] 全局记忆路径上夹着 symlink/reparse,可能越出主目录: " +
+                            PathUtf8(user_root));
+        } else if (!trajectory::IsContainedCanonicalPath(user_root, home)) {
+            lines.push_back("[!!] 全局记忆目录越出主目录: " + PathUtf8(user_root));
+        } else {
+            lines.push_back("[ok] 全局记忆目录在主目录内,无 symlink 逃逸");
+        }
+        // user-only 复紧(POSIX 0700 / Windows PROTECTED DACL):设不住大声报。
+        if (fs::is_directory(user_root, ec) && !trajectory::HardenDirectoryUserOnly(user_root)) {
+            lines.push_back("[! ] 全局记忆目录收紧 user-only 失败,请检查文件系统权限: " +
+                            PathUtf8(user_root));
+        } else {
+            lines.push_back("[ok] 全局记忆目录 user-only 权限已核(0700/PROTECTED DACL)");
+        }
+    }
+    std::size_t failed_jobs = 0;
+    fs::directory_iterator failed_it(home / "memory-jobs" / "failed", ec);
+    if (!ec) {
+        for (const auto& item : failed_it) {
+            if (item.is_regular_file(ec) && item.path().extension() == ".json") ++failed_jobs;
+        }
+    }
+    if (failed_jobs == 0) {
+        lines.push_back("[ok] memory job 无失败积压");
+    } else {
+        lines.push_back("[! ] memory job 失败积压 " + std::to_string(failed_jobs) +
+                        " 笔(memory-jobs/failed,各带 .error.txt 回执)");
+    }
+    ec.clear();
+    if (fs::exists(home / "projects", ec)) {
+        lines.push_back("[i ] 检测到旧 <home>/projects/ 记忆树:新运行时不再读写,迁移归 "
+                        "migrate-storage(P0-5)");
+    }
+    return lines;
 }
 
 std::expected<std::size_t, std::string> RunPendingMemoryJobs(const fs::path& home_lubancode) {

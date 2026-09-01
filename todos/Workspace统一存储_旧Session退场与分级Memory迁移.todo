@@ -1,6 +1,6 @@
 # Workspace 统一存储、旧 Session 退场与分级 Memory 迁移
 
-- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 已落（WorkspaceIdentityResolver 四级裁决+统一 key+两把旧钥匙退役+v2 manifest/checkout/doctor+cwd change/跨 workspace 换场，全量 ctest 339 册绿，2026-09-01）；P0-3 已落（项目 Memory 搬进 workspace 树+召回快照 typed 事件+worker lifecycle 回执+子代理冻结快照，全量 ctest 359 册绿，2026-09-01）；P0-2/P0-4 起待实现
+- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 已落（WorkspaceIdentityResolver 四级裁决+统一 key+两把旧钥匙退役+v2 manifest/checkout/doctor+cwd change/跨 workspace 换场，全量 ctest 339 册绿，2026-09-01）；P0-3 已落（项目 Memory 搬进 workspace 树+召回快照 typed 事件+worker lifecycle 回执+子代理冻结快照，全量 ctest 359 册绿，2026-09-01）；P0-4 已落（全局记忆收紧：命令面显式层级+逐次确认+写通道闸+user-only/doctor 项，全量 ctest 360 册绿，2026-09-01）；P0-2 起待实现（并行工位在换 Session 账）
 - 日期：2026-09-01
 - 级别：P0（持久化唯一真账、项目身份、恢复正确性与用户数据安全）
 - 范围：`src/sessions/`、`src/trajectory/`、`src/runtime/session_runtime.*`、`src/runtime/trajectory_session.*`、`src/memory/`、`src/app/commands/session_commands.*`、`src/app/commands/memory_commands.*`、`src/tools/agent_tool.*`、配置/CLI/app-server、测试、文档与旧数据迁移
@@ -529,13 +529,13 @@ lubancode migrate-storage plan|run|status
 
 ### P0-4：收紧全局 Memory
 
-- [ ] 保留 `~/.lubancode/memory/user/`，明确 UI 名称“全局记忆”。
-- [ ] 禁止回合尾抽取、`memory_save` 与项目配置直接写全局层。
-- [ ] 新增显式 global remember/list/show/forget 命令与逐次用户确认合同。
-- [ ] 保留项目层覆盖全局层、统一预算、去重、过期与证据漂移规则。
-- [ ] 给全局目录加 user-only 权限检查与 doctor 项。
+- [x] 保留 `~/.lubancode/memory/user/`，明确 UI 名称“全局记忆”。（路径不动;i18n 文案与 why 标注换“全局记忆”，schema 仍 level=user，两套词不混）
+- [x] 禁止回合尾抽取、`memory_save` 与项目配置直接写全局层。（memory_save 见 scope=user 即拒并指路用户命令;EnqueueSave 的 user 层请求须 user_initiated=true——回合尾抽取/候选 accept/工具路全不带,一律 `memory.global_unauthorized`;项目配置开 user_enabled 本就只认全局授权,config merge 层已有测试钉住）
+- [x] 新增显式 global remember/list/show/forget 命令与逐次用户确认合同。（`/memory remember|list|show|forget|verify [project|global]`,user 为过渡期别名;remember/forget global 每次 y/N 确认;旧的不带层级写法默认 project,每进程提示一次迁移;list/show global 走管理读口,不看召回授权）
+- [x] 保留项目层覆盖全局层、统一预算、去重、过期与证据漂移规则。（P0-3 迁根不动排级/预算/指纹逻辑,检索评测册全绿）
+- [x] 给全局目录加 user-only 权限检查与 doctor 项。（构造时与 worker 写后幂等复紧 `HardenDirectoryUserOnly`(0700/PROTECTED DACL);`/doctor memory` 走 memory::CheckGlobalMemoryHealth:越根/symlink/权限/failed job/旧 projects/ 遗留逐项报）
 
-验收：没有用户主动命令便永不新增全局主题；陌生仓库、Skill、Hook、子代理与模型调用都提不了权。
+验收：没有用户主动命令便永不新增全局主题；陌生仓库、Skill、Hook、子代理与模型调用都提不了权。（tests/unit/memory/test_memory_global_gate.cpp:工具路拒、裸 EnqueueSave 拒、授权关着连用户命令也拒且零 pending job;Skill/Hook/子代理都借工具路,同闸）
 
 ### P0-5：迁移旧 Session 与旧 Project Memory
 

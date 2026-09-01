@@ -1521,7 +1521,9 @@ TEST_CASE("ProjectMemory 用户层: 写入走全局授权,项目证据不得混�
     request.content = "所有前端项目一律用 pnpm。";
     request.scope.level = "user";
     request.scope.kind = "user";
-    REQUIRE(store.EnqueueSave(request).has_value());
+    // 存储 v2 P0-4:用户层只认用户命令路(user_initiated);裸路(模型工具/
+    // 回合尾抽取)在这里就得起用户命令语义。
+    REQUIRE(store.EnqueueSave(request, /*user_initiated=*/true).has_value());
     REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
     const fs::path user_topic = root / "home" / "memory" / "user" / "preferences" / "global-pnpm.md";
     REQUIRE(fs::exists(user_topic));
@@ -1534,16 +1536,18 @@ TEST_CASE("ProjectMemory 用户层: 写入走全局授权,项目证据不得混�
     memory::SaveRequest bad_fact = request;
     bad_fact.kind = memory::MemoryKind::Fact;
     bad_fact.id = "fact.no-user-facts";
-    CHECK_FALSE(store.EnqueueSave(bad_fact).has_value());
+    CHECK_FALSE(store.EnqueueSave(bad_fact, /*user_initiated=*/true).has_value());
     memory::SaveRequest bad_paths = request;
     bad_paths.paths = {"package.json"};
-    CHECK_FALSE(store.EnqueueSave(bad_paths).has_value());
+    CHECK_FALSE(store.EnqueueSave(bad_paths, /*user_initiated=*/true).has_value());
+    // P0-4:不带 user_initiated 的裸路(模型工具/回合尾抽取)连门都进不了。
+    CHECK_FALSE(store.EnqueueSave(request).has_value());
 
     // 全局没授权时,用户层写入被拒(项目配置无权开)。
     memory::Options ungranted = options;
     ungranted.user_enabled = false;
     memory::ProjectMemory plain_store(*identity, root / "home", ungranted);
-    CHECK_FALSE(plain_store.EnqueueSave(request).has_value());
+    CHECK_FALSE(plain_store.EnqueueSave(request, /*user_initiated=*/true).has_value());
     // 授权关着时召回也只查项目层。
     CHECK(plain_store.ListUserEntries().empty());
 

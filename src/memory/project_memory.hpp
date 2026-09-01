@@ -435,11 +435,17 @@ public:
     // P0-4 起全局层写入也只认 user_initiated=true 的路。
     std::expected<std::string, std::string> EnqueueSave(const SaveRequest& request,
                                                         bool user_initiated = false);
-    std::expected<std::string, std::string> EnqueueForget(const std::string& id);
+    // P0-4:显式层路由——layer 为 "user"/"project" 时按命令指定的层动
+    // (forget global 的删除边界 §6.4:只认用户命令,本口即命令口);空串
+    // 保持旧写法(按 id 自动认层)。
+    std::expected<std::string, std::string> EnqueueForget(const std::string& id,
+                                                          const std::string& layer = std::string());
     std::expected<std::string, std::string> EnqueueRebuild();
     // 核验:原 id 复活——重算指纹、盖 last_verified_at、status 回 active。
-    // refresh=true 时连 status 一并回炉(verify 只盖时间戳)。
-    std::expected<std::string, std::string> EnqueueVerify(const std::string& id, bool refresh);
+    // refresh=true 时连 status 一并回炉(verify 只盖时间戳)。layer 同
+    // EnqueueForget 的显式层路由。
+    std::expected<std::string, std::string> EnqueueVerify(const std::string& id, bool refresh,
+                                                          const std::string& layer = std::string());
 
     // 陈旧清单:指纹漂移的与已过期的,附原因(/memory stale 用)。
     struct StaleEntry {
@@ -451,6 +457,9 @@ public:
     std::vector<MemoryEntry> ListEntries(std::string* error = nullptr) const;
     // 用户层条目(全局授权关着时为空表)。/memory list 合并两层展示。
     std::vector<MemoryEntry> ListUserEntries(std::string* error = nullptr) const;
+    // P0-4:全局层的管理读口——/memory list|show global 是用户自己的管理
+    // 命令,不看召回授权(user_enabled 只闸召回与写入,不闸眼看自己的库)。
+    std::vector<MemoryEntry> ListGlobalEntriesForManagement(std::string* error = nullptr) const;
     RuntimeStatus Status() const;
 
     // 有 pending job 时起一枚会话级后台 worker。失败不删 job，下次还能捞。
@@ -481,6 +490,12 @@ private:
 // 隐藏 CLI 子命令调用。串行捞 pending/*.json；成功删 job，坏 job 挪 failed。
 std::expected<std::size_t, std::string> RunPendingMemoryJobs(
     const std::filesystem::path& home_lubancode);
+
+// P0-4:全局记忆目录的健康自检(user-only 权限、symlink 越根、failed job
+// 与旧 projects/ 遗留)。/doctor memory 的引擎体:一行一条,先状态字后
+// 说明,不发请求、不改盘(HardenDirectoryUserOnly 的复紧是幂等的,算
+// 修复不算改账)。
+std::vector<std::string> CheckGlobalMemoryHealth(const std::filesystem::path& home_lubancode);
 
 // 测试与 /memory rebuild 共用的同步底层。不起进程。user_layer=true 时按
 // 用户层扫描(preferences/feedback,没有 facts),index 头写 User Memory。
