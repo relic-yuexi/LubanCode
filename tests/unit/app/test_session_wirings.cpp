@@ -19,7 +19,6 @@
 #include "config/config.hpp"
 #include "runtime/idle_wake.hpp"
 #include "runtime/session_runtime.hpp"
-#include "sessions/session_store.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/read_file.hpp"
 #include "tools/registry.hpp"
@@ -54,7 +53,6 @@ GoalSessionWiring::Host MakeGoalHost(lubancode::runtime::SessionRuntime& runtime
     host.theme = &theme;
     static lubancode::config::Config config;
     host.config = &config;
-    host.session_store = &runtime.store();
     host.current_model = std::make_shared<std::string>("test-model");
     evaluation_model = nullptr;
     host.start_turn = [](const std::string&, bool* failed) {
@@ -69,18 +67,13 @@ GoalSessionWiring::Host MakeGoalHost(lubancode::runtime::SessionRuntime& runtime
 
 TEST_CASE("goal 接线器:装配独立起,泵与收口空转安全") {
     TempCwd cwd_guard;
-    lubancode::runtime::SessionRuntime runtime({std::string(), "anthropic", "test"});
+    lubancode::runtime::SessionRuntime runtime({"anthropic", "test"});
     GoalSessionWiring wiring(MakeGoalHost(runtime, nullptr));
 
     // 装配前:coordinator 空、iteration 不活跃,收口路原样返回。
     REQUIRE(wiring.coordinator() == nullptr);
     CHECK_FALSE(wiring.HasActiveIteration());
     wiring.CloseIteration("turn-x", /*turn_failed=*/false);  // 不炸即过
-    // 没活跃 goal:补快照是空操作(Ensure 在内部幂等补)。
-    lubancode::sessions::CompactV2Event compact_event;
-    wiring.AttachSnapshotToCompact(compact_event);
-    CHECK_FALSE(compact_event.metrics.contains("goal"));
-
     // 装配:coordinator 安家,Ensure 幂等。
     lubancode::config::Config config;
     wiring.Ensure(config);
@@ -97,13 +90,13 @@ TEST_CASE("goal 接线器:装配独立起,泵与收口空转安全") {
     // 泵:没有 ready continuation,原样返回。
     wiring.PumpContinuation(0);
     CHECK_FALSE(wiring.HasActiveIteration());
-    // 存档恢复:没建档的会话安静退。
+    // 恢复口:P0-6 后是幂等空位(旧档路删,新账接入属后续波次)。
     wiring.RestoreFromArchive();
 }
 
 TEST_CASE("loop 接线器:装配独立起(timer 起/收),泵无活空转") {
     TempCwd cwd_guard;
-    lubancode::runtime::SessionRuntime runtime({std::string(), "anthropic", "test"});
+    lubancode::runtime::SessionRuntime runtime({"anthropic", "test"});
     lubancode::runtime::IdleWakeCoordinator wakes;
     lubancode::config::Config config;
 
@@ -112,7 +105,6 @@ TEST_CASE("loop 接线器:装配独立起(timer 起/收),泵无活空转") {
     host.theme = &theme;
     host.interactive = false;
     host.config = &config;
-    host.session_store = &runtime.store();
     host.session_runtime = &runtime;
     static std::optional<std::string> home;
     host.home_lubancode = &home;
@@ -148,7 +140,7 @@ TEST_CASE("loop 接线器:装配独立起(timer 起/收),泵无活空转") {
 
 TEST_CASE("plan 接线器:装配独立起,Default 档一概放行,恢复空档落 Default") {
     TempCwd cwd_guard;
-    lubancode::runtime::SessionRuntime runtime({std::string(), "anthropic", "test"});
+    lubancode::runtime::SessionRuntime runtime({"anthropic", "test"});
     lubancode::agent::PromptOptions prompt_options;
 
     PlanSessionWiring::Host host;
@@ -165,10 +157,6 @@ TEST_CASE("plan 接线器:装配独立起,Default 档一概放行,恢复空档�
     const nlohmann::json input{{"command", "rm -rf /"}};
     CHECK(wiring.EvaluateGate("run_command", input).empty());
     CHECK(wiring.EvaluateGate("write_file", nlohmann::json{}).empty());
-    // 老档没 mode 行:恢复落 Default,悬稿空。
-    wiring.RestoreFromArchive(std::nullopt, {}, std::nullopt);
-    CHECK(runtime.collaboration_mode() == lubancode::runtime::CollaborationMode::Default);
-    CHECK_FALSE(wiring.RestoredFromArchive());
     // 计划采集:Default 档不认 <proposed_plan>,历史没动。
     wiring.CollectProposal(0, "turn-1");
     CHECK(runtime.latest_plan() == nullptr);
@@ -180,7 +168,7 @@ TEST_CASE("plan 接线器:装配独立起,Default 档一概放行,恢复空档�
 // 改状态命令拦,拦截回执带命中规则。
 TEST_CASE("plan 接线器: Plan 档按参数放只读——skill/Explore/git ls-tree,拦写盘") {
     TempCwd cwd_guard;
-    lubancode::runtime::SessionRuntime runtime({std::string(), "anthropic", "test"});
+    lubancode::runtime::SessionRuntime runtime({"anthropic", "test"});
     lubancode::agent::PromptOptions prompt_options;
     runtime.SetCollaborationMode(lubancode::runtime::CollaborationMode::Plan, "test", "confirm");
 
@@ -315,7 +303,7 @@ TEST_CASE("record 接线器:材料包装配独立起,没在录给 nullptr") {
 
 TEST_CASE("P2 暴露位: goal_checkpoint 只认会话级条件,与轮次活跃账分家") {
     TempCwd cwd_guard;
-    lubancode::runtime::SessionRuntime runtime({std::string(), "anthropic", "test"});
+    lubancode::runtime::SessionRuntime runtime({"anthropic", "test"});
 
     // features.goals 关:定义不进 tools(暴露位假)。
     {
@@ -325,8 +313,7 @@ TEST_CASE("P2 暴露位: goal_checkpoint 只认会话级条件,与轮次活跃�
         GoalSessionWiring::Host host;
         host.theme = &theme;
         host.config = &config;
-        host.session_store = &runtime.store();
-        GoalSessionWiring wiring(host);
+            GoalSessionWiring wiring(host);
         CHECK_FALSE(wiring.ToolExposed());
     }
     // features.goals 开:定义常驻(暴露位真)——但"本轮可不可用"另算,
@@ -338,8 +325,7 @@ TEST_CASE("P2 暴露位: goal_checkpoint 只认会话级条件,与轮次活跃�
         GoalSessionWiring::Host host;
         host.theme = &theme;
         host.config = &config;
-        host.session_store = &runtime.store();
-        GoalSessionWiring wiring(host);
+            GoalSessionWiring wiring(host);
         CHECK(wiring.ToolExposed());
         CHECK_FALSE(wiring.HasActiveIteration());
         CHECK(wiring.ActiveGoalId().empty());
@@ -354,7 +340,7 @@ TEST_CASE("P2 暴露位: goal_checkpoint 只认会话级条件,与轮次活跃�
 
 TEST_CASE("P2 暴露位: loop_control 只认会话级条件,与拍活跃账分家") {
     TempCwd cwd_guard;
-    lubancode::runtime::SessionRuntime runtime({std::string(), "anthropic", "test"});
+    lubancode::runtime::SessionRuntime runtime({"anthropic", "test"});
     lubancode::runtime::IdleWakeCoordinator wakes;
 
     // features.loop 关:暴露位假。
@@ -366,8 +352,7 @@ TEST_CASE("P2 暴露位: loop_control 只认会话级条件,与拍活跃账分�
         host.theme = &theme;
         host.interactive = false;
         host.config = &config;
-        host.session_store = &runtime.store();
-        host.idle_wakes = &wakes;
+            host.idle_wakes = &wakes;
         LoopSessionWiring wiring(host);
         CHECK_FALSE(wiring.ToolExposed());
     }
@@ -381,8 +366,7 @@ TEST_CASE("P2 暴露位: loop_control 只认会话级条件,与拍活跃账分�
         host.theme = &theme;
         host.interactive = false;
         host.config = &config;
-        host.session_store = &runtime.store();
-        host.idle_wakes = &wakes;
+            host.idle_wakes = &wakes;
         LoopSessionWiring wiring(host);
         CHECK(wiring.ToolExposed());
         CHECK_FALSE(wiring.TickActive());

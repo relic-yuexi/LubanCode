@@ -18,7 +18,6 @@
 
 #include "app/session_title_refiner.hpp"
 #include "runtime/trajectory_session.hpp"
-#include "sessions/session_store.hpp"
 
 namespace lubancode::app {
 
@@ -38,13 +37,11 @@ public:
         WriteFailed,  // 标题事件行落不了盘:内存标题已回退
     };
 
-    // title/pending 是 runtime::SessionRuntime 那份的引用(resume、/title、
-    // /clear 都直接写它,这里不夺所有权);store 同为借用。store_broken 是
-    // "建档失败过,别每轮都再撞一次"的那本账。
-    // P0-2(Trajectory 升为唯一 Session):ledger 非空时标题事件走
-    // control.title.changed(旧 SessionStore 参数退役中,留待 P0-6 摘除)。
-    SessionTitleAccount(std::string& title, bool& pending, lubancode::sessions::SessionStore& store,
-                        bool& store_broken,
+    // title/pending 是会话层那份的引用(resume、/title、/clear 都直接写
+    // 它,这里不夺所有权)。P0-2 起标题真账唯一:control.title.changed
+    // (旧 SessionStore 参数已随 P0-6 摘除);ledger 空 = 没账可落,起名
+    // 路安静降级。
+    SessionTitleAccount(std::string& title,
                         lubancode::runtime::TrajectorySessionLedger* ledger = nullptr);
 
     // 第一层:首问建档当场起本地临时标题(零模型 token),/sessions 立刻
@@ -78,10 +75,7 @@ private:
     bool AppendTitleEvent(const std::string& title);
 
     std::string& title_;
-    bool& pending_;
-    lubancode::sessions::SessionStore& store_;
-    bool& store_broken_;
-    lubancode::runtime::TrajectorySessionLedger* ledger_ = nullptr;  // P0-2 标题真账
+    lubancode::runtime::TrajectorySessionLedger* ledger_ = nullptr;  // 标题真账
     bool auto_attempted_ = false;  // 一场只试一次,失败安静降级
     std::uint64_t generation_ = 0;
     SessionTitleRefiner refiner_;

@@ -3,6 +3,7 @@
 
 #include "config/config.hpp"
 #include "tools/path_utils.hpp"
+#include "tools/session_utils.hpp"  // NowIdTimestamp(P0-6 自 sessions 迁来)
 #include "workspace/identity.hpp"
 
 namespace lubancode::runtime {
@@ -38,9 +39,8 @@ AgentChannelEngine::AgentChannelEngine(api::Backend& backend, tools::ToolRegistr
                                        agent::AgentProfile profile, Options options)
     : options_(std::move(options)), session_runtime_([this]() {
         SessionRuntime::Options runtime_options;
-        runtime_options.sessions_dir = options_.sessions_dir;
         runtime_options.wire_name = options_.wire_name;
-        runtime_options.start_ts = sessions::NowIdTimestamp();
+        runtime_options.start_ts = tools::NowIdTimestamp();
         runtime_options.lubancode_version = options_.lubancode_version;
         // P0-2(Trajectory 升为唯一 Session):账本恒开;身份按 engine 的
         // cwd 四级裁决(P0-1 规矩:不认进程 current_path)。
@@ -64,16 +64,7 @@ agent::RunOutcome AgentChannelEngine::RunTurn(const TurnIngress& ingress, std::s
     if (reply_text != nullptr) reply_text->clear();
     if (error != nullptr) error->clear();
 
-    // 首条文本做建档 slug(与终端路同款)。
-    std::string first_text;
-    for (const auto& block : ingress.message.content) {
-        if (const auto* tb = std::get_if<api::TextBlock>(&block)) {
-            first_text = tb->text;
-            break;
-        }
-    }
-    session_runtime_.EnsureBegun(first_text, options_.model, options_.cwd);
-
+    // (P0-6:旧存档建档路已删;账本在 SessionRuntime ctor 里恒开。)
     const std::size_t history_before = agent_.history().size();
 
     // 事件出水:每轮一只适配器(与终端路同款;sink 没挂就只发号)。
@@ -136,8 +127,6 @@ agent::RunOutcome AgentChannelEngine::RunTurn(const TurnIngress& ingress, std::s
         trajectory_bridge->EndTurn(ok, /*cancelled=*/false,
                                     ok ? std::string("done") : outcome.error());
     }
-    (void)session_runtime_.PersistNewWithProvenance(agent_.history(), options_.model, options_.cwd,
-                                                    ingress.provenance);
     return outcome.has_value() ? *outcome : agent::RunOutcome{};
 }
 

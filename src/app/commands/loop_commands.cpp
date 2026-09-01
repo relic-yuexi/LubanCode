@@ -400,12 +400,13 @@ int HandleLoopCommand(const lubancode::cli::ParsedLoopCommand& command, const Lo
             out << theme.error << resolved.error << theme.reset << "\n";
             return flow_continue;
         }
+        std::string loop_session_id;
+        if (wiring.session_runtime != nullptr && wiring.session_runtime->trajectory() != nullptr) {
+            loop_session_id = wiring.session_runtime->trajectory()->session_id();
+        }
         const auto outcome = lubancode::app::HandleLoopCreateCommand(
             scheduler, resolved.text, interval, lubancode::platform::CurrentDirUtf8(),
-            wiring.session_store != nullptr && wiring.session_store->active()
-                ? wiring.session_store->session_id()
-                : std::string(),
-            now_ms, resolved.source, resolved.file);
+            loop_session_id, now_ms, resolved.source, resolved.file);
         for (const std::string& line : outcome.lines) {
             out << theme.stats << line << theme.reset << "\n";
         }
@@ -425,61 +426,9 @@ int HandleLoopCommand(const lubancode::cli::ParsedLoopCommand& command, const Lo
     return flow_continue;
 }
 
-void RestoreLoopFromArchive(const LoopWiring& wiring) {
-    auto& out = lubancode::cli::TermOut();
-    const lubancode::cli::Theme& theme = *wiring.theme;
-    LoopScheduler& scheduler = *wiring.scheduler;
-    if (wiring.session_store == nullptr || !wiring.session_store->active()) {
-        return;
-    }
-    const auto bytes = lubancode::sessions::ReadSessionFileBytes(wiring.session_store->file_path());
-    if (!bytes.has_value()) {
-        return;
-    }
-    // 行进信封出、文件序喂
-    // 折叠口、坏行跳过不废整场——规矩只在 runtime/replay 一份;loop 的
-    // 域编解码(ParseLoopLedgerLine)与折叠(ReplayEvent)各归各。
-    std::vector<std::string> lines;
-    std::istringstream stream(*bytes);
-    std::string line;
-    while (std::getline(stream, line)) {
-        lines.push_back(line);
-    }
-    const auto replay_stats = lubancode::runtime::replay::ReplayLedgerLines(
-        lines,
-        [](const std::string& row) {
-            return LoopScheduler::ParseLoopLedgerLine(row);
-        },
-        [&scheduler](const lubancode::runtime::replay::Envelope& envelope) {
-            const auto event = LoopScheduler::EventFromEnvelope(envelope);
-            return event.has_value() && scheduler.ReplayEvent(*event);
-        });
-    const int replayed = replay_stats.replayed;
-    if (replayed == 0) {
-        return;
-    }
-    // 恢复的 active task 默认暂停(resume 时不问一句就自动烧 token,风险
-    // 大过便利;单子"恢复"节:Active 且未过期可恢复——这里保守起步,用户
-    // /loop resume 显式续)。Running 中断的标 Interrupted 语义:转 Paused。
-    const auto now_ms = [] {
-        return std::chrono::duration_cast<std::chrono::milliseconds>(
-                   std::chrono::system_clock::now().time_since_epoch())
-            .count();
-    }();
-    int resumed_active = 0;
-    for (const auto& view : scheduler.Snapshot(now_ms)) {
-        if (view.task.state == LoopTaskState::Active || view.task.state == LoopTaskState::Running ||
-            view.task.state == LoopTaskState::Due) {
-            scheduler.Pause(view.task.task_id, now_ms, "resumed_paused");
-            ++resumed_active;
-        }
-    }
-    out << theme.stats << "loop 任务已随会话恢复(" << replayed << " 条事件;"
-        << resumed_active << " 只默认暂停,续跑 /loop resume <id>)。" << theme.reset << "\n";
-    if (wiring.flush_events) {
-        wiring.flush_events();
-    }
-}
+// (P0-6:RestoreLoopFromArchive——从旧 session JSONL 恢复 loop 任务——
+// 已删;P0-2 起 store 恒不开档,此路早已不通。loop 任务的持久化接
+// trajectory Journal 属 loop 单后续波次,如实记缺口。)
 
 void AttachLoopSnapshotToCompact(const LoopWiring& wiring, nlohmann::json& metrics_out) {
     if (wiring.scheduler == nullptr) {
@@ -526,28 +475,8 @@ void FlushLoopEvents(const LoopWiring& wiring) {
     // 状态栏与任务行,不解析 slash 字符串(单子"前端凭 payload 画")。
     // 投影不拦落盘:UI 失败不拦工具的规矩在这里同款。
     EmitLoopServerEvents(wiring, events);
-    if (wiring.session_store == nullptr || !wiring.session_store->active()) {
-        return;  // 没建档的会话照常跑,事件只进内存
-    }
-    for (const auto& e : events) {
-        nlohmann::json line;
-        line["type"] = e.family;
-        line["event"] = e.event;
-        line["task_id"] = e.task_id;
-        if (!e.tick_id.empty()) {
-            line["tick_id"] = e.tick_id;
-        }
-        line["payload"] = e.payload;
-        line["timestamp_ms"] = e.timestamp_ms;
-        if (!wiring.session_store->AppendRawLine(line.dump())) {
-            // 写盘失败熔断:失去恢复账后继续跑,风险大过便利。
-            wiring.scheduler->FailStore("session append failed");
-            out << wiring.theme->error
-                << "loop 事件写盘失败,定时任务已熔断(已跑的拍照常收口;新拍不再排)。"
-                << wiring.theme->reset << "\n";
-            return;
-        }
-    }
+    // (P0-6:旧 SessionStore 的 loop 事件行落盘已删——P0-2 起此路恒不走。
+    // 持久账接 trajectory 属 loop 单后续波次;眼下事件只进内存与投影。)
 }
 
 void EmitLoopServerEvents(const LoopWiring& wiring,

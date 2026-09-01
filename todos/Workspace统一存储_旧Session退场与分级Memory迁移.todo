@@ -1,6 +1,6 @@
 # Workspace 统一存储、旧 Session 退场与分级 Memory 迁移
 
-- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 已落（WorkspaceIdentityResolver 四级裁决+统一 key+两把旧钥匙退役+v2 manifest/checkout/doctor+cwd change/跨 workspace 换场，2026-09-01）；P0-2 已落（Trajectory 升唯一 Session:根迁 workspaces/、开关退役、命令面/app-server/渠道全换账、artifact 归拢、无损投影、父子账保住+真机冒烟，2026-09-01）；P0-3 已落（项目 Memory 搬进 workspace 树+召回快照 typed 事件+worker lifecycle 回执+子代理冻结快照，2026-09-01）；P0-4 已落（全局记忆收紧：命令面显式层级+逐次确认+写通道闸+user-only/doctor 项，2026-09-01）；P0-5 已落（幂等迁移器+fault 注入百次打断验收+真进程 kill 折算+迁移说明与版本边界，2026-09-02）。**P0-6（删旧码）进行中**。另：Wave3×P0-2 合并态有 16 册交叠红（轨迹边界 prepared 空串一类），缝合进展在专门分支，换机后第一件事收完再发版。
+- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 已落（WorkspaceIdentityResolver 四级裁决+统一 key+两把旧钥匙退役+v2 manifest/checkout/doctor+cwd change/跨 workspace 换场，2026-09-01）；P0-2 已落（Trajectory 升唯一 Session:根迁 workspaces/、开关退役、命令面/app-server/渠道全换账、artifact 归拢、无损投影、父子账保住+真机冒烟，2026-09-01）；P0-3 已落（项目 Memory 搬进 workspace 树+召回快照 typed 事件+worker lifecycle 回执+子代理冻结快照，2026-09-01）；P0-4 已落（全局记忆收紧：命令面显式层级+逐次确认+写通道闸+user-only/doctor 项，2026-09-01）；P0-5 已落（幂等迁移器+fault 注入百次打断验收+真进程 kill 折算+迁移说明与版本边界，2026-09-02）；P0-6 已落（旧 SessionStore/Catalog/Lifecycle 删除、纯函数迁 tools/session_utils、双路 wiring 拆净、features.trajectory 文案退役、静态审计守门，2026-09-02）。另：Wave3×P0-2 合并态有 16 册交叠红（轨迹边界 prepared 空串一类），缝合进展在专门分支，换机后第一件事收完再发版。
 - 日期：2026-09-01
 - 级别：P0（持久化唯一真账、项目身份、恢复正确性与用户数据安全）
 - 范围：`src/sessions/`、`src/trajectory/`、`src/runtime/session_runtime.*`、`src/runtime/trajectory_session.*`、`src/memory/`、`src/app/commands/session_commands.*`、`src/app/commands/memory_commands.*`、`src/tools/agent_tool.*`、配置/CLI/app-server、测试、文档与旧数据迁移
@@ -550,15 +550,15 @@ lubancode migrate-storage plan|run|status
 
 ### P0-6：彻底删除旧格式代码
 
-- [ ] 删除 `src/sessions/session_store.*` 及其 CMake 项。
-- [ ] 删除 `SessionRuntime::PersistNew`、旧 store 成员、旧 persisted_count 与双路 wiring。
-- [ ] 删除旧平铺 SessionCatalog/Lifecycle 实现或改造成纯 Workspace 投影，不留旧目录扫描。
-- [ ] 删除 `features.trajectory`、环境变量、配置文档与关闭态降级文案。
-- [ ] 删除旧 projects memory root 与旧 key 生产代码。
-- [ ] 删除生产二进制里的旧 JSONL reader/writer；迁移器在收官发行前独立封存或移出生产构建。
-- [ ] 加静态审计：源码与文档除迁移说明外，不得再出现生产路径 `~/.lubancode/sessions`、`~/.lubancode/trajectories`、`~/.lubancode/projects`。
+- [x] 删除 `src/sessions/session_store.*` 及其 CMake 项。（连同 session_catalog.*/session_lifecycle.* 一并删；仍被生产消费的纯函数迁 `tools/session_utils`：时间戳/UTF-8 截断/会话 id 拼装/路径归一/引用消歧/Markdown 导出）
+- [x] 删除 `SessionRuntime::PersistNew`、旧 store 成员、旧 persisted_count 与双路 wiring。（store_/meta_/title_/persisted_count_/store_broken_/pending_*_ 成员、EnsureBegun/PersistNew*/ClampPersisted 死体、Options.sessions_dir 全删；title_/compact_epoch 改控制器活值）
+- [x] 删除旧平铺 SessionCatalog/Lifecycle 实现或改造成纯 Workspace 投影，不留旧目录扫描。（两文件删；ResolveSessionRef/SessionRefCandidate 迁 tools/session_utils 喂 workspace 索引候选；archive/delete 仍走 trajectory::SessionAdminOutcome；goal_session.cpp 留任——goal 事件纯函数仍有消费者）
+- [x] 删除 `features.trajectory`、环境变量、配置文档与关闭态降级文案。（开关/env 已随 P0-2 删；本批删 server 侧字段、config 快照展示与全部"关态"文案——i18n/insights/doctor/telemetry/usage；config 解析键保留只为吞旧配置文件,读而不用）
+- [x] 删除旧 projects memory root 与旧 key 生产代码。（旧 root/key 生产路随 P0-1/P0-3 退役;ComputeLegacyProjectKey 只活在迁移器；本批静态审计把旧路径字样从 src/ 与 docs/ 钉死为零）
+- [x] 删除生产二进制里的旧 JSONL reader/writer；迁移器在收官发行前独立封存或移出生产构建。（session_store 删除后生产代码零旧格式解析;迁移器在独立 target `lubancode_storage_migrator` + `legacy-storage-migrator` exe，app 链的摘除留待收官发行,如实记）
+- [x] 加静态审计：源码与文档除迁移说明外，不得再出现生产路径 `~/.lubancode/sessions`、`~/.lubancode/trajectories`、`~/.lubancode/projects`。（tests/unit/workspace/test_legacy_storage_gate.cpp：扫 src/（剥注释）与 docs/，白名单=迁移器三件+迁移说明+开发文档；另钉旧件源文件确已删除）
 
-验收：删掉上述旧目录后程序照常工作；手工造旧目录也不会被扫描；新路故障时明确失败，绝不回退。
+验收：删掉上述旧目录后程序照常工作；手工造旧目录也不会被扫描；新路故障时明确失败，绝不回退。（全量 ctest 两轮对账绿——358 册仅 app_server_browser 一册并行抖动,单跑绿;生产目标 engine/app/exe/迁移器全编过。goal/loop 事件的持久账接 trajectory、/trace 跨进程折叠、evolve 读新账三处如实记缺口,属各自单子的后续波次）
 
 ### P0-7：测试、性能与发布门
 

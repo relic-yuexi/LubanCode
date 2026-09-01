@@ -485,14 +485,14 @@ add_library(lubancode_engine STATIC
   src/agent/compact.cpp
   src/agent/context_budget.cpp
   src/agent/microcompact.cpp
-  src/sessions/session_store.cpp
+  # 存储 v2 P0-6:旧 SessionStore/Catalog/Lifecycle(平铺目录读写)已删,
+  # 仍被生产消费的纯工具(时间戳/UTF-8 截断/id 拼装/路径归一/引用消歧)
+  # 迁 tools/session_utils;旧格式解析只活在迁移器独立 target。
+  src/tools/session_utils.cpp
   # 持久目标单:goal 事件行(goal_v1 族)的 serialize/parse 纯函数。
   src/sessions/goal_session.cpp
   # 逐枚追踪单:工具生命周期栅栏事件、恢复账本(纯函数)。
   src/agent/tool_trace.cpp
-  src/sessions/session_catalog.cpp
-  # 会话管理器单第四五步:SessionLifecycle 搬与删的唯一收口(纯磁盘薄壳)。
-  src/sessions/session_lifecycle.cpp
   src/skills/workflow_recorder.cpp
   src/skills/skill_drafter.cpp
   # engine 引用的三个 cli 叶子(零标准流、零终端依赖,tools/config 都吃):

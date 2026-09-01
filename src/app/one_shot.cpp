@@ -32,7 +32,6 @@
 #include "agent/loop.hpp"
 #include "peers/peer_session.hpp"
 #include "agent/prompts.hpp"
-#include "sessions/session_store.hpp"
 #include "skills/workflow_recorder.hpp"
 #include "api/anthropic/client.hpp"
 #include "api/backend.hpp"

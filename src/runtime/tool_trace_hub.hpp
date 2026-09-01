@@ -31,7 +31,6 @@
 #include <vector>
 
 #include "agent/loop.hpp"
-#include "sessions/session_store.hpp"
 #include "agent/tool_trace.hpp"
 #include "runtime/event.hpp"
 #include "runtime/event_sink.hpp"
@@ -50,8 +49,8 @@ public:
         bool power_loss_durable = false;  // started/finished 额外 fsync;增延迟,不默认
     };
 
-    ToolTraceHub(IdAuthority& ids, sessions::SessionStore* store);
-    ToolTraceHub(IdAuthority& ids, sessions::SessionStore* store, const Options& options);
+    ToolTraceHub(IdAuthority& ids);
+    ToolTraceHub(IdAuthority& ids, const Options& options);
     ~ToolTraceHub();
 
     ToolTraceHub(const ToolTraceHub&) = delete;
@@ -61,9 +60,9 @@ public:
     // app-server/Json sink 的会话在这里接上,工具相位随 ServerEvent 走。
     void AttachSink(EventSink* sink) { sink_ = sink; }
 
-    // 轨迹落点(P0-2,§15.2 ToolTraceHub -> TrajectorySink):flag 开的
-    // 会话由 turn_runner 每轮挂上;挂了之后持久账走轨迹(不写
-    // SessionStore,禁 dual-write),没挂照旧路。每轮各一只,轮结束 Detach。
+    // 轨迹落点(P0-2,§15.2 ToolTraceHub -> TrajectorySink;P0-6 起唯一
+    // 持久路):会话由 turn_runner 每轮挂上,持久账走轨迹。每轮各一只,
+    // 轮结束 Detach。
     void AttachTrajectory(ToolTrajectorySink* trajectory) { trajectory_ = trajectory; }
     void DetachTrajectory() { trajectory_ = nullptr; }
 
@@ -99,8 +98,13 @@ public:
     // 从这里接同一道闸。
     bool IsExecutionBlocked(const std::string& execution_id) const;
 
-    // 恢复:从 LoadedSession 的 trace 事件折叠账本(/resume 侧调)。
+    // 恢复:从事件序列折叠账本(纯函数;迁移器与诊断侧用)。
     static agent::ToolExecutionLedger BuildLedger(const std::vector<agent::ToolTraceEvent>& events);
+
+    // 折叠进程内最近账(recent_,有界 512 枚)成 ledger。P0-6 起 /trace 的
+    // 详细档与 export 吃这份;跨进程的持久真账在 trajectory Journal,
+    // 事件侧折叠口属 trace 单后续波次。
+    agent::ToolExecutionLedger BuildRecentLedger() const;
 
     // 诊断:最近一批的摘要(/trace 用)。返回空串 = 没账。
     std::string LastBatchSummary() const;
@@ -140,7 +144,6 @@ private:
     bool ShouldBlockOnFailedStart(agent::EffectClass cls) const;
 
     IdAuthority& ids_;
-    sessions::SessionStore* store_;  // 不持有;空 = 只投影不落盘
     Options options_;
     EventSink* sink_ = nullptr;
     ToolTrajectorySink* trajectory_ = nullptr;  // P0-2:不持有,轮内由装配层挂

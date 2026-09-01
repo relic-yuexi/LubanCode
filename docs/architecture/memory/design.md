@@ -10,7 +10,7 @@
 
 | 机制 | 记什么 | 存在哪儿 | 何时进入上下文 |
 | --- | --- | --- | --- |
-| 会话 | 本场用户消息、回复、工具调用与 usage | `~/.lubancode/sessions/*.jsonl` | 恢复或继续本场时 |
+| 会话 | 本场用户消息、回复、工具调用与 usage | workspace trajectory Journal(P0-2 起唯一真账) | 恢复或继续本场时 |
 | 项目记忆 | 跨会话仍有用的事实与偏好 | `~/.lubancode/workspaces/<workspace_key>/memory/`（存储 v2 P0-3 起，与 session 同一棵 workspace 树） | 每条外层用户消息前，按相关度召回 |
 | 项目指令 | 必须遵守的仓库规矩 | 仓库 `AGENTS.md` | 拼入系统提示 |
 

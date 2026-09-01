@@ -68,7 +68,7 @@ flowchart TD
 ~/.lubancode/workspaces/<workspace-key>/memory/
 ```
 
-用户级记忆另住 `~/.lubancode/memory/user/`。旧 `~/.lubancode/projects/` 树的迁移归 P0-5。
+用户级记忆另住 `~/.lubancode/memory/user/`。旧项目记忆树的迁移归 P0-5(见存储迁移说明)。
 
 ## 召回读路
 

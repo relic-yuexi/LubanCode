@@ -105,9 +105,6 @@ lubancode::evolution::CollectSources BuildCollectSources(SlashDispatchContext& c
         sources.workflow_runs_root =
             lubancode::platform::Utf8ToPath(**ctx.home_lubancode) / "workflow-runs";
     }
-    if (ctx.sessions_dir != nullptr) {
-        sources.sessions_dir = *ctx.sessions_dir;
-    }
     if (ctx.project_memory != nullptr) {
         // 已接受条目,按层各递一份。授权与开关的判断仍在 ProjectMemory 一处
         //(ListUserEntries 没开授权自然给空表)。
@@ -279,8 +276,7 @@ void RunEvolveStatus(SlashDispatchContext& ctx) {
     TermOut() << "自进化观察账(阶段 1:只观察,不生成 Package):\n";
     TermOut() << "  采集: 录制件 " << report.recordings_scanned << "(跳过半截 "
               << report.recordings_skipped << "),workflow run " << report.runs_scanned
-              << ",会话 " << report.sessions_scanned << "(读不动 " << report.sessions_unreadable
-              << "),memory " << report.memory_entries << "\n";
+              << ",memory " << report.memory_entries << "\n";
     TermOut() << "  落账: 新增 " << appended << ",重采跳过 " << duplicates << ",被拒压下 "
               << suppressed << "\n";
     TermOut() << "  账面: 观察 " << ledger.size() << " 条,同类簇 " << clusters.size() << " 个";

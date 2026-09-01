@@ -38,7 +38,7 @@ const InsightsHealthLine* FindLine(const std::vector<InsightsHealthLine>& lines,
 
 }  // namespace
 
-TEST_CASE("健康检查:账未开、无报告、无价格表、目录可写") {
+TEST_CASE("健康检查:账恒开、无报告、无价格表、目录可写") {
     const auto home = TempRoot("lubancode-a5-health");
     InsightsHealthInput input;
     input.trajectory_on = false;
@@ -51,8 +51,9 @@ TEST_CASE("健康检查:账未开、无报告、无价格表、目录可写") {
     REQUIRE(lines.size() >= 8);
     const auto* trajectory = FindLine(lines, "trajectory");
     REQUIRE(trajectory != nullptr);
-    CHECK(trajectory->status == 'x');  // 账未开 = fail
-    CHECK(trajectory->detail.find("features.trajectory") != std::string::npos);
+    // P0-6:features.trajectory 开关删除,轨迹账恒开——健康行恒绿。
+    CHECK(trajectory->status == ' ');
+    CHECK(trajectory->detail.find("唯一事实账") != std::string::npos);
     const auto* derived = FindLine(lines, "derived 目录");
     REQUIRE(derived != nullptr);
     CHECK(derived->status == ' ');

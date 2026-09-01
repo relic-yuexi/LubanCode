@@ -23,7 +23,6 @@
 #include "cli/theme.hpp"
 #include "runtime/plan_mode.hpp"
 #include "runtime/session_runtime.hpp"
-#include "sessions/session_store.hpp"  // ModeEvent/PlanEvent/PlanReviewEvent
 #include "tools/registry.hpp"
 
 namespace lubancode::agent {
@@ -73,9 +72,6 @@ public:
 
     // resume 恢复 mode/plan/review 账(老档没 mode 行按 Default;Approved 已
     // 落而 Default 未落时按"已批准待执行"提示,不自动重跑)。
-    void RestoreFromArchive(const std::optional<lubancode::sessions::ModeEvent>& mode_event,
-                            const std::vector<lubancode::sessions::PlanEvent>& plans,
-                            const std::optional<lubancode::sessions::PlanReviewEvent>& review);
 
     // ---- 查询口 ----
     bool RestoredFromArchive() const { return restored_from_archive_; }

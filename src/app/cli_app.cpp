@@ -38,7 +38,6 @@
 #include "agent/loop.hpp"
 #include "peers/peer_session.hpp"
 #include "agent/prompts.hpp"
-#include "sessions/session_store.hpp"
 #include "skills/workflow_recorder.hpp"
 #include "api/anthropic/client.hpp"
 #include "api/backend.hpp"
@@ -373,7 +372,6 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
                      const CliOptions& cli_options) {
     lubancode::app_server::ServerOptions options;
     if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
-        options.sessions_dir = *luban_dir + "/sessions";  // P0-2 起不消费(P0-6 删)
         // P0-2:会话账走唯一持久化根 workspaces/。
         options.workspaces_dir = *luban_dir + "/workspaces";
         // wf 线的 run 账根(workflow/query 的快照与增量事件从这里读)。
@@ -398,7 +396,7 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
     }
     options.session_model = config_result.config.model;
     // P0-2(Trajectory 升为唯一 Session):feature/env 开关已删,thread 恒走
-    // Trajectory 账(server.hpp 的 features_trajectory 字段退役中,P0-6 删)。
+    // Trajectory 账(P0-6:features.trajectory 开关与 server 侧字段随之退役)。
     // 浏览器面(可见调试阶段 3):sidecar 命令解析——环境变量
     // LUBAN_BROWSER_SIDECAR 指到 browser/sidecar.js 优先;没指则按可执行
     // 文件旁边与当前目录找 browser/sidecar.js。找不到就不配(browser/*

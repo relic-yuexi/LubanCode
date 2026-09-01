@@ -17,7 +17,6 @@
 #include "hooks/dispatcher.hpp"
 #include "hooks/hash.hpp"
 #include "platform/paths.hpp"
-#include "sessions/session_store.hpp"
 #include "tools/agent_tool.hpp"
 
 #include <cstdlib>
@@ -319,9 +318,6 @@ void EmitGoalHook(const GoalWiring& wiring, lubancode::hooks::HookEvent event, n
     if (dispatcher == nullptr || dispatcher->Empty() || !dispatcher->HasHandlersFor(event)) {
         return;
     }
-    if (wiring.session_store != nullptr && wiring.session_store->active()) {
-        fields["session_id"] = wiring.session_store->session_id();
-    }
     lubancode::hooks::HookPayload payload;
     payload.event = event;
     payload.fields = std::move(fields);
@@ -517,9 +513,6 @@ void NoteSubagentCompletionForGoal(const GoalWiring& wiring) {
         payload["evidence"] = evidence.to_json();
         line.payload = std::move(payload);
         line.timestamp_ms = now_ms;
-        if (wiring.session_store != nullptr && wiring.session_store->active()) {
-            (void)wiring.session_store->AppendGoalEvent(line);
-        }
         coordinator.RecordEvidence(evidence);
         // 白名单顺手补(checkpoint 工具可引用它)。
         if (wiring.checkpoint_state != nullptr &&

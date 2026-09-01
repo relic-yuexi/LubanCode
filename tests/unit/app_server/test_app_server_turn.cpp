@@ -16,7 +16,6 @@
 
 #include "agent/agent.hpp"
 #include "agent/loop.hpp"
-#include "sessions/session_store.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "app_server/connection.hpp"
@@ -92,7 +91,6 @@ struct TestHarness {
 
     explicit TestHarness(const std::string& sessions_dir) {
         app_server::ServerOptions options;
-        options.sessions_dir = sessions_dir;
         options.workspaces_dir = sessions_dir + "/workspaces";  // P0-2:会话账根
         options.cwd = "/test/cwd";
         options.outbox_capacity = 256;
@@ -211,10 +209,10 @@ std::string ThreadIdOf(const nlohmann::json& response) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// thread 账(SessionStore 复用)
+// thread 账(Trajectory Journal)
 // ---------------------------------------------------------------------------
 
-TEST_CASE("thread/start -> thread/list -> thread/stop:会话账走 SessionStore") {
+TEST_CASE("thread/start -> thread/list -> thread/stop:会话账走 Trajectory Journal") {
     const std::string sessions_dir = MakeTempDir("lubancode_test_app_server_threads");
     TestHarness harness(sessions_dir);
 
@@ -398,7 +396,7 @@ TEST_CASE("整回合:thread/start -> turn/start -> 文本流 -> turn/completed")
     }
     CHECK(assistant_logged);
 
-    // 先正经停线程:SessionStore 还攥着 .jsonl 的追加柄,不停就删,Windows
+    // 先正经停线程:账本还攥着 main.jsonl 的追加柄,不停就删,Windows
     // 不许(POSIX 删开着的文件没事,本地 WSL 全绿是这么来的)。
     std::string stop_error;
     harness.server->HandleThreadStop(thread_id, stop_error);

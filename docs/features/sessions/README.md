@@ -6,7 +6,7 @@ LubanCode 把三件事分开：**history** 是当前模型要看的对话，**se
 
 ## 一场会话有什么
 
-交互会话启动后会在 `~/.lubancode/sessions/` 建 JSONL。第一行 meta 记录会话 id、cwd、模型等信息。后续事件逐行追加：
+交互会话的持久账是 workspace trajectory Journal（P0-2 起唯一真账；旧平铺 JSONL 已随 P0-6 退场，旧数据经 `migrate-storage` 迁入）：
 
 ```text
 meta
@@ -59,7 +59,7 @@ lubancode unarchive <id>       # 搬回 sessions 根
 /sessions archived             # 只读列表,看归档了哪些
 ```
 
-- 归档把 JSONL 字节原样搬进 `~/.lubancode/sessions/archive/`——id、标题、时间、消息一字不动。搬运用 rename（同盘原子），半路失败原文件仍在原地可用，不会两头各剩半份。
+- 归档按 session 状态图把场子转入 archived——id、标题、时间、消息一字不动。搬运用 rename（同盘原子），半路失败原文件仍在原地可用。
 - 归档后 `--continue`、`/sessions`、裸 `/resume` 一概略过它；`/sessions archived` 看得见，想续聊先 `lubancode unarchive <id>`。
 - 会话内 `/archive` 先刷盘、关句柄，再搬、退出——Windows 上 append 句柄开着就动文件会吃 sharing violation，这条由生命周期服务统一收口。后台子代理还在跑时拒绝。
 - 引用认完整 id、唯一 id 前缀或唯一命中的标题；重名便列出短 id 叫你点明，绝不猜一场。

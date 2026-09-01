@@ -90,7 +90,7 @@ CommandFlow HandleSlashTelemetry(SlashDispatchContext& ctx,
             // 未装配 = 激活判定非 Active(默认关闭/环境变量关/总闸/缺前置)。
             TermOut() << ctx.theme->stats
                       << "遥测未开启(features.telemetry 默认关;开启须与 "
-                         "features.trajectory 同开;也可 /telemetry enable session 只开本场)"
+                         "遥测需要轨迹账在场;也可 /telemetry enable session 只开本场)"
                       << ctx.theme->reset << "\n";
             return CommandFlow::Continue;
         }

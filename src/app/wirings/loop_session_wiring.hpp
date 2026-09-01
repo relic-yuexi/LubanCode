@@ -31,7 +31,6 @@
 #include "runtime/loop_scheduler.hpp"
 #include "runtime/loop_tick_driver.hpp"  // 单拍执行的调度状态机(问题 3 下沉)
 #include "runtime/session_runtime.hpp"
-#include "sessions/session_store.hpp"
 #include "tools/loop_control_tool.hpp"
 
 namespace lubancode::cli {
@@ -50,7 +49,6 @@ public:
         const lubancode::cli::Theme* theme = nullptr;
         bool interactive = false;  // 真控制台(pipe/one-shot 的 create 明拒在命令层)
         lubancode::config::Config* config = nullptr;  // features_loop 等装配档
-        lubancode::sessions::SessionStore* session_store = nullptr;
         lubancode::runtime::SessionRuntime* session_runtime = nullptr;  // ServerEvent 投影
         const std::optional<std::string>* home_lubancode = nullptr;     // 用户级 loop.md
         lubancode::runtime::IdleWakeCoordinator* idle_wakes = nullptr;  // due 唤醒多路总口

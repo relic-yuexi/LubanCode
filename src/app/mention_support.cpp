@@ -7,8 +7,8 @@
 #include "cli/i18n.hpp"
 #include "cli/image_input.hpp"  // MediaTypeForPath(图片提及走视觉附件路)
 #include "runtime/worktree.hpp"  // FindRepositoryRoot
-#include "sessions/session_store.hpp"  // NormalizePathForCompare
 #include "tools/path_utils.hpp"
+#include "tools/session_utils.hpp"  // NormalizePathForCompare(P0-6 自 sessions 迁来)
 
 namespace lubancode::app {
 
@@ -84,7 +84,7 @@ std::pair<std::string, std::string> MentionSupport::BuildLedger(const std::strin
     const std::filesystem::path cwd = std::filesystem::current_path();
     const auto root = lubancode::cli::FindRepositoryRoot(cwd);
     const std::filesystem::path base = root.value_or(cwd);
-    const std::string base_key = lubancode::sessions::NormalizePathForCompare(lubancode::tools::PathToUtf8(base));
+    const std::string base_key = lubancode::tools::NormalizePathForCompare(lubancode::tools::PathToUtf8(base));
     std::string ledger;
     for (const std::string& token : tokens) {
         if (lubancode::cli::MediaTypeForPath(token).has_value()) {
@@ -110,7 +110,7 @@ std::pair<std::string, std::string> MentionSupport::BuildLedger(const std::strin
         std::error_code ec;
         const std::filesystem::path canon = std::filesystem::weakly_canonical(resolved, ec);
         const std::string canon_key =
-            lubancode::sessions::NormalizePathForCompare(lubancode::tools::PathToUtf8(canon));
+            lubancode::tools::NormalizePathForCompare(lubancode::tools::PathToUtf8(canon));
         if (!canon_key.empty() && canon_key.rfind(base_key + "/", 0) != 0 && canon_key != base_key) {
             return {trf("mention.outside_root", token), {}};
         }

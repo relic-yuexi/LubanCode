@@ -25,7 +25,6 @@
 
 #include "agent/agent.hpp"
 #include "agent/loop.hpp"
-#include "sessions/session_store.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "config/config.hpp"
@@ -61,25 +60,8 @@ private:
     std::string path_;
 };
 
-// 一场真存档:Begin + 两条消息,给 resume 接管。
-std::string WriteSampleSession(const std::string& dir, const std::string& slug) {
-    sessions::SessionStore store(dir);
-    sessions::SessionMeta meta;
-    meta.wire = "anthropic";
-    meta.model = "old-model";
-    meta.cwd = "/tmp";
-    meta.started_at = sessions::NowTimestamp();
-    REQUIRE(store.Begin(meta, slug));
-    api::Message user;
-    user.role = api::Role::User;
-    user.content.push_back(api::TextBlock{"旧话"});
-    store.AppendMessage(user);
-    api::Message assistant;
-    assistant.role = api::Role::Assistant;
-    assistant.content.push_back(api::TextBlock{"旧答"});
-    store.AppendMessage(assistant);
-    return store.session_id();
-}
+// (P0-6:WriteSampleSession——旧档造场——已删;ResumeThread 的用例走
+// trajectory 新账(make_session 造封口场)。)
 
 class NullBackend : public api::Backend {
 public:

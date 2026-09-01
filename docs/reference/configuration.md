@@ -227,7 +227,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 
 项目级 `.lubancode/config.json` 不能自行把记忆从关改开。全局开过后，项目配置可以关闭，或收紧 `use`、`learn` 与预算——项目级只能降档，不能替用户升到 `auto`。陌生仓库便不能替用户开启聊天提取。
 
-Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正文放在 `~/.lubancode/projects/<项目key>/memory/`，分 `facts/` 与 `preferences/`；`index.md` 和 `.state/catalog.json` 都可从主题文件重建。记忆不写进会话 history，也不随 `/export` 导出。
+Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正文放在 workspace 记忆树（`<workspaces>/<key>/memory/`，P0-3 起统一），分 `facts/` 与 `preferences/`；`index.md` 和 `.state/catalog.json` 都可从主题文件重建。记忆不写进会话 history，也不随 `/export` 导出。
 
 交互会话可用 `/memory` 看状态。`/memory use on|off` 与 `/memory learn off|review|auto` 只改本场(只能降到全局授权以内)；`/memory review` 看待审候选，`accept`/`edit`/`reject` 处置；`/memory remember fact|preference 标题 [:: 正文]` 可显式排一条；`list`、`forget <id>`、`rebuild`、`stale`、`verify <id>`、`why [id]` 分别用来查看、归档、重建、查陈旧、续命与对账。
 

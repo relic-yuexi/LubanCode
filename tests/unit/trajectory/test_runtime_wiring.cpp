@@ -399,27 +399,16 @@ TEST_CASE("SpawnSubagent:嵌套派工的 parent_run_id 指向父任务自己的 
     CHECK(grandchild_parent != main_run_id);
 }
 
-TEST_CASE("SessionRuntime 轨迹档:恒开、旧档不建、轮末补抄停用") {
-    // P0-2(Trajectory 升为唯一 Session):feature/env 开关已删,ledger 恒在
-    // SessionRuntime 手里,EnsureBegun/PersistNew 全走 Disabled/Nothing
-    //(轮末补抄这条路停用,§15.3)。
+TEST_CASE("SessionRuntime 轨迹档:恒开,旧档建档/轮末补抄路已删净") {
+    // P0-2(Trajectory 升为唯一 Session):feature/env 开关已删,ledger 恒在;
+    // P0-6:EnsureBegun/PersistNew/store 本体删除——旧路不复存在,这里只
+    // 验轨迹账恒开。
     const auto root = FreshDir("lubancode-traj-p2-runtime");
     runtime::SessionRuntime::Options options;
     options.trajectory_workspace_identity = workspace::MakeFallbackIdentity(root / "repo");
     std::error_code ec;
     std::filesystem::create_directories(root / "repo", ec);
     runtime::SessionRuntime session(options);
-    if (session.trajectory() != nullptr) {
-        CHECK(std::filesystem::exists(session.trajectory()->session_dir() / "main.jsonl"));
-    }
-    CHECK(session.EnsureBegun("first", "model", "/tmp") == runtime::SessionBeginResult::Disabled);
-    std::vector<api::Message> history;
-    history.push_back(UserMessage("wen yiju"));
-    api::Message answer;
-    answer.role = api::Role::Assistant;
-    answer.content.push_back(api::TextBlock{"da yiju"});
-    history.push_back(answer);
-    CHECK(session.PersistNew(history, "model", "/tmp") == runtime::SessionPersistResult::Nothing);
-    CHECK(session.persisted_count() == 0);
-    CHECK_FALSE(session.store().active());
+    REQUIRE(session.trajectory() != nullptr);
+    CHECK(std::filesystem::exists(session.trajectory()->session_dir() / "main.jsonl"));
 }

@@ -428,7 +428,7 @@ void HandleUsageCommand(const std::string& args, const UsageCommandContext& cont
             {"schema", "lubancode.usage.report"},
             {"schema_version", 1},
             {"source", "memory_fallback"},
-            {"note", "features.trajectory off: no journal, memory ledger only"}};
+            {"note", "journal unavailable: memory ledger only"}};
         if (context.memory_ledger != nullptr) {
             nlohmann::json roles = nlohmann::json::array();
             for (const auto& [role, entry] : context.memory_ledger->by_role()) {
