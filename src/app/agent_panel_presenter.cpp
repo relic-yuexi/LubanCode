@@ -25,7 +25,9 @@ using lubancode::cli::trf;
 namespace {
 
 // 面板短因文案(规格"现场三"):失败须分得出接口错/工具错/空结论——导航
-// 坞只放短因,完整错误进 transcript(Enter 切进该会话再看)。
+// 坞只放短因,完整错误进 transcript(Enter 切进该会话再看)。P1-1(turn
+// 预算单 §8.3)补 TurnLimitExhausted——任务级 turn 账的短因不再掉进"未注明
+// 原因"。
 std::string OutcomeReasonText(lubancode::tools::TaskOutcomeReason reason) {
     using R = lubancode::tools::TaskOutcomeReason;
     switch (reason) {
@@ -33,6 +35,8 @@ std::string OutcomeReasonText(lubancode::tools::TaskOutcomeReason reason) {
             return tr("agent_status.reason_api_error");
         case R::StepLimitExhausted:
             return tr("agent_status.reason_step_limit");
+        case R::TurnLimitExhausted:
+            return tr("agent_status.reason_turn_limit");
         case R::TimeBudgetExhausted:
             return tr("agent_status.reason_time_budget");
         case R::TokenBudgetExhausted:
@@ -99,7 +103,11 @@ std::string AgentActivityWord(const lubancode::tools::AgentTaskActivity& activit
 // 假象(单子 §13.1"等子任务态"落点);现在与 Running 同一支路处理,只是
 // 不发活跃短语(没有请求在飞),换一句专属短话。一处写死,两处口径永远
 // 一致。
+// P1-1(turn 预算单 §8.3):预算后缀换 task turn 账——设了任务总 turn 的
+// 任务带"turn N/M"(无上限带"turn N/不限"),消费数认 attempted;legacy
+// 步数只在没设任务总 turn 的任务上投影,且明标"每输入轮;待迁移"。
 std::string AgentStateWord(lubancode::tools::AgentTaskState state, int steps_used, int step_limit,
+                           int turn_limit, int turns_attempted, int turns_completed,
                            lubancode::tools::TaskOutcomeReason outcome_reason,
                            const lubancode::tools::AgentTaskActivity* activity,
                            std::chrono::steady_clock::time_point now, bool stop_requested = false,
@@ -119,10 +127,14 @@ std::string AgentStateWord(lubancode::tools::AgentTaskState state, int steps_use
         if (word.empty()) {
             word = tr("agent_status.state_running");
         }
-        // 步数常驻可见(真机实测 P2-1:Dock 要"已用步数、上限、累计 token、
-        // 最后一次工具"四样都看得到):有上限带 N/M,没上限跑过步数也带 N。
-        if (step_limit > 0) {
-            word += trf("agent_status.budget_suffix", steps_used, step_limit);
+        // 预算常驻可见(真机实测 P2-1 的四样之一;turn 预算单 §8.3 换账):
+        // 任务 turn 账优先,legacy 步数退居其后。
+        if (turn_limit > 0) {
+            word += trf("agent_status.turn_budget_suffix", turns_attempted, turn_limit);
+        } else if (turns_attempted > 0) {
+            word += trf("agent_status.turn_suffix", turns_attempted);
+        } else if (step_limit > 0) {
+            word += trf("agent_status.legacy_budget_suffix", steps_used, step_limit);
         } else if (steps_used > 0) {
             word += trf("agent_status.steps_suffix", steps_used);
         }
@@ -140,8 +152,11 @@ std::string AgentStateWord(lubancode::tools::AgentTaskState state, int steps_use
         case S::Cancelled:
             return trf("agent_status.state_stopped_reason", tr("agent_status.reason_user_stop"));
         case S::BudgetExhausted:
-            // 断的是时间/token 线时步数上限多半是 0,不画"N/0 步"的假账——
-            // 短因写明线别,步数与预算明细在详情行看(P2-6)。
+            // 断的是时间/token 线时两本预算多半都是 0,不画"N/0"的假账——
+            // 短因写明线别,预算明细在详情行看(P2-6)。turn 账优先(§8.3)。
+            if (turn_limit > 0) {
+                return trf("agent_status.state_exhausted_turn", turns_attempted, turn_limit, turns_completed);
+            }
             if (step_limit > 0) {
                 return trf("agent_status.state_exhausted", steps_used, step_limit);
             }
@@ -212,7 +227,8 @@ std::vector<lubancode::cli::AgentPanelEntry> AgentPanelPresenter::Entries(
                                                  ? agent_tool->ledger().AliveChildCount(task.id)
                                                  : 0;
         const std::string state_word =
-            AgentStateWord(task.state, task.steps_used, task.step_limit, task.outcome_reason,
+            AgentStateWord(task.state, task.steps_used, task.step_limit, task.turn_limit, task.turns_attempted,
+                           task.turns_completed, task.outcome_reason,
                            task.state == lubancode::tools::AgentTaskState::Running ? &task.activity : nullptr, now,
                            task.stop_requested, waiting_children);
         entry.state = trf("agent_status.summary", state_word, task.tool_call_count, token_text,
@@ -328,6 +344,7 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
             "  " + theme.stats +
             trf("agent_status.summary",
                 AgentStateWord(snapshot->state, snapshot->steps_used, snapshot->step_limit,
+                               snapshot->turn_limit, snapshot->turns_attempted, snapshot->turns_completed,
                                snapshot->outcome.reason,
                                running ? &snapshot->activity : nullptr, now, snapshot->stop_requested,
                                waiting_children),
@@ -338,12 +355,18 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
         }
         lines.push_back(stats_line + theme.reset);
         // 预算明细行(真机实测 P2-6:Dock 要能看出"为什么还在跑"):派出时
-        // 设了哪几根线、各用到哪了——步数/时间/token 三样,只列设了的。
+        // 设了哪几根线、各用到哪了——turn/步数/时间/token,只列设了的。
+        // P1-1(turn 预算单 §8.3):turn 账先行,completed 另列;legacy 步数
+        // 只在没设任务总 turn 时投影。
         {
             std::vector<std::string> parts;
-            if (snapshot->step_limit > 0) {
+            if (snapshot->turn_limit > 0) {
+                parts.push_back("turn " + std::to_string(snapshot->turns_attempted) + "/" +
+                                std::to_string(snapshot->turn_limit) + "(完整返回 " +
+                                std::to_string(snapshot->turns_completed) + ")");
+            } else if (snapshot->step_limit > 0) {
                 parts.push_back(std::to_string(snapshot->steps_used) + "/" + std::to_string(snapshot->step_limit) +
-                                " 步");
+                                " 步(每输入轮;待迁移)");
             }
             if (snapshot->wall_limit_secs > 0) {
                 parts.push_back(lubancode::cli::FormatSeconds(seconds) + "/" +

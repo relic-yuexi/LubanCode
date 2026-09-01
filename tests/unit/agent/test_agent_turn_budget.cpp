@@ -66,6 +66,37 @@ using namespace lubancode;
 
 namespace {
 
+// 轨迹边界的记录仪替身(P1-1,§11.1):只记 sent 两口的调用序列,验证
+// loop 在 permit 提交后走带 turn 账的口、主会话(没装门)走旧口。
+class FakeBoundaryRecorder : public agent::LoopBoundaryRecorder {
+public:
+    struct Sent {
+        std::string request_id;
+        int task_turn_index = 0;   // 0 = 走的旧口(没有 turn 账)
+        int turn_limit = 0;
+        int input_round_index = 0;
+    };
+    std::vector<Sent> sent;
+    int prepared_count = 0;
+
+    std::string OnRequestPrepared(const api::Request&, const agent::RequestPreparedContext&) override {
+        ++prepared_count;
+        return "req-" + std::to_string(prepared_count);
+    }
+    void OnRequestSent(const std::string& request_id) override { sent.push_back({request_id, 0, 0, 0}); }
+    void OnRequestSentWithTurn(const std::string& request_id, int task_turn_index, int turn_limit,
+                               int input_round_index) override {
+        sent.push_back({request_id, task_turn_index, turn_limit, input_round_index});
+    }
+    void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool) override {}
+    bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
+                           const std::string&) override {
+        return true;
+    }
+    void OnOutputFailed(const std::string&, const std::string&) override {}
+    void OnOutputCancelled(const std::string&) override {}
+};
+
 // 按脚本吐事件的假后端(与 test_turn_harness.cpp 同款):每调一次
 // send_stream 取下一组脚本,顺带记请求,方便对账。
 class FakeBackend : public api::Backend {
@@ -708,4 +739,98 @@ TEST_CASE("AgentTool:不设任务总 turn(SetDefaultMaxTurns 缺省 0)时行为�
     REQUIRE(snapshots.size() == 1);
     CHECK(snapshots.front().turn_limit == 0);  // 0 = 不设任务总帽,不拦
     CHECK(snapshots.front().turns_attempted == 3);
+}
+
+// ---------------------------------------------------------------------------
+// P1-1(§11.1):轨迹 sent 边界的任务 turn 账。装了门的会话走
+// OnRequestSentWithTurn(index 从 commit 来,limit/input round 随行);没装门
+// 的会话走旧口 OnRequestSent,一字不差。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("轨迹边界:装了 turn 门的请求走带账 sent 口,index 逐枚对上 commit") {
+    FakeBackend backend;
+    backend.scripts = {
+        TextScript("一。"),
+        TextScript("二。"),
+    };
+    tools::ToolRegistry registry;
+    agent::AgentProfile profile;
+    profile.request.model = "test-model";
+    profile.system_prompt = "system";
+    agent::Agent loop(backend, registry, std::move(profile));
+
+    agent::TurnBudgetAccount account(2);
+    agent::ModelTurnBudgetGate gate = agent::MakeLocalTurnBudgetGate(&account);
+    agent::TurnWiring wiring;
+    wiring.turn_budget = &gate;
+    FakeBoundaryRecorder recorder;
+    wiring.boundary_recorder = &recorder;
+
+    REQUIRE(loop.Run(UserText("第一步"), wiring).has_value());
+    REQUIRE(loop.Run(UserText("第二步,恰好用满"), wiring).has_value());
+    REQUIRE(loop.Run(UserText("封门后的第三步"), wiring)->hit_turn_limit);
+
+    REQUIRE(recorder.sent.size() == 2);  // 第三枚被拒,连 prepared 都没有
+    CHECK(recorder.sent[0].task_turn_index == 1);
+    CHECK(recorder.sent[0].turn_limit == 2);
+    CHECK(recorder.sent[0].input_round_index == 0);
+    CHECK(recorder.sent[1].task_turn_index == 2);
+    CHECK(recorder.sent[1].turn_limit == 2);
+}
+
+TEST_CASE("轨迹边界:没装门的会话走旧口 OnRequestSent,一字不差") {
+    FakeBackend backend;
+    backend.scripts = {TextScript("结论。")};
+    tools::ToolRegistry registry;
+    agent::AgentProfile profile;
+    profile.request.model = "test-model";
+    profile.system_prompt = "system";
+    agent::Agent loop(backend, registry, std::move(profile));
+
+    agent::TurnWiring wiring;
+    FakeBoundaryRecorder recorder;
+    wiring.boundary_recorder = &recorder;
+
+    REQUIRE(loop.Run(UserText("问一句"), wiring).has_value());
+    REQUIRE(recorder.sent.size() == 1);
+    CHECK(recorder.sent[0].task_turn_index == 0);  // 旧口:没有 turn 账
+}
+
+TEST_CASE("轨迹边界:DriveTurn 的续投轮把 input_round_index 递进") {
+    FakeBackend backend;
+    backend.scripts = {
+        TextScript("一。"),
+        TextScript("二。"),
+    };
+    tools::ToolRegistry registry;
+    agent::AgentProfile profile;
+    profile.request.model = "test-model";
+    profile.system_prompt = "system";
+    agent::Agent loop(backend, registry, std::move(profile));
+
+    agent::TurnBudgetAccount account(0);  // 不限:只为给 sent 带账
+    agent::ModelTurnBudgetGate gate = agent::MakeLocalTurnBudgetGate(&account);
+    agent::TurnWiring wiring;
+    wiring.turn_budget = &gate;
+    FakeBoundaryRecorder recorder;
+    wiring.boundary_recorder = &recorder;
+
+    int continuations = 0;
+    agent::DriveOptions options;
+    options.continuation = [&continuations]() -> std::optional<agent::ContinuationBatch> {
+        if (continuations >= 1) {
+            return std::nullopt;
+        }
+        ++continuations;
+        agent::ContinuationBatch batch;
+        batch.input = "mailbox 增量";
+        return batch;
+    };
+    const agent::DriveReport report = agent::DriveTurn(loop, wiring, UserText("干活"), options);
+    CHECK(report.ok);
+
+    // 初始轮 input_round_index=0,续投轮=1——两枚 sent 各带各的坐标。
+    REQUIRE(recorder.sent.size() == 2);
+    CHECK(recorder.sent[0].input_round_index == 0);
+    CHECK(recorder.sent[1].input_round_index == 1);
 }

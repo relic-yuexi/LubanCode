@@ -126,7 +126,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `normal_model` / `cheap_model` / `lao_model` | 字符串,可留空 | 空串 | 三档模型角色的简写，只换模型名并沿用当前 provider；未配置的 cheap/lao 回落 normal。 |
 | `model_roles` | JSON object | 空 object | 三档模型角色的完整路由，可分别指定 provider、model、effort、context window 与输出上限。见下节。 |
 | `max_context_chars` | 正整数 | `600000` | 旧的按字节硬切安全网,跟 `context_window` 不是一回事,两条防线互不依赖;真触发时终端打有损裁剪告警。 |
-| `max_steps_per_turn` | 非负整数 | `0`(无上限) | agent 主循环一个 turn 内的步数上限:一步 = 一次模型请求,一步可含多枚工具调用。不配或配 `0` = 不设上限,防跑飞靠 ESC/Ctrl+C;配正整数才是硬上限,超过就按预算耗尽收场。负数或非法值静默忽略。旧名 `max_turns` 仍可读入(兼容期,读到会打弃用提示);两者同现且值不同会明报冲突并采用新名。 |
+| `max_steps_per_turn` | 非负整数 | `0`(无上限) | **主回合局部保险**(turn 预算单 §4.4 的正名):主会话一次用户输入内,agent 主循环最多走几次模型请求——一步 = 一次模型请求,一步可含多枚工具调用。它不是子代理的任务总预算;子代理的任务总量走 `subagent.default_max_turns` 与 Agent YAML 的 `runtime.max_turns`(见下节"两道预算闸")。不配或配 `0` = 不设上限,防跑飞靠 ESC/Ctrl+C;配正整数才是硬上限。负数或非法值静默忽略。旧名 `max_turns` 仍可读入(兼容期,读到会打弃用提示);两者同现且值不同会明报冲突并采用新名。 |
 | `system_prompt_file` | 字符串,UTF-8 文本路径 | 无 | 人格段文件路径;没配就用内置人格,`--system-prompt` 命令行参数会压过它。 |
 | `tool_search_threshold` | 非负整数 | `20` | 注册工具总数超过此数才启用延迟挂载(工具搜索);`0` 永不延迟。 |
 | `tool_search_token_floor` | 非负整数 | `1500` | 延迟挂载的 token 预算门:延迟工具全量常驻的声明 token 本金(名字+描述+schema)低于此值时,总数过了阈值也不启用——本金太小,启用反比全量常驻贵(依据 P0 baseline 实测,见 [工具参考·延迟挂载](tools.md#延迟挂载与工具搜索))。`0` 关掉这道门,只看枚数。 |
@@ -147,6 +147,16 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `stream_idle_timeout_secs` | 正整数(秒) | `60` | 流式(SSE)读空闲超时——连续这么多秒没收到字节就判定假死。 |
 | `request_timeout_secs` | 正整数(秒) | `30` | 非流式请求(如拉模型列表)的整体超时。 |
 | `request_hard_timeout_secs` | 非负整数(秒) | `300` | 每枚流式请求的硬墙钟,`0` = 不设。connect/idle 两道闸都不触发的挂死绝境(典型:本机代理/TUN 截胡回环连接)由它兜底掐断,收场翻成"请求硬超时"。长任务撞上就显式调大。与 `subagent.wall_clock_timeout_secs` 分工:那管一只任务整轮,这管一枚请求。 |
+
+### 两道预算闸:主回合局部保险与子代理任务总账
+
+预算分两层,字段分家、账本分家、文案分家(turn 预算单 §一):
+
+- **主回合局部保险**——顶层 `max_steps_per_turn`:只管主会话一次用户输入内的模型请求数。这是本地保险,不是任务预算;后续若改名,候选名 `max_model_calls_per_input`,另立兼容单。
+- **子代理任务总账**——`subagent.default_max_turns`(非负整数,默认未设 = `0` 不限):一只子代理任务从注册到终态,最多准入几次逻辑模型请求;父代理补话、孩子回信、Stop 钩子续跑共一本账,不会每轮重领。自定义 Agent 在 YAML `runtime.max_turns` 里自带预算时压过它;宿主 typed override 只能收窄。解析链:override > Agent 定义 > `subagent.default_max_turns` > 0(不限)。
+- `subagent.max_steps_per_turn`(旧名 `subagent.max_turns`)是 legacy 每输入轮步数,兼容窗内照旧生效,新配置别再写。
+
+`/doctor agents` 列明两层各自的生效值与来源。
 
 `base_url`/`api_key`/`model` 没有内置默认值——lubancode 不绑死哪一家模型服务。交互模式缺连接时会打开两项开场页：可直接添加 Provider，也可暂时跳过。跳过后 `/provider`、`/help` 等命令照常可用；发送普通消息时只提示先配置，不会拿空地址发请求。单发模式/管道模式仍直接报错，提示缺了哪些字段。
 

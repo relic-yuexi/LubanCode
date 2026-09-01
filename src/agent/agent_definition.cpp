@@ -152,9 +152,12 @@ bool StringListField(const YAML::Node& map, const char* key, const std::string& 
 // 省了不算错(into 保持 nullopt = 继承)。
 constexpr long long kIntFieldMax = 2147483647;                    // int 字段上限(runtime_profile 的 int 键)
 constexpr long long kSizeFieldMax = 1099511627776LL;              // size_t 字段上限(1 TiB 级,写超这数必是笔误)
+// error_code 两枚非空时填进诊断的稳定码(turn 预算单 §10.1:agent.turn_
+// budget_type/range;其余键走解析层老账,码留空)。
 bool IntField(const YAML::Node& map, const char* key, const std::string& prefix, long long min_value,
               long long max_value, std::optional<unsigned long long>& into,
-              std::vector<AgentDefinitionIssue>& issues) {
+              std::vector<AgentDefinitionIssue>& issues, const char* type_code = nullptr,
+              const char* range_code = nullptr) {
     into.reset();  // 省了/出错都先清干净:into 复用时绝不带上一键的旧值
     const YAML::Node node = map[key];
     if (!node || node.IsNull()) {
@@ -177,12 +180,13 @@ bool IntField(const YAML::Node& map, const char* key, const std::string& prefix,
     if (!ok || static_cast<long long>(value) < min_value) {
         issues.push_back(AgentDefinitionIssue{
             prefix + key, "必须是整数(且不小于 " + std::to_string(min_value) + ")", mark.line + 1,
-            mark.column + 1, false});
+            mark.column + 1, false, type_code != nullptr ? type_code : std::string()});
         return false;
     }
     if (static_cast<long long>(value) > max_value) {
         issues.push_back(AgentDefinitionIssue{
-            prefix + key, "整数超上限 " + std::to_string(max_value), mark.line + 1, mark.column + 1, false});
+            prefix + key, "整数超上限 " + std::to_string(max_value), mark.line + 1, mark.column + 1, false,
+            range_code != nullptr ? range_code : std::string()});
         return false;
     }
     into = value;
@@ -412,8 +416,10 @@ AgentDefinitionParseResult ParseAgentDefinitionYaml(const std::string& yaml_text
             def.max_steps_per_turn = static_cast<int>(*value);
         }
         // 任务总 turn(turn 预算单 §4.1):非负整数,沿用现有整数硬帽
-        //(§3.5:首版不另拍新数)。
-        if (!IntField(runtime, "max_turns", "runtime.", 0, kIntFieldMax, value, issues)) {
+        //(§3.5:首版不另拍新数)。类型/越界诊断带稳定码
+        // agent.turn_budget_type / agent.turn_budget_range(§10.1)。
+        if (!IntField(runtime, "max_turns", "runtime.", 0, kIntFieldMax, value, issues,
+                      "agent.turn_budget_type", "agent.turn_budget_range")) {
             has_error = true;
         } else if (value.has_value()) {
             def.max_turns = static_cast<int>(*value);
@@ -439,6 +445,32 @@ AgentDefinitionParseResult ParseAgentDefinitionYaml(const std::string& yaml_text
         }
         if (!EnumField(runtime, "isolation", "runtime.", {"none", "worktree"}, def.isolation, issues)) {
             has_error = true;
+        }
+        // ---- 预算字段新旧合同(turn 预算单 §5.1,P1-0 兼容批)----------------
+        // 新旧同现:定义直接不可用——两者作用域不同(前者任务总 turn,后者
+        // 兼容窗里仍是"每个 input round"的旧义),静默选边会藏错,不采用
+        // "新字段优先"。稳定码 agent.turn_budget_conflict。
+        if (def.max_turns.has_value() && def.max_steps_per_turn.has_value()) {
+            const YAML::Node node = runtime["max_turns"];
+            const YAML::Mark mark = node ? node.Mark() : YAML::Mark();
+            issues.push_back(AgentDefinitionIssue{
+                "runtime.max_turns",
+                "runtime.max_turns 与 runtime.max_steps_per_turn 不能同现:前者限制整项任务"
+                "(从接到任务到交回终态最多几次逻辑模型请求),后者是待移除的单轮旧限制"
+                "(每个 input round 各自上限);请删掉 max_steps_per_turn,只留 max_turns",
+                mark.line + 1, mark.column + 1, false, "agent.turn_budget_conflict"});
+            has_error = true;
+        } else if (def.max_steps_per_turn.has_value()) {
+            // 旧字段单独出现:照旧按 legacy 语义生效(不偷换含义),给弃用
+            // 警告(§5.2 阶段 A);warning 不挡加载,doctor/inspect 会摆出来。
+            const YAML::Node node = runtime["max_steps_per_turn"];
+            const YAML::Mark mark = node ? node.Mark() : YAML::Mark();
+            issues.push_back(AgentDefinitionIssue{
+                "runtime.max_steps_per_turn",
+                "runtime.max_steps_per_turn 已弃用:它只限制每个 input round 的模型请求数,"
+                "不是任务总预算;续投、孩子回流、Stop 钩子续跑都会各自重领这份额度。"
+                "请改写 runtime.max_turns(任务总 turn,一道闸管到底)",
+                mark.line + 1, mark.column + 1, /*warning=*/true, "agent.legacy_step_budget"});
         }
     }
 

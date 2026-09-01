@@ -55,7 +55,7 @@ requires:
     - mcp__browser__browser_network
 
 runtime:
-  max_steps_per_turn: 32
+  max_turns: 32
   execution_mode: auto
   isolation: none
 

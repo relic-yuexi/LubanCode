@@ -194,9 +194,9 @@
 
 `prompt` 必填，必须自包含；子代理看不见主对话。
 
-步数预算不在工具入参里，模型定不了——要限步走配置 `subagent.max_steps_per_turn`（未设则继承 `max_steps_per_turn`，默认 `0` = 不限步）。这道口子早先是敞开的，实测模型见字段就填，一趟深挖的活被自己掐到十来步就 `budget_exhausted` 收场，等于把配置里"不限步"的默认悄悄夺了。默认不限步是有意为之：防跑飞靠 ESC/Ctrl+C，不靠模型自己拍一个数。
+预算不在工具入参里，模型定不了——两道闸都不给模型旋钮。**任务总 turn** 走配置 `subagent.default_max_turns` 或自定义 Agent YAML 的 `runtime.max_turns`：一道闸管到任务终态，续投、孩子回流、Stop 钩子续跑共一本账。**每输入轮步数**走 `subagent.max_steps_per_turn`（未设则继承 `max_steps_per_turn`，默认 `0` = 不限步；legacy，待迁移）。这两道口子早先是敞开的，实测模型见字段就填，一趟深挖的活被自己掐到十来步就 `budget_exhausted` 收场，等于把配置里"不限步"的默认悄悄夺了。默认不限是有意为之：防跑飞靠 ESC/Ctrl+C，不靠模型自己拍一个数。
 
-解析层仍收 `max_steps_per_turn`（旧名 `max_turns` 兼容，两者同现取新名）：手写 JSON、老脚本、测试照旧能用，`0` 表示不设上限，负数拒绝。
+解析层仍收 `max_steps_per_turn`（旧名 `max_turns` 兼容，两者同现取新名）：手写 JSON、老脚本、测试照旧能用，`0` 表示不设上限，负数拒绝。两枚键都是 legacy 每输入轮语义，给了会随结果带回一行 `[弃用提示]`——任务总量预算改走 Agent YAML `runtime.max_turns` 或宿主 typed 派工（旧名 `max_turns` 在明确破坏版本前不会改成任务总 turn 的意思）。
 
 子代理有独立历史、独立工具表与同一模型后端。其流式碎念不回主屏，只显示子工具状态，末尾把结论交回。主 Esc/Ctrl+C 会透传取消；pre/post hooks 与工具确认照常生效。
 

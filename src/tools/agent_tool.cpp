@@ -27,6 +27,7 @@
 #include "cli/i18n.hpp"  // trf:墙钟/预算文案(参数校验的错误文案发给模型看,不走 i18n)
 #include "cli/line_editor.hpp"  // DisplayWidthUtf8:标题宽度(纯逻辑编辑核的零流符号)
 #include "config/command_permission.hpp"  // 后台任务命令的 permissions 前缀裁定(问题 7 拆出)
+#include "platform/log_sink.hpp"  // §5.3 旧预算键的弃用日志
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:inbox 投递文本的编码关口
 #include "runtime/turn_runtime.hpp"    // MapPreToolDecision:PreToolUse 归并映射与主路径同一颗
@@ -940,6 +941,7 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
     // AgentProfileResolver):入参显式 > 自定义 Agent YAML 的 runtime 字段
     //(P2-1:max_steps_per_turn 真能落到派出预算)> 配置默认。
     SubagentBudget budget;
+    std::string budget_deprecation_note;  // §5.3:旧预算键给了就随结果带一行提示
     budget.max_steps_per_turn = default_max_steps_per_turn_;
     // 任务总 turn 的宿主默认(turn 预算单 §4.2):配置 subagent.default_max_
     // turns(0 = 不限)。自定义 Agent 在下面 Resolver 里按
@@ -966,6 +968,18 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
                           budget_key + " 不能是负数(0 = 不设上限)。示例:max_steps_per_turn=10。");
         }
         budget.max_steps_per_turn = value;
+        // 弃用提示(turn 预算单 §5.3,P1-0):两枚键都是 legacy per-run step
+        // 语义。max_turns 历史上是 max_steps_per_turn 的旧别名,不能无版本
+        // 直接改成任务总 turn——先报弃用,要求改走 typed API(宿主 override)
+        // 或 Agent YAML 的 runtime.max_turns;到明确破坏版本再改义。提示随
+        // 结果带回(手写脚本作者看得见),并落一行日志。
+        budget_deprecation_note =
+            "[弃用提示] JSON 入参 " + budget_key + " 是待移除的单轮旧限制(每个 input round 各自上限,"
+            "续投/钩子续跑会重领额度);它不是任务总 turn 预算。要限任务总量请走 Agent YAML 的"
+            " runtime.max_turns 或宿主 typed 派工,别再写这枚键。";
+        platform::LogSink::Instance().Warn(
+            "agent_tool", "[弃用] JSON 入参 " + budget_key +
+                              " 是 legacy per-run step 限制;任务总预算改走 runtime.max_turns / typed API");
     }
     // 时间硬线(max_time_secs,秒)。
     if (const auto it = input.find("max_time_secs"); it != input.end() && !it->is_null()) {
@@ -1008,6 +1022,7 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
         budget.soft_percent = value;
     }
     request.budget = budget;
+    request.budget_deprecation_note = std::move(budget_deprecation_note);
 
     // ---- 阶段 3:统一解析(自定义 Agent)---------------------------------------
     // 父上下文 + 定义 -> ResolvedAgentProfile 的合并只许发生在
@@ -1219,6 +1234,11 @@ Tool::Result AgentTool::ExecuteForeground(const DispatchRequest& request, ToolRe
     // x 停掉(task->cancel)与父轮 ESC 打断(hooks.cancel)都算取消;嵌套路
     // 没有父轮 ESC,只看自己的取消链。
     result.AppendText(TaskLedger::UndeliveredInboxNote(task));
+    // §5.3 弃用提示:手写 JSON 给了旧预算键,随结果带回(空串 = 没用旧键,
+    // AppendText 对空串零输出)。
+    if (!request.budget_deprecation_note.empty()) {
+        result.AppendText(request.budget_deprecation_note);
+    }
     coordinator_->ledger().FinalizeFromToolResult(
         task, result.content,
         task->cancel.load(std::memory_order_acquire) ||
@@ -1461,9 +1481,13 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
             coordinator_->ledger().DeliverChildCompletion(task);
         }));
 
-    return {"后台子代理 #" + std::to_string(id) + " (" + agent_type +
-                ") 已启动。主会话可以继续;完成结果会在后续回合送达。",
-            false};
+    // §5.3 弃用提示:手写 JSON 给了旧预算键,随启动回执带回(空 = 没用)。
+    std::string acceptance = "后台子代理 #" + std::to_string(id) + " (" + agent_type +
+                             ") 已启动。主会话可以继续;完成结果会在后续回合送达。";
+    if (!request.budget_deprecation_note.empty()) {
+        acceptance += "\n" + request.budget_deprecation_note;
+    }
+    return {acceptance, false};
 }
 
 Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_registry, const std::string& prompt,
@@ -2364,6 +2388,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 start.fields["task_spec_hash"] = hook_spec_hash;
             }
             start.fields["execution_mode"] = detached != nullptr ? "background" : "foreground";
+            // 任务级 turn 预算(turn 预算单 §11.2):Start 只报上限——账还没开
+            // 跑,attempted/completed 归 Stop。字段只读,hook 不能回写预算。
+            start.fields["turn_limit"] = task != nullptr ? task->snapshot.turn_limit : 0;
             sub_hook_dispatcher->EmitWith(lubancode::hooks::HookEvent::SubagentStart, start, sub_context);
         }
         sub_hook_dispatcher->UpdateContext(std::move(sub_context));
@@ -2395,6 +2422,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 start.fields["task_spec_hash"] = hook_spec_hash;
             }
             start.fields["execution_mode"] = "background";
+            // 任务级 turn 预算(§11.2,与前台同款):Start 只报上限。
+            start.fields["turn_limit"] = task != nullptr ? task->snapshot.turn_limit : 0;
             background_hooks->Emit(lubancode::hooks::HookEvent::SubagentStart, start);
         }
     }
@@ -2610,8 +2639,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         }
         if (stop_hooks_on_foreground) {
             const lubancode::hooks::HookContext sub_context = sub_hook_dispatcher->context();
-            stop_options.emit = [sub_hook_dispatcher, sub_context](bool stop_hook_active,
-                                                                   const std::string& last_text) {
+            stop_options.emit = [this, task, sub_hook_dispatcher, sub_context](bool stop_hook_active,
+                                                                               const std::string& last_text) {
                 lubancode::hooks::HookPayload stop;
                 stop.event = lubancode::hooks::HookEvent::SubagentStop;
                 stop.fields["agent_id"] = sub_context.agent_id.value_or(std::string());
@@ -2619,10 +2648,22 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 stop.fields["agent_transcript_path"] = std::string();  // 子代理历史不落独立文件,如实留空
                 stop.fields["last_assistant_message"] = last_text;
                 stop.fields["stop_hook_active"] = stop_hook_active;
+                // 任务级 turn 账(§11.2):Stop 时从唯一真账现读——attempted 是
+                // 消费数,completed 另列;额度尽时给 budget_exhausted_reason。
+                // 只读投影,hook 不能回写。
+                if (task != nullptr) {
+                    const agent::ModelTurnBudgetSnapshot turns = ledger().ModelTurnSnapshot(task);
+                    stop.fields["turn_limit"] = turns.limit;
+                    stop.fields["turns_attempted"] = turns.attempted;
+                    stop.fields["turns_completed"] = turns.completed;
+                    if (turns.Exhausted()) {
+                        stop.fields["budget_exhausted_reason"] = "turn_limit";
+                    }
+                }
                 return sub_hook_dispatcher->EmitWith(lubancode::hooks::HookEvent::SubagentStop, stop, sub_context);
             };
         } else {
-            stop_options.emit = [background_hooks](bool stop_hook_active, const std::string& last_text) {
+            stop_options.emit = [this, task, background_hooks](bool stop_hook_active, const std::string& last_text) {
                 lubancode::hooks::HookPayload stop;
                 stop.event = lubancode::hooks::HookEvent::SubagentStop;
                 stop.fields["agent_id"] = background_hooks->context().agent_id.value_or(std::string());
@@ -2630,6 +2671,15 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 stop.fields["agent_transcript_path"] = std::string();
                 stop.fields["last_assistant_message"] = last_text;
                 stop.fields["stop_hook_active"] = stop_hook_active;
+                if (task != nullptr) {
+                    const agent::ModelTurnBudgetSnapshot turns = ledger().ModelTurnSnapshot(task);
+                    stop.fields["turn_limit"] = turns.limit;
+                    stop.fields["turns_attempted"] = turns.attempted;
+                    stop.fields["turns_completed"] = turns.completed;
+                    if (turns.Exhausted()) {
+                        stop.fields["budget_exhausted_reason"] = "turn_limit";
+                    }
+                }
                 return background_hooks->Emit(lubancode::hooks::HookEvent::SubagentStop, stop);
             };
         }

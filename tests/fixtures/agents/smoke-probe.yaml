@@ -8,7 +8,7 @@ tools:
     - read_file
     - search
 runtime:
-  max_steps_per_turn: 4
+  max_turns: 4
   max_output_tokens: 1024
 prompt:
   project_instructions: omit

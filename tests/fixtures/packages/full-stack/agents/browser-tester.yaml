@@ -36,7 +36,7 @@ requires:
     - mcp__moontide%2Efull-stack%2Ebrowser__navigate
 
 runtime:
-  max_steps_per_turn: 24
+  max_turns: 24
   execution_mode: auto
   isolation: none
 

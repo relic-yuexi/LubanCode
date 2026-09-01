@@ -2,6 +2,13 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.160] - 2026-09-02
+
+- **子代理预算的兼容迁移收官（P1）。** Agent YAML 的 `runtime.max_turns`（任务总 turn）与弃用的 `max_steps_per_turn`（每输入轮步数）同现时明拒（`agent.turn_budget_conflict`），不静默选边；旧字段单独使用仍按旧义生效，但加载即给 `agent.legacy_step_budget` 弃用警告。`agent` 工具 JSON 入参的 `max_steps_per_turn` / 旧别名 `max_turns` 保持旧义，用了会随结果带回一行 `[弃用提示]`。`/agent doctor`、`/agent inspect` 与 `/doctor agents` 列明生效的是哪条路，并给可复制的迁移片段。示例、夹具与文档全改写新字段。
+- **账面数字三处对齐。** 运行中的 Dock 行、收场后的结果页与通知、导出的轨迹，现在同一组数字：`turn 已用/上限（完整返回 N）`。不再出现"配置写 12、任务烧 36"的假账——任务 turn 账是唯一生效硬线，legacy 步数只在没设任务总 turn 的任务上投影，且明标"每输入轮；待迁移"。SubagentStart/Stop 钩子带 `turn_limit` / `turns_attempted` / `turns_completed`（只读）。
+- **轨迹落任务 turn 边界，verifier 核账。** 每枚准入的逻辑模型请求在 `model.request.sent` 边界带 `task_turn_index` / `turn_limit` / `input_round_index`，completed/failed/cancelled 收口带回同一编号；`trajectory verify` 核对编号从 1 严格递增、不超上限、终态后无悬空请求（`turn.index_*` 稳定码）。
+- **兼容窗与删除条件（先说清，不突然拆）。** `runtime.max_steps_per_turn` 与 Workflow 节点 `step_limit` 的删除窗：自本版本起至少跨两个 minor 版本（预计 0.29.0 起转"稳定解析错误"），届时 CHANGELOG 另立条目确认；窗口期内老定义不突变、历史 session/trajectory 照读。`agent` 工具 JSON `max_turns` 改义（与任务总 turn 同义）同样等明确破坏版本。主会话顶层 `max_steps_per_turn`（主回合局部保险）与树级预算不在本窗内——见 todos 单 P2 留档。
+
 ## [v0.26.159] - 2026-09-02
 
 - **按需调工具这单，验收收官。** P0~P4 红线内逐批过堂：三拍前缀合同、四 wire 代理回放、条件工具 hash 守恒、Claude 原生链无损，各有测试册与读码证据钉着；362/363 绿（余一为并发超时假红，单跑即绿）。真机 cache 账那栏无钥匙不冒充——对照脚本在位，配钥匙即可跑。

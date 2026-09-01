@@ -38,7 +38,7 @@ requires:
 
 runtime:
   max_output_tokens: 8192
-  max_steps_per_turn: 24
+  max_turns: 24
   max_context_chars: 600000
   context_window_tokens: 0
   length_continuations: 1

@@ -247,6 +247,69 @@ TEST_CASE("bridge 一轮全流:请求/输出/工具三道栅栏齐,verify 过") 
     CHECK(committed["payload"].contains("derived_from_event"));
 }
 
+TEST_CASE("任务 turn 账边界(§11.1,P1-1):sent 带 index/limit/input round,三态收口带回 index") {
+    const auto dir = FreshDir("lubancode-traj-turn-budget");
+    auto recorder = trajectory::TrajectoryRecorder::Start(
+        dir / "main.jsonl", dir / "artifacts", MainScope(), [] {
+        trajectory::RecorderOptions options;
+        options.event_schema_version = 2;
+        return options;
+    }());
+    REQUIRE(recorder.has_value());
+    REQUIRE(recorder->WriteRunStarted(nlohmann::json{{"run_kind", "main_session"}},
+                                      Durability::PowerLoss)
+                .status == RecordReceipt::Status::Committed);
+    auto bridge = OpenBridge(*recorder);
+    bridge.BeginTurn("turn-1", "external_user");
+    bridge.RecordInput(UserMessage("查两处"));
+
+    // 第 1 枚 turn:sent-with-turn(index=1,limit=2,round=0),completed 带回 1。
+    const std::string req1 = bridge.OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
+    REQUIRE_FALSE(req1.empty());
+    bridge.OnRequestSentWithTurn(req1, 1, 2, 0);
+    REQUIRE(bridge.OnOutputCompleted(req1, AssistantWithToolCall("call-1"), "tool_use", "resp-1"));
+    bridge.OnToolTrace(TraceEvent(agent::ToolTraceEventKind::Scheduled, "call-1"));
+    bridge.OnToolTrace(TraceEvent(agent::ToolTraceEventKind::ExecutionStarted, "call-1"));
+    bridge.OnToolTrace(TraceEvent(agent::ToolTraceEventKind::ExecutionFinished, "call-1"));
+    api::Message results;
+    results.role = api::Role::User;
+    results.content.push_back(api::ToolResultBlock{"call-1", "第一处完。", false});
+    bridge.OnToolResultsCommitted("batch-1", results);
+
+    // 第 2 枚 turn:续投轮(round=1)失败收口——failed 也带回 index=2。
+    const std::string req2 = bridge.OnRequestPrepared(api::Request{}, agent::RequestPreparedContext{});
+    REQUIRE_FALSE(req2.empty());
+    bridge.OnRequestSentWithTurn(req2, 2, 2, 1);
+    bridge.OnOutputFailed(req2, "HTTP 500");
+    bridge.EndTurn(false, false, "failed");
+
+    const auto report = trajectory::VerifyJournalFile(dir / "main.jsonl");
+    REQUIRE(report.ok);
+    const auto lines = trajectory::ReadJournalLines(dir / "main.jsonl");
+    REQUIRE(lines.has_value());
+    for (const std::string& line : *lines) {
+        const auto parsed = nlohmann::json::parse(line, nullptr, false);
+        if (parsed.is_discarded()) {
+            continue;
+        }
+        const std::string kind = parsed.value("kind", std::string());
+        const auto payload = parsed.value("payload", nlohmann::json::object());
+        if (kind == "model.request.sent" && payload.value("task_turn_index", 0) == 1) {
+            CHECK(payload.value("turn_limit", 0) == 2);
+            CHECK(payload.value("input_round_index", 0) == 0);
+        }
+        if (kind == "model.request.sent" && payload.value("task_turn_index", 0) == 2) {
+            CHECK(payload.value("input_round_index", 0) == 1);  // 续投轮的坐标
+        }
+        if (kind == "model.output.completed") {
+            CHECK(payload.value("task_turn_index", 0) == 1);
+        }
+        if (kind == "model.output.failed") {
+            CHECK(payload.value("task_turn_index", 0) == 2);
+        }
+    }
+}
+
 TEST_CASE("ledger:开账出 main.jsonl,子代理拿独立 JSONL 与父边界") {
     const auto root = FreshDir("lubancode-traj-p2-ledger");
     TrajectorySessionLedger::Options options;

@@ -562,6 +562,10 @@ private:
         bool background = false;
         bool isolate = false;
         SubagentBudget budget;
+        // 预算类 JSON 入参的弃用提示(turn 预算单 §5.3,P1-0):max_steps_
+        // per_turn / 旧别名 max_turns 都是 legacy per-run step 语义且不出
+        // 模型 schema,手写脚本给了就随结果带回一行提示。空 = 没用旧键。
+        std::string budget_deprecation_note;
         std::optional<CustomAgentMaterial> custom;
         std::optional<agent::ResolvedAgentProfile> resolved;
         std::optional<agent::AgentPermissionMode> permission_floor;
