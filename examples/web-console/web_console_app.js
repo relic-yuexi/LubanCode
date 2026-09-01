@@ -38,6 +38,7 @@
     state: null,
     port: 0,
     token: '',
+    compat: null,
     activePageId: '',
     selectedRef: '',
     lastSnapshotId: '',
@@ -88,7 +89,14 @@
 
   function renderConnection() {
     const on = session.channel !== null && !session.channel.closed;
-    els.connState.textContent = on ? '已连接 :' + session.port : '未连接';
+    // 兼容检测提示(打包发布账 §四):连得上但协议不合,状态条转 warn 摆
+    // 人话——提示,不拦截;合的就只报版本。
+    if (on && session.compat && !session.compat.ok) {
+      els.connState.textContent = '已连(协议不合):' + session.compat.hint;
+      els.connState.className = 'state warn';
+      return;
+    }
+    els.connState.textContent = on ? '已连接 :' + session.port + (session.compat ? '(协议 ' + session.compat.server + ')' : '') : '未连接';
     els.connState.className = 'state ' + (on ? 'on' : 'off');
     els.connectButton.hidden = on;
     els.disconnectButton.hidden = !on;
@@ -414,7 +422,12 @@
     session.port = port;
     session.token = token;
     channel.connect().then((init) => {
-      note('握手', '协议 ' + (init && init.protocolVersion));
+      // 版本对齐口径(打包发布账 §四):壳不捆绑内核,连上后对协议版本
+      // 对表,不合就把人话摆到状态条上——检测提示,不是拦截。
+      session.compat = core.checkProtocolCompat(init && init.protocolVersion);
+      note('握手', '协议 ' + (init && init.protocolVersion) +
+        (session.compat.ok ? '' : ' [不合] ' + session.compat.hint +
+          ' (内核 ' + ((init && init.lubancodeVersion) || '版本未报') + ')'));
       renderAll();
       // 现场对账:浏览器状态、页签账、journal 补账(重连同一条路)。
       channel.request('browser/status', {}).then((reply) => {
@@ -439,6 +452,7 @@
       fail('连接', error);
       session.channel = null;
       session.state = null;
+      session.compat = null;
       renderConnection();
     });
     renderConnection();
@@ -454,6 +468,7 @@
     }
     session.channel = null;
     session.state = null;
+    session.compat = null;
     renderConnection();
   };
 

@@ -115,10 +115,33 @@ function seq(points) {
 }
 
 // ---------------------------------------------------------------------------
-// 2. Tauri 壳静态账
+// 2. 协议兼容声明(打包发布账 §四:壳不捆绑内核,声明+检测提示)
 // ---------------------------------------------------------------------------
 
-console.log('[2] Tauri 壳(examples/shells/tauri)');
+console.log('[2] 协议兼容声明 checkProtocolCompat');
+
+{
+  const core = require(path.join(WEB_CONSOLE, 'web_console_core.js'));
+  ok('兼容范围已声明(min<=max)', core.PROTOCOL_COMPAT && typeof core.PROTOCOL_COMPAT.min === 'string' &&
+    typeof core.PROTOCOL_COMPAT.max === 'string', JSON.stringify(core.PROTOCOL_COMPAT));
+  ok('范围含现役协议 1.1', core.checkProtocolCompat('1.1').ok === true,
+    JSON.stringify(core.checkProtocolCompat('1.1')));
+  ok('低版本判不合', core.checkProtocolCompat('1.0').ok === false);
+  ok('高版本判不合(没验过的不冒充兼容)', core.checkProtocolCompat('1.2').ok === false);
+  ok('不报版本判不合', core.checkProtocolCompat(null).ok === false);
+  ok('不合有人话提示', core.checkProtocolCompat('9.9').hint.indexOf('对齐') >= 0,
+    core.checkProtocolCompat('9.9').hint);
+  // 渲染层真接了:握手对表 + 状态条 warn。
+  const app = read(path.join(WEB_CONSOLE, 'web_console_app.js'));
+  ok('握手接了对表(checkProtocolCompat)', /checkProtocolCompat/.test(app));
+  ok('状态条有不合的 warn 路(state warn)', /state warn/.test(app));
+}
+
+// ---------------------------------------------------------------------------
+// 3. Tauri 壳静态账
+// ---------------------------------------------------------------------------
+
+console.log('[3] Tauri 壳(examples/shells/tauri)');
 
 const tauriDir = path.join(SHELLS, 'tauri');
 {
@@ -145,10 +168,10 @@ const tauriDir = path.join(SHELLS, 'tauri');
 }
 
 // ---------------------------------------------------------------------------
-// 3. Android 壳静态账
+// 4. Android 壳静态账
 // ---------------------------------------------------------------------------
 
-console.log('[3] Android 壳(examples/shells/android)');
+console.log('[4] Android 壳(examples/shells/android)');
 
 const androidDir = path.join(SHELLS, 'android');
 {
@@ -175,10 +198,10 @@ const androidDir = path.join(SHELLS, 'android');
 }
 
 // ---------------------------------------------------------------------------
-// 4. 纪律:参考前端仍只走协议;壳不碰内核
+// 5. 纪律:参考前端仍只走协议;壳不碰内核
 // ---------------------------------------------------------------------------
 
-console.log('[4] 纪律账');
+console.log('[5] 纪律账');
 
 {
   const html = read(path.join(WEB_CONSOLE, 'index.html'));
