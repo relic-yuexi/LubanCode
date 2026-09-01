@@ -1,6 +1,6 @@
 # SearchTool 内置 Ripgrep 后端迁移设计
 
-- 状态：P0-1 已落（`2ffa1dc`）；P0-2/P0-3 已落；P0-4/P0-5/P0-6 已落（本批，2026-09-01）：流式 runner（ChildProcess 起 rg、JSONL/NUL 分帧、四道墙、终态裁决）在 `src/tools/search_ripgrep_run.cpp`，真实 rg 差分 17 全等/7 批准迁移/0 未批准，SearchTool 已切随包 ripgrep 主路且旧 std::regex 内核整段删除，发行链（release.yml 抓取+验包、安装脚本三件套、check_release、README 口径）齐。P0-7（性能与稳定门）与 P0-8（发布收口余项）未动。真机验：Windows 全链 + WSL 侧 POSIX 收树夹具与 Linux 包/安装/离线搜；macOS 无本机环境，release.yml 矩阵已写入待 CI。
+- 状态：P0-1 已落（`2ffa1dc`）；P0-2/P0-3 已落；P0-4/P0-5/P0-6 已落（2026-09-01）：流式 runner（ChildProcess 起 rg、JSONL/NUL 分帧、四道墙、终态裁决）在 `src/tools/search_ripgrep_run.cpp`，真实 rg 差分 17 全等/7 批准迁移/0 未批准，SearchTool 已切随包 ripgrep 主路且旧 std::regex 内核整段删除，发行链（release.yml 抓取+验包、安装脚本三件套、check_release、README 口径）齐。P0-8 已落（本批，2026-09-01）：漏网清扫（删 golden driver 的 diff 差分门与旧内核冻结基线 JSON；全仓 grep 证 src 无旧 walker/regex 残留、无 PATH/env/runtime fallback）+ 回滚策略入迁移文档 §十一 + 全量测试/安装测试/拼包验包断网装/安装位 E2E 复跑全绿。**单子只剩 P0-7（性能与稳定门）未完**，收官待它落账。真机验：Windows 全链 + WSL 侧 POSIX 收树夹具与 Linux 包/安装/离线搜；macOS 无本机环境，release.yml 矩阵已写入待 CI。
 - 日期：2026-08-31（P0-4~P0-6 批 2026-09-01）
 - 级别：P0（核心只读工具的速度、正确性、取消与发行完整性）
 - 范围：`src/tools/search.*`、`src/platform/process.*`、观察边界、工具文案、安装脚本、Release 包、三平台 CI、第三方许可证、性能基准
@@ -132,6 +132,8 @@ THIRD_PARTY_NOTICES.md
 
 ### 3.2 Linux 不直接拿 15.2.0 x64 musl 包
 
+（2026-09-01 改判记档，主人裁决：**接受 musl**。本节前提不成立——amd64 `.deb` 内的 `usr/bin/rg` 实测就是 static-pie 静态链接（musl 系，`ldd` 零动态依赖），并非账面写的 GNU/glibc 构建，"取 deb 即避开 musl"从头就没避成。大树压力门 100 轮已过、本仓工况（100 条截断+命中满额主动收树）不碰上游 #3494 的"超大目录高并发"场景，故照用不换；上游 #3494 结论未查证、留 watch。manifest.json notes 与 THIRD_PARTY_NOTICES.md 的取包取舍同步改判。）
+
 上游 `15.2.0` 的 `x86_64-unknown-linux-musl` 预编译包已有“超大目录高并发偶发 SIGSEGV”的公开报告（BurntSushi/ripgrep#3494）。本仓 Release 本来就在 Ubuntu 构建，产物也依赖 glibc，故首版优先取上游 amd64 `.deb` 内的 GNU/glibc `usr/bin/rg`。
 
 Linux 资产门：
@@ -139,8 +141,8 @@ Linux 资产门：
 - [ ] 在 `ubuntu-latest` 解 `.deb`，运行 `rg --version`。
 - [ ] 跑本单大树压力夹具至少 100 轮，不崩、不挂。
 - [ ] 用 `ldd` 记录运行库；不得添出 runner 镜像没有、目标 Ubuntu 常规环境也没有的私有依赖。
-- [ ] 若 `.deb` 资产不宜再分发，改为 Release job 用固定 Rust toolchain 从 `15.2.0` tag 构建 GNU 版；仍产哈希、仍过同一压力门。
-- [ ] musl 方案只有上游问题有结论并经本仓压力实测后才可回来，不能因包小便越门。
+- [ ] 若 `.deb` 资产不宜再分发，改为 Release job 用固定 Rust toolchain 从 `15.2.0` tag 构建 GNU 版；仍产哈希、仍过同一压力门。（2026-09-01 按裁决关闭：.deb 实为 musl 静态且压力门已过，自建 GNU 版路线不排期。）
+- [x] musl 方案只有上游问题有结论并经本仓压力实测后才可回来，不能因包小便越门。→ 按裁决勾账：本仓压力实测已过（大树压力门 100 轮，P0-7 批实测）；上游 #3494 结论仍 watch 未查证——若上游有结论再回头对表，平时不动。
 
 ### 3.3 许可证与署名
 
@@ -627,7 +629,7 @@ lubancode/
 
 - [x] CI 下载并校验三平台候选资产。→ `ci.yml` 三平台矩阵先跑 `fetch_ripgrep.py`（哈希/版本双对账）再 configure（`-DLUBANCODE_BUNDLED_RG_DIR`）；Windows/Linux-x64 资产本机真拉实测（含 deb 解包），macOS 资产与 CI 流水线本身无本机环境，矩阵已写入待 CI 真跑——如实标注
 - [x] 跑 fixture corpus，比较旧内核与新后端。→ `search_golden_driver diff` 子命令（复用 P0-1 场景表与归一化），rg 15.2.0 真机跑
-- [x] “必须保留”全等；“有意迁移”只准落在批准表里。→ **全等 17 / 批准迁移 7 / 未批准出入 0 / 基线缺失 0**；批准表在 driver 源码与迁移文档 §十（新批准一笔：显式 include glob 压过 ignore 规则，rg 优先级合同，已记档并钉单测）
+- [x] “必须保留”全等；“有意迁移”只准落在批准表里。→ **全等 17 / 批准迁移 7 / 未批准出入 0 / 基线缺失 0**；批准表在 driver 源码与迁移文档 §十（新批准一笔：显式 include glob 压过 ignore 规则，rg 优先级合同，已记档并钉单测）。（P0-8 注：diff 子命令与冻结基线 `old_kernel_golden.json` 已按 P0-8 删——它比的是**存档基线**不是活旧内核（P0-5 已删源码），对账正本在迁移文档 §十，删件不丢账。）
 - [x] SearchTool 默认切到 BundledRipgrepRunner。→ 默认构造即生产装配；execute 主路 解析→策略→runner→投影；旧内核（WalkFiles/GlobMatches/LooksBinary/std::regex 搜索）整段删除；单文件 glob 闸门由宿主守（rg 对显式文件参数绕过一切 glob，A 类 #9/#10 合同）
 - [x] 更新中英文 prompt、fallback 文案、schema 与 tool_text tests。→ `src/prompts/tools/{zh-CN,en}/search.md` 重写（Rust regex/ignore/NEVER 句式），schema 加 `fixed_strings`/`max_results`，`test_tool_text.cpp` 钉值同步
 - [x] （2026-08-31 补）`max_results` 事前声明参数落地。→ schema/钳制（`MakeRipgrepStreamLimits` 只降不升）/truncated 口径/中英文文案齐；grep 按行计、glob 按文件计各有单测
@@ -681,14 +683,14 @@ lubancode/
 
 ### P0-8：删旧内核与发布收口
 
-- [ ] 删除 `WalkFiles`、`LooksBinary`、自写 Glob、`std::regex` 搜索等旧实现。
-- [ ] 删除只为旧内核服务的测试；合同测试迁到 backend-neutral 层。
-- [ ] 不留 runtime fallback，不留隐藏开关，不留 PATH fallback。
-- [ ] 若新后端发布后出事，回滚整个 LubanCode 版本；不在一版里养两套语义。
-- [ ] 全量 C++ tests、安装 tests、Release package smoke、三平台 E2E 全过。
-- [ ] `git diff --check`、第三方 notices、README/CHANGELOG、版本源对账。
+- [x] 删除 `WalkFiles`、`LooksBinary`、自写 Glob、`std::regex` 搜索等旧实现。→ P0-5 已删大头，本批全仓 grep 清扫：`src/` 里 `WalkFiles/ShouldSkipDir/GlobToRegex`/search 语境 `std::regex`/`recursive_directory_iterator` 零命中（剩四处全是 `search_ripgrep.*` 注释里"与旧内核对账"的账目文字）。两枚同名物如实留档不删：`search.cpp` 的 `SingleFileGlobMatches` 是单文件 glob 闸门（A 类合同 #9/#10，rg 对显式文件参数绕过一切 glob，这道闸只能宿主守，不是内核）；`src/evolution/eval.cpp` 的 `LooksBinary` 是 evolution 评测判文本用，与 search 无涉。
+- [x] 删除只为旧内核服务的测试；合同测试迁到 backend-neutral 层。→ 删 `search_golden_driver` 的 `diff` 子命令（P0-5 迁移差分门：`ApprovedMigration`/`ApprovedMigrations`/`DiffOne`/`RunDiff` 及 main 分支，driver 净 -293 行）与 `tests/fixtures/search/golden/old_kernel_golden.json`（-494 行，diff 的唯一输入，差分账已记迁移文档 §十）；`bench/old_kernel_bench_src.json` 留——P0-7 性能表"旧内核"一列的唯一数据源（旧内核已删没法重跑，活人引用，不硬删）。合同测试 P0-5 已迁好：`test_search.cpp` 20 条全是 `SearchTool::execute()` 黑盒（真 rg 端到端 + 纯参数校验），本批复跑确认，ctest 册数与 main 基线持平（331 册）一条没少。
+- [x] 不留 runtime fallback，不留隐藏开关，不留 PATH fallback。→ 全仓 grep 证：三个 search 源文件 `getenv` 零处；`LUBANCODE_RG_PATH` 只出现在头文件禁令注释与反向单测（设了它定位结果一字不差）；运行时下载零分支（下载只在 `fetch_ripgrep.py`，构建期/流水线）；无 legacy/hidden switch 编译期开关；runner 缺位分支回稳定错 `search_backend_missing`，没有退回本地内核的代码可走。
+- [x] 若新后端发布后出事，回滚整个 LubanCode 版本；不在一版里养两套语义。→ 回滚策略定案入 `docs/development/search-ripgrep-migration.md` §十一：触发条件、回滚动作（撤包回上一 tag，不把旧内核从历史捞回来）、为什么这样够（供应链三道口拦缺件/坏件）、恢复向前走的路（manifest 换资产/升版 + 新基线 golden）。
+- [x] 全量 C++ tests、安装 tests、Release package smoke、三平台 E2E 全过。→ Windows 真机：ctest -C Release（临时 USERPROFILE）331 册全绿（收口轮 100%；此前几轮各有一笔漂移的进程类红笔、单跑即绿，同一二进制直跑 372s/60s 两档摆幅，判为宿机负载抖非代码病，静机轮零红定案）；`install.tests.ps1` 27 项全过；本机拼 Windows zip 包（9.4 MiB）→ 重解验件（notices/license/libexec 齐两枚 --version 对）→ 五步搜索 smoke（中文/regex/glob/ignore/无命中退出 1）→ 坏代理断网 install.ps1 安装 → golden 驱动放**安装位**跑 24 场景全过（默认构造 SearchTool 走生产定位路认安装位 rg，即离线装完可搜的 E2E 铁证）。Linux：WSL 拉真 linux rg（哈希+版本双过）、重编改动驱动件、golden 24 场景全过。macOS 无本机环境，release.yml 矩阵已写入待 CI——如实标注。
+- [x] `git diff --check`、第三方 notices、README/CHANGELOG、版本源对账。→ `git diff --check` 干净；`check_release.sh` 过（vcpkg.json 0.26.154 = version.hpp 0.26.154 同号，manifest 三平台哈希无占位，代码钉死 15.2.0 与 manifest 对账）；`check_docs.sh` 过；notices/README 中英口径 P0-6 已齐本批复核无失实；CHANGELOG 的内核删除条目已在 v0.26.153 落过（"旧自研 std::regex/walker 内核整段删除，生产只有一条执行路"），本批无用户可见变化不另立条，版本号不动。
 
-验收：生产二进制只有一条 search 执行路；源码里搜不到旧 walker/regex 内核。
+验收：生产二进制只有一条 search 执行路；源码里搜不到旧 walker/regex 内核。→ 过（grep 证据见上；生产装配 `SearchTool()` 默认构造 → `BundledRipgrepRunner`，源码无第二条执行路分支）。
 
 ## 十、测试清单
 

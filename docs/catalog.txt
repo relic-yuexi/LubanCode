@@ -61,6 +61,7 @@ DOC development/documentation.md
 DOC development/encoding.md
 DOC development/i18n.md
 DOC development/naming.md
+DOC development/search-ripgrep-migration.md
 DOC development/security.md
 DOC development/testing.md
 

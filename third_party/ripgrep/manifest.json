@@ -11,7 +11,7 @@
     "first_line_program": "ripgrep",
     "first_line_version": "15.2.0"
   },
-  "notes": "上游 MIT OR UNLICENSE 双许可,LubanCode 按 MIT 路分发(third_party/ripgrep/LICENSE-MIT 为上游 15.2.0 tag 原文)。哈希于 2026-08-31 由上游同版 .sha256 资产与本机下载实测重算双对;Release 流水线须再重算一遍,不一致即红。Linux 取 amd64 .deb 内 GNU/glibc usr/bin/rg,不用 musl 预编译包(超大目录高并发偶发 SIGSEGV 的公开报告 BurntSushi/ripgrep#3494,见设计单 3.2);.deb 成员路径在包内带 ./ 前缀,按 member 相对路径匹配时剥掉。",
+  "notes": "上游 MIT OR UNLICENSE 双许可,LubanCode 按 MIT 路分发(third_party/ripgrep/LICENSE-MIT 为上游 15.2.0 tag 原文)。哈希于 2026-08-31 由上游同版 .sha256 资产与本机下载实测重算双对;Release 流水线须再重算一遍,不一致即红。Linux 取 amd64 .deb 内 usr/bin/rg——实测 static-pie 静态链接(musl 系,ldd 零动态依赖),并非早前账面写的 GNU/glibc 构建;按 2026-09-01 主人裁决接受 musl:上游 BurntSushi/ripgrep#3494(超大目录高并发偶发 SIGSEGV)结论未查证、留 watch,本仓大树压力门 100 轮已过,且本仓工况(100 条截断+命中满额主动收树)不碰该 issue 的场景;.deb 成员路径在包内带 ./ 前缀,按 member 相对路径匹配时剥掉。",
   "assets": {
     "windows-x64": {
       "archive": "ripgrep-15.2.0-x86_64-pc-windows-msvc.zip",

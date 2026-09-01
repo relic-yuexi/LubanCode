@@ -259,13 +259,15 @@ target_compile_features(model_probe_e2e PRIVATE cxx_std_23)
 add_dependencies(lubancode_tests model_probe_e2e)
 add_test(NAME manual.model_probe_stub COMMAND model_probe_e2e)
 
-# SearchTool 内置 Ripgrep 后端迁移单 P0-1:旧内核照相机(不进 ctest,手动跑):
+# SearchTool 内置 Ripgrep 后端迁移单 P0-1:场景照相机(不进 ctest,手动跑):
 #   search_golden_driver golden <输出JSON路径>   固化 fixtures/search/corpus/
-#       这批夹具在旧内核(std::regex + recursive_directory_iterator)上的
-#       行为,格式见驱动源码头注释,供 P0-5 拿新 ripgrep 后端跑同一份场景表
-#       做自动化差分。
+#       这批夹具在当前后端(随包 ripgrep,走生产定位路)上的行为,格式见
+#       驱动源码头注释;把驱动 exe 放进发行包/安装位跑,就是对包内布局
+#       认不认随包 rg 的最直接 E2E。P0-5 的 diff 子命令(旧内核差分门)
+#       已过门,迁移单 P0-8 删。
 #   search_golden_driver bench <输出JSON路径> [语料目录=src]
-#       旧内核基准(P50/P95、扫描文件数),默认对本仓 src/ 目录跑。
+#       当前后端基准(P50/P95、扫描文件数),默认对本仓 src/ 目录跑,
+#       P0-7 性能门的驱动件。
 add_executable(search_golden_driver EXCLUDE_FROM_ALL manual/search_golden_driver.cpp)
 target_link_libraries(search_golden_driver PRIVATE lubancode_core)
 target_compile_features(search_golden_driver PRIVATE cxx_std_23)
