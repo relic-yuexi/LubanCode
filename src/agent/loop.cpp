@@ -1160,43 +1160,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             turn_permit = *reserved_permit;
         }
 
-        // 轨迹边界(P0-2):request prepared 记不住就不发模型(§7.4 耐久
-        // 栅栏);落稳随即记 sent。没接轨迹的会话一字不加。
-        // Token 账本单 A1:purpose 恒有效(AgentProfile.purpose 默认值),
-        // manifest/前缀账各自看 has_* 位——没接 ResolvedPromptBuilder 的
-        // 会话如实报 has_prompt_manifest=false,不拿空 manifest 冒充。
+        // 轨迹边界(P0-2)与 Token 账本 A1 的 prepared/sent 记账已并入下方
+        // 恢复环(监督器单 P0-1):每枚尝试各记一笔——本层不再重复落账,
+        // 预算 permit 的归还/提交同样跟环内的各尝试走(见环内注释)。
         std::string trajectory_request_id;
-        if (wiring.boundary_recorder != nullptr) {
-            RequestPreparedContext prepared_ctx;
-            prepared_ctx.purpose = agent.profile_.purpose;
-            if (request_prompt_manifest.has_value()) {
-                prepared_ctx.has_prompt_manifest = true;
-                prepared_ctx.prompt_manifest = *request_prompt_manifest;
-            }
-            prepared_ctx.has_prefix_account = true;
-            prepared_ctx.system_hash = step_prefix_account.system_hash;
-            prepared_ctx.tools_hash = step_prefix_account.tools_hash;
-            prepared_ctx.cache_epoch = step_prefix_account.cache_epoch;
-            prepared_ctx.prefix_append_only = step_prefix_account.append_only;
-            trajectory_request_id = wiring.boundary_recorder->OnRequestPrepared(request, prepared_ctx);
-            if (trajectory_request_id.empty()) {
-                // 请求尚未发出:归还 permit 名额,attempted 不加(设计单 §6.4)。
-                if (turn_permit.has_value() && wiring.turn_budget->abort_before_send) {
-                    wiring.turn_budget->abort_before_send(*turn_permit);
-                }
-                return std::unexpected("轨迹账写盘失败,本轮停在请求边界,未发模型");
-            }
-            wiring.boundary_recorder->OnRequestSent(trajectory_request_id);
-        }
-        if (turn_permit.has_value() && wiring.turn_budget->commit_sent) {
-            // reserved -= 1, attempted += 1:这枚请求从"占额"翻成"已发"。提
-            // 交不上(账错位)就明败不发——对不住账的请求宁可不出门。
-            if (const auto committed = wiring.turn_budget->commit_sent(*turn_permit);
-                !committed.has_value()) {
-                return std::unexpected("turn 预算账提交失败(" + committed.error() +
-                                       "),本轮停在请求边界,未发模型");
-            }
-        }
+        bool turn_committed = false;  // 首枚尝试已提交预算,重试趟跳过(不靠状态机拒绝判)
 
         // ---- 请求级恢复(监督器单 P0-1):尝试环 --------------------------------
         // 半截流永不落地:每次尝试重置 assembler 与显示闸,只有 send_stream
@@ -1272,10 +1240,31 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 prepared_ctx.prefix_append_only = step_prefix_account.append_only;
                 trajectory_request_id = wiring.boundary_recorder->OnRequestPrepared(request, prepared_ctx);
                 if (trajectory_request_id.empty()) {
+                    // 轨迹账写盘失败,本枚请求不出门:归还预算 permit 名额
+                    //(attempted 不加,turn 预算单 §6.4),退出尝试环不重试。
+                    if (turn_permit.has_value() && wiring.turn_budget->abort_before_send) {
+                        wiring.turn_budget->abort_before_send(*turn_permit);
+                        turn_permit.reset();
+                    }
                     trajectory_write_failed = true;
                     return std::unexpected(api::Error{api::ErrorKind::Api, "trajectory write failed", 0});
                 }
                 wiring.boundary_recorder->OnRequestSent(trajectory_request_id);
+            }
+            // permit 从"占额"翻"已发"(reserved-=1,attempted+=1,turn 预算单
+            // §3.2)——与轨迹解耦:没接 boundary_recorder 的会话照样提交(纯预
+            // 算门单测即此形状);只在本请求首枚尝试提交,恢复重试不重复扣
+            // turn(与 backend 肚内重试同口径)。提交不上按本地账错退出尝试环。
+            if (turn_permit.has_value() && !turn_committed && wiring.turn_budget->commit_sent) {
+                if (const auto committed = wiring.turn_budget->commit_sent(*turn_permit);
+                    !committed.has_value()) {
+                    turn_permit.reset();
+                    return std::unexpected(api::Error{api::ErrorKind::Api,
+                                                      "turn budget commit failed", 0});
+                }
+                turn_committed = true;
+                // 不 reset permit:留到 assistant 入 history 后 mark_completed
+                // 用(Turn 单 §3.2 三步账);重试趟由上面的旗子跳过,不重复扣。
             }
             const std::size_t thinking_bytes_at_attempt_start = budget_report.thinking_bytes;
             std::string thinking_tail_at_attempt_start = budget_report.thinking_tail;
