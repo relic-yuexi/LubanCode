@@ -132,7 +132,7 @@ requires:
 
 runtime:
   max_output_tokens: 8192
-  max_steps_per_turn: 24
+  max_turns: 24
   max_context_chars: 600000
   context_window_tokens: 0
   length_continuations: 1
@@ -267,7 +267,8 @@ MCP 工具用 `mcp__<server>__<tool>`，插件工具用 `plugin__<plugin>__<tool
 | 字段 | 必填 | 类型 | 默认 | 语义 |
 | --- | --- | --- | --- | --- |
 | `max_output_tokens` | 否 | 正整数 | 继承三级解析 | 显式声明输出上限 |
-| `max_steps_per_turn` | 否 | 非负整数 | 继承父 | 一个 turn 内步数上限，`0` = 不限 |
+| `max_turns` | 否 | 非负整数 | 走宿主默认（`subagent.default_max_turns`，未设 = `0` 不限） | **任务总 turn**：从接到任务到交回终态，最多准入几次逻辑模型请求；父代理补话、孩子回信、Stop 钩子续跑共一本账，`0` = 不限 |
+| `max_steps_per_turn` | 否 | 非负整数 | 继承父 | **已弃用**（legacy）：每个 input round （一次 `Agent::Run()`）各自的模型请求数上限，续投会重领额度；单独使用仍按旧义生效并给 `agent.legacy_step_budget` 警告，与 `max_turns` 同现按 `agent.turn_budget_conflict` 拒载 |
 | `max_context_chars` | 否 | 正整数 | `600000` | history 字符安全网 |
 | `context_window_tokens` | 否 | 非负整数 | 继承父 | 上下文窗口 token 数，`0` = 未知 |
 | `length_continuations` | 否 | 非负整数 | `1` | max_tokens 打断在思考段时的续跑次数，`0` = 不续 |
@@ -277,6 +278,14 @@ MCP 工具用 `mcp__<server>__<tool>`，插件工具用 `plugin__<plugin>__<tool
 `max_output_tokens` 省略时走现有三级解析：config 显式 > provider 声明 > 模型
 目录声明，全缺席交服务端默认。Agent YAML 里写了正整数，视同 config 级显式
 声明。
+
+预算合同的迁移（turn 预算单 §5）：`runtime.max_turns` 是任务总闸——一道闸
+管到终态，续投、孩子回流、Stop 钩子续跑都从这本账扣；`max_steps_per_turn`
+是兼容窗里的旧键，只限单个 input round，已弃用。旧定义迁移时把
+`max_steps_per_turn: N` 改写成 `max_turns: M`——语义从"每轮各自 N"变"整任务
+合计 M"，按任务实际规模调数值；两者同现直接拒载（`agent.turn_budget_conflict`），
+不静默选边。`/agent doctor <名字>` 列明当前生效路并给迁移建议，
+`/agent inspect <名字>` 给可复制的迁移片段。
 
 `execution_mode` 是这份定义的**缺省执行档**：调用方（`agent` 工具、Workflow
 节点）显式给值时压过它。取值与 `agent` 工具现有参数一致。
@@ -438,7 +447,8 @@ Agent 定义不写进会话历史正文。历史只记稳定 `name`、定义来�
 | `mcp_servers` | MCP 服务引用 -> 过滤 `mcp__<server>__*` 工具；段开关 `PromptSectionSwitches::mcp` | `src/agent/agent.hpp` |
 | `requires.tools` | （解析期断言，无运行时字段） | Catalog / doctor |
 | `runtime.max_output_tokens` | `AgentRuntimeProfile::max_output_tokens`（配 `max_output_tokens_source`） | `src/agent/runtime_profile.hpp` |
-| `runtime.max_steps_per_turn` | `AgentRuntimeProfile::max_steps_per_turn` | 同上 |
+| `runtime.max_turns` | `AgentTurnBudgetProfile::max_turns`（Resolver 合并；任务注册时冻进 `TaskRecord::turn_account`） | `src/agent/turn_budget.hpp`、`src/tools/task_ledger.hpp` |
+| `runtime.max_steps_per_turn` | `AgentRuntimeProfile::max_steps_per_turn`（legacy；`AgentTurnBudgetProfile::legacy_max_steps_per_input` 另记一笔） | 同上 |
 | `runtime.max_context_chars` | `AgentRuntimeProfile::max_context_chars` | 同上 |
 | `runtime.context_window_tokens` | `AgentRuntimeProfile::context_window_tokens` | 同上 |
 | `runtime.length_continuations` | `AgentRuntimeProfile::length_continuations` | 同上 |

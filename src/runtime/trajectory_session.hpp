@@ -86,6 +86,12 @@ public:
     // ---- agent::LoopBoundaryRecorder(loop 在模型边界调) ----
     std::string OnRequestPrepared(const api::Request& request, const agent::RequestPreparedContext& ctx) override;
     void OnRequestSent(const std::string& request_id) override;
+    // 任务级 turn 账(turn 预算单 §11.1,P1-1):permit 提交后的 sent 边界带
+    // task_turn_index/turn_limit/input_round_index;随后同 request_id 的
+    // output 三态收口也带上 task_turn_index——started/completed/failed 三处
+    // 边界数字与台账同一本账,不靠数 assistant message 猜。
+    void OnRequestSentWithTurn(const std::string& request_id, int task_turn_index, int turn_limit,
+                               int input_round_index) override;
     void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                          bool reported_by_provider, const std::string& provider_response_id,
                          int cache_epoch = 0, bool prefix_append_only = true) override;
@@ -201,6 +207,14 @@ private:
     bool turn_open_ = false;
     std::map<std::string, CallBook> calls_;  // call_id(模型 tool_use id)
     std::map<std::string, std::string> request_prepared_;  // request_id -> prepared event id
+    // 任务 turn 账的请求簿(§11.1,P1-1):sent 时记下这枚请求的 turn 坐标,
+    // output 三态收口按 request_id 对回。只住本轮内存,不落盘。
+    struct RequestTurnBook {
+        int task_turn_index = 0;
+        int turn_limit = 0;
+        int input_round_index = 0;
+    };
+    std::map<std::string, RequestTurnBook> request_turns_;
     std::map<std::string, std::string> child_terminal_hashes_;  // agent_run_id -> hash
     std::set<std::string> started_io_failed_;  // started 落不住被拦的 execution
     std::set<std::string> storage_blocked_;    // 磁盘 reserve 不足被拦的 execution

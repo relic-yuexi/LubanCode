@@ -61,7 +61,7 @@ nodes:
     label: 翻账断言
     agent: browser-reviewer
     task: prompts/audit.md
-    step_limit: 16
+    turn_limit: 16
     allowed_tools:
       - mcp__browser__browser_status
       - mcp__browser__browser_tabs

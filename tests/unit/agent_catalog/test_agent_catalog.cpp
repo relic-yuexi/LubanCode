@@ -229,7 +229,10 @@ TEST_CASE("夹具样本真文件走一遍:完整/最小/坏样本/名不符") {
     CHECK(browser->available);
     REQUIRE(browser->definition.has_value());
     CHECK(browser->definition->prompt.profile == std::optional<std::string>("browser-tester"));
-    CHECK(browser->definition->max_steps_per_turn == std::optional<int>(24));
+    // P1-0(turn 预算单 §5.2):夹具已迁新字段——任务总 turn 落 max_turns,
+    // legacy 步数键不再写(写了会有 agent.legacy_step_budget 警告)。
+    CHECK(browser->definition->max_turns == std::optional<int>(24));
+    CHECK_FALSE(browser->definition->max_steps_per_turn.has_value());
     CHECK(browser->definition->tools.deny == std::vector<std::string>{"shell"});
 
     const auto* minimal = FindEntry(catalog, "minimal-agent");

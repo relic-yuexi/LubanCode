@@ -1073,6 +1073,27 @@ void PrintAgentsMatrix(const DoctorContext& context) {
         TermOut() << tr("doctor.agents.lineage") << "\n";
         TermOut() << trf("doctor.agents.limits", active_limit, depth_limit, children_limit, tree_nodes_limit)
                   << "\n";
+        // 任务级 turn 预算(turn 预算单 §11.3,P1-1):列明宿主默认、legacy
+        // 影子账与归属——哪个定义还走旧路,doctor 一眼指出。
+        {
+            const std::optional<int> default_turns = context.config.subagent.default_max_turns;
+            TermOut() << trf("doctor.agents.turn_budget",
+                             default_turns.has_value() ? std::to_string(*default_turns)
+                                                       : std::string("0"),
+                             default_turns.has_value() ? tr("doctor.agents.turn_budget_source_config")
+                                                       : tr("doctor.agents.turn_budget_source_unset"))
+                      << "\n";
+            const std::optional<int> legacy_steps = context.config.subagent.max_steps_per_turn;
+            TermOut() << trf("doctor.agents.legacy_step_budget",
+                             legacy_steps.has_value()
+                                 ? std::to_string(*legacy_steps)
+                                 : (context.main_profile->max_steps_per_turn > 0
+                                        ? std::to_string(context.main_profile->max_steps_per_turn) +
+                                              "(继承 max_steps_per_turn)"
+                                        : std::string("unset")))
+                      << "\n";
+            TermOut() << tr("doctor.agents.turn_budget_share") << "\n";
+        }
         TermOut() << tr("doctor.agents.detached_registry") << "\n";
         TermOut() << tr("doctor.agents.completion_routing") << "\n";
         TermOut() << tr("doctor.agents.task_spec") << "\n";

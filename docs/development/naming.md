@@ -49,6 +49,8 @@ session
 
 步数上限的配置键是 `max_steps_per_turn`(旧名 `max_turns` 兼容读入,兼容期至少跨一个明确版本窗,删前写 CHANGELOG)。`0 = 不限`,两代同义。
 
+同名异义要分家(turn 预算单):**配置文件顶层**的 `max_turns` 是 `max_steps_per_turn` 的弃用别名(每输入轮步数);**Agent YAML `runtime.max_turns`** 是任务总 turn(从接到任务到终态的逻辑模型请求总数,`subagent.default_max_turns` 同义层)。两处同名不同物,写文档与诊断时必须带上下文,别裸写 `max_turns`。
+
 ## 通用五条
 
 1. **名字先说领域,再说形态。** `assistant_message`、`tool_results`、`has_tool_use` 是好名字;跨分支、跨回调的 `data`、`info`、`value` 是坏名字。短函数里的 `result`、`out` 可留,一旦跨二十来行就补领域名,如 `send_result`、`trim_report`。

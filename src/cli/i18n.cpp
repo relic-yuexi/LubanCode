@@ -211,6 +211,12 @@ const Entry kZhCN[] = {
     {"agent_status.state_exhausted", "耗尽 · {0}/{1} 步"},
     {"agent_status.budget_suffix", " · {0}/{1} 步"},
     {"agent_status.steps_suffix", " · {0} 步"},
+    // 任务级 turn 账(turn 预算单 §8.3,P1-1):坞行/详情/通知同一组数字。
+    {"agent_status.turn_budget_suffix", " · turn {0}/{1}"},
+    {"agent_status.turn_suffix", " · turn {0}/不限"},
+    {"agent_status.legacy_budget_suffix", " · legacy step {0}/{1}(每输入轮;待迁移)"},
+    {"agent_status.state_exhausted_turn", "耗尽 · turn {0}/{1}(完整返回 {2})"},
+    {"agent_status.reason_turn_limit", "turn 预算耗尽"},
     {"agent_status.last_tool", " · 上次 {0}"},
     {"agent_status.reason_api_error", "接口报错"},
     {"agent_status.reason_step_limit", "步数耗尽"},
@@ -1400,7 +1406,7 @@ const Entry kZhCN[] = {
     // /doctor agents:main 与各 agent type 的差异矩阵(规格"架构落点")。
     {"doctor.agents.header", "main 与各 agent type 的能力矩阵(默认同级;差异来自角色或显式配置)"},
     {"doctor.agents.budget",
-     "共用运行策略:输出上限 {0}(0 = unset,交服务端默认) · 步数 {1} · length 续跑 {2} 次"},
+     "共用运行策略:输出上限 {0}(0 = unset,交服务端默认) · 主回合局部保险 {1}(max_steps_per_turn,每输入轮) · length 续跑 {2} 次"},
     {"doctor.agents.governance", "派工治理:并发槽 ≤ {0}(subagent.max_active) · 深度 ≤ {1}(subagent.max_depth)"},
     {"doctor.agents.recursive_dispatch",
      "recursive dispatch: foreground=yes, background=yes(scoped handle,前后台同一套 admission,不由前台/"
@@ -1417,6 +1423,15 @@ const Entry kZhCN[] = {
      "不跨级提孙任务)"},
     {"doctor.agents.task_spec",
      "task spec: v2 title + instructions(扁平 title + prompt)"},
+    // 任务级 turn 预算(turn 预算单 §11.3,P1-1):doctor 列明生效路与归属。
+    {"doctor.agents.turn_budget",
+     "subagent task turn budget: {0}(来源: {1};budget owner: TaskLedger task record)"},
+    {"doctor.agents.turn_budget_source_config", "config subagent.default_max_turns"},
+    {"doctor.agents.turn_budget_source_unset", "未设(0 = 不限)"},
+    {"doctor.agents.legacy_step_budget",
+     "legacy per-input step budget: {0}(每输入轮各自上限,待迁移;/agent doctor <名字> 看逐定义建议)"},
+    {"doctor.agents.turn_budget_share",
+     "continuations share task budget: yes · stop-hook continuation shares task budget: yes"},
     {"doctor.agents.warning_active_lt_depth",
      "警告:max_active({0}) < max_depth({1}),最深一条链路可能在并发槽处被拒(调大 subagent.max_active 或"
      "收窄 subagent.max_depth)"},
@@ -1425,7 +1440,7 @@ const Entry kZhCN[] = {
      "general-purpose:{0} 枚工具(与 main 同能力;todo 为每任务私有实例,可再派 agent)"},
     {"doctor.agents.row_explore", "Explore     :{0} 枚工具(只读白名单,角色限制——不是子代理无权限)"},
     {"doctor.agents.note",
-     "注:输出上限/步数/续跑/并发/深度 main 与子代理同一份(runtime profile);仅 Explore 按角色收窄工具。"},
+     "注:输出上限/续跑/并发/深度 main 与子代理同一份(runtime profile);主回合局部保险只管 main 的一次用户输入,子代理任务总量走 task turn 预算(见上);仅 Explore 按角色收窄工具。"},
     {"doctor.agents.subagent_debug_log",
      "子代理流诊断:设 LUBANCODE_DEBUG_SUBAGENT=1 后,每个子代理任务逐流事件一行落 "
      "~/.lubancode/logs/subagent-<任务号>.log(只记事件类型与字节数,不记正文与思考;也可设成别的目录)。"},
@@ -2048,6 +2063,12 @@ const Entry kEn[] = {
     {"agent_status.state_exhausted", "exhausted · {0}/{1} steps"},
     {"agent_status.budget_suffix", " · {0}/{1} steps"},
     {"agent_status.steps_suffix", " · {0} steps"},
+    // Task-level turn account (turn-budget doc §8.3, P1-1): dock/detail/notice share the same numbers.
+    {"agent_status.turn_budget_suffix", " · turn {0}/{1}"},
+    {"agent_status.turn_suffix", " · turn {0}/unlimited"},
+    {"agent_status.legacy_budget_suffix", " · legacy step {0}/{1} (per input round; migration pending)"},
+    {"agent_status.state_exhausted_turn", "exhausted · turn {0}/{1} ({2} completed)"},
+    {"agent_status.reason_turn_limit", "turn budget exhausted"},
     {"agent_status.last_tool", " · last {0}"},
     {"agent_status.reason_api_error", "API error"},
     {"agent_status.reason_step_limit", "step budget exhausted"},
@@ -2842,7 +2863,7 @@ const Entry kEn[] = {
     // this writing — new strings come in pairs per house rule).
     {"doctor.agents.header", "Capability matrix: main vs agent types (same level by default; differences come from roles or explicit config)"},
     {"doctor.agents.budget",
-     "shared runtime profile: output budget {0} (0 = unset, server default) · steps {1} · length continuations {2}"},
+     "shared runtime profile: output budget {0} (0 = unset, server default) · per-input local guard {1} (max_steps_per_turn, per input round) · length continuations {2}"},
     {"doctor.agents.governance",
      "dispatch governance: concurrency slots ≤ {0} (subagent.max_active) · depth ≤ {1} (subagent.max_depth)"},
     {"doctor.agents.recursive_dispatch",
@@ -2861,6 +2882,15 @@ const Entry kEn[] = {
      "mailbox; main only drains root-task results, never pulls grandchild results across levels)"},
     {"doctor.agents.task_spec",
      "task spec: v2 title + instructions (flat title + prompt)"},
+    // Task-level turn budget (turn-budget doc §11.3, P1-1): state the active path and owner.
+    {"doctor.agents.turn_budget",
+     "subagent task turn budget: {0} (source: {1}; budget owner: TaskLedger task record)"},
+    {"doctor.agents.turn_budget_source_config", "config subagent.default_max_turns"},
+    {"doctor.agents.turn_budget_source_unset", "unset (0 = unlimited)"},
+    {"doctor.agents.legacy_step_budget",
+     "legacy per-input step budget: {0} (per input round, migration pending; /agent doctor <name> for per-definition advice)"},
+    {"doctor.agents.turn_budget_share",
+     "continuations share task budget: yes · stop-hook continuation shares task budget: yes"},
     {"doctor.agents.warning_active_lt_depth",
      "warning: max_active({0}) < max_depth({1}), the deepest chain may be rejected at the concurrency slot (raise "
      "subagent.max_active or lower subagent.max_depth)"},
@@ -2869,8 +2899,9 @@ const Entry kEn[] = {
      "general-purpose: {0} tools (same capabilities as main; per-task private todo; may dispatch further agents)"},
     {"doctor.agents.row_explore", "Explore     : {0} tools (read-only allowlist, a role restriction — not \"subagent has no permission\")"},
     {"doctor.agents.note",
-     "note: output budget/steps/continuations/concurrency/depth are one shared runtime profile for main and subagents; "
-     "only Explore narrows tools by role."},
+     "note: output budget/continuations/concurrency/depth are one shared runtime profile for main and subagents; the "
+     "per-input local guard only bounds one user input of main — subagent task totals go through the task turn "
+     "budget (see above); only Explore narrows tools by role."},
     {"doctor.agents.subagent_debug_log",
      "Subagent stream diagnostics: set LUBANCODE_DEBUG_SUBAGENT=1 and every subagent task logs one line per stream event "
      "to ~/.lubancode/logs/subagent-<id>.log (event types and byte counts only, never content or thinking; a custom "

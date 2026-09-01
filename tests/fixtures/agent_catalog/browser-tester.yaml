@@ -34,7 +34,7 @@ requires:
     - mcp__browser__screenshot
 
 runtime:
-  max_steps_per_turn: 24
+  max_turns: 24
   execution_mode: auto
   isolation: none
 

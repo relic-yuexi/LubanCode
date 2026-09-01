@@ -1193,6 +1193,7 @@ nlohmann::json VerifiedStream::ToJson() const {
     return nlohmann::json{{"relative_path", relative_path},
                           {"ok", ok},
                           {"error_code", error_code},
+                          {"message", message},
                           {"run_id", run_id},
                           {"run_kind", RunKindName(run_kind)},
                           {"events", events},
@@ -1234,6 +1235,16 @@ struct StreamScan {
         bool started_seen = false;
     };
     std::map<std::string, ParentDispatch> dispatches;
+    // 任务 turn 账素材(§13.7,P1-1):sent 边界的 turn 坐标逐枚 + 输出三态
+    // 的 request_id 集,扫描收尾一并核对。
+    struct TurnSequence {
+        std::string request_id;
+        int task_turn_index = 0;
+        int turn_limit = 0;
+        bool after_terminal = false;  // sent 落在 run 终态之后(账面破)
+    };
+    std::vector<TurnSequence> turns;
+    std::set<std::string> request_outputs;
 };
 
 StreamScan ScanStream(const std::filesystem::path& session_dir, const std::filesystem::path& path) {
@@ -1260,6 +1271,7 @@ StreamScan ScanStream(const std::filesystem::path& session_dir, const std::files
         report.truncated_tail
             ? std::min<std::size_t>(static_cast<std::size_t>(report.events), lines->size())
             : lines->size();
+    bool terminal_seen = false;  // run 终态是否已扫过(turn 序列核对用)
     for (std::size_t i = 0; i < count; ++i) {
         const auto parsed = nlohmann::json::parse((*lines)[i], nullptr, false);
         if (parsed.is_discarded()) {
@@ -1286,6 +1298,7 @@ StreamScan ScanStream(const std::filesystem::path& session_dir, const std::files
             scan.verified.run_terminal = true;
             scan.verified.terminal_kind = EventKindName(envelope.kind);
             scan.last_terminal_event_hash = envelope.event_hash;
+            terminal_seen = true;
         }
         // 父侧派发边:relations.child_run_id(§3.5)。
         const auto child = envelope.relations.find("child_run_id");
@@ -1304,6 +1317,80 @@ StreamScan ScanStream(const std::filesystem::path& session_dir, const std::files
                 const auto ref = envelope.payload.find("result_ref");
                 if (ref != envelope.payload.end() && ref->is_object()) {
                     dispatch.recorded_hash = GetString(*ref, "child_terminal_event_hash");
+                }
+            }
+        }
+        // 任务级 turn 账(§13.7,P1-1):sent 边界的 task_turn_index 逐枚收账,
+        // 收口三态按 request_id 记终态——收尾一并核"不重号、不超 limit、
+        // 终态后无悬空请求"。旧 stream 没有这些键,序列为空,核账自然跳过。
+        if (envelope.kind == EventKind::ModelRequestSent) {
+            if (const auto index = envelope.payload.find("task_turn_index");
+                index != envelope.payload.end() && index->is_number_unsigned()) {
+                StreamScan::TurnSequence entry;
+                entry.request_id = envelope.request_id.value_or(std::string());
+                entry.task_turn_index = index->get<int>();
+                entry.after_terminal = terminal_seen;
+                const auto limit = envelope.payload.find("turn_limit");
+                if (limit != envelope.payload.end() && limit->is_number_unsigned()) {
+                    entry.turn_limit = limit->get<int>();
+                }
+                scan.turns.push_back(entry);
+            }
+        }
+        if (envelope.kind == EventKind::ModelOutputCompleted || envelope.kind == EventKind::ModelOutputFailed ||
+            envelope.kind == EventKind::ModelOutputCancelled) {
+            const std::string request_id = envelope.request_id.value_or(std::string());
+            if (!request_id.empty()) {
+                scan.request_outputs.insert(request_id);
+            }
+        }
+    }
+    // ---- 任务 turn 序列核对(§13.7)------------------------------------------
+    if (!scan.turns.empty()) {
+        int expected = 1;
+        for (const auto& entry : scan.turns) {
+            if (entry.task_turn_index != expected) {
+                scan.verified.ok = false;
+                if (scan.verified.error_code.empty()) {
+                    scan.verified.error_code =
+                        entry.task_turn_index < expected ? "turn.index_repeated" : "turn.index_skipped";
+                    scan.verified.message = "model.request.sent 的 task_turn_index 不从 1 起严格递增(期望 " +
+                                             std::to_string(expected) + ",实得 " +
+                                             std::to_string(entry.task_turn_index) + ")";
+                }
+                break;
+            }
+            if (entry.turn_limit > 0 && entry.task_turn_index > entry.turn_limit) {
+                scan.verified.ok = false;
+                if (scan.verified.error_code.empty()) {
+                    scan.verified.error_code = "turn.index_over_limit";
+                    scan.verified.message = "task_turn_index " + std::to_string(entry.task_turn_index) +
+                                             " 越过 turn_limit " + std::to_string(entry.turn_limit);
+                }
+                break;
+            }
+            // 终态后不得再出现新的 turn 请求:run terminal 之后的 sent 直接红。
+            if (entry.after_terminal) {
+                scan.verified.ok = false;
+                if (scan.verified.error_code.empty()) {
+                    scan.verified.error_code = "turn.sent_after_terminal";
+                    scan.verified.message = "run 终态之后还有 task_turn_index " +
+                                             std::to_string(entry.task_turn_index) + " 的请求边界";
+                }
+                break;
+            }
+            ++expected;
+        }
+        // 悬空核对:run 已终态,而某枚带 turn 坐标的请求没有对应的输出三态
+        //(completed/failed/cancelled 任一)——started 无收口,账面破。
+        if (scan.verified.ok && scan.verified.run_terminal) {
+            for (const auto& entry : scan.turns) {
+                if (!entry.request_id.empty() && scan.request_outputs.count(entry.request_id) == 0) {
+                    scan.verified.ok = false;
+                    scan.verified.error_code = "turn.request_dangling";
+                    scan.verified.message = "task_turn_index " + std::to_string(entry.task_turn_index) +
+                                             " 的请求只有 sent 边界,没有 completed/failed/cancelled 收口";
+                    break;
                 }
             }
         }
