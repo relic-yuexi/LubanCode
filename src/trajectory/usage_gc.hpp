@@ -49,7 +49,7 @@ struct WorkspaceUsageReport {
 };
 
 // 扫一间 workspace 的 sessions/ 全部子目录(每个视作一场 session)。
-WorkspaceUsageReport ScanWorkspaceUsage(const std::filesystem::path& sessions_dir,
+WorkspaceUsageReport ScanWorkspaceUsage(const std::filesystem::path& workspace_sessions_dir,
                                         const std::string& workspace_key);
 
 struct GcPlanItem {

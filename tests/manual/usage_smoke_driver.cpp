@@ -95,7 +95,6 @@ int main(int argc, char** argv) {
     runtime::TrajectorySessionLedger::Options options;
     options.workspace_root = root / "workspace";
     options.trajectories_root = root / "trajectories";
-    options.readable_workspace_name = "usage-smoke";
     options.launch_cwd = "D:/demo";
     options.lubancode_version = "smoke";
     auto ledger = runtime::TrajectorySessionLedger::Open(std::move(options));

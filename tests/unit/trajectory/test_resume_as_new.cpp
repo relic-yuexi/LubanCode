@@ -57,7 +57,6 @@ SessionManagerOptions Opts(const std::filesystem::path& root) {
     SessionManagerOptions options;
     options.trajectories_root = root / "trajectories";
     options.workspace_root = root / "ws";
-    options.readable_workspace_name = "恢复测试";
     options.launch_cwd = "D:/tmp/ws";
     options.lubancode_version = "0.26.138-test";
     return options;

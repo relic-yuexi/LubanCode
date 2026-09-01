@@ -1,6 +1,6 @@
 # Workspace 统一存储、旧 Session 退场与分级 Memory 迁移
 
-- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 起待实现
+- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 已落（WorkspaceIdentityResolver 四级裁决+统一 key+两把旧钥匙退役+v2 manifest/checkout/doctor+cwd change/跨 workspace 换场，全量 ctest 339 册绿，2026-09-01）；P0-2 起待实现
 - 日期：2026-09-01
 - 级别：P0（持久化唯一真账、项目身份、恢复正确性与用户数据安全）
 - 范围：`src/sessions/`、`src/trajectory/`、`src/runtime/session_runtime.*`、`src/runtime/trajectory_session.*`、`src/memory/`、`src/app/commands/session_commands.*`、`src/app/commands/memory_commands.*`、`src/tools/agent_tool.*`、配置/CLI/app-server、测试、文档与旧数据迁移
@@ -497,11 +497,11 @@ lubancode migrate-storage plan|run|status
 
 ### P0-1：收拢 WorkspaceIdentityResolver
 
-- [ ] 新增 `src/workspace/identity.*`，实现 Git common dir、marker、config root、cwd fallback 四级裁决。
-- [ ] 让 Trajectory、Memory、Session 命令、app-server、Gateway 与子代理都改吃 `WorkspaceIdentity`。
-- [ ] 删除 `trajectory::FindWorkspaceRoot/ComputeWorkspaceKey` 与 `memory::ResolveProjectIdentity` 的平级生产身份逻辑，必要纯函数降为新 resolver 内部件。
-- [ ] 实现 workspace v2 manifest、checkout 登记与 doctor 对账。
-- [ ] 实现同 workspace cwd change 与跨 workspace session switch。
+- [x] 新增 `src/workspace/identity.*`，实现 Git common dir、marker、config root、cwd fallback 四级裁决。（2026-09-01；home 层止步防 `~/.lubancode` 吸成大项目；坏 marker 滑下一级）
+- [x] 让 Trajectory、Memory、Session 命令、app-server、Gateway 与子代理都改吃 `WorkspaceIdentity`。（终端装配/app-server thread/memory 适配/ledger 兜底全接；Gateway 现仓只有 command_registry.hpp:188 一句引导文案、无身份消费点，如实记缺口）
+- [x] 删除 `trajectory::FindWorkspaceRoot/ComputeWorkspaceKey` 与 `memory::ResolveProjectIdentity` 的平级生产身份逻辑，必要纯函数降为新 resolver 内部件。（`NormalizeRootPathText`→`NormalizeIdentityPathText`、`ResolveGitCommonDir`/`SafeName` 收编 workspace/identity.cpp；memory 侧函数降为薄适配，算法归一）
+- [x] 实现 workspace v2 manifest、checkout 登记与 doctor 对账。（src/workspace/manifest.*；`OpenOrRegisterWorkspace` 首仓原子写/开仓对账/checkout upsert；doctor 报表加 manifest 对账段）
+- [x] 实现同 workspace cwd change 与跨 workspace session switch。（`HandleCwdChange` 同 key 落 control.cwd.changed+登记；`SessionRuntime::NoteWorkingDirectoryChanged` 跨 key 封旧场开新场，接线在 SyncWorktreeDirectory）
 
 验收：同一 cwd 从任一入口所得 key 逐字相同；linked worktree 共 workspace，独立 clone 不共享，嵌套仓最近者胜。
 

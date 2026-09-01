@@ -17,6 +17,7 @@
 #include "trajectory/journal.hpp"
 #include "trajectory/recorder.hpp"
 #include "trajectory/session_manager.hpp"
+#include "workspace/identity.hpp"
 
 using namespace lubancode::trajectory;
 
@@ -48,7 +49,7 @@ SessionManagerOptions Opts(const std::filesystem::path& root) {
     SessionManagerOptions options;
     options.trajectories_root = root / "trajectories";
     options.workspace_root = root / "ws";
-    options.readable_workspace_name = "恢复测试";
+    options.identity = lubancode::workspace::MakeFallbackIdentity(root / "ws");
     options.launch_cwd = "D:/tmp/ws";
     options.lubancode_version = "0.26.128-test";
     return options;
@@ -431,7 +432,7 @@ TEST_CASE("孤儿 preparing(开场半路崩): 恢复器清账 + tombstone") {
     // 直接手植一只空 preparing(不带锁):launch 崩在锁之后、开张之前。
     SessionManifest manifest;
     manifest.schema_version = 1;
-    manifest.workspace_key = ComputeWorkspaceKey(options.workspace_root);
+    manifest.workspace_key = lubancode::workspace::MakeFallbackIdentity(options.workspace_root).workspace_key;
     manifest.session_id = "20260830-040000-R90001";
     manifest.launch_cwd = options.launch_cwd;
     manifest.main_run_id = "main-0009";
@@ -439,9 +440,8 @@ TEST_CASE("孤儿 preparing(开场半路崩): 恢复器清账 + tombstone") {
     manifest.status = "preparing";
     manifest.created_at_ms = clock.WallMs();
     manifest.lubancode_version = options.lubancode_version;
-    auto directory = TrajectoryDirectory::CreateWorkspace(options.trajectories_root,
-                                                          options.workspace_root, "孤儿测试",
-                                                          clock.WallMs());
+    auto directory = TrajectoryDirectory::CreateWorkspace(
+        options.trajectories_root, options.identity, clock.WallMs());
     REQUIRE(directory.has_value());
     REQUIRE(TrajectoryDirectory::CreateSession(options.trajectories_root / "workspaces",
                                                manifest.workspace_key, manifest)

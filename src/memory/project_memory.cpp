@@ -21,6 +21,7 @@
 #include "memory/frontmatter.hpp"
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
+#include "workspace/identity.hpp"  // P0-1:身份裁决唯一入口
 #include "platform/text_encoding.hpp"
 
 namespace lubancode::memory {
@@ -119,28 +120,6 @@ std::string HexHash(std::string_view value) {
     return out.str();
 }
 
-std::string SafeName(std::string value, std::size_t max_bytes = 48) {
-    std::string out;
-    out.reserve((std::min)(value.size(), max_bytes));
-    bool dash = false;
-    for (const unsigned char byte : value) {
-        if (out.size() >= max_bytes) {
-            break;
-        }
-        if (byte >= 0x80 || std::isalnum(byte) != 0 || byte == '_' || byte == '-') {
-            out.push_back(static_cast<char>(byte));
-            dash = false;
-        } else if (!dash && !out.empty()) {
-            out.push_back('-');
-            dash = true;
-        }
-    }
-    while (!out.empty() && out.back() == '-') {
-        out.pop_back();
-    }
-    return out.empty() ? "project" : out;
-}
-
 std::string Slug(std::string value) {
     value = LowerAscii(std::move(value));
     std::string out;
@@ -185,40 +164,9 @@ std::string JobStamp() {
     return std::to_string(millis) + "-" + std::to_string(g_sequence.fetch_add(1));
 }
 
-bool RegularFile(const fs::path& path) {
-    std::error_code ec;
-    return fs::is_regular_file(path, ec) && !ec;
-}
-
-std::optional<fs::path> ResolveGitCommonDir(const fs::path& root) {
-    const fs::path dot_git = root / ".git";
-    std::error_code ec;
-    if (fs::is_directory(dot_git, ec) && !ec) {
-        return AbsoluteNormal(dot_git);
-    }
-    if (!RegularFile(dot_git)) {
-        return std::nullopt;
-    }
-    const std::string marker = Trim(ReadFile(dot_git));
-    constexpr std::string_view prefix = "gitdir:";
-    if (!marker.starts_with(prefix)) {
-        return std::nullopt;
-    }
-    fs::path git_dir = Utf8Path(Trim(marker.substr(prefix.size())));
-    if (git_dir.is_relative()) {
-        git_dir = root / git_dir;
-    }
-    git_dir = AbsoluteNormal(git_dir);
-    const fs::path common_file = git_dir / "commondir";
-    if (!RegularFile(common_file)) {
-        return git_dir;
-    }
-    fs::path common = Utf8Path(Trim(ReadFile(common_file)));
-    if (common.is_relative()) {
-        common = git_dir / common;
-    }
-    return AbsoluteNormal(common);
-}
+// ResolveGitCommonDir/SafeName/RegularFile 已随 P0-1 收编或退役:Git 探测
+// 与显示名清洗住 workspace/identity.cpp(四级裁决的部件),memory 不再
+// 自持一份平级实现。
 
 bool IsValidId(const std::string& id) {
     if (id.empty() || id.size() > 120 || id.front() == '.' || id.back() == '.') {
@@ -1810,51 +1758,21 @@ std::vector<ScoredEntry> RankEntries(const std::vector<MemoryEntry>& entries, co
 
 std::expected<ProjectIdentity, std::string> ResolveProjectIdentity(
     const fs::path& cwd, const fs::path& home_lubancode) {
+    // P0-1:平级生产身份逻辑退役——Git/标记/配置探测、seed、hash 全部只由
+    // workspace::ResolveWorkspaceIdentity 裁决;本函数只是把 WorkspaceIdentity
+    // 折成 memory 域的 ProjectIdentity(形状适配,不再有自己的算法)。
+    // key 换成统一 workspace_key(SHA256 前 16 位 + seed 前缀);project_dir
+    // 仍住 <home>/projects/<key>/(P0-3 才搬进 workspace)——换钥匙不换房。
     if (home_lubancode.empty()) return std::unexpected("找不到 LubanCode 主目录");
-    fs::path current = AbsoluteNormal(cwd);
-    std::error_code ec;
-    if (!fs::is_directory(current, ec)) current = current.parent_path();
-    if (current.empty()) return std::unexpected("工作目录为空");
-
-    fs::path fallback = current;
-    fs::path local_config_root;
-    fs::path project_root;
-    fs::path common_root;
-    bool git = false;
-    while (!current.empty()) {
-        if (auto common = ResolveGitCommonDir(current); common.has_value()) {
-            project_root = current;
-            common_root = *common;
-            git = true;
-            break;
-        }
-        if (local_config_root.empty() && RegularFile(current / ".lubancode" / "config.json")) {
-            local_config_root = current;
-        }
-        const fs::path parent = current.parent_path();
-        if (parent.empty() || parent == current) break;
-        current = parent;
-    }
-    if (project_root.empty()) {
-        project_root = local_config_root.empty() ? fallback : local_config_root;
-        common_root = project_root;
-    }
+    auto resolved = workspace::ResolveWorkspaceIdentity(cwd, home_lubancode);
+    if (!resolved.has_value()) return std::unexpected(resolved.error());
 
     ProjectIdentity identity;
-    identity.project_root = AbsoluteNormal(project_root);
-    identity.common_root = AbsoluteNormal(common_root);
-    identity.git = git;
-    // linked worktree 的 checkout 目录名可以各不相同；显示前缀也须跟着
-    // common git dir 走，否则哈希虽相同，最终 project_dir 仍会裂开。
-    identity.display_name = PathUtf8((git ? identity.common_root.parent_path() : identity.project_root).filename());
-    if (identity.display_name.empty()) identity.display_name = "project";
-    std::string identity_path = PathUtf8(identity.common_root);
-#ifdef _WIN32
-    // Windows 路径不分大小写；POSIX 分大小写，不能把 /Repo 与 /repo 合成一份。
-    identity_path = LowerAscii(std::move(identity_path));
-#endif
-    const std::string seed = (git ? "git:" : "path:") + identity_path;
-    identity.key = SafeName(identity.display_name) + "-" + HexHash(seed);
+    identity.project_root = resolved->project_root;
+    identity.common_root = resolved->identity_root;
+    identity.git = resolved->git();
+    identity.display_name = resolved->display_name;
+    identity.key = resolved->workspace_key;
     identity.project_dir = AbsoluteNormal(home_lubancode) / "projects" / Utf8Path(identity.key);
     return identity;
 }

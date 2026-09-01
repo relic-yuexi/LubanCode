@@ -19,6 +19,8 @@
 #include "trajectory/canonical_json.hpp"
 #include "trajectory/directory.hpp"
 #include "trajectory/recorder.hpp"
+#include "workspace/identity.hpp"
+#include "workspace/manifest.hpp"
 
 using namespace lubancode::trajectory;
 
@@ -464,37 +466,37 @@ TEST_CASE("目录制: workspace_key、session 树、session.json 原子写、占
     std::filesystem::remove_all(root, ec);
     std::filesystem::create_directories(root, ec);
 
-    SUBCASE("workspace_key 规则(§3.2)") {
-        const auto key = ComputeWorkspaceKey(std::filesystem::path("D:/work/demo"));
-        // <basename>-<12 hex>。
+    SUBCASE("workspace_key 规则(P0-1 统一算法:SHA256 前 16 位 + seed 前缀)") {
+        const auto key = lubancode::workspace::MakeFallbackIdentity(std::filesystem::path("D:/work/demo")).workspace_key;
+        // <safe-basename>-<16 hex>;key 算法住 workspace::identity。
         CHECK(key.substr(0, 5) == "demo-");
-        CHECK(key.size() == 5 + 12);
+        CHECK(key.size() == 5 + 16);
         // 同一路径两种写法归一(正斜杠/反斜杠、尾斜杠)。
-        CHECK(ComputeWorkspaceKey(std::filesystem::path("D:\\work\\demo\\")) == key);
+        CHECK(lubancode::workspace::MakeFallbackIdentity(std::filesystem::path("D:\\work\\demo\\")).workspace_key == key);
 #ifdef _WIN32
         // Windows 大小写不敏感:整串折叠小写后同一仓库同一 key。
-        CHECK(ComputeWorkspaceKey(std::filesystem::path("d:/Work/demo")) == key);
+        CHECK(lubancode::workspace::MakeFallbackIdentity(std::filesystem::path("d:/Work/demo")).workspace_key == key);
 #else
         // POSIX 大小写敏感:Work 与 work 是两个不同根,各立各的。
-        CHECK(ComputeWorkspaceKey(std::filesystem::path("d:/Work/demo")) != key);
+        CHECK(lubancode::workspace::MakeFallbackIdentity(std::filesystem::path("d:/Work/demo")).workspace_key != key);
 #endif
-        CHECK(ComputeWorkspaceKey(std::filesystem::path("D:/work/other")) != key);
+        CHECK(lubancode::workspace::MakeFallbackIdentity(std::filesystem::path("D:/work/other")).workspace_key != key);
 #ifdef _WIN32
-        CHECK(NormalizeRootPathText(std::filesystem::path("D:\\a\\/b\\\\")) == "d:/a/b");
+        CHECK(lubancode::workspace::NormalizeIdentityPathText(std::filesystem::path("D:\\a\\/b\\\\")) == "d:/a/b");
 #endif
     }
-    SUBCASE("FindWorkspaceRoot 向上找 .git") {
+    SUBCASE("Git 探测:向上找最近 .git 并解 common dir") {
         std::filesystem::create_directories(root / "proj" / "sub" / "deep", ec);
         std::filesystem::create_directories(root / "proj" / ".git", ec);
-        const auto found = FindWorkspaceRoot(root / "proj" / "sub" / "deep");
-        REQUIRE(found.has_value());
-        CHECK(*found == std::filesystem::absolute(root / "proj"));
-        // 无 .git 的分支:找到的必是含 .git 的祖先(temp 祖先链罕见地带着
-        // .git 时,这一条仍须成立)。
-        const auto missing = FindWorkspaceRoot(root / "nowhere");
-        if (missing.has_value()) {
-            CHECK(std::filesystem::exists(*missing / ".git"));
-        }
+        const auto common = lubancode::workspace::ResolveGitCommonDir(root / "proj");
+        REQUIRE(common.has_value());
+        // 四级裁决的第 1 级部件:cwd 在深子目录,身份根取 common git dir。
+        const auto identity = lubancode::workspace::ResolveWorkspaceIdentity(root / "proj" / "sub" / "deep", {});
+        REQUIRE(identity.has_value());
+        CHECK(identity->git());
+        CHECK(identity->identity_kind == "git_common");
+        CHECK(identity->checkout_root == std::filesystem::weakly_canonical(root / "proj"));
+        CHECK(identity->workspace_key == lubancode::workspace::ResolveWorkspaceIdentity(root / "proj", {}).value().workspace_key);
     }
     SUBCASE("session_id 形状") {
         const auto id = GenerateSessionId(2026, 8, 30, 3, 15, 22, "7K4M2P");
@@ -502,16 +504,22 @@ TEST_CASE("目录制: workspace_key、session 树、session.json 原子写、占
     }
 
     SUBCASE("workspace 与 session 目录树(§3.1)") {
-        auto workspace = TrajectoryDirectory::CreateWorkspace(root, root / "proj", "demo", 1000);
+        const auto identity = lubancode::workspace::MakeFallbackIdentity(root / "proj");
+        auto workspace = TrajectoryDirectory::CreateWorkspace(root, identity, 1000);
         REQUIRE(workspace.has_value());
-        const auto key = ComputeWorkspaceKey(root / "proj");
+        const auto key = identity.workspace_key;
         CHECK(std::filesystem::exists(root / "workspaces" / key / "workspace.json"));
         CHECK(std::filesystem::exists(root / "workspaces" / key / "sessions"));
         CHECK(std::filesystem::exists(root / "workspaces" / key / "lifecycle"));
         CHECK(std::filesystem::exists(root / "workspaces" / key / "tombstones"));
-        // 二次创建不覆盖(首次创建时间等材料以旧账为准)。
-        auto again = TrajectoryDirectory::CreateWorkspace(root, root / "proj", "demo-2", 2000);
+        // 二次创建不覆盖首仓(created_at 以旧账为准),只更新登记。
+        auto again = TrajectoryDirectory::CreateWorkspace(root, identity, 2000);
         REQUIRE(again.has_value());
+        const auto manifest_again = lubancode::workspace::ReadWorkspaceManifest(root / "workspaces" / key);
+        REQUIRE(manifest_again.status == lubancode::workspace::ManifestRead::Status::Ok);
+        CHECK(manifest_again.manifest.created_at_ms == 1000);
+        CHECK(manifest_again.manifest.last_opened_at_ms == 2000);
+        CHECK(manifest_again.manifest.workspace_key == key);
 
         SessionManifest manifest;
         manifest.workspace_key = key;

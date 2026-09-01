@@ -54,6 +54,9 @@ struct WorkspaceDoctorReport {
     std::optional<SessionDoctorReport> active_session;
     std::vector<std::string> recent_errors;  // 调用方递入(§13.1"最近 I/O 错误")
     std::uint64_t queue_high_water_mark = 1;  // 单写者同步提交:恒 <=1(见头注)
+    // P0-1:workspace v2 manifest 对账(key 与算法重算逐字比,不合即
+    // identity.key_mismatch;版本超限即 schema.unsupported_version)。
+    std::vector<std::string> manifest_issues;
     std::vector<std::string> notes;
 };
 

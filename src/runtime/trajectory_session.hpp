@@ -43,6 +43,7 @@
 #include "trajectory/recorder.hpp"
 #include "trajectory/session_manager.hpp"
 #include "trajectory/usage_gc.hpp"
+#include "workspace/identity.hpp"
 
 namespace lubancode::runtime {
 
@@ -366,9 +367,13 @@ struct TrajectoryResumeSummary {
 class TrajectorySessionLedger {
 public:
     struct Options {
-        std::filesystem::path workspace_root;  // 仓库根(算 workspace_key;空 = 启动 cwd)
+        // P0-1:冻结身份由装配层裁决后整份递进(终端/app-server/子代理同一
+        // 把钥匙)。空身份且 workspace_root 也空时,才按启动 cwd 现场裁决
+        // ——这条兜底只服务旧测试;子代理/Gateway 恢复路必须显式递身份,
+        // 不得让各进程按临时 cwd 另算 key(§4.5)。
+        workspace::WorkspaceIdentity workspace_identity;
+        std::filesystem::path workspace_root;  // 兜底裁决起点与环境快照根
         std::filesystem::path trajectories_root;  // 空 = <home>/.lubancode/trajectories
-        std::string readable_workspace_name;
         std::string launch_cwd;      // UTF-8 文本,进 manifest
         std::string lubancode_version;
         // run.started 的 v2 usage owner 账(Token 账本单 §6.1.1):
@@ -424,6 +429,18 @@ public:
     // 正常封口(/exit 与 EOF):turn 收齐后 run terminal + session.ended +
     // session.json closed。恢复器/replay 是 P0-3 的活,这里只留封口。
     trajectory::CloseOutcome CloseSession(const std::string& reason);
+
+    // ---- P0-1(§4.5):cwd 变化对账 ----
+    // 同 workspace(common git dir 未变,如 /worktree 进出 linked worktree):
+    // 落 control.cwd.changed + checkout 登记,账不换房。跨 workspace:
+    // 不写旧账,same_workspace=false 带新 key——调用方封当前 session 后在
+    // 新 workspace 开新场,不许偷偷往旧房搬账。
+    struct CwdChangeResult {
+        bool same_workspace = false;
+        std::string workspace_key;  // 新裁决的 key
+        std::string error;          // 落账/登记失败说明(空 = 顺)
+    };
+    CwdChangeResult HandleCwdChange(const workspace::WorkspaceIdentity& new_identity);
 
     // ---- P0-3:clear 八步换账 / resume-as-new / replay 读口 ----
 

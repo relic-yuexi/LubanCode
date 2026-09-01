@@ -2,7 +2,11 @@
 
 #include <sstream>
 
+#include "platform/paths.hpp"
 #include "trajectory/directory.hpp"
+#include "workspace/identity.hpp"
+#include "workspace/manifest.hpp"
+#include "workspace/storage_contracts.hpp"
 
 namespace lubancode::trajectory {
 namespace {
@@ -108,6 +112,35 @@ WorkspaceDoctorReport BuildWorkspaceDoctorReport(const std::filesystem::path& tr
         const std::filesystem::path session_dir = workspace_dir / "sessions" / *active_session_id;
         report.active_session = BuildSessionDoctorReport(session_dir);
     }
+
+    // P0-1:workspace v2 manifest 对账。读 manifest → 按 identity_kind/
+    // identity_root 重算 key → 与 manifest.workspace_key 逐字比;不合即
+    // identity.key_mismatch(隔离语义:不自动改名合并,只报)。P0-1 之前的
+    // v1 目录(schema_version 单键)在这里如实报"缺 v2 manifest",不算账坏。
+    const auto manifest_read = workspace::ReadWorkspaceManifest(workspace_dir);
+    if (manifest_read.status == workspace::ManifestRead::Status::Ok) {
+        std::optional<std::string> marker_id;
+        if (manifest_read.manifest.identity_kind ==
+            std::string(workspace::contracts::kIdentityKindExplicitMarker)) {
+            marker_id = workspace::ReadMarkerWorkspaceId(
+                platform::Utf8ToPath(manifest_read.manifest.identity_root) / ".lubancode" /
+                "workspace.json");
+        }
+        const auto reconcile =
+            workspace::ReconcileWorkspaceManifest(manifest_read.manifest, std::move(marker_id));
+        if (reconcile.ok) {
+            report.manifest_issues.push_back(
+                "manifest 对账通过(identity_kind=" + manifest_read.manifest.identity_kind +
+                ",checkouts=" + std::to_string(manifest_read.manifest.checkouts.size()) + ")");
+        } else {
+            report.manifest_issues.push_back(reconcile.error_code + ": " + reconcile.error_text);
+        }
+    } else if (manifest_read.status == workspace::ManifestRead::Status::Missing) {
+        report.manifest_issues.push_back("缺 v2 workspace.json(P0-1 前旧目录或首仓未写)");
+    } else {
+        report.manifest_issues.push_back(manifest_read.error_code + ": " +
+                                         manifest_read.error_text);
+    }
     return report;
 }
 
@@ -158,6 +191,12 @@ std::vector<std::string> FormatWorkspaceDoctorReport(const WorkspaceDoctorReport
         lines.push_back("最近 I/O 错误:");
         for (const auto& error : report.recent_errors) {
             lines.push_back("  " + error);
+        }
+    }
+    if (!report.manifest_issues.empty()) {
+        lines.push_back("manifest 对账:");
+        for (const auto& issue : report.manifest_issues) {
+            lines.push_back("  " + issue);
         }
     }
     for (const auto& note : report.notes) {
