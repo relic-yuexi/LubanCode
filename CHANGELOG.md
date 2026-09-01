@@ -2,6 +2,12 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.161] - 2026-09-02
+
+- **老数据搬家有了正门。** `lubancode migrate-storage plan|run|status` 三口齐：先出计划单，再逐场导入（turn/请求/工具全事件链、图片字节改内容寻址、旧记忆升 schema 3），每场导入前先验后录，回执照合同落账。可断点续跑——故障注入一百个耐久点逐点打断，旧源一个字节没动过；`--delete-source --yes` 删源前逐件复验。文档见 getting-started/storage-migration.md。
+- **旧 Session 存储的代码删净了。** session_store/catalog/lifecycle 三件连同 CMake 项清仓，SessionRuntime 里的双路死分支拆完；纯函数（时间戳、路径归一、Markdown 导出）原样迁进 tools/session_utils，行为一字未改。守门册盯着 src/ 与 docs/，旧目录路径字样再冒头就红——迁移器三件白名单除外。
+- **迁移器自身修了五处暗病。** 含 Windows 相对路径正斜杠失灵、memory 子目录未建即写、imported 件漏填目标场 id 等五处，皆由十册新测试钉死。
+
 ## [v0.26.160] - 2026-09-02
 
 - **子代理有了 `agent_watch`。** 主代理可查任务短快照（状态、阶段、健康、耗时、进展龄、重试数），也可睡到修订号变化再醒——condition variable 实现，无变化零 CPU 忙转，最多等 30 秒；用户输入、父取消、session close 提前唤醒。lineage 鉴权，兄弟看不到兄弟；thinking 与 Secret 一概不出工具口。
