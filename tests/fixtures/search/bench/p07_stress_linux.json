@@ -1,0 +1,43 @@
+{
+  "foreign_rg_at_start": 0,
+  "handle_delta": 0,
+  "host_after": {
+    "handles": 5,
+    "peak_ws_bytes": 7991296,
+    "threads": 1
+  },
+  "host_before": {
+    "handles": 5,
+    "threads": 1
+  },
+  "phases": [
+    {
+      "corpus": "<wsl-home>/p07_corpus/fixtures_corpus",
+      "is_error_rounds": 0,
+      "name": "short_x1000",
+      "residue_bad_checks": 0,
+      "residue_checks": 10,
+      "rounds_done": 1000,
+      "wall_ms_max": 284.274871,
+      "wall_ms_p50": 11.026364,
+      "wall_ms_p95": 244.08729,
+      "wall_s_total": 58.991288788
+    },
+    {
+      "corpus": "<wsl-home>/p07_corpus/large",
+      "is_error_rounds": 0,
+      "name": "large_tree_x100",
+      "residue_bad_checks": 0,
+      "rounds_done": 100,
+      "truncated_rounds": 80,
+      "wall_ms_max": 247.818864,
+      "wall_ms_p50": 244.184708,
+      "wall_ms_p95": 244.976626,
+      "wall_s_total": 21.268207506
+    }
+  ],
+  "rg_residue_final": 0,
+  "rg_version": "15.2.0",
+  "round_cap_ms": 30000,
+  "thread_delta": 0
+}

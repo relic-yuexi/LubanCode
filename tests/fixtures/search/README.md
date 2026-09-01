@@ -35,6 +35,11 @@ tests/fixtures/search/
     old_kernel_golden.json        旧内核在 corpus/ 全场景表上的固化输出
   bench/
     old_kernel_bench_src.json     旧内核对本仓 src/ 的基准原始数据
+    p07_bench_win.json/.csv       ripgrep 后端基准(Windows x64,P0-7)
+    p07_bench_linux.json/.csv     ripgrep 后端基准(WSL Ubuntu x64,P0-7)
+    p07_report.json/.csv          旧内核对账 + 包装开销门判(P0-7)
+    p07_stress_win.json / p07_stress_linux.json   1000 短搜 + 大树 100 轮稳定门账
+    p07_cancel_win.json / p07_cancel_linux.json   取消响应延迟账
 ```
 
 ## 各夹具为什么这么造
@@ -131,6 +136,32 @@ build\debug\tests\Debug\search_golden_driver.exe bench tests\fixtures\search\ben
 中档)。JSON 里每条 query 记 7 轮 wall time 原始样本、P50/P95、首轮单独
 拎出来(穷人版"冷热盘分开",不是 P0-7 要求的正式冷热盘门槛)、命中行数、
 是否出错。数据解读见迁移文档。
+
+## P0-7 基准/稳定门复现方式(ripgrep 后端,2026-09-01 落档)
+
+大树语料须先造(确定性,同种子同树;**必须放在 git 仓库之外**——rg 尊重
+父仓 .gitignore,放仓库 ignored 路径下会被整树忽略):
+
+```powershell
+python scripts\gen_search_bench_corpus.py --target <语料根目录>   # 仓库之外
+cmake --build --preset release --target search_perf_driver
+build\release\tests\Release\search_perf_driver.exe bench <rg.exe绝对路径> out.json `
+  --small-dir tests\fixtures\search\corpus --small-file <语料根目录>\small_single_file.cpp `
+  --medium src --medium-p01 <P0-1提交的src快照> --large <语料根目录>\large `
+  --rounds 7 --csv out.csv
+build\release\tests\Release\search_perf_driver.exe stress <rg> stress.json `
+  --corpus tests\fixtures\search\corpus --rounds 1000 --large <语料根目录>\large --large-rounds 100
+build\release\tests\Release\search_perf_driver.exe cancel <rg> cancel.json `
+  --corpus <语料根目录>\large --delay-ms 200 --rounds 10   # Linux 侧 --delay-ms 20
+build\release\tests\Release\search_perf_driver.exe report `
+  tests\fixtures\search\bench\old_kernel_bench_src.json out.json [linux侧.json...] `
+  --out report.json --csv report.csv
+```
+
+`--medium-p01` 是 P0-1 提交(`2ffa1dc`)时点的 `src/` 快照(git archive 抽
+出,768 文件,与旧内核基准账面严丝合缝),旧内核提速倍数只在同语料上有
+意义。rg 路径必须给绝对(生产定位器之外的手动注入口)。采样线程按
+"exe 名 + 父进程 == 驱动"归属盯 rg,同机其他会话的 rg 不串账。
 
 ## 幂等重建
 

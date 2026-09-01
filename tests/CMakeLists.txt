@@ -273,6 +273,31 @@ target_compile_definitions(search_golden_driver PRIVATE
   LUBANCODE_SEARCH_FIXTURES_DIR="${CMAKE_CURRENT_SOURCE_DIR}/fixtures/search"
   LUBANCODE_SOURCE_ROOT_DIR="${CMAKE_SOURCE_DIR}")
 
+# ripgrep 迁移单 P0-7:性能与稳定门驱动(不进 ctest,手动跑——要真 rg、要
+# 长跑):
+#   search_perf_driver bench  <rg> <输出JSON> [--small-dir/--small-file/
+#       --medium/--medium-p01/--large D...] [--rounds N] [--csv P]
+#       三档语料 x 五类查询 x direct rg/SearchTool+rg 两列,P50/P95、rg 峰值
+#       内存与 CPU(采样线程扫进程表;direct 列另有 Job Object 精确账)、
+#       冷(首轮)/热分账。旧内核列由 report 按 P0-1 冻结的
+#       old_kernel_bench_src.json 对账,不重跑(内核已删)。
+#   search_perf_driver stress <rg> <输出JSON> --corpus D [--rounds 1000]
+#       [--large D] [--large-rounds 100]
+#       稳定门:短搜压力 + 大树轮跑,看板挂死/孤儿/句柄线程账;Linux 侧即
+#       设计单 §3.2 的 15.2.0 资产压力门。
+#   search_perf_driver cancel <rg> <输出JSON> --corpus D [--delay-ms 200]
+#       取消响应延迟:按停 -> execute 返回 / 进程表无 rg 残留 两段耗时。
+#   search_perf_driver report <旧内核bench.json> <新raw.json...> --out P
+#       对账提速倍数 + 包装开销过门判(max(20%, 20ms)) + 大树截断亚线性证据。
+add_executable(search_perf_driver EXCLUDE_FROM_ALL manual/search_perf_driver.cpp)
+target_link_libraries(search_perf_driver PRIVATE lubancode_core)
+target_compile_features(search_perf_driver PRIVATE cxx_std_23)
+if(MSVC)
+  # psapi 的 K32GetProcessMemoryInfo(PSAPI_VERSION=2)在 kernel32,无需另链。
+  target_compile_definitions(search_perf_driver PRIVATE
+    NOMINMAX WIN32_LEAN_AND_MEAN PSAPI_VERSION=2)
+endif()
+
 # Browser MCP 自家测试(MCP 富结果单 P1.8):真 node 子进程起 server.js +
 # 真 Playwright,本地验收站(127.0.0.1 动态端口)跑核心 E2E/profile/崩溃
 # 矩阵。机器上没有 node 就不注册;有 node 没装 playwright/浏览器时 runner

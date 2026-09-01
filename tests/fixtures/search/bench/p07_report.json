@@ -1,0 +1,710 @@
+{
+  "gate2_linearity": [
+    {
+      "file_ratio_large_vs_small": 122.1025641025641,
+      "highfreq_p50_ratio_large_vs_small": 1.0550728177306066,
+      "sublinear": true
+    },
+    {
+      "file_ratio_large_vs_small": 122.1025641025641,
+      "highfreq_p50_ratio_large_vs_small": 1.0009879920690297,
+      "sublinear": true
+    }
+  ],
+  "old_bench_file": "tests/fixtures/search/bench/old_kernel_bench_src.json",
+  "old_bench_file_count": 768,
+  "old_bench_target_dir": "src",
+  "runs": [
+    {
+      "file": "tests/fixtures/search/bench/p07_bench_win.json",
+      "platform": "windows-x64",
+      "rg_version": "15.2.0",
+      "tiers": [
+        {
+          "file_count": 25,
+          "gate2_highfreq_vs_fullscan_p50_ratio": 7.25460476140834,
+          "gate2_truncated_at_100": true,
+          "name": "small_dir",
+          "queries": [
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 33.7508,
+              "direct_p95": 34.7108,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "glob_enum_txt",
+              "overhead_ms": 1.649799999999999,
+              "overhead_ratio": 1.0488818042831578,
+              "tool_p50": 35.4006,
+              "tool_p95": 37.5036,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 35.8616,
+              "direct_p95": 36.4716,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "high_frequency",
+              "overhead_ms": 228.57889999999998,
+              "overhead_ratio": 7.373918062774666,
+              "tool_p50": 264.4405,
+              "tool_p95": 266.8601,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 34.4093,
+              "direct_p95": 34.7955,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "literal_common_word",
+              "overhead_ms": 1.822899999999997,
+              "overhead_ratio": 1.0529769568110945,
+              "tool_p50": 36.2322,
+              "tool_p95": 57.0519,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 37.2502,
+              "direct_p95": 39.2201,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "no_match",
+              "overhead_ms": -0.7988,
+              "overhead_ratio": 0.9785558198345243,
+              "tool_p50": 36.4514,
+              "tool_p95": 40.5867,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 34.523,
+              "direct_p95": 35.5432,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "regex_moderate",
+              "overhead_ms": 1.0815999999999946,
+              "overhead_ratio": 1.0313298380789617,
+              "tool_p50": 35.6046,
+              "tool_p95": 36.5679,
+              "truncated": false
+            }
+          ]
+        },
+        {
+          "file_count": 1,
+          "gate2_highfreq_vs_fullscan_p50_ratio": 8.866648741208271,
+          "gate2_truncated_at_100": true,
+          "name": "small_file",
+          "queries": [
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 28.9775,
+              "direct_p95": 30.0412,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "glob_enum_cpp",
+              "overhead_ms": -1.334299999999999,
+              "overhead_ratio": 0.9539539297730999,
+              "tool_p50": 27.6432,
+              "tool_p95": 28.3126,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 57.8122,
+              "direct_p95": 329.7746,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "high_frequency",
+              "overhead_ms": 192.80540000000002,
+              "overhead_ratio": 4.335029630424028,
+              "tool_p50": 250.6176,
+              "tool_p95": 263.685,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 31.9229,
+              "direct_p95": 34.3838,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "literal_common_word",
+              "overhead_ms": 326.8026,
+              "overhead_ratio": 11.237246616065583,
+              "tool_p50": 358.7255,
+              "tool_p95": 500.3623,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 29.5788,
+              "direct_p95": 31.8882,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "no_match",
+              "overhead_ms": -1.313600000000001,
+              "overhead_ratio": 0.955589814326477,
+              "tool_p50": 28.2652,
+              "tool_p95": 29.9184,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 33.3518,
+              "direct_p95": 35.0854,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "regex_moderate",
+              "overhead_ms": 218.5274,
+              "overhead_ratio": 7.552192085584586,
+              "tool_p50": 251.8792,
+              "tool_p95": 254.643,
+              "truncated": true
+            }
+          ]
+        },
+        {
+          "file_count": 819,
+          "gate2_highfreq_vs_fullscan_p50_ratio": 4.86354034724211,
+          "gate2_truncated_at_100": true,
+          "name": "medium",
+          "queries": [
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 33.6683,
+              "direct_p95": 35.752,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "glob_enum_cpp",
+              "overhead_ms": 203.7858,
+              "overhead_ratio": 7.0527499160931795,
+              "tool_p50": 237.4541,
+              "tool_p95": 267.6945,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 50.5979,
+              "direct_p95": 55.5801,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "high_frequency",
+              "overhead_ms": 202.438,
+              "overhead_ratio": 5.000917034106158,
+              "tool_p50": 253.0359,
+              "tool_p95": 267.9184,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 49.1309,
+              "direct_p95": 49.9324,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "literal_common_word",
+              "overhead_ms": 0.7467000000000041,
+              "overhead_ratio": 1.0151981746721515,
+              "tool_p50": 49.8776,
+              "tool_p95": 51.5693,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 49.8917,
+              "direct_p95": 51.6626,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "no_match",
+              "overhead_ms": 2.135399999999997,
+              "overhead_ratio": 1.0428007063299105,
+              "tool_p50": 52.0271,
+              "tool_p95": 53.8873,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 49.0759,
+              "direct_p95": 50.1105,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "regex_moderate",
+              "overhead_ms": 201.8272,
+              "overhead_ratio": 5.112552189567588,
+              "tool_p50": 250.9031,
+              "tool_p95": 251.7079,
+              "truncated": true
+            }
+          ]
+        },
+        {
+          "file_count": 768,
+          "gate2_highfreq_vs_fullscan_p50_ratio": 5.2259928726409814,
+          "gate2_truncated_at_100": true,
+          "name": "medium_p01_snapshot",
+          "queries": [
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 36.291,
+              "direct_p95": 38.8217,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "glob_enum_cpp",
+              "old_kernel_p50": 101.1471,
+              "old_kernel_p95": 105.1117,
+              "overhead_ms": 213.2088,
+              "overhead_ratio": 6.8749772670910145,
+              "speedup_old_vs_new_p50": 0.4053995233663514,
+              "speedup_old_vs_new_p95": 0.4182925931453017,
+              "tool_p50": 249.4998,
+              "tool_p95": 251.2875,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 48.53,
+              "direct_p95": 49.5134,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "high_frequency",
+              "old_kernel_p50": 902.4237,
+              "old_kernel_p95": 925.7828,
+              "overhead_ms": 203.4078,
+              "overhead_ratio": 5.191382649907274,
+              "speedup_old_vs_new_p50": 3.5819305399983645,
+              "speedup_old_vs_new_p95": 3.444656571628644,
+              "tool_p50": 251.9378,
+              "tool_p95": 268.7591,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 49.1355,
+              "direct_p95": 50.7357,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "literal_common_word",
+              "old_kernel_p50": 5167.5999,
+              "old_kernel_p95": 5560.193,
+              "overhead_ms": -0.2937999999999974,
+              "overhead_ratio": 0.9940206164585687,
+              "speedup_old_vs_new_p50": 105.8030310165289,
+              "speedup_old_vs_new_p95": 112.94685587993922,
+              "tool_p50": 48.8417,
+              "tool_p95": 49.2284,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 47.9457,
+              "direct_p95": 48.5646,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "no_match",
+              "old_kernel_p50": 6327.1153,
+              "old_kernel_p95": 6385.7808,
+              "overhead_ms": 0.2628999999999948,
+              "overhead_ratio": 1.0054832863009613,
+              "speedup_old_vs_new_p50": 131.24453520741113,
+              "speedup_old_vs_new_p95": 130.24603598715854,
+              "tool_p50": 48.2086,
+              "tool_p95": 49.0286,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 49.3739,
+              "direct_p95": 52.5403,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "regex_moderate",
+              "old_kernel_p50": 83.4687,
+              "old_kernel_p95": 87.2136,
+              "overhead_ms": 202.9366,
+              "overhead_ratio": 5.110199923441332,
+              "speedup_old_vs_new_p50": 0.330817385721165,
+              "speedup_old_vs_new_p95": 0.3284134230856709,
+              "tool_p50": 252.3105,
+              "tool_p95": 265.5604,
+              "truncated": true
+            }
+          ]
+        },
+        {
+          "file_count": 100002,
+          "gate2_highfreq_vs_fullscan_p50_ratio": 0.14466511708432145,
+          "gate2_truncated_at_100": true,
+          "name": "large",
+          "queries": [
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 72.5422,
+              "direct_p95": 77.1065,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "glob_enum_cpp",
+              "overhead_ms": 193.1098,
+              "overhead_ratio": 3.6620339609220567,
+              "tool_p50": 265.652,
+              "tool_p95": 265.8059,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 3264.8109,
+              "direct_p95": 3378.7577,
+              "gate1_pass": true,
+              "gate_allowance_ms": 652.96218,
+              "id": "high_frequency",
+              "overhead_ms": -2997.8396,
+              "overhead_ratio": 0.08177236237480094,
+              "tool_p50": 266.9713,
+              "tool_p95": 268.7913,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 1755.1106,
+              "direct_p95": 2009.9801,
+              "gate1_pass": true,
+              "gate_allowance_ms": 351.02212000000003,
+              "id": "literal_common_word",
+              "overhead_ms": -1488.6219999999998,
+              "overhead_ratio": 0.1518357874426831,
+              "tool_p50": 266.4886,
+              "tool_p95": 268.0524,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 1829.0301,
+              "direct_p95": 1850.7447,
+              "gate1_pass": true,
+              "gate_allowance_ms": 365.80602,
+              "id": "no_match",
+              "overhead_ms": 16.413400000000138,
+              "overhead_ratio": 1.0089738271666497,
+              "tool_p50": 1845.4435,
+              "tool_p95": 1913.4924,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 1764.3367,
+              "direct_p95": 1799.8536,
+              "gate1_pass": true,
+              "gate_allowance_ms": 352.86734,
+              "id": "regex_moderate",
+              "overhead_ms": -1499.4885,
+              "overhead_ratio": 0.15011205060802738,
+              "tool_p50": 264.8482,
+              "tool_p95": 267.1995,
+              "truncated": true
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "file": "tests/fixtures/search/bench/p07_bench_linux.json",
+      "platform": "linux-x64",
+      "rg_version": "15.2.0",
+      "tiers": [
+        {
+          "file_count": 25,
+          "gate2_highfreq_vs_fullscan_p50_ratio": 21.965447318684806,
+          "gate2_truncated_at_100": true,
+          "name": "small_dir",
+          "queries": [
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 10.775711,
+              "direct_p95": 10.998689,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "glob_enum_txt",
+              "overhead_ms": 0.10410900000000112,
+              "overhead_ratio": 1.009661450645809,
+              "tool_p50": 10.87982,
+              "tool_p95": 10.955387,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 10.790987,
+              "direct_p95": 10.981701,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "high_frequency",
+              "overhead_ms": 232.807581,
+              "overhead_ratio": 22.57426202070302,
+              "tool_p50": 243.598568,
+              "tool_p95": 243.867357,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 10.805969,
+              "direct_p95": 10.966911,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "literal_common_word",
+              "overhead_ms": 0.22888900000000056,
+              "overhead_ratio": 1.0211817191035806,
+              "tool_p50": 11.034858,
+              "tool_p95": 11.121726,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 10.786713,
+              "direct_p95": 10.810254,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "no_match",
+              "overhead_ms": 0.3033669999999997,
+              "overhead_ratio": 1.0281241375384698,
+              "tool_p50": 11.09008,
+              "tool_p95": 11.200113,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 11.008405,
+              "direct_p95": 11.219135,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "regex_moderate",
+              "overhead_ms": 0.11670999999999943,
+              "overhead_ratio": 1.0106018991852135,
+              "tool_p50": 11.125115,
+              "tool_p95": 11.317826,
+              "truncated": false
+            }
+          ]
+        },
+        {
+          "file_count": 1,
+          "gate2_highfreq_vs_fullscan_p50_ratio": 22.537311786326196,
+          "gate2_truncated_at_100": true,
+          "name": "small_file",
+          "queries": [
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 10.983943,
+              "direct_p95": 11.073414,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "glob_enum_cpp",
+              "overhead_ms": 0.14147799999999933,
+              "overhead_ratio": 1.012880438290694,
+              "tool_p50": 11.125421,
+              "tool_p95": 11.27968,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 31.104448,
+              "direct_p95": 31.307043,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "high_frequency",
+              "overhead_ms": 213.439651,
+              "overhead_ratio": 7.862029861452612,
+              "tool_p50": 244.544099,
+              "tool_p95": 245.020523,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 10.973582,
+              "direct_p95": 11.085018,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "literal_common_word",
+              "overhead_ms": -0.036573999999999884,
+              "overhead_ratio": 0.9966670864627429,
+              "tool_p50": 10.937008,
+              "tool_p95": 11.011178,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 10.985617,
+              "direct_p95": 11.074807,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "no_match",
+              "overhead_ms": -0.13498399999999933,
+              "overhead_ratio": 0.9877126610184936,
+              "tool_p50": 10.850633,
+              "tool_p95": 10.988158,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 11.02671,
+              "direct_p95": 11.160945,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "regex_moderate",
+              "overhead_ms": -0.13132699999999886,
+              "overhead_ratio": 0.9880901012178611,
+              "tool_p50": 10.895383,
+              "tool_p95": 10.921965,
+              "truncated": true
+            }
+          ]
+        },
+        {
+          "file_count": 819,
+          "gate2_highfreq_vs_fullscan_p50_ratio": 22.38696220861052,
+          "gate2_truncated_at_100": true,
+          "name": "medium",
+          "queries": [
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 10.879142,
+              "direct_p95": 11.044354,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "glob_enum_cpp",
+              "overhead_ms": 0.07474500000000006,
+              "overhead_ratio": 1.00687048666154,
+              "tool_p50": 10.953887,
+              "tool_p95": 11.037736,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 10.946133,
+              "direct_p95": 11.083911,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "high_frequency",
+              "overhead_ms": 233.636802,
+              "overhead_ratio": 22.344231976717257,
+              "tool_p50": 244.582935,
+              "tool_p95": 244.793277,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 10.935354,
+              "direct_p95": 11.179814,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "literal_common_word",
+              "overhead_ms": 0.6759149999999998,
+              "overhead_ratio": 1.061810070346145,
+              "tool_p50": 11.611269,
+              "tool_p95": 21.282543,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 10.910835,
+              "direct_p95": 10.937014,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "no_match",
+              "overhead_ms": 0.014405000000000001,
+              "overhead_ratio": 1.0013202472588028,
+              "tool_p50": 10.92524,
+              "tool_p95": 10.994437,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 10.8327,
+              "direct_p95": 20.888835,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "regex_moderate",
+              "overhead_ms": 233.650172,
+              "overhead_ratio": 22.56896913973432,
+              "tool_p50": 244.482872,
+              "tool_p95": 244.583141,
+              "truncated": true
+            }
+          ]
+        },
+        {
+          "file_count": 100002,
+          "gate2_highfreq_vs_fullscan_p50_ratio": 3.384605899865152,
+          "gate2_truncated_at_100": true,
+          "name": "large",
+          "queries": [
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 20.941383,
+              "direct_p95": 20.987382,
+              "gate1_pass": false,
+              "gate_allowance_ms": 20.0,
+              "id": "glob_enum_cpp",
+              "overhead_ms": 223.589282,
+              "overhead_ratio": 11.676910975745967,
+              "tool_p50": 244.530665,
+              "tool_p95": 245.0745,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 1311.897793,
+              "direct_p95": 1334.021938,
+              "gate1_pass": true,
+              "gate_allowance_ms": 262.37955860000005,
+              "id": "high_frequency",
+              "overhead_ms": -1067.073212,
+              "overhead_ratio": 0.18661863927687847,
+              "tool_p50": 244.824581,
+              "tool_p95": 245.097413,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 223.051331,
+              "direct_p95": 353.889933,
+              "gate1_pass": true,
+              "gate_allowance_ms": 44.610266200000005,
+              "id": "literal_common_word",
+              "overhead_ms": 21.649148999999994,
+              "overhead_ratio": 1.097059044225116,
+              "tool_p50": 244.70048,
+              "tool_p95": 245.242744,
+              "truncated": true
+            },
+            {
+              "comparison_caveat": "两侧同跑全程,纯包装开销",
+              "direct_p50": 72.457801,
+              "direct_p95": 91.596892,
+              "gate1_pass": true,
+              "gate_allowance_ms": 20.0,
+              "id": "no_match",
+              "overhead_ms": -0.12306300000000192,
+              "overhead_ratio": 0.9983015907424516,
+              "tool_p50": 72.334738,
+              "tool_p95": 82.931407,
+              "truncated": false
+            },
+            {
+              "comparison_caveat": "tool 100 条截断早停,direct 全程,开销差含早停红利",
+              "direct_p50": 303.548738,
+              "direct_p95": 324.748446,
+              "gate1_pass": true,
+              "gate_allowance_ms": 60.70974760000001,
+              "id": "regex_moderate",
+              "overhead_ms": -59.03198500000002,
+              "overhead_ratio": 0.805527160518124,
+              "tool_p50": 244.516753,
+              "tool_p95": 244.594528,
+              "truncated": true
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

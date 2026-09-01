@@ -1,0 +1,88 @@
+{
+  "cancel_to_clean_ms_max": 62.381358,
+  "cancel_to_clean_ms_p50": 61.958806,
+  "cancel_to_clean_ms_p95": 62.327575,
+  "cancel_to_return_ms_max": 62.381358,
+  "cancel_to_return_ms_p50": 61.958806,
+  "cancel_to_return_ms_p95": 62.327575,
+  "delay_ms": 20,
+  "midflight": [
+    {
+      "cancel_to_clean_table_ms": 62.381358,
+      "cancel_to_return_ms": 62.381358,
+      "cancelled_ok": true,
+      "residue_after": false,
+      "round": 0
+    },
+    {
+      "cancel_to_clean_table_ms": 52.312233,
+      "cancel_to_return_ms": 52.312233,
+      "cancelled_ok": true,
+      "residue_after": false,
+      "round": 1
+    },
+    {
+      "cancel_to_clean_table_ms": 52.181154,
+      "cancel_to_return_ms": 52.181154,
+      "cancelled_ok": true,
+      "residue_after": false,
+      "round": 2
+    },
+    {
+      "cancel_to_clean_table_ms": 56.579517,
+      "cancel_to_return_ms": 56.579517,
+      "cancelled_ok": true,
+      "residue_after": false,
+      "round": 3
+    },
+    {
+      "cancel_to_clean_table_ms": 62.327575,
+      "cancel_to_return_ms": 62.327575,
+      "cancelled_ok": true,
+      "residue_after": false,
+      "round": 4
+    },
+    {
+      "cancel_to_clean_table_ms": 57.681086,
+      "cancel_to_return_ms": 57.681086,
+      "cancelled_ok": true,
+      "residue_after": false,
+      "round": 5
+    },
+    {
+      "cancel_to_clean_table_ms": 62.278933,
+      "cancel_to_return_ms": 62.278933,
+      "cancelled_ok": true,
+      "residue_after": false,
+      "round": 6
+    },
+    {
+      "cancel_to_clean_table_ms": 62.025266,
+      "cancel_to_return_ms": 62.025266,
+      "cancelled_ok": true,
+      "residue_after": false,
+      "round": 7
+    },
+    {
+      "cancel_to_clean_table_ms": 62.036987,
+      "cancel_to_return_ms": 62.036987,
+      "cancelled_ok": true,
+      "residue_after": false,
+      "round": 8
+    },
+    {
+      "cancel_to_clean_table_ms": 61.958806,
+      "cancel_to_return_ms": 61.958806,
+      "cancelled_ok": true,
+      "residue_after": false,
+      "round": 9
+    }
+  ],
+  "no_cancel_full_ms": 93.457922,
+  "precancelled": {
+    "ok": true,
+    "wall_ms": 0.082658
+  },
+  "rg_version": "15.2.0",
+  "rounds": 10
+}

@@ -1,0 +1,43 @@
+{
+  "foreign_rg_at_start": 0,
+  "handle_delta": 0,
+  "host_after": {
+    "handles": 65,
+    "peak_ws_bytes": 8810496,
+    "threads": 1
+  },
+  "host_before": {
+    "handles": 65,
+    "threads": 3
+  },
+  "phases": [
+    {
+      "corpus": "<repo>/tests/fixtures/search/corpus",
+      "is_error_rounds": 0,
+      "name": "short_x1000",
+      "residue_bad_checks": 0,
+      "residue_checks": 10,
+      "rounds_done": 1000,
+      "wall_ms_max": 8266.2979,
+      "wall_ms_p50": 163.2156,
+      "wall_ms_p95": 3577.4442,
+      "wall_s_total": 581.7823368
+    },
+    {
+      "corpus": "<bench>/corpus/large",
+      "is_error_rounds": 0,
+      "name": "large_tree_x100",
+      "residue_bad_checks": 0,
+      "rounds_done": 100,
+      "truncated_rounds": 80,
+      "wall_ms_max": 14265.9691,
+      "wall_ms_p50": 2303.6815,
+      "wall_ms_p95": 9172.0641,
+      "wall_s_total": 321.8554391
+    }
+  ],
+  "rg_residue_final": 0,
+  "rg_version": "15.2.0",
+  "round_cap_ms": 30000,
+  "thread_delta": 0
+}

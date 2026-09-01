@@ -1,7 +1,7 @@
 # SearchTool 内置 Ripgrep 后端迁移设计
 
-- 状态：P0-1 已落（`2ffa1dc`）；P0-2/P0-3 已落；P0-4/P0-5/P0-6 已落（本批，2026-09-01）：流式 runner（ChildProcess 起 rg、JSONL/NUL 分帧、四道墙、终态裁决）在 `src/tools/search_ripgrep_run.cpp`，真实 rg 差分 17 全等/7 批准迁移/0 未批准，SearchTool 已切随包 ripgrep 主路且旧 std::regex 内核整段删除，发行链（release.yml 抓取+验包、安装脚本三件套、check_release、README 口径）齐。P0-7（性能与稳定门）与 P0-8（发布收口余项）未动。真机验：Windows 全链 + WSL 侧 POSIX 收树夹具与 Linux 包/安装/离线搜；macOS 无本机环境，release.yml 矩阵已写入待 CI。
-- 日期：2026-08-31（P0-4~P0-6 批 2026-09-01）
+- 状态：P0-1 已落（`2ffa1dc`）；P0-2/P0-3 已落；P0-4/P0-5/P0-6 已落（2026-09-01）：流式 runner（ChildProcess 起 rg、JSONL/NUL 分帧、四道墙、终态裁决）在 `src/tools/search_ripgrep_run.cpp`，真实 rg 差分 17 全等/7 批准迁移/0 未批准，SearchTool 已切随包 ripgrep 主路且旧 std::regex 内核整段删除，发行链（release.yml 抓取+验包、安装脚本三件套、check_release、README 口径）齐。**P0-7（性能与稳定门）已落（2026-09-01）**：三档基准×五类查询×两平台 raw 账落 `tests/fixtures/search/bench/p07_*`，自然完成档包装开销≈0、大树截断亚线性、1000 短搜+大树 100 轮两平台全净、取消响应与内存采集齐；查出两笔要紧的：①满额/取消停树固定多付 ~200ms 体面等待（`Shutdown(200)` 等 rg 自愿退出，rg 不读 stdin 等不来，修复另批）；②上游 `.deb` 的 rg 本就是 musl 静态构建（3.2 的"deb=GNU/glibc"前提不成立），musl 资产过本仓大树压力门，改源码构建 GNU 版归主控/P0-8 裁决。P0-8（发布收口余项）未动。真机验：Windows 全链 + WSL 侧 POSIX 收树夹具与 Linux 包/安装/离线搜；macOS 无本机环境，release.yml 矩阵已写入待 CI。
+- 日期：2026-08-31（P0-4~P0-7 批 2026-09-01）
 - 级别：P0（核心只读工具的速度、正确性、取消与发行完整性）
 - 范围：`src/tools/search.*`、`src/platform/process.*`、观察边界、工具文案、安装脚本、Release 包、三平台 CI、第三方许可证、性能基准
 - 依赖：`ToolExecutionContext.cancel`、`platform::ChildProcess`、`ObservationBoundary`、`Tool::Result`、现有 `search` grep/glob 合同
@@ -136,11 +136,11 @@ THIRD_PARTY_NOTICES.md
 
 Linux 资产门：
 
-- [ ] 在 `ubuntu-latest` 解 `.deb`，运行 `rg --version`。
-- [ ] 跑本单大树压力夹具至少 100 轮，不崩、不挂。
-- [ ] 用 `ldd` 记录运行库；不得添出 runner 镜像没有、目标 Ubuntu 常规环境也没有的私有依赖。
-- [ ] 若 `.deb` 资产不宜再分发，改为 Release job 用固定 Rust toolchain 从 `15.2.0` tag 构建 GNU 版；仍产哈希、仍过同一压力门。
-- [ ] musl 方案只有上游问题有结论并经本仓压力实测后才可回来，不能因包小便越门。
+- [x] 在 `ubuntu-latest` 解 `.deb`，运行 `rg --version`。→（P0-7 落，2026-09-01）WSL Ubuntu 26.04 x64 真机解包（dpkg-deb -x），`rg --version` 过：`ripgrep 15.2.0 (rev e89fff89ac)`；成员 sha256 `c2e9783a…` 落档。CI 的 `ubuntu-latest` 矩阵待流水线真跑，如实标注。
+- [x] 跑本单大树压力夹具至少 100 轮，不崩、不挂。→ 过：WSL 真机大树 100 轮（100,002 文件、含 ignored 生成树），0 崩 0 挂 0 报错 0 孤儿（`p07_stress_linux.json`）。**正是这道门必须跑的原因——见下条的事实发现。**
+- [x] 用 `ldd` 记录运行库；不得添出 runner 镜像没有、目标 Ubuntu 常规环境也没有的私有依赖。→ 记了：`ldd libexec/rg` → `statically linked`（ELF static-pie，零动态依赖）。零动态依赖即"不可能添私有依赖"的最强形态。
+- [ ] 若 `.deb` 资产不宜再分发，改为 Release job 用固定 Rust toolchain 从 `15.2.0` tag 构建 GNU 版；仍产哈希、仍过同一压力门。→ **本批查出事实错，此条从"备选"变"待裁决"**：上游 `release.yml` 的 `build-release-deb` job 钉死 `TARGET: x86_64-unknown-linux-musl`（cargo deb 按 musl target 编，为的是发行面广、PCRE2 静态进二进制）——**`.deb` 里的 `usr/bin/rg` 本就是 musl 静态构建，"deb 内是 GNU/glibc rg"这一节的前提不成立**。也就是说随包资产自 P0-2 起就是 musl，3.2 想绕开的那份风险其实一直在包里。实测账：musl rg 在 WSL 大树 100 轮 0 崩 0 挂，`no_match` 全树扫 72ms、基准/取消全跑通——本仓压力门这一侧是绿的；上游 #3494（musl 超大目录偶发 SIGSEGV）是否有结论未查证。改源码构建 GNU 版 or 接受 musl（压力门实测背书），归主控/P0-8 裁决，本批不擅动 manifest 与发行链。
+- [ ] musl 方案只有上游问题有结论并经本仓压力实测后才可回来，不能因包小便越门。→ 如实标注：实测这半边已过（上条）；上游 #3494 结论未查证，留待裁决时一并看。
 
 ### 3.3 许可证与署名
 
@@ -671,13 +671,13 @@ lubancode/
 
 首版性能门：
 
-- [ ] medium/large 的 SearchTool+rg 不得比直接 rg 多 20% wall time 或 20ms（取较宽者）。
-- [ ] large 高频命中在第 100 条后主动停，耗时不得随余下语料线性增长。
-- [ ] small 档若因起进程略慢，如实记录；不得拿 large 倍数遮住。
-- [ ] 每平台压力跑 1000 次短搜索，无崩溃、死锁、句柄泄漏、孤儿进程。
-- [ ] Linux 另跑大树 100 轮，守住 15.2.0 资产风险门。
+- [ ] medium/large 的 SearchTool+rg 不得比直接 rg 多 20% wall time 或 20ms（取较宽者）。→ **半过，如实记账（P0-7 落，2026-09-01，数据为定稿轮）**：自然完成档全过且开销≈0——Windows medium `no_match` tool 52.0ms vs direct 49.9ms、`literal` 49.9 vs 49.1（±2ms 内）；Linux medium 10.9 vs 10.9、Linux large `no_match` 72.3 vs 72.5；Windows large `no_match` 1845.4 vs 1829.0（+16ms，+0.9%，门宽 366ms）。**截断档红**——两平台所有满 100 条主动停树的查询固定多付 ~200ms（Linux 截断档 p50 一律 244.5ms、direct 同查 10.8~1311ms；Windows 同形态 250~267ms，direct 33~72ms——仅 large glob 这类 direct 本就快的查询在门上见红；direct 全程慢于工具的截断查询反而 PASS，那是早停红利不是包装免费，report 里逐条带 caveat）。病根已定位：`ChildProcess::Shutdown(200)` 先关 stdin 等子进程自愿退出，而 rg 以显式路径参数跑、从不读 stdin，stdout 停读后 rg 只会在管道写满处阻塞，等不来自愿退出——体面等待每次白等满 200ms 才 SIGTERM/TerminateJobObject（佐证：小语料上 rg 能在 200ms 内自然跑完的截断查询就不付这笔，Linux medium glob 11.0ms、small_file literal 10.9ms）。取消路径同病（Windows 按停到返回 p50≈300ms，大头即此等待）。本批红线只测不改，修复（满额/取消停树跳过或缩短 grace）另批。raw 账：`tests/fixtures/search/bench/p07_report.{json,csv}`。
+- [x] large 高频命中在第 100 条后主动停，耗时不得随余下语料线性增长。→ 过。两平台大树（100,002 文件）`high_frequency` 均 `truncated=true` 且恰 100 条；耗时亚线性实测：medium→large 文件比 122×，高频截断耗时比 Windows 1.06x、Linux 1.00x（`p07_report.json` 的 gate2_linearity 字段）；对照 full-scan `no_match` 同口径是 Windows 52.0→1845.4ms（35×）、Linux 10.9→72.3ms（6.6×），都朝文件比方向走——全文扫描随语料长、截断查询不随，两相对照正是这道门要的证据。
+- [x] small 档若因起进程略慢，如实记录；不得拿 large 倍数遮住。→ 如实记了，没拿大档遮：small_file（单文件）/small_dir（25 文件）自然完成 tool≈direct（Windows 27.6-36.5ms vs 29.0-37.3ms；Linux 10.8-11.1ms 两列几乎逐位相同），起 rg 的固定成本 Windows ~28ms、Linux ~11ms，与档位无关——small 档的耗时本来就是进程启动成本主导，没有"靠 large 倍数撑场面"；small 档截断查询同样吃那 ~200ms 停树等待（Linux small_file high_frequency 244.5ms vs direct 31.1ms；Windows small_file literal 358.7 vs 31.9），与大档病根同源、同批另修。raw：`p07_bench_{win,linux}.json` 的 small_file/small_dir 档。
+- [x] 每平台压力跑 1000 次短搜索，无崩溃、死锁、句柄泄漏、孤儿进程。→ 过，两平台真机：Windows 1000 轮（p50 163ms，0 报错，句柄 65→65 零涨，线程归位，rg 残留 0，逐 100 轮查进程表 10 次全净）+ 大树 100 轮（截断 80 轮符合查询轮换预期，0 报错 0 残留）；WSL Ubuntu 同口径 1000 短搜（p50 11.0ms）+ 大树 100 轮全净。macOS 无本机环境，如实标注待 CI。raw：`p07_stress_{win,linux}.json`。
+- [x] Linux 另跑大树 100 轮，守住 15.2.0 资产风险门。→ 过（WSL Ubuntu 26.04 x64，真机非 CI）：大树 100 轮 0 崩 0 挂 0 残留。**但 3.2 的资产前提查出事实错，见下**。
 
-不预写“快 10 倍”。数字只从固定脚本与原始结果来。
+不预写“快 10 倍”。数字只从固定脚本与原始结果来。→ 驱动 `tests/manual/search_perf_driver.cpp`（bench/stress/cancel/report 四子命令，不进 ctest）+ `scripts/gen_search_bench_corpus.py`（确定性大树语料，100,002 文件含 5,000 文件 ignored 生成树，ignored 树真被剪的活探针 = `needle_only_in_ignored` 从根搜零命中）。旧内核列不重跑（内核已删），按 query id 对 P0-1 冻结账对账：**同语料（P0-1 提交 `2ffa1dc` 时点的 src/ 快照，768 文件）提速倍数（P50）——`no_match` 6327.1→48.2ms = 131.2x、`literal_common_word` 5167.6→48.8ms = 105.8x、`high_frequency` 902.4→251.9ms = 3.6x；`regex_moderate` 83.5→252.3ms = 0.3x、`glob_enum_cpp` 101.1→249.5ms = 0.4x（这两档新反慢，即上文的 200ms 停树等待，去掉后 ≈ direct 的 49/36ms，修复后应反超旧内核 1.7~2.8x）**。P0-1 留白的内存采集也交了账：独立驱动文件里 `NOMINMAX`+`WIN32_LEAN_AND_MEAN`+windows.h 先行的宏防护下 psapi.h 直含可编（P0-1 的撞车是 include 序/宏污染，不是工具链不兼容，未动生产一分）；rg 峰值内存两把尺子分记——采样账（进程表 2ms 采样，PeakWorkingSetSize/VmHWM，量的是驻留集峰）与 direct 列 Windows Job Object 精确账（PeakProcessMemoryUsed，量的是提交内存峰，口径不同不冒充互等）：大树档 rg 驻留峰 9.6-13.9MB（glob 档最高，rg 列路径缓冲大）、medium 6.5-9.2MB、宿主（驱动进程）全程峰值 <9MB、句柄/线程账见 stress 账。
 
 ### P0-8：删旧内核与发布收口
 
