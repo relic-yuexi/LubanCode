@@ -17,30 +17,26 @@ namespace lubancode::runtime {
 
 SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)), store_(options_.sessions_dir) {
     thread_id_ = ids_.NextThreadId();
-    // P0-2 轨迹账:flag 开的会话在这里开张(进程一场,LaunchSession)。
-    // 开不出来记 error,由装配层决定会话启动失败——本类不回退旧写口。
-    if (options_.trajectory_enabled) {
-        TrajectorySessionLedger::Options ledger_options;
-        ledger_options.trajectories_root = options_.trajectory_trajectories_root;
-        ledger_options.workspace_identity = options_.trajectory_workspace_identity;
-        ledger_options.lubancode_version = options_.lubancode_version;
-        ledger_options.resume_at_launch = options_.trajectory_resume_at_launch;
-        ledger_options.resume_source_session_id = options_.trajectory_resume_source_session_id;
-        auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
-        if (ledger.has_value()) {
-            trajectory_.emplace(std::move(*ledger));
-        } else {
-            trajectory_open_error_ = ledger.error();
-        }
+    // P0-2(Trajectory 升为唯一 Session):恒开一场(进程一场,
+    // LaunchSession/resume-as-new)。开不出来记 error,由装配层让会话启动
+    // 失败——本类不回退旧写口,也不留"先聊聊再落账"的暗门。
+    TrajectorySessionLedger::Options ledger_options;
+    ledger_options.workspaces_root = options_.trajectory_workspaces_root;
+    ledger_options.workspace_identity = options_.trajectory_workspace_identity;
+    ledger_options.lubancode_version = options_.lubancode_version;
+    ledger_options.resume_at_launch = options_.trajectory_resume_at_launch;
+    ledger_options.resume_source_session_id = options_.trajectory_resume_source_session_id;
+    auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
+    if (ledger.has_value()) {
+        trajectory_.emplace(std::move(*ledger));
+    } else {
+        trajectory_open_error_ = ledger.error();
     }
 }
 
 SessionRuntime::~SessionRuntime() = default;
 
 std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::path& new_cwd) {
-    if (!options_.trajectory_enabled) {
-        return {};
-    }
     std::filesystem::path home_dir;
     if (const auto home = config::HomeLubancodeDir(); home.has_value()) {
         home_dir = tools::Utf8ToPath(*home);
@@ -56,13 +52,13 @@ std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::p
         }
         // 跨 workspace:封当前场,再在新 workspace 开新场(§4.5 不许往旧房
         // 搬账)。旧场留在旧 workspace,sessions 索引可查可 resume。新场落
-        // 同一个 trajectories 根(从旧场 session 目录四层上推:session 在
-        // <root>/workspaces/<key>/sessions/<id>,布局是合同)。
-        const std::filesystem::path trajectories_root =
-            trajectory_->session_dir().parent_path().parent_path().parent_path().parent_path();
+        // 同一个持久化根(从旧场 session 目录三层上推:session 在
+        // <root>/<key>/sessions/<id>,布局是合同)。
+        const std::filesystem::path workspaces_root =
+            trajectory_->session_dir().parent_path().parent_path().parent_path();
         trajectory_->CloseSession("workspace_switch");
         TrajectorySessionLedger::Options ledger_options;
-        ledger_options.trajectories_root = trajectories_root;
+        ledger_options.workspaces_root = workspaces_root;
         ledger_options.workspace_identity = std::move(*identity);
         ledger_options.lubancode_version = options_.lubancode_version;
         ledger_options.launch_cwd = platform::PathToUtf8(ledger_options.workspace_identity.launch_cwd);
@@ -104,11 +100,9 @@ TurnEventAdapter SessionRuntime::MakeTurnAdapter() {
 
 SessionBeginResult SessionRuntime::EnsureBegun(const std::string& first_text, const std::string& model,
                                                const std::string& cwd) {
-    if (options_.trajectory_enabled) {
-        // P0-2:单一真账在 Trajectory Journal,旧 SessionStore 不建档
-        //(禁 dual-write)。标题等控制事实后续走 control.* 事件。
-        return SessionBeginResult::Disabled;
-    }
+    // P0-2:单一真账在 Trajectory Journal,旧 SessionStore 不建档
+    //(禁 dual-write)。标题等控制事实走 control.* 事件(RecordTitleChanged)。
+    return SessionBeginResult::Disabled;
     if (store_.active()) {
         return SessionBeginResult::Active;
     }
@@ -145,11 +139,9 @@ SessionBeginResult SessionRuntime::EnsureBegun(const std::string& first_text, co
 
 SessionPersistResult SessionRuntime::PersistNew(const std::vector<api::Message>& history, const std::string& model,
                                                 const std::string& cwd) {
-    if (options_.trajectory_enabled) {
-        // P0-2:轮末补抄停用(§15.3"删除轮末按 persisted_count_ 扫 history
-        // 追加这条路")。轨迹路的事实已随事件即时落账。
-        return SessionPersistResult::Nothing;
-    }
+    // P0-2:轮末补抄停用(§15.3"删除轮末按 persisted_count_ 扫 history
+    // 追加这条路")。事实已随事件即时落账(input/output/tool.result)。
+    return SessionPersistResult::Nothing;
     if (options_.sessions_dir.empty() || store_broken_) {
         return SessionPersistResult::Nothing;
     }
@@ -196,7 +188,9 @@ SessionPersistResult SessionRuntime::PersistNewWithProvenance(
     const channel::MessageProvenance& provenance) {
     // 渠道轮(多渠道单阶段 3):与 PersistNew 同一条路,差别只在落盘新基线
     // 里的第一条 user 消息带 provenance(宿主真账进 session JSONL,§12.2)。
-    if (options_.trajectory_enabled || options_.sessions_dir.empty() || store_broken_) {
+    // P0-2(Trajectory 升为唯一 Session):轮末补抄停用——事实由事件即时
+    // 落账;provenance 进 Journal 的 typed 投影是 channel 线后续批次的活。
+    if (options_.sessions_dir.empty() || store_broken_) {
         return SessionPersistResult::Nothing;
     }
     if (history.size() <= persisted_count_) {

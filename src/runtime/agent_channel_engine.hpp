@@ -34,10 +34,11 @@ namespace lubancode::runtime {
 class AgentChannelEngine : public ChannelTurnEngine {
 public:
     struct Options {
-        std::string sessions_dir;   // 空 = 不落盘(测试/无主目录)
+        std::string sessions_dir;   // 旧 SessionStore 档案目录(P0-2 起不消费,P0-6 删)
+        std::string workspaces_dir;  // P0-2:唯一持久化根(空 = <home>/.lubancode/workspaces)
         std::string wire_name;      // meta.wire
         std::string model;          // 会话模型(存档 meta 用)
-        std::string cwd;            // 会话目录
+        std::string cwd;            // 会话目录(身份按它四级裁决,不认进程 cwd)
         std::string lubancode_version;
         channel::ToolRoutePolicy tools;  // binding 工具策略(fail closed 裁定用)
     };

@@ -748,16 +748,17 @@ const Entry kZhCN[] = {
      "  /memory accept <id>             接受候选入库\n"
      "  /memory edit <id> 标题 [:: 正文] 改候选\n"
      "  /memory reject <id> [理由]      拒绝候选(同主题不再重提)\n"
-     "  /memory list                     列出项目记忆\n"
-     "  /memory remember fact|preference|feedback 标题 [:: 正文]\n"
-     "  /memory remember user preference|feedback 标题 [:: 正文]  (须全局授权)\n"
-     "  /memory forget <id>              归档一条记忆\n"
+     "  /memory list [project|global]   列记忆(默认两层合并;global 是管理读口)\n"
+     "  /memory remember project fact|preference|feedback 标题 [:: 正文]\n"
+     "  /memory remember global preference|feedback 标题 [:: 正文]\n"
+     "                                  (全局记忆:只认这条用户命令,每次写入须确认)\n"
+     "  /memory forget [project|global] <id>   归档一条记忆(global 须确认)\n"
      "  /memory rebuild                  后台重建索引\n"
      "  /memory stale                    看指纹漂移与已过期的记忆\n"
-     "  /memory verify <id>              核验后续命(原 id 复活)\n"
+     "  /memory verify [project|global] <id>   核验后续命(原 id 复活)\n"
      "  /memory refresh <id>             核验并把 status 回炉为 active\n"
      "  /memory migrate                  旧格式主题批迁 front matter(先列账再确认)\n"
-     "  /memory show <id>                看一份主题的 front matter 与正文\n"
+     "  /memory show [project|global] <id>     看一份主题的 front matter 与正文\n"
      "  /memory open [id]                用 $VISUAL/$EDITOR 编辑主题或索引\n"
      "  /memory why [id]                 看上一轮召回为何命中/落选\n"},
     {"cmd.memory.unavailable", "[memory] 找不到主目录，项目记忆不可用。"},
@@ -778,7 +779,7 @@ const Entry kZhCN[] = {
      "用 /memory accept <id> 接受、/memory edit <id> 标题::正文 修改、/memory reject <id> [理由] 拒绝。"},
     {"cmd.memory.reject.done", "[memory] 候选已拒绝,同主题不会再自动重提。"},
     {"cmd.memory.edit.done", "[memory] 候选已改,仍在待审区。"},
-    {"cmd.memory.project", "项目: {0}"},
+    {"cmd.memory.project", "工作区: {0}"},
     {"cmd.memory.directory", "目录: {0}"},
     {"cmd.memory.counts", "条目: {0}；待办: {1}"},
     {"cmd.memory.master", "[memory] 本场已{0}。"},
@@ -810,11 +811,22 @@ const Entry kZhCN[] = {
     {"cmd.memory.why.hit", "  {0}  分数 {1}(硬命中 {2}，词项 {3}) — 已注入 {4} 字节"},
     {"cmd.memory.why.miss", "  {0}  分数 {1}(硬命中 {2}，词项 {3}) — 未注入: {4}"},
     {"cmd.memory.why.stale", "相关文件已变化，只提示不注正文"},
+    {"cmd.memory.why.snapshot_failed", "召回快照落账不稳,本轮不注入(§9.2 不得注了却无账)"},
     {"cmd.memory.why.duplicate", "同一事实/相同证据已注入,去重让位"},
     {"cmd.memory.why.superseded", "项目层同主题已注入,用户层让位"},
-    {"cmd.memory.why.layer_user", "(用户层)"},
+    {"cmd.memory.why.layer_user", "(全局记忆)"},
     {"cmd.memory.user_layer", "用户层"},
-    {"cmd.memory.user_status", "用户级记忆: {0} 条;目录: {1}(授权在全局 memory.user_enabled)"},
+    {"cmd.memory.global_layer", "全局记忆"},
+    {"cmd.memory.remember.legacy_hint",
+     "[memory] 提示:不带层级的 remember 默认写项目层;全局记忆请显式写 "
+     "/memory remember global preference|feedback 标题 :: 正文(每次写入须确认)。"},
+    {"cmd.memory.global.confirm", "写入全局记忆「{0}」——跨项目生效,确认? [y/N]: "},
+    {"cmd.memory.global.confirm_forget", "归档全局记忆「{0}」(只挪进 archive/,不改旧 Journal),确认? [y/N]: "},
+    {"cmd.memory.global.cancelled", "未确认,全局记忆未动。"},
+    {"cmd.memory.global.no_fact", "[memory] 全局记忆只收 preference|feedback——仓库事实住项目层。"},
+    {"cmd.memory.global.layer_mismatch", "该主题不在全局层"},
+    {"cmd.memory.user_status",
+     "全局记忆: {0} 条;目录: {1}(召回授权在全局 memory.user_enabled;写入只认 /memory remember global + 确认)"},
     {"cmd.memory.why.below_threshold", "分数未过最低门槛"},
     {"cmd.memory.why.budget", "条数/字节预算已满"},
     {"cmd.memory.why.skipped", "未取到正文"},
@@ -1338,7 +1350,7 @@ const Entry kZhCN[] = {
 
     // ---- /doctor:本地兼容端 Effort 与前缀缓存诊断(2026-08 单) ----
     {"doctor.usage.usage_line",
-     "用法: /doctor effort [档位|unset] | /doctor cache [probe [轮数]|usage] | /doctor agents | /doctor shell | /doctor trajectory"},
+     "用法: /doctor effort [档位|unset] | /doctor cache [probe [轮数]|usage] | /doctor agents | /doctor shell | /doctor trajectory | /doctor memory"},
     {"doctor.overview.header", "诊断概览(不发请求,只看当前声明与结论):"},
     {"doctor.overview.effort", "  当前档位: "},
     {"doctor.overview.declared", "  档位声明: "},
@@ -1635,7 +1647,7 @@ const Entry kZhCN[] = {
     // ---- 会话存档:/sessions //resume //export //title //clear ----
     {"session.no_home", "找不到用户主目录,会话存档不可用。"},
     {"cmd.sessions.usage", "用法:/sessions(本目录)或 /sessions all(全部目录)"},
-    {"cmd.sessions.none_all", "还没有会话存档({0} 下没有 .jsonl)。"},
+    {"cmd.sessions.none_all", "还没有会话账({0} 下没有任何场次)。"},
     {"cmd.sessions.none_here", "本目录还没有会话存档(/sessions all 看全部目录)。"},
     {"cmd.sessions.header", "最近 {0} 场会话({1};时间倒序,/resume 编号或id 续聊):"},
     {"cmd.sessions.scope_all", "全部目录"},
@@ -1674,9 +1686,9 @@ const Entry kZhCN[] = {
      "用法:lubancode delete <id|标题> [--force]。永久删除,不可恢复;--force 跳过确认,只给脚本。"},
     {"cmd.session.ref_not_found", "找不到会话 {0}(按 id 或标题解;先 /sessions 看一眼)。"},
     {"cmd.session.ref_ambiguous", "引用 {0} 命中多场,请用完整 id 点明: {1}"},
-    {"cmd.session.archive.done", "已归档 {0}(搬进 sessions/archive/,字节原样)。"},
+    {"cmd.session.archive.done", "已归档 {0}(session.json 转 archived,正文与 hash 原样)。"},
     {"cmd.session.archive.failed", "归档 {0} 失败:文件没动,原账可用。"},
-    {"cmd.session.unarchive.done", "已取消归档 {0}(搬回 sessions/ 根,可 /resume 续聊)。"},
+    {"cmd.session.unarchive.done", "已取消归档 {0}(转回 closed,可 /resume 续聊)。"},
     {"cmd.session.unarchive.failed", "取消归档 {0} 失败:文件没动,原账可用。"},
     {"cmd.session.delete.confirm_header", "永久删除确认"},
     {"cmd.session.delete.confirm_title", "  标题: {0}"},
@@ -1684,7 +1696,7 @@ const Entry kZhCN[] = {
     {"cmd.session.delete.confirm_cwd", "  目录: {0}"},
     {"cmd.session.delete.confirm_prompt", "这是永久删除,不可恢复。确认请输 y,缺省取消: "},
     {"cmd.session.delete.cancelled", "已取消,什么都没删。"},
-    {"cmd.session.delete.done", "已永久删除 {0}(只删这一场;artifact blob 按内容寻址,别的会话还可能引用)。"},
+    {"cmd.session.delete.done", "已永久删除 {0}(只删这一场,留 tombstone;artifact 按内容寻址,别的会话还可能引用)。"},
     {"cmd.session.delete.failed", "删除 {0} 失败:文件没动。"},
     {"cmd.archive.not_active", "当前会话还没落盘(没建过档),没什么可归档。"},
     {"cmd.delete.not_active", "当前会话还没落盘(没建过档),没什么可删。"},
@@ -2602,16 +2614,17 @@ const Entry kEn[] = {
      "  /memory accept <id>                      accept a candidate into the store\n"
      "  /memory edit <id> title [:: body]        edit a candidate\n"
      "  /memory reject <id> [reason]             reject a candidate (same topic won't return)\n"
-     "  /memory list                              list project memories\n"
-     "  /memory remember fact|preference|feedback title [:: body]\n"
-     "  /memory remember user preference|feedback title [:: body]  (needs global grant)\n"
-     "  /memory forget <id>                       archive one memory\n"
+     "  /memory list [project|global]            list memories (both layers by default)\n"
+     "  /memory remember project fact|preference|feedback title [:: body]\n"
+     "  /memory remember global preference|feedback title [:: body]\n"
+     "                                           (global memory: this user command only, confirmed each time)\n"
+     "  /memory forget [project|global] <id>     archive one memory (global asks for confirmation)\n"
      "  /memory rebuild                           rebuild the index in background\n"
      "  /memory stale                             list drifted (fingerprint) and expired memories\n"
-     "  /memory verify <id>                       re-verify, reviving the entry under its id\n"
+     "  /memory verify [project|global] <id>     re-verify, reviving the entry under its id\n"
      "  /memory refresh <id>                      re-verify and reset status to active\n"
      "  /memory migrate                           batch-migrate legacy topics to front matter (plan first)\n"
-     "  /memory show <id>                         show one topic's front matter and body\n"
+     "  /memory show [project|global] <id>       show one topic's front matter and body\n"
      "  /memory open [id]                         edit a topic or the index via $VISUAL/$EDITOR\n"
      "  /memory why [id]                          explain the last recall: hits, misses, blocks\n"},
     {"cmd.memory.unavailable", "[memory] The home directory is unavailable; project memory cannot run."},
@@ -2633,7 +2646,7 @@ const Entry kEn[] = {
      "[reason] to reject."},
     {"cmd.memory.reject.done", "[memory] Candidate rejected; the same topic won't be proposed again."},
     {"cmd.memory.edit.done", "[memory] Candidate updated; still pending review."},
-    {"cmd.memory.project", "Project: {0}"},
+    {"cmd.memory.project", "Workspace: {0}"},
     {"cmd.memory.directory", "Directory: {0}"},
     {"cmd.memory.counts", "Entries: {0}; pending: {1}"},
     {"cmd.memory.master", "[memory] Project memory is now {0} for this session."},
@@ -2666,12 +2679,25 @@ const Entry kEn[] = {
     {"cmd.memory.why.hit", "  {0}  score {1} (hard hits {2}, terms {3}) — injected {4} bytes"},
     {"cmd.memory.why.miss", "  {0}  score {1} (hard hits {2}, terms {3}) — not injected: {4}"},
     {"cmd.memory.why.stale", "related files changed; hint only, body withheld"},
+    {"cmd.memory.why.snapshot_failed", "recall snapshot could not be recorded; withheld this turn"},
     {"cmd.memory.why.duplicate", "duplicate fact/evidence already injected; deduped"},
     {"cmd.memory.why.superseded", "project-layer topic on the same theme was injected; user layer yielded"},
     {"cmd.memory.why.layer_user", " (user layer)"},
     {"cmd.memory.user_layer", "user layer"},
+    {"cmd.memory.global_layer", "global memory"},
+    {"cmd.memory.remember.legacy_hint",
+     "[memory] Note: remember without a layer defaults to project. For global memory use "
+     "/memory remember global preference|feedback title :: body (confirmed each time)."},
+    {"cmd.memory.global.confirm", "Write into global memory \"{0}\" — it applies across projects. Proceed? [y/N]: "},
+    {"cmd.memory.global.confirm_forget",
+     "Archive global memory \"{0}\" (moves to archive/ only, old journals untouched). Proceed? [y/N]: "},
+    {"cmd.memory.global.cancelled", "Not confirmed; global memory untouched."},
+    {"cmd.memory.global.no_fact",
+     "[memory] Global memory takes preference|feedback only — repo facts live in the project layer."},
+    {"cmd.memory.global.layer_mismatch", "that topic is not in the global layer"},
     {"cmd.memory.user_status",
-     "User-level memories: {0}; directory: {1} (grant lives in global memory.user_enabled)"},
+     "Global memory: {0} entries; directory: {1} (recall grant in global memory.user_enabled; "
+     "writes only via /memory remember global + confirmation)"},
     {"cmd.memory.why.below_threshold", "score below the minimum threshold"},
     {"cmd.memory.why.budget", "result/byte budget exhausted"},
     {"cmd.memory.why.skipped", "body unavailable"},
@@ -2945,9 +2971,9 @@ const Entry kEn[] = {
      "confirmation (scripts only)."},
     {"cmd.session.ref_not_found", "No session matches {0} (by id or title; try /sessions first)."},
     {"cmd.session.ref_ambiguous", "Reference {0} matches several sessions; name the full id: {1}"},
-    {"cmd.session.archive.done", "Archived {0} (moved into sessions/archive/, bytes untouched)."},
+    {"cmd.session.archive.done", "Archived {0} (session.json marked archived, bytes untouched)."},
     {"cmd.session.archive.failed", "Archiving {0} failed; the file is untouched and still usable."},
-    {"cmd.session.unarchive.done", "Unarchived {0} (back in sessions/, resumable)."},
+    {"cmd.session.unarchive.done", "Unarchived {0} (back to closed, resumable)."},
     {"cmd.session.unarchive.failed", "Unarchiving {0} failed; the file is untouched and still usable."},
     {"cmd.session.delete.confirm_header", "Permanent deletion"},
     {"cmd.session.delete.confirm_title", "  Title: {0}"},

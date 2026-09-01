@@ -47,7 +47,7 @@ SessionDoctorReport BuildSessionDoctorReport(const std::filesystem::path& sessio
 
 struct WorkspaceDoctorReport {
     std::string workspace_key;
-    std::filesystem::path trajectories_root;
+    std::filesystem::path workspaces_root;  // P0-2:唯一项目持久化根
     bool disk_space_known = false;
     std::uint64_t disk_free_bytes = 0;
     std::uint64_t disk_total_bytes = 0;
@@ -61,7 +61,7 @@ struct WorkspaceDoctorReport {
 };
 
 // active_session_id 空 = 没有活动 session(只报磁盘与 workspace 概况)。
-WorkspaceDoctorReport BuildWorkspaceDoctorReport(const std::filesystem::path& trajectories_root,
+WorkspaceDoctorReport BuildWorkspaceDoctorReport(const std::filesystem::path& workspaces_root,
                                                  const std::filesystem::path& workspace_dir,
                                                  const std::string& workspace_key,
                                                  const std::optional<std::string>& active_session_id,

@@ -210,6 +210,8 @@ const char* LifecycleOperationName(LifecycleOperation operation) {
             return "create_session";
         case LifecycleOperation::ArchiveSession:
             return "archive_session";
+        case LifecycleOperation::UnarchiveSession:
+            return "unarchive_session";
         case LifecycleOperation::ResumeReference:
             return "resume_reference";
         case LifecycleOperation::DeleteSession:
@@ -221,7 +223,8 @@ const char* LifecycleOperationName(LifecycleOperation operation) {
 std::optional<LifecycleOperation> LifecycleOperationFromName(std::string_view name) {
     for (const LifecycleOperation operation :
          {LifecycleOperation::CreateSession, LifecycleOperation::ArchiveSession,
-          LifecycleOperation::ResumeReference, LifecycleOperation::DeleteSession}) {
+          LifecycleOperation::UnarchiveSession, LifecycleOperation::ResumeReference,
+          LifecycleOperation::DeleteSession}) {
         if (name == LifecycleOperationName(operation)) {
             return operation;
         }
@@ -627,8 +630,7 @@ SessionManager::SessionManager(SessionManagerOptions options, SessionManagerCloc
         options_.identity = workspace::MakeFallbackIdentity(options_.workspace_root);
     }
     workspace_key_ = options_.identity.workspace_key;
-    workspace_dir_ =
-        options_.trajectories_root / "workspaces" / platform::Utf8ToPath(workspace_key_);
+    workspace_dir_ = options_.workspaces_root / platform::Utf8ToPath(workspace_key_);
 }
 
 SessionManager::~SessionManager() = default;
@@ -638,8 +640,8 @@ bool SessionManager::EnsureWorkspace(std::string* error) {
     // v2;已存在则 key 对账(不合即隔离失败,不自动改名)+ last_opened/
     // checkouts 更新。不再"目录在就跳过"——否则 linked worktree 的检出
     // 登记永远缺账。
-    auto workspace = TrajectoryDirectory::CreateWorkspace(options_.trajectories_root,
-                                                          options_.identity, clock_->WallMs());
+    auto workspace =
+        TrajectoryDirectory::CreateWorkspace(options_.workspaces_root, options_.identity, clock_->WallMs());
     if (!workspace.has_value()) {
         *error = workspace.error();
         return false;
@@ -654,8 +656,8 @@ std::expected<void, std::string> SessionManager::RegisterCheckout(
         return std::unexpected("identity.key_mismatch: 登记 key=" + identity.workspace_key +
                                " 与本 workspace key=" + workspace_key_ + " 不合;跨 workspace 切换须封场换账");
     }
-    if (const auto registered = workspace::OpenOrRegisterWorkspace(
-            options_.trajectories_root / "workspaces", identity, clock_->WallMs());
+    if (const auto registered =
+            workspace::OpenOrRegisterWorkspace(options_.workspaces_root, identity, clock_->WallMs());
         !registered.has_value()) {
         return std::unexpected(registered.error());
     }
@@ -753,7 +755,7 @@ std::expected<ActiveSession*, std::string> SessionManager::LaunchSession() {
 
     // create-new 建目录,session.json(status=preparing)。
     SessionManifest manifest;
-    manifest.schema_version = 1;
+    manifest.schema_version = 2;
     manifest.workspace_key = workspace_key_;
     manifest.session_id = NewStampId();
     manifest.launch_cwd = options_.launch_cwd;
@@ -763,7 +765,7 @@ std::expected<ActiveSession*, std::string> SessionManager::LaunchSession() {
     manifest.created_at_ms = clock_->WallMs();
     manifest.lubancode_version = options_.lubancode_version;
 
-    auto directory = TrajectoryDirectory::CreateSession(options_.trajectories_root / "workspaces",
+    auto directory = TrajectoryDirectory::CreateSession(options_.workspaces_root,
                                                         workspace_key_, manifest);
     if (!directory.has_value()) {
         return std::unexpected("session.create_failed: " + directory.error());
@@ -920,7 +922,7 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
 
     // ---- 第 1 步:新 session_id create-new 建新目录,session.json(preparing)。
     SessionManifest new_manifest;
-    new_manifest.schema_version = 1;
+    new_manifest.schema_version = 2;
     new_manifest.workspace_key = workspace_key_;
     new_manifest.session_id = NewStampId();
     new_manifest.launch_cwd = old.manifest.launch_cwd;
@@ -931,7 +933,7 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
     new_manifest.created_at_ms = clock_->WallMs();
     new_manifest.lubancode_version = old.manifest.lubancode_version;
 
-    auto new_directory = TrajectoryDirectory::CreateSession(options_.trajectories_root / "workspaces",
+    auto new_directory = TrajectoryDirectory::CreateSession(options_.workspaces_root,
                                                             workspace_key_, new_manifest);
     if (!new_directory.has_value()) {
         // 第 1 步失败:旧 session 仍可用,clear 返回失败(§3.3.1)。
@@ -1374,7 +1376,7 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
         previous_session_id = source_id;  // --continue:直接前驱就是 source
     }
     SessionManifest manifest;
-    manifest.schema_version = 1;
+    manifest.schema_version = 2;
     manifest.workspace_key = workspace_key_;
     manifest.session_id = NewStampId();
     manifest.launch_cwd = options_.launch_cwd;
@@ -1386,7 +1388,7 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     manifest.created_at_ms = clock_->WallMs();
     manifest.lubancode_version = options_.lubancode_version;
 
-    auto directory = TrajectoryDirectory::CreateSession(options_.trajectories_root / "workspaces",
+    auto directory = TrajectoryDirectory::CreateSession(options_.workspaces_root,
                                                         workspace_key_, manifest);
     if (!directory.has_value()) {
         return fail("resume.step5_failed", directory.error());
@@ -1669,7 +1671,7 @@ void SessionManager::ContinueNewSide(const std::filesystem::path& next_dir,
             std::filesystem::remove(next_main, remove_ec);
         }
         SessionManifest manifest;
-        manifest.schema_version = 1;
+        manifest.schema_version = 2;
         manifest.workspace_key = workspace_key_;
         manifest.session_id = next_id;
         manifest.launch_cwd = options_.launch_cwd;
@@ -1740,7 +1742,7 @@ void SessionManager::ContinueNewSide(const std::filesystem::path& next_dir,
     auto manifest = ReadSessionJson(next_dir);
     if (!manifest.has_value()) {
         manifest = SessionManifest{};
-        manifest->schema_version = 1;
+        manifest->schema_version = 2;
         manifest->workspace_key = workspace_key_;
         manifest->session_id = next_id;
         manifest->main_run_id = recorder->base_scope().run_id;
@@ -1860,7 +1862,7 @@ WorkspaceRecoveryReport SessionManager::RecoverWorkspace(ClearRecoveryPolicy pol
         if (!manifest.has_value() && facts.has_run_started) {
             // session.json 坏/丢:按 Journal 可证事实重建索引(§3.3.2)。
             SessionManifest rebuilt;
-            rebuilt.schema_version = 1;
+            rebuilt.schema_version = 2;
             rebuilt.workspace_key = workspace_key_;
             rebuilt.session_id = session_id;
             rebuilt.launch_cwd = options_.launch_cwd;
@@ -2019,22 +2021,24 @@ std::expected<void, std::string> SessionManager::ArchiveSession(const std::strin
         active_->status == SessionStatus::Running) {
         return std::unexpected("session.archive_active: active session 先 close 再归档");
     }
-    const std::filesystem::path session_dir = SessionDirOf(session_id);
-    auto manifest = ReadSessionJson(session_dir);
-    if (!manifest.has_value()) {
-        return std::unexpected("session.not_found: " + session_id);
+    // P0-2:搬删路径收进自由函数(命令面/成员版同一条路)。
+    const SessionAdminOutcome outcome =
+        ArchiveSessionDir(workspace_dir_, session_id, clock_->WallMs());
+    if (!outcome.ok()) {
+        return std::unexpected(outcome.error_code + ": " + outcome.message);
     }
-    // archived 是 closed 的目录管理标记;正文与 hash 不变(§3.3.2)。
-    if (const auto transition =
-            TransitionSessionStatus(session_dir, &*manifest, SessionStatus::Archived);
-        !transition.has_value()) {
-        return std::unexpected("session.archive_rejected: " + transition.error());
+    return {};
+}
+
+std::expected<void, std::string> SessionManager::UnarchiveSession(const std::string& session_id) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!IsSafeSingleSegment(session_id)) {
+        return std::unexpected("session.invalid_ref: session id 须是单段名(不带路径)");
     }
-    if (const auto op = RunLifecycleOp(LifecycleOperation::ArchiveSession, session_id,
-                                       nlohmann::json{{"from", "closed"}},
-                                       nlohmann::json{{"status", "archived"}});
-        !op.has_value()) {
-        return std::unexpected(op.error());
+    const SessionAdminOutcome outcome =
+        UnarchiveSessionDir(workspace_dir_, session_id, clock_->WallMs());
+    if (!outcome.ok()) {
+        return std::unexpected(outcome.error_code + ": " + outcome.message);
     }
     return {};
 }
@@ -2050,42 +2054,10 @@ std::expected<void, std::string> SessionManager::DeleteSession(const std::string
         active_->status == SessionStatus::Running) {
         return std::unexpected("session.delete_active: active session 不得删");
     }
-    const std::filesystem::path session_dir = SessionDirOf(session_id);
-    if (!std::filesystem::exists(session_dir)) {
-        return std::unexpected("session.not_found: " + session_id);
-    }
-    const auto holder = SessionLock::Inspect(session_dir);
-    if (holder.has_value() && ProbeLockHolder(*holder) == LockHolderState::Alive) {
-        return std::unexpected("session.delete_locked: 活进程正持有此 session");
-    }
-    const MainJournalFacts facts = ScanStreamFacts(session_dir / "main.jsonl");
-    if (facts.journal_exists && !facts.run_terminal) {
-        // 未封口的账不许删:删了就丢了"跑到一半"的事实(§14.5 先封再删)。
-        return std::unexpected("session.delete_unsealed: run 没 terminal,先 close/verify");
-    }
-    // durable intent 先行,再留 tombstone,末后删目录(§3.2)。
-    const auto operation = RunLifecycleOp(LifecycleOperation::DeleteSession, session_id,
-                                          nlohmann::json{{"reason", reason}},
-                                          nlohmann::json{{"tombstone", true}});
-    if (!operation.has_value()) {
-        return std::unexpected(operation.error());
-    }
-    SessionTombstone tombstone;
-    tombstone.session_id = session_id;
-    tombstone.deleted_at_ms = clock_->WallMs();
-    tombstone.reason = reason;
-    tombstone.last_event_hash =
-        facts.last_event_hash.empty() ? std::nullopt : std::optional(facts.last_event_hash);
-    tombstone.operation_id = *operation;
-    if (const auto written = WriteSessionTombstone(workspace_dir_ / "tombstones", tombstone);
-        !written.has_value()) {
-        return std::unexpected(written.error());
-    }
-    std::error_code ec;
-    std::filesystem::remove_all(session_dir, ec);
-    if (ec) {
-        return std::unexpected("session.delete_remove_failed: " + platform::PathToUtf8(session_dir) +
-                               ": " + ec.message());
+    const SessionAdminOutcome outcome =
+        DeleteSessionDir(workspace_dir_, session_id, reason, clock_->WallMs());
+    if (!outcome.ok()) {
+        return std::unexpected(outcome.error_code + ": " + outcome.message);
     }
     return {};
 }
@@ -2110,6 +2082,168 @@ std::expected<void, std::string> SessionManager::RecordResumeReference(
         return std::unexpected(op.error());
     }
     return {};
+}
+
+
+// ---------------------------------------------------------------------------
+// P0-2:管理操作自由函数(命令面/session 服务用;与成员版同一条路)
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// lifecycle intent + result 一笔(自由函数版:operation_id 由操作名 +
+// session_id + 时刻拼单段名,同毫秒同场次同操作的重复请求会被
+// lifecycle intent 的 create-new 占位拒——正好是抢占语义)。
+SessionAdminOutcome RunDirLifecycleOp(const std::filesystem::path& workspace_dir,
+                                      LifecycleOperation operation, const std::string& session_id,
+                                      const nlohmann::json& parameters, const nlohmann::json& outcome_json,
+                                      std::int64_t now_ms, std::string* operation_id_out) {
+    const WorkspaceLifecycle lifecycle(workspace_dir);
+    LifecycleIntent intent;
+    intent.operation_id = std::string(LifecycleOperationName(operation)) + "-" + session_id + "-" +
+                          std::to_string(now_ms);
+    intent.operation = LifecycleOperationName(operation);
+    intent.workspace_key = platform::PathToUtf8(workspace_dir.filename());
+    intent.session_id = session_id;
+    intent.requested_at_ms = now_ms;
+    intent.parameters = parameters;
+    const auto intent_dir = lifecycle.WriteIntent(intent);
+    if (!intent_dir.has_value()) {
+        return SessionAdminOutcome{"lifecycle.intent_failed", intent_dir.error()};
+    }
+    LifecycleResult result;
+    result.operation_id = intent.operation_id;
+    result.status = "completed";
+    result.completed_at_ms = now_ms;
+    result.outcome = outcome_json;
+    if (const auto written = lifecycle.WriteResult(result); !written.has_value()) {
+        return SessionAdminOutcome{"lifecycle.result_failed", written.error()};
+    }
+    if (operation_id_out != nullptr) {
+        *operation_id_out = intent.operation_id;
+    }
+    return SessionAdminOutcome{};
+}
+
+}  // namespace
+
+SessionAdminOutcome ArchiveSessionDir(const std::filesystem::path& workspace_dir,
+                                      const std::string& session_id, std::int64_t now_ms) {
+    if (!IsSafeSingleSegment(session_id)) {
+        return SessionAdminOutcome{"session.invalid_ref", "session id 须是单段名(不带路径)"};
+    }
+    const std::filesystem::path session_dir =
+        workspace_dir / "sessions" / platform::Utf8ToPath(session_id);
+    auto manifest = ReadSessionJson(session_dir);
+    if (!manifest.has_value()) {
+        return SessionAdminOutcome{"session.not_found", session_id};
+    }
+    // session.json 落后于 Journal 可证事实(崩溃残留 running/preparing)时,
+    // 先按事实推导收口(recovery_collapse 允许折掉中间态),再走 closed ->
+    // archived 的正门;推导不出 closed 的(incomplete/corrupt)不归档——
+    // 半场账先 resume/verify 收口,不拿归档遮坏账。
+    if (manifest->status != SessionStatusName(SessionStatus::Closed)) {
+        const auto holder = SessionLock::Inspect(session_dir);
+        if (holder.has_value() && ProbeLockHolder(*holder) == LockHolderState::Alive) {
+            return SessionAdminOutcome{"session.locked", "活进程正持有此 session"};
+        }
+        const MainJournalFacts facts = ScanStreamFacts(session_dir / "main.jsonl");
+        const SessionStatus derived = DeriveSessionStatusFromFacts(facts);
+        if (const auto transition = TransitionSessionStatus(session_dir, &*manifest, derived,
+                                                            /*recovery_collapse=*/true);
+            !transition.has_value()) {
+            return SessionAdminOutcome{"session.archive_rejected",
+                                       "状态按 Journal 事实收口失败: " + transition.error()};
+        }
+        if (derived != SessionStatus::Closed) {
+            return SessionAdminOutcome{"session.archive_rejected",
+                                       "状态是 " + std::string(SessionStatusName(derived)) +
+                                           ",不是 closed;先 resume/verify 收口再归档"};
+        }
+    }
+    // archived 是 closed 的目录管理标记;正文与 hash 不变(§3.3.2)。
+    if (const auto transition =
+            TransitionSessionStatus(session_dir, &*manifest, SessionStatus::Archived);
+        !transition.has_value()) {
+        return SessionAdminOutcome{"session.archive_rejected", transition.error()};
+    }
+    return RunDirLifecycleOp(workspace_dir, LifecycleOperation::ArchiveSession, session_id,
+                             nlohmann::json{{"from", "closed"}}, nlohmann::json{{"status", "archived"}},
+                             now_ms, nullptr);
+}
+
+SessionAdminOutcome UnarchiveSessionDir(const std::filesystem::path& workspace_dir,
+                                        const std::string& session_id, std::int64_t now_ms) {
+    if (!IsSafeSingleSegment(session_id)) {
+        return SessionAdminOutcome{"session.invalid_ref", "session id 须是单段名(不带路径)"};
+    }
+    const std::filesystem::path session_dir =
+        workspace_dir / "sessions" / platform::Utf8ToPath(session_id);
+    auto manifest = ReadSessionJson(session_dir);
+    if (!manifest.has_value()) {
+        return SessionAdminOutcome{"session.not_found", session_id};
+    }
+    if (manifest->status != SessionStatusName(SessionStatus::Archived)) {
+        return SessionAdminOutcome{"session.unarchive_rejected",
+                                   "状态是 " + manifest->status + ",不是 archived"};
+    }
+    if (const auto transition =
+            TransitionSessionStatus(session_dir, &*manifest, SessionStatus::Closed);
+        !transition.has_value()) {
+        return SessionAdminOutcome{"session.unarchive_rejected", transition.error()};
+    }
+    return RunDirLifecycleOp(workspace_dir, LifecycleOperation::UnarchiveSession, session_id,
+                             nlohmann::json{{"from", "archived"}}, nlohmann::json{{"status", "closed"}},
+                             now_ms, nullptr);
+}
+
+SessionAdminOutcome DeleteSessionDir(const std::filesystem::path& workspace_dir,
+                                     const std::string& session_id, const std::string& reason,
+                                     std::int64_t now_ms) {
+    if (!IsSafeSingleSegment(session_id)) {
+        return SessionAdminOutcome{"session.invalid_ref", "session id 须是单段名(不带路径)"};
+    }
+    const std::filesystem::path session_dir =
+        workspace_dir / "sessions" / platform::Utf8ToPath(session_id);
+    if (!std::filesystem::exists(session_dir)) {
+        return SessionAdminOutcome{"session.not_found", session_id};
+    }
+    const auto holder = SessionLock::Inspect(session_dir);
+    if (holder.has_value() && ProbeLockHolder(*holder) == LockHolderState::Alive) {
+        return SessionAdminOutcome{"session.delete_locked", "活进程正持有此 session"};
+    }
+    const MainJournalFacts facts = ScanStreamFacts(session_dir / "main.jsonl");
+    if (facts.journal_exists && !facts.run_terminal) {
+        // 未封口的账不许删:删了就丢了"跑到一半"的事实(§14.5 先封再删)。
+        return SessionAdminOutcome{"session.delete_unsealed", "run 没 terminal,先 close/verify"};
+    }
+    // durable intent 先行,再留 tombstone,末后删目录(§3.2)。
+    std::string operation_id;
+    SessionAdminOutcome outcome =
+        RunDirLifecycleOp(workspace_dir, LifecycleOperation::DeleteSession, session_id,
+                          nlohmann::json{{"reason", reason}}, nlohmann::json{{"tombstone", true}},
+                          now_ms, &operation_id);
+    if (!outcome.ok()) {
+        return outcome;
+    }
+    SessionTombstone tombstone;
+    tombstone.session_id = session_id;
+    tombstone.deleted_at_ms = now_ms;
+    tombstone.reason = reason;
+    tombstone.last_event_hash =
+        facts.last_event_hash.empty() ? std::nullopt : std::optional(facts.last_event_hash);
+    tombstone.operation_id = operation_id;
+    if (const auto written = WriteSessionTombstone(workspace_dir / "tombstones", tombstone);
+        !written.has_value()) {
+        return SessionAdminOutcome{"session.delete_tombstone_failed", written.error()};
+    }
+    std::error_code ec;
+    std::filesystem::remove_all(session_dir, ec);
+    if (ec) {
+        return SessionAdminOutcome{"session.delete_remove_failed",
+                                   platform::PathToUtf8(session_dir) + ": " + ec.message()};
+    }
+    return SessionAdminOutcome{};
 }
 
 }  // namespace lubancode::trajectory

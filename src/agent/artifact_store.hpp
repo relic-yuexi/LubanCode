@@ -3,10 +3,11 @@
 // 现状里 `[artifact eN ...]` 只是请求视图里的一行字样,模型不能按它搜全
 // 文、不能读某段。这一层把超长工具结果的真本落成内容寻址仓:
 //
-//   <sessions_dir>/<session-id>/context/
-//     index.jsonl          每枚 artifact 一行(ArtifactRef 全字段)
-//     blobs/<sha256>.txt   全文真本,内容寻址(同内容只存一份)
-//     chunks/<sha256>.json 分块索引(稳定 chunk_id、行号、字节范围、局部 hash)
+//   <session_dir>/artifacts/          (P0-2:仓住 session artifacts/,与
+//     index.jsonl            每枚 artifact 一行(ArtifactRef 全字段)
+//     sha256/<sha256>.txt    全文真本,内容寻址(同内容只存一份;与 MCP
+//                            rich、模型图片同一子层,hash 即地址)
+//     chunks/<sha256>.json   分块索引(稳定 chunk_id、行号、字节范围、局部 hash)
 //
 // 硬规矩(规格"产品不变量"与"渐进式上下文仓"):
 //   - 新长结果先原子写 blob(tmp + rename),再写 chunks 索引,最后才把
@@ -53,7 +54,7 @@ struct ArtifactRef {
     std::string created_at;            // "yyyy-mm-dd HH:MM:SS"
     std::size_t source_message_index = 0;
     std::string preview;               // 头部一行(索引可读性,非请求视图)
-    std::string blob_path;             // "blobs/<sha>.txt"(相对仓根)
+    std::string blob_path;             // "sha256/<sha>.txt"(相对仓根)
     std::string chunk_index_path;      // "chunks/<sha>.json"(相对仓根)
 
     nlohmann::json ToJson() const;

@@ -455,7 +455,7 @@ bool ContextArtifactStore::Open(std::string root_dir, std::string session_id) {
     next_seq_ = 1;
     std::error_code ec;
     const std::filesystem::path root = lubancode::platform::Utf8ToPath(root_dir);
-    std::filesystem::create_directories(root / "blobs", ec);
+    std::filesystem::create_directories(root / "sha256", ec);
     if (ec) {
         return false;
     }
@@ -534,7 +534,7 @@ std::optional<ArtifactRef> ContextArtifactStore::Offload(const std::string& tool
         }
         ref.preview = std::move(first_line);
     }
-    ref.blob_path = "blobs/" + sha + ".txt";
+    ref.blob_path = "sha256/" + sha + ".txt";
     ref.chunk_index_path = "chunks/" + sha + ".json";
 
     const std::filesystem::path root = lubancode::platform::Utf8ToPath(root_);

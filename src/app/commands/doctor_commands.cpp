@@ -45,6 +45,7 @@ using lubancode::cli::TermErr;
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
 #include "insights/insights_health.hpp"  // CheckInsightsHealth:/doctor insights(Token 账本单 A5)
+#include "memory/project_memory.hpp"  // CheckGlobalMemoryHealth:/doctor memory(存储 v2 P0-4)
 #include "runtime/trajectory_session.hpp"  // TrajectoryBypassBridge(Token 账本单 A1)
 #include "tools/path_utils.hpp"  // PathToUtf8:诊断路径显示
 #include "tools/search_ripgrep.hpp"  // BundledRipgrepLocator/RunRipgrepSmoke:search 后端诊断(ripgrep 迁移 P0-2)
@@ -1162,6 +1163,25 @@ void PrintTrajectoryDoctor(const DoctorContext& context) {
     TermOut().flush();
 }
 
+// /doctor memory(存储 v2 P0-4):全局记忆目录的 user-only 权限、symlink
+// 越根、job 失败积压与旧 projects/ 遗留。引擎体在 memory 域
+//(CheckGlobalMemoryHealth),这里只装配材料与打印;不发请求、不改账
+//(user-only 复紧是幂等修复)。
+void PrintMemoryDoctor(const DoctorContext& context) {
+    TermOut() << context.theme.stats << "记忆存储(/doctor memory):" << context.theme.reset << "\n";
+    if (!context.home_lubancode.has_value()) {
+        TermOut() << "  [!!] 找不到 LubanCode 主目录,记忆存储无从检查\n";
+        TermOut().flush();
+        return;
+    }
+    for (const std::string& line :
+         lubancode::memory::CheckGlobalMemoryHealth(lubancode::tools::Utf8ToPath(*context.home_lubancode))) {
+        TermOut() << "  " << line << "\n";
+    }
+    TermOut() << "  口径:全局记忆只认用户命令写入;陌生仓库、Skill、Hook、子代理与模型调用都提不了权。\n";
+    TermOut().flush();
+}
+
 // /doctor insights(Token 账本单 A5):insights 管线的健康检查(§10.4)。
 // 检查体在领域层(insights/insights_health),这里只装配材料与打印;
 // 不调模型、不重建报告。
@@ -1271,13 +1291,17 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
         PrintInsightsDoctor(context);
         return;
     }
+    if (subcommand == "memory") {
+        PrintMemoryDoctor(context);
+        return;
+    }
     if (subcommand == "instructions") {
         PrintInstructionsDoctor(context);
         return;
     }
     if (subcommand == "telemetry") {
-        // 端云协同可观测单 T1:/doctor telemetry 只读本地状态(§24.2 默认
-        // 不联网;--probe 属 T2 exporter 面)。遥测没开就明说,零副作用。
+        // 端云协同可观测单 T1/T2:/doctor telemetry 默认只读本地状态(§24.2
+        // 默认不联网);--probe 才对明配 endpoint 发无业务数据的探针。
         TermOut() << context.theme.stats << "遥测(/doctor telemetry):" << context.theme.reset << "\n";
         if (context.telemetry_service == nullptr) {
             TermOut() << "  未装配(features.telemetry 默认关;须与 features.trajectory 同开)。\n";
@@ -1288,7 +1312,22 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
                  context.telemetry_service->Status())) {
             TermOut() << "  " << line << "\n";
         }
-        TermOut() << "  注:本批只有本地投影与 spool;exporter/联网属 T2,本面不发请求。\n";
+        if (rest == "--probe") {
+            const auto attempt = context.telemetry_service->ProbeEndpoint();
+            if (!attempt.has_value()) {
+                TermOut() << "  --probe: 出口未配置(telemetry.exporter.endpoint 空),无探针可发。\n";
+            } else if (attempt->kind == lubancode::telemetry::ExportOutcomeKind::Accepted ||
+                       attempt->kind == lubancode::telemetry::ExportOutcomeKind::Partial) {
+                TermOut() << "  --probe: 通(HTTP " << attempt->http_status << ",无业务数据)。\n";
+            } else {
+                TermOut() << "  --probe: 不通(" << attempt->error_code << " HTTP "
+                          << attempt->http_status
+                          << (attempt->detail.empty() ? std::string() : (" " + attempt->detail))
+                          << ")\n";
+            }
+        } else {
+            TermOut() << "  注:本面默认不联网;探针走 /doctor telemetry --probe(无业务数据)。\n";
+        }
         TermOut().flush();
         return;
     }

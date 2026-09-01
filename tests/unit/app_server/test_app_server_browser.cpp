@@ -1025,7 +1025,7 @@ TEST_CASE("截图:字节对得上时 artifact 落盘,协议无 base64") {
     CHECK(image["height"] == 1);
     CHECK(image["sha256"] == expected_sha);
     const std::string path = image["artifact"]["path"];
-    CHECK(path.find("art-") != std::string::npos);
+    CHECK(path.find(".png") != std::string::npos);
     CHECK(std::filesystem::exists(platform::Utf8ToPath(path)));
 
     const auto ready = harness.WaitForEvent("browser/screenshot/ready");
@@ -1179,7 +1179,7 @@ TEST_CASE("镜像流:帧只发 artifact 引用,同截图链落盘") {
     CHECK(params["artifact"]["stored"] == true);
     CHECK(params["artifact"]["sha256"] == expected_sha);
     const std::string path = params["artifact"]["path"];
-    CHECK(path.find("art-") != std::string::npos);
+    CHECK(path.find(".png") != std::string::npos);
     CHECK(std::filesystem::exists(platform::Utf8ToPath(path)));
 
     // 出站行没有 base64 正文(与截图链同一条纪律)。

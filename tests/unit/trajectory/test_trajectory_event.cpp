@@ -52,9 +52,14 @@ TEST_CASE("event: 全部 68 种 kind 名字往返") {
         CHECK(*back == kind);
         ++count;
     }
-    CHECK(count == 68);
+    CHECK(count == 72);
     // v2 新事件(Token 账本单 §6.1.1):usage 的 canonical owner。
     CHECK(EventKindFromName("model.usage.recorded").has_value());
+    // 存储 v2 P0-3:召回快照与 Memory 写入因果边。
+    CHECK(EventKindFromName("context.injected").has_value());
+    CHECK(EventKindFromName("memory.save.requested").has_value());
+    CHECK(EventKindFromName("memory.save.committed").has_value());
+    CHECK(EventKindFromName("memory.save.failed").has_value());
     CHECK_FALSE(EventKindFromName("no.such.kind").has_value());
     CHECK(EventKindName(static_cast<EventKind>(999))[0] == '\0');
 }

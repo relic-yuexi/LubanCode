@@ -25,6 +25,10 @@
 #include "app/commands/peer_commands.hpp"
 #include "app/commands/session_commands.hpp"
 #include "app/commands/settings_commands.hpp"
+#include "runtime/trajectory_session.hpp"
+#include "trajectory/directory.hpp"
+#include "trajectory/session_index.hpp"
+#include "workspace/identity.hpp"
 #include "cli/theme.hpp"
 #include "tools/registry.hpp"
 
@@ -374,99 +378,158 @@ std::filesystem::path CmdWriteSession(const std::filesystem::path& dir, const st
 
 }  // namespace
 
-TEST_CASE("顶层 delete:确认屏 y 才删,空答/EOF/别答都取消不动盘") {
-    const auto dir = TempDir("delete_confirm");
-    const std::string sessions = CmdPathUtf8(dir);
+// ---------------------------------------------------------------------------
+// P0-2(Trajectory 升为唯一 Session):顶层 delete/archive/unarchive 走
+// workspace 新账——索引解引用、确认屏、lifecycle + 状态图 + tombstone。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 一只临时 workspaces 根 + 一场封了口、带标题的会话。
+class WorkspaceSessionsFixture {
+public:
+    // TempDir 的路径按进程内 rand 序列生成,跨进程会同址——先清场再住,
+    // 上次跑剩的账不掺进这次(引用解析的歧义测试尤其忌脏账)。
+    explicit WorkspaceSessionsFixture(const std::string& tag)
+        : dir_(TempDir(tag)), root_(dir_ / "workspaces") {
+        std::error_code ec;
+        std::filesystem::remove_all(dir_, ec);
+        std::filesystem::create_directories(dir_, ec);
+    }
+    ~WorkspaceSessionsFixture() {
+        std::error_code ec;
+        std::filesystem::remove_all(dir_, ec);
+    }
+    // 造一场:turn 一问一答 + 可选标题,正常封口(closed)。
+    std::string MakeSession(const std::string& title, const std::string& cwd_utf8) {
+        std::error_code ec;
+        std::filesystem::create_directories(dir_ / "repo", ec);
+        lubancode::runtime::TrajectorySessionLedger::Options options;
+        options.workspaces_root = root_;
+        options.workspace_identity = lubancode::workspace::MakeFallbackIdentity(dir_ / "repo");
+        options.lubancode_version = "test";
+        options.launch_cwd = cwd_utf8;
+        auto ledger = lubancode::runtime::TrajectorySessionLedger::Open(options);
+        REQUIRE(ledger.has_value());
+        if (!title.empty()) {
+            ledger->RecordTitleChanged(title, "");
+        }
+        auto bridge = ledger->NewTurnBridge({"demo", "responses", "terminal"});
+        REQUIRE(bridge != nullptr);
+        bridge->BeginTurn("turn-1", "external_user");
+        lubancode::api::Message input;
+        input.role = lubancode::api::Role::User;
+        input.content.push_back(lubancode::api::TextBlock{"问一句 " + title});
+        bridge->RecordInput(input);
+        lubancode::api::Request prepared;
+        prepared.model = "m1";
+        const std::string request =
+            bridge->OnRequestPrepared(prepared, lubancode::agent::RequestPreparedContext{});
+        REQUIRE_FALSE(request.empty());
+        bridge->OnRequestSent(request);
+        lubancode::api::Message answer;
+        answer.role = lubancode::api::Role::Assistant;
+        answer.content.push_back(lubancode::api::TextBlock{"回一句"});
+        REQUIRE(bridge->OnOutputCompleted(request, answer, "end_turn", "resp-1"));
+        bridge->EndTurn(true, false, "done");
+        const std::string id = ledger->session_id();
+        (void)ledger->CloseSession("exit");
+        return id;
+    }
+    const std::filesystem::path& root() const { return root_; }
+    std::filesystem::path SessionDirOf(const std::string& session_id) const {
+        // 单一 workspace(fallback 身份),目录枚举找场次。
+        for (const auto& workspace : std::filesystem::directory_iterator(root_)) {
+            const auto candidate = workspace.path() / "sessions" / std::filesystem::path(
+                                                               std::u8string(reinterpret_cast<const char8_t*>(
+                                                                                 session_id.data()),
+                                                                             session_id.size()));
+            if (std::filesystem::exists(candidate)) {
+                return candidate;
+            }
+        }
+        return {};
+    }
+
+private:
+    std::filesystem::path dir_;
+    std::filesystem::path root_;
+};
+
+}  // namespace
+
+TEST_CASE("顶层 delete:确认屏 y/n/force 三态,引用按标题解,重名列短 id 拒绝") {
+    WorkspaceSessionsFixture fixture("delete_confirm");
     const lubancode::cli::Theme theme;
-    const auto file = CmdWriteSession(dir, "20260820-101010-甲", "甲的场", "D:/房");
-    const std::string id = "20260820-101010-甲";
+    const std::string id = fixture.MakeSession("甲的场", "D:/房");
+    REQUIRE_FALSE(id.empty());
+    const auto file = fixture.SessionDirOf(id);
+    REQUIRE_FALSE(file.empty());
 
-    // 空答:取消,文件还在。
-    CHECK(HandleSessionManagementCommand(sessions, /*kind=delete=*/2, id, false, theme,
-                                         [] { return std::string(""); }) == 1);
-    CHECK(std::filesystem::exists(file));
-
-    // 别的答案(n):取消。
-    CHECK(HandleSessionManagementCommand(sessions, 2, id, false, theme,
+    // n:取消,盘上不动。
+    CHECK(HandleSessionManagementCommand(fixture.root(), /*kind=delete=*/2, id, false, theme,
                                          [] { return std::string("n"); }) == 1);
     CHECK(std::filesystem::exists(file));
 
-    // y:删掉。
-    CHECK(HandleSessionManagementCommand(sessions, 2, id, false, theme,
+    // y:删掉(tombstone 留痕,目录消失)。
+    CHECK(HandleSessionManagementCommand(fixture.root(), 2, id, false, theme,
                                          [] { return std::string("y"); }) == 0);
     CHECK_FALSE(std::filesystem::exists(file));
 
-    // --force:跳过确认直接删(脚本路)。
-    const auto file_b = CmdWriteSession(dir, "20260821-111111-乙", "", "D:/房");
-    CHECK(HandleSessionManagementCommand(sessions, 2, "20260821-111111-乙", true, theme,
-                                         [] { return std::string(""); }) == 0);
-    CHECK_FALSE(std::filesystem::exists(file_b));
-
-    std::error_code ec;
-    std::filesystem::remove_all(dir, ec);
-}
-
-TEST_CASE("顶层 delete:引用按标题解,重名列短 id 拒绝,缺参报用法") {
-    const auto dir = TempDir("delete_ref");
-    const std::string sessions = CmdPathUtf8(dir);
-    const lubancode::cli::Theme theme;
-    CmdWriteSession(dir, "20260820-101010-甲", "唯一标题", "D:/房");
-
-    // 标题唯一命中。
-    CHECK(HandleSessionManagementCommand(sessions, 2, "唯一标题", true, theme, nullptr) == 0);
+    // --force:跳过确认直接删(脚本路);引用按标题解。
+    const std::string id_b = fixture.MakeSession("唯一标题", "D:/房");
+    CHECK(HandleSessionManagementCommand(fixture.root(), 2, "唯一标题", true, theme, nullptr) == 0);
+    CHECK_FALSE(std::filesystem::exists(fixture.SessionDirOf(id_b)));
 
     // 重名:两场同名,列短 id 拒绝(绝不猜一场)。
-    CmdWriteSession(dir, "20260821-111111-乙", "同名", "D:/房");
-    CmdWriteSession(dir, "20260822-121212-丙", "同名", "D:/房");
-    CHECK(HandleSessionManagementCommand(sessions, 2, "同名", true, theme, nullptr) == 1);
-    // 两场都还在(没连坐)。中文文件名按 u8 拼(窄串在 MSVC 下按 ANSI
-    // 代码页解码,exists 会找错名)。
-    const auto u8name_b = [](const char* utf8) {
-        return std::filesystem::path(
-            std::u8string(reinterpret_cast<const char8_t*>(utf8), std::strlen(utf8)));
-    };
-    CHECK(std::filesystem::exists(dir / u8name_b("20260821-111111-乙.jsonl")));
-    CHECK(std::filesystem::exists(dir / u8name_b("20260822-121212-丙.jsonl")));
+    const std::string id_c = fixture.MakeSession("同名", "D:/房");
+    const std::string id_d = fixture.MakeSession("同名", "D:/房");
+    CHECK(HandleSessionManagementCommand(fixture.root(), 2, "同名", true, theme, nullptr) == 1);
+    CHECK(std::filesystem::exists(fixture.SessionDirOf(id_c)));
+    CHECK(std::filesystem::exists(fixture.SessionDirOf(id_d)));
 
-    // 认不出。
-    CHECK(HandleSessionManagementCommand(sessions, 2, "没这一场", true, theme, nullptr) == 1);
-
-    // 缺参:报用法退 1。
-    CHECK(HandleSessionManagementCommand(sessions, 2, "", true, theme, nullptr) == 1);
-
-    std::error_code ec;
-    std::filesystem::remove_all(dir, ec);
+    // 认不出 / 缺参:如实退 1。
+    CHECK(HandleSessionManagementCommand(fixture.root(), 2, "没这一场", true, theme, nullptr) == 1);
+    CHECK(HandleSessionManagementCommand(fixture.root(), 2, "", true, theme, nullptr) == 1);
 }
 
 TEST_CASE("顶层 archive/unarchive 往返;归档后默认列表不见、archived 列表见") {
-    const auto dir = TempDir("archive_cli");
-    const std::string sessions = CmdPathUtf8(dir);
+    WorkspaceSessionsFixture fixture("archive_cli");
     const lubancode::cli::Theme theme;
-    const auto file = CmdWriteSession(dir, "20260820-101010-甲", "甲的场", "D:/房");
+    const std::string id = fixture.MakeSession("甲的场", "D:/房");
+    const auto dir = fixture.SessionDirOf(id);
+    REQUIRE_FALSE(dir.empty());
 
-    // archive(标题命中)。
-    CHECK(HandleSessionManagementCommand(sessions, /*kind=archive=*/0, "甲的场", false, theme,
+    // archive(标题命中):目录不搬,session.json 转 archived + lifecycle 记账。
+    CHECK(HandleSessionManagementCommand(fixture.root(), /*kind=archive=*/0, "甲的场", false, theme,
                                          nullptr) == 0);
-    CHECK_FALSE(std::filesystem::exists(file));
-    CHECK(std::filesystem::exists(dir / "archive" /
-                                  std::filesystem::path(std::u8string(
-                                      reinterpret_cast<const char8_t*>("20260820-101010-甲.jsonl"),
-                                      sizeof("20260820-101010-甲.jsonl") - 1))));
+    {
+        const auto manifest = lubancode::trajectory::ReadSessionJson(dir);
+        REQUIRE(manifest.has_value());
+        CHECK(manifest->status == "archived");
+    }
 
-    // ListSessions(默认列表/--continue 的口径)不掺归档:根里没有 .jsonl。
-    CHECK(lubancode::sessions::ListSessions(sessions).empty());
+    // 默认列表(active)不见;archived 只读入口见。
+    lubancode::trajectory::SessionIndexQuery active;
+    const std::string key = lubancode::workspace::MakeFallbackIdentity(
+                                 fixture.root().parent_path() / "repo")
+                                 .workspace_key;
+    active.current_workspace_key = key;
+    CHECK(lubancode::trajectory::QueryWorkspaceSessions(fixture.root(), active).entries.empty());
+    lubancode::trajectory::SessionIndexQuery archived;
+    archived.current_workspace_key = key;
+    archived.archived_only = true;
+    CHECK(lubancode::trajectory::QueryWorkspaceSessions(fixture.root(), archived).total == 1);
 
-    // /sessions archived(只读入口)列得到。
-    PrintSessionsCommand(sessions, "archived");
-
-    // unarchive(完整 id)搬回根,老路又能列。
-    CHECK(HandleSessionManagementCommand(sessions, /*kind=unarchive=*/1, "20260820-101010-甲",
-                                         false, theme, nullptr) == 0);
-    CHECK(std::filesystem::exists(file));
-    CHECK(lubancode::sessions::ListSessions(sessions).size() == 1);
-
-    std::error_code ec;
-    std::filesystem::remove_all(dir, ec);
+    // unarchive(完整 id)搬回 closed,默认列表又见。
+    CHECK(HandleSessionManagementCommand(fixture.root(), /*kind=unarchive=*/1, id, false, theme,
+                                         nullptr) == 0);
+    {
+        const auto manifest = lubancode::trajectory::ReadSessionJson(dir);
+        REQUIRE(manifest.has_value());
+        CHECK(manifest->status == "closed");
+    }
+    CHECK(lubancode::trajectory::QueryWorkspaceSessions(fixture.root(), active).total == 1);
 }
 
 // ---------------------------------------------------------------------------

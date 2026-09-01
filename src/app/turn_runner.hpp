@@ -156,13 +156,13 @@ struct TurnContext {
     std::string trajectory_wire;
 
     // ---- 模型输出图片(ccmoon 巡检单 P0)----
-    // 会话图片目录(<sessions_dir>/<session-id>/images)。非空 = 挂上
+    // 会话图片目录(<session-dir>/artifacts/sha256,P0-2 归拢)。非空 = 挂上
     // on_model_image 落盘口,模型出的图解码落盘、引用入史;空(单发/没
     // 开会话)= 不挂,图片真来了由引擎明败("未接线图片落盘"),不吞图。
     std::string model_images_dir;
 
     // ---- MCP 富结果单 P0.5:工具二进制 artifact 目录 ----
-    // 会话 artifact 目录(<sessions_dir>/<session-id>/mcp-artifacts)。非空
+    // 会话 artifact 目录(<session-dir>/artifacts/sha256,P0-2 归拢)。非空
     // = 经 TurnWiring.tool_artifact_dir 递给每次工具调用,MCP 返回的图片/
     // 音频/blob 字节先落这里再入史;空(单发/没开会话)= 富二进制块按稳定
     // 错误收口,文本结果不受影响。

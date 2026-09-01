@@ -757,7 +757,7 @@ TEST_CASE("宿主旁路小请求(compact 起名一类)不当 episode 编") {
 TEST_CASE("子代理分账:child episode 只出现一次,main 只带边界引用") {
     const auto root = FreshDir("lubancode-p5-subagent");
     TrajectorySessionLedger::Options options;
-    options.trajectories_root = root / "trajectories";
+    options.workspaces_root = root / "workspaces";
     options.workspace_root = root / "repo";
     options.lubancode_version = "test";
     std::error_code ec;

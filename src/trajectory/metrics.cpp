@@ -88,18 +88,18 @@ SessionDoctorReport BuildSessionDoctorReport(const std::filesystem::path& sessio
     return report;
 }
 
-WorkspaceDoctorReport BuildWorkspaceDoctorReport(const std::filesystem::path& trajectories_root,
+WorkspaceDoctorReport BuildWorkspaceDoctorReport(const std::filesystem::path& workspaces_root,
                                                  const std::filesystem::path& workspace_dir,
                                                  const std::string& workspace_key,
                                                  const std::optional<std::string>& active_session_id,
                                                  std::vector<std::string> recent_errors) {
     WorkspaceDoctorReport report;
     report.workspace_key = workspace_key;
-    report.trajectories_root = trajectories_root;
+    report.workspaces_root = workspaces_root;
     report.recent_errors = std::move(recent_errors);
 
     std::error_code ec;
-    const std::filesystem::space_info space = std::filesystem::space(trajectories_root, ec);
+    const std::filesystem::space_info space = std::filesystem::space(workspaces_root, ec);
     if (!ec) {
         report.disk_space_known = true;
         report.disk_free_bytes = static_cast<std::uint64_t>(space.available);

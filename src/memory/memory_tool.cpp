@@ -114,6 +114,15 @@ tools::Tool::Result MemorySaveTool::execute(const nlohmann::json& input) {
         request.scope.value = input["scope"].value("value", std::string());
         if (request.scope.kind == "user") request.scope.level = "user";
     }
+    // 存储 v2 P0-4(§6.1):memory_save 的 scope 只能是 project——模型不得
+    // 自行提交全局记忆。想升为 global 的,只该在结论里建议用户走
+    // /memory remember global(须逐次确认)。
+    if (request.scope.level == "user") {
+        return {"memory.global_unauthorized: 全局记忆不接受模型工具直写。"
+                "如确属跨项目偏好,请在回复里建议用户执行 /memory remember global <kind> 标题 :: 正文,"
+                "由用户确认后入库。",
+                true};
+    }
     if (input.contains("evidence") && input["evidence"].is_array()) {
         for (const auto& item : input["evidence"]) {
             if (!item.is_object()) return {"evidence 每项必须是带 path 的 object", true};

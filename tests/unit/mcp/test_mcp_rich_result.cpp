@@ -64,7 +64,9 @@ TEST_CASE("解析: image 块解码落盘,块里只剩引用(MIME/尺寸/SHA 齐�
     CHECK(image.width == 1);
     CHECK(image.height == 1);
     CHECK(image.artifact.stored);
-    CHECK(image.artifact.path.rfind(dir + "/art-", 0) == 0);
+    // P0-2:文件名即内容地址(全 hash;目录是会话 artifacts/sha256/)。
+    CHECK(image.artifact.path.rfind(dir + "/", 0) == 0);
+    CHECK(image.artifact.path.find("/art-") == std::string::npos);
     CHECK(image.artifact.path.find(".png") != std::string::npos);
     CHECK(parsed.landed_bytes == image.bytes);
 
@@ -290,7 +292,8 @@ TEST_CASE("LandToolArtifact: 内容寻址、原子落盘、空入参给空串") 
     CHECK(LandToolArtifact(dir, "", "bin").empty());
     const std::string path = LandToolArtifact(dir, "artifact-body", "txt");
     REQUIRE_FALSE(path.empty());
-    CHECK(path.rfind(dir + "/art-", 0) == 0);
+    CHECK(path.rfind(dir + "/", 0) == 0);
+    CHECK(path.find("/art-") == std::string::npos);
     CHECK(path.find(".txt") != std::string::npos);
     CHECK(LandToolArtifact(dir, "artifact-body", "txt") == path);  // 同字节同名
     CHECK(LandToolArtifact(dir, "artifact-body-2", "txt") != path);

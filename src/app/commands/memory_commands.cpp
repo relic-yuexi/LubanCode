@@ -40,6 +40,32 @@ std::string TrimAscii(std::string value) {
     return value;
 }
 
+std::string LowerAscii(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(),
+                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+    return value;
+}
+
+// 层级词解析(P0-4 §8.3):project|global 是正名,user 是过渡期别名。
+// 返回 <层, 剩余参数流的下一词已否被吃掉>;层为空 = 没写层级(旧写法)。
+std::string ParseLayerWord(std::istringstream& words) {
+    std::string word;
+    const std::streampos back = words.tellg();
+    words >> word;
+    word = LowerAscii(std::move(word));
+    if (word == "project") return "project";
+    if (word == "global" || word == "user") return "user";
+    words.seekg(back);  // 不是层级词,还回去
+    return std::string();
+}
+
+// 逐次确认合同(P0-4 §6.1):全局层的每次写入/删除都要用户点头。
+bool ConfirmGlobalAction(const lubancode::cli::Theme& theme, const std::string& question) {
+    const auto answer = lubancode::cli::ReadLine(theme.confirm + question + theme.reset, theme,
+                                                 /*esc_rejects=*/true);
+    return answer.has_value() && (*answer == "y" || *answer == "Y");
+}
+
 void PrintMemoryUsage() {
     TermOut() << tr("cmd.memory.usage");
 }
@@ -72,7 +98,7 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
                          toggle_word(status.generate))
                   << "\n"
                   << trf("cmd.memory.learn_status", status.learn) << "\n"
-                  << trf("cmd.memory.project", status.project_key) << "\n"
+                  << trf("cmd.memory.project", status.workspace_key) << "\n"
                   << trf("cmd.memory.directory", lubancode::tools::PathToUtf8(status.memory_dir)) << "\n"
                   << trf("cmd.memory.counts", status.entry_count, status.pending_jobs) << "\n";
         if (status.user_enabled) {
@@ -245,6 +271,7 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             if (entry.expired) reason = tr("cmd.memory.why.expired");
             else if (entry.scope_blocked) reason = tr("cmd.memory.why.scope");
             else if (entry.stale_blocked) reason = tr("cmd.memory.why.stale");
+            else if (entry.snapshot_failed) reason = tr("cmd.memory.why.snapshot_failed");
             else if (entry.layer_superseded) reason = tr("cmd.memory.why.superseded");
             else if (entry.duplicate_dropped) reason = tr("cmd.memory.why.duplicate");
             else if (entry.below_threshold) reason = tr("cmd.memory.why.below_threshold");
@@ -261,11 +288,16 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         return;
     }
     if (action == "list") {
+        const std::string layer = ParseLayerWord(words);
         std::string error;
-        // 两层合并列:项目层在前,用户层带标注。
-        const auto entries = project_memory->ListEntries(&error);
+        // 两层合并列:项目层在前,全局层带标注。显式 global 只列全局层
+        //(管理读口,不看召回授权)。
+        const auto entries = layer == "user" ? std::vector<lubancode::memory::MemoryEntry>{}
+                                             : project_memory->ListEntries(&error);
         if (!error.empty()) TermOut() << trf("cmd.memory.catalog_warning", error) << "\n";
-        const auto user_entries = project_memory->ListUserEntries(&error);
+        const auto user_entries =
+            layer == "user" ? project_memory->ListGlobalEntriesForManagement(&error)
+                            : project_memory->ListUserEntries(&error);
         if (!error.empty()) TermOut() << trf("cmd.memory.catalog_warning", error) << "\n";
         if (entries.empty() && user_entries.empty()) {
             TermOut() << tr("cmd.memory.empty") << "\n";
@@ -281,7 +313,7 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         }
         for (const auto& entry : user_entries) {
             TermOut() << "- " << entry.id << " [" << lubancode::memory::MemoryKindName(entry.kind) << "] "
-                      << entry.title << " (" << tr("cmd.memory.user_layer") << ")";
+                      << entry.title << " (" << tr("cmd.memory.global_layer") << ")";
             if (!entry.summary.empty() && entry.summary != entry.title) {
                 TermOut() << " - " << entry.summary;
             }
@@ -290,16 +322,12 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         return;
     }
     if (action == "remember") {
+        // P0-4(§8.3):显式层级——remember project|global <kind> ...;旧的不带
+        // 层级写法过渡期默认 project,每场提示一次迁移。
+        const std::string layer = ParseLayerWord(words);
         std::string kind_text;
         words >> kind_text;
-        // 用户级写法:/memory remember user preference 标题 :: 正文。
-        // 授权另设全局 memory.user_enabled,项目配置无权开。
-        bool to_user = false;
-        if (kind_text == "user") {
-            to_user = true;
-            words >> kind_text;
-        }
-        auto kind = lubancode::memory::ParseMemoryKind(kind_text);
+        auto kind = lubancode::memory::ParseMemoryKind(LowerAscii(kind_text));
         std::string remainder;
         std::getline(words, remainder);
         remainder = TrimAscii(std::move(remainder));
@@ -307,12 +335,18 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             PrintMemoryUsage();
             return;
         }
+        const bool to_global = layer == "user";
+        if (to_global && *kind == lubancode::memory::MemoryKind::Fact) {
+            TermOut() << tr("cmd.memory.global.no_fact") << "\n";
+            return;
+        }
         const std::size_t separator = remainder.find("::");
         lubancode::memory::SaveRequest request;
         request.kind = *kind;
-        if (to_user) {
+        if (to_global) {
             request.scope.level = "user";
             request.scope.kind = "user";
+            request.confidence = "user-stated";
         }
         request.title = TrimAscii(remainder.substr(0, separator));
         request.content = separator == std::string::npos
@@ -323,20 +357,40 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             PrintMemoryUsage();
             return;
         }
-        const auto queued = project_memory->EnqueueSave(request);
+        if (layer.empty()) {
+            static bool hinted = false;  // 每进程一次
+            if (!hinted) {
+                hinted = true;
+                TermOut() << tr("cmd.memory.remember.legacy_hint") << "\n";
+            }
+        }
+        // 全局层逐次确认(§6.1:写入永远须用户主动授权与主动命令)。
+        if (to_global &&
+            !ConfirmGlobalAction(theme, trf("cmd.memory.global.confirm", request.title))) {
+            TermOut() << tr("cmd.memory.global.cancelled") << "\n";
+            return;
+        }
+        const auto queued = project_memory->EnqueueSave(request, /*user_initiated=*/true);
         TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
                                          : trf("cmd.memory.queue_failed", queued.error()))
                   << "\n";
         return;
     }
     if (action == "forget") {
+        const std::string layer = ParseLayerWord(words);
         std::string id;
         words >> id;
         if (id.empty()) {
             PrintMemoryUsage();
             return;
         }
-        const auto queued = project_memory->EnqueueForget(id);
+        // 全局层删除是破坏性动作:逐次确认(§6.4 只认用户级命令)。
+        if (layer == "user" &&
+            !ConfirmGlobalAction(theme, trf("cmd.memory.global.confirm_forget", id))) {
+            TermOut() << tr("cmd.memory.global.cancelled") << "\n";
+            return;
+        }
+        const auto queued = project_memory->EnqueueForget(id, layer);
         TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
                                          : trf("cmd.memory.queue_failed", queued.error()))
                   << "\n";
@@ -369,19 +423,21 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
         return;
     }
     if (action == "verify" || action == "refresh") {
+        const std::string layer = ParseLayerWord(words);
         std::string id;
         words >> id;
         if (id.empty()) {
             PrintMemoryUsage();
             return;
         }
-        const auto queued = project_memory->EnqueueVerify(id, action == "refresh");
+        const auto queued = project_memory->EnqueueVerify(id, action == "refresh", layer);
         TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
                                          : trf("cmd.memory.queue_failed", queued.error()))
                   << "\n";
         return;
     }
     if (action == "show") {
+        const std::string layer = ParseLayerWord(words);
         std::string id;
         words >> id;
         if (id.empty()) {
@@ -394,6 +450,10 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             return;
         }
         const auto& [text, dir] = *topic;
+        if (layer == "user" && dir != project_memory->user_memory_dir()) {
+            TermOut() << trf("cmd.memory.queue_failed", tr("cmd.memory.global.layer_mismatch")) << "\n";
+            return;
+        }
         TermOut() << trf("cmd.memory.show.header", id, lubancode::tools::PathToUtf8(dir)) << "\n" << text;
         if (!text.empty() && text.back() != '\n') TermOut() << "\n";
         return;

@@ -45,6 +45,7 @@
 #include "telemetry/batch_queue.hpp"
 #include "telemetry/contract.hpp"
 #include "telemetry/cursor.hpp"
+#include "telemetry/exporter.hpp"
 #include "telemetry/spool.hpp"
 #include "telemetry/wake.hpp"
 
@@ -56,6 +57,10 @@ struct TelemetryServiceOptions {
     DataClass data_class = DataClass::Metadata;
     BatchQueueOptions queue;
     SpoolOptions spool;
+    // T2 出口(§19):endpoint 空 = 不出网(本地投影照跑,§7.1 收窄到
+    // spool)。出口线程只在 configured 时起。
+    OtlpExporterOptions exporter;
+    bool spool_enabled = true;             // telemetry.spool.enabled:关 = 派生批即弃(不出网)
     std::int64_t tick_ms = 1000;         // 周期扫描(丢 wake 补账的兜底)
     std::int64_t flush_interval_ms = 500;  // spool 时间帽(§18.3 batch flush)
 };
@@ -84,6 +89,9 @@ struct TelemetryServiceStatus {
         bool final_flushed = false;
     };
     std::vector<StreamStatus> streams;
+    // T2 出口面(§24.3:exporter endpoint(去 query/userinfo)、last export
+    // success/error、出口计数)。endpoint 未配 = 全零 + configured=false。
+    ExportStatusFace exporter;
 
     nlohmann::json ToJson() const;
 };
@@ -123,6 +131,31 @@ public:
     // 状态面(本地读,无 IO 副作用)。
     TelemetryServiceStatus Status() const;
 
+    // ---- T2 出口面(§24.2)----
+    // pause/resume:停/复出口,本地投影与 spool 照常(§24.2 "pause 停出口,
+    // 可继续按本地策略有限落 spool")。
+    void SetExportPaused(bool paused);
+    // flush:立即 seal active,推出口线程赶一趟,有界等(§24.2 "只尝试发送
+    // sealed segment;不强制等公网无限久";§26.3 --telemetry-flush-timeout
+    // 有硬上限)。回 true = 存量 sealed 批全出清(或出口本就没开)。
+    bool Flush(std::int64_t bounded_ms);
+    // 出口状态(轻量版,Status() 的 exporter 节同源)。
+    ExportStatusFace ExportStatusFaceData() const;
+    // §8.4 公网确认:授权当前 endpoint+数据档+脱敏版本(写 <root>/consent.json,
+    // 并放行非回环出口);回 false = 落盘失败。回环 endpoint 不需要授权。
+    bool GrantConsent();
+    // spool clear(§24.2 删除动作):清空全部 sealed 段与 active.tmp。批账
+    // 先落 retired watermark/tombstone(cursor 对账不报孤儿,§18.5),再删
+    // 文件。回被清掉的 (段, 批) 数。
+    std::pair<std::size_t, std::size_t> ClearSpool();
+    // 撤回:删 consent 记录;非回环出口立即关门(telemetry.consent_required)。
+    bool RevokeConsent();
+    // consent 状态:granted | not_required(回环) | required。
+    std::string ConsentState() const;
+    // §24.2 "--probe 才对明配 endpoint 发无业务数据的探针"。出口没配回
+    // nullopt。探针不碰 spool、不记账。const:/doctor 只读诊断面。
+    std::optional<ExportAttempt> ProbeEndpoint() const;
+
     // T2 口(本批只做本地生命周期):ACK 批次 -> 删段;删失败的批记
     // tombstone 进 state.json(§18.2 防重复无限发)。
     void AckBatches(const std::vector<std::string>& batch_ids);
@@ -154,6 +187,13 @@ private:
     void DrainQueue();
     void AdvancePendingCursors();
     void DiscoverStreams(const SessionEntry& session);
+    // ---- T2 出口线程(§19;业务线程不等网络,Notify 面零变化)----
+    void ExportLoop();
+    // 赶一趟出口:按段序逐批 POST;Accepted/Partial(有收)→ ACK 删段;
+    // Retryable → 退避记账(§19.2 双限);Permanent → 关 endpoint 代。
+    // 回 true = 本趟把现存 sealed 批全部出清(无剩、无在等退避)。
+    bool RunExportPass();
+    void EvaluateExportGateLocked();
     // state.json 的读写(§14.2 三层账的第三层:ACK/tombstone/清理水位)。
     bool LoadState();
     bool PersistState();
@@ -191,6 +231,26 @@ private:
     SpoolRecoveryReport recovery_;
     std::string degraded_reason_;
     std::int64_t started_at_ms_ = 0;
+    // ---- T2 出口面 ----
+    // spool 并发面:投影 worker(落盘/seal/cursor)与出口线程(读段/ACK
+    // 删段)各持此锁过;锁序 spool -> state,export 永不嵌在 spool 里。
+    mutable std::mutex spool_mutex_;
+    mutable std::mutex export_mutex_;  // 出口账/退避表/门/pause
+    std::condition_variable export_cv_;
+    std::condition_variable flush_cv_;  // flush 等出清(有界)
+    bool export_wake_ = false;          // export_mutex_
+    bool export_paused_ = false;        // export_mutex_(§24.2 pause)
+    std::string export_gate_reason_;    // export_mutex_(consent/https/永久错)
+    struct BatchRetry {
+        int attempts = 0;
+        std::int64_t next_eligible_ms = 0;
+    };
+    std::map<std::string, BatchRetry> export_retry_;  // export_mutex_;键=batch_id
+    ExportStatusFace export_stats_;                   // export_mutex_
+    std::thread export_thread_;
+    mutable std::atomic<bool> export_cancel_{false};  // 在传输请求的取消(§26.4;probe 只读面也要能清残留)
+    std::unique_ptr<OtlpHttpExporter> exporter_;
+    std::optional<ConsentStore> consent_store_;
 };
 
 // 装配工厂(§8.5 默认关闭硬验收的代码面):ResolveTelemetryActivation 判

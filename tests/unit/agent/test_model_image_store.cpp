@@ -147,9 +147,11 @@ TEST_CASE("LandModelImage:真 PNG 落盘、文件名内容寻址、幂等只写�
     CHECK(first->block.width == 1);
     CHECK(first->block.height == 1);
     CHECK(first->block.bytes == 68);
-    CHECK(first->block.filename.substr(0, 4) == "img-");
+    // P0-2:文件名即内容地址(全 hash,归拢进 artifacts/sha256/)。
+    CHECK(first->block.filename.substr(0, 4) != std::string("img-"));
+    CHECK(first->block.filename.size() == 64 + 1 + 3);  // <sha256>.png
     CHECK(EndsWith(first->block.filename, ".png"));
-    CHECK(first->block.path == "images/" + first->block.filename);
+    CHECK(first->block.path == "artifacts/sha256/" + first->block.filename);
     CHECK(first->block.sha256.size() == 64);
     // 文件真落了,字节与解码后一致。
     const auto written = ReadFileBytes(dir / first->block.filename);
@@ -206,11 +208,11 @@ TEST_CASE("LandModelImage:坏 base64/坏魔数/空目录,各给各的人话,不�
 TEST_CASE("ModelImageReplayText:引用翻短文本,不带 base64") {
     api::ModelImageBlock block;
     block.id = "ig_1";
-    block.filename = "img-abcd1234.png";
+    block.filename = "abcd1234.png";
     block.width = 1024;
     block.height = 768;
     const std::string text = api::ModelImageReplayText(block);
-    CHECK(text.find("img-abcd1234.png") != std::string::npos);
+    CHECK(text.find("abcd1234.png") != std::string::npos);
     CHECK(text.find("1024x768") != std::string::npos);
     CHECK(text.find("iVBOR") == std::string::npos);
 }

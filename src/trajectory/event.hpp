@@ -90,7 +90,8 @@ const char* DurabilityName(Durability value);
 std::optional<Durability> DurabilityFromName(std::string_view name);
 
 // ---------------------------------------------------------------------------
-// 事件种类(§五全列 67 种 + v2 的 model.usage.recorded,共 68 种)
+// 事件种类(§五全列 67 种 + v2 的 model.usage.recorded,再加存储 v2 的
+// context.injected 与 memory.save.* 三枚,共 72 种)
 // ---------------------------------------------------------------------------
 
 enum class EventKind {
@@ -110,6 +111,10 @@ enum class EventKind {
     InputReceived,
     ContextAttached,
     ContextDetached,
+    // P0-3(存储 v2 合同 §四):记忆召回快照——每次真正注入模型的记忆落
+    // 一枚,payload 带 memory_id/content_sha256/snapshot_ref,Replay 凭它
+    // 重建"当时模型看见哪一版",不读今天的 Memory。
+    ContextInjected,
     // 5.3 模型请求与输出
     ModelRequestPrepared,
     ModelRequestSent,
@@ -169,6 +174,12 @@ enum class EventKind {
     VerificationRecorded,
     VerificationInvalidated,
     OutcomeAssessed,
+    // 5.6 Memory 写入因果边(存储 v2 合同 §四,P0-3 接线):requested 落在
+    // 请求写入的那场 session;committed/failed 由异步 worker 写 workspace
+    // lifecycle 回执(单子 §6.3),事件种类先入合同,回执补记归后续波次。
+    MemorySaveRequested,
+    MemorySaveCommitted,
+    MemorySaveFailed,
 };
 
 const char* EventKindName(EventKind kind);

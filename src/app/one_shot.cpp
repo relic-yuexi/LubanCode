@@ -40,7 +40,6 @@
 #include "api/models.hpp"
 #include "api/responses/client.hpp"
 #include "app/backend_stack.hpp"
-#include "runtime/session_runtime.hpp"
 #include "app/runtime_profile.hpp"
 #include "app/tool_runtime.hpp"
 #include "app/hook_runtime.hpp"
@@ -292,13 +291,14 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         subagent_profile.runtime = lubancode::app::BuildSubagentRuntimeProfile(
             lubancode::app::BuildMainRuntimeProfile(config, &once_catalog, config.model), config);
         agent_tool->SetAgentProfile(std::move(subagent_profile));
-        // 单发模式的子代理记忆召回:按任务 prompt 独立检索(与 main 同一只
-        // ProjectMemory;关着就不注)。
+        // 单发模式的子代理记忆召回(存储 v2 P0-3):派工当刻检索一次,整段
+        // 冻结下发,子代理不自动扫整库。单发没有轨迹账,child_run_id 空。
         if (project_memory != nullptr && config.memory.use) {
-            agent_tool->SetTurnContextProvider([memory = project_memory](const std::string& task_prompt) {
-                return memory->BuildTurnContext(task_prompt, std::filesystem::current_path(),
-                                                lubancode::memory::QueryOrigin::User);
-            });
+            agent_tool->SetTurnContextProvider(
+                [memory = project_memory](const std::string& task_prompt, const std::string& child_run_id) {
+                    return memory->BuildTurnContextForDispatch(task_prompt, std::filesystem::current_path(),
+                                                               child_run_id);
+                });
         }
         if (sub_deferral) {
             agent_tool->SetToolFilter(sub_tool_filter);
@@ -393,14 +393,13 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         loop.SetTurnContext(std::move(turn_context));
     }
     lubancode::cli::ContextTracker context_tracker(config.context_window_tokens);
-    // P6/P10(显示系统剥离单):权限账归 SessionRuntime——单发模式与交互
-    // 会话同一颗内核(不再各装一遍大栈)。单发不落盘,sessions_dir 给空;
-    // settings 的 allow_tools 灌进 runtime 那本,RunTurn 引用同一份。
-    lubancode::runtime::SessionRuntime session_runtime({"", std::string(), std::string()});
+    // 权限账(P6/P10 拆出后,P0-2 收窄):单发不是会话——不建
+    // TrajectorySessionLedger(设计如此"单发不落盘",不是 feature 开关),
+    // settings 的 allow_tools 灌进本地这本,RunTurn 引用同一份。
+    std::set<std::string> always_allowed_tools;
     for (const std::string& tool_name : settings_local.allow_tools) {
-        session_runtime.always_allowed().insert(tool_name);
+        always_allowed_tools.insert(tool_name);
     }
-    std::set<std::string>& always_allowed_tools = session_runtime.always_allowed();
 
     // 单发模式没有下一轮循环好把排队消息接着发出去——AskOnce 只问这一句就
     // 退出,ESC/排队这套机制天生只对交互循环有意义(spec 也只要求交互模式

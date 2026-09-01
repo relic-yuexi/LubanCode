@@ -54,7 +54,9 @@ std::string PlatformId();
 
 // 一场 thread(协议层的一个会话)在服务侧的全部家当。
 struct ThreadRecord {
-    std::string thread_id;   // = SessionStore 的会话 id
+    // P0-2:thread_id = workspace session id(Trajectory 唯一真账发号;
+    // 旧 SessionStore 会话 id 退役)。
+    std::string thread_id;
     std::string cwd;         // 本场工作目录
     std::atomic<bool> turn_running{false};
     std::string turn_id;     // 在跑/最近一轮的 id
@@ -74,8 +76,11 @@ struct ThreadRecord {
     std::atomic<bool> turn_finished{false};
     // 最近一轮的 turn/completed params(HandleTurnStart 同步口径取回)。
     nlohmann::json last_completed;
-    // 场次存档句柄(落盘由它管;失败不拦协议,只打 stderr)。
+    // 场次存档句柄(旧 SessionStore;P0-2 起不再开档,字段待 P0-6 删)。
     std::unique_ptr<sessions::SessionStore> store;
+    // 本场 main.jsonl 的绝对路径(trace/query 断线补账/冷回放用;账本
+    // 开张成功后由 thread/start 填)。
+    std::string session_main_path;
 
     // goal 单合流批:typed 命令面(goal 六 + loop 七 + plan 三)的会话级
     // 状态。goal/loop 的状态机真值按 thread 各一本(一场 thread 一只
@@ -92,7 +97,8 @@ struct ThreadRecord {
 
 // 装配选项。
 struct ServerOptions {
-    std::string sessions_dir;     // 会话档目录(空 = 不落盘,纯内存跑)
+    std::string sessions_dir;     // 旧会话档目录(P0-2 起不消费,P0-6 删)
+    std::string workspaces_dir;   // P0-2:唯一持久化根(<home>/.lubancode/workspaces)
     std::string cwd;              // 服务进程当前目录(事件里回给前端)
     std::string lubancode_version = std::string(app::kVersion);
     // 会话档 meta 真值(阶段 3 冻结项:thread/start 的 meta 不再写占位)。
@@ -279,16 +285,21 @@ private:
     std::shared_ptr<StdioConnection> connection_;
     std::mutex connection_mutex_;
     // P9 收尾:thread/list|archive|unarchive|delete 的执行体。server 不
-    // 另写扫盘路,全从这里走(sessions_dir 空 = 没建,搬删一律拒)。
+    // 另写扫盘路,全从这里走(workspaces 根空 = 没建,搬删一律拒)。
     std::unique_ptr<runtime::SessionCommandService> session_commands_;
+    // 服务进程默认 workspace 的 key(scope=cwd 的 thread/list 用;按
+    // options_.cwd 四级裁决,thread 各自的 cwd 在各自账里)。
+    std::string DefaultWorkspaceKey() const;
     // 浏览器面(阶段 3):sidecar 进程管理 + browser/* 方法与事件。
     std::unique_ptr<BrowserService> browser_;
 
     std::mutex threads_mutex_;
     std::map<std::string, std::shared_ptr<ThreadRecord>> threads_;
 
-    // 会话档目录(选项里给了才有)。
+    // 旧会话档目录(P0-2 起不消费,P0-6 删)。
     std::string sessions_dir_;
+    // P0-2:唯一持久化根(~/.lubancode/workspaces)。
+    std::string workspaces_dir_;
     // turnId/itemId 派生:P9 起统一走 runtime::ProcessIdAuthority(进程级
     // 单份,见 runtime/id_authority.hpp),这里的回合计数账已拆。
 };

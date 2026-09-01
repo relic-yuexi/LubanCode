@@ -156,7 +156,8 @@ std::optional<LineIdHash> ParseLineIdHash(const std::string& line) {
 // ---------------------------------------------------------------------------
 
 TelemetryService::TelemetryService(TelemetryServiceOptions options)
-    : options_(std::move(options)), queue_(options_.queue) {}
+    : options_(std::move(options)), queue_(options_.queue),
+      consent_store_(ConsentStore(options_.telemetry_root / "consent.json")) {}
 
 TelemetryService::~TelemetryService() {
     if (running_.load()) {
@@ -285,16 +286,34 @@ bool TelemetryService::Start() {
         // 状态开不出仍继续开 spool:投影能跑就跑,状态面报 degraded。
     }
     NormalizeResourcePlatform(&options_.resource);
-    spool_ = std::make_unique<TelemetrySpool>(options_.telemetry_root / "spool",
-                                              options_.telemetry_root / "quarantine",
-                                              options_.spool);
-    recovery_ = spool_->OpenAndRecover(platform::WallClockNowMs());
-    if (!recovery_.error_code.empty() && degraded_reason_.empty()) {
-        degraded_reason_ = recovery_.error_code;
+    if (options_.spool_enabled) {
+        spool_ = std::make_unique<TelemetrySpool>(options_.telemetry_root / "spool",
+                                                  options_.telemetry_root / "quarantine",
+                                                  options_.spool);
+        recovery_ = spool_->OpenAndRecover(platform::WallClockNowMs());
+        if (!recovery_.error_code.empty() && degraded_reason_.empty()) {
+            degraded_reason_ = recovery_.error_code;
+        }
+    }
+    // T2 出口(§26.1 "start exporter"):endpoint 配了且 spool 在(durable
+    // 是出口的前提,§18.6)才起出口线程。回环/公网分界的门在此判。
+    if (options_.exporter.configured() && spool_ != nullptr) {
+        exporter_ = std::make_unique<OtlpHttpExporter>(options_.exporter);
+        consent_store_ = ConsentStore(options_.telemetry_root / "consent.json");
+        std::lock_guard<std::mutex> lock(export_mutex_);
+        export_stats_ = ExportStatusFace{};
+        export_stats_.configured = true;
+        export_stats_.endpoint_display = SanitizeEndpointForDisplay(options_.exporter.endpoint);
+        export_stats_.endpoint_loopback = EndpointIsLoopback(options_.exporter.endpoint);
+        EvaluateExportGateLocked();
     }
     started_at_ms_ = platform::WallClockNowMs();
     stop_.store(false);
     worker_ = std::thread([this] { WorkerLoop(); });
+    if (exporter_ != nullptr) {
+        export_cancel_.store(false);
+        export_thread_ = std::thread([this] { ExportLoop(); });
+    }
     running_.store(true);
     return true;
 }
@@ -304,12 +323,21 @@ void TelemetryService::Stop() {
         return;
     }
     stop_.store(true);
+    export_cancel_.store(true);  // §26.4 正在传输的请求发取消
     {
         std::lock_guard<std::mutex> lock(wake_mutex_);
         wake_cv_.notify_all();
     }
+    {
+        std::lock_guard<std::mutex> lock(export_mutex_);
+        export_wake_ = true;
+        export_cv_.notify_all();
+    }
     if (worker_.joinable()) {
         worker_.join();
+    }
+    if (export_thread_.joinable()) {
+        export_thread_.join();
     }
     running_.store(false);
     // §26.3:seal active -> persist cursor(AdvancePendingCursors 已在 worker
@@ -369,10 +397,13 @@ void TelemetryService::WorkerLoop() {
         RunPass(false);
     }
     // §26.3 末趟:final flush(开着的 span 按 missing 收口入账)+ seal +
-    // 持久化。
+    // 持久化。出口线程此刻还活着(Stop 先 join worker),spool 面照持锁。
     RunPass(true);
     if (spool_ != nullptr) {
-        spool_->SealNow(platform::WallClockNowMs());
+        {
+            std::lock_guard<std::mutex> lock(spool_mutex_);
+            spool_->SealNow(platform::WallClockNowMs());
+        }
         AdvancePendingCursors();
     }
     PersistState();
@@ -438,12 +469,23 @@ void TelemetryService::RunPass(bool final_flush) {
     }
     DrainQueue();
     if (spool_ != nullptr) {
-        spool_->SealIfDue(platform::WallClockNowMs(), options_.flush_interval_ms);
-        // 清理半账并进退场水位(§18.5)。
-        for (const auto& [key, cov] : spool_->CleanedCoverage()) {
-            retired_watermarks_[key] = cov.last_event_id;
+        bool sealed_now = false;
+        {
+            std::lock_guard<std::mutex> lock(spool_mutex_);
+            sealed_now = spool_->SealIfDue(platform::WallClockNowMs(), options_.flush_interval_ms);
+            // 清理半账并进退场水位(§18.5)。
+            for (const auto& [key, cov] : spool_->CleanedCoverage()) {
+                std::lock_guard<std::mutex> state_lock(state_mutex_);
+                retired_watermarks_[key] = cov.last_event_id;
+            }
         }
         AdvancePendingCursors();
+        if (sealed_now) {
+            // 新段上市(§18.2):出口线程赶一趟,免等 tick。
+            std::lock_guard<std::mutex> lock(export_mutex_);
+            export_wake_ = true;
+            export_cv_.notify_all();
+        }
     }
 }
 
@@ -559,7 +601,11 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
     // ---- 与 spool durable 覆盖对账(§18.5)----
     bool spool_reaches_cursor = !has_cursor;
     if (spool_ != nullptr) {
-        const std::map<std::string, StreamCoverage> coverage = spool_->Coverage();
+        std::map<std::string, StreamCoverage> coverage;
+        {
+            std::lock_guard<std::mutex> lock(spool_mutex_);
+            coverage = spool_->Coverage();
+        }
         const auto cov = coverage.find(key);
         if (cov != coverage.end() && cov->second.projection_generation == projection_generation_) {
             // coverage 端点在 Journal 里的位置(全本找:落在 cursor 之前 =
@@ -609,12 +655,19 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
         if (!spool_reaches_cursor) {
             // cursor 超前于现存 spool(无覆盖,或覆盖端点落后):查退场水位
             //(ACK 删除或 TTL 清理;有账 = 正常清理,无账 = 损坏,§18.5)。
-            const auto retired = retired_watermarks_.find(key);
+            std::string retired_watermark;
+            {
+                std::lock_guard<std::mutex> state_lock(state_mutex_);
+                const auto retired = retired_watermarks_.find(key);
+                if (retired != retired_watermarks_.end()) {
+                    retired_watermark = retired->second;
+                }
+            }
             bool accounted = false;
-            if (retired != retired_watermarks_.end()) {
+            if (!retired_watermark.empty()) {
                 for (std::size_t i = cursor_index; i < lines->size(); ++i) {
                     auto id_hash = ParseLineIdHash((*lines)[i]);
-                    if (id_hash.has_value() && id_hash->event_id == retired->second) {
+                    if (id_hash.has_value() && id_hash->event_id == retired_watermark) {
                         accounted = true;
                         break;
                     }
@@ -715,7 +768,12 @@ void TelemetryService::ProjectStream(const SessionEntry& session, const std::str
     };
 
     const auto enqueue_or_dedup = [&](BatchItem item) {
-        if (spool_ != nullptr && spool_->HasBatch(item.batch_id)) {
+        bool durable_already = false;
+        if (spool_ != nullptr) {
+            std::lock_guard<std::mutex> lock(spool_mutex_);
+            durable_already = spool_->HasBatch(item.batch_id);
+        }
+        if (durable_already) {
             // durable 已有(崩溃后重投同一窗口):不重发,直接记推进
             //(批已在 sealed 段里,epoch 0 = 永远可推)。
             pending_cursor_advances_[key] =
@@ -800,7 +858,12 @@ void TelemetryService::DrainQueue() {
                              ? EncodeMetricsRequest(item->resource_attributes, item->metrics)
                              : EncodeTracesRequest(item->resource_attributes, item->spans);
         const std::uint64_t epoch = append_epoch_ + 1;
-        if (spool_->AppendBatch(record, now_ms)) {
+        bool appended = false;
+        {
+            std::lock_guard<std::mutex> lock(spool_mutex_);
+            appended = spool_->AppendBatch(record, now_ms);
+        }
+        if (appended) {
             append_epoch_ = epoch;
             const std::string key =
                 StreamKey(item->workspace_key, item->session_id, item->stream_id);
@@ -824,11 +887,16 @@ void TelemetryService::DrainQueue() {
 
 void TelemetryService::AdvancePendingCursors() {
     // cursor 只在派生批次 durable 入 spool 后推进(§14.2):落 active 的批
-    // 要等 spool 真封了一段(seal 代数前进)才许推。单写者,无竞态。
+    // 要等 spool 真封了一段(seal 代数前进)才许推。投影 worker 单写者;
+    // 出口线程只读 ACK 面,spool 面一律持锁过。
     if (spool_ == nullptr) {
         return;
     }
-    const std::uint64_t seal_generation = spool_->seal_generation();
+    std::uint64_t seal_generation = 0;
+    {
+        std::lock_guard<std::mutex> lock(spool_mutex_);
+        seal_generation = spool_->seal_generation();
+    }
     if (seal_generation != last_seen_seal_generation_) {
         // 封段完成:此刻之前落盘的批全部 durable。
         last_seen_seal_generation_ = seal_generation;
@@ -863,25 +931,416 @@ void TelemetryService::AckBatches(const std::vector<std::string>& batch_ids) {
         return std::find(batch_ids.begin(), batch_ids.end(), id) != batch_ids.end();
     };
     // 删段前先记窗口账:ACK 覆盖到的 stream 端点进退场水位(§18.5),
-    // 批 id 进 tombstone 簿(§18.2 删除失败防重复无限发)。
-    for (const SealedSegment& segment : spool_->sealed_segments()) {
-        for (const SegmentBatchIndex& batch : segment.batches) {
-            if (!acked(batch.batch_id)) {
-                continue;
+    // 批 id 进 tombstone 簿(§18.2 删除失败防重复无限发)。锁序:state 与
+    // spool 各一段scope,不嵌套(出口线程与投影线程都不会两头持)。
+    std::vector<SegmentBatchIndex> acknowledged;
+    {
+        std::lock_guard<std::mutex> lock(spool_mutex_);
+        for (const SealedSegment& segment : spool_->sealed_segments()) {
+            for (const SegmentBatchIndex& batch : segment.batches) {
+                if (acked(batch.batch_id)) {
+                    acknowledged.push_back(batch);
+                }
             }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        for (const SegmentBatchIndex& batch : acknowledged) {
             const std::string key =
                 batch.workspace_key + "|" + batch.session_id + "|" + batch.stream_id;
             retired_watermarks_[key] = batch.last_event_id;
             tombstones_.emplace_back(batch.batch_id, now_ms);
         }
+        if (tombstones_.size() > kTombstoneCap) {
+            tombstones_.erase(tombstones_.begin(),
+                              tombstones_.begin() + static_cast<std::ptrdiff_t>(
+                                                       tombstones_.size() - kTombstoneCap));
+        }
     }
-    if (tombstones_.size() > kTombstoneCap) {
-        tombstones_.erase(tombstones_.begin(),
-                          tombstones_.begin() + static_cast<std::ptrdiff_t>(
-                                                   tombstones_.size() - kTombstoneCap));
+    {
+        std::lock_guard<std::mutex> lock(spool_mutex_);
+        (void)spool_->AckBatches(batch_ids);
     }
-    (void)spool_->AckBatches(batch_ids);
     PersistState();
+}
+
+// ---------------------------------------------------------------------------
+// T2 出口线程(§19):出队 -> POST -> ACK/退避/tombstone 全链
+// ---------------------------------------------------------------------------
+
+void TelemetryService::EvaluateExportGateLocked() {
+    // export_mutex_ 已持有。回环免披露;公网须 HTTPS + 匹配 consent(§8.4)。
+    if (exporter_ == nullptr) {
+        return;
+    }
+    std::optional<ConsentRecord> consent;
+    if (consent_store_.has_value()) {
+        consent = consent_store_->Load();
+    }
+    const std::string gate =
+        EvaluateExportGate(options_.exporter.endpoint, options_.data_class, consent);
+    // 永久错停的代(telemetry.export.http_permanent)只在重启或换 endpoint
+    // 后由本函数重置;consent/https 门动态判。
+    if (export_gate_reason_ != "telemetry.export.http_permanent") {
+        export_gate_reason_ = gate;
+    }
+    export_stats_.consent_state =
+        options_.exporter.endpoint.empty() || EndpointIsLoopback(options_.exporter.endpoint)
+            ? "not_required"
+            : (gate.empty() ? "granted" : "required");
+    export_stats_.gate_reason = export_gate_reason_;
+}
+
+void TelemetryService::ExportLoop() {
+    while (!stop_.load()) {
+        RunExportPass();
+        std::unique_lock<std::mutex> lock(export_mutex_);
+        // 下一趟的等时:有在等退避的批,等到最早到期;否则出口 tick 兜底
+        //(丢 notify 也能醒,§14.1 同一哲学)。
+        std::int64_t wait_ms = 500;
+        const std::int64_t now_ms = platform::WallClockNowMs();
+        for (const auto& [id, retry] : export_retry_) {
+            (void)id;
+            if (retry.next_eligible_ms > now_ms) {
+                wait_ms = std::min(wait_ms, retry.next_eligible_ms - now_ms);
+            }
+        }
+        wait_ms = std::max<std::int64_t>(1, std::min<std::int64_t>(wait_ms, 500));
+        export_cv_.wait_for(lock, std::chrono::milliseconds(wait_ms),
+                            [this] { return stop_.load() || export_wake_; });
+        export_wake_ = false;
+    }
+}
+
+bool TelemetryService::RunExportPass() {
+    if (exporter_ == nullptr || spool_ == nullptr) {
+        return true;
+    }
+    {
+        std::lock_guard<std::mutex> lock(export_mutex_);
+        if (export_paused_ || !export_gate_reason_.empty()) {
+            // 停出口(pause/门关):投影照跑,spool 照落(§24.2 pause 语义;
+            // 门关原因进状态面)。flush 等待方要知道"没得发"。
+            flush_cv_.notify_all();
+            return true;
+        }
+    }
+
+    // 段序快照(§18.2 段内批序即落盘序):严格 FIFO,一只批卡住,后面
+    // 的不抢跑——at-least-once 的顺序账面干净,双限兜住毒批。
+    struct SegmentSnapshot {
+        std::uint64_t segment_id = 0;
+        std::int64_t created_at_ms = 0;
+        std::vector<std::string> batch_ids;
+    };
+    std::vector<SegmentSnapshot> snapshot;
+    {
+        std::lock_guard<std::mutex> lock(spool_mutex_);
+        for (const SealedSegment& segment : spool_->sealed_segments()) {
+            SegmentSnapshot item;
+            item.segment_id = segment.segment_id;
+            item.created_at_ms = segment.created_at_ms;
+            for (const SegmentBatchIndex& batch : segment.batches) {
+                item.batch_ids.push_back(batch.batch_id);
+            }
+            if (!item.batch_ids.empty()) {
+                snapshot.push_back(std::move(item));
+            }
+        }
+    }
+    if (snapshot.empty()) {
+        std::lock_guard<std::mutex> lock(export_mutex_);
+        flush_cv_.notify_all();
+        return true;
+    }
+
+    static thread_local std::mt19937_64 rng(std::random_device{}());
+    std::vector<std::string> acks;
+    bool stopped = false;
+    for (const SegmentSnapshot& segment : snapshot) {
+        std::optional<std::vector<SpoolBatchRecord>> records;
+        for (const std::string& batch_id : segment.batch_ids) {
+            const std::int64_t now_ms = platform::WallClockNowMs();
+            int attempts = 0;
+            std::int64_t next_eligible_ms = 0;
+            {
+                std::lock_guard<std::mutex> lock(export_mutex_);
+                const auto found = export_retry_.find(batch_id);
+                if (found != export_retry_.end()) {
+                    attempts = found->second.attempts;
+                    next_eligible_ms = found->second.next_eligible_ms;
+                }
+            }
+            if (next_eligible_ms > now_ms) {
+                stopped = true;  // 退避未到:按序停趟,下一趟再赶
+                break;
+            }
+            // §19.2 双限:尝试次数/年龄任一超 → 弃置(记 tombstone,
+            // AckBatches 删段,不再无限发)。
+            const bool over_attempts =
+                options_.exporter.retry.max_attempts > 0 &&
+                attempts >= options_.exporter.retry.max_attempts;
+            const bool over_age =
+                segment.created_at_ms + options_.exporter.retry.max_batch_age_ms <= now_ms;
+            if (over_attempts || over_age) {
+                acks.push_back(batch_id);
+                {
+                    std::lock_guard<std::mutex> lock(export_mutex_);
+                    export_retry_.erase(batch_id);
+                    export_stats_.abandoned_batches_total += 1;
+                    export_stats_.last_error_at_ms = now_ms;
+                    export_stats_.last_error_code = over_attempts
+                                                        ? "telemetry.export.max_attempts"
+                                                        : "telemetry.export.max_age";
+                }
+                continue;
+            }
+            if (!records.has_value()) {
+                std::lock_guard<std::mutex> lock(spool_mutex_);
+                records = spool_->ReadSealedBatches(segment.segment_id);
+            }
+            const SpoolBatchRecord* record = nullptr;
+            if (records.has_value()) {
+                for (const SpoolBatchRecord& candidate : *records) {
+                    if (candidate.batch_id == batch_id) {
+                        record = &candidate;
+                        break;
+                    }
+                }
+            }
+            if (record == nullptr) {
+                continue;  // 段在快照后已退场(并发 ACK/TTL):不是错,跳过
+            }
+            if (!stop_.load()) {
+                export_cancel_.store(false);  // 只在关停时置位,这里清残留
+            }
+            {
+                std::lock_guard<std::mutex> lock(export_mutex_);
+                export_stats_.in_flight = 1;
+            }
+            const ExportAttempt attempt = exporter_->Export(*record, &export_cancel_);
+            {
+                std::lock_guard<std::mutex> lock(export_mutex_);
+                export_stats_.in_flight = 0;
+                if (attempt.kind != ExportOutcomeKind::Accepted &&
+                    attempt.kind != ExportOutcomeKind::Partial &&
+                    attempt.kind != ExportOutcomeKind::Cancelled) {
+                    export_stats_.retried_batches_total += 1;  // 未成的尝试账
+                }
+            }
+            switch (attempt.kind) {
+                case ExportOutcomeKind::Accepted:
+                case ExportOutcomeKind::Partial: {
+                    acks.push_back(batch_id);
+                    std::lock_guard<std::mutex> lock(export_mutex_);
+                    export_retry_.erase(batch_id);
+                    export_stats_.exported_batches_total += 1;
+                    export_stats_.exported_bytes_total += attempt.body_bytes;
+                    export_stats_.last_success_at_ms = now_ms;
+                    if (attempt.kind == ExportOutcomeKind::Partial) {
+                        // §19.3:拒收账记下;不盲目整批重试,也不 quarantine
+                        //(有收的批按 delivered 记,后端按 id 幂等)。
+                        export_stats_.partial_rejected_points_total +=
+                            static_cast<std::uint64_t>(std::max<std::int64_t>(0, attempt.rejected_points));
+                    }
+                    break;
+                }
+                case ExportOutcomeKind::Retryable: {
+                    const int next_attempt = attempts + 1;
+                    const std::int64_t delay =
+                        BackoffDelayMs(next_attempt,
+                                       attempt.retry_after_ms >= 0
+                                           ? std::optional<std::int64_t>(attempt.retry_after_ms)
+                                           : std::nullopt,
+                                       options_.exporter.retry,
+                                       static_cast<std::uint32_t>(rng() & 0x3FFu));
+                    std::lock_guard<std::mutex> lock(export_mutex_);
+                    export_retry_[batch_id] = BatchRetry{next_attempt, now_ms + delay};
+                    export_stats_.last_error_at_ms = now_ms;
+                    export_stats_.last_error_code = attempt.error_code;
+                    export_stats_.last_error_status = attempt.http_status;
+                    stopped = true;  // 按序停趟:对端没就绪,后面的批下趟再发
+                    break;
+                }
+                case ExportOutcomeKind::Permanent: {
+                    // §19.2:永久错停该 endpoint generation,报 doctor。
+                    std::lock_guard<std::mutex> lock(export_mutex_);
+                    export_gate_reason_ = "telemetry.export.http_permanent";
+                    export_stats_.gate_reason = export_gate_reason_;
+                    export_stats_.last_error_at_ms = now_ms;
+                    export_stats_.last_error_code = attempt.error_code;
+                    export_stats_.last_error_status = attempt.http_status;
+                    stopped = true;
+                    break;
+                }
+                case ExportOutcomeKind::Cancelled: {
+                    stopped = true;  // 关停:立刻收
+                    break;
+                }
+            }
+            if (stopped) {
+                break;
+            }
+        }
+        if (stopped) {
+            break;
+        }
+    }
+    if (!acks.empty()) {
+        AckBatches(acks);  // 删段 + tombstone + 退场水位 + PersistState(§18.2)
+    }
+    {
+        std::lock_guard<std::mutex> lock(export_mutex_);
+        flush_cv_.notify_all();
+    }
+    if (stopped) {
+        return false;  // 卡在退避/永久错/取消:flush 等待方按未出清看
+    }
+    {
+        // 出清 = 没有段剩(ACK 后段已删,以 spool 现账为准)。
+        std::lock_guard<std::mutex> lock(spool_mutex_);
+        return spool_->sealed_segments().empty();
+    }
+}
+
+void TelemetryService::SetExportPaused(bool paused) {
+    std::lock_guard<std::mutex> lock(export_mutex_);
+    export_paused_ = paused;
+    export_stats_.paused = paused;
+    export_wake_ = true;
+    export_cv_.notify_all();
+    flush_cv_.notify_all();
+}
+
+bool TelemetryService::Flush(std::int64_t bounded_ms) {
+    if (!running_.load()) {
+        return false;
+    }
+    if (spool_ != nullptr) {
+        std::lock_guard<std::mutex> lock(spool_mutex_);
+        spool_->SealNow(platform::WallClockNowMs());
+    }
+    if (exporter_ == nullptr) {
+        // 本地模式:seal 到位即"发完了"(§24.2 flush 只到本地 durability)。
+        return true;
+    }
+    {
+        std::lock_guard<std::mutex> lock(export_mutex_);
+        export_wake_ = true;
+        export_cv_.notify_all();
+    }
+    const auto deadline =
+        std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max<std::int64_t>(0, bounded_ms));
+    std::unique_lock<std::mutex> lock(export_mutex_);
+    while (true) {
+        // 出清判据:没在等退避的批,且 spool 里没有 sealed 段,或出口被
+        // pause/门关(§24.2 不强制等公网无限久)。
+        bool blocked = export_paused_ || !export_gate_reason_.empty();
+        bool waiting_retry = false;
+        for (const auto& [id, retry] : export_retry_) {
+            (void)id;
+            if (retry.next_eligible_ms > platform::WallClockNowMs()) {
+                waiting_retry = true;
+                break;
+            }
+        }
+        if (blocked || (!waiting_retry && [&] {
+                std::lock_guard<std::mutex> spool_lock(spool_mutex_);
+                return spool_ == nullptr || spool_->sealed_segments().empty();
+            }())) {
+            return !blocked;
+        }
+        if (flush_cv_.wait_until(lock, deadline) == std::cv_status::timeout) {
+            return false;
+        }
+    }
+}
+
+ExportStatusFace TelemetryService::ExportStatusFaceData() const {
+    std::lock_guard<std::mutex> lock(export_mutex_);
+    ExportStatusFace out = export_stats_;
+    out.active = running_.load() && exporter_ != nullptr;
+    return out;
+}
+
+std::string TelemetryService::ConsentState() const {
+    std::lock_guard<std::mutex> lock(export_mutex_);
+    return export_stats_.consent_state.empty() ? std::string("not_required")
+                                               : export_stats_.consent_state;
+}
+
+bool TelemetryService::GrantConsent() {
+    if (!consent_store_.has_value()) {
+        consent_store_ = ConsentStore(options_.telemetry_root / "consent.json");
+    }
+    ConsentRecord record;
+    record.endpoint = options_.exporter.endpoint;
+    record.data_class = DataClassName(options_.data_class);
+    record.redaction_version = std::string(kRedactionPolicyVersion);
+    record.granted_at_ms = platform::WallClockNowMs();
+    if (!consent_store_->Save(record)) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(export_mutex_);
+    EvaluateExportGateLocked();
+    export_wake_ = true;
+    export_cv_.notify_all();
+    return true;
+}
+
+bool TelemetryService::RevokeConsent() {
+    const bool removed = consent_store_.has_value() ? consent_store_->Remove() : true;
+    std::lock_guard<std::mutex> lock(export_mutex_);
+    EvaluateExportGateLocked();
+    export_wake_ = true;
+    export_cv_.notify_all();
+    return removed;
+}
+
+std::pair<std::size_t, std::size_t> TelemetryService::ClearSpool() {
+    if (spool_ == nullptr) {
+        return {0, 0};
+    }
+    std::vector<SealedSegment> purged;
+    {
+        std::lock_guard<std::mutex> lock(spool_mutex_);
+        purged = spool_->PurgeAll();
+    }
+    std::size_t batches = 0;
+    {
+        std::lock_guard<std::mutex> state_lock(state_mutex_);
+        const std::int64_t now_ms = platform::WallClockNowMs();
+        for (const SealedSegment& segment : purged) {
+            for (const SegmentBatchIndex& batch : segment.batches) {
+                const std::string key =
+                    batch.workspace_key + "|" + batch.session_id + "|" + batch.stream_id;
+                retired_watermarks_[key] = batch.last_event_id;
+                tombstones_.emplace_back(batch.batch_id, now_ms);
+                batches += 1;
+            }
+        }
+        if (tombstones_.size() > kTombstoneCap) {
+            tombstones_.erase(tombstones_.begin(),
+                              tombstones_.begin() + static_cast<std::ptrdiff_t>(
+                                                       tombstones_.size() - kTombstoneCap));
+        }
+    }
+    // 清掉的批进了 tombstone:出口退避表里在等的也一并销账(段没了,不再发)。
+    {
+        std::lock_guard<std::mutex> lock(export_mutex_);
+        export_retry_.clear();
+    }
+    PersistState();
+    return {purged.size(), batches};
+}
+
+std::optional<ExportAttempt> TelemetryService::ProbeEndpoint() const {
+    if (exporter_ == nullptr) {
+        return std::nullopt;
+    }
+    export_cancel_.store(false);
+    return exporter_->Probe(&export_cancel_);
 }
 
 TelemetryServiceStatus TelemetryService::Status() const {
@@ -895,9 +1354,11 @@ TelemetryServiceStatus TelemetryService::Status() const {
     status.missed_wakes = missed_wakes_.load();
     status.queue = queue_.Stats();
     if (spool_ != nullptr) {
+        std::lock_guard<std::mutex> lock(spool_mutex_);
         status.spool = spool_->Stats(platform::WallClockNowMs());
     }
     status.recovery = recovery_;
+    status.exporter = ExportStatusFaceData();
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         for (const auto& [key, state] : streams_) {
@@ -944,6 +1405,7 @@ nlohmann::json TelemetryServiceStatus::ToJson() const {
                                          {"final_flushed", stream.final_flushed}});
     }
     out["streams"] = std::move(streams);
+    out["exporter"] = exporter.ToJson();
     return out;
 }
 
@@ -969,6 +1431,22 @@ std::vector<std::string> FormatTelemetryStatusLines(const TelemetryServiceStatus
                     std::to_string(status.spool.bytes) + " 字节, 待发 " +
                     std::to_string(status.spool.active_batches) + " 批" +
                     (status.spool.degraded ? " [降级: 磁盘帽]" : ""));
+    if (status.exporter.configured) {
+        std::string line = "出口: " + status.exporter.endpoint_display;
+        line += status.exporter.endpoint_loopback ? " (回环)" : " (公网)";
+        if (status.exporter.paused) {
+            line += " [已暂停]";
+        } else if (!status.exporter.gate_reason.empty()) {
+            line += " [停: " + status.exporter.gate_reason + "]";
+        } else if (status.exporter.last_error_at_ms > status.exporter.last_success_at_ms) {
+            line += " [上次失败: " + status.exporter.last_error_code + "]";
+        } else if (status.exporter.last_success_at_ms > 0) {
+            line += " [通]";
+        }
+        lines.push_back(std::move(line));
+    } else {
+        lines.push_back("出口: 未配置(本地投影+spool,不出网)");
+    }
     lines.push_back("流: " + std::to_string(status.streams.size()) + " 条在册");
     return lines;
 }
@@ -997,6 +1475,25 @@ std::vector<std::string> FormatTelemetryDoctorLines(const TelemetryServiceStatus
         lines.push_back("  spool 错误: 无");
     } else {
         lines.push_back("  spool 错误: " + status.spool.last_error_code);
+    }
+    if (status.exporter.configured) {
+        lines.push_back("  出口账: 已发 " +
+                        std::to_string(status.exporter.exported_batches_total) + " 批 (" +
+                        std::to_string(status.exporter.exported_bytes_total) + " 字节), 重试 " +
+                        std::to_string(status.exporter.retried_batches_total) + " 次, 弃置 " +
+                        std::to_string(status.exporter.abandoned_batches_total) + " 批");
+        if (status.exporter.partial_rejected_points_total > 0) {
+            lines.push_back("  partial success 拒收点数: " +
+                            std::to_string(status.exporter.partial_rejected_points_total) +
+                            "(§19.3 已记账,不盲重试)");
+        }
+        lines.push_back("  consent: " + status.exporter.consent_state);
+        if (status.exporter.last_error_at_ms > 0) {
+            lines.push_back("  上次出口错误: " + status.exporter.last_error_code + " (HTTP " +
+                            std::to_string(status.exporter.last_error_status) + ")");
+        } else {
+            lines.push_back("  上次出口错误: 无");
+        }
     }
     return lines;
 }

@@ -55,7 +55,7 @@ std::filesystem::path MakeRoot(const char* tag) {
 
 SessionManagerOptions Opts(const std::filesystem::path& root) {
     SessionManagerOptions options;
-    options.trajectories_root = root / "trajectories";
+    options.workspaces_root = root / "workspaces";
     options.workspace_root = root / "ws";
     options.launch_cwd = "D:/tmp/ws";
     options.lubancode_version = "0.26.138-test";
@@ -535,7 +535,7 @@ TEST_CASE("第 2/4 步: checkpoint 高水位与悬空工具分档") {
     std::string source_id;
     {
         const auto sessions = std::filesystem::temp_directory_path() /
-                              "lubancode-traj-resume-dangling" / "trajectories" / "workspaces";
+                              "lubancode-traj-resume-dangling" / "workspaces";
         for (const auto& workspace : std::filesystem::directory_iterator(sessions)) {
             for (const auto& session : std::filesystem::directory_iterator(workspace.path() / "sessions")) {
                 source_id = session.path().filename().generic_string();

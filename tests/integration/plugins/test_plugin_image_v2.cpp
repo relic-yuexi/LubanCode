@@ -169,10 +169,11 @@ TEST_CASE("v2 端到端: path 源图片 → 落账 → payload 带 ImageContent 
     REQUIRE(image != nullptr);
     CHECK(image->mime_type == "image/png");
     CHECK(image->artifact.stored);
-    CHECK(image->artifact.filename.rfind("art-", 0) == 0);
+    // P0-2:文件名即内容地址(全 hash;art- 只是短 id 前缀)。
+    CHECK(image->artifact.filename.rfind("art-", 0) != 0);
     CHECK(std::filesystem::exists(artifact_dir.path / image->artifact.filename));
     // 投影文本带 artifact 短句。
-    CHECK(result.content.find("[图片 art-") != std::string::npos);
+    CHECK(result.content.find("[图片 ") != std::string::npos);
 
     // 一杆子到底:payload 进 ToolResultBlock,重灌,anthropic wire 见原生图。
     api::Request wire_request;

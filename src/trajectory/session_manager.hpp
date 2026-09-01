@@ -77,6 +77,7 @@ std::expected<void, std::string> TransitionSessionStatus(const std::filesystem::
 enum class LifecycleOperation {
     CreateSession,
     ArchiveSession,
+    UnarchiveSession,  // P0-2:archived -> closed 的目录管理逆操作
     ResumeReference,
     DeleteSession,
 };
@@ -441,7 +442,9 @@ enum class ClearRecoveryPolicy { CompleteSwitch, AbortEmptyPreparing };
 // ---------------------------------------------------------------------------
 
 struct SessionManagerOptions {
-    std::filesystem::path trajectories_root;  // ~/.lubancode/trajectories(P0-2 挪 workspaces/)
+    // P0-2:唯一项目持久化根(=~/.lubancode/workspaces,直接含
+    // <workspace_key>/;原 trajectories/workspaces 迁此)。空 = 调用方兜底。
+    std::filesystem::path workspaces_root;
     // P0-1:身份由 workspace::ResolveWorkspaceIdentity 唯一裁决后整份递进
     //(workspace_key/display_name/checkout_root 全在 identity 里)。空
     // identity(旧测试/兜底)按 workspace_root 退 cwd_fallback 形状。
@@ -496,6 +499,8 @@ public:
     // ---- workspace 管理操作(§3.2;只动非 active 的 session) ----
     // closed -> archived;lifecycle 记 intent/result。正文与 hash 不变。
     std::expected<void, std::string> ArchiveSession(const std::string& session_id);
+    // archived -> closed(解除归档);lifecycle 同记一笔。
+    std::expected<void, std::string> UnarchiveSession(const std::string& session_id);
     // 真删目录:durable intent → tombstone → 删目录 → result。活锁或
     // active session 拒绝。
     std::expected<void, std::string> DeleteSession(const std::string& session_id,
@@ -566,5 +571,29 @@ private:
     std::atomic<bool> boundary_in_progress_{false};
     std::mutex mutex_;
 };
+
+// ---------------------------------------------------------------------------
+// P0-2:workspace 管理操作的自由函数形态(命令面/session 服务用)
+// ---------------------------------------------------------------------------
+
+// SessionManager 的成员版绑着 active session(进程内一场);/sessions、
+// app-server thread/list 这类命令面要在没有任何活动会话的进程里搬删
+// 任意 workspace 的场次。这三只自由函数与成员版同一条路(状态图校验 +
+// lifecycle intent/result + tombstone),只是拿 workspace_dir 直接干活。
+// now_ms 由调用方递(单测可钉固定钟)。
+struct SessionAdminOutcome {
+    std::string error_code;  // 空 = 成功;稳定码同成员版
+    std::string message;
+
+    bool ok() const { return error_code.empty(); }
+};
+
+SessionAdminOutcome ArchiveSessionDir(const std::filesystem::path& workspace_dir,
+                                      const std::string& session_id, std::int64_t now_ms);
+SessionAdminOutcome UnarchiveSessionDir(const std::filesystem::path& workspace_dir,
+                                        const std::string& session_id, std::int64_t now_ms);
+SessionAdminOutcome DeleteSessionDir(const std::filesystem::path& workspace_dir,
+                                     const std::string& session_id, const std::string& reason,
+                                     std::int64_t now_ms);
 
 }  // namespace lubancode::trajectory

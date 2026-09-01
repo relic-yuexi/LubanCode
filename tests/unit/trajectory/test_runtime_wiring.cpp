@@ -133,21 +133,6 @@ agent::ToolTraceEvent TraceEvent(agent::ToolTraceEventKind kind, const std::stri
 
 }  // namespace
 
-TEST_CASE("flag: 环境变量压配置一头,默认听配置") {
-    EnvGuard env("LUBANCODE_TRAJECTORY");
-    env.set("1");
-    CHECK(ResolveTrajectoryEnabled(false));
-    CHECK(ResolveTrajectoryEnabled(true));
-    env.set("0");
-    CHECK_FALSE(ResolveTrajectoryEnabled(true));
-    CHECK_FALSE(ResolveTrajectoryEnabled(false));
-    env.set("");
-    CHECK_FALSE(ResolveTrajectoryEnabled(false));
-    CHECK(ResolveTrajectoryEnabled(true));
-    env.set("yes");
-    CHECK(ResolveTrajectoryEnabled(false));
-}
-
 TEST_CASE("状态机补丁:cancelled 不须 started,failed 仍须") {
     const auto dir = FreshDir("lubancode-traj-p2-cancel");
     auto recorder = trajectory::TrajectoryRecorder::Start(
@@ -265,7 +250,7 @@ TEST_CASE("bridge 一轮全流:请求/输出/工具三道栅栏齐,verify 过") 
 TEST_CASE("ledger:开账出 main.jsonl,子代理拿独立 JSONL 与父边界") {
     const auto root = FreshDir("lubancode-traj-p2-ledger");
     TrajectorySessionLedger::Options options;
-    options.trajectories_root = root / "trajectories";
+    options.workspaces_root = root / "workspaces";
     options.workspace_root = root / "repo";
     options.lubancode_version = "test";
     std::error_code ec;
@@ -377,7 +362,7 @@ std::string ParentRunIdOf(const std::filesystem::path& stream) {
 TEST_CASE("SpawnSubagent:嵌套派工的 parent_run_id 指向父任务自己的 run,不冒充 main(P1-2)") {
     const auto root = FreshDir("lubancode-traj-p1-2-nested");
     TrajectorySessionLedger::Options options;
-    options.trajectories_root = root / "trajectories";
+    options.workspaces_root = root / "workspaces";
     options.workspace_root = root / "repo";
     options.lubancode_version = "test";
     std::error_code ec;
@@ -414,12 +399,12 @@ TEST_CASE("SpawnSubagent:嵌套派工的 parent_run_id 指向父任务自己的 
     CHECK(grandchild_parent != main_run_id);
 }
 
-TEST_CASE("SessionRuntime 轨迹档:旧档不建、轮末补抄停用") {
-    // flag 开:ledger 在 SessionRuntime 手里,EnsureBegun/PersistNew 全走
-    // Disabled/Nothing(轮末补抄这条路停用,15.3)。
+TEST_CASE("SessionRuntime 轨迹档:恒开、旧档不建、轮末补抄停用") {
+    // P0-2(Trajectory 升为唯一 Session):feature/env 开关已删,ledger 恒在
+    // SessionRuntime 手里,EnsureBegun/PersistNew 全走 Disabled/Nothing
+    //(轮末补抄这条路停用,§15.3)。
     const auto root = FreshDir("lubancode-traj-p2-runtime");
     runtime::SessionRuntime::Options options;
-    options.trajectory_enabled = true;
     options.trajectory_workspace_identity = workspace::MakeFallbackIdentity(root / "repo");
     std::error_code ec;
     std::filesystem::create_directories(root / "repo", ec);

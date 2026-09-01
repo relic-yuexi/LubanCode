@@ -1,12 +1,13 @@
-// SessionCommandService(会话管理器单第六步):runtime 侧的会话查询与
-// 搬删命令服务。前端(TUI/Web/Tauri/app-server)只发 typed ClientCommand,
-// 拿即时 ClientReceipt——不再各自扫 JSONL、各自碰 filesystem。
+// SessionCommandService(会话管理器单第六步;P0-2 换到 workspace 新账):
+// runtime 侧的会话查询与搬删命令服务。前端(TUI/Web/Tauri/app-server)只
+// 发 typed ClientCommand,拿即时 ClientReceipt——不再各自扫 JSONL、各自
+// 碰 filesystem。
 //
-// 职责(单子"代码边界"一节):
-//   thread.list       -> SessionCatalog 查询,回结构化 SessionSummary 数组
-//   thread.archive    -> SessionLifecycle.ArchiveSession
-//   thread.unarchive  -> SessionLifecycle.UnarchiveSession
-//   thread.delete     -> SessionLifecycle.DeleteSession(payload.confirm 才动手)
+// 职责(单子"代码边界"一节;P0-2 数据源换 workspace 索引/管理面):
+//   thread.list       -> trajectory::QueryWorkspaceSessions(可重建索引)
+//   thread.archive    -> trajectory::ArchiveSessionDir(lifecycle + 状态图)
+//   thread.unarchive  -> trajectory::UnarchiveSessionDir
+//   thread.delete     -> trajectory::DeleteSessionDir(payload.confirm 才动手)
 //
 // 确认策略:delete 的确认归调用方(终端走确认屏,GUI 走自己的对话框),
 // 协议不替人决定;没带 confirm 一律 confirmation_required 拒绝,不动盘。
@@ -15,30 +16,22 @@
 // 删除成功后发 thread.deleted——服务本身不持 EventSink,长活事件归
 // Runtime 装配层(与 ClientReceipt 的即时语义分层)。
 //
-// 依赖铁律:runtime 不 include cli/app;sessions::SessionCatalog 与
-// sessions::SessionLifecycle 是中立层(agent/ 不反向依赖 runtime),这里引
-// 它们不破层次。thread_id_to_path 形状的会话存档根由装配层注入。
+// 依赖铁律:runtime 不 include cli/app;trajectory 是中立库,这里引它
+// 不破层次。workspaces_root 与当前 workspace_key 由装配层注入。
 
 #pragma once
 
-#include <functional>
-#include <memory>
+#include <filesystem>
 #include <string>
 
 #include <nlohmann/json.hpp>
 
 #include "runtime/command.hpp"
 
-namespace lubancode::sessions {
-class SessionCatalog;
-class SessionLifecycle;
-}  // namespace lubancode::sessions
-
 namespace lubancode::runtime {
 
-// 服务的即时回执。error_code 用 SessionLifecycle 的稳定码
-// (not_found/ambiguous/confirmation_required/path_outside_root/
-// target_exists/io_error/invalid_request)。
+// 服务的即时回执。error_code 用稳定码(not_found/confirmation_required/
+// invalid_request/io_error,详见实现)。
 struct SessionCommandOutcome {
     bool accepted = true;
     std::string error_code;
@@ -55,33 +48,36 @@ struct SessionCommandOutcome {
     }
 };
 
-// 会话查询/搬删服务。构造时定会话根目录;线程模型与 catalog/lifecycle
-// 相同(调用方串行调,内部不另起线程)。
+// 会话查询/搬删服务。构造时定唯一持久化根与当前 workspace;线程模型与
+// 索引/管理面相同(调用方串行调,内部不另起线程)。
 class SessionCommandService {
 public:
-    // sessions_dir 空 = 没有会话存档可用(list 给空表,搬删一律拒绝)。
-    explicit SessionCommandService(std::string sessions_dir);
+    struct Options {
+        std::filesystem::path workspaces_root;  // ~/.lubancode/workspaces;空 = 没账可用
+        std::string workspace_key;              // scope=cwd 时的当前 workspace key
+    };
+
+    // workspaces_root 空 = 没有会话账可用(list 给空表,搬删一律拒绝)。
+    explicit SessionCommandService(Options options);
+    SessionCommandService(const SessionCommandService&) = delete;
+    SessionCommandService& operator=(const SessionCommandService&) = delete;
     ~SessionCommandService();
 
     // thread.list:payload 查询形状(全可选,缺省 cwd|active|updated|
     // 空 search|不截):
     //   {"scope":"cwd"|"all", "state":"active"|"archived",
     //    "sort":"updated"|"created", "search":"...",
-    //    "cwd":"...", "cursor":0, "limit":20}
-    // receipt.payload = {"threads":[{...SessionSummary...}], "total":N}。
-    // 相对时间不在这层算——协议层留稳定时间串,前端按自己的 locale 画
-    // (单子"代码边界 SessionCatalog"定死)。
+    //    "cursor":0, "limit":20}
+    // scope=cwd 即当前 workspace(同仓子目录/linked worktree 一把钥匙,
+    // 不再按 meta.cwd 逐场筛)。receipt.payload =
+    // {"threads":[{...SessionSummary...}], "total":N}。
     SessionCommandOutcome ListThreads(const nlohmann::json& query_payload) const;
 
     // thread.archive / thread.unarchive:thread_id 按完整 id 解(协议层
-    // 已经是稳定 id,引用消歧是终端/CLI 的活,不进协议)。
+    // 已经是稳定 id,引用消歧是终端/CLI 的活,不进协议)。id 在哪个
+    // workspace 由索引定位(跨 workspace 也搬得动)。
     SessionCommandOutcome ArchiveThread(const std::string& thread_id);
     SessionCommandOutcome UnarchiveThread(const std::string& thread_id);
-
-    // 会话内 /archive、/delete 的 Windows 句柄闸:当前会话的 append 句柄
-    // 还开着,搬删之前先经回调收柄。转发给 SessionLifecycle::SetActiveFile
-    // ——宿主(InteractiveSession)知道句柄在谁手里,这里不猜。
-    void SetActiveFile(std::string active_file, std::function<bool(const std::string&)> flush_close);
 
     // thread.delete:payload.confirm == true 才动手;否则
     // confirmation_required,盘上不动。
@@ -91,11 +87,10 @@ public:
     // 不吞)。返回即时回执。
     ClientReceipt HandleCommand(const ClientCommand& command);
 
-    const std::string& sessions_dir() const { return sessions_dir_; }
+    const std::filesystem::path& workspaces_root() const { return options_.workspaces_root; }
 
 private:
-    std::string sessions_dir_;
-    std::unique_ptr<sessions::SessionLifecycle> lifecycle_;
+    Options options_;
 };
 
 // SessionSummary(agent 侧) -> JSON(协议形状;字段名与 app-server 的

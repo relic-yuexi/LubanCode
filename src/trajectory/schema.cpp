@@ -136,6 +136,18 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::ContextAttached, "source_refs", "a", false},
     {EventKind::ContextDetached, "context_id", "s", true},
     {EventKind::ContextDetached, "reason", "s", false},
+    // 存储 v2 P0-3(合同 §四):记忆召回快照。snapshot_ref 与 snapshot_inline
+    // 二选一——≤512B 小内容允许内联,其余落 session artifacts 后引用。
+    {EventKind::ContextInjected, "kind", "s", true},
+    {EventKind::ContextInjected, "memory_level", "s", true},
+    {EventKind::ContextInjected, "memory_id", "s", true},
+    {EventKind::ContextInjected, "memory_schema", "u", true},
+    {EventKind::ContextInjected, "memory_updated_at", "s", true},
+    {EventKind::ContextInjected, "content_sha256", "s", true},
+    {EventKind::ContextInjected, "source_evidence_refs", "a", true},
+    {EventKind::ContextInjected, "injected_bytes", "u", true},
+    {EventKind::ContextInjected, "snapshot_ref", "s", false},
+    {EventKind::ContextInjected, "snapshot_inline", "s", false},
     {EventKind::ModelRequestPrepared, "model", "s", true},
     {EventKind::ModelRequestPrepared, "provider", "s", true},
     {EventKind::ModelRequestPrepared, "wire", "s", true},
@@ -207,6 +219,11 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::ToolExecutionFailed, "error_code", "s", false},
     {EventKind::ToolExecutionFailed, "stdout_ref", "o|", false},
     {EventKind::ToolExecutionFailed, "stderr_ref", "o|", false},
+    // P0-2(子代理失败路补列):agent 工具的执行终态带 child_run_id 时,
+    // result_ref(child_stream:子账终态 hash 对账)与 side_effects 随行——
+    // 与 Finished 同一形状,失败也不丢父子边。
+    {EventKind::ToolExecutionFailed, "result_ref", "o", false},
+    {EventKind::ToolExecutionFailed, "side_effects", "a", false},
     {EventKind::ToolExecutionCancelled, "reason", "s", true},
     {EventKind::ToolExecutionCancelled, "duration_ms", "i", false},
     {EventKind::ToolExecutionUnknown, "reason", "s", true},
@@ -217,6 +234,10 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::ToolResultCommitted, "is_error", "b", true},
     {EventKind::ToolResultCommitted, "derived_from_event", "s", false},
     {EventKind::ToolResultCommitted, "truncation", "s", false},
+    // P0-2(无损投影):MCP structuredContent 原样随行(nullopt 不落键,
+    // 与"server 没给"分得清);图片/音频等富块在 content 数组里以
+    // *_ref 形状带 artifact 引用。
+    {EventKind::ToolResultCommitted, "structured_content", "o", false},
     {EventKind::ControlCommandRequested, "command_id", "s", true},
     {EventKind::ControlCommandRequested, "command_name", "s", true},
     {EventKind::ControlCommandRequested, "action_name", "s", true},
@@ -246,6 +267,7 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::ControlCwdChanged, "worktree_id", "s", false},
     {EventKind::ControlModeChanged, "mode", "s", true},
     {EventKind::ControlModeChanged, "old_mode", "s", false},
+    {EventKind::ControlModeChanged, "reason", "s", false},
     {EventKind::ControlContextWindowChanged, "context_window", "s", true},
     {EventKind::ControlContextWindowChanged, "old_context_window", "s", false},
     {EventKind::ControlCheckpointCreated, "checkpoint_id", "s", true},
@@ -362,6 +384,21 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::OutcomeAssessed, "outcome", "s", true},
     {EventKind::OutcomeAssessed, "evidence_refs", "a", false},
     {EventKind::OutcomeAssessed, "criteria", "a", false},
+    // 存储 v2 P0-3:Memory 写入因果边(合同 §四)。request 是嵌套摘要
+    //(operation/layer/memory_id/title);committed/failed 本批只入合同,
+    // worker 回执先落 workspace lifecycle。
+    {EventKind::MemorySaveRequested, "request", "o", true},
+    {EventKind::MemorySaveRequested, "source_session", "s", false},
+    {EventKind::MemorySaveRequested, "source_run", "s", false},
+    {EventKind::MemorySaveRequested, "source_turn", "s", false},
+    {EventKind::MemorySaveRequested, "source_event_ref", "s", false},
+    {EventKind::MemorySaveCommitted, "memory_id", "s", true},
+    {EventKind::MemorySaveCommitted, "memory_version", "s", false},
+    {EventKind::MemorySaveCommitted, "content_sha256", "s", false},
+    {EventKind::MemorySaveCommitted, "memory_path", "s", false},
+    {EventKind::MemorySaveCommitted, "committed_at", "s", false},
+    {EventKind::MemorySaveFailed, "stable_error_code", "s", true},
+    {EventKind::MemorySaveFailed, "retryable", "b", false},
 };
 
 }  // namespace

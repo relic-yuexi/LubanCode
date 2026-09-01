@@ -544,7 +544,7 @@ nlohmann::json BrowserService::FinishScreenshot(const nlohmann::json& sidecar_re
     const agent::ImageDimensions dims = agent::ReadImageDimensions(*decoded, "image/png");
     nlohmann::json artifact;
     artifact["id"] = "art-" + sha256.substr(0, 8);
-    artifact["filename"] = "art-" + sha256.substr(0, 8) + ".png";
+    artifact["filename"] = sha256 + ".png";  // P0-2:文件名即内容地址
     artifact["path"] = relative;
     artifact["mime_type"] = "image/png";
     artifact["bytes"] = decoded->size();
@@ -666,7 +666,7 @@ void BrowserService::EmitScreencastFrame(const PendingScreencastFrame& frame) {
     const agent::ImageDimensions dims = agent::ReadImageDimensions(*decoded, frame.mime_type);
     nlohmann::json artifact;
     artifact["id"] = "art-" + sha256.substr(0, 8);
-    artifact["filename"] = "art-" + sha256.substr(0, 8) + "." + extension;
+    artifact["filename"] = sha256 + "." + extension;  // P0-2:文件名即内容地址
     artifact["path"] = relative;
     artifact["mime_type"] = frame.mime_type;
     artifact["bytes"] = decoded->size();

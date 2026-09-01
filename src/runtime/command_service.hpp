@@ -23,6 +23,7 @@
 
 #pragma once
 
+#include <filesystem>
 #include <expected>
 #include <functional>
 #include <memory>
@@ -141,7 +142,10 @@ public:
         std::function<void(std::size_t)> apply_context_window;
         const agent::ModelRouteTable* roles_table = nullptr; // 可空:路由表原样外带
         ModelFetcher fetch_models;                            // 可空:query 时拿不到清单
-        std::string sessions_dir;                             // ListThreads 的扫档目录(空 = 空清单)
+        // P0-2:ListThreads/ResumeThread 的会话账根与当前 workspace(空 =
+        // 空清单/不可恢复;旧 sessions_dir 扫档路已换 workspace 索引)。
+        std::filesystem::path workspaces_root;
+        std::string workspace_key;
     };
 
     explicit CommandService(Options options);

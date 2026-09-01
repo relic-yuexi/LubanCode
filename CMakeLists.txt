@@ -423,6 +423,8 @@ add_library(lubancode_engine STATIC
   src/memory/project_memory.cpp
   src/memory/frontmatter.cpp
   src/memory/memory_tool.cpp
+  # 存储 v2 P0-3:memory 落账口在 Trajectory 账上的桥(召回快照+写入因果边)。
+  src/app/memory_ledger_bridge.cpp
   src/mcp/transport.cpp
   src/mcp/client.cpp
   src/mcp/rich_result.cpp  # MCP 富结果:tools/call 全块型解析与 artifact 落盘
@@ -529,6 +531,7 @@ add_library(lubancode_engine STATIC
   # 启动恢复器(Journal 可证事实为准)。
   src/trajectory/session_lock.cpp
   src/trajectory/session_manager.cpp
+  src/trajectory/session_index.cpp
   # P0-3:ReplayState 折叠/exact replay/state hash/checkpoint/session
   # verifier,与 harness replay 的录制桩(RecordedBackend/RecordedExecutor)。
   src/trajectory/replay.cpp
@@ -590,6 +593,14 @@ add_library(lubancode_engine STATIC
   # 多渠道消息接入单阶段 3:ChannelRouter(准入链/binding/session key/
   # 工具与记忆策略;manager 的路由准入经它)。
   src/channel/channel_router.cpp
+  # 持久 Agent 总装单 G1:Gateway 骨架——profile 裁决/锁(pid+start token
+  # +boot_id)/boot history 与 SafeMode/文件控制面/只读探测。纯库,与
+  # channel/trajectory 同层(依赖 platform/trajectory 身份核,不 include
+  # runtime/app/cli)。
+  src/gateway/profile.cpp
+  src/gateway/control_server.cpp
+  src/gateway/process.cpp
+  src/gateway/status.cpp
   src/insights/finding.cpp
   src/insights/session_summary.cpp
   src/insights/report_model.cpp
@@ -634,6 +645,10 @@ add_library(lubancode_engine STATIC
   src/telemetry/batch_queue.cpp
   src/telemetry/spool.cpp
   src/telemetry/service.cpp
+  # T2(OTLP/HTTP 出口):单次 OTLP/HTTP JSON POST(cpr 底座)、§19.2/§19.3
+  # 重试/退避/partial success 分型、§8.4 consent 与回环/公网分界、
+  # §15.4 凭证 seam(装配层适配 runtime::SecretResolver)。
+  src/telemetry/exporter.cpp
 )
 target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src
@@ -1006,6 +1021,8 @@ add_library(lubancode_app STATIC
   src/cli/record_command.cpp
   # P0-3:`lubancode trajectory <verify|replay|harness-replay>` 只读诊断子命令。
   src/cli/trajectory_command.cpp
+  # 持久 Agent 总装单 G1:`lubancode gateway run|status|stop` 子命令面。
+  src/cli/gateway_command.cpp
   # 骨架拆解反弹·问题 1:工具确认的终端半边(菜单/diff/[y/a/N]/持久化)
   # 与 ask_user 问询,自 app/turn_runner.cpp 搬来——真终端 IO 件,随
   # console_input 住 app target。

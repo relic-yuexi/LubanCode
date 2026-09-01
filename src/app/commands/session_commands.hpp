@@ -251,7 +251,10 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
                                           const lubancode::agent::CompactOptions& options, int& compact_epoch,
                                           lubancode::agent::BackgroundCallAccounting* accounting = nullptr);
 
-void PrintSessionsCommand(const std::string& sessions_dir, const std::string& args);
+// P0-2:数据源换 workspace 可重建索引(经账本;默认只列当前 workspace,
+// all 扫全部,archived 是归档只读入口)。
+void PrintSessionsCommand(const lubancode::runtime::TrajectorySessionLedger* ledger,
+                          const std::string& args);
 
 // ---------------------------------------------------------------------------
 // 归档与永久删除(会话管理器单第四、五步)。搬与删全经
@@ -263,10 +266,7 @@ void PrintSessionsCommand(const std::string& sessions_dir, const std::string& ar
 // 补;重名列短 id 叫用户点明,绝不猜一场。命中唯一时填 out_id/out_title。
 // 返回 false = 没解出(人话已打好,调用方直接印)。include_archived 版
 // 连归档场一起列候选(unarchive 的目标恰是归档场)。
-bool ResolveSessionReference(const std::string& sessions_dir, const std::string& ref,
-                             const std::function<std::string()>& stdin_line, std::string& out_id,
-                             std::string& out_title, std::string& out_message, bool& ambiguous);
-bool ResolveSessionReference(const std::string& sessions_dir, const std::string& ref,
+bool ResolveSessionReference(const std::filesystem::path& workspaces_root, const std::string& ref,
                              const std::function<std::string()>& stdin_line, bool include_archived,
                              std::string& out_id, std::string& out_title, std::string& out_message,
                              bool& ambiguous);
@@ -275,25 +275,25 @@ bool ResolveSessionReference(const std::string& sessions_dir, const std::string&
 // `delete <SESSION> [--force]` 的执行体。stdin_line:读一行输入的回调
 // (确认屏用;null = 非交互,delete 一律按缺确认拒绝)。force 只 delete 认。
 // 返回进程退出码(0 = 成功)。
-int HandleSessionManagementCommand(const std::string& sessions_dir, int kind, const std::string& ref,
-                                   bool force, const lubancode::cli::Theme& theme,
+int HandleSessionManagementCommand(const std::filesystem::path& workspaces_root, int kind,
+                                   const std::string& ref, bool force, const lubancode::cli::Theme& theme,
                                    const std::function<std::string()>& stdin_line);
 
 // 会话内 /archive:只归档当前会话。先经 lifecycle 刷盘收柄再搬,成功后
 // 调用方退场(返回 true = 该退出交互会话)。
-bool ArchiveCurrentSession(const std::string& sessions_dir, lubancode::sessions::SessionStore& store,
+bool ArchiveCurrentSession(lubancode::runtime::TrajectorySessionLedger* ledger,
                            const lubancode::cli::Theme& theme);
 
 // 会话内 /delete:只删当前会话。回合在跑/工具在飞/审批悬着时拒绝
 // (调用方先验);闲下来后走确认屏,再关柄、删文件。返回 true = 该退出。
-bool DeleteCurrentSession(const std::string& sessions_dir, lubancode::sessions::SessionStore& store,
-                          const lubancode::sessions::SessionMeta& meta, const std::string& title,
-                          const lubancode::cli::Theme& theme);
+bool DeleteCurrentSession(lubancode::runtime::TrajectorySessionLedger* ledger,
+                          const lubancode::cli::Theme& theme, const std::string& title,
+                          const std::string& cwd, const std::function<std::string()>& stdin_line);
 
 
 // /resume 裸敲:本目录最近 20 场直接做成方向键菜单。显式编号/id 仍由
 // ResumeSession 解析，脚本和熟手用法不变。
-std::optional<std::string> PromptResumeTarget(const std::string& sessions_dir,
+std::optional<std::string> PromptResumeTarget(const lubancode::runtime::TrajectorySessionLedger* ledger,
                                               const lubancode::cli::Theme& theme);
 
 

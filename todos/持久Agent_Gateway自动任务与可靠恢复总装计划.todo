@@ -1,6 +1,6 @@
 # 持久 Agent：Gateway、自动任务与可靠恢复总装计划
 
-- 状态：待实现（G0 现状冻结与合同补齐起）
+- 状态：G0/G1 已落地（2026-09-01。G0：合同冻结进 docs/architecture/gateway/ 三篇。G1：GatewayProcess/profile/锁/文件控制面/status/stop/boot history/SafeMode 骨架 + `lubancode gateway run|status|stop` 子命令，测试 tests/unit/gateway/test_gateway_process.cpp 16 例全绿 + 真机冒烟）。G2（AutomationStore/Scheduler/系统服务）起待实现
 - 日期：2026-08-31
 - 级别：P0
 - 范围：`src/app`、`src/runtime`、`src/trajectory`、`src/workflow`、`src/tools`、`src/channel`、`src/sessions`、`src/platform`、`src/cli`、`tests/`
@@ -62,7 +62,7 @@ OS Supervisor
 | 会话排活 | `SessionWorkScheduler`、`IdleWakeCoordinator` | timer/transport 只投 wake，主泵单飞开 turn | 没有跨进程 durable queue |
 | 子代理 | `TaskLedger`、`AgentTaskCoordinator`、`SubagentScheduler` | 父子边、mailbox、取消、预算、后台线程、完成回流 | `tasks_` 与线程句柄仍在内存；进程死后不能续 |
 | 后台命令 | `BackgroundTaskRegistry` | 进程、日志、停止、完成通知 | 进程级单例，不是 durable job manager |
-| Channel 合同 | `src/channel/types.*`、`manifest.*`、`frame.*`、`bridge_protocol.*`、`router.*` | 冻结消息形状、manifest、framing、双向配对 | 目前不 spawn sidecar，不接真网络，无 durable ingress/outbox |
+| Channel 合同 | `src/channel/types.*`、`manifest.*`、`frame.*`、`bridge_protocol.*`、`router.*` | 冻结消息形状、manifest、framing、双向配对 | 目前不 spawn sidecar，不接真网络，无 outbox（阶段 4）。G0 复核：阶段 2（Manager/IngressStore/账号锁/pairing）与阶段 3（TurnIngress/ChannelRouter/ChannelSessionHost）已落库，但无生产宿主进程 |
 | App Server | `src/app_server/` 与中立事件合同 | 控制面、远端前端、SessionRuntime 复用底子 | 不自动等于 Gateway，不管公网渠道账号 |
 
 ### 2.2 当前断口
@@ -993,28 +993,28 @@ recovery.action_forbidden
 
 ### G0：现状冻结与总合同
 
-- [ ] 逐项审 `SessionRuntime`、Trajectory resume、Goal/Loop restore、Workflow Resume、TaskLedger、BackgroundTaskRegistry、Channel phase 1 与 App Server。
-- [ ] 画出当前真实写盘图，列每本账的 writer 与 direct write call site。
-- [ ] 冻结 `ProcessMode::Gateway`、六本账所有权、cross-ledger ref、stable error code。
-- [ ] 冻结 Automation Job/Occurrence、Task、Ingress、Delivery 状态机。
-- [ ] 冻结 RecoveryAction 与失败矩阵。
-- [ ] 冻结 disabled 零副作用合同。
-- [ ] 把本单核心合同提炼进 `docs/architecture/gateway/`。
-- [ ] 修正 `多渠道消息接入与常驻ChannelPlugin设计.todo` 阶段 1 的真实勾选状态；已写源码却未勾的逐项对账，未实现的不得借文件名算完成。
+- [x] 逐项审 `SessionRuntime`、Trajectory resume、Goal/Loop restore、Workflow Resume、TaskLedger、BackgroundTaskRegistry、Channel phase 1 与 App Server。（`docs/architecture/gateway/audit-write-map.md` §2；要点：goal/loop 事件 P0-2 后无 durable 落点、ChannelManager 件已落库但无生产宿主）
+- [x] 画出当前真实写盘图，列每本账的 writer 与 direct write call site。（audit-write-map.md §3）
+- [x] 冻结 `ProcessMode::Gateway`、六本账所有权、cross-ledger ref、stable error code。（`docs/architecture/gateway/contracts.md` §1-§3、§7；代码枚举落 `src/gateway/process.hpp` 的 `ProcessMode`，G1 批）
+- [x] 冻结 Automation Job/Occurrence、Task、Ingress、Delivery 状态机。（contracts.md §4）
+- [x] 冻结 RecoveryAction 与失败矩阵。（contracts.md §5）
+- [x] 冻结 disabled 零副作用合同。（contracts.md §6；G1 批在 tests/unit/gateway/test_gateway_process.cpp 钉进程级测试：status 只读零建目录）
+- [x] 把本单核心合同提炼进 `docs/architecture/gateway/`。（README.md/contracts.md/audit-write-map.md 三篇 + 架构索引挂链）
+- [x] 修正 `多渠道消息接入与常驻ChannelPlugin设计.todo` 阶段 1 的真实勾选状态；已写源码却未勾的逐项对账，未实现的不得借文件名算完成。（对账结论：阶段 1 七项勾选与源码一一相符——types/channel.yaml parser/ComponentKind Channel/frame codec/router/fake sidecar/错误码，无需改勾；渠道单状态行已注记本次对账）
 
-验收：Reviewer 能从源码指到每本真账与唯一 writer；能回答任一崩溃点是 retry、resume、projection、delivery 还是 needs review。
+验收：Reviewer 能从源码指到每本真账与唯一 writer；能回答任一崩溃点是 retry、resume、projection、delivery 还是 needs review。（audit-write-map.md §3 写盘图 + contracts.md §5 失败矩阵，逐格可对照）
 
 ### G1：前台 Gateway 骨架与控制面
 
-- [ ] 新建 `GatewayProcess`、profile、instance id、pid/start-token lock。
-- [ ] 实现 `lubancode gateway run/status/stop`。
-- [ ] 起 local-only control endpoint、health/readiness、graceful shutdown。
-- [ ] 接统一日志目录与 JSON status。
-- [ ] 实现 boot history 与 SafeMode 骨架。
-- [ ] 普通 CLI 只读 probe 已运行 Gateway，不暗起它。
-- [ ] 加第二实例抢锁、陈旧锁、坏 control endpoint、关机超时测试。
+- [x] 新建 `GatewayProcess`、profile、instance id、pid/start-token lock。（`src/gateway/process.*`：boot_id 即 instance id；`GatewayLock` 记 pid + 进程 start token（复用 `trajectory::ProbeLockHolder` 同一把身份尺）+ boot_id；陈旧锁清后重拿、坏锁保守不删）
+- [x] 实现 `lubancode gateway run/status/stop`。（`src/cli/gateway_command.*` + cli_options/cli_app 接线；退出码合同见 docs/architecture/gateway/README.md §5）
+- [x] 起 local-only control endpoint、health/readiness、graceful shutdown。（`src/gateway/control_server.*`：首版为本地文件控制通道——control.json 原子换代快照 + control/stop.json 命令（boot_id 定向，陈旧命令不追杀新实例）；G1 实现裁决记 contracts.md §10。graceful shutdown 走 ShutdownHook，超宽限记 timeout 退 4 不假写 clean）
+- [x] 接统一日志目录与 JSON status。（profiles/<p>/logs/gateway.log 统一日志；`gateway status --json` 出机器可读快照（含 holder/control/health/safe_mode/连击数））
+- [x] 实现 boot history 与 SafeMode 骨架。（boot-history.jsonl append-only；连续非干净关机 ≥ 阈值（默认 3）进 SafeMode：控制面照起、业务面暂停、状态明示；干净关机破连击。显式 ack 口留 G2 doctor）
+- [x] 普通 CLI 只读 probe 已运行 Gateway，不暗起它。（`src/gateway/status.*` 纯读；测试钉"未运行时零建目录零写盘"；真机冒烟第一步验证过 home 目录为空）
+- [x] 加第二实例抢锁、陈旧锁、坏 control endpoint、关机超时测试。（tests/unit/gateway/test_gateway_process.cpp 16 例：抢锁/陈旧锁（PID 复用 token 对不上）/坏锁保守/坏 control.json 降级不崩/钩子没收净退 4/SafeMode 进出/StopGateway 等待收口/CLI 解析；另有真机冒烟：run→status→--json→第二实例退 2→stop 干净退 0→硬杀后陈旧锁裁决→重启自动清）
 
-验收：前台 Gateway 不接模型、不接渠道也能守住唯一实例；外部 CLI 可查、可停；杀进程后陈旧锁能按 pid + start token 安全裁决。
+验收：前台 Gateway 不接模型、不接渠道也能守住唯一实例；外部 CLI 可查、可停；杀进程后陈旧锁能按 pid + start token 安全裁决。（真机冒烟全过：第二实例 exit 2、stop 后 run exit 0、硬杀后 status 报陈旧锁、再 run 自动清锁起得来；boot-history/control.json/gateway.log 三账句句对得上）
 
 ### G2：AutomationStore、Scheduler 与系统服务
 

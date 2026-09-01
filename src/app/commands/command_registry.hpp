@@ -174,6 +174,10 @@ struct SlashDispatchContext {
     // 端云协同可观测单 T1:本地遥测服务(/telemetry status 的状态面)。
     // 空 = 遥测未开,命令面打"未开启",不发任何请求。
     lubancode::telemetry::TelemetryService* telemetry_service = nullptr;
+    // /telemetry enable session(端云协同可观测单 T2,§24.2):当前进程内装
+    // 遥测服务的执行体(控制器持有装配材料)。空 = 没接(非交互装配),
+    // 命令面明说接不上,不装样子。回一组要打印的行。
+    std::function<std::vector<std::string>()> enable_telemetry_session;
     lubancode::runtime::FanoutEventSink* session_events = nullptr;
     lubancode::sessions::SessionStore* session_store = nullptr;
     const std::string* sessions_dir = nullptr;

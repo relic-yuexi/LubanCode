@@ -184,6 +184,22 @@ bool FoldEvent(const EventEnvelope& envelope, ReplayState* state, FoldIndex* ind
             // 内容 ref 进 artifact 账。
             CollectArtifactRefs(payload.value("content_ref", nlohmann::json()), &state->artifact_refs);
             return true;
+        case EventKind::ContextInjected: {
+            // 存储 v2 P0-3:记忆召回快照。不进 effective conversation(正文
+            // 已经活在当轮 input 里);快照是内容寻址 blob,content_sha256 即
+            // 文件名,进 artifact 账——Replay 重建"当时模型看见哪一版"凭
+            // 这枚 hash 去仓里取,不读今天的 Memory。
+            const auto content_hash = payload.find("content_sha256");
+            if (content_hash != payload.end() && content_hash->is_string()) {
+                state->artifact_refs.push_back(content_hash->get<std::string>());
+            }
+            return true;
+        }
+        case EventKind::MemorySaveRequested:
+        case EventKind::MemorySaveCommitted:
+        case EventKind::MemorySaveFailed:
+            // Memory 写入因果边:纯账目,不参与会话投影。
+            return true;
         case EventKind::ModelRequestPrepared: {
             ReplayRequestStep step;
             step.request_id = envelope.request_id.value_or(std::string());
@@ -1196,6 +1212,7 @@ nlohmann::json ChildEdgeReport::ToJson() const {
                           {"parent_recorded_hash", parent_recorded_hash},
                           {"owner_matches", owner_matches},
                           {"spawn_reference_found", spawn_reference_found},
+                          {"dispatch_on_started", dispatch_on_started},
                           {"hash_matches", hash_matches},
                           {"accepted_once", accepted_once},
                           {"error_code", error_code}};
@@ -1383,7 +1400,14 @@ SessionVerifyReport VerifySessionDir(const std::filesystem::path& session_dir) {
         if (parent_exists) {
             const auto dispatch = parent_it->second.dispatches.find(run_id);
             if (dispatch != parent_it->second.dispatches.end()) {
-                edge.spawn_reference_found = dispatch->second.started_seen;
+                // P0-2(生产时序收口):父侧派发引用认"任何带
+                // relations.child_run_id 的事件"——started 先于派工落地是
+                // 生产时序的常态(agent 工具的子 run id 在 execute 里才
+                // 出生,AttachChildRun 只来得及挂在终态上)。started_seen
+                // 仍如实上报;双向引用(parent_call_id/child hash)照旧逐位
+                // 对账,不因挂点后移而放松。
+                edge.spawn_reference_found = true;
+                edge.dispatch_on_started = dispatch->second.started_seen;
                 if (edge.parent_call_id.empty()) {
                     edge.parent_call_id = dispatch->second.call_id;
                 }

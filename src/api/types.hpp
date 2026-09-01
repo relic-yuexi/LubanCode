@@ -54,8 +54,8 @@ struct ImageBlock {
 // filename/path 由本地按内容寻址起名,不信模型正文一个字。
 struct ModelImageBlock {
     std::string id;         // wire 侧 item id(image_generation_call 的 id),重复终帧的去重键
-    std::string filename;   // "img-<sha8>.png":落盘文件名(本地起的)
-    std::string path;       // 相对会话目录的落盘路径("images/img-<sha8>.png")
+    std::string filename;   // "<sha256>.png":落盘文件名(内容寻址,本地起的)
+    std::string path;       // 相对会话目录的落盘路径("artifacts/sha256/<sha256>.png")
     std::string mime_type;  // 解码后按魔数判定的 MIME("image/png" 等)
     std::uint32_t width = 0;
     std::uint32_t height = 0;

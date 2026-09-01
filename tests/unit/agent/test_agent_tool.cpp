@@ -1102,14 +1102,15 @@ TEST_CASE("Explore 撞只读墙:错误写明'角色限制',不写'子代理无�
     CHECK(tool_result_text.find("子代理无权限") == std::string::npos);
 }
 
-TEST_CASE("子代理记忆召回:按任务 prompt 独立检索,注入本轮 user 消息尾部") {
+TEST_CASE("子代理记忆召回:派工当刻冻结快照,注入本轮 user 消息尾部") {
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("结论")};
     tools::ToolRegistry sub_registry;
     tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
-    // 召回 provider:吃任务 prompt,吐一段上下文(会话层闭包 ProjectMemory,
-    // 这里用假实现钉注入语义)。
-    agent_tool.SetTurnContextProvider([](const std::string& task_prompt) {
+    // 召回 provider:吃任务 prompt 与子 run id,吐一段上下文(会话层闭包
+    // ProjectMemory,这里用假实现钉注入语义;child_run_id 没轨迹账时空)。
+    agent_tool.SetTurnContextProvider([](const std::string& task_prompt, const std::string& child_run_id) {
+        (void)child_run_id;
         return "[项目记忆] 与\"" + task_prompt + "\"相关的召回段";
     });
 

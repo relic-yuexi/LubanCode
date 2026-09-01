@@ -213,6 +213,21 @@ namespace {
 // 文本做 slug;建档失败置 session_store_broken 照旧拦落盘,会话本身照跑。
 // 建档成功顺手开仓(开不成只告警:超长结果退回内存全文,不产生假引用)。
 bool TerminalSessionController::EnsureSessionBegun(const std::string& first_text) {
+    (void)first_text;
+    // P0-2(Trajectory 升为唯一 Session):会话账在 SessionRuntime ctor 里
+    // 已开——session id 与转录路径这一刻就齐,hooks 上下文与上下文仓随
+    // 账开。每轮重进这里全部幂等(仓 Open 重读 index,hooks 只是重设)。
+    if (session_runtime_.trajectory() != nullptr) {
+        if (lubancode::app::HookRuntime() != nullptr) {
+            lubancode::hooks::HookContext hook_context = lubancode::app::HookRuntime()->context();
+            hook_context.session_id = session_runtime_.trajectory()->session_id();
+            hook_context.transcript_path =
+                (session_runtime_.trajectory()->session_dir() / "main.jsonl").generic_string();
+            lubancode::app::UpdateHookRuntimeContext(hook_context);
+        }
+        OpenArtifactStore();
+        return true;
+    }
     // P6:建档本体在 SessionRuntime(错误不再自己打印,由这边按结果印)。
     const auto result =
         session_runtime_.EnsureBegun(first_text, *current_model, CurrentDirUtf8());
@@ -254,7 +269,10 @@ void TerminalSessionController::BeginSessionTitle(const std::string& first_query
     switch (result) {
         case lubancode::app::SessionTitleAccount::LocalResult::Set:
             TermOut() << theme.stats << trf("cmd.title.local_set", session_title) << theme.reset << "\n";
-            StartTitleRefinement(first_query);
+            // P0-2:精炼不在回合里发——旁路小 turn 与主 turn 不能同流并存
+            //(状态机一 stream 一 open turn),首问回合正要开,现在发必撞
+            // 车。挂账,回合收口后的收货点再发。
+            pending_title_refinement_query_ = first_query;
             break;
         case lubancode::app::SessionTitleAccount::LocalResult::WriteFailed:
             TermOut() << theme.error << tr("cmd.title.write_failed") << theme.reset << "\n";
@@ -327,6 +345,14 @@ void TerminalSessionController::BackfillTitleOnResume() {
 // 上屏。非阻塞——没完工直接回,轮末到提示符的路上没有一步在等标题;
 // 结果通常在主回合跑着的时候就备好了,回合一收口这里一眼取走。
 void TerminalSessionController::PollSessionTitleRefinement() {
+    // P0-2:回合已收口(这里只在轮末/空闲进),挂账的标题精炼现在发才不
+    // 与主 turn 抢流。发完照旧走非阻塞收货。
+    if (!pending_title_refinement_query_.empty()) {
+        const std::string query = std::move(pending_title_refinement_query_);
+        pending_title_refinement_query_.clear();
+        StartTitleRefinement(query);
+        return;  // 本圈先发货,结果下圈收
+    }
     std::optional<lubancode::app::SessionTitleRefiner::Outcome> outcome =
         titles_.refiner().TakeFinished();
     if (!outcome.has_value()) {
@@ -360,6 +386,17 @@ void TerminalSessionController::PollSessionTitleRefinement() {
 // 开仓:<sessions_dir>/<session-id>/context(与 <session-id>.jsonl 并排,
 // /sessions 只扫 *.jsonl,互不干扰)。开不成只告警——仓是加层,不是依赖。
 void TerminalSessionController::OpenArtifactStore() {
+    // P0-2:仓住 session artifacts/(blob 内容寻址进 sha256/ 子层,与 MCP
+    // rich、模型图片同根——单子 §三"统一放进 session artifacts/")。旧
+    // sessions/<id>/context 路随旧档退役(P0-5 迁移器搬 blob)。
+    if (session_runtime_.trajectory() != nullptr) {
+        const std::string root =
+            (session_runtime_.trajectory()->session_dir() / "artifacts").generic_string();
+        if (!artifact_store->Open(root, session_runtime_.trajectory()->session_id())) {
+            TermOut() << theme.stats << trf("artifact.store_open_failed", root) << theme.reset << "\n";
+        }
+        return;
+    }
     if (sessions_dir.empty() || !session_store.active()) {
         return;
     }
@@ -530,6 +567,26 @@ void TerminalSessionController::RestoreSteeringQueueFrom(
 // 也按身份合并成一条。
 lubancode::cli::PromptHistoryDataset TerminalSessionController::CollectPromptHistory() {
     lubancode::cli::PromptHistoryDataset data;
+    // P0-2(Trajectory 升为唯一 Session):提问历史读 workspace 索引的
+    // 派生账(indexes/sessions.json 的 prompts 段,重建时单遍扫
+    // main.jsonl 的 input.received)。本轮已问未收口的正文在 Journal 里
+    // 即时落账,索引指纹跟着 main.jsonl 长度走,没有"活尾巴"要另补。
+    if (session_runtime_.trajectory() != nullptr) {
+        data.current_session_id = session_runtime_.trajectory()->session_id();
+        data.current_project_key = session_runtime_.trajectory()->workspace_key();
+        for (const lubancode::trajectory::PromptHistoryLine& line :
+             session_runtime_.trajectory()->ReadPromptHistory(/*max_lines=*/2000)) {
+            lubancode::cli::PromptHistoryEntry entry;
+            entry.text = line.text;
+            entry.ts = lubancode::trajectory::FormatMillisAsLocalTimestamp(line.ts_ms);
+            entry.session_id = line.session_id;
+            entry.title = line.title;
+            entry.project_key = line.workspace_key;  // workspace 身份键(同 key 即同项目)
+            entry.event_seq = static_cast<std::size_t>(line.seq);
+            data.entries.push_back(std::move(entry));
+        }
+        return data;
+    }
     data.current_session_id = session_store.session_id();
     data.current_project_key = lubancode::sessions::NormalizePathForCompare(CurrentDirUtf8());
     if (!sessions_dir.empty()) {
@@ -922,19 +979,14 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
     turn.recorder = is_user_turn ? record_wiring_.recorder() : nullptr;
     turn.silent = silent;
     turn.turn_events = &turn_events;
-    // 模型输出图片的落盘口(ccmoon 巡检单 P0):会话开了档才有目录;
-    // 没开(还没建档)就不挂,引擎遇图片明败,不吞图。
-    // P0-2 轨迹路:旧档不开,图片与 artifact 落进轨迹 session 目录
-    //(同一份目录树,§3.1)。
+    // 模型输出图片与工具二进制 artifact 的落盘口(P0-2 归拢):session
+    // artifacts/sha256/ 内容寻址,同字节只落一份。账本没开(Run() 已拦,
+    // 这里只剩极端竞态窗口)就不挂目录,引擎遇图明败,不吞图。
     if (session_runtime_.trajectory() != nullptr) {
-        const std::filesystem::path dir = session_runtime_.trajectory()->session_dir();
-        turn.model_images_dir = (dir / "images").generic_string();
-        turn.tool_artifact_dir = (dir / "mcp-artifacts").generic_string();
-    } else if (sessions_dir.empty() == false && session_store.active()) {
-        turn.model_images_dir = sessions_dir + "/" + session_store.session_id() + "/images";
-        // MCP 富结果单 P0.5:工具二进制 artifact 目录——MCP 返回的图片/音频/
-        // blob 字节先落这里,history 只留引用。与 images/ 并排,各管各的。
-        turn.tool_artifact_dir = sessions_dir + "/" + session_store.session_id() + "/mcp-artifacts";
+        const std::filesystem::path dir =
+            session_runtime_.trajectory()->session_dir() / "artifacts" / "sha256";
+        turn.model_images_dir = dir.generic_string();
+        turn.tool_artifact_dir = dir.generic_string();
     }
     // 输入图片前置拦截(MiniCPM5 真机巡检单 P2):目录与当前模型身份递给
     // RunTurn,纯文本模型的图片附件发送前就拦住。
@@ -1085,7 +1137,7 @@ void TerminalSessionController::CleanupBackgroundAgents(bool dispose_queue) {
 void TerminalSessionController::Run() {
     // P0-2 轨迹(§十七"要么全走 Trajectory 要么启动失败"):flag 开了却
     // 开不出账,明败退出——不许回退旧 SessionStore 写口续命。
-    if (session_runtime_.trajectory_enabled() && session_runtime_.trajectory() == nullptr) {
+    if (session_runtime_.trajectory() == nullptr) {
         TermErr() << theme.error << tr("error.prefix")
                   << "轨迹账开张失败,会话不启动: " << session_runtime_.trajectory_open_error()
                   << theme.reset << "\n";

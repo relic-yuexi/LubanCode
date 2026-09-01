@@ -111,7 +111,7 @@ TEST_CASE("HardenDirectoryUserOnly / HardenFileUserOnly:user-only 收紧") {
 TEST_CASE("SessionManager:用户递的 session ref 过不了单段门就拒") {
     const auto root = FreshDir("lubancode-p4-ref-gate");
     SessionManagerOptions options;
-    options.trajectories_root = root / "trajectories";
+    options.workspaces_root = root / "workspaces";
     options.workspace_root = root / "repo";
     options.lubancode_version = "test";
     std::error_code ec;

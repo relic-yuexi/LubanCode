@@ -57,3 +57,6 @@ examples/shells/android/.gradle/
 examples/shells/android/build/
 examples/shells/android/app/build/
 examples/shells/android/local.properties
+
+# Agent 会话交接档:随机器走的临时产物,绝不入库(557c62e7 曾误入后移出)
+AGENT_HANDOFF.md

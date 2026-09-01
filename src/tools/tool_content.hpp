@@ -22,10 +22,11 @@
 
 namespace lubancode::tools {
 
-// 二进制内容落进会话 artifact 目录后的引用账。路径按内容寻址
-// ("mcp-artifacts/art-<sha8>.<ext>"),文件名本地起,不信 server 给的
-// 名字一个字。stored=false 表示字节没落盘(没开 artifact 目录/超帽),
-// 投影必须明说"未落盘",不得冒充可取。
+// 二进制内容落进 session artifact 目录后的引用账。路径按内容寻址
+// ("artifacts/sha256/<sha256>.<ext>",P0-2 归拢进 session artifacts/),
+// 文件名本地起(全 hash),不信 server 给的名字一个字。stored=false 表示
+// 字节没落盘(没开 artifact 目录/超帽),投影必须明说"未落盘",不得
+// 冒充可取。
 struct ArtifactRef {
     std::string id;        // "art-<sha8>"
     std::string filename;  // "art-<sha8>.png"

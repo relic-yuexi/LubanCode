@@ -37,7 +37,7 @@ std::filesystem::path MakeRoot(const char* tag) {
 TrajectorySessionLedger::Options LedgerOptions(const std::filesystem::path& root) {
     TrajectorySessionLedger::Options options;
     options.workspace_root = root / "ws";
-    options.trajectories_root = root / "trajectories";
+    options.workspaces_root = root / "workspaces";
     options.launch_cwd = "D:/tmp/ws";
     options.lubancode_version = "0.26.138-test";
     return options;
@@ -106,7 +106,7 @@ TEST_CASE("--continue 启动路: resume_at_launch 开新场,history 投影可取
     // source main.jsonl 存在,记下字节数。
     std::filesystem::path main_path;
     {
-        const auto workspaces = root / "trajectories" / "workspaces";
+        const auto workspaces = root / "workspaces";
         for (const auto& workspace : std::filesystem::directory_iterator(workspaces)) {
             for (const auto& session : std::filesystem::directory_iterator(workspace.path() / "sessions")) {
                 if (session.path().filename().generic_string() == source_id) {
@@ -180,7 +180,7 @@ TEST_CASE("ResumeInteractive: 旧场封口 + 新场七步 + 跨 session command"
     // 旧场封口为 switch_to_resume。
     bool old_ended = false;
     {
-        const auto workspaces = root / "trajectories" / "workspaces";
+        const auto workspaces = root / "workspaces";
         for (const auto& workspace : std::filesystem::directory_iterator(workspaces)) {
             for (const auto& session : std::filesystem::directory_iterator(workspace.path() / "sessions")) {
                 if (session.path().filename().generic_string() != current_id) {

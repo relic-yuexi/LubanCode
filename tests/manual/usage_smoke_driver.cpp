@@ -94,7 +94,7 @@ int main(int argc, char** argv) {
     // ---- 幕一:flag 开,真账本 ----
     runtime::TrajectorySessionLedger::Options options;
     options.workspace_root = root / "workspace";
-    options.trajectories_root = root / "trajectories";
+    options.workspaces_root = root / "workspaces";
     options.launch_cwd = "D:/demo";
     options.lubancode_version = "smoke";
     auto ledger = runtime::TrajectorySessionLedger::Open(std::move(options));

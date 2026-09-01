@@ -93,7 +93,10 @@ std::optional<SessionManifest> SessionManifest::FromJson(const nlohmann::json& j
         return std::nullopt;
     }
     manifest.schema_version = json.at("schema_version").get<int>();
-    if (manifest.schema_version != 1) {
+    // P0-2:新根写 v2;v1 是旧根旧档形状,读侧仍认(迁移器输入/P0-5),
+    // 消费方(index/doctor)在新根见到 v1 按"旧档搬错家"处置。更大的
+    // 版本号按合同整份拒读(schema.unsupported_version 语义),不猜。
+    if (manifest.schema_version < 1 || manifest.schema_version > 2) {
         return std::nullopt;
     }
     const auto read_string = [&](const char* key, std::string* out) {
@@ -147,13 +150,12 @@ std::optional<SessionManifest> ReadSessionJson(const std::filesystem::path& sess
 }
 
 std::expected<TrajectoryDirectory, std::string> TrajectoryDirectory::CreateWorkspace(
-    const std::filesystem::path& trajectories_root, const workspace::WorkspaceIdentity& identity,
+    const std::filesystem::path& workspaces_root, const workspace::WorkspaceIdentity& identity,
     std::int64_t now_ms) {
     if (!identity.valid()) {
         return std::unexpected("identity.path_invalid: 身份没裁决出 workspace_key");
     }
     const std::string key = identity.workspace_key;
-    const std::filesystem::path workspaces_root = trajectories_root / "workspaces";
     const std::filesystem::path workspace_dir = workspaces_root / platform::Utf8ToPath(key);
     std::error_code ec;
     for (const char* sub : {"sessions", "lifecycle", "tombstones"}) {

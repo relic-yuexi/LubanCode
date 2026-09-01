@@ -11,7 +11,7 @@
 | 机制 | 记什么 | 存在哪儿 | 何时进入上下文 |
 | --- | --- | --- | --- |
 | 会话 | 本场用户消息、回复、工具调用与 usage | `~/.lubancode/sessions/*.jsonl` | 恢复或继续本场时 |
-| 项目记忆 | 跨会话仍有用的事实与偏好 | `~/.lubancode/projects/<key>/memory/` | 每条外层用户消息前，按相关度召回 |
+| 项目记忆 | 跨会话仍有用的事实与偏好 | `~/.lubancode/workspaces/<workspace_key>/memory/`（存储 v2 P0-3 起，与 session 同一棵 workspace 树） | 每条外层用户消息前，按相关度召回 |
 | 项目指令 | 必须遵守的仓库规矩 | 仓库 `AGENTS.md` | 拼入系统提示 |
 
 强制规则写 `AGENTS.md`。记忆只是线索。它可能陈旧，命中后仍须按需读源码核验。
@@ -173,17 +173,20 @@ Git 项目按 common git dir 认身份：
       feedback/                     跨项目行事反馈
       archive/
       .state/catalog.json
-  projects/
+  workspaces/                     存储 v2 P0-3 起:session 与 memory 同树
     lubancode-4fd2c83a9e5b7a10/
-      project.json                  项目身份资料
-      memory-candidates/            review 档待审候选
-        cand-*.json
-        rejected.json               被拒主题短哈希与理由，不存正文
+      workspace.json                workspace v2 manifest(OpenOrRegisterWorkspace 原子写)
       memory/
         index.md                    给人看的短索引，可重建
         facts/                      事实主题(只住项目层)
           agent-loop-request-flow.md
         preferences/                项目偏好主题
+        memory-candidates/          review 档待审候选
+          cand-*.json
+          rejected.json             被拒主题短哈希与理由，不存正文
+        .state/
+          catalog.json
+          recall-traces/trace-last.json   上一轮召回 trace(schema 3,键 workspace_key)
           package-manager.md
         feedback/                   项目层行事反馈
         archive/                    已遗忘或被替代的旧主题
@@ -419,10 +422,11 @@ CLI 组装 `SaveRequest`，立即写一张 pending job，再拉起 worker。
 {
   "schema": 1,
   "operation": "upsert",
-  "project_key": "lubancode-4fd2c83a9e5b7a10",
+  "workspace_key": "lubancode-4fd2c83a9e5b7a10",
   "project_root": "D:/lubancode",
-  "project_dir": "C:/Users/me/.lubancode/projects/lubancode-...",
-  "memory_dir": "C:/Users/me/.lubancode/projects/lubancode-.../memory",
+  "workspace_dir": "C:/Users/me/.lubancode/workspaces/lubancode-...",
+  "memory_dir": "C:/Users/me/.lubancode/workspaces/lubancode-.../memory",
+  "source_event_ref": "workspace_key=.../session_id=.../run_id=.../event_id=...",
   "created_at": "2026-08-06T00:00:00Z",
   "kind": "fact",
   "id": "fact.session.storage",
@@ -506,7 +510,7 @@ linked worktree 共用 common git dir，故而共享记忆。切 worktree 后会
 
 若只改正文而未改 `updated_at`、summary 或关键词，检索资料不会自动替你补。最稳的路是用同 id 再 `remember` / `memory_save`，或把元数据一并改准。
 
-要彻底清空某个项目，先用 `/memory` 看清目录，再在进程退出后处理对应 `projects/<key>/memory/`。不要靠模糊目录名猜。
+要彻底清空某个项目，先用 `/memory` 看清目录，再在进程退出后处理对应 `workspaces/<key>/memory/`。不要靠模糊目录名猜。
 
 ## 17. 排错
 

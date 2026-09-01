@@ -1,7 +1,11 @@
 // Trajectory 目录制(P0 新轨迹记录单 §三):workspace -> session 两层。
 //
-//   <trajectories_root>/workspaces/<workspace_key>/
+//   <workspaces_root>/<workspace_key>/
 //     workspace.json  lifecycle/  tombstones/  sessions/<session_id>/...
+//
+// P0-2(Workspace 统一存储)起 workspaces_root 是唯一项目持久化根
+// `~/.lubancode/workspaces`(从 `~/.lubancode/trajectories/workspaces`
+// 迁来;"trajectories" 生产目录退场,旧根零读零写)。
 //
 // session 目录树照 §3.1 全量占位;session.json 只存静态材料,写法是
 // 临时文件 + 原子 rename(§3.3)。本单只做 preparing/running 两态写入,
@@ -44,7 +48,11 @@ std::string GenerateSessionId(int year, int month, int day, int hour, int minute
 // ---------------------------------------------------------------------------
 
 struct SessionManifest {
-    int schema_version = 1;
+    // P0-2(存储 v2 合同 §三):新根下 session.json 一律 v2。v1 只许旧根
+    // 旧档与迁移器输入侧出现;新根读到 v1 即"旧档搬错家",reader 按坏档
+    // 对待。v2 与 v1 字段同构,新增键(subagent_detail/training_policy)
+    // 只有 legacy_import 迁移场才写(P0-5)。
+    int schema_version = 2;
     // 本 session 各 stream 的 event schema major(Token 账本单 §6.1.1):
     // v2 = usage 走 model.usage.recorded。manifest 钉死 major,旧 manifest
     // 没写这键按 v1 读。
@@ -77,12 +85,12 @@ class TrajectoryDirectory {
 public:
     TrajectoryDirectory() = default;
 
-    // 建 workspace 层:workspaces/<identity.workspace_key>/ + workspace.json
-    //(v2 manifest,由 workspace::OpenOrRegisterWorkspace 首仓原子写/开仓
-    // 登记)+ sessions/ + lifecycle/ + tombstones/。已存在的 manifest 只
-    // 更新 last_opened 与 checkout 登记,首次创建时间以旧账为准。
+    // 建 workspace 层:workspaces_root/<identity.workspace_key>/ +
+    // workspace.json(v2 manifest,由 workspace::OpenOrRegisterWorkspace 首仓
+    // 原子写/开仓登记)+ sessions/ + lifecycle/ + tombstones/。已存在的
+    // manifest 只更新 last_opened 与 checkout 登记,首次创建时间以旧账为准。
     static std::expected<TrajectoryDirectory, std::string> CreateWorkspace(
-        const std::filesystem::path& trajectories_root, const workspace::WorkspaceIdentity& identity,
+        const std::filesystem::path& workspaces_root, const workspace::WorkspaceIdentity& identity,
         std::int64_t now_ms);
 
     // 建 session 层:§3.1 全目录树 + session.json(status=preparing)。

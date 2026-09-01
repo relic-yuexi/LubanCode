@@ -21,22 +21,23 @@ namespace lubancode::cli {
 
 namespace {
 
-std::filesystem::path DefaultTrajectoriesRoot() {
+// P0-2:唯一项目持久化根(原 ~/.lubancode/trajectories 迁
+// ~/.lubancode/workspaces;旧根零读零写,不设暗门)。
+std::filesystem::path DefaultWorkspacesRoot() {
     const auto home = config::HomeLubancodeDir();
     if (!home.has_value()) {
         return {};
     }
-    return tools::Utf8ToPath(*home) / "trajectories";
+    return tools::Utf8ToPath(*home) / "workspaces";
 }
 
-// 在 workspaces/<key>/sessions/ 下找 <session_id> 的目录。找不到给空。
+// 在 <key>/sessions/ 下找 <session_id> 的目录。找不到给空。
 std::filesystem::path FindSessionDir(const std::filesystem::path& root, const std::string& session_id) {
     std::error_code ec;
-    const auto workspaces = root / "workspaces";
-    if (!std::filesystem::is_directory(workspaces, ec)) {
+    if (!std::filesystem::is_directory(root, ec)) {
         return {};
     }
-    for (const auto& workspace : std::filesystem::directory_iterator(workspaces, ec)) {
+    for (const auto& workspace : std::filesystem::directory_iterator(root, ec)) {
         const auto candidate = workspace.path() / "sessions" / platform::Utf8ToPath(session_id);
         if (std::filesystem::is_directory(candidate, ec)) {
             return candidate;
@@ -48,13 +49,13 @@ std::filesystem::path FindSessionDir(const std::filesystem::path& root, const st
 }  // namespace
 
 // §12.2 容量/CI 档:usage / gc / doctor 吃 workspace-key(单段名,先过
-// 安全校验再拼路径)。workspaces/<key> 找不到给空。
+// 安全校验再拼路径)。<key> 找不到给空。
 std::filesystem::path FindWorkspaceDir(const std::filesystem::path& root, const std::string& key) {
     if (!trajectory::IsSafeSingleSegment(key)) {
         return {};
     }
     std::error_code ec;
-    const auto candidate = root / "workspaces" / platform::Utf8ToPath(key);
+    const auto candidate = root / platform::Utf8ToPath(key);
     if (std::filesystem::is_directory(candidate, ec)) {
         return candidate;
     }
@@ -181,7 +182,7 @@ int RunTrajectoryCommand(const TrajectoryCommandArgs& args) {
                       << " --format training-v1\n";
             return 1;
         }
-        const auto root = args.trajectories_root.empty() ? DefaultTrajectoriesRoot()
+        const auto root = args.trajectories_root.empty() ? DefaultWorkspacesRoot()
                                                          : tools::Utf8ToPath(args.trajectories_root);
         if (root.empty()) {
             std::cerr << "找不到主目录,轨迹账无处寻\n";
@@ -195,7 +196,7 @@ int RunTrajectoryCommand(const TrajectoryCommandArgs& args) {
                       << " <workspace-key>\n";
             return 1;
         }
-        const auto root = args.trajectories_root.empty() ? DefaultTrajectoriesRoot()
+        const auto root = args.trajectories_root.empty() ? DefaultWorkspacesRoot()
                                                          : tools::Utf8ToPath(args.trajectories_root);
         if (root.empty()) {
             std::cerr << "找不到主目录,轨迹账无处寻\n";
@@ -224,7 +225,7 @@ int RunTrajectoryCommand(const TrajectoryCommandArgs& args) {
         std::cerr << "缺 session id: lubancode trajectory " << args.verb << " <session-id>\n";
         return 1;
     }
-    const auto root = args.trajectories_root.empty() ? DefaultTrajectoriesRoot()
+    const auto root = args.trajectories_root.empty() ? DefaultWorkspacesRoot()
                                                      : tools::Utf8ToPath(args.trajectories_root);
     if (root.empty()) {
         std::cerr << "找不到主目录,轨迹账无处寻\n";

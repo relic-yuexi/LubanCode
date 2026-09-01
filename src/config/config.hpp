@@ -550,6 +550,43 @@ struct GoalsConfig {
 };
 
 // ---------------------------------------------------------------------------
+// 端云协同可观测单 T2:telemetry{} 段(§24.1 草案)。
+// ---------------------------------------------------------------------------
+
+// telemetry 段的文件形状(全字段可选;没写的落 TelemetryConfig 内置默认)。
+struct TelemetryFileConfig {
+    std::optional<std::string> data_class;          // metadata|diagnostic|content
+    std::optional<std::string> exporter_kind;       // otlp-http-json
+    std::optional<std::string> exporter_endpoint;   // http://127.0.0.1:4318
+    std::optional<std::string> exporter_secret_ref; // 环境变量名(§15.4)
+    std::optional<std::string> exporter_compression; // none(gzip 依赖未启用,报错)
+    std::optional<std::int64_t> exporter_timeout_ms;
+    std::optional<std::int64_t> queue_capacity_items;
+    std::optional<std::int64_t> queue_capacity_bytes;
+    std::optional<bool> spool_enabled;
+    std::optional<std::int64_t> spool_max_bytes;
+    std::optional<std::int64_t> spool_max_age_hours;
+};
+
+// telemetry 段的运行配置。canonical 默认只有这一处(§24.1"字段默认值
+// 必须在 config.hpp 有一处 canonical 定义");装配层把这里折进
+// telemetry::TelemetryServiceOptions。sampling 与 remote_policy 属 T3/T4,
+// 本批不认(写了报错,不静默忽略)。
+struct TelemetryConfig {
+    std::string data_class = "metadata";
+    std::string exporter_kind = "otlp-http-json";
+    std::string exporter_endpoint;                       // 空 = 不出网
+    std::string exporter_secret_ref;                     // 空 = 匿名
+    std::string exporter_compression = "none";
+    std::int64_t exporter_timeout_ms = 10000;
+    std::int64_t queue_capacity_items = 8192;            // §24.1 草案起点
+    std::int64_t queue_capacity_bytes = 16 * 1024 * 1024;
+    bool spool_enabled = true;
+    std::int64_t spool_max_bytes = 256 * 1024 * 1024;    // §24.1 草案起点
+    std::int64_t spool_max_age_hours = 48;
+};
+
+// ---------------------------------------------------------------------------
 // 三档模型角色(渐进式上下文装载与 cheap/normal/lao 模型分工,第一期)
 // ---------------------------------------------------------------------------
 
@@ -730,6 +767,13 @@ struct Config {
     // trajectory=false 由 Activation 报 telemetry.requires_trajectory,
     // 不暗开 trajectory。
     bool features_telemetry = false;
+    // 端云协同可观测单 T2:telemetry{} 段(§24.1)。整段回退(项目级压全
+    // 局,与 goals 同待遇),没配的字段一律走这里的内置默认——canonical
+    // 定义只有这一处。exporter.endpoint 空 = 不出网(本地投影+spool 照跑,
+    // §7.1 收窄面);配了非回环端点须 HTTPS + consent(§8.4/§19.4),由
+    // telemetry 侧 EvaluateExportGate 把门,config 这层只做形状校验。
+    // compression 首版只认 "none"(构建未启 zlib,gzip 写了就报错,不装样子)。
+    TelemetryConfig telemetry;
     // goals 段:预算默认值(只从配置文件来,项目级压全局;CLI /goal 首版
     // 不塞 budget flag,全从这读)。没配的字段落 GoalsConfig 里的内置默认。
     GoalsConfig goals;
@@ -937,6 +981,8 @@ struct FileConfig {
     std::optional<bool> features_trajectory;
     // 端云协同可观测单 T0:features.telemetry(布尔)。
     std::optional<bool> features_telemetry;
+    // 端云协同可观测单 T2:telemetry{} 段(整段回退,项目级压全局)。
+    std::optional<TelemetryFileConfig> telemetry;
     std::optional<GoalsFileConfig> goals;
     std::optional<MemoryFileConfig> memory;
     // project_doc_fallback_filenames(AGENTS.md 作用域单 P2-2):顶层键,
@@ -1199,6 +1245,12 @@ ConfigMigrationOutcome MigrateConfigFileIfNeeded(const std::string& old_path, co
 // 就先建;找不到主目录时报错)。成功时返回写入的完整路径。初次配置向导
 // 选择保存时调用这个。
 std::expected<std::string, std::string> SaveConfigFile(const Config& config);
+
+// /telemetry enable|disable config(端云协同可观测单 T2,§24.2):在指定配置
+// 文件里写 features.telemetry 这一枚布尔,其余字段原样保留(文件不在则从
+// 空 object 起写)。file_path 传全局配置(项目文件不许被遥测命令暗改)。
+std::expected<void, std::string> SetTelemetryFeatureInConfigFile(const std::string& file_path,
+                                                                 bool enabled);
 
 // 只更新一份已存在的配置文件里的 model 字段,其余字段原样保留(哪怕是
 // 这份 FileConfig 结构体不认得的字段,也不会被冲掉——直接读原始 JSON、

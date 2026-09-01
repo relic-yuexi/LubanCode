@@ -60,11 +60,6 @@ std::optional<bool> TrajectoryEnvOpinion() {
 
 }  // namespace
 
-bool ResolveTrajectoryEnabled(bool config_flag) {
-    const std::optional<bool> env = TrajectoryEnvOpinion();
-    return env.has_value() ? *env : config_flag;
-}
-
 // §12.2/§13 journal emergency reserve 首版起始值(16 MiB)。配置面
 //(trajectory.journal_emergency_reserve_bytes)随 P0-6 的配置档落,本批
 // 用起始常量并在 /doctor trajectory 里如实展示。
@@ -719,6 +714,88 @@ void TrajectoryTurnBridge::OnToolTrace(const agent::ToolTraceEvent& event) {
     }
 }
 
+// 富结果块 -> 无损投影块(P0-2:structured content 与图片/音频 artifact
+// ref 一个不丢)。文本块原样;二进制块只落引用(mime/尺寸/字节/sha/
+// artifact 相对路径,字节永不内联 Journal);resource link 落 URI;embedded
+// text 帽内原样、超帽带 artifact 引用与截断标记;未知块保 type 与摘要。
+// 旧会话存档的 BlockToJson 投影随 P0-6 退役,这里是唯一真账。
+nlohmann::json RichBlockToProjection(const tools::ToolContentBlock& block) {
+    if (const auto* text = std::get_if<tools::TextContent>(&block)) {
+        return nlohmann::json{{"type", "text"}, {"text", text->text}};
+    }
+    if (const auto* image = std::get_if<tools::ImageContent>(&block)) {
+        nlohmann::json projection = nlohmann::json{{"type", "image_ref"},
+                                                   {"mime_type", image->mime_type},
+                                                   {"width", image->width},
+                                                   {"height", image->height},
+                                                   {"bytes", image->bytes},
+                                                   {"sha256", image->sha256},
+                                                   {"stored", image->artifact.stored}};
+        if (image->artifact.stored) {
+            projection["artifact_id"] = image->artifact.id;
+            projection["path"] = image->artifact.path;
+        }
+        return projection;
+    }
+    if (const auto* audio = std::get_if<tools::AudioContent>(&block)) {
+        nlohmann::json projection = nlohmann::json{{"type", "audio_ref"},
+                                                   {"mime_type", audio->mime_type},
+                                                   {"bytes", audio->bytes},
+                                                   {"sha256", audio->sha256},
+                                                   {"stored", audio->artifact.stored}};
+        if (audio->artifact.stored) {
+            projection["artifact_id"] = audio->artifact.id;
+            projection["path"] = audio->artifact.path;
+        }
+        return projection;
+    }
+    if (const auto* link = std::get_if<tools::ResourceLinkContent>(&block)) {
+        nlohmann::json projection = nlohmann::json{{"type", "resource_link"}, {"uri", link->uri}};
+        if (!link->name.empty()) {
+            projection["name"] = link->name;
+        }
+        if (!link->mime_type.empty()) {
+            projection["mime_type"] = link->mime_type;
+        }
+        if (link->size >= 0) {
+            projection["size"] = link->size;
+        }
+        return projection;
+    }
+    if (const auto* embedded = std::get_if<tools::EmbeddedTextResourceContent>(&block)) {
+        nlohmann::json projection = nlohmann::json{{"type", "embedded_text"},
+                                                   {"uri", embedded->uri},
+                                                   {"text", embedded->text},
+                                                   {"truncated", embedded->truncated}};
+        if (embedded->artifact.has_value() && embedded->artifact->stored) {
+            projection["artifact_id"] = embedded->artifact->id;
+            projection["path"] = embedded->artifact->path;
+        }
+        return projection;
+    }
+    if (const auto* blob = std::get_if<tools::EmbeddedBlobResourceContent>(&block)) {
+        nlohmann::json projection = nlohmann::json{{"type", "blob_ref"},
+                                                   {"uri", blob->uri},
+                                                   {"mime_type", blob->mime_type},
+                                                   {"bytes", blob->bytes},
+                                                   {"sha256", blob->sha256},
+                                                   {"stored", blob->artifact.stored}};
+        if (blob->artifact.stored) {
+            projection["artifact_id"] = blob->artifact.id;
+            projection["path"] = blob->artifact.path;
+        }
+        return projection;
+    }
+    if (const auto* unknown = std::get_if<tools::UnknownContent>(&block)) {
+        return nlohmann::json{{"type", "unknown"},
+                              {"original_type", unknown->original_type},
+                              {"summary", unknown->summary}};
+    }
+    return nlohmann::json{{"type", "unknown"},
+                          {"original_type", std::string()},
+                          {"summary", std::string()}};
+}
+
 void TrajectoryTurnBridge::OnToolResultsCommitted(const std::string& batch_id, const api::Message& results) {
     (void)batch_id;
     if (!turn_open_) {
@@ -738,13 +815,16 @@ void TrajectoryTurnBridge::OnToolResultsCommitted(const std::string& batch_id, c
             content.push_back(nlohmann::json{{"type", "text"}, {"text", result->content}});
         }
         for (const auto& extra : result->blocks) {
-            if (const auto* text = std::get_if<tools::TextContent>(&extra)) {
-                content.push_back(nlohmann::json{{"type", "text"}, {"text", text->text}});
-            }
+            content.push_back(RichBlockToProjection(extra));
         }
         nlohmann::json payload = nlohmann::json{{"call_id", result->tool_use_id},
                                                 {"content", std::move(content)},
                                                 {"is_error", result->is_error}};
+        // structuredContent 无损随行(P0-2):nullopt 不落键——"server 没给"
+        // 与"给了空对象"在账上分得清。
+        if (result->structured_content.has_value()) {
+            payload["structured_content"] = *result->structured_content;
+        }
         if (!it->second.terminal_event_id.empty()) {
             payload["derived_from_event"] = it->second.terminal_event_id;
         }
@@ -786,6 +866,13 @@ TrajectoryBypassBridge::~TrajectoryBypassBridge() = default;
 
 RecordReceipt TrajectoryBypassBridge::Put(EventKind kind, std::optional<std::string> request_id, Actor actor,
                                           Origin origin, nlohmann::json payload, Durability durability) {
+    if (dead_) {
+        // 哑火桥:小 turn 开不成(主 turn 占着 stream),本枚采样不入账。
+        RecordReceipt receipt;
+        receipt.status = RecordReceipt::Status::Rejected;
+        receipt.error_code = "state.turn_overlap";
+        return receipt;
+    }
     trajectory::RecordRequest request;
     request.kind = kind;
     request.scope = base_scope_;
@@ -845,7 +932,13 @@ void TrajectoryBypassBridge::OpenTurn() {
         Put(EventKind::TurnStarted, std::nullopt, Actor::Host, Origin::ScheduledHost,
             nlohmann::json{{"trigger", "scheduled_host"}}, Durability::ProcessCrash);
     if (receipt.status != RecordReceipt::Status::Committed) {
+        // 开不了小 turn(典型:主 turn 还开着,状态机一 stream 一 open
+        // turn)——本桥哑火:后续事件一概不发,只记一笔缺口,不连环报
+        // 错吓人。旁路采样本体照跑(调用方不依赖桥的成败),丢的只是
+        // 这枚采样的 usage 细账。
         NoteError(receipt, "turn.started(bypass)");
+        turn_open_ = false;
+        dead_ = true;
     }
 }
 
@@ -1248,6 +1341,7 @@ bool TrajectoryTurnBridge::StorageAvailable() const {
 
 struct TrajectorySessionLedger::Impl {
     std::unique_ptr<trajectory::SessionManager> manager;
+    std::filesystem::path workspaces_root;  // P0-2:唯一持久化根(查询/管理面用)
     trajectory::ActiveSession* active = nullptr;
     trajectory::RecorderOptions recorder_options;
     std::string main_run_id;
@@ -1282,13 +1376,13 @@ void HardenLedgerDirectories(const trajectory::TrajectoryDirectory& directory,
 
 std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Open(Options options) {
     std::filesystem::path home_dir;
-    if (options.trajectories_root.empty()) {
+    if (options.workspaces_root.empty()) {
         const auto home = config::HomeLubancodeDir();
         if (!home.has_value()) {
-            return std::unexpected("trajectory.no_home: 找不到主目录,轨迹账无处落");
+            return std::unexpected("trajectory.no_home: 找不到主目录,会话账无处落");
         }
         home_dir = tools::Utf8ToPath(*home);
-        options.trajectories_root = home_dir / "trajectories";
+        options.workspaces_root = home_dir / "workspaces";
     }
     // P0-1:身份只认装配层递进的冻结 WorkspaceIdentity;空身份才按兜底根
     //(或启动 cwd)现场四级裁决——同仓子目录/linked worktree 不再各立各
@@ -1319,7 +1413,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     }
     options.workspace_root = options.workspace_identity.checkout_root;
     trajectory::SessionManagerOptions manager_options;
-    manager_options.trajectories_root = options.trajectories_root;
+    manager_options.workspaces_root = options.workspaces_root;
     manager_options.identity = options.workspace_identity;
     manager_options.workspace_root = options.workspace_root;
     manager_options.launch_cwd = options.launch_cwd;
@@ -1327,6 +1421,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     manager_options.recorder.event_schema_version = options.event_schema_version;
 
     Impl impl;
+    impl.workspaces_root = options.workspaces_root;
     impl.recorder_options.event_schema_version = options.event_schema_version;
     impl.lubancode_version = options.lubancode_version;
     impl.workspace_root_text = platform::PathToUtf8(options.workspace_root);
@@ -2274,6 +2369,106 @@ std::string TrajectorySessionLedger::workspace_key() const {
                    impl_->active->main.has_value()
                ? impl_->active->main->base_scope().workspace_key
                : std::string();
+}
+
+// ---------------------------------------------------------------------------
+// P0-2:会话读面与 workspace 管理面(命令/app-server 共用)
+// ---------------------------------------------------------------------------
+
+std::filesystem::path TrajectorySessionLedger::workspaces_root() const {
+    static const std::filesystem::path empty;
+    return impl_ != nullptr ? impl_->workspaces_root : empty;
+}
+
+trajectory::SessionIndexPage TrajectorySessionLedger::ListWorkspaceSessions(
+    const trajectory::SessionIndexQuery& query) const {
+    trajectory::SessionIndexQuery effective = query;
+    if (!effective.all_workspaces && effective.current_workspace_key.empty()) {
+        effective.current_workspace_key = workspace_key();
+    }
+    return trajectory::QueryWorkspaceSessions(workspaces_root(), effective);
+}
+
+std::vector<trajectory::PromptHistoryLine> TrajectorySessionLedger::ReadPromptHistory(
+    std::size_t max_lines) const {
+    return trajectory::ReadWorkspacePromptHistory(workspaces_root(), workspace_key(), max_lines);
+}
+
+std::vector<std::string> TrajectorySessionLedger::MakeTranscriptExcerpt(const std::string& target_id,
+                                                                        std::size_t max_half) const {
+    if (impl_ != nullptr && impl_->active != nullptr && target_id == this->session_id()) {
+        return trajectory::MakeSessionTranscriptExcerpt(impl_->active->session_dir(), max_half);
+    }
+    // 别的场次:经索引定位目录(跨 workspace 也找得回)。
+    trajectory::SessionIndexQuery query;
+    query.all_workspaces = true;
+    const auto page = trajectory::QueryWorkspaceSessions(workspaces_root(), query);
+    for (const auto& summary : page.entries) {
+        if (summary.session_id == target_id) {
+            return trajectory::MakeSessionTranscriptExcerpt(
+                tools::Utf8ToPath(summary.session_dir), max_half);
+        }
+    }
+    return {};
+}
+
+std::string TrajectorySessionLedger::ArchiveSessionInWorkspace(const std::string& session_id) const {
+    if (impl_ == nullptr) {
+        return "session.open_failed: 账本未开";
+    }
+    const auto outcome = trajectory::ArchiveSessionDir(impl_->manager->workspace_dir(), session_id,
+                                                       std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                           std::chrono::system_clock::now()
+                                                               .time_since_epoch())
+                                                           .count());
+    return outcome.ok() ? std::string() : outcome.error_code + ": " + outcome.message;
+}
+
+std::string TrajectorySessionLedger::UnarchiveSessionInWorkspace(const std::string& session_id) const {
+    if (impl_ == nullptr) {
+        return "session.open_failed: 账本未开";
+    }
+    const auto outcome = trajectory::UnarchiveSessionDir(
+        impl_->manager->workspace_dir(), session_id,
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    return outcome.ok() ? std::string() : outcome.error_code + ": " + outcome.message;
+}
+
+std::string TrajectorySessionLedger::DeleteSessionInWorkspace(const std::string& session_id,
+                                                              const std::string& reason) const {
+    if (impl_ == nullptr) {
+        return "session.open_failed: 账本未开";
+    }
+    if (session_id == this->session_id()) {
+        return "session.delete_active: 当前场先 /exit 封口再删";
+    }
+    const auto outcome = trajectory::DeleteSessionDir(
+        impl_->manager->workspace_dir(), session_id, reason,
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::system_clock::now().time_since_epoch())
+            .count());
+    return outcome.ok() ? std::string() : outcome.error_code + ": " + outcome.message;
+}
+
+void TrajectorySessionLedger::RecordTitleChanged(const std::string& title, const std::string& old_title) {
+    nlohmann::json payload = nlohmann::json{{"title", title}};
+    if (!old_title.empty()) {
+        payload["old_title"] = old_title;
+    }
+    // /title 是真人敲的命令账;自动精炼采纳的标题同走这枚事件(actor
+    // 如实分流留给后续批次,先把"标题变过"落成可回放事实)。
+    PutUserCommand_(trajectory::EventKind::ControlTitleChanged, std::move(payload));
+}
+
+void TrajectorySessionLedger::RecordModeChanged(const std::string& mode, const std::string& reason,
+                                                const std::string& old_mode) {
+    nlohmann::json payload = nlohmann::json{{"mode", mode}, {"reason", reason}};
+    if (!old_mode.empty()) {
+        payload["old_mode"] = old_mode;
+    }
+    PutControl_(trajectory::EventKind::ControlModeChanged, std::move(payload));
 }
 
 }  // namespace lubancode::runtime

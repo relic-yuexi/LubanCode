@@ -18,6 +18,10 @@
 // 不构成反向依赖——它不牵扯 cli 的任何交互逻辑。
 #include "cli/i18n.hpp"
 #include "platform/paths.hpp"
+// telemetry 值域校验(端云协同可观测单 T2):data_class 四档名与 endpoint
+// 形状(禁 userinfo/query)认 telemetry 合同的同一张表,不在 config 再抄一份。
+#include "telemetry/contract.hpp"
+#include "telemetry/exporter.hpp"
 
 namespace lubancode::config {
 
@@ -1915,6 +1919,132 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             return std::unexpected(result.error());
         config.goals = std::move(goals);
     }
+    // telemetry 段(端云协同可观测单 T2,§24.1):queue/spool/exporter 配置
+    // 键。sampling/remote_policy 属 T3/T4,写了就报错——不静默忽略,也不装
+    // 样子。形状校验只在这层(endpoint 分界/consent 的门在 telemetry 侧)。
+    if (parsed.contains("telemetry")) {
+        const auto& field = parsed["telemetry"];
+        if (!field.is_object()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 telemetry 字段必须是 JSON object");
+        }
+        for (const char* future : {"sampling", "remote_policy", "system_metrics"}) {
+            if (field.contains(future)) {
+                return std::unexpected(std::string("配置文件 ") + file_path_for_error +
+                                       " 里的 telemetry." + future +
+                                       " 属后续批次(T3/T4),本批不认——写了请删掉,不静默忽略");
+            }
+        }
+        TelemetryFileConfig telemetry;
+        const auto parse_int64 = [&](const char* section, const char* name,
+                                     std::optional<std::int64_t>& target)
+            -> std::expected<void, std::string> {
+            if (!field.contains(section) || !field[section].is_object() ||
+                !field[section].contains(name)) {
+                return {};
+            }
+            const auto& node = field[section][name];
+            if ((!node.is_number_integer() && !node.is_number_unsigned()) ||
+                node.get<long long>() <= 0) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 telemetry." +
+                                       section + "." + name + " 必须是正整数");
+            }
+            target = static_cast<std::int64_t>(node.get<long long>());
+            return {};
+        };
+        const auto parse_string = [&](const char* section, const char* name,
+                                      std::optional<std::string>& target)
+            -> std::expected<void, std::string> {
+            if (!field.contains(section) || !field[section].is_object() ||
+                !field[section].contains(name)) {
+                return {};
+            }
+            if (!field[section][name].is_string()) {
+                return std::unexpected("配置文件 " + file_path_for_error + " 里的 telemetry." +
+                                       section + "." + name + " 必须是字符串");
+            }
+            target = field[section][name].get<std::string>();
+            return {};
+        };
+        if (field.contains("data_class")) {
+            if (!field["data_class"].is_string()) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 telemetry.data_class 必须是字符串");
+            }
+            telemetry.data_class = field["data_class"].get<std::string>();
+        }
+        if (auto result = parse_string("exporter", "kind", telemetry.exporter_kind);
+            !result.has_value()) {
+            return std::unexpected(result.error());
+        }
+        if (auto result = parse_string("exporter", "endpoint", telemetry.exporter_endpoint);
+            !result.has_value()) {
+            return std::unexpected(result.error());
+        }
+        if (auto result = parse_string("exporter", "secret_ref", telemetry.exporter_secret_ref);
+            !result.has_value()) {
+            return std::unexpected(result.error());
+        }
+        if (auto result = parse_string("exporter", "compression", telemetry.exporter_compression);
+            !result.has_value()) {
+            return std::unexpected(result.error());
+        }
+        if (auto result = parse_int64("exporter", "timeout_ms", telemetry.exporter_timeout_ms);
+            !result.has_value()) {
+            return std::unexpected(result.error());
+        }
+        if (auto result = parse_int64("queue", "capacity_items", telemetry.queue_capacity_items);
+            !result.has_value()) {
+            return std::unexpected(result.error());
+        }
+        if (auto result = parse_int64("queue", "capacity_bytes", telemetry.queue_capacity_bytes);
+            !result.has_value()) {
+            return std::unexpected(result.error());
+        }
+        if (field.contains("spool") && field["spool"].is_object() &&
+            field["spool"].contains("enabled")) {
+            if (!field["spool"]["enabled"].is_boolean()) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 telemetry.spool.enabled 必须是布尔值");
+            }
+            telemetry.spool_enabled = field["spool"]["enabled"].get<bool>();
+        }
+        if (auto result = parse_int64("spool", "max_bytes", telemetry.spool_max_bytes);
+            !result.has_value()) {
+            return std::unexpected(result.error());
+        }
+        if (auto result = parse_int64("spool", "max_age_hours", telemetry.spool_max_age_hours);
+            !result.has_value()) {
+            return std::unexpected(result.error());
+        }
+        // 值域校验(§24.1/§19.1):kind 只认 otlp-http-json;compression 首版
+        // 只有 none(构建未启 zlib);data_class 认 telemetry 合同的四档名;
+        // endpoint 形状(禁 userinfo/query,token 不进 URL)。
+        if (telemetry.exporter_kind.has_value() && *telemetry.exporter_kind != "otlp-http-json") {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 telemetry.exporter.kind 只认 otlp-http-json");
+        }
+        if (telemetry.exporter_compression.has_value() &&
+            *telemetry.exporter_compression != "none") {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 telemetry.exporter.compression 首版只认 none"
+                                   "(gzip 依赖未启用,不装样子)");
+        }
+        if (telemetry.data_class.has_value() &&
+            !lubancode::telemetry::DataClassFromName(*telemetry.data_class).has_value()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 telemetry.data_class 只认 off|metadata|diagnostic|content");
+        }
+        if (telemetry.exporter_endpoint.has_value()) {
+            if (const auto invalid =
+                    lubancode::telemetry::ValidateEndpoint(*telemetry.exporter_endpoint);
+                invalid.has_value()) {
+                return std::unexpected("配置文件 " + file_path_for_error +
+                                       " 里的 telemetry.exporter.endpoint 不合规: " + *invalid);
+            }
+        }
+        config.telemetry = std::move(telemetry);
+    }
     if (parsed.contains("connect_timeout_ms")) {
         const auto& field = parsed["connect_timeout_ms"];
         if ((!field.is_number_integer() && !field.is_number_unsigned()) || field.get<long long>() <= 0) {
@@ -2768,6 +2898,43 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         if (telemetry_file != nullptr) {
             result.config.features_telemetry = *telemetry_file->features_telemetry;
         }
+        // 端云协同可观测单 T2:telemetry{} 段整段回退(项目级压全局,与
+        // goals 同待遇);默认值在 TelemetryConfig(canonical 一处)。
+        const FileConfig* telemetry_section_file =
+            project_ptr != nullptr && project_ptr->telemetry.has_value()
+                ? project_ptr
+                : (global_ptr != nullptr && global_ptr->telemetry.has_value() ? global_ptr : nullptr);
+        if (telemetry_section_file != nullptr) {
+            const TelemetryFileConfig& telemetry = *telemetry_section_file->telemetry;
+            TelemetryConfig& target = result.config.telemetry;
+            if (telemetry.data_class.has_value()) target.data_class = *telemetry.data_class;
+            if (telemetry.exporter_kind.has_value()) target.exporter_kind = *telemetry.exporter_kind;
+            if (telemetry.exporter_endpoint.has_value()) {
+                target.exporter_endpoint = *telemetry.exporter_endpoint;
+            }
+            if (telemetry.exporter_secret_ref.has_value()) {
+                target.exporter_secret_ref = *telemetry.exporter_secret_ref;
+            }
+            if (telemetry.exporter_compression.has_value()) {
+                target.exporter_compression = *telemetry.exporter_compression;
+            }
+            if (telemetry.exporter_timeout_ms.has_value()) {
+                target.exporter_timeout_ms = *telemetry.exporter_timeout_ms;
+            }
+            if (telemetry.queue_capacity_items.has_value()) {
+                target.queue_capacity_items = *telemetry.queue_capacity_items;
+            }
+            if (telemetry.queue_capacity_bytes.has_value()) {
+                target.queue_capacity_bytes = *telemetry.queue_capacity_bytes;
+            }
+            if (telemetry.spool_enabled.has_value()) target.spool_enabled = *telemetry.spool_enabled;
+            if (telemetry.spool_max_bytes.has_value()) {
+                target.spool_max_bytes = *telemetry.spool_max_bytes;
+            }
+            if (telemetry.spool_max_age_hours.has_value()) {
+                target.spool_max_age_hours = *telemetry.spool_max_age_hours;
+            }
+        }
         const FileConfig* goals_file = project_ptr != nullptr && project_ptr->goals.has_value()
                                            ? project_ptr
                                            : (global_ptr != nullptr && global_ptr->goals.has_value()
@@ -3525,6 +3692,22 @@ std::expected<void, std::string> UpdateActiveProviderInConfigFile(const std::str
         return std::unexpected("active_provider 不能为空");
     }
     return UpdateStringFieldInConfigFile(file_path, "active_provider", name);
+}
+
+std::expected<void, std::string> SetTelemetryFeatureInConfigFile(const std::string& file_path,
+                                                                 bool enabled) {
+    // /telemetry enable|disable config(端云协同可观测单 T2,§24.2):只写
+    // features.telemetry 这一枚布尔,其余字段(哪怕是 FileConfig 不认得的)
+    // 原样保留。文件不在也能写(ReadConfigObjectForUpdate 回空 object)。
+    auto root = ReadConfigObjectForUpdate(file_path);
+    if (!root.has_value()) {
+        return std::unexpected(root.error());
+    }
+    if (!root->contains("features") || !(*root)["features"].is_object()) {
+        (*root)["features"] = nlohmann::json::object();
+    }
+    (*root)["features"]["telemetry"] = enabled;
+    return WriteConfigObject(file_path, *root);
 }
 
 std::expected<std::string, std::string> SetActiveProviderInGlobalConfig(const std::string& name) {

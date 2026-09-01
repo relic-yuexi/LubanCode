@@ -206,8 +206,8 @@ TEST_CASE("P2 清账: memory_save 暴露只认注册,运行档翻面不收定义
 
     lubancode::memory::ProjectIdentity identity;
     identity.project_root = std::filesystem::temp_directory_path() / "lubancode_p2_memory_project";
-    identity.project_dir = identity.project_root;
-    identity.key = "p2-memory-test";
+    identity.workspace_dir = identity.project_root;
+    identity.workspace_key = "p2-memory-test";
     lubancode::memory::Options memory_options;
     memory_options.global_allowed = true;
     memory_options.enabled = true;

@@ -302,6 +302,7 @@ struct ChildEdgeReport {
     std::string parent_recorded_hash;  // 父侧 result_ref.child_terminal_event_hash
     bool owner_matches = false;
     bool spawn_reference_found = false;
+    bool dispatch_on_started = false;  // P0-2:派发引用是否落在 started 上(生产时序常落终态)
     bool hash_matches = false;    // 前台:父记 hash 必须相等;后台:核 child 有终态即过
     bool accepted_once = false;   // 恰一次(0 次未收 = 悬空,由 child terminal 标)
     std::string error_code;       // 空 = 过;child.* / edge.* 稳定码

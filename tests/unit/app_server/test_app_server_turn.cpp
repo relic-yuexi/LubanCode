@@ -23,6 +23,7 @@
 #include "app_server/protocol.hpp"
 #include "app_server/schema.hpp"
 #include "app_server/server.hpp"
+#include "tools/path_utils.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
 
@@ -91,7 +92,8 @@ struct TestHarness {
 
     explicit TestHarness(const std::string& sessions_dir) {
         app_server::ServerOptions options;
-        options.sessions_dir = std::move(sessions_dir);
+        options.sessions_dir = sessions_dir;
+        options.workspaces_dir = sessions_dir + "/workspaces";  // P0-2:会话账根
         options.cwd = "/test/cwd";
         options.outbox_capacity = 256;
         server = std::make_unique<app_server::Server>(
@@ -265,12 +267,17 @@ TEST_CASE("thread/start -> thread/list -> thread/stop:会话账走 SessionStore"
     CHECK((*started)["params"]["threadId"] == thread_id);
     CHECK((*started)["params"]["cwd"] == "/test/cwd");
 
-    // 落盘真发生了:目录里有一场 .jsonl。
+    // 落盘真发生了:workspaces 树里有一场 session 的 main.jsonl。
     bool file_found = false;
-    for (const auto& entry : std::filesystem::directory_iterator(
-             std::filesystem::path(reinterpret_cast<const char8_t*>(sessions_dir.c_str())))) {
-        if (entry.path().extension() == ".jsonl") {
-            file_found = true;
+    {
+        const std::filesystem::path workspaces(
+            std::filesystem::path(reinterpret_cast<const char8_t*>(sessions_dir.c_str())) /
+            "workspaces");
+        std::error_code walk_ec;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(workspaces, walk_ec)) {
+            if (entry.is_regular_file() && entry.path().filename() == "main.jsonl") {
+                file_found = true;
+            }
         }
     }
     CHECK(file_found);
@@ -370,18 +377,23 @@ TEST_CASE("整回合:thread/start -> turn/start -> 文本流 -> turn/completed")
     }
     CHECK(completed_count == 1);
 
-    // 会话账:整轮 user+assistant 落了盘(事件流之外,存档真写了)。
-    const std::u8string u8_dir(sessions_dir.begin(), sessions_dir.end());
+    // 会话账:整轮 user+assistant 落了 Journal(事件流之外,真账真写了)。
     bool assistant_logged = false;
-    for (const auto& entry : std::filesystem::directory_iterator(std::filesystem::path(u8_dir))) {
-        if (entry.path().extension() != ".jsonl") {
-            continue;
-        }
-        std::ifstream in(entry.path(), std::ios::binary);
-        std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-        if (content.find("你好,远方。") != std::string::npos &&
-            content.find("打个招呼") != std::string::npos) {
-            assistant_logged = true;
+    {
+        const std::filesystem::path workspaces(
+            std::filesystem::path(reinterpret_cast<const char8_t*>(sessions_dir.c_str())) /
+            "workspaces");
+        std::error_code walk_ec;
+        for (const auto& entry : std::filesystem::recursive_directory_iterator(workspaces, walk_ec)) {
+            if (!entry.is_regular_file() || entry.path().filename() != "main.jsonl") {
+                continue;
+            }
+            std::ifstream in(entry.path(), std::ios::binary);
+            std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+            if (content.find("你好,远方。") != std::string::npos &&
+                content.find("打个招呼") != std::string::npos) {
+                assistant_logged = true;
+            }
         }
     }
     CHECK(assistant_logged);
@@ -394,7 +406,7 @@ TEST_CASE("整回合:thread/start -> turn/start -> 文本流 -> turn/completed")
     // 兜底用不抛的形态:真还有漏网的柄,记码不炸测试(目录留着,下趟
     // MakeTempDir 起手自会清)。
     std::error_code cleanup_ec;
-    std::filesystem::remove_all(std::filesystem::path(u8_dir), cleanup_ec);
+    std::filesystem::remove_all(lubancode::tools::Utf8ToPath(sessions_dir), cleanup_ec);
 }
 
 TEST_CASE("整回合(模型报错):终态 error,错误文案带上") {
