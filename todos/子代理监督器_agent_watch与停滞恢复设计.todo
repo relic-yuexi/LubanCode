@@ -1,6 +1,6 @@
 # 子代理监督器、agent_watch 与停滞恢复设计
 
-- 状态：实施中——P0-0/P0-1/P0-2 已落(0.26.x,测试见 test_agent_progress / test_model_request_recovery / test_agent_recovery / test_agent_supervisor,并 test_agent_activity 墙钟用例随迁移改判);P1-0(agent_watch)/P1-1(面板)/P2 未动
+- 状态：实施中——P0-0/P0-1/P0-2 已落(0.26.x,测试见 test_agent_progress / test_model_request_recovery / test_agent_recovery / test_agent_supervisor,并 test_agent_activity 墙钟用例随迁移改判);P1-0(agent_watch)/P1-1(面板与通知)/P2 本地件(只读 hook+六枚 OTel 指标)已落(test_agent_watch_tool / test_agent_supervisor_metrics);P2 真机校准与 replacement Agent 留档未做
 - 级别：P0 可靠性；模型侧 `agent_watch` 为 P1 控制面
 - 日期：2026-08-31
 - 基线：`7c0bea5` (`main`)
@@ -561,27 +561,29 @@ Supervisor 最好由会话级 `AgentTaskCoordinator` 持有。它与 TaskLedger 
 
 ### P1-0：`agent_watch`
 
-- [ ] typed schema 与输出上限。
-- [ ] `WaitForRevision` 用 condition variable，不忙轮询。
-- [ ] main/直接父 lineage 鉴权。
-- [ ] 用户输入与取消提前唤醒。
-- [ ] 工具描述明写“状态变化才再等，不要短周期轮询”。
+- [x] typed schema 与输出上限。（`src/tools/agent_watch_tool.*`:task_ids≤16 项项≥1、after_revision≥0、wait_ms 钳 0~30000、include 三档枚举、additionalProperties=false 在 execute 侧执法;events 每任务≤50 枚、输出只带 id/枚举/计数/稳定码）
+- [x] `WaitForRevision` 用 condition variable，不忙轮询。（台账 `WaitForWatchChange`:watch_cv_ + 监督可见修订 watch_generation,谓词同锁读无丢醒;token 级传输流量不抬修订——安静任务上等待线程零 CPU 挂在 cv 上）
+- [x] main/直接父 lineage 鉴权。（main=caller 0 看整棵树含孙辈;子代理窄实例(RunTask 第二段随 scoped agent 同门挂载)只认 parent_task_id==caller,越 lineage 一律稳定拒绝且不泄露目标细节）
+- [x] 用户输入与取消提前唤醒。（台账取消/收消息/收场路径全在锁内 notify watch_cv_;ESC 打断与用户往待发队列排消息经 cli::BroadcastTurnInterrupted -> ledger.NotifyExternalWake;取消旗经 ToolExecutionContext 进等待谓词）
+- [x] 工具描述明写“状态变化才再等，不要短周期轮询”。（zh-CN/en 两份 prompts/tools/agent_watch.md + C++ 兜底文案,描述里点名"不要拿短 wait_ms 循环打卡"）
 
-验收：无变化时 30 秒内零 CPU 忙转；变化一到立即醒；兄弟 Agent 看不到彼此详情；输出不泄 thinking 与 Secret。
+验收：无变化时 30 秒内零 CPU 忙转；变化一到立即醒；兄弟 Agent 看不到彼此详情；输出不泄 thinking 与 Secret。（test_agent_watch_tool 钉:超时睡满不吃满前不回、50ms 变化 <1.5s 醒、scoped 拒孙辈/旁系/自己、events 档不含正文与参数原文）
 
 ### P1-1：面板与通知
 
-- [ ] Dock 显阶段、静默龄与恢复次数。
-- [ ] 查看态显监督折叠行。
-- [ ] 恢复成功、用尽、工具结果不明各一条通知。
-- [ ] 终端窄宽、中文/英文文案与无色模式。
+- [x] Dock 显阶段、静默龄与恢复次数。（AgentTaskSummary 添 progress 投影,presenter 在活度短语后拼"重连 N/3 · 静默 XmYs"小截;静默尺与监督拍同钟(流式/等首字节看传输,等下一轮/等孩子看执行,跑工具由活度短语自带)）
+- [x] 查看态显监督折叠行。（一行"监督 · 最后传输/最后完整提交/实质进展/请求尝试/错误码/墙钟剩余";墙钟是唯一有明确截止的硬线,软线归监督拍不在这重复执法）
+- [x] 恢复成功、用尽、工具结果不明各一条通知。（台账侧 PushSupervisorNoticeDeduped 与监督器共用同一本 task+epoch+reason 键账;用尽在 Exhausted 相位(用户取消的 Exhausted 不弹);工具不明=已过执行边界的工具被取消,消息账补"结果不明"卡+通知,绝不自动重跑）
+- [x] 终端窄宽、中文/英文文案与无色模式。（agent_supervision.* i18n 中英成对;颜色只作辅助——AgentHealthTint 四档映射既有主题档(黄/青/红),plain 主题全空串退默认淡色,行文本自身带全部语义,窄宽走坞行既有截断）
+
+验收补:Dock 不刷屏——通知仍走去重后的空闲拍 toast+transcript 通路(P0-2 既有),监督小截只在活态行出现。
 
 ### P2：策略、遥测与可选 replacement
 
-- [ ] `AgentHealthChanged` 只读 hook。
-- [ ] OpenTelemetry 指标与低基数字段。
-- [ ] 真实 provider 长跑统计，校准默认软线。
-- [ ] 另审 replacement Agent；没有隔离、checkpoint 与副作用证明便不做。
+- [x] `AgentHealthChanged` 只读 hook。（`src/runtime/agent_health_hooks.*`:有界队列(256,溢出丢最老计数)+专职派发线程;Publish 只入队,监督拍永不被下游背压卡住;坏钩子(抛异常)吞掉不杀总线;台账侧事件(恢复起讫/工具不明/强收)经台账 sink 汇入同一条路）
+- [x] OpenTelemetry 指标与低基数字段。（`src/runtime/agent_supervisor_metrics.*`:单子六枚(按仓库遥测惯例加 lubancode. 前缀)——active{stage,health}/transport_idle/progress_idle(观测最大值,单调非降与 CUMULATIVE 编码一致)/recovery_attempts_total{reason,outcome}/stall_total{layer,reason}/force_finalize_total{reason};label 只认有界枚举与稳定码,基数闸由 test 钉死 task_id/title/tool_input/error_message 不进 label;输出 telemetry::MetricSample,可直走 EncodeMetricsRequest 编 OTLP JSON。留档:未接 spool/export 管道——遥测服务的出口吃 journal 投影,直推指标须另立事件合同(改轨迹 schema),单独立单再做）
+- [ ] 真实 provider 长跑统计，校准默认软线。（留档:Windows 开发机无真 provider 长跑环境,软线仍为单子 §7.1 初稿;须真机统计后另笔校准）
+- [ ] 另审 replacement Agent；没有隔离、checkpoint 与副作用证明便不做。（留档:按单子 §8.4 原样不做——同 checkout 重改/重跑写操作/与晚归线程撞笔/丢 mailbox 确认四条风险没有隔离与幂等证明前不立项）
 
 ## 十四、测试矩阵
 
@@ -595,6 +597,8 @@ Supervisor 最好由会话级 `AgentTaskCoordinator` 持有。它与 TaskLedger 
 - reason code 到 health/state/outcome 的映射。
 - 通知按 epoch 去重。
 
+（P1-0/P2 实测:test_agent_watch_tool 钉 after_revision 命中/超时/外部唤醒/取消、lineage 拒越权、events 输出卫生、恢复成功/用尽/工具不明按 epoch+reason 去重;test_agent_supervisor_metrics 钉钩子总线(坏钩子/溢出/慢钩子不卡拍)与六枚指标形状+基数闸）
+
 ### 14.2 集成
 
 - HTTP accept 后不吐首字节。
@@ -605,7 +609,7 @@ Supervisor 最好由会话级 `AgentTaskCoordinator` 持有。它与 TaskLedger 
 - `run_command` 长静默但最终成功；未过工具 timeout 不误杀。
 - 工具超时后进程树在 Windows/Ubuntu/macOS 都收净。
 - 父取消时，孩子恢复退避立即停。
-- session close 时，watcher 与 waiter 都醒，台账有终态。
+- session close 时，watcher 与 waiter 都醒，台账有终态。（本地件已钉:test_agent_watch_tool 的 session-close 用例——BroadcastCancel 叫醒 agent_watch watcher 与 WaitingChildren 的 WaitForKeyChange waiter,台账全终态;真进程树收净归 E2E,未做）
 
 ### 14.3 E2E
 
@@ -643,16 +647,16 @@ Supervisor 最好由会话级 `AgentTaskCoordinator` 持有。它与 TaskLedger 
 
 以下全过，本单才可销：
 
-- [ ] 能从台账说清一只任务此刻在等什么、多久没传输、多久没实质推进。
-- [ ] 网络断流与 Agent 空转分型不同，错误码稳定。
-- [ ] 可安全请求自动恢复；不安全工具绝不盲重放。
-- [ ] 恢复用尽后保留部分成果、最后完整 checkpoint 与明确原因。
-- [ ] `agent_watch` 有界、可取消、无忙轮询、守 lineage、无内容泄漏。
-- [ ] 用户停止与 session close 压过重试，线程和进程都收净。
-- [ ] Agent Dock 能显 quiet/recovering/degraded，不刷屏。
-- [ ] Windows、Ubuntu、macOS 各过对应进程与时钟测试。
-- [ ] fake server 故障矩阵全过；至少两类真实 provider 长跑留证。
-- [ ] README/帮助只在实现后更新，不把本设计写成已发布能力。
+- [x] 能从台账说清一只任务此刻在等什么、多久没传输、多久没实质推进。（四本时钟 + progress 投影进 Summaries;agent_watch/Dock/查看态三处都读同一份账）
+- [x] 网络断流与 Agent 空转分型不同，错误码稳定。（P0-0/P0-2 已落:transport.*/tool.*/agent.* 分层 reason code）
+- [x] 可安全请求自动恢复；不安全工具绝不盲重放。（P0-1 恢复环;工具结果不明只通知不重跑）
+- [x] 恢复用尽后保留部分成果、最后完整 checkpoint 与明确原因。（P0-2 强收骨架 + CheckpointFallback）
+- [x] `agent_watch` 有界、可取消、无忙轮询、守 lineage、无内容泄漏。（P1-0 已落,test_agent_watch_tool 六册钉死）
+- [x] 用户停止与 session close 压过重试，线程和进程都收净。（取消链既有合同;P1-0 起 watch/waiter 也被这些信号当拍叫醒——test 的 session-close 用例）
+- [x] Agent Dock 能显 quiet/recovering/degraded，不刷屏。（P1-1:监督小截 + AgentHealthTint 颜色辅助,通知走去重通路）
+- [ ] Windows、Ubuntu、macOS 各过对应进程与时钟测试。（留档:本批只在 Windows 本地过 ctest;Ubuntu/macOS 与 TSAN 归真机校准那笔）
+- [ ] fake server 故障矩阵全过；至少两类真实 provider 长跑留证。（留档:fake 矩阵 P0-1 已过;真实 provider 长跑无环境,与软线校准同一笔留档）
+- [x] README/帮助只在实现后更新，不把本设计写成已发布能力。（docs/reference/tools.md 在实现后补了 agent_watch 条目;本单未竟项在状态行与 P2 留档里如实写明）
 
 ## 十八、实施次序一句话
 

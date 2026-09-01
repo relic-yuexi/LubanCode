@@ -461,6 +461,9 @@ AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int 
             row.identity = indent + entry->name;
             row.middle = entry->title;
             row.status = entry->state;
+            // 监督色辅助(监督器单 P1-1):颜色只是辅助手段——行文本自身已带
+            // 阶段/静默龄/重连次数,plain 主题(无色模式)不丢信息。
+            row.health_tint = entry->health_tint;
             identity_max = (std::max)(identity_max, static_cast<int>(DisplayWidthUtf8(row.identity)));
             status_max = (std::max)(status_max, static_cast<int>(DisplayWidthUtf8(entry->state)));
         }
@@ -518,6 +521,15 @@ std::vector<std::string> RenderAgentDockLines(const AgentDockLayout& layout, int
     out.reserve(layout.rows.size());
     for (const auto& row : layout.rows) {
         out.push_back(RenderAgentDockRow(layout, row, width));
+    }
+    return out;
+}
+
+std::vector<AgentHealthTint> DockRowTints(const AgentDockLayout& layout) {
+    std::vector<AgentHealthTint> out;
+    out.reserve(layout.rows.size());
+    for (const auto& row : layout.rows) {
+        out.push_back(row.health_tint);
     }
     return out;
 }

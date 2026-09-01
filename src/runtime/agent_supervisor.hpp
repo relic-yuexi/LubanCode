@@ -33,6 +33,8 @@
 #include <vector>
 
 #include "agent/agent_progress.hpp"  // SupervisionThresholds/TaskVitals/EvaluateSupervision
+#include "runtime/agent_health_hooks.hpp"     // AgentHealthHookBus:P2 只读钩子总线
+#include "runtime/agent_supervisor_metrics.hpp"  // AgentSupervisorMetrics:P2 六枚指标
 #include "tools/task_ledger.hpp"     // TaskLedger/TaskRecord:任务真账
 
 namespace lubancode::runtime {
@@ -71,6 +73,14 @@ public:
     // 测试口:同步驱动一拍(线程外直跑健康拍;deadline 仍由线程/真时间驱动)。
     void TickHealthForTest(bool host_resume_suspected = false);
 
+    // ---- P2:只读钩子与指标 --------------------------------------------------
+    // AgentHealthChanged 钩子总线(后台安全队列):会话装配层 Subscribe,
+    // 慢/坏钩子不卡监督拍。监督器与台账侧事件(恢复/不明/强收)都进这里。
+    AgentHealthHookBus& health_hooks() { return health_hooks_; }
+    // 六枚低基数指标(单子 §11.3):事件计数 + 台账现值,Snapshot 出
+    // telemetry::MetricSample(可走 OTLP 编码器)。
+    std::vector<telemetry::MetricSample> MetricsSnapshot() const { return metrics_.Snapshot(); }
+
 private:
     struct Deadline {
         enum class Kind { WallClock, WallGrace, NoProgressGrace };
@@ -92,10 +102,17 @@ private:
     Clock::time_point NextDeadlineLocked() const;
     void PushNoticeDeduped(const std::shared_ptr<tools::TaskRecord>& task, std::uint64_t health_epoch,
                            const std::string& reason_code, const std::string& text);
+    // 台账侧监督事件(恢复起讫/工具不明/强收)的进料口:投钩子总线 + 记
+    // 指标。在台账锁内被调,只入队/拿自家小锁,不回拿台账锁。
+    void OnLedgerSupervisionEvent(const agent::AgentSupervisionEvent& event);
 
     tools::TaskLedger& ledger_;
     agent::SupervisionThresholds thresholds_;
     int no_progress_grace_secs_ = 15;
+    // P2:钩子总线与指标(声明在 ledger_ 之后,析构先于台账)。总线自带
+    // 专职派发线程(首个事件到达才起),慢/坏钩子不占监督拍。
+    AgentHealthHookBus health_hooks_;
+    AgentSupervisorMetrics metrics_;
 
     mutable std::mutex mutex_;
     std::condition_variable cv_;
@@ -105,8 +122,6 @@ private:
     bool stop_requested_ = false;
     std::vector<Deadline> deadlines_;
     std::vector<std::shared_ptr<tools::TaskRecord>> watches_;
-    // 通知去重(单子 §十):同一 task_id + health_epoch + reason 只弹一次。
-    std::set<std::string> noticed_keys_;
     Clock::time_point last_tick_{};
 };
 

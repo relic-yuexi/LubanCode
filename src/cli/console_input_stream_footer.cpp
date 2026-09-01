@@ -604,6 +604,7 @@ void RedrawStreamFooterLocked() {
     // 原地重画,转空闲自然保得住。plain 主题行内无 ANSI。坞贴底、预算封在
     // 半屏以内,输入框与状态栏始终留在视口里。
     std::vector<std::string> dock_rows_text;
+    std::vector<AgentHealthTint> dock_rows_tints;  // 监督色(P1-1):与行按位对齐
     std::string footer_rule_tag;
     int dock_selected_task_id = 0;
     if (SessionAgentPanelHost().provider()) {
@@ -623,6 +624,7 @@ void RedrawStreamFooterLocked() {
                                 /*streaming=*/true, panel_snapshot.idle_expanded,
                                 panel_snapshot.viewed_task_id);
             dock_rows_text = RenderAgentDockLines(dock_layout, info->width);
+            dock_rows_tints = DockRowTints(dock_layout);
             dock_selected_task_id = panel_snapshot.selected_task_id;
             if (panel_snapshot.target_task_id.has_value()) {
                 for (const auto& entry : panel_entries) {
@@ -670,6 +672,7 @@ void RedrawStreamFooterLocked() {
     }
     model.queue_rows = queue_rows_text;
     model.agent_dock_rows = dock_rows_text;
+    model.agent_dock_tints = dock_rows_tints;  // 监督色(P1-1):与行按位对齐
     model.transient_rows = f.composer.hint_lines;
     model.rule_tag = footer_rule_tag;
     model.selected_task_id = dock_selected_task_id;

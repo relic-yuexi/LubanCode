@@ -223,6 +223,7 @@ std::shared_ptr<TaskRecord> TaskLedger::Register(AgentTaskSnapshot snapshot) {
         task->turn_account.FreezeLimitLocked(snapshot.turn_limit);
         task->snapshot = std::move(snapshot);
         tasks_.push_back(task);
+        NotifyWatchChangeLocked();  // agent_watch:新任务进场即是变化
     }
     Touch();
     return task;
@@ -427,6 +428,98 @@ bool TaskLedger::HasUndeliveredInboxLocked(const TaskRecord& task) const {
 
 void TaskLedger::NotifyStateChangeLocked() {
     state_cv_.notify_all();
+    // 生命周期/取消/inbox/强收对 agent_watch 都是"任务有变化"(单子 §9.2
+    // 提前唤醒的那几路),watcher 一并叫醒。
+    NotifyWatchChangeLocked();
+}
+
+void TaskLedger::NotifyWatchChangeLocked() {
+    ++watch_generation_;
+    watch_cv_.notify_all();
+}
+
+void TaskLedger::EmitSupervisionEventLocked(const std::shared_ptr<TaskRecord>& task,
+                                            agent::AgentSupervisionEventKind kind,
+                                            agent::AgentHealthState old_health, agent::AgentHealthState new_health,
+                                            const std::string& reason_code) {
+    if (task == nullptr || supervision_event_sink_ == nullptr) {
+        return;
+    }
+    agent::AgentSupervisionEvent event;
+    event.kind = kind;
+    event.task_id = task->snapshot.id;
+    event.parent_task_id = task->snapshot.parent_task_id;
+    event.root_task_id = task->snapshot.root_task_id;
+    event.stage = task->progress.stage;
+    event.old_health = old_health;
+    event.new_health = new_health;
+    event.reason_code = reason_code;
+    event.progress_revision = task->progress.progress_revision;
+    event.attempt = task->progress.request_attempt;
+    const auto now = std::chrono::steady_clock::now();
+    if (task->snapshot.start_time.time_since_epoch().count() != 0) {
+        event.elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - task->snapshot.start_time)
+                               .count();
+    }
+    if (task->progress.last_transport_at.time_since_epoch().count() != 0) {
+        event.transport_idle_ms =
+            std::chrono::duration_cast<std::chrono::milliseconds>(now - task->progress.last_transport_at).count();
+    }
+    if (task->progress.last_meaningful_progress_at.time_since_epoch().count() != 0) {
+        event.progress_idle_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     now - task->progress.last_meaningful_progress_at)
+                                     .count();
+    }
+    // 锁内只投递:sink 只许入队(监督器的钩子总线),不得回头拿台账锁。
+    supervision_event_sink_(event);
+}
+
+std::uint64_t TaskLedger::watch_generation() const {
+    std::lock_guard<std::mutex> lock(mutex);
+    return watch_generation_;
+}
+
+bool TaskLedger::WaitForWatchChange(std::uint64_t after_generation,
+                                    std::chrono::steady_clock::time_point deadline,
+                                    const std::function<bool()>& extra_wake) {
+    // 谓词在台账锁内读:修订前进 / extra_wake(取消旗一类只读探测,锁内
+    // 调不许再拿台账锁)。伪醒(cv 常态)只是再查一遍谓词,不误报。
+    std::unique_lock<std::mutex> lock(mutex);
+    const bool changed = watch_cv_.wait_until(lock, deadline, [&] {
+        return watch_generation_ != after_generation || (extra_wake != nullptr && extra_wake());
+    });
+    return changed && watch_generation_ != after_generation;
+}
+
+void TaskLedger::NotifyExternalWake() {
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        NotifyWatchChangeLocked();
+    }
+    Touch();
+}
+
+void TaskLedger::PushSupervisorNoticeDedupedLocked(const std::shared_ptr<TaskRecord>& task,
+                                                   std::uint64_t health_epoch, const std::string& reason_key,
+                                                   const std::string& notice) {
+    if (task == nullptr || health_epoch == 0 || notice.empty()) {
+        return;
+    }
+    const std::string key =
+        std::to_string(task->snapshot.id) + ":" + std::to_string(health_epoch) + ":" + reason_key;
+    if (supervisor_notice_keys_.insert(key).second) {
+        supervisor_notices_.push_back(notice);
+        // 防账面无限涨:旧代际不会再来,保留最近一批即可(与监督器同规矩)。
+        if (supervisor_notice_keys_.size() > 512) {
+            supervisor_notice_keys_.erase(supervisor_notice_keys_.begin());
+        }
+    }
+}
+
+void TaskLedger::PushSupervisorNoticeDeduped(const std::shared_ptr<TaskRecord>& task, std::uint64_t health_epoch,
+                                             const std::string& reason_key, std::string notice) {
+    std::lock_guard<std::mutex> lock(mutex);
+    PushSupervisorNoticeDedupedLocked(task, health_epoch, reason_key, notice);
 }
 
 std::vector<AgentTaskSnapshot> TaskLedger::Snapshots(std::size_t max_entries) const {
@@ -523,6 +616,8 @@ std::vector<AgentTaskSummary> TaskLedger::Summaries() const {
         summary.activity.reasoning_chars = tools::CountUtf8Codepoints(task->pending_reasoning);
         summary.activity.text_chars = tools::CountUtf8Codepoints(task->pending_text);
         summary.content_revision = task->content_revision;
+        // 监督投影(P1-1):Dock 行与查看态监督行从这份账现算。
+        summary.progress = task->progress;
         std::lock_guard<std::mutex> inbox_lock(task->inbox_mutex);
         for (const auto& item : task->inbox) {
             if (!item.delivered) {
@@ -577,6 +672,37 @@ std::vector<AgentTaskEvent> TaskLedger::Events(int task_id) const {
             event.text = task->pending_text;
             event.streaming = true;
             out.push_back(std::move(event));
+        }
+        return out;
+    }
+    return {};
+}
+
+std::vector<AgentTaskEvent> TaskLedger::EventsSince(int task_id, std::uint64_t after_event_revision,
+                                                    std::size_t max_events) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (const auto& task : tasks_) {
+        if (task->snapshot.id != task_id) {
+            continue;
+        }
+        // 只拷结构化字段(kind/tool/is_error/streaming/revision),text/result/
+        // input_json 一律剥掉——agent_watch 的输出不泄思考、正文与完整工具
+        // 参数(单子 §9.2/§十六)。流尾(未切段)不算已发生的事件,不给。
+        std::vector<AgentTaskEvent> out;
+        for (const auto& event : task->events) {
+            if (event.revision <= after_event_revision) {
+                continue;
+            }
+            AgentTaskEvent stripped;
+            stripped.kind = event.kind;
+            stripped.tool_name = event.tool_name;
+            stripped.is_error = event.is_error;
+            stripped.streaming = event.streaming;
+            stripped.revision = event.revision;
+            out.push_back(std::move(stripped));
+            if (out.size() >= max_events) {
+                break;
+            }
         }
         return out;
     }
@@ -653,6 +779,11 @@ void TaskLedger::AppendEventLocked(const std::shared_ptr<TaskRecord>& task, Agen
         marker.text = "(事件过多,最早的记录已被截去)";
         task->events.insert(task->events.begin(), std::move(marker));
     }
+    // 事件号(P1-0):从 watch_generation 同一枚单调计数发号(消息账长了一
+    // 笔对 watcher 也是变化,顺带叫醒);agent_watch 的 events 档按它与顶层
+    // revision 同轴过滤"after_revision 之后"的事件。
+    event.revision = ++watch_generation_;
+    watch_cv_.notify_all();
     task->events.push_back(std::move(event));
     ++task->content_revision;  // 查看态实时流:消息账动了,这一拍要重铺
 }
@@ -1161,6 +1292,7 @@ void TaskLedger::RecordRequestStarted(const std::shared_ptr<TaskRecord>& task, i
         // 显示回滚锚:这一轮 live_output 从这截起,断流重试时截回这里。
         clock.live_output_mark = task->snapshot.live_output.size();
         clock.last_observed_at = now;
+        NotifyWatchChangeLocked();  // agent_watch:新请求起跑即是变化
     }
     Touch();
 }
@@ -1231,6 +1363,7 @@ bool TaskLedger::RecordMeaningfulProgressLocked(const std::shared_ptr<TaskRecord
         clock.last_meaningful_progress_at = now;
         ++clock.progress_revision;
         clock.stale_rounds = 0;
+        NotifyWatchChangeLocked();  // agent_watch:实质进展前进了修订
         return true;
     }
     // 同指纹:时间戳不刷——"重复相同"不是进展(单子 §6.3:重复相同错误、
@@ -1252,6 +1385,7 @@ void TaskLedger::RecordAssistantMessage(const std::shared_ptr<TaskRecord>& task,
         ++task->progress.stale_rounds;
     }
     task->progress.stage = agent::AgentSupervisionStage::AwaitingToolInputComplete;
+    NotifyWatchChangeLocked();  // 完整消息提交(含空转轮)对 watcher 都是变化
 }
 
 void TaskLedger::RecordToolStartedLocked(const std::shared_ptr<TaskRecord>& task) {
@@ -1261,6 +1395,7 @@ void TaskLedger::RecordToolStartedLocked(const std::shared_ptr<TaskRecord>& task
     }
     task->progress.tool_started_at = std::chrono::steady_clock::now();
     task->progress.stage = agent::AgentSupervisionStage::RunningTool;
+    NotifyWatchChangeLocked();  // 工具起跑:相位变化
 }
 
 void TaskLedger::RecordToolCompletedLocked(const std::shared_ptr<TaskRecord>& task,
@@ -1269,6 +1404,7 @@ void TaskLedger::RecordToolCompletedLocked(const std::shared_ptr<TaskRecord>& ta
     if (task != nullptr && IsAliveTaskState(task->snapshot.state)) {
         task->progress.stage = agent::AgentSupervisionStage::AwaitingNextModelTurn;
         task->progress.tool_started_at.reset();
+        NotifyWatchChangeLocked();  // 工具收口:相位变化(进展账在上面已记)
     }
 }
 
@@ -1297,6 +1433,7 @@ void TaskLedger::RecordRequestRetry(const std::shared_ptr<TaskRecord>& task, int
         if (!IsAliveTaskState(task->snapshot.state)) {
             return;
         }
+        const agent::AgentHealthState old_health = task->progress.health;
         auto& clock = task->progress;
         clock.retry_count += 1;
         clock.request_attempt = attempt;
@@ -1316,6 +1453,9 @@ void TaskLedger::RecordRequestRetry(const std::shared_ptr<TaskRecord>& task, int
             task->snapshot.live_output.resize(clock.live_output_mark);
         }
         ++task->content_revision;
+        NotifyWatchChangeLocked();  // agent_watch:进恢复态是变化
+        EmitSupervisionEventLocked(task, agent::AgentSupervisionEventKind::RecoveryStarted, old_health,
+                                   task->progress.health, reason_code);
     }
     Touch();
 }
@@ -1325,24 +1465,125 @@ void TaskLedger::RecordRequestOutcome(const std::shared_ptr<TaskRecord>& task, b
     if (task == nullptr) {
         return;
     }
-    std::lock_guard<std::mutex> lock(mutex);
-    if (!IsAliveTaskState(task->snapshot.state)) {
-        return;
-    }
-    auto& clock = task->progress;
-    if (!reason_code.empty()) {
-        clock.last_reason_code = reason_code;
-    }
-    if (succeeded) {
-        // 传输侧自愈:恢复中 -> 正常。空转计数不动——重试成功不等于语义
-        // 进展(流收到了才算,那是下一条 meaningful progress 的事)。
-        if (clock.health == agent::AgentHealthState::Recovering ||
-            clock.health == agent::AgentHealthState::SuspectTransport) {
-            clock.health = agent::AgentHealthState::Healthy;
-            ++clock.health_epoch;
-            clock.stage = agent::AgentSupervisionStage::StreamingText;
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!IsAliveTaskState(task->snapshot.state)) {
+            return;
+        }
+        auto& clock = task->progress;
+        if (!reason_code.empty()) {
+            clock.last_reason_code = reason_code;
+        }
+        if (succeeded) {
+            // 传输侧自愈:恢复中 -> 正常。空转计数不动——重试成功不等于语义
+            // 进展(流收到了才算,那是下一条 meaningful progress 的事)。
+            if (clock.health == agent::AgentHealthState::Recovering ||
+                clock.health == agent::AgentHealthState::SuspectTransport) {
+                const agent::AgentHealthState old_health = clock.health;
+                clock.health = agent::AgentHealthState::Healthy;
+                ++clock.health_epoch;
+                clock.stage = agent::AgentSupervisionStage::StreamingText;
+                NotifyWatchChangeLocked();  // agent_watch:健康回正是变化
+                EmitSupervisionEventLocked(task, agent::AgentSupervisionEventKind::RecoverySucceeded, old_health,
+                                           clock.health, reason_code.empty() ? "transport.recovered" : reason_code);
+                // P1-1 通知"恢复成功":一次恢复 episode 恰一条(epoch 随翻页
+                // 递增,同一代际同一因只弹一次,单子 §十)。
+                PushSupervisorNoticeDedupedLocked(
+                    task, clock.health_epoch, "recovery.succeeded",
+                    "[监督] #" + std::to_string(task->snapshot.id) + " " +
+                        (task->snapshot.title.empty() ? std::string("(未命名)") : task->snapshot.title) +
+                        " 断流后自动重连成功(第 " + std::to_string(clock.retry_count) + " 次重试),任务继续。");
+            }
         }
     }
+    Touch();
+}
+
+void TaskLedger::RecordRecoveryExhausted(const std::shared_ptr<TaskRecord>& task, const std::string& reason_code) {
+    if (task == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!IsAliveTaskState(task->snapshot.state)) {
+            return;
+        }
+        auto& clock = task->progress;
+        if (!reason_code.empty()) {
+            clock.last_reason_code = reason_code;
+        }
+        // P1-1 通知"用尽":重试链打完仍没成,按错误收口(终态由收尾分型定,
+        // 这里只留通知与账)。同一代际同一因只弹一次。用户取消也走 Exhausted
+        // 相位(恢复环把停手交回)——那不是"用尽",不弹这条通知,账照记。
+        if (reason_code != "cancelled") {
+            PushSupervisorNoticeDedupedLocked(
+                task, clock.health_epoch != 0 ? clock.health_epoch : 1, "recovery.exhausted",
+                "[监督] #" + std::to_string(task->snapshot.id) + " " +
+                    (task->snapshot.title.empty() ? std::string("(未命名)") : task->snapshot.title) +
+                    " 自动重试已用尽(" + (reason_code.empty() ? std::string("未知错误") : reason_code) +
+                    "),按错误收口;已落盘成果保留。");
+        }
+        EmitSupervisionEventLocked(task, agent::AgentSupervisionEventKind::RecoveryExhausted, clock.health,
+                                   clock.health, reason_code);
+        NotifyWatchChangeLocked();
+    }
+    Touch();
+}
+
+void TaskLedger::RecordToolIndeterminateLocked(const std::shared_ptr<TaskRecord>& task, const std::string& tool_name,
+                                               const std::string& tool_use_id) {
+    if (task == nullptr || !IsAliveTaskState(task->snapshot.state)) {
+        return;
+    }
+    // 消息账:补一张明确的结果卡——被取消的工具不许永远挂着 Running 卡,
+    // 也不冒充成功。tool_calls 先按 id 精确对账,再退同名。
+    FlushPendingTextLocked(task);
+    bool matched = false;
+    for (auto call_it = task->snapshot.tool_calls.rbegin(); call_it != task->snapshot.tool_calls.rend();
+         ++call_it) {
+        if (!call_it->done && !call_it->tool_use_id.empty() && call_it->tool_use_id == tool_use_id) {
+            call_it->done = true;
+            call_it->is_error = true;
+            call_it->result = "(工具被取消,结果不明)";
+            matched = true;
+            break;
+        }
+    }
+    if (!matched) {
+        for (auto call_it = task->snapshot.tool_calls.rbegin(); call_it != task->snapshot.tool_calls.rend();
+             ++call_it) {
+            if (!call_it->done && call_it->name == tool_name) {
+                call_it->done = true;
+                call_it->is_error = true;
+                call_it->result = "(工具被取消,结果不明)";
+                break;
+            }
+        }
+    }
+    AgentTaskEvent ledger_event;
+    ledger_event.kind = AgentTaskEventKind::ToolResult;
+    ledger_event.tool_name = tool_name;
+    ledger_event.is_error = true;
+    ledger_event.text = "(工具被取消,结果不明:不知副作用是否落地,不自动重跑)";
+    ledger_event.result = "(工具被取消,结果不明)";
+    AppendEventLocked(task, std::move(ledger_event));
+    task->activity.stage = AgentTaskActivity::Stage::None;
+    task->activity.tool_name.clear();
+    // 相位退回等下一轮;执行账照刷(有事情发生了)。
+    task->progress.stage = agent::AgentSupervisionStage::AwaitingNextModelTurn;
+    task->progress.tool_started_at.reset();
+    RecordExecutionActivityLocked(task);
+    // P1-1 通知"工具结果不明"(单子 §8.3:不自动重放,请用户或父代理核对):
+    // 去重键带 tool_use_id——每笔被取消的调恰一条,同代际也不吞。
+    PushSupervisorNoticeDedupedLocked(
+        task, task->progress.health_epoch != 0 ? task->progress.health_epoch : 1,
+        "tool.indeterminate." + (tool_use_id.empty() ? tool_name : tool_use_id),
+        "[监督] #" + std::to_string(task->snapshot.id) + " " +
+            (task->snapshot.title.empty() ? std::string("(未命名)") : task->snapshot.title) + " 的工具 " +
+            tool_name + " 被取消后结果不明:不知副作用是否已落地。宿主不自动重跑,请核对现场。");
+    EmitSupervisionEventLocked(task, agent::AgentSupervisionEventKind::ToolIndeterminate, task->progress.health,
+                               task->progress.health, "tool.outcome_indeterminate");
+    NotifyWatchChangeLocked();
 }
 
 // ---- 监督面(P0-2)----
@@ -1372,6 +1613,9 @@ void TaskLedger::ForEachAliveVitals(
                                   task->wall_stop.load(std::memory_order_acquire);
         vitals.stale_rounds = task->progress.stale_rounds;
         vitals.host_notice_sent = task->progress.host_notice_sent;
+        vitals.progress_revision = task->progress.progress_revision;
+        vitals.request_attempt = task->progress.request_attempt;
+        vitals.reason_code = task->progress.last_reason_code;
         // 墙钟软线只看任务自带的时间预算(派出时写进快照);工具级的默认
         // 墙钟没有进快照,不在这条软线上另立账。
         vitals.wall_limit_secs = task->snapshot.wall_limit_secs;
@@ -1402,6 +1646,7 @@ void TaskLedger::FinalizeFromToolResult(const std::shared_ptr<TaskRecord>& task,
                                         const std::string& result_content, bool cancelled_by_stop_signal) {
     {
         std::lock_guard<std::mutex> lock(mutex);
+        const agent::AgentHealthState health_before_finalize = task->progress.health;
         // 看门狗已强制收账(wall_clock 绝境):台账保持那份,这里只报收尾。
         if (!task->force_finalized) {
             task->snapshot.result = result_content;
@@ -1439,6 +1684,9 @@ void TaskLedger::FinalizeFromToolResult(const std::shared_ptr<TaskRecord>& task,
         task->progress.health = agent::AgentHealthState::Terminal;
         ++task->progress.health_epoch;
         task->finalized.store(true, std::memory_order_release);
+        // 正常收口也是健康翻页(P2 钩子要看见 Terminal)。
+        EmitSupervisionEventLocked(task, agent::AgentSupervisionEventKind::HealthChanged,
+                                   health_before_finalize, agent::AgentHealthState::Terminal, "task.finalized");
         NotifyStateChangeLocked();  // 等孩子的父与收柄口当拍醒
     }
     if (task->watchdog.joinable()) {
@@ -1468,6 +1716,8 @@ void TaskLedger::ForceFinalizeWallClock(const std::shared_ptr<TaskRecord>& task,
     forced_event.kind = AgentTaskEventKind::Failure;
     forced_event.text = task->snapshot.outcome.message;
     AppendEventLocked(task, std::move(forced_event));
+    EmitSupervisionEventLocked(task, agent::AgentSupervisionEventKind::ForceFinalized, task->progress.health,
+                               agent::AgentHealthState::Terminal, "wall_clock.force_finalized");
     NotifyStateChangeLocked();  // 强收也要叫醒等孩子的父,不许它在 cv 上挂到天荒地老
     Touch();
 }
@@ -1482,11 +1732,15 @@ std::uint64_t TaskLedger::ApplyHealth(const std::shared_ptr<TaskRecord>& task, a
         return 0;
     }
     if (health != task->progress.health) {
+        const agent::AgentHealthState old_health = task->progress.health;
         task->progress.health = health;
         ++task->progress.health_epoch;
         if (!reason_code.empty()) {
             task->progress.last_reason_code = reason_code;
         }
+        NotifyWatchChangeLocked();  // agent_watch:健康翻页是变化
+        EmitSupervisionEventLocked(task, agent::AgentSupervisionEventKind::HealthChanged, old_health, health,
+                                   reason_code);
         return task->progress.health_epoch;
     }
     return 0;
@@ -1561,6 +1815,8 @@ void TaskLedger::ForceFinalizeNoProgress(const std::shared_ptr<TaskRecord>& task
     forced_event.kind = AgentTaskEventKind::Failure;
     forced_event.text = task->snapshot.outcome.message;
     AppendEventLocked(task, std::move(forced_event));
+    EmitSupervisionEventLocked(task, agent::AgentSupervisionEventKind::ForceFinalized, task->progress.health,
+                               agent::AgentHealthState::Terminal, "agent.no_meaningful_progress.finalized");
     NotifyStateChangeLocked();
     Touch();
 }

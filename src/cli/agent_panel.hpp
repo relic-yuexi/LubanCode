@@ -21,6 +21,15 @@
 
 namespace lubancode::cli {
 
+// 监督色辅助(监督器单 P1-1 §十):颜色只作辅助,行文本自身已带语义
+//(阶段/静默龄/重连次数)——plain 主题与无色模式不丢任何信息。
+enum class AgentHealthTint {
+    Normal,     // Healthy:常色(走渲染处的默认淡色)
+    Quiet,      // Quiet/Suspect*:黄(警告,还没到坏)
+    Recovering, // Recovering:青(正在自动重连)
+    Degraded,   // Degraded:红(已降级)
+};
+
 // 面板条目。main 不在列表里(固定画成第 0 项);provider 只交后台子代理。
 // 轻量:列表每 100ms 拉一次,这里只放列表行要用的字段——查看态的长正文
 // (完整任务说明、工具流水、结论)由应用层按 viewed_task_id 从任务台账
@@ -47,6 +56,9 @@ struct AgentPanelEntry {
     // 0/0,画树时按无缩进的平铺处理,行为与从前一致。
     int parent_task_id = 0;
     int depth = 0;
+    // 监督色辅助(监督器单 P1-1):presenter 从台账的 progress.health 折,
+    // 渲染层只认这枚枚举映射 ANSI,不认健康态本体。
+    AgentHealthTint health_tint = AgentHealthTint::Normal;
 };
 
 // 面板动作,由应用层(InteractiveSession)接线到 AgentTool 的正式取消/清理
@@ -206,6 +218,9 @@ struct AgentDockRow {
     std::string middle;     // 中段:真正短标题(优先吃宽、优先截断)
     std::string status;     // 右列:状态摘要(耗时/token/queued),右对齐
     std::string text;       // Hint/Note 的整行文本
+    // 监督色辅助(P1-1):Entry 行从条目透传;渲染文本保持纯 ANSI-free,
+    // 颜色由画行的那一层按这枚枚举包(窄宽截断的宽账不受影响)。
+    AgentHealthTint health_tint = AgentHealthTint::Normal;
 };
 
 struct AgentDockLayout {
@@ -260,6 +275,10 @@ std::string RenderAgentDockRow(const AgentDockLayout& layout, const AgentDockRow
 
 // 整坞渲染成纯文本行(空闲 composer 与流式 footer 共用这一份)。
 std::vector<std::string> RenderAgentDockLines(const AgentDockLayout& layout, int width);
+
+// 与 RenderAgentDockLines 同序的行级监督色(P1-1):渲染文本保持纯文本,
+// 画行的那一层按这枚枚举挑 ANSI 前缀(plain 主题全 Normal = 默认淡色)。
+std::vector<AgentHealthTint> DockRowTints(const AgentDockLayout& layout);
 
 // -----------------------------------------------------------------------
 // 输入框上横线右端的代理短标签(纯函数)

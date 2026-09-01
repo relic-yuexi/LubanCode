@@ -14,9 +14,20 @@ constexpr auto kTickInterval = std::chrono::milliseconds(500);
 constexpr auto kHostResumeMinGap = std::chrono::seconds(30);
 }  // namespace
 
-AgentSupervisor::AgentSupervisor(tools::TaskLedger& ledger) : ledger_(ledger) {}
+AgentSupervisor::AgentSupervisor(tools::TaskLedger& ledger)
+    : ledger_(ledger), metrics_(&ledger) {
+    // P2:台账侧事件(恢复起讫/工具结果不明/强收)经 sink 递进来——投钩子
+    // 总线、记指标。sink 在台账锁内被调,OnLedgerSupervisionEvent 只入队,
+    // 不回拿台账锁,无锁序环。
+    ledger_.SetSupervisionEventSink([this](const agent::AgentSupervisionEvent& event) {
+        OnLedgerSupervisionEvent(event);
+    });
+}
 
 AgentSupervisor::~AgentSupervisor() {
+    // 先拔台账的 sink:台账活得比本件长(成员声明序),不拔的话晚到的
+    // 台账事件会摸到悬垂的 this。
+    ledger_.SetSupervisionEventSink(nullptr);
     RequestStop();
     if (!thread_.joinable()) {
         return;
@@ -322,22 +333,15 @@ void AgentSupervisor::HealthPass(bool host_resume_suspected) {
 void AgentSupervisor::PushNoticeDeduped(const std::shared_ptr<tools::TaskRecord>& task,
                                         std::uint64_t health_epoch, const std::string& reason_code,
                                         const std::string& text) {
-    if (task == nullptr || health_epoch == 0) {
-        return;
-    }
-    const std::string key =
-        std::to_string(task->snapshot.id) + ":" + std::to_string(health_epoch) + ":" + reason_code;
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        if (!noticed_keys_.insert(key).second) {
-            return;  // 同一健康代际同一因,只弹一次(单子 §十)
-        }
-        // 防账面无限涨:去重键保留最近若干即可(旧代际不会再来)。
-        if (noticed_keys_.size() > 512) {
-            noticed_keys_.erase(noticed_keys_.begin());
-        }
-    }
-    ledger_.PushSupervisorNotice(text);
+    // 去重账归台账(单一去重口,P1-1 起台账侧通知与监督器共用同一本键账)。
+    ledger_.PushSupervisorNoticeDeduped(task, health_epoch, reason_code, text);
+}
+
+void AgentSupervisor::OnLedgerSupervisionEvent(const agent::AgentSupervisionEvent& event) {
+    // 只入队/计数:钩子在总线的专职线程上跑,慢与坏都不占监督拍(单子
+    // §11.2 红线)。
+    health_hooks_.Publish(event);
+    metrics_.Count(event);
 }
 
 }  // namespace lubancode::runtime

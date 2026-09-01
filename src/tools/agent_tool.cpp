@@ -31,6 +31,7 @@
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:inbox 投递文本的编码关口
 #include "runtime/turn_runtime.hpp"    // MapPreToolDecision:PreToolUse 归并映射与主路径同一颗
 #include "tools/agent_message_tool.hpp"  // scoped agent_message(P1-1:子代理只投自己直接孩子)
+#include "tools/agent_watch_tool.hpp"  // scoped agent_watch(监督器单 P1-0:子代理只看自己直接孩子)
 #include "tools/instruction_scope.hpp"  // 写前作用域闸(AGENTS.md 作用域单 P0)
 #include "tools/observation_filter.hpp"  // 观察边界(P2-5):子代理日志目录默认不可搜
 #include "tools/path_utils.hpp"
@@ -252,8 +253,8 @@ TaskScopedRegistry BuildTaskScopedRegistry(ToolRegistry& source) {
         const std::string name = tool->name();
         if (name == "todo_write") {
             out->Register(std::make_unique<TodoWriteTool>(std::make_shared<TodoListState>()));
-        } else if (name == "agent" || name == "agent_message") {
-            continue;  // 第二段换 scoped 壳(P1-1:agent_message 同 agent 一并收窄)
+        } else if (name == "agent" || name == "agent_message" || name == "agent_watch") {
+            continue;  // 第二段换 scoped 壳(P1-0:agent_watch 同 agent 一并收窄)
         } else {
             out->Register(std::make_unique<ForwardingTool>(*tool));
         }
@@ -1555,6 +1556,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             // "首版只放直接孩子")。main 那份不受此门(main 不经这条 RunTask
             // 路径,main_registry_ 装配时直挂 caller_task_id=0 的无限定实例)。
             scoped_registry.registry->Register(std::make_unique<AgentMessageTool>(this, task->snapshot.id));
+            // scoped agent_watch(监督器单 P1-0):同一道资格门——能派孩子
+            // 才有孩子可看。窄实例只看直接孩子(lineage 鉴权在工具里执法),
+            // 无 diagnostic 档(那只给 main)。main 那份由 tool_runtime 装配
+            // 时直挂 caller_task_id=0。
+            scoped_registry.registry->Register(std::make_unique<AgentWatchTool>(this, task->snapshot.id));
         }
     }
 
@@ -1950,10 +1956,21 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     if (event.item_kind != runtime::ItemKind::Tool) {
                         break;
                     }
-                    // 适配器 Finish 的 Cancelled 兜底:老路上没有对应的台账
-                    // 回调,照旧不落。
+                    // 适配器 Finish 的 Cancelled 兜底(P1-1 起不再裸丢):工具
+                    // 已越过执行边界(ItemStarted 落过账)却被取消——副作用
+                    // 是否落地无从证实。按"结果不明"收口:消息账补一张明确的
+                    // 卡,通知请用户/父代理核对,绝不自动重跑(单子 §8.3)。
                     if (event.outcome == runtime::Outcome::Cancelled) {
-                        open_tools->erase(event.item_id);
+                        const auto open_it = open_tools->find(event.item_id);
+                        if (open_it != open_tools->end() && task != nullptr) {
+                            const auto [cancelled_use_id, cancelled_tool] = open_it->second;
+                            open_tools->erase(open_it);
+                            std::lock_guard<std::mutex> lock(ledger().mutex);
+                            ledger().RecordToolIndeterminateLocked(task, cancelled_tool, cancelled_use_id);
+                            ledger().Touch();
+                        } else {
+                            open_tools->erase(event.item_id);
+                        }
                         break;
                     }
                     const auto it = open_tools->find(event.item_id);
@@ -2084,9 +2101,13 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     ledger().RecordRequestRetry(task, attempt.attempt, attempt.error_code);
                     break;
                 case api::RequestAttemptPhase::Succeeded:
-                case api::RequestAttemptPhase::Exhausted:
                     // 收场账由 TraceBackend 的 RecordRequestOutcome 记(那里有
                     // 错误本体),这里不双记。
+                    break;
+                case api::RequestAttemptPhase::Exhausted:
+                    // P1-1 通知"用尽":重试链打完仍没成。恢复账(次数/稳定码)
+                    // 也在这一笔里收口(单子 §十"恢复用尽"一条通知)。
+                    ledger().RecordRecoveryExhausted(task, attempt.error_code);
                     break;
             }
         };

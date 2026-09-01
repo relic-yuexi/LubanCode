@@ -111,6 +111,24 @@ std::string HealthLabel(AgentHealthState health) {
     return "";
 }
 
+const char* SupervisionEventTag(AgentSupervisionEventKind kind) {
+    switch (kind) {
+        case AgentSupervisionEventKind::HealthChanged:
+            return "agent.health.changed";
+        case AgentSupervisionEventKind::RecoveryStarted:
+            return "agent.recovery.started";
+        case AgentSupervisionEventKind::RecoverySucceeded:
+            return "agent.recovery.succeeded";
+        case AgentSupervisionEventKind::RecoveryExhausted:
+            return "agent.recovery.exhausted";
+        case AgentSupervisionEventKind::ToolIndeterminate:
+            return "agent.tool.indeterminate";
+        case AgentSupervisionEventKind::ForceFinalized:
+            return "agent.force_finalized";
+    }
+    return "agent.supervision.unknown";
+}
+
 namespace {
 
 bool OlderThan(std::chrono::steady_clock::time_point now, std::chrono::steady_clock::time_point at, int soft_secs) {
