@@ -102,7 +102,7 @@ TEST_CASE("P0-3: 召回快照进 main.jsonl,Memory 改后旧账不动") {
 
     // 开轨迹账(与 memory 同一把 cwd_fallback 钥匙),挂落账桥。
     runtime::TrajectorySessionLedger::Options ledger_options;
-    ledger_options.workspaces_root = home / "trajectories";
+    ledger_options.workspaces_root = home / "workspaces";
     ledger_options.workspace_root = repo;
     // 显式递冻结身份(§4.5):非 Git 临时目录不给 resolver 爬到真用户主目录
     // 的 .lubancode/config.json 里去。
@@ -187,7 +187,7 @@ TEST_CASE("P0-3: memory.save.requested 落因果边,引用全限定") {
     fs::create_directories(home);
 
     runtime::TrajectorySessionLedger::Options ledger_options;
-    ledger_options.workspaces_root = home / "trajectories";
+    ledger_options.workspaces_root = home / "workspaces";
     ledger_options.workspace_root = repo;
     // 显式递冻结身份(§4.5):非 Git 临时目录不给 resolver 爬到真用户主目录
     // 的 .lubancode/config.json 里去。
@@ -245,7 +245,7 @@ TEST_CASE("P0-3: 派工快照事件带 relations.child_run_id") {
     Write(repo / "build.sh", "#!/bin/sh\necho build\n");
 
     runtime::TrajectorySessionLedger::Options ledger_options;
-    ledger_options.workspaces_root = home / "trajectories";
+    ledger_options.workspaces_root = home / "workspaces";
     ledger_options.workspace_root = repo;
     // 显式递冻结身份(§4.5):非 Git 临时目录不给 resolver 爬到真用户主目录
     // 的 .lubancode/config.json 里去。
