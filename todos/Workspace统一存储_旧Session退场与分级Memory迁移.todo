@@ -1,6 +1,6 @@
 # Workspace 统一存储、旧 Session 退场与分级 Memory 迁移
 
-- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 已落（WorkspaceIdentityResolver 四级裁决+统一 key+两把旧钥匙退役+v2 manifest/checkout/doctor+cwd change/跨 workspace 换场，2026-09-01）；P0-2 已落（Trajectory 升唯一 Session:根迁 workspaces/、开关退役、命令面/app-server/渠道全换账、artifact 归拢、无损投影、父子账保住+真机冒烟，2026-09-01）；P0-3 已落（项目 Memory 搬进 workspace 树+召回快照 typed 事件+worker lifecycle 回执+子代理冻结快照，2026-09-01）；P0-4 已落（全局记忆收紧：命令面显式层级+逐次确认+写通道闸+user-only/doctor 项，2026-09-01）。**P0-5（迁移器）与 P0-6（删旧码）待实现。**
+- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 已落（WorkspaceIdentityResolver 四级裁决+统一 key+两把旧钥匙退役+v2 manifest/checkout/doctor+cwd change/跨 workspace 换场，2026-09-01）；P0-2 已落（Trajectory 升唯一 Session:根迁 workspaces/、开关退役、命令面/app-server/渠道全换账、artifact 归拢、无损投影、父子账保住+真机冒烟，2026-09-01）；P0-3 已落（项目 Memory 搬进 workspace 树+召回快照 typed 事件+worker lifecycle 回执+子代理冻结快照，2026-09-01）；P0-4 已落（全局记忆收紧：命令面显式层级+逐次确认+写通道闸+user-only/doctor 项，2026-09-01）。**P0-5（迁移器）与 P0-6（删旧码）进行中——2026-09-01 封机存照**：storage_migrator 半成品连同 handoff 落在 worktree 分支（WIP commit），换机续做。另：Wave3×P0-2 合并态有 16 册交叠红（轨迹边界 prepared 空串一类），缝合进展在专门分支，换机后第一件事收完再发版。
 - 日期：2026-09-01
 - 级别：P0（持久化唯一真账、项目身份、恢复正确性与用户数据安全）
 - 范围：`src/sessions/`、`src/trajectory/`、`src/runtime/session_runtime.*`、`src/runtime/trajectory_session.*`、`src/memory/`、`src/app/commands/session_commands.*`、`src/app/commands/memory_commands.*`、`src/tools/agent_tool.*`、配置/CLI/app-server、测试、文档与旧数据迁移
