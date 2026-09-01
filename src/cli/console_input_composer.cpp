@@ -642,7 +642,8 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         if (box) {
             const std::optional<platform::ScreenInfo> info_now = platform::GetScreenInfo();
             const int width = info_now.has_value() ? info_now->width : 80;
-            model.status_rows = {BuildStatusLine(chrome, width - 1)};
+            model.status_rows = {BuildComposerModeLine(
+                chrome, static_cast<int>(SessionSkillCount()), (std::max)(0, width - 1))};
         }
         return model;
     };

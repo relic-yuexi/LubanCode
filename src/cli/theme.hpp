@@ -26,6 +26,7 @@ struct Theme {
     std::string error;      // `[错误]`/`[工具出错]`
     std::string stats;      // token 统计行、cwd 提示这类淡色信息
     std::string spinner;    // "思考中" 转轮字符本身的颜色
+    std::string danger_mode; // yolo 档模式名的危险警示红色
     std::string reset;      // 恢复默认颜色;plain 主题这个也是空串
 
     // diff 预览(Claude Code Update 样式)专用色。前缀 diff_ 是跟兄弟

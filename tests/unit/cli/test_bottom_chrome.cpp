@@ -112,17 +112,17 @@ TEST_CASE("同源布局:golden——两逻辑行 + 中英混排,行序/padding/c
                                           ComposerMode::BusyQueue);
     const BottomChromeLayout layout = BuildBottomChromeLayout(model, plain, 40);
     REQUIRE(layout.frame.rows.size() == 5);
-    CHECK(layout.frame.rows[0].text == PlainRule(40));   // 上横线
-    CHECK(layout.frame.rows[1].text == "> 第一行");       // 首行带提示符
-    CHECK(layout.frame.rows[2].text == "  second");       // 续行两格缩进,落在文本里
-    CHECK(layout.frame.rows[3].text == PlainRule(40));   // 下横线
-    CHECK(layout.frame.rows[4].text == "status");        // 状态行
-    CHECK(layout.composer_first_row == 1);
+    CHECK(layout.frame.rows[0].text == "status");        // 模式行紧贴输入框上方
+    CHECK(layout.frame.rows[1].text == PlainRule(40));   // 上横线
+    CHECK(layout.frame.rows[2].text == "> 第一行");       // 首行带提示符
+    CHECK(layout.frame.rows[3].text == "  second");       // 续行两格缩进,落在文本里
+    CHECK(layout.frame.rows[4].text == PlainRule(40));   // 下横线
+    CHECK(layout.composer_first_row == 2);
     CHECK(layout.composer_row_count == 2);
-    CHECK(layout.cursor_row == 2);                       // 光标在第二物理行
+    CHECK(layout.cursor_row == 3);                       // 光标在第二物理行
     CHECK(layout.cursor_x == 2 + 6);                     // 缩进 2 + "second" 宽 6
     CHECK(layout.painted_row_widths ==
-          std::vector<int>{39, 8, 8, 39, 6});            // 纯文本宽,转义字节不计
+          std::vector<int>{6, 39, 8, 8, 39});            // 纯文本宽,转义字节不计
     CHECK(layout.chrome.composer_rows == 2);
     CHECK(layout.chrome.TotalRows() == 5);
 }
@@ -152,8 +152,8 @@ TEST_CASE("同源布局:Idle 与 Busy 同拍——物理行/padding/cursor 必�
         BuildBottomChromeLayout(FramedModel(empty, ComposerMode::Idle), plain, 40);
     const BottomChromeLayout busy_empty = BuildBottomChromeLayout(
         FramedModel(empty, ComposerMode::BusyQueue, "键入并回车排队"), plain, 40);
-    CHECK(idle_empty.frame.rows[1].text == "> ");
-    CHECK(busy_empty.frame.rows[1].text == "> 键入并回车排队");
+    CHECK(idle_empty.frame.rows[idle_empty.composer_first_row].text == "> ");
+    CHECK(busy_empty.frame.rows[busy_empty.composer_first_row].text == "> 键入并回车排队");
     CHECK(idle_empty.frame.rows.size() == busy_empty.frame.rows.size());
     CHECK(idle_empty.chrome.composer_rows == busy_empty.chrome.composer_rows);
     CHECK(idle_empty.cursor_row == busy_empty.cursor_row);
@@ -280,11 +280,11 @@ TEST_CASE("同源布局:top padding 与 min body 改值,Idle 与 Busy 同拍变�
     // 单行正文:上留白 2 + 正文 1 + 下补 2 = 5。
     CHECK(idle_layout.chrome.composer_rows == 5);
     CHECK(busy_layout.chrome.composer_rows == 5);
-    CHECK(idle_layout.frame.rows[1].text.empty());   // 上留白两行
-    CHECK(idle_layout.frame.rows[2].text.empty());
-    CHECK(idle_layout.frame.rows[3].text == "> 正文");
-    CHECK(idle_layout.frame.rows[4].text.empty());   // 下补两行
-    CHECK(idle_layout.frame.rows[5].text.empty());
+    CHECK(idle_layout.frame.rows[2].text.empty());   // 上留白两行
+    CHECK(idle_layout.frame.rows[3].text.empty());
+    CHECK(idle_layout.frame.rows[4].text == "> 正文");
+    CHECK(idle_layout.frame.rows[5].text.empty());   // 下补两行
+    CHECK(idle_layout.frame.rows[6].text.empty());
     CHECK(idle_layout.frame.rows.size() == busy_layout.frame.rows.size());
     // 正文长过 min body 时框自然长高,不留下补。
     idle.composer.editor = ComposerState({U"一", U"二", U"三", U"四", U"五"}, 4, 1);
@@ -316,14 +316,14 @@ TEST_CASE("同源布局:activity/queue/hints/dock 单独增减,行序与锚点�
     model.transient_rows = {"  /help  列出命令"};
     model.agent_dock_rows = {"● main", "○ agent #1"};
     const BottomChromeLayout layout = BuildBottomChromeLayout(model, plain, 40);
-    // 行序:Working > 队列 > 上横线 > 输入 > 下横线 > 状态 > 坞 > 提示。
+    // 行序:Working > 队列 > 模式行 > 上横线 > 输入 > 下横线 > 坞 > 提示。
     CHECK(layout.frame.rows[0].text == "• Working (3s)");
     CHECK(layout.frame.rows[1].text == "待发 2 条");
     CHECK(layout.frame.rows[2].text == "> 第一条");
-    CHECK(layout.frame.rows[3].text == PlainRule(40));
-    CHECK(layout.composer_first_row == 4);
-    CHECK(layout.frame.rows[5].text == PlainRule(40));
-    CHECK(layout.frame.rows[6].text == "status");
+    CHECK(layout.frame.rows[3].text == "status");
+    CHECK(layout.frame.rows[4].text == PlainRule(40));
+    CHECK(layout.composer_first_row == 5);
+    CHECK(layout.frame.rows[6].text == PlainRule(40));
     CHECK(layout.frame.rows[7].text == "● main");
     CHECK(layout.frame.rows[8].text == "○ agent #1");
     CHECK(layout.frame.rows[9].text == "  /help  列出命令");
@@ -336,8 +336,8 @@ TEST_CASE("同源布局:activity/queue/hints/dock 单独增减,行序与锚点�
     model.activity_rows.clear();
     model.queue_rows.clear();
     const auto lean = BuildBottomChromeLayout(model, plain, 40);
-    CHECK(lean.composer_first_row == 1);  // 上横线之后便是输入行
-    CHECK(lean.cursor_row == 1);
+    CHECK(lean.composer_first_row == 2);  // 模式行、上横线之后便是输入行
+    CHECK(lean.cursor_row == 2);
     CHECK(lean.frame.rows.size() == 7);
 }
 
@@ -346,10 +346,10 @@ TEST_CASE("同源布局:rule tag 挂上横线右端,没有就整线") {
     BottomChromeModel model = FramedModel(ComposerState({U"正文"}, 0, 2), ComposerMode::Idle);
     model.rule_tag = "agent #2 重构";
     const auto tagged = BuildBottomChromeLayout(model, plain, 40);
-    CHECK(Contains(tagged.frame.rows[0].text, "agent #2 重构"));
+    CHECK(Contains(tagged.frame.rows[1].text, "agent #2 重构"));
     model.rule_tag.clear();
     const auto plain_rule = BuildBottomChromeLayout(model, plain, 40);
-    CHECK(plain_rule.frame.rows[0].text == PlainRule(40));
+    CHECK(plain_rule.frame.rows[1].text == PlainRule(40));
 }
 
 TEST_CASE("同源布局:dark/light 着色,plain 不夹一个转义字节") {
@@ -365,9 +365,10 @@ TEST_CASE("同源布局:dark/light 着色,plain 不夹一个转义字节") {
         const auto layout = BuildBottomChromeLayout(model, theme, 40);
         // 横线/队列/坞行带主题淡色;宽度账只记纯文本宽。
         CHECK(Contains(layout.frame.rows[0].text, theme.stats));
-        CHECK(Contains(layout.frame.rows[1].text, theme.stats));
+        CHECK(Contains(layout.frame.rows[2].text, theme.stats));
         CHECK(layout.painted_row_widths[0] == 6);   // 队列行"队列行" 三个汉字
-        CHECK(layout.painted_row_widths[1] == 39);  // 其下才是满宽横线
+        CHECK(layout.painted_row_widths[1] == 6);   // 模式行测试占位 "status"
+        CHECK(layout.painted_row_widths[2] == 39);  // 其下才是满宽横线
         CHECK(layout.cursor_x == 6);                // 彩色 "> " 只占 2 列 + 正文 4 列
     }
     BottomChromeModel model = FramedModel(draft, ComposerMode::BusyQueue, "占位");
@@ -525,8 +526,8 @@ TEST_CASE("高度预算:绝境开窗——输入行比窗高也围光标画得�
     CHECK(windowed.frame.rows.size() == 5);
     CHECK(windowed.composer_row_count == 2);
     CHECK(windowed.chrome.composer_rows == 2);
-    CHECK(Contains(windowed.frame.rows[1].text, "第9行"));
-    CHECK(Contains(windowed.frame.rows[2].text, "第十行"));
+    CHECK(Contains(windowed.frame.rows[2].text, "第9行"));
+    CHECK(Contains(windowed.frame.rows[3].text, "第十行"));
     CHECK(windowed.cursor_row == windowed.composer_first_row + 1);
     CHECK(windowed.frame.cursor_row == windowed.cursor_row);
     // 预算 1:横线/状态全让位,只剩光标那一行——硬约束的底线。
@@ -592,14 +593,15 @@ TEST_CASE("帮助层布局:垫帧最顶,行序在活动条/队列之上,进指�
     model.activity_rows = {"• Working (3s)"};
     model.queue_rows = {"待发 1 条"};
     const auto layout = BuildBottomChromeLayout(model, plain, 40);
-    // 行序:帮助 3 行 > 活动条 > 队列 > 上横线 > 输入 > 下横线 > 状态。
+    // 行序:帮助 3 行 > 活动条 > 队列 > 模式行 > 上横线 > 输入 > 下横线。
     CHECK(layout.frame.rows[0].text == "帮助表头");
     CHECK(layout.frame.rows[1].text == "? help.show");
     CHECK(layout.frame.rows[2].text == "帮助表尾");
     CHECK(layout.frame.rows[3].text == "• Working (3s)");
     CHECK(layout.frame.rows[4].text == "待发 1 条");
-    CHECK(layout.frame.rows[5].text == PlainRule(40));
-    CHECK(layout.composer_first_row == 6);
+    CHECK(layout.frame.rows[5].text == "status");
+    CHECK(layout.frame.rows[6].text == PlainRule(40));
+    CHECK(layout.composer_first_row == 7);
     CHECK(layout.chrome.help_rows.size() == 3);
     CHECK(layout.chrome.TotalRows() == static_cast<int>(layout.frame.rows.size()));
     // 指纹认帮助行:行变了指纹必变;与别区分区隔开,同文不误判相等。

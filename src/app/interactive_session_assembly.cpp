@@ -729,6 +729,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         return lubancode::app::BuildBackgroundStatusSegment(
             lubancode::tools::BackgroundTaskRegistry::Instance().List());
     });
+    lubancode::cli::SetSessionSkillCount(skills.size());
 
     // 后台代理权限拒绝的当场告知(后台代理权限拒绝无告知单,2026-08-17):
     // 后台任务的 needs_confirm 工具被拒那一刻,AgentTool 已把一行通知推进
@@ -1057,6 +1058,7 @@ TerminalSessionController::~TerminalSessionController() {
     lubancode::cli::SetIdleWakeHook(nullptr);
     lubancode::cli::SetBackgroundNoticeHook(nullptr);
     lubancode::cli::SetBackgroundStatusProvider(nullptr);
+    lubancode::cli::SetSessionSkillCount(0);
     lubancode::cli::SetTurnInterruptBroadcast(nullptr);
     lubancode::cli::SetPromptHistoryProvider(nullptr);
     lubancode::cli::SetFileMentionProvider(nullptr);
@@ -1324,6 +1326,7 @@ void TerminalSessionController::RefreshSkills() {
     skills = lubancode::tools::LoadSkills(
         CurrentDirUtf8(), home_dir, official_skills_dir,
         lubancode::package::MountSkillRoots(stack_.CurrentPackageSnapshot()->mount()));
+    lubancode::cli::SetSessionSkillCount(skills.size());
     skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
     if (auto* tool = dynamic_cast<lubancode::tools::SkillTool*>(registry().Find("skill")); tool != nullptr) {
         tool->SetSkills(skills);
