@@ -1736,7 +1736,8 @@ std::string RelativeToHome(const fs::path& home, const fs::path& path) {
     if (ec || relative.empty()) {
         return PathToUtf8(path);
     }
-    return PathToUtf8(relative);
+    // 统一正斜杠:回执/账面文本跨平台同形,archive 段的判定也靠它。
+    return relative.generic_string();
 }
 
 std::string NewOperationId(std::int64_t now_ms) {
@@ -1812,6 +1813,7 @@ MigrationResultItem ImportOneSession(MigratorContext& context, const MigrationSo
 
     // 旧 id 原样带入(§2D):文件名去 .jsonl。
     const std::string session_id = PathToUtf8(source_path.stem());
+    item.target_session_id = session_id;  // 合同 §五:逐项记目标 session id
     const fs::path session_dir = directory->workspace_dir() / "sessions" / Utf8ToPath(session_id);
     std::error_code ec;
     if (fs::exists(session_dir, ec) || ec) {
@@ -1872,6 +1874,9 @@ MigrationResultItem ImportOneSession(MigratorContext& context, const MigrationSo
     scope.actor = trajectory::Actor::Host;
     scope.origin = trajectory::Origin::RecoveryRuntime;
     scope.training_policy = trajectory::TrainingPolicy::Exclude;
+    // 信封 schema 要求 visibility 非空(§2.7);旧档导入场与生产主会话同取
+    // HostOnly(迁移场不进模型可见面,训练策略另由 exclude 钉死)。
+    scope.visibility = {trajectory::Visibility::HostOnly};
     auto recorder = trajectory::TrajectoryRecorder::Start(
         created->main_stream_path(), created->artifacts_root(), std::move(scope),
         trajectory::RecorderOptions{}, &clock);
@@ -2300,6 +2305,19 @@ std::expected<MigrationRunReport, std::string> RunStorageMigration(const Migrato
                             : parsed.entry.id;
                     parsed.entry.file = std::string(folder) + "/" + parsed.entry.name + ".md";
                     const fs::path target_file = target_memory / Utf8ToPath(parsed.entry.file);
+                    {
+                        // 主题按 kind 分目录(facts/preferences/feedback),
+                        // 目标侧首迁时目录还不存在,写盘前先落目录。
+                        std::error_code topic_dir_ec;
+                        fs::create_directories(target_file.parent_path(), topic_dir_ec);
+                        if (topic_dir_ec) {
+                            topic.outcome = "failed";
+                            topic.note = "目标主题目录建不起: " + topic_dir_ec.message();
+                            failed += 1;
+                            entry.topics.push_back(std::move(topic));
+                            continue;
+                        }
+                    }
                     const std::string composed = memory::frontmatter::BuildTopicText(
                         parsed.entry, parsed.fingerprints, parsed.body);
                     topic.target_file = RelativeToHome(workspace_dir, target_file);
@@ -2503,6 +2521,15 @@ MigrationStatusReport QueryStorageMigrationStatus(const MigratorOptions& options
         if (receipts::ReadResult(dir).has_value()) {
             operation.phase = "committed";
             status.committed_operations += 1;
+            // committed 也回填 done/total(progress 是最后落账的进度),账面
+            // 不因收工而丢总数。
+            if (const auto progress = receipts::ReadProgress(dir); progress.has_value()) {
+                operation.done = progress->value("done", std::size_t{0});
+                operation.total = progress->value("total", std::size_t{0});
+                operation.last_source_sha256 = progress->value("last_source_sha256", std::string());
+                operation.last_outcome = progress->value("last_outcome", std::string());
+                operation.updated_at_ms = progress->value("updated_at_ms", std::int64_t{0});
+            }
         } else if (const auto progress = receipts::ReadProgress(dir); progress.has_value()) {
             operation.phase = progress->value("phase", "unknown");
             operation.done = progress->value("done", std::size_t{0});

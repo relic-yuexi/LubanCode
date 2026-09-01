@@ -1,6 +1,6 @@
 # Workspace 统一存储、旧 Session 退场与分级 Memory 迁移
 
-- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 已落（WorkspaceIdentityResolver 四级裁决+统一 key+两把旧钥匙退役+v2 manifest/checkout/doctor+cwd change/跨 workspace 换场，2026-09-01）；P0-2 已落（Trajectory 升唯一 Session:根迁 workspaces/、开关退役、命令面/app-server/渠道全换账、artifact 归拢、无损投影、父子账保住+真机冒烟，2026-09-01）；P0-3 已落（项目 Memory 搬进 workspace 树+召回快照 typed 事件+worker lifecycle 回执+子代理冻结快照，2026-09-01）；P0-4 已落（全局记忆收紧：命令面显式层级+逐次确认+写通道闸+user-only/doctor 项，2026-09-01）。**P0-5（迁移器）与 P0-6（删旧码）进行中——2026-09-01 封机存照**：storage_migrator 半成品连同 handoff 落在 worktree 分支（WIP commit），换机续做。另：Wave3×P0-2 合并态有 16 册交叠红（轨迹边界 prepared 空串一类），缝合进展在专门分支，换机后第一件事收完再发版。
+- 状态：P0-0 已落（冻结合同+盘点+夹具，2026-09-01）；P0-1 已落（WorkspaceIdentityResolver 四级裁决+统一 key+两把旧钥匙退役+v2 manifest/checkout/doctor+cwd change/跨 workspace 换场，2026-09-01）；P0-2 已落（Trajectory 升唯一 Session:根迁 workspaces/、开关退役、命令面/app-server/渠道全换账、artifact 归拢、无损投影、父子账保住+真机冒烟，2026-09-01）；P0-3 已落（项目 Memory 搬进 workspace 树+召回快照 typed 事件+worker lifecycle 回执+子代理冻结快照，2026-09-01）；P0-4 已落（全局记忆收紧：命令面显式层级+逐次确认+写通道闸+user-only/doctor 项，2026-09-01）；P0-5 已落（幂等迁移器+fault 注入百次打断验收+真进程 kill 折算+迁移说明与版本边界，2026-09-02）。**P0-6（删旧码）进行中**。另：Wave3×P0-2 合并态有 16 册交叠红（轨迹边界 prepared 空串一类），缝合进展在专门分支，换机后第一件事收完再发版。
 - 日期：2026-09-01
 - 级别：P0（持久化唯一真账、项目身份、恢复正确性与用户数据安全）
 - 范围：`src/sessions/`、`src/trajectory/`、`src/runtime/session_runtime.*`、`src/runtime/trajectory_session.*`、`src/memory/`、`src/app/commands/session_commands.*`、`src/app/commands/memory_commands.*`、`src/tools/agent_tool.*`、配置/CLI/app-server、测试、文档与旧数据迁移
@@ -539,14 +539,14 @@ lubancode migrate-storage plan|run|status
 
 ### P0-5：迁移旧 Session 与旧 Project Memory
 
-- [ ] 实现只写新格式的幂等 storage-v2 migrator。
-- [ ] 迁移旧 SessionStore 消息与可确认事件，缺口标 `legacy_partial/training=exclude`。
-- [ ] 迁移旧 `projects/<key>/memory` 到新 workspace memory，逐主题对 hash。
-- [ ] 实现 plan/run/status、崩溃续跑、重复 source 去重、源/目标审计报告。
-- [ ] 默认保留源档；`--delete-source` 单独确认，只删已 committed 且复验通过的源。
-- [ ] 发布迁移说明与最后兼容版本边界。
+- [x] 实现只写新格式的幂等 storage-v2 migrator。（`src/workspace/storage_migrator.*` 独立 target `lubancode_storage_migrator`，旧格式行解析只活在 .cpp 匿名命名空间；plan/run/status 三口，committed SHA 索引去重，半截目标删重建）
+- [x] 迁移旧 SessionStore 消息与可确认事件，缺口标 `legacy_partial/training=exclude`。（单场导入器 turn/request/tool 全事件链，tool_trace_v1 四档结论融终态，rich 块无损投影+artifact 内容寻址搬运，compact/title/cwd/queue/mode 映射，goal/plan/think 照实列缺口；session.json 记 start_reason=legacy_import/subagent_detail=unavailable_legacy/training_policy=exclude）
+- [x] 迁移旧 `projects/<key>/memory` 到新 workspace memory，逐主题对 hash。（主题升 schema 3、source_sessions 裸 id 升四段引用、migrated_from 登记、memory-candidates 跟搬、result.json 逐主题 source/target sha 对照）
+- [x] 实现 plan/run/status、崩溃续跑、重复 source 去重、源/目标审计报告。（intent/progress/result 三回执按合同 §五；progress 逐文件原子落账，run 续跑最近未 committed operation；`lubancode migrate-storage` 命令面 + `legacy-storage-migrator` 独立封存体）
+- [x] 默认保留源档；`--delete-source` 单独确认，只删已 committed 且复验通过的源。（缺 `--yes` 拒；删前逐件重算 sha + 目标 verify/replay 复验，任一环不合整批不删；旧 memory 库不删）
+- [x] 发布迁移说明与最后兼容版本边界。（`docs/getting-started/storage-migration.md`：三步走、回执字段、迁移边界、独立工具与 0.26 系列收官的版本线）
 
-验收：故障注入打断迁移一百次，旧源无损；续跑不重复；成功目标全部可 Replay/rebuild。
+验收：故障注入打断迁移一百次，旧源无损；续跑不重复；成功目标全部可 Replay/rebuild。（tests/unit/workspace/test_storage_migrator.cpp：fault hook 按耐久点序号逐点打断 100 次，每轮断言旧源逐字节不变、终局 result committed 且逐场 verify+FoldStreamReplay 过；另真进程强杀 legacy-storage-migrator 15 轮折算如实记录）
 
 ### P0-6：彻底删除旧格式代码
 
