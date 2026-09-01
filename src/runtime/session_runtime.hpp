@@ -149,6 +149,13 @@ public:
     SessionPersistResult PersistNew(const std::vector<api::Message>& history, const std::string& model,
                                     const std::string& cwd);
 
+    // 渠道轮(多渠道单阶段 3):同 PersistNew,但本轮新区间的第一条 user
+    // 消息带 provenance 落档(session JSONL 向后兼容保存宿主真账,
+    // message-contracts.md §2)。assistant/tool_result 消息照旧不带。
+    SessionPersistResult PersistNewWithProvenance(const std::vector<api::Message>& history,
+                                                  const std::string& model, const std::string& cwd,
+                                                  const channel::MessageProvenance& provenance);
+
     // 落盘基线收到新长度(/compact 换史后由调用方校正;
     // 只收不放,防旧账重写)。
     void ClampPersisted(std::size_t history_size);

@@ -1,6 +1,7 @@
 #include "app/commands/channel_commands.hpp"
 
 #include <cctype>
+#include <chrono>
 #include <sstream>
 
 #include "app/commands/command_registry.hpp"  // SlashDispatchContext 完整定义
@@ -41,6 +42,81 @@ ParsedChannelCommand ParseChannelCommand(const std::string& args) {
     std::string lower = word;
     for (char& c : lower) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+
+    // /channel pairing <list|approve|reject> ...(阶段 3):两词动作。
+    if (lower == "pairing") {
+        std::string sub = tail;
+        const auto sub_first = sub.find_first_not_of(" \t");
+        if (sub_first == std::string::npos) {
+            parsed.action = ChannelCommandAction::Invalid;
+            parsed.bad_word = "pairing";
+            return parsed;
+        }
+        sub = sub.substr(sub_first);
+        std::string sub_word = sub;
+        std::string sub_tail;
+        const auto sub_space = sub.find_first_of(" \t");
+        if (sub_space != std::string::npos) {
+            sub_word = sub.substr(0, sub_space);
+            sub_tail = sub.substr(sub_space + 1);
+        }
+        std::string sub_lower = sub_word;
+        for (char& c : sub_lower) {
+            c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+        }
+        if (sub_lower == "list") {
+            parsed.action = ChannelCommandAction::PairingList;
+        } else if (sub_lower == "approve") {
+            parsed.action = ChannelCommandAction::PairingApprove;
+        } else if (sub_lower == "reject") {
+            parsed.action = ChannelCommandAction::PairingReject;
+        } else {
+            parsed.action = ChannelCommandAction::Invalid;
+            parsed.bad_word = "pairing " + sub_word;
+            return parsed;
+        }
+        // 参数:<channel> [account](list)与 <channel> [account] <code>
+        //(approve/reject)。词序固定,按位置分:approve/reject 收到 3 词时
+        // 第 3 词当 code,4 词时第 3 词 account、第 4 词 code。
+        std::vector<std::string> words;
+        std::string remaining = sub_tail;
+        while (words.size() < 4) {
+            const auto first = remaining.find_first_not_of(" \t");
+            if (first == std::string::npos) break;
+            remaining = remaining.substr(first);
+            const auto next_space = remaining.find_first_of(" \t");
+            if (next_space == std::string::npos) {
+                words.push_back(remaining);
+                break;
+            }
+            words.push_back(remaining.substr(0, next_space));
+            remaining = remaining.substr(next_space + 1);
+        }
+        const bool needs_code =
+            parsed.action == ChannelCommandAction::PairingApprove ||
+            parsed.action == ChannelCommandAction::PairingReject;
+        if (words.empty()) {
+            parsed.action = ChannelCommandAction::Invalid;
+            parsed.bad_word = "pairing " + sub_word;
+            return parsed;
+        }
+        parsed.channel_id = words[0];
+        if (!needs_code) {
+            if (words.size() >= 2) parsed.account_id = words[1];
+            return parsed;
+        }
+        if (words.size() == 2) {
+            parsed.code = words[1];
+        } else if (words.size() >= 3) {
+            parsed.account_id = words[1];
+            parsed.code = words[2];
+        }
+        if (parsed.code.empty()) {
+            parsed.action = ChannelCommandAction::Invalid;
+            parsed.bad_word = "pairing " + sub_word;
+        }
+        return parsed;
     }
 
     if (lower == "show") parsed.action = ChannelCommandAction::Show;
@@ -228,7 +304,7 @@ std::vector<std::string> FormatChannelDoctor(const ChannelManager::AccountSnapsh
     }
     if (snapshot->pairing_pending > 0) {
         lines.push_back("  pairing: " + std::to_string(snapshot->pairing_pending) +
-                        " 条待审(/channel pairing approve 留阶段 3)。");
+                        " 条待审,看 /channel pairing list <channel> [account]。");
     }
     if (IsUnrecoverableAccountState(snapshot->state)) {
         lines.push_back(std::string("  状态: ") + ChannelAccountStateName(snapshot->state) +
@@ -239,6 +315,33 @@ std::vector<std::string> FormatChannelDoctor(const ChannelManager::AccountSnapsh
                         "(第 " + std::to_string(snapshot->backoff_attempt) + " 次退避)。");
     }
     lines.push_back("  (体检不发平台请求;Package trust 与 manifest 检查在挂载侧,/package doctor 看。)");
+    return lines;
+}
+
+std::vector<std::string> FormatChannelPairingList(
+    const std::vector<ChannelManager::PendingPairingView>* pending, std::int64_t now_ms) {
+    std::vector<std::string> lines;
+    if (pending == nullptr) {
+        lines.push_back("本进程没挂 ChannelManager(普通交互形态);配对账在 Gateway 进程里。");
+        return lines;
+    }
+    if (pending->empty()) {
+        lines.push_back("没有待审配对。dm_policy=pairing 的账号收到未知 sender 来信会在这里挂账。");
+        return lines;
+    }
+    lines.push_back("待审配对(" + std::to_string(pending->size()) + " 条):");
+    for (const auto& view : *pending) {
+        std::ostringstream row;
+        row << "  sender " << view.sender_id;
+        const std::int64_t remaining_ms = view.expires_at_ms - now_ms;
+        if (remaining_ms <= 0) {
+            row << "  (已过期)";
+        } else {
+            row << "  剩 " << (remaining_ms / 1000) << " 秒";
+        }
+        row << "  /channel pairing approve <channel> <code>";
+        lines.push_back(row.str());
+    }
     return lines;
 }
 
@@ -282,6 +385,8 @@ void PrintChannelUsage() {
     lubancode::cli::TermOut() << "  /channel show <channel> [account]\n";
     lubancode::cli::TermOut() << "  /channel doctor <channel> [account]\n";
     lubancode::cli::TermOut() << "  /channel start|stop|restart <channel> [account]\n";
+    lubancode::cli::TermOut() << "  /channel pairing list <channel> [account]\n";
+    lubancode::cli::TermOut() << "  /channel pairing approve|reject <channel> [account] <code>\n";
 }
 
 }  // namespace
@@ -389,6 +494,59 @@ CommandFlow HandleSlashChannel(SlashDispatchContext& ctx,
             } else {
                 lubancode::cli::TermOut() << "已提交(" << command.channel_id << "/" << account
                                           << ")。\n";
+            }
+            return CommandFlow::Continue;
+        }
+        case ChannelCommandAction::PairingList:
+        case ChannelCommandAction::PairingApprove:
+        case ChannelCommandAction::PairingReject: {
+            if (command.channel_id.empty()) {
+                PrintChannelUsage();
+                return CommandFlow::Continue;
+            }
+            if (ctx.channel_manager == nullptr) {
+                // 与 start 同规(§3):普通交互进程只读,不碰配对账。
+                lubancode::cli::TermOut()
+                    << "本进程是普通交互形态,配对账在 Gateway 进程里。\n";
+                return CommandFlow::Continue;
+            }
+            // 定位账号:显式给 account 用之;否则 default_account 或唯一账号。
+            std::string account = command.account_id;
+            if (account.empty() && channels != nullptr) {
+                const auto channel = channels->find(command.channel_id);
+                if (channel != channels->end()) {
+                    if (!channel->second.default_account.empty()) {
+                        account = channel->second.default_account;
+                    } else if (channel->second.accounts.size() == 1) {
+                        account = channel->second.accounts.begin()->first;
+                    }
+                }
+            }
+            if (account.empty()) {
+                lubancode::cli::TermOut() << "定位不到账号(给全 <channel> <account> 再试)。\n";
+                return CommandFlow::Continue;
+            }
+            if (command.action == ChannelCommandAction::PairingList) {
+                const auto pending = ctx.channel_manager->PendingPairings(command.channel_id, account);
+                const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                                std::chrono::system_clock::now().time_since_epoch())
+                                                .count();
+                lubancode::cli::TermOut() << command.channel_id << "/" << account << ":\n";
+                PrintLines(FormatChannelPairingList(&pending, now_ms));
+                return CommandFlow::Continue;
+            }
+            std::string error;
+            const auto sender = command.action == ChannelCommandAction::PairingApprove
+                                    ? ctx.channel_manager->ApprovePairing(command.channel_id, account,
+                                                                          command.code, &error)
+                                    : ctx.channel_manager->RejectPairing(command.channel_id, account,
+                                                                         command.code, &error);
+            if (sender.has_value()) {
+                lubancode::cli::TermOut()
+                    << (command.action == ChannelCommandAction::PairingApprove ? "已批准 " : "已拒绝 ")
+                    << *sender << "(" << command.channel_id << "/" << account << ")。\n";
+            } else {
+                lubancode::cli::TermOut() << "失败: " << error << "\n";
             }
             return CommandFlow::Continue;
         }

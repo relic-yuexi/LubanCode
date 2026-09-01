@@ -43,6 +43,7 @@
 #include "sessions/goal_session.hpp"
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
+#include "channel/types.hpp"  // MessageProvenance(多渠道单阶段 3:渠道轮消息行带宿主真账)
 
 namespace lubancode::sessions {
 
@@ -74,6 +75,40 @@ std::string SerializeSessionMessage(const api::Message& message, const std::stri
 // 一行 JSON -> 消息。解析不动(坏 JSON、缺字段、认不得的块类型)给 nullopt,
 // 调用方跳过这一行接着读下一行——存档坏一行不该废掉整场会话。
 std::optional<api::Message> DeserializeSessionMessage(const std::string& line);
+
+// ---------------------------------------------------------------------------
+// provenance(多渠道消息接入单阶段 3:message-contracts.md §2)
+//
+// 渠道轮的 user 消息带宿主真账落盘:
+//   {"role":"user","content":[...],"ts":"...","provenance":{"origin":"external_channel",
+//    "channel_id":"qqbot","account_id":"main","sender_id":"...",
+//    "conversation_id":"...","provider_message_id":"..."}}
+//
+// 兼容规矩(§2"老 session 没字段时回落"):
+//   - 老版本读新档:MessageFromJson 只取 role/content,未知键天然忽略,
+//     一个不坏(事件行通用约定的消息版)。
+//   - 新版本读老档:没 provenance 字段,InferLegacyProvenance 按角色推断
+//     回落(user -> HumanTerminal,assistant -> HostSynthetic),不猜渠道。
+// ---------------------------------------------------------------------------
+
+// 消息 + provenance -> 一行 JSON(不带换行符)。
+std::string SerializeSessionMessageWithProvenance(const api::Message& message,
+                                                  const channel::MessageProvenance& provenance,
+                                                  const std::string& ts);
+
+// 一行 JSON -> 消息 + 可选 provenance。老档没 provenance 字段时
+// provenance 为 nullopt(不在这猜,交给 InferLegacyProvenance)。坏行给
+// nullopt,口径同 DeserializeSessionMessage。
+struct SessionMessageRecord {
+    api::Message message;
+    std::optional<channel::MessageProvenance> provenance;
+};
+std::optional<SessionMessageRecord> ParseSessionMessageWithProvenance(const std::string& line);
+
+// 老档消息的 provenance 兼容推断(§2):user -> HumanTerminal,
+// assistant -> HostSynthetic;其余字段留空——不靠"[来自 QQ]"这类文字标签
+// 猜渠道身份,猜不出就如实留白。
+channel::MessageProvenance InferLegacyProvenance(const api::Message& message);
 
 // ---------------------------------------------------------------------------
 // 事件行(compact / title)
@@ -395,6 +430,10 @@ public:
 
     // 追加一条消息(自动带当前时刻的 ts),append+flush。
     bool AppendMessage(const api::Message& message);
+
+    // 追加一条带 provenance 的消息(渠道轮的 user 消息),append+flush。
+    bool AppendMessageWithProvenance(const api::Message& message,
+                                     const channel::MessageProvenance& provenance);
 
     // 追加一条压缩事件行(自动带 ts),append+flush。
     bool AppendCompactEvent(const CompactEvent& event);

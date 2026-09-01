@@ -32,6 +32,7 @@
 #include "channel/account_lock.hpp"
 #include "channel/account_state.hpp"
 #include "channel/channel_config.hpp"
+#include "channel/channel_router.hpp"
 #include "channel/frame.hpp"
 #include "channel/ingress_store.hpp"
 #include "channel/inbox.hpp"
@@ -101,6 +102,11 @@ public:
                                 const ChannelAccountUserConfig& config,
                                 ChannelBridgeTransport* transport);
 
+    // 渠道层 bindings(阶段 3 路由批,configuration.md §8):按渠道注入,
+    // AddAccount 前后都可设;路由每次现读,改完即生效(新 turn 用新账)。
+    void SetChannelBindings(const std::string& channel_id,
+                            std::vector<ChannelBindingConfig> bindings);
+
     // 起账号:Disabled -> Validating -> Starting,发 channel.initialize。
     // 后续推进靠 Pump()(收到 initialize result 发 start,收到 start result
     // 入 Running)。
@@ -168,9 +174,30 @@ public:
         std::string conversation_id;
         std::string sender_id;
         ChannelInboundEvent event;
+        // 路由决策(阶段 3 ChannelRouter):session_key/agent/工具与记忆
+        // 策略/provenance。准入时已判过 Admitted;这里现跑同一只纯函数
+        // 取全账(同样的输入同样的决策,不另存第二份真账)。
+        RouteDecision route;
     };
     std::optional<WorkItem> TakeNextWork(const std::string& channel_id,
                                          const std::string& account_id);
+
+    // ---- pairing 账的口子(阶段 3 命令面:/channel pairing list/approve/reject) ----
+
+    struct PendingPairingView {
+        std::string sender_id;
+        std::int64_t expires_at_ms = 0;
+    };
+    std::vector<PendingPairingView> PendingPairings(const std::string& channel_id,
+                                                    const std::string& account_id) const;
+    // 批准/拒绝。成功返回被批准/拒绝的 sender id;code 不认、过期、已处理
+    // 报错(stable reason:not_found/expired/already_finalized)。
+    std::optional<std::string> ApprovePairing(const std::string& channel_id,
+                                              const std::string& account_id, const std::string& code,
+                                              std::string* error = nullptr);
+    std::optional<std::string> RejectPairing(const std::string& channel_id,
+                                             const std::string& account_id, const std::string& code,
+                                             std::string* error = nullptr);
 
 private:
     struct AccountEntry {
@@ -211,19 +238,19 @@ private:
     void NotifyTransportFailureLocked(AccountEntry& entry, const std::string& reason,
                                       const std::string& detail);
     void HandleMessageLocked(AccountEntry& entry, const IncomingMessage& message);
-    // channel.inbound 的处理:去重落账 -> ack -> 准入 -> inbox/背压 -> nack。
+    // channel.inbound 的处理:去重落账 -> ack -> 路由准入 -> inbox/背压。
     void OnInboundLocked(AccountEntry& entry, const ChannelInboundEvent& event);
-    // 最小 DM 准入(阶段 3 的 ChannelRouter 接全账:bot 拒绝/policy/
-    // allowlist/pairing;群聊准入随路由批一起落)。
-    enum class DmAdmission { Admit, PendingPairing, Rejected };
-    DmAdmission AdmitDirectMessageLocked(AccountEntry& entry, const ChannelInboundEvent& event,
-                                         std::string* code_out);
+    // 路由准入(阶段 3):ChannelRouter 全账,pairing 账经 PairingStore 适配。
+    // 调用方已持 mutex_。
+    RouteDecision RouteInboundLocked(AccountEntry& entry, const ChannelInboundEvent& event);
     AccountSnapshot SnapshotLocked(const AccountEntry& entry) const;
 
     ChannelManagerOptions options_;
     std::string instance_token_;  // 进锁账:同进程多 manager 互不相认
     mutable std::mutex mutex_;
     std::vector<std::unique_ptr<AccountEntry>> accounts_;
+    // 渠道层 bindings(§8):channel_id -> bindings。
+    std::map<std::string, std::vector<ChannelBindingConfig>> channel_bindings_;
 };
 
 }  // namespace lubancode::channel

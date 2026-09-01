@@ -57,6 +57,7 @@
 #include "runtime/idle_wake.hpp"
 #include "runtime/session_runtime.hpp"
 #include "runtime/session_work_scheduler.hpp"
+#include "runtime/turn_ingress.hpp"
 #include "sessions/session_store.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/registry.hpp"
@@ -173,8 +174,14 @@ private:
     // 双胞胎合一(会话终章):用户正文与外来消息共用 RunSessionTurn 一只
     // 回合入口,来源参数分档,原先的两只胞胎方法(RunUserTurn/RunPeerTurn)
     // 行为差异逐一保真(差异清单见实现处注释)。
-    enum class TurnSource { User, Incoming };
+    // 多渠道单阶段 3(§15.2):TurnSource 上移 runtime/turn_ingress.hpp(加
+    // Channel 档),这里用别名续命;字符串重载折 TurnIngress 后走同一只
+    // 结构体入口,行为逐字节不变。
+    using TurnSource = lubancode::runtime::TurnSource;
     void RunSessionTurn(const std::string& content, TurnSource source,
+                        bool* autosend_failed = nullptr, bool silent = false,
+                        memory::QueryOrigin origin = memory::QueryOrigin::User);
+    void RunSessionTurn(lubancode::runtime::TurnIngress ingress,
                         bool* autosend_failed = nullptr, bool silent = false,
                         memory::QueryOrigin origin = memory::QueryOrigin::User);
     void PumpSteeringToSubagents();

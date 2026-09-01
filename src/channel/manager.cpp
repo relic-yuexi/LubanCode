@@ -54,6 +54,25 @@ std::string NewInstanceToken() {
     return Sha256Hex(seed);
 }
 
+// PairingStore -> PairingAdmission 的适配器(router 是纯函数件,不持账;
+// 账的归属仍在 manager 的 AccountEntry)。
+class StorePairingAdmission : public PairingAdmission {
+public:
+    explicit StorePairingAdmission(PairingStore& store) : store_(store) {}
+
+    bool IsSenderApproved(const std::string& sender_id) const override {
+        return store_.IsSenderApproved(sender_id);
+    }
+
+    std::optional<std::string> RequestCode(const std::string& sender_id,
+                                           std::int64_t now_ms) override {
+        return store_.RequestPairing(sender_id, now_ms);
+    }
+
+private:
+    PairingStore& store_;
+};
+
 }  // namespace
 
 ChannelManager::ChannelManager(ChannelManagerOptions options)
@@ -496,46 +515,21 @@ void ChannelManager::OnInboundLocked(AccountEntry& entry, const ChannelInboundEv
         return;  // 重复投递:ack 了就完,不开新账
     }
 
-    // 3) 最小 DM 准入(bot 拒绝/dm_policy/pairing)。群聊准入全账在
-    // 阶段 3 ChannelRouter;群消息本批按 group_policy 粗判。
-    bool admitted = false;
-    if (event.sender.is_bot && !entry.config.allow_bots) {
-        entry.ingress->Transition(ingest->sid, IngressEventState::Rejected, "bot_rejected");
+    // 3) 路由准入(阶段 3 ChannelRouter 全账:bot 拒绝/dm_policy/pairing/
+    //    group/mention/binding 冲突;阶段 2 的最小 DM 准入退役)。pairing
+    //    账经适配器喂给 router——批准只认宿主看到的 sender id。
+    const auto route = RouteInboundLocked(entry, event);
+    if (route.status == RouteDecision::Status::Rejected) {
+        entry.ingress->Transition(ingest->sid, IngressEventState::Rejected, route.reason);
         return;
     }
-    if (event.conversation.kind == ConversationKind::Direct) {
-        std::string pairing_code;
-        const auto admission = AdmitDirectMessageLocked(entry, event, &pairing_code);
-        if (admission == DmAdmission::PendingPairing) {
-            entry.ingress->Transition(ingest->sid, IngressEventState::Rejected, "pairing_pending");
-            return;
-        }
-        if (admission == DmAdmission::Rejected) {
-            entry.ingress->Transition(ingest->sid, IngressEventState::Rejected, "dm_rejected");
-            return;
-        }
-        admitted = true;
-    } else {
-        // 群/频道:allowlist 命中或 open 放行;mention 要求粗判。
-        const bool allowed =
-            entry.config.group_policy == GroupPolicy::Open ||
-            std::find(entry.config.group_allow_from.begin(), entry.config.group_allow_from.end(),
-                      event.conversation.id) != entry.config.group_allow_from.end();
-        const bool mentioned = !entry.config.require_mention || event.hints.mentions_bot ||
-                               event.hints.is_reply;
-        if (!allowed || !mentioned) {
-            entry.ingress->Transition(ingest->sid, IngressEventState::Rejected,
-                                     !allowed ? "group_rejected" : "mention_required");
-            return;
-        }
-        admitted = true;
+    if (route.status == RouteDecision::Status::PendingPairing) {
+        entry.ingress->Transition(ingest->sid, IngressEventState::Rejected, "pairing_pending");
+        return;
     }
-    if (admitted) {
-        // 准入过了:主线 Authorized -> Routed -> Queued(message-contracts.md
-        // §4;路由账阶段 3 由 ChannelRouter 填实,这里先走完主线)。
-        entry.ingress->Transition(ingest->sid, IngressEventState::Authorized, "");
-        entry.ingress->Transition(ingest->sid, IngressEventState::Routed, "");
-    }
+    // 准入过了:主线 Authorized -> Routed(message-contracts.md §4)。
+    entry.ingress->Transition(ingest->sid, IngressEventState::Authorized, "");
+    entry.ingress->Transition(ingest->sid, IngressEventState::Routed, "");
 
     // 4) inbox 排队 + 背压(满不默丢:nack retry,事件留在 ingress 账上)。
     const auto queue_result = entry.inbox->Enqueue(
@@ -556,33 +550,27 @@ void ChannelManager::OnInboundLocked(AccountEntry& entry, const ChannelInboundEv
                               queue_result.reason);
 }
 
-ChannelManager::DmAdmission ChannelManager::AdmitDirectMessageLocked(
-    AccountEntry& entry, const ChannelInboundEvent& event, std::string* code_out) {
-    switch (entry.config.dm_policy) {
-        case DmPolicy::Disabled:
-            return DmAdmission::Rejected;
-        case DmPolicy::Open:
-            return DmAdmission::Admit;
-        case DmPolicy::Allowlist: {
-            const auto hit = std::find(entry.config.allow_from.begin(),
-                                       entry.config.allow_from.end(), event.sender.id);
-            return hit != entry.config.allow_from.end() ? DmAdmission::Admit : DmAdmission::Rejected;
-        }
-        case DmPolicy::Pairing: {
-            if (entry.pairing->IsSenderApproved(event.sender.id)) {
-                return DmAdmission::Admit;
-            }
-            // 未配对:发一次性 code(回固定提示的发送链路在阶段 4;code
-            // 落 pairing 账,本地 approve 用)。
-            const auto code =
-                entry.pairing->RequestPairing(event.sender.id, options_.now_ms());
-            if (code_out != nullptr && code.has_value()) {
-                *code_out = *code;
-            }
-            return DmAdmission::PendingPairing;
-        }
+RouteDecision ChannelManager::RouteInboundLocked(AccountEntry& entry,
+                                                 const ChannelInboundEvent& event) {
+    StorePairingAdmission admission(*entry.pairing);
+    RouteInput input;
+    input.event = &event;
+    input.account = &entry.config;
+    const auto bindings = channel_bindings_.find(entry.channel_id);
+    input.bindings = bindings != channel_bindings_.end() ? &bindings->second : nullptr;
+    input.pairing = &admission;
+    input.now_ms = options_.now_ms();
+    return RouteChannelEvent(input);
+}
+
+void ChannelManager::SetChannelBindings(const std::string& channel_id,
+                                        std::vector<ChannelBindingConfig> bindings) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (bindings.empty()) {
+        channel_bindings_.erase(channel_id);
+        return;
     }
-    return DmAdmission::Rejected;
+    channel_bindings_[channel_id] = std::move(bindings);
 }
 
 void ChannelManager::NotifyTransportFailure(const std::string& channel_id,
@@ -714,8 +702,58 @@ std::optional<ChannelManager::WorkItem> ChannelManager::TakeNextWork(
     if (record.has_value()) {
         work.event = record->event;
         entry->ingress->Transition(item->sid, IngressEventState::Running, "");
+        // 路由全账现跑(纯函数:与准入时同一只 RouteChannelEvent,同样的
+        // 输入同样的决策)。准入后配置又改了(如 SetChannelBindings)按新
+        // 账算——正在跑的 turn 不受影响,新 turn 用新快照(§8.4)。
+        work.route = RouteInboundLocked(*entry, work.event);
     }
     return work;
+}
+
+std::vector<ChannelManager::PendingPairingView> ChannelManager::PendingPairings(
+    const std::string& channel_id, const std::string& account_id) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    const AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) return {};
+    std::vector<PendingPairingView> out;
+    for (const auto& pending : entry->pairing->PendingList(options_.now_ms())) {
+        PendingPairingView view;
+        view.sender_id = pending.sender_id;
+        view.expires_at_ms = pending.expires_at_ms;
+        out.push_back(std::move(view));
+    }
+    return out;
+}
+
+std::optional<std::string> ChannelManager::ApprovePairing(const std::string& channel_id,
+                                                          const std::string& account_id,
+                                                          const std::string& code,
+                                                          std::string* error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        if (error != nullptr) *error = "account_not_found";
+        return std::nullopt;
+    }
+    auto approved = entry->pairing->Approve(code, options_.now_ms());
+    if (!approved.has_value() && error != nullptr) {
+        // Approve 没带出参,失败原因从账上取(stable reason)。
+        *error = entry->pairing->last_error();
+    }
+    return approved;
+}
+
+std::optional<std::string> ChannelManager::RejectPairing(const std::string& channel_id,
+                                                         const std::string& account_id,
+                                                         const std::string& code,
+                                                         std::string* error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    AccountEntry* entry = Find(channel_id, account_id);
+    if (entry == nullptr) {
+        if (error != nullptr) *error = "account_not_found";
+        return std::nullopt;
+    }
+    return entry->pairing->Reject(code, options_.now_ms(), error);
 }
 
 }  // namespace lubancode::channel

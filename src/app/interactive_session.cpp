@@ -763,6 +763,32 @@ bool TerminalSessionController::PumpScheduledWork() {
 void TerminalSessionController::RunSessionTurn(const std::string& content, TurnSource source,
                                                bool* autosend_failed, bool silent,
                                                memory::QueryOrigin origin) {
+    // 多渠道单阶段 3(§15.2):字符串路折 TurnIngress 再进结构体入口。
+    // 终端路的 provenance 按 origin 分档落账(User -> HumanTerminal,
+    // Incoming -> PeerSession);渠道路(Channel)不经这里——headless 会话
+    // 由 AgentChannelEngine 自己造 ingress。
+    lubancode::runtime::TurnIngress ingress;
+    ingress.source = source;
+    ingress.provenance.origin =
+        source == TurnSource::User ? lubancode::channel::MessageOrigin::HumanTerminal
+                                   : lubancode::channel::MessageOrigin::PeerSession;
+    ingress.message.role = api::Role::User;
+    ingress.message.content.push_back(api::TextBlock{content});
+    RunSessionTurn(std::move(ingress), autosend_failed, silent, origin);
+}
+
+void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress ingress,
+                                               bool* autosend_failed, bool silent,
+                                               memory::QueryOrigin origin) {
+    const TurnSource source = ingress.source;
+    // 终端老路只吃文本(渠道的媒体投影不进终端);取首个 TextBlock。
+    std::string content;
+    for (const auto& block : ingress.message.content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+            content = text->text;
+            break;
+        }
+    }
     const bool is_user_turn = source == TurnSource::User;
     if (!is_user_turn) {
         peer_wiring_.SetStatus("busy");
