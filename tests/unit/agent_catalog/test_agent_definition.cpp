@@ -283,6 +283,51 @@ TEST_CASE("runtime 五预算键:下界与类型各报一处,行列指得到") {
     }
 }
 
+TEST_CASE("runtime.max_turns(任务总 turn,turn 预算单 §4.1):正例、0、负数、错型、超帽") {
+    // 正例:非负整数照收。
+    const auto ok = agent::ParseAgentDefinitionYaml(
+        "schema: 1\nname: a\ndescription: d\nruntime:\n  max_turns: 12\n", "a.yaml");
+    REQUIRE(ok.definition.has_value());
+    CHECK(ok.issues.empty());
+    REQUIRE(ok.definition->max_turns.has_value());
+    CHECK(*ok.definition->max_turns == 12);
+
+    // 0 = 不设任务总帽,合法。
+    const auto zero = agent::ParseAgentDefinitionYaml(
+        "schema: 1\nname: a\ndescription: d\nruntime:\n  max_turns: 0\n", "a.yaml");
+    REQUIRE(zero.definition.has_value());
+    REQUIRE(zero.definition->max_turns.has_value());
+    CHECK(*zero.definition->max_turns == 0);
+
+    // 负数:stoull 不收负号,按类型错报(稳定诊断,不偷换)。
+    CHECK(HasIssueOn(agent::ParseAgentDefinitionYaml(
+                         "schema: 1\nname: a\ndescription: d\nruntime:\n  max_turns: -3\n", "a.yaml"),
+                     "runtime.max_turns"));
+
+    // 字符串:类型错,行列指到。
+    const auto typed = agent::ParseAgentDefinitionYaml(
+        "schema: 1\nname: a\ndescription: d\nruntime:\n  max_turns: 十二\n", "a.yaml");
+    CHECK_FALSE(typed.definition.has_value());
+    REQUIRE(HasIssueOn(typed, "runtime.max_turns"));
+
+    // 超帽:沿用 int 字段的整数硬帽(§3.5:首版不另拍新数),不截断装小。
+    const auto overflow = agent::ParseAgentDefinitionYaml(
+        "schema: 1\nname: a\ndescription: d\nruntime:\n  max_turns: 99999999999\n", "a.yaml");
+    CHECK_FALSE(overflow.definition.has_value());
+    REQUIRE(HasIssueOn(overflow, "runtime.max_turns"));
+    for (const auto& issue : overflow.issues) {
+        if (issue.field == "runtime.max_turns") {
+            CHECK(issue.message.find("超上限") != std::string::npos);
+        }
+    }
+
+    // 省了 = nullopt(走宿主默认链),不是 0。
+    const auto absent = agent::ParseAgentDefinitionYaml(
+        "schema: 1\nname: a\ndescription: d\nruntime:\n  length_continuations: 1\n", "a.yaml");
+    REQUIRE(absent.definition.has_value());
+    CHECK_FALSE(absent.definition->max_turns.has_value());
+}
+
 TEST_CASE("类型错:prompt 不是映射、mcp_servers 项是映射(内联 MCP 拒收)") {
     SUBCASE("prompt 是标量") {
         const auto result = agent::ParseAgentDefinitionYaml(

@@ -1997,6 +1997,15 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
                 config.subagent_max_turns = static_cast<int>(turns);
             }
         }
+        // 任务总 turn 的宿主默认(turn 预算单 §4.2):非负整数才落,坏值静默
+        // 跳过(救命阀待遇同上)。注意与上面弃用的 max_turns 是两码事——
+        // 那个是 per-run step 的旧别名,这个是新键新义。
+        if (subagent.contains("default_max_turns") && subagent["default_max_turns"].is_number_integer()) {
+            const long long turns = subagent["default_max_turns"].get<long long>();
+            if (turns >= 0 && turns <= static_cast<long long>(1000000)) {
+                config.subagent_default_max_turns = static_cast<int>(turns);
+            }
+        }
         // 输出上限:正整数才落(0/负数/坏类型静默跳过);null 与缺失同义
         // (规格"兼容与配置":字段缺失或 null 就继承 agent 段,不落回魔数)。
         if (subagent.contains("max_output_tokens") && subagent["max_output_tokens"].is_number_integer()) {
@@ -2998,6 +3007,17 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.config.subagent.max_output_tokens = global_file->subagent_max_output_tokens;
     } else {
         result.config.subagent.max_output_tokens = std::nullopt;
+    }
+    // subagent.default_max_turns(turn 预算单 §4.2):任务总 turn 的宿主默认,
+    // 项目级压全局;都没写 = 不设任务总帽。与 max_steps_per_turn 一脉的
+    // 旧键(max_turns)不相干——那个是 per-run step 的弃用别名,这个是新
+    // 键新义,无兼容包袱。
+    if (project_file.has_value() && project_file->subagent_default_max_turns.has_value()) {
+        result.config.subagent.default_max_turns = project_file->subagent_default_max_turns;
+    } else if (global_file.has_value() && global_file->subagent_default_max_turns.has_value()) {
+        result.config.subagent.default_max_turns = global_file->subagent_default_max_turns;
+    } else {
+        result.config.subagent.default_max_turns = std::nullopt;
     }
     // 派工治理:深度与并发槽,项目级压全局,没写用公开默认值。
     if (project_file.has_value() && project_file->subagent_max_depth.has_value()) {

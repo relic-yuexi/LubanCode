@@ -34,6 +34,7 @@
 #include <vector>
 
 #include "agent/loop.hpp"
+#include "agent/turn_budget.hpp"  // ModelTurnBudgetSnapshot:DriveReport 的任务 turn 账投影
 #include "hooks/types.hpp"
 
 namespace lubancode::agent {
@@ -80,7 +81,9 @@ struct TurnVerdict {
     enum class Reason {
         None,                 // 正常完成
         UserStop,             // 用户中止(ESC/面板 x)
-        StepLimit,            // 步数预算用满
+        StepLimit,            // 步数预算用满(单次 Run 的输入轮局部保险,legacy)
+        TurnLimit,            // 任务级 turn 预算用满(turn 预算单 P0-1/P0-2:
+                              // 整项任务从注册到终态的逻辑模型请求总数到帽)
         TimeBudget,           // 时间预算用满(成本硬线,区别于看门狗墙钟)
         TokenBudget,          // token 预算用满(成本硬线)
         OutputBudget,         // 输出预算耗尽(续跑用完仍无正文)
@@ -102,7 +105,9 @@ struct TurnVerdict {
 // 分型输入:harness 交回的原始信号(DriveReport 平铺)+ 终局上下文。
 struct TurnEndgame {
     bool cancelled = false;             // 有轮被打断
-    bool hit_step_limit = false;        // 有轮撞步数闸
+    bool hit_step_limit = false;        // 有轮撞步数闸(legacy per-run)
+    bool turn_budget_exhausted = false;  // 任务级 turn 预算用满(turn 预算单:
+                                         // 初始/续投/孩子回流/Stop 钩子共那本账)
     bool time_budget_exhausted = false;  // 有轮撞时间成本闸(P2-6)
     bool token_budget_exhausted = false;  // 有轮撞 token 成本闸(P2-6)
     bool wall_clock = false;            // 墙钟看门狗到点(置位时压过 cancelled)
@@ -116,8 +121,8 @@ struct TurnEndgame {
 };
 
 // 纯函数,单测钉:各态分型。裁定次序与合流前两家一致——墙钟 > 打断 >
-// 步数闸 > 报错 > 空历史 > 输出预算 > 无结论 > 完成。报错文案含"上下文"
-// 按 MaxContext 分(沿用旧启发式,不改判据)。
+// 任务 turn 闸 > 步数闸 > 报错 > 空历史 > 输出预算 > 无结论 > 完成。报错
+// 文案含"上下文"按 MaxContext 分(沿用旧启发式,不改判据)。
 TurnVerdict ClassifyTurnEnd(const TurnEndgame& end);
 
 // ---------------------------------------------------------------------------
@@ -147,6 +152,15 @@ struct DriveOptions {
     // 每轮正常收口的观察口(RunOutcome 交账:子代理记步数进台账、封卷
     // 消息账)。空 = 不看。
     std::function<void(const RunOutcome&)> on_round_settled;
+    // ---- 任务级 turn 预算(turn 预算单 P0-2:续投与 Stop hook 共账)------
+    // 轮间闸:一轮正常收口后先问它,真 = 任务 turn 预算已尽——不再领续投
+    // 批(领了也发不出请求,批次留在未送账)、不进 WaitingChildren 死等
+    // 孩子,直接按 TurnLimit 收口(设计单 §7.3/§7.4)。空函数 = 没装预算门
+    //(主回合),行为与从前一字不差。
+    std::function<bool()> turn_budget_exhausted;
+    // 任务 turn 账的投影口:每轮收口后读一份进 DriveReport(对账用,真账
+    // 在预算 owner——任务记录/节点账户)。空 = DriveReport.turn_budget 留空。
+    std::function<ModelTurnBudgetSnapshot()> turn_budget_snapshot;
 };
 
 // DriveTurn 的交账:原始信号,不分型(分型归 ClassifyTurnEnd,两边的
@@ -154,13 +168,19 @@ struct DriveOptions {
 struct DriveReport {
     bool ok = true;               // 最后一轮 Run 是否正常交账(false = error 有货)
     bool cancelled = false;       // 任一轮被打断(含续投领批后发现的取消)
-    bool hit_step_limit = false;  // 任一轮撞步数闸
+    bool hit_step_limit = false;  // 任一轮撞步数闸(legacy per-run)
+    bool hit_turn_limit = false;  // 任务级 turn 预算用满(初始/续投/Stop 续跑
+                                  // 共那本账,请求发出前被拒;turn 预算单 P0-2)
     bool time_budget_exhausted = false;   // 任一轮撞时间成本闸(P2-6)
     bool token_budget_exhausted = false;  // 任一轮撞 token 成本闸(P2-6)
     bool wall_clock = false;      // 轮间查到墙钟到点
     std::string error;            // !ok 时的错误文案
     std::string stop_reason;      // 最后一轮正常收口的 stop_reason
     int steps_used = 0;           // 全部轮次(含 Stop 续跑轮)的模型请求数合计
+    // 任务 turn 账的收口投影(turn 预算单:与预算 owner 那份逐笔一致,
+    // attempted/completed 分开交,不拿 completed 冒充消费数)。没装门 =
+    // nullopt。
+    std::optional<ModelTurnBudgetSnapshot> turn_budget;
     std::optional<OutputBudgetReport> output_budget;  // 最后一份输出预算账(含续跑轮的)
     // 最后一个正常收口轮的原始 RunOutcome。length_empty_output 这类"轮内
     // 状态"从这取——主回合读它还原 RunOutcome;Stop 续跑轮的 outcome 只并
@@ -207,6 +227,9 @@ struct StopOptions {
     // 末条 assistant 文本的取法。主回合冻结在环前(从前的语义:续跑轮
     // 不刷新它);子代理每轮现取。差别写在这儿。
     std::function<std::string()> final_text;
+    // 任务 turn 账的投影口(turn 预算单):续跑轮收口后读一份进
+    // DriveReport(与 DriveOptions 同名口同一口径)。空 = 不刷。
+    std::function<ModelTurnBudgetSnapshot()> turn_budget_snapshot;
 };
 
 // 跑 Stop 续跑环。steps_used/output_budget 的增量并进 drive 交来的账

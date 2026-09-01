@@ -97,6 +97,15 @@ TurnVerdict ClassifyTurnEnd(const TurnEndgame& end) {
         verdict.reason = TurnVerdict::Reason::UserStop;
         return verdict;
     }
+    if (end.turn_budget_exhausted) {
+        // 任务级 turn 闸(turn 预算单):整项任务的逻辑模型请求总数到帽。
+        // 先于 per-run 步数闸报——它是任务作用域的真账,步数闸只是兼容窗
+        // 里的单轮旧保险(两者在实践里互斥:闸拒时循环当场返回,轮不到
+        // 步数条件求值)。
+        verdict.status = TurnVerdict::Status::BudgetExhausted;
+        verdict.reason = TurnVerdict::Reason::TurnLimit;
+        return verdict;
+    }
     if (end.hit_step_limit) {
         verdict.status = TurnVerdict::Status::BudgetExhausted;
         verdict.reason = TurnVerdict::Reason::StepLimit;
@@ -176,6 +185,9 @@ DriveReport DriveTurn(Agent& agent, const TurnWiring& wiring, api::Message input
         report.output_budget = outcome->output_budget;
         report.stop_reason = outcome->stop_reason;
         report.final_round = *outcome;
+        if (options.turn_budget_snapshot) {
+            report.turn_budget = options.turn_budget_snapshot();
+        }
         if (options.on_round_settled) {
             options.on_round_settled(*outcome);
         }
@@ -197,6 +209,13 @@ DriveReport DriveTurn(Agent& agent, const TurnWiring& wiring, api::Message input
             report.hit_step_limit = true;
             break;
         }
+        if (outcome->hit_turn_limit) {
+            // 任务级 turn 预算在请求发出前被拒(turn 预算单 P0-2):退回在飞
+            // 批次("取走了不等于送到了"),按 TurnLimit 收口,不再发请求。
+            restore_inflight();
+            report.hit_turn_limit = true;
+            break;
+        }
         if (outcome->hit_time_budget || outcome->hit_token_budget) {
             // 成本硬线(时间/token):与步数闸同款——退批收场,分型写明线别。
             restore_inflight();
@@ -206,11 +225,22 @@ DriveReport DriveTurn(Agent& agent, const TurnWiring& wiring, api::Message input
         }
         inflight.reset();  // 上一批已随本轮请求真正送达,提交
         if (!options.continuation) {
-            break;  // 没有续投源(主回合):单轮即收
+            break;  // 没有续投源(主回合/workflow 无 steering):单轮即收
         }
         std::optional<ContinuationBatch> drained = options.continuation();
         if (!drained.has_value()) {
-            break;  // 封账,可进终态
+            break;  // 封账,可进终态(自然完成——末枚额度上交出结论不算耗尽)
+        }
+        // 任务级 turn 预算的轮间闸(turn 预算单 §7.3):刚领到新批,先问剩余
+        // 额度。尽了就不带着批开新一轮——按批退回未送("取走了不等于送到
+        // 了"),按 TurnLimit 收口;批次留在未送账,收场报告照列"尚有 N 条
+        // 未送达"。
+        if (options.turn_budget_exhausted && options.turn_budget_exhausted()) {
+            if (drained->restore) {
+                drained->restore();
+            }
+            report.hit_turn_limit = true;
+            break;
         }
         // 有未送项:cancel 已置位就不必再起一轮(起了也立刻被打断),退回
         // 未送,让收尾账注列明。
@@ -250,6 +280,13 @@ void RunStopContinuation(Agent& agent, const TurnWiring& wiring, const StopOptio
         if (!continuation.has_value() || continuation->cancelled || continuation->hit_step_limit) {
             break;  // 续跑轮报错/被打断/撞预算:如实停,不带病硬续
         }
+        if (continuation->hit_turn_limit) {
+            // Stop hook 共账(turn 预算单 §7.5):钩子拉闸时额度已尽——钩子
+            // 的阻断理由已留痕,但宿主拿不到新 permit,backend 零调用。如实
+            // 按 TurnLimit 收口,终态保持 turn budget exhausted。
+            report.hit_turn_limit = true;
+            break;
+        }
         if (continuation->hit_time_budget || continuation->hit_token_budget) {
             // 成本硬线:续跑轮同样停——成本闸不因钩子续跑而豁免(P2-6)。
             report.time_budget_exhausted = report.time_budget_exhausted || continuation->hit_time_budget;
@@ -259,6 +296,9 @@ void RunStopContinuation(Agent& agent, const TurnWiring& wiring, const StopOptio
         report.cancelled = report.cancelled || continuation->cancelled;
         report.steps_used += continuation->steps_used;
         report.output_budget = continuation->output_budget;
+        if (options.turn_budget_snapshot) {
+            report.turn_budget = options.turn_budget_snapshot();
+        }
         if (options.on_round) {
             options.on_round(*continuation);
         }

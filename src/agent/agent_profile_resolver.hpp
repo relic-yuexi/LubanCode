@@ -41,6 +41,7 @@
 #include "agent/agent.hpp"             // AgentProfile:合并结果的皮
 #include "agent/agent_definition.hpp"  // AgentDefinition/Issue:定义与诊断
 #include "agent/permission_mode.hpp"   // AgentPermissionMode:权限三档(阶段 5 拆出的轻头)
+#include "agent/turn_budget.hpp"       // AgentTurnBudgetProfile:任务 turn 预算档(turn 预算单 §10.2)
 
 namespace lubancode::agent {
 
@@ -57,6 +58,11 @@ struct AgentRoleRoute {
 // YAML runtime(契约 §4.8:调用方显式给值压过定义的缺省档)。
 struct AgentDispatchOverrides {
     std::optional<int> max_steps_per_turn;  // agent 工具 max_steps_per_turn / 节点 step_limit
+    // 任务总 turn 的宿主 typed override(turn 预算单 §4.2/§10.3):模型
+    // schema 不暴露,只有宿主/Workflow 节点/测试夹具可给。只可收窄——
+    // 把定义的正数改小可以,改大或把正数改成 0(不限)报
+    // agent.turn_budget_widening;定义本就是 0(不限)时可给正数。
+    std::optional<int> max_turns;
 };
 
 // 父会话的活材料账(AgentTool 自己没有、宿主递进来的那几笔)。工具名不
@@ -86,6 +92,9 @@ struct AgentProfileResolveRequest {
     // max_steps_per_turn 三级里的最底层(子代理:subagent 段一脉的配置默认;
     // Workflow:父皮的步数值)。YAML 与入参都缺席时用它。
     int default_max_steps_per_turn = 0;
+    // 任务总 turn 三级里的最底层(turn 预算单 §4.2:subagent.default_max_
+    // turns,0/未设 = 不限)。定义与 override 都缺席时用它。
+    int default_max_turns = 0;
     // 会话另行同步的上下文窗口(AgentTool::SetContextWindowTokens 那口;
     // 0 = 用父皮里的值)。父值与它之间它赢——这是"发轮前再同步"的活值。
     std::size_t context_window_tokens = 0;
@@ -104,6 +113,10 @@ struct ResolvedAgentProfile {
     std::string execution_mode;                // 定义缺省档:auto/foreground/background
     std::string isolation;                     // 定义缺省档:none/worktree
     AgentPermissionMode permission = AgentPermissionMode::Confirm;  // 决议后的权限档
+    // 任务总 turn 预算(turn 预算单 §10.2):数值 + 来源 + legacy per-input
+    // step 的影子账,与皮上那枚含糊的 runtime.max_steps_per_turn 分家。宿主
+    // override 只可收窄,放宽在解析口明拒(agent.turn_budget_widening)。
+    AgentTurnBudgetProfile turn_budget;
     std::vector<AgentDefinitionIssue> issues;  // 结构化错误(code 见契约 §9.2/§9.3)
 
     bool ok() const {
@@ -126,6 +139,7 @@ AgentProfileResolveRequest BuildSubagentResolveRequest(const AgentDefinition& de
                                                         const AgentProfile& parent_profile,
                                                         std::vector<std::string> parent_tool_names,
                                                         int default_max_steps_per_turn,
+                                                        int default_max_turns,
                                                         std::size_t context_window_tokens,
                                                         std::optional<AgentProfileResolveEnvironment> environment,
                                                         const AgentDispatchOverrides& overrides);
@@ -138,6 +152,7 @@ AgentProfileResolveRequest BuildWorkflowAgentResolveRequest(const AgentDefinitio
                                                              const AgentProfile& parent_profile,
                                                              std::vector<std::string> parent_tool_names,
                                                              int default_max_steps_per_turn,
+                                                             int default_max_turns,
                                                              std::optional<AgentProfileResolveEnvironment> environment,
                                                              const AgentDispatchOverrides& overrides);
 

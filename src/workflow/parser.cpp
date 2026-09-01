@@ -266,6 +266,17 @@ std::expected<WorkflowDefinition, std::vector<ParseIssue>> ParseWorkflowYaml(con
             if (const auto& n = raw["step_limit"]; n && n.IsScalar()) {
                 try { node.step_limit = std::stoi(n.Scalar()); } catch (...) {}
             }
+            // 任务总 turn 帽(turn 预算单 §4.3):整只节点(含 steering 续投)
+            // 的逻辑模型请求总数。新旧同现明拒——作用域不同,静默择一会猜错。
+            if (const auto& n = raw["turn_limit"]; n && n.IsScalar()) {
+                try { node.turn_limit = std::stoi(n.Scalar()); } catch (...) {}
+            }
+            if (node.step_limit > 0 && node.turn_limit > 0) {
+                sink.Add(Where(raw, "nodes." + id),
+                         "step_limit 与 turn_limit 不能同现:前者是待移除的单轮旧限制,"
+                         "后者是任务总 turn 帽,请删掉一枚");
+                continue;
+            }
             node_str("model_role", node.model_role);
             node_str("prompt", node.prompt);
             if (const auto& n = raw["output_schema"]) node.output_schema = YamlToJson(n);
@@ -582,6 +593,7 @@ std::string EmitWorkflowYaml(const WorkflowDefinition& def) {
             for (const auto& t : node.allowed_tools) out << "      - " << t << "\n";
         }
         if (node.step_limit > 0) out << "    step_limit: " << node.step_limit << "\n";
+        if (node.turn_limit > 0) out << "    turn_limit: " << node.turn_limit << "\n";
         if (!node.model_role.empty()) out << "    model_role: " << node.model_role << "\n";
         if (!node.prompt.empty()) out << "    prompt: " << node.prompt << "\n";
         if (!node.output_schema.empty()) {

@@ -1,6 +1,6 @@
 # Agent 任务级 Turn 预算与旧 Step 限制迁移设计
 
-- 状态：待实现
+- 状态：P0-0~P0-3 已落地(2026-09-01,worktree agent-a119a426f9bfa566a);P1-0/P1-1/P2 未做。树级预算(max_tree_total_tokens/max_tree_turns 一族)按主人 2026-08-31 裁决跳过,透明展示走 Token 账本单;P0 批次未涉树级,消费接口留待树级预算单。
 - 日期：2026-08-31
 - 级别：P0（预算硬线的作用域与账实一致）；兼容迁移、诊断与文案为 P1
 - 范围：自定义 Agent 定义、`agent` 派工、Workflow Agent 节点、AgentLoop 请求边界、TurnHarness 续投、TaskLedger 预算账、配置与诊断
@@ -731,42 +731,42 @@ stop-hook continuation shares task budget: yes
 
 ### P0-0：冻结现状缺口
 
-- [ ] 补三枚“续投重领预算”缺口回归。
-- [ ] 给现有 `step/turn/run/task` 术语落一份代码注释词表。
-- [ ] 盘清所有 `step_limit/steps_used/max_turns/max_steps_per_turn` 消费方，生成迁移清单并钉进测试注释。
+- [x] 补三枚“续投重领预算”缺口回归。（tests/unit/agent/test_agent_turn_budget.cpp 顶部两用例:续投重领 2+2、Stop 钩子重领 2+2,并断言 DriveReport.steps_used(4)>limit(2);legacy per-run 语义钉死,注释写明是兼容窗现状不是榜样）
+- [x] 给现有 `step/turn/run/task` 术语落一份代码注释词表。（src/agent/turn_budget.hpp 文件头:task/input round/model turn/step 四条,含记账口径与旧名陷阱）
+- [x] 盘清所有 `step_limit/steps_used/max_turns/max_steps_per_turn` 消费方，生成迁移清单并钉进测试注释。（test_agent_turn_budget.cpp 顶部“旧 step 限制的迁移清单”:写口 7 处、读口 12 处逐文件钉账,搬动前先对册）
 
-验收：测试能精确证明当前限制只管单次 Run，不能管整项任务。
+验收：测试能精确证明当前限制只管单次 Run，不能管整项任务。✔（缺口回归用例 + 新账对照用例同册并存）
 
 ### P0-1：任务级 turn 真账
 
-- [ ] 在 engine 层立 `ModelTurnBudgetGate` 与 typed permit。
-- [ ] 在 TaskLedger 任务记录加入 limit/attempted/completed。
-- [ ] 实现原子 reserve/commit_sent/abort_before_send 与幂等 `MarkModelTurnCompleted`。
-- [ ] 任务注册时冻结预算来源与数值。
-- [ ] AgentLoop 在请求发出前取 permit，assistant 落 history 后确认 completed。
-- [ ] API 错、取消、流断按 §6.4 对账。
+- [x] 在 engine 层立 `ModelTurnBudgetGate` 与 typed permit。（src/agent/turn_budget.hpp:ModelTurnPermit/ModelTurnBudgetSnapshot/TurnBudgetAccount 状态机 + ModelTurnBudgetGate 窄接口;引擎不认 tools）
+- [x] 在 TaskLedger 任务记录加入 limit/attempted/completed。（TaskRecord::turn_account,含 reserved/completed 分账与 permit 幂等轨迹）
+- [x] 实现原子 reserve/commit_sent/abort_before_send 与幂等 `MarkModelTurnCompleted`。（台账锁内"验活态->验额度->占额"同一锁域;commit 两次/commit 后 abort/重复完成均稳定拒绝;tests/unit/agent/test_turn_budget_account.cpp 11 用例含两线程争最后一枚）
+- [x] 任务注册时冻结预算来源与数值。（Register/TryRegisterChild 事务内 FreezeLimitLocked(snapshot.turn_limit);来源链在 Resolver(AgentTurnBudgetProfile.source)）
+- [x] AgentLoop 在请求发出前取 permit，assistant 落 history 后确认 completed。（loop.cpp 请求边界三口:reserve->boundary(失败 abort)->commit_sent->send;PushMessage 后 mark_completed）
+- [x] API 错、取消、流断按 §6.4 对账。（commit 后失败保留 attempted、completed 不加;取消/流断/报错三路各有用例）
 
-验收：任何任务的 attempted 永不超过正数 limit；provider 捕获请求数与 permit 账逐枚对应。
+验收：任何任务的 attempted 永不超过正数 limit；provider 捕获请求数与 permit 账逐枚对应。✔（denied 时 backend 捕获数不增的用例钉死）
 
 ### P0-2：续投与 Stop hook 共账
 
-- [ ] `DriveTurn` 的初始、mailbox、child completion 各轮共用 task gate。
-- [ ] `RunStopContinuation` 共用同一 gate。
-- [ ] 额度尽时退回 inflight continuation，不确认送达。
-- [ ] `WaitingChildren` 与取消树按 §7.4 收口。
-- [ ] TurnVerdict/TaskOutcome 接 `TurnLimitExhausted`，保住部分结果。
+- [x] `DriveTurn` 的初始、mailbox、child completion 各轮共用 task gate。（RunTask 装一枚 task-scoped adapter 进 turn_wiring,整任务寿命同一本账;轮边界先问有无活儿再问额度——末枚额度交出结论且无待办按自然完成收口,有挂起批次才翻 TurnLimit）
+- [x] `RunStopContinuation` 共用同一 gate。（同一条 turn_wiring 递进续跑环;额度尽时 backend 零调用、钩子理由仍留痕）
+- [x] 额度尽时退回 inflight continuation，不确认送达。（领到批后撞门 restore 退回未送;mid-run 拒绝同样退批）
+- [x] `WaitingChildren` 与取消树按 §7.4 收口。（continuation 源在进 WaitingChildren 前查账,额度尽即返;收尾补判旗 + 向下 CancelTask 收树;child outcome 留未送达清单,不 reparent 不越级）
+- [x] TurnVerdict/TaskOutcome 接 `TurnLimitExhausted`，保住部分结果。（TurnVerdict::Reason::TurnLimit + TaskOutcomeReason::TurnLimitExhausted,收场带"attempted/limit(完整返回 completed)"账面与检查点兜底）
 
-验收：初始任务、父消息、孩子结果、Stop hook 合计只准发 N 枚逻辑模型请求。
+验收：初始任务、父消息、孩子结果、Stop hook 合计只准发 N 枚逻辑模型请求。✔（引擎级 max_turns=3 封门/Stop 零调用用例 + AgentTool 任务级 2 枚封门用例）
 
 ### P0-3：自定义 Agent 与 Workflow 接线
 
-- [ ] Agent Definition 解析 `runtime.max_turns`。
-- [ ] AgentProfileResolver 合并预算与来源。
-- [ ] AgentTool typed 派工快照接任务总预算。
-- [ ] Workflow Agent 节点接 `turn_limit`，与 AgentTool 对账。
-- [ ] override 只可收窄。
+- [x] Agent Definition 解析 `runtime.max_turns`。（agent_definition.*:非负整数、沿用 int 硬帽;新旧同现明拒归 P1-0）
+- [x] AgentProfileResolver 合并预算与来源。（AgentTurnBudgetProfile{max_turns,source,legacy_max_steps_per_input};链:override>定义>subagent.default_max_turns>0）
+- [x] AgentTool typed 派工快照接任务总预算。（SubagentBudget.max_turns -> snapshot.turn_limit -> 注册冻结;JSON 入参不暴露）
+- [x] Workflow Agent 节点接 `turn_limit`，与 AgentTool 对账。（parser/definition 双解析器 + 同现明拒;host_executors 装节点寿命本地 TurnBudgetAccount;workflow_wiring 经同一 Resolver,配置默认取 agent_tool->default_max_turns() 只读口;对账测试扩进 CheckProfilesIdentical）
+- [x] override 只可收窄。（Resolver 解析口判 agent.turn_budget_widening:改大或抹 0 均拒;定义 0(不限)时可给正数）
 
-验收：同一 Agent 定义从 AgentTool 与 Workflow 两路跑，预算数、来源、收场原因逐字段一致。
+验收：同一 Agent 定义从 AgentTool 与 Workflow 两路跑，预算数、来源、收场原因逐字段一致。✔（test_agent_profile_resolver 两路对账用例,turn_budget 三笔入 CheckProfilesIdentical）
 
 ### P1-0：兼容迁移
 

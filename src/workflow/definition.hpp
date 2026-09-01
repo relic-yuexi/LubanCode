@@ -146,7 +146,11 @@ struct WorkflowNode {
     std::string agent;
     std::string task;             // prompts/xx.md 一类包内引用
     std::vector<std::string> allowed_tools;
-    int step_limit = 0;           // 0 = 用全局默认
+    int step_limit = 0;           // 0 = 用全局默认(legacy:单个 input round 的模型请求数,待迁移)
+    // agent 节点的任务总 turn 帽(turn 预算单 §4.3):整只节点从首轮到收口
+    //(含 steering 续投)最多准入几次逻辑模型请求,0 = 不设。与 step_limit
+    // 作用域不同,同时出现解析层明拒(§4.3:不静默择一,免得猜错)。
+    int turn_limit = 0;
     std::string model_role;       // 空 = 会话当前模型
     // llm 节点:prompt 包内引用 + output_schema(JSON Schema,可空)。
     std::string prompt;

@@ -913,6 +913,11 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
     //(P2-1:max_steps_per_turn 真能落到派出预算)> 配置默认。
     SubagentBudget budget;
     budget.max_steps_per_turn = default_max_steps_per_turn_;
+    // 任务总 turn 的宿主默认(turn 预算单 §4.2):配置 subagent.default_max_
+    // turns(0 = 不限)。自定义 Agent 在下面 Resolver 里按
+    // runtime.max_turns 压过它;模型可见的 JSON 不暴露这枚(§9.1:模型
+    // 不决定预算)。
+    budget.max_turns = default_max_turns_;
     const auto steps_arg = input.find("max_steps_per_turn");
     const auto turns_arg = input.find("max_turns");
     const nlohmann::json* budget_arg = nullptr;
@@ -1013,7 +1018,7 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
         }
         resolved_storage = agent::ResolveAgentProfile(agent::BuildSubagentResolveRequest(
             custom->definition, agent_profile_, std::move(parent_tool_names),
-            default_max_steps_per_turn_, context_window_tokens_, environment, overrides));
+            default_max_steps_per_turn_, default_max_turns_, context_window_tokens_, environment, overrides));
         if (!resolved_storage->ok()) {
             return {"自定义 Agent \"" + agent_type + "\" 解析不过,已拒发(定义或环境有错,重试同样的入参"
                     "不会成功;先 /agent doctor " + agent_type + " 看诊断):\n" +
@@ -1022,6 +1027,10 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
         }
         // 步数预算的权威账在解析器里(入参 > YAML > 配置默认),派发链照抄。
         request.budget.max_steps_per_turn = resolved_storage->profile.runtime.max_steps_per_turn;
+        // 任务总 turn 同一只有权威账(turn 预算单 P0-3:Resolver 合并预算与
+        // 来源,两路同源):override(只可收窄)> 定义 runtime.max_turns >
+        // 配置默认。派发链照抄,不再各算一套。
+        request.budget.max_turns = resolved_storage->turn_budget.max_turns;
     }
     request.resolved = resolved_storage;
     const agent::ResolvedAgentProfile* resolved =
@@ -1107,6 +1116,7 @@ Tool::Result AgentTool::ExecuteForeground(const DispatchRequest& request, ToolRe
     snapshot.foreground = true;
     snapshot.delivery_target = TaskDeliveryTarget::ForegroundCaller;
     snapshot.step_limit = budget.max_steps_per_turn;  // 派出时预算进快照(规格"现场四")
+    snapshot.turn_limit = budget.max_turns;  // 任务总 turn 派出即冻结(注册事务写死进 turn_account)
     snapshot.wall_limit_secs = budget.max_wall_secs;
     snapshot.token_limit = budget.max_total_tokens;
     snapshot.state = AgentTaskState::Running;
@@ -1271,6 +1281,7 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
     snapshot.delivery_target = caller.task_id == 0 ? TaskDeliveryTarget::MainTurnContext
                                                    : TaskDeliveryTarget::ParentTaskInbox;
     snapshot.step_limit = budget.max_steps_per_turn;  // 派出时预算进快照(规格"现场四")
+    snapshot.turn_limit = budget.max_turns;  // 任务总 turn 派出即冻结(注册事务写死进 turn_account)
     snapshot.wall_limit_secs = budget.max_wall_secs;
     snapshot.token_limit = budget.max_total_tokens;
     snapshot.state = AgentTaskState::Running;
@@ -2346,6 +2357,31 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     } hook_context_restore{sub_hook_dispatcher, parent_hook_context};
 
     // ---- harness(批三:与主回合同一份)------------------------------------
+    // 任务级 turn 预算门(turn 预算单 P0-1/P0-2):真账在 TaskRecord 的
+    // turn_account(注册时按快照 turn_limit 冻结),这里只装一枚 task-
+    // scoped adapter 递给引擎——初始 Run、mailbox 续投、孩子回流、Stop 钩子
+    // 续跑全都从同一本账走原子准入,谁也不许重领。预算 owner 不在
+    // AgentLoop(它正是"每 Run 重置"漏洞的根,设计单 §16.8),也不在
+    // DriveReport(那是请求结束后的账)。进台账的旧路(task 为空的测试
+    // 直调)不装门,行为与从前一字不差。
+    std::optional<agent::ModelTurnBudgetGate> turn_budget_gate;
+    if (task != nullptr) {
+        agent::ModelTurnBudgetGate gate;
+        gate.try_reserve = [this, task]() { return ledger().TryReserveModelTurn(task); };
+        gate.commit_sent = [this, task](const agent::ModelTurnPermit& permit) {
+            return ledger().CommitModelTurnSent(task, permit);
+        };
+        gate.abort_before_send = [this, task](const agent::ModelTurnPermit& permit) {
+            ledger().AbortModelTurnBeforeSend(task, permit);
+        };
+        gate.mark_completed = [this, task](const agent::ModelTurnPermit& permit) {
+            ledger().MarkModelTurnCompleted(task, permit);
+        };
+        gate.snapshot = [this, task]() { return ledger().ModelTurnSnapshot(task); };
+        gate.claim_turn_nudge = [this, task]() { return ledger().ClaimModelTurnNudge(task); };
+        turn_budget_gate = std::move(gate);
+        turn_wiring.turn_budget = &*turn_budget_gate;
+    }
     // 续投源(规格第五节"排到了却没送"):一轮 Run 正常收口后与 SendTaskMessage
     // 做原子交接——inbox 空封账进终态;有未送项拼成新一轮用户输入续跑一轮,
     // 续跑失败按批退回(RestoreDrainedInbox)。
@@ -2355,6 +2391,16 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     drive_options.wall_clock_fired = [task]() {
         return task != nullptr && task->wall_clock_fired.load(std::memory_order_acquire);
     };
+    // 任务级 turn 预算的轮间闸与投影口(turn 预算单 P0-2):一轮正常收口后
+    // harness 先问剩余额度,尽了就不领续投批、不进 WaitingChildren(§7.3/
+    // §7.4);DriveReport 顺带带走一份任务 turn 账的收口投影(与台账逐笔
+    // 一致,对账用)。没进台账的旧路不装,行为不变。
+    if (task != nullptr) {
+        drive_options.turn_budget_exhausted = [this, task]() {
+            return ledger().ModelTurnSnapshot(task).Exhausted();
+        };
+        drive_options.turn_budget_snapshot = [this, task]() { return ledger().ModelTurnSnapshot(task); };
+    }
     drive_options.on_round_settled = [this, task, &settled_steps](const agent::RunOutcome& outcome) {
         // 直接记账:步数来自 RunOutcome(循环内按模型请求累计),不靠 usage
         // 回调猜——面板与终态摘要看到的 steps_used 同一笔账。顺带把这轮流
@@ -2421,6 +2467,12 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 if (sealed) {
                     return std::nullopt;  // 没信也没活孩子:封账收口
                 }
+                // 任务 turn 预算已尽(turn 预算单 §7.4):不进 WaitingChildren
+                // 死等一个注定无法吸收的孩子结果——按封账返回,收树与终态
+                // 归 RunTask 收尾块(补判旗 + 取消块)。
+                if (ledger().ModelTurnSnapshot(task).Exhausted()) {
+                    return std::nullopt;
+                }
                 // WaitingChildren:面板明写"等 N 只子任务",醒来再查一遍。
                 ledger().SetLiveTaskState(task, AgentTaskState::WaitingChildren);
                 ledger().WaitForKeyChange(task);
@@ -2446,10 +2498,32 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 取消链收口(合流前的次序:join 在 Stop 续跑环之前;合并旗 Stop 时
     // 置真,续跑轮拿到即收——与旧行为一致)。
     cancel_chain.Stop();
+    // 边界耗尽的补判(turn 预算单 §7.4):续投源没领到批、任务 turn 账却
+    // 已尽、活孩子还在——continuation 那头不进 WaitingChildren 死等
+    //(见上),这里把旗补上,好让分型按 TurnLimitExhausted 收口、下面的
+    // 取消块去收树。mailbox 恰好封账、孩子清零的自然完成不进这半截——
+    // 末枚额度上交出结论不算预算耗尽。
+    if (task != nullptr && !drive.hit_turn_limit && ledger().ModelTurnSnapshot(task).Exhausted() &&
+        ledger().AliveChildCount(task->snapshot.id) > 0) {
+        drive.hit_turn_limit = true;
+    }
     // Completing(P0-4 状态机):模型已交最终文本、活孩子清零,正在收口——
     // 面板据此从"运行中/等子任务"翻成"收口中";终态由 Finalize 落。
     if (task != nullptr) {
         ledger().SetLiveTaskState(task, AgentTaskState::Completing);
+    }
+
+    // ---- 父任务 turn 预算尽时的收树(turn 预算单 §7.4)--------------------
+    // 硬线先到,父没有资格再花模型 turn 整合:向下取消 attached children
+    // (各发停止信号,收尾按 ParentCancelled 分型),不再死等一个注定无法
+    // 吸收的结果;已完成但未送达的 child outcome 留进未送达清单(收场报告
+    // 照列,UndeliveredInboxNote 兜底),不 reparent、不越级交 main 冒充父
+    // 已整合。与递归派工单"父不得甩手先走"共同裁决:预算硬线先到时收树
+    // 并如实交部分结果。非 turn 耗尽的收场不走这半截(老行为)。
+    if (task != nullptr && drive.hit_turn_limit) {
+        for (const int child_id : ledger().ChildTaskIds(task->snapshot.id)) {
+            ledger().CancelTask(child_id);
+        }
     }
 
     // hooks 第四五步:SubagentStop(带 agent id/type/末条 assistant 文本;
@@ -2472,6 +2546,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 ledger().Touch();
             }
         };
+        // 续跑轮的 turn 账投影(与 DriveOptions 同一口径):真账共一本,
+        // DriveReport 刷新用。
+        if (task != nullptr) {
+            stop_options.turn_budget_snapshot = [this, task]() { return ledger().ModelTurnSnapshot(task); };
+        }
         if (stop_hooks_on_foreground) {
             const lubancode::hooks::HookContext sub_context = sub_hook_dispatcher->context();
             stop_options.emit = [sub_hook_dispatcher, sub_context](bool stop_hook_active,
@@ -2529,6 +2608,16 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     task_outcome.stop_reason = drive.stop_reason;
     task_outcome.wall_limit_secs = budget.max_wall_secs;
     task_outcome.token_limit = budget.max_total_tokens;
+    // 任务级 turn 账(turn 预算单 §8.2):从唯一真账(任务记录的
+    // turn_account)收口投影,attempted/completed 分账;与 legacy 的
+    // steps_used/step_limit 并存但不混写成同一根"生效硬线"。
+    if (task != nullptr) {
+        const agent::ModelTurnBudgetSnapshot turns = ledger().ModelTurnSnapshot(task);
+        task_outcome.turn_limit = turns.limit;
+        task_outcome.turns_reserved = turns.reserved;
+        task_outcome.turns_attempted = turns.attempted;
+        task_outcome.turns_completed = turns.completed;
+    }
     // 输出预算账(规格根因四):撞墙上限、续跑次数、usage 是否报告、思考
     // 检查点,一并交出去。
     if (drive.output_budget.has_value()) {
@@ -2564,6 +2653,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     agent::TurnEndgame endgame;
     endgame.cancelled = drive.cancelled;
     endgame.hit_step_limit = drive.hit_step_limit;
+    // 任务级 turn 闸(turn 预算单):初始/续投/Stop 钩子合计的那本账尽了,
+    // 分型按 TurnLimitExhausted 收口,带部分结果走。
+    endgame.turn_budget_exhausted = drive.hit_turn_limit;
     // 墙钟信号归因(P2-6):看门狗那根线若是任务自带的时间预算掐的,算
     // TimeBudget(预算断线,带部分结果),不算看门狗兜底的 WallClockTimeout
     // ——两码事,缘由要分清。
@@ -2605,6 +2697,19 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             task_outcome.reason = TaskOutcomeReason::StepLimitExhausted;
             task_outcome.message = "步数预算已用满(" + std::to_string(drive.steps_used) + "/" +
                                    std::to_string(budget.max_steps_per_turn) + " 步)";
+            task_outcome.partial_result = partial;
+            run_result = {ComposeOutcomeText(task_outcome), true};
+            break;
+        case agent::TurnVerdict::Reason::TurnLimit:
+            // 任务级 turn 预算用满(turn 预算单 §8.1/§8.3):整项任务的逻辑
+            // 模型请求总数到帽(初始/续投/孩子回流/Stop 钩子共那本账)。
+            // 部分结果照常带走;另有未送达的父消息/孩子结果由
+            // UndeliveredInboxNote 在收尾账注里列明,不冒充已整合。
+            task_outcome.status = TaskOutcomeStatus::BudgetExhausted;
+            task_outcome.reason = TaskOutcomeReason::TurnLimitExhausted;
+            task_outcome.message = "模型 turn 预算已用满(" + std::to_string(task_outcome.turns_attempted) +
+                                   "/" + std::to_string(task_outcome.turn_limit) + " 次请求,完整返回 " +
+                                   std::to_string(task_outcome.turns_completed) + " 次)";
             task_outcome.partial_result = partial;
             run_result = {ComposeOutcomeText(task_outcome), true};
             break;

@@ -201,6 +201,56 @@ TEST_CASE("JSON round-trip: ToJson/FromJson 保真") {
     CHECK(lubancode::workflow::ContentHash(restored) == lubancode::workflow::ContentHash(*parsed));
 }
 
+TEST_CASE("agent 节点 turn_limit(任务总 turn 帽):解析、往返保真、与 step_limit 同现明拒") {
+    const char* yaml = R"YAML(
+schema_version: 1
+id: turn-cap-flow
+version: 1.0.0
+entry: probe
+nodes:
+  probe:
+    type: agent
+    task: prompts/probe.md
+    turn_limit: 12
+)YAML";
+    const auto parsed = lubancode::workflow::ParseWorkflowYaml(yaml);
+    REQUIRE(parsed.has_value());
+    REQUIRE(parsed->nodes.size() == 1);
+    CHECK(parsed->nodes[0].turn_limit == 12);
+    CHECK(parsed->nodes[0].step_limit == 0);
+
+    // YAML 往返与 JSON 往返都保真。
+    const auto reparsed = lubancode::workflow::ParseWorkflowYaml(lubancode::workflow::EmitWorkflowYaml(*parsed));
+    REQUIRE(reparsed.has_value());
+    CHECK(reparsed->nodes[0].turn_limit == 12);
+    const auto restored = lubancode::workflow::WorkflowDefinition::FromJson(parsed->ToJson());
+    CHECK(restored.nodes[0].turn_limit == 12);
+
+    // 新旧限制同现:解析失败,要求作者删掉一枚(turn 预算单 §4.3——
+    // 两者作用域不同,静默择一会猜错)。
+    const char* conflicting = R"YAML(
+schema_version: 1
+id: turn-cap-conflict
+version: 1.0.0
+entry: probe
+nodes:
+  probe:
+    type: agent
+    task: prompts/probe.md
+    step_limit: 8
+    turn_limit: 12
+)YAML";
+    const auto rejected = lubancode::workflow::ParseWorkflowYaml(conflicting);
+    REQUIRE_FALSE(rejected.has_value());
+    bool saw_conflict = false;
+    for (const auto& issue : rejected.error()) {
+        if (issue.message.find("不能同现") != std::string::npos) {
+            saw_conflict = true;
+        }
+    }
+    CHECK(saw_conflict);
+}
+
 TEST_CASE("loop:解析、归一化与有帽校验") {
     const char* yaml = R"YAML(
 schema_version: 1

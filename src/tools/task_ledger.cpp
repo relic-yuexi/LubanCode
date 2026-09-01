@@ -54,6 +54,8 @@ std::string ReasonShortLabel(TaskOutcomeReason reason) {
             return "接口报错";
         case TaskOutcomeReason::StepLimitExhausted:
             return "耗尽";
+        case TaskOutcomeReason::TurnLimitExhausted:
+            return "turn 耗尽";
         case TaskOutcomeReason::TimeBudgetExhausted:
             return "时间耗尽";
         case TaskOutcomeReason::TokenBudgetExhausted:
@@ -138,6 +140,12 @@ std::string ComposeOutcomeText(const TaskOutcome& outcome) {
     } else if (outcome.steps_used > 0) {
         out += " · 步数 " + std::to_string(outcome.steps_used);
     }
+    // 任务级 turn 账(turn 预算单 §8.2/§8.3):attempted 是消费数,completed
+    // 另列——两笔分开写,不拿 completed 冒充已用。0 = 没设任务总 turn,不写。
+    if (outcome.turn_limit > 0) {
+        out += " · turn " + std::to_string(outcome.turns_attempted) + "/" +
+               std::to_string(outcome.turn_limit) + "(完整返回 " + std::to_string(outcome.turns_completed) + ")";
+    }
     if (outcome.wall_limit_secs > 0) {
         out += " · 时间上限 " + std::to_string(outcome.wall_limit_secs) + "s";
     }
@@ -208,6 +216,9 @@ std::shared_ptr<TaskRecord> TaskLedger::Register(AgentTaskSnapshot snapshot) {
     {
         std::lock_guard<std::mutex> lock(mutex);
         snapshot.id = next_task_id_++;
+        // 任务级 turn 预算冻结(turn 预算单 §7.1):limit 随注册一次写死进
+        // turn_account——会话中途改配置只影响后来派出的任务,不改在跑的。
+        task->turn_account.FreezeLimitLocked(snapshot.turn_limit);
         task->snapshot = std::move(snapshot);
         tasks_.push_back(task);
     }
@@ -282,12 +293,71 @@ std::shared_ptr<TaskRecord> TaskLedger::TryRegisterChild(AgentTaskSnapshot proto
         proto.id = next_task_id_++;
         proto.depth = expected_depth;
         proto.root_task_id = parent != nullptr ? parent->snapshot.root_task_id : proto.id;
+        // 任务级 turn 预算冻结(turn 预算单 §7.1):与 id 同一笔事务里写死,
+        // 注册后只读。会话中途改配置只影响后来派出的任务。
+        task->turn_account.FreezeLimitLocked(proto.turn_limit);
         task->snapshot = std::move(proto);
         tasks_.push_back(task);
         NotifyStateChangeLocked();
     }
     Touch();
     return task;
+}
+
+// ---- 任务级 turn 预算的准入口(turn 预算单 §6.3)--------------------------
+// "验活态 -> 验额度 -> 占额/翻账"全在台账锁内,与看门狗强收/父级取消的
+// 状态翻页互斥;两线程误对同 task 申请最后一枚时恰一枚成功。
+
+std::expected<agent::ModelTurnPermit, std::string> TaskLedger::TryReserveModelTurn(
+    const std::shared_ptr<TaskRecord>& task) {
+    if (task == nullptr) {
+        return std::unexpected(std::string(agent::kTurnBudgetDeniedNotActive));
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    return task->turn_account.TryReserveLocked(IsAliveTaskState(task->snapshot.state));
+}
+
+std::expected<int, std::string> TaskLedger::CommitModelTurnSent(const std::shared_ptr<TaskRecord>& task,
+                                                                const agent::ModelTurnPermit& permit) {
+    if (task == nullptr) {
+        return std::unexpected(std::string(agent::kTurnBudgetErrorStalePermit));
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    return task->turn_account.CommitSentLocked(permit);
+}
+
+bool TaskLedger::AbortModelTurnBeforeSend(const std::shared_ptr<TaskRecord>& task,
+                                          const agent::ModelTurnPermit& permit) {
+    if (task == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    return task->turn_account.AbortBeforeSendLocked(permit);
+}
+
+bool TaskLedger::MarkModelTurnCompleted(const std::shared_ptr<TaskRecord>& task,
+                                        const agent::ModelTurnPermit& permit) {
+    if (task == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    return task->turn_account.MarkCompletedLocked(permit);
+}
+
+agent::ModelTurnBudgetSnapshot TaskLedger::ModelTurnSnapshot(const std::shared_ptr<TaskRecord>& task) const {
+    if (task == nullptr) {
+        return agent::ModelTurnBudgetSnapshot{};
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    return task->turn_account.SnapshotLocked();
+}
+
+bool TaskLedger::ClaimModelTurnNudge(const std::shared_ptr<TaskRecord>& task) {
+    if (task == nullptr) {
+        return false;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    return task->turn_account.ShouldNudgeOnceLocked(agent::kTurnNudgeThreshold);
 }
 
 std::vector<int> TaskLedger::ChildTaskIds(int parent_task_id) const {
@@ -366,6 +436,12 @@ std::vector<AgentTaskSnapshot> TaskLedger::Snapshots(std::size_t max_entries) co
         snapshot.activity.text_chars = tools::CountUtf8Codepoints(task->pending_text);
         snapshot.content_revision = task->content_revision;
         snapshot.stop_requested = task->cancel.load(std::memory_order_acquire);
+        // 任务 turn 账投影(turn 预算单):真账在 turn_account,limit 已随
+        // 快照冻结,reserved/attempted/completed 从活账现读。
+        const agent::ModelTurnBudgetSnapshot turns = task->turn_account.SnapshotLocked();
+        snapshot.turns_reserved = turns.reserved;
+        snapshot.turns_attempted = turns.attempted;
+        snapshot.turns_completed = turns.completed;
         return snapshot;
     };
     if (max_entries == 0 || tasks_.size() <= max_entries) {
@@ -423,6 +499,12 @@ std::vector<AgentTaskSummary> TaskLedger::Summaries() const {
         summary.stop_requested = task->cancel.load(std::memory_order_acquire);
         summary.step_limit = task->snapshot.step_limit;
         summary.steps_used = task->snapshot.steps_used;
+        // 任务 turn 账投影(turn 预算单):运行中行显示 turn attempted/limit,
+        // 真账在 turn_account。
+        const agent::ModelTurnBudgetSnapshot turns = task->turn_account.SnapshotLocked();
+        summary.turn_limit = turns.limit;
+        summary.turns_attempted = turns.attempted;
+        summary.turns_completed = turns.completed;
         summary.wall_limit_secs = task->snapshot.wall_limit_secs;
         summary.token_limit = task->snapshot.token_limit;
         summary.outcome_reason = task->snapshot.outcome.reason;
@@ -460,6 +542,10 @@ std::optional<AgentTaskSnapshot> TaskLedger::Detail(int task_id) const {
             snapshot.activity.text_chars = tools::CountUtf8Codepoints(task->pending_text);
             snapshot.content_revision = task->content_revision;
             snapshot.stop_requested = task->cancel.load(std::memory_order_acquire);
+            const agent::ModelTurnBudgetSnapshot turns = task->turn_account.SnapshotLocked();
+            snapshot.turns_reserved = turns.reserved;
+            snapshot.turns_attempted = turns.attempted;
+            snapshot.turns_completed = turns.completed;
             return snapshot;
         }
     }

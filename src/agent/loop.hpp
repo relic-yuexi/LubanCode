@@ -42,6 +42,7 @@
 
 #include "agent/model_image_store.hpp"  // ModelImageLanding:on_model_image 的回执形状
 #include "agent/permission_mode.hpp"  // AgentPermissionMode:on_tool_confirm_floored 的下限档
+#include "agent/turn_budget.hpp"  // ModelTurnBudgetGate:任务级 turn 预算门(turn 预算单 P0-1)
 
 namespace lubancode::agent {
 
@@ -273,6 +274,16 @@ struct TurnWiring {
     // 模型请求/输出边界的轨迹记录(见 LoopBoundaryRecorder)。空 = 没接,
     // 行为与从前一字不差。不持有,调用方保证存活到本轮收口。
     LoopBoundaryRecorder* boundary_recorder = nullptr;
+
+    // ---- 任务级 turn 预算门(turn 预算单 P0-1)-------------------------------
+    // 每次"逻辑模型请求发出前"的原子准入口:try_reserve 拒绝即按任务
+    // turn 预算耗尽收场(RunOutcome.hit_turn_limit),不再发请求;permit 在
+    // 请求真正上 wire 时 commit_sent,发不出去(轨迹边界写失败)则
+    // abort_before_send;完整 assistant 入 history 后 mark_completed(API 错/
+    // 流断/用户取消保留 attempted,不冒充没发生,设计单 §6.4)。空 = 没装
+    //(主会话的输入轮局部保险/旧调用方),行为与从前一字不差。不持有,
+    // 调用方保证存活到本轮收口——预算 owner 在任务记录,不在单次 Run。
+    ModelTurnBudgetGate* turn_budget = nullptr;
 };
 
 // 输出预算耗尽的明细账(规格根因四):max_tokens 从普通 end turn 里拆出来
@@ -324,6 +335,12 @@ struct RunOutcome {
     // hit_step_limit。三根都只在对应上限 >0 时可能置位。
     bool hit_time_budget = false;
     bool hit_token_budget = false;
+    // 任务级 turn 预算耗尽(turn 预算单 P0-1):TurnWiring.turn_budget 的
+    // try_reserve 在请求发出前被拒。不是错误:history 里留着到限为止的全部
+    // 来回(工具结果照常落账),上层按 TurnLimitExhausted 收口、带走部分
+    // 结果。与 hit_step_limit(单次 Run 的输入轮局部保险)分家:前者管整项
+    // 任务,后者兼容窗内保留旧义。
+    bool hit_turn_limit = false;
 };
 
 // 步数将尽提醒:剩三步时在当步末条消息尾部附一句"收口"提示——停止

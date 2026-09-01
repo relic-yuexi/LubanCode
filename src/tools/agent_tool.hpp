@@ -94,6 +94,13 @@ struct AgentTypeInfo {
 // > 配置默认(subagent.max_steps_per_turn 一脉)。
 struct SubagentBudget {
     int max_steps_per_turn = 0;
+    // 任务总 turn(turn 预算单 P0-1/P0-3):整项任务从注册到终态最多准入
+    // 几次逻辑模型请求——初始 Run、mailbox 续投、孩子回流、Stop 钩子续跑
+    // 共这本账。不走模型可见的 JSON 入参(解析链在 Resolver:宿主
+    // override > Agent Definition runtime.max_turns > subagent.default_max_
+    // turns > 0)。0 = 不设任务总帽。与 max_steps_per_turn(兼容窗里仍是
+    // "每个 input round"的旧义)分家,不混写。
+    int max_turns = 0;
     int max_wall_secs = 0;
     std::int64_t max_total_tokens = 0;
     int soft_percent = agent::kDefaultBudgetSoftPercent;
@@ -456,6 +463,15 @@ public:
         turn_context_provider_ = std::move(provider);
     }
 
+    // 任务总 turn 的宿主默认(turn 预算单 §4.2):配置 subagent.default_max_
+    // turns(0/未设 = 不限)。与 default_max_steps_per_turn(兼容窗旧义)
+    // 分开管——自定义 Agent 的 runtime.max_turns 在 Resolver 里压过它,
+    // 内置两枚与旧调用路径吃这份默认。
+    void SetDefaultMaxTurns(int turns) { default_max_turns_ = turns > 0 ? turns : 0; }
+    // 只读口:Workflow 的自定义 Agent 解析路复用同一份默认(turn 预算单
+    // P0-3 验收线——同一 Agent 定义两路解析,预算链逐级一致,不各养一本)。
+    int default_max_turns() const { return default_max_turns_; }
+
     // tool_search(延迟挂载):子代理注册表同机制。filter 原样灌给每次
     // execute() 新建的 sub_loop;index_provider 每次 execute() 现算"延迟
     // 未加载"索引段,拼进子代理系统提示末尾。两个都不设(默认)= 子代理
@@ -590,6 +606,7 @@ private:
     std::string cwd_;
     std::string model_;
     int default_max_steps_per_turn_;
+    int default_max_turns_ = 0;  // 任务总 turn 的配置默认(turn 预算单 §4.2;0 = 不限)
     std::string skills_segment_;
     std::string prompts_dir_;  // 提示词运行时化:空 = 只用嵌入版
     std::string project_prompts_dir_;  // Prompt Profile 项目层根(阶段 2):空 = 没有项目层

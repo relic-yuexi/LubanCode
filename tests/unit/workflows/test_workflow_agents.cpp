@@ -472,6 +472,77 @@ nodes:
     CHECK(backend.requests[0].tools[0].name == "reader");
 }
 
+TEST_CASE("agent 节点:turn_limit 真能跨续投封总账——第 N+1 枚逻辑请求不发") {
+    using namespace lubancode::workflow;
+    lubancode::tools::ToolRegistry registry;
+    auto* reader = new FakeTool("reader", R"({"read":true})", false, false);
+    registry.Register(std::unique_ptr<lubancode::tools::Tool>(reader));
+    AgentBackend backend;  // 首发工具,次发正文
+
+    AgentExecutor::Options options;
+    options.default_binding.backend = &backend;
+    options.default_binding.profile.provider = "zai";
+    options.default_binding.profile.request.model = "glm-5.3";
+    options.registry = &registry;
+    options.task_loader = [](const std::string&) { return std::string("只读探索"); };
+    AgentExecutor executor(std::move(options));
+
+    // turn_limit=1:第一枚请求返回工具调用,工具照常执行;第二枚被门拦下
+    // ——预算尽,带部分结果收口(turn 预算单 §7.2)。
+    const WorkflowDefinition capped = ParseOrDie(R"YAML(
+schema_version: 1
+id: turn-cap-1
+version: 1.0.0
+entry: explore
+nodes:
+  explore:
+    type: agent
+    task: prompts/explore.md
+    turn_limit: 1
+)YAML");
+    NodeExecRequest request;
+    request.definition = &capped;
+    request.node = &capped.node_map.at("explore");
+    request.resolved_input = nlohmann::json{{"topic", "木构"}};
+
+    const NodeExecResult capped_result = executor.Execute(request);
+    CHECK_FALSE(capped_result.ok);
+    CHECK(capped_result.error_code == "budget_exhausted");
+    CHECK(capped_result.error_message.find("turn 预算已用满") != std::string::npos);
+    CHECK(capped_result.error_message.find("1/1") != std::string::npos);
+    CHECK(capped_result.error_message.find("完整返回 1") != std::string::npos);
+    REQUIRE(backend.requests.size() == 1);  // 第 2 枚逻辑请求确实未发
+    CHECK(reader->calls == 1);              // 工具结果与部分结论不丢
+
+    // turn_limit=2:完整工具循环(工具 + 收正文)恰用满,正常交卷。
+    AgentBackend backend_two;
+    AgentExecutor::Options options_two;
+    options_two.default_binding.backend = &backend_two;
+    options_two.default_binding.profile.provider = "zai";
+    options_two.default_binding.profile.request.model = "glm-5.3";
+    options_two.registry = &registry;
+    options_two.task_loader = [](const std::string&) { return std::string("只读探索"); };
+    AgentExecutor executor_two(std::move(options_two));
+    const WorkflowDefinition fitting = ParseOrDie(R"YAML(
+schema_version: 1
+id: turn-cap-2
+version: 1.0.0
+entry: explore
+nodes:
+  explore:
+    type: agent
+    task: prompts/explore.md
+    turn_limit: 2
+)YAML");
+    NodeExecRequest fitting_request;
+    fitting_request.definition = &fitting;
+    fitting_request.node = &fitting.node_map.at("explore");
+    fitting_request.resolved_input = nlohmann::json{{"topic", "木构"}};
+    const NodeExecResult fitting_result = executor_two.Execute(fitting_request);
+    CHECK(fitting_result.ok);
+    CHECK(backend_two.requests.size() == 2);
+}
+
 TEST_CASE("agent 节点:审批口三态——放行、拒绝、没宿主的兜底") {
     using namespace lubancode::workflow;
     const WorkflowDefinition def = ParseOrDie(R"YAML(

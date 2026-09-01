@@ -138,6 +138,11 @@ void CheckProfilesIdentical(const agent::ResolvedAgentProfile& a, const agent::R
     CHECK(a.execution_mode == b.execution_mode);
     CHECK(a.isolation == b.isolation);
     CHECK(a.permission == b.permission);
+    // 任务 turn 预算(turn 预算单 P0-3 对账线):数值、来源与 legacy 影子账
+    // 三笔都全等——同一 Agent 定义两路跑,预算逐字段一致。
+    CHECK(a.turn_budget.max_turns == b.turn_budget.max_turns);
+    CHECK(a.turn_budget.source == b.turn_budget.source);
+    CHECK(a.turn_budget.legacy_max_steps_per_input == b.turn_budget.legacy_max_steps_per_input);
     CHECK(a.issues.size() == b.issues.size());
     // 谓词行为等价:同一份候选名单,两份谓词逐名同断。
     const bool a_has_filter = a.profile.tool_filter != nullptr;
@@ -449,12 +454,14 @@ TEST_CASE("对账:同一 Definition 从 AgentTool 与 Workflow 两条路解析,�
     // 连会话同步的窗口也一并给(0 = 用父皮值,与 Workflow 路同基线)。
     const agent::ResolvedAgentProfile from_agent_tool = agent::ResolveAgentProfile(
         agent::BuildSubagentResolveRequest(definition, parent, parent_tools, default_steps,
+                                           /*default_max_turns=*/0,
                                            /*context_window_tokens=*/0, environment,
                                            agent::AgentDispatchOverrides{}));
     // Workflow 路:workflow_commands 装配 default binding 用的同一口
     //(BuildWorkflowAgentResolveRequest)。
     const agent::ResolvedAgentProfile from_workflow = agent::ResolveAgentProfile(
-        agent::BuildWorkflowAgentResolveRequest(definition, parent, parent_tools, default_steps, environment,
+        agent::BuildWorkflowAgentResolveRequest(definition, parent, parent_tools, default_steps,
+                                                /*default_max_turns=*/0, environment,
                                                 agent::AgentDispatchOverrides{}));
 
     // 夹具的工具名(mcp__browser__screenshot 等)不在父面里,两条路都该
@@ -471,10 +478,12 @@ TEST_CASE("对账:同一 Definition 从 AgentTool 与 Workflow 两条路解析,�
     };
     const agent::ResolvedAgentProfile clean_agent_tool = agent::ResolveAgentProfile(
         agent::BuildSubagentResolveRequest(definition, parent, wide_parent_tools, default_steps,
+                                           /*default_max_turns=*/0,
                                            /*context_window_tokens=*/0, environment,
                                            agent::AgentDispatchOverrides{}));
     const agent::ResolvedAgentProfile clean_workflow = agent::ResolveAgentProfile(
-        agent::BuildWorkflowAgentResolveRequest(definition, parent, wide_parent_tools, default_steps, environment,
+        agent::BuildWorkflowAgentResolveRequest(definition, parent, wide_parent_tools, default_steps,
+                                                /*default_max_turns=*/0, environment,
                                                 agent::AgentDispatchOverrides{}));
     CHECK(clean_agent_tool.ok());
     CHECK(clean_workflow.ok());
@@ -500,11 +509,116 @@ TEST_CASE("对账:入参显式只影响步数一笔,两路同口径") {
     overrides.max_steps_per_turn = 7;
 
     const agent::ResolvedAgentProfile from_agent_tool = agent::ResolveAgentProfile(
-        agent::BuildSubagentResolveRequest(definition, parent, parent_tools, 15, 0,
+        agent::BuildSubagentResolveRequest(definition, parent, parent_tools, 15, /*default_max_turns=*/0, 0,
                                            agent::AgentProfileResolveEnvironment{}, overrides));
     const agent::ResolvedAgentProfile from_workflow = agent::ResolveAgentProfile(
         agent::BuildWorkflowAgentResolveRequest(definition, parent, parent_tools, 15,
+                                                /*default_max_turns=*/0,
                                                 agent::AgentProfileResolveEnvironment{}, overrides));
     CHECK(from_agent_tool.profile.runtime.max_steps_per_turn == 7);  // 入参 > YAML 24 > 默认 15
+    CheckProfilesIdentical(from_agent_tool, from_workflow);
+}
+
+// ---------------------------------------------------------------------------
+// 任务总 turn 预算(turn 预算单 P0-3):三级合并、来源、只可收窄。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("任务 turn 预算:override(收窄)> 定义 runtime.max_turns > 配置默认 > 0") {
+    const agent::AgentProfile parent = MakeParentProfile();
+    const std::vector<std::string> parent_tools = MakeParentTools();
+
+    // 定义缺席 + 默认缺席 = 0(不限),来源 Default。
+    const agent::AgentDefinition bare = ParseOrThrow(BudgetYaml("  max_output_tokens: 4096\n"));
+    const agent::ResolvedAgentProfile unset = agent::ResolveAgentProfile(agent::BuildSubagentResolveRequest(
+        bare, parent, parent_tools, 0, /*default_max_turns=*/0, 0, std::nullopt, {}));
+    CHECK(unset.turn_budget.max_turns == 0);
+    CHECK(unset.turn_budget.source == agent::TurnBudgetSource::Default);
+
+    // 配置默认:subagent.default_max_turns 那一级。
+    const agent::ResolvedAgentProfile config_level = agent::ResolveAgentProfile(
+        agent::BuildSubagentResolveRequest(bare, parent, parent_tools, 0, /*default_max_turns=*/20, 0,
+                                           std::nullopt, {}));
+    CHECK(config_level.turn_budget.max_turns == 20);
+    CHECK(config_level.turn_budget.source == agent::TurnBudgetSource::Config);
+
+    // 定义 runtime.max_turns 压过配置默认。
+    const agent::AgentDefinition with_turns = ParseOrThrow(BudgetYaml("  max_turns: 12\n"));
+    const agent::ResolvedAgentProfile definition_level = agent::ResolveAgentProfile(
+        agent::BuildSubagentResolveRequest(with_turns, parent, parent_tools, 0, /*default_max_turns=*/20, 0,
+                                           std::nullopt, {}));
+    CHECK(definition_level.turn_budget.max_turns == 12);
+    CHECK(definition_level.turn_budget.source == agent::TurnBudgetSource::Definition);
+
+    // 宿主 override 收窄:压过定义。
+    agent::AgentDispatchOverrides narrowing;
+    narrowing.max_turns = 5;
+    const agent::ResolvedAgentProfile narrowed = agent::ResolveAgentProfile(
+        agent::BuildSubagentResolveRequest(with_turns, parent, parent_tools, 0, 0, 0, std::nullopt, narrowing));
+    CHECK(narrowed.turn_budget.max_turns == 5);
+    CHECK(narrowed.turn_budget.source == agent::TurnBudgetSource::HostOverride);
+
+    // 定义 0(不限)时宿主可给正数。
+    agent::AgentDispatchOverrides set_on_unlimited;
+    set_on_unlimited.max_turns = 8;
+    const agent::ResolvedAgentProfile set_fresh = agent::ResolveAgentProfile(
+        agent::BuildSubagentResolveRequest(bare, parent, parent_tools, 0, 0, 0, std::nullopt, set_on_unlimited));
+    CHECK(set_fresh.turn_budget.max_turns == 8);
+    CHECK(set_fresh.turn_budget.source == agent::TurnBudgetSource::HostOverride);
+}
+
+TEST_CASE("任务 turn 预算:override 放宽(变大或 0)报 agent.turn_budget_widening") {
+    const agent::AgentProfile parent = MakeParentProfile();
+    const std::vector<std::string> parent_tools = MakeParentTools();
+    const agent::AgentDefinition with_turns = ParseOrThrow(BudgetYaml("  max_turns: 12\n"));
+
+    // 改大:拒。
+    agent::AgentDispatchOverrides bigger;
+    bigger.max_turns = 30;
+    const agent::ResolvedAgentProfile widened = agent::ResolveAgentProfile(
+        agent::BuildSubagentResolveRequest(with_turns, parent, parent_tools, 0, 0, 0, std::nullopt, bigger));
+    CHECK_FALSE(widened.ok());
+    CHECK(HasCode(widened.issues, "agent.turn_budget_widening"));
+    CHECK(widened.turn_budget.max_turns == 12);  // 诊断份仍带定义值
+
+    // override=0(想抹成不限):同样算放宽,拒。
+    agent::AgentDispatchOverrides unlimit;
+    unlimit.max_turns = 0;
+    const agent::ResolvedAgentProfile erased = agent::ResolveAgentProfile(
+        agent::BuildSubagentResolveRequest(with_turns, parent, parent_tools, 0, 0, 0, std::nullopt, unlimit));
+    CHECK_FALSE(erased.ok());
+    CHECK(HasCode(erased.issues, "agent.turn_budget_widening"));
+}
+
+TEST_CASE("任务 turn 预算:legacy per-input step 的影子账(§10.2)随行,不混写") {
+    const agent::AgentDefinition with_legacy = ParseOrThrow(BudgetYaml("  max_steps_per_turn: 24\n"));
+    const agent::AgentProfile parent = MakeParentProfile();
+    const std::vector<std::string> parent_tools = MakeParentTools();
+    const agent::ResolvedAgentProfile resolved = agent::ResolveAgentProfile(
+        agent::BuildSubagentResolveRequest(with_legacy, parent, parent_tools, 0, 0, 0, std::nullopt, {}));
+    // legacy 字段照旧喂 per-run 步数(兼容窗旧义),新账是另一笔。
+    REQUIRE(resolved.turn_budget.legacy_max_steps_per_input.has_value());
+    CHECK(*resolved.turn_budget.legacy_max_steps_per_input == 24);
+    CHECK(resolved.profile.runtime.max_steps_per_turn == 24);
+    CHECK(resolved.turn_budget.max_turns == 0);
+    CHECK(resolved.turn_budget.source == agent::TurnBudgetSource::Default);
+}
+
+TEST_CASE("对账:同一 Definition 的任务 turn 预算从 AgentTool 与 Workflow 两路解析全等") {
+    const agent::AgentDefinition with_turns = ParseOrThrow(BudgetYaml("  max_turns: 12\n"));
+    const agent::AgentProfile parent = MakeParentProfile();
+    const std::vector<std::string> parent_tools = MakeParentTools();
+
+    // 同一份宿主 override(Workflow 的节点 turn_limit 走的就是这只口)。
+    agent::AgentDispatchOverrides overrides;
+    overrides.max_turns = 6;
+    const agent::ResolvedAgentProfile from_agent_tool = agent::ResolveAgentProfile(
+        agent::BuildSubagentResolveRequest(with_turns, parent, parent_tools, 15, /*default_max_turns=*/20, 0,
+                                           agent::AgentProfileResolveEnvironment{}, overrides));
+    const agent::ResolvedAgentProfile from_workflow = agent::ResolveAgentProfile(
+        agent::BuildWorkflowAgentResolveRequest(with_turns, parent, parent_tools, 15,
+                                                /*default_max_turns=*/20,
+                                                agent::AgentProfileResolveEnvironment{}, overrides));
+    CHECK(from_agent_tool.turn_budget.max_turns == 6);
+    CHECK(from_agent_tool.turn_budget.source == agent::TurnBudgetSource::HostOverride);
     CheckProfilesIdentical(from_agent_tool, from_workflow);
 }
