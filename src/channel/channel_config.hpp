@@ -45,6 +45,53 @@ struct ChannelReplyUserConfig {
     bool tool_progress = false;         // 工具进度默认不出站
 };
 
+// ---------------------------------------------------------------------------
+// binding(阶段 3 路由批;configuration.md §8 的冻结形状)
+//
+//   {"agent":"ops-agent","match":{"channel":"qqbot","account":"main",
+//     "conversation":{"kind":"group","id":"group_openid"}},
+//    "policy":{"tools":{"allow":[...],"deny":[...]},
+//              "memory":{"user":true,"project":true}}}
+//
+// 匹配从具体到宽(conversation+thread -> conversation -> account -> channel
+// -> default Agent);同档命中两条报冲突,不按文件次序碰运气——这条规矩
+// 在 ChannelRouter(channel_router.hpp)执法,这里只管形状与解析。
+// ---------------------------------------------------------------------------
+
+struct ChannelBindingConversationMatch {
+    std::string kind;  // direct|group|guild|channel|thread;空 = 不限
+    std::string id;    // conversation id;空 = 不限
+};
+
+struct ChannelBindingMatch {
+    std::string channel;  // 渠道层 bindings 里可空(= 本渠道);写了须与所在渠道 id 一致
+    std::string account;  // 空 = 该渠道任意账号
+    // 无 conversation = account/channel 档;有 conversation 无 thread = conversation 档。
+    std::optional<ChannelBindingConversationMatch> conversation;
+    std::string thread_id;  // 空 = 不限 thread
+};
+
+struct ChannelBindingToolsPolicy {
+    std::vector<std::string> allow;  // 空 = 不另设上限(仍受 deny 与上层交集管)
+    std::vector<std::string> deny;
+};
+
+struct ChannelBindingMemoryPolicy {
+    std::optional<bool> user;     // 仅 owner DM 生效(§8 首版默认表)
+    std::optional<bool> project;
+};
+
+struct ChannelBindingPolicy {
+    ChannelBindingToolsPolicy tools;
+    std::optional<ChannelBindingMemoryPolicy> memory;
+};
+
+struct ChannelBindingConfig {
+    std::string agent;  // 空 = 不改 Agent(只收紧策略的 binding 也合法)
+    ChannelBindingMatch match;
+    ChannelBindingPolicy policy;
+};
+
 struct ChannelAccountUserConfig {
     bool enabled = false;
     std::string transport;                // websocket | webhook | long_polling(按 manifest 能力收)
@@ -60,12 +107,16 @@ struct ChannelAccountUserConfig {
     bool allow_bots = false;               // 默认拒绝其它 bot(configuration.md §7)
     std::string agent;                     // 绑定的 Agent 名(可空 = default)
     ChannelReplyUserConfig reply;
+    // 群聊 session scope(§8):group|group_sender|group_thread|group_thread_sender。默认 group。
+    std::string group_scope;
 };
 
 struct ChannelUserConfig {
     bool enabled = false;
     std::string default_account;
     std::map<std::string, ChannelAccountUserConfig> accounts;  // key = account id
+    // 渠道层 bindings(§8):match.channel 可空 = 本渠道;非空须等于本渠道 id。
+    std::vector<ChannelBindingConfig> bindings;
 };
 
 // ---------------------------------------------------------------------------

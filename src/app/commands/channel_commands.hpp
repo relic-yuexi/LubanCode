@@ -40,12 +40,16 @@ enum class ChannelCommandAction {
     Start,
     Stop,
     Restart,
+    PairingList,    // /channel pairing list <channel> [account](阶段 3)
+    PairingApprove,  // /channel pairing approve <channel> [account] <code>
+    PairingReject,   // /channel pairing reject <channel> [account] <code>
 };
 
 struct ParsedChannelCommand {
     ChannelCommandAction action = ChannelCommandAction::Invalid;
     std::string channel_id;   // show/doctor/start/stop/restart 的渠道 id
     std::string account_id;   // 可空 = 渠道 default_account 或唯一账号
+    std::string code;         // pairing approve/reject 的配对 code
     std::string bad_word;     // Invalid 时第一词原文
 };
 
@@ -67,6 +71,12 @@ std::vector<std::string> FormatChannelShow(
 // configuration.md §4)。
 std::vector<std::string> FormatChannelDoctor(
     const lubancode::channel::ChannelManager::AccountSnapshot* snapshot);
+
+// /channel pairing list:待审配对清单(sender id + 过期时刻)。空表给一行
+// "没有待审";manager 为空给引导行。
+std::vector<std::string> FormatChannelPairingList(
+    const std::vector<lubancode::channel::ChannelManager::PendingPairingView>* pending,
+    std::int64_t now_ms);
 
 // ---------------- 执行(handler) ----------------
 

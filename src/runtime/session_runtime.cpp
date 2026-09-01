@@ -135,6 +135,56 @@ SessionPersistResult SessionRuntime::PersistNew(const std::vector<api::Message>&
     return SessionPersistResult::Appended;
 }
 
+SessionPersistResult SessionRuntime::PersistNewWithProvenance(
+    const std::vector<api::Message>& history, const std::string& model, const std::string& cwd,
+    const channel::MessageProvenance& provenance) {
+    // 渠道轮(多渠道单阶段 3):与 PersistNew 同一条路,差别只在落盘新基线
+    // 里的第一条 user 消息带 provenance(宿主真账进 session JSONL,§12.2)。
+    if (options_.trajectory_enabled || options_.sessions_dir.empty() || store_broken_) {
+        return SessionPersistResult::Nothing;
+    }
+    if (history.size() <= persisted_count_) {
+        return SessionPersistResult::Nothing;
+    }
+    // 找本轮落盘区间里的第一条 user 消息(渠道消息本体);assistant 与
+    // tool_result 消息不带渠道 provenance。
+    std::size_t provenance_index = history.size();
+    for (std::size_t i = persisted_count_; i < history.size(); ++i) {
+        if (history[i].role == api::Role::User) {
+            provenance_index = i;
+            break;
+        }
+    }
+    if (!store_.active()) {
+        std::string first_text;
+        for (const auto& message : history) {
+            if (message.role != api::Role::User) continue;
+            for (const auto& block : message.content) {
+                if (const auto* tb = std::get_if<api::TextBlock>(&block)) {
+                    first_text = tb->text;
+                    break;
+                }
+            }
+            break;
+        }
+        const SessionBeginResult begun = EnsureBegun(first_text, model, cwd);
+        if (begun != SessionBeginResult::Begun && begun != SessionBeginResult::Active) {
+            return SessionPersistResult::Nothing;
+        }
+    }
+    for (std::size_t i = persisted_count_; i < history.size(); ++i) {
+        const bool with_provenance = i == provenance_index;
+        const bool ok = with_provenance ? store_.AppendMessageWithProvenance(history[i], provenance)
+                                        : store_.AppendMessage(history[i]);
+        if (!ok) {
+            store_broken_ = true;
+            return SessionPersistResult::BrokenNow;
+        }
+    }
+    persisted_count_ = history.size();
+    return SessionPersistResult::Appended;
+}
+
 void SessionRuntime::ClampPersisted(std::size_t history_size) {
     if (persisted_count_ > history_size) {
         persisted_count_ = history_size;

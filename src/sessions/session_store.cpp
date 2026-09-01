@@ -372,6 +372,47 @@ std::optional<api::Message> DeserializeSessionMessage(const std::string& line) {
     return MessageFromJson(j);
 }
 
+std::string SerializeSessionMessageWithProvenance(const api::Message& message,
+                                                  const channel::MessageProvenance& provenance,
+                                                  const std::string& ts) {
+    nlohmann::json j = MessageToJson(message);
+    j["ts"] = ts;
+    // provenance 的键集与类型由 channel::MessageProvenance::ToJson 钉死;
+    // 坏不了(结构体字段),但兜底口径与普通消息行一致:落盘的每一行都
+    // 要能重新解析。
+    j["provenance"] = provenance.ToJson();
+    return platform::DumpJsonSanitized(j);
+}
+
+std::optional<SessionMessageRecord> ParseSessionMessageWithProvenance(const std::string& line) {
+    const nlohmann::json j = nlohmann::json::parse(line, nullptr, /*allow_exceptions=*/false);
+    if (!j.is_object()) {
+        return std::nullopt;
+    }
+    auto message = MessageFromJson(j);
+    if (!message.has_value()) {
+        return std::nullopt;
+    }
+    SessionMessageRecord record;
+    record.message = std::move(*message);
+    if (j.contains("provenance") && j["provenance"].is_object()) {
+        std::string error;
+        auto provenance = channel::MessageProvenance::FromJsonStrict(j["provenance"], &error);
+        if (provenance.has_value()) {
+            record.provenance = std::move(provenance);
+        }
+        // provenance 坏行不废消息:留空回落推断(§2 的兼容规矩)。
+    }
+    return record;
+}
+
+channel::MessageProvenance InferLegacyProvenance(const api::Message& message) {
+    channel::MessageProvenance provenance;
+    provenance.origin = message.role == api::Role::User ? channel::MessageOrigin::HumanTerminal
+                                                        : channel::MessageOrigin::HostSynthetic;
+    return provenance;
+}
+
 // ---------------------------------------------------------------------------
 // 事件行(compact / title)
 // ---------------------------------------------------------------------------
@@ -1428,6 +1469,16 @@ bool SessionStore::AppendMessage(const api::Message& message) {
         return false;
     }
     out_ << SerializeSessionMessage(message, NowTimestamp()) << "\n";
+    out_.flush();
+    return out_.good();
+}
+
+bool SessionStore::AppendMessageWithProvenance(const api::Message& message,
+                                               const channel::MessageProvenance& provenance) {
+    if (!out_.is_open()) {
+        return false;
+    }
+    out_ << SerializeSessionMessageWithProvenance(message, provenance, NowTimestamp()) << "\n";
     out_.flush();
     return out_.good();
 }

@@ -19,6 +19,7 @@ int WorkPriority(WorkKind kind) {
     switch (kind) {
         case WorkKind::UserQueuedTurn: return 0;
         case WorkKind::PendingInteraction: return 0;
+        case WorkKind::ChannelTurn: return 0;  // 渠道消息与用户排队同档(§15.3)
         case WorkKind::GoalContinuation: return 1;
         case WorkKind::LoopTick: return 1;
         case WorkKind::Maintenance: return 2;

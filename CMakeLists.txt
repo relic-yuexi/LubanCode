@@ -576,6 +576,9 @@ add_library(lubancode_engine STATIC
   src/channel/inbox.cpp
   src/channel/pairing.cpp
   src/channel/manager.cpp
+  # 多渠道消息接入单阶段 3:ChannelRouter(准入链/binding/session key/
+  # 工具与记忆策略;manager 的路由准入经它)。
+  src/channel/channel_router.cpp
   src/insights/finding.cpp
   src/insights/session_summary.cpp
   src/insights/report_model.cpp
@@ -700,6 +703,12 @@ add_library(lubancode_runtime STATIC
   src/runtime/idle_wake.cpp
   # loop 单:goal 单立的会话工作分流合同在这里实装(公平泵 PumpNextWork)。
   src/runtime/session_work_scheduler.cpp
+  # 多渠道消息接入单阶段 3:TurnIngress(回合入口统一合同,含渠道事件
+  # 折算)、ChannelSessionHost(headless 单飞/限额/每会话 FIFO)、
+  # AgentChannelEngine(SessionRuntime+Agent+Run 的渠道装配)。
+  src/runtime/turn_ingress.cpp
+  src/runtime/channel_session_host.cpp
+  src/runtime/agent_channel_engine.cpp
   # loop 单遗留(骨架):scheduled prompt -> 安全动作的 catalog 与 resolver。
   src/runtime/scheduled_action.cpp
   # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument

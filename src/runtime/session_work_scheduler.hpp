@@ -30,6 +30,9 @@ namespace lubancode::runtime {
 enum class WorkKind {
     UserQueuedTurn,   // 用户排队消息(最高)
     PendingInteraction, // 审批/问答(最高)
+    ChannelTurn,      // 渠道消息 turn(多渠道单阶段 3):外部真人从 IM 发来
+                      // 的输入,与用户排队消息同档(TODO §15.3"不该排在
+                      // goal/loop 后头"),不掺 fairness 账。
     GoalContinuation, // evaluator=continue 的下一轮 goal iteration
     LoopTick,         // 到点的 loop 拍子
     Maintenance,      // compact/摘要一类后台活(低)
