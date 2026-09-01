@@ -588,9 +588,11 @@ Hooks 在会话或工具边界跑外部命令。适合审计、格式检查、�
 
 ## 9. 延迟挂载
 
-注册表工具总数超过 `tool_search_threshold` 时，部分动态与低频工具先不把 schema 发给模型。模型只看见 `tool_search`，搜到工具后再挂载。
+注册表工具总数超过 `tool_search_threshold`，且延迟工具声明 token 本金（名字+描述+schema）不低于 `tool_search_token_floor` 时，部分动态与低频工具先不把 schema 发给模型。模型只看见 `tool_search`，搜到工具后按 `deferred_tool_mode` 走法发现与调用。
 
-默认阈值是 20。设 `0` 关闭延迟，所有工具每轮都进 schema。工具多时，关闭会明显吃输入 token。
+默认阈值是 20、预算门是 1500。阈值设 `0` 关闭延迟，所有工具每轮都进 schema；预算门设 `0` 只按枚数判定。工具多时，关闭会明显吃输入 token。
+
+命中之后走哪条路（扩写回顶层 / 代理引用 / 原生引用）见[工具参考·延迟挂载](../../reference/tools.md#延迟挂载与工具搜索)。
 
 `/tools` 可看已注册、已挂载与延迟工具。工具名没出现在本轮 schema，不等于插件没加载。
 

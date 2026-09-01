@@ -20,6 +20,7 @@
 #include "ptc/profile.hpp"
 #include "agent/agent_catalog.hpp"  // LoadAgentCatalog:派发时按名解析自定义 Agent(P2-2)
 #include "agent/agent_profile_resolver.hpp"  // AgentProfileResolveEnvironment:阶段 3 解析环境
+#include "agent/context.hpp"  // EstimateUtf8Tokens:P4 延迟本金与 /context 同一把尺
 #include "tools/agent_message_tool.hpp"
 #include "tools/background_output.hpp"
 #include "tools/edit_file.hpp"
@@ -53,6 +54,24 @@ bool PosixSandboxExempted() {
 }
 
 }  // namespace
+
+// 动态工具 P4·§十三 P4-1:延迟工具全量常驻的声明 token 本金——名字+
+// 描述+schema 累加,统一 agent::EstimateUtf8Tokens 口径(与 /context 的
+// tools_tokens 同一把尺;ASCII 约 4 字符/token,非 ASCII 每字 1.5)。tool_
+// runtime 在 app 层,引 agent 层不构成反向依赖。数的是"若不延迟会发出去
+// 的字节",非延迟工具(tool_search/tool_invoke/核心件)不进来。
+std::size_t DeferredDeclarationTokens(const lubancode::tools::ToolRegistry& registry) {
+    std::size_t total = 0;
+    for (const auto& tool : registry.All()) {
+        if (!tool->deferred()) {
+            continue;
+        }
+        total += lubancode::agent::EstimateUtf8Tokens(tool->name()) +
+                 lubancode::agent::EstimateUtf8Tokens(tool->description()) +
+                 lubancode::agent::EstimateUtf8Tokens(tool->input_schema().dump());
+    }
+    return total;
+}
 
 // i18n:装配函数里到处用 tr/trf,拉进来省得每处全限定。
 using lubancode::cli::tr;
@@ -709,8 +728,15 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     // 路上不翻页。
     const int tool_search_threshold = config.tool_search_threshold;
     lubancode::tools::DeferredToolMode mode = lubancode::tools::DeferredToolMode::LegacyExpand;
-    if (const auto configured = lubancode::tools::ParseDeferredToolMode(config.deferred_tool_mode);
-        configured.has_value() && *configured != lubancode::tools::DeferredToolMode::NativeReference) {
+    if (config.deferred_tool_mode == "auto") {
+        // 动态工具 P4:"auto"(能力驱动)在直构路落宿主推荐档——这条路
+        // 没有 wire/目录能力可判(那两道门在装配层 session_stack/one_shot
+        // 过),native 半边开不了;与 native_reference 在直构路不开同一
+        // 待遇,不绕过目录判定(单子红线 2)。推荐档当前 = legacy,翻
+        // P4-2 时同笔翻(见 deferred_tool_resolver.hpp 的开关注)。
+        mode = lubancode::tools::kRecommendedDeferredToolMode;
+    } else if (const auto configured = lubancode::tools::ParseDeferredToolMode(config.deferred_tool_mode);
+               configured.has_value() && *configured != lubancode::tools::DeferredToolMode::NativeReference) {
         mode = *configured;
     }
     if (options.deferred_mode.has_value()) {
@@ -718,8 +744,18 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     }
     main_mode_ = mode;
     sub_mode_ = mode;
-    main_deferral_ = lubancode::tools::DeferralEnabled(main_registry_.All().size(), tool_search_threshold);
-    sub_deferral_ = lubancode::tools::DeferralEnabled(sub_registry_.All().size(), tool_search_threshold);
+    // 动态工具 P4·§十三 P4-1:枚数门之外补一道 token 预算门——延迟工具
+    // 全量常驻的声明 token 本金(名字+描述+schema,EstimateUtf8Tokens 与
+    // /context 的 tools_tokens 同一把尺)低于 floor 时,枚数过了也不启用:
+    // 本金太小省不出固定开销,P0 baseline 册轻 schema 形状实测启用反赔。
+    // floor=0 时这道门关着(只看枚数,现状)。枚数口径不含 tool_search
+    // 自身(注册它在后头,与 DeferralEnabled 的既有合同一致)。
+    main_deferral_ = lubancode::tools::ShouldDeferTools(main_registry_.All().size(), tool_search_threshold,
+                                                        DeferredDeclarationTokens(main_registry_),
+                                                        config.tool_search_token_floor);
+    sub_deferral_ = lubancode::tools::ShouldDeferTools(sub_registry_.All().size(), tool_search_threshold,
+                                                       DeferredDeclarationTokens(sub_registry_),
+                                                       config.tool_search_token_floor);
     if (main_mode_ == lubancode::tools::DeferredToolMode::Disabled) {
         main_deferral_ = false;
     }

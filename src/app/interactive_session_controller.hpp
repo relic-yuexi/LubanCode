@@ -385,6 +385,9 @@ private:
     bool sub_native;
     std::string native_server_tool_search;
     int tool_search_threshold;
+    // 动态工具 P4:延迟挂载的 token 预算门(与 threshold 同一条灌线,
+    // /tools 的"没延迟"缘由话术要看它)。
+    int tool_search_token_floor;
 
     // ---- UI 状态 ----
     // transcript 接线收尾单:导航/查看态/条目账/展开档全归这只控制器

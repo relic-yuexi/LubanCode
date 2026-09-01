@@ -20,9 +20,12 @@
 //     RunOneTool 正门(接线在 ToolRuntime/装配层,不在本文件)。
 //
 // 阈值开关:注册表总工具数 ≤ 阈值(config.tool_search_threshold,默认 20,
-// 0 = 永不延迟)时一切照旧,现状行为零变化;超阈值才启用。启用与否、
-// loaded 集合都由装配层持有(会话级,/clear 不清——工具挂载与对话
-// 历史无关),这里只提供纯逻辑:判定、索引段、检索工具、延迟包装。
+// 0 = 永不延迟)时一切照旧,现状行为零变化;超阈值才启用。P4 起多一道
+// token 预算闸(config.tool_search_token_floor,默认非 0):枚数过了、延迟
+// 工具的声明 token 本金不够,也不启用——本金太小省不出固定开销,P0
+// baseline 册轻 schema 形状实测启用反赔。两道闸与 loaded 集合都由装配层
+// 持有(会话级,/clear 不清——工具挂载与对话历史无关),这里只提供纯逻辑:
+// 判定、索引段、检索工具、延迟包装。
 #pragma once
 
 #include <cstddef>
@@ -40,6 +43,28 @@ namespace lubancode::tools {
 // 注册 tool_search 之前数)严格大于阈值才启用。纯函数,好单测。
 inline bool DeferralEnabled(std::size_t total_tools, int threshold) {
     return threshold > 0 && total_tools > static_cast<std::size_t>(threshold);
+}
+
+// token 预算门(动态工具 PromptCache 守恒单 P4·§十三 P4-1):枚数门之外的
+// 第二道闸。依据只引 P0 baseline 册的实测(tests/unit/tools/test_tool_search.cpp
+// "P0基线"三册):轻 schema/长描述的工具形状,越阈值启用延迟后首份请求
+//(tools+索引段)反而比全量常驻贵——索引段把长描述原样照抄(不超 80 字
+// 不截断),省出的小 schema 抵不过 tool_search 自身定义与索引段前言的固定
+// 开销;重 schema/短描述形状本金大才有真节省。枚数口径(默认 20)分不出
+// 这两种形状,所以补一道"延迟工具全量常驻的声明 token 本金"下限:本金
+// < floor 时启用必赔,不如全量常驻(disabled)。floor=0 关掉这道门,只看
+// 枚数(P4 之前的现状)。本金数与 floor 都由调用方递——EstimateUtf8Tokens
+// 在 agent 层,tools 层不反向引。
+inline bool DeferralBudgetOk(std::size_t deferred_decl_tokens, int token_floor) {
+    return token_floor <= 0 || deferred_decl_tokens >= static_cast<std::size_t>(token_floor);
+}
+
+// 组合判定(P4-1):枚数门与预算门都开才启用。枚数默认 20 不动——baseline
+// 册没有支持改枚数的实测数(它证明的恰是枚数口径不分辨工具形状),重定
+// 落在"换 token-aware 决策"这一路。
+inline bool ShouldDeferTools(std::size_t total_tools, int threshold, std::size_t deferred_decl_tokens,
+                             int token_floor) {
+    return DeferralEnabled(total_tools, threshold) && DeferralBudgetOk(deferred_decl_tokens, token_floor);
 }
 
 // P0(动态工具 PromptCache 守恒单·§十三):/context 与 trace 的

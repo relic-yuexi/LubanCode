@@ -131,6 +131,36 @@ TEST_CASE("DeferralEnabled: 总数不超阈值不启用,超了才启用,threshol
 }
 
 // ---------------------------------------------------------------------------
+// token 预算门(动态工具 P4·§十三 P4-1)。依据只引 P0 baseline 册实测
+//(上面"P0基线"三册,2026-08-31 跑数):轻 schema/长描述形状 18 枚延迟
+// 本金约 1080 token,启用后首份请求 1151 > 全量常驻 1089,反赔;重
+// schema/短描述形状本金约 2220,首份 634 < 2296 才有真省。枚数口径分不出
+// 这两种形状,这道门按"本金"分——默认线 1500 落在两实测点之间(反赔点
+// 上 39%、有省点下 32%)。这里钉纯函数合同;装配级(ToolRuntime 吃
+// DeferredDeclarationTokens)的账在 test_tool_runtime_deferral.cpp。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ShouldDeferTools: 枚数门与预算门都开才启用;floor=0 关预算门回到现状") {
+    // floor=0:预算门关着,只看枚数——P4 之前的现状(既有册的口径)。
+    CHECK(tools::ShouldDeferTools(/*total=*/30, /*threshold=*/20, /*deferred_tokens=*/100, /*floor=*/0));
+    CHECK_FALSE(tools::ShouldDeferTools(20, 20, 100000, 0));  // 枚数门没过,本金再大也不启用
+
+    // floor>0:枚数过了还得本金够。基准点取 P0 baseline 册的两个实测形状
+    //(18 枚延迟,轻形状本金约 1080 / 重形状约 2220),默认线 1500 落中间。
+    CHECK_FALSE(tools::ShouldDeferTools(30, 20, 1080, 1500));  // 轻形状:实测反赔,预算门拦下
+    CHECK(tools::ShouldDeferTools(30, 20, 2220, 1500));        // 重形状:实测有省,放行
+    CHECK(tools::ShouldDeferTools(30, 20, 1500, 1500));        // 本金正好压线:放行(>=)
+    CHECK_FALSE(tools::ShouldDeferTools(30, 20, 1499, 1500));
+
+    // 预算门单独看(DeferralBudgetOk):floor=0 恒放行;floor<0(异常档)
+    // 也放行——这道门只做"止损",不做"强开"。
+    CHECK(tools::DeferralBudgetOk(0, 0));
+    CHECK(tools::DeferralBudgetOk(0, -1));
+    CHECK_FALSE(tools::DeferralBudgetOk(1499, 1500));
+    CHECK(tools::DeferralBudgetOk(1500, 1500));
+}
+
+// ---------------------------------------------------------------------------
 // tool_search 匹配
 // ---------------------------------------------------------------------------
 

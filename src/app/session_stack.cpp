@@ -432,6 +432,11 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
         if (!resolution.native_denial.empty()) {
             TermOut() << theme.error << "[tool_search] " << resolution.native_denial << theme.reset << "\n";
         }
+        // 动态工具 P4:"auto" 档落 native 时给一行生效说明(与 denial 同通道,
+        // 淡色)——能力驱动落了原生档,用户该知道怎么强制回通用路。
+        if (!resolution.mode_note.empty()) {
+            TermOut() << theme.stats << "[tool_search] " << resolution.mode_note << theme.reset << "\n";
+        }
         runtime_options.deferred_mode = resolution.mode;
         runtime_options.native_server_tool_search = resolution.server_tool_search;
     }
@@ -450,6 +455,7 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
     stack->sub_native = stack->tool_runtime->sub_native_enabled();
     stack->native_server_tool_search = stack->tool_runtime->native_server_tool_search();
     stack->tool_search_threshold = config.tool_search_threshold;
+    stack->tool_search_token_floor = config.tool_search_token_floor;
 
     if (stack->agent_tool() != nullptr) {
         // execution_mode=auto 的缺省走向:交互会话里独立探索型任务默认后台
@@ -519,6 +525,19 @@ std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions&
                                               : "tool_search.enabled",
                           stack->tool_search_threshold)
                   << theme.reset << "\n";
+        // 动态工具 P4·§十三 P4-4:legacy 档明标 cache-hostile——未配置的
+        // 默认档就是它(空串 = legacy_expand 现状),迁移窗内启动横幅如实
+        // 告知并指路 proxy_reference(单子:"legacy 留一版迁移窗,启动与
+        // 文档明标 cache-hostile")。deferral 没启用就没有 legacy 行为可言
+        //(外层 if 拦住);proxy/native 档本就守恒,不标。横幅文案与
+        // one_shot.cpp 单发路逐字一致。
+        if (stack->tool_runtime->main_tool_mode() == lubancode::tools::DeferredToolMode::LegacyExpand) {
+            TermOut() << theme.stats
+                      << "[tool_search] legacy_expand 档:命中后 schema 扩写回顶层 tools 与延迟索引,断前缀"
+                         "缓存(cache-hostile);迁移窗内可改 proxy_reference(前缀不断),见 "
+                         "docs/reference/tools.md。"
+                      << theme.reset << "\n";
+        }
     }
 
     // 作用域单 P0(§7.1):root->cwd 基线已拼进主系统提示,同 scope 的写

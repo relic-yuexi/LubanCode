@@ -1622,24 +1622,41 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.tool_search_threshold = static_cast<int>(value);
     }
+    // 动态工具 P4:延迟挂载的 token 预算门。非负整数,0 = 关掉这道门
+    //(只看枚数,P4 之前的现状)——与 threshold 同一套报错口径。
+    if (parsed.contains("tool_search_token_floor")) {
+        const auto& field = parsed["tool_search_token_floor"];
+        if (!field.is_number_integer() && !field.is_number_unsigned()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                    " 里的 tool_search_token_floor 字段必须是非负整数(0 = 只看枚数不设预算门)");
+        }
+        const long long floor_value = field.get<long long>();
+        if (floor_value < 0) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                    " 里的 tool_search_token_floor 字段必须是非负整数(0 = 只看枚数不设预算门)");
+        }
+        config.tool_search_token_floor = static_cast<int>(floor_value);
+    }
     // 动态工具 P1:延迟工具模式。认不得的值报错——这个字段没法静默落默认,
     // 下游不知道该走哪条路。P3 起 native_reference 放行:配置层只收字符串,
     // 生效与否由装配期 ResolveDeferredToolMode 过 wire+目录能力两道门
-    //(单子红线 2:兼容端不得误开;门不开时大声回落,不悄悄换路)。
+    //(单子红线 2:兼容端不得误开;门不开时大声回落,不悄悄换路)。P4 起
+    // "auto" 放行(能力驱动档:native 门开走原生、门不开落宿主推荐档),
+    // 解析同样归 ResolveDeferredToolMode。
     if (parsed.contains("deferred_tool_mode")) {
         const auto& field = parsed["deferred_tool_mode"];
         if (!field.is_string()) {
             return std::unexpected("配置文件 " + file_path_for_error +
-                                   " 里的 deferred_tool_mode 字段必须是字符串(disabled|proxy_reference|"
+                                   " 里的 deferred_tool_mode 字段必须是字符串(auto|disabled|proxy_reference|"
                                    "native_reference|legacy_expand)");
         }
         const std::string text = field.get<std::string>();
-        const bool allowed =
-            text == "disabled" || text == "proxy_reference" || text == "native_reference" || text == "legacy_expand";
+        const bool allowed = text == "auto" || text == "disabled" || text == "proxy_reference" ||
+                             text == "native_reference" || text == "legacy_expand";
         if (!text.empty() && !allowed) {
             return std::unexpected("配置文件 " + file_path_for_error +
                                    " 里的 deferred_tool_mode 认不得: " + text +
-                                   "(可用:disabled|proxy_reference|native_reference|legacy_expand)");
+                                   "(可用:auto|disabled|proxy_reference|native_reference|legacy_expand)");
         }
         config.deferred_tool_mode = text;
     }
@@ -2643,9 +2660,24 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.sources.tool_search_threshold = Source::Default;
     }
 
+    // ---- tool_search_token_floor(动态工具 P4):项目级 > 全局 > 默认值,
+    // 没有 environment 变量这一级,与 threshold 同一套待遇。取值校验在
+    // ParseFileConfigJson 里做过了。 ----
+    if (project_file.has_value() && project_file->tool_search_token_floor.has_value()) {
+        result.config.tool_search_token_floor = *project_file->tool_search_token_floor;
+        result.sources.tool_search_token_floor = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->tool_search_token_floor.has_value()) {
+        result.config.tool_search_token_floor = *global_file->tool_search_token_floor;
+        result.sources.tool_search_token_floor = Source::GlobalConfigFile;
+    } else {
+        result.config.tool_search_token_floor = kDefaultToolSearchTokenFloor;
+        result.sources.tool_search_token_floor = Source::Default;
+    }
+
     // ---- deferred_tool_mode(动态工具 P1):项目级 > 全局 > 默认(空 =
-    // legacy_expand 现状),没有环境变量这一级。取值校验在
-    // ParseFileConfigJson 里做过了;先 opt-in,不默认换路。 ----
+    // legacy_expand 现状,P4 迁移窗内不动),没有环境变量这一级。取值校验
+    // 在 ParseFileConfigJson 里做过了("auto" P4 起放行,解析归装配期
+    // ResolveDeferredToolMode);先 opt-in,不默认换路。 ----
     if (project_file.has_value() && project_file->deferred_tool_mode.has_value()) {
         result.config.deferred_tool_mode = *project_file->deferred_tool_mode;
         result.sources.deferred_tool_mode = Source::ProjectConfigFile;

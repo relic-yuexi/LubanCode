@@ -197,7 +197,7 @@ ETag 另存一份。下次刷新发送条件请求；远端没变，便不重写
 | `max_output` | 最大输出 token |
 | `default_think` | 默认推理档 |
 | `capabilities` | 能力名到布尔值；供展示和选择使用。几枚有行为的键:`image`/`input_modalities` 声明纯文本的模型,带图片附件的输入在发送前拦住;`always_think` 或 `off_unsupported` 声明思考关不掉的模型,`/think none` 切换前后明说"此端点未证实可关" |
-| `deferred_tools` | Anthropic 原生工具搜索能力(动态工具 P3):`mode` 只认 `native_reference`,`tool_reference` 声明 wire 认 `defer_loading`/`tool_reference`,`server_tool_search` 是搜索变体(`regex`/`bm25`,可省)。只在用户配置 `deferred_tool_mode=native_reference` 且 wire 为 anthropic-messages 时启用;目录不写 = 不声明,第三方兼容端不声明即不开——能力按目录判,不按厂名猜 |
+| `deferred_tools` | Anthropic 原生工具搜索能力(动态工具 P3):`mode` 只认 `native_reference`,`tool_reference` 声明 wire 认 `defer_loading`/`tool_reference`,`server_tool_search` 是搜索变体(`regex`/`bm25`,可省)。用户配置 `deferred_tool_mode=native_reference` 或 `auto`(P4 能力驱动档,门开即落原生)且 wire 为 anthropic-messages 时启用;目录不写 = 不声明,第三方兼容端不声明即不开——能力按目录判,不按厂名猜 |
 | `reasoning` | 该模型支持的 effort、toggle、budget 与 wire 方言 |
 
 推理控制按模型直写。`/think` 只展示当前模型声明的档位，请求层也读同一份档案。

@@ -402,6 +402,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       sub_native(stack_.sub_native),
       native_server_tool_search(stack_.native_server_tool_search),
       tool_search_threshold(stack_.tool_search_threshold),
+      tool_search_token_floor(stack_.tool_search_token_floor),
       config_file_path(stack_.config_result.config_file_path),
       always_allowed_tools(session_runtime_.always_allowed()),
       // P6:存档账本体在 SessionRuntime;引用别名在此初始化列表里绑过去
@@ -1436,6 +1437,7 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.main_proxy_reference = main_proxy;
     ctx.main_native_reference = main_native;
     ctx.tool_search_threshold = tool_search_threshold;
+    ctx.tool_search_token_floor = tool_search_token_floor;
     ctx.tool_runtime = tool_runtime_.has_value() ? &*tool_runtime_ : nullptr;
     ctx.worktree_session = &worktree_session;
     ctx.main_agent = main_agent.has_value() ? &*main_agent : nullptr;

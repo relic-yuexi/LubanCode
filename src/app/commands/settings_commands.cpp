@@ -1765,8 +1765,14 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     TermOut() << "  tool_search_threshold = " << config.tool_search_threshold
               << (config.tool_search_threshold == 0 ? tr("config.threshold.never") : "") << "  ["
               << lubancode::config::ToString(sources.tool_search_threshold) << "]\n";
+    // 动态工具 P4:延迟挂载的 token 预算门(0 = 只看枚数)。与 threshold
+    // 同级展示,排查"枚数过了怎么没延迟"就看这行。
+    TermOut() << "  tool_search_token_floor = " << config.tool_search_token_floor
+              << (config.tool_search_token_floor == 0 ? "(只看枚数)" : "") << "  ["
+              << lubancode::config::ToString(sources.tool_search_token_floor) << "]\n";
     // 动态工具 P1:延迟工具模式(空 = legacy_expand 现状;proxy_reference
-    // 是 P1 新路,disabled 全量常驻)。
+    // 是 P1 新路,disabled 全量常驻;auto 是 P4 能力驱动档——门开走
+    // native、门不开落宿主推荐档)。
     TermOut() << "  deferred_tool_mode = "
               << (config.deferred_tool_mode.empty() ? "legacy_expand(默认)" : config.deferred_tool_mode)
               << "  [" << lubancode::config::ToString(sources.deferred_tool_mode) << "]\n";

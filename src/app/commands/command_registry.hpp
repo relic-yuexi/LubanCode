@@ -158,6 +158,9 @@ struct SlashDispatchContext {
     // 动态工具 P3:native_reference 开没开(展示分档用)。
     bool main_native_reference = false;
     int tool_search_threshold = 0;
+    // 动态工具 P4:延迟挂载的 token 预算门(0 = 只看枚数)。/tools 在
+    // "枚数过了却没延迟"时拿它说清缘由。
+    int tool_search_token_floor = 0;
     lubancode::app::ToolRuntime* tool_runtime = nullptr;  // process_manifests/explore_registry
     lubancode::cli::WorktreeSession* worktree_session = nullptr;
 
