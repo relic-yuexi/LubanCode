@@ -1,6 +1,6 @@
 # 动态工具 Prompt Cache 守恒与按需调用设计
 
-- 状态：P0 已落（a6c48f7，2026-08-31 补账）；P1 通用 ProxyReference 已落（2026-08-31，待主控验收）；P2 条件工具也守恒已落（2026-08-31，待主控验收）；P3 Claude NativeReference 已落（2026-09-01，待主控验收；真机 cache usage 一栏未验——本机无钥匙，对照脚本已备）；P4 红线内部分已落（2026-09-01，待主控验收——token 预算门/legacy 横幅/auto 档机制/删除清单；proxy 与 native 切默认两条被质量对照红线拦住留白，待真机）
+- 状态：P0 已落（a6c48f7，2026-08-31 补账）；P0-P4 主控验收过（2026-09-02，worktree 独立构建 ctest 363 册全绿——唯一红 unit.cli.status_refresh 为并发偶发、单跑即绿，与本单无关；读码逐条对 §四~§十三合同，结构侧全过）；P3 真机 cache usage 一栏仍验不了（本机无钥匙，对照脚本已备在 tests/manual/native_tool_search_cache_compare.py）；P4 的 proxy 与 native 切默认两条被质量对照红线（§十五·8）拦住留白，待真机。验收顺手补三处小漏：§12.3"compact 不丢 DiscoveryLedger"补册（test_loop.cpp）、tools.md 补 tool_invoke 文档与 tool_search 三档行为、对照脚本清一处死分支
 - 日期：2026-08-31
 - 级别：P1（长会话成本、首 token 延迟与工具扩展性的共同底座）
 - 范围：`tool_search`、延迟工具、条件工具、四条 wire、前缀账、会话恢复、compact、工具执行正门
@@ -625,6 +625,9 @@ proxy 多走一步，未必总比全量 tools 便宜。短会话、少工具时�
 - [x] 以现有 20 阈值跑 baseline：成功、token、cache、延迟、误选。（同上 commit：tests/unit/tools/test_tool_search.cpp P0 基线三册——轻/重 schema 两形状字节账、干净命中 vs 误选往返步数账；延迟在假后端退化为 0，如实标 N/A 不拿假数冒充）
 
 验收：能复现，能分清客户端断前缀与 provider 未命中；尚不宣称修好。
+（2026-09-02 主控验收：过。现状回归册与假后端 usage 账单跑皆绿——册里 cache_epoch/prefix_append_only 管客户端断前缀、cache_read/creation 管 provider 命中，两栏分列不混；deferred_tool_mode 展示位（/context、i18n、tool_search details）读码核对在位；P0 基线三册绿。数字系脚本喂的假后端账，用例内如实标注，不算真机实测。）
+
+### P1：通用 ProxyReference
 
 ### P1：通用 ProxyReference
 
@@ -638,6 +641,7 @@ proxy 多走一步，未必总比全量 tools 便宜。短会话、少工具时�
 
 验收：客户端三拍前缀合同全过；安全回归全过；四 wire proxy replay 全过；质量对照不差到触发回退门。
 （2026-08-31 P1 验收账：三拍前缀合同在 tests/unit/api/test_request_prefix.cpp"P1三拍前缀合同"册钉绿（发现/调用前后 system/tools 指纹全等、messages 只追加、相邻请求断因全空）；安全回归在 test_loop.cpp 四册（直名被拦/伪拼 ref/越权策略/坏参数各有稳定码，Hook 与确认看真实目标）+ test_deferred_tool_resolver.cpp（跨侧不串/stale/unavailable）；四 wire replay 在 test_chat/anthropic/responses/gemini_request.cpp 各一册；§12.5 质量对照（同模型三档跑分）未做——无真机钥匙，proxy 保持 opt-in 不默认，不因结构验收绿就宣称质量门已过。）
+（2026-09-02 主控验收：过——前三件全数复跑皆绿（三拍合同/安全回归七册/四 wire replay），读码核对 §五代理协议与 §六执行正门逐条相符：Resolve 只管引用与版本、RunOneTool 唯一执行口、闸序=暴露过滤→turn 闸→mode/scope 闸→proxy 参数先验→PreToolUse→updatedInput 复验→确认；质量对照一件验不了（无钥匙），opt-in 留白与红线 8 相符，不冒充。验收补一小漏：§12.3"compact 不丢 DiscoveryLedger"原无册钉，已在 test_loop.cpp 补一册（发现→compact 换史→账不动→旧 ref 照常解、照常调），单跑 12 断言绿。）
 
 ### P2：条件工具也守恒
 
@@ -648,6 +652,7 @@ proxy 多走一步，未必总比全量 tools 便宜。短会话、少工具时�
 
 验收：普通 turn、goal turn、loop tick 之间 tools hash 不变；越界调用照样被硬拦。
 （2026-08-31 P2 验收账：三回合合同在 tests/unit/api/test_request_prefix.cpp"P2三回合前缀合同"册钉绿——普通→goal→loop→普通(含一次越界误调)四拍 system/tools 指纹逐位相等、messages 只追加、两枚条件工具定义每拍常驻;执行门拦截在 test_loop.cpp 三册(普通轮直名调用 turn.tool_not_active/TurnGateDenied/确定没越过执行边界;goal 轮同款调用放行;proxy 解引用路同一道闸且 transport/resolved 两层留账)+ goal_checkpoint_tool/loop_control_tool 各自 execute 里的 in-execute 自拒保底(workflow 等未接闸的入口吃这道);暴露位在 test_session_wirings.cpp 两册;能力段在 test_turn_capabilities.cpp 五册;memory 清账在 test_tool_runtime.cpp 一册(翻档后定义照旧常驻、execute 拒"未开启")。)
+（2026-09-02 主控验收：过。上列各册复跑皆绿；读码核对 §8.2 两家分立在位——ToolExposed 只认会话级条件(与 coordinator/scheduler 同一判式)、tool_turn_gate 调用当口现判(loop.cpp 闸序在暴露过滤后、Plan 闸前,直名与 proxy 解引用同闸)、[turn capabilities] 段走 turn context 尾部不进 system;子代理皮拷贝显式清 turn 闸核对在位。）
 
 ### P3：Claude NativeReference
 
@@ -659,6 +664,7 @@ proxy 多走一步，未必总比全量 tools 便宜。短会话、少工具时�
 
 验收：官方原生链无损走通；发现前后旧前缀守恒；模型直接调用真实工具仍走本地安全正门。
 （2026-09-01 P3 验收账:原生链无损在 wire_replay"原生工具搜索"回环册钉绿——server_tool_use/tool_search_tool_result(含嵌套 tool_reference 与 error 变体)解析/攒块/存档/回传逐字段一致,srvtoolu id 绝不配 tool_result,发现的工具照常配;前缀守恒在 test_request_prefix"P3三拍前缀合同"册钉绿;安全正门在 P1/P2 既有册(直名调用的 filter/turn 闸/确认/Hook 全套)之上叠加"真工具恰执行一次、服务端搜索不在本地执行"的账;真机 cache usage 一栏未验(无钥匙),对照脚本与夹具已备,如实留白。）
+（2026-09-02 主控验收：过（结构侧三件——原生链无损/前缀守恒/安全正门，各册复跑皆绿）。读码另核：defer_loading 映射 Eager 不带字段（与从前逐字节一致）、全表 deferred 的防御降级在位、§7.3 能力不符错误文案点名指路不自动改发、ResolveDeferredToolMode 两道门（wire=anthropic + 目录显式声明）半截不认、catalog 九枚模型声明与 schema 形状核对在位。真机 cache usage 一栏维持未验——对照脚本 tests/manual/native_tool_search_cache_compare.py 在位且无钥匙时拒绝跑（exit 2），留白合规；验收顺手清了脚本里一处死分支（if native and step>=1: pass——原生对块回传实际由 assistant content append 实现，说明并入该处注释）。）
 
 ### P4：默认切换与旧路退场
 
@@ -670,6 +676,7 @@ proxy 多走一步，未必总比全量 tools 便宜。短会话、少工具时�
 
 验收：默认路径不再因发现/调用动态工具开 cache epoch；旧配置有清楚迁移提示与可控回退。
 （2026-09-01 P4 验收账：后半句已落——legacy 默认档启动横幅明标 cache-hostile 并指路，回退=显式写四值任一（proxy/native/disabled/legacy），auto 档给能力驱动的第三种写法；token 预算门把"枚数到就开"的必赔场景（P0 baseline 册轻 schema 形状实测）拦在全量常驻。前半句的"默认路径守恒"**未达**——默认仍是 legacy_expand，proxy/native 默认两条被质量对照红线（§十五·8）拦住留白，真机钥匙到位跑完 §12.5 三档对照后按 tools.md 的 SOP 三步切默认。）
+（2026-09-02 主控验收：红线内四件过——token 预算门（ShouldDeferTools 纯函数+deferral 产品行为册）、auto 档机制（resolver auto 册+config auto 册；直构路落推荐档不绕目录判定）、legacy 横幅（session_stack/one_shot 两路文案核对在位）、删除清单（tools.md"迁移窗结束后删什么"六条）。切默认两条留白与红线 8 相符，不冒充。验收顺手补 tools.md 一处文档缺口：可用性总表原缺 tool_invoke 行、tool_search 小节原只写 legacy 行为——已补三档差异与 tool_invoke 小节。）
 
 ## 十四、预计改动边界
 
