@@ -1,0 +1,577 @@
+# 多用户多节点集群控制面：Node Bridge、LubanCore 宿主与多 Session 畅想
+
+- 状态：远期畅想，暂不实施（2026-09-02）
+- 日期：2026-09-02
+- 级别：Future / P2；前置未满足前不得排进近期实现
+- 范围：多租户控制面、Node Bridge、多 Session 宿主、Web 工作台、Skill/MCP/Package/Secret、断线续看与故障恢复
+- 硬前置：`LubanCore与CLI分离_核心库独立成宿主底座设计.todo` 完成最终验收
+- 软前置：`持久Agent_Gateway自动任务与可靠恢复总装计划.todo` 至少打通单机常驻、可靠恢复与 durable outbox
+- 关联：`多前端外壳与浏览器Tab_AppServer承载设计.todo`、`Workspace统一存储_旧Session退场与分级Memory迁移.todo`、`轻量可塑ExtensionRuntime与动态扩展API设计.todo`、`docs/reference/packages.md`、`docs/reference/browser-runtime.md`
+- 不在本单：现在拆 LubanCore、立刻开公网服务、首版跨节点热迁移、未经裁决自动重放未知副作用、把现有本机 Gateway 冒充集群 Gateway
+
+## 一、先下断语
+
+这套系统不是“网页套 SSH”，也不是“主机列表加几只终端”。
+
+它是一层多租户控制面。主服务器管身份、权限、目录、调度与索引；每台工作节点跑一只 Node Bridge，守住本机 LubanCore Worker、项目工作区、Session、MCP 进程与工具副作用。浏览器按服务器、Project、Session 查看和操作，断线回来还能续看，宿主重启后还能按事实账恢复。
+
+集群接入点必须是 LubanCore 的稳定宿主 API，不是 LubanCode CLI。CLI 仍是本地终端宿主，与 Web、Node Bridge、App Server 平起平坐。
+
+```text
+LubanCore
+  ├─ LubanCode CLI
+  ├─ App Server / local Web
+  ├─ Channel Host
+  └─ Node Bridge Worker
+```
+
+一个节点可以挂许多 Session。规矩是：**同一 Session 的 main turn 单飞，不同 Session 受节点配额约束并发。** 在线不等于正在烧算力；一千场闲置 Session 与一千场同时编译、开浏览器，不是一回事。
+
+本单先留图、留边界、留验收门。LubanCore 尚未分离成功，不为赶集群反过来把 CLI 耦合焊死。
+
+## 二、与现有单子的分工
+
+| 单子 | 它管什么 | 本单不重复什么 |
+|---|---|---|
+| LubanCore 与 CLI 分离 | 纯库、稳定头、依赖方向、宿主接入 | 不在集群单里顺手搬 core/cli 边界 |
+| 持久 Agent / Gateway | 单机常驻、automation、ingress、outbox、安全恢复 | 不把多节点调度塞回单机 Gateway 首版 |
+| 多前端 / App Server | 中立事件与命令、Web/Tauri 承载 | 不把前端连接当 Session 所有者 |
+| Workspace 统一存储 | workspace/session/memory 身份与唯一真账 | 不另造一套 project/session id |
+| Package / Skill / MCP | 能力发现、信任、挂载、执行与富结果 | 不把集群协议当扩展协议 |
+
+本单只能吃这些合同，不得另写一份相互打架的真值。
+
+## 三、当前真相：已有地基，不等于集群已成
+
+开工前须按当时 HEAD 重查。以下只记 2026-09-02 的仓库形状。
+
+### 3.1 LubanCore 仍未完成合同分离
+
+- CMake 已有 `lubancode_engine -> lubancode_runtime -> lubancode_core -> lubancode_app` 的目标层次。
+- 当前 `lubancode_core` 仍收着一部分 `src/cli/` 纯逻辑，是旧消费方不断链的兼容层。
+- `LubanCore与CLI分离_核心库独立成宿主底座设计.todo` 仍是待实现状态。
+- 故本单不得假定已有稳定、可发布、可多宿主接入的 LubanCore SDK。
+
+### 3.2 App Server 已证明“一进程多 Session”可行
+
+- `src/app_server/server.hpp` 以 `threads_` 保存多只 `ThreadRecord`。
+- 每只 `ThreadRecord` 各持 `SessionRuntime`、交互账、Goal、Loop 与回合线程。
+- `AcceptTurnStart` 用 `turn_running` 明拒同一 thread 同拍两轮。
+- 不同 thread 可各起工作线程，已有“同场单飞、跨场并发”的雏形。
+
+它仍不能冒充生产集群宿主：
+
+- WS 当前按一条前端连接服务，不是多用户订阅总线。
+- 断线会打断在跑回合，不符合“网页关了，Session 继续跑”的目标。
+- 无活连接时事件会丢，不符合按 durable cursor 补流。
+- 没有 tenant/user/project ACL、节点配额与跨进程 Worker 监督。
+- 一场一线程只是当前实现，未做高并发容量测量。
+
+### 3.3 当前 Gateway 是本机常驻骨架
+
+- 当前控制面是 profile 目录下的 `control.json` 与命令文件。
+- 它没有集群节点注册、网络心跳、租约、远程调度与多用户认证。
+- 后续即使复用名字，也要分清 `Local Gateway` 与 `Cluster Control Plane`。最好在代码合同里用不同类型，免得口头混成一团。
+
+### 3.4 Skill、MCP、Package 各有边界
+
+- Skill 是按需加载的说明与资源；读取 `SKILL.md` 不等于执行代码。
+- MCP 是长驻工具 RPC 进程；状态、凭证、浏览器页与 cookie 可能跨调用存活。
+- Package 是安装、分发与挂载外壳，不是执行主体。
+- Plugin/MCP 的 `permissions.network` 一类声明是策略材料，不自动等于 OS 隔离。
+- 集群只能搬运已冻结的能力快照与授权，不能把“发现到了”当“可以执行”。
+
+## 四、目标形态
+
+```text
+Browser / Desktop
+        │ HTTPS + WebSocket
+        ▼
+Cluster Control Plane
+  ├─ Identity / Tenant / ACL
+  ├─ Node Registry + Scheduler
+  ├─ Project / Session Catalog
+  ├─ Capability Registry
+  ├─ Audit / Quota / Policy
+  └─ Durable event cursor / command receipt
+        │ mTLS outbound connection
+        ├──────────────────────────────┐
+        ▼                              ▼
+Node Bridge A                     Node Bridge B
+  ├─ Supervisor                     ├─ Supervisor
+  ├─ Workspace/Worktree             ├─ Workspace/Worktree
+  ├─ Core Worker pool               ├─ Core Worker pool
+  │   ├─ Session A                  │   ├─ Session C
+  │   └─ Session B                  │   └─ Session D
+  ├─ MCP instances                  ├─ MCP instances
+  ├─ Secret resolution              ├─ Secret resolution
+  └─ Local durable spool            └─ Local durable spool
+```
+
+Node Bridge 主动连回 Control Plane。首版不要求每台节点开放公网入站端口。连接负责注册、心跳、命令、回执与事件同步；本地事实先落盘，再上报。
+
+## 五、领域对象与所有权
+
+底层不能硬套成一棵“服务器包含 Project，Project 包含 Session”的树。那只适合页面浏览，不适合身份与迁移。
+
+```text
+Tenant
+├─ User / Group / Role
+├─ Node
+├─ Project
+├─ SkillRelease / PackageRelease / McpDefinition
+├─ SecretRef / Policy / Quota
+└─ AuditEvent
+
+Project + Node -> WorkspaceBinding / Checkout
+WorkspaceBinding + SessionSpec -> Session
+Session + User -> SessionMembership
+Session -> CapabilitySnapshot
+Session -> zero or one active RuntimeLease
+```
+
+核心对象：
+
+| 对象 | 真正含义 | 主要写者 |
+|---|---|---|
+| Tenant | 组织或隔离域 | Control Plane |
+| User / Group | 登录主体与成员关系 | Identity service |
+| Node | 一台可调度宿主 | Control Plane 据 Bridge 租约投影 |
+| Project | 稳定项目身份，不从属于某台节点 | Control Plane |
+| WorkspaceBinding | Project 在某节点的一份 checkout/worktree | Node Bridge |
+| Session | 一场可恢复工作 | LubanCore/Trajectory 为执行事实写者 |
+| RuntimeLease | 哪只 Worker 此刻有权写这场 Session | Control Plane 发，Node Bridge 执行 |
+| CapabilitySnapshot | 本场钉住的模型、Skill、MCP、Package、策略与版本 | Session 创建/恢复裁决器 |
+| AuditEvent | 谁在何时发了什么控制命令 | Control Plane；节点附执行回执 |
+
+页面仍可给用户熟悉的三层入口：
+
+```text
+Server
+└─ Project checkout
+   └─ Session
+```
+
+另给 Project 视图：从一个 Project 反看它在哪些节点有 checkout、哪些 Session 在跑。
+
+## 六、LubanCore 宿主合同
+
+Node Bridge 不模拟终端，不拼 slash command，不读 CLI stdout。它只接 LubanCore 稳定 API。
+
+首批宿主接口暂拟：
+
+```text
+CreateSession(SessionSpec) -> SessionId
+ResumeSession(SessionId, ResumePolicy) -> ResumeOutcome
+CloseSession(SessionId, EndReason)
+
+AttachSubscriber(SessionId, cursor) -> EventStream
+DetachSubscriber(SessionId, subscriber_id)
+QuerySnapshot(SessionId) -> SessionSnapshot
+
+EnqueueTurn(SessionId, ActorContext, Input) -> CommandReceipt
+AnswerInteraction(SessionId, ActorContext, InteractionReply)
+InterruptTurn(SessionId, ActorContext, TurnId)
+PauseSession(SessionId, ActorContext)
+
+ListCapabilities(NodeContext) -> CapabilityInventory
+BindCapabilitySnapshot(SessionId, SnapshotId)
+```
+
+合同要求：
+
+1. Core 不 include CLI、App Server、Node Bridge 或 Web 头。
+2. Core 不读 stdin，不写 stdout/stderr 作为业务合同。
+3. Core 不依赖进程级可变 cwd；cwd、workspace、home、policy 全由 SessionSpec 注入。
+4. 一只 Host 可持多只相互隔离的 SessionRuntime。
+5. 全局可共享服务必须只读或线程安全；可变会话状态不得藏进单例。
+6. 事件有稳定 `session_id/turn_id/item_id/seq`，可先落账再投递。
+7. 宿主销毁不等于删除 Session；关闭、归档、删除各走各的状态机。
+
+## 七、多 Session 并发与容量
+
+### 7.1 并发铁律
+
+- 同一 Session 同时最多一枚 main turn。
+- 新输入先落队列，主泵在安全边界取下一枚。
+- 不同 Session 可以并发，但必须经过节点级调度器。
+- 子代理、Workflow 节点、MCP 调用可并发，仍吃 Session 与 Node 双层预算。
+- 同一工作目录有写冲突时，不因“Session 不同”便放行。
+
+### 7.2 在线与运行分账
+
+```text
+resident_sessions     已装入索引或可随时恢复
+attached_sessions     正有浏览器/客户端订阅
+running_turns         正在调用模型或执行工具
+waiting_interactions  等人审批/回答
+queued_turns          已接受、尚未开跑
+```
+
+这些数不能混成一个 `active_sessions`。
+
+### 7.3 节点配额
+
+每只 Node Bridge 上报静态能力与动态水位：
+
+```text
+os / arch / bridge_version / core_version
+cpu / memory / disk reserve
+gpu / toolchain / shell
+installed package and skill digests
+available MCP definitions
+resident_sessions / running_turns
+model_requests / build_jobs / browser_sessions
+queue_depth / last_heartbeat / drain_state
+```
+
+节点策略至少能限制：
+
+- 同时运行的 main turn 数；
+- 模型在飞请求数；
+- 构建/命令进程数；
+- 浏览器与 GUI 会话数；
+- MCP 实例数；
+- 单 Tenant、单 User、单 Project 的并发与每日预算；
+- 磁盘低水位后的新 Session 接纳。
+
+首版用有界 Worker pool，不用“一场 Session 永久占一条线程”。等待模型、审批与 timer 时须释放昂贵执行槽。
+
+### 7.4 Project 写冲突
+
+- 默认一场可写 Session 配一份独立 worktree。
+- 明确只读任务可共享 checkout。
+- 用户坚持共用目录时，须有 workspace write lease，并在 UI 明示冲突风险。
+- 构建缓存、下载缓存可共享；CMake build tree、编译中间物与可变工具状态默认隔离。
+
+## 八、多用户、权限与协作
+
+### 8.1 三层授权
+
+| 层 | 例子 |
+|---|---|
+| 组织角色 | tenant admin、node admin、auditor |
+| 资源 ACL | 谁能看某 Node、Project、Session |
+| 执行策略 | 能用哪些工具、MCP、Secret，危险动作是否须审批 |
+
+Session 角色首版可收成四档：
+
+- `viewer`：看事件、产物与状态；
+- `collaborator`：发消息、上传输入、写旁注；
+- `operator`：回答 AskUser、批准工具、暂停、恢复、打断；
+- `owner`：管理成员、策略、归档与删除。
+
+### 8.2 多人订阅与操作租约
+
+多人可同时观看同一 Session。首版只准一名 active operator 持短租约，处理会改变运行状态的动作。旁人仍可留言；留言先排队，逐条带 `actor_id`，不得冒充操作者直接插进 Agent 历史。
+
+所有命令至少携带：
+
+```text
+tenant_id
+actor_id
+session_id
+request_id
+expected_revision
+policy_version
+issued_at
+```
+
+浏览器声称的角色不算数。Control Plane 按登录态与资源 ACL 重验，Node Bridge 再校验已签命令、租约与目标 Session。
+
+### 8.3 审批归属
+
+- 审批单带 `session_id/turn_id/interaction_id/tool_execution_id`。
+- 只有当时有权的 operator/owner 可以回答。
+- 过期、换租约、回合已收口的答案一律回 `stale`。
+- `accept_for_session` 只写本场权限账，不上升成 Project 或 Tenant 永久授权。
+- 每次批准、拒绝、超时、撤销都落审计，不能只写聊天正文。
+
+## 九、Skill、Package 与能力快照
+
+### 9.1 Skill 作用域
+
+```text
+official -> tenant -> user -> project -> session
+```
+
+这只是候选来源，不是无条件“越近越赢”。Tenant 可以锁住合规 Skill，禁止用户用同名内容悄悄覆盖。
+
+Session 启动时生成 `EffectiveSkillSet`：
+
+```text
+canonical_id
+source_scope
+package_id / version
+content_hash
+trust_state
+allowed_resources
+resolved_precedence
+```
+
+恢复时优先取原哈希。原版不在节点上，Session 进入 `CapabilityDegraded`，让有权用户选择安装旧版、显式升级或只读打开。不得偷偷吃最新版。
+
+### 9.2 激活不等于执行
+
+- 发现 Skill：只把元数据列入目录。
+- 加载 Skill：只读 `SKILL.md` 与受控资源。
+- 执行脚本：必须另过 Tool/ExecutionProvider、权限、Secret、网络与沙箱合同。
+- 远端执行只传受控 workspace snapshot，不顺手带 `.env`、SSH key 与无关文件。
+
+### 9.3 Package
+
+- Package Release 用不可变 digest 标识。
+- 代码型 Plugin/MCP 挂载前须过信任与兼容检查。
+- Session 钉住 Package snapshot；升级只影响新 Session，或经显式迁移生成新 snapshot。
+- Project 安装、User 安装、Tenant 发布分开记，数据目录与包源码分离。
+
+## 十、MCP 生命周期与隔离
+
+MCP 拆成定义与实例：
+
+```text
+McpDefinition
+  command / args / protocol / tool schema
+  supported os/arch
+  SecretRefs / policy / timeout / limits
+  package digest
+
+McpInstance
+  node_id / worker_id / session_id
+  process generation / pid
+  health / pending calls / last activity
+```
+
+建议生命周期：
+
+| MCP 类型 | 默认隔离 |
+|---|---|
+| 无状态、无凭证、纯计算 | Tenant 级池，可复用 |
+| Project 数据库或索引 | Project + WorkspaceBinding |
+| 带个人账号凭证 | User + Session |
+| 浏览器、桌面、登录态 | Session 独占 |
+| 本地构建、文件系统 | Node + WorkspaceBinding |
+
+硬规矩：
+
+1. 不跨 Tenant 共用带状态 MCP。
+2. MCP annotations、tool hints 与声明权限只作参考，不替宿主授权。
+3. 迟到响应须按 transport generation 与 request id 丢回原账，不投给新实例。
+4. MCP 进程重启不等于原调用可重做；已开始副作用仍按 `indeterminate` 裁决。
+5. stderr、富结果与 artifact 都要过租户边界、大小帽与脱敏。
+
+## 十一、Secret
+
+Control Plane 与配置只流转 `SecretRef`：
+
+```text
+tenant_scope / user_scope / project_scope
+logical_name
+provider
+version
+allowed_consumers
+expires_at
+```
+
+明文由 Node Bridge 或受信宿主在最后一刻解析，只送进目标进程环境或宿主控制的请求头。不得进入模型上下文、Trajectory 正文、工具结果、MCP stderr、Telemetry、浏览器事件或 Web 日志。
+
+“有权使用”不等于“有权查看”。Secret 撤销后仍可打开历史，相关 MCP/工具调用则明确失败；不能拿旧 Session 快照复活已撤销凭证。
+
+## 十二、Session 生命周期与恢复
+
+### 12.1 生命周期
+
+```text
+Created
+  -> Queued
+  -> Starting
+  -> Running / WaitingInteraction / Idle
+  -> Paused
+  -> Recovering
+  -> CapabilityDegraded / NeedsReview
+  -> Closed
+  -> Archived
+  -> Deleted
+```
+
+`online/offline` 是连接投影，不是 Session 业务状态。
+
+### 12.2 三种“恢复”分开说
+
+1. **前端重连**：浏览器按 cursor 补事件，不动 Agent Runtime。
+2. **Runtime 重挂**：Worker 尚活，换一条订阅或控制租约继续看。
+3. **崩溃恢复**：旧调用栈已死，从 durable ledger 折叠状态，开新 Runtime 接续。
+
+心跳只能证明某条租约近日有续，不能替代这三种恢复。
+
+### 12.3 CapabilitySnapshot
+
+每场 Session 至少钉住：
+
+```text
+core / host protocol version
+model / provider / wire
+AgentProfile / PromptProfile
+Skill hashes
+Package digests
+MCP definitions and tool schemas
+policy version / permission mode
+SecretRef versions, not plaintext
+workspace identity / checkout / commit / worktree
+node capability requirements
+```
+
+恢复裁决：
+
+| 情形 | 结果 |
+|---|---|
+| 快照全齐、租约合法 | 原样恢复 |
+| 原节点失联，新节点能力全齐 | 首版仍人工迁移；后期可调度恢复 |
+| Skill/Package/MCP 缺失 | `CapabilityDegraded`，等待选择 |
+| Secret 已撤销 | 历史可读，相关能力禁用 |
+| 工具副作用终态不明 | `NeedsReview`，禁止自动重放 |
+| workspace/commit 对不上 | 停住，展示差异，不偷偷切目录 |
+
+恢复是“从旧场事实开新 Runtime”，不是 reopen 旧 Journal 继续追加。单写者与不可变封口规矩沿用 Trajectory。
+
+## 十三、连接、心跳、游标与租约
+
+### 13.1 Node Bridge 长连接
+
+- Node Bridge 主动以 mTLS 连 Control Plane。
+- 握手带 `node_id/boot_id/bridge_version/core_protocol/capabilities`。
+- 心跳带资源水位、运行 Session 摘要与最后 durable event cursor。
+- 断线先进入 `Suspect`，租约到期才判 `Offline`；网络抖一下不立刻重派工作。
+
+### 13.2 事件补流
+
+每条 Session 事件带单调 `seq`。客户端说“我看到了 1837”，服务端从 1838 补。Control Plane 可缓存投影，canonical 事实仍在节点 Trajectory；缓存丢了可按授权重新投影。
+
+首版不得出现：
+
+- 无订阅者便把事件永久丢掉；
+- 浏览器断线便自动打断 Session；
+- 把 WS 发送成功当 durable commit；
+- cursor 与 delivery ACK 混作一个数。
+
+### 13.3 单写者与 fencing
+
+每场可写 Session 只有一枚 `RuntimeLease{epoch, owner_node, owner_worker, expires_at}`。所有状态改变与事件提交都带 epoch。旧 Worker 即使网络恢复，也因 epoch 过期而失写权，不能与新 Worker 双写。
+
+只靠心跳而无 fencing，遇上网络分区必会裂脑。
+
+## 十四、进程形态与故障半径
+
+远期推荐：
+
+```text
+Node Bridge daemon
+  ├─ Core Worker process 1 -> Session A/B
+  ├─ Core Worker process 2 -> Session C/D
+  ├─ MCP child processes
+  └─ tool/background process trees
+```
+
+MVP 可先在一只 Node Bridge 进程内持多只 SessionRuntime，验证 Core Host API 与调度合同。进入多用户生产前，应重新裁决 Worker 进程隔离：
+
+- 一 Worker 一 Session：隔离强，进程与冷启动开销大；
+- 一 Worker 少量 Session：折中，崩溃只伤一小组；
+- 一 Bridge 全部 Session：最省事，故障半径最大，不宜直接当最终形态。
+
+不管哪种形态，外部命令、MCP、浏览器 sidecar 的进程树都须可监督、可取消、可清理。
+
+## 十五、分期与开工门
+
+### Gate -1：本单保持冻结
+
+- [ ] `LubanCore与CLI分离_核心库独立成宿主底座设计.todo` 全部验收通过。
+- [ ] 新的最小 headless host 只凭 public headers + library 创建一场 Session。
+- [ ] CLI 行为对照不变，core 反向依赖检查绿。
+
+没过这道门，只许更新设计，不写 Cluster Control Plane 生产代码。
+
+### Gate 0：单机多 Session 宿主
+
+- [ ] 一只 Host 创建、列出、暂停、关闭多场 Session。
+- [ ] 同场单飞，跨场有界并发；排队、公平与取消有 focused tests。
+- [ ] 前端断线不打断 Runtime；按 cursor 补回 durable events。
+- [ ] 共享 Project 的 worktree/write lease 规矩有测试。
+- [ ] 做 24 小时 soak 与固定语料容量测量，再定默认上限。
+
+### Gate 1：Node Bridge
+
+- [ ] 节点注册、mTLS、boot_id、心跳、租约、drain 与升级协议冻结。
+- [ ] Node Bridge 主动出站连接；断网后本地 spool 有界、可续传。
+- [ ] RuntimeLease 带 fencing epoch；旧 Worker 无法双写。
+- [ ] Bridge/Worker/MCP 崩溃分别注入，状态不冒充 clean。
+
+### Gate 2：多用户控制面
+
+- [ ] Tenant/User/Group/Role/ACL 数据模型与迁移完成。
+- [ ] viewer/collaborator/operator/owner 行为逐项验权。
+- [ ] 多人订阅、operator 租约、stale approval 有并发测试。
+- [ ] 所有命令有 actor、request id、revision、回执与审计。
+- [ ] 跨 Tenant 数据、artifact、日志、MCP 与 Secret 隔离测试零泄漏。
+
+### Gate 3：Skill/MCP/Package/Secret
+
+- [ ] CapabilitySnapshot 可冻结、比较、恢复与显式升级。
+- [ ] Skill 加载不触发执行；代码执行另过明确边界。
+- [ ] MCP 按 Tenant/User/Project/Session 生命周期隔离。
+- [ ] SecretRef 最后时刻解析，模型/账本/日志里搜不到明文。
+- [ ] 缺能力、撤 Secret、MCP 崩溃均进入稳定可解释状态。
+
+### Gate 4：跨节点恢复，另行裁决
+
+首版先不做热迁移。待前四道门跑稳，再单立设计，回答：
+
+- workspace 数据怎样到新节点；
+- 未提交文件修改怎样搬；
+- MCP/浏览器状态能否迁；
+- indeterminate 工具怎样人工裁决；
+- 大 artifact 与模型缓存怎样限流；
+- 节点回来后旧 Runtime 怎样 fencing。
+
+这些问题未答清，不许做“自动漂移 Session”的按钮。
+
+## 十六、验收证据
+
+任何阶段都按证据分层，不拿一张网页截图冒充集群可用：
+
+1. 协议解析与状态机单测；
+2. 单机多 Session focused tests；
+3. 多进程故障注入；
+4. 两节点真实网络断开、重连与补流；
+5. 多用户越权与跨 Tenant 泄漏测试；
+6. 固定负载下的 P50/P95、内存、句柄、线程、磁盘与队列水位；
+7. 长时 soak、低磁盘、MCP 卡死、模型超时与 Bridge 升级演练。
+
+未经真实测量，不写“支持上千 Session”“高可用”“无缝迁移”。只能写通过了哪只夹具、哪种故障、多少并发、跑了多久。
+
+## 十七、明确不做
+
+1. 不把 CLI 进程当 Node Bridge。
+2. 不让 Control Plane 直接摸节点文件系统。
+3. 不把主服务器数据库写成第二份 Session 真账。
+4. 不让浏览器连接拥有 Runtime 生命周期。
+5. 不因节点短暂失联便自动重跑工具。
+6. 不跨 Tenant 共享带状态 MCP、浏览器 profile 或用户凭证。
+7. 不把 Skill 内容、Package 发现或 MCP annotations 当授权。
+8. 不把 Secret 明文塞进模型、Trajectory、Telemetry 或调试日志。
+9. 不在 LubanCore 分离时顺手实现集群；两项各有验收门。
+10. 不先承诺跨节点热迁移，再倒推事实账与 fencing。
+
+## 十八、开工前仍须回答的问题
+
+- Tenant 是单组织部署，还是一套 Control Plane 托多个互不信任组织？
+- 用户身份先接本地账号、OIDC，还是企业 SSO？
+- Project 的稳定身份沿用 Git common dir 规则时，跨节点 clone 怎样映射同一 Project？
+- Control Plane 保存多少 Session 投影；节点离线时允许读到什么程度？
+- Core Worker 最终一场一进程，还是少量 Session 一进程？
+- 哪些 MCP 真能 Tenant 级复用，谁来出可共享证明？
+- operator 租约是否允许管理员强抢；强抢时在跑审批怎样收口？
+- Project 共用工作区的最低可接受策略是什么？
+- 节点升级与 Core 协议版本不一致时，兼容窗口多长？
+- Session 恢复缺旧 Skill/Package 时，旧包由谁保留、保留多久？
+
+这些答案会改变安全边界与数据模型。到真正开工那日，先复核源码与现有 TODO，再把本畅想拆成合同、控制面、Node Bridge、Web、多租户与能力治理六份实施单。
