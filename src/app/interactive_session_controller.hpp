@@ -121,6 +121,11 @@ public:
     // 主循环:读一行、分派一行,exit/quit 或 EOF 返回。
     void Run();
 
+    // /telemetry enable session(端云协同可观测单 T2,§24.2):当前进程内
+    // 装遥测服务——不动配置文件,下场会话回到 features.telemetry 真值。
+    // 回一组要打印的行(成没成、为什么)。
+    std::vector<std::string> EnableTelemetryForSession();
+
 private:
     // ---- 工具全栈的别名口(ToolRuntime 在构造函数体内 emplace,
     // 引用成员绑不了,统一走这几个窄口) ----

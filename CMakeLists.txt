@@ -634,6 +634,10 @@ add_library(lubancode_engine STATIC
   src/telemetry/batch_queue.cpp
   src/telemetry/spool.cpp
   src/telemetry/service.cpp
+  # T2(OTLP/HTTP 出口):单次 OTLP/HTTP JSON POST(cpr 底座)、§19.2/§19.3
+  # 重试/退避/partial success 分型、§8.4 consent 与回环/公网分界、
+  # §15.4 凭证 seam(装配层适配 runtime::SecretResolver)。
+  src/telemetry/exporter.cpp
 )
 target_include_directories(lubancode_engine PUBLIC
   ${CMAKE_CURRENT_SOURCE_DIR}/src

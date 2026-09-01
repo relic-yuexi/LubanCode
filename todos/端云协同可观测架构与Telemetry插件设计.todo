@@ -1,6 +1,6 @@
 # LubanCode 端云协同可观测架构与 Telemetry 插件设计
 
-- 状态：实现中——T0（合同与离线投影）、T1（本地 Service 与 Spool）已落地；T2（OTLP/HTTP 出口）起待做
+- 状态：实现中——T0（合同与离线投影）、T1（本地 Service 与 Spool）、T2（OTLP/HTTP 出口，回环验收；一条真实 Agent trace 在开源后端可查待真机环境）已落地；T3（系统指标与全链路补点）起待做
 - 日期：2026-08-31
 - 级别：P1；P0 Trajectory 单一事实账是前置依赖
 - 范围：端侧轻量采集、本地投影与缓存、OTLP 导出、云端 Gateway、端云策略、TelemetryConnector、全链路关联、故障排查与治理
@@ -1977,12 +1977,12 @@ lubancode.*              Luban 自有领域字段
 
 ### 阶段 T2：OTLP/HTTP 与本地 Collector
 
-- [ ] 严格 OTLP/HTTP JSON encoder。
-- [ ] cpr/libcurl exporter。
-- [ ] retry/partial success/ACK 语义。
-- [ ] consent、SecretRef、TLS 与回环/公网分界。
-- [ ] docker/local Collector 示例。
-- [ ] 一条真实 Agent trace 在开源后端可查。
+- [x] 严格 OTLP/HTTP JSON encoder。（T0 编码器直接复用：spool 段里的 payload 即已编码请求体，exporter 不重编码；回环假 collector 收到的 body 过 ValidateOtlpTracesJson 合同闸，tests/integration/telemetry/test_telemetry_otlp_export.cpp）
+- [x] cpr/libcurl exporter。（src/telemetry/exporter.*：单次 POST <endpoint>/v1/<signal>、总 Timeout、ProgressCallback 取消、批次识别头 x-lubancode-batch-id/projection-generation；出口线程在 service.cpp 的 ExportLoop/RunExportPass，业务线程 Notify 面零变化）
+- [x] retry/partial success/ACK 语义。（§19.2/§19.3：408/429/502/503/504 与 5xx/传输错可重试、指数退避+jitter+本地帽、尊重 Retry-After、尝试/年龄双限弃置记账；400/401/403/404 停该 endpoint 代报 doctor；partialSuccess 拒收点数入账不盲重试、全拒按可重试；Accepted→AckBatches 删段+退场水位+tombstone，删失败留 tombstone 防重复无限发）
+- [x] consent、SecretRef、TLS 与回环/公网分界。（§8.4：回环免披露、公网须 HTTPS+匹配 consent（endpoint/数据档/脱敏版本变更须重确认），/telemetry consent grant|revoke 与 <root>/consent.json；token 走 runtime::SecretResolver 装配适配（telemetry 在 engine 层不认 runtime，经 token_source 窄缝，即取即弃不落账面），禁 userinfo/query、hostname 校验无关闭口）
+- [x] docker/local Collector 示例。（docs/features/telemetry/collector.md：config 片段、otel-collector-config.yaml（debug/file 出口不出网）、docker-compose 与本地二进制两条路、命令速查与可靠性说明）
+- [ ] 一条真实 Agent trace 在开源后端可查。（受"不连真外部端点"红线限制未做：回环假 collector 已验合同与全链，真实后端（Jaeger/Prometheus 等）待真机环境补验）
 
 验收：断网、429、5xx、Collector 重启后补送；重复 batch 可识别；业务线程不等网络。
 

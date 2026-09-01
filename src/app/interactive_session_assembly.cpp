@@ -78,6 +78,7 @@
 #include "runtime/command_service.hpp"
 #include "runtime/event_sinks.hpp"
 #include "runtime/plan_mode.hpp"
+#include "runtime/secret_resolver.hpp"  // T2 遥测出口凭证(§15.4 唯一 owner)
 #include "runtime/session_runtime.hpp"
 #include "runtime/tool_trace_hub.hpp"
 #include "workspace/identity.hpp"  // P0-1:终端面 workspace 身份裁决
@@ -355,6 +356,66 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
     return wiring;
 }
 
+// 端云协同可观测单 T1/T2:遥测服务装配(构造函数与 EnableTelemetryForSession
+// 共用)。telemetry{} 段的 queue/spool/exporter 键折进 options(§24.1;
+// canonical 默认在 config::TelemetryConfig),出口 token 走 runtime::
+// SecretResolver(§15.4 不造第二份密钥管理;telemetry 在 engine 层不认
+// runtime,凭证经 token_source 这道窄缝递进去,值即取即弃不落任何账面)。
+std::unique_ptr<lubancode::telemetry::TelemetryService> AssembleTelemetryServiceForSession(
+    const lubancode::config::Config& config, bool config_telemetry,
+    const std::optional<std::string>& home_lubancode, bool trajectory_enabled,
+    lubancode::runtime::TrajectorySessionLedger* ledger, std::string* note) {
+    lubancode::telemetry::TelemetryAssemblyInputs telemetry_inputs;
+    telemetry_inputs.config_telemetry = config_telemetry;
+    telemetry_inputs.config_trajectory = trajectory_enabled;
+    if (home_lubancode.has_value()) {
+        telemetry_inputs.options.telemetry_root =
+            lubancode::tools::Utf8ToPath(*home_lubancode) / "telemetry";
+        telemetry_inputs.options.resource.service_version = std::string(lubancode::app::kVersion);
+        telemetry_inputs.options.resource.frontend = "terminal";
+    }
+    telemetry_inputs.options.queue.capacity_items =
+        static_cast<std::size_t>(config.telemetry.queue_capacity_items);
+    telemetry_inputs.options.queue.capacity_bytes =
+        static_cast<std::uint64_t>(config.telemetry.queue_capacity_bytes);
+    telemetry_inputs.options.spool_enabled = config.telemetry.spool_enabled;
+    telemetry_inputs.options.spool.total_bytes_cap =
+        static_cast<std::uint64_t>(config.telemetry.spool_max_bytes);
+    telemetry_inputs.options.spool.max_age_ms = config.telemetry.spool_max_age_hours * 3600 * 1000;
+    if (auto data_class = lubancode::telemetry::DataClassFromName(config.telemetry.data_class);
+        data_class.has_value()) {
+        telemetry_inputs.options.data_class = *data_class;
+    }
+    telemetry_inputs.options.exporter.endpoint = config.telemetry.exporter_endpoint;
+    telemetry_inputs.options.exporter.compression = config.telemetry.exporter_compression;
+    telemetry_inputs.options.exporter.timeout_ms = config.telemetry.exporter_timeout_ms;
+    telemetry_inputs.options.exporter.secret_ref = config.telemetry.exporter_secret_ref;
+    if (!config.telemetry.exporter_secret_ref.empty()) {
+        // 凭证适配(§15.4):EnvDotEnvSecretResolver 按声明解析(host feature
+        // 无插件数据目录,.env 来源没有,只有宿主环境);resolver 不缓存,
+        // 每次出口现读——轮换 Key 无需重启。
+        auto resolver = std::make_shared<lubancode::runtime::EnvDotEnvSecretResolver>();
+        lubancode::runtime::SecretDeclaration declaration;
+        declaration.id = "telemetry.exporter";
+        declaration.env = config.telemetry.exporter_secret_ref;
+        declaration.required = false;  // 缺失时匿名发,由 collector 裁
+        telemetry_inputs.options.exporter.token_source =
+            [resolver, declaration]() -> std::optional<std::string> {
+            auto resolved = resolver->Resolve(declaration);
+            if (!resolved.has_value() || !resolved->HasValue()) {
+                return std::nullopt;
+            }
+            return std::string(resolved->View());
+        };
+    }
+    auto service = lubancode::telemetry::TryAssembleTelemetryService(telemetry_inputs, note);
+    if (service != nullptr && ledger != nullptr) {
+        service->RegisterSession(ledger->workspace_key(), ledger->session_id(), ledger->session_dir());
+        ledger->SetTelemetryWake(service.get());
+    }
+    return service;
+}
+
 TerminalSessionController::TerminalSessionController(const InteractiveSessionOptions& options,
                                                      SessionStack& stack)
     : opts_(options),
@@ -470,31 +531,21 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     session_runtime_.AttachSink(&session_events_);
     trace_hub_->AttachSink(&session_events_);
 
-    // 端云协同可观测单 T1:features.telemetry 激活(且轨迹真开了)才装
+    // 端云协同可观测单 T1/T2:features.telemetry 激活(且轨迹真开了)才装
     // 本地遥测服务——TryAssemble 非 Active 一律 nullptr,零目录零线程
     // (§8.5);开了则注册本场 session 并把 committed wake 挂到账本。
+    // telemetry{} -> options 的折法在 AssembleTelemetryServiceForSession
+    // (EnableTelemetryForSession 复用同一份)。
     if (auto* ledger = session_runtime_.trajectory()) {
-        lubancode::telemetry::TelemetryAssemblyInputs telemetry_inputs;
-        telemetry_inputs.config_telemetry = config.features_telemetry;
-        telemetry_inputs.config_trajectory = session_runtime_.trajectory_enabled();
-        if (home_lubancode.has_value()) {
-            telemetry_inputs.options.telemetry_root =
-                lubancode::tools::Utf8ToPath(*home_lubancode) / "telemetry";
-            telemetry_inputs.options.resource.service_version =
-                std::string(lubancode::app::kVersion);
-            telemetry_inputs.options.resource.frontend = "terminal";
-        }
         std::string telemetry_note;
-        telemetry_service_ = lubancode::telemetry::TryAssembleTelemetryService(
-            telemetry_inputs, &telemetry_note);
-        if (telemetry_service_ != nullptr) {
-            telemetry_service_->RegisterSession(ledger->workspace_key(), ledger->session_id(),
-                                                ledger->session_dir());
-            ledger->SetTelemetryWake(telemetry_service_.get());
-        } else if (lubancode::telemetry::ResolveTelemetryActivation(
-                       telemetry_inputs.config_telemetry, telemetry_inputs.config_trajectory)
-                       .status ==
-                   lubancode::telemetry::TelemetryActivationStatus::RequiresTrajectory) {
+        telemetry_service_ = AssembleTelemetryServiceForSession(
+            config, config.features_telemetry, home_lubancode,
+            session_runtime_.trajectory_enabled(), ledger, &telemetry_note);
+        if (telemetry_service_ == nullptr &&
+            lubancode::telemetry::ResolveTelemetryActivation(
+                config.features_telemetry, session_runtime_.trajectory_enabled())
+                    .status ==
+                lubancode::telemetry::TelemetryActivationStatus::RequiresTrajectory) {
             // §8.2:telemetry 开了 trajectory 没开——明说,不暗开。
             TermErr() << theme.error << tr("error.prefix")
                       << "遥测需要轨迹账(features.trajectory)同开,本次未启用: "
@@ -1456,6 +1507,8 @@ void TerminalSessionController::AssembleDispatchContext() {
     ctx.trajectory = session_runtime_.trajectory();
     // T1 遥测:/telemetry 与 /doctor telemetry 的本地状态面(可空 = 未开)。
     ctx.telemetry_service = telemetry_service_.get();
+    // T2:/telemetry enable session 的执行体(当前进程内装,§24.2)。
+    ctx.enable_telemetry_session = [this]() { return EnableTelemetryForSession(); };
     ctx.session_events = &session_events_;
     ctx.session_store = &session_store;
     ctx.sessions_dir = &sessions_dir;
@@ -1602,6 +1655,52 @@ lubancode::agent::CompactOptions TerminalSessionController::BuildCompactOptions(
     // 几份。配置层已在合并时校验 2..8;这里只管带下来。
     options.partition_count = static_cast<std::size_t>(config.compact_partition_count);
     return options;
+}
+
+// ---------------------------------------------------------------------------
+// /telemetry enable session(端云协同可观测单 T2,§24.2):当前进程内开遥测。
+// 只影响本场会话,不写配置文件;下场会话回到 features.telemetry 真值。
+// 走 §8.2 同一道激活合同:trajectory 没开就明拒,不暗开。
+// ---------------------------------------------------------------------------
+std::vector<std::string> TerminalSessionController::EnableTelemetryForSession() {
+    std::vector<std::string> lines;
+    if (telemetry_service_ != nullptr) {
+        lines.push_back("遥测已在本场会话开着,无需再开。");
+        return lines;
+    }
+    auto* ledger = session_runtime_.trajectory();
+    if (ledger == nullptr || !session_runtime_.trajectory_enabled()) {
+        lines.push_back("开不了:本场会话的轨迹账(features.trajectory)没开,遥测没有事实源。");
+        lines.push_back("先用 /trajectory 开轨迹(或配置 features.trajectory=true)再开遥测。");
+        return lines;
+    }
+    const lubancode::telemetry::TelemetryActivation activation =
+        lubancode::telemetry::ResolveTelemetryActivation(true, true);
+    if (!activation.enabled()) {
+        lines.push_back("开不了: " + activation.reason_code + "(环境变量把遥测关死了,配置改不动它)");
+        return lines;
+    }
+    std::string note;
+    telemetry_service_ = AssembleTelemetryServiceForSession(
+        config, /*config_telemetry=*/true, home_lubancode,
+        session_runtime_.trajectory_enabled(), ledger, &note);
+    if (telemetry_service_ == nullptr) {
+        lines.push_back("开不出: " + note);
+        return lines;
+    }
+    const auto status = telemetry_service_->Status();
+    lines.push_back("遥测已在本场会话开启(只本场;配置文件未动)。");
+    lines.push_back("投影根目录: " +
+                    lubancode::tools::PathToUtf8(telemetry_service_->options().telemetry_root));
+    if (status.exporter.configured) {
+        lines.push_back("出口: " + status.exporter.endpoint_display +
+                        (status.exporter.gate_reason.empty()
+                             ? std::string()
+                             : (" [待办: " + status.exporter.gate_reason + "]")));
+    } else {
+        lines.push_back("出口: 未配置 endpoint,本地投影+spool,不出网。");
+    }
+    return lines;
 }
 
 }  // namespace lubancode::app
