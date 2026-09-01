@@ -371,7 +371,9 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
                      const CliOptions& cli_options) {
     lubancode::app_server::ServerOptions options;
     if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
-        options.sessions_dir = *luban_dir + "/sessions";
+        options.sessions_dir = *luban_dir + "/sessions";  // P0-2 起不消费(P0-6 删)
+        // P0-2:会话账走唯一持久化根 workspaces/。
+        options.workspaces_dir = *luban_dir + "/workspaces";
         // wf 线的 run 账根(workflow/query 的快照与增量事件从这里读)。
         options.workflow_runs_dir = *luban_dir + "/workflow-runs";
     }
@@ -393,9 +395,8 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
             break;
     }
     options.session_model = config_result.config.model;
-    // P0-2 轨迹:与终端同一颗 flag(features.trajectory + 环境变量)。
-    options.features_trajectory =
-        lubancode::runtime::ResolveTrajectoryEnabled(config_result.config.features_trajectory);
+    // P0-2(Trajectory 升为唯一 Session):feature/env 开关已删,thread 恒走
+    // Trajectory 账(server.hpp 的 features_trajectory 字段退役中,P0-6 删)。
     // 浏览器面(可见调试阶段 3):sidecar 命令解析——环境变量
     // LUBAN_BROWSER_SIDECAR 指到 browser/sidecar.js 优先;没指则按可执行
     // 文件旁边与当前目录找 browser/sidecar.js。找不到就不配(browser/*
@@ -583,11 +584,11 @@ int RunCli(const std::vector<std::string>& args) {
             }
             const lubancode::cli::Theme manage_theme = lubancode::cli::ResolveTheme(
                 std::string(), lubancode::cli::DetectConsoleCapability().colors_enabled);
-            return HandleSessionManagementCommand(*luban_dir + "/sessions",
-                                                  static_cast<int>(parsed_cli.session_command.kind),
-                                                  parsed_cli.session_command.session_ref,
-                                                  parsed_cli.session_command.force, manage_theme,
-                                                  nullptr);
+            // P0-2:搬删走 workspace 新账(不进会话;索引定位 + 管理面)。
+            return HandleSessionManagementCommand(
+                lubancode::tools::Utf8ToPath(*luban_dir) / "workspaces",
+                static_cast<int>(parsed_cli.session_command.kind), parsed_cli.session_command.session_ref,
+                parsed_cli.session_command.force, manage_theme, nullptr);
         }
     }
     const CliOptions& cli_options = parsed_cli.options;

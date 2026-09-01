@@ -18,6 +18,7 @@
 #include <memory>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include <nlohmann/json.hpp>
@@ -32,7 +33,9 @@
 #include "runtime/command_service.hpp"
 #include "runtime/interaction_broker.hpp"
 #include "runtime/session_runtime.hpp"
+#include "runtime/trajectory_session.hpp"
 #include "tools/registry.hpp"
+#include "workspace/identity.hpp"
 
 namespace rt = lubancode::runtime;
 using namespace lubancode;
@@ -397,48 +400,93 @@ TEST_CASE("SetModel:active_provider 在场写 provider 条目,各记各的模型
     }
 }
 
-TEST_CASE("ResumeThread:序号、id、空串三条解析路,旧账接上") {
+TEST_CASE("ResumeThread:序号、id、空串三条解析路,新账接上") {
+    // P0-2(Trajectory 升为唯一 Session):列表读 workspace 索引,恢复走
+    // resume 七步(source 只读,新场 start_reason=resume)。
     TempSessionsDir dir;
-    const std::string id_a = WriteSampleSession(dir.path(), "第一场");
-    const std::string id_b = WriteSampleSession(dir.path(), "第二场");
+    const std::filesystem::path root = dir.path();
+    const std::filesystem::path workspaces = root / "workspaces";
+    std::filesystem::create_directories(root / "repo");
+    const auto identity = workspace::MakeFallbackIdentity(root / "repo");
 
+    // 先开 runtime(它自己的空场最旧,排列表末尾,不干扰序号语义)。
     NullBackend backend;
     tools::ToolRegistry registry;
     agent::AgentRuntimeProfile profile;
     agent::Agent loop(backend, registry, [&] { agent::AgentProfile out; out.runtime = profile; out.system_prompt = "resume-test"; return out; }());
-    rt::SessionRuntime runtime({dir.path(), "anthropic", "20260823-130000"});
+    rt::SessionRuntime::Options runtime_options;
+    runtime_options.trajectory_workspace_identity = identity;
+    runtime_options.trajectory_workspaces_root = workspaces;
+    rt::SessionRuntime runtime(runtime_options);
+    REQUIRE(runtime.trajectory() != nullptr);
+
+    // 造两场封了口的会话(各一条 user 输入 + 一条 assistant 输出)。
+    // 间隔 3ms 造场:updated_at 的排序才稳定(同毫秒会落进随机 id 的
+    // 决胜局,顺序不可复现)。
+    const auto make_session = [&](const std::string& text) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
+        rt::TrajectorySessionLedger::Options options;
+        options.workspaces_root = workspaces;
+        options.workspace_identity = identity;
+        options.lubancode_version = "test";
+        auto ledger = rt::TrajectorySessionLedger::Open(options);
+        REQUIRE(ledger.has_value());
+        auto bridge = ledger->NewTurnBridge({"demo", "responses", "terminal"});
+        REQUIRE(bridge != nullptr);
+        bridge->BeginTurn("turn-1", "external_user");
+        api::Message input;
+        input.role = api::Role::User;
+        input.content.push_back(api::TextBlock{text});
+        bridge->RecordInput(input);
+        api::Request prepared;
+        prepared.model = "m1";
+        const std::string request = bridge->OnRequestPrepared(prepared, agent::RequestPreparedContext{});
+        REQUIRE_FALSE(request.empty());
+        bridge->OnRequestSent(request);
+        api::Message answer;
+        answer.role = api::Role::Assistant;
+        answer.content.push_back(api::TextBlock{"回一句"});
+        REQUIRE(bridge->OnOutputCompleted(request, answer, "end_turn", "resp-1"));
+        bridge->EndTurn(true, false, "done");
+        const std::string id = ledger->session_id();
+        (void)ledger->CloseSession("exit");
+        return id;
+    };
+    const std::string id_a = make_session("第一场");
+    const std::string id_b = make_session("第二场");
 
     rt::CommandService::Options options = BaseOptions();
-    options.sessions_dir = dir.path();
+    options.workspaces_root = workspaces;
+    options.workspace_key = identity.workspace_key;
     rt::CommandService service(options);
 
-    // 列表:倒序,第二场在前。
+    // 列表:updated 倒序——第二场在前、第一场次之(runtime 的空场最旧,
+    // 排末尾;计数把它算进来,共 3)。
     const auto list = service.ListThreads();
-    REQUIRE(list.size() == 2);
+    REQUIRE(list.size() == 3);
     CHECK(list[0].index == 1);
     CHECK(list[0].id == id_b);
     CHECK(list[1].id == id_a);
 
-    // 按序号恢复(1 = 最近一场)。
+    // 按序号恢复(1 = 最近一场):折叠投影 2 条(一问一答)。
     auto result = service.ResumeThread(loop, runtime, "1", "/tmp");
     CHECK(result.resumed);
     CHECK(result.id == id_b);
     CHECK(result.restored_messages == 2);
     CHECK(loop.History().size() == 2);
-    CHECK(runtime.store().active());
-    CHECK(runtime.persisted_count() == 2);
-    CHECK(runtime.meta().model == "old-model");
+    CHECK(runtime.trajectory() != nullptr);
+    CHECK(runtime.trajectory()->session_id() != id_b);  // resume 开的是新场
+
+    // 空串 = 最近一场可恢复的(跳过本进程 active 的那场——上一步 resume
+    // 开出的新场;此刻最近的可恢复场就是第二场)。
+    result = service.ResumeThread(loop, runtime, "", "/tmp");
+    CHECK(result.resumed);
+    CHECK(result.id == id_b);
 
     // 按 id 恢复(旧场)。
     result = service.ResumeThread(loop, runtime, id_a, "/tmp");
     CHECK(result.resumed);
     CHECK(result.id == id_a);
-    CHECK(runtime.title().empty());  // 没写过 title 事件
-
-    // 空串 = 最近一场。
-    result = service.ResumeThread(loop, runtime, "", "/tmp");
-    CHECK(result.resumed);
-    CHECK(result.id == id_b);
 
     // 越界序号:如实拒。
     CHECK_FALSE(service.ResumeThread(loop, runtime, "9", "/tmp").resumed);

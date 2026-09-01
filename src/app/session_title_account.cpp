@@ -10,14 +10,36 @@
 namespace lubancode::app {
 
 SessionTitleAccount::SessionTitleAccount(std::string& title, bool& pending,
-                                         lubancode::sessions::SessionStore& store, bool& store_broken)
-    : title_(title), pending_(pending), store_(store), store_broken_(store_broken) {}
+                                         lubancode::sessions::SessionStore& store, bool& store_broken,
+                                         lubancode::runtime::TrajectorySessionLedger* ledger)
+    : title_(title), pending_(pending), store_(store), store_broken_(store_broken), ledger_(ledger) {}
+
+// P0-2:账本在,标题真账就是 control.title.changed;"档子活没活"看
+// ledger 的 main recorder。
+bool SessionTitleAccount::LedgerActive() const {
+    return ledger_ != nullptr && ledger_->main() != nullptr;
+}
+
+bool SessionTitleAccount::AppendTitleEvent(const std::string& title) {
+    if (ledger_ != nullptr) {
+        if (!LedgerActive()) {
+            return false;
+        }
+        std::string old;
+        if (!title_.empty() && title_ != title) {
+            old = title_;
+        }
+        ledger_->RecordTitleChanged(title, old);
+        return true;  // 落账失败由 ledger 记 I/O 错误(/doctor trajectory 可查)
+    }
+    return store_.AppendTitleEvent(title);
+}
 
 SessionTitleAccount::LocalResult SessionTitleAccount::BeginLocalTitle(const std::string& first_query) {
     if (auto_attempted_ || pending_ || !title_.empty()) {
         return LocalResult::NoNeed;
     }
-    if (store_broken_ || !store_.active()) {
+    if (ledger_ == nullptr && (store_broken_ || !store_.active())) {
         return LocalResult::NoNeed;  // 没建档就没什么好起名的,/title 的人工路径照旧
     }
     auto_attempted_ = true;  // 一场只试一次,失败安静降级
@@ -32,7 +54,7 @@ SessionTitleAccount::LocalResult SessionTitleAccount::BackfillOnResume(const std
     generation_++;
     refiner_.RequestCancel();  // 上一场迟到的精炼结果不许落进新场子的存档
     auto_attempted_ = true;    // 恢复的场子不走"首问自动起名"路
-    if (!title_.empty() || store_broken_ || !store_.active()) {
+    if (!title_.empty() || (ledger_ == nullptr && (store_broken_ || !store_.active()))) {
         return LocalResult::NoNeed;
     }
     const std::string local = lubancode::app::LocalSessionTitle(first_user_text);
@@ -51,11 +73,11 @@ SessionTitleAccount::AdoptResult SessionTitleAccount::AdoptRefined(
     if (outcome.generation != generation_) {
         return AdoptResult::Ignored;  // 人工 /title、/clear 或 resume 抢先:迟到的自动结果丢弃
     }
-    if (store_broken_ || !store_.active()) {
+    if (ledger_ == nullptr ? (store_broken_ || !store_.active()) : !LedgerActive()) {
         return AdoptResult::Ignored;  // 场子没了:标题无处落,不追着写
     }
     title_ = outcome.title;
-    if (!store_.AppendTitleEvent(title_)) {
+    if (!AppendTitleEvent(title_)) {
         // 落不了盘就不占内存标题(老规矩),/sessions 仍用首句摘要。
         title_.clear();
         return AdoptResult::WriteFailed;
@@ -74,7 +96,7 @@ void SessionTitleAccount::ResetForNewSession() {
 SessionTitleAccount::LocalResult SessionTitleAccount::AdoptLocalTitle(const std::string& local,
                                                                       bool quiet_on_failure) {
     title_ = local;
-    if (!store_.AppendTitleEvent(title_)) {
+    if (!AppendTitleEvent(title_)) {
         // 落不了盘就不占内存标题(老规矩),/sessions 仍用首句摘要。
         title_.clear();
         return quiet_on_failure ? LocalResult::NoNeed : LocalResult::WriteFailed;

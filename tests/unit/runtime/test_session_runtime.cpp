@@ -1,12 +1,14 @@
 // SessionRuntime 单测(显示系统剥离单第六步:拆 SessionRuntime)。
 //
-// 钉的是搬出来那半账本的语义(原文自 InteractiveSession 的 EnsureSessionBegun
-// /PersistNewMessages,一字不改,只是不再自己打印):
-//   1. 建档:首条文本做 slug、meta 填账、建档前挂起的标题补事件行;
-//   2. 增量落盘:只追加 persisted_count 之后的消息;换短历史后基线钳回;
-//   3. 失败路径:Begin 失败置 broken,后续不再撞;
-//   4. 权限账与 thread 身份:IdAuthority 发号、always_allowed 直通;
-//   5. MakeTurnAdapter:同一 thread_id、同一发号局,事件落 AttachSink。
+// P0-2(Trajectory 升为唯一 Session):旧 SessionStore 建档/轮末补抄路停用
+// ——EnsureBegun 恒 Disabled、PersistNew 恒 Nothing,会话真账在 ctor 里恒开
+// 的 TrajectorySessionLedger。旧路的建档语义(首句 slug、标题补行、增量
+// 落盘、broken 账)随旧档退役,由 P0-5 迁移器/P0-6 删码收口;这里钉的是
+// 新语义 + 与旧 Store 无关的部分:
+//   1. ledger 恒开:临时根下出 workspace/session 目录与 main.jsonl;
+//   2. EnsureBegun/PersistNew 的退役语义(Disabled/Nothing);
+//   3. 权限账与 thread 身份:IdAuthority 发号、always_allowed 直通;
+//   4. MakeTurnAdapter:同一 thread_id、同一发号局,事件落 AttachSink。
 
 #include <doctest/doctest.h>
 
@@ -28,6 +30,7 @@
 #include "runtime/id_authority.hpp"
 #include "runtime/session_runtime.hpp"
 #include "tools/registry.hpp"
+#include "workspace/identity.hpp"
 
 namespace rt = lubancode::runtime;
 using namespace lubancode;
@@ -76,67 +79,38 @@ public:
 
 }  // namespace
 
-TEST_CASE("SessionRuntime:建档用首句做 slug,挂起标题补事件行") {
+TEST_CASE("SessionRuntime:账本恒开,workspace/session 目录在临时根下") {
     TempSessionsDir dir;
-    rt::SessionRuntime runtime({dir.path(), "anthropic", "20260823-120000"});
-    CHECK(runtime.store().session_id().empty());
-
-    runtime.title() = "起个名字";
-    runtime.title_pending() = true;
-    const auto begun = runtime.EnsureBegun("第一句话", "test-model", "/tmp");
-    CHECK(begun == rt::SessionBeginResult::Begun);
-    CHECK(runtime.store().active());
-    CHECK(runtime.store().session_id().find("第一句话") != std::string::npos);
-    CHECK_FALSE(runtime.title_pending());
-
-    // 建过档再 Ensure:Active,不重复建。
-    CHECK(runtime.EnsureBegun("另一句", "test-model", "/tmp") == rt::SessionBeginResult::Active);
-    CHECK(runtime.meta().model == "test-model");
-    CHECK(runtime.meta().wire == "anthropic");
+    rt::SessionRuntime::Options options;
+    options.trajectory_workspaces_root = dir.path() + "/workspaces";
+    std::error_code ec;
+    std::filesystem::create_directories(dir.path() + "/repo", ec);
+    options.trajectory_workspace_identity = workspace::MakeFallbackIdentity(
+        std::filesystem::path(dir.path()) / "repo");
+    options.lubancode_version = "test";
+    rt::SessionRuntime runtime(std::move(options));
+    REQUIRE(runtime.trajectory() != nullptr);
+    CHECK(std::filesystem::exists(runtime.trajectory()->session_dir() / "main.jsonl"));
+    CHECK_FALSE(runtime.trajectory()->session_id().empty());
+    CHECK(runtime.trajectory_open_error().empty());
 }
 
-TEST_CASE("SessionRuntime:增量落盘只追新消息,基线只收不放") {
+TEST_CASE("SessionRuntime:旧档建档/轮末补抄退役(Disabled/Nothing)") {
     TempSessionsDir dir;
-    rt::SessionRuntime runtime({dir.path(), "anthropic", "20260823-120001"});
+    rt::SessionRuntime::Options options;
+    options.trajectory_workspaces_root = dir.path() + "/workspaces";
+    std::error_code ec;
+    std::filesystem::create_directories(dir.path() + "/repo", ec);
+    options.trajectory_workspace_identity = workspace::MakeFallbackIdentity(
+        std::filesystem::path(dir.path()) / "repo");
+    rt::SessionRuntime runtime(std::move(options));
+    // P0-2:单一真账在 Trajectory Journal——旧 SessionStore 不建档、轮末
+    // 不补抄;标题等控制事实走 control.* 事件(RecordTitleChanged)。
+    CHECK(runtime.EnsureBegun("第一句话", "test-model", "/tmp") == rt::SessionBeginResult::Disabled);
+    CHECK_FALSE(runtime.store().active());
     std::vector<api::Message> history = {UserText("问"), AssistantText("答")};
-    CHECK(runtime.PersistNew(history, "m", "/tmp") == rt::SessionPersistResult::Appended);
-    CHECK(runtime.persisted_count() == 2);
-
-    // 没新消息:Nothing。
-    CHECK(runtime.PersistNew(history, "m", "/tmp") == rt::SessionPersistResult::Nothing);
-
-    history.push_back(UserText("再问"));
-    CHECK(runtime.PersistNew(history, "m", "/tmp") == rt::SessionPersistResult::Appended);
-    CHECK(runtime.persisted_count() == 3);
-
-    // 压缩换史(/compact 语义):基线钳到新长度,旧账不重写。
-    history.resize(1);
-    runtime.ClampPersisted(history.size());
-    CHECK(runtime.persisted_count() == 1);
-}
-
-TEST_CASE("SessionRuntime:Begin 失败置 broken,后续落盘安静跳过") {
-    // 目录指到一个文件占着的路径:create/Mkdir 失败,Begin 报 false。
-    TempSessionsDir dir;
-    const std::string blocker = dir.path() + "/blocker";
-    {
-        std::ofstream out(blocker, std::ios::binary);
-        out << "x";
-    }
-    rt::SessionRuntime runtime({blocker, "anthropic", "20260823-120002"});
-    const auto begun = runtime.EnsureBegun("问一句", "m", "/tmp");
-    CHECK(begun == rt::SessionBeginResult::Failed);
-    CHECK(runtime.store_broken());
-    // broken 之后:不撞第二次,Nothing 收场。
-    std::vector<api::Message> history = {UserText("问")};
-    CHECK(runtime.PersistNew(history, "m", "/tmp") == rt::SessionPersistResult::Nothing);
-}
-
-TEST_CASE("SessionRuntime:sessions_dir 空 = 不落盘") {
-    rt::SessionRuntime runtime({"", "anthropic", "20260823-120003"});
-    std::vector<api::Message> history = {UserText("问")};
-    CHECK(runtime.PersistNew(history, "m", "/tmp") == rt::SessionPersistResult::Nothing);
-    CHECK(runtime.EnsureBegun("问", "m", "/tmp") == rt::SessionBeginResult::Disabled);
+    CHECK(runtime.PersistNew(history, "test-model", "/tmp") == rt::SessionPersistResult::Nothing);
+    CHECK(runtime.persisted_count() == 0);
 }
 
 TEST_CASE("SessionRuntime:thread 身份、发号局与权限账") {

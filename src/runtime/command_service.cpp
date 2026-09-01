@@ -7,6 +7,8 @@
 // cli/app,不碰标准流。
 
 #include "runtime/command_service.hpp"
+
+#include "trajectory/session_index.hpp"
 #include "agent/agent.hpp"  // Agent::ReplaceHistory:resume 换史(批四自立门户后的完整类型)
 
 #include <algorithm>
@@ -190,23 +192,26 @@ SetRoleModelResult CommandService::SetRoleModel(const std::string& role_name, co
 // ---- ResumeThread -------------------------------------------------------------
 
 std::vector<ThreadListEntry> CommandService::ListThreads(std::size_t limit) const {
+    // P0-2:列表读 workspace 可重建索引(当前 workspace,按 updated 新→旧);
+    // 旧平铺 sessions/ 扫档路退役,索引坏了就地重建,不为列表重放 Journal。
     std::vector<ThreadListEntry> out;
-    if (options_.sessions_dir.empty()) {
-        return out;  // 没主目录:空清单,不冒充
+    if (options_.workspaces_root.empty()) {
+        return out;  // 没账根:空清单,不冒充
     }
-    // cwd 过滤不做(远端前端看得见全部场子,自己按 cwd 列组);resume 的
-    // 序号以这份清单为准。
-    const std::vector<sessions::SessionListEntry> entries = sessions::ListSessions(options_.sessions_dir, limit);
-    out.reserve(entries.size());
+    trajectory::SessionIndexQuery query;
+    query.current_workspace_key = options_.workspace_key;
+    query.limit = limit > 0 ? limit : 20;
+    const auto page = trajectory::QueryWorkspaceSessions(options_.workspaces_root, query);
+    out.reserve(page.entries.size());
     std::size_t index = 1;
-    for (const auto& entry : entries) {
+    for (const auto& entry : page.entries) {
         ThreadListEntry item;
-        item.id = entry.id;
-        item.started_at = entry.started_at;
+        item.id = entry.session_id;
+        item.started_at = trajectory::FormatMillisAsLocalTimestamp(entry.created_at_ms);
         item.cwd = entry.cwd;
         item.title = entry.title;
         item.first_user_text = entry.first_user_text;
-        item.message_count = entry.message_count;
+        item.message_count = static_cast<std::size_t>(entry.message_count);
         item.index = index++;
         out.push_back(std::move(item));
     }
@@ -215,18 +220,17 @@ std::vector<ThreadListEntry> CommandService::ListThreads(std::size_t limit) cons
 
 ResumeResult CommandService::ResumeThread(agent::Agent& loop, SessionRuntime& runtime,
                                           const std::string& thread_ref, const std::string& cwd) {
+    (void)cwd;
     ResumeResult out;
-    if (runtime.sessions_dir().empty()) {
-        out.error = "no_home";
+    // P0-2:恢复走账本的 resume 七步(§10.4)——source 只读验账,当前场
+    // 以 switch_to_resume 封口,新场 start_reason=resume 开张;回的 history
+    // 是折叠投影。旧 SessionStore 的接管追加路不存在了。
+    TrajectorySessionLedger* ledger = runtime.trajectory();
+    if (ledger == nullptr) {
+        out.error = "no_session_ledger";
         return out;
     }
-    // 目标解析:空串 = 最近一场;纯数字 = 列表序号(倒序,1 起);其余按
-    // id 找,不在前列就拼路径兜底(与终端 ResumeSession 同规矩,只是这里
-    // 不限"本目录"——远端前端看得见全部场子)。
-    const std::vector<sessions::SessionListEntry> entries =
-        sessions::ListSessions(runtime.sessions_dir(), 200, /*cwd_filter=*/std::string());
-    std::string id;
-    std::string file_path;
+    std::string target = thread_ref;
     bool all_digits = !thread_ref.empty();
     for (const char c : thread_ref) {
         if (c < '0' || c > '9') {
@@ -234,65 +238,43 @@ ResumeResult CommandService::ResumeThread(agent::Agent& loop, SessionRuntime& ru
             break;
         }
     }
-    if (thread_ref.empty()) {
-        if (entries.empty()) {
-            out.error = "none";
-            return out;
-        }
-        id = entries.front().id;
-        file_path = entries.front().file_path;
-    } else if (all_digits) {
+    if (all_digits) {
         std::size_t n = 0;
         try {
             n = static_cast<std::size_t>(std::stoul(thread_ref));
         } catch (...) {
             n = 0;
         }
-        if (n < 1 || n > entries.size()) {
+        trajectory::SessionIndexQuery query;
+        query.current_workspace_key = ledger->workspace_key();
+        const auto page = ledger->ListWorkspaceSessions(query);
+        if (n < 1 || n > page.entries.size()) {
             out.error = "out_of_range";
             return out;
         }
-        id = entries[n - 1].id;
-        file_path = entries[n - 1].file_path;
-    } else {
-        for (const auto& entry : entries) {
-            if (entry.id == thread_ref) {
-                id = entry.id;
-                file_path = entry.file_path;
-                break;
-            }
-        }
-        if (id.empty()) {
-            id = thread_ref;
-            file_path = runtime.sessions_dir() + "/" + thread_ref + ".jsonl";
+        target = page.entries[n - 1].session_id;
+    } else if (target.empty()) {
+        target = ledger->LatestResumableSessionId();
+        if (target.empty()) {
+            out.error = "none";
+            return out;
         }
     }
-
-    const auto content = sessions::ReadSessionFileBytes(file_path);
-    if (!content.has_value()) {
-        out.error = "read_failed";
+    const TrajectoryResumeSummary summary = ledger->ResumeInteractive(target, "resume");
+    if (!summary.outcome.error_code.empty()) {
+        out.error = summary.outcome.error_code;
         return out;
     }
-    auto session = sessions::ParseSessionFile(*content);
-    if (!session.has_value()) {
-        out.error = "bad_meta";
-        return out;
-    }
-
-    loop.ReplaceHistory(session->messages);
-    runtime.persisted_count() = session->messages.size();
-    (void)runtime.store().ResumeAt(file_path, id);
-    runtime.meta() = session->meta;
-    runtime.title() = session->title;
-    runtime.compact_epoch() = session->compact_epoch;
-    (void)cwd;
-
+    loop.RestoreSessionHistory(summary.history);
+    runtime.persisted_count() = summary.history.size();
+    runtime.title() = summary.outcome.control.title.value_or(std::string());
+    runtime.compact_epoch() = summary.outcome.control.compact_epoch;
     out.resumed = true;
-    out.id = id;
-    out.restored_messages = session->messages.size();
-    out.total_lines = session->all_messages.size();
-    out.compact_epoch = session->compact_epoch;
-    out.title = session->title;
+    out.id = summary.outcome.source_session_id;
+    out.restored_messages = summary.history.size();
+    out.total_lines = static_cast<std::size_t>(summary.outcome.source_event_count);
+    out.compact_epoch = summary.outcome.control.compact_epoch;
+    out.title = summary.outcome.control.title.value_or(std::string());
     return out;
 }
 

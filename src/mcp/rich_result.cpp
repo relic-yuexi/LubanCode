@@ -183,7 +183,9 @@ std::string LandToolArtifact(const std::string& artifact_dir, const std::string&
         return std::string();
     }
     const std::string sha = hooks::Sha256Hex(bytes);
-    const std::string filename = "art-" + sha.substr(0, 8) + "." + extension;
+    // P0-2:文件名即内容地址(全 hash;目录是 session artifacts/sha256/,
+    // hash 即地址,同字节天然去重)。id 保留 art-<sha8> 短形(会话内引用)。
+    const std::string filename = sha + "." + extension;
     const std::filesystem::path dir = platform::Utf8ToPath(artifact_dir);
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
@@ -296,7 +298,7 @@ CallToolParseResult ParseCallToolResult(const nlohmann::json& result, const Call
                 out.landed_bytes += decoded->size();
                 tools::ArtifactRef artifact;
                 artifact.id = "art-" + sha.substr(0, 8);
-                artifact.filename = "art-" + sha.substr(0, 8) + "." + ExtensionForMime(*mime);
+                artifact.filename = sha + "." + ExtensionForMime(*mime);
                 artifact.path = relative;
                 artifact.mime_type = *mime;
                 artifact.bytes = decoded->size();

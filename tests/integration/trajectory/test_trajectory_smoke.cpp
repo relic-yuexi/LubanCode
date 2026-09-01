@@ -508,14 +508,14 @@ TEST_CASE("目录制: workspace_key、session 树、session.json 原子写、占
         auto workspace = TrajectoryDirectory::CreateWorkspace(root, identity, 1000);
         REQUIRE(workspace.has_value());
         const auto key = identity.workspace_key;
-        CHECK(std::filesystem::exists(root / "workspaces" / key / "workspace.json"));
-        CHECK(std::filesystem::exists(root / "workspaces" / key / "sessions"));
-        CHECK(std::filesystem::exists(root / "workspaces" / key / "lifecycle"));
-        CHECK(std::filesystem::exists(root / "workspaces" / key / "tombstones"));
+        CHECK(std::filesystem::exists(root / key / "workspace.json"));
+        CHECK(std::filesystem::exists(root / key / "sessions"));
+        CHECK(std::filesystem::exists(root / key / "lifecycle"));
+        CHECK(std::filesystem::exists(root / key / "tombstones"));
         // 二次创建不覆盖首仓(created_at 以旧账为准),只更新登记。
         auto again = TrajectoryDirectory::CreateWorkspace(root, identity, 2000);
         REQUIRE(again.has_value());
-        const auto manifest_again = lubancode::workspace::ReadWorkspaceManifest(root / "workspaces" / key);
+        const auto manifest_again = lubancode::workspace::ReadWorkspaceManifest(root / key);
         REQUIRE(manifest_again.status == lubancode::workspace::ManifestRead::Status::Ok);
         CHECK(manifest_again.manifest.created_at_ms == 1000);
         CHECK(manifest_again.manifest.last_opened_at_ms == 2000);
@@ -529,7 +529,7 @@ TEST_CASE("目录制: workspace_key、session 树、session.json 原子写、占
         manifest.status = "preparing";
         manifest.created_at_ms = 1759000000000LL;
         manifest.lubancode_version = "0.0.0-test";
-        auto session = TrajectoryDirectory::CreateSession(root / "workspaces", key, manifest);
+        auto session = TrajectoryDirectory::CreateSession(root, key, manifest);
         REQUIRE(session.has_value());
         const auto session_dir = session->session_dir();
         // §3.1 全目录树。
@@ -556,7 +556,7 @@ TEST_CASE("目录制: workspace_key、session 树、session.json 原子写、占
         REQUIRE(reread.has_value());
         CHECK(reread->status == "running");
         // 同 session_id 再建即失败(绝不复用)。
-        auto duplicate = TrajectoryDirectory::CreateSession(root / "workspaces", key, manifest);
+        auto duplicate = TrajectoryDirectory::CreateSession(root, key, manifest);
         CHECK_FALSE(duplicate.has_value());
 
         // 占位流:main / subagent / workflow / node。
@@ -590,7 +590,7 @@ TEST_CASE("占位流上起 recorder,子流独立收口") {
     manifest.session_id = "20260830-031522-7K4M2P";
     manifest.main_run_id = "main-0001";
     manifest.status = "running";
-    auto session = TrajectoryDirectory::CreateSession(root / "workspaces", key, manifest);
+    auto session = TrajectoryDirectory::CreateSession(root, key, manifest);
     REQUIRE(session.has_value());
 
     // 子代理流:Reserve 之后 recorder 才进来(create-new,§3.10)。

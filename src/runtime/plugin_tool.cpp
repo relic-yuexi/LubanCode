@@ -104,7 +104,7 @@ std::expected<tools::ImageContent, std::string> LandResponseImage(
     image.bytes = bytes.size();
     image.sha256 = sha;
     image.artifact.id = "art-" + sha.substr(0, 8);
-    image.artifact.filename = "art-" + sha.substr(0, 8) + "." + format.extension;
+    image.artifact.filename = sha + "." + format.extension;  // P0-2:文件名即内容地址
     image.artifact.path = relative;
     image.artifact.mime_type = format.mime_type;
     image.artifact.bytes = bytes.size();

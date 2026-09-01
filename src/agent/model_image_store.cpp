@@ -293,8 +293,10 @@ std::expected<ModelImageLanding, std::string> LandModelImage(const std::string& 
     block.height = dims.height;
     block.bytes = decoded->size();
     block.sha256 = sha;
-    block.filename = "img-" + sha.substr(0, 8) + "." + format.extension;
-    block.path = "images/" + block.filename;
+    // P0-2:归拢进 session artifacts/sha256/(与 MCP rich、上下文仓 blob
+    // 同层);文件名即内容地址(全 hash),同图天然只落一份。
+    block.filename = sha + "." + format.extension;
+    block.path = "artifacts/sha256/" + block.filename;
 
     const std::filesystem::path file = dir / platform::Utf8ToPath(block.filename);
     // 内容寻址:同图已落过就不再写(幂等,重复终帧/断点重来的自然去重)。

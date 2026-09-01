@@ -59,20 +59,18 @@ enum class SessionPersistResult {
 class SessionRuntime {
 public:
     struct Options {
-        std::string sessions_dir;  // 空 = 找不到主目录,不落盘
+        std::string sessions_dir;  // 旧 SessionStore 档案目录(P0-2 起不消费,P0-6 删)
         std::string wire_name;     // meta.wire(provider 协议名)
         std::string start_ts;      // 会话 id 的时间戳底子(NowIdTimestamp)
-        // P0-2 轨迹(flag 开的会话走 Trajectory v1,§十七"内部预览"):
-        // true 时本会话只写 Trajectory Journal,不写旧 SessionStore——
-        // 禁 dual-write;开张失败由 trajectory_open_error 报,装配层须
-        // 让会话启动失败,不许回退旧写口。
-        bool trajectory_enabled = false;
+        // P0-2(Trajectory 升为唯一 Session):feature/env 开关已删,本类
+        // 恒开一场 TrajectorySessionLedger——开张失败由 trajectory_open_error
+        // 报,装配层须让会话启动失败,不回退旧 SessionStore(禁 dual-write)。
         // P0-1:装配层按四级裁决冻好的身份整份递进(终端/app-server/子代理
         // 同一把钥匙);空 = ledger 按启动 cwd 现场裁决(兜底,只服务测试)。
         workspace::WorkspaceIdentity trajectory_workspace_identity;
-        // 轨迹根:空 = <home>/.lubancode/trajectories(生产默认);测试与
-        // P0-2 根迁移装配用它注入。
-        std::filesystem::path trajectory_trajectories_root;
+        // 唯一持久化根:空 = <home>/.lubancode/workspaces(生产默认);
+        // 测试与装配注入临时根。旧 trajectories/ 根零读零写。
+        std::filesystem::path trajectory_workspaces_root;
         std::string lubancode_version;
         // P0-3 resume(§10.4):--continue 启动路开 start_reason=resume 的
         // 新场(source 只读,永不 reopen append)。source id 空 = 取本
@@ -98,9 +96,9 @@ public:
     EventSink* sink() const { return sink_; }
 
     // ---- 轨迹账(P0-2:SessionRuntime 持有 Recorder 所有权) ----------------
-    // flag 开的会话:本类持一场 TrajectorySessionLedger(main recorder +
-    // 目录 + 子代理注册表)。空 = flag 关,旧路照旧。开张失败给
-    // trajectory_open_error(),装配层据此失败会话启动。
+    // 本类持一场 TrajectorySessionLedger(main recorder + 目录 + 子代理
+    // 注册表)——Session 的定义本身,恒开。空 = 开张失败(装配层须让会话
+    // 启动失败,见 trajectory_open_error)。
     TrajectorySessionLedger* trajectory() { return trajectory_.has_value() ? &*trajectory_ : nullptr; }
     // P0-1(§4.5):cwd 变化对账(/worktree 切房等)。同 workspace:落
     // control.cwd.changed + checkout 登记,账不换房;跨 workspace:封当前
@@ -111,7 +109,7 @@ public:
     const TrajectorySessionLedger* trajectory() const {
         return trajectory_.has_value() ? &*trajectory_ : nullptr;
     }
-    bool trajectory_enabled() const { return options_.trajectory_enabled; }
+    // 开不出账的说明(空 = 开出来了)。装配层据此失败会话启动。
     const std::string& trajectory_open_error() const { return trajectory_open_error_; }
 
     // 开一轮的事件适配器:把 loop 的回调翻成 ServerEvent 流,落到 AttachSink
@@ -136,8 +134,8 @@ public:
     // Plan 模式单:建档前切过的协作档(存档未开时 SetCollaborationMode 只
     // 记内存)在这里补落 mode_v1——起手 --mode plan 的场子,档里第一行
     // 用户消息之前就有 mode 账,resume 才接得回档位。
-    // P0-2 轨迹路:trajectory_enabled 的会话不建旧档(单一真账在
-    // Trajectory Journal),直接回 Disabled。
+    // P0-2:单一真账在 Trajectory Journal,旧 SessionStore 不建档——恒回
+    // Disabled(会话 id 与转录路径由账本在 ctor 里定)。
     SessionBeginResult EnsureBegun(const std::string& first_text, const std::string& model,
                                    const std::string& cwd);
 

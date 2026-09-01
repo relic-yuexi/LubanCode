@@ -380,7 +380,7 @@ TEST_CASE("没验过的 turn 不落 outcome.assessed(§11.5 成功门的账面�
 TEST_CASE("ledger 排队账:enqueued/dequeued/cancelled/expired 全链进 Journal") {
     const auto root = FreshDir("lubancode-p4-queue");
     TrajectorySessionLedger::Options options;
-    options.trajectories_root = root / "trajectories";
+    options.workspaces_root = root / "workspaces";
     options.workspace_root = root / "repo";
     options.lubancode_version = "test";
     std::error_code ec;
@@ -410,7 +410,7 @@ TEST_CASE("ledger 排队账:enqueued/dequeued/cancelled/expired 全链进 Journa
 TEST_CASE("ledger 环境快照:非 git 仓如实降档,字段全账可回读") {
     const auto root = FreshDir("lubancode-p4-environment");
     TrajectorySessionLedger::Options options;
-    options.trajectories_root = root / "trajectories";
+    options.workspaces_root = root / "workspaces";
     options.workspace_root = root / "repo";  // 非 git 仓:in_repo=false 如实记
     options.lubancode_version = "0.26.148-test";
     std::error_code ec;

@@ -23,11 +23,11 @@
 #include "agent/agent.hpp"  // Agent/AgentProfile/AgentWiring(批四自立门户)
 #include "agent/context.hpp"  // ContextPressure:压力通报的形状
 #include "config/config.hpp"  // HomeLubancodeDir:P0-1 身份裁决的全局件止步
-#include "sessions/session_catalog.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/session_command_service.hpp"
 #include "runtime/tool_trace_hub.hpp"
 #include "runtime/trajectory_session.hpp"  // P0-2:app-server 同一口接 Trajectory
+#include "trajectory/session_index.hpp"    // P0-2:trace/query 冷回放的索引定位
 #include "runtime/turn_event_adapter.hpp"
 #include "runtime/turn_item.hpp"
 #include "tools/ask_user.hpp"
@@ -254,13 +254,19 @@ std::string PlatformId() {
 
 Server::Server(ServerOptions options, BackendFactory backend_factory, RegistryFactory registry_factory)
     : options_(std::move(options)), backend_factory_(std::move(backend_factory)),
-      registry_factory_(std::move(registry_factory)), sessions_dir_(options_.sessions_dir) {
+      registry_factory_(std::move(registry_factory)), sessions_dir_(options_.sessions_dir),
+      workspaces_dir_(options_.workspaces_dir) {
     dispatcher_ = std::make_shared<Dispatcher>();
     dispatcher_->SetInitializeResultFactory(
         [this]() { return MakeInitializeResult(options_.lubancode_version, PlatformId()); });
-    // P9 收尾:会话查询/搬删的执行体(sessions_dir 空 = 没建,list 给空表)。
-    if (!sessions_dir_.empty()) {
-        session_commands_ = std::make_unique<runtime::SessionCommandService>(sessions_dir_);
+    // P9 收尾 + P0-2 换账:会话查询/搬删的执行体吃 workspace 新账
+    //(索引投影 + 管理自由函数)。workspaces_dir 空(测试纯内存跑)= 没建,
+    // list 给空表。scope=cwd 的默认 workspace 按服务 cwd 裁决。
+    if (!workspaces_dir_.empty()) {
+        runtime::SessionCommandService::Options service_options;
+        service_options.workspaces_root = tools::Utf8ToPath(workspaces_dir_);
+        service_options.workspace_key = DefaultWorkspaceKey();
+        session_commands_ = std::make_unique<runtime::SessionCommandService>(service_options);
     }
     // 浏览器面(阶段 3):事件出水走连接层的统一出口(seq + 有界 + 溢出
     // 通报);审批口挂 thread 的悬起件(取消旗贯通到动作)。
@@ -284,6 +290,23 @@ Server::Server(ServerOptions options, BackendFactory backend_factory, RegistryFa
             });
     }
     RegisterMethods(*dispatcher_);
+}
+
+// 服务进程默认 workspace 的 key:按 options_.cwd 四级裁决(P0-1 同一颗
+// resolver);裁决不出给空(scope=cwd 的 list 就按空 key 拒,如实不冒充)。
+std::string Server::DefaultWorkspaceKey() const {
+    if (workspaces_dir_.empty()) {
+        return std::string();
+    }
+    const std::filesystem::path identity_cwd = tools::Utf8ToPath(options_.cwd);
+    const auto identity_home = lubancode::config::HomeLubancodeDir();
+    auto identity = lubancode::workspace::ResolveWorkspaceIdentity(
+        identity_cwd, identity_home.has_value() ? lubancode::tools::Utf8ToPath(*identity_home)
+                                                : std::filesystem::path());
+    if (!identity.has_value()) {
+        return std::string();
+    }
+    return identity->workspace_key;
 }
 
 // browser 动作的审批:与工具审批同一套悬起件(permission/request 反向
@@ -443,32 +466,37 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
             if (!base.ok) {
                 return MakeError(request.id, base.code, base.message);
             }
-            // 会话档路径:ThreadRecord 活着取 file_path,没活着的 thread
-            // 按 sessions_dir 拼(存档还在盘上,冷回放照给)。
-            std::string file_path;
+            // P0-2:会话账在 workspace Journal——活 thread 从账本拿
+            // main.jsonl;冷 thread 经索引跨 workspace 定位。折叠直接吃
+            // tool.* 事件(唯一真账),不再读旧 tool_trace_v1 行。
+            std::filesystem::path session_dir;
             {
                 std::lock_guard<std::mutex> lock(threads_mutex_);
                 const auto it = threads_.find(thread_id);
-                if (it != threads_.end() && it->second->store != nullptr) {
-                    file_path = it->second->store->file_path();
+                if (it != threads_.end() && it->second->session_runtime != nullptr &&
+                    it->second->session_runtime->trajectory() != nullptr) {
+                    session_dir = it->second->session_runtime->trajectory()->session_dir();
                 }
             }
-            if (file_path.empty() && !sessions_dir_.empty()) {
-                file_path = sessions_dir_ + "/" + thread_id + ".jsonl";
+            if (session_dir.empty() && !workspaces_dir_.empty()) {
+                // 冷 thread:索引跨 workspace 定位(thread 的 cwd 各归各的
+                // workspace,不能只按服务默认 key 找)。
+                trajectory::SessionIndexQuery index_query;
+                index_query.all_workspaces = true;
+                const auto page = trajectory::QueryWorkspaceSessions(tools::Utf8ToPath(workspaces_dir_),
+                                                                    index_query);
+                for (const auto& summary : page.entries) {
+                    if (summary.session_id == thread_id) {
+                        session_dir = tools::Utf8ToPath(summary.session_dir);
+                        break;
+                    }
+                }
             }
-            if (file_path.empty()) {
+            if (session_dir.empty()) {
                 return MakeError(request.id, kErrInvalidParams,
-                                 "trace/query: 没有会话存档(纯内存 thread 或未配置 sessionsDir)");
+                                 "trace/query: 没有会话账(纯内存 thread 或未配置 workspaces 根)");
             }
-            const auto bytes = sessions::ReadSessionFileBytes(file_path);
-            if (!bytes.has_value()) {
-                return MakeError(request.id, kErrInvalidParams, "trace/query: 会话档读不到: " + file_path);
-            }
-            const auto loaded = sessions::ParseSessionFile(*bytes);
-            if (!loaded.has_value()) {
-                return MakeError(request.id, kErrInvalidParams, "trace/query: 会话档解析失败: " + file_path);
-            }
-            const auto ledger = runtime::ToolTraceHub::BuildLedger(loaded->tool_trace_events);
+            const auto folded = trajectory::FoldSessionToolExecutions(session_dir);
 
             // 可选过滤。
             const std::string filter_execution =
@@ -480,65 +508,29 @@ void Server::RegisterMethods(Dispatcher& dispatcher) {
 
             nlohmann::json executions = nlohmann::json::array();
             std::uint64_t max_seq = last_seq;
-            for (const auto& record : ledger.executions()) {
-                // seq 过滤:lastSeq 之后的才回(断线补账的口径)。
-                if (record.seq_scheduled <= last_seq) {
+            for (const nlohmann::json& item : folded.executions) {
+                // seq 过滤:lastSeq 之后的才回(断线补账的口径)。行的
+                // seqScheduled 是该调用首枚事件(planned)的 seq,与旧
+                // tool_trace_v1 的 seq_scheduled 同语义。
+                if (item.value("seqScheduled", std::uint64_t{0}) <= last_seq) {
                     continue;
                 }
-                if (!filter_execution.empty() && record.execution_id != filter_execution) {
+                if (!filter_execution.empty() &&
+                    item.value("executionId", std::string()) != filter_execution) {
                     continue;
                 }
-                if (!filter_tool_use.empty() && record.tool_use_id != filter_tool_use) {
+                if (!filter_tool_use.empty() && item.value("toolUseId", std::string()) != filter_tool_use) {
                     continue;
                 }
-                if (!filter_turn.empty() && record.turn_id != filter_turn) {
+                if (!filter_turn.empty() && item.value("turnId", std::string()) != filter_turn) {
                     continue;
                 }
-                if (errors_only && record.outcome == agent::ToolOutcome::Succeeded) {
+                if (errors_only && item.value("outcome", std::string()) == "succeeded") {
                     continue;
                 }
-                nlohmann::json item;
-                item["executionId"] = record.execution_id;
-                item["toolUseId"] = record.tool_use_id;
-                item["toolName"] = record.tool_name;
-                item["batchId"] = record.batch_id;
-                item["sequenceInBatch"] = record.sequence_in_batch;
-                item["turnId"] = record.turn_id;
-                item["source"] = agent::ToString(record.source_kind);
-                if (!record.source_instance.empty()) {
-                    item["sourceInstance"] = record.source_instance;
-                }
-                if (!record.parent_execution_id.empty()) {
-                    item["parentExecutionId"] = record.parent_execution_id;
-                }
-                if (!record.retry_of.empty()) {
-                    item["retryOf"] = record.retry_of;
-                }
-                if (!record.blocked_by.empty()) {
-                    item["blockedBy"] = record.blocked_by;
-                }
-                if (!record.compensates.empty()) {
-                    item["compensates"] = record.compensates;
-                }
-                item["outcome"] = agent::ToString(record.outcome);
-                if (!record.error_code.empty()) {
-                    item["errorCode"] = record.error_code;
-                }
-                item["durationMs"] = record.duration_ms;
-                item["recovery"] = agent::ToString(record.Classify());
-                item["corrupt"] = record.corrupt;
-                // 遮敏默认:preview 与字节/hash 只给摘要,不给 inline 原文。
-                item["resultBytes"] = record.result_ref.bytes;
-                item["resultSha256"] = record.result_ref.sha256;
-                if (!record.result_ref.preview.empty()) {
-                    item["resultPreview"] = record.result_ref.preview;
-                }
-                if (!record.result_ref.artifact_id.empty()) {
-                    item["resultArtifactId"] = record.result_ref.artifact_id;
-                }
-                executions.push_back(std::move(item));
-                max_seq = std::max(max_seq, record.seq_scheduled);
+                executions.push_back(item);
             }
+            max_seq = std::max(max_seq, folded.max_seq);
 
             return MakeResult(request.id,
                               nlohmann::json{{"threadId", thread_id},
@@ -701,87 +693,67 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
         record->cwd = options_.cwd;
     }
 
-    // 会话账:复用 SessionStore,不另立第二本账。首句摘要用一句占位的
-    // 协议话——thread/start 阶段还没有用户文本(单子的存档恢复线会把
-    // 真首句补进来);MakeSessionId 的 slug 拿它生成文件名。
+    // P0-2(Trajectory 升为唯一 Session):thread 的会话账走
+    // SessionRuntime 的 TrajectorySessionLedger——thread_id 直接用 workspace
+    // session id(与 CLI 同一命名空间,迁移器原样带入 legacy_import 场)。
+    // 旧 SessionStore 不再开档(禁 dual-write)。
     //
-    // 同秒撞名防(多前端外壳单阶段 B 挖出的暗雷):id 是秒级时间戳 +
-    // 固定 slug,同秒两场 thread/start 会撞成同一个 id——threads_ 里旧
-    // 场被悄悄顶掉,审批/放行账随之丢,悬着的审批再没人答得对。撞了就
-    // 追加序号直到唯一;入账与查重在同一把锁里,不留窗口。
-    {
-        std::lock_guard<std::mutex> lock(threads_mutex_);
-        std::string candidate = sessions::MakeSessionId(sessions::NowIdTimestamp(), "app-server-thread");
-        const std::string base = candidate;
-        for (int n = 2; threads_.count(candidate) > 0; ++n) {
-            candidate = base + "-" + std::to_string(n);
-        }
-        record->thread_id = candidate;
-        threads_[candidate] = record;
-    }
-    record->interactions = std::make_unique<InteractionLedger>(record->thread_id);
-    if (!sessions_dir_.empty() && !options_.features_trajectory) {
-        // P0-2 轨迹:flag 开的 thread 不开旧存档(禁 dual-write)——真账
-        // 在 Trajectory SessionLedger,下面的接线在 SessionRuntime 那节。
-        record->store = std::make_unique<sessions::SessionStore>(sessions_dir_);
-        sessions::SessionMeta meta;
-        // 阶段 3 冻结项:meta 写真值。wire 是协议名(anthropic/responses/
-        // chat,配置四级合并的结果),model 是配置里的模型名;测试/纯内存
-        // 跑没有配置,空串照写(与 CLI 会话档同一张 meta 表)。
-        meta.wire = options_.session_wire;
-        meta.model = options_.session_model;
-        meta.cwd = record->cwd;
-        meta.started_at = sessions::NowTimestamp();
-        if (!record->store->Begin(meta, record->thread_id)) {
-            // 落盘失败不拦协议:thread 照开,只打 stderr。
-            Diagnose("会话建档失败,本场不落盘: " + sessions_dir_);
-            record->store.reset();
-        }
-    }
-
-    // goal 单合流批:typed 命令面的会话级状态按 thread 各起一本。goal/
-    // loop 的 feature 门从 options 折(关着也建实例——命令面回稳定禁用
-    // 码,存档侧不碰);Plan 的 SessionRuntime 纯内存跑(sessions_dir 空,
-    // 存档走 record->store 自己那条,不掺和)。
-    {
+    // goal 单合流批:typed 命令面的会话级状态按 thread 各起一本(goal/
+    // loop 关着也建实例——命令面回稳定禁用码)。
+    record->goal_coordinator = [this] {
         runtime::goal::GoalCoordinator::Options goal_options;
         goal_options.goals_enabled = options_.features_goal;
-        record->goal_coordinator = std::make_unique<runtime::goal::GoalCoordinator>(goal_options);
+        return std::make_unique<runtime::goal::GoalCoordinator>(goal_options);
+    }();
+    {
         runtime::loop::LoopScheduler::Options loop_options;
         loop_options.enabled = options_.features_loop;
         record->loop_scheduler = std::make_unique<runtime::loop::LoopScheduler>(loop_options);
-        runtime::SessionRuntime::Options runtime_options;  // sessions_dir 空 = 纯内存
-        // P0-2 轨迹:flag 开的 thread 与终端同走 Trajectory 单写口
-        //(app-server 的存档 record->store 那条不开,禁 dual-write)。
-        runtime_options.trajectory_enabled = options_.features_trajectory;
-        if (runtime_options.trajectory_enabled) {
-            // P0-1:thread 身份按前端指定的 cwd(record->cwd;空则 options_.cwd)
-            // 四级裁决,不按 server 进程的 current_path——前端外壳在各项目里
-            // 起 thread,server 进程 cwd 跟项目无关。home 递进去做全局件止步。
-            const std::filesystem::path identity_cwd = lubancode::tools::Utf8ToPath(record->cwd);
-            const auto identity_home = lubancode::config::HomeLubancodeDir();
-            auto identity = lubancode::workspace::ResolveWorkspaceIdentity(
-                identity_cwd, identity_home.has_value()
-                                 ? lubancode::tools::Utf8ToPath(*identity_home)
-                                 : std::filesystem::path());
-            if (identity.has_value()) {
-                runtime_options.trajectory_workspace_identity = std::move(*identity);
-            }
-            runtime_options.lubancode_version = options_.lubancode_version;
+    }
+    {
+        runtime::SessionRuntime::Options runtime_options;  // sessions_dir 空 = 纯内存(旧档不开)
+        // P0-1:thread 身份按前端指定的 cwd(record->cwd;空则 options_.cwd)
+        // 四级裁决,不按 server 进程的 current_path——前端外壳在各项目里
+        // 起 thread,server 进程 cwd 跟项目无关。home 递进去做全局件止步。
+        const std::filesystem::path identity_cwd = lubancode::tools::Utf8ToPath(record->cwd);
+        const auto identity_home = lubancode::config::HomeLubancodeDir();
+        auto identity = lubancode::workspace::ResolveWorkspaceIdentity(
+            identity_cwd, identity_home.has_value()
+                             ? lubancode::tools::Utf8ToPath(*identity_home)
+                             : std::filesystem::path());
+        if (identity.has_value()) {
+            runtime_options.trajectory_workspace_identity = std::move(*identity);
+        }
+        runtime_options.lubancode_version = options_.lubancode_version;
+        if (!workspaces_dir_.empty()) {
+            runtime_options.trajectory_workspaces_root = tools::Utf8ToPath(workspaces_dir_);
         }
         record->session_runtime = std::make_unique<runtime::SessionRuntime>(std::move(runtime_options));
-        if (options_.features_trajectory && record->session_runtime->trajectory() == nullptr) {
-            // §十七:flag 开了开不出账,thread 明败,不回退旧写口。先把
-            // 刚登记的 thread 撤下来,再交稳定错误码。
-            Diagnose("轨迹账开张失败,thread 不开: " + record->session_runtime->trajectory_open_error());
-            {
-                std::lock_guard<std::mutex> lock(threads_mutex_);
-                threads_.erase(record->thread_id);
-            }
-            out_error_code = "trajectory.open_failed";
-            return nlohmann::json();
-        }
     }
+    const runtime::TrajectorySessionLedger* ledger = record->session_runtime->trajectory();
+    if (ledger == nullptr) {
+        // 开不出账 thread 明败,不回退旧写口(§十七失败合同)。
+        Diagnose("会话账开张失败,thread 不开: " + record->session_runtime->trajectory_open_error());
+        out_error_code = "trajectory.open_failed";
+        return nlohmann::json();
+    }
+    record->thread_id = ledger->session_id();
+    record->session_main_path = (ledger->session_dir() / "main.jsonl").generic_string();
+    {
+        std::lock_guard<std::mutex> lock(threads_mutex_);
+        // ledger 的 session_id 自带随机尾,理论不撞;真撞了(同秒同尾)按
+        // 旧行为追加序号,审批/放行账不丢。
+        if (threads_.count(record->thread_id) > 0) {
+            std::string candidate = record->thread_id;
+            const std::string base = candidate;
+            for (int n = 2; threads_.count(candidate) > 0; ++n) {
+                candidate = base + "-" + std::to_string(n);
+            }
+            record->thread_id = candidate;
+        }
+        threads_[record->thread_id] = record;
+    }
+    record->interactions = std::make_unique<InteractionLedger>(record->thread_id);
     Diagnose("thread 已建: " + record->thread_id);
     return nlohmann::json{{"threadId", record->thread_id}, {"cwd", record->cwd}};
 }
@@ -819,11 +791,11 @@ nlohmann::json Server::HandleThreadLifecycle(const std::string& method, const st
     out_state.clear();
     if (session_commands_ == nullptr) {
         out_error_code = "not_found";
-        out_error_message = "服务没有会话档目录,搬删一律不可用";
+        out_error_message = "服务没有会话账根,搬删一律不可用";
         return nlohmann::json();
     }
-    // 在跑的 thread 不许搬删(句柄在 SessionStore 手里,Windows 上 rename
-    // 会吃 sharing violation;协议侧明拒,不留给 IO 层炸)。
+    // 在跑的 thread 不许搬删(账本还持着独占锁,running 场也不进状态图
+    // 的归档边;协议侧明拒,不留给 IO 层炸)。
     if (FindThread(thread_id) != nullptr) {
         out_error_code = "active_thread";
         out_error_message = "thread 还开着,先 thread/stop 再搬删";
@@ -948,7 +920,16 @@ nlohmann::json Server::HandleThreadStop(const std::string& thread_id, std::strin
         }
     }
     if (record->store != nullptr) {
-        record->store->Reset(); // 文件留在磁盘上,只是句柄收掉
+        record->store->Reset(); // 旧档句柄(P0-2 起不再开,防御兜底)
+    }
+    // P0-2:thread 停场即 session 封口(session.ended + session.json closed;
+    // 收不回的执行记 unknown,不冒充 clean)。封不了只记账,不拦停场——
+    // 半开的场由恢复器按 Journal 事实收口。
+    if (record->session_runtime != nullptr && record->session_runtime->trajectory() != nullptr) {
+        const auto closed = record->session_runtime->trajectory()->CloseSession("thread_stop");
+        if (!closed.error_code.empty()) {
+            Diagnose("thread 停场时会话封口失败(" + closed.error_code + "): " + thread_id);
+        }
     }
     Diagnose("thread 已停: " + thread_id);
     return MakeThreadStoppedResult();

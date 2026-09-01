@@ -10,12 +10,11 @@
 //                                         请求/输出边界 + hub 的工具栅栏
 //                                         -> trajectory 事件
 //   ToolTraceHub(改造)                  持久账从 SessionStore 改接本件
-//                                         的桥(flag 关的老路一字不变)
+//                                         的桥(旧指针路 P0-6 删)
 //
-// flag 门控(§十七"内部预览"):ResolveTrajectoryEnabled 合成配置
-// features.trajectory(默认 false)与环境变量 LUBANCODE_TRAJECTORY。flag
-// 开的会话只写 Trajectory,不写旧 SessionStore(禁 dual-write);flag 关
-// 的会话照旧路走,trajectory 目录一个字节不产。
+// P0-2(Trajectory 升为唯一 Session):feature/env 开关已删,Session 即
+// Trajectory——开不出账就会话明败,不回退旧 SessionStore(旧件退役待
+// P0-5/P0-6,本批不再消费)。
 #pragma once
 
 #include <cstdint>
@@ -41,20 +40,12 @@
 #include "trajectory/environment.hpp"
 #include "trajectory/metrics.hpp"
 #include "trajectory/recorder.hpp"
+#include "trajectory/session_index.hpp"
 #include "trajectory/session_manager.hpp"
 #include "trajectory/usage_gc.hpp"
 #include "workspace/identity.hpp"
 
 namespace lubancode::runtime {
-
-// ---------------------------------------------------------------------------
-// flag(§十七:开发期 test-only feature flag,产品切换按 session 原子选路)
-// ---------------------------------------------------------------------------
-
-// 合成开关:config_flag 来自配置 features.trajectory(默认 false);环境
-// 变量 LUBANCODE_TRAJECTORY 显式压一头——"1"/"true" 开,"0"/"false" 关,
-// 没设或空串听配置。默认整条路是关的,旧路行为零变。
-bool ResolveTrajectoryEnabled(bool config_flag);
 
 // ---------------------------------------------------------------------------
 // 轮次边界桥:AgentLoop 的模型边界 + hub 的工具栅栏 -> trajectory 事件
@@ -373,7 +364,9 @@ public:
         // 不得让各进程按临时 cwd 另算 key(§4.5)。
         workspace::WorkspaceIdentity workspace_identity;
         std::filesystem::path workspace_root;  // 兜底裁决起点与环境快照根
-        std::filesystem::path trajectories_root;  // 空 = <home>/.lubancode/trajectories
+        // P0-2:唯一项目持久化根。空 = <home>/.lubancode/workspaces(生产
+        // 默认);测试注入临时根。旧 trajectories/ 根零读零写。
+        std::filesystem::path workspaces_root;
         std::string launch_cwd;      // UTF-8 文本,进 manifest
         std::string lubancode_version;
         // run.started 的 v2 usage owner 账(Token 账本单 §6.1.1):
@@ -548,6 +541,31 @@ public:
     std::filesystem::path session_dir() const;
     // T1 遥测注册用:本场 workspace 的假名 key(与 wake/cursor 同一口径)。
     std::string workspace_key() const;
+
+    // ---- P0-2:会话读面与 workspace 管理面(命令/app-server 共用) ----
+    // 唯一持久化根(<home>/.lubancode/workspaces);空 = 开账时没递。
+    std::filesystem::path workspaces_root() const;
+    // /sessions、/resume 选择器、thread/list 的数据源:可重建索引查询
+    // (session_index.hpp;不为每次列表重放所有 Journal)。
+    trajectory::SessionIndexPage ListWorkspaceSessions(
+        const trajectory::SessionIndexQuery& query) const;
+    // Ctrl+R 提问历史(当前 workspace;旧→新,max_lines 截尾)。
+    std::vector<trajectory::PromptHistoryLine> ReadPromptHistory(std::size_t max_lines) const;
+    // /resume 选择器的 Ctrl+T 转录浮层。
+    std::vector<std::string> MakeTranscriptExcerpt(const std::string& session_id,
+                                                   std::size_t max_half) const;
+    // workspace 管理操作(任意场次;本进程 active 的那场仍走成员语义,
+    // 先 close 再动)。回空 error_code = 成功。
+    std::string ArchiveSessionInWorkspace(const std::string& session_id) const;
+    std::string UnarchiveSessionInWorkspace(const std::string& session_id) const;
+    std::string DeleteSessionInWorkspace(const std::string& session_id,
+                                         const std::string& reason) const;
+
+    // ---- P0-2:标题与协作档的会话控制账(/title、Plan 档;resume 折叠
+    // 回 ReplayControlState.title/mode)----
+    void RecordTitleChanged(const std::string& title, const std::string& old_title);
+    void RecordModeChanged(const std::string& mode, const std::string& reason,
+                           const std::string& old_mode);
 
     // 端云协同可观测单 T1(§25.4 路 1):装配层把 TelemetryService 挂上,
     // 之后本账本铸的每只桥与每笔会话级控制事件提交后都投 committed wake。

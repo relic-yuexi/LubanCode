@@ -186,6 +186,7 @@ struct MiniGateway {
         host.SetEngineFactory([this, tools](const std::string& /*session_key*/) {
             runtime::AgentChannelEngine::Options engine_options;
             engine_options.sessions_dir = (root / "sessions").string();
+            engine_options.workspaces_dir = (root / "workspaces").string();  // P0-2:会话账根
             engine_options.wire_name = "anthropic";
             engine_options.model = "test-model";
             engine_options.cwd = root.string();
@@ -203,11 +204,13 @@ struct MiniGateway {
     void QueueTextReply(const std::string& text) { backend.scripts.push_back(TextScript(text)); }
 
     // 会话存档目录里落了几份 .jsonl(引擎建档数)。
+    // P0-2:会话账住 workspaces/<key>/sessions/<id>/main.jsonl(数有几场)。
     std::vector<std::string> SessionFiles() const {
         std::vector<std::string> files;
         std::error_code ec;
-        for (const auto& entry : std::filesystem::directory_iterator(root / "sessions", ec)) {
-            if (entry.path().extension() == ".jsonl") {
+        for (const auto& entry :
+             std::filesystem::recursive_directory_iterator(root / "workspaces", ec)) {
+            if (entry.is_regular_file() && entry.path().filename() == "main.jsonl") {
                 files.push_back(entry.path().string());
             }
         }
@@ -377,7 +380,7 @@ TEST_CASE("验收三:工具权限不越过 binding,confirm fail closed") {
     }
 }
 
-TEST_CASE("provenance 落 session JSONL:档案里查得回渠道真账") {
+TEST_CASE("渠道轮的真账落 Journal:P0-2 起进 workspaces,provenance 投影另批接") {
     MiniGateway gw("provenance");
     gw.InstallHost(channel::ToolRoutePolicy{});
     gw.QueueTextReply("从渠道来的");
@@ -388,12 +391,12 @@ TEST_CASE("provenance 落 session JSONL:档案里查得回渠道真账") {
     const auto files = gw.SessionFiles();
     REQUIRE(files.size() == 1);
 
+    // 真账是 main.jsonl:来信与回话都在。provenance 字段进 Journal 的
+    // typed 投影是 channel 线后续批次的活(轮末补抄路已停,不伪造账)。
     std::ifstream in(files[0], std::ios::binary);
     std::string content((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
-    CHECK(content.find("\"provenance\"") != std::string::npos);
-    CHECK(content.find("external_channel") != std::string::npos);
-    CHECK(content.find("owner-openid") != std::string::npos);
-    CHECK(content.find("dm-owner") != std::string::npos);
+    CHECK(content.find("从哪儿来的") != std::string::npos);
+    CHECK(content.find("从渠道来的") != std::string::npos);
 }
 
 TEST_CASE("准入与 pairing:allowlist 外的 sender 不进 Agent,命令口子的账可查") {

@@ -74,7 +74,7 @@ TEST_CASE("SessionManager:冻结身份递进,workspace 目录与 manifest 同 ke
                               .value();
 
     trajectory::SessionManagerOptions options;
-    options.trajectories_root = root / "trajectories";
+    options.workspaces_root = root / "workspaces";
     options.identity = identity;
     trajectory::SessionManager manager(options);
     CHECK(manager.workspace_key() == identity.workspace_key);
@@ -99,7 +99,7 @@ TEST_CASE("RegisterCheckout:同 key upsert,异 key 拒绝(key_mismatch 隔离)")
     CHECK(main_identity.workspace_key == wt_identity.workspace_key);
 
     trajectory::SessionManagerOptions options;
-    options.trajectories_root = root / "trajectories";
+    options.workspaces_root = root / "workspaces";
     options.identity = main_identity;
     trajectory::SessionManager manager(options);
     REQUIRE(manager.LaunchSession().has_value());
@@ -129,7 +129,7 @@ TEST_CASE("HandleCwdChange:同 workspace 落 cwd.changed,跨 workspace 不写旧
     const auto other_identity = workspace::ResolveWorkspaceIdentity(root / "other-repo", {}).value();
 
     runtime::TrajectorySessionLedger::Options options;
-    options.trajectories_root = root / "trajectories";
+    options.workspaces_root = root / "workspaces";
     options.workspace_identity = identity;
     options.lubancode_version = "test";
     auto ledger = runtime::TrajectorySessionLedger::Open(options);
@@ -144,7 +144,7 @@ TEST_CASE("HandleCwdChange:同 workspace 落 cwd.changed,跨 workspace 不写旧
     CHECK(MainJsonlHasCwdEvent(first_session_dir,
                                platform::PathToUtf8(wt_identity.launch_cwd)));
     const auto read = workspace::ReadWorkspaceManifest(
-        root / "trajectories" / "workspaces" / identity.workspace_key);
+        root / "workspaces" / identity.workspace_key);
     REQUIRE(read.status == workspace::ManifestRead::Status::Ok);
     REQUIRE(read.manifest.checkouts.size() == 2);
     CHECK(ledger->session_id() == first_session_id);  // session 不换
@@ -166,14 +166,13 @@ TEST_CASE("SessionRuntime:跨 workspace 切换封旧场开新场,旧账留旧房
     const auto identity_b = workspace::ResolveWorkspaceIdentity(root / "repo-b", {}).value();
 
     runtime::SessionRuntime::Options options;
-    options.trajectory_enabled = true;
     options.trajectory_workspace_identity = identity_a;
-    options.trajectory_trajectories_root = root / "trajectories";
+    options.trajectory_workspaces_root = root / "workspaces";
     options.lubancode_version = "test";
     runtime::SessionRuntime session(options);
     REQUIRE(session.trajectory() != nullptr);
     const fs::path first_session_dir = session.trajectory()->session_dir();
-    const fs::path workspace_a_dir = root / "trajectories" / "workspaces" /
+    const fs::path workspace_a_dir = root / "workspaces" /
                                      identity_a.workspace_key;
 
     // 同 workspace 换 cwd(进子目录):不换场。
@@ -186,7 +185,7 @@ TEST_CASE("SessionRuntime:跨 workspace 切换封旧场开新场,旧账留旧房
     const fs::path second_session_dir = session.trajectory()->session_dir();
     CHECK(second_session_dir != first_session_dir);
     CHECK(second_session_dir.parent_path().parent_path() ==
-          root / "trajectories" / "workspaces" / identity_b.workspace_key);
+          root / "workspaces" / identity_b.workspace_key);
 
     // 旧场的账留在旧 workspace,可查(封口后的 session.json 落 closed)。
     const auto first_manifest = trajectory::ReadSessionJson(first_session_dir);
@@ -194,13 +193,10 @@ TEST_CASE("SessionRuntime:跨 workspace 切换封旧场开新场,旧账留旧房
     CHECK(first_manifest->status == "closed");
     // 新 workspace 的 manifest 也开出来了。
     const auto read_b = workspace::ReadWorkspaceManifest(
-        root / "trajectories" / "workspaces" / identity_b.workspace_key);
+        root / "workspaces" / identity_b.workspace_key);
     REQUIRE(read_b.status == workspace::ManifestRead::Status::Ok);
     CHECK(read_b.manifest.workspace_key == identity_b.workspace_key);
 
-    // flag 关的老路:口子是 no-op。
-    runtime::SessionRuntime::Options off_options;
-    off_options.trajectory_enabled = false;
-    runtime::SessionRuntime off(off_options);
-    CHECK(off.NoteWorkingDirectoryChanged(root / "repo-a").empty());
+    // P0-2:开关已删——账开不出来时(无主目录极例)换场口如实报错,
+    // 不再是"flag 关的老路 no-op"。
 }

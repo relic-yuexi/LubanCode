@@ -1,55 +1,25 @@
-// session_command_service.hpp 的实现:runtime 侧的会话查询与搬删服务。
+// session_command_service.hpp 的实现:runtime 侧的会话查询与搬删服务
+// (P0-2:数据源与执行体全换 workspace 新账——索引投影 + 管理自由函数)。
 
 #include "runtime/session_command_service.hpp"
 
+#include <chrono>
+#include <cstdint>
+#include <optional>
 #include <utility>
 
-#include "sessions/session_catalog.hpp"
-#include "sessions/session_lifecycle.hpp"
+#include "tools/path_utils.hpp"
+#include "trajectory/session_index.hpp"
+#include "trajectory/session_manager.hpp"
 
 namespace lubancode::runtime {
 
 namespace {
 
-// lifecycle 结果码 -> 稳定字符串(协议侧的错误码,单子"代码边界"一节)。
-const char* LifecycleCodeToString(sessions::SessionLifecycleCode code) {
-    switch (code) {
-        case sessions::SessionLifecycleCode::Ok: return "";
-        case sessions::SessionLifecycleCode::NotFound: return "not_found";
-        case sessions::SessionLifecycleCode::Ambiguous: return "ambiguous";
-        case sessions::SessionLifecycleCode::ActiveTurn: return "active_turn";
-        case sessions::SessionLifecycleCode::ConfirmationRequired: return "confirmation_required";
-        case sessions::SessionLifecycleCode::PathOutsideRoot: return "path_outside_root";
-        case sessions::SessionLifecycleCode::TargetExists: return "target_exists";
-        case sessions::SessionLifecycleCode::IoError: return "io_error";
-    }
-    return "io_error";
-}
-
-// 查询 payload 的字符串档位 -> 枚举(认不出给缺省,不抛——协议演进里
-// "新加的档位老对端还没跟上"是常态)。
-sessions::SessionScope ParseScope(const nlohmann::json& payload) {
-    const auto it = payload.find("scope");
-    if (it != payload.end() && it->is_string() && *it == "all") {
-        return sessions::SessionScope::All;
-    }
-    return sessions::SessionScope::Cwd;
-}
-
-sessions::SessionState ParseState(const nlohmann::json& payload) {
-    const auto it = payload.find("state");
-    if (it != payload.end() && it->is_string() && *it == "archived") {
-        return sessions::SessionState::Archived;
-    }
-    return sessions::SessionState::Active;
-}
-
-sessions::SessionSort ParseSort(const nlohmann::json& payload) {
-    const auto it = payload.find("sort");
-    if (it != payload.end() && it->is_string() && *it == "created") {
-        return sessions::SessionSort::Created;
-    }
-    return sessions::SessionSort::Updated;
+std::int64_t NowMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::system_clock::now().time_since_epoch())
+        .count();
 }
 
 std::string JsonStr(const nlohmann::json& payload, const char* key) {
@@ -62,8 +32,6 @@ std::string JsonStr(const nlohmann::json& payload, const char* key) {
 
 std::size_t JsonSize(const nlohmann::json& payload, const char* key) {
     const auto it = payload.find(key);
-    // 整数字面量在 nlohmann 里是 number_integer(带符号),显式 uint 才是
-    // number_unsigned——两种都认,负数折 0。
     if (it == payload.end() || !it->is_number_integer()) {
         return 0;
     }
@@ -71,59 +39,81 @@ std::size_t JsonSize(const nlohmann::json& payload, const char* key) {
     return value > 0 ? static_cast<std::size_t>(value) : 0;
 }
 
-const char* StateToString(sessions::SessionState state) {
-    return state == sessions::SessionState::Archived ? "archived" : "active";
+// 查询 payload -> 索引查询(scope=cwd 即当前 workspace)。
+trajectory::SessionIndexQuery ParseQuery(const nlohmann::json& payload,
+                                         const std::string& workspace_key) {
+    trajectory::SessionIndexQuery query;
+    query.all_workspaces = JsonStr(payload, "scope") == "all";
+    query.current_workspace_key = workspace_key;
+    if (JsonStr(payload, "state") == "archived") {
+        query.archived_only = true;
+    } else {
+        query.include_archived = false;
+    }
+    query.sort_by_created = JsonStr(payload, "sort") == "created";
+    query.search = JsonStr(payload, "search");
+    query.cursor = JsonSize(payload, "cursor");
+    const std::size_t limit = JsonSize(payload, "limit");
+    query.limit = limit;  // 0 = 不截(与旧协议口径一致:缺省由调用方给大数)
+    return query;
 }
 
-const char* HealthToString(sessions::SessionHealth health) {
-    return health == sessions::SessionHealth::Damaged ? "damaged" : "ok";
+// 按 id 跨 workspace 定位场次(搬删执行前先找到家)。
+std::optional<trajectory::WorkspaceSessionSummary> LocateSession(
+    const std::filesystem::path& workspaces_root, const std::string& session_id) {
+    trajectory::SessionIndexQuery query;
+    query.all_workspaces = true;
+    query.include_archived = true;
+    const auto page = trajectory::QueryWorkspaceSessions(workspaces_root, query);
+    for (const auto& summary : page.entries) {
+        if (summary.session_id == session_id) {
+            return summary;
+        }
+    }
+    return std::nullopt;
+}
+
+std::filesystem::path WorkspaceDirOf(const std::filesystem::path& workspaces_root,
+                                     const std::string& workspace_key) {
+    return workspaces_root / tools::Utf8ToPath(workspace_key);
+}
+
+SessionCommandOutcome FromAdminOutcome(const trajectory::SessionAdminOutcome& outcome,
+                                       const std::string& thread_id) {
+    SessionCommandOutcome result;
+    if (outcome.ok()) {
+        return result;
+    }
+    result.accepted = false;
+    result.error_code = outcome.error_code;
+    result.error_message = outcome.message.empty() ? thread_id : outcome.message;
+    return result;
 }
 
 }  // namespace
 
-SessionCommandService::SessionCommandService(std::string sessions_dir)
-    : sessions_dir_(std::move(sessions_dir)) {
-    if (!sessions_dir_.empty()) {
-        lifecycle_ = std::make_unique<sessions::SessionLifecycle>(sessions_dir_);
-    }
-}
+SessionCommandService::SessionCommandService(Options options) : options_(std::move(options)) {}
 
 SessionCommandService::~SessionCommandService() = default;
 
-void SessionCommandService::SetActiveFile(std::string active_file,
-                                          std::function<bool(const std::string&)> flush_close) {
-    if (lifecycle_ != nullptr) {
-        lifecycle_->SetActiveFile(std::move(active_file), std::move(flush_close));
-    }
-}
-
 SessionCommandOutcome SessionCommandService::ListThreads(const nlohmann::json& query_payload) const {
     SessionCommandOutcome outcome;
-    if (sessions_dir_.empty()) {
+    if (options_.workspaces_root.empty()) {
         outcome.payload = {{"threads", nlohmann::json::array()}, {"total", 0}};
         return outcome;
     }
-    sessions::SessionCatalog catalog(sessions_dir_);
-    catalog.Scan();
-    sessions::SessionQuery query;
-    query.scope = ParseScope(query_payload);
-    query.state = ParseState(query_payload);
-    query.sort = ParseSort(query_payload);
-    query.search = JsonStr(query_payload, "search");
-    query.cwd = JsonStr(query_payload, "cwd");
-    query.cursor = JsonSize(query_payload, "cursor");
-    const std::size_t limit = JsonSize(query_payload, "limit");
-    query.limit = limit == 0 ? 20 : limit;  // 缺省 20;0 是"不截",协议里
-                                            // 显式 0 也照给(payload 里给
-                                            // number 0 会被当缺省,想要不截
-                                            // 给大数——协议文档口径)
-    const auto page = catalog.Query(query);
+    trajectory::SessionIndexQuery query = ParseQuery(query_payload, options_.workspace_key);
+    if (query.limit == 0) {
+        query.limit = 20;  // 缺省 20(旧协议口径;0 显式给大数 = 不截)
+    }
+    const auto page = trajectory::QueryWorkspaceSessions(options_.workspaces_root, query);
     nlohmann::json threads = nlohmann::json::array();
     for (const auto& entry : page.entries) {
-        threads.push_back(SessionSummaryToJson(entry.id, entry.title, entry.first_user_text, entry.cwd,
-                                               entry.model, entry.created_at, entry.updated_at,
-                                               entry.message_count, StateToString(entry.state),
-                                               HealthToString(entry.health)));
+        threads.push_back(SessionSummaryToJson(
+            entry.session_id, entry.title, entry.first_user_text, entry.cwd, entry.model,
+            trajectory::FormatMillisAsLocalTimestamp(entry.created_at_ms),
+            trajectory::FormatMillisAsLocalTimestamp(entry.updated_at_ms), entry.message_count,
+            entry.archived ? "archived" : "active", entry.damaged ? "damaged" : "ok"));
     }
     outcome.payload = {{"threads", std::move(threads)}, {"total", page.total}};
     return outcome;
@@ -131,37 +121,47 @@ SessionCommandOutcome SessionCommandService::ListThreads(const nlohmann::json& q
 
 SessionCommandOutcome SessionCommandService::ArchiveThread(const std::string& thread_id) {
     SessionCommandOutcome outcome;
-    if (lifecycle_ == nullptr || thread_id.empty()) {
+    if (options_.workspaces_root.empty() || thread_id.empty()) {
         outcome.accepted = false;
         outcome.error_code = thread_id.empty() ? "invalid_request" : "not_found";
         return outcome;
     }
-    const auto result = lifecycle_->ArchiveSession(thread_id);
-    if (!result.ok()) {
+    const auto located = LocateSession(options_.workspaces_root, thread_id);
+    if (!located.has_value()) {
         outcome.accepted = false;
-        outcome.error_code = LifecycleCodeToString(result.code);
-        outcome.error_message = result.message;
+        outcome.error_code = "not_found";
+        outcome.error_message = thread_id;
         return outcome;
     }
-    outcome.payload = {{"threadId", thread_id}, {"state", "archived"}};
+    const auto result = trajectory::ArchiveSessionDir(
+        WorkspaceDirOf(options_.workspaces_root, located->workspace_key), thread_id, NowMs());
+    outcome = FromAdminOutcome(result, thread_id);
+    if (outcome.accepted) {
+        outcome.payload = {{"threadId", thread_id}, {"state", "archived"}};
+    }
     return outcome;
 }
 
 SessionCommandOutcome SessionCommandService::UnarchiveThread(const std::string& thread_id) {
     SessionCommandOutcome outcome;
-    if (lifecycle_ == nullptr || thread_id.empty()) {
+    if (options_.workspaces_root.empty() || thread_id.empty()) {
         outcome.accepted = false;
         outcome.error_code = thread_id.empty() ? "invalid_request" : "not_found";
         return outcome;
     }
-    const auto result = lifecycle_->UnarchiveSession(thread_id);
-    if (!result.ok()) {
+    const auto located = LocateSession(options_.workspaces_root, thread_id);
+    if (!located.has_value()) {
         outcome.accepted = false;
-        outcome.error_code = LifecycleCodeToString(result.code);
-        outcome.error_message = result.message;
+        outcome.error_code = "not_found";
+        outcome.error_message = thread_id;
         return outcome;
     }
-    outcome.payload = {{"threadId", thread_id}, {"state", "active"}};
+    const auto result = trajectory::UnarchiveSessionDir(
+        WorkspaceDirOf(options_.workspaces_root, located->workspace_key), thread_id, NowMs());
+    outcome = FromAdminOutcome(result, thread_id);
+    if (outcome.accepted) {
+        outcome.payload = {{"threadId", thread_id}, {"state", "active"}};
+    }
     return outcome;
 }
 
@@ -182,19 +182,25 @@ SessionCommandOutcome SessionCommandService::DeleteThread(const std::string& thr
         outcome.error_code = "confirmation_required";
         return outcome;
     }
-    if (lifecycle_ == nullptr) {
+    if (options_.workspaces_root.empty()) {
         outcome.accepted = false;
         outcome.error_code = "not_found";
         return outcome;
     }
-    const auto result = lifecycle_->DeleteSession(thread_id, /*confirmed=*/true);
-    if (!result.ok()) {
+    const auto located = LocateSession(options_.workspaces_root, thread_id);
+    if (!located.has_value()) {
         outcome.accepted = false;
-        outcome.error_code = LifecycleCodeToString(result.code);
-        outcome.error_message = result.message;
+        outcome.error_code = "not_found";
+        outcome.error_message = thread_id;
         return outcome;
     }
-    outcome.payload = {{"threadId", thread_id}};
+    const auto result = trajectory::DeleteSessionDir(
+        WorkspaceDirOf(options_.workspaces_root, located->workspace_key), thread_id,
+        /*reason=*/"user_delete", NowMs());
+    outcome = FromAdminOutcome(result, thread_id);
+    if (outcome.accepted) {
+        outcome.payload = {{"threadId", thread_id}};
+    }
     return outcome;
 }
 

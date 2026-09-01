@@ -48,7 +48,7 @@ std::filesystem::path MakeRoot(const char* tag) {
 
 SessionManagerOptions Opts(const std::filesystem::path& root) {
     SessionManagerOptions options;
-    options.trajectories_root = root / "trajectories";
+    options.workspaces_root = root / "workspaces";
     options.workspace_root = root / "ws";
     options.launch_cwd = "D:/tmp/ws";
     options.lubancode_version = "0.26.138-test";

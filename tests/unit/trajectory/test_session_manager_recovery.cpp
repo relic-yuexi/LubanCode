@@ -47,7 +47,7 @@ std::filesystem::path MakeRoot(const char* tag) {
 
 SessionManagerOptions Opts(const std::filesystem::path& root) {
     SessionManagerOptions options;
-    options.trajectories_root = root / "trajectories";
+    options.workspaces_root = root / "workspaces";
     options.workspace_root = root / "ws";
     options.identity = lubancode::workspace::MakeFallbackIdentity(root / "ws");
     options.launch_cwd = "D:/tmp/ws";
@@ -441,9 +441,9 @@ TEST_CASE("孤儿 preparing(开场半路崩): 恢复器清账 + tombstone") {
     manifest.created_at_ms = clock.WallMs();
     manifest.lubancode_version = options.lubancode_version;
     auto directory = TrajectoryDirectory::CreateWorkspace(
-        options.trajectories_root, options.identity, clock.WallMs());
+        options.workspaces_root, options.identity, clock.WallMs());
     REQUIRE(directory.has_value());
-    REQUIRE(TrajectoryDirectory::CreateSession(options.trajectories_root / "workspaces",
+    REQUIRE(TrajectoryDirectory::CreateSession(options.workspaces_root,
                                                manifest.workspace_key, manifest)
                 .has_value());
 

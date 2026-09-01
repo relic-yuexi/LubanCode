@@ -529,6 +529,7 @@ add_library(lubancode_engine STATIC
   # 启动恢复器(Journal 可证事实为准)。
   src/trajectory/session_lock.cpp
   src/trajectory/session_manager.cpp
+  src/trajectory/session_index.cpp
   # P0-3:ReplayState 折叠/exact replay/state hash/checkpoint/session
   # verifier,与 harness replay 的录制桩(RecordedBackend/RecordedExecutor)。
   src/trajectory/replay.cpp

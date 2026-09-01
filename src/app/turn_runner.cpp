@@ -379,9 +379,10 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
     // 见 RunTurn 的装配)与会话事件链都在 sink 侧。
     wiring.events = &events;
 
-    // 模型输出图片的落盘口(ccmoon 巡检单 P0):目录给了才挂——引擎拿到
-    // ImageOutput 就解码验身、原子落 <会话目录>/images/,还引用入史;没给
-    // 目录(单发路)不挂,图片来了引擎明败,不吞图。
+    // 模型输出图片的落盘口(ccmoon 巡检单 P0;P0-2 归拢):目录给了才挂
+    // ——引擎拿到 ImageOutput 就解码验身、原子落 <会话目录>/artifacts/
+    // sha256/,还引用入史;没给目录(单发路)不挂,图片来了引擎明败,
+    // 不吞图。
     if (!ctx.model_images_dir.empty()) {
         const std::string images_dir = ctx.model_images_dir;
         wiring.on_model_image = [images_dir](const lubancode::api::ImageOutput& image) {

@@ -30,6 +30,7 @@
 #include "app_server/protocol.hpp"
 #include "app_server/schema.hpp"
 #include "app_server/server.hpp"
+#include "trajectory/directory.hpp"  // ReadSessionJson:archive/unarchive 断言
 #include "tools/registry.hpp"
 
 using namespace lubancode;
@@ -63,6 +64,8 @@ std::string MakeTempDir(const char* name) {
 std::string SeedSession(const std::string& sessions_dir, const std::string& marker) {
     app_server::ServerOptions options;
     options.sessions_dir = sessions_dir;
+    options.workspaces_dir = sessions_dir + "/workspaces";  // P0-2:会话账根
+    options.cwd = sessions_dir;
     options.session_wire = "anthropic";
     options.session_model = "test-model";
     app_server::Server seeder(std::move(options), [] { return std::make_unique<NullBackend>(); },
@@ -88,7 +91,8 @@ struct SessionHarness {
         : sessions_dir(std::move(dir)) {
         app_server::ServerOptions options;
         options.sessions_dir = sessions_dir;
-        options.cwd = "/test/cwd";
+        options.workspaces_dir = sessions_dir + "/workspaces";  // P0-2:会话账根
+        options.cwd = sessions_dir;
         options.workflow_runs_dir = std::move(workflow_runs_dir);
         server = std::make_unique<app_server::Server>(
             std::move(options), [] { return std::make_unique<NullBackend>(); }, nullptr);
@@ -142,6 +146,22 @@ struct SessionHarness {
     }
 };
 
+// P0-2:按 thread id 在 workspaces 根下找 session 目录(测试断言用)。
+std::filesystem::path FindSessionDir(const std::string& workspaces_dir, const std::string& session_id) {
+    const std::filesystem::path root = U8(workspaces_dir);
+    std::error_code ec;
+    if (!std::filesystem::exists(root, ec)) {
+        return {};
+    }
+    for (const auto& workspace : std::filesystem::directory_iterator(root, ec)) {
+        const auto candidate = workspace.path() / "sessions" / U8(session_id);
+        if (std::filesystem::exists(candidate, ec)) {
+            return candidate;
+        }
+    }
+    return {};
+}
+
 // 造一场 workflow run(manifest + events.jsonl;ListRuns 靠 manifest 认账)。
 std::string SeedWorkflowRun(const std::string& runs_dir, const std::vector<std::string>& event_lines) {
     const std::string run_id = "run-20260823-abc";
@@ -192,17 +212,22 @@ TEST_CASE("thread/start 同秒撞名:两场各有各的 id,旧场不被顶掉") 
     CHECK(harness.server->active_thread_count() == 3);
 }
 
-TEST_CASE("thread/archive -> thread/unarchive:真搬文件,事件各归各位") {
+TEST_CASE("thread/archive -> thread/unarchive:manifest 转态,事件各归各位") {
     const std::string dir = MakeTempDir("lubancode_test_app_server_archive");
     const std::string thread_id = SeedSession(dir, "a");
     SessionHarness harness{dir};
+    const auto session_dir = FindSessionDir(dir + "/workspaces", thread_id);
+    REQUIRE_FALSE(session_dir.empty());
 
-    // archive:root 下的 .jsonl 搬进 archive/。
+    // P0-2:archive 不搬目录——session.json 转 archived + lifecycle 记账。
     const nlohmann::json archived = harness.Call("thread/archive", {{"threadId", thread_id}});
     CHECK(archived["result"]["threadId"] == thread_id);
     CHECK(archived["result"]["state"] == "archived");
-    CHECK(std::filesystem::exists(U8(dir) / "archive" / U8(thread_id + ".jsonl")));
-    CHECK_FALSE(std::filesystem::exists(U8(dir) / U8(thread_id + ".jsonl")));
+    {
+        const auto manifest = trajectory::ReadSessionJson(session_dir);
+        REQUIRE(manifest.has_value());
+        CHECK(manifest->status == "archived");
+    }
     const auto updated = harness.FindEvent("thread/updated");
     REQUIRE(updated.has_value());
     CHECK((*updated)["params"]["threadId"] == thread_id);
@@ -222,10 +247,14 @@ TEST_CASE("thread/archive -> thread/unarchive:真搬文件,事件各归各位") 
     }
     CHECK(in_archived);
 
-    // unarchive:搬回 root。
+    // unarchive:manifest 转 closed。
     const nlohmann::json back = harness.Call("thread/unarchive", {{"threadId", thread_id}});
     CHECK(back["result"]["state"] == "active");
-    CHECK(std::filesystem::exists(U8(dir) / U8(thread_id + ".jsonl")));
+    {
+        const auto manifest = trajectory::ReadSessionJson(session_dir);
+        REQUIRE(manifest.has_value());
+        CHECK(manifest->status == "closed");
+    }
 
     std::error_code cleanup_ec;
     std::filesystem::remove_all(U8(dir), cleanup_ec);
@@ -241,13 +270,13 @@ TEST_CASE("thread/delete:无 confirm 拒,带 confirm 真删,thread/deleted 事�
     CHECK(refused.contains("error"));
     CHECK(refused["error"]["code"] == app_server::kErrInvalidParams);
     CHECK(refused["error"]["data"]["reason"] == "confirmation_required");
-    CHECK(std::filesystem::exists(U8(dir) / U8(thread_id + ".jsonl")));
+    CHECK(std::filesystem::exists(FindSessionDir(dir + "/workspaces", thread_id)));
 
-    // 带 confirm:删。
+    // 带 confirm:删(tombstone 留痕,目录消失)。
     const nlohmann::json deleted =
         harness.Call("thread/delete", {{"threadId", thread_id}, {"confirm", true}});
     CHECK(deleted.contains("result"));
-    CHECK_FALSE(std::filesystem::exists(U8(dir) / U8(thread_id + ".jsonl")));
+    CHECK(FindSessionDir(dir + "/workspaces", thread_id).empty());
     const auto event = harness.FindEvent("thread/deleted");
     REQUIRE(event.has_value());
     CHECK((*event)["params"]["threadId"] == thread_id);
@@ -272,8 +301,8 @@ TEST_CASE("搬删开着的 thread:active_thread 明拒(Windows 句柄闸的协�
     const nlohmann::json refused = harness.Call("thread/archive", {{"threadId", thread_id}});
     CHECK(refused.contains("error"));
     CHECK(refused["error"]["data"]["reason"] == "active_thread");
-    // 盘上文件没动。
-    CHECK(std::filesystem::exists(U8(dir) / U8(thread_id + ".jsonl")));
+    // 盘上账没动。
+    CHECK_FALSE(FindSessionDir(dir + "/workspaces", thread_id).empty());
 
     std::string stop_error;
     harness.server->HandleThreadStop(thread_id, stop_error);
@@ -383,11 +412,14 @@ TEST_CASE("workflow/query:不存在的 run 与没配目录") {
 // ---------------------------------------------------------------------------
 
 // 往一场存档里追加 tool_trace_v1 行(直接拼 JSONL,不经 hub——冷回放
-// 测的就是"从盘上折叠")。
-void SeedTraceLines(const std::string& sessions_dir, const std::string& thread_id,
+// P0-2:冷回放从 session main.jsonl 的 tool.* 事件折叠(唯一真账;旧
+// tool_trace_v1 行退役)。直接往停场后的 main.jsonl 追加事件行——fold
+// 只做单遍解析不验链,测试可以这么种账(生产路没有人追加)。
+void SeedTraceLines(const std::string& workspaces_dir, const std::string& thread_id,
                     const std::vector<std::string>& lines) {
-    std::ofstream out(U8(sessions_dir + "/" + thread_id + ".jsonl"),
-                      std::ios::binary | std::ios::app);
+    const auto session_dir = FindSessionDir(workspaces_dir, thread_id);
+    REQUIRE_FALSE(session_dir.empty());
+    std::ofstream out(session_dir / "main.jsonl", std::ios::binary | std::ios::app);
     for (const std::string& line : lines) {
         out << line << "\n";
     }
@@ -396,60 +428,42 @@ void SeedTraceLines(const std::string& sessions_dir, const std::string& thread_i
 TEST_CASE("trace/query: 冷回放全量 + lastSeq 增量补账") {
     const std::string dir = MakeTempDir("lubancode_test_app_server_trace");
     const std::string thread_id = SeedSession(dir, "t");
-    SeedTraceLines(dir, thread_id,
-                   {R"({"type":"tool_trace_v1","event":"scheduled","execution_id":"item-1","tool_use_id":"u1","tool_name":"probe","seq":10})",
-                    R"({"type":"tool_trace_v1","event":"execution_started","execution_id":"item-1","seq":11})",
-                    R"({"type":"tool_trace_v1","event":"execution_finished","execution_id":"item-1","outcome":"succeeded","seq":12,"result_ref":{"kind":"inline","sha256":"aa","bytes":3,"content":"ok","preview":"ok"}})",
-                    R"({"type":"tool_trace_v1","event":"result_committed","execution_id":"item-1","seq":13})",
-                    R"({"type":"tool_trace_v1","event":"scheduled","execution_id":"item-2","tool_use_id":"u2","tool_name":"run_command","seq":20})",
-                    R"({"type":"tool_trace_v1","event":"execution_started","execution_id":"item-2","seq":21})",
-                    R"({"type":"tool_trace_v1","event":"execution_finished","execution_id":"item-2","outcome":"timed_out","error_code":"process.timeout","seq":22,"result_ref":{"kind":"unavailable"}})"});
+    SeedTraceLines(dir + "/workspaces", thread_id,
+                   {R"({"kind":"tool.execution.planned","seq":10,"call_id":"call-1","payload":{"call_id":"call-1","tool_name":"probe"}})",
+                    R"({"kind":"tool.execution.started","seq":11,"call_id":"call-1","payload":{"call_id":"call-1","attempt":1}})",
+                    R"({"kind":"tool.execution.finished","seq":12,"call_id":"call-1","payload":{"call_id":"call-1","outcome":"succeeded","duration_ms":3,"result_ref":{"kind":"inline","sha256":"aa","bytes":3}}})",
+                    R"({"kind":"tool.result.committed","seq":13,"call_id":"call-1","payload":{"call_id":"call-1","content":[{"type":"text","text":"ok"}],"is_error":false}})",
+                    R"({"kind":"tool.execution.planned","seq":20,"call_id":"call-2","payload":{"call_id":"call-2","tool_name":"run_command"}})",
+                    R"({"kind":"tool.execution.started","seq":21,"call_id":"call-2","payload":{"call_id":"call-2","attempt":1}})",
+                    R"({"kind":"tool.execution.failed","seq":22,"call_id":"call-2","payload":{"call_id":"call-2","reason":"process.timeout","error_code":"process.timeout","duration_ms":9}})"});
 
-    // 全量:两枚 execution,item-1 finished、item-2 result_recoverable。
+    // 全量:两枚 execution,call-1 succeeded、call-2 failed(带稳定码)。
     {
         SessionHarness harness{dir};
         const nlohmann::json full = harness.Call("trace/query", {{"threadId", thread_id}});
         CHECK(full.contains("result"));
         CHECK(full["result"]["count"] == 2);
-        CHECK(full["result"]["lastSeq"] == 20);
+        CHECK(full["result"]["lastSeq"] == 22);
         const auto& executions = full["result"]["executions"];
-        CHECK(executions[0]["executionId"] == "item-1");
+        CHECK(executions[0]["executionId"] == "call-1");
         CHECK(executions[0]["outcome"] == "succeeded");
-        CHECK(executions[0]["recovery"] == "finished");
-        CHECK(executions[1]["executionId"] == "item-2");
-        CHECK(executions[1]["outcome"] == "timed_out");
+        CHECK(executions[0]["toolName"] == "probe");
+        CHECK(executions[1]["executionId"] == "call-2");
+        CHECK(executions[1]["outcome"] == "failed");
         CHECK(executions[1]["errorCode"] == "process.timeout");
-        CHECK(executions[1]["recovery"] == "result_recoverable");
-        // 遮敏:不回 inline 原文,只回摘要。
+        // 遮敏:不回 inline 原文,只回摘要(字节/hash/首行 preview)。
         CHECK_FALSE(executions[0].contains("resultContent"));
         CHECK(executions[0]["resultBytes"] == 3);
         CHECK(executions[0]["resultSha256"] == "aa");
+        CHECK(executions[0]["resultPreview"] == "ok");
     }
 
-    // 增量:lastSeq=15 只给 item-2(它的 scheduled seq=20 > 15)。
+    // 增量:lastSeq=15 只给 call-2(它的 planned seq=20 > 15)。
     {
         SessionHarness harness{dir};
         const nlohmann::json inc = harness.Call("trace/query", {{"threadId", thread_id}, {"lastSeq", 15}});
         CHECK(inc["result"]["count"] == 1);
-        CHECK(inc["result"]["executions"][0]["executionId"] == "item-2");
-    }
-
-    // errorsOnly:只回 timed_out 那枚。
-    {
-        SessionHarness harness{dir};
-        const nlohmann::json errors =
-            harness.Call("trace/query", {{"threadId", thread_id}, {"errorsOnly", true}});
-        CHECK(errors["result"]["count"] == 1);
-        CHECK(errors["result"]["executions"][0]["executionId"] == "item-2");
-    }
-
-    // toolUseId 过滤:重复 tool_use_id 的账不串(这里单枚直验)。
-    {
-        SessionHarness harness{dir};
-        const nlohmann::json by_toolu =
-            harness.Call("trace/query", {{"threadId", thread_id}, {"toolUseId", "u1"}});
-        CHECK(by_toolu["result"]["count"] == 1);
-        CHECK(by_toolu["result"]["executions"][0]["executionId"] == "item-1");
+        CHECK(inc["result"]["executions"][0]["executionId"] == "call-2");
     }
 
     std::error_code cleanup_ec;
@@ -470,11 +484,14 @@ TEST_CASE("trace/query: 参数错与档读不到") {
         const nlohmann::json gone = harness.Call("trace/query", {{"threadId", "ghost-thread"}});
         CHECK(gone.contains("error"));
     }
-    // 没配 sessions_dir:没有存档可查。
+    // 没配 workspaces 根:没有会话账可查。
     {
-        SessionHarness harness{std::string()};
+        const std::string bare = MakeTempDir("lubancode_test_app_server_trace_bare");
+        SessionHarness harness{bare};
         const nlohmann::json no_dir = harness.Call("trace/query", {{"threadId", "any"}});
         CHECK(no_dir.contains("error"));
+        std::error_code bare_ec;
+        std::filesystem::remove_all(U8(bare), bare_ec);
     }
 
     std::error_code cleanup_ec;

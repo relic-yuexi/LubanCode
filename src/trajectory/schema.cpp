@@ -217,6 +217,10 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::ToolResultCommitted, "is_error", "b", true},
     {EventKind::ToolResultCommitted, "derived_from_event", "s", false},
     {EventKind::ToolResultCommitted, "truncation", "s", false},
+    // P0-2(无损投影):MCP structuredContent 原样随行(nullopt 不落键,
+    // 与"server 没给"分得清);图片/音频等富块在 content 数组里以
+    // *_ref 形状带 artifact 引用。
+    {EventKind::ToolResultCommitted, "structured_content", "o", false},
     {EventKind::ControlCommandRequested, "command_id", "s", true},
     {EventKind::ControlCommandRequested, "command_name", "s", true},
     {EventKind::ControlCommandRequested, "action_name", "s", true},
@@ -246,6 +250,7 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::ControlCwdChanged, "worktree_id", "s", false},
     {EventKind::ControlModeChanged, "mode", "s", true},
     {EventKind::ControlModeChanged, "old_mode", "s", false},
+    {EventKind::ControlModeChanged, "reason", "s", false},
     {EventKind::ControlContextWindowChanged, "context_window", "s", true},
     {EventKind::ControlContextWindowChanged, "old_context_window", "s", false},
     {EventKind::ControlCheckpointCreated, "checkpoint_id", "s", true},

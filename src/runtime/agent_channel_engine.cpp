@@ -1,6 +1,10 @@
 // AgentChannelEngine 实现(多渠道消息接入单阶段 3)。装配合同见头文件。
 #include "runtime/agent_channel_engine.hpp"
 
+#include "config/config.hpp"
+#include "tools/path_utils.hpp"
+#include "workspace/identity.hpp"
+
 namespace lubancode::runtime {
 
 namespace {
@@ -32,12 +36,27 @@ agent::AgentProfile ApplyChannelToolPolicy(agent::AgentProfile profile,
 
 AgentChannelEngine::AgentChannelEngine(api::Backend& backend, tools::ToolRegistry& registry,
                                        agent::AgentProfile profile, Options options)
-    : options_(std::move(options)), session_runtime_(SessionRuntime::Options{
-                                        .sessions_dir = options_.sessions_dir,
-                                        .wire_name = options_.wire_name,
-                                        .start_ts = sessions::NowIdTimestamp(),
-                                        .lubancode_version = options_.lubancode_version,
-                                    }),
+    : options_(std::move(options)), session_runtime_([this]() {
+        SessionRuntime::Options runtime_options;
+        runtime_options.sessions_dir = options_.sessions_dir;
+        runtime_options.wire_name = options_.wire_name;
+        runtime_options.start_ts = sessions::NowIdTimestamp();
+        runtime_options.lubancode_version = options_.lubancode_version;
+        // P0-2(Trajectory 升为唯一 Session):账本恒开;身份按 engine 的
+        // cwd 四级裁决(P0-1 规矩:不认进程 current_path)。
+        const std::filesystem::path identity_cwd = tools::Utf8ToPath(options_.cwd);
+        const auto identity_home = config::HomeLubancodeDir();
+        auto identity = workspace::ResolveWorkspaceIdentity(
+            identity_cwd, identity_home.has_value() ? tools::Utf8ToPath(*identity_home)
+                                                    : std::filesystem::path());
+        if (identity.has_value()) {
+            runtime_options.trajectory_workspace_identity = std::move(*identity);
+        }
+        if (!options_.workspaces_dir.empty()) {
+            runtime_options.trajectory_workspaces_root = tools::Utf8ToPath(options_.workspaces_dir);
+        }
+        return runtime_options;
+    }()),
       agent_(backend, registry, ApplyChannelToolPolicy(std::move(profile), options_.tools)) {}
 
 agent::RunOutcome AgentChannelEngine::RunTurn(const TurnIngress& ingress, std::string* reply_text,
@@ -58,11 +77,26 @@ agent::RunOutcome AgentChannelEngine::RunTurn(const TurnIngress& ingress, std::s
     const std::size_t history_before = agent_.history().size();
 
     // 事件出水:每轮一只适配器(与终端路同款;sink 没挂就只发号)。
+    // Start 先走:turn_id 在这里 mint,轨迹桥吃同一枚(与 trace 同口径)。
     TurnEventAdapter turn_events = session_runtime_.MakeTurnAdapter();
+    const std::string turn_id = turn_events.Start();
+
+    // P0-2(Trajectory 升为唯一 Session):渠道轮的真账进 Journal——本轮
+    // 边界桥管 input/模型请求/输出/收口。工具栅栏经 ToolTraceHub 的路
+    // 是 channel 线后续批次的活,这里不伪造。
+    std::unique_ptr<TrajectoryTurnBridge> trajectory_bridge;
+    if (TrajectorySessionLedger* ledger = session_runtime_.trajectory(); ledger != nullptr) {
+        trajectory_bridge = ledger->NewTurnBridge({"", options_.wire_name, "channel"});
+        if (trajectory_bridge != nullptr) {
+            trajectory_bridge->BeginTurn(turn_id, "peer_agent");
+            trajectory_bridge->RecordInput(ingress.message);
+        }
+    }
 
     // 渠道轮的最小接线:无终端、无远端审批——工具确认 fail closed。
     agent::TurnWiring wiring;
     wiring.events = &turn_events;
+    wiring.boundary_recorder = trajectory_bridge.get();
     const channel::ToolRoutePolicy& tools = options_.tools;
     wiring.on_tool_confirm = [&tools](const std::string& /*tool_use_id*/,
                                       const std::string& name, const nlohmann::json& /*input*/) {
@@ -95,9 +129,15 @@ agent::RunOutcome AgentChannelEngine::RunTurn(const TurnIngress& ingress, std::s
         }
     }
 
-    // 落档:渠道 user 消息带 provenance(message-contracts.md §2)。
-    session_runtime_.PersistNewWithProvenance(agent_.history(), options_.model, options_.cwd,
-                                              ingress.provenance);
+    // 收口:本轮边界桥封 turn 终态(成败如实;provenance 进 Journal 的
+    // typed 投影是 channel 线后续批次的活)。
+    if (trajectory_bridge != nullptr) {
+        const bool ok = outcome.has_value();
+        trajectory_bridge->EndTurn(ok, /*cancelled=*/false,
+                                    ok ? std::string("done") : outcome.error());
+    }
+    (void)session_runtime_.PersistNewWithProvenance(agent_.history(), options_.model, options_.cwd,
+                                                    ingress.provenance);
     return outcome.has_value() ? *outcome : agent::RunOutcome{};
 }
 

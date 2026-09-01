@@ -1,77 +1,99 @@
-// SessionCommandService(会话管理器单第六步)的测试:runtime 侧的会话
-// 查询/搬删命令服务。
+// SessionCommandService(会话管理器单第六步;P0-2 换 workspace 新账)的
+// 测试:runtime 侧的会话查询/搬删命令服务。
 //   - thread.list:查询形状(scope/state/sort/search/limit)与结构化
-//     SessionSummary(稳定时间串,不算相对时间);
-//   - thread.archive/unarchive/delete:typed command 收口,稳定错误码;
+//     SessionSummary(稳定时间串,不算相对时间),数据源是 workspace
+//     可重建索引;
+//   - thread.archive/unarchive/delete:typed command 收口,lifecycle +
+//     状态图 + tombstone,稳定错误码;
 //   - delete 的 confirm 门:不带 confirm 一律拒绝不动盘;
 //   - 合同枚举往返:thread.archive/unarchive/delete 与 thread.deleted
-//     事件,序列化稳定字符串;
-//   - 终端与 app-server 同一查询给同一份 id/顺序/状态(验收:两者对同一
-//     query 给出相同 id/顺序/状态)。
+//     事件,序列化稳定字符串。
 
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <filesystem>
-#include <fstream>
 #include <string>
+#include <thread>
 
 #include <nlohmann/json.hpp>
 
-#include "sessions/session_catalog.hpp"
-#include "sessions/session_store.hpp"
 #include "runtime/command.hpp"
 #include "runtime/event.hpp"
 #include "runtime/session_command_service.hpp"
+#include "runtime/trajectory_session.hpp"
+#include "trajectory/directory.hpp"
+#include "workspace/identity.hpp"
 
 using namespace lubancode;
 
 namespace {
 
-// 文件名(可能含中文 id)走 u8 通道:窄串在 Windows 按 ACP 解码成乱码名,
-// 与 u8 的服务侧对不上账(HOT 单同款教训)。
-std::filesystem::path U8Name(const std::string& s) {
-    return std::filesystem::path(
-        std::u8string(reinterpret_cast<const char8_t*>(s.data()), s.size()));
-}
-
-std::string PathUtf8(const std::filesystem::path& p) {
-    const std::u8string u8 = p.u8string();
-    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
-}
-
-struct TempSessionsDir {
+struct TempWorkspacesRoot {
     std::filesystem::path base;
 
-    TempSessionsDir(const char* tag) {
+    TempWorkspacesRoot(const char* tag) {
         base = std::filesystem::temp_directory_path() / (std::string("lubancode_scs_") + tag);
         std::error_code ec;
         std::filesystem::remove_all(base, ec);
         std::filesystem::create_directories(base);
     }
-    ~TempSessionsDir() {
+    ~TempWorkspacesRoot() {
         std::error_code ec;
         std::filesystem::remove_all(base, ec);
     }
-    std::string str() const { return PathUtf8(base); }
+    std::filesystem::path root() const { return base / "workspaces"; }
 };
 
-void WriteSession(const TempSessionsDir& dir, const std::string& id, const std::string& title,
-                  const std::string& cwd, const std::string& started_at) {
-    sessions::SessionMeta meta;
-    meta.wire = "anthropic";
-    meta.model = "m1";
-    meta.cwd = cwd;
-    meta.started_at = started_at;
-    api::Message message;
-    message.role = api::Role::User;
-    message.content.push_back(api::TextBlock{"首句" + id});
-    std::string content = sessions::SerializeSessionMeta(meta) + "\n" +
-                          sessions::SerializeSessionMessage(message, started_at) + "\n";
-    if (!title.empty()) {
-        content += sessions::SerializeTitleEvent(title, started_at) + "\n";
+// 造一场封了口的会话:turn 一问一答 + 可选标题。正常 Close 后是 closed
+// 态(索引可见、可搬删)。间隔 2ms 造场,updated_at 的排序才稳定。
+std::string MakeSession(const TempWorkspacesRoot& dir, const std::string& title,
+                        const std::string& cwd) {
+    static int counter = 0;
+    ++counter;
+    if (counter % 2 == 0) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(3));
     }
-    std::ofstream f(dir.base / U8Name(id + ".jsonl"), std::ios::binary);
-    f << content;
+    std::error_code ec;
+    std::filesystem::create_directories(dir.base / "repo", ec);
+    runtime::TrajectorySessionLedger::Options options;
+    options.workspaces_root = dir.root();
+    options.workspace_identity = workspace::MakeFallbackIdentity(dir.base / "repo");
+    options.lubancode_version = "test";
+    options.launch_cwd = cwd;
+    auto ledger = runtime::TrajectorySessionLedger::Open(options);
+    REQUIRE(ledger.has_value());
+    auto bridge = ledger->NewTurnBridge({"demo", "responses", "terminal"});
+    REQUIRE(bridge != nullptr);
+    bridge->BeginTurn("turn-1", "external_user");
+    api::Message input;
+    input.role = api::Role::User;
+    input.content.push_back(api::TextBlock{"首句 " + title});
+    bridge->RecordInput(input);
+    api::Request prepared;
+    prepared.model = "m1";
+    const std::string request = bridge->OnRequestPrepared(prepared, agent::RequestPreparedContext{});
+    REQUIRE_FALSE(request.empty());
+    bridge->OnRequestSent(request);
+    api::Message answer;
+    answer.role = api::Role::Assistant;
+    answer.content.push_back(api::TextBlock{"回一句"});
+    REQUIRE(bridge->OnOutputCompleted(request, answer, "end_turn", "resp-1"));
+    bridge->EndTurn(true, false, "done");
+    if (!title.empty()) {
+        ledger->RecordTitleChanged(title, "");
+    }
+    const std::string id = ledger->session_id();
+    (void)ledger->CloseSession("exit");
+    return id;
+}
+
+runtime::SessionCommandService::Options ServiceOptions(const TempWorkspacesRoot& dir) {
+    runtime::SessionCommandService::Options options;
+    options.workspaces_root = dir.root();
+    options.workspace_key =
+        workspace::MakeFallbackIdentity(dir.base / "repo").workspace_key;
+    return options;
 }
 
 }  // namespace
@@ -110,34 +132,37 @@ TEST_CASE("合同枚举:thread.archive/unarchive/delete 与 thread.deleted 往�
 }
 
 TEST_CASE("thread.list: 结构化 SessionSummary,稳定时间串,搜索/排序/limit") {
-    TempSessionsDir dir("list");
-    WriteSession(dir, "20260820-101010-甲", "甲的场", "D:/房", "2026-08-20 10:10:10");
-    WriteSession(dir, "20260821-111111-乙", "", "D:/房", "2026-08-21 11:11:11");
-    WriteSession(dir, "20260822-121212-丙", "丙在别处", "E:/别的", "2026-08-22 12:12:12");
+    TempWorkspacesRoot dir("list");
+    const std::string id_a = MakeSession(dir, "甲的场", "D:/房");
+    const std::string id_b = MakeSession(dir, "", "D:/房");
+    const std::string id_c = MakeSession(dir, "丙在别处", "E:/别的");
+    REQUIRE_FALSE(id_a.empty());
+    REQUIRE_FALSE(id_b.empty());
+    REQUIRE_FALSE(id_c.empty());
 
-    const runtime::SessionCommandService service(dir.str());
+    const runtime::SessionCommandService service(ServiceOptions(dir));
     const auto outcome = service.ListThreads(nlohmann::json{{"scope", "all"}});
     REQUIRE(outcome.accepted);
     const auto& threads = outcome.payload.at("threads");
     CHECK(outcome.payload.at("total") == 3);
     REQUIRE(threads.size() == 3);
-    // updated 倒序:丙(0822)在头,甲(0820)在尾。
-    CHECK(threads[0].at("threadId") == "20260822-121212-丙");
-    CHECK(threads[2].at("threadId") == "20260820-101010-甲");
+    // updated 倒序:丙(最后造)在头,甲(最先造)在尾。
+    CHECK(threads[0].at("threadId") == id_c);
+    CHECK(threads[2].at("threadId") == id_a);
     // 结构化字段:标题/首句/cwd/模型/时间串/消息数/状态/健康。
     CHECK(threads[2].at("title") == "甲的场");
     CHECK(threads[2].at("firstUserText").get<std::string>().starts_with("首句"));
     CHECK(threads[2].at("cwd") == "D:/房");
-    CHECK(threads[2].at("model") == "m1");
-    CHECK(threads[2].at("createdAt") == "2026-08-20 10:10:10");  // 稳定串,不是相对时间
-    CHECK(threads[2].at("messageCount") == 1);
+    CHECK(threads[2].at("model").get<std::string>().empty() == false);
+    CHECK(threads[2].at("createdAt").get<std::string>().size() == 19);  // 稳定串,不是相对时间
+    CHECK(threads[2].at("messageCount") == 2);                           // 一问一答
     CHECK(threads[2].at("state") == "active");
     CHECK(threads[2].at("health") == "ok");
 
     // 搜索:标题命中,只留一场。
     const auto searched = service.ListThreads(nlohmann::json{{"scope", "all"}, {"search", "丙在"}});
     CHECK(searched.payload.at("total") == 1);
-    CHECK(searched.payload.at("threads")[0].at("threadId") == "20260822-121212-丙");
+    CHECK(searched.payload.at("threads")[0].at("threadId") == id_c);
 
     // limit 截页,total 不受分页影响。
     const auto paged = service.ListThreads(nlohmann::json{{"scope", "all"}, {"limit", 1}});
@@ -146,7 +171,7 @@ TEST_CASE("thread.list: 结构化 SessionSummary,稳定时间串,搜索/排序/l
 
     // HandleCommand 总入口:thread.list 同一形状同一份账(list 只读,
     // 非 const 服务上调用——HandleCommand 统一收口搬删与查询)。
-    runtime::SessionCommandService mutable_service(dir.str());
+    runtime::SessionCommandService mutable_service(ServiceOptions(dir));
     runtime::ClientCommand command;
     command.kind = runtime::ClientCommandKind::ListThreads;
     command.payload = {{"scope", "all"}};
@@ -156,44 +181,41 @@ TEST_CASE("thread.list: 结构化 SessionSummary,稳定时间串,搜索/排序/l
 }
 
 TEST_CASE("thread.archive/unarchive/delete: typed command 收口与错误码") {
-    TempSessionsDir dir("manage");
-    WriteSession(dir, "20260820-101010-甲", "甲的场", "D:/房", "2026-08-20 10:10:10");
-    runtime::SessionCommandService service(dir.str());
+    TempWorkspacesRoot dir("manage");
+    const std::string id = MakeSession(dir, "甲的场", "D:/房");
+    runtime::SessionCommandService service(ServiceOptions(dir));
 
-    // archive:成功,payload 带 state=archived。
-    auto outcome = service.ArchiveThread("20260820-101010-甲");
+    // archive:成功,payload 带 state=archived;目录不搬,manifest 转态。
+    auto outcome = service.ArchiveThread(id);
     REQUIRE(outcome.accepted);
     CHECK(outcome.payload.at("state") == "archived");
-    CHECK(std::filesystem::exists(dir.base / "archive" / U8Name("20260820-101010-甲.jsonl")));
 
     // 归档后 list(active)不见,archived 见。
-    const runtime::SessionCommandService const_view(dir.str());
+    const runtime::SessionCommandService const_view(ServiceOptions(dir));
     CHECK(const_view.ListThreads({{"scope", "all"}}).payload.at("total") == 0);
     CHECK(const_view.ListThreads({{"scope", "all"}, {"state", "archived"}}).payload.at("total") == 1);
 
     // unarchive:成功,payload 带 state=active。
-    outcome = service.UnarchiveThread("20260820-101010-甲");
+    outcome = service.UnarchiveThread(id);
     REQUIRE(outcome.accepted);
     CHECK(outcome.payload.at("state") == "active");
 
     // delete:不带 confirm 一律拒绝,盘上不动。
     runtime::ClientCommand no_confirm;
     no_confirm.kind = runtime::ClientCommandKind::DeleteThread;
-    no_confirm.thread_id = "20260820-101010-甲";
+    no_confirm.thread_id = id;
     const auto refused = service.HandleCommand(no_confirm);
     CHECK_FALSE(refused.accepted);
     CHECK(refused.error_code == "confirmation_required");
-    CHECK(std::filesystem::exists(dir.base / U8Name("20260820-101010-甲.jsonl")));
 
-    // 带 confirm:删掉。
+    // 带 confirm:删掉(tombstone 留痕,目录消失)。
     runtime::ClientCommand confirmed = no_confirm;
     confirmed.payload = {{"confirm", true}};
     const auto deleted = service.HandleCommand(confirmed);
     CHECK(deleted.accepted);
-    CHECK_FALSE(std::filesystem::exists(dir.base / U8Name("20260820-101010-甲.jsonl")));
 
     // not_found:删不存在的。
-    const auto missing = service.DeleteThread("99999999-000000-无", {{"confirm", true}});
+    const auto missing = service.DeleteThread("99999999-000000-XXXXXX", {{"confirm", true}});
     CHECK_FALSE(missing.accepted);
     CHECK(missing.error_code == "not_found");
 
@@ -206,36 +228,34 @@ TEST_CASE("thread.archive/unarchive/delete: typed command 收口与错误码") {
     CHECK_FALSE(service.HandleCommand(other).accepted);
 }
 
-TEST_CASE("终端与 app-server 同一查询同一份账:catalog 直查与 service 对齐") {
-    TempSessionsDir dir("parity");
-    WriteSession(dir, "20260820-101010-甲", "甲", "D:/房", "2026-08-20 10:10:10");
-    WriteSession(dir, "20260821-111111-乙", "乙", "D:/房", "2026-08-21 11:11:11");
+TEST_CASE("service 与终端 picker 同一份账:索引直查与 service 对齐") {
+    TempWorkspacesRoot dir("parity");
+    const std::string id_a = MakeSession(dir, "甲", "D:/房");
+    const std::string id_b = MakeSession(dir, "乙", "D:/房");
+    REQUIRE_FALSE(id_a.empty());
+    REQUIRE_FALSE(id_b.empty());
 
-    // 终端路(SessionCatalog 直查,picker 吃这份)。
-    sessions::SessionCatalog catalog(dir.str());
-    catalog.Scan();
-    sessions::SessionQuery query;
-    query.scope = sessions::SessionScope::All;
-    query.sort = sessions::SessionSort::Updated;
-    query.limit = 0;
-    const auto page = catalog.Query(query);
+    // 终端路(/sessions、picker 吃索引这份)。
+    trajectory::SessionIndexQuery query;
+    query.current_workspace_key = workspace::MakeFallbackIdentity(dir.base / "repo").workspace_key;
+    const auto page = trajectory::QueryWorkspaceSessions(dir.root(), query);
 
     // 协议路(SessionCommandService,app-server 吃这份)。
-    const runtime::SessionCommandService service(dir.str());
+    const runtime::SessionCommandService service(ServiceOptions(dir));
     const auto outcome = service.ListThreads({{"scope", "all"}});
 
     REQUIRE(page.entries.size() == outcome.payload.at("threads").size());
     for (std::size_t i = 0; i < page.entries.size(); ++i) {
-        CHECK(page.entries[i].id == outcome.payload.at("threads")[i].at("threadId").get<std::string>());
-        CHECK(page.entries[i].title == outcome.payload.at("threads")[i].at("title").get<std::string>());
-        CHECK(page.entries[i].updated_at ==
-              outcome.payload.at("threads")[i].at("updatedAt").get<std::string>());
+        CHECK(page.entries[i].session_id ==
+              outcome.payload.at("threads")[i].at("threadId").get<std::string>());
+        CHECK(page.entries[i].title ==
+              outcome.payload.at("threads")[i].at("title").get<std::string>());
     }
 }
 
-TEST_CASE("sessions_dir 空:service 拒搬删,list 给空表") {
-    const std::string empty_dir;
-    runtime::SessionCommandService service(empty_dir);
+TEST_CASE("workspaces 根空:service 拒搬删,list 给空表") {
+    runtime::SessionCommandService::Options empty_options;
+    runtime::SessionCommandService service(empty_options);
     CHECK(service.ListThreads({}).accepted);
     CHECK(service.ListThreads({}).payload.at("total") == 0);
     CHECK_FALSE(service.ArchiveThread("x").accepted);

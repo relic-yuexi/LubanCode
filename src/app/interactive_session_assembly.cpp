@@ -413,16 +413,13 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
               home_lubancode.has_value() ? (*home_lubancode + "/sessions") : std::string();
           runtime_options.wire_name = lubancode::config::ProviderWireName(config.wire);
           runtime_options.start_ts = lubancode::sessions::NowIdTimestamp();
-          // P0-2 轨迹(§十七内部预览):features.trajectory + 环境变量
-          // LUBANCODE_TRAJECTORY 合成。开的会话只写 Trajectory Journal、
-          // 不写旧 SessionStore(禁 dual-write);开张失败在 ctor 后由
-          // trajectory_open_error 报,Run() 入口据此失败启动。
-          runtime_options.trajectory_enabled =
-              lubancode::runtime::ResolveTrajectoryEnabled(config.features_trajectory);
-          if (runtime_options.trajectory_enabled) {
-              // P0-1:终端面身份按四级裁决冻结(commondir→marker→config→cwd),
-              // 同仓子目录/linked worktree 同一把钥匙;裁决料整份递给 ledger,
-              // 账本不再各算各的 key。
+          // P0-2(Trajectory 升为唯一 Session):feature/env 开关已删,恒开
+          // 轨迹账;开张失败在 ctor 后由 trajectory_open_error 报,Run()
+          // 入口据此失败启动,不回退旧 SessionStore。
+          // P0-1:终端面身份按四级裁决冻结(commondir→marker→config→cwd),
+          // 同仓子目录/linked worktree 同一把钥匙;裁决料整份递给 ledger,
+          // 账本不再各算各的 key。
+          {
               const std::filesystem::path identity_home =
                   home_lubancode.has_value()
                       ? lubancode::tools::Utf8ToPath(*home_lubancode)
@@ -432,12 +429,12 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
               if (identity.has_value()) {
                   runtime_options.trajectory_workspace_identity = std::move(*identity);
               }
-              runtime_options.lubancode_version = std::string(lubancode::app::kVersion);
-              // P0-3 --continue(§10.4):启动路直接开 start_reason=resume 的
-              // 新场,不先造空 session;没有可恢复场回落普通开张(同旧路
-              // quiet_if_none)。恢复的历史由启动善后段灌进 loop。
-              runtime_options.trajectory_resume_at_launch = options.continue_last;
           }
+          runtime_options.lubancode_version = std::string(lubancode::app::kVersion);
+          // --continue(§10.4):启动路直接开 start_reason=resume 的新场,
+          // 不先造空 session;没有可恢复场回落普通开张(同旧路
+          // quiet_if_none)。恢复的历史由启动善后段灌进 loop。
+          runtime_options.trajectory_resume_at_launch = options.continue_last;
           return runtime_options;
       }()),
       wire_str(lubancode::config::ProviderWireName(config.wire)),
@@ -452,7 +449,8 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       session_title_pending(session_runtime_.title_pending()),
       // 两层标题的账(骨架拆解反弹·问题 2):绑 runtime 那份标题真值与
       // 存档口,判定本体在 app/session_title_account。
-      titles_(session_title, session_title_pending, session_store, session_store_broken),
+      titles_(session_title, session_title_pending, session_store, session_store_broken,
+              session_runtime_.trajectory()),
       recordings_root(home_lubancode.has_value() ? lubancode::tools::Utf8ToPath(*home_lubancode) / "recordings"
                                                  : std::filesystem::path()),
       // 非 turn 通知的终端画法(骨架拆解反弹·问题 2):controller 经
@@ -476,7 +474,8 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     if (auto* ledger = session_runtime_.trajectory()) {
         lubancode::telemetry::TelemetryAssemblyInputs telemetry_inputs;
         telemetry_inputs.config_telemetry = config.features_telemetry;
-        telemetry_inputs.config_trajectory = session_runtime_.trajectory_enabled();
+        // P0-2:feature 开关已删;遥测的轨迹前置看"账真开出来了没"。
+        telemetry_inputs.config_trajectory = session_runtime_.trajectory() != nullptr;
         if (home_lubancode.has_value()) {
             telemetry_inputs.options.telemetry_root =
                 lubancode::tools::Utf8ToPath(*home_lubancode) / "telemetry";
