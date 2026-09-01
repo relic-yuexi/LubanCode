@@ -111,6 +111,8 @@ Gateway 进程退出码（G1 实现裁决，冻结）：
 | 3 | `gateway.config_invalid`（profile 配置坏，稳定退出防重启风暴） |
 | 4 | `gateway.shutdown_timeout`（关机超限，账上明示，不假写 clean） |
 
+`gateway status`：0 = 运行中；1 = 未运行/陈旧锁/锁读不懂（探测结论进 stdout 与 `--json`）。`gateway stop`：0 = 已停（含"本来就没在跑"与"非干净退出已如实入账"）；4 = 等待超时（不越权代杀）；1 = 锁读不懂不敢投命令/命令文件写不进。
+
 ## 6. 目录布局
 
 ```text
@@ -147,7 +149,7 @@ Agent 运行事实仍住 `~/.lubancode/workspaces/<workspace_key>/sessions/<sess
 | 批 | 内容 | 状态 |
 |---|---|---|
 | G0 | 现状冻结与总合同（本目录文档 + 渠道单对账） | 已落（2026-09-01） |
-| G1 | 前台 Gateway 骨架与控制面（GatewayProcess/profile/lock/control/status/boot history/SafeMode 骨架） | 已落（2026-09-01） |
+| G1 | 前台 Gateway 骨架与控制面（GatewayProcess/profile/lock/control/status/boot history/SafeMode 骨架） | 已落（2026-09-01：`src/gateway/` 四件 + `lubancode gateway run\|status\|stop` 子命令 + `tests/unit/gateway/` 16 例 + 真机冒烟） |
 | G2 | AutomationStore、Scheduler 与系统服务 | 待实现 |
 | G3 | Headless Session 与 Trajectory 收口（BuildRecoveryDecision） | 待实现 |
 | G4 | DurableTaskStore 与 detached work | 待实现 |

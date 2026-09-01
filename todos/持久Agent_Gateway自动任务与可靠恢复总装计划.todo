@@ -1,6 +1,6 @@
 # 持久 Agent：Gateway、自动任务与可靠恢复总装计划
 
-- 状态：G0 已落地（2026-09-01：现状审计与合同冻结进 docs/architecture/gateway/ 三篇——README/contracts/audit-write-map；渠道单阶段 1 勾选对账相符）。G1（前台 Gateway 骨架与控制面）起待实现
+- 状态：G0/G1 已落地（2026-09-01。G0：合同冻结进 docs/architecture/gateway/ 三篇。G1：GatewayProcess/profile/锁/文件控制面/status/stop/boot history/SafeMode 骨架 + `lubancode gateway run|status|stop` 子命令，测试 tests/unit/gateway/test_gateway_process.cpp 16 例全绿 + 真机冒烟）。G2（AutomationStore/Scheduler/系统服务）起待实现
 - 日期：2026-08-31
 - 级别：P0
 - 范围：`src/app`、`src/runtime`、`src/trajectory`、`src/workflow`、`src/tools`、`src/channel`、`src/sessions`、`src/platform`、`src/cli`、`tests/`
@@ -1006,15 +1006,15 @@ recovery.action_forbidden
 
 ### G1：前台 Gateway 骨架与控制面
 
-- [ ] 新建 `GatewayProcess`、profile、instance id、pid/start-token lock。
-- [ ] 实现 `lubancode gateway run/status/stop`。
-- [ ] 起 local-only control endpoint、health/readiness、graceful shutdown。
-- [ ] 接统一日志目录与 JSON status。
-- [ ] 实现 boot history 与 SafeMode 骨架。
-- [ ] 普通 CLI 只读 probe 已运行 Gateway，不暗起它。
-- [ ] 加第二实例抢锁、陈旧锁、坏 control endpoint、关机超时测试。
+- [x] 新建 `GatewayProcess`、profile、instance id、pid/start-token lock。（`src/gateway/process.*`：boot_id 即 instance id；`GatewayLock` 记 pid + 进程 start token（复用 `trajectory::ProbeLockHolder` 同一把身份尺）+ boot_id；陈旧锁清后重拿、坏锁保守不删）
+- [x] 实现 `lubancode gateway run/status/stop`。（`src/cli/gateway_command.*` + cli_options/cli_app 接线；退出码合同见 docs/architecture/gateway/README.md §5）
+- [x] 起 local-only control endpoint、health/readiness、graceful shutdown。（`src/gateway/control_server.*`：首版为本地文件控制通道——control.json 原子换代快照 + control/stop.json 命令（boot_id 定向，陈旧命令不追杀新实例）；G1 实现裁决记 contracts.md §10。graceful shutdown 走 ShutdownHook，超宽限记 timeout 退 4 不假写 clean）
+- [x] 接统一日志目录与 JSON status。（profiles/<p>/logs/gateway.log 统一日志；`gateway status --json` 出机器可读快照（含 holder/control/health/safe_mode/连击数））
+- [x] 实现 boot history 与 SafeMode 骨架。（boot-history.jsonl append-only；连续非干净关机 ≥ 阈值（默认 3）进 SafeMode：控制面照起、业务面暂停、状态明示；干净关机破连击。显式 ack 口留 G2 doctor）
+- [x] 普通 CLI 只读 probe 已运行 Gateway，不暗起它。（`src/gateway/status.*` 纯读；测试钉"未运行时零建目录零写盘"；真机冒烟第一步验证过 home 目录为空）
+- [x] 加第二实例抢锁、陈旧锁、坏 control endpoint、关机超时测试。（tests/unit/gateway/test_gateway_process.cpp 16 例：抢锁/陈旧锁（PID 复用 token 对不上）/坏锁保守/坏 control.json 降级不崩/钩子没收净退 4/SafeMode 进出/StopGateway 等待收口/CLI 解析；另有真机冒烟：run→status→--json→第二实例退 2→stop 干净退 0→硬杀后陈旧锁裁决→重启自动清）
 
-验收：前台 Gateway 不接模型、不接渠道也能守住唯一实例；外部 CLI 可查、可停；杀进程后陈旧锁能按 pid + start token 安全裁决。
+验收：前台 Gateway 不接模型、不接渠道也能守住唯一实例；外部 CLI 可查、可停；杀进程后陈旧锁能按 pid + start token 安全裁决。（真机冒烟全过：第二实例 exit 2、stop 后 run exit 0、硬杀后 status 报陈旧锁、再 run 自动清锁起得来；boot-history/control.json/gateway.log 三账句句对得上）
 
 ### G2：AutomationStore、Scheduler 与系统服务
 

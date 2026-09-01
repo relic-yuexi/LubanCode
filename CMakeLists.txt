@@ -591,6 +591,14 @@ add_library(lubancode_engine STATIC
   # 多渠道消息接入单阶段 3:ChannelRouter(准入链/binding/session key/
   # 工具与记忆策略;manager 的路由准入经它)。
   src/channel/channel_router.cpp
+  # 持久 Agent 总装单 G1:Gateway 骨架——profile 裁决/锁(pid+start token
+  # +boot_id)/boot history 与 SafeMode/文件控制面/只读探测。纯库,与
+  # channel/trajectory 同层(依赖 platform/trajectory 身份核,不 include
+  # runtime/app/cli)。
+  src/gateway/profile.cpp
+  src/gateway/control_server.cpp
+  src/gateway/process.cpp
+  src/gateway/status.cpp
   src/insights/finding.cpp
   src/insights/session_summary.cpp
   src/insights/report_model.cpp
@@ -1007,6 +1015,8 @@ add_library(lubancode_app STATIC
   src/cli/record_command.cpp
   # P0-3:`lubancode trajectory <verify|replay|harness-replay>` 只读诊断子命令。
   src/cli/trajectory_command.cpp
+  # 持久 Agent 总装单 G1:`lubancode gateway run|status|stop` 子命令面。
+  src/cli/gateway_command.cpp
   # 骨架拆解反弹·问题 1:工具确认的终端半边(菜单/diff/[y/a/N]/持久化)
   # 与 ask_user 问询,自 app/turn_runner.cpp 搬来——真终端 IO 件,随
   # console_input 住 app target。

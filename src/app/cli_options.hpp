@@ -74,6 +74,15 @@ struct TrajectoryCliArgs {
     std::string format;             // export/export-workspace 的 --format;唯一认 training-v1
 };
 
+// Gateway 子命令(总装单 G1):`lubancode gateway run|status|stop
+// [--profile <名>] [--json 只 status 认]`。run 是前台真进程;status/stop
+// 是只读 probe/本地控制文件操作,绝不暗起 Gateway(零副作用合同)。
+struct GatewayCliArgs {
+    std::string verb;    // run | status | stop
+    std::string profile; // --profile <名>;空 = default
+    bool json = false;   // status --json:机器可读快照
+};
+
 // 解析结果:action 不是 Proceed 时,RunCli 兑现完动作就退,不进会话。
 enum class CliAction {
     Proceed,                  // 正常路径:按 options 继续启动
@@ -93,6 +102,8 @@ enum class CliAction {
     BadEvolveTest,            // evolve test 参数不对:人话已塞进 error_text
     RunTrajectory,            // trajectory 子命令:verify/replay/harness-replay 后退(P0-3)
     BadTrajectory,            // trajectory 参数不对:人话已塞进 error_text
+    RunGateway,               // gateway 子命令:run/status/stop(总装单 G1)
+    BadGateway,               // gateway 参数不对:人话已塞进 error_text
 };
 
 struct ParsedCliArgs {
@@ -103,6 +114,7 @@ struct ParsedCliArgs {
     SessionManagementCommand session_command;  // action == ManageSession 时有效
     EvolveTestArgs evolve_test;  // action == RunEvolveTest 时有效
     TrajectoryCliArgs trajectory;  // action == RunTrajectory 时有效
+    GatewayCliArgs gateway;  // action == RunGateway 时有效
 };
 
 // args[0] 是程序名,实参从 args[1] 起。多个早退参数同时出现时,按扫描
