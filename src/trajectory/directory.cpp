@@ -81,6 +81,14 @@ nlohmann::json SessionManifest::ToJson() const {
     // event schema major 钉进 manifest(Token 账本单 §6.1.1):v1 老档没这键,
     // 读侧按默认 1 兜。
     json["event_schema_version"] = event_schema_version;
+    // 存储 v2 合同 §三:两枚迁移键只在 legacy_import 场落盘,空串不写键
+    //(与 schema 的"空=缺省"同一口径)。
+    if (!subagent_detail.empty()) {
+        json["subagent_detail"] = subagent_detail;
+    }
+    if (!training_policy.empty()) {
+        json["training_policy"] = training_policy;
+    }
     return json;
 }
 
@@ -121,6 +129,8 @@ std::optional<SessionManifest> SessionManifest::FromJson(const nlohmann::json& j
     if (json.contains("event_schema_version") && json.at("event_schema_version").is_number_integer()) {
         manifest.event_schema_version = json.at("event_schema_version").get<int>();
     }
+    read_string("subagent_detail", &manifest.subagent_detail);
+    read_string("training_policy", &manifest.training_policy);
     return manifest;
 }
 
