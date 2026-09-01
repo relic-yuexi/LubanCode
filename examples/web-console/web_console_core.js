@@ -57,6 +57,49 @@
   }
 
   // -------------------------------------------------------------------------
+  // 协议兼容声明(打包发布账 §四:壳不捆绑内核、不做 sidecar 分发,版本
+  // 对齐靠"壳声明兼容范围 + 连上检测提示")。三只前端(浏览器页/Tauri/
+  // Android)同一份声明,谁装这份代码谁就带这份账。范围是闭区间;
+  // major 变了必不兼容(报文形状变),minor 超出声明也判不合——参考前端
+  // 只按声明里的版本验过,没验过的不冒充兼容。
+  // -------------------------------------------------------------------------
+
+  const PROTOCOL_COMPAT = { min: '1.1', max: '1.1' };
+
+  function compareVersions(a, b) {
+    const pa = String(a || '').split('.');
+    const pb = String(b || '').split('.');
+    for (let i = 0; i < 2; ++i) {
+      const na = parseInt(pa[i], 10) || 0;
+      const nb = parseInt(pb[i], 10) || 0;
+      if (na !== nb) {
+        return na < nb ? -1 : 1;
+      }
+    }
+    return 0;
+  }
+
+  // 服务端协议版本对声明范围的对表:回 {ok, server, declared, hint}。
+  // ok=false 时 hint 给一句人话,页上原样摆出来,连不上合的内核也照连
+  // (检测提示,不是拦截)——壳只报账,不替用户做主。
+  function checkProtocolCompat(serverVersion) {
+    const declared = PROTOCOL_COMPAT.min + ' ~ ' + PROTOCOL_COMPAT.max;
+    if (!serverVersion) {
+      return { ok: false, server: null, declared: declared,
+        hint: '内核没报协议版本,画面可能不对' };
+    }
+    const ok = compareVersions(serverVersion, PROTOCOL_COMPAT.min) >= 0 &&
+      compareVersions(serverVersion, PROTOCOL_COMPAT.max) <= 0;
+    return {
+      ok: ok,
+      server: serverVersion,
+      declared: declared,
+      hint: ok ? '' : '内核协议 ' + serverVersion + ',本前端声明兼容 ' + declared +
+        '——请对齐所连的 lubancode 内核版本再试'
+    };
+  }
+
+  // -------------------------------------------------------------------------
   // 协议通道
   // -------------------------------------------------------------------------
 
@@ -557,6 +600,8 @@
     buildHttpBaseUrl: buildHttpBaseUrl,
     buildArtifactUrl: buildArtifactUrl,
     parseSnapshotRefs: parseSnapshotRefs,
+    PROTOCOL_COMPAT: PROTOCOL_COMPAT,
+    checkProtocolCompat: checkProtocolCompat,
     ProtocolChannel: ProtocolChannel,
     ConsoleState: ConsoleState,
   };

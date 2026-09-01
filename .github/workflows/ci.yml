@@ -95,6 +95,21 @@ jobs:
         shell: bash
         run: ctest --test-dir build -C Release --parallel 4 --output-on-failure --no-tests=error
 
+      # 外壳冒烟挂 windows 腿(打包发布账 §四.3:发布前回归必跑),复用
+      # 上面现建的 exe,不另编:静态册验两家壳的静态账(触屏折算 +
+      # tauri.conf/gradle/清单),端到端册起真 app-server 走参考前端
+      # 四件套的协议路(playwright 未装时浏览器幕按设计跳,协议与口子
+      # 已钉)。别的腿是内核账,不掺和。
+      - name: Shell static smoke (windows only)
+        if: matrix.name == 'windows-msvc'
+        shell: bash
+        run: node scripts/tests/app_shell_smoke.js
+
+      - name: Web console end-to-end smoke (windows only)
+        if: matrix.name == 'windows-msvc'
+        shell: bash
+        run: node scripts/tests/app_server_web_console_smoke.js --binary build/Release/lubancode.exe
+
       - name: Report failed CTest cases
         if: ${{ failure() && steps.test.outcome == 'failure' }}
         shell: bash

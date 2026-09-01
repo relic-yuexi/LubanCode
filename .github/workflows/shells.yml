@@ -1,0 +1,144 @@
+# 外壳打包流水线(Tauri与Android外壳打包与发布账 第一批):
+#   - windows-latest 出 Tauri 壳的 NSIS 安装包
+#   - ubuntu-latest 出 Android 壳的 debug APK
+# 壳不捆绑内核(单子口径:安装包/apk 不塞 lubancode.exe,连的是用户
+# 已装的 app-server),版本对齐走协议兼容声明——见
+# examples/shells/README.md《版本对齐》与《打包流程》。
+#
+# 产物走 workflow artifacts,不进 git(仓库惯例);打 shell-v* tag 时
+# 附到 GitHub Release——与内核 v* tag 分流,壳版本(0.1.x)与内核
+# 版本解耦,互不牵引。
+#
+# 依赖口径:
+#   - Tauri:Rust 走 dtolnay/rust-toolchain 钉 stable;tauri CLI 经 npx
+#     钉 2.11.4(与本机勘察一致,见 shells README 工具链账);NSIS
+#     工具链由 tauri CLI 首跑自动下载缓存,runner 网络直通。
+#   - Android:ubuntu runner 自带 JDK 17 与 Android SDK(SDK 34 平台
+#     在镜像里);仓库无 gradle wrapper,用 gradle/actions/setup-gradle
+#     钉 gradle 版本跑 assembleDebug。AGP 版本在
+#     examples/shells/android/settings.gradle.kts 统一钉死。
+#   - 两个静态冒烟(app_shell_smoke 对两家壳的静态账)先跑,红了不打包。
+name: shells
+
+on:
+  push:
+    branches: [main]
+    tags: ["shell-v*"]
+    paths:
+      - "examples/shells/**"
+      - "examples/web-console/**"
+      - "scripts/tests/app_shell_smoke.js"
+      - ".github/workflows/shells.yml"
+  pull_request:
+    paths:
+      - "examples/shells/**"
+      - "examples/web-console/**"
+      - "scripts/tests/app_shell_smoke.js"
+      - ".github/workflows/shells.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: shells-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  tauri-nsis:
+    name: tauri-nsis-windows-x64
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Shell static smoke (app_shell_smoke)
+        shell: bash
+        run: node scripts/tests/app_shell_smoke.js
+
+      - name: Install Rust (stable, msvc)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Build NSIS installer
+        shell: bash
+        run: |
+          cd examples/shells/tauri
+          npx --yes @tauri-apps/cli@2.11.4 build --bundles nsis
+
+      - name: Verify installer and record digest
+        shell: bash
+        run: |
+          set -eu
+          setup_exe="$(find examples/shells/tauri/target/release/bundle/nsis -name '*-setup.exe' | head -1)"
+          test -n "$setup_exe" || { echo "bundle/nsis 下没有 *-setup.exe" >&2; exit 1; }
+          test "$(find examples/shells/tauri/target/release/bundle/nsis -name '*-setup.exe' | wc -l)" = 1
+          ls -l "$setup_exe"
+          sha256sum "$setup_exe" | tee installer.sha256
+
+      # Windows 代码签名占位:无 Authenticode 证书就不签,SmartScreen 会
+      # 拦——如实告知,不冒充(见 shells README《签名占位》)。证书到位
+      # 后:runner 装证书、tauri CLI 读 WINDOWS_CERTIFICATE_THUMBPRINT /
+      # WINDOWS_CERTIFICATE_PASSWORD 自动签,无需改本流水线结构。
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lubancode-console-windows-x64-setup
+          path: |
+            examples/shells/tauri/target/release/bundle/nsis/*-setup.exe
+            installer.sha256
+
+      - name: Attach to GitHub Release (shell-v tags only)
+        if: startsWith(github.ref, 'refs/tags/shell-v')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            examples/shells/tauri/target/release/bundle/nsis/*-setup.exe
+
+  android-apk:
+    name: android-apk-ubuntu
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Shell static smoke (app_shell_smoke)
+        shell: bash
+        run: node scripts/tests/app_shell_smoke.js
+
+      # 仓库无 gradle wrapper:runner 的 JDK 17 + Android SDK(SDK 34)
+      # 镜像自带,这里只钉 gradle 版本。AGP 在 settings.gradle.kts 钉。
+      - name: Set up Gradle (pinned)
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
+
+      - name: Build debug APK
+        shell: bash
+        run: |
+          cd examples/shells/android
+          gradle :app:assembleDebug --no-daemon
+
+      - name: Verify APK and record digest
+        shell: bash
+        run: |
+          set -eu
+          apk="examples/shells/android/app/build/outputs/apk/debug/app-debug.apk"
+          test -f "$apk" || { echo "缺 $apk" >&2; exit 1; }
+          ls -l "$apk"
+          sha256sum "$apk" | tee apk.sha256
+
+      # release 签名走 keystore.properties(不进仓,见 shells README
+      # 《Android 签名》);CI 无密钥,只出 debug APK。release 包在本机
+      # 配好 keystore 后 assembleRelease 出。
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lubancode-console-android-debug-apk
+          path: |
+            examples/shells/android/app/build/outputs/apk/debug/app-debug.apk
+            apk.sha256
+
+      - name: Attach to GitHub Release (shell-v tags only)
+        if: startsWith(github.ref, 'refs/tags/shell-v')
+        uses: softprops/action-gh-release@v3
+        with:
+          files: |
+            examples/shells/android/app/build/outputs/apk/debug/app-debug.apk

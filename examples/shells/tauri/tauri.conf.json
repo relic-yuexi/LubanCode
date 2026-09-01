@@ -26,6 +26,15 @@
     "category": "DeveloperTool",
     "shortDescription": "LubanCode 参考前端的桌面壳",
     "longDescription": "LubanCode 参考前端(examples/web-console)的 Tauri 桌面壳:装同一页、走同一协议(app-server WS 承载),浏览器 Tab 走镜像路。验收工具,不是产品。",
-    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"]
+    "icon": ["icons/32x32.png", "icons/128x128.png", "icons/icon.ico"],
+    "createUpdaterArtifacts": false,
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico",
+        "installMode": "currentUser",
+        "languages": ["SimpChinese", "English"],
+        "displayLanguageSelector": false
+      }
+    }
   }
 }
