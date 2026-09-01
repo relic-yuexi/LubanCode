@@ -304,6 +304,8 @@ iterator` 立刻停止遍历,不再碰后面的文件;但只要命中数没到 1
    `search_golden_driver golden`,跟 `tests/fixtures/search/golden/
    old_kernel_golden.json` 比对,confirm 24 条场景依旧全等,再继续往下
    走——这是本批留给后面批次的免费回归网。
+   *(P0-8 注:此法在迁移期有效;差分过门后旧基线已删,将来的对照法是
+   "当前后端快照 vs 新快照",见第十一节回滚策略末条。)*
 2. **`excluded_dirs/` 每次都要现造,不能假设它在盘上。** 见第二节与
    README 的专门说明;P0-5 的差分工具如果要同时跑旧内核和新 rg,两边
    都要在各自的执行前调用同一份 `MaterializeExcludedDirsFixture` 逻辑
@@ -362,7 +364,9 @@ P0-2/P0-3 落地(同一批),生产行为仍一字不动:旧内核照跑,落的�
    单测设了该变量,定位结果与不设一字不差。
 
 另有**真机四幕**(WSL 下临时驱动链 `search_ripgrep.cpp + process_posix.cpp`
-直跑 `RunRipgrepSmoke`,非单测假件):deb 内真 GNU rg → `ready`/版本 15.2.0
+直跑 `RunRipgrepSmoke`,非单测假件):deb 内真 rg(当时账面记作 GNU/glibc;
+2026-09-01 实测改判:实为 static-pie 静态链接的 musl 系构建,见 §十一)→
+`ready`/版本 15.2.0
 精确对上;假版本脚本 → `version_mismatch` + 稳定码;缺件 → `missing` +
 稳定码;PATH 前放会写 marker 的假 rg、smoke 真 rg → 照常 `ready` 且
 marker 不存在。真探针(`DefaultRipgrepVersionProbe` → `RunProcess` →
@@ -594,3 +598,83 @@ WSL:同口径 1000 轮 p50=11.0ms、大树 100 轮 0 崩 0 挂 0 残留。采样
 no_match 全树扫 72ms、基准/取消全跑通——本仓压力门这侧是绿的;上游
 #3494(超大目录偶发 SIGSEGV)是否有结论未查证。改源码构建 GNU 版 or
 接受 musl(压力门背书),归主控/P0-8 裁决,本批未动 manifest 与发行链。
+
+## 十一（增补）：P0-8 账:删旧内核清扫与发布收口
+
+P0-5 删了旧内核的大头,本批是漏网清扫加发布收口(2026-09-01 落)。
+
+### 删了什么
+
+| 件 | 处置 | 说明 |
+|---|---|---|
+| `search_golden_driver` 的 `diff` 子命令 | 删 | P0-5 迁移差分门,门已过(§十);批准迁移表跟着删,它的语义只对"旧内核→rg"这一次迁移成立,留着会引诱将来 rg 升版时错用 |
+| `tests/fixtures/search/golden/old_kernel_golden.json` | 删 | diff 的唯一输入,差分结果已记档(§十),基线留着等于给死语义留对表口 |
+| golden 子命令与 corpus/ 夹具 | 留 | 现在给当前后端拍快照;驱动 exe 放进发行包/安装位跑,就是对包内布局认不认随包 rg 的最直接 E2E |
+| `bench` 子命令与 `bench/old_kernel_bench_src.json` | 留 | P0-7 性能门的驱动件;旧内核已删没法重跑,冻结基线是性能表"旧内核"一列的唯一数据源 |
+| `SingleFileGlobMatches`(search.cpp) | 留 | **不是旧内核残留**:单文件 root 的 glob 闸门,产品合同 A 类 #9/#10(rg 对显式文件参数绕过一切 glob,这道闸只能宿主守);不参与目录递归,不是搜索引擎 |
+| `src/evolution/eval.cpp` 的 `LooksBinary` | 留 | 同名不同物:evolution 评测里判文本内容是否二进制,与 search 内核无涉,不属本单 |
+
+全仓 grep 验证:`src/` 里 `WalkFiles`/`ShouldSkipDir`/`GlobToRegex`/
+search 语境的 `std::regex`/`recursive_directory_iterator` 零命中(仅剩
+`search_ripgrep.*` 注释里"与旧内核对账"的账目文字,那是设计单 §5.4
+要求的逐条对账记录,不是实现)。
+
+### 不留 fallback 的证据
+
+- 定位器 `BundledRipgrepPath()` 只有 `ExecutableDir()/libexec/rg(.exe)`
+  一条路;`src/tools/search*.cpp` 全文无 `getenv`,无 PATH 搜索。
+- `LUBANCODE_RG_PATH` 全仓只出现在两处:头文件注释(明令禁止)与
+  `test_search_ripgrep.cpp` 的反向单测(设了它,定位结果与不设一字不差)。
+- 运行时下载零分支:下载只存在于 `scripts/fetch_ripgrep.py`(构建期/
+  Release 流水线,读 committed manifest,不问 latest)。
+- `SearchTool::execute` 的 runner 缺位分支回稳定错 `search_backend_missing`,
+  源码里没有"退回本地内核"的分支可走——那条路没有代码。
+
+### musl 改判(2026-09-01,主人裁决)
+
+`.deb` 内的 `usr/bin/rg` 实测为 static-pie 静态链接(`ldd` 零动态依赖,
+musl 系),早前"取 .deb 即得 GNU/glibc"的前提不成立。裁决:**接受
+musl**——本仓大树压力门 100 轮已过(P0-7 批实测),本仓工况(100 条截断
++命中满额主动收树)不碰上游 #3494 的"超大目录高并发"场景;上游结论未
+查证、留 watch;"自建 GNU 版"路线关闭不排期。manifest.json notes、
+THIRD_PARTY_NOTICES.md 取包取舍、设计单 §3.2 三处同步改判。
+
+### 回滚策略(定案)
+
+**新后端发布后出事,回滚整个 LubanCode 版本,不在一版里养两套语义。**
+
+- 触发条件:某版 Release 后 `search` 出现回归(错结果、崩溃、取消失灵、
+  随包 rg 损坏且 doctor/smoke 拦不住),优先热修(修 SearchTool 投影层/
+  换 manifest 资产);热修不动框架,一版内修不好就回滚。
+- 回滚动作:把该版本包从发行渠道撤下,用户与 CI 回到上一个 tag 的包。
+  Git 侧是 `git revert` 到上一版或直接重新发上一版号,**不是**把旧内核
+  从历史里捞回来编译——旧内核已删净,捞回来等于在同一版里养两套搜索
+  语义,那正是设计单 §十一"旧代码舍不得删"反设计条目拦的事。
+- 为什么这样够:随包 rg 的供应链钉在 manifest(哈希+版本+MIT),缺件/
+  坏件在 doctor、启动 smoke、Release 验包三道口都会红;能漏到用户手里的
+  "rg 本身坏了"只剩上游 bug 一种,那类问题回滚整版比维护双内核便宜得多。
+- 回滚后重新往前走的路:修好的版本照常走 `fetch_ripgrep.py` 换资产或升
+  rg 版本(manifest 改哈希、`kBundledRipgrepVersion` 同步、check_release
+  对账、快照 golden 另立新基线比对)。
+
+### 发布收口验证账(2026-09-01,本机 Windows x64)
+
+- 全量 C++ tests(ctest -C Release,临时 USERPROFILE):**331 册全绿**
+  (收口轮 100% passed)。本批只删了不进 ctest 的手动驱动代码,册数与
+  main 基线持平、一条没少。过程账:收口前几轮各有一笔**漂移的**进程类
+  红笔(run_command_process / search_ripgrep_run 超时 / hooks_dispatcher /
+  tools / plugin_process),每笔单跑即绿;同一二进制直跑 wall time 实测
+  372s 与 60s 两档摆幅,判定为宿机负载抖(后台大户挤压下生进程超时),
+  非代码病——最终静机全量轮零红定案。
+- `scripts/tests/install.tests.ps1`:27 项全绿(P0-6 已含 libexec/licenses/
+  notices 一节,本批复跑)。
+- Release package smoke(本机拼 Windows zip 包):configure Release →
+  fetch_ripgrep.py 入包 → 打 zip → 重解验件(notices/license/libexec/rg
+  两枚 --version + 中文/regex/glob/ignore/无命中退出 1 五步搜索 smoke)。
+- 断网装:坏代理(`HTTP(S)_PROXY=http://127.0.0.1:9`)下 install.ps1
+  从包内安装,装完把 `search_golden_driver.exe` 放进安装位跑 golden——
+  默认构造的 SearchTool 走生产定位路找到**安装位**的 `libexec/rg.exe`,
+  24 场景全过,即"断网安装后离线可搜"的 E2E 证据。
+- Linux:WSL 侧重编译改动的驱动件并跑 golden 24 场景(真 linux rg,哈希/
+  版本双验后放驱动旁走生产定位路);bench 归 P0-7 性能门,不在本批复跑。
+  macOS 无本机环境,release.yml 矩阵已写入待 CI,如实标注。

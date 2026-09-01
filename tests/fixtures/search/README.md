@@ -1,9 +1,10 @@
-# search 迁移单(P0-1)夹具:tests/fixtures/search/
+# search 迁移单夹具:tests/fixtures/search/
 
 给《SearchTool 内置 Ripgrep 后端迁移设计》(`todos/SearchTool内置Ripgrep后端迁移设计.todo`)
-P0-1 批次用的照相语料。本批**不接真 ripgrep**,只拿它固化旧内核
-(`src/tools/search.cpp` 现有 `std::regex` + `recursive_directory_iterator`
-实现)的行为,供 P0-5 换真后端后做自动化差分。
+用的照相语料。P0-1 造这批夹具是为了给旧内核(`std::regex` +
+`recursive_directory_iterator`,P0-5 已整段删除)拍照做差分;差分过门后
+(P0-8),corpus/ 留着继续服务 `search_golden_driver` 的 golden/bench——
+golden 给当前后端(随包 ripgrep)拍快照,bench 是 P0-7 性能门的驱动件。
 
 设计与结果的完整叙述(用例分栏表、ECMAScript/Rust regex 迁移表、
 fixed_strings schema 决定、基准结论)在
@@ -31,16 +32,21 @@ tests/fixtures/search/
     illegal_utf8_content/bad_utf8.txt
   posix_only/
     make_illegal_utf8_filename.sh 非法 UTF-8 文件名,仅 POSIX 现造,不进 git
-  golden/
-    old_kernel_golden.json        旧内核在 corpus/ 全场景表上的固化输出
   bench/
-    old_kernel_bench_src.json     旧内核对本仓 src/ 的基准原始数据
+    old_kernel_bench_src.json     旧内核对本仓 src/ 的基准原始数据(P0-1 采集,
+                                   冻结的历史基线——旧内核已删,没法重跑,这是
+                                   P0-7 性能表"旧内核"一列的唯一数据源,故留)
     p07_bench_win.json/.csv       ripgrep 后端基准(Windows x64,P0-7)
     p07_bench_linux.json/.csv     ripgrep 后端基准(WSL Ubuntu x64,P0-7)
     p07_report.json/.csv          旧内核对账 + 包装开销门判(P0-7)
     p07_stress_win.json / p07_stress_linux.json   1000 短搜 + 大树 100 轮稳定门账
     p07_cancel_win.json / p07_cancel_linux.json   取消响应延迟账
 ```
+
+`golden/old_kernel_golden.json`(旧内核 24 场景冻结基线)已随迁移单 P0-8
+删除:它的唯一消费者是 P0-5 的 diff 差分门,门已过(全等 17/批准迁移 7/
+未批准 0,账在迁移文档 §十),旧内核源码也没了,基线留着只会引诱人拿
+新后端跟一段死语义对表。
 
 ## 各夹具为什么这么造
 
@@ -103,39 +109,41 @@ tests/fixtures/search/
 
 ```powershell
 cmake --build --preset debug --target search_golden_driver
-build\debug\tests\Debug\search_golden_driver.exe golden tests\fixtures\search\golden\old_kernel_golden.json
+build\debug\tests\Debug\search_golden_driver.exe golden <输出JSON路径>
 ```
 
 golden JSON 是数组,每个元素是一条场景的固化结果,字段:
 
 | 字段 | 含义 |
 |---|---|
-| `id` | 场景名,P0-5 差分表按它对齐 |
+| `id` | 场景名,快照比对按它对齐 |
 | `mode` / `pattern` / `path` / `glob` | 喂给 `SearchTool::execute()` 的入参(`path` 是相对 `corpus/` 的路径,跨机器可移植,不落绝对路径) |
 | `is_error` | `Tool::Result::is_error` |
 | `hit_count` | 命中行数(grep)或命中文件数(glob),已排除"没搜到"哨兵文案与截断提示行 |
 | `truncated` | 输出里是否带"……(结果超过 100 条,已截断…)"提示 |
 | `notice_present` / `notice_over_threshold` | 是否带观察边界读取提示(§7.2 那一行),**只存布尔标记,不存提示文本本身**——提示文本含绝对路径,为了 golden 跨机器可移植特意剥掉 |
-| `hits_sorted` | 命中行/命中路径,**排过序**——旧内核靠 `recursive_directory_iterator` 遍历,顺序不是合同的一部分,以后 ripgrep 并行 walker 的顺序更不会跟它一样,所以比较时按集合比,不比原始行序 |
-| `hits_sha256` | `hits_sorted` 拼接(每条后跟 `\n`)后的 sha256,给自动化差分一个快速对比锚点 |
+| `hits_sorted` | 命中行/命中路径,**排过序**——遍历顺序不是合同的一部分(旧内核的 `recursive_directory_iterator`、ripgrep 并行 walker 都一样),比较时按集合比,不比原始行序 |
+| `hits_sha256` | `hits_sorted` 拼接(每条后跟 `\n`)后的 sha256,给比对一个快速对比锚点 |
 
-比较两份 golden(旧内核 vs 未来新后端)时,应该按 `id` 对齐后比较
-`is_error`/`hit_count`/`truncated`/`hits_sorted`(集合意义上)/`hits_sha256`
-这几项;"必须保留"类场景(见迁移文档的用例分栏表)要求全等,"预期保留
-但底层引擎迁移"类场景允许有出入,但出入必须落进迁移文档的批准表,不能
-悄悄不同。
+当前后端(随包 ripgrep)的两次快照之间比较,按 `id` 对齐后比
+`is_error`/`hit_count`/`truncated`/`hits_sorted`(集合意义上)/`hits_sha256`。
+SearchTool 走默认构造(生产定位路 `ExecutableDir()/libexec/rg`),所以
+跑之前得让驱动 exe 旁边有 `libexec/rg.exe`——把驱动拷进发行包或安装位
+里跑,顺手就验了包内布局。
 
 ## bench 复现方式
 
 ```powershell
 cmake --build --preset debug --target search_golden_driver
-build\debug\tests\Debug\search_golden_driver.exe bench tests\fixtures\search\bench\old_kernel_bench_src.json src
+build\debug\tests\Debug\search_golden_driver.exe bench <输出JSON路径> [语料目录]
 ```
 
-第三个参数是要跑基准的目录(默认本仓 `src/`,即 todo 说的"中/大语料"里的
+第二个参数是要跑基准的目录(默认本仓 `src/`,即 todo 说的"中/大语料"里的
 中档)。JSON 里每条 query 记 7 轮 wall time 原始样本、P50/P95、首轮单独
 拎出来(穷人版"冷热盘分开",不是 P0-7 要求的正式冷热盘门槛)、命中行数、
-是否出错。数据解读见迁移文档。
+是否出错。数据解读见迁移文档。`bench/old_kernel_bench_src.json` 是 P0-1
+用旧内核采的冻结基线,别往它上面写——新基准另起文件,旧文件是 P0-7
+"旧内核"一列的唯一数据源。
 
 ## P0-7 基准/稳定门复现方式(ripgrep 后端,2026-09-01 落档)
 

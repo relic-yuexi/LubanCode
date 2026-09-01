@@ -19,9 +19,12 @@ LubanCode 发行包内携带的第三方组件在此逐件声明:组件名、版
 - 三平台资产(archive、SHA-256、archive 内成员路径)见
   `third_party/ripgrep/manifest.json`;哈希由 `scripts/fetch_ripgrep.py`
   下载后重算核对,Release 流水线再独立重算一遍。
-- 取包取舍:Linux 取上游 amd64 `.deb` 内的 GNU/glibc 构建,不用
-  `x86_64-unknown-linux-musl` 预编译包(该包对超大目录高并发扫描有偶发
-  SIGSEGV 的公开报告 BurntSushi/ripgrep#3494)。
+- 取包取舍:Linux 取上游 amd64 `.deb` 内的 `usr/bin/rg`——实测 static-pie
+  静态链接(musl 系,`ldd` 零动态依赖),非 glibc 动态构建。曾因上游
+  `x86_64-unknown-linux-musl` 预编译包有"超大目录高并发偶发 SIGSEGV"的
+  公开报告(BurntSushi/ripgrep#3494)想避 musl,但 `.deb` 内本就是 musl
+  静态件;2026-09-01 裁决接受:本仓大树压力门 100 轮已过,且本仓工况
+  (100 条截断+命中满额主动收树)不碰该 issue 场景;上游结论留 watch。
 
 ## 构建期依赖(不随发行包分发)
 
