@@ -1,6 +1,6 @@
 # 子代理监督器、agent_watch 与停滞恢复设计
 
-- 状态：待实现
+- 状态：实施中——P0-0/P0-1/P0-2 已落(0.26.x,测试见 test_agent_progress / test_model_request_recovery / test_agent_recovery / test_agent_supervisor,并 test_agent_activity 墙钟用例随迁移改判);P1-0(agent_watch)/P1-1(面板)/P2 未动
 - 级别：P0 可靠性；模型侧 `agent_watch` 为 P1 控制面
 - 日期：2026-08-31
 - 基线：`7c0bea5` (`main`)
@@ -532,32 +532,32 @@ Supervisor 最好由会话级 `AgentTaskCoordinator` 持有。它与 TaskLedger 
 
 ### P0-0：先补账，不改行为
 
-- [ ] 添四本时钟、阶段、health、request attempt 与稳定 reason code。
-- [ ] 完整消息提交、工具起止、child delivery 接进展事件。
-- [ ] `content_revision` 与 `progress_revision` 分家。
-- [ ] Agent Dock 只展示，不自动重试。
+- [x] 添四本时钟、阶段、health、request attempt 与稳定 reason code。（`src/agent/agent_progress.*`:AgentProgressClock 四本时钟、AgentSupervisionStage 十二相位、AgentHealthState 八态、SupervisionThresholds 默认尺、稳定 reason code;台账侧 TaskRecord.progress 挂真账,ProgressOf 读口）
+- [x] 完整消息提交、工具起止、child delivery 接进展事件。（loop 侧 on_assistant_message_ready / ledger_sink 工具起止 / DeliverChildCompletion 三路接进 RecordAssistantMessage / RecordToolStarted·CompletedLocked / RecordChildDeliveredLocked）
+- [x] `content_revision` 与 `progress_revision` 分家。（content_revision 照旧只服务显示;progress_revision 只在指纹变化时 +1,token 流量一概不抬）
+- [x] Agent Dock 只展示，不自动重试。（Dock 与显示层一字未动;P0 段只有 P0-1 的请求级重试与 P0-2 的监督拍在宿主内动)
 
-验收：旧任务行为不变；现有 `test_agent_activity` 全过；新增 fake clock 测试能分清 token 活动、工具活动与 meaningful progress。
+验收：旧任务行为不变；现有 `test_agent_activity` 全过；新增 fake clock 测试能分清 token 活动、工具活动与 meaningful progress。（test_agent_activity 全绿;test_agent_progress 以注入时钟钉四本账互不串账）
 
 ### P0-1：请求级恢复
 
-- [ ] 抽出主/子共用 retry classifier 与 backoff。
-- [ ] 给请求立 logical id、attempt 与 history commit hash。
-- [ ] 首字节前失败、未提交断流可安全重发。
-- [ ] 部分 tool JSON 不执行；已提交 ToolResult 不重放。
-- [ ] 总墙钟、用户取消可打断退避。
+- [x] 抽出主/子共用 retry classifier 与 backoff。（`src/api/model_request_recovery.*`:IsRetryableError 白名单、250~750ms/1~2s 抖动阶梯、RunRequestWithRecovery 尝试环;主子两路都经 AgentLoop::Run 一处接入,不在 AgentTool 抄私货）
+- [x] 给请求立 logical id、attempt 与 history commit hash。（ModelRequestAttempt + 进程内单调 logical id;HistoryCommitHashOf 按消息序列取短哈希）
+- [x] 首字节前失败、未提交断流可安全重发。（消息只在流收口后原子提交,断流时永不落地,从同一提交边界重发幂等）
+- [x] 部分 tool JSON 不执行；已提交 ToolResult 不重放。（半截流随 assembler 整份丢弃;已提交的工具结果只随重发的模型请求上 wire,绝不重跑）
+- [x] 总墙钟、用户取消可打断退避。（退避走可取消等待;墙钟经取消链同根旗打断）
 
-验收：本地假服务分别造 connect reset、首字节挂起、半截 text、半截 tool JSON、tool result 后下一请求挂起；每路都按合同收口。
+验收：本地假服务分别造 connect reset、首字节挂起、半截 text、半截 tool JSON、tool result 后下一请求挂起；每路都按合同收口。（test_agent_recovery 五路全钉;"首字节挂起"由挂死服务真链路用例收口——重试 3 次后结构化 ApiError 带重试次数）
 
 ### P0-2：Supervisor 状态机
 
-- [ ] 会话级单线程/定时器驱动，不为每任务再起 watchdog 线程。
-- [ ] 按阶段软线判 `Quiet/Suspect*`。
-- [ ] 恢复通知去重，force finalize 留账。
-- [ ] 机器睡眠/长 tick 不误判 Agent。
-- [ ] 现有 `SetWallClockTimeout` 迁入统一 deadline heap 或 timer queue。
+- [x] 会话级单线程/定时器驱动，不为每任务再起 watchdog 线程。（`src/runtime/agent_supervisor.*`:懒起单线,500ms 拍;test_agent_supervisor 钉 100 只任务 1 根线）
+- [x] 按阶段软线判 `Quiet/Suspect*`。（EvaluateSupervision 纯函数,四相位各用各的尺;等待/流式/工具/空转分型不同 reason code）
+- [x] 恢复通知去重，force finalize 留账。（task+health_epoch+reason 去重;ForceFinalizeWallClock/NoProgress 双强收路,晚归不翻案照旧）
+- [x] 机器睡眠/长 tick 不误判 Agent。（tick 跳超 30s 记 host_resume_suspected,该拍不判 SuspectAgent、不发停止信号）
+- [x] 现有 `SetWallClockTimeout` 迁入统一 deadline heap 或 timer queue。（统一期限表,RunTask 不再每任务起看门狗线程;SetWallClockTimeout 接口语义不动）
 
-验收：100 只 fake task 不生 100 根 watchdog 线程；取消、终态与 session close 都及时移除 deadline；TSAN 可跑平台无竞态。
+验收：100 只 fake task 不生 100 根 watchdog 线程；取消、终态与 session close 都及时移除 deadline；TSAN 可跑平台无竞态。（前两条已钉;TSAN 未跑——Windows 开发机上未执行,留 P2 真机校准时一并补)
 
 ### P1-0：`agent_watch`
 

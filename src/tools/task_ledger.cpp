@@ -82,6 +82,8 @@ std::string ReasonShortLabel(TaskOutcomeReason reason) {
             return "钩子拒绝";
         case TaskOutcomeReason::ShutdownTimeoutUnknown:
             return "停机超时未证实";
+        case TaskOutcomeReason::NoMeaningfulProgress:
+            return "空转收口";
         case TaskOutcomeReason::None:
             return "";
     }
@@ -1027,6 +1029,9 @@ bool TaskLedger::DeliverChildCompletion(const std::shared_ptr<TaskRecord>& child
             item.child_task_id = child->snapshot.id;
             parent->inbox.push_back(std::move(item));
         }
+        // 孩子交付是父任务的 meaningful progress(单子 §6.3):指纹必变,
+        // 等孩子的静默计时归零。
+        RecordChildDeliveredLocked(parent);
         NotifyStateChangeLocked();  // WaitingChildren 的父当拍醒
     }
     Touch();
@@ -1045,6 +1050,247 @@ void TaskLedger::SetLiveTaskState(const std::shared_ptr<TaskRecord>& task, Agent
         task->snapshot.state = state;
     }
     Touch();
+}
+
+// ---- 进展合同写口(P0-0)----
+
+void TaskLedger::RecordRequestStarted(const std::shared_ptr<TaskRecord>& task, int attempt,
+                                       const std::string& history_commit_hash) {
+    if (task == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!IsAliveTaskState(task->snapshot.state)) {
+            return;
+        }
+        auto& clock = task->progress;
+        const auto now = std::chrono::steady_clock::now();
+        clock.request_started_at = now;
+        clock.request_attempt = attempt;
+        // history_commit_hash 是重发边界的凭据,账面留在请求侧(attempt 结构);
+        // 台账只记时刻与相位。
+        (void)history_commit_hash;
+        clock.stage = agent::AgentSupervisionStage::AwaitingFirstByte;
+        // 显示回滚锚:这一轮 live_output 从这截起,断流重试时截回这里。
+        clock.live_output_mark = task->snapshot.live_output.size();
+        clock.last_observed_at = now;
+    }
+    Touch();
+}
+
+void TaskLedger::RecordTransportActivity(const std::shared_ptr<TaskRecord>& task) {
+    if (task == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!IsAliveTaskState(task->snapshot.state)) {
+        return;
+    }
+    task->progress.last_transport_at = std::chrono::steady_clock::now();
+    ++task->progress.transport_revision;
+}
+
+void TaskLedger::RecordFirstStreamEvent(const std::shared_ptr<TaskRecord>& task, int ttfb_ms) {
+    if (task == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!IsAliveTaskState(task->snapshot.state)) {
+        return;
+    }
+    auto& clock = task->progress;
+    const auto now = std::chrono::steady_clock::now();
+    if (!clock.first_stream_event_at.has_value()) {
+        clock.first_stream_event_at = now;
+    }
+    clock.last_transport_at = now;
+    ++clock.transport_revision;
+    (void)ttfb_ms;
+}
+
+void TaskLedger::RecordStageLocked(const std::shared_ptr<TaskRecord>& task, agent::AgentSupervisionStage stage) {
+    if (task == nullptr || !IsAliveTaskState(task->snapshot.state)) {
+        return;
+    }
+    task->progress.stage = stage;
+    task->progress.last_observed_at = std::chrono::steady_clock::now();
+}
+
+void TaskLedger::RecordStage(const std::shared_ptr<TaskRecord>& task, agent::AgentSupervisionStage stage) {
+    if (task == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    RecordStageLocked(task, stage);
+}
+
+void TaskLedger::RecordExecutionActivityLocked(const std::shared_ptr<TaskRecord>& task) {
+    if (task == nullptr || !IsAliveTaskState(task->snapshot.state)) {
+        return;
+    }
+    task->progress.last_execution_at = std::chrono::steady_clock::now();
+}
+
+bool TaskLedger::RecordMeaningfulProgressLocked(const std::shared_ptr<TaskRecord>& task,
+                                                const std::string& fingerprint) {
+    if (task == nullptr || !IsAliveTaskState(task->snapshot.state)) {
+        return false;
+    }
+    auto& clock = task->progress;
+    const auto now = std::chrono::steady_clock::now();
+    clock.last_execution_at = now;
+    if (fingerprint != clock.progress_fingerprint) {
+        clock.progress_fingerprint = fingerprint;
+        clock.last_meaningful_progress_at = now;
+        ++clock.progress_revision;
+        clock.stale_rounds = 0;
+        return true;
+    }
+    // 同指纹:时间戳不刷——"重复相同"不是进展(单子 §6.3:重复相同错误、
+    // 只增长协议噪声不算)。stale_rounds 由轮次边界(消息提交)累计。
+    return false;
+}
+
+void TaskLedger::RecordAssistantMessage(const std::shared_ptr<TaskRecord>& task,
+                                         const std::string& content_fingerprint) {
+    if (task == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!IsAliveTaskState(task->snapshot.state)) {
+        return;
+    }
+    // 轮次边界:先按指纹判真假进展,同指纹才累计空转轮数(单子 §7.1)。
+    if (!RecordMeaningfulProgressLocked(task, content_fingerprint)) {
+        ++task->progress.stale_rounds;
+    }
+    task->progress.stage = agent::AgentSupervisionStage::AwaitingToolInputComplete;
+}
+
+void TaskLedger::RecordToolStartedLocked(const std::shared_ptr<TaskRecord>& task) {
+    RecordExecutionActivityLocked(task);
+    if (task == nullptr || !IsAliveTaskState(task->snapshot.state)) {
+        return;
+    }
+    task->progress.tool_started_at = std::chrono::steady_clock::now();
+    task->progress.stage = agent::AgentSupervisionStage::RunningTool;
+}
+
+void TaskLedger::RecordToolCompletedLocked(const std::shared_ptr<TaskRecord>& task,
+                                            const std::string& result_fingerprint) {
+    RecordMeaningfulProgressLocked(task, result_fingerprint);
+    if (task != nullptr && IsAliveTaskState(task->snapshot.state)) {
+        task->progress.stage = agent::AgentSupervisionStage::AwaitingNextModelTurn;
+        task->progress.tool_started_at.reset();
+    }
+}
+
+void TaskLedger::RecordChildDeliveredLocked(const std::shared_ptr<TaskRecord>& parent) {
+    if (parent == nullptr) {
+        return;
+    }
+    // 孩子交付:新事实进账,指纹必变(带孩子的 id 与终态)。
+    RecordMeaningfulProgressLocked(parent, "child:" + std::to_string(parent->progress.progress_revision + 1));
+    parent->progress.stage = agent::AgentSupervisionStage::AwaitingNextModelTurn;
+}
+
+void TaskLedger::RecordInboxDeliveredLocked(const std::shared_ptr<TaskRecord>& task) {
+    RecordExecutionActivityLocked(task);
+}
+
+// ---- 请求级恢复账(P0-1)----
+
+void TaskLedger::RecordRequestRetry(const std::shared_ptr<TaskRecord>& task, int attempt,
+                                     const std::string& reason_code) {
+    if (task == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!IsAliveTaskState(task->snapshot.state)) {
+            return;
+        }
+        auto& clock = task->progress;
+        clock.retry_count += 1;
+        clock.request_attempt = attempt;
+        clock.last_reason_code = reason_code;
+        clock.stage = agent::AgentSupervisionStage::Recovering;
+        if (clock.health != agent::AgentHealthState::Degraded) {
+            clock.health = agent::AgentHealthState::Recovering;
+            ++clock.health_epoch;
+        }
+        // 显示回滚(单子 §8.3"不拼两段正文"):半截 pending 与 live_output
+        // 截回本请求起跑时的锚。事件账(已封口段)不动——那是已提交事实。
+        task->pending_text.clear();
+        task->pending_reasoning.clear();
+        task->activity.text_bytes = 0;
+        task->activity.reasoning_bytes = 0;
+        if (task->snapshot.live_output.size() > clock.live_output_mark) {
+            task->snapshot.live_output.resize(clock.live_output_mark);
+        }
+        ++task->content_revision;
+    }
+    Touch();
+}
+
+void TaskLedger::RecordRequestOutcome(const std::shared_ptr<TaskRecord>& task, bool succeeded,
+                                       const std::string& reason_code) {
+    if (task == nullptr) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!IsAliveTaskState(task->snapshot.state)) {
+        return;
+    }
+    auto& clock = task->progress;
+    if (!reason_code.empty()) {
+        clock.last_reason_code = reason_code;
+    }
+    if (succeeded) {
+        // 传输侧自愈:恢复中 -> 正常。空转计数不动——重试成功不等于语义
+        // 进展(流收到了才算,那是下一条 meaningful progress 的事)。
+        if (clock.health == agent::AgentHealthState::Recovering ||
+            clock.health == agent::AgentHealthState::SuspectTransport) {
+            clock.health = agent::AgentHealthState::Healthy;
+            ++clock.health_epoch;
+            clock.stage = agent::AgentSupervisionStage::StreamingText;
+        }
+    }
+}
+
+// ---- 监督面(P0-2)----
+
+void TaskLedger::ForEachAliveVitals(
+    const std::function<void(const std::shared_ptr<TaskRecord>&, const agent::TaskVitals&)>& visitor) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    const auto now = std::chrono::steady_clock::now();
+    for (const auto& task : tasks_) {
+        if (!IsAliveTaskState(task->snapshot.state)) {
+            continue;
+        }
+        agent::TaskVitals vitals;
+        vitals.stage = task->progress.stage;
+        vitals.health = task->progress.health;
+        vitals.now = now;
+        vitals.task_started_at = task->snapshot.start_time;
+        vitals.request_started_at = task->progress.request_started_at;
+        vitals.last_transport_at = task->progress.last_transport_at;
+        vitals.last_execution_at = task->progress.last_execution_at;
+        vitals.last_meaningful_progress_at = task->progress.last_meaningful_progress_at;
+        vitals.tool_started_at = task->progress.tool_started_at;
+        vitals.has_transport = task->progress.transport_revision > 0;
+        vitals.has_execution = task->progress.last_execution_at.time_since_epoch().count() != 0;
+        vitals.has_progress = task->progress.progress_revision > 0;
+        vitals.cancel_requested = task->cancel.load(std::memory_order_acquire) ||
+                                  task->wall_stop.load(std::memory_order_acquire);
+        vitals.stale_rounds = task->progress.stale_rounds;
+        vitals.host_notice_sent = task->progress.host_notice_sent;
+        // 墙钟软线只看任务自带的时间预算(派出时写进快照);工具级的默认
+        // 墙钟没有进快照,不在这条软线上另立账。
+        vitals.wall_limit_secs = task->snapshot.wall_limit_secs;
+        visitor(task, vitals);
+    }
 }
 
 void TaskLedger::WaitForKeyChange(const std::shared_ptr<TaskRecord>& task) {
@@ -1077,21 +1323,35 @@ void TaskLedger::FinalizeFromToolResult(const std::shared_ptr<TaskRecord>& task,
             if (cancelled_by_stop_signal) {
                 // 面板 x / 父轮 ESC / 取消树级联:按中止收账。级联来的记
                 // ParentCancelled(单子 §8.3),不冒充孩子自己收到了 UserStop;
-                // 其余按用户中止。
-                task->snapshot.state = AgentTaskState::Cancelled;
-                task->snapshot.outcome.status = TaskOutcomeStatus::Stopped;
-                task->snapshot.outcome.reason =
-                    task->cancelled_by_parent ? TaskOutcomeReason::ParentCancelled : TaskOutcomeReason::UserStop;
-                if (task->snapshot.outcome.message.empty()) {
-                    task->snapshot.outcome.message = task->cancelled_by_parent
-                                                         ? "父任务取消,这只子任务随树停止"
-                                                         : "用户中止了这只子代理";
+                // 其余按用户中止。监督器的空转停止(no_progress_fired)不是
+                // 用户的手:按 NoMeaningfulProgress 收口(Failed,部分结果保留)。
+                if (task->no_progress_fired.load(std::memory_order_acquire)) {
+                    task->snapshot.state = AgentTaskState::Failed;
+                    task->snapshot.outcome.status = TaskOutcomeStatus::Failed;
+                    task->snapshot.outcome.reason = TaskOutcomeReason::NoMeaningfulProgress;
+                    if (task->snapshot.outcome.message.empty()) {
+                        task->snapshot.outcome.message =
+                            "连续多个完整轮次无任何可验证进展,监督器按空转收口(部分结果保留)。";
+                    }
+                } else {
+                    task->snapshot.state = AgentTaskState::Cancelled;
+                    task->snapshot.outcome.status = TaskOutcomeStatus::Stopped;
+                    task->snapshot.outcome.reason =
+                        task->cancelled_by_parent ? TaskOutcomeReason::ParentCancelled : TaskOutcomeReason::UserStop;
+                    if (task->snapshot.outcome.message.empty()) {
+                        task->snapshot.outcome.message = task->cancelled_by_parent
+                                                             ? "父任务取消,这只子任务随树停止"
+                                                             : "用户中止了这只子代理";
+                    }
                 }
             } else {
                 task->snapshot.state = StateFromOutcome(task->snapshot.outcome.status);
             }
             task->activity = AgentTaskActivity{};
         }
+        task->progress.stage = agent::AgentSupervisionStage::Terminal;
+        task->progress.health = agent::AgentHealthState::Terminal;
+        ++task->progress.health_epoch;
         task->finalized.store(true, std::memory_order_release);
         NotifyStateChangeLocked();  // 等孩子的父与收柄口当拍醒
     }
@@ -1110,6 +1370,9 @@ void TaskLedger::ForceFinalizeWallClock(const std::shared_ptr<TaskRecord>& task,
     task->snapshot.state = AgentTaskState::Failed;
     task->snapshot.end_time = std::chrono::steady_clock::now();
     task->activity = AgentTaskActivity{};
+    task->progress.stage = agent::AgentSupervisionStage::Terminal;
+    task->progress.health = agent::AgentHealthState::Terminal;
+    ++task->progress.health_epoch;
     task->snapshot.outcome.status = TaskOutcomeStatus::Failed;
     task->snapshot.outcome.reason = TaskOutcomeReason::WallClockTimeout;
     task->snapshot.outcome.message =
@@ -1121,6 +1384,121 @@ void TaskLedger::ForceFinalizeWallClock(const std::shared_ptr<TaskRecord>& task,
     AppendEventLocked(task, std::move(forced_event));
     NotifyStateChangeLocked();  // 强收也要叫醒等孩子的父,不许它在 cv 上挂到天荒地老
     Touch();
+}
+
+std::uint64_t TaskLedger::ApplyHealth(const std::shared_ptr<TaskRecord>& task, agent::AgentHealthState health,
+                                      const std::string& reason_code) {
+    if (task == nullptr) {
+        return 0;
+    }
+    std::lock_guard<std::mutex> lock(mutex);
+    if (!IsAliveTaskState(task->snapshot.state)) {
+        return 0;
+    }
+    if (health != task->progress.health) {
+        task->progress.health = health;
+        ++task->progress.health_epoch;
+        if (!reason_code.empty()) {
+            task->progress.last_reason_code = reason_code;
+        }
+        return task->progress.health_epoch;
+    }
+    return 0;
+}
+
+bool TaskLedger::PushHostNotice(const std::shared_ptr<TaskRecord>& task, const std::string& text) {
+    if (task == nullptr) {
+        return false;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!IsAliveTaskState(task->snapshot.state) || task->inbox_closed ||
+            task->progress.host_notice_sent) {
+            return false;
+        }
+        {
+            std::lock_guard<std::mutex> inbox_lock(task->inbox_mutex);
+            TaskRecord::InboxItem item;
+            item.text = text;
+            item.source = TaskMessageSource::User;  // 宿主通知,非模型传话
+            item.kind = TaskMailboxKind::HostNotice;
+            task->inbox.push_back(std::move(item));
+        }
+        task->progress.host_notice_sent = true;
+        NotifyStateChangeLocked();  // 等孩子的父/续投口当拍醒
+    }
+    Touch();
+    return true;
+}
+
+void TaskLedger::RequestNoProgressStop(const std::shared_ptr<TaskRecord>& task) {
+    if (task == nullptr) {
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!IsAliveTaskState(task->snapshot.state)) {
+            return;
+        }
+        task->no_progress_fired.store(true, std::memory_order_release);
+        // 走取消链的墙钟那一路(不置 task->cancel,那会被收成"用户中止")。
+        task->wall_stop.store(true, std::memory_order_release);
+        NotifyStateChangeLocked();
+    }
+    Touch();
+}
+
+void TaskLedger::ForceFinalizeNoProgress(const std::shared_ptr<TaskRecord>& task, int stale_rounds) {
+    std::lock_guard<std::mutex> lock(mutex);
+    if (task->finalized.load(std::memory_order_acquire) || !IsAliveTaskState(task->snapshot.state)) {
+        return;
+    }
+    task->force_finalized = true;
+    task->snapshot.state = AgentTaskState::Failed;
+    task->snapshot.end_time = std::chrono::steady_clock::now();
+    task->activity = AgentTaskActivity{};
+    task->progress.stage = agent::AgentSupervisionStage::Terminal;
+    task->progress.health = agent::AgentHealthState::Terminal;
+    ++task->progress.health_epoch;
+    task->snapshot.outcome.status = TaskOutcomeStatus::Failed;
+    task->snapshot.outcome.reason = TaskOutcomeReason::NoMeaningfulProgress;
+    // 部分成果照留(单子 §17"恢复用尽后保留部分成果"):台账里已完成的
+    // 工具结果与实时输出不动,ComposeOutcomeText/CheckpointFallback 带得走。
+    task->snapshot.outcome.message = "连续 " + std::to_string(stale_rounds) +
+                                     " 个完整轮次没有任何可验证进展(指纹不变),已按空转收口。"
+                                     "已完成的工具结果与实时输出保留在部分结果里。";
+    // 部分成果照留(单子 §17):台账里已完成的工具结果与实时输出折成检查点
+    // 带走,绝不交白卷——现场不丢是恢复动作的红线。
+    task->snapshot.outcome.partial_result = CheckpointFallback(task->snapshot);
+    task->snapshot.result = ComposeOutcomeText(task->snapshot.outcome);
+    AgentTaskEvent forced_event;
+    forced_event.kind = AgentTaskEventKind::Failure;
+    forced_event.text = task->snapshot.outcome.message;
+    AppendEventLocked(task, std::move(forced_event));
+    NotifyStateChangeLocked();
+    Touch();
+}
+
+void TaskLedger::PushSupervisorNotice(std::string notice) {
+    std::lock_guard<std::mutex> lock(mutex);
+    supervisor_notices_.push_back(std::move(notice));
+}
+
+std::vector<std::string> TaskLedger::TakeSupervisorNotices() {
+    std::lock_guard<std::mutex> lock(mutex);
+    std::vector<std::string> taken = std::move(supervisor_notices_);
+    supervisor_notices_.clear();
+    return taken;
+}
+
+agent::AgentProgressClock TaskLedger::ProgressOf(int task_id) const {
+    std::lock_guard<std::mutex> lock(mutex);
+    for (const auto& task : tasks_) {
+        if (task->snapshot.id == task_id) {
+            return task->progress;
+        }
+    }
+    return agent::AgentProgressClock{};
 }
 
 }  // namespace lubancode::tools

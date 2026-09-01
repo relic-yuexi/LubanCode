@@ -175,7 +175,8 @@ bool WaitForSummary(tools::AgentTool& tool, Predicate predicate, int timeout_sec
 }
 
 // 起一个 accept 后吐一帧 SSE 就装死 30 秒的假服务器(与 test_network_timeout
-// 同一套手艺),返回端口。
+// 同一套手艺),返回端口。P0-1 请求级恢复起,一次任务会对它连 3 次(首发 +
+// 2 次重试),故而每条连接各起一线伺候(连着装死),最多接 4 条。
 int StartStallingServer() {
     EnsureSocketsReady();
     socket_t listener = ::socket(AF_INET, SOCK_STREAM, 0);
@@ -189,27 +190,31 @@ int StartStallingServer() {
     socklen_t bound_len = sizeof(bound);
     REQUIRE(::getsockname(listener, reinterpret_cast<sockaddr*>(&bound), &bound_len) == 0);
     const int port = ntohs(bound.sin_port);
-    REQUIRE(::listen(listener, 1) == 0);
+    REQUIRE(::listen(listener, 4) == 0);
     std::thread([listener]() {
-        sockaddr_in client_addr{};
-        socklen_t client_len = sizeof(client_addr);
-        const socket_t client = ::accept(listener, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
-        if (client == kInvalidSocket) {
-            CloseSocket(listener);
-            return;
+        for (int accepted = 0; accepted < 4; ++accepted) {
+            sockaddr_in client_addr{};
+            socklen_t client_len = sizeof(client_addr);
+            const socket_t client = ::accept(listener, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
+            if (client == kInvalidSocket) {
+                break;
+            }
+            std::thread([client]() {
+                char buf[4096];
+                ::recv(client, buf, sizeof(buf), 0);  // 排干请求
+                const std::string head =
+                    "HTTP/1.1 200 OK\r\n"
+                    "Content-Type: text/event-stream\r\n"
+                    "\r\n"
+                    "event: message_start\n"
+                    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"test\"}}\n"
+                    "\n";
+                ::send(client, head.data(), static_cast<int>(head.size()), 0);
+                std::this_thread::sleep_for(std::chrono::seconds(30));  // 装死:不再发也不再关
+                CloseSocket(client);
+            }).detach();
         }
-        char buf[4096];
-        ::recv(client, buf, sizeof(buf), 0);  // 排干请求
-        const std::string head =
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: text/event-stream\r\n"
-            "\r\n"
-            "event: message_start\n"
-            "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"test\"}}\n"
-            "\n";
-        ::send(client, head.data(), static_cast<int>(head.size()), 0);
-        std::this_thread::sleep_for(std::chrono::seconds(30));  // 装死:不再发也不再关
-        CloseSocket(client);
+        std::this_thread::sleep_for(std::chrono::seconds(35));  // 等各连接各自装死完
         CloseSocket(listener);
     }).detach();
     return port;
@@ -475,7 +480,7 @@ TEST_CASE("墙钟兜底:后端不理取消(所有超时全失效),宽限期后�
 #endif
 
 #ifdef _WIN32
-TEST_CASE("挂起服务真链路:accept 后吐一帧就装死,子代理按 stream_idle_timeout 翻成 api_error 终态") {
+TEST_CASE("挂起服务真链路:断流自动重试 3 次后按 stream_idle_timeout 结构化收口") {
     cli::SetLanguage("zh-CN");
     constexpr int kIdleSecs = 2;
     const int port = StartStallingServer();
@@ -489,7 +494,9 @@ TEST_CASE("挂起服务真链路:accept 后吐一帧就装死,子代理按 strea
     const tools::Tool::Result result = RunForeground(tool, "死流子代理", "跑一趟");
     const auto elapsed = std::chrono::steady_clock::now() - start;
 
-    // 终态是结构化的 api_error,带超时原因,不是永挂。
+    // 终态是结构化的 api_error,带超时原因,不是永挂。P0-1 起,流空闲且
+    // 消息未提交属可安全重发白名单:同一提交边界自动重试(首发 + 2 次),
+    // 用尽后如实写"已自动重试 N 次"——不是一断就报。
     REQUIRE(result.is_error);
     const auto summaries = tool.TaskSummaries();
     REQUIRE(summaries.size() == 1);
@@ -499,6 +506,10 @@ TEST_CASE("挂起服务真链路:accept 后吐一帧就装死,子代理按 strea
     REQUIRE(detail.has_value());
     CHECK(detail->outcome.message.find(cli::trf("error.network.stream_idle_timeout", kIdleSecs)) !=
           std::string::npos);
-    CHECK(elapsed < std::chrono::seconds(kIdleSecs + 8));
+    CHECK(detail->outcome.message.find("已自动重试 2 次") != std::string::npos);
+    // 时限:libcurl LowSpeed(1B/s 窗口)从收到那一帧到判死实测约 8s——单趟
+    // 如此,三趟(首发 + 2 次重试)加两段退避(0.25~0.75s 与 1~2s)按
+    // 35s 收;量级对(不是永挂),不追求钉死秒数。
+    CHECK(elapsed < std::chrono::seconds(35));
 }
 #endif

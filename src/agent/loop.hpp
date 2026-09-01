@@ -42,6 +42,7 @@
 
 #include "agent/model_image_store.hpp"  // ModelImageLanding:on_model_image 的回执形状
 #include "agent/permission_mode.hpp"  // AgentPermissionMode:on_tool_confirm_floored 的下限档
+#include "api/model_request_recovery.hpp"  // ModelRequestAttempt/RequestAttemptPhase:P0-1 恢复账
 
 namespace lubancode::agent {
 
@@ -254,6 +255,10 @@ struct TurnWiring {
     // 1. assistant 消息组装完、刚入 history:装配层 append+flush 进 session。
     //    不设 = 老路(整轮收口后 PersistNewMessages),行为不变。
     std::function<void(const api::Message&)> on_assistant_message_ready;
+    // ---- 请求级恢复账(监督器单 P0-1):每次模型尝试的起/重试/收场从这出。
+    // Retrying 那一拍调用方须丢弃上一尝试的半截显示积累(pending/live 账),
+    // 不拼两段正文。不设 = 恢复照跑(重试仍在),只是没人记账。
+    std::function<void(const api::ModelRequestAttempt&, api::RequestAttemptPhase)> on_request_attempt;
     // 2. 本批五枚 tool result 全收齐、合并的 user 消息刚入 history:装配层
     //    append+flush user 消息,再为每枚写 result_committed 栅栏。
     std::function<void(const std::string& batch_id, const api::Message& tool_result_message)> on_tool_results_committed;

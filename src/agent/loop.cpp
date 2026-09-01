@@ -1130,31 +1130,14 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
         }
 
-        // 轨迹边界(P0-2):request prepared 记不住就不发模型(§7.4 耐久
-        // 栅栏);落稳随即记 sent。没接轨迹的会话一字不加。
-        // Token 账本单 A1:purpose 恒有效(AgentProfile.purpose 默认值),
-        // manifest/前缀账各自看 has_* 位——没接 ResolvedPromptBuilder 的
-        // 会话如实报 has_prompt_manifest=false,不拿空 manifest 冒充。
-        std::string trajectory_request_id;
-        if (wiring.boundary_recorder != nullptr) {
-            RequestPreparedContext prepared_ctx;
-            prepared_ctx.purpose = agent.profile_.purpose;
-            if (request_prompt_manifest.has_value()) {
-                prepared_ctx.has_prompt_manifest = true;
-                prepared_ctx.prompt_manifest = *request_prompt_manifest;
-            }
-            prepared_ctx.has_prefix_account = true;
-            prepared_ctx.system_hash = step_prefix_account.system_hash;
-            prepared_ctx.tools_hash = step_prefix_account.tools_hash;
-            prepared_ctx.cache_epoch = step_prefix_account.cache_epoch;
-            prepared_ctx.prefix_append_only = step_prefix_account.append_only;
-            trajectory_request_id = wiring.boundary_recorder->OnRequestPrepared(request, prepared_ctx);
-            if (trajectory_request_id.empty()) {
-                return std::unexpected("轨迹账写盘失败,本轮停在请求边界,未发模型");
-            }
-            wiring.boundary_recorder->OnRequestSent(trajectory_request_id);
-        }
-
+        // ---- 请求级恢复(监督器单 P0-1):尝试环 --------------------------------
+        // 半截流永不落地:每次尝试重置 assembler 与显示闸,只有 send_stream
+        // 归队且流无错的那份才往下走 BuildMessage(单子 §8.1 原子提交)。可
+        // 安全重发的错(Network/408/429/502/503/504)按阶梯退避后从同一
+        // history 提交边界原样重发——幂等;已提交的 ToolResult 不在重发范围,
+        // 绝不重跑工具。用户取消与不可重试错误立即收口,退避等待中也可打断。
+        // 主路与子路共用这一环:两路都经 AgentLoop::Run,不在 AgentTool 里
+        // 另抄私货(单子 §8.2)。
         api::MessageAssembler assembler;
         bool stream_error = false;
         std::string stream_error_message;
@@ -1173,10 +1156,67 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 闸;流收口后统一 Flush,残尾按 U+FFFD 放完。
         platform::Utf8DeltaGate text_delta_gate;
         platform::Utf8DeltaGate thinking_delta_gate;
-
-        const auto send_result = backend_.send_stream(
-            request,
-            [&](const api::StreamEvent& event) {
+        // 轨迹请求 id 与恢复账:每枚尝试各自重置(尝试内记 prepared/sent)。
+        std::string trajectory_request_id;
+        const std::string history_commit_hash = api::HistoryCommitHashOf(request);
+        bool trajectory_write_failed = false;
+        int recovery_attempts_used = 0;
+        api::RequestRecoveryHooks recovery_hooks;
+        recovery_hooks.on_attempt = [&wiring, &recovery_attempts_used](
+                                        const api::ModelRequestAttempt& recovery_attempt,
+                                        api::RequestAttemptPhase phase) {
+            if (phase == api::RequestAttemptPhase::Started) {
+                ++recovery_attempts_used;
+            }
+            if (wiring.on_request_attempt) {
+                wiring.on_request_attempt(recovery_attempt, phase);
+            }
+        };
+        // 一次尝试:重置局部 -> 轨迹 prepared/sent -> 发流 -> 放闸尾巴。
+        const auto run_one_attempt = [&](api::ModelRequestAttempt& recovery_attempt)
+                                          -> std::expected<void, api::Error> {
+            assembler = api::MessageAssembler{};
+            stream_error = false;
+            stream_error_message.clear();
+            model_images.clear();
+            landed_image_ids.clear();
+            stream_request_id.clear();
+            stream_model.clear();
+            text_delta_gate = platform::Utf8DeltaGate{};
+            thinking_delta_gate = platform::Utf8DeltaGate{};
+            trajectory_request_id.clear();
+            recovery_attempt.history_commit_hash = history_commit_hash;
+            // 轨迹边界(P0-2):request prepared 记不住就不发模型(§7.4 耐久
+            // 栅栏);落稳随即记 sent。没接轨迹的会话一字不加。写失败按 Api
+            // 类错误退出尝试环(不可重发),环外按老文案收口。
+            if (wiring.boundary_recorder != nullptr) {
+                RequestPreparedContext prepared_ctx;
+                prepared_ctx.purpose = agent.profile_.purpose;
+                if (request_prompt_manifest.has_value()) {
+                    prepared_ctx.has_prompt_manifest = true;
+                    prepared_ctx.prompt_manifest = *request_prompt_manifest;
+                }
+                prepared_ctx.has_prefix_account = true;
+                prepared_ctx.system_hash = step_prefix_account.system_hash;
+                prepared_ctx.tools_hash = step_prefix_account.tools_hash;
+                prepared_ctx.cache_epoch = step_prefix_account.cache_epoch;
+                prepared_ctx.prefix_append_only = step_prefix_account.append_only;
+                trajectory_request_id = wiring.boundary_recorder->OnRequestPrepared(request, prepared_ctx);
+                if (trajectory_request_id.empty()) {
+                    trajectory_write_failed = true;
+                    return std::unexpected(api::Error{api::ErrorKind::Api, "trajectory write failed", 0});
+                }
+                wiring.boundary_recorder->OnRequestSent(trajectory_request_id);
+            }
+            const std::size_t thinking_bytes_at_attempt_start = budget_report.thinking_bytes;
+            std::string thinking_tail_at_attempt_start = budget_report.thinking_tail;
+            const auto attempt_result = backend_.send_stream(
+                request,
+                [&](const api::StreamEvent& event) {
+                if (!recovery_attempt.saw_stream_event) {
+                    recovery_attempt.saw_stream_event = true;  // 首枚流事件旁证
+                    recovery_attempt.saw_headers = true;
+                }
                 assembler.Feed(event);
                 std::visit(
                     [&](const auto& e) {
@@ -1282,21 +1322,31 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     },
                     event);
             },
-            cancel);
-
-        // 流收口:闸里扣着的尾巴拼不齐就是坏字节,按 U+FFFD 放完——错误/
-        // 打断路径也要放,显示层与 history 的账对得上。
-        if (wiring.events != nullptr) {
-            const std::string text_tail = text_delta_gate.Flush();
-            if (!text_tail.empty()) {
-                wiring.events->OnTextDelta(text_tail);
+                cancel);
+            // 流收口:闸里扣着的尾巴拼不齐就是坏字节,按 U+FFFD 放完——错误/
+            // 打断路径也要放,显示层与 history 的账对得上。
+            if (wiring.events != nullptr) {
+                const std::string text_tail = text_delta_gate.Flush();
+                if (!text_tail.empty()) {
+                    wiring.events->OnTextDelta(text_tail);
+                }
             }
-        }
-        if (wiring.events != nullptr) {
-            const std::string thinking_tail = thinking_delta_gate.Flush();
-            if (!thinking_tail.empty()) {
-                wiring.events->OnThinkingDelta(thinking_tail);
+            if (wiring.events != nullptr) {
+                const std::string thinking_tail = thinking_delta_gate.Flush();
+                if (!thinking_tail.empty()) {
+                    wiring.events->OnThinkingDelta(thinking_tail);
+                }
             }
+            if (!attempt_result.has_value() && api::IsRetryableError(attempt_result.error())) {
+                // 本次尝试攒进活账的思考字节回滚:重试会整段重来,不双记。
+                budget_report.thinking_bytes = thinking_bytes_at_attempt_start;
+                budget_report.thinking_tail = std::move(thinking_tail_at_attempt_start);
+            }
+            return attempt_result;
+        };
+        const auto send_result = api::RunRequestWithRecovery(run_one_attempt, recovery_hooks, cancel);
+        if (trajectory_write_failed) {
+            return std::unexpected("轨迹账写盘失败,本轮停在请求边界,未发模型");
         }
 
         if (!send_result.has_value()) {
@@ -1364,6 +1414,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                               api::SummarizeErrorBodyForUser(message);
                 } else {
                     message = api::SummarizeErrorBodyForUser(message);
+                }
+                if (recovery_attempts_used > 1) {
+                    // 恢复账说给人听:不是一错就报,是重试过才报(单子 §8.2
+                    // 用尽即结构化收口)。
+                    message += "(已自动重试 " + std::to_string(recovery_attempts_used - 1) + " 次仍失败)";
                 }
                 return std::unexpected("请求失败: " + message);
             }

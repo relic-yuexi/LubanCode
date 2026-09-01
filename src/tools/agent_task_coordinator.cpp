@@ -128,6 +128,9 @@ void AgentTaskCoordinator::JoinAllBounded() {
             thread.detach();  // 挂死绝境:放线程走,不冻退出
         }
     }
+    // 任务线程收完,监督线也停(单子 P0-2:session close 时 watcher 都要收净;
+    // 析构里的 detach 只是兜底)。
+    supervisor_.RequestStop();
 }
 
 }  // namespace lubancode::tools

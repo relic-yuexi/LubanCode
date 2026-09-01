@@ -330,6 +330,9 @@ add_library(lubancode_engine STATIC
   src/platform/dir_fingerprint.cpp
   src/api/sse_framing.cpp
   src/api/http_stream_transport.cpp  # 批六:四家 wire client 共用的 cpr 传输骨架
+  # 监督器单 P0-1:主/子共用的请求级恢复链(错误分型->稳定码、重试白名单、
+  # 抖动阶梯、尝试环)。
+  src/api/model_request_recovery.cpp
   # Lua 受控 HTTP 单·阶段 2:中立非流式传输底座(cpr 一笔完整请求 +
   # 回调入口落帽/取消 + getaddrinfo DNS seam + 地址安全分类)。plugin
   # HTTP 先用;provider SSE 路暂不迁(设计单 §8.1)。
@@ -440,6 +443,8 @@ add_library(lubancode_engine STATIC
   src/agent/turn_harness.cpp
   # 递归派工单 P0-1:结构化任务合同(parse/validate/canonicalize/render)。
   src/agent/task_spec.cpp
+  # 监督器单 P0-0:进展合同——四本时钟、监督相位、健康态、空转指纹与判定尺。
+  src/agent/agent_progress.cpp
   # 骨架拆解批七·病十五:peer 域/会话域/技能域物件迁出 agent/(目录归位,
   # target 不动——engine 的 tool_trace/artifact_store 仍引它们的纯函数)。
   src/peers/peer_registry.cpp
@@ -735,6 +740,9 @@ add_library(lubancode_runtime STATIC
   # 骨架拆解批五先行半批:重试退避(固定/指数/阶梯 + 上限 + 抖动档 +
   # 可取消等待)——loop 的 5s/15s 与 workflow 的节点级指数同走这枚。
   src/runtime/retry_backoff.cpp
+  # 监督器单 P0-2:会话级单线程监督器(健康拍 + 期限表 + 通知去重),
+  # 墙钟看门狗自每任务一线迁入。
+  src/runtime/agent_supervisor.cpp
   # 统一回放接口只收信封、次序与坏行恢复规矩;loop/goal/workflow
   # 各自保留域编解码与折叠口。
   src/runtime/replay.cpp

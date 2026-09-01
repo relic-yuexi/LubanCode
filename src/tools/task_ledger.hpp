@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -24,6 +25,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/agent_progress.hpp"  // AgentProgressClock/AgentHealthState:P0-0 进展合同
 #include "agent/loop.hpp"  // ToolTraceEvent 等转发类型(与拆分前同一份引用)
 #include "agent/task_spec.hpp"  // AgentTaskSpec v2 canonical task contract
 #include "api/types.hpp"
@@ -91,6 +93,7 @@ enum class TaskOutcomeReason {
     SessionClosing,        // 会话收场向下取消整树(Cancelled)
     HookDenied,            // hook 拒绝派工(Failed;拒绝发生在注册前则不造 TaskOutcome)
     ShutdownTimeoutUnknown,  // 停机超时未证实结束(映射 Failed,不冒充已收净)
+    NoMeaningfulProgress,  // 连续完整轮指纹不变(监督器 §7.1 尺子;Failed,带部分结果)
 };
 
 // ---------------------------------------------------------------------------
@@ -355,12 +358,21 @@ struct TaskRecord {
     AgentTaskActivity activity;
     std::uint64_t content_revision = 0;
     std::chrono::steady_clock::time_point last_activity_touch{};
+    // 进展合同(P0-0):四本时钟 + 恢复账 + 监督相位/健康,与显示用的
+    // activity/content_revision 分账——progress_revision 只在 meaningful
+    // progress 时前进,token 流量一概不抬它。写点:TraceBackend(请求/传输)、
+    // ledger_sink(工具起止/轮次)、DeliverChildCompletion(孩子交付)、
+    // 恢复钩子(重试);读点:监督拍、面板、agent_watch。
+    agent::AgentProgressClock progress;
     // 墙钟兜底的三枚信号:wall_stop 看门狗到点置位(合并 cancel 线程收进
     // merged cancel,绝不动 task->cancel——那会被收成"用户中止");
     // wall_clock_fired 供收场分型(墙钟超时 ≠ 用户中止);finalized 是任务
     // 线程正式收尾的标志(看门狗宽限期内据此早退)。
     std::atomic<bool> wall_stop{false};
     std::atomic<bool> wall_clock_fired{false};
+    // 监督器的空转停止信号(P0-2):与 wall_stop 同一条取消链(不是用户
+    // 中止),收尾按 NoMeaningfulProgress 分型。
+    std::atomic<bool> no_progress_fired{false};
     std::atomic<bool> finalized{false};
     // 看门狗强制收账后置位:任务线程晚到的收尾不得再把台账翻回去
     //(状态/结果/outcome 一律保持强制收账那份)。
@@ -441,6 +453,8 @@ public:
     std::vector<AgentTaskEvent> Events(int task_id) const;
     // 某只任务已排队未送达的介入消息原文(详情展示/测试用)。
     std::vector<std::string> PendingMessages(int task_id) const;
+    // 某只任务的进展合同快照(测试与 agent_watch 的读口;认不出返回空钟)。
+    agent::AgentProgressClock ProgressOf(int task_id) const;
 
     // ---- 介入/取消/清理 ----
     // 定向介入:非活态(终态/封账)明确拒收(不改投 main)。
@@ -505,6 +519,66 @@ public:
     // 用):只许活态内翻,终态不动——迟到线程不许翻账。
     void SetLiveTaskState(const std::shared_ptr<TaskRecord>& task, AgentTaskState state);
 
+    // ---- 进展合同写口(P0-0;监督器单)--------------------------------------
+    // 口径(单子 §6.1):token 流量只刷 transport;工具开闭/完整消息提交/
+    // inbox 送达刷 execution;指纹变化刷 meaningful progress。心跳(tick、
+    // 状态查询)只在读侧,不进这些口——心跳不证明任务有进展。
+    // 无 Locked 后缀的自己拿锁;带 Locked 的要求调用方已持 mutex(ledger_
+    // sink 的逐事件路径在锁内,别双锁)。
+    void RecordRequestStarted(const std::shared_ptr<TaskRecord>& task, int attempt,
+                              const std::string& history_commit_hash);
+    void RecordTransportActivity(const std::shared_ptr<TaskRecord>& task);  // 每枚 SSE 帧
+    void RecordFirstStreamEvent(const std::shared_ptr<TaskRecord>& task, int ttfb_ms);
+    void RecordStageLocked(const std::shared_ptr<TaskRecord>& task, agent::AgentSupervisionStage stage);
+    // 相位翻页的自拿锁版(continuation 等台账锁外调用点用)。
+    void RecordStage(const std::shared_ptr<TaskRecord>& task, agent::AgentSupervisionStage stage);
+    void RecordExecutionActivityLocked(const std::shared_ptr<TaskRecord>& task);
+    // 工具起跑:execution + tool_started_at + RunningTool 相位。
+    void RecordToolStartedLocked(const std::shared_ptr<TaskRecord>& task);
+    // meaningful progress + 轮次账:指纹与上一笔不同才算真进展(时间戳、
+    // progress_revision、stale_rounds 归零);相同则 stale_rounds +1(空转
+    // 计数)。返回真 = 本笔是新指纹。
+    bool RecordMeaningfulProgressLocked(const std::shared_ptr<TaskRecord>& task, const std::string& fingerprint);
+    // 完整 assistant 消息提交进 history(轮次边界):execution + meaningful。
+    void RecordAssistantMessage(const std::shared_ptr<TaskRecord>& task, const std::string& content_fingerprint);
+    // 工具收口:execution + meaningful(结果散列做指纹)。
+    void RecordToolCompletedLocked(const std::shared_ptr<TaskRecord>& task, const std::string& result_fingerprint);
+    // 孩子交付进父 mailbox / inbox 安全送达:前者 meaningful,后者 execution。
+    void RecordChildDeliveredLocked(const std::shared_ptr<TaskRecord>& parent);
+    void RecordInboxDeliveredLocked(const std::shared_ptr<TaskRecord>& task);
+
+    // ---- 请求级恢复账(P0-1)------------------------------------------------
+    // 重试决定:attempt 记账、健康翻 Recovering、相位翻 Recovering,并把
+    // 上一尝试的半截显示账回滚到 live_output_mark(不拼两段正文,单子
+    // §8.3)。终态任务不记(晚到线程不翻账)。
+    void RecordRequestRetry(const std::shared_ptr<TaskRecord>& task, int attempt, const std::string& reason_code);
+    // 尝试收场:成功回 Healthy(传输侧自愈),失败只留稳定错误码——终态
+    // 由收尾分型定,这里不越权。
+    void RecordRequestOutcome(const std::shared_ptr<TaskRecord>& task, bool succeeded,
+                              const std::string& reason_code);
+
+    // ---- 监督面(P0-2)------------------------------------------------------
+    // 锁内对每只活任务跑一遍 visitor(记录指针 + 只读视景);visitor 里
+    // 不许再拿台账锁。监督线程的取数口。
+    void ForEachAliveVitals(
+        const std::function<void(const std::shared_ptr<TaskRecord>&, const agent::TaskVitals&)>& visitor) const;
+    // 翻健康(epoch 递增,通知按它去重);终态翻 Terminal 也走这。返回翻后
+    // 的 epoch,0 = 没翻(同态/已终态)。
+    std::uint64_t ApplyHealth(const std::shared_ptr<TaskRecord>& task, agent::AgentHealthState health,
+                              const std::string& reason_code);
+    // 空转提醒:host notice 进 inbox(轮次边界注入,给模型一轮自救上下文,
+    // 单子 §七 SuspectAgent 流转),progress.host_notice_sent 置位只投一次。
+    bool PushHostNotice(const std::shared_ptr<TaskRecord>& task, const std::string& text);
+    // 空转收口信号:置 no_progress_fired + wall_stop(走取消链,不冒充用户
+    // 中止),等任务线程自己收账;收不动由 ForceFinalizeNoProgress 兜底。
+    void RequestNoProgressStop(const std::shared_ptr<TaskRecord>& task);
+    // 看门狗式强收(Failed/NoMeaningfulProgress):与 ForceFinalizeWallClock
+    // 同一骨架,部分结果照旧留在台账(CheckpointFallback 带得走)。
+    void ForceFinalizeNoProgress(const std::shared_ptr<TaskRecord>& task, int stale_rounds);
+    // 监督通知(去重由监督器按 task+epoch+reason 把):主会话空闲拍取走。
+    void PushSupervisorNotice(std::string notice);
+    std::vector<std::string> TakeSupervisorNotices();
+
     // ---- inbox 原子交接 ----
     // 一轮 Run 正常收口后调。有未送项 -> 取走标 delivered(sealed=false),
     // 调用方必须把它们注入再续跑一轮——"Queued 是交付承诺"。inbox 空且
@@ -550,6 +624,7 @@ private:
     int next_task_id_ = 1;
     std::atomic<std::uint64_t> revision_{0};
     std::vector<std::string> permission_denial_notices_;
+    std::vector<std::string> supervisor_notices_;
     // WaitingChildren 的唤醒源:inbox 入项/孩子终态/取消/强收都在台账锁内
     // 记账,松锁前 notify_all(单子 §6.3 第 7 条)。一把全局 cv 足够——
     // 谓词按各自 task 记录判,虚醒只是再查一遍。

@@ -388,6 +388,11 @@ public:
     std::vector<std::string> TakePermissionDenialNotices() {
         return coordinator_->ledger().TakePermissionDenialNotices();
     }
+    // 监督器通知(监督器单 P0-2):同一条空闲拍通路取走——疑似断流/空转
+    // 提醒/恢复成功,按 task+epoch+reason 去重过,不刷屏。
+    std::vector<std::string> TakeSupervisorNotices() {
+        return coordinator_->ledger().TakeSupervisorNotices();
+    }
 
     // 主会话切进 /worktree 后，子代理也得看见同一处工作目录。
     void SetWorkingDirectory(std::string cwd) { cwd_ = std::move(cwd); }

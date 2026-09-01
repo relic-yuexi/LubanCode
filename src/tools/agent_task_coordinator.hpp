@@ -28,6 +28,7 @@
 #include "api/backend.hpp"                   // Backend:detached 材料的 client 形状
 #include "api/types.hpp"                     // RequestProfile
 #include "hooks/dispatcher.hpp"              // HookDispatcher:进程级稳定指针
+#include "runtime/agent_supervisor.hpp"  // AgentSupervisor:监督器单 P0-2,与台账同寿
 #include "tools/registry.hpp"
 #include "tools/subagent_scheduler.hpp"
 #include "tools/task_ledger.hpp"
@@ -146,6 +147,12 @@ public:
     TaskLedger& ledger() { return ledger_; }
     const TaskLedger& ledger() const { return ledger_; }
 
+    // 监督器(监督器单 P0-2):会话级单线程,吃台账的进展合同,按阶段软线
+    // 判健康,墙钟期限统一登记——与 TaskLedger 同寿,不绑 Agent Dock,也不
+    // 绑某轮 UI。RunTask 在任务起跑处 WatchTask/ArmWallClock。
+    runtime::AgentSupervisor& supervisor() { return supervisor_; }
+    const runtime::AgentSupervisor& supervisor() const { return supervisor_; }
+
     // 派工治理(原 SetDispatchGovernance 的账,这里唯一一份)。
     void SetGovernance(SubagentGovernance governance) { governance_ = governance; }
     const SubagentGovernance& governance() const { return governance_; }
@@ -153,6 +160,8 @@ public:
     // 引擎回调:AgentTool 装配时挂自己(裸指针捕获安全——协调器是它的
     // 成员,先亡;handle 只持 weak_ptr,引擎亡后派工口稳定报 session_closed)。
     void SetEngine(Engine engine) { engine_ = std::move(engine); }
+
+    AgentTaskCoordinator() : supervisor_(ledger_) {}
 
     // 门面工具指针(AgentTool 自己):薄壳的 name/description/input_schema
     // 只读转发用——schema 的动态内容(agent 类型清单)与主路同源。execute
@@ -180,6 +189,8 @@ public:
 
 private:
     TaskLedger ledger_;
+    // 声明在 ledger_ 之后:析构先于台账(监督线程停线时台账还活着)。
+    runtime::AgentSupervisor supervisor_;
     SubagentGovernance governance_{};
     Engine engine_;
     Tool* facade_tool_ = nullptr;
