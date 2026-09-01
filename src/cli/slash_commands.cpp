@@ -96,6 +96,11 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         // Token 账本单 A2:/usage 只认词,二级参数(session/--by/--json)在
         // ParseUsageCommand(app/commands/usage_commands)拆。
         parsed.command = SlashCommand::Usage;
+    } else if (lower == "/insights") {
+        // Token 账本单 A5:/insights 只认词,二级参数(--since/--sessions/
+        // --all-workspaces/status/clean)在 ParseInsightsCommand
+        // (app/commands/insights_commands)拆。
+        parsed.command = SlashCommand::Insights;
     } else if (lower == "/compact") {
         parsed.command = SlashCommand::Compact;
     } else if (lower == "/think" || lower == "/effort") {
@@ -911,6 +916,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/exit", tr("slash.desc.exit")},
             {"/context", tr("slash.desc.context")},
             {"/usage", tr("slash.desc.usage")},
+            {"/insights", tr("slash.desc.insights")},
             {"/compact", tr("slash.desc.compact")},
             {"/think", tr("slash.desc.think")},
             {"/effort", tr("slash.desc.effort")},

@@ -43,7 +43,21 @@ struct FeatureSignal {
     std::vector<EvidenceItem> evidence;
 };
 
-// 检测(纯函数)。次序稳定:同输入同输出。
+// 检测(纯函数)。次序稳定:同输入同输出。id 按规则钉死(FS-01 验证固化、
+// FS-02 工具面收窄、FS-03 cache 前缀、FS-04 子代理收窄)——不是场内
+// 序号:同一条规则跨场同名,A5 聚合层才能按 id 汇总(单子 A4 行"映射落
+// FS-01–FS-04"的钉法)。只开一条时也用本命 id,不从 1 重编。
 std::vector<FeatureSignal> DetectFeatureSignals(const FeatureSignalInput& input);
+
+// 信号静态目录(A5 汇总层用):规则钉死的 id -> 现成能力与先决条件,
+// 文案与 DetectFeatureSignals 同源,不另立门户。
+struct FeatureSignalCatalogEntry {
+    std::string signal_id;
+    std::string feature;
+    std::string precondition;
+    std::string action;  // 建议节的一句话动作(只指现成功能)
+};
+const std::vector<FeatureSignalCatalogEntry>& FeatureSignalCatalog();
+std::optional<FeatureSignalCatalogEntry> FindFeatureSignal(const std::string& signal_id);
 
 }  // namespace lubancode::insights

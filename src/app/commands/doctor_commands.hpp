@@ -235,6 +235,10 @@ struct DoctorContext {
     // /doctor telemetry(端云协同可观测单 T1):本地遥测服务的状态面。
     // 可空 = 遥测未装配(默认关),那节只说未开,不发任何请求。
     const lubancode::telemetry::TelemetryService* telemetry_service = nullptr;
+    // /doctor insights(Token 账本单 A5):报告仓主目录与当前 workspace 的
+    // sessions 根。空 = 没接(单测/旧装配),那节明说。
+    std::optional<std::string> home_lubancode;
+    std::optional<std::filesystem::path> insights_sessions_root;
 };
 
 void HandleDoctorCommand(const std::string& args, const DoctorContext& context);

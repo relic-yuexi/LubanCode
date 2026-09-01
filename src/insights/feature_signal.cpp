@@ -24,16 +24,10 @@ EvidenceItem Ev(std::string metric, nlohmann::json value) {
 
 std::vector<FeatureSignal> DetectFeatureSignals(const FeatureSignalInput& input) {
     std::vector<FeatureSignal> out;
-    int seq = 0;
-    const auto next_id = [&seq]() {
-        char buffer[16];
-        std::snprintf(buffer, sizeof(buffer), "FS-%02d", ++seq);
-        return std::string(buffer);
-    };
 
     // §12.2 第 5 行:同一验收步骤反复手敲 → skill / workflow。
     // 先决"步骤稳定且权限边界清楚"——同类验证 ≥3 次只证步骤稳定;
-    // 权限边界由主人看单定,信号里写明。
+    // 权限边界由主人看单定,信号里写明。FS-01 本命 id(规则钉死,跨场可比)。
     {
         std::string hot_kind;
         std::int64_t hot_count = 0;
@@ -45,7 +39,7 @@ std::vector<FeatureSignal> DetectFeatureSignals(const FeatureSignalInput& input)
         }
         if (hot_count >= 3) {
             FeatureSignal signal;
-            signal.signal_id = next_id();
+            signal.signal_id = "FS-01";
             signal.feature = "/skill 或 /workflow";
             signal.summary = "同类验证(" + hot_kind + ")在这场里跑了 " +
                              std::to_string(hot_count) + " 次;步骤稳定,可固化成技能或工作流";
@@ -57,13 +51,13 @@ std::vector<FeatureSignal> DetectFeatureSignals(const FeatureSignalInput& input)
     }
 
     // §12.2 第 3 行:system/tool 占比过高 → Prompt Profile、延迟工具、裁 MCP。
-    // 先决"模块占比可定位"——manifest 的段级表就是定位账。
+    // 先决"模块占比可定位"——manifest 的段级表就是定位账。FS-02 本命 id。
     if (input.total_input_tokens > 0) {
         const int tool_share =
             SharePercent(input.tool_definition_tokens, input.total_input_tokens);
         if (tool_share >= 40) {
             FeatureSignal signal;
-            signal.signal_id = next_id();
+            signal.signal_id = "FS-02";
             signal.feature = "Prompt Profile / 延迟工具索引(tool_search)/ 裁 MCP";
             signal.summary = "工具定义估算约占实测输入 " + std::to_string(tool_share) +
                              "%(≥40%);工具面可收窄";
@@ -77,10 +71,10 @@ std::vector<FeatureSignal> DetectFeatureSignals(const FeatureSignalInput& input)
     }
 
     // §12.2 第 8 行:cache 前缀抖 → 固定排序、稳定段前置、动态段后置。
-    // 先决"provider 明报 cache 或有诊断证据"——有实测 cache 账才算。
+    // 先决"provider 明报 cache 或有诊断证据"——有实测 cache 账才算。FS-03。
     if (input.prefix_breaks_same_epoch >= 2 && input.cache_read_tokens > 0) {
         FeatureSignal signal;
-        signal.signal_id = next_id();
+        signal.signal_id = "FS-03";
         signal.feature = "固定工具排序;稳定段前置、动态段后置";
         signal.summary = "同 epoch 内稳定前缀断了 " +
                          std::to_string(input.prefix_breaks_same_epoch) +
@@ -96,10 +90,10 @@ std::vector<FeatureSignal> DetectFeatureSignals(const FeatureSignalInput& input)
     }
 
     // §12.2 第 7 行:subagent token 暴涨 → 收窄工具、prompt、并发与任务。
-    // 先决"子流 usage 已独立"——Trajectory 分 stream 记账,已满足。
+    // 先决"子流 usage 已独立"——Trajectory 分 stream 记账,已满足。FS-04。
     if (input.subagent_tokens > input.main_tokens && input.subagent_tokens > 0) {
         FeatureSignal signal;
-        signal.signal_id = next_id();
+        signal.signal_id = "FS-04";
         signal.feature = "收窄子代理的工具面与任务边界";
         signal.summary = "子执行 token(" + std::to_string(input.subagent_tokens) +
                          ")超过主会话(" + std::to_string(input.main_tokens) + ")";
@@ -110,6 +104,30 @@ std::vector<FeatureSignal> DetectFeatureSignals(const FeatureSignalInput& input)
     }
 
     return out;
+}
+
+const std::vector<FeatureSignalCatalogEntry>& FeatureSignalCatalog() {
+    static const std::vector<FeatureSignalCatalogEntry> catalog = {
+        {"FS-01", "/skill 或 /workflow", "步骤稳定已证(同类 ≥3 次);权限边界请主人过目",
+         "把反复手敲的验收步骤固化成技能或工作流"},
+        {"FS-02", "Prompt Profile / 延迟工具索引(tool_search)/ 裁 MCP",
+         "模块占比可定位(manifest 段级表在 /prompt audit)",
+         "按 Prompt Profile 收窄工具面,或开延迟工具索引、裁不用的 MCP"},
+        {"FS-03", "固定工具排序;稳定段前置、动态段后置", "本场有实测 cache 账(cache_read>0)",
+         "固定工具注册与序列化次序,动态段挪到稳定前缀尾部"},
+        {"FS-04", "收窄子代理的工具面与任务边界", "子流 usage 已独立(分 stream 记账)",
+         "给子代理收窄工具表与任务边界(/agents 配置)"},
+    };
+    return catalog;
+}
+
+std::optional<FeatureSignalCatalogEntry> FindFeatureSignal(const std::string& signal_id) {
+    for (const auto& entry : FeatureSignalCatalog()) {
+        if (entry.signal_id == signal_id) {
+            return entry;
+        }
+    }
+    return std::nullopt;
 }
 
 }  // namespace lubancode::insights

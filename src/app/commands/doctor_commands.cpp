@@ -38,11 +38,13 @@ using lubancode::cli::TermErr;
 #include "api/responses/client.hpp"
 #include "api/responses/request.hpp"
 #include "app/backend_stack.hpp"
+#include "app/commands/usage_commands.hpp"  // LoadPricingTable:/doctor insights 的价格表口径
 #include "cli/console_input.hpp"  // ReadLine:公网探针的一次性确认门(问题 9)
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
+#include "insights/insights_health.hpp"  // CheckInsightsHealth:/doctor insights(Token 账本单 A5)
 #include "runtime/trajectory_session.hpp"  // TrajectoryBypassBridge(Token 账本单 A1)
 #include "tools/path_utils.hpp"  // PathToUtf8:诊断路径显示
 #include "tools/search_ripgrep.hpp"  // BundledRipgrepLocator/RunRipgrepSmoke:search 后端诊断(ripgrep 迁移 P0-2)
@@ -1160,6 +1162,50 @@ void PrintTrajectoryDoctor(const DoctorContext& context) {
     TermOut().flush();
 }
 
+// /doctor insights(Token 账本单 A5):insights 管线的健康检查(§10.4)。
+// 检查体在领域层(insights/insights_health),这里只装配材料与打印;
+// 不调模型、不重建报告。
+void PrintInsightsDoctor(const DoctorContext& context) {
+    TermOut() << context.theme.stats << "洞察报告(/doctor insights):" << context.theme.reset << "\n";
+    lubancode::insights::InsightsHealthInput input;
+    input.trajectory_on = context.trajectory_ledger != nullptr;
+    if (context.home_lubancode.has_value()) {
+        input.insights_home = lubancode::tools::Utf8ToPath(*context.home_lubancode) / "insights";
+    }
+    if (context.insights_sessions_root.has_value()) {
+        lubancode::insights::InsightsWorkspaceRef ref;
+        ref.workspace_key = lubancode::tools::PathToUtf8(
+            context.insights_sessions_root->parent_path().filename());
+        ref.sessions_root = *context.insights_sessions_root;
+        input.workspaces.push_back(std::move(ref));
+    }
+    {
+        const std::time_t now = std::time(nullptr);
+        std::tm local{};
+#ifdef _WIN32
+        localtime_s(&local, &now);
+#else
+        localtime_r(&now, &local);
+#endif
+        char buffer[16];
+        std::snprintf(buffer, sizeof(buffer), "%04d%02d%02d", local.tm_year + 1900,
+                      local.tm_mon + 1, local.tm_mday);
+        input.now_yyyymmdd = buffer;
+    }
+    const LoadedPricing pricing =
+        context.home_lubancode.has_value()
+            ? LoadPricingTable(context.home_lubancode)
+            : LoadedPricing{};
+    input.pricing_loaded = pricing.table.has_value();
+    input.pricing_note = pricing.note;
+    for (const auto& line : lubancode::insights::CheckInsightsHealth(input)) {
+        const char* mark = line.status == ' ' ? "[ok]" : line.status == '!' ? "[! ]" : "[!!]";
+        TermOut() << "  " << mark << " " << line.name << ": " << line.detail << "\n";
+    }
+    TermOut() << "  口径:不调模型,不重建报告;/insights 才生成,doctor 只看账。\n";
+    TermOut().flush();
+}
+
 void HandleDoctorCommand(const std::string& args, const DoctorContext& context) {
     std::istringstream input(args);
     std::string subcommand;
@@ -1219,6 +1265,10 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
     }
     if (subcommand == "trajectory") {
         PrintTrajectoryDoctor(context);
+        return;
+    }
+    if (subcommand == "insights") {
+        PrintInsightsDoctor(context);
         return;
     }
     if (subcommand == "instructions") {
@@ -1326,6 +1376,14 @@ CommandFlow HandleSlashDoctor(SlashDispatchContext& ctx, const lubancode::cli::P
                                                      : std::string(),
                                                  ctx.trajectory,
                                                  ctx.telemetry_service};
+    // /doctor insights(Token 账本单 A5):主目录与当前 workspace 的
+    // sessions 根(轨迹没开时根为空,那节自己明说)。
+    doctor_context.home_lubancode = ctx.home_lubancode != nullptr
+                                        ? *ctx.home_lubancode
+                                        : std::optional<std::string>{};
+    if (ctx.trajectory != nullptr) {
+        doctor_context.insights_sessions_root = ctx.trajectory->session_dir().parent_path();
+    }
     HandleDoctorCommand(parsed.args, doctor_context);
     ctx.real_backend->Rebuild(*ctx.config);
     return CommandFlow::Continue;

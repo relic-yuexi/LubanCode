@@ -1,6 +1,6 @@
 # LubanCode 使用洞察、Token 账本与 Prompt 审计设计
 
-- 状态：A0–A4 已落 main（A0=accounting/insights 合同与十二场夹具；A1=事实接线与旁路桥；A2=/usage 报告命令面；A3=/prompt audit 三层审法；A4=Session Analyzer：IntegrityGate/FrictionClassifier/FeatureSignal/派生仓）；A5(/insights 报告)起待实现
+- 状态：A0–A5 已落（A0=accounting/insights 合同与十二场夹具；A1=事实接线与旁路桥；A2=/usage 报告命令面；A3=/prompt audit 三层审法；A4=Session Analyzer：IntegrityGate/FrictionClassifier/FeatureSignal/派生仓；A5=/insights：跨会话/跨工作区总报告 + HTML + /doctor insights）；A6(模型评议)/A7(app-server 与 GUI)起待实现
 - 级别：P1；其中 Usage 事实入账随 Trajectory P0 一道落地
 - 日期：2026-08-30
 - 范围：本机 LubanCode 新轨迹、当前工作区与显式选择的跨工作区报告
@@ -1330,15 +1330,17 @@ coverage，几本账不串。（`tests/unit/accounting/test_usage_aggregate.cpp`
 
 ### A5 `/insights`
 
-- [ ] session discover 与 current-workspace 默认范围。
-- [ ] 跨 workspace 显式开关。
-- [ ] 增量聚合。
-- [ ] report JSON。
-- [ ] 自包含 HTML renderer、CSP、筛选。
-- [ ] latest 原子替换、历史保留与 derived-only clean。
-- [ ] `/doctor insights`。
+- [x] session discover 与 current-workspace 默认范围。（`src/insights/insights_generate.*` 的 `GenerateInsightsReport`：逐 workspace 扫 sessions 目录，日期窗照 A4 口径（目录名头 8 位，形状不合不猜日期、收进来让 gate 说话）；默认只取当前 workspace（命令层从轨迹账本折 sessions 根）；选号按 session 开始时间新→旧、同时间 session id 降序——结束时间不在 manifest，按开始时间排并在限制节写明，不靠目录遍历次序）
+- [x] 跨 workspace 显式开关。（`/insights --all-workspaces` 才跨仓：`insights_commands.cpp` 的 `AllWorkspaceRefs` 枚举 trajectories 根下 workspaces/*/sessions，workspace 只显 readable name 与 key 短码，`--show-paths` 才列 workspace 明细；报告 scope.all_workspaces 置位、workspace_key 记 "*"）
+- [x] 增量聚合。（§9.2 管线：GateSession 验账 → ReadExistingSessionSummary + IsSummaryStale 比 terminal hash 与 analyzer 版本 → fresh 直接吃摘要（§9.1 尾段：fresh 场不占 200 重算名额照进汇总）→ stale/missing 按 --sessions 上限走 AnalyzeSession 原子写摘要，超出的记 pending（页眉可见）；--include-active 读高水位成 provisional 且不写长期摘要。聚合是摘要的纯函数（`workspace_aggregator.*`），同输入同输出——report.json 字节稳定的根）
+- [x] report JSON。（冻结的 `lubancode.insights.report` v1 typed report 是唯一来源：coverage 五账（found/verified/analyzed/pending/excluded）、usage 总账（unknown 单列不折 0、费用 not_priced 并在限制节说明逐笔在 /usage）、sessions 摘要数组、workspace 级 findings（prompt 规则汇总 + 摩擦 INS-F## 按封闭表编号）；micro 场（§9.1）usage 照收、摩擦与交互样本不算它）
+- [x] 自包含 HTML renderer、CSP、筛选。（`src/insights/html_renderer.*`：CSS/JS 全内联零外链，CSP `default-src 'none'` + style/script 各带本地 sha256(base64) 哈希（与 hooks/hash 同一把尺），动态文本全过 HTML escape、控制字符剥掉，prompt 正文/绝对路径不进 DOM；七节（概览/Token/摩擦前的 prompt 构成/摩擦/交互形状/建议/覆盖与限制）+ 可筛场次明细表，筛 workspace/成色/outcome/摩擦类/session 片段——model/purpose 不在摘要 schema，这两维不设筛并在页面写明，逐笔账在 /usage）
+- [x] latest 原子替换、历史保留与 derived-only clean。（`src/insights/report_store.*`：reports/<stamp>-<label>-<since>d.{json,html} 先落、latest.* 最后原子替换（任一失败不动 latest）；历史报告保留不自动删；`/insights clean --derived-only` 先列文件与字节、二次确认后才删，只删 derived/<analyzer> 层内派生件，Journal 与报告不在清理面，symlink 一律跳过 + 删前 containment 再验）
+- [x] `/doctor insights`。（`src/insights/insights_health.*` + doctor_commands 的 insights 子命令：轨迹开关、reader 版本口径、派生目录可写性与磁盘余量、最近成功报告（latest.json 读回 analyzer 版本，旧版如实标注）、stale/坏 JSON 摘要计数、价格表口径、HTML renderer 自检（CSP/转义/七节锚点/零外链）、model review 默认关——不调模型不重建报告）
 
-验收：200-session fixture 能生成可读报告；coverage、usage、prompt、friction、建议、限制七节齐。
+验收：200-session fixture 能生成可读报告；coverage、usage、prompt、friction、建议、限制七节齐。（`tests/unit/insights/test_insights_generate.cpp`：200 场出报告、七节锚点齐、fresh 全复用的第二轮与删 derived 重算的第三轮 report.json 字节一致；五态场次排除与理由；--sessions 上限的 pending 账；跨 workspace 汇总。renderer/CSP/转义/canary 在 `test_html_renderer.cpp`，聚合口径在 `test_workspace_aggregator.cpp`，报告仓与 clean containment 在 `test_insights_report_store.cpp`，健康检查在 `test_insights_health.cpp`，命令面在 `tests/unit/app/test_insights_command.cpp`）
+
+A5 附注（如实记）：① FeatureSignal 的 id 从"场内序号"改成"规则钉死"（FS-01 验证固化 / FS-02 工具面 / FS-03 cache 前缀 / FS-04 子代理，单子 A4 行"映射落 FS-01–FS-04"的钉法），analyzer 版本抬到 insights-v1.1——旧摘要按 §14.6 判 stale 重算一次，schema 形状不动；② --model-review 属 A6、--open 属 A7（报告打开 containment），敲了明说后续批次，本地报告照出。
 
 ### A6 可选模型评议
 
