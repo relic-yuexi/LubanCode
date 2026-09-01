@@ -38,7 +38,6 @@ TrajectorySessionLedger::Options LedgerOptions(const std::filesystem::path& root
     TrajectorySessionLedger::Options options;
     options.workspace_root = root / "ws";
     options.trajectories_root = root / "trajectories";
-    options.readable_workspace_name = "接线测试";
     options.launch_cwd = "D:/tmp/ws";
     options.lubancode_version = "0.26.138-test";
     return options;

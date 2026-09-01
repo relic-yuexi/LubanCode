@@ -8,6 +8,11 @@
 
 #include <utility>
 
+#include "config/config.hpp"      // HomeLubancodeDir:身份裁决的全局件止步
+#include "platform/paths.hpp"
+#include "tools/path_utils.hpp"   // Utf8ToPath
+#include "workspace/identity.hpp"
+
 namespace lubancode::runtime {
 
 SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)), store_(options_.sessions_dir) {
@@ -16,8 +21,8 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)), 
     // 开不出来记 error,由装配层决定会话启动失败——本类不回退旧写口。
     if (options_.trajectory_enabled) {
         TrajectorySessionLedger::Options ledger_options;
-        ledger_options.workspace_root = options_.trajectory_workspace_root;
-        ledger_options.readable_workspace_name = options_.trajectory_workspace_name;
+        ledger_options.trajectories_root = options_.trajectory_trajectories_root;
+        ledger_options.workspace_identity = options_.trajectory_workspace_identity;
         ledger_options.lubancode_version = options_.lubancode_version;
         ledger_options.resume_at_launch = options_.trajectory_resume_at_launch;
         ledger_options.resume_source_session_id = options_.trajectory_resume_source_session_id;
@@ -31,6 +36,57 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)), 
 }
 
 SessionRuntime::~SessionRuntime() = default;
+
+std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::path& new_cwd) {
+    if (!options_.trajectory_enabled) {
+        return {};
+    }
+    std::filesystem::path home_dir;
+    if (const auto home = config::HomeLubancodeDir(); home.has_value()) {
+        home_dir = tools::Utf8ToPath(*home);
+    }
+    auto identity = workspace::ResolveWorkspaceIdentity(new_cwd, home_dir);
+    if (!identity.has_value()) {
+        return identity.error();
+    }
+    if (trajectory_.has_value()) {
+        auto change = trajectory_->HandleCwdChange(*identity);
+        if (change.same_workspace) {
+            return change.error;
+        }
+        // 跨 workspace:封当前场,再在新 workspace 开新场(§4.5 不许往旧房
+        // 搬账)。旧场留在旧 workspace,sessions 索引可查可 resume。新场落
+        // 同一个 trajectories 根(从旧场 session 目录四层上推:session 在
+        // <root>/workspaces/<key>/sessions/<id>,布局是合同)。
+        const std::filesystem::path trajectories_root =
+            trajectory_->session_dir().parent_path().parent_path().parent_path().parent_path();
+        trajectory_->CloseSession("workspace_switch");
+        TrajectorySessionLedger::Options ledger_options;
+        ledger_options.trajectories_root = trajectories_root;
+        ledger_options.workspace_identity = std::move(*identity);
+        ledger_options.lubancode_version = options_.lubancode_version;
+        ledger_options.launch_cwd = platform::PathToUtf8(ledger_options.workspace_identity.launch_cwd);
+        auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
+        if (!ledger.has_value()) {
+            return ledger.error();
+        }
+        // ledger 的 move 赋值删了(引用成员),optional 走 reset + emplace。
+        trajectory_.reset();
+        trajectory_.emplace(std::move(*ledger));
+        return {};
+    }
+    TrajectorySessionLedger::Options ledger_options;
+    ledger_options.workspace_identity = std::move(*identity);
+    ledger_options.lubancode_version = options_.lubancode_version;
+    ledger_options.launch_cwd = platform::PathToUtf8(ledger_options.workspace_identity.launch_cwd);
+    auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
+    if (!ledger.has_value()) {
+        return ledger.error();
+    }
+    trajectory_.reset();
+    trajectory_.emplace(std::move(*ledger));
+    return {};
+}
 
 TurnEventAdapter SessionRuntime::MakeTurnAdapter() {
     // 适配器按值构造会拷 map/串——MoveCallbacks 的正确姿势是调用方写

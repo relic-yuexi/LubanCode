@@ -20,21 +20,15 @@
 
 #include <nlohmann/json.hpp>
 
+#include "workspace/identity.hpp"
+
 namespace lubancode::trajectory {
 
 // ---------------------------------------------------------------------------
-// workspace_key(§3.2)
+// workspace_key(P0-1 起由 workspace::ResolveWorkspaceIdentity 唯一裁决:
+// Git common dir→marker→config→cwd 四级,SHA256 前 16 位 + seed 前缀。
+// trajectory 只吃结果,不再各算各的 key。)
 // ---------------------------------------------------------------------------
-
-// 规范化:绝对路径 + lexically_normal + 正斜杠 + 去尾斜杠 + Windows 盘符
-// 小写。跨平台同一份规则,hash 输入先过这道。
-std::string NormalizeRootPathText(const std::filesystem::path& root);
-
-// workspace_key = <root-basename>-<first12(SHA256(normalized-root))>。
-std::string ComputeWorkspaceKey(const std::filesystem::path& root);
-
-// 向上找 .git 定仓库根;不在 Git 仓库内给 nullopt(调用方退回启动 cwd)。
-std::optional<std::filesystem::path> FindWorkspaceRoot(const std::filesystem::path& cwd);
 
 // ---------------------------------------------------------------------------
 // session_id(§3.3)
@@ -83,12 +77,13 @@ class TrajectoryDirectory {
 public:
     TrajectoryDirectory() = default;
 
-    // 建 workspace 层:workspaces/<key>/ + workspace.json + sessions/ +
-    // lifecycle/ + tombstones/。已存在照旧(workspace.json 不覆盖——首次
-    // 创建时间等材料以旧账为准)。
+    // 建 workspace 层:workspaces/<identity.workspace_key>/ + workspace.json
+    //(v2 manifest,由 workspace::OpenOrRegisterWorkspace 首仓原子写/开仓
+    // 登记)+ sessions/ + lifecycle/ + tombstones/。已存在的 manifest 只
+    // 更新 last_opened 与 checkout 登记,首次创建时间以旧账为准。
     static std::expected<TrajectoryDirectory, std::string> CreateWorkspace(
-        const std::filesystem::path& trajectories_root, const std::filesystem::path& workspace_root,
-        const std::string& readable_name, std::int64_t created_at_ms);
+        const std::filesystem::path& trajectories_root, const workspace::WorkspaceIdentity& identity,
+        std::int64_t now_ms);
 
     // 建 session 层:§3.1 全目录树 + session.json(status=preparing)。
     // session_id 已存在即失败(绝不复用,§3.3)。

@@ -441,9 +441,12 @@ enum class ClearRecoveryPolicy { CompleteSwitch, AbortEmptyPreparing };
 // ---------------------------------------------------------------------------
 
 struct SessionManagerOptions {
-    std::filesystem::path trajectories_root;  // ~/.lubancode/trajectories
-    std::filesystem::path workspace_root;     // 仓库根或启动 cwd(§3.2)
-    std::string readable_workspace_name;
+    std::filesystem::path trajectories_root;  // ~/.lubancode/trajectories(P0-2 挪 workspaces/)
+    // P0-1:身份由 workspace::ResolveWorkspaceIdentity 唯一裁决后整份递进
+    //(workspace_key/display_name/checkout_root 全在 identity 里)。空
+    // identity(旧测试/兜底)按 workspace_root 退 cwd_fallback 形状。
+    workspace::WorkspaceIdentity identity;
+    std::filesystem::path workspace_root;  // 兜底根(identity 空时用)
     std::string launch_cwd;  // UTF-8 文本,进 manifest
     std::string lubancode_version;
     RecorderOptions recorder;
@@ -500,6 +503,11 @@ public:
     // 记一次恢复引用(resume 的 source 指认;不另开 session)。
     std::expected<void, std::string> RecordResumeReference(const std::string& source_session_id,
                                                            const std::string& note);
+
+    // P0-1(§4.5):同 workspace 的检出登记/开仓对账(last_opened_at_ms +
+    // checkouts upsert,linked worktree 进出房各记一笔)。身份 key 与本
+    // manager 不合同拒绝(identity.key_mismatch 隔离语义)。空 = 成功。
+    std::expected<void, std::string> RegisterCheckout(const workspace::WorkspaceIdentity& identity);
 
     // ---- 观测 ----
     ActiveSession* active() { return active_.has_value() ? &*active_ : nullptr; }

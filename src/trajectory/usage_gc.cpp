@@ -87,17 +87,17 @@ SessionCapacityUsage ScanSessionCapacity(const std::filesystem::path& session_di
     return usage;
 }
 
-WorkspaceUsageReport ScanWorkspaceUsage(const std::filesystem::path& sessions_dir,
+WorkspaceUsageReport ScanWorkspaceUsage(const std::filesystem::path& workspace_sessions_dir,
                                         const std::string& workspace_key) {
     WorkspaceUsageReport report;
     report.workspace_key = workspace_key;
     std::error_code ec;
-    if (!std::filesystem::exists(sessions_dir, ec)) {
+    if (!std::filesystem::exists(workspace_sessions_dir, ec)) {
         return report;
     }
     std::vector<std::filesystem::path> session_dirs;
     for (const auto& entry : std::filesystem::directory_iterator(
-             sessions_dir, std::filesystem::directory_options::skip_permission_denied, ec)) {
+             workspace_sessions_dir, std::filesystem::directory_options::skip_permission_denied, ec)) {
         if (ec) break;
         std::error_code dir_ec;
         if (entry.is_directory(dir_ec) && !dir_ec) {

@@ -19,6 +19,7 @@
 #include "runtime/trajectory_session.hpp"
 #include "trajectory/journal.hpp"
 #include "trajectory/recorder.hpp"
+#include "workspace/identity.hpp"
 
 using namespace lubancode;
 using namespace lubancode::runtime;
@@ -266,7 +267,6 @@ TEST_CASE("ledger:开账出 main.jsonl,子代理拿独立 JSONL 与父边界") {
     TrajectorySessionLedger::Options options;
     options.trajectories_root = root / "trajectories";
     options.workspace_root = root / "repo";
-    options.readable_workspace_name = "demo";
     options.lubancode_version = "test";
     std::error_code ec;
     std::filesystem::create_directories(root / "repo", ec);
@@ -379,7 +379,6 @@ TEST_CASE("SpawnSubagent:嵌套派工的 parent_run_id 指向父任务自己的 
     TrajectorySessionLedger::Options options;
     options.trajectories_root = root / "trajectories";
     options.workspace_root = root / "repo";
-    options.readable_workspace_name = "demo";
     options.lubancode_version = "test";
     std::error_code ec;
     std::filesystem::create_directories(root / "repo", ec);
@@ -421,8 +420,7 @@ TEST_CASE("SessionRuntime 轨迹档:旧档不建、轮末补抄停用") {
     const auto root = FreshDir("lubancode-traj-p2-runtime");
     runtime::SessionRuntime::Options options;
     options.trajectory_enabled = true;
-    options.trajectory_workspace_root = root / "repo";
-    options.trajectory_workspace_name = "demo";
+    options.trajectory_workspace_identity = workspace::MakeFallbackIdentity(root / "repo");
     std::error_code ec;
     std::filesystem::create_directories(root / "repo", ec);
     runtime::SessionRuntime session(options);

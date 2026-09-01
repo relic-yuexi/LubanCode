@@ -502,6 +502,12 @@ add_library(lubancode_engine STATIC
   # target 反向链 engine,不能收。照批七 sessions/peers/skills 的先例:
   # 目录归位,target 不动。
   src/runtime/worktree.cpp
+  # Workspace 统一存储 P0-1:唯一的 WorkspaceIdentityResolver(四级裁决:
+  # commondir→marker→config→cwd)与 workspace v2 manifest/checkout 登记/
+  # doctor 对账。trajectory 与 memory 只吃结果,不各自算 key。纯库,与
+  # trajectory 同层(依赖 platform/hooks,不 include app/cli/runtime)。
+  src/workspace/identity.cpp
+  src/workspace/manifest.cpp
   # P0 新轨迹记录单(P0-1 核心半场):trajectory 事实仓底座——事件合同、
   # schema 强校验、canonical JSON、内容寻址 blob、journal/hash chain、
   # 单写者 recorder 与目录制。纯库,不 include app/cli/runtime;依赖方向

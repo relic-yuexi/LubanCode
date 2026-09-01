@@ -22,6 +22,7 @@
 
 #include "agent/agent.hpp"  // Agent/AgentProfile/AgentWiring(批四自立门户)
 #include "agent/context.hpp"  // ContextPressure:压力通报的形状
+#include "config/config.hpp"  // HomeLubancodeDir:P0-1 身份裁决的全局件止步
 #include "sessions/session_catalog.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/session_command_service.hpp"
@@ -32,6 +33,7 @@
 #include "tools/ask_user.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/registry.hpp"
+#include "workspace/identity.hpp"  // P0-1:thread 面 workspace 身份裁决
 #include "workflow/frontend.hpp"
 #include "workflow/journal.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:入站用户文本的编码关口
@@ -753,9 +755,18 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
         //(app-server 的存档 record->store 那条不开,禁 dual-write)。
         runtime_options.trajectory_enabled = options_.features_trajectory;
         if (runtime_options.trajectory_enabled) {
-            runtime_options.trajectory_workspace_root = std::filesystem::current_path();
-            runtime_options.trajectory_workspace_name =
-                runtime_options.trajectory_workspace_root.filename().generic_string();
+            // P0-1:thread 身份按前端指定的 cwd(record->cwd;空则 options_.cwd)
+            // 四级裁决,不按 server 进程的 current_path——前端外壳在各项目里
+            // 起 thread,server 进程 cwd 跟项目无关。home 递进去做全局件止步。
+            const std::filesystem::path identity_cwd = lubancode::tools::Utf8ToPath(record->cwd);
+            const auto identity_home = lubancode::config::HomeLubancodeDir();
+            auto identity = lubancode::workspace::ResolveWorkspaceIdentity(
+                identity_cwd, identity_home.has_value()
+                                 ? lubancode::tools::Utf8ToPath(*identity_home)
+                                 : std::filesystem::path());
+            if (identity.has_value()) {
+                runtime_options.trajectory_workspace_identity = std::move(*identity);
+            }
             runtime_options.lubancode_version = options_.lubancode_version;
         }
         record->session_runtime = std::make_unique<runtime::SessionRuntime>(std::move(runtime_options));

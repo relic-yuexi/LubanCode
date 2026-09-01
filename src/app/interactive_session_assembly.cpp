@@ -80,6 +80,7 @@
 #include "runtime/plan_mode.hpp"
 #include "runtime/session_runtime.hpp"
 #include "runtime/tool_trace_hub.hpp"
+#include "workspace/identity.hpp"  // P0-1:终端面 workspace 身份裁决
 // 持久目标单:goal 状态机(coordinator)、GoalContext 注入、终端排版。
 #include "app/commands/goal_commands.hpp"
 #include "runtime/goal_context.hpp"
@@ -418,9 +419,18 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
           runtime_options.trajectory_enabled =
               lubancode::runtime::ResolveTrajectoryEnabled(config.features_trajectory);
           if (runtime_options.trajectory_enabled) {
-              runtime_options.trajectory_workspace_root = std::filesystem::current_path();
-              runtime_options.trajectory_workspace_name =
-                  runtime_options.trajectory_workspace_root.filename().generic_string();
+              // P0-1:终端面身份按四级裁决冻结(commondir→marker→config→cwd),
+              // 同仓子目录/linked worktree 同一把钥匙;裁决料整份递给 ledger,
+              // 账本不再各算各的 key。
+              const std::filesystem::path identity_home =
+                  home_lubancode.has_value()
+                      ? lubancode::tools::Utf8ToPath(*home_lubancode)
+                      : std::filesystem::path();
+              auto identity = lubancode::workspace::ResolveWorkspaceIdentity(
+                  std::filesystem::current_path(), identity_home);
+              if (identity.has_value()) {
+                  runtime_options.trajectory_workspace_identity = std::move(*identity);
+              }
               runtime_options.lubancode_version = std::string(lubancode::app::kVersion);
               // P0-3 --continue(§10.4):启动路直接开 start_reason=resume 的
               // 新场,不先造空 session;没有可恢复场回落普通开张(同旧路

@@ -14,6 +14,8 @@
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "trajectory/safety.hpp"
+#include "workspace/identity.hpp"
+#include "workspace/manifest.hpp"  // P0-1:RegisterCheckout 的登记体
 
 namespace lubancode::trajectory {
 namespace {
@@ -619,7 +621,12 @@ SessionManager::SessionManager(SessionManagerOptions options, SessionManagerCloc
     if (clock != nullptr) {
         clock_ = clock;
     }
-    workspace_key_ = ComputeWorkspaceKey(options_.workspace_root);
+    // P0-1:key 只吃递进的身份;空身份(旧测试/兜底)按 workspace_root 退
+    // cwd_fallback 形状,不再各算各的 hash。
+    if (!options_.identity.valid()) {
+        options_.identity = workspace::MakeFallbackIdentity(options_.workspace_root);
+    }
+    workspace_key_ = options_.identity.workspace_key;
     workspace_dir_ =
         options_.trajectories_root / "workspaces" / platform::Utf8ToPath(workspace_key_);
 }
@@ -627,18 +634,32 @@ SessionManager::SessionManager(SessionManagerOptions options, SessionManagerCloc
 SessionManager::~SessionManager() = default;
 
 bool SessionManager::EnsureWorkspace(std::string* error) {
-    if (!workspace_dir_.empty() && std::filesystem::exists(workspace_dir_ / "sessions")) {
-        return true;
-    }
-    auto workspace = TrajectoryDirectory::CreateWorkspace(
-        options_.trajectories_root, options_.workspace_root, options_.readable_workspace_name,
-        clock_->WallMs());
+    // P0-1:每次开张都走 manifest 对账 + checkout 登记(幂等):首仓原子写
+    // v2;已存在则 key 对账(不合即隔离失败,不自动改名)+ last_opened/
+    // checkouts 更新。不再"目录在就跳过"——否则 linked worktree 的检出
+    // 登记永远缺账。
+    auto workspace = TrajectoryDirectory::CreateWorkspace(options_.trajectories_root,
+                                                          options_.identity, clock_->WallMs());
     if (!workspace.has_value()) {
         *error = workspace.error();
         return false;
     }
     workspace_dir_ = workspace->workspace_dir();
     return true;
+}
+
+std::expected<void, std::string> SessionManager::RegisterCheckout(
+    const workspace::WorkspaceIdentity& identity) {
+    if (identity.workspace_key != workspace_key_) {
+        return std::unexpected("identity.key_mismatch: 登记 key=" + identity.workspace_key +
+                               " 与本 workspace key=" + workspace_key_ + " 不合;跨 workspace 切换须封场换账");
+    }
+    if (const auto registered = workspace::OpenOrRegisterWorkspace(
+            options_.trajectories_root / "workspaces", identity, clock_->WallMs());
+        !registered.has_value()) {
+        return std::unexpected(registered.error());
+    }
+    return {};
 }
 
 std::filesystem::path SessionManager::SessionDirOf(const std::string& session_id) const {

@@ -607,6 +607,17 @@ void TerminalSessionController::SyncWorktreeDirectory() {
     // @ 提及索引跟着根走:根变了重扫(下一拍 Snapshot 自办)。
     mention_support_.Invalidate();
     prompt_options.cwd = CurrentDirUtf8();
+    // P0-1(§4.5):轨迹账按冻结身份对账——同一 common git dir 内进出房,
+    // workspace 不变,落 cwd.changed + checkout 登记;真跨了 workspace 则
+    // 封旧场开新场(交互面的 /worktree 只在同仓内动,跨场属 Gateway/多项目
+    // 路的将来;这里机制同一条)。失败只打警告,不拦切房主流程。
+    if (session_runtime_.trajectory() != nullptr) {
+        if (const std::string switch_error = session_runtime_.NoteWorkingDirectoryChanged(
+                std::filesystem::current_path());
+            !switch_error.empty()) {
+            TermOut() << trf("cmd.memory.switch_failed", switch_error) << "\n";
+        }
+    }
     if (project_memory != nullptr) {
         if (const auto updated = project_memory->SetWorkingDirectory(std::filesystem::current_path());
             !updated.has_value()) {

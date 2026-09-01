@@ -60,8 +60,10 @@ struct ProjectIdentity {
     bool git = false;
 };
 
-// Git 项目以规范化后的 common git dir 为身份，故同仓库 worktree 共用 key；
-// 非 Git 项目向上找最近的 .lubancode/config.json，找不到就用 cwd。
+// P0-1 起这是形状适配,不是身份算法:裁决(commondir→marker→config→cwd
+// 四级 + 统一 workspace_key)只在 workspace::ResolveWorkspaceIdentity 一处,
+// 这里把结果折成 memory 域的 ProjectIdentity。key 即统一 workspace_key;
+// project_dir 仍住 <home>/projects/<key>/(P0-3 才搬进 workspace)。
 std::expected<ProjectIdentity, std::string> ResolveProjectIdentity(
     const std::filesystem::path& cwd, const std::filesystem::path& home_lubancode);
 

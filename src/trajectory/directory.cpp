@@ -4,8 +4,8 @@
 #include <fstream>
 #include <sstream>
 
-#include "hooks/hash.hpp"
 #include "platform/paths.hpp"
+#include "workspace/manifest.hpp"
 
 namespace lubancode::trajectory {
 namespace {
@@ -56,70 +56,6 @@ bool WriteTextFileAtomic(const std::filesystem::path& path, const std::string& c
 }
 
 }  // namespace
-
-std::string NormalizeRootPathText(const std::filesystem::path& root) {
-    std::filesystem::path normalized = std::filesystem::absolute(root).lexically_normal();
-    std::string text = platform::PathToUtf8(normalized);
-    // 统一正斜杠、去尾斜杠。Windows 文件系统大小写不敏感:整串折叠 ASCII
-    // 小写,免得 D:/Work 与 d:/work 各立一间 workspace。POSIX 大小写敏感,
-    // 保持原样。
-    for (char& c : text) {
-        if (c == '\\') {
-            c = '/';
-        }
-#ifdef _WIN32
-        if (c >= 'A' && c <= 'Z') {
-            c = static_cast<char>(c - 'A' + 'a');
-        }
-#endif
-    }
-    if (text.size() > 1 && text.back() == '/') {
-        text.pop_back();
-    }
-    return text;
-}
-
-std::string ComputeWorkspaceKey(const std::filesystem::path& root) {
-    const std::string normalized = NormalizeRootPathText(root);
-    // basename 一律从规范化文本切最后一段非空路径,不问平台 fs 语义——
-    // POSIX 把反斜杠当普通字符,fs::path("D:\\work\\demo").filename() 在
-    // macOS/Linux 上是整串反斜杠串,workspace_key 就成了"整路径-hash"
-    // (CI 实翻)。规范文本已统一正斜杠,两边同口径。
-    std::string basename;
-    std::istringstream stream(normalized);
-    std::string segment;
-    while (std::getline(stream, segment, '/')) {
-        if (!segment.empty() && segment != "." && segment != "..") {
-            basename = segment;
-        }
-    }
-    if (basename.empty()) {
-        basename = "root";
-    }
-    const std::string hash = hooks::Sha256Hex(normalized);
-    return basename + "-" + hash.substr(0, 12);
-}
-
-std::optional<std::filesystem::path> FindWorkspaceRoot(const std::filesystem::path& cwd) {
-    std::error_code ec;
-    std::filesystem::path current = std::filesystem::absolute(cwd, ec);
-    if (ec) {
-        return std::nullopt;
-    }
-    while (true) {
-        if (std::filesystem::exists(current / ".git", ec)) {
-            return current;
-        }
-        if (ec) {
-            return std::nullopt;
-        }
-        const std::filesystem::path parent = current.parent_path();
-        if (parent == current) {
-            return std::nullopt;  // 到根了还没见 .git
-        }
-        current = parent;
-    }
-}
 
 std::string GenerateSessionId(int year, int month, int day, int hour, int minute, int second,
                               std::string_view random6) {
@@ -211,11 +147,14 @@ std::optional<SessionManifest> ReadSessionJson(const std::filesystem::path& sess
 }
 
 std::expected<TrajectoryDirectory, std::string> TrajectoryDirectory::CreateWorkspace(
-    const std::filesystem::path& trajectories_root, const std::filesystem::path& workspace_root,
-    const std::string& readable_name, std::int64_t created_at_ms) {
-    const std::string key = ComputeWorkspaceKey(workspace_root);
-    const std::filesystem::path workspace_dir = trajectories_root / "workspaces" /
-                                                 platform::Utf8ToPath(key);
+    const std::filesystem::path& trajectories_root, const workspace::WorkspaceIdentity& identity,
+    std::int64_t now_ms) {
+    if (!identity.valid()) {
+        return std::unexpected("identity.path_invalid: 身份没裁决出 workspace_key");
+    }
+    const std::string key = identity.workspace_key;
+    const std::filesystem::path workspaces_root = trajectories_root / "workspaces";
+    const std::filesystem::path workspace_dir = workspaces_root / platform::Utf8ToPath(key);
     std::error_code ec;
     for (const char* sub : {"sessions", "lifecycle", "tombstones"}) {
         std::filesystem::create_directories(workspace_dir / sub, ec);
@@ -224,19 +163,11 @@ std::expected<TrajectoryDirectory, std::string> TrajectoryDirectory::CreateWorks
                                    ": " + ec.message());
         }
     }
-    const std::filesystem::path manifest_path = workspace_dir / "workspace.json";
-    if (!std::filesystem::exists(manifest_path, ec)) {
-        nlohmann::json manifest = nlohmann::json::object();
-        manifest["schema_version"] = 1;
-        manifest["workspace_key"] = key;
-        manifest["root_path"] = NormalizeRootPathText(workspace_root);
-        manifest["readable_name"] = readable_name;
-        manifest["created_at_ms"] = created_at_ms;
-        manifest["git_remote_redacted"] = nullptr;  // 接线批次再填(§3.2)
-        if (!WriteTextFileAtomic(manifest_path, manifest.dump())) {
-            return std::unexpected("workspace.json 原子写失败: " +
-                                   platform::PathToUtf8(manifest_path));
-        }
+    // P0-1:manifest 换 v2 合同(workspace::manifest 管读写)。首仓原子写;
+    // 已存在则 key 对账 + last_opened/checkout 登记,创建时间以旧账为准。
+    if (const auto registered = workspace::OpenOrRegisterWorkspace(workspaces_root, identity, now_ms);
+        !registered.has_value()) {
+        return std::unexpected(registered.error());
     }
     TrajectoryDirectory directory;
     directory.workspace_dir_ = workspace_dir;

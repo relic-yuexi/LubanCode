@@ -19,6 +19,7 @@
 #include "tools/path_utils.hpp"     // Utf8ToPath:主目录文本转路径
 #include "tools/tool_content.hpp"   // TextContent:富结果块的文本投影
 #include "trajectory/safety.hpp"
+#include "workspace/identity.hpp"  // P0-1:身份裁决(冻结身份的兜底路)
 
 namespace lubancode::runtime {
 
@@ -1280,23 +1281,47 @@ void HardenLedgerDirectories(const trajectory::TrajectoryDirectory& directory,
 }
 
 std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Open(Options options) {
+    std::filesystem::path home_dir;
     if (options.trajectories_root.empty()) {
         const auto home = config::HomeLubancodeDir();
         if (!home.has_value()) {
             return std::unexpected("trajectory.no_home: 找不到主目录,轨迹账无处落");
         }
-        options.trajectories_root = tools::Utf8ToPath(*home) / "trajectories";
+        home_dir = tools::Utf8ToPath(*home);
+        options.trajectories_root = home_dir / "trajectories";
     }
-    if (options.workspace_root.empty()) {
-        options.workspace_root = std::filesystem::current_path();
+    // P0-1:身份只认装配层递进的冻结 WorkspaceIdentity;空身份才按兜底根
+    //(或启动 cwd)现场四级裁决——同仓子目录/linked worktree 不再各立各
+    // 的房。子代理与 Gateway 恢复路由调用方显式递身份,不吃这条兜底。
+    if (!options.workspace_identity.valid()) {
+        std::error_code cwd_ec;
+        const std::filesystem::path start = options.workspace_root.empty()
+                                                ? std::filesystem::current_path(cwd_ec)
+                                                : options.workspace_root;
+        if (start.empty()) {
+            return std::unexpected("identity.no_boundary: 启动工作目录取不到,身份无从裁决");
+        }
+        if (home_dir.empty()) {
+            const auto home = config::HomeLubancodeDir();
+            if (home.has_value()) {
+                home_dir = tools::Utf8ToPath(*home);
+            }
+        }
+        auto resolved = workspace::ResolveWorkspaceIdentity(start, home_dir);
+        if (resolved.has_value()) {
+            options.workspace_identity = std::move(*resolved);
+        } else if (!options.workspace_root.empty()) {
+            // 显式递了根的旧调用(测试):裁决失败退 cwd_fallback 形状。
+            options.workspace_identity = workspace::MakeFallbackIdentity(options.workspace_root);
+        } else {
+            return std::unexpected(resolved.error());
+        }
     }
+    options.workspace_root = options.workspace_identity.checkout_root;
     trajectory::SessionManagerOptions manager_options;
     manager_options.trajectories_root = options.trajectories_root;
+    manager_options.identity = options.workspace_identity;
     manager_options.workspace_root = options.workspace_root;
-    manager_options.readable_workspace_name =
-        options.readable_workspace_name.empty()
-            ? options.workspace_root.filename().generic_string()
-            : options.readable_workspace_name;
     manager_options.launch_cwd = options.launch_cwd;
     manager_options.lubancode_version = options.lubancode_version;
     manager_options.recorder.event_schema_version = options.event_schema_version;
@@ -1541,6 +1566,28 @@ trajectory::CloseOutcome TrajectorySessionLedger::CloseSession(const std::string
     request.reason = reason;
     trajectory::NullClearParticipant participant;
     return impl_->manager->Close(request, &participant);
+}
+
+TrajectorySessionLedger::CwdChangeResult TrajectorySessionLedger::HandleCwdChange(
+    const workspace::WorkspaceIdentity& new_identity) {
+    CwdChangeResult result;
+    result.workspace_key = new_identity.workspace_key;
+    if (impl_ == nullptr || impl_->manager == nullptr || impl_->active == nullptr) {
+        result.error = "trajectory.open_failed: 会话账未开,cwd 变化无处对账";
+        return result;
+    }
+    if (new_identity.workspace_key != impl_->manager->workspace_key()) {
+        // 跨 workspace:账一个字不写,交调用方封场换账(§4.5)。
+        return result;
+    }
+    // 同 workspace:cwd.changed 事件 + 检出登记(worktree 进出房各记一笔)。
+    PutControl_(trajectory::EventKind::ControlCwdChanged,
+                nlohmann::json{{"cwd", platform::PathToUtf8(new_identity.launch_cwd)}});
+    if (const auto touched = impl_->manager->RegisterCheckout(new_identity); !touched.has_value()) {
+        result.error = touched.error();
+    }
+    result.same_workspace = true;
+    return result;
 }
 
 // ---------------------------------------------------------------------------

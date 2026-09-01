@@ -37,6 +37,7 @@
 #include "runtime/plan_mode.hpp"
 #include "runtime/trajectory_session.hpp"
 #include "runtime/turn_event_adapter.hpp"
+#include "workspace/identity.hpp"  // P0-1:Options.trajectory_workspace_identity
 
 namespace lubancode::runtime {
 
@@ -66,8 +67,12 @@ public:
         // 禁 dual-write;开张失败由 trajectory_open_error 报,装配层须
         // 让会话启动失败,不许回退旧写口。
         bool trajectory_enabled = false;
-        std::filesystem::path trajectory_workspace_root;  // 空 = 当前目录
-        std::string trajectory_workspace_name;            // 空 = 目录名
+        // P0-1:装配层按四级裁决冻好的身份整份递进(终端/app-server/子代理
+        // 同一把钥匙);空 = ledger 按启动 cwd 现场裁决(兜底,只服务测试)。
+        workspace::WorkspaceIdentity trajectory_workspace_identity;
+        // 轨迹根:空 = <home>/.lubancode/trajectories(生产默认);测试与
+        // P0-2 根迁移装配用它注入。
+        std::filesystem::path trajectory_trajectories_root;
         std::string lubancode_version;
         // P0-3 resume(§10.4):--continue 启动路开 start_reason=resume 的
         // 新场(source 只读,永不 reopen append)。source id 空 = 取本
@@ -97,6 +102,12 @@ public:
     // 目录 + 子代理注册表)。空 = flag 关,旧路照旧。开张失败给
     // trajectory_open_error(),装配层据此失败会话启动。
     TrajectorySessionLedger* trajectory() { return trajectory_.has_value() ? &*trajectory_ : nullptr; }
+    // P0-1(§4.5):cwd 变化对账(/worktree 切房等)。同 workspace:落
+    // control.cwd.changed + checkout 登记,账不换房;跨 workspace:封当前
+    // 场(end_reason=workspace_switch)后按新身份整只重开 ledger——旧账
+    // 留在新 workspace 的 sessions/ 里可 resume,不偷偷搬。返回空 = 顺;
+    // 否则错误说明(调用方打警告,不拦切房主流程)。
+    std::string NoteWorkingDirectoryChanged(const std::filesystem::path& new_cwd);
     const TrajectorySessionLedger* trajectory() const {
         return trajectory_.has_value() ? &*trajectory_ : nullptr;
     }
