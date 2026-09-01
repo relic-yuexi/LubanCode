@@ -102,7 +102,9 @@ TEST_CASE("gate re-blocks when agents content changes between attempts") {
     REQUIRE(gate.CheckTargets({target}).has_value());
 
     // 内容变了:旧指纹不在账上,重新拦、重新注入新规则。
-    project.Write("AGENTS.md", "v2 rule");
+    // 注意长度必须错开——resolver 的文档缓存按 size+mtime 快筛,同秒内
+    // 同尺寸覆写会被判"未变"读到旧缓存(生产无碍,测试时序会踩)。
+    project.Write("AGENTS.md", "v2 rule changed");
     const auto again = gate.CheckTargets({target});
     REQUIRE(again.has_value());
     CHECK(Contains(again->message, "v2 rule"));
