@@ -15,6 +15,7 @@
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
+#include <expected>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -26,6 +27,7 @@
 
 #include "agent/loop.hpp"  // ToolTraceEvent 等转发类型(与拆分前同一份引用)
 #include "agent/task_spec.hpp"  // AgentTaskSpec v2 canonical task contract
+#include "agent/turn_budget.hpp"  // TurnBudgetAccount:任务级 turn 预算唯一真账(turn 预算单)
 #include "api/types.hpp"
 #include "tools/subagent_scheduler.hpp"  // SubagentGovernance/AgentLedgerStats:P0-2 纯 admission
 
@@ -91,6 +93,9 @@ enum class TaskOutcomeReason {
     SessionClosing,        // 会话收场向下取消整树(Cancelled)
     HookDenied,            // hook 拒绝派工(Failed;拒绝发生在注册前则不造 TaskOutcome)
     ShutdownTimeoutUnknown,  // 停机超时未证实结束(映射 Failed,不冒充已收净)
+    // ---- 任务级 turn 预算(turn 预算单 §8.1):新枚举,只服务新账 ----
+    // 旧 StepLimitExhausted 留给 legacy per-run step 路,兼容窗内不混写。
+    TurnLimitExhausted,    // 任务总 turn 预算用满(初始/续投/孩子回流/Stop 钩子共账)
 };
 
 // ---------------------------------------------------------------------------
@@ -128,7 +133,17 @@ struct TaskOutcome {
     std::string stop_reason;     // 模型原始 stop reason(空 = 一个字都没回来)
     std::string last_tool;       // 最后一次工具名与结果摘要
     int steps_used = 0;
-    int step_limit = 0;          // 0 = 不限步(一个 turn 内的模型请求数上限)
+    int step_limit = 0;          // 0 = 不限步(一个 turn 内的模型请求数上限;legacy 投影)
+    // ---- 任务级 turn 账(turn 预算单 §8.2):attempted/completed 分账 ----
+    // turn_limit = 派出时冻结的任务总 turn 上限(0 = 不限);attempted 是
+    // 宿主准入并发出过的逻辑模型请求(API 错/流断也保留),completed 只数
+    // 完整收回 assistant 的那部分。展示一律拿 attempted 当消费数,不拿
+    // completed 冒充。steps_used/step_limit 是兼容窗里的 legacy 投影,两套
+    // 不混写成同一根"生效硬线"。
+    int turn_limit = 0;
+    int turns_reserved = 0;      // 正常终态必须归零(诊断口)
+    int turns_attempted = 0;
+    int turns_completed = 0;
     // 成本预算账(真机实测 P2-6):派出时的时间/token 硬线,0 = 不设。断线
     // 时 message 写明哪根线,这里留数好对账。
     int wall_limit_secs = 0;
@@ -195,6 +210,12 @@ struct AgentTaskSnapshot {
     // 派出时写死的预算(0 = 不限步):面板可见,不等撞墙才揭晓(规格"现场四")。
     int step_limit = 0;
     int steps_used = 0;  // 已发生的模型请求数(RunOutcome 直接记账,不靠 usage 回调猜)
+    // ---- 任务级 turn 账(turn 预算单 §6.1):唯一真账在 TaskRecord 的
+    // turn_account,这几枚是快照拷出时的投影(运行中随时读活账)。----
+    int turn_limit = 0;
+    int turns_reserved = 0;
+    int turns_attempted = 0;
+    int turns_completed = 0;
     // 派出时的时间/token 成本预算(真机实测 P2-6;0 = 不设)。与 step_limit
     // 同一规矩:预算进快照,坞行与详情看得见,超了有短因。
     int wall_limit_secs = 0;
@@ -275,6 +296,11 @@ struct AgentTaskSummary {
     bool stop_requested = false;
     int step_limit = 0;
     int steps_used = 0;
+    // 任务级 turn 账的列表投影(turn 预算单:运行中行显示 turn attempted/
+    // limit,真账在 TaskRecord::turn_account)。
+    int turn_limit = 0;
+    int turns_attempted = 0;
+    int turns_completed = 0;
     int wall_limit_secs = 0;       // 派出时的时间预算(0 = 不设;P2-6)
     std::int64_t token_limit = 0;  // 派出时的 token 预算(0 = 不设;P2-6)
     TaskOutcomeReason outcome_reason = TaskOutcomeReason::None;  // 面板短因用
@@ -376,6 +402,12 @@ struct TaskRecord {
     //(Finished);非空则不封账,取走注入、再续跑一轮。置位与入队同锁成对,
     // 不存在"刚封账又收信"的缝。
     bool inbox_closed = false;
+    // ---- 任务级 turn 预算唯一真账(turn 预算单 §6.1)-----------------------
+    // 预算归任务记录,不归某次 Run/UI/hook/DriveReport。注册时按快照的
+    // turn_limit 冻结;此后所有 Agent::Run()(初始任务、mailbox 续投、孩子
+    // 回流、Stop 钩子续跑)都从这本账走原子准入。台账锁内驱动(Unlocked
+    // 系列),与"验活态"同一锁域(设计单 §6.3)。
+    agent::TurnBudgetAccount turn_account;
 };
 
 // 续投交接的取件批次:SealOrContinueInbox 取走未送项时记下标与原文;续跑
@@ -427,6 +459,21 @@ public:
     // 修订号 +1(面板/查看态按它决定重画)。原子,任何线程可调。
     void Touch() { revision_.fetch_add(1, std::memory_order_release); }
     std::uint64_t revision() const { return revision_.load(std::memory_order_acquire); }
+
+    // ---- 任务级 turn 预算的准入口(turn 预算单 §6.2/§6.3)-------------------
+    // task-scoped adapter(AgentTool::RunTask 装的 ModelTurnBudgetGate)从这
+    // 几枚口子进。全部在台账锁内做完"验活态 -> 验额度 -> 占额/翻账",
+    // 不给两线程同时占到最后一枚留缝;任务终态后再申请稳定拒绝。
+    // 返回值与人话码见 agent/turn_budget.hpp(turn_budget.exhausted 一族)。
+    std::expected<agent::ModelTurnPermit, std::string> TryReserveModelTurn(const std::shared_ptr<TaskRecord>& task);
+    std::expected<int, std::string> CommitModelTurnSent(const std::shared_ptr<TaskRecord>& task,
+                                                        const agent::ModelTurnPermit& permit);
+    bool AbortModelTurnBeforeSend(const std::shared_ptr<TaskRecord>& task, const agent::ModelTurnPermit& permit);
+    // 幂等:同一 permit 重复完成不加第二次。
+    bool MarkModelTurnCompleted(const std::shared_ptr<TaskRecord>& task, const agent::ModelTurnPermit& permit);
+    agent::ModelTurnBudgetSnapshot ModelTurnSnapshot(const std::shared_ptr<TaskRecord>& task) const;
+    // 任务级"将尽提示"认领(§9.2):一任务恰一次。
+    bool ClaimModelTurnNudge(const std::shared_ptr<TaskRecord>& task);
 
     // ---- 查询口(面板/查看态/测试)----
     // max_entries=0 取全量;给正数时保留全部运行中任务,再从新到旧补齐

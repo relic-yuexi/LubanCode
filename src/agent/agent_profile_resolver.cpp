@@ -85,6 +85,39 @@ ResolvedAgentProfile ResolveAgentProfile(const AgentProfileResolveRequest& reque
     runtime.max_steps_per_turn = request.overrides.max_steps_per_turn.value_or(
         definition.max_steps_per_turn.value_or(request.default_max_steps_per_turn));
 
+    // ---- 1b. 任务总 turn 预算(turn 预算单 §4.2/§10.2/§10.3)-----------------
+    // 解析链:宿主 typed override > Agent Definition runtime.max_turns >
+    // subagent.default_max_turns > 0(不限)。与上面那枚 per-input step 分家:
+    // 各自的数值、来源、文案都不混写。override 只可收窄——定义是正数时
+    // override 不得更大、不得为 0(放宽报 agent.turn_budget_widening);
+    // 定义是 0(不限)时宿主可给正数。
+    resolved.turn_budget.legacy_max_steps_per_input = definition.max_steps_per_turn;
+    if (request.overrides.max_turns.has_value()) {
+        const int override_turns = *request.overrides.max_turns;
+        const int definition_turns = definition.max_turns.value_or(0);
+        const bool widening =
+            definition_turns > 0 && (override_turns <= 0 || override_turns > definition_turns);
+        if (widening) {
+            // 诊断用的"尽量合并完"份仍带上定义值;ok() 已翻假,派发层拒发。
+            resolved.turn_budget.max_turns = definition_turns;
+            resolved.turn_budget.source = TurnBudgetSource::Definition;
+            resolved.issues.push_back(MakeIssue(
+                "agent.turn_budget_widening", "runtime.max_turns",
+                "宿主 override 的任务 turn 预算(" + std::to_string(override_turns) +
+                    ")比定义的正数上限(" + std::to_string(definition_turns) +
+                    ")宽(override=0 也算放宽);预算只能收窄,想放宽去改 Agent 定义"));
+        } else {
+            resolved.turn_budget.max_turns = override_turns;
+            resolved.turn_budget.source = TurnBudgetSource::HostOverride;
+        }
+    } else if (definition.max_turns.has_value()) {
+        resolved.turn_budget.max_turns = *definition.max_turns;
+        resolved.turn_budget.source = TurnBudgetSource::Definition;
+    } else if (request.default_max_turns > 0) {
+        resolved.turn_budget.max_turns = request.default_max_turns;
+        resolved.turn_budget.source = TurnBudgetSource::Config;
+    }
+
     resolved.profile = parent;
     resolved.profile.runtime = runtime;
     // 请求期活口不搬运(契约 §8 反向边界):system_prompt 是拼装结果、
@@ -243,7 +276,7 @@ ResolvedAgentProfile ResolveAgentProfile(const AgentProfileResolveRequest& reque
 
 AgentProfileResolveRequest BuildSubagentResolveRequest(
     const AgentDefinition& definition, const AgentProfile& parent_profile,
-    std::vector<std::string> parent_tool_names, int default_max_steps_per_turn,
+    std::vector<std::string> parent_tool_names, int default_max_steps_per_turn, int default_max_turns,
     std::size_t context_window_tokens, std::optional<AgentProfileResolveEnvironment> environment,
     const AgentDispatchOverrides& overrides) {
     AgentProfileResolveRequest request;
@@ -252,6 +285,7 @@ AgentProfileResolveRequest BuildSubagentResolveRequest(
     request.parent_tool_names = std::move(parent_tool_names);
     request.environment = std::move(environment);
     request.default_max_steps_per_turn = default_max_steps_per_turn;
+    request.default_max_turns = default_max_turns;
     request.context_window_tokens = context_window_tokens;
     request.overrides = overrides;
     return request;
@@ -259,7 +293,7 @@ AgentProfileResolveRequest BuildSubagentResolveRequest(
 
 AgentProfileResolveRequest BuildWorkflowAgentResolveRequest(
     const AgentDefinition& definition, const AgentProfile& parent_profile,
-    std::vector<std::string> parent_tool_names, int default_max_steps_per_turn,
+    std::vector<std::string> parent_tool_names, int default_max_steps_per_turn, int default_max_turns,
     std::optional<AgentProfileResolveEnvironment> environment, const AgentDispatchOverrides& overrides) {
     AgentProfileResolveRequest request;
     request.definition = definition;
@@ -267,6 +301,7 @@ AgentProfileResolveRequest BuildWorkflowAgentResolveRequest(
     request.parent_tool_names = std::move(parent_tool_names);
     request.environment = std::move(environment);
     request.default_max_steps_per_turn = default_max_steps_per_turn;
+    request.default_max_turns = default_max_turns;
     request.context_window_tokens = 0;  // Workflow 没有会话另行同步的窗口,落父皮值
     request.overrides = overrides;
     return request;

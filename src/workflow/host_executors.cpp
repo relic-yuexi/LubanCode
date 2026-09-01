@@ -236,6 +236,16 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         // 三级:入参 > YAML > 父步数),这里不重设,免得两笔账打架。
         binding.profile.runtime.max_steps_per_turn = request.node->step_limit;
     }
+    // ---- 任务总 turn 帽(turn 预算单 P0-3):与 agent 工具路同一本账 ----
+    // 自定义路的数值在 Resolver 里并完(节点 turn_limit 走 overrides,只可
+    // 收窄);非自定义路直接取节点的 turn_limit。装一枚节点寿命的本地
+    // TurnBudgetAccount(engine 抽象,workflow 不认台账)——首轮与 steering
+    // 续投共用,不重领;0 = 不设,不装门,行为与从前一字不差。
+    const int node_turn_limit = is_custom ? custom->resolved.turn_budget.max_turns : request.node->turn_limit;
+    std::optional<agent::TurnBudgetAccount> node_turn_account;
+    if (node_turn_limit > 0) {
+        node_turn_account.emplace(node_turn_limit);
+    }
     // 工具可见性(病十三的方向):allowed_tools 的白名单写进皮,不再走
     // loop 级 setter。自定义路的 YAML allow/deny 已由 Resolver 装好,节点
     // 白名单(给了的话)压过它——同一道门,非自定义路行为一字不动。
@@ -313,6 +323,14 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         events.Start(request.run_id);
     }
     wiring.events = &events;
+    // 任务 turn 门(turn 预算单):本地账户造一枚窄门递给引擎,AgentLoop 在
+    // 请求发出前原子准入,assistant 入 history 后确认完成。账户寿命盖过
+    // DriveTurn(栈上,同函数)。
+    agent::ModelTurnBudgetGate node_turn_gate;
+    if (node_turn_account.has_value()) {
+        node_turn_gate = agent::MakeLocalTurnBudgetGate(&*node_turn_account);
+        wiring.turn_budget = &node_turn_gate;
+    }
     // workflow 没接审批宿主时,危险工具明拒;不能因回调空着便默认放行。
     if (!wiring.on_tool_confirm && !wiring.on_tool_confirm_async) {
         wiring.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) {
@@ -356,6 +374,16 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
     }
     agent::DriveOptions drive_options;
     drive_options.cancel = request.cancel;
+    // 任务 turn 帽的轮间闸(turn 预算单 §7.3):额度尽时不领 steering 批次,
+    // 直接按 turn 预算耗尽收口(批次留在源队列,restore 语义归 steering 源)。
+    if (node_turn_account.has_value()) {
+        drive_options.turn_budget_exhausted = [&node_turn_account]() {
+            return node_turn_account->SnapshotLock().Exhausted();
+        };
+        drive_options.turn_budget_snapshot = [&node_turn_account]() {
+            return node_turn_account->SnapshotLock();
+        };
+    }
     int steering_round = 1;
     if (options_.steering) {
         drive_options.continuation = [this, &request, &events, &text,
@@ -381,7 +409,7 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
     // 走各的 error_code,终态映射在这定死:报错/预算尽 = Failed,打断 =
     // Cancelled,其余 Succeeded)。
     const bool empty_output = drive.final_round.has_value() && drive.final_round->length_empty_output;
-    events.Finish(!drive.ok || drive.hit_step_limit || empty_output
+    events.Finish(!drive.ok || drive.hit_step_limit || drive.hit_turn_limit || empty_output
                       ? runtime::Outcome::Failed
                   : drive.cancelled ? runtime::Outcome::Cancelled
                                     : runtime::Outcome::Succeeded,
@@ -395,6 +423,31 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
     if (drive.hit_step_limit) {
         result.error_code = "budget_exhausted";
         result.error_message = "agent 节点达到 step_limit";
+        return result;
+    }
+    if (drive.hit_turn_limit) {
+        // 任务总 turn 帽收口(turn 预算单 §7.2):首轮与 steering 续投合计到
+        // 帽。部分结果不丢——已得正文照常带回 output,错误页写明账面。
+        if (text.empty() && !task_agent.History().empty()) {
+            for (const auto& block : task_agent.History().back().content) {
+                if (const auto* body = std::get_if<api::TextBlock>(&block)) text += body->text;
+            }
+        }
+        try {
+            result.output = nlohmann::json::parse(text);
+        } catch (...) {
+            result.output = nlohmann::json{{"content", text}};
+        }
+        result.empty = text.empty();
+        result.error_code = "budget_exhausted";
+        if (drive.turn_budget.has_value()) {
+            result.error_message = "agent 节点 turn 预算已用满(" +
+                                   std::to_string(drive.turn_budget->attempted) + "/" +
+                                   std::to_string(drive.turn_budget->limit) + " 次请求,完整返回 " +
+                                   std::to_string(drive.turn_budget->completed) + " 次)";
+        } else {
+            result.error_message = "agent 节点 turn 预算已用满";
+        }
         return result;
     }
     if (empty_output) {

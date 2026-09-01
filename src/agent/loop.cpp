@@ -963,8 +963,16 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 条件第一次成立的那一步追加进尚未发出的尾部消息(user 输入或刚攒完
         // 的 tool result),随 history 留住——不改 system,不撤旧提醒,追加律
         // 不破。两条共用 budget_nudged:一次 Run 至多注入一条,先到先得。
+        // turn 预算单 §9.2:装了任务级 turn 门的(子代理/workflow 节点),
+        // 判定换成任务 remaining——认领口在预算账里,一任务恰一次,跨 Run
+        // 不重发;没装门的(主会话/旧调用方)照旧按单轮 step 判,一字不动。
         if (!budget_nudged && !context_.durable_history().empty()) {
-            if (ShouldNudgeStepLimit(step_index, profile_.max_steps_per_turn)) {
+            const bool turn_gate_armed = wiring.turn_budget != nullptr && wiring.turn_budget->armed();
+            const bool nudge_task_turns =
+                turn_gate_armed && wiring.turn_budget->claim_turn_nudge && wiring.turn_budget->claim_turn_nudge();
+            const bool nudge_run_steps =
+                !turn_gate_armed && ShouldNudgeStepLimit(step_index, profile_.max_steps_per_turn);
+            if (nudge_run_steps || nudge_task_turns) {
                 const api::TextBlock nudge{BuildStepLimitNudgeText()};
                 context_.AppendToLast(nudge);
                 budget_nudged = true;
@@ -1130,6 +1138,28 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
         }
 
+        // ---- 任务级 turn 预算门(turn 预算单 P0-1/§3.2):请求发出前的原子准入 ----
+        // 预留、发出、完成三步分开:先占一枚 permit(拒绝即按任务 turn 预算
+        // 耗尽收场,请求不发);durable 请求边界写失败且请求未发则归还名额;
+        // 边界落稳才 commit(reserved->attempted,从此 API 错/流断/取消都
+        // 保留这笔账,设计单 §6.4);完整 assistant 入 history 后另记 completed。
+        // backend 肚里的连接重试不回到这层,不重复扣 turn。没装门的会话
+        // 一处不调,行为与从前一字不差。
+        std::optional<ModelTurnPermit> turn_permit;
+        if (wiring.turn_budget != nullptr && wiring.turn_budget->armed()) {
+            const auto reserved_permit = wiring.turn_budget->try_reserve();
+            if (!reserved_permit.has_value()) {
+                // denied:不发请求。history 里留着到限为止的全部来回(上一拍
+                // 的工具结果已照常落账),部分结果由调用方按 TurnLimitExhausted
+                // 收口带走——不得冒充已有最终结论(设计单 §7.2)。
+                RunOutcome outcome{false, false, false, last_stop_reason, steps_used};
+                outcome.output_budget = budget_report;
+                outcome.hit_turn_limit = true;
+                return outcome;
+            }
+            turn_permit = *reserved_permit;
+        }
+
         // 轨迹边界(P0-2):request prepared 记不住就不发模型(§7.4 耐久
         // 栅栏);落稳随即记 sent。没接轨迹的会话一字不加。
         // Token 账本单 A1:purpose 恒有效(AgentProfile.purpose 默认值),
@@ -1150,9 +1180,22 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             prepared_ctx.prefix_append_only = step_prefix_account.append_only;
             trajectory_request_id = wiring.boundary_recorder->OnRequestPrepared(request, prepared_ctx);
             if (trajectory_request_id.empty()) {
+                // 请求尚未发出:归还 permit 名额,attempted 不加(设计单 §6.4)。
+                if (turn_permit.has_value() && wiring.turn_budget->abort_before_send) {
+                    wiring.turn_budget->abort_before_send(*turn_permit);
+                }
                 return std::unexpected("轨迹账写盘失败,本轮停在请求边界,未发模型");
             }
             wiring.boundary_recorder->OnRequestSent(trajectory_request_id);
+        }
+        if (turn_permit.has_value() && wiring.turn_budget->commit_sent) {
+            // reserved -= 1, attempted += 1:这枚请求从"占额"翻成"已发"。提
+            // 交不上(账错位)就明败不发——对不住账的请求宁可不出门。
+            if (const auto committed = wiring.turn_budget->commit_sent(*turn_permit);
+                !committed.has_value()) {
+                return std::unexpected("turn 预算账提交失败(" + committed.error() +
+                                       "),本轮停在请求边界,未发模型");
+            }
         }
 
         api::MessageAssembler assembler;
@@ -1407,6 +1450,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
         }
         context_.PushMessage(std::move(assistant_message));
+        // 任务级 turn 账的完成确认(设计单 §6.4):完整 assistant message 入
+        // history 后 completed += 1。幂等——同一 permit 重复回调不加二次。
+        // API 错/流断/用户取消不走这里,attempted 保留,completed 不加。
+        if (turn_permit.has_value() && wiring.turn_budget->mark_completed) {
+            wiring.turn_budget->mark_completed(*turn_permit);
+        }
         // usage 是否报告(规格根因四):任一请求带回过非零 usage 就算报告过,
         // 之后失败页说"token 数未报告"只看这一位,不拿 0 糊。
         {

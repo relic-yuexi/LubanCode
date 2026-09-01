@@ -95,6 +95,13 @@ struct AgentDefinition {
     // ---- runtime:复用 AgentRuntimeProfile 概念(见文件头对齐账,契约 4.8) ----
     std::optional<int> max_output_tokens;      // 正整数;空 = 三级解析(config > provider > 目录)
     std::optional<int> max_steps_per_turn;     // 非负整数;空 = 继承父 Agent(0 = 不限步)
+    // 任务总 turn 上限(turn 预算单 §4.1):非负整数;空 = 走宿主默认
+    //(subagent.default_max_turns,再缺 = 0 不限)。含义是"从接到任务到交回
+    // 终态,最多准入几次逻辑模型请求"——父代理补话、孩子回信、Stop 钩子
+    // 续跑都吃同一本累计账。与 max_steps_per_turn(兼容窗内仍是"每个
+    // input round"的旧义)分家。新旧同现的明拒在 P1-0 兼容批落,本批先
+    // 双读不冲突(两根线各自执法,谁先到谁收)。
+    std::optional<int> max_turns;
     std::optional<std::size_t> max_context_chars;      // 正整数;空 = 继承(默认 600000)
     std::optional<std::size_t> context_window_tokens;  // 非负整数;空 = 继承(0 = 未知)
     std::optional<int> length_continuations;   // 非负整数;空 = 继承(默认 1,0 = 不续)

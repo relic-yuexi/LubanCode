@@ -182,6 +182,7 @@ int main(int argc, char** argv) {
         for (const auto& tool : registry.All()) parent_tools.push_back(tool->name());
         out.resolved = lubancode::agent::ResolveAgentProfile(lubancode::agent::BuildWorkflowAgentResolveRequest(
             *entry->definition, parent, parent_tools, parent.runtime.max_steps_per_turn,
+            /*default_max_turns=*/0,
             lubancode::agent::AgentProfileResolveEnvironment{}, overrides));
         out.material.definition = *entry->definition;
         out.resolved_name = entry->name;

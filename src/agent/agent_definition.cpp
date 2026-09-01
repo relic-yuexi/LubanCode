@@ -394,12 +394,12 @@ AgentDefinitionParseResult ParseAgentDefinitionYaml(const std::string& yaml_text
     //      对齐账)----
     if (const YAML::Node runtime = MapField(root, "runtime", issues, &has_error); runtime) {
         has_error = !CheckUnknownFields(runtime, "runtime.",
-                                        {"max_output_tokens", "max_steps_per_turn", "max_context_chars",
-                                         "context_window_tokens", "length_continuations", "execution_mode",
-                                         "isolation"},
+                                        {"max_output_tokens", "max_steps_per_turn", "max_turns",
+                                         "max_context_chars", "context_window_tokens", "length_continuations",
+                                         "execution_mode", "isolation"},
                                         issues) ||
                     has_error;
-        // 五个预算键:类型/下界/上界各异,共用 IntField;省了 = 继承(nullopt)。
+        // 六个预算键:类型/下界/上界各异,共用 IntField;省了 = 继承(nullopt)。
         std::optional<unsigned long long> value;
         if (!IntField(runtime, "max_output_tokens", "runtime.", 1, kIntFieldMax, value, issues)) {
             has_error = true;
@@ -410,6 +410,13 @@ AgentDefinitionParseResult ParseAgentDefinitionYaml(const std::string& yaml_text
             has_error = true;
         } else if (value.has_value()) {
             def.max_steps_per_turn = static_cast<int>(*value);
+        }
+        // 任务总 turn(turn 预算单 §4.1):非负整数,沿用现有整数硬帽
+        //(§3.5:首版不另拍新数)。
+        if (!IntField(runtime, "max_turns", "runtime.", 0, kIntFieldMax, value, issues)) {
+            has_error = true;
+        } else if (value.has_value()) {
+            def.max_turns = static_cast<int>(*value);
         }
         if (!IntField(runtime, "max_context_chars", "runtime.", 1, kSizeFieldMax, value, issues)) {
             has_error = true;

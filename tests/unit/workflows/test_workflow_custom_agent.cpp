@@ -227,7 +227,7 @@ workflow::CustomAgentNodeResolution ResolveForWorkflow(
     if (step_limit > 0) overrides.max_steps_per_turn = step_limit;
     workflow::CustomAgentNodeResolution out;
     out.resolved = agent::ResolveAgentProfile(agent::BuildWorkflowAgentResolveRequest(
-        definition, parent, parent_tools, default_steps, env, overrides));
+        definition, parent, parent_tools, default_steps, /*default_max_turns=*/0, env, overrides));
     out.material.definition = definition;
     out.resolved_name = name;
     if (agent::AgentPermissionModeRank(out.resolved.permission) <

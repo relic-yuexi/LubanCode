@@ -456,6 +456,12 @@ struct AgentRunConfig {
 // 缩小);显式正整数是用户主动收窄/放宽,面板与请求里明写这一份。
 struct SubagentConfig {
     std::optional<int> max_steps_per_turn;
+    // 任务总 turn 的宿主默认(turn 预算单 §4.2):subagent.default_max_turns。
+    // nullopt/0 = 不设任务总帽(整项任务的逻辑模型请求数不设硬线,靠别的
+    // 终止条件);正整数 = 派出的子代理任务合计至多这么多次逻辑模型请求
+    //——初始 Run、mailbox 续投、孩子回流、Stop 钩子续跑共这本账。与
+    // max_steps_per_turn(兼容窗内仍是"每个 input round"的旧义)分家。
+    std::optional<int> default_max_turns;
     std::optional<int> max_output_tokens;
     // 派工治理(规格"递归派工不能再靠拿掉工具解决"):nullopt = 用
     // kDefaultSubagentMaxDepth / kDefaultSubagentMaxActive(默认值公开)。
@@ -857,6 +863,7 @@ struct FileConfig {
     // 跳过(待遇同主预算字段的"救命阀"取舍)。
     std::optional<int> subagent_max_steps_per_turn;  // 新键
     std::optional<int> subagent_max_turns;           // 旧键(弃用)
+    std::optional<int> subagent_default_max_turns;   // 任务总 turn 的宿主默认(turn 预算单 §4.2)
     // subagent 段的 max_output_tokens:正整数;缺失/null = 继承 agent 段
     // (null 与缺失同义,规格"兼容与配置"节)。
     std::optional<int> subagent_max_output_tokens;

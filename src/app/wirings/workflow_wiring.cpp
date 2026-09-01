@@ -101,6 +101,7 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
             lubancode::agent::BuildWorkflowAgentResolveRequest(
                 lubancode::agent::BuiltinGeneralPurposeDefinition(), workflow_parent,
                 std::move(workflow_parent_tools), exec_ctx.agent_profile.max_steps_per_turn,
+                /*default_max_turns=*/0,
                 lubancode::agent::AgentProfileResolveEnvironment{}, lubancode::agent::AgentDispatchOverrides{}))
             .profile;
         // 阶段 5:`agent: <name>` 节点的解析口。查名与预装技能正文复用
@@ -138,11 +139,18 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
                 if (node.step_limit > 0) {
                     overrides.max_steps_per_turn = node.step_limit;  // 入参显式压过 YAML
                 }
+                // 任务总 turn(turn 预算单 §4.3):节点的 turn_limit 走同一只
+                // Resolver 的 overrides——与 agent 工具路同一笔账,只可收窄。
+                // 配置默认(subagent.default_max_turns)也从 agent 工具那份
+                // 只读口取,两条解析链逐级一致,不各养一本。
+                if (node.turn_limit > 0) {
+                    overrides.max_turns = node.turn_limit;
+                }
                 lubancode::workflow::CustomAgentNodeResolution out;
                 out.resolved = lubancode::agent::ResolveAgentProfile(
                     lubancode::agent::BuildWorkflowAgentResolveRequest(
-                        material->definition, custom_parent, custom_parent_tools, default_steps, environment,
-                        overrides));
+                        material->definition, custom_parent, custom_parent_tools, default_steps,
+                        agent_tool->default_max_turns(), environment, overrides));
                 out.material = std::move(*material);
                 out.resolved_name = node.agent;
                 if (environment.has_value() &&

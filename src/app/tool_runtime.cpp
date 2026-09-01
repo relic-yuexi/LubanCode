@@ -519,6 +519,9 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         skills_segment));
     agent_tool_ = dynamic_cast<lubancode::tools::AgentTool*>(main_registry_.Find("agent"));
     if (agent_tool_ != nullptr) {
+        // 任务总 turn 的宿主默认(turn 预算单 §4.2):subagent.default_max_turns
+        //(0/未设 = 不限)。与 per-run step 默认分开灌——两本账,两条链。
+        agent_tool_->SetDefaultMaxTurns(config.subagent.default_max_turns.value_or(0));
         // 阶段 3:解析环境(AgentProfileResolver 的父会话活材料账)。静态
         // 半份(技能/MCP 名单、角色路由、思考档表)构造时定格;权限档是
         // 会话活账(Shift+Tab 随时切),供应商回调里现读——每笔派发拿到的

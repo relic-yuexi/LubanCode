@@ -56,6 +56,7 @@ ordered Normalize(const WorkflowDefinition& def) {
         if (!node.task.empty()) n["task"] = node.task;
         if (!node.allowed_tools.empty()) n["allowed_tools"] = node.allowed_tools;
         if (node.step_limit > 0) n["step_limit"] = node.step_limit;
+        if (node.turn_limit > 0) n["turn_limit"] = node.turn_limit;
         if (!node.model_role.empty()) n["model_role"] = node.model_role;
         if (!node.prompt.empty()) n["prompt"] = node.prompt;
         if (!node.output_schema.empty()) n["output_schema"] = node.output_schema;
@@ -256,6 +257,14 @@ WorkflowDefinition WorkflowDefinition::FromJson(const nlohmann::json& in) {
                 }
             }
             node.step_limit = GetInt(raw, "step_limit", 0);
+            node.turn_limit = GetInt(raw, "turn_limit", 0);
+            // 新旧限制同现明拒(turn 预算单 §4.3):两者作用域不同(任务总
+            // turn vs 单轮 step),静默择一会猜错——要作者删掉一枚。
+            if (node.step_limit > 0 && node.turn_limit > 0) {
+                throw std::runtime_error("node " + node.id +
+                                         ": step_limit 与 turn_limit 不能同现;"
+                                         "前者是待移除的单轮旧限制,后者是任务总 turn 帽,请删掉一枚");
+            }
             node.model_role = GetStr(raw, "model_role");
             node.prompt = GetStr(raw, "prompt");
             node.output_schema = GetObj(raw, "output_schema");
