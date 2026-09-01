@@ -182,6 +182,26 @@ bool ExploreAllows(const Tool& tool) {
            name == "lsp";
 }
 
+// 完整 assistant 消息的进展指纹(监督器单 P0-0):文本/思考取内容,工具取
+// 名 + 入参——不掺每轮必变的 tool_use id。"同一只工具反复读同一份内容"指
+// 纹不变(空转),"读了新东西"必变。只留短哈希,不留正文。
+std::string AssistantMessageFingerprint(const api::Message& message) {
+    std::string material;
+    for (const auto& block : message.content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block)) {
+            material += "t:" + text->text;
+            material.push_back('\x1f');
+        } else if (const auto* thinking = std::get_if<api::ThinkingBlock>(&block)) {
+            material += "r:" + thinking->text;
+            material.push_back('\x1f');
+        } else if (const auto* call = std::get_if<api::ToolUseBlock>(&block)) {
+            material += "u:" + call->name + ":" + call->input.dump();
+            material.push_back('\x1f');
+        }
+    }
+    return agent::FingerprintOfParts("msg", material);
+}
+
 // title 的硬上限(显示列,不是码点数):终端窄时显示层可以再截标题字段
 // 本身,但入参这里超过就拒绝,不替调用方截成另一句话。
 constexpr int kMaxTitleDisplayWidth = 40;
@@ -489,6 +509,10 @@ public:
             } else if (tag.type == std::string_view("delta.thinking")) {
                 thinking_bytes += tag.bytes;
             }
+            // 传输账(P0-0 四本时钟之一):每枚 SSE 帧都算传输活。token 流量
+            // 只刷 transport_revision,绝不刷 meaningful progress——"流在动"
+            // 与"任务在推进"是两码事(单子 §2.2 缺口 2)。
+            ledger_.RecordTransportActivity(task_);
             if (!saw_first_event) {
                 saw_first_event = true;
                 const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(
@@ -523,6 +547,7 @@ public:
             LogLine("stream_end seq=" + std::to_string(seq) + " ok events=" + std::to_string(events_total) +
                     " text_bytes=" + std::to_string(text_bytes) +
                     " thinking_bytes=" + std::to_string(thinking_bytes));
+            ledger_.RecordRequestOutcome(task_, true, std::string());
         } else {
             const api::Error& error = result.error();
             std::string kind;
@@ -547,6 +572,9 @@ public:
                     " events=" + std::to_string(events_total) + " text_bytes=" + std::to_string(text_bytes) +
                     " thinking_bytes=" + std::to_string(thinking_bytes) +
                     " message=" + FirstLineCapped(error.message));
+            // 本次尝试的收场账:稳定错误码进时钟(诊断/agent_watch 用,不带
+            // 错误正文)。是否重试由恢复环决定,Retrying 相位另行记账。
+            ledger_.RecordRequestOutcome(task_, false, api::ReasonCodeOfError(error));
         }
         return result;
     }
@@ -1744,6 +1772,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 event.kind = AgentTaskEventKind::SteeringMessage;
                 event.text = text;
                 ledger().AppendEventLocked(task, std::move(event));
+                // inbox 安全送达 = 执行活(P0-0 四本时钟之 execution):等下一
+                // 轮的静默从这里重新起算。
+                ledger().RecordInboxDeliveredLocked(task);
             }
             api::Message message;
             message.role = api::Role::User;
@@ -1864,11 +1895,15 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                         task->activity.text_bytes = task->pending_text.size();
                         ++task->content_revision;
                         touch_activity(AgentTaskActivity::Stage::Text);
+                        // 监督相位(P0-0):token 流量只算传输活(TraceBackend 已
+                        // 刷 transport),这里只翻相位。
+                        ledger().RecordStageLocked(task, agent::AgentSupervisionStage::StreamingText);
                     } else if (event.item_kind == runtime::ItemKind::Thinking) {
                         task->pending_reasoning += event.text;  // 思考也入账,查看态与 main 同款折叠
                         task->activity.reasoning_bytes = task->pending_reasoning.size();
                         ++task->content_revision;
                         touch_activity(AgentTaskActivity::Stage::Thinking);
+                        ledger().RecordStageLocked(task, agent::AgentSupervisionStage::StreamingThinking);
                     }
                     break;
                 }
@@ -1898,6 +1933,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                         task->activity.last_tool_name = tool_name;  // 收口不清:坞行"上次 <工具>"常驻(P2-1)
                         task->activity.tool_started = std::chrono::steady_clock::now();
                         ++task->content_revision;
+                        // 执行账 + RunningTool 相位(P0-0):工具起跑刷 execution,
+                        // 静默尺子(120s 软线)从这里起算。
+                        ledger().RecordToolStartedLocked(task);
                         ledger().Touch();
                     }
                     if (foreground_hooks != nullptr && foreground_hooks->on_sub_tool_start) {
@@ -1962,6 +2000,11 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     task->activity.stage = AgentTaskActivity::Stage::None;
                     task->activity.tool_name.clear();
                     ++task->content_revision;
+                    // meaningful progress(P0-0):工具结果散列做指纹——结果与
+                    // 上一笔不同才算真进展;相同则指纹不动(空转计数由轮次
+                    // 边界累计,单子 §6.3)。
+                    ledger().RecordToolCompletedLocked(
+                        task, agent::FingerprintOfParts("tool:" + tool_name, result_text));
                     ledger().Touch();
                     break;
                 }
@@ -2020,6 +2063,30 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
 
     // ---- 控制面:确认/钩子/Plan 闸(问话口原样走 TurnWiring)----------------
     if (task != nullptr) {
+        // ---- 进展合同与恢复账接线(监督器单 P0-0/P0-1)----------------------
+        // 完整 assistant 消息提交进 history 是 meaningful progress 的候选:指
+        // 纹变了刷进展,没变计空转轮(单子 §6.3——thinking/text 的 token 只算
+        // 传输活,提交后才算一次)。请求尝试的起跑/重试从恢复环回流台账:重试
+        // 那一拍把半截显示账回滚到本请求起跑的锚,不拼两段正文(单子 §8.3)。
+        turn_wiring.on_assistant_message_ready = [this, task](const api::Message& message) {
+            ledger().RecordAssistantMessage(task, AssistantMessageFingerprint(message));
+        };
+        turn_wiring.on_request_attempt = [this, task](const api::ModelRequestAttempt& attempt,
+                                                      api::RequestAttemptPhase phase) {
+            switch (phase) {
+                case api::RequestAttemptPhase::Started:
+                    ledger().RecordRequestStarted(task, attempt.attempt, attempt.history_commit_hash);
+                    break;
+                case api::RequestAttemptPhase::Retrying:
+                    ledger().RecordRequestRetry(task, attempt.attempt, attempt.error_code);
+                    break;
+                case api::RequestAttemptPhase::Succeeded:
+                case api::RequestAttemptPhase::Exhausted:
+                    // 收场账由 TraceBackend 的 RecordRequestOutcome 记(那里有
+                    // 错误本体),这里不双记。
+                    break;
+            }
+        };
         if (foreground_hooks != nullptr) {
             // 权限收窄执法(阶段 4):子定义档比父会话档严时,确认回调换成
             // 宿主的"带下限"口——yolo/auto 的免问在里头被 min(会话档,
@@ -2225,45 +2292,29 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     }
     const std::atomic<bool>* cancel = cancel_chain.Start();
 
-    // 墙钟看门狗(规格三):整轮上限兜底。到点置 wall_stop(取消链收进停止
-    // 信号——绝不置 task->cancel,那会被收成"用户中止");宽限期内任务线程
-    // 仍没报终态(所有超时全失效、后端不理取消的绝境),直接把台账翻成
-    // Failed/WallClockTimeout——任务绝不无限占着坞行。任务自带时间预算
-    // (P2-6 max_time_secs)时取更紧的那根:引擎侧软停(步顶查)先到,看门狗
-    // 只在引擎停不下来的绝境落锤。
+    // 墙钟与监督登记(监督器单 P0-2 迁移):从前每任务起一根看门狗线程,
+    // 100 只并发就是 100 根轮询线——现在统一登记进会话级监督器,同一根线
+    // 落锤。语义一字不动:到点置 wall_stop(取消链收进停止信号——绝不置
+    // task->cancel,那会被收成"用户中止");宽限期内任务线程仍没报终态
+    // (所有超时全失效、后端不理取消的绝境),直接把台账翻成
+    // Failed/WallClockTimeout。任务自带时间预算(P2-6 max_time_secs)时取
+    // 更紧的那根:引擎侧软停(步顶查)先到,看门狗只在引擎停不下来的绝境
+    // 落锤。健康拍(四本时钟的软线判)同样由监督器驱动,这只任务起跑即登。
     int effective_wall_secs = wall_clock_timeout_secs_;
     if (budget.max_wall_secs > 0 &&
         (effective_wall_secs <= 0 || budget.max_wall_secs < effective_wall_secs)) {
         effective_wall_secs = budget.max_wall_secs;
     }
-    if (task != nullptr && effective_wall_secs > 0) {
+    if (task != nullptr) {
         task->wall_stop.store(false, std::memory_order_release);
         task->wall_clock_fired.store(false, std::memory_order_release);
+        task->no_progress_fired.store(false, std::memory_order_release);
         task->finalized.store(false, std::memory_order_release);
         task->force_finalized = false;
-        const auto deadline = task->snapshot.start_time + std::chrono::seconds(effective_wall_secs);
-        const int grace_secs = wall_clock_grace_secs_;
-        std::thread watchdog([this, task, deadline, grace_secs, effective_wall_secs] {
-            while (!task->finalized.load(std::memory_order_acquire) &&
-                   std::chrono::steady_clock::now() < deadline) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(250));
-            }
-            if (task->finalized.load(std::memory_order_acquire)) {
-                return;  // 正常收尾在限内办完,无事发生
-            }
-            task->wall_clock_fired.store(true, std::memory_order_release);
-            task->wall_stop.store(true, std::memory_order_release);
-            const auto grace_end = std::chrono::steady_clock::now() + std::chrono::seconds(grace_secs);
-            while (!task->finalized.load(std::memory_order_acquire) &&
-                   std::chrono::steady_clock::now() < grace_end) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(100));
-            }
-            if (task->finalized.load(std::memory_order_acquire)) {
-                return;  // 停止信号起了作用,任务线程自己收的账更准
-            }
-            ledger().ForceFinalizeWallClock(task, effective_wall_secs);
-        });
-        task->watchdog = std::move(watchdog);
+        coordinator_->supervisor().WatchTask(task);
+        if (effective_wall_secs > 0) {
+            coordinator_->supervisor().ArmWallClock(task, effective_wall_secs, wall_clock_grace_secs_);
+        }
     }
     // hooks 第四五步:SubagentStart + 上下文切换。前台子代理在宿主主线程
     // 里同步跑,dispatcher 上下文换成这只子代理的(agent_id/agent_type),
@@ -2475,8 +2526,10 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 }
                 // WaitingChildren:面板明写"等 N 只子任务",醒来再查一遍。
                 ledger().SetLiveTaskState(task, AgentTaskState::WaitingChildren);
+                ledger().RecordStage(task, agent::AgentSupervisionStage::WaitingChildren);
                 ledger().WaitForKeyChange(task);
                 ledger().SetLiveTaskState(task, AgentTaskState::Running);
+                ledger().RecordStage(task, agent::AgentSupervisionStage::Preparing);
                 if (task->cancel.load(std::memory_order_acquire) || task->force_finalized) {
                     // 取消/强收唤醒:不再续投,交 harness 按原因收账。
                     return std::nullopt;
@@ -2511,6 +2564,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 面板据此从"运行中/等子任务"翻成"收口中";终态由 Finalize 落。
     if (task != nullptr) {
         ledger().SetLiveTaskState(task, AgentTaskState::Completing);
+        ledger().RecordStage(task, agent::AgentSupervisionStage::Completing);
     }
 
     // ---- 父任务 turn 预算尽时的收树(turn 预算单 §7.4)--------------------
@@ -2774,6 +2828,18 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             task_outcome.reason = TaskOutcomeReason::None;
             run_result = {text, false};
             break;
+    }
+    // 空转收口改判(监督器单 P0-2):监督器发的停止信号(no_progress_fired)
+    // 不是用户的手,UserStop 不许冒名——改按 NoMeaningfulProgress 分型,
+    // 检查点/部分结果照常带走(现场不丢的红线)。
+    if (task != nullptr && task->no_progress_fired.load(std::memory_order_acquire) &&
+        task_outcome.reason == TaskOutcomeReason::UserStop) {
+        task_outcome.status = TaskOutcomeStatus::Failed;
+        task_outcome.reason = TaskOutcomeReason::NoMeaningfulProgress;
+        task_outcome.message =
+            "连续多个完整轮次无任何可验证进展(指纹不变),宿主提醒后仍无进展,按空转收口";
+        task_outcome.partial_result = partial;
+        run_result = {"子代理空转收口: " + task_outcome.message + "\n" + ComposeOutcomeText(task_outcome), true};
     }
     if (task != nullptr) {
         std::lock_guard<std::mutex> lock(ledger().mutex);

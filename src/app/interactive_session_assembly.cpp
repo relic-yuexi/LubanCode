@@ -704,7 +704,16 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         if (session_agent_tool() == nullptr) {
             return;
         }
-        const std::vector<std::string> notices = session_agent_tool()->TakePermissionDenialNotices();
+        std::vector<std::string> notices = session_agent_tool()->TakePermissionDenialNotices();
+        // 监督器通知(监督器单 P0-2):同一枚空闲拍取走,同一条 toast +
+        // transcript 通路——疑似断流/空转提醒/恢复成功按 task+epoch+reason
+        // 去重过,不会每拍刷屏(单子 §十)。
+        const std::vector<std::string> supervisor_notices = session_agent_tool()->TakeSupervisorNotices();
+        for (const std::string& notice : supervisor_notices) {
+            if (std::find(notices.begin(), notices.end(), notice) == notices.end()) {
+                notices.push_back(notice);
+            }
+        }
         if (notices.empty()) {
             return;
         }
