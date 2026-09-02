@@ -323,6 +323,7 @@ public:
     std::string description() const override { return target_.description(); }
     nlohmann::json input_schema() const override { return target_.input_schema(); }
     bool needs_confirm() const override { return target_.needs_confirm(); }
+    ApprovalClass approval_class() const override { return target_.approval_class(); }
     // deferred 必须转发:私有 todo 的包装表出现在延迟挂载的会话里时,
     // 外挂工具的延迟身份不能被包装层洗掉(洗掉=未挂载也全量直挂,
     // tool_search 的账就错了)。
@@ -2456,6 +2457,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                 background_hooks != nullptr && !background_hooks->Empty() ? background_hooks : nullptr;
             turn_wiring.on_permission_evaluate =
                 [this, task, background_permissions](const std::string&, const std::string& name,
+                                                     ApprovalClass approval_class,
                                                      const nlohmann::json& input,
                                                      const lubancode::runtime::ToolHookDecision& pre) {
                     lubancode::runtime::PermissionContext context;
@@ -2465,7 +2467,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                         context.allow_commands = &background_permissions->allow_commands;
                         context.deny_commands = &background_permissions->deny_commands;
                     }
-                    const auto verdict = lubancode::runtime::EvaluatePermission(context, pre, name, input);
+                    const auto verdict = lubancode::runtime::EvaluatePermission(context, pre, approval_class,
+                                                                                name, input);
                     if (verdict.action == lubancode::runtime::PermissionVerdict::Action::Deny) {
                         const int task_id = task != nullptr ? task->snapshot.id : 0;
                         ledger().PushPermissionDenialNotice(

@@ -37,6 +37,7 @@ public:
     std::string description() const override;  // [plugin:<dll名>] 前缀
     nlohmann::json input_schema() const override;
     bool needs_confirm() const override { return true; }  // 外部代码,一律先问
+    ApprovalClass approval_class() const override { return ApprovalClass::External; }
     bool deferred() const override { return true; }        // tool_search:外挂工具走延迟挂载
     Result execute(const nlohmann::json& input) override;
 

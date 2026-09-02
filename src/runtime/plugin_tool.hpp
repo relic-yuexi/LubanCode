@@ -46,6 +46,7 @@ public:
     std::string description() const override;  // 模型可见说明(不带宿主元数据)
     nlohmann::json input_schema() const override;
     bool needs_confirm() const override { return true; }   // process 插件默认确认
+    tools::ApprovalClass approval_class() const override { return tools::ApprovalClass::External; }
     bool deferred() const override { return true; }        // tool_search:外挂工具延迟挂载
     tools::Tool::Result execute(const nlohmann::json& input) override;
     // 子代理 x 停止失效单:取消旗随调用递进(context 优先,SetCancel 兜底)

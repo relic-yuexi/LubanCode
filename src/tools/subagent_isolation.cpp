@@ -22,6 +22,7 @@ public:
     std::string description() const override { return inner_.description(); }
     nlohmann::json input_schema() const override { return inner_.input_schema(); }
     bool needs_confirm() const override { return inner_.needs_confirm(); }
+    ApprovalClass approval_class() const override { return inner_.approval_class(); }
     bool deferred() const override { return inner_.deferred(); }
 
     Result execute(const nlohmann::json& input) override { return inner_.execute(PatchPaths(input)); }

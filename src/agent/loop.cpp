@@ -579,7 +579,8 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     if (tool->needs_confirm()) {
         runtime::PermissionVerdict permission;
         if (wiring.on_permission_evaluate) {
-            permission = wiring.on_permission_evaluate(call.id, call.name, effective_input, pre);
+            permission = wiring.on_permission_evaluate(call.id, call.name, tool->approval_class(),
+                                                       effective_input, pre);
         }
         if (permission.action == runtime::PermissionVerdict::Action::Deny) {
             phase(runtime::ToolPhase::Blocked);

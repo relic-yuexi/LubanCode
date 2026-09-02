@@ -42,6 +42,7 @@ public:
     std::string description() const override { return tool_->description(); }
     nlohmann::json input_schema() const override { return tool_->input_schema(); }
     bool needs_confirm() const override { return true; }
+    tools::ApprovalClass approval_class() const override { return tools::ApprovalClass::External; }
     bool deferred() const override { return true; }
     tools::Tool::Result execute(const nlohmann::json& input) override { return tool_->execute(input); }
     // 取消旗透传(子代理 x 停止失效单):adapter 不许洗掉 context。

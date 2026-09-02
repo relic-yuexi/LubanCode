@@ -141,6 +141,7 @@ public:
         // 回调里已经处理好了,这里不用重复实现。
         std::function<bool(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input)> on_tool_confirm;
         std::function<runtime::PermissionVerdict(const std::string& tool_use_id, const std::string& name,
+                                                 ApprovalClass approval_class,
                                                  const nlohmann::json& input,
                                                  const runtime::ToolHookDecision& pre)>
             on_permission_evaluate;

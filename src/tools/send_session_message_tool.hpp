@@ -27,6 +27,7 @@ public:
     std::string description() const override;
     nlohmann::json input_schema() const override;
     bool needs_confirm() const override { return true; }
+    ApprovalClass approval_class() const override { return ApprovalClass::External; }
     Tool::Result execute(const nlohmann::json& input) override;
 
 private:

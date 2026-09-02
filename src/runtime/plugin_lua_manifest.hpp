@@ -121,6 +121,7 @@ public:
     std::string description() const override;  // 模型可见说明(不带宿主元数据)
     nlohmann::json input_schema() const override;
     bool needs_confirm() const override { return true; }  // 外部代码,一律先问
+    tools::ApprovalClass approval_class() const override { return tools::ApprovalClass::External; }
     bool deferred() const override { return true; }       // tool_search:延迟挂载
     tools::Tool::Result execute(const nlohmann::json& input) override;
     // 取消旗随调用递进(context 优先,owner 的 SetCancel 兜底)。

@@ -136,6 +136,7 @@ struct TurnWiring {
     // Runtime 权限预裁定。Allow 直接越过询问，Deny 在 Runtime 边界收口；
     // 只有 Ask 才可进入 PermissionRequest/前端确认。空 = 兼容旧宿主。
     std::function<runtime::PermissionVerdict(const std::string& tool_use_id, const std::string& name,
+                                             tools::ApprovalClass approval_class,
                                              const nlohmann::json& input,
                                              const runtime::ToolHookDecision& pre)>
         on_permission_evaluate;

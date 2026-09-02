@@ -90,7 +90,8 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
                     lubancode::cli::ToolDisplay& display, const std::vector<std::string>& allow_commands,
                     const std::vector<std::string>& deny_commands,
                     lubancode::hooks::HookDispatcher* hook_dispatcher, const runtime::ToolHookDecision& pre,
-                    bool has_permission_hooks, const std::string& name, const nlohmann::json& input,
+                    bool has_permission_hooks, tools::ApprovalClass approval_class,
+                    const std::string& name, const nlohmann::json& input,
                     const std::function<void(bool asked, bool allowed)>& approval_observer = {},
                     runtime::PermissionMode permission_floor = runtime::PermissionMode::Yolo);
 

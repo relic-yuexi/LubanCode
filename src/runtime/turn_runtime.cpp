@@ -21,14 +21,16 @@ constexpr const char* kPromptHookContextPrefix = "[UserPromptSubmit 钩子附加
 // ---- 权限裁定 --------------------------------------------------------------
 
 PermissionVerdict EvaluatePermission(const PermissionContext& context, const runtime::ToolHookDecision& pre,
-                                     const std::string& name, const nlohmann::json& input) {
+                                     tools::ApprovalClass approval_class, const std::string& name,
+                                     const nlohmann::json& input) {
     PermissionVerdict verdict;
 
-    const bool file_tool = name == "write_file" || name == "edit_file";
+    const bool file_edit = approval_class == tools::ApprovalClass::FileEdit;
+    const bool command_tool = approval_class == tools::ApprovalClass::Command;
 
     std::string command;
-    std::string shell = "powershell";  // run_command 的默认 shell,语义同 execute()
-    if (name == "run_command") {
+    std::string shell = "powershell";  // Command 类工具的默认 shell,语义同 run_command::execute()
+    if (command_tool) {
         if (const auto it = input.find("command"); it != input.end() && it->is_string()) {
             command = it->get<std::string>();
         }
@@ -41,7 +43,7 @@ PermissionVerdict EvaluatePermission(const PermissionContext& context, const run
     // 的是钩子可能改写过的 input(updatedInput 重过 deny 规则——不许借
     // 改参绕黑名单)。
     const config::CommandPermission perm =
-        name == "run_command"
+        command_tool
             ? config::ClassifyCommandByPermissions(command, context.allow_commands ? *context.allow_commands
                                                                                    : std::vector<std::string>{},
                                                    context.deny_commands ? *context.deny_commands
@@ -52,7 +54,7 @@ PermissionVerdict EvaluatePermission(const PermissionContext& context, const run
                           context.mode != PermissionMode::Yolo;
 
     bool safe_command = false;
-    if (context.mode == PermissionMode::Auto && name == "run_command" && !deny_hit) {
+    if (context.mode == PermissionMode::Auto && command_tool && !deny_hit) {
         // allow_commands 命中 → auto 档等价 command_safety 的 Safe(补白名单)。
         // PowerShell 脚本块例外:{ } 体内是任意代码,白名单与放行账都证明
         // 不了它无害,一律拉回确认(与 command_safety 分档同一道闸)。
@@ -66,11 +68,12 @@ PermissionVerdict EvaluatePermission(const PermissionContext& context, const run
         pre.decision == runtime::ToolHookDecision::Decision::Allow && !deny_hit;
     const bool hook_ask = pre.decision == runtime::ToolHookDecision::Decision::Ask;
     const bool explicit_command_allow =
-        context.mode == PermissionMode::DontAsk && name == "run_command" &&
+        context.mode == PermissionMode::DontAsk && command_tool &&
         perm == config::CommandPermission::Allow && !deny_hit;
     const bool auto_pass = !deny_hit &&
                            (context.auto_confirm || context.mode == PermissionMode::Yolo ||
-                            (context.mode == PermissionMode::Auto && (file_tool || safe_command)) ||
+                            (context.mode == PermissionMode::AcceptEdits && file_edit) ||
+                            (context.mode == PermissionMode::Auto && (file_edit || safe_command)) ||
                             explicit_command_allow ||
                             (context.always_allowed != nullptr && context.always_allowed->count(name) != 0) ||
                             hook_allow_skip);
@@ -234,7 +237,9 @@ TurnRuntime::TurnRuntime(Options options)
       deny_commands_(std::move(options.deny_commands)),
       hook_dispatcher_(options.hook_dispatcher) {}
 
-PermissionVerdict TurnRuntime::EvaluatePermission(const runtime::ToolHookDecision& pre, const std::string& name,
+PermissionVerdict TurnRuntime::EvaluatePermission(const runtime::ToolHookDecision& pre,
+                                                  tools::ApprovalClass approval_class,
+                                                  const std::string& name,
                                                   const nlohmann::json& input) const {
     PermissionContext context;
     context.auto_confirm = auto_confirm_;
@@ -242,7 +247,7 @@ PermissionVerdict TurnRuntime::EvaluatePermission(const runtime::ToolHookDecisio
     context.always_allowed = always_allowed_;
     context.allow_commands = &allow_commands_;
     context.deny_commands = &deny_commands_;
-    return runtime::EvaluatePermission(context, pre, name, input);
+    return runtime::EvaluatePermission(context, pre, approval_class, name, input);
 }
 
 runtime::ToolHookDecision TurnRuntime::EmitPreToolUse(const std::string& name, const nlohmann::json& input) {

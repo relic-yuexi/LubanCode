@@ -1110,7 +1110,8 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         //   - turn/interrupt 置旗 + CancelPending,future 按 cancel 醒;
         //   - 超时(选项给了时限)按"没人可答"悬空收口,不冒充用户拒绝。
         wiring.on_permission_evaluate =
-            [this, record](const std::string&, const std::string& name, const nlohmann::json& input,
+            [this, record](const std::string&, const std::string& name,
+                           tools::ApprovalClass approval_class, const nlohmann::json& input,
                            const runtime::ToolHookDecision& pre) {
                 runtime::PermissionContext context;
                 context.mode = options_.permission_mode;
@@ -1119,7 +1120,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                     session_allowed.insert(name);
                 }
                 context.always_allowed = &session_allowed;
-                return runtime::EvaluatePermission(context, pre, name, input);
+                return runtime::EvaluatePermission(context, pre, approval_class, name, input);
             };
         wiring.on_tool_confirm_async =
             [this, record, turn_id](const runtime::ApprovalRequest& request)

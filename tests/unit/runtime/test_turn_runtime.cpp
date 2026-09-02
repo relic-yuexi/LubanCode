@@ -52,13 +52,16 @@ public:
 
 class FakeTool : public tools::Tool {
 public:
-    FakeTool(std::string name, bool needs_confirm_flag)
-        : name_(std::move(name)), needs_confirm_flag_(needs_confirm_flag) {}
+    FakeTool(std::string name, bool needs_confirm_flag,
+             tools::ApprovalClass approval_class = tools::ApprovalClass::External)
+        : name_(std::move(name)), needs_confirm_flag_(needs_confirm_flag),
+          approval_class_(needs_confirm_flag ? approval_class : tools::ApprovalClass::None) {}
 
     std::string name() const override { return name_; }
     std::string description() const override { return "fake tool for test"; }
     nlohmann::json input_schema() const override { return nlohmann::json::object(); }
     bool needs_confirm() const override { return needs_confirm_flag_; }
+    tools::ApprovalClass approval_class() const override { return approval_class_; }
 
     tools::Tool::Result execute(const nlohmann::json&) override {
         ++calls;
@@ -70,6 +73,7 @@ public:
 private:
     std::string name_;
     bool needs_confirm_flag_;
+    tools::ApprovalClass approval_class_;
 };
 
 rt::PermissionContext MakeContext(rt::PermissionMode mode, bool auto_confirm = false) {
@@ -99,30 +103,30 @@ TEST_CASE("权限:DontAsk 只放显式预授权，其余由 Runtime 直接拒绝
     context.allow_commands = &allow;
     context.deny_commands = &deny;
 
-    CHECK(rt::EvaluatePermission(context, no_hook, "write_file", nlohmann::json::object()).action ==
+    CHECK(rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::FileEdit, "write_file", nlohmann::json::object()).action ==
           rt::PermissionVerdict::Action::Allow);
-    CHECK(rt::EvaluatePermission(context, no_hook, "run_command", RunCommandInput("git status --short")).action ==
+    CHECK(rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::Command, "run_command", RunCommandInput("git status --short")).action ==
           rt::PermissionVerdict::Action::Allow);
 
     runtime::ToolHookDecision hook_allow;
     hook_allow.decision = runtime::ToolHookDecision::Decision::Allow;
-    CHECK(rt::EvaluatePermission(context, hook_allow, "external_tool", nlohmann::json::object()).action ==
+    CHECK(rt::EvaluatePermission(context, hook_allow, tools::ApprovalClass::External, "external_tool", nlohmann::json::object()).action ==
           rt::PermissionVerdict::Action::Allow);
 
     const auto denied =
-        rt::EvaluatePermission(context, no_hook, "run_command", RunCommandInput("git push origin main"));
+        rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::Command, "run_command", RunCommandInput("git push origin main"));
     CHECK(denied.action == rt::PermissionVerdict::Action::Deny);
     CHECK(denied.reason == rt::PermissionVerdict::Reason::CommandDenied);
     CHECK(denied.deny_hit);
 
     const auto no_prompt =
-        rt::EvaluatePermission(context, no_hook, "external_tool", nlohmann::json::object());
+        rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::External, "external_tool", nlohmann::json::object());
     CHECK(no_prompt.action == rt::PermissionVerdict::Action::Deny);
     CHECK(no_prompt.reason == rt::PermissionVerdict::Reason::NoPrompt);
 
     runtime::ToolHookDecision hook_ask;
     hook_ask.decision = runtime::ToolHookDecision::Decision::Ask;
-    CHECK(rt::EvaluatePermission(context, hook_ask, "write_file", nlohmann::json::object()).action ==
+    CHECK(rt::EvaluatePermission(context, hook_ask, tools::ApprovalClass::FileEdit, "write_file", nlohmann::json::object()).action ==
           rt::PermissionVerdict::Action::Deny);
 }
 
@@ -138,10 +142,11 @@ TEST_CASE("权限:DontAsk 拒绝时零确认回调、零工具执行并返回稳
     int permission_request_calls = 0;
     agent::TurnWiring wiring;
     wiring.on_permission_evaluate = [&](const std::string&, const std::string& name,
+                                        tools::ApprovalClass approval_class,
                                         const nlohmann::json& input,
                                         const runtime::ToolHookDecision& pre) {
         ++evaluator_calls;
-        return rt::EvaluatePermission(MakeContext(rt::PermissionMode::DontAsk), pre, name, input);
+        return rt::EvaluatePermission(MakeContext(rt::PermissionMode::DontAsk), pre, approval_class, name, input);
     };
     wiring.on_tool_confirm_async = [&](const runtime::ApprovalRequest&) {
         ++async_confirm_calls;
@@ -189,12 +194,13 @@ TEST_CASE("权限:Runtime Allow 与无需确认工具都不进入确认回调") 
     int confirm_calls = 0;
     agent::TurnWiring wiring;
     wiring.on_permission_evaluate = [&](const std::string&, const std::string& name,
+                                        tools::ApprovalClass approval_class,
                                         const nlohmann::json& input,
                                         const runtime::ToolHookDecision& pre) {
         ++evaluator_calls;
         auto context = MakeContext(rt::PermissionMode::DontAsk);
         context.always_allowed = &always;
-        return rt::EvaluatePermission(context, pre, name, input);
+        return rt::EvaluatePermission(context, pre, approval_class, name, input);
     };
     wiring.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) {
         ++confirm_calls;
@@ -211,16 +217,67 @@ TEST_CASE("权限:Runtime Allow 与无需确认工具都不进入确认回调") 
     CHECK(free_ptr->calls == 1);
 }
 
+TEST_CASE("权限:AcceptEdits 只放文件编辑，Auto 另放安全命令") {
+    const runtime::ToolHookDecision no_hook;
+    struct Case {
+        rt::PermissionMode mode;
+        tools::ApprovalClass approval_class;
+        const char* name;
+        nlohmann::json input;
+        rt::PermissionVerdict::Action expected;
+    };
+    const std::vector<Case> cases{
+        {rt::PermissionMode::AcceptEdits, tools::ApprovalClass::FileEdit, "renamed_writer",
+         nlohmann::json::object(), rt::PermissionVerdict::Action::Allow},
+        {rt::PermissionMode::AcceptEdits, tools::ApprovalClass::FileDestructive, "edit_file",
+         nlohmann::json::object(), rt::PermissionVerdict::Action::Ask},
+        {rt::PermissionMode::AcceptEdits, tools::ApprovalClass::Command, "not_run_command",
+         RunCommandInput("git status"), rt::PermissionVerdict::Action::Ask},
+        {rt::PermissionMode::AcceptEdits, tools::ApprovalClass::External, "write_file",
+         nlohmann::json::object(), rt::PermissionVerdict::Action::Ask},
+        {rt::PermissionMode::Auto, tools::ApprovalClass::FileEdit, "renamed_writer",
+         nlohmann::json::object(), rt::PermissionVerdict::Action::Allow},
+        {rt::PermissionMode::Auto, tools::ApprovalClass::Command, "not_run_command",
+         RunCommandInput("git status"), rt::PermissionVerdict::Action::Allow},
+        {rt::PermissionMode::Auto, tools::ApprovalClass::External, "run_command",
+         RunCommandInput("git status"), rt::PermissionVerdict::Action::Ask},
+    };
+    for (const auto& test : cases) {
+        CAPTURE(test.name);
+        const auto verdict = rt::EvaluatePermission(MakeContext(test.mode), no_hook, test.approval_class,
+                                                    test.name, test.input);
+        CHECK(verdict.action == test.expected);
+    }
+}
+
+TEST_CASE("权限:RunOneTool 向 evaluator 传真实 ApprovalClass") {
+    tools::ToolRegistry registry;
+    registry.Register(std::make_unique<FakeTool>("misleading_name", true, tools::ApprovalClass::FileDestructive));
+    tools::ApprovalClass observed = tools::ApprovalClass::None;
+    agent::TurnWiring wiring;
+    wiring.on_permission_evaluate = [&](const std::string&, const std::string&, tools::ApprovalClass approval_class,
+                                        const nlohmann::json&, const runtime::ToolHookDecision&) {
+        observed = approval_class;
+        rt::PermissionVerdict verdict;
+        verdict.action = rt::PermissionVerdict::Action::Deny;
+        verdict.reason = rt::PermissionVerdict::Reason::NoPrompt;
+        return verdict;
+    };
+    api::ToolUseBlock call{"approval-class", "misleading_name", nlohmann::json::object()};
+    CHECK(agent::RunOneTool(registry, call, wiring, nullptr).is_error);
+    CHECK(observed == tools::ApprovalClass::FileDestructive);
+}
+
 TEST_CASE("权限:confirm 档下文件工具要问,选过 a 的放行") {
     std::set<std::string> always{"write_file"};
     rt::PermissionContext context = MakeContext(rt::PermissionMode::Confirm);
     context.always_allowed = &always;
     const runtime::ToolHookDecision no_hook;
 
-    auto verdict = rt::EvaluatePermission(context, no_hook, "write_file", nlohmann::json::object());
+    auto verdict = rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::FileEdit, "write_file", nlohmann::json::object());
     CHECK(verdict.action == rt::PermissionVerdict::Action::Allow);  // 选过 a:本会话不再问
 
-    verdict = rt::EvaluatePermission(context, no_hook, "edit_file", nlohmann::json::object());
+    verdict = rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::FileEdit, "edit_file", nlohmann::json::object());
     CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);  // 没选过的照问
 }
 
@@ -230,12 +287,12 @@ TEST_CASE("权限:yolo 与 --yes 全放,黑名单不拦") {
 
     rt::PermissionContext yolo = MakeContext(rt::PermissionMode::Yolo);
     yolo.deny_commands = &deny;
-    auto verdict = rt::EvaluatePermission(yolo, no_hook, "run_command", RunCommandInput("rm -rf /"));
+    auto verdict = rt::EvaluatePermission(yolo, no_hook, tools::ApprovalClass::Command, "run_command", RunCommandInput("rm -rf /"));
     CHECK(verdict.action == rt::PermissionVerdict::Action::Allow);  // yolo 显式全放
 
     rt::PermissionContext yes = MakeContext(rt::PermissionMode::Confirm, /*auto_confirm=*/true);
     yes.deny_commands = &deny;
-    verdict = rt::EvaluatePermission(yes, no_hook, "run_command", RunCommandInput("rm -rf /"));
+    verdict = rt::EvaluatePermission(yes, no_hook, tools::ApprovalClass::Command, "run_command", RunCommandInput("rm -rf /"));
     CHECK(verdict.action == rt::PermissionVerdict::Action::Allow);  // --yes 同理
 }
 
@@ -250,7 +307,7 @@ TEST_CASE("权限:deny 前缀压过 allow、压过总是允许;auto+allow 前缀
         context.deny_commands = &deny;
         context.always_allowed = &always;
         const auto verdict =
-            rt::EvaluatePermission(context, no_hook, "run_command", RunCommandInput("git push origin main"));
+            rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::Command, "run_command", RunCommandInput("git push origin main"));
         CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);
         CHECK(verdict.deny_hit);  // 黑名单命中,选过 a 也不放
     }
@@ -259,13 +316,13 @@ TEST_CASE("权限:deny 前缀压过 allow、压过总是允许;auto+allow 前缀
         rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
         context.allow_commands = &allow;
         const auto verdict =
-            rt::EvaluatePermission(context, no_hook, "run_command", RunCommandInput("git status"));
+            rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::Command, "run_command", RunCommandInput("git status"));
         CHECK(verdict.action == rt::PermissionVerdict::Action::Allow);
     }
 
     SUBCASE("auto 档,不认识的安全命令:照问(保守)") {
         rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
-        const auto verdict = rt::EvaluatePermission(context, no_hook, "run_command", RunCommandInput("some-unknown-cmd"));
+        const auto verdict = rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::Command, "run_command", RunCommandInput("some-unknown-cmd"));
         CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);
     }
 }
@@ -275,7 +332,7 @@ TEST_CASE("权限:auto 档 PowerShell 脚本块不放行——白名单与放行
 
     SUBCASE("首词在 PowerShell 白名单,{ } 体内是任意代码:照问") {
         rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
-        const auto verdict = rt::EvaluatePermission(context, no_hook, "run_command",
+        const auto verdict = rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::Command, "run_command",
                                                     RunCommandInput("Where-Object { Remove-Item x }"));
         CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);
     }
@@ -284,7 +341,7 @@ TEST_CASE("权限:auto 档 PowerShell 脚本块不放行——白名单与放行
         const std::vector<std::string> allow{"Where-Object"};
         rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
         context.allow_commands = &allow;
-        const auto verdict = rt::EvaluatePermission(context, no_hook, "run_command",
+        const auto verdict = rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::Command, "run_command",
                                                     RunCommandInput("Where-Object { Remove-Item x }"));
         CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);
     }
@@ -293,7 +350,7 @@ TEST_CASE("权限:auto 档 PowerShell 脚本块不放行——白名单与放行
         const std::vector<std::string> allow{"Where-Object"};
         rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
         context.allow_commands = &allow;
-        const auto verdict = rt::EvaluatePermission(context, no_hook, "run_command",
+        const auto verdict = rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::Command, "run_command",
                                                     RunCommandInput("Where-Object Length -gt 5"));
         CHECK(verdict.action == rt::PermissionVerdict::Action::Allow);
     }
@@ -308,7 +365,7 @@ TEST_CASE("权限:PreToolUse 表态参与——allow 跳问,ask 拉回,deny 规�
         runtime::ToolHookDecision pre;
         pre.decision = runtime::ToolHookDecision::Decision::Allow;
         const auto verdict =
-            rt::EvaluatePermission(context, pre, "run_command", RunCommandInput("git status"));
+            rt::EvaluatePermission(context, pre, tools::ApprovalClass::Command, "run_command", RunCommandInput("git status"));
         CHECK(verdict.action == rt::PermissionVerdict::Action::Allow);
     }
 
@@ -317,7 +374,7 @@ TEST_CASE("权限:PreToolUse 表态参与——allow 跳问,ask 拉回,deny 规�
         runtime::ToolHookDecision pre;
         pre.decision = runtime::ToolHookDecision::Decision::Ask;
         const auto verdict =
-            rt::EvaluatePermission(context, pre, "write_file", nlohmann::json::object());
+            rt::EvaluatePermission(context, pre, tools::ApprovalClass::FileEdit, "write_file", nlohmann::json::object());
         CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);  // auto 档文件工具本放行,ask 拉回
     }
 
@@ -327,7 +384,7 @@ TEST_CASE("权限:PreToolUse 表态参与——allow 跳问,ask 拉回,deny 规�
         runtime::ToolHookDecision pre;
         pre.decision = runtime::ToolHookDecision::Decision::Allow;
         const auto verdict =
-            rt::EvaluatePermission(context, pre, "run_command", RunCommandInput("rm -rf x"));
+            rt::EvaluatePermission(context, pre, tools::ApprovalClass::Command, "run_command", RunCommandInput("rm -rf x"));
         CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);
         CHECK(verdict.deny_hit);
     }
@@ -339,7 +396,7 @@ TEST_CASE("权限:PreToolUse 表态参与——allow 跳问,ask 拉回,deny 规�
         runtime::ToolHookDecision pre;
         pre.decision = runtime::ToolHookDecision::Decision::Allow;
         const auto verdict =
-            rt::EvaluatePermission(context, pre, "run_command", RunCommandInput("rm -rf x"));
+            rt::EvaluatePermission(context, pre, tools::ApprovalClass::Command, "run_command", RunCommandInput("rm -rf x"));
         CHECK(verdict.action == rt::PermissionVerdict::Action::Allow);
     }
 }
@@ -354,11 +411,11 @@ TEST_CASE("TurnRuntime::EvaluatePermission:options 携带的黑名单同纯函�
     rt::TurnRuntime core(std::move(options));
 
     const runtime::ToolHookDecision no_hook;
-    auto verdict = core.EvaluatePermission(no_hook, "run_command", RunCommandInput("rm -rf x"));
+    auto verdict = core.EvaluatePermission(no_hook, tools::ApprovalClass::Command, "run_command", RunCommandInput("rm -rf x"));
     CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);
     CHECK(verdict.deny_hit);
 
-    verdict = core.EvaluatePermission(no_hook, "run_command", RunCommandInput("git status"));
+    verdict = core.EvaluatePermission(no_hook, tools::ApprovalClass::Command, "run_command", RunCommandInput("git status"));
     CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);  // confirm 档照问
 }
 

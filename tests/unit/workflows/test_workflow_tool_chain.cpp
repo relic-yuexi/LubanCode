@@ -246,6 +246,7 @@ TEST_CASE("确认门旧语义保住:无门明拒、gate 拒 permission_denied、
         ToolExecutor::Options options;
         options.registry = &registry;
         options.callbacks.on_permission_evaluate = [](const std::string&, const std::string&,
+                                                       lubancode::tools::ApprovalClass,
                                                        const nlohmann::json&,
                                                        const lubancode::runtime::ToolHookDecision&) {
             lubancode::runtime::PermissionVerdict verdict;

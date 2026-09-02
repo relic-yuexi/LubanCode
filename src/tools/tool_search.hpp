@@ -96,6 +96,7 @@ public:
     std::string description() const override { return inner_->description(); }
     nlohmann::json input_schema() const override { return inner_->input_schema(); }
     bool needs_confirm() const override { return inner_->needs_confirm(); }
+    ApprovalClass approval_class() const override { return inner_->approval_class(); }
     bool deferred() const override { return true; }
     // 逐枚追踪单:注册元数据透传内层的回答,不把来源洗成 deferred——
     // trace 里 MCP 工具就是 MCP,延迟挂载只是宿主的工具表策略,不是
