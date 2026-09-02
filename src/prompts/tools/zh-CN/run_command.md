@@ -1,10 +1,10 @@
 ## description
 
-在 shell 里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。shell 参数可选 powershell(默认)或 cmd,分别按对应语法写命令。执行前要经用户确认。超时会被强制杀掉。起 dev server、watch 进程这类要跨命令、跨调用存活的长命进程,或者想后台跑完不阻塞对话的短任务,传 run_in_background=true:不等它跑完,spawn 成功立刻返回 task_id、PID 和日志文件路径;命令跑完时下一次给提示符会打一行完成通知。之后用 background_output 工具(传 task_id)查状态/读输出,stop_background 工具收尾。
+在 shell 里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。shell 参数可选 powershell(默认)或 cmd,分别按对应语法写命令。执行前要经用户确认。超时会被强制杀掉。构建/configure/测试类命令默认 900000 毫秒(15 分钟),其余默认 120000 毫秒(2 分钟);预计更久的长命令请显式传 timeout_ms,或传 run_in_background=true 后台运行并用 background_output 轮询。起 dev server、watch 进程这类要跨命令、跨调用存活的长命进程,或者想后台跑完不阻塞对话的短任务,传 run_in_background=true:不等它跑完,spawn 成功立刻返回 task_id、PID 和日志文件路径;命令跑完时下一次给提示符会打一行完成通知。之后用 background_output 工具(传 task_id)查状态/读输出,stop_background 工具收尾。
 
 ## description (POSIX)
 
-在 shell(/bin/sh)里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。按 POSIX sh 语法写命令。执行前要经用户确认。超时会被强制杀掉。起 dev server、watch 进程这类要跨命令、跨调用存活的长命进程,或者想后台跑完不阻塞对话的短任务,传 run_in_background=true:不等它跑完,spawn 成功立刻返回 task_id、PID 和日志文件路径;命令跑完时下一次给提示符会打一行完成通知。之后用 background_output 工具(传 task_id)查状态/读输出,stop_background 工具收尾。
+在 shell(/bin/sh)里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。按 POSIX sh 语法写命令。执行前要经用户确认。超时会被强制杀掉。构建/configure/测试类命令默认 900000 毫秒(15 分钟),其余默认 120000 毫秒(2 分钟);预计更久的长命令请显式传 timeout_ms,或传 run_in_background=true 后台运行并用 background_output 轮询。起 dev server、watch 进程这类要跨命令、跨调用存活的长命进程,或者想后台跑完不阻塞对话的短任务,传 run_in_background=true:不等它跑完,spawn 成功立刻返回 task_id、PID 和日志文件路径;命令跑完时下一次给提示符会打一行完成通知。之后用 background_output 工具(传 task_id)查状态/读输出,stop_background 工具收尾。
 
 ## param.command
 
@@ -16,7 +16,7 @@
 
 ## param.timeout_ms
 
-超时时间,单位毫秒,不填默认 120000(2 分钟)
+超时时间,单位毫秒。不填时构建/configure/测试类命令默认 900000(15 分钟),其余默认 120000(2 分钟);长命令应显式加大此值或用 run_in_background
 
 ## param.shell
 

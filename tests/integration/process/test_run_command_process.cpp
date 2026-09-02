@@ -250,6 +250,44 @@ TEST_CASE("run_command: command 超长被拒,不硬顶系统命令行") {
     CHECK(result.content.find("write_file") != std::string::npos);
 }
 
+TEST_CASE("run_command: 默认超时按命令前缀分档,显式值仍优先") {
+    RunCommandTool tool;
+
+    const auto normal = tool.execute(nlohmann::json{{"command", "echo normal"}});
+    REQUIRE_FALSE(normal.is_error);
+    CHECK(normal.details["timeout_ms"] == 120000);
+
+    const auto build = tool.execute(nlohmann::json{{"command", "cmake --version"}});
+    REQUIRE_FALSE(build.is_error);
+    CHECK(build.details["timeout_ms"] == 900000);
+
+    const auto explicit_timeout =
+        tool.execute(nlohmann::json{{"command", "cmake --version"}, {"timeout_ms", 30000}});
+    REQUIRE_FALSE(explicit_timeout.is_error);
+    CHECK(explicit_timeout.details["timeout_ms"] == 30000);
+}
+
+TEST_CASE("run_command: 短 timeout 跑长命令时给三条改路引导") {
+    RunCommandTool tool;
+    nlohmann::json input;
+#ifdef _WIN32
+    input["command"] = "Start-Sleep -Milliseconds 500";
+#else
+    input["command"] = "sleep 1";
+#endif
+    input["timeout_ms"] = 20;
+
+    const Tool::Result result = tool.execute(input);
+
+    REQUIRE(result.is_error);
+    CHECK(result.outcome == "timed_out");
+    CHECK(result.error_code == "process.timeout");
+    CHECK(result.content.find("加大 timeout_ms") != std::string::npos);
+    CHECK(result.content.find("run_in_background=true") != std::string::npos);
+    CHECK(result.content.find("依赖下载是否卡网") != std::string::npos);
+    CHECK(result.content.find("_deps") != std::string::npos);
+}
+
 TEST_CASE("run_command: timeout_ms 超出 int 范围,体面报错不抛异常") {
     RunCommandTool tool;
     nlohmann::json input;
