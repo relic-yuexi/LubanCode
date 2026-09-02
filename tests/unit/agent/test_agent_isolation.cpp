@@ -99,11 +99,13 @@ struct GitRepo {
         std::filesystem::remove_all(root.parent_path(), ec);
     }
 
-    platform::ProcessResult RunGit(std::vector<std::string> args) const {
-        std::vector<std::string> argv = {"git", "-C", PathToUtf8(root)};
+    platform::ProcessResult RunGitAt(const std::filesystem::path& cwd, std::vector<std::string> args) const {
+        std::vector<std::string> argv = {"git", "-C", PathToUtf8(cwd)};
         argv.insert(argv.end(), std::make_move_iterator(args.begin()), std::make_move_iterator(args.end()));
         return platform::RunProcess(argv, 60000);
     }
+
+    platform::ProcessResult RunGit(std::vector<std::string> args) const { return RunGitAt(root, std::move(args)); }
 
     std::vector<std::filesystem::path> AgentRooms() const {
         std::vector<std::filesystem::path> rooms;
@@ -378,6 +380,114 @@ TEST_CASE("agent isolation: 调用者未提交改动明示,不悄悄丢(派工�
     // 房从提交起树、子代理没动房:干净无自有提交,收工照旧自动清理——
     // 调用者的 wip.txt 从头到尾没进过任何房。
     CHECK(repo.AgentRooms().empty());
+}
+
+TEST_CASE("agent isolation: 嵌套派工按父任务 effective_cwd 冻结,不回读已搬走的宿主 cwd") {
+    GitRepo caller_repo;
+    GitRepo moved_repo;
+    std::ofstream(caller_repo.root / "caller-only.txt") << "caller\n";
+    REQUIRE(caller_repo.RunGit({"add", "."}).exit_code == 0);
+    REQUIRE(caller_repo.RunGit({"commit", "-q", "-m", "caller head"}).exit_code == 0);
+    const std::string caller_head = TrimGitOutput(caller_repo.RunGit({"rev-parse", "HEAD"}).output);
+
+    FakeBackend root_backend;
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(root_backend, sub_registry, PathToUtf8(moved_repo.root));
+
+    auto env = std::make_shared<tools::SubagentDispatchEnv>();
+    env->effective_cwd = PathToUtf8(caller_repo.root);
+    env->base_registry = &sub_registry;
+    env->headless = true;
+    env->detached_shared = std::make_shared<tools::DetachedAgentBackend>();
+    env->detached_shared->backend = std::make_unique<FakeBackend>();
+    static_cast<FakeBackend*>(env->detached_shared->backend.get())->scripts = {TextScript("嵌套完成")};
+    tools::AgentDispatchHandle nested(agent_tool.coordinator(), tools::AgentRunIdentity{0, 0, 0, ""}, env);
+    const auto result = nested.Dispatch(
+        nlohmann::json{{"title", "嵌套基线"}, {"prompt", "检查 caller-only.txt"}, {"isolation", "worktree"}});
+
+    CHECK_FALSE(result.is_error);
+    const auto detail = agent_tool.TaskDetail(1);
+    REQUIRE(detail.has_value());
+    CHECK(detail->isolation_base_commit == caller_head);
+    CHECK(result.content.find("[隔离基线] base=main@" + caller_head) != std::string::npos);
+    CHECK(caller_repo.AgentRooms().empty());
+    CHECK(moved_repo.AgentRooms().empty());
+}
+
+TEST_CASE("agent isolation: TaskSnapshot 基线与调用者 HEAD 不符时建房前阻断") {
+    GitRepo repo;
+    const std::string first = TrimGitOutput(repo.RunGit({"rev-parse", "HEAD"}).output);
+    int head_reads = 0;
+    const cli::GitRunner drifting = [&repo, &head_reads, &first](const cli::GitCommand& command) {
+        if (!command.args.empty() && command.args[0] == "rev-parse" && command.args.size() > 1 &&
+            command.args[1] == "HEAD") {
+            ++head_reads;
+            if (head_reads == 2) {
+                return cli::GitCommandResult{0, "0000000000000000000000000000000000000000\n", {}};
+            }
+        }
+        const auto result = repo.RunGitAt(command.working_directory, command.args);
+        return cli::GitCommandResult{static_cast<int>(result.exit_code), result.output, result.spawn_error};
+    };
+
+    FakeBackend backend;
+    backend.scripts = {TextScript("不应请求")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, PathToUtf8(repo.root));
+    agent_tool.SetGitRunner(drifting);
+    const auto rejected = agent_tool.execute(
+        nlohmann::json{{"title", "基线漂移"}, {"prompt", "看看"}, {"isolation", "worktree"}});
+
+    CHECK(rejected.is_error);
+    CHECK(rejected.content.find("[isolation_base_mismatch]") != std::string::npos);
+    CHECK(rejected.content.find(first) != std::string::npos);
+    CHECK(rejected.content.find("0000000000000000000000000000000000000000") != std::string::npos);
+    CHECK(repo.AgentRooms().empty());
+    CHECK(backend.captured_requests.empty());
+}
+
+TEST_CASE("agent 派工前查单: 当前 HEAD 已完成且无未勾批次时拒发并回执完成提交") {
+    GitRepo repo;
+    std::filesystem::create_directories(repo.root / "todos");
+    std::ofstream(repo.root / "todos" / "done.todo") << "# 已完成\n- 状态：已实现并验收\n- [x] P0\n";
+    REQUIRE(repo.RunGit({"add", "."}).exit_code == 0);
+    REQUIRE(repo.RunGit({"commit", "-q", "-m", "finish todo"}).exit_code == 0);
+    const std::string done_commit = TrimGitOutput(repo.RunGit({"rev-parse", "HEAD"}).output);
+
+    FakeBackend backend;
+    backend.scripts = {TextScript("不应请求")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, PathToUtf8(repo.root));
+    const auto rejected = agent_tool.execute(nlohmann::json{
+        {"title", "重做旧单"}, {"prompt", "请修 todos/done.todo"}, {"isolation", "worktree"}});
+
+    CHECK(rejected.is_error);
+    CHECK(rejected.content.find("[todo_already_completed]") != std::string::npos);
+    CHECK(rejected.content.find("此单已修完于 " + done_commit) != std::string::npos);
+    CHECK(rejected.content.find("确认要在当前基线重做？") != std::string::npos);
+    CHECK(repo.AgentRooms().empty());
+    CHECK(backend.captured_requests.empty());
+    CHECK(agent_tool.TaskSnapshots().empty());
+}
+
+TEST_CASE("agent 派工前查单: 已完成状态仍有未勾批次时不误拦") {
+    GitRepo repo;
+    std::filesystem::create_directories(repo.root / "todos");
+    std::ofstream(repo.root / "todos" / "reopened.todo")
+        << "# 又开工\n- 状态：已实现（旧批次）\n- [x] 旧批次\n- [ ] 新批次\n";
+    REQUIRE(repo.RunGit({"add", "."}).exit_code == 0);
+    REQUIRE(repo.RunGit({"commit", "-q", "-m", "reopen todo"}).exit_code == 0);
+
+    FakeBackend backend;
+    backend.scripts = {TextScript("继续实施")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, PathToUtf8(repo.root));
+    const auto result = agent_tool.execute(
+        nlohmann::json{{"title", "实施新批次"}, {"prompt", "修 todos/reopened.todo"}});
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("继续实施") != std::string::npos);
+    CHECK(backend.captured_requests.size() == 1);
 }
 
 TEST_CASE("agent isolation: 无后台后端的后台+worktree 派工——preflight 先拒,worktree 零创建") {

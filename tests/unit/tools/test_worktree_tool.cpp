@@ -119,6 +119,10 @@ TEST_CASE("worktree 工具:入参校验") {
     CHECK(tool.execute(nlohmann::json{{"action", "enter"}, {"base", "origin/main"}}).is_error);
     CHECK(tool.execute(nlohmann::json{{"action", "exit"}, {"mode", "destroy"}}).is_error);
     CHECK(tool.execute(nlohmann::json{{"action", "enter"}, {"name", "bad/name"}}).is_error);
+    const auto reserved = tool.execute(nlohmann::json{{"action", "enter"}, {"name", "agent-manual"}});
+    CHECK(reserved.is_error);
+    CHECK(reserved.content.find("agent-") != std::string::npos);
+    CHECK_FALSE(session.active());
 }
 
 TEST_CASE("worktree 工具:status/list 文本可读") {

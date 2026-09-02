@@ -24,9 +24,9 @@ namespace lubancode::tools {
 
 // isolation=worktree 的一站式准备:从 cwd 找仓库根、建房、上锁。失败给
 // Result 错误,成功返回房信息。
-std::optional<lubancode::cli::AgentWorktree> SetupIsolationRoom(const std::string& cwd,
-                                                                const lubancode::cli::GitRunner& runner,
-                                                                Tool::Result& error_out);
+std::optional<lubancode::cli::AgentWorktree> SetupIsolationRoom(
+    const std::string& cwd, const std::optional<lubancode::cli::FrozenWorktreeBase>& expected_base,
+    const lubancode::cli::GitRunner& runner, Tool::Result& error_out);
 
 // 收工房务(派工单 §五):解锁;干净且无自有提交才删房,有活(未提交/
 // 已提交)留房待主控复核,note 给结果文本,removed/awaiting_review/

@@ -567,6 +567,10 @@ private:
         std::string agent_type;
         bool background = false;
         bool isolate = false;
+        // 派工入口冻结的实际调用者目录/HEAD。main 直派取 cwd_，嵌套取父
+        // TaskSnapshot.effective_cwd；前后台建房、todo 查单与快照对账只认这枚。
+        std::string caller_cwd;
+        std::optional<lubancode::cli::FrozenWorktreeBase> caller_base;
         SubagentBudget budget;
         // 预算类 JSON 入参的弃用提示(turn 预算单 §5.3,P1-0):max_steps_
         // per_turn / 旧别名 max_turns 都是 legacy per-run step 语义且不出
