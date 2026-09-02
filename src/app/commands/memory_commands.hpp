@@ -61,7 +61,6 @@ struct SessionTailContext {
     lubancode::app::ModelRouterService* model_router = nullptr;
     const std::string* prompts_dir = nullptr;          // 抽取系统提示的运行时模块
     lubancode::agent::ContextArtifactStore* artifact_store = nullptr;  // 可空
-    lubancode::sessions::SessionStore* session_store = nullptr;
     const lubancode::cli::Theme* theme = nullptr;
     // Token 账本单 A1(旁路落账):flag 开的会话递账本,回合收尾的抽取与
     // artifact 按需摘要各自铸旁路桥落 Journal(purpose=memory_extract/

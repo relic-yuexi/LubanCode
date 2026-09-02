@@ -6,9 +6,6 @@
 #include "agent/tool_trace.hpp"
 #include "evolution/adapters.hpp"
 #include "platform/paths.hpp"
-#include "runtime/tool_trace_hub.hpp"  // ToolTraceHub::BuildLedger(trace 行折叠)
-#include "sessions/session_catalog.hpp"
-#include "sessions/session_store.hpp"
 #include "skills/workflow_recorder.hpp"
 #include "workflow/journal.hpp"
 
@@ -62,46 +59,11 @@ std::vector<EvolutionObservation> CollectObservations(const CollectSources& sour
         }
     }
 
-    // ---- 会话档(goal_v1 族 + tool_trace_v1 族;消息正文一行不读)----
-    if (!sources.sessions_dir.empty()) {
-        sessions::SessionCatalog catalog(sources.sessions_dir);
-        catalog.Scan();
-        sessions::SessionQuery query;
-        query.scope = sessions::SessionScope::All;
-        query.state = sessions::SessionState::Active;
-        query.sort = sessions::SessionSort::Updated;
-        query.limit = sources.max_sessions;
-        const sessions::SessionQueryPage page = catalog.Query(query);
-        for (const sessions::SessionSummary& summary : page.entries) {
-            if (report != nullptr) {
-                ++report->sessions_scanned;
-            }
-            const auto bytes = sessions::ReadSessionFileBytes(summary.file_path);
-            if (!bytes.has_value()) {
-                if (report != nullptr) {
-                    ++report->sessions_unreadable;
-                }
-                continue;
-            }
-            const auto loaded = sessions::ParseSessionFile(*bytes);
-            if (!loaded.has_value()) {
-                if (report != nullptr) {
-                    ++report->sessions_unreadable;
-                }
-                continue;
-            }
-            for (EvolutionObservation& observation :
-                 ObservationsFromGoalEvents(summary.file_path, loaded->goal_events)) {
-                observations.push_back(std::move(observation));
-            }
-            const agent::ToolExecutionLedger ledger =
-                runtime::ToolTraceHub::BuildLedger(loaded->tool_trace_events);
-            for (EvolutionObservation& observation :
-                 ObservationsFromToolTrace(summary.file_path, ledger)) {
-                observations.push_back(std::move(observation));
-            }
-        }
-    }
+    // ---- 会话观察 ----
+    // P0-6:旧平铺会话档(sessions/*.jsonl 的 goal_v1/tool_trace_v1 抽取)已删
+    // ——goal 与工具追踪的持久账都在 workspace trajectory Journal,evolve 接
+    // 新账属自进化单的后续批次,这里不另写第二条扫盘路。
+
 
     // ---- Memory(已接受条目,命令层按层喂进)----
     for (const MemoryLayer& layer : sources.memory_layers) {

@@ -41,7 +41,6 @@
 #include "peers/peer_session.hpp"
 #include "agent/prompts.hpp"
 #include "agent/resolved_prompt_builder.hpp"
-#include "sessions/session_store.hpp"
 #include "skills/workflow_recorder.hpp"
 #include "api/backend.hpp"
 #include "api/models.hpp"
@@ -49,7 +48,7 @@
 #include "app/commands/command_registry.hpp"  // 命令注册制:47 案分派的注册表与路由
 #include "app/session_stack.hpp"  // 组合根装配件(会话终章):控制器只收装好的件
 // 子系统接线器(会话终章):goal/loop/plan/peer/录制各一只(状态+装配+
-// 泵+存档恢复),控制器持句柄调;会话级状态(theme/config/session_store)
+// 泵+恢复),控制器持句柄调;会话级状态(theme/config/标题活值)
 // 留控制器。
 #include "app/wirings/goal_session_wiring.hpp"
 #include "app/wirings/loop_session_wiring.hpp"
@@ -218,8 +217,7 @@ nlohmann::json BuildRedactedConfigSnapshot(const lubancode::config::Config& conf
         {"language", config.language},
         {"features",
          {{"goals", config.features_goals},
-          {"loop", config.features_loop},
-          {"trajectory", config.features_trajectory}}},
+          {"loop", config.features_loop}}},
         {"connect_timeout_ms", config.connect_timeout_ms},
         {"request_timeout_secs", config.request_timeout_secs}};
 }
@@ -466,14 +464,12 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       tool_search_token_floor(stack_.tool_search_token_floor),
       config_file_path(stack_.config_result.config_file_path),
       always_allowed_tools(session_runtime_.always_allowed()),
-      // P6:存档账本体在 SessionRuntime;引用别名在此初始化列表里绑过去
-      //(wire_str 先落值,runtime 的 Options 要吃它)。
+      // P6:会话真账本体在 SessionRuntime(轨迹账本);wire_str 先落值,
+      // runtime 的 Options 要吃它。P0-6:旧 sessions_dir 不再传。
       session_runtime_([&] {
           lubancode::runtime::SessionRuntime::Options runtime_options;
-          runtime_options.sessions_dir =
-              home_lubancode.has_value() ? (*home_lubancode + "/sessions") : std::string();
           runtime_options.wire_name = lubancode::config::ProviderWireName(config.wire);
-          runtime_options.start_ts = lubancode::sessions::NowIdTimestamp();
+          runtime_options.start_ts = lubancode::tools::NowIdTimestamp();
           // P0-2(Trajectory 升为唯一 Session):feature/env 开关已删,恒开
           // 轨迹账;开张失败在 ctor 后由 trajectory_open_error 报,Run()
           // 入口据此失败启动,不回退旧 SessionStore。
@@ -499,19 +495,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
           return runtime_options;
       }()),
       wire_str(lubancode::config::ProviderWireName(config.wire)),
-      sessions_dir(session_runtime_.sessions_dir()),
-      session_store(session_runtime_.store()),
-      session_meta(session_runtime_.meta()),
       session_start_ts(session_runtime_.start_ts()),
-      persisted_count(session_runtime_.persisted_count()),
-      session_compact_epoch(session_runtime_.compact_epoch()),
-      session_store_broken(session_runtime_.store_broken()),
-      session_title(session_runtime_.title()),
-      session_title_pending(session_runtime_.title_pending()),
-      // 两层标题的账(骨架拆解反弹·问题 2):绑 runtime 那份标题真值与
-      // 存档口,判定本体在 app/session_title_account。
-      titles_(session_title, session_title_pending, session_store, session_store_broken,
-              session_runtime_.trajectory()),
+      // 两层标题的账(骨架拆解反弹·问题 2):绑本类标题活值与轨迹账本,
+      // 判定本体在 app/session_title_account。
+      titles_(session_title, session_runtime_.trajectory()),
       recordings_root(home_lubancode.has_value() ? lubancode::tools::Utf8ToPath(*home_lubancode) / "recordings"
                                                  : std::filesystem::path()),
       // 非 turn 通知的终端画法(骨架拆解反弹·问题 2):controller 经
@@ -520,7 +507,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       active_provider_write_path(stack_.active_provider_write_path) {
     // 逐枚追踪单:trace hub 安家(抓 session_runtime_ 的 ids/store 引用;
     // 分线 canonical 工具事件到 session 栅栏/录制投影/UI 投影)。
-    trace_hub_.emplace(session_runtime_.ids(), &session_runtime_.store());
+    trace_hub_.emplace(session_runtime_.ids());
     // 事件流接线(骨架拆解批二,补显示剥离第六步停下的那段):sink 列表
     // 一处配齐——终端账本先挂;SessionRuntime 的每轮 adapter 与 hub 的
     // trace 投影都落到这串。往后加消费方(app-server 直出、脚本桥)只往
@@ -546,7 +533,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
                 lubancode::telemetry::TelemetryActivationStatus::RequiresTrajectory) {
             // §8.2:telemetry 开了 trajectory 没开——明说,不暗开。
             TermErr() << theme.error << tr("error.prefix")
-                      << "遥测需要轨迹账(features.trajectory)同开,本次未启用: "
+                      << "遥测需要轨迹账在场,本次未启用: "
                       << telemetry_note << theme.reset << "\n";
         }
     }
@@ -567,12 +554,11 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     sub_registry().Register(std::make_unique<lubancode::tools::ContextReadTool>(artifact_store));
     // 子系统接线器(会话终章):goal/loop/plan/peer/录制各配一只 Host(全
     // 借用 + 晚绑定槽),装配与状态归接线器,控制器持句柄调。会话级状态
-    //(theme/config/session_store)留本类,两边不互相摸。
+    //(theme/config/标题活值)留本类,两边不互相摸。
     {
         GoalSessionWiring::Host goal_host;
         goal_host.theme = &theme;
         goal_host.config = &config;
-        goal_host.session_store = &session_store;
         goal_host.trace_hub = &*trace_hub_;
         goal_host.model_router = model_router.get();
         goal_host.evaluation_backend = &wrapped_backend;
@@ -593,7 +579,6 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         loop_host.theme = &theme;
         loop_host.interactive = spinner_enabled;
         loop_host.config = &config;
-        loop_host.session_store = &session_store;
         loop_host.session_runtime = &session_runtime_;
         loop_host.home_lubancode = &home_lubancode;
         loop_host.idle_wakes = &idle_wakes_;
@@ -744,6 +729,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         return lubancode::app::BuildBackgroundStatusSegment(
             lubancode::tools::BackgroundTaskRegistry::Instance().List());
     });
+    lubancode::cli::SetSessionSkillCount(skills.size());
 
     // 后台代理权限拒绝的当场告知(后台代理权限拒绝无告知单,2026-08-17):
     // 后台任务的 needs_confirm 工具被拒那一刻,AgentTool 已把一行通知推进
@@ -881,10 +867,8 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     }
 
     // -----------------------------------------------------------------------
-    // 会话存档(0.13.x):每轮结束把 history 里新增的消息逐条追加写
-    // <主目录>/.lubancode/sessions/<会话id>.jsonl。文件在首条用户消息落地时
-    // 才建(会话 id 的 slug 要用它),此前只记一个启动时间戳。找不到主目录
-    // (sessions_dir 空)或建档失败,打一行警告后本场闭嘴,不拦着人聊。
+    // 会话真账(P0-2 起 trajectory Journal,P0-6 旧存档已删):消息事实由
+    // typed 事件即时落账;memory 的会话源接轨迹场 id。
     // -----------------------------------------------------------------------
     if (project_memory != nullptr) {
         project_memory->set_source_session(session_start_ts);
@@ -927,46 +911,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             goal_wiring_.RestoreFromArchive();
             BackfillTitleOnResume();
         }
-    } else if (opts_.continue_last) {
-        const std::function<void(const std::vector<lubancode::sessions::ArchivedQueueItem>&)> queue_restorer =
-            [this](const std::vector<lubancode::sessions::ArchivedQueueItem>& items) {
-                RestoreSteeringQueueFrom(items);
-            };
-        // Plan 模式单:mode/plan/review 账的恢复口(resume 后档位/计划成品
-        // /审阅悬稿都接得回来)。
-        const std::function<void(const std::optional<lubancode::sessions::ModeEvent>&,
-                                 const std::vector<lubancode::sessions::PlanEvent>&,
-                                 const std::optional<lubancode::sessions::PlanReviewEvent>&)>
-            mode_restorer = [this](const std::optional<lubancode::sessions::ModeEvent>& mode_event,
-                                   const std::vector<lubancode::sessions::PlanEvent>& plans,
-                                   const std::optional<lubancode::sessions::PlanReviewEvent>& review) {
-                plan_wiring_.RestoreFromArchive(mode_event, plans, review);
-            };
-        // 跨轮保留选择的恢复口(P1):落回会话真值并按当前模型重校验。
-        const std::function<void(const std::optional<lubancode::sessions::ThinkHistoryEvent>&)>
-            think_history_restorer = [this](const std::optional<lubancode::sessions::ThinkHistoryEvent>& event) {
-                RestoreThinkHistoryFrom(event);
-            };
-        if (ResumeSession("", sessions_dir, *main_agent, session_store, persisted_count, session_meta, session_title,
-                          wire_str, *current_model, theme, /*quiet_if_none=*/true, &worktree_session,
-                          &session_compact_epoch, &queue_restorer, &mode_restorer, &think_history_restorer)) {
-            resume_moved_into_worktree = worktree_session.active();
-            // 仓按恢复的那场开张(旧档若落过盘,artifact 继续可追)。
-            OpenArtifactStore();
-            // 持久目标单:goal 事件账随档恢复(replay 重建 coordinator;默认
-            // paused-on-resume,不自动续跑,用户 /goal status 看账、/goal
-            // resume 显式续)。
-            goal_wiring_.RestoreFromArchive();
-            // loop 单:loop 事件账随档恢复(active 默认暂停,用户 /loop
-            // resume 显式续;单子"恢复"节)。
-            lubancode::app::RestoreLoopFromArchive(loop_wiring_.MakeCommandWiring());
-            // resume 进来的旧档(实测问题 7):有标题不重复;没标题的补一枚
-            // 本地标题(零模型 token),不再为老档发精炼请求;顺带翻标题代数、
-            // 取消在飞的精炼。
-            BackfillTitleOnResume();
-        }
     }
-
+    // (P0-6:--continue 的旧 SessionStore resume 路已删;账本恒开,
+    // resumed_at_launch 为假即安静开新会话,同旧 quiet_if_none 语义。)
     // -----------------------------------------------------------------------
     // 跨会话传话:登记名册、起 pipe/socket 服务与心跳。只在交互会话启用
     // (spinner_enabled = 真控制台;管道/单发没有可回话的人,也不该挂监听)。
@@ -1014,7 +961,6 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
                 // 送走的即出档(路径二):快照事件行记当前活队列,已注入的
                 // 不在里头,resume 不复活已送出的消息。崩在这之后的半轮里,
                 // 消息本体也已在 history 落盘路上(PersistNewMessages)。
-                PersistSteeringQueue();
                 // P0-4 排队账(§5.5):注入消息已成形,dequeued 在这落锤
                 //(取走即消费,不会再退还)。
                 if (session_runtime_.trajectory() != nullptr) {
@@ -1112,6 +1058,7 @@ TerminalSessionController::~TerminalSessionController() {
     lubancode::cli::SetIdleWakeHook(nullptr);
     lubancode::cli::SetBackgroundNoticeHook(nullptr);
     lubancode::cli::SetBackgroundStatusProvider(nullptr);
+    lubancode::cli::SetSessionSkillCount(0);
     lubancode::cli::SetTurnInterruptBroadcast(nullptr);
     lubancode::cli::SetPromptHistoryProvider(nullptr);
     lubancode::cli::SetFileMentionProvider(nullptr);
@@ -1369,20 +1316,8 @@ void TerminalSessionController::SyncAgentRequestPolicy() {
     main_agent->SetSoul(*current_soul);
 }
 
-void TerminalSessionController::RestoreThinkHistoryFrom(
-    const std::optional<lubancode::sessions::ThinkHistoryEvent>& event) {
-    // 存档的跨轮保留选择落回会话真值,再按当前模型重校验——恢复时用的
-    // 模型未必是存档时的模型,K2.6 存的 all 不能硬带给不认的模型(P1
-    // 第 6 条)。校验回落时自打一行,SyncAgentRequestPolicy 让下一份
-    // 请求立即按新形状走。
-    *current_think_history = event.has_value() && event->mode == "all"
-                                  ? lubancode::api::ReasoningHistoryMode::All
-                                  : lubancode::api::ReasoningHistoryMode::ProviderDefault;
-    lubancode::app::RevalidateThinkHistoryMode(
-        current_think_history, current_think,
-        model_catalog.FindByProviderAndSlug(active_provider, *current_model));
-    SyncAgentRequestPolicy();
-}
+// (P0-6:RestoreThinkHistoryFrom——旧存档 think_history 事件的恢复口——
+// 已删;跨轮保留选择的持久账在 trajectory,/think history 每场现设。)
 
 void TerminalSessionController::RefreshSkills() {
     // 包根来自会话钉快照(阶段 3;/package reload 后的 RefreshSkills 折
@@ -1391,6 +1326,7 @@ void TerminalSessionController::RefreshSkills() {
     skills = lubancode::tools::LoadSkills(
         CurrentDirUtf8(), home_dir, official_skills_dir,
         lubancode::package::MountSkillRoots(stack_.CurrentPackageSnapshot()->mount()));
+    lubancode::cli::SetSessionSkillCount(skills.size());
     skills_segment = lubancode::tools::BuildSkillsPromptSegment(skills);
     if (auto* tool = dynamic_cast<lubancode::tools::SkillTool*>(registry().Find("skill")); tool != nullptr) {
         tool->SetSkills(skills);
@@ -1528,9 +1464,6 @@ void TerminalSessionController::AssembleDispatchContext() {
     // T2:/telemetry enable session 的执行体(当前进程内装,§24.2)。
     ctx.enable_telemetry_session = [this]() { return EnableTelemetryForSession(); };
     ctx.session_events = &session_events_;
-    ctx.session_store = &session_store;
-    ctx.sessions_dir = &sessions_dir;
-    ctx.session_meta = &session_meta;
     ctx.session_title = &session_title;
     ctx.last_compact_line = &last_compact_line;
     ctx.prompt_options = &prompt_options;
@@ -1566,16 +1499,11 @@ void TerminalSessionController::AssembleDispatchContext() {
 }
 
 SessionCommandState TerminalSessionController::MakeSessionCommandState() {
-    return SessionCommandState{
+    SessionCommandState state{
         [this](bool preserve_history) { RebuildLoop(preserve_history); },
         *main_agent,
-        session_store,
-        persisted_count,
         session_compact_epoch,
-        session_meta,
         session_title,
-        session_title_pending,
-        session_store_broken,
         session_start_ts,
         [this]() {
             // /clear:旧上下文就此终局——SessionEnd(reason=clear) 先发,新的
@@ -1605,36 +1533,19 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
         [this]() { SyncWorktreeDirectory(); },
         [this]() { CleanupBackgroundAgents(/*dispose_queue=*/true); },
         &worktree_session,
-        sessions_dir,
         wire_str,
         current_model,
-        // /resume 成功:恢复的历史开新账(SessionStart source=resume),
-        // 仓也按恢复的那场开张(旧档若落过盘,artifact 继续可追)。
+        // /resume 成功:恢复的历史开新账(SessionStart source=resume)。
         [this]() {
             EmitSessionHook(lubancode::hooks::HookEvent::SessionStart, nlohmann::json{{"source", "resume"}},
                             "resume");
             OpenArtifactStore();
             // 持久目标单:goal 事件账随档恢复(默认 paused-on-resume)。
             goal_wiring_.RestoreFromArchive();
-            // 两层标题(实测问题 7):换场善后——翻代、取消在飞的精炼,旧档
-            // 没标题就补一枚本地标题。
+            // 两层标题(实测问题 7):换场善后——翻代、取消在飞的精炼。
             BackfillTitleOnResume();
-        },
-        // /resume 的排队账重建(路径二):存档快照灌回会话层队列。
-        [this](const std::vector<lubancode::sessions::ArchivedQueueItem>& items) {
-            RestoreSteeringQueueFrom(items);
-        },
-        // Plan 模式单:/resume 的 mode/plan/review 账恢复。
-        [this](const std::optional<lubancode::sessions::ModeEvent>& mode_event,
-               const std::vector<lubancode::sessions::PlanEvent>& plans,
-               const std::optional<lubancode::sessions::PlanReviewEvent>& review) {
-            plan_wiring_.RestoreFromArchive(mode_event, plans, review);
-        },
-        // 跨轮保留选择恢复(P1):存档的 /think history 选择按当前模型
-        // 重校验后落回会话真值。
-        [this](const std::optional<lubancode::sessions::ThinkHistoryEvent>& event) {
-            RestoreThinkHistoryFrom(event);
         }};
+    return state;
 }
 
 lubancode::agent::CompactOptions TerminalSessionController::BuildCompactOptions() {
@@ -1691,8 +1602,7 @@ std::vector<std::string> TerminalSessionController::EnableTelemetryForSession() 
     }
     auto* ledger = session_runtime_.trajectory();
     if (ledger == nullptr || session_runtime_.trajectory() == nullptr) {
-        lines.push_back("开不了:本场会话的轨迹账(features.trajectory)没开,遥测没有事实源。");
-        lines.push_back("先用 /trajectory 开轨迹(或配置 features.trajectory=true)再开遥测。");
+        lines.push_back("开不了:本场会话的轨迹账未装配,遥测没有事实源。");
         return lines;
     }
     const lubancode::telemetry::TelemetryActivation activation =

@@ -27,7 +27,6 @@
 
 #include "agent/agent.hpp"
 #include "agent/loop.hpp"
-#include "sessions/session_store.hpp"
 #include "agent/tool_trace.hpp"
 #include "platform/text_encoding.hpp"
 #include "runtime/id_authority.hpp"
@@ -603,97 +602,11 @@ TEST_CASE("重复事件幂等,冲突 finished 报 corrupt 不取最后一条赢"
 // trace-aware 修补与落盘次序
 // ---------------------------------------------------------------------------
 
-TEST_CASE("trace-aware 修补: unknown 补 [会话恢复] 结果,老档回落 legacy") {
-    // 一条 assistant 消息带两枚 tool_use:u_done(finished)、u_unknown(started)。
-    api::Message assistant;
-    assistant.role = api::Role::Assistant;
-    api::ToolUseBlock done_use;
-    done_use.id = "u_done";
-    api::ToolUseBlock unknown_use;
-    unknown_use.id = "u_unknown";
-    assistant.content.push_back(done_use);
-    assistant.content.push_back(unknown_use);
+// (P0-6:trace-aware 修补(RepairToolPairsWithTrace)的用例已删——旧档
+// 恢复路退场;新账的悬空工具按 trajectory 三道账封存。)
 
-    agent::ToolExecutionLedger ledger;
-    agent::ToolTraceEvent sched1;
-    sched1.kind = agent::ToolTraceEventKind::Scheduled;
-    sched1.execution_id = "e1";
-    sched1.tool_use_id = "u_done";
-    ledger.Fold(sched1);
-    agent::ToolTraceEvent fin1;
-    fin1.kind = agent::ToolTraceEventKind::ExecutionFinished;
-    fin1.execution_id = "e1";
-    fin1.tool_use_id = "u_done";
-    fin1.outcome = agent::ToolOutcome::Succeeded;
-    fin1.result_ref.kind = agent::ToolResultRef::Kind::Inline;
-    fin1.result_ref.content = "done 正文";
-    ledger.Fold(fin1);
-    agent::ToolTraceEvent commit1;
-    commit1.kind = agent::ToolTraceEventKind::ResultCommitted;
-    commit1.execution_id = "e1";
-    commit1.tool_use_id = "u_done";
-    ledger.Fold(commit1);
-
-    agent::ToolTraceEvent sched2;
-    sched2.kind = agent::ToolTraceEventKind::Scheduled;
-    sched2.execution_id = "e2";
-    sched2.tool_use_id = "u_unknown";
-    ledger.Fold(sched2);
-    agent::ToolTraceEvent start2;
-    start2.kind = agent::ToolTraceEventKind::ExecutionStarted;
-    start2.execution_id = "e2";
-    ledger.Fold(start2);
-
-    std::vector<api::Message> history{assistant};
-    const auto report = sessions::RepairToolPairsWithTrace(history, ledger);
-    CHECK(report.trace_matched == 2);
-    CHECK(report.unknown_after_start == 1);
-    CHECK(report.result_recovered >= 1);
-    // 紧随的 user 消息补了两条结果。
-    REQUIRE(history.size() == 2);
-    REQUIRE(history[1].role == api::Role::User);
-    REQUIRE(history[1].content.size() == 2);
-    const auto& r0 = std::get<api::ToolResultBlock>(history[1].content[0]);
-    const auto& r1 = std::get<api::ToolResultBlock>(history[1].content[1]);
-    CHECK(r0.tool_use_id == "u_done");
-    CHECK(r0.content.find("done 正文") != std::string::npos);
-    CHECK_FALSE(r0.is_error);
-    CHECK(r1.tool_use_id == "u_unknown");
-    CHECK(r1.is_error);
-    CHECK(r1.content.find("unknown_after_start") != std::string::npos);
-}
-
-TEST_CASE("session: tool_trace_v1 行落盘与回读;老版本读档不坏") {
-    TempDir tmp("session");
-    const std::string file = (tmp.Get() / "s.jsonl").string();
-
-    {
-        sessions::SessionStore store(tmp.Get().string());
-        sessions::SessionMeta meta;
-        meta.wire = "anthropic";
-        meta.model = "m";
-        REQUIRE(store.Begin(meta, "s"));
-        agent::ToolTraceEvent scheduled;
-        scheduled.kind = agent::ToolTraceEventKind::Scheduled;
-        scheduled.execution_id = "e1";
-        scheduled.tool_use_id = "u1";
-        scheduled.tool_name = "probe";
-        CHECK(store.AppendToolTraceEvent(scheduled));
-        agent::ToolTraceEvent started;
-        started.kind = agent::ToolTraceEventKind::ExecutionStarted;
-        started.execution_id = "e1";
-        CHECK(store.AppendToolTraceEvent(started));
-    }
-
-    const auto bytes = sessions::ReadSessionFileBytes(file);
-    REQUIRE(bytes.has_value());
-    const auto loaded = sessions::ParseSessionFile(*bytes);
-    REQUIRE(loaded.has_value());
-    REQUIRE(loaded->tool_trace_events.size() == 2);
-    CHECK(loaded->tool_trace_events[0].kind == agent::ToolTraceEventKind::Scheduled);
-    CHECK(loaded->tool_trace_events[1].kind == agent::ToolTraceEventKind::ExecutionStarted);
-
-}
+// (P0-6:tool_trace_v1 行的落盘回读用例已删——持久账走 trajectory
+// Journal 的 typed 工具事件。)
 
 TEST_CASE("消息落盘次序: assistant 先落、五结果一条 user message 后落") {
     FakeBackend backend;
@@ -1175,7 +1088,7 @@ TEST_CASE("子代理内层工具带 parent_execution_id;hub 只读并轨不交�
 
 TEST_CASE("hub 的 agent 执行区间:scheduled 期间 parent 可查,finished 清位") {
     lubancode::runtime::IdAuthority ids;
-    lubancode::runtime::ToolTraceHub hub(ids, nullptr);  // 无 store:只走内存账
+    lubancode::runtime::ToolTraceHub hub(ids);  // 只走内存账
     CHECK(hub.current_agent_execution().empty());
 
     agent::ToolTraceEvent started;

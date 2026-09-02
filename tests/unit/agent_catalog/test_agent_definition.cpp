@@ -89,7 +89,13 @@ permissions:
 )yaml";
     const auto result = agent::ParseAgentDefinitionYaml(yaml, "browser-tester.yaml");
     REQUIRE(result.definition.has_value());
-    CHECK(result.issues.empty());
+    // 旧字段单独出现:定义可用,但带一条 agent.legacy_step_budget 弃用警告
+    //(turn 预算单 §5.2 阶段 A,P1-0)——不偷换语义,也不悄悄放过。
+    REQUIRE(result.issues.size() == 1);
+    REQUIRE(HasIssueOn(result, "runtime.max_steps_per_turn"));
+    CHECK(result.issues[0].warning);
+    CHECK(result.issues[0].code == "agent.legacy_step_budget");
+    CHECK(ErrorCount(result) == 0);
     const auto& def = *result.definition;
     CHECK(def.schema == 1);
     CHECK(def.name == "browser-tester");
@@ -213,12 +219,16 @@ runtime:
 )yaml";
     const auto result = agent::ParseAgentDefinitionYaml(yaml, "budget-probe.yaml");
     REQUIRE(result.definition.has_value());
-    CHECK(result.issues.empty());
+    // max_steps_per_turn 单独出现:值照收 + 一条 legacy 弃用警告(§5.2)。
+    REQUIRE(result.issues.size() == 1);
+    CHECK(result.issues[0].warning);
+    CHECK(result.issues[0].code == "agent.legacy_step_budget");
+    CHECK(ErrorCount(result) == 0);
     const auto& def = *result.definition;
     REQUIRE(def.max_output_tokens.has_value());
     CHECK(*def.max_output_tokens == 4096);
     REQUIRE(def.max_steps_per_turn.has_value());
-    CHECK(*def.max_steps_per_turn == 0);  // 0 = 不限步,合法
+    CHECK(*def.max_steps_per_turn == 0);  // 0 = 不限步,合法(legacy 语义不动)
     REQUIRE(def.max_context_chars.has_value());
     CHECK(*def.max_context_chars == 200000);
     REQUIRE(def.context_window_tokens.has_value());
@@ -243,8 +253,10 @@ runtime:
     CHECK(*from_file.definition->context_window_tokens == 0);
     REQUIRE(from_file.definition->length_continuations.has_value());
     CHECK(*from_file.definition->length_continuations == 1);
-    REQUIRE(from_file.definition->max_steps_per_turn.has_value());
-    CHECK(*from_file.definition->max_steps_per_turn == 24);
+    // P1-0:夹具已迁新字段——任务总 turn 落 max_turns,legacy 键零警告。
+    REQUIRE(from_file.definition->max_turns.has_value());
+    CHECK(*from_file.definition->max_turns == 24);
+    CHECK_FALSE(from_file.definition->max_steps_per_turn.has_value());
 }
 
 TEST_CASE("runtime 五预算键:下界与类型各报一处,行列指得到") {
@@ -326,6 +338,66 @@ TEST_CASE("runtime.max_turns(任务总 turn,turn 预算单 §4.1):正例、0、�
         "schema: 1\nname: a\ndescription: d\nruntime:\n  length_continuations: 1\n", "a.yaml");
     REQUIRE(absent.definition.has_value());
     CHECK_FALSE(absent.definition->max_turns.has_value());
+}
+
+// ---------------------------------------------------------------------------
+// P1-0 兼容批(turn 预算单 §5.1/§10.1/§13.6):新旧合同分家、同现明拒、
+// legacy 弃用警告、turn 键稳定码。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("新旧预算字段同现:明拒 agent.turn_budget_conflict,定义不可用(不静默选边)") {
+    const auto result = agent::ParseAgentDefinitionYaml(
+        "schema: 1\nname: a\ndescription: d\nruntime:\n  max_turns: 12\n  max_steps_per_turn: 24\n", "a.yaml");
+    CHECK_FALSE(result.definition.has_value());  // 不交半份定义
+    REQUIRE(HasIssueOn(result, "runtime.max_turns"));
+    bool found = false;
+    for (const auto& issue : result.issues) {
+        if (issue.field == "runtime.max_turns") {
+            CHECK_FALSE(issue.warning);
+            CHECK(issue.code == "agent.turn_budget_conflict");
+            found = true;
+        }
+    }
+    CHECK(found);
+}
+
+TEST_CASE("旧字段单独出现:legacy 语义照收 + agent.legacy_step_budget 弃用警告,不挡加载") {
+    const auto result = agent::ParseAgentDefinitionYaml(
+        "schema: 1\nname: a\ndescription: d\nruntime:\n  max_steps_per_turn: 9\n", "a.yaml");
+    REQUIRE(result.definition.has_value());  // warning 不挡加载
+    REQUIRE(result.issues.size() == 1);
+    CHECK(result.issues[0].warning);
+    CHECK(result.issues[0].code == "agent.legacy_step_budget");
+    CHECK(result.issues[0].field == "runtime.max_steps_per_turn");
+    CHECK(*result.definition->max_steps_per_turn == 9);  // 值照收,语义不偷换
+    CHECK_FALSE(result.definition->max_turns.has_value());
+    CHECK(ErrorCount(result) == 0);
+}
+
+TEST_CASE("max_turns 类型/越界诊断带稳定码 agent.turn_budget_type / agent.turn_budget_range") {
+    const auto typed = agent::ParseAgentDefinitionYaml(
+        "schema: 1\nname: a\ndescription: d\nruntime:\n  max_turns: 十二\n", "a.yaml");
+    CHECK_FALSE(typed.definition.has_value());
+    bool saw_type = false;
+    for (const auto& issue : typed.issues) {
+        if (issue.field == "runtime.max_turns" && !issue.warning) {
+            CHECK(issue.code == "agent.turn_budget_type");
+            saw_type = true;
+        }
+    }
+    CHECK(saw_type);
+
+    const auto overflow = agent::ParseAgentDefinitionYaml(
+        "schema: 1\nname: a\ndescription: d\nruntime:\n  max_turns: 99999999999\n", "a.yaml");
+    CHECK_FALSE(overflow.definition.has_value());
+    bool saw_range = false;
+    for (const auto& issue : overflow.issues) {
+        if (issue.field == "runtime.max_turns" && !issue.warning) {
+            CHECK(issue.code == "agent.turn_budget_range");
+            saw_range = true;
+        }
+    }
+    CHECK(saw_range);
 }
 
 TEST_CASE("类型错:prompt 不是映射、mcp_servers 项是映射(内联 MCP 拒收)") {

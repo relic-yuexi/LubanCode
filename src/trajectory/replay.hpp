@@ -271,6 +271,7 @@ struct VerifiedStream {
     std::string relative_path;  // session 内相对路径(main.jsonl / subagents/…)
     bool ok = false;
     std::string error_code;
+    std::string message;        // 人话补充(turn.* 一族核错的定位说明;空 = 无)
     std::string run_id;
     RunKind run_kind = RunKind::MainSession;
     std::string parent_run_id;  // 子账 run.started relations 报的 owner

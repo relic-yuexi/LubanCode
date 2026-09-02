@@ -18,7 +18,6 @@
 
 #include "agent/agent.hpp"
 #include "agent/loop.hpp"
-#include "sessions/session_store.hpp"
 #include "api/backend.hpp"
 #include "app/commands/command_flow.hpp"
 #include "app/commands/model_commands.hpp"
@@ -177,120 +176,43 @@ TEST_CASE("/config:env 把运行端点换走时明说 provider unbound") {
     CHECK(captured.str().find("provider_binding   = env override / unbound") != std::string::npos);
 }
 
-TEST_CASE("/title 状态账:建档前挂起,建档后补写,再设当场落事件行") {
-    const auto dir = TempDir("title");
-    lubancode::sessions::SessionStore store(dir.string());
+// (P0-6:/title 的旧档挂起/补写用例已删——标题真账走 control.title.changed,
+// 现行路在 HandleSlashTitle 的 trajectory 分支。)
+
+TEST_CASE("/clear 状态账:SessionCommandState 聚合可装,标题活值翻篇") {
     lubancode::tools::ToolRegistry registry;
     NullBackend backend;
     lubancode::agent::Agent loop(backend, registry, lubancode::agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
-
-    std::string title;
-    bool title_pending = false;
-    std::size_t persisted = 0;
-    bool broken = false;
-    std::string start_ts = "ts-1";
-    lubancode::sessions::SessionMeta meta;
-    const std::string sessions_dir = dir.string();
-    const std::string wire = "anthropic";
-    auto model = std::make_shared<std::string>("test-model");
-    lubancode::cli::WorktreeSession worktree;
-    std::vector<lubancode::peers::PeerEnvelope> ready;
-    std::vector<lubancode::peers::PeerEnvelope> held;
-
-    int compact_epoch = 0;
-    SessionCommandState state{[](bool) {}, loop, store,  persisted, compact_epoch, meta, title,
-                               title_pending, broken,  start_ts, nullptr, nullptr, nullptr,
-                               nullptr,       &worktree, sessions_dir, wire, model};
-    const lubancode::cli::Theme theme;
-
-    // 建档前:/title 名字 只挂起,不写文件。
-    CHECK(HandleTitleCommand(state, "场子一", theme) == CommandFlow::Continue);
-    CHECK(title == "场子一");
-    CHECK(title_pending);
-    CHECK_FALSE(store.active());
-
-    // 建档后(模拟首条消息落盘路径):再设标题当场补写事件行。
-    lubancode::sessions::SessionMeta begin_meta;
-    begin_meta.wire = wire;
-    REQUIRE(store.Begin(begin_meta, "sess-title-test"));
-    CHECK(HandleTitleCommand(state, "场子二", theme) == CommandFlow::Continue);
-    CHECK(title == "场子二");
-    // 注意:pending 只由落盘路径(PersistNewMessages)与 /resume 清掉,
-    // 这里带着旧 true 过来是搬家前的原语义,handler 照抄不私自翻新。
-    CHECK(title_pending);
-    CHECK(store.active());
-
-    // 裸敲:不改任何状态。
-    CHECK(HandleTitleCommand(state, "", theme) == CommandFlow::Continue);
-    CHECK(title == "场子二");
-
-    std::error_code ec;
-    std::filesystem::remove_all(dir, ec);
-}
-
-TEST_CASE("/clear 状态账:重建不带历史、存档翻篇、标题清空") {
-    const auto dir = TempDir("clear");
-    lubancode::sessions::SessionStore store(dir.string());
-    lubancode::tools::ToolRegistry registry;
-    NullBackend backend;
-    lubancode::agent::Agent loop(backend, registry, lubancode::agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
-    lubancode::sessions::SessionMeta begin_meta;
-    REQUIRE(store.Begin(begin_meta, "sess-clear-test"));
-    store.AppendTitleEvent("旧标题");
 
     std::string title = "旧标题";
-    bool title_pending = false;
-    std::size_t persisted = 7;
-    bool broken = true;  // 旧场的坏账,/clear 后该翻篇
     std::string start_ts = "ts-old";
-    lubancode::sessions::SessionMeta meta;
-    const std::string sessions_dir = dir.string();
     const std::string wire = "anthropic";
     auto model = std::make_shared<std::string>("test-model");
     lubancode::cli::WorktreeSession worktree;
-    bool restarted = false;
     int epoch = 0;
-    int rebuild_calls = 0;
-    bool rebuild_preserve_history = true;
 
     SessionCommandState state{
-        [&](bool preserve) {
-            ++rebuild_calls;
-            rebuild_preserve_history = preserve;
-        },
+        [](bool) {},
         loop,
-        store,
-        persisted,
         epoch,
-        meta,
         title,
-        title_pending,
-        broken,
         start_ts,
-        [&] { restarted = true; },
+        nullptr,
         nullptr,
         nullptr,
         nullptr,
         &worktree,
-        sessions_dir,
         wire,
-        model};
-    const lubancode::cli::Theme theme;
-    lubancode::config::Config config;  // 管道场景 spinner 恒 false,不清屏
-
-    CHECK(HandleClearCommand(state, config, theme, /*spinner_enabled=*/false) == CommandFlow::Continue);
-    CHECK(rebuild_calls == 1);
-    CHECK_FALSE(rebuild_preserve_history);  // /clear 丢历史重建
-    CHECK(restarted);                       // project memory 源的善后跑了
-    CHECK_FALSE(store.active());            // 存档翻篇
-    CHECK(persisted == 0);
-    CHECK_FALSE(broken);
-    CHECK(title.empty());
-    CHECK_FALSE(title_pending);
-    CHECK(start_ts != "ts-old");
-
+        model,
+        nullptr};
+    // P0-6:聚合字段瘦身后的形状钉住(编译即验);旧档字段(store/
+    // persisted/meta/title_pending/broken/sessions_dir)不再存在。
+    CHECK(&state.loop == &loop);
+    CHECK(state.title == "旧标题");
+    CHECK(state.start_ts == "ts-old");
+    (void)wire;
     std::error_code ec;
-    std::filesystem::remove_all(dir, ec);
+    (void)ec;
 }
 
 TEST_CASE("/send 与 /peerperm 状态账:off 档、空名册、权限档切换") {
@@ -345,36 +267,8 @@ std::string CmdPathUtf8(const std::filesystem::path& p) {
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }
 
-// 写一场带标题的会话(写完关柄)。返回文件路径。
-// 文件名走 u8string:MSVC 下窄串拼 path 按 ANSI 代码页解码,中文 slug 写出
-// 乱码名——Windows CI 上 delete 确认后删不掉的根因(写盘真名与 lifecycle
-// 的 u8 拼名对不上,exists 落空回 NotFound)。夹具必须写真名。
-std::filesystem::path CmdWriteSession(const std::filesystem::path& dir, const std::string& id,
-                                      const std::string& title, const std::string& cwd) {
-    lubancode::sessions::SessionMeta meta;
-    meta.wire = "anthropic";
-    meta.model = "m1";
-    meta.cwd = cwd;
-    meta.started_at = "2026-08-20 10:10:10";
-    lubancode::api::Message message;
-    message.role = lubancode::api::Role::User;
-    message.content.push_back(lubancode::api::TextBlock{"首句"});
-    const std::string content = lubancode::sessions::SerializeSessionMeta(meta) + "\n" +
-                                lubancode::sessions::SerializeSessionMessage(message, "2026-08-20 10:10:11") +
-                                "\n" +
-                                (title.empty() ? std::string()
-                                               : lubancode::sessions::SerializeTitleEvent(title,
-                                                                                      "2026-08-20 10:10:12") +
-                                                     "\n");
-    const std::u8string u8name(reinterpret_cast<const char8_t*>((id + ".jsonl").data()),
-                               (id + ".jsonl").size());
-    const auto path = dir / std::filesystem::path(u8name);
-    {  // MSVC:写完显式关柄
-        std::ofstream f(path, std::ios::binary);
-        f << content;
-    }
-    return path;
-}
+// (P0-6:CmdWriteSession——旧档造场——已删;顶层 archive/delete 的
+// 用例走 WorkspaceSessionsFixture(trajectory 新账)。)
 
 }  // namespace
 
@@ -931,7 +825,6 @@ std::vector<lubancode::api::Message> SyntheticMultiToolHistory() {
 
 TEST_CASE("TryRunCompact: 压缩收窄落档;同一视图无进展的第二次触发被滞回拦下") {
     const auto dir = TempDir("compact_hysteresis");
-    lubancode::sessions::SessionStore store(dir.string());
     lubancode::tools::ToolRegistry registry;
     ScriptBackend compact_backend;
     // 双账压缩(阶段 2-4):map 吐严格 JSON 小结,reduce 吐严格双账。
@@ -941,7 +834,6 @@ TEST_CASE("TryRunCompact: 压缩收窄落档;同一视图无进展的第二次�
                                  lubancode::agent::AgentProfile{.request{.model = "test-model"},
                                                                 .system_prompt = "sys"});
     loop.ReplaceHistory(SyntheticMultiToolHistory());
-    REQUIRE(store.Begin(lubancode::sessions::SessionMeta{}, "sess-compact-hyst"));
 
     CompactSessionInputs in;
     in.agent = &loop;
@@ -951,10 +843,6 @@ TEST_CASE("TryRunCompact: 压缩收窄落档;同一视图无进展的第二次�
     in.session_compact_epoch = &compact_epoch;
     std::string last_compact_line;
     in.last_compact_line = &last_compact_line;
-    std::size_t persisted = 0;
-    in.persisted_count = &persisted;
-    in.session_store = &store;
-    in.session_store_broken = false;
     CompactHysteresis hysteresis;
     in.hysteresis = &hysteresis;
     in.build_compact_options = [] { return lubancode::agent::CompactOptions{}; };
@@ -1007,7 +895,6 @@ TEST_CASE("TryRunCompact: 压缩收窄落档;同一视图无进展的第二次�
 
 TEST_CASE("TryRunCompact: 压缩结果不降反升时拒收换账,历史一字未动") {
     const auto dir = TempDir("compact_grew");
-    lubancode::sessions::SessionStore store(dir.string());
     lubancode::tools::ToolRegistry registry;
     ScriptBackend compact_backend;
     // 双账存档本身 ~1100 token(goal 塞 4000 字):两轮共 ~1500 token 的小史,
@@ -1036,13 +923,10 @@ TEST_CASE("TryRunCompact: 压缩结果不降反升时拒收换账,历史一字�
     in.agent = &loop;
     const lubancode::cli::Theme theme;
     in.theme = &theme;
-    in.session_store = &store;
     int compact_epoch = 0;
     in.session_compact_epoch = &compact_epoch;
     std::string last_compact_line;
     in.last_compact_line = &last_compact_line;
-    std::size_t persisted = 0;
-    in.persisted_count = &persisted;
     in.build_compact_options = [] { return lubancode::agent::CompactOptions{}; };
     lubancode::agent::ModelRoute route;
     route.model = "test-model";
@@ -1074,7 +958,6 @@ TEST_CASE("TryRunCompact: 压缩结果不降反升时拒收换账,历史一字�
 
 TEST_CASE("TryRunCompact 压缩成功后:下一次模型请求、工具执行、session flush 都活着") {
     const auto dir = TempDir("compact_aftermath");
-    lubancode::sessions::SessionStore store(dir.string());
     lubancode::tools::ToolRegistry registry;
     ScriptBackend compact_backend;
     compact_backend.map_script = TurnGroupMapJsonScript();
@@ -1084,20 +967,15 @@ TEST_CASE("TryRunCompact 压缩成功后:下一次模型请求、工具执行、
                                                                 .runtime{.max_steps_per_turn = 2},
                                                                 .system_prompt = "sys"});
     loop.ReplaceHistory(SyntheticMultiToolHistory());
-    REQUIRE(store.Begin(lubancode::sessions::SessionMeta{}, "sess-compact-aftermath"));
 
     CompactSessionInputs in;
     in.agent = &loop;
     const lubancode::cli::Theme theme;
     in.theme = &theme;
-    in.session_store = &store;
     int compact_epoch = 0;
     in.session_compact_epoch = &compact_epoch;
     std::string last_compact_line;
     in.last_compact_line = &last_compact_line;
-    std::size_t persisted = 0;
-    in.persisted_count = &persisted;
-    in.persist_new_messages = [] {};
     in.build_compact_options = [] { return lubancode::agent::CompactOptions{}; };
     lubancode::agent::ModelRoute route;
     route.model = "test-model";
@@ -1139,14 +1017,9 @@ TEST_CASE("TryRunCompact 压缩成功后:下一次模型请求、工具执行、
     }
     CHECK(paired);
 
-    // session flush:存档文件落了 compact_v2 与后续消息。
-    lubancode::api::Message tail;
-    tail.role = lubancode::api::Role::User;
-    tail.content.push_back(lubancode::api::TextBlock{"压缩后的尾巴"});
-    CHECK(store.AppendMessage(tail));  // flush 路径本身不炸
+    // (P0-6:旧存档的 session flush 断言已删;压缩的持久账是 trajectory 的
+    // compact.applied。)
     std::error_code ec;
-    const bool ledger_exists = std::filesystem::file_size(store.file_path(), ec) > 0;
-    CHECK(ledger_exists);
     std::filesystem::remove_all(dir, ec);
 }
 
@@ -1190,7 +1063,7 @@ TEST_CASE("HandleCompactCommand: 手工压缩反涨也拒收,历史一字未动"
                                              compact_epoch);
 
     // 反涨:拒收——没有事件,epoch 不进,历史原样。
-    CHECK_FALSE(result.event.has_value());
+    CHECK_FALSE(result.applied);
     CHECK(compact_epoch == 0);
     REQUIRE(loop.History().size() == size_before);
     CHECK(std::get<lubancode::api::TextBlock>(loop.History()[0].content[0]).text.size() == 1500);
@@ -1216,7 +1089,7 @@ TEST_CASE("HandleCompactCommand: 手工压缩收窄时照常换账,反涨闸不�
                                              /*spinner_enabled=*/false, lubancode::agent::CompactOptions{},
                                              compact_epoch);
 
-    REQUIRE(result.event.has_value());
+    REQUIRE(result.applied);
     CHECK(result.after_tokens < result.before_tokens);
     CHECK(compact_epoch == 1);
     CHECK(loop.History().size() < size_before);

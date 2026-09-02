@@ -63,7 +63,6 @@ std::string MakeTempDir(const char* name) {
 // 造一场会话档(带 meta + 一条 user 消息),返回 thread_id。
 std::string SeedSession(const std::string& sessions_dir, const std::string& marker) {
     app_server::ServerOptions options;
-    options.sessions_dir = sessions_dir;
     options.workspaces_dir = sessions_dir + "/workspaces";  // P0-2:会话账根
     options.cwd = sessions_dir;
     options.session_wire = "anthropic";
@@ -90,7 +89,6 @@ struct SessionHarness {
     explicit SessionHarness(std::string dir, std::string workflow_runs_dir = std::string())
         : sessions_dir(std::move(dir)) {
         app_server::ServerOptions options;
-        options.sessions_dir = sessions_dir;
         options.workspaces_dir = sessions_dir + "/workspaces";  // P0-2:会话账根
         options.cwd = sessions_dir;
         options.workflow_runs_dir = std::move(workflow_runs_dir);

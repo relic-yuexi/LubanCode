@@ -82,7 +82,7 @@ lubancode app-server --app-server-ws 9001 --app-server-ws-token <token>
 
 | 方法 | 参数 | 结果 |
 | --- | --- | --- |
-| `thread/start` | `cwd?` | `{threadId, cwd}`;会话档真落盘(`~/.lubancode/sessions/`),meta 写真值(wire/model 来自配置四级合并)。 |
+| `thread/start` | `cwd?` | `{threadId, cwd}`;会话账真落盘(workspace trajectory Journal),meta 写真值(wire/model 来自配置四级合并)。 |
 | `thread/list` | `scope?/state?/sort?/search?/cwd?/cursor?/limit?` | `{threads:[...], total}`;走 `runtime::SessionCommandService`,与终端 `/sessions` 同一碗饭。缺省全量 + active + updated。`startedAt` 续给(`createdAt` 同源),老前端不断。 |
 | `thread/stop` | `threadId` | 停场;在跑回合按打断收口。 |
 | `thread/archive` | `threadId` | 搬进 `archive/`;成功发 `thread/updated`(state=archived)。开着的 thread 拒 `active_thread`。 |

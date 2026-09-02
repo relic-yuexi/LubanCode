@@ -1,6 +1,6 @@
 // /goal 子系统接线器(会话终章):goal 的"状态+装配+泵+存档恢复"自
 // TerminalSessionController 大类外迁,归这一只。控制器持句柄调;会话级
-// 状态(theme/config/session_store)仍留控制器,两边不互相摸。
+// 状态(theme/config)仍留控制器,两边不互相摸。
 //
 // 骨架拆解反弹·问题 3:Ensure 里"事件类型分族 + ledger sink 搭建"抽去
 // runtime::goal::MakeSessionLedgerSink(纯函数);终端打印改产 notify 回调
@@ -9,7 +9,7 @@
 // 状态归属(单子钉的):
 //   - coordinator(状态机)/checkpoint 工具账/work source/fairness 账/
 //     活跃 iteration 号——全跟接线器走;
-//   - 存档(SessionStore)/模型路由/评估 backend——会话借来(Host 全借用);
+//   - 模型路由/评估 backend——会话借来(Host 全借用);
 //   - 开 turn 只经 start_turn 回调(单飞铁律:一场会话同时一枚主 turn)。
 //
 // 泵的公平仲裁(session_work_scheduler 的 PumpNextWork)不动,留控制器;
@@ -31,7 +31,6 @@
 #include "config/config.hpp"
 #include "runtime/goal_coordinator.hpp"
 #include "runtime/session_work_scheduler.hpp"  // GoalWorkSource/FairnessCounter
-#include "sessions/session_store.hpp"
 #include "tools/goal_checkpoint_tool.hpp"
 
 namespace lubancode::cli {
@@ -57,7 +56,6 @@ public:
     struct Host {
         const lubancode::cli::Theme* theme = nullptr;
         const lubancode::config::Config* config = nullptr;      // Ensure 折 Options
-        lubancode::sessions::SessionStore* session_store = nullptr;
         lubancode::runtime::ToolTraceHub* trace_hub = nullptr;   // 可空(采证)
         lubancode::app::ModelRouterService* model_router = nullptr;  // 可空
         lubancode::api::Backend* evaluation_backend = nullptr;   // 评估轮的独立请求
@@ -80,9 +78,9 @@ public:
     // 不露面)。状态跟接线器走,工具只持 shared_ptr。
     void RegisterTools(lubancode::tools::ToolRegistry& registry);
 
-    // 装配:coordinator 从 config+env 折 Options 安家,LedgerSink 接 session
-    // 存档(goal 事件行 append+flush),ready continuation 经 GoalWorkSource
-    // 出候选。幂等。
+    // 装配:coordinator 从 config+env 折 Options 安家,ready continuation
+    // 经 GoalWorkSource 出候选。幂等。(P0-6:旧存档的 LedgerSink 已删;
+    // goal 事件的持久账接 trajectory 属 goal 单后续波次,如实记缺口。)
     void Ensure(const lubancode::config::Config& config);
 
     // ---- 泵(主线程安全边界) ----
@@ -93,11 +91,10 @@ public:
     // → 独立 evaluator → ApplyEvaluation → continue 则 ScheduleNextIteration。
     void CloseIteration(const std::string& turn_id, bool turn_failed);
 
-    // ---- 存档恢复与守恒面 ----
-    // /resume 后从存档 goal 事件账回放重建(默认 paused-on-resume)。
+    // ---- 恢复与守恒面 ----
+    // (P0-6:RestoreFromArchive——旧存档 goal 事件账回放——已删;goal 的
+    // 持久账接 trajectory 属 goal 单后续波次。)保留空位调用兼容。
     void RestoreFromArchive();
-    // compact_v2 事件落盘前补 goal snapshot(有 goal 才带)。
-    void AttachSnapshotToCompact(lubancode::sessions::CompactV2Event& event);
     // 后台子代理回流喂 goal 的证据/usage 账(没有活跃 goal 零影响)。
     void NoteSubagentCompletion();
 

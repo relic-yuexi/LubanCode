@@ -15,7 +15,6 @@
 #include "evolution/observation_store.hpp"
 #include "memory/project_memory.hpp"
 #include "sessions/goal_session.hpp"
-#include "sessions/session_store.hpp"
 #include "skills/workflow_recorder.hpp"
 #include "workflow/journal.hpp"
 
@@ -46,91 +45,8 @@ const char* kFakeToken = "sk-COLLECTFAKE444555";
 // 假的模型思考原文(长篇推理)。观察里查不到它——压根不收。
 const char* kFakeThinking = "INNER-THINKING-请让我一步步推理这个 provider 绑定问题首先我要……";
 
-// 造一场会话档:meta + 一条带思考原文的 assistant 消息 + goal 事件 + 失败
-// 工具栅栏。返回文件路径。
-std::string WriteSession(const fs::path& sessions_dir, const std::string& session_id) {
-    std::error_code ec;
-    fs::create_directories(sessions_dir, ec);
-    const fs::path file = sessions_dir / (session_id + ".jsonl");
-    std::ofstream out(file, std::ios::binary);
-
-    lubancode::sessions::SessionMeta meta;
-    meta.version = 1;
-    meta.wire = "anthropic";
-    meta.model = "fake-model";
-    meta.cwd = "D:/nowhere";
-    meta.started_at = "2026-08-28 09:00:00";
-    out << lubancode::sessions::SerializeSessionMeta(meta) << "\n";
-
-    // 一条 assistant 消息:thinking 块(模型思考原文,不收)+ 文本块。
-    lubancode::api::Message assistant;
-    assistant.role = lubancode::api::Role::Assistant;
-    lubancode::api::ThinkingBlock thinking;
-    thinking.text = kFakeThinking;
-    assistant.content.push_back(thinking);
-    lubancode::api::TextBlock text;
-    text.text = "答话正文(观察也不收消息正文)";
-    assistant.content.push_back(text);
-    out << lubancode::sessions::SerializeSessionMessage(assistant, "2026-08-28 09:00:01") << "\n";
-
-    // goal 事件:created + iteration + evidence + evaluated(achieved)。
-    lubancode::sessions::GoalSessionEvent created;
-    created.type = "goal_v1";
-    created.event = "created";
-    created.goal_id = "goal-1";
-    created.revision = 1;
-    created.payload["objective"] = "修好绑定,token " + std::string(kFakeToken) + " 不外泄";
-    created.timestamp_ms = 1750000000000LL;
-    out << lubancode::sessions::SerializeGoalEvent(created, "2026-08-28 09:00:02") << "\n";
-
-    lubancode::sessions::GoalSessionEvent evidence;
-    evidence.type = "goal_evidence_v1";
-    evidence.event = "observed";
-    evidence.goal_id = "goal-1";
-    evidence.iteration_id = "goal-1/iter-1";
-    evidence.payload["evidence_id"] = "ev-1";
-    evidence.payload["kind"] = "command_exit";
-    out << lubancode::sessions::SerializeGoalEvent(evidence, "2026-08-28 09:00:03") << "\n";
-
-    lubancode::sessions::GoalSessionEvent evaluated;
-    evaluated.type = "goal_evaluation_v1";
-    evaluated.event = "evaluated";
-    evaluated.goal_id = "goal-1";
-    evaluated.iteration_id = "goal-1/iter-1";
-    evaluated.revision = 1;
-    nlohmann::json evaluation;
-    evaluation["id"] = "eval-1";
-    evaluation["decision"] = "achieved";
-    evaluation["summary"] = "验收全绿";
-    evaluated.payload["evaluation"] = evaluation;
-    out << lubancode::sessions::SerializeGoalEvent(evaluated, "2026-08-28 09:00:04") << "\n";
-
-    // 失败工具栅栏:scheduled/started/finished 三道,error_code 进账。
-    for (const auto kind : {lubancode::agent::ToolTraceEventKind::Scheduled,
-                            lubancode::agent::ToolTraceEventKind::ExecutionStarted,
-                            lubancode::agent::ToolTraceEventKind::ExecutionFinished}) {
-        lubancode::agent::ToolTraceEvent event;
-        event.kind = kind;
-        event.thread_id = session_id;
-        event.turn_id = "t1";
-        event.batch_id = "b1";
-        event.execution_id = "item-91";
-        event.item_id = "item-91";
-        event.tool_use_id = "toolu-91";
-        event.tool_name = "run_command";
-        if (kind == lubancode::agent::ToolTraceEventKind::ExecutionStarted) {
-            event.effective_input_sha256 =
-                "sha256:" + std::string(64, '0');  // 内容哈希:不进指纹也不进观察
-        }
-        if (kind == lubancode::agent::ToolTraceEventKind::ExecutionFinished) {
-            event.outcome = lubancode::agent::ToolOutcome::ProcessExitNonzero;
-            event.error_code = "process.exit_nonzero";
-            event.fallback_message = "退出码 1";
-        }
-        out << lubancode::agent::SerializeToolTraceEvent(event, "2026-08-28 09:00:05") << "\n";
-    }
-    return file.string();
-}
+// (P0-6:旧会话档的 WriteSession 造档函数已删——采集器不再扫旧档,
+// goal/trace 观察的输入接 trajectory 新账属自进化单后续波次。)
 
 }  // namespace
 
@@ -167,14 +83,14 @@ TEST_CASE("采集:五路合拢,追得到原始账,查无密钥与思考原文") 
     journal->Append(lubancode::workflow::kEventNodeStarted, "a", 0, nlohmann::json::object());
     journal->Finish("succeeded", nlohmann::json::object());
 
-    // 一场会话档(goal + 失败工具)。
-    const std::string session_file = WriteSession(sessions_dir, "20260828-090000-demo");
+    // (P0-6:会话档路已删——goal/trace 的观察输入接 trajectory 新账属
+    // 自进化单后续波次。)
+    const std::string session_file;
 
     // 一条已接受 memory。
     lubancode::evolution::CollectSources sources;
     sources.recordings_root = recordings_root;
     sources.workflow_runs_root = runs_root;
-    sources.sessions_dir = sessions_dir.string();
     lubancode::memory::MemoryEntry fact;
     fact.id = "fact-1";
     fact.kind = lubancode::memory::MemoryKind::Feedback;
@@ -191,13 +107,12 @@ TEST_CASE("采集:五路合拢,追得到原始账,查无密钥与思考原文") 
     lubancode::evolution::CollectReport report;
     const auto observations = lubancode::evolution::CollectObservations(sources, &report);
 
-    // 五路各出多少:recording 1 + run 1 + goal 1 + tooltrace 1 + memory 1。
-    REQUIRE(observations.size() == 5);
+    // 四路各出多少:recording 1 + run 1 + memory 1(P0-6 起旧会话档路删)。
+    REQUIRE(observations.size() == 3);
     CHECK(report.recordings_scanned == 1);
     CHECK(report.runs_scanned == 1);
-    CHECK(report.sessions_scanned == 1);
     CHECK(report.memory_entries == 1);
-    CHECK(report.observations == 5);
+    CHECK(report.observations == 3);
 
     std::string all;
     for (const auto& observation : observations) {
@@ -208,6 +123,7 @@ TEST_CASE("采集:五路合拢,追得到原始账,查无密钥与思考原文") 
     CHECK(all.find(kFakeToken) == std::string::npos);
     CHECK(all.find(kFakeThinking) == std::string::npos);
     CHECK(all.find("INNER-THINKING") == std::string::npos);
+    (void)0;
 
     // ---- 追得到原始账:来源 ID 与文件都指得回 ----
     bool saw_goal = false;
@@ -238,8 +154,8 @@ TEST_CASE("采集:五路合拢,追得到原始账,查无密钥与思考原文") 
             CHECK(observation.source_id == "fact-1");
         }
     }
-    CHECK(saw_goal);
-    CHECK(saw_trace);
+    CHECK_FALSE(saw_goal);   // P0-6:旧会话档路删,goal 观察暂缺
+    CHECK_FALSE(saw_trace);  // 同上,tooltrace 观察暂缺
     CHECK(saw_recording);
     CHECK(saw_run);
     CHECK(saw_memory);
@@ -249,16 +165,16 @@ TEST_CASE("采集:五路合拢,追得到原始账,查无密钥与思考原文") 
     for (const auto& observation : observations) {
         REQUIRE(store.Append(observation).has_value());
     }
-    CHECK(store.Load().size() == 5);
+    CHECK(store.Load().size() == 3);
     // 再采一回:id 全部命中 DuplicateId,账不翻倍。
     const auto again = lubancode::evolution::CollectObservations(sources, nullptr);
-    CHECK(again.size() == 5);
+    CHECK(again.size() == 3);
     for (const auto& observation : again) {
         const auto status = store.Append(observation);
         REQUIRE(status.has_value());
         CHECK(*status == lubancode::evolution::ObservationStore::AppendStatus::DuplicateId);
     }
-    CHECK(store.Load().size() == 5);
+    CHECK(store.Load().size() == 3);
 }
 
 TEST_CASE("采集:空根不扫、坏档跳过、上限生效") {
@@ -267,21 +183,6 @@ TEST_CASE("采集:空根不扫、坏档跳过、上限生效") {
     lubancode::evolution::CollectReport report;
     CHECK(lubancode::evolution::CollectObservations(sources, &report).empty());
     CHECK(report.observations == 0);
-
-    // 会话目录里塞一份坏档(不是 JSONL):跳过计数,不抛。
-    const fs::path sessions_dir = temp.Get() / "sessions";
-    std::error_code ec;
-    fs::create_directories(sessions_dir, ec);
-    {
-        std::ofstream out(sessions_dir / "20260828-100000-bad.jsonl", std::ios::binary);
-        out << "not a session file at all\n";
-    }
-    sources.sessions_dir = sessions_dir.string();
-    sources.max_sessions = 5;
-    const auto observations = lubancode::evolution::CollectObservations(sources, &report);
-    CHECK(observations.empty());
-    CHECK(report.sessions_scanned == 1);
-    CHECK(report.sessions_unreadable == 1);
 
     // 上限:三场录制件,max_recordings=2 只扫两件。
     const fs::path recordings_root = temp.Get() / "recordings";

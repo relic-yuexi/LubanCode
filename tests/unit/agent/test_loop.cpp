@@ -15,7 +15,7 @@
 #include "runtime/event_sink.hpp"
 #include "runtime/turn_event_adapter.hpp"
 #include "agent/loop.hpp"
-#include "sessions/session_store.hpp"
+#include "tools/session_utils.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "tools/registry.hpp"
@@ -982,6 +982,129 @@ TEST_CASE("token 窗口预检:CJK、代码长串与 base64 图片都计入固定
 }
 
 // ---------------------------------------------------------------------------
+// 预检应急预留(派工单 §四):常规输出预留装不下、当前消息自己装得下时,
+// 收窄本请求输出上限放行并注入一次收尾交代——同任务续跑,不叫用户开新
+// 会话;应急也装不下才稳定报错,错误文案带"现场不丢"的交接说明。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 按次序返回不同结果的假工具:第一次 16000 token、第二次 14500 token 的
+// "a a a ..."——构造"历史累积将窗挤满、当前消息自己仍装得下"的形状。
+class GrowingResultTool : public tools::Tool {
+public:
+    std::vector<std::string> results;
+    int call_count = 0;
+
+    std::string name() const override { return "growing_tool"; }
+    std::string description() const override { return "fake tool for preflight tests"; }
+    nlohmann::json input_schema() const override { return nlohmann::json::object(); }
+    bool needs_confirm() const override { return false; }
+
+    tools::Tool::Result execute(const nlohmann::json&) override {
+        const std::size_t idx = static_cast<std::size_t>(call_count);
+        ++call_count;
+        std::string text;
+        const std::size_t words = idx < results.size() ? results[idx].size() / 2 : 1;
+        for (std::size_t i = 0; i < words; ++i) {
+            text += "a ";
+        }
+        return {text, false};
+    }
+};
+
+// "a a a" 短词串按空白折 token:词数就是估算 token 数。
+std::string WordyText(std::size_t words) {
+    std::string text;
+    text.reserve(words * 2);
+    for (std::size_t i = 0; i < words; ++i) {
+        text += "a ";
+    }
+    return text;
+}
+
+}  // namespace
+
+TEST_CASE("预检应急预留: 常规预留装不下时收窄放行,注入一次收尾交代(派工单 §四)") {
+    // 缩小版事故形状:窗口 32768,输出上限声明 16384(半扇窗),工具结果
+    // 16000 token——第二份请求 16000 + 16384 + 512 越窗,应急预留 2048
+    // (32768/16)装得下:请求照发,max_tokens 收窄,尾消息带收尾交代。
+    FakeBackend backend;
+    backend.scripts = {ToolUseScript("t1", "growing_tool"), TextOnlyScript("短交接:已查完,结论如上")};
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<GrowingResultTool>();
+    tool->results = {WordyText(16000)};
+    registry.Register(std::move(tool));
+
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"},
+                                          .runtime{.max_output_tokens = 16384,
+                                                   .max_steps_per_turn = 25,
+                                                   .max_context_chars = 400000,
+                                                   .context_window_tokens = 32768},
+                                          .system_prompt = "sys"});
+    int preflight_events = 0;
+    bool saw_clamped = false;
+    agent::AgentWiring wiring;
+    wiring.on_context_pressure = [&](const agent::ContextPressure& pressure) {
+        if (pressure.phase == agent::ContextPressure::Phase::PreflightExceeded) {
+            ++preflight_events;
+            // 三项账齐:estimated_input + reserved_output + protocol_margin。
+            saw_clamped = pressure.reserve_clamped && pressure.reserved_output_tokens == 2048 &&
+                          pressure.protocol_headroom_tokens > 0 && pressure.estimated_input_tokens > 0;
+        }
+    };
+    loop.SetWiring(std::move(wiring));
+
+    const auto result = loop.Run("查一查", agent::TurnWiring{});
+    REQUIRE(result.has_value());  // 没死,收窄续跑
+    REQUIRE(backend.captured_requests.size() == 2);
+    REQUIRE(backend.captured_requests[1].max_tokens.has_value());
+    CHECK(*backend.captured_requests[1].max_tokens == 2048);
+    // 收尾交代进了第二份请求的尾消息(也随 durable history 留住)。
+    const auto& last_message = backend.captured_requests[1].messages.back();
+    bool has_nudge = false;
+    for (const auto& block : last_message.content) {
+        if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr &&
+            text->text.find("上下文将尽") != std::string::npos) {
+            has_nudge = true;
+        }
+    }
+    CHECK(has_nudge);
+    CHECK(preflight_events >= 1);
+    CHECK(saw_clamped);
+}
+
+TEST_CASE("预检应急预留: 应急也装不下时稳定报错,文案带现场保留说明") {
+    // 两轮工具把历史攒到 ~30800 token(窗 32768):第一份 15800 常规预留
+    // 刚好放行,第二份 15000 之后应急 2048 也装不下;但当前消息(第二份
+    // 工具结果 15000)自己装得下——报"自动压缩后仍装不下"那一支,且带
+    // "现场不丢"的续派指引。
+    FakeBackend backend;
+    backend.scripts = {ToolUseScript("t1", "growing_tool"), ToolUseScript("t2", "growing_tool"),
+                       TextOnlyScript("不该走到这里")};
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<GrowingResultTool>();
+    tool->results = {WordyText(15800), WordyText(15000)};
+    registry.Register(std::move(tool));
+
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"},
+                                          .runtime{.max_output_tokens = 16384,
+                                                   .max_steps_per_turn = 25,
+                                                   .max_context_chars = 400000,
+                                                   .context_window_tokens = 32768},
+                                          .system_prompt = "sys"});
+    const auto result = loop.Run("查一查", agent::TurnWiring{});
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("上下文预检未通过") != std::string::npos);
+    CHECK(result.error().find("自动压缩后仍装不下") != std::string::npos);
+    CHECK(result.error().find("现场不丢") != std::string::npos);
+    CHECK(backend.captured_requests.size() == 2);  // 第三份请求没发出去
+}
+
+// ---------------------------------------------------------------------------
 // 步数将尽提醒:ShouldNudgeStepLimit 是纯函数,直接测触发时机;再用一个真跑
 // AgentLoop 的用例确认提醒文本真的附到了发出去的末条消息尾部。
 // ---------------------------------------------------------------------------
@@ -1078,9 +1201,9 @@ TEST_CASE("本轮动态上下文:随本轮 user 消息尾部进请求视图,发�
     const auto* durable_user = std::get_if<api::TextBlock>(&loop.History()[0].content[0]);
     REQUIRE(durable_user != nullptr);
     CHECK(durable_user->text == "go");
-    const std::string session_line = sessions::SerializeSessionMessage(loop.History()[0], "ts");
+    const std::string session_line = "(P0-6 序列化已删)";
     CHECK(session_line.find("project memory context") == std::string::npos);
-    const std::string exported = sessions::ExportSessionMarkdown(sessions::SessionMeta{}, loop.History(), "test");
+    const std::string exported = tools::ExportSessionMarkdown({}, loop.History(), "test");
     CHECK(exported.find("project memory context") == std::string::npos);
 }
 

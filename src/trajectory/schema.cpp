@@ -162,6 +162,12 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::ModelRequestPrepared, "purpose", "s", false},
     {EventKind::ModelRequestSent, "prepared_event_id", "s", true},
     {EventKind::ModelRequestSent, "attempt", "u", false},
+    // 任务级 turn 账(turn 预算单 §11.1,P1-1):装了任务 turn 门的会话在
+    // sent/completed/failed/cancelled 边界带上这些键;旧 stream 缺席合法,
+    // 新 stream 不给也合法(主会话/旁路请求没有任务 turn 账)。
+    {EventKind::ModelRequestSent, "task_turn_index", "u", false},
+    {EventKind::ModelRequestSent, "turn_limit", "u", false},
+    {EventKind::ModelRequestSent, "input_round_index", "u", false},
     {EventKind::ModelOutputCompleted, "output_id", "s", true},
     {EventKind::ModelOutputCompleted, "blocks", "a", true},
     {EventKind::ModelOutputCompleted, "stop_reason", "s", true},
@@ -169,11 +175,14 @@ constexpr PayloadField kPayloadFields[] = {
     // model.usage.recorded;v2 校验在 ValidatePayloadWithVersion 拒这键)。
     {EventKind::ModelOutputCompleted, "usage", "o", false},
     {EventKind::ModelOutputCompleted, "provider_response_id", "s", false},
+    {EventKind::ModelOutputCompleted, "task_turn_index", "u", false},
     {EventKind::ModelOutputFailed, "reason", "s", true},
     {EventKind::ModelOutputFailed, "error_code", "s", false},
     {EventKind::ModelOutputFailed, "attempt", "u", false},
+    {EventKind::ModelOutputFailed, "task_turn_index", "u", false},
     {EventKind::ModelOutputCancelled, "reason", "s", true},
     {EventKind::ModelOutputCancelled, "error_code", "s", false},
+    {EventKind::ModelOutputCancelled, "task_turn_index", "u", false},
     // v2 model.usage.recorded(Token 账本单 §6.1.1):attempt 必须,token
     // 五项与 cache_epoch/prefix_append_only 只在 reported_by_provider=true
     // 时必填、false 时禁现——"没报"不许拿 0 顶上。条件硬约束在

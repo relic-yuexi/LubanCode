@@ -70,6 +70,12 @@ struct SessionManifest {
     std::string status = "preparing";  // 本单只写 preparing/running
     std::int64_t created_at_ms = 0;
     std::string lubancode_version;
+    // 存储 v2 合同 §三(P0-5 接线):仅 start_reason=legacy_import 场必填。
+    // subagent_detail 恒 unavailable_legacy(旧主账只有 agent 最终回话,
+    // 不伪造子 Journal);training_policy 恒 exclude(复现等级不高于
+    // partial)。空 = 非迁移场,两键不落盘。
+    std::string subagent_detail;
+    std::string training_policy;
 
     nlohmann::json ToJson() const;
     static std::optional<SessionManifest> FromJson(const nlohmann::json& json);

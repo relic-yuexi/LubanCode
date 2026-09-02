@@ -38,7 +38,6 @@
 #include "agent/loop.hpp"
 #include "peers/peer_session.hpp"
 #include "agent/prompts.hpp"
-#include "sessions/session_store.hpp"
 #include "skills/workflow_recorder.hpp"
 #include "api/anthropic/client.hpp"
 #include "api/backend.hpp"
@@ -56,6 +55,7 @@
 #include "app/version.hpp"
 #include "cli/console_input.hpp"
 #include "cli/gateway_command.hpp"  // 总装单 G1:gateway run/status/stop 子命令
+#include "cli/migrate_storage_command.hpp"  // 存储 v2 P0-5:migrate-storage plan/run/status
 #include "cli/trajectory_command.hpp"  // P0-3:trajectory verify/replay/harness-replay 子命令
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
@@ -372,7 +372,6 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
                      const CliOptions& cli_options) {
     lubancode::app_server::ServerOptions options;
     if (const auto luban_dir = lubancode::config::HomeLubancodeDir(); luban_dir.has_value()) {
-        options.sessions_dir = *luban_dir + "/sessions";  // P0-2 起不消费(P0-6 删)
         // P0-2:会话账走唯一持久化根 workspaces/。
         options.workspaces_dir = *luban_dir + "/workspaces";
         // wf 线的 run 账根(workflow/query 的快照与增量事件从这里读)。
@@ -397,7 +396,7 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
     }
     options.session_model = config_result.config.model;
     // P0-2(Trajectory 升为唯一 Session):feature/env 开关已删,thread 恒走
-    // Trajectory 账(server.hpp 的 features_trajectory 字段退役中,P0-6 删)。
+    // Trajectory 账(P0-6:features.trajectory 开关与 server 侧字段随之退役)。
     // 浏览器面(可见调试阶段 3):sidecar 命令解析——环境变量
     // LUBAN_BROWSER_SIDECAR 指到 browser/sidecar.js 优先;没指则按可执行
     // 文件旁边与当前目录找 browser/sidecar.js。找不到就不配(browser/*
@@ -559,6 +558,19 @@ int RunCli(const std::vector<std::string>& args) {
             return cli::RunGatewayCommand(gateway_args);
         }
         case CliAction::BadGateway:
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
+        case CliAction::RunMigrateStorage: {
+            // 存储 v2 P0-5:一次性迁移命令面(plan/run/status),跑完就退。
+            cli::MigrateStorageCommandArgs migrate_args;
+            migrate_args.verb = parsed_cli.migrate_storage.verb;
+            migrate_args.operation_id = parsed_cli.migrate_storage.operation_id;
+            migrate_args.project_roots = parsed_cli.migrate_storage.project_roots;
+            migrate_args.delete_source = parsed_cli.migrate_storage.delete_source;
+            migrate_args.confirm_delete = parsed_cli.migrate_storage.confirm_delete;
+            return cli::RunMigrateStorageCommand(migrate_args);
+        }
+        case CliAction::BadMigrateStorage:
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::RunEvolveTest:

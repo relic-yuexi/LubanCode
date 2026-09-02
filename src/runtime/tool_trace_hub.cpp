@@ -12,13 +12,10 @@
 
 namespace lubancode::runtime {
 
-ToolTraceHub::ToolTraceHub(IdAuthority& ids, sessions::SessionStore* store)
-    : ToolTraceHub(ids, store, Options{}) {}
+ToolTraceHub::ToolTraceHub(IdAuthority& ids) : ToolTraceHub(ids, Options{}) {}
 
-ToolTraceHub::ToolTraceHub(IdAuthority& ids, sessions::SessionStore* store, const Options& options)
-    : ids_(ids), store_(store), options_(options) {}
-
-
+ToolTraceHub::ToolTraceHub(IdAuthority& ids, const Options& options)
+    : ids_(ids), options_(options) {}
 
 ToolTraceHub::~ToolTraceHub() = default;
 
@@ -45,49 +42,16 @@ void ToolTraceHub::Install(agent::Agent& loop, agent::TurnWiring& wiring, const 
         std::lock_guard<std::mutex> lock(mutex_);
         return blocked_executions_.count(execution_id) != 0;
     };
-    // 落盘次序关口(单子"消息落盘次序要改"):assistant 消息在执行任何
-    // 工具之前 append+flush;五枚结果收齐后 user 消息 append+flush,再补
-    // 各枚 result_committed。store 没开张(空指针/没 active)时这两个口
-    // 空操作——老路 PersistNewMessages 仍会在轮末兜底,一个不丢。
-    // P0-2 轨迹路(§15.2):挂了轨迹口的会话不写 SessionStore(禁
-    // dual-write)——消息事实由 model.output.completed/tool.result.committed
-    // 事件承载,轨迹桥从下面的批次尾口拿正文。
-    wiring.on_assistant_message_ready = [this](const api::Message& message) {
-        if (trajectory_ != nullptr) {
-            return;  // 轨迹路:model.output.completed 已是消息事实,不再落 store
-        }
-        if (store_ != nullptr && store_->active()) {
-            store_->AppendMessage(message);
-        }
-    };
+    // P0-6:旧 SessionStore 的轮内消息 append 关口已删——消息事实由
+    // model.output.completed/tool.result.committed typed 事件承载,轨迹桥
+    // 从批次尾口拿正文。on_assistant_message_ready 因此只剩占位(接口
+    // 保留,AgentLoop 的挂点不动)。
+    wiring.on_assistant_message_ready = [](const api::Message&) {};
     wiring.on_tool_results_committed = [this](const std::string& batch_id, const api::Message& message) {
+        // 正文进 tool.result.committed 事件(轨迹桥落账;没挂轨迹的会话
+        // 只有进程内 recent_ 诊断账)。
         if (trajectory_ != nullptr) {
-            // 轨迹路:正文进 tool.result.committed 事件,不写 store。
             trajectory_->OnToolResultsCommitted(batch_id, message);
-            return;
-        }
-        if (store_ != nullptr && store_->active()) {
-            store_->AppendMessage(message);
-        }
-        // 各枚 result_committed:本批在 recent_ 里有 finished 的都算落定。
-        std::lock_guard<std::mutex> lock(mutex_);
-        for (const auto& event : recent_) {
-            if (event.batch_id != batch_id ||
-                (event.kind != agent::ToolTraceEventKind::ExecutionFinished &&
-                 event.kind != agent::ToolTraceEventKind::Scheduled)) {
-                continue;
-            }
-            agent::ToolTraceEvent committed = event;
-            committed.kind = agent::ToolTraceEventKind::ResultCommitted;
-            committed.outcome = agent::ToolOutcome::Succeeded;
-            committed.error_code.clear();
-            committed.result_ref = agent::ToolResultRef{};
-            committed.undo = agent::ToolUndoToken{};
-            committed.seq = ids_.NextSeq();
-            committed.timestamp_ms = platform::WallClockNowMs();
-            if (store_ != nullptr && store_->active()) {
-                store_->AppendToolTraceEvent(committed);
-            }
         }
     };
 }
@@ -129,23 +93,12 @@ void ToolTraceHub::OnTrace(const agent::ToolTraceEvent& event) {
         }
     }
 
-    // 1) 持久账:关键栅栏 append+flush。P0-2 起分两路——轨迹路(§15.2
-    //    ToolTraceHub -> TrajectorySink,不写 SessionStore)与旧路
-    //    (SessionStore append+flush)。started 写失败按 effect class
-    // 决定拦不拦(拦的信号走 EventSink 的 Error + LogSink,execute 不再
-    // 发生——RunOneTool 在 emit(started) 之后、execute 之前没有查询口,
-    // 这里用"写失败即置 fail_start_、由下一枚 started 前检查"的口径:
-    // 事实上 RunOneTool 的 emit 是同步的,store 写失败时我们直接改走
-    // 拦截分支:把 started 事件翻成 finished(blocked by trace_append_
-    // failed)再投出去,RunOneTool 随后的 execute 照跑——所以真正的闸
-    // 在这里:写不落且副作用档时,投一枚 Error 事件并把 finishOutcome
-    // 置为 ResultStoreFailed,模型看到的就是"没跑成"。
+    // 1) 持久账(P0-6 后唯一路):轨迹桥同步落账。started 提交完再问一次
+    //    ShouldBlockExecution——桥的拦截集合在提交时才填得上,先问后提交
+    //    永远问着空集(P0-4 修的次序缺陷)。拦下且副作用档,同一道闸拦
+    //    执行:把 started 翻成 finished(result_store_failed),模型看到的
+    //    就是"没跑成"。
     if (trajectory_ != nullptr) {
-        // 轨迹路:started 先同步提交(桥在 OnToolTrace 里落账;写不住或
-        // §12.2 磁盘 reserve 不足,桥把 execution_id 记进自己的拦截集合),
-        // 提交完再问一次 ShouldBlockExecution——集合在提交时才填得上,
-        // 先问后提交永远问着空集(P0-4 修的次序缺陷)。拦下且副作用档,
-        // 同一道闸拦执行。
         trajectory_->OnToolTrace(event);
         if (event.kind == agent::ToolTraceEventKind::ExecutionStarted &&
             trajectory_->ShouldBlockExecution(event) && ShouldBlockOnFailedStart(event.effect_class)) {
@@ -162,33 +115,6 @@ void ToolTraceHub::OnTrace(const agent::ToolTraceEvent& event) {
             trajectory_->OnToolTrace(failed);  // 轨迹侧翻 cancelled 落账
             EmitRuntimeEvent(failed);
             return;  // 终态已出,不再往下分线
-        }
-    } else if (store_ != nullptr && store_->active()) {
-        const bool durable_ok = store_->AppendToolTraceEvent(event);
-        if (!durable_ok) {
-            if (event.kind == agent::ToolTraceEventKind::ExecutionStarted &&
-                ShouldBlockOnFailedStart(event.effect_class)) {
-                // 副作用工具、started 落不住:按单子,不得继续执行。
-                // 补一枚 terminal 栅栏把这一枚收成 result_store_failed,
-                // 恢复侧不会把它误读成"副作用未知"。
-                agent::ToolTraceEvent failed = event;
-                failed.kind = agent::ToolTraceEventKind::ExecutionFinished;
-                failed.outcome = agent::ToolOutcome::ResultStoreFailed;
-                failed.error_code = agent::kErrSessionTraceAppendFailed;
-                failed.fallback_message = "追踪账写盘失败,该工具未执行(副作用档默认拦截)";
-                {
-                    std::lock_guard<std::mutex> lock(mutex_);
-                    blocked_executions_.insert(event.execution_id);
-                    recent_.push_back(failed);
-                }
-                store_->AppendToolTraceEvent(failed);
-                EmitRuntimeEvent(failed);
-                return;  // 终态已出,不再往下分线
-            }
-            // 只读档或非 started 栅栏:降级执行,当场告警(UI 不拦工具)。
-            if (sink_ != nullptr) {
-                sink_->Emit(MakeWarningEvent(event, agent::kErrSessionTraceAppendFailed));
-            }
         }
     }
 
@@ -277,6 +203,11 @@ agent::ToolExecutionLedger ToolTraceHub::BuildLedger(const std::vector<agent::To
     return ledger;
 }
 
+agent::ToolExecutionLedger ToolTraceHub::BuildRecentLedger() const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    return BuildLedger(recent_);
+}
+
 std::string ToolTraceHub::LastBatchSummary() const {
     std::lock_guard<std::mutex> lock(mutex_);
     if (last_batch_id_.empty()) {
@@ -309,30 +240,15 @@ std::string ToolTraceHub::LastBatchSummary() const {
 }
 
 std::optional<agent::ToolUndoToken> ToolTraceHub::FindUndoToken(const std::string& execution_id) const {
-    // 进程内账:折叠 recent_ 查。
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        agent::ToolExecutionLedger ledger;
-        for (const auto& event : recent_) {
-            ledger.Fold(event);
-        }
-        if (const auto* record = ledger.FindByExecution(execution_id); record != nullptr && !record->undo.path.empty()) {
-            return record->undo;
-        }
+    // 进程内账:折叠 recent_ 查。(P0-6:旧存档真本回落已删——撤销令牌
+    // 的持久真账在 trajectory Journal,跨进程查令牌走事件账侧。)
+    std::lock_guard<std::mutex> lock(mutex_);
+    agent::ToolExecutionLedger ledger;
+    for (const auto& event : recent_) {
+        ledger.Fold(event);
     }
-    // 存档真本:重启后 recent_ 空,折叠 JSONL(调用方保证 store 活着)。
-    if (store_ != nullptr && store_->active()) {
-        const auto bytes = sessions::ReadSessionFileBytes(store_->file_path());
-        if (bytes.has_value()) {
-            const auto loaded = sessions::ParseSessionFile(*bytes);
-            if (loaded.has_value()) {
-                const auto ledger = BuildLedger(loaded->tool_trace_events);
-                if (const auto* record = ledger.FindByExecution(execution_id);
-                    record != nullptr && !record->undo.path.empty()) {
-                    return record->undo;
-                }
-            }
-        }
+    if (const auto* record = ledger.FindByExecution(execution_id); record != nullptr && !record->undo.path.empty()) {
+        return record->undo;
     }
     return std::nullopt;
 }

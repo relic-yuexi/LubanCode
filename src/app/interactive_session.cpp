@@ -48,7 +48,6 @@
 #include "agent/loop.hpp"
 #include "peers/peer_session.hpp"
 #include "agent/prompts.hpp"
-#include "sessions/session_store.hpp"
 #include "skills/workflow_recorder.hpp"
 #include "api/backend.hpp"
 #include "api/models.hpp"
@@ -60,7 +59,7 @@
 // 经 interactive_session_controller.hpp 引入)。
 #include "app/turn_usage_account.hpp"
 // 子系统接线器(会话终章):goal/loop/plan/peer/录制各一只(状态+装配+
-// 泵+存档恢复),控制器持句柄调;会话级状态(theme/config/session_store)
+// 泵+恢复),控制器持句柄调;会话级状态(theme/config/标题活值)
 // 留控制器。
 #include "app/wirings/goal_session_wiring.hpp"
 #include "app/wirings/loop_session_wiring.hpp"
@@ -210,7 +209,7 @@ namespace {
 
 // 建档(渐进式上下文仓第二期起,第一轮用户输入**之前**就要建):仓要拿
 // session id 开张,超长结果在第一轮请求里就得能落盘,不能等回合收尾。首条
-// 文本做 slug;建档失败置 session_store_broken 照旧拦落盘,会话本身照跑。
+// 文本做 slug 的旧建档路已删(P0-6);轨迹账在 SessionRuntime ctor 里已开。
 // 建档成功顺手开仓(开不成只告警:超长结果退回内存全文,不产生假引用)。
 bool TerminalSessionController::EnsureSessionBegun(const std::string& first_text) {
     (void)first_text;
@@ -228,25 +227,9 @@ bool TerminalSessionController::EnsureSessionBegun(const std::string& first_text
         OpenArtifactStore();
         return true;
     }
-    // P6:建档本体在 SessionRuntime(错误不再自己打印,由这边按结果印)。
-    const auto result =
-        session_runtime_.EnsureBegun(first_text, *current_model, CurrentDirUtf8());
-    if (result == lubancode::runtime::SessionBeginResult::Failed) {
-        TermOut() << theme.error << trf("session.create_failed", sessions_dir) << theme.reset << "\n";
-        return false;
-    }
-    if (result != lubancode::runtime::SessionBeginResult::Begun) {
-        return session_store.active();  // Active/Disabled:照旧语义
-    }
-    // hooks 上下文补真 session id 与转录路径(建档这一刻才齐)。
-    if (lubancode::app::HookRuntime() != nullptr) {
-        lubancode::hooks::HookContext hook_context = lubancode::app::HookRuntime()->context();
-        hook_context.session_id = session_store.session_id();
-        hook_context.transcript_path = session_store.file_path();
-        lubancode::app::UpdateHookRuntimeContext(hook_context);
-    }
-    OpenArtifactStore();
-    return true;
+    // P0-6:旧 SessionStore 建档路已删;没有轨迹账本 = 装配层早已让会话
+    // 启动失败,这里到不了。
+    return false;
 }
 
 // ---- 两层会话标题(实测问题 7) ----------------------------------------------
@@ -397,56 +380,12 @@ void TerminalSessionController::OpenArtifactStore() {
         }
         return;
     }
-    if (sessions_dir.empty() || !session_store.active()) {
-        return;
-    }
-    const std::string root = sessions_dir + "/" + session_store.session_id() + "/context";
-    if (!artifact_store->Open(root, session_store.session_id())) {
-        TermOut() << theme.stats << trf("artifact.store_open_failed", root) << theme.reset << "\n";
-    }
+    // P0-6:旧存档侧的 context 仓已删;没有轨迹账本时仓不开。
 }
 
-// 把 history 里 persisted_count 之后的消息逐条追加落盘(append+flush,
-// 崩溃安全)。history 被 ReplaceHistory 换短(/compact)的场合由调用处
-// 先把 persisted_count 收到新长度,这里只管"只增不减"的常态。
-void TerminalSessionController::PersistNewMessages() {
-    // P6:增量落盘本体在 SessionRuntime(只增不减、兜底建档同旧路)。
-    // store 没开张时的兜底建档也在它那头(首条用户文本抽出来做 slug);
-    // 这边只在"Begun 且还没 active"的窗口补一句给用户的话与 hooks 上下文。
-    const auto result = session_runtime_.PersistNew(main_agent->History(), *current_model, CurrentDirUtf8());
-    if (result == lubancode::runtime::SessionPersistResult::BrokenNow) {
-        TermOut() << theme.error << tr("session.append_failed") << theme.reset << "\n";
-        return;
-    }
-    if (result == lubancode::runtime::SessionPersistResult::Nothing && !session_store.active() &&
-        !sessions_dir.empty() && !session_store_broken && !main_agent->History().empty()) {
-        // 落盘账没动而 store 仍没开张:按旧兜底路走一遍建档(给 hooks 与
-        // 仓一齐的机会)。PersistNew 里 EnsureBegun 只填账不碰 hooks,这里
-        // 补上与 EnsureSessionBegun 相同的那段。
-        std::string first_text;
-        for (const auto& message : main_agent->History()) {
-            if (message.role != lubancode::api::Role::User) {
-                continue;
-            }
-            for (const auto& block : message.content) {
-                if (const auto* tb = std::get_if<lubancode::api::TextBlock>(&block)) {
-                    first_text = tb->text;
-                    break;
-                }
-                if (const auto* image = std::get_if<lubancode::api::ImageBlock>(&block)) {
-                    first_text = image->filename;
-                    break;
-                }
-            }
-            break;
-        }
-        if (!first_text.empty()) {
-            EnsureSessionBegun(first_text);
-        }
-    }
-}
-
-
+// (P0-6:PersistNewMessages——旧 SessionStore 的轮末补抄——已删;
+// 消息事实由 model.output.completed/tool.result.committed typed 事件即时
+// 落账,§15.3。)
 
 // 子代理目标的排队消息转投任务 inbox(与面板定向介入同一条通道:
 // AgentTool::SendTaskMessage——那只子代理自己的 AgentLoop 会在"当前工具
@@ -493,69 +432,14 @@ void TerminalSessionController::PumpSteeringToSubagents() {
             queue_changed = true;
         }
     }
-    if (queue_changed) {
-        PersistSteeringQueue();  // 转投/标注也是排队账一变(路径二,快照对齐)
-    }
+    (void)queue_changed;
+    // (P0-6:排队账的旧存档快照路已删;queue 持久账走 trajectory 的
+    // control.queue.snapshot。)
 }
 
-// 排队账 -> 存档快照事件行(路径二)。落不了档(没建档/写坏)只安静退:
-// 存档从来是加层,坏不到会话本体。TargetGone/Failed 的条目也一并进快照——
-// 它们是"等用户处置"的活账,resume 后还该看得见。
-void TerminalSessionController::PersistSteeringQueue() {
-    if (sessions_dir.empty() || session_store_broken) {
-        return;
-    }
-    if (!session_store.active()) {
-        // 一条消息没发过就排了队、又直接 /exit:档还没建。拿队头那条当
-        // 首句建档(slug 用得上),排队账才有处落——不然这类场子的队列
-        // 依然落空。建不成档安静退,老规矩。
-        std::string first_text;
-        for (const auto& item : SessionSteeringQueue().Snapshot()) {
-            if (!item.text.empty()) {
-                first_text = item.text;
-                break;
-            }
-        }
-        if (first_text.empty() || !EnsureSessionBegun(first_text)) {
-            return;
-        }
-    }
-    const auto snapshot = SessionSteeringQueue().Snapshot();
-    std::vector<lubancode::sessions::ArchivedQueueItem> items;
-    items.reserve(snapshot.size());
-    for (const auto& item : snapshot) {
-        lubancode::sessions::ArchivedQueueItem archived;
-        archived.id = item.id;
-        archived.subagent = !item.target.is_main();
-        archived.task_id = item.target.task_id;
-        archived.text = item.text;
-        archived.attempts = item.delivery_attempts;
-        items.push_back(std::move(archived));
-    }
-    (void)session_store.AppendQueueEvent(items);  // 失败不告警:下一趟账变了再追
-}
-
-// 存档快照 -> 会话层队列(resume 路)。RestoreFromArchive 只在队列还空着时
-// 收(本场自己还没排队),运行中的账不给旧档盖。
-void TerminalSessionController::RestoreSteeringQueueFrom(
-    const std::vector<lubancode::sessions::ArchivedQueueItem>& items) {
-    if (items.empty()) {
-        return;
-    }
-    std::vector<lubancode::cli::QueuedMessage> restored;
-    restored.reserve(items.size());
-    for (const auto& archived : items) {
-        lubancode::cli::QueuedMessage item;
-        item.id = archived.id;
-        item.target = archived.subagent ? lubancode::cli::MessageTarget::Agent(archived.task_id)
-                                        : lubancode::cli::MessageTarget::Main();
-        item.text = archived.text;
-        item.state = lubancode::cli::QueueItemState::Queued;
-        item.delivery_attempts = archived.attempts;
-        restored.push_back(std::move(item));
-    }
-    SessionSteeringQueue().RestoreFromArchive(std::move(restored));
-}
+// (P0-6:PersistSteeringQueue/RestoreSteeringQueueFrom——旧存档的排队
+// 事件快照读写——已删;queue 的持久账走 trajectory 的
+// control.queue.snapshot,由轮接线落。)
 
 // Ctrl+R 提问历史搜索的数据源:只读 session 事件账 + 活历史的未落盘尾巴。
 // ListSessions 按新→旧给场次,这里倒序遍历(整体旧→新,BuildHistorySearch
@@ -587,45 +471,7 @@ lubancode::cli::PromptHistoryDataset TerminalSessionController::CollectPromptHis
         }
         return data;
     }
-    data.current_session_id = session_store.session_id();
-    data.current_project_key = lubancode::sessions::NormalizePathForCompare(CurrentDirUtf8());
-    if (!sessions_dir.empty()) {
-        const std::vector<lubancode::sessions::SessionListEntry> listed =
-            lubancode::sessions::ListSessions(sessions_dir, /*limit=*/150);
-        for (auto it = listed.rbegin(); it != listed.rend(); ++it) {
-            const auto bytes = lubancode::sessions::ReadSessionFileBytes(it->file_path);
-            if (!bytes.has_value()) {
-                continue;  // 读不动这场就跳过,不废整份
-            }
-            const std::string project_key = lubancode::sessions::NormalizePathForCompare(it->cwd);
-            for (auto& record : lubancode::sessions::ExtractPromptHistory(*bytes)) {
-                lubancode::cli::PromptHistoryEntry entry;
-                entry.text = std::move(record.text);
-                entry.ts = std::move(record.ts);
-                entry.session_id = it->id;
-                entry.title = it->title;
-                entry.project_key = project_key;
-                entry.event_seq = record.seq;
-                data.entries.push_back(std::move(entry));
-            }
-        }
-    }
-    // 活历史只补尾巴:history 前 persisted_count 条已进存档(上面读过),
-    // ExtractLivePromptTail 只收其后的提问;ts 取收集时的当前时间(还没
-    // 落盘,档上时间未定),标题用活会话的(与档上最后一条 title 事件同源)。
-    const std::string current_id =
-        data.current_session_id.empty() ? std::string("current") : data.current_session_id;
-    for (auto& record : lubancode::sessions::ExtractLivePromptTail(
-             main_agent->History(), persisted_count, lubancode::sessions::NowTimestamp())) {
-        lubancode::cli::PromptHistoryEntry entry;
-        entry.text = std::move(record.text);
-        entry.ts = std::move(record.ts);
-        entry.session_id = current_id;
-        entry.title = session_title;
-        entry.project_key = data.current_project_key;
-        entry.event_seq = record.seq;
-        data.entries.push_back(std::move(entry));
-    }
+    return data;  // 没有轨迹账本(装配层早已失败启动):空账
     return data;
 }
 
@@ -702,11 +548,8 @@ void TerminalSessionController::SyncWorktreeDirectory() {
         agent_tool->SetWorkingDirectory(prompt_options.cwd);
         agent_tool->SetProjectInstructions(project_instructions);
     }
-    // 会话档跟 cwd 走(0.27.x):目录动了就追加一条 cwd 事件,
-    // /resume 靠它把会话送回原房。
-    if (session_store.active()) {
-        session_store.AppendCwdEvent(prompt_options.cwd);
-    }
+    // cwd 的事实账在 trajectory(control.cwd.changed,SessionRuntime 的
+    // NoteWorkingDirectoryChanged 路);旧存档 cwd 事件行已随 P0-6 删。
     RefreshWorkflowCompletions();
 }
 
@@ -742,7 +585,6 @@ CommandFlow TerminalSessionController::ProcessLine(const std::string& content, b
             TermErr().flush();
         }
         try {
-            PersistNewMessages();  // 已入 history 的部分照常落盘,/resume 接得回来
         } catch (...) {
             // 落盘自己都失败了:报不出更多信息,会话仍续命
         }
@@ -951,7 +793,7 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         {
             std::string first_line = content.substr(0, content.find('\n'));
             context_tracker.BeginUserTurn(trace_turn_id,
-                                          lubancode::sessions::TruncateUtf8Chars(first_line, 24));
+                                          lubancode::tools::TruncateUtf8Chars(first_line, 24));
         }
         turn_views_.emplace_back();
     }
@@ -1038,7 +880,6 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         }
     }
     // 每轮结束(成功/出错/ESC 打断都算)把新增消息逐条追加落盘。
-    PersistNewMessages();
     if (is_user_turn) {
         // Plan 模式(只读研究硬闸单):turn 正常收口后扫本轮 assistant 正文,
         // <proposed_plan> 完整则记 PlanDocument 并弹审阅框(单子:不在解析到
@@ -1054,7 +895,6 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
     }
     // 排队账快照落档(路径二):轮内可能进过队/边界注入送走过,趁收尾把
     // 最新一份快照追进存档,/exit 或崩掉后 resume 接得回来。
-    PersistSteeringQueue();
     if (!is_user_turn) {
         peer_wiring_.SetStatus("idle");
     }
@@ -1071,17 +911,14 @@ void TerminalSessionController::EmitSessionHook(lubancode::hooks::HookEvent even
         return;
     }
     // SessionStart 的两个来源(startup 已在 cli_app 发过、这里管 resume/clear/
-    // compact)都要把转录路径与 session id 对齐——存档文件名就是会话 id
-    // (MakeSessionId 落盘时定的),resume 后这份才是真的。
+    // compact)都要把转录路径与 session id 对齐——账本在场就给 main.jsonl
+    // 的真路径,resume 换场后这份才是真的。
     if (event == lubancode::hooks::HookEvent::SessionStart) {
         lubancode::hooks::HookContext ctx = dispatcher->context();
-        if (session_store.active()) {
-            ctx.transcript_path = session_store.file_path();
-            // 会话存档名就是会话 id(MakeSessionId:时间戳 + 首句 slug,slug
-            // 原样保留多字节字符)——GBK 机器上 .string() 遇 emoji 就是
-            // 1113 异常,一律走 u8 通道。
-            ctx.session_id = lubancode::tools::PathToUtf8(
-                lubancode::tools::Utf8ToPath(session_store.file_path()).stem());
+        if (session_runtime_.trajectory() != nullptr) {
+            ctx.session_id = session_runtime_.trajectory()->session_id();
+            ctx.transcript_path =
+                (session_runtime_.trajectory()->session_dir() / "main.jsonl").generic_string();
         }
         lubancode::app::UpdateHookRuntimeContext(ctx);
     }
@@ -1107,7 +944,6 @@ void TerminalSessionController::CleanupBackgroundAgents(bool dispose_queue) {
         // 倒掉的账),醒目告知(路径三:条数 + 首条预览,淡字换醒目色)。
         const auto discarded = SessionSteeringQueue().TakeAllForDisposal();
         if (!discarded.empty()) {
-            PersistSteeringQueue();
             for (const std::string& row : lubancode::cli::BuildQueueDisposalRows(discarded)) {
                 TermOut() << theme.error << row << theme.reset << "\n";
             }
@@ -1229,7 +1065,6 @@ void TerminalSessionController::Run() {
                 session_runtime_.trajectory()->NoteQueueDequeued(
                     lubancode::cli::QueueItemId(head->id), "end_of_turn_delivery");
             }
-            PersistSteeringQueue();
             if (flow == CommandFlow::Exit) {
                 break;
             }
@@ -1345,7 +1180,6 @@ void TerminalSessionController::Run() {
             if (lubancode::cli::ComposerStashHasContent()) {
                 TermOut() << theme.stats << tr("stash.still_there") << theme.reset << "\n";
             }
-            PersistSteeringQueue();  // EOF 退场同路(路径二,"先留后清")
             break;  // EOF:Ctrl+Z 或管道读尽
         }
         if (line->empty()) {
@@ -1358,7 +1192,6 @@ void TerminalSessionController::Run() {
             if (lubancode::cli::ComposerStashHasContent()) {
                 TermOut() << theme.stats << tr("stash.still_there") << theme.reset << "\n";
             }
-            PersistSteeringQueue();  // 裸退场同样先留账(路径二,"先留后清")
             break;
         }
         // 定向介入(规格第七节):查看态 composer 提交的话直接进那只子代理
@@ -1383,7 +1216,6 @@ void TerminalSessionController::Run() {
             // 退出前把排队账最后一眼落档(路径二):/exit 这轮里可能还排着
             // 没送走的话,resume 要接得回来。CleanupBackgroundAgents 里那趟
             // 落的是清账后的空快照,先后次序就是"先留后清"。
-            PersistSteeringQueue();
             break;
         }
     }

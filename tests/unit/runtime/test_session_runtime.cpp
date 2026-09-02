@@ -22,7 +22,6 @@
 
 #include "agent/agent.hpp"
 #include "agent/loop.hpp"
-#include "sessions/session_store.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "runtime/event.hpp"
@@ -95,26 +94,11 @@ TEST_CASE("SessionRuntime:账本恒开,workspace/session 目录在临时根下")
     CHECK(runtime.trajectory_open_error().empty());
 }
 
-TEST_CASE("SessionRuntime:旧档建档/轮末补抄退役(Disabled/Nothing)") {
-    TempSessionsDir dir;
-    rt::SessionRuntime::Options options;
-    options.trajectory_workspaces_root = dir.path() + "/workspaces";
-    std::error_code ec;
-    std::filesystem::create_directories(dir.path() + "/repo", ec);
-    options.trajectory_workspace_identity = workspace::MakeFallbackIdentity(
-        std::filesystem::path(dir.path()) / "repo");
-    rt::SessionRuntime runtime(std::move(options));
-    // P0-2:单一真账在 Trajectory Journal——旧 SessionStore 不建档、轮末
-    // 不补抄;标题等控制事实走 control.* 事件(RecordTitleChanged)。
-    CHECK(runtime.EnsureBegun("第一句话", "test-model", "/tmp") == rt::SessionBeginResult::Disabled);
-    CHECK_FALSE(runtime.store().active());
-    std::vector<api::Message> history = {UserText("问"), AssistantText("答")};
-    CHECK(runtime.PersistNew(history, "test-model", "/tmp") == rt::SessionPersistResult::Nothing);
-    CHECK(runtime.persisted_count() == 0);
-}
+// (P0-6:旧档建档/轮末补抄的退役语义用例已删——EnsureBegun/PersistNew
+// 本体随 SessionStore 删除,新语义是"这些方法不存在"。)
 
 TEST_CASE("SessionRuntime:thread 身份、发号局与权限账") {
-    rt::SessionRuntime runtime({"", "anthropic", "ts"});
+    rt::SessionRuntime runtime({"anthropic", "ts"});
     CHECK(runtime.thread_id().rfind("thread-", 0) == 0);
     const std::uint64_t before = runtime.ids().items_issued();
     (void)runtime.ids().NextItemId();
@@ -125,7 +109,7 @@ TEST_CASE("SessionRuntime:thread 身份、发号局与权限账") {
 }
 
 TEST_CASE("SessionRuntime:MakeTurnAdapter 共用 thread_id 与发号局,事件落挂的 sink") {
-    rt::SessionRuntime runtime({"", "anthropic", "ts"});
+    rt::SessionRuntime runtime({"anthropic", "ts"});
     RecordingSink sink;
     runtime.AttachSink(&sink);
 

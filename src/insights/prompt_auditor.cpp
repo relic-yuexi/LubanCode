@@ -585,7 +585,7 @@ void AuditSnapshotCoverage(const std::vector<RuntimeRequestView>& requests,
         "prompt.snapshot_missing", FindingSeverity::Info, FindingConfidence::High,
         "有 " + std::to_string(missing.size()) + "/" + std::to_string(requests.size()) +
             " 笔请求没有可解析的 request snapshot(A1 前的旧账或缺 manifest;这些请求不进层变化分析)",
-        "开了 features.trajectory 的新请求都会带 manifest;旧账不补造", "R01");
+        "新请求都带 manifest;旧账不补造", "R01");
     finding.scope = "session";
     finding.evidence.push_back(Ev("requests_without_snapshot", missing));
     out.push_back(std::move(finding));

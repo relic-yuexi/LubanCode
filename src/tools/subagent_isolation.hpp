@@ -28,9 +28,11 @@ std::optional<lubancode::cli::AgentWorktree> SetupIsolationRoom(const std::strin
                                                                 const lubancode::cli::GitRunner& runner,
                                                                 Tool::Result& error_out);
 
-// 收工房务:解锁;干净删房,有活留房并返回给结果文本的附言。
-std::string FinishIsolationRoom(const lubancode::cli::AgentWorktree& room,
-                                const lubancode::cli::GitRunner& runner);
+// 收工房务(派工单 §五):解锁;干净且无自有提交才删房,有活(未提交/
+// 已提交)留房待主控复核,note 给结果文本,removed/awaiting_review/
+// head_commit 进任务快照。
+lubancode::cli::AgentWorktreeFinish FinishIsolationRoom(const lubancode::cli::AgentWorktree& room,
+                                                        const lubancode::cli::GitRunner& runner);
 
 // 把一张工具表整体包成"落在房里"的表(路径按房解析、cwd 注入房)。
 std::unique_ptr<ToolRegistry> BuildIsolatedRegistry(ToolRegistry& source, const IsolationScope& scope);

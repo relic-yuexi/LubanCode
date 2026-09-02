@@ -32,12 +32,12 @@
 
 ## 三、清单
 
-- [ ] 定位现状渲染点并照账（每行谁画的、何时显隐）。
-- [ ] 第①层模式行：左端 `<mode> shift+tab to <next> mode`（yolo 档 `yolo` 红色，其余档用主题默认），右端 `<N> skills`（N=当前会话可用技能数，来源与 /skills 同账）。
-- [ ] 第②层 thinking 行：左端 `thinking …（esc to cancel，x m xs）`（沿用现有 spinner/thinking 文案），右端 `? for shortcuts`。
-- [ ] 显隐规矩：thinking 行随思考状态同显隐（含上面那条待确认项的默认案）；模式行常驻输入区上方。
-- [ ] 中英文词条成对；窄终端折行不串行（按屏宽收缩，右端信息优先保）。
-- [ ] 渲染对照截图/文本快照进测试（既有终端帧测试路数）。
+- [x] 定位现状渲染点并照账（每行谁画的、何时显隐）。
+- [x] 第①层模式行：左端 `<mode> shift+tab to <next> mode`（yolo 档 `yolo` 红色，其余档用主题默认），右端 `<N> skills`（N=当前会话可用技能数，来源与 /skills 同账）。
+- [x] 第②层 thinking 行：左端 `thinking …（esc to cancel，x m xs）`（沿用现有 spinner/thinking 文案），右端 `? for shortcuts`。
+- [x] 显隐规矩：thinking 行随思考状态同显隐（含上面那条待确认项的默认案）；模式行常驻输入区上方。
+- [x] 中英文词条成对；窄终端折行不串行（按屏宽收缩，右端信息优先保）。
+- [x] 渲染对照截图/文本快照进测试（既有终端帧测试路数）。
 验收：三层归位如上图；yolo 红色可辨；窄屏不破行。
 
 ## 四、不做什么

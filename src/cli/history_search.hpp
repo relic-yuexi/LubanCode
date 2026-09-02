@@ -2,7 +2,7 @@
 // 范围过滤、查询匹配、搜索框状态机与结果行渲染。终端(console_input)只
 // 管把键喂进来、把行画出去;数据由应用层(interactive_session)只读
 // session 事件账现抽——工具结果、密钥、未发送草稿压根不在账里,天然混
-// 不进来(见 sessions/session_store.hpp 的 ExtractPromptHistory)。
+// 不进来(提问抽取的口径已随 P0-6 移除旧存档侧,数据源见 trajectory 索引)。
 //
 // 纯逻辑:不碰终端、不碰磁盘,tests/unit/cli/test_history_search.cpp 钉死。
 #pragma once

@@ -1,7 +1,7 @@
 // app-server 服务装配:把 Dispatcher、StdioConnection 与真家伙接起来。
 // 阶段 3/4 接线的方法面:
 //   - initialize/initialized/shutdown/exit(握手);
-//   - thread/start、thread/list、thread/stop(会话账,复用 SessionStore);
+//   - thread/start、thread/list、thread/stop(会话账,走 Trajectory Journal);
 //   - thread/archive、thread/unarchive、thread/delete(P9 收尾:走
 //     runtime::SessionCommandService,server 不另写扫盘路);
 //   - turn/start(图片输入 + 文本;工具条目带中立 diff 行表;usage/
@@ -30,7 +30,6 @@
 #include <nlohmann/json.hpp>
 
 #include "agent/loop.hpp"
-#include "sessions/session_store.hpp"
 #include "api/backend.hpp"
 #include "app_server/browser_service.hpp"
 #include "app_server/connection.hpp"
@@ -76,8 +75,6 @@ struct ThreadRecord {
     std::atomic<bool> turn_finished{false};
     // 最近一轮的 turn/completed params(HandleTurnStart 同步口径取回)。
     nlohmann::json last_completed;
-    // 场次存档句柄(旧 SessionStore;P0-2 起不再开档,字段待 P0-6 删)。
-    std::unique_ptr<sessions::SessionStore> store;
     // 本场 main.jsonl 的绝对路径(trace/query 断线补账/冷回放用;账本
     // 开张成功后由 thread/start 填)。
     std::string session_main_path;
@@ -97,7 +94,6 @@ struct ThreadRecord {
 
 // 装配选项。
 struct ServerOptions {
-    std::string sessions_dir;     // 旧会话档目录(P0-2 起不消费,P0-6 删)
     std::string workspaces_dir;   // P0-2:唯一持久化根(<home>/.lubancode/workspaces)
     std::string cwd;              // 服务进程当前目录(事件里回给前端)
     std::string lubancode_version = std::string(app::kVersion);
@@ -123,9 +119,6 @@ struct ServerOptions {
     // 的 features.goals/features.loop 缺省一致,装配层显式开)。
     bool features_goal = false;
     bool features_loop = false;
-    // P0-2 轨迹(§十七内部预览):开的 thread 走 Trajectory 单写口
-    //(与终端同一颗 SessionRuntime 账本);缺省关。
-    bool features_trajectory = false;
     // 浏览器面(阶段 3):sidecar 命令与参数、截图 artifact 目录。
     // sidecar_command 空 = browser/* 方法回 browser.not_configured(不冒充)。
     std::string browser_sidecar_command;
@@ -297,7 +290,6 @@ private:
     std::map<std::string, std::shared_ptr<ThreadRecord>> threads_;
 
     // 旧会话档目录(P0-2 起不消费,P0-6 删)。
-    std::string sessions_dir_;
     // P0-2:唯一持久化根(~/.lubancode/workspaces)。
     std::string workspaces_dir_;
     // turnId/itemId 派生:P9 起统一走 runtime::ProcessIdAuthority(进程级

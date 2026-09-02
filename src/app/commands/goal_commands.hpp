@@ -79,7 +79,6 @@ std::vector<std::string> BuildGoalClearConfirmLines(const lubancode::runtime::go
 struct GoalWiring {
     const lubancode::cli::Theme* theme = nullptr;
     lubancode::runtime::goal::GoalCoordinator* coordinator = nullptr;  // ensure 后非空
-    lubancode::sessions::SessionStore* session_store = nullptr;
     lubancode::tools::AgentTool* agent_tool = nullptr;      // 子代理台账(可空)
     lubancode::tools::GoalCheckpointState* checkpoint_state = nullptr;  // 可空
     lubancode::runtime::loop::LoopScheduler* loop_scheduler = nullptr;  // 状态栏短段(可空)

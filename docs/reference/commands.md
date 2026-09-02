@@ -27,7 +27,7 @@ lubancode delete <id|标题> [--force]
 
 ### 会话管理子命令
 
-- `lubancode archive <SESSION>`：把一场会话归档——JSONL 字节原样搬进 `~/.lubancode/sessions/archive/`。`SESSION` 认完整 id、唯一 id 前缀或唯一命中的标题；重名列短 id 叫你点明，绝不猜。归档后 `--continue`、`/sessions`、裸 `/resume` 略过它。
+- `lubancode archive <SESSION>`：把一场会话归档（状态图转入 archived，字节原样）。`SESSION` 认完整 id、唯一 id 前缀或唯一命中的标题；重名列短 id 叫你点明，绝不猜。归档后 `--continue`、`/sessions`、裸 `/resume` 略过它。
 - `lubancode unarchive <SESSION>`：取消归档，搬回 sessions 根，`/resume` 又能续聊。
 - `lubancode delete <SESSION>`：永久删除一场会话（根或归档里的都行）。交互终端先走确认屏（标题/完整 id/目录/「永久删除」，缺省取消，EOF、空答、别的答案都算取消）。`--force` 跳过确认——只给脚本显式使用，不可恢复。删除只碰目标那一份 `.jsonl`；artifact blob 按内容寻址、可能被别的会话引用，不连坐删。
 
@@ -184,7 +184,7 @@ Token 账本报告（只读，只摆事实）。裸敲看当前会话：coverage
 
 ### `/archive`
 
-归档当前会话：刷盘关句柄，把 JSONL 搬进 `~/.lubancode/sessions/archive/`，成功后退出交互。字节、id、标题、时间一字不动；`--continue`、`/sessions`、裸 `/resume` 从此略过它。后台子代理还在跑时拒绝。别的场子用顶层命令 `lubancode archive <id|标题>`。
+归档当前会话（状态图转入 archived），成功后退出交互。字节、id、标题、时间一字不动；`--continue`、`/sessions`、裸 `/resume` 从此略过它。后台子代理还在跑时拒绝。别的场子用顶层命令 `lubancode archive <id|标题>`。
 
 ### `/delete`
 

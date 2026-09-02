@@ -11,9 +11,9 @@
 // 口径戒律(A1 落的,本件照守):
 //   - provider 没报 usage 写 unknown,不写 0;
 //   - compact/title 一类旁路请求算进总账(purpose 分账列明);
-//   - flag(features.trajectory)关:Trajectory 一笔没记,报告明说"账未开",
-//     降级给内存粗账(ModelUsageLedger,按角色累计)并明示口径差异——内存
-//     账没有 purpose 分账、没有逐请求 coverage,不能悄悄换口径冒充实测。
+//   - Journal 侧逐请求账不可得时,报告明说,降级给内存粗账
+//     (ModelUsageLedger,按角色累计)并明示口径差异——内存账没有
+//     purpose 分账、没有逐请求 coverage,不能悄悄换口径冒充实测。
 #pragma once
 
 #include <cstdint>

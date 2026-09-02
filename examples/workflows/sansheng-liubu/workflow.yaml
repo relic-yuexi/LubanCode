@@ -182,7 +182,7 @@ nodes:
       - edit_file
       - search
       - run_command
-    step_limit: 40
+    turn_limit: 40
 
   fuming:
     type: llm

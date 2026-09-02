@@ -12,7 +12,6 @@
 #include <string>
 
 #include "sessions/goal_session.hpp"
-#include "sessions/session_store.hpp"
 #include "platform/text_encoding.hpp"  // IsValidUtf8:坏串落档行的出口校验
 
 using lubancode::sessions::GoalEvidenceRecord;
@@ -179,47 +178,9 @@ TEST_CASE("goal 证据行:serialize → parse roundtrip") {
     CHECK_FALSE(ParseGoalEvidence(R"({"type":"goal_v1"})").has_value());
 }
 
-TEST_CASE("SessionStore:AppendGoalEvent/AppendGoalEvidence 落盘,回放整收") {
-    TempDir tmp;
-    lubancode::sessions::SessionStore store(tmp.path.string());
-    lubancode::sessions::SessionMeta meta;
-    meta.wire = "anthropic";
-    meta.model = "m";
-    meta.cwd = "/repo";
-    REQUIRE(store.Begin(meta, "goal-test-session"));
-
-    lubancode::sessions::GoalSessionEvent created = MakeCreated();
-    REQUIRE(store.AppendGoalEvent(created));
-    GoalSessionEvent scheduled = MakeCreated();
-    scheduled.type = "goal_iteration_v1";
-    scheduled.event = "scheduled";
-    scheduled.iteration_id = "goal-3/iter-1";
-    scheduled.payload["dedupe_key"] = "goal-3:r1:i1";
-    REQUIRE(store.AppendGoalEvent(scheduled));
-
-    GoalEvidenceRecord evidence;
-    evidence.id = "ev-1";
-    evidence.kind = "tool_result";
-    evidence.goal_id = "goal-3";
-    evidence.iteration_id = "goal-3/iter-1";
-    evidence.content_sha256 = "s1";
-    REQUIRE(store.AppendGoalEvidence(evidence));
-
-    // 读回:文件里 meta + 3 行事件(created/scheduled/observed)。
-    const auto bytes = lubancode::sessions::ReadSessionFileBytes(store.file_path());
-    REQUIRE(bytes.has_value());
-    const auto loaded = lubancode::sessions::ParseSessionFile(*bytes);
-    REQUIRE(loaded.has_value());
-    REQUIRE(loaded->goal_events.size() == 3);
-    CHECK(loaded->goal_events[0].event == "created");
-    CHECK(loaded->goal_events[1].event == "scheduled");
-    CHECK(loaded->goal_events[1].iteration_id == "goal-3/iter-1");
-    // 证据行(goal_evidence_v1 顶层 type 也是 goal_ 族)同样整收。
-    CHECK(loaded->goal_events[2].type == "goal_evidence_v1");
-    CHECK(loaded->goal_events[2].payload.at("evidence_id") == "ev-1");
-    CHECK(loaded->messages.empty());  // 事件行不算消息
-    CHECK(loaded->skipped_lines == 0);
-}
+// (P0-6:SessionStore 的 goal 事件行落盘用例已删——旧存档写入路退场;
+// goal 事件纯函数序列化/解析的用例保留,持久账接 trajectory 属 goal 单
+// 后续波次。)
 
 TEST_CASE("IsGoalEventLine 粗筛与尾行截断") {
     CHECK(lubancode::sessions::IsGoalEventLine(R"({"type":"goal_v1","event":"created"})"));

@@ -1,12 +1,10 @@
 // 自进化闭环阶段 1:采集器——扫五路账本,产观察。只读各家账(不改一行),
 // 产物交给 ObservationStore 落账。不生成 Package、不决定晋升(契约)。
 //
-// 扫描口径(上限防大目录拖慢命令):
+// 扫描口径(上限防大目录拖慢命令;P0-6 起旧会话档路已删,goal/trace 走新账属后续批次):
 //   recordings_root  ListRecordings 倒序取最近 max_recordings 件(只收
 //                    finished 的,半截件跳过并计数);
 //   workflow_runs_root  ListRuns 倒序取最近 max_runs 场;
-//   sessions_dir     SessionCatalog 按 updated 倒序取最近 max_sessions 场,
-//                    每场读档抽 goal_v1 族与 tool_trace_v1 族(消息正文不读);
 //   memory_entries   由调用方喂(ProjectMemory::ListEntries/ListUserEntries
 //                    的已接受条目)——采集器不碰 ProjectMemory 对象本身,
 //                    免得把授权/开关的判断散到第二处。
@@ -31,20 +29,16 @@ struct MemoryLayer {
 struct CollectSources {
     std::filesystem::path recordings_root;    // <home>/.lubancode/recordings;空 = 不扫
     std::filesystem::path workflow_runs_root; // <home>/.lubancode/workflow-runs;空 = 不扫
-    std::string sessions_dir;                 // <home>/.lubancode/sessions;空 = 不扫
     std::vector<MemoryLayer> memory_layers;   // 已接受条目(命令层喂;授权与开关的判断在 ProjectMemory 一处)
 
     std::size_t max_recordings = 20;
     std::size_t max_runs = 20;
-    std::size_t max_sessions = 20;
 };
 
 struct CollectReport {
     std::size_t recordings_scanned = 0;   // ListRecordings 里过的件数(含半截)
     std::size_t recordings_skipped = 0;   // 未 finished 跳过的件数
     std::size_t runs_scanned = 0;
-    std::size_t sessions_scanned = 0;
-    std::size_t sessions_unreadable = 0;  // 读不动/解析失败的档
     std::size_t memory_entries = 0;
     std::size_t observations = 0;         // 五路合计产出的观察数
 };

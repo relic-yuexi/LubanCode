@@ -40,7 +40,6 @@ struct DomainHarness {
 
     explicit DomainHarness(bool goal_on = true, bool loop_on = true) {
         ServerOptions options;
-        options.sessions_dir = std::string();  // 纯内存
         options.cwd = "/test/cwd";
         options.features_goal = goal_on;
         options.features_loop = loop_on;

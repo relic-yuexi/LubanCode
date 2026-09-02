@@ -37,7 +37,7 @@ requires:
 
 # 运行参数:只挑有讲究的写,其余逐字段继承。
 runtime:
-  max_steps_per_turn: 40      # 评审要多走几步读上下文,放宽步帽
+  max_turns: 40              # 评审要多走几轮读上下文,任务总 turn 一道闸管到底
   execution_mode: foreground  # 结论要当面看,不进后台
   isolation: none            # 只读不写,不必隔离 worktree
 

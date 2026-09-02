@@ -47,7 +47,7 @@ JSON 值。
 | `type` | 必要字段 | 产物或用途 |
 | --- | --- | --- |
 | `tool` | `tool` | 调已注册工具 |
-| `agent` | `task`；可选 `agent`、`role`、`allowed_tools`、`step_limit`、`model_role` | 跑完整 Agent 工具循环 |
+| `agent` | `task`；可选 `agent`、`role`、`allowed_tools`、`turn_limit`、`model_role` | 跑完整 Agent 工具循环 |
 | `llm` | `prompt`；可选 `output_schema` | 单次模型调用 |
 | `skill` | `skill` | 装载一份 Skill |
 | `template` | `template` | 安全模板渲染 |
@@ -83,8 +83,10 @@ Package 内的 workflow 写包内短名即可——挂载层自动折成 canonic
   （Prompt Profile 五层、能力推导、预装技能、AGENTS.md 继承都按定义走）。
 - `task` 仍是必填：自定义路里它是任务指令，与节点 `input` 一起进首条
   user message，不进系统提示。
-- `allowed_tools` 与 `step_limit` 是调用方显式值，压过定义的缺省档
-  （契约 §4.8）。
+- `allowed_tools` 与 `turn_limit` 是调用方显式值，压过定义的缺省档
+  （契约 §4.8）。`turn_limit` 是**任务总 turn**：这个节点从开跑到收口，最多准入几次逻辑模型请求（含 steering 续投）——与 `agent` 工具走同一只
+  `AgentProfileResolver` 与同一份任务预算账。旧键 `step_limit`（每个 input round
+  各自上限）已弃用，兼容窗内照旧生效；两者同现解析直接拒绝，要求删掉一枚。
 - 名字查不到或定义不可用：编译期能查（能力表带 AgentCatalog 名单）就
   报 `unknown_agent`，运行时首知即报 `agent_unresolved`——不会静默换
   `general-purpose`。

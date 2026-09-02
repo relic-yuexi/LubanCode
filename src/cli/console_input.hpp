@@ -349,6 +349,10 @@ void BroadcastTurnInterrupted();
 // 认台账。传空清除(回到 SetStatusLineData 存的那份)。
 void SetBackgroundStatusProvider(std::function<std::string()> provider);
 
+// 输入框模式行最右端的当前会话技能数,与 /skills 使用同一份活动清单。
+// 值式发布避免 footer 心跳线程与 RefreshSkills 的 vector 替换发生数据竞争。
+void SetSessionSkillCount(std::size_t count);
+
 // Ctrl+R 提问历史反向搜索的数据源(0.30.x 第二批):应用层从 session 事件
 // 账只读现抽一份 PromptHistoryDataset(打开搜索框时取一次,范围轮换在
 // 终端层本地过滤,不反复读盘)。传空清除;管道/重定向走不到逐键路径,

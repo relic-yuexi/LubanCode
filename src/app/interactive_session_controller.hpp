@@ -59,7 +59,6 @@
 #include "runtime/session_runtime.hpp"
 #include "runtime/session_work_scheduler.hpp"
 #include "runtime/turn_ingress.hpp"
-#include "sessions/session_store.hpp"
 #include "tools/agent_tool.hpp"
 #include "tools/registry.hpp"
 
@@ -70,10 +69,10 @@ namespace lubancode::app {
 // 函数尾的手工收尾(摘收件点、停 peer、摘 UI 回调),异常退场同路。
 //
 // P6(显示系统剥离单):会话的"不碰画面"那半账本已搬去
-// runtime::SessionRuntime(存档账/权限账/thread 身份/事件接线),本类
-// 持一份并按引用续用老名字;存档成员(session_store/session_meta/
-// session_title/...)以引用别名指向 runtime 那份,寿命由 runtime 成员的
-// 声明位保住。工具栈/backend 栈/peer/面板仍住本类,后续批次再搬。
+// runtime::SessionRuntime(轨迹账/权限账/thread 身份/事件接线),本类
+// 按引用续用;旧存档成员(session_store/session_meta/...)已随 P0-6 的
+// SessionStore 删除退场,标题与压缩序号是本类活值。工具栈/backend 栈/
+// peer/面板仍住本类,后续批次再搬。
 //
 // ---------------------------------------------------------------------------
 // 剩余方法与职责清单(骨架拆解反弹·问题 2;与实际代码逐条对账,别再靠
@@ -149,10 +148,6 @@ private:
     // /think、/soul 改完会话状态后把皮上的 request 档案与叠层刷新一遍,
     // 下一份请求即时生效——从前这活是传输层包装器在 send_stream 里干的)。
     void SyncAgentRequestPolicy();
-    // /resume 恢复跨轮保留选择(Kimi 保留式思考单 P1):存档的
-    // think_history 事件落回 current_think_history,再按当前模型重校验
-    // (不认就明说并回 default),顺手同步请求档案。
-    void RestoreThinkHistoryFrom(const std::optional<lubancode::sessions::ThinkHistoryEvent>& event);
     void RefreshSkills();
     void RefreshWorkflowCompletions();
     void RefreshProjectInstructions();
@@ -160,8 +155,8 @@ private:
     // 一分不动)→ 原子换档 → 刷下游(技能清单/Profile 根/补全)。回执
     // 逐行带回,由命令层打印。
     std::vector<std::string> ReloadPackages();
-    void PersistNewMessages();
-    // 建档与开仓(第二期):建档提前到发轮前;仓跟着会话 id 开张。
+    // 会话起手对齐(hooks 上下文的 session id/转录路径 + 上下文仓开张):
+    // 轨迹账在 SessionRuntime ctor 里已开,这里只做幂等的对齐与开仓。
     bool EnsureSessionBegun(const std::string& first_text);
     // ---- 两层会话标题(实测问题 7) ----
     // 第一层:首问建档当场起本地临时标题(零模型 token),/sessions 立刻
@@ -193,15 +188,11 @@ private:
                         bool* autosend_failed = nullptr, bool silent = false,
                         memory::QueryOrigin origin = memory::QueryOrigin::User);
     void PumpSteeringToSubagents();
-    // 排队账落会话存档(取走即消费单路径二):queue 事件行,快照式,回放取
-    // 最后一条。排队账一变(进队/送达/回还/清账)都追一份;存档没建档或
-    // 已写坏就安静跳过——档是加层,不拦会话。
-    void PersistSteeringQueue();
-    // resume 重建队列:存档最后一条 queue 快照灌回 SessionSteeringQueue
-    // (空档/没行 = 空队列,照旧)。恢复的条目保 id/次序/尝试次数。
-    void RestoreSteeringQueueFrom(const std::vector<lubancode::sessions::ArchivedQueueItem>& items);
-    // Ctrl+R 提问历史搜索的数据源(0.30.x 第二批):只读 session 事件账
-    // (存档 JSONL 的用户提问行)拼整份 PromptHistoryDataset。
+    // (P0-6:PersistSteeringQueue/RestoreSteeringQueueFrom——旧存档的排队
+    // 事件快照路——已删;queue 的持久账走 trajectory 的
+    // control.queue.snapshot。)
+    // Ctrl+R 提问历史搜索的数据源(0.30.x 第二批):读 workspace 索引的
+    // 派生提问账(indexes/sessions.json 的 prompts 段)。
     lubancode::cli::PromptHistoryDataset CollectPromptHistory();
     // 终端标题模板:项目短名 · 分支 · 状态(0.30.x 第四批)。
     std::string BuildTerminalTitleText(const std::string& state_word) const;
@@ -219,17 +210,8 @@ private:
         in.spinner_enabled = spinner_enabled;
         in.session_compact_epoch = &session_compact_epoch;
         in.last_compact_line = &last_compact_line;
-        in.persisted_count = &persisted_count;
-        in.session_store = &session_store;
-        in.session_store_broken = session_store_broken;
         in.hysteresis = &compact_hysteresis_;
         in.build_compact_options = [this]() { return BuildCompactOptions(); };
-        in.attach_goal_snapshot = [this](lubancode::sessions::CompactV2Event& event) {
-            goal_wiring_.AttachSnapshotToCompact(event);
-        };
-        in.attach_loop_snapshot = [this](lubancode::sessions::CompactV2Event& event) {
-            lubancode::app::AttachLoopSnapshotToCompact(loop_wiring_.MakeCommandWiring(), event.metrics);
-        };
         in.emit_session_hook =
             [this](lubancode::hooks::HookEvent event, nlohmann::json fields, const std::string& match_value) {
                 EmitSessionHook(event, std::move(fields), match_value);
@@ -247,8 +229,7 @@ private:
                                     lubancode::agent::ModelRole to, const std::string& reason) {
             model_router->ledger().RecordFallback(kind, from, to, reason);
         };
-        in.persist_new_messages = [this]() { PersistNewMessages(); };
-        // P0-2 轨迹:flag 开的会话递账本,compact 走 typed 状态机。
+        // P0-2 轨迹:递账本,compact 走 typed 状态机。
         in.trajectory = session_runtime_.trajectory();
         // Token 账本单 A1:compact 子请求旁路桥的 wire(与主 turn 桥同源,
         // interactive_session.cpp 的 ctx.trajectory_wire)。
@@ -262,7 +243,6 @@ private:
         tail.model_router = model_router.get();
         tail.prompts_dir = &prompts_dir;
         tail.artifact_store = artifact_store.get();
-        tail.session_store = &session_store;
         tail.theme = &theme;
         // Token 账本单 A1:回合收尾的抽取/按需摘要走旁路桥落轨迹。
         tail.trajectory = session_runtime_.trajectory();
@@ -339,7 +319,7 @@ private:
     // ---- 组合根装配件(会话终章):材料/后端栈/工具全栈在组合根装好
     //(cli_app 调 BuildSessionStack),控制器只收——下列引用别名指进
     // stack_,名字沿用原局部变量,方法体原样。会话级真值(theme/config/
-    // session_store)里 theme 与存档留本类,config 经别名指 stack_ 的唯一
+    // 标题活值)里 theme 留本类,config 经别名指 stack_ 的唯一
     // 一份。 ----
     SessionStack& stack_;
     lubancode::config::ConfigResult& config_result;  // stack_ 那份(唯一真值)
@@ -454,22 +434,19 @@ private:
     std::vector<lubancode::runtime::TurnView> turn_views_;
     static constexpr std::size_t kMaxArchivedTurnViews = 8;
     std::string wire_str;
-    const std::string& sessions_dir;
-    lubancode::sessions::SessionStore& session_store;
-    lubancode::sessions::SessionMeta& session_meta;  // /export 用;Begin/resume 时填
     std::string session_start_ts;
-    // session_meta 的构造绑定(引用成员):在初始化列表里接 runtime 那份。
-    std::size_t& persisted_count;       // history 里前多少条已经落过盘
-    int& session_compact_epoch;         // 本场第几次压缩(v2 事件记序;resume 接旧账)
-    bool& session_store_broken;         // 建档失败过,别每轮都再撞一次
-    std::string& session_title;         // /title 设的标题;resume 时取存档里最后一条
-    bool& session_title_pending;        // 建档前设了标题,建档成功后补写事件行
+    // P0-6:旧存档的引用成员(store/meta/persisted_count/store_broken/
+    // title_pending/sessions_dir)随 SessionStore 删除;标题与压缩序号改
+    // 本类本体(真账分别是 control.title.changed 与 compact.applied,
+    // 这里只是会话层的活值)。
+    int session_compact_epoch = 0;      // 本场第几次压缩(compact.applied 记序)
+    std::string session_title;          // /title 设的标题;resume 时取折叠真值
     // 两层标题的"账"那半(骨架拆解反弹·问题 2 自本类拆出
-    // app/session_title_account):一场一次/落盘成功才占标题/代数弃迟到
+    // app/session_title_account):一场一次/落账成功才占标题/代数弃迟到
     // 结果的判定都在它那,本类只留"打印、发精炼、同步 peer 名册"。代数
     // 在人工 /title、/clear、/resume 时翻号——在飞的精炼结果落地对代,
     // 对不上就弃(人工优先);精炼器持自己的后台线程,析构自带取消与
-    // 有界收尾。
+    // 有界收尾。标题真账自 P0-6 起唯一:control.title.changed。
     lubancode::app::SessionTitleAccount titles_;
     // 最近一次 compact 的台账(第四期 /context"最近一次 compact 所用角色、
     // 模型、前后 token、耗时和校验结果"):一行人话,由压缩路径写。
@@ -487,7 +464,7 @@ private:
 
     // ---- 子系统接线器(会话终章) ----
     // goal/loop/plan/peer/录制各一只:状态+装配+泵+存档恢复归接线器,
-    // 控制器持句柄调;会话级状态(theme/config/session_store)留本类。
+    // 控制器持句柄调;会话级状态(theme/config/标题活值)留本类。
     // idle_wakes 是会话级的(子代理/loop/后台命令三路并存),loop 接线器借去挂源。
     lubancode::runtime::IdleWakeCoordinator idle_wakes_;
     lubancode::runtime::IdleWakeCoordinator::Subscription subagent_wake_token_;

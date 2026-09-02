@@ -1,8 +1,8 @@
 // SessionRuntime 的实现(显示系统剥离单第六步)。
 //
-// 建档/落盘/标题/压缩序号的账,原文自 InteractiveSession 的 EnsureSessionBegun
-// 与 PersistNewMessages 搬来,语义一字不改;区别只有一处:错误不再当场
-// std::cout,改用返回值交账,由前端决定怎么印(单子"Runtime 不碰界面")。
+// P0-2(Trajectory 升为唯一 Session)之后本类只剩三件事:开账、cwd 对账、
+// 权限/模式/计划的内存真值。旧 SessionStore 的建档/轮末补抄/事件行
+// append 已随 P0-6 删净——事实由 typed 事件即时落账。
 
 #include "runtime/session_runtime.hpp"
 
@@ -15,7 +15,7 @@
 
 namespace lubancode::runtime {
 
-SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)), store_(options_.sessions_dir) {
+SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)) {
     thread_id_ = ids_.NextThreadId();
     // P0-2(Trajectory 升为唯一 Session):恒开一场(进程一场,
     // LaunchSession/resume-as-new)。开不出来记 error,由装配层让会话启动
@@ -98,221 +98,32 @@ TurnEventAdapter SessionRuntime::MakeTurnAdapter() {
     return adapter;
 }
 
-SessionBeginResult SessionRuntime::EnsureBegun(const std::string& first_text, const std::string& model,
-                                               const std::string& cwd) {
-    // P0-2:单一真账在 Trajectory Journal,旧 SessionStore 不建档
-    //(禁 dual-write)。标题等控制事实走 control.* 事件(RecordTitleChanged)。
-    return SessionBeginResult::Disabled;
-    if (store_.active()) {
-        return SessionBeginResult::Active;
-    }
-    if (options_.sessions_dir.empty() || store_broken_) {
-        return SessionBeginResult::Disabled;
-    }
-    meta_ = sessions::SessionMeta{};
-    meta_.wire = options_.wire_name;
-    meta_.model = model;
-    meta_.cwd = cwd;
-    meta_.started_at = sessions::NowTimestamp();
-    const std::string session_id = sessions::MakeSessionId(options_.start_ts, first_text);
-    if (!store_.Begin(meta_, session_id)) {
-        store_broken_ = true;
-        return SessionBeginResult::Failed;
-    }
-    // 建档前设过的标题:现在有文件了,把事件行补上。
-    if (title_pending_ && !title_.empty()) {
-        store_.AppendTitleEvent(title_);
-    }
-    title_pending_ = false;
-    // Plan 模式单:建档前切过的协作档(存档未开时只记了内存)补落 mode_v1。
-    if (pending_mode_event_.has_value()) {
-        store_.AppendModeEvent(*pending_mode_event_);
-        pending_mode_event_.reset();
-    }
-    // /think history 同一道补落(P1):起手切过跨轮保留再开聊,档里也留账。
-    if (pending_think_history_.has_value()) {
-        store_.AppendThinkHistoryEvent(*pending_think_history_);
-        pending_think_history_.reset();
-    }
-    return SessionBeginResult::Begun;
-}
-
-SessionPersistResult SessionRuntime::PersistNew(const std::vector<api::Message>& history, const std::string& model,
-                                                const std::string& cwd) {
-    // P0-2:轮末补抄停用(§15.3"删除轮末按 persisted_count_ 扫 history
-    // 追加这条路")。事实已随事件即时落账(input/output/tool.result)。
-    return SessionPersistResult::Nothing;
-    if (options_.sessions_dir.empty() || store_broken_) {
-        return SessionPersistResult::Nothing;
-    }
-    if (history.size() <= persisted_count_) {
-        return SessionPersistResult::Nothing;
-    }
-    if (!store_.active()) {
-        // 首条用户消息的第一段文本做 slug(图片消息拿文件名)。
-        std::string first_text;
-        for (const auto& message : history) {
-            if (message.role != api::Role::User) {
-                continue;
-            }
-            for (const auto& block : message.content) {
-                if (const auto* tb = std::get_if<api::TextBlock>(&block)) {
-                    first_text = tb->text;
-                    break;
-                }
-                if (const auto* image = std::get_if<api::ImageBlock>(&block)) {
-                    first_text = image->filename;
-                    break;
-                }
-            }
-            break;
-        }
-        // 正路(RunUserTurn)已建档;这里是兜底(peer 轮等不经正路的路径)。
-        const SessionBeginResult begun = EnsureBegun(first_text, model, cwd);
-        if (begun != SessionBeginResult::Begun && begun != SessionBeginResult::Active) {
-            return SessionPersistResult::Nothing;
-        }
-    }
-    for (std::size_t i = persisted_count_; i < history.size(); ++i) {
-        if (!store_.AppendMessage(history[i])) {
-            store_broken_ = true;
-            return SessionPersistResult::BrokenNow;
-        }
-    }
-    persisted_count_ = history.size();
-    return SessionPersistResult::Appended;
-}
-
-SessionPersistResult SessionRuntime::PersistNewWithProvenance(
-    const std::vector<api::Message>& history, const std::string& model, const std::string& cwd,
-    const channel::MessageProvenance& provenance) {
-    // 渠道轮(多渠道单阶段 3):与 PersistNew 同一条路,差别只在落盘新基线
-    // 里的第一条 user 消息带 provenance(宿主真账进 session JSONL,§12.2)。
-    // P0-2(Trajectory 升为唯一 Session):轮末补抄停用——事实由事件即时
-    // 落账;provenance 进 Journal 的 typed 投影是 channel 线后续批次的活。
-    if (options_.sessions_dir.empty() || store_broken_) {
-        return SessionPersistResult::Nothing;
-    }
-    if (history.size() <= persisted_count_) {
-        return SessionPersistResult::Nothing;
-    }
-    // 找本轮落盘区间里的第一条 user 消息(渠道消息本体);assistant 与
-    // tool_result 消息不带渠道 provenance。
-    std::size_t provenance_index = history.size();
-    for (std::size_t i = persisted_count_; i < history.size(); ++i) {
-        if (history[i].role == api::Role::User) {
-            provenance_index = i;
-            break;
-        }
-    }
-    if (!store_.active()) {
-        std::string first_text;
-        for (const auto& message : history) {
-            if (message.role != api::Role::User) continue;
-            for (const auto& block : message.content) {
-                if (const auto* tb = std::get_if<api::TextBlock>(&block)) {
-                    first_text = tb->text;
-                    break;
-                }
-            }
-            break;
-        }
-        const SessionBeginResult begun = EnsureBegun(first_text, model, cwd);
-        if (begun != SessionBeginResult::Begun && begun != SessionBeginResult::Active) {
-            return SessionPersistResult::Nothing;
-        }
-    }
-    for (std::size_t i = persisted_count_; i < history.size(); ++i) {
-        const bool with_provenance = i == provenance_index;
-        const bool ok = with_provenance ? store_.AppendMessageWithProvenance(history[i], provenance)
-                                        : store_.AppendMessage(history[i]);
-        if (!ok) {
-            store_broken_ = true;
-            return SessionPersistResult::BrokenNow;
-        }
-    }
-    persisted_count_ = history.size();
-    return SessionPersistResult::Appended;
-}
-
-void SessionRuntime::ClampPersisted(std::size_t history_size) {
-    if (persisted_count_ > history_size) {
-        persisted_count_ = history_size;
-    }
-}
-
 bool SessionRuntime::SetCollaborationMode(CollaborationMode mode, const std::string& reason,
                                           const std::string& permission_before_plan) {
     if (mode_state_.active == mode) {
-        return false;  // 同档重复切:不动账、不落事件行
+        return false;  // 同档重复切:不动账
     }
     mode_state_.active = mode;
     mode_state_.revision += 1;
     if (mode == CollaborationMode::Plan) {
         mode_state_.permission_before_plan = permission_before_plan;
     }
-    // 存档活跃就落 mode_v1(append+flush);没建档先挂起(EnsureBegun 补落),
-    // 写坏不拦切档——内存真值在,档是加层(与 queue 事件同取舍)。
-    sessions::ModeEvent event;
-    event.mode = ToString(mode);
-    event.reason = reason;
-    event.revision = mode_state_.revision;
-    if (store_.active() && !store_broken_) {
-        store_.AppendModeEvent(event);
-    } else {
-        pending_mode_event_ = event;
-    }
+    // 档位变更的事件账(control.mode.changed)由装配层接 trajectory 落;
+    // 本类只管内存真值。
+    (void)reason;
     return true;
 }
 
-void SessionRuntime::RecordThinkHistory(const std::string& mode) {
-    // /think history 的会话账(Kimi 保留式思考单 P1):存档活跃就落
-    // think_history_v1;没建档先挂起(EnsureBegun 补落),写坏不拦切换。
-    // 同档重复落也无害(append-only 最后一条胜),调用方自己省了就不落。
-    sessions::ThinkHistoryEvent event;
-    event.mode = mode;
-    if (store_.active() && !store_broken_) {
-        store_.AppendThinkHistoryEvent(event);
-    } else {
-        pending_think_history_ = event;
-    }
-}
-
 void SessionRuntime::RecordPlanDocument(const PlanDocument& plan) {
-    // 新稿 supersede 旧稿(旧账仍在 session 事件行,不删)。
+    // 新稿 supersede 旧稿;事件账在 trajectory 侧,这里只留内存真值。
     if (latest_plan_.has_value() && latest_plan_->plan_id == plan.plan_id &&
         latest_plan_->state == PlanReviewState::Presented) {
         PlanDocument superseded = *latest_plan_;
         superseded.state = PlanReviewState::Superseded;
         latest_plan_ = superseded;
-        // supersede 也留一行账:审阅历史看得见"哪稿被哪稿顶了"。
-        if (store_.active() && !store_broken_) {
-            sessions::PlanEvent event;
-            event.plan_id = superseded.plan_id;
-            event.revision = superseded.revision;
-            event.state = ToString(superseded.state);
-            event.sha256 = superseded.content_sha256;
-            event.turn_id = superseded.source_turn_id;
-            store_.AppendPlanEvent(event);
-        }
     }
     latest_plan_ = plan;
     mode_state_.latest_plan_id = plan.plan_id;
-    if (store_.active() && !store_broken_) {
-        sessions::PlanEvent event;
-        event.plan_id = plan.plan_id;
-        event.revision = plan.revision;
-        event.state = ToString(plan.state);
-        event.sha256 = plan.content_sha256;
-        // 内联上限:超限不塞事件行(装配层已落 artifact,这里带引用)。
-        if (plan.markdown.size() <= kPlanMarkdownInlineCap) {
-            event.markdown = plan.markdown;
-        } else {
-            event.artifact_ref = plan.artifact_ref;
-        }
-        event.turn_id = plan.source_turn_id;
-        store_.AppendPlanEvent(event);
-    }
 }
 
 SessionRuntime::PlanReviewOutcome SessionRuntime::ReviewPlan(const std::string& plan_id, std::uint64_t revision,
@@ -322,13 +133,6 @@ SessionRuntime::PlanReviewOutcome SessionRuntime::ReviewPlan(const std::string& 
         return PlanReviewOutcome::Stale;  // 旧 dialog 的迟到回答,不落账
     }
     latest_plan_->state = approve ? PlanReviewState::Approved : PlanReviewState::Rejected;
-    if (store_.active() && !store_broken_) {
-        sessions::PlanReviewEvent event;
-        event.plan_id = plan_id;
-        event.revision = revision;
-        event.decision = approve ? "approved" : "rejected";
-        store_.AppendPlanReviewEvent(event);
-    }
     return approve ? PlanReviewOutcome::Approved : PlanReviewOutcome::Rejected;
 }
 

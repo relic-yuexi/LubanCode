@@ -300,6 +300,13 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     for (std::size_t i = 0; i < queue_count; ++i) {
         push(false, tinted(model.queue_rows[i]));
     }
+    // 模式行常驻输入框正上方；thinking/activity 在它上面。状态行自带配色，
+    // 窄屏由组行层先保右端信息，再由这里作最后一道 ANSI 安全截断。
+    if (draw_status) {
+        for (const std::string& row : model.status_rows) {
+            push(draw_rules, ClampAnsiRowToWidth(row, width));
+        }
+    }
     if (draw_rules) {
         const std::string rule =
             model.rule_tag.empty()
@@ -336,11 +343,6 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
 
     if (draw_rules) {
         push(true, BoxRuleLine(theme, width));
-    }
-    if (draw_status) {
-        for (const std::string& row : model.status_rows) {
-            push(draw_rules, ClampAnsiRowToWidth(row, width));  // 无框读取常态没有状态行,防御性摆位
-        }
     }
     for (std::size_t i = 0; i < dock_count; ++i) {
         push(false, dock_tint_of(i) + TruncateUtf8ToDisplayWidth(model.agent_dock_rows[i], width - 1) +

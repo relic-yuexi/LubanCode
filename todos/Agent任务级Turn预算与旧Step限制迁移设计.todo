@@ -1,6 +1,6 @@
 # Agent 任务级 Turn 预算与旧 Step 限制迁移设计
 
-- 状态：P0-0~P0-3 已落地(2026-09-01,worktree agent-a119a426f9bfa566a);P1-0/P1-1/P2 未做。树级预算(max_tree_total_tokens/max_tree_turns 一族)按主人 2026-08-31 裁决跳过,透明展示走 Token 账本单;P0 批次未涉树级,消费接口留待树级预算单。
+- 状态：P0-0~P0-3 已落地(2026-09-01,worktree agent-a119a426f9bfa566a);P1-0/P1-1 已落地(2026-09-02,worktree agent-a51160f43464368fe);P2 按窗判留档(删除窗未到,不删;两项评估只写结论,见 P2 批次注)。树级预算(max_tree_total_tokens/max_tree_turns 一族)按主人 2026-08-31 裁决跳过,透明展示走 Token 账本单;P0 批次未涉树级,消费接口留待树级预算单。
 - 日期：2026-08-31
 - 级别：P0（预算硬线的作用域与账实一致）；兼容迁移、诊断与文案为 P1
 - 范围：自定义 Agent 定义、`agent` 派工、Workflow Agent 节点、AgentLoop 请求边界、TurnHarness 续投、TaskLedger 预算账、配置与诊断
@@ -770,33 +770,33 @@ stop-hook continuation shares task budget: yes
 
 ### P1-0：兼容迁移
 
-- [ ] 保留 legacy per-run step 路，隔离类型与字段。
-- [ ] 新旧同现明拒，不静默选边。
-- [ ] 老 JSON 入参按 §5.3 给弃用提示。
-- [ ] `/agent doctor` 与 `/agent inspect` 给迁移建议。
-- [ ] fixtures、示例与文档全改写新字段。
-- [ ] CHANGELOG 写明兼容窗与删除条件。
+- [x] 保留 legacy per-run step 路，隔离类型与字段。（P0 已拆 AgentDefinition.max_turns / max_steps_per_turn 两枚独立 optional + AgentTurnBudgetProfile.legacy_max_steps_per_input 影子账;本批补上同现明拒后隔离闭环——两条路各自执法、各自投影,不混写）
+- [x] 新旧同现明拒，不静默选边。（agent_definition.cpp:同现报 agent.turn_budget_conflict,定义不可用;单独旧键按旧义生效 + agent.legacy_step_budget 弃用警告;max_turns 类型/越界带 agent.turn_budget_type/range 稳定码。用例:tests/unit/agent_catalog/test_agent_definition.cpp"新旧预算字段同现"等三册）
+- [x] 老 JSON 入参按 §5.3 给弃用提示。（agent_tool.cpp ExecuteDispatch:两枚键均按 legacy 旧义收值,随结果带回一行 [弃用提示] 并落 LogSink 警告;max_turns 未改义,改义等明确破坏版本。用例:test_agent_tool.cpp 两处 [弃用提示] 断言）
+- [x] `/agent doctor` 与 `/agent inspect` 给迁移建议。（doctor:runtime 行登 max_turns + "预算合同"三行(哪条路生效/迁移建议/预算归属);inspect:legacy 定义给可复制迁移片段。/doctor agents 另列 subagent task turn budget 与 legacy 影子账。用例:test_agent_commands.cpp P1-0 两册）
+- [x] fixtures、示例与文档全改写新字段。（complete.yaml/smoke-probe.yaml/catalog 与 packages 夹具、code-reviewer.yaml、browser-reviewer.yaml 改 max_turns;5 份 workflow 示例 step_limit→turn_limit;agents.md/configuration.md/workflow-schema.md/tools.md/naming.md 同步）
+- [x] CHANGELOG 写明兼容窗与删除条件。（v0.26.160 条目:删除窗=自本版起至少跨两个 minor(预计 0.29.0 起转稳定解析错误),窗内老定义不突变、历史照读）
 
-验收：老定义不突变；新定义不再掉进每轮重置漏洞；用户一眼看得出自己走哪条路。
+验收：老定义不突变；新定义不再掉进每轮重置漏洞；用户一眼看得出自己走哪条路。✔
 
 ### P1-1：可观测性与文案
 
-- [ ] Dock、详情、通知、TaskOutcome 全换 task turn 账。
-- [ ] hooks 增 turn limit/attempted/completed。
-- [ ] trajectory 落 started/completed/failed 边界。
-- [ ] verifier 核对 `task_turn_index`、limit 与终态。
-- [ ] 中英文与帮助页同步。
+- [x] Dock、详情、通知、TaskOutcome 全换 task turn 账。（agent_panel_presenter.cpp AgentStateWord 带 turn_limit/attempted/completed 三参:运行中"turn N/M"(不限"turn N/不限"),耗尽"耗尽 · turn N/M(完整返回 C)";legacy 步数只在没设任务总 turn 时投影且明标"每输入轮;待迁移"。task_ledger.cpp ComposeOutcomeText/CompletionNoticeLines/DrainCompletionNotices 同口径:turn 行是唯一"生效硬线",不再与步数行并写）
+- [x] hooks 增 turn limit/attempted/completed。（SubagentStart 带 turn_limit;SubagentStop 带 turn_limit/turns_attempted/turns_completed/额度尽时 budget_exhausted_reason="turn_limit";前台 EmitWith 与后台 Emit 两路都带,只读）
+- [x] trajectory 落 started/completed/failed 边界。（LoopBoundaryRecorder 新口 OnRequestSentWithTurn:commit_sent 提到 sent 前(顺带治了"commit 失败先记 sent"的糊账),model.request.sent 载荷带 task_turn_index/turn_limit/input_round_index;completed/failed/cancelled 收口按 request_id 对回带 task_turn_index。TurnWiring.input_round_index 由 DriveTurn 每轮钉(旧调用方保持 0)。用例:test_agent_turn_budget.cpp 三册 + test_runtime_wiring.cpp 一册）
+- [x] verifier 核对 `task_turn_index`、limit 与终态。（ScanStream 收 sent 的 turn 序列:不从 1 严格递增报 turn.index_repeated/skipped,越限报 turn.index_over_limit,终态后新 sent 报 turn.sent_after_terminal,终态后无收口报 turn.request_dangling;活账(无终态)不判悬空。用例:test_session_verifier.cpp 四册）
+- [x] 中英文与帮助页同步。（i18n.cpp 中英成对新增 agent_status.turn_* 一族与 doctor.agents.turn_budget/legacy_step_budget;"步数"行正名"主回合局部保险(每输入轮)";doctor.agents.note 改口;无 /help 条目涉预算,查过）
 
-验收：运行中、收场后、导出轨迹三处看到同一组数字，不再出现“36/12 步”这类假账。
+验收：运行中、收场后、导出轨迹三处看到同一组数字，不再出现“36/12 步”这类假账。✔（三处都从 TaskRecord::turn_account 或其请求簿取数;legacy 投影只在 turn_limit==0 的任务上出现）
 
 ### P2：旧路退场与树级预算预留
 
-- [ ] 到明确版本窗后，Agent YAML 删除 `runtime.max_steps_per_turn`。
-- [ ] 清掉 `StepLimitExhausted` 在自定义 Agent 主路的消费。
-- [ ] 评估 `subagent.max_tree_turns`，另立实施单，不在本批偷做。
-- [ ] 评估主会话顶层 `max_steps_per_turn` 是否另改 `max_model_calls_per_input`。
+- [ ] 到明确版本窗后，Agent YAML 删除 `runtime.max_steps_per_turn`。（**窗未到,不删**。CHANGELOG v0.26.160 定的窗:自该版起至少跨两个 minor 版本,预计 0.29.0 起转稳定解析错误。条件:窗内 /agent doctor 的迁移建议至少观察一个 minor 周期、存量定义的 legacy 警告不再新增(可由 doctor 汇总判断)。到窗后另立删除单,按 §5.2 阶段 C 办:主会话顶层同名配置不跟绑删,历史 session/trajectory 照读旧快照字段）
+- [ ] 清掉 `StepLimitExhausted` 在自定义 Agent 主路的消费。（**同窗判,不删**。现状:自定义 Agent 主路的收场分型里 StepLimit 只在没装任务 turn 账时出现(turn_limit>0 时 TurnLimit 先到先收,ClassifyTurnEnd 的序钉着);真正清消费须等 legacy 键删除窗到,同上一条一起办）
+- [ ] 评估 `subagent.max_tree_turns`，另立实施单，不在本批偷做。（**评估结论:另立单,本单不做**。理由:主人 2026-08-31 已裁决树级预算(max_tree_turns 一族)跳过,透明展示走 Token 账本单;§7.6 只要求预留消费接口——P0 的 ModelTurnBudgetGate 已是消费口,root tree ledger 挂同一只接口即可,不必现在动。建议单名"树级Turn预算与root账单设计",范围:root tree ledger 归属(与 max_tree_nodes/max_tree_total_tokens 同层)、父子并行的准入次序、树级耗尽的收树分型)
+- [ ] 评估主会话顶层 `max_steps_per_turn` 是否另改 `max_model_calls_per_input`。（**评估结论:暂不改,要改另立兼容单**。理由:§4.4 已定"本单不借子代理修正顺手破坏主会话老配置";现行为"主回合局部保险"已在 configuration.md 与 /doctor agents 正名,语义无歧义;改名收益(名字自释)小于兼容成本(顶层配置+env+两层配置文件三处双读)。若日后改:候选名 max_model_calls_per_input,走 config 命名规范单的兼容窗流程,与本单 legacy 键删除窗错开)
 
-验收：对外 Agent 合同只剩任务级 turn；内部 step 只作局部循环坐标。
+验收：对外 Agent 合同只剩任务级 turn；内部 step 只作局部循环坐标。（**部分达成,按窗递进**:自定义 Agent 的对外合同已是 runtime.max_turns(示例/文档/向导只写新键);legacy 键与 StepLimitExhausted 的最终退场等 0.29.0 窗,见上）
 
 ## 十五、预计改动边界
 

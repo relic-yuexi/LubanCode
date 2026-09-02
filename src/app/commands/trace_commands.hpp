@@ -24,7 +24,6 @@ namespace lubancode::app {
 
 struct TraceCommandContext {
     lubancode::runtime::ToolTraceHub* trace_hub = nullptr;  // 空 = 没装 hub
-    lubancode::sessions::SessionStore* session_store = nullptr;  // 空 = 没建档
     const lubancode::cli::Theme* theme = nullptr;
 };
 

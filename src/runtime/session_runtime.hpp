@@ -3,8 +3,8 @@
 // 一场会话真正的核心状态,从 app/interactive_session.cpp 的 InteractiveSession
 // (缩成 TerminalSessionController)手里搬出来的那半:
 //   - thread 身份与统一发号(IdAuthority:thread/turn/item/request/seq);
-//   - 会话存档账:SessionStore、SessionMeta、标题、落盘基线、压缩序号、
-//     建档失败旗——Begin/Resume/追加/标题事件/压缩事件的开账与收口;
+//   - 会话真账:一场恒开的 TrajectorySessionLedger(P0-2 起唯一 Session,
+//     旧 SessionStore/轮末补抄路已随 P0-6 删净);
 //   - 会话权限账:"总是允许"的工具集合(按 a / accept_for_session 落进来);
 //   - 事件接线:Attach 一只 EventSink,每轮经 TurnEventAdapter 把
 //     AgentLoop 回调翻成 ServerEvent 流——终端、app-server、Web/Tauri
@@ -30,7 +30,6 @@
 #include <vector>
 
 #include "agent/loop.hpp"
-#include "sessions/session_store.hpp"
 #include "api/types.hpp"
 #include "runtime/event_sink.hpp"
 #include "runtime/id_authority.hpp"
@@ -41,30 +40,15 @@
 
 namespace lubancode::runtime {
 
-// 建档结果:控制器据此决定要不要打一行错误(本类不打印)。
-enum class SessionBeginResult {
-    Active,    // 已经建过档(或刚建成功)
-    Begun,     // 本次新建成功
-    Failed,    // 本次尝试失败(store_broken 已置位)
-    Disabled,  // 没主目录/先前已 broken:根本没试
-};
-
-// 增量落盘结果。
-enum class SessionPersistResult {
-    Nothing,    // 没有新消息(或本来就不落盘)
-    Appended,   // 追加成功
-    BrokenNow,  // 追加失败,broken 在这一刻置位(只报一次)
-};
-
 class SessionRuntime {
 public:
     struct Options {
-        std::string sessions_dir;  // 旧 SessionStore 档案目录(P0-2 起不消费,P0-6 删)
         std::string wire_name;     // meta.wire(provider 协议名)
         std::string start_ts;      // 会话 id 的时间戳底子(NowIdTimestamp)
         // P0-2(Trajectory 升为唯一 Session):feature/env 开关已删,本类
         // 恒开一场 TrajectorySessionLedger——开张失败由 trajectory_open_error
-        // 报,装配层须让会话启动失败,不回退旧 SessionStore(禁 dual-write)。
+        // 报,装配层须让会话启动失败,不回退旧写口(禁 dual-write)。P0-6:
+        // 旧 sessions_dir 与 SessionStore 成员已删,旧路不存在了。
         // P0-1:装配层按四级裁决冻好的身份整份递进(终端/app-server/子代理
         // 同一把钥匙);空 = ledger 按启动 cwd 现场裁决(兜底,只服务测试)。
         workspace::WorkspaceIdentity trajectory_workspace_identity;
@@ -87,9 +71,14 @@ public:
 
     // ---- thread 身份与事件 --------------------------------------------------
     // 事件层的 thread_id(IdAuthority 发的 thread-<n>)。存档的会话 id
-    // (MakeSessionId 的时间戳+slug)是另一本账,在 store 里,两者不混。
+    // 在 TrajectorySessionLedger 手里,两者不混。
     const std::string& thread_id() const { return thread_id_; }
     IdAuthority& ids() { return ids_; }
+
+    // 事件桥的 wire 名(旁路桥 identity;与主轮桥同源)。
+    const std::string& wire_name() const { return options_.wire_name; }
+    // 会话 id 的时间戳底子(/clear 翻新场次用)。
+    const std::string& start_ts() const { return options_.start_ts; }
 
     // 事件出口:不持有,调用方保证存活;可空(终端老路不接)。
     void AttachSink(EventSink* sink) { sink_ = sink; }
@@ -116,48 +105,6 @@ public:
     // 挂的那只 sink(没挂就只发号不落笔)。每轮各开一只,轮间不共用状态。
     TurnEventAdapter MakeTurnAdapter();
 
-    // ---- 会话存档账(本类持有,控制器按引用续用) ----------------------------
-    sessions::SessionStore& store() { return store_; }
-    const sessions::SessionStore& store() const { return store_; }
-    const std::string& sessions_dir() const { return options_.sessions_dir; }
-    const std::string& wire_name() const { return options_.wire_name; }
-    const std::string& start_ts() const { return options_.start_ts; }
-    sessions::SessionMeta& meta() { return meta_; }
-    std::string& title() { return title_; }
-    bool& title_pending() { return title_pending_; }
-    std::size_t& persisted_count() { return persisted_count_; }
-    int& compact_epoch() { return compact_epoch_; }
-    bool& store_broken() { return store_broken_; }
-
-    // 建档:meta 填账 + Begin + 建档前挂起的标题补事件行。失败置 broken。
-    // 首条文本做 slug;model/cwd 由调用方给(会话模型与目录是控制器的活)。
-    // Plan 模式单:建档前切过的协作档(存档未开时 SetCollaborationMode 只
-    // 记内存)在这里补落 mode_v1——起手 --mode plan 的场子,档里第一行
-    // 用户消息之前就有 mode 账,resume 才接得回档位。
-    // P0-2:单一真账在 Trajectory Journal,旧 SessionStore 不建档——恒回
-    // Disabled(会话 id 与转录路径由账本在 ctor 里定)。
-    SessionBeginResult EnsureBegun(const std::string& first_text, const std::string& model,
-                                   const std::string& cwd);
-
-    // 增量落盘:history 里 persisted_count 之后逐条追加(只增不减);store
-    // 还没开张时先按兜底建档(首条用户文本抽出来做 slug)。失败置 broken。
-    // P0-2 轨迹路:轮末补抄这条路整个停用——事实由
-    // input.received/model.output.completed/tool.result.committed 事件
-    // 即时落账,轮末只验状态机,不补抄消息(§15.3)。
-    SessionPersistResult PersistNew(const std::vector<api::Message>& history, const std::string& model,
-                                    const std::string& cwd);
-
-    // 渠道轮(多渠道单阶段 3):同 PersistNew,但本轮新区间的第一条 user
-    // 消息带 provenance 落档(session JSONL 向后兼容保存宿主真账,
-    // message-contracts.md §2)。assistant/tool_result 消息照旧不带。
-    SessionPersistResult PersistNewWithProvenance(const std::vector<api::Message>& history,
-                                                  const std::string& model, const std::string& cwd,
-                                                  const channel::MessageProvenance& provenance);
-
-    // 落盘基线收到新长度(/compact 换史后由调用方校正;
-    // 只收不放,防旧账重写)。
-    void ClampPersisted(std::size_t history_size);
-
     // ---- 会话权限账 ----------------------------------------------------------
     // "总是允许"的工具集合:确认档按 a、远端审批 accept_for_session 落进来,
     // 本场该工具免问。settings.local.json 的 allow_tools 由装配层注入。
@@ -165,37 +112,30 @@ public:
 
     // ---- 协作模式账(Plan 模式单:两根轴的会话级真值) ------------------------
     // ModeState 归本类所有(单子:"不塞进 LineEditor 的 ConfirmMode 原子"),
-    // 前端只读快照。切档走 SetCollaborationMode——它顺手落 mode_v1 事件行
-    // (存档活跃时),/resume 按"最后一条 mode 事件"恢复档位。
+    // 前端只读快照。切档走 SetCollaborationMode;事件的落账在 trajectory
+    // 侧(control.mode.changed),旧 mode_v1 存档行已随 P0-6 删。
     const ModeState& mode_state() const { return mode_state_; }
     CollaborationMode collaboration_mode() const { return mode_state_.active; }
 
-    // 切档。reason 是稳定短码("slash"/"approved"/"resume"/"clear"),随事件
-    // 行落账。permission_before_plan 在切入 Plan 时由调用方传当前确认档
-    // ("confirm"/"auto"/"yolo");切回 Default 时本类不动确认档——批准框选的
-    // 新档只改本 session,由装配层落。
-    // 返回值:切换是否真的发生(同档重复切给 false,不落事件行)。
+    // 切档。reason 是稳定短码("slash"/"approved"/"resume"/"clear"),随
+    // control.mode.changed 事件落账(装配层接)。permission_before_plan 在
+    // 切入 Plan 时由调用方传当前确认档("confirm"/"auto"/"yolo");切回
+    // Default 时本类不动确认档——批准框选的新档只改本 session,由装配层落。
+    // 返回值:切换是否真的发生(同档重复切给 false)。
     bool SetCollaborationMode(CollaborationMode mode, const std::string& reason,
                               const std::string& permission_before_plan = std::string());
-    // resume 专用:只回内存真值,不落 mode 事件行(档位是回放出来的,再落
-    // 一行会把 resume 当一次切换记账)。
+    // resume 专用:只回内存真值,不落事件(档位是回放出来的,再记
+    // 一笔会把 resume 当一次切换记账)。
     void RestoreCollaborationMode(CollaborationMode mode, std::uint64_t revision) {
         mode_state_.active = mode;
         mode_state_.revision = revision;
     }
 
-    // ---- 跨轮保留账(Kimi 保留式思考单 P1)-----------------------------------
-    // /think history default|all 的会话账:存档活跃就落 think_history_v1 事件
-    // 行(append+flush),没建档先挂起(EnsureBegun 补落)。mode 是稳定短码
-    // ("default"/"all"),/resume 按"最后一条"恢复并按当前模型重新校验。
-    void RecordThinkHistory(const std::string& mode);
-
     // ---- 计划成品账 -----------------------------------------------------------
-    // 最近一份 PlanDocument(按 revision supersede;旧稿仍在 session 事件
-    // 行里,/resume 按 plan_v1 行重建全账)。null = 本场还没交过计划。
+    // 最近一份 PlanDocument(按 revision supersede;/resume 按新账重建)。
+    // null = 本场还没交过计划。
     void RecordPlanDocument(const PlanDocument& plan);
-    // resume 专用:只回内存真值,不落 plan 事件行(账已在档里,重复落会
-    // 翻倍),也不做 supersede 侧写。
+    // resume 专用:只回内存真值,不落账(账已在 trajectory,重复落会翻倍)。
     void RestorePlanDocument(const PlanDocument& plan) {
         latest_plan_ = plan;
         mode_state_.latest_plan_id = plan.plan_id;
@@ -214,18 +154,7 @@ private:
     std::string thread_id_;
     EventSink* sink_ = nullptr;
 
-    sessions::SessionStore store_;
-    sessions::SessionMeta meta_{};
-    std::string title_;
-    bool title_pending_ = false;
-    // persisted_count_:旧路(轮末按 history 追加补抄)的落盘基线。轨迹路
-    // (P0-2)不读不写它——事实由事件即时落账,这条补抄路停用;flag 关的
-    // 会话照旧。
-    std::size_t persisted_count_ = 0;
-    int compact_epoch_ = 0;
-    bool store_broken_ = false;
-
-    // P0-2 轨迹账:flag 开的会话持一场(可选构造;move-only)。
+    // P0-2 轨迹账:每场恒开一只(可选构造;move-only)。
     std::optional<TrajectorySessionLedger> trajectory_;
     std::string trajectory_open_error_;
 
@@ -233,10 +162,6 @@ private:
 
     // Plan 模式单:两轴真值与计划成品账。
     ModeState mode_state_;
-    // 存档未开时切过的档(起手 --mode plan):建档那一刻补落。
-    std::optional<sessions::ModeEvent> pending_mode_event_;
-    // 存档未开时切过的跨轮保留选择(起手 /think history all):建档补落。
-    std::optional<sessions::ThinkHistoryEvent> pending_think_history_;
     std::optional<PlanDocument> latest_plan_;
 };
 

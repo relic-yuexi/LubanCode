@@ -214,6 +214,9 @@ public:
                         std::shared_ptr<const SubagentDispatchEnv> env);
 
     const AgentRunIdentity& identity() const { return identity_; }
+    // 冻结派工环境(只读):薄壳按当前入口修 schema 的后台可见性用(派工单
+    // §二——嵌套环境没有后台工厂时,schema 不再把 background 摆出来)。
+    const std::shared_ptr<const SubagentDispatchEnv>& env() const { return env_; }
     // 派工入口:身份先经 TLS 校准(见 CurrentDispatchIdentity),再进协调器。
     Tool::Result Dispatch(const nlohmann::json& input);
     // 薄壳的 schema/description 只读转发口(协调器亡 = null,壳退静态文案)。

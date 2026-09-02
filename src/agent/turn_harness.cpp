@@ -160,6 +160,7 @@ DriveReport DriveTurn(Agent& agent, const TurnWiring& wiring, api::Message input
     // 首轮吃完整 Message(可带图像附件);续投轮的输入是字符串(拼好的
     // inbox 增量),走 Run 的字符串重载。
     bool first_round = true;
+    int input_rounds = 0;  // 输入轮坐标(§11.1):初始任务为 0,续投轮递增
     std::string run_input;
     // 已领出、尚未真正随一次模型请求发出的续投批:领了批的那轮若失败/被
     // 打断/撞限,按批退回未送("取走了不等于送到了")。
@@ -172,8 +173,14 @@ DriveReport DriveTurn(Agent& agent, const TurnWiring& wiring, api::Message input
     };
 
     for (;;) {
-        const auto outcome = first_round ? agent.Run(std::move(input), wiring, options.cancel)
-                                         : agent.Run(run_input, wiring, options.cancel);
+        // 输入轮坐标(turn 预算单 §3.1/§11.1,P1-1):每轮拷一份 wiring 钉好
+        // input_round_index——纯信息投影随 turn 边界进轨迹,引擎不拿它执法。
+        // 旧调用方直调 Run 的 wiring 保持 0,行为不变。
+        TurnWiring round_wiring = wiring;
+        round_wiring.input_round_index = input_rounds;
+        const auto outcome = first_round ? agent.Run(std::move(input), round_wiring, options.cancel)
+                                         : agent.Run(run_input, round_wiring, options.cancel);
+        ++input_rounds;
         first_round = false;
         if (!outcome.has_value()) {
             restore_inflight();

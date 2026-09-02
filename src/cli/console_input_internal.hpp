@@ -70,12 +70,17 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key);
 // 从 keymap 查表,/keymap 改绑面板跟脚换键)。
 std::optional<PanelKey> MapToPanelKey(const platform::KeyInput& key);
 
-// 状态行组行(空闲 composer 路与 footer 路共用同一只 BoxChrome 形状)。
+// 模式行:左端钉当前档与下一档提示,右端钉会话技能数。右端信息优先保留;
+// 窄屏先收左端,最后才截右端。yolo 只给档名本身套危险色。
 struct BoxChrome {
     bool enabled = false;
     const Theme* theme = nullptr;
     ConfirmMode mode = ConfirmMode::Confirm;
 };
+std::string BuildComposerModeLine(const BoxChrome& chrome, int skill_count, int max_width);
+std::size_t SessionSkillCount();
+
+// 状态行组行(兼容其余调用点;输入区现由 BuildComposerModeLine 画专用模式行)。
 std::string BuildStatusLine(const BoxChrome& chrome, int max_width);
 
 // 行级双缓冲的兜底画法(VT 批量不可用的老终端):空闲路 RedrawEditArea

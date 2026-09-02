@@ -247,6 +247,57 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             parsed.gateway = gateway;
             return parsed;
         }
+        // 存储 v2 P0-5 子命令:lubancode migrate-storage <plan|run|status>
+        // [--operation <id>] [--project-root <路径>(可多枚)] [--delete-source --yes]。
+        // 只认裸词打头且此前没有位置参数;形状不对当场退用法。
+        if (arg == "migrate-storage" && options.positional.empty()) {
+            static const std::set<std::string> kVerbs = {"plan", "run", "status"};
+            const std::size_t rest = args.size() - i - 1;
+            if (rest == 0 || kVerbs.count(args[i + 1]) == 0) {
+                parsed.action = CliAction::BadMigrateStorage;
+                parsed.error_text = "用法: lubancode migrate-storage <plan|run|status> "
+                                    "[--operation <id>] [--project-root <路径>] "
+                                    "[--delete-source --yes]";
+                return parsed;
+            }
+            MigrateStorageCliArgs migrate;
+            migrate.verb = args[i + 1];
+            for (std::size_t extra = i + 2; extra < args.size(); ++extra) {
+                if (args[extra] == "--operation") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadMigrateStorage;
+                        parsed.error_text = "--operation 需要一个 operation id";
+                        return parsed;
+                    }
+                    migrate.operation_id = args[++extra];
+                    continue;
+                }
+                if (args[extra] == "--project-root") {
+                    if (extra + 1 >= args.size()) {
+                        parsed.action = CliAction::BadMigrateStorage;
+                        parsed.error_text = "--project-root 需要一个项目根路径";
+                        return parsed;
+                    }
+                    migrate.project_roots.push_back(args[++extra]);
+                    continue;
+                }
+                if (args[extra] == "--delete-source") {
+                    migrate.delete_source = true;
+                    continue;
+                }
+                if (args[extra] == "--yes") {
+                    migrate.confirm_delete = true;
+                    continue;
+                }
+                parsed.action = CliAction::BadMigrateStorage;
+                parsed.error_text = "migrate-storage " + migrate.verb + " 认不得参数 \"" +
+                                    args[extra] + "\"";
+                return parsed;
+            }
+            parsed.action = CliAction::RunMigrateStorage;
+            parsed.migrate_storage = migrate;
+            return parsed;
+        }
         if (arg == "--continue") {
             options.continue_last = true;
             continue;

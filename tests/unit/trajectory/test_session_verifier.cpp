@@ -6,6 +6,7 @@
 //   - 坏边明报:child 文件缺、hash 不合、无父派发引用。
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <filesystem>
 #include <fstream>
 #include <memory>
@@ -316,6 +317,179 @@ TEST_CASE("后台子账(relations 无 parent_call_id)不落父侧派发边,不�
     CHECK(edge.child_has_terminal);
     CHECK(edge.child_terminal_hash.size() == 64);  // 实读回填
     CHECK(edge.error_code.empty());  // 后台无父侧边是合同形状,不是坏账
+}
+
+// ---------------------------------------------------------------------------
+// 任务级 turn 序列核对(turn 预算单 §13.7,P1-1):sent 的 task_turn_index
+// 从 1 起严格递增、不超 limit、终态后无悬空请求。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 写一只带 turn 坐标的子账:sent 事件逐枚(task_turn_index/turn_limit),
+// 每枚可选收口(completed/failed),末尾 run 终态。request_id 逐枚自增。
+void WriteTurnSequenceChild(ActiveSession& session, const std::string& child_run_id,
+                            const std::vector<int>& sent_indexes, int turn_limit,
+                            const std::vector<int>& close_indexes, bool with_terminal = true) {
+    auto stream = session.directory.ReserveSubagentStream(child_run_id);
+    REQUIRE(stream.has_value());
+    EventScope scope = session.main->base_scope();
+    scope.run_id = child_run_id;
+    scope.run_kind = RunKind::Subagent;
+    auto child = TrajectoryRecorder::Start(*stream, session.directory.artifacts_root(), scope);
+    REQUIRE(child.has_value());
+    EventLinks links;
+    links.parent_run_id = session.manifest.main_run_id;
+    REQUIRE(child->WriteRunStarted(nlohmann::json{{"run_kind", "subagent"},
+                                                  {"agent_run_id", child_run_id},
+                                                  {"owner_run_id", session.manifest.main_run_id},
+                                                  {"start_reason", "agent_tool_dispatch"}},
+                                    Durability::PowerLoss, std::move(links))
+                .status == RecordReceipt::Status::Committed);
+    // 状态机要求:首枚 prepared 前须有开着的 turn 与输入。
+    {
+        EventScope turn = child->base_scope();
+        turn.turn_id = "turn-0001";
+        turn.actor = Actor::User;
+        turn.origin = Origin::ExternalUser;
+        REQUIRE(Put(*child, EventKind::TurnStarted, turn, nlohmann::json{{"trigger", "external_user"}})
+                    .status == RecordReceipt::Status::Committed);
+        REQUIRE(Put(*child, EventKind::InputReceived, turn,
+                    nlohmann::json{{"input_id", "input-0001"},
+                                   {"content", nlohmann::json::array({"干活"})},
+                                   {"channel", "subagent"},
+                                   {"sender", nlohmann::json{{"kind", "local_user"}}}})
+                    .status == RecordReceipt::Status::Committed);
+    }
+    for (const int index : sent_indexes) {
+        EventScope req = child->base_scope();
+        req.turn_id = "turn-0001";
+        req.request_id = "req-" + std::to_string(index);
+        req.actor = Actor::Host;
+        req.origin = Origin::RecoveryRuntime;
+        const auto prepared =
+            Put(*child, EventKind::ModelRequestPrepared, req,
+                nlohmann::json{{"model", "demo-model"},
+                               {"provider", "demo"},
+                               {"wire", "responses"},
+                               {"message_refs", nlohmann::json::array({"evt-00000002"})}});
+        REQUIRE(prepared.status == RecordReceipt::Status::Committed);
+        REQUIRE(Put(*child, EventKind::ModelRequestSent, req,
+                    nlohmann::json{{"prepared_event_id", prepared.event_id},
+                                   {"task_turn_index", static_cast<std::uint64_t>(index)},
+                                   {"turn_limit", static_cast<std::uint64_t>(turn_limit)},
+                                   {"input_round_index", std::uint64_t{0}}})
+                    .status == RecordReceipt::Status::Committed);
+        if (std::find(close_indexes.begin(), close_indexes.end(), index) != close_indexes.end()) {
+            EventScope out = child->base_scope();
+            out.turn_id = "turn-0001";
+            out.request_id = "req-" + std::to_string(index);
+            out.actor = Actor::Model;
+            out.origin = Origin::ProviderModel;
+            REQUIRE(Put(*child, EventKind::ModelOutputCompleted, out,
+                        nlohmann::json{{"output_id", "output-" + std::to_string(index)},
+                                       {"blocks", nlohmann::json::array({nlohmann::json{
+                                                      {"type", "text"}, {"text", "结论"}}})},
+                                       {"stop_reason", "end_turn"},
+                                       {"task_turn_index", static_cast<std::uint64_t>(index)}})
+                        .status == RecordReceipt::Status::Committed);
+        }
+    }
+    if (with_terminal) {
+        // 状态机要求:run 终态前先收 turn。
+        EventScope turn = child->base_scope();
+        turn.turn_id = "turn-0001";
+        turn.actor = Actor::Host;
+        turn.origin = Origin::RecoveryRuntime;
+        REQUIRE(Put(*child, EventKind::TurnCompleted, turn, nlohmann::json{{"outcome", "done"}})
+                    .status == RecordReceipt::Status::Committed);
+        REQUIRE(child->FinishRun(EventKind::RunCompleted, "task done", Durability::PowerLoss).status ==
+                RecordReceipt::Status::Committed);
+    }
+    REQUIRE(child->Close().has_value());
+}
+
+}  // namespace
+
+TEST_CASE("turn 序列:好账——1,2 递增、limit 内、每枚有收口,verify 过") {
+    ParentFixture fixture("turngood");
+    ActiveSession& session = *fixture.active;
+    WriteTurnSequenceChild(session, "agent-turn-ok",
+                           /*sent_indexes=*/{1, 2}, /*turn_limit=*/2, /*close_indexes=*/{1, 2});
+    const auto report = VerifySessionDir(session.session_dir());
+    CHECK(report.ok);
+    for (const auto& stream : report.streams) {
+        if (stream.relative_path.find("agent-turn-ok") != std::string::npos) {
+            CHECK(stream.ok);
+            CHECK(stream.error_code.empty());
+        }
+    }
+}
+
+TEST_CASE("turn 序列:越过 turn_limit——turn.index_over_limit") {
+    ParentFixture fixture("turnover");
+    ActiveSession& session = *fixture.active;
+    WriteTurnSequenceChild(session, "agent-turn-over",
+                           /*sent_indexes=*/{1, 2, 3}, /*turn_limit=*/2, /*close_indexes=*/{1, 2, 3});
+    const auto report = VerifySessionDir(session.session_dir());
+    REQUIRE_FALSE(report.ok);
+    bool found = false;
+    for (const auto& stream : report.streams) {
+        if (stream.relative_path.find("agent-turn-over") != std::string::npos) {
+            found = true;
+            CHECK_FALSE(stream.ok);
+            CHECK(stream.error_code == "turn.index_over_limit");
+        }
+    }
+    CHECK(found);
+}
+
+TEST_CASE("turn 序列:重号与跳号——turn.index_repeated / turn.index_skipped") {
+    {
+        ParentFixture fixture("turnrep");
+        ActiveSession& session = *fixture.active;
+        WriteTurnSequenceChild(session, "agent-turn-rep",
+                               /*sent_indexes=*/{1, 1}, /*turn_limit=*/0, /*close_indexes=*/{1});
+        const auto report = VerifySessionDir(session.session_dir());
+        REQUIRE_FALSE(report.ok);
+        for (const auto& stream : report.streams) {
+            if (stream.relative_path.find("agent-turn-rep") != std::string::npos) {
+                CHECK(stream.error_code == "turn.index_repeated");
+            }
+        }
+    }
+    {
+        ParentFixture fixture("turnskip");
+        ActiveSession& session = *fixture.active;
+        WriteTurnSequenceChild(session, "agent-turn-skip",
+                               /*sent_indexes=*/{1, 3}, /*turn_limit=*/0, /*close_indexes=*/{1, 3});
+        const auto report = VerifySessionDir(session.session_dir());
+        REQUIRE_FALSE(report.ok);
+        for (const auto& stream : report.streams) {
+            if (stream.relative_path.find("agent-turn-skip") != std::string::npos) {
+                CHECK(stream.error_code == "turn.index_skipped");
+            }
+        }
+    }
+}
+
+TEST_CASE("turn 序列:悬空请求——活账不判,终态后的悬空由防御分支兜着") {
+    // 注:recorder 的状态机根本不允许把"sent 后无收口"的请求写到 run 终态
+    // 之后(turn 收口就被拒)——所以 turn.request_dangling / turn.sent_after_
+    // terminal 两枚码是防御手工修复/外部写账的兜底分支,正经 API 造不出这
+    // 种账。这里钉住可达的那半边:run 未终态的活账,请求还在飞,不算悬空。
+    ParentFixture fixture("turnlive");
+    ActiveSession& session = *fixture.active;
+    WriteTurnSequenceChild(session, "agent-turn-live",
+                           /*sent_indexes=*/{1}, /*turn_limit=*/0, /*close_indexes=*/{},
+                           /*with_terminal=*/false);
+    const auto report = VerifySessionDir(session.session_dir());
+    for (const auto& stream : report.streams) {
+        if (stream.relative_path.find("agent-turn-live") != std::string::npos) {
+            CHECK(stream.ok);  // 活账:请求还在飞,不算悬空
+            CHECK(stream.error_code.empty());
+        }
+    }
 }
 
 TEST_CASE("坏链: 子账尾行截断,该 stream 明报不影响别的边") {

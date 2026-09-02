@@ -1073,6 +1073,27 @@ void PrintAgentsMatrix(const DoctorContext& context) {
         TermOut() << tr("doctor.agents.lineage") << "\n";
         TermOut() << trf("doctor.agents.limits", active_limit, depth_limit, children_limit, tree_nodes_limit)
                   << "\n";
+        // 任务级 turn 预算(turn 预算单 §11.3,P1-1):列明宿主默认、legacy
+        // 影子账与归属——哪个定义还走旧路,doctor 一眼指出。
+        {
+            const std::optional<int> default_turns = context.config.subagent.default_max_turns;
+            TermOut() << trf("doctor.agents.turn_budget",
+                             default_turns.has_value() ? std::to_string(*default_turns)
+                                                       : std::string("0"),
+                             default_turns.has_value() ? tr("doctor.agents.turn_budget_source_config")
+                                                       : tr("doctor.agents.turn_budget_source_unset"))
+                      << "\n";
+            const std::optional<int> legacy_steps = context.config.subagent.max_steps_per_turn;
+            TermOut() << trf("doctor.agents.legacy_step_budget",
+                             legacy_steps.has_value()
+                                 ? std::to_string(*legacy_steps)
+                                 : (context.main_profile->max_steps_per_turn > 0
+                                        ? std::to_string(context.main_profile->max_steps_per_turn) +
+                                              "(继承 max_steps_per_turn)"
+                                        : std::string("unset")))
+                      << "\n";
+            TermOut() << tr("doctor.agents.turn_budget_share") << "\n";
+        }
         TermOut() << tr("doctor.agents.detached_registry") << "\n";
         TermOut() << tr("doctor.agents.completion_routing") << "\n";
         TermOut() << tr("doctor.agents.task_spec") << "\n";
@@ -1151,8 +1172,8 @@ void PrintInstructionsDoctor(const DoctorContext& context) {
 void PrintTrajectoryDoctor(const DoctorContext& context) {
     TermOut() << context.theme.stats << "轨迹账(/doctor trajectory):" << context.theme.reset << "\n";
     if (context.trajectory_ledger == nullptr) {
-        TermOut() << "  轨迹未开(features.trajectory 关)。副作用工具的可恢复保证"
-                     "按降级口径执行,无审计账可查。\n";
+        TermOut() << "  轨迹账未装配(会话启动时开张失败)。无审计账可查,"
+                     "详见启动错误。\n";
         TermOut().flush();
         return;
     }
@@ -1304,7 +1325,7 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
         // 默认不联网);--probe 才对明配 endpoint 发无业务数据的探针。
         TermOut() << context.theme.stats << "遥测(/doctor telemetry):" << context.theme.reset << "\n";
         if (context.telemetry_service == nullptr) {
-            TermOut() << "  未装配(features.telemetry 默认关;须与 features.trajectory 同开)。\n";
+            TermOut() << "  未装配(features.telemetry 默认关)。\n";
             TermOut().flush();
             return;
         }

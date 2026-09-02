@@ -165,22 +165,47 @@ struct AgentWorktree {
     std::filesystem::path room_path;      // 房路径
     std::string name;                     // 房名(agent-xxxx)
     std::string branch;                   // worktree/agent-xxxx
+    // ---- 基线账(派工单 §三:基线=派工瞬间的调用者 HEAD,不解析 origin)----
+    std::string base_ref;                 // 冻结时调用者所在分支短名;detached 给 "(detached)"
+    std::string base_commit;              // 冻结的调用者 HEAD 全哈希(建房起点)
+    std::string actual_head;              // 建成后房的实际 HEAD;与 base_commit 对不上即拆房报错
+    std::string caller_note;              // 给调用方看的基线附言(未提交改动明示等)
 };
 
-// 给隔离子代理建房:名字 agent-<随机>,基准与主代理同规(fresh,失败回落
-// HEAD),建成后拷 .worktreeinclude 并上锁(reason 记来源,跑着的房不怕
-// 并发清扫误删)。房区固定在 .lubancode/worktrees 之下,无须用户确认。
+// 冻结调用者 HEAD(派工单 §三):working_directory 里 rev-parse 出全哈希,
+// symbolic-ref 出分支短名(detached 给 "(detached)")。拿不到 commit 给空串,
+// 调用方据此明拒——绝不回落 origin 默认分支。
+struct FrozenWorktreeBase {
+    std::string commit;
+    std::string ref;
+};
+FrozenWorktreeBase FreezeWorktreeBase(const std::filesystem::path& working_directory, GitRunner runner = {});
+
+// 给隔离子代理建房:名字 agent-<随机>,基准=冻结的调用者提交(base_commit,
+// 传空自动冻结 repository_root 的 HEAD——测试/旧调用方用),建成后拷
+// .worktreeinclude 并上锁(reason 记来源,跑着的房不怕并发清扫误删)。
+// 三者对账:actual_head != base_commit 时当场拆房报错,不让子任务在错
+// 基线上静默开工。房区固定在 .lubancode/worktrees 之下,无须用户确认。
+AgentWorktree CreateAgentWorktree(const std::filesystem::path& repository_root, const std::string& base_commit,
+                                  const std::string& base_ref, GitRunner runner = {});
+// 旧签名(基准冻结在调用当口的仓库 HEAD):等价于先 FreezeWorktreeBase
+// 再进上面的主口。
 AgentWorktree CreateAgentWorktree(const std::filesystem::path& repository_root, GitRunner runner = {});
 
-// 收工房务:解锁;房干净 → 删房删分支(removed=true);有改动 → 留着,
-// note 给模型看的附言(房路径与分支,让主代理或用户后续去收)。
+// 收工房务(派工单 §五:回传路径在主控复核前必须有效):解锁;三种情况
+// 绝不删房——未提交改动、房内有自基线以来的提交(awaiting_parent_review,
+// 主控确认后才由人/清扫收)、删除失败。干净且无自有提交的房才自动清理
+//(没有可复核的现场,留着只攒垃圾)。note 是给模型看的交接附言:路径、
+// 分支、HEAD 提交、复核与清理命令、房没了之后的一条命令重挂法。
 struct AgentWorktreeFinish {
     bool removed = false;
+    bool awaiting_review = false;  // 现场保留待主控复核(已提交/未提交皆算)
+    std::string head_commit;       // 保留房的 HEAD(持久提交引用;读不到留空)
     std::string note;
 };
 AgentWorktreeFinish FinishAgentWorktree(const std::filesystem::path& repository_root,
                                         const std::filesystem::path& room_path, const std::string& branch,
-                                        GitRunner runner = {});
+                                        const std::string& base_commit, GitRunner runner = {});
 
 // 陈房清扫:只扫 .lubancode/worktrees 下 agent- 前缀、修改时间早于
 // now - max_age 的房。锁着的先解锁(被杀会话留下的;用户手上的锁只在

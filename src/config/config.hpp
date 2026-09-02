@@ -756,12 +756,9 @@ struct Config {
     // 局),没配就是 false(首版藏起来);环境变量 LUBANCODE_DISABLE_
     // LOOP=1 是总闸,装配层读(只关功能不改存档,不开第二只来源)。
     bool features_loop = false;
-    // P0 新轨迹记录单 P0-2:trajectory 单写口的 feature gate(§十七
-    // "内部预览")。features.trajectory 只从配置文件来(项目级压全
-    // 局),没配就是 false;环境变量 LUBANCODE_TRAJECTORY=1/0 显式压
-    // 一头(runtime::ResolveTrajectoryEnabled 合成)。开的会话只写
-    // Trajectory Journal、不写旧 SessionStore(禁 dual-write);关的
-    // 会话行为与从前一字不差。
+    // P0-6:features.trajectory 开关已删——Trajectory Journal 是唯一
+    // Session 真账,恒开,没有"关闭态"。字段保留只为吞下旧配置文件里
+    // 的这个键(读而不用),不再出现在任何 UI/文档。
     bool features_trajectory = false;
     // 端云协同可观测单 T0:features.telemetry(默认 false,内部预览)。
     // 只从配置文件来(项目级压全局),环境变量 LUBANCODE_TELEMETRY=1/0

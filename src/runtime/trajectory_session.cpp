@@ -413,6 +413,31 @@ void TrajectoryTurnBridge::OnRequestSent(const std::string& request_id) {
     }
 }
 
+void TrajectoryTurnBridge::OnRequestSentWithTurn(const std::string& request_id, int task_turn_index,
+                                                 int turn_limit, int input_round_index) {
+    const auto it = request_prepared_.find(request_id);
+    if (it == request_prepared_.end()) {
+        return;
+    }
+    // 任务 turn 账(§11.1,P1-1):sent 边界就是一枚 model turn 的 started——
+    // permit 已提交(此后 API 错/流断都保留 attempted),task_turn_index 从
+    // 1 起、limit/input round 一并落账。收口三态按 request_id 对回坐标,
+    // verifier 据此核"不重号、不超 limit"。
+    nlohmann::json payload = nlohmann::json{{"prepared_event_id", it->second},
+                                            {"task_turn_index", static_cast<std::uint64_t>(task_turn_index)},
+                                            {"turn_limit", static_cast<std::uint64_t>(turn_limit)},
+                                            {"input_round_index", static_cast<std::uint64_t>(input_round_index)}};
+    RequestTurnBook& book = request_turns_[request_id];
+    book.task_turn_index = task_turn_index;
+    book.turn_limit = turn_limit;
+    book.input_round_index = input_round_index;
+    const auto receipt = Put(EventKind::ModelRequestSent, request_id, std::nullopt, Actor::Host,
+                             Origin::RecoveryRuntime, std::move(payload), Durability::ProcessCrash);
+    if (receipt.status != RecordReceipt::Status::Committed) {
+        NoteError(receipt, "model.request.sent");
+    }
+}
+
 void TrajectoryTurnBridge::OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                                            bool reported_by_provider,
                                            const std::string& provider_response_id, int cache_epoch,
@@ -458,6 +483,11 @@ bool TrajectoryTurnBridge::OnOutputCompleted(const std::string& request_id, cons
     if (!provider_response_id.empty()) {
         payload["provider_response_id"] = provider_response_id;
     }
+    // 任务 turn 账(§11.1,P1-1):completed 边界带回 task_turn_index——同一枚
+    // turn 的 started/completed 两处数字同源(sent 时记的请求簿)。
+    if (const auto turn_it = request_turns_.find(request_id); turn_it != request_turns_.end()) {
+        payload["task_turn_index"] = static_cast<std::uint64_t>(turn_it->second.task_turn_index);
+    }
     const auto receipt =
         Put(EventKind::ModelOutputCompleted, request_id, std::nullopt, Actor::Model,
             Origin::ProviderModel, std::move(payload), Durability::ProcessCrash);
@@ -476,18 +506,29 @@ bool TrajectoryTurnBridge::OnOutputCompleted(const std::string& request_id, cons
 }
 
 void TrajectoryTurnBridge::OnOutputFailed(const std::string& request_id, const std::string& reason) {
+    nlohmann::json payload = {{"reason", reason}};
+    // 任务 turn 账(§11.1,P1-1):failed 也带 task_turn_index——失败请求保留
+    // attempted,这枚 turn 有编号可对。
+    if (const auto turn_it = request_turns_.find(request_id); turn_it != request_turns_.end()) {
+        payload["task_turn_index"] = static_cast<std::uint64_t>(turn_it->second.task_turn_index);
+    }
     const auto receipt =
         Put(EventKind::ModelOutputFailed, request_id, std::nullopt, Actor::Model,
-            Origin::ProviderModel, nlohmann::json{{"reason", reason}}, Durability::ProcessCrash);
+            Origin::ProviderModel, std::move(payload), Durability::ProcessCrash);
     if (receipt.status != RecordReceipt::Status::Committed) {
         NoteError(receipt, "model.output.failed");
     }
 }
 
 void TrajectoryTurnBridge::OnOutputCancelled(const std::string& request_id) {
+    nlohmann::json payload = {{"reason", "user_interrupt"}};
+    // 流中取消:permit 已消耗,attempted 保留(§6.4)——turn 坐标照带。
+    if (const auto turn_it = request_turns_.find(request_id); turn_it != request_turns_.end()) {
+        payload["task_turn_index"] = static_cast<std::uint64_t>(turn_it->second.task_turn_index);
+    }
     const auto receipt =
         Put(EventKind::ModelOutputCancelled, request_id, std::nullopt, Actor::Model,
-            Origin::ProviderModel, nlohmann::json{{"reason", "user_interrupt"}}, Durability::ProcessCrash);
+            Origin::ProviderModel, std::move(payload), Durability::ProcessCrash);
     if (receipt.status != RecordReceipt::Status::Committed) {
         NoteError(receipt, "model.output.cancelled");
     }

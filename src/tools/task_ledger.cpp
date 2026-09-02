@@ -137,16 +137,18 @@ std::string FirstLineOf(const std::string& text) {
 
 std::string ComposeOutcomeText(const TaskOutcome& outcome) {
     std::string out = std::string("[") + OutcomeStatusTag(outcome.status) + "] " + outcome.message;
-    if (outcome.step_limit > 0) {
-        out += " · 步数 " + std::to_string(outcome.steps_used) + "/" + std::to_string(outcome.step_limit);
-    } else if (outcome.steps_used > 0) {
-        out += " · 步数 " + std::to_string(outcome.steps_used);
-    }
-    // 任务级 turn 账(turn 预算单 §8.2/§8.3):attempted 是消费数,completed
-    // 另列——两笔分开写,不拿 completed 冒充已用。0 = 没设任务总 turn,不写。
+    // 任务级 turn 账(turn 预算单 §8.2/§8.3,P1-1 换血):设了任务总 turn 的
+    // 任务,生效硬线只有这一根——attempted 是消费数,completed 另列,两笔
+    // 分开写,不拿 completed 冒充已用。legacy 步数行此时不再写(两套账不
+    // 同时冒充"生效硬线");没设任务总 turn 的任务才按 legacy 步数投影。
     if (outcome.turn_limit > 0) {
         out += " · turn " + std::to_string(outcome.turns_attempted) + "/" +
                std::to_string(outcome.turn_limit) + "(完整返回 " + std::to_string(outcome.turns_completed) + ")";
+    } else if (outcome.step_limit > 0) {
+        out += " · 步数 " + std::to_string(outcome.steps_used) + "/" + std::to_string(outcome.step_limit) +
+               "(每输入轮;待迁移)";
+    } else if (outcome.steps_used > 0) {
+        out += " · 步数 " + std::to_string(outcome.steps_used);
     }
     if (outcome.wall_limit_secs > 0) {
         out += " · 时间上限 " + std::to_string(outcome.wall_limit_secs) + "s";
@@ -1117,8 +1119,16 @@ std::vector<std::string> TaskLedger::CompletionNoticeLines() const {
         if (!reason.empty() && reason != label) {
             label += " · " + reason;
         }
-        if (snapshot.state == AgentTaskState::BudgetExhausted && snapshot.step_limit > 0) {
-            label += " · " + std::to_string(snapshot.steps_used) + "/" + std::to_string(snapshot.step_limit) + " 步";
+        // 预算行(turn 预算单 §8.3,P1-1):任务 turn 账优先;没设任务总 turn
+        // 的任务才退 legacy 步数投影。真账从 turn_account 现读(锁已持)。
+        if (snapshot.state == AgentTaskState::BudgetExhausted) {
+            const agent::ModelTurnBudgetSnapshot turns = task->turn_account.SnapshotLocked();
+            if (turns.limit > 0) {
+                label += " · turn " + std::to_string(turns.attempted) + "/" + std::to_string(turns.limit);
+            } else if (snapshot.step_limit > 0) {
+                label += " · " + std::to_string(snapshot.steps_used) + "/" + std::to_string(snapshot.step_limit) +
+                         " 步(每输入轮)";
+            }
         }
         out.push_back("#" + std::to_string(snapshot.id) + " " +
                       (snapshot.title.empty() ? "(未命名)" : snapshot.title) + " · " + label + " · " +
@@ -1179,9 +1189,18 @@ std::string TaskLedger::DrainCompletionNotices() {
             case AgentTaskState::Cancelled:
                 out << "已取消";
                 break;
-            case AgentTaskState::BudgetExhausted:
-                out << "预算耗尽(" << snapshot.steps_used << "/" << snapshot.step_limit << " 步)";
+            case AgentTaskState::BudgetExhausted: {
+                // 预算行(turn 预算单 §8.3,P1-1):任务 turn 账优先,legacy
+                // 步数只在没设任务总 turn 时投影。锁已持,从真账现读。
+                const agent::ModelTurnBudgetSnapshot turns = task->turn_account.SnapshotLocked();
+                if (turns.limit > 0) {
+                    out << "预算耗尽(turn " << turns.attempted << "/" << turns.limit << ",完整返回 "
+                        << turns.completed << ")";
+                } else {
+                    out << "预算耗尽(" << snapshot.steps_used << "/" << snapshot.step_limit << " 步,每输入轮)";
+                }
                 break;
+            }
             case AgentTaskState::Running:
             case AgentTaskState::WaitingChildren:
             case AgentTaskState::Completing:

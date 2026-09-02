@@ -254,7 +254,7 @@ std::string PlatformId() {
 
 Server::Server(ServerOptions options, BackendFactory backend_factory, RegistryFactory registry_factory)
     : options_(std::move(options)), backend_factory_(std::move(backend_factory)),
-      registry_factory_(std::move(registry_factory)), sessions_dir_(options_.sessions_dir),
+      registry_factory_(std::move(registry_factory)),
       workspaces_dir_(options_.workspaces_dir) {
     dispatcher_ = std::make_shared<Dispatcher>();
     dispatcher_->SetInitializeResultFactory(
@@ -711,7 +711,7 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
         record->loop_scheduler = std::make_unique<runtime::loop::LoopScheduler>(loop_options);
     }
     {
-        runtime::SessionRuntime::Options runtime_options;  // sessions_dir 空 = 纯内存(旧档不开)
+        runtime::SessionRuntime::Options runtime_options;
         // P0-1:thread 身份按前端指定的 cwd(record->cwd;空则 options_.cwd)
         // 四级裁决,不按 server 进程的 current_path——前端外壳在各项目里
         // 起 thread,server 进程 cwd 跟项目无关。home 递进去做全局件止步。
@@ -761,7 +761,7 @@ nlohmann::json Server::HandleThreadStart(const nlohmann::json& params, std::stri
 nlohmann::json Server::HandleThreadList(const nlohmann::json& params) {
     // P9 收尾:列举走 SessionCommandService(会话管理器单第六步)——与
     // 终端 picker 共吃一碗饭,同一查询给同一份 id/顺序/状态,server 不
-    // 另写第二条扫盘路。sessions_dir 空(纯内存跑)给空表。
+    // 另写第二条扫盘路。
     if (session_commands_ == nullptr) {
         return MakeThreadListResult({});
     }
@@ -919,9 +919,6 @@ nlohmann::json Server::HandleThreadStop(const std::string& thread_id, std::strin
             record->turn_worker.detach();
         }
     }
-    if (record->store != nullptr) {
-        record->store->Reset(); // 旧档句柄(P0-2 起不再开,防御兜底)
-    }
     // P0-2:thread 停场即 session 封口(session.ended + session.json closed;
     // 收不回的执行记 unknown,不冒充 clean)。封不了只记账,不拦停场——
     // 半开的场由恢复器按 Journal 事实收口。
@@ -1030,11 +1027,6 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         block.width = image.value("width", 0);
         block.height = image.value("height", 0);
         user_message.content.push_back(std::move(block));
-    }
-    if (record->store != nullptr) {
-        // P0-2 轨迹:flag 开的 thread 只写 Trajectory(禁 dual-write),
-        // 旧存档不 App;store 在 thread/start 就没开,这里到不了。
-        record->store->AppendMessage(user_message);
     }
 
     // 事件账:P9 起条目 id 与事件序号都从 runtime::ProcessIdAuthority 发
@@ -1198,7 +1190,7 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
                                                              "app_server"};
             trajectory_bridge = trajectory_ledger->NewTurnBridge(std::move(identity));
             if (trajectory_bridge != nullptr) {
-                trajectory_hub.emplace(record->session_runtime->ids(), nullptr);
+                trajectory_hub.emplace(record->session_runtime->ids());
                 trajectory_hub->Install(loop, wiring, thread_id, turn_id);
                 trajectory_hub->AttachTrajectory(trajectory_bridge.get());
                 wiring.boundary_recorder = trajectory_bridge.get();
@@ -1243,15 +1235,6 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         completed_params = MakeTurnCompletedParams(thread_id, turn_id, status, error_message,
                                                    UsageToJson(SumUsage(usage_reports)), steps_used);
 
-        // 存档:助手回合整段落一条(事件流是协议的,存档是会话账的)。
-        if (record->store != nullptr && outcome.has_value()) {
-            for (const api::Message& message : loop.history()) {
-                // 历史里首条 user(本轮输入)已写过;只补 assistant 的尾巴。
-                if (message.role == api::Role::Assistant) {
-                    record->store->AppendMessage(message);
-                }
-            }
-        }
     }
 
     // 回合收口:清掉这一轮残留的悬起请求(理论到不了这——审批都是同步
@@ -1679,9 +1662,6 @@ void Server::Shutdown() {
         }
     }
     for (const std::shared_ptr<ThreadRecord>& record : records) {
-        if (record->store != nullptr) {
-            record->store->Reset();
-        }
     }
 }
 

@@ -181,7 +181,15 @@ if(LUBANCODE_BUNDLED_RG_DIR)
     LUBANCODE_TEST_HAS_BUNDLED_RG=1)
   message(STATUS "tests: 真 ripgrep ${LUBANCODE_RG_VERSION} 入位 ${LUBANCODE_BUNDLED_RG_DIR} (集成测试启用)")
 else()
-  message(STATUS "tests: 未设 LUBANCODE_BUNDLED_RG_DIR —— 真 rg 集成组将跳过 (纯单测照跑)")
+  # 可执行的缺项诊断(派工单 §6.3):两条真 rg 依赖册(integration.ptc.
+  # ptc_tool、unit.tools.observation_filter)不走 LUBANCODE_TEST_HAS_BUNDLED_RG
+  # 跳过门——缺 rg 它们会失败,不是跳过;文案把补齐命令写全。
+  message(WARNING
+    "tests: 未设 LUBANCODE_BUNDLED_RG_DIR 且 <home>/.lubancode/rg-stage 无 rg。\n"
+    "  影响: integration.ptc.ptc_tool 与 unit.tools.observation_filter 两册会失败(真 rg 依赖,不跳过);"
+    "其余真 rg 集成组跳过,纯单测照跑。\n"
+    "  修法(一次,全机 worktree 共享): python scripts/fetch_ripgrep.py --target <home>/.lubancode/rg-stage\n"
+    "  或 configure 显式传 -DLUBANCODE_BUNDLED_RG_DIR=<fetch_ripgrep.py 产物目录>。")
 endif()
 
 # 一册源码一条 CTest。仍只编一只 lubancode_tests，免去重复链接；运行时靠

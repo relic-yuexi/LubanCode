@@ -280,15 +280,20 @@ std::vector<std::string> FormatAgentDoctorReport(const lubancode::agent::AgentCa
     // ---- runtime 与 permissions:登账;权限越界比对属阶段 3 ----
     // 阶段 3 起五枚预算字段一并登(并流口径:YAML 显式 > 父值;steps 另有
     // 入参与配置默认两级,见 AgentProfileResolver)。显式与否如实标——
-    // "继承"就是落父值,不猜数。
+    // "继承"就是落父值,不猜数。P1-0(turn 预算单 §5.2/§11.3)起 max_turns
+    // 一并登,并列明生效的是任务级 turn 预算还是 legacy per-run step 预算。
     std::string runtime = "runtime: max_output_tokens=";
     runtime += def.max_output_tokens.has_value()
                    ? std::to_string(*def.max_output_tokens) + "(YAML 显式,视同 config 级)"
                    : std::string("继承");
     runtime += " · max_steps_per_turn=";
     runtime += def.max_steps_per_turn.has_value()
-                   ? std::to_string(*def.max_steps_per_turn) + "(入参 > YAML > 配置默认)"
+                   ? std::to_string(*def.max_steps_per_turn) + "(入参 > YAML > 配置默认;legacy,待迁移)"
                    : std::string("继承");
+    runtime += " · max_turns=";
+    runtime += def.max_turns.has_value()
+                   ? std::to_string(*def.max_turns) + "(任务总 turn;override > YAML > subagent.default_max_turns)"
+                   : std::string("继承(配置 subagent.default_max_turns,未设 = 0 不限)");
     runtime += " · max_context_chars=";
     runtime += def.max_context_chars.has_value() ? std::to_string(*def.max_context_chars)
                                                  : std::string("继承");
@@ -301,6 +306,22 @@ std::vector<std::string> FormatAgentDoctorReport(const lubancode::agent::AgentCa
     runtime += " · execution_mode=" + (def.execution_mode.empty() ? std::string("auto") : def.execution_mode);
     runtime += " · isolation=" + (def.isolation.empty() ? std::string("none") : def.isolation);
     lines.push_back(std::move(runtime));
+    // ---- 预算合同判读(turn 预算单 §11.3/§5.1,P1-0)--------------------------
+    // 列明生效的是哪条路,顺带给迁移建议:老定义不突变,新定义不掉进每轮
+    // 重置漏洞,用户一眼看得出自己走哪条。
+    if (def.max_turns.has_value()) {
+        lines.push_back("预算合同: task turn 预算 " + std::to_string(*def.max_turns) +
+                        "(来源: Agent Definition runtime.max_turns;续投、孩子回流、Stop 钩子续跑共这本账)");
+    } else if (def.max_steps_per_turn.has_value()) {
+        lines.push_back("预算合同: legacy per-run step 预算 " + std::to_string(*def.max_steps_per_turn) +
+                        "(每个 input round 各自上限;续投/Stop 钩子会重领额度)——待迁移");
+        lines.push_back("迁移建议: 删掉 runtime.max_steps_per_turn,改写 runtime.max_turns: " +
+                        std::to_string(*def.max_steps_per_turn) +
+                        "(任务总 turn,一道闸管到底;语义从\"每轮各自\"变\"整任务合计\",按需调大数值)");
+    } else {
+        lines.push_back("预算合同: 未显式声明(task turn 落 subagent.default_max_turns,未设 = 0 不限)");
+    }
+    lines.push_back("预算归属: TaskLedger 任务记录(attempted/completed 分账;正常收场 reserved=0)");
     lines.push_back("permissions: " + (def.permissions_mode.empty() ? std::string("inherit") : def.permissions_mode) +
                     "(只能比父 Agent 更窄;派发时 AgentProfileResolver 按 agent.permission_widening 明拒)");
 
@@ -373,7 +394,10 @@ std::vector<std::string> FormatAgentInspectReport(const lubancode::agent::AgentC
             append("max_output_tokens", std::to_string(*def.max_output_tokens) + "(来源档:config 级)");
         }
         if (def.max_steps_per_turn.has_value()) {
-            append("max_steps_per_turn", std::to_string(*def.max_steps_per_turn));
+            append("max_steps_per_turn", std::to_string(*def.max_steps_per_turn) + "(legacy,待迁移)");
+        }
+        if (def.max_turns.has_value()) {
+            append("max_turns", std::to_string(*def.max_turns) + "(任务总 turn)");
         }
         if (def.max_context_chars.has_value()) {
             append("max_context_chars", std::to_string(*def.max_context_chars));
@@ -387,6 +411,15 @@ std::vector<std::string> FormatAgentInspectReport(const lubancode::agent::AgentC
         lines.push_back("runtime 并流: " +
                         (declared.empty() ? std::string("定义未显式声明预算字段,五枚全落父值")
                                           : ("显式声明 " + declared + ";其余落父值")));
+    }
+    // ---- 迁移片段(turn 预算单 §5.2 阶段 B,P1-0):旧字段还在用的定义给
+    // 一段可直接复制的替换 YAML;新字段的定义不补这段。
+    if (def.max_steps_per_turn.has_value()) {
+        lines.push_back("迁移片段(把 runtime 段的旧键换成下面这行即可):");
+        lines.push_back("  runtime:");
+        lines.push_back("    max_turns: " + std::to_string(*def.max_steps_per_turn));
+        lines.push_back("(语义变化:旧键是\"每个 input round 各自上限\",新键是\"整项任务合计\";"
+                        "按任务实际规模调数值,再删旧键——两者同现会按 agent.turn_budget_conflict 拒载)");
     }
 
     // 来源账本:整张 default 模块树在这个 Profile 上下文下逐段解析。

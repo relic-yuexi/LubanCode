@@ -202,11 +202,20 @@ std::string BuildFooterWorkingLine(const StreamFooterState& f, int width) {
     const std::string label =
         f.turn_working && f.turn_interrupt_requested ? tr("spinner.stopping") : f.working_label;
     const std::vector<std::string> glyphs = FooterUtf8Glyphs(label);
-    const std::string suffix = " (" + std::to_string(f.working_seconds) + "s)";
+    const std::string timer = " (" + std::to_string(f.working_seconds) + "s)";
+    const std::string cancel = tr("spinner.cancel_hint");
+    const std::string shortcut = tr("input.shortcuts_hint");
+    const std::string suffix = " " + cancel + timer;
     const std::string prefix = "• ";
     const int prefix_width = static_cast<int>(DisplayWidthUtf8(prefix));
     const int suffix_width = static_cast<int>(DisplayWidthUtf8(suffix));
-    const int label_room = (std::max)(0, width - 1 - prefix_width - suffix_width);
+    const int shortcut_width = static_cast<int>(DisplayWidthUtf8(shortcut));
+    const int content_limit = (std::max)(0, width - 1);
+    if (shortcut_width >= content_limit) {
+        return f.theme.stats + TruncateUtf8ToDisplayWidth(shortcut, content_limit) + f.reset;
+    }
+    const int left_limit = (std::max)(0, content_limit - shortcut_width - 1);
+    const int label_room = (std::max)(0, left_limit - prefix_width - suffix_width);
 
     // 圆点按 turn 级态上色:Stopping 用 error 色(用户看得见"真置了"),
     // 常态用 spinner 色;字符本体不变。
@@ -223,8 +232,17 @@ std::string BuildFooterWorkingLine(const StreamFooterState& f, int width) {
         line += glyphs[i];
         used += glyph_width;
     }
-    if (prefix_width + used + suffix_width < width) {
+    int left_used = prefix_width + used;
+    if (left_used + suffix_width <= left_limit) {
         line += f.theme.stats + suffix;
+        left_used += suffix_width;
+    }
+    const int shortcut_room = content_limit - left_used;
+    if (shortcut_room > 0) {
+        const std::string kept = TruncateUtf8ToDisplayWidth(shortcut, shortcut_room);
+        const int kept_width = static_cast<int>(DisplayWidthUtf8(kept));
+        line += std::string(static_cast<std::size_t>((std::max)(1, content_limit - left_used - kept_width)), ' ');
+        line += f.theme.stats + kept;
     }
     line += f.reset;
     return line;
@@ -681,7 +699,8 @@ void RedrawStreamFooterLocked() {
     model.composer.placeholder = f.hint;
     model.composer.mode = ComposerMode::BusyQueue;
     model.composer.confirm_mode = chrome.mode;
-    model.status_rows = {BuildStatusLine(chrome, (std::max)(20, width - 1))};
+    model.status_rows = {BuildComposerModeLine(chrome, static_cast<int>(SessionSkillCount()),
+                                               (std::max)(0, width - 1))};
     const BottomChromeLayout layout = BuildBottomChromeLayout(model, f.theme, width, viewport_rows);
 
     if (f.hint.empty() && f.composer.line.empty() && f.composer.hint_lines.empty()) {
