@@ -2461,7 +2461,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             const std::shared_ptr<lubancode::hooks::DetachedHookSession> hooks_session =
                 background_hooks != nullptr && !background_hooks->Empty() ? background_hooks : nullptr;
             turn_wiring.on_permission_evaluate =
-                [this, task, background_permissions](const std::string&, const std::string& name,
+                [this, task, background_permissions, &last_denial_hook_reason,
+                 &last_denial_by_deny_prefix](const std::string&, const std::string& name,
                                                      ApprovalClass approval_class,
                                                      const nlohmann::json& input,
                                                      const lubancode::runtime::ToolHookDecision& pre) {
@@ -2475,10 +2476,12 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     const auto verdict = lubancode::runtime::EvaluatePermission(context, pre, approval_class,
                                                                                 name, input);
                     if (verdict.action == lubancode::runtime::PermissionVerdict::Action::Deny) {
+                        last_denial_hook_reason.clear();
+                        last_denial_by_deny_prefix = verdict.deny_hit;
                         const int task_id = task != nullptr ? task->snapshot.id : 0;
                         ledger().PushPermissionDenialNotice(
                             "后台 #" + std::to_string(task_id) + " 请求 " + name +
-                            (verdict.deny_hit ? " 命中 deny 命令前缀,已拒" : " 未预放行,已拒") +
+                            (verdict.deny_hit ? " 命中 deny 命令前缀,未放行并已拒" : " 未放行(无预授权),已拒") +
                             "——/permissions 预放行或让其前台重试");
                     }
                     return verdict;

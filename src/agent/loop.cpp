@@ -585,11 +585,16 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         if (permission.action == runtime::PermissionVerdict::Action::Deny) {
             phase(runtime::ToolPhase::Blocked);
             const bool command_denied = permission.reason == runtime::PermissionVerdict::Reason::CommandDenied;
+            // 不询问档/策略黑名单在预裁定阶段直接拒绝时，也让装配层提供
+            // 场景化文案。后台子代理借此如实说明“没有审批口、未预放行”，
+            // 而不是退回通用的不询问档文案；结构化 outcome/error_code 不变。
             const std::string denial =
-                command_denied
-                    ? (call.name + " 命中 deny_commands，已被权限策略直接拒绝，本次未执行。")
-                    : ("当前为“不询问”档；" + call.name +
-                       " 需要授权，本次未执行。请切回可询问档，或先在权限配置中明确放行。");
+                wiring.on_tool_denial_text
+                    ? wiring.on_tool_denial_text(call.id, call.name)
+                    : (command_denied
+                           ? (call.name + " 命中 deny_commands，已被权限策略直接拒绝，本次未执行。")
+                           : ("当前为“不询问”档；" + call.name +
+                              " 需要授权，本次未执行。请切回可询问档，或先在权限配置中明确放行。"));
             tools::Tool::Result declined{denial, true};
             declined.outcome = ToString(ToolOutcome::PermissionDeclined);
             declined.error_code = kErrPermissionNoPromptDenied;

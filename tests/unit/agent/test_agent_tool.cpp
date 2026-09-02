@@ -156,13 +156,16 @@ private:
 // 固定返回一个结果的假工具,记下被调用了几次、needs_confirm 能配置。
 class FakeTool : public tools::Tool {
 public:
-    FakeTool(std::string name, tools::Tool::Result result, bool needs_confirm_flag)
-        : name_(std::move(name)), result_(std::move(result)), needs_confirm_flag_(needs_confirm_flag) {}
+    FakeTool(std::string name, tools::Tool::Result result, bool needs_confirm_flag,
+             tools::ApprovalClass approval_class = tools::ApprovalClass::None)
+        : name_(std::move(name)), result_(std::move(result)), needs_confirm_flag_(needs_confirm_flag),
+          approval_class_(approval_class) {}
 
     std::string name() const override { return name_; }
     std::string description() const override { return "fake tool for test"; }
     nlohmann::json input_schema() const override { return nlohmann::json::object(); }
     bool needs_confirm() const override { return needs_confirm_flag_; }
+    tools::ApprovalClass approval_class() const override { return approval_class_; }
 
     tools::Tool::Result execute(const nlohmann::json& input) override {
         ++call_count;
@@ -177,6 +180,7 @@ private:
     std::string name_;
     tools::Tool::Result result_;
     bool needs_confirm_flag_;
+    tools::ApprovalClass approval_class_;
 };
 
 std::vector<api::StreamEvent> TextOnlyScript(const std::string& text, api::Usage usage = api::Usage{}) {
@@ -1409,7 +1413,8 @@ TEST_CASE("后台子代理放行账:账上工具免问放行,账外照旧拒") {
 TEST_CASE("后台子代理放行账:run_command 前缀——allow 命中放行,deny 压过 allow") {
     FakeBackend foreground_backend;
     tools::ToolRegistry sub_registry;
-    auto* run_ptr = new FakeTool("run_command", tools::Tool::Result{"跑完了", false}, /*needs_confirm=*/true);
+    auto* run_ptr = new FakeTool("run_command", tools::Tool::Result{"跑完了", false}, /*needs_confirm=*/true,
+                                 tools::ApprovalClass::Command);
     sub_registry.Register(std::unique_ptr<FakeTool>(run_ptr));
 
     auto backend = std::make_unique<FakeBackend>();
