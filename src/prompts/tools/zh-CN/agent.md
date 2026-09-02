@@ -42,3 +42,55 @@ worktree = 给子代理单独开一间 git worktree 隔离房干活:写不碰主
 ## persona.explore
 
 你是 Explore 子代理,专门快速搜索、阅读并分析代码库。只读,不得改文件、启动会改动环境的命令或做别的写操作。完成后给出简明结论和具体文件位置,不要寒暄。
+
+## param.template
+
+(可选)任务书套壳:full = 宿主给 prompt 套六件套引导壳(单子路径/范围红线/环境实情/纪律/完工标准/回报格式),任务原文逐字节保留。模板只引导不强制,自包含已写清的简单任务不必套;大单子(修 todos 单、多步改码)套上更稳。
+
+## env_appendix.header
+
+[宿主注入·本机环境附录] 以下是宿主在会话启动时探测的本机构建环境事实,与任务正文无关;构建与测试照此办理,不必自行摸索。
+
+## env_appendix.preset
+
+仓库构建账:CMake preset {0};构建目录 {1}(相对仓库根);ctest 配置名 {2}。
+
+## env_appendix.offline_deps_ready
+
+离线省时路:本机 {0}/_deps 已备齐。换树构建时把它整目录拷到该树同名位置,configure 再加 -DFETCHCONTENT_FULLY_DISCONNECTED=ON(依赖全走本地,网络不通也能配);全量 FetchContent configure 约十分钟,能省则省。
+
+## env_appendix.offline_no_deps
+
+构建树已在,但 {0}/_deps 不齐:离线路走不通,依赖走 FetchContent 全量 configure(约十分钟)。
+
+## env_appendix.offline_no_build
+
+本机还没起构建树:先 configure(依赖走 FetchContent,约十分钟);别处若有备齐的 _deps,整目录拷来并加 -DFETCHCONTENT_FULLY_DISCONNECTED=ON 可走离线。
+
+## env_appendix.ctest_windows
+
+ctest 规矩:必带 -C {0}(多配置生成器);ctest 前把 USERPROFILE 指到 Windows 路径的临时目录,别碰真用户主目录。
+
+## env_appendix.ctest_posix
+
+ctest 规矩:多配置生成器必带 -C {0}。
+
+## env_appendix.clean_first
+
+动了头文件就带 --clean-first 重建,别吃陈旧构建产物的亏。
+
+## template.full
+
+[宿主套壳·任务书六件套] 下面先录派工者任务原文,再附六件套核对单。六件套是引导不是格式铁律:原文已写清的不必重抄,缺的项照提示补齐或向派工者问明,别自行脑补。
+
+===== 任务原文 =====
+{0}
+===== 原文完 =====
+
+[六件套核对单]
+1. 单子路径:本任务出自哪张单/哪段需求?原文没写就先问明,别猜。
+2. 范围红线:只许动哪些文件/模块?哪些明确不碰?
+3. 环境实情:宿主若在任务书尾部附了 [宿主注入·本机环境附录],照附录构建测试;没附就动工前自己摸清本机构建环境,并在回报里写明。
+4. 纪律:提交信息规矩、push 与否、版本号动不动、单子批次只勾真验证过的。
+5. 完工标准:怎样算修完——测试全绿、回归零、验收命令过。
+6. 回报格式:完工回报带分支、commit 号、测试汇总原文、落点(文件:行)、新增测试册。

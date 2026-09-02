@@ -42,3 +42,55 @@ You are a general-purpose subagent that can search, analyze, and complete multi-
 ## persona.explore
 
 You are an Explore subagent that specializes in quickly searching, reading, and analyzing codebases. Read-only: you must not modify files, start commands that change the environment, or perform any other write operation. When done, give a concise conclusion with concrete file locations; no pleasantries.
+
+## param.template
+
+(Optional) Task brief shell: full = the host wraps the prompt with the six-part brief guide (ticket path / scope red lines / environment facts / discipline / done criteria / report format); the original prompt text is preserved byte for byte. The template guides but does not enforce—self-contained simple tasks do not need it; for big jobs (fixing a todos ticket, multi-step code changes) it pays off.
+
+## env_appendix.header
+
+[Host-injected · local environment appendix] Below are local build-environment facts probed by the host once at session startup. They are unrelated to the task body; follow them for builds and tests instead of probing on your own.
+
+## env_appendix.preset
+
+Repository build facts: CMake preset {0}; build directory {1} (relative to the repository root); ctest configuration name {2}.
+
+## env_appendix.offline_deps_ready
+
+Offline shortcut: {0}/_deps on this machine is stocked. When building in a fresh tree, copy that _deps directory to the same spot in your tree and configure with -DFETCHCONTENT_FULLY_DISCONNECTED=ON (all dependencies resolve locally; works even with no network); a full FetchContent configure takes roughly ten minutes—save it when you can.
+
+## env_appendix.offline_no_deps
+
+The build tree exists but {0}/_deps is incomplete: the offline route is out; configure fully with FetchContent dependencies (roughly ten minutes).
+
+## env_appendix.offline_no_build
+
+No build tree on this machine yet: configure first (dependencies go through FetchContent, roughly ten minutes); if another tree has a stocked _deps, copy it over and add -DFETCHCONTENT_FULLY_DISCONNECTED=ON to go offline.
+
+## env_appendix.ctest_windows
+
+ctest rules: always pass -C {0} (multi-config generator); before running ctest, point USERPROFILE at a temporary Windows-path directory—never touch the real user home.
+
+## env_appendix.ctest_posix
+
+ctest rules: for multi-config generators always pass -C {0}.
+
+## env_appendix.clean_first
+
+If you touched headers, rebuild with --clean-first; do not trust stale build artifacts.
+
+## template.full
+
+[Host shell · six-part task brief] The dispatcher's original prompt comes first, then the six-part checklist. The six parts are guidance, not a rigid format: anything the original text already covers need not be restated; fill in or ask about the missing parts—do not guess.
+
+===== Original prompt =====
+{0}
+===== End of original =====
+
+[Six-part checklist]
+1. Ticket path: which ticket or requirement does this task come from? If the prompt does not say, ask first—do not guess.
+2. Scope red lines: which files/modules may be touched? Which are explicitly off-limits?
+3. Environment facts: if the host appended a [Host-injected · local environment appendix] at the end of the brief, build and test per that appendix; otherwise probe the local build environment yourself before starting and state it in your report.
+4. Discipline: commit message conventions, whether to push, whether to touch version numbers, and only check off ticket batches you have actually verified.
+5. Done criteria: what counts as finished—tests green, zero regressions, acceptance commands passing.
+6. Report format: the completion report carries branch, commit hash, raw test summary line, touchpoints (file:line), and new test files.

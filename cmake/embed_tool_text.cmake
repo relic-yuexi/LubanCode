@@ -69,7 +69,11 @@ function(_embed_tool_file lang tool stem file)
       math(EXPR _next "${_nl} + 1")
       string(SUBSTRING "${_remaining}" "${_next}" "-1" _remaining)
     endif()
-    if(_line MATCHES "^##[ \\t]+([A-Za-z0-9_.]+( \\(POSIX\\))?)[ \\t]*$")
+    # 空白类写 "\t"(单反斜杠):字符串层已把 \t 转成真制表符,正则收到
+    # "[ <TAB>]"。写成 "\\t" 则正则收到字面 "\t"——CMake 正则不认该转义,
+    # 按字面 't' 解释,类变成"空格或字母 t",键名以 t 开头会被吃掉一个 t
+    #(template.full 曾被嵌成 emplate.full,查表落空只剩 C++ 兜底)。
+    if(_line MATCHES "^##[ \t]+([A-Za-z0-9_.]+( \\(POSIX\\))?)[ \t]*$")
       if(NOT _cur_key STREQUAL "")
         _flush_key("${lang}" "${tool}" "${stem}" "${_cur_key}" _cur_body)
       endif()

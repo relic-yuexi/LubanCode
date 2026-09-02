@@ -528,6 +528,22 @@ public:
     // 不设走真 git。
     void SetGitRunner(lubancode::cli::GitRunner runner) { git_runner_ = std::move(runner); }
 
+    // ---- 本机环境附录(派工任务书单 2.1 P1)----
+    // 宿主(会话装配层)灌入探测口:返回附录正文(空 = 探测过但无可注入,
+    // 比如非 CMake 工程)。CachedEnvAppendix 首调探测一次并缓存,会话内
+    // 复用——重复派工不重复探测;SetHooks(回合边界)不清这份缓存,环境
+    // 不会一回合一变。空函数(默认,旧调用方/单测)= 不注入,行为与从前
+    // 一致。探测与成文在 tools/subagent_env_appendix,本类只管缓存与注入。
+    void SetEnvAppendixProbe(std::function<std::string()> probe) {
+        env_appendix_probe_ = std::move(probe);
+        std::lock_guard<std::mutex> lock(env_appendix_cache_.mutex);
+        env_appendix_cache_.loaded = false;
+        env_appendix_cache_.text.clear();
+    }
+    // 探测+缓存的统一取口:首调跑 probe(装配层可在启动时调一次,即规格
+    // 的"启动时探测一次"),之后只读缓存。线程安全(后台嵌套派工同过这)。
+    std::string CachedEnvAppendix();
+
     void SetSkillsSegment(std::string skills_segment) { skills_segment_ = std::move(skills_segment); }
     void SetProjectInstructions(std::string instructions) { project_instructions_ = std::move(instructions); }
 
@@ -563,7 +579,11 @@ private:
     struct DispatchRequest {
         std::string title;                     // canonical 标题(spec->title)
         std::shared_ptr<const agent::AgentTaskSpec> spec;
-        std::string task_input_text;           // 原始派工说明；首轮 user message 原样投递
+        std::string task_input_text;           // 派工说明；首轮 user message 投递的正文（查单吃原文，
+                                               // 之后可能带 template 壳与环境附录的宿主注入尾巴）
+        // template: full(派工任务书单 2.2 P2):给 prompt 套六件套引导壳。
+        // 套壳在查单之后、附录注入之前,spec(任务语义合同)始终存原文。
+        bool template_full = false;
         std::string agent_type;
         bool background = false;
         bool isolate = false;
@@ -673,6 +693,16 @@ private:
     int wall_clock_grace_secs_ = kDefaultSubagentWallClockGraceSecs;
     // 子代理记忆召回(冻结快照);空 = 不召回。参数:任务 prompt + 子 run id。
     std::function<std::string(const std::string&, const std::string&)> turn_context_provider_;
+    // ---- 本机环境附录(2.1 P1)----
+    // 探测口(空 = 旧路不注入) + 一次性缓存(首调探测,会话内只读)。
+    // 与 agent_types_cache_ 同款锁规矩:嵌套派工在后台线程也走这,短持有。
+    std::function<std::string()> env_appendix_probe_;
+    struct EnvAppendixCache {
+        std::mutex mutex;
+        bool loaded = false;
+        std::string text;
+    };
+    EnvAppendixCache env_appendix_cache_;
     // ---- 连败保险(缺 title 无限重试拖死主循环单)----
     // 账随 handle 走(P0-3:main 那枚常驻 main_handle_,每只任务那枚随
     // 私有表):同一回合内同一入参错误连拒到 kParamFailLimit 次就明拒收场,

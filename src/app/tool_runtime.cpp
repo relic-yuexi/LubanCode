@@ -33,6 +33,7 @@
 #include "tools/search.hpp"
 #include "tools/search_ripgrep.hpp"  // BundledRipgrepRunner:SearchTool 的 P0-2 装配注入口
 #include "tools/skill_tool.hpp"
+#include "tools/subagent_env_appendix.hpp"  // 派工任务书单 2.1:本机环境附录探测与成文
 #include "tools/tool_search.hpp"
 #include "tools/web_fetch.hpp"
 #include "tools/web_search.hpp"
@@ -623,6 +624,25 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
             config.subagent.max_active.value_or(lubancode::config::kDefaultSubagentMaxActive),
             config.subagent.max_depth.value_or(lubancode::config::kDefaultSubagentMaxDepth),
             config.subagent.max_children_per_task.value_or(0), config.subagent.max_tree_nodes.value_or(0));
+        // 本机环境附录(派工任务书单 2.1 P1):启动时探测一次——git 仓库根、
+        // CMake preset、build 树在不在、_deps 齐不齐——成文缓存,会话内复
+        // 用;之后每笔派工的 prompt 尾部自动附上,子代理不再自己摸环境。
+        // 仓库外/非 CMake 工程探测不出就空附录,静默不注入,不挡会话起。
+        agent_tool_->SetEnvAppendixProbe([cwd_utf8]() {
+            try {
+                const std::optional<std::filesystem::path> repo_root =
+                    lubancode::cli::FindRepositoryRoot(lubancode::tools::Utf8ToPath(cwd_utf8));
+                if (!repo_root.has_value()) {
+                    return std::string();
+                }
+                return lubancode::tools::ComposeSubagentEnvAppendix(
+                    lubancode::tools::DetectSubagentEnvFacts(*repo_root));
+            } catch (...) {
+                return std::string();  // 探测炸了当没探到,不挡派工
+            }
+        });
+        // 启动即探测并缓存(规格"启动时探测一次,会话内复用")。
+        (void)agent_tool_->CachedEnvAppendix();
     }
     // 同级派工:子表也挂 agent(转发壳,目标是上面那只 AgentTool)。后台
     // 的独立注册表(BuildDetachedRegistry)不挂——后台线程不能同步跑前台

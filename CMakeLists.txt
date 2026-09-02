@@ -418,6 +418,8 @@ add_library(lubancode_engine STATIC
   # .evidence 运行时证据,显式点名才放行并告知体积。
   src/tools/observation_filter.cpp
   src/tools/agent_tool.cpp
+  # 派工任务书单 2.1/2.2:本机环境附录探测成文与六件套套壳(纯函数件)。
+  src/tools/subagent_env_appendix.cpp
   # 监督器三件住 engine:用户(agent_tool/task_coordinator)都在 engine,
   # 住 runtime 便是 engine 反向引用 runtime——MSVC 多遍解析容得下,
   # GCC 单遍链接炸 undefined(CI ubuntu 腿首跑实证);runtime 无人用
