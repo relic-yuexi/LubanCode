@@ -1,0 +1,303 @@
+# 子代理空轨迹、父账污染与 dangling 补账失败修复
+
+- 状态：待修
+- 级别：P0
+- 日期：2026-09-02
+- 现场版本：`lubancode 0.26.172`
+- 类型：LubanCode 产品缺陷（Trajectory 完整性、子代理故障降级、诊断留证）
+- 现场 session：`20260902-113716-L0O6LI`
+- 现场 workspace：`lubancode-4d95553fc4115958`
+- 现场目录：`~/.lubancode/workspaces/lubancode-4d95553fc4115958/sessions/20260902-113716-L0O6LI/`
+- 主要落点：`src/runtime/trajectory_session.cpp`、`src/runtime/tool_trace_hub.cpp`、`src/tools/agent_tool.cpp`、`src/app/turn_runner.cpp`、`src/api/responses/events.cpp`、`src/api/assembler.cpp`
+- 不在本单：旧 SessionStore；训练导出格式改版；把子代理正文抄进 `main.jsonl`；悄悄修写既有原始 Journal
+
+## 一、现场
+
+终端报错：
+
+```text
+[trajectory] tool.execution.cancelled(dangling) 落账失败: schema.missing_field
+```
+
+这场 session 的第三轮做了这些事：
+
+```text
+19:44:30  turn-3 开张；用户要求开 worktree，实现两项附加功能
+19:44:46  worktree 工具完成，cwd 切进隔离房
+19:45:16  第一只 Explore 子代理开始执行
+19:47:25  用户按 ESC；子代理停在第 10 步，最后一项是 search/tool_use
+19:47:25  第二只代理和四枚尚未执行的工具落 cancelled_before_start
+19:47:25  turn.cancelled 落账
+19:48:16  run.failed(reason=exit) 与 session.ended 落账
+```
+
+主账统计：
+
+```text
+main.jsonl             377 事件
+model request/output    22 / 22
+tool planned            56
+tool finished           50
+tool failed              1
+tool cancelled           5
+tool result committed   56
+```
+
+主账里声明过的 56 枚 call 与实际落账的 56 枚 call 一一相合。可见报错所说的
+`dangling` 不在已提交主账中，而在当时那只 `TrajectoryTurnBridge::calls_`
+内存表里。它没能通过 schema，故没有写入 JSONL。
+
+子代理目录却留下了一份空账：
+
+```text
+subagents/agent-1-main-0063.jsonl    0 bytes
+```
+
+实跑只读检查：
+
+```powershell
+lubancode trajectory verify 20260902-113716-L0O6LI
+lubancode trajectory replay 20260902-113716-L0O6LI
+lubancode trajectory doctor lubancode-4d95553fc4115958
+```
+
+本次实际结果：
+
+```text
+verify：未过（verify.session_failed）
+  [ok] main.jsonl，377 事件，终态 run.failed
+  [!!] subagents/agent-1-main-0063.jsonl，0 事件，verify.empty_journal
+
+replay：成功
+  折叠 377 事件，4 turn，22 请求，56 工具
+  悬空工具 0
+  run 终态 run.failed
+
+doctor：磁盘余量 70749 MiB；manifest 对账通过；active session 无
+```
+
+上面的 `run.failed` 是用户打断后退出留下的会话终态，不等于 hash chain 损坏。
+真正使整场 verify 失败的，是那份 0 字节子账。
+
+## 二、已经钉死的因果链
+
+### 2.1 收轮补账为何报 missing_field
+
+`TrajectoryTurnBridge::CancelDanglingCalls()` 遍历 `calls_`。凡 `terminal=false`
+的账项，一律补 `tool.execution.cancelled`：
+
+```cpp
+Put(EventKind::ToolExecutionCancelled,
+    book.request_id,
+    call_id,
+    Actor::Tool,
+    Origin::BuiltinTool,
+    {{"reason", reason}});
+```
+
+`tool.execution.cancelled` 的合同要求：
+
+```text
+turn_id     required
+request_id  required
+call_id     required
+```
+
+`Put()` 又会把空串归一成缺省值。故 `book.request_id` 或 `call_id` 只要为空，
+schema 必回 `schema.missing_field`。这条报错不是磁盘写失败，而是写前校验拒绝。
+
+### 2.2 无主 call 怎样混进内存表
+
+`OnToolTrace()` 眼下先做：
+
+```cpp
+CallBook& book = calls_[event.tool_use_id];
+```
+
+这会给任何陌生 `tool_use_id` 当场造一册空账。它没有对应
+`model.output.completed`，自然没有 `request_id`。后续 planned/started/terminal
+写不进 schema；收轮时它仍是 `terminal=false`，又触发一次 dangling 补账失败。
+
+子代理正常拿到独立 `TrajectorySubagentBridge` 时，内层工具 trace 写子账，不进
+父桥。子账没拿到时，`AgentTool::RunTask()` 会退回
+`foreground_hooks->on_tool_trace`，把子代理内层 trace 转投父 `ToolTraceHub`。
+父桥不认这些 call，却又用 `operator[]` 收下，于是父账内存表受了污染。
+
+这条降级路与“每个 run 各写各的 Journal，父账只留边”的合同相冲。
+
+### 2.3 空子账为何让整场 verify 失败
+
+`ReserveSubagentStream()` 已把最终名 `.jsonl` 占下。后续 `run.started` 没有提交，
+调用方又没撤销这份未开卷文件。Session verifier 扫见 `subagents/*.jsonl`，便把它
+当正式子 stream 验账，最后报 `verify.empty_journal`。
+
+原始 Journal 不许改写，这条规矩没错。错在未提交的预留物冒充了 Journal。
+
+## 三、还没查明的第一因
+
+这次能确认“子 stream 留下 0 字节”，尚不能从现有持久证据确认
+`SpawnSubagent()` 究竟在哪一步失败。
+
+原因在装配层：
+
+```cpp
+auto child = ledger->SpawnSubagent(parent_call_id, task_label, parent_run_id);
+if (!child.has_value()) {
+    return nullptr;
+}
+```
+
+`child.error()` 被吞了。失败没有进入：
+
+- 父 `main.jsonl`；
+- session manifest；
+- 可跨进程保留的诊断文件；
+- agent 工具结果；
+- app-server warning/error 通知。
+
+`recent_io_errors` 又只是进程内短账。进程退出后再跑 doctor，只能看到“最近 I/O
+错误：无”。故眼下不能硬猜是 schema、状态机、文件句柄、竞态还是别的错。
+
+另有一条相邻风险须一并设门，不冒充本次已证实首因：Responses 兼容解析用
+`item.value("call_id", "")`，`MessageAssembler` 也允许空 id 的半截 function call
+进入 `ToolUseBlock`。用户恰在 `tool_use` 流中按 ESC，若兼容端早帧不带
+`call_id`，同样能造出空 `call_id` 的 `calls_` 账项。现有 session 没保存被拒事件
+与原始 provider 帧，不能用猜测替代证据；但这道协议门必须补测试。
+
+## 四、修法
+
+### P0-A：子账开张失败必须 fail closed
+
+- `SpawnSubagent()` 任一步失败，agent 工具不得继续执行那只无账子代理。
+- 工具终态落明确失败，例如稳定码 `trajectory.subagent_start_failed`。
+- 结果正文带阶段与稳定错误码，不带敏感路径正文。
+- 主调用仍须收齐 `tool.execution.failed + tool.result.committed`，父 turn 可继续。
+- 不许退化成“子代理照跑，工具 trace 借父账旁听”。Trajectory 已是唯一 Session，
+  无真账执行不算可接受降级。
+
+### P0-B：失败事实要持久留证
+
+- 新增父侧 typed 事件，建议名 `subagent.run.start_failed`；由父 run 持有。
+- 至少记录：`stage`、`error_code`、`parent_run_id`、`parent_call_id`、
+  `reserved_run_id`、`stream_ref`、`retryable`。
+- 事件只记引用与稳定码，不写子 prompt 正文，不抄敏感绝对路径。
+- 同一事实同时可投 UI warning；UI 是投影，不另当真账。
+- `RecordReceipt` 或调用链应保留 schema 的字段级 message。日志不能只剩
+  `schema.missing_field`，须能看出缺 `request_id` 还是 `call_id`。
+
+若本期不愿扩 schema，最低限度也须把完整失败写进主账现有、语义相合的诊断
+事件；不得挪用 `control.command.failed` 冒充子 run 启动失败。找不到合适 kind，
+就老实新增 kind 与版本测试。
+
+### P0-C：未提交的预留文件不得冒充 Journal
+
+二选一，优先第一种：
+
+1. `ReserveSubagentStream()` 只预留 run id 与目标名；Recorder 以独占创建方式在
+   首枚 `run.started` 提交事务里创建正式 `.jsonl`。
+2. 先写同目录临时文件；`run.started` 落稳后原子改名为正式 `.jsonl`。
+
+失败清理由所有权凭据约束：只删本次尚未提交、大小为 0、名称与 reservation
+完全相合的临时物。不得扫目录删“看着像空”的旧文件。
+
+若为审计决定保留失败物，放进 `quarantine/`，扩展名不得是 `.jsonl`，并由父侧
+失败事件引用。Session verifier 不把它当正式 stream。
+
+### P0-D：父桥只收模型声明过的 call
+
+- `OnToolTrace()` 不再用 `calls_[id]` 接陌生调用。
+- 改用 `find()`；查不到便报 `trajectory.unowned_tool_trace`，不改 `calls_`。
+- 无主 trace 可进有界诊断投影，不得进父 canonical call 状态机。
+- 诊断带 `run_id/turn_id/execution_id/call_id/tool_name/parent_execution_id`。
+- 父 bridge、子 bridge、workflow bridge 都守同一条 ownership invariant。
+
+核心不变量：
+
+```text
+model.output.completed 声明 call
+        ↓
+同 run、同 turn、同 request 的 tool trace 才能推进它
+        ↓
+terminal 与 result 收口
+```
+
+任何旁路 trace 都不能靠 `operator[]` 反向创造模型事实。
+
+### P0-E：dangling 收口只处理合法、已声明调用
+
+- `CallBook` 增 `declared` 或等价状态；只由已提交的 `model.output.completed` 置真。
+- `CancelDanglingCalls()` 只补 `declared=true && terminal=false` 的调用。
+- `request_id/call_id` 为空时，不再发一枚明知过不了 schema 的事件。
+- 这不是静默跳过：先落稳定诊断，再让 turn 按真实结果收成
+  `turn.failed` 或 `turn.cancelled`。
+- 不可用“遇空 continue”当最终修复；那只消掉红字，没治无主调用。
+
+### P0-F：空 call id 挡在 provider 边界
+
+- Responses/Chat/Anthropic/Gemini 四线统一校验本地可执行 ToolCall 身份。
+- `id/call_id` 为空的 function call 不得进入 `ToolUseBlock`，更不得执行。
+- 流式协议若早帧缺 id、终帧补 id，assembler 须按 output index 合并终帧身份。
+- ESC 截断时仍拿不到 id，收成明确的 malformed/cancelled model output，不合成
+  本地工具结果，不伪造 provider call id。
+- 不随手造随机 id：下一轮回喂仍须使用 provider 认可的 id；假 id 会把故障推迟
+  到下一次请求。
+
+## 五、测试
+
+### 5.1 单元测试
+
+- `SpawnSubagent` fault injection：stream reserve 成功、Recorder start 失败。
+- `run.started` schema 拒绝、I/O 写失败、flush 失败各一例。
+- 每例断言：子代理未执行；父工具失败收口；错误码没吞；无正式空 `.jsonl`。
+- 给父 bridge 投一枚陌生 call trace：`calls_` 不增长，收轮不报 dangling。
+- 给已声明调用投 planned 后直接取消：仍可合法补 `tool.execution.cancelled`。
+- 构造空 `request_id`、空 `call_id`：给出字段级诊断，不二次落坏账。
+- Responses function call 的 added 帧缺 `call_id`、done 帧补 id：最终 id 正确。
+- added/done 都缺 id，再 ESC：不产出可执行 `ToolUseBlock`。
+
+### 5.2 整合测试
+
+用真 `TrajectorySessionLedger + ToolTraceHub + AgentTool` 接线造三场：
+
+1. 子账正常：内层 trace 只在子 JSONL；父账只有 child edge 与终态引用。
+2. 子账启动失败：agent 工具 fail closed；父 main verify 通过；无空子账。
+3. 子代理运行中 ESC：父、子各自收口；不得出现 missing_field；不得留下空 stream。
+
+测试须断言事件归属，不只数日志里有没有红字。
+
+### 5.3 真机验收
+
+- Windows，真实 `lubancode.exe`，临时主目录，假 Responses 服务。
+- 服务依次回：正常 call、早帧无 id 后补 id、始终无 id、工具流中 ESC。
+- 再注入一次子 stream 开张失败。
+- 每场保留命令、退出码、session id、主/子文件清单与 verify 原文。
+- `lubancode trajectory verify <session-id>` 必须通过。
+- `lubancode trajectory replay <session-id>` 必须报告悬空工具 0。
+- 失败场仍须有可读、可定位的 typed 失败事实，不能靠终端滚屏留证。
+
+## 六、实施批次
+
+- [ ] P0：先补失败码传播与持久诊断，重跑本次形状，捉住子账开张第一因
+- [ ] P0：子账启动失败改为 fail closed，删掉“无账照跑并回灌父 trace”降级
+- [ ] P0：正式 stream 原子开卷；失败不留下 0 字节 `.jsonl`
+- [ ] P0：`OnToolTrace` ownership 门；陌生 call 不再写入 `calls_`
+- [ ] P0：dangling 收口只认合法声明；字段级 schema 错误可见
+- [ ] P0：四条 provider wire 的空 call id 统一门，先补 Responses ESC 用例
+- [ ] P0：单元与整合测试全绿
+- [ ] P0：Windows 假服务真进程验收，保存命令、退出码与原始输出
+- [ ] P1：为旧 session 提供只读诊断，明确标出空子 stream；不改写原账
+
+## 七、验收红线
+
+以下任一项仍在，便不算修完：
+
+- 子账开不成，子代理却继续执行；
+- 子代理内层 trace 混进父 `calls_`；
+- `OnToolTrace()` 能凭陌生 id 新造 call；
+- session 目录留下 0 字节正式 `.jsonl`；
+- 日志只报 `schema.missing_field`，说不出缺哪个字段；
+- 单测绿，却没跑 Windows 真进程 + 假 Responses 服务；
+- 为消红字跳过错误，却没留下 typed 失败事实；
+- 修复脚本改写或删除本次原始 session 证据。
+
+本次 session 原样保留。它是回归夹具的来源，不是待清理垃圾。
