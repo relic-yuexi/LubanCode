@@ -244,6 +244,26 @@ TEST_CASE("LineEditorCore: 空行 Enter 不计入历史") {
     CHECK(editor.history_size() == 0);
 }
 
+TEST_CASE("LineEditorCore: 输入历史只留最近 100 条") {
+    LineEditorCore editor;
+    for (int i = 0; i < 101; ++i) {
+        editor.BeginLine();
+        TypeString(editor, "entry-" + std::to_string(i));
+        editor.HandleKey(KeyEvent::Simple(KeyKind::Enter));
+    }
+    CHECK(editor.history_size() == 100);
+
+    editor.BeginLine();
+    for (int i = 100; i >= 1; --i) {
+        const RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::Up));
+        CHECK(Utf32ToUtf8(state.line) == "entry-" + std::to_string(i));
+    }
+
+    // 再往上已到头；最老的 entry-0 已经淘汰，不能翻回来。
+    const RenderState oldest = editor.HandleKey(KeyEvent::Simple(KeyKind::Up));
+    CHECK(oldest.line == U"entry-1");
+}
+
 TEST_CASE("LineEditorCore: 历史上下键翻,翻到最老一条不越界,翻回底部还原草稿") {
     LineEditorCore editor;
     editor.BeginLine();

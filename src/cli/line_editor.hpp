@@ -319,6 +319,8 @@ private:
     bool composer_ = false;  // 见 BeginLine() 注释
 
     // 历史一条就是一次完整提交的 composer 内容(多行拼 '\n' 存);draft_ 同理。
+    // 只供输入框 ↑/↓ 翻阅,留最近 100 条足够;再多只会白占内存。
+    static constexpr std::size_t kHistoryCapacity = 100;
     std::vector<std::u32string> history_;
     std::optional<std::size_t> history_index_;  // nullopt = 在"底部"(没有在翻历史)
     std::u32string draft_;                      // 开始翻历史之前正在编辑的内容(拼 '\n'),翻回底部时恢复

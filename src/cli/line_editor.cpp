@@ -1009,6 +1009,9 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             }
             if (!expanded.empty()) {
                 history_.push_back(expanded);
+                if (history_.size() > kHistoryCapacity) {
+                    history_.erase(history_.begin());
+                }
             }
             // Codex 的占位符只活在 composer：提交时展开，历史回显也留下
             // 全文。短 paste 本来就是明文；大 paste 到这里才从 token 还原。
