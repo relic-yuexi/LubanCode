@@ -1,0 +1,47 @@
+# OneShot 轨迹断档：单发会话不进账本
+
+- 状态：待实现（2026-09-02 主人立单；实战挖账亲踩——逐请求 usage 无处可查）
+- 日期：2026-09-02
+- 级别：P1（可观测性——最烧钱的用法恰好是笔糊涂账）
+- 范围：`src/app/one_shot.cpp`、TrajectorySessionLedger 接线、会话列表/管理面、Token 账本与 insights 投影
+- 依赖：workspace 存储 v2（已落）、Token 账本单（已落）
+- 关联：《LubanCode使用洞察_Token账本与Prompt审计设计.todo》、《动态工具PromptCache守恒与按需调用设计.todo》
+- 不在本单：one_shot 的交互化改造；网络层 usage 采集本身
+
+## 一、先下断语
+
+`one_shot.cpp:396` 注释写明："TrajectorySessionLedger（设计如此'单发不落盘'，不是 feature 开关）"。这条设计的前提是 one_shot 只当"一次问答"轻用途。**前提已经死了。**
+
+2026-09-02 实战：派活走 one_shot，一场 53 分 25 秒、108 次请求、8.55M 输入 tokens 的重会话——账本上查无此场。挖遍 `~/.lubancode/workspaces/`，只有几行头的空壳会话（还是交互测试留下的）。总账只在进程退出前打一行 `[tokens]` 汇总，进程一退，细账蒸发。
+
+## 二、糊涂在哪儿（四笔）
+
+1. **Token 账本瞎**。`/prompt audit`、Session Analyzer、`/insights` 全吃轨迹投影——one_shot 的场一概不进。实战主力恰好全走 one_shot：账本记录的是零头，漏掉的是大头。
+2. **缓存诊断断档**。实战缓存命中 36%（理想稳态 85-95%），想看逐请求命中分布归因——数据不存在。PromptCache 单 §12.5 三档质量对照若用 one_shot 跑，跑了也白跑。
+3. **断线无档**。交互会话死了能 resume；one_shot 中途死（实战头两回：401、缺 key），活到哪步、读了什么、写了什么，无档可查——重跑只能从头来。
+4. **训练投影缺角**。evolve/导出吃新账，one_shot 的产出不进轨迹，投影天然缺一块。
+
+## 三、修法
+
+1. one_shot 过 TrajectorySessionLedger，`run_kind=one_shot` 单列；`training_policy` 默认 exclude（实战派活含内部路径，不进训练集），配置可改。
+2. 逐请求 usage 落账：cache_read/creation/input/output 分列（口径照 PromptCache 单 §11，与交互会话同轴）。
+3. 会话管理面：`/sessions` 列 one_shot 场（run_kind 标注），archive/delete 照管；resume 不做（单发语义不续），但审计可读。
+4. 进程退出前的 `[tokens]` 汇总行保留（人眼快账），注明"细账见轨迹"。
+
+## 四、实施批次
+
+### P0：落账
+- [ ] one_shot 接 TrajectorySessionLedger（run_kind=one_shot，training_policy=exclude）
+- [ ] 逐请求 usage 事件（cache 分列）
+- [ ] 中途异常退出（401/缺 key/kill）已落事件不丢——账本 WAL 语义既有，验 one_shot 路径
+
+### P1：管理面与投影
+- [ ] `/sessions` 与 session 管理子命令纳管 one_shot 场
+- [ ] Token 账本/insights 投影含 one_shot（`/doctor insights` 对账）
+- [ ] 中英文案成对
+
+## 五、验收
+
+- 跑一场 one_shot（正常收场 + 人为 kill 各一）：`workspaces` 下事件流完整，逐请求 usage 可查，cache_read/creation 分列。
+- `/insights` 或 `/doctor insights` 能看到这场；交互会话的账不受影响（零回归）。
+- 401 早死场景：账里能看到已发出的请求与失败原因。
