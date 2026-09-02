@@ -6,7 +6,7 @@
 #                        双语 README、docs/、安装/卸载脚本
 #   linux/macos.tar.gz -> lubancode、libexec/rg、LICENSE、licenses/、
 #                         THIRD_PARTY_NOTICES.md、skills/、双语 README、docs/、install.sh
-# libexec/rg 由 scripts/fetch_ripgrep.py 按 third_party/ripgrep/manifest.json
+# libexec/rg 由 scripts/fetch_ripgrep.sh 按 third_party/ripgrep/manifest.json
 # 钉死的哈希/版本拉取(缺 rg 或缺 license 流水线必红,不发半套)。
 # 装/卸载脚本源码在仓库 scripts/ 目录,详见脚本内注释。
 name: release
@@ -77,8 +77,8 @@ jobs:
       - name: Fetch bundled ripgrep (manifest-pinned)
         shell: bash
         run: |
-          python3 scripts/fetch_ripgrep.py --target dist/lubancode --platform ${{ matrix.name }} --cache build/rg-cache \
-            || python scripts/fetch_ripgrep.py --target dist/lubancode --platform ${{ matrix.name }} --cache build/rg-cache
+          python3 scripts/fetch_ripgrep.sh --target dist/lubancode --platform ${{ matrix.name }} --cache build/rg-cache \
+            || python scripts/fetch_ripgrep.sh --target dist/lubancode --platform ${{ matrix.name }} --cache build/rg-cache
 
       - name: Package
         shell: bash

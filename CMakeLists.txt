@@ -60,12 +60,12 @@ endif()
 option(LUBANCODE_USE_CODELOAD
        "用 codeload.github.com 镜像拉 FetchContent 依赖(github 主站不通的网络环境用)" ON)
 # 随包 ripgrep 分期目录(SearchTool 内置 Ripgrep 后端迁移单,设计单 8.4):
-# 指向 scripts/fetch_ripgrep.py 过完哈希/版本门的产物目录(内含 rg[.exe])。
+# 指向 scripts/fetch_ripgrep.sh 过完哈希/版本门的产物目录(内含 rg[.exe])。
 # 设了则:configure 校版本(与 third_party/ripgrep/manifest.json 对账)、
 # 构建后复制进主程序与测试运行目录的 libexec/(search 生产定位是
 # ExecutableDir/libexec,同一条路);没设则主程序 search 明报缺件、真 rg
 # 集成测试跳过——绝不暗中联网,依赖获取永远显式、可缓存、可校验。
-set(LUBANCODE_BUNDLED_RG_DIR "" CACHE PATH "已校验的随包 ripgrep 目录(内含 rg[.exe];由 scripts/fetch_ripgrep.py 产出)")
+set(LUBANCODE_BUNDLED_RG_DIR "" CACHE PATH "已校验的随包 ripgrep 目录(内含 rg[.exe];由 scripts/fetch_ripgrep.sh 产出)")
 # 全机共享分期兜底(派工单 §六:新 worktree 断供 bundled rg):没显式传
 # LUBANCODE_BUNDLED_RG_DIR 时,探一次 <home>/.lubancode/rg-stage/libexec——
 # fetch_ripgrep.py --target <home>/.lubancode/rg-stage 的一次性产物,离线、
@@ -425,6 +425,14 @@ add_library(lubancode_engine STATIC
   src/runtime/agent_supervisor.cpp
   src/runtime/agent_health_hooks.cpp
   src/runtime/agent_supervisor_metrics.cpp
+  # 引擎层也用的 runtime 纯逻辑件(turn_runtime/plan_mode/retry_backoff/
+  # loop_scheduler)随之上行:engine 的 agent_tool/loop/api 引用它们,住
+  # runtime 便是 engine 反向引用 runtime——GCC 单遍链接炸 undefined(CI
+  # ubuntu 腿两轮实证);四件 cli/app 零依赖,居 engine 不破门。
+  src/runtime/turn_runtime.cpp
+  src/runtime/plan_mode.cpp
+  src/runtime/retry_backoff.cpp
+  src/runtime/loop_scheduler.cpp
   # 骨架拆解批三·病十四:AgentTool 六职拆分出的台账/调度/隔间三件。
   src/tools/task_ledger.cpp
   src/tools/subagent_scheduler.cpp
@@ -710,7 +718,6 @@ add_library(lubancode_runtime STATIC
   # 会话管理器单第六步:会话查询/搬删的 runtime 侧命令服务(合同消费方)。
   src/runtime/session_command_service.cpp
   # 第三步:TurnRuntime 纯逻辑核(权限/hooks/usage/取消),cli/app 零依赖。
-  src/runtime/turn_runtime.cpp
   # 第五步:TurnItem 领域条目 + 中立 diff 行表(diff 计算移出 ToolDisplay)。
   src/runtime/turn_item.cpp
   # 终端回合视觉收束单:TurnView 中立视图模型(turn/step/batch/item 四层
@@ -761,7 +768,6 @@ add_library(lubancode_runtime STATIC
   # /loop 会话定时循环单:领域类型/状态机转换表/interval 解析/错过合并账。
   src/runtime/loop_types.cpp
   # /loop 会话定时循环单:内存 scheduler(timer 只发 wake/泵取件/退避/expiry)。
-  src/runtime/loop_scheduler.cpp
   # 骨架拆解反弹·问题 3:loop 单拍执行的调度状态机(自 app/wirings 下沉,
   # 通知走回调,零终端)。
   src/runtime/loop_tick_driver.cpp
@@ -779,13 +785,11 @@ add_library(lubancode_runtime STATIC
   src/runtime/scheduled_action.cpp
   # Plan 模式(只读研究硬闸单):CollaborationMode/ModePolicy/PlanDocument
   # 合同与纯函数(ModePolicy 硬闸、Plan shell 分类、<proposed_plan> 扫描)。
-  src/runtime/plan_mode.cpp
   # 骨架拆解批五先行半批:预算闸(三尺 + 停因分型 + 连撞计数)——三外壳
   # (loop/goal/workflow)各声明自己的尺,机制只此一份。
   src/runtime/budget_gate.cpp
   # 骨架拆解批五先行半批:重试退避(固定/指数/阶梯 + 上限 + 抖动档 +
   # 可取消等待)——loop 的 5s/15s 与 workflow 的节点级指数同走这枚。
-  src/runtime/retry_backoff.cpp
   # (监督器三件已挪 engine——见 engine 源列表注:断 engine→runtime
   # 反向引用,GCC 单遍链接 undefined。)
   # 统一回放接口只收信封、次序与坏行恢复规矩;loop/goal/workflow
@@ -1104,7 +1108,7 @@ target_link_libraries(legacy-storage-migrator PRIVATE lubancode_storage_migrator
 target_compile_features(legacy-storage-migrator PRIVATE cxx_std_23)
 
 # 随包 rg 落到主程序旁的 libexec/(迁移单 8.4:构建后复制)。Release 包
-# 的 rg 由 scripts/fetch_ripgrep.py 在打包阶段直接放 dist/lubancode/libexec,
+# 的 rg 由 scripts/fetch_ripgrep.sh 在打包阶段直接放 dist/lubancode/libexec,
 # 这条只服务本地/CI 构建出来的 exe 也能跑真 search。
 if(LUBANCODE_BUNDLED_RG_DIR AND EXISTS "${LUBANCODE_BUNDLED_RG_DIR}")
   if(WIN32)
