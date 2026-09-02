@@ -105,6 +105,23 @@ struct Turn {
 
 }  // namespace
 
+TEST_CASE("断流恢复:假后端前三次 503,第 4 次尝试恢复成功") {
+    FlakyBackend backend;
+    for (int i = 0; i < 3; ++i) {
+        backend.script.push_back({{}, api::Error{api::ErrorKind::HttpStatus, "overloaded", 503}});
+    }
+    backend.script.push_back({TextScript("第四次恢复"), std::nullopt});
+    api::Request request;
+    api::RequestRecoveryHooks hooks;
+    hooks.wait_backoff = [](std::chrono::milliseconds, const std::atomic<bool>*) { return true; };
+    int events = 0;
+    const auto result = api::SendStreamWithRecovery(
+        backend, request, [&events](const api::StreamEvent&) { ++events; }, hooks, nullptr);
+    REQUIRE(result.has_value());
+    CHECK(backend.calls == 4);
+    CHECK(events == 4);
+}
+
 TEST_CASE("断流恢复:首字节都没到就断,重发后整轮跑完,attempt 连号") {
     FlakyBackend backend;
     backend.script = {
@@ -216,11 +233,7 @@ TEST_CASE("断流恢复:工具结果已提交,下一请求断流重试不重跑�
 
 TEST_CASE("断流恢复:重试用尽,结构化收口并如实写重试次数") {
     FlakyBackend backend;
-    backend.script = {
-        {/*空*/},
-        {/*空*/},
-        {/*空*/},
-    };
+    backend.script.resize(api::kMaxRequestAttempts);
     for (auto& take : backend.script) {
         take.error = ConnectReset();
     }
@@ -230,10 +243,13 @@ TEST_CASE("断流恢复:重试用尽,结构化收口并如实写重试次数") {
     Turn turn;
     agent::TurnWiring wiring;
     wiring.events = &turn.adapter;
+    wiring.wait_request_backoff = [](std::chrono::milliseconds, const std::atomic<bool>*) { return true; };
     const auto result = loop.Run("必失败", wiring);
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().find("已自动重试 2 次仍失败") != std::string::npos);
-    CHECK(backend.calls == 3);  // 首发 + 2 次重试
+    CHECK(result.error().find("已自动重试 5 次仍失败") != std::string::npos);
+    CHECK(result.error().find("总时长") != std::string::npos);
+    CHECK(result.error().find("含退避") != std::string::npos);
+    CHECK(backend.calls == 6);  // 首发 + 5 次重试
 }
 
 TEST_CASE("恢复账:尝试相位从环里流出,started 连号、retrying 带稳定码") {

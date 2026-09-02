@@ -12,6 +12,7 @@
 #include <utility>
 #include <vector>
 
+#include "api/model_request_recovery.hpp"
 #include "cli/agent_panel.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
@@ -72,10 +73,9 @@ std::string SupervisionSegment(const agent::AgentProgressClock& progress,
     }
     std::vector<std::string> parts;
     if (progress.health == H::Recovering) {
-        // "重连 2/3":自动重试次数/上限(单子 §十样例)。上限是请求恢复链
-        // 的常量(api::kMaxRequestAttempts),这里不引 api 头,按同一数值写死
-        // 并注释拴住——两处不同步时以 api 侧为准。
-        parts.push_back(trf("agent_supervision.recovering", progress.retry_count, 3));
+        // 显示的是自动重试次数,因此上限是总尝试数减去首发。
+        parts.push_back(trf("agent_supervision.recovering", progress.retry_count,
+                            api::kMaxRequestAttempts - 1));
     } else if (progress.health == H::Degraded) {
         parts.push_back(tr("agent_supervision.degraded"));
     }

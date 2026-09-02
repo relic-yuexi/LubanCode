@@ -128,6 +128,20 @@ TEST_CASE("请求级恢复账:重试回滚半截显示账,不拼两段正文") {
     CHECK(ledger.ProgressOf(task->snapshot.id).health == AgentHealthState::Healthy);
 }
 
+TEST_CASE("判定尺:长退避中的 Recovering 保持恢复态,不判 Suspect") {
+    agent::SupervisionThresholds thresholds;
+    thresholds.streaming_soft_secs = 30;
+    agent::TaskVitals v;
+    v.now = Clock::now();
+    v.stage = AgentSupervisionStage::Recovering;
+    v.health = AgentHealthState::Recovering;
+    v.has_transport = true;
+    v.last_transport_at = v.now - std::chrono::minutes(2);
+    const auto verdict = agent::EvaluateSupervision(v, thresholds, false);
+    CHECK(verdict.action == agent::SupervisionAction::None);
+    CHECK(verdict.new_health == AgentHealthState::Recovering);
+}
+
 TEST_CASE("判定尺:等首字节越软线判 SuspectTransport,不冒充工具或 Agent") {
     agent::SupervisionThresholds thresholds;
     thresholds.first_byte_soft_secs = 20;

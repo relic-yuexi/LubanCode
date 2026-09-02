@@ -275,6 +275,8 @@ struct TurnWiring {
     // Retrying 那一拍调用方须丢弃上一尝试的半截显示积累(pending/live 账),
     // 不拼两段正文。不设 = 恢复照跑(重试仍在),只是没人记账。
     std::function<void(const api::ModelRequestAttempt&, api::RequestAttemptPhase)> on_request_attempt;
+    // 请求恢复退避的测试注入口;生产装配不设,走 10ms 粒度真实可取消等待。
+    std::function<bool(std::chrono::milliseconds, const std::atomic<bool>*)> wait_request_backoff;
     // 2. 本批五枚 tool result 全收齐、合并的 user 消息刚入 history:装配层
     //    append+flush user 消息,再为每枚写 result_committed 栅栏。
     std::function<void(const std::string& batch_id, const api::Message& tool_result_message)> on_tool_results_committed;
