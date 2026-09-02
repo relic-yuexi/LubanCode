@@ -94,7 +94,8 @@ public:
                                int input_round_index) override;
     void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                          bool reported_by_provider, const std::string& provider_response_id,
-                         int cache_epoch = 0, bool prefix_append_only = true) override;
+                         int cache_epoch = 0, bool prefix_append_only = true,
+                         bool cache_reported_by_provider = false) override;
     bool OnOutputCompleted(const std::string& request_id, const api::Message& assistant,
                            const std::string& stop_reason,
                            const std::string& provider_response_id) override;
@@ -257,7 +258,8 @@ public:
     void OnRequestSent(const std::string& request_id) override;
     void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                          bool reported_by_provider, const std::string& provider_response_id,
-                         int cache_epoch = 0, bool prefix_append_only = true) override;
+                         int cache_epoch = 0, bool prefix_append_only = true,
+                         bool cache_reported_by_provider = false) override;
     bool OnOutputCompleted(const std::string& request_id, const api::Message& assistant,
                            const std::string& stop_reason,
                            const std::string& provider_response_id) override;

@@ -62,12 +62,22 @@ std::optional<int> UsageTotals::cache_read_ratio_percent() const {
     return RatioPercent(cache_read_tokens, base);
 }
 
+std::optional<int> CacheEpochBreakdown::cache_read_ratio_percent() const {
+    const std::int64_t base = cache_reported_input_tokens + cache_reported_read_tokens +
+                              cache_reported_creation_tokens;
+    if (requests_cache_reported <= 0 || base <= 0) {
+        return std::nullopt;
+    }
+    return RatioPercent(cache_reported_read_tokens, base);
+}
+
 UsageAggregate AggregateUsage(const std::vector<UsageSample>& samples) {
     UsageAggregate aggregate;
     std::map<std::string, UsageTotals> by_purpose;
     std::map<std::string, UsageTotals> by_model;
     std::map<std::string, UsageTotals> by_run;
     std::map<std::string, UsageTotals> by_outcome;
+    std::map<std::pair<std::string, int>, CacheEpochBreakdown> by_cache_epoch;
     std::vector<std::string> run_ids;
     // cache 行为观察按 run 分段:epoch 与 append-only 只在同一条 stream 内
     // 比较才有意义(§7.2)。
@@ -98,6 +108,21 @@ UsageAggregate AggregateUsage(const std::vector<UsageSample>& samples) {
         by_model[model_label].Add(sample);
         by_run[sample.run_kind].Add(sample);
         by_outcome[outcome_label].Add(sample);
+        const int epoch_label = sample.cache_epoch.value_or(0);
+        CacheEpochBreakdown& epoch = by_cache_epoch[{sample.run_id, epoch_label}];
+        epoch.run_id = sample.run_id;
+        epoch.cache_epoch = epoch_label;
+        epoch.totals.Add(sample);
+        if (sample.cache_reported_by_provider.value_or(false)) {
+            epoch.requests_cache_reported += 1;
+            if (sample.usage.has_value()) {
+                epoch.cache_reported_input_tokens += sample.usage->input_tokens;
+                epoch.cache_reported_read_tokens += sample.usage->cache_read_tokens;
+                epoch.cache_reported_creation_tokens += sample.usage->cache_creation_tokens;
+            }
+        } else {
+            epoch.requests_cache_unknown += 1;
+        }
 
         if (std::find(run_ids.begin(), run_ids.end(), sample.run_id) == run_ids.end()) {
             run_ids.push_back(sample.run_id);
@@ -143,6 +168,10 @@ UsageAggregate AggregateUsage(const std::vector<UsageSample>& samples) {
     aggregate.by_model = Flatten(by_model);
     aggregate.by_run = Flatten(by_run);
     aggregate.by_outcome = Flatten(by_outcome);
+    for (auto& [key, row] : by_cache_epoch) {
+        (void)key;
+        aggregate.by_cache_epoch.push_back(std::move(row));
+    }
     return aggregate;
 }
 
@@ -188,6 +217,25 @@ nlohmann::json UsageAggregate::ToJson() const {
     for (const auto& run_id : run_ids) {
         run_ids_json.push_back(run_id);
     }
+    nlohmann::json epoch_json = nlohmann::json::array();
+    for (const auto& row : by_cache_epoch) {
+        nlohmann::json item{{"run_id", row.run_id},
+                            {"cache_epoch", row.cache_epoch == 0 ? nlohmann::json(nullptr)
+                                                                  : nlohmann::json(row.cache_epoch)},
+                            {"requests", row.totals.requests_total},
+                            {"requests_cache_reported", row.requests_cache_reported},
+                            {"requests_cache_unknown", row.requests_cache_unknown},
+                            {"input_tokens", row.totals.input_tokens},
+                            {"cache_read_tokens", row.totals.cache_read_tokens},
+                            {"cache_creation_tokens", row.totals.cache_creation_tokens},
+                            {"total_input_tokens", row.totals.total_input_tokens}};
+        if (const auto ratio = row.cache_read_ratio_percent()) {
+            item["read_ratio_percent"] = *ratio;
+        } else {
+            item["read_ratio_percent"] = nullptr;
+        }
+        epoch_json.push_back(std::move(item));
+    }
     return nlohmann::json{
         {"run_ids", run_ids_json},
         {"totals",
@@ -206,6 +254,7 @@ nlohmann::json UsageAggregate::ToJson() const {
                         {"cost_micros", totals.cost_micros},
                         {"requests_priced", totals.requests_priced}}},
         {"cache", cache_json},
+        {"by_cache_epoch", epoch_json},
         {"by_purpose", breakdown_json(by_purpose)},
         {"by_model", breakdown_json(by_model)},
         {"by_run", breakdown_json(by_run)},

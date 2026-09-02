@@ -28,8 +28,14 @@ std::string StopReason(const std::string& reason, bool has_tools) {
 //   3) 光杆 prompt_tokens:input=total,cache_read=0。
 // 每次带 usage 的帧整个覆盖(不是累加)——finish chunk 与 [DONE] 前的
 // 独立 usage chunk 各来一次也只认最后一份数,不会重复累计。
-Usage ParseUsage(const nlohmann::json& usage) {
-    Usage out;
+struct ParsedUsage {
+    Usage usage;
+    bool cache_reported = false;
+};
+
+ParsedUsage ParseUsage(const nlohmann::json& usage) {
+    ParsedUsage parsed;
+    Usage& out = parsed.usage;
     out.output_tokens = usage.value("completion_tokens", static_cast<std::int64_t>(0));
     const std::int64_t prompt_total = usage.value("prompt_tokens", static_cast<std::int64_t>(0));
     // reasoning 拆账(OpenAI/vLLM 兼容):completion_tokens_details.reasoning_tokens,
@@ -57,16 +63,21 @@ Usage ParseUsage(const nlohmann::json& usage) {
         }
         out.input_tokens = miss;
         out.cache_read_tokens = hit;
-        return out;
+        parsed.cache_reported = true;
+        return parsed;
     }
     if (auto details = usage.find("prompt_tokens_details"); details != usage.end() && details->is_object()) {
-        const std::int64_t cached = details->value("cached_tokens", static_cast<std::int64_t>(0));
-        out.cache_read_tokens = cached;
-        out.input_tokens = prompt_total > cached ? prompt_total - cached : 0;
-        return out;
+        if (auto cached_it = details->find("cached_tokens");
+            cached_it != details->end() && cached_it->is_number_integer()) {
+            const std::int64_t cached = cached_it->get<std::int64_t>();
+            out.cache_read_tokens = cached;
+            out.input_tokens = prompt_total > cached ? prompt_total - cached : 0;
+            parsed.cache_reported = true;
+            return parsed;
+        }
     }
     out.input_tokens = prompt_total;
-    return out;
+    return parsed;
 }
 
 }  // namespace
@@ -99,7 +110,9 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
         // 帧里真有 usage 对象才算 provider 明报(Token 账本单 A0):后面
         // 凑 MessageDone 时把这位带出去,明报全零与没报分家。
         usage_reported_ = true;
-        usage_ = ParseUsage(*usage);
+        const ParsedUsage parsed = ParseUsage(*usage);
+        usage_ = parsed.usage;
+        cache_reported_ = parsed.cache_reported;
     }
 
     auto choices = data.find("choices");
@@ -220,6 +233,7 @@ std::vector<StreamEvent> EventParser::Finish() {
         done.stop_reason = StopReason(finish_reason_, !tool_calls_.empty());
         done.usage = usage_;
         done.usage_reported = usage_reported_;
+        done.cache_reported = cache_reported_;
         events.push_back(std::move(done));
     }
     // 结构化 reasoning_details 的留账诊断:不映射(映射另定)但必须说破,

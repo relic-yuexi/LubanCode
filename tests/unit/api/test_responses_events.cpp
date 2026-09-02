@@ -186,6 +186,7 @@ TEST_CASE("response.completed:usage.input_tokens_details.cached_tokens 映射进
     CHECK(done.usage.input_tokens == 1450);
     CHECK(done.usage.output_tokens == 83);
     CHECK(done.usage.cache_read_tokens == 128);
+    CHECK(done.cache_reported);
     CHECK(TotalInputTokens(done.usage) == 1578);
     CHECK(done.usage.cache_creation_tokens == 0);  // responses wire 没有缓存写入这个概念
 }
@@ -196,7 +197,10 @@ TEST_CASE("response.completed:没有 input_tokens_details 字段时,cache_read_t
 
     REQUIRE(event.has_value());
     REQUIRE(std::holds_alternative<MessageDone>(*event));
-    CHECK(std::get<MessageDone>(*event).usage.cache_read_tokens == 0);
+    const auto& done = std::get<MessageDone>(*event);
+    CHECK(done.usage.cache_read_tokens == 0);
+    CHECK(done.usage_reported);
+    CHECK_FALSE(done.cache_reported);
 }
 
 TEST_CASE("response.completed:output 里带 function_call,stop_reason 相当于 tool_use") {

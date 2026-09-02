@@ -137,6 +137,8 @@ TEST_CASE("A4 摘要合同:work/coverage/usage/friction/版本账齐") {
     CHECK(summary.usage.requests_with_usage == 2);
     CHECK(summary.usage.input_tokens == 5200);
     CHECK(summary.usage.cache_read_tokens == 5000);
+    REQUIRE(summary.cache_epochs.size() == 1);
+    CHECK(summary.cache_epochs[0].cache_read_tokens == 5000);
     CHECK(summary.usage.cost_status == "not_priced");
     // 摩擦:工具失败 + 验证失败两类在册(排序稳定);passed 前有验证,
     // 不算 verification.missing。

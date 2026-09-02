@@ -203,6 +203,11 @@ UsageProjection ProjectUsage(const std::vector<trajectory::EventEnvelope>& event
                     owner.payload.at("prefix_append_only").is_boolean()) {
                     sample.prefix_append_only = owner.payload.at("prefix_append_only").get<bool>();
                 }
+                if (owner.payload.contains("cache_reported_by_provider") &&
+                    owner.payload.at("cache_reported_by_provider").is_boolean()) {
+                    sample.cache_reported_by_provider =
+                        owner.payload.at("cache_reported_by_provider").get<bool>();
+                }
                 if (owner.payload.value("reported_by_provider", false)) {
                     api::Usage usage;
                     usage.input_tokens = owner.payload.value("input_tokens", std::int64_t{0});

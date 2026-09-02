@@ -357,6 +357,9 @@ struct UsageReport {
     // usage 帧才置真,明报全零也是真。耐久账(accounting::UsageSample 与
     // Trajectory v2 model.usage.recorded)只认这一位。
     bool reported_by_provider = false;
+    // provider 是否明报缓存读明细。与 usage 明报分开：usage 对象存在但
+    // cached_tokens/cache hit 字段缺席时为 false，显示与耐久账据此写“未报缓存”。
+    bool cache_reported_by_provider = false;
 
     // legacy 推断 helper(五项任一非零 = 报过):老 UI 流水(TurnUsageStats/
     // ContextTracker 面板)沿用。provider"明报全零"与"没报"靠它分不开,
@@ -448,6 +451,7 @@ struct MessageDone {
     std::string stop_reason;
     Usage usage;
     bool usage_reported = false;
+    bool cache_reported = false;  // wire 中是否真出现 cache token 明细字段
 };
 
 // 模型输出的一张图片(Responses 的 image_generation_call.result)。base64

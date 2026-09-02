@@ -78,11 +78,26 @@ struct CacheBehavior {
     std::int64_t epoch_unlabeled = 0;
 };
 
+struct CacheEpochBreakdown {
+    std::string run_id;
+    int cache_epoch = 0;  // 0 = 未标 epoch
+    UsageTotals totals;
+    std::int64_t requests_cache_reported = 0;
+    std::int64_t requests_cache_unknown = 0;
+    std::int64_t cache_reported_input_tokens = 0;
+    std::int64_t cache_reported_read_tokens = 0;
+    std::int64_t cache_reported_creation_tokens = 0;
+
+    std::optional<int> cache_read_ratio_percent() const;
+};
+
 // 一份聚合账(turn/run/session/workspace 哪一层由调用方喂多少决定)。
 struct UsageAggregate {
     std::vector<std::string> run_ids;  // 收进来的 stream(coverage 写"几条 run")
     UsageTotals totals;
     CacheBehavior cache;
+    // 按 run+epoch 分段，避免不同 stream 的同号 epoch 被误并；顺序稳定。
+    std::vector<CacheEpochBreakdown> by_cache_epoch;
     std::vector<UsageBreakdown> by_purpose;  // purpose 线上名;缺 = "unknown"
     std::vector<UsageBreakdown> by_model;    // "provider/model";prepared 缺 = "unknown/*"
     std::vector<UsageBreakdown> by_run;      // run_kind 线上名

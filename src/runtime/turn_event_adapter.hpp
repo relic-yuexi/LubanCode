@@ -226,6 +226,7 @@ public:
                                        {"step_index", report.step_index},
                                        {"provider_response_id", report.provider_response_id},
                                        {"reported_by_provider", report.reported_by_provider},
+                                       {"cache_reported_by_provider", report.cache_reported_by_provider},
                                        {"cache_epoch", report.cache_epoch},
                                        {"epoch_break_reason", report.epoch_break_reason},
                                        {"prefix_append_only", report.prefix_append_only},

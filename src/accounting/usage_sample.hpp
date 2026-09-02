@@ -79,6 +79,8 @@ struct UsageSample {
     std::int64_t total_billed_shape_tokens = 0;  // total_input + output,比较规模用
     std::optional<int> cache_epoch;
     std::optional<bool> prefix_append_only;
+    // nullopt = 旧账未知；false = usage 有报但 cache 明细字段缺席；true = 明报。
+    std::optional<bool> cache_reported_by_provider;
     CostEstimate cost;
     std::optional<SourceEventRef> source_event;
     // request 终态:completed/failed/cancelled;没见到终态留空(unknown)。

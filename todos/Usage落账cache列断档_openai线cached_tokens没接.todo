@@ -1,6 +1,6 @@
 # Usage 落账 cache 列断档：openai 线 cached_tokens 没接
 
-- 状态：待实现（2026-09-02 主人质疑缓存命中低，挖轨迹账撞见）
+- 状态：已实现并验收（2026-09-02）
 - 日期：2026-09-02
 - 级别：P1（可观测性——细账的 cache 眼睛是瞎的，68% 这种数无法归因）
 - 范围：openai-responses/openai-chat wire 的 usage 解析、`model.usage.recorded` 落账、`[tokens]` 汇总行的算法来源
@@ -40,9 +40,9 @@
 ## 五、实施批次
 
 ### P0：接线
-- [ ] openai 两线 cached_tokens 挖取进落账
-- [ ] 汇总行与逐请求账同源
+- [x] openai 两线 cached_tokens 挖取进落账
+- [x] 汇总行与逐请求账同源
 
 ### P1：分段与明示
-- [ ] epoch 分段统计口（insights/doctor）
-- [ ] 未报缓存的明示文案（中英）
+- [x] epoch 分段统计口（insights/doctor）
+- [x] 未报缓存的明示文案（中英）

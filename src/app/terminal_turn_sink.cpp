@@ -132,6 +132,8 @@ void TerminalTurnSink::RenderEvent(const runtime::ServerEvent& event) {
             report.step_index = event.payload.value("step_index", 0);
             report.provider_response_id = event.payload.value("provider_response_id", std::string());
             report.reported_by_provider = event.payload.value("reported_by_provider", false);
+            report.cache_reported_by_provider =
+                event.payload.value("cache_reported_by_provider", false);
             report.model = event.payload.value("model", std::string());
             report.cache_epoch = event.payload.value("cache_epoch", 1);
             report.epoch_break_reason = event.payload.value("epoch_break_reason", std::string());

@@ -1222,6 +1222,9 @@ RunTurnResult RunTurn(TurnContext ctx) {
         // (结论记在 ContextTracker),否则 0 命中如实带"是否启用未验证"。
         const std::string cache_part = [&]() {
             if (!usage_stats.any_reported()) {
+                return tr("stats.usage_not_reported");
+            }
+            if (!usage_stats.all_cache_reported()) {
                 return tr("stats.cache_not_reported");
             }
             if (usage_stats.cache_read_tokens() > 0) {

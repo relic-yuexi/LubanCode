@@ -105,6 +105,8 @@ TEST_CASE("Chat events: 只有 prompt_tokens、没有 cache 字段——input=to
     const auto& event = std::get<api::MessageDone>(done[0]);
     CHECK(event.usage.input_tokens == 37);
     CHECK(event.usage.cache_read_tokens == 0);
+    CHECK(event.usage_reported);
+    CHECK_FALSE(event.cache_reported);
     CHECK(api::TotalInputTokens(event.usage) == 37);
 }
 
@@ -136,6 +138,7 @@ TEST_CASE("Chat events: usage 在 finish chunk 与独立 chunk 各来一次,只�
     const auto& event = std::get<api::MessageDone>(done[0]);
     CHECK(event.usage.input_tokens == 40);
     CHECK(event.usage.cache_read_tokens == 60);
+    CHECK(event.cache_reported);
     CHECK(event.usage.output_tokens == 10);
     CHECK(api::TotalInputTokens(event.usage) == 100);
 }

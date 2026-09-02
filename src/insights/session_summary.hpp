@@ -36,10 +36,20 @@ struct SummaryUsage {
     std::string price_table_id;
 };
 
+struct SummaryCacheEpoch {
+    std::string run_id;
+    int cache_epoch = 0;
+    std::uint64_t requests_total = 0;
+    std::uint64_t requests_cache_reported = 0;
+    std::uint64_t requests_cache_unknown = 0;
+    std::int64_t input_tokens = 0;
+    std::int64_t cache_read_tokens = 0;
+    std::int64_t cache_creation_tokens = 0;
+};
+
 struct SessionInsightSummary {
-    // 与 kInsightsAnalyzerVersion 同步(A5 抬到 insights-v1.1:信号 id 改
-    // 规则钉死,旧摘要判 stale 重算)。
-    std::string analyzer_version = "insights-v1.1";
+    // 与 kInsightsAnalyzerVersion 同步(v1.2 加 cache epoch 分段；旧摘要判 stale 重算)。
+    std::string analyzer_version = "insights-v1.2";
     struct Source {
         std::string session_id;
         // stream run_id -> terminal event hash;任一变化即 stale。
@@ -61,6 +71,7 @@ struct SessionInsightSummary {
         std::string outcome;  // 空 = 无 outcome 评估
     } work;
     SummaryUsage usage;
+    std::vector<SummaryCacheEpoch> cache_epochs;
     std::vector<Finding> prompt_findings;
     std::vector<std::string> friction_events;   // 摩擦类名(§9.3 枚举)
     std::vector<std::string> feature_signals;   // 建议引用的信号 id
