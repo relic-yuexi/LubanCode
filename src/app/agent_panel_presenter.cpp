@@ -46,7 +46,7 @@ std::string FormatDurationCompact(std::int64_t ms) {
     }
     char buf[16];
     std::snprintf(buf, sizeof(buf), "%dh%02dm", static_cast<int>(total_seconds / 3600),
-                  static_cast<long long>((total_seconds % 3600) / 60));
+                  static_cast<int>((total_seconds % 3600) / 60));
     return buf;
 }
 
