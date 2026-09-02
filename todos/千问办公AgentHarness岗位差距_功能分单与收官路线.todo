@@ -1,0 +1,146 @@
+# 千问办公 Agent Harness 岗位差距：功能分单与收官路线
+
+- 状态：待实现（2026-09-02 立单）
+- 日期：2026-09-02
+- 级别：总装索引；本文件不承载重复实现细节
+- 范围：把当前 LubanCode 尚不能完整支撑的 Harness 能力分账，排清依赖、收官口径与岗位证明材料
+- 依据：当前 `main` / `0.26.172` 源码、文档与 361/361 Release CTest 实跑
+- 不在本单：改代码、复写各专题设计、把办公业务功能硬塞进通用 Harness、拿测试数量冒充 Agent 任务成功率
+
+## 一、先下断语
+
+LubanCode 已有 Agent Harness 主骨架。会话、Turn/Event、工具、上下文、MCP、Plugin、Skill、Trajectory、Replay、Telemetry、App Server 与离线评测都不是空名。
+
+眼下缺的，不是一只大而全的“岗位补齐”模块，而是五道各自独立的能力门：
+
+1. 不同 Agent Engine 尚不能按同一运行合同接入；
+2. 通用工具与扩展尚无跨平台强化沙箱；
+3. 回放、场景、故障注入与调试材料尚未收成一座工作台；
+4. 评测仍散在 PTC、Evolution、Trajectory 与手测脚本里；
+5. 启动、稳态、故障恢复与发布尚无统一 SLO 和阻断门。
+
+云端多租户、LubanCore、Extension Runtime、Telemetry 已有旧单。它们继续做主账。本轮不另造副本。
+
+## 二、功能分账
+
+| 功能域 | 当前有何底座 | 尚缺什么 | 主 TODO |
+|---|---|---|---|
+| 多 Agent Engine | `api::Backend`、`Agent`、`AgentLoop`、Workflow `AgentExecutor`、Channel `ChannelTurnEngine` | Engine 生命周期、能力协商、统一事件、工具桥、暂停/恢复、兼容套件 | `多AgentEngine统一Runtime与适配层设计.todo` |
+| 通用执行与沙箱 | `platform::Process`、Job Object/进程组、PTC 受限 token、权限三档、worktree 隔离 | `ExecutionProvider`、文件/网络/进程/Secret 强制策略、三平台能力分级、远端执行 | `跨平台ExecutionProvider与通用强化沙箱设计.todo` |
+| 场景与调试工作台 | Trajectory Replay、Harness Replay、API fixture、Workflow journal、App Server、Web Console | 场景清单、可复现实验包、事件时间线、故障注入、差分、敏感材料导出 | `Harness场景启动器_事件重放与调试工作台设计.todo` |
+| 统一评测平台 | PTC bench、Evolution eval、Training Exporter、Rollout 设计、CTest | 冻结数据集、统一 Runner/Judge、统计口径、跨 Engine 对照、回归门 | `AgentHarness评测回归与Benchmark平台设计.todo` |
+| 性能与发布门 | 三平台 CI、原生发行包、usage/telemetry、搜索 benchmark、进程收树 | 冷/热启动账、资源预算、长稳与故障 SLO、兼容矩阵、canary/rollback 证据 | `AgentHarness性能SLO_稳定性与发布安全门设计.todo` |
+| 云端多租户 | App Server、Gateway、Workspace、Channel、Trajectory | ACL、Quota、Scheduler、RuntimeLease、fencing、节点恢复 | `多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo` |
+| 核心宿主边界 | CMake 四层 target、`SessionRuntime`、中立事件 | 稳定 Core API、宿主反向依赖清零、独立 SDK/示例宿主 | `LubanCore与CLI分离_核心库独立成宿主底座设计.todo` |
+| 扩展宿主 | Tool/Plugin/MCP/Package/Hooks | 六平面 Extension Runtime、grant、quarantine、generation | `轻量可塑ExtensionRuntime与动态扩展API设计.todo` |
+| 端云观测 | Trajectory、Telemetry、OTLP、Insights | 端云采集拓扑、中央查询、告警、容量与隐私运营 | `端云协同可观测架构与Telemetry插件设计.todo` |
+
+## 三、不可混写的边界
+
+1. Provider wire 适配不是 Agent Engine 适配。前者翻请求，后者接管一场运行。
+2. worktree 不是安全沙箱。它隔开 Git 改动，不拦网络、环境变量与系统文件。
+3. 进程边界不是权限边界。MCP/process Plugin 崩了不拖宿主，不等于看不见本机文件。
+4. exact replay 不是 live rerun。前者重放事实，后者重做外部动作。
+5. CTest 绿色不是 Agent benchmark 成功。它证明代码回归，不证明任务质量。
+6. App Server 能远程承载，不等于已有云控制面。
+7. Telemetry 能导出，不等于已有告警、SLO 和事故闭环。
+8. 办公 Agent 的 Word、表格、邮件、日历、企业 ACL 属业务能力；本轮只补通用 Harness，不冒充已做办公套件。
+
+## 四、依赖次序
+
+```text
+LubanCore 稳定宿主边界
+  ├─ 多 Agent Engine Runtime
+  │    ├─ 场景启动器 / 调试工作台
+  │    └─ 统一评测平台
+  ├─ ExecutionProvider / 强化沙箱
+  │    ├─ Extension Runtime 安全执行
+  │    ├─ 场景故障注入
+  │    └─ 云节点执行
+  └─ App Server / Gateway
+       └─ 多用户多节点控制面
+
+Trajectory + Telemetry
+  ├─ 调试工作台
+  ├─ 评测平台
+  └─ 性能 SLO / 发布门
+```
+
+近期先做合同，不先铺 UI：
+
+1. 冻结 `AgentEngine`、`ExecutionProvider`、`ScenarioSpec`、`EvalSuite` 四份 schema；
+2. 用当前内核各做一只 reference adapter，证明合同不丢现有行为；
+3. 把事件、身份、错误码、artifact 与权限接回 Trajectory；
+4. 再做 CLI/App Server/Web 投影；
+5. 最后接云控制面和第二只真实 Engine。
+
+## 五、共同身份
+
+五张新单共用这些稳定身份，不各造一套：
+
+```text
+workspace_key
+session_id
+run_id
+turn_id
+request_id
+call_id
+
+engine_id + engine_version
+execution_id + provider_id
+scenario_id + scenario_revision + attempt_id
+suite_id + dataset_revision + eval_run_id
+release_candidate_id + build_fingerprint
+```
+
+跨模块关联只传身份与内容寻址引用。大正文、大日志、截图、patch、环境包一律进 artifact/blob，不塞事件总线。
+
+## 六、共同失败纪律
+
+1. 所有长活都有 `queued/running/waiting/terminal`，终态只落一次。
+2. 取消要贯穿模型、工具、子进程、Engine、场景与评测，不许只关 UI。
+3. 能力不齐时明拒或显式降级，回执写清 `requested/effective/reason`。
+4. 未知副作用不自动重做。恢复裁决须把 `safe_to_resume/needs_review/blocked` 分开。
+5. schema、版本、哈希对不上时 fail closed，不拿“兼容”吞错。
+6. Secret 不进模型上下文、Trajectory 正文、Telemetry、评测报告与调试包。
+7. 宿主崩溃后，孤儿进程、锁、租约、临时目录都有盘点与收尾账。
+8. 任何“成功”都引用 fresh verification；只有 HTTP 2xx 或模型自述不算。
+
+## 七、共同验收矩阵
+
+每张专题单收官时都要过：
+
+- Windows x64 / MSVC；
+- Ubuntu x64 / GCC；
+- macOS arm64 / Clang；
+- 单元、组件、进程、应用集成四层；
+- 超时、取消、崩溃、坏输入、输出过大、磁盘满、权限拒绝；
+- 至少一条 CLI 路和一条 app-server 路；
+- Trajectory 可验链，Replay 可折叠，Telemetry 不含敏感正文；
+- 旧配置、旧 session、旧 Plugin/MCP/Skill 不静默破坏；
+- `ctest --test-dir build/release -C Release --output-on-failure` 全绿；
+- 真机或真服务没跑的项明确写“未验”，不得用 fixture 顶替。
+
+## 八、岗位收官证据
+
+最终不靠一句“支持 Harness”交差。应留六包证据：
+
+1. 一张中立 Runtime 架构图与公开合同；
+2. 当前内核 + 第二 Engine 跑同一 Scenario 的对照报告；
+3. 三平台 sandbox capability 与越权阻断报告；
+4. 一份可脱敏导出的失败调试包，能在干净机重放到同一状态 hash；
+5. 一份冻结 EvalSuite 的基线、候选、置信区间与回归裁决；
+6. 一份 Release Candidate 的启动、长稳、故障恢复、兼容和回滚报告。
+
+六包齐了，才可说 LubanCode 把这份岗位里暂缺的底层能力补全。少一包，便照实标缺。
+
+## 九、总验收门
+
+- [ ] 五张新功能单都至少完成 P0 合同与 reference implementation。
+- [ ] `LubanCore与CLI分离_核心库独立成宿主底座设计.todo` 收官。
+- [ ] 第二只真实 Agent Engine 通过兼容套件，不是 mock。
+- [ ] 通用 `ExecutionProvider` 在三平台各有明确 enforcement grade。
+- [ ] 场景包可导出、可脱敏、可重放、可比对。
+- [ ] EvalSuite 能以同一任务、同一环境比较 Engine/模型/配置。
+- [ ] Release Gate 能因确定回归阻断发布，并给出证据链接。
+- [ ] 多租户控制面另按旧单推进；未完成前不宣称云端 Harness 平台。

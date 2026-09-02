@@ -1,0 +1,182 @@
+# Agent 执行治理：统一拦截链、熔断、降级与安全边界
+
+- 状态：待实施（2026-09-02）
+- 级别：P0（副作用、治理与恢复正确性）
+- 当前基线：权限/Hooks/信任门/超时杀树已落；PTC 有资源墙；普通工具与 process Plugin 没有通用强化沙箱
+- 范围：统一拦截链、熔断、fallback、重试/恢复、故障注入与审计；消费 ExecutionProvider 的执行回执
+- 权威分工：`跨平台ExecutionProvider与通用强化沙箱设计.todo` 独占 ExecutionProvider、IsolationGrade、三平台沙箱与资源墙合同；本单不得另写第二份
+- 关联：`跨平台ExecutionProvider与通用强化沙箱设计.todo`、`轻量可塑ExtensionRuntime与动态扩展API设计.todo`、`端云协同可观测架构与Telemetry插件设计.todo`、`多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo`
+- 不在本单：把 confirm/auto/yolo 改名为沙箱、自动运行陌生仓库代码、云端越权下发命令、替第三方插件证明无恶意
+
+## 一、目标
+
+把“能拦一次工具调用”升成“能治理一条执行链”。一枚动作从计划到收场，只走
+一条主路：
+
+```text
+ToolCall
+  -> schema
+  -> policy
+  -> PreToolUse
+  -> user approval
+  -> execution plan
+  -> sandbox admission
+  -> resource budget
+  -> execute
+  -> evidence commit
+  -> PostToolUse
+  -> outcome / circuit feedback
+```
+
+任何插件、MCP、PTC、shell、GUI adapter、Workflow node、NodeBridge Worker 都不能
+绕开这条链另起炉灶。
+
+## 二、与 ExecutionProvider 的分工
+
+本单不定义 `ExecutionSpec`、`ExecutionReceipt`、sandbox grade，也不裁 Windows、
+Linux、macOS 各用哪种隔离手段。那些全归
+`跨平台ExecutionProvider与通用强化沙箱设计.todo`。
+
+本单只消费四项稳定事实：
+
+- 请求的执行身份、side-effect、idempotency 与预算；
+- provider 实际给出的隔离档和能力；
+- started/finished、exit code、资源与违规回执；
+- 给不到所需能力时的稳定错误码。
+
+治理层据此决定放行、重试、熔断、降级、停在 NeedsReview，不能反过来绕开
+provider 自己 spawn。隔离档名称若有冲突，以 ExecutionProvider 单为准。
+
+## 三、统一治理状态
+
+```text
+Planned -> Admitted -> Running -> Committed
+                |          |          |
+                v          v          v
+             Rejected   Indeterminate Failed
+```
+
+`Committed` 只说明执行事实封账，任务是否成功仍由 verification/outcome 裁决。
+治理层给每次动作补 `governance_decision_id`，把 policy、Hook、approval、provider、
+circuit 与 fallback 串成一条可追链。
+
+## 五、熔断
+
+熔断按最小故障域建键：
+
+```text
+provider endpoint + model
+tool implementation + content hash
+plugin/mcp instance + generation
+node + capability
+telemetry endpoint + generation
+```
+
+状态只有 `Closed -> Open -> HalfOpen -> Closed`。每次变化落 Trajectory：阈值、
+窗口、冷却期、样本数、最后错误码、恢复探针结果。
+
+错误分三类：
+
+- transient：429、明确 5xx、连接重置、临时 DNS；可计入短窗。
+- permanent：认证、schema、权限、版本不合；直接停该代，不做风暴重试。
+- caller_fault：坏参数、找不到文件、用户拒绝；不污染 provider 健康。
+
+熔断不取消已提交事实，也不抹掉错误。HalfOpen 只放一枚只读或可证幂等探针。
+
+## 六、降级
+
+用 `FallbackCatalog` 明列，不准散在调用点里：
+
+| 主能力 | 后备 | 允许条件 | 明示损失 |
+|---|---|---|---|
+| PTC | JSON tool calling | PTC 协议/沙箱失败且工具语义相同 | 模型轮数可能增加 |
+| UIA action | 坐标 action | 有新 observation、权限同档 | 定位可靠度下降 |
+| native tool search | proxy/reference | provider 明确不支持 | cache/延迟变化 |
+| remote node | local node | workspace 与能力快照可用，任务未起副作用 | 容量/数据位置变化 |
+| live telemetry export | durable spool | 本地容量未越帽 | 云端可见性延后 |
+
+禁止降级：
+
+- hardened -> none；
+- 远端已开始未知副作用后换节点重跑；
+- 权限拒绝后换工具绕过；
+- verification 失败后直接把 action receipt 当 success；
+- Secret 解析失败后把明文塞进参数。
+
+## 七、重试与恢复
+
+- retry 只重发同一可证幂等 attempt；新 attempt id，沿用 idempotency key。
+- continuation 是下一模型 step，不算 retry。
+- recovery 从 committed boundary 接，不恢复 C++ 调用栈。
+- `started` 无 `finished` 且有外部副作用，状态为 `Indeterminate/NeedsReview`。
+- 后台进程关停先取消、再宽限、再杀树；每一步有收场账。
+- 预算耗尽返回稳定 outcome，不让模型靠换壳逃过总预算。
+
+## 八、测试
+
+### 单元与集成
+
+- 每种 IsolationGrade 的 capability/admission/fallback 矩阵。
+- deny 压过 allow；Hook 改写后重过 schema、deny、permission。
+- 熔断滑窗、冷却、HalfOpen 单探针、generation 换代。
+- 429/500/401/schema/user-deny 分类不串账。
+- stdout/stderr 超帽、坏 UTF-8、超时、取消、子孙逃逸。
+- 磁盘满、Journal 写失败时 fail closed，不跑完副作用再丢证据。
+
+### 真机与攻击夹具
+
+- 复用 ExecutionProvider 单的越权夹具，只检查治理层是否按 receipt 裁决。
+- provider 报档位不足、违规、资源耗尽时，不得转裸进程重试。
+- 恶意插件伪造 receipt、刷 circuit、复用旧 generation。
+- 主进程 kill、断电模拟、NodeBridge 失联后的副作用裁决。
+
+## 九、实施批次
+
+### E0：合同与盘点
+
+- [ ] 引用并冻结 ExecutionProvider 版本，不复制它的 schema。
+- [ ] 枚举现有治理入口，CI 禁止新增绕过 governance decision 的调用路。
+- [ ] 建 FallbackCatalog 与错误分类表。
+
+### E1：统一主路
+
+- [ ] shell、process Plugin、PTC、Hooks helper 接统一 governance decision。
+- [ ] MCP/native/Lua 宿主调用统一 policy、预算、审计与 outcome。
+- [ ] ExecutionProvider receipt 与 governance decision 双向关联。
+
+### E2：熔断与降级
+
+- [ ] 落 CircuitRegistry，按 generation 隔离。
+- [ ] PTC 熔断迁入统一实现，保住现有三次协议错误语义。
+- [ ] provider/plugin/node/telemetry 接入；caller fault 不误伤。
+- [ ] `/doctor execution` 展示 circuit、档位、降级与最近稳定错误码。
+
+### E3：隔离回执接入
+
+- [ ] 消费 requested/effective sandbox grade，档位不足时 fail closed。
+- [ ] provider violation 与资源耗尽进入错误分类和 circuit 反馈。
+- [ ] GUI/PTY 等特殊 provider 的降级须逐项授权。
+- [ ] 复用三平台 enforcement 报告，不在治理层另造平台跑分。
+
+### E4：恢复与多节点接线
+
+- [ ] ExecutionReceipt 进入 Trajectory power-loss 边界。
+- [ ] RuntimeLease/fencing token 进入写操作 admission。
+- [ ] 节点失联、租约过期、旧 Worker 回写全部拒绝。
+- [ ] 未知副作用统一落 NeedsReview，不自动换节点。
+
+### E5：发布门
+
+- [ ] 三平台隔离矩阵引用 ExecutionProvider 的同一份二进制实测报告。
+- [ ] 故障注入连续夜跑，无重启风暴、无越权 fallback。
+- [ ] 默认配置零外发、零陌生代码执行。
+- [ ] 文档删掉把“进程隔离”“权限确认”写成“安全沙箱”的字样。
+
+## 十、完成门
+
+- [ ] 每个受治理入口都有 governance decision，并关联 ExecutionReceipt。
+- [ ] required grade 给不到时 fail closed；所有降级可查、可计数、可告警。
+- [ ] 永久错误不会重试风暴，临时错误不会把整宿主拖死。
+- [ ] crash/restart 后不重放未知副作用。
+- [ ] provider 档位不足、违规与失联都不会触发越权 fallback。
+- [ ] “强化安全沙箱”的发布门只引用 ExecutionProvider 单的验收结果。

@@ -1,0 +1,204 @@
+# 智能体记忆效果：个性化适配、续接快照与在线评测
+
+- 状态：待实施（2026-09-02）
+- 级别：P1；隐私、删除与错误续接按 P0 办
+- 当前基线：项目/用户记忆、BM25+硬命中、review/auto、后台原子写入与 `/resume` 已落；记忆默认关闭
+- 范围：记忆使用回执、个性化边界、任务续接快照、收益评测、漂移治理与用户控制
+- 关联：`Workspace统一存储_旧Session退场与分级Memory迁移.todo`、`Agent全链路度量_真实任务Harness回放与功耗评测.todo`
+- 不在本单：向量库崇拜、偷偷画像、跨用户共享、训练模型权重、云端同步、把整场历史永久保存
+
+## 一、目标
+
+现在已经“能存、能找”。下一步要答两道更难的题：模型到底用了哪条记忆？用了
+以后，任务真办得更好吗？
+
+记忆与续接分开：
+
+- Memory 保存跨会话仍有用的稳定事实、偏好与反馈。
+- Continuation Snapshot 保存一桩未完任务的边界、待办、证据与恢复条件。
+- Trajectory 保存原始事实；两者都只是投影或引用，不能另抄一份真相。
+
+## 二、MemoryUseReceipt
+
+每次召回生成 `MemoryRecallSet`：
+
+```text
+recall_id
+query_fingerprint
+topic_refs[]
+rank / score / source_layer / reason
+freshness / stale_state
+injected_bytes
+budget_drop_reason
+```
+
+模型请求只引用 `recall_id`。回合结束后再记 `MemoryUseReceipt`：
+
+```text
+recall_id
+topic_id
+used = yes | no | unknown
+use_evidence
+effect = helpful | harmful | neutral | unknown
+effect_evidence
+```
+
+首版不让模型自说自话判 helpful。证据优先级：确定性验收差异、用户明确反馈、
+独立 Judge、模型自评。没证据就记 unknown。
+
+## 三、个性化边界
+
+用户级记忆只收：
+
+- 用户明说的长期偏好；
+- 用户确认过的工作习惯；
+- 跨项目仍成立的工具/环境事实；
+- 用户主动保存的稳定背景。
+
+不得自动沉淀：敏感身份、健康、财务、账号、密钥、短期情绪、推断偏好、第三方
+隐私。项目配置无权替用户打开 user memory。
+
+冲突裁决：
+
+1. 当前用户明确指令压过一切旧记忆；
+2. 项目层同主题压过用户层；
+3. 新的用户明说压过旧的用户明说；
+4. inferred 永不压 user-stated；
+5. 无法裁决便不注入，提示 `/memory conflicts`。
+
+每次因记忆改变行为，`/memory why` 能说清哪条、为何命中、来自哪层、是否过期。
+
+## 四、TaskContinuationSnapshot
+
+跨会话续接不能只靠把旧聊天全塞回来。新增可校验快照：
+
+```text
+continuation_id
+source_session_id / source_turn_id
+goal_ref
+status
+completed_steps[]
+pending_steps[]
+artifact_refs[]
+workspace_revision
+environment_ref
+capability_snapshot_ref
+permission_requirements[]
+indeterminate_side_effects[]
+resume_preconditions[]
+created_at / expires_at
+content_hash
+```
+
+快照只在稳定边界提交。工具正在跑、Journal 未封口、未知副作用未裁决时不得写成
+“可自动续接”。恢复时逐项检查 workspace revision、文件指纹、能力、Secret 可用性、
+租约与权限。条件不合便产 `ResumeDiff`，交用户裁决。
+
+`/resume` 仍恢复原 Session；`/continue <id>` 从快照开新 Session。两条路不可混。
+
+## 五、检索与预算演进
+
+- 保住本地 BM25 与硬命中作可解释基线。
+- 可加 reranker 接口，却须离线、远端、成本与隐私分档。
+- query expansion 只收当前任务材料与上一轮显式检索词，不吞整场历史。
+- topic 正文按事实粒度切，不按固定 token 生劈。
+- stale 条目只给提示，不注正文；refresh 后才恢复资格。
+- 同事实去重后再算预算；项目层覆盖不重复占坑。
+- 召回延迟、读盘字节、注入 token 与模型收益一并记，不能只追 Recall。
+
+## 六、效果评测
+
+### 离线检索
+
+在现有中文固定语料上继续报 Recall@1/3、Precision@3、false-hit-rate、P50/P95
+注入字节。扩三类集：路径/符号事实、长期偏好冲突、陈旧与过期条目。
+
+### 配对任务
+
+同一模型、温度、预算、任务与环境，按 seed 跑：
+
+- memory off；
+- memory on，但不给相关条目；
+- memory on，给正确条目；
+- memory on，注入陈旧/冲突候选，检验防害。
+
+主要指标：任务成功率提升、续接成功率、首个有效动作时间、模型轮数、工具调用、
+Token、用户纠正次数、harmful-memory rate。
+
+### 长期任务
+
+至少三类：跨日代码任务、反复使用同一偏好、仓库事实随 commit 漂移。恢复时故意
+制造文件变更、缺 Secret、工具下线、旧副作用不确定，查系统会不会硬续。
+
+## 七、在线观测
+
+默认只在本地聚合：
+
+- recall 次数、零命中、注入条数/字节；
+- used/helpful/harmful/unknown 分布；
+- 用户删除、纠正、拒绝与关闭记忆；
+- continuation 成功、需审、放弃与过期；
+- 召回 P50/P95、索引大小、worker 失败。
+
+Telemetry 只发聚合指标与稳定枚举。topic 标题、正文、路径、query、用户反馈原文
+默认不外发。公网出口另过现有 consent。
+
+## 八、用户控制
+
+- `/memory status|why|list|show|forget|conflicts|export|off`。
+- `/continuations list|show|continue|discard`。
+- 删除 topic 时同步重建派生索引，并给可核验 receipt。
+- 关闭 user memory 后停止检索与写入；旧数据保留还是删除，由用户另选。
+- 任何自动学习都能在 review 箱看见来由、来源 Session 与敏感性裁决。
+
+## 九、实施批次
+
+### M0：合同
+
+- [ ] 冻结 RecallSet、UseReceipt、ContinuationSnapshot、ResumeDiff schema。
+- [ ] 冻结 helpful/harmful 证据优先级与 unknown 口径。
+- [ ] 加 Trajectory typed events，不复制 topic 正文。
+
+### M1：使用回执
+
+- [ ] 每次召回产 recall_id，注入与丢弃逐条可追。
+- [ ] verification、用户反馈与 outcome 能关联 recall_id。
+- [ ] `/memory why` 展示本轮命中、使用与效果证据。
+- [ ] Insights 投影记忆覆盖率与 harmful rate。
+
+### M2：续接快照
+
+- [ ] 稳定边界生成快照；未决副作用阻止 auto-resumable。
+- [ ] `/continue` 新场续接，`/resume` 原场恢复，命令与文档分清。
+- [ ] workspace/capability/permission/Secret 漂移生成 ResumeDiff。
+- [ ] 快照过期、删除、clear、archive 与 GC 生命周期补齐。
+
+### M3：个性化治理
+
+- [ ] 用户/项目冲突表与 `/memory conflicts`。
+- [ ] 敏感类别、inferred feedback、第三方信息的 fail-closed gate。
+- [ ] 可选 reranker 只作插件接口，保住 BM25 基线与可解释回退。
+- [ ] idle merge 若实施，须幂等、可恢复、可撤销；失败不伤原 topic。
+
+### M4：评测
+
+- [ ] 冻结 MemoryBench v1 与 off/on 配对 runner。
+- [ ] 续接任务至少覆盖代码、Workflow、GUI 三类。
+- [ ] 报 bootstrap 置信区间与逐题结果，不只报平均。
+- [ ] 正确记忆、无关记忆、陈旧记忆、冲突记忆四组俱全。
+
+### M5：小流量与发布
+
+- [ ] 默认仍关闭；用户主动打开后才记本地 usage receipt。
+- [ ] harmful-memory rate 越门自动停学习，不自动删用户数据。
+- [ ] 版本升级做 schema migration 与回滚演练。
+- [ ] 发布文案只报配对任务增益，不拿离线 Recall 冒充个性化收益。
+
+## 十、完成门
+
+- [ ] 任一注入条目都能追到 recall_id、topic 与筛选理由。
+- [ ] 任一“记忆有帮助”都有高于模型自评的证据，或明确标 unknown。
+- [ ] `/continue` 遇到漂移与未知副作用会停，不硬接、不重放。
+- [ ] off/on 配对评测可复算，任务成功率与 harmful rate 同报。
+- [ ] 用户能查看、纠正、导出、关闭与删除；删除后派生物无残留引用。
+- [ ] 线上默认不外发记忆正文、query、路径与用户反馈原文。

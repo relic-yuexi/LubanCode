@@ -1,0 +1,329 @@
+# Harness 场景启动器、事件重放与调试工作台设计
+
+- 状态：待实现（2026-09-02 立单）
+- 日期：2026-09-02
+- 级别：P0（可复现、可诊断、可脱敏）+ P1（可视工作台与差分）
+- 范围：拟新增 `src/scenario/`、App Server 调试方法、CLI 命令、`examples/debug-workbench/`；复用 Trajectory、Replay、Workflow、Telemetry、artifact 与 ExecutionProvider
+- 依赖：`P0新轨迹记录_可重放与训练投影设计.todo` 已落部分；`跨平台ExecutionProvider与通用强化沙箱设计.todo` 至少完成 Spec/Receipt；LubanCore public host API 冻结
+- 关联：`多前端外壳与浏览器Tab_AppServer承载设计.todo`、`端云协同可观测架构与Telemetry插件设计.todo`、`AgentHarness评测回归与Benchmark平台设计.todo`
+- 不在本单：把 live rerun 吹成确定重放、把调试台做成生产云控制面、记录隐藏思考全文、默认打包用户源码和 Secret
+
+## 一、先下断语
+
+LubanCode 已能存轨迹、折 ReplayState、跑 Harness Replay，也有 API fixture、Workflow journal、App Server 与浏览器参考前端。砖都在，尚未砌成一套“复现某场 Agent 故障”的工程工具。
+
+本单收三件东西：
+
+1. `ScenarioSpec`：怎样起一场可复现实验；
+2. `ScenarioBundle`：怎样把输入、环境、事件、artifact 与结果封成一包；
+3. Debug Workbench：怎样按时间线查、筛、比、重放，不翻十本日志。
+
+事实重放、Harness 重放、输入重做、真机重跑四档分开。用户点哪档，系统便亮哪档风险。
+
+## 二、当前真相
+
+### 2.1 已有
+
+- `trajectory::FoldStreamReplay` 可确定折出会话、请求、工具、控制、证据与 artifact 引用。
+- `RunHarnessReplay` 用录制模型和录制工具重跑宿主状态机。
+- Replay checkpoint 有 source seq/event hash/state hash 校验。
+- session verifier 能验 hash chain 与父子 run 边。
+- API fixture 能回放四 wire 的请求与 SSE。
+- Workflow 有 definition snapshot、journal、checkpoint 与恢复。
+- App Server 有 thread/turn/item、trace/workflow 查询、cursor 补账与 artifact GET。
+- `examples/web-console` 已证明浏览器工作台可只走公开协议。
+
+### 2.2 尚缺
+
+1. 没有统一场景清单、变量、准备/执行/验收/清理阶段。
+2. 没有一条命令从失败 session 生成最小可移交调试包。
+3. 没有故障注入点与 crash barrier 目录。
+4. 没有按 request/call/file/process/agent lineage 串起时间线。
+5. 没有两次运行的结构差分与首个分岔点。
+6. 没有自动脱敏、内容清单和导出审阅页。
+7. 没有“本机可重放、异机缺环境、外部副作用阻断”的稳定判词。
+
+## 三、ScenarioSpec v1
+
+```yaml
+schema: lubancode.scenario/v1
+id: tool-timeout-and-recovery
+revision: 1
+description: 工具超时后取消并收树
+tags: [tool, timeout, recovery]
+requires:
+  platforms: [windows, linux, macos]
+  capabilities: [process_tree_control]
+workspace:
+  source: {kind: fixture, ref: fixtures/tool-timeout-v1}
+  writable: true
+engine:
+  selector: lubancode.native
+provider:
+  mode: recorded
+inputs:
+  - type: user
+    text_ref: {sha256: ...}
+faults:
+  - at: tool.execution.started
+    when: {tool: run_command, ordinal: 1}
+    action: stall
+acceptance:
+  - type: event
+    match: {kind: tool.execution.finished, outcome: timed_out}
+  - type: process
+    no_descendants_of: call-1
+budgets:
+  wall_ms: 60000
+cleanup: always
+```
+
+清单字段严格校验。未知字段报错。所有外部引用在开跑前解析成内容 hash 并冻结。
+
+## 四、场景生命周期
+
+```text
+Discovered
+ -> Validated
+ -> Materializing
+ -> Ready
+ -> Running
+ -> Verifying
+ -> Cleaning
+ -> Passed | Failed | Blocked | Cancelled | Invalid
+```
+
+### 4.1 Materializing
+
+- 创建临时 workspace；
+- 解析 fixture/snapshot/git revision；
+- 挂模型录制桩、假服务或真 provider；
+- 解析 Engine 与 ExecutionProvider；
+- 冻结环境、配置、Package/Skill/MCP 快照；
+- 给每项 fault 安装一次性注入器；
+- 写 `scenario.started` 后才进 Running。
+
+### 4.2 Running
+
+输入按清单顺序投递。多轮场景不许把三轮压成一条 prompt。每轮各有 turn id 与 deadline。
+
+### 4.3 Verifying
+
+验收器分：event、file、command、process、artifact、metric、snapshot、custom trusted verifier。验收只读。要起进程也走 ExecutionProvider。
+
+### 4.4 Cleaning
+
+不论成功、失败、取消都跑清理。清理失败不改场景业务结果，但 `cleanup_status=failed` 必须让整份报告不合发布门。
+
+## 五、四档重现
+
+| 档位 | 模型 | 工具 | 环境 | 用途 |
+|---|---|---|---|---|
+| `event_replay` | 不调 | 不调 | 不建 | 重画时间线与状态 |
+| `harness_replay` | 录制值 | 录制值 | 最小 | 查宿主状态机 |
+| `input_replay` | 可调或录制 | 真调 | 尽量还原 | 查协议/工具集成；副作用须审 |
+| `live_rerun` | 真调 | 真调 | 新建 | 比较结果，不承诺逐字相同 |
+
+系统根据 environment snapshot、artifact 完整度、Engine/provider 版本与副作用账给出 `available/degraded/blocked`。用户不能强把 blocked 改名 exact。
+
+## 六、故障注入
+
+注入点只能放稳定语义边界，不按源码行号：
+
+```text
+session.opened
+turn.started
+model.request.committed
+model.first_event
+tool.planned
+tool.execution.started
+tool.execution.finished
+tool.result.committed
+artifact.committed
+checkpoint.committed
+turn.terminal.committed
+delivery.enqueued
+delivery.acked
+```
+
+动作首版：`delay/drop/error/crash_host/crash_child/truncate/corrupt_once/deny/cancel/disconnect/disk_full_simulated`。
+
+每枚 fault 有 `fault_id`、命中次数、作用域和安全等级。生产构建默认关闭危险注入；只认测试配置或显式开发开关。
+
+## 七、ScenarioBundle
+
+```text
+bundle/
+  manifest.json
+  scenario.yaml
+  environment.json
+  capability-snapshot.json
+  trajectory/
+  artifacts/
+  fixtures/
+  reports/
+    verify.json
+    replay.json
+    redaction.json
+  checksums.sha256
+```
+
+manifest 记：schema、创建版本、来源 session/run、replay grade、缺失项、敏感级别、每件文件 hash、允许用途与过期时间。
+
+默认不收：
+
+- Secret 值；
+- 隐藏思考全文；
+- 用户主目录绝对路径；
+- 未授权源码正文；
+- 浏览器 cookie/profile；
+- 环境变量全集；
+- MCP/Plugin stderr 全文。
+
+源码若需复现，优先收 commit/ref + patch。用户逐项审过，才可内嵌文件 blob。
+
+## 八、时间线与关联图
+
+Workbench 按 canonical seq 画一条主线；另给这些筛选：
+
+- main/subagent/workflow lineage；
+- turn/request/call/execution id；
+- model、tool、file、process、interaction、delivery；
+- succeeded/failed/declined/cancelled/unknown；
+- latency、token、bytes、retry、side effect；
+- first error、first divergence、critical path。
+
+事件卡只显示短摘要。点开才按权限取 artifact。大正文不进列表响应。
+
+## 九、结构差分
+
+`scenario diff <run-a> <run-b>` 先按稳定身份和语义节点对齐，再找首个分岔：
+
+```text
+environment/config/capability
+-> prompt/request digest
+-> model event shape
+-> tool selection/arguments
+-> permission decision
+-> execution outcome/artifact
+-> verification/outcome
+```
+
+文本差分是末层，不先拿整段回答做字符串 diff。随机采样不同要标 stochastic divergence，不冒充 Harness 回归。
+
+## 十、调试工作台协议
+
+App Server additive 方法：
+
+```text
+scenario/list
+scenario/validate
+scenario/run
+scenario/cancel
+scenario/status
+scenario/export
+replay/inspect
+replay/run
+replay/diff
+timeline/query
+artifact/inspect
+faults/list
+```
+
+长活先回 receipt，再发带 seq 事件。查询有 cursor、limit 与时间/类型过滤。导出是敏感动作，须审批。
+
+CLI 对应：
+
+```text
+lubancode scenario validate <file>
+lubancode scenario run <file>
+lubancode scenario replay <bundle> --mode harness
+lubancode scenario diff <a> <b>
+lubancode scenario export <session-id> --review
+```
+
+## 十一、错误合同
+
+```text
+scenario.invalid
+scenario.capability_missing
+scenario.materialize_failed
+scenario.fault_not_reached
+scenario.timeout
+scenario.verification_failed
+scenario.cleanup_failed
+scenario.bundle_incomplete
+scenario.bundle_tampered
+scenario.redaction_blocked
+replay.mode_unavailable
+replay.environment_mismatch
+replay.side_effect_review_required
+replay.divergence
+```
+
+每份失败报告指出阶段、稳定码、第一枚相关 seq、可重试与否、调试包路径。
+
+## 十二、分期落地
+
+### P0-0：schema 与纯状态机
+
+- [ ] 冻结 ScenarioSpec、状态机、验收器接口和错误码。
+- [ ] 写 parser/validator、capability resolve 与 replay-grade 纯函数。
+- [ ] 建十只最小 fixture，覆盖成功与失败。
+
+验收：坏字段、缺能力、错误跃迁、未命中 fault 与清理失败均稳定复现。
+
+### P0-1：本地 Runner
+
+- [ ] 接临时 workspace、Recorded Backend、Native Engine 与 ExecutionProvider。
+- [ ] 接多轮输入、fault injector、verifier 与统一报告。
+- [ ] 把运行事实写回 Trajectory。
+
+验收：一条命令跑完工具超时、模型断流、权限拒绝、宿主崩溃恢复四幕。
+
+### P0-2：Bundle 与重放
+
+- [ ] 从 session/run 生成 bundle；落 hash、缺失项与 redaction report。
+- [ ] 接 event/harness/input/live 四档裁决。
+- [ ] 接 session verifier、ReplayState 与 Harness Replay。
+
+验收：干净机拿 bundle 跑 event/harness replay，state hash 对得上；敏感 canary 不泄。
+
+### P1-0：Workbench
+
+- [ ] App Server 增调试方法与事件。
+- [ ] 参考 Web Console 增时间线、筛选、artifact、diff、故障注入页。
+- [ ] 保持它是公开协议消费者，不读内核盘。
+
+验收：从一枚失败 run 点到首个错误、相关 tool call、进程 receipt 与验证失败，路径不越三层。
+
+### P1-1：差分与移交
+
+- [ ] 落语义对齐和首分岔算法。
+- [ ] 生成机器 JSON + 人读 Markdown 报告。
+- [ ] 加最小复现裁剪器，裁剪后重跑验证原故障仍在。
+
+验收：两次运行能分清环境漂移、Engine 差异、模型随机性与 Harness 回归。
+
+## 十三、测试矩阵
+
+- 清单：未知字段、循环引用、坏 hash、变量缺失、平台不符；
+- 环境：Git 干净/脏、文件消失、symlink 越界、磁盘满；
+- 模型：401、429、500、半帧、空流、迟到 usage；
+- 工具：拒绝、超时、崩溃、输出过大、未知副作用；
+- 宿主：每道 crash barrier 后重启；
+- bundle：篡改、缺件、旧 schema、敏感 canary；
+- diff：相同、插入、乱序、随机文本、首分岔；
+- UI：长时间线、断线补账、cursor、权限、窄屏；
+- 三平台：路径、进程树、编码、时钟与资源统计。
+
+## 十四、最终验收门
+
+1. 一份失败场景可由命令复现，不靠开发者手敲十步。
+2. event/harness replay 在同一 bundle 上给稳定 state hash。
+3. input/live 模式把外部副作用风险亮给用户，未知副作用默认阻断。
+4. bundle 通过 hash、schema、redaction 和权限检查。
+5. Workbench 只走 App Server 公开协议。
+6. 两次 run 可找到可解释的首分岔点。
+7. 故障注入默认不进普通生产路径。
+8. 全量 CTest 绿；至少四幕进程级故障 E2E 绿。

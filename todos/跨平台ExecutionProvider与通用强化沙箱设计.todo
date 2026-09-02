@@ -1,0 +1,349 @@
+# 跨平台 ExecutionProvider 与通用强化沙箱设计
+
+- 状态：待实现（2026-09-02 立单）
+- 日期：2026-09-02
+- 级别：P0（边界可信、策略强制、降级可见）
+- 范围：拟新增 `src/execution/`；改造 `src/platform/process.*`、`src/tools/`、`src/runtime/plugin_*`、`src/mcp/`、`src/hooks/`、`src/ptc/`、Package/Agent/Workflow 接线、测试与安全文档
+- 关联：`轻量可塑ExtensionRuntime与动态扩展API设计.todo`、`多AgentEngine统一Runtime与适配层设计.todo`、`后台命令PTY会话与可附着终端设计.todo`、`多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo`
+- 不在本单：自造容器内核、声称任一平台绝对安全、把 worktree 当 sandbox、远程执行市场、静默降级到裸进程
+
+## 一、先下断语
+
+权限提示管“用户肯不肯”。沙箱管“进程能不能”。两者须叠在一起，谁也顶不了谁。
+
+当前 `IsolationScope` 主要守工作区路径；Job Object/进程组主要守寿命与资源；MCP/process Plugin 的进程边界主要隔崩溃。它们都不是通用文件、网络、Secret 与子进程隔离。
+
+本单立 `ExecutionProvider`。所有会执行外部代码的能力，先交一份 `ExecutionSpec`，由策略解析器选出满足要求的 provider。没有合格 provider，明拒。绝不因“先跑起来”便退成宿主权限。
+
+## 二、威胁模型
+
+### 2.1 要防的事
+
+- 读工作区外的 SSH key、浏览器 cookie、云凭据与用户文档；
+- 改宿主配置、其他仓库、系统目录或别的 Session 工作区；
+- 偷拿未授权环境变量、命令行参数和 Secret；
+- 任意联网、DNS 外带、回连监听或访问云元数据地址；
+- fork/Spawn 风暴、CPU/内存/磁盘/句柄耗尽；
+- 逃出挂载根、跟随 symlink/junction/reparse point 越界；
+- 留孤儿进程、守住文件锁、跨取消继续写；
+- 伪报“只读”“无副作用”“已隔离”；
+- 把 stdout、错误文案、Telemetry 或调试包当泄密暗道。
+
+### 2.2 首版不承诺
+
+- 防内核零日、硬件侧信道与宿主管理员；
+- 把进程内 Lua/DLL 变成不可信代码安全边界；
+- POSIX rlimit 等同文件/网络隔离；
+- 远端 provider 自动可信；
+- 对所有构建工具零兼容损失。
+
+## 三、核心对象
+
+```cpp
+struct ExecutionSpec;
+struct ExecutionPolicy;
+struct ExecutionCapabilities;
+struct ExecutionReceipt;
+struct ExecutionArtifact;
+
+class ExecutionProvider {
+public:
+    virtual ProviderDescriptor Describe() const = 0;
+    virtual ExecutionCapabilities Probe() = 0;
+    virtual expected<ExecutionHandle, ExecutionError> Prepare(const ExecutionSpec&) = 0;
+    virtual expected<void, ExecutionError> Start(ExecutionHandle, ExecutionEventSink&) = 0;
+    virtual expected<void, ExecutionError> WriteInput(ExecutionHandle, bytes) = 0;
+    virtual expected<void, ExecutionError> Cancel(ExecutionHandle, CancelReason) = 0;
+    virtual expected<ExecutionReceipt, ExecutionError> Collect(ExecutionHandle) = 0;
+    virtual expected<void, ExecutionError> Destroy(ExecutionHandle) = 0;
+};
+```
+
+`Prepare` 只建隔离环境，不执行用户代码。`Start` 之后任何失败都须有 execution 终态与资源收尾账。
+
+## 四、ExecutionSpec v1
+
+```yaml
+schema: lubancode.execution/v1
+identity:
+  execution_id: exec-...
+  session_id: session-...
+  run_id: run-...
+purpose: tool | plugin | mcp | hook | skill | engine | workflow
+command:
+  executable_ref: {sha256: ...}
+  args: []
+  cwd: /workspace
+filesystem:
+  inputs:
+    - source_ref: {sha256: ...}
+      mount: /workspace
+      mode: ro
+  outputs:
+    - /workspace/out/**
+  scratch_bytes: 1073741824
+network:
+  mode: none
+  allow: []
+secrets: []
+process:
+  child_processes: true
+  max_processes: 64
+resources:
+  wall_ms: 30000
+  cpu_ms: 20000
+  memory_bytes: 536870912
+  output_bytes: 8388608
+required_grade: isolated
+```
+
+Spec 中只出现内容引用与逻辑挂载名，不塞宿主绝对路径。解析后另成一份 host-private mount plan。
+
+## 五、能力与隔离等级
+
+### 5.1 能力位
+
+```text
+filesystem_read_filter
+filesystem_write_filter
+network_deny
+network_allowlist
+dns_control
+secret_injection
+environment_filter
+process_tree_control
+cpu_limit
+memory_limit
+disk_limit
+process_count_limit
+syscall_filter
+gui_session
+pty
+snapshot_input
+collect_patch
+remote_execution
+```
+
+### 5.2 等级
+
+| 等级 | 含义 | 可用于什么 |
+|---|---|---|
+| `none` | 宿主权限裸跑 | 仅用户显式 yolo 且策略允许的可信代码 |
+| `contained` | 进程树、超时、CPU/内存/输出帽 | 已信任工具；不称安全沙箱 |
+| `workspace` | 再加工作区读写边界与环境过滤 | 普通本地代码任务 |
+| `isolated` | 再加默认断网、受控挂载、Secret 最小注入 | 不可信 process/MCP/Engine 首选 |
+| `hardened` | 再加 syscall/内核隔离、只读根、不可提权 | 高风险代码与云端多租户 |
+
+等级由宿主根据探针算，不由 provider 自报字符串决定。报告同时列 enforcement 明细，免得同名等级跨平台偷换。
+
+## 六、策略裁决
+
+有效策略等于：
+
+```text
+系统硬门
+∩ 用户/组织策略
+∩ Package/Agent/Workflow 请求
+∩ 当前 permission mode
+∩ provider verified capabilities
+```
+
+下层只能收窄，不能放宽。Agent、Skill、Plugin manifest 的 `permissions` 只是请求材料。
+
+### 6.1 provider 选择
+
+1. 列出已探测 provider；
+2. 过滤平台、架构、工具链和 required capabilities；
+3. 过滤数据驻留、网络、Secret 与 GUI 限制；
+4. 依用户配置排序；
+5. 选满足策略的最低成本 provider；
+6. 把 requested/effective/denied/downgraded 写进 receipt。
+
+若 `required_grade=isolated`，只剩 `contained`，返回 `execution.no_provider`。只有 Spec 明写 `allow_weaker_grade=true` 且用户当场批准，才可降级，并把 effective grade 亮给用户。
+
+## 七、平台后端
+
+### 7.1 Windows
+
+分三档实现，开工前用真机探针定案：
+
+- `WindowsContainedProvider`：Job Object、受限 token、环境过滤、资源帽、整树收尾；
+- `WindowsAppContainerProvider`：AppContainer capability、受控目录、默认网络策略；
+- `WindowsVmProvider`：Hyper-V/WSL2/容器一类强化后端，按安装与管理员条件显式启用。
+
+Restricted Token 不自动等于文件系统隔离。AppContainer ACL、网络 capability 与挂载路径须逐项实测。
+
+### 7.2 Linux
+
+- `LinuxContainedProvider`：进程组 + rlimit/cgroup；
+- `LinuxBwrapProvider`：user namespace、mount namespace、只读根、tmpfs、默认断网；
+- 可选 OCI/VM provider：只有策略要求 hardened 时启用。
+
+`bwrap` 不存在、user namespace 被禁、发行版策略不同，都须落稳定探针结果。不得悄悄退裸跑。
+
+### 7.3 macOS
+
+- `MacContainedProvider`：进程组、rlimit、环境过滤与工作目录策略；
+- 受支持的 native sandbox/provider 要钉 OS 版本与公开能力；
+- Linux OCI 工作负载可走 VM/container provider，但不能冒充原生 Xcode/codesign 环境。
+
+平台没有可靠文件/网络隔离时，grade 如实停在 `contained` 或 `workspace`。
+
+### 7.4 Remote
+
+远端 provider 另带：endpoint 身份、TLS、租约、上传清单、数据驻留、排队、取消、回收、结果签名。远端不是天然更安全，只是把执行边界挪了地方。
+
+## 八、文件系统与工作区
+
+首选过滤快照，不把整仓直接可写挂进去：
+
+1. 解析 project instructions 与忽略规则；
+2. 排除 `.git` 写口、`.env`、SSH key、凭据、其他 workspace；
+3. 内容寻址打包输入；
+4. provider 内只读展开；
+5. 单独给 scratch/output；
+6. 收场只取声明路径；
+7. 生成 patch/artifact，回宿主再过 review/permission 落盘。
+
+若任务必须原位编译，可选受控 bind mount。receipt 要写出哪些路径 ro/rw，不能只写 `workspace`。
+
+symlink/junction/reparse point 在打包、挂载、写回三处都重新核边界。一次检查管不了后续替换竞态。
+
+## 九、网络与 Secret
+
+### 9.1 网络
+
+- 默认 `none`；
+- allowlist 同时约束 scheme、host、port、解析后 IP；
+- 拦 loopback、link-local、私网与云 metadata，除非逐项授权；
+- DNS rebinding 要重新钉地址；
+- redirect 每跳重做策略；
+- 代理地址和凭据不进模型；
+- 收请求数、上下载字节与 deadline。
+
+### 9.2 Secret
+
+Secret 只以 `SecretRef` 进 Spec。provider 在最后时刻解析，按文件描述符、短命文件或单枚环境变量注入。receipt 只记 ref、用途和是否注入，不记值。
+
+子进程默认不继承全环境。`PATH`、locale、系统根等最小白名单由平台 provider 生成。
+
+## 十、执行生命周期
+
+```text
+Requested
+ -> PolicyResolved
+ -> Preparing
+ -> Ready
+ -> Running
+ -> Cancelling
+ -> Collecting
+ -> Succeeded | Failed | Cancelled | TimedOut | Lost
+ -> Destroyed
+```
+
+`Destroyed` 是资源收尾，不覆盖业务终态。若业务成功、清理失败，receipt 同时保留 `outcome=succeeded` 与 `cleanup=failed`，并升告警。
+
+宿主崩溃后，启动盘点 orphan marker。能证明属于本实例且租约失效的才清；身份不清的列 `needs_review`，不凭目录名猛删。
+
+## 十一、接入范围
+
+所有代码执行入口最终都走 provider：
+
+- `run_command` 前台与后台；
+- process Plugin；
+- MCP/LSP server；
+- hooks；
+- PTC Python；
+- Workflow command node；
+- Skill 日后若有显式 `skill_exec`；
+- 外部 Agent Engine；
+- browser/channel sidecar。
+
+进程内 Lua/DLL 无法套进程沙箱。首版两条路：只许 trusted；或搬到 process adapter。不得给它们虚构 `isolated`。
+
+## 十二、错误合同
+
+```text
+execution.policy_invalid
+execution.no_provider
+execution.capability_missing
+execution.prepare_failed
+execution.input_rejected
+execution.path_escape
+execution.network_denied
+execution.secret_denied
+execution.spawn_failed
+execution.resource_exhausted
+execution.output_too_large
+execution.cancel_timeout
+execution.provider_lost
+execution.collect_failed
+execution.cleanup_failed
+execution.receipt_invalid
+```
+
+所有拒绝带 policy rule id、requested/effective grade 与 provider probe revision。文案可翻译，稳定码不改。
+
+## 十三、诊断面
+
+```text
+/sandbox list
+/sandbox inspect <provider>
+/sandbox doctor <provider>
+/sandbox explain <execution-id>
+```
+
+doctor 只跑无副作用探针：文件越界、网络拒绝、环境过滤、子进程收树、CPU/内存/输出帽、取消。探针产物进临时目录，收场验证无残留。
+
+## 十四、分期落地
+
+### P0-0：合同与假 provider
+
+- [ ] 冻结 Spec、Policy、Capabilities、Receipt、事件与错误码。
+- [ ] 把策略合并和 provider 选择写成纯函数。
+- [ ] 建 fake provider 与越权矩阵。
+
+验收：能力不足、降级、拒绝、迟到终态与清理失败都有确定结果。
+
+### P0-1：现有进程归一
+
+- [ ] 以 `ContainedProvider` 包住现有 `platform::Process`。
+- [ ] 先迁 PTC、process Plugin、MCP 三路。
+- [ ] 保持旧行为，明标现有 enforcement grade。
+
+验收：旧测试全绿；三路执行都有 execution_id、receipt 与 Trajectory 边。
+
+### P0-2：三平台 workspace/isolated
+
+- [ ] Windows 落可验证后端；Linux 落 bwrap 后端；macOS 落当时可用的最强明确后端。
+- [ ] 落快照输入、输出收集、patch 回写。
+- [ ] 落网络默认拒绝与 SecretRef 注入。
+
+验收：三平台越权夹具逐项给 enforcement 结果；无能力的平台拒跑而非假绿。
+
+### P1-0：全入口迁移
+
+- [ ] 迁 run_command、hooks、Workflow、LSP、sidecar、外部 Engine。
+- [ ] Package/Agent/Workflow 声明统一投进 ExecutionPolicy。
+- [ ] 淘汰各模块私有的半套资源限制。
+
+验收：仓库里外部进程启动只剩 provider 白名单入口，检查脚本可证。
+
+### P1-1：远端 provider
+
+- [ ] 冻结远端协议、租约、上传清单与结果签名。
+- [ ] 接一只开发用远端后端。
+- [ ] 测断线、取消、重复回执、过期租约和数据驻留。
+
+验收：本地与远端吃同一 Spec；差异只在 capability/receipt，不爬进工具业务层。
+
+## 十五、最终验收门
+
+1. 所有外部代码入口都有 execution_id 与可查询 receipt。
+2. requested/effective sandbox grade 可见、可测、不可由插件自报伪造。
+3. 文件、网络、Secret、资源与进程树各有至少一条真越权阻断测试。
+4. 无合格 provider 时 fail closed；降级只在显式授权后发生。
+5. 取消与宿主崩溃后无已知孤儿进程和未记临时目录。
+6. Lua/DLL 的可信边界明示，不冒充沙箱。
+7. Windows、Ubuntu、macOS 各出 capability + enforcement 报告；缺项写未支持。
+8. 全量 CTest 绿，安全文档与 `/sandbox doctor` 对得上。

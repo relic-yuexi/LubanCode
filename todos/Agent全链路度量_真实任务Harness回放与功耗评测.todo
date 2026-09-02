@@ -1,0 +1,233 @@
+# Agent 全链路度量：真实任务 Harness、回放与功耗评测
+
+- 状态：待实施（2026-09-02）
+- 级别：P1；判卷可信度、隐私与发布回归门按 P0 办
+- 当前基线：Trajectory、Replay、Training Exporter、Telemetry、Insights、PTC Bench 与 Evolution 确定性评测已落
+- 范围：给统一评测平台补 GUI、记忆、ReAct 效率、交互体验、性能功耗五组专项指标与 projector
+- 权威分工：`AgentHarness评测回归与Benchmark平台设计.todo` 独占 EvalSuite、Runner、Judge、统计与通用回归门；本单只给它供专项量尺，不另造第二座评测平台
+- 关联：`AgentHarness评测回归与Benchmark平台设计.todo`、`AgentHarness性能SLO_稳定性与发布安全门设计.todo`、`P0新轨迹记录_可重放与训练投影设计.todo`、`端云协同可观测架构与Telemetry插件设计.todo`、`GUIAgent核心_多模态理解定位执行与泛化评测.todo`
+- 不在本单：拿单元测试数冒充 Agent 成功率、默认上传用户轨迹、用单次跑分排模型总榜、训练模型
+
+## 一、目标
+
+给统一 Harness 配齐岗位点名的五把专项量尺。它不另写运行时、Runner 或 Judge，
+只吃同一份 Trajectory 与评测证据，产带单位、分母和缺失口径的指标。
+
+```text
+EvaluationSpec
+   -> EnvironmentProvisioner
+   -> Frozen Agent/Model/Capability Snapshot
+   -> SessionRuntime
+   -> Trajectory + Artifacts + Resource Samples
+   -> Deterministic Checkers
+   -> Optional Independent Judge
+   -> Metrics Projector
+   -> Baseline Comparator
+   -> Report + Regression Gate
+```
+
+## 二、评测平台接入要求
+
+下列形状只说明本单需要从统一 `EvalSuite/EvalRun` 读取哪些材料，不冻结字段名；
+实际 schema 以 `AgentHarness评测回归与Benchmark平台设计.todo` 为准。
+
+```text
+schema / suite_id / version
+task_id / split / tags
+prompt_ref
+workspace_fixture / setup / cleanup
+platform_requirements
+model_matrix / seeds / repetitions
+permission_script
+budgets
+acceptance[]
+forbidden_effects[]
+judge
+resource_sampling
+privacy
+```
+
+fixture 必须可重建。setup/cleanup 走 argv，不经 shell 拼串。真实账号、生产数据、
+不可逆外部系统不得进公共 suite。
+
+任务版本一变，suite hash 跟着变。报告不得把不同 hash 的数字直接相减。
+
+## 三、判卷顺序
+
+证据从硬到软：
+
+1. 文件、JSON、数据库、进程状态、GUI 夹具等确定性 oracle；
+2. 已签名外部服务 receipt；
+3. 独立规则 checker；
+4. 冻结模型 Judge，多次投票并保留原答；
+5. 被测 Agent 自报，只作线索。
+
+确定性 oracle 与 Judge 冲突，oracle 胜。没有足够证据的任务记 `unverified`，不能
+为了凑成功率硬判 pass。
+
+## 四、统一指标
+
+### 4.1 任务完成
+
+- `task_success_rate = passed / assessable`
+- `acceptance_rate = passed_checks / executable_checks`
+- unverified、skipped、infra_error 单列，不塞进失败或成功。
+- 报逐题结果、宏平均、置信区间与失败类别。
+
+### 4.2 ReAct 循环效率
+
+不强求模型吐出私有思维。只量宿主可见动作：
+
+- model requests、steps、tool calls、有效工具调用、重复调用；
+- 首个有效动作时间、首次验证时间、总墙钟；
+- observation->action、action->verification 延迟；
+- 每个成功任务的 calls/tokens/time；
+- loop stall、空转正文、无新信息重试、context compact 次数；
+- 并行度、关键路径长度、被预算闸拦下次数。
+
+定义 `action_efficiency = useful_actions / all_actions`。useful 只由后续验收或依赖图
+证明，判不了记 unknown，不靠关键词猜。
+
+### 4.3 记忆
+
+- Recall@k、Precision@k、false-hit-rate 是检索尺。
+- recall coverage、used rate、helpful/harmful rate 是运行尺。
+- memory lift 用同任务 off/on 配对差值；同时报 Token 与延迟代价。
+- 续接成功率只数通过 ResumeDiff 前置检查且最终验收通过的任务。
+
+### 4.4 交互体验
+
+- permission prompts、ask_user 次数、用户纠正、取消、重输与等待时间；
+- 首次可见反馈、进度静默最长时间、输入到响应 P50/P95；
+- stale/冲突/失败提示是否给出可执行 remedy；
+- friction classifier 只作代理信号；另设小规模人工量表与任务访谈。
+
+### 4.5 性能与功耗
+
+- CPU time、wall time、峰值工作集/私有内存、线程/句柄或 FD、磁盘读写、网络字节；
+- 空闲宿主、单 turn、并行 Agent、GUI screenshot、Telemetry exporter 分场景量；
+- Windows 优先 ETW/系统能源计数；Linux 优先 RAPL/perf/cgroup；macOS 用受支持
+  的 powermetrics/能源接口。拿不到焦耳便报 unavailable，不用 CPU 百分比冒充功耗。
+- 区分宿主进程、子进程与远端模型。云端推理能耗没有可信数据就不估。
+
+## 五、回放分层
+
+| 回放 | 做什么 | 能否算模型成功率 |
+|---|---|---|
+| ledger replay | 校验事件与状态投影 | 不能 |
+| tool replay | 用录制结果重放模型后续路径 | 只能测 Harness 确定性 |
+| environment replay | 重建夹具，真跑工具 | 仍未必起模型 |
+| model replay | 冻结模型、prompt、工具与环境真跑 | 可以，须报 provider 漂移 |
+| production shadow | 小流量镜像，只读或隔离执行 | 可以观测，不自动放副作用 |
+
+副作用工具默认不用旧结果重发。需要重放时，只在隔离夹具内按新 execution_id 跑。
+
+## 六、失败分类
+
+统一闭集：
+
+- `perception` / `grounding` / `planning`
+- `tool_selection` / `tool_arguments` / `tool_execution`
+- `permission` / `sandbox` / `environment`
+- `memory_retrieval` / `memory_harm`
+- `verification` / `false_completion`
+- `provider` / `budget` / `timeout` / `cancelled`
+- `harness_infra` / `unverified`
+
+一题可有主因与次因。主因须有 event/receipt/check 引用。评测设施坏了记
+`harness_infra`，不罚被测 Agent。
+
+## 七、数据与隐私
+
+- 公共 suite 用合成或明确授权夹具。
+- 用户 Session 默认不进评测库；导入须逐批授权、脱敏、可撤销。
+- prompt、tool input/result、截图、路径、Secret 分级；报告默认只带引用与摘要。
+- 原始 trajectory 与发布报告分仓；报告能复算指标，却不能反推出敏感正文。
+- 数据保留期、删除 receipt、访问审计与导出清单须在 manifest 写明。
+
+## 八、报告
+
+每场生成：
+
+```text
+run.json
+cases.jsonl
+metrics.json
+failures.jsonl
+artifacts/
+report.html
+reproduce.ps1 | reproduce.sh
+```
+
+首页先亮环境与 coverage，再亮数字。至少展示：commit、binary hash、suite hash、
+模型、provider、sampling、预算、平台、成功/失败/unverified、置信区间、基线差值、
+资源开销、已知限制。
+
+## 九、回归门
+
+- PR：确定性 L0-L2，零网络或只打本地假服务。
+- Nightly：固定模型小集、GUI 夹具、memory 配对、故障注入。
+- Weekly：完整 holdout、两平台以上、功耗与长任务。
+- Release：冻结候选二进制，对比上一稳定版；关键指标越门即挡。
+
+门槛用绝对值加相对退化双闸。样本少时不硬判，报置信区间不足并积累样本。
+不得只看平均数；P5/P50/P95、最差任务与按类别分层都要留。
+
+## 十、实施批次
+
+### A0：指标与 schema
+
+- [ ] 冻结 EvaluationSpec、CaseResult、MetricSet、FailureAttribution。
+- [ ] 建 metric dictionary：单位、分母、缺失值、版本与 owner。
+- [ ] OutcomeAssessed 必须引用验收证据，挡住 false completion。
+
+### A1：真实 Harness
+
+- [ ] runner 直接装配 SessionRuntime，不另写简化 Agent loop。
+- [ ] 环境 provision/setup/cleanup、预算、permission script 全接上。
+- [ ] 确定性 checker 与 Judge 按优先级合流。
+- [ ] infra_error 与 agent failure 分账。
+
+### A2：Trajectory 与回放
+
+- [ ] ledger/tool/environment/model 四档 replay 命令落地。
+- [ ] 环境与能力快照可比；provider 漂移明报。
+- [ ] 失败能从 report 跳到 event、artifact、tool receipt。
+- [ ] 重放未知副作用时 fail closed。
+
+### A3：专项基准
+
+- [ ] GUI Bench 接入 perception/grounding/action/verification 指标。
+- [ ] MemoryBench 接入 off/on 配对与 harmful-memory rate。
+- [ ] PTC/JSON 对照扩到真模型，至少五轮并报模型请求数。
+- [ ] Workflow/Goal/长任务加入 30 分钟、2 小时、跨进程恢复档。
+
+### A4：体验与资源
+
+- [ ] 首反馈、静默时长、确认、纠正、取消等 UI 事件接入。
+- [ ] Windows/Linux/macOS 资源采样 provider 与 unavailable 口径。
+- [ ] 空闲、单任务、并行、GUI、Telemetry 五场景测量。
+- [ ] 采样器自身开销做 on/off 对照，不让仪表盘拖慢 Agent。
+
+### A5：报告与 CI
+
+- [ ] 生成 JSON/HTML 与复现脚本；报告 schema 可版本化。
+- [ ] baseline comparator、置信区间、绝对/相对回归门。
+- [ ] PR/nightly/weekly/release 四档接 CI，密钥环境缺失便 skip 并明报。
+- [ ] 历史趋势按 suite hash 分段，版本不同不硬连折线。
+
+### A6：小流量闭环
+
+- [ ] 只读 shadow 与隔离 canary；默认不放真实副作用。
+- [ ] 告警能定位到版本、模型、工具、平台与失败类。
+- [ ] 回滚只换候选能力快照，不篡改旧结果。
+- [ ] 每次“优化”须带基线、成本、收益与副作用四本账。
+
+## 十一、完成门
+
+- [ ] 真模型任务从 setup 到判卷一条命令可跑，原始证据可复算。
+- [ ] 任务成功率、ReAct 效率、记忆收益、体验、性能功耗五组都有冻结口径。
+- [ ] GUI 与 Memory 至少各有一份 holdout，不拿训练夹具报泛化。
+- [ ] Judge 不能覆盖确定性 oracle，unverified 不混进成功率。
+- [ ] 评测设施故障不误判 Agent；报告能追到具体证据。
+- [ ] Release 门能挡住显著退化，并能指出代价落在哪一维。

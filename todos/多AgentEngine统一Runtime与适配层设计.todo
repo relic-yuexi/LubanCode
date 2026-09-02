@@ -1,0 +1,364 @@
+# 多 Agent Engine 统一 Runtime 与适配层设计
+
+- 状态：待实现（2026-09-02 立单）
+- 日期：2026-09-02
+- 级别：P0（运行合同、事件、权限、恢复）+ P1（外部 Engine 与热切换）
+- 范围：拟新增 `src/engine_runtime/` 与公开合同；改造 `src/agent/`、`src/runtime/`、`src/app/`、`src/app_server/`、`src/workflow/`、`src/tools/`、测试与文档
+- 硬前置：`LubanCore与CLI分离_核心库独立成宿主底座设计.todo` 至少完成 public host API 与依赖方向冻结
+- 关联：`轻量可塑ExtensionRuntime与动态扩展API设计.todo`、`跨平台ExecutionProvider与通用强化沙箱设计.todo`、`Harness场景启动器_事件重放与调试工作台设计.todo`
+- 不在本单：训练模型、代替 Provider wire adapter、跨节点调度、把第三方 Engine 私有事件原样漏给前端
+
+## 一、先下断语
+
+`api::Backend` 只管一枚模型请求。`AgentEngine` 要管一场 Agent 运行。两者不可混名。
+
+当前 LubanCode 只有一颗生产 Agent 内核：`Agent + AgentLoop + RunTurn`。Workflow 的 `AgentExecutor` 与 Channel 的 `ChannelTurnEngine` 都是宿主适配，并不是可替换 Engine。
+
+本单立一层中立 `AgentEngine` 合同。LubanCode 原生内核先包成 `NativeAgentEngine`。第二只 Engine 必须真接入、真跑同一套兼容场景，才算多 Engine 落地。
+
+宿主独占五样东西：身份、权限、工具执行、事实账、资源预算。Engine 可以决定怎样规划和何时请求工具，不能绕过这五道门。
+
+## 二、当前真相
+
+### 2.1 已有底座
+
+- `src/api/backend.hpp` 只有 `send_stream(Request, on_event, cancel)`，按 wire 屏蔽 Anthropic/Responses/Chat/Gemini 差异。
+- `src/app/backend_stack.cpp` 按 `config.wire` 创建具体 Backend。
+- `src/agent/agent.hpp` 持 profile、history、context、request policy 与 wiring。
+- `src/agent/loop.hpp` 推模型 step、工具 batch、取消和终态。
+- `src/runtime/event.hpp` 已有 thread/turn/item 三层中立事件。
+- `src/runtime/session_runtime.hpp` 已有身份、Trajectory、权限账与 EventSink。
+- `src/workflow/host_executors.hpp::AgentExecutor` 能从 Workflow 起 Agent。
+- `src/runtime/channel_session_host.hpp::ChannelTurnEngine` 把渠道消息翻成一次 turn。
+
+### 2.2 还缺的门
+
+1. 没有 Engine manifest、版本、能力与健康状态。
+2. 没有统一 create/start/resume/steer/cancel/close 生命周期。
+3. 没有 Engine 级 checkpoint 与恢复裁决。
+4. 工具调用仍由原生 AgentLoop 内部形状主导，外部 Engine 无稳定桥。
+5. 外部 Engine 的事件、usage、错误、思考与 artifact 无统一归一层。
+6. Workflow、App Server、Channel 若想换 Engine，仍要碰各自装配代码。
+7. 没有跨 Engine 的兼容套件与行为差异报告。
+
+## 三、目标分层
+
+```text
+CLI / App Server / Workflow / Channel / Gateway
+                    |
+              EngineRuntime
+       identity / policy / budget / ledger
+          /            |             \
+ NativeAgentEngine  ProcessEngine  RemoteEngine
+       |                |             |
+ Agent + AgentLoop   framed RPC     versioned RPC
+       \                |             /
+           EngineHostServices
+ tool gateway / artifacts / secrets / clock / telemetry
+```
+
+`EngineRuntime` 是裁判，不是第四只 Engine。它开身份、查能力、发预算、接事件、守终态、落 Trajectory。
+
+## 四、核心合同
+
+### 4.1 EngineDescriptor
+
+```cpp
+struct EngineDescriptor {
+    std::string engine_id;
+    std::string engine_version;
+    std::string protocol_version;
+    EngineKind kind;               // native | process | remote
+    EngineCapabilities capabilities;
+    std::string build_fingerprint;
+};
+```
+
+`engine_id + engine_version + build_fingerprint` 随 run 冻结。恢复时逐位对账。版本不同默认不续跑，只可 replay 或显式迁移。
+
+### 4.2 AgentEngine
+
+```cpp
+class AgentEngine {
+public:
+    virtual EngineDescriptor Describe() const = 0;
+    virtual expected<EngineHandle, EngineError> Create(const EngineRunSpec&) = 0;
+    virtual expected<void, EngineError> Start(EngineHandle, EngineEventSink&) = 0;
+    virtual expected<void, EngineError> Submit(EngineHandle, const EngineInput&) = 0;
+    virtual expected<void, EngineError> ResolveInteraction(EngineHandle, const InteractionReply&) = 0;
+    virtual expected<void, EngineError> Steer(EngineHandle, const SteeringInput&) = 0;
+    virtual expected<CheckpointRef, EngineError> Checkpoint(EngineHandle) = 0;
+    virtual expected<void, EngineError> Cancel(EngineHandle, CancelReason) = 0;
+    virtual expected<void, EngineError> Close(EngineHandle, CloseReason) = 0;
+};
+```
+
+调用是异步状态机。`Start` 返回只说明启动请求已受理；真正 Running/Failed 走事件。不得在两条路各落一次终态。
+
+### 4.3 EngineRunSpec
+
+必须包含：
+
+- workspace/session/run/turn 身份；
+- engine selector 与版本约束；
+- provider/model/request profile；
+- effective prompt/context 的内容寻址引用；
+- ToolProjection 与 capability snapshot；
+- permission mode 与不可放宽的 policy ceiling；
+- token/turn/tool/wall-clock/resource budget；
+- artifact root、Trajectory sink 与 telemetry context；
+- execution provider id 与 sandbox grade；
+- resume/checkpoint policy。
+
+Spec 冻结后不可就地改。转向、追加用户消息、预算补发都另写控制事件。
+
+### 4.4 EngineCapabilities
+
+首版至少分开：
+
+```text
+stream_text
+stream_thinking
+tool_calls
+parallel_tool_calls
+images_in / images_out
+steering
+pause_resume
+checkpoint
+durable_resume
+subagents
+structured_output
+usage_tokens / usage_cost
+```
+
+能力是 Engine 报告、宿主验证后的交集。Engine 自报支持而兼容探针未过，只标 `declared`，不得标 `verified`。
+
+## 五、工具桥
+
+Engine 不直接执行本机工具。它只发 `ToolCallProposal`：
+
+```text
+engine_call_id
+tool_ref
+arguments
+requested_parallel_group
+engine_sequence
+```
+
+宿主完成：
+
+```text
+wire name 解码
+-> 真 schema 校验
+-> Plan/permission/hook gate
+-> ExecutionProvider
+-> ToolTrace + Trajectory
+-> artifact 落盘
+-> ToolResultEnvelope 回 Engine
+```
+
+宿主重新分配 canonical `call_id`，并记 `engine_call_id` 映射。重试不能复用一枚已落终态的 canonical id。
+
+外部 Engine 不得：
+
+- 直拿 `ToolRegistry*`；
+- 直读 Secret；
+- 以“只读”自述绕确认；
+- 把工具 stdout 当模型事件；
+- 越过结果字节帽；
+- 自行重放未知副作用调用。
+
+## 六、事件归一
+
+Engine adapter 把私有事件翻成 `EngineEvent`，再由 Runtime 投成现有 `ServerEvent` 与 Trajectory。
+
+```text
+engine.lifecycle.started
+engine.model.requested
+engine.content.delta
+engine.reasoning.delta
+engine.tool.proposed
+engine.interaction.requested
+engine.usage.reported
+engine.checkpoint.created
+engine.warning
+engine.failed
+engine.completed
+```
+
+每枚事件带 `engine_seq`。Runtime 另发 canonical `seq`。重连补流按 canonical seq；私有 seq 只作查重和诊断。
+
+不认识的私有事件：
+
+- 声明为 optional：记计数，保留原始摘要 artifact，继续；
+- 声明为 stateful/terminal：`engine.event_unsupported`，fail closed。
+
+## 七、生命周期
+
+```text
+Discovered
+ -> Validated
+ -> Ready
+ -> Creating
+ -> Running
+ -> WaitingTool | WaitingInteraction | Paused
+ -> Checkpointing
+ -> Completing
+ -> Completed | Failed | Cancelled | Lost
+```
+
+状态只许按表跳。每次跃迁带 expected revision，迟到事件不给旧状态翻案。
+
+### 7.1 启动
+
+1. 解析 Engine selector；
+2. 校验协议与能力；
+3. 冻结 RunSpec；
+4. 预留预算与 ExecutionProvider；
+5. 开 Trajectory run；
+6. Create/Start；
+7. 收到 `engine.lifecycle.started` 后才标 Running。
+
+第 5 步之后失败，必须给 run 落失败终态。第 5 步之前失败，不得留空 run。
+
+### 7.2 取消
+
+取消分 `user_cancel/budget_exhausted/session_close/host_shutdown/policy_revoke`。Runtime 先关新工具提案，再通知 Engine，再停在飞执行，过 grace 才杀进程或断租约。
+
+### 7.3 恢复
+
+恢复裁决只认：
+
+- Engine 版本与 checkpoint 兼容；
+- Trajectory 完整；
+- 无未知副作用悬空；
+- capability snapshot 仍可满足；
+- workspace/environment 指纹允许；
+- 原 RuntimeLease 已失效。
+
+裁决为 `resumable/needs_review/replay_only/blocked`。不许“能起进程”便算恢复成功。
+
+## 八、适配器
+
+### 8.1 NativeAgentEngine
+
+第一批只包现有行为：
+
+- `Agent` 与 `AgentLoop` 不重写；
+- callback 全翻 `EngineEvent`；
+- `RunTurn` 改吃 `EngineRuntime`，终端画面不变；
+- 旧配置没写 engine 时固定选 `lubancode.native`；
+- 全量回归逐字节守住。
+
+### 8.2 ProcessEngine
+
+版本化 framed RPC：stdin/stdout 或本机 socket。握手顺序：`hello -> capabilities -> create -> start`。stderr 只收日志。帧有长度帽、deadline、call id 与 protocol version。
+
+进程必须走 `ExecutionProvider`。没有满足策略的 provider 就拒启，不静默裸跑。
+
+### 8.3 RemoteEngine
+
+远端只作为后续批次。须另有 TLS、身份、租约、幂等命令、durable cursor 与背压。它复用本合同，不把集群控制面塞进 `AgentEngine`。
+
+## 九、错误合同
+
+```text
+engine.not_found
+engine.protocol_mismatch
+engine.capability_missing
+engine.create_failed
+engine.start_timeout
+engine.transport_lost
+engine.event_invalid
+engine.event_unsupported
+engine.tool_protocol_violation
+engine.permission_violation
+engine.budget_exhausted
+engine.checkpoint_failed
+engine.resume_incompatible
+engine.cancel_timeout
+engine.terminal_conflict
+```
+
+错误载荷统一带 `engine_id/version/run_id/stage/retryable`。`retryable=true` 只是建议，是否重试仍由 Runtime 按副作用与预算裁决。
+
+## 十、配置与选择
+
+```json
+{
+  "agent_engine": "lubancode.native",
+  "engines": {
+    "external-demo": {
+      "kind": "process",
+      "command": "demo-engine",
+      "protocol": "luban-agent-engine-v1",
+      "execution_policy": "engine-default"
+    }
+  }
+}
+```
+
+优先级：任务显式选择 > Agent Definition > session 配置 > `lubancode.native`。选择失败不退别的 Engine；只有配置明写 `fallback_engines` 才可逐个试，且落完整尝试账。
+
+## 十一、分期落地
+
+### P0-0：合同与兼容尺
+
+- [ ] 冻结 descriptor、capabilities、RunSpec、EngineEvent、错误码和状态机。
+- [ ] 写 adapter contract tests 与协议 golden。
+- [ ] 建当前原生行为基线：事件序列、工具、取消、usage、artifact、resume。
+
+验收：mock Engine 能跑成功、拒绝、超时、乱序、重复终态五类夹具；不碰生产入口。
+
+### P0-1：NativeAgentEngine
+
+- [ ] 把现有 `Agent + AgentLoop` 包成 reference adapter。
+- [ ] CLI、one-shot、app-server、Workflow、Channel 改从同一 resolver 取 Engine。
+- [ ] 旧配置默认行为与事件逐项对照。
+
+验收：现有全量 CTest 零红；同一 fixture 改造前后 canonical event 与 Trajectory 投影一致。
+
+### P0-2：工具、权限与恢复
+
+- [ ] 落 EngineHostServices 与 ToolCallProposal 桥。
+- [ ] 接预算、InteractionBroker、artifact、Trajectory、Telemetry。
+- [ ] 落 checkpoint/recovery decision 与未知副作用门。
+
+验收：恶意 mock Engine 不能越 schema、权限、路径、预算与 Secret 边界。
+
+### P1-0：第二只真实 Engine
+
+- [ ] 实现 ProcessEngine 协议与 supervisor。
+- [ ] 接一只仓外或示例 Engine，保留版本和构建指纹。
+- [ ] 跑统一 Scenario/EvalSuite，对差异逐项交账。
+
+验收：第二 Engine 真跑工具任务、取消、断线和恢复；不是录制桩。
+
+### P1-1：运维与外壳
+
+- [ ] `/engine list|inspect|doctor`。
+- [ ] app-server 能力表与 Engine 状态查询。
+- [ ] Engine 级 metrics、健康、熔断、quarantine。
+
+验收：不读日志正文也能定位“没发现、握手坏、能力缺、运行崩、恢复拒绝”。
+
+## 十二、测试矩阵
+
+- 生命周期：创建、启动、等待、暂停、取消、正常终态、重复终态；
+- 协议：半帧、坏 UTF-8、坏 JSON、未知 stateful 事件、seq 回退；
+- 工具：错 schema、拒绝、超时、富结果、并发组、重复 call id；
+- 资源：token/turn/tool/wall-clock 耗尽；
+- 恢复：版本漂移、checkpoint 坏、工具悬空、workspace 漂移；
+- 前端：CLI 与 app-server 看见同一 canonical 状态；
+- 兼容：四 wire、Workflow、Channel、子代理、Plan/Goal/Loop；
+- 三平台：native + process adapter，进程树无孤儿。
+
+## 十三、最终验收门
+
+1. `AgentEngine` public contract 不 include `cli/app/app_server` 私头。
+2. 原生 Engine 行为无回归。
+3. 第二只真实 Engine 跑过同一兼容套件。
+4. 两只 Engine 的差异能从 capability 与报告解释，不靠日志猜。
+5. 外部 Engine 无法绕开宿主工具、权限、Secret、预算与 Trajectory。
+6. 取消、崩溃、恢复、未知副作用都有唯一终态。
+7. Windows、Ubuntu、macOS 全量测试绿；真外部 Engine 未覆盖的平台明标未验。

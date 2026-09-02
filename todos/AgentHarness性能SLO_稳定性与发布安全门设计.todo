@@ -1,0 +1,204 @@
+# Agent Harness 性能 SLO、稳定性与发布安全门设计
+
+- 状态：待实现（2026-09-02 立单）
+- 日期：2026-09-02
+- 级别：P0（发布阻断、恢复正确性）+ P1（性能容量与趋势）
+- 范围：启动与稳态性能、长稳、故障恢复、兼容矩阵、容量、发布 canary/rollback 及签字证据
+- 依赖：`AgentHarness评测回归与Benchmark平台设计.todo`、`Harness场景启动器_事件重放与调试工作台设计.todo`
+- 关联：`Agent全链路度量_真实任务Harness回放与功耗评测.todo`、`端云协同可观测架构与Telemetry插件设计.todo`、`跨平台ExecutionProvider与通用强化沙箱设计.todo`
+- 不在本单：模型任务质量榜、云端推理能耗猜测、拿开发机单次耗时当三平台 SLO、失败后自动重放未知副作用
+
+## 一、先下断语
+
+功能齐，不等于能发布。Harness 一旦常驻，要经得住冷启动、长任务、断网、磁盘满、
+子进程逃逸、宿主重启与版本回滚。
+
+本单立四本账：性能、稳定、兼容、发布。每本都从已有事实与专项评测投影，不在
+CLI、App Server、Gateway 各藏一套数字。
+
+## 二、SLO 合同
+
+```text
+SloDefinition
+  id / version / owner
+  scope              cli | app-server | gateway | worker
+  platform / arch
+  workload_ref
+  metric / unit
+  objective / window
+  min_samples
+  exclusions
+  severity
+  release_action
+```
+
+SLO 版本随口径变。样本不足报 `insufficient_data`，不可硬判绿。infra failure、
+provider failure、product failure 分账。
+
+## 三、工作负载
+
+冻结六类 workload：
+
+1. 空宿主：不启模型、不挂外部组件；
+2. 交互单轮：一问一答，无工具；
+3. 工具任务：读、写、命令、MCP、Plugin 混合；
+4. 长任务：30 分钟、2 小时、跨 compact 与 checkpoint；
+5. 并行任务：多 Agent、Workflow fan-out、多 Session；
+6. 常驻服务：Gateway/Channel/Telemetry 24 小时与 7 天。
+
+每类带 fixture hash、模型档、权限脚本、并发、数据规模、暖机次数与采样窗。
+
+## 四、性能账
+
+- 冷启动：进程 spawn 到可收首条输入；
+- 热启动：已有配置与索引时恢复可交互；
+- 首反馈、首 token、首有效动作、首验证；
+- turn P50/P95/P99、tool dispatch、Journal commit、Replay fold；
+- 空闲/稳态/峰值工作集、私有内存、线程、句柄/FD；
+- 磁盘读写、Trajectory/Spool 增长、网络字节；
+- 并发吞吐、排队时长、取消收场与进程树清理；
+- 指标采样自身开销。
+
+焦耳级功耗与平台采样归 `Agent全链路度量_真实任务Harness回放与功耗评测.todo`。
+本单只消费它的稳定指标，设发布门。
+
+## 五、稳定性账
+
+### 5.1 长稳
+
+- 24 小时 smoke、7 天 soak 分档；
+- RSS/句柄/线程/临时文件斜率；
+- 队列高水位、spool 增长、checkpoint 数与 GC；
+- provider 重连、MCP/Plugin 重启、后台进程孤儿；
+- session/turn/tool 终态守恒。
+
+### 5.2 故障注入
+
+在稳定 barrier 动手：模型半流、429/500、DNS/TLS 失败、工具超时/崩溃、磁盘满、
+Journal 写失败、强杀宿主、断网、时钟跳变、NodeBridge 失联。
+
+每幕须写：注入点、已提交事实、预期终态、恢复路、最大恢复时间、是否需人工、
+副作用是否可能不确定。
+
+### 5.3 恢复
+
+- 已提交只读工作可续；
+- 未提交且无副作用的 attempt 可按合同重试；
+- 已开始的未知副作用停 `NeedsReview`；
+- 恢复后 event seq/hash、workspace revision、capability snapshot 对得上；
+- 旧进程、旧租约、旧 generation 不得回写。
+
+## 六、兼容矩阵
+
+至少记录：
+
+- Windows x64/MSVC、Ubuntu x64/GCC、macOS arm64/Clang；
+- CLI、App Server、Gateway、headless worker；
+- Anthropic、Responses、Chat、Gemini 四 wire；
+- 旧配置、旧 Session、旧 Package/Plugin/MCP/Skill；
+- 文件系统大小写、长路径、中文路径、代理与证书；
+- 无 Python/Node、无网络、无交互终端等缺能力环境。
+
+“编过”与“真跑”分两格。没有对应真机就写 unverified。
+
+## 七、容量
+
+容量不猜“大规模”。先给单机曲线：
+
+- idle Session 数；
+- 同时 running turn 数；
+- Workflow node/Agent 并发；
+- 每分钟 tool calls 与 Journal events；
+- artifact、memory、trajectory、telemetry 占盘；
+- provider、MCP、Plugin、PTY 子进程数。
+
+逐档加压，找到 knee point、拒绝点与恢复点。越配额须排队或拒绝，不许拖死宿主。
+多节点容量另归集群控制面单。
+
+## 八、发布候选
+
+```text
+ReleaseCandidate
+  version / commit / binary hashes
+  dependency lock / bundled assets
+  config/schema migrations
+  suite + workload hashes
+  platform matrix
+  SLO results
+  known issues / waivers
+  rollback target
+```
+
+waiver 写 owner、理由、影响、到期日。P0 安全、数据损坏、未知副作用重放不得豁免。
+
+## 九、发布门
+
+### Quick Gate
+
+- 静态合同、单元、关键集成、迁移 dry-run；
+- 目标 15 分钟内；只挡确定回归。
+
+### Stable Gate
+
+- 完整 CTest、Scenario、Eval quick suite；
+- 三平台至少构建，承诺平台真跑；
+- 故障注入短集、资源预算、artifact/Trajectory 校验。
+
+### Release Gate
+
+- 冻结二进制重跑，不拿开发树结果顶替；
+- 完整兼容矩阵、24 小时长稳、关键真实模型任务；
+- 安装、升级、降级、卸载、回滚真机；
+- 报告、原始证据、已知限制与签字页齐全。
+
+## 十、Canary 与回滚
+
+- 能力快照按 generation 发布；先内部、再小流量、后扩大。
+- canary 只拿授权任务；外部副作用默认关闭或隔离。
+- 指标越门先停新任务，保住已提交账与可查询状态。
+- 回滚只换程序/能力快照，不改旧 Trajectory，不删失败证据。
+- schema migration 须有 forward/rollback 或明确不可逆门；不可逆前另做备份与确认。
+
+## 十一、实施批次
+
+### S0：冻结口径
+
+- [ ] 冻结 SloDefinition、Workload、ReleaseCandidate 与 waiver schema。
+- [ ] 盘点现有 benchmark、Telemetry、Insights、CI，定唯一来源。
+- [ ] 给启动、内存、长稳、恢复、兼容各定首版阈值与 owner。
+
+### S1：测量器
+
+- [ ] 冷/热启动、首反馈、资源、队列与落盘采样接统一事件。
+- [ ] Windows/Linux/macOS provider，缺能力报 unavailable。
+- [ ] 采样 on/off 测自身开销。
+
+### S2：长稳与故障
+
+- [ ] 24 小时 smoke、7 天 soak runner 与泄漏斜率报告。
+- [ ] 模型、工具、磁盘、网络、宿主五类故障注入。
+- [ ] 恢复时间、终态、孤儿进程、未知副作用逐项判卷。
+
+### S3：兼容与容量
+
+- [ ] 三平台/四 wire/四宿主矩阵落报告。
+- [ ] 旧配置、Session、Package/Plugin/MCP/Skill 迁移与回滚。
+- [ ] 单机容量曲线、配额拒绝与恢复实测。
+
+### S4：CI 与发布
+
+- [ ] quick/stable/release 三门接 CI，证据能点回 run。
+- [ ] 冻结二进制、安装包与 bundled assets 重跑。
+- [ ] canary、停新任务、回滚与 waiver 演练。
+- [ ] 发布说明自动带平台、数字、限制与未验项。
+
+## 十二、最终验收门
+
+1. 冷/热启动、稳态资源、长稳与恢复都有版本化 SLO。
+2. 三平台结果分清 build、fixture、真机，不混写。
+3. 24 小时长稳无无界资源增长；7 天项未跑便明标未验。
+4. 关键故障注入后终态守恒，无已知孤儿与未知副作用自动重放。
+5. 旧版本升级、回滚、配置与数据迁移有真实安装证据。
+6. 一项确定性能/稳定回归能挡发布；infra 抖动能判 inconclusive。
+7. canary 越门能停新任务并回滚，旧事实账仍可验。
+8. Release Candidate 的 commit、二进制与报告能一一对上。

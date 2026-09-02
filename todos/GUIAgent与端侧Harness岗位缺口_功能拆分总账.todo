@@ -1,0 +1,124 @@
+# GUI Agent 与端侧 Harness 岗位缺口：功能拆分总账
+
+- 状态：待实施（2026-09-02）
+- 级别：Roadmap；本单只管分工、依赖与对外口径，不替子单写实现
+- 起因：对照 GUI Agent、Agent Harness、智能体记忆、全链路度量四组职责，逐项清点当前 HEAD
+- 当前基线：`a26f7612`；落地前须重查源码、测试与当时 HEAD
+- 原则：已落能力不重做；设计稿不冒充成品；单测不冒充真实任务成功率
+
+## 一、先下断语
+
+LubanCode 已有四块硬地基：Agent/Tool 循环、Trajectory、项目与用户记忆、
+Telemetry/Insights。眼下欠的不是再添几枚工具，而是把这些地基接成四条可验收的
+产品链。
+
+按功能分五域：
+
+| 功能域 | 当前成色 | 欠下的活 | 权威 TODO |
+|---|---|---|---|
+| GUI Agent 核心 | Windows 示例包可截图、UIA、点击与输入 | 核心接口、多源定位、动作验证、跨应用泛化评测 | `GUIAgent核心_多模态理解定位执行与泛化评测.todo` |
+| 执行治理 | Schema、权限、Hooks、超时杀树、PTC 资源墙已落 | 强化沙箱、统一熔断、语义降级、故障注入 | 沙箱归 `跨平台ExecutionProvider与通用强化沙箱设计.todo`；治理归 `Agent执行治理_强化沙箱熔断降级与安全边界.todo` |
+| 端云调度 | App Server 多 Session 雏形、本机 Gateway 骨架 | NodeBridge、租约、fencing、多租户配额、断线续跑 | `多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo` |
+| 记忆与续接 | BM25 召回、写入、review/auto、`/resume` 已落 | 使用回执、收益归因、续接快照、个性化边界 | `智能体记忆效果_个性化适配续接快照与在线评测.todo` |
+| 度量与评测 | Trajectory、OTLP、Insights、确定性 replay 已落 | 真实模型 Harness、GUI 基准、体验与功耗、回归门 | `Agent全链路度量_真实任务Harness回放与功耗评测.todo` |
+
+## 二、不重复哪些旧单
+
+- Trajectory 事实合同、ReplayState、Training Exporter 仍归
+  `P0新轨迹记录_可重放与训练投影设计.todo`。
+- workspace/session/memory 目录与身份仍归
+  `Workspace统一存储_旧Session退场与分级Memory迁移.todo`。
+- OTLP 投影、脱敏、spool、出口与远端观测策略仍归
+  `端云协同可观测架构与Telemetry插件设计.todo`。
+- Gateway 常驻、automation、channel ingress/outbox 仍归
+  `持久Agent_Gateway自动任务与可靠恢复总装计划.todo`。
+- 多租户、多节点、NodeBridge 与 RuntimeLease 仍归现有集群控制面单。
+
+新单只能吃旧合同，不得另造第二份 session id、event id、tool outcome、
+permission verdict 或 memory topic 真值。
+
+## 三、依赖次序
+
+```text
+LubanCore/CLI 边界稳定
+        |
+        +--> ExecutionProvider + 强化沙箱
+        |          |
+        |          +--> GUI 动作执行器
+        |          +--> NodeBridge Worker
+        |
+Trajectory 唯一真账
+        |
+        +--> GUI observation/action/verification 事件
+        +--> MemoryUseReceipt / ContinuationSnapshot
+        +--> EvalRun / 功耗与体验投影
+        |
+        +--> Telemetry / Insights / 回归门
+```
+
+先把事件与能力合同钉住，再铺平台实现。先有夹具与故障注入，再谈真实模型跑分。
+
+## 四、统一红线
+
+1. 模型说“成功”不算成功。须有确定性验收、界面复核、产物检查或独立 Judge。
+2. 观察不是授权。GUI screenshot、UIA ref、memory hit 都不能越过权限面。
+3. `process` 隔离不是强化沙箱。隔着一只进程，仍可能拿到当前用户文件与网络。
+4. 未知副作用不自动重放。崩溃后停在 `NeedsReview`，由事实账裁决。
+5. fallback 必须语义等价。少了一项保证，就明报 degraded，不能悄悄换路。
+6. 离线 fixture、mock model、固定语料与真实模型 E2E 分账。
+7. Windows 一机通过，不可写成三平台通过；单应用通过，不可写成场景泛化。
+8. 默认关闭的能力，不得写成用户开箱即有。
+
+## 五、共同事件最小集
+
+新子单落事件时，须复用 Trajectory envelope，只增 typed payload：
+
+- `gui.observation.captured`
+- `gui.candidates.resolved`
+- `gui.action.requested|started|finished`
+- `gui.verification.assessed`
+- `sandbox.plan.resolved`
+- `execution.circuit.changed`
+- `execution.fallback.selected`
+- `memory.recall.used`
+- `memory.continuation.snapshot.committed`
+- `eval.run.started|finished`
+- `eval.case.assessed`
+- `resource.sample.recorded`
+
+事件只记事实。指标由 projector 折叠，不在五处手写计数器。
+
+## 六、共同验收分级
+
+| 等级 | 能说明什么 | 不能说明什么 |
+|---|---|---|
+| L0 静态 | schema、依赖方向、配置合法 | 代码真能跑 |
+| L1 单元 | 状态机、纯函数、故障分支对 | 平台接线无误 |
+| L2 集成 | 真进程、真 Journal、真 OS API | 真实模型会用 |
+| L3 夹具 E2E | 固定应用/任务可办完 | 开放场景泛化 |
+| L4 真实模型基准 | 冻结模型与任务集有数字 | 线上用户收益 |
+| L5 小流量观测 | 真实使用有收益与回滚账 | 全量规模化 |
+| L6 多节点容量 | 配额、故障域、恢复与成本过门 | 所有环境都适用 |
+
+每份报告须带：commit、binary SHA256、模型与 provider、配置快照、任务集版本、
+随机种子、环境指纹、开始结束时间、退出码、原始结果路径。
+
+## 七、对外表述门
+
+- GUI 单过 L3：只可说“具备 Windows GUI 自动化原型”。
+- GUI 单过 L4 且留出集无回退：方可说“持续度量 GUI 操作成功率与泛化”。
+- 执行治理单过对应平台硬隔离门：方可说“安全沙箱”；否则只说权限与资源墙。
+- 集群单过单机常驻、断线续跑、多租户与双节点故障验收：方可说“端云协同调度”。
+- 记忆单过 on/off 配对实验：方可说“记忆提升任务续接”；只跑 Recall 不够。
+- 评测单过真实模型、真实环境、可复算报告：方可说“度量驱动 Agent 开发”。
+
+## 八、总检查单
+
+- [ ] GUI Agent 核心单完成 G0-G5，至少两类留出应用过门。
+- [ ] 执行治理单完成 E0-E5，三平台逐档写清隔离等级。
+- [ ] 集群控制面前置满足，NodeBridge 与 RuntimeLease 不再停在纸面。
+- [ ] 记忆效果单完成 M0-M5，线上使用回执能归因。
+- [ ] 全链路评测单完成 A0-A6，GUI、记忆、体验、功耗均有冻结口径。
+- [ ] 五域事件都能由一份 Trajectory 投影，不生旁路真账。
+- [ ] CI、夜跑、真机、小流量四档各有 owner、预算与失败处置。
+- [ ] README、简历与发布文案按“对外表述门”逐条复核。

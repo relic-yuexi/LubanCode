@@ -1,0 +1,357 @@
+# Agent Harness 评测、回归与 Benchmark 平台设计
+
+- 状态：待实现（2026-09-02 立单）
+- 日期：2026-09-02
+- 级别：P0（口径、冻结、判卷、回归门）+ P1（在线矩阵与趋势）
+- 范围：拟新增 `src/eval/`、`benchmarks/`、CLI/App Server 评测面、CI 报告；复用 Scenario、Trajectory、Evolution eval、PTC bench、Rollout 与 Telemetry
+- 依赖：`Harness场景启动器_事件重放与调试工作台设计.todo` P0；跨 Engine 对照另依赖 `多AgentEngine统一Runtime与适配层设计.todo`
+- 关联：`Agent强化学习Rollout轨迹采集与训练交付设计.todo`、`P0新轨迹记录_可重放与训练投影设计.todo`、`AgentHarness性能SLO_稳定性与发布安全门设计.todo`
+- 不在本单：训练模型、制造排行榜、拿同题调参污染 holdout、用 judge 自述顶替可执行验收、把离线 fixture 成绩说成线上模型效果
+
+## 一、先下断语
+
+测试查代码有没有坏。评测查 Agent 能不能把事办成。Benchmark 再给不同版本一把同尺。
+
+当前 CTest、PTC bench、Evolution eval、Trajectory verification 各有一把尺，却没有统一任务身份、环境冻结、Runner、Judge、统计和回归裁决。本单不推倒旧尺，只把它们挂进同一评测合同。
+
+一项结果若说不清任务版本、Engine、模型、配置、环境、样本数、失败数与判卷证据，便不进基线。
+
+## 二、当前真相
+
+### 2.1 可复用底座
+
+- CTest 已按 unit/integration/domain 分组，可守代码回归。
+- PTC `BuildBenchScenarios` 有依赖链、fan-out、找针、大结果、半失败与扩展交叉场景。
+- PTC metrics 已记任务成功、漏调用、参数、轮数、时延、token、重复与安全覆盖。
+- Evolution eval 已有 frozen plan、replay、holdout、baseline 与 pass/fail/skipped 汇总。
+- Trajectory 有环境快照、verification、outcome、usage、tool ledger 与 replay level。
+- Training Exporter 可给成功、失败、partial、excluded 分流。
+- Rollout TODO 已设计 experiment/task/sample/policy/grader 身份。
+
+### 2.2 缺口
+
+1. 没有仓库级 `EvalSuite` 与 dataset revision。
+2. 没有统一 Agent task runner；PTC 与 Evolution 各跑各的。
+3. 没有同一场景跨 Engine/model/config 的矩阵。
+4. 没有置信区间、重复采样、配对比较与波动裁决。
+5. 没有 flaky/infra/model/harness/task_failure 分型。
+6. 没有成本、延迟、可靠性、安全与任务质量的共同报告。
+7. 没有 PR quick gate、nightly stable gate、release full gate 三档。
+8. 在线真模型仍以手测为主，证据难沉淀。
+
+## 三、评测分层
+
+| 层 | 是否调模型 | 是否真执行工具 | 主要回答 |
+|---|---|---|---|
+| Contract | 否 | 假/本机夹具 | schema、状态机、错误码守不守 |
+| Harness Replay | 录制 | 录制 | 同一事实能否重建同一状态 |
+| Offline Scenario | 假/录制 | 受控真工具 | Harness 集成与故障恢复是否正确 |
+| Live Probe | 是 | 低风险工具 | Provider/Engine 基本能力是否真支持 |
+| Benchmark | 是 | 隔离环境真执行 | Agent 在冻结任务集上的质量、成本与稳定性 |
+| Soak/Chaos | 可选 | 是 | 长稳、泄漏、恢复与背压 |
+
+报告必须标层级。低层绿色不能给高层背书。
+
+## 四、EvalSuite v1
+
+```yaml
+schema: lubancode.eval-suite/v1
+suite_id: harness-core
+revision: 3
+dataset:
+  id: harness-core-fixtures
+  revision: sha256:...
+splits:
+  smoke: [task-001, task-002]
+  dev: [task-001..task-080]
+  holdout_ref: sealed:harness-core-holdout-v3
+runner:
+  attempts: 5
+  max_parallel: 4
+  reset_between_attempts: true
+matrix:
+  engines: [lubancode.native]
+  models: [recorded]
+  profiles: [default]
+metrics:
+  primary: task_success
+  secondary: [wall_ms, model_turns, tool_errors, input_tokens, cost]
+gates:
+  task_success:
+    min: 0.95
+    max_drop: 0.02
+  p95_wall_ms:
+    max_regression_ratio: 1.15
+```
+
+Suite 文件可公开；sealed holdout 只给独立 runner。模型上下文、工具、调试包与开发日志都不得读答案。
+
+## 五、EvalTask
+
+每题包含：
+
+```text
+task_id + revision
+category + tags + difficulty
+prompt/content refs
+workspace baseline
+required capabilities
+allowed tools/network/secrets
+budgets
+determinism class
+acceptance spec
+grader spec
+cleanup spec
+data sensitivity
+```
+
+任务改一个字也升 revision。旧结果仍绑旧 revision，不回填新题。
+
+### 5.1 任务族
+
+首版至少有：
+
+- 会话多轮与 steering；
+- 文件读取、编辑、patch 与冲突；
+- 工具串行、并发、失败、取消与输出过大；
+- MCP/Plugin/Skill/Package 发现、权限与降级；
+- context 压缩与长历史召回；
+- 子代理、Workflow、Goal/Loop；
+- app-server 断线、cursor 与交互；
+- sandbox 越权与 Secret 泄露；
+- Trajectory/Replay/恢复；
+- Provider 四 wire 异常；
+- 办公迁移预备场景：长文档、表格 artifact、附件、多文件引用与权限边界。此处只测通用 Harness，不宣称完整办公应用。
+
+## 六、Runner
+
+`EvalRunner` 只负责排活，不判分：
+
+1. 解析 suite 与 matrix；
+2. 冻结 Engine/model/config/build/environment；
+3. 为每个 attempt 建隔离 workspace；
+4. 生成稳定 `eval_run_id/attempt_id`；
+5. 调 ScenarioRunner；
+6. 收 Trajectory、artifact、resource receipt；
+7. 交 Judge；
+8. 清理并写 attempt terminal；
+9. 汇总统计与 gate verdict。
+
+同题同配置第 N 次 attempt 身份稳定，但失败重试另开 attempt，不覆盖原账。
+
+## 七、Judge
+
+判卷按可信度排序：
+
+1. 确定性程序检查：退出码、测试、结构化状态、文件 hash；
+2. schema/rule grader：JSON、AST、表格、diff、事件序列；
+3. 参考实现或 property test；
+4. 人工 rubric；
+5. LLM judge，只作需审证据，须带 judge 模型、prompt 版本与原始输出。
+
+最终 `task_success` 不能只取 Agent 自述。每个 metric 带 `verified/estimated/unavailable`。
+
+Judge 与被测 Agent 分权：不同工具面、不同 Secret、不同 workspace 权限。被测 Agent 看不到 grader 配置与 holdout 答案。
+
+## 八、指标
+
+### 8.1 任务质量
+
+```text
+task_success
+acceptance_pass_rate
+partial_credit
+first_pass_success
+recovery_success
+regression_count
+```
+
+### 8.2 Harness 行为
+
+```text
+model_turns
+tool_calls / failed / declined / repeated
+invalid_arguments
+orphan_processes
+unknown_side_effects
+replay_integrity
+context_compactions
+event_drops / coalesced
+```
+
+### 8.3 成本与性能
+
+```text
+wall_ms / first_event_ms / tool_wait_ms
+input/output/cache tokens
+normalized cost
+peak_rss / cpu_ms / disk_bytes / network_bytes
+```
+
+### 8.4 安全
+
+```text
+permission_coverage
+sandbox_coverage
+path_escape_blocked
+network_escape_blocked
+secret_canary_leaks
+untrusted_code_started
+```
+
+分母必须随报告输出。`3/3` 不可只写 100%。skipped 不塞进 passed。
+
+## 九、统计与比较
+
+确定性题跑一次即可；含模型采样的题按 suite 设 N，默认至少 5 次。报告给原始 attempt，不只给平均数。
+
+- 二元成功率：Wilson interval；
+- 连续指标：median、P90、P95；
+- 同题 A/B：配对比较，先看每题差值；
+- 小样本：不给虚假的三位小数；
+- 多次查看：报告 trial 数，避免挑最好一轮；
+- flaky：按同一冻结配置重复后另标，不从失败分母删除。
+
+回归裁决同时看绝对门和相对门。基线样本不足或环境不可比时给 `inconclusive`，不硬判绿。
+
+## 十、失败分型
+
+```text
+task_failure
+harness_failure
+engine_failure
+provider_failure
+tool_failure
+sandbox_failure
+grader_failure
+infra_failure
+budget_exhausted
+cancelled
+invalid_fixture
+inconclusive
+```
+
+分型由事件和证据规则算。模型说“网络坏了”不能直接归 provider failure。
+
+重试策略：只有零业务事件、零副作用、未提交模型请求或被明确列白的 infra failure 可自动重试。原 attempt 仍保留。
+
+## 十一、基线与防污染
+
+BaselineManifest 绑定：
+
+```text
+suite/dataset revision
+build commit + dirty state
+engine id/version/fingerprint
+provider endpoint class + model identity
+config/prompt/tool/package snapshot
+platform/compiler
+runner/judge version
+attempt count
+```
+
+dev 可反复看；holdout 由独立命令/CI 身份读取。看过 holdout 细节的版本，不再声称盲测。
+
+基线不可就地覆盖。新基线先成 candidate，附差分、批准者与理由，再推进 active。
+
+## 十二、CI 与执行档
+
+### PR Quick
+
+- 纯离线；
+- 5 分钟内；
+- contract + replay + 关键 scenario；
+- 零网络、零个人 key；
+- 确定失败直接阻断。
+
+### Nightly Stable
+
+- 三平台；
+- 全离线 suite + soak；
+- 可选固定内部 provider；
+- 波动题积累趋势，不因一次抖动立刻封死。
+
+### Release Full
+
+- 候选发行包，不用工作树二进制；
+- 三平台安装后跑；
+- live probe + benchmark + sandbox + upgrade/rollback；
+- 所有不可比、跳过、未验项进签字页。
+
+## 十三、命令与报告
+
+```text
+lubancode eval validate <suite>
+lubancode eval run <suite> --split smoke
+lubancode eval compare <baseline> <candidate>
+lubancode eval report <eval-run-id> --format json|md|html
+lubancode eval baseline propose|approve|show
+```
+
+报告目录：
+
+```text
+eval-run/
+  manifest.json
+  attempts.jsonl
+  metrics.json
+  verdict.json
+  failures/
+  artifacts/
+  report.md
+```
+
+Telemetry 只收汇总指标和关联 id；任务正文与私有 artifact 不默认上送。
+
+## 十四、分期落地
+
+### P0-0：统一 schema
+
+- [ ] 冻结 EvalSuite、EvalTask、Attempt、Metrics、Verdict、BaselineManifest。
+- [ ] 从 PTC/Evolution 映射旧指标，缺项标 unavailable。
+- [ ] 写 validator 与 canonical hash。
+
+验收：同一 suite 在三平台算出同一清单 hash；坏引用与污染 holdout 明拒。
+
+### P0-1：离线 Runner/Judge
+
+- [ ] 接 ScenarioRunner、Trajectory 与确定性 Judge。
+- [ ] 迁一组 PTC bench 与 Evolution fixture 作兼容样例。
+- [ ] 落失败分型、原始 attempt 与汇总。
+
+验收：离线 suite 可重复跑，结果差异能追到 attempt 和证据。
+
+### P0-2：基线与 CI 门
+
+- [ ] 落 immutable baseline、candidate/approve 流程。
+- [ ] 接 PR quick 与 release full JSON verdict。
+- [ ] 明定 infra/flaky/inconclusive 裁决。
+
+验收：人工造一项确定回归能阻断；一次 infra 抖动不冒充产品回归。
+
+### P1-0：跨 Engine/模型矩阵
+
+- [ ] 接 Engine/model/profile matrix 与并发配额。
+- [ ] 落配对比较、区间与成本归一。
+- [ ] 真模型 probe 记录 endpoint class、日期和原始 usage。
+
+验收：同一任务集可公平比较两只 Engine；报告不混环境与缺失指标。
+
+### P1-1：趋势与工作台
+
+- [ ] App Server 增 eval 查询；Workbench 展趋势、失败簇和首分岔。
+- [ ] 接长期保留、GC、artifact 权限与脱敏。
+- [ ] 输出发布签字页。
+
+验收：能从一项指标跌落点进失败题、场景 run、Trajectory 和验证证据。
+
+## 十五、最终验收门
+
+1. Suite、数据、Runner、Judge、Engine、模型与环境皆有不可变身份。
+2. task success 必有独立验收证据。
+3. 原始 attempt、分母、skipped、失败分型与区间完整可查。
+4. PR、nightly、release 三档各有清楚预算与裁决。
+5. 两只 Engine 能跑同一 suite 并出可比报告。
+6. holdout 不进 Agent 上下文与普通调试包。
+7. 一项真实回归能阻断发布，一项假 infra 抖动能判 inconclusive。
+8. 全量 CTest 绿；在线结果另列日期、模型、endpoint 与未验边界。

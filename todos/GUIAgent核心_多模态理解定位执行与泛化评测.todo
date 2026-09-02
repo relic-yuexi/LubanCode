@@ -1,0 +1,237 @@
+# GUI Agent 核心：多模态理解、元素定位、动作执行与泛化评测
+
+- 状态：待实施（2026-09-02）
+- 级别：P1；涉及误操作、隐私与外部副作用的部分按 P0 办
+- 当前基线：`examples/packages/gui-agent/` 是 Windows code-bearing 示例包，不是核心模块
+- 范围：桌面观察、结构/视觉融合定位、动作计划、执行、验证、回放、跨应用评测
+- 关联：`Agent执行治理_强化沙箱熔断降级与安全边界.todo`、`Agent全链路度量_真实任务Harness回放与功耗评测.todo`
+- 不在本单：训练自有视觉大模型、浏览器 DOM Agent、移动端无障碍服务、验证码绕过、无人值守操作真实账号
+
+## 一、目标
+
+把现在“模型看图，调用示例插件”的路，收成宿主可治理、可观测、可替换的 GUI
+能力。核心不猜模型，也不绑 UIA。它只管五件事：看、找、裁、动、验。
+
+```text
+Desktop Adapter
+  screenshot / accessibility / window / cursor / focus
+             |
+             v
+       ObservationAssembler
+       observation_id + generation
+             |
+      +------+------+
+      |             |
+ Accessibility   Vision Grounder
+      |             |
+      +------v------+
+        CandidateResolver
+             |
+        ActionPlanner
+             |
+ Permission + ExecutionProvider
+             |
+        ActionExecutor
+             |
+          Verifier
+```
+
+## 二、当前事实
+
+现有示例已有截图、region 裁切、窗口枚举、聚焦、UIA snapshot、鼠标、滚轮、
+Unicode 输入、按键、`set_value`、`invoke`。它还做了 DPI 统一、窗口矩形复查、
+危险键闸与 dry-run。
+
+缺口也摆在桌上：
+
+- 生命周期、schema 与实现全住示例包，核心不知道“GUI observation”是什么。
+- UIA ref 只在单份快照内靠序号定位，控件树变化后可能漂。
+- 视觉路只有截图回喂，没有候选框、文字、置信度、来源与遮挡账。
+- “动作已发送”与“目标状态已达成”靠 Skill 约束，宿主没有统一 verifier。
+- 只承诺 Windows；自绘、游戏、部分 Electron 只能回视觉路。
+- 73 项自测与夹具 E2E 不能回答真实应用成功率与泛化。
+
+## 三、核心合同
+
+### 3.1 Observation
+
+```text
+GuiObservation
+  observation_id       全局唯一
+  captured_at
+  desktop_generation   显示器/DPI/登录桌面变化即递增
+  window
+    process_identity   pid + start token，不只认标题
+    native_id
+    rect_physical
+    client_rect_physical
+    z_order / focused / minimized
+  screenshot_ref       artifact 引用，可空
+  accessibility_ref    结构快照引用，可空
+  privacy_class
+  truncation
+  sha256
+```
+
+截图与结构树须同代。窗口、DPI、显示器拓扑或进程身份变了，动作返回
+`stale_observation`。不得拿标题相同的另一只进程顶上。
+
+### 3.2 ElementCandidate
+
+```text
+ElementCandidate
+  candidate_id
+  role / name / text / value
+  rect_physical
+  sources[]             accessibility | ocr | vision | heuristic
+  confidence
+  actionable_patterns[]
+  occluded / enabled / offscreen
+  observation_id
+```
+
+`CandidateResolver` 先按结构身份、文字、空间重叠归并。来源冲突时不硬拼：
+高风险动作须重新观察或问用户；低风险动作可选置信度最高一项，并把裁决入账。
+
+### 3.3 Action
+
+动作只收闭集：`focus`、`move`、`click`、`scroll`、`type_text`、`key`、
+`set_value`、`invoke`、`expand`、`collapse`、`wait`。每项带：
+
+- `observation_id` 与 `candidate_id` 或明确坐标；
+- `expected_window_identity` 与 `expected_window_rect`；
+- `side_effect`：read / reversible / external / destructive；
+- `verification`：预期界面事实，不收“应该成功”这类空话；
+- `idempotency_key`：只给宿主可证幂等的动作。
+
+坐标动作是后备。能走 `ValuePattern`、`InvokePattern` 一类结构动作，先走结构路。
+
+### 3.4 Verification
+
+动作结束后必须另取 observation。Verifier 只认可复核谓词：
+
+- 指定控件出现、消失、启用或值变化；
+- 窗口标题、进程或焦点变更；
+- 局部像素/感知 hash 在阈值内变化；
+- OCR 文本出现；
+- 应用夹具给出的业务状态；
+- 用户明确确认。
+
+`sent`、`completed`、`verified` 三态分开。没验成就不能报 success。
+
+## 四、平台层
+
+### Windows
+
+- 把现有 Win32/UIA 后端迁为 `GuiDesktopAdapter` 首个实现。
+- 保住 Per-Monitor v2、物理像素、PrintWindow/BitBlt 与 SendInput 行为。
+- 加进程 start token、显示器拓扑代次、secure desktop 检测。
+- 管理员窗口、UAC 桌面、锁屏一律明拒，不尝试绕过。
+
+### macOS
+
+- Accessibility API 管结构与动作，ScreenCaptureKit 管截图。
+- 未获 Screen Recording 或 Accessibility 授权，返回稳定错误码和设置指路。
+- 不用 AppleScript 充通用后端。
+
+### Linux
+
+- Wayland 优先走 portal；X11 另作受限适配。
+- AT-SPI 管结构；截图与注入能力按 compositor 如实分级。
+- 平台不许注入时返回 unavailable，不暗退到 `xdotool`。
+
+## 五、安全
+
+- 默认只允许观察；所有写动作照过 Tool Schema、Hooks、Permission 与审计链。
+- screenshot 默认目标窗口，整屏另问；密码框、secure input、通知区可做遮罩。
+- 剪贴板读写分开授权，正文不得进普通 telemetry。
+- 外部提交、付款、删除、发送消息、发布内容列高风险动作，最后一步须逐次确认。
+- GUI 插件或 adapter 拿什么 OS 权限，`/doctor gui` 逐项亮明。
+- 远程桌面、锁屏、DPI unaware、窗口不停抖，宁可停手，不盲点。
+
+## 六、评测集
+
+建 `tests/gui_bench/`，任务与应用夹具分离：
+
+```text
+manifest.json
+apps/<app_id>/...
+tasks/<split>/<task_id>.yaml
+oracles/<task_id>.*
+baselines/<model>/<platform>.json
+```
+
+至少覆盖：原生表单、Electron、自绘 Canvas、滚动长页、多窗口、对话框、
+菜单/下拉、文件选择、DPI 125%/150%/200%、双屏负坐标、遮挡与窗口移动。
+
+拆四份数据：
+
+- train/dev：可用于调 prompt 与规则；
+- app-holdout：新应用，同类交互；
+- layout-holdout：旧应用，新布局/主题/DPI；
+- task-holdout：新组合任务，不许见 oracle。
+
+指标：任务成功率、元素定位 Top-1/Top-k、动作成功率、验证准确率、平均模型轮数、
+工具调用数、重复动作率、stale 拦截率、误操作率、用户确认数、墙钟、Token。
+
+## 七、实施批次
+
+### G0：冻结合同
+
+- [ ] 冻结 Observation、Candidate、Action、Verification schema 与错误码。
+- [ ] 冻结平台 capability matrix；没有的能力不进工具 schema。
+- [ ] 钉 Trajectory typed events 与 artifact 生命周期。
+- [ ] 给现有示例包写兼容适配层，不先破坏用户装法。
+
+### G1：Windows 核心化
+
+- [ ] 迁 Win32/UIA 后端，示例包只留 thin adapter 与教学物料。
+- [ ] 加 process start token、desktop generation 与 secure desktop 拒绝。
+- [ ] screenshot、snapshot、action 全走统一 artifact/permission/trace。
+- [ ] `/doctor gui` 报平台、DPI、权限、截图、结构、注入与降级档。
+
+### G2：定位融合
+
+- [ ] 接 OCR provider 接口；实现文本框到物理像素的映射。
+- [ ] 接 vision grounder 接口；输出候选框、置信度与模型版本。
+- [ ] 实现 UIA/OCR/vision 候选归并与冲突裁决。
+- [ ] 加局部重拍与自适应 crop；不把整屏反复塞进模型。
+
+### G3：执行与验证
+
+- [ ] 动作状态机与 idempotency gate 落地。
+- [ ] 结构动作优先、坐标后备；fallback 每次记原因。
+- [ ] Verifier 支持结构、OCR、像素、夹具与人工五路证据。
+- [ ] 中断、超时、窗口消失、焦点抢占、观察过期全补故障测试。
+
+### G4：跨平台
+
+- [ ] macOS adapter 与权限诊断。
+- [ ] Linux Wayland/AT-SPI adapter；X11 能力另列。
+- [ ] 三平台错误码与工具面一致，能力缺失不假装成功。
+
+### G5：真实模型与泛化
+
+- [ ] 冻结 GUI Bench v1、任务拆分与 oracle。
+- [ ] 至少两家模型、两档预算各跑三次，保存原始 trajectory。
+- [ ] app/layout/task 三类 holdout 分报，不只报总平均。
+- [ ] 与“纯截图坐标路”“纯结构路”做消融。
+- [ ] 失败归因到 perception / grounding / planning / execution / verification。
+
+### G6：发布与回归
+
+- [ ] PR 跑 L0-L2；夜跑 L3；有钥匙环境跑 L4。
+- [ ] 成功率或误操作率越门即挡发布；波动给置信区间。
+- [ ] 发布包带 adapter、fixture、doctor 与最小演示。
+- [ ] 文档只报冻结任务集数字，不拿 73 项自测冒充成功率。
+
+## 八、完成门
+
+只有下列全过，才可说“GUI Agent 核心能力已成”：
+
+- [ ] GUI 工具由核心合同承载，示例包不再握唯一实现。
+- [ ] Windows 真机 100 轮无越窗误点，stale/焦点抢占均能拦住。
+- [ ] 固定模型下，app-holdout 与 task-holdout 都有可复算成功率。
+- [ ] 每个 success 都有 verification evidence；抽查无“动作发出即成功”。
+- [ ] 高风险动作逐次确认，日志与遥测不泄露截图、密码或剪贴板正文。
+- [ ] 至少 Windows 发布；其余平台若未过门，文案逐项标 unsupported。
