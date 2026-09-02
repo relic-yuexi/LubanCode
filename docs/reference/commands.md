@@ -294,7 +294,7 @@ Prompt 三层审计（只读，只摆事实，主人裁决）。`static` 审眼�
 | `Home / End` | 到当前逻辑行首/尾。 |
 | `Backspace / Delete` | 删除字符；碰到大段粘贴占位时整枚删除。 |
 | `Tab` | 有输入时补全；空输入时进入工具条目焦点。 |
-| `Shift+Tab` | 非焦点状态循环 `confirm -> auto -> yolo`。 |
+| `Shift+Tab` | 非焦点状态按 `default -> accept_edits -> yolo -> auto -> dont_ask` 循环审批档；中文 UI 名依次为“默认模式 / 接受编辑 / YOLO / 自动模式 / 不询问”。切档后黄色说明显示约 6 秒。 |
 | `Ctrl+C` | 非空输入时清行；空输入时按 EOF 处理。 |
 | `Ctrl+D` / Windows `Ctrl+Z` | EOF，结束读取。 |
 
@@ -325,4 +325,4 @@ Prompt 三层审计（只读，只摆事实，主人裁决）。`static` 审眼�
 - 管道与重定向不用原地菜单、动画、ANSI 重画和 bracketed paste。
 - `ask_user` 不在单发/管道入口挂载，免得无人应答时挂死。
 - 图片、slash 命令、焦点按键属于交互入口；脚本场景应把要求直接写进问题。
-- 需要无确认自动化时用 `--yes`，或设 `LUBANCODE_CONFIRM_MODE=auto|yolo|confirm`。
+- 需要无确认自动化时用 `--yes`（即 `yolo`），或设 `LUBANCODE_CONFIRM_MODE=default|accept_edits|yolo|auto|dont_ask`；旧 `confirm` 仍兼容为 `default`，但已弃用。

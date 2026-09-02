@@ -330,10 +330,9 @@ MCP 工具用 `mcp__<server>__<tool>`，插件工具用 `plugin__<plugin>__<tool
 
 | 字段 | 必填 | 类型 | 默认 | 取值 |
 | --- | --- | --- | --- | --- |
-| `mode` | 否 | 字符串 | `inherit` | `inherit`、`confirm`、`auto`、`yolo` |
+| `mode` | 否 | 字符串 | `inherit` | `inherit`、`default`、`accept_edits`、`yolo`、`auto`、`dont_ask`（`confirm` 兼容为 `default`，已弃用） |
 
-对齐现有权限三档（`confirm` / `auto` / `yolo`）。铁律：**只能比父 Agent 更
-窄，不能更宽**。宽窄序：`yolo` > `auto` > `confirm`。`inherit` = 同父。
+权限不能用单一 rank/min 排序：父子按两部分求交——可自动执行的能力集合取交集，是否保留询问资格也取交集。`inherit` 原样继承父档。于是父 `yolo`（自动能力为 All）配子 `default` 时，子定义会收窄为默认审批并可向主会话询问；父 `dont_ask` 配任何会询问的子档时，询问资格被拿掉，未获自动许可的动作直接拒绝。父 `auto` 配子 `accept_edits` 只自动接受文件编辑。工具白名单仍另行取交集，不能借档位拿回父 Agent 没有的工具。
 
 子 Agent 想要"只读"，不用另造权限档——用 `tools.allow` 收成只读白名单（现有
 Explore 即此做法）。
@@ -487,7 +486,7 @@ Agent 定义不写进会话历史正文。历史只记稳定 `name`、定义来�
 | `runtime.length_continuations` | `AgentRuntimeProfile::length_continuations` | 同上 |
 | `runtime.execution_mode` | `agent` 工具 `execution_mode` 参数（`auto`/`foreground`/`background`） | `src/tools/agent_tool.cpp` |
 | `runtime.isolation` | `tools::IsolationScope`（worktree 房） | `src/tools/isolation.hpp` |
-| `permissions.mode` | `runtime::PermissionMode`（`Confirm`/`Auto`/`Yolo`） | `src/runtime/turn_runtime.hpp` |
+| `permissions.mode` | `runtime::PermissionMode`（五档，见 §4.9） | `src/runtime/turn_runtime.hpp` |
 
 反向也有一条边界：C++ 有、YAML 没有的字段，同样写明。
 
@@ -511,8 +510,7 @@ Agent 定义不写进会话历史正文。历史只记稳定 `name`、定义来�
 
 1. 工具名对齐现有注册表：命令工具叫 `run_command`（不叫 `shell`）；待办工具
    只有 `todo_write`，没有 `todo_read`。
-2. `permissions.mode: read_only` 不进首版。现有权限档只有 confirm/auto/yolo；
-   只读限制用 `tools.allow` 表达。
+2. `permissions.mode: read_only` 不进首版。现有权限档为 `default` / `accept_edits` / `yolo` / `auto` / `dont_ask`（另有 `inherit`）；只读限制用 `tools.allow` 表达。
 3. `runtime` 补全 `AgentRuntimeProfile` 全部字段（`max_output_tokens`、
    `max_context_chars`、`context_window_tokens`、`length_continuations`），
    名字与 C++ 一字不差。
@@ -540,7 +538,7 @@ Agent 定义不写进会话历史正文。历史只记稳定 `name`、定义来�
 | --- | --- |
 | `agent.duplicate_same_layer` | 同一层目录两份定义同名 |
 | `agent.tool_not_granted` | `tools.allow` 点到父 Agent 没有的工具 |
-| `agent.permission_widening` | `permissions.mode` 比父 Agent 宽 |
+| `agent.permission_widening` | 旧版兼容诊断名；当前 `permissions.mode` 采用自动能力集合与询问资格求交，不因单一 rank 判定父子宽窄 |
 | `agent.effort_not_supported` | `model.effort` 不在 provider 声明的思考档里 |
 
 ### 9.3 不可用（不报错，标状态）

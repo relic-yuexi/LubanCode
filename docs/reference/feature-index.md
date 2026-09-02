@@ -82,7 +82,7 @@
 | 工具转录 | 运行态原位换成终态；紧凑档藏子工具，详细档显示参数、全文与 diff。 |
 | 回合中切档 | `Ctrl+O` 会重打当前快照，不只改一行提示；旧屏幕锚点随即作废，后续改为安全追加。 |
 | 聚焦查看 | 空输入时 Tab 选条目，`Ctrl+E` 看全文，Esc/Enter 返回。 |
-| 三档确认 | `confirm / auto / yolo` 用 `Shift+Tab` 切换；状态栏实时显示。 |
+| 五档审批 | `default / accept_edits / yolo / auto / dont_ask` 用 `Shift+Tab` 切换；状态栏实时显示，切档说明约 6 秒后收走。 |
 | 图片输入 | `/image` 或消息里的 `@路径`；PNG/JPEG/GIF/WebP，每张最多 5 MiB。 |
 | 主题与语言 | dark/light/plain；内置中英文，外部 JSON 语言包可扩展，见[界面多语言](../development/i18n.md)。 |
 

@@ -93,6 +93,12 @@ Package 内的 workflow 写包内短名即可——挂载层自动折成 canonic
 - 定义声明 `permissions.mode` 比会话档严时，节点内工具的确认真拉回
   （与 `agent` 工具同一执法路）。
 
+### 审批档传播
+
+Workflow 的 `agent` 节点与普通 `agent` 工具共用 `AgentProfileResolver` 和运行时裁定器。会话档及节点 Agent 的 `permissions.mode` 使用稳定值 `default` / `accept_edits` / `yolo` / `auto` / `dont_ask`（旧 `confirm` 兼容为 `default`）；父子按自动能力集合和询问资格求交，而不是 rank/min。父 YOLO 允许子定义收窄后向主会话询问，父 `dont_ask` 则拿掉询问资格，未自动许可的动作直接拒绝。
+
+Workflow、Hook payload、Peer 名片和 Session/Trajectory manifest 均写上述五个稳定值；非法或未知值保守归到 `default`。Plan 能力边界和 PreToolUse Hook deny 先于审批档生效，YOLO 也越不过；Hook ask 则继续进入五档裁定。
+
 ## 公共节点字段
 
 ```yaml

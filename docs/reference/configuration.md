@@ -201,7 +201,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 
 | 字段 | 内容 |
 | --- | --- |
-| `permission_mode` | 当前 confirm / auto / yolo 档及 Shift+Tab 提示。 |
+| `permission_mode` | 当前五档审批状态及 Shift+Tab 下一档提示；稳定值为 `default` / `accept_edits` / `yolo` / `auto` / `dont_ask`。 |
 | `model` | 当前会话模型。 |
 | `cwd` | 当前工作目录；太长时从左侧收起，保住末级目录。 |
 | `git_branch` | 当前 Git 分支；不在仓库时自动跳过，游离 HEAD 显示短哈希。 |
@@ -315,7 +315,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 | `LUBANCODE_THINK` | `think` | `none`/`low`/`medium`/`high`。 |
 | `LUBANCODE_SOUL` | `soul` | `default`、`off` 或 `souls/` 下魂名。 |
 | `LUBANCODE_FORCE_COLOR` | 终端颜色开关 | 设为 `1` 时,管道/重定向也强制尝试输出颜色;不写入 `config.json`。 |
-| `LUBANCODE_CONFIRM_MODE` | 会话起手确认档 | `confirm`、`auto` 或 `yolo`；不写入 `config.json`，优先级低于 `--yes`，高于 `settings.local.json`。 |
+| `LUBANCODE_CONFIRM_MODE` | 会话起手确认档 | `default`、`accept_edits`、`yolo`、`auto` 或 `dont_ask`；旧值 `confirm` 兼容为 `default`，但已弃用。不写入 `config.json`，优先级低于 `--yes`，高于 `settings.local.json`；非法值告警并保守回到 `default`。 |
 
 环境变量设为空串,按没设处理。`LUBAN_*` 与对应 `LUBANCODE_*` 同设时采用 `LUBAN_*`。`ANTHROPIC_*`/`OPENAI_*` 不参与顶层解析；provider.key_env 显式指定它们时例外。`hooks`、`mcpServers`、`search`、`lsp`、`tool_search_threshold`、`tool_search_token_floor`、`deferred_tool_mode`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs`、`request_hard_timeout_secs` 没有对应的 `LUBANCODE_*` 变量,只能写配置文件。
 
@@ -482,9 +482,9 @@ GLM 模型档位已经写进 provider 目录。`glm-5.2` 认 `max/xhigh/high/med
 全部字段可选,坏 JSON 只告警跳过、不崩:
 
 - `allow_tools`:这些工具启动即进"总是允许"集合,本会话免确认。
-- `allow_commands`:`run_command` 命令前缀白名单,auto 档里命中前缀等价 Safe(补充白名单,不改内置判定)。
-- `deny_commands`:`run_command` 命令前缀黑名单,命中永远问一句,压过 `allow_commands`、压过会话"总是允许";只在 confirm/auto 档生效,`--yes`/yolo 是显式全放,`deny` 不拦。
-- `default_confirm_mode`:起手确认档 `auto`/`yolo`/`confirm`,优先级低于 `--yes`/`LUBANCODE_CONFIRM_MODE`,高于内置默认 `confirm`。
+- `allow_commands`:`run_command` 命令前缀白名单，命中后可免询问；`auto` 还会自动放行内置判定为安全的命令。
+- `deny_commands`:`run_command` 命令前缀黑名单，命中时要求询问，压过 `allow_commands` 与会话“总是允许”。**已发布兼容例外：`yolo` 与 `--yes` 是显式全放，`deny_commands` 不拦；不要把这里当操作系统安全边界。** `dont_ask` 下命中后不能询问，因而直接拒绝。
+- `default_confirm_mode`:字段名因兼容历史保持不变。合法值为 `default` / `accept_edits` / `yolo` / `auto` / `dont_ask`；旧值 `confirm` 仍按 `default` 读取，但已弃用。优先级低于 `--yes` / `LUBANCODE_CONFIRM_MODE`，高于内置 `default`；非法值告警并保守回到 `default`。`--yes` 始终选择 `yolo`。
 
 确认某工具时按 `a`(本会话总是允许),真控制台里会多问一句要不要永久写进 `settings.local.json`。`/config` 会打一行 `permissions` 摘要。
 
