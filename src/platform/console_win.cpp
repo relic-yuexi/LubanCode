@@ -34,6 +34,19 @@
 
 namespace lubancode::platform {
 
+// NativeRowCell 的属性位与 Win32 控制台常量必须逐位同值(单 2 二轮·8.2:
+// WriteNativeRow 直接把它们搬进 CHAR_INFO.Attributes,不同值就是画错色)。
+static_assert(kNativeFgBlue == FOREGROUND_BLUE, "fg blue bit mismatch");
+static_assert(kNativeFgGreen == FOREGROUND_GREEN, "fg green bit mismatch");
+static_assert(kNativeFgRed == FOREGROUND_RED, "fg red bit mismatch");
+static_assert(kNativeFgIntensity == FOREGROUND_INTENSITY, "fg intensity bit mismatch");
+static_assert(kNativeBgBlue == BACKGROUND_BLUE, "bg blue bit mismatch");
+static_assert(kNativeBgGreen == BACKGROUND_GREEN, "bg green bit mismatch");
+static_assert(kNativeBgRed == BACKGROUND_RED, "bg red bit mismatch");
+static_assert(kNativeBgIntensity == BACKGROUND_INTENSITY, "bg intensity bit mismatch");
+static_assert(kNativeCellLeading == COMMON_LVB_LEADING_BYTE, "wide-char leading flag mismatch");
+static_assert(kNativeCellTrailing == COMMON_LVB_TRAILING_BYTE, "wide-char trailing flag mismatch");
+
 // 输入侧(剪贴板/按键)的宽窄转换直接用 paths_win 那两份(Utf8ToWide/
 // WideToUtf8,经上面的 paths.hpp 引进来):同一份"坏字符替换 U+FFFD、
 // 绝不抛"的合同,不在这只文件再养一份私有实现。
@@ -636,6 +649,68 @@ void ClearRowHardFrom(int x, int y, int count) {
     if (GetConsoleScreenBufferInfo(h_out, &info)) {
         FillConsoleOutputAttribute(h_out, info.wAttributes, static_cast<DWORD>(count), pos, &written);
     }
+}
+
+bool WriteNativeRow(int x, int y, const NativeRowCell* cells, int cell_count) {
+    if (cells == nullptr || cell_count <= 0 || x < 0 || y < 0) {
+        return false;
+    }
+    const HANDLE h_out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (h_out == nullptr || h_out == INVALID_HANDLE_VALUE) {
+        return false;
+    }
+    CONSOLE_SCREEN_BUFFER_INFO info{};
+    if (!GetConsoleScreenBufferInfo(h_out, &info)) {
+        return false;  // 非真控制台(管道/重定向):没有缓冲区可直写
+    }
+    // 与缓冲区求交集,越界部分裁掉;交集为空 = 这行无笔可落,不算失败
+    //(调用方的帧账按可视窗口预算,正常到不了这里,防御而已)。
+    const int width = static_cast<int>(info.dwSize.X);
+    const int height = static_cast<int>(info.dwSize.Y);
+    int write_x = x;
+    int begin = 0;
+    int count = cell_count;
+    if (write_x + count > width) {
+        count = width - write_x;
+    }
+    if (y >= height || count <= 0) {
+        return true;
+    }
+
+    // CHAR_INFO 一次成块:字符、属性(含宽字半格旗标)同步落,随后一发
+    // WriteConsoleOutputW——不 SetCursorPos、不写 stdout,buffer 光标从头
+    // 到尾没被碰过(单 2 二轮的核心合同,G0 高频轨迹判据就是验它)。
+    std::vector<CHAR_INFO> buf(static_cast<std::size_t>(count));
+    const WORD default_attr = info.wAttributes;
+    for (int i = 0; i < count; ++i) {
+        const NativeRowCell& cell = cells[begin + i];
+        WORD attr = static_cast<WORD>(cell.attr & 0xFFu);
+        if (attr == 0) {
+            attr = default_attr;  // "默认属性"记号(构建器不动色的格子)
+        }
+        if ((cell.attr & kNativeCellLeading) != 0) {
+            attr |= COMMON_LVB_LEADING_BYTE;
+        }
+        if ((cell.attr & kNativeCellTrailing) != 0) {
+            attr |= COMMON_LVB_TRAILING_BYTE;
+        }
+        buf[static_cast<std::size_t>(i)].Attributes = attr;
+        // 星面码点(>BMP)按半格旗标拆代理对:前半格高代理、后半格低代理
+        //(footer 行全是 BMP 字符,这条只是别在罕见输入上画替换符的保险)。
+        WCHAR wc;
+        if (cell.ch >= 0x10000) {
+            const std::uint32_t v = static_cast<std::uint32_t>(cell.ch) - 0x10000;
+            wc = static_cast<WCHAR>((cell.attr & kNativeCellTrailing) != 0 ? (0xDC00 + (v & 0x3FF))
+                                                                            : (0xD800 + (v >> 10)));
+        } else {
+            wc = static_cast<WCHAR>(cell.ch);
+        }
+        buf[static_cast<std::size_t>(i)].Char.UnicodeChar = wc;
+    }
+    SMALL_RECT region{static_cast<SHORT>(write_x), static_cast<SHORT>(y),
+                      static_cast<SHORT>(write_x + count - 1), static_cast<SHORT>(y)};
+    return WriteConsoleOutputW(h_out, buf.data(), COORD{static_cast<SHORT>(count), 1}, COORD{0, 0},
+                               &region) != 0;
 }
 
 int PanViewportDown(int rows) {

@@ -16,6 +16,7 @@
 
 #include <atomic>
 #include <fstream>
+#include <map>
 #include <mutex>
 #include <set>
 #include <string>
@@ -416,6 +417,10 @@ std::vector<std::string> (*g_script_events)() = &ThinkingScriptEvents;
 int g_event_delay_ms = 300;
 std::vector<std::string> ScriptEvents() { return g_script_events(); }
 
+// 带前置延时的剧本(g0 静默窗用):每枚事件先睡 delay 毫秒再发。置空则退回
+// g_script_events + 均匀 g_event_delay_ms 的老路(G6/G7 用)。
+std::vector<std::pair<int, std::string>> (*g_script_timed_events)() = nullptr;
+
 int StartFakeAnthropicServer() {
     WSADATA wsa;
     WSAStartup(MAKEWORD(2, 2), &wsa);
@@ -446,6 +451,24 @@ int StartFakeAnthropicServer() {
             }
             std::thread([client_fd]() {
                 DrainHttpRequestBytes(client_fd);
+                if (g_script_timed_events != nullptr) {
+                    const auto timed = g_script_timed_events();
+                    std::size_t body_bytes = 0;
+                    for (const auto& [delay, event] : timed) {
+                        body_bytes += SseLine(event).size();
+                    }
+                    const std::string head = "HTTP/1.1 200 OK\r\n"
+                                             "Content-Type: text/event-stream\r\n"
+                                             "Content-Length: " +
+                                             std::to_string(body_bytes) + "\r\n" + "Connection: close\r\n\r\n";
+                    SendAllBytes(client_fd, head);
+                    for (const auto& [delay, event] : timed) {
+                        Sleep(static_cast<DWORD>(delay));
+                        SendAllBytes(client_fd, SseLine(event));
+                    }
+                    closesocket(client_fd);
+                    return;
+                }
                 std::size_t body_bytes = 0;
                 for (const auto& event : ScriptEvents()) {
                     body_bytes += SseLine(event).size();
@@ -488,7 +511,11 @@ bool WaitForFooterInputRow(int timeout_ms, int* found_row = nullptr) {
 }  // namespace
 
 std::string ReadAuditFileUtf8(const wchar_t* path) {
-    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, 0, nullptr);
+    // FILE_SHARE_WRITE 必须带上:全幕序列里 G7 子进程偶发挂在 exit 上被强
+    // 杀,咽气的瞬间写句柄还在,只共享读会被共享违规挡成空读——audit 行
+    // 明明在盘上却报"帧账行没落"(单 2 二轮实录的 G7 假红)。
+    HANDLE file = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING,
+                              0, nullptr);
     if (file == INVALID_HANDLE_VALUE) {
         return {};
     }
@@ -517,6 +544,220 @@ bool ParseAuditFields(const std::string& audit, const std::string& tag, long lon
     *frames = field("frames=");
     *bytes = field("bytes=");
     return *frames >= 0 && *bytes >= 0;
+}
+
+// G0 幕本体(开场问题已由调用方发出,子进程正跑第一个 turn):高频光标
+// 轨迹 + 活动行三连判。全跑与 g0 单跑共用。单 2 二轮把"轨迹无活动行落点"
+// 从 INFO 升格为硬判据:50ms 轮询抓不到批内毫秒中间态(8.1 假绿的教训),
+// 几十 kHz 轨迹抓得到——footer 帧序列里但凡还有 CUP 去活动行,这里必红。
+void RunG0TrajectoryScene(const char* settle_needle = nullptr) {
+    // settle_needle 非空:先等它上屏再开轨迹窗(g0 静默幕用)——首笔正文
+    // delta 的 Prepare/落笔本身会把光标合法地带到旧帧位置,采样窗避开这
+    // 一拍,只看静默段(正文停笔、秒钟照走)里的轨迹。
+    if (settle_needle != nullptr) {
+        Check(WaitForText(settle_needle, 15000), "G0 静默入场:首笔预览已上屏");
+        Sleep(300);  // 等帧彻底落定,避开 delta 边沿
+    }
+    struct CursorTraceSample { DWORD tick; SHORT x; SHORT y; };
+    std::vector<CursorTraceSample> cursor_trace;
+    std::atomic<bool> trace_run{true};
+    std::thread cursor_tracer([&]() {
+        CONSOLE_SCREEN_BUFFER_INFO ci{};
+        SHORT lx = -1, ly = -1;
+        while (trace_run.load(std::memory_order_relaxed)) {
+            if (GetConsoleScreenBufferInfo(g_conout, &ci) &&
+                (ci.dwCursorPosition.X != lx || ci.dwCursorPosition.Y != ly)) {
+                cursor_trace.push_back({GetTickCount(), ci.dwCursorPosition.X, ci.dwCursorPosition.Y});
+                lx = ci.dwCursorPosition.X;
+                ly = ci.dwCursorPosition.Y;
+            }
+        }
+    });
+    // 活动行观测账:轮询里每次见到的活动行行号 -> 首见/末见时刻。轨迹判据
+    // 拿它做"这一行当下是不是活动行"的夹逼门:正文往下长会把框顶下去,旧
+    // 活动行随即变成正文行——正文续写的合法光标落点(首见之前、末见之后)
+    // 不能误伤;只有夹在首见与末见之间的落点才是真踩在活动行上。
+    std::map<SHORT, DWORD> activity_row_first_tick;
+    std::map<SHORT, DWORD> activity_row_last_tick;
+    std::set<std::string> activity_texts;
+    bool working_and_composer_visible = false;
+    bool working_cursor_ever_left_composer = false;
+    const DWORD spinner_deadline = GetTickCount() + 10000;
+    while (GetTickCount() < spinner_deadline) {
+        const int spinner_row = FindLastRow("思考中");
+        const int composer_row = FindFooterInputRow();
+        if (spinner_row >= 0) {
+            const DWORD now = GetTickCount();
+            const SHORT row_key = static_cast<SHORT>(spinner_row);
+            if (activity_row_first_tick.find(row_key) == activity_row_first_tick.end()) {
+                activity_row_first_tick[row_key] = now;
+            }
+            activity_row_last_tick[row_key] = now;
+            activity_texts.insert(ReadRow(spinner_row));
+        }
+        if (spinner_row >= 0 && composer_row > spinner_row) {
+            working_and_composer_visible = true;
+            if (!(CursorRow() == composer_row && CursorColumn() >= 2)) {
+                working_cursor_ever_left_composer = true;
+            }
+        }
+        if (activity_texts.size() >= 3) {
+            break;  // 已跨过至少两次秒钟跳,采样足够
+        }
+        Sleep(50);
+    }
+    trace_run.store(false, std::memory_order_relaxed);
+    cursor_tracer.join();
+    // 轨迹统计:光标到过的行分布 + 前 24 次变化。活动行行号 = "思考中"行,
+    // composer 行号 = 输入行;轨迹里出现活动行(或其他行)即 buffer 层有
+    // 中间态裸 CUP。
+    {
+        const int trace_spinner_row = FindLastRow("思考中");
+        const int trace_composer_row = FindFooterInputRow();
+        std::set<SHORT> rows_seen;
+        for (const auto& smp : cursor_trace) {
+            rows_seen.insert(smp.y);
+        }
+        std::string rows_desc;
+        for (SHORT r : rows_seen) {
+            if (!rows_desc.empty()) rows_desc += ",";
+            rows_desc += std::to_string(r);
+            if (r == trace_spinner_row) rows_desc += "(活动行!)";
+            else if (r == trace_composer_row) rows_desc += "(输入行)";
+        }
+        Log("INFO: G0 光标轨迹 " + std::to_string(cursor_trace.size()) + " 次变化,到过行: " + rows_desc +
+            " (活动行=" + std::to_string(trace_spinner_row) + " 输入行=" + std::to_string(trace_composer_row) + ")");
+        const std::size_t shown = cursor_trace.size() < 24 ? cursor_trace.size() : 24;
+        for (std::size_t i = 0; i < shown; ++i) {
+            Log("INFO: G0 轨迹[" + std::to_string(i) + "] t=" + std::to_string(cursor_trace[i].tick) +
+                " x=" + std::to_string(cursor_trace[i].x) + " y=" + std::to_string(cursor_trace[i].y));
+        }
+    }
+    // 硬判据(8.2 升格):凡是"当时已是活动行"的行,高频轨迹一次都不许
+    // 落——50ms 轮询漏检的毫秒中间态(藏光标→CUP 到活动行→清写→CUP 回)
+    // 在几十 kHz 采样下现形。门按轮询首见/末见夹逼:正文长高把框顶下去的
+    // 那一拍,旧活动行正在变成正文行,末见之后的正文落点放行;夹在其中的
+    // 落点才是真踩在活动行上(VT 批每秒一次的 CUP 振荡会连中几十次,不怕
+    // 漏)。
+    int activity_landings = 0;
+    for (const auto& smp : cursor_trace) {
+        const auto first = activity_row_first_tick.find(smp.y);
+        const auto last = activity_row_last_tick.find(smp.y);
+        if (first != activity_row_first_tick.end() && last != activity_row_last_tick.end() &&
+            smp.tick >= first->second && smp.tick <= last->second) {
+            ++activity_landings;
+        }
+    }
+    Check(activity_landings == 0,
+          "G0 高频轨迹:光标从未落在活动行(8.2 硬判据,实得 " +
+              std::to_string(activity_landings) +
+              " 次落点;VT 批内 CUP 的毫秒中间态在 50ms 轮询下漏检,在此现形)");
+    Check(activity_texts.size() >= 2,
+          "G0 Working:秒钟走动,活动行文本至少变过两拍(实得 " +
+              std::to_string(activity_texts.size()) + " 种,扫光已撤不验配色轮换)");
+    Check(working_and_composer_visible,
+          "G0 Working 与输入框同帧可见,输入框不再被 spinner 挂起");
+    Check(!working_cursor_ever_left_composer,
+          "G0 Working 期间物理光标全程钉在输入框(全程采样,无一次落在活动行)");
+    ChildStillRunning("G0 Working");
+}
+
+// g0 单跑模式(沙箱/二轮灵敏度验证用):进程内假 anthropic 服务供思考剧本
+// (不碰真网络、不依赖真后端),跑满 G0 轨迹幕即收。判据灵敏度用它验,三组
+// 对照的结论记在单 2 第 8.3 节第 7 条:拨针一回来(拆 frame_fits 闸)必红,
+// 闸上必绿。
+// g0 剧本(带前置延时):先两笔快闪把思考预览立起来,随后 4500ms 静默——
+// turn 挂着、活动行每秒走字,正文一行不写。高频轨迹的采样窗(约 3.5 秒,
+// 凑满三种活动行文本即止)整体落在静默段里:此时光标的任何"活动行落点"
+// 都不可能是正文续写(正文没有笔),只能是 footer 帧序列自己的 CUP——
+// 这正是 8.1 取证里"真机肉眼见光标跳到蓝球左边"的那一拍。
+std::vector<std::pair<int, std::string>> G0ThinkingScriptEvents() {
+    std::vector<std::pair<int, std::string>> events;
+    events.push_back({0, "{\"type\":\"message_start\",\"message\":{\"id\":\"msg\",\"model\":\"fake-model\"}}"});
+    events.push_back({0, "{\"type\":\"content_block_start\",\"index\":0,\"content_block\":{\"type\":\"thinking\",\"thinking\":\"\"}}"});
+    // 第一笔把思考预览立起来;随后 4500ms 静默——turn 挂着、秒钟走字、
+    // 正文停笔。G0 采样窗(凑满三种活动行文本即止,约 3.5 秒)整体落在
+    // 这段静默里:静默中光标的任何"活动行落点"都不可能是正文续写(正文
+    // 没有笔),只能是 footer 帧序列自己搬的 CUP。
+    events.push_back({400, "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"预览行第一句慢慢想。\\n\"}}"});
+    events.push_back({4500, "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"预览行第二句继续想。\\n\"}}"});
+    for (int i = 3; i <= 8; ++i) {
+        events.push_back({300, "{\"type\":\"content_block_delta\",\"index\":0,\"delta\":{\"type\":\"thinking_delta\",\"thinking\":\"预览行第" + std::to_string(i) + "句。\\n\"}}"});
+    }
+    events.push_back({300, "{\"type\":\"content_block_stop\",\"index\":0"});
+    events.push_back({300, "{\"type\":\"content_block_start\",\"index\":1,\"content_block\":{\"type\":\"text\",\"text\":\"\"}}"});
+    events.push_back({300, "{\"type\":\"content_block_delta\",\"index\":1,\"delta\":{\"type\":\"text_delta\",\"text\":\"done\"}}"});
+    events.push_back({300, "{\"type\":\"content_block_stop\",\"index\":1"});
+    events.push_back({300, "{\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"input_tokens\":60,\"output_tokens\":30}}"});
+    return events;
+}
+
+void RunG0OnlyScene(const std::wstring& exe_path, const std::wstring& workdir) {
+    g_script_timed_events = &G0ThinkingScriptEvents;  // 静默窗剧本,收场还原
+    const int port = StartFakeAnthropicServer();
+    Check(port != 0, "G0 假 anthropic 服务起来(思考剧本)");
+    if (port == 0) {
+        g_script_timed_events = nullptr;
+        return;
+    }
+    SetEnvVar(L"LUBANCODE_WIRE", L"anthropic");
+    SetEnvVar(L"LUBANCODE_BASE_URL", L"http://127.0.0.1:" + std::to_wstring(port));
+    SetEnvVar(L"LUBANCODE_API_KEY", L"stream-footer-driver");
+    SetEnvVar(L"LUBANCODE_MODEL", L"fake-model");
+    SetEnvVar(L"NO_PROXY", L"127.0.0.1,localhost");
+    SetEnvVar(L"http_proxy", L"");
+    SetEnvVar(L"https_proxy", L"");
+
+    STARTUPINFOW si0{};
+    si0.cb = sizeof(si0);
+    si0.dwFlags = STARTF_USESTDHANDLES;
+    si0.hStdInput = g_conin;
+    si0.hStdOutput = g_conout;
+    // 诊断期:stderr 落文件(g0 幕的排障抓手,留在手艺里)
+    SECURITY_ATTRIBUTES inherit0{sizeof(SECURITY_ATTRIBUTES), nullptr, TRUE};
+    const std::wstring err0_path = std::wstring(L"g0child_stderr.log");
+    DeleteFileW(err0_path.c_str());
+    HANDLE err0 = CreateFileW(err0_path.c_str(), GENERIC_WRITE, FILE_SHARE_READ, &inherit0, CREATE_ALWAYS,
+                              FILE_ATTRIBUTE_NORMAL, nullptr);
+    si0.hStdError = err0 != INVALID_HANDLE_VALUE ? err0 : g_conout;
+    PROCESS_INFORMATION pi0{};
+    std::wstring cmdline0 = L"\"" + exe_path + L"\"";
+    if (!CreateProcessW(exe_path.c_str(), cmdline0.data(), nullptr, nullptr, TRUE, 0, nullptr, workdir.c_str(),
+                        &si0, &pi0)) {
+        Check(false, "G0 CreateProcess " + std::to_string(GetLastError()));
+        return;
+    }
+    CloseHandle(pi0.hThread);
+    g_child = pi0.hProcess;
+    Check(WaitForText("shift+tab", 30000), "G0 开场:composer 状态行出现");
+    if (err0 != INVALID_HANDLE_VALUE) {
+        FlushFileBuffers(err0);
+    }
+    Sleep(400);
+    SendText("\xe6\x80\x9d\xe8\x80\x83\xe9\xa2\x84\xe8\xa7\x88\xe8\xb5\xb0\xe4\xb8\x80"
+             "\xe6\xb3\xa2");  // 思考预览走一波
+    SendKey(VK_RETURN, L'\r', 0);
+    // 静默入场锚:第一笔预览行的开头三字(预览行)。等它上屏再开轨迹窗。
+    const std::string g0_settle_needle = std::string("\xe9\xa2\x84\xe8\xa7\x88") + "\xe8\xa1\x8c";
+    RunG0TrajectoryScene(g0_settle_needle.c_str());
+    // 收尾:忙队列里的 "exit" 只是排队消息——先 Esc 打断当前 turn,等回到
+    // 空闲 composer 再 exit,免得白等 15 秒强杀。
+    SendKey(VK_ESCAPE, 0, 0);
+    // 等打断收场的 [已打断](模式行里的 shift+tab 在忙路也在屏上,等它白等)。
+    WaitForText("[å·²ææ­]", 15000);
+    Sleep(600);
+    SendText("exit");
+    SendKey(VK_RETURN, L'\r', 0);
+    if (WaitForSingleObject(pi0.hProcess, 15000) != WAIT_OBJECT_0) {
+        Log("INFO: G0 exit 超时,强杀子进程");
+        TerminateProcess(pi0.hProcess, 9);
+    }
+    CloseHandle(pi0.hProcess);
+    if (err0 != INVALID_HANDLE_VALUE) {
+        CloseHandle(err0);
+    }
+    g_child = nullptr;
+    g_script_timed_events = nullptr;
 }
 
 // G7 幕:第三个子进程带 LUBANCODE_FRAME_AUDIT=1,stderr 改道进文件;假服务
@@ -655,6 +896,18 @@ int wmain(int argc, wchar_t** argv) {
     SetConsoleWindowInfo(g_conout, TRUE, &window);
     FlushConsoleInputBuffer(g_conin);
     Log("INFO: console buffer " + std::to_string(BufferWidth()) + " cols, window 30 rows");
+    // 关轨迹账(观察系统):本 driver 验的是终端渲染,而轨迹账本在工具边界
+    // 送达的 turn 上有既有的 turn_overlap 偶发(基线取证全幕同样报"轨迹账
+    // 写盘失败"并连带队列回队),开着它全幕结果非确定。渲染验收不依赖它。
+    SetEnvVar(L"LUBANCODE_TRAJECTORY", L"0");
+
+    // g0 单跑模式:假服务思考剧本,只跑高频光标轨迹幕(沙箱/二轮灵敏度
+    // 验证用,不碰真后端)。
+    if (argc >= 5 && wcscmp(argv[4], L"g0") == 0) {
+        RunG0OnlyScene(exe_path, workdir);
+        Log(g_failures == 0 ? "RESULT: ALL PASS" : "RESULT: " + std::to_string(g_failures) + " FAIL");
+        return g_failures == 0 ? 0 : 1;
+    }
 
     // g7 单跑模式:跳过需要真后端的 G1-G6,只跑帧账审计幕(沙箱/CI 用)。
     if (argc >= 5 && wcscmp(argv[4], L"g7") == 0) {
@@ -695,77 +948,7 @@ int wmain(int argc, wchar_t** argv) {
     //(只调 GetConsoleScreenBufferInfo,几十 kHz),buffer 光标若在帧序列
     // 中途真的到过活动行,轨迹现形;若轨迹全程钉输入框,则是渲染层
     //(conhost/WT 对 2026 的实现)在露,锅不在字节序列。
-    struct CursorTraceSample { DWORD tick; SHORT x; SHORT y; };
-    std::vector<CursorTraceSample> cursor_trace;
-    std::atomic<bool> trace_run{true};
-    std::thread cursor_tracer([&]() {
-        CONSOLE_SCREEN_BUFFER_INFO ci{};
-        SHORT lx = -1, ly = -1;
-        while (trace_run.load(std::memory_order_relaxed)) {
-            if (GetConsoleScreenBufferInfo(g_conout, &ci) &&
-                (ci.dwCursorPosition.X != lx || ci.dwCursorPosition.Y != ly)) {
-                cursor_trace.push_back({GetTickCount(), ci.dwCursorPosition.X, ci.dwCursorPosition.Y});
-                lx = ci.dwCursorPosition.X;
-                ly = ci.dwCursorPosition.Y;
-            }
-        }
-    });
-    std::set<std::string> activity_texts;
-    bool working_and_composer_visible = false;
-    bool working_cursor_ever_left_composer = false;
-    const DWORD spinner_deadline = GetTickCount() + 10000;
-    while (GetTickCount() < spinner_deadline) {
-        const int spinner_row = FindLastRow("思考中");
-        const int composer_row = FindFooterInputRow();
-        if (spinner_row >= 0) {
-            activity_texts.insert(ReadRow(spinner_row));
-        }
-        if (spinner_row >= 0 && composer_row > spinner_row) {
-            working_and_composer_visible = true;
-            if (!(CursorRow() == composer_row && CursorColumn() >= 2)) {
-                working_cursor_ever_left_composer = true;
-            }
-        }
-        if (activity_texts.size() >= 3) {
-            break;  // 已跨过至少两次秒钟跳,采样足够
-        }
-        Sleep(50);
-    }
-    trace_run.store(false, std::memory_order_relaxed);
-    cursor_tracer.join();
-    // 轨迹统计:光标到过的行分布 + 前 24 次变化。活动行行号 = "思考中"行,
-    // composer 行号 = 输入行;轨迹里出现活动行(或其他行)即 buffer 层有
-    // 中间态裸 CUP。
-    {
-        const int trace_spinner_row = FindLastRow("思考中");
-        const int trace_composer_row = FindFooterInputRow();
-        std::set<SHORT> rows_seen;
-        for (const auto& smp : cursor_trace) {
-            rows_seen.insert(smp.y);
-        }
-        std::string rows_desc;
-        for (SHORT r : rows_seen) {
-            if (!rows_desc.empty()) rows_desc += ",";
-            rows_desc += std::to_string(r);
-            if (r == trace_spinner_row) rows_desc += "(活动行!)";
-            else if (r == trace_composer_row) rows_desc += "(输入行)";
-        }
-        Log("INFO: G0 光标轨迹 " + std::to_string(cursor_trace.size()) + " 次变化,到过行: " + rows_desc +
-            " (活动行=" + std::to_string(trace_spinner_row) + " 输入行=" + std::to_string(trace_composer_row) + ")");
-        const std::size_t shown = cursor_trace.size() < 24 ? cursor_trace.size() : 24;
-        for (std::size_t i = 0; i < shown; ++i) {
-            Log("INFO: G0 轨迹[" + std::to_string(i) + "] t=" + std::to_string(cursor_trace[i].tick) +
-                " x=" + std::to_string(cursor_trace[i].x) + " y=" + std::to_string(cursor_trace[i].y));
-        }
-    }
-    Check(activity_texts.size() >= 2,
-          "G0 Working:秒钟走动,活动行文本至少变过两拍(实得 " +
-              std::to_string(activity_texts.size()) + " 种,扫光已撤不验配色轮换)");
-    Check(working_and_composer_visible,
-          "G0 Working 与输入框同帧可见,输入框不再被 spinner 挂起");
-    Check(!working_cursor_ever_left_composer,
-          "G0 Working 期间物理光标全程钉在输入框(全程采样,无一次落在活动行)");
-    ChildStillRunning("G0 Working");
+    RunG0TrajectoryScene();
     // 输入行靠结构定位(上横线/`> `输入行/下横线/状态行四连),不靠占位
     // 提示文案——文案改版不再连坐。
     int input_row = -1;
@@ -773,20 +956,23 @@ int wmain(int argc, wchar_t** argv) {
     if (input_row >= 0) {
         const int top_rule_row = FindRuleAboveInput(input_row);
         const int bottom_rule_row = FindRuleBelowInput(input_row);
-        const int status_row = bottom_rule_row + 1;
+        // 版式依据 25fd55a9(改造输入区模式与思考状态行):模式行常驻上横线
+        // 正上方,不再在下横线之下——判据 2026-09-03 二轮随版式对齐。
+        const int status_row = top_rule_row - 1;
         // Composer 合流(35c621d)后主输入区只占一行正文、紧贴上下横线
         // (kComposerTopPaddingRows=0),旧"隔一行留白"形状已撤。
         Check(top_rule_row == input_row - 1, "G1 上横线紧贴输入行上方(合流后紧排)");
         Check(bottom_rule_row >= 0, "G1 下横线在输入区之下");
         Check(IsRuleRow(top_rule_row), "G1 上横线在输入行上一行");
-        Check(IsRuleRow(bottom_rule_row), "G1 下横线在输入行下一行(状态行上一行)");
+        Check(IsRuleRow(bottom_rule_row), "G1 下横线在输入行下一行");
         const std::string input_text = ReadRow(input_row);
         Check(!input_text.empty() && input_text[0] == '>', "G1 输入行以 '> ' 开头(跟 composer 一个样式)");
         // 忙时空草稿的占位提示自带 Esc 打断(旧状态行尾巴撤了之后,"打断"
         // 可发现性的新家;空队列时全屏只有这里写)。
         Check(input_text.find("Esc") != std::string::npos && input_text.find("打断") != std::string::npos,
               "G1 忙时空草稿:占位提示写明 Esc 打断");
-        Check(ReadRow(status_row).find("shift+tab") != std::string::npos, "G1 状态行有 shift+tab 提示(复用 PrintStatusLine)");
+        Check(ReadRow(status_row).find("shift+tab") != std::string::npos,
+              "G1 模式行有 shift+tab 提示(25fd55a9 起常驻上横线正上方)");
         Check(CursorRow() == input_row && CursorColumn() >= 2,
               "G1 物理光标停在输入行 '> ' 后面,不再钉在正文末尾");
         Log("INFO: G1 框位置 top_rule=" + std::to_string(top_rule_row) + " input=" + std::to_string(input_row) +
@@ -819,18 +1005,17 @@ int wmain(int argc, wchar_t** argv) {
         }
     }
     SendKey(VK_RETURN, L'\r', 0);
-    // 落队后:正文挪进输入框上方的队列区。0.28.x 起队列区带标题行,行序
-    // (自上而下)= 标题行、消息行、上横线、(留白)、输入行(BuildSteering
-    // QueueRows 的真序:标题在前);输入行清空回占位提示。只有一条时不写
-    // "另有 N 条"。位置全按上横线相对算(Composer 合流后输入行与横线之间
-    // 隔着留白行,不再紧贴)。
+    // 落队后:正文挪进输入框上方的队列区。行序(自上而下,25fd55a9 版式)
+    //= 标题行(rule-3)、消息行(rule-2)、模式行(rule-1,常驻上横线正上
+    // 方)、上横线(rule)、输入行;输入行清空回占位提示。只有一条时不写
+    // "另有 N 条"。位置全按上横线相对算。
     bool g2_queued_row_seen = false;
     const DWORD g2_queue_deadline = GetTickCount() + 8000;
     while (GetTickCount() < g2_queue_deadline) {
         const int row = FindFooterInputRow();
         const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
-        if (rule >= 2 && ReadRow(rule - 1).find("你好排队") != std::string::npos &&
-            ReadRow(rule - 2).find("送出") != std::string::npos &&
+        if (rule >= 3 && ReadRow(rule - 2).find("你好排队") != std::string::npos &&
+            ReadRow(rule - 3).find("送出") != std::string::npos &&
             ReadRow(row).find("你好排队") == std::string::npos) {
             g2_queued_row_seen = true;
             break;
@@ -858,12 +1043,13 @@ int wmain(int argc, wchar_t** argv) {
         while (GetTickCount() < recall_deadline) {
             const int row = FindFooterInputRow();
             const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
-            // 取回态形状(queue_model.cpp):rule-1 是消息行 "  ↳ [编辑中] 你好
-            // 排队"(标记挂在消息行前缀),rule-2 是标题行 "正在编辑排队消
-            // 息 · …"(没有"编辑中"三字连写)。两行任一见到编辑态即算取回。
-            if (rule >= 2 && ReadRow(row).find("你好排队") != std::string::npos &&
-                (ReadRow(rule - 1).find("编辑中") != std::string::npos ||
-                 ReadRow(rule - 2).find("正在编辑") != std::string::npos)) {
+            // 取回态形状(queue_model.cpp,25fd55a9 版式):rule-2 是消息行
+            // "  ↳ [编辑中] 你好排队"(标记挂在消息行前缀),rule-3 是标题行
+            // "正在编辑排队消息 · …"(没有"编辑中"三字连写);rule-1 是常驻
+            // 模式行。两行任一见到编辑态即算取回。
+            if (rule >= 3 && ReadRow(row).find("你好排队") != std::string::npos &&
+                (ReadRow(rule - 2).find("编辑中") != std::string::npos ||
+                 ReadRow(rule - 3).find("正在编辑") != std::string::npos)) {
                 recalled = true;
                 break;
             }
@@ -881,9 +1067,9 @@ int wmain(int argc, wchar_t** argv) {
             while (GetTickCount() < replace_deadline) {
                 const int row = FindFooterInputRow();
                 const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
-                if (rule >= 2 && ReadRow(rule - 1).find("你好排队过") != std::string::npos &&
-                    ReadRow(rule - 1).find("编辑中") == std::string::npos &&
-                    ReadRow(rule - 2).find("正在编辑") == std::string::npos &&
+                if (rule >= 3 && ReadRow(rule - 2).find("你好排队过") != std::string::npos &&
+                    ReadRow(rule - 2).find("编辑中") == std::string::npos &&
+                    ReadRow(rule - 3).find("正在编辑") == std::string::npos &&
                     ReadRow(row).find("你好排队过") == std::string::npos) {
                     replaced = true;
                     break;
@@ -905,16 +1091,16 @@ int wmain(int argc, wchar_t** argv) {
     // 落队之后框应该重新出现在新位置(占位提示复位),再验一次上下横线还在。
     {
         int status_row2 = -1;
-        Check(WaitForText("shift+tab", 10000, &status_row2), "G2 落队后:状态行仍在(框没被冲散)");
+        Check(WaitForText("shift+tab", 10000, &status_row2), "G2 落队后:模式行仍在(框没被冲散)");
         if (status_row2 >= 0) {
-            // 合流后紧排版式(自上而下):上横线(status-3)/ 输入行
-            // (status-2)/ 下横线(status-1)/ 状态行(status)。
-            Check(IsRuleRow(status_row2 - 1), "G2 落队后:下横线还在状态行上一行");
-            Check(!IsRuleRow(status_row2 - 2), "G2 落队后:下横线正上方是输入行(非横线)");
-            Check(IsRuleRow(status_row2 - 3), "G2 落队后:上横线还在(框结构完整,没有残影/错位)");
+            // 25fd55a9 版式(自上而下):模式行(status)/ 上横线(status+1)/
+            // 输入行(status+2)/ 下横线(status+3)。
+            Check(IsRuleRow(status_row2 + 1), "G2 落队后:上横线在模式行下一行");
+            Check(!IsRuleRow(status_row2 + 2), "G2 落队后:上横线正下方是输入行(非横线)");
+            Check(IsRuleRow(status_row2 + 3), "G2 落队后:下横线还在(框结构完整,没有残影/错位)");
             // 占位提示复位:落队清空正文后,"Esc 打断"提示跟着回到输入行
             // (打的是输入行这一行,队列标题那处"打断"不算数)。
-            Check(ReadRow(status_row2 - 2).find("打断") != std::string::npos,
+            Check(ReadRow(status_row2 + 2).find("打断") != std::string::npos,
                   "G2 落队后:占位提示复位,输入行重新带 Esc 打断");
         }
     }
@@ -932,7 +1118,8 @@ int wmain(int argc, wchar_t** argv) {
         while (GetTickCount() < hint_deadline) {
             const int row = FindFooterInputRow();
             const int rule = row >= 0 ? FindRuleAboveInput(row) : -1;
-            if (rule >= 2 && ReadRow(rule - 1).find("你好排队") != std::string::npos) {
+            // 25fd55a9 版式:队列消息行在 rule-2(rule-1 是常驻模式行)。
+            if (rule >= 3 && ReadRow(rule - 2).find("你好排队") != std::string::npos) {
                 const std::string input_text = ReadRow(row);  // 输入行 "> /"(打了一个 '/')
                 int hint_count = 0;
                 for (int r = row + 3; r < row + 11 && r < 400; ++r) {
@@ -1009,10 +1196,14 @@ int wmain(int argc, wchar_t** argv) {
           "G2 工具续轮:第二个 Working 期间光标仍在输入框");
 
     // 等第一轮问答彻底收束。统计降噪(0.26.x)后真控制台紧凑态不打
-    // [tokens] 长行(30 行窄窗也盛不下详细态),回合收尾的锚改用 turn 尾
-    // 分界线 "Worked for"(两轮各一条,打断轮才是 Stopped after)。
-    Check(WaitForTextCount("Worked for", 2, 180000),
-          "G1 主消息与排队消息:两轮 turn 尾分界线都出现(180s 内)");
+    // [tokens] 长行(30 行窄窗也盛不下详细态),回合收尾的锚用 turn 尾
+    // 分界线 "Worked for"(打断轮才是 Stopped after)。工具边界送达的语义
+    // 是"注入当前轮的下一次模型请求,不另起新任务"(interactive_session_
+    // assembly 的 wiring 注释原文)——排队消息不产生第二条 Worked for,
+    // 旧判据"两轮分界线"按"排队消息自成一轮"的老语义写,随语义对齐
+    //(2026-09-03 单 2 二轮):改验会话泵在送达时打的用户回显 "> 正文"。
+    Check(WaitForText("> 你好排队过", 120000),
+          "G1 主消息与排队消息:工具边界送达后用户回显落屏(注入当前轮,不另起 turn)");
     const int read_file_title_rows = CountRowsWithText("read_file(");
     Check(read_file_title_rows == 1,
           "G2 工具终态原位覆写:read_file 标题只剩一行(实际 " +
@@ -1036,19 +1227,22 @@ int wmain(int argc, wchar_t** argv) {
         Sleep(300);
         int post_status = FindLastRow("shift+tab");
         if (post_status >= 0) {
-            // composer 新框的标准版式:上横线(status-3) / 输入行(status-2) /
-            // 下横线(status-1) / 状态行(status)。"没有叠影残留"精确验成这
-            // 四行严丝合缝——上下横线各只有一根;叠一份旧框出来的"线贴线"形状跟它完全不同,
-            // 足够分辨有没有叠影,不受"屏幕上方还有更早几轮遗留的框"干扰
-            //(那些是正常的历史记录,不是这一次打断留下的残留)。
-            Check(IsRuleRow(post_status - 1), "G3 打断后:composer 下横线正常(没有残留的流式框横线叠加)");
-            Check(!ReadRow(post_status - 2).empty() && ReadRow(post_status - 2)[0] == '>',
-                  "G3 打断后:下横线正上方是 '> ' 输入行(框形状完整,不多不少)");
-            Check(IsRuleRow(post_status - 3), "G3 打断后:上横线紧贴输入行");
-            // 上横线正上方那一行:turn 尾分界线(── Stopped after … ──)夹着
-            // 文字,是合法邻居;只有清一色纯横线的"裸线"才是叠影残留。
-            Check(!IsBareRuleRow(post_status - 4), "G3 打断后:上横线之上无裸横线叠影(文字分界线除外)");
-            for (int r = post_status - 4; r <= post_status; ++r) {
+            // composer 新框的标准版式(25fd55a9):模式行(status) / 上横线
+            // (status+1) / 输入行(status+2) / 下横线(status+3)。"没有叠影
+            // 残留"精确验成这几行严丝合缝——上下横线各只有一根;叠一份旧框
+            // 出来的"线贴线"形状跟它完全不同,足够分辨有没有叠影,不受
+            // "屏幕上方还有更早几轮遗留的框"干扰(那些是正常的历史记录,
+            // 不是这一次打断留下的残留)。
+            Check(IsRuleRow(post_status + 1), "G3 打断后:composer 上横线正常(没有残留的流式框横线叠加)");
+            Check(!ReadRow(post_status + 2).empty() && ReadRow(post_status + 2)[0] == '>',
+                  "G3 打断后:上横线正下方是 '> ' 输入行(框形状完整,不多不少)");
+            Check(IsRuleRow(post_status + 3), "G3 打断后:下横线还在输入行之下");
+            // 模式行正上方两行:帮助行("? 键位")与 turn 尾分界线(──
+            // Stopped after … ──)都夹着文字,是合法邻居;只有清一色纯横线
+            // 的"裸线"才是叠影残留。
+            Check(!IsBareRuleRow(post_status - 1), "G3 打断后:模式行之上无裸横线叠影(帮助行/文字分界线除外)");
+            Check(!IsBareRuleRow(post_status - 2), "G3 打断后:帮助行之上无裸横线叠影(文字分界线除外)");
+            for (int r = post_status - 2; r <= post_status + 3; ++r) {
                 const std::string row_text = ReadRow(r);
                 if (!row_text.empty()) {
                     Log("INFO: G3 诊断 row[" + std::to_string(r) + "]=" + row_text);

@@ -5,6 +5,7 @@
 #include <string_view>
 #include <vector>
 
+#include "platform/console.hpp"  // NativeRowCell:原生直写行的单元格(单 2 二轮)
 #include "platform/terminal_batch.hpp"
 
 namespace lubancode::cli {
@@ -54,6 +55,28 @@ struct InlineFrameDiffStats {
 InlineFrameDiffStats QueueInlineFrameDiff(platform::TerminalBatch& batch,
                                           const InlineFrame* previous,
                                           const InlineFrame& next, int origin_y);
+
+// ---------------------------------------------------------------------------
+// 原生行直写(单 2 二轮·8.2):Windows 真 console 上 footer 行级重画的正路
+// ---------------------------------------------------------------------------
+// 把一行"UTF-8 正文 + SGR 配色"的 footer 行翻成按格排布的单元格:SGR 译
+// 成 16 色属性位(kNativeFg*/kNativeBg*;认 0/1/2/22、30-37/90-97、38/48
+// 的 5;N 与 2;R;G;B(近似到最近 16 色)、39/49,其余码忽略),宽字
+// (显示宽 2)占双格并打半格旗标,尾部补默认属性空格铺满 cell_count,
+// 超宽整字截断(不劈半个宽字)。纯函数,帧测试钉合同——WriteNativeRow
+// 只管落盘,"落什么"全在这里看得见、测得着。
+std::vector<platform::NativeRowCell> BuildNativeRowCells(std::string_view utf8_text, int cell_count);
+
+// 行级双缓冲的原生直写版:diff 的账与 QueueInlineFrameDiff 同一把(没变
+// 的行一字不写),但每一脏行按坐标 WriteNativeRow 直写(字符+属性一次
+// 落),**全程不挪光标**——藏光标/CUP 回/显光标那一串从帧序列里清出去
+// (8.1 高频轨迹实锤:conhost/WT 的 2026 实现只缓冲文本渲染,批内 CUP 照
+// 搬 buffer 光标)。返回 false = 原生路不可用(非真 console/写失败),调
+// 用方退 PaintInlineFrameLegacy 老路;painted_rows(可空)回带实际直写的
+// 脏行数,帧账审计用。光标末态由调用方一笔 SetCursorPos 权威钉回,本函数
+// 绝不碰光标。
+bool PaintInlineFrameNativeRows(const InlineFrame* previous, const InlineFrame& next, int origin_y,
+                                std::size_t* painted_rows = nullptr);
 
 // 活动行的重画判据(终端思考活动条单·P0 止血):只有秒数、阶段标签或
 // 中断态变化,这一行才算变了——逐字扫光撤除后动画不再是变化源,同一秒

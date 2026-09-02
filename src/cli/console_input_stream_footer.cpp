@@ -113,12 +113,14 @@ struct StreamFooterState {
     std::uint64_t audit_bytes = 0;
     std::uint64_t audit_dirty_rows = 0;
     // VT 批量序列(TerminalBatch)这一场能不能用:BeginStreamFooter 探一次
-    // 存住(探测带 SetConsoleMode,不该每帧来一遍)。
+    // 存住(探测带 SetConsoleMode,不该每帧来一遍)。单 2 二轮 8.2 重裁后
+    // Windows 真 console 恒 false(行级重画走 WriteNativeRow 直写),VT 批
+    // 只剩 POSIX 低频档。
     bool vt_batch = false;
     // DEC 2026 同步输出这一场能不能包(终端思考活动条单·P0 治根):与
     // vt_batch 各是各的档,没确认 2026 的宿主批里一枚标记都不发,单帧
     // 事务(kSyncOutputBegin/End 的散装用法)同样不发——静默假装原子提交
-    // 比不包装更糟。
+    // 比不包装更糟。Windows 上一并恒 false(连 VT 批都不走,谈不上包)。
     bool sync_output = false;
     // 两枚深度都只在 StdoutWriteMutex 内改。确认/ask_user 可嵌套挂起；
     // 工具条目重画也可套着状态块重画。任何一层尚未退完，Redraw 都只记
@@ -760,11 +762,26 @@ void RedrawStreamFooterLocked() {
     // ConPTY 常把缓冲区高度报成窗口高度，正文一长，框很快便贴底。旧版
     // 这时干脆不画，正是“Working 还在，输入框忽然没了”的根子。如今先
     // 主动滚够行数，再由 scroll hook 把正文/工具锚点一同上移。
-    platform::SetCursorPos(bx, by);
+    //
+    // 8.2 二轮补刀:腾位前置判定——帧在可视区装得下(不平移、不滚屏)时,
+    // 省掉"拨光标到正文位"这一笔与腾位后的重探。正文以换行收尾时正文位
+    // (bx=0, by)恰是帧顶(活动行行首),一拍一拨正是高频轨迹里"光标每秒
+    // 落一次活动行"的另一半来源(VT 批内 CUP 是已清出去的那一半)。装得
+    // 下时腾位本来就一笔不写、视口原点不动,账面 bx/by 与 viewport 沿用
+    // 本帧探得的这份即可。真要腾位(pan/scroll>0)照旧先拨后探——滚屏后
+    // 的正文位与视口对账靠它。锁内无并发写屏,前置判定与腾位内部重算之
+    // 间不存在漂移。
     const int body_offset = bx > 0 ? 1 : 0;
+    const int rows_needed_full = body_offset + static_cast<int>(layout.frame.rows.size());
+    const ViewportRevealPlan reveal_pre = ComputeViewportReveal(info->height, info->viewport_y,
+                                                                info->viewport_height, by, rows_needed_full);
+    const bool frame_fits_viewport = reveal_pre.pan_rows == 0 && reveal_pre.scroll_rows == 0;
+    if (!frame_fits_viewport) {
+        platform::SetCursorPos(bx, by);
+    }
     const BottomChromeLayout* paint = &layout;
     BottomChromeLayout degraded;  // 战术一的降级帧(横线+输入行+横线+状态行)
-    if (!EnsureStreamScreenRowsLocked(body_offset + static_cast<int>(layout.frame.rows.size()))) {
+    if (!(frame_fits_viewport || EnsureStreamScreenRowsLocked(rows_needed_full))) {
         // 腾位失败不裸退:舍掉坞/队列/活动条/提示,只保输入框与状态行。
         // 高度预算已把整帧钳进窗口,走到这条的多半是锚点护栏的绝境
         // (要滚的比锚点上方还多);最小框还画不下才置待补画收场。
@@ -783,18 +800,21 @@ void RedrawStreamFooterLocked() {
             return;
         }
     }
-    // Ensure 之后一律重探一次:平移视口(pan,内容与锚点不动、overflow 报 0)
-    // 也会挪 viewport 原点,VT 批的 CUP 坐标按 viewport 相对定位——拿旧原点
-    // 画帧会整体错位(压测驱动器实锤:活动行重影、框画出窗口外)。滚屏
-    // (scroll)另会挪光标,同一次重探一并收账。
+    // 真腾过位(pan/scroll>0)才重探一次:平移视口(pan,内容与锚点不动、
+    // overflow 报 0)也会挪 viewport 原点,VT 批的 CUP 坐标按 viewport 相对
+    // 定位——拿旧原点画帧会整体错位(压测驱动器实锤:活动行重影、框画出
+    // 窗口外)。滚屏(scroll)另会挪光标,同一次重探一并收账。frame_fits
+    // 时视口一个字节没动,重探省下(免那一笔 DSR/GetScreenInfo 往返)。
     int viewport_x = info->viewport_x;
     int viewport_y = info->viewport_y;
-    if (const std::optional<platform::ScreenInfo> after_scroll = platform::GetScreenInfo();
-        after_scroll.has_value()) {
-        bx = after_scroll->cursor_x;
-        by = after_scroll->cursor_y;
-        viewport_x = after_scroll->viewport_x;
-        viewport_y = after_scroll->viewport_y;
+    if (!frame_fits_viewport) {
+        if (const std::optional<platform::ScreenInfo> after_scroll = platform::GetScreenInfo();
+            after_scroll.has_value()) {
+            bx = after_scroll->cursor_x;
+            by = after_scroll->cursor_y;
+            viewport_x = after_scroll->viewport_x;
+            viewport_y = after_scroll->viewport_y;
+        }
     }
     const int target = by + (bx > 0 ? 1 : 0);
 
@@ -823,13 +843,15 @@ void RedrawStreamFooterLocked() {
             }
         }
     }
-    // 三档选路 + 光标所有权(P0 治根,终端思考活动条单):vt_batch/sync_
-    // output 两枚档位在 BeginStreamFooter 探好。VT 批有命令落笔时,批的
-    // 末笔 MoveTo+ShowCursor 就是本帧唯一的光标恢复路;原生路 legacy 的
-    // 末笔 SetCursorPos 同理。批里一个命令都没落(指纹跳帧漏网的等价帧)
-    // 才由平台口补钉。旧路批落完再叠一笔原生 SetCursorPos——两条恢复路
-    // 各说各话,ConPTY 异步渲染与直写缓冲两套时序打架,正是实体光标在
-    // 活动行与输入框之间来回跳的另一半病根。
+    // 选路 + 光标所有权(单 2 二轮按 8.2 重裁):vt_batch/sync_output 两枚
+    // 档位在 BeginStreamFooter 探好——Windows 真 console 上 PlanInlineRepaint
+    // 恒给 vt_batch=false,正路是 PaintInlineFrameNativeRows(WriteConsole
+    // Output 按坐标直写,行画期间光标一步不挪,帧序列里没有 CUP);VT 批
+    // 只剩 POSIX 低频档。帧落定后光标的权威恢复路各路只有一笔:直写路由
+    // 下面这笔 SetCursorPos(正文落笔可能把光标挪去过续写点,这里接回
+    // 输入行);VT 批有命令时批末笔 MoveTo+ShowCursor 当值;批零命令才由
+    // 平台口补钉。直写不可用(非真 console)退 legacy 老路,其末笔
+    // SetCursorPos 同样唯一。
     bool cursor_pinned_by_paint = false;
     if (f.vt_batch) {
         platform::TerminalBatch batch(viewport_x, viewport_y, f.sync_output);
@@ -843,8 +865,21 @@ void RedrawStreamFooterLocked() {
             f.audit_dirty_rows += diff_stats.changed_rows;
         }
     } else {
-        PaintInlineFrameLegacy(previous, paint->frame, target);
-        cursor_pinned_by_paint = true;
+        // 一次直写带回脏行数(帧账对齐:直写帧照记帧数与脏行,字节恒 0
+        //——一个 stdout 字节都没写,这正是直写路的意义;G7 的帧数帽在
+        // 直写路同样成立)。直写不可用(非真 console/写失败)退 legacy。
+        std::size_t native_rows = 0;
+        if (PaintInlineFrameNativeRows(previous, paint->frame, target, &native_rows)) {
+            if (FrameAuditEnabled()) {
+                ++f.audit_frames;
+                f.audit_dirty_rows += native_rows;
+            }
+            platform::SetCursorPos(paint->cursor_x, target + paint->cursor_row);
+            cursor_pinned_by_paint = true;
+        } else {
+            PaintInlineFrameLegacy(previous, paint->frame, target);
+            cursor_pinned_by_paint = true;
+        }
     }
     // 光标落在输入行(布局算出的真实软换行位置;resize 追踪跟着光标走,
     // ComputeFooterResizeRecovery 的"input row"语义即"光标所在行")。
@@ -901,9 +936,10 @@ void BeginStreamFooter(const Theme& theme, bool enabled) {
     f.audit_bytes = 0;
     f.audit_dirty_rows = 0;
     // 三档能力分开问(P0 治根):vt/sync 各探各的,选路规则集中在
-    // PlanInlineRepaint。被动探针只答 is_console/vt,同步输出是主动一问
-    // (DECRQM,进程级缓存,交互会话开场已预热),这里拿现成结论,不再付
-    // 探测窗。
+    // PlanInlineRepaint(单 2 二轮 8.2 重裁:Windows 真 console 一律原生
+    // 直写行,探测结论只作 POSIX 选路与诊断档案)。被动探针只答
+    // is_console/vt,同步输出是主动一问(DECRQM,进程级缓存,交互会话
+    // 开场已预热),这里拿现成结论,不再付探测窗。
     platform::StdoutConsoleProbe probe = platform::ProbeStdoutConsole();
     probe.sync_output = platform::ProbeSyncOutputSupport();
     const platform::InlineRepaintPlan plan = platform::PlanInlineRepaint(probe);
