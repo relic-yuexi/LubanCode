@@ -15,7 +15,6 @@
 #include <doctest/doctest.h>
 
 #include "agent/prompt_assembler.hpp"
-#include "sessions/session_store.hpp"
 #include "cli/slash_commands.hpp"
 #include "runtime/command.hpp"
 #include "runtime/event.hpp"
@@ -28,15 +27,6 @@ lubancode::runtime::PlanToolCapability Builtin(const char* name) {
     capability.name = name;
     capability.origin = lubancode::runtime::PlanToolOrigin::Builtin;
     return capability;
-}
-
-lubancode::sessions::SessionMeta TestMeta() {
-    lubancode::sessions::SessionMeta meta;
-    meta.wire = "anthropic";
-    meta.model = "m";
-    meta.cwd = "D:\\x";
-    meta.started_at = "2026-08-23 10:00:00";
-    return meta;
 }
 
 lubancode::api::Message UserMessage(const std::string& text) {
@@ -401,109 +391,11 @@ TEST_CASE("plan_scan: 没有标签是普通正文") {
     CHECK_FALSE(scan.truncated);
 }
 
+// (P0-6:mode_v1/plan_v1/plan_review_v1 旧档事件行的序列化/回放用例已删
+// ——mode 与计划成品的持久账走 trajectory 的 control.mode.changed 等
+// typed 事件,内存真值(ModeState/PlanDocument)的用例在前文。)
+
 // ---------------------------------------------------------------------------
-// session 事件:mode_v1 / plan_v1 / plan_review_v1
-// ---------------------------------------------------------------------------
-
-TEST_CASE("plan_events: mode_v1 序列化与解析往返") {
-    lubancode::sessions::ModeEvent event;
-    event.mode = "plan";
-    event.reason = "slash";
-    event.revision = 3;
-    const std::string line = lubancode::sessions::SerializeModeEvent(event, "2026-08-23 10:00:00");
-    const auto parsed = lubancode::sessions::ParseModeEvent(line);
-    REQUIRE(parsed.has_value());
-    CHECK(parsed->mode == "plan");
-    CHECK(parsed->reason == "slash");
-    CHECK(parsed->revision == 3);
-    // 坏形状:认不得的档位给 nullopt(不猜)。
-    CHECK_FALSE(lubancode::sessions::ParseModeEvent(R"({"type":"mode_v1","mode":"yolo"})").has_value());
-    CHECK_FALSE(lubancode::sessions::ParseModeEvent(R"({"type":"queue","items":[]})").has_value());
-}
-
-TEST_CASE("plan_events: plan_v1 序列化与解析往返(超限稿不带 markdown)") {
-    lubancode::sessions::PlanEvent event;
-    event.plan_id = "plan-1";
-    event.revision = 2;
-    event.state = "presented";
-    event.sha256 = "abc123";
-    event.markdown = "# 稿子";
-    event.turn_id = "turn-4";
-    const std::string line = lubancode::sessions::SerializePlanEvent(event, "ts");
-    const auto parsed = lubancode::sessions::ParsePlanEvent(line);
-    REQUIRE(parsed.has_value());
-    CHECK(parsed->plan_id == "plan-1");
-    CHECK(parsed->revision == 2);
-    CHECK(parsed->state == "presented");
-    CHECK(parsed->sha256 == "abc123");
-    CHECK(parsed->markdown == "# 稿子");
-    CHECK(parsed->turn_id == "turn-4");
-    // 没身份/没锚的行救不了。
-    CHECK_FALSE(lubancode::sessions::ParsePlanEvent(R"({"type":"plan_v1","plan_id":"plan-1"})").has_value());
-}
-
-TEST_CASE("plan_events: plan_review_v1 序列化与解析往返") {
-    lubancode::sessions::PlanReviewEvent event;
-    event.plan_id = "plan-1";
-    event.revision = 2;
-    event.decision = "approved";
-    event.execution_permission = "confirm";
-    const std::string line = lubancode::sessions::SerializePlanReviewEvent(event, "ts");
-    const auto parsed = lubancode::sessions::ParsePlanReviewEvent(line);
-    REQUIRE(parsed.has_value());
-    CHECK(parsed->decision == "approved");
-    CHECK(parsed->execution_permission == "confirm");
-    CHECK(parsed->revision == 2);
-    // decision 只认 approved/rejected/continued。
-    CHECK_FALSE(lubancode::sessions::ParsePlanReviewEvent(
-                    R"({"type":"plan_review_v1","plan_id":"p","decision":"maybe"})").has_value());
-}
-
-TEST_CASE("plan_events: ParseSessionFile 回放——最后一条 mode 胜、计划逐稿收、审批收") {
-    const std::string meta = lubancode::sessions::SerializeSessionMeta(TestMeta());
-    std::string content = meta + "\n";
-    content += lubancode::sessions::SerializeSessionMessage(UserMessage("帮我规划"), "ts1");
-    content += "\n" + lubancode::sessions::SerializeModeEvent({"plan", "slash", 1}, "ts2");
-    content += "\n" + lubancode::sessions::SerializePlanEvent({"plan-1", 1, "presented", "sha1", "# 初稿", "", "turn-1"},
-                                                           "ts3");
-    content += "\n" + lubancode::sessions::SerializePlanEvent(
-                         {"plan-1", 1, "superseded", "sha1", "# 初稿", "", "turn-1"}, "ts4");
-    content += "\n" + lubancode::sessions::SerializePlanEvent({"plan-1", 2, "presented", "sha2", "# 改稿", "", "turn-2"},
-                                                           "ts5");
-    content += "\n" + lubancode::sessions::SerializePlanReviewEvent({"plan-1", 2, "approved", "confirm"}, "ts6");
-    content += "\n" + lubancode::sessions::SerializeModeEvent({"default", "approved", 2}, "ts7");
-    const auto session = lubancode::sessions::ParseSessionFile(content);
-    REQUIRE(session.has_value());
-    CHECK(session->last_mode_event.mode == "default");  // 最后一条胜
-    CHECK(session->last_mode_event.reason == "approved");
-    REQUIRE(session->plan_events.size() == 3);  // 逐稿留账(含 superseded 行)
-    CHECK(session->plan_events.back().revision == 2);
-    CHECK(session->last_plan_review.has_value());
-    CHECK(session->last_plan_review->decision == "approved");
-    CHECK(session->skipped_lines == 0);
-}
-
-TEST_CASE("plan_events: 老档没有 mode/plan 行,按空账收(向后兼容)") {
-    const std::string meta = lubancode::sessions::SerializeSessionMeta(TestMeta());
-    std::string content = meta + "\n";
-    content += lubancode::sessions::SerializeSessionMessage(UserMessage("旧会话"), "ts1");
-    const auto session = lubancode::sessions::ParseSessionFile(content);
-    REQUIRE(session.has_value());
-    CHECK(session->last_mode_event.mode.empty());  // 老 session 默认 Default
-    CHECK(session->plan_events.empty());
-    CHECK_FALSE(session->last_plan_review.has_value());
-}
-
-TEST_CASE("plan_events: 坏 mode 行跳过,不废整场") {
-    const std::string meta = lubancode::sessions::SerializeSessionMeta(TestMeta());
-    std::string content = meta + "\n";
-    content += "{\"type\":\"mode_v1\",\"mode\":\"plan\"";  // 坏 JSON(没闭合)
-    content += "\n" + lubancode::sessions::SerializeModeEvent({"default", "slash", 1}, "ts2");
-    const auto session = lubancode::sessions::ParseSessionFile(content);
-    REQUIRE(session.has_value());
-    CHECK(session->last_mode_event.mode == "default");
-    CHECK(session->skipped_lines == 1);
-}
 
 // ---------------------------------------------------------------------------
 // SessionRuntime 的模式/计划账

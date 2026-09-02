@@ -163,7 +163,6 @@ struct ProgressHarness {
                              std::size_t outbox_capacity = 4096, bool with_image_tool = false) {
         tool_names = std::move(names);
         app_server::ServerOptions options;
-        options.sessions_dir = sessions_dir;
         options.cwd = "/test/cwd";
         options.outbox_capacity = outbox_capacity;
         std::shared_ptr<SharedScriptBackend::State> state = backend;

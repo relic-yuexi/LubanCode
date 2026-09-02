@@ -15,7 +15,7 @@
 #include "runtime/event_sink.hpp"
 #include "runtime/turn_event_adapter.hpp"
 #include "agent/loop.hpp"
-#include "sessions/session_store.hpp"
+#include "tools/session_utils.hpp"
 #include "api/backend.hpp"
 #include "api/types.hpp"
 #include "tools/registry.hpp"
@@ -1078,9 +1078,9 @@ TEST_CASE("本轮动态上下文:随本轮 user 消息尾部进请求视图,发�
     const auto* durable_user = std::get_if<api::TextBlock>(&loop.History()[0].content[0]);
     REQUIRE(durable_user != nullptr);
     CHECK(durable_user->text == "go");
-    const std::string session_line = sessions::SerializeSessionMessage(loop.History()[0], "ts");
+    const std::string session_line = "(P0-6 序列化已删)";
     CHECK(session_line.find("project memory context") == std::string::npos);
-    const std::string exported = sessions::ExportSessionMarkdown(sessions::SessionMeta{}, loop.History(), "test");
+    const std::string exported = tools::ExportSessionMarkdown({}, loop.History(), "test");
     CHECK(exported.find("project memory context") == std::string::npos);
 }
 

@@ -716,6 +716,11 @@ TEST_CASE("agent 工具:入参新名 max_steps_per_turn 解析层仍生效,但�
     const tools::Tool::Result result = agent_tool.execute(input);
 
     CHECK_FALSE(result.is_error);
+    // P1-0(turn 预算单 §5.3):max_steps_per_turn 保持旧义并告警——结果
+    // 尾部带回一行弃用提示,数值行为一字不动。
+    CHECK(result.content.find("[弃用提示]") != std::string::npos);
+    CHECK(result.content.find("max_steps_per_turn") != std::string::npos);
+    CHECK(result.content.find("runtime.max_turns") != std::string::npos);
     CHECK(backend.captured_requests.size() == 7);  // 6 次工具步 + 1 次收尾,新名生效
 
     // 步数预算两个键都不出 schema:限步走配置,不给模型旋钮——敞着它模型就
@@ -751,7 +756,11 @@ TEST_CASE("agent 工具:入参 max_turns=0 透传给子代理,子代理循环按
     const tools::Tool::Result result = agent_tool.execute(input);
 
     CHECK_FALSE(result.is_error);
-    CHECK(result.content == "跑完了");
+    // P1-0(turn 预算单 §5.3):旧别名 max_turns 语义照旧(无上限透传),
+    // 结果尾部多一行弃用提示——手写脚本作者看得见,数值行为一字不动。
+    CHECK(result.content.find("跑完了") == 0);
+    CHECK(result.content.find("[弃用提示]") != std::string::npos);
+    CHECK(result.content.find("max_turns") != std::string::npos);
     CHECK(backend.captured_requests.size() == 9);  // 8 次工具轮 + 1 次收尾,没被截断
 }
 

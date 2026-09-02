@@ -83,7 +83,6 @@ lubancode::app::LoopWiring LoopSessionWiring::BuildWiring() {
     wiring.feature_enabled = host_.config->features_loop && !lubancode::app::LoopDisabledByEnv();
     wiring.theme = host_.theme;
     wiring.scheduler = scheduler_.has_value() ? &*scheduler_ : nullptr;
-    wiring.session_store = host_.session_store;
     wiring.home_lubancode = host_.home_lubancode;
     wiring.session_runtime = host_.session_runtime;
     wiring.flush_events = [this]() { lubancode::app::FlushLoopEvents(BuildWiring()); };

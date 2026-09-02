@@ -132,7 +132,6 @@ struct ApprovalHarness {
 
     explicit ApprovalHarness(int timeout_ms = 0) : approval_timeout_ms(timeout_ms) {
         app_server::ServerOptions options;
-        options.sessions_dir = std::string(); // 不落盘
         options.cwd = "/test/cwd";
         options.approval_timeout_ms = approval_timeout_ms;
         server = std::make_unique<app_server::Server>(
@@ -559,7 +558,6 @@ TEST_CASE("ask_user:user/ask 反向请求,answers 送回原回合") {
     // 夹具:注册 ask_user 工具 + 脚本调它。
     std::vector<std::vector<api::StreamEvent>> scripts;
     app_server::ServerOptions options;
-    options.sessions_dir = std::string();
     ScriptedIo io;
     auto server = std::make_unique<app_server::Server>(
         std::move(options), [&scripts]() -> std::unique_ptr<api::Backend> {
@@ -635,7 +633,6 @@ TEST_CASE("ask_user:user/ask 反向请求,answers 送回原回合") {
 TEST_CASE("ask_user:悬停期间 turn/interrupt,提问按取消收口") {
     std::vector<std::vector<api::StreamEvent>> scripts;
     app_server::ServerOptions options;
-    options.sessions_dir = std::string();
     ScriptedIo io;
     auto server = std::make_unique<app_server::Server>(
         std::move(options), [&scripts]() -> std::unique_ptr<api::Backend> {

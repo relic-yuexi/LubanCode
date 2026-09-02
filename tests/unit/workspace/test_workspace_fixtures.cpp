@@ -1,7 +1,11 @@
 // workspace 统一存储 P0-0:夹具防漂移。九种旧数据场景的夹具住
-// tests/fixtures/workspace/,本册用**现行** parser 逐件校验形状——夹具与
-// 生产格式任何一边漂了,这里当场红。P0-6 旧 parser 退场时,本册随迁移器
-// 测试改吃 tools/legacy-storage-migrator/ 的隔离副本,不陪葬。
+// tests/fixtures/workspace/,本册守形状——夹具与迁移器输入格式任何一边
+// 漂了,这里当场红。
+//
+// P0-6 口径:旧 JSONL 的生产 parser(SessionStore/ParseSessionFile)已删,
+// 这里不再借它校验——形状按 JSON 行本身守(逐行可解析、事件行带 type、
+// 消息行带 role);"整场能被迁移器吃下并过 verify+replay"的端到端守门
+// 在 tests/unit/workspace/test_storage_migrator.cpp(全件真导入)。
 
 #include <doctest/doctest.h>
 
@@ -13,7 +17,6 @@
 #include <vector>
 
 #include "memory/frontmatter.hpp"
-#include "sessions/session_store.hpp"
 
 using namespace lubancode;
 
@@ -38,18 +41,47 @@ std::vector<std::string> ReadLines(const std::filesystem::path& path) {
     std::istringstream stream(*text);
     std::string line;
     while (std::getline(stream, line)) {
-        if (!line.empty() && line.back() == '\r') line.pop_back();
+        if (line.empty() && line.back() == '\r') line.pop_back();
         if (!line.empty()) lines.push_back(line);
     }
     return lines;
 }
 
-// 一场旧档的标准读法:ParseSessionFile 能吃下、meta 合法、有消息。
-std::optional<sessions::LoadedSession> LoadFixture(const std::string& name) {
-    const auto path = FixtureRoot() / "legacy" / (name + ".jsonl");
-    const auto text = ReadFileText(path);
-    if (!text.has_value()) return std::nullopt;
-    return sessions::ParseSessionFile(*text);
+// 一份 legacy 夹具的逐行解析账:每行都是合法 JSON 对象;首行是 meta
+// (带整型 version),其后每行带 type(事件行)或 role(消息行)。
+struct LegacyShape {
+    nlohmann::json meta;
+    std::vector<nlohmann::json> rows;
+    std::size_t bad_lines = 0;
+};
+
+std::optional<LegacyShape> ShapeOf(const std::string& name) {
+    const auto lines = ReadLines(FixtureRoot() / "legacy" / (name + ".jsonl"));
+    if (lines.empty()) return std::nullopt;
+    LegacyShape shape;
+    shape.meta = nlohmann::json::parse(lines.front(), nullptr, false);
+    if (shape.meta.is_discarded() || !shape.meta.is_object() ||
+        !shape.meta.contains("version")) {
+        return std::nullopt;
+    }
+    for (std::size_t i = 1; i < lines.size(); ++i) {
+        const auto json = nlohmann::json::parse(lines[i], nullptr, false);
+        if (json.is_discarded() || !json.is_object() ||
+            (!json.contains("type") && !json.contains("role"))) {
+            shape.bad_lines += 1;
+            continue;
+        }
+        shape.rows.push_back(std::move(json));
+    }
+    return shape;
+}
+
+std::size_t CountRows(const LegacyShape& shape, const std::string& key, const std::string& value) {
+    std::size_t n = 0;
+    for (const auto& row : shape.rows) {
+        if (row.value(key, std::string()) == value) n += 1;
+    }
+    return n;
 }
 
 }  // namespace
@@ -73,35 +105,39 @@ TEST_CASE("workspace 夹具:manifest 列的每一件都在盘上") {
     CHECK(checked >= 9);
 }
 
-TEST_CASE("workspace 夹具:普通会话与工具结果都能整场解析") {
-    const auto plain = LoadFixture("plain-conversation");
+TEST_CASE("workspace 夹具:普通会话与工具往返逐行可解析") {
+    const auto plain = ShapeOf("plain-conversation");
     REQUIRE(plain.has_value());
-    CHECK(plain->meta.version == 1);
-    CHECK(plain->meta.cwd == "C:/Users/sandbox/work/demo-repo");
-    CHECK(plain->messages.size() == 4);
+    CHECK(plain->meta.value("version", 0) == 1);
+    CHECK(plain->meta.value("cwd", std::string()) == "C:/Users/sandbox/work/demo-repo");
+    CHECK(plain->bad_lines == 0);
+    CHECK(plain->rows.size() == 4);  // 两轮往返
+    CHECK(CountRows(*plain, "role", "user") == 2);
+    CHECK(CountRows(*plain, "role", "assistant") == 2);
 
-    const auto tools = LoadFixture("tool-roundtrip");
+    const auto tools = ShapeOf("tool-roundtrip");
     REQUIRE(tools.has_value());
-    CHECK(tools->messages.size() == 8);
-    CHECK(tools->repaired == 0);  // tool_use/tool_result 全配对,无孤儿
+    CHECK(tools->bad_lines == 0);
+    // 两次工具往返:4 条消息行 + tool_trace_v1 事件行若干。
+    std::size_t tool_calls = 0;
+    std::size_t tool_results = 0;
+    for (const auto& row : tools->rows) {
+        if (!row.contains("content") || !row["content"].is_array()) continue;
+        for (const auto& block : row["content"]) {
+            const std::string type = block.value("type", std::string());
+            tool_calls += type == "tool_use" ? 1 : 0;
+            tool_results += type == "tool_result" ? 1 : 0;
+        }
+    }
+    CHECK(tool_calls == 2);
+    CHECK(tool_results == 2);
 }
 
 TEST_CASE("workspace 夹具:MCP rich result 的块账无损") {
-    const auto rich = LoadFixture("mcp-rich-result");
+    const auto rich = ShapeOf("mcp-rich-result");
     REQUIRE(rich.has_value());
-    // 富块留在全量流水里:找带 blocks 的 tool_result。
-    int rich_results = 0;
-    int image_blocks = 0;
-    int audio_blocks = 0;
-    for (const auto& message : rich->all_messages) {
-        for (const auto& block : message.content) {
-            const auto* result = std::get_if<api::ToolResultBlock>(&block);
-            if (result == nullptr) continue;
-            rich_results += 1;
-        }
-    }
-    CHECK(rich_results == 1);
-    // 块细节直接读原始行:parser 投影不携 rich 块时,形状由 JSON 行守。
+    CHECK(rich->bad_lines == 0);
+    // 富块留在流水里:找带 blocks 的 tool_result 行。
     const auto lines = ReadLines(FixtureRoot() / "legacy" / "mcp-rich-result.jsonl");
     const std::string* result_line = nullptr;
     for (const auto& line : lines) {
@@ -112,6 +148,8 @@ TEST_CASE("workspace 夹具:MCP rich result 的块账无损") {
     REQUIRE_FALSE(json.is_discarded());
     const auto& blocks = json["content"][0]["blocks"];
     CHECK(blocks.size() == 5);
+    int image_blocks = 0;
+    int audio_blocks = 0;
     for (const auto& block : blocks) {
         const std::string type = block.value("type", std::string());
         if (type == "image") image_blocks += 1;
@@ -130,53 +168,73 @@ TEST_CASE("workspace 夹具:MCP rich result 的块账无损") {
 }
 
 TEST_CASE("workspace 夹具:前后台子代理只有最终回话,无子账") {
-    const auto foreground = LoadFixture("subagent-foreground");
+    const auto foreground = ShapeOf("subagent-foreground");
     REQUIRE(foreground.has_value());
     bool has_agent_call = false;
-    for (const auto& message : foreground->all_messages) {
-        for (const auto& block : message.content) {
-            const auto* use = std::get_if<api::ToolUseBlock>(&block);
-            if (use != nullptr && use->name == "agent") has_agent_call = true;
+    for (const auto& row : foreground->rows) {
+        if (!row.contains("content") || !row["content"].is_array()) continue;
+        for (const auto& block : row["content"]) {
+            if (block.value("type", std::string()) == "tool_use" &&
+                block.value("name", std::string()) == "agent") {
+                has_agent_call = true;
+            }
         }
     }
     CHECK(has_agent_call);
     // 旧格式没有 subagents/ 子账——这正是迁移须标 unavailable_legacy 的场景。
 
-    const auto background = LoadFixture("subagent-background");
+    const auto background = ShapeOf("subagent-background");
     REQUIRE(background.has_value());
-    CHECK(background->queued_messages.size() == 1);
-    CHECK(background->queued_messages[0].subagent);
-    CHECK(background->queued_messages[0].task_id == 3);
+    // queue 事件快照:一条 subagent 目标的排队账。
+    std::size_t queue_events = 0;
+    for (const auto& row : background->rows) {
+        if (row.value("type", std::string()) != "queue" || !row.contains("items")) continue;
+        queue_events += 1;
+        REQUIRE(row["items"].is_array());
+        REQUIRE(row["items"].size() == 1);
+        CHECK(row["items"][0].value("target", std::string()) == "#3");
+    }
+    CHECK(queue_events == 1);
 }
 
 TEST_CASE("workspace 夹具:compact_v2 与 resume/title 事件") {
-    const auto compact = LoadFixture("compact");
+    const auto compact = ShapeOf("compact");
     REQUIRE(compact.has_value());
-    CHECK(compact->compact_count == 1);
-    CHECK(compact->compact_epoch == 1);
-    CHECK(compact->last_compact_manifest.contains("goal"));
+    CHECK(CountRows(*compact, "type", "compact_v2") == 1);
+    // compact_v2 的 manifest 带 goal 字段(压缩守恒面)。
+    for (const auto& row : compact->rows) {
+        if (row.value("type", std::string()) != "compact_v2") continue;
+        REQUIRE(row.contains("manifest"));
+        CHECK(row["manifest"].contains("goal"));
+        CHECK(row.value("epoch", 0) == 1);
+    }
 
-    const auto resumed = LoadFixture("resume");
+    const auto resumed = ShapeOf("resume");
     REQUIRE(resumed.has_value());
-    CHECK(resumed->title == "demo-repo 目录说明");
-    CHECK(resumed->messages.size() == 4);
+    CHECK(CountRows(*resumed, "type", "title") == 1);
+    for (const auto& row : resumed->rows) {
+        if (row.value("type", std::string()) == "title") {
+            CHECK(row.value("title", std::string()) == "demo-repo 目录说明");
+        }
+    }
+    CHECK(CountRows(*resumed, "role", "user") + CountRows(*resumed, "role", "assistant") == 4);
 }
 
 TEST_CASE("workspace 夹具:linked worktree 的 cwd 事件序列") {
-    const auto lines = ReadLines(FixtureRoot() / "legacy" / "linked-worktree.jsonl");
+    const auto linked = ShapeOf("linked-worktree");
+    REQUIRE(linked.has_value());
     std::vector<std::string> cwds;
-    for (const auto& line : lines) {
-        if (auto cwd = sessions::ParseCwdEvent(line); cwd.has_value()) {
-            cwds.push_back(*cwd);
+    for (const auto& row : linked->rows) {
+        if (row.value("type", std::string()) == "cwd") {
+            cwds.push_back(row.value("cwd", std::string()));
         }
     }
     REQUIRE(cwds.size() == 2);
     CHECK(cwds[0] == "C:/Users/sandbox/work/.wt/demo-repo-feature");  // 进 worktree 房
     CHECK(cwds[1] == "C:/Users/sandbox/work/demo-repo");              // 回主树
-    // 会话本体照旧可整场解析(事件行不算坏行)。
-    const auto loaded = LoadFixture("linked-worktree");
-    REQUIRE(loaded.has_value());
-    CHECK(loaded->messages.size() == 6);  // 三轮往返;两行 cwd 事件不计入
+    // 消息行照旧可数(事件行不是坏行):三轮往返。
+    CHECK(CountRows(*linked, "role", "user") + CountRows(*linked, "role", "assistant") == 6);
+    CHECK(linked->bad_lines == 0);
 }
 
 TEST_CASE("workspace 夹具:项目/全局 Memory 的主题与 catalog 对得上") {

@@ -1165,6 +1165,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 预算 permit 的归还/提交同样跟环内的各尝试走(见环内注释)。
         std::string trajectory_request_id;
         bool turn_committed = false;  // 首枚尝试已提交预算,重试趟跳过(不靠状态机拒绝判)
+        int committed_turn_index = 0;  // 首枚尝试 commit 拿到的 task_turn_index(重试趟复用,§11.1)
 
         // ---- 请求级恢复(监督器单 P0-1):尝试环 --------------------------------
         // 半截流永不落地:每次尝试重置 assembler 与显示闸,只有 send_stream
@@ -1249,22 +1250,37 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     trajectory_write_failed = true;
                     return std::unexpected(api::Error{api::ErrorKind::Api, "trajectory write failed", 0});
                 }
-                wiring.boundary_recorder->OnRequestSent(trajectory_request_id);
             }
             // permit 从"占额"翻"已发"(reserved-=1,attempted+=1,turn 预算单
             // §3.2)——与轨迹解耦:没接 boundary_recorder 的会话照样提交(纯预
             // 算门单测即此形状);只在本请求首枚尝试提交,恢复重试不重复扣
             // turn(与 backend 肚内重试同口径)。提交不上按本地账错退出尝试环。
+            // P1-1:commit 提到 sent 之前——sent 是"真的发出去"的事实,提交
+            // 失败(本地账错)时不再先记一笔 sent 糊账;task_turn_index 也随
+            // commit 返回,正好随 sent 边界交轨迹(§11.1)。
             if (turn_permit.has_value() && !turn_committed && wiring.turn_budget->commit_sent) {
-                if (const auto committed = wiring.turn_budget->commit_sent(*turn_permit);
-                    !committed.has_value()) {
+                auto committed = wiring.turn_budget->commit_sent(*turn_permit);
+                if (!committed.has_value()) {
                     turn_permit.reset();
                     return std::unexpected(api::Error{api::ErrorKind::Api,
                                                       "turn budget commit failed", 0});
                 }
                 turn_committed = true;
+                committed_turn_index = *committed;
                 // 不 reset permit:留到 assistant 入 history 后 mark_completed
                 // 用(Turn 单 §3.2 三步账);重试趟由上面的旗子跳过,不重复扣。
+            }
+            if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
+                if (turn_committed) {
+                    // 任务 turn 账随发随记(§11.1):started 边界带 index/limit/
+                    // input round,收口三态(completed/failed/cancelled)由实现
+                    // 侧按 request_id 对回这枚 turn。
+                    wiring.boundary_recorder->OnRequestSentWithTurn(
+                        trajectory_request_id, committed_turn_index,
+                        turn_permit.has_value() ? turn_permit->limit : 0, wiring.input_round_index);
+                } else {
+                    wiring.boundary_recorder->OnRequestSent(trajectory_request_id);
+                }
             }
             const std::size_t thinking_bytes_at_attempt_start = budget_report.thinking_bytes;
             std::string thinking_tail_at_attempt_start = budget_report.thinking_tail;

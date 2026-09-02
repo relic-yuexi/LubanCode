@@ -266,9 +266,7 @@ ResumeResult CommandService::ResumeThread(agent::Agent& loop, SessionRuntime& ru
         return out;
     }
     loop.RestoreSessionHistory(summary.history);
-    runtime.persisted_count() = summary.history.size();
-    runtime.title() = summary.outcome.control.title.value_or(std::string());
-    runtime.compact_epoch() = summary.outcome.control.compact_epoch;
+    // P0-6:旧存档侧的落盘基线/标题/压缩序号真值已删,这些只进回执。
     out.resumed = true;
     out.id = summary.outcome.source_session_id;
     out.restored_messages = summary.history.size();

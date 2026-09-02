@@ -13,7 +13,6 @@
 #include "platform/json_safe.hpp"  // DumpJsonSanitized:goal 事件落档的编码窄边界
 #include "runtime/budget_gate.hpp"  // 三种宿主共用的预算闸与连撞计数
 #include "runtime/replay.hpp"  // RestoreFromArchive 的次序、跳过与账面规矩
-#include "sessions/session_store.hpp"  // MakeSessionLedgerSink(问题 3:存档 sink 搭建)
 
 namespace lubancode::runtime::goal {
 
@@ -1336,31 +1335,6 @@ std::vector<std::string> GoalCoordinator::EvidenceIds() const {
         ids.push_back(id);
     }
     return ids;
-}
-
-GoalCoordinator::LedgerSink MakeSessionLedgerSink(lubancode::sessions::SessionStore& store) {
-    // 函数体自 app/wirings/goal_session_wiring.cpp 的 Ensure 原样搬来
-    //(骨架拆解反弹·问题 3),行为一字未改——注释一并随行。
-    // LedgerSink:goal 事件行 append+flush 进 session 存档。store 没开张时
-    // 返回 true(没建档的会话照常吃命令,事件只进内存——建档后新事件落盘;
-    // 单子写盘栅栏管的是"已建档的会话",这里同取舍)。
-    return [&store](const GoalCoordinatorEvent& event) {
-        if (!store.active()) return true;
-        lubancode::sessions::GoalSessionEvent line;
-        line.event = event.event;
-        line.goal_id = event.goal_id;
-        line.iteration_id = event.iteration_id;
-        line.revision = event.revision;
-        line.payload = event.payload;
-        line.timestamp_ms = event.timestamp_ms;
-        // type 分族:iteration 级事件走 goal_iteration_v1,其余 goal_v1。
-        if (!event.iteration_id.empty()) {
-            line.type = "goal_iteration_v1";
-        } else {
-            line.type = "goal_v1";
-        }
-        return store.AppendGoalEvent(line);
-    };
 }
 
 }  // namespace lubancode::runtime::goal

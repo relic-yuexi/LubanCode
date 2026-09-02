@@ -25,7 +25,6 @@
 #include "agent/agent.hpp"
 #include "runtime/turn_event_adapter.hpp"
 #include "agent/loop.hpp"
-#include "sessions/session_store.hpp"
 #include "skills/workflow_recorder.hpp"
 #include "api/anthropic/client.hpp"
 #include "api/backend.hpp"
@@ -348,37 +347,8 @@ TEST_CASE("DumpJsonSanitized: 坏串树兜底后每行可重新解析") {
     CHECK(DumpJsonSanitized(nlohmann::json{{"a", "汉"}}) == "{\"a\":\"汉\"}");
 }
 
-TEST_CASE("SerializeSessionMessage: 坏串兜底,JSONL 行可重新解析,/resume 不吃坏行") {
-    // 配一对 tool_use/tool_result,不然 RepairToolPairs 会把孤儿 tool_result
-    // 当残档删掉。
-    api::Message assistant;
-    assistant.role = api::Role::Assistant;
-    api::ToolUseBlock use;
-    use.id = "toolu_1";
-    use.name = "read_file";
-    use.input = nlohmann::json::object({{"path", "a.txt"}});
-    assistant.content.push_back(std::move(use));
-
-    api::Message message;
-    message.role = api::Role::User;
-    message.content.push_back(api::ToolResultBlock{"toolu_1", std::string("结果\xC4\xE3"), false});
-
-    const std::string assistant_line = sessions::SerializeSessionMessage(assistant, "2026-08-14 00:00:00");
-    const std::string line = sessions::SerializeSessionMessage(message, "2026-08-14 00:00:01");
-    CHECK(sessions::DeserializeSessionMessage(line).has_value());
-    // meta 行拼上,整文件解析(真实 /resume 路径)。
-    const std::string file_content =
-        sessions::SerializeSessionMeta(sessions::SessionMeta{}) + "\n" + assistant_line + "\n" + line + "\n";
-    const auto session = sessions::ParseSessionFile(file_content);
-    REQUIRE(session.has_value());
-    REQUIRE(session->messages.size() == 2);
-    REQUIRE(session->messages[1].content.size() == 1);
-    const auto* result = std::get_if<api::ToolResultBlock>(&session->messages[1].content[0]);
-    REQUIRE(result != nullptr);
-    CHECK(IsValidUtf8(result->content));
-    CHECK(result->content.find("结果") != std::string::npos);
-    CHECK(session->skipped_lines == 0);
-}
+// (P0-6:SerializeSessionMessage 的坏串兜底用例已随旧 JSONL 序列化退场;
+// 消息正文的编码关口现由 SanitizeExternalText + typed 事件载荷承担。)
 
 TEST_CASE("SerializeRecordEvent: 录制器吃到坏输出,事件行仍是合法 JSON") {
     skills::RecordEvent event;

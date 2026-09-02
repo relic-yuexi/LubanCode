@@ -195,6 +195,51 @@ TEST_CASE("FormatAgentDoctorReport:覆盖链摆出被盖住的来源") {
 }
 
 // ---------------------------------------------------------------------------
+// P1-0(turn 预算单 §5.2/§11.3):doctor/inspect 的预算合同判读与迁移建议。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("P1-0 doctor:预算合同列明生效路,legacy 定义给迁移建议") {
+    Fixture fx;
+    fx.Write("legacy.yaml", "schema: 1\nname: legacy\ndescription: d\nruntime:\n  max_steps_per_turn: 9\n");
+    fx.Write("fresh.yaml", "schema: 1\nname: fresh\ndescription: d\nruntime:\n  max_turns: 12\n");
+    const agent::AgentCatalog catalog = fx.Load();
+
+    // legacy 定义:警告摆出来,预算合同判读走旧路,迁移建议带替换数值。
+    const std::vector<std::string> legacy_lines = app::FormatAgentDoctorReport(catalog, "legacy", {});
+    CHECK(Contains(legacy_lines, "[警告]"));
+    CHECK(Contains(legacy_lines, "agent.legacy_step_budget"));
+    CHECK(Contains(legacy_lines, "预算合同: legacy per-run step 预算 9"));
+    CHECK(Contains(legacy_lines, "迁移建议: 删掉 runtime.max_steps_per_turn"));
+    CHECK(Contains(legacy_lines, "runtime.max_turns: 9"));
+
+    // 新字段定义:任务 turn 预算一行,归属行,不给迁移建议。
+    const std::vector<std::string> fresh_lines = app::FormatAgentDoctorReport(catalog, "fresh", {});
+    CHECK(Contains(fresh_lines, "预算合同: task turn 预算 12(来源: Agent Definition runtime.max_turns"));
+    CHECK(Contains(fresh_lines, "预算归属: TaskLedger 任务记录"));
+    CHECK_FALSE(Contains(fresh_lines, "迁移建议"));
+
+    // 两枚都没写:如实说落宿主默认。
+    const std::vector<std::string> bare_lines = app::FormatAgentDoctorReport(catalog, "general-purpose", {});
+    CHECK(Contains(bare_lines, "预算合同: 未显式声明"));
+}
+
+TEST_CASE("P1-0 inspect:legacy 定义给可复制的迁移片段,新字段不给") {
+    Fixture fx;
+    fx.Write("legacy.yaml", "schema: 1\nname: legacy\ndescription: d\nruntime:\n  max_steps_per_turn: 9\n");
+    fx.Write("fresh.yaml", "schema: 1\nname: fresh\ndescription: d\nruntime:\n  max_turns: 12\n");
+    const agent::AgentCatalog catalog = fx.Load();
+
+    const std::vector<std::string> legacy_lines = app::FormatAgentInspectReport(catalog, "legacy", {});
+    CHECK(Contains(legacy_lines, "迁移片段"));
+    CHECK(Contains(legacy_lines, "max_turns: 9"));
+    CHECK(Contains(legacy_lines, "agent.turn_budget_conflict"));
+
+    const std::vector<std::string> fresh_lines = app::FormatAgentInspectReport(catalog, "fresh", {});
+    CHECK(Contains(fresh_lines, "max_turns=12(任务总 turn)"));
+    CHECK_FALSE(Contains(fresh_lines, "迁移片段"));
+}
+
+// ---------------------------------------------------------------------------
 // 阶段 2:Profile 覆盖检查(doctor)与来源账本(inspect)。
 // ---------------------------------------------------------------------------
 

@@ -495,7 +495,7 @@ void HandlePromptAuditCommand(const std::string& args, const PromptAuditContext&
     if (wants_runtime) {
         if (context.trajectory == nullptr) {
             model.warnings.push_back(
-                "prompt.runtime_ledger_off: Token 账本未开(features.trajectory 关),runtime 层没有事实可审");
+                "prompt.runtime_ledger_off: Token 账本不可得,runtime 层没有事实可审");
         } else {
             std::filesystem::path session_dir;
             if (!parsed.session_id.empty()) {
@@ -542,7 +542,7 @@ void HandlePromptAuditCommand(const std::string& args, const PromptAuditContext&
     if (wants_outcome) {
         if (context.trajectory == nullptr) {
             model.warnings.push_back(
-                "prompt.outcome_ledger_off: Token 账本未开(features.trajectory 关),outcome 层没有事实可审");
+                "prompt.outcome_ledger_off: Token 账本不可得,outcome 层没有事实可审");
         } else {
             const std::string now = NowYyyymmdd(context);
             const lubancode::insights::WorkspaceScanReport scan =

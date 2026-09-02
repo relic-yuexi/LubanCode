@@ -22,7 +22,6 @@
 #include "cli/theme.hpp"
 #include "runtime/loop_scheduler.hpp"
 #include "runtime/loop_types.hpp"
-#include "sessions/session_store.hpp"
 
 namespace lubancode::runtime {
 class EventSink;
@@ -71,7 +70,6 @@ struct LoopWiring {
     bool feature_enabled = false;      // features.loop && !env 总闸
     const lubancode::cli::Theme* theme = nullptr;
     lubancode::runtime::loop::LoopScheduler* scheduler = nullptr;  // ensure 后非空
-    lubancode::sessions::SessionStore* session_store = nullptr;
     const std::optional<std::string>* home_lubancode = nullptr;    // 用户级 loop.md
     lubancode::runtime::SessionRuntime* session_runtime = nullptr; // ServerEvent 投影(thread/seq/sink)
     std::function<void()> flush_events;                             // 事件账落盘(EnsureLoopScheduler 后)
@@ -91,14 +89,15 @@ LoopPromptResolution ResolveLoopPrompt(const LoopWiring& wiring, const std::stri
 // 先跑(scheduler 已在 wiring 里)。
 int HandleLoopCommand(const lubancode::cli::ParsedLoopCommand& command, const LoopWiring& wiring);
 
-// /resume 后从存档 loop 事件账回放重建(默认 paused-on-resume)。
-void RestoreLoopFromArchive(const LoopWiring& wiring);
+// (P0-6:RestoreLoopFromArchive 已删——旧 session JSONL 恢复路 P0-2 起
+// 不通;loop 持久化接 trajectory 属 loop 单后续波次。)
 
-// compact_v2 事件落盘前补 active loop 摘要(守恒面;没活任务不带)。
+// 压缩事件落账前补 active loop 摘要(守恒面;没活任务不带)。
 void AttachLoopSnapshotToCompact(const LoopWiring& wiring, nlohmann::json& metrics_out);
 
-// scheduler 攒的事件账落盘(append+flush);失败即 FailStore 熔断。投影
-// (EmitLoopServerEvents)同在里头。没建档的会话照常跑,事件只进内存。
+// scheduler 攒的事件账出清:ServerEvent 投影(EmitLoopServerEvents 同在
+// 里头)。P0-6 起旧落盘路删,事件只进内存与投影;持久化接 trajectory 属
+// loop 单后续波次。
 void FlushLoopEvents(const LoopWiring& wiring);
 
 // loop 事件 -> ServerEvent 投影(sink 没挂零影响)。

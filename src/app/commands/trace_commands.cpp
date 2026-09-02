@@ -16,8 +16,8 @@
 #include "cli/theme.hpp"
 #include "platform/console.hpp"
 #include "runtime/tool_trace_hub.hpp"
-#include "sessions/session_store.hpp"
 #include "tools/path_utils.hpp"
+#include "tools/session_utils.hpp"  // NowTimestamp(P0-6 自 sessions 迁来)
 
 namespace lubancode::app {
 
@@ -49,25 +49,18 @@ void HandleTraceCommand(const TraceCommandContext& ctx, const std::string& args)
             TermOut() << theme.error << "用法: /trace export <路径>" << theme.reset << "\n";
             return;
         }
-        if (ctx.session_store == nullptr || !ctx.session_store->active()) {
-            TermOut() << theme.error << "本会话没有存档,没有可导出的追踪账。" << theme.reset << "\n";
+        if (ctx.trace_hub == nullptr) {
+            TermOut() << theme.error << "本会话没有追踪 hub,没有可导出的追踪账。" << theme.reset << "\n";
             return;
         }
-        const auto bytes = lubancode::sessions::ReadSessionFileBytes(ctx.session_store->file_path());
-        if (!bytes.has_value()) {
-            TermOut() << theme.error << "会话档读不到: " << ctx.session_store->file_path() << theme.reset << "\n";
-            return;
-        }
-        const auto loaded = lubancode::sessions::ParseSessionFile(*bytes);
-        if (!loaded.has_value()) {
-            TermOut() << theme.error << "会话档解析失败。" << theme.reset << "\n";
-            return;
-        }
-        const auto ledger = lubancode::runtime::ToolTraceHub::BuildLedger(loaded->tool_trace_events);
+        // P0-6:旧 session 存档已删,导出吃 hub 的进程内最近账(有界 512
+        // 枚);跨进程的持久真账在 trajectory Journal,事件侧折叠口属
+        // trace 单后续波次,如实注明。
+        const auto ledger = ctx.trace_hub->BuildRecentLedger();
         nlohmann::json bundle;
         bundle["schema"] = "tool_trace_export_v1";
-        bundle["session"] = ctx.session_store->session_id();
-        bundle["exportedAt"] = lubancode::sessions::NowTimestamp();
+        bundle["note_scope"] = "in-process recent ledger (bounded)";
+        bundle["exportedAt"] = lubancode::tools::NowTimestamp();
         bundle["note"] = "脱敏诊断包:只有遮敏摘要,无正文原文";
         nlohmann::json items = nlohmann::json::array();
         for (const auto& record : ledger.executions()) {
@@ -128,51 +121,46 @@ void HandleTraceCommand(const TraceCommandContext& ctx, const std::string& args)
                               (!args.empty() && args != "errors" && args != "--raw" &&
                                args.find(' ') == std::string::npos);
     if (detail_query) {
-        if (ctx.session_store != nullptr && ctx.session_store->active()) {
-            const auto bytes = lubancode::sessions::ReadSessionFileBytes(ctx.session_store->file_path());
-            if (bytes.has_value()) {
-                const auto loaded = lubancode::sessions::ParseSessionFile(*bytes);
-                if (loaded.has_value()) {
-                    const auto ledger =
-                        lubancode::runtime::ToolTraceHub::BuildLedger(loaded->tool_trace_events);
-                    if (args.rfind("toolu ", 0) == 0) {
-                        const std::string id = args.substr(6);
-                        for (const auto* record : ledger.FindByToolUse(id)) {
-                            TermOut() << theme.stats
-                                      << lubancode::agent::FormatExecutionSummaryLine(*record, false)
-                                      << theme.reset << "\n";
-                        }
-                    } else if (args.rfind("turn ", 0) == 0) {
-                        const std::string id = args.substr(5);
-                        for (const auto& record : ledger.executions()) {
-                            if (record.turn_id == id) {
-                                TermOut() << theme.stats
-                                          << lubancode::agent::FormatExecutionSummaryLine(record, false)
-                                          << theme.reset << "\n";
-                            }
-                        }
-                    } else {
-                        const auto* record = ledger.FindByExecution(args);
-                        if (record != nullptr) {
-                            TermOut() << theme.stats
-                                      << lubancode::agent::FormatExecutionSummaryLine(*record, false)
-                                      << theme.reset << "\n";
-                            if (!record->error_code.empty()) {
-                                TermOut() << theme.stats << "  error_code: " << record->error_code
-                                          << theme.reset << "\n";
-                            }
-                            if (!record->source_instance.empty()) {
-                                TermOut() << theme.stats << "  source: " << record->source_instance
-                                          << theme.reset << "\n";
-                            }
-                            TermOut() << theme.stats << "  recovery: "
-                                      << lubancode::agent::ToString(record->Classify()) << theme.reset
-                                      << "\n";
-                        } else {
-                            TermOut() << theme.stats << "没有这枚 execution 的账: " << args
-                                      << theme.reset << "\n";
-                        }
+        if (ctx.trace_hub != nullptr) {
+            // P0-6:旧 session 存档已删,详细档吃 hub 的进程内最近账;跨进程
+            // 持久真账在 trajectory Journal(事件侧折叠口属 trace 单后续波次)。
+            const auto ledger = ctx.trace_hub->BuildRecentLedger();
+            if (args.rfind("toolu ", 0) == 0) {
+                const std::string id = args.substr(6);
+                for (const auto* record : ledger.FindByToolUse(id)) {
+                    TermOut() << theme.stats
+                              << lubancode::agent::FormatExecutionSummaryLine(*record, false)
+                              << theme.reset << "\n";
+                }
+            } else if (args.rfind("turn ", 0) == 0) {
+                const std::string id = args.substr(5);
+                for (const auto& record : ledger.executions()) {
+                    if (record.turn_id == id) {
+                        TermOut() << theme.stats
+                                  << lubancode::agent::FormatExecutionSummaryLine(record, false)
+                                  << theme.reset << "\n";
                     }
+                }
+            } else {
+                const auto* record = ledger.FindByExecution(args);
+                if (record != nullptr) {
+                    TermOut() << theme.stats
+                              << lubancode::agent::FormatExecutionSummaryLine(*record, false)
+                              << theme.reset << "\n";
+                    if (!record->error_code.empty()) {
+                        TermOut() << theme.stats << "  error_code: " << record->error_code
+                                  << theme.reset << "\n";
+                    }
+                    if (!record->source_instance.empty()) {
+                        TermOut() << theme.stats << "  source: " << record->source_instance
+                                  << theme.reset << "\n";
+                    }
+                    TermOut() << theme.stats << "  recovery: "
+                              << lubancode::agent::ToString(record->Classify()) << theme.reset
+                              << "\n";
+                } else {
+                    TermOut() << theme.stats << "没有这枚 execution 的账: " << args
+                              << theme.reset << "\n";
                 }
             }
         }
@@ -191,7 +179,6 @@ void HandleTraceCommand(const TraceCommandContext& ctx, const std::string& args)
 CommandFlow HandleSlashTrace(SlashDispatchContext& dispatch, const lubancode::cli::ParsedSlashCommand& parsed) {
     lubancode::app::TraceCommandContext trace_ctx;
     trace_ctx.trace_hub = dispatch.trace_hub;
-    trace_ctx.session_store = dispatch.session_store;
     trace_ctx.theme = dispatch.theme;
     HandleTraceCommand(trace_ctx, parsed.args);
     return CommandFlow::Continue;

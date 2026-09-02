@@ -73,6 +73,12 @@ struct RequestPreparedContext {
 //                        manifest/前缀账(Token 账本单 A1)。
 //   OnRequestSent     —— prepared 落稳后随发随记(prepared_event_id 由实现
 //                        侧在 OnRequestPrepared 里落好,这里只报发出去)。
+//   OnRequestSentWithTurn —— 同上,但带上任务级 turn 账(turn 预算单 §11.1,
+//                        P1-1):permit 提交(commit_sent)后、请求即将发出的
+//                        那枚边界,载荷含 task_turn_index(从 1 起)/turn_
+//                        limit/input_round_index。只在装了任务 turn 门的会话
+//                        被 loop 调(主会话/旁路走旧口);默认实现转发旧口,
+//                        旁路桥与测试替身零改动。
 //   OnUsageRecorded   —— v2 usage owner(一 request attempt 一 owner;wire
 //                        见没见过 usage 帧如实报)。cache_epoch/
 //                        prefix_append_only 随本步前缀账一并交(0/true 起点
@@ -87,6 +93,15 @@ public:
     virtual ~LoopBoundaryRecorder() = default;
     virtual std::string OnRequestPrepared(const api::Request& request, const RequestPreparedContext& ctx) = 0;
     virtual void OnRequestSent(const std::string& request_id) = 0;
+    // 任务 turn 账随发随记(§11.1):turn_limit=0 表示任务不设帽(此时仍有
+    // task_turn_index,input_round_index 照记);默认转发旧口。
+    virtual void OnRequestSentWithTurn(const std::string& request_id, int task_turn_index, int turn_limit,
+                                       int input_round_index) {
+        (void)task_turn_index;
+        (void)turn_limit;
+        (void)input_round_index;
+        OnRequestSent(request_id);
+    }
     virtual void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                                  bool reported_by_provider, const std::string& provider_response_id,
                                  int cache_epoch = 0, bool prefix_append_only = true) = 0;
@@ -289,6 +304,13 @@ struct TurnWiring {
     //(主会话的输入轮局部保险/旧调用方),行为与从前一字不差。不持有,
     // 调用方保证存活到本轮收口——预算 owner 在任务记录,不在单次 Run。
     ModelTurnBudgetGate* turn_budget = nullptr;
+
+    // ---- 输入轮坐标(turn 预算单 §3.1/§11.1,P1-1)---------------------------
+    // 本 Run() 是任务的第几个 input round(0 = 初始任务;直接调 Run 的旧
+    // 调用方保持 0)。纯信息投影,随 turn 边界进轨迹;引擎不拿它执法——
+    // 硬闸只认 turn 账。TurnHarness(DriveTurn)每轮拷一份 wiring 并钉好
+    // 这枚下标,调用方自己装配的 wiring 不设就是 0,行为不变。
+    int input_round_index = 0;
 };
 
 // 输出预算耗尽的明细账(规格根因四):max_tokens 从普通 end turn 里拆出来

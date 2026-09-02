@@ -28,6 +28,7 @@
 #include "app/turn_runner.hpp"
 #include "runtime/turn_event_adapter.hpp"
 #include "cli/console_input.hpp"
+#include "cli/console_input_internal.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
@@ -42,6 +43,28 @@
 using namespace lubancode;
 
 namespace {
+
+TEST_CASE("输入区模式行:当前档/下一档/技能数、yolo 红色与窄屏右端优先") {
+    using namespace lubancode::cli;
+    SetLanguage("en");
+    const Theme dark = BuiltinTheme("dark");
+    BoxChrome chrome{true, &dark, ConfirmMode::Confirm};
+    const std::string confirm = BuildComposerModeLine(chrome, 12, 60);
+    CHECK(confirm.find("confirm shift+tab to auto mode") != std::string::npos);
+    CHECK(confirm.find("12 skills") != std::string::npos);
+
+    chrome.mode = ConfirmMode::Yolo;
+    const std::string yolo = BuildComposerModeLine(chrome, 12, 60);
+    CHECK(yolo.find(dark.danger_mode + "yolo" + dark.reset) != std::string::npos);
+    CHECK(yolo.find("shift+tab to confirm mode") != std::string::npos);
+
+    const Theme plain;
+    chrome.theme = &plain;
+    const std::string narrow = BuildComposerModeLine(chrome, 123, 10);
+    CHECK(narrow == "123 skills");
+    CHECK(DisplayWidthUtf8(narrow) == 10);
+    SetLanguage("zh-CN");
+}
 
 // 按脚本吐事件的假后端,写法同 test_agent_tool.cpp:每调一次 send_stream
 // 按调用次序取下一组脚本吐出去。

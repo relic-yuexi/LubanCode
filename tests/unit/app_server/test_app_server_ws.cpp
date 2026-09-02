@@ -287,7 +287,6 @@ struct WsHarness {
     explicit WsHarness(const std::string& token = "")
         : transport(WsOptionsFor(token)) {
         app_server::ServerOptions options;
-        options.sessions_dir = MakeTempDir("lubancode_test_app_server_ws");
         options.cwd = "/test/cwd";
         options.outbox_capacity = 256;
         server = std::make_unique<app_server::Server>(

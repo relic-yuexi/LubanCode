@@ -52,6 +52,7 @@
 #include "cli/bottom_chrome.hpp"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <cstdio>
@@ -260,6 +261,10 @@ std::function<std::string()>& BackgroundStatusProviderSlot() {
     static std::function<std::string()> provider;
     return provider;
 }
+std::atomic<std::size_t>& SessionSkillCountSlot() {
+    static std::atomic<std::size_t> count{0};
+    return count;
+}
 }  // namespace
 
 // 键位缝:platform 语义按键 -> 面板动作 id(PanelKey)。0.30.x 交互抛光
@@ -416,6 +421,32 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
 }
 // BoxRuleLine 挪去 cli/bottom_chrome.cpp(布局函数画横线要用,不能留在
 // 终端层);这里经 bottom_chrome.hpp 直接用。
+
+std::string BuildComposerModeLine(const BoxChrome& chrome, int skill_count, int max_width) {
+    if (max_width <= 0) {
+        return {};
+    }
+    const Theme& theme = *chrome.theme;
+    const std::string current = ConfirmModeLabel(chrome.mode);
+    const std::string next = ConfirmModeLabel(NextConfirmMode(chrome.mode));
+    const std::string left_plain = current + " " + trf("status.mode_switch_hint", next);
+    const std::string right = trf("status.skills_count", skill_count);
+    const int right_width = static_cast<int>(DisplayWidthUtf8(right));
+    const int gap = 2;
+    const int left_room = (std::max)(0, max_width - right_width - gap);
+    const std::string left = TruncateUtf8ToDisplayWidth(left_plain, left_room);
+    const int left_width = static_cast<int>(DisplayWidthUtf8(left));
+    const int spaces = (std::max)(1, max_width - left_width - right_width);
+
+    std::string colored_left = left;
+    if (chrome.mode == ConfirmMode::Yolo && left.rfind(current, 0) == 0) {
+        colored_left = theme.danger_mode + current + theme.reset + left.substr(current.size());
+    }
+    if (right_width >= max_width) {
+        return theme.stats + TruncateUtf8ToDisplayWidth(right, max_width) + theme.reset;
+    }
+    return colored_left + std::string(static_cast<std::size_t>(spaces), ' ') + theme.stats + right + theme.reset;
+}
 
 // 状态行:模式段按档配色(确认=默认色、auto=stats、yolo=error),信息段
 // 恒 stats 淡色。0.21.x 起状态行是档位的唯一去处(提示符不再带前缀)。文本拼装是
@@ -1353,6 +1384,12 @@ int CurrentAgentViewedTaskId() {
 }
 void SetBackgroundStatusProvider(std::function<std::string()> provider) {
     BackgroundStatusProviderSlot() = std::move(provider);
+}
+void SetSessionSkillCount(std::size_t count) {
+    SessionSkillCountSlot().store(count, std::memory_order_relaxed);
+}
+std::size_t SessionSkillCount() {
+    return SessionSkillCountSlot().load(std::memory_order_relaxed);
 }
 std::string NormalizeEditorDraft(std::string bytes) {
     // CRLF / 裸 CR 归一成 '\n';编辑器普遍在文件尾补一个换行,读回时剥

@@ -488,10 +488,14 @@ TEST_CASE("对账:同一 Definition 从 AgentTool 与 Workflow 两条路解析,�
     CHECK(clean_agent_tool.ok());
     CHECK(clean_workflow.ok());
     CheckProfilesIdentical(clean_agent_tool, clean_workflow);
-    // 完整夹具的决议值抽几笔钉死(两路共用的那份)。
+    // 完整夹具的决议值抽几笔钉死(两路共用的那份)。P1-0:夹具已迁
+    // max_turns——任务总 turn 走 turn_budget 账,legacy 步数落 default_steps。
     CHECK(clean_agent_tool.profile.runtime.max_output_tokens == 8192);
-    CHECK(clean_agent_tool.profile.runtime.max_steps_per_turn == 24);
+    CHECK(clean_agent_tool.profile.runtime.max_steps_per_turn == default_steps);
     CHECK(clean_agent_tool.profile.runtime.length_continuations == 1);
+    CHECK(clean_agent_tool.turn_budget.max_turns == 24);
+    CHECK(clean_agent_tool.turn_budget.source == agent::TurnBudgetSource::Definition);
+    CHECK_FALSE(clean_agent_tool.turn_budget.legacy_max_steps_per_input.has_value());
     CHECK(clean_agent_tool.prompt_profile == "browser-tester");
     CHECK(clean_agent_tool.execution_mode == "auto");
     CHECK(clean_agent_tool.isolation == "none");

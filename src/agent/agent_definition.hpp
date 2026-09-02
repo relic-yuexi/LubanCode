@@ -99,8 +99,8 @@ struct AgentDefinition {
     //(subagent.default_max_turns,再缺 = 0 不限)。含义是"从接到任务到交回
     // 终态,最多准入几次逻辑模型请求"——父代理补话、孩子回信、Stop 钩子
     // 续跑都吃同一本累计账。与 max_steps_per_turn(兼容窗内仍是"每个
-    // input round"的旧义)分家。新旧同现的明拒在 P1-0 兼容批落,本批先
-    // 双读不冲突(两根线各自执法,谁先到谁收)。
+    // input round"的旧义,单独出现给 agent.legacy_step_budget 弃用警告)
+    // 分家;新旧同现明拒 agent.turn_budget_conflict(P1-0 兼容批已落)。
     std::optional<int> max_turns;
     std::optional<std::size_t> max_context_chars;      // 正整数;空 = 继承(默认 600000)
     std::optional<std::size_t> context_window_tokens;  // 非负整数;空 = 继承(0 = 未知)
