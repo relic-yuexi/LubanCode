@@ -70,3 +70,10 @@ AGENT_HANDOFF.md
 
 # 质量对照跑批临时目录:含拷贝的真 config(带钥匙)与会话轨迹,绝不进 git
 eval/deferred_quality/_run/
+
+# LoCoMo-MC10 防作弊基准(记忆系统评测单):492MB 原数据、扰动产物与
+# 变换账本(含答案映射)绝不进 git——CC BY-NC 数据 + 防作弊隔离要求。
+# 进 git 的只有聚合报告(无原文无答案):retrieval_baseline.md / report.md。
+eval/locomo/*
+!eval/locomo/retrieval_baseline.md
+!eval/locomo/report.md
