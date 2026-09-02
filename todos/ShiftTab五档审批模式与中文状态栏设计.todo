@@ -1,0 +1,354 @@
+# Shift+Tab 五档审批模式与中文状态栏设计
+
+- 状态：待实现
+- 日期：2026-09-03
+- 级别：P1（权限语义与终端可见性）
+- 类型：LubanCode 产品设计（交互审批档位）
+- 现场版本：`lubancode 0.26.175`
+- 范围：终端状态行与 6 秒切档说明、会话级审批档、工具权限裁定、子代理权限收窄、Hook/Peer/配置/文档与测试
+- 现场截图：默认档显示“确认 shift+tab 切换到 auto 模式”；中英文混排，且旧 `auto` 一词同时背了“接受编辑”和“安全命令自动放行”两层意思
+- 不在本单：Plan 模式能力闸、操作系统沙箱、工具确认菜单样式、`--yes` 的全放语义、工具自身业务校验
+
+## 一、要改成什么
+
+`Shift+Tab` 按下后，五档照此顺序循环：
+
+```text
+默认 -> 接受编辑 -> YOLO -> 自动模式 -> 不询问 -> 默认
+```
+
+默认档只提示下一档，不另挂“默认”标签；进入后四档，才写“当前档 + 下一档”。这与“默认时安静，特殊档亮牌”同一路数。中文界面逐档如下：
+
+```text
+Shift+Tab 切换到接受编辑
+接受编辑   Shift+Tab 切换到 YOLO
+YOLO       Shift+Tab 切换到自动模式
+自动模式   Shift+Tab 切换到不询问
+不询问     Shift+Tab 切换到默认
+```
+
+英文界面逐档如下：
+
+```text
+Shift+Tab to Accept Edits
+Accept Edits   Shift+Tab to YOLO
+YOLO           Shift+Tab to Auto Mode
+Auto Mode      Shift+Tab to Don't Ask
+Don't Ask      Shift+Tab to Default
+```
+
+中文标签裁决：
+
+- `Default` 译“默认”。默认态本身不显示这枚标签；它只在“不询问”的下一档提示、帮助文档与配置诊断里出现。不再叫“确认模式”。
+- `Accept Edits` 译“接受编辑”。帮助文档另写“自动放行文件改动”，状态行不塞长句。
+- `YOLO` 留英文。这个名字已有用户认知，也须保留危险感。
+- `Auto Mode` 译“自动模式”。它比“接受编辑”多放一类安全命令。
+- `Don't Ask` 译“不询问”。不要写“无需询问”；“无需询问”容易叫人误会成自动放行。
+
+大小写照上表。键名统一写 `Shift+Tab`，不再在中文里落成小写 `shift+tab`。中文提示末尾不加“模式”二字；否则“切换到自动模式模式”会撞词，别的档也显得拖沓。
+
+## 二、颜色
+
+只给当前档名上色。`Shift+Tab` 与下一档仍用普通前景色，右端 skills 仍走淡色。窄屏截断也不得切断 ANSI 序列。
+
+| 当前档 | 深色主题 | 浅色主题 | 含义 |
+|---|---|---|---|
+| 默认 | 不显示当前档名 | 不显示当前档名 | 只提示下一档，站稳不抢眼 |
+| 接受编辑 | 紫色/品红 | 深紫 | 文件改动会免问 |
+| YOLO | 亮红加粗 | 红色加粗 | 全放，最高风险 |
+| 自动模式 | 黄色 | 深黄 | 宿主按规则代判 |
+| 不询问 | 橙色 | 深橙 | 要问即拒，提醒有能力会被挡 |
+
+不要拿 `theme.confirm`、`theme.tool_line`、`theme.error` 凑五档。给 `Theme` 添语义色，例如 `mode_accept_edits`、`mode_yolo`、`mode_auto`、`mode_dont_ask`。`plain` 主题四枚仍为空串。颜色只是提示，纯文本标签才是合同；重定向输出、无色终端、截图 OCR 都要看得懂。
+
+### 2.1 切档后冒一行说明，约 6 秒收走
+
+每次由用户按 `Shift+Tab` 切档，常驻档位行上面立刻多出一行黄色说明。它只讲刚切入的当前档，不讲下一档。约 6 秒后自动消失，常驻档位行不动，输入草稿与光标也不动。
+
+中文逐档文案：
+
+```text
+默认：需要授权的操作会先询问你。
+接受编辑：文件创建与改写自动允许；其他操作仍会询问。
+YOLO：允许所有工具，无需确认。
+自动模式：文件编辑与安全命令自动允许；其余操作仍会询问。
+不询问：已授权的操作照常执行；需要询问的操作直接拒绝。
+```
+
+英文逐档文案：
+
+```text
+Default: asks before operations that need approval.
+Accept Edits: allows file creation and edits; asks for other operations.
+YOLO: allows all tools without approval.
+Auto Mode: allows file edits and safe commands; asks for the rest.
+Don't Ask: runs pre-approved operations and denies anything that would need a prompt.
+```
+
+交互合同：
+
+- 说明行一律用黄色；不要跟着当前档改成紫、红或橙。当前档自身仍按第二节配色。
+- 显示时长定为 `6000ms`，用 `steady_clock` 计时，不拿系统墙钟算。
+- 连按切档时不排队、不叠行；立刻换成最新档说明，并从最后一次按键重新计满 6 秒。
+- 只响应用户当场切档。程序启动、环境变量、项目配置、会话恢复设定起手档时不弹说明，免得每次开场都多占一行。
+- 空闲 composer 与流式 footer 都要显示；两条路共用同一份会话级 `ModeNoticeState`。
+- 6 秒到点后须主动触发一次重画，不能等用户再敲键才消失。复用空闲 100ms tick 与流式 footer 心跳，不另起一根只管 sleep 的绘制线程。
+- 说明只占一个物理行。窄屏按显示宽截断，不软换行，不切坏 UTF-8/ANSI。
+- 高度吃紧时，先舍 slash/search transient、Agent 坞与帮助层，再舍这行；composer、框线、常驻档位行永远排在它前头。
+
+不要复用现有 `transient_rows`。它在 `BottomChrome` 里垫最底，位置不对，还与 slash 补全、历史搜索共用。给底栏模型添专位 `mode_notice_rows`，固定摆在常驻 `status_rows` 紧上方；帧高、指纹、revision、resize 恢复与可选行裁剪都把它算进去。
+
+## 三、五档到底做什么
+
+先分清两类工具：
+
+1. `needs_confirm=false`：本来就不用问。五档下照常执行，除非 Plan、作用域指令、Hook deny 或别的硬闸拦下。
+2. `needs_confirm=true`：交给本单五档裁定。五档只管这一类。
+
+### 3.1 权限矩阵
+
+| 场景 | 默认 | 接受编辑 | YOLO | 自动模式 | 不询问 |
+|---|---:|---:|---:|---:|---:|
+| `needs_confirm=false` | 放行 | 放行 | 放行 | 放行 | 放行 |
+| 文件新建/改写 | 询问 | 放行 | 放行 | 放行 | 拒绝 |
+| 文件撤销、删除、跨目录移动 | 询问 | 询问 | 放行 | 询问 | 拒绝 |
+| 经安全分析认定的命令 | 询问 | 询问 | 放行 | 放行 | 拒绝 |
+| 未知或危险命令 | 询问 | 询问 | 放行 | 询问 | 拒绝 |
+| MCP/Lua/native/外部副作用工具 | 询问 | 询问 | 放行 | 询问 | 拒绝 |
+| 会话内“总是允许”已记账 | 放行 | 放行 | 放行 | 放行 | 放行（见 3.3） |
+| `allow_commands` 命中 | 询问 | 询问 | 放行 | 放行 | 放行（见 3.3） |
+| `deny_commands` 命中 | 询问且标出命中 | 询问且标出命中 | 放行（沿用现合同） | 询问且标出命中 | 拒绝 |
+| PreToolUse `ask` | 询问 | 询问 | 询问 | 询问 | 拒绝 |
+| PreToolUse `allow` | 放行（硬拒绝除外） | 放行 | 放行 | 放行 | 放行（见 3.3） |
+| PreToolUse `deny` / Plan 硬闸 | 拒绝 | 拒绝 | 拒绝 | 拒绝 | 拒绝 |
+
+这张表有三处要紧：
+
+- `接受编辑` 不等于旧 `auto`。它只免问“创建/改写文件”，不替用户跑命令。
+- `自动模式` 承接旧 `auto`：文件改动与安全命令免问，其余仍问。
+- `不询问` 不是 YOLO 的别名。裁定本来会落到 Ask 时，它直接回 Deny，终端不弹菜单，工具也不执行。
+
+### 3.2 “编辑”不可再靠两个工具名硬猜
+
+当前 `runtime::EvaluatePermission()` 用 `name == "write_file" || name == "edit_file"` 认文件工具。这在三档时已经偏窄，添“接受编辑”后会成公开合同，不能继续散写字符串。
+
+- [ ] 给工具元数据添稳定审批类别，例如：
+
+```cpp
+enum class ApprovalClass {
+    None,          // 不需审批
+    FileEdit,      // 新建/改写普通文件，可被 AcceptEdits 放行
+    FileDestructive, // 删除、撤销、跨目录移动，不归 AcceptEdits
+    Command,       // 另走 command_safety
+    External,      // MCP/Lua/native/联网及别的外部副作用
+};
+```
+
+- [ ] `write_file`、`edit_file` 标 `FileEdit`；`undo_file_edit` 先标 `FileDestructive`，仍要问。
+- [ ] 往后添文件工具，注册时必须选类别；测试枚举所有 `needs_confirm=true` 工具，漏标即失败。
+- [ ] `EvaluatePermission` 吃类别，不再认工具名。工具名只用于日志、规则与用户文案。
+
+### 3.3 不询问档的“显式预放行”
+
+“不询问”只把 Ask 改成 Deny，不推翻用户先前写下的允许：
+
+- `always_allowed_tools`、`allow_commands`、PreToolUse `allow` 都是弹框前已有的显式授权，照常放行。
+- `deny_commands` 是显式拦阻，直接拒绝。
+- 没有明确 Allow/Deny，且工具需要确认，才落 `DeniedNoPrompt`。
+- PermissionRequest Hook 不发。它只在“真要问人”之前触发；本档压根儿不问。
+
+这样，“不询问”适合后台、批处理、演示与只想看结果的场合：已预授权的能走，没授权的当场收住。
+
+拒绝结果须说实话：
+
+```text
+当前为“不询问”档；run_command 需要授权，本次未执行。按 Shift+Tab 切回“默认”，或先在权限配置中明确放行。
+```
+
+不要写“用户拒绝”。用户没见菜单，也没按拒绝键。结构化原因建议用 `permission.no_prompt_denied`，轨迹终态沿用或新增 `ModeDenied` 的细分码，日志保留 mode、tool、approval_class 与命中规则。
+
+## 四、裁定次序
+
+五档添进来后，权限核仍只留一个。次序钉死如下：
+
+```text
+Plan/能力硬闸
+  -> scoped AGENTS 指令闸
+  -> PreToolUse deny
+  -> permissions deny/allow 与会话放行账
+  -> 五档策略
+  -> PreToolUse ask/allow 归并
+  -> 若仍为 Ask：Don'tAsk 改 Deny；其余发 PermissionRequest
+  -> PermissionRequest allow/deny/无人表态
+  -> 终端菜单（只有无人表态且仍为 Ask 才出现）
+  -> 执行
+```
+
+现实现里 `deny_commands` 遇 YOLO/`--yes` 会失效。这虽危险，却是已发布合同。本单先照旧，文档醒目标明；若要改成“黑名单连 YOLO 也拦”，另开破坏性安全单，不夹带。
+
+`--yes` 仍是显式全放，起手映射 YOLO。它不是“不询问”；两者一个全放，一个未授权即拒。
+
+## 五、枚举与边界
+
+当前有三面镜子：
+
+- `cli::ConfirmMode`：输入与状态行；
+- `runtime::PermissionMode`：一轮工具裁定；
+- `agent::AgentPermissionMode`：子代理定义与权限下限。
+
+不能只给 CLI 枚举添两项。否则画面写“不询问”，Runtime 仍按旧档放行，便是安全事故。
+
+- [ ] 将名字收正为 `ApprovalMode`；若改名牵扯过大，可先保留类型名，枚举值必须完整：`Default / AcceptEdits / Yolo / Auto / DontAsk`。
+- [ ] 三层枚举都补五档，并用一组集中映射函数来回转换；未知值一律退 `Default`，同时给诊断，不静默落到更宽档。
+- [ ] `NextApprovalMode()` 只留一份顺序真相；空闲输入与流式监听继续共用它。
+- [ ] Hook 上下文、Peer 名册、Trajectory、Session 元数据都写稳定机读值：`default`、`accept_edits`、`yolo`、`auto`、`dont_ask`。
+- [ ] UI 标签走 i18n，不拿机读值直接上屏。
+
+## 六、子代理：五档不是简单一条宽窄尺
+
+旧代码用 `confirm < auto < yolo` 的整数 rank，再取 `min` 收窄。五档若硬排成一列，会藏下歧义：`默认` 能问后放行，`不询问` 却会直接拒绝；两者交互不同，不能只比数字便算完。
+
+改用“自动能力集合 + 是否准许询问”求交：
+
+| 档位 | 自动能力 | 可询问 |
+|---|---|---|
+| 默认 | 显式预授权 | 是 |
+| 接受编辑 | 显式预授权 + FileEdit | 是 |
+| YOLO | All | 否（无需问） |
+| 自动模式 | 显式预授权 + FileEdit + SafeCommand | 是 |
+| 不询问 | 仅显式预授权 | 否 |
+
+父子合并规则：
+
+```text
+effective.auto_capabilities = parent ∩ child
+effective.may_prompt = parent.may_prompt && child.may_prompt
+```
+
+- 子定义不得扩大父自动能力。
+- 子定义不得把父“不许询问”改回“可询问”。
+- 父为 YOLO、子为默认：子需要确认时可把问题拉回主会话，沿用现有 floored confirm 合同。
+- 父为不询问、子为默认：子需要确认时不得弹框，直接拒绝。
+- 后台子代理本来就无审批口；其结果应与不询问档同一套结构化拒绝，不再另造文案。
+
+自定义 Agent 的 `permissions.mode` 扩成 `inherit/default/accept_edits/auto/yolo/dont_ask`。旧 `confirm` 作为 `default` 的兼容别名，至少跨两个 minor 版本；读取时发弃用提示，写回只写新值。
+
+## 七、配置与兼容
+
+现入口有 `--yes`、`LUBANCODE_CONFIRM_MODE`、`settings.local.json.permissions.default_confirm_mode`。迁移如下：
+
+| 旧值 | 新语义 | 备注 |
+|---|---|---|
+| `confirm` | `default` | 兼容别名 |
+| `auto` | `auto` | 行为不变，只换 UI 标签“自动模式” |
+| `yolo` | `yolo` | 不变 |
+
+新增值：`accept_edits`、`dont_ask`。环境变量大小写仍按现规矩；非法值不可悄悄当 YOLO，回默认并给一行警告。
+
+- [ ] 配置字段新名先不动，免得一单里又迁 schema；文档说明 `default_confirm_mode` 历史命名，值已是五档。
+- [ ] `--yes` 始终压到 YOLO，优先级照旧。
+- [ ] 会话恢复若持久化了档位，认旧三值；没有档位的旧会话从当前启动配置取值。
+- [ ] `/config`、`/doctor` 与启动诊断列出最终档位及来源：CLI / env / project / builtin。
+
+## 八、状态栏实现
+
+源码落点：
+
+- `src/cli/line_editor.*`：枚举、标签、轮转、会话级原子状态；
+- `src/cli/console_input.cpp`：`BuildComposerModeLine()` 当前档/下一档与颜色；
+- `src/cli/console_input_turn_listener.cpp`：流式中切档，并刷新 6 秒说明期限；
+- `src/cli/bottom_chrome.*`：`mode_notice_rows` 的固定位置、高度、指纹与窄屏裁剪；
+- `src/cli/console_input_composer.cpp`、`console_input_stream_footer.cpp`：空闲/流式两路读取同一份 `ModeNoticeState`，到期重画；
+- `src/cli/i18n.cpp`：中英文标签与句式；
+- `src/cli/theme.*`：四枚模式语义色；
+- `src/runtime/turn_runtime.*`：Allow / Ask / Deny 三态裁定；
+- `src/app/turn_runner.cpp`、`interactive_session_assembly.cpp`、`tool_runtime.cpp`：三层映射与询问口；
+- `src/agent/permission_mode.hpp`、profile resolver：子代理权限集合求交；
+- `src/config/settings_local.*`、`src/app/cli_app.cpp`：起手值与兼容别名。
+
+当前 `PermissionVerdict::Action` 只有 `Allow / Ask`。本单须添 `Deny`；不要让“不询问”先伪造 Ask，再靠某个终端回调拒绝。Runtime 自己给出拒绝，App Server、Workflow、后台 Agent 与终端才会同义。
+
+状态行拼装也别再写 `if (mode == Yolo)` 特判。改成：
+
+```cpp
+ModePresentation PresentApprovalMode(ApprovalMode mode, Language language);
+// current_label / next_label / notice / color_role / machine_name
+```
+
+纯函数只给语义，不夹 ANSI。渲染层按 `color_role` 取 Theme 色。这样中英文、plain 主题、窄屏与单测都不必各抄一遍 switch。
+
+## 九、测试
+
+### 9.1 纯函数与 UI
+
+- [ ] `NextApprovalMode` 五按一圈回原位；每一步顺序与本单一致。
+- [ ] 中文五行与英文五行逐字断言：默认行不带当前档名；另钉住 `Shift+Tab` 大小写及中文不重复“模式”。
+- [ ] 五档只染当前标签；后半句、下一档与 skills 不串色。
+- [ ] 每次切档立刻在常驻档位行上面显示对应黄色说明；五档中英文逐字断言。
+- [ ] 假时钟钉 `5999ms` 仍显示、`6000ms` 到期收走；连按后旧期限失效，新档重新计时。
+- [ ] 启动配置、环境变量、会话恢复设档不显示说明；只有用户切档才显示。
+- [ ] 说明出现与消失各只触发所需重画，草稿字节、软换行布局与物理光标坐标不变。
+- [ ] slash 补全/历史搜索与切档说明同时在场时各居其位；不能互相覆盖或借同一 vector 清空。
+- [ ] dark/light/plain 三主题都测；plain 不得吐 ANSI。
+- [ ] 窄屏分别卡在当前标签、提示、说明、右端 skills 四处，UTF-8 与 ANSI 都不截坏；矮屏按既定优先级舍行。
+- [ ] 空闲、流式中、排队输入、焦点态各跑切档；焦点态内 Shift+Tab 仍按现合同往新条目走，不切审批档。
+
+### 9.2 权限矩阵
+
+- [ ] 把 3.1 每一格做成表驱动测试。断言 `Allow / Ask / Deny`，还要断言工具调用次数。
+- [ ] 不询问档遇需确认工具：零 PermissionRequest、零终端读键、零副作用、结构化拒绝回模型。
+- [ ] 接受编辑只放 `FileEdit`；安全 `git status` 仍问。
+- [ ] 自动模式放 `FileEdit` 与安全命令；脚本块、危险命令、外挂工具仍问。
+- [ ] YOLO 沿用当前全放；Plan 与 PreToolUse deny 仍能压住。
+- [ ] `undo_file_edit` 不因接受编辑而免问。
+- [ ] 显式 allow/deny、会话“总是允许”、Hook ask/allow/deny 与五档交叉覆盖。
+
+### 9.3 子代理与非终端宿主
+
+- [ ] 父子五档两两组合，按能力集合求交；共 25 格，不靠枚举整数大小碰运气。
+- [ ] 父不询问 + 子默认、父自动 + 子接受编辑、父 YOLO + 子默认三景单列回归。
+- [ ] 交互主代理、后台子代理、Workflow agent/tool 节点、one-shot、App Server 走同一权限核。
+- [ ] Hook、Peer、Trajectory 机读值覆盖五档；旧消费者看到未知值时保守回默认。
+- [ ] `confirm` 旧配置、`auto` 旧配置、`yolo` 旧配置各起一次，行为不漂。
+
+### 9.4 真终端
+
+- [ ] Windows Terminal 中从默认连按五次，逐帧核对标签、次序、颜色；每次上方黄字换成新档说明，不叠行。
+- [ ] 停在 YOLO，录下“YOLO：允许所有工具，无需确认。”约 6 秒后自行消失；全程核对草稿不丢、光标不跳。
+- [ ] 在每一档分别触发 `edit_file`、安全命令、危险命令；保留弹框/免问/拒绝三类现场证据。
+- [ ] 切到不询问后跑一枚未预授权工具，确认不弹菜单、不执行，模型收到如实拒绝。
+- [ ] 切回默认后再跑同一工具，确认菜单恢复。
+
+源码检查与单测不能冒充真终端。验收须留命令、构建版本、退出码、终端名、五档截图或录屏，以及工具是否真执行的文件/进程证据。
+
+## 十、实施批次
+
+- [ ] P0：先把权限核改成 `Allow / Ask / Deny`，落 `DontAsk`，打通终端、Workflow、Agent、App Server；无 UI 漏网。
+- [ ] P0：以 `ApprovalClass` 取代文件工具名硬编码，钉住接受编辑与自动模式差别。
+- [ ] P1：补五档枚举、轮转、i18n、颜色、状态行与 6 秒切档说明；旧三值兼容读取。
+- [ ] P1：子代理从 rank/min 改成能力集合求交；补 25 格矩阵。
+- [ ] P1：同步 Hook、Peer、Trajectory、Session 与诊断机读值。
+- [ ] P1：更新 README、配置参考、命令参考、安全文档、CHANGELOG。
+- [ ] P1：跑相关单测与全量 CTest，再做真终端五档验收。
+
+## 十一、验收口径
+
+本单收官须同时满足：
+
+1. 状态行五档按指定次序循环；默认态只提示下一档，后四档亮当前档名；中英文自然，颜色与当前风险相合。
+2. 每次用户切档，上方黄色说明立即换成当前档文案，约 6 秒自行收走；不叠行，不惊动草稿与光标。
+3. `接受编辑` 与 `自动模式` 真有行为差别，不只是换名换色。
+4. `不询问` 遇未授权需确认工具，零询问、零副作用、如实拒绝。
+5. `YOLO`、`--yes`、旧 `auto/confirm/yolo` 配置不暗改既有行为。
+6. 子代理不能借新档位放宽父权限，也不会在父“不询问”时偷弹审批。
+7. 终端、后台、Workflow、one-shot、App Server 共用一颗裁定脑子。
+8. 单测、全量 CTest、真终端三道证据齐全；只过前两道不得标“已实现”。
+
+## 十二、不做什么
+
+- 不把“不询问”做成“所有工具都拒绝”；无需确认或已明确放行的仍可执行。
+- 不把“不询问”做成“问也不问就执行”；那是 YOLO。
+- 不把“接受编辑”偷换成旧 auto；安全命令在这一档仍要问。
+- 不用颜色代替文字，也不让 plain 主题失去档位差别。
+- 不在 CLI、Runtime、Agent 三处各写一份略有不同的五档逻辑。
+- 不把 Plan 硬闸并进审批档；Plan 是能力边界，五档越不过。
