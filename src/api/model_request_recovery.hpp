@@ -35,6 +35,7 @@ struct ModelRequestAttempt {
     bool saw_stream_event = false;
     bool committed_assistant_message = false;
     std::string error_code;  // 稳定码(ReasonCodeOfError),成功时为空
+    std::chrono::milliseconds elapsed{0};  // 本逻辑请求已耗时(含退避)
 };
 
 // 尝试相位(恢复账的事件流)。
@@ -60,16 +61,20 @@ std::string HistoryCommitHashOf(const Request& request);
 // 它这件事记在案,后端若将来透出,再在阶梯上叠加(不越过总墙钟)。
 bool IsRetryableError(const Error& error);
 
-// 重试阶梯(单子 §8.2):第 1 次失败等 250~750ms,第 2 次等 1~2s,第 3 次
-// 失败即收口。attempt = 刚失败的那次尝试号(1 起)。
+// 重试阶梯:五次失败分别等 1~2s / 4~8s / 15~30s / 30~60s /
+// 60~120s,均匀抖动;单次等待不超过 2 分钟。attempt = 刚失败的
+// 那次尝试号(1 起)。
 std::chrono::milliseconds BackoffMsForAttempt(int attempt);
 
-// 一条逻辑请求最多几次尝试(含首发)。
-constexpr int kMaxRequestAttempts = 3;
+// 一条逻辑请求最多几次尝试(含首发):首发 + 5 次重试。
+constexpr int kMaxRequestAttempts = 6;
 
 struct RequestRecoveryHooks {
     // 恢复账出水口(空 = 没人记账,恢复照跑)。在发送线程上同步调。
     std::function<void(const ModelRequestAttempt&, RequestAttemptPhase)> on_attempt;
+    // 测试时可注入 fake clock:记录/推进等待而不睡真实分钟。空则走生产
+    // WaitBackoffCancellable(10ms 取消粒度)。返回 false 表示取消打断。
+    std::function<bool(std::chrono::milliseconds, const std::atomic<bool>*)> wait_backoff;
 };
 
 // 单次尝试的执行体:调用方(AgentLoop::Run)自备 assembler/gates 等局部,

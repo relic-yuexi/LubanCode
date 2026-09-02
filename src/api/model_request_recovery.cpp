@@ -3,6 +3,8 @@
 // 睡(10ms 粒度),用户取消一置位立刻返回 false。
 #include "api/model_request_recovery.hpp"
 
+#include <algorithm>
+#include <array>
 #include <mutex>
 #include <random>
 #include <type_traits>
@@ -83,19 +85,19 @@ bool IsRetryableError(const Error& error) {
 }
 
 std::chrono::milliseconds BackoffMsForAttempt(int attempt) {
-    // 单子 §8.2 的阶梯:1 -> 250~750ms,2 -> 1~2s,3 -> 收口。均匀抖动把
-    // 同时断的多只任务错开,不齐步拥上去。
+    // 五档长退避:低高界内均匀抖动,同时断的多只任务不会齐步拥上去。
+    // 表外也钳在最后一档,保证任何单次等待都不越过 2 分钟。
+    static constexpr std::array<std::pair<int, int>, 5> kRangesMs{{
+        {1000, 2000},
+        {4000, 8000},
+        {15000, 30000},
+        {30000, 60000},
+        {60000, 120000},
+    }};
     static std::mutex rng_mutex;
     static std::mt19937_64 engine{std::random_device{}()};
-    int low_ms = 0;
-    int high_ms = 0;
-    if (attempt <= 1) {
-        low_ms = 250;
-        high_ms = 750;
-    } else {
-        low_ms = 1000;
-        high_ms = 2000;
-    }
+    const std::size_t index = static_cast<std::size_t>(std::clamp(attempt, 1, 5) - 1);
+    const auto [low_ms, high_ms] = kRangesMs[index];
     std::lock_guard<std::mutex> lock(rng_mutex);
     std::uniform_int_distribution<int> dist(low_ms, high_ms);
     return std::chrono::milliseconds(dist(engine));
@@ -119,18 +121,22 @@ std::expected<void, Error> RunRequestWithRecovery(const AttemptSender& send_once
                                                   const std::atomic<bool>* cancel) {
     ModelRequestAttempt attempt;
     attempt.logical_request_id = NextLogicalRequestId();
+    const auto request_started_at = std::chrono::steady_clock::now();
+    const auto emit = [&](RequestAttemptPhase phase) {
+        attempt.elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - request_started_at);
+        if (hooks.on_attempt) {
+            hooks.on_attempt(attempt, phase);
+        }
+    };
     for (attempt.attempt = 1;; ++attempt.attempt) {
         attempt.saw_stream_event = false;
         attempt.saw_headers = false;
         attempt.error_code.clear();
-        if (hooks.on_attempt) {
-            hooks.on_attempt(attempt, RequestAttemptPhase::Started);
-        }
+        emit(RequestAttemptPhase::Started);
         auto result = send_once(attempt);
         if (result.has_value()) {
-            if (hooks.on_attempt) {
-                hooks.on_attempt(attempt, RequestAttemptPhase::Succeeded);
-            }
+            emit(RequestAttemptPhase::Succeeded);
             return result;
         }
         attempt.error_code = ReasonCodeOfError(result.error());
@@ -138,21 +144,18 @@ std::expected<void, Error> RunRequestWithRecovery(const AttemptSender& send_once
             result.error().kind == ErrorKind::Cancelled || (cancel != nullptr && cancel->load());
         if (user_cancelled) {
             // 用户停止压过自动恢复(单子不变量 10):立即停,原样交回。
-            if (hooks.on_attempt) {
-                hooks.on_attempt(attempt, RequestAttemptPhase::Exhausted);
-            }
+            emit(RequestAttemptPhase::Exhausted);
             return result;
         }
         if (attempt.attempt >= kMaxRequestAttempts || !IsRetryableError(result.error())) {
-            if (hooks.on_attempt) {
-                hooks.on_attempt(attempt, RequestAttemptPhase::Exhausted);
-            }
+            emit(RequestAttemptPhase::Exhausted);
             return result;
         }
-        if (hooks.on_attempt) {
-            hooks.on_attempt(attempt, RequestAttemptPhase::Retrying);
-        }
-        if (!runtime::WaitBackoffCancellable(BackoffMsForAttempt(attempt.attempt), cancel)) {
+        emit(RequestAttemptPhase::Retrying);
+        const auto wait = BackoffMsForAttempt(attempt.attempt);
+        const bool waited = hooks.wait_backoff ? hooks.wait_backoff(wait, cancel)
+                                                : runtime::WaitBackoffCancellable(wait, cancel);
+        if (!waited) {
             // 退避中被取消:按取消收口,不让"停了还在重试"穿透出去。
             return std::unexpected(Error{ErrorKind::Cancelled, "重试等待中被取消", 0});
         }

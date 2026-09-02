@@ -175,9 +175,13 @@ SupervisionVerdict EvaluateSupervision(const TaskVitals& v, const SupervisionThr
         case AgentSupervisionStage::StreamingThinking:
         case AgentSupervisionStage::StreamingText:
         case AgentSupervisionStage::AwaitingToolInputComplete:
-        case AgentSupervisionStage::Recovering:
             quiet = v.has_transport && OlderThan(v.now, v.last_transport_at, t.streaming_soft_secs);
             reason = "transport.stream_quiet";
+            break;
+        case AgentSupervisionStage::Recovering:
+            // 请求恢复链正在按既定预算退避,长等待是健康的 Recovering,
+            // 不能拿流静默尺误判成 SuspectTransport。
+            quiet = false;
             break;
         case AgentSupervisionStage::RunningTool:
             // 没有进度回调的工具,宿主只说"静默",不说"卡死"(单子 §6.2);

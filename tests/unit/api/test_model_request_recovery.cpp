@@ -6,6 +6,7 @@
 
 #include <doctest/doctest.h>
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <string>
@@ -25,6 +26,7 @@ public:
     std::vector<std::expected<void, api::Error>> script;
     std::vector<int> attempts_started;
     std::vector<api::RequestAttemptPhase> phases;
+    std::vector<std::chrono::milliseconds> waits;
     int calls = 0;
 
     api::AttemptSender Sender() {
@@ -44,6 +46,10 @@ api::RequestRecoveryHooks RecordingHooks(ScriptedSender& sender) {
     hooks.on_attempt = [&sender](const api::ModelRequestAttempt& attempt, api::RequestAttemptPhase phase) {
         (void)attempt;
         sender.phases.push_back(phase);
+    };
+    hooks.wait_backoff = [&sender](std::chrono::milliseconds wait, const std::atomic<bool>* cancel) {
+        sender.waits.push_back(wait);
+        return cancel == nullptr || !cancel->load();
     };
     return hooks;
 }
@@ -71,15 +77,17 @@ TEST_CASE("重试白名单:瞬时网络错与 408/429/502/503/504 可重发,其�
     CHECK_FALSE(api::IsRetryableError(api::Error{api::ErrorKind::Cancelled, "x", 0}));
 }
 
-TEST_CASE("抖动阶梯:第 1 次失败等 250~750ms,第 2 次等 1~2s") {
-    for (int i = 0; i < 20; ++i) {
-        const auto first = api::BackoffMsForAttempt(1).count();
-        CHECK(first >= 250);
-        CHECK(first <= 750);
-        const auto second = api::BackoffMsForAttempt(2).count();
-        CHECK(second >= 1000);
-        CHECK(second <= 2000);
+TEST_CASE("抖动阶梯:五档指数范围且单次以 2 分钟封顶") {
+    constexpr std::array<std::pair<long long, long long>, 5> ranges{{
+        {1000, 2000}, {4000, 8000}, {15000, 30000}, {30000, 60000}, {60000, 120000}}};
+    for (int attempt = 1; attempt <= 5; ++attempt) {
+        for (int sample = 0; sample < 20; ++sample) {
+            const auto wait = api::BackoffMsForAttempt(attempt).count();
+            CHECK(wait >= ranges[attempt - 1].first);
+            CHECK(wait <= ranges[attempt - 1].second);
+        }
     }
+    CHECK(api::BackoffMsForAttempt(99).count() <= 120000);
 }
 
 TEST_CASE("恢复环:网络错一次后重发成功,attempt 连号且 Retrying 相位在案") {
@@ -102,29 +110,33 @@ TEST_CASE("恢复环:网络错一次后重发成功,attempt 连号且 Retrying �
     CHECK(saw_retrying);
 }
 
-TEST_CASE("恢复环:不可重试错误立即收口,不退避不重发") {
+TEST_CASE("恢复环:401 确定性错误零重试零等待") {
     ScriptedSender sender;
     sender.script = {
-        std::unexpected(api::Error{api::ErrorKind::HttpStatus, "bad request", 400}),
+        std::unexpected(api::Error{api::ErrorKind::HttpStatus, "unauthorized", 401}),
     };
     const auto result = api::RunRequestWithRecovery(sender.Sender(), RecordingHooks(sender), nullptr);
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().http_status == 400);
+    CHECK(result.error().http_status == 401);
     CHECK(sender.calls == 1);
+    CHECK(sender.waits.empty());
 }
 
-TEST_CASE("恢复环:重试用尽(3 次)后按最后一错收口") {
+TEST_CASE("恢复环:fake clock 钉住五段等待,第 6 次尝试后收口") {
     ScriptedSender sender;
-    sender.script = {
-        std::unexpected(api::Error{api::ErrorKind::Network, "reset", 0}),
-        std::unexpected(api::Error{api::ErrorKind::Network, "reset", 0}),
-        std::unexpected(api::Error{api::ErrorKind::HttpStatus, "overloaded", 503}),
-    };
+    sender.script.assign(api::kMaxRequestAttempts,
+                         std::unexpected(api::Error{api::ErrorKind::Network, "reset", 0}));
     const auto result = api::RunRequestWithRecovery(sender.Sender(), RecordingHooks(sender), nullptr);
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().http_status == 503);
-    CHECK(sender.calls == 3);
-    CHECK(sender.attempts_started.size() == 3);
+    CHECK(sender.calls == 6);
+    CHECK(sender.attempts_started == std::vector<int>{1, 2, 3, 4, 5, 6});
+    REQUIRE(sender.waits.size() == 5);
+    constexpr std::array<std::pair<long long, long long>, 5> ranges{{
+        {1000, 2000}, {4000, 8000}, {15000, 30000}, {30000, 60000}, {60000, 120000}}};
+    for (std::size_t i = 0; i < sender.waits.size(); ++i) {
+        CHECK(sender.waits[i].count() >= ranges[i].first);
+        CHECK(sender.waits[i].count() <= ranges[i].second);
+    }
 }
 
 TEST_CASE("恢复环:用户取消压过重试,立即原样交回") {
@@ -139,22 +151,23 @@ TEST_CASE("恢复环:用户取消压过重试,立即原样交回") {
     CHECK(sender.calls == 2);  // 取消那次不再重试
 }
 
-TEST_CASE("恢复环:退避等待中被取消,合成 Cancelled 收口") {
+TEST_CASE("恢复环:退避等待中取消立即返回,不发第 2 次") {
     ScriptedSender sender;
     sender.script = {
         std::unexpected(api::Error{api::ErrorKind::Network, "reset", 0}),
     };
     std::atomic<bool> cancel{false};
-    // 200ms 后置取消:第 1 次失败的退避(250~750ms)还没睡完就被打断。
-    std::thread canceller([&cancel]() {
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+    auto hooks = RecordingHooks(sender);
+    hooks.wait_backoff = [&cancel, &sender](std::chrono::milliseconds wait, const std::atomic<bool>*) {
+        sender.waits.push_back(wait);
         cancel.store(true);
-    });
-    const auto result = api::RunRequestWithRecovery(sender.Sender(), RecordingHooks(sender), &cancel);
-    canceller.join();
+        return false;
+    };
+    const auto result = api::RunRequestWithRecovery(sender.Sender(), hooks, &cancel);
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().kind == api::ErrorKind::Cancelled);
-    CHECK(sender.calls == 1);  // 没有发出第二次
+    CHECK(sender.calls == 1);
+    CHECK(sender.waits.size() == 1);
 }
 
 TEST_CASE("历史提交边界凭据:同请求同哈希,消息变了就变") {

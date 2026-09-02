@@ -1013,6 +1013,8 @@ const Entry kZhCN[] = {
      "网络读超时:连续 {0} 秒没收到新数据,连接可能已经断了,请重试"},
     {"error.network.request_timeout", "请求超时:{0} 秒内没有完成,请检查网络后重试"},
     {"error.network.connect_failed", "连接失败: {0}"},
+    {"error.request.failed", "请求失败: {0}"},
+    {"error.request.recovery_exhausted", "(已自动重试 {0} 次仍失败,总时长 {1},含退避)"},
     // 流式请求硬墙钟(cpr 并发挂死单):连接/空闲两道闸都不触发的挂死绝境,
     // 由这面墙兜底掐断。文案要点:不是网络慢,是挂死;配置键写明,好让人调。
     {"error.network.hard_timeout",
@@ -3034,6 +3036,9 @@ const Entry kEn[] = {
      "network read timed out: no new data for {0}s straight; the connection may have dropped, please retry"},
     {"error.network.request_timeout", "request timed out: did not finish within {0}s; check your network and retry"},
     {"error.network.connect_failed", "connection failed: {0}"},
+    {"error.request.failed", "request failed: {0}"},
+    {"error.request.recovery_exhausted",
+     " (failed after {0} automatic retries; total elapsed {1}, including backoff)"},
     {"error.network.hard_timeout",
      "request hard timeout: the whole request was force-aborted after {0}s (request_hard_timeout_secs). Usually the "
      "connection was hijacked by a proxy/TUN or the server went silent; check the network before retrying, and raise "

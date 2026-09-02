@@ -480,36 +480,9 @@ TEST_CASE("墙钟兜底:后端不理取消(所有超时全失效),宽限期后�
 #endif
 
 #ifdef _WIN32
-TEST_CASE("挂起服务真链路:断流自动重试 3 次后按 stream_idle_timeout 结构化收口") {
-    cli::SetLanguage("zh-CN");
-    constexpr int kIdleSecs = 2;
-    const int port = StartStallingServer();
-    auto backend = std::make_unique<api::anthropic::AnthropicBackend>(
-        "http://127.0.0.1:" + std::to_string(port), "test-token",
-        /*connect_timeout_ms=*/3000, /*stream_idle_timeout_secs=*/kIdleSecs);
-    tools::ToolRegistry registry;
-    tools::AgentTool tool(*backend, registry, "D:/");
-
-    const auto start = std::chrono::steady_clock::now();
-    const tools::Tool::Result result = RunForeground(tool, "死流子代理", "跑一趟");
-    const auto elapsed = std::chrono::steady_clock::now() - start;
-
-    // 终态是结构化的 api_error,带超时原因,不是永挂。P0-1 起,流空闲且
-    // 消息未提交属可安全重发白名单:同一提交边界自动重试(首发 + 2 次),
-    // 用尽后如实写"已自动重试 N 次"——不是一断就报。
-    REQUIRE(result.is_error);
-    const auto summaries = tool.TaskSummaries();
-    REQUIRE(summaries.size() == 1);
-    CHECK(summaries[0].state == tools::AgentTaskState::Failed);
-    CHECK(summaries[0].outcome_reason == tools::TaskOutcomeReason::ApiError);
-    const auto detail = tool.TaskDetail(1);
-    REQUIRE(detail.has_value());
-    CHECK(detail->outcome.message.find(cli::trf("error.network.stream_idle_timeout", kIdleSecs)) !=
-          std::string::npos);
-    CHECK(detail->outcome.message.find("已自动重试 2 次") != std::string::npos);
-    // 时限:libcurl LowSpeed(1B/s 窗口)从收到那一帧到判死实测约 8s——单趟
-    // 如此,三趟(首发 + 2 次重试)加两段退避(0.25~0.75s 与 1~2s)按
-    // 35s 收;量级对(不是永挂),不追求钉死秒数。
-    CHECK(elapsed < std::chrono::seconds(35));
+TEST_CASE("挂起服务真链路:长退避预算不在全量单测里睡真实分钟" * doctest::skip()) {
+    // 五档真实退避最坏累计数分钟,会撞单例 180s 测试墙。重试用尽、总时长
+    // 文案与取消由 fake clock 合同测试钉死;真 socket 的空闲超时分型由
+    // integration.process.network_timeout 覆盖,这里明确跳过旧的短预算时序桩。
 }
 #endif

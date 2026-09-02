@@ -22,6 +22,7 @@
 #include "agent/resolved_prompt_builder.hpp"  // Token 账本单 A1:三层后叠 + manifest 同一次解析
 #include "agent/tool_result_images.hpp"  // 工具结果图片回喂:请求出门前的 base64 重灌
 #include "api/assembler.hpp"
+#include "cli/i18n.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:trace 的入参/结果摘要锚
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:工具结果的第一道编码关口
 #include "platform/wall_clock.hpp"     // trace 与计划动作须共用一枚墙钟
@@ -34,6 +35,16 @@ namespace lubancode::agent {
 
 namespace {
 constexpr std::size_t kContextPreflightHeadroomTokens = 512;
+
+std::string FormatRecoveryElapsed(std::chrono::milliseconds elapsed) {
+    const auto total_seconds = std::chrono::duration_cast<std::chrono::seconds>(elapsed).count();
+    if (total_seconds < 60) {
+        return std::to_string(total_seconds) + "s";
+    }
+    const auto minutes = total_seconds / 60;
+    const auto seconds = total_seconds % 60;
+    return std::to_string(minutes) + "m" + (seconds < 10 ? "0" : "") + std::to_string(seconds) + "s";
+}
 
 // 预检放不下时的应急输出预留(派工单 §四):常规预留(声明值/保守估)装
 // 不下、当前消息自己装得下时启用——按窗口取一个小而正的值,让任务能在
@@ -1269,10 +1280,13 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         const std::string history_commit_hash = api::HistoryCommitHashOf(request);
         bool trajectory_write_failed = false;
         int recovery_attempts_used = 0;
+        std::chrono::milliseconds recovery_elapsed{0};
         api::RequestRecoveryHooks recovery_hooks;
-        recovery_hooks.on_attempt = [&wiring, &recovery_attempts_used](
+        recovery_hooks.wait_backoff = wiring.wait_request_backoff;
+        recovery_hooks.on_attempt = [&wiring, &recovery_attempts_used, &recovery_elapsed](
                                         const api::ModelRequestAttempt& recovery_attempt,
                                         api::RequestAttemptPhase phase) {
+            recovery_elapsed = recovery_attempt.elapsed;
             if (phase == api::RequestAttemptPhase::Started) {
                 ++recovery_attempts_used;
             }
@@ -1560,11 +1574,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                     message = api::SummarizeErrorBodyForUser(message);
                 }
                 if (recovery_attempts_used > 1) {
-                    // 恢复账说给人听:不是一错就报,是重试过才报(单子 §8.2
-                    // 用尽即结构化收口)。
-                    message += "(已自动重试 " + std::to_string(recovery_attempts_used - 1) + " 次仍失败)";
+                    message += cli::trf("error.request.recovery_exhausted", recovery_attempts_used - 1,
+                                        FormatRecoveryElapsed(recovery_elapsed));
                 }
-                return std::unexpected("请求失败: " + message);
+                return std::unexpected(cli::trf("error.request.failed", message));
             }
         }
         if (stream_error) {
