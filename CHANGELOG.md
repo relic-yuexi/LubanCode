@@ -2,6 +2,12 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.177] - 2026-09-03
+
+- **子代理账开不成就不许跑。** 此前子账 stream 开张失败被装配层吞错，子代理照跑、内层工具 trace 借父账旁听——父账内存表被无主 call 污染，收轮补账再撞 schema.missing_field 红字（实战实录：0 字节空子账令整场 verify 失败）。现 SpawnSubagent 任一步失败即 fail closed，工具终态带稳定码 `trajectory.subagent_start_failed`，父侧新事件 `subagent.run.start_failed` 持久留证（stage/error_code/字段级 message，不写敏感路径）。
+- **子账原子开卷，失败不冒充 Journal。** stream 预留不再直接占 `.jsonl`——首枚 run.started 提交事务独占创建；失败残留按三凭据（本次预留+0 字节+名全合）清理，session 目录不再留 0 字节正式账。
+- **父桥只收模型声明过的 call。** OnToolTrace 弃 operator[] 造册，陌生 trace 落 `trajectory.unowned_tool_trace` 诊断不进状态机；dangling 收口三分支（已声明补 cancelled / 未声明落诊断 / 空字段先诊断不发明知坏事件）。四条 wire 的空 call id 挡在 assembler 边界（早帧缺 id 终帧按 output index 合并，双缺丢弃不伪造假 id）。真机四场验收：verify 全过、悬空工具 0。365/365 全绿。
+
 ## [v0.26.176] - 2026-09-03
 
 - **派工任务书自动带本机环境附录。** 子代理开工前，宿主探测一次构建环境（preset 挑法、`_deps` 离线依赖树齐不齐、ctest 规矩），以 `[宿主注入·本机环境附录]` 标注附在任务 prompt 尾部——离线 configure 路径、临时 USERPROFILE、动头文件 `--clean-first` 全替它写好，不再自己摸环境烧 turn 烧 token（对照实战：三段套话裸派的子代理全程自摸环境）。探测一次会话内缓存，用户正文一个字节不动。
