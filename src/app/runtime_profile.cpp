@@ -39,6 +39,18 @@ agent::AgentRuntimeProfile BuildSubagentRuntimeProfile(const agent::AgentRuntime
         profile.max_output_tokens = config.subagent.max_output_tokens;
         profile.max_output_tokens_source = agent::OutputBudgetSource::ConfigFile;
     }
+    // 受控收窄(派工单 §四):继承来的能力级声明(模型目录/provider)超出
+    // 子任务上限的部分收掉——输出预留不该一刀切吃掉半扇窗口,普通子任务
+    // 的工具轮用不了那么多输出,报告阶段真要长文再显式放宽。显式配置
+    //(ConfigFile)不收,用户手笔尊重原值。
+    if (profile.max_output_tokens.has_value() &&
+        profile.max_output_tokens_source != agent::OutputBudgetSource::ConfigFile) {
+        const int cap = agent::SubagentOutputReserveCap(profile.context_window_tokens);
+        if (*profile.max_output_tokens > cap) {
+            profile.max_output_tokens = cap;
+            profile.max_output_tokens_source = agent::OutputBudgetSource::SubagentDefault;
+        }
+    }
     return profile;
 }
 
@@ -51,6 +63,8 @@ std::string OutputBudgetSourceText(agent::OutputBudgetSource source, bool subage
             return cli::tr("config.output_source.provider");
         case agent::OutputBudgetSource::ModelCatalog:
             return cli::tr("config.output_source.catalog");
+        case agent::OutputBudgetSource::SubagentDefault:
+            return cli::tr("config.output_source.subagent_default");
         case agent::OutputBudgetSource::Unset:
             return cli::tr("config.output_source.unset");
     }

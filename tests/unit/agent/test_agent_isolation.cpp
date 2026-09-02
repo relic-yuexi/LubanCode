@@ -377,3 +377,18 @@ TEST_CASE("agent isolation: 调用者未提交改动明示,不悄悄丢(派工�
     // 调用者的 wip.txt 从头到尾没进过任何房。
     CHECK(repo.AgentRooms().empty());
 }
+
+TEST_CASE("agent isolation: 无后台后端的后台+worktree 派工——preflight 先拒,worktree 零创建") {
+    GitRepo repo;
+    FakeBackend backend;
+    backend.scripts = {TextScript("不该跑到")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, PathToUtf8(repo.root));
+    const auto rejected = agent_tool.execute(
+        nlohmann::json{{"title", "后台隔离"}, {"prompt", "x"}, {"execution_mode", "background"},
+                       {"isolation", "worktree"}});
+    CHECK(rejected.is_error);
+    CHECK(rejected.content.find("[background_unavailable]") != std::string::npos);
+    CHECK(repo.AgentRooms().empty());          // worktree 零创建
+    CHECK(backend.captured_requests.empty());  // backend 零调用
+}

@@ -5,6 +5,8 @@
 //      effective max_output_tokens 相同(默认同级,不暗自缩小);
 //   3. subagent 段显式覆盖才不同,且来源标明;
 //   4. 未写 subagent 段时永不出现 4096 这类编译期魔数。
+// 派工单 §四追加一条:能力级声明(目录/provider)超出子任务受控上限的
+// 部分收窄(256k 窗 × 128k 目录上限的真机事故),显式配置不受收窄。
 // 真机回归(vLLM 0.27.1 + qwen3.8-27b)的解析层行为也钉在这里:unset 时
 // 请求不带字段,墙在服务端。
 
@@ -103,8 +105,10 @@ TEST_CASE("main 与 general-purpose 子代理的有效输出上限相同(规格\
     CHECK(sub_unset.max_steps_per_turn == main_unset.max_steps_per_turn);
 
     // 声明之后:同轮同值——改 provider/模型目录后两边一起变(同一只装配
-    // 函数算出来,不存在子代理另算一套)。
-    config.provider_max_output_tokens = std::size_t{32768};
+    // 函数算出来,不存在子代理另算一套)。声明值取受控上限内的 16384
+    //(默认窗 256k 的上限是 32000):能力声明超上限的收窄是派工单 §四的
+    // 另一条规矩,由下面的专项 TEST CASE 钉。
+    config.provider_max_output_tokens = std::size_t{16384};
     const agent::AgentRuntimeProfile main_set = app::BuildMainRuntimeProfile(config, nullptr, config.model);
     const agent::AgentRuntimeProfile sub_set = app::BuildSubagentRuntimeProfile(main_set, config);
     REQUIRE(main_set.max_output_tokens.has_value());
@@ -139,4 +143,56 @@ TEST_CASE("InheritForSubagent:整份继承,不暗自缩小(规格\"产品不变�
     CHECK(sub.max_context_chars == main_profile.max_context_chars);
     CHECK(sub.context_window_tokens == main_profile.context_window_tokens);
     CHECK(sub.length_continuations == main_profile.length_continuations);
+}
+
+TEST_CASE("子任务输出预留受控上限(派工单 §四):能力声明超窗收窄,显式配置不收") {
+    // cap 表:窗口未知与大窗封 32k;中窗按 window/8;小窗托底 8k。
+    CHECK(agent::SubagentOutputReserveCap(0) == 32768);
+    CHECK(agent::SubagentOutputReserveCap(262144) == 32768);
+    CHECK(agent::SubagentOutputReserveCap(65536) == 8192);
+    CHECK(agent::SubagentOutputReserveCap(16384) == 8192);  // window/8=2048,托底 8k
+
+    // 事故形状:256k 窗 × 128k 目录上限——main 原样(那是模型能力),子任务
+    // 收到 32k、来源记 SubagentDefault;显式 subagent 段配置尊重原值。
+    config::Config config;
+    config.wire = config::Wire::ChatCompletions;
+    config.model = "glm-4.6";
+    config.context_window_tokens = 262144;
+
+    config::ModelCatalog catalog;
+    config::ModelCatalogEntry entry;
+    entry.slug = "glm-4.6";
+    entry.max_output_tokens = std::size_t{128000};
+    catalog.models.push_back(entry);
+
+    const agent::AgentRuntimeProfile main_profile = app::BuildMainRuntimeProfile(config, &catalog, config.model);
+    REQUIRE(main_profile.max_output_tokens.has_value());
+    CHECK(*main_profile.max_output_tokens == 128000);
+    CHECK(main_profile.max_output_tokens_source == agent::OutputBudgetSource::ModelCatalog);
+
+    const agent::AgentRuntimeProfile sub = app::BuildSubagentRuntimeProfile(main_profile, config);
+    REQUIRE(sub.max_output_tokens.has_value());
+    CHECK(*sub.max_output_tokens == 32768);
+    CHECK(sub.max_output_tokens_source == agent::OutputBudgetSource::SubagentDefault);
+    // 收窄只动输出上限:窗口/字符网/续跑次数照旧继承。
+    CHECK(sub.context_window_tokens == main_profile.context_window_tokens);
+    CHECK(sub.max_context_chars == main_profile.max_context_chars);
+    CHECK(sub.length_continuations == main_profile.length_continuations);
+
+    // 显式配置(用户手笔)哪怕超上限也不收。
+    config.subagent.max_output_tokens = 128000;
+    const agent::AgentRuntimeProfile sub_explicit = app::BuildSubagentRuntimeProfile(main_profile, config);
+    REQUIRE(sub_explicit.max_output_tokens.has_value());
+    CHECK(*sub_explicit.max_output_tokens == 128000);
+    CHECK(sub_explicit.max_output_tokens_source == agent::OutputBudgetSource::ConfigFile);
+
+    // 能力声明在上限之内(如 16k)不动,来源保持原样。注意改 catalog 里
+    // 那份(栈上的 entry 是 push_back 时的副本)。
+    catalog.models[0].max_output_tokens = std::size_t{16384};
+    const agent::AgentRuntimeProfile main_small = app::BuildMainRuntimeProfile(config, &catalog, config.model);
+    config.subagent.max_output_tokens = std::nullopt;
+    const agent::AgentRuntimeProfile sub_small = app::BuildSubagentRuntimeProfile(main_small, config);
+    REQUIRE(sub_small.max_output_tokens.has_value());
+    CHECK(*sub_small.max_output_tokens == 16384);
+    CHECK(sub_small.max_output_tokens_source == agent::OutputBudgetSource::ModelCatalog);
 }

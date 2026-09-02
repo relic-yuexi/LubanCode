@@ -410,6 +410,42 @@ std::string AgentTypeListingLine(const AgentTypeInfo& info, std::size_t max_char
     return "- " + info.name + ": " + flat;
 }
 
+// ---- 后台能力的稳定拒绝文案与 schema 修形(派工单 §二)----------------------
+// 错误码 [background_unavailable] + 当前入口 + 可用模式 + 改法,四件一套;
+// schema、派工前 preflight、执行口三处共用同一份话,不各说各话。
+std::string BackgroundUnavailableText(bool nested) {
+    std::string text = "[background_unavailable] 当前入口没有配置后台子代理后端,后台派工在任务注册前即拒绝。\n";
+    text += "当前入口: " +
+            std::string(nested ? "嵌套子代理树(无冻结后台工厂)" : "主入口(管道/单发)") + "\n";
+    text += "可用执行模式: auto(本入口等价前台)、foreground。改法: execution_mode 设为 foreground 或不传;"
+            "旧参数 run_in_background 设为 false 同效。\n";
+    text += "如需真后台: 在交互会话(配置了后台子代理后端的入口)派工。";
+    return text;
+}
+
+// 嵌套壳按当前入口修 schema(派工单 §二):环境没有后台工厂时把 background
+// 从枚举里摘掉、说明里写明不可用——模型看得到的选项与执行口判的同一本账。
+void DropBackgroundFromSchema(nlohmann::json& schema) {
+    if (!schema.contains("properties") || !schema["properties"].is_object()) {
+        return;
+    }
+    nlohmann::json& properties = schema["properties"];
+    if (!properties.contains("execution_mode") || !properties["execution_mode"].is_object()) {
+        return;
+    }
+    nlohmann::json& mode = properties["execution_mode"];
+    if (mode.contains("enum") && mode["enum"].is_array()) {
+        std::vector<std::string> values = mode["enum"].get<std::vector<std::string>>();
+        values.erase(std::remove(values.begin(), values.end(), "background"), values.end());
+        mode["enum"] = values;
+    }
+    if (mode.contains("description") && mode["description"].is_string()) {
+        mode["description"] = mode["description"].get<std::string>() +
+                              "\n本嵌套入口没有后台子代理后端:background 不可用(派工前预检以 "
+                              "[background_unavailable] 稳定拒绝),auto 等价前台。";
+    }
+}
+
 }  // namespace
 
 bool AgentFaceIsReadOnly(
@@ -627,6 +663,15 @@ AgentTool::~AgentTool() {
     coordinator_->JoinAllBounded();
 }
 
+bool AgentTool::BackgroundBackendAvailable(const std::shared_ptr<const SubagentDispatchEnv>& env) const {
+    if (env != nullptr) {
+        // 嵌套:无 UI 的树只认冻结工厂;有 UI 的嵌套(前台任务的孩子)还能
+        // 借会话工厂——与 LaunchBackground 的材料分路同一张表。
+        return env->backend_factory != nullptr || (!env->headless && detached_backend_factory_ != nullptr);
+    }
+    return detached_backend_factory_ != nullptr;
+}
+
 std::string AgentTool::name() const {
     return "agent";
 }
@@ -695,10 +740,18 @@ nlohmann::json AgentTool::input_schema() const {
     type_prop["description"] = std::move(type_description);
     properties["agent_type"] = type_prop;
 
+    // 执行模式按当前入口生成(派工单 §2.4):本入口没有后台子代理后端时,
+    // background 不进枚举、说明写明不可用与改法——能力快照不再把没路的
+    // 模式摆出来,调用方不必撞了运行时才知道。
+    const bool background_available = detached_backend_factory_ != nullptr;
     nlohmann::json mode_prop = nlohmann::json::object();
     mode_prop["type"] = "string";
-    mode_prop["enum"] = nlohmann::json::array({"auto", "foreground", "background"});
-    mode_prop["description"] =
+    if (background_available) {
+        mode_prop["enum"] = nlohmann::json::array({"auto", "foreground", "background"});
+    } else {
+        mode_prop["enum"] = nlohmann::json::array({"auto", "foreground"});
+    }
+    std::string mode_description =
         ToolText("agent", "param.execution_mode",
                  "执行模式,缺省 auto。auto:交互会话里默认后台独立跑(结论完成后自动交回主对话,"
                  "主对话可继续干别的)——不要习惯性写 foreground,只有下一步非等这份结果不可才显式写;"
@@ -707,14 +760,25 @@ nlohmann::json AgentTool::input_schema() const {
                  "未预先放行的操作会被拒绝。foreground:本次调用阻塞等子代理结论。"
                  "旧参数 run_in_background 仍认(true=background,false=foreground);"
                  "两者都给时,显式(非 auto)的 execution_mode 优先。");
+    if (!background_available) {
+        mode_description +=
+            "\n本入口未配置后台子代理后端:background 不可用(派工前预检以 [background_unavailable] "
+            "稳定拒绝),auto 等价前台;请用 foreground 或不传。";
+    }
+    mode_prop["description"] = std::move(mode_description);
     properties["execution_mode"] = mode_prop;
 
     nlohmann::json background_prop = nlohmann::json::object();
     background_prop["type"] = "boolean";
-    background_prop["description"] =
+    std::string background_description =
         ToolText("agent", "param.run_in_background",
                  "(兼容旧参)是否放到会话后台运行:true 等价 execution_mode=background,"
                  "false 等价 foreground。新调用建议用 execution_mode。");
+    if (!background_available) {
+        background_description +=
+            "\n本入口没有后台后端:传 true 会被 [background_unavailable] 稳定拒绝,请用 false。";
+    }
+    background_prop["description"] = std::move(background_description);
     properties["run_in_background"] = background_prop;
 
     nlohmann::json isolation_prop = nlohmann::json::object();
@@ -906,6 +970,15 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
     }
     request.background =
         mode_explicit ? mode_background : input.value("run_in_background", background_by_default_);
+
+    // capability preflight(派工单 §2.4):后台后端没配就在派工口稳定拒绝——
+    // 带稳定错误码、当前入口、可用模式与改法,不等任务注册后才报;此口在
+    // 隔离房创建、Resolver、backend 构造之前,backend 零调用、worktree 零
+    // 创建。auto 落到前台(没有 background_by_default_ 或显式 foreground)
+    // 的调用不受影响。
+    if (request.background && !BackgroundBackendAvailable(env)) {
+        return {BackgroundUnavailableText(env != nullptr), true};
+    }
 
     std::string isolation = input.value("isolation", std::string("none"));
     if (isolation != "none" && isolation != "worktree") {
@@ -1278,9 +1351,13 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
     } else if (!headless && detached_backend_factory_) {
         backend_source = detached_backend_factory_;
     } else if (!nested) {
-        return {"当前入口没有配置后台子代理后端,请把 run_in_background 设为 false", true};
+        // 执行口兜底(派工单 §二):正常该在 ExecuteDispatch 的 preflight 就
+        // 拦下;走到这里是装配中途工厂被拆——同一套稳定文案,不换说法。
+        return {BackgroundUnavailableText(/*nested=*/false), true};
     } else {
-        return {"嵌套后台派工没有可用的冻结后端工厂,已拒发:请由当前代理直接完成,或改派前台任务。", true};
+        return {"[background_unavailable] 嵌套后台派工没有可用的冻结后端工厂,已拒发:请由当前代理直接完成,"
+                "或改派前台任务(execution_mode=foreground)。",
+                true};
     }
     const std::function<std::unique_ptr<ToolRegistry>()> registry_source =
         nested && env->registry_factory ? env->registry_factory : detached_registry_factory_;
@@ -1761,7 +1838,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         sub_wiring.on_context_pressure = [this, &sub_agent, &backend, &task_model, task](
                                              const agent::ContextPressure& pressure) {
             if (pressure.phase != agent::ContextPressure::Phase::PreRequest || !pressure.projected_overflow) {
-                return;  // AfterHardTrim 是纯通报;安全网丢的东西压缩救不回
+                return;  // AfterHardTrim/PreflightExceeded 是纯通报:前者安全网丢的东西压缩救不回,
+                         // 后者是最终闸的三项账(§4.4 可观测事件),这里不动作。
             }
             agent::CompactOptions options;  // 子代理没有守恒待办,双账只做结构校验
             // 与主会话同一条双账路(四分区单·阶段 2-4):turn 分区 map +
@@ -2981,10 +3059,20 @@ std::string AgentDispatchTool::description() const {
     return "把独立任务委托给子代理。";
 }
 nlohmann::json AgentDispatchTool::input_schema() const {
-    if (const Tool* facade = handle_.facade_tool(); facade != nullptr) {
-        return facade->input_schema();
+    const Tool* facade = handle_.facade_tool();
+    if (facade == nullptr) {
+        return nlohmann::json::object();
     }
-    return nlohmann::json::object();
+    nlohmann::json schema = facade->input_schema();
+    // 按当前入口修后台可见性(派工单 §二):嵌套壳的环境没有后台工厂时,
+    // background 从枚举摘掉——模型看得见的选项与 preflight/执行口同一本账。
+    // main 那枚壳(env 为空)不修,schema 与门面逐字节一致(旧测试钉的形状)。
+    const std::shared_ptr<const SubagentDispatchEnv>& env = handle_.env();
+    const AgentTool* agent_facade = dynamic_cast<const AgentTool*>(facade);
+    if (env != nullptr && agent_facade != nullptr && !agent_facade->BackgroundBackendAvailable(env)) {
+        DropBackgroundFromSchema(schema);
+    }
+    return schema;
 }
 tools::Tool::Result AgentDispatchTool::execute(const nlohmann::json& input) { return handle_.Dispatch(input); }
 // 取消旗透传:壳不许洗 context(AgentTool 侧另有自己的 CancelChain,外层
