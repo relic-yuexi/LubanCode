@@ -195,6 +195,8 @@
 
 `prompt` 必填，必须自包含；子代理看不见主对话。
 
+可选参数 `template: "full"`：宿主给 prompt 套六件套任务书引导壳（单子路径/范围红线/环境实情/纪律/完工标准/回报格式），原文逐字节保留——模板见 [agents.md §1.2](agents.md#12-派工任务书六件套模板)。另有环境附录：宿主启动时探测一次本机构建环境（CMake preset、build 树、`_deps` 离线料），成文缓存后自动附在每笔派工 prompt 尾部，标注 `[宿主注入·本机环境附录]`，与用户正文不混淆；非 CMake 工程探测不出就不注入。
+
 预算不在工具入参里，模型定不了——两道闸都不给模型旋钮。**任务总 turn** 走配置 `subagent.default_max_turns` 或自定义 Agent YAML 的 `runtime.max_turns`：一道闸管到任务终态，续投、孩子回流、Stop 钩子续跑共一本账。**每输入轮步数**走 `subagent.max_steps_per_turn`（未设则继承 `max_steps_per_turn`，默认 `0` = 不限步；legacy，待迁移）。这两道口子早先是敞开的，实测模型见字段就填，一趟深挖的活被自己掐到十来步就 `budget_exhausted` 收场，等于把配置里"不限步"的默认悄悄夺了。默认不限是有意为之：防跑飞靠 ESC/Ctrl+C，不靠模型自己拍一个数。
 
 解析层仍收 `max_steps_per_turn`（旧名 `max_turns` 兼容，两者同现取新名）：手写 JSON、老脚本、测试照旧能用，`0` 表示不设上限，负数拒绝。两枚键都是 legacy 每输入轮语义，给了会随结果带回一行 `[弃用提示]`——任务总量预算改走 Agent YAML `runtime.max_turns` 或宿主 typed 派工（旧名 `max_turns` 在明确破坏版本前不会改成任务总 turn 的意思）。

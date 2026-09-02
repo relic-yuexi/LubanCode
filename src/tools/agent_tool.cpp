@@ -37,6 +37,7 @@
 #include "tools/instruction_scope.hpp"  // 写前作用域闸(AGENTS.md 作用域单 P0)
 #include "tools/observation_filter.hpp"  // 观察边界(P2-5):子代理日志目录默认不可搜
 #include "tools/path_utils.hpp"
+#include "tools/subagent_env_appendix.hpp"  // 环境附录探测成文与六件套套壳(2.1/2.2)
 #include "tools/subagent_isolation.hpp"
 #include "tools/todo_tool.hpp"
 #include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明/persona)查表,源头 prompts/tools/
@@ -893,6 +894,18 @@ nlohmann::json AgentTool::input_schema() const {
                  "改代码的多步任务建议带上;只读摸排不必。缺省 none。");
     properties["isolation"] = isolation_prop;
 
+    // template(2.2 P2):任务书套壳,可选。只认 "full"(六件套引导壳);
+    // 壳不重写正文,原文逐字节保留,套完环境附录照常附尾。
+    nlohmann::json template_prop = nlohmann::json::object();
+    template_prop["type"] = "string";
+    template_prop["enum"] = nlohmann::json::array({"full"});
+    template_prop["description"] =
+        ToolText("agent", "param.template",
+                 "(可选)任务书套壳:full = 宿主给 prompt 套六件套引导壳(单子路径/范围红线/环境实情/纪律/"
+                 "完工标准/回报格式),任务原文逐字节保留。模板只引导不强制,自包含已写清的简单任务不必套;"
+                 "大单子(修 todos 单、多步改码)套上更稳。");
+    properties["template"] = template_prop;
+
     schema["properties"] = properties;
     schema["required"] = nlohmann::json::array({"title", "prompt"});
 
@@ -913,6 +926,20 @@ std::vector<AgentTypeInfo> AgentTool::CachedAgentTypes() const {
         agent_types_cache_.loaded = true;
     }
     return agent_types_cache_.types;
+}
+
+// 环境附录(2.1 P1)的一次性缓存:首调探测并定格(空 probe 也算"探测过",
+// 记空串不注入),之后会话内只读——重复派工不重复探测。probe 在锁内跑:
+// 生产装配里是一次文件系统探测(git 仓库根在装配层先折好),会话至多一遍。
+std::string AgentTool::CachedEnvAppendix() {
+    std::lock_guard<std::mutex> lock(env_appendix_cache_.mutex);
+    if (!env_appendix_cache_.loaded) {
+        if (env_appendix_probe_) {
+            env_appendix_cache_.text = env_appendix_probe_();
+        }
+        env_appendix_cache_.loaded = true;
+    }
+    return env_appendix_cache_.text;
 }
 
 Tool::Result AgentTool::execute(const nlohmann::json& input) {
@@ -1107,6 +1134,23 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
     }
     request.isolate = isolation == "worktree";
 
+    // template(派工任务书单 2.2 P2):任务书套壳,可选。当前只认 "full"
+    //(六件套引导壳);不传就不套。此处只解析置位,套壳动作在下面查单之后
+    //(查单吃原文)、环境附录注入之前(附录永远在最尾),原文逐字节保留。
+    if (const auto it = input.find("template"); it != input.end() && !it->is_null()) {
+        if (!it->is_string()) {
+            return reject("template 类型不对",
+                          "template 得是字符串,当前只认 \"full\"(六件套任务书套壳)。不套壳就不传。");
+        }
+        const std::string template_value = it->get<std::string>();
+        if (template_value != "full") {
+            return reject("template 取值不合法",
+                          "template 当前只认 \"full\"(六件套任务书套壳:单子路径/范围红线/环境实情/纪律/"
+                          "完工标准/回报格式);不套壳就不传。");
+        }
+        request.template_full = true;
+    }
+
     // 入参双读(命名规范第二批):预算类键都不出 schema(见 input_schema 的
     // 说明——模型见字段就填,索性不给),但解析层照旧收:手写 JSON、老脚本、
     // 测试都还走这条路。新名 max_steps_per_turn 优先,旧名 max_turns 兼容;
@@ -1285,6 +1329,18 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
             request.task_input_text, Utf8ToPath(request.caller_cwd), git_runner_);
         completed.has_value()) {
         return {*completed, true};
+    }
+
+    // ---- 任务书尾部注入(派工任务书单 2.1 P1 / 2.2 P2)----------------------
+    // 都在用户正文之外动手术:template: full 先给原文套六件套引导壳(原文
+    // 逐字节居中),环境附录再附最尾([宿主注入·本机环境附录] 标注来源,不
+    // 与用户正文混淆;探测一次,会话内缓存)。spec(任务语义合同)仍存原文
+    // ——哈希与台账记派工者的意图,宿主注入不进合同;上面查单吃的也是原文。
+    if (request.template_full) {
+        request.task_input_text = WrapPromptWithTaskTemplate(request.task_input_text);
+    }
+    if (const std::string appendix = CachedEnvAppendix(); !appendix.empty()) {
+        request.task_input_text += "\n\n" + appendix;
     }
 
     // 入参过了检:连败账翻篇——改对了就不记仇,后续调用从引导文案重新起。
