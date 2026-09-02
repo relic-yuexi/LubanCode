@@ -22,6 +22,19 @@ namespace lubancode::cli {
 
 namespace {
 
+// 钥匙撞车单:通名变量(ANTHROPIC_*/OPENAI_* 前缀)配进 key_env 时给提示——
+// Claude Code、Codex、各类代理都爱往这些名字里塞别家钥匙,撞上就是 401。
+// 大小写不敏感(Windows 环境变量名本就不分大小写)。往后要扩点名(GEMINI_
+// 一类)就在这里添前缀。
+bool IsCommonEnvVarName(const std::string& name) {
+    std::string lower;
+    lower.reserve(name.size());
+    for (const char c : name) {
+        lower.push_back(static_cast<char>(std::tolower(static_cast<unsigned char>(c))));
+    }
+    return lower.rfind("anthropic_", 0) == 0 || lower.rfind("openai_", 0) == 0;
+}
+
 // ---------------------------------------------------------------------------
 // 小工具
 // ---------------------------------------------------------------------------
@@ -487,6 +500,11 @@ StepResult RunAuthStep(WizardIO& io, ProviderWizardState& state) {
             env_frame.body.push_back(current.has_value() && !current->empty()
                                          ? trf("provider_wizard.auth.env.note_set", default_env)
                                          : trf("provider_wizard.auth.env.note_unset", default_env));
+            // 钥匙撞车单:默认名是通名就叫一声(用户自敲通名时,下次 edit 进
+            // 这页 key_env 已成默认,同样能看到)。
+            if (IsCommonEnvVarName(default_env)) {
+                env_frame.body.push_back(trf("provider_wizard.auth.env.common_name", default_env));
+            }
             env_frame.error = state.last_error;
             env_frame.prompt = tr("provider_wizard.auth.env.input");
             env_frame.footer = tr("provider_wizard.footer.back");

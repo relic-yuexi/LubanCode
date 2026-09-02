@@ -240,8 +240,8 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 | `name` | 字符串,必填 | provider 名字,`/provider switch <名字>` 用。 |
 | `base_url` | 字符串,必填 | 服务根地址。 |
 | `wire` | `anthropic-messages` / `openai-responses` / `openai-chat-completions` / `google-generate-content` | 协议；旧名只作兼容输入。 |
-| `key_env` | 字符串 | 密钥所在环境变量名(默认只记名字,不落明文密钥)。 |
-| `api_key` | 字符串,可选 | 非空时优先于 `key_env`(`/provider add` 向导贴明文密钥走这条,展示/日志一律打码)。 |
+| `key_env` | 字符串 | 密钥所在环境变量名(默认只记名字,不落明文密钥)。别用 `ANTHROPIC_*`/`OPENAI_*` 这类通名——Claude Code、Codex、代理工具都可能往里塞别家的钥匙,撞上了启动会给警告,但更稳妥的是换个专用变量名。 |
+| `api_key` | 字符串,可选 | 明文密钥,展示/日志一律打码。取钥优先级(自上而下):`key_env` 指的变量存在且有值,用它(压过 `api_key`;两把都有且不一致时启动打一行警告,明示用的是变量那把);变量没设,回落 `api_key`;两把都无才报缺。 |
 | `model` | 字符串,可选 | 默认模型,留空仍可 `/model` 选。 |
 | `model_reasoning_effort` | 字符串,可选 | 切到该 provider 时按 `/think` 同一套机制应用的推理档位。 |
 | `context_window` | 字符串或整数 | 上下文窗口,默认 `256000`。 |
@@ -576,7 +576,12 @@ lubancode --config
 
 ### Provider 有 key，仍报未认证
 
-若写 `key_env`，它存的是环境变量名，不是密钥。确认启动 LubanCode 的同一进程环境里真有该变量。明文 `api_key` 优先于 `key_env`，空串则按没设处理。
+若写 `key_env`，它存的是环境变量名，不是密钥。确认启动 LubanCode 的同一进程环境里真有该变量。
+
+取钥优先级:`key_env` 指的变量存在且有值就用它(压过 `api_key`);变量没设回落 `api_key`;两把都无才报缺。空串一律按没设处理。两个常见坑:
+
+- **撞车**:`key_env` 配了 `ANTHROPIC_AUTH_TOKEN` 这类通名,而 shell 里 Claude Code、Codex 或代理工具已经往里注入了别家的钥匙——变量压过配置里贴好的 `api_key`,服务端回 401。两把都有且不一致时启动会打警告(变量名 + 两把钥匙打码前缀),按提示 unset 变量,或 `/provider set <名字> auth inline` 改走明文。
+- **不兜底的历史版**:`api_key` 落了盘、变量没设,老版本仍报"缺少配置: api_key"。现在的版本回落 inline,不再判缺。
 
 ### MCP、LSP、Hooks 改了却不生效
 

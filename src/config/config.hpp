@@ -221,7 +221,7 @@ struct ProviderConfig {
     // 解析旧配置(没写 auth)时按 api_key 有无现场迁移,序列化时永远落盘。
     ProviderAuthMode auth = ProviderAuthMode::Env;
     std::string key_env = "ANTHROPIC_AUTH_TOKEN";
-    std::string api_key;               // auth=inline 时必填，非空时优先于 key_env
+    std::string api_key;               // auth=inline 时必填;env 模式下当兜底(变量有值才压过它)
     std::string model;
     std::string model_reasoning_effort;  // 可选，切到该端时应用的推理档位
     std::size_t context_window_tokens = kDefaultContextWindowTokens;
@@ -1099,13 +1099,25 @@ std::expected<void, std::string> ValidateProviderName(const std::string& name,
 
 // 运行时鉴权解析(向导重排单):把"无需鉴权 / 已取到 key / 该有 key 却缺"
 // 三态分清,模型探测、切换预检和正式请求都吃这一份结果,不许各猜一遍。
+// source/conflict 两枚是观测字段(钥匙撞车单):前者说 Ready 的 key 打哪儿
+// 来,后者标记"变量压过 inline 且两把不一致"——调用方据此打警告/--config
+// 展示来路,文案在 cli 层组词,这里只给结构化事实。
 struct ProviderAuthResolution {
     enum class Status { NotRequired, Ready, Missing };
+    // Ready 时的取值来源(展示/报错用);其余两态保持 None。
+    enum class KeySource { None, Inline, EnvVar };
     Status status = Status::Missing;
     std::optional<std::string> key;  // Ready 时非空;其余两态为 nullopt
     std::string env_name;            // env 模式的变量名(报错/展示用,可为空)
+    KeySource source = KeySource::None;  // Ready 时:这把 key 是 inline 还是变量
+    bool conflict = false;  // 两把都有且不一致(变量赢,inline 被压;警告用)
 };
 ProviderAuthResolution ResolveProviderAuth(const ProviderConfig& provider);
+
+// 钥匙撞车单:该 provider 的 key_env 变量与 inline api_key 两把都有且不一致
+// 时,给一条打码的警告文案(变量名 + 两把的前缀,明示用变量那把)。没撞车
+// 返回 nullopt。启动横幅、/provider 切换预检、--config 共用,别各写一遍。
+std::optional<std::string> ProviderAuthConflictWarning(const ProviderConfig& provider);
 
 // 旧便捷口(保留既有调用方):Ready 时给 key,其余(无需鉴权、缺失)给
 // nullopt。要分清"无需鉴权"与"缺 key"的调用方请改用 ResolveProviderAuth。
@@ -1169,8 +1181,8 @@ bool SetProviderAuthInline(std::vector<ProviderConfig>& providers, const std::st
                            const std::string& api_key);
 
 // 切到环境变量:auth=Env + key_env 一次写齐。key_env 空串拒绝返回 false、
-// 原列表不动。api_key 旧值照留——ResolveProviderAuth 的旧优先级(明文 key
-// 压环境变量)因此照旧生效,与盘上同名函数一致。
+// 原列表不动。api_key 旧值照留,当 env 模式的兜底底座(钥匙撞车单:变量
+// 存在且有值才压过它),与盘上同名函数一致。
 // /provider 补救页"改用另一个环境变量"、/provider set auth env 用。
 bool SetProviderAuthEnv(std::vector<ProviderConfig>& providers, const std::string& name,
                         const std::string& key_env);

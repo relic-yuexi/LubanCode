@@ -241,29 +241,39 @@ ProviderAuthResolution ResolveProviderAuth(const ProviderConfig& provider) {
             if (!provider.api_key.empty()) {
                 out.status = ProviderAuthResolution::Status::Ready;
                 out.key = provider.api_key;
+                out.source = ProviderAuthResolution::KeySource::Inline;
             } else {
                 out.status = ProviderAuthResolution::Status::Missing;
             }
             return out;
-        case ProviderAuthMode::Env:
+        case ProviderAuthMode::Env: {
+            // 钥匙撞车单:inline 是底座,key_env 变量存在且有值才压过它;
+            // 变量不在(未设/空串)回落 inline,不判缺——两把都无才算缺。
+            // 实战里 Claude Code 这类工具爱往通名变量塞别家钥匙,变量整个
+            // 接管会让配置里贴好的 key 悄悄失效(401);倒过来、变量当显式
+            // 覆盖并留 conflict 标记叫人,两头都看得见。
             out.env_name = provider.key_env;
             out.status = ProviderAuthResolution::Status::Missing;
-            // 兼容旧优先级:api_key 非空(明文贴过 key)仍然优先于环境变量——
-            // 一行式 /provider add --key、目录预设贴 key 这些路子构造出来的
-            // 条目可能没显式写 auth=inline,取值不能因此翻车。
-            if (!provider.api_key.empty()) {
+            std::optional<std::string> env_value;
+            if (!provider.key_env.empty()) {
+                env_value = GetEnv(provider.key_env.c_str());
+            }
+            const bool has_env = env_value.has_value() && !env_value->empty();
+            const bool has_inline = !provider.api_key.empty();
+            if (has_env) {
+                out.status = ProviderAuthResolution::Status::Ready;
+                out.key = *env_value;
+                out.source = ProviderAuthResolution::KeySource::EnvVar;
+                if (has_inline && provider.api_key != *env_value) {
+                    out.conflict = true;  // 两把都有且不一致:变量赢,叫人
+                }
+            } else if (has_inline) {
                 out.status = ProviderAuthResolution::Status::Ready;
                 out.key = provider.api_key;
-                return out;
-            }
-            if (!provider.key_env.empty()) {
-                if (const std::optional<std::string> value = GetEnv(provider.key_env.c_str());
-                    value.has_value() && !value->empty()) {
-                    out.status = ProviderAuthResolution::Status::Ready;
-                    out.key = *value;
-                }
+                out.source = ProviderAuthResolution::KeySource::Inline;
             }
             return out;
+        }
     }
     return out;
 }
@@ -271,6 +281,16 @@ ProviderAuthResolution ResolveProviderAuth(const ProviderConfig& provider) {
 std::optional<std::string> ProviderApiKey(const ProviderConfig& provider) {
     const ProviderAuthResolution resolved = ResolveProviderAuth(provider);
     return resolved.status == ProviderAuthResolution::Status::Ready ? resolved.key : std::nullopt;
+}
+
+std::optional<std::string> ProviderAuthConflictWarning(const ProviderConfig& provider) {
+    const ProviderAuthResolution resolved = ResolveProviderAuth(provider);
+    if (!resolved.conflict || !resolved.key.has_value()) {
+        return std::nullopt;
+    }
+    // 打码走 MaskApiKey 同款(露前缀认钥匙,其余遮死),两把都露的是打码值。
+    return cli::trf("warn.auth_key_conflict", provider.key_env, MaskApiKey(*resolved.key),
+                    MaskApiKey(provider.api_key));
 }
 
 const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers, const std::string& name) {
@@ -3333,6 +3353,15 @@ std::expected<void, std::string> RequireApiKey(const ConfigResult& result) {
     if (!result.config.auth_token.empty()) {
         return {};
     }
+    // 钥匙撞车单:激活的是 provider 条目时,报错点名它 key_env 指的变量与
+    // inline 状态——用户知道该去设哪个变量,或改贴明文 key,不用瞎猜。
+    // (auth=env 才可能走到缺:inline 校验非空、none 在上面就放行了。)
+    if (const ProviderConfig* provider =
+            FindProvider(result.config.providers, result.config.active_provider);
+        provider != nullptr && provider->auth == ProviderAuthMode::Env) {
+        return std::unexpected(
+            cli::trf("error.api_key_missing_provider", provider->name, provider->key_env));
+    }
     const std::string generic_api_key_name =
         result.config.wire == Wire::Anthropic ? "ANTHROPIC_AUTH_TOKEN" : "OPENAI_API_KEY";
     return std::unexpected(cli::trf("error.api_key_missing", generic_api_key_name));
@@ -3368,6 +3397,7 @@ std::expected<void, std::string> RequireConfigured(const ConfigResult& result) {
     // "base_url"/"api_key" 字样反而误导人去查不缺的字段。
     std::string joined;
     std::string joined_env;
+    bool api_key_missing = false;
     for (std::size_t i = 0; i < missing.size(); ++i) {
         if (i != 0) {
             joined += "、";
@@ -3378,9 +3408,22 @@ std::expected<void, std::string> RequireConfigured(const ConfigResult& result) {
         for (const char c : missing[i]) {
             joined_env += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         }
+        if (missing[i] == "api_key") {
+            api_key_missing = true;
+        }
     }
 
-    return std::unexpected(cli::trf("error.not_configured", joined, joined_env));
+    std::string message = cli::trf("error.not_configured", joined, joined_env);
+    // 钥匙撞车单:api_key 在缺的名单里且激活的是 provider 条目时,追加一行
+    // 点名 key_env 指的变量与 inline 状态,别让人对着泛名瞎试。
+    if (api_key_missing) {
+        if (const ProviderConfig* provider =
+                FindProvider(result.config.providers, result.config.active_provider);
+            provider != nullptr && provider->auth == ProviderAuthMode::Env) {
+            message += "\n" + cli::trf("error.not_configured.key_detail", provider->name, provider->key_env);
+        }
+    }
+    return std::unexpected(message);
 }
 
 std::expected<std::string, std::string> SaveConfigFile(const Config& config) {
