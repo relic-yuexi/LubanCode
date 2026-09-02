@@ -499,6 +499,18 @@ std::optional<std::string> ReadRowText(int row) {
     return std::nullopt;
 }
 
+bool WriteNativeRow(int x, int y, const NativeRowCell* cells, int cell_count) {
+    // POSIX 终端没有可移植的"按坐标直写缓冲区"原语(一切皆字节流),原生
+    // 行直写恒不可用——忙路 footer 在这平台上按 PlanInlineRepaint 走 VT 批
+    // 低频档(真状态变化才落帧),批内 CUP 的中间态风险已知并接受,见
+    // console.hpp 的 8.2 选路注。
+    (void)x;
+    (void)y;
+    (void)cells;
+    (void)cell_count;
+    return false;
+}
+
 RawInputScope::RawInputScope() {
     ok_ = EnterRawTermios(&original_termios_);
 }

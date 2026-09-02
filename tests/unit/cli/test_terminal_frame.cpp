@@ -10,7 +10,10 @@ using lubancode::cli::InlineFrame;
 using lubancode::cli::InlineFrameRow;
 using lubancode::cli::LayoutComposerRows;
 using lubancode::cli::QueueInlineFrameDiff;
+using lubancode::cli::BuildNativeRowCells;
+using lubancode::cli::PaintInlineFrameNativeRows;
 using lubancode::cli::TurnActivityRowChanged;
+namespace native_bits = lubancode::platform;
 using lubancode::platform::StdoutConsoleProbe;
 using lubancode::platform::TerminalBatch;
 
@@ -116,7 +119,7 @@ TEST_CASE("terminal batch: sync=true 整批包 2026,sync=false 一枚不包") {
     CHECK(plain_bytes == "x");
 }
 
-TEST_CASE("inline repaint plan: VT×sync 四档选路") {
+TEST_CASE("inline repaint plan: 8.2 二轮重裁——Windows 恒原生直写,VT 批只剩 POSIX") {
     // 无 VT(老 conhost/管道):原生兜底路,谈不上同步输出。
     StdoutConsoleProbe none;
     none.is_console = true;
@@ -126,9 +129,9 @@ TEST_CASE("inline repaint plan: VT×sync 四档选路") {
     CHECK_FALSE(plan_none.vt_batch);
     CHECK_FALSE(plan_none.sync_output);
 
-    // 普通 VT + 未确认 2026:Windows 退原生控制台 API(不搬实体光标的屏
-    // 幕写入),不再发会漏中间态的 CUP 串;POSIX 无原生路,退 VT 批不包
-    // 2026(动画已撤,只在真状态变化时单笔落帧)。
+    // 普通 VT + 未确认 2026:Windows 恒原生直写行(8.1 实锤批内 CUP 搬
+    // buffer 光标,2026 只缓冲文本渲染救不了);POSIX 无原生路,退 VT 批
+    // 不包 2026(低频档,接受已知中间态)。
     StdoutConsoleProbe vt_only;
     vt_only.is_console = true;
     vt_only.vt_enabled = true;
@@ -136,19 +139,27 @@ TEST_CASE("inline repaint plan: VT×sync 四档选路") {
     const auto plan_vt_only = lubancode::platform::PlanInlineRepaint(vt_only);
 #ifdef _WIN32
     CHECK_FALSE(plan_vt_only.vt_batch);
+    CHECK_FALSE(plan_vt_only.sync_output);
 #else
     CHECK(plan_vt_only.vt_batch);
-#endif
     CHECK_FALSE(plan_vt_only.sync_output);
+#endif
 
-    // 普通 VT + 确认 2026:VT 批 + 同步输出,帧原子提交。
+    // 普通 VT + 确认 2026:8.2 裁决"2026 保护光标"的前提已被实验否定——
+    // Windows 上一律 native 写行(照样全 false);POSIX 才是 VT 批 + 同步
+    // 输出(文本撕裂它还是防得住的)。
     StdoutConsoleProbe vt_sync;
     vt_sync.is_console = true;
     vt_sync.vt_enabled = true;
     vt_sync.sync_output = true;
     const auto plan_vt_sync = lubancode::platform::PlanInlineRepaint(vt_sync);
+#ifdef _WIN32
+    CHECK_FALSE(plan_vt_sync.vt_batch);
+    CHECK_FALSE(plan_vt_sync.sync_output);
+#else
     CHECK(plan_vt_sync.vt_batch);
     CHECK(plan_vt_sync.sync_output);
+#endif
 
     // 防御:VT 都不开却报 sync(矛盾输入),一律按无 VT 处理。
     StdoutConsoleProbe broken;
@@ -195,6 +206,116 @@ TEST_CASE("turn activity row: 同一秒零变化,秒数/标签/中断态变才�
     CHECK(TurnActivityRowChanged("思考中", 10, false, "Stopping...", 10, false));
     // 中断置位(圆点换 error 色):重画。
     CHECK(TurnActivityRowChanged("思考中", 10, false, "思考中", 10, true));
+}
+
+// ---- 单 2 二轮(8.2):原生行直写的纯函数合同 ----
+// BuildNativeRowCells 是"落什么"的全部账:SGR 译 16 色位、宽字双格、尾部
+// 铺默认空格、整字截断。WriteNativeRow 只管落盘,真 console 行为由 driver
+// G0 高频轨迹幕钉(单测环境没有真控制台)。
+
+TEST_CASE("native row cells: 无 SGR 的明文整行默认属性,尾部铺空格") {
+    const auto cells = BuildNativeRowCells("ab", 5);
+    REQUIRE(cells.size() == 5);
+    CHECK(cells[0].ch == U'a');
+    CHECK(cells[1].ch == U'b');
+    CHECK(cells[2].ch == U' ');
+    CHECK(cells[3].ch == U' ');
+    CHECK(cells[4].ch == U' ');
+    for (const auto& cell : cells) {
+        CHECK(cell.attr == 0);  // 0 = 默认属性记号,WriteNativeRow 落盘时换控制台默认
+    }
+}
+
+TEST_CASE("native row cells: 主题 SGR 译 16 色位,加粗补亮、压暗去亮") {
+    using namespace lubancode::platform;
+    const std::uint16_t fg_gray = kNativeFgRed | kNativeFgGreen | kNativeFgBlue;              // "2;37" 暗白
+    const std::uint16_t fg_cyan = kNativeFgGreen | kNativeFgBlue;                             // "36" 青
+    const std::uint16_t fg_bold_green = kNativeFgGreen | kNativeFgIntensity;                  // "1;32" 亮绿
+    const std::uint16_t fg_bold_red = kNativeFgRed | kNativeFgIntensity;                      // "1;31" 亮红
+    // dark 主题 stats("\x1b[2;37m") + spinner("\x1b[36m") + error("\x1b[1;31m") + 复位。
+    const std::string row = std::string("\x1b[2;37m") + "灰" + "\x1b[36m" + "青" +
+                            "\x1b[1;31m" + "红" + "\x1b[0m" + "默认";
+    const auto cells = BuildNativeRowCells(row, 40);
+    REQUIRE(cells.size() == 40);
+    CHECK(cells[0].ch == U'灰');  // 灰(宽字前半格)
+    CHECK(cells[0].attr == (fg_gray | kNativeCellLeading));
+    CHECK(cells[1].attr == (fg_gray | kNativeCellTrailing));
+    CHECK(cells[2].ch == U'青');  // 青
+    CHECK(cells[2].attr == (fg_cyan | kNativeCellLeading));
+    CHECK(cells[4].ch == U'红');  // 红
+    CHECK(cells[4].attr == (fg_bold_red | kNativeCellLeading));
+    // 复位之后回默认属性记号。
+    CHECK(cells[6].ch == U'默');
+    CHECK(cells[6].attr == kNativeCellLeading);
+    // "1;32" 先加粗后给色:加粗在前景还是默认时记账不落位,色号一到补上
+    // 强度——亮绿不许褪成暗绿。
+    const auto bold_green = BuildNativeRowCells("\x1b[1;32mG", 3);
+    CHECK(bold_green[0].attr == (kNativeFgGreen | kNativeFgIntensity));
+    CHECK(fg_bold_green == (kNativeFgGreen | kNativeFgIntensity));
+    // 90 系亮色自带强度,不被"未加粗"抹掉。
+    const auto bright = BuildNativeRowCells("\x1b[91mX", 3);
+    CHECK(bright[0].attr == (kNativeFgRed | kNativeFgIntensity));
+}
+
+TEST_CASE("native row cells: 宽字占双格带半格旗标,放不下整字就截断") {
+    using namespace lubancode::platform;
+    // "• 思考中" —— bullet(1 格)+ 空格 + 三个宽字(各 2 格)。
+    const std::string bullet = "\xe2\x80\xa2 \xe6\x80\x9d\xe8\x80\x83\xe4\xb8\xad";  // bullet + 空格 + 思考中
+    const auto full = BuildNativeRowCells(bullet, 12);
+    REQUIRE(full.size() == 12);
+    CHECK(full[0].ch == 0x2022);
+    CHECK(full[0].attr == 0);
+    CHECK(full[2].ch == 0x601d);  // 思
+    CHECK(full[2].attr == kNativeCellLeading);
+    CHECK(full[3].attr == kNativeCellTrailing);
+    CHECK(full[6].ch == 0x4e2d);  // 中:第三个宽字,占 [6][7] 双格
+    CHECK(full[7].attr == kNativeCellTrailing);
+    CHECK(full[8].ch == U' ');
+    CHECK(full[11].ch == U' ');
+    // 只有 3 格:bullet + 空格之后放不下整个"思"(2 格),整字截断补空格。
+    const auto cut = BuildNativeRowCells(bullet, 3);
+    REQUIRE(cut.size() == 3);
+    CHECK(cut[0].ch == 0x2022);
+    CHECK(cut[1].ch == U' ');
+    CHECK(cut[2].ch == U' ');
+}
+
+TEST_CASE("native row cells: 256 色近似到最近 16 色,非 SGR 的 CSI 序列直接跳过") {
+    using namespace lubancode::platform;
+    // 38;5;196 = 纯红 -> 亮红(9 号)。
+    const auto red = BuildNativeRowCells("\x1b[38;5;196mR", 2);
+    CHECK(red[0].attr == (kNativeFgRed | kNativeFgIntensity));
+    // 38;2;255;0;0 同为纯红,殊途同归。
+    const auto rgb = BuildNativeRowCells("\x1b[38;2;255;0;0mR", 2);
+    CHECK(rgb[0].attr == (kNativeFgRed | kNativeFgIntensity));
+    // 夹杂非 SGR 的 CSI(光标类):不产格、不动色,只吃字节。
+    const auto csi = BuildNativeRowCells("\x1b[2J\x1b[36mC", 4);
+    REQUIRE(csi.size() == 4);
+    CHECK(csi[0].ch == U'C');
+    CHECK(csi[0].attr == (kNativeFgGreen | kNativeFgBlue));
+}
+
+TEST_CASE("native frame paint: 管道拒直写、越界行无笔可落,真写路不碰光标") {
+    InlineFrame previous{{InlineFrameRow{0, 10, false, "old"}}, 2, 0};
+    InlineFrame next{{InlineFrameRow{0, 10, false, "new"}}, 2, 0};
+    if (lubancode::platform::ProbeStdoutConsole().is_console) {
+        // 手工在真控制台直跑测试本体的情形:屏内行不许写(单测不涂屏),
+        // 用越界行验"无笔可落不算失败"与脏行记账。
+        std::size_t rows = 0;
+        CHECK(PaintInlineFrameNativeRows(nullptr, next, 1000000, &rows));
+        CHECK(rows == 1);
+    } else {
+        // CTest/管道环境(常态):WriteNativeRow 拿不到控制台缓冲区,
+        // PaintInlineFrameNativeRows 必须如实返回 false 让调用方退
+        // PaintInlineFrameLegacy——直写路写失败时装死才是真祸。POSIX 无
+        // 原生路,同样恒 false。
+        std::size_t painted_rows = 99;
+        CHECK_FALSE(PaintInlineFrameNativeRows(&previous, next, 5, &painted_rows));
+        CHECK(painted_rows == 0);
+    }
+    // "写行不动光标"的正面合同在真 console 上由 driver G0 高频轨迹幕钉
+    //(几十 kHz 采样,任何 CUP 中间态现形);纯函数侧能钉的半边是:构建
+    // 器产物只有"字符+属性",压根不存在光标语义。
 }
 
 // ---- 帧账"保锚可见"决策(多智能体真机回归单):纯函数钉死两套控制台形态的账 ----

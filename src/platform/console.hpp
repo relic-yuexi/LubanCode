@@ -58,24 +58,64 @@ StdoutConsoleProbe ProbeStdoutConsole();
 // 队列安静时问(交互会话开场已预热,见 RunInteractiveSession)。
 bool ProbeSyncOutputSupport();
 
-// 原地重画的选路计划(终端思考活动条单·P0 治根):绘制方(忙路 footer/
-// 空闲 composer)据这份计划决定走哪条路——
+// 原地重画的选路计划(终端思考活动条单·P0 治根;单 2 二轮按 8.2 裁决重裁):
+// 绘制方(忙路 footer/空闲 composer)据这份计划决定走哪条路——
 //   vt_batch=true:VT 批,定位/擦行/正文/归光标攒成一段字节一次写出;
-//   sync_output=true:批外包 `CSI ?2026 h/l`,一帧原子提交,中间 CUP 不露。
+//   sync_output=true:批外包 `CSI ? 2026 h/l`。
 struct InlineRepaintPlan {
     bool vt_batch = false;
     bool sync_output = false;
 };
-// 选路规矩:
-//   普通 VT + 确认 2026   -> VT 批 + 同步输出(帧原子,动画与 diff 随便跑);
-//   普通 VT + 未确认 2026 -> Windows 退原生控制台 API(FillConsoleOutput 一
-//                            族,不搬实体光标的屏幕写入),不再发会漏中间
-//                            态的 CUP 串;POSIX 没有原生路(一切皆字节流,
-//                            散装 CUP 逐条 flush 比单批更漏),退 VT 批不包
-//                            2026——动画此时必须已撤,只在真状态变化时单笔
-//                            落帧;
-//   无 VT                 -> 原生 API 兜底路(与旧 PaintInlineFrameLegacy 同款)。
+// 选路规矩(8.2 二轮重裁,"2026 保护光标"的前提已被实验否定):
+//   8.1 取证实锤——conhost 手搓 DECRQM 答 `CSI ?2026;2$y`(认得 2026),
+//   driver 高频轨迹(几十 kHz)仍录得每秒换帧时光标真实经过活动行行首再
+//   回输入行:conhost/WT 对 2026 的实现只缓冲文本渲染,不缓冲光标位置,
+//   VT 批内 CUP 照样把 buffer 光标搬去活动行。故:
+//   Windows 真 console -> vt_batch 恒 false:行级重画走原生 WriteConsoleOutput
+//                         直写(WriteNativeRow,字符+属性按坐标一次落,光标
+//                         原地不动),footer 帧序列里不再有 CUP;
+//   POSIX              -> 没有原生缓冲区 API,保留 VT 批低频档(真状态变化
+//                         才落帧),批内 CUP 的中间态风险已知并接受——动画
+//                         已撤,一秒至多一帧,肉眼可忍;确认 2026 的终端照包
+//                         (文本撕裂它还是防得住的)。
+// 能力探测(ProbeStdoutConsole/ProbeSyncOutputSupport)照旧保留:POSIX 选
+// 路还要用 sync 结论,Windows 侧留作诊断档案——只是选路不再信"2026=原子"。
 InlineRepaintPlan PlanInlineRepaint(const StdoutConsoleProbe& probe);
+
+// ---------------------------------------------------------------------------
+// 原生行直写(单 2 二轮·8.2):Windows 真 console 上 footer 行级重画的正路
+// ---------------------------------------------------------------------------
+
+// 一个单元格 = 一个字符 + 一份 16 色属性。attr 的低 8 位是颜色位,取值与
+// Windows 控制台的 FOREGROUND_*/BACKGROUND_* 完全同值(见 console_win.cpp
+// 的 static_assert);attr==0 是"默认属性"记号,WriteNativeRow 落盘时换成
+// 控制台当前默认(黑底上请求"纯黑前景"本就与默认不可分,footer 行从不请
+// 求,撞了也不亏)。高 10 位可携带宽字半格旗标(kNativeCellLeading/
+// kNativeCellTrailing),与 COMMON_LVB_LEADING_BYTE/TRAILING_BYTE 同值。
+constexpr std::uint16_t kNativeFgBlue = 0x01;
+constexpr std::uint16_t kNativeFgGreen = 0x02;
+constexpr std::uint16_t kNativeFgRed = 0x04;
+constexpr std::uint16_t kNativeFgIntensity = 0x08;
+constexpr std::uint16_t kNativeBgBlue = 0x10;
+constexpr std::uint16_t kNativeBgGreen = 0x20;
+constexpr std::uint16_t kNativeBgRed = 0x40;
+constexpr std::uint16_t kNativeBgIntensity = 0x80;
+constexpr std::uint16_t kNativeCellLeading = 0x0100;  // 宽字前半格
+constexpr std::uint16_t kNativeCellTrailing = 0x0200;  // 宽字后半格
+
+struct NativeRowCell {
+    char32_t ch = U' ';
+    std::uint16_t attr = 0;  // 0 = 默认属性(落盘时替换);否则为颜色位|半格旗标
+};
+
+// 把 cells 从缓冲区坐标 (x, y) 起整行直写进控制台(Windows: WriteConsole
+// OutputW 的 CHAR_INFO 块)。字符与属性一次落,**全程不碰光标**——这正是
+// 8.2 裁决要的原生行写入:CUP 从帧序列里清出去,buffer 光标一步不挪。
+// 返回 false = 这台宿主没有原生路(POSIX 无缓冲区 API/Windows 下 stdout
+// 不是真控制台/写失败),调用方退各自的兜底写路。
+// cells 应当已经铺满整行的清写宽度(尾部空格补齐,构建器 BuildNativeRow
+// Cells 负责包办);越出缓冲区的部分自动按交集裁剪,交集为空不算失败。
+bool WriteNativeRow(int x, int y, const NativeRowCell* cells, int cell_count);
 
 // 真控制台此刻的显示宽度(列数),查 stdout。探测不到返回 std::nullopt,
 // 调用方按 80 列兜底。
