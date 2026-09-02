@@ -233,7 +233,7 @@ TEST_CASE("/send 与 /peerperm 状态账:off 档、空名册、权限档切换")
     options.registry_dir = dir;
     options.name = "solo";
     options.cwd = dir.string();
-    options.permission_mode = [] { return 0; };
+    options.permission_mode = [] { return lubancode::ApprovalMode::Default; };
     idle_runtime.emplace(std::move(options));
     std::string error;
     REQUIRE(idle_runtime->Start(&error));

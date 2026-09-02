@@ -109,13 +109,18 @@ TEST_CASE("队列硬上限:满了再收报 QueueFull") {
     CHECK(mailbox.pending() == 2);
 }
 
-TEST_CASE("默认权限档:两边都确认可直接收;任一边免确认默认 hold;cwd 相远默认 hold") {
-    // 0=confirm, 1=auto, 2=yolo。
-    CHECK(DefaultReceiveTier(0, 0, false) == PeerPermissionTier::Accept);
-    CHECK(DefaultReceiveTier(1, 0, false) == PeerPermissionTier::Hold);
-    CHECK(DefaultReceiveTier(0, 2, false) == PeerPermissionTier::Hold);
-    CHECK(DefaultReceiveTier(2, 2, false) == PeerPermissionTier::Hold);
-    CHECK(DefaultReceiveTier(0, 0, true) == PeerPermissionTier::Hold);
+TEST_CASE("默认权限档:五档强类型，非默认与跨项目都保守 hold") {
+    using lubancode::ApprovalMode;
+    CHECK(DefaultReceiveTier(ApprovalMode::Default, ApprovalMode::Default, false) ==
+          PeerPermissionTier::Accept);
+    const std::vector<ApprovalMode> non_default{ApprovalMode::AcceptEdits, ApprovalMode::Yolo,
+                                                ApprovalMode::Auto, ApprovalMode::DontAsk};
+    for (const auto mode : non_default) {
+        CHECK(DefaultReceiveTier(mode, ApprovalMode::Default, false) == PeerPermissionTier::Hold);
+        CHECK(DefaultReceiveTier(ApprovalMode::Default, mode, false) == PeerPermissionTier::Hold);
+    }
+    CHECK(DefaultReceiveTier(ApprovalMode::Default, ApprovalMode::Default, true) ==
+          PeerPermissionTier::Hold);
 }
 
 TEST_CASE("cwd 距离:前两段相同算近,不同算远,信息不全按远") {

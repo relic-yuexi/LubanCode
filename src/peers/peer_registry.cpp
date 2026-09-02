@@ -39,7 +39,7 @@ nlohmann::json PeerCardToJson(const PeerCard& card) {
     json["started_at"] = card.started_at;
     json["status"] = card.status;
     json["endpoint"] = card.endpoint;
-    json["permission_mode"] = card.permission_mode;
+    json["permission_mode"] = ApprovalModeMachineName(card.permission_mode);
     json["protocol_version"] = card.protocol_version;
     json["last_seen"] = card.last_seen;
     return json;
@@ -69,7 +69,9 @@ std::optional<PeerCard> PeerCardFromJson(const nlohmann::json& json) {
     read_string("name", card.name);
     read_string("cwd", card.cwd);
     read_string("status", card.status);
-    read_string("permission_mode", card.permission_mode);
+    if (const auto it = json.find("permission_mode"); it != json.end() && it->is_string()) {
+        card.permission_mode = ParseApprovalModeOrDefault(it->get<std::string>());
+    }
     const auto read_number = [&](std::string_view key, long long& out) {
         if (const auto it = json.find(key); it != json.end() && it->is_number()) {
             out = it->get<long long>();

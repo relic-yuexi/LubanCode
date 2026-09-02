@@ -105,15 +105,7 @@ std::vector<std::string> AdoptBackgroundHookRecordNotices() {
 }
 
 std::string HookPermissionModeText() {
-    switch (cli::CurrentConfirmMode()) {
-        case cli::ConfirmMode::Confirm:
-            return "confirm";
-        case cli::ConfirmMode::Auto:
-            return "auto";
-        case cli::ConfirmMode::Yolo:
-            return "yolo";
-    }
-    return "confirm";
+    return cli::ConfirmModeMachineName(cli::CurrentConfirmMode());
 }
 
 }  // namespace lubancode::app

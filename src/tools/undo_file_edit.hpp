@@ -54,6 +54,7 @@ public:
     // 即便用户 accept_for_session 过 write_file,这里也不吃那份免问——
     // 撤销的方向与写相反,免问账不通用。
     bool needs_confirm() const override { return true; }
+    ApprovalClass approval_class() const override { return ApprovalClass::FileDestructive; }
 
     // 撤销的撤销还是一次文件改动:与 write/edit 同档(本地可逆)。
     EffectClass effect_class() const override { return EffectClass::LocalReversible; }

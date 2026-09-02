@@ -34,7 +34,7 @@ LubanCode 是一款用 C++23 编写的跨平台 AI 编程 CLI。它用统一事�
 | **命令与验证** | 前台执行构建、测试与 Git 命令，也可把长任务放到后台；支持超时、输出捕获、日志读取与整棵子进程树清理。 |
 | **代理工作流** | 支持多轮工具调用、子代理、待办清单与 `ask_user`；工具过多时先搜索再挂载，还可在隔离 Git worktree 中完成任务。 |
 | **终端交互** | 流式渲染 Markdown；行内公式换成数学 Unicode，块级 LaTeX 用二维字符盒排分式、根式、上下标、括号与矩阵；执行中仍可排队消息，支持逐键编辑、多行输入、粘贴折叠、打断、工具明细展开与全文聚焦。 |
-| **安全确认** | 提供 `confirm`、`auto`、`yolo` 三档；支持工具与命令黑白名单、项目级权限、hooks 与 diff 预览；工具可在本场放行，也可写入项目配置长期生效。 |
+| **安全确认** | 提供 `default`、`accept_edits`、`yolo`、`auto`、`dont_ask` 五档；支持工具与命令黑白名单、项目级权限、hooks 与 diff 预览；工具可在本场放行，也可写入项目配置长期生效。 |
 | **上下文与会话** | 展示 token 占用，自动或手工压缩长对话；支持会话存档、恢复、续聊、标题与 Markdown 导出，并提供默认关闭的项目记忆。 |
 | **扩展能力** | 可挂载 MCP stdio 服务、LSP、Skills、Lua 工具与 C ABI DLL 插件；主题、语言、soul 和 system prompt 均可定制。 |
 | **跨平台交付** | 支持 Windows、Linux 与 macOS；提供初次配置向导、显式 Release 更新检查、安装脚本、CMake 构建、三平台 CI 与按标签自动发布，发行包连同官方 Skills 一并安装。 |
@@ -483,7 +483,7 @@ dogfooding、coverage、durable ack、默认终端 CI 与许可证把地基压�
 
 ### 如何防止工具误操作？
 
-有三档确认模式、工具自身确认属性、项目级命令黑白名单、pre/post hooks 与 diff 预览。密钥走环境变量引用。需要诚实说明：这不是操作系统沙箱；`yolo`、Lua 与 DLL 都有真实风险。
+有五档审批模式（`default`、`accept_edits`、`yolo`、`auto`、`dont_ask`）、工具自身确认属性、项目级命令黑白名单、pre/post hooks 与 diff 预览。密钥走环境变量引用。需要诚实说明：这不是操作系统沙箱；`yolo`、Lua 与 DLL 都有真实风险，`dont_ask` 是“会问则拒”而非全放。
 
 ### 插件为何用 C ABI，不直接导出 C++ 类？
 

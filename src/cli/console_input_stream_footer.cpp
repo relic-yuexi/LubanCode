@@ -699,6 +699,9 @@ void RedrawStreamFooterLocked() {
     model.queue_rows = queue_rows_text;
     model.agent_dock_rows = dock_rows_text;
     model.agent_dock_tints = dock_rows_tints;  // 监督色(P1-1):与行按位对齐
+    if (const auto notice_mode = ModeNoticeSlot().VisibleMode(); notice_mode.has_value()) {
+        model.mode_notice_rows = {PresentApprovalMode(*notice_mode).notice};
+    }
     const bool composer_empty = f.composer.lines.empty() ||
                                 (f.composer.lines.size() == 1 && f.composer.lines[0].empty());
     const bool shortcut_hint = composer_empty && f.composer.hint_lines.size() == 1;
@@ -1147,10 +1150,14 @@ void StreamFooterHeartbeat::Stop() {
 void StreamFooterHeartbeat::ThreadMain() {
     try {
         bool stopping_reported = false;
+        bool mode_notice_was_visible = ModeNoticeSlot().VisibleMode().has_value();
         while (!stop_.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
             if (stop_.load(std::memory_order_acquire)) return;
 
+            const bool mode_notice_visible = ModeNoticeSlot().VisibleMode().has_value();
+            const bool mode_notice_changed = mode_notice_visible != mode_notice_was_visible;
+            mode_notice_was_visible = mode_notice_visible;
             // 活动态的公开口各自拿 stdout 锁；非活动态才在这里拿锁，调用
             // “Locked” 重画口。两者倒过来套会在 MSVC 下撞递归上锁异常。
             if (TurnActivityActive()) {
@@ -1167,6 +1174,10 @@ void StreamFooterHeartbeat::ThreadMain() {
                 // 走字扫光已撤(P0 止血):心跳只报秒数,同一秒的拍在
                 // UpdateTurnActivityElapsed 里就收手,帧审计零新增落笔。
                 UpdateTurnActivityElapsed(elapsed);
+                if (mode_notice_changed) {
+                    std::lock_guard<std::mutex> lock(StdoutWriteMutex());
+                    if (!RepaintSuspendedLocked()) RedrawStreamFooterLocked();
+                }
             } else {
                 std::lock_guard<std::mutex> lock(StdoutWriteMutex());
                 if (RepaintSuspendedLocked()) continue;

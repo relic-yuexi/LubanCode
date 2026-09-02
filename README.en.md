@@ -228,7 +228,7 @@ At startup, LubanCode walks from the Git root to the working directory. Each dir
 
 Useful keys:
 
-- `Shift+Tab`: cycle through `confirm`, `auto`, and `yolo` approval modes.
+- `Shift+Tab`: cycle through `default → accept_edits → yolo → auto → dont_ask`. The Chinese UI labels are “默认模式 / 接受编辑 / YOLO / 自动模式 / 不询问”, and each manual switch shows a yellow explanation above the status line for about six seconds. `dont_ask` rejects actions that would otherwise prompt; it is not YOLO.
 - `Ctrl+O`: toggle compact and detailed tool output.
 - `Ctrl+E`: focus the full content of the selected tool item.
 - `Shift+Enter`: insert a newline in the composer.

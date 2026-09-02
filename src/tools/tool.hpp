@@ -43,6 +43,10 @@ enum class RecoveryCapability {
     Compensatable,         // 反向业务动作(另作一枚可见工具调用)
 };
 
+// 权限核只认工具自报的稳定类别，不按可变工具名猜语义。None 与
+// needs_confirm=false 严格配对；需确认工具必须显式声明其真实类别。
+enum class ApprovalClass { None, FileEdit, FileDestructive, Command, External };
+
 // 工具执行上下文(子代理 x 停止失效单:取消令牌贯通工具进程)。渐进迁移
 // 的口子:RunOneTool 把"这一次调用"的取消旗从这里递进来,工具 override
 // execute(input, context) 便可在长操作里查旗、收子进程树;没 override 的
@@ -77,6 +81,10 @@ public:
 
     // 执行前要不要先问用户一句。默认不用(比如 read_file 这种只读的)。
     virtual bool needs_confirm() const { return false; }
+
+    // 审批类别由工具自报。默认 None 只适用于无需确认工具；所有
+    // needs_confirm=true 的生产工具必须显式 override 成非 None。
+    virtual ApprovalClass approval_class() const { return ApprovalClass::None; }
 
     // tool_search:这个工具是不是"延迟挂载"的——注册表总工具数超过阈值时,
     // 延迟工具不直接进请求的 tools 数组,只在系统提示的索引段里露个名字,

@@ -24,14 +24,14 @@ namespace lubancode::config {
 //   - deny_commands:run_command 命令前缀黑名单,confirm/auto 档里前缀命中就
 //     永远问一句(压过 allow_commands、压过会话"总是允许";yolo/--yes 是显式
 //     全放,deny 不拦);
-//   - default_confirm_mode:起手确认档(auto/yolo/confirm),优先级低于
+//   - default_confirm_mode:起手审批档(default/accept_edits/yolo/auto/dont_ask),优先级低于
 //     --yes/LUBANCODE_CONFIRM_MODE,高于内置默认 confirm。
 // 全部字段可选;坏 JSON 只告警跳过,不崩。
 struct SettingsLocal {
     std::vector<std::string> allow_tools;
     std::vector<std::string> allow_commands;
     std::vector<std::string> deny_commands;
-    std::optional<std::string> default_confirm_mode;  // auto / yolo / confirm
+    std::optional<std::string> default_confirm_mode;  // 五档机读值；兼容 confirm
     // Plan 模式单:起手协作档(plan / default)。优先级低于 --mode 与
     // LUBANCODE_COLLABORATION_MODE(RunCli 的 ResolveStartupPlanMode)。
     std::optional<std::string> default_collaboration_mode;

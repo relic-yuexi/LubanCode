@@ -28,6 +28,7 @@ public:
     std::string description() const override;
     nlohmann::json input_schema() const override;
     bool needs_confirm() const override;
+    tools::ApprovalClass approval_class() const override { return tools::ApprovalClass::External; }
     // 逐枚追踪单:MCP 远端工具按远端未知副作用声明。协议没声明幂等/
     // 补偿,一律按远端不可逆档处理——server metadata 将来若明示
     // idempotent/compensatable,须在装配层显式改,不默认放宽。

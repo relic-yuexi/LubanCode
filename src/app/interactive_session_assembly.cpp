@@ -307,8 +307,66 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
     //(yolo/auto/预放行不问),真要问时 diff 预览 + 三档菜单 + "总是允许"
     // 落回会话账(always_allowed_tools 按引用进 ConfirmToolUse)都在里头。
     lubancode::agent::TurnWiring wiring;
-    wiring.on_tool_confirm = [this](const std::string& tool_use_id, const std::string& name,
-                                    const nlohmann::json& input) -> bool {
+    auto approval_class_slot =
+        std::make_shared<lubancode::tools::ApprovalClass>(lubancode::tools::ApprovalClass::None);
+    wiring.on_permission_evaluate = [this, approval_class_slot](const std::string&, const std::string& name,
+                                           lubancode::tools::ApprovalClass approval_class,
+                                           const nlohmann::json& input,
+                                           const lubancode::runtime::ToolHookDecision& pre) {
+        *approval_class_slot = approval_class;
+        lubancode::runtime::PermissionContext context;
+        context.auto_confirm = auto_confirm;
+        switch (lubancode::cli::CurrentConfirmMode()) {
+            case lubancode::cli::ConfirmMode::Confirm:
+                context.mode = lubancode::runtime::PermissionMode::Confirm;
+                break;
+            case lubancode::cli::ConfirmMode::AcceptEdits:
+                context.mode = lubancode::runtime::PermissionMode::AcceptEdits;
+                break;
+            case lubancode::cli::ConfirmMode::Auto:
+                context.mode = lubancode::runtime::PermissionMode::Auto;
+                break;
+            case lubancode::cli::ConfirmMode::Yolo:
+                context.mode = lubancode::runtime::PermissionMode::Yolo;
+                break;
+            case lubancode::cli::ConfirmMode::DontAsk:
+                context.mode = lubancode::runtime::PermissionMode::DontAsk;
+                break;
+        }
+        context.always_allowed = &always_allowed_tools;
+        context.allow_commands = &settings_local.allow_commands;
+        context.deny_commands = &settings_local.deny_commands;
+        return lubancode::runtime::EvaluatePermission(context, pre, approval_class, name, input);
+    };
+    wiring.on_permission_evaluate_floored =
+        [this, approval_class_slot](const std::string&, const std::string& name,
+                                    lubancode::tools::ApprovalClass approval_class,
+                                    const nlohmann::json& input,
+                                    const lubancode::runtime::ToolHookDecision& pre,
+                                    lubancode::agent::AgentPermissionMode effective) {
+            *approval_class_slot = approval_class;
+            lubancode::runtime::PermissionContext context;
+            context.auto_confirm = auto_confirm;
+            switch (effective) {
+                case lubancode::agent::AgentPermissionMode::Default:
+                    context.mode = lubancode::runtime::PermissionMode::Confirm; break;
+                case lubancode::agent::AgentPermissionMode::AcceptEdits:
+                    context.mode = lubancode::runtime::PermissionMode::AcceptEdits; break;
+                case lubancode::agent::AgentPermissionMode::Yolo:
+                    context.mode = lubancode::runtime::PermissionMode::Yolo; break;
+                case lubancode::agent::AgentPermissionMode::Auto:
+                    context.mode = lubancode::runtime::PermissionMode::Auto; break;
+                case lubancode::agent::AgentPermissionMode::DontAsk:
+                    context.mode = lubancode::runtime::PermissionMode::DontAsk; break;
+            }
+            context.always_allowed = &always_allowed_tools;
+            context.allow_commands = &settings_local.allow_commands;
+            context.deny_commands = &settings_local.deny_commands;
+            return lubancode::runtime::EvaluatePermission(context, pre, approval_class, name, input);
+        };
+    wiring.on_tool_confirm = [this, approval_class_slot](const std::string& tool_use_id,
+                                                         const std::string& name,
+                                                         const nlohmann::json& input) -> bool {
         // 每次现起一只 ToolDisplay:workflow 的工具不在会话条目账上,
         // OnConfirmRequest 查不到 id 拿 -1,确认块退化成纯打印,不会去动
         // 主回合的条目;diff 预览照画(文件工具),菜单照问。
@@ -319,7 +377,7 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
         return lubancode::app::ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display,
                                               settings_local.allow_commands, settings_local.deny_commands,
                                               /*hook_dispatcher=*/nullptr, pre,
-                                              /*has_permission_hooks=*/false, name, input);
+                                              /*has_permission_hooks=*/false, *approval_class_slot, name, input);
     };
     // 权限下限(阶段 5,R 单遗留——"确认口走 ConfirmToolUse 缺省无下限,
     // 等 resolver 接线时一并喂"):`agent: <name>` 节点的自定义 Agent 定义
@@ -327,7 +385,8 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
     // 会话档向下并到下限再裁定,父会话开着 yolo 也不免问。与 agent 工具
     // 路的 Hooks::on_tool_confirm_floored 同一先例(0.26.96)。
     wiring.on_tool_confirm_floored =
-        [this](const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
+        [this, approval_class_slot](const std::string& tool_use_id, const std::string& name,
+                                    const nlohmann::json& input,
                lubancode::agent::AgentPermissionMode floor) -> bool {
         lubancode::cli::ToolDisplay display(transcript_ui_.items(), theme,
                                             lubancode::platform::ProbeStdoutConsole().is_console,
@@ -335,8 +394,11 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
         const lubancode::runtime::ToolHookDecision pre;
         lubancode::runtime::PermissionMode runtime_floor = lubancode::runtime::PermissionMode::Yolo;
         switch (floor) {
-            case lubancode::agent::AgentPermissionMode::Confirm:
+            case lubancode::agent::AgentPermissionMode::Default:
                 runtime_floor = lubancode::runtime::PermissionMode::Confirm;
+                break;
+            case lubancode::agent::AgentPermissionMode::AcceptEdits:
+                runtime_floor = lubancode::runtime::PermissionMode::AcceptEdits;
                 break;
             case lubancode::agent::AgentPermissionMode::Auto:
                 runtime_floor = lubancode::runtime::PermissionMode::Auto;
@@ -344,11 +406,14 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
             case lubancode::agent::AgentPermissionMode::Yolo:
                 runtime_floor = lubancode::runtime::PermissionMode::Yolo;
                 break;
+            case lubancode::agent::AgentPermissionMode::DontAsk:
+                runtime_floor = lubancode::runtime::PermissionMode::DontAsk;
+                break;
         }
         return lubancode::app::ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display,
                                               settings_local.allow_commands, settings_local.deny_commands,
                                               /*hook_dispatcher=*/nullptr, pre,
-                                              /*has_permission_hooks=*/false, name, input, {},
+                                              /*has_permission_hooks=*/false, *approval_class_slot, name, input, {},
                                               runtime_floor);
     };
     return wiring;
@@ -488,6 +553,8 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
               }
           }
           runtime_options.lubancode_version = std::string(lubancode::app::kVersion);
+          runtime_options.approval_mode =
+              static_cast<lubancode::ApprovalMode>(lubancode::cli::CurrentConfirmMode());
           // --continue(§10.4):启动路直接开 start_reason=resume 的新场,
           // 不先造空 session;没有可恢复场回落普通开张(同旧路
           // quiet_if_none)。恢复的历史由启动善后段灌进 loop。
@@ -614,7 +681,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         peer_host.home_lubancode = &home_lubancode;
         peer_host.session_title = [this]() { return session_title; };
         peer_host.permission_mode = [] {
-            return static_cast<int>(lubancode::cli::CurrentConfirmMode());
+            return static_cast<lubancode::ApprovalMode>(lubancode::cli::CurrentConfirmMode());
         };
         peer_wiring_.AttachHost(std::move(peer_host));
 

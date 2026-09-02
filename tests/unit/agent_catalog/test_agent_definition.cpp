@@ -85,7 +85,7 @@ runtime:
   isolation: none
 
 permissions:
-  mode: confirm
+  mode: default
 )yaml";
     const auto result = agent::ParseAgentDefinitionYaml(yaml, "browser-tester.yaml");
     REQUIRE(result.definition.has_value());
@@ -124,7 +124,7 @@ permissions:
     CHECK(*def.length_continuations == 1);
     CHECK(def.execution_mode == "auto");
     CHECK(def.isolation == "none");
-    CHECK(def.permissions_mode == "confirm");
+    CHECK(def.permissions_mode == "default");
 }
 
 TEST_CASE("最小合法 YAML:三样必填之外全走默认(继承)") {
@@ -444,9 +444,8 @@ TEST_CASE("枚举认不得:prompt.soul=on 报错并列出只收的值") {
     }
 }
 
-TEST_CASE("permissions.mode:契约四值各过,read_only 报错并指路 tools.allow") {
-    // 契约 4.9:mode 只认 inherit/confirm/auto/yolo,四值各解析成自己。
-    for (const char* mode : {"inherit", "confirm", "auto", "yolo"}) {
+TEST_CASE("permissions.mode:五档 canonical、inherit 与旧 confirm 兼容") {
+    for (const char* mode : {"inherit", "default", "accept_edits", "yolo", "auto", "dont_ask"}) {
         const std::string yaml =
             std::string("schema: 1\nname: a\ndescription: d\npermissions:\n  mode: ") + mode + "\n";
         const auto result = agent::ParseAgentDefinitionYaml(yaml, "a.yaml");
@@ -454,6 +453,14 @@ TEST_CASE("permissions.mode:契约四值各过,read_only 报错并指路 tools.a
         CHECK(result.issues.empty());
         CHECK(result.definition->permissions_mode == mode);
     }
+
+    const auto legacy = agent::ParseAgentDefinitionYaml(
+        "schema: 1\nname: a\ndescription: d\npermissions:\n  mode: confirm\n", "a.yaml");
+    REQUIRE(legacy.definition.has_value());
+    CHECK(legacy.definition->permissions_mode == "default");
+    REQUIRE(legacy.issues.size() == 1);
+    CHECK(legacy.issues.front().warning);
+    CHECK(legacy.issues.front().code == "agent.legacy_permission_confirm");
 
     // read_only 不进首版:报 agent.bad_enum 一路的错,文案点名 tools.allow。
     const auto rejected = agent::ParseAgentDefinitionYaml(

@@ -59,7 +59,8 @@ NodeExecResult ToolExecutor::Execute(const NodeExecRequest& request) {
     }
     // 旧路的守门语义照旧:needs_confirm 的工具既没有宿主确认口也没有旧
     // gate 时,明拒 not_configured——RunOneTool 缺省放行,这里不许静默跟放。
-    if (tool->needs_confirm() && !chain.on_tool_confirm && !chain.on_tool_confirm_async) {
+    if (tool->needs_confirm() && !chain.on_permission_evaluate && !chain.on_tool_confirm &&
+        !chain.on_tool_confirm_async) {
         result.error_code = "not_configured";
         result.error_message = "工具要确认,但没人管确认门: " + request.node->tool;
         return result;
@@ -105,10 +106,11 @@ NodeExecResult ToolExecutor::Execute(const NodeExecRequest& request) {
         // 稳定码映射:旧两码(permission_denied/tool_error)不动,新路才有
         // 的失败形态(钩子拦/Plan 拒/schema 打回)按 RunOneTool 给的稳定码
         // 透传,journal 与 on_error 边看得见细因。
-        result.error_code = tool_result.error_code == agent::kErrPermissionDeclined
-                                ? std::string("permission_denied")
-                                : (tool_result.error_code.empty() ? std::string("tool_error")
-                                                                  : tool_result.error_code);
+        result.error_code =
+            (tool_result.error_code == agent::kErrPermissionDeclined ||
+             tool_result.error_code == agent::kErrPermissionNoPromptDenied)
+                ? std::string("permission_denied")
+                : (tool_result.error_code.empty() ? std::string("tool_error") : tool_result.error_code);
         result.error_message = tool_result.content.substr(0, 500);
         return result;
     }
@@ -332,7 +334,7 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
         wiring.turn_budget = &node_turn_gate;
     }
     // workflow 没接审批宿主时,危险工具明拒;不能因回调空着便默认放行。
-    if (!wiring.on_tool_confirm && !wiring.on_tool_confirm_async) {
+    if (!wiring.on_permission_evaluate && !wiring.on_tool_confirm && !wiring.on_tool_confirm_async) {
         wiring.on_tool_confirm = [](const std::string&, const std::string&, const nlohmann::json&) {
             return false;
         };
@@ -341,19 +343,27 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
             return "workflow agent 节点未接审批宿主，已拒绝 " + name;
         };
     }
-    // 权限下限接线(阶段 5,R 单遗留):Resolver 已校验"不许放宽"(越宽在
-    // 解析口明拒),"收窄生效"在这半截——自定义 Agent 的定义档比会话档
-    // 严时(父 yolo 子 confirm),确认回调换成宿主的"带下限"口,会话档
-    // 向下并到下限再裁定,该问就真把确认拉回。宿主没接 floored 口(旧
-    // 装配)或档不比父严时,原样转发,行为不变。与 agent 工具路的
-    // Hooks::on_tool_confirm_floored 同一先例(0.26.96)。
-    if (custom.has_value() && custom->permission_floor.has_value() && wiring.on_tool_confirm_floored) {
-        auto floored = wiring.on_tool_confirm_floored;
-        const agent::AgentPermissionMode floor = *custom->permission_floor;
-        wiring.on_tool_confirm = [floored, floor](const std::string& tool_use_id, const std::string& name,
-                                                  const nlohmann::json& input) {
-            return floored(tool_use_id, name, input, floor);
-        };
+    // Resolver 已给出父子求交后的有效五档。预裁定与最终确认必须共用它：
+    // 只包确认口会让父 Yolo 在更早的 evaluator 阶段直接 Allow。
+    if (custom.has_value() && custom->permission_floor.has_value()) {
+        const agent::AgentPermissionMode effective = *custom->permission_floor;
+        if (wiring.on_permission_evaluate_floored) {
+            auto floored_evaluate = wiring.on_permission_evaluate_floored;
+            wiring.on_permission_evaluate =
+                [floored_evaluate, effective](const std::string& tool_use_id, const std::string& name,
+                                              tools::ApprovalClass approval_class,
+                                              const nlohmann::json& input,
+                                              const runtime::ToolHookDecision& pre) {
+                    return floored_evaluate(tool_use_id, name, approval_class, input, pre, effective);
+                };
+        }
+        if (wiring.on_tool_confirm_floored) {
+            auto floored = wiring.on_tool_confirm_floored;
+            wiring.on_tool_confirm = [floored, effective](const std::string& tool_use_id, const std::string& name,
+                                                          const nlohmann::json& input) {
+                return floored(tool_use_id, name, input, effective);
+            };
+        }
     }
 
     // turn 推进走 TurnHarness。面板补充只在一轮正常收口后取，取到便另开

@@ -36,6 +36,11 @@ public:
     struct Hooks {
         std::function<bool(const std::string& tool_use_id, const std::string& name,
                            const nlohmann::json& input)> on_tool_confirm;
+        std::function<runtime::PermissionVerdict(const std::string& tool_use_id, const std::string& name,
+                                                 tools::ApprovalClass approval_class,
+                                                 const nlohmann::json& input,
+                                                 const runtime::ToolHookDecision& pre)>
+            on_permission_evaluate;
         std::function<runtime::ToolHookDecision(const std::string& tool_use_id, const std::string& name,
                                               const nlohmann::json& input)>
             on_pre_tool_use_hook;

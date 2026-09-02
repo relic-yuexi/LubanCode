@@ -36,27 +36,6 @@ std::string NextMessageId(const std::string& peer_id) {
 
 bool PidAlive(unsigned long pid) { return platform::IsProcessAlive(pid); }
 
-std::string PermissionModeName(int mode) {
-    switch (mode) {
-        case 1:
-            return "auto";
-        case 2:
-            return "yolo";
-        default:
-            return "confirm";
-    }
-}
-
-int PermissionModeValue(const std::string& name) {
-    if (name == "auto") {
-        return 1;
-    }
-    if (name == "yolo") {
-        return 2;
-    }
-    return 0;
-}
-
 }  // namespace
 
 std::string DefaultPeerEndpoint(const std::string& peer_id) {
@@ -84,7 +63,7 @@ PeerRuntime::PeerRuntime(PeerRuntimeOptions options)
     own_.started_at = NowUnix();
     own_.status = "idle";
     own_.endpoint = DefaultPeerEndpoint(own_.peer_id);
-    own_.permission_mode = "confirm";
+    own_.permission_mode = ApprovalMode::Default;
     own_.last_seen = own_.started_at;
 }
 
@@ -114,7 +93,7 @@ bool PeerRuntime::Start(std::string* error) {
         // 心跳。
         std::lock_guard<std::mutex> lock(card_mutex_);
         if (options_.permission_mode) {
-            own_.permission_mode = PermissionModeName(options_.permission_mode());
+            own_.permission_mode = options_.permission_mode();
         }
     }
     RewriteCard();
@@ -130,7 +109,7 @@ bool PeerRuntime::Start(std::string* error) {
                 std::lock_guard<std::mutex> lock(card_mutex_);
                 own_.last_seen = NowUnix();
                 if (options_.permission_mode) {
-                    own_.permission_mode = PermissionModeName(options_.permission_mode());
+                    own_.permission_mode = options_.permission_mode();
                 }
             }
             RewriteCard();
@@ -263,16 +242,17 @@ std::string PeerRuntime::HandleRequestOnTransportThread(const std::string& paylo
     PeerPermissionTier effective = tier_.load();
     if (effective == PeerPermissionTier::Auto) {
         const std::vector<PeerCard> peers = registry_.ListPeers(NowUnix(), PidAlive);
-        int remote_mode = 0;
+        ApprovalMode remote_mode = ApprovalMode::Default;
         std::string remote_cwd;
         for (const auto& card : peers) {
             if (card.peer_id == parsed->sender_id) {
-                remote_mode = PermissionModeValue(card.permission_mode);
+                remote_mode = card.permission_mode;
                 remote_cwd = card.cwd;
                 break;
             }
         }
-        const int local_mode = options_.permission_mode ? options_.permission_mode() : 0;
+        const ApprovalMode local_mode =
+            options_.permission_mode ? options_.permission_mode() : ApprovalMode::Default;
         bool far_apart = true;
         {
             std::lock_guard<std::mutex> lock(card_mutex_);

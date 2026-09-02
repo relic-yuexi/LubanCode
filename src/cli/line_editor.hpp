@@ -17,8 +17,10 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -83,23 +85,46 @@ struct KeyEvent {
     static KeyEvent Simple(KeyKind k) { return KeyEvent{k, 0, {}, 0}; }
 };
 
-// Shift+Tab 循环切换的三档会话级确认模式,main.cpp 的工具确认回调按这个
-// 分流:
-//   Confirm(默认) —— needs_confirm 的工具逐个问(现状)
-//   Auto           —— write_file/edit_file 自动放行;run_command 过命令
-//                     安全分类(tools/command_safety),安全命令放行、
-//                     危险仍问;MCP/插件等外挂工具仍问
-//   Yolo           —— 全自动(等价 --yes)
-enum class ConfirmMode { Confirm, Auto, Yolo };
+// Shift+Tab 循环切换的五档会话级审批模式。
+enum class ConfirmMode { Confirm, AcceptEdits, Yolo, Auto, DontAsk };
 
-// 滚动切到下一档:Confirm -> Auto -> Yolo -> Confirm。单独导出成纯函数,
-// 方便不经过 LineEditorCore 也能测这一条轮转规则。
+// 唯一轮转顺序:默认 -> 接受编辑 -> YOLO -> 自动模式 -> 不询问 -> 默认。
 ConfirmMode NextConfirmMode(ConfirmMode mode);
 
-// 中文说法(切换通知用):档位的展示词,状态行(StatusLineModeSegment)、
-// 切换通知共用,纯函数。0.21.x 起提示符不再带 [auto]/[yolo] 前缀,档位
-// 全交给常驻状态行,原来的 ConfirmModePromptPrefix 随之废除。
+// 稳定机读值与兼容解析。旧 confirm 是 default 的兼容别名；未知值返回空。
+const char* ConfirmModeMachineName(ConfirmMode mode);
+std::optional<ConfirmMode> ParseConfirmMode(std::string_view value);
+
+enum class ModeColorRole { Default, AcceptEdits, Yolo, Auto, DontAsk };
+
+struct ModePresentation {
+    std::string current_label;
+    std::string next_label;
+    std::string notice;
+    std::string machine_name;
+    ModeColorRole color_role = ModeColorRole::Default;
+};
+
+// 当前语言下的完整展示语义；不夹 ANSI。
+ModePresentation PresentApprovalMode(ConfirmMode mode);
 std::string ConfirmModeLabel(ConfirmMode mode);
+
+// 用户 Shift+Tab 切档后的会话级说明。时间点由调用方传入，测试可用假时钟
+// 精确钉住 5999/6000ms；SetConfirmMode 等启动/配置入口不经过 Show。
+class ModeNoticeState {
+public:
+    using Clock = std::chrono::steady_clock;
+    static constexpr auto kDuration = std::chrono::milliseconds(6000);
+
+    void Show(ConfirmMode mode, Clock::time_point now = Clock::now());
+    std::optional<ConfirmMode> VisibleMode(Clock::time_point now = Clock::now()) const;
+    void Reset();
+
+private:
+    mutable std::mutex mutex_;
+    std::optional<ConfirmMode> mode_;
+    Clock::time_point expires_at_{};
+};
 
 // 补全候选:slash 命令名 + 一句话说明,由调用方(console_input.cpp)从
 // cli::slash_commands 现有的命令定义转换而来,核心层自己不认得任何具体

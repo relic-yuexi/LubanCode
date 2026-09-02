@@ -78,7 +78,7 @@ LubanCode 会记住你的项目事实与偏好——构建命令、代码风格�
 | **代码工具** | 读、写、容错编辑、搜索文件；前台或后台跑命令；改动先看 diff，再落盘。 |
 | **语义与外接工具** | LSP 定义、引用、符号、诊断；MCP stdio；联网搜索与网页抓取。 |
 | **代理工作流** | 子代理、三档角色模型、Plan 模式、待办清单、`ask_user`、`AGENTS.md`、隔离 worktree 与项目级权限。 |
-| **终端体验** | 分段 Markdown 渲染、动态工作状态、常驻消息队列、智能粘贴折叠、逐键编辑、折叠与聚焦、三档确认。 |
+| **终端体验** | 分段 Markdown 渲染、动态工作状态、常驻消息队列、智能粘贴折叠、逐键编辑、折叠与聚焦、五档审批。 |
 | **上下文与存档** | token 占用分析、确定性裁面、可追回 artifact、按需局部摘要、会话恢复、标题、Markdown 导出。 |
 | **扩展与定制** | Skills、Lua 工具、C ABI DLL 插件、hooks、主题、i18n、soul 与 system prompt。 |
 
@@ -227,7 +227,7 @@ git diff --cached | lubancode "替我审一遍这份改动"
 
 几个键也常用：
 
-- `Shift+Tab`：循环切换 `confirm`、`auto`、`yolo`。
+- `Shift+Tab`：按 `default → accept_edits → yolo → auto → dont_ask` 循环审批档。中文状态栏依次显示“默认模式 / 接受编辑 / YOLO / 自动模式 / 不询问”；每次切档会在状态栏上方显示约 6 秒黄色说明。`DontAsk` 是“原本会询问的动作直接拒绝”，不是 YOLO。
 - `Ctrl+O`：工具输出在紧凑与详细之间切换。
 - `Ctrl+E`：聚焦查看当前工具条目全文。
 - `Shift+Enter`：输入框里换行。

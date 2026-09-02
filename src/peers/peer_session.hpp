@@ -29,6 +29,7 @@
 #include <unordered_set>
 #include <vector>
 
+#include "approval_mode.hpp"
 #include "peers/peer_mailbox.hpp"
 #include "peers/peer_registry.hpp"
 #include "platform/peer_transport.hpp"
@@ -46,7 +47,7 @@ struct PeerRuntimeOptions {
     std::string name;                        // 显示名(可由 /title 派生)
     std::string session_id;                  // 会话存档 id,可为空
     std::string cwd;                         // 会话工作目录
-    std::function<int()> permission_mode;    // 本场确认档:0=confirm 1=auto 2=yolo
+    std::function<ApprovalMode()> permission_mode;  // 本场五档审批模式（强类型）
 };
 
 class PeerRuntime {

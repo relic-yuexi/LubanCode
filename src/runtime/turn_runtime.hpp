@@ -23,7 +23,7 @@
 
 #include <nlohmann/json.hpp>
 
-#include "agent/loop.hpp"      // ToolHookDecision:hooks 决策的中立表态
+#include "runtime/interaction.hpp"  // ToolHookDecision:hooks 决策的中立表态
 #include "api/types.hpp"       // UsageReport/Message:usage 与 prompt 的领域形状
 #include "config/command_permission.hpp"  // ClassifyCommandByPermissions:permissions 叠加(问题 7 拆出,不再借 config.hpp)
 #include "hooks/dispatcher.hpp"
@@ -35,7 +35,7 @@ namespace lubancode::runtime {
 // 权限档位:cli::ConfirmMode 的中立镜像(Confirm/Auto/Yolo,Shift+Tab 循环)。
 // 不 include cli/*,字段同名同义;映射由终端装配层做,漂移由单测钉住。
 // ---------------------------------------------------------------------------
-enum class PermissionMode { Confirm, Auto, Yolo };
+enum class PermissionMode { Confirm, AcceptEdits, Auto, Yolo, DontAsk };
 
 // ---------------------------------------------------------------------------
 // 权限裁定(纯函数,原文自 ConfirmToolUse 搬来)
@@ -64,14 +64,17 @@ struct PermissionContext {
 };
 
 struct PermissionVerdict {
-    enum class Action { Allow, Ask };
+    enum class Action { Allow, Ask, Deny };
+    enum class Reason { None, CommandDenied, NoPrompt };
     Action action = Action::Ask;
+    Reason reason = Reason::None;
     bool deny_hit = false;  // 黑名单命中(诊断/文案用;allow 时恒 false)
 };
 
-// 纯函数,可单测:档位 + 钩子表态 + 工具名/入参 -> 放行还是问。
+// 纯函数,可单测:档位 + 钩子表态 + 工具自报类别/名称/入参 -> 放行还是问。
 PermissionVerdict EvaluatePermission(const PermissionContext& context, const runtime::ToolHookDecision& pre,
-                                     const std::string& name, const nlohmann::json& input);
+                                     tools::ApprovalClass approval_class, const std::string& name,
+                                     const nlohmann::json& input);
 
 // ---------------------------------------------------------------------------
 // hooks 决策(发射 + 归并映射)
@@ -305,7 +308,8 @@ public:
 
     // ---- 权限 -------------------------------------------------------------
     // 档位裁定(纯);问话本身(菜单/[y/a/N]/悬起 future)在前端。
-    PermissionVerdict EvaluatePermission(const runtime::ToolHookDecision& pre, const std::string& name,
+    PermissionVerdict EvaluatePermission(const runtime::ToolHookDecision& pre,
+                                         tools::ApprovalClass approval_class, const std::string& name,
                                          const nlohmann::json& input) const;
 
     // ---- hooks ------------------------------------------------------------

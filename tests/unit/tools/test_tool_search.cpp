@@ -337,6 +337,7 @@ TEST_CASE("DeferredTool: 原样转发 name/description/schema/needs_confirm/exec
     CHECK(wrapped.description() == "描述");
     CHECK(wrapped.input_schema() == AddSchema());
     CHECK_FALSE(wrapped.needs_confirm());
+    CHECK(wrapped.approval_class() == tools::ApprovalClass::None);
     CHECK(wrapped.deferred());
     const auto result = wrapped.execute(nlohmann::json::object());
     CHECK_FALSE(result.is_error);

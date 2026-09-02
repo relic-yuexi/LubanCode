@@ -632,6 +632,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         model.queue_rows = queue_rows;
         model.agent_dock_rows = dock;
         model.agent_dock_tints = dock_tints;  // build_dock 刚写的那份,按位对齐
+        if (const auto notice_mode = ModeNoticeSlot().VisibleMode(); notice_mode.has_value()) {
+            model.mode_notice_rows = {PresentApprovalMode(*notice_mode).notice};
+        }
         const bool composer_empty = state.lines.empty() ||
                                     (state.lines.size() == 1 && state.lines[0].empty());
         const bool shortcut_hint = composer_empty && state.hint_lines.size() == 1;
@@ -1902,6 +1905,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         }
 
         RenderState state = editor.HandleKey(*mapped);
+        if (state.mode_changed) {
+            ModeNoticeSlot().Show(state.mode);
+        }
         if (!state.line.empty() && panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id == 0) {
             // 敲了正文即离开面板焦点(上下键归历史);查看态例外——那只标签
             // 还挂着,话要送去那只子代理。

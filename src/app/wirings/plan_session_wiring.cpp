@@ -33,14 +33,8 @@ PlanSessionWiring::PlanSessionWiring(Host host) : host_(std::move(host)) {}
 
 void PlanSessionWiring::SwitchMode(lubancode::runtime::CollaborationMode mode, const std::string& reason) {
     using lubancode::runtime::CollaborationMode;
-    // 进 Plan 前记当前确认档("confirm"/"auto"/"yolo")——离开 Plan 不重置
-    // 用户原有档(单子:批准框选的新档只改本 session,那由审阅框那边落)。
-    std::string permission_now;
-    switch (lubancode::cli::CurrentConfirmMode()) {
-        case lubancode::cli::ConfirmMode::Auto: permission_now = "auto"; break;
-        case lubancode::cli::ConfirmMode::Yolo: permission_now = "yolo"; break;
-        case lubancode::cli::ConfirmMode::Confirm: permission_now = "confirm"; break;
-    }
+    const std::string permission_now =
+        lubancode::cli::ConfirmModeMachineName(lubancode::cli::CurrentConfirmMode());
     host_.session_runtime->SetCollaborationMode(mode, reason, permission_now);
     // 模式段在系统提示末尾,换档即重拼(Default 模板明说旧 Plan 已结束)。
     host_.prompt_options->plan_mode = mode == CollaborationMode::Plan;

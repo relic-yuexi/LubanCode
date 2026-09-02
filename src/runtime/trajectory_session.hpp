@@ -17,6 +17,8 @@
 // P0-5/P0-6,本批不再消费)。
 #pragma once
 
+#include "approval_mode.hpp"
+
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -440,6 +442,7 @@ public:
         // 提交前问一次,返回稳定码即按该码注入一次失败(子代理空轨迹单
         // 5.1 的 fault injection)。只作用于子账,不影响 main。
         std::function<std::optional<std::string>()> subagent_start_fault;
+        ApprovalMode approval_mode = ApprovalMode::Default;
     };
 
     // 进程一场:LaunchSession(建 workspace/session 目录、独占锁、

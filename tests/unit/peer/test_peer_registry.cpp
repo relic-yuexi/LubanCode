@@ -35,7 +35,7 @@ PeerCard MakeCard(const std::string& id, long long last_seen, unsigned long pid 
     card.started_at = 900;
     card.status = "idle";
     card.endpoint = "\\\\.\\pipe\\lubancode-peer-" + id;
-    card.permission_mode = "confirm";
+    card.permission_mode = lubancode::ApprovalMode::Default;
     card.protocol_version = 1;
     card.last_seen = last_seen;
     return card;
@@ -50,7 +50,7 @@ TEST_CASE("名片 JSON:往返无损") {
     const nlohmann::json json = PeerCardToJson(card);
     CHECK(json["peer_id"] == "abcd1234");
     CHECK(json["pid"] == 12345);
-    CHECK(json["permission_mode"] == "confirm");
+    CHECK(json["permission_mode"] == "default");
     const auto parsed = PeerCardFromJson(json);
     REQUIRE(parsed.has_value());
     CHECK(parsed->name == card.name);
@@ -58,6 +58,27 @@ TEST_CASE("名片 JSON:往返无损") {
     CHECK(parsed->endpoint == card.endpoint);
     CHECK(parsed->last_seen == card.last_seen);
     CHECK(parsed->pid == card.pid);
+}
+
+TEST_CASE("名片审批档:五档只写稳定值，旧值与未知值保守归默认") {
+    const std::vector<std::pair<lubancode::ApprovalMode, std::string>> cases{
+        {lubancode::ApprovalMode::Default, "default"}, {lubancode::ApprovalMode::AcceptEdits, "accept_edits"},
+        {lubancode::ApprovalMode::Yolo, "yolo"}, {lubancode::ApprovalMode::Auto, "auto"},
+        {lubancode::ApprovalMode::DontAsk, "dont_ask"}};
+    for (const auto& [mode, name] : cases) {
+        PeerCard card = MakeCard("abcd1234", 1000);
+        card.permission_mode = mode;
+        const auto json = PeerCardToJson(card);
+        CHECK(json["permission_mode"] == name);
+        const auto parsed = PeerCardFromJson(json);
+        REQUIRE(parsed.has_value());
+        CHECK(parsed->permission_mode == mode);
+    }
+    nlohmann::json legacy = PeerCardToJson(MakeCard("abcd1234", 1000));
+    legacy["permission_mode"] = "confirm";
+    CHECK(PeerCardFromJson(legacy)->permission_mode == lubancode::ApprovalMode::Default);
+    legacy["permission_mode"] = "future_unrestricted";
+    CHECK(PeerCardFromJson(legacy)->permission_mode == lubancode::ApprovalMode::Default);
 }
 
 TEST_CASE("名片解析:非对象/缺 peer_id/缺 endpoint 整张不要") {

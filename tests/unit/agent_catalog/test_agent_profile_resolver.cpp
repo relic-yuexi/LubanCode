@@ -13,6 +13,7 @@
 
 #include <doctest/doctest.h>
 
+#include <array>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -261,44 +262,59 @@ TEST_CASE("context_window:YAML > 会话同步值 > 父皮值(三级钉一档)") 
 }
 
 // ---------------------------------------------------------------------------
-// 权限只可收窄(契约 §4.9)
+// 五档权限能力求交矩阵
 // ---------------------------------------------------------------------------
 
-TEST_CASE("权限:inherit 同父、收窄放行、放宽报 agent.permission_widening") {
-    auto resolve_with = [](const std::string& mode, agent::AgentPermissionMode parent) {
-        const std::string yaml = "schema: 1\nname: perm-probe\ndescription: 权限探针。\npermissions:\n  mode: " +
-                                 mode + "\n";
+TEST_CASE("权限五档25格:自动能力求交且只有 DontAsk 禁止询问") {
+    struct ModeCase { const char* text; agent::AgentPermissionMode mode; };
+    const std::array<ModeCase, 5> modes{{
+        {"default", agent::AgentPermissionMode::Default},
+        {"accept_edits", agent::AgentPermissionMode::AcceptEdits},
+        {"yolo", agent::AgentPermissionMode::Yolo},
+        {"auto", agent::AgentPermissionMode::Auto},
+        {"dont_ask", agent::AgentPermissionMode::DontAsk},
+    }};
+    for (const ModeCase& parent : modes) {
+        for (const ModeCase& child : modes) {
+            CAPTURE(parent.text);
+            CAPTURE(child.text);
+            const std::string yaml = "schema: 1\nname: perm-probe\ndescription: 权限探针。\npermissions:\n  mode: " +
+                                     std::string(child.text) + "\n";
+            agent::AgentProfileResolveRequest request;
+            request.definition = ParseOrThrow(yaml);
+            request.parent_permission = parent.mode;
+            request.parent_tool_names = MakeParentTools();
+            const agent::ResolvedAgentProfile resolved = agent::ResolveAgentProfile(request);
+            CHECK(resolved.ok());
+            CHECK(resolved.permission == agent::IntersectPermissionModes(parent.mode, child.mode));
+        }
+    }
+
+    // 明确回归合同：Yolo 是“All 下无需问”而非“禁止后代问”。
+    CHECK(agent::IntersectPermissionModes(agent::AgentPermissionMode::Yolo,
+                                          agent::AgentPermissionMode::Default) ==
+          agent::AgentPermissionMode::Default);
+    CHECK(agent::IntersectPermissionModes(agent::AgentPermissionMode::DontAsk,
+                                          agent::AgentPermissionMode::Default) ==
+          agent::AgentPermissionMode::DontAsk);
+    CHECK(agent::IntersectPermissionModes(agent::AgentPermissionMode::Auto,
+                                          agent::AgentPermissionMode::AcceptEdits) ==
+          agent::AgentPermissionMode::AcceptEdits);
+}
+
+TEST_CASE("权限 inherit 原样继承父档") {
+    for (agent::AgentPermissionMode parent : {agent::AgentPermissionMode::Default,
+                                              agent::AgentPermissionMode::AcceptEdits,
+                                              agent::AgentPermissionMode::Yolo,
+                                              agent::AgentPermissionMode::Auto,
+                                              agent::AgentPermissionMode::DontAsk}) {
         agent::AgentProfileResolveRequest request;
-        request.definition = ParseOrThrow(yaml);
+        request.definition = ParseOrThrow(
+            "schema: 1\nname: perm-probe\ndescription: 权限探针。\npermissions:\n  mode: inherit\n");
         request.parent_permission = parent;
         request.parent_tool_names = MakeParentTools();
-        return agent::ResolveAgentProfile(request);
-    };
-
-    // inherit / 空缺 = 同父,不报错。
-    agent::ResolvedAgentProfile resolved = resolve_with("inherit", agent::AgentPermissionMode::Auto);
-    CHECK(resolved.ok());
-    CHECK(resolved.permission == agent::AgentPermissionMode::Auto);
-
-    // 收窄:auto 父下声明 confirm,放行。
-    resolved = resolve_with("confirm", agent::AgentPermissionMode::Auto);
-    CHECK(resolved.ok());
-    CHECK(resolved.permission == agent::AgentPermissionMode::Confirm);
-
-    // 同档:不算放宽。
-    resolved = resolve_with("auto", agent::AgentPermissionMode::Auto);
-    CHECK(resolved.ok());
-
-    // 放宽一档:confirm 父下声明 auto,结构化报错。
-    resolved = resolve_with("auto", agent::AgentPermissionMode::Confirm);
-    CHECK_FALSE(resolved.ok());
-    CHECK(HasCode(resolved.issues, "agent.permission_widening"));
-    CHECK(agent::FormatResolutionIssues(resolved.issues).find("agent.permission_widening") != std::string::npos);
-
-    // 放宽两档:confirm 父下声明 yolo,同样报。
-    resolved = resolve_with("yolo", agent::AgentPermissionMode::Confirm);
-    CHECK_FALSE(resolved.ok());
-    CHECK(HasCode(resolved.issues, "agent.permission_widening"));
+        CHECK(agent::ResolveAgentProfile(request).permission == parent);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -132,7 +132,7 @@ Don't Ask: runs pre-approved operations and denies anything that would need a pr
 
 当前 `runtime::EvaluatePermission()` 用 `name == "write_file" || name == "edit_file"` 认文件工具。这在三档时已经偏窄，添“接受编辑”后会成公开合同，不能继续散写字符串。
 
-- [ ] 给工具元数据添稳定审批类别，例如：
+- [x] 给工具元数据添稳定审批类别，例如：
 
 ```cpp
 enum class ApprovalClass {
@@ -144,9 +144,9 @@ enum class ApprovalClass {
 };
 ```
 
-- [ ] `write_file`、`edit_file` 标 `FileEdit`；`undo_file_edit` 先标 `FileDestructive`，仍要问。
+- [x] `write_file`、`edit_file` 标 `FileEdit`；`undo_file_edit` 先标 `FileDestructive`，仍要问。
 - [ ] 往后添文件工具，注册时必须选类别；测试枚举所有 `needs_confirm=true` 工具，漏标即失败。
-- [ ] `EvaluatePermission` 吃类别，不再认工具名。工具名只用于日志、规则与用户文案。
+- [x] `EvaluatePermission` 吃类别，不再认工具名。工具名只用于日志、规则与用户文案。
 
 ### 3.3 不询问档的“显式预放行”
 
@@ -198,9 +198,9 @@ Plan/能力硬闸
 
 不能只给 CLI 枚举添两项。否则画面写“不询问”，Runtime 仍按旧档放行，便是安全事故。
 
-- [ ] 将名字收正为 `ApprovalMode`；若改名牵扯过大，可先保留类型名，枚举值必须完整：`Default / AcceptEdits / Yolo / Auto / DontAsk`。
+- [x] 将名字收正为 `ApprovalMode`；若改名牵扯过大，可先保留类型名，枚举值必须完整：`Default / AcceptEdits / Yolo / Auto / DontAsk`。
 - [ ] 三层枚举都补五档，并用一组集中映射函数来回转换；未知值一律退 `Default`，同时给诊断，不静默落到更宽档。
-- [ ] `NextApprovalMode()` 只留一份顺序真相；空闲输入与流式监听继续共用它。
+- [x] `NextApprovalMode()` 只留一份顺序真相；空闲输入与流式监听继续共用它。
 - [ ] Hook 上下文、Peer 名册、Trajectory、Session 元数据都写稳定机读值：`default`、`accept_edits`、`yolo`、`auto`、`dont_ask`。
 - [ ] UI 标签走 i18n，不拿机读值直接上屏。
 
@@ -281,11 +281,11 @@ ModePresentation PresentApprovalMode(ApprovalMode mode, Language language);
 
 ### 9.1 纯函数与 UI
 
-- [ ] `NextApprovalMode` 五按一圈回原位；每一步顺序与本单一致。
+- [x] `NextApprovalMode` 五按一圈回原位；每一步顺序与本单一致。
 - [ ] 中文五行与英文五行逐字断言：默认行不带当前档名；另钉住 `Shift+Tab` 大小写及中文不重复“模式”。
 - [ ] 五档只染当前标签；后半句、下一档与 skills 不串色。
 - [ ] 每次切档立刻在常驻档位行上面显示对应黄色说明；五档中英文逐字断言。
-- [ ] 假时钟钉 `5999ms` 仍显示、`6000ms` 到期收走；连按后旧期限失效，新档重新计时。
+- [x] 假时钟钉 `5999ms` 仍显示、`6000ms` 到期收走；连按后旧期限失效，新档重新计时。
 - [ ] 启动配置、环境变量、会话恢复设档不显示说明；只有用户切档才显示。
 - [ ] 说明出现与消失各只触发所需重画，草稿字节、软换行布局与物理光标坐标不变。
 - [ ] slash 补全/历史搜索与切档说明同时在场时各居其位；不能互相覆盖或借同一 vector 清空。
@@ -296,19 +296,19 @@ ModePresentation PresentApprovalMode(ApprovalMode mode, Language language);
 ### 9.2 权限矩阵
 
 - [ ] 把 3.1 每一格做成表驱动测试。断言 `Allow / Ask / Deny`，还要断言工具调用次数。
-- [ ] 不询问档遇需确认工具：零 PermissionRequest、零终端读键、零副作用、结构化拒绝回模型。
-- [ ] 接受编辑只放 `FileEdit`；安全 `git status` 仍问。
-- [ ] 自动模式放 `FileEdit` 与安全命令；脚本块、危险命令、外挂工具仍问。
-- [ ] YOLO 沿用当前全放；Plan 与 PreToolUse deny 仍能压住。
-- [ ] `undo_file_edit` 不因接受编辑而免问。
-- [ ] 显式 allow/deny、会话“总是允许”、Hook ask/allow/deny 与五档交叉覆盖。
+- [x] 不询问档遇需确认工具：零 PermissionRequest、零终端读键、零副作用、结构化拒绝回模型。
+- [x] 接受编辑只放 `FileEdit`；安全 `git status` 仍问。
+- [x] 自动模式放 `FileEdit` 与安全命令；脚本块、危险命令、外挂工具仍问。
+- [x] YOLO 沿用当前全放；Plan 与 PreToolUse deny 仍能压住。
+- [x] `undo_file_edit` 不因接受编辑而免问。
+- [x] 显式 allow/deny、会话“总是允许”、Hook ask/allow/deny 与五档交叉覆盖。
 
 ### 9.3 子代理与非终端宿主
 
-- [ ] 父子五档两两组合，按能力集合求交；共 25 格，不靠枚举整数大小碰运气。
-- [ ] 父不询问 + 子默认、父自动 + 子接受编辑、父 YOLO + 子默认三景单列回归。
+- [x] 父子五档两两组合，按能力集合求交；共 25 格，不靠枚举整数大小碰运气。
+- [x] 父不询问 + 子默认、父自动 + 子接受编辑、父 YOLO + 子默认三景单列回归。
 - [ ] 交互主代理、后台子代理、Workflow agent/tool 节点、one-shot、App Server 走同一权限核。
-- [ ] Hook、Peer、Trajectory 机读值覆盖五档；旧消费者看到未知值时保守回默认。
+- [x] Hook、Peer、Trajectory 机读值覆盖五档；旧消费者看到未知值时保守回默认。
 - [ ] `confirm` 旧配置、`auto` 旧配置、`yolo` 旧配置各起一次，行为不漂。
 
 ### 9.4 真终端
@@ -324,11 +324,11 @@ ModePresentation PresentApprovalMode(ApprovalMode mode, Language language);
 ## 十、实施批次
 
 - [ ] P0：先把权限核改成 `Allow / Ask / Deny`，落 `DontAsk`，打通终端、Workflow、Agent、App Server；无 UI 漏网。
-- [ ] P0：以 `ApprovalClass` 取代文件工具名硬编码，钉住接受编辑与自动模式差别。
+- [x] P0：以 `ApprovalClass` 取代文件工具名硬编码，钉住接受编辑与自动模式差别。
 - [ ] P1：补五档枚举、轮转、i18n、颜色、状态行与 6 秒切档说明；旧三值兼容读取。
-- [ ] P1：子代理从 rank/min 改成能力集合求交；补 25 格矩阵。
+- [x] P1：子代理从 rank/min 改成能力集合求交；补 25 格矩阵。
 - [ ] P1：同步 Hook、Peer、Trajectory、Session 与诊断机读值。
-- [ ] P1：更新 README、配置参考、命令参考、安全文档、CHANGELOG。
+- [x] P1：更新 README、配置参考、命令参考、安全文档、CHANGELOG。
 - [ ] P1：跑相关单测与全量 CTest，再做真终端五档验收。
 
 ## 十一、验收口径

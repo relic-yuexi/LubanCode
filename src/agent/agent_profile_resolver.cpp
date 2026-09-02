@@ -237,30 +237,27 @@ ResolvedAgentProfile ResolveAgentProfile(const AgentProfileResolveRequest& reque
         }
     }
 
-    // ---- 5. permissions:只可收窄(契约 §4.9 铁律) ---------------------------
-    // inherit/空 = 同父;宽窄序 confirm < auto < yolo,比父宽即结构化报错。
-    // 父档是会话活账,生产装配经环境账递进来;没递(旧调用方)时以请求里
-    // 显式给的父档为准,默认 Confirm——保守侧,不放过越权。
+    // ---- permissions:父子能力求交 -------------------------------------------
+    // inherit/空 = 同父。显式子档不因“更宽”拒发，而是按自动能力集合求交；
+    // may_prompt 单独取 AND。Yolo 的 may_prompt=true，含义是其自身 All 能力
+    // 通常无需问，不会封死父 Yolo + 子 Default 沿 floored 链拉回主会话；
+    // 只有 DontAsk 禁止后代询问。
     const AgentPermissionMode parent_permission =
         has_env ? env.parent_permission : request.parent_permission;
     resolved.permission = parent_permission;
     const std::string& declared = definition.permissions_mode;
     if (!declared.empty() && declared != "inherit") {
-        AgentPermissionMode mode = parent_permission;
-        if (declared == "confirm") {
-            mode = AgentPermissionMode::Confirm;
+        AgentPermissionMode child = AgentPermissionMode::Default;
+        if (declared == "accept_edits") {
+            child = AgentPermissionMode::AcceptEdits;
         } else if (declared == "auto") {
-            mode = AgentPermissionMode::Auto;
+            child = AgentPermissionMode::Auto;
         } else if (declared == "yolo") {
-            mode = AgentPermissionMode::Yolo;
+            child = AgentPermissionMode::Yolo;
+        } else if (declared == "dont_ask") {
+            child = AgentPermissionMode::DontAsk;
         }
-        if (AgentPermissionModeRank(mode) > AgentPermissionModeRank(parent_permission)) {
-            resolved.issues.push_back(MakeIssue(
-                "agent.permission_widening", "permissions.mode",
-                "定义 " + declared + " 比父会话 " + ToString(parent_permission) +
-                    " 宽(宽窄序 confirm < auto < yolo;子代理只可收窄,想放宽去改父会话档位)"));
-        }
-        resolved.permission = mode;
+        resolved.permission = IntersectPermissionModes(parent_permission, child);
     }
 
     // ---- 6. prompt 三笔与缺省档:原样决议 ------------------------------------

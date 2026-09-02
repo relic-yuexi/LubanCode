@@ -275,6 +275,39 @@ TEST_CASE("session manifest 钉 event schema major") {
     CHECK(legacy_parsed->event_schema_version == 1);
 }
 
+TEST_CASE("session manifest 审批档五值稳定，兼容旧值并保守回退") {
+    const std::vector<std::pair<lubancode::ApprovalMode, std::string>> cases{
+        {lubancode::ApprovalMode::Default, "default"},
+        {lubancode::ApprovalMode::AcceptEdits, "accept_edits"},
+        {lubancode::ApprovalMode::Yolo, "yolo"},
+        {lubancode::ApprovalMode::Auto, "auto"},
+        {lubancode::ApprovalMode::DontAsk, "dont_ask"}};
+    for (const auto& [mode, name] : cases) {
+        SessionManifest manifest;
+        manifest.workspace_key = "ws";
+        manifest.session_id = "session";
+        manifest.main_run_id = "main";
+        manifest.status = "running";
+        manifest.approval_mode = mode;
+        const auto json = manifest.ToJson();
+        CHECK(json["approval_mode"] == name);
+        const auto parsed = SessionManifest::FromJson(json);
+        REQUIRE(parsed.has_value());
+        CHECK(parsed->approval_mode == mode);
+    }
+    SessionManifest base;
+    base.workspace_key = "ws";
+    base.session_id = "session";
+    base.main_run_id = "main";
+    base.status = "running";
+    nlohmann::json json = base.ToJson();
+    CHECK_FALSE(SessionManifest::FromJson(json)->approval_mode.has_value());
+    json["approval_mode"] = "confirm";
+    CHECK(SessionManifest::FromJson(json)->approval_mode == lubancode::ApprovalMode::Default);
+    json["approval_mode"] = "future_unrestricted";
+    CHECK(SessionManifest::FromJson(json)->approval_mode == lubancode::ApprovalMode::Default);
+}
+
 TEST_CASE("Start 拒不支持的 event_schema_version") {
     std::filesystem::path dir = std::filesystem::temp_directory_path() / "lubancode-traj-v2-badver";
     std::error_code ec;

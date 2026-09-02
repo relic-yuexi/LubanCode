@@ -35,6 +35,7 @@
 #include "agent/tool_trace.hpp"
 #include "api/types.hpp"
 #include "runtime/interaction.hpp"
+#include "runtime/turn_runtime.hpp"
 #include "runtime/turn_event_adapter.hpp"
 #include "tools/deferred_tool_resolver.hpp"  // ProxyCallContext:tool_invoke 规范化调用的协议证据
 #include "tools/tool.hpp"
@@ -132,6 +133,14 @@ struct TurnWiring {
     // ---- 审批(合同形状在 runtime/interaction.hpp,与 InteractionBroker
     // 同源;宿主把"怎么问、怎么答"从那只口子递进来)------------------------
 
+    // Runtime 权限预裁定。Allow 直接越过询问，Deny 在 Runtime 边界收口；
+    // 只有 Ask 才可进入 PermissionRequest/前端确认。空 = 兼容旧宿主。
+    std::function<runtime::PermissionVerdict(const std::string& tool_use_id, const std::string& name,
+                                             tools::ApprovalClass approval_class,
+                                             const nlohmann::json& input,
+                                             const runtime::ToolHookDecision& pre)>
+        on_permission_evaluate;
+
     // 异步审批通道(P2 主路):工具 needs_confirm 且档位真要问用户时,把
     // "问"变成"发请求、拿 future"——回调立即返回 future,RunOneTool 在
     // 原地 Wait(工作线程阻塞等,事件泵/连接线程不跟着堵)。终端前端的实
@@ -155,7 +164,16 @@ struct TurnWiring {
     // 分拒绝原因。
     std::function<std::string(const std::string& tool_use_id, const std::string& name)> on_tool_denial_text;
 
-    // 权限收窄执法(自定义 Agent 单·阶段 5,Workflow 侧接线):带档位下限
+    // 自定义 Agent 的有效五档在预裁定阶段也必须生效；只包确认口不够，
+    // 因为父 Yolo 可能在抵达确认口前已经 Allow。空 = 旧宿主回落。
+    std::function<runtime::PermissionVerdict(const std::string& tool_use_id, const std::string& name,
+                                             tools::ApprovalClass approval_class,
+                                             const nlohmann::json& input,
+                                             const runtime::ToolHookDecision& pre,
+                                             AgentPermissionMode effective)>
+        on_permission_evaluate_floored;
+
+    // 有效权限确认口。Yolo 的 may_prompt=true，父 Yolo + 子 Default 可沿此口
     // 的确认口。Workflow agent 节点派的自定义 Agent 定义比会话档严时
     //(父 yolo 子 confirm),AgentExecutor 用它把 on_tool_confirm 包一层
     // ——宿主在里头把会话档向下并到下限再裁定,该问就真把确认拉回。

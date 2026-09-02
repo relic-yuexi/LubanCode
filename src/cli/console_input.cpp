@@ -162,6 +162,11 @@ LineEditorCore& SharedEditor() {
     static LineEditorCore editor = [] { return LineEditorCore(BuildSlashCompletionCandidates()); }();
     return editor;
 }
+
+ModeNoticeState& ModeNoticeSlot() {
+    static ModeNoticeState state;
+    return state;
+}
 // 视图切换钩子的槽(viewed_task_id 变了才被调;tail_rows>0 = 实时流重铺拍,
 // 见 console_input.hpp)。
 // [共享] composer(空闲切看铺帧)/监听线程(流式切看铺帧)/导出口
@@ -427,9 +432,11 @@ std::string BuildComposerModeLine(const BoxChrome& chrome, int skill_count, int 
         return {};
     }
     const Theme& theme = *chrome.theme;
-    const std::string current = ConfirmModeLabel(chrome.mode);
-    const std::string next = ConfirmModeLabel(NextConfirmMode(chrome.mode));
-    const std::string left_plain = current + " " + trf("status.mode_switch_hint", next);
+    const ModePresentation presentation = PresentApprovalMode(chrome.mode);
+    const std::string left_plain =
+        chrome.mode == ConfirmMode::Confirm
+            ? trf("status.mode_switch_hint", presentation.next_label)
+            : presentation.current_label + "   " + trf("status.mode_switch_hint", presentation.next_label);
     const std::string right = trf("status.skills_count", skill_count);
     const int right_width = static_cast<int>(DisplayWidthUtf8(right));
     const int gap = 2;
@@ -439,8 +446,21 @@ std::string BuildComposerModeLine(const BoxChrome& chrome, int skill_count, int 
     const int spaces = (std::max)(1, max_width - left_width - right_width);
 
     std::string colored_left = left;
-    if (chrome.mode == ConfirmMode::Yolo && left.rfind(current, 0) == 0) {
-        colored_left = theme.danger_mode + current + theme.reset + left.substr(current.size());
+    if (chrome.mode != ConfirmMode::Confirm) {
+        const std::string visible_label = TruncateUtf8ToDisplayWidth(presentation.current_label, left_room);
+        if (!visible_label.empty() && left.rfind(visible_label, 0) == 0) {
+            std::string color;
+            switch (presentation.color_role) {
+                case ModeColorRole::AcceptEdits: color = theme.mode_accept_edits; break;
+                case ModeColorRole::Yolo: color = theme.mode_yolo; break;
+                case ModeColorRole::Auto: color = theme.mode_auto; break;
+                case ModeColorRole::DontAsk: color = theme.mode_dont_ask; break;
+                case ModeColorRole::Default: break;
+            }
+            if (!color.empty()) {
+                colored_left = color + visible_label + theme.reset + left.substr(visible_label.size());
+            }
+        }
     }
     if (right_width >= max_width) {
         return theme.stats + TruncateUtf8ToDisplayWidth(right, max_width) + theme.reset;
@@ -503,10 +523,12 @@ std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
         const std::string text = TruncateUtf8ToDisplayWidth(segment.text, remaining);
         std::string color = theme.stats;
         if (segment.key == "permission_mode") {
-            if (chrome.mode == ConfirmMode::Confirm) {
-                color.clear();
-            } else if (chrome.mode == ConfirmMode::Yolo) {
-                color = theme.error;
+            switch (PresentApprovalMode(chrome.mode).color_role) {
+                case ModeColorRole::Default: color.clear(); break;
+                case ModeColorRole::AcceptEdits: color = theme.mode_accept_edits; break;
+                case ModeColorRole::Yolo: color = theme.mode_yolo; break;
+                case ModeColorRole::Auto: color = theme.mode_auto; break;
+                case ModeColorRole::DontAsk: color = theme.mode_dont_ask; break;
             }
         } else if (segment.key == "model") {
             color = theme.tool_line;

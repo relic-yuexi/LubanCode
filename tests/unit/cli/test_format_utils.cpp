@@ -71,12 +71,14 @@ TEST_CASE("FormatTokenCount: 负数不猜,原样十进制") {
     CHECK(FormatTokenCount(-5) == "-5");
 }
 
-TEST_CASE("StatusLineModeSegment: 三档各有一个展示词,提示 shift+tab 切换") {
-    const std::string confirm = StatusLineModeSegment(ConfirmMode::Confirm);
-    CHECK(confirm.find("确认模式") != std::string::npos);
-    CHECK(confirm.find("shift+tab") != std::string::npos);
-    CHECK(StatusLineModeSegment(ConfirmMode::Auto).find("auto") != std::string::npos);
-    CHECK(StatusLineModeSegment(ConfirmMode::Yolo).find("yolo") != std::string::npos);
+TEST_CASE("StatusLineModeSegment: 五档各有人读展示词,提示 Shift+Tab 切换") {
+    const std::string default_mode = StatusLineModeSegment(ConfirmMode::Confirm);
+    CHECK(default_mode.find("默认") != std::string::npos);
+    CHECK(default_mode.find("Shift+Tab") != std::string::npos);
+    CHECK(StatusLineModeSegment(ConfirmMode::AcceptEdits).find("接受编辑") != std::string::npos);
+    CHECK(StatusLineModeSegment(ConfirmMode::Yolo).find("YOLO") != std::string::npos);
+    CHECK(StatusLineModeSegment(ConfirmMode::Auto).find("自动模式") != std::string::npos);
+    CHECK(StatusLineModeSegment(ConfirmMode::DontAsk).find("不询问") != std::string::npos);
 }
 
 TEST_CASE("StatusLineInfoSegment: 模型名 + context 百分比,token 数 k 化") {
@@ -147,7 +149,7 @@ TEST_CASE("StatusPanel: provider、effort 与 permission mode 可按需启用") 
         {"provider", "effort", "permission_mode"}, " · ", ConfirmMode::Auto, data);
     CHECK(text.find("provider sub-openai") != std::string::npos);
     CHECK(text.find("effort xhigh") != std::string::npos);
-    CHECK(text.find("auto") != std::string::npos);
+    CHECK(text.find("自动模式") != std::string::npos);
 }
 
 TEST_CASE("StatusPanel: goal/loop 段非空恒挂,不进 items 配置") {

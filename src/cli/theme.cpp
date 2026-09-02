@@ -18,7 +18,11 @@ Theme DarkTheme() {
     t.error = "\x1b[1;31m";      // 亮红,加粗
     t.stats = "\x1b[2;37m";      // 暗淡的白(灰)
     t.spinner = "\x1b[36m";      // 青
-    t.danger_mode = "\x1b[1;31m"; // yolo:亮红,加粗
+    t.mode_accept_edits = "\x1b[35m";      // 品红
+    t.mode_yolo = "\x1b[1;31m";            // 亮红,加粗
+    t.mode_auto = "\x1b[33m";              // 黄
+    t.mode_dont_ask = "\x1b[38;5;208m";    // 橙
+    t.danger_mode = t.mode_yolo;             // 旧兼容别名
     t.reset = "\x1b[0m";
     t.diff_add_bg = "\x1b[48;5;22m";   // 深绿底(默认前景在深色终端上看得清)
     t.diff_del_bg = "\x1b[48;5;52m";   // 深红底
@@ -48,7 +52,11 @@ Theme LightTheme() {
     t.error = "\x1b[1;31m";      // 红,加粗(哪个背景下都得显眼)
     t.stats = "\x1b[2;30m";      // 暗淡的黑(浅灰)
     t.spinner = "\x1b[0;36m";    // 深青
-    t.danger_mode = "\x1b[1;31m"; // yolo:红,加粗
+    t.mode_accept_edits = "\x1b[0;35m";    // 深紫
+    t.mode_yolo = "\x1b[1;31m";            // 红,加粗
+    t.mode_auto = "\x1b[0;33m";            // 深黄
+    t.mode_dont_ask = "\x1b[38;5;166m";    // 深橙
+    t.danger_mode = t.mode_yolo;             // 旧兼容别名
     t.reset = "\x1b[0m";
     t.diff_add_bg = "\x1b[48;5;194m";  // 浅绿底(浅色终端下深色前景照样清楚)
     t.diff_del_bg = "\x1b[48;5;224m";  // 浅红底

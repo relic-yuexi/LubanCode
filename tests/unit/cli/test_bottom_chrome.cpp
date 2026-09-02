@@ -10,6 +10,7 @@
 
 #include <doctest/doctest.h>
 
+#include <chrono>
 #include <string>
 #include <vector>
 
@@ -98,6 +99,47 @@ TEST_CASE("帧账:指纹把各分区隔开,行内容跨区撞车也不误判相�
     CHECK(BottomChromeFingerprint(a) != BottomChromeFingerprint(b));
     CHECK(Contains(BottomChromeFingerprint(a), "q:"));
     CHECK(Contains(BottomChromeFingerprint(a), "d:"));
+}
+
+TEST_CASE("模式说明状态:5999ms 可见、6000ms 到期且连按重置") {
+    using Clock = ModeNoticeState::Clock;
+    const Clock::time_point t0{};
+    ModeNoticeState state;
+    LineEditorCore configured_editor;
+    configured_editor.set_confirm_mode(ConfirmMode::Yolo);
+    CHECK(configured_editor.confirm_mode() == ConfirmMode::Yolo);
+    CHECK_FALSE(state.VisibleMode(t0).has_value());  // 启动/配置设档不调用 Show
+
+    state.Show(ConfirmMode::AcceptEdits, t0);
+    CHECK(state.VisibleMode(t0 + std::chrono::milliseconds(5999)) == ConfirmMode::AcceptEdits);
+    CHECK_FALSE(state.VisibleMode(t0 + std::chrono::milliseconds(6000)).has_value());
+
+    state.Show(ConfirmMode::Yolo, t0);
+    state.Show(ConfirmMode::Auto, t0 + std::chrono::milliseconds(5000));
+    CHECK(state.VisibleMode(t0 + std::chrono::milliseconds(10999)) == ConfirmMode::Auto);
+    CHECK_FALSE(state.VisibleMode(t0 + std::chrono::milliseconds(11000)).has_value());
+}
+
+TEST_CASE("模式说明专位:状态行上方、与 transient 并存且安全裁剪") {
+    Theme theme;
+    theme.tool_line = "\x1b[33m";
+    theme.reset = "\x1b[0m";
+    BottomChromeModel model = FramedModel(ComposerState({U""}, 0, 0), ComposerMode::Idle);
+    model.mode_notice_rows = {"YOLO：允许所有工具，无需确认。"};
+    model.transient_rows = {"slash hint"};
+    const BottomChromeLayout layout = BuildBottomChromeLayout(model, theme, 16);
+
+    REQUIRE(layout.frame.rows.size() == 6);
+    CHECK(Contains(layout.frame.rows[0].text, "YOLO"));
+    CHECK(layout.frame.rows[1].text == "status");
+    CHECK(layout.frame.rows.back().text == "slash hint");
+    CHECK(layout.chrome.mode_notice_rows.size() == 1);
+    CHECK(layout.chrome.transient_rows.size() == 1);
+    CHECK(layout.painted_row_widths[0] <= 15);
+
+    BottomChromeFrame without = layout.chrome;
+    without.mode_notice_rows.clear();
+    CHECK(BottomChromeRevision(layout.chrome) != BottomChromeRevision(without));
 }
 
 // ---------------------------------------------------------------------------

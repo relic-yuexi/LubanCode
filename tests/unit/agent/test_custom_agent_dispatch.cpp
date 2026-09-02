@@ -700,7 +700,7 @@ TEST_CASE("权限收窄执法:父 yolo 子 confirm,needs_confirm 的工具走带
 
     // 确认真拉回了:走的是带下限的口,下限是定义声明的 confirm;免问不再免。
     CHECK(floored_calls == 1);
-    CHECK(seen_floor == agent::AgentPermissionMode::Confirm);
+    CHECK(seen_floor == agent::AgentPermissionMode::Default);
     CHECK(plain_calls == 0);                 // 旧口没被走到
     CHECK(sensitive_ptr->call_count == 0);   // 拒了:工具没执行
     REQUIRE(backend.captured_requests.size() == 2);
@@ -708,7 +708,7 @@ TEST_CASE("权限收窄执法:父 yolo 子 confirm,needs_confirm 的工具走带
           std::string::npos);  // 模型看到如实的拒绝回执
 }
 
-TEST_CASE("权限收窄执法:档不比父严不启用;父档没账可查也不启用(旧口径)") {
+TEST_CASE("权限求交执法:自定义 Agent 总携带有效档;父档没账时按保守默认") {
     tools::ToolRegistry sub_registry;
     sub_registry.Register(std::make_unique<FakeTool>("read_file", tools::Tool::Result{"内容", false}));
     sub_registry.Register(std::make_unique<FakeTool>(
@@ -741,8 +741,8 @@ TEST_CASE("权限收窄执法:档不比父严不启用;父档没账可查也不�
         input["prompt"] = "审";
         input["agent_type"] = "library-reviewer";
         CHECK_FALSE(agent_tool.execute(input).is_error);
-        CHECK(floored_calls == 0);
-        CHECK(plain_calls == 1);
+        CHECK(floored_calls == 1);
+        CHECK(plain_calls == 0);
     }
     // 没递环境账(旧调用方):"没账可查"跳过执法,确认照旧口。
     {

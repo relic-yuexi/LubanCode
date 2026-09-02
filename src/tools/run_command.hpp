@@ -28,6 +28,7 @@ public:
     std::string description() const override;
     nlohmann::json input_schema() const override;
     bool needs_confirm() const override { return true; }
+    ApprovalClass approval_class() const override { return ApprovalClass::Command; }
     Result execute(const nlohmann::json& input) override;
     // 子代理 x 停止失效单:取消旗随调用递进——共享实例上的 cancel_ 只认
     // 装配层那根(主回合 ESC),子代理的 CancelChain 合并旗(面板 x/墙钟)

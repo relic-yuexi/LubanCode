@@ -98,6 +98,7 @@ inline constexpr const char* kErrRegistryNotMounted = "registry.not_mounted";
 inline constexpr const char* kErrHookPreDenied = "hook.pre.denied";
 inline constexpr const char* kErrHookUpdatedInputInvalid = "hook.updated_input.invalid";
 inline constexpr const char* kErrPermissionDeclined = "permission.declined";
+inline constexpr const char* kErrPermissionNoPromptDenied = "permission.no_prompt_denied";
 inline constexpr const char* kErrProcessSpawnFailed = "process.spawn_failed";
 inline constexpr const char* kErrProcessTimeout = "process.timeout";
 inline constexpr const char* kErrProcessOutputLimit = "process.output_limit";

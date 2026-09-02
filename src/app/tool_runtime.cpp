@@ -573,15 +573,21 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         agent_tool_->SetResolveEnvironment([this]() {
             lubancode::agent::AgentProfileResolveEnvironment env = resolve_env_static_;
             switch (lubancode::cli::CurrentConfirmMode()) {
+                case lubancode::cli::ConfirmMode::AcceptEdits:
+                    env.parent_permission = lubancode::agent::AgentPermissionMode::AcceptEdits;
+                    break;
                 case lubancode::cli::ConfirmMode::Auto:
                     env.parent_permission = lubancode::agent::AgentPermissionMode::Auto;
                     break;
                 case lubancode::cli::ConfirmMode::Yolo:
                     env.parent_permission = lubancode::agent::AgentPermissionMode::Yolo;
                     break;
+                case lubancode::cli::ConfirmMode::DontAsk:
+                    env.parent_permission = lubancode::agent::AgentPermissionMode::DontAsk;
+                    break;
                 case lubancode::cli::ConfirmMode::Confirm:
                 default:
-                    env.parent_permission = lubancode::agent::AgentPermissionMode::Confirm;
+                    env.parent_permission = lubancode::agent::AgentPermissionMode::Default;
                     break;
             }
             return env;
