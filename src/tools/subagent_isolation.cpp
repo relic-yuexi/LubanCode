@@ -62,20 +62,28 @@ private:
 
 }  // namespace
 
-std::optional<lubancode::cli::AgentWorktree> SetupIsolationRoom(const std::string& cwd,
-                                                                const lubancode::cli::GitRunner& runner,
-                                                                Tool::Result& error_out) {
+std::optional<lubancode::cli::AgentWorktree> SetupIsolationRoom(
+    const std::string& cwd, const std::optional<lubancode::cli::FrozenWorktreeBase>& expected_base,
+    const lubancode::cli::GitRunner& runner, Tool::Result& error_out) {
     const std::filesystem::path cwd_path = Utf8ToPath(cwd);
     const auto repo_root = lubancode::cli::FindRepositoryRoot(cwd_path, runner);
     if (!repo_root.has_value()) {
         error_out = {"isolation=worktree 需要在 git 仓库里给子代理建房,当前目录不是仓库: " + cwd, true};
         return std::nullopt;
     }
-    // 基线冻结(派工单 §三):派工瞬间的调用者 HEAD,先冻结再建房——本地
-    // 分支领先远端时子代理照样在调用者的代码上开工,不再解析 origin/main。
-    const lubancode::cli::FrozenWorktreeBase base = lubancode::cli::FreezeWorktreeBase(cwd_path, runner);
-    if (base.commit.empty()) {
+    // 二次读取调用者 HEAD 并与派工口冻结账核对：期间 checkout 漂移、嵌套
+    // 错拿宿主 cwd 或调用方传错 TaskSnapshot 都必须在 git worktree add 前阻断。
+    const lubancode::cli::FrozenWorktreeBase actual = lubancode::cli::FreezeWorktreeBase(cwd_path, runner);
+    if (actual.commit.empty()) {
         error_out = {"isolation=worktree 冻结调用者 HEAD 失败(不在可用 git 仓库里?): " + cwd, true};
+        return std::nullopt;
+    }
+    const lubancode::cli::FrozenWorktreeBase base = expected_base.value_or(actual);
+    if (base.commit.empty() || base.commit != actual.commit) {
+        error_out = {"[isolation_base_mismatch] TaskSnapshot 基线与调用者 HEAD 不符,已拒绝建房: caller_head=" +
+                         actual.commit + " base_commit=" + (base.commit.empty() ? "(空)" : base.commit) +
+                         " caller_cwd=" + cwd,
+                     true};
         return std::nullopt;
     }
     // 未提交改动(派工单 §3.4):产品不接未提交改动(房从提交起树),但必须

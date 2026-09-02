@@ -68,23 +68,6 @@ bool KeyIsUnder(const std::string& key, const std::string& root) {
     return key.size() > root.size() && key.compare(0, root.size(), root) == 0 && key[root.size()] == '/';
 }
 
-GitCommandResult DefaultGitRunner(const GitCommand& command) {
-    std::vector<std::string> argv = {"git", "-C", PathToUtf8(command.working_directory)};
-    argv.insert(argv.end(), command.args.begin(), command.args.end());
-    const int timeout = command.timeout_ms > 0 ? command.timeout_ms : 120000;
-    const platform::ProcessResult process = platform::RunProcess(argv, timeout);
-    if (process.spawn_failed) {
-        return {1, process.output, process.spawn_error};
-    }
-    if (process.timed_out) {
-        return {1, process.output, "git timed out"};
-    }
-    if (process.output_truncated) {
-        return {1, process.output, "git output was truncated"};
-    }
-    return {static_cast<int>(process.exit_code), process.output, std::string()};
-}
-
 std::vector<WorktreeEntry> ParsePorcelainList(const std::string& output) {
     std::vector<WorktreeEntry> entries;
     std::istringstream input(output);
@@ -143,6 +126,25 @@ bool IsLinkEntry(const std::filesystem::path& current) {
 
 }  // namespace
 
+// 真跑 git 的默认 runner:生产路径各口共用这一份(字段拼装/超时/失败折形
+// 只养一处)。原先在匿名区,agent 派工链的查单口也要用,导出。
+GitCommandResult DefaultGitRunner(const GitCommand& command) {
+    std::vector<std::string> argv = {"git", "-C", PathToUtf8(command.working_directory)};
+    argv.insert(argv.end(), command.args.begin(), command.args.end());
+    const int timeout = command.timeout_ms > 0 ? command.timeout_ms : 120000;
+    const platform::ProcessResult process = platform::RunProcess(argv, timeout);
+    if (process.spawn_failed) {
+        return {1, process.output, process.spawn_error};
+    }
+    if (process.timed_out) {
+        return {1, process.output, "git timed out"};
+    }
+    if (process.output_truncated) {
+        return {1, process.output, "git output was truncated"};
+    }
+    return {static_cast<int>(process.exit_code), process.output, std::string()};
+}
+
 ParsedWorktreeCommand ParseWorktreeCommand(std::string_view args) {
     ParsedWorktreeCommand command;
     const std::string text = Trim(args);
@@ -168,6 +170,9 @@ std::optional<std::string> ValidateWorktreeName(std::string_view name) {
     }
     if (name.size() > 64) {
         return std::string("name is longer than 64 characters");
+    }
+    if (name.rfind("agent-", 0) == 0) {
+        return std::string("'agent-' prefix is reserved for isolated subagent worktrees");
     }
     for (const char ch : name) {
         const bool allowed = std::isalnum(static_cast<unsigned char>(ch)) != 0 || ch == '-' || ch == '_';
@@ -669,6 +674,12 @@ WorktreeResult WorktreeSession::Enter(const std::string& name_or_path, const std
         target = WorktreePath(repository.path, name);
     } else if (looks_like_path) {
         target = Utf8ToPath(name_or_path);
+        // agent-* 是产品隔离房的所有权边界；即使给绝对路径也不许通用
+        // worktree 入口创建/接管，否则会绕开调用者 HEAD 与 TaskSnapshot 账。
+        if (target.filename().string().rfind("agent-", 0) == 0) {
+            return {WorktreeResultCode::InvalidName, {}, {},
+                    "'agent-' prefix is reserved for isolated subagent worktrees", {}};
+        }
     } else {
         name = name_or_path;
         if (const auto invalid = ValidateWorktreeName(name); invalid.has_value()) {

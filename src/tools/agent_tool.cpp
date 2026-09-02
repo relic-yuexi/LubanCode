@@ -6,6 +6,7 @@
 #include "tools/agent_tool.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cstddef>
 #include <cstdio>
 #include <ctime>
@@ -55,6 +56,107 @@ std::string ExplorePersona() {
     return ToolText("agent", "persona.explore",
                     "你是 Explore 子代理,专门快速搜索、阅读并分析代码库。只读,不得改文件、启动会改动环境的命令或做别的写操作。"
                     "完成后给出简明结论和具体文件位置,不要寒暄。");
+}
+
+std::vector<std::filesystem::path> ReferencedTodoPaths(const std::string& prompt,
+                                                       const std::filesystem::path& caller_cwd) {
+    std::vector<std::filesystem::path> paths;
+    std::size_t search_from = 0;
+    while (search_from < prompt.size()) {
+        const std::size_t suffix = prompt.find(".todo", search_from);
+        if (suffix == std::string::npos) {
+            break;
+        }
+        // 从 .todo 向前只认最近一枚 todos/；这样兼容中文紧贴、反斜杠和
+        // 文件名空格，也不会把绝对路径前缀或自然语言吞进任务单相对路径。
+        const std::size_t todos_slash = prompt.rfind("todos/", suffix);
+        const std::size_t todos_backslash = prompt.rfind("todos\\", suffix);
+        const std::size_t todos = todos_slash == std::string::npos
+                                      ? todos_backslash
+                                      : (todos_backslash == std::string::npos ? todos_slash
+                                                                              : std::max(todos_slash, todos_backslash));
+        if (todos == std::string::npos) {
+            search_from = suffix + 5;
+            continue;
+        }
+        const std::string raw = prompt.substr(todos, suffix + 5 - todos);
+        const std::filesystem::path resolved = caller_cwd / std::filesystem::path(raw);
+        const std::filesystem::path normalized = resolved.lexically_normal();
+        if (std::find(paths.begin(), paths.end(), normalized) == paths.end()) {
+            paths.push_back(normalized);
+        }
+        search_from = suffix + 5;
+    }
+    return paths;
+}
+
+bool HasUncheckedTodoItem(const std::string& content) {
+    for (std::size_t i = 0; i + 2 < content.size(); ++i) {
+        if (content[i] == '[' && (content[i + 1] == ' ' || content[i + 1] == '\t') && content[i + 2] == ']') {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool HasCompletedTodoStatus(const std::string& content) {
+    std::istringstream lines(content);
+    std::string line;
+    while (std::getline(lines, line)) {
+        const std::size_t status = line.find("状态：");
+        if (status == std::string::npos) {
+            continue;
+        }
+        const std::string value = line.substr(status + std::string("状态：").size());
+        return value.find("已实现") != std::string::npos || value.find("已销") != std::string::npos;
+    }
+    return false;
+}
+
+std::optional<std::string> CompletedTodoDispatchError(const std::string& prompt,
+                                                      const std::filesystem::path& caller_cwd,
+                                                      lubancode::cli::GitRunner runner) {
+    if (!runner) {
+        runner = lubancode::cli::DefaultGitRunner;
+    }
+    const auto repo_root = lubancode::cli::FindRepositoryRoot(caller_cwd, runner);
+    if (!repo_root.has_value()) {
+        return std::nullopt;
+    }
+    for (const std::filesystem::path& path : ReferencedTodoPaths(prompt, caller_cwd)) {
+        std::error_code ec;
+        const std::filesystem::path relative = std::filesystem::relative(path, *repo_root, ec);
+        if (ec || relative.empty() || relative.is_absolute()) {
+            continue;
+        }
+        const auto component = relative.begin();
+        if (component == relative.end() || *component != "todos" || path.extension() != ".todo") {
+            continue;
+        }
+        std::ifstream input(path, std::ios::binary);
+        if (!input) {
+            continue;
+        }
+        std::ostringstream buffer;
+        buffer << input.rdbuf();
+        const std::string content = buffer.str();
+        if (!HasCompletedTodoStatus(content) || HasUncheckedTodoItem(content)) {
+            continue;
+        }
+        const std::string relative_utf8 = relative.generic_string();
+        const lubancode::cli::GitCommandResult commit = runner(
+            {*repo_root, {"log", "-1", "--format=%H", "HEAD", "--", relative_utf8}});
+        std::string hash = commit.exit_code == 0 ? commit.output : std::string();
+        while (!hash.empty() && std::isspace(static_cast<unsigned char>(hash.back())) != 0) {
+            hash.pop_back();
+        }
+        if (hash.empty()) {
+            hash = "当前 HEAD（完成提交未查到）";
+        }
+        return "[todo_already_completed] 此单已修完于 " + hash + ": " + relative_utf8 +
+               "。确认要在当前基线重做？如确需重做，请先把任务单状态改回待修或新增未勾批次。";
+    }
+    return std::nullopt;
 }
 
 // 自定义 Agent 的人格段(P2-2):名字 + YAML description 拼一份跟内置两枚
@@ -1167,6 +1269,24 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
     request.permission_floor = permission_floor;
     request.custom = custom;
 
+    // 派工瞬间冻结实际调用者目录。嵌套任务必须认父快照 effective_cwd，
+    // 不能回读随后可能已被 /worktree 改过的 AgentTool::cwd_。
+    request.caller_cwd = env != nullptr && !env->effective_cwd.empty() ? env->effective_cwd : cwd_;
+    if (request.isolate) {
+        request.caller_base = lubancode::cli::FreezeWorktreeBase(Utf8ToPath(request.caller_cwd), git_runner_);
+        if (request.caller_base->commit.empty()) {
+            return {"isolation=worktree 冻结调用者 HEAD 失败(不在可用 git 仓库里?): " + request.caller_cwd, true};
+        }
+    }
+
+    // 派工前查单(2.3):只解析 prompt 里明确的 todos/*.todo。当前 HEAD 中
+    // 状态已实现/已销且没有未勾批次时，在建房、注册和请求后端前稳定拒绝。
+    if (const auto completed = CompletedTodoDispatchError(
+            request.task_input_text, Utf8ToPath(request.caller_cwd), git_runner_);
+        completed.has_value()) {
+        return {*completed, true};
+    }
+
     // 入参过了检:连败账翻篇——改对了就不记仇,后续调用从引导文案重新起。
     fail_account.set_param_fail_cause(std::string());
     fail_account.set_param_fail_streak(0);
@@ -1207,7 +1327,7 @@ Tool::Result AgentTool::ExecuteForeground(const DispatchRequest& request, ToolRe
     std::optional<IsolationScope> scope_storage;
     if (request.isolate) {
         Result setup_error;
-        room = SetupIsolationRoom(cwd_, git_runner_, setup_error);
+        room = SetupIsolationRoom(request.caller_cwd, request.caller_base, git_runner_, setup_error);
         if (!room.has_value()) {
             return setup_error;
         }
@@ -1225,9 +1345,7 @@ Tool::Result AgentTool::ExecuteForeground(const DispatchRequest& request, ToolRe
     snapshot.agent_type = agent_type;
     snapshot.title = request.title;
     snapshot.prompt = request.task_input_text;
-    snapshot.effective_cwd = scope_storage.has_value()
-                                 ? scope_storage->base_dir
-                                 : (env != nullptr && !env->effective_cwd.empty() ? env->effective_cwd : cwd_);
+    snapshot.effective_cwd = scope_storage.has_value() ? scope_storage->base_dir : request.caller_cwd;
     snapshot.spec = request.spec;
     snapshot.parent_task_id = caller.task_id;
     snapshot.foreground = true;
@@ -1376,7 +1494,7 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
     std::optional<lubancode::cli::AgentWorktree> room;
     if (request.isolate) {
         Result setup_error;
-        room = SetupIsolationRoom(cwd_, git_runner_, setup_error);
+        room = SetupIsolationRoom(request.caller_cwd, request.caller_base, git_runner_, setup_error);
         if (!room.has_value()) {
             return setup_error;
         }
@@ -1414,9 +1532,7 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
     snapshot.agent_type = agent_type;
     snapshot.title = request.title;
     snapshot.prompt = request.task_input_text;
-    snapshot.effective_cwd = room.has_value()
-                                 ? PathToUtf8(room->room_path)
-                                 : (env != nullptr && !env->effective_cwd.empty() ? env->effective_cwd : cwd_);
+    snapshot.effective_cwd = room.has_value() ? PathToUtf8(room->room_path) : request.caller_cwd;
     snapshot.spec = request.spec;
     snapshot.parent_task_id = caller.task_id;
     // 送达去处(单子 §7.1):根任务进 main 回合上下文;嵌套任务进直接父的
