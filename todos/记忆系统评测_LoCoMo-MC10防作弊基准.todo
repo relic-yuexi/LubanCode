@@ -46,9 +46,9 @@ LoCoMo-MC10 是 LoCoMo（Snap Research 2024，长对话记忆基准）的十选�
 
 ### E0 离线准备（零模型成本）
 
-- [ ] 下载 raw/locomo10.json（走代理）；解析十场对话。
-- [ ] 扰动器 `scripts/eval_locomo_perturb.py`：改名+平移+改写，产 `eval/locomo/perturbed.jsonl` + `eval/locomo/ledger.json`（含答案映射）+ `eval/locomo/answers.sha256`。
-- [ ] 一致性自检：同场同名恒定、日期相对关系保持、20 题人工抽验。
+- [x] 下载 raw/locomo10.json（走代理）；解析十场对话。（实测:raw/ 是无选项原始版,真 MC10 十选一在 data/locomo_mc10.json 240MB,一并下载;底细与单子 §一 对齐:1986 题、五类占比吻合）
+- [x] 扰动器 `scripts/eval_locomo_perturb.py`：改名+平移+改写，产 `eval/locomo/perturbed.jsonl` + `eval/locomo/ledger.json`（含答案映射）+ `eval/locomo/answers.sha256`。（answers.sha256=95d397cc…;同 seed 字节级可复现）
+- [x] 一致性自检：同场同名恒定、日期相对关系保持、20 题人工抽验。（四项自检全绿:sha256/旧名零残留含实体扫描/带年日期平移双射 10 场/session 日期序列;20 题清单人工过目,改写保义选项对位;修过三处错位:月年式只换年、级联二次平移、实体先于人名替换）
 
 ### E1 检索层评测（零模型成本，先掐软柿子）
 
