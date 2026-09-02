@@ -1,0 +1,665 @@
+# Agent 强化学习 Rollout 轨迹采集与训练交付设计
+
+- 状态：待实现（2026-09-02 立单；现有 Trajectory/Training Exporter 可收离线训练轨迹，本单补齐在线 rollout 身份、采样、环境、奖励、批调度与训练交付）
+- 日期：2026-09-02
+- 级别：P0（训练数据正确性、可复现性与安全边界）
+- 范围：`src/trajectory/`、`src/runtime/trajectory_session.*`、`src/api/` provider 中立采样结果、拟新增 `src/rollout/`、CLI/app-server rollout 面、测试与参考文档
+- 依赖：`todos/P0新轨迹记录_可重放与训练投影设计.todo`、`todos/OneShot轨迹断档_单发会话不进账本.todo`、`src/trajectory/training_exporter.*`、`src/evolution/eval.*`
+- 关联：`todos/Workspace统一存储_旧Session退场与分级Memory迁移.todo`、`todos/Agent任务级Turn预算与旧Step限制迁移设计.todo`、`todos/多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo`
+- 不在本单：优化器、反向传播、GPU/NPU 调度、参数服务器、ZeRO/FSDP、模型权重存储、训练算法实现、数据集上传平台、云端训练服务
+
+## 一、先下断语
+
+LubanCode 要做 rollout engine，不做 trainer。
+
+它接一批任务，装好指定策略，起干净环境，让 Agent 真跑。模型怎样想，工具怎样调，
+文件怎样改，测试怎样验，末了得几分，都落进一本 Trajectory Journal。随后再投影成
+`rollout-v1`，交给外部训练器。
+
+这条路不是 `harness-replay`。后者拿旧模型输出、旧工具结果喂宿主，查状态机为何走歪；
+rollout 则让当前策略重新采样，真调工具，真改环境，真收一条新轨迹。
+
+现有 `training-v1` 不改。它仍管 SFT、tool-use、成功/失败样本。RL 所需的策略版本、
+采样种子、精确 token、logprob、reward、同题多样本关系另立 `rollout-v1`。两份投影都
+只读 Journal，不互相反推，不各写第二本事实账。
+
+没有精确采样事实，便标 `unavailable`。没有独立 grader 证据，便没有 reward。模型自称
+“完成”，宿主 turn 正常收口，都不能冒充任务成功。
+
+## 二、现状证据
+
+### 2.1 已有底座
+
+1. `src/trajectory/` 已有强类型事件、单 writer Journal、hash chain、blob、环境快照、
+   replay、session verifier 与父子 run 交叉核验。
+2. `src/runtime/trajectory_session.*` 已把模型请求、模型输出、usage、工具调用、工具结果、
+   副作用、verification 与 `outcome.assessed` 接进账本。
+3. `src/trajectory/training_exporter.*` 已按 turn 投影 provider-neutral episode，分流
+   `success/failure/partial/excluded`，并有隐私、完整性、证据、重放等级与确定性指纹门。
+4. `lubancode trajectory export <session-id> --format training-v1` 已能显式导出本地数据。
+5. one-shot 已接 `TrajectorySessionLedger`，正常、kill、401 三场有落账验收；本单不再把
+   “one-shot 全无轨迹”当现状。
+6. `src/evolution/eval.*` 已有 `task_id`、acceptance、command/file 检查、预算与基线指标。
+   这些确定性检查器可以复用，候选晋升状态机不能拿来顶替 rollout 调度。
+
+### 2.2 还缺的账
+
+现有账能回答“这场 Agent 做了什么”，还不能严丝合缝回答下面八问：
+
+1. 这条样本属于哪场实验、哪道任务、同题第几次采样？
+2. 采样时真正加载的是哪版策略、哪份 tokenizer、哪套 chat template？
+3. temperature、top-p、top-k、seed 等采样参数究竟是什么？
+4. provider 真正吐出的 token ids 与逐 token logprob 是什么？
+5. 起跑前环境从哪份不可变基线 reset，收场后产生了哪份 patch/artifact？
+6. 谁按哪版规则打分，原始证据在哪，标量 reward 怎样算出？
+7. 同一任务的 K 条候选怎样成组，失败重试怎样避免重复记账？
+8. 训练器怎样确认数据完整、去重、未串策略、未混 train/holdout？
+
+### 2.3 现有合同不能硬凑
+
+- `outcome.assessed=succeeded` 是任务成败裁断，不是 RL 标量 reward。
+- `model.usage.recorded.output_tokens` 是计费数量，不是 token id 序列。
+- 重新拿文本 tokenize，只能算派生近似；chat template、tokenizer 版不同，结果便会变。
+- provider 没回 logprob，LubanCode 不能猜，也不能拿另一模型补算后写成“采样 logprob”。
+- `harness-replay` 用录制桩，不是 live rollout，也不能替代干净环境 reset。
+- `training-v1` 的 fingerprint 面向同一 Journal 的确定投影，不等于训练批次里的 sample id。
+- Evolution 的 replay/holdout 首版只跑确定性检查，不起真模型，不能冒充策略评测。
+
+## 三、职责边界
+
+### 3.1 LubanCode 负责
+
+- 接收、校验、冻结 `RolloutTaskSpec`。
+- 绑定实验、任务、样本、策略、采样与 grader 身份。
+- 从不可变基线创建隔离工作区。
+- 驱动 Agent 真跑，执行工具、预算、审批、取消与子代理调度。
+- 把采样事实、工具事实、副作用、环境变化、验证证据与 reward 落入 Journal。
+- 批量采 K 条候选，限制并发，处理超时、崩溃、取消与恢复。
+- 导出 provider-neutral `rollout-v1` 与 manifest。
+- 给训练器一份可拉取、可校验、可去重的本地产物。
+
+### 3.2 外部训练器负责
+
+- 选择 SFT、DPO、GRPO、PPO 或别的算法。
+- 组 batch、算 advantage、KL、loss，做反向传播与参数更新。
+- 管 GPU/NPU、权重、checkpoint、optimizer state 与分布式通信。
+- 发布新策略版本，再把不可变 `policy_version` 交回 LubanCode 采下一轮。
+
+### 3.3 双方交界
+
+训练器只下发任务与策略身份，不得直写 Trajectory。LubanCode 只交付事实与派生数据，
+不得声称“已经训练”。策略文件怎样加载，由 provider/backend adapter 负责；加载后须回报
+实际 identity，LubanCode 对账，不合便拒开场。
+
+## 四、不可破的合同
+
+1. 一条 rollout 对应一枚稳定 `rollout_id`，终生不复用。
+2. 同题重试另开 `rollout_id`；原场留 failed/partial，不抹账，不续写封口 stream。
+3. `experiment_id + task_id + sample_index` 在一份 batch manifest 内唯一。
+4. `policy_version` 是训练器给的期望值；backend 回报 actual identity，两者逐位对账。
+5. workspace reset 成功后才许发第一枚模型请求。
+6. grader 与 Agent 分权。Agent 不得写 reward，不得改 grader 配置与 holdout 答案。
+7. reward 必须引用 fresh verification 与原始 grader report；缺证据便是 unavailable。
+8. scalar reward 与各分量同存。不得只留总分，日后猜不回公式。
+9. 精确 token/logprob 只收 provider/backend 原始值；重 tokenize 另标 derived。
+10. train/validation/holdout split 随 TaskSpec 冻结，模型上下文与工具不得读 holdout 答案。
+11. Journal 仍是唯一事实账；`rollout-v1` 可删可重算。
+12. `training-v1` schema v1 不原地加字段，不因本单改变既有字节输出。
+13. rollout 默认不上传。导出与交付都要显式命令或显式本地配置。
+14. secret、用户私有路径、未授权源码命中门禁时整枚排除，不拿 excluded 文件泄密。
+15. live 外部系统不承诺确定复现；replay level 要照实降档。
+16. 预算耗尽、用户取消、进程崩溃都要有终态或 recovery verdict，不能悄悄消失。
+17. 子代理各写各的 Journal；父级只留边与验收引用，不把子轨迹复制进 main。
+18. 训练器确认 receipt 前，导出件可重送；训练器按 dataset/episode fingerprint 幂等接收。
+
+## 五、身份合同
+
+### 5.1 RolloutTaskSpec
+
+拟新增 provider-neutral schema：`lubancode.rollout.task` v1。
+
+```json
+{
+  "schema": "lubancode.rollout.task",
+  "schema_version": 1,
+  "experiment_id": "exp-20260902-code-repair-001",
+  "task_id": "bugfix-0042",
+  "dataset": "internal-code-repair-v1",
+  "split": "train",
+  "prompt": {"text_ref": {"sha256": "...", "bytes": 321}},
+  "workspace": {
+    "reset_kind": "git_commit",
+    "repository_ref": "repo-demo-v1",
+    "base_revision": "<full sha>",
+    "dirty_patch_ref": null
+  },
+  "policy": {
+    "provider": "local",
+    "model": "demo-agent-7b",
+    "policy_version": "step-000120",
+    "checkpoint_digest": "sha256:...",
+    "tokenizer_digest": "sha256:...",
+    "chat_template_digest": "sha256:..."
+  },
+  "sampling": {
+    "samples": 8,
+    "temperature": 0.8,
+    "top_p": 0.95,
+    "top_k": 0,
+    "max_output_tokens": 4096,
+    "seed_base": 42000
+  },
+  "budget": {
+    "max_model_turns": 24,
+    "max_tool_calls": 96,
+    "max_input_tokens": 1000000,
+    "max_output_tokens": 50000,
+    "timeout_ms": 1800000
+  },
+  "tools": {"profile": "code-repair-v1", "allow": [], "deny": []},
+  "grader": {
+    "grader_id": "ctest-code-repair",
+    "grader_version": "1",
+    "config_ref": {"sha256": "...", "bytes": 456},
+    "reward_spec_ref": {"sha256": "...", "bytes": 234}
+  }
+}
+```
+
+TaskSpec 解析须严：未知 schema/version、空 identity、相对路径越界、负预算、`samples=0`、
+策略 digest 形状不对，一律明拒。TaskSpec 原文先内容寻址，再把 ref 绑定到 run；不把一大段
+任务配置复制进每枚事件。
+
+### 5.2 RolloutIdentity
+
+每条样本冻结：
+
+```text
+experiment_id
+task_id
+dataset
+split
+rollout_id
+sample_index
+attempt
+seed_requested
+policy_version_expected
+policy_version_actual
+task_spec_sha256
+```
+
+`rollout_id` 由宿主发，不用模型响应 id，不用正文 hash。`sample_index` 表示同题第几条候选；
+基础设施失败重跑时 `attempt + 1`，但仍开新 `rollout_id`。manifest 保留 sibling 关系。
+
+### 5.3 Journal 落点
+
+不在 EventEnvelope 上硬塞十个 rollout 字段。拟增两类强类型事实，具体事件名在 P0-0
+合同评审时冻结：
+
+- rollout binding：run 开场后第一枚业务事实，引用 TaskSpec 与 RolloutIdentity；
+- reward record：grader 收口后落，引用 RewardReport、evidence、grader identity 与公式 hash。
+
+若给现有 event schema 加 kind，须抬 schema 版本，补 v1/v2 reader；不得让旧 reader 猜新事件。
+control 事件默认 `training_policy=metadata`，任务正文与采样正文照原有 content policy 走。
+
+## 六、策略与采样事实
+
+### 6.1 PolicySnapshot
+
+backend 开场须回一份实际快照：
+
+```text
+provider / wire / endpoint_identity_redacted
+model
+policy_version
+checkpoint_digest
+tokenizer_digest
+chat_template_digest
+backend_build
+supports_token_ids
+supports_logprobs
+supports_seed
+```
+
+期望与实际不合，给稳定错误 `rollout.policy_identity_mismatch`，一枚请求也不发。闭源 provider
+没有 checkpoint digest 时写 unavailable；这类样本可做行为数据，是否可进 on-policy RL 由
+export route 决定，不能冒充精确策略版本。
+
+### 6.2 SamplingConfig
+
+`model.request.prepared.payload.parameters` 要能保存真正生效的采样参数，不再只靠参数 hash：
+
+- temperature
+- top_p
+- top_k（backend 支持才有）
+- min_p（backend 支持才有）
+- max_output_tokens
+- seed requested / seed effective
+- stop 条件的规范 hash
+- tool choice / parallel tool policy
+
+backend 不支持某项时，明列 `unsupported`。不得把 requested 值抄成 effective 值。
+
+### 6.3 SamplingTrace
+
+provider 中立输出新增可选采样侧带：
+
+```text
+token_ids[]
+token_logprobs[]
+top_logprobs[]（可选，有界）
+finish_reason
+provider_response_id
+tokenizer_digest
+trace_kind = exact | derived | unavailable
+```
+
+大数组进 blob，Journal 只留 ref、bytes、sha256、token_count 与 kind。`token_ids` 和
+`token_logprobs` 长度不合、NaN/Inf、正 logprob、token_count 对不上，一律结构失败。
+
+精确 trace 只能由实际采样 backend 给。文本重 tokenize 的结果若确有离线用途，另存
+`trace_kind=derived`，不许进要求 on-policy exact 的 route。
+
+## 七、环境 Reset 与隔离
+
+### 7.1 Reset 形态
+
+首版只收三种：
+
+1. `git_commit`：从固定仓库引用与 full SHA 建隔离 worktree。
+2. `directory_snapshot`：从内容寻址快照解到新目录。
+3. `container_image`：预留合同；没有生产 runtime 前明拒，不做假实现。
+
+每条 rollout 独占 workspace。兄弟样本不得共用可写目录、后台进程、临时文件、端口租约、
+MCP 会话与环境变量覆盖。
+
+### 7.2 ResetReceipt
+
+开场落：base revision、workspace identity、初态 dirty 状态、toolset hash、config hash、
+env allowlist hash。非预期 dirty、基线不存在、快照 hash 不合，给 `rollout.reset_*` 稳定码，
+归 infrastructure failure，不给任务 reward=0。
+
+### 7.3 收场产物
+
+收场保存：
+
+- final git status；
+- patch blob 与 untracked manifest；
+- grader 指定 artifact；
+- 后台进程清理账；
+- workspace retention decision。
+
+默认先封 Journal，再删派生 workspace。清理失败不改任务 reward，但标 infrastructure warning，
+留可诊断路径。任何递归删除都先验 workspace lease 与解析后的绝对根，不能凭模型给的路径删。
+
+## 八、Grader 与 Reward
+
+### 8.1 分权
+
+Agent 跑任务时看不到 grader 密钥、holdout 答案与 reward 脚本可写路径。Grader 在 Agent 收口
+后起独立进程，拿只读 TaskSpec、最终 workspace 与 artifact。它不读模型“我完成了”的文字。
+
+可复用 `src/evolution/eval.*` 的 file/JSON/command 检查器与无 shell argv 执行规矩；须另加
+rollout grader host，不能让 EvolutionCoordinator 改 rollout 状态。
+
+### 8.2 RewardSpec
+
+首版合同须同时留分量与公式：
+
+```json
+{
+  "schema": "lubancode.rollout.reward",
+  "schema_version": 1,
+  "rollout_id": "roll-...",
+  "grader_id": "ctest-code-repair",
+  "grader_version": "1",
+  "reward_spec_sha256": "...",
+  "components": [
+    {"name": "tests_passed", "value": 18, "maximum": 20, "weight": 1.0},
+    {"name": "forbidden_change", "value": 0, "maximum": 1, "weight": -1.0}
+  ],
+  "scalar_reward": 0.9,
+  "task_outcome": "succeeded",
+  "evidence_refs": [],
+  "grader_report_ref": {"sha256": "...", "bytes": 789},
+  "status": "scored"
+}
+```
+
+状态只收 `scored / unavailable / invalid`。基础设施坏、grader 超时、report 解析失败，写
+`unavailable`，不能随手给 0。任务真失败、grader 正常跑完，才可按 RewardSpec 给 0 或负分。
+
+### 8.3 奖励防钻
+
+- grader 配置与测试基线来自只读快照；Agent 改了即 hash 不合。
+- 测试命令、退出码、stdout/stderr ref、通过/失败计数全留证据。
+- reward 公式由宿主按冻结 RewardSpec 算，grader 插件只交原始分量。
+- 分量设上下界，拒 NaN/Inf 与越界值。
+- task success、成本指标、安全违规分列。首版不把 token 少、耗时短直接揉进主 reward。
+- holdout 任务只出评测报告，默认不进训练交付。
+
+## 九、RolloutCoordinator
+
+### 9.1 状态机
+
+```text
+accepted
+  -> resetting
+  -> ready
+  -> running
+  -> grading
+  -> scored
+  -> exporting
+  -> delivered
+```
+
+旁路终态：`rejected / infra_failed / task_failed / cancelled / expired / excluded`。
+
+状态只许 Coordinator 一处改。Trajectory 记事实，Coordinator store 记批调度状态；两者不是
+两本平级真值。恢复时以 Journal 与 receipt 校对 store，不能拿 store 反造模型、工具、reward
+事件。
+
+### 9.2 批与并发
+
+- 一份 batch 可含多 task，每 task 可采 K 条 sibling rollout。
+- 并发受全局、workspace、provider、model 四层限额。
+- 同 session 的一条 rollout 保持单飞；不同 rollout 可并行。
+- 公平调度按 task 轮转，不能让一题的 K 条样本吃尽队列。
+- budget 吃实际 model turns、tool calls、tokens、wall time；超帽立即取消并收口。
+- provider 429/5xx 重试沿既有 request retry 合同走；若重试可能改变采样，attempt 事实要入账。
+
+### 9.3 崩溃恢复
+
+- reset 前崩：可在同 job 下新开 attempt。
+- 已发模型请求但终态不明：原 rollout 标 partial/indeterminate，不偷重发同一步。
+- 工具副作用不明：按现有 unknown side effect 门排除训练。
+- grading 前崩：若 run 已封口、workspace lease 与 final hash 仍在，可幂等补 grade。
+- reward 已落、export 未做：可重导。
+- delivered receipt 已落：重复投递由 dataset fingerprint 幂等吞掉。
+
+### 9.4 命令面
+
+拟增：
+
+```text
+lubancode rollout validate <task-spec.json>
+lubancode rollout run <task-spec.json> [--samples K] [--jobs N]
+lubancode rollout status <batch-id> [--json]
+lubancode rollout cancel <batch-id|rollout-id>
+lubancode rollout export <batch-id> --format rollout-v1
+lubancode rollout doctor <batch-id>
+```
+
+首版 CLI 跑本机。app-server 只包同一 service，不另写状态机。Gateway、跨节点 Node Bridge 与
+远端训练队列另批接，不能拖住单机闭环。
+
+## 十、rollout-v1 导出
+
+### 10.1 Episode
+
+拟定 schema：`lubancode.rollout.episode` v1。每行至少含：
+
+```text
+identity        experiment/task/rollout/sample/attempt/split
+policy          expected/actual identity + tokenizer/template digest
+sampling        requested/effective config
+messages        provider-neutral 消息与 tool-use
+steps           模型、工具、子代理边界
+sampling_trace  每次 assistant 输出的 exact/derived/unavailable ref
+outcome         task outcome、终态、evidence
+reward          scalar、components、grader identity、report ref
+usage           input/cache/output/reasoning tokens
+environment     reset receipt、replay level、final patch/artifact refs
+quality         structure/privacy/completeness/replayability/on-policy eligibility
+fingerprint     episode 与 exporter config 指纹
+```
+
+### 10.2 路由
+
+至少分五路：
+
+- `on_policy.jsonl`：策略 identity 对上，精确 token/logprob 齐，reward 有效，结构完整。
+- `rewarded.jsonl`：reward 有效，但 token/logprob 不齐；可供 SFT、偏好、分析。
+- `unscored.jsonl`：轨迹完整，grader 未得分。
+- `partial.jsonl`：预算、取消、崩溃等未完整收口。
+- `excluded.jsonl`：隐私、链断、策略串线、未知副作用、污染等硬伤。
+
+具体算法要不要 logprob，不由 exporter 猜。manifest 写 capability，训练器按算法选择 route。
+例如某训练器能从冻结策略重算 old logprob，也须在训练侧另留 derivation receipt；LubanCode
+不能把它倒填成采样时事实。
+
+### 10.3 BatchManifest
+
+manifest 记：TaskSpec/RewardSpec/exporter config hash、策略分布、split、route counts、reward
+分布、排除缘由、逐文件 sha256、episode fingerprints、生成锚点与授权来源。排序与 canonical
+JSON 沿用 training exporter 规矩；同账同配置连导两次逐字节一致。
+
+### 10.4 交付
+
+P0 只写本地原子目录：
+
+```text
+<workspace>/rollouts/<batch-id>/
+  batch.json
+  tasks/
+  status.jsonl
+  exports/rollout-v1/
+```
+
+训练器用 pull 方式取 manifest。自动 HTTP 上传、对象存储、消息队列、鉴权与断点续传另立
+connector，不塞进 exporter。没有用户授权，事实账与导出件都不出本机。
+
+## 十一、安全、隐私与数据治理
+
+1. TaskSpec、grader config、源码许可与训练授权分别记，不拿“能运行”顶“准训练”。
+2. `training_policy=exclude` 的事件不得因 batch 绑定而翻成 include。
+3. project/user memory 默认不进 rollout；若实验明确需要，须冻结快照、记授权与可见范围。
+4. 环境变量只按 allowlist 进 Agent；grader secret 走独立 resolver，不落模型上下文。
+5. Prompt、tool result、patch、artifact 与 sampling trace 都过 secret/privacy scanner。
+6. 外部网络、MCP、浏览器与真实账号默认禁用；开放时 TaskSpec 明列 capability 与 replay impact。
+7. grader command 不经 shell 拼接；cwd 固定到隔离 workspace，路径先做 containment 校验。
+8. 导出前再次扫隐私。命中后正文整包扣下，只留稳定码与 source event id。
+9. holdout 目录、grader 脚本与答案挂只读，且不注册为 Agent 可见工具资源。
+10. 删除 rollout workspace 与派生导出不删 canonical Journal；删 Journal 仍走显式 session delete。
+
+## 十二、可观测性与容量
+
+本地指标至少有：
+
+```text
+rollout_jobs_total{terminal}
+rollout_active
+rollout_reset_seconds
+rollout_run_seconds
+rollout_grade_seconds
+rollout_reward{component}
+rollout_tokens_total{kind}
+rollout_export_episodes{route}
+rollout_excluded_total{reason}
+rollout_policy_mismatch_total
+rollout_workspace_bytes
+```
+
+label 不带 task_id、prompt、路径、模型输出、reward 明细与用户正文，防高基数与泄密。CLI status
+可点名看任务细账，Telemetry 只报有界聚合。
+
+容量要分别记 Journal、sampling trace blob、workspace、patch/artifact 与 export。开 batch 前估算
+最坏占用；低于 reserve 不再接新 rollout，已运行者照现有 WAL 纪律收口。GC 先删可重算 export，
+再删已确认交付的 workspace；canonical Journal 与被引用 grader report 不进自动清理面。
+
+## 十三、错误合同
+
+首批稳定码：
+
+```text
+rollout.task_schema_unsupported
+rollout.task_invalid
+rollout.identity_conflict
+rollout.policy_unavailable
+rollout.policy_identity_mismatch
+rollout.sampling_unsupported
+rollout.reset_failed
+rollout.reset_dirty
+rollout.workspace_escape
+rollout.budget_exhausted
+rollout.cancelled
+rollout.provider_indeterminate
+rollout.side_effect_unknown
+rollout.grader_failed
+rollout.grader_timeout
+rollout.reward_invalid
+rollout.trace_invalid
+rollout.privacy_excluded
+rollout.storage_exhausted
+rollout.export_failed
+rollout.delivery_unconfirmed
+```
+
+错误要分 task failure 与 infrastructure failure。前者可以有合法低 reward；后者默认无 reward，
+不能一股脑算成模型没本事。
+
+## 十四、分期落地
+
+批间按序，不越级。每批落完便在本单勾项，附实现文件、测试命令与真机证据。
+
+### P0-0：冻结合同
+
+- [ ] 冻结 `RolloutTaskSpec`、RolloutIdentity、PolicySnapshot、SamplingTrace、RewardReport 与 `rollout-v1` schema。
+- [ ] 冻结 task failure / infrastructure failure / excluded 三类裁断表。
+- [ ] 冻结 `training-v1` 零改动与 Journal 单真值不变量。
+- [ ] 写 schema golden fixtures 与兼容矩阵。
+
+验收：只读设计与 fixture 足以让 runtime、provider、grader、exporter 四边各自开工，字段没有一词多义。
+
+### P0-1：单条 Rollout 身份接线
+
+- [ ] 新增 `src/rollout/` 合同、解析器与 Coordinator 最小状态机。
+- [ ] 把 TaskSpec/identity ref 绑定到独立 session/run。
+- [ ] 接实际 PolicySnapshot，期望/实际不合时请求零发出。
+- [ ] 加 `rollout validate/run/status/cancel` 单条命令。
+
+验收：假 backend 跑一条 rollout，Journal 能从 binding 一路核到 run 终态；坏身份不发模型请求。
+
+### P0-2：环境 Reset 与收场
+
+- [ ] 落 `git_commit` 隔离 worktree reset。
+- [ ] 落 `directory_snapshot` 内容寻址 reset。
+- [ ] 落 workspace lease、端口/后台进程隔离与 final patch/artifact capture。
+- [ ] 落 crash 后 orphan workspace 盘点与保守清理。
+
+验收：同题两条兄弟样本并跑，互相看不见改动；基线 dirty/hash 不合时全挡在第一枚请求前。
+
+### P0-3：采样事实
+
+- [ ] 扩全 request effective sampling 参数与 provider capability。
+- [ ] 中立层接可选 token ids/logprob，不支持者明记 unavailable。
+- [ ] 大 trace 走 blob，补长度、数值、tokenizer digest 校验。
+- [ ] 把 usage、provider response id 与 SamplingTrace 按 request_id 配齐。
+
+验收：假 backend 给 exact trace 时逐 token 往返不丢；不给 trace 时不伪造，route 自动降档。
+
+### P0-4：Grader 与 Reward
+
+- [ ] 复用 Evolution 确定性检查器，新增独立 rollout grader host。
+- [ ] 落 RewardSpec 解析、分量边界、宿主公式与 RewardReport。
+- [ ] reward 引 fresh evidence、grader report 与 final workspace hash。
+- [ ] 分清任务失败、grader 失败、基础设施失败。
+- [ ] 加 grader 只读/不可见隔离与防篡改 hash 门。
+
+验收：同一 workspace、同一 grader/config 连跑两次 reward 一致；Agent 改 grader 或答案时不出分。
+
+### P0-5：批量采样与恢复
+
+- [ ] 落一 task K samples、多 task 公平队列与四层并发帽。
+- [ ] 落 batch/rollout 状态机、预算、取消、过期与恢复。
+- [ ] 落 sibling/attempt 关系与 identity 唯一门。
+- [ ] 落请求终态不明、工具副作用不明、grading 中断三类恢复剧本。
+
+验收：百条假 rollout 随机 kill/restart，不重号、不覆写、不把 infra failure 算低 reward，终态总数对得上接单数。
+
+### P0-6：rollout-v1 导出与交付
+
+- [ ] 新增 `rollout-v1` episode、五路裁断与 BatchManifest。
+- [ ] 保住 `training-v1` golden bytes 不变。
+- [ ] 落确定性导出、原子 rename、磁盘 reserve 与逐文件 hash。
+- [ ] 落本地 pull 交付与 receipt；重复取件幂等。
+- [ ] CLI 增 `rollout export/doctor`。
+
+验收：同一 batch 连导两次逐字节一致；改 exporter config 指纹必变；链断、隐私、策略串线各进正确路。
+
+### P0-7：安全、容量与发布门
+
+- [ ] 跑路径逃逸、grader 注入、secret、holdout 泄漏、未授权网络与恶意 artifact 夹具。
+- [ ] 跑低磁盘、blob 超限、坏 manifest、坏 trace、坏 reward 与并发清理夹具。
+- [ ] 跑 focused、integration、process-kill、full CTest。
+- [ ] 用本地可控模型 backend 跑一批真实 code-repair rollout；没有 exact logprob 能力便如实降档。
+- [ ] Windows 真机跑 worktree/process；Linux/macOS 由真 CI 或真机补平台证据。
+- [ ] 补 `docs/reference/rollout.md`、CLI 中英文案与 CHANGELOG。
+
+验收：真实 batch 能从 TaskSpec 走到本地 `rollout-v1`；数量、reward、usage、hash 与 Journal 逐项对上。没跑的平台、provider、训练器明写未验。
+
+## 十五、预计改动边界
+
+拟新增：
+
+```text
+src/rollout/contracts.hpp/.cpp
+src/rollout/task_spec.hpp/.cpp
+src/rollout/coordinator.hpp/.cpp
+src/rollout/workspace_reset.hpp/.cpp
+src/rollout/grader.hpp/.cpp
+src/rollout/reward.hpp/.cpp
+src/rollout/exporter.hpp/.cpp
+src/cli/rollout_command.hpp/.cpp
+tests/unit/rollout/
+tests/integration/rollout/
+tests/manual/rollout/
+docs/reference/rollout.md
+```
+
+预计修改：
+
+```text
+src/trajectory/event.*
+src/trajectory/schema.*
+src/runtime/trajectory_session.*
+src/api/types.*
+各 provider backend 的可选 SamplingTrace 接口
+src/app/cli_options.*
+src/app_server/（只包同一 RolloutService）
+CMakeLists.txt
+tests/CMakeLists.txt
+```
+
+`src/evolution/` 首批只抽取或复用确定性检查接口。若为复用而改，须保住 Evolution 既有
+candidate/eval ledger 行为与 golden；不得把两套状态机合成一锅。
+
+## 十六、不做什么
+
+- 不在 C++ Harness 里实现 GRPO/PPO/optimizer。
+- 不让 Trainer 直接写 Journal。
+- 不把 `harness-replay` 政名当 rollout。
+- 不把正常 turn 收口当 reward=1。
+- 不把 provider usage 数当 token ids。
+- 不拿 retokenize 或别的模型补算冒充采样时 logprob。
+- 不因 RL 需求改写 `training-v1` schema v1。
+- 不把每条子代理正文复制进父 episode。
+- 不默认上传私有代码、prompt、轨迹与 reward。
+- 不先上多节点。单机闭环、崩溃账、确定性导出没站稳，多节点只会把错账撒远。
+- 不拿结构单测冒充真实模型 rollout，也不拿 rollout 数量冒充训练收益。
+
+## 十七、最终验收门
+
+1. 一份 TaskSpec 可在干净环境采 K 条真实 rollout，每条身份唯一，策略版本可核。
+2. 模型、工具、子代理、副作用、verification、reward 与 usage 在 Journal 中首尾闭合。
+3. task failure 与 infrastructure failure 分账；grader 坏了绝不默记 reward=0。
+4. 支持的 backend 能给 exact token/logprob；不支持者全链明标 unavailable，不伪造。
+5. `rollout-v1` 五路、manifest、fingerprint 与隐私门全有 golden tests。
+6. `training-v1` 既有确定性输出逐字节不变。
+7. kill/restart、低磁盘、策略串线、环境污染、未知副作用与重复投递均有过程测试。
+8. 同题 sibling 并行不串 workspace、seed、provider response、reward 与 artifact。
+9. 本地真实 code-repair batch 跑通；外部 trainer 能只凭 manifest 拉取并校验数据。
+10. full CTest 零红；Windows 真机有账，Linux/macOS、真实 provider、真实训练器缺哪项便写哪项未验。
+
+收官文案只许写“LubanCode 已能采集并交付 RL rollout”。没有外部 trainer 的权重更新与
+held-out 复测证据，不许写“LubanCode 已完成强化学习训练”或“模型能力已经提升”。
