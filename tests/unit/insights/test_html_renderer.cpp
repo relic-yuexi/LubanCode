@@ -31,6 +31,7 @@ SessionInsightSummary MakeSummary() {
     summary.usage.input_tokens = 1200;
     summary.usage.cache_read_tokens = 48000;
     summary.usage.output_tokens = 1800;
+    summary.cache_epochs.push_back(SummaryCacheEpoch{"main-0001", 1, 2, 1, 1, 1200, 48000, 0});
     summary.friction_events = {"tool.repeated_retry"};
     summary.feature_signals = {"FS-01"};
     Finding finding;
@@ -144,6 +145,8 @@ TEST_CASE("七节锚点与筛选器在场;canary 不进页面") {
     }
     CHECK(html.find("id=\"session-rows\"") != std::string::npos);
     CHECK(html.find("data-cats=\"tool.repeated_retry\"") != std::string::npos);
+    CHECK(html.find("Cache epoch 分段") != std::string::npos);
+    CHECK(html.find("1/2") != std::string::npos);
     // 排除理由与落盘缺口如实进限制节(转义后)。
     CHECK(html.find("verify.chain_broken") != std::string::npos);
     CHECK(html.find("磁盘满") != std::string::npos);

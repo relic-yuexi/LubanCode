@@ -219,6 +219,9 @@ nlohmann::json UsageSample::ToJson() const {
     if (prefix_append_only.has_value()) {
         json["prefix_append_only"] = *prefix_append_only;
     }
+    if (cache_reported_by_provider.has_value()) {
+        json["cache_reported_by_provider"] = *cache_reported_by_provider;
+    }
     json["cost"] = cost.ToJson();
     if (source_event.has_value()) {
         json["source_event"] = source_event->ToJson();
@@ -358,6 +361,14 @@ std::optional<UsageSample> UsageSample::FromJsonStrict(const nlohmann::json& jso
         }
         sample.prefix_append_only = json.at("prefix_append_only").get<bool>();
     }
+    if (json.contains("cache_reported_by_provider")) {
+        if (!json.at("cache_reported_by_provider").is_boolean()) {
+            *error = "cache_reported_by_provider 须是 bool";
+            return std::nullopt;
+        }
+        sample.cache_reported_by_provider =
+            json.at("cache_reported_by_provider").get<bool>();
+    }
     if (json.contains("cost")) {
         const auto cost = CostEstimate::FromJsonStrict(json.at("cost"), error);
         if (!cost.has_value()) {
@@ -397,6 +408,7 @@ std::optional<UsageSample> UsageSample::FromJsonStrict(const nlohmann::json& jso
                                        "total_billed_shape_tokens",
                                        "cache_epoch",
                                        "prefix_append_only",
+                                       "cache_reported_by_provider",
                                        "cost",
                                        "source_event",
                                        "request_outcome",

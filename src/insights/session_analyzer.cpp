@@ -186,9 +186,24 @@ SessionAnalyzeResult AnalyzeSession(const std::filesystem::path& session_dir,
         }
     }
 
-    // cache 行为(A2 的账)进功能信号。
+    // cache 行为与 epoch 分段都吃同一批逐请求 sample。
     {
         const accounting::UsageAggregate aggregate = accounting::AggregateUsage(samples);
+        summary.cache_epochs.clear();
+        for (const auto& row : aggregate.by_cache_epoch) {
+            SummaryCacheEpoch epoch;
+            epoch.run_id = row.run_id;
+            epoch.cache_epoch = row.cache_epoch;
+            epoch.requests_total = static_cast<std::uint64_t>(row.totals.requests_total);
+            epoch.requests_cache_reported =
+                static_cast<std::uint64_t>(row.requests_cache_reported);
+            epoch.requests_cache_unknown =
+                static_cast<std::uint64_t>(row.requests_cache_unknown);
+            epoch.input_tokens = row.totals.input_tokens;
+            epoch.cache_read_tokens = row.totals.cache_read_tokens;
+            epoch.cache_creation_tokens = row.totals.cache_creation_tokens;
+            summary.cache_epochs.push_back(std::move(epoch));
+        }
         signal_input.unexpected_miss_candidates =
             aggregate.cache.unexpected_miss_candidates;
         signal_input.cache_read_tokens = aggregate.totals.cache_read_tokens;

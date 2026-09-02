@@ -319,6 +319,22 @@ TEST_CASE("usage:整轮一笔实测都没有时 any_reported 为假") {
     CHECK(stats.any_reported());
 }
 
+TEST_CASE("usage:明报全零与 cache 未报靠显式位分家") {
+    rt::TurnUsageStats stats;
+    api::UsageReport report;
+    report.reported_by_provider = true;
+    report.cache_reported_by_provider = false;
+    stats.Add(report);
+    CHECK(stats.any_reported());
+    CHECK_FALSE(stats.any_cache_reported());
+    CHECK_FALSE(stats.all_cache_reported());
+
+    report.cache_reported_by_provider = true;
+    stats.Add(report);
+    CHECK(stats.any_cache_reported());
+    CHECK_FALSE(stats.all_cache_reported());
+}
+
 TEST_CASE("usage:reasoning 拆账含在 output 里,不是另加的一笔") {
     api::Usage usage;
     usage.input_tokens = 100;

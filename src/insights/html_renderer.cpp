@@ -298,6 +298,29 @@ std::string RenderInsightsHtml(const InsightsReport& report,
              << ";逐笔费用看 /usage)</td></tr>\n</table>\n"
              << "<p class=\"muted\">模型/用途/主子执行/重试/compact 的逐笔分账在 Journal 里,"
                 "摘要 schema 未带,本表不猜;逐笔账看 /usage --by。</p>\n";
+        if (!agg.cache_epochs.empty()) {
+            page << "<h3>Cache epoch 分段</h3>\n<table>\n"
+                 << "<tr><th>session/run</th><th>epoch</th><th>请求</th><th>cache 上报覆盖</th>"
+                    "<th>完整输入</th><th>cache 读</th><th>命中率</th></tr>\n";
+            for (const auto& epoch : agg.cache_epochs) {
+                const std::int64_t total_input = epoch.input_tokens + epoch.cache_read_tokens +
+                                                 epoch.cache_creation_tokens;
+                page << "<tr><td>" << EscapeHtml(epoch.session_id + "/" + epoch.run_id)
+                     << "</td><td>"
+                     << (epoch.cache_epoch > 0 ? std::to_string(epoch.cache_epoch)
+                                               : std::string("未标"))
+                     << "</td><td>" << FormatNumber(epoch.requests_total) << "</td><td>"
+                     << FormatNumber(epoch.requests_cache_reported) << "/"
+                     << FormatNumber(epoch.requests_total) << "</td><td>"
+                     << FormatTokens(total_input) << "</td><td>"
+                     << FormatTokens(epoch.cache_read_tokens) << "</td><td>"
+                     << (epoch.cache_read_ratio_percent.has_value()
+                             ? std::to_string(*epoch.cache_read_ratio_percent) + "%"
+                             : std::string("该 provider 未报缓存"))
+                     << "</td></tr>\n";
+            }
+            page << "</table>\n";
+        }
     }
 
     // ---- 三 Prompt 构成 ----

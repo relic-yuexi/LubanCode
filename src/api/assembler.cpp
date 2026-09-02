@@ -100,6 +100,7 @@ void MessageAssembler::Feed(const StreamEvent& event) {
                 stop_reason_ = e.stop_reason;
                 usage_ = e.usage;
                 usage_seen_ = e.usage_reported;  // 显式位:wire 见没见过 usage 帧
+                cache_seen_ = e.cache_reported;
             }
             // MessageStart / StreamError:不影响攒出来的内容。
         },

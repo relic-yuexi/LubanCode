@@ -151,7 +151,11 @@ MessageDone DoneFromResponseObject(const json& response) {
         std::int64_t cached = 0;
         if (auto details_it = usage_it->find("input_tokens_details");
             details_it != usage_it->end() && details_it->is_object()) {
-            cached = details_it->value("cached_tokens", static_cast<std::int64_t>(0));
+            if (auto cached_it = details_it->find("cached_tokens");
+                cached_it != details_it->end() && cached_it->is_number_integer()) {
+                cached = cached_it->get<std::int64_t>();
+                event.cache_reported = true;
+            }
         }
         event.usage.cache_read_tokens = cached;
         event.usage.input_tokens = input_total > cached ? input_total - cached : 0;

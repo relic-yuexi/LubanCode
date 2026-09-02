@@ -1056,7 +1056,8 @@ const Entry kZhCN[] = {
     {"oneshot.ledger_open_failed", "轨迹账开张失败,单发不启动: "},
     {"oneshot.ledger_close_failed", "轨迹账收口失败: "},
     {"oneshot.ledger_note", "[tokens] 汇总行之外,细账(逐请求 usage/cache 分列/工具流水)已落轨迹会话 {0}"},
-    {"stats.cache_not_reported", "(usage 未报告)"},
+    {"stats.usage_not_reported", "(usage 未报告)"},
+    {"stats.cache_not_reported", "(该 provider 未报缓存)"},
     {"stats.cache_disabled", "(服务端未启用前缀缓存)"},
     {"stats.cache_no_hit_enabled", "(缓存已启用,本场未命中)"},
     {"stats.cache_no_hit_unverified", "(缓存 0 命中,服务端是否启用未验证)"},
@@ -3075,6 +3076,11 @@ const Entry kEn[] = {
     // ---- stats line ----
     {"stats.line", "[tokens] in {0}{1} · out {2} · {3} requests · context {4}%"},
     {"stats.cache", " (cache hit {0}, {1}%)"},
+    {"stats.usage_not_reported", " (usage not reported)"},
+    {"stats.cache_not_reported", " (cache not reported by this provider)"},
+    {"stats.cache_disabled", " (server-side prefix caching disabled)"},
+    {"stats.cache_no_hit_enabled", " (cache enabled, no hit this turn)"},
+    {"stats.cache_no_hit_unverified", " (zero cache hit; server enablement unverified)"},
     // ---- one-shot trajectory ledger (usage detail lives in the trajectory) ----
     {"oneshot.ledger_open_failed", "trajectory ledger failed to open; one-shot aborted: "},
     {"oneshot.ledger_close_failed", "trajectory ledger failed to close: "},

@@ -93,6 +93,19 @@ struct WorkspaceAggregate {
     std::int64_t output_tokens = 0;
     std::int64_t reasoning_tokens = 0;  // 已含在 output,拆账用
     std::optional<int> cache_read_ratio_percent;  // nullopt = unknown(分母 0)
+    struct CacheEpochRow {
+        std::string session_id;
+        std::string run_id;
+        int cache_epoch = 0;
+        std::int64_t requests_total = 0;
+        std::int64_t requests_cache_reported = 0;
+        std::int64_t requests_cache_unknown = 0;
+        std::int64_t input_tokens = 0;
+        std::int64_t cache_read_tokens = 0;
+        std::int64_t cache_creation_tokens = 0;
+        std::optional<int> cache_read_ratio_percent;
+    };
+    std::vector<CacheEpochRow> cache_epochs;
     // 三 Prompt 构成:runtime finding 按规则 id 汇总(每规则一条)。
     std::vector<Finding> prompt_rollups;
     // 四 摩擦点(按场次计,micro 除外)。

@@ -1547,7 +1547,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
                     wiring.boundary_recorder->OnUsageRecorded(
                         trajectory_request_id, assembler.usage(), assembler.usage_seen(), stream_request_id,
-                        step_prefix_account.cache_epoch, step_prefix_account.append_only);
+                        step_prefix_account.cache_epoch, step_prefix_account.append_only,
+                        assembler.cache_seen());
                     wiring.boundary_recorder->OnOutputCancelled(trajectory_request_id);
                 }
                 return RunOutcome{true, false, false, last_stop_reason, steps_used};
@@ -1612,7 +1613,8 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             wiring.boundary_recorder->OnUsageRecorded(trajectory_request_id, assembler.usage(),
                                                       assembler.usage_seen(), stream_request_id,
                                                       step_prefix_account.cache_epoch,
-                                                      step_prefix_account.append_only);
+                                                      step_prefix_account.append_only,
+                                                      assembler.cache_seen());
             if (!wiring.boundary_recorder->OnOutputCompleted(trajectory_request_id, assistant_message,
                                                              stop_reason, stream_request_id)) {
                 return std::unexpected("轨迹账写盘失败,模型输出未落账,不执行工具");
@@ -1629,9 +1631,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 之后失败页说"token 数未报告"只看这一位,不拿 0 糊。
         {
             const api::Usage& usage = assembler.usage();
-            budget_report.usage_reported = budget_report.usage_reported || usage.input_tokens > 0 ||
-                                            usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
-                                            usage.cache_creation_tokens > 0 || usage.output_reasoning_tokens > 0;
+            budget_report.usage_reported =
+                budget_report.usage_reported || assembler.usage_seen() || usage.input_tokens > 0 ||
+                usage.output_tokens > 0 || usage.cache_read_tokens > 0 ||
+                usage.cache_creation_tokens > 0 || usage.output_reasoning_tokens > 0;
             // 成本刹车(P2-6):token 硬线按"完整输入 + 输出"累计,与台账/
             // 面板同口径——provider 漏 usage 只会晚触发,不会把闸拆了。
             tokens_seen += api::TotalInputTokens(usage) + usage.output_tokens;
@@ -1649,6 +1652,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // provider 明报位(Token 账本单 A0):wire 见过 usage 帧才算,
             // 明报全零也是真,没报不许拿 0 冒充。
             report.reported_by_provider = assembler.usage_seen();
+            report.cache_reported_by_provider = assembler.cache_seen();
             // 每请求缓存诊断账(问题 9):本地前缀视角全量带出——epoch 首请
             // 求、system/tools/稳定前缀指纹与长度、wire 公共前缀字节(诊断
             // 模式才有,-1 = 不可得)。只留短 hash 与长度,不落正文。

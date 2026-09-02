@@ -88,7 +88,8 @@ public:
                                int input_round_index) override {
         sent.push_back({request_id, task_turn_index, turn_limit, input_round_index});
     }
-    void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool) override {}
+    void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
+                         bool) override {}
     bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
                            const std::string&) override {
         return true;

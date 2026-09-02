@@ -128,7 +128,8 @@ struct StepUsageRecord {
     std::int64_t cache_creation_tokens = 0;
     std::int64_t output_tokens = 0;
     std::int64_t reasoning_tokens = 0;  // output 里的 reasoning 拆账(含在 output_tokens)
-    bool reported = false;             // legacy 推断(五项任一非零);耐久账认显式位
+    bool reported = false;             // provider 是否明报整份 usage
+    bool cache_reported = false;       // provider 是否明报 cache token 明细
     std::string epoch_break_reason;    // 空 = 本步没断 epoch
 
     std::int64_t total_input_tokens() const {
@@ -165,7 +166,11 @@ struct TurnUsageStats {
         record.cache_creation_tokens = report.usage.cache_creation_tokens;
         record.output_tokens = report.usage.output_tokens;
         record.reasoning_tokens = report.usage.output_reasoning_tokens;
-        record.reported = report.reported();
+        // 显式位是主路；聚合初始化的旧测试/旧调用方仍可由非零数字兼容。
+        record.reported = report.reported_by_provider || report.reported();
+        record.cache_reported = report.cache_reported_by_provider ||
+                                report.usage.cache_read_tokens > 0 ||
+                                report.usage.cache_creation_tokens > 0;
         record.epoch_break_reason = report.epoch_break_reason;
         steps.push_back(std::move(record));
     }
@@ -222,6 +227,29 @@ struct TurnUsageStats {
 
     // 整轮里哪怕一笔 usage 是实测的就算 true——全没回报时统计行按
     // "usage 未报告"收场,不拿 0 命中糊(缓存诊断单四态里的 not_reported)。
+    bool any_cache_reported() const {
+        for (const auto& step : steps) {
+            if (step.cache_reported) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    bool all_cache_reported() const {
+        bool saw_usage = false;
+        for (const auto& step : steps) {
+            if (!step.reported) {
+                continue;
+            }
+            saw_usage = true;
+            if (!step.cache_reported) {
+                return false;
+            }
+        }
+        return saw_usage;
+    }
+
     bool any_reported() const {
         for (const auto& step : steps) {
             if (step.reported) {

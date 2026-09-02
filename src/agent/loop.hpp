@@ -104,7 +104,8 @@ public:
     }
     virtual void OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                                  bool reported_by_provider, const std::string& provider_response_id,
-                                 int cache_epoch = 0, bool prefix_append_only = true) = 0;
+                                 int cache_epoch = 0, bool prefix_append_only = true,
+                                 bool cache_reported_by_provider = false) = 0;
     // 返回 false = 输出事实没写稳,loop 不执行工具(§7.4"model output
     // 记不住,不执行工具"),本步明败。
     virtual bool OnOutputCompleted(const std::string& request_id, const api::Message& assistant,

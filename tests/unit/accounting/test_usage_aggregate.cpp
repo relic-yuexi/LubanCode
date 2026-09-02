@@ -143,6 +143,34 @@ TEST_CASE("聚合数学:求和、unknown 不折 0、reasoning 不双计、重试
     CHECK(aggregate.run_ids.size() == 1);
 }
 
+TEST_CASE("cache epoch 分段:compact 翻页后各段独立求和,未报缓存不伪装 0%") {
+    UsageSample first = Sample("req-1", RequestPurpose::MainTurn, 1000, 9000, 10);
+    first.cache_epoch = 1;
+    first.cache_reported_by_provider = true;
+    UsageSample second = Sample("req-2", RequestPurpose::MainTurn, 2000, 8000, 20);
+    second.cache_epoch = 2;
+    second.cache_reported_by_provider = true;
+    UsageSample unknown = Sample("req-3", RequestPurpose::MainTurn, 3000, 0, 30);
+    unknown.cache_epoch = 2;
+    unknown.cache_reported_by_provider = false;
+
+    const UsageAggregate aggregate = AggregateUsage({first, second, unknown});
+    REQUIRE(aggregate.by_cache_epoch.size() == 2);
+    CHECK(aggregate.by_cache_epoch[0].cache_epoch == 1);
+    CHECK(aggregate.by_cache_epoch[0].totals.cache_read_tokens == 9000);
+    CHECK(aggregate.by_cache_epoch[0].totals.total_input_tokens == 10000);
+    CHECK(aggregate.by_cache_epoch[0].requests_cache_reported == 1);
+    CHECK(aggregate.by_cache_epoch[1].cache_epoch == 2);
+    CHECK(aggregate.by_cache_epoch[1].totals.cache_read_tokens == 8000);
+    CHECK(aggregate.by_cache_epoch[1].totals.total_input_tokens == 13000);
+    CHECK(aggregate.by_cache_epoch[1].requests_cache_reported == 1);
+    CHECK(aggregate.by_cache_epoch[1].requests_cache_unknown == 1);
+
+    const nlohmann::json json = aggregate.ToJson();
+    REQUIRE(json.at("by_cache_epoch").size() == 2);
+    CHECK(json.at("by_cache_epoch")[0].at("read_ratio_percent") == 90);
+}
+
 TEST_CASE("全 unknown:比例给 nullopt,不拿 0% 冒充") {
     std::vector<UsageSample> samples;
     samples.push_back(UnknownSample("req-1"));

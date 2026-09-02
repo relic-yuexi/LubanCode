@@ -90,6 +90,26 @@ WorkspaceAggregate AggregateInsights(const InsightsReport& report) {
         agg.cache_creation_tokens += session.usage.cache_creation_tokens;
         agg.output_tokens += session.usage.output_tokens;
         agg.reasoning_tokens += session.usage.reasoning_tokens;
+        for (const auto& epoch : session.cache_epochs) {
+            WorkspaceAggregate::CacheEpochRow row;
+            row.session_id = session.source.session_id;
+            row.run_id = epoch.run_id;
+            row.cache_epoch = epoch.cache_epoch;
+            row.requests_total = static_cast<std::int64_t>(epoch.requests_total);
+            row.requests_cache_reported =
+                static_cast<std::int64_t>(epoch.requests_cache_reported);
+            row.requests_cache_unknown =
+                static_cast<std::int64_t>(epoch.requests_cache_unknown);
+            row.input_tokens = epoch.input_tokens;
+            row.cache_read_tokens = epoch.cache_read_tokens;
+            row.cache_creation_tokens = epoch.cache_creation_tokens;
+            const std::int64_t base = row.input_tokens + row.cache_read_tokens +
+                                      row.cache_creation_tokens;
+            if (row.requests_cache_reported > 0 && row.requests_cache_unknown == 0) {
+                row.cache_read_ratio_percent = SharePercent(row.cache_read_tokens, base);
+            }
+            agg.cache_epochs.push_back(std::move(row));
+        }
 
         const bool micro = IsMicroSession(session);
         if (micro) {

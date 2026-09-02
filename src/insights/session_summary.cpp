@@ -60,6 +60,18 @@ nlohmann::json SessionInsightSummary::ToJson() const {
     cost_json["price_table_id"] = usage.price_table_id;
     usage_json["cost"] = std::move(cost_json);
     json["usage"] = std::move(usage_json);
+    nlohmann::json cache_epochs_json = nlohmann::json::array();
+    for (const auto& epoch : cache_epochs) {
+        cache_epochs_json.push_back(nlohmann::json{{"run_id", epoch.run_id},
+                                                   {"cache_epoch", epoch.cache_epoch},
+                                                   {"requests_total", epoch.requests_total},
+                                                   {"requests_cache_reported", epoch.requests_cache_reported},
+                                                   {"requests_cache_unknown", epoch.requests_cache_unknown},
+                                                   {"input_tokens", epoch.input_tokens},
+                                                   {"cache_read_tokens", epoch.cache_read_tokens},
+                                                   {"cache_creation_tokens", epoch.cache_creation_tokens}});
+    }
+    json["cache_epochs"] = std::move(cache_epochs_json);
     nlohmann::json findings = nlohmann::json::array();
     for (const auto& finding : prompt_findings) {
         findings.push_back(finding.ToJson());
@@ -182,6 +194,37 @@ std::optional<SessionInsightSummary> SessionInsightSummary::FromJsonStrict(
         *error = "usage 未知键";
         return std::nullopt;
     }
+    if (json.contains("cache_epochs")) {
+        if (!json.at("cache_epochs").is_array()) {
+            *error = "cache_epochs 须是数组";
+            return std::nullopt;
+        }
+        for (const auto& item : json.at("cache_epochs")) {
+            SummaryCacheEpoch epoch;
+            if (!item.is_object() || item.size() != 8 ||
+                !ReadString(item, "run_id", &epoch.run_id) ||
+                !item.contains("cache_epoch") || !item.at("cache_epoch").is_number_integer() ||
+                !ReadUint(item, "requests_total", &epoch.requests_total) ||
+                !ReadUint(item, "requests_cache_reported", &epoch.requests_cache_reported) ||
+                !ReadUint(item, "requests_cache_unknown", &epoch.requests_cache_unknown)) {
+                *error = "cache_epochs 条目形状不合";
+                return std::nullopt;
+            }
+            epoch.cache_epoch = item.at("cache_epoch").get<int>();
+            for (const auto& [key, target] :
+                 std::initializer_list<std::pair<const char*, std::int64_t*>>{
+                     {"input_tokens", &epoch.input_tokens},
+                     {"cache_read_tokens", &epoch.cache_read_tokens},
+                     {"cache_creation_tokens", &epoch.cache_creation_tokens}}) {
+                if (!item.contains(key) || !item.at(key).is_number_integer()) {
+                    *error = "cache_epochs token 字段不合";
+                    return std::nullopt;
+                }
+                *target = item.at(key).get<std::int64_t>();
+            }
+            summary.cache_epochs.push_back(std::move(epoch));
+        }
+    }
     if (!json.contains("prompt_findings") || !json.at("prompt_findings").is_array()) {
         *error = "prompt_findings 须是数组";
         return std::nullopt;
@@ -208,7 +251,8 @@ std::optional<SessionInsightSummary> SessionInsightSummary::FromJsonStrict(
                 .push_back(item.get<std::string>());
         }
     }
-    if (json.size() != 10) {
+    const std::size_t expected_keys = json.contains("cache_epochs") ? 11 : 10;
+    if (json.size() != expected_keys) {
         *error = "summary 未知键";
         return std::nullopt;
     }

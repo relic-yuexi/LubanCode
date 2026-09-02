@@ -190,6 +190,7 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::ModelUsageRecorded, "attempt", "u", true},
     {EventKind::ModelUsageRecorded, "provider_response_id", "s", false},
     {EventKind::ModelUsageRecorded, "reported_by_provider", "b", true},
+    {EventKind::ModelUsageRecorded, "cache_reported_by_provider", "b", false},
     {EventKind::ModelUsageRecorded, "input_tokens", "i", false},
     {EventKind::ModelUsageRecorded, "cache_read_tokens", "i", false},
     {EventKind::ModelUsageRecorded, "cache_creation_tokens", "i", false},

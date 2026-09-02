@@ -441,9 +441,10 @@ void TrajectoryTurnBridge::OnRequestSentWithTurn(const std::string& request_id, 
 void TrajectoryTurnBridge::OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                                            bool reported_by_provider,
                                            const std::string& provider_response_id, int cache_epoch,
-                                           bool prefix_append_only) {
+                                           bool prefix_append_only, bool cache_reported_by_provider) {
     nlohmann::json payload = nlohmann::json{{"attempt", std::uint64_t{1}},
-                                            {"reported_by_provider", reported_by_provider}};
+                                            {"reported_by_provider", reported_by_provider},
+                                            {"cache_reported_by_provider", cache_reported_by_provider}};
     if (!provider_response_id.empty()) {
         payload["provider_response_id"] = provider_response_id;
     }
@@ -1064,9 +1065,10 @@ void TrajectoryBypassBridge::OnRequestSent(const std::string& request_id) {
 void TrajectoryBypassBridge::OnUsageRecorded(const std::string& request_id, const api::Usage& usage,
                                              bool reported_by_provider,
                                              const std::string& provider_response_id, int cache_epoch,
-                                             bool prefix_append_only) {
+                                             bool prefix_append_only, bool cache_reported_by_provider) {
     nlohmann::json payload = nlohmann::json{{"attempt", std::uint64_t{1}},
-                                            {"reported_by_provider", reported_by_provider}};
+                                            {"reported_by_provider", reported_by_provider},
+                                            {"cache_reported_by_provider", cache_reported_by_provider}};
     if (!provider_response_id.empty()) {
         payload["provider_response_id"] = provider_response_id;
     }

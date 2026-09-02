@@ -42,6 +42,7 @@ public:
     // 显式位,与"五项是否非零"分开。老 wire 路径没置位便是 false,消费端
     // 要兼容就退回 usage() 的非零推断。
     bool usage_seen() const { return usage_seen_; }
+    bool cache_seen() const { return cache_seen_; }
 
     // tool_use 的 input JSON 拼完后解析失败时置位。就算解析失败,BuildMessage()
     // 依旧会给出可用的 Message——那个 tool_use 块的 input 会是个空对象,不会因为
@@ -75,6 +76,7 @@ private:
     std::string stop_reason_;
     Usage usage_;
     bool usage_seen_ = false;
+    bool cache_seen_ = false;
     std::string parse_error_;
 
     void FinalizeCurrent();
