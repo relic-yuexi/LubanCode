@@ -1,0 +1,116 @@
+{
+  "schema": "lubancode.error.shapes.ledger",
+  "schema_version": 1,
+  "notes": [
+    "实战错误形态账本(重试白名单单 P0-2):每条是一次真实撞见的失败形态,不是教科书枚举。",
+    "每撞见新形态就回填一条:scripts/collect_error_shapes.py <轨迹根> --config <lubancode config.json>",
+    "对账:expected_retryable 是人对现场的判断(瞬时上游病=true,确定性错误=false);",
+    "脚本按 IsRetryableError 镜像白名单重算 current_policy,与预期相左即标 mismatch。",
+    "测试矩阵:同一形态在假后端有用例的,把用例名记进 test_coverage,不重复造。"
+  ],
+  "shapes": [
+    {
+      "id": "shape-api-upstream_error-openai-responses",
+      "wire": "openai-responses",
+      "http_status": null,
+      "api_code": "upstream_error",
+      "error_kind": "Api",
+      "reason_code": "api.upstream_error",
+      "provider": "ccmoon",
+      "model": "gpt-5.6-sol",
+      "expected_retryable": true,
+      "first_seen_date": "2026-09-02",
+      "first_seen_scene": "one_shot 实施会话 turn-2:model.request.sent 之后零恢复事件直接 model.output.failed/turn.failed(0.26.169,reason 无 HTTP 前缀、带 ComposeErrorMessage 的 (code=) 尾巴,判 200+error body 路)。同日 0.26.171 CHANGELOG 记'实战三只阵亡实录'——同病阵亡不止这一只。",
+      "first_seen_policy": {
+        "version": "0.26.169",
+        "retryable": false,
+        "note": "Api kind 一刀切零重试——五次重试一发未触发,当场死。0.26.171 把 upstream_error 等六码收进可重试白名单,StreamError 在尝试边界折 Api 错误进恢复环。"
+      },
+      "current_policy": {
+        "retryable": true,
+        "reason_code": "api.upstream_error",
+        "source": "src/api/model_request_recovery.cpp IsRetryableError"
+      },
+      "mismatch": null,
+      "origin": "manual",
+      "sources": [
+        {
+          "kind": "trajectory",
+          "session_id": "20260902-083744-0JNHLK",
+          "event": "model.output.failed",
+          "reason": "Upstream request failed (code=upstream_error)",
+          "date": "2026-09-02",
+          "provider": "ccmoon",
+          "model": "gpt-5.6-sol",
+          "purpose": "main_turn"
+        },
+        {
+          "kind": "changelog",
+          "version": "0.26.68",
+          "date": "2026-08-27",
+          "detail": "更早一次同形态实录的佐证:该版记'请求失败行带上 HTTP 状态与错误类型,不再只剩一句糊脸的 Upstream request failed'——病在 0.26.68 之前就撞过,当时未留轨迹(失败事件落轨迹是后来的事)。"
+        }
+      ],
+      "test_coverage": {
+        "unit": [
+          "tests/unit/agent/test_agent_recovery.cpp:断流恢复:HTTP 200 的 upstream_error 事件进入重试环后恢复",
+          "tests/unit/agent/test_agent_recovery.cpp:断流恢复:采样实录形态用满预算,失败文案如实带重试次数",
+          "tests/unit/api/test_model_request_recovery.cpp:恢复环:500 与 upstream_error 都会用满预算,任一后续成功即恢复",
+          "tests/unit/api/test_model_request_recovery.cpp:重试白名单:瞬时网络错、指定 HTTP 状态与瞬时 Api code 可重发",
+          "tests/unit/api/test_responses_events.cpp:response.failed / error 事件:type 与 code 随 message 带上,指得上路"
+        ]
+      }
+    },
+    {
+      "id": "shape-http-401",
+      "wire": null,
+      "http_status": 401,
+      "api_code": null,
+      "error_kind": "HttpStatus",
+      "reason_code": "http.401",
+      "provider": null,
+      "model": null,
+      "expected_retryable": false,
+      "first_seen_date": "2026-09-02",
+      "first_seen_scene": "2026-09-02 04:56 一带(单子记'0456-SACDYE 一带,401 早死场'):钥匙被废撞 401,HTTP 401 形态。会话目录已不在盘,案卷见 0.26.169 CHANGELOG'401 无头案'。",
+      "first_seen_policy": {
+        "version": "0.26.169",
+        "retryable": false,
+        "note": "401 是确定性错误,零重试是正确行为——现场要治的病不是重试,是外部工具注入的通名环境变量悄悄改走 wire、废掉配置里贴好的钥匙。0.26.169 通名环境变量退役,病根拔了。"
+      },
+      "current_policy": {
+        "retryable": false,
+        "reason_code": "http.401",
+        "source": "src/api/model_request_recovery.cpp IsRetryableError"
+      },
+      "mismatch": null,
+      "origin": "manual",
+      "sources": [
+        {
+          "kind": "session-lost",
+          "session_id": "0456-SACDYE(2026-09-02)",
+          "detail": "会话目录已不在盘(workspaces 全量扫过,model.output.failed/turn.failed 无此场实录);形态与时段以单子《重试白名单漏500与真实错误形态采样》交待为准。"
+        },
+        {
+          "kind": "changelog",
+          "version": "0.26.169",
+          "date": "2026-09-02",
+          "detail": "'401 无头案'结案记要:Claude Code 一类工具往环境里塞的 ANTHROPIC_*/OPENAI_* 通名变量,悄悄改走 wire、解绑 provider、废掉配置里贴好的钥匙——四个通名齐注的污染环境下 401。同版通名退役。"
+        },
+        {
+          "kind": "changelog",
+          "version": "0.26.167",
+          "date": "2026-09-02",
+          "detail": "'401 一类确定性错误照旧零重试,重试更久也没用的病不归它治'——预算加厚单对 401 的定案。"
+        }
+      ],
+      "test_coverage": {
+        "unit": [
+          "tests/unit/api/test_model_request_recovery.cpp:恢复环:400/401 与确定性 Api code 零重试",
+          "tests/unit/api/test_model_request_recovery.cpp:恢复环:401 确定性错误零重试零等待",
+          "tests/unit/api/test_model_request_recovery.cpp:重试白名单:瞬时网络错、指定 HTTP 状态与瞬时 Api code 可重发"
+        ]
+      }
+    }
+  ]
+}

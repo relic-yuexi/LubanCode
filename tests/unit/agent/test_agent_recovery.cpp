@@ -296,6 +296,47 @@ TEST_CASE("断流恢复:重试用尽,结构化收口并如实写重试次数") {
     CHECK(backend.calls == 6);  // 首发 + 5 次重试
 }
 
+TEST_CASE("断流恢复:采样实录形态用满预算,失败文案如实带重试次数") {
+    // 错误形态账本(tests/fixtures/api/error_shapes.json)首批实录喂满预算:
+    // Api 路(HTTP 200 + code=upstream_error)与 HttpStatus 500 路都按现行
+    // 白名单可重试,重试用尽后的收口文案必须把真实重试次数与含退避的
+    // 总时长写明——文案在 loop.cpp 对两条 kind 同一段拼装,这里各钉一路,
+    // Api 分型路(200+错误体)此前只有 Network 路验过。
+    bool api_shape = false;
+    SUBCASE("HTTP 200 + upstream_error(账本实录形态)") {
+        api_shape = true;
+    }
+    SUBCASE("HTTP 500(账本实录形态)") {
+        api_shape = false;
+    }
+    FlakyBackend backend;
+    backend.script.resize(api::kMaxRequestAttempts);
+    for (auto& take : backend.script) {
+        if (api_shape) {
+            take.events = {api::StreamError{"Upstream request failed (code=upstream_error)",
+                                            "upstream_error"}};
+        } else {
+            take.error = api::Error{api::ErrorKind::HttpStatus, "server failed", 500};
+        }
+    }
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
+    Turn turn;
+    agent::TurnWiring wiring;
+    wiring.events = &turn.adapter;
+    wiring.wait_request_backoff = [](std::chrono::milliseconds, const std::atomic<bool>*) {
+        return true;
+    };
+    const auto result = loop.Run("必失败", wiring);
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().find("已自动重试 5 次仍失败") != std::string::npos);
+    CHECK(result.error().find("总时长") != std::string::npos);
+    CHECK(result.error().find("含退避") != std::string::npos);
+    CHECK(result.error().find(api_shape ? "Upstream request failed" : "500") != std::string::npos);
+    CHECK(backend.calls == api::kMaxRequestAttempts);  // 首发 + 5 次重试
+}
+
 TEST_CASE("恢复账:尝试相位从环里流出,started 连号、retrying 带稳定码") {
     FlakyBackend backend;
     backend.script = {
