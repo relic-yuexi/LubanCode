@@ -10,6 +10,8 @@
 #pragma once
 
 #include <cstdint>
+#include "approval_mode.hpp"
+
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -92,17 +94,16 @@ private:
     std::unordered_map<std::string, std::deque<std::pair<long long, std::size_t>>> send_texts_;  // 正文去重窗
 };
 
-// 权限三档 + 默认档计算(规格"权限"一节)。mode 用 0=confirm、1=auto、
-// 2=yolo 的 int,跟 cli::ConfirmMode 的取值序对齐,免得 agent 层反向依赖
-// cli 层的头。
+// 五档审批模式 + 默认收件档计算。强类型防止枚举序号泄漏到协议。
 enum class PeerPermissionTier { Auto, Accept, Hold, Refuse };
 
 // 默认收件档:
-//   - 两边都要确认工具(confirm)——可直接收;
-//   - 任一边处在 auto/yolo(免确认一类)——默认 hold;
+//   - 两边都是默认档——可直接收;
+//   - 任一边处在其余四档——默认 hold;
 //   - 两边 cwd 相隔甚远(项目不同)——默认 hold。
 // 纯函数,单测钉住。
-PeerPermissionTier DefaultReceiveTier(int local_mode, int remote_mode, bool cwd_far_apart);
+PeerPermissionTier DefaultReceiveTier(ApprovalMode local_mode, ApprovalMode remote_mode,
+                                      bool cwd_far_apart);
 
 // cwd 距离的粗判:规范化分隔符后拆段(Windows [D:, work, ...],POSIX
 // [home, user, ...]),头两段不同就算"相隔甚远"——同盘/同用户下的相邻

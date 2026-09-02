@@ -2,6 +2,7 @@
 
 #include <algorithm>
 
+#include "approval_mode.hpp"
 #include "platform/text_encoding.hpp"
 
 #ifdef _WIN32
@@ -64,7 +65,7 @@ nlohmann::json BuildStdinPayload(const HookPayload& payload, const HookContext& 
     out["turn_id"] = context.turn_id;
     out["cwd"] = context.cwd;
     out["transcript_path"] = context.transcript_path;
-    out["permission_mode"] = context.permission_mode;
+    out["permission_mode"] = CanonicalApprovalModeName(context.permission_mode);
     out["agent_id"] = context.agent_id.has_value() ? nlohmann::json(*context.agent_id) : nlohmann::json();
     out["agent_type"] = context.agent_type.has_value() ? nlohmann::json(*context.agent_type) : nlohmann::json();
     out["parent_agent_id"] =

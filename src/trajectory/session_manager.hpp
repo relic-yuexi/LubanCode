@@ -351,6 +351,8 @@ struct ResumeOutcome {
     std::string imported_state_hash;
     std::vector<ReplayMessage> effective_conversation;  // 引用,不复制 child 正文
     ReplayControlState control;
+    // 旧 session 缺字段时为空，调用侧保留当前启动配置。
+    std::optional<ApprovalMode> approval_mode;
     // 第 4 步:悬空工具三道账;unknown 副作用不重跑。
     std::vector<ReplayDanglingTool> dangling_tools;
     // 第 5 步:新 session 开张(run.started(start_reason=resume))。
@@ -452,6 +454,7 @@ struct SessionManagerOptions {
     std::filesystem::path workspace_root;  // 兜底根(identity 空时用)
     std::string launch_cwd;  // UTF-8 文本,进 manifest
     std::string lubancode_version;
+    ApprovalMode approval_mode = ApprovalMode::Default;
     // main run 的种类(单发轨迹断档单):默认 main_session;one_shot 一场
     // 递 RunKind::OneShot——manifest、run.started payload 与信封三处同源。
     RunKind main_run_kind = RunKind::MainSession;

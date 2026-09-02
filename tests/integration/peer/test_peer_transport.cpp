@@ -36,7 +36,7 @@ PeerRuntimeOptions MakeOptions(const std::filesystem::path& registry_dir, const 
     options.registry_dir = registry_dir;
     options.name = name;
     options.cwd = cwd;
-    options.permission_mode = [] { return 0; };  // confirm
+    options.permission_mode = [] { return ApprovalMode::Default; };  // default
     return options;
 }
 
@@ -150,14 +150,14 @@ TEST_CASE("PeerRuntime 权限:auto 档下任一边 yolo 默认 hold,信被扣住
     const auto dir = TempDir("hold");
     PeerRuntime alpha(MakeOptions(dir, "alpha", "D:\\work\\demo"));
     PeerRuntimeOptions beta_options = MakeOptions(dir, "beta", "D:\\work\\demo");
-    beta_options.permission_mode = [] { return 2; };  // beta 处在 yolo
+    beta_options.permission_mode = [] { return ApprovalMode::Yolo; };
     PeerRuntime beta(std::move(beta_options));
     REQUIRE(alpha.Start());
     REQUIRE(beta.Start());
 
     const auto peers = alpha.ListPeers();
     REQUIRE(peers.size() == 1);
-    CHECK(peers[0].permission_mode == "yolo");  // 名册带出了对方的确认档
+    CHECK(peers[0].permission_mode == ApprovalMode::Yolo);  // 名册带出了对方的确认档
     CHECK(alpha.Send(peers[0], "这信该被扣住") == PeerDelivery::Held);
     const auto incoming = beta.DrainIncoming();
     REQUIRE(incoming.size() == 1);

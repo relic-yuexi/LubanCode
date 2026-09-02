@@ -26,6 +26,7 @@ SessionRuntime::SessionRuntime(Options options) : options_(std::move(options)) {
     ledger_options.lubancode_version = options_.lubancode_version;
     ledger_options.resume_at_launch = options_.trajectory_resume_at_launch;
     ledger_options.resume_source_session_id = options_.trajectory_resume_source_session_id;
+    ledger_options.approval_mode = options_.approval_mode;
     auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
     if (ledger.has_value()) {
         trajectory_.emplace(std::move(*ledger));
@@ -61,6 +62,7 @@ std::string SessionRuntime::NoteWorkingDirectoryChanged(const std::filesystem::p
         ledger_options.workspaces_root = workspaces_root;
         ledger_options.workspace_identity = std::move(*identity);
         ledger_options.lubancode_version = options_.lubancode_version;
+        ledger_options.approval_mode = options_.approval_mode;
         ledger_options.launch_cwd = platform::PathToUtf8(ledger_options.workspace_identity.launch_cwd);
         auto ledger = TrajectorySessionLedger::Open(std::move(ledger_options));
         if (!ledger.has_value()) {

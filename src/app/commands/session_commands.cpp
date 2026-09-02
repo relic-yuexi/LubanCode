@@ -1732,6 +1732,10 @@ CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::P
         ctx.main_agent->RestoreSessionHistory(summary.history);
         // 标题真值吃 replay 折叠(control.title.changed 的最后一条)。
         *ctx.session_title = summary.outcome.control.title.value_or(std::string());
+        if (summary.outcome.approval_mode.has_value()) {
+            lubancode::cli::SetConfirmMode(
+                static_cast<lubancode::cli::ConfirmMode>(*summary.outcome.approval_mode));
+        }
         TermOut() << trf("cmd.resume.restored", summary.outcome.source_session_id,
                          summary.history.size())
                   << "(新 session " << summary.outcome.new_session_id << ")\n";

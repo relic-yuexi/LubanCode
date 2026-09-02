@@ -47,7 +47,7 @@ void PeerSessionWiring::Start(lubancode::tools::ToolRegistry& registry) {
         peer_options.cwd = lubancode::platform::CurrentDirUtf8();
         peer_options.permission_mode = host_.permission_mode
                                            ? host_.permission_mode
-                                           : [] { return static_cast<int>(lubancode::cli::ConfirmMode::Confirm); };
+                                           : [] { return lubancode::ApprovalMode::Default; };
         runtime_.emplace(std::move(peer_options));
         std::string peer_error;
         started_ = runtime_->Start(&peer_error);

@@ -1,5 +1,7 @@
 #include "cli/line_editor.hpp"
 
+#include "approval_mode.hpp"
+
 #include <algorithm>
 #include <cctype>
 
@@ -144,23 +146,13 @@ ConfirmMode NextConfirmMode(ConfirmMode mode) {
 }
 
 const char* ConfirmModeMachineName(ConfirmMode mode) {
-    switch (mode) {
-        case ConfirmMode::Confirm: return "default";
-        case ConfirmMode::AcceptEdits: return "accept_edits";
-        case ConfirmMode::Yolo: return "yolo";
-        case ConfirmMode::Auto: return "auto";
-        case ConfirmMode::DontAsk: return "dont_ask";
-    }
-    return "default";
+    return ApprovalModeMachineName(static_cast<ApprovalMode>(mode));
 }
 
 std::optional<ConfirmMode> ParseConfirmMode(std::string_view value) {
-    if (value == "default" || value == "confirm") return ConfirmMode::Confirm;
-    if (value == "accept_edits") return ConfirmMode::AcceptEdits;
-    if (value == "yolo") return ConfirmMode::Yolo;
-    if (value == "auto") return ConfirmMode::Auto;
-    if (value == "dont_ask") return ConfirmMode::DontAsk;
-    return std::nullopt;
+    const auto parsed = ParseApprovalMode(value);
+    if (!parsed.has_value()) return std::nullopt;
+    return static_cast<ConfirmMode>(*parsed);
 }
 
 ModePresentation PresentApprovalMode(ConfirmMode mode) {

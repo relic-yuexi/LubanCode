@@ -79,6 +79,9 @@ nlohmann::json SessionManifest::ToJson() const {
     json["status"] = status;
     json["created_at_ms"] = created_at_ms;
     json["lubancode_version"] = lubancode_version;
+    if (approval_mode.has_value()) {
+        json["approval_mode"] = ApprovalModeMachineName(*approval_mode);
+    }
     // event schema major 钉进 manifest(Token 账本单 §6.1.1):v1 老档没这键,
     // 读侧按默认 1 兜。
     json["event_schema_version"] = event_schema_version;
@@ -122,6 +125,9 @@ std::optional<SessionManifest> SessionManifest::FromJson(const nlohmann::json& j
     read_string("run_kind", &manifest.run_kind);
     read_string("start_reason", &manifest.start_reason);
     read_string("lubancode_version", &manifest.lubancode_version);
+    if (json.contains("approval_mode") && json.at("approval_mode").is_string()) {
+        manifest.approval_mode = ParseApprovalModeOrDefault(json.at("approval_mode").get<std::string>());
+    }
     if (json.contains("previous_session_id") && json.at("previous_session_id").is_string()) {
         manifest.previous_session_id = json.at("previous_session_id").get<std::string>();
     }

@@ -765,6 +765,7 @@ std::expected<ActiveSession*, std::string> SessionManager::LaunchSession() {
     manifest.status = SessionStatusName(SessionStatus::Preparing);
     manifest.created_at_ms = clock_->WallMs();
     manifest.lubancode_version = options_.lubancode_version;
+    manifest.approval_mode = options_.approval_mode;
     // event schema major 钉进 manifest(存储 v2:recorder 写 v2 就得报 v2,
     // 读侧不重放整本也能认);从前漏写,session.json 恒报 1。
     manifest.event_schema_version = options_.recorder.event_schema_version;
@@ -936,6 +937,7 @@ ClearOutcome SessionManager::Clear(const ClearRequest& request, ClearParticipant
     new_manifest.status = SessionStatusName(SessionStatus::Preparing);
     new_manifest.created_at_ms = clock_->WallMs();
     new_manifest.lubancode_version = old.manifest.lubancode_version;
+    new_manifest.approval_mode = old.manifest.approval_mode.value_or(options_.approval_mode);
     new_manifest.run_kind = RunKindName(options_.main_run_kind);
     new_manifest.event_schema_version = options_.recorder.event_schema_version;
 
@@ -1325,7 +1327,8 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     // 单发场不可 resume(单发轨迹断档单):单发语义不续,审计可读——/resume
     // <id> 指名要续也明拒,不折叠成新交互场。manifest 读不动照旧往下走,
     // 由后面的验账说话。
-    if (const auto source_manifest = ReadSessionJson(source_dir); source_manifest.has_value()) {
+    std::optional<SessionManifest> source_manifest = ReadSessionJson(source_dir);
+    if (source_manifest.has_value()) {
         if (source_manifest->run_kind == RunKindName(RunKind::OneShot)) {
             return fail("resume.source_not_resumable",
                         "单发场(one_shot)不参与 resume:轨迹可审计读取,不续聊");
@@ -1383,6 +1386,9 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     outcome.imported_state_hash = ComputeReplayStateHash(fold.state);
     outcome.effective_conversation = fold.state.effective_conversation;
     outcome.control = fold.state.control;
+    if (source_manifest.has_value() && source_manifest->approval_mode.has_value()) {
+        outcome.approval_mode = source_manifest->approval_mode;
+    }
     // 已完成的 child 只在 verifier 里核过 terminal hash;正文不进新 main
     //(§10.4"不把正文灌进新 main.jsonl",effective history 只引用 source
     // 事件——ReplayMessage 带的就是 source event id,不复制 child 细账)。
@@ -1409,6 +1415,7 @@ ResumeOutcome SessionManager::ResumeAsNew(const ResumeRequest& request) {
     manifest.lubancode_version = options_.lubancode_version;
     manifest.run_kind = RunKindName(options_.main_run_kind);
     manifest.event_schema_version = options_.recorder.event_schema_version;
+    manifest.approval_mode = outcome.approval_mode.value_or(options_.approval_mode);
 
     auto directory = TrajectoryDirectory::CreateSession(options_.workspaces_root,
                                                         workspace_key_, manifest);
@@ -1707,6 +1714,7 @@ void SessionManager::ContinueNewSide(const std::filesystem::path& next_dir,
         manifest.status = SessionStatusName(SessionStatus::Preparing);
         manifest.created_at_ms = clock_->WallMs();
         manifest.lubancode_version = options_.lubancode_version;
+        manifest.approval_mode = options_.approval_mode;
         manifest.run_kind = RunKindName(options_.main_run_kind);
         manifest.event_schema_version = options_.recorder.event_schema_version;
         const TrajectoryDirectory directory = TrajectoryDirectory::OpenExisting(next_dir);

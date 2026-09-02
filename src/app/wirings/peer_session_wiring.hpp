@@ -15,6 +15,7 @@
 #include <string>
 #include <vector>
 
+#include "approval_mode.hpp"
 #include "api/types.hpp"  // Message(收件口的组包)
 #include "peers/peer_session.hpp"
 
@@ -37,7 +38,7 @@ public:
         bool interactive = false;                        // 真控制台才起服务
         const std::optional<std::string>* home_lubancode = nullptr;  // 名册根
         std::function<std::string()> session_title;      // 名片上的名字(起时取)
-        std::function<int()> permission_mode;            // 来信权限档起手值
+        std::function<lubancode::ApprovalMode()> permission_mode;  // 来信权限档起手值
     };
 
     PeerSessionWiring() = default;

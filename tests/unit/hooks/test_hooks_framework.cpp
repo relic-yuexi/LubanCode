@@ -90,11 +90,26 @@ TEST_CASE("BuildStdinPayload: 公共字段 + 事件字段,agent 字段 null 语�
     CHECK(out["turn_id"] == "turn_1");
     CHECK(out["cwd"] == "D:/proj");
     CHECK(out["transcript_path"] == "D:/proj/.lubancode/session.jsonl");
-    CHECK(out["permission_mode"] == "confirm");
+    CHECK(out["permission_mode"] == "default");
     CHECK(out["agent_id"].is_null());
     CHECK(out["agent_type"].is_null());
     CHECK(out["tool_name"] == "run_command");
     CHECK(out["tool_input"]["command"] == "dir");
+}
+
+TEST_CASE("BuildStdinPayload: 审批档五值写稳，旧值与未知值保守归默认") {
+    hooks::HookContext ctx;
+    hooks::HookPayload payload;
+    payload.event = hooks::HookEvent::SessionStart;
+    const std::vector<std::string> stable{"default", "accept_edits", "yolo", "auto", "dont_ask"};
+    for (const auto& mode : stable) {
+        ctx.permission_mode = mode;
+        CHECK(hooks::BuildStdinPayload(payload, ctx, "r")["permission_mode"] == mode);
+    }
+    ctx.permission_mode = "confirm";
+    CHECK(hooks::BuildStdinPayload(payload, ctx, "r")["permission_mode"] == "default");
+    ctx.permission_mode = "future_unrestricted";
+    CHECK(hooks::BuildStdinPayload(payload, ctx, "r")["permission_mode"] == "default");
 }
 
 TEST_CASE("BuildStdinPayload: 子代理触发时 agent 字段带值,主代理为 null") {

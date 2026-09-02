@@ -19,8 +19,9 @@
 // 剩余留在控制器一侧的(按单子次序后续批次搬):工具全栈(ToolRuntime)、
 // backend 栈、peer、steering 泵、面板与键位——那些与终端回调缠得深,
 // 一次搬完风险大,本步先落"账本"这一层。
-
 #pragma once
+
+#include "approval_mode.hpp"
 
 #include <cstdint>
 #include <filesystem>
@@ -61,6 +62,7 @@ public:
         // workspace 最近一场可恢复的;没有可恢复场回落普通开张。
         bool trajectory_resume_at_launch = false;
         std::string trajectory_resume_source_session_id;
+        ApprovalMode approval_mode = ApprovalMode::Default;
     };
 
     explicit SessionRuntime(Options options);

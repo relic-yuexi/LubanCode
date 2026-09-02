@@ -15,6 +15,8 @@
 // 次序(父 dispatched 先 durable,子 run.started 后)由调用方掌管。
 #pragma once
 
+#include "approval_mode.hpp"
+
 #include <array>
 #include <cstdint>
 #include <expected>
@@ -70,6 +72,8 @@ struct SessionManifest {
     std::string status = "preparing";  // 本单只写 preparing/running
     std::int64_t created_at_ms = 0;
     std::string lubancode_version;
+    // 本场审批档位；新账必写，旧账缺字段时为空，由启动配置接管。
+    std::optional<ApprovalMode> approval_mode;
     // 存储 v2 合同 §三(P0-5 接线):仅 start_reason=legacy_import 场必填。
     // subagent_detail 恒 unavailable_legacy(旧主账只有 agent 最终回话,
     // 不伪造子 Journal);training_policy 恒 exclude(复现等级不高于

@@ -126,7 +126,7 @@ struct HookContext {
     std::string turn_id;
     std::string cwd;
     std::string transcript_path;
-    std::string permission_mode;  // confirm/auto/yolo
+    std::string permission_mode;  // 稳定五档机读值；旧/未知值在协议边界保守归 default
     std::optional<std::string> agent_id;
     std::optional<std::string> agent_type;
     std::optional<std::string> parent_agent_id;

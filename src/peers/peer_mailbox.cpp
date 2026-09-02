@@ -154,9 +154,10 @@ std::size_t PeerMailbox::pending() const {
     return queue_.size();
 }
 
-PeerPermissionTier DefaultReceiveTier(int local_mode, int remote_mode, bool cwd_far_apart) {
-    // 任一边免确认(auto/yolo),默认扣住等用户点头;项目相隔甚远同理。
-    if (local_mode != 0 || remote_mode != 0 || cwd_far_apart) {
+PeerPermissionTier DefaultReceiveTier(ApprovalMode local_mode, ApprovalMode remote_mode,
+                                      bool cwd_far_apart) {
+    // 任一边不是默认档时保守扣住等用户点头；项目相隔甚远同理。
+    if (local_mode != ApprovalMode::Default || remote_mode != ApprovalMode::Default || cwd_far_apart) {
         return PeerPermissionTier::Hold;
     }
     return PeerPermissionTier::Accept;

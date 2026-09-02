@@ -1489,6 +1489,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     manager_options.workspace_root = options.workspace_root;
     manager_options.launch_cwd = options.launch_cwd;
     manager_options.lubancode_version = options.lubancode_version;
+    manager_options.approval_mode = options.approval_mode;
     // 单发轨迹断档单:one_shot 场的 main run 单列 run_kind,manifest 与
     // run.started 同源落 one_shot。
     manager_options.main_run_kind =

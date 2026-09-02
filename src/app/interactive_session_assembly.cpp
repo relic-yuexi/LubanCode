@@ -553,6 +553,8 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
               }
           }
           runtime_options.lubancode_version = std::string(lubancode::app::kVersion);
+          runtime_options.approval_mode =
+              static_cast<lubancode::ApprovalMode>(lubancode::cli::CurrentConfirmMode());
           // --continue(§10.4):启动路直接开 start_reason=resume 的新场,
           // 不先造空 session;没有可恢复场回落普通开张(同旧路
           // quiet_if_none)。恢复的历史由启动善后段灌进 loop。
@@ -679,7 +681,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         peer_host.home_lubancode = &home_lubancode;
         peer_host.session_title = [this]() { return session_title; };
         peer_host.permission_mode = [] {
-            return static_cast<int>(lubancode::cli::CurrentConfirmMode());
+            return static_cast<lubancode::ApprovalMode>(lubancode::cli::CurrentConfirmMode());
         };
         peer_wiring_.AttachHost(std::move(peer_host));
 

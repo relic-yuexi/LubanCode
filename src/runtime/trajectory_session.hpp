@@ -17,6 +17,8 @@
 // P0-5/P0-6,本批不再消费)。
 #pragma once
 
+#include "approval_mode.hpp"
+
 #include <cstdint>
 #include <expected>
 #include <filesystem>
@@ -403,6 +405,7 @@ public:
         // 单发账本配 Exclude(实战派活含内部路径,不进训练集),配置
         // oneshot_training_policy 可改。session 边界事件恒 Exclude,不在此列。
         trajectory::TrainingPolicy training_policy = trajectory::TrainingPolicy::Metadata;
+        ApprovalMode approval_mode = ApprovalMode::Default;
     };
 
     // 进程一场:LaunchSession(建 workspace/session 目录、独占锁、

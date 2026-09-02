@@ -13,6 +13,8 @@
 // tests/unit/peer/test_peer_registry.cpp。
 #pragma once
 
+#include "approval_mode.hpp"
+
 #include <cstdint>
 #include <filesystem>
 #include <functional>
@@ -37,7 +39,7 @@ struct PeerCard {
     long long started_at = 0; // unix 秒
     std::string status;       // idle | busy | waiting | closing
     std::string endpoint;     // Windows: \\.\pipe\... ; POSIX: socket 路径
-    std::string permission_mode;  // confirm | auto | yolo——收件方算默认权限档用
+    ApprovalMode permission_mode = ApprovalMode::Default;  // 收件方算默认权限档用
     int protocol_version = kPeerCardProtocolVersion;
     long long last_seen = 0;  // unix 秒,心跳刷新
 };
