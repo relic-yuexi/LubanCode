@@ -1132,14 +1132,20 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                 " protocol_margin=" + std::to_string(kContextPreflightHeadroomTokens) +
                                 " window=" + std::to_string(window_tokens) +
                                 (clamped ? " action=reserve_clamped" : " action=exceeded"));
+                ContextPressure pressure;
+                pressure.phase = ContextPressure::Phase::PreflightExceeded;
+                pressure.estimated_input_tokens = input_tokens;
+                pressure.reserved_output_tokens = used_reserve;
+                pressure.protocol_headroom_tokens = kContextPreflightHeadroomTokens;
+                pressure.window_tokens = window_tokens;
+                pressure.reserve_clamped = clamped;
+                // trajectory 是当轮/当 run 的边界账，不能依赖宿主是否另接了
+                // 长生命周期的压力回调；拒绝分支不会走 model.request.prepared，
+                // 因此必须在判定当场独立落。
+                if (wiring.boundary_recorder != nullptr) {
+                    wiring.boundary_recorder->OnContextPressure(pressure);
+                }
                 if (wiring_.on_context_pressure) {
-                    ContextPressure pressure;
-                    pressure.phase = ContextPressure::Phase::PreflightExceeded;
-                    pressure.estimated_input_tokens = input_tokens;
-                    pressure.reserved_output_tokens = used_reserve;
-                    pressure.protocol_headroom_tokens = kContextPreflightHeadroomTokens;
-                    pressure.window_tokens = window_tokens;
-                    pressure.reserve_clamped = clamped;
                     wiring_.on_context_pressure(pressure);
                 }
             };

@@ -1056,7 +1056,28 @@ TEST_CASE("预检应急预留: 常规预留装不下时收窄放行,注入一次
     };
     loop.SetWiring(std::move(wiring));
 
-    const auto result = loop.Run("查一查", agent::TurnWiring{});
+    class PressureRecorder final : public agent::LoopBoundaryRecorder {
+    public:
+        std::vector<agent::ContextPressure> pressure;
+        int prepared_count = 0;
+        void OnContextPressure(const agent::ContextPressure& value) override { pressure.push_back(value); }
+        std::string OnRequestPrepared(const api::Request&, const agent::RequestPreparedContext&) override {
+            return "req-" + std::to_string(++prepared_count);
+        }
+        void OnRequestSent(const std::string&) override {}
+        void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
+                             bool) override {}
+        bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
+                               const std::string&) override {
+            return true;
+        }
+        void OnOutputFailed(const std::string&, const std::string&) override {}
+        void OnOutputCancelled(const std::string&) override {}
+    } recorder;
+    agent::TurnWiring turn_wiring;
+    turn_wiring.boundary_recorder = &recorder;
+
+    const auto result = loop.Run("查一查", std::move(turn_wiring));
     REQUIRE(result.has_value());  // 没死,收窄续跑
     REQUIRE(backend.captured_requests.size() == 2);
     REQUIRE(backend.captured_requests[1].max_tokens.has_value());
@@ -1073,6 +1094,10 @@ TEST_CASE("预检应急预留: 常规预留装不下时收窄放行,注入一次
     CHECK(has_nudge);
     CHECK(preflight_events >= 1);
     CHECK(saw_clamped);
+    REQUIRE(recorder.pressure.size() == 1);
+    CHECK(recorder.pressure.front().phase == agent::ContextPressure::Phase::PreflightExceeded);
+    CHECK(recorder.pressure.front().reserved_output_tokens == 2048);
+    CHECK(recorder.pressure.front().reserve_clamped);
 }
 
 TEST_CASE("预检应急预留: 应急也装不下时稳定报错,文案带现场保留说明") {
@@ -1095,13 +1120,36 @@ TEST_CASE("预检应急预留: 应急也装不下时稳定报错,文案带现场
                                                    .max_context_chars = 400000,
                                                    .context_window_tokens = 32768},
                                           .system_prompt = "sys"});
-    const auto result = loop.Run("查一查", agent::TurnWiring{});
+    class RejectPressureRecorder final : public agent::LoopBoundaryRecorder {
+    public:
+        std::vector<agent::ContextPressure> pressure;
+        int prepared_count = 0;
+        void OnContextPressure(const agent::ContextPressure& value) override { pressure.push_back(value); }
+        std::string OnRequestPrepared(const api::Request&, const agent::RequestPreparedContext&) override {
+            return "req-" + std::to_string(++prepared_count);
+        }
+        void OnRequestSent(const std::string&) override {}
+        void OnUsageRecorded(const std::string&, const api::Usage&, bool, const std::string&, int, bool,
+                             bool) override {}
+        bool OnOutputCompleted(const std::string&, const api::Message&, const std::string&,
+                               const std::string&) override {
+            return true;
+        }
+        void OnOutputFailed(const std::string&, const std::string&) override {}
+        void OnOutputCancelled(const std::string&) override {}
+    } recorder;
+    agent::TurnWiring turn_wiring;
+    turn_wiring.boundary_recorder = &recorder;
+    const auto result = loop.Run("查一查", std::move(turn_wiring));
 
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().find("上下文预检未通过") != std::string::npos);
     CHECK(result.error().find("自动压缩后仍装不下") != std::string::npos);
     CHECK(result.error().find("现场不丢") != std::string::npos);
     CHECK(backend.captured_requests.size() == 2);  // 第三份请求没发出去
+    REQUIRE(recorder.pressure.size() == 1);
+    CHECK_FALSE(recorder.pressure.front().reserve_clamped);
+    CHECK(recorder.prepared_count == 2);  // 拒绝分支本身没有 model.request.prepared
 }
 
 // ---------------------------------------------------------------------------

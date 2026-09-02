@@ -41,7 +41,7 @@ EventEnvelope MakeValidEnvelope() {
 
 }  // namespace
 
-TEST_CASE("event: 全部 68 种 kind 名字往返") {
+TEST_CASE("event: 全部 73 种 kind 名字往返") {
     int count = 0;
     for (const EventKind kind : AllEventKinds()) {
         const char* name = EventKindName(kind);
@@ -52,8 +52,9 @@ TEST_CASE("event: 全部 68 种 kind 名字往返") {
         CHECK(*back == kind);
         ++count;
     }
-    CHECK(count == 72);
-    // v2 新事件(Token 账本单 §6.1.1):usage 的 canonical owner。
+    CHECK(count == 73);
+    // 派工长任务最终预检三项账。
+    CHECK(EventKindFromName("context.pressure.recorded") == EventKind::ContextPressureRecorded);
     CHECK(EventKindFromName("model.usage.recorded").has_value());
     // 存储 v2 P0-3:召回快照与 Memory 写入因果边。
     CHECK(EventKindFromName("context.injected").has_value());
@@ -90,6 +91,9 @@ TEST_CASE("event: kind 固定 plane(§4.2 归面)") {
     CHECK(EventKindInfoOf(EventKind::VerificationRecorded).plane == Plane::Evidence);
     CHECK(EventKindInfoOf(EventKind::OutcomeAssessed).plane == Plane::Evidence);
     CHECK(EventKindInfoOf(EventKind::ControlTitleChanged).plane == Plane::Control);
+    CHECK(EventKindInfoOf(EventKind::ContextPressureRecorded).plane == Plane::Control);
+    CHECK(EventKindInfoOf(EventKind::ContextPressureRecorded).turn == IdNeed::Required);
+    CHECK(EventKindInfoOf(EventKind::ContextPressureRecorded).request == IdNeed::Forbidden);
     CHECK(EventKindInfoOf(EventKind::SessionEnded).main_stream_only);
     CHECK(EventKindInfoOf(EventKind::SessionClearRequested).main_stream_only);
     CHECK_FALSE(EventKindInfoOf(EventKind::TurnStarted).main_stream_only);

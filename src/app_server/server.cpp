@@ -1076,17 +1076,27 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         agent::AgentWiring loop_wiring;
         loop_wiring.on_context_pressure = [this, &thread_id, &turn_id](
                                               const agent::ContextPressure& pressure) {
-            // 上下文压力通报:PreRequest 评估与 hard trim 之后各来一次。
+            // 上下文压力通报三相明确投影；最终预检不得冒充 hard trim。
             nlohmann::json context;
-            context["phase"] = pressure.phase == agent::ContextPressure::Phase::PreRequest
-                                   ? "pre_request"
-                                   : "after_hard_trim";
+            if (pressure.phase == agent::ContextPressure::Phase::PreRequest) {
+                context["phase"] = "pre_request";
+            } else if (pressure.phase == agent::ContextPressure::Phase::AfterHardTrim) {
+                context["phase"] = "after_hard_trim";
+            } else {
+                context["phase"] = "preflight_exceeded";
+            }
             context["projectedTokens"] = pressure.projected_tokens;
             context["windowTokens"] = pressure.window_tokens;
             context["projectedOverflow"] = pressure.projected_overflow;
             context["hardTrimmedTurns"] = pressure.hard_trimmed_turns;
             context["hardDroppedMessages"] = pressure.hard_dropped_messages;
             context["hardTruncatedResults"] = pressure.hard_truncated_results;
+            if (pressure.phase == agent::ContextPressure::Phase::PreflightExceeded) {
+                context["estimatedInputTokens"] = pressure.estimated_input_tokens;
+                context["reservedOutputTokens"] = pressure.reserved_output_tokens;
+                context["protocolHeadroomTokens"] = pressure.protocol_headroom_tokens;
+                context["reserveClamped"] = pressure.reserve_clamped;
+            }
             EmitEventSafe(kEventTurnContext,
                                    MakeTurnContextParams(thread_id, turn_id, std::move(context)));
         };

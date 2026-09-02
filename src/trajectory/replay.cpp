@@ -480,6 +480,7 @@ bool FoldEvent(const EventEnvelope& envelope, ReplayState* state, FoldIndex* ind
         case EventKind::ControlApprovalExpired:
         case EventKind::ControlCancellationRequested:
         case EventKind::ControlCancellationApplied:
+        case EventKind::ContextPressureRecorded:
         case EventKind::CompactRequested:
         case EventKind::CompactRequestPrepared:
         case EventKind::CompactOutputGenerated:
