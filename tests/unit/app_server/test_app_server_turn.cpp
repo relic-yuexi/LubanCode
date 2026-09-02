@@ -408,7 +408,10 @@ TEST_CASE("整回合:thread/start -> turn/start -> 文本流 -> turn/completed")
 }
 
 TEST_CASE("整回合(模型报错):终态 error,错误文案带上") {
-    TestHarness harness{std::string()}; // 不落盘
+    // P0-2 起会话账恒开,空 sessions_dir 会把根折成 "/workspaces"——
+    // POSIX 上是根目录下的路径,CI 没权限建。给临时根。
+    const std::string sessions_dir = MakeTempDir("lubancode_test_app_server_turn_error");
+    TestHarness harness(sessions_dir);
     harness.backend->scripts = {ErrorScript()};
 
     std::string error_code;
@@ -445,7 +448,9 @@ TEST_CASE("turn/start 打不存在的 thread:参数错,不发终态假事件") {
 }
 
 TEST_CASE("同一 thread 同拍两轮:协议明拒 kErrTurnAlreadyRunning 的口径") {
-    TestHarness harness{std::string()};
+    // 同上:账恒开,临时根起场(空串会折成 "/workspaces",POSIX CI 建不起)。
+    const std::string sessions_dir = MakeTempDir("lubancode_test_app_server_turn_twice");
+    TestHarness harness(sessions_dir);
     harness.backend->scripts = {TextOnlyScript("第一轮")};
 
     std::string error_code;

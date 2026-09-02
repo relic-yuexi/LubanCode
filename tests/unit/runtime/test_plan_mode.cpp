@@ -14,11 +14,14 @@
 
 #include <doctest/doctest.h>
 
+#include <filesystem>
+
 #include "agent/prompt_assembler.hpp"
 #include "cli/slash_commands.hpp"
 #include "runtime/command.hpp"
 #include "runtime/event.hpp"
 #include "runtime/session_runtime.hpp"
+#include "workspace/identity.hpp"
 
 namespace {
 
@@ -402,7 +405,21 @@ TEST_CASE("plan_scan: 没有标签是普通正文") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("session_runtime: 切档、恢复、审批三对匹配") {
-    lubancode::runtime::SessionRuntime runtime({"", "wire", "ts"});  // 不落盘(sessions_dir 空)
+    // P0-6 起 Options 无 sessions_dir("不落盘"的老路已删),账恒开——
+    // 旧三参聚合初始化的 "ts" 会落进 WorkspaceIdentity.workspace_key,
+    // 半截身份(有 key 无 checkout_root)让账本 absolute(空路径) 抛异常。
+    // 照 test_session_runtime.cpp 的样子给临时根 + 兜底身份。
+    const std::filesystem::path tmp =
+        std::filesystem::temp_directory_path() / "lubancode-plan-mode-runtime";
+    std::error_code ec;
+    std::filesystem::create_directories(tmp / "repo", ec);
+    lubancode::runtime::SessionRuntime::Options runtime_options;
+    runtime_options.wire_name = "wire";
+    runtime_options.start_ts = "ts";
+    runtime_options.trajectory_workspaces_root = tmp / "workspaces";
+    runtime_options.trajectory_workspace_identity =
+        lubancode::workspace::MakeFallbackIdentity(tmp / "repo");
+    lubancode::runtime::SessionRuntime runtime(std::move(runtime_options));
     CHECK(runtime.collaboration_mode() == lubancode::runtime::CollaborationMode::Default);
     CHECK(runtime.SetCollaborationMode(lubancode::runtime::CollaborationMode::Plan, "slash", "confirm"));
     CHECK(runtime.mode_state().permission_before_plan == "confirm");
