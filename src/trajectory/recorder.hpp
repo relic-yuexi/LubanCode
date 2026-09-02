@@ -19,6 +19,7 @@
 #include <cstdint>
 #include <expected>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -75,6 +76,10 @@ struct RecordReceipt {
     std::uint64_t seq = 0;
     std::string event_hash;
     std::string error_code;  // 稳定错误码,见 recorder.cpp 注释总表
+    // 子代理空轨迹单 P0-B:schema/状态机拒绝时的字段级人话(如"缺字段:
+    // turn_id")。稳定码给程序分支,这行给人看——日志不许只剩
+    // schema.missing_field 说不出缺哪个字段。IoFailed 也带 io 细节。
+    std::string error_message;
 };
 
 // runtime 只认这只口(§7.1);装配层把真 Recorder 挂上。
@@ -99,7 +104,23 @@ struct RecorderOptions {
     // model.usage.recorded canonical owner,completed 不复制)。一场 run
     // 一只 recorder,一条 stream 只得一个版本,不混。
     int event_schema_version = kEnvelopeSchemaVersion;
+    // 子代理空轨迹单 P0-C(修法一):true = Start 不预建 JSONL——预留只留
+    // run id 与目标名,正式 .jsonl 在首枚 run.started 提交事务里独占创建。
+    // run.started 没提交,session 目录就不会出现 0 字节正式 stream。
+    bool defer_stream_create = false;
+    // 提交故障注入(测试专用;生产恒空 = 零行为):每枚提交在校验全过
+    // 之后、开卷写盘之前问一次;返回稳定码则本枚注入失败——码以 "io."
+    // 起头按 IoFailed 收(append/flush 类,可重试),其余按 Rejected 收
+    //(schema 类,不可重试;子代理空轨迹单 5.1 的 fault injection 用)。
+    // 锁内调用,须廉价且无副作用。
+    std::function<std::optional<std::string>(EventKind)> inject_submit_reject;
 };
+
+// 子代理空轨迹单 P0-C:清掉"预留了却从未提交过任何事件"的 stream 残留。
+// 所有权凭据三全才动:调用方递来的正是本次预留的目标路径、该文件存在、
+// 且大小为 0(从未提交过事件)。非 0 字节一个指头都不碰——不扫目录,不删
+// "看着像空"的旧文件。返回 true = 确实清了一枚。
+bool DiscardUncommittedStream(const std::filesystem::path& stream_path);
 
 class TrajectoryRecorder : public TrajectorySink {
 public:

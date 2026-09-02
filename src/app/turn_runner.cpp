@@ -500,12 +500,23 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
             // 才回填;嵌套层自己的调用边界回填是另一件未接的活,不在本单
             // 里顺手做错。
             hooks.trajectory_spawn = [ledger, hub, main_bridge](
-                                         const std::string& task_label, const std::string& parent_run_id)
+                                         const std::string& task_label, const std::string& parent_run_id,
+                                         lubancode::runtime::SubagentSpawnFailure* failure_out)
                                         -> std::unique_ptr<lubancode::runtime::TrajectorySubagentBridge> {
                 const std::string parent_call_id = hub->current_agent_call_id();
                 auto child = ledger->SpawnSubagent(parent_call_id, task_label, parent_run_id);
                 if (!child.has_value()) {
-                    return nullptr;  // 子账开张失败:子代理照跑,父账如实缺子边
+                    // 子代理空轨迹单 P0-A/P0-B:失败事实不再吞掉——父账落
+                    // subagent.run.start_failed typed 事件(阶段+稳定码+
+                    // 引用边),agent 工具据此 fail closed,子代理不执行。
+                    const std::string effective_parent_run =
+                        parent_run_id.empty() ? std::string() : parent_run_id;
+                    ledger->NoteSubagentStartFailed(child.error(), effective_parent_run, parent_call_id,
+                                                    main_bridge->current_turn_id());
+                    if (failure_out != nullptr) {
+                        *failure_out = child.error();
+                    }
+                    return nullptr;
                 }
                 if (parent_run_id.empty() && !parent_call_id.empty()) {
                     main_bridge->AttachChildRun(parent_call_id, (*child)->run_id());

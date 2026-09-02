@@ -1,8 +1,10 @@
 #include "trajectory/recorder.hpp"
 
 #include <chrono>
+#include <cstdio>
 #include <map>
 #include <set>
+#include <system_error>
 #include <utility>
 
 #include "platform/paths.hpp"
@@ -101,6 +103,9 @@ struct TrajectoryRecorder::Impl {
     bool run_terminal = false;
     bool session_ended = false;
     bool closed = false;
+    // P0-C 延迟开卷:defer_stream_create 的 stream 在首枚提交事务里才
+    // 独占创建文件;true = writer 还没开过。
+    bool stream_pending = false;
 
     std::map<std::string, TurnState> turns;
     std::string active_turn;
@@ -614,20 +619,29 @@ struct TrajectoryRecorder::Impl {
 std::expected<TrajectoryRecorder, std::string> TrajectoryRecorder::Start(
     const std::filesystem::path& stream_path, const std::filesystem::path& artifact_root,
     EventScope base_scope, RecorderOptions options, const RecorderClock* clock) {
-    auto writer = JournalWriter::Open(stream_path, JournalWriter::OpenMode::CreateNew);
-    if (!writer.has_value()) {
-        return std::unexpected(std::move(writer).error());
-    }
+    // 版本先裁再动文件(子代理空轨迹单 P0-C):坏选项不该在盘上留一枚
+    // 0 字节的"开了却没写"文件。
     if (options.event_schema_version < kEnvelopeSchemaVersion ||
         options.event_schema_version > kMaxEnvelopeSchemaVersion) {
         return std::unexpected("schema.unsupported_version: event_schema_version 只认 1(v1)或 2(v2 usage owner)");
     }
     auto impl = std::make_shared<Impl>();
-    impl->writer = std::move(*writer);
+    if (!options.defer_stream_create) {
+        auto writer = JournalWriter::Open(stream_path, JournalWriter::OpenMode::CreateNew);
+        if (!writer.has_value()) {
+            return std::unexpected(std::move(writer).error());
+        }
+        impl->writer = std::move(*writer);
+    } else {
+        // P0-C 修法一:只预留 run id 与目标名;正式 .jsonl 由首枚 run.started
+        // 提交事务在 Record 里独占创建。预留失败/首枚提交失败,目录里不会
+        // 出现正式 stream 文件,verifier 也就扫不见 0 字节子账。
+        impl->stream_pending = true;
+    }
     impl->stream_path = stream_path;
     impl->blobs = BlobStore(artifact_root, options.blobs);
     impl->base = std::move(base_scope);
-    impl->options = options;
+    impl->options = std::move(options);
     if (clock != nullptr) {
         impl->clock = clock;
     }
@@ -742,14 +756,16 @@ bool OffloadTextFields(nlohmann::json* value, BlobStore& blobs, Durability durab
 RecordReceipt TrajectoryRecorder::Record(RecordRequest request, Durability durability) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     RecordReceipt receipt;
-    const auto reject = [&receipt](std::string code) {
+    const auto reject = [&receipt](std::string code, std::string message = std::string()) {
         receipt.status = RecordReceipt::Status::Rejected;
         receipt.error_code = std::move(code);
+        receipt.error_message = std::move(message);
         return receipt;
     };
-    const auto io_fail = [&receipt](std::string code) {
+    const auto io_fail = [&receipt](std::string code, std::string message = std::string()) {
         receipt.status = RecordReceipt::Status::IoFailed;
         receipt.error_code = std::move(code);
+        receipt.error_message = std::move(message);
         return receipt;
     };
 
@@ -825,16 +841,32 @@ RecordReceipt TrajectoryRecorder::Record(RecordRequest request, Durability durab
     envelope.event_id = FormatEventId(envelope.run_id, 1);
     envelope.event_hash = std::string(kGenesisHash);
     if (auto error = ValidateEnvelope(envelope)) {
-        return reject(error->error_code);
+        // P0-B:字段级 message 随 receipt 走——日志要能看出缺 turn_id 还是
+        // call_id,不能只剩 schema.missing_field 一枚稳定码。
+        return reject(error->error_code, error->message);
     }
     if (auto error = ValidatePayloadWithVersion(impl_->options.event_schema_version, request.kind,
                                                 request.payload)) {
-        return reject(error->error_code);
+        return reject(error->error_code, error->message);
     }
 
     // state-machine validate(§6.2 十八条)。
     if (auto code = impl_->Check(request, envelope)) {
         return reject(*code);
+    }
+
+    // 提交故障注入(测试专用;生产恒空 = 零行为)。放在校验之后、开卷
+    // 之前:注入的拒绝不落盘、不动状态机,也不留下未开卷的 stream 文件。
+    // 约定:注入码以 "io." 起头的按 IoFailed 收(模拟 append/flush 一类
+    // I/O 失败的重试语义,子代理空轨迹单 5.1 的"flush 失败"一例靠它),
+    // 其余按 Rejected 收(schema 类,不可重试)。
+    if (impl_->options.inject_submit_reject != nullptr) {
+        if (auto injected = impl_->options.inject_submit_reject(request.kind)) {
+            if (injected->rfind("io.", 0) == 0) {
+                return io_fail(*injected, "fault injected by test hook");
+            }
+            return reject(*injected, "fault injected by test hook");
+        }
     }
 
     // 发号(§2.3:调用方不传 seq/event_id/hash,Recorder 一处生成)。
@@ -874,6 +906,19 @@ RecordReceipt TrajectoryRecorder::Record(RecordRequest request, Durability durab
     std::string blob_error;
     if (!OffloadTextFields(&envelope.payload, impl_->blobs, effective_durability, &blob_error)) {
         return io_fail("io.blob_failed: " + blob_error);
+    }
+
+    // P0-C 延迟开卷:首枚提交事务里独占创建正式 .jsonl。开不成(重名/
+    // 无权限/占名)按 IoFailed 明败——文件未创建或仍为空,由调用方按
+    // 所有权凭据清理。人话(含路径)走 error_message,稳定码保持干净,
+    // 上层给模型可见文案/typed 事件时才好按需 redact。
+    if (impl_->stream_pending) {
+        auto writer = JournalWriter::Open(impl_->stream_path, JournalWriter::OpenMode::CreateNew);
+        if (!writer.has_value()) {
+            return io_fail("io.create_failed", writer.error());
+        }
+        impl_->writer = std::move(*writer);
+        impl_->stream_pending = false;
     }
 
     // canonical + hash chain。
@@ -971,11 +1016,31 @@ std::expected<std::string, std::string> TrajectoryRecorder::Close() {
         return std::unexpected("io.closed: 已关柄");
     }
     impl_->closed = true;
+    if (impl_->stream_pending) {
+        // P0-C:延迟开卷的 stream 一枚事件都没提交过,文件从未创建,没有
+        // journal_sha256 可算。放掉(空)writer,如实回错。
+        impl_->writer = JournalWriter{};
+        return std::unexpected("io.no_stream: 首枚事件未提交,stream 未开卷");
+    }
     // 先算整本 hash(§8.3),再放掉句柄:封了口的账不该再攥着文件——
     // Windows 下攥着句柄的文件删不掉、搬不动(/delete、/archive 要用)。
     auto sha = JournalWriter::ComputeJournalSha256(impl_->stream_path);
     impl_->writer = JournalWriter{};
     return sha;
+}
+
+bool DiscardUncommittedStream(const std::filesystem::path& stream_path) {
+    std::error_code ec;
+    if (stream_path.empty() || !std::filesystem::exists(stream_path, ec) || ec) {
+        return false;
+    }
+    if (!std::filesystem::is_regular_file(stream_path, ec) || ec) {
+        return false;  // 目录/别的形状不是"未开卷的 stream 残留",不碰
+    }
+    if (std::filesystem::file_size(stream_path, ec) != 0 || ec) {
+        return false;  // 有字节的文件可能是别人的账,一个指头都不碰
+    }
+    return std::filesystem::remove(stream_path, ec) && !ec;
 }
 
 const std::filesystem::path& TrajectoryRecorder::stream_path() const {

@@ -147,13 +147,17 @@ RecordReceipt TrajectoryTurnBridge::Put(EventKind kind, std::optional<std::strin
 }
 
 void TrajectoryTurnBridge::NoteError(const RecordReceipt& receipt, const char* where) {
-    const std::string note = std::string(where) + ":" + receipt.error_code;
+    // P0-B:字段级 message 随行——日志要能看出缺 turn_id 还是 call_id,
+    // 不能只剩 schema.missing_field 一枚稳定码。
+    std::string note = std::string(where) + ":" + receipt.error_code;
+    if (!receipt.error_message.empty()) {
+        note += " (" + receipt.error_message + ")";
+    }
     recent_errors_.push_back(note);
     if (error_sink_ != nullptr) {
         error_sink_->push_back(note);
     }
-    platform::LogSink::Instance().Error("trajectory",
-                                        std::string(where) + " 落账失败: " + receipt.error_code);
+    platform::LogSink::Instance().Error("trajectory", "落账失败: " + note);
 }
 
 std::string TrajectoryTurnBridge::NextRequestId() {
@@ -231,17 +235,45 @@ void TrajectoryTurnBridge::RecordInput(const api::Message& user_message) {
 
 void TrajectoryTurnBridge::CancelDanglingCalls(const std::string& reason) {
     for (auto& [call_id, book] : calls_) {
-        if (!book.terminal) {
-            const auto receipt =
-                Put(EventKind::ToolExecutionCancelled, book.request_id, call_id, Actor::Tool,
-                    Origin::BuiltinTool, nlohmann::json{{"reason", reason}});
-            if (receipt.status == RecordReceipt::Status::Committed) {
-                book.terminal = true;
-                book.terminal_cancelled = true;
-                book.terminal_event_id = receipt.event_id;
-            } else {
-                NoteError(receipt, "tool.execution.cancelled(dangling)");
+        if (book.terminal) {
+            continue;
+        }
+        if (!book.declared) {
+            // P0-E:无主账项不该存在(OnToolTrace 的 ownership 门挡在造册口),
+            // 万一有也不造明知过不了 schema 的事件。这不是静默跳过——先落
+            // 稳定诊断(recent_errors/error_sink,doctor 可见),turn 由
+            // EndTurn 按真实结果收成 failed/cancelled。
+            const std::string note = "trajectory.dangling_call_undeclared:" + call_id;
+            recent_errors_.push_back(note);
+            if (error_sink_ != nullptr) {
+                error_sink_->push_back(note);
             }
+            platform::LogSink::Instance().Error(
+                "trajectory", "悬空调用未声明过(无主账项),不补 cancelled: " + call_id);
+            continue;
+        }
+        if (book.request_id.empty() || call_id.empty()) {
+            // P0-E:request_id/call_id 为空必过不了 schema(Put 把空串归一成
+            // 缺省,required 一刀拒下)。不再发这枚事件;字段级诊断先行,
+            // EndTurn 若落 turn.completed 会被状态机拦下并如实转 failed。
+            const std::string missing = book.request_id.empty() ? "request_id" : "call_id";
+            const std::string note = "trajectory.dangling_call_missing_field:" + missing + ":" + call_id;
+            recent_errors_.push_back(note);
+            if (error_sink_ != nullptr) {
+                error_sink_->push_back(note);
+            }
+            platform::LogSink::Instance().Error(
+                "trajectory", "悬空调用缺 " + missing + ",不补 cancelled,turn 按真实结果收口: " + call_id);
+            continue;
+        }
+        const auto receipt = Put(EventKind::ToolExecutionCancelled, book.request_id, call_id,
+                                 Actor::Tool, Origin::BuiltinTool, nlohmann::json{{"reason", reason}});
+        if (receipt.status == RecordReceipt::Status::Committed) {
+            book.terminal = true;
+            book.terminal_cancelled = true;
+            book.terminal_event_id = receipt.event_id;
+        } else {
+            NoteError(receipt, "tool.execution.cancelled(dangling)");
         }
     }
 }
@@ -521,11 +553,17 @@ bool TrajectoryTurnBridge::OnOutputCompleted(const std::string& request_id, cons
         NoteError(receipt, "model.output.completed");
         return false;  // §7.4:输出记不住,不执行工具
     }
-    // 声明本份 output 的 tool call(§6.1:call 由模型输出定义)。
+    // 声明本份 output 的 tool call(§6.1:call 由模型输出定义)。这是
+    // calls_ 造册的唯一合法入口(P0-D ownership 不变量):旁路 trace 想靠
+    // operator[] 反向创造模型事实,门都没有。
     for (const auto& block : assistant.content) {
         if (const auto* call = std::get_if<api::ToolUseBlock>(&block)) {
+            if (call->id.empty()) {
+                continue;  // P0-F:空 id 的 call 不入册(assembler 已挡,双保险)
+            }
             CallBook& book = calls_[call->id];
             book.request_id = request_id;
+            book.declared = true;
         }
     }
     return true;
@@ -564,7 +602,16 @@ void TrajectoryTurnBridge::OnToolTrace(const agent::ToolTraceEvent& event) {
     if (!turn_open_ || event.tool_use_id.empty()) {
         return;
     }
-    CallBook& book = calls_[event.tool_use_id];
+    // P0-D ownership 门:父桥只收模型声明过的 call(model.output.completed
+    // 造册)。陌生 tool_use_id(子代理账没拿到时回灌的旁听 trace、上游
+    // 串线的 call id)不进 calls_,不造册,不推进状态机——只进有界诊断
+    // 投影。旁路 trace 不能靠 operator[] 反向创造模型事实。
+    const auto book_it = calls_.find(event.tool_use_id);
+    if (book_it == calls_.end()) {
+        NoteUnownedToolTrace(event);
+        return;
+    }
+    CallBook& book = book_it->second;
     switch (event.kind) {
         case agent::ToolTraceEventKind::Scheduled: {
             if (book.planned) {
@@ -705,17 +752,23 @@ void TrajectoryTurnBridge::OnToolTrace(const agent::ToolTraceEvent& event) {
             // 子代理边界:agent 工具的执行终态把 child run 引用带上
             //(§3.5/§16.4:父子文件只传边界引用与 terminal hash,不内联
             // 子账细账)。child_run_id 走 relations;子账终态 hash 落
-            // result_ref——payload 键集封闭,加未知键会被 schema 拒收。
+            // result_ref——但 result_ref 只在 schema 认它的终态 kind 上带
+            //(finished/failed)。cancelled/unknown 的 payload 键集没有
+            // result_ref,塞进去会被 schema 拒收,终态就丢了(ESC 掐在
+            // agent 调用中途正是这一形状——child_run_id 照挂 relations,
+            // hash 对账交给 verifier 实读子文件)。
             EventLinks links;
             if (!book.child_run_id.empty()) {
                 links.child_run_id = book.child_run_id;
-                const auto hash = child_terminal_hashes_.find(book.child_run_id);
-                payload["result_ref"] = nlohmann::json{
-                    {"kind", "child_stream"},
-                    {"child_run_id", book.child_run_id},
-                    {"child_terminal_event_hash",
-                     hash != child_terminal_hashes_.end() ? hash->second : std::string()}};
-                payload["side_effects"] = nlohmann::json::array();
+                if (kind == EventKind::ToolExecutionFinished || kind == EventKind::ToolExecutionFailed) {
+                    const auto hash = child_terminal_hashes_.find(book.child_run_id);
+                    payload["result_ref"] = nlohmann::json{
+                        {"kind", "child_stream"},
+                        {"child_run_id", book.child_run_id},
+                        {"child_terminal_event_hash",
+                         hash != child_terminal_hashes_.end() ? hash->second : std::string()}};
+                    payload["side_effects"] = nlohmann::json::array();
+                }
             }
             const auto receipt = Put(kind, book.request_id, event.tool_use_id, Actor::Tool,
                                      Origin::BuiltinTool, std::move(payload), Durability::PowerLoss,
@@ -911,8 +964,43 @@ bool TrajectoryTurnBridge::ShouldBlockExecution(const agent::ToolTraceEvent& sta
            storage_blocked_.count(started.execution_id) != 0;
 }
 
+void TrajectoryTurnBridge::NoteUnownedToolTrace(const agent::ToolTraceEvent& event) {
+    // P0-D 的有界诊断投影:一条一枚,带齐单子点名的六样身份;上限 32 条,
+    // 溢出只计数不刷屏。进 recent_errors/error_sink(doctor 可见),不进
+    // canonical 事件流,不动 calls_。
+    std::string note = "trajectory.unowned_tool_trace: run_id=" + base_scope_.run_id +
+                       " turn_id=" + turn_id_ + " execution_id=" + event.execution_id +
+                       " call_id=" + event.tool_use_id + " tool_name=" + event.tool_name +
+                       " parent_execution_id=" + event.parent_execution_id;
+    if (unowned_trace_notes_.size() < 32) {
+        unowned_trace_notes_.push_back(note);
+    } else {
+        ++unowned_trace_dropped_;
+    }
+    if (recent_errors_.size() < 64) {  // 有界:同一症状不无限刷错误环
+        recent_errors_.push_back(note);
+    }
+    if (error_sink_ != nullptr && error_sink_->size() < 128) {
+        error_sink_->push_back(note);
+    }
+    platform::LogSink::Instance().Warn("trajectory", "无主 tool trace(未由模型输出声明): " + note);
+}
+
 void TrajectoryTurnBridge::AttachChildRun(const std::string& call_id, const std::string& agent_run_id) {
-    calls_[call_id].child_run_id = agent_run_id;
+    // P0-D:挂边也只认已声明的 call——operator[] 会给陌生 id 造空册,正是
+    // 这次的污染路径之一。找不到就记一笔诊断,不造册。
+    const auto it = calls_.find(call_id);
+    if (it == calls_.end()) {
+        const std::string note = "trajectory.attach_child_run_undeclared:" + call_id;
+        recent_errors_.push_back(note);
+        if (error_sink_ != nullptr) {
+            error_sink_->push_back(note);
+        }
+        platform::LogSink::Instance().Warn(
+            "trajectory", "AttachChildRun 指到未声明的 call,边界不挂: " + call_id);
+        return;
+    }
+    it->second.child_run_id = agent_run_id;
 }
 
 void TrajectoryTurnBridge::NoteChildTerminal(const std::string& agent_run_id,
@@ -1421,6 +1509,9 @@ struct TrajectorySessionLedger::Impl {
     // 子代理账:run_id -> 终态 hash(Finish 时填,父账边界引用用)。
     std::map<std::string, std::string> child_terminal_hashes;
     std::uint64_t subagent_counter = 0;
+    // 测试故障注入(生产恒空;子代理空轨迹单 5.1):子账首枚 run.started
+    // 提交前问一次。
+    std::function<std::optional<std::string>()> subagent_start_fault;
     // --continue 启动路的 resume 投影(没 resume 为空)。
     bool launch_resumed = false;
     std::vector<api::Message> launch_resume_history;
@@ -1494,6 +1585,9 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     manager_options.main_run_kind =
         options.one_shot ? trajectory::RunKind::OneShot : trajectory::RunKind::MainSession;
     manager_options.recorder.event_schema_version = options.event_schema_version;
+    // 子代理空轨迹单 P0-C:main stream 同样走延迟开卷——正式 .jsonl 由
+    // 首枚 run.started 提交事务独占创建,开张失败不在盘上留 0 字节文件。
+    manager_options.recorder.defer_stream_create = true;
 
     Impl impl;
     impl.workspaces_root = options.workspaces_root;
@@ -1501,6 +1595,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     impl.lubancode_version = options.lubancode_version;
     impl.workspace_root_text = platform::PathToUtf8(options.workspace_root);
     impl.training_policy = options.training_policy;
+    impl.subagent_start_fault = options.subagent_start_fault;
     impl.manager = std::make_unique<trajectory::SessionManager>(std::move(manager_options));
 
     // --continue 启动路(§10.4):直接建 start_reason=resume 的新 session,
@@ -1657,17 +1752,44 @@ private:
 
 }  // namespace
 
-std::expected<std::unique_ptr<TrajectorySubagentBridge>, std::string>
+std::expected<std::unique_ptr<TrajectorySubagentBridge>, SubagentSpawnFailure>
 TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const std::string& task_label,
                                        const std::string& parent_run_id) {
     if (impl_ == nullptr || impl_->active == nullptr) {
-        return std::unexpected("trajectory.no_active_session");
+        SubagentSpawnFailure failure;
+        failure.stage = "reserve_stream";
+        failure.error_code = "trajectory.no_active_session";
+        failure.detail = "会话账未开,子账无处落";
+        return std::unexpected(std::move(failure));
     }
     const std::string agent_run_id =
         "agent-" + std::to_string(++impl_->subagent_counter) + "-" + impl_->main_run_id;
+    SubagentSpawnFailure failure;
+    failure.reserved_run_id = agent_run_id;
+    // 本轮失败共同收尾:recorder 先放干净(Windows 攥着句柄删不掉文件),
+    // 再按所有权凭据清未提交的 0 字节残留(路径=本次预留名、大小=0)。
+    const auto fail_out = [this, &failure](std::string stage, std::string code, std::string detail,
+                                           bool retryable) {
+        failure.stage = std::move(stage);
+        failure.error_code = std::move(code);
+        failure.detail = std::move(detail);
+        failure.retryable = retryable;
+        if (impl_ != nullptr && impl_->active != nullptr) {
+            const auto stream_path = impl_->active->directory.ReserveSubagentStream(failure.reserved_run_id);
+            if (stream_path.has_value()) {
+                (void)trajectory::DiscardUncommittedStream(*stream_path);
+            }
+        }
+        io_errors_.push_back("subagent.start_failed:" + failure.stage + ":" + failure.error_code);
+        platform::LogSink::Instance().Error(
+            "trajectory", "子账开张失败[" + failure.stage + "]: " + failure.error_code +
+                              (failure.detail.empty() ? std::string() : " (" + failure.detail + ")"));
+        return std::unexpected(std::move(failure));
+    };
     auto stream = impl_->active->directory.ReserveSubagentStream(agent_run_id);
     if (!stream.has_value()) {
-        return std::unexpected("trajectory.subagent_stream: " + stream.error());
+        return fail_out("reserve_stream", "trajectory.subagent_stream", stream.error(),
+                        /*retryable=*/false);
     }
     trajectory::EventScope scope = impl_->active->main->base_scope();
     scope.run_id = agent_run_id;
@@ -1677,10 +1799,25 @@ TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const 
     scope.call_id.reset();
     scope.visibility = {Visibility::HostOnly};
     scope.training_policy = impl_->training_policy;
+    // P0-C:子账走延迟开卷——正式 .jsonl 在首枚 run.started 提交事务里独占
+    // 创建;开不成/写不进都不会留下 0 字节正式 stream。
+    trajectory::RecorderOptions recorder_options = impl_->recorder_options;
+    recorder_options.defer_stream_create = true;
+    if (impl_->subagent_start_fault != nullptr) {
+        recorder_options.inject_submit_reject = [hook = impl_->subagent_start_fault](
+                                                     trajectory::EventKind kind)
+                                                     -> std::optional<std::string> {
+            if (kind == trajectory::EventKind::RunStarted && hook != nullptr) {
+                return hook();
+            }
+            return std::nullopt;
+        };
+    }
     auto recorder = trajectory::TrajectoryRecorder::Start(*stream, impl_->active->directory.artifacts_root(),
-                                                          scope, impl_->recorder_options);
+                                                          scope, std::move(recorder_options));
     if (!recorder.has_value()) {
-        return std::unexpected("trajectory.subagent_recorder: " + recorder.error());
+        return fail_out("recorder_start", "trajectory.subagent_recorder", recorder.error(),
+                        /*retryable=*/false);
     }
     // 先把 recorder 落到堆上再让桥引用它——expected 里的值 move 走之后,
     // 引用会悬在 moved-from 壳上(桥的 recorder_ 是裸引用)。
@@ -1706,7 +1843,12 @@ TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const 
                                                           trajectory::Durability::PowerLoss,
                                                           std::move(links));
     if (started.status != trajectory::RecordReceipt::Status::Committed) {
-        return std::unexpected("trajectory.subagent_run_started: " + started.error_code);
+        const bool io_failure = started.status == trajectory::RecordReceipt::Status::IoFailed;
+        // recorder 攥着已开卷的句柄:先放掉再清残留。
+        recorder_owner.reset();
+        return fail_out("run_started",
+                        "trajectory.subagent_run_started: " + started.error_code,
+                        started.error_message, /*retryable=*/io_failure);
     }
 
     TrajectoryTurnBridge::Identity identity;
@@ -1722,6 +1864,70 @@ TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const 
     }
     return std::unique_ptr<TrajectorySubagentBridge>(new SubagentBridgeImpl(
         std::move(recorder_owner), std::move(bridge), agent_run_id, &impl_->child_terminal_hashes));
+}
+
+void TrajectorySessionLedger::NoteSubagentStartFailed(const SubagentSpawnFailure& failure,
+                                                      const std::string& parent_run_id,
+                                                      const std::string& parent_call_id,
+                                                      const std::string& turn_id) {
+    trajectory::TrajectoryRecorder* recorder = main();
+    if (recorder == nullptr) {
+        return;  // main 都没了,诊断只能进 io_errors(fail_out 那侧已记)
+    }
+    // 持有者与 SpawnSubagent 的 relations 同一口径:main 直派(空串)记
+    // main_run_id;嵌套派工记派工者自己的 run。
+    const std::string owner_run_id =
+        parent_run_id.empty() ? impl_->main_run_id : parent_run_id;
+    trajectory::RecordRequest request;
+    request.kind = trajectory::EventKind::SubagentRunStartFailed;
+    request.scope = recorder->base_scope();
+    request.scope.actor = trajectory::Actor::Tool;
+    request.scope.origin = trajectory::Origin::SubagentTool;
+    request.scope.visibility = {Visibility::HostOnly};
+    // 子账开张失败是宿主侧诊断事实,不进训练集。
+    request.scope.training_policy = trajectory::TrainingPolicy::Exclude;
+    request.scope.turn_id = turn_id.empty() ? std::optional<std::string>() : std::optional<std::string>(turn_id);
+    request.scope.call_id =
+        parent_call_id.empty() ? std::optional<std::string>() : std::optional<std::string>(parent_call_id);
+    nlohmann::json payload = nlohmann::json{{"stage", failure.stage},
+                                            {"error_code", failure.error_code},
+                                            {"parent_run_id", owner_run_id}};
+    if (!failure.detail.empty()) {
+        // 事件只记稳定码与引用,不抄敏感绝对路径:io 细节里的会话目录
+        // 原文换占位符。
+        std::string detail = failure.detail;
+        if (impl_ != nullptr && impl_->active != nullptr) {
+            const std::string session_root =
+                platform::PathToUtf8(impl_->active->directory.session_dir());
+            const auto pos = detail.find(session_root);
+            if (pos != std::string::npos) {
+                detail.replace(pos, session_root.size(), "<session_dir>");
+            }
+        }
+        payload["detail"] = std::move(detail);
+    }
+    if (!parent_call_id.empty()) {
+        payload["parent_call_id"] = parent_call_id;
+    }
+    if (!failure.reserved_run_id.empty()) {
+        payload["reserved_run_id"] = failure.reserved_run_id;
+    }
+    // stream_ref:session 相对引用(subagents/<file>.jsonl),不写绝对路径。
+    if (!failure.reserved_run_id.empty() && impl_ != nullptr && impl_->active != nullptr) {
+        payload["stream_ref"] = "subagents/" + failure.reserved_run_id + ".jsonl";
+    }
+    payload["retryable"] = failure.retryable;
+    request.payload = std::move(payload);
+    const auto receipt = recorder->Record(std::move(request), trajectory::Durability::PowerLoss);
+    if (receipt.status != trajectory::RecordReceipt::Status::Committed) {
+        const std::string note =
+            "subagent.run.start_failed:" + receipt.error_code +
+            (receipt.error_message.empty() ? std::string() : " (" + receipt.error_message + ")");
+        io_errors_.push_back(note);
+        platform::LogSink::Instance().Error("trajectory", "子账开张失败事件落不了: " + note);
+        return;
+    }
+    NotifyCommitted_();
 }
 
 std::optional<std::string> TrajectorySessionLedger::ChildTerminalHash(const std::string& agent_run_id) const {

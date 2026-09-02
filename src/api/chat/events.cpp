@@ -223,10 +223,16 @@ std::vector<StreamEvent> EventParser::Finish() {
     if (!tool_calls_.empty()) {
         events.push_back(ContentBlockDone{0});
         for (const auto& [index, call] : tool_calls_) {
-            const std::string id = call.id.empty() ? "chat_tool_" + std::to_string(index) : call.id;
-            events.push_back(ToolUseStart{index, id, call.name});
+            // P0-F(子代理空轨迹单):id 缺席不再本地造 "chat_tool_N" 假 id——
+            // 假 id 会把故障推迟到下一次回喂(provider 不认,配对断裂)。
+            // 终帧身份随 done 帧交回 assembler;仍无 id 的调用由 assembler
+            // 丢弃并计数,消费端把这份输出按畸形收口。
+            events.push_back(ToolUseStart{index, call.id, call.name});
             events.push_back(ToolUseInputDelta{index, call.arguments});
-            events.push_back(ContentBlockDone{index});
+            ContentBlockDone done;
+            done.index = index;
+            done.tool_use_id = call.id;
+            events.push_back(std::move(done));
         }
     }
     if (saw_payload_ || started_ || !tool_calls_.empty()) {

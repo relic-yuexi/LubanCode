@@ -1309,6 +1309,22 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
     return ExecuteForeground(request, *task_registry, caller, env);
 }
 
+// 子代理空轨迹单 P0-A:子账开张失败的 fail-closed 文案。只带阶段与稳定
+// 错误码——错误明细(detail)可能嵌会话目录绝对路径,不进模型可见正文。
+std::string SubagentStartFailedText(const runtime::SubagentSpawnFailure& failure) {
+    std::string text = "[trajectory.subagent_start_failed] 子代理轨迹账开张失败,该子代理未执行"
+                       "(阶段: " +
+                       (failure.stage.empty() ? std::string("unknown") : failure.stage) +
+                       "; 错误码: " +
+                       (failure.error_code.empty() ? std::string("unknown") : failure.error_code) + ")";
+    if (failure.retryable) {
+        text += "。属 I/O 类失败,可重试同一派工。";
+    } else {
+        text += "。详见父账 subagent.run.start_failed 事件;修好后再派。";
+    }
+    return text;
+}
+
 Tool::Result AgentTool::ExecuteForeground(const DispatchRequest& request, ToolRegistry& task_registry,
                                           const AgentRunIdentity& caller,
                                           const std::shared_ptr<const SubagentDispatchEnv>& env) {
@@ -1392,10 +1408,35 @@ Tool::Result AgentTool::ExecuteForeground(const DispatchRequest& request, ToolRe
     // §12.3 第一条)。caller.agent_run_id 空(父任务自己没开轨迹账,或
     // main 直派)时,SpawnSubagent 按空串落回本场 main_run_id,行为与从前
     // main 直派一致。
+    // 子代理空轨迹单 P0-A:钩子接了而申请失败 = fail closed——无真账的
+    // 子代理不执行,工具调用落明确失败(稳定码 trajectory.subagent_start_
+    // failed),主调用照常收 tool.execution.failed + tool.result.committed,
+    // 父 turn 可继续。
     std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory;
-    if (hooks.trajectory_spawn) {
-        trajectory =
-            hooks.trajectory_spawn(agent_type + ": " + task->snapshot.prompt.substr(0, 120), caller.agent_run_id);
+    runtime::SubagentSpawnFailure spawn_failure;
+    const bool trajectory_spawn_armed = hooks.trajectory_spawn != nullptr;
+    if (trajectory_spawn_armed) {
+        trajectory = hooks.trajectory_spawn(agent_type + ": " + task->snapshot.prompt.substr(0, 120),
+                                            caller.agent_run_id, &spawn_failure);
+    }
+    if (trajectory_spawn_armed && trajectory == nullptr) {
+        Result result{SubagentStartFailedText(spawn_failure), true};
+        if (room.has_value()) {
+            // 隔离房照常收尾:早退不漏清理(有活留房附路径,与正常路同款)。
+            const auto finish = FinishIsolationRoom(*room, git_runner_);
+            result.AppendText(finish.note);
+            result.AppendText(room->caller_note);
+            std::lock_guard<std::mutex> lock(coordinator_->ledger().mutex);
+            task->snapshot.worktree_removed = finish.removed;
+            task->snapshot.worktree_awaiting_review = finish.awaiting_review;
+            coordinator_->ledger().Touch();
+        }
+        result.AppendText(TaskLedger::UndeliveredInboxNote(task));
+        coordinator_->ledger().FinalizeFromToolResult(
+            task, result.content,
+            foreground_hooks != nullptr && foreground_hooks->cancel != nullptr &&
+                foreground_hooks->cancel->load(std::memory_order_acquire));
+        return result;
     }
     if (trajectory != nullptr) {
         // 回填自己的 run id(P1-2):这只任务若再往下派孩子,RunTask 顶部的
@@ -1613,9 +1654,19 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
     // (parent 是某只子代理,不论它自己前台/后台)现在也申请——parent_run_id
     // 传 caller.agent_run_id,不冒充 main(单子 §12.3 第一条)。caller 空
     // (main 直派,或父任务自己没开轨迹账)时按空串落回本场 main_run_id。
+    // 子代理空轨迹单 P0-A:钩子接了而申请失败 = fail closed,后台同样不
+    // 放无账子代理上路——注册的任务当场按失败收账,错误码带回给模型。
     std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory;
-    if (hooks_.trajectory_spawn) {
-        trajectory = hooks_.trajectory_spawn(agent_type + ": " + prompt.substr(0, 120), caller.agent_run_id);
+    runtime::SubagentSpawnFailure spawn_failure;
+    const bool trajectory_spawn_armed = hooks_.trajectory_spawn != nullptr;
+    if (trajectory_spawn_armed) {
+        trajectory = hooks_.trajectory_spawn(agent_type + ": " + prompt.substr(0, 120),
+                                             caller.agent_run_id, &spawn_failure);
+    }
+    if (trajectory_spawn_armed && trajectory == nullptr) {
+        const std::string failure_text = SubagentStartFailedText(spawn_failure);
+        coordinator_->ledger().FinalizeFromToolResult(task, failure_text, /*cancelled=*/false);
+        return {failure_text, true};
     }
     if (trajectory != nullptr) {
         // 回填自己的 run id(P1-2,与前台路同一规矩):写在起线程之前——
@@ -2074,6 +2125,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     // 逐枚追踪单:子代理内层工具的 canonical 事件转发(只读 sink 并轨)。
     // P0-2 轨迹路:给了子代理轨迹桥的,子代理的工具事件落子账(独立
     // JSONL),不再旁听进父账——父子文件只传边界引用(§3.5)。
+    // 子代理空轨迹单 P0-A:spawn 钩子接了而子账没拿到的情况在派工口已
+    // fail closed,到不了这里——下面这条旁听路只服务"宿主压根没接
+    // Trajectory"的旧调用方(单测/无账环境),不再是子账失败的降级。
     if (trajectory != nullptr) {
         runtime::TrajectoryTurnBridge& child_bridge = trajectory->turn_bridge();
         turn_wiring.boundary_recorder = &child_bridge;

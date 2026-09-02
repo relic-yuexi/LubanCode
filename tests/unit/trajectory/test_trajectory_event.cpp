@@ -41,7 +41,7 @@ EventEnvelope MakeValidEnvelope() {
 
 }  // namespace
 
-TEST_CASE("event: 全部 73 种 kind 名字往返") {
+TEST_CASE("event: 全部 74 种 kind 名字往返") {
     int count = 0;
     for (const EventKind kind : AllEventKinds()) {
         const char* name = EventKindName(kind);
@@ -52,7 +52,7 @@ TEST_CASE("event: 全部 73 种 kind 名字往返") {
         CHECK(*back == kind);
         ++count;
     }
-    CHECK(count == 73);
+    CHECK(count == 74);
     // 派工长任务最终预检三项账。
     CHECK(EventKindFromName("context.pressure.recorded") == EventKind::ContextPressureRecorded);
     CHECK(EventKindFromName("model.usage.recorded").has_value());
@@ -61,6 +61,8 @@ TEST_CASE("event: 全部 73 种 kind 名字往返") {
     CHECK(EventKindFromName("memory.save.requested").has_value());
     CHECK(EventKindFromName("memory.save.committed").has_value());
     CHECK(EventKindFromName("memory.save.failed").has_value());
+    // 子代理空轨迹单 P0-B:子 run 开张失败的父侧 typed 事实。
+    CHECK(EventKindFromName("subagent.run.start_failed") == EventKind::SubagentRunStartFailed);
     CHECK_FALSE(EventKindFromName("no.such.kind").has_value());
     CHECK(EventKindName(static_cast<EventKind>(999))[0] == '\0');
 }

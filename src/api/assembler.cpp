@@ -29,6 +29,14 @@ void MessageAssembler::FinalizeCurrent() {
             block.name = open_tool_->name;
             block.input = std::move(input);
             content_.push_back(std::move(block));
+        } else if (open_tool_->id.empty()) {
+            // 子代理空轨迹单 P0-F:provider 没给身份的 function call 不进
+            // ToolUseBlock——不执行、不合成局部工具结果、不伪造 provider
+            // call id(假 id 只会把故障推迟到下一次回喂)。计数留给消费端
+            // 把这份输出按畸形收口。
+            ++idless_tool_calls_dropped_;
+            open_tool_.reset();
+            return;
         } else {
             content_.push_back(
                 ToolUseBlock{open_tool_->id, open_tool_->name, std::move(input), open_tool_->caller});
@@ -69,13 +77,24 @@ void MessageAssembler::Feed(const StreamEvent& event) {
                 open_thinking_->signature += e.signature;
             } else if constexpr (std::is_same_v<T, ToolUseStart>) {
                 FinalizeCurrent();  // 上一个块(多半是文本)先收尾
-                open_tool_ = OpenToolUse{e.id, e.name, std::string{}, e.caller, /*is_server=*/false};
+                OpenToolUse open;
+                open.index = e.index;  // 记下 output 下标:终帧按它合并身份(P0-F)
+                open.id = e.id;
+                open.name = e.name;
+                open.caller = e.caller;
+                open_tool_ = std::move(open);
             } else if constexpr (std::is_same_v<T, ToolUseInputDelta>) {
                 if (open_tool_.has_value()) {
                     open_tool_->partial_json += e.partial_json;
                 }
                 // 没有正在累积的 tool_use 块却来了输入片段:协议乱了,静默丢弃,不崩。
             } else if constexpr (std::is_same_v<T, ContentBlockDone>) {
+                // P0-F:早帧缺 id、终帧补 id 的流式协议(Responses 兼容端实测
+                // 形状)按 output index 合并终帧身份,再收块。
+                if (open_tool_.has_value() && open_tool_->index == e.index &&
+                    open_tool_->id.empty() && !e.tool_use_id.empty()) {
+                    open_tool_->id = e.tool_use_id;
+                }
                 FinalizeCurrent();
             } else if constexpr (std::is_same_v<T, ServerToolUseStart>) {
                 // 服务端工具搜索(动态工具 P3):开服务端累积器,后续的
@@ -83,6 +102,7 @@ void MessageAssembler::Feed(const StreamEvent& event) {
                 // tool 累积器(块序即流序),不必再按 index 分桶。
                 FinalizeCurrent();
                 OpenToolUse open;
+                open.index = e.index;
                 open.id = e.id;
                 open.name = e.name;
                 open.is_server = true;

@@ -417,6 +417,18 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::MemorySaveCommitted, "committed_at", "s", false},
     {EventKind::MemorySaveFailed, "stable_error_code", "s", true},
     {EventKind::MemorySaveFailed, "retryable", "b", false},
+    // 子代理空轨迹单 P0-B:子 run 开张失败的父侧 typed 事实。stage/error_code
+    // 必填;parent_run_id 必填(SpawnSubagent 恒知);parent_call_id 可空
+    //(hub 给不出时如实缺);reserved_run_id/stream_ref/retryable/detail 按场
+    // 在场与否带。正文只认稳定码与引用,不进子 prompt。
+    {EventKind::SubagentRunStartFailed, "stage", "s", true},
+    {EventKind::SubagentRunStartFailed, "error_code", "s", true},
+    {EventKind::SubagentRunStartFailed, "parent_run_id", "s", true},
+    {EventKind::SubagentRunStartFailed, "parent_call_id", "s", false},
+    {EventKind::SubagentRunStartFailed, "reserved_run_id", "s", false},
+    {EventKind::SubagentRunStartFailed, "stream_ref", "s", false},
+    {EventKind::SubagentRunStartFailed, "retryable", "b", false},
+    {EventKind::SubagentRunStartFailed, "detail", "s", false},
 };
 
 }  // namespace

@@ -801,6 +801,12 @@ std::expected<ActiveSession*, std::string> SessionManager::LaunchSession() {
     const auto started = recorder->WriteRunStarted(nlohmann::json{{"start_reason", "process_launch"}},
                                                    Durability::PowerLoss);
     if (started.status != RecordReceipt::Status::Committed) {
+        // 子代理空轨迹单 P0-C:run.started 没提交,这场 session 没开成——
+        // main.jsonl 不算开卷。先放掉 recorder(Windows 攥句柄删不掉文件),
+        // 再按所有权凭据清 0 字节残留(路径=本次 launch 的目标名、大小=0),
+        // 不扫目录、不删非 0 文件。
+        { auto drop_recorder = std::move(recorder); }
+        (void)DiscardUncommittedStream(directory->main_stream_path());
         return std::unexpected("session.run_start_failed: " + started.error_code);
     }
     ActiveSession session;

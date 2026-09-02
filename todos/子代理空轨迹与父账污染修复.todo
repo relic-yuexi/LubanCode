@@ -1,6 +1,6 @@
 # 子代理空轨迹、父账污染与 dangling 补账失败修复
 
-- 状态：待修
+- 状态：源码修复已收口（2026-09-03 P0-A~F 全落，单测 364/364 全绿；Windows 真进程 + 假 Responses 服务四场验收过——正常/晚到 id/始终无 id/子账开张失败，证据在 build/trajectory-probe-evidence/；工具流中 ESC 一场管道模式发不了键，留白待真终端）
 - 级别：P0
 - 日期：2026-09-02
 - 现场版本：`lubancode 0.26.172`
@@ -277,14 +277,14 @@ terminal 与 result 收口
 
 ## 六、实施批次
 
-- [ ] P0：先补失败码传播与持久诊断，重跑本次形状，捉住子账开张第一因
-- [ ] P0：子账启动失败改为 fail closed，删掉“无账照跑并回灌父 trace”降级
-- [ ] P0：正式 stream 原子开卷；失败不留下 0 字节 `.jsonl`
-- [ ] P0：`OnToolTrace` ownership 门；陌生 call 不再写入 `calls_`
-- [ ] P0：dangling 收口只认合法声明；字段级 schema 错误可见
-- [ ] P0：四条 provider wire 的空 call id 统一门，先补 Responses ESC 用例
-- [ ] P0：单元与整合测试全绿
-- [ ] P0：Windows 假服务真进程验收，保存命令、退出码与原始输出
+- [x] P0：先补失败码传播与持久诊断，重跑本次形状，捉住子账开张第一因
+- [x] P0：子账启动失败改为 fail closed，删掉“无账照跑并回灌父 trace”降级
+- [x] P0：正式 stream 原子开卷；失败不留下 0 字节 `.jsonl`
+- [x] P0：`OnToolTrace` ownership 门；陌生 call 不再写入 `calls_`
+- [x] P0：dangling 收口只认合法声明；字段级 schema 错误可见
+- [x] P0：四条 provider wire 的空 call id 统一门，先补 Responses ESC 用例
+- [x] P0：单元与整合测试全绿
+- [x] P0：Windows 假服务真进程验收，保存命令、退出码与原始输出（四场：normal_call/late_id/never_id/spawn_fail，verify 全过、replay 悬空工具 0，证据 build/trajectory-probe-evidence/；工具流中 ESC 一场管道模式发不了 ESC 键，留白待真终端手验）
 - [ ] P1：为旧 session 提供只读诊断，明确标出空子 stream；不改写原账
 
 ## 七、验收红线

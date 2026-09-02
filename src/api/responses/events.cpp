@@ -111,6 +111,13 @@ std::optional<StreamEvent> HandleOutputItemDone(const json& data) {
     }
     ContentBlockDone event;
     event.index = data.value("output_index", 0);
+    // P0-F(子代理空轨迹单):兼容端早帧(output_item.added)可能缺
+    // call_id,终帧(output_item.done 的 function_call 条目)才给全——
+    // 终帧身份按 output index 交回 assembler 合并。到收尾仍无 id 的调用
+    // 由 assembler 丢弃(不进 ToolUseBlock,不伪造 id)。
+    if (type == "function_call") {
+        event.tool_use_id = it->value("call_id", "");
+    }
     return event;
 }
 
@@ -356,7 +363,12 @@ std::vector<StreamEvent> ExpandNonStreamResponse(const std::string& body) try {
             if (!arguments.empty()) {
                 events.push_back(ToolUseInputDelta{index, arguments});
             }
-            events.push_back(ContentBlockDone{index});
+            // 终帧身份随 done 帧走(P0-F):call_id 为空时 assembler 丢弃
+            // 该调用,不伪造 id。
+            ContentBlockDone done;
+            done.index = index;
+            done.tool_use_id = item.value("call_id", "");
+            events.push_back(std::move(done));
         }
         // 别的条目类型(web_search_call 等)非流式不接线:流式路怎么翻,
         // 这路将来照着补;眼下静默跳过,收尾事件照发。
