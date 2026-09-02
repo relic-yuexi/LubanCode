@@ -224,6 +224,12 @@ struct AgentTaskSnapshot {
     // 同一规矩:预算进快照,坞行与详情看得见,超了有短因。
     int wall_limit_secs = 0;
     std::int64_t token_limit = 0;
+    // ---- 隔离房基线账(派工单 §三/§五):isolation=worktree 派工即冻结 ----
+    // 基线 = 派工瞬间的调用者 HEAD(不再解析 origin 默认分支);恢复、重试、
+    // 嵌套派工对账都认这几枚。空 isolation_branch = 无房任务。
+    std::string isolation_branch;       // worktree/agent-xxxx
+    std::string isolation_base_ref;     // 冻结时调用者所在分支;detached 记 "(detached)"
+    std::string isolation_base_commit;  // 冻结的调用者 HEAD 全哈希
     // api::Usage 统一口径(input=非缓存输入),完整输入 = 三项相加。
     std::int64_t input_tokens = 0;
     std::int64_t cache_read_tokens = 0;

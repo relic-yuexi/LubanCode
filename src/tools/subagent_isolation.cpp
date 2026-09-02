@@ -71,7 +71,21 @@ std::optional<lubancode::cli::AgentWorktree> SetupIsolationRoom(const std::strin
         error_out = {"isolation=worktree 需要在 git 仓库里给子代理建房,当前目录不是仓库: " + cwd, true};
         return std::nullopt;
     }
-    lubancode::cli::AgentWorktree room = lubancode::cli::CreateAgentWorktree(*repo_root, runner);
+    // 基线冻结(派工单 §三):派工瞬间的调用者 HEAD,先冻结再建房——本地
+    // 分支领先远端时子代理照样在调用者的代码上开工,不再解析 origin/main。
+    const lubancode::cli::FrozenWorktreeBase base = lubancode::cli::FreezeWorktreeBase(cwd_path, runner);
+    if (base.commit.empty()) {
+        error_out = {"isolation=worktree 冻结调用者 HEAD 失败(不在可用 git 仓库里?): " + cwd, true};
+        return std::nullopt;
+    }
+    // 未提交改动(派工单 §3.4):产品不接未提交改动(房从提交起树),但必须
+    // 明说,不能悄悄丢——给调用方的附言在这里攒好,随结果带回。
+    std::string dirty_note;
+    if (!lubancode::cli::WorktreeClean(cwd_path, runner)) {
+        dirty_note = "调用者工作树有未提交改动,未提交改动不在房内(如需带上,先提交或写进任务说明)。";
+    }
+    lubancode::cli::AgentWorktree room =
+        lubancode::cli::CreateAgentWorktree(*repo_root, base.commit, base.ref, runner);
     if (!room.ok) {
         error_out = {"给隔离子代理建 worktree 失败: " + room.error, true};
         // 半拉子房收拾掉,不留垃圾。
@@ -81,6 +95,7 @@ std::optional<lubancode::cli::AgentWorktree> SetupIsolationRoom(const std::strin
         }
         return std::nullopt;
     }
+    room.caller_note = "\n\n[隔离基线] base=" + room.base_ref + "@" + room.base_commit + "。" + dirty_note;
     return room;
 }
 

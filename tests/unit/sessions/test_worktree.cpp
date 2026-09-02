@@ -538,3 +538,81 @@ TEST_CASE("CleanStaleAgentWorktrees: 只清 agent- 陈房,有活/新近/用户�
     CHECK(std::filesystem::exists(fresh.room_path));        // 新近
     CHECK(std::filesystem::exists(user_room));              // 用户手起
 }
+
+// ---------------------------------------------------------------------------
+// 基线冻结(派工单 §三):CreateAgentWorktree 的基准=冻结的调用者 HEAD,
+// 不解析 origin 默认分支。四场景:本地领先远端、detached HEAD、普通分支、
+// 带未推提交——基线都不漂;actual_head 对不上冻结值时拆房报错。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+std::string TrimGitOutput(const std::string& text) {
+    std::size_t end = text.size();
+    while (end > 0 && (text[end - 1] == '\n' || text[end - 1] == '\r' || text[end - 1] == ' ')) {
+        --end;
+    }
+    return text.substr(0, end);
+}
+
+}  // namespace
+
+TEST_CASE("CreateAgentWorktree: 基线=冻结的调用者 HEAD——领先远端/detached/普通分支/未推提交都不漂") {
+    RealGitRepo repo;
+    // 摆一个"落后的远端":origin/main 钉在第一笔提交,本地再进一笔(未推)。
+    const std::string first = TrimGitOutput(RunGitAt(repo.root, {"rev-parse", "HEAD"}).output);
+    REQUIRE(RunGitAt(repo.root, {"update-ref", "refs/remotes/origin/main", first}).exit_code == 0);
+    REQUIRE(RunGitAt(repo.root, {"symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"})
+                .exit_code == 0);
+    std::ofstream(repo.root / "second.txt") << "second\n";
+    REQUIRE(RunGitAt(repo.root, {"add", "."}).exit_code == 0);
+    REQUIRE(RunGitAt(repo.root, {"commit", "-q", "-m", "second"}).exit_code == 0);
+    const std::string head = TrimGitOutput(RunGitAt(repo.root, {"rev-parse", "HEAD"}).output);
+
+    // 场景 1+4:普通分支、本地领先远端、带未推提交——房 HEAD=本地 HEAD,
+    // 不是 origin/main;新代码(second.txt)在房里读得到。
+    const cli::AgentWorktree ahead = cli::CreateAgentWorktree(repo.root);
+    REQUIRE(ahead.ok);
+    CHECK(ahead.base_commit == head);
+    CHECK(ahead.actual_head == head);
+    CHECK(ahead.base_ref == "main");
+    CHECK(ahead.actual_head != first);  // 若还按 origin/main 起树,这里就漂了
+    CHECK(std::filesystem::exists(ahead.room_path / "second.txt"));
+    REQUIRE(cli::FinishAgentWorktree(repo.root, ahead.room_path, ahead.branch).removed);
+
+    // 场景 2:detached HEAD——基线照样冻结得住,base_ref 记 "(detached)"。
+    REQUIRE(RunGitAt(repo.root, {"checkout", "-q", "--detach", head}).exit_code == 0);
+    const cli::AgentWorktree detached = cli::CreateAgentWorktree(repo.root);
+    REQUIRE(detached.ok);
+    CHECK(detached.base_commit == head);
+    CHECK(detached.actual_head == head);
+    CHECK(detached.base_ref == "(detached)");
+    REQUIRE(cli::FinishAgentWorktree(repo.root, detached.room_path, detached.branch).removed);
+    REQUIRE(RunGitAt(repo.root, {"checkout", "-q", "main"}).exit_code == 0);
+}
+
+TEST_CASE("CreateAgentWorktree: actual_head 对不上冻结基线时拆房报错,不静默开工") {
+    RealGitRepo repo;
+    const std::string head = TrimGitOutput(RunGitAt(repo.root, {"rev-parse", "HEAD"}).output);
+
+    // 假 runner:worktree add 报"成功",但房内 rev-parse HEAD 吐另一个提交
+    //——CreateAgentWorktree 必须当场拆房,把 base_ref/base_commit/actual_head
+    // 三个值全亮出来。其余 git 调用(lock/unlock/prune/branch)一律报成功,
+    // 拆房路径才走得完。
+    const cli::GitRunner lying = [](const cli::GitCommand& command) -> cli::GitCommandResult {
+        if (command.args.size() >= 2 && command.args[0] == "worktree" && command.args[1] == "add") {
+            return {0, "", ""};
+        }
+        if (!command.args.empty() && command.args[0] == "rev-parse") {
+            return {0, "0000000000000000000000000000000000000000\n", ""};
+        }
+        return {0, "", ""};
+    };
+    const cli::AgentWorktree mismatched = cli::CreateAgentWorktree(repo.root, head, "main", lying);
+    CHECK_FALSE(mismatched.ok);
+    CHECK(mismatched.error.find("基线对不上") != std::string::npos);
+    CHECK(mismatched.error.find(head) != std::string::npos);
+    CHECK(mismatched.error.find("0000000000000000000000000000000000000000") != std::string::npos);
+    // git 侧没落下任何房(worktree add 是假的,登记不存在)。
+    CHECK(cli::ListWorktrees(repo.root).size() == 1);  // 只有主 checkout 自己
+}

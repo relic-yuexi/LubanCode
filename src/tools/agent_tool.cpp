@@ -1166,6 +1166,13 @@ Tool::Result AgentTool::ExecuteForeground(const DispatchRequest& request, ToolRe
     snapshot.state = AgentTaskState::Running;
     snapshot.start_time = std::chrono::steady_clock::now();
     snapshot.delivered = true;
+    // 隔离基线进快照(派工单 §三):TaskSnapshot 持久化基线提交,恢复/重试/
+    // 嵌套派工对账都认这一枚,不再各算各的。
+    if (room.has_value()) {
+        snapshot.isolation_branch = room->branch;
+        snapshot.isolation_base_ref = room->base_ref;
+        snapshot.isolation_base_commit = room->base_commit;
+    }
     std::string admission_error;
     const std::shared_ptr<TaskRecord> task = coordinator_->ledger().TryRegisterChild(
         std::move(snapshot), caller.depth + 1, coordinator_->governance(), &admission_error);
@@ -1230,6 +1237,7 @@ Tool::Result AgentTool::ExecuteForeground(const DispatchRequest& request, ToolRe
                             custom, resolved, request.permission_floor, std::move(trajectory), env);
     if (room.has_value()) {
         result.AppendText(FinishIsolationRoom(*room, git_runner_));
+        result.AppendText(room->caller_note);
     }
     // 收尾入账:未送达的介入消息逐条列原文记进结果文本,不无声遗失;面板
     // x 停掉(task->cancel)与父轮 ESC 打断(hooks.cancel)都算取消;嵌套路
@@ -1335,6 +1343,12 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
     snapshot.token_limit = budget.max_total_tokens;
     snapshot.state = AgentTaskState::Running;
     snapshot.start_time = std::chrono::steady_clock::now();
+    // 隔离基线进快照(派工单 §三):前后台同一枚账。
+    if (room.has_value()) {
+        snapshot.isolation_branch = room->branch;
+        snapshot.isolation_base_ref = room->base_ref;
+        snapshot.isolation_base_commit = room->base_commit;
+    }
     std::string admission_error;
     const std::shared_ptr<TaskRecord> task = coordinator_->ledger().TryRegisterChild(
         std::move(snapshot), caller.depth + 1, coordinator_->governance(), &admission_error);
@@ -1433,6 +1447,9 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
     child_env->parent_in_isolation = room.has_value() || (env != nullptr && env->parent_in_isolation);
     child_env->effective_cwd = task->snapshot.effective_cwd;
     child_env->headless = true;
+    // 隔离基线附言(派工单 §三):room 马上 move 进任务线程,给启动回执的
+    // 那份先拷出来。
+    const std::string isolation_caller_note = room.has_value() ? room->caller_note : std::string();
     coordinator_->TrackThread(
         id, std::thread([this, task, registry, prompt, agent_type, budget,
                                 custom_copy = request.custom, resolved_copy = request.resolved,
@@ -1483,8 +1500,13 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
         }));
 
     // §5.3 弃用提示:手写 JSON 给了旧预算键,随启动回执带回(空 = 没用)。
+    // 隔离基线附言(派工单 §三)一并随回执亮明:后台任务的房在派工线程建
+    // 好,调用方当场该知道基线与未提交改动的边界。
     std::string acceptance = "后台子代理 #" + std::to_string(id) + " (" + agent_type +
                              ") 已启动。主会话可以继续;完成结果会在后续回合送达。";
+    if (!isolation_caller_note.empty()) {
+        acceptance += isolation_caller_note;
+    }
     if (!request.budget_deprecation_note.empty()) {
         acceptance += "\n" + request.budget_deprecation_note;
     }

@@ -22,6 +22,7 @@
 #include "runtime/worktree.hpp"
 #include "platform/process.hpp"
 #include "tools/agent_tool.hpp"
+#include "tools/read_file.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
 #include "tools/write_file.hpp"
@@ -306,4 +307,73 @@ TEST_CASE("agent isolation: 入参校验") {
     const auto failed = outside.execute(nlohmann::json{{"title", "测试任务"}, {"prompt", "x"}, {"isolation", "worktree"}});
     CHECK(failed.is_error);
     CHECK(failed.content.find("git 仓库") != std::string::npos);
+}
+
+namespace {
+
+std::string TrimGitOutput(const std::string& text) {
+    std::size_t end = text.size();
+    while (end > 0 && (text[end - 1] == '\n' || text[end - 1] == '\r' || text[end - 1] == ' ')) {
+        --end;
+    }
+    return text.substr(0, end);
+}
+
+}  // namespace
+
+TEST_CASE("agent isolation: 基线=派工瞬间的调用者 HEAD,领先远端不漂(派工单 §三)") {
+    GitRepo repo;
+    // origin/main 钉在第一笔,本地再进一笔(未推)——旧实现从 origin/main
+    // 起树会读不到 second.txt。
+    const std::string first = TrimGitOutput(repo.RunGit({"rev-parse", "HEAD"}).output);
+    REQUIRE(repo.RunGit({"update-ref", "refs/remotes/origin/main", first}).exit_code == 0);
+    REQUIRE(repo.RunGit({"symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"}).exit_code == 0);
+    std::ofstream(repo.root / "second.txt") << "second\n";
+    REQUIRE(repo.RunGit({"add", "."}).exit_code == 0);
+    REQUIRE(repo.RunGit({"commit", "-q", "-m", "second"}).exit_code == 0);
+    const std::string head = TrimGitOutput(repo.RunGit({"rev-parse", "HEAD"}).output);
+
+    // 房里的子代理真读得到新代码:脚本第一拍用 read_file 读 second.txt。
+    FakeBackend backend;
+    backend.scripts = {
+        ToolUseScript("t1", "read_file", "{\"path\":\"second.txt\"}"),
+        TextScript("结论:读到 second"),
+    };
+    tools::ToolRegistry sub_registry;
+    sub_registry.Register(std::make_unique<tools::ReadFileTool>());
+    tools::AgentTool agent_tool(backend, sub_registry, PathToUtf8(repo.root));
+    const tools::Tool::Result result = agent_tool.execute(
+        nlohmann::json{{"title", "基线验证"}, {"prompt", "读 second.txt"}, {"isolation", "worktree"}});
+
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("second") != std::string::npos);  // 新代码在房里
+    // 基线账随 TaskSnapshot 持久化:恢复/重试/嵌套对账认这一枚。
+    const auto detail = agent_tool.TaskDetail(1);
+    REQUIRE(detail.has_value());
+    CHECK(detail->isolation_base_commit == head);
+    CHECK(detail->isolation_base_ref == "main");
+    CHECK_FALSE(detail->isolation_branch.empty());
+    CHECK(detail->isolation_branch.rfind("worktree/agent-", 0) == 0);
+    // 结果文本带基线附言,调用方看得见起树基准。
+    CHECK(result.content.find("[隔离基线] base=main@" + head) != std::string::npos);
+}
+
+TEST_CASE("agent isolation: 调用者未提交改动明示,不悄悄丢(派工单 §3.4)") {
+    GitRepo repo;
+    std::ofstream(repo.root / "wip.txt") << "uncommitted\n";  // 未提交改动
+
+    FakeBackend backend;
+    backend.scripts = {TextScript("结论:只是看了看")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, PathToUtf8(repo.root));
+    const tools::Tool::Result result = agent_tool.execute(
+        nlohmann::json{{"title", "脏树派工"}, {"prompt", "看看"}, {"isolation", "worktree"}});
+
+    CHECK_FALSE(result.is_error);
+    // 明示:基线附言写清"未提交改动不在房内",不是悄悄丢。
+    CHECK(result.content.find("未提交改动") != std::string::npos);
+    CHECK(result.content.find("不在房内") != std::string::npos);
+    // 房从提交起树、子代理没动房:干净无自有提交,收工照旧自动清理——
+    // 调用者的 wip.txt 从头到尾没进过任何房。
+    CHECK(repo.AgentRooms().empty());
 }

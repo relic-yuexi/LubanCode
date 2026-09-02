@@ -955,15 +955,43 @@ bool RoomHasOwnCommits(const std::filesystem::path& repository_root, const std::
 
 }  // namespace
 
-AgentWorktree CreateAgentWorktree(const std::filesystem::path& repository_root, GitRunner runner) {
+FrozenWorktreeBase FreezeWorktreeBase(const std::filesystem::path& working_directory, GitRunner runner) {
+    if (!runner) {
+        runner = DefaultGitRunner;
+    }
+    FrozenWorktreeBase out;
+    const GitCommandResult hash = runner({working_directory, {"rev-parse", "HEAD"}});
+    if (hash.exit_code != 0) {
+        return out;
+    }
+    out.commit = Trim(hash.output);
+    const GitCommandResult ref = runner({working_directory, {"symbolic-ref", "--quiet", "--short", "HEAD"}});
+    out.ref = ref.exit_code == 0 && !Trim(ref.output).empty() ? Trim(ref.output) : "(detached)";
+    return out;
+}
+
+AgentWorktree CreateAgentWorktree(const std::filesystem::path& repository_root, const std::string& requested_base,
+                                  const std::string& requested_base_ref, GitRunner runner) {
     if (!runner) {
         runner = DefaultGitRunner;
     }
     AgentWorktree out;
+    // 基线冻结(派工单 §三):优先吃调用方传入的冻结提交;没有就冻结仓库
+    // 当前 HEAD。绝不再解析 origin 默认分支——本地领先远端时,子代理会
+    // 在旧代码上开工。
+    const FrozenWorktreeBase fallback = requested_base.empty()
+                                           ? FreezeWorktreeBase(repository_root, runner)
+                                           : FrozenWorktreeBase{};
+    const std::string base_commit = !requested_base.empty() ? requested_base : fallback.commit;
+    const std::string base_ref =
+        !requested_base.empty() ? requested_base_ref : (!fallback.ref.empty() ? fallback.ref : "(detached)");
+    if (base_commit.empty()) {
+        out.error = "拿不到基线提交(调用者 HEAD 解析失败),不建房——绝不回落 origin 默认分支";
+        return out;
+    }
     const std::string name = FreshAgentWorktreeName(repository_root);
     const std::filesystem::path room = WorktreePath(repository_root, name);
     const std::string branch = "worktree/" + name;
-    const std::string base_ref = ResolveFreshBaseRef(repository_root, runner);
 
     std::error_code ec;
     std::filesystem::create_directories(room.parent_path(), ec);
@@ -972,9 +1000,22 @@ AgentWorktree CreateAgentWorktree(const std::filesystem::path& repository_root, 
         return out;
     }
     const GitCommandResult git = runner(
-        {repository_root, {"worktree", "add", "-b", branch, PathToUtf8(room), base_ref}});
+        {repository_root, {"worktree", "add", "-b", branch, PathToUtf8(room), base_commit}});
     if (git.exit_code != 0) {
         out.error = git.error.empty() ? Trim(git.output) : git.error;
+        return out;
+    }
+    // 三者对账(派工单 §3.3):房的实际 HEAD 必须逐字等于冻结基线;对不上
+    // 当场拆房报错,把三个值全亮出来,不让子任务在错基线上静默开工。
+    const GitCommandResult head = runner({room, {"rev-parse", "HEAD"}});
+    out.actual_head = Trim(head.output);
+    if (head.exit_code != 0 || out.actual_head != base_commit) {
+        UnlockWorktree(room, runner);
+        SafeRemoveTree(room);
+        runner({repository_root, {"worktree", "prune"}});
+        runner({repository_root, {"branch", "-D", branch}});
+        out.error = "隔离房基线对不上,已拆房不静默开工: base_ref=" + base_ref + " base_commit=" + base_commit +
+                    " actual_head=" + (out.actual_head.empty() ? "(读不到)" : out.actual_head);
         return out;
     }
     CopyWorktreeInclude(repository_root, room, runner);
@@ -984,7 +1025,17 @@ AgentWorktree CreateAgentWorktree(const std::filesystem::path& repository_root, 
     out.room_path = room;
     out.name = name;
     out.branch = branch;
+    out.base_ref = base_ref;
+    out.base_commit = base_commit;
     return out;
+}
+
+AgentWorktree CreateAgentWorktree(const std::filesystem::path& repository_root, GitRunner runner) {
+    if (!runner) {
+        runner = DefaultGitRunner;
+    }
+    const FrozenWorktreeBase frozen = FreezeWorktreeBase(repository_root, runner);
+    return CreateAgentWorktree(repository_root, frozen.commit, frozen.ref, runner);
 }
 
 AgentWorktreeFinish FinishAgentWorktree(const std::filesystem::path& repository_root,
