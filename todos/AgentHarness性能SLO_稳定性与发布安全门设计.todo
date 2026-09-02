@@ -5,6 +5,7 @@
 - 级别：P0（发布阻断、恢复正确性）+ P1（性能容量与趋势）
 - 范围：启动与稳态性能、长稳、故障恢复、兼容矩阵、容量、发布 canary/rollback 及签字证据
 - 依赖：`AgentHarness评测回归与Benchmark平台设计.todo`、`Harness场景启动器_事件重放与调试工作台设计.todo`
+- 权威分工：本单独占启动、稳态、资源、长稳、故障恢复与 Release Gate；`Agent全链路度量_真实任务Harness回放与功耗评测.todo` 只管单次真实 Agent 任务的功耗与体验指标
 - 关联：`Agent全链路度量_真实任务Harness回放与功耗评测.todo`、`端云协同可观测架构与Telemetry插件设计.todo`、`跨平台ExecutionProvider与通用强化沙箱设计.todo`
 - 不在本单：模型任务质量榜、云端推理能耗猜测、拿开发机单次耗时当三平台 SLO、失败后自动重放未知副作用
 

@@ -4,7 +4,7 @@
 - 日期：2026-09-02
 - 级别：总装索引；本文件不承载重复实现细节
 - 范围：把当前 LubanCode 尚不能完整支撑的 Harness 能力分账，排清依赖、收官口径与岗位证明材料
-- 依据：当前 `main` / `0.26.172` 源码、文档与 361/361 Release CTest 实跑
+- 依据：盘点起点 `1b9a5ed6` / `0.26.172` 源码、文档与 361/361 Release CTest 实跑；落单时 HEAD 已前移到 `a26f7612` / `0.26.175`，提交前另按新 HEAD 重跑验证
 - 不在本单：改代码、复写各专题设计、把办公业务功能硬塞进通用 Harness、拿测试数量冒充 Agent 任务成功率
 
 ## 一、先下断语
@@ -30,6 +30,10 @@ LubanCode 已有 Agent Harness 主骨架。会话、Turn/Event、工具、上下
 | 场景与调试工作台 | Trajectory Replay、Harness Replay、API fixture、Workflow journal、App Server、Web Console | 场景清单、可复现实验包、事件时间线、故障注入、差分、敏感材料导出 | `Harness场景启动器_事件重放与调试工作台设计.todo` |
 | 统一评测平台 | PTC bench、Evolution eval、Training Exporter、Rollout 设计、CTest | 冻结数据集、统一 Runner/Judge、统计口径、跨 Engine 对照、回归门 | `AgentHarness评测回归与Benchmark平台设计.todo` |
 | 性能与发布门 | 三平台 CI、原生发行包、usage/telemetry、搜索 benchmark、进程收树 | 冷/热启动账、资源预算、长稳与故障 SLO、兼容矩阵、canary/rollback 证据 | `AgentHarness性能SLO_稳定性与发布安全门设计.todo` |
+| 执行治理 | Schema、权限、Hook、信任与工具终态 | 统一拦截链、熔断、重试、语义降级与恢复裁决 | `Agent执行治理_强化沙箱熔断降级与安全边界.todo` |
+| 真实任务度量 | Trajectory、Insights、PTC/Evolution 指标 | GUI、记忆、交互、体验与单任务功耗的可执行量尺 | `Agent全链路度量_真实任务Harness回放与功耗评测.todo` |
+| GUI Agent | Browser Runtime 与 Windows GUI 示例包 | 核心观察/定位/动作/验证合同和跨应用泛化评测 | `GUIAgent核心_多模态理解定位执行与泛化评测.todo` |
+| 记忆效果 | 项目/用户记忆、BM25、review/auto、resume | 使用回执、收益归因、续接快照、漂移与在线评测 | `智能体记忆效果_个性化适配续接快照与在线评测.todo` |
 | 云端多租户 | App Server、Gateway、Workspace、Channel、Trajectory | ACL、Quota、Scheduler、RuntimeLease、fencing、节点恢复 | `多用户多节点集群控制面_NodeBridge与LubanCore宿主畅想.todo` |
 | 核心宿主边界 | CMake 四层 target、`SessionRuntime`、中立事件 | 稳定 Core API、宿主反向依赖清零、独立 SDK/示例宿主 | `LubanCore与CLI分离_核心库独立成宿主底座设计.todo` |
 | 扩展宿主 | Tool/Plugin/MCP/Package/Hooks | 六平面 Extension Runtime、grant、quarantine、generation | `轻量可塑ExtensionRuntime与动态扩展API设计.todo` |
@@ -45,6 +49,12 @@ LubanCode 已有 Agent Harness 主骨架。会话、Turn/Event、工具、上下
 6. App Server 能远程承载，不等于已有云控制面。
 7. Telemetry 能导出，不等于已有告警、SLO 和事故闭环。
 8. 办公 Agent 的 Word、表格、邮件、日历、企业 ACL 属业务能力；本轮只补通用 Harness，不冒充已做办公套件。
+
+相邻单再钉三条权威分工：
+
+- `AgentHarness评测回归与Benchmark平台设计.todo` 独占 EvalSuite、Runner、Judge、Baseline 与 CI verdict；“全链路度量”只补真实任务指标与 suite 内容。
+- `AgentHarness性能SLO_稳定性与发布安全门设计.todo` 独占启动、稳态、资源、长稳与 Release Gate；“全链路度量”只记单次 Agent 任务里的功耗和体验。
+- `跨平台ExecutionProvider与通用强化沙箱设计.todo` 独占 ExecutionSpec、provider、隔离等级与三平台执法；“执行治理”只消费回执，管放行、熔断、重试、fallback 与恢复。
 
 ## 四、依赖次序
 
