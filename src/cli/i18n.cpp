@@ -530,6 +530,9 @@ const Entry kZhCN[] = {
     {"provider_wizard.auth.env.prompt", "环境变量名(回车用默认 {0})。"},
     {"provider_wizard.auth.env.note_set", "环境变量 {0} 已设置。"},
     {"provider_wizard.auth.env.note_unset", "环境变量 {0} 当前没读到值——拉模型前得先设好。"},
+    {"provider_wizard.auth.env.common_name",
+     "注意: {0} 是个通名,Claude Code、Codex、代理工具都可能往里塞别家钥匙;真撞上了启动会给警告"
+     "(变量压过 inline)。不想被环境牵着走就换个专用名,或改用明文 key。"},
     {"provider_wizard.auth.env.input", "环境变量名: "},
     {"provider_wizard.auth.inline.hint", "明文 key 落盘到 api_key,展示一律打码。"},
     {"provider_wizard.auth.inline.keep", "已设置明文密钥({0}),回车保留;重新输入即更换。"},
@@ -940,6 +943,13 @@ const Entry kZhCN[] = {
     {"config.catalog.miss", "否({0} 不在目录里,一切按现状)"},
     {"config.session_model", "  本会话实际在用的 model = {0}"},
     {"config.session_model.note", "  (只在本会话生效,尚未写入配置文件)"},
+    // 钥匙撞车单:api_key 行的来路说明(压过关系一眼可见,参数全打码)。
+    {"config.api_key.from_env", "来自环境变量 {0}({1})"},
+    {"config.api_key.env_over_inline", "来自环境变量 {0}({1}),压过配置里的 inline({2})"},
+    {"config.api_key.env_same_as_inline", "来自环境变量 {0},与配置 inline 一致"},
+    {"config.api_key.from_inline", "来自配置 inline({0})"},
+    {"config.api_key.from_inline_env_unset", "来自配置 inline({0};key_env 指的 {1} 未设)"},
+    {"config.api_key.missing", "未取到(key_env 指的 {0} 未设,inline api_key 未配)"},
     {"path.no_home", "<找不到主目录>"},
 
     // ---- 配置来源 / 常见错误(config 层) ----
@@ -965,6 +975,18 @@ const Entry kZhCN[] = {
      "{0} 写进去(字段全部可选)\n"
      "  3) 设置对应的环境变量: {1}\n"
      "配好之后用 --config 能看到当前每个字段实际读到了什么、来自哪一级。"},
+    // 钥匙撞车单:缺钥匙的报错点名 provider 的 key_env 变量名与 inline 状态。
+    {"error.api_key_missing_provider",
+     "缺少 API Key:激活的 provider {0} 配置了 key_env={1},该变量在当前环境里没设;inline api_key 也"
+     "未配置,两把钥匙都落了空。设环境变量 {1},或用 /provider set {0} auth inline 直接贴明文 key。"
+     "--config 能看到当前钥匙来路。"},
+    {"error.not_configured.key_detail",
+     "  其中 api_key:provider {0} 的 key_env 指向 {1},该变量没设,inline api_key 也未配置——设 "
+     "{1} 或 /provider set {0} auth inline 贴 key"},
+    {"warn.auth_key_conflict",
+     "[钥匙撞车] 环境变量 {0}({1})压过 provider 配置里的 inline api_key({2}),用变量那把。若 shell "
+     "里有别的工具(Claude Code、代理)注入了同名变量,unset 它或 /provider set <名字> auth inline "
+     "改走明文。"},
 
     // ---- 通用错误 ----
     {"error.prefix", "[错误] "},
@@ -2426,6 +2448,10 @@ const Entry kEn[] = {
     {"provider_wizard.auth.env.prompt", "Environment variable name (Enter for the default {0})."},
     {"provider_wizard.auth.env.note_set", "Environment variable {0} is set."},
     {"provider_wizard.auth.env.note_unset", "Environment variable {0} has no value right now - set it before fetching models."},
+    {"provider_wizard.auth.env.common_name",
+     "Note: {0} is a common name - Claude Code, Codex and proxy tools may inject a different key into "
+     "it; if they do, startup warns as the variable overrides the inline key. Pick a dedicated name, or "
+     "use a plaintext key, to stay independent of the environment."},
     {"provider_wizard.auth.env.input", "environment variable name: "},
     {"provider_wizard.auth.inline.hint", "The key is stored in plaintext in api_key and always displayed masked."},
     {"provider_wizard.auth.inline.keep", "A plaintext key is set ({0}); Enter keeps it, typing replaces it."},
@@ -2936,6 +2962,13 @@ const Entry kEn[] = {
     {"config.catalog.miss", "no ({0} is not in the catalog; behavior unchanged)"},
     {"config.session_model", "  model in use this session = {0}"},
     {"config.session_model.note", "  (session only; not written to the config file)"},
+    // key provenance for the api_key line (override relationship visible; args masked).
+    {"config.api_key.from_env", "from env var {0} ({1})"},
+    {"config.api_key.env_over_inline", "from env var {0} ({1}), overriding the inline key ({2})"},
+    {"config.api_key.env_same_as_inline", "from env var {0}, same as the inline key"},
+    {"config.api_key.from_inline", "from config inline ({0})"},
+    {"config.api_key.from_inline_env_unset", "from config inline ({0}; key_env {1} is unset)"},
+    {"config.api_key.missing", "not resolved (key_env {0} unset, no inline api_key)"},
     {"path.no_home", "<home dir not found>"},
 
     // ---- config sources / common errors ----
@@ -2963,6 +2996,18 @@ const Entry kEn[] = {
      "     and migrated) and set {0} in it (all fields optional)\n"
      "  3) set the corresponding environment variables: {1}\n"
      "Afterwards, --config shows what each field resolves to and from which tier."},
+    // key-conflict remediation: missing-key errors name the provider's key_env and inline state.
+    {"error.api_key_missing_provider",
+     "Missing API key: the active provider {0} has key_env={1}, which is not set in this environment; the "
+     "inline api_key is empty too, so both sources came up empty. Set {1}, or paste a key directly with "
+     "/provider set {0} auth inline. --config shows where the key would come from."},
+    {"error.not_configured.key_detail",
+     "  api_key: provider {0} points key_env at {1}, which is unset, and the inline api_key is empty — set "
+     "{1} or /provider set {0} auth inline"},
+    {"warn.auth_key_conflict",
+     "[key conflict] env var {0} ({1}) overrides the inline api_key ({2}) in the provider config; the env "
+     "var wins. If another tool (Claude Code, a proxy) injected this variable, unset it or switch with "
+     "/provider set <name> auth inline."},
 
     // ---- common errors ----
     {"error.prefix", "[error] "},

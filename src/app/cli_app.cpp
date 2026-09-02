@@ -783,6 +783,21 @@ int RunCli(const std::vector<std::string>& args) {
     }
     lubancode::cli::SetConfirmMode(initial_mode);
 
+    // 钥匙撞车单:active provider 的 key_env 变量与 inline api_key 两把都有
+    // 且不一致——变量赢,但得叫一声,不然 401 成了无头案(实战:Claude Code
+    // 往 ANTHROPIC_AUTH_TOKEN 塞别家钥匙,压过配置里贴好的 key)。stderr 与
+    // hook 提示同规矩:交互看得见,单发/管道不污染 stdout 重定向产物。
+    if (!config_result->config.active_provider.empty()) {
+        if (const lubancode::config::ProviderConfig* active_provider = lubancode::config::FindProvider(
+                config_result->config.providers, config_result->config.active_provider);
+            active_provider != nullptr) {
+            if (const std::optional<std::string> key_warning =
+                    lubancode::config::ProviderAuthConflictWarning(*active_provider)) {
+                std::cerr << *key_warning << "\n";
+            }
+        }
+    }
+
     // hooks 运行时装载:来源分级 + definition hash 信任审查在这里完成。
     // 未信任的项目 hook 从这一刻起就绝不起进程;提示打到 stderr(交互模式
     // 用户看得见;单发/管道模式 stderr 也不污染 stdout 的重定向产物)。

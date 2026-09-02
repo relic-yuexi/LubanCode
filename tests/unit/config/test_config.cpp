@@ -6,6 +6,7 @@
 #include <doctest/doctest.h>
 
 #include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -26,6 +27,25 @@ config::LubancodeEnvValues EmptyLubancodeEnv() {
 
 config::GenericEnvValues EmptyGenericEnv() {
     return config::GenericEnvValues{};
+}
+
+// ResolveProviderAuth 直读进程环境(钥匙撞车单的四情形测试要真设变量)。
+// Windows _putenv("NAME=") 即删除;POSIX unsetenv。测试完必须清,别漏给
+// 同进程的别的用例。
+void SetEnvForTest(const char* name, const std::string& value) {
+#ifdef _WIN32
+    _putenv((std::string(name) + "=" + value).c_str());
+#else
+    setenv(name, value.c_str(), 1);
+#endif
+}
+
+void UnsetEnvForTest(const char* name) {
+#ifdef _WIN32
+    _putenv((std::string(name) + "=").c_str());
+#else
+    unsetenv(name);
+#endif
 }
 
 }  // namespace
@@ -2820,6 +2840,9 @@ TEST_CASE("active_provider: 解析、分层并展开对应 provider") {
         .name = "sub-openai",
         .base_url = "https://api.example.test",
         .wire = config::Wire::Responses,
+        // key_env 用独一名:真环境里常有 ANTHROPIC_AUTH_TOKEN(Claude Code 注入),
+        // 撞车单的新规矩是"变量有值压过 inline",默认名会吃掉 sk-provider。
+        .key_env = "LUBANCODE_TEST_ACTIVE_PROVIDER_KEY_UNSET_XYZ",
         .api_key = "sk-provider",
         .model = "gpt-test",
         .model_reasoning_effort = "xhigh",
@@ -3161,16 +3184,16 @@ TEST_CASE("SetProviderAuthInline: auth=Inline + api_key 一次切齐,key_env 旧
     CHECK(*resolved.key == "sk-test-123");
 }
 
-TEST_CASE("SetProviderAuthEnv: auth=Env + key_env 一次切齐,api_key 旧值照留(旧优先级仍生效)") {
+TEST_CASE("SetProviderAuthEnv: auth=Env + key_env 一次切齐,api_key 旧值照留当兜底") {
     std::vector<config::ProviderConfig> providers{
         {.name = "glm", .base_url = "https://open.bigmodel.cn/api/paas/v4", .wire = config::Wire::Responses},
     };
-    providers[0].api_key = "sk-old";  // 旧的明文 key,切 env 后照留
+    providers[0].api_key = "sk-old";  // 旧的明文 key,切 env 后照留(变量未设时兜底)
 
     CHECK(config::SetProviderAuthEnv(providers, "glm", "GLM_KEY"));
     CHECK(providers[0].auth == config::ProviderAuthMode::Env);
     CHECK(providers[0].key_env == "GLM_KEY");
-    CHECK(providers[0].api_key == "sk-old");  // ResolveProviderAuth 的旧优先级(明文压 env)靠它
+    CHECK(providers[0].api_key == "sk-old");  // env 模式兜底底座(钥匙撞车单)靠它
 }
 
 TEST_CASE("SetProviderAuthNone: auth=None 并清 key_env;api_key 不动") {
@@ -3291,7 +3314,7 @@ TEST_CASE("/provider set 名字不存在:不该调 UpdateProvidersInConfigFile,�
     CHECK(cwd.ReadFile(".lubancode/config.json") == original);
 }
 
-TEST_CASE("ProviderApiKey: api_key 非空时优先于 key_env,不管环境变量有没有设置") {
+TEST_CASE("ProviderApiKey: key_env 变量未设时用 inline 兜底(撞车单新规矩)") {
     config::ProviderConfig provider;
     provider.key_env = "LUBANCODE_TEST_PROVIDER_KEY_ENV_DOES_NOT_EXIST_XYZ";
     provider.api_key = "sk-direct-pasted-key";
@@ -3412,12 +3435,107 @@ TEST_CASE("ResolveProviderAuth: 无需鉴权/已取到/该有却缺三态分清"
     resolved = config::ResolveProviderAuth(provider);
     CHECK(resolved.status == config::ProviderAuthResolution::Status::Ready);
     CHECK(*resolved.key == "sk-inline");
+    CHECK(resolved.source == config::ProviderAuthResolution::KeySource::Inline);
 
-    // 旧优先级兼容:env 模式下 api_key 非空仍优先(一行式 --key 构造的条目)。
+    // env 模式变量未设(两把里只有 inline):回落 inline,不判缺(钥匙撞车单)。
     provider.auth = config::ProviderAuthMode::Env;
     resolved = config::ResolveProviderAuth(provider);
     CHECK(resolved.status == config::ProviderAuthResolution::Status::Ready);
     CHECK(*resolved.key == "sk-inline");
+    CHECK(resolved.source == config::ProviderAuthResolution::KeySource::Inline);
+    CHECK_FALSE(resolved.conflict);
+}
+
+// 钥匙撞车单:env 模式取钥四情形钉死——仅 inline(变量未设)/仅变量(api_key
+// 空)/两把一致/两把不一致(变量赢 + conflict,警告路径)。
+TEST_CASE("ResolveProviderAuth: env 模式取钥四情形——inline 底座、变量覆盖、撞车标记") {
+    const char* env_name = "LUBANCODE_TEST_AUTH_KEY_ENV_SAMPLE";
+    config::ProviderConfig provider;
+    provider.name = "p";
+    provider.base_url = "https://p.test";
+    provider.auth = config::ProviderAuthMode::Env;
+    provider.key_env = env_name;
+
+    // 情形一:仅 inline(变量未设)——回落 inline,不判缺。
+    UnsetEnvForTest(env_name);
+    provider.api_key = "sk-inline-only";
+    auto resolved = config::ResolveProviderAuth(provider);
+    CHECK(resolved.status == config::ProviderAuthResolution::Status::Ready);
+    CHECK(*resolved.key == "sk-inline-only");
+    CHECK(resolved.source == config::ProviderAuthResolution::KeySource::Inline);
+    CHECK_FALSE(resolved.conflict);
+    CHECK_FALSE(config::ProviderAuthConflictWarning(provider).has_value());
+
+    // 情形二:仅变量(api_key 空)——用变量。
+    SetEnvForTest(env_name, "sk-env-only");
+    provider.api_key.clear();
+    resolved = config::ResolveProviderAuth(provider);
+    CHECK(resolved.status == config::ProviderAuthResolution::Status::Ready);
+    CHECK(*resolved.key == "sk-env-only");
+    CHECK(resolved.source == config::ProviderAuthResolution::KeySource::EnvVar);
+    CHECK_FALSE(resolved.conflict);
+
+    // 情形三:两把一致——用变量,无冲突。
+    SetEnvForTest(env_name, "sk-same");
+    provider.api_key = "sk-same";
+    resolved = config::ResolveProviderAuth(provider);
+    CHECK(resolved.status == config::ProviderAuthResolution::Status::Ready);
+    CHECK(*resolved.key == "sk-same");
+    CHECK(resolved.source == config::ProviderAuthResolution::KeySource::EnvVar);
+    CHECK_FALSE(resolved.conflict);
+
+    // 情形四:两把不一致——变量赢,conflict 标记,警告文案给变量名与打码前缀。
+    SetEnvForTest(env_name, "sk-env-wins");
+    provider.api_key = "sk-inline-loses";
+    resolved = config::ResolveProviderAuth(provider);
+    CHECK(resolved.status == config::ProviderAuthResolution::Status::Ready);
+    CHECK(*resolved.key == "sk-env-wins");
+    CHECK(resolved.source == config::ProviderAuthResolution::KeySource::EnvVar);
+    CHECK(resolved.conflict);
+    const auto warning = config::ProviderAuthConflictWarning(provider);
+    REQUIRE(warning.has_value());
+    CHECK(warning->find(env_name) != std::string::npos);
+    CHECK(warning->find("sk-env-") != std::string::npos);            // 变量那把的打码前缀在
+    CHECK(warning->find("sk-inline-loses") == std::string::npos);    // 完整明文绝不出现
+
+    // 空串变量按没设:回落 inline。
+    SetEnvForTest(env_name, "");
+    resolved = config::ResolveProviderAuth(provider);
+    CHECK(resolved.status == config::ProviderAuthResolution::Status::Ready);
+    CHECK(*resolved.key == "sk-inline-loses");
+    CHECK(resolved.source == config::ProviderAuthResolution::KeySource::Inline);
+
+    // 两把都无才判缺。
+    UnsetEnvForTest(env_name);
+    provider.api_key.clear();
+    resolved = config::ResolveProviderAuth(provider);
+    CHECK(resolved.status == config::ProviderAuthResolution::Status::Missing);
+}
+
+TEST_CASE("RequireApiKey / RequireConfigured: 缺钥匙时报错点名 provider 的 key_env 与 inline 状态") {
+    config::ConfigResult result;
+    result.config.base_url = "https://p.test";
+    result.config.model = "m";
+    result.config.auth_token = "";
+    result.config.auth_mode = config::ProviderAuthMode::Env;
+    result.config.active_provider = "ccmoon";
+    config::ProviderConfig provider;
+    provider.name = "ccmoon";
+    provider.base_url = "https://p.test";
+    provider.auth = config::ProviderAuthMode::Env;
+    provider.key_env = "LUBANCODE_TEST_CCMOON_KEY";
+    result.config.providers.push_back(provider);
+
+    const auto api_check = config::RequireApiKey(result);
+    REQUIRE_FALSE(api_check.has_value());
+    CHECK(api_check.error().find("LUBANCODE_TEST_CCMOON_KEY") != std::string::npos);
+    CHECK(api_check.error().find("ccmoon") != std::string::npos);
+    CHECK(api_check.error().find("inline") != std::string::npos);
+
+    const auto configured = config::RequireConfigured(result);
+    REQUIRE_FALSE(configured.has_value());
+    CHECK(configured.error().find("LUBANCODE_TEST_CCMOON_KEY") != std::string::npos);
+    CHECK(configured.error().find("inline") != std::string::npos);
 }
 
 TEST_CASE("RequireApiKey / RequireConfigured: auth_mode=none 时空 key 放行") {

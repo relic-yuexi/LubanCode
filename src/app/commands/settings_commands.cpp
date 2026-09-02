@@ -1189,11 +1189,19 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
             if (needs_connection) {
                 const lubancode::config::ProviderConfig* added =
                     lubancode::config::FindProvider(config.providers, command.name);
-                if (added != nullptr &&
-                    lubancode::config::ResolveProviderAuth(*added).status ==
-                        lubancode::config::ProviderAuthResolution::Status::Missing &&
-                    !remediate_missing_auth(command.name)) {
-                    return;
+                if (added != nullptr) {
+                    if (lubancode::config::ResolveProviderAuth(*added).status ==
+                            lubancode::config::ProviderAuthResolution::Status::Missing &&
+                        !remediate_missing_auth(command.name)) {
+                        return;
+                    }
+                    // 钥匙撞车单:一行式贴 key + 默认 key_env 并存、变量里有值——
+                    // 切过去前叫一声(变量赢,打码),别让刚贴的 key 悄悄失效。
+                    // (provider 本体已被 push_back move 走,用盘上找回来的 added。)
+                    if (const std::optional<std::string> key_warning =
+                            lubancode::config::ProviderAuthConflictWarning(*added)) {
+                        TermOut() << *key_warning << "\n";
+                    }
                 }
                 execute_switch(command.name, "");
             }
@@ -1217,11 +1225,17 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     if (picked.pick == lubancode::cli::ProviderSwitchPick::Named) {
                         const lubancode::config::ProviderConfig* chosen =
                             lubancode::config::FindProvider(config.providers, picked.name);
-                        if (chosen != nullptr &&
-                            lubancode::config::ResolveProviderAuth(*chosen).status ==
-                                lubancode::config::ProviderAuthResolution::Status::Missing &&
-                            !remediate_missing_auth(picked.name)) {
-                            return;
+                        if (chosen != nullptr) {
+                            if (lubancode::config::ResolveProviderAuth(*chosen).status ==
+                                    lubancode::config::ProviderAuthResolution::Status::Missing &&
+                                !remediate_missing_auth(picked.name)) {
+                                return;
+                            }
+                            // 钥匙撞车单:切过去前把撞车叫出来(变量赢,打码)。
+                            if (const std::optional<std::string> key_warning =
+                                    lubancode::config::ProviderAuthConflictWarning(*chosen)) {
+                                TermOut() << *key_warning << "\n";
+                            }
                         }
                         execute_switch(picked.name, "");
                     } else if (picked.pick == lubancode::cli::ProviderSwitchPick::AddNew) {
@@ -1249,6 +1263,11 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     }
                     return;
                 }
+            }
+            // 钥匙撞车单:切过去之前两把钥匙并存且不一致就叫一声(变量赢,打码)。
+            if (const std::optional<std::string> key_warning =
+                    lubancode::config::ProviderAuthConflictWarning(*provider)) {
+                TermOut() << *key_warning << "\n";
             }
             execute_switch(command.name, command.model);
             return;
@@ -1291,6 +1310,11 @@ void HandleProviderCommand(const std::string& args, lubancode::config::Config& c
                     if (!remediate_missing_auth(picked.name)) {
                         continue;  // 返回列表:选择与筛选词都还原
                     }
+                }
+                // 钥匙撞车单:同 Switch 分支,切过去前把撞车叫出来(变量赢,打码)。
+                if (const std::optional<std::string> key_warning =
+                        lubancode::config::ProviderAuthConflictWarning(*provider)) {
+                    TermOut() << *key_warning << "\n";
                 }
                 execute_switch(picked.name, "");
                 return;
@@ -1685,11 +1709,52 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     TermOut() << "  wire               = " << wire_str << "  [" << lubancode::config::ToString(sources.wire) << "]\n";
     TermOut() << "  base_url           = " << (config.base_url.empty() ? tr("config.not_set") : config.base_url)
               << "  [" << lubancode::config::ToString(sources.base_url) << "]\n";
+    // api_key 行(钥匙撞车单):方括号说钥匙来路——变量名/inline/压过关系,
+    // 前缀打码,与实际发送的钥匙对得上账。只在激活 provider 条目的解析结果
+    // 确实是当前 auth_token 时才换(被 LUBANCODE_API_KEY 等压过、或没有
+    // 条目的纯顶层写法,照旧标来源层级,别张冠李戴)。
+    std::string api_key_bracket = lubancode::config::ToString(sources.auth_token);
+    if (const lubancode::config::ProviderConfig* active = lubancode::config::FindProvider(
+            config.providers, config.active_provider);
+        active != nullptr) {
+        const lubancode::config::ProviderAuthResolution auth = lubancode::config::ResolveProviderAuth(*active);
+        const bool matches_token =
+            (auth.status == lubancode::config::ProviderAuthResolution::Status::Ready &&
+             auth.key.has_value() && *auth.key == config.auth_token) ||
+            (auth.status == lubancode::config::ProviderAuthResolution::Status::Missing &&
+             config.auth_token.empty());
+        if (matches_token) {
+            using lubancode::config::ProviderAuthResolution;
+            if (auth.status == ProviderAuthResolution::Status::Missing) {
+                api_key_bracket = trf("config.api_key.missing", active->key_env);
+            } else if (auth.source == ProviderAuthResolution::KeySource::EnvVar) {
+                if (auth.conflict) {
+                    api_key_bracket = trf("config.api_key.env_over_inline", active->key_env,
+                                          lubancode::config::MaskApiKey(*auth.key),
+                                          lubancode::config::MaskApiKey(active->api_key));
+                } else if (!active->api_key.empty()) {
+                    api_key_bracket = trf("config.api_key.env_same_as_inline", active->key_env);
+                } else {
+                    api_key_bracket =
+                        trf("config.api_key.from_env", active->key_env, lubancode::config::MaskApiKey(*auth.key));
+                }
+            } else if (auth.source == ProviderAuthResolution::KeySource::Inline) {
+                if (active->auth == lubancode::config::ProviderAuthMode::Env) {
+                    // env 模式回落:inline 兜底,点名变量未设,别让人以为变量在生效。
+                    api_key_bracket = trf("config.api_key.from_inline_env_unset",
+                                          lubancode::config::MaskApiKey(*auth.key), active->key_env);
+                } else {
+                    api_key_bracket =
+                        trf("config.api_key.from_inline", lubancode::config::MaskApiKey(*auth.key));
+                }
+            }
+        }
+    }
     TermOut() << "  api_key            = "
               << (config.auth_mode == lubancode::config::ProviderAuthMode::None
                       ? tr("cmd.provider.auth_none")
                       : lubancode::config::MaskApiKey(config.auth_token))
-              << "  [" << lubancode::config::ToString(sources.auth_token) << "]\n";
+              << "  [" << api_key_bracket << "]\n";
     TermOut() << "  model              = " << (config.model.empty() ? tr("config.not_set") : config.model) << "  ["
               << lubancode::config::ToString(sources.model) << "]\n";
     TermOut() << "  active_provider    = "
