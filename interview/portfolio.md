@@ -327,7 +327,7 @@ Skill 是提示与资源，不在进程内执行。MCP/LSP 是子进程。Lua �
 **源码证据**
 
 - [`src/agent/compact.cpp`](../src/agent/compact.cpp)
-- [`src/sessions/session_store.cpp`](../src/sessions/session_store.cpp)
+- [`src/trajectory/directory.cpp`](../src/trajectory/directory.cpp)
 - [`src/memory/project_memory.cpp`](../src/memory/project_memory.cpp)
 - [`docs/architecture/memory/design.md`](../docs/architecture/memory/design.md)
 
@@ -591,7 +591,7 @@ ctest --test-dir build/release -C Release --output-on-failure
 | 工具条目 | [`src/cli/transcript.cpp`](../src/cli/transcript.cpp) | [`tests/unit/cli/test_transcript.cpp`](../tests/unit/cli/test_transcript.cpp) |
 | Markdown 与 LaTeX | [`src/cli/markdown.cpp`](../src/cli/markdown.cpp) | [`src/cli/latex_math.cpp`](../src/cli/latex_math.cpp) |
 | 进程抽象 | [`src/platform/process.hpp`](../src/platform/process.hpp) | Win/POSIX 两份实现 |
-| 会话恢复 | [`src/sessions/session_store.cpp`](../src/sessions/session_store.cpp) | [`tests/unit/sessions/test_session_store.cpp`](../tests/unit/sessions/test_session_store.cpp) |
+| 会话恢复 | [`src/trajectory/directory.cpp`](../src/trajectory/directory.cpp) | [`tests/unit/workspace/test_legacy_storage_gate.cpp`](../tests/unit/workspace/test_legacy_storage_gate.cpp) |
 | 项目记忆 | [`src/memory/project_memory.cpp`](../src/memory/project_memory.cpp) | [`docs/architecture/memory/design.md`](../docs/architecture/memory/design.md) |
 | 插件 | [`include/luban_plugin.h`](../include/luban_plugin.h) | [`src/tools/plugin_loader.cpp`](../src/tools/plugin_loader.cpp) |
 | 构建测试 | [`CMakeLists.txt`](../CMakeLists.txt) | [`tests/CMakeLists.txt`](../tests/CMakeLists.txt) |

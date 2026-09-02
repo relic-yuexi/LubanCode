@@ -105,3 +105,10 @@ ROUTE development/build-and-release.md
 ROUTE getting-started/troubleshooting.md
 ROUTE development/testing.md
 ROUTE reference/feature-index.md
+DOC architecture/gateway/README.md
+DOC architecture/gateway/contracts.md
+DOC architecture/gateway/audit-write-map.md
+DOC development/workspace-storage-v2/P0-0-contracts.md
+DOC development/workspace-storage-v2/P0-0-inventory.md
+DOC features/telemetry/collector.md
+DOC getting-started/storage-migration.md

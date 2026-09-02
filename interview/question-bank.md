@@ -257,7 +257,7 @@ history。只有用户按 ESC，主循环才强制收起 partial assistant，添
 
 证据：[`loop.cpp`](../src/agent/loop.cpp)、
 [`reliability.md`](../docs/architecture/agent-loop/reliability.md)、
-[`session_store.cpp`](../src/sessions/session_store.cpp)。
+[`session_utils.cpp`](../src/tools/session_utils.cpp)。
 
 ### 4. 单二进制最终多大？启动多快？
 
@@ -521,7 +521,7 @@ receipt，再替源队列补 ack。次序不能倒。先写源 ack，后写目�
 
 证据：[`queue_model.hpp`](../src/cli/queue_model.hpp)、
 [`interactive_session.cpp`](../src/app/interactive_session.cpp)、
-[`session_store.cpp`](../src/sessions/session_store.cpp)、
+[`session_utils.cpp`](../src/tools/session_utils.cpp)、
 [`test_queue_model.cpp`](../tests/unit/agent/test_queue_model.cpp)。
 
 ### 2. Lua / DLL 插件怎样搬到进程外？文件权限怎样传？

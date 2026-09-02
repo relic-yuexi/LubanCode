@@ -734,4 +734,4 @@ system + history + tools -> assistant -> tool result -> assistant
 | Anthropic 请求与回包 | [`src/api/anthropic/client.cpp`](../../src/api/anthropic/client.cpp)、[`events.cpp`](../../src/api/anthropic/events.cpp) |
 | Gemini 请求与回包 | [`src/api/gemini/request.cpp`](../../src/api/gemini/request.cpp)、[`events.cpp`](../../src/api/gemini/events.cpp) |
 | 子代理与 Explore | [`src/tools/agent_tool.cpp`](../../src/tools/agent_tool.cpp) |
-| JSONL 会话 | [`src/sessions/session_store.cpp`](../../src/sessions/session_store.cpp) |
+| JSONL 会话 | [`src/trajectory/directory.cpp`](../../src/trajectory/directory.cpp) |
