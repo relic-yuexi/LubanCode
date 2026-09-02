@@ -6,8 +6,9 @@
 //   help_rows(场景按键帮助层,`?` 展开;空 = 没开,垫最顶)
 //   activity_rows(Working 活动条)
 //   queue_rows(待发队列,composer 上横线之上)
-//   上横线 / top_padding 留白 / composer_rows 行输入 / bottom_padding 补空 / 下横线
-//   status_rows 行状态栏
+//   shortcut_rows(空 composer 的常用键速览)
+//   status_rows 行状态栏 / 上横线 / top_padding 留白 / composer_rows 行输入 /
+//   bottom_padding 补空 / 下横线
 //   agent_dock_rows(导航坞,贴底)
 //   transient_rows(slash 提示等短命 UI,垫最底)
 //
@@ -32,6 +33,7 @@ struct BottomChromeFrame {
     std::vector<std::string> help_rows;       // 场景帮助层(0.32.x ? 开合;空 = 没开)
     std::vector<std::string> activity_rows;   // Working 活动条(空闲空)
     std::vector<std::string> queue_rows;      // 待发队列(空队列零行)
+    std::vector<std::string> shortcut_rows;   // 常用键速览(空 composer 才有)
     std::vector<std::string> agent_dock_rows; // 导航坞(无子代理零行)
     std::vector<std::string> transient_rows;  // slash 提示等(常态零行)
     // Composer 摘要:草稿全文 + 光标 + 档位 + 占位提示拼成的一串,给指纹
@@ -44,16 +46,18 @@ struct BottomChromeFrame {
     int selected_task_id = 0;  // 导航当前选中(0=main,-1=汇总哨兵)
     std::uint64_t revision = 0;  // 帧身份:内容变必变
 
-    // 整帧行数(帮助+活动条+队列+横线+输入+状态+坞+提示)。
+    // 整帧行数(帮助+活动条+队列+快捷键+横线+输入+状态+坞+提示)。
     int TotalRows() const {
         return static_cast<int>(help_rows.size()) + static_cast<int>(activity_rows.size()) +
-               static_cast<int>(queue_rows.size()) + composer_rows + rule_rows + status_rows +
+               static_cast<int>(queue_rows.size()) + static_cast<int>(shortcut_rows.size()) +
+               composer_rows + rule_rows + status_rows +
                static_cast<int>(agent_dock_rows.size()) + static_cast<int>(transient_rows.size());
     }
-    // 坞首行相对帧顶的偏移:帮助/队列之后、框与状态栏之下。
+    // 坞首行相对帧顶的偏移:帮助/队列/快捷键之后、框与状态栏之下。
     int AgentDockFirstRow() const {
         return static_cast<int>(help_rows.size()) + static_cast<int>(activity_rows.size()) +
-               static_cast<int>(queue_rows.size()) + composer_rows + rule_rows + status_rows;
+               static_cast<int>(queue_rows.size()) + static_cast<int>(shortcut_rows.size()) +
+               composer_rows + rule_rows + status_rows;
     }
 };
 
@@ -93,6 +97,7 @@ struct BottomChromeModel {
     std::vector<std::string> help_rows;        // 场景帮助层(空 = 没开,垫帧最顶)
     std::vector<std::string> activity_rows;    // Working 活动条(空闲空)
     std::vector<std::string> queue_rows;       // 待发队列(空队列零行)
+    std::vector<std::string> shortcut_rows;    // 常用键速览,排在 status/skills 上一行
     ComposerViewModel composer;
     std::vector<std::string> status_rows;      // 状态栏(调用方拼好的整行)
     std::vector<std::string> agent_dock_rows;  // 导航坞(无子代理零行)
@@ -129,7 +134,7 @@ bool HelpOverlayNext(bool visible, HelpOverlayEvent event);
 // painted_row_widths 是每行"纯文本显示宽"(剥掉 ANSI 后按显示宽算),
 // footer 的 resize 旧帧追踪(ComputeFooterResizeRecovery)靠它反推 reflow。
 // dropped_optional_rows:高度预算钳制(见 BuildBottomChromeLayout 的
-// height_budget)舍掉了多少行可选内容(活动条/队列/坞/提示)。输入区本体
+// height_budget)舍掉了多少行可选内容(活动条/队列/快捷键/坞/提示)。输入区本体
 // 不在可舍之列,不算进这个数。
 struct BottomChromeLayout {
     InlineFrame frame;         // 逐行内容(x/清宽/文本)与帧内光标
@@ -150,7 +155,7 @@ struct BottomChromeLayout {
 //
 // height_budget(终端画面隔网单·战术二,0 = 不限):整帧最多占的行数
 // (调用方传可视窗口高)。"输入行必画得下"在这里立成硬约束——超预算时
-// 按 transient(提示)→ dock(坞)→ queue(队列)→ activity(活动条)
+// 按 transient(提示)→ dock(坞)→ shortcut(快捷键)→ queue(队列)→ activity(活动条)
 // 的次序舍可选行;可选行全舍了还不够(多行输入比窗还高),再把 composer
 // 的物理行围光标开窗,横线/状态行跟着让位。与 LayoutAgentDock 的矮屏
 // 预算、ClampAnsiRowToWidth 的窄窗截断同族,都是"布局层兜底,不让画面

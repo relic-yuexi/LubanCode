@@ -632,7 +632,14 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         model.queue_rows = queue_rows;
         model.agent_dock_rows = dock;
         model.agent_dock_tints = dock_tints;  // build_dock 刚写的那份,按位对齐
-        model.transient_rows = state.hint_lines;
+        const bool composer_empty = state.lines.empty() ||
+                                    (state.lines.size() == 1 && state.lines[0].empty());
+        const bool shortcut_hint = composer_empty && state.hint_lines.size() == 1;
+        if (shortcut_hint) {
+            model.shortcut_rows = state.hint_lines;
+        } else {
+            model.transient_rows = state.hint_lines;
+        }
         model.rule_tag = tag;
         model.selected_task_id = selected_task_id;
         model.composer.editor = state;

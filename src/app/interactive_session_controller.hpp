@@ -100,8 +100,8 @@ namespace lubancode::app {
 //     + steering 三只):本体在 runtime::SessionRuntime 与 cli 队列层;
 //   - 标题编排一组(BeginSessionTitle/StartTitleRefinement/
 //     BackfillTitleOnResume/StartPendingTitleRefinementAfterTurn/
-//     DrainFinishedTitleRefinement/HasFinishedTitleRefinement/
-//     FlushDeferredTitleNotice):判定在 SessionTitleAccount,这里只管
+//     DrainFinishedTitleRefinement/HasFinishedTitleRefinement):判定在
+//     SessionTitleAccount,这里只管
 //     打印/发精炼/同步 peer 名册;
 //   - CollectPromptHistory/BuildTerminalTitleText:Ctrl+R 数据源与终端
 //     标题模板;
@@ -172,19 +172,13 @@ private:
     // 主 turn 收口后的发货点(只在会话空闲边界调):挂账的首问现在起飞
     // 精修——回合里发必与主 turn 撞同一 stream 的 turn 账。
     void StartPendingTitleRefinementAfterTurn();
-    // 收货点:完工的精修结果记 usage、对代采纳、同步 peer 名册、打通知。
-    // notice_now=false 时只静默落账改名,通知文压进 deferred_title_notice_
-    // ——用户刚提交正文的当口,标题行不许插成"第二问的下一行",等
-    // FlushDeferredTitleNotice 在下一枚提示符前见人。
-    void DrainFinishedTitleRefinement(bool notice_now);
+    // 收货点:完工的精修结果记 usage、对代采纳、同步 peer 名册。自动标题
+    // 只属会话元数据,不往对话正文插异步通知行。
+    void DrainFinishedTitleRefinement();
     // 只读:有完工的精修结果待收(空闲唤醒的 ready 条件,主线程拍里问)。
     bool HasFinishedTitleRefinement();
-    // 压后的标题通知:打在下一枚提示符重画前,打完清账。
-    void FlushDeferredTitleNotice();
     // P0-2:待发的标题精修首问(回合内不与主 turn 抢流,收口后补发)。
     std::string pending_title_refinement_query_;
-    // 提交竞态压后的标题通知(提交那刻不打裸行,攒到下一枚提示符前)。
-    std::string deferred_title_notice_;
     void OpenArtifactStore();
     // 外来消息轮:peer 来信是 user 语义(另一会话的用户正文);后台完成
     // 唤醒是宿主合成控制消息,传 BackgroundCompletion——检索整轮跳过,

@@ -127,6 +127,21 @@ TEST_CASE("同源布局:golden——两逻辑行 + 中英混排,行序/padding/c
     CHECK(layout.chrome.TotalRows() == 5);
 }
 
+TEST_CASE("同源布局:快捷键提示独占 skills 上一行,临时候选仍留框下") {
+    const Theme plain;
+    BottomChromeModel model = FramedModel(ComposerState({U""}, 0, 0), ComposerMode::Idle);
+    model.shortcut_rows = {"? for shortcuts"};
+    model.status_rows = {"confirm                                      4 skills"};
+    model.transient_rows = {"/help  show help"};
+    const BottomChromeLayout layout = BuildBottomChromeLayout(model, plain, 60);
+    REQUIRE(layout.frame.rows.size() == 6);
+    CHECK(layout.frame.rows[0].text == "? for shortcuts");
+    CHECK(layout.frame.rows[1].text.find("4 skills") != std::string::npos);
+    CHECK(layout.frame.rows[2].text == PlainRule(60));
+    CHECK(layout.composer_first_row == 3);
+    CHECK(layout.frame.rows[5].text == "/help  show help");
+}
+
 TEST_CASE("同源布局:Idle 与 Busy 同拍——物理行/padding/cursor 必须相同") {
     const Theme plain;
     // 两边各造同一份 RenderState:Idle 不带占位提示,Busy 带(两边数据差异

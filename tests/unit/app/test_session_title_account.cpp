@@ -97,6 +97,19 @@ TEST_CASE("首问本地起名:一场一次,已有标题不起,全空白留空") 
     CHECK(fx5.title.empty());
 }
 
+TEST_CASE("首问本地起名:路径只取文件主题,不把盘符和提交尾巴当标题") {
+    TitleFixture fx;
+    CHECK(fx.account->BeginLocalTitle(
+              "D:\\lubancode\\todos\\终端思考活动条重画与输入框光标跳动.todo commit一下这个吧") ==
+          LocalResult::Set);
+    CHECK(fx.title == "终端思考活动条重画与输入框光标跳动");
+
+    TitleFixture quoted;
+    CHECK(quoted.account->BeginLocalTitle("\"D:\\work dir\\修复登录超时.todo\" 请提交") ==
+          LocalResult::Set);
+    CHECK(quoted.title == "修复登录超时");
+}
+
 TEST_CASE("resume 补名:翻代弃旧精炼,已有标题不重复") {
     TitleFixture fx;
     // 在飞精炼带着旧代数;resume 善后翻代后落地 -> Ignored(人工优先)。

@@ -26,6 +26,10 @@ std::string BottomChromeFingerprint(const BottomChromeFrame& frame) {
     for (const auto& row : frame.queue_rows) {
         value += row + "\n";
     }
+    value += "k:";
+    for (const auto& row : frame.shortcut_rows) {
+        value += row + "\n";
+    }
     value += "c:" + std::to_string(frame.composer_rows) + "\n";
     value += "e:" + frame.composer_digest + "\n";
     value += "d:";
@@ -184,8 +188,8 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             : 0;
 
     // ---- 高度预算钳制(终端画面隔网单·战术二):"输入行必画得下"的硬约束 ----
-    // 可选行(帮助/活动条/队列/坞/提示)按 transient -> dock -> queue ->
-    // activity -> help 的次序舍(即保的优先级相反:帮助层是用户刚显式要
+    // 可选行(帮助/活动条/队列/快捷键/坞/提示)按 transient -> dock ->
+    // shortcut -> queue -> activity -> help 的次序舍(即保的优先级相反:帮助层是用户刚显式要
     // 的,最保、最后舍;舍时保头——表头写着怎么收,丢了头用户就找不到门,
     // 装不下全表即面板内截断);可选行全舍了还装不下,composer 的物理行围
     // 光标开窗——窗口尾部贴光标,保底一行,留白跟着免掉。0 = 不限(单测
@@ -193,6 +197,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     std::size_t help_count = model.help_rows.size();
     std::size_t activity_count = model.activity_rows.size();
     std::size_t queue_count = model.queue_rows.size();
+    std::size_t shortcut_count = model.shortcut_rows.size();
     std::size_t dock_count = model.agent_dock_rows.size();
     std::size_t transient_count = model.transient_rows.size();
     std::size_t window_first = 0;                          // composer 行窗(默认全量)
@@ -218,6 +223,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             help_count = take(model.help_rows.size());
             activity_count = take(model.activity_rows.size());
             queue_count = take(model.queue_rows.size());
+            shortcut_count = take(model.shortcut_rows.size());
             dock_count = take(model.agent_dock_rows.size());
             transient_count = take(model.transient_rows.size());
         } else {
@@ -227,6 +233,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             help_count = 0;
             activity_count = 0;
             queue_count = 0;
+            shortcut_count = 0;
             dock_count = 0;
             transient_count = 0;
             int keep = height_budget - rules_rows - status_rows_n;
@@ -255,6 +262,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             static_cast<int>(model.help_rows.size() - help_count +
                              model.activity_rows.size() - activity_count +
                              model.queue_rows.size() - queue_count +
+                             model.shortcut_rows.size() - shortcut_count +
                              model.agent_dock_rows.size() - dock_count +
                              model.transient_rows.size() - transient_count);
     }
@@ -300,8 +308,13 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     for (std::size_t i = 0; i < queue_count; ++i) {
         push(false, tinted(model.queue_rows[i]));
     }
-    // 模式行常驻输入框正上方；thinking/activity 在它上面。状态行自带配色，
-    // 窄屏由组行层先保右端信息，再由这里作最后一道 ANSI 安全截断。
+    // 常用键速览只在空 composer 出现,紧挨 skills 上方。slash/搜索/提及
+    // 仍走 transient_rows 留在输入框下,两类提示不混位。
+    for (std::size_t i = 0; i < shortcut_count; ++i) {
+        push(false, tinted(model.shortcut_rows[i]));
+    }
+    // 模式行常驻输入框正上方,快捷键速览紧贴其上。thinking/activity 再在
+    // 上面。状态行自带配色,窄屏由组行层先保右端信息,这里再作 ANSI 截断。
     if (draw_status) {
         for (const std::string& row : model.status_rows) {
             push(draw_rules, ClampAnsiRowToWidth(row, width));
@@ -375,6 +388,8 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     chrome.help_rows.assign(model.help_rows.begin(), model.help_rows.begin() + help_count);
     chrome.activity_rows.assign(model.activity_rows.begin(), model.activity_rows.begin() + activity_count);
     chrome.queue_rows.assign(model.queue_rows.begin(), model.queue_rows.begin() + queue_count);
+    chrome.shortcut_rows.assign(model.shortcut_rows.begin(),
+                                model.shortcut_rows.begin() + shortcut_count);
     chrome.agent_dock_rows.assign(model.agent_dock_rows.begin(),
                                   model.agent_dock_rows.begin() + dock_count);
     chrome.transient_rows.assign(model.transient_rows.begin(),

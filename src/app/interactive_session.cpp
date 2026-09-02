@@ -348,11 +348,9 @@ bool TerminalSessionController::HasFinishedTitleRefinement() {
 }
 
 // 收货点(实测问题 7):完工的精修结果记 cheap 账、对代采纳、同步 peer
-// 名册、打"标题已设为"。非阻塞——没完工直接回,没有任何一步在等标题。
-// notice_now=false:用户刚提交正文的当口,只静默落账与改名,通知文压后
-// 到下一枚提示符前(FlushDeferredTitleNotice)——标题行是首问的旁路
-// 结果,不许横插成"第二问的下一行"。
-void TerminalSessionController::DrainFinishedTitleRefinement(bool notice_now) {
+// 名册。自动标题只属会话元数据,不往正文区插一行迟到通知。非阻塞——
+// 没完工直接回,没有任何一步在等标题。
+void TerminalSessionController::DrainFinishedTitleRefinement() {
     std::optional<lubancode::app::SessionTitleRefiner::Outcome> outcome =
         titles_.refiner().TakeFinished();
     if (!outcome.has_value()) {
@@ -375,25 +373,6 @@ void TerminalSessionController::DrainFinishedTitleRefinement(bool notice_now) {
     }
     // 跨会话名册同步改名(与人工 /title 同一条路)——采纳即改,不等通知。
     peer_wiring_.SetName(session_title);
-    const std::string notice =
-        trf("router.task_flash", trf("cmd.title.set", session_title), "cheap:" + outcome->model);
-    if (notice_now) {
-        std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
-        TermOut() << theme.stats << notice << theme.reset << "\n";
-        return;
-    }
-    deferred_title_notice_ = notice;  // 压后:下一枚提示符重画前再打
-}
-
-// 压后的标题通知落地:打在下一枚提示符重画前(ReadLine 调用点紧邻的
-// 上一步),打完清账——只打一次,不追不补。
-void TerminalSessionController::FlushDeferredTitleNotice() {
-    if (deferred_title_notice_.empty()) {
-        return;
-    }
-    std::lock_guard<std::mutex> stdout_lock(lubancode::cli::StdoutWriteMutex());
-    TermOut() << theme.stats << deferred_title_notice_ << theme.reset << "\n";
-    deferred_title_notice_.clear();
 }
 
 // 开仓:<sessions_dir>/<session-id>/context(与 <session-id>.jsonl 并排,
@@ -1034,10 +1013,10 @@ void TerminalSessionController::Run() {
 
         // 两层标题编排(实测问题 7):这里是主 turn 收口后的空闲边界——
         // 挂账的精修首问现在起飞(P0-2:回合里发与主 turn 撞同一 stream 的
-        // turn 账);已完工的结果当场收(记 cheap 账、对代采纳、打通知)。
+        // turn 账);已完工的结果当场收(记 cheap 账、对代采纳、改名)。
         // 非阻塞一眼——没落地就等空闲唤醒把主循环叫回来再收。
         StartPendingTitleRefinementAfterTurn();
-        DrainFinishedTitleRefinement(/*notice_now=*/true);
+        DrainFinishedTitleRefinement();
 
         // 后台命令完成通知:每圈开头取一次"新进入终态"的任务,折成
         // SessionNotice 走通知口(骨架拆解反弹·问题 2:原先直接 TermOut,
@@ -1198,9 +1177,6 @@ void TerminalSessionController::Run() {
 
         std::string content;
         std::optional<int> composer_target;  // 这条话若出自查看态 composer,收件人是那只子代理
-        // 压后的标题通知落地(通知时序缺陷单):上一圈提交竞态里静默落账
-        // 的改名,在下一枚提示符重画前见人——不压在用户刚提交的正文下面。
-        FlushDeferredTitleNotice();
         // UI-A:主提示符是唯一开 composer 的读取点——Alt/Shift+Enter 插
         // 换行、Enter 全发、全空白不发送。别的 ReadLine 调用点(确认提示、
         // /model 编号选择、向导)保持单行语义。查看态里提交的话,收件
@@ -1209,12 +1185,9 @@ void TerminalSessionController::Run() {
             lubancode::cli::ReadLine(theme.prompt + "> " + theme.reset, theme,
                                       /*esc_rejects=*/false, /*composer=*/true);
         // 两层标题的第二个收货点(实测问题 7):ReadLine 等键期间精修可能
-        // 已完工——空闲唤醒以空串让位回来的,当场收货打通知(下一枚提示
-        // 符重画前见人);用户自己敲了下一行回来的,只静默落账改名,通知
-        // 压到下一枚提示符前——标题行绝不插成"第二问的下一行"。exit/EOF
+        // 已完工——空闲唤醒以空串让位回来,当场静默落账改名。exit/EOF
         // 也先走这一步,迟到的标题不因退出被整笔丢掉(usage 也照记)。
-        const bool user_submitted = line.has_value() && !line->empty();
-        DrainFinishedTitleRefinement(/*notice_now=*/!user_submitted);
+        DrainFinishedTitleRefinement();
         if (!line.has_value()) {
             if (lubancode::cli::ComposerStashHasContent()) {
                 TermOut() << theme.stats << tr("stash.still_there") << theme.reset << "\n";

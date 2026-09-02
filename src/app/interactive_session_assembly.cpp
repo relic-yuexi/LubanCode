@@ -1531,9 +1531,7 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
             }
             // 两层标题(实测问题 7):翻场翻代,上一场在飞的精炼落地即弃;
             // 新场子的下一问重走本地起名 + 精炼(判定本体在 titles_)。
-            // 压后的标题通知一并弃掉——旧场子的改名不能打进新场子的提示符。
             titles_.ResetForNewSession();
-            deferred_title_notice_.clear();
         },
         [this](const std::string& title) {
             peer_wiring_.SetName(title);
@@ -1554,10 +1552,8 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
             OpenArtifactStore();
             // 持久目标单:goal 事件账随档恢复(默认 paused-on-resume)。
             goal_wiring_.RestoreFromArchive();
-            // 两层标题(实测问题 7):换场善后——翻代、取消在飞的精炼;
-            // 压后的通知也随旧场子作废。
+            // 两层标题(实测问题 7):换场善后——翻代、取消在飞的精炼。
             BackfillTitleOnResume();
-            deferred_title_notice_.clear();
         }};
     return state;
 }

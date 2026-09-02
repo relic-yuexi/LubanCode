@@ -353,8 +353,10 @@ TEST_CASE("标题精炼:只喂首问,600 字节刀口不留下半个汉字") {
     REQUIRE(backend.captured.messages[0].content.size() == 1);
     const auto& sent = std::get<lubancode::api::TextBlock>(backend.captured.messages[0].content[0]).text;
     CHECK(lubancode::platform::IsValidUtf8(sent));
-    // 只喂首问截段,不带对话转写的尾巴。
-    CHECK(sent == "用户: " + std::string(599, 'a'));
+    // 原请求仍只取 UTF-8 安全的首问截段;前面附一枚本地主题线索,不带
+    // 助手回复或工具转写的尾巴。
+    CHECK(sent == "本地主题线索: " + std::string(48, 'a') +
+                      "\n原请求: " + std::string(599, 'a'));
     // 单子预算:输出上限收紧到 24,reasoning 没配档位时压到最低档 low。
     REQUIRE(backend.captured.max_tokens.has_value());
     CHECK(*backend.captured.max_tokens == lubancode::app::kTitleRefineMaxTokens);

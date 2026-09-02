@@ -22,6 +22,39 @@ bool EndsWithBytes(const std::string& s, std::string_view suffix) {
            s.compare(s.size() - suffix.size(), suffix.size(), suffix) == 0;
 }
 
+std::string LeadingPathStem(const std::string& line) {
+    const std::size_t begin = line.find_first_not_of(" \t\r");
+    if (begin == std::string::npos) return {};
+
+    std::size_t path_begin = begin;
+    char quote = '\0';
+    if (line[path_begin] == '"' || line[path_begin] == '\'') quote = line[path_begin++];
+    const bool windows_path = path_begin + 2 < line.size() &&
+                              ((line[path_begin] >= 'A' && line[path_begin] <= 'Z') ||
+                               (line[path_begin] >= 'a' && line[path_begin] <= 'z')) &&
+                              line[path_begin + 1] == ':' &&
+                              (line[path_begin + 2] == '\\' || line[path_begin + 2] == '/');
+    const bool rooted_path = path_begin < line.size() &&
+                             (line[path_begin] == '\\' || line[path_begin] == '/');
+    if (!windows_path && !rooted_path) return {};
+
+    std::size_t path_end = path_begin;
+    while (path_end < line.size()) {
+        const char c = line[path_end];
+        if ((quote != '\0' && c == quote) ||
+            (quote == '\0' && (c == ' ' || c == '\t' || c == '\r'))) {
+            break;
+        }
+        ++path_end;
+    }
+    const std::string path = line.substr(path_begin, path_end - path_begin);
+    const std::size_t slash = path.find_last_of("\\/");
+    std::string name = slash == std::string::npos ? path : path.substr(slash + 1);
+    const std::size_t dot = name.find_last_of('.');
+    if (dot != std::string::npos && dot > 0) name.resize(dot);
+    return name;
+}
+
 }  // namespace
 
 std::string SanitizeTitle(const std::string& raw, std::size_t max_chars) {
@@ -110,8 +143,10 @@ std::string LocalSessionTitle(const std::string& first_query, std::size_t max_ch
     const std::string first_line = newline == std::string::npos
                                        ? first_query
                                        : first_query.substr(0, newline);
-    // 清洗与限长全走 SanitizeTitle(同一把刀,单测钉同一处)。
-    return SanitizeTitle(first_line, max_chars);
+    // 首问若以路径开头,题眼在文件名,不在盘符与层层目录。后面的
+    // "commit 一下"之类只是处置动作,也不该挤掉真正主题。
+    const std::string path_stem = LeadingPathStem(first_line);
+    return SanitizeTitle(path_stem.empty() ? first_line : path_stem, max_chars);
 }
 
 std::expected<std::string, std::string> RefineSessionTitle(lubancode::api::Backend& backend,
@@ -138,11 +173,14 @@ std::expected<std::string, std::string> RefineSessionTitle(lubancode::api::Backe
     // 不为十几个 token 烧思考。
     sample.reasoning_effort = reasoning_effort.empty() ? std::string("low") : reasoning_effort;
     sample.system = "给下面这条用户请求起一个会话标题。要求:中文不超过 16 个字(英文不超过 8 个词),"
-                    "说清请求在做什么(比如\"修登录超时\"\"调研向量库选型\");"
+                    "写任务的实际主题,不要写处置动作。若请求含文件路径,优先从文件名判断主题;"
+                    "忽略提交、commit、继续、帮我处理、看看图片这类尾随指令。"
+                    "例如应写\"修终端光标跳动\",不要写\"提交终端修复待办\";"
                     "直接输出标题本身,不要引号、不要标点结尾、不要解释。";
     lubancode::api::Message message;
     message.role = lubancode::api::Role::User;
-    message.content.push_back(lubancode::api::TextBlock{"用户: " + query_excerpt});
+    message.content.push_back(lubancode::api::TextBlock{
+        "本地主题线索: " + LocalSessionTitle(first_query, 48) + "\n原请求: " + query_excerpt});
     sample.messages.push_back(std::move(message));
     sample.max_tokens = kTitleRefineMaxTokens;
 

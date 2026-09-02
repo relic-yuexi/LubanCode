@@ -222,18 +222,12 @@ std::string BuildFooterWorkingLine(const StreamFooterState& f, int width) {
     const std::vector<std::string> glyphs = FooterUtf8Glyphs(label);
     const std::string timer = " (" + std::to_string(f.working_seconds) + "s)";
     const std::string cancel = tr("spinner.cancel_hint");
-    const std::string shortcut = tr("input.shortcuts_hint");
     const std::string suffix = " " + cancel + timer;
     const std::string prefix = "• ";
     const int prefix_width = static_cast<int>(DisplayWidthUtf8(prefix));
     const int suffix_width = static_cast<int>(DisplayWidthUtf8(suffix));
-    const int shortcut_width = static_cast<int>(DisplayWidthUtf8(shortcut));
     const int content_limit = (std::max)(0, width - 1);
-    if (shortcut_width >= content_limit) {
-        return f.theme.stats + TruncateUtf8ToDisplayWidth(shortcut, content_limit) + f.reset;
-    }
-    const int left_limit = (std::max)(0, content_limit - shortcut_width - 1);
-    const int label_room = (std::max)(0, left_limit - prefix_width - suffix_width);
+    const int label_room = (std::max)(0, content_limit - prefix_width - suffix_width);
 
     // 圆点按 turn 级态上色:Stopping 用 error 色(用户看得见"真置了"),
     // 常态用 spinner 色;字符本体不变。
@@ -252,17 +246,9 @@ std::string BuildFooterWorkingLine(const StreamFooterState& f, int width) {
         line += f.theme.stats + glyphs[i];
         used += glyph_width;
     }
-    int left_used = prefix_width + used;
-    if (left_used + suffix_width <= left_limit) {
+    const int left_used = prefix_width + used;
+    if (left_used + suffix_width <= content_limit) {
         line += f.theme.stats + suffix;
-        left_used += suffix_width;
-    }
-    const int shortcut_room = content_limit - left_used;
-    if (shortcut_room > 0) {
-        const std::string kept = TruncateUtf8ToDisplayWidth(shortcut, shortcut_room);
-        const int kept_width = static_cast<int>(DisplayWidthUtf8(kept));
-        line += std::string(static_cast<std::size_t>((std::max)(1, content_limit - left_used - kept_width)), ' ');
-        line += f.theme.stats + kept;
     }
     line += f.reset;
     return line;
@@ -711,7 +697,16 @@ void RedrawStreamFooterLocked() {
     model.queue_rows = queue_rows_text;
     model.agent_dock_rows = dock_rows_text;
     model.agent_dock_tints = dock_rows_tints;  // 监督色(P1-1):与行按位对齐
-    model.transient_rows = f.composer.hint_lines;
+    const bool composer_empty = f.composer.lines.empty() ||
+                                (f.composer.lines.size() == 1 && f.composer.lines[0].empty());
+    const bool shortcut_hint = composer_empty && f.composer.hint_lines.size() == 1;
+    if (shortcut_hint) {
+        model.shortcut_rows = f.composer.hint_lines;
+    } else if (composer_empty && f.working) {
+        model.shortcut_rows = {tr("input.shortcuts_hint")};
+    } else {
+        model.transient_rows = f.composer.hint_lines;
+    }
     model.rule_tag = footer_rule_tag;
     model.selected_task_id = dock_selected_task_id;
     model.composer.editor = f.composer;
