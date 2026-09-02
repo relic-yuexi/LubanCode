@@ -1,0 +1,60 @@
+# 子代理工具事件落账断档：schema 必填表与子账组装不同步
+
+- 状态：待实现（2026-09-02 主人在实战日志里发现 340 处落账失败，令查实立单）
+- 日期：2026-09-02
+- 级别：P1（可观测性——子代理干了什么，审计上看不见；轨迹承诺的"工具栅栏/子代理子账进账"名存实亡）
+- 范围：`src/trajectory/` 的事件 schema 必填表（kPayloadFields 一带）、子代理工具事件的组装路径（ToolTraceHub 子账 / recordSubagentStream / 子代理 loop 的 turn 桥）、OneShot 与交互两路的子代理事件
+- 依赖：OneShot 轨迹断档单（已销，主会话事件链已通）
+- 关联：《Usage落账cache列断档_openai线cached_tokens没接.todo》（同属"账要记全"一族）
+- 不在本单：子代理隔离房基线落后 origin/main 的疑点（归派工隔离单追加，另行核）
+
+## 一、现场（2026-09-02 实战第三场实录）
+
+`env_generic_retire_run.log` 中 **340 处**落账失败，形态一律：
+
+```text
+[trajectory] tool.execution.planned   落账失败: schema.missing_field
+[trajectory] tool.input.effective     落账失败: schema.missing_field
+[trajectory] tool.execution.started   落账失败: schema.missing_field
+[trajectory] tool.terminal            落账失败: schema.missing_field
+```
+
+三条铁律对照，坐实病位在子代理这条腿：
+
+1. **失败全部发生在子代理上下文**（日志行紧跟"[子代理·工具]"之后）——同一进程里主会话的工具事件一枚不漏；
+2. **二场实战轨迹**（主会话、无子代理）同款事件 `tool.execution.planned 348 / input.effective 348 / started 348 / finished 347 / result.committed 348` 全部落账成功——主路径组装是好的；
+3. **第四场实战**（未派子代理）零落账失败。
+
+即：主路径的事件组装带齐了 schema 必填字段，**子代理子账的组装路径少拼了字段**，被必填表整批拒收。这是 16 红同款病的变种——`schema.cpp` 的 kPayloadFields 按事件类型定必填表，收紧后子代理写入方没跟上。
+
+## 二、影响
+
+- 子代理读了什么、跑了什么命令、改了什么——轨迹里一概没有。one_shot 大规模派子代理的场子（实战第三场起是常态打法），"子代理干了什么"这层审计整层缺失。
+- OneShot 单 P0 承诺的"工具栅栏/子代理子账从此进账"只在主会话成立，子账名存实亡。
+- `trajectory verify` 对此**不报错**——事件根本没进账，验证无从发现缺件。静默断档。
+
+## 三、待查与修法
+
+1. **定位缺的字段**：diff 主路径与子代理路径对这四种事件的 payload 组装（缺的多半是 session_id / turn_id / run_id / 工具调用 id 一类合同字段）；`schema.missing_field` 的报错里带上缺的字段名（现在只报 missing_field 不报名字——排障要猜）。
+2. **对齐组装**：子代理子账四种事件补齐必填字段，与主路径同一份组装函数最好（一处拼、两路用，别再养两份）。
+3. **roundtrip 测试**：one_shot 派一只子代理跑几枚工具，断言轨迹里子代理的 planned/input.effective/started/terminal/result 全落、schema 验证过——现有测试只盖主会话事件，这是漏网根因。
+4. **verify 补门**：任务快照声明"派过 N 只子代理"而轨迹里子代理工具事件为零时，verify 报警（静默缺件要能被抓）。
+5. **落账失败的可见性**：`[trajectory] ... 落账失败` 目前只打日志——启动时若已见落账失败，`/doctor` 或会话收尾给一行汇总（"本会话 N 枚事件落账失败，审计不完整"），别让人翻日志才知道账漏了。
+
+## 四、验收
+
+- 重跑一场带子代理的 one_shot（子代理至少跑 5 枚工具）：轨迹里子代理五种工具事件全落，零落账失败；`trajectory verify` 过。
+- 交互会话派子代理同样验一路（两路同源）。
+- 主会话事件零回归（二场 348 枚基线对照）。
+- schema.missing_field 报错带字段名。
+
+## 五、实施批次
+
+### P0：对齐与可见
+- [ ] 缺字段定位与子账组装对齐（一处拼、两路用）
+- [ ] missing_field 报错带字段名
+- [ ] roundtrip 测试（one_shot 子代理 + 交互子代理）
+
+### P1：守门
+- [ ] verify 对"派过子代理但零子账事件"报警
+- [ ] /doctor 或收尾汇总落账失败数（中英）
