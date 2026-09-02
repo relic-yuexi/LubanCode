@@ -428,7 +428,16 @@ TEST_CASE("ripgrep runner: 前置全过后真起进程,假件起不来报 spawn 
     // spawn 失败——没有 NotWired 这一站,也没有本地内核可退。
     const TempDir dir;
     FakeProbe probe;
-    BundledRipgrepRunner runner(MakeFakeRg(dir, "rg_ok.exe", "x"), probe.AsProbe());
+    // 假件内容得让 execve 真失败:Windows 上非 PE 头 CreateProcess 就拒;
+    // POSIX 上 execvp 对带执行位的非 ELF 文本会回落 /bin/sh 当脚本跑
+    // (内容 "x" 真跑成一场 shell,退出码 127 的 RunFailed)——shebang 指
+    // 向不存在的解释器才给 ENOENT,不触发 sh 回落,spawn 如实失败。
+#ifdef _WIN32
+    const std::filesystem::path exe = MakeFakeRg(dir, "rg_ok.exe", "MZ fake rg, not a real PE");
+#else
+    const std::filesystem::path exe = MakeFakeRg(dir, "rg_ok.exe", "#!/no/such/interpreter\n");
+#endif
+    BundledRipgrepRunner runner(exe, probe.AsProbe());
     const auto result = runner.Run(GrepRequest("x", dir.Path()), SearchPolicy{}, ToolExecutionContext{});
     REQUIRE_FALSE(result.has_value());
     const bool spawn_failed = result.error().code == SearchBackendError::SpawnFailed;

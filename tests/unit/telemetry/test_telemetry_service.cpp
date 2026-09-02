@@ -439,8 +439,12 @@ TEST_CASE("IO 坏:spool 写不进 → degraded 停收,Agent 侧 Notify 照常") 
     fixture.CompleteTurn("turn-0001");
     fixture.CloseRun();
 
+    // 注意 root 不能与 fixture 的 session_dir 同路径:JournalFixture 用
+    // "lubancode-tel-svc-iodegraded" 当 session 目录,下面的 remove_all(root)
+    // 在 POSIX 上会把刚落好的 Journal 一并删掉(Windows 上靠 recorder 攥着
+    // 句柄删不动才侥幸活着)——投影没了源,degraded 永远等不来。
     const std::filesystem::path root = std::filesystem::temp_directory_path() /
-                                       "lubancode-tel-svc-iodegraded";
+                                       "lubancode-tel-svc-iodegraded-root";
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
     std::filesystem::create_directories(root / "spool", ec);
@@ -469,8 +473,11 @@ TEST_CASE("projection_key 归属:重启沿用;projector 版本换代 → generat
     fixture.CompleteTurn("turn-0001");
     fixture.CloseRun();
 
+    // 与 fixture 的 session_dir("lubancode-tel-svc-generation")分开:
+    // 同路径时 remove_all(root) 会把 Journal 删掉(POSIX 上真删得动),
+    // sealed batches 永远等不来。
     const std::filesystem::path root = std::filesystem::temp_directory_path() /
-                                       "lubancode-tel-svc-generation";
+                                       "lubancode-tel-svc-generation-root";
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
     std::string first_key;
