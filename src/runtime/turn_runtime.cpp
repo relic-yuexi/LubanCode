@@ -65,9 +65,13 @@ PermissionVerdict EvaluatePermission(const PermissionContext& context, const run
     const bool hook_allow_skip =
         pre.decision == runtime::ToolHookDecision::Decision::Allow && !deny_hit;
     const bool hook_ask = pre.decision == runtime::ToolHookDecision::Decision::Ask;
+    const bool explicit_command_allow =
+        context.mode == PermissionMode::DontAsk && name == "run_command" &&
+        perm == config::CommandPermission::Allow && !deny_hit;
     const bool auto_pass = !deny_hit &&
                            (context.auto_confirm || context.mode == PermissionMode::Yolo ||
                             (context.mode == PermissionMode::Auto && (file_tool || safe_command)) ||
+                            explicit_command_allow ||
                             (context.always_allowed != nullptr && context.always_allowed->count(name) != 0) ||
                             hook_allow_skip);
     if (auto_pass && !hook_ask) {
@@ -75,8 +79,14 @@ PermissionVerdict EvaluatePermission(const PermissionContext& context, const run
         verdict.deny_hit = false;
         return verdict;
     }
-    verdict.action = PermissionVerdict::Action::Ask;
     verdict.deny_hit = deny_hit;
+    if (context.mode == PermissionMode::DontAsk) {
+        verdict.action = PermissionVerdict::Action::Deny;
+        verdict.reason = deny_hit ? PermissionVerdict::Reason::CommandDenied
+                                  : PermissionVerdict::Reason::NoPrompt;
+        return verdict;
+    }
+    verdict.action = PermissionVerdict::Action::Ask;
     return verdict;
 }
 

@@ -228,6 +228,7 @@ tools::Tool::Result PtcTool::execute(const nlohmann::json& input) {
     // "ptc-N",见 executor 里 call.id)。
     agent::TurnWiring chain;
     chain.on_tool_confirm = hooks.on_tool_confirm;
+    chain.on_permission_evaluate = hooks.on_permission_evaluate;
     chain.on_pre_tool_use_hook = hooks.on_pre_tool_use_hook;
     chain.on_permission_request = hooks.on_permission_request;
     chain.on_tool_phase = hooks.on_tool_phase;

@@ -238,6 +238,34 @@ TEST_CASE("确认门旧语义保住:无门明拒、gate 拒 permission_denied、
         CHECK(result.error_code == "permission_denied");
         CHECK(tool->calls == 0);
     }
+    SUBCASE("DontAsk 由 Runtime 拒绝:确认口不调用,旧稳定码保留,工具零执行") {
+        lubancode::tools::ToolRegistry registry;
+        auto* tool = new FakeTool("dangerous", "x", true);
+        registry.Register(std::unique_ptr<lubancode::tools::Tool>(tool));
+        int confirm_calls = 0;
+        ToolExecutor::Options options;
+        options.registry = &registry;
+        options.callbacks.on_permission_evaluate = [](const std::string&, const std::string&,
+                                                       const nlohmann::json&,
+                                                       const lubancode::runtime::ToolHookDecision&) {
+            lubancode::runtime::PermissionVerdict verdict;
+            verdict.action = lubancode::runtime::PermissionVerdict::Action::Deny;
+            verdict.reason = lubancode::runtime::PermissionVerdict::Reason::NoPrompt;
+            return verdict;
+        };
+        options.callbacks.on_tool_confirm = [&](const std::string&, const std::string&,
+                                                const nlohmann::json&) {
+            ++confirm_calls;
+            return true;
+        };
+        ToolExecutor executor(std::move(options));
+        const auto result = executor.Execute(MakeRequest(def, nlohmann::json::object()));
+        CHECK_FALSE(result.ok);
+        CHECK(result.error_code == "permission_denied");
+        CHECK(result.error_message.find("用户拒绝") == std::string::npos);
+        CHECK(confirm_calls == 0);
+        CHECK(tool->calls == 0);
+    }
 }
 
 TEST_CASE("Plan 闸同路:ModePolicy 拒下工具不执行,细码透传") {

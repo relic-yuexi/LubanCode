@@ -1109,6 +1109,18 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         //   - 读线程 HandleInteractionResponse 把答复 resolve 进 promise;
         //   - turn/interrupt 置旗 + CancelPending,future 按 cancel 醒;
         //   - 超时(选项给了时限)按"没人可答"悬空收口,不冒充用户拒绝。
+        wiring.on_permission_evaluate =
+            [this, record](const std::string&, const std::string& name, const nlohmann::json& input,
+                           const runtime::ToolHookDecision& pre) {
+                runtime::PermissionContext context;
+                context.mode = options_.permission_mode;
+                std::set<std::string> session_allowed;
+                if (record->interactions->IsSessionAllowed(name)) {
+                    session_allowed.insert(name);
+                }
+                context.always_allowed = &session_allowed;
+                return runtime::EvaluatePermission(context, pre, name, input);
+            };
         wiring.on_tool_confirm_async =
             [this, record, turn_id](const runtime::ApprovalRequest& request)
             -> std::shared_ptr<runtime::InteractionFuture> {

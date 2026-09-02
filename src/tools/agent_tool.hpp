@@ -140,6 +140,10 @@ public:
         // on_tool_confirm——三档确认模式(yolo/auto/confirm)在父级那份
         // 回调里已经处理好了,这里不用重复实现。
         std::function<bool(const std::string& tool_use_id, const std::string& name, const nlohmann::json& input)> on_tool_confirm;
+        std::function<runtime::PermissionVerdict(const std::string& tool_use_id, const std::string& name,
+                                                 const nlohmann::json& input,
+                                                 const runtime::ToolHookDecision& pre)>
+            on_permission_evaluate;
 
         // 子代理发起了一次工具调用(还没执行),给上层打一行提示用。跟
         // on_tool_confirm 分开是因为这个纯粹用于展示,没有返回值、不影响

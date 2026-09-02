@@ -39,6 +39,7 @@ void PlanSessionWiring::SwitchMode(lubancode::runtime::CollaborationMode mode, c
     switch (lubancode::cli::CurrentConfirmMode()) {
         case lubancode::cli::ConfirmMode::Auto: permission_now = "auto"; break;
         case lubancode::cli::ConfirmMode::Yolo: permission_now = "yolo"; break;
+        case lubancode::cli::ConfirmMode::DontAsk: permission_now = "dont_ask"; break;
         case lubancode::cli::ConfirmMode::Confirm: permission_now = "confirm"; break;
     }
     host_.session_runtime->SetCollaborationMode(mode, reason, permission_now);

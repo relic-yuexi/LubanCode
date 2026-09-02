@@ -2425,6 +2425,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             }
         };
         if (foreground_hooks != nullptr) {
+            turn_wiring.on_permission_evaluate = foreground_hooks->on_permission_evaluate;
             // 权限收窄执法(阶段 4):子定义档比父会话档严时,确认回调换成
             // 宿主的"带下限"口——yolo/auto 的免问在里头被 min(会话档,
             // 下限) 并掉,该问就真把确认拉回(单子"执行"账:自定义 Agent
@@ -2453,6 +2454,27 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             // 台账——主会话空闲拍里取走,toast + transcript 事件同拍落地。
             const std::shared_ptr<lubancode::hooks::DetachedHookSession> hooks_session =
                 background_hooks != nullptr && !background_hooks->Empty() ? background_hooks : nullptr;
+            turn_wiring.on_permission_evaluate =
+                [this, task, background_permissions](const std::string&, const std::string& name,
+                                                     const nlohmann::json& input,
+                                                     const lubancode::runtime::ToolHookDecision& pre) {
+                    lubancode::runtime::PermissionContext context;
+                    context.mode = lubancode::runtime::PermissionMode::DontAsk;
+                    if (background_permissions != nullptr) {
+                        context.always_allowed = &background_permissions->always_allowed;
+                        context.allow_commands = &background_permissions->allow_commands;
+                        context.deny_commands = &background_permissions->deny_commands;
+                    }
+                    const auto verdict = lubancode::runtime::EvaluatePermission(context, pre, name, input);
+                    if (verdict.action == lubancode::runtime::PermissionVerdict::Action::Deny) {
+                        const int task_id = task != nullptr ? task->snapshot.id : 0;
+                        ledger().PushPermissionDenialNotice(
+                            "后台 #" + std::to_string(task_id) + " 请求 " + name +
+                            (verdict.deny_hit ? " 命中 deny 命令前缀,已拒" : " 未预放行,已拒") +
+                            "——/permissions 预放行或让其前台重试");
+                    }
+                    return verdict;
+                };
             turn_wiring.on_tool_confirm = [this, task, hooks_session, background_permissions,
                                            &last_denial_hook_reason, &last_denial_by_deny_prefix](
                                               const std::string& /*tool_use_id*/, const std::string& name,

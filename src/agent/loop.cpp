@@ -577,6 +577,32 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
     }
 
     if (tool->needs_confirm()) {
+        runtime::PermissionVerdict permission;
+        if (wiring.on_permission_evaluate) {
+            permission = wiring.on_permission_evaluate(call.id, call.name, effective_input, pre);
+        }
+        if (permission.action == runtime::PermissionVerdict::Action::Deny) {
+            phase(runtime::ToolPhase::Blocked);
+            const bool command_denied = permission.reason == runtime::PermissionVerdict::Reason::CommandDenied;
+            const std::string denial =
+                command_denied
+                    ? (call.name + " 命中 deny_commands，已被权限策略直接拒绝，本次未执行。")
+                    : ("当前为“不询问”档；" + call.name +
+                       " 需要授权，本次未执行。请切回可询问档，或先在权限配置中明确放行。");
+            tools::Tool::Result declined{denial, true};
+            declined.outcome = ToString(ToolOutcome::PermissionDeclined);
+            declined.error_code = kErrPermissionNoPromptDenied;
+            declined.details["gate"] = "permission";
+            declined.details["reason"] = command_denied ? "deny_commands" : "no_prompt_denied";
+            declined.details["mode"] = "dont_ask";
+            declined.details["tool"] = call.name;
+            declined.details["deny_hit"] = permission.deny_hit;
+            finish(declined, source_kind, source_instance, effect_class);
+            return dispatch_done(call.id, call.name, std::move(declined));
+        }
+        if (permission.action == runtime::PermissionVerdict::Action::Allow) {
+            // 显式预授权或档位自动放行，绝不进入 PermissionRequest/前端确认。
+        } else {
         phase(runtime::ToolPhase::WaitingPermission);
         // P2(显示系统剥离单):异步审批通道优先——发 runtime::ApprovalRequest 拿
         // future,原地 Wait。终端前端的 future 实现是"当场问完再给结果"
@@ -629,6 +655,7 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
             declined.error_code = kErrPermissionDeclined;
             finish(declined, source_kind, source_instance, effect_class);
             return dispatch_done(call.id, call.name, std::move(declined));
+        }
         }
     }
 

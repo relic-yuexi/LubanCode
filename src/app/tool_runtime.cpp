@@ -579,6 +579,9 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
                 case lubancode::cli::ConfirmMode::Yolo:
                     env.parent_permission = lubancode::agent::AgentPermissionMode::Yolo;
                     break;
+                case lubancode::cli::ConfirmMode::DontAsk:
+                    env.parent_permission = lubancode::agent::AgentPermissionMode::Confirm;
+                    break;
                 case lubancode::cli::ConfirmMode::Confirm:
                 default:
                     env.parent_permission = lubancode::agent::AgentPermissionMode::Confirm;

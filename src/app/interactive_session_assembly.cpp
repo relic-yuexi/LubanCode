@@ -307,6 +307,30 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
     //(yolo/auto/预放行不问),真要问时 diff 预览 + 三档菜单 + "总是允许"
     // 落回会话账(always_allowed_tools 按引用进 ConfirmToolUse)都在里头。
     lubancode::agent::TurnWiring wiring;
+    wiring.on_permission_evaluate = [this](const std::string&, const std::string& name,
+                                           const nlohmann::json& input,
+                                           const lubancode::runtime::ToolHookDecision& pre) {
+        lubancode::runtime::PermissionContext context;
+        context.auto_confirm = auto_confirm;
+        switch (lubancode::cli::CurrentConfirmMode()) {
+            case lubancode::cli::ConfirmMode::Confirm:
+                context.mode = lubancode::runtime::PermissionMode::Confirm;
+                break;
+            case lubancode::cli::ConfirmMode::Auto:
+                context.mode = lubancode::runtime::PermissionMode::Auto;
+                break;
+            case lubancode::cli::ConfirmMode::Yolo:
+                context.mode = lubancode::runtime::PermissionMode::Yolo;
+                break;
+            case lubancode::cli::ConfirmMode::DontAsk:
+                context.mode = lubancode::runtime::PermissionMode::DontAsk;
+                break;
+        }
+        context.always_allowed = &always_allowed_tools;
+        context.allow_commands = &settings_local.allow_commands;
+        context.deny_commands = &settings_local.deny_commands;
+        return lubancode::runtime::EvaluatePermission(context, pre, name, input);
+    };
     wiring.on_tool_confirm = [this](const std::string& tool_use_id, const std::string& name,
                                     const nlohmann::json& input) -> bool {
         // 每次现起一只 ToolDisplay:workflow 的工具不在会话条目账上,

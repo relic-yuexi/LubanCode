@@ -90,7 +90,7 @@ struct KeyEvent {
 //                     安全分类(tools/command_safety),安全命令放行、
 //                     危险仍问;MCP/插件等外挂工具仍问
 //   Yolo           —— 全自动(等价 --yes)
-enum class ConfirmMode { Confirm, Auto, Yolo };
+enum class ConfirmMode { Confirm, Auto, Yolo, DontAsk };
 
 // 滚动切到下一档:Confirm -> Auto -> Yolo -> Confirm。单独导出成纯函数,
 // 方便不经过 LineEditorCore 也能测这一条轮转规则。

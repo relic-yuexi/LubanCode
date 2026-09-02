@@ -165,6 +165,9 @@ lubancode::runtime::TurnRuntime::Options BuildTurnRuntimeOptions(
         case lubancode::cli::ConfirmMode::Yolo:
             options.permission_mode = lubancode::runtime::PermissionMode::Yolo;
             break;
+        case lubancode::cli::ConfirmMode::DontAsk:
+            options.permission_mode = lubancode::runtime::PermissionMode::DontAsk;
+            break;
     }
     options.always_allowed = &always_allowed_tools;
     options.allow_commands = allow_commands;
@@ -344,6 +347,25 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
         };
     }
 
+    wiring.on_permission_evaluate =
+        [auto_confirm, &always_allowed_tools, &allow_commands, &deny_commands, hook_dispatcher, &display](
+            const std::string& tool_use_id, const std::string& name, const nlohmann::json& input,
+            const lubancode::runtime::ToolHookDecision& pre) {
+            const auto options = BuildTurnRuntimeOptions(auto_confirm, always_allowed_tools, allow_commands,
+                                                         deny_commands, hook_dispatcher);
+            lubancode::runtime::PermissionContext permission;
+            permission.auto_confirm = options.auto_confirm;
+            permission.mode = options.permission_mode;
+            permission.always_allowed = options.always_allowed;
+            permission.allow_commands = &options.allow_commands;
+            permission.deny_commands = &options.deny_commands;
+            const auto verdict = lubancode::runtime::EvaluatePermission(permission, pre, name, input);
+            if (verdict.action == lubancode::runtime::PermissionVerdict::Action::Allow) {
+                lubancode::cli::ShowAutomaticToolDiff(display, tool_use_id, name, input);
+            }
+            return verdict;
+        };
+
     wiring.on_tool_confirm = [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands,
                               &deny_commands, hook_dispatcher, pre_decision_slot,
                               has_permission_hooks, approval_observer](const std::string& tool_use_id,
@@ -414,6 +436,7 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
         // "没人可问"的同步短路正是要保住的路径)。主轮回合有 async 就走
         // async,子代理转发保持同步,两不串。
         hooks.on_tool_confirm = wiring.on_tool_confirm;
+        hooks.on_permission_evaluate = wiring.on_permission_evaluate;
         // 权限收窄执法(自定义 Agent 单·阶段 4):同一颗确认脑袋,多带一枚
         // 档位下限——自定义 Agent 定义比会话档严时(父 yolo 子 confirm),
         // 子代理 needs_confirm 的工具真把确认拉回(ConfirmToolUse 里把会话
@@ -551,6 +574,7 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
         lubancode::ptc::PtcTool::Hooks hooks;
         // P2:同 agent 工具,转发走旧同步回调(PTC 脚本线程不吃 async future)。
         hooks.on_tool_confirm = wiring.on_tool_confirm;
+        hooks.on_permission_evaluate = wiring.on_permission_evaluate;
         hooks.on_pre_tool_use_hook = wiring.on_pre_tool_use_hook;
         hooks.on_permission_request = wiring.on_permission_request;
         hooks.on_tool_phase = wiring.on_tool_phase;

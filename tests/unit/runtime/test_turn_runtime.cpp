@@ -89,6 +89,128 @@ nlohmann::json RunCommandInput(const std::string& command) {
 // 1) 权限裁定
 // ---------------------------------------------------------------------------
 
+TEST_CASE("权限:DontAsk 只放显式预授权，其余由 Runtime 直接拒绝") {
+    const runtime::ToolHookDecision no_hook;
+    const std::vector<std::string> allow{"git status"};
+    const std::vector<std::string> deny{"git push"};
+    std::set<std::string> always{"write_file"};
+    rt::PermissionContext context = MakeContext(rt::PermissionMode::DontAsk);
+    context.always_allowed = &always;
+    context.allow_commands = &allow;
+    context.deny_commands = &deny;
+
+    CHECK(rt::EvaluatePermission(context, no_hook, "write_file", nlohmann::json::object()).action ==
+          rt::PermissionVerdict::Action::Allow);
+    CHECK(rt::EvaluatePermission(context, no_hook, "run_command", RunCommandInput("git status --short")).action ==
+          rt::PermissionVerdict::Action::Allow);
+
+    runtime::ToolHookDecision hook_allow;
+    hook_allow.decision = runtime::ToolHookDecision::Decision::Allow;
+    CHECK(rt::EvaluatePermission(context, hook_allow, "external_tool", nlohmann::json::object()).action ==
+          rt::PermissionVerdict::Action::Allow);
+
+    const auto denied =
+        rt::EvaluatePermission(context, no_hook, "run_command", RunCommandInput("git push origin main"));
+    CHECK(denied.action == rt::PermissionVerdict::Action::Deny);
+    CHECK(denied.reason == rt::PermissionVerdict::Reason::CommandDenied);
+    CHECK(denied.deny_hit);
+
+    const auto no_prompt =
+        rt::EvaluatePermission(context, no_hook, "external_tool", nlohmann::json::object());
+    CHECK(no_prompt.action == rt::PermissionVerdict::Action::Deny);
+    CHECK(no_prompt.reason == rt::PermissionVerdict::Reason::NoPrompt);
+
+    runtime::ToolHookDecision hook_ask;
+    hook_ask.decision = runtime::ToolHookDecision::Decision::Ask;
+    CHECK(rt::EvaluatePermission(context, hook_ask, "write_file", nlohmann::json::object()).action ==
+          rt::PermissionVerdict::Action::Deny);
+}
+
+TEST_CASE("权限:DontAsk 拒绝时零确认回调、零工具执行并返回稳定结构化原因") {
+    tools::ToolRegistry registry;
+    auto tool = std::make_unique<FakeTool>("dangerous_tool", true);
+    FakeTool* tool_ptr = tool.get();
+    registry.Register(std::move(tool));
+
+    int evaluator_calls = 0;
+    int async_confirm_calls = 0;
+    int sync_confirm_calls = 0;
+    int permission_request_calls = 0;
+    agent::TurnWiring wiring;
+    wiring.on_permission_evaluate = [&](const std::string&, const std::string& name,
+                                        const nlohmann::json& input,
+                                        const runtime::ToolHookDecision& pre) {
+        ++evaluator_calls;
+        return rt::EvaluatePermission(MakeContext(rt::PermissionMode::DontAsk), pre, name, input);
+    };
+    wiring.on_tool_confirm_async = [&](const runtime::ApprovalRequest&) {
+        ++async_confirm_calls;
+        return std::shared_ptr<runtime::InteractionFuture>();
+    };
+    wiring.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) {
+        ++sync_confirm_calls;
+        return true;
+    };
+    wiring.on_permission_request = [&](const std::string&, const std::string&, const nlohmann::json&) {
+        ++permission_request_calls;
+        return runtime::ToolHookDecision{};
+    };
+
+    api::ToolUseBlock call;
+    call.id = "toolu_dont_ask";
+    call.name = "dangerous_tool";
+    call.input = nlohmann::json::object();
+    const auto result = agent::RunOneTool(registry, call, wiring, nullptr);
+
+    CHECK(result.is_error);
+    CHECK(result.error_code == agent::kErrPermissionNoPromptDenied);
+    CHECK(result.details["mode"] == "dont_ask");
+    CHECK(result.details["tool"] == "dangerous_tool");
+    CHECK(result.details["reason"] == "no_prompt_denied");
+    CHECK(result.content.find("用户拒绝") == std::string::npos);
+    CHECK(evaluator_calls == 1);
+    CHECK(async_confirm_calls == 0);
+    CHECK(sync_confirm_calls == 0);
+    CHECK(permission_request_calls == 0);
+    CHECK(tool_ptr->calls == 0);
+}
+
+TEST_CASE("权限:Runtime Allow 与无需确认工具都不进入确认回调") {
+    tools::ToolRegistry registry;
+    auto allowed_tool = std::make_unique<FakeTool>("allowed_tool", true);
+    auto free_tool = std::make_unique<FakeTool>("free_tool", false);
+    FakeTool* allowed_ptr = allowed_tool.get();
+    FakeTool* free_ptr = free_tool.get();
+    registry.Register(std::move(allowed_tool));
+    registry.Register(std::move(free_tool));
+
+    std::set<std::string> always{"allowed_tool"};
+    int evaluator_calls = 0;
+    int confirm_calls = 0;
+    agent::TurnWiring wiring;
+    wiring.on_permission_evaluate = [&](const std::string&, const std::string& name,
+                                        const nlohmann::json& input,
+                                        const runtime::ToolHookDecision& pre) {
+        ++evaluator_calls;
+        auto context = MakeContext(rt::PermissionMode::DontAsk);
+        context.always_allowed = &always;
+        return rt::EvaluatePermission(context, pre, name, input);
+    };
+    wiring.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) {
+        ++confirm_calls;
+        return false;
+    };
+
+    api::ToolUseBlock allowed_call{"allow-id", "allowed_tool", nlohmann::json::object()};
+    api::ToolUseBlock free_call{"free-id", "free_tool", nlohmann::json::object()};
+    CHECK_FALSE(agent::RunOneTool(registry, allowed_call, wiring, nullptr).is_error);
+    CHECK_FALSE(agent::RunOneTool(registry, free_call, wiring, nullptr).is_error);
+    CHECK(evaluator_calls == 1);
+    CHECK(confirm_calls == 0);
+    CHECK(allowed_ptr->calls == 1);
+    CHECK(free_ptr->calls == 1);
+}
+
 TEST_CASE("权限:confirm 档下文件工具要问,选过 a 的放行") {
     std::set<std::string> always{"write_file"};
     rt::PermissionContext context = MakeContext(rt::PermissionMode::Confirm);

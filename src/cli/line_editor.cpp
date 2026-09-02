@@ -135,6 +135,8 @@ ConfirmMode NextConfirmMode(ConfirmMode mode) {
             return ConfirmMode::Yolo;
         case ConfirmMode::Yolo:
             return ConfirmMode::Confirm;
+        case ConfirmMode::DontAsk:
+            return ConfirmMode::Confirm;
     }
     return ConfirmMode::Confirm;
 }
@@ -147,6 +149,8 @@ std::string ConfirmModeLabel(ConfirmMode mode) {
             return "auto";
         case ConfirmMode::Yolo:
             return "yolo";
+        case ConfirmMode::DontAsk:
+            return "dont_ask";
     }
     return tr("mode.confirm");
 }

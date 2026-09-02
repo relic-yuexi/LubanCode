@@ -129,11 +129,15 @@ struct ApprovalHarness {
     std::shared_ptr<std::atomic<int>> tool_calls = std::make_shared<std::atomic<int>>(0);
     std::string tool_name = "write_file";
     int approval_timeout_ms = 0;
+    runtime::PermissionMode permission_mode = runtime::PermissionMode::Confirm;
 
-    explicit ApprovalHarness(int timeout_ms = 0) : approval_timeout_ms(timeout_ms) {
+    explicit ApprovalHarness(int timeout_ms = 0,
+                             runtime::PermissionMode mode = runtime::PermissionMode::Confirm)
+        : approval_timeout_ms(timeout_ms), permission_mode(mode) {
         app_server::ServerOptions options;
         options.cwd = "/test/cwd";
         options.approval_timeout_ms = approval_timeout_ms;
+        options.permission_mode = permission_mode;
         server = std::make_unique<app_server::Server>(
             std::move(options),
             [this]() -> std::unique_ptr<api::Backend> { return std::make_unique<SharedScriptBackend>(scripts); },
@@ -205,6 +209,23 @@ struct ApprovalHarness {
 // 审批反向请求:四态各归各位
 // ---------------------------------------------------------------------------
 
+
+TEST_CASE("审批:DontAsk 由 Runtime 直接拒绝，App Server 零 permission/request") {
+    ApprovalHarness harness(/*timeout_ms=*/0, runtime::PermissionMode::DontAsk);
+    harness.scripts = {ToolUseScript("toolu_no_prompt", "write_file"), TextOnlyScript("收到未执行")};
+
+    std::string error_code;
+    const nlohmann::json start = harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());
+    harness.server->HandleTurnStart(start["threadId"], "写个文件", {}, error_code);
+    REQUIRE(error_code.empty());
+
+    CHECK(harness.CountEvents("permission/request") == 0);
+    CHECK(harness.tool_calls->load() == 0);
+    const auto completed = harness.FindEvent("turn/completed");
+    REQUIRE(completed.has_value());
+    CHECK((*completed)["params"]["status"] == "success");
+}
 
 TEST_CASE("审批:accept 放行,工具真执行,回合 success") {
     ApprovalHarness harness;

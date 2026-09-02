@@ -112,6 +112,8 @@ std::string HookPermissionModeText() {
             return "auto";
         case cli::ConfirmMode::Yolo:
             return "yolo";
+        case cli::ConfirmMode::DontAsk:
+            return "dont_ask";
     }
     return "confirm";
 }
