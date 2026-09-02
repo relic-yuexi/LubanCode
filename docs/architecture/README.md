@@ -211,12 +211,14 @@ Gemini 眼下不另挂 platform 提示段；wire adapter 仍是独立实现。�
 配置优先级如下：
 
 ```text
-LUBANCODE_* 环境变量
+LUBAN_BASE_URL / LUBAN_API_KEY / LUBAN_MODEL
+    > 对应的 LUBANCODE_*（兼容保留）及其余 LUBANCODE_* 专属变量
     > 项目 .lubancode/config.json
     > 用户 ~/.lubancode/config.json
-    > 兼容环境变量
     > 内置默认值
 ```
+
+顶层连接解析不再隐式读取 `ANTHROPIC_*`、`OPENAI_*` 通名，避免外部工具污染导致 provider 解绑。`providers[].key_env` 是显式配置的密钥来源，仍可指向任意变量名（包括这些通名），不做前缀拦截。
 
 会话写 JSONL。消息、工具、usage、模式、goal、loop、plan 与 compact 各按事件落账。`SessionRuntime` 管会话级真值与事件接线，`SessionStore` 管持久文件，`agent::ContextManager` 管模型眼下要看的两本历史。
 

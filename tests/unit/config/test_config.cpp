@@ -1,7 +1,7 @@
-// 配置四级合并:专属 env(1 级)> 配置文件(2 级)> 通用 env(3 级)>
-// 内置默认值(4 级),按字段逐个决,不是整套配置一刀切。
-// 全部用纯函数测(MergeConfig / ParseFileConfigJson / RequireApiKey),
-// 不真读环境变量、不真读磁盘文件。
+// 配置三级合并:专属 env(LUBAN_ / LUBANCODE_) > 配置文件 >
+// 内置默认值,按字段逐个决,不是整套配置一刀切。
+// MergeConfig 等纯函数测试之外,LoadFromEnv 用隔离 cwd/home 与可恢复环境变量
+// 做真实读盘、读环境覆盖。
 
 #include <doctest/doctest.h>
 
@@ -9,7 +9,10 @@
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -23,10 +26,6 @@ namespace {
 
 config::LubancodeEnvValues EmptyLubancodeEnv() {
     return config::LubancodeEnvValues{};
-}
-
-config::GenericEnvValues EmptyGenericEnv() {
-    return config::GenericEnvValues{};
 }
 
 // ResolveProviderAuth 直读进程环境(钥匙撞车单的四情形测试要真设变量)。
@@ -48,14 +47,72 @@ void UnsetEnvForTest(const char* name) {
 #endif
 }
 
+std::optional<std::string> GetEnvForTest(const char* name) {
+#ifdef _WIN32
+    char* value = nullptr;
+    std::size_t size = 0;
+    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) {
+        return std::nullopt;
+    }
+    std::string result(value);
+    std::free(value);
+    return result;
+#else
+    const char* value = std::getenv(name);
+    return value == nullptr ? std::nullopt : std::optional<std::string>(value);
+#endif
+}
+
+class ScopedEnvForTest {
+public:
+    ScopedEnvForTest(const char* name, std::optional<std::string> value)
+        : name_(name), saved_(GetEnvForTest(name)) {
+        if (value.has_value()) {
+            SetEnvForTest(name_.c_str(), *value);
+        } else {
+            UnsetEnvForTest(name_.c_str());
+        }
+    }
+    ~ScopedEnvForTest() {
+        if (saved_.has_value()) {
+            SetEnvForTest(name_.c_str(), *saved_);
+        } else {
+            UnsetEnvForTest(name_.c_str());
+        }
+    }
+    ScopedEnvForTest(const ScopedEnvForTest&) = delete;
+    ScopedEnvForTest& operator=(const ScopedEnvForTest&) = delete;
+
+private:
+    std::string name_;
+    std::optional<std::string> saved_;
+};
+
+class ScopedCurrentPathForTest {
+public:
+    explicit ScopedCurrentPathForTest(const std::filesystem::path& path)
+        : saved_(std::filesystem::current_path()) {
+        std::filesystem::current_path(path);
+    }
+    ~ScopedCurrentPathForTest() {
+        std::error_code ec;
+        std::filesystem::current_path(saved_, ec);
+    }
+    ScopedCurrentPathForTest(const ScopedCurrentPathForTest&) = delete;
+    ScopedCurrentPathForTest& operator=(const ScopedCurrentPathForTest&) = delete;
+
+private:
+    std::filesystem::path saved_;
+};
+
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// 四级优先级:每一级都设置同一字段,验证高优先级压过低优先级。
+// 环境变量优先级与通名退役。
 // ---------------------------------------------------------------------------
 
 TEST_CASE("MergeConfig: 什么都没设置时,wire/max_context_chars 走内置默认值,base_url/model/api_key 留空") {
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
 
     // lubancode 不绑死哪一家模型服务:base_url、model、api_key 都没有内置默认值。
@@ -72,178 +129,54 @@ TEST_CASE("MergeConfig: 什么都没设置时,wire/max_context_chars 走内置�
     CHECK(result->sources.max_context_chars == config::Source::Default);
 }
 
-TEST_CASE("MergeConfig: 通用环境变量压过内置默认值") {
-    config::GenericEnvValues generic;
-    generic.anthropic_base_url = "https://generic.example.com";
-    generic.anthropic_auth_token = "generic-token";
-    generic.anthropic_model = "generic-model";
+TEST_CASE("MergeConfig: LUBAN 三字段优先于 LUBANCODE 同字段并准确标来源") {
+    config::LubancodeEnvValues env;
+    env.luban_base_url = "https://luban.example.com";
+    env.luban_api_key = "luban-key";
+    env.luban_model = "luban-model";
+    env.base_url = "https://lubancode.example.com";
+    env.api_key = "lubancode-key";
+    env.model = "lubancode-model";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, generic);
+    const auto result = config::MergeConfig(env, std::nullopt);
     REQUIRE(result.has_value());
-
-    CHECK(result->config.base_url == "https://generic.example.com");
-    CHECK(result->config.auth_token == "generic-token");
-    CHECK(result->config.model == "generic-model");
-
-    CHECK(result->sources.base_url == config::Source::GenericEnv);
-    CHECK(result->sources.auth_token == config::Source::GenericEnv);
-    CHECK(result->sources.model == config::Source::GenericEnv);
+    CHECK(result->config.base_url == "https://luban.example.com");
+    CHECK(result->config.auth_token == "luban-key");
+    CHECK(result->config.model == "luban-model");
+    CHECK(result->sources.base_url == config::Source::LubanEnv);
+    CHECK(result->sources.auth_token == config::Source::LubanEnv);
+    CHECK(result->sources.model == config::Source::LubanEnv);
 }
 
-TEST_CASE("MergeConfig: 配置文件压过通用环境变量") {
-    config::GenericEnvValues generic;
-    generic.anthropic_base_url = "https://generic.example.com";
-    generic.anthropic_auth_token = "generic-token";
-    generic.anthropic_model = "generic-model";
+TEST_CASE("MergeConfig: LUBANCODE 三字段保留且来源与 LUBAN 分开") {
+    config::LubancodeEnvValues env;
+    env.base_url = "https://lubancode.example.com";
+    env.api_key = "lubancode-key";
+    env.model = "lubancode-model";
 
-    config::FileConfig file;
-    file.base_url = "https://file.example.com";
-    file.api_key = "file-key";
-    file.model = "file-model";
-    file.source_path = "/tmp/.lubancode.json";
-
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, generic);
+    const auto result = config::MergeConfig(env, std::nullopt);
     REQUIRE(result.has_value());
-
-    CHECK(result->config.base_url == "https://file.example.com");
-    CHECK(result->config.auth_token == "file-key");
-    CHECK(result->config.model == "file-model");
-
-    CHECK(result->sources.base_url == config::Source::ProjectConfigFile);
-    CHECK(result->sources.auth_token == config::Source::ProjectConfigFile);
-    CHECK(result->sources.model == config::Source::ProjectConfigFile);
-}
-
-TEST_CASE("MergeConfig: 专属 env 压过配置文件") {
-    config::LubancodeEnvValues lubancode_env;
-    lubancode_env.base_url = "https://lubancode.example.com";
-    lubancode_env.api_key = "lubancode-key";
-    lubancode_env.model = "lubancode-model";
-
-    config::FileConfig file;
-    file.base_url = "https://file.example.com";
-    file.api_key = "file-key";
-    file.model = "file-model";
-    file.source_path = "/tmp/.lubancode.json";
-
-    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
-    REQUIRE(result.has_value());
-
-    CHECK(result->config.base_url == "https://lubancode.example.com");
-    CHECK(result->config.auth_token == "lubancode-key");
-    CHECK(result->config.model == "lubancode-model");
-
     CHECK(result->sources.base_url == config::Source::LubancodeEnv);
     CHECK(result->sources.auth_token == config::Source::LubancodeEnv);
     CHECK(result->sources.model == config::Source::LubancodeEnv);
+    CHECK(config::ToString(config::Source::LubanEnv) != config::ToString(config::Source::LubancodeEnv));
 }
 
-TEST_CASE("MergeConfig: 四级全设置时,专属 env 全面胜出") {
-    config::LubancodeEnvValues lubancode_env;
-    lubancode_env.base_url = "https://lubancode.example.com";
-    lubancode_env.api_key = "lubancode-key";
-    lubancode_env.model = "lubancode-model";
-    lubancode_env.max_context_chars = 12345;
-
-    config::FileConfig file;
-    file.base_url = "https://file.example.com";
-    file.api_key = "file-key";
-    file.model = "file-model";
-    file.max_context_chars = 999;
-    file.source_path = "/tmp/.lubancode.json";
-
-    config::GenericEnvValues generic;
-    generic.anthropic_base_url = "https://generic.example.com";
-    generic.anthropic_auth_token = "generic-token";
-    generic.anthropic_model = "generic-model";
-
-    const auto result = config::MergeConfig(lubancode_env, file, generic);
+TEST_CASE("MergeConfig: 未注入专属 env 时不再有 generic 兜底") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
-
-    CHECK(result->config.base_url == "https://lubancode.example.com");
-    CHECK(result->config.auth_token == "lubancode-key");
-    CHECK(result->config.model == "lubancode-model");
-    CHECK(result->config.max_context_chars == 12345);
-}
-
-// ---------------------------------------------------------------------------
-// 配置文件部分字段缺失:没写的字段该去哪一级找哪一级。
-// ---------------------------------------------------------------------------
-
-TEST_CASE("MergeConfig: 配置文件只写了 base_url 和 api_key,model 从通用 env 来") {
-    config::GenericEnvValues generic;
-    generic.anthropic_model = "generic-model";
-    generic.anthropic_base_url = "https://should-not-be-used.example.com";  // 文件优先,不该用到这个
-
-    config::FileConfig file;
-    file.base_url = "https://file.example.com";
-    file.api_key = "file-key";
-    // model、max_context_chars 没写
-    file.source_path = "/tmp/.lubancode.json";
-
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, generic);
-    REQUIRE(result.has_value());
-
-    CHECK(result->config.base_url == "https://file.example.com");
-    CHECK(result->sources.base_url == config::Source::ProjectConfigFile);
-
-    CHECK(result->config.auth_token == "file-key");
-    CHECK(result->sources.auth_token == config::Source::ProjectConfigFile);
-
-    CHECK(result->config.model == "generic-model");
-    CHECK(result->sources.model == config::Source::GenericEnv);
-
-    CHECK(result->config.max_context_chars == config::kDefaultMaxContextChars);
-    CHECK(result->sources.max_context_chars == config::Source::Default);
-}
-
-TEST_CASE("MergeConfig: 配置文件只写了 model,base_url/api_key 没有默认值,留空") {
-    config::FileConfig file;
-    file.model = "only-model-from-file";
-    file.source_path = "/tmp/.lubancode.json";
-
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
-    REQUIRE(result.has_value());
-
-    CHECK(result->config.model == "only-model-from-file");
-    CHECK(result->sources.model == config::Source::ProjectConfigFile);
-
     CHECK(result->config.base_url.empty());
-    CHECK(result->sources.base_url == config::Source::Default);
-
     CHECK(result->config.auth_token.empty());
+    CHECK(result->config.model.empty());
+    CHECK(result->sources.base_url == config::Source::Default);
     CHECK(result->sources.auth_token == config::Source::Default);
+    CHECK(result->sources.model == config::Source::Default);
 }
-
-// ---------------------------------------------------------------------------
-// wire 决定用哪一组通用环境变量、哪一套默认值。
-// ---------------------------------------------------------------------------
-
-TEST_CASE("MergeConfig: wire=responses 时,通用 env 读 OPENAI_*,不读 ANTHROPIC_*") {
-    config::LubancodeEnvValues lubancode_env;
-    lubancode_env.wire = "responses";
-
-    config::GenericEnvValues generic;
-    generic.anthropic_base_url = "https://anthropic-should-not-be-used.example.com";
-    generic.anthropic_auth_token = "anthropic-should-not-be-used";
-    generic.openai_base_url = "https://openai.example.com";
-    generic.openai_api_key = "openai-key";
-    generic.openai_model = "openai-model";
-
-    const auto result = config::MergeConfig(lubancode_env, std::nullopt, generic);
-    REQUIRE(result.has_value());
-
-    CHECK(result->config.wire == config::Wire::Responses);
-    CHECK(result->config.base_url == "https://openai.example.com");
-    CHECK(result->config.auth_token == "openai-key");
-    CHECK(result->config.model == "openai-model");
-}
-
 TEST_CASE("MergeConfig: wire=responses 且什么都没配时,base_url/model 一样没有默认值,留空") {
     config::LubancodeEnvValues lubancode_env;
     lubancode_env.wire = "responses";
 
-    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt);
     REQUIRE(result.has_value());
 
     CHECK(result->config.base_url.empty());
@@ -255,14 +188,14 @@ TEST_CASE("MergeConfig: 配置文件里的 wire 压过默认值,专属 env 的 w
     file.wire = "responses";
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto file_only = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto file_only = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(file_only.has_value());
     CHECK(file_only->config.wire == config::Wire::Responses);
     CHECK(file_only->sources.wire == config::Source::ProjectConfigFile);
 
     config::LubancodeEnvValues lubancode_env;
     lubancode_env.wire = "anthropic";
-    const auto env_wins = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    const auto env_wins = config::MergeConfig(lubancode_env, file);
     REQUIRE(env_wins.has_value());
     CHECK(env_wins->config.wire == config::Wire::Anthropic);
     CHECK(env_wins->sources.wire == config::Source::LubancodeEnv);
@@ -272,7 +205,7 @@ TEST_CASE("MergeConfig: wire 是不认得的值时报错,错误信息里带上�
     config::LubancodeEnvValues lubancode_env;
     lubancode_env.wire = "not-a-real-wire";
 
-    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt);
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().find("LUBANCODE_WIRE") != std::string::npos);
     CHECK(result.error().find("not-a-real-wire") != std::string::npos);
@@ -283,7 +216,7 @@ TEST_CASE("MergeConfig: 配置文件里的 wire 是不认得的值,错误信息�
     file.wire = "bogus";
     file.source_path = "/home/user/.lubancode.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().find("/home/user/.lubancode.json") != std::string::npos);
     CHECK(result.error().find("bogus") != std::string::npos);
@@ -297,36 +230,26 @@ TEST_CASE("MergeConfig: 配置文件里的 wire 是不认得的值,错误信息�
 TEST_CASE("RequireApiKey: api_key 有值时通过") {
     config::LubancodeEnvValues lubancode_env;
     lubancode_env.api_key = "some-key";
-    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt);
     REQUIRE(result.has_value());
     CHECK(config::RequireApiKey(*result).has_value());
 }
 
-TEST_CASE("RequireApiKey: 四级都没有 api_key 时报错,错误信息提到四级来源") {
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+TEST_CASE("RequireApiKey: 各级都没有 api_key 时报错,只提示自家变量、文件与默认值") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.auth_token.empty());
 
     const auto check = config::RequireApiKey(*result);
     REQUIRE_FALSE(check.has_value());
     const std::string& message = check.error();
+    CHECK(message.find("LUBAN_API_KEY") != std::string::npos);
     CHECK(message.find("LUBANCODE_API_KEY") != std::string::npos);
     CHECK(message.find(".lubancode.json") != std::string::npos);
     CHECK(message.find("api_key") != std::string::npos);
-    CHECK(message.find("ANTHROPIC_AUTH_TOKEN") != std::string::npos);
+    CHECK(message.find("ANTHROPIC_AUTH_TOKEN") == std::string::npos);
+    CHECK(message.find("OPENAI_API_KEY") == std::string::npos);
     CHECK(message.find("内置默认值") != std::string::npos);
-}
-
-TEST_CASE("RequireApiKey: wire=responses 时,错误信息提到 OPENAI_API_KEY 而不是 ANTHROPIC_AUTH_TOKEN") {
-    config::LubancodeEnvValues lubancode_env;
-    lubancode_env.wire = "responses";
-    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
-    REQUIRE(result.has_value());
-
-    const auto check = config::RequireApiKey(*result);
-    REQUIRE_FALSE(check.has_value());
-    CHECK(check.error().find("OPENAI_API_KEY") != std::string::npos);
-    CHECK(check.error().find("ANTHROPIC_AUTH_TOKEN") == std::string::npos);
 }
 
 // ---------------------------------------------------------------------------
@@ -338,7 +261,7 @@ TEST_CASE("MergeConfig: max_context_chars 配置文件压过默认值") {
     file.max_context_chars = 777;
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.max_context_chars == 777);
     CHECK(result->sources.max_context_chars == config::Source::ProjectConfigFile);
@@ -352,7 +275,7 @@ TEST_CASE("MergeConfig: max_context_chars 专属 env 压过配置文件") {
     file.max_context_chars = 777;
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, file);
     REQUIRE(result.has_value());
     CHECK(result->config.max_context_chars == 555);
     CHECK(result->sources.max_context_chars == config::Source::LubancodeEnv);
@@ -365,7 +288,7 @@ TEST_CASE("MergeConfig: max_context_chars 专属 env 压过配置文件") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("MergeConfig: 什么都没设置时,max_turns 走内置默认值 0(无上限)") {
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.max_steps_per_turn == config::kDefaultMaxStepsPerTurn);
     CHECK(result->config.max_steps_per_turn == 0);
@@ -377,7 +300,7 @@ TEST_CASE("MergeConfig: max_turns 配置文件压过默认值") {
     file.max_turns = 50;
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.max_steps_per_turn == 50);
     CHECK(result->sources.max_steps_per_turn == config::Source::ProjectConfigFile);
@@ -388,7 +311,7 @@ TEST_CASE("MergeConfig: max_turns 配置文件显式写 0,合并结果就是 0(�
     file.max_turns = 0;
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.max_steps_per_turn == 0);
     // 来源仍然记成配置文件那一级(不是 Default)——0 是显式配的值。
@@ -403,7 +326,7 @@ TEST_CASE("MergeConfig: max_turns 专属 env(LUBANCODE_MAX_TURNS)压过配置文
     file.max_turns = 50;
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, file);
     REQUIRE(result.has_value());
     CHECK(result->config.max_steps_per_turn == 30);
     CHECK(result->sources.max_steps_per_turn == config::Source::LubancodeEnv);
@@ -435,7 +358,7 @@ TEST_CASE("MergeConfig: 新名单独出现,生效且不打弃用提示") {
     file.max_steps_per_turn = 40;
     file.source_path = "/tmp/.lubancode/config.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.max_steps_per_turn == 40);
     CHECK(result->sources.max_steps_per_turn == config::Source::ProjectConfigFile);
@@ -447,7 +370,7 @@ TEST_CASE("MergeConfig: 旧名单独出现,映射生效并打一条弃用提示"
     file.max_turns = 25;
     file.source_path = "/tmp/.lubancode/config.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.max_steps_per_turn == 25);  // 旧名映射到同一字段
     CHECK(result->sources.max_steps_per_turn == config::Source::ProjectConfigFile);
@@ -462,7 +385,7 @@ TEST_CASE("MergeConfig: 新旧同现同值,按新名收账并提示弃用") {
     file.max_turns = 40;
     file.source_path = "/tmp/.lubancode/config.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.max_steps_per_turn == 40);
     REQUIRE(result->deprecation_notices.size() == 1);
@@ -475,7 +398,7 @@ TEST_CASE("MergeConfig: 新旧同现异值,明报冲突,取新名不暗取") {
     file.max_turns = 15;
     file.source_path = "/tmp/.lubancode/config.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.max_steps_per_turn == 40);  // 新名优先
     REQUIRE(result->deprecation_notices.size() == 1);
@@ -490,7 +413,7 @@ TEST_CASE("MergeConfig: 旧名 0 = 不限步,两代同义(显式无上限不当�
     file.max_turns = 0;
     file.source_path = "/tmp/.lubancode/config.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.max_steps_per_turn == 0);
     CHECK(result->sources.max_steps_per_turn == config::Source::ProjectConfigFile);
@@ -505,7 +428,7 @@ TEST_CASE("MergeConfig: env 新名压过配置文件旧名(层级照旧,env > �
     file.max_turns = 50;
     file.source_path = "/tmp/.lubancode/config.json";
 
-    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, file);
     REQUIRE(result.has_value());
     CHECK(result->config.max_steps_per_turn == 30);
     CHECK(result->sources.max_steps_per_turn == config::Source::LubancodeEnv);
@@ -518,7 +441,7 @@ TEST_CASE("MergeConfig: env 新旧两个变量同现异值,明报冲突取新名
     lubancode_env.max_steps_per_turn = 30;
     lubancode_env.max_turns = 20;
 
-    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.max_steps_per_turn == 30);
     CHECK(result->sources.max_steps_per_turn == config::Source::LubancodeEnv);
@@ -540,7 +463,7 @@ TEST_CASE("MergeConfig: subagent 段新旧同现异值,明报冲突取新名") {
     file.subagent_max_turns = 8;
     file.source_path = "/tmp/.lubancode/config.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     REQUIRE(result->config.subagent.max_steps_per_turn.has_value());
     CHECK(*result->config.subagent.max_steps_per_turn == 20);
@@ -601,14 +524,14 @@ TEST_CASE("MergeConfig: agent 段项目级压全局,都没写 = unset + 默认�
     global.agent_length_continuations = 3;
     global.source_path = "/tmp/home/.lubancode/config.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(result.has_value());
     REQUIRE(result->config.agent.max_output_tokens.has_value());
     CHECK(*result->config.agent.max_output_tokens == 65536);  // 项目级压全局
     CHECK(result->sources.agent == config::Source::ProjectConfigFile);
     CHECK(result->config.agent.length_continuations == 3);  // 全局的字段各回各级
 
-    const auto none = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global, EmptyGenericEnv());
+    const auto none = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global);
     REQUIRE(none.has_value());
     REQUIRE(none->config.agent.max_output_tokens.has_value());
     CHECK(*none->config.agent.max_output_tokens == 16384);
@@ -617,7 +540,7 @@ TEST_CASE("MergeConfig: agent 段项目级压全局,都没写 = unset + 默认�
     // 全都没有:unset + 默认续跑次数,绝无 4096。
     config::FileConfig empty;
     empty.source_path = "/tmp/.lubancode/config.json";
-    const auto unset = config::MergeConfig(EmptyLubancodeEnv(), empty, EmptyGenericEnv());
+    const auto unset = config::MergeConfig(EmptyLubancodeEnv(), empty);
     REQUIRE(unset.has_value());
     CHECK(unset->config.agent.max_output_tokens == std::nullopt);
     CHECK(unset->config.agent.length_continuations == config::kDefaultLengthContinuations);
@@ -642,7 +565,7 @@ TEST_CASE("ParseFileConfigJson/MergeConfig: subagent.max_depth 与 max_active(�
     config::FileConfig global;
     global.subagent_max_depth = 5;
     global.source_path = "/tmp/home/.lubancode/config.json";
-    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global, EmptyGenericEnv());
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global);
     REQUIRE(merged.has_value());
     REQUIRE(merged->config.subagent.max_depth.has_value());
     CHECK(*merged->config.subagent.max_depth == 5);
@@ -672,7 +595,7 @@ TEST_CASE("ParseFileConfigJson/MergeConfig: subagent.max_children_per_task 与 m
     global.subagent_max_children_per_task = 8;
     global.subagent_max_tree_nodes = 16;
     global.source_path = "/tmp/home/.lubancode/config.json";
-    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(merged.has_value());
     REQUIRE(merged->config.subagent.max_children_per_task.has_value());
     CHECK(*merged->config.subagent.max_children_per_task == 4);  // 项目级压全局
@@ -680,7 +603,7 @@ TEST_CASE("ParseFileConfigJson/MergeConfig: subagent.max_children_per_task 与 m
     CHECK(*merged->config.subagent.max_tree_nodes == 16);  // 项目没写,落全局
 
     // 都没写 = nullopt(不设)。
-    const auto unset_governance = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt, EmptyGenericEnv());
+    const auto unset_governance = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt);
     REQUIRE(unset_governance.has_value());
     CHECK(unset_governance->config.subagent.max_children_per_task == std::nullopt);
     CHECK(unset_governance->config.subagent.max_tree_nodes == std::nullopt);
@@ -715,12 +638,11 @@ TEST_CASE("ParseFileConfigJson/MergeConfig: subagent.wall_clock_timeout_secs(墙
     config::FileConfig global;
     global.subagent_wall_clock_timeout_secs = 900;
     global.source_path = "/tmp/home/.lubancode/config.json";
-    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global, EmptyGenericEnv());
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global);
     REQUIRE(merged.has_value());
     REQUIRE(merged->config.subagent.wall_clock_timeout_secs.has_value());
     CHECK(*merged->config.subagent.wall_clock_timeout_secs == 900);
-    const auto merged_empty = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt,
-                                                  EmptyGenericEnv());
+    const auto merged_empty = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt);
     REQUIRE(merged_empty.has_value());
     CHECK(merged_empty->config.subagent.wall_clock_timeout_secs == std::nullopt);
 }
@@ -755,7 +677,7 @@ TEST_CASE("ParseFileConfigJson: subagent.max_turns 正常解析;坏段/坏值/�
 }
 
 TEST_CASE("MergeConfig: subagent.max_turns 未设时留 nullopt(运行时继承 max_turns)") {
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
     CHECK_FALSE(result->config.subagent.max_steps_per_turn.has_value());
     CHECK(result->sources.subagent == config::Source::Default);
@@ -770,7 +692,7 @@ TEST_CASE("MergeConfig: subagent.max_turns 项目级压全局,与 max_turns 互�
     project.max_turns = 50;
     project.source_path = "/tmp/.lubancode/config.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(result.has_value());
     // 项目级只写了 max_turns:subagent 段回退全局的 12;max_turns 用项目级 50。
     REQUIRE(result->config.subagent.max_steps_per_turn.has_value());
@@ -786,7 +708,7 @@ TEST_CASE("MergeConfig: subagent.max_turns 显式 0 是显式不限轮,不当没
     project.subagent_max_turns = 0;
     project.source_path = "/tmp/.lubancode/config.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, std::nullopt);
     REQUIRE(result.has_value());
     REQUIRE(result->config.subagent.max_steps_per_turn.has_value());
     CHECK(*result->config.subagent.max_steps_per_turn == 0);  // 子代理不限轮,主代理仍 40
@@ -809,8 +731,7 @@ TEST_CASE("ParseFileConfigJson: memory 对象能解析，坏类型会报错") {
 }
 
 TEST_CASE("MergeConfig: memory 默认关闭，项目配置不能自行开启") {
-    const auto defaults = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt,
-                                               EmptyGenericEnv());
+    const auto defaults = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt);
     REQUIRE(defaults.has_value());
     CHECK_FALSE(defaults->config.memory.enabled);
 
@@ -819,8 +740,7 @@ TEST_CASE("MergeConfig: memory 默认关闭，项目配置不能自行开启") {
     config::MemoryFileConfig project_memory;
     project_memory.enabled = true;
     project.memory = project_memory;
-    const auto project_only = config::MergeConfig(EmptyLubancodeEnv(), project, std::nullopt,
-                                                   EmptyGenericEnv());
+    const auto project_only = config::MergeConfig(EmptyLubancodeEnv(), project, std::nullopt);
     REQUIRE(project_only.has_value());
     CHECK_FALSE(project_only->config.memory.enabled);
 }
@@ -839,22 +759,21 @@ TEST_CASE("MergeConfig: 全局打开 memory，项目可以收窄并关闭") {
     project_memory.use = false;
     project_memory.max_results = 2;
     project.memory = project_memory;
-    const auto narrowed = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    const auto narrowed = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(narrowed.has_value());
     CHECK(narrowed->config.memory.enabled);
     CHECK_FALSE(narrowed->config.memory.use);
     CHECK(narrowed->config.memory.max_results == 2);
 
     project.memory->enabled = false;
-    const auto disabled = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    const auto disabled = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(disabled.has_value());
     CHECK_FALSE(disabled->config.memory.enabled);
 }
 
 TEST_CASE("MergeConfig: memory.user_enabled 只认全局授权,项目只能收窄成关") {
     // 默认关。
-    const auto defaults = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt,
-                                               EmptyGenericEnv());
+    const auto defaults = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt);
     REQUIRE(defaults.has_value());
     CHECK_FALSE(defaults->config.memory.user_enabled);
 
@@ -865,8 +784,7 @@ TEST_CASE("MergeConfig: memory.user_enabled 只认全局授权,项目只能收�
     project_memory.enabled = true;
     project_memory.user_enabled = true;
     project.memory = project_memory;
-    const auto project_only = config::MergeConfig(EmptyLubancodeEnv(), project, std::nullopt,
-                                                   EmptyGenericEnv());
+    const auto project_only = config::MergeConfig(EmptyLubancodeEnv(), project, std::nullopt);
     REQUIRE(project_only.has_value());
     CHECK_FALSE(project_only->config.memory.user_enabled);
 
@@ -877,15 +795,14 @@ TEST_CASE("MergeConfig: memory.user_enabled 只认全局授权,项目只能收�
     global_memory.enabled = true;
     global_memory.user_enabled = true;
     global.memory = global_memory;
-    const auto granted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global,
-                                              EmptyGenericEnv());
+    const auto granted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global);
     REQUIRE(granted.has_value());
     CHECK(granted->config.memory.user_enabled);
 
     config::MemoryFileConfig narrow;
     narrow.user_enabled = false;
     project.memory = narrow;
-    const auto narrowed = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    const auto narrowed = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(narrowed.has_value());
     CHECK_FALSE(narrowed->config.memory.user_enabled);
 
@@ -914,21 +831,21 @@ TEST_CASE("MergeConfig: memory.learn 只认三档,项目配置只能收窄") {
     config::MemoryFileConfig project_memory;
     project_memory.learn = "review";
     project.memory = project_memory;
-    const auto narrowed = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    const auto narrowed = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(narrowed.has_value());
     CHECK(narrowed->config.memory.learn == "review");
 
     // 全局只给 review,项目想升 auto:合并后仍是 review。
     global.memory->learn = "review";
     project.memory->learn = "auto";
-    const auto capped = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    const auto capped = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(capped.has_value());
     CHECK(capped->config.memory.learn == "review");
 
     // 全局 auto、项目不写 learn:auto 保持。
     global.memory->learn = "auto";
     project.memory.reset();
-    const auto kept = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    const auto kept = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(kept.has_value());
     CHECK(kept->config.memory.learn == "auto");
 
@@ -937,7 +854,7 @@ TEST_CASE("MergeConfig: memory.learn 只认三档,项目配置只能收窄") {
     config::MemoryFileConfig legacy;
     legacy.generate = false;
     project.memory = legacy;
-    const auto legacy_off = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    const auto legacy_off = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(legacy_off.has_value());
     CHECK(legacy_off->config.memory.learn == "off");
 }
@@ -1071,13 +988,13 @@ TEST_CASE("status_panel: 项目级整段压过全局，没配置走内置字段"
     global.source_path = "global.json";
     global.status_panel = config::StatusPanelConfig{{"model"}, " | "};
 
-    const auto merged = config::MergeConfig({}, project, global, {});
+    const auto merged = config::MergeConfig({}, project, global);
     REQUIRE(merged.has_value());
     CHECK(merged->config.status_panel.items == std::vector<std::string>{"cwd", "git_branch"});
     CHECK(merged->config.status_panel.separator == " / ");
     CHECK(merged->sources.status_panel == config::Source::ProjectConfigFile);
 
-    const auto defaults = config::MergeConfig({}, std::nullopt, std::nullopt, {});
+    const auto defaults = config::MergeConfig({}, std::nullopt, std::nullopt);
     REQUIRE(defaults.has_value());
     CHECK(defaults->config.status_panel.items ==
           std::vector<std::string>{"permission_mode", "model", "effort", "cwd", "git_branch", "context", "tokens"});
@@ -1157,7 +1074,7 @@ TEST_CASE("ParseContextWindowTokens: 只有 k/m 后缀没有数字报错") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("MergeConfig: context_window_tokens 什么都没设置时用内置默认值 256k") {
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.context_window_tokens == config::kDefaultContextWindowTokens);
     CHECK(result->sources.context_window_tokens == config::Source::Default);
@@ -1168,7 +1085,7 @@ TEST_CASE("MergeConfig: context_window_tokens 配置文件压过默认值") {
     file.context_window = "512k";
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.context_window_tokens == 512000);
     CHECK(result->sources.context_window_tokens == config::Source::ProjectConfigFile);
@@ -1182,7 +1099,7 @@ TEST_CASE("MergeConfig: context_window_tokens 专属 env 压过配置文件") {
     file.context_window = "512k";
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, file);
     REQUIRE(result.has_value());
     CHECK(result->config.context_window_tokens == 1000000);
     CHECK(result->sources.context_window_tokens == config::Source::LubancodeEnv);
@@ -1192,7 +1109,7 @@ TEST_CASE("MergeConfig: context_window 坏值报错,错误信息带上是哪里�
     config::LubancodeEnvValues lubancode_env;
     lubancode_env.context_window = "abc";
 
-    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt);
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().find("LUBANCODE_CONTEXT_WINDOW") != std::string::npos);
 }
@@ -1202,7 +1119,7 @@ TEST_CASE("MergeConfig: 配置文件里的 context_window 坏值报错,错误信
     file.context_window = "0";
     file.source_path = "/home/user/.lubancode.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().find("/home/user/.lubancode.json") != std::string::npos);
 }
@@ -1213,7 +1130,7 @@ TEST_CASE("MergeConfig: 配置文件里的 context_window 坏值报错,错误信
 // ---------------------------------------------------------------------------
 
 TEST_CASE("MergeConfig: compact_model 什么都没设置时留空") {
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.compact_model.empty());
     CHECK(result->sources.compact_model == config::Source::Default);
@@ -1224,7 +1141,7 @@ TEST_CASE("MergeConfig: compact_model 配置文件压过默认值") {
     file.compact_model = "MiniMax-M3-mini";
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.compact_model == "MiniMax-M3-mini");
     CHECK(result->sources.compact_model == config::Source::ProjectConfigFile);
@@ -1238,7 +1155,7 @@ TEST_CASE("MergeConfig: compact_model 专属 env 压过配置文件") {
     file.compact_model = "file-compact-model";
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, file);
     REQUIRE(result.has_value());
     CHECK(result->config.compact_model == "env-compact-model");
     CHECK(result->sources.compact_model == config::Source::LubancodeEnv);
@@ -1251,7 +1168,7 @@ TEST_CASE("MergeConfig: compact_model 专属 env 压过配置文件") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("MergeConfig: think 什么都没设置时留空") {
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.think.empty());
     CHECK(result->sources.think == config::Source::Default);
@@ -1262,7 +1179,7 @@ TEST_CASE("MergeConfig: think 配置文件压过默认值") {
     file.think = "medium";
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.think == "medium");
     CHECK(result->sources.think == config::Source::ProjectConfigFile);
@@ -1276,7 +1193,7 @@ TEST_CASE("MergeConfig: think 专属 env 压过配置文件") {
     file.think = "medium";
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, file);
     REQUIRE(result.has_value());
     CHECK(result->config.think == "high");
     CHECK(result->sources.think == config::Source::LubancodeEnv);
@@ -1286,7 +1203,7 @@ TEST_CASE("MergeConfig: think 原样存,不改大小写(M10 放开档位后,大�
     config::LubancodeEnvValues lubancode_env;
     lubancode_env.think = "HIGH";
 
-    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.think == "HIGH");
 }
@@ -1295,7 +1212,7 @@ TEST_CASE("MergeConfig: think 是任意字符串都不报错(M10 放开档位,�
     config::LubancodeEnvValues lubancode_env;
     lubancode_env.think = "extreme";
 
-    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.think == "extreme");
 }
@@ -1305,7 +1222,7 @@ TEST_CASE("MergeConfig: 配置文件里的 think 也是任意字符串都放行"
     file.think = "ultra";
     file.source_path = "/home/user/.lubancode.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.think == "ultra");
 }
@@ -1317,7 +1234,7 @@ TEST_CASE("MergeConfig: 配置文件里的 think 也是任意字符串都放行"
 // ---------------------------------------------------------------------------
 
 TEST_CASE("MergeConfig: soul 什么都没设置时留空(= 用 SOUL.md)") {
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.soul.empty());
     CHECK(result->sources.soul == config::Source::Default);
@@ -1328,7 +1245,7 @@ TEST_CASE("MergeConfig: soul 配置文件压过默认值") {
     file.soul = "wenyan";
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.soul == "wenyan");
     CHECK(result->sources.soul == config::Source::ProjectConfigFile);
@@ -1342,7 +1259,7 @@ TEST_CASE("MergeConfig: soul 专属 env(LUBANCODE_SOUL)压过配置文件") {
     file.soul = "wenyan";
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, file);
     REQUIRE(result.has_value());
     CHECK(result->config.soul == "pirate");
     CHECK(result->sources.soul == config::Source::LubancodeEnv);
@@ -1416,7 +1333,7 @@ TEST_CASE("ParseFileConfigJson: think 类型不对报错") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("MergeConfig: compact_partition_count 什么都没设置时用内置默认值 4") {
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.compact_partition_count == config::kDefaultCompactPartitionCount);
     CHECK(result->config.compact_partition_count == 4);
@@ -1428,7 +1345,7 @@ TEST_CASE("MergeConfig: compact_partition_count 配置文件压过默认值,来�
     file.compact_partition_count = 6;
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.compact_partition_count == 6);
     CHECK(result->sources.compact_partition_count == config::Source::ProjectConfigFile);
@@ -1439,7 +1356,7 @@ TEST_CASE("MergeConfig: compact_partition_count 边界值 2 与 8 都合法") {
         config::FileConfig file;
         file.compact_partition_count = config::kMinCompactPartitionCount;
         file.source_path = "/tmp/.lubancode.json";
-        const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+        const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
         REQUIRE(result.has_value());
         CHECK(result->config.compact_partition_count == 2);
     }
@@ -1447,7 +1364,7 @@ TEST_CASE("MergeConfig: compact_partition_count 边界值 2 与 8 都合法") {
         config::FileConfig file;
         file.compact_partition_count = config::kMaxCompactPartitionCount;
         file.source_path = "/tmp/.lubancode.json";
-        const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+        const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
         REQUIRE(result.has_value());
         CHECK(result->config.compact_partition_count == 8);
     }
@@ -1458,7 +1375,7 @@ TEST_CASE("MergeConfig: compact_partition_count 越界报错,不静默夹值,错
     file.compact_partition_count = 9;
     file.source_path = "/home/user/.lubancode.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().find("compact_partition_count") != std::string::npos);
     CHECK(result.error().find("/home/user/.lubancode.json") != std::string::npos);
@@ -1466,7 +1383,7 @@ TEST_CASE("MergeConfig: compact_partition_count 越界报错,不静默夹值,错
     config::FileConfig zero;
     zero.compact_partition_count = 1;
     zero.source_path = "/home/user/.lubancode.json";
-    const auto too_small = config::MergeConfig(EmptyLubancodeEnv(), zero, EmptyGenericEnv());
+    const auto too_small = config::MergeConfig(EmptyLubancodeEnv(), zero);
     REQUIRE_FALSE(too_small.has_value());
     CHECK(too_small.error().find("2..8") != std::string::npos);
 }
@@ -1492,12 +1409,14 @@ TEST_CASE("ParseFileConfigJson: compact_partition_count 解出整数;类型不�
 // 配置文件拆成项目级/全局两级,两条都得有独立、非空、彼此不同的说法。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("ToString(Source): 每种来源都有非空的中文说法,项目级/全局各自区分") {
+TEST_CASE("ToString(Source): 每种来源都有非空说法,两类 env 与两级文件各自区分") {
+    CHECK_FALSE(config::ToString(config::Source::LubanEnv).empty());
     CHECK_FALSE(config::ToString(config::Source::LubancodeEnv).empty());
     CHECK_FALSE(config::ToString(config::Source::ProjectConfigFile).empty());
     CHECK_FALSE(config::ToString(config::Source::GlobalConfigFile).empty());
-    CHECK_FALSE(config::ToString(config::Source::GenericEnv).empty());
     CHECK_FALSE(config::ToString(config::Source::Default).empty());
+    CHECK(config::ToString(config::Source::LubanEnv) !=
+          config::ToString(config::Source::LubancodeEnv));
     // 项目级与全局的说法不能一样,不然 /config 看不出这字段到底来自哪一级。
     CHECK(config::ToString(config::Source::ProjectConfigFile) !=
           config::ToString(config::Source::GlobalConfigFile));
@@ -1539,13 +1458,13 @@ TEST_CASE("RequireConfigured: 三个字段都有值时通过") {
     lubancode_env.base_url = "https://example.com";
     lubancode_env.api_key = "some-key";
     lubancode_env.model = "some-model";
-    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt);
     REQUIRE(result.has_value());
     CHECK(config::RequireConfigured(*result).has_value());
 }
 
 TEST_CASE("RequireConfigured: 什么都没配时报错,三个字段都点名,并且提到三条配置途径") {
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
 
     const auto check = config::RequireConfigured(*result);
@@ -1556,14 +1475,15 @@ TEST_CASE("RequireConfigured: 什么都没配时报错,三个字段都点名,并
     CHECK(message.find("model") != std::string::npos);
     CHECK(message.find("向导") != std::string::npos);
     CHECK(message.find(".lubancode.json") != std::string::npos);
-    CHECK(message.find("LUBANCODE_") != std::string::npos);
+    CHECK(message.find("LUBAN_BASE_URL / LUBAN_API_KEY / LUBAN_MODEL") != std::string::npos);
+    CHECK(message.find("LUBANCODE_") == std::string::npos);
 }
 
 TEST_CASE("RequireConfigured: 只缺 model 时,错误信息只点名 model,不提 base_url/api_key") {
     config::LubancodeEnvValues lubancode_env;
     lubancode_env.base_url = "https://example.com";
     lubancode_env.api_key = "some-key";
-    const auto result = config::MergeConfig(lubancode_env, std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, std::nullopt);
     REQUIRE(result.has_value());
 
     const auto check = config::RequireConfigured(*result);
@@ -1596,7 +1516,7 @@ TEST_CASE("MaskApiKey: 不超过 8 位原样加省略号,不截断出空字符�
 // ---------------------------------------------------------------------------
 
 TEST_CASE("MergeConfig: 不设置 config_file_path,默认是 std::nullopt") {
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
     CHECK_FALSE(result->config_file_path.has_value());
 }
@@ -1607,7 +1527,7 @@ TEST_CASE("MergeConfig: 不设置 config_file_path,默认是 std::nullopt") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("MergeConfig: theme 什么都没设置时,用内置默认值 dark") {
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.theme == config::kDefaultTheme);
     CHECK(result->sources.theme == config::Source::Default);
@@ -1618,7 +1538,7 @@ TEST_CASE("MergeConfig: theme 配置文件压过默认值") {
     file.theme = "light";
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.theme == "light");
     CHECK(result->sources.theme == config::Source::ProjectConfigFile);
@@ -1632,7 +1552,7 @@ TEST_CASE("MergeConfig: theme 专属 env 压过配置文件") {
     file.theme = "light";
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, file);
     REQUIRE(result.has_value());
     CHECK(result->config.theme == "plain");
     CHECK(result->sources.theme == config::Source::LubancodeEnv);
@@ -1644,7 +1564,7 @@ TEST_CASE("MergeConfig: theme 专属 env 压过配置文件") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("MergeConfig: system_prompt_file 什么都没设置时留空") {
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.system_prompt_file.empty());
     CHECK(result->sources.system_prompt_file == config::Source::Default);
@@ -1655,7 +1575,7 @@ TEST_CASE("MergeConfig: system_prompt_file 配置文件压过默认值") {
     file.system_prompt_file = "./persona.md";
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
     CHECK(result->config.system_prompt_file == "./persona.md");
     CHECK(result->sources.system_prompt_file == config::Source::ProjectConfigFile);
@@ -1669,7 +1589,7 @@ TEST_CASE("MergeConfig: system_prompt_file 专属 env 压过配置文件") {
     file.system_prompt_file = "./file-persona.md";
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(lubancode_env, file, EmptyGenericEnv());
+    const auto result = config::MergeConfig(lubancode_env, file);
     REQUIRE(result.has_value());
     CHECK(result->config.system_prompt_file == "./env-persona.md");
     CHECK(result->sources.system_prompt_file == config::Source::LubancodeEnv);
@@ -1946,13 +1866,13 @@ TEST_CASE("MergeConfig: 配置文件里的 search 段原样进最终配置;没�
     search.api_key = "sk-s";
     file.search = search;
 
-    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(merged.has_value());
     CHECK(merged->config.search.provider == "serper");
     CHECK(merged->config.search.api_key == "sk-s");
     CHECK(merged->config.search.Configured());
 
-    const auto merged_empty = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto merged_empty = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(merged_empty.has_value());
     CHECK_FALSE(merged_empty->config.search.Configured());
 }
@@ -1981,7 +1901,7 @@ TEST_CASE("ParseFileConfigJson: tool_search_threshold 正常解析,0 也认,负�
 }
 
 TEST_CASE("MergeConfig: tool_search_threshold 配置文件压过默认值,没写走默认 20") {
-    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(defaulted.has_value());
     CHECK(defaulted->config.tool_search_threshold == config::kDefaultToolSearchThreshold);
     CHECK(defaulted->config.tool_search_threshold == 20);
@@ -1989,7 +1909,7 @@ TEST_CASE("MergeConfig: tool_search_threshold 配置文件压过默认值,没写
 
     config::FileConfig file;
     file.tool_search_threshold = 5;
-    const auto from_file = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto from_file = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(from_file.has_value());
     CHECK(from_file->config.tool_search_threshold == 5);
     CHECK(from_file->sources.tool_search_threshold == config::Source::ProjectConfigFile);
@@ -2023,7 +1943,7 @@ TEST_CASE("ParseFileConfigJson: tool_search_token_floor 正常解析,0 也认(�
 }
 
 TEST_CASE("MergeConfig: tool_search_token_floor 配置文件压过默认值,没写走默认 1500") {
-    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(defaulted.has_value());
     CHECK(defaulted->config.tool_search_token_floor == config::kDefaultToolSearchTokenFloor);
     CHECK(defaulted->config.tool_search_token_floor == 1500);
@@ -2031,7 +1951,7 @@ TEST_CASE("MergeConfig: tool_search_token_floor 配置文件压过默认值,没�
 
     config::FileConfig file;
     file.tool_search_token_floor = 0;
-    const auto from_file = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto from_file = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(from_file.has_value());
     CHECK(from_file->config.tool_search_token_floor == 0);
     CHECK(from_file->sources.tool_search_token_floor == config::Source::ProjectConfigFile);
@@ -2080,7 +2000,7 @@ TEST_CASE("ParseFileConfigJson: deferred_tool_mode 四档认得,垃圾值报错"
 }
 
 TEST_CASE("MergeConfig: deferred_tool_mode 项目级压全局,没写落空(= legacy 现状)") {
-    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(defaulted.has_value());
     CHECK(defaulted->config.deferred_tool_mode.empty());
     CHECK(defaulted->sources.deferred_tool_mode == config::Source::Default);
@@ -2088,7 +2008,7 @@ TEST_CASE("MergeConfig: deferred_tool_mode 项目级压全局,没写落空(= leg
     config::FileConfig global_file;
     global_file.deferred_tool_mode = "legacy_expand";
     const auto from_global =
-        config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global_file, EmptyGenericEnv());
+        config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global_file);
     REQUIRE(from_global.has_value());
     CHECK(from_global->config.deferred_tool_mode == "legacy_expand");
     CHECK(from_global->sources.deferred_tool_mode == config::Source::GlobalConfigFile);
@@ -2096,7 +2016,7 @@ TEST_CASE("MergeConfig: deferred_tool_mode 项目级压全局,没写落空(= leg
     config::FileConfig project_file;
     project_file.deferred_tool_mode = "proxy_reference";
     const auto from_project =
-        config::MergeConfig(EmptyLubancodeEnv(), project_file, global_file, EmptyGenericEnv());
+        config::MergeConfig(EmptyLubancodeEnv(), project_file, global_file);
     REQUIRE(from_project.has_value());
     CHECK(from_project->config.deferred_tool_mode == "proxy_reference");
     CHECK(from_project->sources.deferred_tool_mode == config::Source::ProjectConfigFile);
@@ -2129,7 +2049,7 @@ TEST_CASE("ParseFileConfigJson: oneshot_training_policy 四值认得,垃圾值�
 }
 
 TEST_CASE("MergeConfig: oneshot_training_policy 项目级压全局,没写落 exclude") {
-    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(defaulted.has_value());
     CHECK(defaulted->config.oneshot_training_policy == "exclude");
     CHECK(defaulted->sources.oneshot_training_policy == config::Source::Default);
@@ -2137,7 +2057,7 @@ TEST_CASE("MergeConfig: oneshot_training_policy 项目级压全局,没写落 exc
     config::FileConfig global_file;
     global_file.oneshot_training_policy = "metadata";
     const auto from_global =
-        config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global_file, EmptyGenericEnv());
+        config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global_file);
     REQUIRE(from_global.has_value());
     CHECK(from_global->config.oneshot_training_policy == "metadata");
     CHECK(from_global->sources.oneshot_training_policy == config::Source::GlobalConfigFile);
@@ -2145,7 +2065,7 @@ TEST_CASE("MergeConfig: oneshot_training_policy 项目级压全局,没写落 exc
     config::FileConfig project_file;
     project_file.oneshot_training_policy = "include";
     const auto from_project =
-        config::MergeConfig(EmptyLubancodeEnv(), project_file, global_file, EmptyGenericEnv());
+        config::MergeConfig(EmptyLubancodeEnv(), project_file, global_file);
     REQUIRE(from_project.has_value());
     CHECK(from_project->config.oneshot_training_policy == "include");
     CHECK(from_project->sources.oneshot_training_policy == config::Source::ProjectConfigFile);
@@ -2212,41 +2132,39 @@ TEST_CASE("ParseFileConfigJson: request_hard_timeout_secs 解析,0 合法(不设
 }
 
 TEST_CASE("MergeConfig: request_hard_timeout_secs 项目级压全局压默认,显式 0 也照收") {
-    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(defaulted.has_value());
     CHECK(defaulted->config.request_hard_timeout_secs == config::kDefaultRequestHardTimeoutSecs);
     CHECK(defaulted->sources.request_hard_timeout_secs == config::Source::Default);
 
     config::FileConfig file;
     file.request_hard_timeout_secs = 600;
-    const auto from_file = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto from_file = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(from_file.has_value());
     CHECK(from_file->config.request_hard_timeout_secs == 600);
     CHECK(from_file->sources.request_hard_timeout_secs == config::Source::ProjectConfigFile);
 
     config::FileConfig global_file;
     global_file.request_hard_timeout_secs = 90;
-    const auto from_global = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global_file,
-                                                 EmptyGenericEnv());
+    const auto from_global = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global_file);
     REQUIRE(from_global.has_value());
     CHECK(from_global->config.request_hard_timeout_secs == 90);
     CHECK(from_global->sources.request_hard_timeout_secs == config::Source::GlobalConfigFile);
 
     // 项目级 0 压全局 90:显式"不设墙"胜过全局的墙,不是被全局顶掉。
-    const auto zero_over_global = config::MergeConfig(EmptyLubancodeEnv(), file, global_file,
-                                                      EmptyGenericEnv());
+    const auto zero_over_global = config::MergeConfig(EmptyLubancodeEnv(), file, global_file);
     REQUIRE(zero_over_global.has_value());
     CHECK(zero_over_global->config.request_hard_timeout_secs == 600);  // file 是 600
     config::FileConfig zero_file;
     zero_file.request_hard_timeout_secs = 0;
-    const auto zero_wins = config::MergeConfig(EmptyLubancodeEnv(), zero_file, global_file, EmptyGenericEnv());
+    const auto zero_wins = config::MergeConfig(EmptyLubancodeEnv(), zero_file, global_file);
     REQUIRE(zero_wins.has_value());
     CHECK(zero_wins->config.request_hard_timeout_secs == 0);
     CHECK(zero_wins->sources.request_hard_timeout_secs == config::Source::ProjectConfigFile);
 }
 
 TEST_CASE("MergeConfig: 三个超时字段配置文件压过默认值,没写走内置默认") {
-    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(defaulted.has_value());
     CHECK(defaulted->config.connect_timeout_ms == config::kDefaultConnectTimeoutMs);
     CHECK(defaulted->config.stream_idle_timeout_secs == config::kDefaultStreamIdleTimeoutSecs);
@@ -2259,7 +2177,7 @@ TEST_CASE("MergeConfig: 三个超时字段配置文件压过默认值,没写走�
     file.connect_timeout_ms = 8000;
     file.stream_idle_timeout_secs = 45;
     file.request_timeout_secs = 20;
-    const auto from_file = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto from_file = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(from_file.has_value());
     CHECK(from_file->config.connect_timeout_ms == 8000);
     CHECK(from_file->config.stream_idle_timeout_secs == 45);
@@ -2273,7 +2191,7 @@ TEST_CASE("MergeConfig: 三个超时字段项目级缺时回退全局") {
     config::FileConfig global_file;
     global_file.connect_timeout_ms = 9000;
 
-    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global_file, EmptyGenericEnv());
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global_file);
     REQUIRE(merged.has_value());
     CHECK(merged->config.connect_timeout_ms == 9000);
     CHECK(merged->sources.connect_timeout_ms == config::Source::GlobalConfigFile);
@@ -2296,7 +2214,7 @@ TEST_CASE("MergeConfig 分层: 项目级压过全局(同一字段两级都写)")
     global.theme = "dark";
     global.source_path = "/home/.lubancode/config.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(result.has_value());
     CHECK(result->config.theme == "light");
     CHECK(result->sources.theme == config::Source::ProjectConfigFile);
@@ -2312,7 +2230,7 @@ TEST_CASE("MergeConfig 分层: 项目级缺的字段回退全局") {
     global.base_url = "https://global.example.com";
     global.source_path = "/home/.lubancode/config.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(result.has_value());
 
     CHECK(result->config.model == "proj-model");
@@ -2331,7 +2249,7 @@ TEST_CASE("MergeConfig 分层: 只有全局有这份文件,字段来源记全局
     global.max_context_chars = 4242;
     global.source_path = "/home/.lubancode/config.json";
 
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global);
     REQUIRE(result.has_value());
     CHECK(result->config.theme == "plain");
     CHECK(result->sources.theme == config::Source::GlobalConfigFile);
@@ -2339,21 +2257,17 @@ TEST_CASE("MergeConfig 分层: 只有全局有这份文件,字段来源记全局
     CHECK(result->sources.max_context_chars == config::Source::GlobalConfigFile);
 }
 
-TEST_CASE("MergeConfig 分层: 两级都没这字段,回退 env / 默认") {
+TEST_CASE("MergeConfig 分层: 两级都没这字段,回退内置默认") {
     config::FileConfig project;
     project.model = "proj-model";  // 只写 model
     project.source_path = "/proj/.lubancode/config.json";
     config::FileConfig global;
     global.source_path = "/home/.lubancode/config.json";  // 空全局
 
-    config::GenericEnvValues generic;
-    generic.anthropic_base_url = "https://generic.example.com";
-
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global, generic);
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(result.has_value());
-    // base_url 两级配置文件都没有,落到通用 env。
-    CHECK(result->config.base_url == "https://generic.example.com");
-    CHECK(result->sources.base_url == config::Source::GenericEnv);
+    CHECK(result->config.base_url.empty());
+    CHECK(result->sources.base_url == config::Source::Default);
     // theme 两级都没有,落到内置默认。
     CHECK(result->config.theme == config::kDefaultTheme);
     CHECK(result->sources.theme == config::Source::Default);
@@ -2369,7 +2283,7 @@ TEST_CASE("MergeConfig 分层: 专属 env 压过项目级与全局") {
     global.theme = "dark";
     global.source_path = "/home/.lubancode/config.json";
 
-    const auto result = config::MergeConfig(env, project, global, EmptyGenericEnv());
+    const auto result = config::MergeConfig(env, project, global);
     REQUIRE(result.has_value());
     CHECK(result->config.theme == "plain");
     CHECK(result->sources.theme == config::Source::LubancodeEnv);
@@ -2390,7 +2304,7 @@ TEST_CASE("MergeConfig 分层: 对象整段(search)项目级压全局,项目级�
     config::FileConfig global;
     global.search = glob_search;
     global.source_path = "/home/.lubancode/config.json";
-    const auto both = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    const auto both = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(both.has_value());
     CHECK(both->config.search.provider == "tavily");
     CHECK(both->config.search.api_key == "proj-key");
@@ -2398,7 +2312,7 @@ TEST_CASE("MergeConfig 分层: 对象整段(search)项目级压全局,项目级�
     // 只有全局写:回退全局那一整段。
     config::FileConfig project_empty;
     project_empty.source_path = "/proj/.lubancode/config.json";
-    const auto only_global = config::MergeConfig(EmptyLubancodeEnv(), project_empty, global, EmptyGenericEnv());
+    const auto only_global = config::MergeConfig(EmptyLubancodeEnv(), project_empty, global);
     REQUIRE(only_global.has_value());
     CHECK(only_global->config.search.provider == "brave");
     CHECK(only_global->config.search.api_key == "glob-key");
@@ -2409,7 +2323,7 @@ TEST_CASE("MergeConfig 分层: wire 坏值报错时,带上写了这个坏值的�
     global.wire = "bogus";
     global.source_path = "/home/.lubancode/config.json";
     // 项目级没写 wire,坏值来自全局——报错要指向全局那份文件。
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global);
     REQUIRE_FALSE(result.has_value());
     CHECK(result.error().find("/home/.lubancode/config.json") != std::string::npos);
     CHECK(result.error().find("bogus") != std::string::npos);
@@ -2575,7 +2489,160 @@ private:
     std::filesystem::path dir_;
 };
 
+class LoadFromEnvSandbox {
+public:
+    LoadFromEnvSandbox()
+        : project_(),
+          home_(),
+#ifdef _WIN32
+          home_env_("USERPROFILE", home_.Path()),
+#else
+          home_env_("HOME", home_.Path()),
+#endif
+          cwd_(project_.Path()) {
+        const std::vector<const char*> clean_names = {
+            "LUBAN_BASE_URL",       "LUBAN_API_KEY",       "LUBAN_MODEL",
+            "LUBANCODE_WIRE",       "LUBANCODE_BASE_URL",  "LUBANCODE_API_KEY",
+            "LUBANCODE_MODEL",      "ANTHROPIC_BASE_URL",  "ANTHROPIC_AUTH_TOKEN",
+            "ANTHROPIC_API_KEY",    "ANTHROPIC_MODEL",     "OPENAI_BASE_URL",
+            "OPENAI_API_KEY",       "OPENAI_MODEL",
+        };
+        for (const char* name : clean_names) {
+            env_.push_back(std::make_unique<ScopedEnvForTest>(name, std::nullopt));
+        }
+    }
+
+    void WriteProjectConfig(const std::string& content) const {
+        project_.WriteFile(".lubancode/config.json", content);
+    }
+    void Set(const char* name, const std::string& value) {
+        env_.push_back(std::make_unique<ScopedEnvForTest>(name, value));
+    }
+
+private:
+    TempCwdDir project_;
+    TempCwdDir home_;
+    ScopedEnvForTest home_env_;
+    ScopedCurrentPathForTest cwd_;
+    std::vector<std::unique_ptr<ScopedEnvForTest>> env_;
+};
+
 }  // namespace
+
+TEST_CASE("LoadFromEnv: provider inline key 不受已退役通名污染") {
+    LoadFromEnvSandbox sandbox;
+    sandbox.WriteProjectConfig(R"({
+        "active_provider":"inline-provider",
+        "providers":[{
+            "name":"inline-provider",
+            "base_url":"https://provider-inline.example.test",
+            "wire":"anthropic-messages",
+            "auth":"inline",
+            "api_key":"inline-provider-key",
+            "model":"provider-inline-model"
+        }]
+    })");
+    sandbox.Set("ANTHROPIC_BASE_URL", "https://polluted-anthropic.example.test");
+    sandbox.Set("ANTHROPIC_AUTH_TOKEN", "polluted-anthropic-token");
+    sandbox.Set("ANTHROPIC_API_KEY", "polluted-anthropic-key");
+    sandbox.Set("ANTHROPIC_MODEL", "polluted-anthropic-model");
+    sandbox.Set("OPENAI_BASE_URL", "https://polluted-openai.example.test");
+    sandbox.Set("OPENAI_API_KEY", "polluted-openai-key");
+    sandbox.Set("OPENAI_MODEL", "polluted-openai-model");
+
+    const auto loaded = config::LoadFromEnv();
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->config.active_provider == "inline-provider");
+    CHECK(loaded->config.base_url == "https://provider-inline.example.test");
+    CHECK(loaded->config.model == "provider-inline-model");
+    CHECK(loaded->config.auth_token == "inline-provider-key");
+    CHECK(loaded->config.auth_mode == config::ProviderAuthMode::Inline);
+    CHECK(loaded->sources.base_url == config::Source::ProjectConfigFile);
+    CHECK(loaded->sources.model == config::Source::ProjectConfigFile);
+    CHECK(loaded->sources.auth_token == config::Source::ProjectConfigFile);
+    CHECK_FALSE(config::EnvironmentOverridesActiveProvider(
+        loaded->config, loaded->sources, loaded->config.active_provider));
+    const config::ProviderConfig* provider =
+        config::FindProvider(loaded->config.providers, loaded->config.active_provider);
+    REQUIRE(provider != nullptr);
+    CHECK_FALSE(config::ProviderAuthConflictWarning(*provider).has_value());
+}
+
+TEST_CASE("LoadFromEnv: LUBAN 与 LUBANCODE 三字段真读取、标来源且 LUBAN 优先") {
+    SUBCASE("只设 LUBANCODE") {
+        LoadFromEnvSandbox sandbox;
+        sandbox.Set("LUBANCODE_BASE_URL", "https://lubancode-env.example.test");
+        sandbox.Set("LUBANCODE_API_KEY", "lubancode-env-key");
+        sandbox.Set("LUBANCODE_MODEL", "lubancode-env-model");
+        const auto loaded = config::LoadFromEnv();
+        REQUIRE(loaded.has_value());
+        CHECK(loaded->config.base_url == "https://lubancode-env.example.test");
+        CHECK(loaded->config.auth_token == "lubancode-env-key");
+        CHECK(loaded->config.model == "lubancode-env-model");
+        CHECK(loaded->sources.base_url == config::Source::LubancodeEnv);
+        CHECK(loaded->sources.auth_token == config::Source::LubancodeEnv);
+        CHECK(loaded->sources.model == config::Source::LubancodeEnv);
+    }
+    SUBCASE("只设 LUBAN") {
+        LoadFromEnvSandbox sandbox;
+        sandbox.Set("LUBAN_BASE_URL", "https://luban-env.example.test");
+        sandbox.Set("LUBAN_API_KEY", "luban-env-key");
+        sandbox.Set("LUBAN_MODEL", "luban-env-model");
+        const auto loaded = config::LoadFromEnv();
+        REQUIRE(loaded.has_value());
+        CHECK(loaded->config.base_url == "https://luban-env.example.test");
+        CHECK(loaded->config.auth_token == "luban-env-key");
+        CHECK(loaded->config.model == "luban-env-model");
+        CHECK(loaded->sources.base_url == config::Source::LubanEnv);
+        CHECK(loaded->sources.auth_token == config::Source::LubanEnv);
+        CHECK(loaded->sources.model == config::Source::LubanEnv);
+    }
+    SUBCASE("双设时 LUBAN 优先") {
+        LoadFromEnvSandbox sandbox;
+        sandbox.Set("LUBANCODE_BASE_URL", "https://losing.example.test");
+        sandbox.Set("LUBANCODE_API_KEY", "losing-key");
+        sandbox.Set("LUBANCODE_MODEL", "losing-model");
+        sandbox.Set("LUBAN_BASE_URL", "https://winning.example.test");
+        sandbox.Set("LUBAN_API_KEY", "winning-key");
+        sandbox.Set("LUBAN_MODEL", "winning-model");
+        const auto loaded = config::LoadFromEnv();
+        REQUIRE(loaded.has_value());
+        CHECK(loaded->config.base_url == "https://winning.example.test");
+        CHECK(loaded->config.auth_token == "winning-key");
+        CHECK(loaded->config.model == "winning-model");
+        CHECK(loaded->sources.base_url == config::Source::LubanEnv);
+        CHECK(loaded->sources.auth_token == config::Source::LubanEnv);
+        CHECK(loaded->sources.model == config::Source::LubanEnv);
+    }
+}
+
+TEST_CASE("LoadFromEnv: provider 显式 key_env 仍读取 ANTHROPIC_AUTH_TOKEN") {
+    LoadFromEnvSandbox sandbox;
+    sandbox.WriteProjectConfig(R"({
+        "active_provider":"env-provider",
+        "providers":[{
+            "name":"env-provider",
+            "base_url":"https://provider-env.example.test",
+            "wire":"anthropic-messages",
+            "auth":"env",
+            "key_env":"ANTHROPIC_AUTH_TOKEN",
+            "model":"provider-env-model"
+        }]
+    })");
+    sandbox.Set("ANTHROPIC_AUTH_TOKEN", "explicit-provider-env-token");
+
+    const auto loaded = config::LoadFromEnv();
+    REQUIRE(loaded.has_value());
+    CHECK(loaded->config.active_provider == "env-provider");
+    CHECK(loaded->config.auth_token == "explicit-provider-env-token");
+    CHECK(loaded->config.auth_mode == config::ProviderAuthMode::Env);
+    CHECK(loaded->sources.auth_token == config::Source::ProjectConfigFile);
+    const config::ProviderConfig* provider =
+        config::FindProvider(loaded->config.providers, loaded->config.active_provider);
+    REQUIRE(provider != nullptr);
+    CHECK(provider->key_env == "ANTHROPIC_AUTH_TOKEN");
+    CHECK_FALSE(config::ProviderAuthConflictWarning(*provider).has_value());
+}
 
 TEST_CASE("AddAllowedToolToSettingsLocal: 文件/目录不存在时按需创建,LoadSettingsLocal 读得回来") {
     TempCwdDir cwd;
@@ -2729,7 +2796,7 @@ TEST_CASE("wire 更名迁移: 顶层单 provider 旧写法经 MergeConfig 归一
     file.api_key = "sk-x";
     file.model = "m";
 
-    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), file, EmptyGenericEnv());
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(merged.has_value());
     CHECK(merged->config.wire == config::Wire::ChatCompletions);
     // SaveConfigFile 的写盘值出自 ProviderWireName(枚举唯一出口),顶层
@@ -2773,7 +2840,7 @@ TEST_CASE("MergeConfig: 项目级 providers 整段压过全局") {
         .model = "global-model",
     }};
 
-    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(merged.has_value());
     REQUIRE(merged->config.providers.size() == 1);
     CHECK(merged->config.providers.front().name == "project");
@@ -2851,7 +2918,7 @@ TEST_CASE("active_provider: 解析、分层并展开对应 provider") {
         .extra_body = nlohmann::json{{"reasoning", "high"}},
         .extra_headers = {{"X-Test", "yes"}},
     }};
-    auto merged = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global, EmptyGenericEnv());
+    auto merged = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global);
     REQUIRE(merged.has_value());
     CHECK(merged->config.active_provider == "sub-openai");
     CHECK(merged->sources.active_provider == config::Source::GlobalConfigFile);
@@ -2890,7 +2957,7 @@ TEST_CASE("active_provider: LUBANCODE 专属环境变量仍压过 provider,旧�
     env.base_url = "https://env.test";
     env.api_key = "env-key";
     env.model = "env-model";
-    auto merged = config::MergeConfig(env, std::nullopt, global, EmptyGenericEnv());
+    auto merged = config::MergeConfig(env, std::nullopt, global);
     REQUIRE(merged.has_value());
     REQUIRE(config::ApplyConfiguredActiveProvider(*merged));
     CHECK(merged->config.base_url == "https://env.test");
@@ -2926,7 +2993,7 @@ TEST_CASE("active_provider: 项目级选择可钉住全局 providers") {
         .model = "selected-model",
     }};
 
-    auto merged = config::MergeConfig(EmptyLubancodeEnv(), project, global, EmptyGenericEnv());
+    auto merged = config::MergeConfig(EmptyLubancodeEnv(), project, global);
     REQUIRE(merged.has_value());
     REQUIRE(config::ApplyConfiguredActiveProvider(*merged));
     CHECK(merged->config.base_url == "https://selected.test");
@@ -3697,7 +3764,7 @@ TEST_CASE("ParseFileConfigJson: 顶层(单 provider 扁平配置)也认 extra_bo
 TEST_CASE("MergeConfig: 顶层 extra_body/extra_headers 没配,最终是空(不启用)") {
     const auto file_config = config::ParseFileConfigJson("{}", "test.json");
     REQUIRE(file_config.has_value());
-    const auto merged = config::MergeConfig(config::LubancodeEnvValues{}, *file_config, config::GenericEnvValues{});
+    const auto merged = config::MergeConfig(config::LubancodeEnvValues{}, *file_config);
     REQUIRE(merged.has_value());
     CHECK(merged->config.extra_body.empty());
     CHECK(merged->config.extra_headers.empty());
@@ -3707,7 +3774,7 @@ TEST_CASE("MergeConfig: 顶层 extra_body/extra_headers 配了就整段进最终
     const auto file_config = config::ParseFileConfigJson(
         R"({"extra_body":{"reasoning_effort":"max"},"extra_headers":{"X-Foo":"bar"}})", "test.json");
     REQUIRE(file_config.has_value());
-    const auto merged = config::MergeConfig(config::LubancodeEnvValues{}, *file_config, config::GenericEnvValues{});
+    const auto merged = config::MergeConfig(config::LubancodeEnvValues{}, *file_config);
     REQUIRE(merged.has_value());
     CHECK(merged->config.extra_body.at("reasoning_effort") == "max");
     CHECK(merged->config.extra_headers.at("X-Foo") == "bar");
@@ -3904,7 +3971,7 @@ TEST_CASE("SetProviderStreamUsage: 改值并置声明位,找不到名字返回 f
 // ---------------------------------------------------------------------------
 
 TEST_CASE("goals 配置:默认关、默认预算;features.goals 打开") {
-    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.features_goals == false);
     CHECK(result->config.goals.max_elapsed_ms == 2 * 60 * 60 * 1000);
@@ -3920,7 +3987,7 @@ TEST_CASE("goals 配置:默认关、默认预算;features.goals 打开") {
     REQUIRE(parsed.has_value());
     CHECK(parsed->features_goals.has_value());
     CHECK(*parsed->features_goals == true);
-    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), *parsed, EmptyGenericEnv());
+    const auto merged = config::MergeConfig(EmptyLubancodeEnv(), *parsed);
     REQUIRE(merged.has_value());
     CHECK(merged->config.features_goals == true);
     CHECK(merged->config.goals.max_elapsed_ms == 90 * 60 * 1000);
@@ -3943,7 +4010,7 @@ TEST_CASE("goals 配置:duration 各单位与坏值") {
         const auto parsed = config::ParseFileConfigJson(
             std::string(R"({"goals":{"max_elapsed":")") + c.text + R"("}})", "t.json");
         REQUIRE(parsed.has_value());
-        const auto merged = config::MergeConfig(EmptyLubancodeEnv(), *parsed, EmptyGenericEnv());
+        const auto merged = config::MergeConfig(EmptyLubancodeEnv(), *parsed);
         REQUIRE(merged.has_value());
         CHECK(merged->config.goals.max_elapsed_ms == c.expect_ms);
     }
@@ -3951,7 +4018,7 @@ TEST_CASE("goals 配置:duration 各单位与坏值") {
         const auto parsed = config::ParseFileConfigJson(
             std::string(R"({"goals":{"max_elapsed":")") + bad + R"("}})", "t.json");
         REQUIRE(parsed.has_value());
-        const auto merged = config::MergeConfig(EmptyLubancodeEnv(), *parsed, EmptyGenericEnv());
+        const auto merged = config::MergeConfig(EmptyLubancodeEnv(), *parsed);
         REQUIRE(merged.has_value());
         CHECK(merged->config.goals.max_elapsed_ms == 2 * 60 * 60 * 1000);
     }
@@ -4017,7 +4084,7 @@ TEST_CASE("MergeConfig: project_doc_fallback_filenames 项目级压全局,没配
         R"({"project_doc_fallback_filenames": ["TEAM.md"]})", "p.json");
     REQUIRE(with_names.has_value());
     const auto merged = config::MergeConfig(EmptyLubancodeEnv(), std::optional(*with_names),
-                                            std::nullopt, EmptyGenericEnv());
+                                            std::nullopt);
     REQUIRE(merged.has_value());
     REQUIRE(merged->config.project_doc_fallback_filenames.size() == 1);
     CHECK(merged->config.project_doc_fallback_filenames[0] == "TEAM.md");
@@ -4027,7 +4094,7 @@ TEST_CASE("MergeConfig: project_doc_fallback_filenames 项目级压全局,没配
     config::FileConfig global;
     global.project_doc_fallback_filenames = std::vector<std::string>{"GLOBAL.md"};
     const auto from_global =
-        config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global, EmptyGenericEnv());
+        config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global);
     REQUIRE(from_global.has_value());
     REQUIRE(from_global->config.project_doc_fallback_filenames.size() == 1);
     CHECK(from_global->config.project_doc_fallback_filenames[0] == "GLOBAL.md");
@@ -4038,13 +4105,13 @@ TEST_CASE("MergeConfig: project_doc_fallback_filenames 项目级压全局,没配
         config::ParseFileConfigJson(R"({"project_doc_fallback_filenames": []})", "p.json");
     REQUIRE(project_clear.has_value());
     const auto cleared = config::MergeConfig(EmptyLubancodeEnv(), std::optional(*project_clear),
-                                             global, EmptyGenericEnv());
+                                             global);
     REQUIRE(cleared.has_value());
     CHECK(cleared->config.project_doc_fallback_filenames.empty());
 
     // 两级都没配:空表(默认不启用)。
     const auto none =
-        config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt, EmptyGenericEnv());
+        config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, std::nullopt);
     REQUIRE(none.has_value());
     CHECK(none->config.project_doc_fallback_filenames.empty());
     CHECK(none->sources.project_doc_fallback_filenames == config::Source::Default);

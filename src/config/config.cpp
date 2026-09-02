@@ -305,7 +305,7 @@ const ProviderConfig* FindProvider(const std::vector<ProviderConfig>& providers,
 namespace {
 
 bool IsEnvironmentSource(Source source) {
-    return source == Source::LubancodeEnv || source == Source::GenericEnv;
+    return source == Source::LubanEnv || source == Source::LubancodeEnv;
 }
 
 bool EnvironmentOverridesProviderBinding(const Config& config, const ConfigSources& sources,
@@ -551,14 +551,14 @@ bool ReplaceProvider(std::vector<ProviderConfig>& providers, const std::string& 
 
 std::string ToString(Source source) {
     switch (source) {
+        case Source::LubanEnv:
+            return cli::tr("config.source.luban_env");
         case Source::LubancodeEnv:
             return cli::tr("config.source.lubancode_env");
         case Source::ProjectConfigFile:
             return cli::tr("config.source.project_config_file");
         case Source::GlobalConfigFile:
             return cli::tr("config.source.global_config_file");
-        case Source::GenericEnv:
-            return cli::tr("config.source.generic_env");
         case Source::Default:
             return cli::tr("config.source.default");
     }
@@ -2449,8 +2449,7 @@ FileStrPick PickFileStr(const std::optional<FileConfig>& project_file,
 
 std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& lubancode_env,
                                                        const std::optional<FileConfig>& project_file,
-                                                       const std::optional<FileConfig>& global_file,
-                                                       const GenericEnvValues& generic_env) {
+                                                       const std::optional<FileConfig>& global_file) {
     ConfigResult result;
 
     // 配置文件那一级统一走这个:项目级优先,回退全局(见 PickFileStr)。
@@ -2458,8 +2457,7 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         return PickFileStr(project_file, global_file, field);
     };
 
-    // ---- 第一步:解出 wire。专属 env(1 级)> 项目级(2 级)> 全局(3 级)>
-    // 默认值——通用环境变量里没有"wire"这一说。 ----
+    // ---- 第一步:解出 wire。LUBANCODE_WIRE > 项目级 > 全局 > 默认值。 ----
     std::string wire_str;
     Source wire_source = Source::Default;
     std::string wire_error_origin;  // 报错时说清楚这个坏值是从哪儿来的
@@ -2485,44 +2483,37 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     result.config.wire = wire;
     result.sources.wire = wire_source;
 
-    const bool is_anthropic = (wire == Wire::Anthropic);
     // base_url、model 没有内置默认值(lubancode 不绑死哪一家模型服务)——
     // 各级都没配到时就是空串,来源记 Default,留给上层(初次配置向导 /
     // RequireConfigured)去拦。
     const std::string default_base_url;
     const std::string default_model;
-    const std::optional<std::string>& generic_base_url =
-        is_anthropic ? generic_env.anthropic_base_url : generic_env.openai_base_url;
-    const std::optional<std::string>& generic_api_key =
-        is_anthropic ? generic_env.anthropic_auth_token : generic_env.openai_api_key;
-    const std::optional<std::string>& generic_model =
-        is_anthropic ? generic_env.anthropic_model : generic_env.openai_model;
 
-    // ---- base_url:env > 项目级 > 全局 > 通用 env(按 wire 挑)> 默认值 ----
-    if (lubancode_env.base_url.has_value()) {
+    // ---- base_url:LUBAN_* > LUBANCODE_* > 项目级 > 全局 > 默认值 ----
+    if (lubancode_env.luban_base_url.has_value()) {
+        result.config.base_url = *lubancode_env.luban_base_url;
+        result.sources.base_url = Source::LubanEnv;
+    } else if (lubancode_env.base_url.has_value()) {
         result.config.base_url = *lubancode_env.base_url;
         result.sources.base_url = Source::LubancodeEnv;
     } else if (const auto p = pick(&FileConfig::base_url); p.value != nullptr) {
         result.config.base_url = *p.value;
         result.sources.base_url = p.source;
-    } else if (generic_base_url.has_value()) {
-        result.config.base_url = *generic_base_url;
-        result.sources.base_url = Source::GenericEnv;
     } else {
         result.config.base_url = default_base_url;
         result.sources.base_url = Source::Default;
     }
 
     // ---- model:同上 ----
-    if (lubancode_env.model.has_value()) {
+    if (lubancode_env.luban_model.has_value()) {
+        result.config.model = *lubancode_env.luban_model;
+        result.sources.model = Source::LubanEnv;
+    } else if (lubancode_env.model.has_value()) {
         result.config.model = *lubancode_env.model;
         result.sources.model = Source::LubancodeEnv;
     } else if (const auto p = pick(&FileConfig::model); p.value != nullptr) {
         result.config.model = *p.value;
         result.sources.model = p.source;
-    } else if (generic_model.has_value()) {
-        result.config.model = *generic_model;
-        result.sources.model = Source::GenericEnv;
     } else {
         result.config.model = default_model;
         result.sources.model = Source::Default;
@@ -2530,15 +2521,15 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
 
     // ---- api_key:同上,但没有内置默认值——都没有时留空,来源记成 Default,
     // 不在这里报错(报错交给 RequireApiKey,见该函数注释)。 ----
-    if (lubancode_env.api_key.has_value()) {
+    if (lubancode_env.luban_api_key.has_value()) {
+        result.config.auth_token = *lubancode_env.luban_api_key;
+        result.sources.auth_token = Source::LubanEnv;
+    } else if (lubancode_env.api_key.has_value()) {
         result.config.auth_token = *lubancode_env.api_key;
         result.sources.auth_token = Source::LubancodeEnv;
     } else if (const auto p = pick(&FileConfig::api_key); p.value != nullptr) {
         result.config.auth_token = *p.value;
         result.sources.auth_token = p.source;
-    } else if (generic_api_key.has_value()) {
-        result.config.auth_token = *generic_api_key;
-        result.sources.auth_token = Source::GenericEnv;
     } else {
         result.config.auth_token.clear();
         result.sources.auth_token = Source::Default;
@@ -3375,10 +3366,9 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
 }
 
 std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& lubancode_env,
-                                                       const std::optional<FileConfig>& file_config,
-                                                       const GenericEnvValues& generic_env) {
+                                                       const std::optional<FileConfig>& file_config) {
     // 只有一份配置文件时当项目级看待(全局留空),来源统一记 ProjectConfigFile。
-    return MergeConfig(lubancode_env, file_config, std::nullopt, generic_env);
+    return MergeConfig(lubancode_env, file_config, std::nullopt);
 }
 
 std::expected<void, std::string> RequireApiKey(const ConfigResult& result) {
@@ -3397,9 +3387,7 @@ std::expected<void, std::string> RequireApiKey(const ConfigResult& result) {
         return std::unexpected(
             cli::trf("error.api_key_missing_provider", provider->name, provider->key_env));
     }
-    const std::string generic_api_key_name =
-        result.config.wire == Wire::Anthropic ? "ANTHROPIC_AUTH_TOKEN" : "OPENAI_API_KEY";
-    return std::unexpected(cli::trf("error.api_key_missing", generic_api_key_name));
+    return std::unexpected(cli::tr("error.api_key_missing"));
 }
 
 std::string MaskApiKey(const std::string& api_key) {
@@ -3439,7 +3427,7 @@ std::expected<void, std::string> RequireConfigured(const ConfigResult& result) {
             joined_env += " / ";
         }
         joined += missing[i];
-        joined_env += "LUBANCODE_";
+        joined_env += "LUBAN_";
         for (const char c : missing[i]) {
             joined_env += static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         }
@@ -4071,6 +4059,9 @@ std::expected<std::string, std::string> ReplaceProviderInGlobalConfig(const std:
 
 std::expected<ConfigResult, std::string> LoadFromEnv() {
     LubancodeEnvValues lubancode_env;
+    lubancode_env.luban_base_url = GetEnv("LUBAN_BASE_URL");
+    lubancode_env.luban_api_key = GetEnv("LUBAN_API_KEY");
+    lubancode_env.luban_model = GetEnv("LUBAN_MODEL");
     lubancode_env.wire = GetEnv("LUBANCODE_WIRE");
     lubancode_env.base_url = GetEnv("LUBANCODE_BASE_URL");
     lubancode_env.api_key = GetEnv("LUBANCODE_API_KEY");
@@ -4127,15 +4118,7 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
         return std::unexpected(loaded.error());
     }
 
-    GenericEnvValues generic_env;
-    generic_env.anthropic_base_url = GetEnv("ANTHROPIC_BASE_URL");
-    generic_env.anthropic_auth_token = GetEnv("ANTHROPIC_AUTH_TOKEN");
-    generic_env.anthropic_model = GetEnv("ANTHROPIC_MODEL");
-    generic_env.openai_base_url = GetEnv("OPENAI_BASE_URL");
-    generic_env.openai_api_key = GetEnv("OPENAI_API_KEY");
-    generic_env.openai_model = GetEnv("OPENAI_MODEL");
-
-    auto merged = MergeConfig(lubancode_env, loaded->project, loaded->global, generic_env);
+    auto merged = MergeConfig(lubancode_env, loaded->project, loaded->global);
     if (merged.has_value()) {
         ApplyConfiguredActiveProvider(*merged);
         if (loaded->project.has_value()) {

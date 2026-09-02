@@ -17,7 +17,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 }
 ```
 
-不想让密钥落盘，就把 `api_key` 换成环境变量 `LUBANCODE_API_KEY`。要管多家服务，优先用下文 `providers` 数组与 `key_env`。
+不想让密钥落盘，就把 `api_key` 换成环境变量 `LUBAN_API_KEY`（兼容保留 `LUBANCODE_API_KEY`）。要管多家服务，优先用下文 `providers` 数组与 `key_env`。
 
 ### 一份较完整的例子
 
@@ -89,13 +89,15 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 
 **只在主目录里跑**(`cwd` 就是主目录)时,只当项目级一份读,不重复。
 
-字段按**五级**逐个决,高到低:
+字段逐个决,高到低:
 
-1. **`LUBANCODE_*` 专属环境变量**。
-2. **项目级** `config.json`。
-3. **全局** `config.json`。
-4. **通用环境变量**(向后兼容,跟 Claude Code、Codex 等工具共用同名变量容易撞车,建议改用第 1 级):`wire=anthropic-messages` 时读 `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN`/`ANTHROPIC_MODEL`;其余 wire 读 `OPENAI_BASE_URL`/`OPENAI_API_KEY`/`OPENAI_MODEL`。Gemini 预设另可用自己的 `key_env`，内置目录写的是 `GEMINI_API_KEY`。
+1. **`LUBAN_*` 顶层连接环境变量**：`LUBAN_BASE_URL`、`LUBAN_API_KEY`、`LUBAN_MODEL`。
+2. **`LUBANCODE_*` 专属环境变量**（兼容保留；与对应 `LUBAN_*` 同设时后者优先）。
+3. **项目级** `config.json`。
+4. **全局** `config.json`。
 5. **内置默认值**。
+
+顶层解析**不再隐式读取** `ANTHROPIC_*`、`OPENAI_*` 等通名，避免被 Claude Code、Codex 或代理注入的变量污染。唯一例外是 provider 的 `key_env`：它是用户显式指定的任意变量名（包括通名），仍会照常读取，不做前缀拦截。例如上文 provider 明写 `"key_env": "OPENAI_API_KEY"` 时，该变量仍有效。
 
 逐字段合并:项目级写了某字段就用项目级那一份,项目级缺的字段回退全局,全局也缺再往下一级找。`mcpServers`、`search`、`lsp`、`status_panel` 这几段是**整段回退**(不做键级混合)——项目级写了就用项目级那一整段,否则用全局那一整段。例外是 `hooks`:全局与项目两层**相加**(两层都跑,项目级删不掉全局的钩子;项目级钩子须经信任审查,见 [Hooks 手册](../features/extensions/hooks.md))。`tool_search_threshold`、`tool_search_token_floor`、`deferred_tool_mode`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs`、`request_hard_timeout_secs` 只从配置文件(项目级 > 全局)或内置默认值来,没有环境变量这一级。
 
@@ -103,7 +105,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 
 ### 为什么要有专属环境变量
 
-不少人机器上已经装了 Claude Code、Codex 之类的工具,全局环境变量里早设好了 `ANTHROPIC_BASE_URL`、`ANTHROPIC_AUTH_TOKEN`——那是给那些工具专用的中转服务配的,lubancode 要是也去读,轻则连错服务,重则被中转拒之门外。推荐直接用 `LUBANCODE_*` 专属变量,或放一份配置文件,不跟别的工具打架。
+不少人机器上已经装了 Claude Code、Codex 之类的工具,其 shell 可能带着 `ANTHROPIC_*`、`OPENAI_*` 通名。lubancode 顶层不会读取这些变量；请用 `LUBAN_*`，既有 `LUBANCODE_*` 仍兼容，或放一份配置文件。provider 显式写出的 `key_env` 不受这条限制。
 
 ## 二、config.json 字段表
 
@@ -292,10 +294,13 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 
 会话内 `/language` 即时切换。机制、回退链、键名规矩详见[界面多语言](../development/i18n.md)。
 
-## 三、LUBANCODE_* 环境变量表
+## 三、LUBAN_* / LUBANCODE_* 环境变量表
 
 | 环境变量 | 对应字段 | 取值 |
 | --- | --- | --- |
+| `LUBAN_BASE_URL` | `base_url` | 模型服务根地址；优先于 `LUBANCODE_BASE_URL`。 |
+| `LUBAN_API_KEY` | `api_key` | 模型服务认证值；优先于 `LUBANCODE_API_KEY`。 |
+| `LUBAN_MODEL` | `model` | 模型名；优先于 `LUBANCODE_MODEL`。 |
 | `LUBANCODE_WIRE` | `wire` | 四条规范名；旧名 `anthropic`、`responses`、`chat_completions`、`chat` 也认。 |
 | `LUBANCODE_BASE_URL` | `base_url` | 模型服务根地址。 |
 | `LUBANCODE_API_KEY` | `api_key` | 模型服务认证值。 |
@@ -312,7 +317,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 | `LUBANCODE_FORCE_COLOR` | 终端颜色开关 | 设为 `1` 时,管道/重定向也强制尝试输出颜色;不写入 `config.json`。 |
 | `LUBANCODE_CONFIRM_MODE` | 会话起手确认档 | `confirm`、`auto` 或 `yolo`；不写入 `config.json`，优先级低于 `--yes`，高于 `settings.local.json`。 |
 
-环境变量设为空串,按没设处理。`hooks`、`mcpServers`、`search`、`lsp`、`tool_search_threshold`、`tool_search_token_floor`、`deferred_tool_mode`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs`、`request_hard_timeout_secs` 没有对应的 `LUBANCODE_*` 变量,只能写配置文件。
+环境变量设为空串,按没设处理。`LUBAN_*` 与对应 `LUBANCODE_*` 同设时采用 `LUBAN_*`。`ANTHROPIC_*`/`OPENAI_*` 不参与顶层解析；provider.key_env 显式指定它们时例外。`hooks`、`mcpServers`、`search`、`lsp`、`tool_search_threshold`、`tool_search_token_floor`、`deferred_tool_mode`、`connect_timeout_ms`、`stream_idle_timeout_secs`、`request_timeout_secs`、`request_hard_timeout_secs` 没有对应的 `LUBANCODE_*` 变量,只能写配置文件。
 
 交互命令 `/update` 使用当前配置的 `connect_timeout_ms` 与 `request_timeout_secs`。启动参数 `--check-update` 在加载配置前执行，故用内置默认超时。两者都只访问 GitHub Release API，不带模型密钥。
 

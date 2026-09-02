@@ -525,9 +525,11 @@ int wmain(int argc, wchar_t** argv) {
     SetEnv(L"LUBANCODE_BASE_URL", L"http://127.0.0.1:" + std::to_wstring(port));
     SetEnv(L"LUBANCODE_API_KEY", L"body-render-driver");
     SetEnv(L"LUBANCODE_MODEL", L"fake-model");
-    SetEnv(L"ANTHROPIC_BASE_URL", L"");
-    SetEnv(L"ANTHROPIC_AUTH_TOKEN", L"");
-    SetEnv(L"ANTHROPIC_MODEL", L"");
+    // 通名环境变量污染哨兵：这些值若重新参与合并，驱动器就不会命中本地假后端。
+    SetEnv(L"ANTHROPIC_BASE_URL", L"https://generic-env-must-be-ignored.invalid");
+    SetEnv(L"ANTHROPIC_AUTH_TOKEN", L"generic-auth-token-must-be-ignored");
+    SetEnv(L"ANTHROPIC_API_KEY", L"generic-api-key-must-be-ignored");
+    SetEnv(L"ANTHROPIC_MODEL", L"generic-model-must-be-ignored");
     SetEnv(L"NO_PROXY", L"127.0.0.1,localhost");
     SetEnv(L"http_proxy", L"");
     SetEnv(L"https_proxy", L"");

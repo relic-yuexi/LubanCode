@@ -228,7 +228,7 @@ TEST_CASE("config: ptc 段解析 + 合并(项目级压全局,整段回退)") {
     REQUIRE(global.has_value());
 
     const auto merged = MergeConfig(LubancodeEnvValues{}, std::optional<FileConfig>{project.value()},
-                                    std::optional<FileConfig>{global.value()}, GenericEnvValues{});
+                                    std::optional<FileConfig>{global.value()});
     REQUIRE(merged.has_value());
     CHECK(merged->config.tool_calling == ToolCallingMode::Programmatic);
     CHECK(merged->sources.tool_calling == Source::ProjectConfigFile);
@@ -242,7 +242,7 @@ TEST_CASE("config: ptc 段解析 + 合并(项目级压全局,整段回退)") {
 
     // 只有全局段:全局生效。
     const auto merged_global = MergeConfig(LubancodeEnvValues{}, std::optional<FileConfig>{},
-                                           std::optional<FileConfig>{global.value()}, GenericEnvValues{});
+                                           std::optional<FileConfig>{global.value()});
     REQUIRE(merged_global.has_value());
     CHECK(merged_global->config.tool_calling == ToolCallingMode::Json);
     CHECK(merged_global->sources.tool_calling == Source::GlobalConfigFile);
@@ -252,7 +252,7 @@ TEST_CASE("config: ptc 段解析 + 合并(项目级压全局,整段回退)") {
 
     // 都没有:默认 json + 默认限额。
     const auto merged_none = MergeConfig(LubancodeEnvValues{}, std::optional<FileConfig>{},
-                                         std::optional<FileConfig>{}, GenericEnvValues{});
+                                         std::optional<FileConfig>{});
     REQUIRE(merged_none.has_value());
     CHECK(merged_none->config.tool_calling == ToolCallingMode::Json);
     CHECK(merged_none->config.ptc.wall_clock_ms == 30000);

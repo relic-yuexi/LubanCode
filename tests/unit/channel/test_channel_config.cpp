@@ -10,7 +10,6 @@
 #include "config/config.hpp"
 
 using namespace lubancode::channel;
-using lubancode::config::GenericEnvValues;
 using lubancode::config::LubancodeEnvValues;
 
 namespace {
@@ -120,11 +119,10 @@ TEST_CASE("密钥来源三种 + 明文兼容") {
 
 TEST_CASE("config 合并:全局 channels 进 Config,项目级 channels 明拒,没段零变化") {
     const LubancodeEnvValues env{};
-    const GenericEnvValues generic{};
 
     // 没配:channels 空 map,不报错。
     {
-        const auto merged = lubancode::config::MergeConfig(env, std::nullopt, std::nullopt, generic);
+        const auto merged = lubancode::config::MergeConfig(env, std::nullopt, std::nullopt);
         REQUIRE(merged.has_value());
         CHECK(merged->config.channels.empty());
     }
@@ -134,7 +132,7 @@ TEST_CASE("config 合并:全局 channels 进 Config,项目级 channels 明拒,�
             R"({"channels": {"qqbot": {"accounts": {"main": {"enabled": true}}}}})",
             "global.json");
         REQUIRE(global.has_value());
-        const auto merged = lubancode::config::MergeConfig(env, std::nullopt, *global, generic);
+        const auto merged = lubancode::config::MergeConfig(env, std::nullopt, *global);
         REQUIRE(merged.has_value());
         REQUIRE(merged->config.channels.count("qqbot") == 1);
         CHECK(merged->config.channels.at("qqbot").accounts.at("main").enabled);
@@ -144,7 +142,7 @@ TEST_CASE("config 合并:全局 channels 进 Config,项目级 channels 明拒,�
         const auto project = lubancode::config::ParseFileConfigJson(
             R"({"channels": {"qqbot": {"enabled": true}}})", "project.json");
         REQUIRE(project.has_value());
-        const auto merged = lubancode::config::MergeConfig(env, *project, std::nullopt, generic);
+        const auto merged = lubancode::config::MergeConfig(env, *project, std::nullopt);
         REQUIRE_FALSE(merged.has_value());
         CHECK(merged.error().find("channels") != std::string::npos);
         CHECK(merged.error().find("项目") != std::string::npos);

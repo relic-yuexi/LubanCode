@@ -395,8 +395,7 @@ TEST_CASE("MergeConfig: hooks 相加——项目级不再整段盖掉全局") {
         "D:/repo/.lubancode/config.json");
 
     config::LubancodeEnvValues empty_env{};
-    config::GenericEnvValues empty_generic{};
-    const auto merged = config::MergeConfig(empty_env, project_file, global_file, empty_generic);
+    const auto merged = config::MergeConfig(empty_env, project_file, global_file);
     REQUIRE(merged.has_value());
 
     REQUIRE(merged->config.hooks.pre_tool.size() == 1);
@@ -427,8 +426,7 @@ TEST_CASE("MergeConfig: 只有一边有旧格式 hooks → 弃用提示(不提�
     const auto global_file = MakeHooksFile(R"({"pre_tool": [{"command": "x"}]})",
                                             "C:/home/.lubancode/config.json");
     config::LubancodeEnvValues empty_env{};
-    config::GenericEnvValues empty_generic{};
-    const auto merged = config::MergeConfig(empty_env, std::nullopt, global_file, empty_generic);
+    const auto merged = config::MergeConfig(empty_env, std::nullopt, global_file);
     REQUIRE(merged.has_value());
     REQUIRE(merged->config.hooks.pre_tool.size() == 1);
     bool has_deprecation = false;

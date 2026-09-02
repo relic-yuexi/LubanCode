@@ -246,20 +246,20 @@ TEST_CASE("MergeConfig: language 四级合并——env 压配置文件,配置文
     file.source_path = "/tmp/.lubancode/config.json";
 
     // 只有配置文件。
-    auto result = config::MergeConfig(env, file, config::GenericEnvValues{});
+    auto result = config::MergeConfig(env, file);
     REQUIRE(result.has_value());
     CHECK(result->config.language == "en");
     CHECK(result->sources.language == config::Source::ProjectConfigFile);
 
     // env 压过配置文件。
     env.language = "ja";
-    result = config::MergeConfig(env, file, config::GenericEnvValues{});
+    result = config::MergeConfig(env, file);
     REQUIRE(result.has_value());
     CHECK(result->config.language == "ja");
     CHECK(result->sources.language == config::Source::LubancodeEnv);
 
     // 四级全空:留空(= 跟系统),来源 Default。
-    result = config::MergeConfig(config::LubancodeEnvValues{}, std::nullopt, config::GenericEnvValues{});
+    result = config::MergeConfig(config::LubancodeEnvValues{}, std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.language.empty());
     CHECK(result->sources.language == config::Source::Default);
