@@ -4,6 +4,7 @@
 
 ## [v0.26.176] - 2026-09-03
 
+- **延迟工具默认走 proxy_reference（按需引用），不再默认断缓存。** 真机三档质量对照（同模型同任务同温度跑 disabled/proxy/legacy，8 任务全机判）过门后按 SOP 切默认：proxy 任务成功 9/9 不低于两档、参数首发合格持平、误选全零；legacy 的 cache-hostile 实测可见——7/8 任务命中即断 cache epoch，非缓存重付全场最高。回退无需改码：配置显式写 `legacy_expand`/`disabled` 任一即压过默认；`auto`（现为未配置默认）对声明 `deferred_tools` 的 Claude 模型走原生引用。证据与成本全账在 `eval/deferred_quality/report.md`。
 - **派工任务书自动带本机环境附录。** 子代理开工前，宿主探测一次构建环境（preset 挑法、`_deps` 离线依赖树齐不齐、ctest 规矩），以 `[宿主注入·本机环境附录]` 标注附在任务 prompt 尾部——离线 configure 路径、临时 USERPROFILE、动头文件 `--clean-first` 全替它写好，不再自己摸环境烧 turn 烧 token（对照实战：三段套话裸派的子代理全程自摸环境）。探测一次会话内缓存，用户正文一个字节不动。
 - **任务书有了六件套模板。** 派工参数 `template: full` 给 prompt 套引导壳（单子路径/范围红线/环境实情/纪律/完工标准/回报格式），任务原文逐字节居中，环境附录永远殿后；不套不传即旧路。
 - **顺手修了文案嵌入的老 bug。** CMake 嵌入正则把空白类写成 `\\t`，落到正则成字面 't'——键名以 t 开头被吃一个字母（`template.full` 嵌成 `emplate.full` 查表落空）。单反斜杠归位，生成表仅该键一行变化。362/362 全绿。

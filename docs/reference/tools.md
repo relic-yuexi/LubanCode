@@ -25,21 +25,21 @@
 
 | 档 | 顶层定义 | 发现结果 | 缓存口径 | 状态 |
 | --- | --- | --- | --- | --- |
-| `legacy_expand` | 命中后 schema 扩写回顶层 `tools` + 延迟索引删行 | 文字结果 + loaded 集合 | **cache-hostile**：每次命中断一次前缀 | 兼容档，当前默认（未配置即此档），迁移窗内保留 |
-| `proxy_reference` | 恒为 `tool_search` + `tool_invoke` | 结构化 schema + `tool_ref` 追加到历史尾部 | system/tools 指纹不变，messages 只追加 | P1 新路，opt-in |
-| `native_reference` | 延迟定义照发但标 `defer_loading` | provider 服务端 `tool_reference` | provider 保证 deferred 定义不改缓存前缀 | P3，仅 anthropic wire + 模型目录声明 `deferred_tools` 时生效 |
+| `legacy_expand` | 命中后 schema 扩写回顶层 `tools` + 延迟索引删行 | 文字结果 + loaded 集合 | **cache-hostile**：每次命中断一次前缀 | 兼容档，迁移窗内保留（显式写才生效） |
+| `proxy_reference` | 恒为 `tool_search` + `tool_invoke` | 结构化 schema + `tool_ref` 追加到历史尾部 | system/tools 指纹不变，messages 只追加 | P1 新路，2026-09-03 真机质量对照过门后的默认（未配置经 `auto` 落此档） |
+| `native_reference` | 延迟定义照发但标 `defer_loading` | provider 服务端 `tool_reference` | provider 保证 deferred 定义不改缓存前缀 | P3，仅 anthropic wire + 模型目录声明 `deferred_tools` 时生效（`auto` 档对声明模型自动落此档） |
 | `disabled` | 全量常驻 | — | 恒定 | 压过两道闸，强制全量 |
-| `auto` | 同命中档 | 同命中档 | 同命中档 | 能力驱动：明确支持原生引用的模型走 `native_reference`，其余落宿主推荐档（当前仍是 `legacy_expand`） |
+| `auto` | 同命中档 | 同命中档 | 同命中档 | 能力驱动（未配置空串即此档）：明确支持原生引用的模型走 `native_reference`，其余落宿主推荐档 `proxy_reference` |
 
-`legacy_expand` 是 **cache-hostile** 的：发现一次工具，`system`（延迟索引删行）与 `tools`（schema 扩写）两处旧前缀同时改，长会话攒下的消息缓存接不上。启动时若在此档运行（含未配置的默认档），横幅会明标这一条。
+`legacy_expand` 是 **cache-hostile** 的：发现一次工具，`system`（延迟索引删行）与 `tools`（schema 扩写）两处旧前缀同时改，长会话攒下的消息缓存接不上。真机对照实测（`eval/deferred_quality/report.md`）：8 任务里 7 任务命中即断 cache epoch，非缓存 input 重付全场最高。启动时若显式在此档运行，横幅会明标这一条。
 
 ### 切默认与迁移窗（P4）
 
-真机质量对照（同模型、同任务、同温度跑 `disabled`/`proxy_reference`/`legacy_expand` 三档，单子 §12.5）跑完并过门之前，默认档保持 `legacy_expand` 不动——**未跑质量对照不把 proxy 强推为默认**。对照过门后切默认只动三处，机制已就位：
+真机质量对照（同模型、同任务、同温度跑 `disabled`/`proxy_reference`/`legacy_expand` 三档，单子 §12.5）已于 2026-09-03 跑完并过门（ccmoon/gpt-5.6-sol，30 枚 MCP stub 工具，8 任务 × 3 档 + T2 复测；proxy 任务成功 9/9、参数首发合格 11/11、误选 0，不退步于另两档；证据与成本全账见 `eval/deferred_quality/report.md`）。切默认三步已同笔落地：
 
 1. `src/tools/deferred_tool_resolver.hpp` 的 `kRecommendedDeferredToolMode` 从 `LegacyExpand` 翻成 `ProxyReference`（`auto` 档与直构路的回落点）；
-2. `ParseDeferredToolMode` 的空串分支从 `LegacyExpand` 改为按 `auto` 档解析（未配置用户：明确支持模型落 `native_reference`，其余落 `proxy_reference`）；
-3. [配置手册](configuration.md)字段表里 `deferred_tool_mode` 的默认值行同步改。
+2. `ParseDeferredToolMode` 的空串分支改为 `nullopt`，未配置空串与 `auto` 同待遇走 `ResolveDeferredToolMode` 能力解析（装配层）与推荐档（直构路）；
+3. [配置手册](configuration.md)字段表里 `deferred_tool_mode` 的默认值行同步改（空 = 按 `auto` 解析）。
 
 回退无需改码：配置文件显式写 `legacy_expand`、`disabled`、`proxy_reference` 任一即压过默认；`auto` 落 `native_reference` 后想强制通用路，显式写 `proxy_reference`。
 

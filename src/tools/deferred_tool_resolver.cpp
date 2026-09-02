@@ -12,7 +12,13 @@
 namespace lubancode::tools {
 
 std::optional<DeferredToolMode> ParseDeferredToolMode(const std::string& text) {
-    if (text.empty() || text == "legacy_expand") {
+    if (text.empty()) {
+        // 2026-09-03 切默认(P4-2/P4-3):空串 = 未配置,不再钉死 legacy——
+        // 与 "auto" 同待遇,档位仲裁归 ResolveDeferredToolMode(装配层过
+        // wire+目录两道门)与直构路(落 kRecommendedDeferredToolMode)。
+        return std::nullopt;
+    }
+    if (text == "legacy_expand") {
         return DeferredToolMode::LegacyExpand;
     }
     if (text == "disabled") {
@@ -41,11 +47,13 @@ DeferredToolModeResolution ResolveDeferredToolMode(const std::string& configured
     //
     // "auto"(P4·§十三 P4-2/P4-3 的机制半边):能力驱动档,用户把选择权交给
     // 宿主——两道门都开走原生(P4-3"native 成为明确支持模型的默认"的
-    // 机制),门不开落 kRecommendedDeferredToolMode(当前 legacy,翻 P4-2
-    // 时同笔翻成 proxy)。与"点名 native 被拒"待遇不同:点名的回落是意外,
+    // 机制),门不开落 kRecommendedDeferredToolMode(2026-09-03 真机质量
+    // 对照过门后已是 ProxyReference)。未配置(空串)与 auto 同待遇——切
+    // 默认后未配置用户的解析也走这里(P4-2"proxy 成为非原生 provider 默认"
+    // 的成本条)。与"点名 native 被拒"待遇不同:点名的回落是意外,
     // 大声报;auto 的回落是合同行为,静默落(只在落 native 时给一行 mode_note
     // 告知生效档,不吵)。
-    if (configured_text == "auto") {
+    if (configured_text == "auto" || configured_text.empty()) {
         DeferredToolModeResolution out;
         if (wire_is_anthropic && catalog_native_declared) {
             out.mode = DeferredToolMode::NativeReference;

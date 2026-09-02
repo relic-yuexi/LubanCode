@@ -1999,7 +1999,7 @@ TEST_CASE("ParseFileConfigJson: deferred_tool_mode 四档认得,垃圾值报错"
     CHECK_FALSE(config::ParseFileConfigJson(R"({"deferred_tool_mode": 42})", "x.json").has_value());
 }
 
-TEST_CASE("MergeConfig: deferred_tool_mode 项目级压全局,没写落空(= legacy 现状)") {
+TEST_CASE("MergeConfig: deferred_tool_mode 项目级压全局,没写落空串(按 auto 解析,2026-09-03 切默认)") {
     const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(defaulted.has_value());
     CHECK(defaulted->config.deferred_tool_mode.empty());

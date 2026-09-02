@@ -1833,11 +1833,11 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     TermOut() << "  tool_search_token_floor = " << config.tool_search_token_floor
               << (config.tool_search_token_floor == 0 ? "(只看枚数)" : "") << "  ["
               << lubancode::config::ToString(sources.tool_search_token_floor) << "]\n";
-    // 动态工具 P1:延迟工具模式(空 = legacy_expand 现状;proxy_reference
-    // 是 P1 新路,disabled 全量常驻;auto 是 P4 能力驱动档——门开走
-    // native、门不开落宿主推荐档)。
+    // 动态工具 P1:延迟工具模式(空串 = 按 auto 解析,2026-09-03 切默认后
+    // 门不开落推荐档 proxy_reference;legacy_expand 显式写才生效的兼容档;
+    // auto 门开走 native、门不开落宿主推荐档)。
     TermOut() << "  deferred_tool_mode = "
-              << (config.deferred_tool_mode.empty() ? "legacy_expand(默认)" : config.deferred_tool_mode)
+              << (config.deferred_tool_mode.empty() ? "auto(默认)" : config.deferred_tool_mode)
               << "  [" << lubancode::config::ToString(sources.deferred_tool_mode) << "]\n";
     TermOut() << "  memory            = " << (config.memory.enabled ? "on" : "off")
               << " (use=" << (config.memory.use ? "on" : "off")

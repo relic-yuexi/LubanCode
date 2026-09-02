@@ -205,8 +205,9 @@ TEST_CASE("全局插件数与 tool deferral:0、1 枚不触发,10 枚越线触�
 // 越线 + proxy 档:tool_search/tool_invoke 双双常驻两表、两侧 resolver 各
 // 一只(scope 不串)、执行资格与 exposure 分家(deferred 工具按名不进
 // 顶层、经 tool_invoke 的执行资格放行);disabled 档压过阈值强制全量;
-// 不写(默认 legacy)没有 tool_invoke。这是"配置 → 装配"那一拍的对账,
-// 发现/调用/前缀三拍在单测册(test_request_prefix/test_loop)钉。
+// 不写(默认)2026-09-03 切默认后经推荐档落 proxy(与显式同款);显式写
+// legacy_expand 才是兼容档(无 tool_invoke)。这是"配置 → 装配"那一拍的
+// 对账,发现/调用/前缀三拍在单测册(test_request_prefix/test_loop)钉。
 // ---------------------------------------------------------------------------
 TEST_CASE("deferred_tool_mode=proxy_reference: 装配落位——双壳常驻、双 resolver、闸分家") {
     const std::filesystem::path home =
@@ -278,10 +279,26 @@ TEST_CASE("deferred_tool_mode=proxy_reference: 装配落位——双壳常驻、
         CHECK(runtime.main_tool_filter()(*plugin_tool));
     }
 
-    // ---- 默认(不写)= legacy_expand 现状:没有 tool_invoke,没有 resolver ----
+    // ---- 默认(不写)= 推荐档:2026-09-03 真机质量对照过门后切默认,空串
+    // 在直构路落 kRecommendedDeferredToolMode(= proxy_reference)——与上面
+    // 显式写 proxy_reference 同款落位。legacy 只剩显式写才生效。 ----
     {
         lubancode::config::Config config = EmptyConfig();
         config.tool_search_token_floor = 0;  // 同上:模式落位册,启用门槛只留枚数门
+        ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
+                            /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", ToolRuntime::Options{});
+        CHECK(runtime.main_deferral());
+        CHECK(runtime.main_proxy_enabled());
+        CHECK(runtime.main_registry().Find("tool_search") != nullptr);
+        CHECK(runtime.main_registry().Find("tool_invoke") != nullptr);
+        CHECK(runtime.main_tool_ref_resolver() != nullptr);
+    }
+
+    // ---- 显式写 legacy_expand 仍是兼容档:没有 tool_invoke,没有 resolver ----
+    {
+        lubancode::config::Config config = EmptyConfig();
+        config.tool_search_token_floor = 0;
+        config.deferred_tool_mode = "legacy_expand";
         ToolRuntime runtime(config, lubancode::cli::BuiltinTheme("plain"), backend, NoSkills(),
                             /*skills_segment=*/"", /*cwd_utf8=*/"/tmp", ToolRuntime::Options{});
         CHECK(runtime.main_deferral());

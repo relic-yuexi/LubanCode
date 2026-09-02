@@ -1,0 +1,1057 @@
+{
+ "suite": "deferred_quality_v1",
+ "provider": "ccmoon",
+ "temperature": 0,
+ "exe": "D:\\lubancode\\build\\release\\Release\\lubancode.exe",
+ "results": [
+  {
+   "mode": "disabled",
+   "task_id": "T1_direct_simple",
+   "shape": "名字直白、参数简单 + 一轮搜一枚",
+   "session_id": "20260902-181316-6MF5R7",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 10.2,
+   "turns": 2,
+   "tool_search_calls": 0,
+   "total_tool_calls": 1,
+   "call_sequence": [
+    "mcp__demosuite__weather_current"
+   ],
+   "usage": {
+    "input_tokens": 10941,
+    "cache_read_tokens": 10496,
+    "cache_creation_tokens": 0,
+    "output_tokens": 81
+   },
+   "usage_samples": 2,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__weather_current",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "disabled",
+   "task_id": "T2_confusable_pair",
+   "shape": "名字相近、容易误选(calendar_add_event vs calendar_add_event_series)",
+   "session_id": "20260902-181326-0KTJEI",
+   "returncode": 0,
+   "failure": "轨迹里没有任何工具调用",
+   "wall_seconds": 7.8,
+   "turns": 1,
+   "tool_search_calls": 0,
+   "total_tool_calls": 0,
+   "call_sequence": [],
+   "usage": {
+    "input_tokens": 10685,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "output_tokens": 114
+   },
+   "usage_samples": 1,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": false,
+   "required": [
+    {
+     "tool": "mcp__demosuite__calendar_add_event",
+     "calls_found": 0,
+     "min_calls": 1,
+     "semantic_ok": false,
+     "first_shot_ok": null,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "disabled",
+   "task_id": "T3_nested_schema",
+   "shape": "schema 有嵌套 object/array/enum(report_build.sections)",
+   "session_id": "20260902-181334-BDG7WZ",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 23.2,
+   "turns": 2,
+   "tool_search_calls": 0,
+   "total_tool_calls": 1,
+   "call_sequence": [
+    "mcp__demosuite__report_build"
+   ],
+   "usage": {
+    "input_tokens": 649,
+    "cache_read_tokens": 20992,
+    "cache_creation_tokens": 0,
+    "output_tokens": 433
+   },
+   "usage_samples": 2,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__report_build",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "disabled",
+   "task_id": "T4_longname_multi",
+   "shape": "MCP 长命名 + 一轮搜多枚 + 顺序依赖",
+   "session_id": "20260902-181357-IWMBSA",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 20.1,
+   "turns": 3,
+   "tool_search_calls": 0,
+   "total_tool_calls": 2,
+   "call_sequence": [
+    "mcp__demosuite__enterprise_datawarehouse_facts_sales_daily_export",
+    "mcp__demosuite__email_send"
+   ],
+   "usage": {
+    "input_tokens": 997,
+    "cache_read_tokens": 31488,
+    "cache_creation_tokens": 0,
+    "output_tokens": 303
+   },
+   "usage_samples": 3,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__enterprise_datawarehouse_facts_sales_daily_export",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    },
+    {
+     "tool": "mcp__demosuite__email_send",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "disabled",
+   "task_id": "T5_side_effect",
+   "shape": "工具有副作用 + 一轮搜一枚",
+   "session_id": "20260902-181418-NPIDU9",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 9.2,
+   "turns": 2,
+   "tool_search_calls": 0,
+   "total_tool_calls": 1,
+   "call_sequence": [
+    "mcp__demosuite__server_restart"
+   ],
+   "usage": {
+    "input_tokens": 415,
+    "cache_read_tokens": 20992,
+    "cache_creation_tokens": 0,
+    "output_tokens": 88
+   },
+   "usage_samples": 2,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__server_restart",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "disabled",
+   "task_id": "T6_reuse_after_gap",
+   "shape": "搜后隔轮再调(同一工具两次,中间隔另一工具)",
+   "session_id": "20260902-181427-PK2I4L",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 21.4,
+   "turns": 4,
+   "tool_search_calls": 0,
+   "total_tool_calls": 3,
+   "call_sequence": [
+    "mcp__demosuite__time_now_in_zone",
+    "mcp__demosuite__weather_current",
+    "mcp__demosuite__time_now_in_zone"
+   ],
+   "usage": {
+    "input_tokens": 2854,
+    "cache_read_tokens": 40576,
+    "cache_creation_tokens": 0,
+    "output_tokens": 255
+   },
+   "usage_samples": 4,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__time_now_in_zone",
+     "calls_found": 2,
+     "min_calls": 2,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    },
+    {
+     "tool": "mcp__demosuite__weather_current",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "disabled",
+   "task_id": "T7_confusable_draft",
+   "shape": "名字相近、容易误选(invoice_create_draft vs invoice_create)",
+   "session_id": "20260902-181448-X5TCDQ",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 11.5,
+   "turns": 2,
+   "tool_search_calls": 0,
+   "total_tool_calls": 1,
+   "call_sequence": [
+    "mcp__demosuite__invoice_create_draft"
+   ],
+   "usage": {
+    "input_tokens": 463,
+    "cache_read_tokens": 20992,
+    "cache_creation_tokens": 0,
+    "output_tokens": 129
+   },
+   "usage_samples": 2,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__invoice_create_draft",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "disabled",
+   "task_id": "T8_confusable_algo",
+   "shape": "名字相近、容易误选(file_checksum_sha256 vs file_checksum_sha1)",
+   "session_id": "20260902-181500-WGJNQU",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 10.3,
+   "turns": 2,
+   "tool_search_calls": 0,
+   "total_tool_calls": 1,
+   "call_sequence": [
+    "mcp__demosuite__file_checksum_sha256"
+   ],
+   "usage": {
+    "input_tokens": 2020,
+    "cache_read_tokens": 19456,
+    "cache_creation_tokens": 0,
+    "output_tokens": 113
+   },
+   "usage_samples": 2,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__file_checksum_sha256",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "proxy_reference",
+   "task_id": "T1_direct_simple",
+   "shape": "名字直白、参数简单 + 一轮搜一枚",
+   "session_id": "20260902-181510-7404S2",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 12.9,
+   "turns": 3,
+   "tool_search_calls": 1,
+   "total_tool_calls": 2,
+   "call_sequence": [
+    "tool_search",
+    "mcp__demosuite__weather_current"
+   ],
+   "usage": {
+    "input_tokens": 5215,
+    "cache_read_tokens": 17664,
+    "cache_creation_tokens": 0,
+    "output_tokens": 123
+   },
+   "usage_samples": 3,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__weather_current",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "proxy_reference",
+   "task_id": "T2_confusable_pair",
+   "shape": "名字相近、容易误选(calendar_add_event vs calendar_add_event_series)",
+   "session_id": "20260902-181523-6I5OQJ",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 18.2,
+   "turns": 3,
+   "tool_search_calls": 1,
+   "total_tool_calls": 2,
+   "call_sequence": [
+    "tool_search",
+    "mcp__demosuite__calendar_add_event"
+   ],
+   "usage": {
+    "input_tokens": 4691,
+    "cache_read_tokens": 19328,
+    "cache_creation_tokens": 0,
+    "output_tokens": 279
+   },
+   "usage_samples": 3,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__calendar_add_event",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "proxy_reference",
+   "task_id": "T3_nested_schema",
+   "shape": "schema 有嵌套 object/array/enum(report_build.sections)",
+   "session_id": "20260902-181541-1KRN2K",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 27.6,
+   "turns": 3,
+   "tool_search_calls": 1,
+   "total_tool_calls": 2,
+   "call_sequence": [
+    "tool_search",
+    "mcp__demosuite__report_build"
+   ],
+   "usage": {
+    "input_tokens": 8976,
+    "cache_read_tokens": 15360,
+    "cache_creation_tokens": 0,
+    "output_tokens": 511
+   },
+   "usage_samples": 3,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__report_build",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "proxy_reference",
+   "task_id": "T4_longname_multi",
+   "shape": "MCP 长命名 + 一轮搜多枚 + 顺序依赖",
+   "session_id": "20260902-181609-WG0G7C",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 62.9,
+   "turns": 8,
+   "tool_search_calls": 2,
+   "total_tool_calls": 7,
+   "call_sequence": [
+    "todo_write",
+    "tool_search",
+    "mcp__demosuite__enterprise_datawarehouse_facts_sales_daily_export",
+    "todo_write",
+    "mcp__demosuite__email_send",
+    "tool_search",
+    "todo_write"
+   ],
+   "usage": {
+    "input_tokens": 37263,
+    "cache_read_tokens": 31872,
+    "cache_creation_tokens": 0,
+    "output_tokens": 1083
+   },
+   "usage_samples": 8,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__enterprise_datawarehouse_facts_sales_daily_export",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    },
+    {
+     "tool": "mcp__demosuite__email_send",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "proxy_reference",
+   "task_id": "T5_side_effect",
+   "shape": "工具有副作用 + 一轮搜一枚",
+   "session_id": "20260902-181711-M3U8KS",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 14.9,
+   "turns": 3,
+   "tool_search_calls": 1,
+   "total_tool_calls": 2,
+   "call_sequence": [
+    "tool_search",
+    "mcp__demosuite__server_restart"
+   ],
+   "usage": {
+    "input_tokens": 6306,
+    "cache_read_tokens": 17664,
+    "cache_creation_tokens": 0,
+    "output_tokens": 135
+   },
+   "usage_samples": 3,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__server_restart",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "proxy_reference",
+   "task_id": "T6_reuse_after_gap",
+   "shape": "搜后隔轮再调(同一工具两次,中间隔另一工具)",
+   "session_id": "20260902-181726-RT94YK",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 24.5,
+   "turns": 5,
+   "tool_search_calls": 1,
+   "total_tool_calls": 4,
+   "call_sequence": [
+    "tool_search",
+    "mcp__demosuite__time_now_in_zone",
+    "mcp__demosuite__weather_current",
+    "mcp__demosuite__time_now_in_zone"
+   ],
+   "usage": {
+    "input_tokens": 5258,
+    "cache_read_tokens": 34048,
+    "cache_creation_tokens": 0,
+    "output_tokens": 353
+   },
+   "usage_samples": 5,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__time_now_in_zone",
+     "calls_found": 2,
+     "min_calls": 2,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    },
+    {
+     "tool": "mcp__demosuite__weather_current",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "proxy_reference",
+   "task_id": "T7_confusable_draft",
+   "shape": "名字相近、容易误选(invoice_create_draft vs invoice_create)",
+   "session_id": "20260902-181751-ALJFS2",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 15.8,
+   "turns": 3,
+   "tool_search_calls": 1,
+   "total_tool_calls": 2,
+   "call_sequence": [
+    "tool_search",
+    "mcp__demosuite__invoice_create_draft"
+   ],
+   "usage": {
+    "input_tokens": 5655,
+    "cache_read_tokens": 17664,
+    "cache_creation_tokens": 0,
+    "output_tokens": 208
+   },
+   "usage_samples": 3,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__invoice_create_draft",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "proxy_reference",
+   "task_id": "T8_confusable_algo",
+   "shape": "名字相近、容易误选(file_checksum_sha256 vs file_checksum_sha1)",
+   "session_id": "20260902-181807-QQTEHN",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 148.3,
+   "turns": 10,
+   "tool_search_calls": 1,
+   "total_tool_calls": 9,
+   "call_sequence": [
+    "run_command",
+    "search",
+    "run_command",
+    "run_command",
+    "run_command",
+    "run_command",
+    "run_command",
+    "tool_search",
+    "mcp__demosuite__file_checksum_sha256"
+   ],
+   "usage": {
+    "input_tokens": 26716,
+    "cache_read_tokens": 59264,
+    "cache_creation_tokens": 0,
+    "output_tokens": 1225
+   },
+   "usage_samples": 10,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__file_checksum_sha256",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "legacy_expand",
+   "task_id": "T1_direct_simple",
+   "shape": "名字直白、参数简单 + 一轮搜一枚",
+   "session_id": "20260902-182035-UYL5L1",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 14.1,
+   "turns": 3,
+   "tool_search_calls": 1,
+   "total_tool_calls": 2,
+   "call_sequence": [
+    "tool_search",
+    "mcp__demosuite__weather_current"
+   ],
+   "usage": {
+    "input_tokens": 27404,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "output_tokens": 125
+   },
+   "usage_samples": 3,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1,
+    2
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__weather_current",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "legacy_expand",
+   "task_id": "T2_confusable_pair",
+   "shape": "名字相近、容易误选(calendar_add_event vs calendar_add_event_series)",
+   "session_id": "20260902-182049-ERCPKD",
+   "returncode": 0,
+   "failure": "轨迹里没有任何工具调用",
+   "wall_seconds": 9.9,
+   "turns": 1,
+   "tool_search_calls": 0,
+   "total_tool_calls": 0,
+   "call_sequence": [],
+   "usage": {
+    "input_tokens": 8870,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "output_tokens": 156
+   },
+   "usage_samples": 1,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1
+   ],
+   "success": false,
+   "required": [
+    {
+     "tool": "mcp__demosuite__calendar_add_event",
+     "calls_found": 0,
+     "min_calls": 1,
+     "semantic_ok": false,
+     "first_shot_ok": null,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "legacy_expand",
+   "task_id": "T3_nested_schema",
+   "shape": "schema 有嵌套 object/array/enum(report_build.sections)",
+   "session_id": "20260902-182059-IWCI45",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 23.9,
+   "turns": 3,
+   "tool_search_calls": 1,
+   "total_tool_calls": 2,
+   "call_sequence": [
+    "tool_search",
+    "mcp__demosuite__report_build"
+   ],
+   "usage": {
+    "input_tokens": 28137,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "output_tokens": 444
+   },
+   "usage_samples": 3,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1,
+    2
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__report_build",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "legacy_expand",
+   "task_id": "T4_longname_multi",
+   "shape": "MCP 长命名 + 一轮搜多枚 + 顺序依赖",
+   "session_id": "20260902-182128-6UYVV4",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 52.5,
+   "turns": 7,
+   "tool_search_calls": 1,
+   "total_tool_calls": 6,
+   "call_sequence": [
+    "todo_write",
+    "tool_search",
+    "mcp__demosuite__enterprise_datawarehouse_facts_sales_daily_export",
+    "todo_write",
+    "mcp__demosuite__email_send",
+    "todo_write"
+   ],
+   "usage": {
+    "input_tokens": 48604,
+    "cache_read_tokens": 18304,
+    "cache_creation_tokens": 0,
+    "output_tokens": 548
+   },
+   "usage_samples": 7,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1,
+    2
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__enterprise_datawarehouse_facts_sales_daily_export",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    },
+    {
+     "tool": "mcp__demosuite__email_send",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "legacy_expand",
+   "task_id": "T5_side_effect",
+   "shape": "工具有副作用 + 一轮搜一枚",
+   "session_id": "20260902-182222-0PVP2G",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 33.8,
+   "turns": 3,
+   "tool_search_calls": 1,
+   "total_tool_calls": 2,
+   "call_sequence": [
+    "tool_search",
+    "mcp__demosuite__server_restart"
+   ],
+   "usage": {
+    "input_tokens": 18698,
+    "cache_read_tokens": 8704,
+    "cache_creation_tokens": 0,
+    "output_tokens": 146
+   },
+   "usage_samples": 3,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1,
+    2
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__server_restart",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "legacy_expand",
+   "task_id": "T6_reuse_after_gap",
+   "shape": "搜后隔轮再调(同一工具两次,中间隔另一工具)",
+   "session_id": "20260902-182256-CYJBG4",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 43.3,
+   "turns": 5,
+   "tool_search_calls": 1,
+   "total_tool_calls": 4,
+   "call_sequence": [
+    "tool_search",
+    "mcp__demosuite__time_now_in_zone",
+    "mcp__demosuite__weather_current",
+    "mcp__demosuite__time_now_in_zone"
+   ],
+   "usage": {
+    "input_tokens": 28784,
+    "cache_read_tokens": 17920,
+    "cache_creation_tokens": 0,
+    "output_tokens": 314
+   },
+   "usage_samples": 5,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1,
+    2
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__time_now_in_zone",
+     "calls_found": 2,
+     "min_calls": 2,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    },
+    {
+     "tool": "mcp__demosuite__weather_current",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "legacy_expand",
+   "task_id": "T7_confusable_draft",
+   "shape": "名字相近、容易误选(invoice_create_draft vs invoice_create)",
+   "session_id": "20260902-182339-OLFYDU",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 29.9,
+   "turns": 3,
+   "tool_search_calls": 1,
+   "total_tool_calls": 2,
+   "call_sequence": [
+    "tool_search",
+    "mcp__demosuite__invoice_create_draft"
+   ],
+   "usage": {
+    "input_tokens": 19060,
+    "cache_read_tokens": 8704,
+    "cache_creation_tokens": 0,
+    "output_tokens": 221
+   },
+   "usage_samples": 3,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1,
+    2
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__invoice_create_draft",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  },
+  {
+   "mode": "legacy_expand",
+   "task_id": "T8_confusable_algo",
+   "shape": "名字相近、容易误选(file_checksum_sha256 vs file_checksum_sha1)",
+   "session_id": "20260902-182406-IV9T2Q",
+   "returncode": 0,
+   "failure": "",
+   "wall_seconds": 32.3,
+   "turns": 3,
+   "tool_search_calls": 1,
+   "total_tool_calls": 2,
+   "call_sequence": [
+    "tool_search",
+    "mcp__demosuite__file_checksum_sha256"
+   ],
+   "usage": {
+    "input_tokens": 27374,
+    "cache_read_tokens": 0,
+    "cache_creation_tokens": 0,
+    "output_tokens": 140
+   },
+   "usage_samples": 3,
+   "cache_reported_by_provider": true,
+   "cache_epochs": [
+    1,
+    2
+   ],
+   "success": true,
+   "required": [
+    {
+     "tool": "mcp__demosuite__file_checksum_sha256",
+     "calls_found": 1,
+     "min_calls": 1,
+     "semantic_ok": true,
+     "first_shot_ok": true,
+     "first_shot_detail": []
+    }
+   ],
+   "misselect_count": 0,
+   "misselect_tools": [],
+   "ordering_ok": true
+  }
+ ]
+}
