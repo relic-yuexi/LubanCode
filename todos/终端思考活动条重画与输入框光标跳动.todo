@@ -106,7 +106,41 @@
 - `tests/unit/cli/test_terminal_frame.cpp`、相关 footer 测试：字节与选路。
 - `tests/manual/stream_footer_driver.cpp` 或新窄驱动：真终端复现与验收。
 
-## 六、不做什么
+## 七、真机复测操作单（源码已收口，剩此一项，留用户真终端跑）
+
+前置：主树先编出驱动器与正式程序（`*_driver` 是 EXCLUDE_FROM_ALL，常规 build 不带）：
+
+```powershell
+cd D:\lubancode
+cmake --build --preset release --target lubancode stream_footer_driver
+```
+
+**第一路：driver 自动判（每款终端各跑一遍）**
+
+```powershell
+cd D:\lubancode\build\release\Release
+.\stream_footer_driver.exe .\lubancode.exe <一个临时工作目录> <报告文件路径>
+.\stream_footer_driver.exe .\lubancode.exe <一个临时工作目录> <报告文件路径> g7
+```
+
+三款宿主终端：
+
+1. **Windows Terminal**：新开 WT 标签页直接跑。
+2. **经典 conhost**：Win+R 敲 `conhost.exe cmd.exe` 回车，在弹出的老控制台里 cd 过去跑。
+3. **VS Code 终端**：VS Code 集成终端里跑。
+
+判据：G0 幕过"秒钟走动 + 活动行至少变两拍 + 物理光标全程钉输入框"；g7 幕帧账行 `paint=vt-sync|vt|native` 记下各终端档位（WT 应 vt-sync，conhost 大概率 native，VS Code 看 xterm.js 实现）。三款各留一份报告文件原文。
+
+**第二路：真交互人眼场景**
+
+`lubancode.exe` 起真会话，问一个答得长的问题：
+
+1. 思考期间**手离键盘静置 10 秒**，录屏——核对光标不跳、活动行只按秒动。
+2. 思考期间**连续打字 10 秒**（打一段长草稿别删），录屏——核对无字符丢失、无残行、无输入延迟突刺、光标不离输入框。
+
+**收尾**：两款路子都过了，勾掉第四节 P1 两个留白项，把终端名与版本、报告原文、录屏存档记回本单；任一终端不过，带着报告文件与录屏回来开续单。
+
+## 八、不做什么
 
 - 不删 busy composer，也不禁止回合运行时排队输入。
 - 不把活动行挪远一点便算修好；光标仍会漏帧，只是更难看见。
