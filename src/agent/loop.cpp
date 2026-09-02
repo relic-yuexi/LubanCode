@@ -1265,6 +1265,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         api::MessageAssembler assembler;
         bool stream_error = false;
         std::string stream_error_message;
+        std::string stream_error_code;
         // 模型输出图片(ccmoon 巡检单 P0):落盘成功的引用块按到达序攒着,
         // 流收口后并进 assistant 消息;同一 item id 只落一回(重复终帧——
         // output_item.done 与 response.completed 各到一次——只算头一回)。
@@ -1306,6 +1307,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             assembler = api::MessageAssembler{};
             stream_error = false;
             stream_error_message.clear();
+            stream_error_code.clear();
             model_images.clear();
             landed_image_ids.clear();
             stream_request_id.clear();
@@ -1420,6 +1422,7 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                         } else if constexpr (std::is_same_v<T, api::StreamError>) {
                             stream_error = true;
                             stream_error_message = e.message;
+                            stream_error_code = e.code;
                         } else if constexpr (std::is_same_v<T, api::ImageOutput>) {
                             // 图片正文到站(Responses 的 image_generation_call。
                             // result):base64 只走到这里为止——落盘口还引用,
@@ -1500,6 +1503,16 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                 if (!thinking_tail.empty()) {
                     wiring.events->OnThinkingDelta(thinking_tail);
                 }
+            }
+            if (attempt_result.has_value() && stream_error) {
+                // 兼容端常回 HTTP 200 + error 事件。必须在尝试边界折成 Api
+                // 错误,恢复环才能按 provider code 判瞬时错并重发。
+                api::Error error{api::ErrorKind::Api, stream_error_message, 0, stream_error_code};
+                if (api::IsRetryableError(error)) {
+                    budget_report.thinking_bytes = thinking_bytes_at_attempt_start;
+                    budget_report.thinking_tail = std::move(thinking_tail_at_attempt_start);
+                }
+                return std::unexpected(std::move(error));
             }
             if (!attempt_result.has_value() && api::IsRetryableError(attempt_result.error())) {
                 // 本次尝试攒进活账的思考字节回滚:重试会整段重来,不双记。

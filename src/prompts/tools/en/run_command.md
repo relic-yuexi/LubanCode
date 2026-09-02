@@ -1,10 +1,10 @@
 ## description
 
-Run one command in a shell and get the merged stdout/stderr plus the exit code. The shell parameter accepts powershell (default) or cmd; write the command in the syntax of whichever you pick. User confirmation is required before executing. Commands that time out are force-killed. For long-lived processes that must survive across commands and calls — a dev server, a watch process — or for a short task you want to finish in the background without blocking the conversation, pass run_in_background=true: the tool does not wait, and returns a task_id, a PID and a log file path as soon as the spawn succeeds; when the command finishes, a one-line completion notice is printed at the next prompt. Afterwards use the background_output tool (pass task_id) to check status and read output, and the stop_background tool to wind it up.
+Run one command in a shell and get the merged stdout/stderr plus the exit code. The shell parameter accepts powershell (default) or cmd; write the command in the syntax of whichever you pick. User confirmation is required before executing. Commands that time out are force-killed. Build, configure and test commands default to 900000 ms (15 minutes), while other commands default to 120000 ms (2 minutes); for commands expected to run longer, pass timeout_ms explicitly or use run_in_background=true and poll with background_output. For long-lived processes that must survive across commands and calls — a dev server, a watch process — or for a short task you want to finish in the background without blocking the conversation, pass run_in_background=true: the tool does not wait, and returns a task_id, a PID and a log file path as soon as the spawn succeeds; when the command finishes, a one-line completion notice is printed at the next prompt. Afterwards use the background_output tool (pass task_id) to check status and read output, and the stop_background tool to wind it up.
 
 ## description (POSIX)
 
-Run one command in a shell (/bin/sh) and get the merged stdout/stderr plus the exit code. Write the command in POSIX sh syntax. User confirmation is required before executing. Commands that time out are force-killed. For long-lived processes that must survive across commands and calls — a dev server, a watch process — or for a short task you want to finish in the background without blocking the conversation, pass run_in_background=true: the tool does not wait, and returns a task_id, a PID and a log file path as soon as the spawn succeeds; when the command finishes, a one-line completion notice is printed at the next prompt. Afterwards use the background_output tool (pass task_id) to check status and read output, and the stop_background tool to wind it up.
+Run one command in a shell (/bin/sh) and get the merged stdout/stderr plus the exit code. Write the command in POSIX sh syntax. User confirmation is required before executing. Commands that time out are force-killed. Build, configure and test commands default to 900000 ms (15 minutes), while other commands default to 120000 ms (2 minutes); for commands expected to run longer, pass timeout_ms explicitly or use run_in_background=true and poll with background_output. For long-lived processes that must survive across commands and calls — a dev server, a watch process — or for a short task you want to finish in the background without blocking the conversation, pass run_in_background=true: the tool does not wait, and returns a task_id, a PID and a log file path as soon as the spawn succeeds; when the command finishes, a one-line completion notice is printed at the next prompt. Afterwards use the background_output tool (pass task_id) to check status and read output, and the stop_background tool to wind it up.
 
 ## param.command
 
@@ -16,7 +16,7 @@ The command to execute; write it in POSIX sh syntax
 
 ## param.timeout_ms
 
-Timeout in milliseconds; omit for the default 120000 (2 minutes)
+Timeout in milliseconds. If omitted, build/configure/test commands default to 900000 (15 minutes), while other commands default to 120000 (2 minutes); explicitly raise this value or use run_in_background for long commands
 
 ## param.shell
 

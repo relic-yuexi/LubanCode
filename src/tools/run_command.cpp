@@ -1,9 +1,12 @@
 #include "tools/run_command.hpp"
 
+#include <algorithm>
+#include <cctype>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <iterator>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -32,6 +35,47 @@ namespace lubancode::tools {
 namespace {
 
 constexpr int kDefaultTimeoutMs = 120000;
+constexpr int kBuildTimeoutMs = 900000;  // 构建/configure/测试类默认 15 分钟
+// 只看命令起始的可执行名前缀(允许常见路径与引号),不扫描参数正文——避免
+// echo "cmake ..." 之类普通命令被误抬档。显式 timeout_ms 始终优先。
+int DefaultTimeoutMsForCommand(const std::string& command) {
+    const auto first = command.find_first_not_of(" \t\r\n");
+    if (first == std::string::npos) {
+        return kDefaultTimeoutMs;
+    }
+    std::size_t end = first;
+    const char quote = command[first] == '\'' || command[first] == '"' ? command[first] : '\0';
+    if (quote != '\0') {
+        end = command.find(quote, first + 1);
+        if (end == std::string::npos) {
+            end = command.size();
+        }
+    } else {
+        end = command.find_first_of(" \t\r\n", first);
+        if (end == std::string::npos) {
+            end = command.size();
+        }
+    }
+    std::string executable = command.substr(first + (quote != '\0' ? 1 : 0),
+                                            end - first - (quote != '\0' ? 1 : 0));
+    const auto slash = executable.find_last_of("/\\");
+    if (slash != std::string::npos) {
+        executable.erase(0, slash + 1);
+    }
+    std::transform(executable.begin(), executable.end(), executable.begin(),
+                   [](unsigned char ch) { return static_cast<char>(std::tolower(ch)); });
+    if (executable.ends_with(".exe") || executable.ends_with(".cmd") || executable.ends_with(".bat")) {
+        executable.erase(executable.find_last_of('.'));
+    }
+    static constexpr const char* kBuildCommands[] = {
+        "cmake", "msbuild", "ninja", "ctest", "gradle", "gradlew", "cargo", "npx",
+        "make", "gmake", "xcodebuild", "mvn", "mvnw", "dotnet", "bazel", "buck2",
+    };
+    return std::find(std::begin(kBuildCommands), std::end(kBuildCommands), executable) !=
+                   std::end(kBuildCommands)
+               ? kBuildTimeoutMs
+               : kDefaultTimeoutMs;
+}
 // timeout_ms 的合法上限(int 全域放进来没意义:Windows 的 DWORD 等得起,
 // 会话也早没了)。超大值体面报错,不窄化走样。
 constexpr int kMaxTimeoutMs = 86400000;  // 24 小时
@@ -162,7 +206,9 @@ std::string RunCommandTool::description() const {
     return ToolText("run_command", "description",
                     "在 shell 里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。"
                     "shell 参数可选 powershell(默认)或 cmd,分别按对应语法写命令。执行前要经用户确认。"
-                    "超时会被强制杀掉。"
+                    "超时会被强制杀掉。构建/configure/测试类命令默认 900000 毫秒(15 分钟),"
+                    "其余默认 120000 毫秒(2 分钟);预计更久的长命令请显式传 timeout_ms,或传 "
+                    "run_in_background=true 后台运行并用 background_output 轮询。"
                     "起 dev server、watch 进程这类要跨命令、跨调用存活的长命进程,或者想后台跑完不阻塞对话的短任务,"
                     "传 run_in_background=true:不等它跑完,spawn 成功立刻返回 task_id、PID 和日志文件路径;"
                     "命令跑完时下一次给提示符会打一行完成通知。之后用 background_output 工具(传 task_id)"
@@ -171,6 +217,9 @@ std::string RunCommandTool::description() const {
     return ToolText("run_command", "description (POSIX)",
                     "在 shell(/bin/sh)里执行一条命令,拿到合并后的标准输出/标准错误,以及退出码。"
                     "按 POSIX sh 语法写命令。执行前要经用户确认。超时会被强制杀掉。"
+                    "构建/configure/测试类命令默认 900000 毫秒(15 分钟),其余默认 120000 毫秒(2 分钟);"
+                    "预计更久的长命令请显式传 timeout_ms,或传 run_in_background=true 后台运行并用 "
+                    "background_output 轮询。"
                     "起 dev server、watch 进程这类要跨命令、跨调用存活的长命进程,或者想后台跑完不阻塞对话的短任务,"
                     "传 run_in_background=true:不等它跑完,spawn 成功立刻返回 task_id、PID 和日志文件路径;"
                     "命令跑完时下一次给提示符会打一行完成通知。之后用 background_output 工具(传 task_id)"
@@ -198,7 +247,9 @@ nlohmann::json RunCommandTool::input_schema() const {
     nlohmann::json timeout_prop = nlohmann::json::object();
     timeout_prop["type"] = "integer";
     timeout_prop["description"] =
-        ToolText("run_command", "param.timeout_ms", "超时时间,单位毫秒,不填默认 120000(2 分钟)");
+        ToolText("run_command", "param.timeout_ms",
+                 "超时时间,单位毫秒。不填时构建/configure/测试类命令默认 900000(15 分钟),其余默认 "
+                 "120000(2 分钟);长命令应显式加大此值或用 run_in_background");
     properties["timeout_ms"] = timeout_prop;
 
     nlohmann::json shell_prop = nlohmann::json::object();
@@ -451,7 +502,7 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
     // timeout_ms 对后台模式没有意义(spawn 完就返回,根本不等),背景模式下
     // 干脆不解析——模型哪怕手滑传了个非法值也不该在这条不使用它的路径上
     // 报错,忽略得彻底一点。
-    int timeout_ms = kDefaultTimeoutMs;
+    int timeout_ms = DefaultTimeoutMsForCommand(command);
     if (!run_in_background) {
         if (auto it = input.find("timeout_ms"); it != input.end() && !it->is_null()) {
             // 模型偶尔会把数字发成字符串/数组;直接 get<int>() 遇到超范围的
@@ -685,7 +736,11 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
     }
     if (proc.timed_out) {
         std::ostringstream oss;
-        oss << "命令执行超时(超过 " << timeout_ms << " 毫秒),已强制终止。\n";
+        oss << "命令执行超时(超过 " << timeout_ms << " 毫秒),已强制终止。\n"
+            << "可改用以下策略：\n"
+            << "1. 加大 timeout_ms 后重跑。\n"
+            << "2. 传 run_in_background=true 后台运行，再用 background_output 查进度。\n"
+            << "3. 首次构建检查依赖下载是否卡网；离线环境先备好 _deps。\n";
         if (!proc.output.empty()) {
             oss << "终止前捕获到的输出:\n" << proc.output;
         }
@@ -724,7 +779,7 @@ Tool::Result RunCommandTool::Run(const nlohmann::json& input, const std::atomic<
     } else {
         exited.outcome = "succeeded";
     }
-    exited.details = nlohmann::json{{"exit_code", proc.exit_code}};
+    exited.details = nlohmann::json{{"exit_code", proc.exit_code}, {"timeout_ms", timeout_ms}};
     exited.effect_summary = "run (exit=" + std::to_string(proc.exit_code) + ")";
     return exited;
 }

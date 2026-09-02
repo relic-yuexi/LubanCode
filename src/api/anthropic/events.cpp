@@ -137,6 +137,7 @@ std::optional<StreamEvent> HandleError(const json& data) {
     StreamError event;
     if (auto it = data.find("error"); it != data.end() && it->is_object()) {
         event.message = it->value("message", "未知错误");
+        event.code = it->value("code", it->value("type", std::string()));
     } else {
         event.message = "未知错误";
     }

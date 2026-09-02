@@ -93,7 +93,8 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
     }
 
     if (auto error = data.find("error"); error != data.end() && error->is_object()) {
-        return {StreamError{error->value("message", "未知错误")}};
+        return {StreamError{error->value("message", "未知错误"),
+                            error->value("code", error->value("type", std::string()))}};
     }
 
     std::vector<StreamEvent> events;

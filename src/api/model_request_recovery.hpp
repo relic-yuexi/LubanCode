@@ -56,8 +56,8 @@ std::string ReasonCodeOfError(const Error& error);
 std::string HistoryCommitHashOf(const Request& request);
 
 // 可自动重试白名单(单子 §8.2):DNS/connect reset/TLS 瞬断(Network 类)、
-// 408/429/502/503/504、首字节前超时。Cancelled/Parse/Api 与其余 HTTP 码
-// 不重试。provider 的 Retry-After 目前不经过 Backend 接口,拿不到——尊重
+// 408/429/500/502/503/504、首字节前超时，以及白名单内的 Api 稳定码。
+// Cancelled/Parse、其余 HTTP 状态和确定性 Api code 不重试。provider 的 Retry-After 目前不经过 Backend 接口,拿不到——尊重
 // 它这件事记在案,后端若将来透出,再在阶梯上叠加(不越过总墙钟)。
 bool IsRetryableError(const Error& error);
 

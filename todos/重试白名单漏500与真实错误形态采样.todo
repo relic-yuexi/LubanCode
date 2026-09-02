@@ -1,6 +1,6 @@
 # 重试白名单漏 500 与真实错误形态采样
 
-- 状态：待修（2026-09-02 主人交互会话实战：子代理死于 Upstream request failed (code=upstream_error)，五次重试未触发）
+- 状态：P0 已修（2026-09-02 实战五场,361/361 全绿;采样账本待做）
 - 现场版本：`lubancode 0.26.169`
 - 日期：2026-09-02
 - 类型：LubanCode 产品缺陷（可靠性——该重试的错没重试）
@@ -51,6 +51,6 @@ case ErrorKind::Cancelled:
 
 ## 四、实施批次
 
-- [ ] P0：HttpStatus 补 500；Api kind 按 code 白名单分型
+- [x] P0：HttpStatus 补 500；Api kind 按 code 白名单分型（500/502/503/504+408/429 全认;upstream_error/server_error/overloaded_error/model_overloaded/internal_error/internal_server_error 可重试;200+错误body折Api进恢复环——四条wire的error code保真传出）
 - [ ] P0：错误形态采样账本（脚本+夹具+首批实录）
 - [ ] P1：假后端矩阵喂入采样形态；重试文案确认覆盖
