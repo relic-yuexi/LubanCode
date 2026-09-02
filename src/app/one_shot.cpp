@@ -454,11 +454,11 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         (void)oneshot_ledger->CaptureEnvironment(environment_facts);
     }
     // 工具栅栏:单发从前的 trace_hub 恒空,工具事件进不了账。这里起一只
-    // 进程级发号的本地 hub(无旧 SessionStore 落点),RunTurn 把它挂上
-    // 轨迹桥——工具 planned/started/finished 与子代理派工的父子边从此
-    // 落账;终端画面不受影响(画面的水从 loop→适配器来,不经 hub)。
-    lubancode::runtime::ToolTraceHub oneshot_trace_hub(lubancode::runtime::ProcessIdAuthority(),
-                                                       nullptr);
+    // 进程级发号的本地 hub(P0-6 后 hub 已无 SessionStore 落点,只走轨迹),
+    // RunTurn 把它挂上轨迹桥——工具 planned/started/finished 与子代理派工
+    // 的父子边从此落账;终端画面不受影响(画面的水从 loop→适配器来,不经
+    // hub)。
+    lubancode::runtime::ToolTraceHub oneshot_trace_hub(lubancode::runtime::ProcessIdAuthority());
     // 权限账(P6/P10 拆出后,P0-2 收窄):settings 的 allow_tools 灌进本地
     // 这本,RunTurn 引用同一份。
     std::set<std::string> always_allowed_tools;
