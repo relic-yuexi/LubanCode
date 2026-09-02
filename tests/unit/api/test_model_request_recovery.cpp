@@ -61,20 +61,67 @@ TEST_CASE("稳定错误码:网络/HTTP/取消各归各,HTTP 带码") {
     CHECK(api::ReasonCodeOfError(api::Error{api::ErrorKind::HttpStatus, "x", 429}) == "http.429");
     CHECK(api::ReasonCodeOfError(api::Error{api::ErrorKind::Parse, "x", 0}) == "protocol.parse");
     CHECK(api::ReasonCodeOfError(api::Error{api::ErrorKind::Api, "x", 0}) == "api.error");
+    CHECK(api::ReasonCodeOfError(api::Error{api::ErrorKind::Api, "x", 0, "upstream_error"}) ==
+          "api.upstream_error");
     CHECK(api::ReasonCodeOfError(api::Error{api::ErrorKind::Cancelled, "x", 0}) == "cancelled");
 }
 
-TEST_CASE("重试白名单:瞬时网络错与 408/429/502/503/504 可重发,其余立即收口") {
+TEST_CASE("重试白名单:瞬时网络错、指定 HTTP 状态与瞬时 Api code 可重发") {
     CHECK(api::IsRetryableError(api::Error{api::ErrorKind::Network, "connect reset", 0}));
-    for (const int status : {408, 429, 502, 503, 504}) {
+    for (const int status : {408, 429, 500, 502, 503, 504}) {
         CHECK(api::IsRetryableError(api::Error{api::ErrorKind::HttpStatus, "x", status}));
     }
-    for (const int status : {400, 401, 403, 404, 500}) {
+    for (const int status : {400, 401, 403, 404, 501}) {
         CHECK_FALSE(api::IsRetryableError(api::Error{api::ErrorKind::HttpStatus, "x", status}));
     }
+    for (const std::string& code : {"upstream_error", "server_error", "overloaded_error", "overloaded",
+                                    "model_overloaded", "internal_error", "internal_server_error"}) {
+        CHECK(api::IsRetryableError(api::Error{api::ErrorKind::Api, "x", 0, code}));
+    }
+    for (const std::string& code : {"", "authentication_error", "invalid_request", "not_found", "permission"}) {
+        CHECK_FALSE(api::IsRetryableError(api::Error{api::ErrorKind::Api, "x", 0, code}));
+    }
     CHECK_FALSE(api::IsRetryableError(api::Error{api::ErrorKind::Parse, "x", 0}));
-    CHECK_FALSE(api::IsRetryableError(api::Error{api::ErrorKind::Api, "x", 0}));
     CHECK_FALSE(api::IsRetryableError(api::Error{api::ErrorKind::Cancelled, "x", 0}));
+}
+
+TEST_CASE("恢复环:500 与 upstream_error 都会用满预算,任一后续成功即恢复") {
+    for (const api::Error error : {
+             api::Error{api::ErrorKind::HttpStatus, "server failed", 500},
+             api::Error{api::ErrorKind::Api, "Upstream request failed", 0, "upstream_error"},
+         }) {
+        SUBCASE(error.kind == api::ErrorKind::HttpStatus ? "HTTP 500" : "Api upstream_error") {
+            ScriptedSender exhausted;
+            exhausted.script.assign(api::kMaxRequestAttempts, std::unexpected(error));
+            const auto failed = api::RunRequestWithRecovery(exhausted.Sender(), RecordingHooks(exhausted));
+            REQUIRE_FALSE(failed.has_value());
+            CHECK(exhausted.calls == api::kMaxRequestAttempts);
+            CHECK(exhausted.waits.size() == api::kMaxRequestAttempts - 1);
+
+            ScriptedSender recovered;
+            recovered.script = {std::unexpected(error), {}};
+            const auto succeeded = api::RunRequestWithRecovery(recovered.Sender(), RecordingHooks(recovered));
+            REQUIRE(succeeded.has_value());
+            CHECK(recovered.calls == 2);
+            CHECK(recovered.waits.size() == 1);
+        }
+    }
+}
+
+TEST_CASE("恢复环:400/401 与确定性 Api code 零重试") {
+    for (const api::Error error : {
+             api::Error{api::ErrorKind::HttpStatus, "bad request", 400},
+             api::Error{api::ErrorKind::HttpStatus, "unauthorized", 401},
+             api::Error{api::ErrorKind::Api, "invalid", 0, "invalid_request"},
+             api::Error{api::ErrorKind::Api, "denied", 0, "authentication_error"},
+         }) {
+        ScriptedSender sender;
+        sender.script = {std::unexpected(error), {}};
+        const auto result = api::RunRequestWithRecovery(sender.Sender(), RecordingHooks(sender));
+        REQUIRE_FALSE(result.has_value());
+        CHECK(sender.calls == 1);
+        CHECK(sender.waits.empty());
+    }
 }
 
 TEST_CASE("抖动阶梯:五档指数范围且单次以 2 分钟封顶") {

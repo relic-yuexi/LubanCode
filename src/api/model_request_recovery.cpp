@@ -5,8 +5,10 @@
 
 #include <algorithm>
 #include <array>
+#include <iterator>
 #include <mutex>
 #include <random>
+#include <string_view>
 #include <type_traits>
 #include <variant>
 
@@ -59,7 +61,7 @@ std::string ReasonCodeOfError(const Error& error) {
         case ErrorKind::Parse:
             return "protocol.parse";
         case ErrorKind::Api:
-            return "api.error";
+            return error.api_code.empty() ? "api.error" : "api." + error.api_code;
         case ErrorKind::Cancelled:
             return "cancelled";
     }
@@ -74,10 +76,19 @@ bool IsRetryableError(const Error& error) {
             // assistant 消息只在 send_stream 归队后才提交,断流时永不落地。
             return true;
         case ErrorKind::HttpStatus:
-            return error.http_status == 408 || error.http_status == 429 || error.http_status == 502 ||
-                   error.http_status == 503 || error.http_status == 504;
+            return error.http_status == 408 || error.http_status == 429 || error.http_status == 500 ||
+                   error.http_status == 502 || error.http_status == 503 || error.http_status == 504;
+        case ErrorKind::Api: {
+            // 兼容端 HTTP 200 + error 事件的真实稳定码。只放瞬时上游/容量/
+            // 内部故障；鉴权、无效请求、权限与不存在等确定性错误不在表中。
+            static constexpr std::string_view kRetryableApiCodes[] = {
+                "upstream_error", "server_error", "overloaded_error", "overloaded",
+                "model_overloaded", "internal_error", "internal_server_error",
+            };
+            return std::find(std::begin(kRetryableApiCodes), std::end(kRetryableApiCodes), error.api_code) !=
+                   std::end(kRetryableApiCodes);
+        }
         case ErrorKind::Parse:
-        case ErrorKind::Api:
         case ErrorKind::Cancelled:
             return false;
     }

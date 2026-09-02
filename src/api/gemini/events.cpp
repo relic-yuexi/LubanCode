@@ -1,6 +1,7 @@
 #include "api/gemini/events.hpp"
 
 #include <string>
+#include <utility>
 
 #include <nlohmann/json.hpp>
 
@@ -77,7 +78,14 @@ std::vector<StreamEvent> EventParser::Consume(const SseFrame& frame) try {
 
     // 服务端业务错误:{"error":{"code":429,"message":"...","status":"..."}}。
     if (auto error = data.find("error"); error != data.end() && error->is_object()) {
-        return {StreamError{error->value("message", std::string("未知错误"))}};
+        std::string code;
+        if (auto code_it = error->find("code"); code_it != error->end()) {
+            code = code_it->is_string() ? code_it->get<std::string>() : code_it->dump();
+        }
+        if (code.empty()) {
+            code = error->value("status", std::string());
+        }
+        return {StreamError{error->value("message", std::string("未知错误")), std::move(code)}};
     }
 
     std::vector<StreamEvent> events;

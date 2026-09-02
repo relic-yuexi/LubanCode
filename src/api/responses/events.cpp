@@ -212,6 +212,7 @@ std::optional<StreamEvent> HandleFailed(const json& data) {
     if (auto response_it = data.find("response"); response_it != data.end() && response_it->is_object()) {
         if (auto error_it = response_it->find("error"); error_it != response_it->end() && error_it->is_object()) {
             event.message = ComposeErrorMessage(*error_it);
+            event.code = error_it->value("code", error_it->value("type", std::string()));
             return event;
         }
     }
@@ -223,6 +224,7 @@ std::optional<StreamEvent> HandleError(const json& data) {
     StreamError event;
     if (auto it = data.find("error"); it != data.end() && it->is_object()) {
         event.message = ComposeErrorMessage(*it);
+        event.code = it->value("code", it->value("type", std::string()));
     } else {
         event.message = data.value("message", "未知错误");
     }

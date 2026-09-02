@@ -467,6 +467,7 @@ struct ImageOutput {
 // 流里出现的错误(服务端主动报错,或者本地解析出的问题)。
 struct StreamError {
     std::string message;
+    std::string code;  // provider 的稳定业务错误码(没有则空)
 };
 
 using StreamEvent = std::variant<MessageStart, TextDelta, ThinkingDelta, ToolUseStart, ToolUseInputDelta,
@@ -489,6 +490,7 @@ struct Error {
     ErrorKind kind = ErrorKind::Network;
     std::string message;
     int http_status = 0;  // kind == HttpStatus 时才有意义
+    std::string api_code;  // kind == Api 时的 provider 稳定错误码(没有则空)
 };
 
 // 给人看的错误体摘要(ccmoon 真机巡检单 P1):HTTP 非 2xx 的原始响应体

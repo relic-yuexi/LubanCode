@@ -60,6 +60,7 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     api::MessageAssembler assembler;
     bool stream_error = false;
     std::string stream_error_message;
+    std::string stream_error_code;
     std::string assembler_response_id;
     const std::atomic<bool>* effective_cancel =
         options.cancel != nullptr ? options.cancel : (options.timeout_secs > 0 ? &local_cancel : nullptr);
@@ -77,6 +78,7 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
                     } else if constexpr (std::is_same_v<T, api::StreamError>) {
                         stream_error = true;
                         stream_error_message = e.message;
+                        stream_error_code = e.code;
                     }
                 },
                 event);
@@ -138,7 +140,7 @@ SampleResult SampleModel(api::Backend& backend, const SampleRequest& request, co
     }
     if (stream_error) {
         result.ok = false;
-        result.error = api::Error{api::ErrorKind::Api, stream_error_message, 0};
+        result.error = api::Error{api::ErrorKind::Api, stream_error_message, 0, stream_error_code};
         return result;
     }
     result.ok = true;

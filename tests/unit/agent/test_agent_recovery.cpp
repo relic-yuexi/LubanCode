@@ -122,6 +122,50 @@ TEST_CASE("断流恢复:假后端前三次 503,第 4 次尝试恢复成功") {
     CHECK(events == 4);
 }
 
+TEST_CASE("断流恢复:HTTP 200 的 upstream_error 事件进入重试环后恢复") {
+    FlakyBackend backend;
+    backend.script = {
+        {{api::StreamError{"Upstream request failed (code=upstream_error)", "upstream_error"}}, std::nullopt},
+        {TextScript("上游恢复后的完整回答"), std::nullopt},
+    };
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
+    Turn turn;
+    agent::TurnWiring wiring;
+    wiring.events = &turn.adapter;
+    wiring.wait_request_backoff = [](std::chrono::milliseconds, const std::atomic<bool>*) { return true; };
+
+    const auto result = loop.Run("问一句", wiring);
+
+    REQUIRE(result.has_value());
+    CHECK(backend.calls == 2);
+    REQUIRE(loop.History().size() == 2);
+    REQUIRE(std::holds_alternative<api::TextBlock>(loop.History().back().content.front()));
+    CHECK(std::get<api::TextBlock>(loop.History().back().content.front()).text == "上游恢复后的完整回答");
+}
+
+TEST_CASE("断流恢复:确定性 Api code 零重试") {
+    FlakyBackend backend;
+    backend.script = {
+        {{api::StreamError{"参数不合法 (code=invalid_request)", "invalid_request"}}, std::nullopt},
+        {TextScript("不应发送第二次"), std::nullopt},
+    };
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
+    Turn turn;
+    agent::TurnWiring wiring;
+    wiring.events = &turn.adapter;
+    wiring.wait_request_backoff = [](std::chrono::milliseconds, const std::atomic<bool>*) { return true; };
+
+    const auto result = loop.Run("问一句", wiring);
+
+    REQUIRE_FALSE(result.has_value());
+    CHECK(backend.calls == 1);
+    CHECK(result.error().find("参数不合法") != std::string::npos);
+}
+
 TEST_CASE("断流恢复:首字节都没到就断,重发后整轮跑完,attempt 连号") {
     FlakyBackend backend;
     backend.script = {
