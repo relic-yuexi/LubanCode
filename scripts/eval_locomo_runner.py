@@ -48,8 +48,8 @@ EXE = r"D:\lubancode\build\release\Release\lubancode.exe"
 PROVIDER_NAME = "ccmoon"
 TEMPERATURE = 0
 # 用户日常档是 high,但 A 组(无记忆)high 空推理实测 420s+ 不封顶,放量跑
-# 不动;两组对称降到 medium,口径可复现,报告注明与日常档的差异。
-REASONING_EFFORT = "medium"
+# 不动;两组对称降档(可经 LOCOMO_EFFORT 覆盖),口径可复现,报告注明与日常档差异。
+REASONING_EFFORT = os.environ.get("LOCOMO_EFFORT", "medium")
 TASK_TIMEOUT_SECS = 420
 CATEGORIES = ("single_hop", "multi_hop", "temporal_reasoning", "open_domain",
               "adversarial")
@@ -287,50 +287,28 @@ def sample_questions(convs: list, per_cat: int, seed: int) -> list:
     return picked
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--convs", default="conv-26,conv-41")
-    ap.add_argument("--per-category", type=int, default=10)
-    ap.add_argument("--seed", type=int, default=20260903)
-    ap.add_argument("--smoke", action="store_true", help="每类 1 题,验管线")
-    ap.add_argument("--limit", type=int, default=0, help="只跑前 N 题(冒烟用)")
-    args = ap.parse_args()
-    per_cat = 1 if args.smoke else args.per_category
+def per_mode_path(mode: str) -> str:
+    return os.path.join(HERE_EVAL, f"e2_per_question_{mode}.json")
 
-    perturbed_path = os.path.join(HERE_EVAL, "perturbed.jsonl")
-    answers_path = os.path.join(HERE_EVAL, "answers.json")
-    convs_all = {}
-    with open(perturbed_path, encoding="utf-8") as f:
-        for line in f:
-            rec = json.loads(line)
-            convs_all[rec["conv_id"]] = rec
-    answers = json.load(open(answers_path, encoding="utf-8"))
-    want = [c.strip() for c in args.convs.split(",") if c.strip()]
-    convs = [convs_all[c] for c in want]
 
-    tasks = sample_questions(convs, per_cat, args.seed)
-    if args.limit:
-        tasks = tasks[:args.limit]
-    print(f"题集: {len(tasks)} 题(每类 {per_cat}),双态 = {len(tasks) * len(MODES)} 次调用")
-
-    # 断点续跑:已有逐题账里成功的(qid,mode)跳过,失败/缺失的重跑。
-    per_q_path = os.path.join(HERE_EVAL, "e2_per_question.json")
-    results = []
-    done = set()
-    if os.path.exists(per_q_path):
-        for r in json.load(open(per_q_path, encoding="utf-8")):
-            if not r.get("failure") and r["qid"] and r.get("choice", -1) >= 0:
-                results.append(r)
-                done.add((r["qid"], r["mode"]))
-    print(f"续跑: 已完成 {len(done)} 笔,跳过")
-
-    for mode in MODES:
+def run_batch(modes, convs, tasks, answers):
+    """逐态跑批,每态独立账文件——A/B 两组 home 互相独立,可两个进程分别
+    --modes A / --modes B 并行,互不写同一份文件(汇总时合并)。"""
+    for mode in modes:
         home = build_home(mode)
         for conv in convs:
             ws_dir, n = ingest_conv(home, conv)
             print(f"[{mode}] {conv['conv_id']}: 灌入 {n} topics -> {ws_dir}", flush=True)
+        account_path = per_mode_path(mode)
+        results = []
+        done = set()
+        if os.path.exists(account_path):
+            for r in json.load(open(account_path, encoding="utf-8")):
+                if not r.get("failure") and r.get("choice", -1) >= 0:
+                    results.append(r)
+                    done.add(r["qid"])
         for cid, q in tasks:
-            if (q["qid"], mode) in done:
+            if q["qid"] in done:
                 continue
             r = ask_one(mode, home, ws_dir_of(cid), q["question"], q["choices"])
             correct = answers[q["qid"]]
@@ -340,45 +318,97 @@ def main():
                       "choice_text": choice_text,
                       "hit": 1 if r["choice"] == correct else 0})
             results.append(r)
-            with open(per_q_path, "w", encoding="utf-8") as f:
+            with open(account_path, "w", encoding="utf-8") as f:
                 json.dump(results, f, ensure_ascii=False, indent=1)
             print(f"[{mode}] {q['qid']} [{q['category']}] "
                   f"choice={r['choice']} correct={correct} "
                   f"{'HIT' if r['hit'] else 'MISS'} wall={r['wall']}s"
                   + (f" failure={r['failure']}" if r["failure"] else ""), flush=True)
 
-    with open(per_q_path, "w", encoding="utf-8") as f:
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--convs", default="conv-26,conv-41")
+    ap.add_argument("--per-category", type=int, default=10)
+    ap.add_argument("--seed", type=int, default=20260903)
+    ap.add_argument("--modes", default="A,B", help="只跑指定态(如 A),A/B 可两进程并行")
+    ap.add_argument("--smoke", action="store_true", help="每类 1 题,验管线")
+    ap.add_argument("--report-only", action="store_true",
+                    help="不跑题,只按已有逐题账产报告")
+    ap.add_argument("--limit", type=int, default=0, help="只跑前 N 题(冒烟用)")
+    args = ap.parse_args()
+    per_cat = 1 if args.smoke else args.per_category
+    run_modes = tuple(m.strip() for m in args.modes.split(",") if m.strip())
+
+    convs_all = {}
+    with open(os.path.join(HERE_EVAL, "perturbed.jsonl"), encoding="utf-8") as f:
+        for line in f:
+            rec = json.loads(line)
+            convs_all[rec["conv_id"]] = rec
+    answers = json.load(open(os.path.join(HERE_EVAL, "answers.json"), encoding="utf-8"))
+    want = [c.strip() for c in args.convs.split(",") if c.strip()]
+    convs = [convs_all[c] for c in want]
+
+    tasks = sample_questions(convs, per_cat, args.seed)
+    if args.limit:
+        tasks = tasks[:args.limit]
+    print(f"题集: {len(tasks)} 题(每类 {per_cat}),本次态 {run_modes}")
+
+    if not args.report_only:
+        run_batch(run_modes, convs, tasks, answers)
+
+    # 合并各态账
+    results = []
+    for mode in MODES:
+        p = per_mode_path(mode)
+        if os.path.exists(p):
+            results.extend(json.load(open(p, encoding="utf-8")))
+    merged = os.path.join(HERE_EVAL, "e2_per_question.json")
+    with open(merged, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=1)
-    print("逐题账: eval/locomo/e2_per_question.json")
+    print(f"逐题账(合并): {merged}")
 
     # ---- 汇总 ----
     lines = ["# LoCoMo-MC10 端到端配对(E2 抽样首批)", ""]
     lines.append(f"题集: {want} x 五类各 {per_cat} = {len(tasks)} 题,双态; "
-                 f"模型 {PROVIDER_NAME}(温度 {TEMPERATURE}); "
-                 "A=memory off,B=memory on。判分对扰动后 correct_choice_index。")
+                 f"模型 {PROVIDER_NAME}(温度 {TEMPERATURE},推理档 "
+                 f"{REASONING_EFFORT}——日常 high 会让 A 组空推理 420s+ 不封顶,"
+                 "两组对称降档,口径可复现); A=memory off,B=memory on。"
+                 "判分对扰动后 correct_choice_index(扰动不改位次)。")
     lines.append("")
-    lines.append("| 类别 | n | A 准确 | B 准确 | B-A | A 选Not answerable | B 选Not answerable |")
+    lines.append("| 类别 | n(A/B) | A 准确 | B 准确 | B-A | A 选Not answerable | B 选Not answerable |")
     lines.append("|---|---|---|---|---|---|---|")
+
+    def acc(rs):
+        return sum(r["hit"] for r in rs) / len(rs) if rs else 0.0
+
+    def na(rs):
+        return sum(1 for r in rs if "not answerable" in
+                   (r.get("choice_text") or "").lower()) / len(rs) if rs else 0.0
+
     for cat in CATEGORIES:
-        rows = [r for r in results if r["category"] == cat and r["mode"] in MODES]
-        if not rows:
+        a = [r for r in results if r["category"] == cat and r["mode"] == "A"]
+        b = [r for r in results if r["category"] == cat and r["mode"] == "B"]
+        if not a and not b:
             continue
-        a = [r for r in rows if r["mode"] == "A"]
-        b = [r for r in rows if r["mode"] == "B"]
-        acc = lambda rs: sum(r["hit"] for r in rs) / len(rs) if rs else 0.0
-        na = lambda rs: sum(1 for r in rs if "not answerable" in
-                            (r.get("choice_text") or "").lower()) / len(rs) if rs else 0.0
-        lines.append(f"| {cat} | {len(a)} | {acc(a):.3f} | {acc(b):.3f} | "
-                     f"{acc(b) - acc(a):+.3f} | {na(a):.3f} | {na(b):.3f} |")
+        delta = f"{acc(b) - acc(a):+.3f}" if (a and b) else "-"
+        lines.append(f"| {cat} | {len(a)}/{len(b)} | "
+                     f"{acc(a):.3f}{'*' * (not a)} | {acc(b):.3f}{'*' * (not b)} | "
+                     f"{delta} | {na(a):.3f}{'*' * (not a)} | {na(b):.3f}{'*' * (not b)} |")
+    lines.append("")
+    lines.append("(* = 该态此桶暂无完成账,数字为空桶占位,不可引用)")
     all_a = [r for r in results if r["mode"] == "A"]
     all_b = [r for r in results if r["mode"] == "B"]
-    acc = lambda rs: sum(r["hit"] for r in rs) / len(rs) if rs else 0.0
-    lines.append(f"| **合计** | {len(all_a)} | {acc(all_a):.3f} | {acc(all_b):.3f} | "
-                 f"{acc(all_b) - acc(all_a):+.3f} | - | - |")
+    delta_all = f"{acc(all_b) - acc(all_a):+.3f}" if (all_a and all_b) else "-"
+    lines.append(f"| **合计** | {len(all_a)}/{len(all_b)} | {acc(all_a):.3f} | "
+                 f"{acc(all_b):.3f} | {delta_all} | - | - |")
     lines.append("")
-    fails = [r for r in results if r["failure"]]
-    if fails:
-        lines.append(f"失败调用: {len(fails)} 次(逐题账里有明细)")
+    fails = [r for r in results if r.get("failure")]
+    unanswered = [r for r in results if r.get("choice", -1) < 0 and not r.get("failure")]
+    if fails or unanswered:
+        lines.append(f"失败调用 {len(fails)} 次、判不出选项 {len(unanswered)} 次"
+                     "(逐题账有明细,未计入分母的按 MISS 计)")
+    lines.append("")
     report = os.path.join(HERE_EVAL, "report.md")
     with open(report, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
