@@ -8,6 +8,7 @@
 #include <chrono>
 #include <clocale>
 #include <cstdlib>
+#include <ctime>
 #include <utility>
 
 #include "accounting/purpose.hpp"   // PurposeName(Token 账本单 A1)
@@ -2120,6 +2121,25 @@ std::string DetectLocale() {
 }
 
 std::string DetectTimezone() {
+#if defined(_LIBCPP_VERSION)
+    // libc++(macOS 一系)未实现 C++20 tzdb——time_zone 类型都缺,编译期
+    // 就炸(CI macos 腿首跑实证)。回落 C 接面:TZ 环境变量优先,否则
+    // tzset 后 strftime %Z 拿时区缩写;拿不到空串,gaps 记"不可知",不猜。
+    tzset();
+    const char* env = std::getenv("TZ");
+    if (env != nullptr && *env != '\0') {
+        return std::string(env);
+    }
+    const std::time_t now = std::time(nullptr);
+    const std::tm* local = std::localtime(&now);
+    if (local != nullptr) {
+        char buf[64] = {0};
+        if (std::strftime(buf, sizeof(buf), "%Z", local) > 0) {
+            return std::string(buf);
+        }
+    }
+    return std::string();
+#else
     try {
         const std::chrono::time_zone* zone = std::chrono::current_zone();
         if (zone != nullptr) {
@@ -2129,6 +2149,7 @@ std::string DetectTimezone() {
         // 无 tzdata 的机器:空串,gaps 里记"不可知",不猜。
     }
     return std::string();
+#endif
 }
 
 }  // namespace

@@ -418,6 +418,13 @@ add_library(lubancode_engine STATIC
   # .evidence 运行时证据,显式点名才放行并告知体积。
   src/tools/observation_filter.cpp
   src/tools/agent_tool.cpp
+  # 监督器三件住 engine:用户(agent_tool/task_coordinator)都在 engine,
+  # 住 runtime 便是 engine 反向引用 runtime——MSVC 多遍解析容得下,
+  # GCC 单遍链接炸 undefined(CI ubuntu 腿首跑实证);runtime 无人用
+  # 监督器,挪库断循环。
+  src/runtime/agent_supervisor.cpp
+  src/runtime/agent_health_hooks.cpp
+  src/runtime/agent_supervisor_metrics.cpp
   # 骨架拆解批三·病十四:AgentTool 六职拆分出的台账/调度/隔间三件。
   src/tools/task_ledger.cpp
   src/tools/subagent_scheduler.cpp
@@ -779,13 +786,8 @@ add_library(lubancode_runtime STATIC
   # 骨架拆解批五先行半批:重试退避(固定/指数/阶梯 + 上限 + 抖动档 +
   # 可取消等待)——loop 的 5s/15s 与 workflow 的节点级指数同走这枚。
   src/runtime/retry_backoff.cpp
-  # 监督器单 P0-2:会话级单线程监督器(健康拍 + 期限表 + 通知去重),
-  # 墙钟看门狗自每任务一线迁入。
-  src/runtime/agent_supervisor.cpp
-  # 监督器单 P2:AgentHealthChanged 只读钩子总线(后台安全队列)与六枚
-  # 低基数 OTel 指标聚合。
-  src/runtime/agent_health_hooks.cpp
-  src/runtime/agent_supervisor_metrics.cpp
+  # (监督器三件已挪 engine——见 engine 源列表注:断 engine→runtime
+  # 反向引用,GCC 单遍链接 undefined。)
   # 统一回放接口只收信封、次序与坏行恢复规矩;loop/goal/workflow
   # 各自保留域编解码与折叠口。
   src/runtime/replay.cpp
