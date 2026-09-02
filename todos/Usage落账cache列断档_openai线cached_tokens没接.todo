@@ -1,0 +1,48 @@
+# Usage 落账 cache 列断档：openai 线 cached_tokens 没接
+
+- 状态：待实现（2026-09-02 主人质疑缓存命中低，挖轨迹账撞见）
+- 日期：2026-09-02
+- 级别：P1（可观测性——细账的 cache 眼睛是瞎的，68% 这种数无法归因）
+- 范围：openai-responses/openai-chat wire 的 usage 解析、`model.usage.recorded` 落账、`[tokens]` 汇总行的算法来源
+- 依赖：OneShot 轨迹断档单（已落，usage 五列结构在）
+- 关联：《动态工具PromptCache守恒与按需调用设计.todo》§11 缓存账怎样验
+- 不在本单：改缓存命中本身（那是 legacy 模式与中转站的事）；compact 语义
+
+## 一、先下断语
+
+实战第二场（轨迹 `20260902-040700-0DTOBC`，315 请求，openai-responses 线）：
+
+- 逐请求 `model.usage.recorded` 的 `cache_read_tokens` / `cache_creation_tokens` **全部为 0**；
+- 而进程退出前 `[tokens]` 汇总行报"输入 29.43M（缓存命中 20.03M，68%）"；
+- 逐请求 `input_tokens` 之和 = 9.40M = 29.43M − 20.03M——**严丝合缝**，说明 `input_tokens` 落的是"未命中新增"（miss 口径），命中份额有处算，只是没进逐请求的 cache 列。
+
+两头对不上账：细账看不见命中，汇总行的 68% 来历不明（无法审计它从哪个字段、哪条算法来）。cache_epoch 字段倒是在落（全场=1），但 cache 列全零，epoch 分段统计无从做起。
+
+## 二、病根假设（接手先验）
+
+1. openai-responses/chat 线的 usage 回包里 cached_tokens 藏在 `prompt_tokens_details.cached_tokens` 一类嵌套字段——wire 解析层没挖出来，落账时 cache 两列留零；
+2. `[tokens]` 汇总行的 68% 大概率是"总输入−逐请求 input_tokens 之和"反推或另一路累计——**反推值冒充实测值**，provider 没报就该如实标"未报"，不能拿减法填空。
+
+## 三、修法
+
+1. openai 两线 usage 解析补 `cached_tokens` 挖取（嵌套字段），anthropic 线照旧（已通）。
+2. `model.usage.recorded` 的 cache 两列填真值；provider 真没报就落 0 + `reported_by_provider` 如实为 false，不反推。
+3. `[tokens]` 汇总行与逐请求账同源同算法——汇总=逐条之和，杜绝两条路算出两个世界。
+4. 顺带：主人要的 **cache_epoch 分段统计**——`/doctor insights` 或 insights 报告里按 epoch 分段给命中（compact 后算第二段整体，段内各看各的命中）。字段已在落，只差统计口。
+
+## 四、验收
+
+- openai 线真机跑一场：逐请求 `cache_read_tokens` 与 provider 回包逐条对得上（抽验≥10 请求）；汇总行 = 逐条之和。
+- anthropic 假后端既有五列用例零回归。
+- provider 不报 cache 的模型：cache 列 0 + `reported_by_provider=false`，汇总行明示"该 provider 未报缓存"。
+- 构造 compact 场（或复用既有 compact 用例）：epoch 翻页后分段统计各段命中正确。
+
+## 五、实施批次
+
+### P0：接线
+- [ ] openai 两线 cached_tokens 挖取进落账
+- [ ] 汇总行与逐请求账同源
+
+### P1：分段与明示
+- [ ] epoch 分段统计口（insights/doctor）
+- [ ] 未报缓存的明示文案（中英）
