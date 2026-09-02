@@ -189,7 +189,6 @@ cd D:\lubancode\build\release\Release
 
 **留白（真机项，不冒充）**：Windows Terminal / 经典 conhost / VS Code 终端三款宿主的全幕 driver 报告与录屏、用户真机肉眼复测（第七节操作单照旧），待用户侧随手补。
 
->>>>>>> worktree-agent-a01535cf8864cbab3
 ## 九、不做什么
 
 - 不删 busy composer，也不禁止回合运行时排队输入。
