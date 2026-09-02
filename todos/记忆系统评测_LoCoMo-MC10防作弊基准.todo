@@ -52,9 +52,9 @@ LoCoMo-MC10 是 LoCoMo（Snap Research 2024，长对话记忆基准）的十选�
 
 ### E1 检索层评测（零模型成本，先掐软柿子）
 
-- [ ] 把每场对话的 sessions 按 session 粒度灌成记忆 topics（走 memory worker 正常抽取路——不许旁门直写正文塞答案，抽取产什么灌什么）。
-- [ ] 每题用 question（改写后）当查询跑 BM25 召回，记 Recall@1/3/5（命中含答案证据的 session）、注入字节、零命中率。
-- [ ] 产出基线表：五类各 Recall@k。检索不行端到端白搭——这步便宜，先跑先看。
+- [x] 把每场对话的 sessions 按 session 粒度灌成记忆 topics（走 memory worker 正常抽取路——不许旁门直写正文塞答案，抽取产什么灌什么）。（C++ driver tests/manual/locomo_retrieval_driver.cpp:每场临时 workspace,EnqueueSave 正门灌入+RunPendingMemoryJobs 落盘;summary=官方摘要截500B,content=正文截8KiB,keywords=说话人名;零模型成本）
+- [x] 每题用 question（改写后）当查询跑 BM25 召回，记 Recall@1/3/5（命中含答案证据的 session）、注入字节、零命中率。（走真实现 BuildTurnContext+LastTrace,不走 python 复刻;全量 1986 题:可定位 498 题 R@1=0.341/R@3=0.554/R@5=0.641,零命中 0,平均注入 2.9 条/7.8KiB 预算打满;表在 eval/locomo/retrieval_baseline.md）
+- [x] 产出基线表：五类各 Recall@k。检索不行端到端白搭——这步便宜，先跑先看。（E1 走 C++ 真实现而非 python 直调的理由:python 复刻 BM25/分词/门槛测的不是 LubanCode 现状,违背量现状红线）
 
 ### E2 端到端配对（烧模型，抽样起步）
 
