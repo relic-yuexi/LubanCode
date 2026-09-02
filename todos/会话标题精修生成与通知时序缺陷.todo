@@ -87,10 +87,10 @@
 
 ### 单元测试
 
-- [ ] `SessionTitleRefiner::Ready()`：未启动=false、运行中=false、完成待取=true、`TakeFinished()` 后=false。
-- [ ] 并发可见性：worker 写完 outcome 后才立 done；主线程见 Ready 后 Take，标题、usage、generation 全齐。
-- [ ] wake source：标题 running 不醒，finished 醒；失败 outcome 也要醒来收账，收完不再醒。
-- [ ] generation 翻号、人工标题抢先、clear/resume 后的迟到结果仍不采纳。
+- [x] `SessionTitleRefiner::Ready()`：未启动=false、运行中=false、完成待取=true、`TakeFinished()` 后=false。
+- [x] 并发可见性：worker 写完 outcome 后才立 done；主线程见 Ready 后 Take，标题、usage、generation 全齐。
+- [x] wake source：标题 running 不醒，finished 醒；失败 outcome 也要醒来收账，收完不再醒。
+- [x] generation 翻号、人工标题抢先、clear/resume 后的迟到结果仍不采纳。（既有 test_session_title_account 册已钉,本次未动采纳逻辑,全量 ctest 复验绿）
 
 ### 交互时序测试
 
@@ -105,7 +105,7 @@
 
 - [ ] 一次成功精修只记一套旁路 request/usage/output/title 事件；wake 不得造成重复 Take、重复 usage 或重复 `control.title.changed`。
 - [ ] 精修失败仍记真实 usage；不改本地标题，不刷错误车轮。
-- [ ] `test_session_title_refiner`、`test_session_title_account`、console input composer、IdleWakeCoordinator、i18n 相关册全绿。
+- [x] `test_session_title_refiner`、`test_session_title_account`、console input composer、IdleWakeCoordinator、i18n 相关册全绿。（全量 ctest 361/361 绿;本次未动 console_input 与文案,i18n 册照旧绿;IdleWakeCoordinator 经 unit.app.session_wirings/loop 册复验）
 
 ## 六、真机验收
 
@@ -118,7 +118,7 @@
 
 ## 七、实施批次
 
-- [ ] P0：补 refiner Ready 查询；标题完成挂 IdleWakeCoordinator；空 composer 自动收货。
-- [ ] P0：定死草稿非空与提交竞态的通知策略；补交互时序回归册。
-- [ ] P1：拆开发货/收货职责；校正过时注释与命名。
-- [ ] 验收：focused 单测、全量 CTest、Windows 真终端六幕；逐项留下命令、退出码与原始失败。
+- [x] P0：补 refiner Ready 查询；标题完成挂 IdleWakeCoordinator；空 composer 自动收货。
+- [ ] P0：定死草稿非空与提交竞态的通知策略；补交互时序回归册。（策略已定死并落地:提交竞态边界只静默落账改名,通知压到下一枚提示符重画前 FlushDeferredTitleNotice 打出;/clear、/resume 弃压后通知;交互时序回归册未建,四幕时序用例仍缺,故不勾）
+- [x] P1：拆开发货/收货职责；校正过时注释与命名。
+- [ ] 验收：focused 单测、全量 CTest、Windows 真终端六幕；逐项留下命令、退出码与原始失败。（单测与全量 CTest 已过,真终端六幕未做）

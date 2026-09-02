@@ -720,6 +720,15 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     background_wake_token_ = idle_wakes_.AddSource("background_tasks", []() {
         return lubancode::tools::BackgroundTaskRegistry::Instance().HasUnreportedCompletions();
     });
+    // 标题精修完工的唤醒源(通知时序缺陷单):精修完成后不再借下一次用户
+    // 输入收货——Ready 只在"结果备好待收"翻真(运行中不醒),空闲
+    // composer 的 100ms 拍一看真就让位,ReadLine 以空串返回,主循环的
+    // 收货点当场记 usage、改名、打"标题已设为"(在提示符重画前)。失败
+    // 的结局也完工:usage 是真花的,照样叫醒来收账;收完 Ready 翻假,
+    // 不空转。
+    title_wake_token_ = idle_wakes_.AddSource("session_title", [this]() {
+        return HasFinishedTitleRefinement();
+    });
     lubancode::cli::SetIdleWakeHook([this]() { return idle_wakes_.AnyReady(); });
 
     // 底栏状态行的后台任务段数据源(background 管理面单):BuildStatusLine
@@ -1067,6 +1076,7 @@ TerminalSessionController::~TerminalSessionController() {
     // callback 析构后摸 this)。
     subagent_wake_token_.reset();
     background_wake_token_.reset();
+    title_wake_token_.reset();
     loop_wiring_.Shutdown();
 }
 
@@ -1521,7 +1531,9 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
             }
             // 两层标题(实测问题 7):翻场翻代,上一场在飞的精炼落地即弃;
             // 新场子的下一问重走本地起名 + 精炼(判定本体在 titles_)。
+            // 压后的标题通知一并弃掉——旧场子的改名不能打进新场子的提示符。
             titles_.ResetForNewSession();
+            deferred_title_notice_.clear();
         },
         [this](const std::string& title) {
             peer_wiring_.SetName(title);
@@ -1542,8 +1554,10 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
             OpenArtifactStore();
             // 持久目标单:goal 事件账随档恢复(默认 paused-on-resume)。
             goal_wiring_.RestoreFromArchive();
-            // 两层标题(实测问题 7):换场善后——翻代、取消在飞的精炼。
+            // 两层标题(实测问题 7):换场善后——翻代、取消在飞的精炼;
+            // 压后的通知也随旧场子作废。
             BackfillTitleOnResume();
+            deferred_title_notice_.clear();
         }};
     return state;
 }

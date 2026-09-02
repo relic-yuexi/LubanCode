@@ -1,6 +1,9 @@
 // 会话标题异步精炼器(实测问题 7)的单测:Start 不阻塞、TakeFinished
 // 非阻塞收货、单飞不叠发、失败半截也出账、取消生效、代数原样带回、
 // 析构不挂。假后端可控延迟,不发一个网络包。
+// 通知时序缺陷单补:Ready 只读查询的真值表、失败结局也要醒、主线程见
+// Ready 后收货数据全齐、IdleWakeCoordinator 挂 Ready 的唤醒源形制
+// (running 不醒/finished 醒/收完不再醒)。
 #include <doctest/doctest.h>
 
 #include <atomic>
@@ -13,6 +16,7 @@
 #include "api/types.hpp"
 #include "app/session_title.hpp"        // kTitleRefineMaxTokens(单子预算钉)
 #include "app/session_title_refiner.hpp"
+#include "runtime/idle_wake.hpp"        // IdleWakeCoordinator(唤醒源形制钉)
 
 namespace {
 
@@ -211,4 +215,104 @@ TEST_CASE("精炼器:析构时在飞也不挂——取消 + 有界收尾 + detac
     const auto elapsed = std::chrono::steady_clock::now() - t0;
     CHECK(elapsed < std::chrono::seconds(15));
     CHECK(true);  // 到这里就是过了:析构未挂死、未 terminate
+}
+
+// 有界等 Ready 翻真:模拟空闲 composer 的 100ms 拍轮询(只问 Ready,
+// 绝不 Take——收货是主循环收货点的事)。
+bool AwaitReady(SessionTitleRefiner& refiner, int wait_ms) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (refiner.Ready()) {
+            return true;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    return refiner.Ready();
+}
+
+TEST_CASE("Ready 真值表:未启动/运行中/完成待取/取走后——Busy 当不了唤醒条件") {
+    auto backend = std::make_unique<FakeTitleBackend>();
+    backend->delay_ms = 200;
+    SessionTitleRefiner refiner;
+    // 未启动:两只都 false,空闲拍不空醒。
+    CHECK_FALSE(refiner.Ready());
+    CHECK_FALSE(refiner.Busy());
+    CHECK(refiner.Start(MakeInputs(std::move(backend))));
+    // 运行中:Ready 仍 false——起飞那一刻不醒,完工才醒。
+    CHECK(refiner.Busy());
+    CHECK_FALSE(refiner.Ready());
+    REQUIRE(AwaitReady(refiner, 2000));
+    // 完成待取:Ready 翻真;Busy 也仍 true(槽还占着,单飞防叠发)——
+    // 这正是 Busy 当不了唤醒条件的原因:它起飞即真,会空转到收货。
+    CHECK(refiner.Ready());
+    CHECK(refiner.Busy());
+    // 取走后:双双翻假,槽复位可再起飞。
+    REQUIRE(refiner.TakeFinished().has_value());
+    CHECK_FALSE(refiner.Ready());
+    CHECK_FALSE(refiner.Busy());
+}
+
+TEST_CASE("Ready 并发可见性:主线程见 Ready 后 Take——标题/usage/代数全齐") {
+    std::vector<CapturedCall> calls;
+    SessionTitleRefiner refiner;
+    CHECK(refiner.Start(MakeInputs(MakeRecordingBackend(&calls, /*delay_ms=*/150),
+                                   /*generation=*/7)));
+    // worker 写完 outcome 后才立 done(Start 尾段的手工次序):主线程一旦
+    // 见 Ready,Take 拿到的必是整套结果,没有半截可见。
+    REQUIRE(AwaitReady(refiner, 2000));
+    const auto outcome = refiner.TakeFinished();
+    REQUIRE(outcome.has_value());
+    CHECK(outcome->ok);
+    CHECK(outcome->title == "实现图书系统");
+    CHECK(outcome->model == "cheap-m");
+    CHECK(outcome->generation == 7);
+    CHECK(outcome->accounting.usage.input_tokens == 492);
+    CHECK(outcome->accounting.usage.output_tokens == 10);
+    CHECK(outcome->accounting.usage_reported);
+}
+
+TEST_CASE("失败结局也 Ready——失败也要叫醒来收账(usage 是真花的)") {
+    // 空回:流正常收场但一个字没吐,usage 照出——收货点记账后安静弃标题。
+    struct EmptyTextBackend final : lubancode::api::Backend {
+        std::expected<void, lubancode::api::Error> send_stream(
+            const lubancode::api::Request&,
+            const std::function<void(const lubancode::api::StreamEvent&)>& on_event,
+            const std::atomic<bool>*) override {
+            lubancode::api::Usage usage;
+            usage.input_tokens = 492;
+            usage.output_tokens = 10;
+            on_event(lubancode::api::MessageDone{"end_turn", usage});
+            return {};
+        }
+    };
+    SessionTitleRefiner refiner;
+    CHECK(refiner.Start(MakeInputs(std::make_unique<EmptyTextBackend>())));
+    REQUIRE(AwaitReady(refiner, 2000));  // 失败结局同样完工待收:不醒就丢账
+    const auto outcome = refiner.TakeFinished();
+    REQUIRE(outcome.has_value());
+    CHECK_FALSE(outcome->ok);
+    CHECK(outcome->title.empty());
+    CHECK(outcome->accounting.usage.input_tokens == 492);
+    CHECK(outcome->accounting.usage_reported);
+}
+
+TEST_CASE("唤醒源形制(装配同款):running 不醒、finished 醒、收完不再醒") {
+    lubancode::runtime::IdleWakeCoordinator wakes;
+    SessionTitleRefiner refiner;
+    // 与 interactive_session_assembly 的挂法同款:ready 只问 Ready()。
+    const auto token = wakes.AddSource("session_title", [&refiner]() { return refiner.Ready(); });
+    CHECK(token.valid());
+    CHECK(wakes.SourceNames() == std::vector<std::string>{"session_title"});
+    CHECK_FALSE(wakes.AnyReady());  // 未启动:不醒
+    std::vector<CapturedCall> calls;
+    CHECK(refiner.Start(MakeInputs(MakeRecordingBackend(&calls, /*delay_ms=*/150))));
+    CHECK(refiner.Busy());
+    CHECK_FALSE(wakes.AnyReady());  // 运行中:不空醒(Ready 才是唤醒条件)
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(2000);
+    while (!wakes.AnyReady() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE(wakes.AnyReady());  // 完工:叫醒主循环收货
+    REQUIRE(refiner.TakeFinished().has_value());
+    CHECK_FALSE(wakes.AnyReady());  // 收完:不再醒,不空转
 }

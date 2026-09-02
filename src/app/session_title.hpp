@@ -1,9 +1,10 @@
 // 会话标题的两层生成(实测问题 7 修复):
 //   第一层 本地临时标题:首问一到、建档即成——清洗首行、截到合宜长度,
 //   零模型 token,当场可见(LocalSessionTitle)。
-//   第二层 cheap 精炼:只在配置了独立 cheap 路由时由 SessionTitleRefiner
-//   异步并行发(session_title_refiner.hpp),结果原子替换临时标题;
-//   失败保留本地标题,不重试,不回落 normal。
+//   第二层 模型精炼:首个主回合收口后的空闲边界由 SessionTitleRefiner
+//   异步发(session_title_refiner.hpp;P0-2:回合里发与主 turn 撞同一
+//   stream 的 turn 账),完工由空闲唤醒收货,结果原子替换临时标题;
+//   失败保留本地标题,不重试。
 // 本文件只放纯函数:本地标题派生、精炼请求的拼装与采样(采样本体走
 // agent::SampleModel 原语)。失败降级:调用方沿用本地标题,不许因起名
 // 失败拦住会话。

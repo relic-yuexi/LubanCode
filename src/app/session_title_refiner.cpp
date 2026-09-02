@@ -119,4 +119,10 @@ bool SessionTitleRefiner::Busy() const {
     return shared_ != nullptr;
 }
 
+bool SessionTitleRefiner::Ready() const {
+    // done 是 outcome 写完才立的收讫旗(见 Start 尾段):这里只读它,不
+    // join、不锁、不动槽——ReadLine 的 100ms 拍在主线程问,零副作用。
+    return shared_ != nullptr && shared_->done.load();
+}
+
 }  // namespace lubancode::app
