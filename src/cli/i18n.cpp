@@ -99,7 +99,9 @@ const Entry kZhCN[] = {
      "  /exit           退出(裸词 exit/quit 也认)\n"},
     {"help.config",
      "配置优先级(从高到低,按字段逐个决,不是整套配置一刀切):\n"
-     "  1) LUBANCODE_ 专属环境变量\n"
+     "  1) LUBAN_* 顶层连接变量(优先于同字段 LUBANCODE_*)\n"
+     "       LUBAN_BASE_URL / LUBAN_API_KEY / LUBAN_MODEL\n"
+     "     LUBANCODE_* 专属环境变量(保留)\n"
      "       LUBANCODE_WIRE          协议选择,anthropic / responses / chat_completions\n"
      "       LUBANCODE_BASE_URL      API 地址\n"
      "       LUBANCODE_API_KEY       认证令牌\n"
@@ -128,13 +130,9 @@ const Entry kZhCN[] = {
      "                \"idle_minutes\": 10}}\n"
      "       配了才注册 lsp 工具(definition/references/symbols/diagnostics 语义查询),懒启动、\n"
      "       闲置自动关停,/lsp 看各语言服务器状态\n"
-     "  3) 通用环境变量(向后兼容旧用法,跟 Claude Code 等工具共用同名变量时容易撞车,\n"
-     "     建议改用第 1 级的 LUBANCODE_* 专属变量):\n"
-     "       wire=anthropic 时读 ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL\n"
-     "       wire=responses 时读 OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL\n"
-     "  4) 内置默认值:wire=anthropic、max_context_chars={0}、theme={1}、context_window={2}。\n"
+     "  3) 内置默认值:wire=anthropic、max_context_chars={0}、theme={1}、context_window={2}。\n"
      "     base_url/api_key/model/system_prompt_file/compact_model/think 不绑死任何一家模型服务,\n"
-     "     没有内置默认值——四级都没配到,交互模式会自动走初次配置向导;单发模式/管道模式会直接\n"
+     "     没有内置默认值——以上各级都没配到,交互模式会自动走初次配置向导;单发模式/管道模式会直接\n"
      "     报错,提示三条配置途径。用 --config 能看到当前实际生效的配置和每个字段的来源。\n"},
 
     // ---- /help(交互内帮助) ----
@@ -953,20 +951,19 @@ const Entry kZhCN[] = {
     {"path.no_home", "<找不到主目录>"},
 
     // ---- 配置来源 / 常见错误(config 层) ----
-    {"config.source.lubancode_env", "LUBANCODE_ 专属环境变量"},
+    {"config.source.luban_env", "环境变量(LUBAN_*)"},
+    {"config.source.lubancode_env", "环境变量(LUBANCODE_*)"},
     {"config.source.config_file", "配置文件(.lubancode/config.json)"},
     {"config.source.project_config_file", "项目级配置(.lubancode/config.json)"},
     {"config.source.global_config_file", "全局配置(~/.lubancode/config.json)"},
-    {"config.source.generic_env", "通用环境变量(ANTHROPIC_*/OPENAI_*)"},
     {"config.source.default", "内置默认值"},
     {"config.source.unknown", "未知来源"},
     {"error.api_key_missing",
      "缺少 API Key,没有它没法跟模型对话。按优先级从高到低找了这些地方,都没找到:\n"
-     "  1) 环境变量 LUBANCODE_API_KEY\n"
+     "  1) 环境变量 LUBAN_API_KEY(兼容保留 LUBANCODE_API_KEY,LUBAN_* 优先)\n"
      "  2) 配置文件(cwd 或用户主目录的 .lubancode/config.json,旧位置 .lubancode.json 也认,\n"
      "     读到会自动迁移)里的 api_key 字段\n"
-     "  3) 通用环境变量 {0}\n"
-     "  4) 内置默认值(api_key 没有内置默认值,必须自己配一个)\n"
+     "  3) 内置默认值(api_key 没有内置默认值,必须自己配一个)\n"
      "挑一种配上,再重新运行 lubancode。用 --config 能看到当前每个字段实际读到了什么。"},
     {"error.not_configured",
      "缺少配置: {0},没法跟模型对话(lubancode 不内置哪一家的地址/模型,得自己配)。三条途径挑一种:\n"
@@ -1965,7 +1962,9 @@ const Entry kEn[] = {
      "  /exit           quit (bare exit/quit work too)\n"},
     {"help.config",
      "Configuration priority (high to low, decided per field, not as a whole):\n"
-     "  1) LUBANCODE_ dedicated environment variables\n"
+     "  1) LUBAN_* top-level connection variables (higher priority than matching LUBANCODE_*)\n"
+     "       LUBAN_BASE_URL / LUBAN_API_KEY / LUBAN_MODEL\n"
+     "     LUBANCODE_* dedicated environment variables (retained)\n"
      "       LUBANCODE_WIRE          protocol: anthropic / responses / chat_completions\n"
      "       LUBANCODE_BASE_URL      API address\n"
      "       LUBANCODE_API_KEY       auth token\n"
@@ -1995,11 +1994,7 @@ const Entry kEn[] = {
      "                \"idle_minutes\": 10}}\n"
      "       registers the lsp tool (definition/references/symbols/diagnostics), lazy-started and\n"
      "       auto-stopped when idle; see /lsp for status\n"
-     "  3) generic environment variables (backward compatible; they collide with tools like Claude\n"
-     "     Code, prefer the LUBANCODE_* tier):\n"
-     "       wire=anthropic reads ANTHROPIC_BASE_URL / ANTHROPIC_AUTH_TOKEN / ANTHROPIC_MODEL\n"
-     "       wire=responses reads OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL\n"
-     "  4) built-in defaults: wire=anthropic, max_context_chars={0}, theme={1}, context_window={2}.\n"
+     "  3) built-in defaults: wire=anthropic, max_context_chars={0}, theme={1}, context_window={2}.\n"
      "     base_url/api_key/model/system_prompt_file/compact_model/think have no built-in defaults -\n"
      "     if nothing is configured, interactive mode runs the setup wizard; one-shot/pipe mode fails\n"
      "     with a readable error listing the three configuration paths. Use --config to inspect.\n"},
@@ -2975,21 +2970,20 @@ const Entry kEn[] = {
     {"path.no_home", "<home dir not found>"},
 
     // ---- config sources / common errors ----
-    {"config.source.lubancode_env", "LUBANCODE_ environment variable"},
+    {"config.source.luban_env", "environment variable (LUBAN_*)"},
+    {"config.source.lubancode_env", "environment variable (LUBANCODE_*)"},
     {"config.source.config_file", "config file (.lubancode/config.json)"},
     {"config.source.project_config_file", "project config (.lubancode/config.json)"},
     {"config.source.global_config_file", "global config (~/.lubancode/config.json)"},
-    {"config.source.generic_env", "generic environment variable (ANTHROPIC_*/OPENAI_*)"},
     {"config.source.default", "built-in default"},
     {"config.source.unknown", "unknown source"},
     {"error.api_key_missing",
      "Missing API key; cannot talk to the model without it. Looked in these places, highest priority\n"
      "first, and found nothing:\n"
-     "  1) environment variable LUBANCODE_API_KEY\n"
+     "  1) environment variable LUBAN_API_KEY (LUBANCODE_API_KEY remains supported; LUBAN_* wins)\n"
      "  2) the api_key field of the config file (.lubancode/config.json in cwd or the home dir;\n"
      "     legacy .lubancode.json is accepted and migrated automatically)\n"
-     "  3) generic environment variable {0}\n"
-     "  4) built-in defaults (api_key has none; you must configure one)\n"
+     "  3) built-in defaults (api_key has none; you must configure one)\n"
      "Pick one, then run lubancode again. --config shows what each field currently resolves to."},
     {"error.not_configured",
      "Missing configuration: {0}. Cannot talk to the model (lubancode ships no vendor defaults).\n"

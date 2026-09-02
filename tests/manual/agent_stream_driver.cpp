@@ -1054,12 +1054,12 @@ int wmain(int argc, wchar_t** argv) {
     SetEnv(L"LUBANCODE_BASE_URL", L"http://127.0.0.1:" + std::to_wstring(port));
     SetEnv(L"LUBANCODE_API_KEY", L"agent-stream-driver");
     SetEnv(L"LUBANCODE_MODEL", L"fake-model");
-    // 环境卫生(记忆条目"集成测试须显式覆盖 ANTHROPIC_BASE_URL"):宿主
-    // shell 常带着真中转的 ANTHROPIC_* 变量,子进程的 generic-env 合并层看得
-    // 见它们——显式盖空,记忆抽取等旁路才不会把请求漏去真网,卡住整场。
-    SetEnv(L"ANTHROPIC_BASE_URL", L"");
-    SetEnv(L"ANTHROPIC_AUTH_TOKEN", L"");
-    SetEnv(L"ANTHROPIC_MODEL", L"");
+    // 污染哨兵:宿主 shell 可能带着通名变量；故意给出明显错误值，验证已退役的
+    // generic env 不会压过上面的 LUBANCODE_* 假后端配置、也不会漏去真网。
+    SetEnv(L"ANTHROPIC_BASE_URL", L"https://generic-env-must-be-ignored.invalid");
+    SetEnv(L"ANTHROPIC_AUTH_TOKEN", L"generic-auth-token-must-be-ignored");
+    SetEnv(L"ANTHROPIC_API_KEY", L"generic-api-key-must-be-ignored");
+    SetEnv(L"ANTHROPIC_MODEL", L"generic-model-must-be-ignored");
     SetEnv(L"NO_PROXY", L"127.0.0.1,localhost");
     SetEnv(L"http_proxy", L"");
     SetEnv(L"https_proxy", L"");

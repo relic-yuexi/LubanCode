@@ -42,8 +42,7 @@ lubancode::config::ConfigResult MergeFromJson(const std::string& json_text) {
     const auto parsed = lubancode::config::ParseFileConfigJson(json_text, "test.json");
     REQUIRE(parsed.has_value());
     const auto merged = lubancode::config::MergeConfig(
-        lubancode::config::LubancodeEnvValues{}, std::optional<lubancode::config::FileConfig>{*parsed},
-        lubancode::config::GenericEnvValues{});
+        lubancode::config::LubancodeEnvValues{}, std::optional<lubancode::config::FileConfig>{*parsed});
     REQUIRE(merged.has_value());
     return *merged;
 }

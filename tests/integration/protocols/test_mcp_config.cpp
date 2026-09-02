@@ -153,7 +153,7 @@ TEST_CASE("MergeConfig: 配置文件写了 mcpServers,合并结果里带过去")
     servers.emplace("test", server);
     file.mcp_servers = servers;
 
-    const auto result = config::MergeConfig(config::LubancodeEnvValues{}, file, config::GenericEnvValues{});
+    const auto result = config::MergeConfig(config::LubancodeEnvValues{}, file);
     REQUIRE(result.has_value());
     REQUIRE(result->config.mcp_servers.count("test") == 1);
     CHECK(result->config.mcp_servers.at("test").command == "python");
@@ -163,13 +163,13 @@ TEST_CASE("MergeConfig: 配置文件没写 mcpServers,合并结果里是空 map"
     config::FileConfig file;
     file.source_path = "/tmp/.lubancode.json";
 
-    const auto result = config::MergeConfig(config::LubancodeEnvValues{}, file, config::GenericEnvValues{});
+    const auto result = config::MergeConfig(config::LubancodeEnvValues{}, file);
     REQUIRE(result.has_value());
     CHECK(result->config.mcp_servers.empty());
 }
 
 TEST_CASE("MergeConfig: 没有配置文件(std::nullopt),mcpServers 是空 map") {
-    const auto result = config::MergeConfig(config::LubancodeEnvValues{}, std::nullopt, config::GenericEnvValues{});
+    const auto result = config::MergeConfig(config::LubancodeEnvValues{}, std::nullopt);
     REQUIRE(result.has_value());
     CHECK(result->config.mcp_servers.empty());
 }

@@ -1,25 +1,14 @@
-// 配置来源分四级,优先级从高到低:
-//   1) LUBANCODE_ 专属环境变量(LUBANCODE_WIRE / LUBANCODE_BASE_URL /
-//      LUBANCODE_API_KEY / LUBANCODE_MODEL / LUBANCODE_MAX_CONTEXT)
-//   2) 配置文件(先找 cwd,再找用户主目录;新位置 <目录>/.lubancode/config.json,
-//      旧位置 <目录>/.lubancode.json,查找顺序见 LoadFileConfig 注释)
-//   3) 通用环境变量(ANTHROPIC_*/OPENAI_*,向后兼容老用法)
+// 配置来源四类,优先级从高到低:
+//   1) LUBAN_ / LUBANCODE_ 专属环境变量(LUBAN_BASE_URL / LUBAN_API_KEY /
+//      LUBAN_MODEL 优先于同字段的 LUBANCODE_*；其余仍为 LUBANCODE_*)
+//   2) 项目级配置文件 <cwd>/.lubancode/config.json
+//   3) 全局配置文件 <主目录>/.lubancode/config.json
 //   4) 内置默认值
-// 按"字段"逐个决,不是整套配置一刀切——比如配置文件只写了 base_url,
-// model 照样能从下一级来。密钥绝不硬编码进源码。
+// 按字段逐个取值,不是整套配置一刀切。base_url/api_key/model 没有内置
+// 默认值,四类都没配到时保持为空,由真正发请求前的校验给出指引。
 //
-// 配置文件住在 <主目录>/.lubancode/,与 plugins/、skills/ 共用一处。
-// 读到旧位置文件而新位置不存在时自动迁移(见
-// MigrateConfigFileIfNeeded),不留旧新两份配置混着用的糊涂账。
-//
-// lubancode 是通用工具,不绑死哪一家模型服务:内置默认值只有 wire=anthropic
-// 和 max_context_chars,base_url/api_key/model 三个字段没有内置默认值,四级
-// 都没配到就是空。空着不算错——MergeConfig 不报错,只是留空;真要跟模型
-// 对话之前(交互模式的初次配置向导、单发模式的 RequireConfigured)才会因为
-// 缺东西而拦下来。
-//
-// 加载逻辑拆成两半:纯函数 MergeConfig 只管按优先级合并、不碰任何 IO,
-// 好单测;LoadFileConfig/LoadFromEnv 才是真正读环境变量、读磁盘文件的地方。
+// 配置文件住在 .lubancode/ 下；旧位置的迁移规则见 LoadFileConfig。
+// 加载逻辑拆成两半:纯函数 MergeConfig 只管合并,LoadFromEnv 才读环境和磁盘。
 
 #pragma once
 
@@ -65,10 +54,10 @@ enum class Wire { Anthropic, Responses, ChatCompletions, GoogleGenerateContent }
 // 里凡是"单文件 = 配置文件来源"的,一律映射成 ProjectConfigFile(3 参
 // MergeConfig 便捷包装把那一份当项目级看待,见下)。
 enum class Source {
+    LubanEnv,           // LUBAN_BASE_URL / LUBAN_API_KEY / LUBAN_MODEL
     LubancodeEnv,       // LUBANCODE_ 专属环境变量
     ProjectConfigFile,  // <cwd>/.lubancode/config.json(项目级,压过全局)
     GlobalConfigFile,   // <主目录>/.lubancode/config.json(全局)
-    GenericEnv,         // ANTHROPIC_*/OPENAI_* 通用环境变量
     Default,            // 内置默认值
 };
 
@@ -1004,9 +993,12 @@ struct FileConfig {
     std::optional<std::string> migration_notice;
 };
 
-// LUBANCODE_ 专属环境变量读出来的值,全部可选(没设置、或者设置了空串,
-// 都算"没有")。
+// LUBAN_ / LUBANCODE_ 专属环境变量读出来的值,全部可选(没设置、或者设置了空串,
+// 都算"没有")。前三个 LUBAN_* 字段优先于对应的 LUBANCODE_* 字段。
 struct LubancodeEnvValues {
+    std::optional<std::string> luban_base_url;
+    std::optional<std::string> luban_api_key;
+    std::optional<std::string> luban_model;
     std::optional<std::string> wire;
     std::optional<std::string> base_url;
     std::optional<std::string> api_key;
@@ -1026,21 +1018,10 @@ struct LubancodeEnvValues {
     std::optional<std::string> soul;                  // LUBANCODE_SOUL
 };
 
-// 通用环境变量(ANTHROPIC_*/OPENAI_*)读出来的值。两组都传全,MergeConfig
-// 内部解出 wire 之后自己挑该用哪一组——这样 MergeConfig 就不用依赖调用方
-// 提前算好 wire,整个函数保持纯粹、一次调用就能测完四级优先级。
-struct GenericEnvValues {
-    std::optional<std::string> anthropic_base_url;
-    std::optional<std::string> anthropic_auth_token;
-    std::optional<std::string> anthropic_model;
-    std::optional<std::string> openai_base_url;
-    std::optional<std::string> openai_api_key;
-    std::optional<std::string> openai_model;
-};
-
 // 纯函数,不碰任何 IO:按优先级逐字段合并出最终配置,并记录每个字段的
 // 来源。分层之后配置文件拆成两级——优先级(高到低):
-//   专属 env > 项目级 config.json > 全局 config.json > 通用 env > 内置默认。
+//   LUBAN_* > LUBANCODE_* > 项目级 config.json > 全局 config.json > 内置默认。
+// LUBAN_* 当前只覆盖 base_url/model/api_key；其余专属环境变量仍为 LUBANCODE_*。
 // 按"字段"逐个决:项目级缺的字段回退全局,全局也缺再往下一级找。对象型
 // 整段(hooks/mcpServers/search/lsp)按"整段"回退——项目级写了就用项目级
 // 那一整段,否则用全局那一整段(不做键级混合,语义清楚)。
@@ -1052,14 +1033,11 @@ struct GenericEnvValues {
 // 时才会报错——这个没法留空糊弄过去,下游没法决定用哪个默认端点。
 std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& lubancode_env,
                                                        const std::optional<FileConfig>& project_file,
-                                                       const std::optional<FileConfig>& global_file,
-                                                       const GenericEnvValues& generic_env);
+                                                       const std::optional<FileConfig>& global_file);
 
-// 便捷包装(旧签名):只有一份配置文件时,当项目级看待(全局留空)。
-// 老调用方/老单测沿用这个,来源统一记成 ProjectConfigFile。
+// 便捷包装:只有一份配置文件时,当项目级看待(全局留空)。
 std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& lubancode_env,
-                                                       const std::optional<FileConfig>& file_config,
-                                                       const GenericEnvValues& generic_env);
+                                                       const std::optional<FileConfig>& file_config);
 
 // 解析 context_window 的字符串取值:"256k"/"512k"/"1m"(大小写不敏感),
 // 或者裸数字(直接就是 token 数)。k/m 按十进制换算(k=1000,m=1,000,000)——
@@ -1205,10 +1183,9 @@ bool SetProviderAuthNone(std::vector<ProviderConfig>& providers, const std::stri
 bool ReplaceProvider(std::vector<ProviderConfig>& providers, const std::string& name,
                      const ProviderConfig& provider);
 
-// 纯函数:检查合并结果里的 api_key 是不是空的。空的话报错,错误信息里把
-// 四级来源都提一遍(按 result.config.wire 挑出对应的通用环境变量名),
-// 让人知道去哪儿配。真正要跟模型对话之前(AskOnce/InteractiveLoop 之前)
-// 才需要调这个;--config 只是看一眼配置,不需要。
+// 纯函数:检查合并结果里的 api_key 是不是空的。空的话报错并指向
+// LUBAN_API_KEY / LUBANCODE_API_KEY 与配置文件；provider 激活时另行点名其
+// 显式 key_env。真正要跟模型对话之前(AskOnce/InteractiveLoop 之前)才调。
 // 例外(向导重排单):result.config.auth_mode 为 none 时放行——当前激活端
 // 明确声明无需鉴权,空 key 是合法状态,不算缺配置。
 std::expected<void, std::string> RequireApiKey(const ConfigResult& result);
@@ -1216,7 +1193,8 @@ std::expected<void, std::string> RequireApiKey(const ConfigResult& result);
 // 纯函数:非交互场景(单发模式 `lubancode "问题"`、管道模式)在真正发请求前的
 // 最后一关——base_url、api_key、model 三个字段都不许是空的(三个都没有内置
 // 默认值)。缺哪个说哪个,统一给出三条配置途径:交互模式走初次配置向导 /
-// 用户主目录放一份 .lubancode.json / 设 LUBANCODE_* 环境变量。
+// 用户主目录放一份 .lubancode/config.json / 设 LUBAN_*（或既有
+// LUBANCODE_*）环境变量。
 // 跟 RequireApiKey 的区别:RequireApiKey 只管 api_key 一个字段(给
 // --config 之外的地方单独复用),这个管三个字段一起,是非交互路径实际会
 // 调用的那个。
@@ -1431,8 +1409,8 @@ struct LoadedFileConfigs {
 // 免得同一份文件读两遍、来源标记打架。找到了但解析失败,返回错误(带路径)。
 std::expected<LoadedFileConfigs, std::string> LoadFileConfigs();
 
-// 真正的入口:读 LUBANCODE_ 专属环境变量、找并读配置文件、读通用环境变量,
-// 按四级优先级合并出最终配置。
+// 真正的入口:读 LUBAN_ / LUBANCODE_ 专属环境变量并读配置文件，按上述
+// 优先级合并；不隐式读取 ANTHROPIC_* / OPENAI_* 通名。
 std::expected<ConfigResult, std::string> LoadFromEnv();
 
 // 读 --system-prompt / system_prompt_file 指向的人格文件,UTF-8 原样读入,

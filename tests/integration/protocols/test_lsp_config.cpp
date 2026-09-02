@@ -90,7 +90,7 @@ TEST_CASE("ParseFileConfigJson + MergeConfig: 配置文件里的 lsp 段一路�
     REQUIRE(file_config->lsp_servers.has_value());
 
     const auto merged =
-        config::MergeConfig(config::LubancodeEnvValues{}, *file_config, config::GenericEnvValues{});
+        config::MergeConfig(config::LubancodeEnvValues{}, *file_config);
     REQUIRE(merged.has_value());
     REQUIRE(merged->config.lsp_servers.size() == 1);
     CHECK(merged->config.lsp_servers.at("cpp").command == "clangd");
@@ -100,7 +100,7 @@ TEST_CASE("MergeConfig: 配置文件没写 lsp 段,最终就是空 map(不启用
     const auto file_config = config::ParseFileConfigJson("{}", "test.json");
     REQUIRE(file_config.has_value());
     const auto merged =
-        config::MergeConfig(config::LubancodeEnvValues{}, *file_config, config::GenericEnvValues{});
+        config::MergeConfig(config::LubancodeEnvValues{}, *file_config);
     REQUIRE(merged.has_value());
     CHECK(merged->config.lsp_servers.empty());
 }

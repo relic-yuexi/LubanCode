@@ -46,7 +46,7 @@
 - `--config` 在上述四种情形下输出与实际发送的钥匙一致（抓包或假后端核）。
 - 现有 provider 配置解析测试全绿，无行为回退（正路配置不受影响）。
 
-## 六、坑三与通名退役（2026-09-02 主人定案，待修）
+## 六、坑三与通名退役（2026-09-02，已完成）
 
 ### 6.1 现场（比前两坑都阴）
 
@@ -68,7 +68,7 @@
 
 ### 6.3 验收
 
-- Claude Code 式污染环境（注入四个 ANTHROPIC 通名变量）下跑 one_shot：provider 的 inline 钥匙照常生效，零警告零干扰。
-- `LUBAN_BASE_URL`/`LUBAN_MODEL`/`LUBAN_API_KEY` 三变量按优先级正常生效，`--config` 来源标注为 [环境变量(LUBAN_*)] 一类明示。
-- 通名注入任何组合都不再改变 wire/base_url/model/api_key 的解析结果。
-- 相关单测更新（generic env 链的既有用例改判/退役），全量 ctest 零回归。
+- [x] Claude Code 式污染环境（注入四个 ANTHROPIC 通名变量）下跑 one_shot：provider 的 inline 钥匙照常生效，零警告零干扰。
+- [x] `LUBAN_BASE_URL`/`LUBAN_MODEL`/`LUBAN_API_KEY` 三变量按优先级正常生效，`--config` 来源标注为 [环境变量(LUBAN_*)] 一类明示。
+- [x] 通名注入任何组合都不再改变 wire/base_url/model/api_key 的解析结果。
+- [x] 相关单测更新（generic env 链的既有用例改判/退役），全量 ctest 零回归。
