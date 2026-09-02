@@ -200,13 +200,18 @@ public:
         // ---- P0-2/P1-2 轨迹接线(flag 开的会话;空 = 旧路,行为零变) ------
         // 子代理派工的轨迹账申请口:向会话账本要独立 JSONL(scoped
         // recorder + run.started,relations 带 parent 边)。返回空 = 子账
-        // 没开张(开张失败/没接线),子代理照跑,父账如实缺子边。
+        // 没开张。子代理空轨迹单 P0-A 起分两支:钩子压根没接(旧调用方/
+        // 单测,没有 Trajectory 会话)= 旧行为照跑;钩子接了而申请失败
+        // (failure_out 带出阶段与稳定码)= fail closed,子代理不执行——
+        // Trajectory 已是唯一 Session,无真账执行不算可接受降级,更不许
+        // "子代理照跑,工具 trace 借父账旁听"。
         // parent_run_id(P1-2 嵌套轨迹边):派工者自己的 agent_run_id;main
         // 直派传空串(SpawnSubagent 内部按空串落回 main_run_id,旧行为不
         // 变)。嵌套 headless 路必须传父任务自己的 run id——它的父亲是
         // 派出它的那只子代理,不是 main(单子 §12.3 第一条)。
-        std::function<std::unique_ptr<runtime::TrajectorySubagentBridge>(const std::string& task_label,
-                                                                        const std::string& parent_run_id)>
+        std::function<std::unique_ptr<runtime::TrajectorySubagentBridge>(
+            const std::string& task_label, const std::string& parent_run_id,
+            runtime::SubagentSpawnFailure* failure_out)>
             trajectory_spawn;
         // 子账收口(run terminal + 关柄)后的回填口:父桥记下子账终态
         // hash,父侧 agent 调用的执行终态事件引用它(§3.5 边界对账)。

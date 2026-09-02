@@ -134,6 +134,13 @@ public:
 
     // 诊断:最近一枚提交失败 receipts 的稳定码(测试与 /doctor 用)。
     std::vector<std::string> recent_errors() const { return recent_errors_; }
+    // P0-D:无主 tool trace 的有界诊断投影(run_id/turn_id/execution_id/
+    // call_id/tool_name/parent_execution_id 各一行)。只进这里,不进父
+    // canonical call 状态机(calls_ 一个字节不动)。
+    std::vector<std::string> unowned_trace_notes() const { return unowned_trace_notes_; }
+    // P0-B/turn_runner 用:当前轮 id(空 = 轮没开),子账开张失败的父侧
+    // typed 事件按它带 turn_id。
+    const std::string& current_turn_id() const { return turn_id_; }
     // 落账错误的共享汇(账本持有,/doctor trajectory 的"最近 I/O 错误"
     // 从这取;桥按轮把错误推进来)。
     void SetErrorSink(std::vector<std::string>* sink) { error_sink_ = sink; }
@@ -149,6 +156,10 @@ public:
 private:
     struct CallBook {
         std::string request_id;         // 声明它的 model output 所属请求
+        // P0-E:只由已提交的 model.output.completed 置真。dangling 收口
+        //(CancelDanglingCalls)只认 declared=true 的账项——无主调用不是
+        // 悬空调用,不补 cancelled,不造明知过不了 schema 的事件。
+        bool declared = false;
         bool planned = false;           // tool.execution.planned 已落
         bool effective = false;         // tool.input.effective 已落
         bool started = false;           // tool.execution.started 已提交
@@ -181,6 +192,8 @@ private:
                                   trajectory::Durability durability = trajectory::Durability::ProcessCrash,
                                   trajectory::EventLinks links = {});
     void NoteError(const trajectory::RecordReceipt& receipt, const char* where);
+    // P0-D:陌生 tool trace 的有界诊断。只记投影,不改 calls_,不落 canonical。
+    void NoteUnownedToolTrace(const agent::ToolTraceEvent& event);
     std::string NextRequestId();
     std::string NextInputId();
     std::string NextOutputId();
@@ -208,6 +221,9 @@ private:
     std::string turn_id_;
     bool turn_open_ = false;
     std::map<std::string, CallBook> calls_;  // call_id(模型 tool_use id)
+    // P0-D:无主 tool trace 的有界诊断投影(上限 32 条,溢出只计数)。
+    std::vector<std::string> unowned_trace_notes_;
+    std::size_t unowned_trace_dropped_ = 0;
     std::map<std::string, std::string> request_prepared_;  // request_id -> prepared event id
     // 任务 turn 账的请求簿(§11.1,P1-1):sent 时记下这枚请求的 turn 坐标,
     // output 三态收口按 request_id 对回。只住本轮内存,不落盘。
@@ -373,6 +389,23 @@ struct TrajectoryResumeSummary {
     std::vector<api::Message> history;  // 折叠出的有效对话(投影)
 };
 
+// ---------------------------------------------------------------------------
+// 子代理空轨迹单 P0-A/P0-B:SpawnSubagent 的结构化失败(替代裸字符串——
+// 装配层吞 error() 是这次第一因查不出的根,失败必须带阶段与稳定码过境)。
+// ---------------------------------------------------------------------------
+struct SubagentSpawnFailure {
+    // 失败阶段:reserve_stream | recorder_start | run_started。
+    std::string stage;
+    // 稳定码(trajectory.subagent_stream / trajectory.subagent_recorder /
+    // trajectory.subagent_run_started 前缀 + 底层码)。
+    std::string error_code;
+    // 字段级人话(schema 缺哪个字段、io 细节);不含子 prompt 正文与
+    // 敏感绝对路径。
+    std::string detail;
+    std::string reserved_run_id;  // 已铸出的子 run id(失败前铸了就带上)
+    bool retryable = false;      // I/O 类失败可重试;schema/状态机类不可
+};
+
 class TrajectorySessionLedger {
 public:
     struct Options {
@@ -403,6 +436,10 @@ public:
         // 单发账本配 Exclude(实战派活含内部路径,不进训练集),配置
         // oneshot_training_policy 可改。session 边界事件恒 Exclude,不在此列。
         trajectory::TrainingPolicy training_policy = trajectory::TrainingPolicy::Metadata;
+        // 故障注入(测试专用;生产恒空 = 零行为):子账首枚 run.started
+        // 提交前问一次,返回稳定码即按该码注入一次失败(子代理空轨迹单
+        // 5.1 的 fault injection)。只作用于子账,不影响 main。
+        std::function<std::optional<std::string>()> subagent_start_fault;
     };
 
     // 进程一场:LaunchSession(建 workspace/session 目录、独占锁、
@@ -429,9 +466,20 @@ public:
     // = main 直派(落回本场 main_run_id,行为与从前一致);非空 = 嵌套
     // 派工——派工者自己的 agent_run_id,relations.parent_run_id 记它,不
     // 冒充 main("嵌套 headless 路的父亲是父任务的 run,不是 main")。
-    std::expected<std::unique_ptr<TrajectorySubagentBridge>, std::string> SpawnSubagent(
+    // 失败给结构化 SubagentSpawnFailure(阶段 + 稳定码 + 字段级人话):
+    // 正式 .jsonl 由首枚 run.started 提交事务独占创建(P0-C),失败不
+    // 留 0 字节残留。
+    std::expected<std::unique_ptr<TrajectorySubagentBridge>, SubagentSpawnFailure> SpawnSubagent(
         const std::string& parent_call_id, const std::string& task_label,
         const std::string& parent_run_id = std::string());
+
+    // 子代理空轨迹单 P0-B:子账开张失败的父侧 typed 事件
+    //(subagent.run.start_failed,由父 run 持有,main stream 落账)。
+    // parent_call_id/turn_id 按在场与否如实带;stream_ref 是 session 相对
+    // 引用(subagents/<file>),不写绝对路径。失败事实同时进 recent_io_errors
+    // 与日志——诊断要能跨进程留证,不靠终端滚屏。
+    void NoteSubagentStartFailed(const SubagentSpawnFailure& failure, const std::string& parent_run_id,
+                                 const std::string& parent_call_id, const std::string& turn_id);
 
     // 旁路模型请求桥(Token 账本单 A1):compact/起名/抽取/doctor 等回合外
     // 小请求落 main stream。每次采样现造一只,用完即弃;账开不出(main

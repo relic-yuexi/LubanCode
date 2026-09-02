@@ -101,7 +101,7 @@ constexpr std::array<std::pair<Durability, const char*>, 3> kDurabilityNames{{
 // 顺序与 EventKind 枚举声明一致,两处对不上会在启动断言里炸出来。
 // plane 归面照 §4.2:conversation=输入/宿主注入/模型输出/回喂结果;
 // execution=provider 请求与工具执行;evidence=验证与终裁;其余 control。
-constexpr std::array<EventKindInfo, 73> kKindInfos{{
+constexpr std::array<EventKindInfo, 74> kKindInfos{{
     {"run.started", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden, IdNeed::Forbidden, false},
     {"run.environment.captured", Plane::Execution, IdNeed::Optional, IdNeed::Optional, IdNeed::Forbidden,
      false},
@@ -243,10 +243,15 @@ constexpr std::array<EventKindInfo, 73> kKindInfos{{
      false},
     {"memory.save.failed", Plane::Control, IdNeed::Optional, IdNeed::Optional, IdNeed::Forbidden,
      false},
+    // 子代理空轨迹单 P0-B:agent 工具派工时子账开张失败,父 run 持有的
+    // typed 失败事实。三档 id 全放宽(派工发生在某枚 agent 调用内,但
+    // hub 可能给不出 call_id,按在场与否如实带)。
+    {"subagent.run.start_failed", Plane::Control, IdNeed::Optional, IdNeed::Optional,
+     IdNeed::Optional, false},
 }};
 
-static_assert(kKindInfos.size() == 73, "kind 信息表与枚举须同长");
-static_assert(static_cast<std::size_t>(EventKind::MemorySaveFailed) + 1 == kKindInfos.size(),
+static_assert(kKindInfos.size() == 74, "kind 信息表与枚举须同长");
+static_assert(static_cast<std::size_t>(EventKind::SubagentRunStartFailed) + 1 == kKindInfos.size(),
               "kind 信息表顺序须与枚举声明一致");
 
 }  // namespace

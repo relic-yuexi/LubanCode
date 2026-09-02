@@ -182,6 +182,10 @@ std::vector<StreamEvent> EventParser::Flush() {
         for (std::size_t index = 0; index < calls_.size(); ++index) {
             // Gemini 的 functionCall 没有调用 id,本地按次序造一枚;回传时
             // functionResponse 只认函数名,这枚 id 纯粹是中立层的账。
+            // (子代理空轨迹单 P0-F 注:这与 chat/anthropic/responses 的
+            // "空 id 禁伪造"不冲突——Gemini 协议根本不发 id,本地序号是
+            // 唯一身份方案且从不参与 provider 回喂配对,不是掩盖协议故障
+            // 的假 id。其余三条 wire 的空 id 一律由 assembler 挡下。)
             const std::string id = "gemini_tool_" + std::to_string(index);
             events.push_back(ToolUseStart{static_cast<int>(index), id, calls_[index].name});
             events.push_back(ToolUseInputDelta{static_cast<int>(index), calls_[index].args.dump()});

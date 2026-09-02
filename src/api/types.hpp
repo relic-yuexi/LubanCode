@@ -422,9 +422,13 @@ struct ToolUseInputDelta {
     std::string partial_json;
 };
 
-// 某个内容块结束。
+// 某个内容块结束。tool_use_id 是"终帧补齐身份"(子代理空轨迹单 P0-F):
+// 流式协议早帧(added/start)可能缺 call_id,终帧(done)才给全——wire
+// 解析层把终帧的 call_id 按 output index 放这里,assembler 据此给开着的
+// tool 累积器补 id。空 = 终帧也没给(文本块、无 id 协议)。
 struct ContentBlockDone {
     int index = 0;
+    std::string tool_use_id;
 };
 
 // Responses 等协议的服务端内置工具。它已由模型服务执行，客户端只展示

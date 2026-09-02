@@ -50,11 +50,18 @@ public:
     bool has_parse_error() const { return !parse_error_.empty(); }
     const std::string& parse_error() const { return parse_error_; }
 
+    // 子代理空轨迹单 P0-F:收尾时仍无 id 的本地可执行 function call 被丢弃
+    // 的枚数(终帧补 id 的合并在先,这里数的是补完仍缺的)。空 id 的调用
+    // 不进 ToolUseBlock、不执行、不合成结果、不伪造 provider id——消费端
+    // 见非零应把这份模型输出按畸形收口。
+    int idless_tool_calls_dropped() const { return idless_tool_calls_dropped_; }
+
 private:
     struct OpenText {
         std::string text;
     };
     struct OpenToolUse {
+        int index = 0;  // wire 的 output/content block 下标(终帧按它合并身份)
         std::string id;
         std::string name;
         std::string partial_json;
@@ -78,6 +85,7 @@ private:
     bool usage_seen_ = false;
     bool cache_seen_ = false;
     std::string parse_error_;
+    int idless_tool_calls_dropped_ = 0;
 
     void FinalizeCurrent();
 };

@@ -188,6 +188,11 @@ enum class EventKind {
     MemorySaveRequested,
     MemorySaveCommitted,
     MemorySaveFailed,
+    // 子代理空轨迹单 P0-B:子 run 开张失败的父侧 typed 事实。由父 run 持有
+    //(main stream),payload 只记阶段与稳定码、引用边(reserved_run_id/
+    // stream_ref),不抄子 prompt 正文与敏感绝对路径——诊断要能跨进程留证,
+    // 不靠终端滚屏。
+    SubagentRunStartFailed,
 };
 
 const char* EventKindName(EventKind kind);

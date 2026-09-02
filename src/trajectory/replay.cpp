@@ -492,6 +492,10 @@ bool FoldEvent(const EventEnvelope& envelope, ReplayState* state, FoldIndex* ind
         case EventKind::RecordSelectionResumed:
         case EventKind::RecordSelectionNoteAdded:
         case EventKind::VerificationStarted:
+        // 子代理空轨迹单 P0-B:子账开张失败的父侧诊断事实,不改 effective
+        // state(失败的派工没有子事实可折;父侧那枚调用的终态由它自己的
+        // tool.execution.* 承载)。
+        case EventKind::SubagentRunStartFailed:
             // 纯控制/生命周期事件:不改 effective state(§14.2 只记 command
             // lifecycle 的不动 ReplayState)。schema 已验过形状。
             return true;

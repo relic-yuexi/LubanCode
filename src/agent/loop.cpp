@@ -1617,6 +1617,24 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         const std::string stop_reason = assembler.stop_reason();
         ++steps_used;
         last_stop_reason = stop_reason;
+
+        // 子代理空轨迹单 P0-F:provider 没给身份的 function call 已被
+        // assembler 丢弃(终帧补 id 的合并也救不回的)。这份输出按畸形
+        // 收口:已攒正文如实入史,落 model.output.failed,回合明败——
+        // 不执行、不合成局部工具结果、不伪造 provider call id,也不带着
+        // "声称 tool_use 却没有工具"的空转进入下一步。
+        if (assembler.idless_tool_calls_dropped() > 0) {
+            if (wiring.boundary_recorder != nullptr && !trajectory_request_id.empty()) {
+                wiring.boundary_recorder->OnOutputFailed(
+                    trajectory_request_id,
+                    "malformed_tool_call_no_id: function call 缺 call_id(" +
+                        std::to_string(assembler.idless_tool_calls_dropped()) + " 枚),已丢弃不执行");
+            }
+            context_.PushMessage(std::move(assistant_message));
+            return std::unexpected("模型输出畸形: function call 缺 call_id(" +
+                                   std::to_string(assembler.idless_tool_calls_dropped()) +
+                                   " 枚),已丢弃不执行");
+        }
         // 逐枚追踪:assistant 消息一入 history 就交装配层 append+flush 进
         // session(单子:provider assistant message 在执行工具前落盘)。
         // 老路(收口后 PersistNewMessages)照旧兜底——没装 trace 的会话
