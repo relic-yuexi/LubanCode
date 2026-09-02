@@ -2,6 +2,11 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.179] - 2026-09-03
+
+- **思考活动条重画不再搬光标——字节层零中间态。** 真机肉眼"光标落到蓝球左边"取证到 buffer 轨迹实锤后（高频采样每秒见活动行落点，旧判据 50ms 轮询是漏检假绿），Windows footer 行级重画整体改原生 `WriteConsoleOutputW` 直写：CHAR_INFO 成块按坐标落笔，光标原地不动，一个 stdout 字节不出（G7 帧账 `paint=native bytes=0`）；SGR 颜色由构建器翻成单元格属性（16 色折算、宽字双格、整字截断）。另一半真凶——帧前奏那笔原生 `SetCursorPos` 拨针——同刀闸掉：帧装得下就不拨。四档表重裁：Windows 真 console 恒走原生直写，VT 批只留 POSIX。
+- **driver 光标判据升格成硬闸**：高频轨迹"零活动行落点"从日志变 Check，灵敏度三组对照验证（旧选路复现红、恒拨针也红）；既有三处 G1/G2 FAIL 查明全是版式挪行后判据过时，非回归，判据已跟版。真终端录屏留用户侧随手补。
+
 ## [v0.26.178] - 2026-09-03
 
 - **延迟工具默认切 proxy_reference。** 真机质量对照过门后（ccmoon/gpt-5.6-sol、温度 0、30 枚 stub 工具、8 任务×3 档）：proxy 任务成功 9/9 不低于 disabled/legacy 的 7/9（分差全在"名字相近+副作用+日期换算"形状——两档两轮皆反问不调工具，proxy 先搜后调首发合格），参数首发 11/11 持平、误选三档全零。legacy 的 cache-hostile 真机坐实：7/8 任务命中即断 cache epoch，非缓存重付全场最高（215k）。未配置空串现自动走 proxy（结构化发现→tool_invoke 直调），回退显式写 `legacy_expand`/`disabled`。证据全账 `eval/deferred_quality/report.md`，夹具与 runner 入库可复算。
