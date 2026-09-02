@@ -1,6 +1,6 @@
 // 两层会话标题的"账本"那一半(骨架拆解反弹·问题 2 自 TerminalSessionController
-// 拆出)。原先四个标题方法(BeginSessionTitle/StartTitleRefinement/
-// BackfillTitleOnResume/PollSessionTitleRefinement)里的"判断"部分收进这只
+// 拆出)。原先几个标题方法(BeginSessionTitle/StartTitleRefinement/
+// BackfillTitleOnResume/收货那只)里的"判断"部分收进这只
 // 小类,单测不必再起一个完整 TerminalSessionController:
 //   - 一场只自动起名一次(人工 /title pending、已有标题都不算);
 //   - 本地标题(第一层)落盘成功才占内存标题——落不了盘就回退,不占;

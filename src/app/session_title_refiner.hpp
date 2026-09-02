@@ -1,14 +1,21 @@
 // 会话标题的异步精炼器(实测问题 7):两层标题的第二层。
 //
-// Start 在首问建档后立刻起一枚后台线程:独占裸 backend(ModelRouterService
-// 的 RouteDetached 造,不与主会话共用 client,不抢流式回调)、只发一次
-// cheap 采样——首问截段 600 字节、max_tokens=24、5 秒看门狗、无工具。
-// 主回合照跑,轮末提示符照还,谁也不等它。
+// Start 由会话在首个主回合收口后的空闲边界调(ec8b22df 起:旁路小 turn
+// 与主 turn 不能同流并存,一 stream 一 open turn,回合里发必撞车):独占
+// 裸 backend(ModelRouterService 的 RouteDetached 造,不与主会话共用
+// client,不抢流式回调)、只发一次 cheap 采样——首问截段 600 字节、
+// max_tokens=24、5 秒看门狗、无工具。起飞后谁也不等它,提示符照还。
 //
-// 结果只经 TakeFinished 出去:主线程在会话循环顶非阻塞收货,记账/落盘/
-// 上屏全在主线程——后台线程不碰会话任何共享态,除自己的 shared 槽外只
-// 引用自持的值。generation 是起飞时的标题代数:人工 /title、/clear、
-// /resume 都会翻代,迟到的结果由调用方对代丢弃(usage 仍照记,账是真的)。
+// 完工的叫醒:Ready()(只读、线程安全)在结果备好待收时翻真,装配层把
+// 它挂进 IdleWakeCoordinator——空闲 composer 的 100ms 拍一看真,ReadLine
+// 以空串让位,主循环的收货点当场记账上屏,不等用户再敲一行。Busy() 与
+// Ready() 的分别:Busy 在"完成待取"时也真(槽还占着,单飞防叠发),
+// 拿它当唤醒条件会起飞即醒、空转到收货——唤醒只认 Ready。
+//
+// 结果只经 TakeFinished 出去:主线程记账/落盘/上屏全在主线程——后台线程
+// 不碰会话任何共享态,除自己的 shared 槽外只引用自持的值。generation 是
+// 起飞时的标题代数:人工 /title、/clear、/resume 都会翻代,迟到的结果由
+// 调用方对代丢弃(usage 仍照记,账是真的)。
 //
 // 退出兜底照子代理的老方子(见 AgentTool 析构):RequestCancel 拉原子
 // 取消旗,析构取消 + 有界等待,等不到就 detach 放行——闭包自持 shared
@@ -76,6 +83,11 @@ public:
 
     // 有任务在跑或结果待收(还没被 TakeFinished 取走)。
     bool Busy() const;
+
+    // 只读完工查询(空闲唤醒的条件):结果备好待收才 true。不 join、不
+    // 取走、不清状态,真正的收货仍走 TakeFinished。运行中恒 false;
+    // Busy() 在完成待取时也是 true——它管单飞,不管唤醒,别混用。
+    bool Ready() const;
 
 private:
     struct Shared {

@@ -98,9 +98,11 @@ namespace lubancode::app {
 //   - PumpScheduledWork:goal continuation 与 due loop tick 的公平仲裁;
 //   - 存档薄壳四只(EnsureSessionBegun/PersistNewMessages/OpenArtifactStore
 //     + steering 三只):本体在 runtime::SessionRuntime 与 cli 队列层;
-//   - 标题编排四只(BeginSessionTitle/StartTitleRefinement/
-//     BackfillTitleOnResume/PollSessionTitleRefinement):判定在
-//     SessionTitleAccount,这里只管打印/发精炼/同步 peer 名册;
+//   - 标题编排一组(BeginSessionTitle/StartTitleRefinement/
+//     BackfillTitleOnResume/StartPendingTitleRefinementAfterTurn/
+//     DrainFinishedTitleRefinement/HasFinishedTitleRefinement/
+//     FlushDeferredTitleNotice):判定在 SessionTitleAccount,这里只管
+//     打印/发精炼/同步 peer 名册;
 //   - CollectPromptHistory/BuildTerminalTitleText:Ctrl+R 数据源与终端
 //     标题模板;
 //   - EnsureMemoryTool/SyncWorktreeDirectory/EmitSessionHook/
@@ -160,16 +162,29 @@ private:
     bool EnsureSessionBegun(const std::string& first_text);
     // ---- 两层会话标题(实测问题 7) ----
     // 第一层:首问建档当场起本地临时标题(零模型 token),/sessions 立刻
-    // 有名字;配了独立 cheap 再并行发第二层精炼——不阻塞 normal 主请求,
-    // 不拖轮末提示符,迟到或被人工抢先即弃。
+    // 有名字。第二层精修不在回合里发(P0-2:旁路小 turn 与主 turn 不能
+    // 同流并存)——首问只挂账,首个主回合收口后的空闲边界再起飞;完工由
+    // 空闲唤醒收货,不等用户再敲一行。
     void BeginSessionTitle(const std::string& first_query);
     void StartTitleRefinement(const std::string& first_query);
     // resume 换场善后:翻标题代数、取消在飞精炼;旧档没标题就补本地标题。
     void BackfillTitleOnResume();
-    // 会话循环顶的非阻塞收货点:精炼落地记 cheap 账、对代替换、上屏。
-    void PollSessionTitleRefinement();
-    // P0-2:待发的标题精炼首问(回合内不与主 turn 抢流,收口后补发)。
+    // 主 turn 收口后的发货点(只在会话空闲边界调):挂账的首问现在起飞
+    // 精修——回合里发必与主 turn 撞同一 stream 的 turn 账。
+    void StartPendingTitleRefinementAfterTurn();
+    // 收货点:完工的精修结果记 usage、对代采纳、同步 peer 名册、打通知。
+    // notice_now=false 时只静默落账改名,通知文压进 deferred_title_notice_
+    // ——用户刚提交正文的当口,标题行不许插成"第二问的下一行",等
+    // FlushDeferredTitleNotice 在下一枚提示符前见人。
+    void DrainFinishedTitleRefinement(bool notice_now);
+    // 只读:有完工的精修结果待收(空闲唤醒的 ready 条件,主线程拍里问)。
+    bool HasFinishedTitleRefinement();
+    // 压后的标题通知:打在下一枚提示符重画前,打完清账。
+    void FlushDeferredTitleNotice();
+    // P0-2:待发的标题精修首问(回合内不与主 turn 抢流,收口后补发)。
     std::string pending_title_refinement_query_;
+    // 提交竞态压后的标题通知(提交那刻不打裸行,攒到下一枚提示符前)。
+    std::string deferred_title_notice_;
     void OpenArtifactStore();
     // 外来消息轮:peer 来信是 user 语义(另一会话的用户正文);后台完成
     // 唤醒是宿主合成控制消息,传 BackgroundCompletion——检索整轮跳过,
@@ -465,12 +480,16 @@ private:
     // ---- 子系统接线器(会话终章) ----
     // goal/loop/plan/peer/录制各一只:状态+装配+泵+存档恢复归接线器,
     // 控制器持句柄调;会话级状态(theme/config/标题活值)留本类。
-    // idle_wakes 是会话级的(子代理/loop/后台命令三路并存),loop 接线器借去挂源。
+    // idle_wakes 是会话级的(子代理/loop/后台命令/标题精修四路并存),
+    // loop 接线器借去挂源。
     lubancode::runtime::IdleWakeCoordinator idle_wakes_;
     lubancode::runtime::IdleWakeCoordinator::Subscription subagent_wake_token_;
     // 后台命令任务的唤醒源(background 管理面单):watcher 报终态那一刻
     // 让空闲主循环醒来,打完成通知 + 刷底栏计数,不等用户再敲一行。
     lubancode::runtime::IdleWakeCoordinator::Subscription background_wake_token_;
+    // 标题精修完工的唤醒源(通知时序缺陷单):精修完成不借下一次用户输入
+    // 收货——Ready 翻真就让空闲 composer 让位,主循环当场记账改名打通知。
+    lubancode::runtime::IdleWakeCoordinator::Subscription title_wake_token_;
     GoalSessionWiring goal_wiring_;
     LoopSessionWiring loop_wiring_;
     PlanSessionWiring plan_wiring_;
