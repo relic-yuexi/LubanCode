@@ -152,6 +152,28 @@ TEST_CASE("schema: §五 payload 样例全过校验") {
     }
 }
 
+TEST_CASE("schema: context.pressure.recorded 三项账闭合且类型严格") {
+    const auto valid = nlohmann::json{{"phase", "preflight_exceeded"},
+                                      {"estimated_input_tokens", std::uint64_t{16000}},
+                                      {"reserved_output_tokens", std::uint64_t{2048}},
+                                      {"protocol_headroom_tokens", std::uint64_t{512}},
+                                      {"window_tokens", std::uint64_t{32768}},
+                                      {"reserve_clamped", true}};
+    CHECK_FALSE(ValidatePayload(EventKind::ContextPressureRecorded, valid).has_value());
+
+    auto missing = valid;
+    missing.erase("protocol_headroom_tokens");
+    const auto missing_error = ValidatePayload(EventKind::ContextPressureRecorded, missing);
+    REQUIRE(missing_error.has_value());
+    CHECK(missing_error->error_code == "schema.payload_missing_field");
+
+    auto bad_type = valid;
+    bad_type["reserved_output_tokens"] = -1;
+    const auto type_error = ValidatePayload(EventKind::ContextPressureRecorded, bad_type);
+    REQUIRE(type_error.has_value());
+    CHECK(type_error->error_code == "schema.payload_bad_type");
+}
+
 TEST_CASE("schema: payload 缺必填拒绝") {
     auto envelope = BaseEnvelope(EventKind::TurnStarted);
     envelope.payload = nlohmann::json{{"trigger", "external_user"}};

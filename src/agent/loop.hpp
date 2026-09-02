@@ -47,6 +47,8 @@
 
 namespace lubancode::agent {
 
+struct ContextPressure;
+
 // OnRequestPrepared 随请求一并递的账(Token 账本单 A1)。purpose 是唯一
 // 恒有效的字段(AgentProfile.purpose 总有默认值,§6.2"调用方不知道用途
 // 便拒绝"在真实运行时路径上不会发生——没显式设时的默认就是 MainTurn,
@@ -91,6 +93,9 @@ struct RequestPreparedContext {
 class LoopBoundaryRecorder {
 public:
     virtual ~LoopBoundaryRecorder() = default;
+    // 上下文最终预检的可观测账。默认 no-op 让旁路采样桥与旧测试替身
+    // 不必为不可能触发的 AgentLoop 压力事件造假实现。
+    virtual void OnContextPressure(const ContextPressure& pressure) { (void)pressure; }
     virtual std::string OnRequestPrepared(const api::Request& request, const RequestPreparedContext& ctx) = 0;
     virtual void OnRequestSent(const std::string& request_id) = 0;
     // 任务 turn 账随发随记(§11.1):turn_limit=0 表示任务不设帽(此时仍有

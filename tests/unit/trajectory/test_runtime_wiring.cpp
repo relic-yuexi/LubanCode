@@ -14,6 +14,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "agent/context.hpp"
 #include "agent/tool_trace.hpp"
 #include "runtime/session_runtime.hpp"
 #include "runtime/trajectory_session.hpp"
@@ -132,6 +133,60 @@ agent::ToolTraceEvent TraceEvent(agent::ToolTraceEventKind kind, const std::stri
 }
 
 }  // namespace
+
+TEST_CASE("bridge: 最终上下文预检三项账落 JSONL,非最终相不落") {
+    const auto dir = FreshDir("lubancode-traj-context-pressure");
+    auto recorder = trajectory::TrajectoryRecorder::Start(
+        dir / "main.jsonl", dir / "artifacts", MainScope(), [] {
+        trajectory::RecorderOptions options;
+        options.event_schema_version = 2;
+        return options;
+    }());
+    REQUIRE(recorder.has_value());
+    REQUIRE(recorder->WriteRunStarted(nlohmann::json{{"run_kind", "main_session"}},
+                                      Durability::PowerLoss)
+                .status == RecordReceipt::Status::Committed);
+    auto bridge = OpenBridge(*recorder);
+    bridge.BeginTurn("turn-1", "external_user");
+
+    agent::ContextPressure pre_request;
+    pre_request.phase = agent::ContextPressure::Phase::PreRequest;
+    bridge.OnContextPressure(pre_request);
+
+    agent::ContextPressure pressure;
+    pressure.phase = agent::ContextPressure::Phase::PreflightExceeded;
+    pressure.estimated_input_tokens = 16000;
+    pressure.reserved_output_tokens = 2048;
+    pressure.protocol_headroom_tokens = 512;
+    pressure.window_tokens = 32768;
+    pressure.reserve_clamped = true;
+    bridge.OnContextPressure(pressure);
+    bridge.EndTurn(true, false, "done");
+
+    const auto report = trajectory::VerifyJournalFile(dir / "main.jsonl");
+    REQUIRE(report.ok);
+    const auto lines = trajectory::ReadJournalLines(dir / "main.jsonl");
+    REQUIRE(lines.has_value());
+    int pressure_count = 0;
+    for (const std::string& line : *lines) {
+        const auto event = nlohmann::json::parse(line);
+        if (event.value("kind", std::string()) != "context.pressure.recorded") {
+            continue;
+        }
+        ++pressure_count;
+        CHECK(event["origin"] == "budget_guard");
+        CHECK(event["turn_id"] == "turn-1");
+        CHECK_FALSE(event.contains("request_id"));
+        const auto& payload = event["payload"];
+        CHECK(payload["phase"] == "preflight_exceeded");
+        CHECK(payload["estimated_input_tokens"] == 16000);
+        CHECK(payload["reserved_output_tokens"] == 2048);
+        CHECK(payload["protocol_headroom_tokens"] == 512);
+        CHECK(payload["window_tokens"] == 32768);
+        CHECK(payload["reserve_clamped"] == true);
+    }
+    CHECK(pressure_count == 1);
+}
 
 TEST_CASE("状态机补丁:cancelled 不须 started,failed 仍须") {
     const auto dir = FreshDir("lubancode-traj-p2-cancel");

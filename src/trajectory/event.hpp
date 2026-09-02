@@ -120,6 +120,9 @@ enum class EventKind {
     // 一枚,payload 带 memory_id/content_sha256/snapshot_ref,Replay 凭它
     // 重建"当时模型看见哪一版",不读今天的 Memory。
     ContextInjected,
+    // 派工长任务预检三项账:最终 token 窗口判定当场落，包含应急收窄
+    // 放行与稳定拒绝两支；不冒充上下文内容附着/移除事件。
+    ContextPressureRecorded,
     // 5.3 模型请求与输出
     ModelRequestPrepared,
     ModelRequestSent,

@@ -382,6 +382,30 @@ nlohmann::json BuildPreparedPayload(const api::Request& request, const agent::Re
 
 }  // namespace
 
+void TrajectoryTurnBridge::OnContextPressure(const agent::ContextPressure& pressure) {
+    if (!turn_open_ || pressure.phase != agent::ContextPressure::Phase::PreflightExceeded) {
+        return;
+    }
+    const auto receipt = Put(
+        EventKind::ContextPressureRecorded, std::nullopt, std::nullopt, Actor::Host,
+        Origin::BudgetGuard,
+        nlohmann::json{{"phase", "preflight_exceeded"},
+                       {"estimated_input_tokens",
+                        static_cast<std::uint64_t>(pressure.estimated_input_tokens)},
+                       {"reserved_output_tokens",
+                        static_cast<std::uint64_t>(pressure.reserved_output_tokens)},
+                       {"protocol_headroom_tokens",
+                        static_cast<std::uint64_t>(pressure.protocol_headroom_tokens)},
+                       {"window_tokens", static_cast<std::uint64_t>(pressure.window_tokens)},
+                       {"reserve_clamped", pressure.reserve_clamped}},
+        Durability::ProcessCrash);
+    if (receipt.status != RecordReceipt::Status::Committed) {
+        // 这是可观测 metadata，不把一次落账故障改写成长任务预检业务结果；
+        // 与 sent/usage 边界同样记错并继续，由 doctor 暴露坏账。
+        NoteError(receipt, "context.pressure.recorded");
+    }
+}
+
 std::string TrajectoryTurnBridge::OnRequestPrepared(const api::Request& request,
                                                      const agent::RequestPreparedContext& ctx) {
     if (!turn_open_) {

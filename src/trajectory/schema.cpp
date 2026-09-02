@@ -148,6 +148,14 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::ContextInjected, "injected_bytes", "u", true},
     {EventKind::ContextInjected, "snapshot_ref", "s", false},
     {EventKind::ContextInjected, "snapshot_inline", "s", false},
+    // 最终窗口预检三项账（派工 worktree 单 §4.4）。window 与 action
+    // 一并落，才能复核同一组数字为何收窄放行或稳定拒绝。
+    {EventKind::ContextPressureRecorded, "phase", "s", true},
+    {EventKind::ContextPressureRecorded, "estimated_input_tokens", "u", true},
+    {EventKind::ContextPressureRecorded, "reserved_output_tokens", "u", true},
+    {EventKind::ContextPressureRecorded, "protocol_headroom_tokens", "u", true},
+    {EventKind::ContextPressureRecorded, "window_tokens", "u", true},
+    {EventKind::ContextPressureRecorded, "reserve_clamped", "b", true},
     {EventKind::ModelRequestPrepared, "model", "s", true},
     {EventKind::ModelRequestPrepared, "provider", "s", true},
     {EventKind::ModelRequestPrepared, "wire", "s", true},

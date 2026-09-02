@@ -84,6 +84,7 @@ public:
     void EndTurn(bool ok, bool cancelled, const std::string& reason);
 
     // ---- agent::LoopBoundaryRecorder(loop 在模型边界调) ----
+    void OnContextPressure(const agent::ContextPressure& pressure) override;
     std::string OnRequestPrepared(const api::Request& request, const agent::RequestPreparedContext& ctx) override;
     void OnRequestSent(const std::string& request_id) override;
     // 任务级 turn 账(turn 预算单 §11.1,P1-1):permit 提交后的 sent 边界带

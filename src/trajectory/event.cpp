@@ -101,7 +101,7 @@ constexpr std::array<std::pair<Durability, const char*>, 3> kDurabilityNames{{
 // 顺序与 EventKind 枚举声明一致,两处对不上会在启动断言里炸出来。
 // plane 归面照 §4.2:conversation=输入/宿主注入/模型输出/回喂结果;
 // execution=provider 请求与工具执行;evidence=验证与终裁;其余 control。
-constexpr std::array<EventKindInfo, 72> kKindInfos{{
+constexpr std::array<EventKindInfo, 73> kKindInfos{{
     {"run.started", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden, IdNeed::Forbidden, false},
     {"run.environment.captured", Plane::Execution, IdNeed::Optional, IdNeed::Optional, IdNeed::Forbidden,
      false},
@@ -125,6 +125,10 @@ constexpr std::array<EventKindInfo, 72> kKindInfos{{
     //(召回在 turn.started 之前拼 prompt,先落账后开轮)。
     {"context.injected", Plane::Conversation, IdNeed::Optional, IdNeed::Optional, IdNeed::Forbidden,
      false},
+    // 最终窗口预检发生在 request id 铸造前，但在已开启的 turn 内；它是
+    // budget guard 的控制元数据，不是模型上下文正文。
+    {"context.pressure.recorded", Plane::Control, IdNeed::Required, IdNeed::Forbidden,
+     IdNeed::Forbidden, false},
     {"model.request.prepared", Plane::Execution, IdNeed::Required, IdNeed::Required, IdNeed::Forbidden,
      false},
     {"model.request.sent", Plane::Execution, IdNeed::Required, IdNeed::Required, IdNeed::Forbidden,
@@ -241,7 +245,7 @@ constexpr std::array<EventKindInfo, 72> kKindInfos{{
      false},
 }};
 
-static_assert(kKindInfos.size() == 72, "kind 信息表与枚举须同长");
+static_assert(kKindInfos.size() == 73, "kind 信息表与枚举须同长");
 static_assert(static_cast<std::size_t>(EventKind::MemorySaveFailed) + 1 == kKindInfos.size(),
               "kind 信息表顺序须与枚举声明一致");
 
