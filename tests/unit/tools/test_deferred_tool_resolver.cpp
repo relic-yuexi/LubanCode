@@ -83,7 +83,10 @@ api::Message UserToolResult(const std::string& id, const std::string& content, b
 // ---------------------------------------------------------------------------
 
 TEST_CASE("DeferredToolMode: 配置词与枚举对上(P3 起 native 放行)") {
-    CHECK(tools::ParseDeferredToolMode("") == tools::DeferredToolMode::LegacyExpand);
+    // 2026-09-03 切默认(P4-2):空串 = 未配置,不再钉死 legacy——回 nullopt,
+    // 档位仲裁归 ResolveDeferredToolMode(空串与 auto 同待遇,见下一册)与
+    // 直构路(落 kRecommendedDeferredToolMode)。
+    CHECK(tools::ParseDeferredToolMode("") == std::nullopt);
     CHECK(tools::ParseDeferredToolMode("legacy_expand") == tools::DeferredToolMode::LegacyExpand);
     CHECK(tools::ParseDeferredToolMode("disabled") == tools::DeferredToolMode::Disabled);
     CHECK(tools::ParseDeferredToolMode("proxy_reference") == tools::DeferredToolMode::ProxyReference);
@@ -126,12 +129,18 @@ TEST_CASE("ResolveDeferredToolMode: 两道门全开才 native,门不开大声回
     REQUIRE_FALSE(no_catalog.native_denial.empty());
     CHECK(no_catalog.native_denial.find("deferred_tools") != std::string::npos);
 
-    // 目录声明了但配置没点名 native:照配置走(默认回落 proxy 是 P4 的活,
-    // 现状空配置 = legacy_expand)。
+    // 目录声明了但配置没点名 native:2026-09-03 切默认后空串与 auto 同
+    // 待遇——两道门都开就走 native(P4-3 的默认半边),不再钉死 legacy。
     const auto not_requested =
         tools::ResolveDeferredToolMode("", /*wire_is_anthropic=*/true, /*catalog_native_declared=*/true, "regex");
-    CHECK(not_requested.mode == tools::DeferredToolMode::LegacyExpand);
+    CHECK(not_requested.mode == tools::DeferredToolMode::NativeReference);
     CHECK(not_requested.native_denial.empty());
+    // 未配置且门不开(如 openai 线):落推荐档 proxy_reference(2026-09-03
+    // 真机质量对照过门后翻转,P4-2)。
+    const auto unset_fallback =
+        tools::ResolveDeferredToolMode("", /*wire_is_anthropic=*/false, /*catalog_native_declared=*/true, "regex");
+    CHECK(unset_fallback.mode == tools::DeferredToolMode::ProxyReference);
+    CHECK(unset_fallback.native_denial.empty());
 
     // 非三值的旧档照旧,不受两道门影响。
     const auto proxy = tools::ResolveDeferredToolMode("proxy_reference", /*wire_is_anthropic=*/false,
@@ -143,10 +152,10 @@ TEST_CASE("ResolveDeferredToolMode: 两道门全开才 native,门不开大声回
 // ---------------------------------------------------------------------------
 // "auto" 档(动态工具 P4·§十三 P4-2/P4-3 的机制半边):能力驱动——两道门
 // 都开走 native(P4-3"native 成为明确支持模型的默认"的机制),门不开落
-// 宿主推荐档(kRecommendedDeferredToolMode,当前 legacy,真机质量对照过门
-// 后翻 proxy——单子红线 8,机制就位、默认值不动)。与"点名 native 被拒"
-// 的待遇不同:点名的回落是意外要大声报,auto 的回落是合同行为静默落,只
-// 在落 native 时给一行 mode_note。
+// 宿主推荐档(kRecommendedDeferredToolMode,2026-09-03 真机 §12.5 质量
+// 对照过门后已翻 proxy,证据 eval/deferred_quality/report.md;空串与
+// auto 同待遇)。与"点名 native 被拒"的待遇不同:点名的回落是意外要大声
+// 报,auto 的回落是合同行为静默落,只在落 native 时给一行 mode_note。
 // ---------------------------------------------------------------------------
 TEST_CASE("ResolveDeferredToolMode: auto 档能力驱动——门开走原生带说明,门不开静默落推荐档") {
     // 门全开:auto -> native + 变体递进 + mode_note 告知生效档与退路。
@@ -164,7 +173,7 @@ TEST_CASE("ResolveDeferredToolMode: auto 档能力驱动——门开走原生带
     const auto wrong_wire =
         tools::ResolveDeferredToolMode("auto", /*wire_is_anthropic=*/false, /*catalog_native_declared=*/true, "regex");
     CHECK(wrong_wire.mode == tools::kRecommendedDeferredToolMode);
-    CHECK(wrong_wire.mode == tools::DeferredToolMode::LegacyExpand);  // 推荐档当前钉在 legacy(现状零变化)
+    CHECK(wrong_wire.mode == tools::DeferredToolMode::ProxyReference);  // 2026-09-03 切默认:推荐档 = proxy(P4-2 过门)
     CHECK(wrong_wire.native_denial.empty());
     CHECK(wrong_wire.mode_note.empty());
 

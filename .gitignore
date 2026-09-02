@@ -67,3 +67,6 @@ examples/shells/android/*.keystore
 
 # Agent 会话交接档:随机器走的临时产物,绝不入库(557c62e7 曾误入后移出)
 AGENT_HANDOFF.md
+
+# 质量对照跑批临时目录:含拷贝的真 config(带钥匙)与会话轨迹,绝不进 git
+eval/deferred_quality/_run/

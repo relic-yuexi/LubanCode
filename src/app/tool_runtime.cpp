@@ -754,12 +754,13 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
     // 路上不翻页。
     const int tool_search_threshold = config.tool_search_threshold;
     lubancode::tools::DeferredToolMode mode = lubancode::tools::DeferredToolMode::LegacyExpand;
-    if (config.deferred_tool_mode == "auto") {
-        // 动态工具 P4:"auto"(能力驱动)在直构路落宿主推荐档——这条路
-        // 没有 wire/目录能力可判(那两道门在装配层 session_stack/one_shot
-        // 过),native 半边开不了;与 native_reference 在直构路不开同一
-        // 待遇,不绕过目录判定(单子红线 2)。推荐档当前 = legacy,翻
-        // P4-2 时同笔翻(见 deferred_tool_resolver.hpp 的开关注)。
+    if (config.deferred_tool_mode == "auto" || config.deferred_tool_mode.empty()) {
+        // 动态工具 P4:"auto"(能力驱动)与未配置(空串,2026-09-03 切默认
+        // 后同待遇)在直构路落宿主推荐档——这条路没有 wire/目录能力可判
+        //(那两道门在装配层 session_stack/one_shot 过),native 半边开不了;
+        // 与 native_reference 在直构路不开同一待遇,不绕过目录判定(单子
+        // 红线 2)。推荐档 2026-09-03 真机质量对照过门后 = proxy_reference
+        //(证据:eval/deferred_quality/report.md)。
         mode = lubancode::tools::kRecommendedDeferredToolMode;
     } else if (const auto configured = lubancode::tools::ParseDeferredToolMode(config.deferred_tool_mode);
                configured.has_value() && *configured != lubancode::tools::DeferredToolMode::NativeReference) {

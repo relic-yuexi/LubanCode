@@ -1,0 +1,168 @@
+{
+  "suite": "deferred_quality_v1",
+  "doc": "动态工具延迟挂载 §12.5 质量对照任务集。三档(disabled/proxy_reference/legacy_expand)同模型同任务同温度各跑一遍,成败线全部可机判:required_calls 逐工具逐参数对照真 schema 判,误选计 misselect_targets 命中,重搜计 tool_search 调用次数。",
+  "mcp_server": "demosuite",
+  "shapes_covered": [
+    "名字直白、参数简单",
+    "名字相近、容易误选",
+    "schema 有嵌套 object/array/enum",
+    "MCP 长命名",
+    "工具有副作用",
+    "一轮搜一枚",
+    "一轮搜多枚",
+    "搜后隔轮再调"
+  ],
+  "shapes_not_covered": [
+    {
+      "shape": "schema 中途漂移",
+      "reason": "one_shot 管道单进程内无中途 MCP 重连换 schema;结构侧 stale_tool_ref 路已有 tests/unit/tools/test_deferred_tool_resolver.cpp 钉死,真机对照不重复测"
+    },
+    {
+      "shape": "子 Agent 调用",
+      "reason": "单轮 one_shot 引入子代理会搅浑对照变量(子代理轮次/开销混入主账);子代理独立 ledger 接线已有单测册"
+    },
+    {
+      "shape": "compact 后再调",
+      "reason": "one_shot 无 compact 动作;compact 不丢 DiscoveryLedger 已有 test_loop.cpp 补册钉死"
+    }
+  ],
+  "tasks": [
+    {
+      "id": "T1_direct_simple",
+      "shape": "名字直白、参数简单 + 一轮搜一枚",
+      "prompt": "用工具查一下上海此刻的天气,把温度和天气状况告诉我。",
+      "required_calls": [
+        {
+          "tool": "mcp__demosuite__weather_current",
+          "checks": [
+            {"path": "city", "op": "contains_ci", "value": ["上海", "shanghai"]},
+            {"path": "units", "op": "optional_enum", "value": ["celsius", "fahrenheit"]}
+          ]
+        }
+      ],
+      "misselect_targets": ["mcp__demosuite__weather_forecast"]
+    },
+    {
+      "id": "T2_confusable_pair",
+      "shape": "名字相近、容易误选(calendar_add_event vs calendar_add_event_series)",
+      "prompt": "给团队日历加一个单次事件:明天上午 10 点的周会,标题就叫\"周会\",时长一小时。注意只要单次这一场,不要建重复系列。",
+      "required_calls": [
+        {
+          "tool": "mcp__demosuite__calendar_add_event",
+          "checks": [
+            {"path": "title", "op": "contains_ci", "value": ["周会"]},
+            {"path": "duration_minutes", "op": "eq_number", "value": 60}
+          ]
+        }
+      ],
+      "misselect_targets": ["mcp__demosuite__calendar_add_event_series", "mcp__demosuite__calendar_remove_event", "mcp__demosuite__calendar_list_events"]
+    },
+    {
+      "id": "T3_nested_schema",
+      "shape": "schema 有嵌套 object/array/enum(report_build.sections)",
+      "prompt": "组装一份周报,分三节:第一节标题\"进展\",放纯文字;第二节做一张数据表,列名用\"项\"和\"值\"两列;第三节放一个柱状图。把组装结果告诉我。",
+      "required_calls": [
+        {
+          "tool": "mcp__demosuite__report_build",
+          "checks": [
+            {"path": "sections", "op": "min_len", "value": 3},
+            {"path": "sections.#0.kind", "op": "eq", "value": "text"},
+            {"path": "sections.#0.section_title", "op": "contains_ci", "value": ["进展"]},
+            {"path": "sections.#1.kind", "op": "eq", "value": "table"},
+            {"path": "sections.#1.table.columns", "op": "array_contains_ci", "value": ["项", "值"]},
+            {"path": "sections.#2.kind", "op": "eq", "value": "chart"},
+            {"path": "sections.#2.chart.chart_type", "op": "eq", "value": "bar"}
+          ]
+        }
+      ],
+      "misselect_targets": ["mcp__demosuite__chart_render", "mcp__demosuite__dashboard_refresh"]
+    },
+    {
+      "id": "T4_longname_multi",
+      "shape": "MCP 长命名 + 一轮搜多枚 + 顺序依赖",
+      "prompt": "把销售数据仓的每日销售事实表导出成 CSV,日期范围取最近 30 天;导出完成后发一封邮件到 sales-team@demo.local,主题写\"每日导出完成\",正文简述导出了什么。两步都做完告诉我结果。",
+      "required_calls": [
+        {
+          "tool": "mcp__demosuite__enterprise_datawarehouse_facts_sales_daily_export",
+          "checks": [
+            {"path": "lookback_days", "op": "eq_number", "value": 30}
+          ]
+        },
+        {
+          "tool": "mcp__demosuite__email_send",
+          "checks": [
+            {"path": "to", "op": "contains_ci", "value": ["sales-team@demo.local"]},
+            {"path": "subject", "op": "contains_ci", "value": ["每日导出"]}
+          ]
+        }
+      ],
+      "misselect_targets": ["mcp__demosuite__invoice_send_by_email", "mcp__demosuite__kv_put"]
+    },
+    {
+      "id": "T5_side_effect",
+      "shape": "工具有副作用 + 一轮搜一枚",
+      "prompt": "把 demo 环境里名叫 payments 的服务重启一次,告诉我重启结果。",
+      "required_calls": [
+        {
+          "tool": "mcp__demosuite__server_restart",
+          "checks": [
+            {"path": "service", "op": "contains_ci", "value": ["payments"]},
+            {"path": "environment", "op": "eq", "value": "demo"}
+          ]
+        }
+      ],
+      "misselect_targets": ["mcp__demosuite__db_query_execute", "mcp__demosuite__deployment_rollback", "mcp__demosuite__server_restart_all"]
+    },
+    {
+      "id": "T6_reuse_after_gap",
+      "shape": "搜后隔轮再调(同一工具两次,中间隔另一工具)",
+      "prompt": "帮我做三件小事:第一,查东八区(上海时区)现在几点;第二,查上海此刻天气;第三,再查一次东八区现在几点,核对和第一次是否一致。三件事的结果都告诉我。",
+      "required_calls": [
+        {
+          "tool": "mcp__demosuite__time_now_in_zone",
+          "checks": [
+            {"path": "timezone", "op": "contains_ci", "value": ["shanghai", "+08", "8"]}
+          ],
+          "min_calls": 2
+        },
+        {
+          "tool": "mcp__demosuite__weather_current",
+          "checks": [
+            {"path": "city", "op": "contains_ci", "value": ["上海", "shanghai"]}
+          ]
+        }
+      ],
+      "ordering": "time_now_in_zone 调用两次之间必须隔着 weather_current 调用",
+      "misselect_targets": ["mcp__demosuite__weather_forecast"]
+    },
+    {
+      "id": "T7_confusable_draft",
+      "shape": "名字相近、容易误选(invoice_create_draft vs invoice_create)",
+      "prompt": "在发票系统里建一张草稿发票:金额 1280.50,币种人民币。注意只要草稿,不要直接开正式发票。",
+      "required_calls": [
+        {
+          "tool": "mcp__demosuite__invoice_create_draft",
+          "checks": [
+            {"path": "amount", "op": "eq_number", "value": 1280.5},
+            {"path": "currency", "op": "eq", "value": "CNY"}
+          ]
+        }
+      ],
+      "misselect_targets": ["mcp__demosuite__invoice_create", "mcp__demosuite__invoice_send_by_email"]
+    },
+    {
+      "id": "T8_confusable_algo",
+      "shape": "名字相近、容易误选(file_checksum_sha256 vs file_checksum_sha1)",
+      "prompt": "算一下 demo 仓库里 reports/summary.pdf 这个文件的 SHA-256 校验和(注意我要 256,不是 SHA-1),把十六进制结果告诉我。",
+      "required_calls": [
+        {
+          "tool": "mcp__demosuite__file_checksum_sha256",
+          "checks": [
+            {"path": "path", "op": "contains_ci", "value": ["summary.pdf"]}
+          ]
+        }
+      ],
+      "misselect_targets": ["mcp__demosuite__file_checksum_sha1"]
+    }
+  ]
+}

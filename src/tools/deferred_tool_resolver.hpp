@@ -49,21 +49,26 @@ enum class DeferredToolMode {
 
 // ---------------------------------------------------------------------------
 // P4 默认切换开关(§十三 P4-2/P4-3):宿主推荐档。"auto" 配置值在 native
-// 两道门不开时回落到它;真机质量对照过门后,切默认就是把未配置(空串)的
-// 落点也改走 auto 的解析。当前钉在 LegacyExpand = 现状零变化——翻转的前
-// 置门是 §12.5 同模型三档质量对照(单子红线 8:未跑质量对照不得把 proxy
-// 强推为默认;真机无钥匙,对照未跑,P4-2/P4-3 如实留白)。翻转 SOP 钉在
-// docs/reference/tools.md"迁移窗"一节:改这枚常量 + ParseDeferredToolMode
-// 空串分支 + 文档默认值行,三处同笔。
+// 两道门不开时回落到它;未配置(空串)同样按 auto 解析。2026-09-03 真机
+// §12.5 质量对照过门后由 LegacyExpand 翻成 ProxyReference(证据:
+// eval/deferred_quality/report.md——proxy 任务成功 9/9 不低于两档,参数
+// 首发合格 11/11 持平,误选三档全零;legacy 的 cache-hostile 真机可见,
+// 7/8 任务命中即断 cache epoch,非缓存重付全场最高)。翻转 SOP 三处同笔:
+// 这枚常量 + ParseDeferredToolMode 空串分支 + 文档默认值行,钉在
+// docs/reference/tools.md"迁移窗"一节。回退无需改码:显式写
+// legacy_expand/disabled 任一即压过默认。
 // ---------------------------------------------------------------------------
-inline constexpr DeferredToolMode kRecommendedDeferredToolMode = DeferredToolMode::LegacyExpand;
+inline constexpr DeferredToolMode kRecommendedDeferredToolMode = DeferredToolMode::ProxyReference;
 
-// ""(未配)与 "legacy_expand" 都落 LegacyExpand(现状默认);认不得的值回
-// nullopt,调用方负责把人话报清。P3 起 native_reference 放行——但配置层
-// 收下不等于生效:装配期还要过 wire 与目录能力两道门
-//(ResolveDeferredToolMode)。P4 起新增 "auto"(能力驱动档)——auto 不是
-// 一档模式而是解析策略(native 门开走原生、门不开落推荐档),不从这里出,
-// 由 ResolveDeferredToolMode 单独判。
+// ""(未配)不再钉死 LegacyExpand——切默认后空串与 "auto" 同待遇,档位
+// 仲裁归 ResolveDeferredToolMode(装配层按 wire+目录能力判)与直构路
+//(落 kRecommendedDeferredToolMode),所以空串在这里回 nullopt,表示
+// "未指定,交给能力仲裁"。显式 "legacy_expand" 仍落 LegacyExpand(迁移窗
+// 兼容档);认不得的值回 nullopt,调用方负责把人话报清。P3 起
+// native_reference 放行——但配置层收下不等于生效:装配期还要过 wire 与
+// 目录能力两道门(ResolveDeferredToolMode)。P4 起新增 "auto"(能力驱动
+// 档)——auto 不是一档模式而是解析策略(native 门开走原生、门不开落推荐
+// 档),不从这里出,由 ResolveDeferredToolMode 单独判。
 std::optional<DeferredToolMode> ParseDeferredToolMode(const std::string& text);
 
 // 稳定名字(disabled/proxy_reference/native_reference/legacy_expand),展示
