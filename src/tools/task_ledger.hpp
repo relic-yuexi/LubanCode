@@ -230,6 +230,10 @@ struct AgentTaskSnapshot {
     std::string isolation_branch;       // worktree/agent-xxxx
     std::string isolation_base_ref;     // 冻结时调用者所在分支;detached 记 "(detached)"
     std::string isolation_base_commit;  // 冻结的调用者 HEAD 全哈希
+    // 收工房态(派工单 §五):房被清理前两者皆 false;未提交/待复核的房
+    // 保留到主控确认,清理动作只把 worktree_removed 翻真。
+    bool worktree_removed = false;
+    bool worktree_awaiting_review = false;
     // api::Usage 统一口径(input=非缓存输入),完整输入 = 三项相加。
     std::int64_t input_tokens = 0;
     std::int64_t cache_read_tokens = 0;

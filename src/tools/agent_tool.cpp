@@ -1309,8 +1309,17 @@ Tool::Result AgentTool::ExecuteForeground(const DispatchRequest& request, ToolRe
                             /*background_permissions=*/headless_permissions,
                             custom, resolved, request.permission_floor, std::move(trajectory), env);
     if (room.has_value()) {
-        result.AppendText(FinishIsolationRoom(*room, git_runner_));
+        const auto finish = FinishIsolationRoom(*room, git_runner_);
+        result.AppendText(finish.note);
         result.AppendText(room->caller_note);
+        // 房态进快照(派工单 §五):清理时机面板/详情看得见,回传路径是否
+        // 仍有效有账可查。
+        {
+            std::lock_guard<std::mutex> lock(coordinator_->ledger().mutex);
+            task->snapshot.worktree_removed = finish.removed;
+            task->snapshot.worktree_awaiting_review = finish.awaiting_review;
+            coordinator_->ledger().Touch();
+        }
     }
     // 收尾入账:未送达的介入消息逐条列原文记进结果文本,不无声遗失;面板
     // x 停掉(task->cancel)与父轮 ESC 打断(hooks.cancel)都算取消;嵌套路
@@ -1564,7 +1573,15 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
                 result = {"子代理执行失败: 未知错误", true};
             }
             if (room.has_value()) {
-                result.AppendText(FinishIsolationRoom(*room, git_runner_));
+                const auto finish = FinishIsolationRoom(*room, git_runner_);
+                result.AppendText(finish.note);
+                result.AppendText(room->caller_note);
+                {
+                    std::lock_guard<std::mutex> lock(coordinator_->ledger().mutex);
+                    task->snapshot.worktree_removed = finish.removed;
+                    task->snapshot.worktree_awaiting_review = finish.awaiting_review;
+                    coordinator_->ledger().Touch();
+                }
             }
             // 收尾前点一遍没送达的介入消息:任务都要结束了,排着的信没有下一个
             // 轮次边界可等——逐条列原文记进结果文本,不无声遗失。

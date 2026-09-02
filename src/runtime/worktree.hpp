@@ -192,15 +192,20 @@ AgentWorktree CreateAgentWorktree(const std::filesystem::path& repository_root, 
 // 再进上面的主口。
 AgentWorktree CreateAgentWorktree(const std::filesystem::path& repository_root, GitRunner runner = {});
 
-// 收工房务:解锁;房干净 → 删房删分支(removed=true);有改动 → 留着,
-// note 给模型看的附言(房路径与分支,让主代理或用户后续去收)。
+// 收工房务(派工单 §五:回传路径在主控复核前必须有效):解锁;三种情况
+// 绝不删房——未提交改动、房内有自基线以来的提交(awaiting_parent_review,
+// 主控确认后才由人/清扫收)、删除失败。干净且无自有提交的房才自动清理
+//(没有可复核的现场,留着只攒垃圾)。note 是给模型看的交接附言:路径、
+// 分支、HEAD 提交、复核与清理命令、房没了之后的一条命令重挂法。
 struct AgentWorktreeFinish {
     bool removed = false;
+    bool awaiting_review = false;  // 现场保留待主控复核(已提交/未提交皆算)
+    std::string head_commit;       // 保留房的 HEAD(持久提交引用;读不到留空)
     std::string note;
 };
 AgentWorktreeFinish FinishAgentWorktree(const std::filesystem::path& repository_root,
                                         const std::filesystem::path& room_path, const std::string& branch,
-                                        GitRunner runner = {});
+                                        const std::string& base_commit, GitRunner runner = {});
 
 // 陈房清扫:只扫 .lubancode/worktrees 下 agent- 前缀、修改时间早于
 // now - max_age 的房。锁着的先解锁(被杀会话留下的;用户手上的锁只在

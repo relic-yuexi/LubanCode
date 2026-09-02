@@ -99,9 +99,10 @@ std::optional<lubancode::cli::AgentWorktree> SetupIsolationRoom(const std::strin
     return room;
 }
 
-std::string FinishIsolationRoom(const lubancode::cli::AgentWorktree& room,
-                                const lubancode::cli::GitRunner& runner) {
-    return lubancode::cli::FinishAgentWorktree(room.repo_root, room.room_path, room.branch, runner).note;
+lubancode::cli::AgentWorktreeFinish FinishIsolationRoom(const lubancode::cli::AgentWorktree& room,
+                                                        const lubancode::cli::GitRunner& runner) {
+    return lubancode::cli::FinishAgentWorktree(room.repo_root, room.room_path, room.branch, room.base_commit,
+                                               runner);
 }
 
 std::unique_ptr<ToolRegistry> BuildIsolatedRegistry(ToolRegistry& source, const IsolationScope& scope) {

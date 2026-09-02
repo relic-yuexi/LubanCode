@@ -354,6 +354,8 @@ TEST_CASE("agent isolation: 基线=派工瞬间的调用者 HEAD,领先远端不
     CHECK(detail->isolation_base_ref == "main");
     CHECK_FALSE(detail->isolation_branch.empty());
     CHECK(detail->isolation_branch.rfind("worktree/agent-", 0) == 0);
+    CHECK(detail->worktree_removed);            // 干净无提交:收工照旧清理
+    CHECK_FALSE(detail->worktree_awaiting_review);
     // 结果文本带基线附言,调用方看得见起树基准。
     CHECK(result.content.find("[隔离基线] base=main@" + head) != std::string::npos);
 }

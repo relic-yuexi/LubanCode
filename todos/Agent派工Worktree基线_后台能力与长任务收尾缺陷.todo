@@ -170,9 +170,35 @@ cwd 不是真实存在的目录
 
 ## 七、最终验收门
 
-- [ ] 后台能力在派工前判定，schema、预检、执行三处一致。
-- [ ] worktree 默认基线与调用者冻结 HEAD 一致，差异会明示并阻断。
-- [ ] 长任务压缩后能继续，或落下可恢复交接。
-- [ ] worktree 清理不再让回传路径当场失效。
-- [ ] bundled rg 在全新隔离树中的责任边界查清，两册测试全绿。
-- [ ] 五项均有稳定回归，且错误码、轨迹、诊断文案可核对。
+- [x] 后台能力在派工前判定，schema、预检、执行三处一致。
+- [x] worktree 默认基线与调用者冻结 HEAD 一致，差异会明示并阻断。
+- [x] 长任务压缩后能继续，或落下可恢复交接。
+- [x] worktree 清理不再让回传路径当场失效。
+- [x] bundled rg 在全新隔离树中的责任边界查清，两册测试全绿。
+- [ ] 五项均有稳定回归，且错误码、轨迹、诊断文案可核对。（回归/错误码/诊断文案已齐；
+      预检三项账走 ContextPressure 事件与 LogSink，未落 trajectory JSONL——遗留见下）
+
+## 八、修复存照（2026-09-02，worktree agent-a9bb1170957161890）
+
+- §三基线：`CreateAgentWorktree` 主口吃冻结提交，`SetupIsolationRoom` 派工瞬间冻结
+  调用者 HEAD；`TaskSnapshot` 持久化 isolation_branch/base_ref/base_commit。
+- §二能力：schema 按入口生成（无后端摘 background）、`ExecuteDispatch` preflight
+  `[background_unavailable]` 稳定拒绝、执行口同文案兜底。
+- §四预检：128000 来路=模型目录 `max_output_tokens`（能力上限）经
+  `BuildSubagentRuntimeProfile` 原样继承。修法：能力级声明按 clamp(window/8, 8k, 32k)
+  收窄（来源记 SubagentDefault，显式配置不收）+ 预检最终闸应急预留
+  clamp(window/16, 2k, 8k) 放行并注入一次收尾交代；三项账进 ContextPressure
+  （PreflightExceeded 相位）与 LogSink。
+- §五删树：未提交/已提交（自基线有新提交）的房一律保留待主控复核，note 带
+  HEAD 提交引用、复核/清理/一条命令重挂法；快照记 worktree_removed/awaiting_review。
+  陈房清扫对"待复核房"仍按有活跳过（不自动收）。
+- §六定责：`LUBANCODE_BUNDLED_RG_DIR` 是 configure 级构建输入，归开发者调用面
+  （preset/命令行），不归 Agent worktree 环境继承，不归测试夹具；两册真 rg 测试
+  依赖生产定位路（ExecutableDir/libexec）却不走 `LUBANCODE_TEST_HAS_BUNDLED_RG`
+  跳过门——缺件即失败。修法：CMake 在未显式传旗时探全机共享分期
+  `<home>/.lubancode/rg-stage/libexec`（`fetch_ripgrep.py --target` 一次产物，离线、
+  版本照过门），configure 缺项时 WARNING 给出可执行补齐命令。本次修复的 worktree
+  即全新树：零手工补环境，361/361 册全绿（含两册真 rg）。
+- 遗留：①预检三项账未落 trajectory JSONL（走 ContextPressure/LogSink，接线归轨迹单）；
+  ②待复核房无自动收口（主控确认靠 note 里的清理命令或陈房清扫跳过，房会留到人处理）；
+  ③嵌套派工开房仍按 §11.3 稳定拒，未裁决"从父 HEAD 还是从父工作树起树"。

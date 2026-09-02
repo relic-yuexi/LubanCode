@@ -953,6 +953,22 @@ bool RoomHasOwnCommits(const std::filesystem::path& repository_root, const std::
     return parsed > 0;
 }
 
+// 房分支自基线以来的提交数(派工单 §五):比"别的分支不含的提交"准——
+// 调用者自己领先远端的未推提交不算房的活。base 空/查询失败退保守口径。
+bool RoomHasCommitsSinceBase(const std::filesystem::path& repository_root, const std::string& branch,
+                             const std::string& base_commit, GitRunner runner) {
+    if (base_commit.empty()) {
+        return RoomHasOwnCommits(repository_root, branch, runner);
+    }
+    const GitCommandResult count =
+        runner({repository_root, {"rev-list", "--count", branch, "--not", base_commit}});
+    if (count.exit_code != 0) {
+        return true;  // 认不出,保守当有活
+    }
+    const long long parsed = std::strtoll(Trim(count.output).c_str(), nullptr, 10);
+    return parsed > 0;
+}
+
 }  // namespace
 
 FrozenWorktreeBase FreezeWorktreeBase(const std::filesystem::path& working_directory, GitRunner runner) {
@@ -1040,7 +1056,7 @@ AgentWorktree CreateAgentWorktree(const std::filesystem::path& repository_root, 
 
 AgentWorktreeFinish FinishAgentWorktree(const std::filesystem::path& repository_root,
                                         const std::filesystem::path& room_path, const std::string& branch,
-                                        GitRunner runner) {
+                                        const std::string& base_commit, GitRunner runner) {
     if (!runner) {
         runner = DefaultGitRunner;
     }
@@ -1052,8 +1068,33 @@ AgentWorktreeFinish FinishAgentWorktree(const std::filesystem::path& repository_
         return out;
     }
     if (!WorktreeClean(room_path, runner)) {
-        out.note = "\n\n隔离子代理的工作树有未提交改动,已保留:\n路径: " + PathToUtf8(room_path) +
-                   "\n分支: " + branch + "\n需要后续收尾(提交/合并/清理)。";
+        // 未提交现场绝不删(派工单 §五):解锁留房,note 给主控指路。
+        out.awaiting_review = true;
+        const GitCommandResult head = runner({room_path, {"rev-parse", "HEAD"}});
+        out.head_commit = head.exit_code == 0 ? Trim(head.output) : std::string();
+        out.note = "\n\n隔离子代理的工作树有未提交改动,已保留(awaiting_parent_review):\n路径: " +
+                   PathToUtf8(room_path) + "\n分支: " + branch +
+                   "\n复核: git -C \"" + PathToUtf8(room_path) + "\" status && git -C \"" +
+                   PathToUtf8(room_path) + "\" diff" + "\n清理(复核后): git worktree remove \"" +
+                   PathToUtf8(room_path) + "\" && git branch -D " + branch +
+                   "\n需要后续收尾(提交/合并/清理)。";
+        return out;
+    }
+    if (RoomHasCommitsSinceBase(repository_root, branch, base_commit, runner)) {
+        // 已提交现场同样待复核(派工单 §五):子代理的报告拿房路径当复核入口,
+        // 主控确认前不删。note 带持久提交引用与复核/清理/重挂命令——房真被
+        // 外部清掉后,一条 git worktree add 也能把现场挂回来。
+        out.awaiting_review = true;
+        const GitCommandResult head = runner({room_path, {"rev-parse", "HEAD"}});
+        out.head_commit = head.exit_code == 0 ? Trim(head.output) : std::string();
+        const std::string range = base_commit.empty() ? std::string("-5") : base_commit + "..HEAD";
+        out.note = "\n\n隔离子代理已在房内提交,现场保留待主控复核(awaiting_parent_review):\n路径: " +
+                   PathToUtf8(room_path) + "\n分支: " + branch +
+                   (out.head_commit.empty() ? std::string() : "\nHEAD: " + out.head_commit) +
+                   "\n复核: git -C \"" + PathToUtf8(room_path) + "\" log --stat " + range +
+                   "\n清理(复核完): git worktree remove \"" + PathToUtf8(room_path) + "\" && git branch -D " +
+                   branch + "\n房若已不在: git worktree add \"" + PathToUtf8(room_path) + "\" " + branch +
+                   " 一条命令重挂。";
         return out;
     }
     if (const auto failure = SafeRemoveTree(room_path); failure.has_value()) {
