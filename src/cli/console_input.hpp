@@ -512,8 +512,12 @@ std::recursive_timed_mutex& ConsoleReadMutex();
 // 正文末尾。这样框永远紧贴"正文当前底部"的下一行,正文往下长它就跟着挪,
 // 绝不跟正文重叠。贴到 ConPTY 缓冲区底时会主动滚屏，并经 scroll hook 把
 // 正文块与工具条目锚点一同上移；输入框不再因“底下没四行空位”而消失。
-// 全程在 StdoutWriteMutex 之内,每次重画都拿 synchronized output
-// (DEC 2026,`\x1b[?2026h`/`l`)包一层,避免终端半途刷出半帧。
+// 全程在 StdoutWriteMutex 之内。绘制档位三档分开建模(终端思考活动条
+// 单·P0 治根):确认 DEC 2026 同步输出的宿主,重画走 VT 批并包
+// `\x1b[?2026h`/`l`,一帧原子提交;没确认的宿主,Windows 退原生控制台
+// API(不搬实体光标的屏幕写入),POSIX 退 VT 批不包 2026——活动行动画
+// 已撤,只在真状态变化时单笔落帧。同一帧只留一条权威光标恢复路,末态
+// 恒为 composer 的真实软换行坐标。选路见 platform::PlanInlineRepaint。
 //
 // enabled:只在 is_console && platform::SupportsScreenRepaint() 下为真。
 // Windows 走控制台 API；POSIX 用 DSR 实探并与按键监听共用输入锁。能力
@@ -568,8 +572,10 @@ int EnsureViewportRowsForAnchorLocked(int anchor_row, int top_row, int rows_need
 // 一气画完。Start 返回 false 表示当前没有 footer（如 /compact），调用方
 // 可退回原来的独立单行 spinner。
 bool StartStreamFooterWorking(const std::string& label);
-void UpdateStreamFooterWorking(const std::string& label, std::size_t highlighted_glyph,
-                               long long elapsed_seconds);
+// 逐字扫光已撤(终端思考活动条单·P0 止血):活动行动态只剩圆点颜色与
+// 秒钟,同一秒的更新在内部直接收手(TurnActivityRowChanged 判据),帧
+// 审计零新增落笔。
+void UpdateStreamFooterWorking(const std::string& label, long long elapsed_seconds);
 void StopStreamFooterWorking();
 
 // ---- turn 级 Working 活动条(终端回合视觉收束单) ------------------------
@@ -579,24 +585,24 @@ void StopStreamFooterWorking();
 //   BeginTurnActivity:用户 prompt 过了本地校验、turn.started 落账那一刻亮。
 //     started_at 是 turn 起点(epoch 毫秒);此后正文 delta、工具批次、
 //     下一次模型请求、重试都不熄、秒数不归零。
-//   UpdateTurnActivityElapsed:计时一秒一跳(或动画线程每拍报同一秒),
-//     highlighted_glyph 走字扫光,字符数与显示宽恒不变。
+//   UpdateTurnActivityElapsed:计时一秒一跳。逐字扫光已撤(P0 止血),
+//     同一秒的心跳闲拍在内部收手,不再每 200ms 改一帧指纹。
 //   SetTurnActivityInterruptRequested:ESC 置了 cancel,文案换 "Stopping..."
 //     (终态落账后由 EndTurnActivity 退场,不瞬间消失)。
 //   EndTurnActivity:turn.completed 一到就熄;返回最终显示的整秒数,交
 //     Worked footer 对账(两边同一只钟,不得差一截)。
 // 没起过的 EndTurn 返回 -1(不误伤 /compact 那类单次 spinner)。
 void BeginTurnActivity(const std::string& label, std::int64_t started_at_ms);
-void UpdateTurnActivityElapsed(std::size_t highlighted_glyph, std::int64_t elapsed_seconds);
+void UpdateTurnActivityElapsed(std::int64_t elapsed_seconds);
 void SetTurnActivityInterruptRequested();
 long long EndTurnActivity();
 // 当前 turn 活动条是否亮着(装配层判断要不要抢 Spinner 的绘制权)。
 bool TurnActivityActive();
 
 // footer 的公共心跳：普通 turn 与同步 workflow 都靠它每 200ms 推一帧。
-// 活动条亮着时更新时间与扫光，cancel 置位后切成 Stopping；没有活动条时
-// 只补画 footer/代理坞。Stop 幂等，调用方须在 EndTurnActivity/EndStreamFooter
-// 之前停妥，免得后台线程追着已经收场的帧写。
+// 活动条亮着时只报秒数(同一秒零落笔)，cancel 置位后切成 Stopping；没
+// 有活动条时只补画 footer/代理坞。Stop 幂等，调用方须在 EndTurnActivity/
+// EndStreamFooter 之前停妥，免得后台线程追着已经收场的帧写。
 class StreamFooterHeartbeat {
 public:
     StreamFooterHeartbeat(bool enabled, std::chrono::steady_clock::time_point started_at,

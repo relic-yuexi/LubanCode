@@ -17,6 +17,7 @@ TerminalBatch::TerminalBatch(int viewport_x, int viewport_y, bool synchronized_o
     : synchronized_output_(synchronized_output),
       viewport_x_((std::max)(0, viewport_x)),
       viewport_y_((std::max)(0, viewport_y)) {
+    // 2026 包裹由入参显式决定(默认关闭):合同见 terminal_batch.hpp。
     if (synchronized_output_) {
         bytes_.append(kSyncOutputBegin);
     }

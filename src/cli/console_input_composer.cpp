@@ -245,7 +245,7 @@ void RedrawEditArea(int& start_row, const BottomChromeModel& model, const Theme&
     // VT 终端把擦行、落字、归光标攒进一段字节,一次 write + flush;老终端
     // 仍走 Console API 兼容路。
     if (vt_enabled) {
-        platform::TerminalBatch batch(viewport_x, viewport_y);
+        platform::TerminalBatch batch(viewport_x, viewport_y, platform::ProbeSyncOutputSupport());
         QueueInlineFrameDiff(batch, previous, next, frame_top);
         if (batch.has_commands()) {
             const std::size_t batch_bytes = batch.Finish().size();
@@ -319,7 +319,7 @@ void CollapseBoxOnSubmit(int frame_top, int prompt_width, int prev_body_row_coun
     const int final_y = top + static_cast<int>(last);
 
     if (vt_enabled) {
-        platform::TerminalBatch batch(info->viewport_x, info->viewport_y);
+        platform::TerminalBatch batch(info->viewport_x, info->viewport_y, platform::ProbeSyncOutputSupport());
         for (int r = top; r <= bottom; ++r) {
             batch.ClearRowHardFrom(0, r, buffer_width);
         }

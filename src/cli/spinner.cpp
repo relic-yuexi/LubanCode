@@ -55,7 +55,9 @@ Spinner::Spinner(const Theme& theme, bool enabled) : enabled_(enabled), stopped_
                                      std::chrono::steady_clock::now() - started)
                                      .count();
             if (footer_mode_) {
-                UpdateStreamFooterWorking(label, frame, seconds);
+                // 扫光参数已撤(终端思考活动条单·P0 止血):footer 活动行动态
+                // 只剩圆点颜色与秒钟,frame 只喂下面的独立单行路。
+                UpdateStreamFooterWorking(label, seconds);
             } else {
                 // 跟 ESC 监听线程的"已打断/已排队"提示共用一个 stdout 锁,
                 // 不持锁的话转轮帧会跟那些提示交错,花屏。

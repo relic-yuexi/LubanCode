@@ -4,11 +4,14 @@
 #include <vector>
 
 #include "cli/terminal_frame.hpp"
+#include "platform/console.hpp"
 
 using lubancode::cli::InlineFrame;
 using lubancode::cli::InlineFrameRow;
 using lubancode::cli::LayoutComposerRows;
 using lubancode::cli::QueueInlineFrameDiff;
+using lubancode::cli::TurnActivityRowChanged;
+using lubancode::platform::StdoutConsoleProbe;
 using lubancode::platform::TerminalBatch;
 
 TEST_CASE("composer layout: first row uses prompt width and continuations use full width") {
@@ -39,7 +42,7 @@ TEST_CASE("inline frame diff: unchanged rows are skipped and all changes share o
                       InlineFrameRow{0, 10, true, "rule"}},
                      5, 0};
 
-    TerminalBatch batch;
+    TerminalBatch batch(0, 0, /*synchronized_output=*/true);
     const auto stats = QueueInlineFrameDiff(batch, &previous, next, 7);
     const std::string bytes = batch.Finish();
     CHECK(stats.compared_rows == 2);
@@ -60,7 +63,7 @@ TEST_CASE("inline frame diff: removed rows are cleared without repainting surviv
                          2, 0};
     InlineFrame next{{InlineFrameRow{2, 8, false, "same"}}, 2, 0};
 
-    TerminalBatch batch;
+    TerminalBatch batch(0, 0, /*synchronized_output=*/true);
     const auto stats = QueueInlineFrameDiff(batch, &previous, next, 3);
     const std::string bytes = batch.Finish();
     CHECK(stats.changed_rows == 1);
@@ -78,7 +81,7 @@ TEST_CASE("inline frame diff: a large frame repaints only the changed row") {
     InlineFrame next = previous;
     next.rows[500].text = "changed";
 
-    TerminalBatch batch;
+    TerminalBatch batch(0, 0, /*synchronized_output=*/true);
     const auto stats = QueueInlineFrameDiff(batch, &previous, next, 0);
     const std::string bytes = batch.Finish();
     CHECK(stats.compared_rows == 1000);
@@ -89,10 +92,109 @@ TEST_CASE("inline frame diff: a large frame repaints only the changed row") {
 }
 
 TEST_CASE("terminal batch converts screen-buffer coordinates to viewport coordinates") {
-    TerminalBatch batch(/*viewport_x=*/4, /*viewport_y=*/7);
+    TerminalBatch batch(/*viewport_x=*/4, /*viewport_y=*/7, /*synchronized_output=*/false);
     batch.MoveTo(6, 9);
     const std::string bytes = batch.Finish();
     CHECK(bytes.find("\x1b[3;3H") != std::string::npos);
+}
+
+// ---- 终端思考活动条单(P0 治根):三档能力分开建模后的选路与输出合同 ----
+// 同步输出是显式能力入参:没确认 DEC 2026 的宿主,批里一枚 2026 标记都
+// 不许有;确认了才整批原子提交。
+
+TEST_CASE("terminal batch: sync=true 整批包 2026,sync=false 一枚不包") {
+    TerminalBatch sync_batch(0, 0, /*synchronized_output=*/true);
+    sync_batch.Write("x");
+    const std::string sync_bytes = sync_batch.Finish();
+    CHECK(sync_bytes.find("\x1b[?2026h") == 0);
+    CHECK(sync_bytes.ends_with("\x1b[?2026l"));
+
+    TerminalBatch plain_batch(0, 0, /*synchronized_output=*/false);
+    plain_batch.Write("x");
+    const std::string plain_bytes = plain_batch.Finish();
+    CHECK(plain_bytes.find("2026") == std::string::npos);
+    CHECK(plain_bytes == "x");
+}
+
+TEST_CASE("inline repaint plan: VT×sync 四档选路") {
+    // 无 VT(老 conhost/管道):原生兜底路,谈不上同步输出。
+    StdoutConsoleProbe none;
+    none.is_console = true;
+    none.vt_enabled = false;
+    none.sync_output = false;
+    const auto plan_none = lubancode::platform::PlanInlineRepaint(none);
+    CHECK_FALSE(plan_none.vt_batch);
+    CHECK_FALSE(plan_none.sync_output);
+
+    // 普通 VT + 未确认 2026:Windows 退原生控制台 API(不搬实体光标的屏
+    // 幕写入),不再发会漏中间态的 CUP 串;POSIX 无原生路,退 VT 批不包
+    // 2026(动画已撤,只在真状态变化时单笔落帧)。
+    StdoutConsoleProbe vt_only;
+    vt_only.is_console = true;
+    vt_only.vt_enabled = true;
+    vt_only.sync_output = false;
+    const auto plan_vt_only = lubancode::platform::PlanInlineRepaint(vt_only);
+#ifdef _WIN32
+    CHECK_FALSE(plan_vt_only.vt_batch);
+#else
+    CHECK(plan_vt_only.vt_batch);
+#endif
+    CHECK_FALSE(plan_vt_only.sync_output);
+
+    // 普通 VT + 确认 2026:VT 批 + 同步输出,帧原子提交。
+    StdoutConsoleProbe vt_sync;
+    vt_sync.is_console = true;
+    vt_sync.vt_enabled = true;
+    vt_sync.sync_output = true;
+    const auto plan_vt_sync = lubancode::platform::PlanInlineRepaint(vt_sync);
+    CHECK(plan_vt_sync.vt_batch);
+    CHECK(plan_vt_sync.sync_output);
+
+    // 防御:VT 都不开却报 sync(矛盾输入),一律按无 VT 处理。
+    StdoutConsoleProbe broken;
+    broken.is_console = true;
+    broken.vt_enabled = false;
+    broken.sync_output = true;
+    const auto plan_broken = lubancode::platform::PlanInlineRepaint(broken);
+    CHECK_FALSE(plan_broken.vt_batch);
+    CHECK_FALSE(plan_broken.sync_output);
+}
+
+TEST_CASE("frame diff: 只有活动行变时,批的末笔光标恒归 composer 输入位") {
+    // 活动行(行 0)秒数变、composer 各行与光标纹丝不动:批里画的最后一
+    // 个 CUP 必须是 composer 的软换行坐标,其后只有 ShowCursor(同步档再
+    // 跟 2026l),没有第二个光标恢复路。
+    InlineFrame previous{{InlineFrameRow{0, 24, false, "activity (10s)"},
+                          InlineFrameRow{0, 40, true, "rule"},
+                          InlineFrameRow{2, 10, false, "> input"}},
+                         4, 2};
+    InlineFrame next = previous;
+    next.rows[0].text = "activity (11s)";
+
+    TerminalBatch batch(0, 0, /*synchronized_output=*/true);
+    const auto stats = QueueInlineFrameDiff(batch, &previous, next, 7);
+    CHECK(stats.changed_rows == 1);
+    CHECK_FALSE(stats.cursor_changed);
+    const std::string bytes = batch.Finish();
+    // composer 光标:x=4,row=7+2=9 → CUP 10;5(1 基)。末笔合同:composer
+    // 归位是最后一个定位命令,其后只有 ShowCursor 与同步输出收尾,没有
+    // 第二条光标恢复路。
+    const std::size_t cursor_cup = bytes.rfind("\x1b[10;5H");
+    REQUIRE(cursor_cup != std::string::npos);
+    const std::string tail = bytes.substr(cursor_cup);
+    CHECK(tail == "\x1b[10;5H\x1b[?25h\x1b[?2026l");
+}
+
+TEST_CASE("turn activity row: 同一秒零变化,秒数/标签/中断态变才重画") {
+    using lubancode::cli::TurnActivityRowChanged;
+    // 同一秒、同一标签、同一中断态:不是变化,闲拍零落笔。
+    CHECK_FALSE(TurnActivityRowChanged("思考中", 10, false, "思考中", 10, false));
+    // 秒数进一:重画。
+    CHECK(TurnActivityRowChanged("思考中", 10, false, "思考中", 11, false));
+    // 阶段换词(Begin/Stopping):重画。
+    CHECK(TurnActivityRowChanged("思考中", 10, false, "Stopping...", 10, false));
+    // 中断置位(圆点换 error 色):重画。
+    CHECK(TurnActivityRowChanged("思考中", 10, false, "思考中", 10, true));
 }
 
 // ---- 帧账"保锚可见"决策(多智能体真机回归单):纯函数钉死两套控制台形态的账 ----

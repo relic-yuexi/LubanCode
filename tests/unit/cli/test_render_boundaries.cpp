@@ -367,7 +367,7 @@ InlineFrame FrameOf(std::vector<std::string> texts) {
 TEST_CASE("QueueInlineFrameDiff: 50 轮交替重铺,变更行数恒定不累计") {
     const InlineFrame a = FrameOf({"one", "two", "three"});
     const InlineFrame b = FrameOf({"one", "TWO", "three"});
-    TerminalBatch batch;  // 只攒不发(不 Flush 就不会真写终端)
+    TerminalBatch batch(0, 0, /*synchronized_output=*/true);  // 只攒不发(不 Flush 就不会真写终端)
     const InlineFrame* prev = &a;
     for (int round = 0; round < 50; ++round) {
         const InlineFrame& next = (round % 2 == 0) ? b : a;
@@ -379,7 +379,7 @@ TEST_CASE("QueueInlineFrameDiff: 50 轮交替重铺,变更行数恒定不累计"
 
 TEST_CASE("QueueInlineFrameDiff: 帧不变零输出(重铺同帧是 no-op)") {
     const InlineFrame frame = FrameOf({"x", "y"});
-    TerminalBatch batch;
+    TerminalBatch batch(0, 0, /*synchronized_output=*/true);
     const auto stats = QueueInlineFrameDiff(batch, &frame, frame, 0);
     CHECK(stats.changed_rows == 0);
     CHECK_FALSE(stats.emitted);

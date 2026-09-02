@@ -34,11 +34,48 @@ bool StdinIsInteractive();
 // stdout 探测 + VT 开启:Windows 下顺手把 ENABLE_VIRTUAL_TERMINAL_PROCESSING
 // 打开(搬自 cli/theme.cpp 的 DetectConsoleCapability);POSIX 真终端天然
 // 支持 ANSI,vt_enabled 恒真。
+//
+// 三档能力分开建模(终端思考活动条单):is_console(是不是真控制台)、
+// vt_enabled(吃不吃 VT 转义)、sync_output(DEC 2026 同步输出)各是各的
+// 事,不得拿 vt_enabled 代替同步输出能力。这份被动探针只答前两档——
+// sync_output 要向终端主动发问,走 ProbeSyncOutputSupport(),这里恒 false
+// 占位。
 struct StdoutConsoleProbe {
     bool is_console = false;
     bool vt_enabled = false;
+    bool sync_output = false;  // 恒 false:被动探针不问终端,主动结论在 ProbeSyncOutputSupport
 };
 StdoutConsoleProbe ProbeStdoutConsole();
+
+// DEC 2026 同步输出的主动一问:发 DECRQM(`CSI ?2026 $ p`)问终端认不认
+// 这枚私有模式,应答 DECRPM(`CSI ?2026;Ps $ y`):Ps=0 是"不认得",
+// 1..4 是"认得"(set/reset/permanently set/permanently reset)。答过话就是
+// 确定性结论,进程内缓存;问不出(输入锁没抢到,监听线程/编辑器正读键)
+// 这轮不缓存、下轮再问。答不上/夹着用户按键,一律当不支持——认不出就
+// 写不知,不静默假装支持(应答里夹带的用户按键按原序还回,一个不丢)。
+// 只在真控制台且 VT 已开时发问(VT 不开的宿主会把查询串当正文印出来);
+// 管道/重定向直接 false。调用方注意:应答走 stdin,与按键混流,须在输入
+// 队列安静时问(交互会话开场已预热,见 RunInteractiveSession)。
+bool ProbeSyncOutputSupport();
+
+// 原地重画的选路计划(终端思考活动条单·P0 治根):绘制方(忙路 footer/
+// 空闲 composer)据这份计划决定走哪条路——
+//   vt_batch=true:VT 批,定位/擦行/正文/归光标攒成一段字节一次写出;
+//   sync_output=true:批外包 `CSI ?2026 h/l`,一帧原子提交,中间 CUP 不露。
+struct InlineRepaintPlan {
+    bool vt_batch = false;
+    bool sync_output = false;
+};
+// 选路规矩:
+//   普通 VT + 确认 2026   -> VT 批 + 同步输出(帧原子,动画与 diff 随便跑);
+//   普通 VT + 未确认 2026 -> Windows 退原生控制台 API(FillConsoleOutput 一
+//                            族,不搬实体光标的屏幕写入),不再发会漏中间
+//                            态的 CUP 串;POSIX 没有原生路(一切皆字节流,
+//                            散装 CUP 逐条 flush 比单批更漏),退 VT 批不包
+//                            2026——动画此时必须已撤,只在真状态变化时单笔
+//                            落帧;
+//   无 VT                 -> 原生 API 兜底路(与旧 PaintInlineFrameLegacy 同款)。
+InlineRepaintPlan PlanInlineRepaint(const StdoutConsoleProbe& probe);
 
 // 真控制台此刻的显示宽度(列数),查 stdout。探测不到返回 std::nullopt,
 // 调用方按 80 列兜底。
