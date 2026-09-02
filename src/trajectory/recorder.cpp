@@ -153,9 +153,10 @@ struct TrajectoryRecorder::Impl {
             }
         }
 
-        // session.* 只许 main stream(§5.1)。
+        // session.* 只许 main stream(§5.1)。one_shot 一场也是进程的 main
+        // stream(单发轨迹断档单),同放行;subagent/workflow 照旧拒。
         if ((kind == EventKind::SessionClearRequested || kind == EventKind::SessionEnded) &&
-            base.run_kind != RunKind::MainSession) {
+            base.run_kind != RunKind::MainSession && base.run_kind != RunKind::OneShot) {
             return "state.session_event_not_main";
         }
 

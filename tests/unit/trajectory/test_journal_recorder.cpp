@@ -9,6 +9,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "trajectory/journal.hpp"
 #include "trajectory/recorder.hpp"
 
 using namespace lubancode::trajectory;
@@ -681,6 +682,35 @@ TEST_CASE("session.* 只许 main stream") {
     auto receipt = sub->Record(std::move(request), Durability::PowerLoss);
     CHECK(receipt.status == RecordReceipt::Status::Rejected);
     CHECK(std::string(CodeOf(receipt)) == "state.session_event_not_main");
+}
+
+// 单发轨迹断档单:one_shot 的 main stream 同放行 session.*(单发一场也是
+// 进程的 main stream;不放开的话 Close 的 session.ended 落不进去)。
+TEST_CASE("session.* 在 one_shot main stream 照放行") {
+    Harness h("oneshotmain");
+    auto dir2 = h.dir / "oneshot";
+    std::error_code ec;
+    std::filesystem::create_directories(dir2 / "artifacts", ec);
+    EventScope scope = Harness::BaseScope();
+    scope.run_kind = RunKind::OneShot;
+    auto once = TrajectoryRecorder::Start(dir2 / "main.jsonl", dir2 / "artifacts", scope,
+                                          RecorderOptions{}, &h.clock);
+    REQUIRE(once.has_value());
+    REQUIRE(once->WriteRunStarted(nlohmann::json::object(), Durability::PowerLoss).status ==
+            RecordReceipt::Status::Committed);
+    // run.started 的 payload run_kind 与信封同源(WriteRunStarted 从 base 取)。
+    const auto events = [&]() {
+        const auto lines = ReadJournalLines(dir2 / "main.jsonl");
+        REQUIRE(lines.has_value());
+        return nlohmann::json::parse(lines->front());
+    }();
+    CHECK(events.at("run_kind").get<std::string>() == "one_shot");
+    CHECK(events.at("payload").at("run_kind").get<std::string>() == "one_shot");
+
+    REQUIRE(once->FinishRun(EventKind::RunCompleted, "exit", Durability::PowerLoss).status ==
+            RecordReceipt::Status::Committed);
+    auto ended = once->EndSession("exit", std::nullopt, "clean", Durability::PowerLoss);
+    CHECK(ended.status == RecordReceipt::Status::Committed);
 }
 
 TEST_CASE("scope 恒等:换 workspace/session/run/kind 拒绝") {

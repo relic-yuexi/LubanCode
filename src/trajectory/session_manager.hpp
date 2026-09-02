@@ -452,6 +452,9 @@ struct SessionManagerOptions {
     std::filesystem::path workspace_root;  // 兜底根(identity 空时用)
     std::string launch_cwd;  // UTF-8 文本,进 manifest
     std::string lubancode_version;
+    // main run 的种类(单发轨迹断档单):默认 main_session;one_shot 一场
+    // 递 RunKind::OneShot——manifest、run.started payload 与信封三处同源。
+    RunKind main_run_kind = RunKind::MainSession;
     RecorderOptions recorder;
 };
 

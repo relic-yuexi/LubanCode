@@ -1017,6 +1017,10 @@ const Entry kZhCN[] = {
     // ---- 统计行 ----
     {"stats.line", "[tokens] 输入 {0}{1} · 输出 {2} · 请求 {3} 次 · context {4}%"},
     {"stats.cache", "(缓存命中 {0},{1}%)"},
+    // ---- 单发轨迹落账(单发轨迹断档单:汇总行照打,细账指路轨迹)----
+    {"oneshot.ledger_open_failed", "轨迹账开张失败,单发不启动: "},
+    {"oneshot.ledger_close_failed", "轨迹账收口失败: "},
+    {"oneshot.ledger_note", "[tokens] 汇总行之外,细账(逐请求 usage/cache 分列/工具流水)已落轨迹会话 {0}"},
     {"stats.cache_not_reported", "(usage 未报告)"},
     {"stats.cache_disabled", "(服务端未启用前缀缓存)"},
     {"stats.cache_no_hit_enabled", "(缓存已启用,本场未命中)"},
@@ -1680,6 +1684,8 @@ const Entry kZhCN[] = {
     {"cmd.sessions.no_text", "(没有用户文本)"},
     {"cmd.sessions.dir_line", "      目录: {0}"},
     {"cmd.sessions.dir_unknown", "(未知)"},
+    // 单发轨迹断档单:one_shot 场在 /sessions 里照列照标。
+    {"cmd.sessions.oneshot_line", "      单发场(one_shot;审计可读,不续聊)"},
     {"cmd.sessions.archived_none", "还没有归档的会话(/archive 归档,归了的场子不进默认列表)。"},
     {"cmd.sessions.archived_header", "已归档 {0} 场(只读列表;想续聊先 lubancode unarchive <id>):"},
     {"cmd.sessions.archived_hint", "这些场子在 ~/.lubancode/sessions/archive/ 下,字节原样保留。"},
@@ -2978,6 +2984,12 @@ const Entry kEn[] = {
     // ---- stats line ----
     {"stats.line", "[tokens] in {0}{1} · out {2} · {3} requests · context {4}%"},
     {"stats.cache", " (cache hit {0}, {1}%)"},
+    // ---- one-shot trajectory ledger (usage detail lives in the trajectory) ----
+    {"oneshot.ledger_open_failed", "trajectory ledger failed to open; one-shot aborted: "},
+    {"oneshot.ledger_close_failed", "trajectory ledger failed to close: "},
+    {"oneshot.ledger_note",
+     "[tokens] per-request detail (usage, cache split, tool trace) is in trajectory session {0}"},
+    {"cmd.sessions.oneshot_line", "      one-shot session (auditable, not resumable)"},
 
     // ---- pipe mode stable output ----
     {"pipe.tool_start", "[tool] "},

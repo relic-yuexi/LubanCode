@@ -61,6 +61,11 @@
 #include "cli/image_input.hpp"
 #include "cli/live_transcript.hpp"
 #include "runtime/worktree.hpp"
+#include "runtime/id_authority.hpp"      // ProcessIdAuthority:单发工具栅栏的发号局
+#include "runtime/tool_trace_hub.hpp"    // ToolTraceHub:单发工具事件进轨迹的栅栏
+#include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger:单发一场的账本
+#include "trajectory/event.hpp"          // TrainingPolicyFromName:单发训练档解析
+#include "workspace/identity.hpp"        // ResolveWorkspaceIdentity:单发同四级裁决
 #include "cli/markdown.hpp"
 #include "cli/provider_wizard.hpp"
 #include "cli/record_command.hpp"
@@ -114,7 +119,6 @@
 #include "platform/console.hpp"
 #include "platform/terminal_batch.hpp"
 #include "platform/paths.hpp"
-#include "platform/process.hpp"  // CurrentProcessId:单发 artifact 临时目录名
 
 namespace lubancode::app {
 
@@ -292,7 +296,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
             lubancode::app::BuildMainRuntimeProfile(config, &once_catalog, config.model), config);
         agent_tool->SetAgentProfile(std::move(subagent_profile));
         // 单发模式的子代理记忆召回(存储 v2 P0-3):派工当刻检索一次,整段
-        // 冻结下发,子代理不自动扫整库。单发没有轨迹账,child_run_id 空。
+        // 冻结下发,子代理不自动扫整库。child_run_id 空——召回快照的 typed
+        // 落账(context.injected)在子代理侧自己的账上,不在这里预写。
         if (project_memory != nullptr && config.memory.use) {
             agent_tool->SetTurnContextProvider(
                 [memory = project_memory](const std::string& task_prompt, const std::string& child_run_id) {
@@ -378,6 +383,8 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
             };
         }
     }
+    // 环境快照要在皮 move 进 loop 前留一份系统提示(§9.1 的真值取材)。
+    const std::string oneshot_system_prompt = once_agent_profile.system_prompt;
     lubancode::agent::Agent loop(wrapped_backend, registry, std::move(once_agent_profile));
     std::string turn_context;
     if (project_memory != nullptr) {
@@ -393,9 +400,68 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         loop.SetTurnContext(std::move(turn_context));
     }
     lubancode::cli::ContextTracker context_tracker(config.context_window_tokens);
-    // 权限账(P6/P10 拆出后,P0-2 收窄):单发不是会话——不建
-    // TrajectorySessionLedger(设计如此"单发不落盘",不是 feature 开关),
-    // settings 的 allow_tools 灌进本地这本,RunTurn 引用同一份。
+    // 单发轨迹断档单:one_shot 一场也过 TrajectorySessionLedger——run_kind=
+    // one_shot 单列,逐请求 usage(cache_read/creation/input/output 分列)、
+    // 工具栅栏、子代理子账全进同一本 Journal(与交互会话同轴)。旧注记
+    // "单发不落盘,设计如此"的前提(单发只当一次问答的轻用途)已死:实战
+    // 派活全走 one_shot,一场上百请求的重会话在 workspaces 账本里查无此场
+    // ——Token 账本/insights/缓存诊断全瞎,中途死了无档可查。training_policy
+    // 默认 exclude(实战派活含内部路径,不进训练集),配置
+    // oneshot_training_policy 可改。开不出账即明败退出(交互会话同一条 §十七
+    // 纪律),不回退"只答不落账"的旧路。
+    std::optional<lubancode::runtime::TrajectorySessionLedger> oneshot_ledger;
+    {
+        lubancode::runtime::TrajectorySessionLedger::Options ledger_options;
+        // P0-1:身份按四级裁决冻结(commondir→marker→config→cwd),与交互
+        // 会话同一把钥匙;裁决失败留空,由 Open 内的同款兜底接着裁。
+        const std::filesystem::path identity_home =
+            home_lubancode.has_value() ? lubancode::tools::Utf8ToPath(*home_lubancode)
+                                       : std::filesystem::path();
+        auto identity = lubancode::workspace::ResolveWorkspaceIdentity(
+            std::filesystem::current_path(), identity_home);
+        if (identity.has_value()) {
+            ledger_options.workspace_identity = std::move(*identity);
+        }
+        ledger_options.launch_cwd = CurrentDirUtf8();
+        ledger_options.lubancode_version = std::string(lubancode::app::kVersion);
+        ledger_options.one_shot = true;
+        if (const auto policy = lubancode::trajectory::TrainingPolicyFromName(
+                config.oneshot_training_policy);
+            policy.has_value()) {
+            ledger_options.training_policy = *policy;
+        }
+        auto ledger = lubancode::runtime::TrajectorySessionLedger::Open(std::move(ledger_options));
+        if (!ledger.has_value()) {
+            std::cerr << "[trajectory] " << lubancode::cli::tr("oneshot.ledger_open_failed")
+                      << ledger.error() << "\n";
+            return 1;
+        }
+        oneshot_ledger.emplace(std::move(*ledger));
+    }
+    // P0-4 环境快照:与交互会话同一只取材件(§9.1);落不进账只是缺口
+    //(replay 降档如实报),不拦问答。
+    {
+        lubancode::runtime::TrajectorySessionLedger::EnvironmentFacts environment_facts;
+        environment_facts.provider = bound_provider;
+        environment_facts.wire = lubancode::config::ProviderWireName(config.wire);
+        environment_facts.model = config.model;
+        environment_facts.system_prompt = oneshot_system_prompt;
+        environment_facts.toolset = lubancode::app::BuildToolsetSummary(registry.All());
+        environment_facts.project_instruction_refs = project_instruction_sources;
+        environment_facts.config_snapshot_redacted = lubancode::app::BuildRedactedConfigSnapshot(config);
+        if (!config.think.empty()) {
+            environment_facts.model_parameters["reasoning_effort"] = config.think;
+        }
+        (void)oneshot_ledger->CaptureEnvironment(environment_facts);
+    }
+    // 工具栅栏:单发从前的 trace_hub 恒空,工具事件进不了账。这里起一只
+    // 进程级发号的本地 hub(无旧 SessionStore 落点),RunTurn 把它挂上
+    // 轨迹桥——工具 planned/started/finished 与子代理派工的父子边从此
+    // 落账;终端画面不受影响(画面的水从 loop→适配器来,不经 hub)。
+    lubancode::runtime::ToolTraceHub oneshot_trace_hub(lubancode::runtime::ProcessIdAuthority(),
+                                                       nullptr);
+    // 权限账(P6/P10 拆出后,P0-2 收窄):settings 的 allow_tools 灌进本地
+    // 这本,RunTurn 引用同一份。
     std::set<std::string> always_allowed_tools;
     for (const std::string& tool_name : settings_local.allow_tools) {
         always_allowed_tools.insert(tool_name);
@@ -425,22 +491,40 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     turn.model_catalog = &once_catalog;
     turn.model_id = config.model;
     turn.active_provider = bound_provider;
-    // 工具结果图片回喂单:单发不落会话档,但工具(MCP/插件 v2)返回的图片
-    // 仍要有落账地——不落账,截图类工具在管道模式下整次被拒(与交互模式
-    // 的 <会话>/mcp-artifacts 同一待遇,这里给一只临时目录,进程收尾尽力
-    // 清掉;中途崩溃残留的由系统临时目录自理)。字节落了账,wire 才有得
-    // 重灌;会话不持久,所以不留长期档案。
+    // 工具结果图片回喂单 + 模型输出图片:单发落了会话档(轨迹断档单),
+    // artifact 与交互会话同一待遇——session artifacts/sha256/ 内容寻址,
+    // 同字节只落一份,随账本持久;旧路(临时目录 + 进程收尾清掉)的注记
+    // "会话不持久,所以不留长期档案"前提已死,一并归位。模型出的图也同
+    // 落这里(交互同款 model_images_dir),不再"未接线图片落盘"明败。
     const std::filesystem::path oneshot_artifacts =
-        std::filesystem::temp_directory_path() /
-        ("lubancode-oneshot-artifacts-" + std::to_string(platform::CurrentProcessId()));
-    std::error_code artifacts_ec;
-    std::filesystem::create_directories(oneshot_artifacts, artifacts_ec);
+        oneshot_ledger->session_dir() / "artifacts" / "sha256";
+    turn.model_images_dir = oneshot_artifacts.generic_string();
     turn.tool_artifact_dir = oneshot_artifacts.generic_string();
     // 作用域单 P0:单发 main 的写前作用域闸(嵌套 AGENTS.md 首写拦下注入,
     // 重试放行)。
     turn.scope_gate = lubancode::tools::BuildScopeGateCallback(instruction_resolver, instruction_scope_state);
+    // 单发轨迹断档单:账本/栅栏递进 RunTurn(模型边界/usage/工具事件/子代理
+    // 派工全接同一口,与交互会话同一套装配);单发的问题就是用户提问,
+    // trigger=external_user。
+    turn.trace_hub = &oneshot_trace_hub;
+    turn.trajectory_ledger = &*oneshot_ledger;
+    turn.trajectory_trigger = "external_user";
+    turn.trajectory_provider = bound_provider;
+    turn.trajectory_wire = lubancode::config::ProviderWireName(config.wire);
     const int status = RunTurn(std::move(turn)).status;
-    std::filesystem::remove_all(oneshot_artifacts, artifacts_ec);
+    // 收口:turn 终态已由 RunTurn 的桥落账,这里封 run/session(§14.5);
+    // 进程被 kill 走不到这行也不丢账——逐事件的 WAL 语义既有,恢复器按
+    // Journal 可证事实收口。收口失败如实报,不拦退出码(问答结果已在)。
+    const std::string oneshot_session_id = oneshot_ledger->session_id();
+    const lubancode::trajectory::CloseOutcome oneshot_close = oneshot_ledger->CloseSession("exit");
+    if (!oneshot_close.error_code.empty()) {
+        std::cerr << "[trajectory] " << lubancode::cli::tr("oneshot.ledger_close_failed")
+                  << oneshot_close.error_code << ": " << oneshot_close.message << "\n";
+    }
+    // [tokens] 汇总行由 RunTurn 照打(管道模式的人眼快账,契约不动);这里
+    // 补一行指路——细账(逐请求 usage、cache 分列、工具流水)在轨迹里,
+    // stderr 出声,不污染被重定向的 stdout。
+    std::cerr << lubancode::cli::trf("oneshot.ledger_note", oneshot_session_id) << "\n";
     return status;
 }
 

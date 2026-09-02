@@ -2083,6 +2083,55 @@ TEST_CASE("MergeConfig: deferred_tool_mode 项目级压全局,没写落空(= leg
 }
 
 // ---------------------------------------------------------------------------
+// 单发轨迹断档单:oneshot_training_policy(单发会话逐事件 training_policy
+// 的默认档)。默认 exclude——实战派活含内部路径,不进训练集;四值闭集,
+// 垃圾值报错;项目级压全局。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ParseFileConfigJson: oneshot_training_policy 四值认得,垃圾值报错") {
+    for (const char* value : {"include", "metadata", "exclude", "review"}) {
+        const auto parsed = config::ParseFileConfigJson(
+            "{\"oneshot_training_policy\": \"" + std::string(value) + "\"}", "x.json");
+        REQUIRE(parsed.has_value());
+        REQUIRE(parsed->oneshot_training_policy.has_value());
+        CHECK(*parsed->oneshot_training_policy == value);
+    }
+    const auto missing = config::ParseFileConfigJson(R"({})", "x.json");
+    REQUIRE(missing.has_value());
+    CHECK_FALSE(missing->oneshot_training_policy.has_value());
+
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"oneshot_training_policy": "chaos"})", "x.json")
+                    .has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"oneshot_training_policy": 42})", "x.json")
+                    .has_value());
+    CHECK_FALSE(config::ParseFileConfigJson(R"({"oneshot_training_policy": ""})", "x.json")
+                    .has_value());
+}
+
+TEST_CASE("MergeConfig: oneshot_training_policy 项目级压全局,没写落 exclude") {
+    const auto defaulted = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, EmptyGenericEnv());
+    REQUIRE(defaulted.has_value());
+    CHECK(defaulted->config.oneshot_training_policy == "exclude");
+    CHECK(defaulted->sources.oneshot_training_policy == config::Source::Default);
+
+    config::FileConfig global_file;
+    global_file.oneshot_training_policy = "metadata";
+    const auto from_global =
+        config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global_file, EmptyGenericEnv());
+    REQUIRE(from_global.has_value());
+    CHECK(from_global->config.oneshot_training_policy == "metadata");
+    CHECK(from_global->sources.oneshot_training_policy == config::Source::GlobalConfigFile);
+
+    config::FileConfig project_file;
+    project_file.oneshot_training_policy = "include";
+    const auto from_project =
+        config::MergeConfig(EmptyLubancodeEnv(), project_file, global_file, EmptyGenericEnv());
+    REQUIRE(from_project.has_value());
+    CHECK(from_project->config.oneshot_training_policy == "include");
+    CHECK(from_project->sources.oneshot_training_policy == config::Source::ProjectConfigFile);
+}
+
+// ---------------------------------------------------------------------------
 // M11(网络超时):connect_timeout_ms / stream_idle_timeout_secs /
 // request_timeout_secs 三个字段,待遇跟 tool_search_threshold 一样——只有
 // 配置文件(项目级 > 全局)和内置默认值两级,没有环境变量这一级。

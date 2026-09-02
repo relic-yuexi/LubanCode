@@ -61,6 +61,10 @@ struct SessionManifest {
     std::string session_id;
     std::string launch_cwd;                 // UTF-8 文本
     std::string main_run_id;
+    // main run 的种类(单发轨迹断档单):默认 main_session;one_shot 一场
+    // 写 one_shot。旧 manifest 没这键按默认读——resume 候选与管理面据此
+    // 认单发场(单发语义不续,审计可读)。
+    std::string run_kind = "main_session";
     std::string start_reason = "process_launch";
     std::optional<std::string> previous_session_id;
     std::string status = "preparing";  // 本单只写 preparing/running

@@ -111,6 +111,11 @@ SessionScan ScanSession(const std::filesystem::path& session_dir, const std::str
     }
     summary.status = manifest->status;
     summary.archived = manifest->status == SessionStatusName(SessionStatus::Archived);
+    // run_kind:manifest 钉的 main run 种类(单发轨迹断档单);旧档没这键
+    // 保持默认 main_session。run.started 的信封同值,双源对得上。
+    if (!manifest->run_kind.empty()) {
+        summary.run_kind = manifest->run_kind;
+    }
     summary.misplaced_v1 = manifest->schema_version < 2;
     summary.created_at_ms = manifest->created_at_ms;
     summary.cwd = manifest->launch_cwd;
@@ -185,6 +190,13 @@ SessionScan ScanSession(const std::filesystem::path& session_dir, const std::str
             if (summary.model.empty()) {
                 summary.model = GetJsonString(payload, "model");
             }
+        } else if (kind == "run.started") {
+            // 信封的 run_kind(main stream 的种类;manifest 同值,谁先见
+            // 都一样——防 manifest 被手改后索引跟错)。
+            const std::string stream_kind = GetJsonString(event, "run_kind");
+            if (!stream_kind.empty()) {
+                summary.run_kind = stream_kind;
+            }
         }
     }
     if (tail_broken) {
@@ -257,6 +269,7 @@ nlohmann::json SummaryToJson(const WorkspaceSessionSummary& summary, const Sessi
                           {"session_id", summary.session_id},
                           {"status", summary.status},
                           {"archived", summary.archived},
+                          {"run_kind", summary.run_kind},
                           {"title", summary.title},
                           {"first_user_text", summary.first_user_text},
                           {"cwd", summary.cwd},
@@ -282,6 +295,12 @@ WorkspaceSessionSummary SummaryFromJson(const nlohmann::json& json) {
     summary.first_user_text = GetJsonString(json, "first_user_text");
     summary.cwd = GetJsonString(json, "cwd");
     summary.model = GetJsonString(json, "model");
+    // run_kind:旧索引行缺键回落 main_session(单发轨迹断档单;旧场没有
+    // one_shot,回落无害)。
+    summary.run_kind = GetJsonString(json, "run_kind");
+    if (summary.run_kind.empty()) {
+        summary.run_kind = "main_session";
+    }
     summary.created_at_ms = GetJsonInt(json, "created_at_ms");
     summary.updated_at_ms = GetJsonInt(json, "updated_at_ms");
     if (json.contains("message_count") && json["message_count"].is_number_unsigned()) {
@@ -552,6 +571,9 @@ SessionIndexPage QueryWorkspaceSessions(const std::filesystem::path& workspaces_
                 }
             } else if (!query.include_archived && summary.archived) {
                 continue;
+            }
+            if (query.exclude_one_shot && summary.run_kind == "one_shot") {
+                continue;  // resume 选择器不列单发场(单发语义不续)
             }
             if (!query.search.empty()) {
                 const std::string needle = ToLowerAscii(query.search);

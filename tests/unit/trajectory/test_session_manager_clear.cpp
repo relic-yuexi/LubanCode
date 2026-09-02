@@ -19,6 +19,7 @@
 #include "platform/process.hpp"
 #include "trajectory/journal.hpp"
 #include "trajectory/recorder.hpp"
+#include "trajectory/session_index.hpp"
 #include "trajectory/session_manager.hpp"
 
 using namespace lubancode::trajectory;
@@ -500,4 +501,94 @@ TEST_CASE("close 硬门: 盘上漏收的子流记 unknown,标 incomplete") {
     const auto manifest = ReadSessionJson(fixture.old_dir);
     REQUIRE(manifest.has_value());
     CHECK(manifest->status == "incomplete");
+}
+
+// ---------------------------------------------------------------------------
+// 单发轨迹断档单:one_shot 一场过账本——run_kind 三处同源、正常收口、
+// 索引可标、resume 候选排除、指名 resume 明拒。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("one_shot 开场: manifest/信封/run.started 三处 run_kind 同源") {
+    const std::filesystem::path root = MakeRoot("oneshot-launch");
+    SessionManagerOptions options = Opts(root);
+    options.main_run_kind = RunKind::OneShot;
+    FakeClock clock;
+    SessionManager manager(options, &clock);
+    auto* active = manager.LaunchSession().value_or(nullptr);
+    REQUIRE(active != nullptr);
+
+    const auto manifest = ReadSessionJson(active->session_dir());
+    REQUIRE(manifest.has_value());
+    CHECK(manifest->run_kind == "one_shot");
+    CHECK(manifest->start_reason == "process_launch");  // 冻结枚举不动,种类归 run_kind
+
+    const std::vector<nlohmann::json> events = Events(active->session_dir() / "main.jsonl");
+    REQUIRE_FALSE(events.empty());
+    CHECK(events.front().at("kind").get<std::string>() == "run.started");
+    CHECK(events.front().at("run_kind").get<std::string>() == "one_shot");
+    CHECK(events.front().at("payload").at("run_kind").get<std::string>() == "one_shot");
+    CHECK(VerifyJournalFile(active->session_dir() / "main.jsonl").ok);
+
+    // 正常收口:session.ended 在 one_shot main stream 照落(recorder 白名单)。
+    CloseRequest close;
+    close.reason = "exit";
+    NullClearParticipant null_participant;
+    const CloseOutcome outcome = manager.Close(close, &null_participant);
+    REQUIRE(outcome.error_code.empty());
+    CHECK(outcome.run_terminal_kind == "run.completed");
+    const std::vector<std::string> kinds = Kinds(active->session_dir() / "main.jsonl");
+    CHECK(kinds.back() == "session.ended");
+    const auto closed_manifest = ReadSessionJson(active->session_dir());
+    REQUIRE(closed_manifest.has_value());
+    CHECK(closed_manifest->status == "closed");
+}
+
+TEST_CASE("one_shot 场: 索引可标 run_kind,resume 候选排除,指名 resume 明拒") {
+    const std::filesystem::path root = MakeRoot("oneshot-resume");
+    std::string one_shot_id;
+    std::filesystem::path workspaces;
+    std::string workspace_key;
+    {
+        SessionManagerOptions options = Opts(root);
+        options.main_run_kind = RunKind::OneShot;
+        FakeClock clock;
+        SessionManager manager(options, &clock);
+        auto* active = manager.LaunchSession().value_or(nullptr);
+        REQUIRE(active != nullptr);
+        one_shot_id = active->session_id();
+        workspace_key = manager.workspace_key();
+        CloseRequest close;
+        close.reason = "exit";
+        NullClearParticipant null_participant;
+        REQUIRE(manager.Close(close, &null_participant).error_code.empty());
+        workspaces = options.workspaces_root;
+    }
+    // 索引里认得出 one_shot,exclude_one_shot 滤得掉。
+    {
+        SessionIndexQuery query;
+        query.current_workspace_key = workspace_key;
+        const auto page = QueryWorkspaceSessions(workspaces, query);
+        REQUIRE(page.total == 1);
+        CHECK(page.entries.front().run_kind == "one_shot");
+        SessionIndexQuery exclude;
+        exclude.current_workspace_key = workspace_key;
+        exclude.exclude_one_shot = true;
+        CHECK(QueryWorkspaceSessions(workspaces, exclude).total == 0);
+    }
+    // 新进程的 LatestResumable 不落在 one_shot 上;指名 resume 也明拒。
+    {
+        SessionManagerOptions options = Opts(root);
+        FakeClock clock;
+        SessionManager manager(options, &clock);
+        CHECK(manager.LatestResumableSessionId().empty());
+        ResumeRequest request;
+        request.source_session_id = one_shot_id;
+        request.interactive = true;
+        request.boundary_command.command_id = "cmd-resume-0001";
+        request.boundary_command.requested_session_id = one_shot_id;
+        request.boundary_command.requested_event_id = "evt";
+        request.boundary_command.boundary_operation_id = "op";
+        const ResumeOutcome outcome = manager.ResumeAsNew(request);
+        CHECK(outcome.error_code == "resume.source_not_resumable");
+    }
 }

@@ -84,7 +84,10 @@ SessionAnalyzeResult AnalyzeSession(const std::filesystem::path& session_dir,
                     summary.usage.reasoning_tokens += sample.usage->output_reasoning_tokens;
                 }
                 const std::int64_t shape = sample.total_billed_shape_tokens;
-                if (sample.run_kind == "main_session") {
+                // one_shot 的 main run 与交互 main 同类(单发轨迹断档单):
+                // 单发一场就是该进程的主会话,token 计入 main 侧,不冒充
+                // 子代理(subagent 收窄建议的分母别被单发重会话灌歪)。
+                if (sample.run_kind == "main_session" || sample.run_kind == "one_shot") {
                     signal_input.main_tokens += shape;
                 } else {
                     signal_input.subagent_tokens += shape;

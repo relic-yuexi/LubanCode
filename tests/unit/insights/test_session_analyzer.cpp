@@ -259,6 +259,42 @@ TEST_CASE("include_active:读高水位,成色 provisional,不写长期摘要") {
     CHECK(!analyzed.summary_written);  // active 不写长期摘要(§14.2)
 }
 
+// 单发轨迹断档单:one_shot 的 main run 与交互 main 同类——token 计入
+// main 侧,不冒充子代理。若是归错了类,这笔 8M 输入的重会话会触发 FS-04
+//(子代理 token 超主会话)的收窄建议;归对了就不出该信号。
+TEST_CASE("one_shot 场: usage 计入 main 侧,不冒充子代理") {
+    const auto root = std::filesystem::temp_directory_path() / "lubancode-oneshot-classify";
+    const auto dir = PrepareDir(root / "s1");
+    const FixedClock clock;
+    {
+        FixtureStream stream(dir / "main.jsonl", dir / "artifacts", kWorkspaceKey,
+                             "20260831-000001-ONE001", "main-0001",
+                             trajectory::RunKind::OneShot, 2, clock);
+        stream.StartRun();
+        stream.StartTurn("turn-0001");
+        UsageSpec usage;
+        usage.input = 1000;
+        usage.cache_read = 8000000;
+        usage.output = 50000;
+        stream.ModelExchange("turn-0001", "req-0001", "main_turn", usage);
+        stream.EndTurn("turn-0001");
+        stream.Seal();
+        WriteFixtureSessionJson(dir, kWorkspaceKey, "20260831-000001-ONE001", "closed");
+    }
+    const SessionAnalyzeResult analyzed = AnalyzeSession(dir, SessionAnalyzeOptions{});
+    REQUIRE(analyzed.analyzed);
+    CHECK(analyzed.summary.usage.requests_with_usage == 1);
+    CHECK(analyzed.summary.usage.cache_read_tokens == 8000000);
+    // usage 进了投影(合计),且没有"子代理超主会话"的收窄信号。
+    bool saw_subagent_shrink = false;
+    for (const auto& signal_id : analyzed.summary.feature_signals) {
+        if (signal_id == "FS-04") {
+            saw_subagent_shrink = true;
+        }
+    }
+    CHECK_FALSE(saw_subagent_shrink);
+}
+
 TEST_CASE("功能信号:同类验证反复与子代理 token 超主会话") {
     SUBCASE("同类验证 ≥3 次 → 固化建议(先决写明)") {
         FeatureSignalInput input;

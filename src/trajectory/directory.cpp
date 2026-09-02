@@ -72,6 +72,7 @@ nlohmann::json SessionManifest::ToJson() const {
     json["session_id"] = session_id;
     json["launch_cwd"] = launch_cwd;
     json["main_run_id"] = main_run_id;
+    json["run_kind"] = run_kind;
     json["start_reason"] = start_reason;
     json["previous_session_id"] = previous_session_id.has_value() ? nlohmann::json(*previous_session_id)
                                                                   : nlohmann::json(nullptr);
@@ -110,6 +111,7 @@ std::optional<SessionManifest> SessionManifest::FromJson(const nlohmann::json& j
         return std::nullopt;
     }
     read_string("launch_cwd", &manifest.launch_cwd);
+    read_string("run_kind", &manifest.run_kind);
     read_string("start_reason", &manifest.start_reason);
     read_string("lubancode_version", &manifest.lubancode_version);
     if (json.contains("previous_session_id") && json.at("previous_session_id").is_string()) {

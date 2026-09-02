@@ -579,6 +579,11 @@ void PrintSessionsCommand(const lubancode::runtime::TrajectorySessionLedger* led
                           label.empty() ? tr("cmd.sessions.no_text")
                                          : lubancode::sessions::TruncateUtf8Chars(label, 40))
                   << "\n";
+        // 单发轨迹断档单:one_shot 场照列照标——审计可读,单发语义不续
+        //(编号仍可作 /resume 的指认,七步里明拒并说原因)。
+        if (entry.run_kind == "one_shot") {
+            TermOut() << tr("cmd.sessions.oneshot_line") << "\n";
+        }
         if (all) {
             TermOut() << trf("cmd.sessions.dir_line",
                               entry.cwd.empty() ? tr("cmd.sessions.dir_unknown")
@@ -652,13 +657,16 @@ std::optional<std::string> PromptResumeTarget(const lubancode::runtime::Trajecto
         return std::nullopt;
     }
 
-    // 打开时查一回(本 workspace 与全部都空才说"没什么可恢复")。
+    // 打开时查一回(本 workspace 与全部都空才说"没什么可恢复")。单发轨迹
+    // 断档单:选择器排除 one_shot 场——单发语义不续,面板里不摆续不了的场。
     lubancode::trajectory::SessionIndexQuery query;
     query.limit = 0;  // 面板自己管视口,数据一次给全
+    query.exclude_one_shot = true;
     if (ledger->ListWorkspaceSessions(query).total == 0) {
         lubancode::trajectory::SessionIndexQuery all_query;
         all_query.all_workspaces = true;
         all_query.limit = 0;
+        all_query.exclude_one_shot = true;
         if (ledger->ListWorkspaceSessions(all_query).total == 0) {
             TermOut() << tr("cmd.resume.none") << "\n";
             return std::nullopt;
@@ -675,6 +683,7 @@ std::optional<std::string> PromptResumeTarget(const lubancode::runtime::Trajecto
         index_query.all_workspaces = scope == lubancode::cli::SessionPickerScope::All;
         index_query.sort_by_created = sort == lubancode::cli::SessionPickerSort::Created;
         index_query.limit = 0;
+        index_query.exclude_one_shot = true;  // 单发场不进续聊面板(不续,审计可读)
         const auto page = ledger->ListWorkspaceSessions(index_query);
         lubancode::cli::SessionPickerFeed feed;
         feed.entries.reserve(page.entries.size());

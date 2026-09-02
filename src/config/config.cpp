@@ -1664,6 +1664,26 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         }
         config.deferred_tool_mode = text;
     }
+    // 单发轨迹断档单:单发会话逐事件 training_policy 的默认档。认不得的值
+    // 报错——四值闭集(include|metadata|exclude|review),静默落默认会让
+    // "以为改了却没改"的账混进训练投影。
+    if (parsed.contains("oneshot_training_policy")) {
+        const auto& field = parsed["oneshot_training_policy"];
+        if (!field.is_string()) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 oneshot_training_policy 字段必须是字符串"
+                                   "(include|metadata|exclude|review)");
+        }
+        const std::string text = field.get<std::string>();
+        const bool allowed =
+            text == "include" || text == "metadata" || text == "exclude" || text == "review";
+        if (!allowed) {
+            return std::unexpected("配置文件 " + file_path_for_error +
+                                   " 里的 oneshot_training_policy 认不得: " + text +
+                                   "(可用:include|metadata|exclude|review)");
+        }
+        config.oneshot_training_policy = text;
+    }
     // PTC:调用档(json|programmatic|auto)。认不得的值报错——这个字段
     // 没法静默落默认,下游不知道走哪个后端。
     if (parsed.contains("tool_calling")) {
@@ -2817,6 +2837,21 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     } else {
         result.config.deferred_tool_mode.clear();
         result.sources.deferred_tool_mode = Source::Default;
+    }
+
+    // ---- oneshot_training_policy(单发轨迹断档单):项目级 > 全局 > 默认
+    //(exclude)。单发会话逐事件 training_policy 的默认档——实战派活含内部
+    // 路径,默认不进训练集;显式配 include/metadata/review 才改。取值校验
+    // 在 ParseFileConfigJson 里做过,没有环境变量这一级。 ----
+    if (project_file.has_value() && project_file->oneshot_training_policy.has_value()) {
+        result.config.oneshot_training_policy = *project_file->oneshot_training_policy;
+        result.sources.oneshot_training_policy = Source::ProjectConfigFile;
+    } else if (global_file.has_value() && global_file->oneshot_training_policy.has_value()) {
+        result.config.oneshot_training_policy = *global_file->oneshot_training_policy;
+        result.sources.oneshot_training_policy = Source::GlobalConfigFile;
+    } else {
+        result.config.oneshot_training_policy = "exclude";
+        result.sources.oneshot_training_policy = Source::Default;
     }
 
     // ---- PTC 调用档与限额段:项目级 > 全局 > 默认(json),没有环境变量

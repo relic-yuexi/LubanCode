@@ -379,6 +379,13 @@ public:
         // (quiet_if_none 语义,与旧路 --continue 一致)。
         bool resume_at_launch = false;
         std::string resume_source_session_id;
+        // 单发轨迹断档单:one_shot 一场置 true——main run 写 run_kind=
+        // one_shot(manifest/信封/run.started 三处同源),resume 候选排除。
+        bool one_shot = false;
+        // 轮桥与子代理账的默认 training_policy:交互会话吃缺省 Metadata;
+        // 单发账本配 Exclude(实战派活含内部路径,不进训练集),配置
+        // oneshot_training_policy 可改。session 边界事件恒 Exclude,不在此列。
+        trajectory::TrainingPolicy training_policy = trajectory::TrainingPolicy::Metadata;
     };
 
     // 进程一场:LaunchSession(建 workspace/session 目录、独占锁、

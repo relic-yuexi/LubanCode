@@ -742,6 +742,10 @@ struct Config {
     // PTC:工具调用后端档。默认 json(行为与从前逐字节一致)。只从配置
     // 文件读(项目级压全局),环境变量不认——强开 PTC 是须看清后果的动作。
     ToolCallingMode tool_calling = ToolCallingMode::Json;
+    // 单发轨迹断档单:单发会话(one_shot)逐事件 training_policy 的默认档。
+    // 默认 exclude——实战派活含内部路径,不进训练集;配置可改
+    //(include|metadata|exclude|review)。只从配置文件读(项目级压全局)。
+    std::string oneshot_training_policy = "exclude";
     // PTC:运行限额与解释器。没配 ptc 段就是内置默认。
     PtcConfig ptc;
     // 持久目标单:feature gate。features.goals 只从配置文件来(项目级压
@@ -833,6 +837,7 @@ struct ConfigSources {
     Source tool_search_threshold = Source::Default;  // tool_search:配置文件或默认,只有这两级
     Source tool_search_token_floor = Source::Default;  // 动态工具 P4:配置文件或默认,只有这两级
     Source deferred_tool_mode = Source::Default;     // 动态工具 P1:配置文件或默认(空 = legacy)
+    Source oneshot_training_policy = Source::Default;  // 单发轨迹断档单:配置文件或默认(exclude)
     Source connect_timeout_ms = Source::Default;        // M11:配置文件或默认,只有这两级
     Source stream_idle_timeout_secs = Source::Default;   // 同上
     Source request_timeout_secs = Source::Default;       // 同上
@@ -961,6 +966,8 @@ struct FileConfig {
     std::optional<int> tool_search_token_floor;
     // 动态工具 P1:延迟工具模式(disabled|proxy_reference|legacy_expand)。
     std::optional<std::string> deferred_tool_mode;
+    // 单发轨迹断档单:oneshot_training_policy(include|metadata|exclude|review)。
+    std::optional<std::string> oneshot_training_policy;
     // PTC:调用档字符串(json|programmatic|auto)与 ptc 段(整段回退)。
     std::optional<std::string> tool_calling;
     std::optional<PtcFileConfig> ptc;

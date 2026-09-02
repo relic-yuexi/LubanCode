@@ -1344,6 +1344,9 @@ struct TrajectorySessionLedger::Impl {
     std::filesystem::path workspaces_root;  // P0-2:唯一持久化根(查询/管理面用)
     trajectory::ActiveSession* active = nullptr;
     trajectory::RecorderOptions recorder_options;
+    // 轮桥/子代理账的默认 training_policy(单发轨迹断档单:单发 Exclude,
+    // 交互 Metadata——NewTurnBridge/SpawnSubagent 从这取,不再写死)。
+    trajectory::TrainingPolicy training_policy = trajectory::TrainingPolicy::Metadata;
     std::string main_run_id;
     std::string lubancode_version;
     std::string workspace_root_text;  // UTF-8,环境快照与 git 状态取材用
@@ -1418,6 +1421,10 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     manager_options.workspace_root = options.workspace_root;
     manager_options.launch_cwd = options.launch_cwd;
     manager_options.lubancode_version = options.lubancode_version;
+    // 单发轨迹断档单:one_shot 场的 main run 单列 run_kind,manifest 与
+    // run.started 同源落 one_shot。
+    manager_options.main_run_kind =
+        options.one_shot ? trajectory::RunKind::OneShot : trajectory::RunKind::MainSession;
     manager_options.recorder.event_schema_version = options.event_schema_version;
 
     Impl impl;
@@ -1425,6 +1432,7 @@ std::expected<TrajectorySessionLedger, std::string> TrajectorySessionLedger::Ope
     impl.recorder_options.event_schema_version = options.event_schema_version;
     impl.lubancode_version = options.lubancode_version;
     impl.workspace_root_text = platform::PathToUtf8(options.workspace_root);
+    impl.training_policy = options.training_policy;
     impl.manager = std::make_unique<trajectory::SessionManager>(std::move(manager_options));
 
     // --continue 启动路(§10.4):直接建 start_reason=resume 的新 session,
@@ -1489,7 +1497,7 @@ std::unique_ptr<TrajectoryTurnBridge> TrajectorySessionLedger::NewTurnBridge(
     }
     trajectory::EventScope scope = impl_->active->main->base_scope();
     scope.visibility = {Visibility::HostOnly};
-    scope.training_policy = TrainingPolicy::Metadata;
+    scope.training_policy = impl_->training_policy;
     auto bridge = std::make_unique<TrajectoryTurnBridge>(*recorder, std::move(scope),
                                                          std::move(identity));
     // 桥按轮把落账错误推进账本的共享环(/doctor trajectory 从这读)。
@@ -1600,7 +1608,7 @@ TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const 
     scope.request_id.reset();
     scope.call_id.reset();
     scope.visibility = {Visibility::HostOnly};
-    scope.training_policy = TrainingPolicy::Metadata;
+    scope.training_policy = impl_->training_policy;
     auto recorder = trajectory::TrajectoryRecorder::Start(*stream, impl_->active->directory.artifacts_root(),
                                                           scope, impl_->recorder_options);
     if (!recorder.has_value()) {

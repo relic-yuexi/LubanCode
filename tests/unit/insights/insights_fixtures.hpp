@@ -234,11 +234,13 @@ public:
         REQUIRE(receipt.status == RecordReceipt::Status::Committed);
     }
 
-    // run 终态(+main stream 补 session.ended),关柄。
+    // run 终态(+main stream 补 session.ended),关柄。one_shot 的 main
+    // stream 同样收 session.ended(单发轨迹断档单:recorder 白名单同放行)。
     void Seal(const std::string& reason = "normal_exit") {
         auto receipt = recorder_->FinishRun(EventKind::RunCompleted, reason, Durability::PowerLoss);
         REQUIRE(receipt.status == RecordReceipt::Status::Committed);
-        if (recorder_->base_scope().run_kind == RunKind::MainSession) {
+        if (recorder_->base_scope().run_kind == RunKind::MainSession ||
+            recorder_->base_scope().run_kind == RunKind::OneShot) {
             receipt = recorder_->EndSession(reason, std::nullopt, "clean", Durability::PowerLoss);
             REQUIRE(receipt.status == RecordReceipt::Status::Committed);
         }

@@ -75,6 +75,14 @@ TEST_CASE("event: 枚举名与 §4.2-4.5 线上名一致") {
     CHECK_FALSE(OriginFromName("nope").has_value());
 }
 
+// 单发轨迹断档单:one_shot 单列 run_kind,线上名闭集里进出一致。
+TEST_CASE("event: one_shot run_kind 线上名一致") {
+    CHECK(std::string(RunKindName(RunKind::OneShot)) == "one_shot");
+    CHECK(RunKindFromName("one_shot") == RunKind::OneShot);
+    CHECK_FALSE(RunKindFromName("oneshot").has_value());
+    CHECK_FALSE(RunKindFromName("one-shot").has_value());
+}
+
 TEST_CASE("event: kind 固定 plane(§4.2 归面)") {
     CHECK(EventKindInfoOf(EventKind::InputReceived).plane == Plane::Conversation);
     CHECK(EventKindInfoOf(EventKind::ToolResultCommitted).plane == Plane::Conversation);

@@ -38,7 +38,12 @@ inline constexpr int kMaxEnvelopeSchemaVersion = 2;
 // 枚举(§4.2-4.5)
 // ---------------------------------------------------------------------------
 
-enum class RunKind { MainSession, Subagent, Workflow, WorkflowNode, Goal, Loop };
+// OneShot(单发轨迹断档单):one_shot 一场的 main run——单发不是"轻问答"
+// 了,实战派活全走它;单列 run_kind 让账本/投影/管理面认得出这场是单发。
+// 加值是纯增量:旧 stream 不含此名,旧读者读新档按 schema.bad_enum 拒
+//(与超前版本同待遇);session.* 事件照许(单发一场也是进程的 main
+// stream,recorder 状态机的白名单同步放开)。
+enum class RunKind { MainSession, Subagent, Workflow, WorkflowNode, Goal, Loop, OneShot };
 
 enum class Plane { Conversation, Execution, Control, Evidence };
 

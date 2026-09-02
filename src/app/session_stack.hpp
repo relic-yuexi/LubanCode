@@ -36,6 +36,9 @@
 #include <atomic>
 #include <mutex>
 
+#include <nlohmann/json.hpp>
+#include "tools/registry.hpp"              // Tool:BuildToolsetSummary 的取材件
+#include "trajectory/environment.hpp"      // ToolsetSummary:环境快照摘要口径
 namespace lubancode::app {
 
 // 装好的整束件。控制器持引用用,不重复造;可变的会话皮(current_model/
@@ -202,5 +205,12 @@ lubancode::package::PackageMountInput BuildSessionPackageMountInput(
     const lubancode::config::Config& config, const std::vector<std::string>& package_dirs,
     const lubancode::package::PackageTrustSnapshot& pinned_trust,
     std::vector<std::string>* warnings = nullptr);
+
+// P0-4 环境快照的取材件(§9.1):定义在 interactive_session_assembly.cpp,
+// 单发轨迹断档单起 one_shot 与交互会话共用(实现住在哪只是链接事,口径
+// 只此一处)。
+lubancode::trajectory::ToolsetSummary BuildToolsetSummary(
+    const std::vector<std::unique_ptr<lubancode::tools::Tool>>& tools);
+nlohmann::json BuildRedactedConfigSnapshot(const lubancode::config::Config& config);
 
 }  // namespace lubancode::app

@@ -28,13 +28,14 @@ std::optional<Enum> LookupValue(const std::array<std::pair<Enum, const char*>, N
     return std::nullopt;
 }
 
-constexpr std::array<std::pair<RunKind, const char*>, 6> kRunKindNames{{
+constexpr std::array<std::pair<RunKind, const char*>, 7> kRunKindNames{{
     {RunKind::MainSession, "main_session"},
     {RunKind::Subagent, "subagent"},
     {RunKind::Workflow, "workflow"},
     {RunKind::WorkflowNode, "workflow_node"},
     {RunKind::Goal, "goal"},
     {RunKind::Loop, "loop"},
+    {RunKind::OneShot, "one_shot"},
 }};
 
 constexpr std::array<std::pair<Plane, const char*>, 4> kPlaneNames{{

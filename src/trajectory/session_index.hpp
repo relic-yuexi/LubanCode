@@ -31,6 +31,10 @@ struct WorkspaceSessionSummary {
     std::string session_id;
     std::string status;              // session.json 的 status(running/closed/archived/…)
     bool archived = false;           // status == archived
+    // main run 的种类(单发轨迹断档单):manifest/run.started 的 run_kind,
+    // 空/旧索引缺键按 main_session 读。/sessions 标注单发场、resume 选择器
+    // 排除单发场都从这认。
+    std::string run_kind = "main_session";
     std::string title;               // 最后一条 control.title.changed(可空)
     std::string first_user_text;     // 首条 input.received 的首段文本(可空)
     std::string cwd;                 // 最后一条 control.cwd.changed,空回落 launch_cwd
@@ -52,6 +56,9 @@ struct SessionIndexQuery {
     bool archived_only = false;           // /sessions archived
     bool sort_by_created = false;         // 缺省按 updated 新→旧
     std::string search;                   // 标题/首句/会话 id 子串
+    // 单发轨迹断档单:resume 选择器置 true 排除 one_shot 场(单发语义不
+    // 续);/sessions 不置——列表是"有哪些场"的事实,单发场照列照标。
+    bool exclude_one_shot = false;
     std::size_t limit = 0;                // 0 = 不截
     std::size_t cursor = 0;               // 跳过头 N 条(分页)
 };
