@@ -725,18 +725,21 @@ TEST_CASE("空闲路默认仍开方向键直选:set_menu_selection_enabled 只�
     CHECK(state.hint_lines[0].rfind("> ", 0) == 0);
 }
 
-TEST_CASE("LineEditorCore: ShiftTab 循环切换确认模式,三档循环") {
+TEST_CASE("LineEditorCore: ShiftTab 循环切换审批模式,五档循环") {
     LineEditorCore editor;
     CHECK(editor.confirm_mode() == ConfirmMode::Confirm);
 
     RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
     CHECK(state.mode_changed);
-    CHECK(state.mode == ConfirmMode::Auto);
-    CHECK(editor.confirm_mode() == ConfirmMode::Auto);
+    CHECK(state.mode == ConfirmMode::AcceptEdits);
+    CHECK(editor.confirm_mode() == ConfirmMode::AcceptEdits);
 
     state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
     CHECK(state.mode == ConfirmMode::Yolo);
-
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
+    CHECK(state.mode == ConfirmMode::Auto);
+    state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
+    CHECK(state.mode == ConfirmMode::DontAsk);
     state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
     CHECK(state.mode == ConfirmMode::Confirm);
 }
@@ -750,10 +753,23 @@ TEST_CASE("LineEditorCore: ShiftTab 不影响正在编辑的行内容") {
     CHECK(state.cursor == 3);
 }
 
-TEST_CASE("NextConfirmMode: 三档顺序循环,不依赖 LineEditorCore") {
-    CHECK(NextConfirmMode(ConfirmMode::Confirm) == ConfirmMode::Auto);
-    CHECK(NextConfirmMode(ConfirmMode::Auto) == ConfirmMode::Yolo);
-    CHECK(NextConfirmMode(ConfirmMode::Yolo) == ConfirmMode::Confirm);
+TEST_CASE("NextConfirmMode: 五档顺序循环,不依赖 LineEditorCore") {
+    CHECK(NextConfirmMode(ConfirmMode::Confirm) == ConfirmMode::AcceptEdits);
+    CHECK(NextConfirmMode(ConfirmMode::AcceptEdits) == ConfirmMode::Yolo);
+    CHECK(NextConfirmMode(ConfirmMode::Yolo) == ConfirmMode::Auto);
+    CHECK(NextConfirmMode(ConfirmMode::Auto) == ConfirmMode::DontAsk);
+    CHECK(NextConfirmMode(ConfirmMode::DontAsk) == ConfirmMode::Confirm);
+}
+
+TEST_CASE("ConfirmMode: 五档机读值往返且兼容 confirm") {
+    const std::vector<ConfirmMode> modes{ConfirmMode::Confirm, ConfirmMode::AcceptEdits,
+                                         ConfirmMode::Yolo, ConfirmMode::Auto, ConfirmMode::DontAsk};
+    for (const auto mode : modes) {
+        REQUIRE(ParseConfirmMode(ConfirmModeMachineName(mode)).has_value());
+        CHECK(*ParseConfirmMode(ConfirmModeMachineName(mode)) == mode);
+    }
+    CHECK(*ParseConfirmMode("confirm") == ConfirmMode::Confirm);
+    CHECK_FALSE(ParseConfirmMode("unknown").has_value());
 }
 
 TEST_CASE("LineEditorCore: Ctrl+C 在非空行清空当前行,继续编辑") {
@@ -1488,7 +1504,7 @@ TEST_CASE("0.17.0: 空 composer 的 Shift+Tab 是切档,不是焦点导航") {
     RenderState state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
     CHECK(state.focus_move == 0);
     CHECK(state.mode_changed);
-    CHECK(editor.confirm_mode() == ConfirmMode::Auto);
+    CHECK(editor.confirm_mode() == ConfirmMode::AcceptEdits);
     CHECK_FALSE(state.focus_active);
 }
 
@@ -1600,7 +1616,7 @@ TEST_CASE("UI-D: composer 有内容时 Tab/Shift+Tab 维持补全/切档现职")
     state = editor.HandleKey(KeyEvent::Simple(KeyKind::ShiftTab));
     CHECK(state.focus_move == 0);
     CHECK(state.mode_changed);  // 还是切档
-    CHECK(editor.confirm_mode() == ConfirmMode::Auto);
+    CHECK(editor.confirm_mode() == ConfirmMode::AcceptEdits);
 }
 
 TEST_CASE("UI-D: 非 composer(确认提示等单行读取)Tab/Shift+Tab 语义不回归") {

@@ -50,13 +50,14 @@ TEST_CASE("输入区模式行:当前档/下一档/技能数、yolo 红色与窄�
     const Theme dark = BuiltinTheme("dark");
     BoxChrome chrome{true, &dark, ConfirmMode::Confirm};
     const std::string confirm = BuildComposerModeLine(chrome, 12, 60);
-    CHECK(confirm.find("confirm shift+tab to auto mode") != std::string::npos);
+    CHECK(confirm.find("Shift+Tab to Accept Edits") != std::string::npos);
+    CHECK(confirm.find("Default") == std::string::npos);
     CHECK(confirm.find("12 skills") != std::string::npos);
 
     chrome.mode = ConfirmMode::Yolo;
     const std::string yolo = BuildComposerModeLine(chrome, 12, 60);
-    CHECK(yolo.find(dark.danger_mode + "yolo" + dark.reset) != std::string::npos);
-    CHECK(yolo.find("shift+tab to confirm mode") != std::string::npos);
+    CHECK(yolo.find(dark.mode_yolo + "YOLO" + dark.reset) != std::string::npos);
+    CHECK(yolo.find("Shift+Tab to Auto Mode") != std::string::npos);
 
     const Theme plain;
     chrome.theme = &plain;
@@ -586,9 +587,13 @@ TEST_CASE("切档与空闲路同源:CurrentConfirmMode/SetConfirmMode 读写同�
     // 监听线程那条新分支做的正是这两步:NextConfirmMode 轮转 + 写回
     // SharedEditor;档位只有这一处存储,footer/空闲状态行都现查它。
     cli::SetConfirmMode(cli::NextConfirmMode(cli::CurrentConfirmMode()));
-    CHECK(cli::CurrentConfirmMode() == cli::ConfirmMode::Auto);
+    CHECK(cli::CurrentConfirmMode() == cli::ConfirmMode::AcceptEdits);
     cli::SetConfirmMode(cli::NextConfirmMode(cli::CurrentConfirmMode()));
     CHECK(cli::CurrentConfirmMode() == cli::ConfirmMode::Yolo);
+    cli::SetConfirmMode(cli::NextConfirmMode(cli::CurrentConfirmMode()));
+    CHECK(cli::CurrentConfirmMode() == cli::ConfirmMode::Auto);
+    cli::SetConfirmMode(cli::NextConfirmMode(cli::CurrentConfirmMode()));
+    CHECK(cli::CurrentConfirmMode() == cli::ConfirmMode::DontAsk);
     cli::SetConfirmMode(cli::NextConfirmMode(cli::CurrentConfirmMode()));
     CHECK(cli::CurrentConfirmMode() == cli::ConfirmMode::Confirm);  // 连切一圈回原点
     // 复位,别把会话级状态泄漏给别的测试。

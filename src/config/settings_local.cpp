@@ -58,7 +58,7 @@ std::expected<SettingsLocal, std::string> ParseSettingsLocal(const std::string& 
     if (perms.contains("default_confirm_mode") && perms["default_confirm_mode"].is_string()) {
         std::string mode = perms["default_confirm_mode"].get<std::string>();
         if (!mode.empty()) {
-            out.default_confirm_mode = std::move(mode);  // auto/yolo/confirm,别的值交给调用方判
+            out.default_confirm_mode = std::move(mode);  // 五档机读值，合法性由调用方集中判
         }
     }
     // Plan 模式单:起手协作档。plan/default 之外的值交给调用方判(RunCli

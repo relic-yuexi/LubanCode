@@ -159,6 +159,9 @@ lubancode::runtime::TurnRuntime::Options BuildTurnRuntimeOptions(
         case lubancode::cli::ConfirmMode::Confirm:
             options.permission_mode = lubancode::runtime::PermissionMode::Confirm;
             break;
+        case lubancode::cli::ConfirmMode::AcceptEdits:
+            options.permission_mode = lubancode::runtime::PermissionMode::AcceptEdits;
+            break;
         case lubancode::cli::ConfirmMode::Auto:
             options.permission_mode = lubancode::runtime::PermissionMode::Auto;
             break;

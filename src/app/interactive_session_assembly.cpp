@@ -320,6 +320,9 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
             case lubancode::cli::ConfirmMode::Confirm:
                 context.mode = lubancode::runtime::PermissionMode::Confirm;
                 break;
+            case lubancode::cli::ConfirmMode::AcceptEdits:
+                context.mode = lubancode::runtime::PermissionMode::AcceptEdits;
+                break;
             case lubancode::cli::ConfirmMode::Auto:
                 context.mode = lubancode::runtime::PermissionMode::Auto;
                 break;

@@ -130,29 +130,78 @@ std::string LongestCommonPrefix(const std::vector<std::string>& items) {
 ConfirmMode NextConfirmMode(ConfirmMode mode) {
     switch (mode) {
         case ConfirmMode::Confirm:
-            return ConfirmMode::Auto;
-        case ConfirmMode::Auto:
+            return ConfirmMode::AcceptEdits;
+        case ConfirmMode::AcceptEdits:
             return ConfirmMode::Yolo;
         case ConfirmMode::Yolo:
-            return ConfirmMode::Confirm;
+            return ConfirmMode::Auto;
+        case ConfirmMode::Auto:
+            return ConfirmMode::DontAsk;
         case ConfirmMode::DontAsk:
             return ConfirmMode::Confirm;
     }
     return ConfirmMode::Confirm;
 }
 
-std::string ConfirmModeLabel(ConfirmMode mode) {
+const char* ConfirmModeMachineName(ConfirmMode mode) {
+    switch (mode) {
+        case ConfirmMode::Confirm: return "default";
+        case ConfirmMode::AcceptEdits: return "accept_edits";
+        case ConfirmMode::Yolo: return "yolo";
+        case ConfirmMode::Auto: return "auto";
+        case ConfirmMode::DontAsk: return "dont_ask";
+    }
+    return "default";
+}
+
+std::optional<ConfirmMode> ParseConfirmMode(std::string_view value) {
+    if (value == "default" || value == "confirm") return ConfirmMode::Confirm;
+    if (value == "accept_edits") return ConfirmMode::AcceptEdits;
+    if (value == "yolo") return ConfirmMode::Yolo;
+    if (value == "auto") return ConfirmMode::Auto;
+    if (value == "dont_ask") return ConfirmMode::DontAsk;
+    return std::nullopt;
+}
+
+ModePresentation PresentApprovalMode(ConfirmMode mode) {
+    ModePresentation out;
+    out.current_label = ConfirmModeLabel(mode);
+    out.next_label = ConfirmModeLabel(NextConfirmMode(mode));
+    out.machine_name = ConfirmModeMachineName(mode);
     switch (mode) {
         case ConfirmMode::Confirm:
-            return tr("mode.confirm");
-        case ConfirmMode::Auto:
-            return "auto";
+            out.notice = tr("mode.notice.default");
+            out.color_role = ModeColorRole::Default;
+            break;
+        case ConfirmMode::AcceptEdits:
+            out.notice = tr("mode.notice.accept_edits");
+            out.color_role = ModeColorRole::AcceptEdits;
+            break;
         case ConfirmMode::Yolo:
-            return "yolo";
+            out.notice = tr("mode.notice.yolo");
+            out.color_role = ModeColorRole::Yolo;
+            break;
+        case ConfirmMode::Auto:
+            out.notice = tr("mode.notice.auto");
+            out.color_role = ModeColorRole::Auto;
+            break;
         case ConfirmMode::DontAsk:
-            return "dont_ask";
+            out.notice = tr("mode.notice.dont_ask");
+            out.color_role = ModeColorRole::DontAsk;
+            break;
     }
-    return tr("mode.confirm");
+    return out;
+}
+
+std::string ConfirmModeLabel(ConfirmMode mode) {
+    switch (mode) {
+        case ConfirmMode::Confirm: return tr("mode.default");
+        case ConfirmMode::AcceptEdits: return tr("mode.accept_edits");
+        case ConfirmMode::Yolo: return tr("mode.yolo");
+        case ConfirmMode::Auto: return tr("mode.auto");
+        case ConfirmMode::DontAsk: return tr("mode.dont_ask");
+    }
+    return tr("mode.default");
 }
 
 int CharDisplayWidth(char32_t cp) {

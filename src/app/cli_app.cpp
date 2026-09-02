@@ -742,43 +742,29 @@ int RunCli(const std::vector<std::string>& args) {
         lubancode::cli::ResolveTheme(config_result->config.theme, console_cap.colors_enabled);
     const bool spinner_enabled = console_cap.is_console;
 
-    // --yes 等价于起手就把会话级确认模式切到 yolo(全自动,needs_confirm
-    // 的工具一概放行)——单发模式(AskOnce)也一起设,虽然单发模式走不到
-    // Shift+Tab 那条路,但 on_tool_confirm 统一查 CurrentConfirmMode(),
-    // 这里设了才对得上。
-    // LUBANCODE_CONFIRM_MODE 环境变量(auto/yolo/confirm)可指定起手档位——
-    // 管道模式敲不了 Shift+Tab,自动化验证 auto 档全靠它;--yes 优先级更高,
-    // 认不出的值一律按默认 confirm 档走,不报错不拦人。
     // 起手档位优先级(高到低):--yes/LUBANCODE_CONFIRM_MODE >
-    // settings.local.json 的 default_confirm_mode > 内置默认 confirm。
+    // settings.local.json 的 default_confirm_mode > 内置默认。五个正式值由
+    // ParseConfirmMode 集中解析，旧 confirm 继续兼容为 default。
     lubancode::cli::ConfirmMode initial_mode =
         cli_options.auto_confirm ? lubancode::cli::ConfirmMode::Yolo : lubancode::cli::ConfirmMode::Confirm;
-    bool mode_from_explicit = cli_options.auto_confirm;  // --yes 或 env 显式指定过,settings 不再插手
+    bool mode_from_explicit = cli_options.auto_confirm;
     if (!cli_options.auto_confirm) {
         if (const auto env_mode = lubancode::platform::GetEnvVar("LUBANCODE_CONFIRM_MODE"); env_mode.has_value()) {
-            const std::string& mode_str = *env_mode;
-            if (mode_str == "auto") {
-                initial_mode = lubancode::cli::ConfirmMode::Auto;
+            if (const auto parsed = lubancode::cli::ParseConfirmMode(*env_mode)) {
+                initial_mode = *parsed;
                 mode_from_explicit = true;
-            } else if (mode_str == "yolo") {
-                initial_mode = lubancode::cli::ConfirmMode::Yolo;
-                mode_from_explicit = true;
-            } else if (mode_str == "confirm") {
-                initial_mode = lubancode::cli::ConfirmMode::Confirm;
+            } else {
+                std::cerr << "LUBANCODE_CONFIRM_MODE 值无效: " << *env_mode << "；已使用 default。\n";
                 mode_from_explicit = true;
             }
         }
     }
-    // settings.local.json 的 default_confirm_mode:只在没被 --yes/env 显式压过
-    // 时才生效(认不出的值一律忽略,不拦人)。
     if (!mode_from_explicit && settings_local.default_confirm_mode.has_value()) {
-        const std::string& mode_str = *settings_local.default_confirm_mode;
-        if (mode_str == "auto") {
-            initial_mode = lubancode::cli::ConfirmMode::Auto;
-        } else if (mode_str == "yolo") {
-            initial_mode = lubancode::cli::ConfirmMode::Yolo;
-        } else if (mode_str == "confirm") {
-            initial_mode = lubancode::cli::ConfirmMode::Confirm;
+        if (const auto parsed = lubancode::cli::ParseConfirmMode(*settings_local.default_confirm_mode)) {
+            initial_mode = *parsed;
+        } else {
+            std::cerr << "permissions.default_confirm_mode 值无效: "
+                      << *settings_local.default_confirm_mode << "；已使用 default。\n";
         }
     }
     lubancode::cli::SetConfirmMode(initial_mode);

@@ -41,10 +41,8 @@ std::string FormatTokenCount(std::int64_t n) {
 }
 
 std::string StatusLineModeSegment(ConfirmMode mode) {
-    // Confirm 档叫"确认模式"(spec 定的展示词),auto/yolo 沿用
-    // ConfirmModeLabel 的英文小写,跟提示符前缀 [auto]/[yolo] 对得上。
-    // i18n:两截文字都进表(status.mode.confirm / status.shift_tab_hint)。
-    const std::string label = mode == ConfirmMode::Confirm ? tr("status.mode.confirm") : ConfirmModeLabel(mode);
+    // i18n:标签与提示分别进表。
+    const std::string label = ConfirmModeLabel(mode);
     return "⏵⏵ " + label + " " + tr("status.shift_tab_hint");
 }
 
