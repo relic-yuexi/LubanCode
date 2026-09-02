@@ -607,7 +607,7 @@ void RunG7AuditScene(const std::wstring& exe_path, const std::wstring& workdir, 
             Check(bytes7 <= 64 * 1024, "G7 长正文:忙路脚注字节有帽(实得 " +
                                            std::to_string(bytes7) + " 字节)");
             Log("INFO: G7 busy_footer frames=" + std::to_string(frames7) + " bytes=" + std::to_string(bytes7));
-            DeleteFileW(audit7.c_str());
+            // audit 文件保留不删(paint= 档位是光标跳行取证的锚点,单 2 二轮要回看)。
         }
     } else {
         Check(false, "G7 CreateProcess " + std::to_string(GetLastError()));
@@ -690,6 +690,26 @@ int wmain(int argc, wchar_t** argv) {
     // Working/思考中(终端思考活动条单后的新合同):逐字扫光已撤,活动行
     // 动态只剩秒钟一跳——文本随秒数变,而物理光标全程钉在输入框,任何
     // 采样点都不许停在活动行(真机"约每秒闪五次跳光标"的直接回归闸)。
+    // 单 2 二轮取证:上面的 50ms 轮询抓不到毫秒级中间态——真机肉眼见
+    // "光标落到蓝球左边"而轮询采样全绿。补一条紧密循环光标轨迹线程
+    //(只调 GetConsoleScreenBufferInfo,几十 kHz),buffer 光标若在帧序列
+    // 中途真的到过活动行,轨迹现形;若轨迹全程钉输入框,则是渲染层
+    //(conhost/WT 对 2026 的实现)在露,锅不在字节序列。
+    struct CursorTraceSample { DWORD tick; SHORT x; SHORT y; };
+    std::vector<CursorTraceSample> cursor_trace;
+    std::atomic<bool> trace_run{true};
+    std::thread cursor_tracer([&]() {
+        CONSOLE_SCREEN_BUFFER_INFO ci{};
+        SHORT lx = -1, ly = -1;
+        while (trace_run.load(std::memory_order_relaxed)) {
+            if (GetConsoleScreenBufferInfo(g_conout, &ci) &&
+                (ci.dwCursorPosition.X != lx || ci.dwCursorPosition.Y != ly)) {
+                cursor_trace.push_back({GetTickCount(), ci.dwCursorPosition.X, ci.dwCursorPosition.Y});
+                lx = ci.dwCursorPosition.X;
+                ly = ci.dwCursorPosition.Y;
+            }
+        }
+    });
     std::set<std::string> activity_texts;
     bool working_and_composer_visible = false;
     bool working_cursor_ever_left_composer = false;
@@ -710,6 +730,33 @@ int wmain(int argc, wchar_t** argv) {
             break;  // 已跨过至少两次秒钟跳,采样足够
         }
         Sleep(50);
+    }
+    trace_run.store(false, std::memory_order_relaxed);
+    cursor_tracer.join();
+    // 轨迹统计:光标到过的行分布 + 前 24 次变化。活动行行号 = "思考中"行,
+    // composer 行号 = 输入行;轨迹里出现活动行(或其他行)即 buffer 层有
+    // 中间态裸 CUP。
+    {
+        const int trace_spinner_row = FindLastRow("思考中");
+        const int trace_composer_row = FindFooterInputRow();
+        std::set<SHORT> rows_seen;
+        for (const auto& smp : cursor_trace) {
+            rows_seen.insert(smp.y);
+        }
+        std::string rows_desc;
+        for (SHORT r : rows_seen) {
+            if (!rows_desc.empty()) rows_desc += ",";
+            rows_desc += std::to_string(r);
+            if (r == trace_spinner_row) rows_desc += "(活动行!)";
+            else if (r == trace_composer_row) rows_desc += "(输入行)";
+        }
+        Log("INFO: G0 光标轨迹 " + std::to_string(cursor_trace.size()) + " 次变化,到过行: " + rows_desc +
+            " (活动行=" + std::to_string(trace_spinner_row) + " 输入行=" + std::to_string(trace_composer_row) + ")");
+        const std::size_t shown = cursor_trace.size() < 24 ? cursor_trace.size() : 24;
+        for (std::size_t i = 0; i < shown; ++i) {
+            Log("INFO: G0 轨迹[" + std::to_string(i) + "] t=" + std::to_string(cursor_trace[i].tick) +
+                " x=" + std::to_string(cursor_trace[i].x) + " y=" + std::to_string(cursor_trace[i].y));
+        }
     }
     Check(activity_texts.size() >= 2,
           "G0 Working:秒钟走动,活动行文本至少变过两拍(实得 " +
