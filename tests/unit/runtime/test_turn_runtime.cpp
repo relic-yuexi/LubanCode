@@ -12,6 +12,7 @@
 
 #include <doctest/doctest.h>
 
+#include <array>
 #include <atomic>
 #include <set>
 #include <thread>
@@ -217,36 +218,191 @@ TEST_CASE("权限:Runtime Allow 与无需确认工具都不进入确认回调") 
     CHECK(free_ptr->calls == 1);
 }
 
-TEST_CASE("权限:AcceptEdits 只放文件编辑，Auto 另放安全命令") {
-    const runtime::ToolHookDecision no_hook;
-    struct Case {
-        rt::PermissionMode mode;
+TEST_CASE("权限矩阵:needs_confirm=false 五档均执行且绕过审批链") {
+    using Mode = rt::PermissionMode;
+    constexpr std::array<Mode, 5> modes{Mode::Confirm, Mode::AcceptEdits, Mode::Yolo, Mode::Auto,
+                                         Mode::DontAsk};
+    for (const auto mode : modes) {
+        tools::ToolRegistry registry;
+        auto tool = std::make_unique<FakeTool>("free_tool", false);
+        FakeTool* tool_ptr = tool.get();
+        registry.Register(std::move(tool));
+        int evaluator_calls = 0;
+        int permission_request_calls = 0;
+        int async_confirm_calls = 0;
+        int sync_confirm_calls = 0;
+        agent::TurnWiring wiring;
+        wiring.on_permission_evaluate = [&](const std::string&, const std::string&, tools::ApprovalClass,
+                                            const nlohmann::json&, const runtime::ToolHookDecision&) {
+            ++evaluator_calls;
+            return rt::EvaluatePermission(MakeContext(mode), {}, tools::ApprovalClass::None, "free_tool",
+                                          nlohmann::json::object());
+        };
+        wiring.on_permission_request = [&](const std::string&, const std::string&, const nlohmann::json&) {
+            ++permission_request_calls;
+            return runtime::ToolHookDecision{};
+        };
+        wiring.on_tool_confirm_async = [&](const runtime::ApprovalRequest&) {
+            ++async_confirm_calls;
+            return std::shared_ptr<runtime::InteractionFuture>();
+        };
+        wiring.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) {
+            ++sync_confirm_calls;
+            return false;
+        };
+        CAPTURE(static_cast<int>(mode));
+        CHECK_FALSE(agent::RunOneTool(registry, {"free-id", "free_tool", nlohmann::json::object()}, wiring,
+                                      nullptr)
+                        .is_error);
+        CHECK(tool_ptr->calls == 1);
+        CHECK(evaluator_calls == 0);
+        CHECK(permission_request_calls == 0);
+        CHECK(async_confirm_calls == 0);
+        CHECK(sync_confirm_calls == 0);
+    }
+}
+
+TEST_CASE("权限矩阵:未预授权 External 五档的执行次数与 Ask 回调次数") {
+    using Mode = rt::PermissionMode;
+    constexpr std::array<Mode, 5> modes{Mode::Confirm, Mode::AcceptEdits, Mode::Yolo, Mode::Auto,
+                                         Mode::DontAsk};
+    constexpr std::array<int, 5> expected_confirm_calls{1, 1, 0, 1, 0};
+    constexpr std::array<int, 5> expected_tool_calls{1, 1, 1, 1, 0};
+    for (std::size_t column = 0; column < modes.size(); ++column) {
+        tools::ToolRegistry registry;
+        auto tool = std::make_unique<FakeTool>("external_tool", true, tools::ApprovalClass::External);
+        FakeTool* tool_ptr = tool.get();
+        registry.Register(std::move(tool));
+        int confirm_calls = 0;
+        agent::TurnWiring wiring;
+        wiring.on_permission_evaluate = [&](const std::string&, const std::string& name,
+                                            tools::ApprovalClass approval_class, const nlohmann::json& input,
+                                            const runtime::ToolHookDecision& pre) {
+            return rt::EvaluatePermission(MakeContext(modes[column]), pre, approval_class, name, input);
+        };
+        wiring.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) {
+            ++confirm_calls;
+            return true;
+        };
+        CAPTURE(column);
+        const auto result = agent::RunOneTool(
+            registry, {"external-id", "external_tool", nlohmann::json::object()}, wiring, nullptr);
+        CHECK(tool_ptr->calls == expected_tool_calls[column]);
+        CHECK(confirm_calls == expected_confirm_calls[column]);
+        CHECK(result.is_error == (modes[column] == Mode::DontAsk));
+    }
+}
+
+TEST_CASE("权限矩阵:PreToolUse deny 与 Plan 硬闸五档均压住 YOLO 且零副作用") {
+    using Mode = rt::PermissionMode;
+    constexpr std::array<Mode, 5> modes{Mode::Confirm, Mode::AcceptEdits, Mode::Yolo, Mode::Auto,
+                                         Mode::DontAsk};
+    for (const auto mode : modes) {
+        for (const bool plan_gate : {false, true}) {
+            tools::ToolRegistry registry;
+            auto tool = std::make_unique<FakeTool>("blocked_tool", true);
+            FakeTool* tool_ptr = tool.get();
+            registry.Register(std::move(tool));
+            int pre_hook_calls = 0;
+            int evaluator_calls = 0;
+            int confirm_calls = 0;
+            agent::TurnWiring wiring;
+            if (plan_gate) {
+                wiring.on_mode_policy = [](const std::string&, const nlohmann::json&) {
+                    return std::string("mode.denied.write");
+                };
+            }
+            wiring.on_pre_tool_use_hook = [&](const std::string&, const std::string&, const nlohmann::json&) {
+                ++pre_hook_calls;
+                runtime::ToolHookDecision denied;
+                denied.decision = runtime::ToolHookDecision::Decision::Deny;
+                denied.reason = "test hook deny";
+                return denied;
+            };
+            wiring.on_permission_evaluate = [&](const std::string&, const std::string& name,
+                                                tools::ApprovalClass approval_class, const nlohmann::json& input,
+                                                const runtime::ToolHookDecision& pre) {
+                ++evaluator_calls;
+                return rt::EvaluatePermission(MakeContext(mode), pre, approval_class, name, input);
+            };
+            wiring.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) {
+                ++confirm_calls;
+                return true;
+            };
+            CAPTURE(static_cast<int>(mode));
+            CAPTURE(plan_gate);
+            const auto result = agent::RunOneTool(
+                registry, {"blocked-id", "blocked_tool", nlohmann::json::object()}, wiring, nullptr);
+            CHECK(result.is_error);
+            CHECK(tool_ptr->calls == 0);
+            CHECK(pre_hook_calls == (plan_gate ? 0 : 1));
+            CHECK(evaluator_calls == 0);
+            CHECK(confirm_calls == 0);
+        }
+    }
+}
+
+TEST_CASE("权限矩阵:3.1 十一类裁定逐格覆盖五档") {
+    using Action = rt::PermissionVerdict::Action;
+    using Mode = rt::PermissionMode;
+    constexpr std::array<Mode, 5> modes{Mode::Confirm, Mode::AcceptEdits, Mode::Yolo, Mode::Auto,
+                                         Mode::DontAsk};
+    struct Row {
+        const char* scenario;
         tools::ApprovalClass approval_class;
         const char* name;
         nlohmann::json input;
-        rt::PermissionVerdict::Action expected;
+        std::array<Action, 5> expected;
+        bool always_allowed = false;
+        bool allow_command = false;
+        bool deny_command = false;
+        runtime::ToolHookDecision::Decision hook = runtime::ToolHookDecision::Decision::None;
     };
-    const std::vector<Case> cases{
-        {rt::PermissionMode::AcceptEdits, tools::ApprovalClass::FileEdit, "renamed_writer",
-         nlohmann::json::object(), rt::PermissionVerdict::Action::Allow},
-        {rt::PermissionMode::AcceptEdits, tools::ApprovalClass::FileDestructive, "edit_file",
-         nlohmann::json::object(), rt::PermissionVerdict::Action::Ask},
-        {rt::PermissionMode::AcceptEdits, tools::ApprovalClass::Command, "not_run_command",
-         RunCommandInput("git status"), rt::PermissionVerdict::Action::Ask},
-        {rt::PermissionMode::AcceptEdits, tools::ApprovalClass::External, "write_file",
-         nlohmann::json::object(), rt::PermissionVerdict::Action::Ask},
-        {rt::PermissionMode::Auto, tools::ApprovalClass::FileEdit, "renamed_writer",
-         nlohmann::json::object(), rt::PermissionVerdict::Action::Allow},
-        {rt::PermissionMode::Auto, tools::ApprovalClass::Command, "not_run_command",
-         RunCommandInput("git status"), rt::PermissionVerdict::Action::Allow},
-        {rt::PermissionMode::Auto, tools::ApprovalClass::External, "run_command",
-         RunCommandInput("git status"), rt::PermissionVerdict::Action::Ask},
+    const auto A = Action::Allow;
+    const auto Q = Action::Ask;
+    const auto D = Action::Deny;
+    const std::vector<Row> rows{
+        {"FileEdit", tools::ApprovalClass::FileEdit, "renamed_writer", nlohmann::json::object(),
+         {Q, A, A, A, D}},
+        {"FileDestructive/undo_file_edit", tools::ApprovalClass::FileDestructive, "undo_file_edit",
+         nlohmann::json::object(), {Q, Q, A, Q, D}},
+        {"SafeCommand/git status", tools::ApprovalClass::Command, "run_command", RunCommandInput("git status"),
+         {Q, Q, A, A, D}},
+        {"危险或未知 Command", tools::ApprovalClass::Command, "run_command", RunCommandInput("some-unknown-cmd"),
+         {Q, Q, A, Q, D}},
+        {"External", tools::ApprovalClass::External, "external_tool", nlohmann::json::object(),
+         {Q, Q, A, Q, D}},
+        {"session always allow", tools::ApprovalClass::External, "always_tool", nlohmann::json::object(),
+         {A, A, A, A, A}, true},
+        {"allow_commands", tools::ApprovalClass::Command, "run_command", RunCommandInput("approved-command --check"),
+         {Q, Q, A, A, A}, false, true},
+        {"deny_commands", tools::ApprovalClass::Command, "run_command", RunCommandInput("blocked-command --force"),
+         {Q, Q, A, Q, D}, false, false, true},
+        {"PreToolUse ask", tools::ApprovalClass::FileEdit, "write_file", nlohmann::json::object(),
+         {Q, Q, Q, Q, D}, false, false, false, runtime::ToolHookDecision::Decision::Ask},
+        {"PreToolUse allow", tools::ApprovalClass::External, "external_tool", nlohmann::json::object(),
+         {A, A, A, A, A}, false, false, false, runtime::ToolHookDecision::Decision::Allow},
     };
-    for (const auto& test : cases) {
-        CAPTURE(test.name);
-        const auto verdict = rt::EvaluatePermission(MakeContext(test.mode), no_hook, test.approval_class,
-                                                    test.name, test.input);
-        CHECK(verdict.action == test.expected);
+
+    const std::vector<std::string> allow{"approved-command"};
+    const std::vector<std::string> deny{"blocked-command"};
+    std::set<std::string> always{"always_tool"};
+    for (const auto& row : rows) {
+        for (std::size_t column = 0; column < modes.size(); ++column) {
+            CAPTURE(row.scenario);
+            CAPTURE(column);
+            rt::PermissionContext context = MakeContext(modes[column]);
+            context.always_allowed = row.always_allowed ? &always : nullptr;
+            context.allow_commands = row.allow_command ? &allow : nullptr;
+            context.deny_commands = row.deny_command ? &deny : nullptr;
+            runtime::ToolHookDecision pre;
+            pre.decision = row.hook;
+            const auto verdict = rt::EvaluatePermission(context, pre, row.approval_class, row.name, row.input);
+            CHECK(verdict.action == row.expected[column]);
+            if (row.deny_command && modes[column] != Mode::Yolo) {
+                CHECK(verdict.deny_hit);
+            }
+        }
     }
 }
 
