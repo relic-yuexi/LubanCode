@@ -45,6 +45,12 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # 分期脚本吃 python。不赌 runner 预装(windows 腿首跑挂在 python3
+      # 探测上):统一 setup-python,python/python3 二名齐备。
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+
       - name: Check release metadata
         shell: bash
         run: bash scripts/check_release.sh
@@ -57,13 +63,15 @@ jobs:
       - name: Fetch bundled ripgrep (manifest-pinned)
         shell: bash
         run: |
+          set -x
           case "${{ matrix.name }}" in
             windows-msvc) platform=windows-x64 ;;
             ubuntu-gcc)   platform=linux-x64 ;;
             macos-clang)  platform=macos-arm64 ;;
           esac
-          python3 scripts/fetch_ripgrep.py --target rg-stage --platform "$platform" --cache rg-cache \
-            || python scripts/fetch_ripgrep.py --target rg-stage --platform "$platform" --cache rg-cache
+          PY="$(command -v python3 || command -v python)"
+          [ -n "$PY" ] || { echo "python3/python 都不在 PATH" >&2; exit 1; }
+          "$PY" scripts/fetch_ripgrep.py --target rg-stage --platform "$platform" --cache rg-cache
 
       # vcpkg manifest 优先:runner 自带的 vcpkg 在 VCPKG_INSTALLATION_ROOT。
       # configure 失败(vcpkg 缺包/版本冲突等)就清掉构建目录、去掉工具链
