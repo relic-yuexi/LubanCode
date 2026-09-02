@@ -35,6 +35,30 @@ namespace lubancode::agent {
 namespace {
 constexpr std::size_t kContextPreflightHeadroomTokens = 512;
 
+// 预检放不下时的应急输出预留(派工单 §四):常规预留(声明值/保守估)装
+// 不下、当前消息自己装得下时启用——按窗口取一个小而正的值,让任务能在
+// 同一上下文里收尾交出短交接,而不是当场死掉叫用户开新会话。
+// clamp(window/16, 2k, 8k);窗口未知给 4096。
+std::size_t EmergencyOutputReserveTokens(std::size_t window_tokens) {
+    std::size_t reserve = window_tokens == 0 ? 4096 : window_tokens / 16;
+    if (reserve < 2048) {
+        reserve = 2048;
+    }
+    if (reserve > 8192) {
+        reserve = 8192;
+    }
+    return reserve;
+}
+
+// 应急收窄时注入的一次性收尾交代(派工单 §4.2/§4.4):模型当轮立即收尾,
+// 交出已跑命令、关键结果、未提交改动与后续建议——durable handoff 的正文
+// 由模型按这段指引产出,现场(工具结果/检查点/隔离房)由宿主保住。
+std::string BuildContextWrapupNudgeText(std::size_t emergency_reserve) {
+    return "[宿主] 上下文将尽:本请求的输出预留已临时收窄至约 " + std::to_string(emergency_reserve) +
+           " token。请立即收尾,不再发起新的工具调用;用一段简短交接写明:已执行的命令与其结果、关键结论、"
+           "未提交的改动、建议的后续步骤。";
+}
+
 // Unix epoch 毫秒。chrono 不同 clock 不能混算;所有台账都从 platform
 // 取墙钟,免得各自换算后留下不同口径。
 std::int64_t NowMsEpoch() {
@@ -844,6 +868,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
     // 催办只此一条:步数将尽提示与预算软线催办共用这面旗(规格"重复念叨
     // 只会把剩余步数也烧掉"同一笔账),一次 Run 至多注入一次。
     bool budget_nudged = false;
+    // 应急收窄的收尾交代(派工单 §四)也只注入一次:预留收窄会持续生效到
+    // Run 收口,念叨一遍够了。
+    bool context_wrapup_nudged = false;
     // 回合视觉收束(终端回合视觉收束单):本 Run() 已发出的批次序号
     // (on_tool_batch_started 的 batch_index 用;每个含工具的 step 消耗
     // 一枚,跨 step 不重号)。
@@ -1072,28 +1099,71 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         }
 
         // token 窗口的最后一道硬闸。上面的压力回调已经有机会压缩；回来后
-        // 仍是“输入估算 + 输出预留 + 协议余量 > 窗口”，就地报错。尤其是
-        // 当前单条用户消息本身过大时，摘要压多少遍也救不了，不能再把同一
-        // 份请求发给 provider 撞 500。
+        // 仍是“输入估算 + 输出预留 + 协议余量 > 窗口”时,先试应急预留
+        //(派工单 §四):当前消息自己装得下、只是常规预留太肥的,把本请求
+        // 的输出上限收窄到一个小而正的值放行——同任务继续跑,并注入一次
+        // 收尾交代。应急也装不下(当前消息本身过大/历史真满了)才就地报错。
+        // 尤其是当前单条用户消息本身过大时，摘要压多少遍也救不了，不能再
+        // 把同一份请求发给 provider 撞 500。
         if (profile_.context_window_tokens > 0) {
             const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
             const std::size_t input_tokens = EstimateRequestInputTokensForPreflight(request);
-            const std::size_t output_tokens = static_cast<std::size_t>(output_budget.reserve_for_estimate());
             const std::size_t window_tokens = profile_.context_window_tokens;
-            const bool overflow = ExceedsContextWindow(input_tokens, output_tokens, window_tokens);
-            if (overflow) {
-                const std::size_t current_turn_tokens =
-                    request.messages.empty() ? 0 : EstimateMessageTokensForPreflight(request.messages.back());
-                const bool current_turn_alone_overflows =
-                    ExceedsContextWindow(current_turn_tokens, output_tokens, window_tokens);
-                return std::unexpected(
-                    "上下文预检未通过:输入约 " + std::to_string(input_tokens) + " token + 输出预留 " +
-                    std::to_string(output_tokens) + " + 协议余量 " +
-                    std::to_string(kContextPreflightHeadroomTokens) +
-                    "，超过窗口 " + std::to_string(window_tokens) +
-                    (current_turn_alone_overflows
-                         ? "。当前消息本身已装不下，压缩旧历史也无济于事；请缩短输入或调低输出上限。"
-                         : "。自动压缩后仍装不下；请开新会话、缩短输入，或调低输出上限。"));
+            const std::size_t current_turn_tokens =
+                request.messages.empty() ? 0 : EstimateMessageTokensForPreflight(request.messages.back());
+            std::size_t output_tokens = static_cast<std::size_t>(output_budget.reserve_for_estimate());
+            // 三项账进可观测事件(派工单 §4.4):estimated_input + reserved_
+            // output + protocol_margin,判定处当场发,不等问题发生后再翻账。
+            const auto emit_preflight = [&](std::size_t used_reserve, bool clamped) {
+                platform::LogSink::Instance().Info(
+                    "loop", "[context-preflight] estimated_input=" + std::to_string(input_tokens) +
+                                " reserved_output=" + std::to_string(used_reserve) +
+                                " protocol_margin=" + std::to_string(kContextPreflightHeadroomTokens) +
+                                " window=" + std::to_string(window_tokens) +
+                                (clamped ? " action=reserve_clamped" : " action=exceeded"));
+                if (wiring_.on_context_pressure) {
+                    ContextPressure pressure;
+                    pressure.phase = ContextPressure::Phase::PreflightExceeded;
+                    pressure.estimated_input_tokens = input_tokens;
+                    pressure.reserved_output_tokens = used_reserve;
+                    pressure.protocol_headroom_tokens = kContextPreflightHeadroomTokens;
+                    pressure.window_tokens = window_tokens;
+                    pressure.reserve_clamped = clamped;
+                    wiring_.on_context_pressure(pressure);
+                }
+            };
+            if (ExceedsContextWindow(input_tokens, output_tokens, window_tokens)) {
+                const std::size_t emergency = EmergencyOutputReserveTokens(window_tokens);
+                if (!ExceedsContextWindow(current_turn_tokens, emergency, window_tokens) &&
+                    !ExceedsContextWindow(input_tokens, emergency, window_tokens)) {
+                    // 应急放行:本请求按小预留发,注入一次收尾交代(已跑命令/
+                    // 关键结果/未提交改动/后续建议)——durable handoff 的正文
+                    // 由模型产出,同任务续跑而不是叫用户开新会话。
+                    request.max_tokens = static_cast<int>(emergency);
+                    output_tokens = emergency;
+                    emit_preflight(output_tokens, /*clamped=*/true);
+                    if (!context_wrapup_nudged) {
+                        const api::TextBlock nudge{BuildContextWrapupNudgeText(emergency)};
+                        context_.AppendToLast(nudge);
+                        if (!request.messages.empty()) {
+                            request.messages.back().content.push_back(nudge);
+                        }
+                        context_wrapup_nudged = true;
+                    }
+                } else {
+                    emit_preflight(output_tokens, /*clamped=*/false);
+                    const bool current_turn_alone_overflows =
+                        ExceedsContextWindow(current_turn_tokens, emergency, window_tokens);
+                    return std::unexpected(
+                        "上下文预检未通过:输入约 " + std::to_string(input_tokens) + " token + 输出预留 " +
+                        std::to_string(output_tokens) + " + 协议余量 " +
+                        std::to_string(kContextPreflightHeadroomTokens) +
+                        "，超过窗口 " + std::to_string(window_tokens) +
+                        (current_turn_alone_overflows
+                             ? "。当前消息本身已装不下，压缩旧历史也无济于事；请缩短输入或调低输出上限。"
+                             : "。自动压缩后仍装不下；请开新会话、缩短输入，或调低输出上限。") +
+                        " 现场不丢:已完成的工具结果与最后检查点已随任务保留,可据此续派同一任务。");
+                }
             }
         }
 

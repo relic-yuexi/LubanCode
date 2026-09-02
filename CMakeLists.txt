@@ -66,6 +66,28 @@ option(LUBANCODE_USE_CODELOAD
 # ExecutableDir/libexec,同一条路);没设则主程序 search 明报缺件、真 rg
 # 集成测试跳过——绝不暗中联网,依赖获取永远显式、可缓存、可校验。
 set(LUBANCODE_BUNDLED_RG_DIR "" CACHE PATH "已校验的随包 ripgrep 目录(内含 rg[.exe];由 scripts/fetch_ripgrep.py 产出)")
+# 全机共享分期兜底(派工单 §六:新 worktree 断供 bundled rg):没显式传
+# LUBANCODE_BUNDLED_RG_DIR 时,探一次 <home>/.lubancode/rg-stage/libexec——
+# fetch_ripgrep.py --target <home>/.lubancode/rg-stage 的一次性产物,离线、
+# 确定性、版本照过下面的门。责任边界:rg 分期是 configure 级构建输入,
+# 归开发者调用面(preset/命令行/这条机器级缓存),不归 Agent worktree 的
+# 环境继承,也不归测试夹具;运行时定位照旧只认 ExecutableDir/libexec,
+# 不搜 PATH、不读环境变量。新开 worktree 由此不再靠手工往 build 树拷 rg。
+if(NOT LUBANCODE_BUNDLED_RG_DIR)
+  if(WIN32)
+    set(_lubancode_user_rg_stage "$ENV{USERPROFILE}/.lubancode/rg-stage/libexec")
+    set(_lubancode_user_rg_exe "${_lubancode_user_rg_stage}/rg.exe")
+  else()
+    set(_lubancode_user_rg_stage "$ENV{HOME}/.lubancode/rg-stage/libexec")
+    set(_lubancode_user_rg_exe "${_lubancode_user_rg_stage}/rg")
+  endif()
+  if(EXISTS "${_lubancode_user_rg_exe}")
+    set(LUBANCODE_BUNDLED_RG_DIR "${_lubancode_user_rg_stage}")
+    message(STATUS "bundled rg: 未显式传 LUBANCODE_BUNDLED_RG_DIR,采用全机共享分期 ${_lubancode_user_rg_stage}")
+  endif()
+  unset(_lubancode_user_rg_stage)
+  unset(_lubancode_user_rg_exe)
+endif()
 # _lubancode_tarball(<out_var> <owner/repo> <tag>):按开关拼 tarball 地址。
 function(_lubancode_tarball out_var repo tag)
   if(LUBANCODE_USE_CODELOAD)

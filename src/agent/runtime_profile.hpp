@@ -48,6 +48,9 @@ enum class OutputBudgetSource {
     ModelCatalog,    // models.json 条目声明
     ProviderDeclared,// provider 目录/配置声明
     ConfigFile,      // agent.max_output_tokens / subagent.max_output_tokens
+    // 能力级声明(目录/provider)被子任务的受控默认收窄(派工单 §四):
+    // 值不再是原声明,查账文案要说清来路。
+    SubagentDefault,
 };
 
 // 输出上限解析结果:tokens 为 nullopt = unset(语义见上)。
@@ -75,6 +78,22 @@ inline OutputBudget ResolveOutputBudget(std::optional<int> config_value,
         return {static_cast<int>(*catalog_declared), OutputBudgetSource::ModelCatalog};
     }
     return {std::nullopt, OutputBudgetSource::Unset};
+}
+
+// 子任务输出预留的受控上限(派工单 §四):模型目录/provider 声明的是模型
+// 能力上限,不是任务默认——原样继承会把小半扇窗口当每次请求的输出预留
+//(256k 窗口 × 128k 目录上限的真机事故:输入 13 万 + 预留 12.8 万,预检
+// 永远过不去)。子任务的预留封顶 = clamp(window/8, 8k, 32k);窗口未知给
+// 32k。显式配置(ConfigFile)不收——那是用户的手笔,尊重原值。
+inline int SubagentOutputReserveCap(std::size_t window_tokens) {
+    std::size_t cap = window_tokens == 0 ? 32768 : window_tokens / 8;
+    if (cap < 8192) {
+        cap = 8192;
+    }
+    if (cap > 32768) {
+        cap = 32768;
+    }
+    return static_cast<int>(cap);
 }
 
 // 一份不可变运行策略。AgentLoop 与子代理(AgentTool::RunTask)从这里拿

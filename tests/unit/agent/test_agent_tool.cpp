@@ -991,6 +991,76 @@ TEST_CASE("同级派工:子表可挂 agent 转发壳,递归靠显式深度上限
     CHECK(sub_registry.Find("agent") == nullptr);
 }
 
+// ---------------------------------------------------------------------------
+// 后台能力三处一致(派工单 §二):schema 按当前入口生成、派工前 preflight
+// 稳定拒绝(带错误码/入口/可用模式/改法)、无后端时 backend 零调用且
+// worktree 零创建;配了工厂则枚举恢复、后台照常可派。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("后台能力: 无后台后端——schema 摘掉 background,preflight 稳定拒绝,前台出路可走") {
+    FakeBackend backend;
+    backend.scripts = {TextOnlyScript("前台结论")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
+
+    // schema:枚举里没有 background,说明点名不可用与改法。
+    const nlohmann::json schema = agent_tool.input_schema();
+    const nlohmann::json& enum_values = schema.at("properties").at("execution_mode").at("enum");
+    bool lists_background = false;
+    for (const auto& value : enum_values) {
+        lists_background = lists_background || value.get<std::string>() == "background";
+    }
+    CHECK_FALSE(lists_background);
+    const std::string mode_description = schema.at("properties").at("execution_mode").at("description");
+    CHECK(mode_description.find("background_unavailable") != std::string::npos);
+
+    // preflight:稳定错误码 + 当前入口 + 可用模式 + 改法;注册前拒绝。
+    const auto rejected = agent_tool.execute(
+        nlohmann::json{{"title", "后台被拒"}, {"prompt", "查"}, {"execution_mode", "background"}});
+    CHECK(rejected.is_error);
+    CHECK(rejected.content.find("[background_unavailable]") != std::string::npos);
+    CHECK(rejected.content.find("主入口") != std::string::npos);
+    CHECK(rejected.content.find("foreground") != std::string::npos);
+    CHECK(agent_tool.TaskSummaries().empty());  // 任务压根没注册
+    CHECK(backend.captured_requests.empty());   // backend 零调用
+
+    // 前台降级出路真的可走。
+    const auto fg = agent_tool.execute(
+        nlohmann::json{{"title", "前台照跑"}, {"prompt", "查"}, {"execution_mode", "foreground"}});
+    CHECK_FALSE(fg.is_error);
+    CHECK(fg.content == "前台结论");
+}
+
+TEST_CASE("后台能力: 配了工厂——schema 列出 background,后台派工返回任务号") {
+    auto detached_backend = std::make_unique<FakeBackend>();
+    detached_backend->scripts = {TextOnlyScript("后台结论")};
+    tools::ToolRegistry sub_registry;
+    tools::AgentTool agent_tool(*detached_backend, sub_registry, "/work/dir");
+    agent_tool.SetDetachedBackendFactory(
+        [&detached_backend]() {
+            tools::DetachedAgentBackend detached;
+            detached.backend = std::move(detached_backend);
+            return detached;
+        });
+
+    // schema:枚举恢复三值(与无后端的入口区分开)。
+    const nlohmann::json schema = agent_tool.input_schema();
+    const nlohmann::json& enum_values = schema.at("properties").at("execution_mode").at("enum");
+    bool lists_background = false;
+    for (const auto& value : enum_values) {
+        lists_background = lists_background || value.get<std::string>() == "background";
+    }
+    CHECK(lists_background);
+
+    // 后台派工照常起任务,回执带任务号。
+    const auto accepted = agent_tool.execute(
+        nlohmann::json{{"title", "后台照跑"}, {"prompt", "查"}, {"execution_mode", "background"}});
+    CHECK_FALSE(accepted.is_error);
+    CHECK(accepted.content.find("已启动") != std::string::npos);
+    REQUIRE(agent_tool.TaskSummaries().size() == 1);
+    CHECK_FALSE(agent_tool.TaskSummaries()[0].foreground);
+}
+
 TEST_CASE("深度治理:嵌套派工超过上限明报,不发请求") {
     // 造一只"被问到就再派一只子代理"的假 agent 目标,验证深度账在
     // AgentTool 内部滚动——不真跑模型,只看拒绝文案与请求数。

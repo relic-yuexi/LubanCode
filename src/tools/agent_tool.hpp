@@ -336,6 +336,12 @@ public:
         detached_registry_factory_ = std::move(factory);
     }
 
+    // 后台能力判定(派工单 §二):当前入口有没有后台子代理后端。main 直派
+    // 看会话工厂;嵌套看冻结 env 的工厂(无 UI 嵌套树只有这一条路,有 UI
+    // 的嵌套还可借会话工厂)。schema 的后台可见性、派工前 preflight、
+    // LaunchBackground 执行口三处都问这一只——能力表与运行时不许各说各话。
+    bool BackgroundBackendAvailable(const std::shared_ptr<const SubagentDispatchEnv>& env) const;
+
     // 嵌套后台孩子的后端工厂源(P0-3"派出时冻结 execution snapshot"):
     // 每只后台任务起跑当口调一次,返回一份闭包拷值的冻结工厂——它造的
     // client 用的是父任务派出时刻的 model/think/指令/魂,任务树中途

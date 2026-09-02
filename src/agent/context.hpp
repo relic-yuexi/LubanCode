@@ -115,15 +115,19 @@ std::vector<api::Message> TrimHistory(const std::vector<api::Message>& history,
 // kAutoCompactThresholdPercent 同档——这是参考线,不是写死的唯一口径。
 constexpr int kProjectedOverflowPercent = 80;
 
-// 每次模型请求前的上下文压力通报。phase 区分两种调用:
+// 每次模型请求前的上下文压力通报。phase 区分三种调用:
 //   PreRequest    —— 请求拼装前。projected_overflow 为真时,上层可在这个
 //                     安全点同步做语义压缩(ReplaceHistory);回调返回后
 //                     Run() 用(可能已换短的)history 重新拼请求。
 //   AfterHardTrim —— TrimHistory 字符安全网这次真丢了东西(丢轮/截结果)。
 //                     纯通报:上层必须向用户显式告警"发生了有损硬裁",
 //                     不许静默降级;此时再压缩也救不回这一次的请求。
+//   PreflightExceeded —— token 预检的最终闸判定(派工单 §4.4)。三项账
+//                     (estimated_input + reserved_output + protocol_margin)
+//                     从这里进可观测事件;reserve_clamped = 常规预留装不下、
+//                     已按应急小预留收窄放行(本请求 max_tokens 随之改小)。
 struct ContextPressure {
-    enum class Phase { PreRequest, AfterHardTrim };
+    enum class Phase { PreRequest, AfterHardTrim, PreflightExceeded };
     Phase phase = Phase::PreRequest;
     bool projected_overflow = false;   // 预计(含输出预留)放不下
     std::size_t projected_tokens = 0;  // 估算的下一请求 prompt + 输出预留
@@ -131,6 +135,11 @@ struct ContextPressure {
     bool hard_trimmed_turns = false;   // 丢了中间整轮
     std::size_t hard_dropped_messages = 0;
     bool hard_truncated_results = false;  // 截了超大工具结果
+    // ---- 预检三项账(派工单 §4.4;phase == PreflightExceeded 时填)--------
+    std::size_t estimated_input_tokens = 0;
+    std::size_t reserved_output_tokens = 0;
+    std::size_t protocol_headroom_tokens = 0;
+    bool reserve_clamped = false;  // 应急收窄放行(没拒,降级继续)
 };
 
 // 跨会话传话(0.25.x)的来信注入规则(纯函数,单测钉):把一封来信按
