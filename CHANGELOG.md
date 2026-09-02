@@ -2,6 +2,11 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.178] - 2026-09-03
+
+- **延迟工具默认切 proxy_reference。** 真机质量对照过门后（ccmoon/gpt-5.6-sol、温度 0、30 枚 stub 工具、8 任务×3 档）：proxy 任务成功 9/9 不低于 disabled/legacy 的 7/9（分差全在"名字相近+副作用+日期换算"形状——两档两轮皆反问不调工具，proxy 先搜后调首发合格），参数首发 11/11 持平、误选三档全零。legacy 的 cache-hostile 真机坐实：7/8 任务命中即断 cache epoch，非缓存重付全场最高（215k）。未配置空串现自动走 proxy（结构化发现→tool_invoke 直调），回退显式写 `legacy_expand`/`disabled`。证据全账 `eval/deferred_quality/report.md`，夹具与 runner 入库可复算。
+- P3 两条非官方端点观察入册：zhipu-anthropic 兼容端宽容收 `defer_loading` 声明却零原生块回传——"不报错"不等于"实现了"，两道门不放行是对的；responses 线点名 native 大声拒回落。
+
 ## [v0.26.177] - 2026-09-03
 
 - **子代理账开不成就不许跑。** 此前子账 stream 开张失败被装配层吞错，子代理照跑、内层工具 trace 借父账旁听——父账内存表被无主 call 污染，收轮补账再撞 schema.missing_field 红字（实战实录：0 字节空子账令整场 verify 失败）。现 SpawnSubagent 任一步失败即 fail closed，工具终态带稳定码 `trajectory.subagent_start_failed`，父侧新事件 `subagent.run.start_failed` 持久留证（stage/error_code/字段级 message，不写敏感路径）。
