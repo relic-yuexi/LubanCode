@@ -1,0 +1,286 @@
+# 主 Agent 与 Subagent 面板工具调用同构渲染
+
+- 状态：待修
+- 日期：2026-09-03
+- 级别：P1
+- 类型：LubanCode 产品缺陷（Agent Panel、Transcript 投影、工具调用层级）
+- 源码版本：`main` / `e325b394`，版本号 `0.26.176`
+- 用户现场：切到 Subagent panel 后，各种工具调用挤成一串；画法与 Main Agent panel 不同
+- 主要落点：`src/app/agent_panel_presenter.cpp`、`src/tools/task_ledger.*`、`src/tools/agent_tool.cpp`、`src/cli/transcript.*`、`src/cli/turn_renderer.*`
+- 关联测试：`tests/unit/agent/test_agent_panel.cpp`、`tests/unit/cli/test_transcript.cpp`、`tests/unit/runtime/test_subagent_event_stream.cpp`
+- 本单性质：源码分析与实施清单；尚未改代码，尚未做真终端复现
+- 不在本单：Agent Dock 导航、Main/Subagent 面板数据串台、会话标题、输入框与 footer 重画、Trajectory 格式
+
+## 一、现象
+
+Main Agent 面板里，顶层工具、子代理卡、子代理内层工具各有层次。紧凑态收起
+`SubTool`。详细态再铺开。工具之间也留一口气。
+
+切到某只 Subagent 后，工具调用却换了一套画法。每一枚都缩进，每一枚都紧贴
+上一枚。`Ctrl+O` 也没有按 Main panel 那套规则统管这些卡。工具一多，画面便挤成
+一堵墙。
+
+这不是单纯少了一行空白。当前源码把“谁是当前视图根节点”“工具属于哪一层”
+认错了；又让 Subagent 查看页绕开 Main panel 的整组 renderer。两处合在一起，才有
+眼前这副样子。
+
+## 二、当前两条显示链
+
+### 2.1 Main Agent：实时 transcript
+
+Main 回合由 `ToolDisplay` 持有一组 `TranscriptItem`：
+
+```text
+main 自己调用工具             -> TranscriptKind::Tool
+main 调 agent，子代理内层工具 -> TranscriptKind::SubTool
+思考                           -> TranscriptKind::Thinking
+```
+
+整组重画走 `FormatTranscriptItems()`。这层会看全局展开档：
+
+```text
+紧凑态：跳过 SubTool
+详细态：铺出 SubTool，并保留四格缩进
+```
+
+实时起止另由 `ToolDisplay` 的 painter 管锚点、原位收口与折叠。块间距已有
+`BlockRole` / `GapBetween()` 规则。顶层 Tool 与下一枚顶层 Tool 之间留一行；
+SubTool 才贴着父工具排。
+
+### 2.2 Subagent 查看页：TaskEvents 全量重建
+
+查看某只 Subagent 时，入口在
+`InteractiveSessionAssembly::build_task_transcript`，随后调用
+`AgentPanelPresenter::TaskTranscriptLines()`。
+
+这条路不读 Main 的 live transcript。它从 `TaskLedger::Events(task_id)` 取
+`AgentTaskEvent`，再在 presenter 里逐枚拼行：
+
+```text
+TaskEvents
+  -> pending_tool_start 配 ToolResult
+  -> MakeAgentTaskToolItem()
+  -> FormatTranscriptItem(..., expanded=false)
+  -> push_rendered() 直接追加到 lines
+```
+
+两条链虽都借了 `FormatTranscriptItem()`，却没有共用同一套会话投影与整组布局。
+注释写着“复用 main 的渲染组件”，实际只复用了最末一颗“单卡 formatter”。
+
+## 三、已由源码钉死的直接病根
+
+### 3.1 当前 Subagent 自己的工具全被标成 SubTool
+
+`MakeAgentTaskToolItem()` 无条件写：
+
+```cpp
+item.kind = TranscriptKind::SubTool;
+```
+
+这枚 `SubTool` 本来表示“当前视图根节点之下的内层工具”。可用户既已切进
+Subagent #N，#N 就该成为这张面板的根。#N 自己调用的 `read_file`、
+`run_command`、`search` 都是这张面板里的顶层 `Tool`，不该再缩四格。
+
+故障不在 Agent 身份。故障在投影坐标没随查看目标切换。Main 和 Subagent 本该
+同为会话根；当前代码却始终拿 Main 当根。
+
+### 3.2 Subagent 查看页绕开 FormatTranscriptItems
+
+presenter 对工具逐枚直调：
+
+```cpp
+FormatTranscriptItem(tool_item(...), theme, width, /*expanded=*/false)
+```
+
+这样一来：
+
+- `agent_view_expanded` 没传给工具卡；
+- `FormatTranscriptItems()` 的紧凑/详细统管失效；
+- 整组焦点、单项展开、子项过滤没有入口；
+- 每张卡只知自己，不知前后块是什么。
+
+`Ctrl+O` 眼下只影响流式思考分支。工具卡被硬编码成 `expanded=false`。Main panel
+能展开参数与全文，Subagent panel 却不能同样展开。
+
+### 3.3 presenter 没走块间距表
+
+`push_rendered()` 只把 formatter 产出的行逐行塞进 `lines`。工具卡之间没调用
+`GapBetween()`，也没维护上一块 `BlockRole`。
+
+而 `FormatTranscriptItem()` 只负责一张卡，不负责卡与卡之间的留白。当前
+Subagent 工具又全是 `SubTool`，视觉上便成了“缩进四格，首尾相接”。这正与现场
+“各种工具调用全都挤在一块”相合。
+
+## 四、结构病根：TaskEvents 丢了布局所需身份
+
+`AgentTaskEvent` 眼下只有：
+
+```text
+kind / text / tool_name / input_json / result / is_error / streaming / revision
+```
+
+它没有：
+
+- `tool_use_id`：ToolStart 与 ToolResult 不能按调用 id 对账；
+- `item_id` / `parent_item_id`：不知道谁是父卡，谁是子卡；
+- `step_id` / `turn_id`：不知道哪几枚工具同属一次模型响应，哪处该换轮；
+- 工具状态与起止时刻：只能临时猜 Running/Ok/Error，不能忠实重放；
+- item 顺序号：只能依靠事件数组位置维持表面顺序。
+
+presenter 因此只养一枚 `pending_tool_start`。新 start 到来时，旧 start 被当成
+“没等到结果”先画出去；任一 result 又只会配当前 pending。如今多数子代理工具
+串行执行，这条脆路未必立刻配错。可一旦同一响应含多工具、事件交错、恢复旧账，
+它就没有足够身份做准确配对。
+
+Main 路已有 `TurnView` / `TurnItemView`，其中正好带 `step_id`、
+`parent_item_id`、状态、输入、结果与时间。Subagent 又另养一份瘦 `TaskEvents`，
+显示语义迟早继续分叉。
+
+## 五、修复裁决
+
+### 5.1 不变量
+
+- [ ] Main 与任一 Subagent 都按“当前查看对象是根节点”投影。
+- [ ] 当前根自己调用的工具一律是 `Tool`；它派出的下一层 Agent 内部工具才是
+      `SubTool`。
+- [ ] Main 与 Subagent 共用同一份会话块模型、同一份紧凑/详细开关、同一份
+      `GapBetween()`、同一份宽字符与截断规矩。
+- [ ] Agent panel 只换数据源，不换 renderer。
+- [ ] 实时流、切换后重建、resize/Ctrl+L 重建，三条路画出同构结果。
+- [ ] 工具起止按稳定 id 配对；不得再靠“最近一枚 start”猜。
+- [ ] 旧任务缺字段时明确走兼容投影，不得悄悄配错卡。
+
+### 5.2 推荐架构
+
+把 Subagent 的查看数据投影成 `TurnView`（或与它等价的 canonical 会话块），再
+交给 `RenderTurnView()` / transcript 整组 renderer。不要继续在
+`AgentPanelPresenter` 里按事件类型手搓第二套会话布局。
+
+推荐数据流：
+
+```text
+子代理 TurnEventAdapter / collector
+  -> 子任务自己的 turn/item 账（保留 turn、step、item、parent、tool_use_id）
+  -> 选中 task_id 后取该任务 TurnView 列表
+  -> 以该任务为视图根做层级投影
+  -> Main/Subagent 共用 renderer
+```
+
+`AgentPanelPresenter` 只拼查看页元数据，如标题、运行目录、角色、预算与监督短行。
+会话正文从 canonical renderer 返回，presenter 不再自行配工具、不再自行决定块间距。
+
+若首批不能立刻迁走 `TaskEvents`，也须先补齐稳定身份，再做一层明确 adapter：
+
+```text
+AgentTaskEvent(tool_use_id, item_id, parent_item_id, step_id, turn_id, seq, status, time)
+  -> TurnView
+  -> shared renderer
+```
+
+这只能当迁移桥，不能再长成第三套显示模型。
+
+## 六、分批实施
+
+### P0：先修眼前错层与挤压
+
+- [ ] 把“相对当前查看根的层级”写成单独投影规则。Subagent 自己的工具投成
+      `Tool`，不要让 `MakeAgentTaskToolItem()` 无条件造 `SubTool`。
+- [ ] 工具卡先收集成一组 `TranscriptItem`，统一交给整组 formatter；不得逐枚
+      直调后裸追加。
+- [ ] `agent_view_expanded` 同时控制思考与工具。紧凑态、详细态与 Main 对齐。
+- [ ] 正文、思考、工具、介入、压缩、终局都带 `BlockRole`，统一走
+      `GapBetween()`；不要在 presenter 里散落空行特判。
+
+### P1：补稳工具配对与轮次边界
+
+- [ ] `ToolStart` / `ToolResult` 写入同一 `tool_use_id`，用 map 对账；删除单枚
+      `pending_tool_start`。
+- [ ] 保存 `turn_id`、`step_id`、`item_id`、`parent_item_id` 与 `seq`。同 step
+      内工具成批，step/turn 之间留轻间隔或轮界。
+- [ ] Running、Succeeded、Failed、Declined、Cancelled、Interrupted、Skipped
+      如实投影；中断工具不得冒充普通失败。
+- [ ] 多工具 start/result 交错时，按 id 原位收口，不准串结果、不准吞卡。
+
+### P1：收拢为一套 renderer
+
+- [ ] 抽出“会话块列表 -> 行组”的公共入口。Main live snapshot、Main replay、
+      Subagent replay 都喂同一种模型。
+- [ ] `AgentPanelPresenter` 删除工具配对、单卡拼行、Markdown 头部拼装等会话
+      renderer 职责，只留 panel 元数据装配。
+- [ ] 清点 `FormatTranscriptItems()` 与 `RenderTurnView()` 的重叠职责，定一处
+      管整组布局；不要再让两者各认一半间距与折叠。
+- [ ] 旧 `TaskEvents` 若仍供 `agent_watch` 或诊断使用，保留事件 API；显示层不再
+      直接拿它猜画面。
+
+### P2：兼容、容量与持久化
+
+- [ ] 老任务没有 id/turn/step 时，按事件顺序作 legacy 投影，并在诊断中标明
+      `legacy_unstructured_transcript`。
+- [ ] canonical 子任务视图设字节、条目与轮数上限；截断须留 marker，不能无声
+      丢掉早期工具。
+- [ ] 前台、后台、递归子代理走同一数据合同。执行模式不得改变 panel 画法。
+- [ ] 任务完成、退出 Dock 后，详情仍可按同一 renderer 重放；不得只剩最终一句。
+
+## 七、测试账
+
+### 7.1 纯投影与 formatter
+
+- [ ] 同一份工具序列，以 Main 为根和以 Subagent #N 为根投影，顶层工具均为
+      `Tool`，下一层工具才为 `SubTool`。
+- [ ] 两枚连续顶层工具之间恰留一口气；父 Tool 与其 SubTool 紧排；SubTool
+      批结束后，下一枚顶层 Tool 重新留间隔。
+- [ ] 紧凑态隐藏真正的 SubTool，不隐藏当前查看 Agent 自己的 Tool。
+- [ ] 详细态在 Main/Subagent 两页都铺参数、全文与错误摘要。
+- [ ] 20、40、80、120 列下不越界，不劈 UTF-8，不靠终端物理折行撑开卡片。
+
+### 7.2 事件与配对
+
+- [ ] `start(A), start(B), result(B), result(A)` 仍各自配对。
+- [ ] 缺 start、缺 result、重复 result、迟到 result 都有稳定投影，不误伤旁卡。
+- [ ] 一次模型响应含多枚工具时保留同 step 身份；下一次响应另起 step 间隔。
+- [ ] steering、compact、cancel 穿过工具事件时，顺序不乱，未定工具状态不伪造。
+
+### 7.3 面板同构
+
+- [ ] 构造同一段会话事实，分别从 Main transcript 与 Subagent task view 渲染；
+      去掉身份头、统计行后，块类型、层级、间距、状态词与展开内容一致。
+- [ ] 切换 `main -> subagent -> main` 不改任一侧 transcript 数据，也不留下另一侧
+      的行。
+- [ ] Subagent 查看态按 `Ctrl+O`，工具与思考一同展开/收起；切回 Main 后沿用
+      会话级开关的既定语义。
+- [ ] resize、Ctrl+L、任务流式更新触发全量重建后，画面与首次 live 渲染同构。
+
+## 八、真终端验收
+
+单测绿了还不算收工。须用 Release 全量一致构建，在真实 worktree、真实交互终端
+跑一遍，留命令、版本、退出码与原始画面记录。
+
+- [ ] Main 派一只会连续调用不少于 8 枚工具的 Subagent；至少含 read/search/
+      command 三类工具。
+- [ ] 工具运行中切入 Subagent：它自己的工具顶格成卡，不再四格缩进挤成一串。
+- [ ] 紧凑态能扫清进度；详细态能展开参数、结果与错误；两态来回切不重影。
+- [ ] Subagent 再派孩子：当前 Subagent 的 `agent(...)` 是顶层 Tool，孙代理内层
+      工具才缩进、才受 SubTool 折叠。
+- [ ] 工具成功、失败、取消各跑一次；状态、摘要、间距与 Main panel 同款。
+- [ ] 终端窄到 20/40 列，再拉宽；卡片不粘连，不串行，不留下旧宽度残影。
+- [ ] 前台与后台子代理各跑一次；完成退 Dock 后重新查看，重放画面不变形。
+
+## 九、收口标准
+
+- [ ] 源码中不再有 Subagent 查看页逐事件手拼工具卡的第二套主路径。
+- [ ] 当前查看 Agent 的工具层级按相对根节点计算，不按“是不是 Main”写死。
+- [ ] 工具配对不再依赖单枚 `pending_tool_start`。
+- [ ] Main/Subagent 的紧凑、详细、间距、宽度、状态与重建行为有同构测试。
+- [ ] Release 聚焦测试通过；全套测试结果与无关失败分开记。
+- [ ] 真 worktree、真终端验收通过，保留版本、命令、退出码与截图/原始输出。
+
+## 十、不要这样修
+
+- 不要只在每张 Subagent 工具卡后塞一行空白。那只遮住“挤”，层级与展开仍错。
+- 不要把 `SubTool` 的全局间距改大。Main 里的真正父子工具本就该紧排，改它会
+  伤到正确画面。
+- 不要只把 `expanded=false` 换成开关便算完。工具仍会全是错层 `SubTool`，配对
+  也仍靠最近一枚 start。
+- 不要复制 `ToolDisplay` 再造一只 SubagentToolDisplay。两套状态机还会走散。
+- 不要拿 presenter 生成了几行字符串当真终端验收。切换、resize、Ctrl+L、流式
+  重铺都须实跑。
