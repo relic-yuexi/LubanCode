@@ -343,19 +343,27 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
             return "workflow agent 节点未接审批宿主，已拒绝 " + name;
         };
     }
-    // 权限下限接线(阶段 5,R 单遗留):Resolver 已校验"不许放宽"(越宽在
-    // 解析口明拒),"收窄生效"在这半截——自定义 Agent 的定义档比会话档
-    // 严时(父 yolo 子 confirm),确认回调换成宿主的"带下限"口,会话档
-    // 向下并到下限再裁定,该问就真把确认拉回。宿主没接 floored 口(旧
-    // 装配)或档不比父严时,原样转发,行为不变。与 agent 工具路的
-    // Hooks::on_tool_confirm_floored 同一先例(0.26.96)。
-    if (custom.has_value() && custom->permission_floor.has_value() && wiring.on_tool_confirm_floored) {
-        auto floored = wiring.on_tool_confirm_floored;
-        const agent::AgentPermissionMode floor = *custom->permission_floor;
-        wiring.on_tool_confirm = [floored, floor](const std::string& tool_use_id, const std::string& name,
-                                                  const nlohmann::json& input) {
-            return floored(tool_use_id, name, input, floor);
-        };
+    // Resolver 已给出父子求交后的有效五档。预裁定与最终确认必须共用它：
+    // 只包确认口会让父 Yolo 在更早的 evaluator 阶段直接 Allow。
+    if (custom.has_value() && custom->permission_floor.has_value()) {
+        const agent::AgentPermissionMode effective = *custom->permission_floor;
+        if (wiring.on_permission_evaluate_floored) {
+            auto floored_evaluate = wiring.on_permission_evaluate_floored;
+            wiring.on_permission_evaluate =
+                [floored_evaluate, effective](const std::string& tool_use_id, const std::string& name,
+                                              tools::ApprovalClass approval_class,
+                                              const nlohmann::json& input,
+                                              const runtime::ToolHookDecision& pre) {
+                    return floored_evaluate(tool_use_id, name, approval_class, input, pre, effective);
+                };
+        }
+        if (wiring.on_tool_confirm_floored) {
+            auto floored = wiring.on_tool_confirm_floored;
+            wiring.on_tool_confirm = [floored, effective](const std::string& tool_use_id, const std::string& name,
+                                                          const nlohmann::json& input) {
+                return floored(tool_use_id, name, input, effective);
+            };
+        }
     }
 
     // turn 推进走 TurnHarness。面板补充只在一轮正常收口后取，取到便另开

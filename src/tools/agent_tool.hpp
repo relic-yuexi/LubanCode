@@ -156,7 +156,16 @@ public:
         // 次数也算进去。
         std::function<void(const api::UsageReport& report)> on_usage;
 
-        // 权限收窄执法(阶段 4):宿主的"带下限的确认"口。自定义 Agent 的
+        // 自定义 Agent 的有效权限预裁定口。父 Yolo 可能提前 Allow，因此
+        // 不能只在最终确认回调里应用求交结果。
+        std::function<runtime::PermissionVerdict(const std::string& tool_use_id, const std::string& name,
+                                                 ApprovalClass approval_class,
+                                                 const nlohmann::json& input,
+                                                 const runtime::ToolHookDecision& pre,
+                                                 agent::AgentPermissionMode effective)>
+            on_permission_evaluate_floored;
+
+        // 有效五档确认口；Yolo may_prompt=true，仅 DontAsk 禁止询问。
         // permissions.mode 比父会话档严时(父 yolo 子 confirm),子代理
         // needs_confirm 的工具走这一口——宿主按 min(会话档, 下限) 裁定,
         // 该问就真把确认拉回来,yolo/auto 的免问不再免。空 = 宿主没接

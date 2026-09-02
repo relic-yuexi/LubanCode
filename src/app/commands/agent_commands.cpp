@@ -323,7 +323,7 @@ std::vector<std::string> FormatAgentDoctorReport(const lubancode::agent::AgentCa
     }
     lines.push_back("预算归属: TaskLedger 任务记录(attempted/completed 分账;正常收场 reserved=0)");
     lines.push_back("permissions: " + (def.permissions_mode.empty() ? std::string("inherit") : def.permissions_mode) +
-                    "(只能比父 Agent 更窄;派发时 AgentProfileResolver 按 agent.permission_widening 明拒)");
+                    "(与父 Agent 按自动能力集合求交，may_prompt 取 AND，子不得扩大父能力)");
 
     // ---- 结论:定义解析过 ≠ 依赖齐;缺项如实数出来 ----
     std::size_t problems = 0;

@@ -93,7 +93,7 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
                     bool has_permission_hooks, tools::ApprovalClass approval_class,
                     const std::string& name, const nlohmann::json& input,
                     const std::function<void(bool asked, bool allowed)>& approval_observer = {},
-                    runtime::PermissionMode permission_floor = runtime::PermissionMode::Yolo);
+                    std::optional<runtime::PermissionMode> permission_floor = std::nullopt);
 
 // ---------------------------------------------------------------------------
 // TurnContext(骨架拆解批三:harness 合流):RunTurn 二十四参 +

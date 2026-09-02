@@ -153,11 +153,9 @@ BuildWorkflowExecutors(const WorkflowCommandContext& wf_ctx, const WorkflowExecu
                         agent_tool->default_max_turns(), environment, overrides));
                 out.material = std::move(*material);
                 out.resolved_name = node.agent;
-                if (environment.has_value() &&
-                    lubancode::agent::AgentPermissionModeRank(out.resolved.permission) <
-                        lubancode::agent::AgentPermissionModeRank(environment->parent_permission)) {
-                    out.permission_floor = out.resolved.permission;
-                }
+                // Resolver 的结果已经是父子能力求交；每个自定义节点都携带，
+                // 后续不得再用枚举整数比较来猜“更严”。
+                out.permission_floor = out.resolved.permission;
                 return out;
             };
         }

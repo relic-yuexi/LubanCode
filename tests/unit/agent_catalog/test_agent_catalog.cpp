@@ -258,7 +258,7 @@ TEST_CASE("夹具样本真文件走一遍:完整/最小/坏样本/名不符") {
 
     // permissions.mode 契约四值各一枚夹具,都可用、值原样落账。
     for (const auto& [fixture, mode] : std::vector<std::pair<const char*, const char*>>{
-             {"perm-inherit", "inherit"}, {"perm-confirm", "confirm"}, {"perm-auto", "auto"},
+             {"perm-inherit", "inherit"}, {"perm-confirm", "default"}, {"perm-auto", "auto"},
              {"perm-yolo", "yolo"}}) {
         const auto* perm = FindEntry(catalog, fixture);
         CHECK(perm->available);

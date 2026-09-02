@@ -1300,15 +1300,12 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
     const agent::ResolvedAgentProfile* resolved =
         resolved_storage.has_value() ? &*resolved_storage : nullptr;
 
-    // 权限收窄执法(阶段 4 接线):Resolver 校验过"不许放宽"(越宽在派发口
-    // 明拒),"收窄生效"在这半截——子定义档比父会话档严时(父 yolo 子
-    // confirm),把确认下限带进 RunTask,子代理循环里 needs_confirm 的工具
-    // 真把确认拉回。父档经环境账现读(嵌套用冻结账);没递环境账(旧调用
-    // 方/单测)按"没账可查"跳过——与技能/MCP 查账同一骨气,不报错,也不放宽。
+    // Resolver 已按“自动能力集合求交 + may_prompt AND”算出最终权限。
+    // 自定义 Agent 每次都携带结果，不能再按枚举 rank 判断是否“更严”。
+    // 这也保证父 Yolo + 子 Default 会进入 floored 确认链，而 Yolo 自身
+    // may_prompt=true，不会错误封死后代询问。
     std::optional<agent::AgentPermissionMode> permission_floor;
-    if (resolved != nullptr && environment.has_value() &&
-        agent::AgentPermissionModeRank(resolved->permission) <
-            agent::AgentPermissionModeRank(environment->parent_permission)) {
+    if (resolved != nullptr) {
         permission_floor = resolved->permission;
     }
     request.permission_floor = permission_floor;
@@ -2426,12 +2423,20 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             }
         };
         if (foreground_hooks != nullptr) {
-            turn_wiring.on_permission_evaluate = foreground_hooks->on_permission_evaluate;
-            // 权限收窄执法(阶段 4):子定义档比父会话档严时,确认回调换成
-            // 宿主的"带下限"口——yolo/auto 的免问在里头被 min(会话档,
-            // 下限) 并掉,该问就真把确认拉回(单子"执行"账:自定义 Agent
-            // 取消与超时之外,权限收窄也是运行期要真生效的一笔)。宿主没接
-            // floored 口(旧调用方)或档不比父严时,原样转发,行为不变。
+            if (permission_floor.has_value() && foreground_hooks->on_permission_evaluate_floored) {
+                auto floored_evaluate = foreground_hooks->on_permission_evaluate_floored;
+                const agent::AgentPermissionMode effective = *permission_floor;
+                turn_wiring.on_permission_evaluate =
+                    [floored_evaluate, effective](const std::string& tool_use_id, const std::string& name,
+                                                  ApprovalClass approval_class, const nlohmann::json& input,
+                                                  const lubancode::runtime::ToolHookDecision& pre) {
+                        return floored_evaluate(tool_use_id, name, approval_class, input, pre, effective);
+                    };
+            } else {
+                turn_wiring.on_permission_evaluate = foreground_hooks->on_permission_evaluate;
+            }
+            // 有效权限必须同时覆盖预裁定和确认：父 Yolo 可能在确认口之前
+            // 就 Allow。resolver 已完成集合求交，这里只把同一结果接进两道门。
             if (permission_floor.has_value() && foreground_hooks->on_tool_confirm_floored) {
                 auto floored = foreground_hooks->on_tool_confirm_floored;
                 const agent::AgentPermissionMode floor = *permission_floor;

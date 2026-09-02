@@ -164,7 +164,16 @@ struct TurnWiring {
     // 分拒绝原因。
     std::function<std::string(const std::string& tool_use_id, const std::string& name)> on_tool_denial_text;
 
-    // 权限收窄执法(自定义 Agent 单·阶段 5,Workflow 侧接线):带档位下限
+    // 自定义 Agent 的有效五档在预裁定阶段也必须生效；只包确认口不够，
+    // 因为父 Yolo 可能在抵达确认口前已经 Allow。空 = 旧宿主回落。
+    std::function<runtime::PermissionVerdict(const std::string& tool_use_id, const std::string& name,
+                                             tools::ApprovalClass approval_class,
+                                             const nlohmann::json& input,
+                                             const runtime::ToolHookDecision& pre,
+                                             AgentPermissionMode effective)>
+        on_permission_evaluate_floored;
+
+    // 有效权限确认口。Yolo 的 may_prompt=true，父 Yolo + 子 Default 可沿此口
     // 的确认口。Workflow agent 节点派的自定义 Agent 定义比会话档严时
     //(父 yolo 子 confirm),AgentExecutor 用它把 on_tool_confirm 包一层
     // ——宿主在里头把会话档向下并到下限再裁定,该问就真把确认拉回。

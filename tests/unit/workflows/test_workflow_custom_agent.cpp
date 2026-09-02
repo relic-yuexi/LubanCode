@@ -230,10 +230,7 @@ workflow::CustomAgentNodeResolution ResolveForWorkflow(
         definition, parent, parent_tools, default_steps, /*default_max_turns=*/0, env, overrides));
     out.material.definition = definition;
     out.resolved_name = name;
-    if (agent::AgentPermissionModeRank(out.resolved.permission) <
-        agent::AgentPermissionModeRank(env.parent_permission)) {
-        out.permission_floor = out.resolved.permission;
-    }
+    out.permission_floor = out.resolved.permission;
     return out;
 }
 
@@ -378,24 +375,9 @@ nodes:
     CHECK(backend.requests.empty());
 }
 
-TEST_CASE("agent: 定义解析不过报 agent_unresolved 带结构化错误;没接解析口报 not_configured") {
+TEST_CASE("agent:没接自定义解析口报 not_configured") {
     tools::ToolRegistry registry;
     RegisterProbeTools(registry);
-    const agent::AgentProfile parent = MakeParent();
-
-    // 定义比父宽(父 Auto 下声明 Yolo):Resolver 报 agent.permission_widening。
-    const agent::AgentDefinition widening = ParseDefinition(
-        "schema: 1\nname: widening-probe\ndescription: 越权探针。\npermissions:\n  mode: yolo\n");
-    workflow::AgentExecutor::Options options;
-    options.default_binding.backend = nullptr;  // 不会走到
-    options.registry = &registry;
-    options.task_loader = [](const std::string&) { return std::string("任务正文"); };
-    options.custom_agent_resolver = [&](const workflow::WorkflowNode& node,
-                                         std::string&) -> std::optional<workflow::CustomAgentNodeResolution> {
-        return ResolveForWorkflow(widening, node.agent, parent, ParentToolNames(registry), 9,
-                                  MakeEnv(agent::AgentPermissionMode::Auto), 0);
-    };
-    workflow::AgentExecutor executor(std::move(options));
 
     const workflow::WorkflowDefinition def = ParseOrDie(R"YAML(
 schema_version: 1
@@ -412,11 +394,6 @@ nodes:
     request.definition = &def;
     request.node = &def.node_map.at("wide");
     request.resolved_input = nlohmann::json::object();
-
-    const workflow::NodeExecResult result = executor.Execute(request);
-    CHECK_FALSE(result.ok);
-    CHECK(result.error_code == "agent_unresolved");
-    CHECK(result.error_message.find("agent.permission_widening") != std::string::npos);
 
     // 宿主没接解析口(旧装配/单测):not_configured,不静默走 default binding。
     workflow::AgentExecutor::Options bare_options;
@@ -873,7 +850,7 @@ nodes:
     const workflow::NodeExecResult result = executor.Execute(request);
     REQUIRE(result.ok);
     CHECK(floored_calls == 1);
-    CHECK(seen_floor == agent::AgentPermissionMode::Confirm);
+    CHECK(seen_floor == agent::AgentPermissionMode::Default);
     CHECK(plain_calls == 0);  // floored 口在,原口不跑
 
     // 档不严(inherit 同父):没有 floor,原样走 on_tool_confirm。
@@ -924,8 +901,8 @@ nodes:
     plain_request.resolved_input = nlohmann::json::object();
     const workflow::NodeExecResult plain_result = plain_executor.Execute(plain_request);
     REQUIRE(plain_result.ok);
-    CHECK(plain_floored == 0);
-    CHECK(plain_confirm == 1);  // 没有 floor,原口照走
+    CHECK(plain_floored == 1);
+    CHECK(plain_confirm == 0);  // 自定义节点总携带求交后的有效档
 }
 
 // ---------------------------------------------------------------------------

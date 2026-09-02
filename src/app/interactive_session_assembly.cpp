@@ -338,6 +338,32 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
         context.deny_commands = &settings_local.deny_commands;
         return lubancode::runtime::EvaluatePermission(context, pre, approval_class, name, input);
     };
+    wiring.on_permission_evaluate_floored =
+        [this, approval_class_slot](const std::string&, const std::string& name,
+                                    lubancode::tools::ApprovalClass approval_class,
+                                    const nlohmann::json& input,
+                                    const lubancode::runtime::ToolHookDecision& pre,
+                                    lubancode::agent::AgentPermissionMode effective) {
+            *approval_class_slot = approval_class;
+            lubancode::runtime::PermissionContext context;
+            context.auto_confirm = auto_confirm;
+            switch (effective) {
+                case lubancode::agent::AgentPermissionMode::Default:
+                    context.mode = lubancode::runtime::PermissionMode::Confirm; break;
+                case lubancode::agent::AgentPermissionMode::AcceptEdits:
+                    context.mode = lubancode::runtime::PermissionMode::AcceptEdits; break;
+                case lubancode::agent::AgentPermissionMode::Yolo:
+                    context.mode = lubancode::runtime::PermissionMode::Yolo; break;
+                case lubancode::agent::AgentPermissionMode::Auto:
+                    context.mode = lubancode::runtime::PermissionMode::Auto; break;
+                case lubancode::agent::AgentPermissionMode::DontAsk:
+                    context.mode = lubancode::runtime::PermissionMode::DontAsk; break;
+            }
+            context.always_allowed = &always_allowed_tools;
+            context.allow_commands = &settings_local.allow_commands;
+            context.deny_commands = &settings_local.deny_commands;
+            return lubancode::runtime::EvaluatePermission(context, pre, approval_class, name, input);
+        };
     wiring.on_tool_confirm = [this, approval_class_slot](const std::string& tool_use_id,
                                                          const std::string& name,
                                                          const nlohmann::json& input) -> bool {
@@ -368,14 +394,20 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
         const lubancode::runtime::ToolHookDecision pre;
         lubancode::runtime::PermissionMode runtime_floor = lubancode::runtime::PermissionMode::Yolo;
         switch (floor) {
-            case lubancode::agent::AgentPermissionMode::Confirm:
+            case lubancode::agent::AgentPermissionMode::Default:
                 runtime_floor = lubancode::runtime::PermissionMode::Confirm;
+                break;
+            case lubancode::agent::AgentPermissionMode::AcceptEdits:
+                runtime_floor = lubancode::runtime::PermissionMode::AcceptEdits;
                 break;
             case lubancode::agent::AgentPermissionMode::Auto:
                 runtime_floor = lubancode::runtime::PermissionMode::Auto;
                 break;
             case lubancode::agent::AgentPermissionMode::Yolo:
                 runtime_floor = lubancode::runtime::PermissionMode::Yolo;
+                break;
+            case lubancode::agent::AgentPermissionMode::DontAsk:
+                runtime_floor = lubancode::runtime::PermissionMode::DontAsk;
                 break;
         }
         return lubancode::app::ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display,

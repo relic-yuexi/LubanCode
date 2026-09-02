@@ -474,9 +474,10 @@ AgentDefinitionParseResult ParseAgentDefinitionYaml(const std::string& yaml_text
         }
     }
 
-    // ---- permissions(契约 4.9:mode 只认 inherit/confirm/auto/yolo) ----
-    // read_only 不进首版——只读由 tools.allow 白名单表达(Explore 即此做法),
-    // 单独点名指路,别让人猜;其余认不得的值走通用枚举错(agent.bad_enum)。
+    // ---- permissions(五档 canonical；confirm 是 default 的兼容别名) ----
+    // read_only 不进本版——只读由 tools.allow 白名单表达。旧 confirm 读取时
+    // 借现有 issue/doctor 通道发弃用 warning，并立即归一化；后续写回只会看
+    // 到 canonical default，不会重新写出旧值。
     if (const YAML::Node permissions = MapField(root, "permissions", issues, &has_error); permissions) {
         has_error = !CheckUnknownFields(permissions, "permissions.", {"mode"}, issues) || has_error;
         const YAML::Node mode = permissions["mode"];
@@ -484,12 +485,19 @@ AgentDefinitionParseResult ParseAgentDefinitionYaml(const std::string& yaml_text
             const YAML::Mark mark = mode.Mark();
             issues.push_back(AgentDefinitionIssue{
                 "permissions.mode",
-                "认不得的值 \"read_only\"(只收 inherit / confirm / auto / yolo);只读限制用 tools.allow 白名单表达",
+                "认不得的值 \"read_only\"(只收 inherit / default / accept_edits / auto / yolo / dont_ask);只读限制用 tools.allow 白名单表达",
                 mark.line + 1, mark.column + 1, false});
             has_error = true;
-        } else if (!EnumField(permissions, "mode", "permissions.", {"inherit", "confirm", "auto", "yolo"},
+        } else if (!EnumField(permissions, "mode", "permissions.",
+                              {"inherit", "default", "accept_edits", "auto", "yolo", "dont_ask", "confirm"},
                               def.permissions_mode, issues)) {
             has_error = true;
+        } else if (def.permissions_mode == "confirm") {
+            const YAML::Mark mark = mode.Mark();
+            issues.push_back(AgentDefinitionIssue{
+                "permissions.mode", "permissions.mode=confirm 已弃用，请改用 default",
+                mark.line + 1, mark.column + 1, /*warning=*/true, "agent.legacy_permission_confirm"});
+            def.permissions_mode = "default";
         }
     }
 

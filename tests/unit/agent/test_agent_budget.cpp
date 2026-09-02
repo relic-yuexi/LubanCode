@@ -662,14 +662,15 @@ TEST_CASE("自定义 Agent:YAML runtime 预算四字段并流——给了压父�
     }
 }
 
-TEST_CASE("自定义 Agent:权限放宽与缺依赖在派发口结构化明拒") {
+TEST_CASE("自定义 Agent:权限按能力求交且缺依赖仍在派发口结构化明拒") {
     tools::ToolRegistry sub_registry;
     sub_registry.Register(std::make_unique<FakeTool>("read_file", tools::Tool::Result{"内容", false}));
     sub_registry.Register(std::make_unique<FakeTool>("search", tools::Tool::Result{"命中", false}));
 
-    // 权限放宽:父会话 auto,定义声明 yolo -> agent.permission_widening,拒发。
+    // 父 Auto、子 Yolo：超出父的 All 能力被交集裁掉，仍按 Auto 派发。
     {
         FakeBackend backend;
+        backend.scripts = {TextScript("结论:能力求交放行")};
         tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
         agent_tool.SetResolveEnvironment([]() -> agent::AgentProfileResolveEnvironment {
             agent::AgentProfileResolveEnvironment env;
@@ -688,11 +689,8 @@ TEST_CASE("自定义 Agent:权限放宽与缺依赖在派发口结构化明拒")
         input["prompt"] = "审";
         input["agent_type"] = "library-reviewer";
         const tools::Tool::Result result = agent_tool.execute(input);
-        CHECK(result.is_error);
-        CHECK(result.content.find("agent.permission_widening") != std::string::npos);
-        CHECK(result.content.find("yolo") != std::string::npos);
-        CHECK(result.content.find("auto") != std::string::npos);
-        CHECK(backend.captured_requests.empty());  // 拒发:一个请求不出
+        CHECK_FALSE(result.is_error);
+        CHECK(backend.captured_requests.size() == 1);
     }
     // 收窄(auto 父下声明 confirm)照常派发。
     {
