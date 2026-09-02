@@ -1,0 +1,90 @@
+# 终端思考活动条重画与输入框光标跳动
+
+- 状态：待修（2026-09-02 真机发现；当前只有源码诊断，尚无修复与真终端复测）
+- 日期：2026-09-02
+- 级别：P1（终端交互体验与光标所有权）
+- 类型：LubanCode 产品缺陷（终端画面重绘）
+- 现场版本：当前 `main`，`1a048bd2`（版本线已到 `0.26.172`）
+- 范围：`src/cli/console_input_stream_footer.cpp`、`src/cli/terminal_frame.cpp`、`src/platform/terminal_batch.*`、`src/platform/console*`、终端帧测试与真终端驱动
+- 关联：`86f9fa87` 引入 turn 级活动条与 200ms 心跳；`25fd55a9` 调整输入区模式行与活动行排位后，现场更容易看见
+- 不在本单：模型请求、输入队列语义、IME 文本提交、正文 Markdown 渲染、Agent Panel 数据隔离
+
+## 一、现场
+
+回合运行时，输入框上方显示：
+
+```text
+• 思考中  esc 取消 (20s)
+确认 shift+tab 切换到 auto 模式
+────────────────────────
+> 键入并回车 排队下一条 · Esc 打断
+```
+
+真机可见光标在蓝色活动点/“思考中”一带与输入框之间反复跳。输入框仍能收字，尚未见草稿丢失；眼前却像焦点被两处争抢，约每秒闪五次。截图只证明画面症状，不证明终端型号，也不证明 DEC 2026 支持情况。
+
+## 二、当前源码路径
+
+1. `StreamFooterHeartbeat::ThreadMain()` 每隔 200ms 推进 `frame`，调用 `UpdateTurnActivityElapsed(frame, elapsed)`。
+2. `BuildFooterWorkingLine()` 用 `working_highlight % glyphs.size()` 逐字扫亮“思考中”。秒数没变，亮字也会变，故每拍都改活动行指纹。
+3. `RedrawStreamFooterLocked()` 发现活动行变化，走 `QueueInlineFrameDiff()`。
+4. `QueueInlineFrameDiff()` 先发隐藏光标，再把终端光标移到活动行清写，随后移回 composer 光标，最后显示光标。
+5. `ProbeStdoutConsole()` 只给出 `is_console` 与 `vt_enabled`。它没有“支持 DEC 2026 synchronized output”这档能力。
+6. `TerminalBatch` 却默认 `synchronized_output=true`，无条件包 `CSI ? 2026 h/l`。终端若只支持普通 VT，不支持或没有正确实现 DEC 2026，中间移光标步骤便可能露到屏上。
+7. 批次落完后，`RedrawStreamFooterLocked()` 还会再调一次 `SetCursorPos()` 钉回输入框；这笔虽不移去活动行，却说明 VT 批与平台光标 API 仍在混用。
+
+源码链与现场节奏相合，故“200ms 活动行重画 + 同步输出能力误判/宿主实现差异”为首要嫌疑。未录制原始 VT 字节与真终端逐帧画面前，不把它写成唯一已证根因。
+
+## 三、现有测试缺口
+
+`tests/unit/cli/test_terminal_frame.cpp` 只断言字节顺序：隐藏光标早于新行、显示光标晚于新行、批次外包 DEC 2026。它没有回答：
+
+- 宿主终端认不认 DEC 2026；
+- 一次 `stdout.write` 内的中间 CUP 是否会露帧；
+- 不支持同步输出时，实体光标是否曾停到活动行；
+- Windows Terminal、经典 conhost、VS Code/xterm.js 与 POSIX 终端是否同款。
+
+纯函数/字节测试即使全绿，也不能冒充真终端已验。
+
+## 四、修复裁决
+
+先止血，再治根；不拿调大刷新间隔遮住所有权问题。
+
+### P0：减少无意义重画
+
+- [ ] 活动行只有秒数、阶段或中断态变化时才重画；普通 turn 不再为逐字扫光每 200ms 改一帧。
+- [ ] 若保留动画，须在不移动实体输入光标的绘制路上跑；做不到便先关闭扫光，只留静态蓝点与秒钟。
+
+验收：同一秒内无状态变化时，footer 帧审计为零新增落笔；输入框光标不因活动动画离位。
+
+### P0：拆开终端能力
+
+- [ ] 将普通 VT、原地重画、DEC 2026 同步输出分开建模；不得再拿 `vt_enabled` 代替同步输出能力。
+- [ ] 不支持同步输出的宿主走明确降级路：隐藏动画，或用不会搬动实体光标的原生屏幕写入；不得仍发送一串会漏中间态的 CUP。
+- [ ] 收拢 VT 批与 `SetCursorPos()` 的所有权。同一帧只留一条权威光标恢复路，末态恒为 composer 的真实软换行坐标。
+
+验收：支持与不支持 DEC 2026 两档都能跑；降级有测试、有诊断，不静默假装支持。
+
+### P1：测试与真机
+
+- [ ] 补能力矩阵单测：VT=true/false、sync=true/false，分别断言选路与输出合同。
+- [ ] 补帧测试：活动行变、composer 不变时，最终光标恒归输入框；无动画档同一秒内零输出。
+- [ ] 用真实交互程序跑 Windows Terminal、经典 conhost、VS Code 终端；能取到环境时再补 Linux/macOS 终端。
+- [ ] 真机录制至少 10 秒静置思考与 10 秒边输入边思考；核对无光标跳行、无字符丢失、无残行、无输入延迟突刺。
+
+验收：保留命令、终端版本、退出码、录屏/逐帧证据与帧审计数字。源码检查、生成字节、单测全绿都不能代替真机结论。
+
+## 五、预计改动边界
+
+- `src/platform/console.hpp` 与 Windows/POSIX 实现：能力模型。
+- `src/platform/terminal_batch.*`：同步输出显式入参及降级合同。
+- `src/cli/console_input_stream_footer.cpp`：活动行刷新节奏与光标恢复单一写口。
+- `src/cli/terminal_frame.cpp`：差量帧的光标所有权。
+- `tests/unit/cli/test_terminal_frame.cpp`、相关 footer 测试：字节与选路。
+- `tests/manual/stream_footer_driver.cpp` 或新窄驱动：真终端复现与验收。
+
+## 六、不做什么
+
+- 不删 busy composer，也不禁止回合运行时排队输入。
+- 不把活动行挪远一点便算修好；光标仍会漏帧，只是更难看见。
+- 不凭截图断言某一款终端必定不支持 DEC 2026。
+- 不把旧 `LubanCode真实实测问题记录_20260829.todo` 复活；那本十票已在 `54bf47be` 清账删档，本票单独立账。
