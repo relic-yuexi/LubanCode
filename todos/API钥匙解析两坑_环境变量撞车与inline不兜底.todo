@@ -1,6 +1,6 @@
 # API 钥匙解析两坑：环境变量撞车与 inline 不兜底
 
-- 状态：已实现（2026-09-02 当日销账。P0 解析链倒转+四情形单测、P1 可观测中英成对、P2 文档向导提示全落；ctest 365/365 全绿，两坑假后端复现验收通过——注入撞车变量带警告跑通、unset 后回落 inline 跑通，实际发送钥匙与 `--config` 展示逐情形核对一致。打码复用 MaskApiKey 前 8 位口径，与单子"前 6 位"字面略异）
+- 状态：已实现（2026-09-02 当日销账。P0 解析链倒转+四情形单测、P1 可观测中英成对、P2 文档向导提示全落；ctest 365/365 全绿，两坑假后端复现验收通过——注入撞车变量带警告跑通、unset 后回落 inline 跑通，实际发送钥匙与 `--config` 展示逐情形核对一致。打码复用 MaskApiKey 前 8 位口径，与单子"前 6 位"字面略异）。**2026-09-02 二次实战又抓出坑三，主人定案通名退役——见"六、坑三与通名退役"，待修。**
 - 日期：2026-09-02
 - 级别：P1（配置可靠性——钥匙错了用户只会看见 401，不知道错在哪）
 - 范围：provider 钥匙解析链、`--config` 展示、缺钥匙报错文案
@@ -45,3 +45,30 @@
 - 复现实战两坑的原始环境（注入撞车变量 / unset 后跑）：前者带警告跑通，后者回落 inline 跑通，均不再 401/判缺。
 - `--config` 在上述四种情形下输出与实际发送的钥匙一致（抓包或假后端核）。
 - 现有 provider 配置解析测试全绿，无行为回退（正路配置不受影响）。
+
+## 六、坑三与通名退役（2026-09-02 主人定案，待修）
+
+### 6.1 现场（比前两坑都阴）
+
+二次实战（0.26.166，坑一坑二已修）unset 撞车变量后仍判"缺 api_key"。破案链：Claude Code 会话给 shell 注入了 `ANTHROPIC_BASE_URL` 等四个通名变量 → 顶层 wire 未配时内置默认按 Anthropic 线 → `generic_env.anthropic_base_url` 有值，base_url 落 [通用环境变量] 来源 → provider 应用段 `EnvironmentOverridesProviderBinding` 判"环境解绑"（`environment_unbound=true`）→ **374 行 auth_token 段被短路，ccmoon 的 inline 钥匙根本不应用** → 顶层 api_key 链（此刻按 anthropic 挑 `anthropic_auth_token`，已 unset）落 2543 清空 → 缺钥匙。
+
+变量不撞车、也不缺——旁边站着同院子的邻居，钥匙就没了。且全程无警告无提示，`--config` 只显示"(未设置)[内置默认值]"，无头案。
+
+### 6.2 主人定案：通名退役，只认自家命名空间
+
+> 不要读 ANTHROPIC_*/OPENAI_* 这类通名，只读 LUBAN 开头的环境变量——比如 LUBAN_BASE_URL、模型同理。
+
+落地口径：
+
+1. **砍掉 generic env 链**（`ANTHROPIC_BASE_URL/ANTHROPIC_AUTH_TOKEN/ANTHROPIC_API_KEY/ANTHROPIC_MODEL`、`OPENAI_API_KEY/OPENAI_BASE_URL/OPENAI_MODEL` 等一切通名读取）——base_url/model/api_key 的顶层来源链里 [通用环境变量] 一级整体退役。
+2. **只认 `LUBAN_*` 命名空间**：`LUBAN_BASE_URL`、`LUBAN_MODEL`、`LUBAN_API_KEY`；既有 `LUBANCODE_*`（如 `LUBANCODE_API_KEY`）作为同族保留（都以 LUBAN 开头，不破坏）。
+3. provider 的 `key_env` 字段照旧可用（显式指定变量名），但其值也不该再指通名——指向通名时按 P2 的既有提示警告。
+4. 退役是干净砍，不走兼容窗：CHANGELOG 写明"通名环境变量不再读取，改用 LUBAN_*"；`--config` 与文档同步。自家产品自家用户，一刀利落。
+5. 砍掉后 `environment_unbound` 的误判源（generic base_url/model）随之消失——provider 绑定在纯文件配置下天然稳定，坑三断根。
+
+### 6.3 验收
+
+- Claude Code 式污染环境（注入四个 ANTHROPIC 通名变量）下跑 one_shot：provider 的 inline 钥匙照常生效，零警告零干扰。
+- `LUBAN_BASE_URL`/`LUBAN_MODEL`/`LUBAN_API_KEY` 三变量按优先级正常生效，`--config` 来源标注为 [环境变量(LUBAN_*)] 一类明示。
+- 通名注入任何组合都不再改变 wire/base_url/model/api_key 的解析结果。
+- 相关单测更新（generic env 链的既有用例改判/退役），全量 ctest 零回归。
