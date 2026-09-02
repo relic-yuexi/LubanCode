@@ -79,7 +79,6 @@ struct StreamFooterState {
     // 送达/打断收场动了账,下一帧自然对上,不会挂着旧条目。
     bool working = false;             // true 时在输入框上方合成 Working 动画
     std::string working_label;
-    std::size_t working_highlight = 0;
     long long working_seconds = 0;
     // turn 级活动条(终端回合视觉收束单):认整个 turn,不认单次模型请求。
     // Spinner 那组 Start/Update/Stop 只在 turn_working 为假时才有绘制权
@@ -116,6 +115,11 @@ struct StreamFooterState {
     // VT 批量序列(TerminalBatch)这一场能不能用:BeginStreamFooter 探一次
     // 存住(探测带 SetConsoleMode,不该每帧来一遍)。
     bool vt_batch = false;
+    // DEC 2026 同步输出这一场能不能包(终端思考活动条单·P0 治根):与
+    // vt_batch 各是各的档,没确认 2026 的宿主批里一枚标记都不发,单帧
+    // 事务(kSyncOutputBegin/End 的散装用法)同样不发——静默假装原子提交
+    // 比不包装更糟。
+    bool sync_output = false;
     // 两枚深度都只在 StdoutWriteMutex 内改。确认/ask_user 可嵌套挂起；
     // 工具条目重画也可套着状态块重画。任何一层尚未退完，Redraw 都只记
     // 状态不落笔，最外层析构负责补回完整帧。
@@ -173,6 +177,21 @@ void ClearStreamFooterRowsAt(int top_row, int rows, int width, int height) {
     }
 }
 
+// 散装单帧事务的开关(P0 治根):只在确认支持 DEC 2026 的档位包这对标记。
+// 没确认的宿主发了也只是被吞掉,平添"这一段已原子提交"的错觉——两枚
+// 都不发,漏不漏中间态交给选路(vt_batch=false 的宿主压根不走 CUP 路)。
+void SyncFrameBegin(const StreamFooterState& f) {
+    if (f.sync_output) {
+        TermOut() << kSyncOutputBegin;
+    }
+}
+
+void SyncFrameEnd(const StreamFooterState& f) {
+    if (f.sync_output) {
+        TermOut() << kSyncOutputEnd;
+    }
+}
+
 // Composer 合流 P1:StripAnsiForDisplayWidth/FooterRowDisplayWidth(逐行量
 // 显示宽)随行拼装一并挪去 cli/bottom_chrome.cpp 的 PlainDisplayWidth——
 // footer 不再自己拼行,自然不再自己量行。
@@ -197,8 +216,7 @@ std::vector<std::string> FooterUtf8Glyphs(const std::string& text) {
 }
 
 std::string BuildFooterWorkingLine(const StreamFooterState& f, int width) {
-    // Stopping 态标签换词(走字扫光的字符数随之变一次,此后恒定——换词
-    // 只发生在置 cancel 那一拍,不逐帧抖)。
+    // Stopping 态标签换词(换词只发生在置 cancel 那一拍,不逐帧抖)。
     const std::string label =
         f.turn_working && f.turn_interrupt_requested ? tr("spinner.stopping") : f.working_label;
     const std::vector<std::string> glyphs = FooterUtf8Glyphs(label);
@@ -227,9 +245,11 @@ std::string BuildFooterWorkingLine(const StreamFooterState& f, int width) {
         if (used + glyph_width > label_room) {
             break;
         }
-        const bool highlighted = !f.reset.empty() && i == f.working_highlight % glyphs.size();
-        line += highlighted ? f.theme.spinner : f.theme.stats;
-        line += glyphs[i];
+        // 逐字扫光已撤(P0 止血,终端思考活动条单):亮字每 200ms 轮换一
+        // 位,活动行指纹便每拍都变,拖着实体光标在活动行与输入框之间来回
+        // 跳——这正是真机"约每秒闪五次"的那一拍。活动行动态只剩圆点颜
+        // 色(阶段/中断态)与秒钟,重画判据收敛到 TurnActivityRowChanged。
+        line += f.theme.stats + glyphs[i];
         used += glyph_width;
     }
     int left_used = prefix_width + used;
@@ -425,7 +445,7 @@ void EraseStreamFooterLocked() {
         // 正文，下一笔流式文字才能接对地方。
         int bx = f.body_x >= 0 ? f.body_x : info->cursor_x;
         int by = f.body_y >= 0 ? f.body_y : info->cursor_y;
-        TermOut() << kSyncOutputBegin;
+        SyncFrameBegin(f);
         if (f.last_width != -1 && f.last_width != info->width &&
             f.input_row >= 0 && !f.painted_row_widths.empty()) {
             // 正文 delta 可能抢在 200ms heartbeat 前到。Erase 自己也要追
@@ -443,7 +463,7 @@ void EraseStreamFooterLocked() {
         } else {
             ClearStreamFooterRowsAt(f.row, f.rows, info->width, info->height);
         }
-        TermOut() << kSyncOutputEnd;
+        SyncFrameEnd(f);
         TermOut().flush();
         platform::SetCursorPos(bx, by);
         f.last_width = info->width;
@@ -496,9 +516,9 @@ void PrepareStreamBodyWriteLocked(int delta_newlines, int delta_width_cols) {
     if (clear_bottom <= clear_top) {
         return;
     }
-    TermOut() << kSyncOutputBegin;
+    SyncFrameBegin(f);
     ClearStreamFooterRowsAt(clear_top, clear_bottom - clear_top, info->width, info->height);
-    TermOut() << kSyncOutputEnd;
+    SyncFrameEnd(f);
     TermOut().flush();
     platform::SetCursorPos(bx, by);
     // 帧账里被压住的行标脏(x 挪到取不到的负值,永远比不中),下一拍
@@ -601,11 +621,11 @@ void RedrawStreamFooterLocked() {
         const FooterResizeRecoveryPlan recovery = ComputeFooterResizeRecovery(
             f.row, f.input_row, info->cursor_y, f.painted_row_widths,
             f.input_row_index, f.input_cursor_column, info->width);
-        TermOut() << kSyncOutputBegin;
+        SyncFrameBegin(f);
         ClearStreamFooterRowsAt(recovery.top_row, recovery.rows_to_clear,
                                 info->width, info->height);
         SweepStaleWorkingRowsLocked(f, *info);
-        TermOut() << kSyncOutputEnd;
+        SyncFrameEnd(f);
         TermOut().flush();
         if (recovery.cursor_reflowed) {
             bx = 0;
@@ -707,9 +727,9 @@ void RedrawStreamFooterLocked() {
         // 没启用 / 还没准备好文案:这一帧不画新框;旧框(若在)整块擦净
         // 再走,不留半帧残影。
         if (f.row >= 0) {
-            TermOut() << kSyncOutputBegin;
+            SyncFrameBegin(f);
             ClearStreamFooterRowsAt(f.row, f.rows, info->width, info->height);
-            TermOut() << kSyncOutputEnd;
+            SyncFrameEnd(f);
             TermOut().flush();
             platform::SetCursorPos(bx, by);
             ForgetStreamFooterFrame(f);
@@ -719,8 +739,10 @@ void RedrawStreamFooterLocked() {
 
     // 指纹跳帧(战术三):内容指纹(含状态行文本、上横线标签、列宽/窗高)
     // 没变、帧还在原处、也不欠补画——这一拍零输出。心跳 200ms 的闲拍从
-    // "整框擦画"变成一笔不写;光标仍钉回输入行(老路每拍重画完都落在那,
-    // 跳帧不能把这笔账丢了)。
+    // "整框擦画"变成一笔不写。光标的账:这一拍没写一个字节,没人挪过它;
+    // 只有探测发现物理光标真离了输入位(被外部/异常挪走)才补钉一笔——
+    // 不再每拍无条件打原生 API(VT 批路混用平台光标口的正是这笔,终端
+    // 思考活动条单收拢所有权)。
     const auto fingerprint_of = [&](const BottomChromeLayout& frame_layout) {
         std::string value = BottomChromeFingerprint(frame_layout.chrome);
         for (const std::string& row : model.status_rows) {
@@ -732,7 +754,9 @@ void RedrawStreamFooterLocked() {
     };
     if (!f.needs_repaint && f.row >= 0 && f.last_frame.has_value() &&
         f.last_frame_origin == f.row && fingerprint_of(layout) == f.last_fingerprint) {
-        platform::SetCursorPos(f.input_cursor_column, f.input_row);
+        if (info->cursor_x != f.input_cursor_column || info->cursor_y != f.input_row) {
+            platform::SetCursorPos(f.input_cursor_column, f.input_row);
+        }
         return;
     }
 
@@ -794,7 +818,7 @@ void RedrawStreamFooterLocked() {
         const int sweep_rows = f.row + f.rows - sweep_top;
         if (sweep_rows > 0) {
             if (f.vt_batch) {
-                platform::TerminalBatch sweep(viewport_x, viewport_y);
+                platform::TerminalBatch sweep(viewport_x, viewport_y, f.sync_output);
                 for (int i = 0; i < sweep_rows; ++i) {
                     sweep.ClearRowHardFrom(0, sweep_top + i, width);
                 }
@@ -804,11 +828,20 @@ void RedrawStreamFooterLocked() {
             }
         }
     }
+    // 三档选路 + 光标所有权(P0 治根,终端思考活动条单):vt_batch/sync_
+    // output 两枚档位在 BeginStreamFooter 探好。VT 批有命令落笔时,批的
+    // 末笔 MoveTo+ShowCursor 就是本帧唯一的光标恢复路;原生路 legacy 的
+    // 末笔 SetCursorPos 同理。批里一个命令都没落(指纹跳帧漏网的等价帧)
+    // 才由平台口补钉。旧路批落完再叠一笔原生 SetCursorPos——两条恢复路
+    // 各说各话,ConPTY 异步渲染与直写缓冲两套时序打架,正是实体光标在
+    // 活动行与输入框之间来回跳的另一半病根。
+    bool cursor_pinned_by_paint = false;
     if (f.vt_batch) {
-        platform::TerminalBatch batch(viewport_x, viewport_y);
+        platform::TerminalBatch batch(viewport_x, viewport_y, f.sync_output);
         const InlineFrameDiffStats diff_stats = QueueInlineFrameDiff(batch, previous, paint->frame, target);
         const std::size_t batch_bytes = batch.has_commands() ? batch.Finish().size() : 0;
         batch.Flush();
+        cursor_pinned_by_paint = batch_bytes > 0;
         if (FrameAuditEnabled() && batch_bytes > 0) {
             ++f.audit_frames;
             f.audit_bytes += batch_bytes;
@@ -816,13 +849,15 @@ void RedrawStreamFooterLocked() {
         }
     } else {
         PaintInlineFrameLegacy(previous, paint->frame, target);
+        cursor_pinned_by_paint = true;
     }
     // 光标落在输入行(布局算出的真实软换行位置;resize 追踪跟着光标走,
-    // ComputeFooterResizeRecovery 的"input row"语义即"光标所在行")。diff
-    // 帧没发命令时也补这一笔——物理光标被别人挪过的账就地钉回。
+    // ComputeFooterResizeRecovery 的"input row"语义即"光标所在行")。
     const int cursor_row = paint->cursor_row;
     const int cursor_column = paint->cursor_x;
-    platform::SetCursorPos(cursor_column, target + cursor_row);
+    if (!cursor_pinned_by_paint) {
+        platform::SetCursorPos(cursor_column, target + cursor_row);
+    }
     f.row = target;
     f.rows = static_cast<int>(paint->frame.rows.size());
     f.body_x = bx;
@@ -870,13 +905,20 @@ void BeginStreamFooter(const Theme& theme, bool enabled) {
     f.audit_frames = 0;
     f.audit_bytes = 0;
     f.audit_dirty_rows = 0;
-    f.vt_batch = platform::ProbeStdoutConsole().vt_enabled;
+    // 三档能力分开问(P0 治根):vt/sync 各探各的,选路规则集中在
+    // PlanInlineRepaint。被动探针只答 is_console/vt,同步输出是主动一问
+    // (DECRQM,进程级缓存,交互会话开场已预热),这里拿现成结论,不再付
+    // 探测窗。
+    platform::StdoutConsoleProbe probe = platform::ProbeStdoutConsole();
+    probe.sync_output = platform::ProbeSyncOutputSupport();
+    const platform::InlineRepaintPlan plan = platform::PlanInlineRepaint(probe);
+    f.vt_batch = plan.vt_batch;
+    f.sync_output = plan.sync_output;
     f.composer = RenderState{};  // 忙时草稿从空开始(取回编辑除外,那由取回方写)
     f.echo.clear();   // 废弃镜像(见 StreamFooterState 迁移注记),归零防旧值漏读
     f.hints.clear();
     f.working = false;
     f.working_label.clear();
-    f.working_highlight = 0;
     f.working_seconds = 0;
     f.suspend_depth = 0;
     f.paint_depth = 0;
@@ -894,8 +936,11 @@ void EndStreamFooter() {
     EraseStreamFooterLocked();  // 擦掉常驻那行,免得残留在 markdown 收束重画区之外
     if (FrameAuditEnabled()) {
         // 一轮流式的脚注帧账:驱动测试对"帧数有帽、字节只花在脏行"用的
-        // 就是这一行(stderr,不搅正文)。
-        TermErr() << "[frame-audit] busy_footer frames=" << f.audit_frames
+        // 就是这一行(stderr,不搅正文)。paint 报这一场走的档位(vt-sync/
+        // vt/native),降级不静默——真机录证拿它对账。
+        const char* paint_tier = f.vt_batch ? (f.sync_output ? "vt-sync" : "vt") : "native";
+        TermErr() << "[frame-audit] busy_footer paint=" << paint_tier
+                  << " frames=" << f.audit_frames
                   << " bytes=" << f.audit_bytes << " dirty_rows=" << f.audit_dirty_rows << "\n";
         TermErr().flush();
     }
@@ -930,14 +975,12 @@ bool StartStreamFooterWorking(const std::string& label) {
     }
     f.working = true;
     f.working_label = label;
-    f.working_highlight = 0;
     f.working_seconds = 0;
     RedrawStreamFooterLocked();
     return true;
 }
 
-void UpdateStreamFooterWorking(const std::string& label, std::size_t highlighted_glyph,
-                               long long elapsed_seconds) {
+void UpdateStreamFooterWorking(const std::string& label, long long elapsed_seconds) {
     std::lock_guard<std::mutex> lock(StdoutWriteMutex());
     StreamFooterState& f = FooterSlot();
     if (!f.enabled || !f.working) {
@@ -946,8 +989,14 @@ void UpdateStreamFooterWorking(const std::string& label, std::size_t highlighted
     if (f.turn_working) {
         return;  // turn 活动条当家:Spinner 的帧不进(含它的"从 0 重数")
     }
+    // P0 止血:活动行只在秒数/标签/中断态变化时才值得重画(TurnActivityRow
+    // Changed 钉的合同)。同一秒的闲拍在这里就收手,不进布局与屏幕探测,
+    // 帧审计零新增落笔;指纹跳帧那道闸继续兜底。
+    if (!TurnActivityRowChanged(f.working_label, f.working_seconds, f.turn_interrupt_requested,
+                                label, elapsed_seconds, f.turn_interrupt_requested)) {
+        return;
+    }
     f.working_label = label;
-    f.working_highlight = highlighted_glyph;
     f.working_seconds = elapsed_seconds;
     RedrawStreamFooterLocked();
 }
@@ -963,7 +1012,6 @@ void StopStreamFooterWorking() {
     }
     f.working = false;
     f.working_label.clear();
-    f.working_highlight = 0;
     f.working_seconds = 0;
     RedrawStreamFooterLocked();
 }
@@ -985,19 +1033,25 @@ void BeginTurnActivity(const std::string& label, std::int64_t started_at_ms) {
     f.turn_interrupt_requested = false;
     f.working = true;
     f.working_label = label;
-    f.working_highlight = 0;
     f.working_seconds = 0;
     RedrawStreamFooterLocked();
 }
 
-void UpdateTurnActivityElapsed(std::size_t highlighted_glyph, std::int64_t elapsed_seconds) {
+void UpdateTurnActivityElapsed(std::int64_t elapsed_seconds) {
     std::lock_guard<std::mutex> lock(StdoutWriteMutex());
     StreamFooterState& f = FooterSlot();
     if (!f.enabled || !f.turn_working) {
         return;
     }
+    // P0 止血:活动行只在秒数/标签/中断态变化时才值得重画(TurnActivityRow
+    // Changed 钉的合同)。同一秒的闲拍(200ms 心跳每拍都来)在这里就收手,
+    // 不进布局与屏幕探测,帧审计零新增落笔;指纹跳帧那道闸继续兜底。
+    if (!TurnActivityRowChanged(f.working_label, f.working_seconds, f.turn_interrupt_requested,
+                                f.working_label, static_cast<long long>(elapsed_seconds),
+                                f.turn_interrupt_requested)) {
+        return;
+    }
     f.working = true;
-    f.working_highlight = highlighted_glyph;
     f.working_seconds = static_cast<long long>(elapsed_seconds);
     RedrawStreamFooterLocked();
 }
@@ -1024,7 +1078,6 @@ long long EndTurnActivity() {
     f.turn_interrupt_requested = false;
     f.working = false;
     f.working_label.clear();
-    f.working_highlight = 0;
     f.working_seconds = 0;
     RedrawStreamFooterLocked();
     return final_seconds;
@@ -1062,7 +1115,6 @@ void StreamFooterHeartbeat::Stop() {
 
 void StreamFooterHeartbeat::ThreadMain() {
     try {
-        std::size_t frame = 0;
         bool stopping_reported = false;
         while (!stop_.load(std::memory_order_acquire)) {
             std::this_thread::sleep_for(std::chrono::milliseconds(200));
@@ -1081,13 +1133,14 @@ void StreamFooterHeartbeat::ThreadMain() {
                     SetTurnActivityInterruptRequested();
                     stopping_reported = true;
                 }
-                UpdateTurnActivityElapsed(frame, elapsed);
+                // 走字扫光已撤(P0 止血):心跳只报秒数,同一秒的拍在
+                // UpdateTurnActivityElapsed 里就收手,帧审计零新增落笔。
+                UpdateTurnActivityElapsed(elapsed);
             } else {
                 std::lock_guard<std::mutex> lock(StdoutWriteMutex());
                 if (RepaintSuspendedLocked()) continue;
                 RedrawStreamFooterLocked();
             }
-            ++frame;
         }
     } catch (const std::exception& e) {
         TermErr() << "\n[footer-heartbeat] " << e.what() << "\n";

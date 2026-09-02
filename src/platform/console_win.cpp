@@ -24,6 +24,7 @@
 #include <windows.h>
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <iostream>
 #include <iterator>
@@ -436,6 +437,129 @@ StdoutConsoleProbe ProbeStdoutConsole() {
         }
     }
     return probe;
+}
+
+// DECRQM 应答的逐事件状态机(ProbeSyncOutputSupport 用):期望收到
+// ESC [ ? 2026 ; <digit> $ y,任何一位走样就把"这一串"整批当用户输入
+// 还回、从下一个 ESC 重头等。前缀配对中的记录单独攒着——问成了它们是
+// 终端应答(吃掉),问不成它们是用户按键(还回),两头都不丢账。
+namespace {
+
+constexpr std::string_view kSyncReplyPrefix = "\x1b[?2026;";
+
+struct SyncReplyReader {
+    std::vector<INPUT_RECORD> prefix_records;  // 配对中的应答字节
+    std::vector<INPUT_RECORD> stray_records;   // 夹带的用户输入/无关事件
+    std::size_t matched = 0;                   // 前缀已对上的长度
+    bool got_param = false;                    // ';' 后那一位数字
+    int mode_value = -1;
+    bool answered = false;
+
+    void GiveUpPrefix() {
+        stray_records.insert(stray_records.end(), prefix_records.begin(), prefix_records.end());
+        prefix_records.clear();
+        matched = 0;
+        got_param = false;
+        mode_value = -1;
+    }
+
+    // 喂一个字符事件。返回 false = 这个事件不是应答的一部分。
+    bool Feed(char ch) {
+        if (matched < kSyncReplyPrefix.size()) {
+            if (ch != kSyncReplyPrefix[matched]) {
+                return false;
+            }
+            ++matched;
+            return true;
+        }
+        if (!got_param) {
+            if (ch < '0' || ch > '9') {
+                return false;
+            }
+            mode_value = ch - '0';
+            got_param = true;
+            return true;
+        }
+        if (!got_dollar) {
+            if (ch != '$') {
+                return false;
+            }
+            got_dollar = true;
+            return true;
+        }
+        if (ch != 'y') {
+            return false;
+        }
+        answered = true;
+        return true;
+    }
+
+    bool got_dollar = false;
+};
+
+}  // namespace
+
+bool ProbeSyncOutputSupport() {
+    // 进程级缓存:0=没问过,1=确认支持,2=确认不支持。只缓存确定性结论
+    // (终端答过话);输入锁没抢到这种"没问成"不缓存,下轮再问。
+    static std::atomic<int> cached{0};
+    const int state = cached.load(std::memory_order_acquire);
+    if (state != 0) {
+        return state == 1;
+    }
+    // 前置:真控制台且 VT 已开(顺带再试一次打开)。VT 不开的宿主,查询串
+    // 会被当正文印到屏上,一发都不能发;那也就无所谓 2026,直接定案。
+    if (!ProbeStdoutConsole().vt_enabled) {
+        cached.store(2, std::memory_order_release);
+        return false;
+    }
+    // 应答走控制台输入,与用户按键混流。限时拿输入锁:拿不到说明监听
+    // 线程/前台编辑器正读键,这一轮不问(不缓存,下轮再试),绝不反向
+    // 等成死锁(stdout 锁的持有方恰是本函数的调用方,见 footer 一路)。
+    std::unique_lock<std::recursive_timed_mutex> input_lock(ConsoleInputMutex(), std::defer_lock);
+    if (!input_lock.try_lock_for(std::chrono::milliseconds(120))) {
+        return false;
+    }
+    std::cout << "\x1b[?2026$p" << std::flush;
+
+    SyncReplyReader reader;
+    const ULONGLONG deadline = GetTickCount64() + 200;
+    while (!reader.answered) {
+        const ULONGLONG now = GetTickCount64();
+        if (now >= deadline) {
+            break;
+        }
+        INPUT_RECORD record{};
+        if (!ReadInputRecord(record, static_cast<DWORD>(deadline - now))) {
+            break;
+        }
+        const bool text_key = record.EventType == KEY_EVENT && record.Event.KeyEvent.bKeyDown != FALSE &&
+                              record.Event.KeyEvent.uChar.UnicodeChar != 0;
+        if (!text_key) {
+            reader.stray_records.push_back(record);  // 修饰键/鼠标/窗口事件:不是应答
+            continue;
+        }
+        const char ch = static_cast<char>(record.Event.KeyEvent.uChar.UnicodeChar);
+        if (!reader.Feed(ch)) {
+            reader.GiveUpPrefix();
+            reader.stray_records.push_back(record);  // 走样:多半是用户先敲的键
+            continue;
+        }
+        reader.prefix_records.push_back(record);
+    }
+    // 结账:夹带的用户输入一律还回(问成也还);配对中的前缀只在问成时
+    // 才算终端应答被吃掉,没问成它们同样是用户按键,一并还回。
+    if (!reader.answered) {
+        reader.GiveUpPrefix();
+    }
+    RestoreInputRecords(reader.stray_records);
+
+    // 答了话(哪怕答 0=不认得)是确定性结论;预算耗尽没答也定案不支持
+    // ——DECRPM 应答是即时的事,200ms 不答就是不会答,别叫每轮再等一遍。
+    // 误伤方向是安全的:支持的终端被误判,走的只是降级路,不再漏中间态。
+    const bool supported = reader.answered && reader.mode_value >= 1 && reader.mode_value <= 4;
+    cached.store(supported ? 1 : 2, std::memory_order_release);
+    return supported;
 }
 
 std::optional<int> ConsoleWidth() {

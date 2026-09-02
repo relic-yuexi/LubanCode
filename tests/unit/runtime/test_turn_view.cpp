@@ -1039,7 +1039,7 @@ TEST_CASE("turn 活动条:footer 未启用时 Begin/Update/End 全链空操作")
     CHECK_FALSE(lubancode::cli::TurnActivityActive());
     lubancode::cli::BeginTurnActivity("Working", 1000);
     CHECK_FALSE(lubancode::cli::TurnActivityActive());  // 没起成
-    lubancode::cli::UpdateTurnActivityElapsed(0, 5);
+    lubancode::cli::UpdateTurnActivityElapsed(5);
     lubancode::cli::SetTurnActivityInterruptRequested();
     CHECK(lubancode::cli::EndTurnActivity() == -1);     // 没起过的 End 返回 -1
     CHECK_FALSE(lubancode::cli::TurnActivityActive());
@@ -1051,7 +1051,7 @@ TEST_CASE("turn 活动条:footer 先启用,首个流事件前也立即亮起并�
 
     lubancode::cli::BeginTurnActivity("Working", 1000);
     CHECK(lubancode::cli::TurnActivityActive());
-    lubancode::cli::UpdateTurnActivityElapsed(2, 5);
+    lubancode::cli::UpdateTurnActivityElapsed(5);
     CHECK(lubancode::cli::EndTurnActivity() == 5);
     CHECK_FALSE(lubancode::cli::TurnActivityActive());
 

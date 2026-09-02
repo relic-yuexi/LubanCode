@@ -22,6 +22,7 @@
 #include "platform/console.hpp"
 #include "platform/csi_keys.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <cstdio>
 #include <cstdlib>
@@ -197,6 +198,133 @@ StdoutConsoleProbe ProbeStdoutConsole() {
     // POSIX 真终端天然支持 ANSI,没有 Windows 那层 VT 开关。
     probe.vt_enabled = probe.is_console;
     return probe;
+}
+
+// DECRQM(`CSI ?2026 $ p`)一问、DECRPM(`CSI ?2026;Ps $ y`)一答。应答走
+// stdin 与用户按键混流:发问、收答、回灌夹带的手艺与 GetScreenInfo 的
+// DSR 循环同一套(回压队列 PendingBytes + 按序回灌,一个键不丢)。答
+// Ps=1..4 是"认得这枚模式",0 是"不认得",都不再问;预算耗尽没答,按
+// "不会答"定案缓存——误伤方向安全:支持的终端被误判,走的只是降级路。
+bool ProbeSyncOutputSupport() {
+    static std::atomic<int> cached{0};  // 0=没问过,1=确认支持,2=确认不支持
+    const int state = cached.load(std::memory_order_acquire);
+    if (state != 0) {
+        return state == 1;
+    }
+    if (isatty(STDOUT_FILENO) == 0 || isatty(STDIN_FILENO) == 0) {
+        cached.store(2, std::memory_order_release);
+        return false;
+    }
+    // 应答与按键共用输入流:限时拿输入锁(拿不到=别人在读键,这轮不问也
+    // 不缓存,下轮再问),堵住短促的单键读取,不跟长菜单反向死等。
+    std::unique_lock<std::recursive_timed_mutex> input_lock(ConsoleInputMutex(), std::defer_lock);
+    if (!input_lock.try_lock_for(std::chrono::milliseconds(120))) {
+        return false;
+    }
+    // 行缓冲模式下应答会被压到换行才放行,先进原始模式再问(同 DSR)。
+    struct termios saved_query{};
+    struct termios current{};
+    const bool need_raw = tcgetattr(STDIN_FILENO, &current) == 0 && (current.c_lflag & ICANON) != 0;
+    if (need_raw && !EnterRawTermios(&saved_query)) {
+        return false;
+    }
+
+    std::cout << "\x1b[?2026$p" << std::flush;
+
+    bool answered = false;
+    int mode_value = -1;
+    std::deque<unsigned char> stray;
+    const auto dump_seq = [&stray](std::deque<unsigned char>& seq) {
+        for (const unsigned char c : seq) {
+            stray.push_back(c);
+        }
+    };
+    const int kTotalBudgetMs = 250;
+    int spent = 0;
+    while (spent < kTotalBudgetMs && !answered) {
+        const int b = ReadByteTimeout(50);
+        if (b < 0) {
+            spent += 50;
+            continue;
+        }
+        if (b != 0x1b) {
+            stray.push_back(static_cast<unsigned char>(b));
+            continue;
+        }
+        // 读到 ESC:配 "?2026;" 前缀,再收 <digit> $ y;哪一步走样,整段进
+        // 回压账,继续等下一个 ESC。
+        std::deque<unsigned char> seq{0x1b};
+        const int b2 = ReadByteTimeout(50);
+        if (b2 != '[') {
+            if (b2 >= 0) {
+                seq.push_back(static_cast<unsigned char>(b2));
+            }
+            dump_seq(seq);
+            continue;
+        }
+        seq.push_back('[');
+        bool prefix_ok = true;
+        for (const unsigned char want : {'?', '2', '0', '2', '6', ';'}) {
+            const int c = ReadByteTimeout(50);
+            if (c < 0) {
+                prefix_ok = false;
+                break;
+            }
+            seq.push_back(static_cast<unsigned char>(c));
+            if (c != want) {
+                prefix_ok = false;
+                break;
+            }
+        }
+        if (!prefix_ok) {
+            dump_seq(seq);
+            continue;
+        }
+        const int param = ReadByteTimeout(50);
+        if (param < '0' || param > '9') {
+            if (param >= 0) {
+                seq.push_back(static_cast<unsigned char>(param));
+            }
+            dump_seq(seq);
+            continue;
+        }
+        seq.push_back(static_cast<unsigned char>(param));
+        mode_value = param - '0';
+        const int dollar = ReadByteTimeout(50);
+        if (dollar != '$') {
+            if (dollar >= 0) {
+                seq.push_back(static_cast<unsigned char>(dollar));
+            }
+            dump_seq(seq);
+            mode_value = -1;
+            continue;
+        }
+        seq.push_back('$');
+        const int final_y = ReadByteTimeout(50);
+        if (final_y != 'y') {
+            if (final_y >= 0) {
+                seq.push_back(static_cast<unsigned char>(final_y));
+            }
+            dump_seq(seq);
+            mode_value = -1;
+            continue;
+        }
+        answered = true;
+    }
+
+    // 夹带的用户按键回灌队列(保持原始顺序,插在队头之前——它们比队列里
+    // 已有的字节先到)。
+    auto& q = PendingBytes();
+    for (auto it = stray.rbegin(); it != stray.rend(); ++it) {
+        q.push_front(*it);
+    }
+
+    if (need_raw) {
+        RestoreTermios(&saved_query);
+    }
+    const bool supported = answered && mode_value >= 1 && mode_value <= 4;
+    cached.store(supported ? 1 : 2, std::memory_order_release);
+    return supported;
 }
 
 std::optional<int> ConsoleWidth() {

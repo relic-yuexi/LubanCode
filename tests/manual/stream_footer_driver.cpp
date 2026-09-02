@@ -131,6 +131,8 @@ std::string ReadRow(int row) {
 }
 
 std::string ReadAttributeSignature(int row) {
+    // (扫光撤除后暂无调用方,保留这只家伙什:后续若要验"同一秒内配色
+    // 零变化"的真机账,还用它刮行属性。)
     const int width = BufferWidth();
     std::vector<CHAR_INFO> cells(static_cast<std::size_t>(width));
     SMALL_RECT region{0, static_cast<SHORT>(row), static_cast<SHORT>(width - 1), static_cast<SHORT>(row)};
@@ -685,33 +687,37 @@ int wmain(int argc, wchar_t** argv) {
     SendText("请务必先调用 read_file 读取 README.md 的前 20 行,再用大约 200 字介绍一下这个项目,"
              "分两三段说,不用标题。");
     SendKey(VK_RETURN, L'\r', 0);
-    // Working/思考中:首个流事件前亮色须沿文字移动。刮同一行的字符属性
-    // 签名，至少见到两帧不同分布才算真动画，不只换了文案。
-    std::set<std::string> spinner_frames;
+    // Working/思考中(终端思考活动条单后的新合同):逐字扫光已撤,活动行
+    // 动态只剩秒钟一跳——文本随秒数变,而物理光标全程钉在输入框,任何
+    // 采样点都不许停在活动行(真机"约每秒闪五次跳光标"的直接回归闸)。
+    std::set<std::string> activity_texts;
     bool working_and_composer_visible = false;
-    bool working_cursor_in_composer = false;
+    bool working_cursor_ever_left_composer = false;
     const DWORD spinner_deadline = GetTickCount() + 10000;
     while (GetTickCount() < spinner_deadline) {
         const int spinner_row = FindLastRow("思考中");
         const int composer_row = FindFooterInputRow();
         if (spinner_row >= 0) {
-            spinner_frames.insert(ReadAttributeSignature(spinner_row));
+            activity_texts.insert(ReadRow(spinner_row));
         }
         if (spinner_row >= 0 && composer_row > spinner_row) {
             working_and_composer_visible = true;
-            working_cursor_in_composer = CursorRow() == composer_row && CursorColumn() >= 2;
+            if (!(CursorRow() == composer_row && CursorColumn() >= 2)) {
+                working_cursor_ever_left_composer = true;
+            }
         }
-        if (spinner_frames.size() >= 2 && working_and_composer_visible && working_cursor_in_composer) {
-            break;
+        if (activity_texts.size() >= 3) {
+            break;  // 已跨过至少两次秒钟跳,采样足够
         }
         Sleep(50);
     }
-    Check(spinner_frames.size() >= 2,
-          "G0 Working:亮色扫过文字,捕获到 " + std::to_string(spinner_frames.size()) + " 帧不同配色");
+    Check(activity_texts.size() >= 2,
+          "G0 Working:秒钟走动,活动行文本至少变过两拍(实得 " +
+              std::to_string(activity_texts.size()) + " 种,扫光已撤不验配色轮换)");
     Check(working_and_composer_visible,
           "G0 Working 与输入框同帧可见,输入框不再被 spinner 挂起");
-    Check(working_cursor_in_composer,
-          "G0 Working 动画期间物理光标仍停在输入框");
+    Check(!working_cursor_ever_left_composer,
+          "G0 Working 期间物理光标全程钉在输入框(全程采样,无一次落在活动行)");
     ChildStillRunning("G0 Working");
     // 输入行靠结构定位(上横线/`> `输入行/下横线/状态行四连),不靠占位
     // 提示文案——文案改版不再连坐。

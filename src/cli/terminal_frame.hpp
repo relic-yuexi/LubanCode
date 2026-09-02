@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "platform/terminal_batch.hpp"
@@ -53,6 +54,12 @@ struct InlineFrameDiffStats {
 InlineFrameDiffStats QueueInlineFrameDiff(platform::TerminalBatch& batch,
                                           const InlineFrame* previous,
                                           const InlineFrame& next, int origin_y);
+
+// 活动行的重画判据(终端思考活动条单·P0 止血):只有秒数、阶段标签或
+// 中断态变化,这一行才算变了——逐字扫光撤除后动画不再是变化源,同一秒
+// 内的心跳闲拍照此直接收手,帧审计零新增落笔。纯函数,帧测试钉合同。
+bool TurnActivityRowChanged(std::string_view old_label, long long old_seconds, bool old_interrupted,
+                            std::string_view new_label, long long new_seconds, bool new_interrupted);
 
 // ---------------------------------------------------------------------------
 // 帧账的"保锚可见"决策(多智能体真机回归单,纯函数):从 top_row 起

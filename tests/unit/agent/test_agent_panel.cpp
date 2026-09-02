@@ -848,7 +848,7 @@ TEST_CASE("帧 diff:面板行加在帧顶,composer 行未变就不重写") {
     small.rows.push_back(InlineFrameRow{0, 80, false, "> "});
     small.cursor_x = 2;
     small.cursor_row = 1;
-    lubancode::platform::TerminalBatch diff_batch(0, 0);
+    lubancode::platform::TerminalBatch diff_batch(0, 0, /*synchronized_output=*/true);
     InlineFrame grown = small;
     grown.rows.insert(grown.rows.begin(), InlineFrameRow{0, 80, false, "agent #1"});
     grown.cursor_row = 2;
@@ -867,7 +867,7 @@ TEST_CASE("帧 diff:面板收走时旧行被清,不留残骸") {
     small.rows.push_back(InlineFrameRow{0, 80, true, "----"});
     small.cursor_x = 2;
     small.cursor_row = 0;
-    lubancode::platform::TerminalBatch diff_batch(0, 0);
+    lubancode::platform::TerminalBatch diff_batch(0, 0, /*synchronized_output=*/true);
     const auto stats = QueueInlineFrameDiff(diff_batch, &grown, small, 10);
     CHECK(stats.emitted);
     CHECK(stats.changed_rows >= 1);  // 第 0 行(agent)必须被清

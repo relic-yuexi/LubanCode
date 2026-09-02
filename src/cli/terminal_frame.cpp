@@ -116,6 +116,11 @@ InlineFrameDiffStats QueueInlineFrameDiff(platform::TerminalBatch& batch,
     return stats;
 }
 
+bool TurnActivityRowChanged(std::string_view old_label, long long old_seconds, bool old_interrupted,
+                            std::string_view new_label, long long new_seconds, bool new_interrupted) {
+    return old_seconds != new_seconds || old_interrupted != new_interrupted || old_label != new_label;
+}
+
 ViewportRevealPlan ComputeViewportReveal(int buffer_height, int viewport_y, int viewport_height, int top_row,
                                          int rows_needed) {
     ViewportRevealPlan plan;

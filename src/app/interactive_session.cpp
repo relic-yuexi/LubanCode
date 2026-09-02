@@ -1228,6 +1228,11 @@ void TerminalSessionController::Run() {
 }
 
 int RunInteractiveSession(const InteractiveSessionOptions& options) {
+    // 同步输出能力(DEC 2026)开场一问(终端思考活动条单):此刻输入队列最
+    // 静、监听线程未起,DECRQM 的应答不会被抢、也不会吞用户按键;结论进
+    // 进程级缓存,后续 footer/重画直接拿,不为 200ms 探测窗付首帧延迟。
+    // 误判方向安全:支持的终端被探成不支持,走的只是不包 2026 的降级路。
+    lubancode::platform::ProbeSyncOutputSupport();
     // 组合根外迁(会话终章):装配由组合根(cli_app)调 BuildSessionStack
     // 完成并经 options.stack 递进来;没递(单测/旧调用点)就在这现装一份,
     // 两条路共用同一只装配,不走第二套逻辑。

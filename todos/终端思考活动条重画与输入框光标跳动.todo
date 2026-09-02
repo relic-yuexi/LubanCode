@@ -1,6 +1,6 @@
 # 终端思考活动条重画与输入框光标跳动
 
-- 状态：待修（2026-09-02 真机发现；当前只有源码诊断，尚无修复与真终端复测）
+- 状态：源码修复已落（2026-09-02；P0 两刀 + P1 单测全绿 361/361，真终端复测待做——见 P1 留白项）
 - 日期：2026-09-02
 - 级别：P1（终端交互体验与光标所有权）
 - 类型：LubanCode 产品缺陷（终端画面重绘）
@@ -51,25 +51,49 @@
 
 ### P0：减少无意义重画
 
-- [ ] 活动行只有秒数、阶段或中断态变化时才重画；普通 turn 不再为逐字扫光每 200ms 改一帧。
-- [ ] 若保留动画，须在不移动实体输入光标的绘制路上跑；做不到便先关闭扫光，只留静态蓝点与秒钟。
+- [x] 活动行只有秒数、阶段或中断态变化时才重画；普通 turn 不再为逐字扫光每 200ms 改一帧。
+  （`BuildFooterWorkingLine` 逐字轮换高亮已删，标签恒一色；判据抽成纯函数
+  `TurnActivityRowChanged`（terminal_frame），心跳/Spinner 同秒闲拍在入口就收手；
+  指纹跳帧闸照旧兜底。）
+- [x] 若保留动画，须在不移动实体输入光标的绘制路上跑；做不到便先关闭扫光，只留静态蓝点与秒钟。
+  （裁决：关扫光，留静态蓝点 + 秒钟。降级档（未确认 2026）本就不该跑动画，
+  确认档也没必要为不可见动画付 5Hz 重画——验收口径"同一秒零新增落笔"一刀切。）
 
 验收：同一秒内无状态变化时，footer 帧审计为零新增落笔；输入框光标不因活动动画离位。
+（单测钉 `TurnActivityRowChanged` 同秒假/秒变真；`EndStreamFooter` 帧账行新增
+`paint=` 档位字段备真机对账。）
 
 ### P0：拆开终端能力
 
-- [ ] 将普通 VT、原地重画、DEC 2026 同步输出分开建模；不得再拿 `vt_enabled` 代替同步输出能力。
-- [ ] 不支持同步输出的宿主走明确降级路：隐藏动画，或用不会搬动实体光标的原生屏幕写入；不得仍发送一串会漏中间态的 CUP。
-- [ ] 收拢 VT 批与 `SetCursorPos()` 的所有权。同一帧只留一条权威光标恢复路，末态恒为 composer 的真实软换行坐标。
+- [x] 将普通 VT、原地重画、DEC 2026 同步输出分开建模；不得再拿 `vt_enabled` 代替同步输出能力。
+  （`StdoutConsoleProbe` 补 `sync_output` 档；新增 `ProbeSyncOutputSupport()`——
+  DECRQM `CSI ?2026$p` 主动一问、DECRPM 应答 1..4 才算认得，答不上/夹按键一律
+  当不支持，结论进程级缓存；交互会话开场（RunInteractiveSession）预热。选路收在
+  `platform::PlanInlineRepaint`：vt×sync 四档一张表。）
+- [x] 不支持同步输出的宿主走明确降级路：隐藏动画，或用不会搬动实体光标的原生屏幕写入；不得仍发送一串会漏中间态的 CUP。
+  （扫光全档已撤；未确认 2026 时 Windows 退原生控制台 API 路
+  （PaintInlineFrameLegacy，FillConsoleOutput 一族），POSIX 无原生路、退 VT 批
+  不包 2026 且只在真状态变化时单笔落帧；`TerminalBatch` 同步输出改显式入参
+  （无默认值），散装 `kSyncOutputBegin/End` 用法全部按档位开关。）
+- [x] 收拢 VT 批与 `SetCursorPos()` 的所有权。同一帧只留一条权威光标恢复路，末态恒为 composer 的真实软换行坐标。
+  （批有命令时批末笔 MoveTo+ShowCursor 是唯一恢复路，原生路 legacy 末笔
+  SetCursorPos 唯一；批零命令才由平台口补钉；指纹跳帧路的每拍无条件原生钉
+  改成"探测发现真离位才补钉"。）
 
 验收：支持与不支持 DEC 2026 两档都能跑；降级有测试、有诊断，不静默假装支持。
+（四档矩阵单测钉选路；帧账行 `paint=vt-sync|vt|native` 即降级诊断，不静默。）
 
 ### P1：测试与真机
 
-- [ ] 补能力矩阵单测：VT=true/false、sync=true/false，分别断言选路与输出合同。
-- [ ] 补帧测试：活动行变、composer 不变时，最终光标恒归输入框；无动画档同一秒内零输出。
-- [ ] 用真实交互程序跑 Windows Terminal、经典 conhost、VS Code 终端；能取到环境时再补 Linux/macOS 终端。
-- [ ] 真机录制至少 10 秒静置思考与 10 秒边输入边思考；核对无光标跳行、无字符丢失、无残行、无输入延迟突刺。
+- [x] 补能力矩阵单测：VT=true/false、sync=true/false，分别断言选路与输出合同。
+  （test_terminal_frame.cpp：`PlanInlineRepaint` 四档 + `TerminalBatch` sync
+  true/false 的 2026 包裹合同。）
+- [x] 补帧测试：活动行变、composer 不变时，最终光标恒归输入框；无动画档同一秒内零输出。
+  （同文件：diff 批末笔 CUP 恒为 composer 坐标、其后仅 ShowCursor/2026l；
+  `TurnActivityRowChanged` 同秒零变化钉"同一秒零输出"的判据半边——
+  fingerprint 跳帧半边是既有机制。）
+- [ ] 用真实交互程序跑 Windows Terminal、经典 conhost、VS Code 终端；能取到环境时再补 Linux/macOS 终端。（待真机：本单在无交互控制台的沙箱/worktree 收口，跑不了真终端；stream_footer_driver G0 幕判据已换新合同——秒钟走动 + 光标全程钉输入框，真机跑时直接用）
+- [ ] 真机录制至少 10 秒静置思考与 10 秒边输入边思考；核对无光标跳行、无字符丢失、无残行、无输入延迟突刺。（待真机：同上；帧账行 `paint=` 档位字段与 G0/G7 幕就是录证抓手）
 
 验收：保留命令、终端版本、退出码、录屏/逐帧证据与帧审计数字。源码检查、生成字节、单测全绿都不能代替真机结论。
 

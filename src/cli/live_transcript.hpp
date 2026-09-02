@@ -173,7 +173,7 @@ public:
                 paint_frame.cursor_x = saved_cursor_x;
                 paint_frame.cursor_row = saved_cursor_y - anchor->start_row;
             }
-            lubancode::platform::TerminalBatch batch(viewport_x, viewport_y);
+            lubancode::platform::TerminalBatch batch(viewport_x, viewport_y, lubancode::platform::ProbeSyncOutputSupport());
             lubancode::cli::QueueInlineFrameDiff(batch, &anchor->frame, paint_frame,
                                                   anchor->start_row);
             batch.Flush();
@@ -231,7 +231,7 @@ public:
             return;
         }
         if (SupportsVtBatch()) {
-            lubancode::platform::TerminalBatch batch(info->viewport_x, info->viewport_y);
+            lubancode::platform::TerminalBatch batch(info->viewport_x, info->viewport_y, lubancode::platform::ProbeSyncOutputSupport());
             for (int r = end_row; r <= info->cursor_y; ++r) {
                 batch.ClearRowHardFrom(0, r, info->width);
             }
@@ -285,7 +285,7 @@ public:
             return;
         }
         if (SupportsVtBatch()) {
-            lubancode::platform::TerminalBatch batch(info->viewport_x, info->viewport_y);
+            lubancode::platform::TerminalBatch batch(info->viewport_x, info->viewport_y, lubancode::platform::ProbeSyncOutputSupport());
             for (int r = 0; r < stored.rows; ++r) {
                 batch.ClearRowHardFrom(0, stored.start_row + r, info->width);
             }
@@ -1012,7 +1012,7 @@ private:
         }
 
         if (SupportsVtBatch()) {
-            lubancode::platform::TerminalBatch batch(viewport_x, viewport_y);
+            lubancode::platform::TerminalBatch batch(viewport_x, viewport_y, lubancode::platform::ProbeSyncOutputSupport());
             for (int r = 0; r < rows_to_clear && start_row_ + r < buffer_height; ++r) {
                 batch.ClearRowFrom(0, start_row_ + r, buffer_width);
             }
