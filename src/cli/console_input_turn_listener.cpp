@@ -525,7 +525,9 @@ void TurnInputListener::ThreadMain() {
                     continue;
                 }
                 LineEditorCore& shared_editor = SharedEditor();
-                shared_editor.set_confirm_mode(NextConfirmMode(shared_editor.confirm_mode()));
+                const ConfirmMode next_mode = NextConfirmMode(shared_editor.confirm_mode());
+                shared_editor.set_confirm_mode(next_mode);
+                ModeNoticeSlot().Show(next_mode);
             }
             std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
             RedrawStreamFooterLocked();

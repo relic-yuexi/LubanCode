@@ -33,6 +33,7 @@ struct BottomChromeFrame {
     std::vector<std::string> activity_rows;   // Working 活动条(空闲空)
     std::vector<std::string> queue_rows;      // 待发队列(空队列零行)
     std::vector<std::string> agent_dock_rows; // 导航坞(无子代理零行)
+    std::vector<std::string> mode_notice_rows; // Shift+Tab 说明(状态栏紧上方)
     std::vector<std::string> transient_rows;  // slash 提示等(常态零行)
     // Composer 摘要:草稿全文 + 光标 + 档位 + 占位提示拼成的一串,给指纹
     // 用。合流前指纹只认行数,正文/光标变了指纹不动;合流后"内容变必变"
@@ -48,12 +49,14 @@ struct BottomChromeFrame {
     int TotalRows() const {
         return static_cast<int>(help_rows.size()) + static_cast<int>(activity_rows.size()) +
                static_cast<int>(queue_rows.size()) + composer_rows + rule_rows + status_rows +
-               static_cast<int>(agent_dock_rows.size()) + static_cast<int>(transient_rows.size());
+               static_cast<int>(agent_dock_rows.size()) + static_cast<int>(mode_notice_rows.size()) +
+               static_cast<int>(transient_rows.size());
     }
     // 坞首行相对帧顶的偏移:帮助/队列之后、框与状态栏之下。
     int AgentDockFirstRow() const {
         return static_cast<int>(help_rows.size()) + static_cast<int>(activity_rows.size()) +
-               static_cast<int>(queue_rows.size()) + composer_rows + rule_rows + status_rows;
+               static_cast<int>(queue_rows.size()) + composer_rows + rule_rows + status_rows +
+               static_cast<int>(mode_notice_rows.size());
     }
 };
 
@@ -95,6 +98,7 @@ struct BottomChromeModel {
     std::vector<std::string> queue_rows;       // 待发队列(空队列零行)
     ComposerViewModel composer;
     std::vector<std::string> status_rows;      // 状态栏(调用方拼好的整行)
+    std::vector<std::string> mode_notice_rows; // Shift+Tab 说明(最多一行，黄色)
     std::vector<std::string> agent_dock_rows;  // 导航坞(无子代理零行)
     // 坞行的监督色辅助(监督器单 P1-1):与 agent_dock_rows 按位对齐,可短
     //(不足位按 Normal);行文本保持纯文本,颜色由布局在这包 ANSI。

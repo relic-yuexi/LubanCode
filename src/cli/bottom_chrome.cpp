@@ -32,6 +32,10 @@ std::string BottomChromeFingerprint(const BottomChromeFrame& frame) {
     for (const auto& row : frame.agent_dock_rows) {
         value += row + "\n";
     }
+    value += "n:";
+    for (const auto& row : frame.mode_notice_rows) {
+        value += row + "\n";
+    }
     value += "t:";
     for (const auto& row : frame.transient_rows) {
         value += row + "\n";
@@ -194,6 +198,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     std::size_t activity_count = model.activity_rows.size();
     std::size_t queue_count = model.queue_rows.size();
     std::size_t dock_count = model.agent_dock_rows.size();
+    std::size_t notice_count = (std::min)(std::size_t{1}, model.mode_notice_rows.size());
     std::size_t transient_count = model.transient_rows.size();
     std::size_t window_first = 0;                          // composer 行窗(默认全量)
     std::size_t window_count = wrapped.rows.size();
@@ -215,6 +220,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
                 room -= granted;
                 return static_cast<std::size_t>(granted);
             };
+            notice_count = take((std::min)(std::size_t{1}, model.mode_notice_rows.size()));
             help_count = take(model.help_rows.size());
             activity_count = take(model.activity_rows.size());
             queue_count = take(model.queue_rows.size());
@@ -228,6 +234,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             activity_count = 0;
             queue_count = 0;
             dock_count = 0;
+            notice_count = 0;
             transient_count = 0;
             int keep = height_budget - rules_rows - status_rows_n;
             if (keep < 1) {
@@ -256,6 +263,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
                              model.activity_rows.size() - activity_count +
                              model.queue_rows.size() - queue_count +
                              model.agent_dock_rows.size() - dock_count +
+                             model.mode_notice_rows.size() - notice_count +
                              model.transient_rows.size() - transient_count);
     }
 
@@ -299,6 +307,11 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     }
     for (std::size_t i = 0; i < queue_count; ++i) {
         push(false, tinted(model.queue_rows[i]));
+    }
+    // Shift+Tab 说明固定在常驻状态行紧上方，黄色且只取第一物理行。
+    for (std::size_t i = 0; i < notice_count; ++i) {
+        push(false, theme.tool_line +
+                        TruncateUtf8ToDisplayWidth(model.mode_notice_rows[i], width - 1) + theme.reset);
     }
     // 模式行常驻输入框正上方；thinking/activity 在它上面。状态行自带配色，
     // 窄屏由组行层先保右端信息，再由这里作最后一道 ANSI 安全截断。
@@ -375,6 +388,8 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     chrome.help_rows.assign(model.help_rows.begin(), model.help_rows.begin() + help_count);
     chrome.activity_rows.assign(model.activity_rows.begin(), model.activity_rows.begin() + activity_count);
     chrome.queue_rows.assign(model.queue_rows.begin(), model.queue_rows.begin() + queue_count);
+    chrome.mode_notice_rows.assign(model.mode_notice_rows.begin(),
+                                   model.mode_notice_rows.begin() + notice_count);
     chrome.agent_dock_rows.assign(model.agent_dock_rows.begin(),
                                   model.agent_dock_rows.begin() + dock_count);
     chrome.transient_rows.assign(model.transient_rows.begin(),

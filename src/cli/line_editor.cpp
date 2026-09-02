@@ -204,6 +204,24 @@ std::string ConfirmModeLabel(ConfirmMode mode) {
     return tr("mode.default");
 }
 
+void ModeNoticeState::Show(ConfirmMode mode, Clock::time_point now) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    mode_ = mode;
+    expires_at_ = now + kDuration;
+}
+
+std::optional<ConfirmMode> ModeNoticeState::VisibleMode(Clock::time_point now) const {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!mode_.has_value() || now >= expires_at_) return std::nullopt;
+    return mode_;
+}
+
+void ModeNoticeState::Reset() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    mode_.reset();
+    expires_at_ = {};
+}
+
 int CharDisplayWidth(char32_t cp) {
     // 见头文件注释:简易 East Asian Width 判定,不是完整的 Unicode 表,
     // 覆盖最常用的 CJK 统一表意文字、假名、韩文音节、全角标点这些区段。

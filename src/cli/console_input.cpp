@@ -162,6 +162,11 @@ LineEditorCore& SharedEditor() {
     static LineEditorCore editor = [] { return LineEditorCore(BuildSlashCompletionCandidates()); }();
     return editor;
 }
+
+ModeNoticeState& ModeNoticeSlot() {
+    static ModeNoticeState state;
+    return state;
+}
 // 视图切换钩子的槽(viewed_task_id 变了才被调;tail_rows>0 = 实时流重铺拍,
 // 见 console_input.hpp)。
 // [共享] composer(空闲切看铺帧)/监听线程(流式切看铺帧)/导出口

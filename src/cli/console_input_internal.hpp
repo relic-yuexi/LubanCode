@@ -36,6 +36,9 @@ namespace lubancode::cli {
 // 导出口,全共用这一份——历史列表、确认模式才有地方跨多轮读取存住。
 LineEditorCore& SharedEditor();
 
+// 仅用户当场 Shift+Tab 才刷新；空闲 composer 与流式 footer 共读这一份。
+ModeNoticeState& ModeNoticeSlot();
+
 // 会话级面板状态机:空闲 composer 与流式 footer/监听线程共用同一份
 // 选择/焦点/详情/两段确认——流式转空闲状态不跳,不靠两边各自记账。
 AgentPanelSession& PanelSessionSlot();

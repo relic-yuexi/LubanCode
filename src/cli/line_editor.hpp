@@ -17,8 +17,10 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <utility>
@@ -106,6 +108,23 @@ struct ModePresentation {
 // 当前语言下的完整展示语义；不夹 ANSI。
 ModePresentation PresentApprovalMode(ConfirmMode mode);
 std::string ConfirmModeLabel(ConfirmMode mode);
+
+// 用户 Shift+Tab 切档后的会话级说明。时间点由调用方传入，测试可用假时钟
+// 精确钉住 5999/6000ms；SetConfirmMode 等启动/配置入口不经过 Show。
+class ModeNoticeState {
+public:
+    using Clock = std::chrono::steady_clock;
+    static constexpr auto kDuration = std::chrono::milliseconds(6000);
+
+    void Show(ConfirmMode mode, Clock::time_point now = Clock::now());
+    std::optional<ConfirmMode> VisibleMode(Clock::time_point now = Clock::now()) const;
+    void Reset();
+
+private:
+    mutable std::mutex mutex_;
+    std::optional<ConfirmMode> mode_;
+    Clock::time_point expires_at_{};
+};
 
 // 补全候选:slash 命令名 + 一句话说明,由调用方(console_input.cpp)从
 // cli::slash_commands 现有的命令定义转换而来,核心层自己不认得任何具体
