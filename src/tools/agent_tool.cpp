@@ -2251,7 +2251,10 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         // 台账 sink 的工具对账:item_id -> (tool_use_id, name)。ItemCompleted
         // 的载荷不带工具名(台账事件与兜底对账都要它),从这里取。
         auto open_tools = std::make_shared<std::map<std::string, std::pair<std::string, std::string>>>();
-        auto ledger_sink = [this, task, foreground_hooks, &touch_activity, open_tools](
+        // 轮次边界账(同构渲染单 P1):当前 model step 号,ToolStart/ToolResult
+        // 落账时带上——查看态据此在同 step 内把工具成批、step 之间留轻间隔。
+        auto current_step = std::make_shared<std::string>();
+        auto ledger_sink = [this, task, foreground_hooks, &touch_activity, open_tools, current_step](
                                const runtime::ServerEvent& event) {
             switch (event.kind) {
                 case runtime::ServerEventKind::ItemDelta: {
@@ -2300,6 +2303,12 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                         ledger_event.kind = AgentTaskEventKind::ToolStart;
                         ledger_event.tool_name = tool_name;
                         ledger_event.input_json = tool_input.dump();
+                        // 稳定身份(同构渲染单 P1):起止按调用 id 对账。
+                        ledger_event.tool_use_id = tool_use_id;
+                        ledger_event.item_id = event.item_id;
+                        ledger_event.step_id = *current_step;
+                        ledger_event.turn_id = event.turn_id;
+                        ledger_event.seq = event.envelope.seq;
                         ledger().AppendEventLocked(task, std::move(ledger_event));
                         task->snapshot.tool_calls.push_back(
                             AgentTaskToolCall{tool_name, tool_input.dump(), std::string(), false, false, tool_use_id});
@@ -2381,6 +2390,32 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     ledger_event.tool_name = tool_name;
                     ledger_event.result = result_text;
                     ledger_event.is_error = is_error;
+                    // 稳定身份 + 终态细分(同构渲染单 P1):起止按同一枚
+                    // tool_use_id 对账;Outcome 如实映射,Declined/Cancelled
+                    // 不再折成普通成败。
+                    ledger_event.tool_use_id = tool_use_id;
+                    ledger_event.item_id = event.item_id;
+                    ledger_event.step_id = *current_step;
+                    ledger_event.turn_id = event.turn_id;
+                    ledger_event.seq = event.envelope.seq;
+                    if (event.outcome.has_value()) {
+                        switch (*event.outcome) {
+                            case runtime::Outcome::Succeeded:
+                                ledger_event.tool_status = AgentTaskToolStatus::Succeeded;
+                                break;
+                            case runtime::Outcome::Failed:
+                                ledger_event.tool_status = AgentTaskToolStatus::Failed;
+                                break;
+                            case runtime::Outcome::Declined:
+                                ledger_event.tool_status = AgentTaskToolStatus::Declined;
+                                break;
+                            case runtime::Outcome::Cancelled:
+                                // 走到这里的取消已被上面的 Cancelled 分支按
+                                // "结果不明"收口(Interrupted);这里是兜底映射。
+                                ledger_event.tool_status = AgentTaskToolStatus::Cancelled;
+                                break;
+                        }
+                    }
                     ledger().AppendEventLocked(task, std::move(ledger_event));
                     // 工具收口:阶段退回 None;工具名即时清,不拿旧名字接着报秒。
                     task->activity.stage = AgentTaskActivity::Stage::None;
@@ -2429,8 +2464,15 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     }
                     break;
                 }
+                case runtime::ServerEventKind::ModelStepStarted: {
+                    // 轮次边界账(同构渲染单 P1):不落事件,只记当前 step 号,
+                    // 后续 ToolStart/ToolResult 带上它——查看态的"同 step 成批、
+                    // step 间轻间隔"全靠这本。
+                    *current_step = "step-" + std::to_string(event.payload.value("step_index", 0));
+                    break;
+                }
                 default:
-                    break;  // step/批次等边界事件不进台账
+                    break;  // 其余 turn/批次边界事件不进台账
             }
         };
         if (host_events != nullptr) {

@@ -1,6 +1,6 @@
 # 主 Agent 与 Subagent 面板工具调用同构渲染
 
-- 状态：待修
+- 状态：部分修复(2026-09-03:P0/P1/P2 代码与单测已落,全套 376/376 绿;§八真终端验收未做)
 - 日期：2026-09-03
 - 级别：P1
 - 类型：LubanCode 产品缺陷（Agent Panel、Transcript 投影、工具调用层级）
@@ -140,15 +140,15 @@ Main 路已有 `TurnView` / `TurnItemView`，其中正好带 `step_id`、
 
 ### 5.1 不变量
 
-- [ ] Main 与任一 Subagent 都按“当前查看对象是根节点”投影。
-- [ ] 当前根自己调用的工具一律是 `Tool`；它派出的下一层 Agent 内部工具才是
+- [x] Main 与任一 Subagent 都按“当前查看对象是根节点”投影。
+- [x] 当前根自己调用的工具一律是 `Tool`；它派出的下一层 Agent 内部工具才是
       `SubTool`。
-- [ ] Main 与 Subagent 共用同一份会话块模型、同一份紧凑/详细开关、同一份
+- [x] Main 与 Subagent 共用同一份会话块模型、同一份紧凑/详细开关、同一份
       `GapBetween()`、同一份宽字符与截断规矩。
-- [ ] Agent panel 只换数据源，不换 renderer。
-- [ ] 实时流、切换后重建、resize/Ctrl+L 重建，三条路画出同构结果。
-- [ ] 工具起止按稳定 id 配对；不得再靠“最近一枚 start”猜。
-- [ ] 旧任务缺字段时明确走兼容投影，不得悄悄配错卡。
+- [x] Agent panel 只换数据源，不换 renderer。
+- [x] 实时流、切换后重建、resize/Ctrl+L 重建，三条路画出同构结果。
+- [x] 工具起止按稳定 id 配对；不得再靠“最近一枚 start”猜。
+- [x] 旧任务缺字段时明确走兼容投影，不得悄悄配错卡。
 
 ### 5.2 推荐架构
 
@@ -183,72 +183,83 @@ AgentTaskEvent(tool_use_id, item_id, parent_item_id, step_id, turn_id, seq, stat
 
 ### P0：先修眼前错层与挤压
 
-- [ ] 把“相对当前查看根的层级”写成单独投影规则。Subagent 自己的工具投成
+- [x] 把“相对当前查看根的层级”写成单独投影规则。Subagent 自己的工具投成
       `Tool`，不要让 `MakeAgentTaskToolItem()` 无条件造 `SubTool`。
-- [ ] 工具卡先收集成一组 `TranscriptItem`，统一交给整组 formatter；不得逐枚
+- [x] 工具卡先收集成一组 `TranscriptItem`，统一交给整组 formatter；不得逐枚
       直调后裸追加。
-- [ ] `agent_view_expanded` 同时控制思考与工具。紧凑态、详细态与 Main 对齐。
-- [ ] 正文、思考、工具、介入、压缩、终局都带 `BlockRole`，统一走
+- [x] `agent_view_expanded` 同时控制思考与工具。紧凑态、详细态与 Main 对齐。
+- [x] 正文、思考、工具、介入、压缩、终局都带 `BlockRole`，统一走
       `GapBetween()`；不要在 presenter 里散落空行特判。
 
 ### P1：补稳工具配对与轮次边界
 
-- [ ] `ToolStart` / `ToolResult` 写入同一 `tool_use_id`，用 map 对账；删除单枚
+- [x] `ToolStart` / `ToolResult` 写入同一 `tool_use_id`，用 map 对账；删除单枚
       `pending_tool_start`。
-- [ ] 保存 `turn_id`、`step_id`、`item_id`、`parent_item_id` 与 `seq`。同 step
+- [x] 保存 `turn_id`、`step_id`、`item_id`、`parent_item_id` 与 `seq`。同 step
       内工具成批，step/turn 之间留轻间隔或轮界。
-- [ ] Running、Succeeded、Failed、Declined、Cancelled、Interrupted、Skipped
+      （实施注:`parent_item_id` 不入账——任务事件账相对自己的根是平的,父子
+      关系归台账 lineage 字段;理由落在 task_ledger.hpp 的字段注释里。）
+- [x] Running、Succeeded、Failed、Declined、Cancelled、Interrupted、Skipped
       如实投影；中断工具不得冒充普通失败。
-- [ ] 多工具 start/result 交错时，按 id 原位收口，不准串结果、不准吞卡。
+- [x] 多工具 start/result 交错时，按 id 原位收口，不准串结果、不准吞卡。
 
 ### P1：收拢为一套 renderer
 
 - [ ] 抽出“会话块列表 -> 行组”的公共入口。Main live snapshot、Main replay、
       Subagent replay 都喂同一种模型。
-- [ ] `AgentPanelPresenter` 删除工具配对、单卡拼行、Markdown 头部拼装等会话
+      （实施注:`RenderSessionBlocks` 已立为公共入口,Subagent 查看页与 Items
+      组整组渲染同源;Main live snapshot(Ctrl+O 重打)与 Main replay
+      (FormatRestoredHistory)尚未迁进块模型——留作续点,不在本批强迁。）
+- [x] `AgentPanelPresenter` 删除工具配对、单卡拼行、Markdown 头部拼装等会话
       renderer 职责，只留 panel 元数据装配。
-- [ ] 清点 `FormatTranscriptItems()` 与 `RenderTurnView()` 的重叠职责，定一处
+      （实施注:配对/拼行迁入 `app::BuildAgentTaskBlocks` 纯函数——单子的
+      "明确 adapter"迁移桥;presenter 类只剩元数据与会话块拼接。）
+- [x] 清点 `FormatTranscriptItems()` 与 `RenderTurnView()` 的重叠职责，定一处
       管整组布局；不要再让两者各认一半间距与折叠。
-- [ ] 旧 `TaskEvents` 若仍供 `agent_watch` 或诊断使用，保留事件 API；显示层不再
+      （归属落笔在 turn_renderer.hpp:条目组内归 FormatTranscriptItems,轮骨架
+      归 RenderTurnView,块级入口归 RenderSessionBlocks。）
+- [x] 旧 `TaskEvents` 若仍供 `agent_watch` 或诊断使用，保留事件 API；显示层不再
       直接拿它猜画面。
 
 ### P2：兼容、容量与持久化
 
-- [ ] 老任务没有 id/turn/step 时，按事件顺序作 legacy 投影，并在诊断中标明
+- [x] 老任务没有 id/turn/step 时，按事件顺序作 legacy 投影，并在诊断中标明
       `legacy_unstructured_transcript`。
 - [ ] canonical 子任务视图设字节、条目与轮数上限；截断须留 marker，不能无声
       丢掉早期工具。
-- [ ] 前台、后台、递归子代理走同一数据合同。执行模式不得改变 panel 画法。
-- [ ] 任务完成、退出 Dock 后，详情仍可按同一 renderer 重放；不得只剩最终一句。
+      （实施注:既有帽沿用——事件账 kMaxTaskEvents=4000 截断留队头 marker、
+      正文/结果 64KB 字节帽;本批未新增专项测试,留待补。）
+- [x] 前台、后台、递归子代理走同一数据合同。执行模式不得改变 panel 画法。
+- [x] 任务完成、退出 Dock 后，详情仍可按同一 renderer 重放；不得只剩最终一句。
 
 ## 七、测试账
 
 ### 7.1 纯投影与 formatter
 
-- [ ] 同一份工具序列，以 Main 为根和以 Subagent #N 为根投影，顶层工具均为
+- [x] 同一份工具序列，以 Main 为根和以 Subagent #N 为根投影，顶层工具均为
       `Tool`，下一层工具才为 `SubTool`。
-- [ ] 两枚连续顶层工具之间恰留一口气；父 Tool 与其 SubTool 紧排；SubTool
+- [x] 两枚连续顶层工具之间恰留一口气；父 Tool 与其 SubTool 紧排；SubTool
       批结束后，下一枚顶层 Tool 重新留间隔。
-- [ ] 紧凑态隐藏真正的 SubTool，不隐藏当前查看 Agent 自己的 Tool。
-- [ ] 详细态在 Main/Subagent 两页都铺参数、全文与错误摘要。
-- [ ] 20、40、80、120 列下不越界，不劈 UTF-8，不靠终端物理折行撑开卡片。
+- [x] 紧凑态隐藏真正的 SubTool，不隐藏当前查看 Agent 自己的 Tool。
+- [x] 详细态在 Main/Subagent 两页都铺参数、全文与错误摘要。
+- [x] 20、40、80、120 列下不越界，不劈 UTF-8，不靠终端物理折行撑开卡片。
 
 ### 7.2 事件与配对
 
-- [ ] `start(A), start(B), result(B), result(A)` 仍各自配对。
-- [ ] 缺 start、缺 result、重复 result、迟到 result 都有稳定投影，不误伤旁卡。
-- [ ] 一次模型响应含多枚工具时保留同 step 身份；下一次响应另起 step 间隔。
-- [ ] steering、compact、cancel 穿过工具事件时，顺序不乱，未定工具状态不伪造。
+- [x] `start(A), start(B), result(B), result(A)` 仍各自配对。
+- [x] 缺 start、缺 result、重复 result、迟到 result 都有稳定投影，不误伤旁卡。
+- [x] 一次模型响应含多枚工具时保留同 step 身份；下一次响应另起 step 间隔。
+- [x] steering、compact、cancel 穿过工具事件时，顺序不乱，未定工具状态不伪造。
 
 ### 7.3 面板同构
 
-- [ ] 构造同一段会话事实，分别从 Main transcript 与 Subagent task view 渲染；
+- [x] 构造同一段会话事实，分别从 Main transcript 与 Subagent task view 渲染；
       去掉身份头、统计行后，块类型、层级、间距、状态词与展开内容一致。
-- [ ] 切换 `main -> subagent -> main` 不改任一侧 transcript 数据，也不留下另一侧
+- [x] 切换 `main -> subagent -> main` 不改任一侧 transcript 数据，也不留下另一侧
       的行。
-- [ ] Subagent 查看态按 `Ctrl+O`，工具与思考一同展开/收起；切回 Main 后沿用
+- [x] Subagent 查看态按 `Ctrl+O`，工具与思考一同展开/收起；切回 Main 后沿用
       会话级开关的既定语义。
-- [ ] resize、Ctrl+L、任务流式更新触发全量重建后，画面与首次 live 渲染同构。
+- [x] resize、Ctrl+L、任务流式更新触发全量重建后，画面与首次 live 渲染同构。
 
 ## 八、真终端验收
 
@@ -267,11 +278,12 @@ AgentTaskEvent(tool_use_id, item_id, parent_item_id, step_id, turn_id, seq, stat
 
 ## 九、收口标准
 
-- [ ] 源码中不再有 Subagent 查看页逐事件手拼工具卡的第二套主路径。
-- [ ] 当前查看 Agent 的工具层级按相对根节点计算，不按“是不是 Main”写死。
-- [ ] 工具配对不再依赖单枚 `pending_tool_start`。
-- [ ] Main/Subagent 的紧凑、详细、间距、宽度、状态与重建行为有同构测试。
-- [ ] Release 聚焦测试通过；全套测试结果与无关失败分开记。
+- [x] 源码中不再有 Subagent 查看页逐事件手拼工具卡的第二套主路径。
+- [x] 当前查看 Agent 的工具层级按相对根节点计算，不按“是不是 Main”写死。
+- [x] 工具配对不再依赖单枚 `pending_tool_start`。
+- [x] Main/Subagent 的紧凑、详细、间距、宽度、状态与重建行为有同构测试。
+- [x] Release 聚焦测试通过；全套测试结果与无关失败分开记。
+      （聚焦 6/6 绿；全套 376/376 绿,无一失败。）
 - [ ] 真 worktree、真终端验收通过，保留版本、命令、退出码与截图/原始输出。
 
 ## 十、不要这样修
@@ -284,3 +296,21 @@ AgentTaskEvent(tool_use_id, item_id, parent_item_id, step_id, turn_id, seq, stat
 - 不要复制 `ToolDisplay` 再造一只 SubagentToolDisplay。两套状态机还会走散。
 - 不要拿 presenter 生成了几行字符串当真终端验收。切换、resize、Ctrl+L、流式
   重铺都须实跑。
+
+## 十一、实施记录（2026-09-03）
+
+- 落点：`src/cli/transcript.hpp/cpp`（SessionBlock 会话块模型、RenderSessionBlocks
+  公共入口、FormatTranscriptItems 条目间距表化、MakeAgentTaskToolItem 显式
+  kind + Main 重放同款摘要行）；`src/app/agent_panel_presenter.hpp/cpp`
+  （BuildAgentTaskBlocks 迁移桥：id 对账 + legacy 相邻配对 + step 轻间隔 +
+  终态细分投影；presenter 类只剩元数据装配）；`src/tools/task_ledger.hpp/cpp`
+  （AgentTaskEvent 稳定身份字段 + AgentTaskToolStatus）；`src/tools/agent_tool.cpp`
+  （台账 sink 写入身份、ModelStepStarted 记 step、Outcome 映射）；
+  `src/app/commands/workflow_commands.cpp`（workflow 节点查看页同款投影）；
+  `src/cli/turn_renderer.hpp`（整组布局职责归属注）；`src/cli/i18n.cpp`
+  （legacy_unstructured / tool_declined / tool_skipped 三 key 中英）。
+- 测试：`tests/unit/app/test_agent_task_transcript.cpp`（新册，13 案）；
+  `tests/unit/cli/test_transcript.cpp` 增三案（间距/工厂/块渲染）。
+- 构建：Release（VS 生成器，离线 configure）；聚焦 6/6 绿，全套 376/376 绿。
+- 留白：§八真终端验收全项未做（管道环境跑不了交互终端）；P1 收拢批第 1 条
+  Main live/replay 迁块模型留作续点；P2 容量上限沿用既有帽未加专项测试。

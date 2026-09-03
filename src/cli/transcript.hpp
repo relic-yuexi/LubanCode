@@ -125,6 +125,10 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
 // 顶层工具；focus_index 是原 items 下标，-1 表示不标焦点；expanded_index
 // 是单独展开的那一条下标(-1 = 无),该条 expanded=true、其余照 expanded——
 // Ctrl+O 用它只展开最近一条,不再全局全展开。
+// 条目之间的空白由间距表唯一决定(主/Subagent 面板同构渲染单 P0):两枚
+// 连续顶层 Tool 之间恰留一口气(GapBetween=1),父 Tool 与其 SubTool、同父
+// SubTool 批次紧排(0),SubTool 批结束后下一枚顶层 Tool 重新留间隔。首枚
+// 打印条目之前不垫(块外 gap 归调用方的块间距账,如 RenderSessionBlocks)。
 std::string FormatTranscriptItems(const std::vector<TranscriptItem>& items, const Theme& theme,
                                   int width, bool expanded, int focus_index = -1,
                                   int expanded_index = -1);
@@ -192,6 +196,30 @@ enum class BlockRole { UserPrompt, Thinking, Tool, SubTool, AssistantText, Warni
 // 前块 -> 后块的默认间距(空白物理行数)。表外的组合一律 1(异常不黏正文)。
 // SubTool 贴父项/同父批次紧排是 0,其余块与块之间留一口气。
 int GapBetween(BlockRole before, BlockRole after);
+
+// ---- 会话块(主/Subagent 面板同构渲染单) ----------------------------------
+//
+// 查看态会话正文的一块:工具/思考卡组(整组交 FormatTranscriptItems,吃
+// 同一份紧凑/详细开关与 SubTool 折叠规矩)、markdown 文本(正文/用户消息/
+// 介入)、通知行(压缩检查点/终局/失败/legacy 诊断)。块与块之间的空白由
+// GapBetween 唯一决定——presenter 不再散落空行特判,Main 与 Subagent 的
+// 查看页共用这一个"会话块列表 -> 行组"入口(面板只换数据源,不换 renderer)。
+
+struct SessionBlock {
+    enum class Kind { Items, Markdown, Notice };
+    Kind kind = Kind::Notice;
+    std::vector<TranscriptItem> items;  // Kind::Items:整组渲染(顺序即事件顺序)
+    std::string header;                  // Kind::Markdown:头行原文(调用方拼好 ANSI)
+    std::string body;                    // Kind::Markdown:markdown 正文
+    std::string line;                    // Kind::Notice:一行通知(调用方拼好 ANSI)
+    BlockRole role = BlockRole::SystemNotice;
+};
+
+// 块列表 -> 行组(每行原样,不含行尾换行)。expanded 只作用于 Items 块
+//(FormatTranscriptItems 的紧凑/详细档,与 Main 面板 Ctrl+O 同一颗开关);
+// 空块跳过,不产空行。
+std::vector<std::string> RenderSessionBlocks(const std::vector<SessionBlock>& blocks, const Theme& theme,
+                                             int width, bool expanded);
 
 // ---- 首行参数摘要 ------------------------------------------------------
 
@@ -266,11 +294,15 @@ TranscriptItem MakeNoticeItem(int id, const std::string& title, TranscriptStatus
 // 折成紧凑档摘要(渲染层还会按终端宽再截)。
 TranscriptItem MakeAssistantArchiveItem(int id, std::string body, TranscriptStatus status);
 
-// 查看态工具卡(子代理事件账的 start/done 配对折一条 SubTool 条目):
-// done=false 是还在跑的 Running 卡;input_json 解析不出对象时标题退
-// "名字(...)"的老兜底(BuildToolTitle 自带)。
+// 查看态工具卡(子代理事件账的 start/done 配对折一条条目):done=false 是
+// 还在跑的 Running 卡;input_json 解析不出对象时标题退 "名字(...)"的老
+// 兜底(BuildToolTitle 自带)。kind 由调用方按"当前查看根"定(同构渲染单
+// P0):查看根自己调用的工具是 Tool,它派出的下一层代理的内层工具才是
+// SubTool——工厂不再无条件造 SubTool。摘要行(Main 重放同款):结果首行
+// 当 ⎿ 摘要,多行补 "+N 行";Running 卡没有摘要。
 TranscriptItem MakeAgentTaskToolItem(int id, const std::string& tool_name, const std::string& input_json,
-                                     bool done, bool is_error, const std::string& result);
+                                     bool done, bool is_error, const std::string& result,
+                                     TranscriptKind kind);
 
 // 查看态思考卡:streaming=true 折 Running 卡(标题「思考中 · N 字」随
 // 重铺拍跳),false 折收定 Ok 卡。

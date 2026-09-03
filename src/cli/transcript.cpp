@@ -357,15 +357,96 @@ std::string FormatTranscriptItem(const TranscriptItem& item, const Theme& theme,
 std::string FormatTranscriptItems(const std::vector<TranscriptItem>& items, const Theme& theme,
                                   int width, bool expanded, int focus_index, int expanded_index) {
     std::string out;
+    // 相邻两枚的间距由间距表唯一决定(同构渲染单 P0):只对"实际打印出来"
+    // 的条目记账——紧凑档跳过的 SubTool 不参与间距计算,免得被隐藏的子项
+    // 把后一枚顶层 Tool 的间隔吃掉。
+    bool printed_any = false;
+    BlockRole previous_role = BlockRole::Tool;
+    const auto role_of = [](const TranscriptItem& item) {
+        switch (item.kind) {
+            case TranscriptKind::Tool:
+                return BlockRole::Tool;
+            case TranscriptKind::SubTool:
+                return BlockRole::SubTool;
+            case TranscriptKind::Thinking:
+                return BlockRole::Thinking;
+        }
+        return BlockRole::Tool;
+    };
     for (std::size_t i = 0; i < items.size(); ++i) {
         const bool item_expanded = expanded || static_cast<int>(i) == expanded_index;
         if (!item_expanded && items[i].kind == TranscriptKind::SubTool) {
             continue;
         }
+        if (printed_any) {
+            for (int gap = 0; gap < GapBetween(previous_role, role_of(items[i])); ++gap) {
+                out += "\n";
+            }
+        }
         out += FormatTranscriptItem(items[i], theme, width, item_expanded,
                                     static_cast<int>(i) == focus_index);
+        previous_role = role_of(items[i]);
+        printed_any = true;
     }
     return out;
+}
+
+std::vector<std::string> RenderSessionBlocks(const std::vector<SessionBlock>& blocks, const Theme& theme,
+                                             int width, bool expanded) {
+    std::vector<std::string> lines;
+    const auto append_lines = [&lines](const std::string& text) {
+        std::size_t pos = 0;
+        while (pos < text.size()) {
+            const std::size_t nl = text.find('\n', pos);
+            const std::size_t end = nl == std::string::npos ? text.size() : nl;
+            lines.push_back(text.substr(pos, end - pos));
+            if (nl == std::string::npos) {
+                break;
+            }
+            pos = nl + 1;
+        }
+    };
+    bool printed_any = false;
+    BlockRole previous_role = BlockRole::Tool;
+    for (const SessionBlock& block : blocks) {
+        std::string rendered;
+        switch (block.kind) {
+            case SessionBlock::Kind::Items:
+                if (block.items.empty()) {
+                    continue;
+                }
+                rendered = FormatTranscriptItems(block.items, theme, width, expanded);
+                break;
+            case SessionBlock::Kind::Markdown: {
+                if (block.header.empty() && block.body.empty()) {
+                    continue;
+                }
+                rendered = block.header.empty() ? std::string() : block.header + "\n";
+                for (const std::string& line : RenderMarkdown(block.body, theme, width)) {
+                    rendered += line + "\n";
+                }
+                break;
+            }
+            case SessionBlock::Kind::Notice:
+                if (block.line.empty()) {
+                    continue;
+                }
+                rendered = block.line + "\n";
+                break;
+        }
+        if (rendered.empty()) {
+            continue;
+        }
+        if (printed_any) {
+            for (int gap = 0; gap < GapBetween(previous_role, block.role); ++gap) {
+                lines.push_back(std::string());
+            }
+        }
+        append_lines(rendered);
+        previous_role = block.role;
+        printed_any = true;
+    }
+    return lines;
 }
 
 std::string BuildToolTitle(const std::string& name, const nlohmann::json& input) {
@@ -871,21 +952,39 @@ TranscriptItem MakeAssistantArchiveItem(int id, std::string body, TranscriptStat
 }
 
 TranscriptItem MakeAgentTaskToolItem(int id, const std::string& tool_name, const std::string& input_json,
-                                     bool done, bool is_error, const std::string& result) {
+                                     bool done, bool is_error, const std::string& result,
+                                     TranscriptKind kind) {
     TranscriptItem item;
     item.id = id;
-    item.kind = TranscriptKind::SubTool;
+    // 投影坐标归调用方(同构渲染单 P0):kind 是"相对当前查看根"的层级,
+    // 不在工厂里写死——Main 面板的子代理内层工具给 SubTool,Subagent 查看
+    // 页给该代理自己的 Tool。
+    item.kind = kind;
     item.tool_name = tool_name;
     item.input_json = input_json;
-    nlohmann::json parsed;
+    // 解析不出对象(空串/坏 JSON,比如只有结果的孤儿卡)退空对象——
+    // BuildToolTitle 拿空对象给出 "名字(...)" 的老兜底,不在 null 上炸。
+    nlohmann::json parsed = nlohmann::json::object();
     try {
         parsed = nlohmann::json::parse(input_json);
     } catch (...) {
+        parsed = nlohmann::json::object();
     }
     item.title = BuildToolTitle(tool_name, parsed);
     if (done) {
         item.status = is_error ? TranscriptStatus::Error : TranscriptStatus::Ok;
         item.full_output = result;
+        // ⎿ 摘要(Main 重放同款口径,同构渲染单 §7.3):结果首行当摘要,
+        // 多行补 "+N 行";空结果按成败给一句兜底,不露空 ⎿。
+        std::string first_line = result.substr(0, result.find('\n'));
+        if (first_line.empty()) {
+            first_line = is_error ? tr("cmd.resume.history.tool_error") : tr("cmd.resume.history.tool_done");
+        }
+        const int line_count = CountLines(result);
+        if (line_count > 1) {
+            first_line += trf("cmd.resume.history.tool_more", line_count - 1);
+        }
+        item.summary_lines = {std::move(first_line)};
         item.end_time = std::chrono::steady_clock::now();
     } else {
         item.status = TranscriptStatus::Running;  // 还在跑

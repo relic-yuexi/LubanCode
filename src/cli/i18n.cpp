@@ -431,6 +431,11 @@ const Entry kZhCN[] = {
     {"agent_panel.event_failed", "任务终止"},
     {"agent_panel.events_unavailable", "该任务没有消息账(旧版派出的任务),仅有结论:"},
     {"agent_panel.main_header", "── 查看 main · 主会话 ──"},
+    // 同构渲染单:旧账缺稳定调用 id 的兼容投影明账(P2)与终态细分摘要(P1)。
+    {"agent_panel.legacy_unstructured",
+     "[诊断 legacy_unstructured_transcript] 旧账缺稳定调用 id,工具按事件顺序配对,层级可能不精确"},
+    {"agent_panel.tool_declined", "(工具被拒绝执行)"},
+    {"agent_panel.tool_skipped", "(工具未执行)"},
 
     // ---- 确认提示 ----
     {"confirm.prompt", "[y] 本次允许  [a] 本会话总是允许(该工具)  [N] 拒绝: "},
@@ -2365,6 +2370,11 @@ const Entry kEn[] = {
     {"agent_panel.events_unavailable",
      "No message ledger for this task (launched by an older build); only the result is available:"},
     {"agent_panel.main_header", "── viewing main · main session ──"},
+    // Same-render ticket: legacy fallback marker (P2) and fine-grained tool status (P1).
+    {"agent_panel.legacy_unstructured",
+     "[diagnostic legacy_unstructured_transcript] legacy events lack stable tool ids; tools paired in event order"},
+    {"agent_panel.tool_declined", "(tool declined)"},
+    {"agent_panel.tool_skipped", "(tool skipped)"},
 
     // ---- confirm prompt ----
     {"confirm.prompt", "[y] allow once  [a] always allow this tool (this session)  [N] deny: "},

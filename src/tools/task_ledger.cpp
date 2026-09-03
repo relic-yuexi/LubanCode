@@ -1583,6 +1583,10 @@ void TaskLedger::RecordToolIndeterminateLocked(const std::shared_ptr<TaskRecord>
     ledger_event.kind = AgentTaskEventKind::ToolResult;
     ledger_event.tool_name = tool_name;
     ledger_event.is_error = true;
+    // 稳定身份 + 终态细分(同构渲染单 P1):被取消的工具按 Interrupted 收口,
+    // 不冒充普通失败;带上 tool_use_id 供查看态按 id 原位对账。
+    ledger_event.tool_use_id = tool_use_id;
+    ledger_event.tool_status = AgentTaskToolStatus::Interrupted;
     ledger_event.text = "(工具被取消,结果不明:不知副作用是否落地,不自动重跑)";
     ledger_event.result = "(工具被取消,结果不明)";
     AppendEventLocked(task, std::move(ledger_event));

@@ -723,3 +723,136 @@ TEST_CASE("ToolDisplay 思考快照:并发收 delta 与读快照,锁规约下不
     display.OnThinkingDone();
     CHECK(display.HasActiveThinking() == false);
 }
+
+// ---------------------------------------------------------------------------
+// 主/Subagent 面板工具调用同构渲染单:
+//   - FormatTranscriptItems 的条目间距改由间距表唯一决定(两枚顶层 Tool
+//     留一口气;父 Tool 与 SubTool、同父批次紧排;SubTool 批后下一枚顶层
+//     Tool 重新留间隔)——Main 的 Ctrl+O 整组重打与 Subagent 查看页同一张表;
+//   - MakeAgentTaskToolItem 的 kind 归调用方按"当前查看根"定,不再无条件
+//     SubTool;摘要行与 Main 重放同口径(结果首行 + "+N 行");
+//   - RenderSessionBlocks:会话块列表 -> 行组的共用入口(块间空白走
+//     GapBetween,Items 块吃同一颗紧凑/详细开关)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("FormatTranscriptItems 间距:顶层 Tool 之间恰一口,Tool->SubTool 紧排,SubTool 批后重留间隔") {
+    const auto theme = BuiltinTheme("plain");
+    TranscriptItem first = MakeItem(TranscriptStatus::Ok);
+    TranscriptItem parent = MakeItem(TranscriptStatus::Ok);
+    parent.tool_name = "agent";
+    parent.title = "agent(查文件)";
+    TranscriptItem child = MakeItem(TranscriptStatus::Ok, TranscriptKind::SubTool);
+    child.tool_name = "read_file";
+    child.title = "read_file(a.txt)";
+    TranscriptItem second = MakeItem(TranscriptStatus::Ok);
+    second.title = "run_command(git status)";
+
+    // 紧凑档:SubTool 被收掉,但两枚顶层 Tool 之间仍恰一枚空行——被收掉的
+    // 子项不参与间距计算。
+    const std::string compact = FormatTranscriptItems({first, parent, child, second}, theme, 120, false);
+    // first 带 ⎿ 摘要行:间隔垫在摘要行与下一枚顶层卡之间。
+    CHECK(compact.find("1.2s\n\n[OK] run_command(git status)") != std::string::npos);
+    CHECK(compact.find("read_file(a.txt)") == std::string::npos);
+
+    // 详细档:parent -> child 紧排(0),child -> second 重新留一口(1)。
+    const std::string expanded = FormatTranscriptItems({parent, child, second}, theme, 120, true);
+    const std::size_t parent_at = expanded.find("agent(查文件)");
+    const std::size_t child_at = expanded.find("read_file(a.txt)");
+    const std::size_t second_at = expanded.find("run_command(git status)");
+    REQUIRE(parent_at != std::string::npos);
+    REQUIRE(child_at != std::string::npos);
+    REQUIRE(second_at != std::string::npos);
+    CHECK(expanded.substr(parent_at, child_at - parent_at).find("\n\n") == std::string::npos);  // 紧排
+    CHECK(expanded.substr(child_at, second_at - child_at).find("\n\n") != std::string::npos);  // 留一口
+}
+
+TEST_CASE("MakeAgentTaskToolItem:kind 归调用方按查看根定,摘要行与 Main 重放同口径") {
+    const auto theme = BuiltinTheme("plain");
+    // 查看根自己的工具:Tool,不缩四格。
+    const TranscriptItem own = lubancode::cli::MakeAgentTaskToolItem(
+        1, "run_command", R"({"command":"git log"})", /*done=*/true, /*is_error=*/false,
+        "[退出码 0]\n第一行\n第二行", TranscriptKind::Tool);
+    CHECK(own.kind == TranscriptKind::Tool);
+    const std::string own_text = FormatTranscriptItem(own, theme, 120);
+    CHECK(own_text.find("[RUNNING]") == std::string::npos);  // 终态卡
+    CHECK(own_text.find("    [OK]") == std::string::npos);  // 不带 SubTool 的四格缩进
+    CHECK(own_text.find("[OK] run_command(git log)") != std::string::npos);
+    // ⎿ 摘要:结果首行 + "另有 N 行"(与 FormatRestoredHistory 同款)。
+    CHECK(own_text.find("\xE2\x8E\xBF" " [退出码 0] · 另有 2 行") != std::string::npos);
+
+    // Main 面板视角:子代理内层工具才是 SubTool(四格缩进)。
+    const TranscriptItem inner = lubancode::cli::MakeAgentTaskToolItem(
+        2, "read_file", R"({"path":"a.txt"})", true, false, "1  hi\n2  bye", TranscriptKind::SubTool);
+    CHECK(inner.kind == TranscriptKind::SubTool);
+    const std::string inner_text = FormatTranscriptItem(inner, theme, 120);
+    CHECK(inner_text.find("    [OK] read_file(a.txt)") != std::string::npos);
+
+    // Running 卡:没有摘要行,done=false。
+    const TranscriptItem running = lubancode::cli::MakeAgentTaskToolItem(
+        3, "search", R"({"query":"x"})", false, false, std::string(), TranscriptKind::Tool);
+    CHECK(running.status == TranscriptStatus::Running);
+    CHECK(running.summary_lines.empty());
+}
+
+TEST_CASE("RenderSessionBlocks:块间空白走 GapBetween,Items 块吃同一颗展开开关") {
+    const auto theme = BuiltinTheme("plain");
+    std::vector<TranscriptItem> items;
+    {
+        TranscriptItem tool = MakeItem(TranscriptStatus::Ok);
+        tool.input_json = R"({"command":"git log"})";
+        items.push_back(tool);
+    }
+    lubancode::cli::SessionBlock items_block;
+    items_block.kind = lubancode::cli::SessionBlock::Kind::Items;
+    items_block.role = BlockRole::Tool;
+    items_block.items = items;
+
+    lubancode::cli::SessionBlock text_block;
+    text_block.kind = lubancode::cli::SessionBlock::Kind::Markdown;
+    text_block.role = BlockRole::AssistantText;
+    text_block.header = "● 助手";
+    text_block.body = "结论一行";
+
+    lubancode::cli::SessionBlock notice_block;
+    notice_block.kind = lubancode::cli::SessionBlock::Kind::Notice;
+    notice_block.role = BlockRole::SystemNotice;
+    notice_block.line = "── 历史已压缩 ──";
+
+    const std::vector<lubancode::cli::SessionBlock> blocks{items_block, text_block, notice_block};
+
+    // 紧凑档:参数 JSON 不露;块与块之间恰一枚空行(Tool->AssistantText=1,
+    // AssistantText->SystemNotice=1)。工具卡自带 ⎿ 摘要行,随后的空行才是
+    // 块间距。
+    const auto compact = RenderSessionBlocks(blocks, theme, 100, false);
+    REQUIRE(compact.size() >= 6);
+    CHECK(compact[0].find("run_command(git log --oneline -3)") != std::string::npos);
+    CHECK(compact[2].empty());  // Tool -> AssistantText 留一口
+    CHECK(compact[3] == "● 助手");
+    CHECK(compact[4] == "结论一行");
+    CHECK(compact[5].empty());  // AssistantText -> SystemNotice 留一口
+    CHECK(compact[6].find("压缩") != std::string::npos);
+    bool saw_params = false;
+    for (const auto& line : compact) {
+        if (line.find("参数:") != std::string::npos) {
+            saw_params = true;
+        }
+    }
+    CHECK_FALSE(saw_params);
+
+    // 详细档:同一份块,参数 JSON 铺出——工具与思考受同一颗开关统管。
+    const auto expanded = RenderSessionBlocks(blocks, theme, 100, true);
+    bool saw_params_expanded = false;
+    for (const auto& line : expanded) {
+        if (line.find("参数: {\"command\":\"git log\"}") != std::string::npos) {
+            saw_params_expanded = true;
+        }
+    }
+    CHECK(saw_params_expanded);
+
+    // 空块跳过:全空输入产零行;单项空 Notice 不产空行。
+    CHECK(RenderSessionBlocks({}, theme, 80, false).empty());
+    lubancode::cli::SessionBlock empty_notice;
+    empty_notice.kind = lubancode::cli::SessionBlock::Kind::Notice;
+    empty_notice.role = BlockRole::SystemNotice;
+    CHECK(RenderSessionBlocks({empty_notice}, theme, 80, false).empty());
+}
