@@ -61,3 +61,7 @@ Optional: function/class/config key
 ## param.expires_at
 
 Optional. Expiry date of a temporary rule (YYYY-MM-DD or an ISO timestamp); no longer recalled after expiry
+
+## param.occurred_at
+
+Optional. When the fact happened (YYYY-MM-DD or an ISO timestamp). Only fill it in when the material states it explicitly; omit it when no date is given, never guess

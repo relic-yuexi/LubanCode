@@ -268,6 +268,13 @@ std::expected<ParsedTopic, std::string> Parse(const std::string& text) {
     if (expires.IsDefined() && !expires.IsNull()) {
         entry.expires_at = ScalarText(expires);
     }
+    // 时间线锚点:旧条目无 occurred_at 读入为空(不参与时间排序),形状
+    // 不像日期也按空处理——不造假。
+    const YAML::Node occurred = meta["occurred_at"];
+    if (occurred.IsDefined() && !occurred.IsNull()) {
+        const std::string occurred_text = ScalarText(occurred);
+        if (LooksLikeMemoryDate(occurred_text)) entry.occurred_at = occurred_text;
+    }
     if (const YAML::Node keywords = meta["keywords"]; keywords.IsDefined()) {
         if (!keywords.IsSequence()) return std::unexpected("metadata.keywords 须是序列");
         for (const auto& item : keywords) {
@@ -346,6 +353,13 @@ std::string BuildTopicText(const MemoryEntry& entry, const nlohmann::json& finge
         out << YAML::Null;
     } else {
         EmitScalar(out, entry.expires_at);
+    }
+    // 时间线锚点:空 = null(与 expires 同款);非空由写入侧校过形状。
+    out << YAML::Key << "occurred_at" << YAML::Value;
+    if (entry.occurred_at.empty()) {
+        out << YAML::Null;
+    } else {
+        EmitScalar(out, entry.occurred_at);
     }
     out << YAML::Key << "keywords" << YAML::Value;
     BeginSeq(out, entry.keywords.empty());

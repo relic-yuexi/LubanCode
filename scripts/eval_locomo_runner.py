@@ -162,6 +162,9 @@ def ingest_conv(home: str, conv: dict) -> tuple:
             "paths": [],
             "source_session": f"locomo-eval-{cid}",
             "confidence": "verified",
+            # 时间线锚点(记忆写入侧改进单):session datetime 是材料自带
+            # 的时间,不是推算——灌进 occurred_at,注入侧排成时间线。
+            "occurred_at": s["datetime"][:10],
         }
         with open(os.path.join(pending, stamp(i) + ".json"), "w",
                   encoding="utf-8") as f:
@@ -274,42 +277,54 @@ def ask_one(mode: str, home: str, ws_dir: str, question: str, choices: list) -> 
 
 # ---------------------------------------------------------------- 主流程
 
-def sample_questions(convs: list, per_cat: int, seed: int) -> list:
+def sample_questions(convs: list, per_cat: int, seed: int, categories=None) -> list:
     rng = random.Random(seed)
+    cats = tuple(categories) if categories else CATEGORIES
     picked = []
     for conv in convs:
         by_cat = {}
         for q in conv["questions"]:
             by_cat.setdefault(q["category"], []).append(q)
-        for cat in CATEGORIES:
+        for cat in cats:
             pool = by_cat.get(cat, [])
             for q in rng.sample(pool, min(per_cat, len(pool))):
                 picked.append((conv["conv_id"], q))
     return picked
 
 
-def per_mode_path(mode: str) -> str:
-    return os.path.join(HERE_EVAL, f"e2_per_question_{mode}.json")
+def per_mode_path(mode: str, suffix: str = "") -> str:
+    return os.path.join(HERE_EVAL, f"e2_per_question_{mode}{suffix}.json")
 
 
-def run_batch(modes, convs, tasks, answers):
+def run_batch(modes, convs, tasks, answers, suffix="", max_attempts=0):
     """逐态跑批,每态独立账文件——A/B 两组 home 互相独立,可两个进程分别
-    --modes A / --modes B 并行,互不写同一份文件(汇总时合并)。"""
+    --modes A / --modes B 并行,互不写同一份文件(汇总时合并)。max_attempts
+    >0 时,账里已失败这么多次的 qid 不再重试(留最后一笔失败账进文件),
+    防断线续跑在 hopeless 超时题上无限烧钟。"""
     for mode in modes:
         home = build_home(mode)
         for conv in convs:
             ws_dir, n = ingest_conv(home, conv)
             print(f"[{mode}] {conv['conv_id']}: 灌入 {n} topics -> {ws_dir}", flush=True)
-        account_path = per_mode_path(mode)
+        account_path = per_mode_path(mode, suffix)
         results = []
         done = set()
+        attempts = {}
         if os.path.exists(account_path):
             for r in json.load(open(account_path, encoding="utf-8")):
+                # 熔断只数 timeout(裸底空推理 420s 不封顶,重试也没救);
+                # 上游 502/连接抖动是暂态病,不计数,续跑时该重试还重试。
+                if r.get("failure") == "timeout":
+                    attempts[r["qid"]] = attempts.get(r["qid"], 0) + 1
+                results.append(r)  # 失败行也留账:熔断计数与失败明细都靠它
                 if not r.get("failure") and r.get("choice", -1) >= 0:
-                    results.append(r)
                     done.add(r["qid"])
         for cid, q in tasks:
             if q["qid"] in done:
+                continue
+            if max_attempts and attempts.get(q["qid"], 0) >= max_attempts:
+                print(f"[{mode}] {q['qid']} 已失败 {attempts[q['qid']]} 次,熔断不再重试",
+                      flush=True)
                 continue
             r = ask_one(mode, home, ws_dir_of(cid), q["question"], q["choices"])
             correct = answers[q["qid"]]
@@ -337,9 +352,20 @@ def main():
     ap.add_argument("--report-only", action="store_true",
                     help="不跑题,只按已有逐题账产报告")
     ap.add_argument("--limit", type=int, default=0, help="只跑前 N 题(冒烟用)")
+    ap.add_argument("--categories", default="",
+                    help="只跑指定类别(逗号分隔,如 temporal_reasoning);空=五类全跑")
+    ap.add_argument("--suffix", default="",
+                    help="账与报告文件名后缀(如 _t1):不同批次/不同构建的账分开落盘,"
+                         "互不覆盖、可分别复算")
+    ap.add_argument("--max-attempts", type=int, default=0,
+                    help=">0 时同一 qid 失败这么多次后熔断,不再重试(防断线续跑"
+                         "在 hopeless 超时题上无限烧钟)")
     args = ap.parse_args()
     per_cat = 1 if args.smoke else args.per_category
     run_modes = tuple(m.strip() for m in args.modes.split(",") if m.strip())
+    cats = [c.strip() for c in args.categories.split(",") if c.strip()] or None
+    suffix = args.suffix if args.suffix == "" or args.suffix.startswith("_") \
+        else "_" + args.suffix
 
     convs_all = {}
     with open(os.path.join(HERE_EVAL, "perturbed.jsonl"), encoding="utf-8") as f:
@@ -350,21 +376,21 @@ def main():
     want = [c.strip() for c in args.convs.split(",") if c.strip()]
     convs = [convs_all[c] for c in want]
 
-    tasks = sample_questions(convs, per_cat, args.seed)
+    tasks = sample_questions(convs, per_cat, args.seed, cats)
     if args.limit:
         tasks = tasks[:args.limit]
-    print(f"题集: {len(tasks)} 题(每类 {per_cat}),本次态 {run_modes}")
+    print(f"题集: {len(tasks)} 题(每类 {per_cat},类别 {cats or '全部'}),本次态 {run_modes}")
 
     if not args.report_only:
-        run_batch(run_modes, convs, tasks, answers)
+        run_batch(run_modes, convs, tasks, answers, suffix, args.max_attempts)
 
     # 合并各态账
     results = []
     for mode in MODES:
-        p = per_mode_path(mode)
+        p = per_mode_path(mode, suffix)
         if os.path.exists(p):
             results.extend(json.load(open(p, encoding="utf-8")))
-    merged = os.path.join(HERE_EVAL, "e2_per_question.json")
+    merged = os.path.join(HERE_EVAL, f"e2_per_question{suffix}.json")
     with open(merged, "w", encoding="utf-8") as f:
         json.dump(results, f, ensure_ascii=False, indent=1)
     print(f"逐题账(合并): {merged}")
@@ -410,7 +436,7 @@ def main():
         lines.append(f"失败调用 {len(fails)} 次、判不出选项 {len(unanswered)} 次"
                      "(逐题账有明细,未计入分母的按 MISS 计)")
     lines.append("")
-    report = os.path.join(HERE_EVAL, "report.md")
+    report = os.path.join(HERE_EVAL, f"report{suffix}.md")
     with open(report, "w", encoding="utf-8") as f:
         f.write("\n".join(lines) + "\n")
     print("\n".join(lines))

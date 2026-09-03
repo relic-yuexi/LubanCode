@@ -124,6 +124,34 @@ TEST_CASE("ParseExtractionJson: 严格字段与容错围栏") {
     CHECK_FALSE(app::ParseExtractionJson("{broken").has_value());
 }
 
+TEST_CASE("ParseExtractionJson: occurred_at 材料里有才留,不像日期落空") {
+    // 材料里明确给出的日期照收。
+    const std::string with_date = R"({"task_type":"other","summary":"s","candidates":[)"
+                                  R"({"kind":"fact","title":"上线日","content":"5月8日上线。",)"
+                                  R"("occurred_at":"2023-05-08","confidence":"verified"}]})";
+    const auto dated = app::ParseExtractionJson(with_date);
+    REQUIRE(dated.has_value());
+    REQUIRE(dated->candidates.size() == 1);
+    CHECK(dated->candidates[0].occurred_at == "2023-05-08");
+
+    // 模型推算/口语时间:形状不像日期,清洗成空——不拦整条候选,也不造假。
+    const std::string sloppy = R"({"task_type":"other","summary":"s","candidates":[)"
+                               R"({"kind":"fact","title":"上线日","content":"上周上线。",)"
+                               R"("occurred_at":"上周三","confidence":"verified"}]})";
+    const auto cleaned = app::ParseExtractionJson(sloppy);
+    REQUIRE(cleaned.has_value());
+    REQUIRE(cleaned->candidates.size() == 1);
+    CHECK(cleaned->candidates[0].occurred_at.empty());
+
+    // 没给字段 = 空。
+    const std::string none = R"({"task_type":"other","summary":"s","candidates":[)"
+                             R"({"kind":"fact","title":"上线日","content":"上线了。",)"
+                             R"("confidence":"verified"}]})";
+    const auto undated = app::ParseExtractionJson(none);
+    REQUIRE(undated.has_value());
+    CHECK(undated->candidates[0].occurred_at.empty());
+}
+
 TEST_CASE("BuildExtractionSystemPrompt: 基础契约 + 分型侧重") {
     const std::string code_prompt = app::BuildExtractionSystemPrompt("", "code");
     CHECK(code_prompt.find("候选只收四类") != std::string::npos);

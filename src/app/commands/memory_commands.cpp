@@ -597,6 +597,7 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
         candidate.keywords = proposed.keywords;
         candidate.paths = proposed.paths;
         candidate.confidence = proposed.confidence;
+        candidate.occurred_at = proposed.occurred_at;
         candidate.task_type = task_type;
 
         // auto 档直写闸:inferred 只进候选区;fact 须 verified 且带证据,
@@ -616,6 +617,7 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
             request.content = candidate.content;
             request.keywords = candidate.keywords;
             request.paths = candidate.paths;
+            request.occurred_at = candidate.occurred_at;
             if (project_memory->EnqueueSave(request).has_value()) {
                 ++written;
                 continue;
