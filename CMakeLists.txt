@@ -355,6 +355,8 @@ add_library(lubancode_engine STATIC
   src/platform/sha256.cpp
   # 审计 P2:标准 Base64 内核(五处手写收一)。
   src/platform/base64.cpp
+  # 审计 P2 候选:路径比较键三处合一(共享向量证一致后收编)。
+  src/platform/path_compare.cpp
   # 统一 Package 封装单阶段 4:目录内容指纹的共用底座(Plugin 与 Package
   # 同一把尺,两把 v1 材料各自冻结)。
   src/platform/dir_fingerprint.cpp

@@ -9,6 +9,7 @@
 #include <system_error>
 #include <utility>
 
+#include "platform/paths.hpp"    // PathComparisonKey:比较键公共件(审计 P2 候选收编)
 #include "platform/process.hpp"
 
 #ifdef _WIN32
@@ -42,27 +43,17 @@ std::filesystem::path Utf8ToPath(const std::string& text) {
     return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(text.data()), text.size()));
 }
 
+}  // namespace
+
 // 归一化比较键(小写、正斜杠、去尾斜杠):验明正身要拿用户给的路径跟
-// git 登记的路径比对,Windows 下大小写与斜杠都不能较真。
+// git 登记的路径比对,Windows 下大小写与斜杠都不能较真。合同与实现统一
+// 在 platform::PathComparisonKey(src 收口审计 P2 候选收编),这里只留
+// 领域薄名,房务内部与向量测试在用。
 std::string NormalizeKey(const std::filesystem::path& path) {
-    std::error_code ec;
-    std::filesystem::path p = std::filesystem::weakly_canonical(path, ec);
-    if (ec || p.empty()) {
-        p = path.lexically_normal();
-    }
-    std::string s = PathToUtf8(p);
-    for (char& c : s) {
-        if (c == '\\') {
-            c = '/';
-        } else if (c >= 'A' && c <= 'Z') {
-            c = static_cast<char>(c - 'A' + 'a');
-        }
-    }
-    while (s.size() > 1 && s.back() == '/') {
-        s.pop_back();
-    }
-    return s;
+    return platform::PathComparisonKey(path);
 }
+
+namespace {
 
 bool KeyIsUnder(const std::string& key, const std::string& root) {
     return key.size() > root.size() && key.compare(0, root.size(), root) == 0 && key[root.size()] == '/';

@@ -170,24 +170,9 @@ std::string NormalizePathForCompare(const std::string& utf8_path) {
     if (utf8_path.empty()) {
         return std::string();
     }
-    std::error_code ec;
-    std::filesystem::path p = std::filesystem::weakly_canonical(Utf8Path(utf8_path), ec);
-    if (ec || p.empty()) {
-        p = Utf8Path(utf8_path).lexically_normal();
-    }
-    std::string s = PathToUtf8(p);
-    std::replace(s.begin(), s.end(), '\\', '/');
-    // 大小写按 Windows 习惯不敏感(盘符、目录名都是 ASCII 场景居多;多字节
-    // 字符的字节不落在 A-Z 区间,这个循环碰不着它们)。
-    for (char& c : s) {
-        if (c >= 'A' && c <= 'Z') {
-            c = static_cast<char>(c - 'A' + 'a');
-        }
-    }
-    while (s.size() > 1 && s.back() == '/') {
-        s.pop_back();
-    }
-    return s;
+    // 合同与实现统一在 platform::PathComparisonKey(src 收口审计 P2 候选:
+    // 三处私房实现共享向量证一致后收编),这里只留 UTF-8 入参的薄口。
+    return platform::PathComparisonKey(Utf8Path(utf8_path));
 }
 
 std::optional<std::vector<SessionRefCandidate>> ResolveSessionRef(

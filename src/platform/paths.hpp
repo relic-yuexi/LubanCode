@@ -65,6 +65,14 @@ std::optional<std::string> OfficialPackagesDir();
 std::expected<void, std::string> ReplaceFileAtomically(const std::filesystem::path& source,
                                                         const std::filesystem::path& destination);
 
+// 路径比较键(src 收口审计 P2 候选:isolation/worktree/session_utils 三处
+// 各养一份,共享向量证得输出一致后收成公共件)。合同:
+//   weakly_canonical(失败退 lexically_normal)-> UTF-8 -> 反斜杠统一正
+//   斜杠 -> ASCII 折小写(Windows 习惯;多字节字符的字节不落 A-Z 区间,
+//   碰不着) -> 去尾斜杠(根除外,如 "c:/")。
+// 用途是“两条写法不同的路径是不是同一个地方”的等值比较,不是展示。
+std::string PathComparisonKey(const std::filesystem::path& path);
+
 // 当前工作目录的 UTF-8 写法。两平台同一套 std::filesystem,内联在此,
 // 不再各写一份。原本住在 main.cpp 的匿名命名空间里,app 层要用,先搬来。
 inline std::string CurrentDirUtf8() {
