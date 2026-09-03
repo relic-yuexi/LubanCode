@@ -468,4 +468,16 @@ if(WIN32)
   add_executable(body_render_driver EXCLUDE_FROM_ALL manual/body_render_driver.cpp)
   target_compile_features(body_render_driver PRIVATE cxx_std_23)
   target_link_libraries(body_render_driver PRIVATE ws2_32)
+
+  # 会话标题精修"交互时序四幕"驱动器(通知时序缺陷单·交互时序回归册):
+  # 进程内假 anthropic SSE 服务兼可控假标题后端(标题请求 max_tokens=24
+  # 单独识别,可扣住择机放行),键直接写进子进程控制台输入队列。四幕:
+  # 起飞边界(主 turn 尚开不起飞)/空闲唤醒(不喂键自醒收货)/草稿保护
+  # (半句草稿不被抢)/提交竞态(重复轮,正文区绝不出现标题行)。账面断
+  # 走子进程 workspaces 的 main.jsonl(无 state.turn_overlap)。要真控制
+  # 台,不进 ctest,集成验证手动跑:
+  #   title_wake_driver <lubancode.exe> <子进程工作目录> <报告文件> [竞态轮数 1-20]
+  add_executable(title_wake_driver EXCLUDE_FROM_ALL manual/title_wake_driver.cpp)
+  target_compile_features(title_wake_driver PRIVATE cxx_std_23)
+  target_link_libraries(title_wake_driver PRIVATE ws2_32)
 endif()
