@@ -61,10 +61,16 @@ bool ProbeSyncOutputSupport();
 // 原地重画的选路计划(终端思考活动条单·P0 治根;单 2 二轮按 8.2 裁决重裁):
 // 绘制方(忙路 footer/空闲 composer)据这份计划决定走哪条路——
 //   vt_batch=true:VT 批,定位/擦行/正文/归光标攒成一段字节一次写出;
-//   sync_output=true:批外包 `CSI ? 2026 h/l`。
+//   sync_output=true:批外包 `CSI ? 2026 h/l`;
+//   native_rows=true:Windows 真 console,行级重画走 WriteConsoleOutput 直写
+//   (vt_batch 恒 false 时的正路;管道/重定向没有缓冲区可直写,恒 false)。
 struct InlineRepaintPlan {
     bool vt_batch = false;
     bool sync_output = false;
+    // 扫光档位门(思考活动条扫光复活单):逐字扫光只在"整行直写、光标
+    // 一步不挪"的原生档跑才有意义——VT 批内 CUP 会搬光标(一轮病根),
+    // 降级档维持静态蓝点+秒钟。footer 在 BeginStreamFooter 探一次存住。
+    bool native_rows = false;
 };
 // 选路规矩(8.2 二轮重裁,"2026 保护光标"的前提已被实验否定):
 //   8.1 取证实锤——conhost 手搓 DECRQM 答 `CSI ?2026;2$y`(认得 2026),

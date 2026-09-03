@@ -455,9 +455,34 @@ bool PaintInlineFrameNativeRows(const InlineFrame* previous, const InlineFrame& 
     return true;
 }
 
+std::size_t WorkingHighlightGlyph(std::size_t beat, const std::vector<int>& glyph_widths) {
+    std::size_t total_cells = 0;
+    for (const int width : glyph_widths) {
+        if (width > 0) {
+            total_cells += static_cast<std::size_t>(width);
+        }
+    }
+    if (total_cells == 0) {
+        return kActivityHighlightNone;  // 空标签(或全是零宽字):没字可亮
+    }
+    const std::size_t cell = beat % total_cells;  // 走到尽头按总格数回绕
+    std::size_t covered = 0;
+    for (std::size_t i = 0; i < glyph_widths.size(); ++i) {
+        const std::size_t width = glyph_widths[i] > 0 ? static_cast<std::size_t>(glyph_widths[i]) : 0;
+        if (cell < covered + width) {
+            return i;  // 光落在这一格;宽字双格都归它(第二格=同字第二拍)
+        }
+        covered += width;
+    }
+    return kActivityHighlightNone;  // 防御:格账与宽度表对不上时不亮
+}
+
 bool TurnActivityRowChanged(std::string_view old_label, long long old_seconds, bool old_interrupted,
-                            std::string_view new_label, long long new_seconds, bool new_interrupted) {
-    return old_seconds != new_seconds || old_interrupted != new_interrupted || old_label != new_label;
+                            std::size_t old_highlight,
+                            std::string_view new_label, long long new_seconds, bool new_interrupted,
+                            std::size_t new_highlight) {
+    return old_seconds != new_seconds || old_interrupted != new_interrupted || old_label != new_label ||
+           old_highlight != new_highlight;
 }
 
 ViewportRevealPlan ComputeViewportReveal(int buffer_height, int viewport_y, int viewport_height, int top_row,

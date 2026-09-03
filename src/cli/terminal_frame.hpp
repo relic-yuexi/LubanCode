@@ -78,11 +78,32 @@ std::vector<platform::NativeRowCell> BuildNativeRowCells(std::string_view utf8_t
 bool PaintInlineFrameNativeRows(const InlineFrame* previous, const InlineFrame& next, int origin_y,
                                 std::size_t* painted_rows = nullptr);
 
-// 活动行的重画判据(终端思考活动条单·P0 止血):只有秒数、阶段标签或
-// 中断态变化,这一行才算变了——逐字扫光撤除后动画不再是变化源,同一秒
-// 内的心跳闲拍照此直接收手,帧审计零新增落笔。纯函数,帧测试钉合同。
+// ---------------------------------------------------------------------------
+// 思考活动条扫光(思考活动条扫光复活单):一轮砍掉的逐字高亮在原生直写
+// 地基上复活——每格 CHAR_INFO 自带属性,高亮只是活动行几个格子的颜色位
+// 换了,行文本不动、光标不动、stdout 零字节。档位门在 PlanInlineRepaint
+// 的 native_rows(降级档不跑动画);这里只放纯函数。
+// ---------------------------------------------------------------------------
+
+// "这一拍不高亮"的记号(降级档/空标签/plain 主题)。
+inline constexpr std::size_t kActivityHighlightNone = static_cast<std::size_t>(-1);
+
+// 高亮位计算(纯函数,只算格位不碰布局):标签按显示格铺开,心拍每 200ms
+// 前进一格,落在哪格就亮哪个字。宽字占双格——光走到宽字后半格的那一拍
+// 亮的还是同一个字(宽字双格占两拍,那拍高亮位没变,调用方据此零落笔);
+// 走到标签尽头按总格数回绕。零宽字(组合附标)不占格、永远轮不到亮。
+// glyph_widths 为空返回 kActivityHighlightNone。
+std::size_t WorkingHighlightGlyph(std::size_t beat, const std::vector<int>& glyph_widths);
+
+// 活动行的重画判据(终端思考活动条单立档,扫光复活单加"高亮位"档):
+// 秒数、阶段标签、中断态或高亮位任一变化,这一行才算变了。同一秒、同一
+// 高亮位的闲拍(宽字第二格的回绕拍)据此直接收手,帧审计零新增落笔;
+// 高亮位一档只在原生直写档有值,降级档恒 kActivityHighlightNone,天然
+// 不构成变化源。纯函数,帧测试钉合同。
 bool TurnActivityRowChanged(std::string_view old_label, long long old_seconds, bool old_interrupted,
-                            std::string_view new_label, long long new_seconds, bool new_interrupted);
+                            std::size_t old_highlight,
+                            std::string_view new_label, long long new_seconds, bool new_interrupted,
+                            std::size_t new_highlight);
 
 // ---------------------------------------------------------------------------
 // 帧账的"保锚可见"决策(多智能体真机回归单,纯函数):从 top_row 起

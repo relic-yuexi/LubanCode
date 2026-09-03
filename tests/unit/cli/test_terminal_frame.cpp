@@ -128,6 +128,13 @@ TEST_CASE("inline repaint plan: 8.2 二轮重裁——Windows 恒原生直写,VT
     const auto plan_none = lubancode::platform::PlanInlineRepaint(none);
     CHECK_FALSE(plan_none.vt_batch);
     CHECK_FALSE(plan_none.sync_output);
+    // 扫光档(思考活动条扫光复活单):Windows 真 console 有缓冲区可直写;
+    // POSIX 无原生路,恒关——降级档不跑动画。
+#ifdef _WIN32
+    CHECK(plan_none.native_rows);
+#else
+    CHECK_FALSE(plan_none.native_rows);
+#endif
 
     // 普通 VT + 未确认 2026:Windows 恒原生直写行(8.1 实锤批内 CUP 搬
     // buffer 光标,2026 只缓冲文本渲染救不了);POSIX 无原生路,退 VT 批
@@ -140,9 +147,11 @@ TEST_CASE("inline repaint plan: 8.2 二轮重裁——Windows 恒原生直写,VT
 #ifdef _WIN32
     CHECK_FALSE(plan_vt_only.vt_batch);
     CHECK_FALSE(plan_vt_only.sync_output);
+    CHECK(plan_vt_only.native_rows);
 #else
     CHECK(plan_vt_only.vt_batch);
     CHECK_FALSE(plan_vt_only.sync_output);
+    CHECK_FALSE(plan_vt_only.native_rows);
 #endif
 
     // 普通 VT + 确认 2026:8.2 裁决"2026 保护光标"的前提已被实验否定——
@@ -156,9 +165,11 @@ TEST_CASE("inline repaint plan: 8.2 二轮重裁——Windows 恒原生直写,VT
 #ifdef _WIN32
     CHECK_FALSE(plan_vt_sync.vt_batch);
     CHECK_FALSE(plan_vt_sync.sync_output);
+    CHECK(plan_vt_sync.native_rows);
 #else
     CHECK(plan_vt_sync.vt_batch);
     CHECK(plan_vt_sync.sync_output);
+    CHECK_FALSE(plan_vt_sync.native_rows);
 #endif
 
     // 防御:VT 都不开却报 sync(矛盾输入),一律按无 VT 处理。
@@ -169,6 +180,17 @@ TEST_CASE("inline repaint plan: 8.2 二轮重裁——Windows 恒原生直写,VT
     const auto plan_broken = lubancode::platform::PlanInlineRepaint(broken);
     CHECK_FALSE(plan_broken.vt_batch);
     CHECK_FALSE(plan_broken.sync_output);
+
+    // 管道/重定向(is_console=false):没有屏幕缓冲区,Windows 上 vt_batch
+    // 虽也恒 false,但原生直写同样落空——扫光档必须关,管道里不跑动画。
+    StdoutConsoleProbe piped;
+    piped.is_console = false;
+    piped.vt_enabled = false;
+    piped.sync_output = false;
+    const auto plan_piped = lubancode::platform::PlanInlineRepaint(piped);
+    CHECK_FALSE(plan_piped.vt_batch);
+    CHECK_FALSE(plan_piped.sync_output);
+    CHECK_FALSE(plan_piped.native_rows);
 }
 
 TEST_CASE("frame diff: 只有活动行变时,批的末笔光标恒归 composer 输入位") {
@@ -196,16 +218,74 @@ TEST_CASE("frame diff: 只有活动行变时,批的末笔光标恒归 composer �
     CHECK(tail == "\x1b[10;5H\x1b[?25h\x1b[?2026l");
 }
 
-TEST_CASE("turn activity row: 同一秒零变化,秒数/标签/中断态变才重画") {
+TEST_CASE("turn activity row: 同一秒零变化,秒数/标签/中断态/高亮位变才重画") {
     using lubancode::cli::TurnActivityRowChanged;
-    // 同一秒、同一标签、同一中断态:不是变化,闲拍零落笔。
-    CHECK_FALSE(TurnActivityRowChanged("思考中", 10, false, "思考中", 10, false));
-    // 秒数进一:重画。
-    CHECK(TurnActivityRowChanged("思考中", 10, false, "思考中", 11, false));
-    // 阶段换词(Begin/Stopping):重画。
-    CHECK(TurnActivityRowChanged("思考中", 10, false, "Stopping...", 10, false));
-    // 中断置位(圆点换 error 色):重画。
-    CHECK(TurnActivityRowChanged("思考中", 10, false, "思考中", 10, true));
+    using lubancode::cli::kActivityHighlightNone;
+    // 同一秒、同一标签、同一中断态、同一高亮位:不是变化,闲拍零落笔。
+    CHECK_FALSE(TurnActivityRowChanged("思考中", 10, false, 0, "思考中", 10, false, 0));
+    // 高亮位变(扫光移格):重画——扫光复活后活动行的新变化源。
+    CHECK(TurnActivityRowChanged("思考中", 10, false, 0, "思考中", 10, false, 1));
+    // 高亮位没变(宽字双格的第二拍):不算变化,帧账不进无变化帧。
+    CHECK_FALSE(TurnActivityRowChanged("思考中", 10, false, 1, "思考中", 10, false, 1));
+    // 有高亮 <-> 无高亮(降级档首拍/末拍):重画。
+    CHECK(TurnActivityRowChanged("思考中", 10, false, kActivityHighlightNone, "思考中", 10, false, 0));
+    CHECK(TurnActivityRowChanged("思考中", 10, false, 0, "思考中", 10, false, kActivityHighlightNone));
+    CHECK_FALSE(TurnActivityRowChanged("思考中", 10, false, kActivityHighlightNone, "思考中", 10, false,
+                                       kActivityHighlightNone));
+    // 旧三档照旧:秒数/标签/中断态。
+    CHECK(TurnActivityRowChanged("思考中", 10, false, 0, "思考中", 11, false, 0));
+    CHECK(TurnActivityRowChanged("思考中", 10, false, 0, "Stopping...", 10, false, 0));
+    CHECK(TurnActivityRowChanged("思考中", 10, false, 0, "思考中", 10, true, 0));
+}
+
+// ---- 思考活动条扫光复活单:高亮位轮换纯函数 --------------------------------
+// 光按显示格走:宽字双格占两拍(第二拍同字,调用方零落笔),尽头回绕归零,
+// 单字标签恒亮同一字(动画自然消失),空标签没字可亮。
+
+TEST_CASE("working highlight: 按显示格逐拍轮换,宽字双格占两拍,回绕归零") {
+    using lubancode::cli::WorkingHighlightGlyph;
+    using lubancode::cli::kActivityHighlightNone;
+    // "思考中":三个宽字 = 六个显示格。光走格:思(两格,两拍同亮)→考→中,
+    // 第六格走完按总格数回绕回"思"。
+    const std::vector<int> cn{2, 2, 2};
+    CHECK(WorkingHighlightGlyph(0, cn) == 0);
+    CHECK(WorkingHighlightGlyph(1, cn) == 0);  // 思的第二格:同字,占两拍
+    CHECK(WorkingHighlightGlyph(2, cn) == 1);
+    CHECK(WorkingHighlightGlyph(3, cn) == 1);
+    CHECK(WorkingHighlightGlyph(4, cn) == 2);
+    CHECK(WorkingHighlightGlyph(5, cn) == 2);
+    CHECK(WorkingHighlightGlyph(6, cn) == 0);  // 边界回绕:第六拍回头亮第一字
+    CHECK(WorkingHighlightGlyph(7, cn) == 0);
+    CHECK(WorkingHighlightGlyph(12, cn) == 0);  // 两轮之后仍对齐
+
+    // 混排 "a思b":1+2+1 = 4 格。
+    const std::vector<int> mixed{1, 2, 1};
+    CHECK(WorkingHighlightGlyph(0, mixed) == 0);
+    CHECK(WorkingHighlightGlyph(1, mixed) == 1);
+    CHECK(WorkingHighlightGlyph(2, mixed) == 1);  // 思的第二格
+    CHECK(WorkingHighlightGlyph(3, mixed) == 2);
+    CHECK(WorkingHighlightGlyph(4, mixed) == 0);  // 回绕
+
+    // 标签长度 1(单字):每一拍都亮同一个字——高亮位永不变,零动画帧。
+    const std::vector<int> single{2};
+    CHECK(WorkingHighlightGlyph(0, single) == 0);
+    CHECK(WorkingHighlightGlyph(1, single) == 0);
+    CHECK(WorkingHighlightGlyph(9, single) == 0);
+
+    // 单字窄标签同理。
+    const std::vector<int> narrow{1};
+    CHECK(WorkingHighlightGlyph(0, narrow) == 0);
+    CHECK(WorkingHighlightGlyph(5, narrow) == 0);
+
+    // 空标签:没字可亮。
+    const std::vector<int> empty;
+    CHECK(WorkingHighlightGlyph(0, empty) == kActivityHighlightNone);
+
+    // 零宽字(组合附标):不占格,永远轮不到亮。
+    const std::vector<int> zero_width{1, 0, 1};
+    CHECK(WorkingHighlightGlyph(0, zero_width) == 0);
+    CHECK(WorkingHighlightGlyph(1, zero_width) == 2);
+    CHECK(WorkingHighlightGlyph(2, zero_width) == 0);
 }
 
 // ---- 单 2 二轮(8.2):原生行直写的纯函数合同 ----
