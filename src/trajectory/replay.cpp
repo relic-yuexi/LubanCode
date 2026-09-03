@@ -1297,6 +1297,19 @@ StreamScan ScanStream(const std::filesystem::path& session_dir, const std::files
             if (parent_call != envelope.relations.end() && parent_call->is_string()) {
                 scan.parent_call_id = parent_call->get<std::string>();
             }
+            // 回滚纪律(§十七:超前的 min_reader_version 明拒,不判 corrupt、
+            // 不猜着读):verifier 与 replay 同一道门——旧 binary 遇新账,
+            // verify 也得报 unsupported,不能只验链路后装作可读。链路本身
+            // 已经红了的流不盖错码(红因照旧报)。
+            if (scan.verified.ok) {
+                const auto min_reader = envelope.payload.find("min_reader_version");
+                if (min_reader != envelope.payload.end() && min_reader->is_number_unsigned() &&
+                    min_reader->get<std::uint64_t>() >
+                        static_cast<std::uint64_t>(kMaxEnvelopeSchemaVersion)) {
+                    scan.verified.ok = false;
+                    scan.verified.error_code = "verify.unsupported_reader_version";
+                }
+            }
         }
         if (envelope.kind == EventKind::RunCompleted || envelope.kind == EventKind::RunFailed ||
             envelope.kind == EventKind::RunCancelled) {

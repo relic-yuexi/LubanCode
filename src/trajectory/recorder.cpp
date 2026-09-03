@@ -958,6 +958,13 @@ RecordReceipt TrajectoryRecorder::WriteRunStarted(nlohmann::json extra, Durabili
     for (auto it = extra.begin(); it != extra.end(); ++it) {
         payload[it.key()] = it.value();
     }
+    // §8.4:run.started 必写 writer_version/min_reader_version(P0-6 收口:
+    // 主账 launch/clear/resume/恢复器各路从前漏写,回滚条款没了抓手——
+    // 收进 recorder 一处,任何调用方都带合同键。min_reader_version 取
+    // event_schema_version(v2 usage 事件须 v2 读者;调用方显式写了同值
+    // 被覆盖成真值,不再手填)。
+    payload["writer_version"] = impl_->options.recorder_version;
+    payload["min_reader_version"] = static_cast<std::uint64_t>(impl_->options.event_schema_version);
     RecordRequest request;
     request.kind = EventKind::RunStarted;
     request.scope = impl_->base;
