@@ -6,6 +6,7 @@
 #include <sstream>
 
 #include "insights/derived_store.hpp"  // kDerivedAnalyzerDir
+#include "platform/atomic_write.hpp"   // 统一原子写(审计 P1)
 #include "platform/paths.hpp"          // ReplaceFileAtomically/PathToUtf8
 
 namespace lubancode::insights {
@@ -13,35 +14,13 @@ namespace {
 
 using lubancode::platform::PathToUtf8;
 
-// 文本整写(先 tmp 再换;tmp 建在目标旁,同文件系统)。
+// 文本整写,统一走 platform::AtomicWriteFile(审计 P1:替掉自备的
+// 固定 .tmp 协议;唯一临时名 + 平台原子替换 + 失败清理)。
 bool WriteTextAtomic(const std::filesystem::path& target, const std::string& text,
                      std::string* error) {
-    std::error_code ec;
-    std::filesystem::create_directories(target.parent_path(), ec);
-    if (ec) {
-        *error = "目录建不成: " + PathToUtf8(target.parent_path()) + ": " + ec.message();
-        return false;
-    }
-    std::filesystem::path tmp = target;
-    tmp += ".tmp";
-    {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out) {
-            *error = "临时文件打不开: " + PathToUtf8(tmp);
-            return false;
-        }
-        out << text;
-        out.flush();
-        if (!out) {
-            *error = "临时文件写失败: " + PathToUtf8(tmp);
-            std::filesystem::remove(tmp, ec);
-            return false;
-        }
-    }
-    const auto replaced = lubancode::platform::ReplaceFileAtomically(tmp, target);
-    if (!replaced.has_value()) {
-        *error = "原子替换失败: " + replaced.error();
-        std::filesystem::remove(tmp, ec);
+    const auto written = lubancode::platform::AtomicWriteFile(target, text);
+    if (!written.has_value()) {
+        *error = written.error().message;
         return false;
     }
     return true;

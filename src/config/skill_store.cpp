@@ -16,6 +16,8 @@
 #include <cpr/cpr.h>
 #include <nlohmann/json.hpp>
 
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1:来源账本先删后换退场)
+
 
 namespace lubancode::config {
 
@@ -630,22 +632,12 @@ std::expected<void, std::string> SaveRemoteSkillRecords(const fs::path& skills_r
         root["skills"][*name] = {{"url", record.source_url}, {"installed_at", record.installed_at}};
     }
 
+    // 来源账本统一走 platform::AtomicWriteFile(旧写法先挪开旧账再换名,
+    // 窗口里账本不在;平台件原子替换,失败不动旧账)。
     const fs::path target = SourcesPath(skills_root);
-    fs::path temporary = target;
-    temporary += ".tmp";
-    if (const auto wrote = WriteWholeFile(temporary, root.dump(2) + "\n"); !wrote.has_value()) {
-        return std::unexpected(wrote.error());
-    }
-    std::error_code ec;
-    fs::remove(target, ec);  // Windows 不肯 rename 覆盖已有文件,先挪开旧账
-    if (ec) {
-        fs::remove(temporary, ec);
-        return std::unexpected("替换来源账本失败: " + ec.message());
-    }
-    fs::rename(temporary, target, ec);
-    if (ec) {
-        fs::remove(temporary, ec);
-        return std::unexpected("写入来源账本失败: " + ec.message());
+    const auto written = platform::AtomicWriteFile(target, root.dump(2) + "\n");
+    if (!written.has_value()) {
+        return std::unexpected("写入来源账本失败: " + written.error().message);
     }
     return {};
 }
