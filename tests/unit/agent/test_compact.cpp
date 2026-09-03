@@ -757,8 +757,11 @@ TEST_CASE("AgentLoop: projected overflow 在请求前通报,回调里压缩后�
     api::Message old_user;
     old_user.role = api::Role::User;
     std::string short_terms;
-    short_terms.reserve(50000);
-    for (int i = 0; i < 25000; ++i) short_terms += "a ";
+    short_terms.reserve(100000);
+    // 压缩触发失衡单后是双闸:托底尺虚算(projected)与真实水位(日常尺,
+    // "a " 串按 ASCII/4 只有虚算一半)须同时过线。50000 词让真实水位也过
+    // 60% 线——短词漏算的形状照样唤醒压缩,只是不再单看虚算。
+    for (int i = 0; i < 50000; ++i) short_terms += "a ";
     old_user.content.push_back(api::TextBlock{std::move(short_terms)});
     api::Message old_assistant;
     old_assistant.role = api::Role::Assistant;
@@ -810,6 +813,124 @@ TEST_CASE("AgentLoop: projected overflow 在请求前通报,回调里压缩后�
             }
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 压缩触发失衡单:projected 虚算 × 80% 参考线 = 真实 ~25% 就误触发
+// midturn 压缩。修法双闸——projected(保守托底尺 + 输出预留,工作视图
+// 口径)过 kProjectedOverflowPercent 之外,真实水位(同一副工作视图,日常
+// 尺)也须过 kRealOverflowPercent;虚算单独不触发,该压的仍压。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("AgentLoop: 预估虚算单独不触发 midturn 压缩——真实水位约三成不再被喊溢出") {
+    // §三复现场景:256k 窗口,历史是短词密集的重复工具结果(run_command
+    // 是副作用工具,判重不给开门,结构压缩后重复结果仍全文)——保守托底
+    // 尺逐词计数把 projected 虚算到 80% 参考线之上,日常尺的真实水位却只有
+    // ~29%。修前单闸即真:midturn 压缩被误触发,压完"没有冷区榨不出收益"
+    // 空跑收场(用户真机 24% 即中的那副形状);修后双闸不同开,不触发。
+    FakeBackend backend;
+    backend.script = SummaryScript("回答正文,凑够字数,免得跟压缩门槛混淆。");
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"},
+                                          .runtime{.max_output_tokens = 65536, .max_context_chars = 600000},
+                                          .system_prompt = "sys"});
+    // 20 组 run_command 工具来回:每组 7500 个短词(15000 字节),托底尺
+    // 记 7500、日常尺只记 3750——虚算恰是真实水位的两倍。
+    std::vector<api::Message> history{UserText("跑构建")};
+    std::string short_terms;
+    short_terms.reserve(15000);
+    for (int i = 0; i < 7500; ++i) short_terms += "a ";
+    for (int i = 0; i < 20; ++i) {
+        const std::string id = "cmd_" + std::to_string(i);
+        history.push_back(AssistantToolUse(id, "run_command"));
+        history.push_back(UserToolResult(id, short_terms));
+    }
+    loop.ReplaceHistory(std::move(history));
+    loop.SetContextWindowTokens(262144);  // 256k
+    std::vector<agent::ContextPressure> seen;
+    agent::AgentWiring wiring;
+    wiring.on_context_pressure = [&](const agent::ContextPressure& pressure) { seen.push_back(pressure); };
+    loop.SetWiring(std::move(wiring));
+
+    REQUIRE(loop.Run("新问题", agent::TurnWiring{}).has_value());
+
+    REQUIRE_FALSE(seen.empty());
+    REQUIRE(seen.front().phase == agent::ContextPressure::Phase::PreRequest);
+    // 事件账如实反映双闸口径:projected(托底尺 + 输出预留)过了 80% 参考
+    // 线,working_view_tokens(真实水位,日常尺)远没过 60% 线。
+    CHECK(seen.front().window_tokens == 262144);
+    CHECK(seen.front().projected_tokens >= 262144 * 80 / 100);
+    CHECK(seen.front().working_view_tokens < 262144 * 60 / 100);
+    CHECK_FALSE(seen.front().working_view_overflow);
+    CHECK_FALSE(seen.front().projected_overflow);
+}
+
+TEST_CASE("AgentLoop: 真实水位过 60% 但 projected 未到 80% 参考线,不触发") {
+    // A 闸自己的钉:日常文本(floor ≈ 日常尺,不虚算)真实水位 64%,但
+    // projected 加上输出预留仍不到 80% 参考线——不压,留给 turn 间的
+    // ShouldAutoCompact 按真实 usage 收口。
+    FakeBackend backend;
+    backend.script = SummaryScript("回答正文,凑够字数,免得跟压缩门槛混淆。");
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"},
+                                          .runtime{.max_output_tokens = 2048},
+                                          .system_prompt = "sys"});
+    api::Message old_user;
+    old_user.role = api::Role::User;
+    std::string plain_words;
+    plain_words.reserve(84000);
+    for (int i = 0; i < 16800; ++i) plain_words += "word ";  // 84000 字节,两尺都记 21000
+    old_user.content.push_back(api::TextBlock{std::move(plain_words)});
+    loop.ReplaceHistory({std::move(old_user)});
+    loop.SetContextWindowTokens(32768);
+    std::vector<agent::ContextPressure> seen;
+    agent::AgentWiring wiring;
+    wiring.on_context_pressure = [&](const agent::ContextPressure& pressure) { seen.push_back(pressure); };
+    loop.SetWiring(std::move(wiring));
+
+    REQUIRE(loop.Run("新问题", agent::TurnWiring{}).has_value());
+
+    REQUIRE_FALSE(seen.empty());
+    REQUIRE(seen.front().phase == agent::ContextPressure::Phase::PreRequest);
+    CHECK(seen.front().working_view_tokens >= 32768 * 60 / 100);  // 真实水位 ~64%
+    CHECK(seen.front().working_view_overflow);
+    CHECK(seen.front().projected_tokens < 32768 * 80 / 100);  // 未到参考线
+    CHECK_FALSE(seen.front().projected_overflow);
+}
+
+TEST_CASE("AgentLoop: 真实水位 ≥80% 该触发仍触发(双闸同开)") {
+    // 不许把该压的放过去:真实水位 82%,projected 过参考线——两闸同开,
+    // midturn 压缩照常唤醒(回调里换短史后请求用新史重拼,既有册钉着)。
+    FakeBackend backend;
+    backend.script = SummaryScript("回答正文,凑够字数,免得跟压缩门槛混淆。");
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"},
+                                          .runtime{.max_output_tokens = 8192},
+                                          .system_prompt = "sys"});
+    api::Message old_user;
+    old_user.role = api::Role::User;
+    std::string plain_words;
+    plain_words.reserve(108000);
+    for (int i = 0; i < 21600; ++i) plain_words += "word ";  // 108000 字节,两尺都记 27000
+    old_user.content.push_back(api::TextBlock{std::move(plain_words)});
+    loop.ReplaceHistory({std::move(old_user)});
+    loop.SetContextWindowTokens(32768);
+    std::vector<agent::ContextPressure> seen;
+    agent::AgentWiring wiring;
+    wiring.on_context_pressure = [&](const agent::ContextPressure& pressure) { seen.push_back(pressure); };
+    loop.SetWiring(std::move(wiring));
+
+    REQUIRE(loop.Run("新问题", agent::TurnWiring{}).has_value());
+
+    REQUIRE_FALSE(seen.empty());
+    REQUIRE(seen.front().phase == agent::ContextPressure::Phase::PreRequest);
+    CHECK(seen.front().working_view_tokens >= 32768 * 80 / 100);  // 真实水位 ~82%
+    CHECK(seen.front().working_view_overflow);
+    CHECK(seen.front().projected_tokens >= 32768 * 80 / 100);
+    CHECK(seen.front().projected_overflow);
 }
 
 TEST_CASE("AgentLoop: TrimHistory 兜底真丢东西时,AfterHardTrim 通报") {

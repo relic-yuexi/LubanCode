@@ -1,6 +1,6 @@
 # 压缩触发失衡：预估虚算把 midturn 压缩线打穿到真实四分之一水位
 
-- 状态：待修（2026-09-03 用户真机实录立案）
+- 状态：已修（2026-09-03 A+B 双闸落地，先红后绿，全量 375 册零回归）
 - 级别：P1（频繁误触发自动压缩、白折腾一轮模型旁路请求的风险路）
 - 类型：LubanCode 产品缺陷（context 压力判定口径失衡）
 - 现场版本：`lubancode 0.26.189`
@@ -42,3 +42,12 @@
 - 不动拒绝空跑的失败路（诚实行为，保留）。
 - 不动 ShouldAutoCompact 的 80% 线（那是 turn 间自动压缩，另一条路，本次实录是 midturn 路）。
 - 不拿"调高阈值"糊弄——80% 是对的，错的是分子虚算。
+
+## 五、收尾（2026-09-03 销单记录）
+
+- A 口径归一：loop.cpp 的 PreRequest 先拼真请求那副 `BuildWorkingView`（压缩+字符安全网+sticky），projected 就拿这副视图估——估的和发的是同一副牌，不再走 `BuildPressureDryRunView`（它只剩 /context 显示与压缩预算侧用户）。输出预留单独保留；防下一轮再涨也靠它，不对整段历史做倍率虚算（重复结果去重由结构压缩负责）。
+- B 真实水位闸：`kRealOverflowPercent=60`（context.hpp）——触发改 `projected_overflow = projected 过 80% 参考线 && working_view_tokens 过 60%`。working_view_tokens 用日常尺（`EstimateHistoryTokens`，与 /context 同一把），projected 仍用托底尺——托底尺量"最坏放不放得下"是对的，量"现在用了多少"会虚抬两倍。
+- 回调换史重拼：压力回调里 ReplaceHistory 开新 epoch，epoch 断了按新史重拼工作视图再发——"projected overflow 在请求前通报,回调里压缩后请求换短史"既有行为不变（既有册原断言全保）。
+- 先红后绿：复现场景（256k 窗口 + 20 组 run_command 重复短词结果，真实水位 ~29%、虚算 projected 过 80% 线）修前 `CHECK_FALSE(projected_overflow)` 打红（值为 true，即修前必触发）；修后同场景不触发。真实水位 ≥80%（双闸同开）、水位过 60% 但 projected 未到 80%（A 闸单独拦）各有新钉。
+- 全量 ctest 375 册全绿；hysteresis 既有册（unit.agent.compact 内 ShouldSkipCompactForHysteresis、unit.app 内 TryRunCompact midturn）未动未退。
+- 留白：`ContextPressure` 新添 `working_view_tokens`/`working_view_overflow` 两字段已如实填；app_server 的 turn/context 通报暂未序列化这两枚（panel 工头同构渲染时顺手可接）。

@@ -115,10 +115,24 @@ std::vector<api::Message> TrimHistory(const std::vector<api::Message>& history,
 // kAutoCompactThresholdPercent 同档——这是参考线,不是写死的唯一口径。
 constexpr int kProjectedOverflowPercent = 80;
 
+// 真实水位闸(压缩触发失衡单 §二.B):projected 用的是"临出门"的保守
+// 托底尺(空白逐词计数),短词密集的工具输出能虚出日常尺的两倍——单看
+// 它判溢出,触发线实际落在真实水位的 ~25-27%,用户真机 24% 就被喊溢出、
+// 压完"没有冷区榨不出收益"空跑。B 闸要求工作视图按日常尺
+// (EstimateHistoryTokens,与 /context 同一把)的真实水位同时过这条线,
+// 虚算单独不触发;真实水位真到线上(配合 80% 参考线),该压的仍压。
+// 60 的依据:它必须显著低于 kProjectedOverflowPercent 才当得起"第二道
+// 保险"(A 的估算偏低时仍能拦住撞墙),又不能低到形同虚设——与
+// ShouldAutoCompact 的 80%(turn 间,按真实 usage)之间留出 midturn 提前
+// 收口的一档,不抢它的活。
+constexpr int kRealOverflowPercent = 60;
+
 // 每次模型请求前的上下文压力通报。phase 区分三种调用:
 //   PreRequest    —— 请求拼装前。projected_overflow 为真时,上层可在这个
 //                     安全点同步做语义压缩(ReplaceHistory);回调返回后
 //                     Run() 用(可能已换短的)history 重新拼请求。
+//                     (压缩触发失衡单后是双闸:projected 过参考线之外,
+//                     真实水位也须过 kRealOverflowPercent——见下。)
 //   AfterHardTrim —— TrimHistory 字符安全网这次真丢了东西(丢轮/截结果)。
 //                     纯通报:上层必须向用户显式告警"发生了有损硬裁",
 //                     不许静默降级;此时再压缩也救不回这一次的请求。
@@ -129,9 +143,19 @@ constexpr int kProjectedOverflowPercent = 80;
 struct ContextPressure {
     enum class Phase { PreRequest, AfterHardTrim, PreflightExceeded };
     Phase phase = Phase::PreRequest;
-    bool projected_overflow = false;   // 预计(含输出预留)放不下
-    std::size_t projected_tokens = 0;  // 估算的下一请求 prompt + 输出预留
+    // 双闸同时过线才为真(压缩触发失衡单 §二):projected(保守托底尺 +
+    // 输出预留)过 kProjectedOverflowPercent,且 working_view_tokens(日常
+    // 尺的真实水位)过 kRealOverflowPercent。虚算单独不触发——单看托底
+    // 尺,真实水位四分之一就会被喊溢出。
+    bool projected_overflow = false;
+    std::size_t projected_tokens = 0;  // 估算的下一请求 prompt + 输出预留(工作视图口径 + 托底尺)
     std::size_t window_tokens = 0;     // 有效窗口;0 = 未知
+    // ---- B 闸自账(PreRequest 时填;轨迹/前端对账用)----------------------
+    // working_view_tokens:与真请求同一副工作视图按日常尺(EstimateHistory
+    // Tokens)估的 token,不含 system/工具表/输出预留——与 /context 显示同
+    // 一把尺。working_view_overflow:它过没过 kRealOverflowPercent 线。
+    std::size_t working_view_tokens = 0;
+    bool working_view_overflow = false;
     bool hard_trimmed_turns = false;   // 丢了中间整轮
     std::size_t hard_dropped_messages = 0;
     bool hard_truncated_results = false;  // 截了超大工具结果

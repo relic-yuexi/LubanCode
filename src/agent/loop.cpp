@@ -1059,40 +1059,65 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
         }
 
-        // mid-turn 安全点:拼请求前先估 projected——system + 工具定义 + 输出
-        // 预留 + history,过参考线就把压力通报出去。history 走压力 dry-run
-        // 视图(P1-1 口径统一):与下面 BuildWorkingView 发出去的是同一副
-        // 结构压缩后的形状——拿未压缩的全量估,重复工具结果与超长回包都
-        // 被虚算进去,真请求 47k 时估出 189k,压缩被误触发又一压再压。
-        // 上层回调里可以同步做一次语义压缩(ReplaceHistory),返回后下面
-        // BuildWorkingView 拿到的就是(可能已换短的)请求视图。窗口未知(0)
-        // 或没设回调时跳过,行为与从前一致——这一步不发出任何请求,估错了
-        // 也不会误伤。
+        // mid-turn 安全点:先拼好真请求要发的那副工作视图(无损结构压缩 +
+        // 字符安全网 + sticky,全在 ContextManager;真丢了东西的因它自己记
+        // 进前缀账),projected 就拿这副视图估——口径归一(压缩触发失衡单
+        // §二.A):估的和发的是同一副牌,不再走 BuildPressureDryRunView 单独
+        // 虚算。旧路的两笔账分家:P1-1 之前拿未压缩全量估(真请求 47k 估出
+        // 189k);P1-1 之后虽与工作视图同样去重,但不走字符安全网与 sticky,
+        // 且量它的尺是"临出门"的保守托底尺——短词密集的工具输出(副作用
+        // 工具的重复结果判重不开门,结构压缩收不走)逐词计数能虚出日常尺
+        // 两倍,叠加按真实口径标定的 80% 参考线,触发线实际落在真实水位
+        // ~25%:用户真机 61.5k/256k(24%)被喊溢出,压完"没有冷区榨不出
+        // 收益"空跑收场。
+        // 双闸(§二.B):projected 过 kProjectedOverflowPercent 参考线之外,
+        // 真实水位(同一副工作视图按日常尺 EstimateHistoryTokens,与 /context
+        // 显示同一把)也须过 kRealOverflowPercent——虚算单独不触发;真实
+        // 水位真到线上,该压的仍压。上层回调里可以同步做一次语义压缩
+        // (ReplaceHistory 开新 epoch),返回后 epoch 断了就按新史重拼——
+        // 发出去的仍是(可能已换短的)那份请求视图。窗口未知(0)或没设
+        // 回调时只拼视图不评估,行为与从前一致——这一步不发出任何请求。
+        ContextWorkingView working_view = context_.BuildWorkingView({profile_.max_context_chars});
         if (profile_.context_window_tokens > 0 && wiring_.on_context_pressure) {
             // 输出上限纳入 projected 计算(规格根因一):声明了用声明值,
             // unset 用保守估计(kUnsetOutputReserveEstimateTokens)——服务端
-            // 默认上限拿不到准数,宁可早压不撞墙。
+            // 默认上限拿不到准数,宁可早压不撞墙。输出预留单独保留:那是
+            // 真会占窗口的空间;防"下一轮工具结果再涨"也靠它,不再对整段
+            // 历史做倍率虚算(重复结果的去重由工作视图的结构压缩负责)。
             const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
             std::size_t projected = EstimateTextTokensForPreflight(request.system) +
-                                    EstimateHistoryTokensForPreflight(context_.BuildPressureDryRunView()) +
+                                    EstimateHistoryTokensForPreflight(working_view.messages) +
                                     static_cast<std::size_t>(output_budget.reserve_for_estimate());
             for (const auto& tool : request.tools) {
                 projected += EstimateTextTokensForPreflight(tool.name) +
                              EstimateTextTokensForPreflight(tool.description) +
                              EstimateTextTokensForPreflight(tool.input_schema.dump());
             }
+            // B 闸的真实水位:同一副工作视图,换日常尺(全库统一的
+            // EstimateUtf8Tokens 口径,无逐词托底)——projected 那把托底尺
+            // 量"最坏情况放不放得下"是对的,量"现在真实用了多少"会把
+            // 短词密集的历史虚抬两倍;水位与 /context 同尺,账才对得上。
+            const std::size_t working_view_tokens = EstimateHistoryTokens(working_view.messages);
+            const std::size_t projected_line =
+                profile_.context_window_tokens * static_cast<std::size_t>(kProjectedOverflowPercent) / 100;
+            const std::size_t real_line =
+                profile_.context_window_tokens * static_cast<std::size_t>(kRealOverflowPercent) / 100;
             ContextPressure pressure;
             pressure.phase = ContextPressure::Phase::PreRequest;
             pressure.projected_tokens = projected;
             pressure.window_tokens = profile_.context_window_tokens;
-            pressure.projected_overflow =
-                projected >= profile_.context_window_tokens * static_cast<std::size_t>(kProjectedOverflowPercent) / 100;
+            pressure.working_view_tokens = working_view_tokens;
+            pressure.working_view_overflow = working_view_tokens >= real_line;
+            pressure.projected_overflow = projected >= projected_line && pressure.working_view_overflow;
+            const int epoch_before = context_.cache_epoch();
             wiring_.on_context_pressure(pressure);
+            if (context_.cache_epoch() != epoch_before) {
+                // 回调里真换了史(midturn compact 走 ReplaceHistory):按新史
+                // 重拼工作视图——ReplaceHistory 已清决策台账与 sticky,重拼
+                // 从头定形,与旧时序(压完再 BuildWorkingView)同一副牌。
+                working_view = context_.BuildWorkingView({profile_.max_context_chars});
+            }
         }
-
-        // 工作视图(压缩 + 字符安全网 + sticky)全在 ContextManager;真丢了
-        // 东西(丢轮/截结果)的因它自己记进前缀账。
-        const ContextWorkingView working_view = context_.BuildWorkingView({profile_.max_context_chars});
         request.messages = working_view.messages;
         const TrimReport& trim_report = working_view.trim;
         // 编码关口(兜底前的主动闸):消息内容上 wire 前统一过一遍清洗,

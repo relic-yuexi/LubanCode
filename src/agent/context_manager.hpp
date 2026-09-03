@@ -85,9 +85,11 @@ public:
     // 压力/触发线专用的 dry-run 视图(P1-1 口径统一):与 BuildWorkingView
     // 走同一条无损结构压缩决策路,但 memo/stats/store 全用临时账——不落
     // 盘、不钉决策、不翻 sticky,纯回答"下一份请求真会发出去的 history
-    // 长什么样"。触发线、/context 与压缩前后账都该拿这一本,不该拿未压
-    // 缩的全量 history(真机 189k 的估账对 47k 的真实请求,就是两把尺
-    // 分家的账)。
+    // 长什么样"。/context 与压缩前后账拿这一本,不该拿未压缩的全量
+    // history(真机 189k 的估账对 47k 的真实请求,就是两把尺分家的账)。
+    // 注意:midturn 触发线自压缩触发失衡单起不再用这本——loop 直接拿
+    // BuildWorkingView 的真视图估(连字符安全网与 sticky 的形状都一致),
+    // 这本只剩显示/预算侧的用户。
     std::vector<api::Message> BuildPressureDryRunView() const;
 
     // ---- 前缀账(agent/prefix.hpp)-----------------------------------------
