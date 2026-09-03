@@ -1,0 +1,32 @@
+# 子代理 spawn 链 UTF-8 清洗门：title 与 prompt 入账前消毒
+
+- 状态：待修（2026-09-03 真机实录立案）
+- 级别：P1（模型输出污染直接杀死子代理派工，fail closed 虽接住但活没干成）
+- 类型：LubanCode 产品缺陷（外部文本编码边界）
+- 现场版本：`lubancode 0.26.193`（minimax-m3 主会话）
+- 现场实录（session 20260903-153004-K2725J）：同 turn 并发派 4 只子代理，"P0 键贴场景"两只（#1/#4）双双死在 spawn：
+  `subagent.run.start_failed | stage=run_started | error_code: trajectory.subagent_run_started: io.canonical_failed: canonical_json.invalid_utf8: 字符串包含非法 UTF-8`
+  不同名的 #2/#3 正常存活。fail closed 与字段级留证（0.26.177）全对——治本缺口在清洗。
+- 不在本单：CanonicalJsonDump 的拒写行为（对，不动）；loop 已有的模型消息清洗门（SanitizeMessage，不重做）；fail closed 防线
+
+## 一、病根
+
+模型回的 agent 工具调用参数（title/prompt）可携带非法 UTF-8 字节（provider 流式坏字节或模型复制了脏内容）。参数直灌 spawn 链：`AgentTool::ExecuteDispatch` → `SpawnSubagent` → run.started payload → `CanonicalJsonDump` 才发现坏字节、整场拒绝——子代理死在起跑线。loop.cpp 的"编码关口"（SanitizeMessage）只洗模型消息正文，**工具调用参数这条路没有门**。
+
+## 二、修法（两道门，入口为主、账前兜底）
+
+1. **入口消毒（主刀）**：`AgentTool::ExecuteDispatch` 解析 title/prompt（及一切将进 spec/台账的字符串参数）后，立即过 `platform::SanitizeExternalText()`（保合法 UTF-8 片段、只替换坏字节——与 web/MCP/search 同一合同）。清洗后字节即可入账，canonical 不再拒。
+2. **账前兜底（保险）**：`SpawnSubagent` 写 run.started 前对 payload 字符串再做一次同款清洗（防其他调用方绕过工具入口——workflow/peer 派工路）。兜底清洗与入口清洗幂等，重复过无副作用。
+3. 诊断：入口清洗**替换了字节**时落一行 warning 日志（"子代理参数含 N 处非法 UTF-8 已消毒"，task_label 截断版）——用户可感知模型吐了脏东西，不静默。
+
+## 三、验收
+
+- 单测：title/prompt 带 `0x80` 孤立续字节/截断多字节/GBK 段——spawn 成功、run.started 落账合法 UTF-8、warning 计数正确；干净参数零 warning 零改动（逐字节不变）。
+- 复现景：构造与现场同形状（minimax 式坏字节 title）——修前 fail closed（红）、修后子代理正常起跑（绿）。
+- 全量 ctest 零回归；0.26.177 的 fail closed 册全部不退（防线仍在，只是好数据不再被误杀）。
+
+## 四、不做什么
+
+- 不放松 CanonicalJsonDump 校验
+- 不在 CanonicalJsonDump 里做清洗（账层只认不洗——脏数据该在进账前治）
+- 不改 fail closed 语义
