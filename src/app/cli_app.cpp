@@ -682,6 +682,23 @@ int RunCli(const std::vector<std::string>& args) {
         std::cout << trf("settings.local.warning", loaded.error()) << "\n";
     }
 
+    // 起手档位四源合议(高到低):--yes/LUBANCODE_CONFIRM_MODE >
+    // settings.local.json 的 default_confirm_mode > 内置默认。解析放在
+    // --config 早退之前——/config 与 --config 的诊断行要列出最终档位及
+    // 来源(单子 §七),拦在后面就没账可查了。警告走 stderr:管道模式的
+    // stdout 是数据口,一行不糟蹋。
+    {
+        const auto env_mode = lubancode::platform::GetEnvVar("LUBANCODE_CONFIRM_MODE");
+        std::vector<std::string> mode_warnings;
+        const lubancode::cli::ApprovalModeStart start = lubancode::cli::ResolveApprovalModeStart(
+            cli_options.auto_confirm, env_mode, settings_local.default_confirm_mode, &mode_warnings);
+        for (const std::string& warning : mode_warnings) {
+            std::cerr << warning << "\n";
+        }
+        lubancode::cli::SetConfirmMode(start.mode);
+        lubancode::cli::SetApprovalModeStart(start);
+    }
+
     if (cli_options.print_config) {
         PrintConfigDiagnostics(*config_result, std::nullopt, &model_catalog, &settings_local);
         return 0;
@@ -741,33 +758,6 @@ int RunCli(const std::vector<std::string>& args) {
     const lubancode::cli::Theme theme =
         lubancode::cli::ResolveTheme(config_result->config.theme, console_cap.colors_enabled);
     const bool spinner_enabled = console_cap.is_console;
-
-    // 起手档位优先级(高到低):--yes/LUBANCODE_CONFIRM_MODE >
-    // settings.local.json 的 default_confirm_mode > 内置默认。五个正式值由
-    // ParseConfirmMode 集中解析，旧 confirm 继续兼容为 default。
-    lubancode::cli::ConfirmMode initial_mode =
-        cli_options.auto_confirm ? lubancode::cli::ConfirmMode::Yolo : lubancode::cli::ConfirmMode::Confirm;
-    bool mode_from_explicit = cli_options.auto_confirm;
-    if (!cli_options.auto_confirm) {
-        if (const auto env_mode = lubancode::platform::GetEnvVar("LUBANCODE_CONFIRM_MODE"); env_mode.has_value()) {
-            if (const auto parsed = lubancode::cli::ParseConfirmMode(*env_mode)) {
-                initial_mode = *parsed;
-                mode_from_explicit = true;
-            } else {
-                std::cerr << "LUBANCODE_CONFIRM_MODE 值无效: " << *env_mode << "；已使用 default。\n";
-                mode_from_explicit = true;
-            }
-        }
-    }
-    if (!mode_from_explicit && settings_local.default_confirm_mode.has_value()) {
-        if (const auto parsed = lubancode::cli::ParseConfirmMode(*settings_local.default_confirm_mode)) {
-            initial_mode = *parsed;
-        } else {
-            std::cerr << "permissions.default_confirm_mode 值无效: "
-                      << *settings_local.default_confirm_mode << "；已使用 default。\n";
-        }
-    }
-    lubancode::cli::SetConfirmMode(initial_mode);
 
     // 钥匙撞车单:active provider 的 key_env 变量与 inline api_key 两把都有
     // 且不一致——变量赢,但得叫一声,不然 401 成了无头案(实战:Claude Code

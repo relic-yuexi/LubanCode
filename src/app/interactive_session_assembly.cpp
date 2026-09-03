@@ -589,6 +589,19 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // telemetry{} -> options 的折法在 AssembleTelemetryServiceForSession
     // (EnableTelemetryForSession 复用同一份)。
     if (auto* ledger = session_runtime_.trajectory()) {
+        // 切档即写(单子 §七):空闲/流式两处用户 Shift+Tab 切档的通知钩子
+        // 接到轨迹账——session manifest 的 approval_mode 跟着换,clear 继承
+        // 内存份、resume 继承盘上份同拍。写盘失败只声张一声,切档本身
+        // (SharedEditor 内存档)不受影响。
+        lubancode::cli::SetApprovalModeChangeHook(
+            [ledger](lubancode::cli::ConfirmMode mode) {
+                const std::string error =
+                    ledger->UpdateApprovalMode(static_cast<lubancode::ApprovalMode>(mode));
+                if (!error.empty()) {
+                    TermErr() << tr("error.prefix") << "切档已生效,但会话档位写盘失败: " << error
+                              << "\n";
+                }
+            });
         std::string telemetry_note;
         telemetry_service_ = AssembleTelemetryServiceForSession(
             config, config.features_telemetry, home_lubancode,

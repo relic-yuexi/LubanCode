@@ -228,6 +228,17 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
 ConfirmMode CurrentConfirmMode();
 void SetConfirmMode(ConfirmMode mode);
 
+// 当场切档的通知钩子(单子 §七"切档即写"):空闲 composer 与流式监听两处
+// 用户 Shift+Tab 切档、以及程序性当场换档(Plan 批准后的执行档)都调
+// NotifyApprovalModeChanged;装配层(interactive_session_assembly)把钩子
+// 接到轨迹账的 UpdateApprovalMode,session manifest 跟着换。启动装配的
+// 起手设定仍走 SetConfirmMode——不触发通知,起手档本就随建场写进
+// manifest。钩子未挂(单测/无轨迹账)时通知是 no-op。线程纪律同
+// AgentViewSwitchHook:装配期(主线程)设置一次,此后空闲主线程与流式
+// 监听线程只调不再改。
+void SetApprovalModeChangeHook(std::function<void(ConfirmMode)> hook);
+void NotifyApprovalModeChanged(ConfirmMode mode);
+
 // AllSlashCommands() -> LineEditorCore 补全候选的唯一转换口:空闲 composer
 // 的 SharedEditor() 与流式监听线程(TurnInputListener)的本地编辑器都从这
 // 里拿候选。命令清单仍只有 slash_commands 那一份——命令增删、i18n 说明变

@@ -404,6 +404,50 @@ TEST_CASE("权限矩阵:3.1 十一类裁定逐格覆盖五档") {
             }
         }
     }
+
+    // 同一张表再过一遍真执行路(单子 9.2 第一条:每格还要断言工具调用
+    // 次数):on_tool_confirm 一律答 true(用户点了放行),于是——
+    // Allow 放行执行 1 次、确认回调 0 次;Ask 进回调后放行,各 1 次;
+    // Deny 零回调零执行,结果条目带结构化拒绝。
+    for (const auto& row : rows) {
+        tools::ToolRegistry registry;
+        auto tool = std::make_unique<FakeTool>(row.name, true, row.approval_class);
+        FakeTool* tool_ptr = tool.get();
+        registry.Register(std::move(tool));
+        for (std::size_t column = 0; column < modes.size(); ++column) {
+            CAPTURE(row.scenario);
+            CAPTURE(column);
+            tool_ptr->calls = 0;
+            int confirm_calls = 0;
+            agent::TurnWiring wiring;
+            wiring.on_pre_tool_use_hook = [&row](const std::string&, const std::string&,
+                                                 const nlohmann::json&) {
+                runtime::ToolHookDecision pre;
+                pre.decision = row.hook;
+                return pre;
+            };
+            wiring.on_permission_evaluate = [&](const std::string&, const std::string& name,
+                                                tools::ApprovalClass approval_class,
+                                                const nlohmann::json& input,
+                                                const runtime::ToolHookDecision& pre) {
+                rt::PermissionContext context = MakeContext(modes[column]);
+                context.always_allowed = row.always_allowed ? &always : nullptr;
+                context.allow_commands = row.allow_command ? &allow : nullptr;
+                context.deny_commands = row.deny_command ? &deny : nullptr;
+                return rt::EvaluatePermission(context, pre, approval_class, name, input);
+            };
+            wiring.on_tool_confirm = [&](const std::string&, const std::string&, const nlohmann::json&) {
+                ++confirm_calls;
+                return true;
+            };
+            const auto result = agent::RunOneTool(
+                registry, {"matrix-id", row.name, row.input}, wiring, nullptr);
+            const Action expected = row.expected[column];
+            CHECK(tool_ptr->calls == (expected == Action::Deny ? 0 : 1));
+            CHECK(confirm_calls == (expected == Action::Ask ? 1 : 0));
+            CHECK(result.is_error == (expected == Action::Deny));
+        }
+    }
 }
 
 TEST_CASE("权限:RunOneTool 向 evaluator 传真实 ApprovalClass") {

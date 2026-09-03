@@ -529,6 +529,13 @@ public:
     // 本 workspace 最近一场可恢复的 session(空 = 没有)。
     std::string LatestResumableSessionId() const;
 
+    // 运行中切档即写(单子 §七):把 active 场 session.json 的 approval_mode
+    // 原子换成新档。终端空闲/流式两处用户 Shift+Tab 切档都经装配层挂的
+    // 钩子走到这里;clear 继承内存份、resume 继承盘上份,从此同拍。回空
+    // 串 = 成功,否则稳定码人话(账没开张/写盘失败——切档本身不失败,只是
+    // 持久化没跟上,调用方按可见性决定声张)。
+    std::string UpdateApprovalMode(ApprovalMode mode);
+
     // --continue 启动路开出来的场是不是 resume(装配层据此把折叠投影灌进
     // loop 的 history 并打"已恢复 N 条"一行)。
     bool resumed_at_launch() const;

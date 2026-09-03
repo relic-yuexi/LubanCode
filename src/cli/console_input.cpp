@@ -167,6 +167,11 @@ ModeNoticeState& ModeNoticeSlot() {
     static ModeNoticeState state;
     return state;
 }
+// 当场切档的持久化钩子槽(签名与线程纪律见 console_input_internal.hpp)。
+std::function<void(ConfirmMode)>& ApprovalModeChangeHookSlot() {
+    static std::function<void(ConfirmMode)> hook;
+    return hook;
+}
 // 视图切换钩子的槽(viewed_task_id 变了才被调;tail_rows>0 = 实时流重铺拍,
 // 见 console_input.hpp)。
 // [共享] composer(空闲切看铺帧)/监听线程(流式切看铺帧)/导出口
@@ -1384,6 +1389,16 @@ std::optional<ChoiceMenuResult> ReadChoiceMenu(const std::vector<ChoiceMenuItem>
 ConfirmMode CurrentConfirmMode() { return SharedEditor().confirm_mode(); }
 
 void SetConfirmMode(ConfirmMode mode) { SharedEditor().set_confirm_mode(mode); }
+
+void SetApprovalModeChangeHook(std::function<void(ConfirmMode)> hook) { ApprovalModeChangeHookSlot() = std::move(hook); }
+
+void NotifyApprovalModeChanged(ConfirmMode mode) {
+    // 引用先落局部:钩子体内若再切档(理论上不该),槽替换不影响本次调用。
+    const auto& hook = ApprovalModeChangeHookSlot();
+    if (hook) {
+        hook(mode);
+    }
+}
 // 非静默轮的"屏面可能被写"记账(见 ViewFrameLedgerSlot 注释):RunTurn 起
 // 跑/收口时调用,作废跨读取账——流式正文在自己的续写行落笔、可能与查看
 // 帧抢行,锚点从此不可信。静默轮不调(输出全进台账,屏面零扰动),账保住。

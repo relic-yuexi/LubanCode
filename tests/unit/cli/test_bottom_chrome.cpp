@@ -10,7 +10,9 @@
 
 #include <doctest/doctest.h>
 
+#include <algorithm>
 #include <chrono>
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -140,6 +142,82 @@ TEST_CASE("模式说明专位:状态行上方、与 transient 并存且安全裁
     BottomChromeFrame without = layout.chrome;
     without.mode_notice_rows.clear();
     CHECK(BottomChromeRevision(layout.chrome) != BottomChromeRevision(without));
+}
+
+// ---------------------------------------------------------------------------
+// 切档说明的零扰动合同(单子 §2.1/§九 9.1):说明出现与消失只多/少那一行,
+// 草稿字节(composer_digest)、软换行布局(composer_row_count)与物理光标
+// (cursor_x、光标相对输入区的行号)一个都不动;窄屏截断不切坏 UTF-8。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("切档说明零扰动:出现与消失不惊动草稿/软换行/物理光标,窄屏不截坏") {
+    const Theme plain;
+    // 多行中英混排草稿,光标落在中间逻辑行——软换行与光标最容易被动到。
+    BottomChromeModel model =
+        FramedModel(ComposerState({U"第一行草稿", U"middle line", U"尾巴"}, 1, 6), ComposerMode::Idle);
+
+    const BottomChromeLayout quiet = BuildBottomChromeLayout(model, plain, 40);
+    model.mode_notice_rows = {"自动模式：文件编辑与安全命令自动允许；其余操作仍会询问。"};
+    const BottomChromeLayout showing = BuildBottomChromeLayout(model, plain, 40);
+
+    // 多出的恰好是说明一行(帧顶、状态行上方),其余行逐行相同。
+    REQUIRE(showing.frame.rows.size() == quiet.frame.rows.size() + 1);
+    CHECK(Contains(showing.frame.rows[0].text, "自动模式"));
+    CHECK(std::equal(quiet.frame.rows.begin(), quiet.frame.rows.end(),
+                     showing.frame.rows.begin() + 1,
+                     [](const auto& a, const auto& b) { return a.text == b.text; }));
+    // 草稿字节与布局:digest/物理行数/光标列/光标相对输入区行号全不动。
+    CHECK(showing.chrome.composer_digest == quiet.chrome.composer_digest);
+    CHECK(showing.composer_row_count == quiet.composer_row_count);
+    CHECK(showing.cursor_x == quiet.cursor_x);
+    CHECK(showing.cursor_row - showing.composer_first_row ==
+          quiet.cursor_row - quiet.composer_first_row);
+    // 输入区整段行内容逐行相同(软换行布局没被重排)。
+    CHECK(std::equal(showing.frame.rows.begin() + showing.composer_first_row,
+                     showing.frame.rows.begin() + showing.composer_first_row + showing.composer_row_count,
+                     quiet.frame.rows.begin() + quiet.composer_first_row,
+                     [](const auto& a, const auto& b) { return a.text == b.text; }));
+
+    // 消失(到期收走)即回原帧:同一份 model 清掉 notice 再布局,帧与
+    // quiet 逐字节相同。
+    model.mode_notice_rows.clear();
+    const BottomChromeLayout gone = BuildBottomChromeLayout(model, plain, 40);
+    REQUIRE(gone.frame.rows.size() == quiet.frame.rows.size());
+    for (std::size_t i = 0; i < gone.frame.rows.size(); ++i) {
+        CHECK(gone.frame.rows[i].text == quiet.frame.rows[i].text);
+    }
+    CHECK(gone.chrome.composer_digest == quiet.chrome.composer_digest);
+    CHECK(gone.cursor_x == quiet.cursor_x);
+    CHECK(gone.cursor_row == quiet.cursor_row);
+
+    // 窄屏:说明行按宽截断(布局层 width-1),中文截掉也只丢整字——UTF-8
+    // 续字节结构完整、显示宽不越界。
+    model.mode_notice_rows = {"不询问：已授权的操作照常执行；需要询问的操作直接拒绝。"};
+    for (const int width : {4, 8, 12, 20}) {
+        CAPTURE(width);
+        model.mode_notice_rows.clear();
+        const BottomChromeLayout narrow = BuildBottomChromeLayout(model, plain, width);
+        model.mode_notice_rows = {"不询问：已授权的操作照常执行；需要询问的操作直接拒绝。"};
+        const BottomChromeLayout narrow_notice = BuildBottomChromeLayout(model, plain, width);
+        REQUIRE(narrow_notice.frame.rows.size() == narrow.frame.rows.size() + 1);
+        const std::string& notice = narrow_notice.frame.rows[0].text;
+        CHECK(DisplayWidthUtf8(notice) <= static_cast<std::size_t>(width - 1));
+        // UTF-8 逐字节过续字节结构(截坏多字节序列即红)。
+        int continuation = 0;
+        bool well_formed = true;
+        for (const unsigned char c : notice) {
+            if (continuation > 0) {
+                if ((c & 0xC0) != 0x80) { well_formed = false; break; }
+                --continuation;
+            } else if (c < 0x80) {
+            } else if ((c & 0xE0) == 0xC0) { continuation = 1;
+            } else if ((c & 0xF0) == 0xE0) { continuation = 2;
+            } else if ((c & 0xF8) == 0xF0) { continuation = 3;
+            } else { well_formed = false; break; }
+        }
+        const bool intact = well_formed && continuation == 0;
+        CHECK_MESSAGE(intact, "说明行窄屏截断切坏了 UTF-8");
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -496,6 +496,12 @@ public:
     // 按创建时间取新);跳过本进程 active 的那场。空串 = 没有。
     std::string LatestResumableSessionId();
 
+    // 运行中更新 active 场的审批档(单子 §七"切档即写"):manifest 内存份
+    // 与 session.json 原子写一起换——clear 换账继承的是内存份,resume 继承
+    // 的是盘上份,两本账同拍才算数。没有 active 场(未开张/已封口)回错,
+    // 调用方决定要不要声张。不落事件:这是会话元数据修补,不是工具裁定。
+    std::expected<void, std::string> UpdateApprovalMode(ApprovalMode mode);
+
     // 启动恢复器:扫 workspace 全部 session,以 Journal 可证事实为准重建
     // session.json;clear 崩在半路的按 next_session_id 与两边终态续办
     // (不合并两本 JSONL,不复用旧 session_id);可接续的新账收作 active。

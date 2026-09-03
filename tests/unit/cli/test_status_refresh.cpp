@@ -67,6 +67,179 @@ TEST_CASE("输入区模式行:当前档/下一档/技能数、yolo 红色与窄�
     SetLanguage("zh-CN");
 }
 
+// ---------------------------------------------------------------------------
+// 五档模式行的三主题与窄屏矩阵(单子 §二/§九 9.1):只染当前档名,后半句、
+// 下一档与 skills 不串模式色;plain 一个转义字节都不吐;窄屏分别卡在当前
+// 标签、切换提示、右端 skills 三处,UTF-8 不截半个字。说明行的窄屏截断
+// 在 test_bottom_chrome 的布局层钉。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 剥掉 CSI 序列(\x1b[...m),截断断言用——行里只剩可见文本。
+std::string StripAnsi(const std::string& line) {
+    std::string out;
+    for (std::size_t i = 0; i < line.size();) {
+        if (line[i] == '\x1b' && i + 1 < line.size() && line[i + 1] == '[') {
+            const std::size_t end = line.find('m', i + 2);
+            if (end == std::string::npos) {
+                break;
+            }
+            i = end + 1;
+        } else {
+            out += line[i];
+            ++i;
+        }
+    }
+    return out;
+}
+
+// 数一枚 ANSI 色码在行里出现的次数(染色"恰一次"用)。
+std::size_t CountOccurrences(const std::string& haystack, const std::string& needle) {
+    if (needle.empty()) {
+        return 0;
+    }
+    std::size_t count = 0;
+    for (std::size_t pos = haystack.find(needle); pos != std::string::npos;
+         pos = haystack.find(needle, pos + needle.size())) {
+        ++count;
+    }
+    return count;
+}
+
+// UTF-8 合法性(截断不切半个字的最硬证据):逐字节过一遍续字节结构。
+bool Utf8WellFormed(const std::string& text) {
+    int continuation = 0;
+    for (const unsigned char c : text) {
+        if (continuation > 0) {
+            if ((c & 0xC0) != 0x80) {
+                return false;
+            }
+            --continuation;
+        } else if (c < 0x80) {
+            // ASCII
+        } else if ((c & 0xE0) == 0xC0) {
+            continuation = 1;
+        } else if ((c & 0xF0) == 0xE0) {
+            continuation = 2;
+        } else if ((c & 0xF8) == 0xF0) {
+            continuation = 3;
+        } else {
+            return false;
+        }
+    }
+    return continuation == 0;  // 尾巴悬着半个多字节序列 = 截坏了
+}
+
+}  // namespace
+
+TEST_CASE("模式行三主题:只染当前档名一次,dark/light 各自色,plain 零转义") {
+    using namespace lubancode::cli;
+    SetLanguage("zh-CN");
+    struct ModeColor {
+        ConfirmMode mode;
+        const std::string Theme::*color;
+    };
+    const std::vector<ModeColor> cases{
+        {ConfirmMode::AcceptEdits, &Theme::mode_accept_edits},
+        {ConfirmMode::Yolo, &Theme::mode_yolo},
+        {ConfirmMode::Auto, &Theme::mode_auto},
+        {ConfirmMode::DontAsk, &Theme::mode_dont_ask},
+    };
+    for (const std::string theme_name : {"dark", "light"}) {
+        const Theme theme = BuiltinTheme(theme_name);
+        for (const auto& item : cases) {
+            CAPTURE(theme_name);
+            CAPTURE(static_cast<int>(item.mode));
+            BoxChrome chrome{true, &theme, item.mode};
+            const std::string line = BuildComposerModeLine(chrome, 12, 80);
+            const std::string& color = theme.*item.color;
+            REQUIRE(!color.empty());
+            // 当前档名恰好被这枚模式色包一次:color + label + reset。
+            CHECK(CountOccurrences(line, color) == 1);
+            CHECK(CountOccurrences(line, theme.reset) >= 1);
+            // 下一档名(提示里)不带任何模式色:剥掉"color+label+reset"后
+            // 剩余段不再含这枚色码(计数 1 已保证)。
+            const ModePresentation presentation = PresentApprovalMode(item.mode);
+            CHECK(line.find(color + presentation.current_label + theme.reset) != std::string::npos);
+        }
+        // 默认档不亮标签:一行里一枚模式色都不该有(默认无标签可染)。
+        BoxChrome chrome{true, &theme, ConfirmMode::Confirm};
+        const std::string plain_default = BuildComposerModeLine(chrome, 12, 80);
+        CHECK(plain_default.find(theme.mode_accept_edits) == std::string::npos);
+        CHECK(plain_default.find(theme.mode_yolo) == std::string::npos);
+        CHECK(plain_default.find(theme.mode_auto) == std::string::npos);
+        CHECK(plain_default.find(theme.mode_dont_ask) == std::string::npos);
+    }
+    // plain:整行一个转义字节都不许有(单子 §二:纯文本标签才是合同)。
+    const Theme plain = BuiltinTheme("plain");
+    for (const auto& item : cases) {
+        BoxChrome chrome{true, &plain, item.mode};
+        const std::string line = BuildComposerModeLine(chrome, 12, 80);
+        CHECK(line.find('\x1b') == std::string::npos);
+        // 纯文本合同仍成立:当前档名与切换提示都在。
+        const ModePresentation presentation = PresentApprovalMode(item.mode);
+        CHECK(line.find(presentation.current_label) != std::string::npos);
+        CHECK(line.find("Shift+Tab") != std::string::npos);
+    }
+    SetLanguage("en");
+    for (const auto& item : cases) {
+        BoxChrome chrome{true, &plain, item.mode};
+        const std::string line = BuildComposerModeLine(chrome, 3, 80);
+        CHECK(line.find('\x1b') == std::string::npos);
+    }
+    SetLanguage("zh-CN");
+}
+
+TEST_CASE("模式行窄屏:卡在当前标签/切换提示/skills 三处,UTF-8 与显示宽都不截坏") {
+    using namespace lubancode::cli;
+    SetLanguage("zh-CN");
+    const Theme plain = BuiltinTheme("plain");  // 剥掉 ANSI 变量,只看文本几何
+    // 中文档名与提示全是宽字符,各处截断都能把 UTF-8 切坏的坑暴露出来。
+    for (const ConfirmMode mode : {ConfirmMode::AcceptEdits, ConfirmMode::Auto, ConfirmMode::DontAsk,
+                                   ConfirmMode::Yolo, ConfirmMode::Confirm}) {
+        CAPTURE(static_cast<int>(mode));
+        for (const int width : {1, 2, 3, 5, 8, 13, 21, 34}) {
+            CAPTURE(width);
+            BoxChrome chrome{true, &plain, mode};
+            const std::string line = BuildComposerModeLine(chrome, 12, width);
+            const std::string visible = StripAnsi(line);
+            CHECK(Utf8WellFormed(visible));
+            CHECK(DisplayWidthUtf8(visible) <= static_cast<std::size_t>(width));
+        }
+    }
+    // 卡当前标签:"接受编辑"8 列 + gap 2 + "0 skills"8 列;宽 12 时左槽
+    // 只剩 2 列,标签截成"接"——丢字不切字。
+    {
+        BoxChrome chrome{true, &plain, ConfirmMode::AcceptEdits};
+        const std::string visible = StripAnsi(BuildComposerModeLine(chrome, 0, 12));
+        CHECK(Utf8WellFormed(visible));
+        CHECK(DisplayWidthUtf8(visible) <= 12);
+        CHECK(visible.find("接") != std::string::npos);    // 宽度内先保左侧档名
+        CHECK(visible.find("接受编辑") == std::string::npos);  // 标签确实被截
+    }
+    // 卡切换提示:标签(8 列)+ 3 空格 + 提示,宽 30 时左槽 20 列——标签
+    // 与 "Shift+Tab" 都在,提示尾巴的 YOLO 被截掉;ASCII 与中文交界不切坏。
+    {
+        BoxChrome chrome{true, &plain, ConfirmMode::AcceptEdits};
+        const std::string visible = StripAnsi(BuildComposerModeLine(chrome, 0, 30));
+        CHECK(Utf8WellFormed(visible));
+        CHECK(DisplayWidthUtf8(visible) <= 30);
+        CHECK(visible.find("接受编辑") != std::string::npos);
+        CHECK(visible.find("Shift+Tab") != std::string::npos);
+        CHECK(visible.find("YOLO") == std::string::npos);  // 提示确实被截
+    }
+    // 卡右端 skills:右段宽 >= 终端宽时整行只剩 skills(右端优先,已有
+    // 用例钉 10;这里再钉一个宽字符窄屏叠加场景)。
+    {
+        BoxChrome chrome{true, &plain, ConfirmMode::Auto};
+        const std::string visible = StripAnsi(BuildComposerModeLine(chrome, 1234, 9));
+        CHECK(visible == "1234 skil");  // 9 列全给 skills,截在尾部 ASCII
+        CHECK(Utf8WellFormed(visible));
+    }
+    SetLanguage("zh-CN");
+}
+
 // 按脚本吐事件的假后端,写法同 test_agent_tool.cpp:每调一次 send_stream
 // 按调用次序取下一组脚本吐出去。
 class FakeBackend : public api::Backend {
