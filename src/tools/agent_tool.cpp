@@ -31,6 +31,7 @@
 #include "platform/log_sink.hpp"  // §5.3 旧预算键的弃用日志
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:inbox 投递文本的编码关口
+#include "runtime/id_authority.hpp"    // ProcessIdAuthority:后台任务 bgtask 前缀号(同一发号口)
 #include "runtime/turn_runtime.hpp"    // MapPreToolDecision:PreToolUse 归并映射与主路径同一颗
 #include "tools/agent_message_tool.hpp"  // scoped agent_message(P1-1:子代理只投自己直接孩子)
 #include "tools/agent_watch_tool.hpp"  // scoped agent_watch(监督器单 P1-0:子代理只看自己直接孩子)
@@ -2801,7 +2802,10 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         sub_context.parent_agent_id = hook_parent_task_id != 0
                                           ? std::optional<std::string>(std::to_string(hook_parent_task_id))
                                           : std::nullopt;
-        sub_context.turn_id = "bgtask_" + sub_context.agent_id.value_or(std::string("0"));
+        // turn_id 从发号局的前缀档现发(bgtask-N,进程内单调不回收)——身份
+        // 分配同一口,不手拼字符串。后台任务没有宿主轮(跨轮活,挂派工那
+        // 一刻的宿主轮号必成错账),也不用 hookrun_* 代班号。
+        sub_context.turn_id = lubancode::runtime::ProcessIdAuthority().NextPrefixedId("bgtask");
         background_hooks->context() = sub_context;
         if (background_hooks->HasHandlersFor(lubancode::hooks::HookEvent::SubagentStart)) {
             lubancode::hooks::HookPayload start;

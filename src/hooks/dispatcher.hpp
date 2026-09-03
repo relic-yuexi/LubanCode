@@ -93,8 +93,10 @@ public:
 
     const HookTrustStore& trust_store() const { return trust_; }
 
-    // 单测/展示用:生成一次发射的 hook_run_id(单调递增 + 随机分量太重,
-    // 用"进程内计数 + 时间戳"就够对账)。
+    // 生成一次发射的 hook_run_id(单调递增 + 随机分量太重,用"进程内计数
+    // + 时间戳"就够对账)。只标单次 Hook 发射;不得拿来给 turn_id 代班——
+    // canonical turn id 由回合装配层在 UserPromptSubmit 之前从 IdAuthority
+    // 定一枚,四本账(hooks/事件流/trace/轨迹)共用。
     static std::string NextHookRunId();
 
     // ---- 后台(外挂)执行面 ----------------------------------------------

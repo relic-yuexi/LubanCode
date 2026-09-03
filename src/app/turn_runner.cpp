@@ -765,11 +765,34 @@ RunTurnResult RunTurn(TurnContext ctx) {
     const std::string background_results =
         completion_agent != nullptr ? completion_agent->DrainCompletionNotices() : std::string();
 
+    // canonical turn id(收口审计单 P0:Hook 的 turn_id 另造一本账):每轮只
+    // mint 一枚,且必须在 UserPromptSubmit 之前定下——宿主(trace 口径)发
+    // 过号的用那枚,没发的(one-shot/单测)从进程发号局现发,同一身份分配
+    // 口。此后本轮所有账——hooks 上下文、事件流(TurnEventAdapter)、trace
+    // hub、轨迹桥、视图账——只认这一枚,按 turn_id 联表不再裂账。
+    // prompt Hook 阻断的轮:号已预留(payload 里看得见),但事件流不 Start
+    //(不发 TurnStarted)、模型零请求,以 blocked 收口——不为抢 ID 先发一个
+    // 永不收尾的 TurnStarted;预留号不回滚,下一轮开张前必换新。
+    const std::string canonical_turn_id =
+        turn_id_for_trace.empty() ? lubancode::runtime::ProcessIdAuthority().NextTurnId() : turn_id_for_trace;
+
+    // hooks 上下文:先换号,再发 UserPromptSubmit(session/cwd 等会话字段保持
+    // 会话层设好的值),确认档可能被 Shift+Tab 切过,按当前值报。turn_id 只
+    // 用 canonical 号——HookDispatcher::NextHookRunId 只许生成 hook_run_id
+    //(每次发射一枚),不得再给 turn_id 代班。
+    if (hook_dispatcher != nullptr && !hook_dispatcher->Empty()) {
+        lubancode::hooks::HookContext turn_context = hook_dispatcher->context();
+        turn_context.turn_id = canonical_turn_id;
+        turn_context.permission_mode = lubancode::app::HookPermissionModeText();
+        hook_dispatcher->UpdateContext(std::move(turn_context));
+    }
+
     // UserPromptSubmit:用户 prompt 送模型前。可阻断(continue=false/exit 2,
     // 这一轮不发模型、不算错误),可追加 developer context(原 prompt 不动,
     // 注入文本带来源标识单独成块,不串成一坨)。背景回流通知的"不可信参考
     // 资料"声明也走同一口(P3 起决策与组装在 runtime::ApplyUserPromptSubmit,
-    // 这里只接阻断的收口与上屏)。
+    // 这里只接阻断的收口与上屏)。此刻 hooks 上下文已带着本轮 canonical 号,
+    // prompt Hook 的 stdin payload 与后续工具/Stop 钩子挂同一轮。
     const lubancode::runtime::PromptGate gate = lubancode::runtime::ApplyUserPromptSubmit(
         hook_dispatcher, user_input, background_results, prepared_input->message);
     if (gate.blocked) {
@@ -798,9 +821,10 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // 视图账(终端回合视觉收束单第 3 步:正文入账):TurnCollector 与
     // ToolDisplay 并行记账——屏上逐字不变(现有 painter 一根毛不动),
     // collector 攒 TurnView 给 Ctrl+L/resume 重放与将来的 TerminalTurnRenderer
-    // 整轮重画。slash/本地校验失败的轮到不了这里,不造假账。
+    // 整轮重画。slash/本地校验失败的轮到不了这里,不造假账。turn id 认
+    // canonical 那一枚(不再另 mint 一枚对不上账的)。
     lubancode::runtime::IdAuthority& view_ids = lubancode::runtime::ProcessIdAuthority();
-    lubancode::runtime::TurnCollector view_collector(view_ids, view_ids.NextTurnId());
+    lubancode::runtime::TurnCollector view_collector(view_ids, canonical_turn_id);
     view_collector.StartTurn(
         user_input, std::chrono::duration_cast<std::chrono::milliseconds>(
                         std::chrono::system_clock::now().time_since_epoch())
@@ -819,21 +843,15 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // enabled=false,正文原样输出,一个字节不动。silent 档正文不上屏,
     // 只攒进台账(见 StreamBodyTracker 注释)。
     StreamBodyTracker body_tracker(theme, is_console && !theme.reset.empty(), silent);
-    // hooks 上下文:这一轮的 turn_id 换新(session_id 等会话字段保持会话层
-    // 设好的值),确认档可能被 Shift+Tab 切过,按当前值报。
-    if (hook_dispatcher != nullptr && !hook_dispatcher->Empty()) {
-        lubancode::hooks::HookContext turn_context = hook_dispatcher->context();
-        turn_context.turn_id = lubancode::hooks::HookDispatcher::NextHookRunId();
-        turn_context.permission_mode = lubancode::app::HookPermissionModeText();
-        hook_dispatcher->UpdateContext(std::move(turn_context));
-    }
+    // (hooks 上下文已在 ApplyUserPromptSubmit 之前换好 canonical 号,见上。)
     // 事件流(骨架拆解批二余款:唯一出水口)。宿主给的(ctx.turn_events,
     // SessionRuntime 造,落点已挂会话事件链)旁边补挂终端画屏的 sink;没给
-    //(单发/单测)就地起一只本地适配器,同一套接线。Start 的 turn_id 复用
-    // trace 口径那枚,宿主没给就现发;收口在 finish_turn_chrome 三条路共用
-    // 的漏斗里 Finish。Stop 钩子续跑的那轮 Run 并进同一 turn 的账(终端
-    // footer 也只有一枚,口径一致)。终端渲染逐字节照旧——改的是水的来路,
-    // 不是画的样子。
+    //(单发/单测)就地起一只本地适配器,同一套接线。Start 的 turn_id 用
+    // canonical 那枚(宿主给过就是 trace 口径同一枚,没给也是本轮开头 mint
+    // 的那枚——Hook/事件/trace/轨迹四本账一号);收口在 finish_turn_chrome
+    // 三条路共用的漏斗里 Finish。Stop 钩子续跑的那轮 Run 并进同一 turn 的账
+    //(终端 footer 也只有一枚,口径一致)。终端渲染逐字节照旧——改的是水
+    // 的来路,不是画的样子。
     lubancode::runtime::TurnEventAdapter local_turn_events("oneshot", lubancode::runtime::ProcessIdAuthority());
     lubancode::runtime::TurnEventAdapter& turn_event_stream =
         turn_events != nullptr ? *turn_events : local_turn_events;
@@ -857,7 +875,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
     TerminalTurnSink terminal_sink(std::move(sink_ingredients));
     turn_event_stream.AttachAlongside(
         [&terminal_sink](const lubancode::runtime::ServerEvent& event) { terminal_sink.Emit(event); });
-    turn_event_stream.Start(turn_id_for_trace);
+    turn_event_stream.Start(canonical_turn_id);
     lubancode::agent::TurnWiring wiring = BuildTurnWiring(ctx, display, usage_stats, cancel_flag, turn_event_stream,
                                                           turn_trajectory.get());
     if (turn_trace_hub != nullptr) {
@@ -875,7 +893,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
                     }
                 });
         }
-        turn_trace_hub->Install(loop, wiring, thread_id_for_trace, turn_id_for_trace);
+        turn_trace_hub->Install(loop, wiring, thread_id_for_trace, canonical_turn_id);
         // P0-2 轨迹:hub 的持久账从 SessionStore 改接本轮边界桥(§15.2)。
         // 桥在 Install 之后挂(Install 装的落盘关口会看它分流)。
         if (turn_trajectory != nullptr) {
@@ -1001,7 +1019,7 @@ RunTurnResult RunTurn(TurnContext ctx) {
     // P0-2 轨迹:轮开张(turn.started + input.received 先于首请求,§6.2
     // 约束 3)。durable 输入用 prepared 后的消息(图片已解成附件账)。
     if (turn_trajectory != nullptr) {
-        turn_trajectory->BeginTurn(turn_event_stream.turn_id(), ctx.trajectory_trigger);
+        turn_trajectory->BeginTurn(canonical_turn_id, ctx.trajectory_trigger);
         turn_trajectory->RecordInput(prepared_input->message);
     }
     try {
