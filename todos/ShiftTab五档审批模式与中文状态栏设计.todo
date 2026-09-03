@@ -9,6 +9,7 @@
 - 范围：终端状态资料、场景快捷键与 6 秒切档说明、会话级审批档、工具权限裁定、子代理权限收窄、Hook/Peer/配置/文档与测试
 - 现场截图：默认档显示“确认 shift+tab 切换到 auto 模式”；中英文混排，且旧 `auto` 一词同时背了“接受编辑”和“安全命令自动放行”两层意思
 - 二次截图：0.26.181 把 `? 键位 · Ctrl+R 搜历史 · Ctrl+O 展开/收起 · Ctrl+G 编辑器` 整行常驻，却把模型、推理档、cwd、分支、context 与 token 用量从输入框下方挤没了
+- 三次截图：模型工作时，`? 查看快捷键` 又从右端掉到左端；同一帮助动作在空闲态叫“键位”，在忙碌态叫“查看快捷键”
 - 不在本单：Plan 模式能力闸、操作系统沙箱、工具确认菜单样式、`--yes` 的全放语义、工具自身业务校验
 
 ## 一、要改成什么
@@ -117,6 +118,41 @@ Don't Ask: runs pre-approved operations and denies anything that would need a pr
 
 1. `BuildComposerModeLine()` 取代了原 `BuildStatusLine()`，只留下档位与 skills。`StatusDataSlot()` 里模型、cwd、Git 分支、context、tokens 等数据仍在，却没人画，属于显示回归，不是数据没采到。
 2. `shortcut_rows` 把四枚键当成空 composer 的固定广告。可 `Ctrl+O`、`Ctrl+G` 都有明确适用对象；无工具、无 thinking、无长草稿时照样摆出来，只会占行、误导。
+
+#### 2.2.1 三次现场：忙碌态的 `?` 左漂，文案也分了叉
+
+模型工作时，真终端又露出一层旧账：
+
+```text
+? 查看快捷键
+Shift+Tab 切换到接受编辑                                      4 skills
+────────────────────────────────────────────────────────────────────
+> 键入并回车 排队下一条 · Esc 打断
+────────────────────────────────────────────────────────────────────
+```
+
+用户要的仍是：
+
+```text
+                                                           ? 键位
+Shift+Tab 切换到接受编辑                               4 skills
+```
+
+源码链如下：
+
+1. 空闲 composer 由 `console_input_composer.cpp::apply_search_hints()` 读取 `ActiveKeymap()`，用 `HelpShow + hint.keys.help` 拼出 `? 键位`，并顺手把 `Ctrl+R/O/G` 拼进同一字符串。
+2. 流式 footer 若拿不到那条 `hint_lines`，便在 `console_input_stream_footer.cpp::RedrawStreamFooterLocked()` 另造 `tr("input.shortcuts_hint")`。中文值是 `? 查看快捷键`。同一帮助动作有两枚 i18n key、两处生产者，故忙闲一换，称呼也换。
+3. 两路文字最后都塞进 `BottomChromeModel::shortcut_rows`。`BuildBottomChromeLayout()` 只调用 `push(false, tinted(...))`，不存左右槽，也不补显示宽空格；这行必从第零列起笔。下方 `skills` 由 `BuildComposerModeLine()` 单独算右端留白，两行压根不共一把尺。
+4. 回归起于 `e325b394`。提交前，`BuildFooterWorkingLine()` 尚有 `shortcut_width`、`left_limit`、`shortcut_room`，会把帮助入口贴到工作行右端；提交把入口拆成独占行时，删了这套计算，却没把“右对齐”写进新模型。行序搬对了，横向语义丢了。
+5. `unit.cli.bottom_chrome` 现有用例只断言快捷键位于 skills 上一行，还断言整行文字恰等于裸字符串 `? for shortcuts`。它不查右边缘，反把左起笔写法钉成期望。2026-09-03 复跑该测试仍是 `1/1` 通过；绿灯只证明行序，不能证明位置。
+
+这不是再补一串前导空格便算完。须收掉重复职责：
+
+- 帮助入口只认 `ActiveKeymap().ChordFor(HelpShow)` 与一枚场景标签；中英文都从同一生产函数出来。不得再让 `input.shortcuts_hint` 与 `hint.keys.help` 各说各话。
+- `assist_row` 明写左右槽。左槽放 6 秒切档说明，右槽放帮助入口；没有说明时左槽为空，右槽位置不动。布局层按 ANSI 剥离后的显示宽算间距。
+- 空闲与流式只提交语义状态，不各造一行成品字符串。`BottomChrome` 独占组行与裁剪，窄屏先保右槽，再截左槽。
+- 删除 `shortcut_rows` 后，也删掉流式 footer 的 `input.shortcuts_hint` 兜底分支。若当前场景不该显示帮助入口，交给场景状态决定，不拿另一条翻译硬补。
+- 回归测试须分别造空闲、工作、排队输入、切档说明显示中四景。逐景断言：帮助入口文案一致；其右边缘与 `skills` 右边缘相同；左槽出现、更新、6 秒收走时，右槽列号不变。
 
 修正后的常态布局：
 
@@ -378,6 +414,8 @@ ModePresentation PresentApprovalMode(ApprovalMode mode, Language language);
 - [ ] 回归 0.26.181 二次截图：输入框下方仍有 model/effort/cwd/branch/context/tokens；`BuildComposerModeLine()` 不得替代整份资料行。
 - [ ] `status_panel.items` 重排/隐藏仍生效；只剥离 `permission_mode`，强制状态段与其余资料一项不少。
 - [ ] `? 键位` 在档位/skills 上一行居右；切档说明占同一行左槽，6 秒到期只清左槽。
+- [ ] 空闲与忙碌只用一枚帮助标签、一条 keymap 驱动生产路；不得再出现空闲“键位”、忙碌“查看快捷键”的分叉。
+- [ ] `assist_row` 几何测试按去 ANSI 后的显示宽核对：`? 键位` 与 `N skills` 右边缘同列；不能只断言行序或裸文本相等。
 - [ ] 空 composer 不再常驻 `Ctrl+R/O/G` 总览；源码与帧账里删除 `shortcut_rows`，不得换个名字原样搬回。
 - [ ] thinking/工具有可展开详情才挂 `Ctrl+O 展开|收起`；空 thinking、无详情工具、纯正文不挂。
 - [ ] 长草稿阈值用实际物理行测：2 行不挂，3 行多行稿挂，单行软换到 4 行挂，大段粘贴 token 挂；草稿缩短后收起。
@@ -405,7 +443,9 @@ ModePresentation PresentApprovalMode(ApprovalMode mode, Language language);
 ### 9.4 真终端
 
 - [ ] 先复现并留存 0.26.181 截图：常驻四键整行、下方模型/消耗资料缺失；标成修前证据。
+- [ ] 留存忙碌态第三张修前截图：`? 查看快捷键` 位于左端；记下终端列宽、版本与当时是否有 `hint_lines`。
 - [ ] 修后空闲画面：右端只见 `? 键位` 与 `skills`，下方看得见模型、context、tokens；不再常驻 `Ctrl+R/O/G`。
+- [ ] 修后让模型工作至少 10 秒，再键入一条排队草稿；空闲、工作、排队三景里 `? 键位` 均贴同一右边缘，文案不换，光标不跳。
 - [ ] Windows Terminal 中从默认连按五次，逐帧核对标签、次序、颜色；每次上方黄字换成新档说明，不叠行。
 - [ ] 停在 YOLO，录下“YOLO：允许所有工具，无需确认。”约 6 秒后自行消失；全程核对草稿不丢、光标不跳。
 - [ ] 分别造有详情工具、thinking、长草稿、历史搜索四景；只在对应一景看见 `Ctrl+O`、`Ctrl+G`、`Ctrl+R` 场景提示。
