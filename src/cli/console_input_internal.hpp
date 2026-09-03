@@ -39,6 +39,12 @@ LineEditorCore& SharedEditor();
 // 仅用户当场 Shift+Tab 才刷新；空闲 composer 与流式 footer 共读这一份。
 ModeNoticeState& ModeNoticeSlot();
 
+// 当场切档的持久化钩子槽:空闲 composer(mode_changed)与监听线程(流式
+// Shift+Tab)都经 NotifyApprovalModeChanged 调它;装配层挂接(见
+// console_input.hpp 的导出口注释)。空 = 未挂,通知 no-op。
+// [共享] composer(空闲切档)/监听线程(流式切档)/导出口 SetApprovalModeChangeHook。
+std::function<void(ConfirmMode)>& ApprovalModeChangeHookSlot();
+
 // 会话级面板状态机:空闲 composer 与流式 footer/监听线程共用同一份
 // 选择/焦点/详情/两段确认——流式转空闲状态不跳,不靠两边各自记账。
 AgentPanelSession& PanelSessionSlot();

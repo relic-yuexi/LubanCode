@@ -1,6 +1,6 @@
 # Shift+Tab 五档审批模式与中文状态栏设计
 
-- 状态：五档权限已实现；0.26.181 真机发现底栏资料丢失与快捷键常驻回归，待修
+- 状态：五档权限已实现；0.26.181 真机发现底栏资料丢失与快捷键常驻回归，待修；管道收尾批已落——/config、/doctor 四源档位诊断、切档即写 session manifest、UI 矩阵四族补齐、旧配置真机验收、矩阵表驱动扩调用次数（366 册全绿）
 - 日期：2026-09-03
 - 二次现场：2026-09-03，`lubancode 0.26.181`（提交 `fac421b4`）
 - 级别：P1（权限语义与终端可见性）
@@ -365,7 +365,8 @@ effective.may_prompt = parent.may_prompt && child.may_prompt
 - [ ] 配置字段新名先不动，免得一单里又迁 schema；文档说明 `default_confirm_mode` 历史命名，值已是五档。
 - [ ] `--yes` 始终压到 YOLO，优先级照旧。
 - [ ] 会话恢复若持久化了档位，认旧三值；没有档位的旧会话从当前启动配置取值。
-- [ ] `/config`、`/doctor` 与启动诊断列出最终档位及来源：CLI / env / project / builtin。
+- [x] `/config`、`/doctor` 与启动诊断列出最终档位及来源：CLI / env / project / builtin。（`ResolveApprovalModeStart` 四源合议纯函数 + `ApprovalModeStartSlot` 会话级记录；`/config`、`/doctor` 总览与 `--config` 同一份账；i18n 中英成对；旧 `confirm` 别名读侧发弃用提示）
+- [x]（运行中切档即写）用户 Shift+Tab 切档后 `session.json` 的 `approval_mode` 随切随写（`SessionManager::UpdateApprovalMode`，空闲/流式两路经 `NotifyApprovalModeChanged` 钩子、Plan 批准执行档同口）；`/clear` 换账继承切后档，恢复路照旧认 manifest；测试钉写盘与内存同拍、clear 继承、封口后拒改。
 
 ## 八、状态栏实现
 
@@ -401,15 +402,15 @@ ModePresentation PresentApprovalMode(ApprovalMode mode, Language language);
 ### 9.1 纯函数与 UI
 
 - [x] `NextApprovalMode` 五按一圈回原位；每一步顺序与本单一致。
-- [ ] 中文五行与英文五行逐字断言：默认行不带当前档名；另钉住 `Shift+Tab` 大小写及中文不重复“模式”。
-- [ ] 五档只染当前标签；后半句、下一档与 skills 不串色。
-- [ ] 每次切档立刻在常驻档位行上面显示对应黄色说明；五档中英文逐字断言。
+- [x] 中文五行与英文五行逐字断言：默认行不带当前档名；另钉住 `Shift+Tab` 大小写及中文不重复“模式”。（test_line_editor 两语言逐档 label/notice + 键名大小写 + “模式模式”撞词）
+- [x] 五档只染当前标签；后半句、下一档与 skills 不串色。（test_status_refresh：dark/light 模式色码在整行恰出现一次、`color+label+reset` 片段在场；默认档零模式色）
+- [x] 每次切档立刻在常驻档位行上面显示对应黄色说明；五档中英文逐字断言。（notice 文案随五档标签同一组 TEST_CASE 逐字钉；专位行序由既有“模式说明专位”用例守）
 - [x] 假时钟钉 `5999ms` 仍显示、`6000ms` 到期收走；连按后旧期限失效，新档重新计时。
 - [ ] 启动配置、环境变量、会话恢复设档不显示说明；只有用户切档才显示。
-- [ ] 说明出现与消失各只触发所需重画，草稿字节、软换行布局与物理光标坐标不变。
+- [x] 说明出现与消失各只触发所需重画，草稿字节、软换行布局与物理光标坐标不变。（test_bottom_chrome：notice 有/无两帧 composer_digest、物理行数、cursor_x、光标相对行号逐项相同，帧行除说明行外逐行相等；到期收走回原帧）
 - [ ] slash 补全/历史搜索与切档说明同时在场时各居其位；不能互相覆盖或借同一 vector 清空。
-- [ ] dark/light/plain 三主题都测；plain 不得吐 ANSI。
-- [ ] 窄屏分别卡在当前标签、提示、说明、右端 skills 四处，UTF-8 与 ANSI 都不截坏；矮屏按既定优先级舍行。
+- [x] dark/light/plain 三主题都测；plain 不得吐 ANSI。（三主题循环断言；plain 整行零 `\x1b` 且纯文本合同仍立）
+- [x] 窄屏分别卡在当前标签、提示、说明、右端 skills 四处，UTF-8 与 ANSI 都不截坏；矮屏按既定优先级舍行。（模式行 1..34 列逐宽扫 + 三处卡位钉值；说明行 4/8/12/20 列过 UTF-8 续字节校验；矮屏舍行由既有高度预算用例守）
 - [ ] 空闲、流式中、排队输入、焦点态各跑切档；焦点态内 Shift+Tab 仍按现合同往新条目走，不切审批档。
 - [ ] 回归 0.26.181 二次截图：输入框下方仍有 model/effort/cwd/branch/context/tokens；`BuildComposerModeLine()` 不得替代整份资料行。
 - [ ] `status_panel.items` 重排/隐藏仍生效；只剥离 `permission_mode`，强制状态段与其余资料一项不少。
@@ -424,7 +425,7 @@ ModePresentation PresentApprovalMode(ApprovalMode mode, Language language);
 
 ### 9.2 权限矩阵
 
-- [ ] 把 3.1 每一格做成表驱动测试。断言 `Allow / Ask / Deny`，还要断言工具调用次数。
+- [x] 把 3.1 每一格做成表驱动测试。断言 `Allow / Ask / Deny`，还要断言工具调用次数。（test_turn_runtime“3.1 十一类裁定逐格覆盖五档”：同一张表先过纯函数逐格 verdict，再过 RunOneTool 真执行路逐格断言工具执行次数与确认回调次数）
 - [x] 不询问档遇需确认工具：零 PermissionRequest、零终端读键、零副作用、结构化拒绝回模型。
 - [x] 接受编辑只放 `FileEdit`；安全 `git status` 仍问。
 - [x] 自动模式放 `FileEdit` 与安全命令；脚本块、危险命令、外挂工具仍问。
@@ -438,7 +439,7 @@ ModePresentation PresentApprovalMode(ApprovalMode mode, Language language);
 - [x] 父不询问 + 子默认、父自动 + 子接受编辑、父 YOLO + 子默认三景单列回归。
 - [ ] 交互主代理、后台子代理、Workflow agent/tool 节点、one-shot、App Server 走同一权限核。
 - [x] Hook、Peer、Trajectory 机读值覆盖五档；旧消费者看到未知值时保守回默认。
-- [ ] `confirm` 旧配置、`auto` 旧配置、`yolo` 旧配置各起一次，行为不漂。
+- [x] `confirm` 旧配置、`auto` 旧配置、`yolo` 旧配置各起一次，行为不漂。（管道真进程验收 0.26.182-dev：临时 USERPROFILE + 临时 cwd 的 settings.local.json 三旧值各起 `lubancode --config`——confirm→默认+弃用提示、auto→自动模式、yolo→YOLO，另验 env=confirm 与 `--yes` 两形态；解析语义与 0.26.x 一字不差）
 
 ### 9.4 真终端
 

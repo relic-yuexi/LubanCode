@@ -126,6 +126,41 @@ private:
     Clock::time_point expires_at_{};
 };
 
+// ---------------------------------------------------------------------------
+// 起手档的四源合议(单子 §七:/config、/doctor 与启动诊断列出最终档位及来源)
+// ---------------------------------------------------------------------------
+
+// 起手档来源,高到低:--yes(CLI) > LUBANCODE_CONFIRM_MODE(env) >
+// settings.local.json 的 permissions.default_confirm_mode(project) > builtin。
+enum class ApprovalModeSource { Cli, Env, Project, Builtin };
+
+// 解析结果:最终档 + 来源 + 原文(原文留着给诊断行与弃用提示当证据;
+// 空串 = 该源没配或来源是 CLI/builtin 这类没有原文的)。
+struct ApprovalModeStart {
+    ConfirmMode mode = ConfirmMode::Confirm;
+    ApprovalModeSource source = ApprovalModeSource::Builtin;
+    std::string raw_value;
+};
+
+// 来源的稳定机读名(诊断行直接落屏,不参与协议)。
+const char* ApprovalModeSourceName(ApprovalModeSource source);
+
+// 四源合议纯函数。env_value/project_value 空串 = 没配。非法值不悄悄当
+// YOLO:回 default 并往 warnings 塞一行人话(调用方打 stderr);旧 confirm
+// 别名解析为 default,同时塞一行弃用提示。warnings 可为 nullptr。
+ApprovalModeStart ResolveApprovalModeStart(bool cli_yes, const std::optional<std::string>& env_value,
+                                           const std::optional<std::string>& project_value,
+                                           std::vector<std::string>* warnings);
+
+// 本进程起手档的会话级记录:启动解析(cli_app)写一次,/config、/doctor
+// 现读。没写过就是 builtin default(--config 等早退路径也有账可查)。
+const ApprovalModeStart& ApprovalModeStartSlot();
+void SetApprovalModeStart(ApprovalModeStart start);
+
+// 来源的人话行(CLI/env/project 带原文,builtin 一句内置默认),i18n 中英
+// 成对;/config 与 /doctor 的诊断行共用,不各抄一份。
+std::string ApprovalModeStartSourceText(const ApprovalModeStart& start);
+
 // 补全候选:slash 命令名 + 一句话说明,由调用方(console_input.cpp)从
 // cli::slash_commands 现有的命令定义转换而来,核心层自己不认得任何具体
 // 命令名字,不写第二份命令清单。

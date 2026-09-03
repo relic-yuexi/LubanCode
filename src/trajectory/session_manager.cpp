@@ -1228,6 +1228,27 @@ std::string SessionManager::LatestResumableSessionId() {
     return LatestResumableSessionIdLocked();
 }
 
+std::expected<void, std::string> SessionManager::UpdateApprovalMode(ApprovalMode mode) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!active_.has_value()) {
+        return std::unexpected("session.no_active_session: 没有可更新审批档的活动场");
+    }
+    // 只在 running 态改:clear/close 封口中或已封口的场,session.json 是
+    // 终态账,不再翻改(切档只在内存生效,下一次开张按起手配置走)。
+    if (active_->status != SessionStatus::Running) {
+        return std::unexpected("session.not_running: 场已不在 running 态,审批档不再回写");
+    }
+    // 先写盘再改内存份:盘上写失败时内存仍是旧档,两本账不会岔开。
+    SessionManifest updated = active_->manifest;
+    updated.approval_mode = mode;
+    if (const auto written = WriteSessionJsonAtomic(active_->session_dir(), updated);
+        !written.has_value()) {
+        return std::unexpected("session.approval_mode_write_failed: " + written.error());
+    }
+    active_->manifest = std::move(updated);
+    return {};
+}
+
 // 调用方须已持 mutex_(ResumeAsNew 七步内取默认源用,不再二次加锁)。
 std::string SessionManager::LatestResumableSessionIdLocked() {
     std::error_code ec;

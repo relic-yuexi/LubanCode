@@ -42,6 +42,7 @@ using lubancode::cli::TermErr;
 #include "cli/console_input.hpp"  // ReadLine:公网探针的一次性确认门(问题 9)
 #include "cli/format_utils.hpp"
 #include "cli/i18n.hpp"
+#include "cli/line_editor.hpp"  // ApprovalModeStartSlot:/doctor 总览的起手档行(单子 §七)
 #include "config/model_catalog.hpp"
 #include "config/provider_catalog.hpp"
 #include "insights/insights_health.hpp"  // CheckInsightsHealth:/doctor insights(Token 账本单 A5)
@@ -1020,6 +1021,20 @@ void RunStreamUsageProbe(const DoctorContext& context) {
 void PrintDoctorOverview(const DoctorContext& context) {
     const lubancode::config::Config& config = context.config;
     TermOut() << tr("doctor.overview.header") << "\n";
+    // 审批档(单子 §七):起手档 + 四源来源一行;会话里切过档另起一行,
+    // 与 /config 同一份账(ApprovalModeStartSlot),不另造第二本。
+    {
+        const lubancode::cli::ApprovalModeStart& start = lubancode::cli::ApprovalModeStartSlot();
+        TermOut() << "  " << trf("mode.start.diagnostic", lubancode::cli::ConfirmModeLabel(start.mode),
+                                 lubancode::cli::ApprovalModeStartSourceText(start))
+                  << "\n";
+        const lubancode::cli::ConfirmMode current = lubancode::cli::CurrentConfirmMode();
+        if (current != start.mode) {
+            TermOut() << "  " << trf("mode.start.diagnostic_session",
+                                     lubancode::cli::ConfirmModeLabel(current))
+                      << "\n";
+        }
+    }
     TermOut() << tr("doctor.overview.effort")
               << (context.current_think.empty() ? tr("doctor.level.unset") : context.current_think) << "\n";
     TermOut() << tr("doctor.overview.declared")

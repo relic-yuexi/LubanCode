@@ -348,9 +348,12 @@ void PlanSessionWiring::LaunchApprovedExecution(lubancode::runtime::PlanDocument
     SwitchMode(CollaborationMode::Default, "approved");
     //   3. 批准框选的执行档只改本 session(Confirm/Auto;Yolo 不出现在框里
     //      ——单子:Yolo 只在本场原本已显式启用且高风险提示时才可选,首版
-    //      不做那条路)。
+    //      不做那条路)。当场换档发通知(单子 §七"切档即写"):session
+    //      manifest 跟着换,崩溃/恢复后认得执行档。
     lubancode::cli::SetConfirmMode(auto_mode ? lubancode::cli::ConfirmMode::Auto
                                              : lubancode::cli::ConfirmMode::Confirm);
+    lubancode::cli::NotifyApprovalModeChanged(auto_mode ? lubancode::cli::ConfirmMode::Auto
+                                                        : lubancode::cli::ConfirmMode::Confirm);
     //   4-5. ImplementationBrief + synthetic user turn:同一轮把 brief 与
     //      计划正文都喂给执行模型(不只剩"按上面的计划做"——compact 后
     //      "上面"可能早没了,单子明令)。

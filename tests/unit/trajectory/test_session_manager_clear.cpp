@@ -592,3 +592,62 @@ TEST_CASE("one_shot 场: 索引可标 run_kind,resume 候选排除,指名 resume
         CHECK(outcome.error_code == "resume.source_not_resumable");
     }
 }
+
+// ---------------------------------------------------------------------------
+// 运行中切档即写(单子 §七):UpdateApprovalMode 原子改 session.json 的
+// approval_mode;clear 换账继承的是改后的档——用户中途切档,重启/恢复
+// 认得出,不再退回起手档。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("UpdateApprovalMode: 写盘与内存同拍,clear 继承新档,无活动场明拒") {
+    const std::filesystem::path root = MakeRoot("approval-mode-update");
+    SessionManagerOptions options = Opts(root);
+    options.approval_mode = lubancode::ApprovalMode::Default;
+    FakeClock clock;
+    SessionManager manager(options, &clock);
+    auto* active = manager.LaunchSession().value_or(nullptr);
+    REQUIRE(active != nullptr);
+
+    // 起手档按 options 落 manifest。
+    {
+        const auto manifest = ReadSessionJson(active->session_dir());
+        REQUIRE(manifest.has_value());
+        REQUIRE(manifest->approval_mode.has_value());
+        CHECK(*manifest->approval_mode == lubancode::ApprovalMode::Default);
+    }
+
+    // 运行中切到 auto:盘上与内存两本账一起换。
+    REQUIRE(manager.UpdateApprovalMode(lubancode::ApprovalMode::Auto).has_value());
+    {
+        const auto manifest = ReadSessionJson(active->session_dir());
+        REQUIRE(manifest.has_value());
+        REQUIRE(manifest->approval_mode.has_value());
+        CHECK(*manifest->approval_mode == lubancode::ApprovalMode::Auto);
+        CHECK(manager.active()->manifest.approval_mode == lubancode::ApprovalMode::Auto);
+    }
+
+    // 再切 dont_ask 后 clear:新场继承的是 dont_ask,不是起手 default。
+    REQUIRE(manager.UpdateApprovalMode(lubancode::ApprovalMode::DontAsk).has_value());
+    ClearRequest clear;
+    clear.reason = "user_clear";
+    NullClearParticipant null_participant;
+    const ClearOutcome outcome = manager.Clear(clear, &null_participant);
+    REQUIRE(outcome.error_code.empty());
+    {
+        const auto new_dir = manager.SessionDirOf(outcome.new_session_id);
+        const auto manifest = ReadSessionJson(new_dir);
+        REQUIRE(manifest.has_value());
+        REQUIRE(manifest->approval_mode.has_value());
+        CHECK(*manifest->approval_mode == lubancode::ApprovalMode::DontAsk);
+    }
+
+    // 封口后场已不在 running:明拒,不悄悄翻改终态 session.json。
+    CloseRequest close;
+    close.reason = "exit";
+    REQUIRE(manager.Close(close, &null_participant).error_code.empty());
+    const auto denied = manager.UpdateApprovalMode(lubancode::ApprovalMode::Yolo);
+    REQUIRE_FALSE(denied.has_value());
+    const bool refused = denied.error().find("no_active_session") != std::string::npos ||
+                         denied.error().find("not_running") != std::string::npos;
+    CHECK(refused);
+}

@@ -31,6 +31,7 @@
 #include "platform/console.hpp"
 #include "cli/context_tracker.hpp"
 #include "cli/i18n.hpp"
+#include "cli/line_editor.hpp"  // ApprovalModeStartSlot:审批档诊断行(单子 §七)
 #include "cli/provider_switch.hpp"
 #include "cli/provider_wizard.hpp"
 #include "cli/slash_commands.hpp"
@@ -1986,6 +1987,21 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
             }
         }
         TermOut() << "\n";
+    }
+    // 审批档诊断(单子 §七):起手档 + 四源来源(CLI/env/project/builtin)。
+    // 会话里用户切过档(与起手档不同)另起一行——两笔账分开:起手档说
+    // "配置怎么合出来的",会话档说"现在实际在用哪档"。
+    {
+        const lubancode::cli::ApprovalModeStart& start = lubancode::cli::ApprovalModeStartSlot();
+        TermOut() << "  " << trf("mode.start.diagnostic", lubancode::cli::ConfirmModeLabel(start.mode),
+                                 lubancode::cli::ApprovalModeStartSourceText(start))
+                  << "\n";
+        const lubancode::cli::ConfirmMode current = lubancode::cli::CurrentConfirmMode();
+        if (current != start.mode) {
+            TermOut() << "  " << trf("mode.start.diagnostic_session",
+                                     lubancode::cli::ConfirmModeLabel(current))
+                      << "\n";
+        }
     }
     // 模型目录(models.json):路径 + 条目数,以及当前模型命没命中。
     if (catalog != nullptr) {

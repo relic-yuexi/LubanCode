@@ -117,11 +117,15 @@ lubancode delete <id|标题> [--force]
 
 诊断只对本地兼容端动手：`probe`/`usage` 两个动作挡在"base_url 是本机地址，或 metrics_url 已明配"这道闸后面，公网 provider 不发。密钥与正文不进报告——只摆参数名、档位值、token 数与错误摘要。
 
+裸敲概要第一行就是审批档：起手档与来源（`CLI --yes` / `env LUBANCODE_CONFIRM_MODE=…` / `project permissions.default_confirm_mode=…` / 内置默认）一行说清；会话里 Shift+Tab 切过档的另起一行标"本会话"当前档。
+
 usage 账分四态：`not_reported`（服务端没回 usage）/ `disabled`（metrics 明说没启用，状态栏写"服务端未启用缓存"）/ `enabled_no_hit`（已启用未命中）/ `hit`。同一个 0 不糊。
 
 ### `/config`
 
 打印配置诊断。它与 `lubancode --config` 共用格式，另会标出当前会话临时切过的模型。
+
+审批档一行与 `/doctor` 同一份账：列出最终起手档及四源来源（CLI/env/project/builtin，带原文值）；本会话切过档的再列一行当前档。`permissions` 摘要行仍照抄 `settings.local.json` 里的原文——配置写的什么、最终生效的是哪档，两笔账分开看。
 
 ### `/update [check]`
 

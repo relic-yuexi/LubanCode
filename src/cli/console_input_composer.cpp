@@ -1907,6 +1907,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         RenderState state = editor.HandleKey(*mapped);
         if (state.mode_changed) {
             ModeNoticeSlot().Show(state.mode);
+            // 切档即写(单子 §七):核心层已把 SharedEditor 切到新档,这里
+            // 通知装配层挂的钩子把 session manifest 一并换过去。
+            NotifyApprovalModeChanged(state.mode);
         }
         if (!state.line.empty() && panel_session.SnapshotFor(nav_ids_for(panel_entries())).viewed_task_id == 0) {
             // 敲了正文即离开面板焦点(上下键归历史);查看态例外——那只标签

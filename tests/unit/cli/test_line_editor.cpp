@@ -5,9 +5,12 @@
 #include <doctest/doctest.h>
 
 #include <algorithm>
+#include <optional>
 #include <string>
+#include <vector>
 
 #include "cli/console_input.hpp"  // BuildSlashCompletionCandidates(候选唯一转换口)
+#include "cli/i18n.hpp"  // SetLanguage:五档文案逐字断言按语言钉死
 #include "cli/line_editor.hpp"
 #include "cli/slash_commands.hpp"  // AllSlashCommands
 
@@ -770,6 +773,150 @@ TEST_CASE("ConfirmMode: 五档机读值往返且兼容 confirm") {
     }
     CHECK(*ParseConfirmMode("confirm") == ConfirmMode::Confirm);
     CHECK_FALSE(ParseConfirmMode("unknown").has_value());
+}
+
+// ---------------------------------------------------------------------------
+// 五档展示合同(单子 §一/§2.1/§九 9.1):中英文五行与说明行逐字断言——
+// 默认档标签只在"下一档提示/帮助/诊断"出现,UI 不叫"确认模式";键名恒
+// "Shift+Tab"(大写 S/T);中文提示尾不加"模式",不得出现"自动模式模式"
+// 这类撞词。钉在这里,改文案的人先过这一关。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("PresentApprovalMode: 中文五行与说明行逐字,键名大小写与'模式'撞词钉死") {
+    SetLanguage("zh-CN");
+    struct Row {
+        ConfirmMode mode;
+        const char* label;
+        const char* next_label;
+        const char* notice;
+    };
+    const std::vector<Row> rows{
+        {ConfirmMode::Confirm, "默认", "接受编辑", "默认：需要授权的操作会先询问你。"},
+        {ConfirmMode::AcceptEdits, "接受编辑", "YOLO",
+         "接受编辑：文件创建与改写自动允许；其他操作仍会询问。"},
+        {ConfirmMode::Yolo, "YOLO", "自动模式", "YOLO：允许所有工具，无需确认。"},
+        {ConfirmMode::Auto, "自动模式", "不询问",
+         "自动模式：文件编辑与安全命令自动允许；其余操作仍会询问。"},
+        {ConfirmMode::DontAsk, "不询问", "默认",
+         "不询问：已授权的操作照常执行；需要询问的操作直接拒绝。"},
+    };
+    for (const auto& row : rows) {
+        CAPTURE(row.label);
+        const ModePresentation presentation = PresentApprovalMode(row.mode);
+        CHECK(presentation.current_label == row.label);
+        CHECK(presentation.next_label == row.next_label);
+        CHECK(presentation.notice == row.notice);
+        // 中文说明尾不加"模式":整句不得出现"模式模式"撞词。
+        CHECK(presentation.notice.find("模式模式") == std::string::npos);
+        // 旧叫法不得回潮:"确认模式"不是档名,"无需询问"会叫人误会成放行。
+        CHECK(presentation.current_label != "确认模式");
+        CHECK(presentation.current_label != "无需询问");
+    }
+    // 切换提示的键名恒 "Shift+Tab"(大写 S/T,单子 §一),且中文提示以
+    // "切换到"收尾不带"模式"后缀。
+    const std::string hint = trf("status.mode_switch_hint", "接受编辑");
+    CHECK(hint.rfind("Shift+Tab ", 0) == 0);
+    CHECK(hint.find("shift+tab") == std::string::npos);
+    CHECK(hint == "Shift+Tab 切换到接受编辑");
+}
+
+TEST_CASE("PresentApprovalMode: 英文五行与说明行逐字") {
+    SetLanguage("en");
+    struct Row {
+        ConfirmMode mode;
+        const char* label;
+        const char* next_label;
+        const char* notice;
+    };
+    const std::vector<Row> rows{
+        {ConfirmMode::Confirm, "Default", "Accept Edits",
+         "Default: asks before operations that need approval."},
+        {ConfirmMode::AcceptEdits, "Accept Edits", "YOLO",
+         "Accept Edits: allows file creation and edits; asks for other operations."},
+        {ConfirmMode::Yolo, "YOLO", "Auto Mode", "YOLO: allows all tools without approval."},
+        {ConfirmMode::Auto, "Auto Mode", "Don't Ask",
+         "Auto Mode: allows file edits and safe commands; asks for the rest."},
+        {ConfirmMode::DontAsk, "Don't Ask", "Default",
+         "Don't Ask: runs pre-approved operations and denies anything that would need a prompt."},
+    };
+    for (const auto& row : rows) {
+        CAPTURE(row.label);
+        const ModePresentation presentation = PresentApprovalMode(row.mode);
+        CHECK(presentation.current_label == row.label);
+        CHECK(presentation.next_label == row.next_label);
+        CHECK(presentation.notice == row.notice);
+    }
+    SetLanguage("zh-CN");
+}
+
+// ---------------------------------------------------------------------------
+// 起手档四源合议(单子 §七):--yes > env > project > builtin;confirm 别名
+// 弃用提示;非法值回 default 给警告,不悄悄落宽档。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ResolveApprovalModeStart: 四源优先级、confirm 别名弃用与非法值警告") {
+    using Source = ApprovalModeSource;
+    std::vector<std::string> warnings;
+
+    // --yes 恒 Yolo,压过一切(单子 §四:显式全放,优先级照旧)。
+    warnings.clear();
+    ApprovalModeStart start = ResolveApprovalModeStart(
+        /*cli_yes=*/true, std::optional<std::string>{"auto"}, std::optional<std::string>{"dont_ask"}, &warnings);
+    CHECK(start.mode == ConfirmMode::Yolo);
+    CHECK(start.source == Source::Cli);
+    CHECK(start.raw_value == "--yes");
+    CHECK(warnings.empty());
+
+    // env 压过 project;合法值直取。
+    start = ResolveApprovalModeStart(false, std::optional<std::string>{"accept_edits"},
+                                     std::optional<std::string>{"dont_ask"}, &warnings);
+    CHECK(start.mode == ConfirmMode::AcceptEdits);
+    CHECK(start.source == Source::Env);
+    CHECK(start.raw_value == "accept_edits");
+
+    // project 兜住(env 没配)。
+    start = ResolveApprovalModeStart(false, std::nullopt, std::optional<std::string>{"auto"}, &warnings);
+    CHECK(start.mode == ConfirmMode::Auto);
+    CHECK(start.source == Source::Project);
+    CHECK(start.raw_value == "auto");
+
+    // 什么都没配:builtin default。
+    start = ResolveApprovalModeStart(false, std::nullopt, std::nullopt, &warnings);
+    CHECK(start.mode == ConfirmMode::Confirm);
+    CHECK(start.source == Source::Builtin);
+    CHECK(start.raw_value.empty());
+
+    // 旧 confirm 别名:default + 弃用提示(读侧提示,不静默)。
+    warnings.clear();
+    start = ResolveApprovalModeStart(false, std::optional<std::string>{"confirm"}, std::nullopt, &warnings);
+    CHECK(start.mode == ConfirmMode::Confirm);
+    CHECK(start.source == Source::Env);
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings[0].find("confirm") != std::string::npos);
+    CHECK(warnings[0].find("default") != std::string::npos);
+
+    // 非法值:回 default + 警告,绝不悄悄当 YOLO(单子 §七)。
+    warnings.clear();
+    start = ResolveApprovalModeStart(false, std::optional<std::string>{"yolo-all-the-time"}, std::nullopt,
+                                     &warnings);
+    CHECK(start.mode == ConfirmMode::Confirm);
+    CHECK(start.source == Source::Env);
+    REQUIRE(warnings.size() == 1);
+    CHECK(warnings[0].find("yolo-all-the-time") != std::string::npos);
+
+    // project 里的非法值同样有警告;env 设了空串按显式设置裁决(压过
+    // project,与 0.26.x 起手解析旧语义一致)。
+    warnings.clear();
+    start = ResolveApprovalModeStart(false, std::nullopt, std::optional<std::string>{"maybe"}, &warnings);
+    CHECK(start.mode == ConfirmMode::Confirm);
+    CHECK(start.source == Source::Project);
+    REQUIRE(warnings.size() == 1);
+    warnings.clear();
+    start = ResolveApprovalModeStart(false, std::optional<std::string>{""},
+                                     std::optional<std::string>{"yolo"}, &warnings);
+    CHECK(start.mode == ConfirmMode::Confirm);
+    CHECK(start.source == Source::Env);
+    REQUIRE(warnings.size() == 1);
 }
 
 TEST_CASE("LineEditorCore: Ctrl+C 在非空行清空当前行,继续编辑") {

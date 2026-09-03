@@ -561,7 +561,7 @@ GLM 模型档位已经写进 provider 目录。`glm-5.2` 认 `max/xhigh/high/med
 | `/memory review|accept|edit|reject` | 是 | 读写项目 `memory-candidates/`；接受后写入项目记忆 |
 | `/memory stale|verify|refresh|why` | 是 | 检查、核验或解释项目记忆；`refresh` 会更新主题文件 |
 | 确认提示按 `a` | 是 | 用户同意后，可写项目 `settings.local.json` |
-| `Shift+Tab` | 是 | 不落盘，只轮换本场确认档 |
+| `Shift+Tab` | 是 | 切档即写本场 `session.json` 的 `approval_mode`（不碰 `config.json` 与 `settings.local.json`）；恢复、`/clear` 换账继承切后的档 |
 | `/init` | 是 | 项目根 `AGENTS.md`；已有文件不覆盖 |
 
 `/clear` 清对话，不重置配置。`/compact` 改会话历史，不改 `config.json`。`--reset-system-prompt` 只处理系统 prompt 文件。

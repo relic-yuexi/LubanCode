@@ -2145,6 +2145,17 @@ std::string TrajectorySessionLedger::LatestResumableSessionId() const {
                : std::string();
 }
 
+std::string TrajectorySessionLedger::UpdateApprovalMode(ApprovalMode mode) {
+    if (impl_ == nullptr || impl_->manager == nullptr) {
+        return "trajectory.not_open: 轨迹账未开张,切档只在内存生效";
+    }
+    const auto updated = impl_->manager->UpdateApprovalMode(mode);
+    if (!updated.has_value()) {
+        return updated.error();
+    }
+    return std::string();
+}
+
 bool TrajectorySessionLedger::resumed_at_launch() const {
     return impl_ != nullptr && impl_->launch_resumed;
 }

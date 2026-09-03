@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <utility>
 
 #include "cli/i18n.hpp"
 
@@ -212,6 +213,102 @@ void ModeNoticeState::Reset() {
     std::lock_guard<std::mutex> lock(mutex_);
     mode_.reset();
     expires_at_ = {};
+}
+
+const char* ApprovalModeSourceName(ApprovalModeSource source) {
+    switch (source) {
+        case ApprovalModeSource::Cli: return "cli";
+        case ApprovalModeSource::Env: return "env";
+        case ApprovalModeSource::Project: return "project";
+        case ApprovalModeSource::Builtin: return "builtin";
+    }
+    return "builtin";
+}
+
+namespace {
+
+// 一枚来源值的裁决:合法给档,旧 confirm 别名给 default + 弃用提示,
+// 认不得的给 default + 无效警告。谁配的由 label 说(source_desc 进人话,
+// 如 "LUBANCODE_CONFIRM_MODE" / "permissions.default_confirm_mode")。
+bool ResolveSourceValue(const std::string& value, const std::string& source_desc, ConfirmMode& into,
+                        std::vector<std::string>* warnings) {
+    const std::string original = value;
+    if (const auto parsed = ParseConfirmMode(original)) {
+        if (original == "confirm") {
+            // 旧 confirm 别名:按 default 收,弃用要叫一声(单子 §七:
+            // 至少跨两个 minor 版本兼容,读侧提示,写侧只写新值)。
+            into = ConfirmMode::Confirm;
+            if (warnings != nullptr) {
+                warnings->push_back(trf("mode.start.deprecated_alias", source_desc));
+            }
+            return true;
+        }
+        into = *parsed;
+        return true;
+    }
+    into = ConfirmMode::Confirm;
+    if (warnings != nullptr) {
+        warnings->push_back(trf("mode.start.invalid_value", source_desc, original));
+    }
+    return false;
+}
+
+}  // namespace
+
+ApprovalModeStart ResolveApprovalModeStart(bool cli_yes, const std::optional<std::string>& env_value,
+                                           const std::optional<std::string>& project_value,
+                                           std::vector<std::string>* warnings) {
+    ApprovalModeStart start;
+    if (cli_yes) {
+        // --yes 始终压到 YOLO(单子 §四:显式全放,优先级照旧)。
+        start.mode = ConfirmMode::Yolo;
+        start.source = ApprovalModeSource::Cli;
+        start.raw_value = "--yes";
+        return start;
+    }
+    if (env_value.has_value()) {
+        // 设了就算数(空串按"值无效"裁决:回 default + 警告),继续压过
+        // project——与 0.26.x 起手解析的旧语义一字不差。
+        ResolveSourceValue(*env_value, "LUBANCODE_CONFIRM_MODE", start.mode, warnings);
+        start.source = ApprovalModeSource::Env;
+        start.raw_value = *env_value;
+        return start;
+    }
+    if (project_value.has_value()) {
+        ResolveSourceValue(*project_value, "permissions.default_confirm_mode", start.mode, warnings);
+        start.source = ApprovalModeSource::Project;
+        start.raw_value = *project_value;
+        return start;
+    }
+    start.mode = ConfirmMode::Confirm;
+    start.source = ApprovalModeSource::Builtin;
+    start.raw_value.clear();
+    return start;
+}
+
+const ApprovalModeStart& ApprovalModeStartSlot() {
+    static ApprovalModeStart start;
+    return start;
+}
+
+void SetApprovalModeStart(ApprovalModeStart start) {
+    // 启动主线程写一次,此后 /config、/doctor 只读——与 ModeNoticeSlot 同款
+    // 会话级静态槽的纪律。
+    const_cast<ApprovalModeStart&>(ApprovalModeStartSlot()) = std::move(start);
+}
+
+std::string ApprovalModeStartSourceText(const ApprovalModeStart& start) {
+    switch (start.source) {
+        case ApprovalModeSource::Cli:
+            return tr("mode.start.source_cli");
+        case ApprovalModeSource::Env:
+            return trf("mode.start.source_env", start.raw_value);
+        case ApprovalModeSource::Project:
+            return trf("mode.start.source_project", start.raw_value);
+        case ApprovalModeSource::Builtin:
+            return tr("mode.start.source_builtin");
+    }
+    return tr("mode.start.source_builtin");
 }
 
 int CharDisplayWidth(char32_t cp) {

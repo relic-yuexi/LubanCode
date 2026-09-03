@@ -528,6 +528,9 @@ void TurnInputListener::ThreadMain() {
                 const ConfirmMode next_mode = NextConfirmMode(shared_editor.confirm_mode());
                 shared_editor.set_confirm_mode(next_mode);
                 ModeNoticeSlot().Show(next_mode);
+                // 切档即写(单子 §七):与空闲路同一枚通知,session manifest
+                // 跟着换——钩子在装配层接轨迹账,未挂(单测)时 no-op。
+                NotifyApprovalModeChanged(next_mode);
             }
             std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
             RedrawStreamFooterLocked();
