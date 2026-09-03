@@ -270,6 +270,36 @@ TEST_CASE("进程:Start 落锁与 running 快照,RequestStop 干净关机退 0")
     CHECK(lines[1].reason == "test");
 }
 
+TEST_CASE("控制文件:替换失败不许删正式目标换成功(src 收口审计 P1 原子写)") {
+    // 目标位被一个空目录占着:原子替换换不上去,写侧必须报错收场,且那个
+    // 目录必须原样还在。老的私房写法(rename 失败 -> 先 remove(target) ->
+    // 再 rename)会把目录删掉、把写报成"成功"——那份成功是拿"正式目标先
+    // 消失"换来的,Windows 上留出文件不存在窗口,正是审计单点名要杀的。
+    const auto root = MakeTempRoot("ctrl-no-delete");
+    const auto control_file = root / "control.json";
+    std::error_code ec;
+    std::filesystem::create_directories(control_file, ec);
+    REQUIRE(std::filesystem::is_directory(control_file));
+
+    GatewayControlSnapshot snapshot;
+    snapshot.profile = "default";
+    snapshot.boot_id = "boot-test";
+    snapshot.state = "running";
+    snapshot.health = "ok";
+
+    const std::string error = WriteControlSnapshot(control_file, snapshot);
+    CHECK_MESSAGE(!error.empty(), "替换失败必须报错,不许删掉占位目标换成功");
+    CHECK(std::filesystem::is_directory(control_file));
+    // 失败收场后不许留下自己的临时件。
+    bool tmp_left = false;
+    for (const auto& entry : std::filesystem::directory_iterator(root, ec)) {
+        if (entry.path().filename().string().find(".tmp") != std::string::npos) {
+            tmp_left = true;
+        }
+    }
+    CHECK_FALSE(tmp_left);
+}
+
 TEST_CASE("进程:stop 控制命令定向 boot_id,陈旧命令不追杀新实例") {
     const auto root = MakeTempRoot("ctrl");
     const auto paths = PathsOf(root);

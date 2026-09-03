@@ -4,38 +4,20 @@
 #include <fstream>
 #include <sstream>
 
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1:旧写法替换失败会先删正式文件)
 #include "platform/paths.hpp"
 
 namespace lubancode::gateway {
 
 namespace {
 
-// 原子换代写:temp 文件写全 -> rename 盖上。与仓里 manifest/spec 的写法
-// 同一规矩(§8.2"spec 可原子换代")——控制快照不是 append 账,是可换代的
-// 投影;但事实事件(boot history)仍只追加。
+// 原子换代写,统一走 platform::AtomicWriteFile(§8.2"spec 可原子换代"):
+// 唯一临时名、平台原子替换、失败不删正式文件、结构化错误。控制快照不是
+// append 账,是可换代的投影;但事实事件(boot history)仍只追加。
 std::string AtomicWriteText(const std::filesystem::path& target, const std::string& text) {
-    std::error_code ec;
-    const std::filesystem::path parent = target.parent_path();
-    if (!parent.empty()) {
-        std::filesystem::create_directories(parent, ec);
-        if (ec) return "建目录失败 " + platform::PathToUtf8(parent) + ": " + ec.message();
-    }
-    std::filesystem::path temp = target;
-    temp += ".tmp";
-    {
-        std::ofstream stream(temp, std::ios::binary | std::ios::trunc);
-        if (!stream) return "打不开临时文件 " + platform::PathToUtf8(temp);
-        stream.write(text.data(), static_cast<std::streamsize>(text.size()));
-        stream.flush();
-        if (!stream) return "写临时文件失败 " + platform::PathToUtf8(temp);
-    }
-    std::filesystem::rename(temp, target, ec);
-    if (ec) {
-        // Windows 上 rename 盖已有文件偶发撞句柄:退回先删再 rename。
-        std::error_code remove_ec;
-        std::filesystem::remove(target, remove_ec);
-        std::filesystem::rename(temp, target, ec);
-        if (ec) return "原子换名失败 " + platform::PathToUtf8(target) + ": " + ec.message();
+    const auto result = platform::AtomicWriteFile(target, text);
+    if (!result.has_value()) {
+        return result.error().code + ": " + result.error().message;
     }
     return std::string();
 }
