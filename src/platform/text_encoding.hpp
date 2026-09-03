@@ -27,6 +27,11 @@ bool IsValidUtf8(const std::string& text);
 // 哪儿)用它,别在外面再写一遍解码器。
 std::size_t FirstInvalidUtf8Offset(const std::string& text);
 
+// 全串解不出合法序列的坏字节处数——每处就是清洗时的一个替换点(逐段
+// 替换路里换出一个 U+FFFD;ACP 整段强转路里就是触发强转的坏字节个数)。
+// "已消毒,含 N 处非法 UTF-8" 这类诊断日志报数用它,别在外面再写解码器。
+std::size_t CountInvalidUtf8Sites(const std::string& text);
+
 // 把任意字节串清洗成保证合法的 UTF-8:
 //   - 已经合法 -> 原样返回。
 //   - 非法时,Windows 上先整段按系统 ANSI 代码页(CP_ACP)重新解释一遍——

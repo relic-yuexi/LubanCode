@@ -17,6 +17,7 @@
 #include "hooks/hash.hpp"           // Sha256Hex:request_snapshot 的 parameters_hash
 #include "platform/log_sink.hpp"
 #include "platform/paths.hpp"
+#include "platform/text_encoding.hpp"  // SanitizeExternalText:子账 payload 账前兜底(UTF-8 清洗门单)
 #include "tools/path_utils.hpp"     // Utf8ToPath:主目录文本转路径
 #include "tools/tool_content.hpp"   // TextContent:富结果块的文本投影
 #include "trajectory/safety.hpp"
@@ -1789,6 +1790,21 @@ TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const 
         return fail_out("recorder_start", "trajectory.subagent_recorder", recorder.error(),
                         /*retryable=*/false);
     }
+    // 账前兜底(UTF-8 清洗门单):入口消毒在 AgentTool::ExecuteDispatch,这里
+    // 写 run.started 前对进 payload 的字符串再洗一道——防别的调用方
+    //(workflow/peer 派工路)绕过工具入口带坏字节直灌,账层只认不洗,坏字节
+    // 会把整场 spawn 拒成 fail closed。与入口同一份合同(platform::
+    // SanitizeExternalText),幂等:入口洗过的合法串这里零成本原样放行。
+    // parent_run_id/parent_call_id 是宿主发的 id,照洗是保险,不另外出声。
+    const std::string clean_label = platform::SanitizeExternalText(task_label);
+    const std::string clean_parent_call_id = platform::SanitizeExternalText(parent_call_id);
+    const std::string clean_parent_run_id = platform::SanitizeExternalText(parent_run_id);
+    if (clean_label != task_label) {
+        platform::LogSink::Instance().Warn(
+            "trajectory", "子账 task_label 含 " +
+                              std::to_string(platform::CountInvalidUtf8Sites(task_label)) +
+                              " 处非法 UTF-8,入账前已消毒(调用方绕过了工具入口的清洗门)");
+    }
     // 先把 recorder 落到堆上再让桥引用它——expected 里的值 move 走之后,
     // 引用会悬在 moved-from 壳上(桥的 recorder_ 是裸引用)。
     auto recorder_owner = std::make_unique<trajectory::TrajectoryRecorder>(std::move(*recorder));
@@ -1797,16 +1813,16 @@ TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const 
     // min_reader_version 由 WriteRunStarted 统一落(P0-6 收口,不再手填)。
     nlohmann::json payload = nlohmann::json{{"run_kind", "subagent"},
                                             {"start_reason", "agent_tool_dispatch"}};
-    if (!task_label.empty()) {
-        payload["task_ref"] = task_label;
+    if (!clean_label.empty()) {
+        payload["task_ref"] = clean_label;
     }
     trajectory::EventLinks links;
     // 嵌套轨迹边(递归派工单 P1-2):parent_run_id 非空 = 嵌套派工——它的
     // 父亲是派出它的那只子代理自己的 run,不是 main;空串(main 直派)按
     // 从前行为落回本场 main_run_id。
-    links.parent_run_id = parent_run_id.empty() ? impl_->main_run_id : parent_run_id;
-    if (!parent_call_id.empty()) {
-        links.parent_call_id = parent_call_id;
+    links.parent_run_id = clean_parent_run_id.empty() ? impl_->main_run_id : clean_parent_run_id;
+    if (!clean_parent_call_id.empty()) {
+        links.parent_call_id = clean_parent_call_id;
     }
     const auto started = recorder_owner->WriteRunStarted(std::move(payload),
                                                           trajectory::Durability::PowerLoss,

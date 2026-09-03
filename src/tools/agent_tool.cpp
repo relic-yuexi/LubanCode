@@ -482,6 +482,29 @@ std::string FirstLineCapped(const std::string& text, std::size_t cap = 200) {
     return text.substr(0, end);
 }
 
+// spawn 链 UTF-8 清洗门·入口消毒(主刀):模型 agent 工具参数(title/prompt)
+// 可带非法 UTF-8——provider 流式坏字节,或模型复制了脏内容。参数直灌
+// spawn 链,到 CanonicalJsonDump 才被拒,子代理整场死在起跑线(真机实录:
+// minimax-m3 主会话并发派工,坏字节参数的两只死在 subagent.run.start_
+// failed | canonical_json.invalid_utf8)。loop 的 SanitizeMessage 只洗发往
+// wire 的请求副本,工具执行吃的内存原档没人洗——这道门就设在参数解析口,
+// 先洗再验(DisplayWidthUtf8/spec 哈希/台账链全吃合法 UTF-8)。合同与
+// web/MCP/search 同一份(platform::SanitizeExternalText:保合法片段,只动
+// 坏字节)。替换发生时落一行 warning(处数 + 字段 + 清洗后首行截断版),
+// 不静默。
+std::string SanitizeDispatchParam(const char* field, const std::string& raw) {
+    if (platform::IsValidUtf8(raw)) {
+        return raw;
+    }
+    const std::size_t sites = platform::CountInvalidUtf8Sites(raw);
+    std::string clean = platform::SanitizeExternalText(raw);
+    platform::LogSink::Instance().Warn(
+        "agent_tool", "子代理参数 " + std::string(field) + " 含 " + std::to_string(sites) +
+                          " 处非法 UTF-8,已消毒入账(模型吐了坏字节;清洗后首行: " +
+                          FirstLineCapped(clean, 60) + ")");
+    return clean;
+}
+
 // 动态 schema 的清单一行(阶段 4·单子 §6.3):换行压成空格、UTF-8 按码点
 // 截到 max_chars——description 是 YAML 里的自由文本,塞进 schema 前先压平
 // 截短,免得一份长描述把参数说明冲成一锅(首版只放 name+description,
@@ -995,7 +1018,9 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
     if (!input.contains("title") || !input.at("title").is_string()) {
         return reject("缺少必填参数 title", title_missing_hint);
     }
-    std::string title = input.at("title").get<std::string>();
+    // 入口消毒(UTF-8 清洗门单):先洗再验,坏字节换成法串过下面的宽度/
+    // 格式检——不洗的话 0x80 会一路灌进 spec 哈希与台账,spawn 整场被拒。
+    std::string title = SanitizeDispatchParam("title", input.at("title").get<std::string>());
     {
         const std::size_t first = title.find_first_not_of(" \t\r\n");
         const std::size_t last = title.find_last_not_of(" \t\r\n");
@@ -1018,8 +1043,11 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
                       "prompt 是必填字符串。把背景、任务和报告要求写进一段自包含说明；普通的一句话任务也"
                       "合法。示例:prompt=\"检查 src 里的取消链，报告文件、行号和风险\"。");
     }
-    request.spec = std::make_shared<const agent::AgentTaskSpec>(
-        agent::MakeAgentTaskSpec(title, input.at("prompt").get<std::string>()));
+    // prompt 同一道门(UTF-8 清洗门单):task_label(子账 run.started 的
+    // task_ref)、子代理任务书、spec 哈希全从这份字符串出,坏字节必须在这
+    // 里就换掉。
+    request.spec = std::make_shared<const agent::AgentTaskSpec>(agent::MakeAgentTaskSpec(
+        title, SanitizeDispatchParam("prompt", input.at("prompt").get<std::string>())));
     if (const std::string error = agent::ValidateAgentTaskSpec(*request.spec); !error.empty()) {
         return reject("prompt 不合法:" + error,
                       error + "。prompt 只须是一段自包含任务说明；宿主不要求固定章节，也不解析 Markdown。");
@@ -1471,8 +1499,13 @@ Tool::Result AgentTool::ExecuteForeground(const DispatchRequest& request, ToolRe
     runtime::SubagentSpawnFailure spawn_failure;
     const bool trajectory_spawn_armed = hooks.trajectory_spawn != nullptr;
     if (trajectory_spawn_armed) {
-        trajectory = hooks.trajectory_spawn(agent_type + ": " + task->snapshot.prompt.substr(0, 120),
-                                            caller.agent_run_id, &spawn_failure);
+        // task_label 的 120 字节截断先过 UTF-8 边界尺(UTF-8 清洗门单):
+        // 裸 substr 劈进多字节序列的腰,好 prompt 也会造出坏字节把 run.started
+        // 拒掉。账前兜底(SpawnSubagent)再兜一道,这里从源头不造坏。
+        const std::string& label_source = task->snapshot.prompt;
+        trajectory = hooks.trajectory_spawn(
+            agent_type + ": " + label_source.substr(0, platform::Utf8PrefixBoundary(label_source, 120)),
+            caller.agent_run_id, &spawn_failure);
     }
     if (trajectory_spawn_armed && trajectory == nullptr) {
         Result result{SubagentStartFailedText(spawn_failure), true};
@@ -1715,8 +1748,10 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
     runtime::SubagentSpawnFailure spawn_failure;
     const bool trajectory_spawn_armed = hooks_.trajectory_spawn != nullptr;
     if (trajectory_spawn_armed) {
-        trajectory = hooks_.trajectory_spawn(agent_type + ": " + prompt.substr(0, 120),
-                                             caller.agent_run_id, &spawn_failure);
+        // 与前台路同一把边界尺(UTF-8 清洗门单):截断不劈多字节序列。
+        trajectory = hooks_.trajectory_spawn(
+            agent_type + ": " + prompt.substr(0, platform::Utf8PrefixBoundary(prompt, 120)),
+            caller.agent_run_id, &spawn_failure);
     }
     if (trajectory_spawn_armed && trajectory == nullptr) {
         const std::string failure_text = SubagentStartFailedText(spawn_failure);
