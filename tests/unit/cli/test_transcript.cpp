@@ -16,7 +16,9 @@
 #include "cli/theme.hpp"
 #include "cli/tool_display.hpp"
 #include "cli/transcript.hpp"
+#include "cli/turn_renderer.hpp"  // RenderTurnView(主面板路径的间距收口)
 #include "cli/line_editor.hpp"  // DisplayWidthUtf8
+#include "runtime/turn_view.hpp"
 
 using lubancode::cli::AgentDoneSummary;
 using lubancode::cli::BlockRole;
@@ -855,4 +857,84 @@ TEST_CASE("RenderSessionBlocks:块间空白走 GapBetween,Items 块吃同一颗�
     empty_notice.kind = lubancode::cli::SessionBlock::Kind::Notice;
     empty_notice.role = BlockRole::SystemNotice;
     CHECK(RenderSessionBlocks({empty_notice}, theme, 80, false).empty());
+}
+
+// ---------------------------------------------------------------------------
+// RenderTurnView 间距(主面板路径,底栏键贴场景单 P1-1):主面板的条目间距
+// 与 FormatTranscriptItems/Subagent 查看页同一张 GapBetween 表——思考与
+// 下一条之间、同 step 的工具与工具之间都要留一口,两层一个气口。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+lubancode::runtime::TurnItemView MakeViewItem(const std::string& id, lubancode::runtime::TurnItemViewKind kind,
+                                              lubancode::runtime::TurnItemViewState status,
+                                              const std::string& tool_name, const nlohmann::json& input,
+                                              const std::string& result_text) {
+    lubancode::runtime::TurnItemView item;
+    item.item_id = id;
+    item.step_id = "s0";
+    item.kind = kind;
+    item.status = status;
+    item.tool_name = tool_name;
+    item.input = input;
+    item.result_text = result_text;
+    item.started_at_ms = 1000;
+    item.ended_at_ms = kind == lubancode::runtime::TurnItemViewKind::Thinking ? 2800 : 3200;
+    return item;
+}
+
+}  // namespace
+
+TEST_CASE("RenderTurnView 间距:思考 -> 工具 与 工具 -> 工具 都留一口(与 FormatTranscriptItems 同表)") {
+    const auto theme = BuiltinTheme("plain");
+    lubancode::runtime::TurnView view;
+    view.turn_id = "t1";
+    view.items.push_back(MakeViewItem("i1", lubancode::runtime::TurnItemViewKind::Thinking,
+                                      lubancode::runtime::TurnItemViewState::Succeeded, "thinking",
+                                      nlohmann::json::object(), "琢磨了一下"));
+    view.items.push_back(MakeViewItem("i2", lubancode::runtime::TurnItemViewKind::Tool,
+                                      lubancode::runtime::TurnItemViewState::Succeeded, "run_command",
+                                      nlohmann::json{{"command", "git log"}}, "[退出码 0]\nok"));
+    view.items.push_back(MakeViewItem("i3", lubancode::runtime::TurnItemViewKind::Tool,
+                                      lubancode::runtime::TurnItemViewState::Succeeded, "read_file",
+                                      nlohmann::json{{"path", "a.txt"}}, "1  hi"));
+    view.steps.push_back(lubancode::runtime::ModelStepView{"s0", 0, {"i1", "i2", "i3"}, true});
+
+    lubancode::cli::TurnRenderOptions options;
+    options.width = 100;
+    options.plain = true;
+    options.include_user = false;
+    options.include_footer = false;
+    const std::vector<std::string> lines = lubancode::cli::RenderTurnView(view, theme, options);
+
+    // 思考行(「思考 1s」)的下一行须是空行——思考不再紧贴工具卡。
+    std::size_t thinking_at = std::string::npos;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].find("思考 ") != std::string::npos) {
+            thinking_at = i;
+            break;
+        }
+    }
+    REQUIRE(thinking_at != std::string::npos);
+    REQUIRE(thinking_at + 2 < lines.size());
+    CHECK(lines[thinking_at + 1].empty());  // Thinking -> Tool 恰一口
+
+    // 同 step 的两枚工具之间也恰一口(Tool -> Tool = 1,与 Subagent 查看页
+    // 同表);且只垫一口,不双打。
+    std::size_t tool1_at = std::string::npos;
+    std::size_t tool2_at = std::string::npos;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        if (lines[i].find("run_command(git log)") != std::string::npos) {
+            tool1_at = i;
+        }
+        if (lines[i].find("read_file(a.txt)") != std::string::npos) {
+            tool2_at = i;
+        }
+    }
+    REQUIRE(tool1_at != std::string::npos);
+    REQUIRE(tool2_at != std::string::npos);
+    REQUIRE(tool2_at > tool1_at + 1);
+    CHECK(lines[tool1_at + 1].find("退出码") != std::string::npos);  // tool1 自带 ⎿ 摘要行
+    CHECK(lines[tool2_at - 1].empty());  // 摘要行之后、下一枚卡之前恰一口
 }

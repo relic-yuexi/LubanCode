@@ -133,6 +133,13 @@ std::vector<std::string> RenderTurnView(const lubancode::runtime::TurnView& view
     }
     std::string previous_step;
     bool first_printed = false;
+    // 间距表唯一决定空白(收口单 P1-1):主面板条目间不再只靠 step 换拍垫
+    // 一行——每条非首条 item 之前按 GapBetween(previous_role, RoleOf(item))
+    // 垫空行,与 FormatTranscriptItems/Subagent 查看页同一张表,「思考」与
+    // 下一条、同 step 的工具与工具之间都留一口。previous_role 跟随实际最后
+    // 一条打印块(user 块/正文/条目各自记账),不硬塞 UserPrompt 兜底——首
+    // 条不垫由 first_printed 守门。
+    lubancode::cli::BlockRole previous_role = lubancode::cli::BlockRole::Tool;
     for (const auto& item : view.items) {
         if (!item.parent_item_id.empty()) {
             continue;
@@ -149,7 +156,11 @@ std::vector<std::string> RenderTurnView(const lubancode::runtime::TurnView& view
             // 账归实时 painter,重建场合只有行组可依;原文直铺,长行交给
             // 终端自然折行。
             if (first_printed) {
-                lines.push_back(std::string());
+                for (int g = 0; g < lubancode::cli::GapBetween(previous_role,
+                                                               lubancode::cli::BlockRole::AssistantText);
+                     ++g) {
+                    lines.push_back(std::string());
+                }
             }
             std::size_t pos = 0;
             while (pos < item.result_text.size()) {
@@ -162,12 +173,16 @@ std::vector<std::string> RenderTurnView(const lubancode::runtime::TurnView& view
                 pos = nl + 1;
             }
             first_printed = true;
+            previous_role = lubancode::cli::BlockRole::AssistantText;
+            previous_step = item.step_id;
             continue;
         }
         // 用户条目:背景块(与 live 提交、resume 重放同一颗 formatter),不再
-        // 折成工具条目样。块前按间距表垫一口气,块后再垫一口(UserPrompt ->
-        // 任意 = 1);turn_divider 开着时,用户块之前再画一道满宽横线(轮界,
-        // 克制样式:stats 淡色,与 PrintDivider 同一根线)。
+        // 折成工具条目样。块前按间距表垫一口气(多轮重放 leading_turn_divider
+        // 开着时算成上一轮 TurnFooter -> 本轮 UserPrompt,并再画一道满宽横
+        // 线——轮界,克制样式:stats 淡色,与 PrintDivider 同一根线)。块后
+        // 不再硬编码 UserPrompt -> Thinking:让下一枚条目按自己的
+        // GapBetween(prev, self) 决定,省得写死 Thinking 把别的来路挡掉。
         if (item.kind == lubancode::runtime::TurnItemViewKind::User) {
             const std::string block =
                 lubancode::cli::FormatUserPromptBlock(item.result_text, theme, width);
@@ -184,6 +199,12 @@ std::vector<std::string> RenderTurnView(const lubancode::runtime::TurnView& view
                     lines.push_back(theme.stats +
                                     lubancode::cli::BuildDividerLine(width, options.plain, width) +
                                     theme.reset);
+                } else if (first_printed) {
+                    for (int g = 0; g < lubancode::cli::GapBetween(previous_role,
+                                                                   lubancode::cli::BlockRole::UserPrompt);
+                         ++g) {
+                        lines.push_back(std::string());
+                    }
                 }
                 std::size_t pos = 0;
                 while (pos < block.size()) {
@@ -195,22 +216,31 @@ std::vector<std::string> RenderTurnView(const lubancode::runtime::TurnView& view
                     }
                     pos = nl + 1;
                 }
-                for (int g = 0; g < lubancode::cli::GapBetween(lubancode::cli::BlockRole::UserPrompt,
-                                                               lubancode::cli::BlockRole::Thinking);
-                     ++g) {
-                    lines.push_back(std::string());
-                }
                 first_printed = true;
+                previous_role = lubancode::cli::BlockRole::UserPrompt;
+                previous_step = item.step_id;
             }
             continue;
         }
-        // step 换拍:垫轻间隔(首条之前不垫)。
-        if (first_printed && !item.step_id.empty() && item.step_id != previous_step) {
-            lines.push_back(std::string());
+        // 思考/工具条目:每条非首条之前垫空行。step 换拍轻间隔与 GapBetween
+        // 不重复——触发时只走一条(一行就好):换拍本身就是一口气,与表值
+        // 一致时只垫一次,不堆出两行。
+        const lubancode::cli::TranscriptItem projected = ProjectTurnItem(item);
+        if (first_printed) {
+            const bool step_changed = !item.step_id.empty() && item.step_id != previous_step;
+            if (step_changed) {
+                lines.push_back(std::string());  // step 换拍:轻间隔
+            } else {
+                for (int g = 0; g < lubancode::cli::GapBetween(previous_role,
+                                                               lubancode::cli::RoleOf(projected));
+                     ++g) {
+                    lines.push_back(std::string());
+                }
+            }
         }
         previous_step = item.step_id;
+        previous_role = lubancode::cli::RoleOf(projected);
         first_printed = true;
-        const lubancode::cli::TranscriptItem projected = ProjectTurnItem(item);
         const std::string text = lubancode::cli::FormatTranscriptItem(projected, theme, width,
                                                                      options.expanded);
         // FormatTranscriptItem 每行以 \n 收尾:拆进行组。
@@ -239,7 +269,7 @@ std::vector<std::string> RenderTurnView(const lubancode::runtime::TurnView& view
             tone = lubancode::cli::TurnFooterTone::Failed;
         }
         if (first_printed) {
-            for (int g = 0; g < lubancode::cli::GapBetween(lubancode::cli::BlockRole::Tool,
+            for (int g = 0; g < lubancode::cli::GapBetween(previous_role,
                                                            lubancode::cli::BlockRole::TurnFooter);
                  ++g) {
                 lines.push_back(std::string());

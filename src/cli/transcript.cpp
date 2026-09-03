@@ -359,33 +359,23 @@ std::string FormatTranscriptItems(const std::vector<TranscriptItem>& items, cons
     std::string out;
     // 相邻两枚的间距由间距表唯一决定(同构渲染单 P0):只对"实际打印出来"
     // 的条目记账——紧凑档跳过的 SubTool 不参与间距计算,免得被隐藏的子项
-    // 把后一枚顶层 Tool 的间隔吃掉。
+    // 把后一枚顶层 Tool 的间隔吃掉。role 投影走共享的 RoleOf(收口单
+    // P1-1 提取,与主面板 RenderTurnView 同一份)。
     bool printed_any = false;
     BlockRole previous_role = BlockRole::Tool;
-    const auto role_of = [](const TranscriptItem& item) {
-        switch (item.kind) {
-            case TranscriptKind::Tool:
-                return BlockRole::Tool;
-            case TranscriptKind::SubTool:
-                return BlockRole::SubTool;
-            case TranscriptKind::Thinking:
-                return BlockRole::Thinking;
-        }
-        return BlockRole::Tool;
-    };
     for (std::size_t i = 0; i < items.size(); ++i) {
         const bool item_expanded = expanded || static_cast<int>(i) == expanded_index;
         if (!item_expanded && items[i].kind == TranscriptKind::SubTool) {
             continue;
         }
         if (printed_any) {
-            for (int gap = 0; gap < GapBetween(previous_role, role_of(items[i])); ++gap) {
+            for (int gap = 0; gap < GapBetween(previous_role, RoleOf(items[i])); ++gap) {
                 out += "\n";
             }
         }
         out += FormatTranscriptItem(items[i], theme, width, item_expanded,
                                     static_cast<int>(i) == focus_index);
-        previous_role = role_of(items[i]);
+        previous_role = RoleOf(items[i]);
         printed_any = true;
     }
     return out;
@@ -755,6 +745,18 @@ int GapBetween(BlockRole before, BlockRole after) {
     (void)before;
     (void)after;
     return 1;
+}
+
+BlockRole RoleOf(const TranscriptItem& item) {
+    switch (item.kind) {
+        case TranscriptKind::Tool:
+            return BlockRole::Tool;
+        case TranscriptKind::SubTool:
+            return BlockRole::SubTool;
+        case TranscriptKind::Thinking:
+            return BlockRole::Thinking;
+    }
+    return BlockRole::Tool;
 }
 
 std::optional<int> ParseRunCommandExitCode(const std::string& content) {

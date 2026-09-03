@@ -651,14 +651,16 @@ TEST_CASE("黄金画面:单轮两拍(思考 + 两工具一批 -> 换拍 -> 长�
     }
     CHECK(saw_thinking);
 
-    // 两枚工具一批:同拍条目之间不垫空行。
+    // 两枚工具一批:同拍条目之间也按间距表留一口(主面板与 Subagent 查看
+    // 页同表——收口单 P1-1 之前这里是"同拍紧排",与 FormatTranscriptItems
+    // 两层不一致,已并轨)。
     const std::size_t g1 = text.find("run_command(git log");
     const std::size_t g2 = text.find("read_file(README.md)");
     REQUIRE(g1 != std::string::npos);
     REQUIRE(g2 != std::string::npos);
     const std::string between = text.substr(g1, g2 - g1);
     CHECK(between.find("退出码 0") != std::string::npos);
-    CHECK(between.find("\n\n") == std::string::npos);  // 同拍无空行
+    CHECK(between.find("\n\n") != std::string::npos);  // 同拍恰一口(Tool -> Tool = 1)
 
     // 换拍:step 1 的条目前有一空行(轻间隔),不是满宽横线。
     const std::size_t g3_title = text.find("run_command($env:http_proxy");
