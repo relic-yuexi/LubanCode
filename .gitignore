@@ -73,7 +73,9 @@ eval/deferred_quality/_run/
 
 # LoCoMo-MC10 防作弊基准(记忆系统评测单):492MB 原数据、扰动产物与
 # 变换账本(含答案映射)绝不进 git——CC BY-NC 数据 + 防作弊隔离要求。
-# 进 git 的只有聚合报告(无原文无答案):retrieval_baseline.md / report.md。
+# 进 git 的只有聚合报告(无原文无答案):retrieval_baseline.md / report.md
+# / retrieval_improved.md(改进前后对照,记忆检索与注入改进单)。
 eval/locomo/*
 !eval/locomo/retrieval_baseline.md
 !eval/locomo/report.md
+!eval/locomo/retrieval_improved.md

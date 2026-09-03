@@ -678,7 +678,7 @@ TEST_CASE("ProjectMemory: 检索预算按去重后有效字节,同一事实只�
     CHECK(twin_duplicates == 2);
 }
 
-TEST_CASE("ProjectMemory: 默认预算 8 KiB/3 条,预算边界不劈开 UTF-8") {
+TEST_CASE("ProjectMemory: 默认预算 8 KiB/3 条,预算边界裁在段上不劈开 UTF-8") {
     const fs::path root = TempRoot("budget");
     const fs::path repo = root / "repo";
     fs::create_directories(repo / ".git");
@@ -690,8 +690,8 @@ TEST_CASE("ProjectMemory: 默认预算 8 KiB/3 条,预算边界不劈开 UTF-8")
     options.enabled = true;
     CHECK(options.max_retrieval_bytes == 8 * 1024);
     CHECK(options.max_results == 3);
-    // 故意压小预算(61 字节,除不尽三字节汉字),逼正文截在多字节字符中间。
-    options.max_retrieval_bytes = 61;
+    // 压小预算但不至于装不下段头:载荷按段裁,整段进出,UTF-8 天然完整。
+    options.max_retrieval_bytes = 400;
     memory::ProjectMemory store(*identity, root / "home", options);
 
     memory::SaveRequest request;
@@ -699,7 +699,11 @@ TEST_CASE("ProjectMemory: 默认预算 8 KiB/3 条,预算边界不劈开 UTF-8")
     request.id = "fact.long-topic";
     request.title = "长正文";
     request.summary = "长正文";
-    request.content = "一二三四五六七八九十甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥";
+    std::string content;
+    for (int i = 0; i < 12; ++i) {
+        content += "一二三四五六七八九十甲乙丙丁戊己庚辛壬癸子丑寅卯辰巳午未申酉戌亥\n";
+    }
+    request.content = content;
     request.keywords = {"长正文"};
     REQUIRE(store.EnqueueSave(request).has_value());
     REQUIRE(memory::RunPendingMemoryJobs(root / "home").has_value());
@@ -707,20 +711,22 @@ TEST_CASE("ProjectMemory: 默认预算 8 KiB/3 条,预算边界不劈开 UTF-8")
     const std::string context = store.BuildTurnContext("长正文讲的什么", repo);
     const std::size_t begin = context.find("## 召回: fact.long-topic");
     REQUIRE(begin != std::string::npos);
-    // 召回段截到预算为止,尾部必须仍是合法 UTF-8(不劈半个汉字)。
+    // 预算实打实管整段(段头 + 来源行 + 载荷):装填后的段不超预算。护栏
+    // 尾巴不算段内——量到尾巴行前为止。
     std::size_t end = context.find("\n## 召回", begin + 1);
+    if (end == std::string::npos) end = context.find("\n（以上记忆段", begin + 1);
     if (end == std::string::npos) end = context.size();
-    std::string section = context.substr(begin, end - begin);
-    // 脚手架行(标题/来源路径)的长度随平台变——macOS 的 /var/folders 比
-    // /tmp 长几个字节,曾把 +200 的富余顶破。预算管正文:正文 = 来源行
-    // 之后第二个空行起的那截。
-    const std::size_t first_gap = section.find("\n\n");
-    REQUIRE(first_gap != std::string::npos);
-    const std::size_t body_begin = section.find("\n\n", first_gap + 2);
-    REQUIRE(body_begin != std::string::npos);
-    const std::string body = section.substr(body_begin + 2);
-    CHECK(body.size() <= 61 + 1);  // 61 预算 + 结尾换行
-    // 逐字节验证整段是合法 UTF-8。
+    const std::string section = context.substr(begin, end - begin);
+    CHECK(section.size() <= 400);
+    // 截断有账:trace 记 content_truncated。
+    const auto trace = store.LastTrace();
+    REQUIRE(trace.valid);
+    bool truncated = false;
+    for (const auto& item : trace.entries) {
+        if (item.id == "fact.long-topic" && item.injected) truncated = item.content_truncated;
+    }
+    CHECK(truncated);
+    // 逐字节验证整段是合法 UTF-8(按段裁,结构上就不会劈半个汉字)。
     bool valid = true;
     for (std::size_t i = 0; i < section.size();) {
         const unsigned char c = static_cast<unsigned char>(section[i]);
@@ -735,6 +741,23 @@ TEST_CASE("ProjectMemory: 默认预算 8 KiB/3 条,预算边界不劈开 UTF-8")
         i += length;
     }
     CHECK(valid);
+
+    // 预算小到装不下任何一段有效载荷(段头都盖不过):整条让位,理由进
+    // trace,不硬塞半截。
+    options.max_retrieval_bytes = 61;  // 换不下:重建一只小预算的 store 复用库
+    memory::ProjectMemory tiny(*identity, root / "home", options);
+    const std::string nothing = tiny.BuildTurnContext("长正文讲的什么", repo);
+    CHECK(nothing.find("## 召回: fact.long-topic") == std::string::npos);
+    const auto tiny_trace = tiny.LastTrace();
+    REQUIRE(tiny_trace.valid);
+    bool dropped_with_reason = false;
+    for (const auto& item : tiny_trace.entries) {
+        if (item.id != "fact.long-topic") continue;
+        CHECK(item.budget_dropped);
+        CHECK(item.drop_reason == "budget_bytes");
+        dropped_with_reason = true;
+    }
+    CHECK(dropped_with_reason);
 }
 
 TEST_CASE("ProjectMemory: learn 三档,auto 越权开不了") {
