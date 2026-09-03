@@ -1,0 +1,7 @@
+# memory_global_gate 测试漂移小修
+
+- 状态：待修（2026-09-04 立单；UTF-8 清洗门工头全量跑时发现，修前修后同在，非其引入）
+- 级别：P2（测试盯旧账——现行代码没有的路，测试还在断言）
+- 现状：`unit.memory.memory_global_gate` 全量跑红。工头排查：现行 `CheckGlobalMemoryHealth`（src/memory/project_memory.cpp）已没有报 `projects/` 的路，测试还盯着旧账断言。
+- 修法：对齐测试与现行合同——要么删过时断言、要么补回应有的诊断路（以 memory 域现行设计为准裁决，别为绿测试倒贴代码）。
+- 验收：全量 ctest 零回归，此册绿且断言与现行 `CheckGlobalMemoryHealth` 行为一一对应。
