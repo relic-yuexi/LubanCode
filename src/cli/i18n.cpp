@@ -1059,7 +1059,7 @@ const Entry kZhCN[] = {
     // ---- 统计行 ----
     {"stats.line", "[tokens] 输入 {0}{1} · 输出 {2} · 请求 {3} 次 · context {4}%"},
     {"stats.cache", "(缓存命中 {0},{1}%)"},
-    // ---- 单发轨迹落账(单发轨迹断档单:汇总行照打,细账指路轨迹)----
+    {"stats.cache_partial", "(缓存命中 {0},{1}%,{2}/{3} 笔未报缓存明细)"},    // ---- 单发轨迹落账(单发轨迹断档单:汇总行照打,细账指路轨迹)----
     {"oneshot.ledger_open_failed", "轨迹账开张失败,单发不启动: "},
     {"oneshot.ledger_close_failed", "轨迹账收口失败: "},
     {"oneshot.ledger_note", "[tokens] 汇总行之外,细账(逐请求 usage/cache 分列/工具流水)已落轨迹会话 {0}"},
@@ -3091,6 +3091,7 @@ const Entry kEn[] = {
     // ---- stats line ----
     {"stats.line", "[tokens] in {0}{1} · out {2} · {3} requests · context {4}%"},
     {"stats.cache", " (cache hit {0}, {1}%)"},
+    {"stats.cache_partial", " (cache hit {0}, {1}%, {2}/{3} requests without cache detail)"},
     {"stats.usage_not_reported", " (usage not reported)"},
     {"stats.cache_not_reported", " (cache not reported by this provider)"},
     {"stats.cache_disabled", " (server-side prefix caching disabled)"},

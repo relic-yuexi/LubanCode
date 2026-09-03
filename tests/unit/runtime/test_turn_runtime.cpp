@@ -670,6 +670,43 @@ TEST_CASE("usage:明报全零与 cache 未报靠显式位分家") {
     CHECK_FALSE(stats.all_cache_reported());
 }
 
+TEST_CASE("usage:缓存报数接口按报了的说账——一笔缺席不再全盘不认") {
+    // 现场(2026-09-03 第三棒):644 笔 usage 全 cache_reported=true、28.3M
+    // cache_read,统计行却因一笔不落轨迹的辅助请求缺席被打成"未报缓存"。
+    // 修后口径:reported_count/cache_reported_count 给显示层按数说话。
+    rt::TurnUsageStats stats;
+    // 三笔全报缓存明细
+    api::UsageReport full;
+    full.reported_by_provider = true;
+    full.cache_reported_by_provider = true;
+    full.usage = api::Usage{100, 0, 900, 0};
+    stats.Add(full);
+    stats.Add(full);
+    stats.Add(full);
+    // 一笔报了 usage 但缓存明细缺席(辅助请求形状)
+    api::UsageReport partial;
+    partial.reported_by_provider = true;
+    partial.cache_reported_by_provider = false;
+    partial.usage = api::Usage{50, 0, 0, 0};
+    stats.Add(partial);
+    CHECK(stats.reported_count() == 4);
+    CHECK(stats.cache_reported_count() == 3);
+    // 命中与命中率照算(2700/(350+2700)≈88.5%→89),显示层打"命中 2.7K(89%,1/4 笔未报)"
+    CHECK(stats.cache_read_tokens() == 2700);
+    CHECK(stats.cache_hit_percent() == 89);
+    // 全缺席时报数归零,显示层落"未报缓存"分支
+    rt::TurnUsageStats none;
+    none.Add(partial);
+    none.Add(partial);
+    CHECK(none.reported_count() == 2);
+    CHECK(none.cache_reported_count() == 0);
+    // 未报 usage 的笔不计入报数
+    rt::TurnUsageStats unreported;
+    unreported.Add(api::UsageReport{api::Usage{}, 0, "", "m"});
+    CHECK(unreported.reported_count() == 0);
+    CHECK(unreported.cache_reported_count() == 0);
+}
+
 TEST_CASE("usage:reasoning 拆账含在 output 里,不是另加的一笔") {
     api::Usage usage;
     usage.input_tokens = 100;

@@ -1295,13 +1295,22 @@ RunTurnResult RunTurn(TurnContext ctx) {
             if (!usage_stats.any_reported()) {
                 return tr("stats.usage_not_reported");
             }
-            if (!usage_stats.all_cache_reported()) {
+            // 缓存口径修(2026-09-03):不再全有或全无——报了几笔按几笔说话。
+            // n<m 且有命中时打"命中 X (P%,n/m 笔未报缓存)";全没报缓存明细
+            // 才落"未报缓存"。一笔缺席不再把 83% 的命中说成零。
+            const std::size_t rep = usage_stats.reported_count();
+            const std::size_t crep = usage_stats.cache_reported_count();
+            if (crep == 0) {
                 return tr("stats.cache_not_reported");
             }
             if (usage_stats.cache_read_tokens() > 0) {
                 const int hit_percent = usage_stats.cache_hit_percent();
-                return trf("stats.cache", lubancode::cli::FormatTokenCount(usage_stats.cache_read_tokens()),
-                           hit_percent >= 0 ? std::to_string(hit_percent) : std::string("?"));
+                const std::string pct = hit_percent >= 0 ? std::to_string(hit_percent) : std::string("?");
+                if (crep < rep) {
+                    return trf("stats.cache_partial", lubancode::cli::FormatTokenCount(usage_stats.cache_read_tokens()),
+                               pct, std::to_string(rep - crep), std::to_string(rep));
+                }
+                return trf("stats.cache", lubancode::cli::FormatTokenCount(usage_stats.cache_read_tokens()), pct);
             }
             const auto server_enabled = context_tracker.server_prefix_caching();
             if (server_enabled.has_value() && !*server_enabled) {

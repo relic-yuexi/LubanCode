@@ -253,6 +253,34 @@ struct TurnUsageStats {
         return saw_usage;
     }
 
+    // ---- 缓存口径修(2026-09-03,第三棒 644 请求 83% 命中被打成"未报缓存")----
+    // all_cache_reported 是全有或全无:644 笔里一笔缺席,整行不认账。实测
+    // (轨迹 644 usage 事件全 cache_reported=true、28.3M cache_read,汇总行
+    // 却报"未报缓存")证明统计里混有缺席笔——大概率是不落轨迹事件的辅助
+    // 请求。显示层改为按报数说话:报了几笔、命中多少,如实打;n<m 时带
+    // "n/m 笔未报",不再一笔缺席全盘不认。
+    /// 报了 usage 的请求数(与 any_reported 同口径的可数版)。
+    std::size_t reported_count() const {
+        std::size_t n = 0;
+        for (const auto& step : steps) {
+            if (step.reported) {
+                ++n;
+            }
+        }
+        return n;
+    }
+
+    /// 报了 usage 且缓存明细字段在场的请求数。
+    std::size_t cache_reported_count() const {
+        std::size_t n = 0;
+        for (const auto& step : steps) {
+            if (step.reported && step.cache_reported) {
+                ++n;
+            }
+        }
+        return n;
+    }
+
     bool any_reported() const {
         for (const auto& step : steps) {
             if (step.reported) {
