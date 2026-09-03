@@ -80,6 +80,16 @@ struct StreamFooterState {
     bool working = false;             // true 时在输入框上方合成 Working 动画
     std::string working_label;
     long long working_seconds = 0;
+    // 扫光账(思考活动条扫光复活单):activity_beat 是 200ms 心拍的拍号
+    //(turn 活动条亮着时每次 Update 长一拍),working_highlight 是这一拍
+    // 该亮的字形下标(kActivityHighlightNone = 不亮)。只算"亮哪个字",
+    // 颜色落在行文本的 SGR 里,由 BuildNativeRowCells 折成格子属性——
+    // 行文本不动、光标不动、stdout 零字节。
+    std::size_t activity_beat = 0;
+    std::size_t working_highlight = kActivityHighlightNone;
+    // 扫光档位门:BeginStreamFooter 探一次(PlanInlineRepaint 的 native_rows)
+    // ——原生直写档才跑动画,VT 批/管道降级档维持静态蓝点+秒钟。
+    bool activity_sweep = false;
     // turn 级活动条(终端回合视觉收束单):认整个 turn,不认单次模型请求。
     // Spinner 那组 Start/Update/Stop 只在 turn_working 为假时才有绘制权
     //(正常聊天 turn 不再由 SpinnerBackend 掌活动条;/compact 等单次后台
@@ -217,10 +227,31 @@ std::vector<std::string> FooterUtf8Glyphs(const std::string& text) {
     return out;
 }
 
+// 活动行标签的现值:Stopping 态换词,换词只发生在置 cancel 那一拍。
+std::string WorkingLabelText(const StreamFooterState& f) {
+    return f.turn_working && f.turn_interrupt_requested ? tr("spinner.stopping") : f.working_label;
+}
+
+// 活动行这一拍亮哪个字(思考活动条扫光复活单):档位门(原生直写档)与
+// plain 主题门(reset 为空,亮不亮都无色差,白改指纹)任一不满足即不亮;
+// 高亮位由纯函数 WorkingHighlightGlyph 从拍号+标签格账算出,换词(思考中
+// ->Stopping)后按新标签重算同一拍号,不留越界旧位。
+std::size_t SweepHighlightLocked(const StreamFooterState& f) {
+    if (!f.activity_sweep || f.reset.empty()) {
+        return kActivityHighlightNone;
+    }
+    const std::vector<std::string> glyphs = FooterUtf8Glyphs(WorkingLabelText(f));
+    std::vector<int> widths;
+    widths.reserve(glyphs.size());
+    for (const std::string& glyph : glyphs) {
+        widths.push_back(static_cast<int>(DisplayWidthUtf8(glyph)));
+    }
+    return WorkingHighlightGlyph(f.activity_beat, widths);
+}
+
 std::string BuildFooterWorkingLine(const StreamFooterState& f, int width) {
     // Stopping 态标签换词(换词只发生在置 cancel 那一拍,不逐帧抖)。
-    const std::string label =
-        f.turn_working && f.turn_interrupt_requested ? tr("spinner.stopping") : f.working_label;
+    const std::string label = WorkingLabelText(f);
     const std::vector<std::string> glyphs = FooterUtf8Glyphs(label);
     const std::string timer = " (" + std::to_string(f.working_seconds) + "s)";
     const std::string cancel = tr("spinner.cancel_hint");
@@ -241,11 +272,13 @@ std::string BuildFooterWorkingLine(const StreamFooterState& f, int width) {
         if (used + glyph_width > label_room) {
             break;
         }
-        // 逐字扫光已撤(P0 止血,终端思考活动条单):亮字每 200ms 轮换一
-        // 位,活动行指纹便每拍都变,拖着实体光标在活动行与输入框之间来回
-        // 跳——这正是真机"约每秒闪五次"的那一拍。活动行动态只剩圆点颜
-        // 色(阶段/中断态)与秒钟,重画判据收敛到 TurnActivityRowChanged。
-        line += f.theme.stats + glyphs[i];
+        // 逐字扫光复活(思考活动条扫光复活单):亮字用 spinner 色压过
+        // stats 淡色,颜色落在行文本的 SGR 里,原生直写路上由 BuildNative
+        // RowCells 折成那(一/两)格的 16 色属性——整行直写、光标不动、
+        // 零 stdout 字节,一轮"扫光=每 200ms 搬光标"的病根不回来(VT 批
+        // /管道降级档被 activity_sweep 门挡在外面,压根不亮)。
+        const bool highlighted = i == f.working_highlight;
+        line += (highlighted ? f.theme.spinner : f.theme.stats) + glyphs[i];
         used += glyph_width;
     }
     const int left_used = prefix_width + used;
@@ -948,12 +981,17 @@ void BeginStreamFooter(const Theme& theme, bool enabled) {
     const platform::InlineRepaintPlan plan = platform::PlanInlineRepaint(probe);
     f.vt_batch = plan.vt_batch;
     f.sync_output = plan.sync_output;
+    // 扫光档(思考活动条扫光复活单):只在原生直写档开——VT 批内 CUP 会
+    // 搬光标,降级档不跑动画,维持静态蓝点+秒钟。
+    f.activity_sweep = plan.native_rows;
     f.composer = RenderState{};  // 忙时草稿从空开始(取回编辑除外,那由取回方写)
     f.echo.clear();   // 废弃镜像(见 StreamFooterState 迁移注记),归零防旧值漏读
     f.hints.clear();
     f.working = false;
     f.working_label.clear();
     f.working_seconds = 0;
+    f.activity_beat = 0;
+    f.working_highlight = kActivityHighlightNone;
     f.suspend_depth = 0;
     f.paint_depth = 0;
     f.theme = theme;
@@ -985,6 +1023,8 @@ void EndStreamFooter() {
     f.hint.clear();
     f.working = false;
     f.working_label.clear();
+    f.activity_beat = 0;
+    f.working_highlight = kActivityHighlightNone;
     // turn 活动条随 footer 一并收(这条路只在轮收口后走;正常路径由
     // EndTurnActivity 先熄,这里兜异常退场的底,不留幽灵 Working)。
     f.turn_working = false;
@@ -1010,6 +1050,8 @@ bool StartStreamFooterWorking(const std::string& label) {
     f.working = true;
     f.working_label = label;
     f.working_seconds = 0;
+    f.activity_beat = 0;
+    f.working_highlight = kActivityHighlightNone;  // Spinner 路不扫光:没人心拍喂拍号
     RedrawStreamFooterLocked();
     return true;
 }
@@ -1023,11 +1065,13 @@ void UpdateStreamFooterWorking(const std::string& label, long long elapsed_secon
     if (f.turn_working) {
         return;  // turn 活动条当家:Spinner 的帧不进(含它的"从 0 重数")
     }
-    // P0 止血:活动行只在秒数/标签/中断态变化时才值得重画(TurnActivityRow
-    // Changed 钉的合同)。同一秒的闲拍在这里就收手,不进布局与屏幕探测,
-    // 帧审计零新增落笔;指纹跳帧那道闸继续兜底。
+    // 活动行只在秒数/标签/中断态/高亮位变化时才值得重画(TurnActivityRow
+    // Changed 钉的合同;Spinner 这条路高亮位恒定不变,同秒闲拍照旧收手,
+    // 不进布局与屏幕探测,帧审计零新增落笔;指纹跳帧那道闸继续兜底)。
     if (!TurnActivityRowChanged(f.working_label, f.working_seconds, f.turn_interrupt_requested,
-                                label, elapsed_seconds, f.turn_interrupt_requested)) {
+                                f.working_highlight,
+                                label, elapsed_seconds, f.turn_interrupt_requested,
+                                f.working_highlight)) {
         return;
     }
     f.working_label = label;
@@ -1047,6 +1091,8 @@ void StopStreamFooterWorking() {
     f.working = false;
     f.working_label.clear();
     f.working_seconds = 0;
+    f.activity_beat = 0;
+    f.working_highlight = kActivityHighlightNone;
     RedrawStreamFooterLocked();
 }
 
@@ -1068,6 +1114,9 @@ void BeginTurnActivity(const std::string& label, std::int64_t started_at_ms) {
     f.working = true;
     f.working_label = label;
     f.working_seconds = 0;
+    // 扫光从拍 0 起跑(首帧亮第一字),此后 200ms 心跳一拍长一号。
+    f.activity_beat = 0;
+    f.working_highlight = SweepHighlightLocked(f);
     RedrawStreamFooterLocked();
 }
 
@@ -1077,16 +1126,22 @@ void UpdateTurnActivityElapsed(std::int64_t elapsed_seconds) {
     if (!f.enabled || !f.turn_working) {
         return;
     }
-    // P0 止血:活动行只在秒数/标签/中断态变化时才值得重画(TurnActivityRow
-    // Changed 钉的合同)。同一秒的闲拍(200ms 心跳每拍都来)在这里就收手,
-    // 不进布局与屏幕探测,帧审计零新增落笔;指纹跳帧那道闸继续兜底。
+    // 扫光拍(思考活动条扫光复活单):心跳 200ms 一拍,拍号长一号,高亮
+    // 位由纯函数从拍号+标签算出。判据在秒数/标签/中断三档上加了"高亮位
+    // 变化"一档(TurnActivityRowChanged)——同秒同位的拍(宽字双格的第
+    // 二拍、单字标签的每一拍)在这里就收手,帧账不进无变化帧;降级档高
+    // 亮位恒空,行为与止血一轮完全一致。
+    ++f.activity_beat;
+    const std::size_t highlight = SweepHighlightLocked(f);
     if (!TurnActivityRowChanged(f.working_label, f.working_seconds, f.turn_interrupt_requested,
+                                f.working_highlight,
                                 f.working_label, static_cast<long long>(elapsed_seconds),
-                                f.turn_interrupt_requested)) {
+                                f.turn_interrupt_requested, highlight)) {
         return;
     }
     f.working = true;
     f.working_seconds = static_cast<long long>(elapsed_seconds);
+    f.working_highlight = highlight;
     RedrawStreamFooterLocked();
 }
 
@@ -1097,6 +1152,9 @@ void SetTurnActivityInterruptRequested() {
         return;
     }
     f.turn_interrupt_requested = true;
+    // 换词(思考中->Stopping)后字形数变了:按新标签重算这一拍的高亮位,
+    // 不留越界旧位;重画由下面的老路走(中断态本身就是变化源)。
+    f.working_highlight = SweepHighlightLocked(f);
     RedrawStreamFooterLocked();
 }
 
@@ -1113,6 +1171,8 @@ long long EndTurnActivity() {
     f.working = false;
     f.working_label.clear();
     f.working_seconds = 0;
+    f.activity_beat = 0;
+    f.working_highlight = kActivityHighlightNone;
     RedrawStreamFooterLocked();
     return final_seconds;
 }
@@ -1171,8 +1231,9 @@ void StreamFooterHeartbeat::ThreadMain() {
                     SetTurnActivityInterruptRequested();
                     stopping_reported = true;
                 }
-                // 走字扫光已撤(P0 止血):心跳只报秒数,同一秒的拍在
-                // UpdateTurnActivityElapsed 里就收手,帧审计零新增落笔。
+                // 扫光复活(思考活动条扫光复活单):心跳只报秒数,拍号由
+                // UpdateTurnActivityElapsed 内部自长;同秒同高亮位的拍在
+                // 那里就收手,帧审计零新增落笔。
                 UpdateTurnActivityElapsed(elapsed);
                 if (mode_notice_changed) {
                     std::lock_guard<std::mutex> lock(StdoutWriteMutex());

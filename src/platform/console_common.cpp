@@ -17,9 +17,13 @@ InlineRepaintPlan PlanInlineRepaint(const StdoutConsoleProbe& probe) {
 #ifdef _WIN32
     plan.vt_batch = false;
     plan.sync_output = false;
+    // 原生行直写要真 console 的屏幕缓冲区;管道/重定向 GetConsoleScreen
+    // BufferInfo 失败,WriteNativeRow 恒 false,那档没有扫光(扫光复活单)。
+    plan.native_rows = probe.is_console;
 #else
     plan.vt_batch = probe.vt_enabled;
     plan.sync_output = probe.vt_enabled && probe.sync_output;
+    plan.native_rows = false;  // POSIX 无缓冲区直写 API,扫光档恒关
 #endif
     return plan;
 }

@@ -14,6 +14,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 
+#include <algorithm>
 #include <atomic>
 #include <fstream>
 #include <map>
@@ -132,8 +133,8 @@ std::string ReadRow(int row) {
 }
 
 std::string ReadAttributeSignature(int row) {
-    // (扫光撤除后暂无调用方,保留这只家伙什:后续若要验"同一秒内配色
-    // 零变化"的真机账,还用它刮行属性。)
+    // 扫光观察的家伙什(思考活动条扫光复活单):扫光只动格子颜色、不动
+    // 行文本,判据得刮行属性——高亮格在动,同一行的属性签名就会变。
     const int width = BufferWidth();
     std::vector<CHAR_INFO> cells(static_cast<std::size_t>(width));
     SMALL_RECT region{0, static_cast<SHORT>(row), static_cast<SHORT>(width - 1), static_cast<SHORT>(row)};
@@ -546,6 +547,24 @@ bool ParseAuditFields(const std::string& audit, const std::string& tag, long lon
     return *frames >= 0 && *bytes >= 0;
 }
 
+// 帧账行里的 paint= 档位(vt-sync|vt|native):字节恒 0 的闸只对原生直写
+// 档立(扫光复活单 G7 验收——动画回来 stdout 字节也不许多一个)。
+std::string AuditPaintTier(const std::string& audit, const std::string& tag) {
+    const std::string marker = "[frame-audit] " + tag;
+    const std::size_t at = audit.rfind(marker);
+    if (at == std::string::npos) {
+        return {};
+    }
+    const std::size_t nl = audit.find('\n', at);
+    const std::string line = audit.substr(at, nl == std::string::npos ? std::string::npos : nl - at);
+    const std::size_t paint = line.find("paint=");
+    if (paint == std::string::npos) {
+        return {};
+    }
+    const std::size_t end = line.find(' ', paint);
+    return line.substr(paint + 6, end == std::string::npos ? std::string::npos : end - paint - 6);
+}
+
 // G0 幕本体(开场问题已由调用方发出,子进程正跑第一个 turn):高频光标
 // 轨迹 + 活动行三连判。全跑与 g0 单跑共用。单 2 二轮把"轨迹无活动行落点"
 // 从 INFO 升格为硬判据:50ms 轮询抓不到批内毫秒中间态(8.1 假绿的教训),
@@ -580,6 +599,11 @@ void RunG0TrajectoryScene(const char* settle_needle = nullptr) {
     std::map<SHORT, DWORD> activity_row_first_tick;
     std::map<SHORT, DWORD> activity_row_last_tick;
     std::set<std::string> activity_texts;
+    // 扫光观察账(思考活动条扫光复活单):活动行文本只随秒数变,高亮格
+    // 走动只改属性——同一行的属性签名见过多态,扫光就是活的。真控制台
+    // 之外(管道)属性刮不出,签名恒空,判据自然不红。
+    std::set<std::string> activity_attr_signatures;
+    int activity_attr_samples = 0;
     bool working_and_composer_visible = false;
     bool working_cursor_ever_left_composer = false;
     const DWORD spinner_deadline = GetTickCount() + 10000;
@@ -594,6 +618,11 @@ void RunG0TrajectoryScene(const char* settle_needle = nullptr) {
             }
             activity_row_last_tick[row_key] = now;
             activity_texts.insert(ReadRow(spinner_row));
+            ++activity_attr_samples;
+            const std::string attr_sig = ReadAttributeSignature(spinner_row);
+            if (!attr_sig.empty()) {
+                activity_attr_signatures.insert(attr_sig);
+            }
         }
         if (spinner_row >= 0 && composer_row > spinner_row) {
             working_and_composer_visible = true;
@@ -649,12 +678,34 @@ void RunG0TrajectoryScene(const char* settle_needle = nullptr) {
         }
     }
     Check(activity_landings == 0,
-          "G0 高频轨迹:光标从未落在活动行(8.2 硬判据,实得 " +
+          "G0 高频轨迹:光标从未落在活动行(8.2 硬判据,扫光复活后仍不许动,实得 " +
               std::to_string(activity_landings) +
               " 次落点;VT 批内 CUP 的毫秒中间态在 50ms 轮询下漏检,在此现形)");
     Check(activity_texts.size() >= 2,
           "G0 Working:秒钟走动,活动行文本至少变过两拍(实得 " +
-              std::to_string(activity_texts.size()) + " 种,扫光已撤不验配色轮换)");
+              std::to_string(activity_texts.size()) + " 种)");
+    // 扫光复活判据(思考活动条扫光复活单):文本不动、只挪高亮格——属性
+    // 签名至少两态才算扫光活着。按"活动行可见时长"立门(轮询每拍自身
+    // 要扫 400 行,拍数不稳):可见 >=1.2s(扫光至少换过两格)才硬判;
+    // 可见过短(快速收场的真后端 turn)降为 INFO,不给全幕添假红。
+    DWORD activity_visible_ms = 0;
+    for (const auto& [row_key, last_tick] : activity_row_last_tick) {
+        const auto first_tick = activity_row_first_tick.find(row_key);
+        if (first_tick != activity_row_first_tick.end()) {
+            activity_visible_ms = (std::max)(activity_visible_ms, last_tick - first_tick->second);
+        }
+    }
+    if (activity_visible_ms >= 1200 && !activity_attr_signatures.empty()) {
+        Check(activity_attr_signatures.size() >= 2,
+              "G0 扫光复活:活动行属性签名至少两态(高亮格在动,实得 " +
+                  std::to_string(activity_attr_signatures.size()) + " 态,可见 " +
+                  std::to_string(activity_visible_ms) + "ms)");
+    } else {
+        Log("INFO: G0 扫光观察窗口不足(可见 " + std::to_string(activity_visible_ms) +
+            "ms),跳过属性签名硬判据");
+    }
+    Log("INFO: G0 活动行属性签名 " + std::to_string(activity_attr_signatures.size()) + " 态,采样 " +
+        std::to_string(activity_attr_samples) + " 拍");
     Check(working_and_composer_visible,
           "G0 Working 与输入框同帧可见,输入框不再被 spinner 挂起");
     Check(!working_cursor_ever_left_composer,
@@ -841,13 +892,23 @@ void RunG7AuditScene(const std::wstring& exe_path, const std::wstring& workdir, 
         const bool parsed7 = ParseAuditFields(audit_text7, "busy_footer", &frames7, &bytes7);
         Check(parsed7, "G7 帧账行落在 stderr 日志");
         if (parsed7) {
-            // 帽:180 枚 delta,只有行跨越(~30)与秒针换帧付账;旧路是每笔
-            // delta 一整框,180 帧起、字节翻几番。
+            // 帽:180 枚 delta,只有行跨越(~30)、秒针换帧与扫光拍(思考中
+            // 三个宽字,至多每秒 3 落)付账;旧路是每笔 delta 一整框,180 帧
+            // 起、字节翻几番。扫光复活后帧数从每秒 1 帧升到至多每秒 5 帧
+            //(200ms 拍),帽仍按全场总账立。
             Check(frames7 <= 96, "G7 长正文:忙路脚注帧数有帽(实得 " + std::to_string(frames7) +
                                       " 帧,旧路 180+ 起步)");
             Check(bytes7 <= 64 * 1024, "G7 长正文:忙路脚注字节有帽(实得 " +
                                            std::to_string(bytes7) + " 字节)");
-            Log("INFO: G7 busy_footer frames=" + std::to_string(frames7) + " bytes=" + std::to_string(bytes7));
+            // 原生直写档的字节恒 0 闸(扫光复活单):动画只动格子属性,一个
+            // stdout 字节都不许多;VT 批档字节照旧有帽不恒 0。
+            const std::string tier7 = AuditPaintTier(audit_text7, "busy_footer");
+            if (tier7 == "native") {
+                Check(bytes7 == 0, "G7 原生直写档:扫光复活后 stdout 字节恒 0(实得 " +
+                                       std::to_string(bytes7) + " 字节)");
+            }
+            Log("INFO: G7 busy_footer paint=" + tier7 + " frames=" + std::to_string(frames7) +
+                " bytes=" + std::to_string(bytes7));
             // audit 文件保留不删(paint= 档位是光标跳行取证的锚点,单 2 二轮要回看)。
         }
     } else {
@@ -940,9 +1001,10 @@ int wmain(int argc, wchar_t** argv) {
     SendText("请务必先调用 read_file 读取 README.md 的前 20 行,再用大约 200 字介绍一下这个项目,"
              "分两三段说,不用标题。");
     SendKey(VK_RETURN, L'\r', 0);
-    // Working/思考中(终端思考活动条单后的新合同):逐字扫光已撤,活动行
-    // 动态只剩秒钟一跳——文本随秒数变,而物理光标全程钉在输入框,任何
-    // 采样点都不许停在活动行(真机"约每秒闪五次跳光标"的直接回归闸)。
+    // Working/思考中(终端思考活动条单后的新合同,扫光复活单再续):活动行
+    // 扫光复活——高亮格 200ms 走一位,但那只动格子属性;文本随秒数变,而
+    // 物理光标全程钉在输入框,任何采样点都不许停在活动行(真机"约每秒闪
+    // 五次跳光标"的直接回归闸——扫光回来光标也不许动)。
     // 单 2 二轮取证:上面的 50ms 轮询抓不到毫秒级中间态——真机肉眼见
     // "光标落到蓝球左边"而轮询采样全绿。补一条紧密循环光标轨迹线程
     //(只调 GetConsoleScreenBufferInfo,几十 kHz),buffer 光标若在帧序列
