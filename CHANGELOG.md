@@ -2,6 +2,11 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.189] - 2026-09-03
+
+- **统一原子写（审计存储线）。** 全仓十余套私房原子写收进 `platform/atomic_write`：唯一临时名（pid+序号，防并发互踩）、同目录写入、逐级查错、平台原子替换、失败清理与结构化错误；明分 AtomicVisibility 与 ProcessCrashDurability 两档合同。**Gateway"先删正式文件再换名"的窗口与 pairing 账"每次保存先删正式账"的常开窗口一并封死**——Windows 再不许靠删正式文件换成功。五批迁移（Gateway→事实账→派生缓存→扫尾）各自验证，"只许首建"与 append 型两处具名分叉不硬并。
+- **编码与摘要合一（审计编码/摘要线）。** WebFetch 私有 UTF-8 解码器退场，网络正文统一过 `platform::SanitizeExternalText()`（坏字节同一样本经 web/MCP/search 同一替换合同）；SHA-256 两本、Base64 六份（含顺手收的第六处字母表循环）各收成 `platform` 唯一内核，字节序与十六进制合同冻结，存量 key 零失配。候选两组凭向量证同后收口：路径比较键三实现 79 断言证同抽 `PathComparisonKey`，run_command 私有 env 读取并入平台口。rg 证明旧实现零孤尾。375/375 全绿——审计单 14 批全清。
+
 ## [v0.26.188] - 2026-09-03
 
 - **Hook 回合身份收口（审计身份线 P0）。** 此前 Hook 的 `turn_id` 另造一本账：`NextHookRunId()` 生成的 `hookrun_*` 填进 turn_id 字段代班，`UserPromptSubmit` 还可能吃到上一轮遗留或 `unassigned`——Hook 记录与 trajectory/tool trace 按 turn_id 联表必裂账。现每轮只 mint 一枚 canonical turn id（在 UserPromptSubmit 之前定下，宿主 trace 号或发号局现发），同一枚交 Hook context/事件流/trace hub/轨迹桥；`NextHookRunId()` 只生 hook_run_id。集成测试先红（旧码 21 断言炸）后绿（四景钉死：五类 Hook 共用一号、两轮不继承、阻断景零请求零 TurnStarted、one-shot 自 mint）。
