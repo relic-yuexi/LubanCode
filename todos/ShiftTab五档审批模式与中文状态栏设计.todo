@@ -1,12 +1,14 @@
 # Shift+Tab 五档审批模式与中文状态栏设计
 
-- 状态：待实现
+- 状态：五档权限已实现；0.26.181 真机发现底栏资料丢失与快捷键常驻回归，待修
 - 日期：2026-09-03
+- 二次现场：2026-09-03，`lubancode 0.26.181`（提交 `fac421b4`）
 - 级别：P1（权限语义与终端可见性）
 - 类型：LubanCode 产品设计（交互审批档位）
 - 现场版本：`lubancode 0.26.175`
-- 范围：终端状态行与 6 秒切档说明、会话级审批档、工具权限裁定、子代理权限收窄、Hook/Peer/配置/文档与测试
+- 范围：终端状态资料、场景快捷键与 6 秒切档说明、会话级审批档、工具权限裁定、子代理权限收窄、Hook/Peer/配置/文档与测试
 - 现场截图：默认档显示“确认 shift+tab 切换到 auto 模式”；中英文混排，且旧 `auto` 一词同时背了“接受编辑”和“安全命令自动放行”两层意思
+- 二次截图：0.26.181 把 `? 键位 · Ctrl+R 搜历史 · Ctrl+O 展开/收起 · Ctrl+G 编辑器` 整行常驻，却把模型、推理档、cwd、分支、context 与 token 用量从输入框下方挤没了
 - 不在本单：Plan 模式能力闸、操作系统沙箱、工具确认菜单样式、`--yes` 的全放语义、工具自身业务校验
 
 ## 一、要改成什么
@@ -63,7 +65,7 @@ Don't Ask      Shift+Tab to Default
 
 ### 2.1 切档后冒一行说明，约 6 秒收走
 
-每次由用户按 `Shift+Tab` 切档，常驻档位行上面立刻多出一行黄色说明。它只讲刚切入的当前档，不讲下一档。约 6 秒后自动消失，常驻档位行不动，输入草稿与光标也不动。
+每次由用户按 `Shift+Tab` 切档，常驻档位行上方的辅助行左侧立刻亮出黄色说明。辅助行右侧仍是 `? 键位`。说明只讲刚切入的当前档，不讲下一档。约 6 秒后左侧自动收空；右侧 `? 键位`、常驻档位行、输入草稿与光标都不动。
 
 中文逐档文案：
 
@@ -87,16 +89,95 @@ Don't Ask: runs pre-approved operations and denies anything that would need a pr
 
 交互合同：
 
-- 说明行一律用黄色；不要跟着当前档改成紫、红或橙。当前档自身仍按第二节配色。
+- 说明文字一律用黄色；不要跟着当前档改成紫、红或橙。当前档自身仍按第二节配色。
 - 显示时长定为 `6000ms`，用 `steady_clock` 计时，不拿系统墙钟算。
 - 连按切档时不排队、不叠行；立刻换成最新档说明，并从最后一次按键重新计满 6 秒。
 - 只响应用户当场切档。程序启动、环境变量、项目配置、会话恢复设定起手档时不弹说明，免得每次开场都多占一行。
 - 空闲 composer 与流式 footer 都要显示；两条路共用同一份会话级 `ModeNoticeState`。
 - 6 秒到点后须主动触发一次重画，不能等用户再敲键才消失。复用空闲 100ms tick 与流式 footer 心跳，不另起一根只管 sleep 的绘制线程。
-- 说明只占一个物理行。窄屏按显示宽截断，不软换行，不切坏 UTF-8/ANSI。
+- 辅助行只占一个物理行：左侧放切档说明，右侧放 `? 键位`。窄屏先保右侧入口，再截左侧说明；不软换行，不切坏 UTF-8/ANSI。
 - 高度吃紧时，先舍 slash/search transient、Agent 坞与帮助层，再舍这行；composer、框线、常驻档位行永远排在它前头。
 
-不要复用现有 `transient_rows`。它在 `BottomChrome` 里垫最底，位置不对，还与 slash 补全、历史搜索共用。给底栏模型添专位 `mode_notice_rows`，固定摆在常驻 `status_rows` 紧上方；帧高、指纹、revision、resize 恢复与可选行裁剪都把它算进去。
+不要复用现有 `transient_rows`。它在 `BottomChrome` 里垫最底，位置不对，还与 slash 补全、历史搜索共用。底栏只留一枚 `assist_row`：左槽接 `ModeNoticeState`，右槽接 `? 键位`。帧高、指纹、revision、resize 恢复与可选行裁剪都把它算进去。
+
+### 2.2 0.26.181 二次现场：常驻资料与场景快捷键各归其位
+
+0.26.181 的真实画面如下：
+
+```text
+? 键位 · Ctrl+R 搜历史 · Ctrl+O 展开/收起 · Ctrl+G 编辑器
+自动模式：文件编辑与安全命令自动允许；其余操作仍会询问。
+自动模式   Shift+Tab 切换到不询问                         4 skills
+──────────────────────────────────────────────────────────────
+>
+──────────────────────────────────────────────────────────────
+```
+
+这画法有两错：
+
+1. `BuildComposerModeLine()` 取代了原 `BuildStatusLine()`，只留下档位与 skills。`StatusDataSlot()` 里模型、cwd、Git 分支、context、tokens 等数据仍在，却没人画，属于显示回归，不是数据没采到。
+2. `shortcut_rows` 把四枚键当成空 composer 的固定广告。可 `Ctrl+O`、`Ctrl+G` 都有明确适用对象；无工具、无 thinking、无长草稿时照样摆出来，只会占行、误导。
+
+修正后的常态布局：
+
+```text
+                                                    ? 键位
+自动模式   Shift+Tab 切换到不询问                 4 skills
+──────────────────────────────────────────────────────────────
+>
+──────────────────────────────────────────────────────────────
+gpt-5.6-sol · effort high · D:\lubancode · main · context 18% · 36k/200k
+```
+
+切档后 6 秒内，仍只多用辅助行左槽：
+
+```text
+自动模式：文件编辑与安全命令自动允许；其余操作仍会询问。    ? 键位
+自动模式   Shift+Tab 切换到不询问                         4 skills
+──────────────────────────────────────────────────────────────
+>
+──────────────────────────────────────────────────────────────
+gpt-5.6-sol · effort high · D:\lubancode · main · context 18% · 36k/200k
+```
+
+四类信息分家：
+
+| 信息 | 放哪 | 何时显示 |
+|---|---|---|
+| `? 键位` | 档位/skills 上一行最右端 | 交互 composer 在场便显示；帮助层、搜索层等接管画面时随场景收起 |
+| 档位 + `Shift+Tab` | 输入框上方常驻行左端 | 常驻 |
+| skills 数 | 同一行右端 | 常驻 |
+| 模型、effort、cwd、branch、context、tokens | 输入框下横线下面的资料行 | 按 `status_panel.items` 配置常驻；空值字段自行略过 |
+
+资料行仍须吃 `status_panel.items` 与 `separator`。只把 `permission_mode` 从这行投影出去，交给上方档位行；其余配置项照原顺序显示。`REC`、worktree、tools、Plan、goal/loop、后台任务等强制状态段也不得随改版丢失。窄屏沿用现有字段裁剪规矩；不得为了保一枚快捷键，先把模型或 token 整行撤掉。
+
+不要保留 `shortcut_rows` 这本常驻总账。整份键位表已经有 `?` 入口；其余快捷键只在有用时，跟着对象露面。
+
+### 2.3 三枚快捷键分别在什么场景出现
+
+#### `Ctrl+O`：跟工具或 thinking 条目走
+
+- 没有可展开内容时不显示。
+- thinking 正在流式且有正文快照，或收定后折成一行时，在该 thinking 条目标题尾部写 `Ctrl+O 展开`；展开后改成 `Ctrl+O 收起`。
+- 工具条目藏有完整参数、输出或 diff 时，也在该工具条目标题/摘要尾部写 `Ctrl+O 展开`；详细态改成 `Ctrl+O 收起`。
+- 它不进常驻底栏，也不与 `? 键位` 抢一行。多个工具同时在场，各条目只写自己的可展开状态；全局按键仍可一次切换画法。
+- 空 thinking、无详情工具、纯正文回答都不挂这枚提示。
+
+#### `Ctrl+G`：长草稿出现后，贴着输入框动态提示
+
+- 空草稿、普通一两行短句不显示。
+- 满足任一条件便显示：草稿含多行且达到 3 个物理行；软换行后达到 4 个物理行；含大段粘贴折叠 token。判定吃 `LayoutComposerRows()` 的实际布局，不按 UTF-8 字节数猜长短。
+- 提示放在输入框下横线与常驻资料行之间：`Ctrl+G 用编辑器编辑长文本`。启动外部编辑器时画面由编辑器流程接管；读回后按新草稿长度重算，变短便收走。
+- 没配置可用编辑器，或当前是搜索、确认菜单、焦点查看等模态场景，不显示这枚提示。
+- 它是一条动态建议，不得顶掉模型/context/token 资料行。
+
+#### `Ctrl+R`：只在历史搜索场景里显示
+
+- 普通空闲输入框不常驻 `Ctrl+R 搜历史`。入口收进 `?` 展开的 Composer 键位表。
+- 用户按下 `Ctrl+R`，且确有可读提问历史，历史搜索层打开；这时首行显示 `Ctrl+R 更早`、范围轮换、接受、提交与取消等搜索场景按键。
+- 搜索层里 `Ctrl+R` 的语义是“移到更早一条”，不是重复写“搜历史”。退出搜索，整组提示一并收走。
+- 没有历史时不铺空面板；短暂提示“没有可搜索的提问历史”，随后回原 composer，草稿不动。
+- 回合运行中、工具确认中、外部编辑器打开时不宣称 `Ctrl+R` 可用；对应状态机不接便不显示。
 
 ## 三、五档到底做什么
 
@@ -255,10 +336,12 @@ effective.may_prompt = parent.may_prompt && child.may_prompt
 源码落点：
 
 - `src/cli/line_editor.*`：枚举、标签、轮转、会话级原子状态；
-- `src/cli/console_input.cpp`：`BuildComposerModeLine()` 当前档/下一档与颜色；
+- `src/cli/console_input.cpp`：`BuildComposerModeLine()` 当前档/下一档与颜色；`BuildStatusLine()`/`BuildStatusPanelSegments()` 恢复模型、消耗等资料投影；
 - `src/cli/console_input_turn_listener.cpp`：流式中切档，并刷新 6 秒说明期限；
-- `src/cli/bottom_chrome.*`：`mode_notice_rows` 的固定位置、高度、指纹与窄屏裁剪；
-- `src/cli/console_input_composer.cpp`、`console_input_stream_footer.cpp`：空闲/流式两路读取同一份 `ModeNoticeState`，到期重画；
+- `src/cli/bottom_chrome.*`：删常驻 `shortcut_rows`，落 `assist_row`、长草稿 context row、下方资料行的固定位置、高度、指纹与窄屏裁剪；
+- `src/cli/console_input_composer.cpp`、`console_input_stream_footer.cpp`：空闲/流式两路读取同一份 `ModeNoticeState`，到期重画；按场景投影 `?`、`Ctrl+G`，不得常驻 `Ctrl+R/O/G` 总览；
+- `src/cli/history_search.*`：`Ctrl+R` 只在搜索层首行承担“更早一条”等场景提示；
+- `src/cli/thinking_preview.*`、`transcript.*`、工具条目渲染：`Ctrl+O` 跟有详情可展开的对象走；
 - `src/cli/i18n.cpp`：中英文标签与句式；
 - `src/cli/theme.*`：四枚模式语义色；
 - `src/runtime/turn_runtime.*`：Allow / Ask / Deny 三态裁定；
@@ -292,6 +375,14 @@ ModePresentation PresentApprovalMode(ApprovalMode mode, Language language);
 - [ ] dark/light/plain 三主题都测；plain 不得吐 ANSI。
 - [ ] 窄屏分别卡在当前标签、提示、说明、右端 skills 四处，UTF-8 与 ANSI 都不截坏；矮屏按既定优先级舍行。
 - [ ] 空闲、流式中、排队输入、焦点态各跑切档；焦点态内 Shift+Tab 仍按现合同往新条目走，不切审批档。
+- [ ] 回归 0.26.181 二次截图：输入框下方仍有 model/effort/cwd/branch/context/tokens；`BuildComposerModeLine()` 不得替代整份资料行。
+- [ ] `status_panel.items` 重排/隐藏仍生效；只剥离 `permission_mode`，强制状态段与其余资料一项不少。
+- [ ] `? 键位` 在档位/skills 上一行居右；切档说明占同一行左槽，6 秒到期只清左槽。
+- [ ] 空 composer 不再常驻 `Ctrl+R/O/G` 总览；源码与帧账里删除 `shortcut_rows`，不得换个名字原样搬回。
+- [ ] thinking/工具有可展开详情才挂 `Ctrl+O 展开|收起`；空 thinking、无详情工具、纯正文不挂。
+- [ ] 长草稿阈值用实际物理行测：2 行不挂，3 行多行稿挂，单行软换到 4 行挂，大段粘贴 token 挂；草稿缩短后收起。
+- [ ] `Ctrl+G` 动态提示位于下横线与资料行之间；出现/消失不顶掉资料，不挪物理光标。
+- [ ] `Ctrl+R` 入口只在 `?` 全表；搜索打开后首行显示搜索态键位，退出全收；无历史只出短提示，不留空面板。
 
 ### 9.2 权限矩阵
 
@@ -313,8 +404,11 @@ ModePresentation PresentApprovalMode(ApprovalMode mode, Language language);
 
 ### 9.4 真终端
 
+- [ ] 先复现并留存 0.26.181 截图：常驻四键整行、下方模型/消耗资料缺失；标成修前证据。
+- [ ] 修后空闲画面：右端只见 `? 键位` 与 `skills`，下方看得见模型、context、tokens；不再常驻 `Ctrl+R/O/G`。
 - [ ] Windows Terminal 中从默认连按五次，逐帧核对标签、次序、颜色；每次上方黄字换成新档说明，不叠行。
 - [ ] 停在 YOLO，录下“YOLO：允许所有工具，无需确认。”约 6 秒后自行消失；全程核对草稿不丢、光标不跳。
+- [ ] 分别造有详情工具、thinking、长草稿、历史搜索四景；只在对应一景看见 `Ctrl+O`、`Ctrl+G`、`Ctrl+R` 场景提示。
 - [ ] 在每一档分别触发 `edit_file`、安全命令、危险命令；保留弹框/免问/拒绝三类现场证据。
 - [ ] 切到不询问后跑一枚未预授权工具，确认不弹菜单、不执行，模型收到如实拒绝。
 - [ ] 切回默认后再跑同一工具，确认菜单恢复。
@@ -323,6 +417,9 @@ ModePresentation PresentApprovalMode(ApprovalMode mode, Language language);
 
 ## 十、实施批次
 
+- [ ] P0 回归修复：恢复输入框下方 `status_panel` 资料行；默认配置至少看见模型、cwd、分支、context 与有实测值时的 tokens。
+- [ ] P0 布局修复：删除常驻 `shortcut_rows`；辅助行改成左侧切档说明、右侧 `? 键位`，档位行右侧仍放 skills。
+- [ ] P1 场景提示：`Ctrl+O` 归 thinking/工具条目，`Ctrl+G` 归长草稿，`Ctrl+R` 归历史搜索层。
 - [ ] P0：先把权限核改成 `Allow / Ask / Deny`，落 `DontAsk`，打通终端、Workflow、Agent、App Server；无 UI 漏网。
 - [x] P0：以 `ApprovalClass` 取代文件工具名硬编码，钉住接受编辑与自动模式差别。
 - [ ] P1：补五档枚举、轮转、i18n、颜色、状态行与 6 秒切档说明；旧三值兼容读取。
@@ -337,18 +434,23 @@ ModePresentation PresentApprovalMode(ApprovalMode mode, Language language);
 
 1. 状态行五档按指定次序循环；默认态只提示下一档，后四档亮当前档名；中英文自然，颜色与当前风险相合。
 2. 每次用户切档，上方黄色说明立即换成当前档文案，约 6 秒自行收走；不叠行，不惊动草稿与光标。
-3. `接受编辑` 与 `自动模式` 真有行为差别，不只是换名换色。
-4. `不询问` 遇未授权需确认工具，零询问、零副作用、如实拒绝。
-5. `YOLO`、`--yes`、旧 `auto/confirm/yolo` 配置不暗改既有行为。
-6. 子代理不能借新档位放宽父权限，也不会在父“不询问”时偷弹审批。
-7. 终端、后台、Workflow、one-shot、App Server 共用一颗裁定脑子。
-8. 单测、全量 CTest、真终端三道证据齐全；只过前两道不得标“已实现”。
+3. `? 键位` 固定居于 skills 上方最右端；空闲主界面不常驻 `Ctrl+R/O/G`。
+4. 模型、effort、cwd、分支、context 与 token 用量回到输入框下方；配置过的有效字段不丢。
+5. `Ctrl+O`、`Ctrl+G`、`Ctrl+R` 只在各自对象/场景出现，场景一散便收走。
+6. `接受编辑` 与 `自动模式` 真有行为差别，不只是换名换色。
+7. `不询问` 遇未授权需确认工具，零询问、零副作用、如实拒绝。
+8. `YOLO`、`--yes`、旧 `auto/confirm/yolo` 配置不暗改既有行为。
+9. 子代理不能借新档位放宽父权限，也不会在父“不询问”时偷弹审批。
+10. 终端、后台、Workflow、one-shot、App Server 共用一颗裁定脑子。
+11. 单测、全量 CTest、真终端三道证据齐全；只过前两道不得标“已实现”。
 
 ## 十二、不做什么
 
 - 不把“不询问”做成“所有工具都拒绝”；无需确认或已明确放行的仍可执行。
 - 不把“不询问”做成“问也不问就执行”；那是 YOLO。
 - 不把“接受编辑”偷换成旧 auto；安全命令在这一档仍要问。
+- 不拿常驻快捷键广告换掉模型、context、token 等运行资料。
+- 不在空闲主界面摆 `Ctrl+R/O/G`；没有对象的快捷键提示就是噪声。
 - 不用颜色代替文字，也不让 plain 主题失去档位差别。
 - 不在 CLI、Runtime、Agent 三处各写一份略有不同的五档逻辑。
 - 不把 Plan 硬闸并进审批档；Plan 是能力边界，五档越不过。
