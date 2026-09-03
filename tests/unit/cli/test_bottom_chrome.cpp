@@ -20,6 +20,7 @@
 #include "cli/console_input.hpp"          // SetStatusLineData(资料行数据源)
 #include "cli/console_input_internal.hpp"  // BoxChrome/BuildComposerModeLine/BuildStatusLine
 #include "cli/i18n.hpp"
+#include "cli/keymap.hpp"  // ActiveKeymap/BuildSceneHelpLines(改绑跟脚合同)
 #include "cli/theme.hpp"
 
 using namespace lubancode::cli;
@@ -1060,4 +1061,48 @@ TEST_CASE("装配器提示类型化:面板 0/1/多行恒留输入框下,不随�
     const BottomChromeModel model = BuildBottomChromeModel(plain_scene);
     CHECK_FALSE(model.assist_row.empty());
     CHECK(model.transient_rows.empty());
+}
+
+// ---------------------------------------------------------------------------
+// 快捷键提示的 keymap 驱动(收口审计单 §二 P2):帮助入口只认
+// ChordFor(HelpShow)与一枚标签——改绑后速览行(空闲)、帮助层、搜索层
+// 一齐跟脚;运行中没有写死 "?" 的兜底(input.shortcuts_hint 兜底生产路
+// 连同翻译 key 一并删除,tr 查不到 key 时回退 key 本身)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("帮助入口改绑跟脚:速览右槽与帮助层同拍换键,流式兜底已死") {
+    SetLanguage("zh-CN");
+    auto& active = keymap::ActiveKeymap();
+    std::string error;
+    // 改绑 help.show:速览右槽与帮助层表头/表尾一齐换 Alt+H,不再写死 ?。
+    REQUIRE(active.SetBinding(keymap::ActionId::HelpShow, *keymap::ParseKeyChord("alt+h"), error));
+    const ChromeAssistRow assist = BuildComposerAssistRow();
+    CHECK(assist.right.find("Alt+H") != std::string::npos);
+    CHECK(assist.right.find("?") == std::string::npos);
+    const std::vector<std::string> help_rows = keymap::BuildSceneHelpLines(active);
+    CHECK(help_rows.front().find("Alt+H") != std::string::npos);
+    CHECK(help_rows.back().find("Alt+H") != std::string::npos);
+    // 改绑 chat.search_history:速览左槽跟脚换键,旧和弦不再出现。
+    REQUIRE(active.SetBinding(keymap::ActionId::ChatSearchHistory, *keymap::ParseKeyChord("ctrl+f"),
+                              error));
+    const ChromeAssistRow rebound = BuildComposerAssistRow();
+    CHECK(rebound.left.find("Ctrl+F") != std::string::npos);
+    CHECK(rebound.left.find("Ctrl+R") == std::string::npos);
+    // 运行中:同一枚改绑下,忙帧不出现任何写死的帮助提示(没有兜底路)。
+    BottomChromeScene busy_scene = CommonScene(ComposerState({U""}, 0, 0));
+    busy_scene.mode = ComposerMode::BusyQueue;
+    busy_scene.placeholder = "键入并回车排队";
+    busy_scene.activity_rows = {"• Working (3s)"};
+    const BottomChromeLayout busy =
+        BuildBottomChromeLayout(BuildBottomChromeModel(busy_scene), Theme{}, 60);
+    for (const auto& row : busy.frame.rows) {
+        CHECK(row.text.find("查看快捷键") == std::string::npos);
+        CHECK(row.text.find("Alt+H") == std::string::npos);
+    }
+    // 收场:两枚改绑复位,别把活动表污染给别的测试。
+    REQUIRE(active.ResetBinding(keymap::ActionId::HelpShow, error));
+    REQUIRE(active.ResetBinding(keymap::ActionId::ChatSearchHistory, error));
+    // input.shortcuts_hint 兜底生产路已删:翻译表里不得再有这枚 key
+    //(tr 查不到时回退 key 本身)。留着它就是"另一条翻译硬补"的孤尾。
+    CHECK(tr("input.shortcuts_hint") == "input.shortcuts_hint");
 }

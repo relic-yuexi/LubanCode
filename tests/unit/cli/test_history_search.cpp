@@ -13,6 +13,7 @@
 #include <string>
 
 #include "cli/history_search.hpp"
+#include "cli/keymap.hpp"  // ActiveKeymap(表头键位反查与改绑跟脚)
 
 using namespace lubancode::cli;
 
@@ -252,4 +253,33 @@ TEST_CASE("渲染行:首行带范围,选中前缀,无命中的空行") {
 
     // 高亮色串透传(plain 主题传空串,行内无 ANSI)。
     CHECK(lines[0].find("\x1b[") == std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 表头键位串(收口审计单 §二 P2):走唯一的 BuildKeyHints 格式化口——与
+// composer 速览左槽同一把尺,改绑后表头跟脚,未绑定整段略过。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("表头键位串:默认键齐备,改绑后跟脚") {
+    HistorySearchSession session;
+    session.Open(MakeDataset(), HistorySearchScope::Session);
+    session.Rerun("");
+
+    const std::vector<std::string> lines = BuildHistorySearchLines(session, "", 100, "", "");
+    REQUIRE(lines.size() >= 2);
+    // 默认键:Ctrl+R 再往早 / Ctrl+W 换范围 / Tab 接受 / Enter 直接发送 /
+    // Ctrl+C 取消——五枚全在表头(键位反查,不写死)。
+    CHECK(lines[0].find("Ctrl+R") != std::string::npos);
+    CHECK(lines[0].find("Tab") != std::string::npos);
+    CHECK(lines[0].find("Enter") != std::string::npos);
+    CHECK(lines[0].find("Ctrl+C") != std::string::npos);
+
+    // 改绑 search.scope_cycle:表头跟脚换新和弦,旧和弦不再出现。
+    auto& active = keymap::ActiveKeymap();
+    std::string error;
+    REQUIRE(active.SetBinding(keymap::ActionId::SearchScopeCycle, *keymap::ParseKeyChord("alt+j"),
+                              error));
+    const std::vector<std::string> rebound = BuildHistorySearchLines(session, "", 100, "", "");
+    CHECK(rebound[0].find("Alt+J") != std::string::npos);
+    REQUIRE(active.ResetBinding(keymap::ActionId::SearchScopeCycle, error));
 }

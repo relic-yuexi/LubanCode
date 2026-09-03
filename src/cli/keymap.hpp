@@ -25,6 +25,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
 
 #include "platform/console.hpp"
@@ -208,6 +209,15 @@ private:
 // (Streaming)不属空闲场景,不进表;未绑键的动作和弦列记 "-"。
 // 宽度自适应不在这里做——行交给 chrome 布局按屏宽截断。
 std::vector<std::string> BuildSceneHelpLines(const Keymap& keymap);
+
+// 一组 (ActionId, 标签 key) -> "和弦 标签 · 和弦 标签"(收口审计单 §二
+// P2):快捷键提示的唯一格式化口——composer 速览左槽、历史搜索表头共用,
+// 不再各写一只近乎相同的内联 lambda。未绑定动作(如没配默认键的
+// composer.stash)整段略过,不留下孤单分隔符;和弦文本走 FormatKeyChord
+// 同一把尺,标签走 i18n(中文与英文只换标签,不换动作来源)。一组全空
+//(列表空或全部未绑)给空串。
+std::string BuildKeyHints(const Keymap& keymap,
+                          const std::vector<std::pair<ActionId, const char*>>& actions);
 
 // ---------------------------------------------------------------------------
 // 进程级活动表:终端层/面板/帮助共用一份。启动时(cli_app)调

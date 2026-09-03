@@ -11,6 +11,7 @@
 #include <string>
 #include <vector>
 
+#include "cli/i18n.hpp"  // SetLanguage(标签语言钉住,断言不跟系统走)
 #include "cli/keymap.hpp"
 
 using namespace lubancode::cli::keymap;
@@ -318,4 +319,36 @@ TEST_CASE("场景帮助表:改绑 help.show 后表头表尾写新和弦,不再�
             CHECK(lines[i].find("Alt+H") != std::string::npos);
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// BuildKeyHints(收口审计单 §二 P2):快捷键提示的唯一格式化口——composer
+// 速览左槽与历史搜索表头共用。未绑定动作整段略过(不留下孤单分隔符),
+// 和弦文本与分隔符只有一把尺。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("BuildKeyHints: 已绑定逐段拼接,未绑定整段略过") {
+    lubancode::cli::SetLanguage("zh-CN");
+    const Keymap map;
+    // composer.stash 没配默认键(留给用户),夹在中间也不留下孤单分隔符:
+    // 两段实键 + 恰一枚分隔符,整串一字不差。
+    const std::string hints = BuildKeyHints(
+        map, {{ActionId::ChatSearchHistory, "hint.keys.search_history"},
+              {ActionId::ComposerStash, "hint.keys.editor"},
+              {ActionId::ChatExternalEditor, "hint.keys.editor"}});
+    CHECK(hints == "Ctrl+R 搜历史 · Ctrl+G 编辑器");
+    // 全部未绑:空串,不产任何分隔符。
+    CHECK(BuildKeyHints(map, {{ActionId::ComposerStash, "hint.keys.editor"}}).empty());
+    CHECK(BuildKeyHints(map, {}).empty());
+}
+
+TEST_CASE("BuildKeyHints: 改绑跟脚——本地表换和弦,文本同拍") {
+    lubancode::cli::SetLanguage("zh-CN");
+    Keymap map;
+    std::string error;
+    REQUIRE(map.SetBinding(ActionId::ChatSearchHistory, Ctrl(U'f'), error));
+    const std::string hints =
+        BuildKeyHints(map, {{ActionId::ChatSearchHistory, "hint.keys.search_history"}});
+    CHECK(hints.find("Ctrl+F") != std::string::npos);
+    CHECK(hints.find("Ctrl+R") == std::string::npos);
 }

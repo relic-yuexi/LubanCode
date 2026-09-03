@@ -569,19 +569,11 @@ std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
 ChromeAssistRow BuildComposerAssistRow() {
     ChromeAssistRow row;
     const keymap::Keymap& km = keymap::ActiveKeymap();
-    const auto add = [&](keymap::ActionId action, const char* label_key) {
-        const auto chord = km.ChordFor(action);
-        if (!chord.has_value()) {
-            return;  // 动作没绑键:整段略过,不留下孤单分隔符
-        }
-        if (!row.left.empty()) {
-            row.left += " · ";
-        }
-        row.left += keymap::FormatKeyChord(*chord) + " " + tr(label_key);
-    };
-    add(keymap::ActionId::ChatSearchHistory, "hint.keys.search_history");
-    add(keymap::ActionId::TranscriptToggleExpand, "hint.keys.expand");
-    add(keymap::ActionId::ChatExternalEditor, "hint.keys.editor");
+    // 左槽常用键走唯一的 BuildKeyHints 格式化口(收口审计单 §二 P2):改绑
+    // 跟脚、未绑定整段略过、和弦与分隔符只有一把尺。
+    row.left = keymap::BuildKeyHints(km, {{keymap::ActionId::ChatSearchHistory, "hint.keys.search_history"},
+                                          {keymap::ActionId::TranscriptToggleExpand, "hint.keys.expand"},
+                                          {keymap::ActionId::ChatExternalEditor, "hint.keys.editor"}});
     if (const auto help = km.ChordFor(keymap::ActionId::HelpShow); help.has_value()) {
         row.right = keymap::FormatKeyChord(*help) + " " + tr("hint.keys.help");
     }

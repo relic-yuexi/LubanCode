@@ -325,6 +325,22 @@ std::vector<std::string> BuildSceneHelpLines(const Keymap& keymap) {
     return lines;
 }
 
+std::string BuildKeyHints(const Keymap& keymap,
+                          const std::vector<std::pair<ActionId, const char*>>& actions) {
+    std::string hints;
+    for (const auto& [action, label_key] : actions) {
+        const auto chord = keymap.ChordFor(action);
+        if (!chord.has_value()) {
+            continue;  // 未绑定:整段略过,不留下孤单分隔符
+        }
+        if (!hints.empty()) {
+            hints += " · ";
+        }
+        hints += FormatKeyChord(*chord) + " " + tr(label_key);
+    }
+    return hints;
+}
+
 Keymap::Keymap() {
     entries_.reserve(kActionCount);
     for (const auto& info : kActionTable) {

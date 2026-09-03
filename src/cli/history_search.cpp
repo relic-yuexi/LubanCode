@@ -192,22 +192,15 @@ std::vector<std::string> BuildHistorySearchLines(const HistorySearchSession& ses
         case HistorySearchScope::Project: scope_word = &tr("search.scope.project"); break;
         case HistorySearchScope::All: scope_word = &tr("search.scope.all"); break;
     }
-    std::string keys;
-    const auto append_key = [&](keymap::ActionId action, const char* label_key) {
-        const auto chord = keymap::ActiveKeymap().ChordFor(action);
-        if (!chord.has_value()) {
-            return;
-        }
-        if (!keys.empty()) {
-            keys += " · ";
-        }
-        keys += keymap::FormatKeyChord(*chord) + " " + tr(label_key);
-    };
-    append_key(keymap::ActionId::SearchOlder, "search.key.older");
-    append_key(keymap::ActionId::SearchScopeCycle, "search.key.scope");
-    append_key(keymap::ActionId::SearchAccept, "search.key.accept");
-    append_key(keymap::ActionId::SearchAcceptSubmit, "search.key.accept_submit");
-    append_key(keymap::ActionId::SearchCancel, "search.key.cancel");
+    // 键位串走唯一的 BuildKeyHints 格式化口(收口审计单 §二 P2):与
+    // composer 速览左槽同一把尺——未绑定整段略过,和弦/分隔符不另立一套。
+    const std::string keys = keymap::BuildKeyHints(
+        keymap::ActiveKeymap(),
+        {{keymap::ActionId::SearchOlder, "search.key.older"},
+         {keymap::ActionId::SearchScopeCycle, "search.key.scope"},
+         {keymap::ActionId::SearchAccept, "search.key.accept"},
+         {keymap::ActionId::SearchAcceptSubmit, "search.key.accept_submit"},
+         {keymap::ActionId::SearchCancel, "search.key.cancel"}});
     lines.push_back(tr("search.header") + " [" + *scope_word + "]" + (keys.empty() ? "" : " · " + keys) +
                     (query.empty() ? std::string() : " · " + tr("search.query") + ": " + query));
 
