@@ -754,6 +754,12 @@ void RedrawStreamFooterLocked() {
     model.composer.confirm_mode = chrome.mode;
     model.status_rows = {BuildComposerModeLine(chrome, static_cast<int>(SessionSkillCount()),
                                                (std::max)(0, width - 1))};
+    // 资料行(收口审计单 §二 P0):与空闲 composer 同一份 StatusDataSlot 活账
+    // 投影——忙闲两路同一只构造器,审批档剥出归模式行,运行中不丢资料。
+    if (const std::string info_row = BuildStatusLine(chrome, (std::max)(0, width - 1));
+        !info_row.empty()) {
+        model.data_rows = {std::move(info_row)};
+    }
     const BottomChromeLayout layout = BuildBottomChromeLayout(model, f.theme, width, viewport_rows);
 
     if (f.hint.empty() && f.composer.line.empty() && f.composer.hint_lines.empty()) {

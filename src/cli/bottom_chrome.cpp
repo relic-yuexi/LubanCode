@@ -40,6 +40,10 @@ std::string BottomChromeFingerprint(const BottomChromeFrame& frame) {
     for (const auto& row : frame.mode_notice_rows) {
         value += row + "\n";
     }
+    value += "i:";
+    for (const auto& row : frame.data_rows) {
+        value += row + "\n";
+    }
     value += "t:";
     for (const auto& row : frame.transient_rows) {
         value += row + "\n";
@@ -192,16 +196,18 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             : 0;
 
     // ---- 高度预算钳制(终端画面隔网单·战术二):"输入行必画得下"的硬约束 ----
-    // 可选行(帮助/活动条/队列/快捷键/坞/提示)按 transient -> dock ->
-    // shortcut -> queue -> activity -> help 的次序舍(即保的优先级相反:帮助层是用户刚显式要
-    // 的,最保、最后舍;舍时保头——表头写着怎么收,丢了头用户就找不到门,
-    // 装不下全表即面板内截断);可选行全舍了还装不下,composer 的物理行围
-    // 光标开窗——窗口尾部贴光标,保底一行,留白跟着免掉。0 = 不限(单测
-    // 与无终端环境的老行为)。
+    // 可选行(帮助/活动条/队列/快捷键/资料/坞/提示)按 transient -> dock ->
+    // shortcut -> data -> queue -> activity -> help 的次序舍(即保的优先级相反:
+    // 帮助层是用户刚显式要的,最保、最后舍;资料行(model/context/tokens 这类
+    // 会话活账)比快捷键速览更保一步——高度紧张时先舍速览再舍资料;舍时保头
+    // ——表头写着怎么收,丢了头用户就找不到门,装不下全表即面板内截断);
+    // 可选行全舍了还装不下,composer 的物理行围光标开窗——窗口尾部贴光标,
+    // 保底一行,留白跟着免掉。0 = 不限(单测与无终端环境的老行为)。
     std::size_t help_count = model.help_rows.size();
     std::size_t activity_count = model.activity_rows.size();
     std::size_t queue_count = model.queue_rows.size();
     std::size_t shortcut_count = model.shortcut_rows.size();
+    std::size_t data_count = model.data_rows.size();
     std::size_t dock_count = model.agent_dock_rows.size();
     std::size_t notice_count = (std::min)(std::size_t{1}, model.mode_notice_rows.size());
     std::size_t transient_count = model.transient_rows.size();
@@ -229,6 +235,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             help_count = take(model.help_rows.size());
             activity_count = take(model.activity_rows.size());
             queue_count = take(model.queue_rows.size());
+            data_count = take(model.data_rows.size());
             shortcut_count = take(model.shortcut_rows.size());
             dock_count = take(model.agent_dock_rows.size());
             transient_count = take(model.transient_rows.size());
@@ -240,6 +247,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             activity_count = 0;
             queue_count = 0;
             shortcut_count = 0;
+            data_count = 0;
             dock_count = 0;
             notice_count = 0;
             transient_count = 0;
@@ -270,6 +278,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
                              model.activity_rows.size() - activity_count +
                              model.queue_rows.size() - queue_count +
                              model.shortcut_rows.size() - shortcut_count +
+                             model.data_rows.size() - data_count +
                              model.agent_dock_rows.size() - dock_count +
                              model.mode_notice_rows.size() - notice_count +
                              model.transient_rows.size() - transient_count);
@@ -370,6 +379,13 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     if (draw_rules) {
         push(true, BoxRuleLine(theme, width));
     }
+    // 资料行(收口审计单 §二 P0):输入框下横线之下、导航坞之上。与模式行
+    // 同一份 StatusPanelData 快照投影(模式行只保 permission_mode+skills)。
+    // 行自带主题色(与 status_rows 同款外包),窄屏作最后一道 ANSI 安全截断
+    // ——先从左边收 cwd、再按段截,组行层已经按段裁过,这里是兜底。
+    for (std::size_t i = 0; i < data_count; ++i) {
+        push(draw_rules, ClampAnsiRowToWidth(model.data_rows[i], width));
+    }
     for (std::size_t i = 0; i < dock_count; ++i) {
         push(false, dock_tint_of(i) + TruncateUtf8ToDisplayWidth(model.agent_dock_rows[i], width - 1) +
                         theme.reset);
@@ -405,6 +421,7 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
                                 model.shortcut_rows.begin() + shortcut_count);
     chrome.mode_notice_rows.assign(model.mode_notice_rows.begin(),
                                    model.mode_notice_rows.begin() + notice_count);
+    chrome.data_rows.assign(model.data_rows.begin(), model.data_rows.begin() + data_count);
     chrome.agent_dock_rows.assign(model.agent_dock_rows.begin(),
                                   model.agent_dock_rows.begin() + dock_count);
     chrome.transient_rows.assign(model.transient_rows.begin(),

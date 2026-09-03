@@ -473,10 +473,17 @@ std::string BuildComposerModeLine(const BoxChrome& chrome, int skill_count, int 
     return colored_left + std::string(static_cast<std::size_t>(spaces), ' ') + theme.stats + right + theme.reset;
 }
 
-// 状态行:模式段按档配色(确认=默认色、auto=stats、yolo=error),信息段
-// 恒 stats 淡色。0.21.x 起状态行是档位的唯一去处(提示符不再带前缀)。文本拼装是
-// cli/format_utils 的纯函数,这里只管配色和按控制台宽度分段截断(截断得
-// 按段做——夹着 ANSI 的整行没法安全截)。
+// 正式资料行构造器(收口审计单 §二 P0):输入框下横线之下那行完整状态
+// 资料。0.26.181 起模式行(BuildComposerModeLine)接管输入区上方后,这只
+// 函数曾失了全部生产调用,数据照采、纯函数照测、真底栏不画——如今恢复
+// 为两路(空闲 composer/流式 footer)组帧前的正式生产调用。合同:
+//   - 审批档从资料行剥出(permission_mode 段恒不画,档位语义归模式行独占,
+//     items 里给了也剥);其余段按 status_panel.items 的次序与折叠规则画。
+//   - 数据只认 StatusDataSlot 那一份活账(SetStatusLineData 整份重建 +
+//     UpdateStatusLineContext 局部更新),与模式行同一份快照投影。
+//   - 宽度不够先从左边收工作目录(保住末级目录与它后面的分支),还不够才
+//     按用户给的字段顺序从行尾截。文本拼装是 cli/format_utils 的纯函数,
+//     这里只管配色与分段截断(夹着 ANSI 的整行没法安全截)。
 std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
     const Theme& theme = *chrome.theme;
     const StatusLineData& data = StatusDataSlot();
@@ -487,19 +494,32 @@ std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
     if (const auto& provider = BackgroundStatusProviderSlot()) {
         values.background = provider();
     }
-    auto segments = BuildStatusPanelSegments(data.items, chrome.mode, values);
+    std::vector<StatusPanelSegment> segments =
+        BuildStatusPanelSegments(data.items, chrome.mode, values);
+    // permission_mode 恒剥出:模式行(BuildComposerModeLine)独占档位语义,
+    // 资料行不再画第二份(档位改一处、两行同拍,不各造一套状态模型)。
+    std::vector<StatusPanelSegment> info;
+    info.reserve(segments.size());
+    for (auto& segment : segments) {
+        if (segment.key != "permission_mode") {
+            info.push_back(std::move(segment));
+        }
+    }
+    if (info.empty()) {
+        return {};  // 一段资料都没有(未设数据源):整行不画,不留空行
+    }
 
     // 宽度不够时先从左边收工作目录，保住项目末级目录与它后面的分支；
     // 还不够才按用户给的字段顺序从行尾截。
     int total_width = 0;
-    for (std::size_t i = 0; i < segments.size(); ++i) {
+    for (std::size_t i = 0; i < info.size(); ++i) {
         if (i > 0) {
             total_width += static_cast<int>(DisplayWidthUtf8(data.separator));
         }
-        total_width += static_cast<int>(DisplayWidthUtf8(segments[i].text));
+        total_width += static_cast<int>(DisplayWidthUtf8(info[i].text));
     }
     if (total_width > max_width) {
-        for (auto& segment : segments) {
+        for (auto& segment : info) {
             if (segment.key != "cwd") {
                 continue;
             }
@@ -513,7 +533,7 @@ std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
     int remaining = max_width;
     bool emitted = false;
     std::string line;
-    for (const auto& segment : segments) {
+    for (const auto& segment : info) {
         if (remaining <= 0) {
             break;
         }
@@ -527,15 +547,7 @@ std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
         }
         const std::string text = TruncateUtf8ToDisplayWidth(segment.text, remaining);
         std::string color = theme.stats;
-        if (segment.key == "permission_mode") {
-            switch (PresentApprovalMode(chrome.mode).color_role) {
-                case ModeColorRole::Default: color.clear(); break;
-                case ModeColorRole::AcceptEdits: color = theme.mode_accept_edits; break;
-                case ModeColorRole::Yolo: color = theme.mode_yolo; break;
-                case ModeColorRole::Auto: color = theme.mode_auto; break;
-                case ModeColorRole::DontAsk: color = theme.mode_dont_ask; break;
-            }
-        } else if (segment.key == "model") {
+        if (segment.key == "model") {
             color = theme.tool_line;
         } else if (segment.key == "cwd") {
             color = theme.prompt;

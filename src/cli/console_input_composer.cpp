@@ -654,6 +654,12 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             const int width = info_now.has_value() ? info_now->width : 80;
             model.status_rows = {BuildComposerModeLine(
                 chrome, static_cast<int>(SessionSkillCount()), (std::max)(0, width - 1))};
+            // 资料行(收口审计单 §二 P0):模式行之下、输入框下横线之下画完整
+            // 状态资料——与模式行同一份 StatusDataSlot 活账投影,审批档剥出。
+            if (const std::string info_row = BuildStatusLine(chrome, (std::max)(0, width - 1));
+                !info_row.empty()) {
+                model.data_rows = {std::move(info_row)};
+            }
         }
         return model;
     };

@@ -89,7 +89,12 @@ struct BoxChrome {
 std::string BuildComposerModeLine(const BoxChrome& chrome, int skill_count, int max_width);
 std::size_t SessionSkillCount();
 
-// 状态行组行(兼容其余调用点;输入区现由 BuildComposerModeLine 画专用模式行)。
+// 正式资料行构造器(收口审计单 §二 P0):输入框下横线之下的完整状态资料
+// (model/effort/cwd/branch/context/tokens/cache/REC/WT/tools/Plan/goal/
+// background)。读 StatusDataSlot 那一份活账,审批段(permission_mode)恒剥
+// 出——档位语义归 BuildComposerModeLine 的模式行独占,两行同一快照投影。
+// 空闲 composer 与流式 footer 组帧前都调它;一段资料都没有时返回空串
+// (调用方据此不进帧,不留空行)。
 std::string BuildStatusLine(const BoxChrome& chrome, int max_width);
 
 // 行级双缓冲的兜底画法(VT 批量不可用的老终端):空闲路 RedrawEditArea

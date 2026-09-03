@@ -17,6 +17,9 @@
 #include <vector>
 
 #include "cli/bottom_chrome.hpp"
+#include "cli/console_input.hpp"          // SetStatusLineData(资料行数据源)
+#include "cli/console_input_internal.hpp"  // BoxChrome/BuildComposerModeLine/BuildStatusLine
+#include "cli/i18n.hpp"
 #include "cli/theme.hpp"
 
 using namespace lubancode::cli;
@@ -260,6 +263,117 @@ TEST_CASE("同源布局:快捷键提示独占 skills 上一行,临时候选仍�
     CHECK(layout.frame.rows[2].text == PlainRule(60));
     CHECK(layout.composer_first_row == 3);
     CHECK(layout.frame.rows[5].text == "/help  show help");
+}
+
+// ---------------------------------------------------------------------------
+// 资料行(收口审计单 §二 P0):完整状态资料画在输入框下横线之下、导航坞
+// 之上,与模式行(permission_mode+skills)同一份快照投影。0.26.181 的字段
+// 丢失正是"只测 formatter、不问最终帧"漏掉的——这里钉最终帧合同。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("资料行专位:下横线之下、坞之上;进指纹;忙闲同画") {
+    const Theme plain;
+    for (const ComposerMode mode : {ComposerMode::Idle, ComposerMode::BusyQueue}) {
+        CAPTURE(static_cast<int>(mode));
+        BottomChromeModel model = FramedModel(ComposerState({U"正文"}, 0, 2), mode);
+        model.status_rows = {"confirm mode                                4 skills"};
+        model.data_rows = {"model · cwd · branch · context 7% · 70/1000"};
+        model.agent_dock_rows = {"↑/↓ 选择", "● main"};
+        const BottomChromeLayout layout = BuildBottomChromeLayout(model, plain, 60);
+        // 行序:模式行 > 上横线 > 输入 > 下横线 > 资料行 > 坞。
+        REQUIRE(layout.frame.rows.size() == 7);
+        CHECK(layout.frame.rows[0].text.find("4 skills") != std::string::npos);
+        CHECK(layout.frame.rows[1].text == PlainRule(60));
+        CHECK(layout.frame.rows[2].text == "> 正文");
+        CHECK(layout.frame.rows[3].text == PlainRule(60));
+        CHECK(layout.frame.rows[4].text == "model · cwd · branch · context 7% · 70/1000");
+        CHECK(layout.frame.rows[5].text == "↑/↓ 选择");
+        CHECK(layout.frame.rows[6].text == "● main");
+        CHECK(layout.chrome.data_rows.size() == 1);
+        CHECK(layout.chrome.TotalRows() == 7);
+        CHECK(layout.chrome.AgentDockFirstRow() == 5);  // 数据行(下标4)之后
+        // 光标仍在输入区,资料行不挤光标。
+        CHECK(layout.cursor_row == layout.composer_first_row);
+    }
+    // 指纹认资料行:行内容变了指纹必变;与别区分区隔开,同文不误判相等。
+    BottomChromeFrame with_data;
+    with_data.data_rows = {"context 7%"};
+    BottomChromeFrame changed = with_data;
+    changed.data_rows[0] = "context 9%";
+    CHECK(BottomChromeFingerprint(with_data) != BottomChromeFingerprint(changed));
+    BottomChromeFrame elsewhere = with_data;
+    elsewhere.data_rows.clear();
+    elsewhere.transient_rows = {"context 7%"};
+    CHECK(BottomChromeFingerprint(with_data) != BottomChromeFingerprint(elsewhere));
+}
+
+TEST_CASE("资料行预算:先舍提示/坞/快捷键,再舍资料;输入行恒画得下") {
+    const Theme plain;
+    BottomChromeModel model = FramedModel(ComposerState({U"一行"}, 0, 2), ComposerMode::BusyQueue);
+    model.shortcut_rows = {"? 速览"};
+    model.data_rows = {"model · context 7%"};
+    model.agent_dock_rows = {"↑/↓ 选择", "● main"};
+    model.transient_rows = {"  /help"};
+    // 不限 = 横线2 + 输入1 + 状态1 + 快捷键1 + 资料1 + 坞2 + 提示1 = 9 行。
+    REQUIRE(BuildBottomChromeLayout(model, plain, 40).frame.rows.size() == 9);
+    // 预算 6:核心 4 + 资料 1 + 快捷键 1——提示与坞整块让位。
+    const auto keeps_both = BuildBottomChromeLayout(model, plain, 40, 6);
+    CHECK(keeps_both.frame.rows.size() == 6);
+    CHECK(keeps_both.chrome.data_rows.size() == 1);
+    CHECK(keeps_both.chrome.shortcut_rows.size() == 1);
+    CHECK(keeps_both.dropped_optional_rows == 3);  // 坞2 + 提示1
+    // 预算 5:资料比快捷键多保一步——速览先舍,资料仍在。
+    const auto tight = BuildBottomChromeLayout(model, plain, 40, 5);
+    CHECK(tight.frame.rows.size() == 5);
+    CHECK(tight.chrome.data_rows.size() == 1);
+    CHECK(tight.chrome.shortcut_rows.empty());
+    CHECK(tight.dropped_optional_rows == 4);  // 快捷键1 + 坞2 + 提示1
+    // 预算 4:资料也让位,只剩核心(横线+输入+状态);输入行必画得下。
+    const auto core_only = BuildBottomChromeLayout(model, plain, 40, 4);
+    CHECK(core_only.frame.rows.size() == 4);
+    CHECK(core_only.chrome.data_rows.empty());
+    CHECK(core_only.dropped_optional_rows == 5);
+}
+
+TEST_CASE("最终帧合同:忙闲两景 mode/skills 与 model/cwd/branch/context/tokens 同时可见") {
+    // 生产接线:两路 status_rows=BuildComposerModeLine、data_rows=BuildStatusLine
+    //(console_input_composer / console_input_stream_footer 各一处);这里把两只
+    // 构造器的产物按生产摆位进最终帧,断言两类信息同帧共存——0.26.181 只剩
+    // 模式行、model/cwd/context/tokens 一齐消失,正是缺这条合同。
+    SetLanguage("zh-CN");
+    StatusPanelData data;
+    data.model = "test-model";
+    data.cwd = "D:\\proj";
+    data.git_branch = "main";
+    data.context_percent = 7;
+    data.used_tokens = 70;
+    data.window_tokens = 1000;
+    SetStatusLineData(data,
+                           {"permission_mode", "model", "cwd", "git_branch", "context", "tokens"},
+                           " · ");
+    const Theme plain;
+    const BoxChrome chrome{true, &plain, ConfirmMode::Yolo};
+    for (const ComposerMode mode : {ComposerMode::Idle, ComposerMode::BusyQueue}) {
+        CAPTURE(static_cast<int>(mode));
+        BottomChromeModel model = FramedModel(ComposerState({U""}, 0, 0), mode);
+        model.status_rows = {BuildComposerModeLine(chrome, 4, 59)};
+        model.data_rows = {BuildStatusLine(chrome, 59)};
+        REQUIRE(model.data_rows[0].find("test-model") != std::string::npos);  // 资料行非空
+        const BottomChromeLayout layout = BuildBottomChromeLayout(model, plain, 60);
+        // 模式行:档位 + 技能数。
+        CHECK(layout.frame.rows[0].text.find("YOLO") != std::string::npos);
+        CHECK(layout.frame.rows[0].text.find("4") != std::string::npos);
+        // 资料行:完整资料段一个不少(下横线之下)。
+        const std::string& info = layout.frame.rows[4].text;
+        CHECK(info.find("test-model") != std::string::npos);
+        CHECK(info.find("D:\\proj") != std::string::npos);
+        CHECK(info.find("main") != std::string::npos);
+        CHECK(info.find("context 7%") != std::string::npos);
+        CHECK(info.find("70/1000") != std::string::npos);
+        // 不拿一行换另一行:模式行与资料行各自独占自己的槽。
+        CHECK(layout.frame.rows[0].text.find("test-model") == std::string::npos);
+        CHECK(info.find("YOLO") == std::string::npos);
+    }
 }
 
 TEST_CASE("同源布局:Idle 与 Busy 同拍——物理行/padding/cursor 必须相同") {

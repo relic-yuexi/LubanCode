@@ -240,6 +240,78 @@ TEST_CASE("模式行窄屏:卡在当前标签/切换提示/skills 三处,UTF-8 �
     SetLanguage("zh-CN");
 }
 
+// ---------------------------------------------------------------------------
+// 资料行构造器(src 重复职责与死生产路收口审计单 §二 P0):0.26.181 起模式行
+// (BuildComposerModeLine)接管输入区上方,完整状态行(BuildStatusLine)失了
+// 生产调用——数据照采、纯函数照测、真底栏不画。收口后 BuildStatusLine 是
+// 正式资料行构造器:审批档从资料行剥出(档位语义归模式行独占),其余段照
+// 画;空闲 composer 与流式 footer 两路都在组帧前调它(最终帧摆位合同在
+// test_bottom_chrome.cpp)。
+// ---------------------------------------------------------------------------
+cli::StatusPanelData BasePanelData();  // 定义在本文件下方(FakeBackend 那一段)
+
+
+TEST_CASE("资料行构造器:审批档剥出,其余资料段一个不丢") {
+    using namespace lubancode::cli;
+    SetLanguage("zh-CN");
+    SetStatusLineData(BasePanelData(),
+                      {"permission_mode", "model", "cwd", "git_branch", "context", "tokens"}, " · ");
+    const Theme plain;
+    BoxChrome chrome{true, &plain, ConfirmMode::Yolo};
+    const std::string row = BuildStatusLine(chrome, 120);
+    // 审批档只归模式行:资料行不得再画档名与切换提示。
+    const ModePresentation yolo = PresentApprovalMode(ConfirmMode::Yolo);
+    CHECK(row.find(yolo.current_label) == std::string::npos);
+    CHECK(row.find("Shift+Tab") == std::string::npos);
+    // 完整资料段全在(0.26.181 真终端消失的正是这些)。
+    CHECK(row.find("test-model") != std::string::npos);
+    CHECK(row.find("D:\\proj") != std::string::npos);
+    CHECK(row.find("main") != std::string::npos);
+    CHECK(row.find("context 7%") != std::string::npos);
+    CHECK(row.find("70/1000") != std::string::npos);
+    CHECK(row.find("REC") != std::string::npos);  // REC 恒挂,不进 items
+}
+
+TEST_CASE("资料行构造器:items 重排与隐藏生效,permission_mode 给了也剥") {
+    using namespace lubancode::cli;
+    SetLanguage("zh-CN");
+    SetStatusLineData(BasePanelData(), {"tokens", "model", "permission_mode"}, " · ");
+    const Theme plain;
+    BoxChrome chrome{true, &plain, ConfirmMode::Auto};
+    const std::string row = BuildStatusLine(chrome, 120);
+    // 只画 items 点名的段,按 items 次序;permission_mode 即便在 items 里也剥出。
+    CHECK(row.find("70/1000") != std::string::npos);
+    CHECK(row.find("test-model") != std::string::npos);
+    CHECK(row.find("70/1000") < row.find("test-model"));
+    CHECK(row.find("D:\\proj") == std::string::npos);
+    CHECK(row.find("context") == std::string::npos);
+    const ModePresentation presentation = PresentApprovalMode(ConfirmMode::Auto);
+    CHECK(row.find(presentation.current_label) == std::string::npos);
+}
+
+TEST_CASE("资料行构造器:usage 局部更新与后台段现折都进资料行") {
+    using namespace lubancode::cli;
+    SetLanguage("zh-CN");
+    SetStatusLineData(BasePanelData(),
+                      {"permission_mode", "model", "cwd", "git_branch", "context", "tokens"}, " · ");
+    const Theme plain;
+    BoxChrome chrome{true, &plain, ConfirmMode::Confirm};
+    // 回合内 usage 到达:局部更新只改 context/tokens,资料行跟着出新的数。
+    UpdateStatusLineContext(42, 420, 1000, false, "缓存命中 1.2k(60%)");
+    const std::string row = BuildStatusLine(chrome, 120);
+    CHECK(row.find("~context 42%") != std::string::npos);  // 缺实测标旧值
+    CHECK(row.find("~420/1000") != std::string::npos);
+    CHECK(row.find("缓存命中 1.2k(60%)") != std::string::npos);
+    CHECK(row.find("test-model") != std::string::npos);  // 局部更新保住其他段
+    // 后台任务段现折:provider 给了就挂,空了整段收起。
+    SetBackgroundStatusProvider([] { return std::string("后台 2 运行 / 1 完成"); });
+    const std::string with_background = BuildStatusLine(chrome, 120);
+    CHECK(with_background.find("后台 2 运行 / 1 完成") != std::string::npos);
+    CHECK(with_background.find("test-model") != std::string::npos);
+    SetBackgroundStatusProvider(nullptr);
+    CHECK(BuildStatusLine(chrome, 120).find("后台") == std::string::npos);
+}
+
 // 按脚本吐事件的假后端,写法同 test_agent_tool.cpp:每调一次 send_stream
 // 按调用次序取下一组脚本吐出去。
 class FakeBackend : public api::Backend {

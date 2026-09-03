@@ -7,8 +7,9 @@
 //   activity_rows(Working 活动条)
 //   queue_rows(待发队列,composer 上横线之上)
 //   shortcut_rows(空 composer 的常用键速览)
-//   status_rows 行状态栏 / 上横线 / top_padding 留白 / composer_rows 行输入 /
-//   bottom_padding 补空 / 下横线
+//   status_rows 行模式栏(permission_mode+skills) / 上横线 / top_padding 留白 /
+//   composer_rows 行输入 / bottom_padding 补空 / 下横线
+//   data_rows 资料行(model/cwd/branch/context/tokens 等,下横线之下)
 //   agent_dock_rows(导航坞,贴底)
 //   transient_rows(slash 提示等短命 UI,垫最底)
 //
@@ -37,6 +38,12 @@ struct BottomChromeFrame {
     std::vector<std::string> agent_dock_rows; // 导航坞(无子代理零行)
     std::vector<std::string> mode_notice_rows; // Shift+Tab 说明(状态栏紧上方)
     std::vector<std::string> transient_rows;  // slash 提示等(常态零行)
+    // 资料行(收口审计单 §二 P0):完整状态资料(model/effort/cwd/branch/
+    // context/tokens/cache/REC/WT/tools/Plan/goal/background)从同一份
+    // StatusPanelData 快照投影,画在输入框下横线之下、导航坞之上。模式行
+    // (status_rows)只保 permission_mode+skills——两行同一快照,不再各造
+    // 一套状态模型。空 = 无资料可画(未设数据源),零行。
+    std::vector<std::string> data_rows;
     // Composer 摘要:草稿全文 + 光标 + 档位 + 占位提示拼成的一串,给指纹
     // 用。合流前指纹只认行数,正文/光标变了指纹不动;合流后"内容变必变"
     // 才真正成立(P1)。
@@ -47,19 +54,19 @@ struct BottomChromeFrame {
     int selected_task_id = 0;  // 导航当前选中(0=main,-1=汇总哨兵)
     std::uint64_t revision = 0;  // 帧身份:内容变必变
 
-    // 整帧行数(帮助+活动条+队列+快捷键+横线+输入+状态+坞+提示)。
+    // 整帧行数(帮助+活动条+队列+快捷键+横线+输入+状态+资料+坞+提示)。
     int TotalRows() const {
         return static_cast<int>(help_rows.size()) + static_cast<int>(activity_rows.size()) +
                static_cast<int>(queue_rows.size()) + static_cast<int>(shortcut_rows.size()) +
-               composer_rows + rule_rows + status_rows +
+               composer_rows + rule_rows + status_rows + static_cast<int>(data_rows.size()) +
                static_cast<int>(agent_dock_rows.size()) + static_cast<int>(mode_notice_rows.size()) +
                static_cast<int>(transient_rows.size());
     }
-    // 坞首行相对帧顶的偏移:帮助/队列/快捷键之后、框与状态栏之下。
+    // 坞首行相对帧顶的偏移:帮助/队列/快捷键之后、框与状态栏与资料行之下。
     int AgentDockFirstRow() const {
         return static_cast<int>(help_rows.size()) + static_cast<int>(activity_rows.size()) +
                static_cast<int>(queue_rows.size()) + static_cast<int>(shortcut_rows.size()) +
-               composer_rows + rule_rows + status_rows +
+               composer_rows + rule_rows + status_rows + static_cast<int>(data_rows.size()) +
                static_cast<int>(mode_notice_rows.size());
     }
 };
@@ -92,17 +99,22 @@ struct ComposerViewModel {
     int top_padding_rows = kComposerTopPaddingRows;
 };
 
-// 整块底栏的输入模型。status_rows 由调用方拼好(width 感知的文案在两条
-// 路里本来就不同:空闲是纯状态行,忙时尾部多一段 Esc 打断提示),布局
+// 整块底栏的输入模型。status_rows(模式行)与 data_rows(资料行)由调用方
+// 拼好——两行同一次从 StatusPanelData 快照投影(收口审计单 §二 P0),布局
 // 只负责摆位与截断。framed=false 是无框单行读取(向导/确认提示)的退化
-// 形态:不画横线、不留白、不摆状态行。
+// 形态:不画横线、不留白、不摆状态行与资料行。
 struct BottomChromeModel {
     std::vector<std::string> help_rows;        // 场景帮助层(空 = 没开,垫帧最顶)
     std::vector<std::string> activity_rows;    // Working 活动条(空闲空)
     std::vector<std::string> queue_rows;       // 待发队列(空队列零行)
     std::vector<std::string> shortcut_rows;    // 常用键速览,排在 status/skills 上一行
     ComposerViewModel composer;
-    std::vector<std::string> status_rows;      // 状态栏(调用方拼好的整行)
+    std::vector<std::string> status_rows;      // 模式行(permission_mode+skills,调用方拼好)
+    // 资料行(收口审计单 §二 P0):完整状态资料画在输入框下横线之下、导航
+    // 坞之上;内容出自 BuildStatusLine(正式资料行构造器,读 StatusDataSlot
+    // 那一份活账,审批档剥出归模式行)。行自带主题色,布局作最后一道 ANSI
+    // 安全截断(与 status_rows 同款)。空 = 无资料可画,零行。
+    std::vector<std::string> data_rows;
     std::vector<std::string> mode_notice_rows; // Shift+Tab 说明(最多一行，黄色)
     std::vector<std::string> agent_dock_rows;  // 导航坞(无子代理零行)
     // 坞行的监督色辅助(监督器单 P1-1):与 agent_dock_rows 按位对齐,可短
