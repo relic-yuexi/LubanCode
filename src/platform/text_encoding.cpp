@@ -96,6 +96,21 @@ std::size_t FirstInvalidUtf8Offset(const std::string& text) {
     return std::string::npos;
 }
 
+std::size_t CountInvalidUtf8Sites(const std::string& text) {
+    std::size_t sites = 0;
+    std::size_t i = 0;
+    while (i < text.size()) {
+        const DecodedSequence seq = DecodeAt(text, i);
+        if (seq.length == 0) {
+            ++sites;
+            ++i;
+            continue;
+        }
+        i += seq.length;
+    }
+    return sites;
+}
+
 std::string SanitizeUtf8(const std::string& text) {
     if (IsValidUtf8(text)) {
         return text;
