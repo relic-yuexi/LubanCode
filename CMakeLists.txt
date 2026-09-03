@@ -351,6 +351,8 @@ add_library(lubancode_engine STATIC
   # 平台原子替换/失败清理/结构化错误),gateway/manifest/telemetry/
   # derived_store 等处的私房协议逐批迁进来。
   src/platform/atomic_write.cpp
+  # 审计 P2:SHA-256 算法内核合一(hooks/channel 各一份,合一后只留薄口)。
+  src/platform/sha256.cpp
   # 统一 Package 封装单阶段 4:目录内容指纹的共用底座(Plugin 与 Package
   # 同一把尺,两把 v1 材料各自冻结)。
   src/platform/dir_fingerprint.cpp
