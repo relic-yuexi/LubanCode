@@ -313,6 +313,12 @@ void InvalidateViewFrameLedger();
 // 管道/重定向模式下面板本来就不存在,调了也是空操作。
 void ResetAgentPanelSession();
 
+// 会话层面板状态机的直接引用(查看态 Esc 兜底单,Bug C):面板键缝
+// (MapToPanelKey→AgentBack)之外,TranscriptUiController 的 Esc 分支也
+// 要认查看态——兜底层直接拿状态机对账/清账,不另立第二本状态。测试
+// (test_transcript_controller)也用它构造"正在查看某只子代理"的前置。
+AgentPanelSession& PanelSessionSlot();
+
 // 这一次 composer 读取的"收件目标":进入某只后台子代理查看态后,面板
 // 控制器记着它的任务号;ReadLine 返回后应用层取这个,把提交的消息定向送
 // 进那只子代理的 inbox(不经 main history)。nullopt = 归 main。每次
