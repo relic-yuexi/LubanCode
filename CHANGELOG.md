@@ -2,6 +2,16 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.196] - 2026-09-04
+
+- **后台代理停得掉了（三连 bug 收官）。** 停控两本账坐实并收口：面板走 TaskLedger（int 编号）、stop_background 走 BackgroundTaskRegistry（字符串编号、只记命令）——模型拿面板 id 去停必"查无此人"，三只代理 30M tokens 眼看烧停不掉。现 id 互认：stop 先认活命令再认面板代理（活态整树级联取消、终态如实），background_output 列表合并分段可辨来源。
+- **"denial 全拒"是误读，翻案有据。** 真机轨迹对质：被疑"全线被拒"的三只代理工具调用全部放行、零权限拒绝——真凶是渲染层把监督器通知（tool.silent 等）混进权限拒绝通道统一挂 denial 标题。双标题分家，"连刷"自解；权限判定路无罪，护栏测试钉死 needs_confirm=false 零拒绝。
+- **查看态 Esc 修通。** 断点在 TranscriptUiController 的 Escape 分支对查看态零处理（漏过面板键缝时落回编辑器老语义清空空草稿=屏上无响应）——Esc 现最前认查看态，清账退出，视口交既有机制重铺。真机复验三景留用户。
+
+## [v0.26.195] - 2026-09-04
+
+- **底栏键贴场景收口（含四子代理遗作吸收）。** P0：左槽三键（Ctrl+R 搜历史/Ctrl+O 展开/Ctrl+G 编辑器）按单子裁决清空散位——Ctrl+G 贴 composer 框末行右内角（4 行/80 字门槛才画，Busy 不画，改绑 alt+e 后提示跟脚走 keymap 反查）；skills 旁帮助入口 `N skills · ? 快捷键`（窄屏 14 列折叠保 skills）。P1：主面板条目间距全表并轨 GapBetween（思考→工具、同拍 Tool→Tool 恰一口，step 换拍不双打）+子代理工具卡三景钉子。遗作（orphan-wip）吸收骨架与画法、弃写死文案，两处产品顶牛按单子规格裁决。先红后绿每件有据。
+
 ## [v0.26.194] - 2026-09-04
 
 - **坏字节杀不死子代理派工了。** 真机实录：minimax 主会话并发派 4 只子代理，模型回的 title 带非法 UTF-8，两只死在 `canonical_json.invalid_utf8` fail closed。现 spawn 链两道清洗门：入口（title/prompt 解析即过 `SanitizeExternalText`，替换落 warning 报处数）+ 账前兜底（run.started payload 再洗，幂等）；顺手拆了两颗自埋雷——title 路 `TaskSpecHash` 的 dump 遇坏字节直接抛异常、`substr(0,120)` 裸砍多字节本身产坏字节（全换 `Utf8PrefixBoundary`）。先红后绿：修前复现景正是现场死法；修后三形态坏字节（孤立续字节/截断多字节/GBK 段）spawn 全活、账合法、干净参数逐字节不变。fail closed 防线 8/8+3/3 原样不退——毒数据照杀，好数据不再陪葬。
