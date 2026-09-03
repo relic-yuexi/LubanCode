@@ -976,12 +976,31 @@ TEST_CASE("装配器忙闲同源:同一快照公共行逐行相同,差量只在�
     const BottomChromeLayout idle = BuildBottomChromeLayout(BuildBottomChromeModel(idle_scene), plain, 60);
     const BottomChromeLayout busy = BuildBottomChromeLayout(BuildBottomChromeModel(busy_scene), plain, 60);
     // Busy 只多一行活动条(帧顶),其余逐行相同——模式行/资料行/横线/输入
-    // 区/坞全部同源,列号与裁剪结果一致。
+    // 区/坞全部同源,列号与裁剪结果一致。唯一差量:模式行右槽的 skills
+    // hint(键贴场景单 P2)只在 Idle 拼——footer 路在监听线程重画,不许查
+    // ActiveKeymap(读侧纪律见 keymap.hpp);它与速览行同属场景数据差量,
+    // 不是画法差量,skills 段两边仍一字不差。
     REQUIRE(busy.frame.rows.size() == idle.frame.rows.size() + 1);
     CHECK(busy.frame.rows[0].text == "• Working (3s)");
+    bool idle_status_checked = false;
+    bool busy_status_checked = false;
     for (std::size_t i = 0; i < idle.frame.rows.size(); ++i) {
+        const bool status_pair =
+                !idle_status_checked && !busy_status_checked && Contains(idle.frame.rows[i].text, "skills");
+        if (status_pair) {
+            // 模式行对:Idle 带 hint 段,Busy 只剩 skills 段——skills 段一致,
+            // hint 段恰是差量。
+            REQUIRE(Contains(busy.frame.rows[i + 1].text, "skills"));
+            CHECK(Contains(idle.frame.rows[i].text, "快捷键"));
+            CHECK(busy.frame.rows[i + 1].text.find("快捷键") == std::string::npos);
+            idle_status_checked = true;
+            busy_status_checked = true;
+            continue;
+        }
         CHECK(busy.frame.rows[i + 1].text == idle.frame.rows[i].text);
     }
+    CHECK(idle_status_checked);  // 上面真比到了模式行,不是静默跳过
+    CHECK(busy_status_checked);
     CHECK(busy.composer_first_row == idle.composer_first_row + 1);
     CHECK(busy.cursor_x == idle.cursor_x);
     CHECK(busy.cursor_row == idle.cursor_row + 1);
@@ -998,20 +1017,24 @@ TEST_CASE("装配器忙闲同源:同一快照公共行逐行相同,差量只在�
     CHECK(busy_has_model);
 }
 
-TEST_CASE("装配器速览行:Idle 空 composer 左右槽齐备;Busy 不设速览也不兜底") {
+TEST_CASE("装配器速览行:Idle 空 composer 左槽留白右槽帮助入口;Busy 不设速览也不兜底") {
     SetLanguage("zh-CN");
     const Theme plain;
-    // Idle 空 composer:速览行自置——左槽三枚常用键,右槽帮助入口(默认 ?)。
+    // Idle 空 composer:速览行右槽只剩帮助入口(默认 ?)——三枚常用键各自
+    // 键贴场景(收口单 P0):Ctrl+R 归搜索面板头行、Ctrl+G 归 composer 框内、
+    // Ctrl+O 归工具卡/思考块,底栏左槽留白,让眼睛歇。
     BottomChromeScene idle_scene = CommonScene(ComposerState({U""}, 0, 0));
     idle_scene.mode = ComposerMode::Idle;
     const BottomChromeModel idle_model = BuildBottomChromeModel(idle_scene);
-    CHECK_FALSE(idle_model.assist_row.empty());
-    CHECK(idle_model.assist_row.left.find("Ctrl+R") != std::string::npos);  // 搜历史
-    CHECK(idle_model.assist_row.left.find("Ctrl+O") != std::string::npos);  // 展开/收起
-    CHECK(idle_model.assist_row.left.find("Ctrl+G") != std::string::npos);  // 编辑器
+    CHECK(idle_model.assist_row.left.empty());  // 左槽不再铺任何快捷键
     CHECK(idle_model.assist_row.right == "? 键位");  // 帮助入口只认 ChordFor(HelpShow)
-    // 帮助入口在右槽:左槽不得再画第二份键位提示。
-    CHECK(idle_model.assist_row.left.find("键位") == std::string::npos);
+    // 整帧(空 composer)不出现三键:打字前后画面不再"抖一下消失"。
+    const BottomChromeLayout idle = BuildBottomChromeLayout(idle_model, plain, 60);
+    for (const auto& row : idle.frame.rows) {
+        CHECK(row.text.find("Ctrl+R") == std::string::npos);  // Ctrl+R 只在搜索面板头行
+        CHECK(row.text.find("Ctrl+O") == std::string::npos);  // Ctrl+O 贴工具卡/思考块
+        CHECK(row.text.find("Ctrl+G") == std::string::npos);  // 空短草稿,Ctrl+G 不画
+    }
     // Busy 空 composer:忙路没有帮助层与这些键,不设速览行——空 composer
     // 的提示位交给 placeholder,不再由 input.shortcuts_hint 硬补"查看快捷键"。
     BottomChromeScene busy_scene = CommonScene(ComposerState({U""}, 0, 0));
@@ -1064,6 +1087,92 @@ TEST_CASE("装配器提示类型化:面板 0/1/多行恒留输入框下,不随�
 }
 
 // ---------------------------------------------------------------------------
+// 键贴场景(收口单 P0):Ctrl+G 的门槛小注贴 composer 框右下角——草稿
+// 够长(4 行或 80 字)才画在下横线右端,短草稿与 Busy 不画。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("Ctrl+G 键贴 composer 框:草稿过门槛下横线右端画「Ctrl+G 编辑器」") {
+    SetLanguage("zh-CN");
+    const Theme plain;
+    const auto layout_for = [](const RenderState& editor, ComposerMode mode) {
+        BottomChromeScene scene = CommonScene(editor);
+        scene.mode = mode;
+        return BuildBottomChromeLayout(BuildBottomChromeModel(scene), Theme{}, 60);
+    };
+    const auto has_g_hint = [](const BottomChromeLayout& layout) {
+        for (const auto& row : layout.frame.rows) {
+            if (row.text.find("Ctrl+G") != std::string::npos) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    // 门槛一:4 行草稿(哪怕每行只有一字)。
+    std::vector<std::u32string> four_rows(kComposerGHintMinRows, U"字");
+    CHECK(has_g_hint(layout_for(ComposerState(four_rows, 0, 0), ComposerMode::Idle)));
+
+    // 门槛二:单行但总字符过 80。
+    const std::u32string eighty(static_cast<std::size_t>(kComposerGHintMinChars), U'a');
+    CHECK(has_g_hint(layout_for(ComposerState({eighty}, 0, 0), ComposerMode::Idle)));
+
+    // 门槛未到(行数不足且字符不足):不画——短草稿不添噪。
+    CHECK_FALSE(has_g_hint(layout_for(ComposerState({U"短草稿"}, 0, 3), ComposerMode::Idle)));
+
+    // Busy:流式没有外部编辑器键,门槛过了也不画。
+    std::vector<std::u32string> busy_rows(kComposerGHintMinRows, U"字");
+    CHECK_FALSE(has_g_hint(layout_for(ComposerState(busy_rows, 0, 0), ComposerMode::BusyQueue)));
+
+    // 门槛边界:行数差一行、字符差一个,都不画。
+    std::vector<std::u32string> three_rows(kComposerGHintMinRows - 1, U"字");
+    CHECK_FALSE(has_g_hint(layout_for(ComposerState(three_rows, 0, 0), ComposerMode::Idle)));
+    const std::u32string short_line(static_cast<std::size_t>(kComposerGHintMinChars - 1), U'a');
+    CHECK_FALSE(has_g_hint(layout_for(ComposerState({short_line}, 0, 0), ComposerMode::Idle)));
+}
+
+// ---------------------------------------------------------------------------
+// 模式行 skills hint(收口单 P2):skills 右侧附帮助入口小字,非空 composer
+// 也有门可寻;窄屏先折叠 hint 段保 skills。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("模式行 skills hint:右槽「N skills · ? 快捷键」,窄屏先折叠 hint") {
+    SetLanguage("zh-CN");
+    const Theme plain;
+    const BoxChrome chrome{true, &plain, ConfirmMode::Confirm};
+
+    // 宽屏:右槽带 hint(和弦文本由装配器从 keymap 拼好传入,这里直接喂)。
+    const std::string wide = BuildComposerModeLine(chrome, 2, 60, "? 快捷键");
+    CHECK(Contains(wide, "2 skills"));
+    CHECK(Contains(wide, "? 快捷键"));
+
+    // 窄屏:skills 与 hint 放不下整段时先丢 hint,skills 保留。
+    const std::string narrow = BuildComposerModeLine(chrome, 2, 14, "? 快捷键");
+    CHECK(Contains(narrow, "2 skills"));
+    CHECK(narrow.find("快捷键") == std::string::npos);
+
+    // 不传 hint(老调用点/Busy 路):右槽仍只有 skills。
+    const std::string legacy = BuildComposerModeLine(chrome, 2, 60);
+    CHECK(Contains(legacy, "2 skills"));
+    CHECK(legacy.find("快捷键") == std::string::npos);
+
+    // 装配器端到端:Idle 场景的模式行自带 hint(和弦从 ActiveKeymap 反查,
+    // 默认 ?);Busy 场景不拼(footer 路不碰 keymap,读侧纪律见 keymap.hpp)。
+    BottomChromeScene idle_scene = CommonScene(ComposerState({U"打了几个字"}, 0, 5));
+    idle_scene.mode = ComposerMode::Idle;
+    const BottomChromeModel idle_model = BuildBottomChromeModel(idle_scene);
+    REQUIRE(idle_model.status_rows.size() == 1);
+    CHECK(Contains(idle_model.status_rows[0], "skills"));
+    CHECK(Contains(idle_model.status_rows[0], "快捷键"));
+
+    BottomChromeScene busy_scene = CommonScene(ComposerState({U"打了几个字"}, 0, 5));
+    busy_scene.mode = ComposerMode::BusyQueue;
+    const BottomChromeModel busy_model = BuildBottomChromeModel(busy_scene);
+    REQUIRE(busy_model.status_rows.size() == 1);
+    CHECK(Contains(busy_model.status_rows[0], "skills"));
+    CHECK(busy_model.status_rows[0].find("快捷键") == std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
 // 快捷键提示的 keymap 驱动(收口审计单 §二 P2):帮助入口只认
 // ChordFor(HelpShow)与一枚标签——改绑后速览行(空闲)、帮助层、搜索层
 // 一齐跟脚;运行中没有写死 "?" 的兜底(input.shortcuts_hint 兜底生产路
@@ -1082,12 +1191,17 @@ TEST_CASE("帮助入口改绑跟脚:速览右槽与帮助层同拍换键,流式�
     const std::vector<std::string> help_rows = keymap::BuildSceneHelpLines(active);
     CHECK(help_rows.front().find("Alt+H") != std::string::npos);
     CHECK(help_rows.back().find("Alt+H") != std::string::npos);
-    // 改绑 chat.search_history:速览左槽跟脚换键,旧和弦不再出现。
-    REQUIRE(active.SetBinding(keymap::ActionId::ChatSearchHistory, *keymap::ParseKeyChord("ctrl+f"),
+    // 改绑 chat.external_editor:composer 框内的 Ctrl+G 小注跟脚换键,
+    // 旧和弦不再出现(收口单 P0:Ctrl+G 键贴 composer 自己,不再进底栏速览)。
+    REQUIRE(active.SetBinding(keymap::ActionId::ChatExternalEditor, *keymap::ParseKeyChord("alt+e"),
                               error));
+    std::vector<std::u32string> long_draft(4, U"草稿行");
+    const std::string g_hint = BuildComposerGHint(ComposerState(long_draft, 0, 0));
+    CHECK(g_hint.find("Alt+E") != std::string::npos);
+    CHECK(g_hint.find("Ctrl+G") == std::string::npos);
+    // 速览左槽在改绑后也仍是留白:键不再进底栏。
     const ChromeAssistRow rebound = BuildComposerAssistRow();
-    CHECK(rebound.left.find("Ctrl+F") != std::string::npos);
-    CHECK(rebound.left.find("Ctrl+R") == std::string::npos);
+    CHECK(rebound.left.empty());
     // 运行中:同一枚改绑下,忙帧不出现任何写死的帮助提示(没有兜底路)。
     BottomChromeScene busy_scene = CommonScene(ComposerState({U""}, 0, 0));
     busy_scene.mode = ComposerMode::BusyQueue;
@@ -1101,7 +1215,7 @@ TEST_CASE("帮助入口改绑跟脚:速览右槽与帮助层同拍换键,流式�
     }
     // 收场:两枚改绑复位,别把活动表污染给别的测试。
     REQUIRE(active.ResetBinding(keymap::ActionId::HelpShow, error));
-    REQUIRE(active.ResetBinding(keymap::ActionId::ChatSearchHistory, error));
+    REQUIRE(active.ResetBinding(keymap::ActionId::ChatExternalEditor, error));
     // input.shortcuts_hint 兜底生产路已删:翻译表里不得再有这枚 key
     //(tr 查不到时回退 key 本身)。留着它就是"另一条翻译硬补"的孤尾。
     CHECK(tr("input.shortcuts_hint") == "input.shortcuts_hint");

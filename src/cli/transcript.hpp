@@ -197,6 +197,12 @@ enum class BlockRole { UserPrompt, Thinking, Tool, SubTool, AssistantText, Warni
 // SubTool 贴父项/同父批次紧排是 0,其余块与块之间留一口气。
 int GapBetween(BlockRole before, BlockRole after);
 
+// 把 TranscriptItem 投影到间距表用的 BlockRole(收口单 P1-1 提取)——主面板
+// RenderTurnView 与条目组 FormatTranscriptItems 共用一份映射,免得两份
+// lambda 各自走偏、间距表两层不同账。未知 kind(预留扩展位)兜回 Tool,
+// 不归零也不丢空行。
+BlockRole RoleOf(const TranscriptItem& item);
+
 // ---- 会话块(主/Subagent 面板同构渲染单) ----------------------------------
 //
 // 查看态会话正文的一块:工具/思考卡组(整组交 FormatTranscriptItems,吃

@@ -382,14 +382,28 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     // placeholder 只在主草稿真空时显示:一行空串且无更多逻辑行才算真空。
     const bool show_placeholder =
         wrapped.rows.size() == 1 && wrapped.rows[0].text.empty() && !composer.placeholder.empty();
+    // Ctrl+G 编辑器小注(键贴场景单 P0):贴在 composer 框内最末一个可见
+    // 物理行的右内角——装配器按 BuildComposerGHint 门控,空串 = 不画;非空
+    // 时只在窗内最末一行追加,前面行不重复。空间不够时被正文挤没(先保
+    // 正文),整行显示宽不越末列铁律。普通主题走淡(stats)配色,与模式行
+    // 同一把尺;plain 主题 stats/reset 是空串,自动退回纯文本。
+    const bool draw_g_hint = !composer.g_hint.empty() && window_count > 0;
     for (std::size_t i = window_first; i < window_first + window_count; ++i) {
         std::string text = i == 0 ? composer.prompt + Utf32ToUtf8(wrapped.rows[i].text)
                                   : std::string(kContinuationIndent, ' ') +
                                         Utf32ToUtf8(wrapped.rows[i].text);
+        const bool is_last_input_row = draw_g_hint && i + 1 == window_first + window_count;
         if (i == 0 && show_placeholder) {
             text += theme.stats + TruncateUtf8ToDisplayWidth(composer.placeholder,
                                                              width - 1 - prompt_width) +
                     theme.reset;
+        }
+        if (is_last_input_row) {
+            const int body_width = PlainDisplayWidth(text);
+            const int hint_width = static_cast<int>(DisplayWidthUtf8(composer.g_hint));
+            const int hint_room = (std::max)(0, width - 1 - body_width - hint_width);
+            text += std::string(static_cast<std::size_t>(hint_room), ' ') + theme.stats +
+                    composer.g_hint + theme.reset;
         }
         // 续行缩进只落在文本里。若再把绘制起点右移两格,屏上会缩进四格,
         // 光标却仍按两格算,末字便被方块光标压住(5782e2a 教训,随布局

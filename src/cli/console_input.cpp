@@ -432,7 +432,24 @@ std::optional<KeyEvent> MapKey(const platform::KeyInput& key) {
 // BoxRuleLine 挪去 cli/bottom_chrome.cpp(布局函数画横线要用,不能留在
 // 终端层);这里经 bottom_chrome.hpp 直接用。
 
-std::string BuildComposerModeLine(const BoxChrome& chrome, int skill_count, int max_width) {
+namespace {
+
+// 模式行右槽的 skills hint 原文(键贴场景单 P2):帮助入口和弦从 keymap
+// 反查 + i18n 标签,非空时由 BuildComposerModeLine 拼进 skills 右侧(窄屏
+// 折叠)。只在空闲主线程被调(ActiveKeymap 读侧纪律);无绑定给空串。
+std::string BuildSkillsHintText() {
+    const keymap::Keymap& km = keymap::ActiveKeymap();
+    const auto help = km.ChordFor(keymap::ActionId::HelpShow);
+    if (!help.has_value()) {
+        return {};
+    }
+    return keymap::FormatKeyChord(*help) + " " + tr("status.skills_hint");
+}
+
+}  // namespace
+
+std::string BuildComposerModeLine(const BoxChrome& chrome, int skill_count, int max_width,
+                                  const std::string& right_hint) {
     if (max_width <= 0) {
         return {};
     }
@@ -442,7 +459,17 @@ std::string BuildComposerModeLine(const BoxChrome& chrome, int skill_count, int 
         chrome.mode == ConfirmMode::Confirm
             ? trf("status.mode_switch_hint", presentation.next_label)
             : presentation.current_label + "   " + trf("status.mode_switch_hint", presentation.next_label);
-    const std::string right = trf("status.skills_count", skill_count);
+    std::string right = trf("status.skills_count", skill_count);
+    // skills hint(键贴场景单 P2):skills 右侧附帮助入口小字——速览行只在
+    // 空 composer 出现,打字后帮助入口没了门;hint 常驻模式行,非空
+    // composer 也有处可寻。右槽整段(skills + 间隔 + hint)放得下才拼;
+    // 放不下先丢 hint 段保 skills(窄屏折叠,右端信息优先保留的既有规矩)。
+    if (!right_hint.empty()) {
+        const std::string full = right + " · " + right_hint;
+        if (static_cast<int>(DisplayWidthUtf8(full)) < max_width) {
+            right = full;
+        }
+    }
     const int right_width = static_cast<int>(DisplayWidthUtf8(right));
     const int gap = 2;
     const int left_room = (std::max)(0, max_width - right_width - gap);
@@ -561,19 +588,40 @@ std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
     return line;
 }
 
-// 空 composer 的左右槽速览行(收口审计单 §二 P1):左槽常用键(keymap
-// 反查,用户改绑跟脚),右槽帮助入口——只认 ChordFor(HelpShow),无绑定
+// Ctrl+G 小注(键贴场景单 P0):草稿过门槛(4 行或 80 字,任一满足)才拼
+// 「Ctrl+G 编辑器」——和弦从 keymap 反查(改绑跟脚,与速览右槽同一把尺),
+// 门槛未到或无绑定给空串。短草稿不添噪,真用得上编辑器的时候才露脸。
+std::string BuildComposerGHint(const RenderState& editor) {
+    if (editor.lines.empty()) {
+        return {};
+    }
+    std::size_t char_count = 0;
+    for (const auto& line : editor.lines) {
+        char_count += line.size();
+    }
+    if (editor.lines.size() < static_cast<std::size_t>(kComposerGHintMinRows) &&
+        char_count < static_cast<std::size_t>(kComposerGHintMinChars)) {
+        return {};
+    }
+    const keymap::Keymap& km = keymap::ActiveKeymap();
+    const auto chord = km.ChordFor(keymap::ActionId::ChatExternalEditor);
+    if (!chord.has_value()) {
+        return {};
+    }
+    return keymap::FormatKeyChord(*chord) + " " + tr("hint.keys.editor");
+}
+
+// 空 composer 的左右槽速览行(收口审计单 §二 P1,键贴场景单 P0 后退化):
+// 左槽不再铺任何快捷键——三枚键各归各景(Ctrl+R 在历史搜索面板头行、
+// Ctrl+G 贴 composer 框右下内角、Ctrl+O 贴工具卡/思考块,后续单),空
+// composer 的底栏左槽留白,让眼睛歇;一打字整行让位时也不再"抖一下消
+// 失"三枚键的提示。右槽帮助入口保留——只认 ChordFor(HelpShow),无绑定
 // 整段不画。Busy 场景没有帮助层,也没有搜索/外部编辑器这些键,装配器不
 // 置速览行(是否显示由场景决定,不再由 input.shortcuts_hint 硬补)。只在
 // 空闲主线程调(ActiveKeymap 的读侧纪律见 keymap.hpp)。
 ChromeAssistRow BuildComposerAssistRow() {
     ChromeAssistRow row;
     const keymap::Keymap& km = keymap::ActiveKeymap();
-    // 左槽常用键走唯一的 BuildKeyHints 格式化口(收口审计单 §二 P2):改绑
-    // 跟脚、未绑定整段略过、和弦与分隔符只有一把尺。
-    row.left = keymap::BuildKeyHints(km, {{keymap::ActionId::ChatSearchHistory, "hint.keys.search_history"},
-                                          {keymap::ActionId::TranscriptToggleExpand, "hint.keys.expand"},
-                                          {keymap::ActionId::ChatExternalEditor, "hint.keys.editor"}});
     if (const auto help = km.ChordFor(keymap::ActionId::HelpShow); help.has_value()) {
         row.right = keymap::FormatKeyChord(*help) + " " + tr("hint.keys.help");
     }
@@ -617,13 +665,26 @@ BottomChromeModel BuildBottomChromeModel(const BottomChromeScene& scene) {
     model.composer.placeholder = scene.placeholder;
     model.composer.mode = scene.mode;
     model.composer.confirm_mode = SharedEditor().confirm_mode();
+    // Ctrl+G 小注(键贴场景单 P0):仅 Idle 填——Busy 路没有外部编辑器键
+    // (见 BuildComposerAssistRow 的场景账),门槛过了也不画。读 ActiveKeymap,
+    // 只在空闲主线程被调;footer 路(Busy)不碰。
+    model.composer.g_hint =
+            scene.mode == ComposerMode::Idle ? BuildComposerGHint(scene.editor) : std::string();
     if (scene.framed) {
         static const Theme kDefaultTheme{};
         const Theme& theme = scene.theme != nullptr ? *scene.theme : kDefaultTheme;
         const BoxChrome chrome{true, &theme, model.composer.confirm_mode};
         const int row_width = (std::max)(0, scene.width - 1);
+        // 模式行右槽的 skills hint(键贴场景单 P2):帮助入口和弦从 keymap
+        // 反查拼好传入(BuildComposerModeLine 本身保持纯,不碰 keymap)。
+        // 仅 Idle 拼——footer 路(Busy)在监听线程重画,ActiveKeymap 的读侧
+        // 纪律不许它查表(keymap.hpp);忙时速览行本就没有,skills 旁的
+        // 帮助入口也无需再画。
         model.status_rows = {BuildComposerModeLine(chrome, static_cast<int>(SessionSkillCount()),
-                                                   row_width)};
+                                                   row_width,
+                                                   scene.mode == ComposerMode::Idle
+                                                       ? BuildSkillsHintText()
+                                                       : std::string())};
         if (const std::string info_row = BuildStatusLine(chrome, row_width); !info_row.empty()) {
             model.data_rows = {std::move(info_row)};
         }

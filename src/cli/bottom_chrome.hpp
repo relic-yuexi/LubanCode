@@ -97,11 +97,14 @@ inline constexpr int kComposerMinBodyRows = 1;
 // 输入区的完整视图模型:布局只认这一份,不认 echo 摘要、不认行数整数。
 // editor 带全部逻辑行与光标;placeholder 只在主草稿真空时显示(空串 =
 // 不显示,空闲路如今便是空串);prompt 由布局自算显示宽,调用方不必
-// 另传 prompt_end_col。
+// 另传 prompt_end_col。g_hint 是键贴场景单 P0 的 Ctrl+G 小注:装配器按
+// 草稿门槛(BuildComposerGHint,仅 Idle——Busy 没有外部编辑器键)自置,
+// 布局贴在 composer 框最末输入物理行右内角,与底栏无关;空 = 不画。
 struct ComposerViewModel {
     RenderState editor;
     std::string prompt;                            // 首行提示符("> ")
     std::string placeholder;                       // 草稿真空时的占位提示
+    std::string g_hint;                            // Ctrl+G 编辑器小注(空=不画)
     ComposerMode mode = ComposerMode::Idle;
     ConfirmMode confirm_mode = ConfirmMode::Confirm;
     int min_body_rows = kComposerMinBodyRows;
