@@ -32,6 +32,7 @@
 #include "hooks/hash.hpp"
 #include "memory/frontmatter.hpp"
 #include "memory/project_memory.hpp"
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "platform/text_encoding.hpp"
@@ -93,23 +94,7 @@ std::optional<std::string> ReadFileBytes(const fs::path& path) {
 std::string Sha256Text(std::string_view bytes) { return hooks::Sha256Hex(bytes); }
 
 bool AtomicWriteText(const fs::path& path, const std::string& content) {
-    fs::path tmp = path;
-    tmp += ".tmp";
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file.is_open()) {
-            return false;
-        }
-        file.write(content.data(), static_cast<std::streamsize>(content.size()));
-        file.flush();
-        if (!file.good()) {
-            file.close();
-            std::error_code ignored;
-            fs::remove(tmp, ignored);
-            return false;
-        }
-    }
-    return platform::ReplaceFileAtomically(tmp, path).has_value();
+    return platform::AtomicWriteFile(path, content).has_value();
 }
 
 std::optional<nlohmann::json> ParseJsonFile(const fs::path& path) {
@@ -260,21 +245,7 @@ struct ArtifactSink {
         const std::string name = actual + extension;
         const fs::path target = new_session_dir / "artifacts" / "sha256" / Utf8ToPath(name);
         if (!fs::exists(target, ec) || ec) {
-            std::error_code dir_ec;
-            fs::create_directories(target.parent_path(), dir_ec);
-            if (dir_ec) {
-                missing->push_back("artifact 目录建不起: " + PathToUtf8(target.parent_path()));
-                return std::string();
-            }
-            fs::path tmp = target;
-            tmp += ".tmp";
-            {
-                std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-                out.write(bytes->data(), static_cast<std::streamsize>(bytes->size()));
-            }
-            if (!platform::ReplaceFileAtomically(tmp, target).has_value()) {
-                std::error_code ignored;
-                fs::remove(tmp, ignored);
+            if (!platform::AtomicWriteFile(target, *bytes).has_value()) {
                 missing->push_back("artifact 写不进: " + PathToUtf8(target));
                 return std::string();
             }

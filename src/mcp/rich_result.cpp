@@ -8,6 +8,7 @@
 
 #include "agent/model_image_store.hpp"  // DecodeBase64Strict/SniffImageFormat/ReadImageDimensions
 #include "hooks/hash.hpp"               // Sha256Hex:内容寻址与审计
+#include "platform/atomic_write.hpp"    // 统一原子写(审计 P1:替掉先删后换)
 #include "platform/paths.hpp"           // Utf8ToPath:目录路径不走 ACP 窄口
 #include "platform/text_encoding.hpp"   // Utf8PrefixBoundary:节选取头的字节边界
 #include "tools/schema_check.hpp"       // structuredContent 对 outputSchema 的子集校验
@@ -86,34 +87,10 @@ std::string ExtensionForMime(const std::string& mime) {
     return "bin";
 }
 
-// 原子写(与 agent/model_image_store.cpp 的 AtomicWriteBytes 同一套规矩:
-// 同目录 tmp 写完 flush 再 rename,失败清 tmp,不留半截文件)。
+// 原子写,统一走 platform::AtomicWriteFile(旧写法与 model_image_store
+// 同款"先删正式件再 rename";平台件原子替换,失败不动正式件)。
 bool AtomicWriteBytes(const std::filesystem::path& path, const std::string& content) {
-    std::filesystem::path tmp = path;
-    tmp += ".tmp";
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file.is_open()) {
-            return false;
-        }
-        file.write(content.data(), static_cast<std::streamsize>(content.size()));
-        file.flush();
-        if (!file.good()) {
-            file.close();
-            std::error_code ignored;
-            std::filesystem::remove(tmp, ignored);
-            return false;
-        }
-    }
-    std::error_code ignored;
-    std::filesystem::remove(path, ignored);
-    std::error_code ec;
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
-        std::filesystem::remove(tmp, ignored);
-        return false;
-    }
-    return true;
+    return platform::AtomicWriteFile(path, content).has_value();
 }
 
 // JSON 深度(structuredContent 的帽)。

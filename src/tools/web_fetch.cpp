@@ -7,7 +7,8 @@
 
 #include <cpr/cpr.h>
 
-#include "tools/tool_text.hpp"  // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
+#include "platform/text_encoding.hpp"  // SanitizeExternalText/Utf8PrefixBoundary:外来文本公共关口
+#include "tools/tool_text.hpp"         // 模型可见文案(描述/参数说明)查表,源头 prompts/tools/
 
 namespace lubancode::tools {
 
@@ -187,72 +188,31 @@ std::string TruncateUtf8(const std::string& text, std::size_t max_bytes) {
     if (text.size() <= max_bytes) {
         return text;
     }
-    std::size_t cut = max_bytes;
-    // 往回退过所有续字节(10xxxxxx),落在字符边界上。最多退 3 步——
-    // 合法 UTF-8 的续字节连不到 4 个,连到了说明本来就是烂的,直接切。
-    for (int i = 0; i < 3 && cut > 0; ++i) {
-        if ((static_cast<unsigned char>(text[cut]) & 0xC0) != 0x80) {
-            break;
-        }
-        --cut;
-    }
-    return text.substr(0, cut);
+    return text.substr(0, platform::Utf8PrefixBoundary(text, max_bytes));
 }
 
-std::string SanitizeUtf8(const std::string& text) {
-    std::string out;
-    out.reserve(text.size());
-    std::size_t i = 0;
-    while (i < text.size()) {
-        const unsigned char c = static_cast<unsigned char>(text[i]);
-        std::size_t len = 0;
-        unsigned int min_value = 0;
-        if (c < 0x80) {
-            out += static_cast<char>(c);
-            ++i;
-            continue;
-        } else if ((c & 0xE0) == 0xC0) {
-            len = 2;
-            min_value = 0x80;
-        } else if ((c & 0xF0) == 0xE0) {
-            len = 3;
-            min_value = 0x800;
-        } else if ((c & 0xF8) == 0xF0) {
-            len = 4;
-            min_value = 0x10000;
-        } else {
-            out += '?';
-            ++i;
-            continue;
-        }
-        if (i + len > text.size()) {
-            out += '?';
-            ++i;
-            continue;
-        }
-        unsigned int code = c & (0xFF >> (len + 1));
-        bool valid = true;
-        for (std::size_t j = 1; j < len; ++j) {
-            const unsigned char cc = static_cast<unsigned char>(text[i + j]);
-            if ((cc & 0xC0) != 0x80) {
-                valid = false;
-                break;
-            }
-            code = (code << 6) | (cc & 0x3F);
-        }
-        // 过长编码、代理区、超出 U+10FFFF 都算非法。
-        if (valid && (code < min_value || (code >= 0xD800 && code <= 0xDFFF) || code > 0x10FFFF)) {
-            valid = false;
-        }
-        if (valid) {
-            out.append(text, i, len);
-            i += len;
-        } else {
-            out += '?';
-            ++i;
-        }
+PreparedBody PrepareFetchedBody(const std::string& content_type, const std::string& raw_body,
+                                std::size_t max_bytes) {
+    // Content-Type 大小写不敏感地认 text/html(cpr 的 header 已小写化过
+    // 一道,这里把入参也折小写,纯函数口不赖调用方)。
+    std::string content_type_lower = content_type;
+    for (char& c : content_type_lower) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
     }
-    return out;
+    const bool is_html = content_type_lower.find("text/html") != std::string::npos;
+    std::string body = is_html ? StripHtml(raw_body) : raw_body;
+    // 网页什么编码的都有(GBK/Latin-1……),统一过外来文本清洗——
+    // tool_result 最终要进 JSON 请求体,nlohmann dump() 遇到非法 UTF-8 会抛;
+    // 与 MCP rich result、Search 同一份替换合同(platform::SanitizeExternalText)。
+    body = platform::SanitizeExternalText(body);
+
+    PreparedBody prepared;
+    prepared.truncated = body.size() > max_bytes;
+    if (prepared.truncated) {
+        body = TruncateUtf8(body, max_bytes);
+    }
+    prepared.text = std::move(body);
+    return prepared;
 }
 
 WebFetchTool::WebFetchTool(std::string user_agent) : user_agent_(std::move(user_agent)) {}
@@ -330,10 +290,6 @@ Tool::Result WebFetchTool::execute(const nlohmann::json& input) {
     if (auto it = response.header.find("Content-Type"); it != response.header.end()) {
         content_type = it->second;
     }
-    std::string content_type_lower = content_type;
-    for (char& c : content_type_lower) {
-        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-    }
 
     // 二进制拒收:正文里出现 NUL 字节,基本可断定不是文本(图片/压缩包/
     // 可执行文件……),剥不出正文,给模型也没用。
@@ -343,16 +299,10 @@ Tool::Result WebFetchTool::execute(const nlohmann::json& input) {
                 true};
     }
 
-    const bool is_html = content_type_lower.find("text/html") != std::string::npos;
-    std::string body = is_html ? StripHtml(response.text) : response.text;
-    // 网页什么编码的都有(GBK/Latin-1……),先把非法 UTF-8 洗掉——
-    // tool_result 最终要进 JSON 请求体,nlohmann dump() 遇到非法 UTF-8 会抛。
-    body = SanitizeUtf8(body);
-
-    const bool truncated = body.size() > max_bytes;
-    if (truncated) {
-        body = TruncateUtf8(body, max_bytes);
-    }
+    // 剥标签 -> 外来文本清洗(公共关口)-> UTF-8 边界截断,纯函数管线。
+    const PreparedBody prepared = PrepareFetchedBody(content_type, response.text, max_bytes);
+    const std::string& body = prepared.text;
+    const bool truncated = prepared.truncated;
 
     // 开头一行元信息。URL 用 response.url(跟随重定向后的最终地址)。
     const std::string final_url = response.url.str().empty() ? url : response.url.str();

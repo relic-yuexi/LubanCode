@@ -5,7 +5,10 @@
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <span>
 #include <utility>
+
+#include "platform/base64.hpp"  // Base64Encode:标准 base64 公共内核(审计 P2)
 
 namespace lubancode::cli {
 
@@ -325,20 +328,10 @@ std::optional<std::string> MediaTypeForPath(std::string_view path) {
 }
 
 std::string Base64Encode(const std::vector<std::uint8_t>& bytes) {
-    static constexpr char kAlphabet[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve(((bytes.size() + 2U) / 3U) * 4U);
-    for (std::size_t pos = 0; pos < bytes.size(); pos += 3) {
-        const std::uint32_t first = bytes[pos];
-        const std::uint32_t second = pos + 1 < bytes.size() ? bytes[pos + 1] : 0U;
-        const std::uint32_t third = pos + 2 < bytes.size() ? bytes[pos + 2] : 0U;
-        const std::uint32_t chunk = (first << 16U) | (second << 8U) | third;
-        out.push_back(kAlphabet[(chunk >> 18U) & 0x3fU]);
-        out.push_back(kAlphabet[(chunk >> 12U) & 0x3fU]);
-        out.push_back(pos + 1 < bytes.size() ? kAlphabet[(chunk >> 6U) & 0x3fU] : '=');
-        out.push_back(pos + 2 < bytes.size() ? kAlphabet[chunk & 0x3fU] : '=');
-    }
-    return out;
+    // 薄口:标准 base64 内核统一住 platform/base64(审计 P2:五处手写收
+    // 一)。签名保留 vector 入参——历史导出面,测试与调用方在用。
+    return lubancode::platform::Base64Encode(
+        std::span<const std::byte>(reinterpret_cast<const std::byte*>(bytes.data()), bytes.size()));
 }
 
 std::expected<PreparedImageInput, ImageInputError> PrepareImageInput(std::string_view input) {

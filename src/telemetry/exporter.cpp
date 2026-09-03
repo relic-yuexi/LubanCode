@@ -25,6 +25,7 @@
 
 #include <cpr/cpr.h>
 
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
 #include "platform/wall_clock.hpp"
 
@@ -197,23 +198,9 @@ std::string TruncateDetail(std::string text, std::size_t cap = 160) {
 }
 
 bool WriteTextFileAtomic(const std::filesystem::path& path, const std::string& content) {
-    std::filesystem::path tmp = path;
-    tmp += ".tmp";
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file.is_open()) {
-            return false;
-        }
-        file.write(content.data(), static_cast<std::streamsize>(content.size()));
-        file.flush();
-        if (!file.good()) {
-            file.close();
-            std::error_code ignored;
-            std::filesystem::remove(tmp, ignored);
-            return false;
-        }
-    }
-    return platform::ReplaceFileAtomically(tmp, path).has_value();
+    // 统一原子写(审计 P1):唯一临时名 + 平台原子替换,替掉本文件原先
+    // 自备的固定 .tmp 协议。耐久档与旧实现持平(可见性原子)。
+    return platform::AtomicWriteFile(path, content).has_value();
 }
 
 }  // namespace

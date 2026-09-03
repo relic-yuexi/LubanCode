@@ -13,6 +13,7 @@
 #include <utility>
 
 #include "hooks/hash.hpp"
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1:definition/checkpoint/manifest 三处)
 #include "platform/json_safe.hpp"
 #include "platform/paths.hpp"
 #include "platform/wall_clock.hpp"
@@ -287,21 +288,13 @@ std::expected<RunJournal, std::string> RunJournal::Start(const std::filesystem::
     if (ec) {
         return std::unexpected("run 目录建不成: " + lubancode::platform::PathToUtf8(dir) + ": " + ec.message());
     }
-    // definition 快照(原子):先临时件再 rename。
-    const std::filesystem::path def_tmp = dir / ".definition.json.tmp";
+    // definition 快照(原子),统一走 platform::AtomicWriteFile。
     const std::filesystem::path def_path = dir / "definition.json";
     {
-        std::ofstream def_file(def_tmp, std::ios::binary | std::ios::trunc);
-        if (!def_file) {
-            return std::unexpected("definition 快照写不开: " + lubancode::platform::PathToUtf8(def_tmp));
+        const auto written = lubancode::platform::AtomicWriteFile(def_path, info.definition_json);
+        if (!written.has_value()) {
+            return std::unexpected("definition 快照写不成: " + written.error().message);
         }
-        def_file << info.definition_json;
-    }
-    std::filesystem::rename(def_tmp, def_path, ec);
-    if (ec) {
-        std::error_code remove_ec;
-        std::filesystem::remove(def_tmp, remove_ec);
-        return std::unexpected("definition 快照换名不成: " + ec.message());
     }
 
     nlohmann::json manifest = info.ToManifestJson();
@@ -346,24 +339,12 @@ void RunJournal::Append(const std::string& type, const std::string& node_id, int
 
 void RunJournal::SaveCheckpoint(std::uint64_t at_seq, const nlohmann::json& store_json) {
     if (broken_ || dir_.empty()) return;
-    std::error_code ec;
-    const std::filesystem::path cp_dir = dir_ / "checkpoints";
-    std::filesystem::create_directories(cp_dir, ec);
-    const std::filesystem::path tmp = cp_dir / (".cp.tmp");
-    const std::filesystem::path final_path = cp_dir / (std::to_string(at_seq) + ".json");
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file) {
-            std::cerr << "[workflow-journal] checkpoint 写不开(" << lubancode::platform::PathToUtf8(tmp) << ")\n";
-            return;
-        }
-        file << SanitizeJournalPayload(store_json).dump();
-    }
-    std::filesystem::rename(tmp, final_path, ec);
-    if (ec) {
-        std::error_code remove_ec;
-        std::filesystem::remove(tmp, remove_ec);
-        std::cerr << "[workflow-journal] checkpoint 换名不成: " << ec.message() << "\n";
+    const std::filesystem::path final_path = dir_ / "checkpoints" / (std::to_string(at_seq) + ".json");
+    // 统一原子写(审计 P1):父目录由平台件建,唯一临时名 + 原子替换。
+    const auto written =
+        lubancode::platform::AtomicWriteFile(final_path, SanitizeJournalPayload(store_json).dump());
+    if (!written.has_value()) {
+        std::cerr << "[workflow-journal] checkpoint 写不成: " << written.error().message << "\n";
         return;
     }
     Append(kEventCheckpointSaved, std::string(), 0, nlohmann::json{{"seq", at_seq}});
@@ -382,8 +363,8 @@ void RunJournal::Finish(const std::string& final_state, const nlohmann::json& su
 }
 
 void RunJournal::WriteManifest(const std::string& final_state, const nlohmann::json& summary) {
-    // Start 落基础字段(start_manifest_ 存着),Finish 补终态,同一套原子写。
-    std::error_code ec;
+    // Start 落基础字段(start_manifest_ 存着),Finish 补终态,同一套统一
+    // 原子写(platform::AtomicWriteFile)。
     nlohmann::json manifest =
         start_manifest_.is_object() ? start_manifest_ : nlohmann::json::object();
     if (!final_state.empty()) {
@@ -391,17 +372,10 @@ void RunJournal::WriteManifest(const std::string& final_state, const nlohmann::j
         manifest["finished_at"] = NowIsoLike();
         if (summary.is_object()) manifest["summary"] = SanitizeJournalPayload(summary);
     }
-    const std::filesystem::path tmp = dir_ / ".manifest.json.tmp";
     const std::filesystem::path path = dir_ / "manifest.json";
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file) return;
-        file << manifest.dump(2);
-    }
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
-        std::error_code remove_ec;
-        std::filesystem::remove(tmp, remove_ec);
+    const auto written = lubancode::platform::AtomicWriteFile(path, manifest.dump(2));
+    if (!written.has_value()) {
+        std::cerr << "[workflow-journal] manifest 写不成: " << written.error().message << "\n";
     }
 }
 

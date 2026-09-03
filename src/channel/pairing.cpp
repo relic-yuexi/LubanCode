@@ -7,6 +7,7 @@
 #include <nlohmann/json.hpp>
 
 #include "channel/digest.hpp"
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1:旧写法先删正式账再换名)
 #include "platform/paths.hpp"
 
 namespace lubancode::channel {
@@ -134,31 +135,13 @@ bool PairingStore::SaveLocked() {
         array.push_back(RecordToJson(record));
     }
     const std::string text = array.dump();
-    // 原子写:temp + replace(std::filesystem::rename 在 Windows 不覆盖,
-    // 先 remove 再 rename;断电窗口由下回 Open 的坏账路径兜底)。
-    std::filesystem::path temp = pairing_path_;
-    temp += ".new";
-    {
-        std::ofstream stream(temp, std::ios::binary | std::ios::trunc);
-        if (!stream) {
-            write_blocked_ = true;
-            last_error_ = "pairing 账写不开: " + platform::PathToUtf8(temp);
-            return false;
-        }
-        stream.write(text.data(), static_cast<std::streamsize>(text.size()));
-        stream.flush();
-        if (!stream) {
-            write_blocked_ = true;
-            last_error_ = "pairing 账落盘失败: " + platform::PathToUtf8(temp);
-            return false;
-        }
-    }
-    std::error_code ec;
-    std::filesystem::remove(pairing_path_, ec);
-    std::filesystem::rename(temp, pairing_path_, ec);
-    if (ec) {
+    // 原子写,统一走 platform::AtomicWriteFile(旧写法先 remove 正式账再
+    // rename,每次保存都留出账本不存在的窗口;新写法平台原子替换,失败
+    // 不动正式账)。
+    const auto written = platform::AtomicWriteFile(pairing_path_, text);
+    if (!written.has_value()) {
         write_blocked_ = true;
-        last_error_ = "pairing 账换名失败: " + ec.message();
+        last_error_ = "pairing 账落盘失败: " + written.error().message;
         return false;
     }
     return true;

@@ -6,6 +6,7 @@
 #include <nlohmann/json.hpp>
 
 #include "insights/report_model.hpp"  // kInsightsAnalyzerVersion
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1:替掉 .tmp+.old 搬移协议)
 
 namespace lubancode::insights {
 
@@ -18,58 +19,25 @@ DerivedWriteResult WriteSessionSummaryAtomic(const std::filesystem::path& sessio
     DerivedWriteResult result;
     const std::filesystem::path target = SessionSummaryPath(session_dir);
     result.path = target;
-    std::error_code ec;
-    std::filesystem::create_directories(target.parent_path(), ec);
-    if (ec) {
-        result.error_code = "derived.mkdir_failed";
-        result.message = "派生目录建不成:" + target.parent_path().string() + ": " + ec.message();
-        return result;
-    }
-    std::filesystem::path tmp = target;
-    tmp += ".tmp";
-    {
-        std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-        if (!out) {
+    // 统一走 platform::AtomicWriteFile:唯一临时名、平台原子替换、失败不
+    // 动正式摘要。derived.* 稳定码保持原值(读侧按码记账)。
+    const auto written = platform::AtomicWriteFile(target, summary.ToJson().dump(2) + "\n");
+    if (!written.has_value()) {
+        static const std::string kTmpOpen("atomic.tmp_open_failed");
+        static const std::string kTmpWrite("atomic.tmp_write_failed");
+        static const std::string kMkdir("atomic.mkdir_failed");
+        const std::string& code = written.error().code;
+        if (code == kTmpOpen) {
             result.error_code = "derived.tmp_open_failed";
-            result.message = "临时文件打不开:" + tmp.string();
-            return result;
-        }
-        out << summary.ToJson().dump(2) << "\n";
-        out.flush();
-        if (!out) {
+        } else if (code == kTmpWrite) {
             result.error_code = "derived.tmp_write_failed";
-            result.message = "临时文件写失败:" + tmp.string();
-            std::filesystem::remove(tmp, ec);
-            return result;
+        } else if (code == kMkdir) {
+            result.error_code = "derived.mkdir_failed";
+        } else {
+            result.error_code = "derived.rename_failed";
         }
-    }
-    // Windows 的 rename 不覆盖已有文件,先挪走旧的再换(全程不留半截)。
-    std::filesystem::path old;
-    if (std::filesystem::exists(target, ec)) {
-        old = target;
-        old += ".old";
-        std::filesystem::remove(old, ec);
-        std::error_code rename_ec;
-        std::filesystem::rename(target, old, rename_ec);
-        if (rename_ec) {
-            old.clear();
-        }
-    }
-    std::error_code rename_ec;
-    std::filesystem::rename(tmp, target, rename_ec);
-    if (rename_ec) {
-        // 换不上:把旧摘要挪回去,清 tmp,如实报错。
-        if (!old.empty()) {
-            std::error_code back_ec;
-            std::filesystem::rename(old, target, back_ec);
-        }
-        std::filesystem::remove(tmp, ec);
-        result.error_code = "derived.rename_failed";
-        result.message = "原子替换失败:" + rename_ec.message();
+        result.message = written.error().message;
         return result;
-    }
-    if (!old.empty()) {
-        std::filesystem::remove(old, ec);
     }
     result.ok = true;
     return result;

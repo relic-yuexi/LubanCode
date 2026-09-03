@@ -366,10 +366,10 @@ Hook 却没有复用：
 - [x] P3：合并 Agent 面板两对完全相同的翻译 key 与选择分支。
 - [x] P0：修 Hook 回合身份；先钉 UserPromptSubmit 的更新时序，再让 Hook/事件/trace/trajectory 共用一枚 turn id。
 - [x] P1：把四套审批枚举收成公共值域与具名转换，先清全部跨枚举 `static_cast`。
-- [ ] P1：建立统一原子写 API；先迁 Gateway 与持久事实账，再迁派生缓存。
-- [ ] P1：WebFetch 改走公共外部文本清洗入口，删私有 UTF-8 解码器。
-- [ ] P2：合并 SHA-256 与 Base64；算法迁移各自单独提交，不跟业务改造混装。
-- [ ] 候选路径比较与环境变量读取先补同向量测试；没有行为同一性证据，不贸然抽象。
+- [x] P1：建立统一原子写 API；先迁 Gateway 与持久事实账，再迁派生缓存。
+- [x] P1：WebFetch 改走公共外部文本清洗入口，删私有 UTF-8 解码器。
+- [x] P2：合并 SHA-256 与 Base64；算法迁移各自单独提交，不跟业务改造混装。
+- [x] 候选路径比较与环境变量读取先补同向量测试；没有行为同一性证据，不贸然抽象。
 - [ ] UI、身份、权限、存储、编码、摘要六条线分提交推进；不得因同属“去重”绑成一只大改。
 
 ## 七、验收门槛
@@ -383,8 +383,8 @@ Hook 却没有复用：
 - [ ] 非显示模块每项另留行为证据：同一输入只走一条 canonical path，旧路无调用、无双写、无双份落盘。
 - [x] Hook payload 的 `turn_id` 可与 runtime event、trace、trajectory 直接等值联表；`hook_run_id` 只标一次 Hook 发射。（integration.hooks.hooks_turn_identity 钉五类 Hook 与事件流等值；trace/trajectory 吃同一枚 canonical 号,代码同源）
 - [x] 审批档跨 CLI/Runtime/Agent/Session/Peer/Hook 往返不靠枚举整数。（unit.cli.approval_mode_boundary 表驱动五档乱序往返;resume/peer/hook/子代理各边全走 machine name 或具名桥,rg 无 static_cast 孤尾）
-- [ ] 原子写故障注入证明正式文件不会先消失，并写清 crash durability 到底保到哪一层。
-- [ ] 外来文本、SHA-256、Base64 各只剩一个算法内核；业务层保留薄适配，不复制循环。
+- [x] 原子写故障注入证明正式文件不会先消失，并写清 crash durability 到底保到哪一层。（unit.platform.atomic_write 六景+并发三连;Visibility/CrashDurability 两档合同分立）
+- [x] 外来文本、SHA-256、Base64 各只剩一个算法内核；业务层保留薄适配，不复制循环。（platform/sha256、platform/base64 唯一内核,rg 常量/字母表单点命中;WebFetch 五类留样对公共口逐字节同归）
 
 ## 八、提交边界
 

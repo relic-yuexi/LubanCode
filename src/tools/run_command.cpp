@@ -16,6 +16,7 @@
 #include <unistd.h>  // access(X_OK):PATH 里探 bash 用
 #endif
 
+#include "platform/paths.hpp"          // GetEnvVar:环境变量读取的唯一口(审计 P3 候选并口);Windows 另有 Utf8ToWide
 #include "platform/process.hpp"
 #include "tools/background_tasks.hpp"  // BackgroundTaskRegistry:后台模式登记 task_id + 起 watcher 探活
 #include "platform/text_encoding.hpp"  // SanitizeUtf8:捕获侧治本,见 execute() 里的调用点注释
@@ -27,7 +28,9 @@
 #include <atomic>
 
 #ifdef _WIN32
-#include "platform/paths.hpp"  // Utf8ToWide:PowerShell -EncodedCommand 拼接用
+#include <span>
+
+#include "platform/base64.hpp"  // Base64Encode:-EncodedCommand 的公共内核(审计 P2)
 #endif
 
 namespace lubancode::tools {
@@ -139,34 +142,18 @@ std::optional<std::string> FindOnPath(const std::string& name_utf8, const char* 
     return std::nullopt;
 }
 
-std::optional<std::string> ReadEnvironmentVariable(const char* name) {
-#ifdef _WIN32
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) {
-        std::free(value);
-        return std::nullopt;
-    }
-    std::string result(value);
-    std::free(value);
-    return result;
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr) {
-        return std::nullopt;
-    }
-    return std::string(value);
-#endif
-}
-
 // 本机装没装 bash(POSIX)/pwsh(Windows)。结果缓存。
 bool OptionalShellAvailable(const std::string& shell_id) {
+    // PATH 读取并入 platform::GetEnvVar(src 收口审计 P3 候选:私有读取把
+    // "空 PATH"当 optional("")、平台口当 nullopt——三格语义测试钉住平台
+    // 合同后并口。对本处行为无差:FindOnPath 对空串与缺席同样找不到,
+    // bash/pwsh 都按"PATH 里没有"收场。
     static const bool bash_ok = [] {
 #ifdef _WIN32
         return false;  // bash 是 POSIX 侧的可选 shell;Windows 不认(WSL 那只 bash 不是宿主 shell)
 #else
         // 常见落点先直查(/bin/bash、/usr/bin/bash),再走 PATH。
-        const auto path = ReadEnvironmentVariable("PATH");
+        const auto path = platform::GetEnvVar("PATH");
         return ShellExecutableExists("/bin/bash") || ShellExecutableExists("/usr/bin/bash") ||
                (path.has_value() && FindOnPath("bash", path->c_str()).has_value());
 #endif
@@ -175,7 +162,7 @@ bool OptionalShellAvailable(const std::string& shell_id) {
 #ifdef _WIN32
         // pwsh 按名字过 PATH 找(PowerShell 7 默认装进 Program Files 并入 PATH;
         // 没装(只有 Windows PowerShell 5.1)就找不到,如实不可用)。
-        const auto path = ReadEnvironmentVariable("PATH");
+        const auto path = platform::GetEnvVar("PATH");
         return path.has_value() && FindOnPath("pwsh", path->c_str()).has_value();
 #else
         return false;  // pwsh 是 Windows 侧的可选 shell;POSIX 不认(装了 pwsh 的 Linux 用户极少,不替他们猜)
@@ -333,40 +320,8 @@ namespace {
 // PowerShell 专属的 base64/编码命令拼接。进程执行的公共基建(RunProcess/
 // BuildCmdCommandLine/编码转换)在 platform/process.hpp、platform/paths.hpp
 // (跨平台单从 tools/process_exec.hpp 搬的家,见那两个文件头注释)。
-
-// 手写的标准 base64 编码,-EncodedCommand 要的就是这个格式,不引额外依赖。
-std::string Base64Encode(const unsigned char* data, std::size_t len) {
-    static const char kTable[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve(((len + 2) / 3) * 4);
-
-    std::size_t i = 0;
-    while (i + 3 <= len) {
-        const unsigned int n = (static_cast<unsigned int>(data[i]) << 16) |
-                                (static_cast<unsigned int>(data[i + 1]) << 8) |
-                                static_cast<unsigned int>(data[i + 2]);
-        out.push_back(kTable[(n >> 18) & 0x3F]);
-        out.push_back(kTable[(n >> 12) & 0x3F]);
-        out.push_back(kTable[(n >> 6) & 0x3F]);
-        out.push_back(kTable[n & 0x3F]);
-        i += 3;
-    }
-    const std::size_t rem = len - i;
-    if (rem == 1) {
-        const unsigned int n = static_cast<unsigned int>(data[i]) << 16;
-        out.push_back(kTable[(n >> 18) & 0x3F]);
-        out.push_back(kTable[(n >> 12) & 0x3F]);
-        out.push_back('=');
-        out.push_back('=');
-    } else if (rem == 2) {
-        const unsigned int n = (static_cast<unsigned int>(data[i]) << 16) | (static_cast<unsigned int>(data[i + 1]) << 8);
-        out.push_back(kTable[(n >> 18) & 0x3F]);
-        out.push_back(kTable[(n >> 12) & 0x3F]);
-        out.push_back(kTable[(n >> 6) & 0x3F]);
-        out.push_back('=');
-    }
-    return out;
-}
+// base64 编码统一走 platform::Base64Encode(审计 P2:五处手写收一)——
+// 这里只管把脚本先编成 UTF-16LE 字节,-EncodedCommand 要的格式。
 
 // 拼一段 PowerShell 脚本,再编码成 -EncodedCommand 要的 UTF-16LE + base64。
 // 用 -EncodedCommand 而不是直接拼 -Command "...",是为了绕开用户命令里
@@ -410,7 +365,8 @@ std::string BuildEncodedCommand(const std::string& user_command_utf8) {
         "if ($errseen) { exit 1 } else { exit 0 }\r\n";  // cmdlet 报错/找不到命令 vs 干净
 
     const std::wstring wide = platform::Utf8ToWide(script_utf8);
-    return Base64Encode(reinterpret_cast<const unsigned char*>(wide.data()), wide.size() * sizeof(wchar_t));
+    return platform::Base64Encode(std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(wide.data()), wide.size() * sizeof(wchar_t)));
 }
 
 // 后台专用的流式 wrapper(background 管理面单):与上面那颗的差异只有
@@ -437,7 +393,8 @@ std::string BuildBackgroundEncodedCommand(const std::string& user_command_utf8) 
         "if ($?) { exit 0 } else { exit 1 }\r\n";
 
     const std::wstring wide = platform::Utf8ToWide(script_utf8);
-    return Base64Encode(reinterpret_cast<const unsigned char*>(wide.data()), wide.size() * sizeof(wchar_t));
+    return platform::Base64Encode(std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(wide.data()), wide.size() * sizeof(wchar_t)));
 }
 
 }  // namespace

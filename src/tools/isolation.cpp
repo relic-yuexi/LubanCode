@@ -1,9 +1,10 @@
 #include "tools/isolation.hpp"
 
-#include <algorithm>
 #include <filesystem>
 #include <system_error>
 #include <utility>
+
+#include "platform/paths.hpp"  // PathComparisonKey:比较键公共件(审计 P2 候选收编)
 
 namespace lubancode::tools {
 
@@ -13,32 +14,16 @@ std::filesystem::path Utf8Path(const std::string& utf8) {
     return std::filesystem::path(std::u8string(reinterpret_cast<const char8_t*>(utf8.data()), utf8.size()));
 }
 
-std::string PathToUtf8(const std::filesystem::path& path) {
-    const std::u8string u8 = path.u8string();
-    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
+}  // namespace
+
+// 归一化比较键:合同与实现统一在 platform::PathComparisonKey(src 收口
+// 审计 P2 候选:三处私房实现共享向量证一致后收编,这里只留领域薄名,
+// 隔离闸内部与向量测试在用)。
+std::string NormalizeKey(const std::filesystem::path& path) {
+    return platform::PathComparisonKey(path);
 }
 
-// 归一化比较键:weakly_canonical(失败退 lexically_normal),反斜杠统一
-// 正斜杠,ASCII 折小写(Windows 习惯),尾斜杠剥掉。跟 sessions/session_store
-// 的 NormalizePathForCompare 同一套思路;这里不引 agent 层,单备一份。
-std::string NormalizeKey(const std::filesystem::path& path) {
-    std::error_code ec;
-    std::filesystem::path p = std::filesystem::weakly_canonical(path, ec);
-    if (ec || p.empty()) {
-        p = path.lexically_normal();
-    }
-    std::string s = PathToUtf8(p);
-    std::replace(s.begin(), s.end(), '\\', '/');
-    for (char& c : s) {
-        if (c >= 'A' && c <= 'Z') {
-            c = static_cast<char>(c - 'A' + 'a');
-        }
-    }
-    while (s.size() > 1 && s.back() == '/') {
-        s.pop_back();
-    }
-    return s;
-}
+namespace {
 
 // key 是否落在 root_key 之下(root_key 自身不算,直接子级往下才算)。
 bool IsUnder(const std::string& key, const std::string& root_key) {

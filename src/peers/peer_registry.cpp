@@ -11,6 +11,7 @@
 #include <sstream>
 #include <string_view>
 
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"  // ReplaceFileAtomically
 
 namespace lubancode::peers {
@@ -112,24 +113,8 @@ bool PeerRegistry::WriteOwn(const PeerCard& card) const {
         return false;
     }
     const std::filesystem::path target = dir_ / (card.peer_id + ".json");
-    const std::filesystem::path temp = dir_ / (card.peer_id + ".json.tmp");
-    {
-        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
-        if (!out.is_open()) {
-            return false;
-        }
-        out << PeerCardToJson(card).dump();
-        out.flush();
-        if (!out.good()) {
-            return false;
-        }
-    }
-    if (!platform::ReplaceFileAtomically(temp, target).has_value()) {
-        std::error_code ec;
-        std::filesystem::remove(temp, ec);
-        return false;
-    }
-    return true;
+    // 统一原子写(审计 P1):名片是持久事实,唯一临时名 + 平台原子替换。
+    return platform::AtomicWriteFile(target, PeerCardToJson(card).dump()).has_value();
 }
 
 bool PeerRegistry::Remove(const std::string& peer_id) const {
@@ -153,8 +138,10 @@ std::vector<PeerCard> PeerRegistry::ListPeers(long long now_unix,
             continue;
         }
         const std::string filename = lubancode::platform::PathToUtf8(entry.path().filename());
-        if (filename.size() < 6 || filename.compare(filename.size() - 5, 5, ".json") != 0 ||
-            (filename.size() >= 9 && filename.compare(filename.size() - 9, 9, ".json.tmp") == 0)) {
+        // 名片只认 "<peer_id>.json"。写到一半的临时件(旧协议 ".json.tmp"、
+        // AtomicWriteFile 的 ".json.<pid>-<n>.tmp")都以 ".tmp" 收尾,天然
+        // 过不了 ".json" 后缀这一关,不必单列。
+        if (filename.size() < 6 || filename.compare(filename.size() - 5, 5, ".json") != 0) {
             continue;  // 不是名片(可能是写到一半的临时文件)
         }
         try {

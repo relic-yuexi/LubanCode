@@ -9,6 +9,7 @@
 
 #include "agent/context_events.hpp"  // Fingerprint64:块局部指纹
 #include "hooks/hash.hpp"            // Sha256Hex:真本的内容寻址
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1:替掉先删后换)
 #include "platform/paths.hpp"        // Utf8ToPath:仓路径不走 ACP 窄口
 #include "platform/text_encoding.hpp"
 #include "tools/session_utils.hpp"   // NowTimestamp(P0-6 自 sessions 迁来)
@@ -396,35 +397,11 @@ std::string MimeFor(ArtifactContentKind kind) {
     }
 }
 
-// 原子写:同目录 tmp 文件写完 flush/close 再 rename。任一步失败 false。
-// 路径一律收 std::filesystem::path(调用方经 platform::Utf8ToPath 从 UTF-8
-// 建好)——窄串口走 ACP,GBK 机器上仓路径带 emoji/生僻字会直接抛 1113。
+// 原子写,统一走 platform::AtomicWriteFile(旧写法"Windows 的 rename 不
+// 覆盖已存在目标:先删再改名"留出正式件不存在的窗口;平台件原子替换,
+// 失败不动正式件)。
 bool AtomicWriteFile(const std::filesystem::path& path, const std::string& content) {
-    std::filesystem::path tmp = path;
-    tmp += ".tmp";  // 纯 ASCII 后缀,窄口拼接不涉代码页
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file.is_open()) {
-            return false;
-        }
-        file.write(content.data(), static_cast<std::streamsize>(content.size()));
-        file.flush();
-        if (!file.good()) {
-            file.close();
-            std::filesystem::remove(tmp);
-            return false;
-        }
-    }
-    // Windows 的 rename 不覆盖已存在目标:先删再改名(同目录,原子性够)。
-    std::error_code ignored;
-    std::filesystem::remove(path, ignored);
-    std::error_code ec;
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
-        std::filesystem::remove(tmp, ignored);
-        return false;
-    }
-    return true;
+    return platform::AtomicWriteFile(path, content).has_value();
 }
 
 bool AppendLineFlushed(const std::filesystem::path& path, const std::string& line) {

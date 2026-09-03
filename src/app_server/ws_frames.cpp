@@ -1,8 +1,10 @@
-// ws_frames.hpp 的实现:SHA-1、base64、握手解析、帧编解码。全在一条
-// 纯函数线上,无锁无线程。
+// ws_frames.hpp 的实现:SHA-1、握手解析、帧编解码。全在一条
+// 纯函数线上,无锁无线程。base64 走 platform 内核(薄口)。
 #include "app_server/ws_frames.hpp"
 
 #include <algorithm>
+
+#include "platform/base64.hpp"  // Base64Encode:标准 base64 公共内核(审计 P2)
 
 namespace lubancode::app_server::ws {
 
@@ -136,37 +138,9 @@ std::array<std::uint8_t, 20> Sha1Digest(std::string_view bytes) {
 }
 
 std::string Base64Encode(std::string_view bytes) {
-    static constexpr const char* kAlphabet =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve((bytes.size() + 2) / 3 * 4);
-    std::size_t i = 0;
-    while (i + 3 <= bytes.size()) {
-        const std::uint32_t triple = (static_cast<std::uint8_t>(bytes[i]) << 16) |
-                                     (static_cast<std::uint8_t>(bytes[i + 1]) << 8) |
-                                     static_cast<std::uint8_t>(bytes[i + 2]);
-        out.push_back(kAlphabet[(triple >> 18) & 0x3F]);
-        out.push_back(kAlphabet[(triple >> 12) & 0x3F]);
-        out.push_back(kAlphabet[(triple >> 6) & 0x3F]);
-        out.push_back(kAlphabet[triple & 0x3F]);
-        i += 3;
-    }
-    const std::size_t rest = bytes.size() - i;
-    if (rest == 1) {
-        const std::uint32_t pair = static_cast<std::uint8_t>(bytes[i]) << 16;
-        out.push_back(kAlphabet[(pair >> 18) & 0x3F]);
-        out.push_back(kAlphabet[(pair >> 12) & 0x3F]);
-        out.push_back('=');
-        out.push_back('=');
-    } else if (rest == 2) {
-        const std::uint32_t pair = (static_cast<std::uint8_t>(bytes[i]) << 16) |
-                                   (static_cast<std::uint8_t>(bytes[i + 1]) << 8);
-        out.push_back(kAlphabet[(pair >> 18) & 0x3F]);
-        out.push_back(kAlphabet[(pair >> 12) & 0x3F]);
-        out.push_back(kAlphabet[(pair >> 6) & 0x3F]);
-        out.push_back('=');
-    }
-    return out;
+    // 薄口:标准 base64 内核统一住 platform/base64(审计 P2:五处手写收
+    // 一,SHA-1 的算法边界不动)。
+    return platform::Base64Encode(bytes);
 }
 
 std::string ComputeAcceptKey(std::string_view client_key) {

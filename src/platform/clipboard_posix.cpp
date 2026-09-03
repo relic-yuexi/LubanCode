@@ -7,53 +7,20 @@
 
 #ifndef _WIN32
 
-#include <array>
 #include <cstdio>
 #include <optional>
 #include <vector>
 
+#include "platform/base64.hpp"  // Base64Encode:OSC 52 载荷的公共内核(审计 P2)
 #include "platform/console.hpp"
 
 namespace lubancode::platform {
 
 namespace {
 
-// 小而正确的 base64(标准字母表 + 填充);剪贴板载荷用,别引第三方。
+// 薄名:剪贴板载荷过公共 base64 内核(标准字母表 + 填充)。
 std::string Base64Encode(const std::string& bytes) {
-    static constexpr std::array<char, 64> kAlphabet{
-        'A', 'B', 'C', 'D', 'E', 'F', 'G', 'H', 'I', 'J', 'K', 'L', 'M', 'N', 'O', 'P',
-        'Q', 'R', 'S', 'T', 'U', 'V', 'W', 'X', 'Y', 'Z', 'a', 'b', 'c', 'd', 'e', 'f',
-        'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's', 't', 'u', 'v',
-        'w', 'x', 'y', 'z', '0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '+', '/'};
-    std::string out;
-    out.reserve((bytes.size() + 2) / 3 * 4);
-    std::size_t i = 0;
-    while (i + 2 < bytes.size()) {
-        const std::uint32_t triple = (static_cast<unsigned char>(bytes[i]) << 16) |
-                                     (static_cast<unsigned char>(bytes[i + 1]) << 8) |
-                                     static_cast<unsigned char>(bytes[i + 2]);
-        out.push_back(kAlphabet[(triple >> 18) & 0x3f]);
-        out.push_back(kAlphabet[(triple >> 12) & 0x3f]);
-        out.push_back(kAlphabet[(triple >> 6) & 0x3f]);
-        out.push_back(kAlphabet[triple & 0x3f]);
-        i += 3;
-    }
-    const std::size_t remain = bytes.size() - i;
-    if (remain == 1) {
-        const std::uint32_t duo = static_cast<unsigned char>(bytes[i]) << 16;
-        out.push_back(kAlphabet[(duo >> 18) & 0x3f]);
-        out.push_back(kAlphabet[(duo >> 12) & 0x3f]);
-        out.push_back('=');
-        out.push_back('=');
-    } else if (remain == 2) {
-        const std::uint32_t pair = (static_cast<unsigned char>(bytes[i]) << 16) |
-                                   (static_cast<unsigned char>(bytes[i + 1]) << 8);
-        out.push_back(kAlphabet[(pair >> 18) & 0x3f]);
-        out.push_back(kAlphabet[(pair >> 12) & 0x3f]);
-        out.push_back(kAlphabet[(pair >> 6) & 0x3f]);
-        out.push_back('=');
-    }
-    return out;
+    return platform::Base64Encode(std::string_view(bytes));
 }
 
 }  // namespace

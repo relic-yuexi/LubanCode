@@ -115,6 +115,12 @@ struct WorktreeResult {
 // 房干不干净:git status --porcelain 输出为空即干净。runner 可替身。
 bool WorktreeClean(const std::filesystem::path& worktree_path, GitRunner runner = {});
 
+// 内部件(验明正身用的归一化比较键):weakly_canonical(失败退
+// lexically_normal)、反斜杠统一正斜杠、ASCII 折小写、去尾斜杠。只给共享
+// 向量测试与房务内部用,别的调用方别碰——路径比较键的公共口看
+// platform::PathComparisonKey(收口后本函数就是它的薄壳)。
+std::string NormalizeKey(const std::filesystem::path& path);
+
 // 验明正身:path 是不是 main_root 名下一间独立的 worktree——有 .git 文件、
 // 指向 main_root/.git/worktrees/<x>、git 的反向登记(gitdir 文件)也对得
 // 上。.git 是目录(主仓本体/嵌套完整仓)、指向别家仓库、core.worktree 改

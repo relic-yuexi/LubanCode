@@ -17,6 +17,7 @@
 #endif
 
 #include "embedded_provider_catalog.hpp"
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/network_proxy.hpp"
 #include "platform/paths.hpp"  // PathToUtf8:缓存路径不走 ACP 窄口
 
@@ -600,30 +601,12 @@ std::optional<std::string> ReadSmallFile(const fs::path& path) {
 }
 
 std::expected<void, std::string> AtomicWrite(const fs::path& path, const std::string& text) {
-    std::error_code ec;
-    fs::create_directories(path.parent_path(), ec);
-    if (ec) return std::unexpected("建立目录失败: " + ec.message());
-    fs::path temp = path;
-    temp += ".tmp";  // 纯 ASCII 后缀,窄口拼接不涉代码页
-    {
-        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
-        if (!out.is_open()) return std::unexpected("临时文件打不开: " + platform::PathToUtf8(temp));
-        out << text;
-        if (!out.good()) return std::unexpected("临时文件写入失败: " + platform::PathToUtf8(temp));
+    // 统一原子写(审计 P1):缓存也是唯一临时名 + 平台原子替换,替掉本处
+    // 自备的 #ifdef MoveFileExW/rename 分叉。
+    const auto written = platform::AtomicWriteFile(path, text);
+    if (!written.has_value()) {
+        return std::unexpected("替换缓存失败: " + written.error().message);
     }
-#ifdef _WIN32
-    if (!MoveFileExW(temp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH)) {
-        const DWORD move_error = GetLastError();
-        fs::remove(temp, ec);
-        return std::unexpected("替换缓存失败，Win32 错误码 " + std::to_string(move_error));
-    }
-#else
-    fs::rename(temp, path, ec);  // POSIX rename 同卷原子替换已有文件
-    if (ec) {
-        fs::remove(temp, ec);
-        return std::unexpected("替换缓存失败: " + ec.message());
-    }
-#endif
     return {};
 }
 

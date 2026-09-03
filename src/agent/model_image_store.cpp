@@ -6,6 +6,7 @@
 #include <utility>
 
 #include "hooks/hash.hpp"      // Sha256Hex:内容寻址文件名
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1:替掉先删后换)
 #include "platform/paths.hpp"  // Utf8ToPath:目录路径不走 ACP 窄口
 
 namespace lubancode::agent {
@@ -57,36 +58,10 @@ std::uint32_t ReadLe32(const std::string& bytes, std::size_t at) {
            (static_cast<std::uint32_t>(static_cast<unsigned char>(bytes[at + 3])) << 24);
 }
 
-// 原子写:同目录 tmp 写完 flush/close 再 rename(Windows 的 rename 不覆盖,
-// 先删再改名,同目录原子性够)。任一步失败清 tmp。与 artifact_store.cpp
-// 的 AtomicWriteFile 同一套规矩,这里为二进制目录独立一份(不引匿名命名
-// 空间外的私有件)。
+// 原子写,统一走 platform::AtomicWriteFile(旧写法先删正式件再 rename,
+// 换名窗口里图不在;平台件原子替换,失败不动正式件)。
 bool AtomicWriteBytes(const std::filesystem::path& path, const std::string& content) {
-    std::filesystem::path tmp = path;
-    tmp += ".tmp";
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file.is_open()) {
-            return false;
-        }
-        file.write(content.data(), static_cast<std::streamsize>(content.size()));
-        file.flush();
-        if (!file.good()) {
-            file.close();
-            std::error_code ignored;
-            std::filesystem::remove(tmp, ignored);
-            return false;
-        }
-    }
-    std::error_code ignored;
-    std::filesystem::remove(path, ignored);
-    std::error_code ec;
-    std::filesystem::rename(tmp, path, ec);
-    if (ec) {
-        std::filesystem::remove(tmp, ignored);
-        return false;
-    }
-    return true;
+    return platform::AtomicWriteFile(path, content).has_value();
 }
 
 }  // namespace

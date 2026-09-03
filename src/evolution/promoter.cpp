@@ -22,6 +22,7 @@
 #include "evolution/candidate.hpp"   // ComputeCandidateContentHash
 #include "evolution/eval.hpp"        // RunStaticGate(静态门复用,不另写)
 #include "package/manifest.hpp"      // ParsePackageManifest(版本号取根清单)
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
 
 namespace lubancode::evolution {
@@ -382,19 +383,10 @@ std::expected<StoreChannels, std::string> VersionStore::LoadOrInitChannels(
 
 bool VersionStore::WriteChannelsAtomic(const std::filesystem::path& package_dir,
                                        const StoreChannels& channels) {
+    // 统一原子写(审计 P1):唯一临时名 + 平台原子替换,要么整份新的在,
+    // 要么整份旧的在,没有半截 channels.json。
     const std::filesystem::path final_path = package_dir / "channels.json";
-    const std::filesystem::path tmp_path = package_dir / "channels.json.tmp";
-    if (!WriteFileBytes(tmp_path, SerializeStoreChannels(channels))) {
-        return false;
-    }
-    std::error_code ec;
-    // 同目录 rename:要么整份新的在,要么整份旧的在,没有半截 channels.json。
-    std::filesystem::rename(tmp_path, final_path, ec);
-    if (ec) {
-        std::filesystem::remove(tmp_path, ec);
-        return false;
-    }
-    return true;
+    return platform::AtomicWriteFile(final_path, SerializeStoreChannels(channels)).has_value();
 }
 
 void VersionStore::AppendLog(const std::filesystem::path& package_dir, StoreLogEvent event) {

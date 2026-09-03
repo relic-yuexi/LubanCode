@@ -14,11 +14,19 @@
 
 #pragma once
 
+#include <filesystem>
 #include <optional>
 #include <string>
 #include <vector>
 
 namespace lubancode::tools {
+
+// 内部件(隔离闸用的归一化比较键):weakly_canonical(失败退
+// lexically_normal)、反斜杠统一正斜杠、ASCII 折小写、去尾斜杠。只给共享
+// 向量测试与隔离闸内部用,别的调用方别碰——路径比较键的公共口看
+// platform::PathComparisonKey(收口后本函数就是它的薄壳)。
+std::string NormalizeKey(const std::filesystem::path& path);
+
 
 // 一份隔离范围。路径都是 UTF-8 字符串(std::filesystem::path 的 u8 通道)。
 struct IsolationScope {
