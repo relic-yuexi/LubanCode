@@ -110,8 +110,9 @@ struct ServerOptions {
     // 审批悬停时限(毫秒)。0 = 不限(悬到断线/打断)。悬停不偷跑:时限
     // 到了按"没人可答"的悬空收口处理,不冒充用户拒绝。
     int approval_timeout_ms = 0;
-    // 非终端宿主同样由 Runtime 权限核裁定；缺省仍为可询问。
-    runtime::PermissionMode permission_mode = runtime::PermissionMode::Confirm;
+    // 非终端宿主同样由 Runtime 权限核裁定；缺省仍为可询问。值域 = 公共
+    // ApprovalMode(收口审计单 P1:runtime 侧镜像枚举已删)。
+    lubancode::ApprovalMode permission_mode = lubancode::ApprovalMode::Default;
     // turn/interrupt 的硬时限(毫秒)。打断旗置位后回合驱动最多再等这么
     // 久:AgentLoop 的 cancel 在流式/工具边界生效,工具跑完了才看旗;真
     // 有卡死不看的(长命令/卡住的外部进程),硬时限一到强制收线,终态照

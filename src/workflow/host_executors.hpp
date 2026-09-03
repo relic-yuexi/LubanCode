@@ -118,7 +118,7 @@ struct CustomAgentNodeResolution {
     // 权限下限(比会话档严时的档位):Resolver 校验"不许放宽"在前,这枚
     // 是"收窄生效"——宿主按环境账的父档算好递进来,executor 接进
     // on_tool_confirm_floored。nullopt = 不比父严(或没递环境账)。
-    std::optional<agent::AgentPermissionMode> permission_floor;
+    std::optional<lubancode::ApprovalMode> permission_floor;
 };
 
 // 名字 -> 解析产物的口。error 出参带人话(查无此名/不可用的原因);

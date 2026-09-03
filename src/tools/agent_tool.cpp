@@ -31,6 +31,7 @@
 #include "platform/log_sink.hpp"  // §5.3 旧预算键的弃用日志
 #include "platform/paths.hpp"
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:inbox 投递文本的编码关口
+#include "runtime/id_authority.hpp"    // ProcessIdAuthority:后台任务 bgtask 前缀号(同一发号口)
 #include "runtime/turn_runtime.hpp"    // MapPreToolDecision:PreToolUse 归并映射与主路径同一颗
 #include "tools/agent_message_tool.hpp"  // scoped agent_message(P1-1:子代理只投自己直接孩子)
 #include "tools/agent_watch_tool.hpp"  // scoped agent_watch(监督器单 P1-0:子代理只看自己直接孩子)
@@ -1304,7 +1305,7 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
     // 自定义 Agent 每次都携带结果，不能再按枚举 rank 判断是否“更严”。
     // 这也保证父 Yolo + 子 Default 会进入 floored 确认链，而 Yolo 自身
     // may_prompt=true，不会错误封死后代询问。
-    std::optional<agent::AgentPermissionMode> permission_floor;
+    std::optional<lubancode::ApprovalMode> permission_floor;
     if (resolved != nullptr) {
         permission_floor = resolved->permission;
     }
@@ -1839,7 +1840,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                 const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions,
                                 const CustomAgentMaterial* custom,
                                 const agent::ResolvedAgentProfile* resolved,
-                                std::optional<agent::AgentPermissionMode> permission_floor,
+                                std::optional<lubancode::ApprovalMode> permission_floor,
                                 std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory,
                                 const std::shared_ptr<const SubagentDispatchEnv>& env) {
     // 派工治理(P0-2 起):admission(并发槽/深度/父子门)在注册事务
@@ -2479,7 +2480,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         if (foreground_hooks != nullptr) {
             if (permission_floor.has_value() && foreground_hooks->on_permission_evaluate_floored) {
                 auto floored_evaluate = foreground_hooks->on_permission_evaluate_floored;
-                const agent::AgentPermissionMode effective = *permission_floor;
+                const lubancode::ApprovalMode effective = *permission_floor;
                 turn_wiring.on_permission_evaluate =
                     [floored_evaluate, effective](const std::string& tool_use_id, const std::string& name,
                                                   ApprovalClass approval_class, const nlohmann::json& input,
@@ -2493,7 +2494,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             // 就 Allow。resolver 已完成集合求交，这里只把同一结果接进两道门。
             if (permission_floor.has_value() && foreground_hooks->on_tool_confirm_floored) {
                 auto floored = foreground_hooks->on_tool_confirm_floored;
-                const agent::AgentPermissionMode floor = *permission_floor;
+                const lubancode::ApprovalMode floor = *permission_floor;
                 turn_wiring.on_tool_confirm = [floored, floor](const std::string& tool_use_id,
                                                                const std::string& name,
                                                                const nlohmann::json& input) {
@@ -2521,7 +2522,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                                      const nlohmann::json& input,
                                                      const lubancode::runtime::ToolHookDecision& pre) {
                     lubancode::runtime::PermissionContext context;
-                    context.mode = lubancode::runtime::PermissionMode::DontAsk;
+                    context.mode = lubancode::ApprovalMode::DontAsk;
                     if (background_permissions != nullptr) {
                         context.always_allowed = &background_permissions->always_allowed;
                         context.allow_commands = &background_permissions->allow_commands;
@@ -2801,7 +2802,10 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         sub_context.parent_agent_id = hook_parent_task_id != 0
                                           ? std::optional<std::string>(std::to_string(hook_parent_task_id))
                                           : std::nullopt;
-        sub_context.turn_id = "bgtask_" + sub_context.agent_id.value_or(std::string("0"));
+        // turn_id 从发号局的前缀档现发(bgtask-N,进程内单调不回收)——身份
+        // 分配同一口,不手拼字符串。后台任务没有宿主轮(跨轮活,挂派工那
+        // 一刻的宿主轮号必成错账),也不用 hookrun_* 代班号。
+        sub_context.turn_id = lubancode::runtime::ProcessIdAuthority().NextPrefixedId("bgtask");
         background_hooks->context() = sub_context;
         if (background_hooks->HasHandlersFor(lubancode::hooks::HookEvent::SubagentStart)) {
             lubancode::hooks::HookPayload start;

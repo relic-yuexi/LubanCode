@@ -129,10 +129,10 @@ struct ApprovalHarness {
     std::shared_ptr<std::atomic<int>> tool_calls = std::make_shared<std::atomic<int>>(0);
     std::string tool_name = "write_file";
     int approval_timeout_ms = 0;
-    runtime::PermissionMode permission_mode = runtime::PermissionMode::Confirm;
+    lubancode::ApprovalMode permission_mode = lubancode::ApprovalMode::Default;
 
     explicit ApprovalHarness(int timeout_ms = 0,
-                             runtime::PermissionMode mode = runtime::PermissionMode::Confirm)
+                             lubancode::ApprovalMode mode = lubancode::ApprovalMode::Default)
         : approval_timeout_ms(timeout_ms), permission_mode(mode) {
         app_server::ServerOptions options;
         options.cwd = "/test/cwd";
@@ -211,7 +211,7 @@ struct ApprovalHarness {
 
 
 TEST_CASE("审批:DontAsk 由 Runtime 直接拒绝，App Server 零 permission/request") {
-    ApprovalHarness harness(/*timeout_ms=*/0, runtime::PermissionMode::DontAsk);
+    ApprovalHarness harness(/*timeout_ms=*/0, lubancode::ApprovalMode::DontAsk);
     harness.scripts = {ToolUseScript("toolu_no_prompt", "write_file"), TextOnlyScript("收到未执行")};
 
     std::string error_code;

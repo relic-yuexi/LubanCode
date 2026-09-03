@@ -196,8 +196,8 @@ agent::AgentProfile MakeParent() {
     return parent;
 }
 
-agent::AgentProfileResolveEnvironment MakeEnv(agent::AgentPermissionMode parent_mode =
-                                                  agent::AgentPermissionMode::Auto) {
+agent::AgentProfileResolveEnvironment MakeEnv(lubancode::ApprovalMode parent_mode =
+                                                  lubancode::ApprovalMode::Auto) {
     agent::AgentProfileResolveEnvironment env;
     env.parent_permission = parent_mode;
     return env;
@@ -812,14 +812,14 @@ TEST_CASE("权限下限:定义比会话档严时确认真拉回,档不严或没�
     options.custom_agent_resolver = [&](const workflow::WorkflowNode& node,
                                          std::string&) -> std::optional<workflow::CustomAgentNodeResolution> {
         return ResolveForWorkflow(strict, node.agent, parent, ParentToolNames(registry), 9,
-                                  MakeEnv(agent::AgentPermissionMode::Yolo), 0);
+                                  MakeEnv(lubancode::ApprovalMode::Yolo), 0);
     };
-    agent::AgentPermissionMode seen_floor = agent::AgentPermissionMode::Yolo;
+    lubancode::ApprovalMode seen_floor = lubancode::ApprovalMode::Yolo;
     int floored_calls = 0;
     int plain_calls = 0;
     options.callbacks.on_tool_confirm_floored =
         [&seen_floor, &floored_calls](const std::string&, const std::string&, const nlohmann::json&,
-                                      agent::AgentPermissionMode floor) {
+                                      lubancode::ApprovalMode floor) {
             seen_floor = floor;
             ++floored_calls;
             return false;  // 宿主按 min(会话档 Yolo, 下限 Confirm) 裁定:真问,测试里答"拒"
@@ -850,7 +850,7 @@ nodes:
     const workflow::NodeExecResult result = executor.Execute(request);
     REQUIRE(result.ok);
     CHECK(floored_calls == 1);
-    CHECK(seen_floor == agent::AgentPermissionMode::Default);
+    CHECK(seen_floor == lubancode::ApprovalMode::Default);
     CHECK(plain_calls == 0);  // floored 口在,原口不跑
 
     // 档不严(inherit 同父):没有 floor,原样走 on_tool_confirm。
@@ -867,13 +867,13 @@ nodes:
     plain_options.custom_agent_resolver = [&](const workflow::WorkflowNode& node,
                                                std::string&) -> std::optional<workflow::CustomAgentNodeResolution> {
         return ResolveForWorkflow(inherit, node.agent, parent, ParentToolNames(registry), 9,
-                                  MakeEnv(agent::AgentPermissionMode::Yolo), 0);
+                                  MakeEnv(lubancode::ApprovalMode::Yolo), 0);
     };
     int plain_floored = 0;
     int plain_confirm = 0;
     plain_options.callbacks.on_tool_confirm_floored =
         [&plain_floored](const std::string&, const std::string&, const nlohmann::json&,
-                         agent::AgentPermissionMode) {
+                         lubancode::ApprovalMode) {
             ++plain_floored;
             return false;
         };

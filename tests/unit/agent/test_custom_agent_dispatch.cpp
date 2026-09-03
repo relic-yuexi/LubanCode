@@ -670,20 +670,20 @@ TEST_CASE("权限收窄执法:父 yolo 子 confirm,needs_confirm 的工具走带
     tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
     agent_tool.SetResolveEnvironment([]() -> agent::AgentProfileResolveEnvironment {
         agent::AgentProfileResolveEnvironment env;
-        env.parent_permission = agent::AgentPermissionMode::Yolo;  // 父会话开着 yolo
+        env.parent_permission = lubancode::ApprovalMode::Yolo;  // 父会话开着 yolo
         return env;
     });
     agent_tool.SetCustomAgentResolver(CatalogResolver(std::move(material)));
 
     int floored_calls = 0;
-    agent::AgentPermissionMode seen_floor = agent::AgentPermissionMode::Yolo;
+    lubancode::ApprovalMode seen_floor = lubancode::ApprovalMode::Yolo;
     int plain_calls = 0;
     tools::AgentTool::Hooks hooks;
     hooks.on_tool_confirm = [&plain_calls](const std::string&, const std::string&,
                                            const nlohmann::json&) { ++plain_calls; return true; };
     hooks.on_tool_confirm_floored =
         [&floored_calls, &seen_floor](const std::string&, const std::string& name, const nlohmann::json&,
-                                      agent::AgentPermissionMode floor) {
+                                      lubancode::ApprovalMode floor) {
             ++floored_calls;
             seen_floor = floor;
             CHECK(name == "sensitive");
@@ -700,7 +700,7 @@ TEST_CASE("权限收窄执法:父 yolo 子 confirm,needs_confirm 的工具走带
 
     // 确认真拉回了:走的是带下限的口,下限是定义声明的 confirm;免问不再免。
     CHECK(floored_calls == 1);
-    CHECK(seen_floor == agent::AgentPermissionMode::Default);
+    CHECK(seen_floor == lubancode::ApprovalMode::Default);
     CHECK(plain_calls == 0);                 // 旧口没被走到
     CHECK(sensitive_ptr->call_count == 0);   // 拒了:工具没执行
     REQUIRE(backend.captured_requests.size() == 2);
@@ -723,7 +723,7 @@ TEST_CASE("权限求交执法:自定义 Agent 总携带有效档;父档没账时
         tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
         agent_tool.SetResolveEnvironment([]() -> agent::AgentProfileResolveEnvironment {
             agent::AgentProfileResolveEnvironment env;
-            env.parent_permission = agent::AgentPermissionMode::Yolo;
+            env.parent_permission = lubancode::ApprovalMode::Yolo;
             return env;
         });
         agent_tool.SetCustomAgentResolver(CatalogResolver(std::move(material)));
@@ -734,7 +734,7 @@ TEST_CASE("权限求交执法:自定义 Agent 总携带有效档;父档没账时
                                                const nlohmann::json&) { ++plain_calls; return true; };
         hooks.on_tool_confirm_floored =
             [&floored_calls](const std::string&, const std::string&, const nlohmann::json&,
-                             agent::AgentPermissionMode) { ++floored_calls; return true; };
+                             lubancode::ApprovalMode) { ++floored_calls; return true; };
         agent_tool.SetHooks(std::move(hooks));
         nlohmann::json input;
         input["title"] = "同档任务";

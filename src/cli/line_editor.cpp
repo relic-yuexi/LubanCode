@@ -146,14 +146,47 @@ ConfirmMode NextConfirmMode(ConfirmMode mode) {
     return ConfirmMode::Confirm;
 }
 
+// 具名桥(收口审计单 P1):逐档 switch,不认声明序,枚举间 static_cast 禁绝。
+ApprovalMode ToApprovalMode(ConfirmMode mode) {
+    switch (mode) {
+        case ConfirmMode::Confirm:
+            return ApprovalMode::Default;
+        case ConfirmMode::AcceptEdits:
+            return ApprovalMode::AcceptEdits;
+        case ConfirmMode::Yolo:
+            return ApprovalMode::Yolo;
+        case ConfirmMode::Auto:
+            return ApprovalMode::Auto;
+        case ConfirmMode::DontAsk:
+            return ApprovalMode::DontAsk;
+    }
+    return ApprovalMode::Default;
+}
+
+ConfirmMode ToConfirmMode(ApprovalMode mode) {
+    switch (mode) {
+        case ApprovalMode::Default:
+            return ConfirmMode::Confirm;
+        case ApprovalMode::AcceptEdits:
+            return ConfirmMode::AcceptEdits;
+        case ApprovalMode::Yolo:
+            return ConfirmMode::Yolo;
+        case ApprovalMode::Auto:
+            return ConfirmMode::Auto;
+        case ApprovalMode::DontAsk:
+            return ConfirmMode::DontAsk;
+    }
+    return ConfirmMode::Confirm;
+}
+
 const char* ConfirmModeMachineName(ConfirmMode mode) {
-    return ApprovalModeMachineName(static_cast<ApprovalMode>(mode));
+    return ApprovalModeMachineName(ToApprovalMode(mode));
 }
 
 std::optional<ConfirmMode> ParseConfirmMode(std::string_view value) {
     const auto parsed = ParseApprovalMode(value);
     if (!parsed.has_value()) return std::nullopt;
-    return static_cast<ConfirmMode>(*parsed);
+    return ToConfirmMode(*parsed);
 }
 
 ModePresentation PresentApprovalMode(ConfirmMode mode) {

@@ -30,6 +30,7 @@
 #include <nlohmann/json.hpp>
 
 #include "agent/loop.hpp"
+#include "approval_mode.hpp"  // ApprovalMode:公共审批值域(收口审计单 P1)
 #include "skills/workflow_recorder.hpp"
 #include "api/types.hpp"
 #include "cli/context_tracker.hpp"
@@ -84,7 +85,8 @@ void PrintTurnFooter(const lubancode::cli::Theme& theme, bool is_console, std::i
 // 空表态);has_permission_hooks 为假时跳过 PermissionRequest 钩子的发射。
 // permission_floor 是子代理定义带来的档位下限(自定义 Agent 单·阶段 4:
 // 只可收窄):会话档比它宽时向下并到它,该问就真问;缺省 Yolo = 没有
-// 下限,行为与从前一字不差。
+// 下限,行为与从前一字不差。档位值域 = 公共 lubancode::ApprovalMode(收口
+// 审计单 P1:四套审批枚举收口,不再有 runtime 侧镜像枚举)。
 bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
                     std::set<std::string>& always_allowed_tools, const lubancode::cli::Theme& theme,
                     lubancode::cli::ToolDisplay& display, const std::vector<std::string>& allow_commands,
@@ -93,7 +95,7 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
                     bool has_permission_hooks, tools::ApprovalClass approval_class,
                     const std::string& name, const nlohmann::json& input,
                     const std::function<void(bool asked, bool allowed)>& approval_observer = {},
-                    std::optional<runtime::PermissionMode> permission_floor = std::nullopt);
+                    std::optional<ApprovalMode> permission_floor = std::nullopt);
 
 // ---------------------------------------------------------------------------
 // TurnContext(骨架拆解批三:harness 合流):RunTurn 二十四参 +

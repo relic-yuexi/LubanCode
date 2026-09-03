@@ -77,7 +77,7 @@ private:
     tools::ApprovalClass approval_class_;
 };
 
-rt::PermissionContext MakeContext(rt::PermissionMode mode, bool auto_confirm = false) {
+rt::PermissionContext MakeContext(lubancode::ApprovalMode mode, bool auto_confirm = false) {
     rt::PermissionContext context;
     context.mode = mode;
     context.auto_confirm = auto_confirm;
@@ -99,7 +99,7 @@ TEST_CASE("权限:DontAsk 只放显式预授权，其余由 Runtime 直接拒绝
     const std::vector<std::string> allow{"git status"};
     const std::vector<std::string> deny{"git push"};
     std::set<std::string> always{"write_file"};
-    rt::PermissionContext context = MakeContext(rt::PermissionMode::DontAsk);
+    rt::PermissionContext context = MakeContext(lubancode::ApprovalMode::DontAsk);
     context.always_allowed = &always;
     context.allow_commands = &allow;
     context.deny_commands = &deny;
@@ -147,7 +147,7 @@ TEST_CASE("权限:DontAsk 拒绝时零确认回调、零工具执行并返回稳
                                         const nlohmann::json& input,
                                         const runtime::ToolHookDecision& pre) {
         ++evaluator_calls;
-        return rt::EvaluatePermission(MakeContext(rt::PermissionMode::DontAsk), pre, approval_class, name, input);
+        return rt::EvaluatePermission(MakeContext(lubancode::ApprovalMode::DontAsk), pre, approval_class, name, input);
     };
     wiring.on_tool_confirm_async = [&](const runtime::ApprovalRequest&) {
         ++async_confirm_calls;
@@ -199,7 +199,7 @@ TEST_CASE("权限:Runtime Allow 与无需确认工具都不进入确认回调") 
                                         const nlohmann::json& input,
                                         const runtime::ToolHookDecision& pre) {
         ++evaluator_calls;
-        auto context = MakeContext(rt::PermissionMode::DontAsk);
+        auto context = MakeContext(lubancode::ApprovalMode::DontAsk);
         context.always_allowed = &always;
         return rt::EvaluatePermission(context, pre, approval_class, name, input);
     };
@@ -219,8 +219,8 @@ TEST_CASE("权限:Runtime Allow 与无需确认工具都不进入确认回调") 
 }
 
 TEST_CASE("权限矩阵:needs_confirm=false 五档均执行且绕过审批链") {
-    using Mode = rt::PermissionMode;
-    constexpr std::array<Mode, 5> modes{Mode::Confirm, Mode::AcceptEdits, Mode::Yolo, Mode::Auto,
+    using Mode = lubancode::ApprovalMode;
+    constexpr std::array<Mode, 5> modes{Mode::Default, Mode::AcceptEdits, Mode::Yolo, Mode::Auto,
                                          Mode::DontAsk};
     for (const auto mode : modes) {
         tools::ToolRegistry registry;
@@ -263,8 +263,8 @@ TEST_CASE("权限矩阵:needs_confirm=false 五档均执行且绕过审批链") 
 }
 
 TEST_CASE("权限矩阵:未预授权 External 五档的执行次数与 Ask 回调次数") {
-    using Mode = rt::PermissionMode;
-    constexpr std::array<Mode, 5> modes{Mode::Confirm, Mode::AcceptEdits, Mode::Yolo, Mode::Auto,
+    using Mode = lubancode::ApprovalMode;
+    constexpr std::array<Mode, 5> modes{Mode::Default, Mode::AcceptEdits, Mode::Yolo, Mode::Auto,
                                          Mode::DontAsk};
     constexpr std::array<int, 5> expected_confirm_calls{1, 1, 0, 1, 0};
     constexpr std::array<int, 5> expected_tool_calls{1, 1, 1, 1, 0};
@@ -294,8 +294,8 @@ TEST_CASE("权限矩阵:未预授权 External 五档的执行次数与 Ask 回�
 }
 
 TEST_CASE("权限矩阵:PreToolUse deny 与 Plan 硬闸五档均压住 YOLO 且零副作用") {
-    using Mode = rt::PermissionMode;
-    constexpr std::array<Mode, 5> modes{Mode::Confirm, Mode::AcceptEdits, Mode::Yolo, Mode::Auto,
+    using Mode = lubancode::ApprovalMode;
+    constexpr std::array<Mode, 5> modes{Mode::Default, Mode::AcceptEdits, Mode::Yolo, Mode::Auto,
                                          Mode::DontAsk};
     for (const auto mode : modes) {
         for (const bool plan_gate : {false, true}) {
@@ -344,8 +344,8 @@ TEST_CASE("权限矩阵:PreToolUse deny 与 Plan 硬闸五档均压住 YOLO 且�
 
 TEST_CASE("权限矩阵:3.1 十一类裁定逐格覆盖五档") {
     using Action = rt::PermissionVerdict::Action;
-    using Mode = rt::PermissionMode;
-    constexpr std::array<Mode, 5> modes{Mode::Confirm, Mode::AcceptEdits, Mode::Yolo, Mode::Auto,
+    using Mode = lubancode::ApprovalMode;
+    constexpr std::array<Mode, 5> modes{Mode::Default, Mode::AcceptEdits, Mode::Yolo, Mode::Auto,
                                          Mode::DontAsk};
     struct Row {
         const char* scenario;
@@ -470,7 +470,7 @@ TEST_CASE("权限:RunOneTool 向 evaluator 传真实 ApprovalClass") {
 
 TEST_CASE("权限:confirm 档下文件工具要问,选过 a 的放行") {
     std::set<std::string> always{"write_file"};
-    rt::PermissionContext context = MakeContext(rt::PermissionMode::Confirm);
+    rt::PermissionContext context = MakeContext(lubancode::ApprovalMode::Default);
     context.always_allowed = &always;
     const runtime::ToolHookDecision no_hook;
 
@@ -485,12 +485,12 @@ TEST_CASE("权限:yolo 与 --yes 全放,黑名单不拦") {
     const std::vector<std::string> deny{"rm "};
     const runtime::ToolHookDecision no_hook;
 
-    rt::PermissionContext yolo = MakeContext(rt::PermissionMode::Yolo);
+    rt::PermissionContext yolo = MakeContext(lubancode::ApprovalMode::Yolo);
     yolo.deny_commands = &deny;
     auto verdict = rt::EvaluatePermission(yolo, no_hook, tools::ApprovalClass::Command, "run_command", RunCommandInput("rm -rf /"));
     CHECK(verdict.action == rt::PermissionVerdict::Action::Allow);  // yolo 显式全放
 
-    rt::PermissionContext yes = MakeContext(rt::PermissionMode::Confirm, /*auto_confirm=*/true);
+    rt::PermissionContext yes = MakeContext(lubancode::ApprovalMode::Default, /*auto_confirm=*/true);
     yes.deny_commands = &deny;
     verdict = rt::EvaluatePermission(yes, no_hook, tools::ApprovalClass::Command, "run_command", RunCommandInput("rm -rf /"));
     CHECK(verdict.action == rt::PermissionVerdict::Action::Allow);  // --yes 同理
@@ -503,7 +503,7 @@ TEST_CASE("权限:deny 前缀压过 allow、压过总是允许;auto+allow 前缀
     const runtime::ToolHookDecision no_hook;
 
     SUBCASE("deny 命中,confirm 档:问(deny_hit)") {
-        rt::PermissionContext context = MakeContext(rt::PermissionMode::Confirm);
+        rt::PermissionContext context = MakeContext(lubancode::ApprovalMode::Default);
         context.deny_commands = &deny;
         context.always_allowed = &always;
         const auto verdict =
@@ -513,7 +513,7 @@ TEST_CASE("权限:deny 前缀压过 allow、压过总是允许;auto+allow 前缀
     }
 
     SUBCASE("allow 命中,auto 档:放行(等价 command_safety 的 Safe)") {
-        rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
+        rt::PermissionContext context = MakeContext(lubancode::ApprovalMode::Auto);
         context.allow_commands = &allow;
         const auto verdict =
             rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::Command, "run_command", RunCommandInput("git status"));
@@ -521,7 +521,7 @@ TEST_CASE("权限:deny 前缀压过 allow、压过总是允许;auto+allow 前缀
     }
 
     SUBCASE("auto 档,不认识的安全命令:照问(保守)") {
-        rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
+        rt::PermissionContext context = MakeContext(lubancode::ApprovalMode::Auto);
         const auto verdict = rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::Command, "run_command", RunCommandInput("some-unknown-cmd"));
         CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);
     }
@@ -531,7 +531,7 @@ TEST_CASE("权限:auto 档 PowerShell 脚本块不放行——白名单与放行
     const runtime::ToolHookDecision no_hook;
 
     SUBCASE("首词在 PowerShell 白名单,{ } 体内是任意代码:照问") {
-        rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
+        rt::PermissionContext context = MakeContext(lubancode::ApprovalMode::Auto);
         const auto verdict = rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::Command, "run_command",
                                                     RunCommandInput("Where-Object { Remove-Item x }"));
         CHECK(verdict.action == rt::PermissionVerdict::Action::Ask);
@@ -539,7 +539,7 @@ TEST_CASE("权限:auto 档 PowerShell 脚本块不放行——白名单与放行
 
     SUBCASE("放行账(allow_commands 前缀命中)同样不得放脚本块") {
         const std::vector<std::string> allow{"Where-Object"};
-        rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
+        rt::PermissionContext context = MakeContext(lubancode::ApprovalMode::Auto);
         context.allow_commands = &allow;
         const auto verdict = rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::Command, "run_command",
                                                     RunCommandInput("Where-Object { Remove-Item x }"));
@@ -548,7 +548,7 @@ TEST_CASE("权限:auto 档 PowerShell 脚本块不放行——白名单与放行
 
     SUBCASE("放行账不误伤:无脚本块的命中照放") {
         const std::vector<std::string> allow{"Where-Object"};
-        rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
+        rt::PermissionContext context = MakeContext(lubancode::ApprovalMode::Auto);
         context.allow_commands = &allow;
         const auto verdict = rt::EvaluatePermission(context, no_hook, tools::ApprovalClass::Command, "run_command",
                                                     RunCommandInput("Where-Object Length -gt 5"));
@@ -561,7 +561,7 @@ TEST_CASE("权限:PreToolUse 表态参与——allow 跳问,ask 拉回,deny 规�
     const std::vector<std::string> allow{"git status"};
 
     SUBCASE("hook allow:跳过用户确认") {
-        rt::PermissionContext context = MakeContext(rt::PermissionMode::Confirm);
+        rt::PermissionContext context = MakeContext(lubancode::ApprovalMode::Default);
         runtime::ToolHookDecision pre;
         pre.decision = runtime::ToolHookDecision::Decision::Allow;
         const auto verdict =
@@ -570,7 +570,7 @@ TEST_CASE("权限:PreToolUse 表态参与——allow 跳问,ask 拉回,deny 规�
     }
 
     SUBCASE("hook ask:本来自动放行的也拉回确认") {
-        rt::PermissionContext context = MakeContext(rt::PermissionMode::Auto);
+        rt::PermissionContext context = MakeContext(lubancode::ApprovalMode::Auto);
         runtime::ToolHookDecision pre;
         pre.decision = runtime::ToolHookDecision::Decision::Ask;
         const auto verdict =
@@ -579,7 +579,7 @@ TEST_CASE("权限:PreToolUse 表态参与——allow 跳问,ask 拉回,deny 规�
     }
 
     SUBCASE("deny 规则压过 hook allow:不许钩子越权") {
-        rt::PermissionContext context = MakeContext(rt::PermissionMode::Confirm);
+        rt::PermissionContext context = MakeContext(lubancode::ApprovalMode::Default);
         context.deny_commands = &deny;
         runtime::ToolHookDecision pre;
         pre.decision = runtime::ToolHookDecision::Decision::Allow;
@@ -590,7 +590,7 @@ TEST_CASE("权限:PreToolUse 表态参与——allow 跳问,ask 拉回,deny 规�
     }
 
     SUBCASE("deny 规则在 yolo 档不拦(显式全放)") {
-        rt::PermissionContext context = MakeContext(rt::PermissionMode::Yolo);
+        rt::PermissionContext context = MakeContext(lubancode::ApprovalMode::Yolo);
         context.deny_commands = &deny;
         context.allow_commands = &allow;
         runtime::ToolHookDecision pre;
@@ -605,7 +605,7 @@ TEST_CASE("TurnRuntime::EvaluatePermission:options 携带的黑名单同纯函�
     std::set<std::string> always;
     std::vector<std::string> deny{"rm "};
     rt::TurnRuntime::Options options;
-    options.permission_mode = rt::PermissionMode::Confirm;
+    options.permission_mode = lubancode::ApprovalMode::Default;
     options.always_allowed = &always;
     options.deny_commands = deny;
     rt::TurnRuntime core(std::move(options));
