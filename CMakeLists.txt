@@ -347,6 +347,10 @@ add_library(lubancode_engine STATIC
   src/platform/terminal_batch.cpp
   src/platform/text_encoding.cpp
   src/platform/json_safe.cpp
+  # src 重复职责收口审计 P1:统一原子写(唯一临时名/同目录/close 检查/
+  # 平台原子替换/失败清理/结构化错误),gateway/manifest/telemetry/
+  # derived_store 等处的私房协议逐批迁进来。
+  src/platform/atomic_write.cpp
   # 统一 Package 封装单阶段 4:目录内容指纹的共用底座(Plugin 与 Package
   # 同一把尺,两把 v1 材料各自冻结)。
   src/platform/dir_fingerprint.cpp
