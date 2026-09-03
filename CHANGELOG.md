@@ -2,6 +2,11 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.188] - 2026-09-03
+
+- **Hook 回合身份收口（审计身份线 P0）。** 此前 Hook 的 `turn_id` 另造一本账：`NextHookRunId()` 生成的 `hookrun_*` 填进 turn_id 字段代班，`UserPromptSubmit` 还可能吃到上一轮遗留或 `unassigned`——Hook 记录与 trajectory/tool trace 按 turn_id 联表必裂账。现每轮只 mint 一枚 canonical turn id（在 UserPromptSubmit 之前定下，宿主 trace 号或发号局现发），同一枚交 Hook context/事件流/trace hub/轨迹桥；`NextHookRunId()` 只生 hook_run_id。集成测试先红（旧码 21 断言炸）后绿（四景钉死：五类 Hook 共用一号、两轮不继承、阻断景零请求零 TurnStarted、one-shot 自 mint）。
+- **四套审批枚举收口（审计权限线 P1）。** 删异序的 `runtime::PermissionMode` 与 `agent::AgentPermissionMode`，公共 `ApprovalMode` 作唯一业务值域（27 文件）；CLI `ConfirmMode` 只持显示状态，与公共值域间唯一一组具名桥；五处散落 switch 与六处枚举间 `static_cast` 全清；持久化/协议边界一律 machine name 解析。五张乱序表钉死"枚举声明序不参与任何映射"。370/370 全绿。
+
 ## [v0.26.187] - 2026-09-03
 
 - **状态栏资料行复活（审计 UI 线七批）。** 0.26.181 起模型/effort/cwd/branch/context/tokens 从底栏齐齐消失——`BuildStatusLine` 成了死生产路（数据照采、纯函数有测、真底栏不画）。现正式收口：新增 `data_rows` 资料行槽（下横线之下、导航坞之上，同一份 StatusPanelData 快照投影）；模式行只保档位+skills，两行一账不再各造。Idle/Busy 合流公共装配器 `BuildBottomChromeModel()`（调用方只给场景差值）；hint 四类语义类型化取代 `size()==1` 外形猜身份；左右槽 `assist_row`（常用键左槽、帮助入口右槽与 skills 同列）；keymap 驱动 `BuildKeyHints()`（改绑跟脚，删写死"？ 查看快捷键"兜底）；Agent 面板两对同文翻译合并。每批先红后绿，rg 零孤尾。
