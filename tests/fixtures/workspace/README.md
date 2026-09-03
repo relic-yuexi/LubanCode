@@ -6,8 +6,7 @@
 假 hash、假时间戳。不含任何真实凭据与真实机器路径。
 
 防漂移:`tests/unit/workspace/test_workspace_fixtures.cpp` 用现行 parser
-逐件校验;parser 退场时(P0-6)该测试随迁移器测试改吃
-`tools/legacy-storage-migrator/` 的隔离副本。
+逐件校验。迁移器与旧档解析已整件退场,这批夹具只作历史形状存档。
 
 ## 清单(详见 manifest.json)
 

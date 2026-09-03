@@ -1,22 +1,16 @@
-// 存储 v2 P0-6 静态审计守门(单子第 7 条):源码与文档里,除迁移说明与
-// 迁移器本体,不得再出现旧格式的生产路径字样——
+// 存储 v2 P0-6 静态审计守门(单子第 7 条):源码与文档里,除开发文档的
+// 历史叙述,不得再出现旧格式的生产路径字样——
 //   ~/.lubancode/sessions、~/.lubancode/trajectories、~/.lubancode/projects
 // 一旦有新代码把旧目录写回生产路(配置默认值、目录扫描、错误提示指路),
-// 这里当场红。
+// 这里当场红。迁移器已随收官发行整件摘除,白名单随之收窄。
 //
 // 白名单(合法持有旧字样):
-//   - src/workspace/storage_migrator.*      迁移器主体(旧格式解析只活在
-//     它内部,单子 §7.4 隔离边界);
-//   - tools/legacy-storage-migrator/*       独立封存体;
-//   - docs/getting-started/storage-migration.md  迁移说明(告诉用户旧数据
-//     在哪、怎么迁,这页就是干这个的);
 //   - docs/development/workspace-storage-v2/*    开发文档(设计/合同的
 //     历史叙述);
 //   - 本测试册自身。
 //
 // 扫描目录:src/(生产代码)与 docs/(用户/开发文档)。测试目录不扫——
-// 旧档夹具(tests/fixtures/workspace/legacy)与迁移器测试册是迁移器的
-// 验收输入,不是生产路径。
+// 旧档夹具(tests/fixtures/workspace/legacy)不是生产路径。
 //
 // 口径与 test_app_boundary_gate 同款:源码先剥注释再匹配(名单管行为
 // 不管文档);文档整文匹配(文档本身就是文案)。
@@ -87,9 +81,6 @@ std::filesystem::path SourceRoot() {
 // 相对路径(通用分隔符)是否命中白名单前缀。
 bool Whitelisted(const std::string& relative) {
     static const char* kPrefixes[] = {
-        "src/workspace/storage_migrator.",
-        "tools/legacy-storage-migrator/",
-        "docs/getting-started/storage-migration.md",
         "docs/development/workspace-storage-v2/",
         "tests/unit/workspace/test_legacy_storage_gate.cpp",
     };

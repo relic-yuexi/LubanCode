@@ -8,8 +8,7 @@
 //   - reader 见 version > 2 一律 schema.unsupported_version 拒读,不猜。
 //   - manifest.workspace_key 与算法重算不合即 identity.key_mismatch 隔离
 //     + doctor,不自动改名合并。
-//   - checkouts[] 只是可重建登记,不是身份源;路径搬家不凭同名目录自动
-//     并账,走显式 lubancode workspace migrate(P0-5 后)。
+//   - checkouts[] 只是可重建登记,不是身份源;路径搬家不凭同名目录自动并账。
 #pragma once
 
 #include <cstdint>

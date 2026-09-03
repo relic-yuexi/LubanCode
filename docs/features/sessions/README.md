@@ -6,7 +6,7 @@ LubanCode 把三件事分开：**history** 是当前模型要看的对话，**se
 
 ## 一场会话有什么
 
-交互会话的持久账是 workspace trajectory Journal（P0-2 起唯一真账；旧平铺 JSONL 已随 P0-6 退场，旧数据经 `migrate-storage` 迁入）：
+交互会话的持久账是 workspace trajectory Journal（P0-2 起唯一真账；旧平铺 JSONL 已随 P0-6 退场）：
 
 ```text
 meta

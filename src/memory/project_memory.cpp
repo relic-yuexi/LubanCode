@@ -3391,11 +3391,6 @@ std::vector<std::string> CheckGlobalMemoryHealth(const fs::path& home_lubancode)
         lines.push_back("[! ] memory job 失败积压 " + std::to_string(failed_jobs) +
                         " 笔(memory-jobs/failed,各带 .error.txt 回执)");
     }
-    ec.clear();
-    if (fs::exists(home / "projects", ec)) {
-        lines.push_back("[i ] 检测到旧 <home>/projects/ 记忆树:新运行时不再读写,迁移归 "
-                        "migrate-storage(P0-5)");
-    }
     return lines;
 }
 

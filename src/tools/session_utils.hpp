@@ -1,6 +1,6 @@
 // 会话侧仍被生产消费的纯工具(P0-6 从 sessions/session_store.* 与
-// sessions/session_lifecycle.* 迁来的活口;旧 JSONL 读写件已删,这里
-// 不碰任何旧格式解析——那活在迁移器 tools/legacy-storage-migrator)。
+// sessions/session_lifecycle.* 迁来的活口;旧 JSONL 读写件与迁移器均已
+// 整件删净,这里不碰任何旧格式解析)。
 //
 //   - 时间戳:NowTimestamp / NowIdTimestamp(meta 与显示共用的本地钟串);
 //   - UTF-8 截断:TruncateUtf8Chars / AbbreviateUtf8Middle(/sessions

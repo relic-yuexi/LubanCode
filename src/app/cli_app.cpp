@@ -55,7 +55,6 @@
 #include "app/version.hpp"
 #include "cli/console_input.hpp"
 #include "cli/gateway_command.hpp"  // 总装单 G1:gateway run/status/stop 子命令
-#include "cli/migrate_storage_command.hpp"  // 存储 v2 P0-5:migrate-storage plan/run/status
 #include "cli/trajectory_command.hpp"  // P0-3:trajectory verify/replay/harness-replay 子命令
 #include "cli/context_tracker.hpp"
 #include "cli/diff.hpp"
@@ -558,19 +557,6 @@ int RunCli(const std::vector<std::string>& args) {
             return cli::RunGatewayCommand(gateway_args);
         }
         case CliAction::BadGateway:
-            std::cerr << parsed_cli.error_text << "\n";
-            return 1;
-        case CliAction::RunMigrateStorage: {
-            // 存储 v2 P0-5:一次性迁移命令面(plan/run/status),跑完就退。
-            cli::MigrateStorageCommandArgs migrate_args;
-            migrate_args.verb = parsed_cli.migrate_storage.verb;
-            migrate_args.operation_id = parsed_cli.migrate_storage.operation_id;
-            migrate_args.project_roots = parsed_cli.migrate_storage.project_roots;
-            migrate_args.delete_source = parsed_cli.migrate_storage.delete_source;
-            migrate_args.confirm_delete = parsed_cli.migrate_storage.confirm_delete;
-            return cli::RunMigrateStorageCommand(migrate_args);
-        }
-        case CliAction::BadMigrateStorage:
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::RunEvolveTest:
