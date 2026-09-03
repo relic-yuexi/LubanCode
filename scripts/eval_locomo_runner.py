@@ -312,7 +312,10 @@ def run_batch(modes, convs, tasks, answers, suffix="", max_attempts=0):
         attempts = {}
         if os.path.exists(account_path):
             for r in json.load(open(account_path, encoding="utf-8")):
-                attempts[r["qid"]] = attempts.get(r["qid"], 0) + 1
+                # 熔断只数 timeout(裸底空推理 420s 不封顶,重试也没救);
+                # 上游 502/连接抖动是暂态病,不计数,续跑时该重试还重试。
+                if r.get("failure") == "timeout":
+                    attempts[r["qid"]] = attempts.get(r["qid"], 0) + 1
                 results.append(r)  # 失败行也留账:熔断计数与失败明细都靠它
                 if not r.get("failure") and r.get("choice", -1) >= 0:
                     done.add(r["qid"])
