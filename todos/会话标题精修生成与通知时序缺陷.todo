@@ -96,15 +96,15 @@
 
 用可控假标题后端和可控 `ReadLine`/composer 驱动器钉四幕：
 
-- [ ] 第一轮收口后才启动精修；主 turn 尚开时不得出现 `state.turn_overlap`。
-- [ ] composer 为空，精修完成后不喂任何用户按键；250ms 内主循环醒来，标题事件落账，提示符重画。
-- [ ] composer 里已有半句，精修完成不抢输入；继续打字、退格、提交，原文逐字不丢。
-- [ ] 第二问提交与精修完成竞态重复跑，屏上绝不出现“第二问\n标题已设为”这副误导排版。
+- [x] 第一轮收口后才启动精修；主 turn 尚开时不得出现 `state.turn_overlap`。（tests/manual/title_wake_driver.cpp 幕一:假 SSE 服务实测主 turn 滴流期间标题请求一枚未发、收口后才到达且不早于主答发完;每场 main.jsonl 恰一枚 title_refine prepared、无 state.turn_overlap,ALL PASS）
+- [x] composer 为空，精修完成后不喂任何用户按键；250ms 内主循环醒来，标题事件落账，提示符重画。（幕二:标题请求扣住择机放行、期间零按键,放行→control.title.changed 落账实测 62~125ms(三跑原始数 94/62/125),提示符仍在屏;按当前 main 口径"提示符重画"以屏面提示符常驻+账面落定为判据）
+- [x] composer 里已有半句，精修完成不抢输入；继续打字、退格、提交，原文逐字不丢。（幕三:半句草稿在握时放行精修,草稿原文与光标不动;补字、退格两下、再补字、提交,回显行"半句草稿开头没提交后半句结尾"逐字完整）
+- [x] 第二问提交与精修完成竞态重复跑，屏上绝不出现“第二问\n标题已设为”这副误导排版。（幕四 6 轮竞态(放行即提交/放行后 60ms 提交两形态交替),每轮正文区零标题行——e325b394 起采纳全程静默,该排版从根上不可能;账面每轮本地+精修恰两条 title.changed,ALL PASS。注:单子现场时的"标题已设为"通知行已被后续单拆为静默元数据,四幕断言按当前 main 代码现状解读）
 
 ### 账与回归
 
-- [ ] 一次成功精修只记一套旁路 request/usage/output/title 事件；wake 不得造成重复 Take、重复 usage 或重复 `control.title.changed`。
-- [ ] 精修失败仍记真实 usage；不改本地标题，不刷错误车轮。
+- [x] 一次成功精修只记一套旁路 request/usage/output/title 事件；wake 不得造成重复 Take、重复 usage 或重复 `control.title.changed`。（tests/unit/app/test_session_title_account.cpp 新增册"账与回归:成功精修只记一套旁路事件":真线程假后端+真 Trajectory 账本,主循环双收货点形态连问连取,二次 Take 空、Ready 翻假不再醒;main.jsonl 数账 title_refine 恰一枚 prepared/usage/output 终态,control.title.changed 恰两条(本地+采纳),无 turn_overlap。驱动器幕一/幕四每场同口径复验）
+- [x] 精修失败仍记真实 usage；不改本地标题，不刷错误车轮。（新增册"账与回归:失败精修照记 usage":空回(流正常收场、provider 报 usage、正文清洗后空)路径 outcome.ok=false 而 usage 照带回;账面 title_refine 恰一套 prepared/usage/output;title.changed 只剩本地一条;AdoptRefined 走 Ignored(车轮只在 WriteFailed 分支打)本地标题保住）
 - [x] `test_session_title_refiner`、`test_session_title_account`、console input composer、IdleWakeCoordinator、i18n 相关册全绿。（全量 ctest 361/361 绿;本次未动 console_input 与文案,i18n 册照旧绿;IdleWakeCoordinator 经 unit.app.session_wirings/loop 册复验）
 
 ## 六、真机验收
@@ -119,6 +119,6 @@
 ## 七、实施批次
 
 - [x] P0：补 refiner Ready 查询；标题完成挂 IdleWakeCoordinator；空 composer 自动收货。
-- [ ] P0：定死草稿非空与提交竞态的通知策略；补交互时序回归册。（策略已定死并落地:提交竞态边界只静默落账改名,通知压到下一枚提示符重画前 FlushDeferredTitleNotice 打出;/clear、/resume 弃压后通知;交互时序回归册未建,四幕时序用例仍缺,故不勾）
+- [x] P0：定死草稿非空与提交竞态的通知策略；补交互时序回归册。（策略终态与单子时不同:e325b394"修正会话标题与快捷键布局"拆掉 FlushDeferredTitleNotice——自动标题只属会话元数据,采纳全程静默,不往对话正文插任何通知行,草稿/提交两边界从根上无排版可言;交互时序回归册本次补上:tests/manual/title_wake_driver.cpp 四幕驱动器(可控假标题后端+注键刮屏,/clear 换场硬同步)+账与回归两册单测,ALL PASS）
 - [x] P1：拆开发货/收货职责；校正过时注释与命名。
-- [ ] 验收：focused 单测、全量 CTest、Windows 真终端六幕；逐项留下命令、退出码与原始失败。（单测与全量 CTest 已过,真终端六幕未做）
+- [ ] 验收：focused 单测、全量 CTest、Windows 真终端六幕；逐项留下命令、退出码与原始失败。（focused 册 test_session_title_account 7/7、test_session_title_refiner 照旧绿;全量 CTest 376/376 绿(100% tests passed, 0 tests failed out of 376,退出码 0);四幕驱动器 ALL PASS(报告 build/twake_run4/report.txt,幕二唤醒实测 62~125ms);真终端六幕仍未做——需真模型端点与真人感知项(双手离键/草稿手感/临界点 Enter 二十次),管道环境跑不了,留白待真机）
