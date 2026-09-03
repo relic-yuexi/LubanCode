@@ -35,11 +35,6 @@ inline constexpr int kSessionManifestMinReaderVersion = 2;
 // envelope.schema_version 与 session.json 的 event_schema_version 钉死。
 inline constexpr int kEnvelopeSchemaVersion = 1;
 
-// 迁移回执(migrations/storage-v2/<operation_id>/{intent,progress,result}.json)。
-inline constexpr std::string_view kMigrationSchemaName = "lubancode.storage-migration";
-inline constexpr int kMigrationSchemaVersion = 1;
-inline constexpr int kMigrationMinReaderVersion = 1;
-
 // memory recall snapshot(typed trajectory event context.injected 的 payload
 // 与 artifact 双形态共用这份版本)。
 inline constexpr std::string_view kMemoryRecallSchemaName = "lubancode.memory-recall";
