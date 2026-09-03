@@ -2,6 +2,11 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.187] - 2026-09-03
+
+- **状态栏资料行复活（审计 UI 线七批）。** 0.26.181 起模型/effort/cwd/branch/context/tokens 从底栏齐齐消失——`BuildStatusLine` 成了死生产路（数据照采、纯函数有测、真底栏不画）。现正式收口：新增 `data_rows` 资料行槽（下横线之下、导航坞之上，同一份 StatusPanelData 快照投影）；模式行只保档位+skills，两行一账不再各造。Idle/Busy 合流公共装配器 `BuildBottomChromeModel()`（调用方只给场景差值）；hint 四类语义类型化取代 `size()==1` 外形猜身份；左右槽 `assist_row`（常用键左槽、帮助入口右槽与 skills 同列）；keymap 驱动 `BuildKeyHints()`（改绑跟脚，删写死"？ 查看快捷键"兜底）；Agent 面板两对同文翻译合并。每批先红后绿，rg 零孤尾。
+- **P0-6 轨迹发布门收官。** 主账 `run.started` 四处全漏写 `writer_version/min_reader_version`（回滚条款没了抓手）——统一收进 `WriteRunStarted` 落笔，新账首行即带版本键；verify 补 `verify.unsupported_reader_version` 拒读门。回滚纪律真机双钉：真账改出"未来账"两档被拒、读前读后 sha256 一致零字节改动。五场真机（one_shot/子代理/workflow 真键入/崩溃 kill/单 4 回归）verify/replay 全过。"内部预览"口径收成正式。workflow session 归属统一另立单。368/368 全绿。
+
 ## [v0.26.185] - 2026-09-03
 
 - **记忆检索大提速：content 正文进索引。** 此前 `EntryIndexText` 只吃 title+summary+keywords，正文完全不参与 BM25——问细节的题（"她研究过什么"）够不着答案所在。现正文词袋进 catalog（字段加权 title>keywords>summary>content），命中注入带正文相关段。LoCoMo E1 复跑：**R@1 0.345→0.612、R@3→0.791、R@5→0.865**（open_domain 0.40→0.71 最猛）。过程真凶一并揪出：Bm25Points 封顶 24 分把强命中与中等命中削平同分、榜首改由时间戳平票——抬到 48 后 R@1 从 0.30 直跳 0.61。
