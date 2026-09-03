@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.194] - 2026-09-04
+
+- **坏字节杀不死子代理派工了。** 真机实录：minimax 主会话并发派 4 只子代理，模型回的 title 带非法 UTF-8，两只死在 `canonical_json.invalid_utf8` fail closed。现 spawn 链两道清洗门：入口（title/prompt 解析即过 `SanitizeExternalText`，替换落 warning 报处数）+ 账前兜底（run.started payload 再洗，幂等）；顺手拆了两颗自埋雷——title 路 `TaskSpecHash` 的 dump 遇坏字节直接抛异常、`substr(0,120)` 裸砍多字节本身产坏字节（全换 `Utf8PrefixBoundary`）。先红后绿：修前复现景正是现场死法；修后三形态坏字节（孤立续字节/截断多字节/GBK 段）spawn 全活、账合法、干净参数逐字节不变。fail closed 防线 8/8+3/3 原样不退——毒数据照杀，好数据不再陪葬。
+
 ## [v0.26.193] - 2026-09-03
 
 - **记忆条目带时间线了。** fact 类 topic 写入 `occurred_at` 字段（抽取时从材料提，没有就留空不造假）+ 正文头部时间锚一行；召回多条含时间条目时按时间排序注入——模型拿到的是一条时间线，不再是一把拼不出先后的散卡（LoCoMo temporal 桶的病根）。schema 向后兼容，旧条目无字段不炸。
