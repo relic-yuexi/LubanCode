@@ -19,6 +19,7 @@
 // Options 用生产默认(max_results=3, max_retrieval_bytes=8KiB):量现状,
 // 不为分数调参。
 
+#include <chrono>
 #include <cstdio>
 #include <filesystem>
 #include <fstream>
@@ -174,19 +175,28 @@ int main(int argc, char** argv) {
             std::fprintf(stderr, "%s: worker 失败: %s\n", cid.c_str(), flushed.error().c_str());
             return 1;
         }
+        // 索引体积对账:catalog.json 落盘字节(content 进索引前后各记一笔,
+        // 汇总侧出对照表)。
+        std::error_code size_ec;
+        const auto catalog_bytes =
+            fs::file_size(memory.memory_dir() / ".state" / "catalog.json", size_ec);
+        const std::size_t catalog_size = size_ec ? 0 : static_cast<std::size_t>(catalog_bytes);
 
         // ---- 逐题召回:BuildTurnContext + LastTrace ----
         json q_out = json::array();
         for (const auto& q : conv.at("questions")) {
             const std::string question = q.at("question").get<std::string>();
+            const auto t0 = std::chrono::steady_clock::now();
             (void)memory.BuildTurnContext(question, proj_dir, memory::QueryOrigin::User);
+            const auto t1 = std::chrono::steady_clock::now();
             const memory::RecallTrace trace = memory.LastTrace();
             json item;
             item["qid"] = q.at("qid");
             item["category"] = q.at("category");
+            item["recall_us"] = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
             json ranked = json::array();
             json injected = json::array();
-            int below = 0, budget = 0, stale = 0, dup = 0;
+            int below = 0, budget = 0, stale = 0, dup = 0, truncated = 0;
             for (const auto& e : trace.entries) {
                 ranked.push_back(e.id);
                 if (e.injected) injected.push_back(e.id);
@@ -194,6 +204,7 @@ int main(int argc, char** argv) {
                 if (e.budget_dropped) ++budget;
                 if (e.stale_blocked) ++stale;
                 if (e.duplicate_dropped) ++dup;
+                if (e.content_truncated) ++truncated;
             }
             item["ranked"] = ranked;
             item["injected"] = injected;
@@ -203,6 +214,7 @@ int main(int argc, char** argv) {
             item["budget_dropped"] = budget;
             item["stale_blocked"] = stale;
             item["duplicate_dropped"] = dup;
+            item["content_truncated"] = truncated;
             item["zero_recall"] = trace.entries.empty();
             q_out.push_back(std::move(item));
         }
@@ -211,6 +223,7 @@ int main(int argc, char** argv) {
         conv_result["conv"] = cid;
         conv_result["n_topics"] = n_topics;
         conv_result["jobs_flushed"] = flushed.value();
+        conv_result["catalog_bytes"] = catalog_size;
         conv_result["questions"] = std::move(q_out);
         out.push_back(std::move(conv_result));
         std::fprintf(stderr, "%s: topics=%zu questions=%zu\n", cid.c_str(), n_topics,

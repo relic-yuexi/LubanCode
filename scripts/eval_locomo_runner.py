@@ -44,7 +44,8 @@ HERE_EVAL = os.environ.get("LOCOMO_EVAL_DIR") or os.path.join(HERE, "eval", "loc
 WS_ROOT = r"D:\locomo_e2_ws"
 REAL_CONFIG = os.path.join(os.environ.get("USERPROFILE", r"C:\Users\moontidef"),
                           ".lubancode", "config.json")
-EXE = r"D:\lubancode\build\release\Release\lubancode.exe"
+# EXE 可用 LOCOMO_EXE 覆盖(复跑指向改进分支的构建;默认主仓产物)。
+EXE = os.environ.get("LOCOMO_EXE") or r"D:\lubancode\build\release\Release\lubancode.exe"
 PROVIDER_NAME = "ccmoon"
 TEMPERATURE = 0
 # 用户日常档是 high,但 A 组(无记忆)high 空推理实测 420s+ 不封顶,放量跑

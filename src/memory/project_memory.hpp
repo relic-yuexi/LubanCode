@@ -177,6 +177,13 @@ struct MemoryEntry {
     std::string name;
     std::string created_at;
     int schema = 2;
+    // content 进索引(LoCoMo 改进单第一刀):content 是主题文件的正文本体
+    //(标题行除外),文件扫描路读入,catalog 不回存全文;content_index 是
+    // 预分词的正文词袋("term:count ..." 空格分隔,分词与查询同款双路手
+    // 艺,单词条数与词条总数封顶),catalog 存读——生产检索每轮只解析词
+    // 袋,不重切全文。排级侧两条路等价:有词袋吃词袋,没词袋有正文就现切。
+    std::string content;
+    std::string content_index;
 };
 
 // 检索排级的纯函数结果(评测集与 /memory why 共用)。injected 只是"过
@@ -185,6 +192,8 @@ struct ScoredEntry {
     const MemoryEntry* entry = nullptr;
     int hard_hits = 0;     // 稳定实体(路径/关键词/symbol/标题/id)硬命中次数
     int token_hits = 0;    // 分词后命中的有效词项数(虚词碎片不计)
+    int content_hits = 0;  // 命中落在正文侧的有效词组数(注入配对用:正文命
+                           // 中的条目除摘要外要带正文相关段)
     double bm25 = 0.0;     // 本地 BM25 软分(词项按来源权重折算)
     int score = 0;         // 硬命中分 + cwd 排位加分 + BM25 折算分(排序用)
     bool qualifies = false;       // 过最低门槛,值得注入(调用方据此判)
@@ -271,6 +280,7 @@ struct RecallTraceEntry {
     int score = 0;
     int hard_hits = 0;    // 稳定实体(路径/关键词/symbol/标题/id)硬命中次数
     int term_hits = 0;    // 分词后命中的有效词项数(虚词碎片不计)
+    int content_hits = 0; // 命中落在正文侧的有效词组数(schema 4 起)
     bool injected = false;
     bool stale_blocked = false;   // 指纹漂移,只提示不注正文
     bool below_threshold = false; // 分数没过最低门槛
@@ -281,6 +291,11 @@ struct RecallTraceEntry {
     bool layer_superseded = false;   // 用户层同主题被项目层压过
     // P0-3:召回快照落不稳(§9.2)——本轮没注入该条,不得"注了却无账"。
     bool snapshot_failed = false;
+    // schema 4(预算选条规则):单条超预算截断只削正文,摘要保完整——此处
+    // 记截断事实;drop_reason 是"拦了什么、为什么"的明细(max_results|
+    // budget_bytes|empty_payload),不静默。
+    bool content_truncated = false;
+    std::string drop_reason;
     std::size_t bytes = 0;
 };
 
