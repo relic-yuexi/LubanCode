@@ -16,6 +16,7 @@
 #include <unistd.h>  // access(X_OK):PATH 里探 bash 用
 #endif
 
+#include "platform/paths.hpp"          // GetEnvVar:环境变量读取的唯一口(审计 P3 候选并口);Windows 另有 Utf8ToWide
 #include "platform/process.hpp"
 #include "tools/background_tasks.hpp"  // BackgroundTaskRegistry:后台模式登记 task_id + 起 watcher 探活
 #include "platform/text_encoding.hpp"  // SanitizeUtf8:捕获侧治本,见 execute() 里的调用点注释
@@ -30,7 +31,6 @@
 #include <span>
 
 #include "platform/base64.hpp"  // Base64Encode:-EncodedCommand 的公共内核(审计 P2)
-#include "platform/paths.hpp"  // Utf8ToWide:PowerShell -EncodedCommand 拼接用
 #endif
 
 namespace lubancode::tools {
@@ -142,34 +142,18 @@ std::optional<std::string> FindOnPath(const std::string& name_utf8, const char* 
     return std::nullopt;
 }
 
-std::optional<std::string> ReadEnvironmentVariable(const char* name) {
-#ifdef _WIN32
-    char* value = nullptr;
-    std::size_t size = 0;
-    if (_dupenv_s(&value, &size, name) != 0 || value == nullptr) {
-        std::free(value);
-        return std::nullopt;
-    }
-    std::string result(value);
-    std::free(value);
-    return result;
-#else
-    const char* value = std::getenv(name);
-    if (value == nullptr) {
-        return std::nullopt;
-    }
-    return std::string(value);
-#endif
-}
-
 // 本机装没装 bash(POSIX)/pwsh(Windows)。结果缓存。
 bool OptionalShellAvailable(const std::string& shell_id) {
+    // PATH 读取并入 platform::GetEnvVar(src 收口审计 P3 候选:私有读取把
+    // "空 PATH"当 optional("")、平台口当 nullopt——三格语义测试钉住平台
+    // 合同后并口。对本处行为无差:FindOnPath 对空串与缺席同样找不到,
+    // bash/pwsh 都按"PATH 里没有"收场。
     static const bool bash_ok = [] {
 #ifdef _WIN32
         return false;  // bash 是 POSIX 侧的可选 shell;Windows 不认(WSL 那只 bash 不是宿主 shell)
 #else
         // 常见落点先直查(/bin/bash、/usr/bin/bash),再走 PATH。
-        const auto path = ReadEnvironmentVariable("PATH");
+        const auto path = platform::GetEnvVar("PATH");
         return ShellExecutableExists("/bin/bash") || ShellExecutableExists("/usr/bin/bash") ||
                (path.has_value() && FindOnPath("bash", path->c_str()).has_value());
 #endif
@@ -178,7 +162,7 @@ bool OptionalShellAvailable(const std::string& shell_id) {
 #ifdef _WIN32
         // pwsh 按名字过 PATH 找(PowerShell 7 默认装进 Program Files 并入 PATH;
         // 没装(只有 Windows PowerShell 5.1)就找不到,如实不可用)。
-        const auto path = ReadEnvironmentVariable("PATH");
+        const auto path = platform::GetEnvVar("PATH");
         return path.has_value() && FindOnPath("pwsh", path->c_str()).has_value();
 #else
         return false;  // pwsh 是 Windows 侧的可选 shell;POSIX 不认(装了 pwsh 的 Linux 用户极少,不替他们猜)
