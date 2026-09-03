@@ -20,6 +20,7 @@
 
 #include "memory/frontmatter.hpp"
 #include "hooks/hash.hpp"  // Sha256Hex:召回快照与证据引用的指纹
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
 #include "platform/process.hpp"
 #include "trajectory/safety.hpp"    // P0-4:全局目录 user-only 收紧与越根检查
@@ -333,30 +334,11 @@ std::expected<void, std::string> ValidateSaveRequest(const SaveRequest& request)
 }
 
 std::expected<void, std::string> AtomicWrite(const fs::path& target, const std::string& content) {
-    std::error_code ec;
-    fs::create_directories(target.parent_path(), ec);
-    if (ec) {
-        return std::unexpected("创建目录失败: " + PathUtf8(target.parent_path()) + ": " + ec.message());
-    }
-    fs::path temporary = target;
-    temporary += ".tmp-" + JobStamp();
-    {
-        std::ofstream file(temporary, std::ios::binary | std::ios::trunc);
-        if (!file.is_open()) {
-            return std::unexpected("无法写临时文件: " + PathUtf8(temporary));
-        }
-        file.write(content.data(), static_cast<std::streamsize>(content.size()));
-        file.flush();
-        if (!file.good()) {
-            file.close();
-            fs::remove(temporary, ec);
-            return std::unexpected("写临时文件失败: " + PathUtf8(temporary));
-        }
-    }
-    auto replaced = platform::ReplaceFileAtomically(temporary, target);
-    if (!replaced.has_value()) {
-        fs::remove(temporary, ec);
-        return replaced;
+    // 统一原子写(审计 P1):唯一临时名与平台原子替换归 platform 件,替掉
+    // 本处自备的 ".tmp-JobStamp" 协议(合同不变:失败清临时件、不动正式件)。
+    const auto written = platform::AtomicWriteFile(target, content);
+    if (!written.has_value()) {
+        return std::unexpected(written.error().message);
     }
     return {};
 }

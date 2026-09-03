@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "hooks/hash.hpp"
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "trajectory/canonical_json.hpp"
 #include "trajectory/schema.hpp"
 
@@ -1026,34 +1027,13 @@ std::optional<ReplayCheckpoint> ReplayCheckpoint::FromJson(const nlohmann::json&
 
 std::expected<void, std::string> WriteReplayCheckpoint(const std::filesystem::path& session_dir,
                                                        const ReplayCheckpoint& checkpoint) {
-    std::error_code ec;
-    std::filesystem::create_directories(session_dir / "checkpoints", ec);
+    // 统一原子写(审计 P1):同 seq 重写允许(幂等),平台原子替换替掉旧写法
+    // 的"先删旧再换新"。checkpoint 本就是缓存,断档至多回退从头折叠,
+    // 不动 canonical 账。
     const auto path = CheckpointFilePath(session_dir, checkpoint.stream_name, checkpoint.source_seq);
-    std::filesystem::path tmp = path;
-    tmp += ".tmp";
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file.is_open()) {
-            return std::unexpected("checkpoint 打不开临时文件");
-        }
-        const std::string text = checkpoint.ToJson().dump();
-        file.write(text.data(), static_cast<std::streamsize>(text.size()));
-        file.flush();
-        if (!file.good()) {
-            file.close();
-            std::filesystem::remove(tmp, ec);
-            return std::unexpected("checkpoint 临时文件写失败");
-        }
-    }
-    // 同 seq 重写允许(幂等):先删旧再换新。checkpoint 本就是缓存,断档
-    // 至多回退从头折叠,不动 canonical 账。
-    std::error_code ignored;
-    std::filesystem::remove(path, ignored);
-    std::error_code rename_ec;
-    std::filesystem::rename(tmp, path, rename_ec);
-    if (rename_ec) {
-        std::filesystem::remove(tmp, ignored);
-        return std::unexpected("checkpoint 原子改名失败");
+    const auto written = platform::AtomicWriteFile(path, checkpoint.ToJson().dump());
+    if (!written.has_value()) {
+        return std::unexpected("checkpoint 原子写失败: " + written.error().message);
     }
     return {};
 }

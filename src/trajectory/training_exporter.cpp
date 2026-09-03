@@ -29,6 +29,7 @@
 
 #include "hooks/hash.hpp"
 #include "insights/redaction.hpp"
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
 #include "trajectory/blob_store.hpp"
 #include "trajectory/canonical_json.hpp"
@@ -872,29 +873,13 @@ ExportedEpisode BuildBrokenStreamStub(const RawStreamScan& raw,
     return stub;
 }
 
-// 原子写文本(同目录临时件 + rename;§12.1 换名前不越 session 根)。
+// 原子写文本(统一走 platform::AtomicWriteFile:同目录唯一临时件 + 平台
+// 原子替换;§12.1 换名不越 session 根)。
 bool WriteTextAtomically(const std::filesystem::path& target, const std::string& content,
                          std::string* error) {
-    std::error_code ec;
-    std::filesystem::create_directories(target.parent_path(), ec);
-    const auto temp = target.parent_path() / ("." + target.filename().string() + ".tmp");
-    {
-        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
-        if (!out.is_open()) {
-            *error = "打不开临时件 " + platform::PathToUtf8(temp);
-            return false;
-        }
-        out.write(content.data(), static_cast<std::streamsize>(content.size()));
-        out.flush();
-        if (!out.good()) {
-            *error = "写不稳 " + platform::PathToUtf8(temp);
-            return false;
-        }
-    }
-    const auto replaced = platform::ReplaceFileAtomically(temp, target);
-    if (!replaced.has_value()) {
-        std::filesystem::remove(temp, ec);
-        *error = replaced.error();
+    const auto written = platform::AtomicWriteFile(target, content);
+    if (!written.has_value()) {
+        *error = written.error().message;
         return false;
     }
     return true;

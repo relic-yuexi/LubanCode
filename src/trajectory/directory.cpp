@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
 #include "workspace/manifest.hpp"
 
@@ -36,23 +37,8 @@ bool IsValidSingleSegment(std::string_view name) {
 }
 
 bool WriteTextFileAtomic(const std::filesystem::path& path, const std::string& content) {
-    std::filesystem::path tmp = path;
-    tmp += ".tmp";  // 纯 ASCII 后缀,窄口拼接不涉代码页
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file.is_open()) {
-            return false;
-        }
-        file.write(content.data(), static_cast<std::streamsize>(content.size()));
-        file.flush();
-        if (!file.good()) {
-            file.close();
-            std::error_code ignored;
-            std::filesystem::remove(tmp, ignored);
-            return false;
-        }
-    }
-    return platform::ReplaceFileAtomically(tmp, path).has_value();
+    // 统一原子写(审计 P1):替掉本文件自备的固定 .tmp 协议。
+    return platform::AtomicWriteFile(path, content).has_value();
 }
 
 }  // namespace
