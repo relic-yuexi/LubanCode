@@ -455,3 +455,56 @@ TEST_CASE("宽度:20/40/80/120 列不越界,宽字符不撑破卡片") {
         CHECK(JoinLines(wide).find("run_command(") != std::string::npos);
     }
 }
+
+// ---------------------------------------------------------------------------
+// 间距钉子(底栏键贴场景单 P1-2):Subagent 查看页的连续工具卡恰留一口——
+// 终态卡/Running 卡/思考卡混排都走同一张 GapBetween 表,不因"没有结果"
+// 或"step 冲组"挤成一串,也不双打。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("间距:连续两枚 Tool 之间恰一口——终态卡、Running 卡、思考前各场景") {
+    cli::SetLanguage("zh");
+    const auto theme = cli::BuiltinTheme("plain");
+
+    // 终态两枚:间隔垫在前卡摘要行之后(同构渲染单已立,这里钉死口径)。
+    {
+        const std::vector<tools::AgentTaskEvent> events{
+            ToolStartEvent("run_command", R"({"command":"git log"})", "A", "step-0"),
+            ToolResultEvent("run_command", "[退出码 0]", "A"),
+            ToolStartEvent("read_file", R"({"path":"a.txt"})", "B", "step-0"),
+            ToolResultEvent("read_file", "1  hi", "B"),
+        };
+        const auto joined =
+            JoinLines(cli::RenderSessionBlocks(app::BuildAgentTaskBlocks(events, theme), theme, 100, false));
+        CHECK(Contains(joined, "[退出码 0]\n\n[OK] read_file(a.txt)"));  // 恰一口
+        CHECK(joined.find("\n\n\n") == std::string::npos);               // 不双打
+    }
+
+    // Running 两枚(结果未到、没有摘要行):卡与卡之间仍恰一口,不挤一起。
+    {
+        const std::vector<tools::AgentTaskEvent> events{
+            ToolStartEvent("web_search", R"({"query":"x"})", "A", "step-0"),
+            ToolStartEvent("read_file", R"({"path":"a.txt"})", "B", "step-0"),
+        };
+        const auto joined =
+            JoinLines(cli::RenderSessionBlocks(app::BuildAgentTaskBlocks(events, theme), theme, 100, false));
+        CHECK(Contains(joined, "web_search(x)\n\n[RUNNING] read_file(a.txt)"));
+        CHECK(joined.find("\n\n\n") == std::string::npos);
+    }
+
+    // 思考 -> 工具:收定的思考卡与下一枚工具卡之间恰一口(与主面板同表)。
+    {
+        const std::vector<tools::AgentTaskEvent> events{
+            ReasoningEvent("琢磨了一下", false),
+            ToolStartEvent("run_command", R"({"command":"git log"})", "A", "step-0"),
+            ToolResultEvent("run_command", "[退出码 0]", "A"),
+        };
+        const auto joined =
+            JoinLines(cli::RenderSessionBlocks(app::BuildAgentTaskBlocks(events, theme), theme, 100, false));
+        const std::size_t thinking_at = joined.find("思考");  // 收定思考卡,标题「思考」
+        const std::size_t tool_at = joined.find("[OK] run_command(git log)");
+        REQUIRE(thinking_at != std::string::npos);
+        REQUIRE(tool_at != std::string::npos);
+        CHECK(joined.substr(thinking_at, tool_at - thinking_at).find("\n\n") != std::string::npos);
+    }
+}
