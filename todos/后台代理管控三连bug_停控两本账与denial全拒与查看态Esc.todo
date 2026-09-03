@@ -1,0 +1,53 @@
+# 后台代理管控三连 bug：停控两本账、denial 全拒、查看态 Esc 失灵
+
+- 状态：待修（2026-09-03 深夜用户真机实录立案，三案同场并发）
+- 级别：P0（三只后台代理烧了 30M+ tokens 停不掉——真金白银的失控）
+- 类型：LubanCode 产品缺陷（后台代理管控链）
+- 现场版本：`lubancode 0.26.193`（minimax-m3 主会话 20260903-153004-K2725J，5 只 general-purpose 后台代理）
+- 不在本单：spawn 链 UTF-8（另单已立）；监督器 tool.silent 误报（被拒静默与真卡同形，denial 修好后自消——若仍有误报再议）；VS Code Ctrl+K 冲突（键盘层，产品无法改 VS Code）
+
+## 一、Bug B（最痛先写）：停控两本账
+
+**现场**：面板显示 #2/#3/#5 三只在跑（工具 run_command、152+ 次调用、10-12M tokens），但：
+- `stop_background({"task_id":"2"})` 三连"找不到 task_id=2 的后台任务"（background_output.cpp:120/176）
+- `background_output({})`："当前没有后台任务"
+- 模型拿面板可见的编号去停，登记簿查无此人——**面板的任务账与 stop/background 工具的登记簿是两本账**
+
+**收口**：
+- 查清两本账各自的数据源（面板走 agent_panel/task_ledger 一族；stop_background 走 background_output 注册表）——要么合成一本，要么 stop/background 接受面板同款 id（编号互认）
+- agent 工具 `background:true` 派工的返回文案必须带**与面板显示一致**的 task_id（模型拿什么看见、就拿什么能停）
+- `background_output({})` 空列表时若面板有活代理——不一致本身就是 bug，列表要合并或明示两类来源
+
+**验收**：面板可见的每只后台代理，其显示 id 能被 stop_background 一击停掉；background_output 列出与面板一致；单测钉"面板账与登记簿同源（或互认）"。
+
+## 二、Bug A：后台子代理工具全线 denial
+
+**现场**：正文区连刷五条"[后台子代理权限未放行,已被拒]"（i18n `agent_panel.denial_notice_title`，渲染点 interactive_session_assembly.cpp:806），#2/#3 的 read_file/search 一类也过不去；监督器同步误报"疑似工具卡(tool.silent)"（被拒静默与真卡同形）。
+
+**矛盾点**：另一边 #2/#3/#5 的 run_command 跑了 150+ 次成功——**部分工具在跑、部分全拒**，拒绝的判定路待查：
+- 后台子代理本该按"不询问档"合同：needs_confirm=false 工具照常执行、显式预授权照放、需确认的给结构化拒绝
+- 现场疑似把某类（或某批）工具无差别拒了；或 denial 通知本身在重复投递（同一拒绝连刷五条）
+- 查 denial 的判定点（后台路的 EvaluatePermission/ApprovalClass 投影）与通知投递路（为何连刷）
+
+**验收**：后台子代理 needs_confirm=false 工具零拒绝；需确认工具单次结构化拒绝（不连刷）；监督器对"被拒静默"不再报 tool.silent（或标注区分）。
+
+## 三、Bug C：查看态 Esc 失灵
+
+**现场**：用户 Enter 进入 subagent 查看页后，按 Esc 无法终止/退出——UI 提示"Esc 逐层退出"但无响应。
+
+**收口**：查查看态的键路（console_input 键盘分发到 agent_panel 查看态的分支）——Esc 该先于编辑器吃掉、逐层退出；若查看态里子代理在跑，Esc 的语义（退视图 vs 停代理）按既有合同钉死并在 UI 明示。
+
+**验收**：进入 subagent 查看页后 Esc 一击退出回上层；连进两层两击退净；不吞编辑器正常 Esc（打断 turn）语义。
+
+## 四、实施批次
+
+- [ ] P0：Bug B 停控两本账——面板与登记簿同源互认，模型可见即可停
+- [ ] P0：Bug A denial 判定路与连刷——后台代理权限合同复位
+- [ ] P1：Bug C 查看态 Esc 键路
+- [ ] 全量 ctest 零回归；真机复验三景（派后台代理→面板停掉/权限行为/Esc 退出）
+
+## 五、不做什么
+
+- 不动监督器（denial 修好自消，验证时顺带看）
+- 不改 VS Code 侧任何东西
+- 不动 spawn UTF-8（另单）
