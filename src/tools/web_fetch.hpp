@@ -11,7 +11,7 @@
 
 namespace lubancode::tools {
 
-// ---- 下面三个纯函数不碰网络,单独导出好单测 ----
+// ---- 下面的纯函数不碰网络,单独导出好单测 ----
 
 // 手写的小剥离器:HTML -> 正文。做四件事:
 //   1) <script>/<style> 整块连内容一起剔掉,<!-- 注释 --> 同样剔掉;
@@ -25,12 +25,22 @@ std::string StripHtml(const std::string& html);
 
 // 把 text 按 UTF-8 边界截断到不超过 max_bytes 字节:落点若在多字节字符
 // 中间,往回退到上一个完整字符结束处,绝不吐出半个字符(半个字符是非法
-// UTF-8,塞进 JSON 请求体时 nlohmann 的 dump() 会直接抛异常)。
+// UTF-8,塞进 JSON 请求体时 nlohmann 的 dump() 会直接抛异常)。实现走
+// platform::Utf8PrefixBoundary,web 工具不自养字节刀。
 std::string TruncateUtf8(const std::string& text, std::size_t max_bytes);
 
-// 把字节流里不合法的 UTF-8 序列(比如 GBK 编码的网页)逐个替换成 '?',
-// 保证返回值是合法 UTF-8——理由同上,tool_result 要进 JSON 请求体。
-std::string SanitizeUtf8(const std::string& text);
+// 抓回正文的三步纯函数管线(不碰网络,清洗合同的测试口):
+//   1) Content-Type 认 text/html 就先剥标签,普通文本原样;
+//   2) 过 platform::SanitizeExternalText——网络正文是外来文本,与 MCP
+//      rich result、Search 走同一替换合同(保合法 UTF-8 片段,坏字节换
+//      U+FFFD;不再自养 '?' 清洗器);
+//   3) 按公共 UTF-8 边界截断到 max_bytes。
+struct PreparedBody {
+    std::string text;
+    bool truncated = false;
+};
+PreparedBody PrepareFetchedBody(const std::string& content_type, const std::string& raw_body,
+                                std::size_t max_bytes);
 
 class WebFetchTool : public Tool {
 public:

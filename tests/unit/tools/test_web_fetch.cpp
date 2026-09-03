@@ -6,9 +6,16 @@
 
 #include <string>
 
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>  // GetACP:GBK 页面留样的代码页分档断言
+#endif
+
+#include "platform/text_encoding.hpp"  // IsValidUtf8/SanitizeExternalText:外来文本公共关口
 #include "tools/web_fetch.hpp"
 
-using lubancode::tools::SanitizeUtf8;
+using lubancode::tools::PrepareFetchedBody;
 using lubancode::tools::StripHtml;
 using lubancode::tools::TruncateUtf8;
 using lubancode::tools::WebFetchTool;
@@ -103,24 +110,85 @@ TEST_CASE("TruncateUtf8: 不吐半个中文字符") {
     CHECK(TruncateUtf8(text, 2) == "");
 }
 
-TEST_CASE("SanitizeUtf8: 合法 UTF-8(含中文)原样保留") {
-    const std::string text = "hello 世界";
-    CHECK(SanitizeUtf8(text) == text);
-}
-
-TEST_CASE("SanitizeUtf8: 非法字节替换成问号") {
-    std::string bad = "ok";
-    bad += static_cast<char>(0xC4);  // GBK "中" 的首字节,后面不是合法续字节
-    bad += static_cast<char>(0xE3);
-    const std::string cleaned = SanitizeUtf8(bad);
-    CHECK(cleaned.find("ok") == 0);
-    CHECK(cleaned.find('?') != std::string::npos);
+TEST_CASE("PrepareFetchedBody: 外来文本合同——坏字节换 U+FFFD,不换 ASCII 问号") {
+    // src 收口审计 P1:网页正文是外来文本,与 MCP rich result、Search 走
+    // 同一份替换合同(platform::SanitizeExternalText)。旧 私有清洗器把坏
+    // 字节洗成 '?' 且不可逆;新合同保住合法中文、坏字节换 U+FFFD。
+    std::string mixed = "正文";
+    mixed += static_cast<char>(0xC4);  // GBK 首字节,后面不是合法续字节
+    mixed += static_cast<char>(0xE3);
+    mixed += "继续";
+    const auto prepared = PrepareFetchedBody("text/plain", mixed, 1 << 20);
+    const std::string& cleaned = prepared.text;
+    CHECK_FALSE(prepared.truncated);
+    CHECK(cleaned.find("正文") != std::string::npos);
+    CHECK(cleaned.find("继续") != std::string::npos);
+    const std::string kFffd = "\xEF\xBF\xBD";
+    CHECK(cleaned.find(kFffd) != std::string::npos);
+    CHECK(cleaned.find('?') == std::string::npos);
+    CHECK(lubancode::platform::IsValidUtf8(cleaned));
+    // 与公共关口逐字节同归:web 路不另立清洗合同。
+    CHECK(cleaned == lubancode::platform::SanitizeExternalText(mixed));
     // 清洗后的结果塞进 JSON 不该抛异常。
     CHECK_NOTHROW([&] {
         nlohmann::json j;
         j["text"] = cleaned;
         (void)j.dump();
     }());
+}
+
+TEST_CASE("PrepareFetchedBody: 合法中文原样保留(text/plain 与 text/html)") {
+    const std::string plain = "hello 世界";
+    const auto p1 = PrepareFetchedBody("text/plain; charset=utf-8", plain, 1 << 20);
+    CHECK(p1.text == plain);
+
+    const std::string html = "<html><body><p>武松打虎,景阳冈上。</p></body></html>";
+    const auto p2 = PrepareFetchedBody("TEXT/HTML", html, 1 << 20);
+    CHECK(p2.text.find("武松打虎,景阳冈上。") != std::string::npos);
+    CHECK(p2.text.find('<') == std::string::npos);
+}
+
+TEST_CASE("PrepareFetchedBody: 孤立续字节收口,出口必是合法 UTF-8") {
+    std::string lone = "ok";
+    lone += static_cast<char>(0x80);  // 孤立 continuation byte
+    const auto prepared = PrepareFetchedBody("text/plain", lone, 1 << 20);
+    CHECK(prepared.text.rfind("ok", 0) == 0);
+    // 坏字节的去向由公共关口按成分裁决:整段像本机编码就按 ACP 试转
+    //(GBK 机器上 0x80 转成 €),转不动才换 U+FFFD——web 路不另立合同,
+    // 只钉两条:出口合法、"ok" 前缀保留、绝不再是裸坏字节。
+    CHECK(lubancode::platform::IsValidUtf8(prepared.text));
+    CHECK(prepared.text == lubancode::platform::SanitizeExternalText(lone));
+}
+
+TEST_CASE("PrepareFetchedBody: 截断落在 UTF-8 边界上,不吐半个字") {
+    const std::string text = "汉字汉字";  // 每字 3 字节,共 12 字节
+    const auto p4 = PrepareFetchedBody("text/plain", text, 4);
+    CHECK(p4.truncated);
+    CHECK(p4.text == "汉");  // 4 字节帽退到 3 字节边界
+
+    const auto p5 = PrepareFetchedBody("text/plain", text, 5);
+    CHECK(p5.text == "汉");
+
+    const auto p12 = PrepareFetchedBody("text/plain", text, 12);
+    CHECK_FALSE(p12.truncated);
+    CHECK(p12.text == text);
+    CHECK(lubancode::platform::IsValidUtf8(p4.text));
+}
+
+TEST_CASE("PrepareFetchedBody: GBK 页面留样——出口必是合法 UTF-8") {
+    // "中文" 的 GBK 字节:D6 D0 CE C4,不是合法 UTF-8。
+    const std::string gbk = "\xD6\xD0\xCE\xC4";
+    const auto prepared = PrepareFetchedBody("text/html; charset=gbk",
+                                             "<html><body><p>" + gbk + "</p></body></html>", 1 << 20);
+    CHECK(lubancode::platform::IsValidUtf8(prepared.text));
+    CHECK(prepared.text.find('<') == std::string::npos);
+#ifdef _WIN32
+    // 中文代码页(936)的机器上,整段 GBK 会被公共关口按 ACP 转回原文;
+    // 别的代码页不强求转换结果,只求出口合法(上面的断言)。
+    if (GetACP() == 936) {
+        CHECK(prepared.text.find("中文") != std::string::npos);
+    }
+#endif
 }
 
 TEST_CASE("WebFetchTool: 参数校验(缺 url / 坏协议 / 坏 max_bytes)不碰网络直接报错") {
