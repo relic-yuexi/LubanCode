@@ -398,21 +398,24 @@ AgentDockLayout LayoutAgentDock(const std::vector<AgentPanelEntry>& agents, int 
     out.hidden_below = agent_total - agents_visible - (first - 1);
 
     // ---- 提示行:随焦点/闲置展开态收放,窄屏(<90 列)摘掉低频长文案 ----
+    // 两对完全相同的场景翻译已合并(收口审计单 §二 P3):未聚焦短文案与
+    // 闲置展开文案忙闲同一句,不再按 streaming 各配一枚 key;focused 文案
+    // 的"返回"与"逐层退出"语义不同,忙闲两套保留。
     const bool on_summary =
         out.idle_summary && out.navigation_ids[static_cast<std::size_t>(safe_selected)] == kIdleSummaryTaskId;
     const char* hint_key;
     if (armed_stop_all) {
         hint_key = "agent_panel.hint_armed";
     } else if (focused && on_summary) {
-        hint_key = streaming ? "agent_panel.stream_hint_idle_expanded" : "agent_panel.hint_idle_expanded";
+        hint_key = "agent_panel.hint_idle_expanded";
     } else if (focused) {
         const bool wide = width >= kStopAllHintMinCols;
         hint_key = streaming ? (wide ? "agent_panel.stream_hint_focused" : "agent_panel.stream_hint_focused_short")
                              : (wide ? "agent_panel.hint_focused" : "agent_panel.hint_focused_short");
     } else {
         const bool wide = width >= kStopAllHintMinCols;
-        hint_key = streaming ? (wide ? "agent_panel.stream_hint" : "agent_panel.stream_hint_short")
-                             : (wide ? "agent_panel.hint" : "agent_panel.hint_short");
+        hint_key = wide ? (streaming ? "agent_panel.stream_hint" : "agent_panel.hint")
+                        : "agent_panel.hint_short";
     }
     AgentDockRow hint_row;
     hint_row.kind = AgentDockRow::Kind::Hint;
