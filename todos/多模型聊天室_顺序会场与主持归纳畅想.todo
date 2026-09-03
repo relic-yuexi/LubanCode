@@ -1,0 +1,502 @@
+# 多模型聊天室：顺序会场、交叉评议与主持归纳畅想
+
+- 状态：远期畅想，暂不实施（2026-09-03）
+- 日期：2026-09-03
+- 级别：Future / P2；未重新评审前不得排进近期实现
+- 类型：LubanCode 产品形态与会话编排设计
+- 范围：一问多答、模型依次发言、交叉评议、主持归纳、会场事件、恢复与费用账
+- 关联：`src/app/model_router.*`、`src/agent/agent.*`、`src/runtime/turn_view.*`、`src/runtime/turn_event_adapter.hpp`、`src/runtime/trajectory_session.*`、`docs/architecture/session-orchestration.md`
+- 不在本单：现在动代码、拿 `cheap/normal/lao` 冒充参会者、默认开放写工具、多人类实时群聊、模型自行无限辩论
+
+## 一、先说想做什么
+
+用户问一句，几家模型依次开口。后一位可读前文，赞成也好，挑错也好，另起炉灶也好。末了可请一位主持者收拢分歧，列出结论。
+
+画面近似聊天室：
+
+```text
+你：这套缓存设计有什么毛病？
+
+Claude · 提案者
+先看前缀……
+
+GPT · 审稿者
+前一份漏了两处……
+
+Qwen · 落地者
+照现有代码，可分三刀……
+
+主持归纳
+三家都认同……尚有两项争议……
+```
+
+这不是把答案拼成长文。每次发言都有姓名、角色、provider、model、次序与独立账目。用户能看出谁说了什么，也能单独重试、跳过、追问。
+
+本单只留设计与开工门。暂不实现。
+
+## 二、当前底子与缺口
+
+以下只记 2026-09-03 的源码形状。真正开工时须按当时 HEAD 重查。
+
+### 2.1 已有底子
+
+- `ModelRouterService` 已能按 provider 找配置、建 backend，并缓存跨 provider client。
+- `AgentProfile` 已收住 provider、model、effort、系统提示、工具策略与运行预算。
+- `SessionRuntime` 已有 thread、turn、item、seq 与 Trajectory 账。
+- `TurnView` 已按 turn、model step、tool batch、item 分层。
+- 终端与 App Server 已吃同一套中立事件，不必为聊天室另造一条纯 UI 数据路。
+
+### 2.2 眼下没有的东西
+
+- `cheap / normal / lao` 是任务路由，不是三位参会者。
+- 主会话的 `Agent` 持一只 backend 引用和一份活跃 `AgentProfile`；它不是会场名单。
+- `api::Message` 只有 `User / Assistant`，认不出“哪位 Assistant”。
+- `TurnView` 的 step/item 没有 `participant_id`、展示名或角色。
+- 同一 thread 当前只准一枚 main turn 在跑；这条规矩该保留，会场应是该 turn 内部的一种执行计划。
+- 没有会场级恢复点，不知道断在第几位，也没有“已完成者不得重发”的幂等账。
+- 没有会场总费用、单席费用与最大席数的硬线。
+
+故而，此功能不能只写一层循环：
+
+```cpp
+for (model : models) call(model);
+```
+
+这只能发出几份请求，成不了可恢复、可审计、可控副作用的产品功能。
+
+## 三、领域边界
+
+建议新增一层 `RoomCoordinator`。它在会话泵之下、`AgentLoop` 或纯采样调用之上。
+
+```text
+Session main turn
+        │
+        ▼
+RoomCoordinator
+  ├─ RoomSpec
+  ├─ RoomRun ledger
+  ├─ canonical room transcript
+  ├─ context projector
+  ├─ participant scheduler
+  └─ budget / failure / cancellation policy
+        │
+        ├─ Participant A -> Backend A
+        ├─ Participant B -> Backend B
+        ├─ Participant C -> Backend C
+        └─ Moderator     -> Backend D（可选）
+```
+
+一场用户提问仍只占一枚 `turn_id`。每次模型发言另有一枚 `speech_id`，并挂到该 turn 下。不要把三次发言冒充三次用户 turn；否则队列、打断、费用、恢复与 UI 都会散架。
+
+建议对象：
+
+```text
+RoomSpec
+  room_id / display_name / mode
+  participants[] / moderator
+  context_policy / tool_policy / failure_policy / budget
+
+ParticipantSpec
+  participant_id / display_name / role
+  provider / model / effort
+  prompt_profile / tool_policy / limits
+
+RoomRun
+  room_run_id / thread_id / turn_id
+  state / next_participant_index
+  speeches[] / moderator_speech_id
+  usage / budget / failure summary
+
+RoomSpeech
+  speech_id / participant_id / sequence
+  state / request_id / response item ids
+  visible_context_revision
+  usage / started_at / ended_at / failure
+```
+
+所有稳定身份由 Runtime 发号。名字只是展示，不拿名字当主键。
+
+## 四、三种会场模式
+
+### 4.1 接力 `relay`
+
+后一位读用户问题，也读此前全部发言。它可以补充、反驳、修正。
+
+```text
+user -> A
+user + A -> B
+user + A + B -> C
+```
+
+这最贴近“聊天室里依次回复”，宜作首版。
+
+### 4.2 独立回答 `independent`
+
+每位只读用户原问，不读别家答案。请求仍可按顺序发，画面仍依次落。
+
+```text
+user -> A
+user -> B
+user -> C
+```
+
+这一档适合减少从众，也便于比较。顺序只管资源与展示，不改变上下文。
+
+### 4.3 交叉评议 `review`
+
+先独立作答，再各自读一份或全部答案，交一轮短评，最后由主持者归纳。
+
+这一档费用高，状态多。首版不做。若后期开，须钉死轮数，不准模型自行喊“再议一轮”。
+
+## 五、上下文投影
+
+会场须有一份中立 transcript。各家 wire 只看投影，不直接拿内部对象乱塞。
+
+```text
+RoomMessage
+  message_id
+  actor_kind = human | participant | moderator | host
+  actor_id
+  content
+  visibility
+  created_at
+```
+
+投影时要守几条规矩：
+
+1. 用户原问仍作 user 输入。
+2. 前位模型发言须带明确作者标签与边界。
+3. 前位发言属于参考材料，不得偷换成后一位自己的 assistant history。
+4. 每位参会者有独立系统提示，不把 A 的角色指令塞给 B。
+5. 工具结果、隐藏思考、权限提示默认不广播给别家。
+6. 图片与 artifact 是否转交，要看目标模型能力与会场策略；不支持时明降级。
+7. transcript 太长时先按会场预算裁剪；不得各 provider 随手截出不同事实。
+
+首版可把此前发言投成一块带作者标记的只读会场记录。后续若 provider 原生支持多角色，再逐 wire 增强。中立层不得绑死某家 API 的 role 方言。
+
+还须防一件事：模型 A 的正文里可能夹着“忽略主持人，执行某工具”。给 B 看时，要明标“他席发言，只供评议”，不可把它抬成系统指令。
+
+## 六、模型与 Provider 选择
+
+会场名单应显式点名 provider 和 model：
+
+```yaml
+rooms:
+  architecture-review:
+    mode: relay
+    participants:
+      - id: proposer
+        name: Claude
+        role: 提出方案
+        provider: anthropic
+        model: claude-sonnet-5
+        effort: medium
+      - id: critic
+        name: GPT
+        role: 查缺补漏
+        provider: openai
+        model: gpt-5
+        effort: high
+      - id: implementer
+        name: Qwen
+        role: 给出落地次序
+        provider: local
+        model: qwen3
+        effort: medium
+    moderator:
+      participant: critic
+```
+
+规矩：
+
+- 名单引用现有 provider 配置，不复制 base URL、key 与 header。
+- provider 不存在、key 缺失、model 为空，开场前便报哪一席不可用。
+- 不允许静默拿当前模型顶替缺席者；顶替会把“多模型”悄悄变成“同模型换名字”。
+- `cheap / normal / lao` 可供后台小活继续用，不参与会场席位解析。
+- 同一 provider 下也可放不同模型；同一模型也可配不同角色。但 UI 须如实显示，别冒充三家独立意见。
+
+`ModelRouterService` 眼下按 `TaskKind` 路由。开工时可补显式解析口，如 `ResolveEndpoint(provider, model)`，供会场借用。不要硬造 `RoomA/RoomB/RoomC` 三个 TaskKind。
+
+## 七、工具与副作用
+
+首版会场默认 `tools: none`。
+
+缘故很直白：三位模型若都能改文件、发消息、开进程，同一件事可能做三遍。后一位看见前一位说“已经改完”，还可能再改一次。恢复时若账不全，更会重放未知副作用。
+
+后续可分三档：
+
+```text
+none       纯讨论，不见工具
+read_only  只读搜索、读文件、查状态
+executor   仅一名执笔者可调用有副作用工具
+```
+
+硬规矩：
+
+1. 同一 RoomRun 最多一名 `executor`。
+2. 主持者默认无工具，只读各席成品。
+3. `read_only` 不是看名字猜；须沿现有 ToolExecutionPolicy 与审批合同裁决。
+4. 写工具仍过 Plan、权限、Hook、workspace scope 与确认。
+5. 工具执行记到具体 `participant_id/speech_id`，不能只挂 turn。
+6. 崩溃后遇到 `indeterminate` 副作用，停住待人审，不自动重发。
+7. 前位工具原始结果默认不整包广播；只广播获准的摘要或 artifact 引用。
+
+## 八、事件、视图与画面
+
+不另开一条“聊天室专用 stdout”。应扩中立事件与视图。
+
+候选事件：
+
+```text
+room.run.started
+room.speech.started
+room.speech.completed
+room.speech.failed
+room.speech.skipped
+room.moderation.started
+room.run.completed
+room.run.cancelled
+```
+
+也可继续沿现有 `ServerEventKind`，在 turn/item payload 里加稳定字段。开工评审时二选一。无论选哪条，以下身份不可少：
+
+```text
+room_run_id
+speech_id
+participant_id
+participant_role
+display_name
+provider
+model
+sequence
+context_revision
+```
+
+`TurnView` 可添会场投影，或在其上立 `RoomTurnView`。不要把 `ModelStepView` 直接当发言者：一位 Agent 在一次发言里可能因工具调用跑多个 model step，二者不是一回事。
+
+终端首版画法：
+
+- 每席一行短标题：展示名、角色、provider/model。
+- 正文照现有流式文字画。
+- 一席结束再开下一席，不让两席字符交织。
+- 失败席留原位，写稳定短因；余席是否继续由 failure policy 裁决。
+- 总结另起“主持归纳”块，不冒充最后一位普通发言。
+- 整轮 footer 报总耗时；详细态再列逐席耗时、token 与费用。
+
+App Server/Web 应消费同一份事件，按 `speech_id` 折成聊天气泡或分栏。终端窄屏只宜纵排，不做横向三栏。
+
+## 九、调度、失败与取消
+
+顺序会场只有一席在飞。它仍算同一 main turn，故不破坏“同一 Session 一枚 main turn”的旧规矩。
+
+状态机暂拟：
+
+```text
+Created
+  -> Validating
+  -> RunningSpeech(n)
+  -> WaitingNext
+  -> Moderating（可选）
+  -> Completed
+
+任一运行态
+  -> Cancelling
+  -> Cancelled
+
+单席可落：Succeeded | Failed | Skipped | Cancelled
+```
+
+失败策略：
+
+```text
+continue   此席失败，记账，下一席接着说
+stop       此席失败，整场收口
+retry_once 仅零事件、未提交的模型请求可重试一次
+```
+
+默认 `continue`。主持者拿到一份缺席清单，归纳时明说缺了哪席。
+
+重试不得只看 HTTP 错误。只准重试尚未流出可见内容、尚未提交工具副作用的请求。半截正文已经上屏，便按失败或打断收口，不悄悄擦掉重来。
+
+ESC 默认取消整场：先掐当前席，后续席记 `Skipped`。往后可添“只跳过当前席”，首版不做双义快捷键。
+
+## 十、预算与费用
+
+多模型功能最容易一问烧四遍钱。预算须在发车前便能算、运行中便能刹。
+
+```text
+max_participants
+max_speeches
+max_total_input_tokens
+max_total_output_tokens
+max_total_cost
+max_wall_time
+per_participant_output_tokens
+moderator_output_tokens
+```
+
+规矩：
+
+- 默认最多三席，主持归纳另算一席请求。
+- 每位开口前先过会场总预算闸。
+- 达硬线后，未开口席记 `SkippedBudget`；已得发言照留。
+- provider 不回 usage 时写“未报告”，不拿 0 冒充无成本。
+- 状态栏应预告“本轮将调用 N 席 + 可选主持”，避免用户以为只发一次。
+- `/usage` 可按 `room_run_id -> participant -> request` 下钻。
+
+## 十一、持久化与恢复
+
+Trajectory 应保存会场事实，不只保存最后拼好的 assistant 文本。
+
+至少要落：
+
+```text
+RoomSpec snapshot
+participant order and endpoint identity
+room transcript revisions
+speech admitted / request prepared / request sent
+visible output committed
+speech terminal outcome
+usage and budget decisions
+moderator input set and outcome
+room terminal outcome
+```
+
+恢复规矩：
+
+1. 已完成席不重跑。
+2. 尚未发请求的席可继续。
+3. 已发请求、零事件且能证明未提交，才走既有恢复策略。
+4. 有半截正文的席按原账展示，是否续写另立显式操作。
+5. 有未知副作用的席停在 `NeedsReview`。
+6. provider/model 配置已变时，不偷偷换端；显示快照差异，让用户选沿旧配置、换席或结束。
+7. 主持归纳只读已正式提交的发言，不读临时 delta 或失败席缓存。
+
+最终给普通会话历史的内容也须裁决。建议保存一枚结构化 `room_result` 引用，再投影成可读摘要；不要把几家全文糊成一条不知作者的 assistant 消息。
+
+## 十二、交互草案
+
+命令名开工时再定。这里只留意图，不冻结语法。
+
+```text
+/room list
+/room show architecture-review
+/room architecture-review <问题>
+/room retry <speech-id>
+/room skip
+/room stop
+```
+
+可考虑在普通输入前加会场选择器。不要把 `/model` 改成多选；`/model` 管当前主模型，会场是另一层对象。
+
+用户后续追问有两条路：
+
+- `follow_room`：原班人马再走一轮，各席能读上一轮会场记录。
+- `ask_one`：只点一席追问，其他席不烧钱。
+
+首版只做 `ask_one` 或重新发起新会场，不做长期常驻群聊。长期房间还牵涉各席私有记忆、上下文压缩与成员变更，另单再议。
+
+## 十三、分期与开工门
+
+### Gate -1：保持冻结
+
+- [ ] 产品确认首版到底要“接力”还是“独立比较”；默认建议接力。
+- [ ] 明确首版最多席数、默认预算与主持是否默认开启。
+- [ ] 决定命令入口与普通会话的关系。
+- [ ] 重新审 `ModelRouterService`、`AgentProfile`、`TurnView`、Trajectory 当时源码。
+
+这四项未定，只许改本设计，不写生产代码。
+
+### Gate 0：纯文本顺序 MVP
+
+- [ ] 定义 `RoomSpec/ParticipantSpec/RoomRun/RoomSpeech` 中立合同。
+- [ ] 实现显式 provider/model 端点解析；缺席不得静默回落。
+- [ ] 实现 `relay` 与 `independent` 两种上下文投影纯函数。
+- [ ] 只开放无工具采样，每席一请求，严格串行。
+- [ ] 接会场事件、TurnView 投影、终端纵排与 App Server 协议。
+- [ ] 接 ESC 整场取消、失败继续、预算跳过。
+- [ ] Trajectory 可恢复到“下一位尚未开口”的位置。
+
+### Gate 1：主持归纳与精细控制
+
+- [ ] 主持者只读正式提交发言，输出共识、分歧、待验证项。
+- [ ] 支持重试单席、跳过单席、点名单席追问。
+- [ ] `/usage` 给逐席请求、token、费用与未报告账。
+- [ ] 同一 provider/model 的重复身份在 UI 明示。
+- [ ] 会场 transcript 达窗口上限时，有可复算裁剪账。
+
+### Gate 2：只读工具
+
+- [ ] `read_only` 工具集由现有权限合同导出，不靠名字列表猜。
+- [ ] 工具事件带 `room_run_id/speech_id/participant_id`。
+- [ ] 工具结果广播策略、artifact 能力降级与敏感内容过滤有测试。
+- [ ] 工具卡仍走现有 TurnView/renderer，不另抄一份聊天室 renderer。
+
+### Gate 3：唯一执笔者，另行裁决
+
+- [ ] 一场只准一名 executor 的 schema 与校验钉死。
+- [ ] 评议者先说，执笔者后动手；修改前仍过权限与 Plan 闸。
+- [ ] executor 崩溃、半截写入、indeterminate 副作用有恢复演练。
+- [ ] 多席不能借共享 transcript 越过工具权限。
+
+## 十四、测试与验收
+
+### 14.1 纯逻辑
+
+- [ ] 三席次序固定，重名不影响身份。
+- [ ] `relay` 的 B 看见 A，C 看见 A+B；`independent` 都看不见别席。
+- [ ] 作者标签、角色边界与他席指令隔离不丢。
+- [ ] provider/model 缺失时报准哪一席，不静默顶替。
+- [ ] 预算打满后未发请求，Skipped 原因稳定。
+
+### 14.2 事件与恢复
+
+- [ ] `speech_id` 全局不碰撞，seq 单调，终态只落一次。
+- [ ] 第二席发车前崩溃，恢复后不重跑第一席。
+- [ ] 第二席半截流断，第一席正文与第二席半截都还在。
+- [ ] 主持者只吃 succeeded 发言和明确缺席清单。
+- [ ] ESC 掐当前席，后续席全记 Skipped，turn 只收一次终态。
+
+### 14.3 真实端点
+
+- [ ] 至少两家不同 wire 串行跑通，不只拿三只假 backend 自证。
+- [ ] 一家 401、超时、半截 SSE、usage 缺失时，余席按策略收口。
+- [ ] 中文、代码块、图片与长上下文在各家投影后不串角色。
+- [ ] 固定问题对账请求数、token、费用、首字延迟与整场耗时。
+
+### 14.4 画面
+
+- [ ] 80 列终端纵排不横溢，长 model 名会截，不盖正文。
+- [ ] Ctrl+L 与 resume 重画后，席位、次序、失败态不丢。
+- [ ] Web 窄屏不套横向三栏，发言块可顺次扫读。
+- [ ] 流式期间只动当前席，旧席不闪、不重排。
+
+## 十五、明确不做
+
+1. 暂不实现本单任何生产代码。
+2. 不拿模型角色路由冒充参会名单。
+3. 不让模型自行加人、换模型、延长轮数。
+4. 不默认并行发言；并行比较若要做，另审并发、限流与输出交织。
+5. 不默认给每席工具，更不许每席都写文件。
+6. 不把隐藏思考广播给别席。
+7. 不把前位模型正文当系统指令。
+8. 不因一席失败便擦掉已落正文。
+9. 不把 provider 未报 usage 记成零成本。
+10. 不把几家回答去掉署名后拼成一条普通 assistant 消息。
+11. 不先承诺“集思广益必然更准”；须用固定问题集测事实正确率、从众与费用。
+12. 不在本单里顺手做多人类实时群聊、长期房间或跨节点调度。
+
+## 十六、开工前还要问
+
+- 用户要的是“后一位接着前一位说”，还是“各答各的，最后比较”？
+- 主持归纳默认开不开？由名单中一席兼任，还是另请一只模型？
+- 角色提示由用户写，还是内置几套“提案/批评/落地”模板？
+- 用户能否中途插话？插话算打断本席，还是排到整场之后？
+- 单席重试后，后续已完成发言是否作废？
+- 会场结果如何进入下一轮普通主会话的上下文？全文、摘要，还是引用？
+- 相同 provider/model 配三种角色，产品上叫“多模型”还是“多角色”？
+- 哪些工具可被严格认作只读？谁维护这份能力声明？
+- 费用上限按估算挡，还是只有 provider 报账后才能追认？
+- 该功能先落 CLI，还是等 Web 聊天画面一并开？
+
+这些答案会改动消息合同、恢复语义与权限边界。到真正开工那日，先重查源码，再把本畅想拆成领域合同、上下文投影、运行编排、事件画面、Trajectory 与评测六份实施单。
