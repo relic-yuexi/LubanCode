@@ -561,6 +561,84 @@ std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
     return line;
 }
 
+// 空 composer 的左右槽速览行(收口审计单 §二 P1):左槽常用键(keymap
+// 反查,用户改绑跟脚),右槽帮助入口——只认 ChordFor(HelpShow),无绑定
+// 整段不画。Busy 场景没有帮助层,也没有搜索/外部编辑器这些键,装配器不
+// 置速览行(是否显示由场景决定,不再由 input.shortcuts_hint 硬补)。只在
+// 空闲主线程调(ActiveKeymap 的读侧纪律见 keymap.hpp)。
+ChromeAssistRow BuildComposerAssistRow() {
+    ChromeAssistRow row;
+    const keymap::Keymap& km = keymap::ActiveKeymap();
+    const auto add = [&](keymap::ActionId action, const char* label_key) {
+        const auto chord = km.ChordFor(action);
+        if (!chord.has_value()) {
+            return;  // 动作没绑键:整段略过,不留下孤单分隔符
+        }
+        if (!row.left.empty()) {
+            row.left += " · ";
+        }
+        row.left += keymap::FormatKeyChord(*chord) + " " + tr(label_key);
+    };
+    add(keymap::ActionId::ChatSearchHistory, "hint.keys.search_history");
+    add(keymap::ActionId::TranscriptToggleExpand, "hint.keys.expand");
+    add(keymap::ActionId::ChatExternalEditor, "hint.keys.editor");
+    if (const auto help = km.ChordFor(keymap::ActionId::HelpShow); help.has_value()) {
+        row.right = keymap::FormatKeyChord(*help) + " " + tr("hint.keys.help");
+    }
+    return row;
+}
+
+// 唯一的底栏模型装配口(收口审计单 §二 P1):空闲 composer 与流式 footer
+// 从同一份场景差量组 BottomChromeModel。归槽只写一次:模式行+资料行从
+// 同一份 StatusDataSlot 活账投影、mode notice 读共享槽、速览行只在
+// Idle 且空 composer 且无面板时自置、菜单行直落 transient 槽——两条路
+// 不再各拼一遍,忙闲不会各搬一半。
+BottomChromeModel BuildBottomChromeModel(const BottomChromeScene& scene) {
+    BottomChromeModel model;
+    model.framed = scene.framed;
+    const bool composer_empty = scene.editor.lines.empty() ||
+                                (scene.editor.lines.size() == 1 && scene.editor.lines[0].empty());
+    const bool menus_open = !scene.menu_rows.empty() || !scene.editor.hint_lines.empty();
+    if (scene.help_visible && composer_empty && scene.mode == ComposerMode::Idle) {
+        // 帮助层垫帧最顶:行内容出自 keymap(表头带实际和弦),只属空
+        // composer——草稿一有正文就不进帧。Busy 场景没有帮助层。
+        model.help_rows = keymap::BuildSceneHelpLines(keymap::ActiveKeymap());
+    }
+    model.activity_rows = scene.activity_rows;
+    model.queue_rows = scene.queue_rows;
+    model.agent_dock_rows = scene.dock_rows;
+    model.agent_dock_tints = scene.dock_tints;
+    if (const auto notice_mode = ModeNoticeSlot().VisibleMode(); notice_mode.has_value()) {
+        model.mode_notice_rows = {PresentApprovalMode(*notice_mode).notice};
+    }
+    if (scene.mode == ComposerMode::Idle && scene.framed && composer_empty && !menus_open) {
+        // 速览行(ShortcutAssist)只在空闲、空 composer、无面板时出现;面板
+        // (搜索/提及/slash)开着时由菜单行接管提示位,不叠速览。Busy 场景
+        // 没有帮助层与这些快捷键,不置速览行——是否显示由场景决定。
+        model.assist_row = BuildComposerAssistRow();
+    }
+    model.transient_rows = scene.menu_rows;
+    model.rule_tag = scene.rule_tag;
+    model.selected_task_id = scene.selected_task_id;
+    model.composer.editor = scene.editor;
+    model.composer.prompt = scene.prompt;
+    model.composer.placeholder = scene.placeholder;
+    model.composer.mode = scene.mode;
+    model.composer.confirm_mode = SharedEditor().confirm_mode();
+    if (scene.framed) {
+        static const Theme kDefaultTheme{};
+        const Theme& theme = scene.theme != nullptr ? *scene.theme : kDefaultTheme;
+        const BoxChrome chrome{true, &theme, model.composer.confirm_mode};
+        const int row_width = (std::max)(0, scene.width - 1);
+        model.status_rows = {BuildComposerModeLine(chrome, static_cast<int>(SessionSkillCount()),
+                                                   row_width)};
+        if (const std::string info_row = BuildStatusLine(chrome, row_width); !info_row.empty()) {
+            model.data_rows = {std::move(info_row)};
+        }
+    }
+    return model;
+}
+
 void PaintInlineFrameLegacy(const InlineFrame* previous, const InlineFrame& next,
                             int origin_y) {
     const std::size_t old_size = previous == nullptr ? 0 : previous->rows.size();

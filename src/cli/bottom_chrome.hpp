@@ -6,12 +6,12 @@
 //   help_rows(场景按键帮助层,`?` 展开;空 = 没开,垫最顶)
 //   activity_rows(Working 活动条)
 //   queue_rows(待发队列,composer 上横线之上)
-//   shortcut_rows(空 composer 的常用键速览)
+//   assist_row(空 composer 的左右槽速览行:左槽常用键,右槽帮助入口)
 //   status_rows 行模式栏(permission_mode+skills) / 上横线 / top_padding 留白 /
 //   composer_rows 行输入 / bottom_padding 补空 / 下横线
 //   data_rows 资料行(model/cwd/branch/context/tokens 等,下横线之下)
 //   agent_dock_rows(导航坞,贴底)
-//   transient_rows(slash 提示等短命 UI,垫最底)
+//   transient_rows(slash/搜索/提及等短命面板,垫最底)
 //
 // Composer 合流 P1(终端Composer合流单):idle 与 busy 不再各拼一套输入行。
 // 两边都组同一只 BottomChromeModel、调唯一的 BuildBottomChromeLayout 纯函数,
@@ -30,14 +30,23 @@
 
 namespace lubancode::cli {
 
+// 左右槽速览行(收口审计单 §二 P1):取代整行 shortcut_rows。左槽是常用键
+// 速览(keymap 反查,用户改绑跟脚),右槽是帮助入口——右对齐、与模式行
+// 右端的 skills 同列,眼睛沿右边缘一列扫下来:skills 的上一行便是它。
+struct ChromeAssistRow {
+    std::string left;   // 常用键速览("Ctrl+R 搜历史 · Ctrl+O 展开/收起"),可空
+    std::string right;  // 帮助入口("? 键位"),右对齐、可空;无绑定整段不画
+    bool empty() const { return left.empty() && right.empty(); }
+};
+
 struct BottomChromeFrame {
     std::vector<std::string> help_rows;       // 场景帮助层(0.32.x ? 开合;空 = 没开)
     std::vector<std::string> activity_rows;   // Working 活动条(空闲空)
     std::vector<std::string> queue_rows;      // 待发队列(空队列零行)
-    std::vector<std::string> shortcut_rows;   // 常用键速览(空 composer 才有)
+    ChromeAssistRow assist_row;               // 左右槽速览行(空 composer 才有)
     std::vector<std::string> agent_dock_rows; // 导航坞(无子代理零行)
     std::vector<std::string> mode_notice_rows; // Shift+Tab 说明(状态栏紧上方)
-    std::vector<std::string> transient_rows;  // slash 提示等(常态零行)
+    std::vector<std::string> transient_rows;  // slash/搜索/提及等(常态零行)
     // 资料行(收口审计单 §二 P0):完整状态资料(model/effort/cwd/branch/
     // context/tokens/cache/REC/WT/tools/Plan/goal/background)从同一份
     // StatusPanelData 快照投影,画在输入框下横线之下、导航坞之上。模式行
@@ -54,18 +63,18 @@ struct BottomChromeFrame {
     int selected_task_id = 0;  // 导航当前选中(0=main,-1=汇总哨兵)
     std::uint64_t revision = 0;  // 帧身份:内容变必变
 
-    // 整帧行数(帮助+活动条+队列+快捷键+横线+输入+状态+资料+坞+提示)。
+    // 整帧行数(帮助+活动条+队列+速览+横线+输入+状态+资料+坞+提示)。
     int TotalRows() const {
         return static_cast<int>(help_rows.size()) + static_cast<int>(activity_rows.size()) +
-               static_cast<int>(queue_rows.size()) + static_cast<int>(shortcut_rows.size()) +
+               static_cast<int>(queue_rows.size()) + (assist_row.empty() ? 0 : 1) +
                composer_rows + rule_rows + status_rows + static_cast<int>(data_rows.size()) +
                static_cast<int>(agent_dock_rows.size()) + static_cast<int>(mode_notice_rows.size()) +
                static_cast<int>(transient_rows.size());
     }
-    // 坞首行相对帧顶的偏移:帮助/队列/快捷键之后、框与状态栏与资料行之下。
+    // 坞首行相对帧顶的偏移:帮助/队列/速览之后、框与状态栏与资料行之下。
     int AgentDockFirstRow() const {
         return static_cast<int>(help_rows.size()) + static_cast<int>(activity_rows.size()) +
-               static_cast<int>(queue_rows.size()) + static_cast<int>(shortcut_rows.size()) +
+               static_cast<int>(queue_rows.size()) + (assist_row.empty() ? 0 : 1) +
                composer_rows + rule_rows + status_rows + static_cast<int>(data_rows.size()) +
                static_cast<int>(mode_notice_rows.size());
     }
@@ -107,7 +116,7 @@ struct BottomChromeModel {
     std::vector<std::string> help_rows;        // 场景帮助层(空 = 没开,垫帧最顶)
     std::vector<std::string> activity_rows;    // Working 活动条(空闲空)
     std::vector<std::string> queue_rows;       // 待发队列(空队列零行)
-    std::vector<std::string> shortcut_rows;    // 常用键速览,排在 status/skills 上一行
+    ChromeAssistRow assist_row;                // 左右槽速览行,排在 status/skills 上一行
     ComposerViewModel composer;
     std::vector<std::string> status_rows;      // 模式行(permission_mode+skills,调用方拼好)
     // 资料行(收口审计单 §二 P0):完整状态资料画在输入框下横线之下、导航

@@ -405,7 +405,6 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     // RedrawEditArea);导航在下方长,EnsureRoomForRows 探底滚屏自会腾位,
     // 不再需要"锚点上方预留面板行数"那一步。
     const bool box = composer;
-    BoxChrome chrome{box, &theme, editor.confirm_mode()};
     if (box) {
         const std::optional<platform::ScreenInfo> pre_info = platform::GetScreenInfo();
         const int console_width = pre_info.has_value() ? pre_info->width : 80;
@@ -613,55 +612,30 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
     };
 
     // 一本帧账:待发队列在 composer 上横线之上,导航坞在状态栏之下贴底,
-    // slash 提示垫最底。Composer 合流 P1 起空闲路组的是 BottomChromeModel,
-    // 行数账与指纹都出自唯一的 BuildBottomChromeLayout——与流式 footer 同
-    // 一颗布局函数,两条路不许再各拼一套行序,也不许一边按逻辑行数报高、
-    // 一边写死一行。
-    const auto build_model = [&](const RenderState& state, const std::vector<std::string>& queue_rows,
+    // 面板提示垫最底。空闲路与流式 footer 共用唯一的 BuildBottomChromeModel
+    // 装配器(收口审计单 §二 P1)——这里只备场景差量,归槽不在此写第二遍;
+    // 行数账与指纹都出自唯一的 BuildBottomChromeLayout。
+    const auto build_scene = [&](const RenderState& state,
+                                 const std::vector<std::string>& queue_rows,
                                  const std::vector<std::string>& dock, const std::string& tag,
-                                 int selected_task_id) {
-        BottomChromeModel model;
-        model.framed = box;
-        if (help_visible && state.line.empty()) {
-            // 帮助层垫帧最顶:行内容出自 keymap(表头带实际和弦),摆位、
-            // 淡色、按屏宽截断、高度预算钳制全归布局函数,与队列/坞同一本账。
-            // 只属空 composer——草稿一有正文就不进帧(粘贴/取回这类不走逐键
-            // 路径的入口,当拍也不闪帮助),状态机随后一拍正式收掉。
-            model.help_rows = keymap::BuildSceneHelpLines(keymap::ActiveKeymap());
-        }
-        model.queue_rows = queue_rows;
-        model.agent_dock_rows = dock;
-        model.agent_dock_tints = dock_tints;  // build_dock 刚写的那份,按位对齐
-        if (const auto notice_mode = ModeNoticeSlot().VisibleMode(); notice_mode.has_value()) {
-            model.mode_notice_rows = {PresentApprovalMode(*notice_mode).notice};
-        }
-        const bool composer_empty = state.lines.empty() ||
-                                    (state.lines.size() == 1 && state.lines[0].empty());
-        const bool shortcut_hint = composer_empty && state.hint_lines.size() == 1;
-        if (shortcut_hint) {
-            model.shortcut_rows = state.hint_lines;
-        } else {
-            model.transient_rows = state.hint_lines;
-        }
-        model.rule_tag = tag;
-        model.selected_task_id = selected_task_id;
-        model.composer.editor = state;
-        model.composer.prompt = prompt;
-        model.composer.mode = ComposerMode::Idle;
-        model.composer.confirm_mode = editor.confirm_mode();
-        if (box) {
-            const std::optional<platform::ScreenInfo> info_now = platform::GetScreenInfo();
-            const int width = info_now.has_value() ? info_now->width : 80;
-            model.status_rows = {BuildComposerModeLine(
-                chrome, static_cast<int>(SessionSkillCount()), (std::max)(0, width - 1))};
-            // 资料行(收口审计单 §二 P0):模式行之下、输入框下横线之下画完整
-            // 状态资料——与模式行同一份 StatusDataSlot 活账投影,审批档剥出。
-            if (const std::string info_row = BuildStatusLine(chrome, (std::max)(0, width - 1));
-                !info_row.empty()) {
-                model.data_rows = {std::move(info_row)};
-            }
-        }
-        return model;
+                                 int selected_task_id,
+                                 const std::vector<std::string>& menu_rows) {
+        const std::optional<platform::ScreenInfo> info_now = platform::GetScreenInfo();
+        BottomChromeScene scene;
+        scene.mode = ComposerMode::Idle;
+        scene.framed = box;
+        scene.theme = &theme;
+        scene.editor = state;
+        scene.prompt = prompt;
+        scene.help_visible = help_visible;
+        scene.queue_rows = queue_rows;
+        scene.dock_rows = dock;
+        scene.dock_tints = dock_tints;  // build_dock 刚写的那份,按位对齐
+        scene.rule_tag = tag;
+        scene.selected_task_id = selected_task_id;
+        scene.menu_rows = menu_rows;
+        scene.width = info_now.has_value() ? info_now->width : 80;
+        return scene;
     };
     // 只算行数账不落笔(100ms 拍的指纹比较用);与真画那一帧出自同一颗
     // 布局函数,指纹才与画面一致。状态行文本不进指纹,宽一点窄一点无妨。
@@ -711,14 +685,18 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
         return &mention_matches_cache;
     };
 
-    const auto apply_search_hints = [&](RenderState& state) {
+    // 类型化提示(收口审计单 §二 P1):历史搜索/@提及是应用层面板,不再
+    // 改写 RenderState::hint_lines 借"空 composer 且恰好一行"的外形猜身份
+    // ——面板行直落 scene.menu_rows(画输入框下 transient 槽),空 composer
+    // 的速览行由装配器自置 assist 槽。编辑器自有的 slash 候选仍随
+    // RenderState 走(那是编辑器状态,归 LineEditorCore 自己)。redraw 与
+    // 100ms tick 的指纹账共用这一份,不然帧帧空转重画。
+    const auto menu_rows_for = [&](const RenderState& state) -> std::vector<std::string> {
         if (!composer) {
             // `/provider add` 等向导也复用 ReadLine。主 composer 的键位速览、
             // slash 候选与临时菜单若漏进来，会占掉 WizardPanel 的输入余量，
             // 下一帧便可能按错锚点。单行读取只画 prompt 与正文。
-            state.hint_lines.clear();
-            state.selected_index = -1;
-            return;
+            return {};
         }
         if (history_search.active()) {
             const std::string query = Utf32ToUtf8(state.line);
@@ -728,55 +706,25 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             }
             const std::optional<platform::ScreenInfo> info_now = platform::GetScreenInfo();
             const int width = info_now.has_value() ? info_now->width : 80;
-            state.hint_lines =
-                BuildHistorySearchLines(history_search, query, width, theme.stats, theme.reset);
-            state.selected_index = -1;  // slash 菜单的选中镜像不适用于搜索行
-            return;
+            return BuildHistorySearchLines(history_search, query, width, theme.stats, theme.reset);
         }
         if (const auto* matches = mention_menu_for(state); matches != nullptr) {
             const std::optional<platform::ScreenInfo> info_now = platform::GetScreenInfo();
             const int width = info_now.has_value() ? info_now->width : 80;
-            state.hint_lines =
-                BuildMentionMenuLines(mention_entries, *matches, mention_selected, width);
-            state.selected_index = -1;
-            return;
+            return BuildMentionMenuLines(mention_entries, *matches, mention_selected, width);
         }
-        // 空 composer 的常用键速览(规格:"footer 先摆三四枚常用键,? 展开
-        // 全表"):键位从 keymap 反查,改键后提示跟着改。
-        if (state.lines.size() == 1 && state.lines[0].empty()) {
-            const keymap::Keymap& km = keymap::ActiveKeymap();
-            std::string hint;
-            const auto add = [&](keymap::ActionId action, const char* label_key) {
-                const auto chord = km.ChordFor(action);
-                if (!chord.has_value()) {
-                    return;
-                }
-                if (!hint.empty()) {
-                    hint += " · ";
-                }
-                hint += keymap::FormatKeyChord(*chord) + " " + tr(label_key);
-            };
-            add(keymap::ActionId::HelpShow, "hint.keys.help");
-            add(keymap::ActionId::ChatSearchHistory, "hint.keys.search_history");
-            add(keymap::ActionId::TranscriptToggleExpand, "hint.keys.expand");
-            add(keymap::ActionId::ChatExternalEditor, "hint.keys.editor");
-            if (!hint.empty()) {
-                state.hint_lines = {hint};
-            }
-        }
+        return state.hint_lines;  // slash 候选(编辑器自有)
     };
 
     auto redraw_with_panel = [&](const RenderState& raw_state, const std::vector<AgentPanelEntry>& entries) {
-        // 搜索开着:提示行位置换装成命中清单(查询变化就地重跑匹配)。
-        RenderState state = raw_state;
-        apply_search_hints(state);
+        // 搜索开着:菜单行换装成命中清单(查询变化就地重跑匹配)。
+        const std::vector<std::string> menu_rows = menu_rows_for(raw_state);
         std::string tag;
         const std::vector<std::string> dock = build_dock(entries, tag);
         const std::vector<std::string> queue_rows = queue_rows_now();
         const AgentPanelSession::Snapshot snapshot = panel_session.SnapshotFor(nav_ids_for(entries));
-        chrome.mode = editor.confirm_mode();
-        const BottomChromeModel model =
-            build_model(state, queue_rows, dock, tag, snapshot.selected_task_id);
+        const BottomChromeModel model = BuildBottomChromeModel(
+            build_scene(raw_state, queue_rows, dock, tag, snapshot.selected_task_id, menu_rows));
         BottomChromeFrame frame;
         RedrawEditArea(start_row, model, theme, prev_body_row_count, previous_frame,
                        prev_frame_origin, vt_enabled, &frame);
@@ -1249,9 +1197,9 @@ std::optional<std::string> ReadLineKeyByKey(const std::string& prompt, const The
             const std::vector<std::string> queue_rows = queue_rows_now();
             const AgentPanelSession::Snapshot snapshot = panel_session.SnapshotFor(nav_ids_for(entries));
             RenderState tick_state = editor.CurrentRenderState();
-            apply_search_hints(tick_state);  // 搜索行进指纹,与真画的那份同一账
-            const BottomChromeFrame frame =
-                build_frame(build_model(tick_state, queue_rows, dock, tag, snapshot.selected_task_id));
+            const std::vector<std::string> tick_menus = menu_rows_for(tick_state);  // 与真画同一账
+            const BottomChromeFrame frame = build_frame(BuildBottomChromeModel(
+                build_scene(tick_state, queue_rows, dock, tag, snapshot.selected_task_id, tick_menus)));
             if (viewed_before_tick != 0 && snapshot.viewed_task_id == 0) {
                 // 正在查看的任务完成退场(结果交回 main)/被清理:原子回
                 // main——上方视口换源、composer 目标回 main、选择落相邻运行

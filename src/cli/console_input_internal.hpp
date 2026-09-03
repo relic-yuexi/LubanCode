@@ -22,6 +22,7 @@
 #include <vector>
 
 #include "cli/agent_panel.hpp"
+#include "cli/bottom_chrome.hpp"
 #include "cli/console_input.hpp"
 #include "cli/line_editor.hpp"
 #include "cli/theme.hpp"
@@ -88,6 +89,47 @@ struct BoxChrome {
 };
 std::string BuildComposerModeLine(const BoxChrome& chrome, int skill_count, int max_width);
 std::size_t SessionSkillCount();
+
+// ---------------------------------------------------------------------------
+// 底栏公共装配器(收口审计单 §二 P1):空闲 composer(console_input_composer)
+// 与流式 footer(console_input_stream_footer)不再各拼一遍 BottomChromeModel
+// ——两条路只给场景差量,归槽(mode notice、assist 行、状态投影、dock、
+// rule tag)只在装配器里写一次,忙闲不分会各搬一半。
+// ---------------------------------------------------------------------------
+
+// 场景差量:Idle 与 Busy 只许在这份差量里不同。menu_rows 是类型化的应用层
+// 面板行(历史搜索/@提及/slash 候选/临时通知,画输入框下 transient 槽)
+// ——不再拿 composer_empty && hint_lines.size()==1 的外形猜身份;空
+// composer 的速览行(ShortcutAssist)由装配器按场景自置,不进这份差量。
+struct BottomChromeScene {
+    ComposerMode mode = ComposerMode::Idle;  // Idle / BusyQueue
+    bool framed = true;                      // 无框单行读取(向导/确认提示)退化态
+    const Theme* theme = nullptr;            // 组行配色(模式行/资料行)
+    RenderState editor;                      // composer 内容(编辑器自有的 slash 候选随 hint_lines)
+    std::string prompt = "> ";               // 首行提示符
+    std::string placeholder;                 // 草稿真空时的占位提示(Busy)
+    std::vector<std::string> activity_rows;  // Working 活动条(Busy;空闲空)
+    bool help_visible = false;               // ? 帮助层(空闲场景;Busy 无帮助层)
+    std::vector<std::string> queue_rows;     // 待发队列(调用方按场景拼好)
+    std::vector<std::string> dock_rows;      // 导航坞行(调用方拼好,与 tints 按位对齐)
+    std::vector<AgentHealthTint> dock_tints;
+    std::string rule_tag;                    // 上横线右端短标签(查看态)
+    int selected_task_id = 0;                // 导航当前选中(0=main)
+    std::vector<std::string> menu_rows;      // 应用层面板行(transient 槽;空 = 无面板)
+    int width = 80;                          // 组行宽度(模式行/资料行/速览右对齐)
+};
+
+// 唯一的底栏模型装配口:从同一份场景差量组 BottomChromeModel。确认档与
+// 技能数读会话级共享槽(SharedEditor/SessionSkillCount),模式行与资料行从
+// 同一份 StatusDataSlot 活账投影。空闲路在主线程调;footer 路在
+// StdoutWriteMutex 内调(与既有的状态行读写纪律同款)。
+BottomChromeModel BuildBottomChromeModel(const BottomChromeScene& scene);
+
+// 空 composer 的左右槽速览行(Idle 场景):左槽常用键(keymap 反查,改绑
+// 跟脚),右槽帮助入口——只认 ChordFor(HelpShow),无绑定整段不画。Busy
+// 场景没有帮助层与这些快捷键,不置速览行(是否显示由场景决定,不由翻译
+// 硬补)。读 ActiveKeymap,只在空闲主线程调。
+ChromeAssistRow BuildComposerAssistRow();
 
 // 正式资料行构造器(收口审计单 §二 P0):输入框下横线之下的完整状态资料
 // (model/effort/cwd/branch/context/tokens/cache/REC/WT/tools/Plan/goal/

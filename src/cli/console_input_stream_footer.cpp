@@ -716,50 +716,34 @@ void RedrawStreamFooterLocked() {
             ? std::vector<std::string>{}
             : BuildSteeringQueueRows(steering_snapshot, queue_view);
 
-    // Composer 合流 P1:footer 与空闲 composer 组同一只 BottomChromeModel、
-    // 调唯一的 BuildBottomChromeLayout。输入区不再单行会计——完整 RenderState
-    // (全部逻辑行、软换行、真实光标)进布局,placeholder 沿用 f.hint;状态
-    // 行尾部照旧多一段 Esc 打断提示,由这里拼好递给布局摆位。
+    // Composer 合流 P1(收口审计单 §二 P1 收口):footer 与空闲 composer 组
+    // 同一只 BottomChromeModel——这里只备场景差量(mode/activity/placeholder/
+    // 队列/坞),归槽(状态投影、mode notice、菜单行/速览行)全在唯一的
+    // BuildBottomChromeModel 装配器里。忙路没有帮助层与搜索/外部编辑器,
+    // 不置速览行;slash 候选(编辑器自有)随 menu_rows 进 transient 槽,
+    // 不再拿"空 composer 且恰好一行"的外形猜身份,也不再由
+    // input.shortcuts_hint 硬补帮助入口。
     // 高度预算(战术二)传可视窗口高:"输入行必画得下"在布局里立成硬约束,
     // 坞/队列/提示按次序舍,整帧不再撑爆窗口。
     const int width = info->width;
     const int viewport_rows = info->viewport_height > 0 ? info->viewport_height : info->height;
-    const BoxChrome chrome{true, &f.theme, SharedEditor().confirm_mode()};
-    BottomChromeModel model;
+    BottomChromeScene scene;
+    scene.mode = ComposerMode::BusyQueue;
+    scene.theme = &f.theme;
+    scene.editor = f.composer;
+    scene.prompt = "> ";
+    scene.placeholder = f.hint;
     if (f.working) {
-        model.activity_rows = {BuildFooterWorkingLine(f, width)};
+        scene.activity_rows = {BuildFooterWorkingLine(f, width)};
     }
-    model.queue_rows = queue_rows_text;
-    model.agent_dock_rows = dock_rows_text;
-    model.agent_dock_tints = dock_rows_tints;  // 监督色(P1-1):与行按位对齐
-    if (const auto notice_mode = ModeNoticeSlot().VisibleMode(); notice_mode.has_value()) {
-        model.mode_notice_rows = {PresentApprovalMode(*notice_mode).notice};
-    }
-    const bool composer_empty = f.composer.lines.empty() ||
-                                (f.composer.lines.size() == 1 && f.composer.lines[0].empty());
-    const bool shortcut_hint = composer_empty && f.composer.hint_lines.size() == 1;
-    if (shortcut_hint) {
-        model.shortcut_rows = f.composer.hint_lines;
-    } else if (composer_empty && f.working) {
-        model.shortcut_rows = {tr("input.shortcuts_hint")};
-    } else {
-        model.transient_rows = f.composer.hint_lines;
-    }
-    model.rule_tag = footer_rule_tag;
-    model.selected_task_id = dock_selected_task_id;
-    model.composer.editor = f.composer;
-    model.composer.prompt = "> ";
-    model.composer.placeholder = f.hint;
-    model.composer.mode = ComposerMode::BusyQueue;
-    model.composer.confirm_mode = chrome.mode;
-    model.status_rows = {BuildComposerModeLine(chrome, static_cast<int>(SessionSkillCount()),
-                                               (std::max)(0, width - 1))};
-    // 资料行(收口审计单 §二 P0):与空闲 composer 同一份 StatusDataSlot 活账
-    // 投影——忙闲两路同一只构造器,审批档剥出归模式行,运行中不丢资料。
-    if (const std::string info_row = BuildStatusLine(chrome, (std::max)(0, width - 1));
-        !info_row.empty()) {
-        model.data_rows = {std::move(info_row)};
-    }
+    scene.queue_rows = queue_rows_text;
+    scene.dock_rows = dock_rows_text;
+    scene.dock_tints = dock_rows_tints;  // 监督色(P1-1):与行按位对齐
+    scene.rule_tag = footer_rule_tag;
+    scene.selected_task_id = dock_selected_task_id;
+    scene.menu_rows = f.composer.hint_lines;  // slash 候选(编辑器自有)
+    scene.width = width;
+    const BottomChromeModel model = BuildBottomChromeModel(scene);
     const BottomChromeLayout layout = BuildBottomChromeLayout(model, f.theme, width, viewport_rows);
 
     if (f.hint.empty() && f.composer.line.empty() && f.composer.hint_lines.empty()) {
@@ -832,6 +816,7 @@ void RedrawStreamFooterLocked() {
         shrunk.queue_rows.clear();
         shrunk.activity_rows.clear();
         shrunk.transient_rows.clear();
+        shrunk.assist_row = ChromeAssistRow{};
         degraded = BuildBottomChromeLayout(shrunk, f.theme, width, /*height_budget=*/0);
         if (EnsureStreamScreenRowsLocked(body_offset + static_cast<int>(degraded.frame.rows.size()))) {
             paint = &degraded;
