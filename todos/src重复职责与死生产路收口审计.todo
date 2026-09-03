@@ -357,13 +357,13 @@ Hook 却没有复用：
 
 ## 六、实施批次
 
-- [ ] P0：恢复完整资料行的正式生产调用；清掉“数据照采、函数无人叫”的半死状态。
-- [ ] P0：补最终 `BottomChrome` 集成合同，先用测试复现 0.26.181 的字段丢失。
-- [ ] P1：合并 Idle/Busy 的 `BottomChromeModel` 公共 assembler。
-- [ ] P1：以有类型的提示模型取代 `hint_lines.size()==1` 分流。
-- [ ] P1：以左右槽 `assist_row` 取代 `shortcut_rows`；右槽帮助入口与 skills 右边缘同列。
-- [ ] P2：抽出 keymap 驱动的快捷键提示 formatter，删除写死 `?` 的流式兜底。
-- [ ] P3：合并 Agent 面板两对完全相同的翻译 key 与选择分支。
+- [x] P0：恢复完整资料行的正式生产调用；清掉“数据照采、函数无人叫”的半死状态。
+- [x] P0：补最终 `BottomChrome` 集成合同，先用测试复现 0.26.181 的字段丢失。
+- [x] P1：合并 Idle/Busy 的 `BottomChromeModel` 公共 assembler。
+- [x] P1：以有类型的提示模型取代 `hint_lines.size()==1` 分流。
+- [x] P1：以左右槽 `assist_row` 取代 `shortcut_rows`；右槽帮助入口与 skills 右边缘同列。
+- [x] P2：抽出 keymap 驱动的快捷键提示 formatter，删除写死 `?` 的流式兜底。
+- [x] P3：合并 Agent 面板两对完全相同的翻译 key 与选择分支。
 - [ ] P0：修 Hook 回合身份；先钉 UserPromptSubmit 的更新时序，再让 Hook/事件/trace/trajectory 共用一枚 turn id。
 - [ ] P1：把四套审批枚举收成公共值域与具名转换，先清全部跨枚举 `static_cast`。
 - [ ] P1：建立统一原子写 API；先迁 Gateway 与持久事实账，再迁派生缓存。
