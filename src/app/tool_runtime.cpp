@@ -633,6 +633,25 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         });
         // 启动即探测并缓存(规格"启动时探测一次,会话内复用")。
         (void)agent_tool_->CachedEnvAppendix();
+
+        // 停控两本账收口(后台代理管控三连 bug 单,Bug B):stop_background/
+        // background_output 原本只认后台命令登记簿,面板上的后台子代理
+        // (TaskLedger,int 编号)停不掉、列不出——真机三只代理烧 30M+ tokens
+        // 停不掉就是这条缝。两张表(main/sub)各一枚实例都接同一本台账,
+        // provider 返回的指针与工具同 registry 同生命周期(装配期定格,安全)。
+        const auto agent_ledger_provider = [this]() -> lubancode::tools::TaskLedger* {
+            return agent_tool_ != nullptr ? &agent_tool_->ledger() : nullptr;
+        };
+        for (lubancode::tools::ToolRegistry* registry : {&main_registry_, &sub_registry_}) {
+            if (auto* out_tool = dynamic_cast<lubancode::tools::BackgroundOutputTool*>(registry->Find("background_output"));
+                out_tool != nullptr) {
+                out_tool->SetAgentLedgerProvider(agent_ledger_provider);
+            }
+            if (auto* stop_tool = dynamic_cast<lubancode::tools::StopBackgroundTool*>(registry->Find("stop_background"));
+                stop_tool != nullptr) {
+                stop_tool->SetAgentLedgerProvider(agent_ledger_provider);
+            }
+        }
     }
     // 同级派工:子表也挂 agent(转发壳,目标是上面那只 AgentTool)。后台
     // 的独立注册表(BuildDetachedRegistry)不挂——后台线程不能同步跑前台

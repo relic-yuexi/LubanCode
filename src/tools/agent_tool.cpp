@@ -1818,8 +1818,12 @@ Tool::Result AgentTool::LaunchBackground(const DispatchRequest& request, ToolReg
     // §5.3 弃用提示:手写 JSON 给了旧预算键,随启动回执带回(空 = 没用)。
     // 隔离基线附言(派工单 §三)一并随回执亮明:后台任务的房在派工线程建
     // 好,调用方当场该知道基线与未提交改动的边界。
+    // 停控两本账收口(Bug B):回执里的编号与面板显示同源,并把停法写明——
+    // 模型拿什么看见,就拿什么能停(真机三连"找不到"烧掉 30M+ tokens)。
     std::string acceptance = "后台子代理 #" + std::to_string(id) + " (" + agent_type +
-                             ") 已启动。主会话可以继续;完成结果会在后续回合送达。";
+                             ") 已启动。主会话可以继续;完成结果会在后续回合送达。"
+                             "要提前收掉它,用 stop_background 给 task_id=\"" +
+                             std::to_string(id) + "\"(此编号与面板显示一致);background_output 可查进度。";
     if (!isolation_caller_note.empty()) {
         acceptance += isolation_caller_note;
     }

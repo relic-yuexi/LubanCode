@@ -5,10 +5,13 @@
 
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstddef>
 #include <filesystem>
 #include <fstream>
+#include <memory>
+#include <optional>
 #include <string>
 #include <thread>
 
@@ -17,6 +20,7 @@
 #include "platform/process.hpp"
 #include "tools/background_output.hpp"
 #include "tools/background_tasks.hpp"
+#include "tools/task_ledger.hpp"
 
 using lubancode::tools::BackgroundTaskRegistry;
 using lubancode::tools::BackgroundTaskInfo;
@@ -235,10 +239,11 @@ TEST_CASE("background: background_output 工具列任务/查单个") {
     using namespace lubancode::tools;
     BackgroundOutputTool tool;
 
-    // 不给 task_id:列全部(至少有前面测试登记的那些)。
+    // 不给 task_id:列全部(至少有前面测试登记的那些)。两本账合并后命令段的
+    // 段头是"后台命令"(Bug B 收口:命令与面板代理分段列)。
     const Tool::Result list_result = tool.execute(nlohmann::json::object());
     CHECK_FALSE(list_result.is_error);
-    CHECK(list_result.content.find("后台任务") != std::string::npos);
+    CHECK(list_result.content.find("后台命令") != std::string::npos);
 
     // 给一个不存在的 task_id:报错。
     nlohmann::json bad_input;
@@ -381,4 +386,121 @@ TEST_CASE("background: Stop 收长命命令进 Stopped,已终态不重复杀") {
         }
     }
     CHECK(stop_reported);
+}
+
+// ---------------------------------------------------------------------------
+// 停控两本账收口(后台代理管控三连 bug 单,Bug B):面板账(TaskLedger,int
+// id)与后台命令登记簿(BackgroundTaskRegistry,字符串 id)互认——模型拿
+// 面板可见的编号,stop_background/background_output 必须一击命中。旧码
+// 两本账互不相认:面板三只在跑,stop 三连"找不到"、background_output 说
+// "当前没有后台任务"——真机 30M+ tokens 停不掉。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 一只挂在面板账上的"在跑"后台代理:TaskLedger 是会话级实例(非单例),
+// 测试里现开一份、Register 一只 Running 任务即可;id 由台账发,取面板
+// 同款显示口径(快照 id)。
+std::optional<int> ParseIdForTest(const std::string& text) {
+    if (text.empty()) {
+        return std::nullopt;
+    }
+    int value = 0;
+    for (const char c : text) {
+        if (c < '0' || c > '9') {
+            return std::nullopt;
+        }
+        value = value * 10 + (c - '0');
+    }
+    return value;
+}
+
+std::shared_ptr<lubancode::tools::TaskRecord> RegisterPanelAgent(lubancode::tools::TaskLedger& ledger,
+                                                                 const std::string& title) {
+    lubancode::tools::AgentTaskSnapshot snapshot;
+    snapshot.agent_type = "general-purpose";
+    snapshot.title = title;
+    snapshot.prompt = "测试派工";
+    snapshot.state = lubancode::tools::AgentTaskState::Running;
+    snapshot.start_time = std::chrono::steady_clock::now();
+    return ledger.Register(std::move(snapshot));
+}
+
+// 命令登记簿(进程单例)在本册前面的测试里已登记过若干条,id 从 "1" 起单调。
+// 面板台账的 id 也从 1 起——直接取第一只会与命令存量撞号(stop 先认命令账,
+// 测试就测不到面板分支)。把面板号顶过命令存量的最大号,确保独占。
+int PanelIdBeyondCommandRegistry(lubancode::tools::TaskLedger& ledger) {
+    int max_command_id = 0;
+    for (const auto& t : lubancode::tools::BackgroundTaskRegistry::Instance().List()) {
+        const auto parsed = ParseIdForTest(t.task_id);
+        if (parsed.has_value() && *parsed > max_command_id) {
+            max_command_id = *parsed;
+        }
+    }
+    while (ledger.Summaries().size() < static_cast<std::size_t>(max_command_id)) {
+        (void)RegisterPanelAgent(ledger, "占位(顶号)");
+    }
+    return max_command_id + 1;
+}
+
+}  // namespace
+
+TEST_CASE("background: stop_background 用面板后台代理的显示 id 一击停掉") {
+    using namespace lubancode::tools;
+    TaskLedger ledger;
+    const int wanted_id = PanelIdBeyondCommandRegistry(ledger);
+    const auto task = RegisterPanelAgent(ledger, "面板代理停控");
+    REQUIRE(task != nullptr);
+    const int panel_id = task->snapshot.id;
+    REQUIRE(panel_id == wanted_id);  // 号已顶过命令存量,面板分支独占
+
+    StopBackgroundTool tool;
+    tool.SetAgentLedgerProvider([&ledger]() -> TaskLedger* { return &ledger; });
+
+    nlohmann::json input;
+    input["task_id"] = std::to_string(panel_id);
+    const Tool::Result result = tool.execute(input);
+    CHECK_FALSE(result.is_error);
+    CHECK(result.content.find("后台子代理") != std::string::npos);
+    CHECK(result.content.find(std::to_string(panel_id)) != std::string::npos);
+
+    // 停止信号真落账:任务收到 cancel(面板行随后显"停止中")。
+    CHECK(task->cancel.load(std::memory_order_acquire));
+
+    // 再停一次:停止中/活态照旧受理(CancelTask 幂等发信号),不报"找不到"。
+    const Tool::Result again = tool.execute(input);
+    CHECK_FALSE(again.is_error);
+}
+
+TEST_CASE("background: background_output 空列表合并面板后台代理,不再'当前没有'") {
+    using namespace lubancode::tools;
+    TaskLedger ledger;
+    const int wanted_id = PanelIdBeyondCommandRegistry(ledger);
+    const auto task = RegisterPanelAgent(ledger, "面板代理列账");
+    REQUIRE(task != nullptr);
+    REQUIRE(task->snapshot.id == wanted_id);
+
+    BackgroundOutputTool tool;
+    tool.SetAgentLedgerProvider([&ledger]() -> TaskLedger* { return &ledger; });
+
+    // 不给 task_id:面板有活代理,列表必须把它列出来——"当前没有后台任务"
+    // 在有活代理的场合就是两本账裂开的症状。
+    const Tool::Result list_result = tool.execute(nlohmann::json::object());
+    CHECK_FALSE(list_result.is_error);
+    CHECK(list_result.content.find("后台子代理") != std::string::npos);
+    CHECK(list_result.content.find(std::to_string(task->snapshot.id)) != std::string::npos);
+
+    // 给面板 id:查得到该代理的摘要(状态/title),不是"找不到"。
+    nlohmann::json detail_input;
+    detail_input["task_id"] = std::to_string(task->snapshot.id);
+    const Tool::Result detail = tool.execute(detail_input);
+    CHECK_FALSE(detail.is_error);
+    CHECK(detail.content.find("面板代理列账") != std::string::npos);
+
+    // 两本账都没有的 id:照旧如实"找不到"。
+    nlohmann::json bad_input;
+    bad_input["task_id"] = "no-such-panel-agent-999";
+    const Tool::Result bad = tool.execute(bad_input);
+    CHECK(bad.is_error);
+    CHECK(bad.content.find("找不到") != std::string::npos);
 }
