@@ -1,12 +1,14 @@
 // transcript 控制器(终端接线收尾单)的合同测试:焦点导航、查看态进出、
 // 轮次导航、空账本口径。输出经 TerminalPort 捕获,不污染测试台。
 
+#include <chrono>
 #include <sstream>
 #include <vector>
 
 #include <doctest/doctest.h>
 
 #include "api/types.hpp"
+#include "cli/console_input.hpp"  // PanelSessionSlot/CurrentAgentViewedTaskId(查看态 Esc 兜底测试)
 #include "cli/terminal_port.hpp"
 #include "cli/transcript_controller.hpp"
 
@@ -152,4 +154,22 @@ TEST_CASE("TranscriptUiController:查看态视口构建走钩子") {
     controller.PrintViewedTranscript(7);
     REQUIRE(out.str().find("任务7 第80列") != std::string::npos);
     lubancode::cli::TermPort().Reset();
+}
+
+// ---------------------------------------------------------------------------
+// 后台通知标题分家(后台代理管控三连 bug 单,Bug A):权限拒绝与监督提醒
+// 各挂各的标题,不许张冠李戴。真机实录:三只后台代理工具全放行,监督器
+// 的提醒 toast 却顶着"权限未放行已拒"的标题连刷五条,用户读成全线被拒。
+// tr 查不到 key 回退 key 原文——断言"key 必须解析成真文案"在旧码
+// (没有 supervisor 标题键)上必红。
+// ---------------------------------------------------------------------------
+TEST_CASE("后台通知标题分家:权限拒绝与监督提醒各挂各的标题") {
+    const std::string denial = lubancode::cli::BackgroundNoticeTitle(/*permission_denial=*/true);
+    const std::string supervisor = lubancode::cli::BackgroundNoticeTitle(/*permission_denial=*/false);
+    // 两枚 key 都得有真文案(回退 key 原文 = 缺文案,红)。
+    CHECK(denial != "agent_panel.denial_notice_title");
+    CHECK(supervisor != "agent_panel.supervisor_notice_title");
+    // 张冠李戴的病灶形态就是"两类同文"——必须分家。
+    CHECK(denial != supervisor);
+    CHECK(denial.find("权限") != std::string::npos);
 }

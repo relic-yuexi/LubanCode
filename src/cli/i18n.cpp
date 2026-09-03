@@ -332,6 +332,11 @@ const Entry kZhCN[] = {
     {"agent_panel.completion_notice", "[后台子代理完成,结果交回主会话继续]"},
     {"agent_panel.reflow_toast", "子代理 {0} 已完成,结果已回流 main(查看态静默收货)"},
     {"agent_panel.denial_notice_title", "[后台子代理权限未放行,已被拒]"},
+    // 监督提醒的独立标题(后台代理管控三连 bug 单,Bug A):疑似断流/空转/
+    // 恢复一类通知与权限拒绝分家——监督提醒顶着"权限未放行"的标题,用户
+    // 就把健康代理当成全线被拒(真机实录:三只代理工具全放行,五条监督
+    // toast 全被读成权限拒绝)。
+    {"agent_panel.supervisor_notice_title", "[后台子代理监督提醒]"},
     {"keymap.override_warning", "键位覆盖未生效一项:{0}"},
     {"search.header", "历史搜索"},
     {"search.scope.session", "本会话"},
@@ -2251,6 +2256,7 @@ const Entry kEn[] = {
     {"agent_panel.completion_notice", "[background agent finished; results handed back to main]"},
     {"agent_panel.reflow_toast", "Agent {0} finished; result delivered to main (silent while viewing)"},
     {"agent_panel.denial_notice_title", "[background agent permission not pre-approved; request denied]"},
+    {"agent_panel.supervisor_notice_title", "[background agent supervision notice]"},
     {"keymap.override_warning", "Keymap override skipped one entry: {0}"},
     {"search.header", "history search"},
     {"search.scope.session", "this session"},
