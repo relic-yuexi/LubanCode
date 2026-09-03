@@ -1,0 +1,29 @@
+# token 估算校准：真实 usage 反推 byte/token 比率
+
+- 状态：待实施（2026-09-04 用户提案立案）
+- 级别：P2（轻量改进——本地估算器用真实账自校准）
+- 类型：LubanCode 产品改进（token 估算精度）
+- 提案（用户原话要义）：每次请求的 byte 数是定的、usage token 数也回——两次请求就能反推出该模型的 token/byte 比率。BBPE 下多 byte 可能合一个 token，但统计出的平均水准已经够用；不同模型各异，各算各的。
+
+## 一、现状与价值
+
+本地 token 估算（`EstimateTextTokens`/`EstimateHistoryTokens` 一族）按字符/结构估，与真实分词有偏差——压缩触发线（0.26.190 双闸）、context 百分比、预算预判全都吃这个偏差。usage 账已在轨迹（`model.usage.recorded` 逐请求 input/output/cache 分列），请求侧字节数也可现算——**校准数据白送，只差用起来**。
+
+## 二、修法
+
+- [ ] 会话内校准器：每枚请求发完，记 `(本地发送 byte 数, provider 实报 input_tokens)` 一对；滚动窗口（如最近 8 对）取中位数比率 `tokens_per_byte`。首两对之前用现估系数兜底。
+- [ ] 比率按 `(provider, model)` 分桶缓存（进程内即可；是否跨会话落盘另议——落盘要走既有配置/存储正门）。
+- [ ] 估算口接入：`EstimateTextTokens` 一族加可选校准系数（会话级注入），压缩触发/context 百分比自动吃到。
+- [ ] 诊断可见：`/context` 加一行"token 估算校准：N 对样本，比率 x.x tokens/byte（估算偏差 ±y%）"；样本不足显示"未校准"。
+- [ ] 护栏：比率异常样本剔除（如 cache 命中致 input 虚低时——用非缓存 input 对账，`input_tokens` 而非总数）；比率漂移超阈值重置窗口。
+
+## 三、验收
+
+- 单测：喂定长请求+定 usage 的假后端，两轮后估算值收敛到校准比率；样本不足走兜底；异常样本剔除。
+- 真机：跑几轮真会话，/context 显示校准行且 context 百分比与 provider 实报逐步贴近（记录前后对照）。
+
+## 四、不做什么
+
+- 不引分词器/不做精确计数——平均水准够用，别背依赖
+- 不改 usage 账本身（只读）
+- 不跨模型共用比率
