@@ -162,7 +162,7 @@ public:
                                                  ApprovalClass approval_class,
                                                  const nlohmann::json& input,
                                                  const runtime::ToolHookDecision& pre,
-                                                 agent::AgentPermissionMode effective)>
+                                                 lubancode::ApprovalMode effective)>
             on_permission_evaluate_floored;
 
         // 有效五档确认口；Yolo may_prompt=true，仅 DontAsk 禁止询问。
@@ -171,7 +171,7 @@ public:
         // 该问就真把确认拉回来,yolo/auto 的免问不再免。空 = 宿主没接
         //(旧调用方/单测),退回 on_tool_confirm 原样转发,行为与从前一致。
         std::function<bool(const std::string& tool_use_id, const std::string& name,
-                           const nlohmann::json& input, agent::AgentPermissionMode floor)>
+                           const nlohmann::json& input, lubancode::ApprovalMode floor)>
             on_tool_confirm_floored;
 
         // M9:子代理内部的工具调用也要受 pre_tool/post_tool 钩子管——原样
@@ -617,7 +617,7 @@ private:
         std::string budget_deprecation_note;
         std::optional<CustomAgentMaterial> custom;
         std::optional<agent::ResolvedAgentProfile> resolved;
-        std::optional<agent::AgentPermissionMode> permission_floor;
+        std::optional<lubancode::ApprovalMode> permission_floor;
     };
 
     // background_hooks:后台任务的只读 hooks 会话(LaunchBackground 在主线程
@@ -633,7 +633,7 @@ private:
                    const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions = nullptr,
                    const CustomAgentMaterial* custom = nullptr,
                    const agent::ResolvedAgentProfile* resolved = nullptr,
-                   std::optional<agent::AgentPermissionMode> permission_floor = std::nullopt,
+                   std::optional<lubancode::ApprovalMode> permission_floor = std::nullopt,
                    // P0-2 轨迹:这只子代理的独立 JSONL 桥(前台/后台都在派工
                    // 线程申请好带进来;空 = flag 关的旧路)。
                    std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory = nullptr,

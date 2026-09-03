@@ -3,7 +3,7 @@
 //
 // 单子定案在这里落地:
 //   - 两根轴不揉成一根:CollaborationMode(Default/Plan)决定"这轮准做
-//     哪类事";PermissionMode(Confirm/Auto/Yolo)决定"准做的事还要不要
+//     哪类事";审批档(公共 ApprovalMode,五档)决定"准做的事还要不要
 //     问"。先过 Plan capability gate,再过 Hook/schema,再过 permission。
 //   - 模式由宿主/UI 切,模型话术、工具结果、MCP annotation、Skill 一概
 //     无权改档。Plan 拒绝的动作,Yolo 也压不过去。
@@ -29,7 +29,7 @@ namespace lubancode::runtime {
 // 两根轴
 // ---------------------------------------------------------------------------
 
-// 协作模式:研究与设计(Plan)还是实施(Default)。与 PermissionMode 正交。
+// 协作模式:研究与设计(Plan)还是实施(Default)。与审批档(ApprovalMode)正交。
 enum class CollaborationMode { Default, Plan };
 
 // ModePolicy 拒绝的稳定错误码(分层错误码风格,不拿中文正文作机器判断)。
@@ -137,8 +137,8 @@ PlanShellClassification ClassifyPlanShellDetailed(const std::string& command, co
 struct ModeState {
     CollaborationMode active = CollaborationMode::Default;
     // 进 Plan 那一刻的确认档快照(restore 用;Default 档下无意义)。
-    // 用字符串存("confirm"/"auto"/"yolo")——本头不引 runtime::PermissionMode
-    // 之外的第二套枚举,装配层翻译。
+    // 用 machine name 存("default"/"auto"/"yolo"…)——按名字走,不认
+    // 枚举整数;装配层用 ApprovalModeMachineName/ParseApprovalMode 翻译。
     std::string permission_before_plan;
     std::optional<std::string> latest_plan_id;  // 最近一份 PlanDocument 的 id
     std::uint64_t revision = 0;                 // 模式切换计数(session 事件行用)

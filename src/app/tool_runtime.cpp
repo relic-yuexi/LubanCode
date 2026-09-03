@@ -572,24 +572,8 @@ ToolRuntime::ToolRuntime(const lubancode::config::Config& config, const lubancod
         resolve_env_static_.supported_efforts = config.provider_think_levels;
         agent_tool_->SetResolveEnvironment([this]() {
             lubancode::agent::AgentProfileResolveEnvironment env = resolve_env_static_;
-            switch (lubancode::cli::CurrentConfirmMode()) {
-                case lubancode::cli::ConfirmMode::AcceptEdits:
-                    env.parent_permission = lubancode::agent::AgentPermissionMode::AcceptEdits;
-                    break;
-                case lubancode::cli::ConfirmMode::Auto:
-                    env.parent_permission = lubancode::agent::AgentPermissionMode::Auto;
-                    break;
-                case lubancode::cli::ConfirmMode::Yolo:
-                    env.parent_permission = lubancode::agent::AgentPermissionMode::Yolo;
-                    break;
-                case lubancode::cli::ConfirmMode::DontAsk:
-                    env.parent_permission = lubancode::agent::AgentPermissionMode::DontAsk;
-                    break;
-                case lubancode::cli::ConfirmMode::Confirm:
-                default:
-                    env.parent_permission = lubancode::agent::AgentPermissionMode::Default;
-                    break;
-            }
+            // 父会话档过具名桥进公共值域(收口审计单 P1:散落 switch 收口)。
+            env.parent_permission = lubancode::cli::ToApprovalMode(lubancode::cli::CurrentConfirmMode());
             return env;
         });
         // 自定义 Agent 解析口(真机实测 P2-1/P2-2;阶段 4 起是 agent_type 的

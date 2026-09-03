@@ -51,10 +51,10 @@ PermissionVerdict EvaluatePermission(const PermissionContext& context, const run
             : config::CommandPermission::None;
     // deny:只在 confirm/auto 档生效(yolo/--yes 显式全放不拦)。
     const bool deny_hit = perm == config::CommandPermission::Deny && !context.auto_confirm &&
-                          context.mode != PermissionMode::Yolo;
+                          context.mode != ApprovalMode::Yolo;
 
     bool safe_command = false;
-    if (context.mode == PermissionMode::Auto && command_tool && !deny_hit) {
+    if (context.mode == ApprovalMode::Auto && command_tool && !deny_hit) {
         // allow_commands 命中 → auto 档等价 command_safety 的 Safe(补白名单)。
         // PowerShell 脚本块例外:{ } 体内是任意代码,白名单与放行账都证明
         // 不了它无害,一律拉回确认(与 command_safety 分档同一道闸)。
@@ -68,12 +68,12 @@ PermissionVerdict EvaluatePermission(const PermissionContext& context, const run
         pre.decision == runtime::ToolHookDecision::Decision::Allow && !deny_hit;
     const bool hook_ask = pre.decision == runtime::ToolHookDecision::Decision::Ask;
     const bool explicit_command_allow =
-        context.mode == PermissionMode::DontAsk && command_tool &&
+        context.mode == ApprovalMode::DontAsk && command_tool &&
         perm == config::CommandPermission::Allow && !deny_hit;
     const bool auto_pass = !deny_hit &&
-                           (context.auto_confirm || context.mode == PermissionMode::Yolo ||
-                            (context.mode == PermissionMode::AcceptEdits && file_edit) ||
-                            (context.mode == PermissionMode::Auto && (file_edit || safe_command)) ||
+                           (context.auto_confirm || context.mode == ApprovalMode::Yolo ||
+                            (context.mode == ApprovalMode::AcceptEdits && file_edit) ||
+                            (context.mode == ApprovalMode::Auto && (file_edit || safe_command)) ||
                             explicit_command_allow ||
                             (context.always_allowed != nullptr && context.always_allowed->count(name) != 0) ||
                             hook_allow_skip);
@@ -83,7 +83,7 @@ PermissionVerdict EvaluatePermission(const PermissionContext& context, const run
         return verdict;
     }
     verdict.deny_hit = deny_hit;
-    if (context.mode == PermissionMode::DontAsk) {
+    if (context.mode == ApprovalMode::DontAsk) {
         verdict.action = PermissionVerdict::Action::Deny;
         verdict.reason = deny_hit ? PermissionVerdict::Reason::CommandDenied
                                   : PermissionVerdict::Reason::NoPrompt;

@@ -26,6 +26,8 @@
 #include <utility>
 #include <vector>
 
+#include "approval_mode.hpp"
+
 namespace lubancode::cli {
 
 // 与 Codex TUI 一致：1000 字符及以下直接显示，超过才折成 paste 附件。
@@ -87,6 +89,15 @@ struct KeyEvent {
 
 // Shift+Tab 循环切换的五档会话级审批模式。
 enum class ConfirmMode { Confirm, AcceptEdits, Yolo, Auto, DontAsk };
+
+// ---------------------------------------------------------------------------
+// 审批档位边界(收口审计单 P1:四套审批枚举收口):cli::ConfirmMode 只持显示
+// 状态(轮转、配色、文案);业务值域只有公共 lubancode::ApprovalMode 一枚。
+// 两边之间只许走下面这组具名桥——枚举声明顺序不参与映射,枚举间
+// static_cast 禁绝;持久化与协议边界一律按 machine name 解析。
+// ---------------------------------------------------------------------------
+ApprovalMode ToApprovalMode(ConfirmMode mode);
+ConfirmMode ToConfirmMode(ApprovalMode mode);
 
 // 唯一轮转顺序:默认 -> 接受编辑 -> YOLO -> 自动模式 -> 不询问 -> 默认。
 ConfirmMode NextConfirmMode(ConfirmMode mode);

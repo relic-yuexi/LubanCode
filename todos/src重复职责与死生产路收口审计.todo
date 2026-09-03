@@ -364,8 +364,8 @@ Hook 却没有复用：
 - [ ] P1：以左右槽 `assist_row` 取代 `shortcut_rows`；右槽帮助入口与 skills 右边缘同列。
 - [ ] P2：抽出 keymap 驱动的快捷键提示 formatter，删除写死 `?` 的流式兜底。
 - [ ] P3：合并 Agent 面板两对完全相同的翻译 key 与选择分支。
-- [ ] P0：修 Hook 回合身份；先钉 UserPromptSubmit 的更新时序，再让 Hook/事件/trace/trajectory 共用一枚 turn id。
-- [ ] P1：把四套审批枚举收成公共值域与具名转换，先清全部跨枚举 `static_cast`。
+- [x] P0：修 Hook 回合身份；先钉 UserPromptSubmit 的更新时序，再让 Hook/事件/trace/trajectory 共用一枚 turn id。
+- [x] P1：把四套审批枚举收成公共值域与具名转换，先清全部跨枚举 `static_cast`。
 - [ ] P1：建立统一原子写 API；先迁 Gateway 与持久事实账，再迁派生缓存。
 - [ ] P1：WebFetch 改走公共外部文本清洗入口，删私有 UTF-8 解码器。
 - [ ] P2：合并 SHA-256 与 Base64；算法迁移各自单独提交，不跟业务改造混装。
@@ -381,8 +381,8 @@ Hook 却没有复用：
 - [ ] model/effort/cwd/branch/context/tokens 与 mode/skills 同时存在，不拿一行换另一行。
 - [ ] 帮助入口改绑后，各场景显示真实键位；空闲与忙碌不换称呼、不换列。
 - [ ] 非显示模块每项另留行为证据：同一输入只走一条 canonical path，旧路无调用、无双写、无双份落盘。
-- [ ] Hook payload 的 `turn_id` 可与 runtime event、trace、trajectory 直接等值联表；`hook_run_id` 只标一次 Hook 发射。
-- [ ] 审批档跨 CLI/Runtime/Agent/Session/Peer/Hook 往返不靠枚举整数。
+- [x] Hook payload 的 `turn_id` 可与 runtime event、trace、trajectory 直接等值联表；`hook_run_id` 只标一次 Hook 发射。（integration.hooks.hooks_turn_identity 钉五类 Hook 与事件流等值；trace/trajectory 吃同一枚 canonical 号,代码同源）
+- [x] 审批档跨 CLI/Runtime/Agent/Session/Peer/Hook 往返不靠枚举整数。（unit.cli.approval_mode_boundary 表驱动五档乱序往返;resume/peer/hook/子代理各边全走 machine name 或具名桥,rg 无 static_cast 孤尾）
 - [ ] 原子写故障注入证明正式文件不会先消失，并写清 crash durability 到底保到哪一层。
 - [ ] 外来文本、SHA-256、Base64 各只剩一个算法内核；业务层保留薄适配，不复制循环。
 

@@ -40,7 +40,7 @@
 
 #include "agent/agent.hpp"             // AgentProfile:合并结果的皮
 #include "agent/agent_definition.hpp"  // AgentDefinition/Issue:定义与诊断
-#include "agent/permission_mode.hpp"   // AgentPermissionMode:权限三档(阶段 5 拆出的轻头)
+#include "agent/permission_mode.hpp"   // IntersectPermissionModes:父子能力求交(值域=公共 ApprovalMode)
 #include "agent/turn_budget.hpp"       // AgentTurnBudgetProfile:任务 turn 预算档(turn 预算单 §10.2)
 
 namespace lubancode::agent {
@@ -70,7 +70,7 @@ struct AgentDispatchOverrides {
 // 全空(宿主没接)时权限与依赖校验按"没账可查"跳过:不报错,也不放宽,
 // 与 doctor 的"会话工具表不可用,跳过比对"同一骨气。
 struct AgentProfileResolveEnvironment {
-    AgentPermissionMode parent_permission = AgentPermissionMode::Default;
+    ApprovalMode parent_permission = ApprovalMode::Default;
     std::vector<std::string> skill_names;        // 已扫描技能名(skills.preload 查账)
     std::vector<std::string> mcp_server_names;   // 已配置且挂载的 MCP 服务名
     AgentRoleRoute role_normal;                  // 三档角色路由;normal 未配置回落父模型
@@ -83,7 +83,7 @@ struct AgentProfileResolveEnvironment {
 struct AgentProfileResolveRequest {
     AgentDefinition definition;
     AgentProfile parent_profile;  // 父 Agent 的有效皮(provider/request/runtime/四段开关)
-    AgentPermissionMode parent_permission = AgentPermissionMode::Default;
+    ApprovalMode parent_permission = ApprovalMode::Default;
     std::vector<std::string> parent_tool_names;  // 父会话有效工具面(完整名,allow 只许点名这里)
     // 环境账:给了(生产装配必给)就查权限收窄与技能/MCP/思考档;std::nullopt
     //= 宿主没接(旧调用方/单测),这几笔按"没账可查"跳过——不报错,也不
@@ -112,7 +112,7 @@ struct ResolvedAgentProfile {
     bool soul = true;                          // 魂启停;false = off
     std::string execution_mode;                // 定义缺省档:auto/foreground/background
     std::string isolation;                     // 定义缺省档:none/worktree
-    AgentPermissionMode permission = AgentPermissionMode::Default;  // 决议后的权限档
+    ApprovalMode permission = ApprovalMode::Default;  // 决议后的权限档
     // 任务总 turn 预算(turn 预算单 §10.2):数值 + 来源 + legacy per-input
     // step 的影子账,与皮上那枚含糊的 runtime.max_steps_per_turn 分家。宿主
     // override 只可收窄,放宽在解析口明拒(agent.turn_budget_widening)。

@@ -95,7 +95,7 @@ agent::AgentProfile MakeParentProfile() {
 
 agent::AgentProfileResolveEnvironment MakeEnvironment() {
     agent::AgentProfileResolveEnvironment env;
-    env.parent_permission = agent::AgentPermissionMode::Auto;
+    env.parent_permission = lubancode::ApprovalMode::Auto;
     env.skill_names = {"browser-testing"};
     env.mcp_server_names = {"browser"};
     env.role_normal = {"", "model-normal"};
@@ -266,13 +266,13 @@ TEST_CASE("context_window:YAML > 会话同步值 > 父皮值(三级钉一档)") 
 // ---------------------------------------------------------------------------
 
 TEST_CASE("权限五档25格:自动能力求交且只有 DontAsk 禁止询问") {
-    struct ModeCase { const char* text; agent::AgentPermissionMode mode; };
+    struct ModeCase { const char* text; lubancode::ApprovalMode mode; };
     const std::array<ModeCase, 5> modes{{
-        {"default", agent::AgentPermissionMode::Default},
-        {"accept_edits", agent::AgentPermissionMode::AcceptEdits},
-        {"yolo", agent::AgentPermissionMode::Yolo},
-        {"auto", agent::AgentPermissionMode::Auto},
-        {"dont_ask", agent::AgentPermissionMode::DontAsk},
+        {"default", lubancode::ApprovalMode::Default},
+        {"accept_edits", lubancode::ApprovalMode::AcceptEdits},
+        {"yolo", lubancode::ApprovalMode::Yolo},
+        {"auto", lubancode::ApprovalMode::Auto},
+        {"dont_ask", lubancode::ApprovalMode::DontAsk},
     }};
     for (const ModeCase& parent : modes) {
         for (const ModeCase& child : modes) {
@@ -291,23 +291,23 @@ TEST_CASE("权限五档25格:自动能力求交且只有 DontAsk 禁止询问") 
     }
 
     // 明确回归合同：Yolo 是“All 下无需问”而非“禁止后代问”。
-    CHECK(agent::IntersectPermissionModes(agent::AgentPermissionMode::Yolo,
-                                          agent::AgentPermissionMode::Default) ==
-          agent::AgentPermissionMode::Default);
-    CHECK(agent::IntersectPermissionModes(agent::AgentPermissionMode::DontAsk,
-                                          agent::AgentPermissionMode::Default) ==
-          agent::AgentPermissionMode::DontAsk);
-    CHECK(agent::IntersectPermissionModes(agent::AgentPermissionMode::Auto,
-                                          agent::AgentPermissionMode::AcceptEdits) ==
-          agent::AgentPermissionMode::AcceptEdits);
+    CHECK(agent::IntersectPermissionModes(lubancode::ApprovalMode::Yolo,
+                                          lubancode::ApprovalMode::Default) ==
+          lubancode::ApprovalMode::Default);
+    CHECK(agent::IntersectPermissionModes(lubancode::ApprovalMode::DontAsk,
+                                          lubancode::ApprovalMode::Default) ==
+          lubancode::ApprovalMode::DontAsk);
+    CHECK(agent::IntersectPermissionModes(lubancode::ApprovalMode::Auto,
+                                          lubancode::ApprovalMode::AcceptEdits) ==
+          lubancode::ApprovalMode::AcceptEdits);
 }
 
 TEST_CASE("权限 inherit 原样继承父档") {
-    for (agent::AgentPermissionMode parent : {agent::AgentPermissionMode::Default,
-                                              agent::AgentPermissionMode::AcceptEdits,
-                                              agent::AgentPermissionMode::Yolo,
-                                              agent::AgentPermissionMode::Auto,
-                                              agent::AgentPermissionMode::DontAsk}) {
+    for (lubancode::ApprovalMode parent : {lubancode::ApprovalMode::Default,
+                                              lubancode::ApprovalMode::AcceptEdits,
+                                              lubancode::ApprovalMode::Yolo,
+                                              lubancode::ApprovalMode::Auto,
+                                              lubancode::ApprovalMode::DontAsk}) {
         agent::AgentProfileResolveRequest request;
         request.definition = ParseOrThrow(
             "schema: 1\nname: perm-probe\ndescription: 权限探针。\npermissions:\n  mode: inherit\n");
@@ -515,7 +515,7 @@ TEST_CASE("对账:同一 Definition 从 AgentTool 与 Workflow 两条路解析,�
     CHECK(clean_agent_tool.prompt_profile == "browser-tester");
     CHECK(clean_agent_tool.execution_mode == "auto");
     CHECK(clean_agent_tool.isolation == "none");
-    CHECK(clean_agent_tool.permission == agent::AgentPermissionMode::Auto);  // inherit = 同父
+    CHECK(clean_agent_tool.permission == lubancode::ApprovalMode::Auto);  // inherit = 同父
     CHECK(clean_agent_tool.profile.request.model == "model-main");           // role: inherit
     // allow 六名全在宽父面里,deny 只点 run_command(不在 allow):六枚全放行。
     REQUIRE(clean_agent_tool.effective_tools.size() == 6);

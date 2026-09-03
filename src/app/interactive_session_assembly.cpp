@@ -316,23 +316,7 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
         *approval_class_slot = approval_class;
         lubancode::runtime::PermissionContext context;
         context.auto_confirm = auto_confirm;
-        switch (lubancode::cli::CurrentConfirmMode()) {
-            case lubancode::cli::ConfirmMode::Confirm:
-                context.mode = lubancode::runtime::PermissionMode::Confirm;
-                break;
-            case lubancode::cli::ConfirmMode::AcceptEdits:
-                context.mode = lubancode::runtime::PermissionMode::AcceptEdits;
-                break;
-            case lubancode::cli::ConfirmMode::Auto:
-                context.mode = lubancode::runtime::PermissionMode::Auto;
-                break;
-            case lubancode::cli::ConfirmMode::Yolo:
-                context.mode = lubancode::runtime::PermissionMode::Yolo;
-                break;
-            case lubancode::cli::ConfirmMode::DontAsk:
-                context.mode = lubancode::runtime::PermissionMode::DontAsk;
-                break;
-        }
+        context.mode = lubancode::cli::ToApprovalMode(lubancode::cli::CurrentConfirmMode());
         context.always_allowed = &always_allowed_tools;
         context.allow_commands = &settings_local.allow_commands;
         context.deny_commands = &settings_local.deny_commands;
@@ -343,22 +327,11 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
                                     lubancode::tools::ApprovalClass approval_class,
                                     const nlohmann::json& input,
                                     const lubancode::runtime::ToolHookDecision& pre,
-                                    lubancode::agent::AgentPermissionMode effective) {
+                                    lubancode::ApprovalMode effective) {
             *approval_class_slot = approval_class;
             lubancode::runtime::PermissionContext context;
             context.auto_confirm = auto_confirm;
-            switch (effective) {
-                case lubancode::agent::AgentPermissionMode::Default:
-                    context.mode = lubancode::runtime::PermissionMode::Confirm; break;
-                case lubancode::agent::AgentPermissionMode::AcceptEdits:
-                    context.mode = lubancode::runtime::PermissionMode::AcceptEdits; break;
-                case lubancode::agent::AgentPermissionMode::Yolo:
-                    context.mode = lubancode::runtime::PermissionMode::Yolo; break;
-                case lubancode::agent::AgentPermissionMode::Auto:
-                    context.mode = lubancode::runtime::PermissionMode::Auto; break;
-                case lubancode::agent::AgentPermissionMode::DontAsk:
-                    context.mode = lubancode::runtime::PermissionMode::DontAsk; break;
-            }
+            context.mode = effective;  // 公共值域直入,不再过第二枚镜像枚举
             context.always_allowed = &always_allowed_tools;
             context.allow_commands = &settings_local.allow_commands;
             context.deny_commands = &settings_local.deny_commands;
@@ -387,29 +360,13 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
     wiring.on_tool_confirm_floored =
         [this, approval_class_slot](const std::string& tool_use_id, const std::string& name,
                                     const nlohmann::json& input,
-               lubancode::agent::AgentPermissionMode floor) -> bool {
+               lubancode::ApprovalMode floor) -> bool {
         lubancode::cli::ToolDisplay display(transcript_ui_.items(), theme,
                                             lubancode::platform::ProbeStdoutConsole().is_console,
                                             todo_state(), /*cancel=*/nullptr, transcript_ui_.expanded_flag());
         const lubancode::runtime::ToolHookDecision pre;
-        lubancode::runtime::PermissionMode runtime_floor = lubancode::runtime::PermissionMode::Yolo;
-        switch (floor) {
-            case lubancode::agent::AgentPermissionMode::Default:
-                runtime_floor = lubancode::runtime::PermissionMode::Confirm;
-                break;
-            case lubancode::agent::AgentPermissionMode::AcceptEdits:
-                runtime_floor = lubancode::runtime::PermissionMode::AcceptEdits;
-                break;
-            case lubancode::agent::AgentPermissionMode::Auto:
-                runtime_floor = lubancode::runtime::PermissionMode::Auto;
-                break;
-            case lubancode::agent::AgentPermissionMode::Yolo:
-                runtime_floor = lubancode::runtime::PermissionMode::Yolo;
-                break;
-            case lubancode::agent::AgentPermissionMode::DontAsk:
-                runtime_floor = lubancode::runtime::PermissionMode::DontAsk;
-                break;
-        }
+        // 公共值域直入(收口审计单 P1):下限档不再过第二枚镜像枚举翻译。
+        const lubancode::ApprovalMode runtime_floor = floor;
         return lubancode::app::ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display,
                                               settings_local.allow_commands, settings_local.deny_commands,
                                               /*hook_dispatcher=*/nullptr, pre,
@@ -554,7 +511,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
           }
           runtime_options.lubancode_version = std::string(lubancode::app::kVersion);
           runtime_options.approval_mode =
-              static_cast<lubancode::ApprovalMode>(lubancode::cli::CurrentConfirmMode());
+              lubancode::cli::ToApprovalMode(lubancode::cli::CurrentConfirmMode());
           // --continue(§10.4):启动路直接开 start_reason=resume 的新场,
           // 不先造空 session;没有可恢复场回落普通开张(同旧路
           // quiet_if_none)。恢复的历史由启动善后段灌进 loop。
@@ -596,7 +553,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         lubancode::cli::SetApprovalModeChangeHook(
             [ledger](lubancode::cli::ConfirmMode mode) {
                 const std::string error =
-                    ledger->UpdateApprovalMode(static_cast<lubancode::ApprovalMode>(mode));
+                    ledger->UpdateApprovalMode(lubancode::cli::ToApprovalMode(mode));
                 if (!error.empty()) {
                     TermErr() << tr("error.prefix") << "切档已生效,但会话档位写盘失败: " << error
                               << "\n";
@@ -694,7 +651,7 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
         peer_host.home_lubancode = &home_lubancode;
         peer_host.session_title = [this]() { return session_title; };
         peer_host.permission_mode = [] {
-            return static_cast<lubancode::ApprovalMode>(lubancode::cli::CurrentConfirmMode());
+            return lubancode::cli::ToApprovalMode(lubancode::cli::CurrentConfirmMode());
         };
         peer_wiring_.AttachHost(std::move(peer_host));
 

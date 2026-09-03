@@ -145,50 +145,18 @@ private:
 
 // ---------------------------------------------------------------------------
 // P3(显示系统剥离单):终端装配的档位翻译。cli::CurrentConfirmMode() 读的
-// 是 SharedEditor 那枚跨线程档位(Shift+Tab 流式切档),runtime 只认自己的
-// 中立枚举——映射在这里,一处。
+// 是 SharedEditor 那枚跨线程档位(Shift+Tab 流式切档),业务值域只有公共
+// ApprovalMode 一枚——CLI 显示档过具名桥 cli::ToApprovalMode 进来,一处
+// (收口审计单 P1:散落的五份 switch 与枚举间 static_cast 全数收口)。
 // ---------------------------------------------------------------------------
 namespace {
-
-lubancode::runtime::PermissionMode ToRuntimePermissionMode(
-    lubancode::agent::AgentPermissionMode mode) {
-    switch (mode) {
-        case lubancode::agent::AgentPermissionMode::Default:
-            return lubancode::runtime::PermissionMode::Confirm;
-        case lubancode::agent::AgentPermissionMode::AcceptEdits:
-            return lubancode::runtime::PermissionMode::AcceptEdits;
-        case lubancode::agent::AgentPermissionMode::Yolo:
-            return lubancode::runtime::PermissionMode::Yolo;
-        case lubancode::agent::AgentPermissionMode::Auto:
-            return lubancode::runtime::PermissionMode::Auto;
-        case lubancode::agent::AgentPermissionMode::DontAsk:
-            return lubancode::runtime::PermissionMode::DontAsk;
-    }
-    return lubancode::runtime::PermissionMode::Confirm;
-}
 
 lubancode::runtime::TurnRuntime::Options BuildTurnRuntimeOptions(
     bool auto_confirm, std::set<std::string>& always_allowed_tools, const std::vector<std::string>& allow_commands,
     const std::vector<std::string>& deny_commands, lubancode::hooks::HookDispatcher* hook_dispatcher) {
     lubancode::runtime::TurnRuntime::Options options;
     options.auto_confirm = auto_confirm;
-    switch (lubancode::cli::CurrentConfirmMode()) {
-        case lubancode::cli::ConfirmMode::Confirm:
-            options.permission_mode = lubancode::runtime::PermissionMode::Confirm;
-            break;
-        case lubancode::cli::ConfirmMode::AcceptEdits:
-            options.permission_mode = lubancode::runtime::PermissionMode::AcceptEdits;
-            break;
-        case lubancode::cli::ConfirmMode::Auto:
-            options.permission_mode = lubancode::runtime::PermissionMode::Auto;
-            break;
-        case lubancode::cli::ConfirmMode::Yolo:
-            options.permission_mode = lubancode::runtime::PermissionMode::Yolo;
-            break;
-        case lubancode::cli::ConfirmMode::DontAsk:
-            options.permission_mode = lubancode::runtime::PermissionMode::DontAsk;
-            break;
-    }
+    options.permission_mode = lubancode::cli::ToApprovalMode(lubancode::cli::CurrentConfirmMode());
     options.always_allowed = &always_allowed_tools;
     options.allow_commands = allow_commands;
     options.deny_commands = deny_commands;
@@ -214,7 +182,7 @@ bool ConfirmToolUse(const std::string& tool_use_id, bool auto_confirm,
                     bool has_permission_hooks, lubancode::tools::ApprovalClass approval_class,
                     const std::string& name, const nlohmann::json& input,
                     const std::function<void(bool asked, bool allowed)>& approval_observer,
-                    std::optional<lubancode::runtime::PermissionMode> permission_floor) {
+                    std::optional<lubancode::ApprovalMode> permission_floor) {
     // 裁定(纯逻辑,runtime 层):档位 + permissions 叠加 + PreToolUse 表态
     // -> 放行还是问。auto_confirm/--yes 与 yolo 在里头一并判。档位翻译复
     // 用 BuildTurnRuntimeOptions(Confirm/Auto/Yolo 的映射一处定)。
@@ -467,13 +435,13 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
              approval_class_slot](const std::string& tool_use_id, const std::string& name,
                                   lubancode::tools::ApprovalClass approval_class, const nlohmann::json& input,
                                   const lubancode::runtime::ToolHookDecision& pre,
-                                  lubancode::agent::AgentPermissionMode effective) {
+                                  lubancode::ApprovalMode effective) {
                 *approval_class_slot = approval_class;
                 auto options = BuildTurnRuntimeOptions(auto_confirm, always_allowed_tools, allow_commands,
                                                        deny_commands, hook_dispatcher);
                 lubancode::runtime::PermissionContext permission;
                 permission.auto_confirm = options.auto_confirm;
-                permission.mode = ToRuntimePermissionMode(effective);
+                permission.mode = effective;
                 permission.always_allowed = options.always_allowed;
                 permission.allow_commands = &options.allow_commands;
                 permission.deny_commands = &options.deny_commands;
@@ -492,8 +460,8 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
             [auto_confirm, &always_allowed_tools, &theme, &display, &allow_commands, &deny_commands,
              hook_dispatcher, pre_decision_slot, approval_class_slot, has_permission_hooks,
              approval_observer](const std::string& tool_use_id, const std::string& name,
-                                 const nlohmann::json& input, lubancode::agent::AgentPermissionMode floor) -> bool {
-            const lubancode::runtime::PermissionMode runtime_floor = ToRuntimePermissionMode(floor);
+                                 const nlohmann::json& input, lubancode::ApprovalMode floor) -> bool {
+            const lubancode::ApprovalMode runtime_floor = floor;
             return ConfirmToolUse(tool_use_id, auto_confirm, always_allowed_tools, theme, display, allow_commands,
                                   deny_commands, hook_dispatcher, *pre_decision_slot, has_permission_hooks,
                                   *approval_class_slot, name, input, approval_observer, runtime_floor);

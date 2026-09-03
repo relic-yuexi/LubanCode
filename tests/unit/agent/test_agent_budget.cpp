@@ -674,7 +674,7 @@ TEST_CASE("自定义 Agent:权限按能力求交且缺依赖仍在派发口结�
         tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
         agent_tool.SetResolveEnvironment([]() -> agent::AgentProfileResolveEnvironment {
             agent::AgentProfileResolveEnvironment env;
-            env.parent_permission = agent::AgentPermissionMode::Auto;
+            env.parent_permission = lubancode::ApprovalMode::Auto;
             return env;
         });
         tools::CustomAgentMaterial material = ReviewerMaterial();
@@ -699,7 +699,7 @@ TEST_CASE("自定义 Agent:权限按能力求交且缺依赖仍在派发口结�
         tools::AgentTool agent_tool(backend, sub_registry, "/work/dir");
         agent_tool.SetResolveEnvironment([]() -> agent::AgentProfileResolveEnvironment {
             agent::AgentProfileResolveEnvironment env;
-            env.parent_permission = agent::AgentPermissionMode::Auto;
+            env.parent_permission = lubancode::ApprovalMode::Auto;
             return env;
         });
         tools::CustomAgentMaterial material = ReviewerMaterial();

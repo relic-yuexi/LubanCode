@@ -42,7 +42,7 @@
 #include "tools/registry.hpp"
 
 #include "agent/model_image_store.hpp"  // ModelImageLanding:on_model_image 的回执形状
-#include "agent/permission_mode.hpp"  // AgentPermissionMode:on_tool_confirm_floored 的下限档
+#include "agent/permission_mode.hpp"  // 能力求交;值域=公共 ApprovalMode(on_tool_confirm_floored 的下限档)
 #include "agent/turn_budget.hpp"  // ModelTurnBudgetGate:任务级 turn 预算门(turn 预算单 P0-1)
 #include "api/model_request_recovery.hpp"  // ModelRequestAttempt/RequestAttemptPhase:P0-1 恢复账
 
@@ -170,7 +170,7 @@ struct TurnWiring {
                                              tools::ApprovalClass approval_class,
                                              const nlohmann::json& input,
                                              const runtime::ToolHookDecision& pre,
-                                             AgentPermissionMode effective)>
+                                             ApprovalMode effective)>
         on_permission_evaluate_floored;
 
     // 有效权限确认口。Yolo 的 may_prompt=true，父 Yolo + 子 Default 可沿此口
@@ -181,7 +181,7 @@ struct TurnWiring {
     // 先例(0.26.96)。空 = 宿主没接(旧装配),原样走 on_tool_confirm,
     // 行为不变。
     std::function<bool(const std::string& tool_use_id, const std::string& name,
-                       const nlohmann::json& input, AgentPermissionMode floor)>
+                       const nlohmann::json& input, ApprovalMode floor)>
         on_tool_confirm_floored;
 
     // ---- 钩子表态(HookDispatcher 的归并决策,发射本体在 runtime 层)------

@@ -1305,7 +1305,7 @@ Tool::Result AgentTool::ExecuteDispatch(const AgentDispatchRequest& dispatch, Ag
     // 自定义 Agent 每次都携带结果，不能再按枚举 rank 判断是否“更严”。
     // 这也保证父 Yolo + 子 Default 会进入 floored 确认链，而 Yolo 自身
     // may_prompt=true，不会错误封死后代询问。
-    std::optional<agent::AgentPermissionMode> permission_floor;
+    std::optional<lubancode::ApprovalMode> permission_floor;
     if (resolved != nullptr) {
         permission_floor = resolved->permission;
     }
@@ -1840,7 +1840,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                 const std::shared_ptr<const BackgroundPermissionLedger>& background_permissions,
                                 const CustomAgentMaterial* custom,
                                 const agent::ResolvedAgentProfile* resolved,
-                                std::optional<agent::AgentPermissionMode> permission_floor,
+                                std::optional<lubancode::ApprovalMode> permission_floor,
                                 std::unique_ptr<runtime::TrajectorySubagentBridge> trajectory,
                                 const std::shared_ptr<const SubagentDispatchEnv>& env) {
     // 派工治理(P0-2 起):admission(并发槽/深度/父子门)在注册事务
@@ -2480,7 +2480,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
         if (foreground_hooks != nullptr) {
             if (permission_floor.has_value() && foreground_hooks->on_permission_evaluate_floored) {
                 auto floored_evaluate = foreground_hooks->on_permission_evaluate_floored;
-                const agent::AgentPermissionMode effective = *permission_floor;
+                const lubancode::ApprovalMode effective = *permission_floor;
                 turn_wiring.on_permission_evaluate =
                     [floored_evaluate, effective](const std::string& tool_use_id, const std::string& name,
                                                   ApprovalClass approval_class, const nlohmann::json& input,
@@ -2494,7 +2494,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
             // 就 Allow。resolver 已完成集合求交，这里只把同一结果接进两道门。
             if (permission_floor.has_value() && foreground_hooks->on_tool_confirm_floored) {
                 auto floored = foreground_hooks->on_tool_confirm_floored;
-                const agent::AgentPermissionMode floor = *permission_floor;
+                const lubancode::ApprovalMode floor = *permission_floor;
                 turn_wiring.on_tool_confirm = [floored, floor](const std::string& tool_use_id,
                                                                const std::string& name,
                                                                const nlohmann::json& input) {
@@ -2522,7 +2522,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                                                      const nlohmann::json& input,
                                                      const lubancode::runtime::ToolHookDecision& pre) {
                     lubancode::runtime::PermissionContext context;
-                    context.mode = lubancode::runtime::PermissionMode::DontAsk;
+                    context.mode = lubancode::ApprovalMode::DontAsk;
                     if (background_permissions != nullptr) {
                         context.always_allowed = &background_permissions->always_allowed;
                         context.allow_commands = &background_permissions->allow_commands;

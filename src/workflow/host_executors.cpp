@@ -346,7 +346,7 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
     // Resolver 已给出父子求交后的有效五档。预裁定与最终确认必须共用它：
     // 只包确认口会让父 Yolo 在更早的 evaluator 阶段直接 Allow。
     if (custom.has_value() && custom->permission_floor.has_value()) {
-        const agent::AgentPermissionMode effective = *custom->permission_floor;
+        const lubancode::ApprovalMode effective = *custom->permission_floor;
         if (wiring.on_permission_evaluate_floored) {
             auto floored_evaluate = wiring.on_permission_evaluate_floored;
             wiring.on_permission_evaluate =

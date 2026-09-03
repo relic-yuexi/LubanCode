@@ -1733,8 +1733,9 @@ CommandFlow HandleSlashResume(SlashDispatchContext& ctx, const lubancode::cli::P
         // 标题真值吃 replay 折叠(control.title.changed 的最后一条)。
         *ctx.session_title = summary.outcome.control.title.value_or(std::string());
         if (summary.outcome.approval_mode.has_value()) {
-            lubancode::cli::SetConfirmMode(
-                static_cast<lubancode::cli::ConfirmMode>(*summary.outcome.approval_mode));
+            // resume 继承盘上档:公共值域过具名桥回 CLI 显示档(收口审计
+            // 单 P1:枚举间 static_cast 禁绝)。
+            lubancode::cli::SetConfirmMode(lubancode::cli::ToConfirmMode(*summary.outcome.approval_mode));
         }
         TermOut() << trf("cmd.resume.restored", summary.outcome.source_session_id,
                          summary.history.size())

@@ -25,6 +25,7 @@
 
 #include "runtime/interaction.hpp"  // ToolHookDecision:hooks 决策的中立表态
 #include "api/types.hpp"       // UsageReport/Message:usage 与 prompt 的领域形状
+#include "approval_mode.hpp"   // ApprovalMode:公共审批值域(收口审计单 P1)
 #include "config/command_permission.hpp"  // ClassifyCommandByPermissions:permissions 叠加(问题 7 拆出,不再借 config.hpp)
 #include "hooks/dispatcher.hpp"
 #include "tools/tool.hpp"      // Tool::Result:PostToolUse 的载荷
@@ -32,10 +33,12 @@
 namespace lubancode::runtime {
 
 // ---------------------------------------------------------------------------
-// 权限档位:cli::ConfirmMode 的中立镜像(Confirm/Auto/Yolo,Shift+Tab 循环)。
-// 不 include cli/*,字段同名同义;映射由终端装配层做,漂移由单测钉住。
+// 权限档位:不再另造中立镜像(收口审计单 P1:四套审批枚举收口)。公共
+// lubancode::ApprovalMode 就是本层的值域——Confirm 档对应 ApprovalMode::
+// Default(机读名 "default"/旧别名 "confirm")。CLI 显示档(cli::ConfirmMode)
+// 到公共值域的映射只有 cli::ToApprovalMode 一组具名桥,枚举间 static_cast
+// 禁绝;旧 runtime::PermissionMode(声明序与其余异序的那枚)已删。
 // ---------------------------------------------------------------------------
-enum class PermissionMode { Confirm, AcceptEdits, Auto, Yolo, DontAsk };
 
 // ---------------------------------------------------------------------------
 // 权限裁定(纯函数,原文自 ConfirmToolUse 搬来)
@@ -57,7 +60,7 @@ enum class PermissionMode { Confirm, AcceptEdits, Auto, Yolo, DontAsk };
 
 struct PermissionContext {
     bool auto_confirm = false;  // --yes:显式全放,deny 也不拦
-    PermissionMode mode = PermissionMode::Confirm;
+    ApprovalMode mode = ApprovalMode::Default;
     const std::set<std::string>* always_allowed = nullptr;  // 选过 a 的工具(会话级)
     const std::vector<std::string>* allow_commands = nullptr;  // settings.local.json 前缀白名单
     const std::vector<std::string>* deny_commands = nullptr;   // settings.local.json 前缀黑名单
@@ -322,7 +325,7 @@ class TurnRuntime {
 public:
     struct Options {
         bool auto_confirm = false;
-        PermissionMode permission_mode = PermissionMode::Confirm;
+        ApprovalMode permission_mode = ApprovalMode::Default;
         std::set<std::string>* always_allowed = nullptr;  // 会话级"总是允许"
         std::vector<std::string> allow_commands;
         std::vector<std::string> deny_commands;
@@ -365,7 +368,7 @@ public:
 
 private:
     bool auto_confirm_ = false;
-    PermissionMode permission_mode_ = PermissionMode::Confirm;
+    ApprovalMode permission_mode_ = ApprovalMode::Default;
     std::set<std::string>* always_allowed_ = nullptr;
     std::vector<std::string> allow_commands_;
     std::vector<std::string> deny_commands_;

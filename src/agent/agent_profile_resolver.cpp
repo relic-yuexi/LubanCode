@@ -49,8 +49,8 @@ const AgentRoleRoute& OrFallback(const AgentRoleRoute& route, const AgentRoleRou
 
 }  // namespace
 
-// AgentPermissionMode 与 Rank/ToString 已拆去 permission_mode.hpp(阶段 5:
-// loop.hpp 也要用,不拆与 agent.hpp 循环)。
+// 档位值域 = 公共 ApprovalMode(approval_mode.hpp);能力求交仍在
+// permission_mode.hpp(收口审计单 P1:四套审批枚举收口)。
 
 ResolvedAgentProfile ResolveAgentProfile(const AgentProfileResolveRequest& request) {
     ResolvedAgentProfile resolved;
@@ -241,22 +241,14 @@ ResolvedAgentProfile ResolveAgentProfile(const AgentProfileResolveRequest& reque
     // inherit/空 = 同父。显式子档不因“更宽”拒发，而是按自动能力集合求交；
     // may_prompt 单独取 AND。Yolo 的 may_prompt=true，含义是其自身 All 能力
     // 通常无需问，不会封死父 Yolo + 子 Default 沿 floored 链拉回主会话；
-    // 只有 DontAsk 禁止后代询问。
-    const AgentPermissionMode parent_permission =
+    // 只有 DontAsk 禁止后代询问。子档按 machine name 解析(收口审计单 P1:
+    // 持久化/YAML 边界不认枚举整数;认不得的名字保守落 Default,同旧行为)。
+    const ApprovalMode parent_permission =
         has_env ? env.parent_permission : request.parent_permission;
     resolved.permission = parent_permission;
     const std::string& declared = definition.permissions_mode;
     if (!declared.empty() && declared != "inherit") {
-        AgentPermissionMode child = AgentPermissionMode::Default;
-        if (declared == "accept_edits") {
-            child = AgentPermissionMode::AcceptEdits;
-        } else if (declared == "auto") {
-            child = AgentPermissionMode::Auto;
-        } else if (declared == "yolo") {
-            child = AgentPermissionMode::Yolo;
-        } else if (declared == "dont_ask") {
-            child = AgentPermissionMode::DontAsk;
-        }
+        const ApprovalMode child = ParseApprovalModeOrDefault(declared);
         resolved.permission = IntersectPermissionModes(parent_permission, child);
     }
 
