@@ -4,6 +4,7 @@
 #include <fstream>
 
 #include "agent/model_image_store.hpp"  // SniffImageFormat/ReadImageDimensions
+#include "platform/base64.hpp"          // Base64Encode:图片重灌的公共内核(审计 P2)
 #include "platform/log_sink.hpp"        // 退字节口径时的留痕日志
 #include "platform/paths.hpp"           // Utf8ToPath:目录路径不走 ACP 窄口
 #include "platform/text_encoding.hpp"
@@ -11,41 +12,6 @@
 namespace lubancode::agent {
 
 namespace {
-
-// 标准 base64(带 padding)。仓库里已有三份局部实现(cli/platform/tools),
-// 那些都在各自的静态命名空间里够不着;这里再落一份局部——四处调用点
-// 各自独立,等哪天真抽公共件再并。
-std::string Base64Encode(const std::string& bytes) {
-    static const char kTable[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve((bytes.size() + 2) / 3 * 4);
-    std::size_t i = 0;
-    while (i + 3 <= bytes.size()) {
-        const std::uint32_t n = (static_cast<unsigned char>(bytes[i]) << 16) |
-                                (static_cast<unsigned char>(bytes[i + 1]) << 8) |
-                                static_cast<unsigned char>(bytes[i + 2]);
-        out += kTable[(n >> 18) & 0x3F];
-        out += kTable[(n >> 12) & 0x3F];
-        out += kTable[(n >> 6) & 0x3F];
-        out += kTable[n & 0x3F];
-        i += 3;
-    }
-    const std::size_t rest = bytes.size() - i;
-    if (rest == 1) {
-        const std::uint32_t n = static_cast<unsigned char>(bytes[i]) << 16;
-        out += kTable[(n >> 18) & 0x3F];
-        out += kTable[(n >> 12) & 0x3F];
-        out += "==";
-    } else if (rest == 2) {
-        const std::uint32_t n = (static_cast<unsigned char>(bytes[i]) << 16) |
-                                (static_cast<unsigned char>(bytes[i + 1]) << 8);
-        out += kTable[(n >> 18) & 0x3F];
-        out += kTable[(n >> 12) & 0x3F];
-        out += kTable[(n >> 6) & 0x3F];
-        out += '=';
-    }
-    return out;
-}
 
 // artifact 文件名干净检查:宿主自己起的内容寻址名(art-<sha8>.<ext>)只
 // 该是平名。带分隔符/..的按脏拒——那是引用被外来的路径串污染了,不读。
@@ -168,7 +134,7 @@ std::size_t RehydrateToolResultImages(api::Request& request, const std::string& 
                     height > kMaxToolResultWireImageSide) {
                     continue;
                 }
-                std::string encoded = Base64Encode(bytes);
+                std::string encoded = platform::Base64Encode(std::string_view(bytes));
                 if (total_base64 + encoded.size() > kMaxToolResultWireImageTotalBytes) {
                     continue;  // 请求合计帽:后面的图全部留给降级路
                 }

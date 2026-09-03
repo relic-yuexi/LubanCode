@@ -10,6 +10,7 @@
 #include <sstream>
 
 #include "hooks/hash.hpp"    // Sha256Hex(CSP 哈希的同一把尺)
+#include "platform/base64.hpp"  // Base64Encode:CSP hash-source 的公共内核(审计 P2)
 #include "insights/redaction.hpp"  // 防御性脱敏(§13.2 第二层,先于 escape)
 
 namespace lubancode::insights {
@@ -66,9 +67,8 @@ std::string FormatNumber(std::int64_t value) {
 }
 
 // hex(64 位) -> base64(32 字节摘要 -> 44 字符,CSP hash-source 要的形态)。
+// 编码走公共 base64 内核(审计 P2:仓内不再养第二只字母表循环)。
 std::string HexDigestToBase64(const std::string& hex) {
-    static const char* kAlphabet =
-        "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     auto hex_value = [](char c) -> int {
         if (c >= '0' && c <= '9') return c - '0';
         if (c >= 'a' && c <= 'f') return c - 'a' + 10;
@@ -85,19 +85,7 @@ std::string HexDigestToBase64(const std::string& hex) {
         }
         bytes += static_cast<char>((hi << 4) | lo);
     }
-    std::string base64;
-    base64.reserve((bytes.size() + 2) / 3 * 4);
-    for (std::size_t i = 0; i < bytes.size(); i += 3) {
-        const unsigned b0 = static_cast<unsigned char>(bytes[i]);
-        const unsigned b1 = i + 1 < bytes.size() ? static_cast<unsigned char>(bytes[i + 1]) : 0u;
-        const unsigned b2 = i + 2 < bytes.size() ? static_cast<unsigned char>(bytes[i + 2]) : 0u;
-        const unsigned triple = (b0 << 16) | (b1 << 8) | b2;
-        base64 += kAlphabet[(triple >> 18) & 0x3f];
-        base64 += kAlphabet[(triple >> 12) & 0x3f];
-        base64 += i + 1 < bytes.size() ? kAlphabet[(triple >> 6) & 0x3f] : '=';
-        base64 += i + 2 < bytes.size() ? kAlphabet[triple & 0x3f] : '=';
-    }
-    return base64;
+    return platform::Base64Encode(std::string_view(bytes));
 }
 
 // 内联块(样式/脚本)的原文——字节稳定,CSP 哈希逐字节对着它算。

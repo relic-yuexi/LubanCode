@@ -27,6 +27,9 @@
 #include <atomic>
 
 #ifdef _WIN32
+#include <span>
+
+#include "platform/base64.hpp"  // Base64Encode:-EncodedCommand 的公共内核(审计 P2)
 #include "platform/paths.hpp"  // Utf8ToWide:PowerShell -EncodedCommand 拼接用
 #endif
 
@@ -333,40 +336,8 @@ namespace {
 // PowerShell 专属的 base64/编码命令拼接。进程执行的公共基建(RunProcess/
 // BuildCmdCommandLine/编码转换)在 platform/process.hpp、platform/paths.hpp
 // (跨平台单从 tools/process_exec.hpp 搬的家,见那两个文件头注释)。
-
-// 手写的标准 base64 编码,-EncodedCommand 要的就是这个格式,不引额外依赖。
-std::string Base64Encode(const unsigned char* data, std::size_t len) {
-    static const char kTable[] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    std::string out;
-    out.reserve(((len + 2) / 3) * 4);
-
-    std::size_t i = 0;
-    while (i + 3 <= len) {
-        const unsigned int n = (static_cast<unsigned int>(data[i]) << 16) |
-                                (static_cast<unsigned int>(data[i + 1]) << 8) |
-                                static_cast<unsigned int>(data[i + 2]);
-        out.push_back(kTable[(n >> 18) & 0x3F]);
-        out.push_back(kTable[(n >> 12) & 0x3F]);
-        out.push_back(kTable[(n >> 6) & 0x3F]);
-        out.push_back(kTable[n & 0x3F]);
-        i += 3;
-    }
-    const std::size_t rem = len - i;
-    if (rem == 1) {
-        const unsigned int n = static_cast<unsigned int>(data[i]) << 16;
-        out.push_back(kTable[(n >> 18) & 0x3F]);
-        out.push_back(kTable[(n >> 12) & 0x3F]);
-        out.push_back('=');
-        out.push_back('=');
-    } else if (rem == 2) {
-        const unsigned int n = (static_cast<unsigned int>(data[i]) << 16) | (static_cast<unsigned int>(data[i + 1]) << 8);
-        out.push_back(kTable[(n >> 18) & 0x3F]);
-        out.push_back(kTable[(n >> 12) & 0x3F]);
-        out.push_back(kTable[(n >> 6) & 0x3F]);
-        out.push_back('=');
-    }
-    return out;
-}
+// base64 编码统一走 platform::Base64Encode(审计 P2:五处手写收一)——
+// 这里只管把脚本先编成 UTF-16LE 字节,-EncodedCommand 要的格式。
 
 // 拼一段 PowerShell 脚本,再编码成 -EncodedCommand 要的 UTF-16LE + base64。
 // 用 -EncodedCommand 而不是直接拼 -Command "...",是为了绕开用户命令里
@@ -410,7 +381,8 @@ std::string BuildEncodedCommand(const std::string& user_command_utf8) {
         "if ($errseen) { exit 1 } else { exit 0 }\r\n";  // cmdlet 报错/找不到命令 vs 干净
 
     const std::wstring wide = platform::Utf8ToWide(script_utf8);
-    return Base64Encode(reinterpret_cast<const unsigned char*>(wide.data()), wide.size() * sizeof(wchar_t));
+    return platform::Base64Encode(std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(wide.data()), wide.size() * sizeof(wchar_t)));
 }
 
 // 后台专用的流式 wrapper(background 管理面单):与上面那颗的差异只有
@@ -437,7 +409,8 @@ std::string BuildBackgroundEncodedCommand(const std::string& user_command_utf8) 
         "if ($?) { exit 0 } else { exit 1 }\r\n";
 
     const std::wstring wide = platform::Utf8ToWide(script_utf8);
-    return Base64Encode(reinterpret_cast<const unsigned char*>(wide.data()), wide.size() * sizeof(wchar_t));
+    return platform::Base64Encode(std::span<const std::byte>(
+        reinterpret_cast<const std::byte*>(wide.data()), wide.size() * sizeof(wchar_t)));
 }
 
 }  // namespace
