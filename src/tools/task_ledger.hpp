@@ -277,6 +277,12 @@ enum class AgentTaskEventKind {
     Failure,             // 失败/中止/耗尽(带短因与部分结果)
 };
 
+// 工具终态细分(主/Subagent 面板同构渲染单 P1):ToolResult 不再只有
+// is_error 一枚布尔——中断的工具不得冒充普通失败。台账不引 runtime,与
+// runtime::Outcome 的对齐映射写在写入侧(agent_tool 的事件 sink)。None =
+// 旧账/未细分,显示层退 is_error 折算。
+enum class AgentTaskToolStatus { None, Succeeded, Failed, Declined, Cancelled, Interrupted, Skipped };
+
 struct AgentTaskEvent {
     AgentTaskEventKind kind = AgentTaskEventKind::UserMessage;
     std::string text;        // 正文/结论/短因/检查点说明
@@ -288,6 +294,18 @@ struct AgentTaskEvent {
     // "正在累积、尚未切段"的正文/思考带这面旗——查看态据此画"思考中 · N 字"
     // 的 Running 条目(与 main 流式思考同款折叠),封卷事件恒 false。
     bool streaming = false;
+    // ---- 稳定身份(同构渲染单 §四/§5.2 迁移桥):ToolStart/ToolResult 按
+    // 调用 id 对账,显示层不再靠"最近一枚 start"猜;step/turn 划轮次边界。
+    // 旧账(升级前写入的)这些字段为空,显示层走 legacy 相邻配对并标明。
+    // parent_item_id 不进这本账:任务事件账相对自己的根是平的(查看根的
+    // 工具都是顶层),父子关系在台账 lineage 字段(parent_task_id/depth)上,
+    // 不在事件里另养一份。 ----
+    std::string tool_use_id;  // ToolStart/ToolResult:模型给的调用 id(空 = 旧账)
+    std::string item_id;      // 事件源条目 id(item-<n>;空 = 旧账)
+    std::string step_id;      // 哪一次模型响应(step-<n>;空 = 旧账/未知)
+    std::string turn_id;      // 哪一轮(空 = 旧账/未知)
+    std::uint64_t seq = 0;    // 事件源序号(envelope.seq;0 = 没带)
+    AgentTaskToolStatus tool_status = AgentTaskToolStatus::None;  // ToolResult 终态细分
     // 事件号(监督器单 P1-0):从台账的 watch_generation 同一枚单调计数发
     // ——与 agent_watch 顶层的 revision 同一数轴,"after_revision 之后的事件"
     // 才对得齐(各任务自己的序列仍严格递增)。显示层不认它(照旧全量拼)。

@@ -508,9 +508,11 @@ public:
                     break;
                 }
                 case DetailKind::Tool: {
+                    // 投影坐标(同构渲染单 P0):workflow 节点查看页的根是
+                    // 节点自己,它调用的工具是这张面板的顶层 Tool,不再缩四格。
                     const auto item = lubancode::cli::MakeAgentTaskToolItem(
                         next_item_id++, detail.tool_name, detail.input_json, detail.completed,
-                        detail.is_error, detail.result);
+                        detail.is_error, detail.result, lubancode::cli::TranscriptKind::Tool);
                     AppendRendered(lines,
                                    lubancode::cli::FormatTranscriptItem(item, theme_, width, false));
                     break;

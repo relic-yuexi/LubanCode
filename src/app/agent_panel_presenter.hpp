@@ -17,6 +17,7 @@
 #include <string>
 #include <vector>
 
+#include "cli/transcript.hpp"  // SessionBlock(查看态会话块模型)
 #include "tools/task_ledger.hpp"  // AgentTaskSummary/AgentTaskEvent(台账条目)
 
 namespace lubancode::cli {
@@ -29,6 +30,14 @@ struct AgentTaskSummary;
 }
 
 namespace lubancode::app {
+
+// 事件账 -> 查看根视角的会话块(主/Subagent 面板同构渲染单):把
+// AgentTaskEvent 逐枚折成 SessionBlock,渲染交给 cli::RenderSessionBlocks
+// 与 FormatTranscriptItems——presenter 不再逐枚直调单卡 formatter 后裸追加,
+// 也不再自行决定块间空行。当前查看代理自己的工具一律投 Tool(相对根节点
+// 的层级,不按"是不是 Main"写死)。公开给单测直接钉投影与配对规矩。
+std::vector<lubancode::cli::SessionBlock> BuildAgentTaskBlocks(
+    const std::vector<lubancode::tools::AgentTaskEvent>& events, const lubancode::cli::Theme& theme);
 
 class AgentPanelPresenter {
 public:

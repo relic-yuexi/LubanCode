@@ -65,6 +65,14 @@ std::vector<std::string> RenderTurnView(const lubancode::runtime::TurnView& view
 // FormatTranscriptItem,文案一处定)。公开给快照重放(Ctrl+L)逐条铺。
 // TranscriptItem 的完整定义在 cli/transcript.hpp;这里前置声明,实现里
 // include(transcript 不认 runtime,方向不倒)。
+//
+// 整组布局的职责归属(主/Subagent 面板同构渲染单 P1 清点):FormatTranscriptItems
+// 管"一组条目之内"——紧凑档 SubTool 过滤、条目间 GapBetween 间距、单条展开;
+// RenderTurnView 管"一轮的骨架"——user 背景块、step 轻间隔、turn footer、
+// 轮界横线。两者各认一半、互不越界:条目间距不在这再排一遍,轮骨架不进
+// 条目组。会话块级(Main/Subagent 查看页共用)的入口是 RenderSessionBlocks
+// (cli/transcript.hpp),它把 Items 块折回 FormatTranscriptItems——三处
+// (live 快照重打、Ctrl+L 轮重放、查看页)同一张间距表、同一颗折叠开关。
 struct TranscriptItem;
 lubancode::cli::TranscriptItem ProjectTurnItem(const lubancode::runtime::TurnItemView& item);
 

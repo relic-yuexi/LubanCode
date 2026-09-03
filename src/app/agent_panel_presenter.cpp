@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
+#include <map>
 #include <string>
 #include <utility>
 #include <vector>
@@ -562,111 +563,23 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
     }
 
     // ---- 复用 main 的渲染组件(规格"现场三":共用 renderer,不共用 history) ----
-    int next_item_id = 1;
-    const auto push_rendered = [&](const std::string& rendered) {
-        std::string rest = rendered;
-        std::size_t cut = 0;
-        do {
-            cut = rest.find('\n');
-            std::string chunk = cut == std::string::npos ? rest : rest.substr(0, cut);
-            if (cut != std::string::npos) {
-                rest.erase(0, cut + 1);
-            }
-            if (chunk.empty() && cut == std::string::npos) {
-                break;
-            }
-            lines.push_back(chunk);
-        } while (cut != std::string::npos);
-    };
-    const auto push_markdown = [&](const std::string& header, const std::string& text) {
-        lines.push_back(header);
-        for (const auto& line : lubancode::cli::RenderMarkdown(text, theme, width)) {
+    // 同构渲染单 P0:会话正文不再在 presenter 里逐事件手拼——先折成会话块
+    // (BuildAgentTaskBlocks),再整组交给 cli 的共用 renderer。面板元数据
+    // (上面那些身份/统计/预算/监督行)与会话正文之间垫一口一口气。
+    const std::vector<lubancode::cli::SessionBlock> blocks = BuildAgentTaskBlocks(events, theme);
+    const std::vector<std::string> body =
+        lubancode::cli::RenderSessionBlocks(blocks, theme, width, agent_view_expanded);
+    if (!body.empty()) {
+        lines.push_back(std::string());
+        for (const auto& line : body) {
             lines.push_back(line);
         }
-    };
-    const auto tool_item = [&](const lubancode::tools::AgentTaskEvent& start,
-                               const lubancode::tools::AgentTaskEvent* done) {
-        return lubancode::cli::MakeAgentTaskToolItem(
-            next_item_id++, start.tool_name, start.input_json, done != nullptr,
-            done != nullptr && done->is_error, done != nullptr ? done->result : std::string());
-    };
-
-    // 工具卡配对:ToolStart 等 ToolResult 成一张终态卡;流尾没等到的画
-    // Running 卡。中间穿插的正文/思考已由账面时序保证不乱。
-    std::optional<lubancode::tools::AgentTaskEvent> pending_tool_start;
-    for (const auto& event : events) {
-        switch (event.kind) {
-            case lubancode::tools::AgentTaskEventKind::UserMessage:
-                push_markdown(theme.confirm + "> " + tr("cmd.resume.history.user") + theme.reset, event.text);
-                break;
-            case lubancode::tools::AgentTaskEventKind::SteeringMessage:
-                push_markdown(theme.confirm + "> " + tr("agent_panel.event_steering") + theme.reset, event.text);
-                break;
-            case lubancode::tools::AgentTaskEventKind::AssistantText:
-                // 流式正文尾巴(追加需求):查看态就是这只代理此刻的实时会话
-                // ——已流出的正文按渲染版铺开,重铺拍自然带出增量。
-                push_markdown(theme.banner + "● " + tr("cmd.resume.history.assistant") + theme.reset, event.text);
-                break;
-            case lubancode::tools::AgentTaskEventKind::AssistantReasoning: {
-                // 流式思考尾巴(追加需求"查看态实时思考流"):工厂折成与 main
-                // 流式思考同款折叠规矩的条目——Running 头行「思考中 · N 字」
-                // 随重铺拍跳动;Ctrl+O 展开看长文(FormatTranscriptItem 的
-                // thinking_live 分支自带"约一屏后截断收口")。
-                const lubancode::cli::TranscriptItem item =
-                    lubancode::cli::MakeAgentTaskThinkingItem(next_item_id++, event.text, event.streaming);
-                push_rendered(lubancode::cli::FormatTranscriptItem(item, theme, width,
-                                                                   /*expanded=*/event.streaming && agent_view_expanded));
-                break;
-            }
-            case lubancode::tools::AgentTaskEventKind::ToolStart:
-                if (pending_tool_start.has_value()) {
-                    // 上一张卡没等到结果(异常路径):先画 Running 卡,不吞。
-                    push_rendered(
-                        lubancode::cli::FormatTranscriptItem(tool_item(*pending_tool_start, nullptr), theme, width,
-                                                             /*expanded=*/false));
-                }
-                pending_tool_start = event;
-                break;
-            case lubancode::tools::AgentTaskEventKind::ToolResult: {
-                const lubancode::tools::AgentTaskEvent* done = &event;
-                if (pending_tool_start.has_value()) {
-                    push_rendered(lubancode::cli::FormatTranscriptItem(
-                        tool_item(*pending_tool_start, done), theme, width, /*expanded=*/false));
-                    pending_tool_start.reset();
-                } else {
-                    // 没配上 start(旧账边缘):单画一张只有结果的卡。
-                    lubancode::tools::AgentTaskEvent pseudo = event;
-                    pseudo.input_json.clear();
-                    push_rendered(lubancode::cli::FormatTranscriptItem(tool_item(pseudo, done), theme, width,
-                                                                       /*expanded=*/false));
-                }
-                break;
-            }
-            case lubancode::tools::AgentTaskEventKind::CompactCheckpoint:
-                lines.push_back(theme.stats + tr("cmd.resume.history.compact") + theme.reset);
-                break;
-            case lubancode::tools::AgentTaskEventKind::Completion:
-                lines.push_back(theme.banner + "✓ " + tr("agent_status.state_done") + theme.reset);
-                for (const auto& line : lubancode::cli::RenderMarkdown(event.text, theme, width)) {
-                    lines.push_back(line);
-                }
-                break;
-            case lubancode::tools::AgentTaskEventKind::Failure:
-                lines.push_back(theme.error + "× " + tr("agent_panel.event_failed") + theme.reset);
-                for (const auto& line : lubancode::cli::RenderMarkdown(event.text, theme, width)) {
-                    lines.push_back(line);
-                }
-                break;
-        }
-    }
-    if (pending_tool_start.has_value()) {
-        push_rendered(lubancode::cli::FormatTranscriptItem(tool_item(*pending_tool_start, nullptr), theme, width,
-                                                           /*expanded=*/false));
     }
     // 未送达的介入消息:排在账尾,等轮次边界注入。
     if (agent_tool != nullptr) {
         const auto pending = agent_tool->PendingTaskMessages(task_id);
         if (!pending.empty()) {
+            lines.push_back(std::string());
             lines.push_back(theme.stats + trf("agent_panel.detail_pending_head", pending.size()) + theme.reset);
             for (const auto& message : pending) {
                 lines.push_back("  * " + lubancode::cli::TruncateUtf8ToDisplayWidth(message, std::max(0, width - 5)));
@@ -674,6 +587,253 @@ std::vector<std::string> AgentPanelPresenter::TaskTranscriptLines(lubancode::too
         }
     }
     return lines;
+}
+
+// 事件账 -> 会话块(同构渲染单 P0/P1)。工具/思考卡按事件顺序攒组,遇
+// markdown/通知事件先冲组;工具配对按 tool_use_id 对账(同 id 首枚 result
+// 生效,多工具 start/result 交错时按 id 原位收口,不串结果、不吞卡),旧账
+// (没有 id 的)退相邻兼容投影并标明 legacy;当前查看代理自己的工具一律投
+// Tool——投影坐标跟着查看根走,不按"是不是 Main"写死。
+std::vector<lubancode::cli::SessionBlock> BuildAgentTaskBlocks(
+    const std::vector<lubancode::tools::AgentTaskEvent>& events, const lubancode::cli::Theme& theme) {
+    using lubancode::tools::AgentTaskEvent;
+    using lubancode::tools::AgentTaskEventKind;
+    using lubancode::tools::AgentTaskToolStatus;
+    std::vector<lubancode::cli::SessionBlock> blocks;
+    int next_item_id = 1;
+    std::vector<lubancode::cli::TranscriptItem> pending_items;
+    const auto flush_items = [&blocks, &pending_items]() {
+        if (pending_items.empty()) {
+            return;
+        }
+        lubancode::cli::SessionBlock block;
+        block.kind = lubancode::cli::SessionBlock::Kind::Items;
+        block.role = pending_items.front().kind == lubancode::cli::TranscriptKind::Thinking
+                         ? lubancode::cli::BlockRole::Thinking
+                         : lubancode::cli::BlockRole::Tool;
+        block.items = std::move(pending_items);
+        pending_items.clear();
+        blocks.push_back(std::move(block));
+    };
+    const auto push_markdown_block = [&blocks, &flush_items](const std::string& header, const std::string& body,
+                                                             lubancode::cli::BlockRole role) {
+        flush_items();
+        lubancode::cli::SessionBlock block;
+        block.kind = lubancode::cli::SessionBlock::Kind::Markdown;
+        block.header = header;
+        block.body = body;
+        block.role = role;
+        blocks.push_back(std::move(block));
+    };
+    const auto push_notice_block = [&blocks, &flush_items](const std::string& line,
+                                                           lubancode::cli::BlockRole role) {
+        flush_items();
+        lubancode::cli::SessionBlock block;
+        block.kind = lubancode::cli::SessionBlock::Kind::Notice;
+        block.line = line;
+        block.role = role;
+        blocks.push_back(std::move(block));
+    };
+    // 终态细分投影(P1):Running/Succeeded/Failed/Declined/Cancelled/
+    // Interrupted/Skipped 如实落卡;None = 旧账,按 is_error 折(工厂已办)。
+    const auto apply_tool_status = [](lubancode::cli::TranscriptItem& item, const AgentTaskEvent& done) {
+        switch (done.tool_status) {
+            case AgentTaskToolStatus::Succeeded:
+                item.status = lubancode::cli::TranscriptStatus::Ok;
+                break;
+            case AgentTaskToolStatus::Failed:
+                item.status = lubancode::cli::TranscriptStatus::Error;
+                break;
+            case AgentTaskToolStatus::Declined:
+            case AgentTaskToolStatus::Skipped:
+            case AgentTaskToolStatus::Cancelled:
+                item.status = lubancode::cli::TranscriptStatus::Cancelled;
+                if (done.result.empty()) {
+                    item.summary_lines = {done.tool_status == AgentTaskToolStatus::Declined
+                                              ? tr("agent_panel.tool_declined")
+                                              : tr("agent_panel.tool_skipped")};
+                }
+                break;
+            case AgentTaskToolStatus::Interrupted:
+                // 中断不得冒充普通失败(单子 P1):灰黄灯 + 结果不明摘要。
+                item.status = lubancode::cli::TranscriptStatus::Interrupted;
+                break;
+            case AgentTaskToolStatus::None:
+                break;
+        }
+    };
+    const auto tool_item = [&next_item_id, &apply_tool_status](const AgentTaskEvent& start,
+                                                               const AgentTaskEvent* done) {
+        auto item = lubancode::cli::MakeAgentTaskToolItem(
+            next_item_id++, start.tool_name, start.input_json, done != nullptr,
+            done != nullptr && done->is_error, done != nullptr ? done->result : std::string(),
+            lubancode::cli::TranscriptKind::Tool);
+        if (done != nullptr) {
+            apply_tool_status(item, *done);
+        }
+        return item;
+    };
+
+    // ---- 工具配对(P1):第一遍按 id 收终态 --------------------------------
+    // 每枚 ToolStart 开一个槽(卡落在 start 位置,按 id 原位收口);result
+    // 按 tool_use_id 入槽,同 id 首枚生效——重复/迟到的 result 不串账。无 id
+    // 的 result(旧账)退"最近的同名未配 no-id start",再退最近的未配
+    // no-id start(老账本的相邻配对);都配不上按孤儿收,单画一张只有结果
+    // 的卡,不吞。
+    struct ToolSlot {
+        const AgentTaskEvent* start = nullptr;
+        const AgentTaskEvent* result = nullptr;
+    };
+    std::vector<ToolSlot> slots;
+    std::map<const AgentTaskEvent*, std::size_t> slot_of_start;
+    std::map<std::string, std::size_t> slot_of_id;
+    std::vector<const AgentTaskEvent*> orphan_results;
+    bool legacy_account = false;
+    for (const auto& event : events) {
+        switch (event.kind) {
+            case AgentTaskEventKind::ToolStart: {
+                ToolSlot slot;
+                slot.start = &event;
+                if (event.tool_use_id.empty()) {
+                    legacy_account = true;
+                } else if (slot_of_id.find(event.tool_use_id) == slot_of_id.end()) {
+                    slot_of_id.emplace(event.tool_use_id, slots.size());
+                }
+                slot_of_start[&event] = slots.size();
+                slots.push_back(slot);
+                break;
+            }
+            case AgentTaskEventKind::ToolResult: {
+                if (!event.tool_use_id.empty()) {
+                    const auto by_id = slot_of_id.find(event.tool_use_id);
+                    if (by_id != slot_of_id.end()) {
+                        if (slots[by_id->second].result == nullptr) {
+                            slots[by_id->second].result = &event;  // 同 id 首枚生效
+                        }
+                        // 重复 result(同 id 第二枚):槽已收口,整枚丢弃——
+                        // 不孤儿开卡、不覆盖首枚,不误伤旁卡。
+                        break;
+                    }
+                } else {
+                    legacy_account = true;
+                    // 旧账兼容投影:优先最近的同名未配 no-id start,退而求
+                    // 最近的未配 no-id start(同名优先,交错的不同名旧工具
+                    // 才不至于串结果)。
+                    std::optional<std::size_t> fallback;
+                    std::optional<std::size_t> same_name;
+                    for (std::size_t i = slots.size(); i-- > 0;) {
+                        if (slots[i].result != nullptr || !slots[i].start->tool_use_id.empty()) {
+                            continue;
+                        }
+                        if (!fallback.has_value()) {
+                            fallback = i;
+                        }
+                        if (slots[i].start->tool_name == event.tool_name) {
+                            same_name = i;
+                            break;
+                        }
+                    }
+                    if (same_name.has_value()) {
+                        slots[*same_name].result = &event;
+                        break;
+                    }
+                    if (fallback.has_value()) {
+                        slots[*fallback].result = &event;
+                        break;
+                    }
+                }
+                orphan_results.push_back(&event);
+                break;
+            }
+            default:
+                break;
+        }
+    }
+
+    // 旧账兼容投影的明账(P2):缺稳定 id 的账面顶部标明,不悄悄猜。
+    if (legacy_account) {
+        lubancode::cli::SessionBlock block;
+        block.kind = lubancode::cli::SessionBlock::Kind::Notice;
+        block.line = theme.stats + tr("agent_panel.legacy_unstructured") + theme.reset;
+        block.role = lubancode::cli::BlockRole::SystemNotice;
+        blocks.push_back(std::move(block));
+    }
+
+    // ---- 第二遍:按事件顺序铺块 ------------------------------------------
+    std::vector<const AgentTaskEvent*> orphan_remaining = orphan_results;
+    std::optional<std::string> last_tool_step;  // 上一枚已铺工具的 step(轻间隔)
+    for (const auto& event : events) {
+        switch (event.kind) {
+            case AgentTaskEventKind::UserMessage:
+                push_markdown_block(theme.confirm + "> " + tr("cmd.resume.history.user") + theme.reset, event.text,
+                                    lubancode::cli::BlockRole::UserPrompt);
+                break;
+            case AgentTaskEventKind::SteeringMessage:
+                push_markdown_block(theme.confirm + "> " + tr("agent_panel.event_steering") + theme.reset,
+                                    event.text, lubancode::cli::BlockRole::SystemNotice);
+                break;
+            case AgentTaskEventKind::AssistantText:
+                // 流式正文尾巴(追加需求):查看态就是这只代理此刻的实时会话
+                // ——已流出的正文按渲染版铺开,重铺拍自然带出增量。
+                push_markdown_block(theme.banner + "● " + tr("cmd.resume.history.assistant") + theme.reset,
+                                    event.text, lubancode::cli::BlockRole::AssistantText);
+                break;
+            case AgentTaskEventKind::AssistantReasoning:
+                // 流式思考尾巴(追加需求"查看态实时思考流"):工厂折成与 main
+                // 流式思考同款折叠规矩的条目——Running 头行「思考中 · N 字」
+                // 随重铺拍跳动;展开档交给整组 formatter 的同一颗开关(与
+                // 工具卡同步受 Ctrl+O 统管,同构渲染单 P0)。
+                pending_items.push_back(
+                    lubancode::cli::MakeAgentTaskThinkingItem(next_item_id++, event.text, event.streaming));
+                break;
+            case AgentTaskEventKind::ToolStart: {
+                const auto found = slot_of_start.find(&event);
+                if (found == slot_of_start.end()) {
+                    break;
+                }
+                const ToolSlot& slot = slots[found->second];
+                // step 换拍:轻间隔——冲组,块间空白由 GapBetween 垫(与 Main
+                // 的 RenderTurnView 同一口气)。旧账没有 step 号,不冲。
+                if (!slot.start->step_id.empty() && last_tool_step.has_value() &&
+                    *last_tool_step != slot.start->step_id) {
+                    flush_items();
+                }
+                last_tool_step = slot.start->step_id;
+                pending_items.push_back(tool_item(*slot.start, slot.result));
+                break;
+            }
+            case AgentTaskEventKind::ToolResult: {
+                // 只有配上 start 的 result 在这里铺(卡的 start 位置已铺);
+                // 孤儿 result(没配上 start 的迟到/旧账边缘)单画一张只有
+                // 结果的卡,不吞。
+                for (std::size_t i = 0; i < orphan_remaining.size(); ++i) {
+                    if (orphan_remaining[i] == &event) {
+                        lubancode::tools::AgentTaskEvent pseudo = event;
+                        pseudo.input_json.clear();
+                        pending_items.push_back(tool_item(pseudo, &event));
+                        orphan_remaining.erase(orphan_remaining.begin() +
+                                               static_cast<std::ptrdiff_t>(i));
+                        break;
+                    }
+                }
+                break;
+            }
+            case AgentTaskEventKind::CompactCheckpoint:
+                push_notice_block(theme.stats + tr("cmd.resume.history.compact") + theme.reset,
+                                  lubancode::cli::BlockRole::SystemNotice);
+                break;
+            case AgentTaskEventKind::Completion:
+                push_markdown_block(theme.banner + "✓ " + tr("agent_status.state_done") + theme.reset, event.text,
+                                    lubancode::cli::BlockRole::TurnFooter);
+                break;
+            case AgentTaskEventKind::Failure:
+                push_markdown_block(theme.error + "× " + tr("agent_panel.event_failed") + theme.reset, event.text,
+                                    lubancode::cli::BlockRole::TurnFooter);
+                break;
+        }
+    }
+    flush_items();
+    return blocks;
 }
 
 }  // namespace lubancode::app
