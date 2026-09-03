@@ -1362,6 +1362,59 @@ TEST_CASE("后台子代理的 needs_confirm 工具被拒:当场入通知账,拒�
     CHECK(gated_ptr->call_count == 0);
 }
 
+// 后台权限合同钉死(后台代理管控三连 bug 单,Bug A 验收原文):needs_confirm
+// =false 的只读工具(read_file/search 一族)在后台子代理里零拒绝、零拒绝
+// 通知——判定路只拦 needs_confirm=true 且未预放行的。真机实录里"read_file
+// 全被拒"的观感来自监督提醒顶着权限拒绝标题连刷(渲染张冠李戴,Bug A 主
+// 修),判定路本身放行;这条护栏防将来有人把 DontAsk 档扩成无差别拒绝。
+TEST_CASE("后台子代理权限合同:needs_confirm=false 工具零拒绝零通知") {
+    FakeBackend foreground_backend;
+    tools::ToolRegistry sub_registry;
+    // needs_confirm=false 的只读工具(与 read_file/search 同档),外加一只
+    // 账外的需确认工具作对照——同一任务里,只读直跑,需确认照拒。
+    auto* read_ptr = new FakeTool("read_file", tools::Tool::Result{"读到了", false}, /*needs_confirm=*/false);
+    auto* search_ptr = new FakeTool("search", tools::Tool::Result{"搜到了", false}, /*needs_confirm=*/false);
+    auto* write_ptr = new FakeTool("write_file", tools::Tool::Result{"写了", false}, /*needs_confirm=*/true);
+    sub_registry.Register(std::unique_ptr<FakeTool>(read_ptr));
+    sub_registry.Register(std::unique_ptr<FakeTool>(search_ptr));
+    sub_registry.Register(std::unique_ptr<FakeTool>(write_ptr));
+
+    auto backend = std::make_unique<FakeBackend>();
+    backend->scripts = {
+        ToolUseScript("toolu_read", "read_file"),
+        ToolUseScript("toolu_search", "search"),
+        ToolUseScript("toolu_write", "write_file"),
+        TextOnlyScript("收工:读搜成了,写被拒"),
+    };
+    tools::AgentTool agent_tool(foreground_backend, sub_registry, "/work/dir");
+    agent_tool.SetDetachedBackendFactory([&backend]() {
+        tools::DetachedAgentBackend detached;
+        detached.backend = std::move(backend);
+        return detached;
+    });
+
+    REQUIRE_FALSE(agent_tool
+                      .execute(nlohmann::json{{"title", "读搜写"}, {"prompt", "读两个搜一个写一个"},
+                                              {"run_in_background", true}})
+                      .is_error);
+    for (int i = 0; i < 300 && agent_tool.HasRunningTasks(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    REQUIRE_FALSE(agent_tool.HasRunningTasks());
+
+    // 只读工具真执行了——零拒绝。
+    CHECK(read_ptr->call_count == 1);
+    CHECK(search_ptr->call_count == 1);
+    // 需确认工具照拒(没执行)。
+    CHECK(write_ptr->call_count == 0);
+    // 拒绝通知只落在 needs_confirm 那笔上,只读的零通知。
+    const std::vector<std::string> notices = agent_tool.TakePermissionDenialNotices();
+    REQUIRE(notices.size() == 1);
+    CHECK(notices[0].find("write_file") != std::string::npos);
+    CHECK(notices[0].find("read_file") == std::string::npos);
+    CHECK(notices[0].find("search") == std::string::npos);
+}
+
 // 修"后台审批不查放行账"(2026-08):主会话的"总是允许"账(settings.local
 // 的 allow_tools + 会话内按 a 落的集合)以快照传入后台任务,审批回调先查
 // 账再问钩子。钉三态:账上工具免问放行、账外照拒、账是派出时刻的定格。

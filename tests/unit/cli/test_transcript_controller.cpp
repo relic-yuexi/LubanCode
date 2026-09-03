@@ -1,12 +1,14 @@
 // transcript 控制器(终端接线收尾单)的合同测试:焦点导航、查看态进出、
 // 轮次导航、空账本口径。输出经 TerminalPort 捕获,不污染测试台。
 
+#include <chrono>
 #include <sstream>
 #include <vector>
 
 #include <doctest/doctest.h>
 
 #include "api/types.hpp"
+#include "cli/console_input.hpp"  // PanelSessionSlot/CurrentAgentViewedTaskId(查看态 Esc 兜底测试)
 #include "cli/terminal_port.hpp"
 #include "cli/transcript_controller.hpp"
 
@@ -151,5 +153,60 @@ TEST_CASE("TranscriptUiController:查看态视口构建走钩子") {
     controller.SetHooks(std::move(hooks));
     controller.PrintViewedTranscript(7);
     REQUIRE(out.str().find("任务7 第80列") != std::string::npos);
+    lubancode::cli::TermPort().Reset();
+}
+
+// ---------------------------------------------------------------------------
+// 后台通知标题分家(后台代理管控三连 bug 单,Bug A):权限拒绝与监督提醒
+// 各挂各的标题,不许张冠李戴。真机实录:三只后台代理工具全放行,监督器
+// 的提醒 toast 却顶着"权限未放行已拒"的标题连刷五条,用户读成全线被拒。
+// tr 查不到 key 回退 key 原文——断言"key 必须解析成真文案"在旧码
+// (没有 supervisor 标题键)上必红。
+// ---------------------------------------------------------------------------
+TEST_CASE("后台通知标题分家:权限拒绝与监督提醒各挂各的标题") {
+    const std::string denial = lubancode::cli::BackgroundNoticeTitle(/*permission_denial=*/true);
+    const std::string supervisor = lubancode::cli::BackgroundNoticeTitle(/*permission_denial=*/false);
+    // 两枚 key 都得有真文案(回退 key 原文 = 缺文案,红)。
+    CHECK(denial != "agent_panel.denial_notice_title");
+    CHECK(supervisor != "agent_panel.supervisor_notice_title");
+    // 张冠李戴的病灶形态就是"两类同文"——必须分家。
+    CHECK(denial != supervisor);
+    CHECK(denial.find("权限") != std::string::npos);
+}
+
+// ---------------------------------------------------------------------------
+// 查看态 Esc 兜底(后台代理管控三连 bug 单,Bug C):Esc 流到
+// TranscriptUiController 时,查看态必须一击退出回 main。旧码 Escape 分支
+// 只认 Ctrl+E 聚焦查看与 loop 急停,查看态(Enter 进的 agent view)零处理
+// ——Esc 落回编辑器老语义(清空),composer 本就空,屏上无响应,用户困在
+// 查看页。
+// ---------------------------------------------------------------------------
+TEST_CASE("TranscriptUiController:查看态 Esc 一击退出回 main") {
+    const lubancode::cli::Theme theme;
+    std::ostringstream out;
+    auto controller = MakeController(out, theme);
+
+    // 前置:面板状态机进 #2 的查看态(Down 聚焦选中 → Enter 查看)。
+    lubancode::cli::PanelSessionSlot().Reset();
+    const std::vector<int> ids{2, 3};
+    const auto now = std::chrono::steady_clock::now();
+    const auto focus = lubancode::cli::PanelSessionSlot().HandleKey(lubancode::cli::PanelKey::Down, ids,
+                                                                    /*composer_empty=*/true, now);
+    REQUIRE(focus.consumed);
+    const auto enter = lubancode::cli::PanelSessionSlot().HandleKey(lubancode::cli::PanelKey::EnterView, ids,
+                                                                    /*composer_empty=*/true, now);
+    REQUIRE(enter.consumed);
+    REQUIRE(lubancode::cli::CurrentAgentViewedTaskId() == 2);
+
+    // Esc:查看态一击退出(旧码 return false,红)。
+    REQUIRE(controller.HandleKey(lubancode::cli::UiKeyAction::Escape));
+    CHECK(lubancode::cli::CurrentAgentViewedTaskId() == 0);
+    CHECK(out.str().find("已回主会话") != std::string::npos);
+
+    // 退出后再按 Esc:不再是查看态,落回既有语义(loop 急停钩子没装 → 不消费,
+    // 编辑器老语义不动)。
+    CHECK_FALSE(controller.HandleKey(lubancode::cli::UiKeyAction::Escape));
+
+    lubancode::cli::PanelSessionSlot().Reset();
     lubancode::cli::TermPort().Reset();
 }

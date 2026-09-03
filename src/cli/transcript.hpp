@@ -296,6 +296,12 @@ int CountUtf8Codepoints(const std::string& text);
 TranscriptItem MakeNoticeItem(int id, const std::string& title, TranscriptStatus status,
                               std::vector<std::string> summary_lines);
 
+// 后台通知的双标题归类(后台代理管控三连 bug 单,Bug A):权限拒绝与监督
+// 提醒各有各的标题,不许张冠李戴——监督提醒(疑似断流/空转/恢复/工具
+// 静默)若顶着"权限未放行"的标题,用户会把工具全放行的健康代理读成
+// 全线被拒(真机实录:五条监督 toast 全被读成权限拒绝连刷)。
+std::string BackgroundNoticeTitle(bool permission_denial);
+
 // 静默档正文归档条目(查看态回流轮):正文全文入库,头两行各 120 码点
 // 折成紧凑档摘要(渲染层还会按终端宽再截)。
 TranscriptItem MakeAssistantArchiveItem(int id, std::string body, TranscriptStatus status);

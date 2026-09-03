@@ -167,6 +167,20 @@ bool TranscriptUiController::HandleKey(UiKeyAction action) {
             return true;
         }
         case UiKeyAction::Escape: {
+            // 查看态 Esc(后台代理管控三连 bug 单,Bug C):面板键缝
+            // (MapToPanelKey→AgentBack→面板状态机)是主路,但 Esc 流到这层
+            // 时必须有兜底——键缝因改绑/修饰匹配不上/流式守卫未过而放行时,
+            // Esc 落进编辑器老语义(清空 composer),composer 本就空 → 屏上
+            // 无响应,用户困在查看页。这里先认查看态:状态机整份收干净,
+            // 视口换源交给既有机制(空闲路 100ms 拍的"viewed 翻 0"分支、
+            // 流式路 sync_agent_panel_view 的对账拍都会自动重铺 main 帧),
+            // 不在控制器里另立第二本屏幕账。
+            if (CurrentAgentViewedTaskId() != 0) {
+                ResetAgentPanelSession();
+                TermOut() << "\n" << theme_.stats << tr("agent_panel.back_to_main") << theme_.reset << "\n";
+                TermOut().flush();
+                return true;
+            }
             if (focus_view_active_) {
                 focus_view_active_ = false;
                 TermOut() << "\n" << theme_.stats << tr("ui.back") << theme_.reset << "\n";

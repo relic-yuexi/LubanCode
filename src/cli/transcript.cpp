@@ -926,6 +926,11 @@ TranscriptItem MakeNoticeItem(int id, const std::string& title, TranscriptStatus
     return item;
 }
 
+std::string BackgroundNoticeTitle(bool permission_denial) {
+    return permission_denial ? tr("agent_panel.denial_notice_title")
+                             : tr("agent_panel.supervisor_notice_title");
+}
+
 TranscriptItem MakeAssistantArchiveItem(int id, std::string body, TranscriptStatus status) {
     TranscriptItem item;
     item.id = id;

@@ -782,29 +782,34 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
     // 台账;空闲 composer 的 100ms 拍在这里取走——导航坞 toast 一枚(几秒
     // 自收)+ transcript 记一条有归属的事件,用户当拍看见,不攒到最终报告。
     // 只落 toast 与台账,不打裸行:不打断 composer,查看态零扰动。
+    // 标题分家(后台代理管控三连 bug 单,Bug A):权限拒绝与监督提醒各挂
+    // 各的标题——监督提醒(疑似断流/空转/工具静默)若顶着"权限未放行"
+    // 的标题,工具全放行的健康代理会被读成全线被拒(真机实录)。
     lubancode::cli::SetBackgroundNoticeHook([this]() {
         if (session_agent_tool() == nullptr) {
             return;
         }
-        std::vector<std::string> notices = session_agent_tool()->TakePermissionDenialNotices();
-        // 监督器通知(监督器单 P0-2):同一枚空闲拍取走,同一条 toast +
-        // transcript 通路——疑似断流/空转提醒/恢复成功按 task+epoch+reason
-        // 去重过,不会每拍刷屏(单子 §十)。
+        const std::vector<std::string> denial_notices = session_agent_tool()->TakePermissionDenialNotices();
+        // 监督器通知(监督器单 P0-2):同一枚空闲拍取走,toast + transcript
+        // 通路与权限拒绝共用——疑似断流/空转提醒/恢复成功按 task+epoch+
+        // reason 去重过,不会每拍刷屏(单子 §十)。标题走监督那枚。
         const std::vector<std::string> supervisor_notices = session_agent_tool()->TakeSupervisorNotices();
-        for (const std::string& notice : supervisor_notices) {
-            if (std::find(notices.begin(), notices.end(), notice) == notices.end()) {
-                notices.push_back(notice);
-            }
-        }
-        if (notices.empty()) {
+        if (denial_notices.empty() && supervisor_notices.empty()) {
             return;
         }
-        for (const std::string& notice : notices) {
+        const auto emit_notice = [this](const std::string& notice, bool permission_denial) {
             lubancode::cli::ShowPanelToast(notice);
             auto& transcript = transcript_ui_.items();
             transcript.push_back(lubancode::cli::MakeNoticeItem(
-                static_cast<int>(transcript.size()) + 1, tr("agent_panel.denial_notice_title"),
+                static_cast<int>(transcript.size()) + 1,
+                lubancode::cli::BackgroundNoticeTitle(permission_denial),
                 lubancode::cli::TranscriptStatus::Error, {notice}));
+        };
+        for (const std::string& notice : denial_notices) {
+            emit_notice(notice, /*permission_denial=*/true);
+        }
+        for (const std::string& notice : supervisor_notices) {
+            emit_notice(notice, /*permission_denial=*/false);
         }
     });
 
