@@ -473,10 +473,17 @@ std::string BuildComposerModeLine(const BoxChrome& chrome, int skill_count, int 
     return colored_left + std::string(static_cast<std::size_t>(spaces), ' ') + theme.stats + right + theme.reset;
 }
 
-// 状态行:模式段按档配色(确认=默认色、auto=stats、yolo=error),信息段
-// 恒 stats 淡色。0.21.x 起状态行是档位的唯一去处(提示符不再带前缀)。文本拼装是
-// cli/format_utils 的纯函数,这里只管配色和按控制台宽度分段截断(截断得
-// 按段做——夹着 ANSI 的整行没法安全截)。
+// 正式资料行构造器(收口审计单 §二 P0):输入框下横线之下那行完整状态
+// 资料。0.26.181 起模式行(BuildComposerModeLine)接管输入区上方后,这只
+// 函数曾失了全部生产调用,数据照采、纯函数照测、真底栏不画——如今恢复
+// 为两路(空闲 composer/流式 footer)组帧前的正式生产调用。合同:
+//   - 审批档从资料行剥出(permission_mode 段恒不画,档位语义归模式行独占,
+//     items 里给了也剥);其余段按 status_panel.items 的次序与折叠规则画。
+//   - 数据只认 StatusDataSlot 那一份活账(SetStatusLineData 整份重建 +
+//     UpdateStatusLineContext 局部更新),与模式行同一份快照投影。
+//   - 宽度不够先从左边收工作目录(保住末级目录与它后面的分支),还不够才
+//     按用户给的字段顺序从行尾截。文本拼装是 cli/format_utils 的纯函数,
+//     这里只管配色与分段截断(夹着 ANSI 的整行没法安全截)。
 std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
     const Theme& theme = *chrome.theme;
     const StatusLineData& data = StatusDataSlot();
@@ -487,19 +494,32 @@ std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
     if (const auto& provider = BackgroundStatusProviderSlot()) {
         values.background = provider();
     }
-    auto segments = BuildStatusPanelSegments(data.items, chrome.mode, values);
+    std::vector<StatusPanelSegment> segments =
+        BuildStatusPanelSegments(data.items, chrome.mode, values);
+    // permission_mode 恒剥出:模式行(BuildComposerModeLine)独占档位语义,
+    // 资料行不再画第二份(档位改一处、两行同拍,不各造一套状态模型)。
+    std::vector<StatusPanelSegment> info;
+    info.reserve(segments.size());
+    for (auto& segment : segments) {
+        if (segment.key != "permission_mode") {
+            info.push_back(std::move(segment));
+        }
+    }
+    if (info.empty()) {
+        return {};  // 一段资料都没有(未设数据源):整行不画,不留空行
+    }
 
     // 宽度不够时先从左边收工作目录，保住项目末级目录与它后面的分支；
     // 还不够才按用户给的字段顺序从行尾截。
     int total_width = 0;
-    for (std::size_t i = 0; i < segments.size(); ++i) {
+    for (std::size_t i = 0; i < info.size(); ++i) {
         if (i > 0) {
             total_width += static_cast<int>(DisplayWidthUtf8(data.separator));
         }
-        total_width += static_cast<int>(DisplayWidthUtf8(segments[i].text));
+        total_width += static_cast<int>(DisplayWidthUtf8(info[i].text));
     }
     if (total_width > max_width) {
-        for (auto& segment : segments) {
+        for (auto& segment : info) {
             if (segment.key != "cwd") {
                 continue;
             }
@@ -513,7 +533,7 @@ std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
     int remaining = max_width;
     bool emitted = false;
     std::string line;
-    for (const auto& segment : segments) {
+    for (const auto& segment : info) {
         if (remaining <= 0) {
             break;
         }
@@ -527,15 +547,7 @@ std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
         }
         const std::string text = TruncateUtf8ToDisplayWidth(segment.text, remaining);
         std::string color = theme.stats;
-        if (segment.key == "permission_mode") {
-            switch (PresentApprovalMode(chrome.mode).color_role) {
-                case ModeColorRole::Default: color.clear(); break;
-                case ModeColorRole::AcceptEdits: color = theme.mode_accept_edits; break;
-                case ModeColorRole::Yolo: color = theme.mode_yolo; break;
-                case ModeColorRole::Auto: color = theme.mode_auto; break;
-                case ModeColorRole::DontAsk: color = theme.mode_dont_ask; break;
-            }
-        } else if (segment.key == "model") {
+        if (segment.key == "model") {
             color = theme.tool_line;
         } else if (segment.key == "cwd") {
             color = theme.prompt;
@@ -547,6 +559,76 @@ std::string BuildStatusLine(const BoxChrome& chrome, int max_width) {
         emitted = true;
     }
     return line;
+}
+
+// 空 composer 的左右槽速览行(收口审计单 §二 P1):左槽常用键(keymap
+// 反查,用户改绑跟脚),右槽帮助入口——只认 ChordFor(HelpShow),无绑定
+// 整段不画。Busy 场景没有帮助层,也没有搜索/外部编辑器这些键,装配器不
+// 置速览行(是否显示由场景决定,不再由 input.shortcuts_hint 硬补)。只在
+// 空闲主线程调(ActiveKeymap 的读侧纪律见 keymap.hpp)。
+ChromeAssistRow BuildComposerAssistRow() {
+    ChromeAssistRow row;
+    const keymap::Keymap& km = keymap::ActiveKeymap();
+    // 左槽常用键走唯一的 BuildKeyHints 格式化口(收口审计单 §二 P2):改绑
+    // 跟脚、未绑定整段略过、和弦与分隔符只有一把尺。
+    row.left = keymap::BuildKeyHints(km, {{keymap::ActionId::ChatSearchHistory, "hint.keys.search_history"},
+                                          {keymap::ActionId::TranscriptToggleExpand, "hint.keys.expand"},
+                                          {keymap::ActionId::ChatExternalEditor, "hint.keys.editor"}});
+    if (const auto help = km.ChordFor(keymap::ActionId::HelpShow); help.has_value()) {
+        row.right = keymap::FormatKeyChord(*help) + " " + tr("hint.keys.help");
+    }
+    return row;
+}
+
+// 唯一的底栏模型装配口(收口审计单 §二 P1):空闲 composer 与流式 footer
+// 从同一份场景差量组 BottomChromeModel。归槽只写一次:模式行+资料行从
+// 同一份 StatusDataSlot 活账投影、mode notice 读共享槽、速览行只在
+// Idle 且空 composer 且无面板时自置、菜单行直落 transient 槽——两条路
+// 不再各拼一遍,忙闲不会各搬一半。
+BottomChromeModel BuildBottomChromeModel(const BottomChromeScene& scene) {
+    BottomChromeModel model;
+    model.framed = scene.framed;
+    const bool composer_empty = scene.editor.lines.empty() ||
+                                (scene.editor.lines.size() == 1 && scene.editor.lines[0].empty());
+    const bool menus_open = !scene.menu_rows.empty() || !scene.editor.hint_lines.empty();
+    if (scene.help_visible && composer_empty && scene.mode == ComposerMode::Idle) {
+        // 帮助层垫帧最顶:行内容出自 keymap(表头带实际和弦),只属空
+        // composer——草稿一有正文就不进帧。Busy 场景没有帮助层。
+        model.help_rows = keymap::BuildSceneHelpLines(keymap::ActiveKeymap());
+    }
+    model.activity_rows = scene.activity_rows;
+    model.queue_rows = scene.queue_rows;
+    model.agent_dock_rows = scene.dock_rows;
+    model.agent_dock_tints = scene.dock_tints;
+    if (const auto notice_mode = ModeNoticeSlot().VisibleMode(); notice_mode.has_value()) {
+        model.mode_notice_rows = {PresentApprovalMode(*notice_mode).notice};
+    }
+    if (scene.mode == ComposerMode::Idle && scene.framed && composer_empty && !menus_open) {
+        // 速览行(ShortcutAssist)只在空闲、空 composer、无面板时出现;面板
+        // (搜索/提及/slash)开着时由菜单行接管提示位,不叠速览。Busy 场景
+        // 没有帮助层与这些快捷键,不置速览行——是否显示由场景决定。
+        model.assist_row = BuildComposerAssistRow();
+    }
+    model.transient_rows = scene.menu_rows;
+    model.rule_tag = scene.rule_tag;
+    model.selected_task_id = scene.selected_task_id;
+    model.composer.editor = scene.editor;
+    model.composer.prompt = scene.prompt;
+    model.composer.placeholder = scene.placeholder;
+    model.composer.mode = scene.mode;
+    model.composer.confirm_mode = SharedEditor().confirm_mode();
+    if (scene.framed) {
+        static const Theme kDefaultTheme{};
+        const Theme& theme = scene.theme != nullptr ? *scene.theme : kDefaultTheme;
+        const BoxChrome chrome{true, &theme, model.composer.confirm_mode};
+        const int row_width = (std::max)(0, scene.width - 1);
+        model.status_rows = {BuildComposerModeLine(chrome, static_cast<int>(SessionSkillCount()),
+                                                   row_width)};
+        if (const std::string info_row = BuildStatusLine(chrome, row_width); !info_row.empty()) {
+            model.data_rows = {std::move(info_row)};
+        }
+    }
+    return model;
 }
 
 void PaintInlineFrameLegacy(const InlineFrame* previous, const InlineFrame& next,

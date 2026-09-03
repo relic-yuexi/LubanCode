@@ -872,3 +872,58 @@ TEST_CASE("帧 diff:面板收走时旧行被清,不留残骸") {
     CHECK(stats.emitted);
     CHECK(stats.changed_rows >= 1);  // 第 0 行(agent)必须被清
 }
+
+// ---------------------------------------------------------------------------
+// 提示行翻译 key 的重复合并(收口审计单 §二 P3):agent_panel.hint_short 与
+// stream_hint_short、hint_idle_expanded 与 stream_hint_idle_expanded 两对
+// 中英文完全相同——按 streaming 选 key 的分支无意义,合并成一只 key。
+// focused 文案含"返回"与"逐层退出"差别,语义确实不同,保留独立断言。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("提示行矩阵:字节相同的一对合并;退出层级不同的一对保留") {
+    SetLanguage("zh-CN");
+    const auto running = MakeAgents(1);
+    const auto idle_many = MakeIdleAgents(6);  // >3 只闲置:导航表出汇总哨兵(下标 4)
+
+    // 窄屏(<90 列)未聚焦:hint_short 一格——忙闲同一句。
+    const auto narrow_idle = RenderAgentDockLines(
+        LayoutAgentDock(running, 0, false, 0, 0, 60, false, /*streaming=*/false, false), 60);
+    const auto narrow_stream = RenderAgentDockLines(
+        LayoutAgentDock(running, 0, false, 0, 0, 60, false, /*streaming=*/true, false), 60);
+    CHECK(narrow_idle[0] == narrow_stream[0]);
+
+    // 聚焦在闲置汇总哨兵上:hint_idle_expanded 一格——忙闲同一句。
+    const auto expanded_idle = RenderAgentDockLines(
+        LayoutAgentDock(idle_many, 4, true, 0, 0, 100, false, /*streaming=*/false, false), 100);
+    const auto expanded_stream = RenderAgentDockLines(
+        LayoutAgentDock(idle_many, 4, true, 0, 0, 100, false, /*streaming=*/true, false), 100);
+    CHECK(expanded_idle[0] == expanded_stream[0]);
+
+    // focused 宽屏:"Esc 返回"与"Esc 逐层退出"语义不同——不合并,忙闲有别。
+    const auto focused_idle = RenderAgentDockLines(
+        LayoutAgentDock(running, 1, true, 0, 0, 100, false, /*streaming=*/false, false), 100);
+    const auto focused_stream = RenderAgentDockLines(
+        LayoutAgentDock(running, 1, true, 0, 0, 100, false, /*streaming=*/true, false), 100);
+    CHECK(focused_idle[0] != focused_stream[0]);
+    CHECK(Contains(focused_idle[0], "Esc 返回"));
+    CHECK(Contains(focused_stream[0], "Esc 逐层退出"));
+
+    // 英文表同款:相同的一对合并、不同的一对有别。
+    SetLanguage("en");
+    const auto en_narrow_idle = RenderAgentDockLines(
+        LayoutAgentDock(running, 0, false, 0, 0, 60, false, false, false), 60);
+    const auto en_narrow_stream = RenderAgentDockLines(
+        LayoutAgentDock(running, 0, false, 0, 0, 60, false, true, false), 60);
+    CHECK(en_narrow_idle[0] == en_narrow_stream[0]);
+    const auto en_focused_idle = RenderAgentDockLines(
+        LayoutAgentDock(running, 1, true, 0, 0, 100, false, false, false), 100);
+    const auto en_focused_stream = RenderAgentDockLines(
+        LayoutAgentDock(running, 1, true, 0, 0, 100, false, true, false), 100);
+    CHECK(en_focused_idle[0] != en_focused_stream[0]);
+
+    // 重复的 stream_* 翻译 key 已删:tr 查不到回退 key 本身,不留孤尾。
+    CHECK(tr("agent_panel.stream_hint_short") == "agent_panel.stream_hint_short");
+    CHECK(tr("agent_panel.stream_hint_idle_expanded") ==
+          "agent_panel.stream_hint_idle_expanded");
+    SetLanguage("zh-CN");
+}

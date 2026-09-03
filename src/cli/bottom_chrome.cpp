@@ -27,8 +27,8 @@ std::string BottomChromeFingerprint(const BottomChromeFrame& frame) {
         value += row + "\n";
     }
     value += "k:";
-    for (const auto& row : frame.shortcut_rows) {
-        value += row + "\n";
+    if (!frame.assist_row.empty()) {
+        value += "L:" + frame.assist_row.left + "\nR:" + frame.assist_row.right + "\n";
     }
     value += "c:" + std::to_string(frame.composer_rows) + "\n";
     value += "e:" + frame.composer_digest + "\n";
@@ -38,6 +38,10 @@ std::string BottomChromeFingerprint(const BottomChromeFrame& frame) {
     }
     value += "n:";
     for (const auto& row : frame.mode_notice_rows) {
+        value += row + "\n";
+    }
+    value += "i:";
+    for (const auto& row : frame.data_rows) {
         value += row + "\n";
     }
     value += "t:";
@@ -153,6 +157,29 @@ std::string BuildComposerDigest(const ComposerViewModel& composer) {
     return digest;
 }
 
+// 左右槽速览行的整行拼装(收口审计单 §二 P1):几何与 BuildComposerModeLine
+// 同一把尺——右槽右对齐到 width-1(模式行的 skills 也停在同一列),右端
+// 信息优先保留;右槽放不下时整行只剩右槽;左槽超宽从尾截,左槽空时右槽
+// 仍右对齐。左右都空则由调用方整行不画。
+std::string ComposeAssistRowText(const ChromeAssistRow& assist, int width) {
+    const int limit = (std::max)(0, width - 1);  // 末列不写字(锚点铁律)
+    if (assist.right.empty()) {
+        return TruncateUtf8ToDisplayWidth(assist.left, limit);
+    }
+    const int right_width = static_cast<int>(DisplayWidthUtf8(assist.right));
+    if (right_width >= limit) {
+        return TruncateUtf8ToDisplayWidth(assist.right, limit);
+    }
+    const int gap = 2;
+    const int left_room = (std::max)(0, limit - right_width - gap);
+    const std::string left = TruncateUtf8ToDisplayWidth(assist.left, left_room);
+    const int left_width = static_cast<int>(DisplayWidthUtf8(left));
+    // 右槽右对齐到 limit;左槽共存时被截在 gap 之内,间隔至少两格;左槽
+    // 空时剩的格子全作左垫,右槽仍钉右缘。
+    const int spaces = (std::max)(0, limit - left_width - right_width);
+    return left + std::string(static_cast<std::size_t>(spaces), ' ') + assist.right;
+}
+
 }  // namespace
 
 bool HelpOverlayNext(bool visible, HelpOverlayEvent event) {
@@ -192,16 +219,18 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             : 0;
 
     // ---- 高度预算钳制(终端画面隔网单·战术二):"输入行必画得下"的硬约束 ----
-    // 可选行(帮助/活动条/队列/快捷键/坞/提示)按 transient -> dock ->
-    // shortcut -> queue -> activity -> help 的次序舍(即保的优先级相反:帮助层是用户刚显式要
-    // 的,最保、最后舍;舍时保头——表头写着怎么收,丢了头用户就找不到门,
-    // 装不下全表即面板内截断);可选行全舍了还装不下,composer 的物理行围
-    // 光标开窗——窗口尾部贴光标,保底一行,留白跟着免掉。0 = 不限(单测
-    // 与无终端环境的老行为)。
+    // 可选行(帮助/活动条/队列/速览/资料/坞/提示)按 transient -> dock ->
+    // assist -> data -> queue -> activity -> help 的次序舍(即保的优先级相反:
+    // 帮助层是用户刚显式要的,最保、最后舍;资料行(model/context/tokens 这类
+    // 会话活账)比速览行更保一步——高度紧张时先舍速览再舍资料;舍时保头
+    // ——表头写着怎么收,丢了头用户就找不到门,装不下全表即面板内截断);
+    // 可选行全舍了还装不下,composer 的物理行围光标开窗——窗口尾部贴光标,
+    // 保底一行,留白跟着免掉。0 = 不限(单测与无终端环境的老行为)。
     std::size_t help_count = model.help_rows.size();
     std::size_t activity_count = model.activity_rows.size();
     std::size_t queue_count = model.queue_rows.size();
-    std::size_t shortcut_count = model.shortcut_rows.size();
+    std::size_t assist_count = model.assist_row.empty() ? 0 : 1;
+    std::size_t data_count = model.data_rows.size();
     std::size_t dock_count = model.agent_dock_rows.size();
     std::size_t notice_count = (std::min)(std::size_t{1}, model.mode_notice_rows.size());
     std::size_t transient_count = model.transient_rows.size();
@@ -229,7 +258,8 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             help_count = take(model.help_rows.size());
             activity_count = take(model.activity_rows.size());
             queue_count = take(model.queue_rows.size());
-            shortcut_count = take(model.shortcut_rows.size());
+            data_count = take(model.data_rows.size());
+            assist_count = take(model.assist_row.empty() ? 0 : 1);
             dock_count = take(model.agent_dock_rows.size());
             transient_count = take(model.transient_rows.size());
         } else {
@@ -239,7 +269,8 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             help_count = 0;
             activity_count = 0;
             queue_count = 0;
-            shortcut_count = 0;
+            assist_count = 0;
+            data_count = 0;
             dock_count = 0;
             notice_count = 0;
             transient_count = 0;
@@ -269,7 +300,8 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
             static_cast<int>(model.help_rows.size() - help_count +
                              model.activity_rows.size() - activity_count +
                              model.queue_rows.size() - queue_count +
-                             model.shortcut_rows.size() - shortcut_count +
+                             (model.assist_row.empty() ? 0 : 1) - assist_count +
+                             model.data_rows.size() - data_count +
                              model.agent_dock_rows.size() - dock_count +
                              model.mode_notice_rows.size() - notice_count +
                              model.transient_rows.size() - transient_count);
@@ -316,10 +348,11 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     for (std::size_t i = 0; i < queue_count; ++i) {
         push(false, tinted(model.queue_rows[i]));
     }
-    // 常用键速览只在空 composer 出现。slash/搜索/提及仍走 transient_rows
-    // 留在输入框下,两类提示不混位。
-    for (std::size_t i = 0; i < shortcut_count; ++i) {
-        push(false, tinted(model.shortcut_rows[i]));
+    // 左右槽速览行只在空 composer 出现(收口审计单 §二 P1):左槽常用键,
+    // 右槽帮助入口右对齐、与模式行右端 skills 同列。slash/搜索/提及等面板
+    // 仍走 transient_rows 留在输入框下,两类提示不混位。
+    if (assist_count > 0) {
+        push(false, tinted(ComposeAssistRowText(model.assist_row, width)));
     }
     // Shift+Tab 说明固定在常驻状态行紧上方，黄色且只取第一物理行。
     for (std::size_t i = 0; i < notice_count; ++i) {
@@ -370,6 +403,13 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     if (draw_rules) {
         push(true, BoxRuleLine(theme, width));
     }
+    // 资料行(收口审计单 §二 P0):输入框下横线之下、导航坞之上。与模式行
+    // 同一份 StatusPanelData 快照投影(模式行只保 permission_mode+skills)。
+    // 行自带主题色(与 status_rows 同款外包),窄屏作最后一道 ANSI 安全截断
+    // ——先从左边收 cwd、再按段截,组行层已经按段裁过,这里是兜底。
+    for (std::size_t i = 0; i < data_count; ++i) {
+        push(draw_rules, ClampAnsiRowToWidth(model.data_rows[i], width));
+    }
     for (std::size_t i = 0; i < dock_count; ++i) {
         push(false, dock_tint_of(i) + TruncateUtf8ToDisplayWidth(model.agent_dock_rows[i], width - 1) +
                         theme.reset);
@@ -401,10 +441,10 @@ BottomChromeLayout BuildBottomChromeLayout(const BottomChromeModel& model, const
     chrome.help_rows.assign(model.help_rows.begin(), model.help_rows.begin() + help_count);
     chrome.activity_rows.assign(model.activity_rows.begin(), model.activity_rows.begin() + activity_count);
     chrome.queue_rows.assign(model.queue_rows.begin(), model.queue_rows.begin() + queue_count);
-    chrome.shortcut_rows.assign(model.shortcut_rows.begin(),
-                                model.shortcut_rows.begin() + shortcut_count);
+    chrome.assist_row = assist_count > 0 ? model.assist_row : ChromeAssistRow{};
     chrome.mode_notice_rows.assign(model.mode_notice_rows.begin(),
                                    model.mode_notice_rows.begin() + notice_count);
+    chrome.data_rows.assign(model.data_rows.begin(), model.data_rows.begin() + data_count);
     chrome.agent_dock_rows.assign(model.agent_dock_rows.begin(),
                                   model.agent_dock_rows.begin() + dock_count);
     chrome.transient_rows.assign(model.transient_rows.begin(),

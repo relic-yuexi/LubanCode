@@ -17,6 +17,10 @@
 #include <vector>
 
 #include "cli/bottom_chrome.hpp"
+#include "cli/console_input.hpp"          // SetStatusLineData(资料行数据源)
+#include "cli/console_input_internal.hpp"  // BoxChrome/BuildComposerModeLine/BuildStatusLine
+#include "cli/i18n.hpp"
+#include "cli/keymap.hpp"  // ActiveKeymap/BuildSceneHelpLines(改绑跟脚合同)
 #include "cli/theme.hpp"
 
 using namespace lubancode::cli;
@@ -247,19 +251,154 @@ TEST_CASE("同源布局:golden——两逻辑行 + 中英混排,行序/padding/c
     CHECK(layout.chrome.TotalRows() == 5);
 }
 
-TEST_CASE("同源布局:快捷键提示独占 skills 上一行,临时候选仍留框下") {
+TEST_CASE("同源布局:速览行独占 skills 上一行,右槽与 skills 同列,临时候选仍留框下") {
     const Theme plain;
     BottomChromeModel model = FramedModel(ComposerState({U""}, 0, 0), ComposerMode::Idle);
-    model.shortcut_rows = {"? for shortcuts"};
+    model.assist_row.left = "Ctrl+R 搜历史 · Ctrl+O 展开/收起";
+    model.assist_row.right = "? 键位";
     model.status_rows = {"confirm                                      4 skills"};
     model.transient_rows = {"/help  show help"};
     const BottomChromeLayout layout = BuildBottomChromeLayout(model, plain, 60);
     REQUIRE(layout.frame.rows.size() == 6);
-    CHECK(layout.frame.rows[0].text == "? for shortcuts");
+    const std::string& assist_text = layout.frame.rows[0].text;
+    CHECK(assist_text.find("Ctrl+R 搜历史") == 0);  // 左槽钉左端
+    CHECK(assist_text.rfind("? 键位") == assist_text.size() - std::string("? 键位").size());
+    CHECK(DisplayWidthUtf8(assist_text) == 59);  // 满宽铺开(60 列末列留白)
     CHECK(layout.frame.rows[1].text.find("4 skills") != std::string::npos);
     CHECK(layout.frame.rows[2].text == PlainRule(60));
     CHECK(layout.composer_first_row == 3);
     CHECK(layout.frame.rows[5].text == "/help  show help");
+    // 右槽帮助入口与模式行右端 skills 同列(收口审计单 §二 P1):拿生产
+    // 模式行构造器(BuildComposerModeLine,同宽同右端)对表。
+    const auto right_edge = [](const std::string& row, const std::string& probe) {
+        const std::size_t at = row.find(probe);
+        REQUIRE(at != std::string::npos);
+        return DisplayWidthUtf8(row.substr(0, at + probe.size()));
+    };
+    const BoxChrome mode_chrome{true, &plain, ConfirmMode::Confirm};
+    const std::string mode_line = BuildComposerModeLine(mode_chrome, 4, 59);
+    CHECK(right_edge(assist_text, "? 键位") == right_edge(mode_line, "4 skills"));
+    // 指纹认速览行:左右槽任一变,指纹必变。
+    BottomChromeFrame changed = layout.chrome;
+    changed.assist_row.right = "? help";
+    CHECK(BottomChromeFingerprint(layout.chrome) != BottomChromeFingerprint(changed));
+    // 窄屏:左槽放不下时右槽仍钉右缘(8 列 = 右槽 6 列 + 1 格左垫);更窄时
+    // 右槽自身截断,显示宽不越界。
+    const auto narrow = BuildBottomChromeLayout(model, plain, 8);
+    CHECK(narrow.frame.rows[0].text == " ? 键位");
+    CHECK(DisplayWidthUtf8(BuildBottomChromeLayout(model, plain, 4).frame.rows[0].text) <=
+          static_cast<std::size_t>(3));
+}
+
+// ---------------------------------------------------------------------------
+// 资料行(收口审计单 §二 P0):完整状态资料画在输入框下横线之下、导航坞
+// 之上,与模式行(permission_mode+skills)同一份快照投影。0.26.181 的字段
+// 丢失正是"只测 formatter、不问最终帧"漏掉的——这里钉最终帧合同。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("资料行专位:下横线之下、坞之上;进指纹;忙闲同画") {
+    const Theme plain;
+    for (const ComposerMode mode : {ComposerMode::Idle, ComposerMode::BusyQueue}) {
+        CAPTURE(static_cast<int>(mode));
+        BottomChromeModel model = FramedModel(ComposerState({U"正文"}, 0, 2), mode);
+        model.status_rows = {"confirm mode                                4 skills"};
+        model.data_rows = {"model · cwd · branch · context 7% · 70/1000"};
+        model.agent_dock_rows = {"↑/↓ 选择", "● main"};
+        const BottomChromeLayout layout = BuildBottomChromeLayout(model, plain, 60);
+        // 行序:模式行 > 上横线 > 输入 > 下横线 > 资料行 > 坞。
+        REQUIRE(layout.frame.rows.size() == 7);
+        CHECK(layout.frame.rows[0].text.find("4 skills") != std::string::npos);
+        CHECK(layout.frame.rows[1].text == PlainRule(60));
+        CHECK(layout.frame.rows[2].text == "> 正文");
+        CHECK(layout.frame.rows[3].text == PlainRule(60));
+        CHECK(layout.frame.rows[4].text == "model · cwd · branch · context 7% · 70/1000");
+        CHECK(layout.frame.rows[5].text == "↑/↓ 选择");
+        CHECK(layout.frame.rows[6].text == "● main");
+        CHECK(layout.chrome.data_rows.size() == 1);
+        CHECK(layout.chrome.TotalRows() == 7);
+        CHECK(layout.chrome.AgentDockFirstRow() == 5);  // 数据行(下标4)之后
+        // 光标仍在输入区,资料行不挤光标。
+        CHECK(layout.cursor_row == layout.composer_first_row);
+    }
+    // 指纹认资料行:行内容变了指纹必变;与别区分区隔开,同文不误判相等。
+    BottomChromeFrame with_data;
+    with_data.data_rows = {"context 7%"};
+    BottomChromeFrame changed = with_data;
+    changed.data_rows[0] = "context 9%";
+    CHECK(BottomChromeFingerprint(with_data) != BottomChromeFingerprint(changed));
+    BottomChromeFrame elsewhere = with_data;
+    elsewhere.data_rows.clear();
+    elsewhere.transient_rows = {"context 7%"};
+    CHECK(BottomChromeFingerprint(with_data) != BottomChromeFingerprint(elsewhere));
+}
+
+TEST_CASE("资料行预算:先舍提示/坞/速览,再舍资料;输入行恒画得下") {
+    const Theme plain;
+    BottomChromeModel model = FramedModel(ComposerState({U"一行"}, 0, 2), ComposerMode::BusyQueue);
+    model.assist_row = {"? 速览", ""};
+    model.data_rows = {"model · context 7%"};
+    model.agent_dock_rows = {"↑/↓ 选择", "● main"};
+    model.transient_rows = {"  /help"};
+    // 不限 = 横线2 + 输入1 + 状态1 + 速览1 + 资料1 + 坞2 + 提示1 = 9 行。
+    REQUIRE(BuildBottomChromeLayout(model, plain, 40).frame.rows.size() == 9);
+    // 预算 6:核心 4 + 资料 1 + 速览 1——提示与坞整块让位。
+    const auto keeps_both = BuildBottomChromeLayout(model, plain, 40, 6);
+    CHECK(keeps_both.frame.rows.size() == 6);
+    CHECK(keeps_both.chrome.data_rows.size() == 1);
+    CHECK_FALSE(keeps_both.chrome.assist_row.empty());
+    CHECK(keeps_both.dropped_optional_rows == 3);  // 坞2 + 提示1
+    // 预算 5:资料比速览多保一步——速览先舍,资料仍在。
+    const auto tight = BuildBottomChromeLayout(model, plain, 40, 5);
+    CHECK(tight.frame.rows.size() == 5);
+    CHECK(tight.chrome.data_rows.size() == 1);
+    CHECK(tight.chrome.assist_row.empty());
+    CHECK(tight.dropped_optional_rows == 4);  // 速览1 + 坞2 + 提示1
+    // 预算 4:资料也让位,只剩核心(横线+输入+状态);输入行必画得下。
+    const auto core_only = BuildBottomChromeLayout(model, plain, 40, 4);
+    CHECK(core_only.frame.rows.size() == 4);
+    CHECK(core_only.chrome.data_rows.empty());
+    CHECK(core_only.dropped_optional_rows == 5);
+}
+
+TEST_CASE("最终帧合同:忙闲两景 mode/skills 与 model/cwd/branch/context/tokens 同时可见") {
+    // 生产接线:两路 status_rows=BuildComposerModeLine、data_rows=BuildStatusLine
+    //(console_input_composer / console_input_stream_footer 各一处);这里把两只
+    // 构造器的产物按生产摆位进最终帧,断言两类信息同帧共存——0.26.181 只剩
+    // 模式行、model/cwd/context/tokens 一齐消失,正是缺这条合同。
+    SetLanguage("zh-CN");
+    StatusPanelData data;
+    data.model = "test-model";
+    data.cwd = "D:\\proj";
+    data.git_branch = "main";
+    data.context_percent = 7;
+    data.used_tokens = 70;
+    data.window_tokens = 1000;
+    SetStatusLineData(data,
+                           {"permission_mode", "model", "cwd", "git_branch", "context", "tokens"},
+                           " · ");
+    const Theme plain;
+    const BoxChrome chrome{true, &plain, ConfirmMode::Yolo};
+    for (const ComposerMode mode : {ComposerMode::Idle, ComposerMode::BusyQueue}) {
+        CAPTURE(static_cast<int>(mode));
+        BottomChromeModel model = FramedModel(ComposerState({U""}, 0, 0), mode);
+        model.status_rows = {BuildComposerModeLine(chrome, 4, 59)};
+        model.data_rows = {BuildStatusLine(chrome, 59)};
+        REQUIRE(model.data_rows[0].find("test-model") != std::string::npos);  // 资料行非空
+        const BottomChromeLayout layout = BuildBottomChromeLayout(model, plain, 60);
+        // 模式行:档位 + 技能数。
+        CHECK(layout.frame.rows[0].text.find("YOLO") != std::string::npos);
+        CHECK(layout.frame.rows[0].text.find("4") != std::string::npos);
+        // 资料行:完整资料段一个不少(下横线之下)。
+        const std::string& info = layout.frame.rows[4].text;
+        CHECK(info.find("test-model") != std::string::npos);
+        CHECK(info.find("D:\\proj") != std::string::npos);
+        CHECK(info.find("main") != std::string::npos);
+        CHECK(info.find("context 7%") != std::string::npos);
+        CHECK(info.find("70/1000") != std::string::npos);
+        // 不拿一行换另一行:模式行与资料行各自独占自己的槽。
+        CHECK(layout.frame.rows[0].text.find("test-model") == std::string::npos);
+        CHECK(info.find("YOLO") == std::string::npos);
+    }
 }
 
 TEST_CASE("同源布局:Idle 与 Busy 同拍——物理行/padding/cursor 必须相同") {
@@ -784,4 +923,186 @@ TEST_CASE("帮助层布局:高度预算里最保,装不下保头舍尾不挤提�
     CHECK(desperate.frame.rows.size() == 1);
     CHECK(desperate.chrome.help_rows.empty());
     CHECK(desperate.composer_row_count == 1);
+}
+
+// ---------------------------------------------------------------------------
+// 底栏公共装配器(收口审计单 §二 P1):空闲 composer 与流式 footer 从同一
+// 份场景差量组 BottomChromeModel。以下钉三件事:
+//   1) 忙闲同源——同一快照喂 Idle/Busy,公共行逐行相同,差量只在
+//      activity/placeholder/composer mode;
+//   2) 提示类型化——面板行(搜索/提及/slash/临时)恒留输入框下 transient
+//      槽,不随行数变化上抬;速览行(ShortcutAssist)只在 Idle 空 composer
+//      且无面板时出现,Busy 没有 input.shortcuts_hint 兜底;
+//   3) 速览行左右槽——左槽常用键、右槽帮助入口右对齐(与 skills 同列)。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 组一份公共场景快照:草稿/队列/坞/资料同一份,忙闲差量由调用方叠上。
+BottomChromeScene CommonScene(const RenderState& editor) {
+    static const Theme kPlain = BuiltinTheme("plain");  // 静态存续,theme 指针不悬垂
+    BottomChromeScene scene;
+    scene.theme = &kPlain;
+    scene.editor = editor;
+    scene.queue_rows = {"待发 1 条", "> 排队的话"};
+    scene.dock_rows = {"↑/↓ 选择", "● main"};
+    scene.rule_tag = "agent #2 重构";
+    scene.selected_task_id = 2;
+    scene.width = 60;
+    return scene;
+}
+
+}  // namespace
+
+TEST_CASE("装配器忙闲同源:同一快照公共行逐行相同,差量只在活动条") {
+    SetLanguage("zh-CN");
+    StatusPanelData data;
+    data.model = "test-model";
+    data.context_percent = 7;
+    data.used_tokens = 70;
+    data.window_tokens = 1000;
+    SetStatusLineData(data, {"permission_mode", "model", "context", "tokens"}, " · ");
+
+    // 草稿非空:忙闲都没有速览行/占位提示,公共区域应逐行相同。
+    const RenderState draft = ComposerState({U"排队草稿"}, 0, 5);
+    BottomChromeScene idle_scene = CommonScene(draft);
+    idle_scene.mode = ComposerMode::Idle;
+    BottomChromeScene busy_scene = CommonScene(draft);
+    busy_scene.mode = ComposerMode::BusyQueue;
+    busy_scene.placeholder = "键入并回车排队";
+    busy_scene.activity_rows = {"• Working (3s)"};
+
+    const Theme plain;
+    const BottomChromeLayout idle = BuildBottomChromeLayout(BuildBottomChromeModel(idle_scene), plain, 60);
+    const BottomChromeLayout busy = BuildBottomChromeLayout(BuildBottomChromeModel(busy_scene), plain, 60);
+    // Busy 只多一行活动条(帧顶),其余逐行相同——模式行/资料行/横线/输入
+    // 区/坞全部同源,列号与裁剪结果一致。
+    REQUIRE(busy.frame.rows.size() == idle.frame.rows.size() + 1);
+    CHECK(busy.frame.rows[0].text == "• Working (3s)");
+    for (std::size_t i = 0; i < idle.frame.rows.size(); ++i) {
+        CHECK(busy.frame.rows[i + 1].text == idle.frame.rows[i].text);
+    }
+    CHECK(busy.composer_first_row == idle.composer_first_row + 1);
+    CHECK(busy.cursor_x == idle.cursor_x);
+    CHECK(busy.cursor_row == idle.cursor_row + 1);
+    // 资料行两景同画(同一份活账投影),模式行同 skills 数。
+    bool idle_has_model = false;
+    bool busy_has_model = false;
+    for (const auto& row : idle.frame.rows) {
+        idle_has_model = idle_has_model || Contains(row.text, "test-model");
+    }
+    for (const auto& row : busy.frame.rows) {
+        busy_has_model = busy_has_model || Contains(row.text, "test-model");
+    }
+    CHECK(idle_has_model);
+    CHECK(busy_has_model);
+}
+
+TEST_CASE("装配器速览行:Idle 空 composer 左右槽齐备;Busy 不设速览也不兜底") {
+    SetLanguage("zh-CN");
+    const Theme plain;
+    // Idle 空 composer:速览行自置——左槽三枚常用键,右槽帮助入口(默认 ?)。
+    BottomChromeScene idle_scene = CommonScene(ComposerState({U""}, 0, 0));
+    idle_scene.mode = ComposerMode::Idle;
+    const BottomChromeModel idle_model = BuildBottomChromeModel(idle_scene);
+    CHECK_FALSE(idle_model.assist_row.empty());
+    CHECK(idle_model.assist_row.left.find("Ctrl+R") != std::string::npos);  // 搜历史
+    CHECK(idle_model.assist_row.left.find("Ctrl+O") != std::string::npos);  // 展开/收起
+    CHECK(idle_model.assist_row.left.find("Ctrl+G") != std::string::npos);  // 编辑器
+    CHECK(idle_model.assist_row.right == "? 键位");  // 帮助入口只认 ChordFor(HelpShow)
+    // 帮助入口在右槽:左槽不得再画第二份键位提示。
+    CHECK(idle_model.assist_row.left.find("键位") == std::string::npos);
+    // Busy 空 composer:忙路没有帮助层与这些键,不设速览行——空 composer
+    // 的提示位交给 placeholder,不再由 input.shortcuts_hint 硬补"查看快捷键"。
+    BottomChromeScene busy_scene = CommonScene(ComposerState({U""}, 0, 0));
+    busy_scene.mode = ComposerMode::BusyQueue;
+    busy_scene.placeholder = "键入并回车排队";
+    busy_scene.activity_rows = {"• Working (3s)"};
+    const BottomChromeModel busy_model = BuildBottomChromeModel(busy_scene);
+    CHECK(busy_model.assist_row.empty());
+    CHECK(busy_model.transient_rows.empty());
+    const BottomChromeLayout busy = BuildBottomChromeLayout(busy_model, plain, 60);
+    for (const auto& row : busy.frame.rows) {
+        CHECK(row.text.find("查看快捷键") == std::string::npos);
+        CHECK(row.text.find("键位") == std::string::npos);
+    }
+}
+
+TEST_CASE("装配器提示类型化:面板 0/1/多行恒留输入框下,不随行数上抬") {
+    SetLanguage("zh-CN");
+    const Theme plain;
+    const std::vector<std::string> header_only = {"搜索面板单行"};
+    const std::vector<std::string> full_menu = {"搜索表头", "❯ 第一条", "  第二条"};
+    for (const std::vector<std::string>* menu : {&header_only, &full_menu}) {
+        CAPTURE(menu->size());
+        BottomChromeScene scene = CommonScene(ComposerState({U""}, 0, 0));
+        scene.mode = ComposerMode::Idle;
+        scene.queue_rows.clear();  // 行序断言只钉模式行/横线/输入/菜单
+        scene.dock_rows.clear();
+        scene.rule_tag.clear();
+        scene.menu_rows = *menu;
+        const BottomChromeModel model = BuildBottomChromeModel(scene);
+        // 面板开着:速览行让位,菜单行全部进 transient 槽。
+        CHECK(model.assist_row.empty());
+        REQUIRE(model.transient_rows.size() == menu->size());
+        const BottomChromeLayout layout = BuildBottomChromeLayout(model, plain, 60);
+        // 菜单行垫最底(输入框下横线与坞之下),一行也不得上抬到 skills 上方。
+        for (std::size_t i = 0; i < menu->size(); ++i) {
+            CHECK(layout.frame.rows[layout.frame.rows.size() - menu->size() + i].text ==
+                  (*menu)[i]);
+        }
+        // 模式行仍在帧里紧贴上横线(行序不被面板行数搅动)。
+        CHECK(layout.frame.rows[0].text.find("skills") != std::string::npos);
+        CHECK(layout.frame.rows[1].text == PlainRule(60));
+    }
+    // 空 composer 且无面板:速览行回归(ShortcutAssist),transient 清空。
+    BottomChromeScene plain_scene = CommonScene(ComposerState({U""}, 0, 0));
+    plain_scene.mode = ComposerMode::Idle;
+    const BottomChromeModel model = BuildBottomChromeModel(plain_scene);
+    CHECK_FALSE(model.assist_row.empty());
+    CHECK(model.transient_rows.empty());
+}
+
+// ---------------------------------------------------------------------------
+// 快捷键提示的 keymap 驱动(收口审计单 §二 P2):帮助入口只认
+// ChordFor(HelpShow)与一枚标签——改绑后速览行(空闲)、帮助层、搜索层
+// 一齐跟脚;运行中没有写死 "?" 的兜底(input.shortcuts_hint 兜底生产路
+// 连同翻译 key 一并删除,tr 查不到 key 时回退 key 本身)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("帮助入口改绑跟脚:速览右槽与帮助层同拍换键,流式兜底已死") {
+    SetLanguage("zh-CN");
+    auto& active = keymap::ActiveKeymap();
+    std::string error;
+    // 改绑 help.show:速览右槽与帮助层表头/表尾一齐换 Alt+H,不再写死 ?。
+    REQUIRE(active.SetBinding(keymap::ActionId::HelpShow, *keymap::ParseKeyChord("alt+h"), error));
+    const ChromeAssistRow assist = BuildComposerAssistRow();
+    CHECK(assist.right.find("Alt+H") != std::string::npos);
+    CHECK(assist.right.find("?") == std::string::npos);
+    const std::vector<std::string> help_rows = keymap::BuildSceneHelpLines(active);
+    CHECK(help_rows.front().find("Alt+H") != std::string::npos);
+    CHECK(help_rows.back().find("Alt+H") != std::string::npos);
+    // 改绑 chat.search_history:速览左槽跟脚换键,旧和弦不再出现。
+    REQUIRE(active.SetBinding(keymap::ActionId::ChatSearchHistory, *keymap::ParseKeyChord("ctrl+f"),
+                              error));
+    const ChromeAssistRow rebound = BuildComposerAssistRow();
+    CHECK(rebound.left.find("Ctrl+F") != std::string::npos);
+    CHECK(rebound.left.find("Ctrl+R") == std::string::npos);
+    // 运行中:同一枚改绑下,忙帧不出现任何写死的帮助提示(没有兜底路)。
+    BottomChromeScene busy_scene = CommonScene(ComposerState({U""}, 0, 0));
+    busy_scene.mode = ComposerMode::BusyQueue;
+    busy_scene.placeholder = "键入并回车排队";
+    busy_scene.activity_rows = {"• Working (3s)"};
+    const BottomChromeLayout busy =
+        BuildBottomChromeLayout(BuildBottomChromeModel(busy_scene), Theme{}, 60);
+    for (const auto& row : busy.frame.rows) {
+        CHECK(row.text.find("查看快捷键") == std::string::npos);
+        CHECK(row.text.find("Alt+H") == std::string::npos);
+    }
+    // 收场:两枚改绑复位,别把活动表污染给别的测试。
+    REQUIRE(active.ResetBinding(keymap::ActionId::HelpShow, error));
+    REQUIRE(active.ResetBinding(keymap::ActionId::ChatSearchHistory, error));
+    // input.shortcuts_hint 兜底生产路已删:翻译表里不得再有这枚 key
+    //(tr 查不到时回退 key 本身)。留着它就是"另一条翻译硬补"的孤尾。
+    CHECK(tr("input.shortcuts_hint") == "input.shortcuts_hint");
 }
