@@ -2156,6 +2156,34 @@ P0-3 Replay/Resume
 - P0-1 至 P0-5 没全过，只能算内部预览；P0-6 真机门过后，才切默认新会话。
 - 回滚程序版本不改写现有 v1 Journal。旧 binary 若不支持 min_reader_version，只准明拒读取。
 
+P0-6 收口注记（2026-09-03，真机与发布门批）：
+
+- **选路状态回看**：默认切换实际落在 P0-2 批（af96427a——SessionRuntime 恒开
+  TrajectorySessionLedger，开不出账明败不回退旧 Store；one_shot 同接 0d780658；
+  features.trajectory 只吞不读）。先切后验，本批把门补齐：LUBANCODE_TRAJECTORY
+  死码（TrajectoryEnvOpinion）删净，env 变量从此无人认领；选路合同按上四条逐条
+  真机核对过（原子选路/无 dual-write/明败不暗开旧口/回滚不改写）。自本批起
+  "内部预览"口径收成正式：新会话默认 Trajectory v1。
+- **真机门证据**：build/p06-gate-evidence/（不进 git）——one_shot 工具轮
+  （verify/replay exit 0、悬空工具 0）、子代理分账（子账 subagents/*.jsonl 独立
+  run_kind=subagent、父账 0 枚子内部事件、edge 双向 hash 对上）、交互 TUI
+  workflow（WriteConsoleInputW 逐键真键入 /workflow run，编排账 workflow-runs/
+  {definition,manifest,events,checkpoints} 终态 succeeded、session verify/replay
+  exit 0、control.command spawn_run 生命周期落账）、崩溃前缀（第 2 请求挂闸后
+  kill：链前缀完好、run 未收口、replay 照折悬空 0）、读者版本门（见下）。
+  探针入库：tests/manual/p06_release_gate_probe.py、p06_workflow_console_probe.py。
+- **回滚纪律真机+册内双钉**：真账改出"未来账"（min_reader_version 2→3 与
+  schema_version 2→3 两档，哈希链整链重建、无编辑重链与原文逐字节一致作对照）
+  后旧读者明拒：verify.unsupported_reader_version（本批补的门，链路本身红的流
+  不盖错码）/ replay.unsupported（min_reader_version=3 > 支持的 2）/
+  schema.unsupported_version，三档退出码 2、Journal 读前读后一枚字节不变。册内
+  tests/unit/trajectory/test_reader_version_gate.cpp 三册同钉。
+- **合同缺口补一刀**：主账 run.started（launch/clear/resume/恢复器四处）此前全
+  漏写 writer_version/min_reader_version（§8.4 钉过、子账写了主账没写，golden
+  fixture 有而真账没有）——收进 TrajectoryRecorder::WriteRunStarted 一处统一落，
+  min_reader_version=event_schema_version（v2 usage 账要 v2 读者），调用方手填被
+  真值覆盖。册内 test_journal_recorder.cpp 补两册。
+
 ### P0-1 合同与最小仓
 
 - [ ] 冻结 EventEnvelope、枚举与首批 payload schema。
@@ -2268,17 +2296,43 @@ P0-3 Replay/Resume
 ### P0-6 真机与发布门
 
 - [ ] 十类真机场景。
+  （本批真机五场过，证据 build/p06-gate-evidence/：one_shot 工具轮、子代理分账、
+  交互 TUI（WriteConsoleInputW 逐键）、workflow 编排、崩溃前缀；§16.6 十类里
+  ESC 打断、provider 失败、app-server turn、resume 后新 turn 未跑——留白。）
 - [ ] app-server、terminal、peer/scheduler 同源。
+  （terminal 交互与 one_shot 真机过；app-server/peer 渠道真机未跑，留白。）
 - [ ] 并行 subagent 分文件真机。
+  （单只子代理父子分账真机过（verify edge + hash 对上、父账零子内部事件）；
+  并行多只留白。）
 - [ ] workflow parallel/loop/retry 分目录真机。
+  （最小 transform workflow 真机过：编排账落 <home>/.lubancode/workflow-runs/
+  <run>/{definition,manifest,events,checkpoints} 终态 succeeded；**session 树内
+  workflows/<run>/{workflow.jsonl,nodes/} 未接线**——trajectory 侧 ReserveWorkflowRun/
+  ReserveWorkflowNodeStream 至今无生产消费方，workflow 节点的模型请求也不落轨迹
+  （§3.6"session 归属统一"欠账，须另立单）；parallel/loop/retry 长跑留白。）
 - [ ] clear 前后双 session、活动 child 收口与崩溃点恢复真机。
+  （崩溃点真机过：crash_midturn 于 12 事件处 kill——verify exit 0 前缀链完好
+  run 未收口、replay exit 0 照折悬空 0；clear 双 session 与活动 child 收口真机
+  未跑（册内 clear 八步/恢复器测试仍绿），留白。）
 - [ ] record 选段、compact 三触发、resume 新目录与全命令分类矩阵真机。
-- [ ] focused tests。
-- [ ] full ctest。
-- [ ] 故障注入与崩溃恢复报告。
-- [ ] 训练导出抽样人工审查。
+- [x] focused tests。
+  （新增 tests/unit/trajectory/test_reader_version_gate.cpp 三册（重链对照/
+  超前 min_reader_version 明拒且不改写/超前 schema_version 整本明拒）；
+  test_journal_recorder.cpp 补 run.started 版本键两册；trajectory 族 29/29 绿。）
+- [x] full ctest。（`ctest -C Release` 两遍全绿：100% tests passed, 0 tests
+  failed out of 367;临时 USERPROFILE 裸跑，原文 build/p06-ctest-full.txt。）
+- [x] 故障注入与崩溃恢复报告。
+  （真机：crash_midturn 挂闸杀进程的前缀完好账（见上）；单 4 故障注入四场
+  （normal_call/late_id/never_id/spawn_fail）回归全过
+  build/p06-gate-evidence/subagent-probe-regression/——fail closed、原子开卷、
+  ownership 门无反弹。）
+- [ ] 训练导出抽样人工审查。（未做，留白。）
 - [ ] Windows/Linux 权限、锁、路径与 schema compatibility fixtures。
-- [ ] 并发/大 blob/大 session/低磁盘性能基准与回退门。
+  （Windows 侧 safety/session_lock/reader gate 册内绿；Linux/跨平台 fixture
+  留白。）
+- [ ] 并发/大 blob/大 session/低磁盘性能基准与回退门。（留白；磁盘 reserve
+  配置面 trajectory.journal_emergency_reserve_bytes 也仍未开键——见
+  trajectory_session.cpp 注记。）
 
 ## 十八、代码边界验收
 

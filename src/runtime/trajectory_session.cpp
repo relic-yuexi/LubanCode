@@ -24,46 +24,15 @@
 
 namespace lubancode::runtime {
 
-// ---------------------------------------------------------------------------
-// flag
-// ---------------------------------------------------------------------------
-
-namespace {
-
-std::optional<bool> TrajectoryEnvOpinion() {
-#ifdef _WIN32
-    char* buffer = nullptr;
-    std::size_t size = 0;
-    const errno_t err = _dupenv_s(&buffer, &size, "LUBANCODE_TRAJECTORY");
-    if (err != 0 || buffer == nullptr) {
-        return std::nullopt;
-    }
-    std::string value = buffer;
-    std::free(buffer);
-#else
-    const char* raw = std::getenv("LUBANCODE_TRAJECTORY");
-    if (raw == nullptr) {
-        return std::nullopt;
-    }
-    std::string value = raw;
-#endif
-    if (value.empty() || value == "auto") {
-        return std::nullopt;  // 没意见,听配置
-    }
-    if (value == "1" || value == "true" || value == "on" || value == "yes") {
-        return true;
-    }
-    if (value == "0" || value == "false" || value == "off" || value == "no") {
-        return false;
-    }
-    return std::nullopt;  // 写坏了不当意见,配置照旧(救命阀字段的待遇)
-}
-
-}  // namespace
+// 发布门(P0-2 切换、P0-6 真机门收口):Session 即 Trajectory,没有
+// feature/env 选路。P0-2 删开关时这段留着 LUBANCODE_TRAJECTORY 的
+// env 解读函数成了死码,P0-6 连尸首一并收走——配置键 features.trajectory
+// 仍被 config 层吞下(读而不用),env 变量从此无人认领。
 
 // §12.2/§13 journal emergency reserve 首版起始值(16 MiB)。配置面
-//(trajectory.journal_emergency_reserve_bytes)随 P0-6 的配置档落,本批
-// 用起始常量并在 /doctor trajectory 里如实展示。
+//(trajectory.journal_emergency_reserve_bytes)尚未落:reserve 目前是
+// 起始常量,/doctor trajectory 如实展示;配置档与 settings 批次合流时
+// 再开键(留白注记见 todos/P0新轨迹记录 P0-6 段)。
 constexpr std::uint64_t kJournalEmergencyReserveBytes = 16ULL * 1024 * 1024;
 
 // ---------------------------------------------------------------------------
@@ -1824,11 +1793,10 @@ TrajectorySessionLedger::SpawnSubagent(const std::string& parent_call_id, const 
     // 引用会悬在 moved-from 壳上(桥的 recorder_ 是裸引用)。
     auto recorder_owner = std::make_unique<trajectory::TrajectoryRecorder>(std::move(*recorder));
     // run.started:父子边界(§3.5/§6.3)——relations 带 parent_run_id 与
-    // parent_call_id,正文只有任务标签,不带父会话细账。
+    // parent_call_id,正文只有任务标签,不带父会话细账。writer_version/
+    // min_reader_version 由 WriteRunStarted 统一落(P0-6 收口,不再手填)。
     nlohmann::json payload = nlohmann::json{{"run_kind", "subagent"},
-                                            {"start_reason", "agent_tool_dispatch"},
-                                            {"writer_version", impl_->recorder_options.recorder_version},
-                                            {"min_reader_version", std::uint64_t{1}}};
+                                            {"start_reason", "agent_tool_dispatch"}};
     if (!task_label.empty()) {
         payload["task_ref"] = task_label;
     }

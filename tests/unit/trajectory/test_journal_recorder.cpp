@@ -706,11 +706,38 @@ TEST_CASE("session.* 在 one_shot main stream 照放行") {
     }();
     CHECK(events.at("run_kind").get<std::string>() == "one_shot");
     CHECK(events.at("payload").at("run_kind").get<std::string>() == "one_shot");
+    // §8.4/P0-6 收口:run.started 恒带 writer_version/min_reader_version
+    //(主账 launch/clear/resume 与子账同合同;回滚条款的抓手)。
+    CHECK(events.at("payload").at("writer_version").get<std::string>() == "trajectory-recorder-v1");
+    CHECK(events.at("payload").at("min_reader_version").get<std::uint64_t>() ==
+          static_cast<std::uint64_t>(RecorderOptions{}.event_schema_version));
 
     REQUIRE(once->FinishRun(EventKind::RunCompleted, "exit", Durability::PowerLoss).status ==
             RecordReceipt::Status::Committed);
     auto ended = once->EndSession("exit", std::nullopt, "clean", Durability::PowerLoss);
     CHECK(ended.status == RecordReceipt::Status::Committed);
+}
+
+TEST_CASE("run.started 版本键:显式手填被真值覆盖,v2 账要 v2 读者") {
+    Harness h("versionkeys");
+    std::error_code ec;
+    const auto dir2 = h.dir / "v2stream";
+    std::filesystem::create_directories(dir2 / "artifacts", ec);
+    EventScope scope = Harness::BaseScope();
+    RecorderOptions options;
+    options.event_schema_version = 2;
+    auto recorder =
+        TrajectoryRecorder::Start(dir2 / "main.jsonl", dir2 / "artifacts", scope, options, &h.clock);
+    REQUIRE(recorder.has_value());
+    // 调用方手填过时(旧子账路写法):recorder 以真值覆盖,不偏不倚。
+    REQUIRE(recorder->WriteRunStarted(nlohmann::json{{"min_reader_version", std::uint64_t{1}}},
+                                      Durability::ProcessCrash)
+                .status == RecordReceipt::Status::Committed);
+    const auto lines = ReadJournalLines(dir2 / "main.jsonl");
+    REQUIRE(lines.has_value());
+    const auto events = nlohmann::json::parse(lines->front());
+    CHECK(events.at("payload").at("min_reader_version").get<std::uint64_t>() == 2);
+    CHECK(events.at("payload").contains("writer_version"));
 }
 
 TEST_CASE("scope 恒等:换 workspace/session/run/kind 拒绝") {
