@@ -12,6 +12,7 @@
 #include "agent/prompt_assembler.hpp"
 #include "agent/sample_model.hpp"  // SampleModel 原语:采样的公共路(批一·病四)
 #include "api/backend.hpp"
+#include "memory/project_memory.hpp"  // LooksLikeMemoryDate:occurred_at 的清洗
 #include "platform/text_encoding.hpp"
 
 namespace lubancode::app {
@@ -161,6 +162,10 @@ std::expected<MemoryExtraction, std::string> ParseExtractionJson(const std::stri
             candidate.summary = item.value("summary", std::string());
             candidate.content = item.value("content", std::string());
             candidate.confidence = item.value("confidence", std::string("inferred"));
+            // 时间线锚点:材料里明确给出的日期才留;形状不像日期(模型编的
+            // 相对时间、口语时间)一律落空,不造假也不拦整条候选。
+            const std::string occurred = item.value("occurred_at", std::string());
+            if (memory::LooksLikeMemoryDate(occurred)) candidate.occurred_at = occurred;
             if (candidate.title.empty() || candidate.content.empty()) continue;
             if (item.contains("keywords") && item["keywords"].is_array()) {
                 for (const auto& keyword : item["keywords"]) {

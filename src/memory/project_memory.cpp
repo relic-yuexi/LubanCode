@@ -236,6 +236,53 @@ bool LooksLikeDateOrIsoTime(const std::string& raw) {
     return true;
 }
 
+}  // namespace
+
+bool LooksLikeMemoryDate(const std::string& raw) { return LooksLikeDateOrIsoTime(raw); }
+
+namespace {
+
+// ---- 时间线锚点(记忆写入侧改进单) ----
+// 正文头部的人类可读时间锚:单行【YYYY-MM-DD…】。全库一致由这一处出;
+// 重写时先剥旧锚再按 occurred_at 补新锚,日期不变不翻倍,occurred_at 空
+// 则只剥不补(不造假)。
+
+bool IsTimeAnchorLine(const std::string& line) {
+    const std::string trimmed = Trim(line);
+    if (trimmed.size() < 12 || trimmed.front() != '\xe3') return false;  // 【 是三字节 UTF-8
+    // 找配对的闭括号】:正文里以【开头的句子不少,只有"整行恰是【…】且
+    // 内文是日期形状"才算锚。
+    const std::size_t open_bytes = 3;   // 【
+    const std::size_t close_bytes = 3;  // 】
+    if (trimmed.size() < open_bytes + close_bytes + 10) return false;
+    const std::size_t close = trimmed.size() - close_bytes;
+    if (trimmed.compare(close, close_bytes, "\xe3\x80\x91") != 0) return false;
+    const std::string inner = trimmed.substr(open_bytes, close - open_bytes);
+    return LooksLikeDateOrIsoTime(inner);
+}
+
+std::string ApplyTimeAnchor(const std::string& body, const std::string& occurred_at) {
+    // 剥头部旧锚(连同其后空行),正文其余一字不动。
+    std::string rest = body;
+    while (true) {
+        const std::size_t eol = rest.find('\n');
+        const std::string line = eol == std::string::npos ? rest : rest.substr(0, eol);
+        if (IsTimeAnchorLine(line)) {
+            rest = eol == std::string::npos ? std::string() : rest.substr(eol + 1);
+            continue;
+        }
+        if (Trim(line).empty() && eol != std::string::npos) {
+            // 锚后面的空行顺手吃掉;正文开头的空行原本也会被 Trim 掉。
+            rest = rest.substr(eol + 1);
+            continue;
+        }
+        break;
+    }
+    rest = Trim(rest);
+    if (occurred_at.empty()) return rest;
+    return "\xe3\x80\x90" + occurred_at + "\xe3\x80\x91\n\n" + rest;
+}
+
 std::expected<void, std::string> ValidateScope(const MemoryScope& scope) {
     if (scope.level == "user") {
         // 用户级记忆(跨项目偏好/反馈):不放仓库事实,不假借项目路径作
@@ -327,6 +374,11 @@ std::expected<void, std::string> ValidateSaveRequest(const SaveRequest& request)
     if (!request.expires_at.empty() && !LooksLikeDateOrIsoTime(request.expires_at)) {
         return std::unexpected("expires_at 须是 YYYY-MM-DD 或 ISO 时间");
     }
+    // 时间线锚点:形状不对直接拒(工具与 job 正门都过这里);抽取侧的
+    // 清洗在 ParseExtractionJson 做,到这的都该是干净日期。
+    if (!request.occurred_at.empty() && !LooksLikeDateOrIsoTime(request.occurred_at)) {
+        return std::unexpected("occurred_at 须是 YYYY-MM-DD 或 ISO 时间");
+    }
     if (LooksSensitive(request)) {
         return std::unexpected("记忆疑似含密钥、口令或认证头，拒绝落盘");
     }
@@ -415,6 +467,9 @@ nlohmann::json EntryMetadata(const StoredEntry& entry) {
         {"last_verified_at", entry.public_entry.last_verified_at},
         {"expires_at", entry.public_entry.expires_at.empty() ? nlohmann::json()
                                                              : nlohmann::json(entry.public_entry.expires_at)},
+        {"occurred_at", entry.public_entry.occurred_at.empty()
+                            ? nlohmann::json()
+                            : nlohmann::json(entry.public_entry.occurred_at)},
         {"fingerprints", entry.fingerprints},
         // content 进索引:词袋随 catalog 落盘,生产检索每轮只解析词袋,不重
         // 切全文(旧 catalog 无此键,读回为空,退回无正文索引,下次 rebuild
@@ -495,6 +550,11 @@ std::expected<StoredEntry, std::string> ParseStoredEntry(const nlohmann::json& m
     entry.public_entry.last_verified_at = meta.value("last_verified_at", std::string());
     if (meta.contains("expires_at") && meta["expires_at"].is_string()) {
         entry.public_entry.expires_at = meta["expires_at"].get<std::string>();
+    }
+    // 时间线锚点:旧 catalog 无此键读空;形状不像日期按空(不造假)。
+    if (meta.contains("occurred_at") && meta["occurred_at"].is_string()) {
+        const std::string occurred = meta["occurred_at"].get<std::string>();
+        if (LooksLikeDateOrIsoTime(occurred)) entry.public_entry.occurred_at = occurred;
     }
     if (meta.contains("fingerprints") && meta["fingerprints"].is_object()) {
         entry.fingerprints = meta["fingerprints"];
@@ -1223,21 +1283,31 @@ struct RecallPayload {
 RecallPayload BuildRecallPayload(const std::string& topic, const MemoryEntry& entry,
                                  const std::vector<TraceTerm>& query_terms, std::size_t budget) {
     RecallPayload payload;
+    // 时间线锚点:正文头部的锚行(【日期】)与骨架里的"时间:"行说的是同
+    // 一件事——锚行不另占正文段,时间进骨架永不截断,模型每段都拿得到
+    // 明确日期。旧条目无 occurred_at 时两者都没有,行为与从前一致。
+    const std::string anchor_line =
+        entry.occurred_at.empty()
+            ? std::string()
+            : "\xe3\x80\x90" + entry.occurred_at + "\xe3\x80\x91";
     // 段落切分:按行,空行只是接缝不占段。
     std::vector<std::string> paragraphs;
     for (std::size_t pos = 0; pos <= topic.size();) {
         const std::size_t eol = topic.find('\n', pos);
         const std::string line =
             topic.substr(pos, eol == std::string::npos ? topic.size() - pos : eol - pos);
-        if (!Trim(line).empty()) paragraphs.push_back(line);
+        if (!Trim(line).empty() && Trim(line) != anchor_line) paragraphs.push_back(line);
         if (eol == std::string::npos) break;
         pos = eol + 1;
     }
-    // 骨架:标题行(有则保留)+ 摘要行。两者永不截断。
+    // 骨架:标题行(有则保留)+ 时间行 + 摘要行。三者永不截断。
     std::string skeleton;
     if (!paragraphs.empty() && paragraphs.front().starts_with("# ")) {
         skeleton = paragraphs.front() + "\n\n";
         paragraphs.erase(paragraphs.begin());
+    }
+    if (!entry.occurred_at.empty()) {
+        skeleton += "时间: " + entry.occurred_at + "\n\n";
     }
     if (!entry.summary.empty()) {
         skeleton += "摘要: " + OneLine(entry.summary, kMaxSummaryBytes) + "\n\n";
@@ -1593,6 +1663,7 @@ std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::jso
     }
     request.confidence = job.value("confidence", std::string());
     request.expires_at = job.value("expires_at", std::string());
+    request.occurred_at = job.value("occurred_at", std::string());
     if (job.contains("scope") && job["scope"].is_object()) {
         request.scope.level = job["scope"].value("level", std::string("project"));
         request.scope.kind = job["scope"].value("kind", std::string("project"));
@@ -1654,6 +1725,11 @@ std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::jso
     updated.public_entry.scope = request.scope;
     updated.public_entry.evidence = request.evidence;
     updated.public_entry.expires_at = request.expires_at;
+    // 时间线锚点:请求带日期就落;不带保旧值(此前从材料里提过的时间不
+    // 因一次没提日期的更新丢掉),不造假也不倒灶。
+    if (!request.occurred_at.empty()) {
+        updated.public_entry.occurred_at = request.occurred_at;
+    }
     if (!request.source_session.empty() &&
         std::find(updated.public_entry.source_sessions.begin(), updated.public_entry.source_sessions.end(),
                   request.source_session) == updated.public_entry.source_sessions.end()) {
@@ -1677,7 +1753,9 @@ std::expected<MemoryWriteOutcome, std::string> ProcessUpsert(const nlohmann::jso
     }
 
     const fs::path topic = memory_dir / Utf8Path(updated.public_entry.file);
-    auto written = AtomicWrite(topic, BuildTopicText(updated, request.content));
+    auto written = AtomicWrite(topic,
+                               BuildTopicText(updated, ApplyTimeAnchor(request.content,
+                                                                       updated.public_entry.occurred_at)));
     if (!written.has_value()) return std::unexpected(written.error());
     // 旧文件名不同(老格式或换名)才清;同一把项目锁里先写新再删旧,中途
     // 失败旧文件仍在,新文件不半截落地。
@@ -2254,6 +2332,16 @@ std::string ProjectMemory::BuildTurnContextImpl(const std::string& query, const 
     std::unordered_set<std::uint64_t> seen_content;
     std::unordered_set<std::string> seen_fact;
     std::unordered_set<std::string> seen_ids;
+    // 时间线锚点(注入侧):召回段先按排级序收进 sections,出了循环再把
+    // 带 occurred_at 的段按时间升序重排(同分按 topic id)——选段与预算
+    // 仍按检索分定,只有拼装顺序按时间线走。没带时间字段的段钉在排级槽
+    // 位不动(旧条目混排稳定),模型拿到的是一条时间线,不是一把散卡。
+    struct RecallSection {
+        std::string text;        // 段头 + 载荷(已按预算定稿)
+        std::string occurred_at; // 空 = 不参与时间排序
+        std::string id;
+    };
+    std::vector<RecallSection> sections;
     // 项目层已有的 id:用户层同主题直接让位(规格"项目层更具体,压过用户
     // 层"),不比分数——两条是同一主题,只认更具体的那份。
     std::unordered_set<std::string> project_ids;
@@ -2321,7 +2409,9 @@ std::string ProjectMemory::BuildTurnContextImpl(const std::string& query, const 
             !FingerprintsCurrent(*stored_hit, identity_.project_root)) {
             traced.stale_blocked = true;
             trace.entries.push_back(std::move(traced));
-            body += "\n- 命中 `" + entry.id + "`，但相关文件已变化；本轮不注入正文，请读源码核验。\n";
+            sections.push_back(RecallSection{
+                "\n- 命中 `" + entry.id + "`，但相关文件已变化；本轮不注入正文，请读源码核验。\n",
+                std::string(), entry.id});
             continue;
         }
         const fs::path& topic_dir = traced.layer == "user" ? user_dir : base_dir;
@@ -2398,7 +2488,8 @@ std::string ProjectMemory::BuildTurnContextImpl(const std::string& query, const 
                 continue;
             }
         }
-        body += section_header + payload.text + "\n";
+        sections.push_back(RecallSection{section_header + payload.text + "\n",
+                                         entry.occurred_at, entry.id});
         used += section_header.size() + payload.text.size() + 1;
         ++emitted;
         traced.injected = true;
@@ -2412,6 +2503,36 @@ std::string ProjectMemory::BuildTurnContextImpl(const std::string& query, const 
         if (!fact_key.empty()) seen_fact.insert(fact_key);
     }
     WriteRecallTrace(memory_dir_, trace);
+    // 时间线拼装:带 occurred_at 的段(≥2 时)按时间升序排成一条连续时间
+    // 线放在最前(同分按 topic id,可复算);没有时间字段的段不参与排序,
+    // 按排级序续后——选段与预算仍按检索分定,trace 记的排级账不受影响。
+    // 只有 0/1 条带时间时无序可排,全部按排级序原样输出。
+    {
+        std::vector<std::size_t> timed_slots;
+        for (std::size_t i = 0; i < sections.size(); ++i) {
+            if (!sections[i].occurred_at.empty()) timed_slots.push_back(i);
+        }
+        if (timed_slots.size() >= 2) {
+            std::sort(timed_slots.begin(), timed_slots.end(),
+                      [&sections](std::size_t a, std::size_t b) {
+                          if (sections[a].occurred_at != sections[b].occurred_at) {
+                              return sections[a].occurred_at < sections[b].occurred_at;
+                          }
+                          return sections[a].id < sections[b].id;
+                      });
+            for (const std::size_t slot : timed_slots) {
+                body += sections[slot].text;
+            }
+            for (std::size_t i = 0; i < sections.size(); ++i) {
+                if (!sections[i].occurred_at.empty()) continue;
+                body += sections[i].text;
+            }
+        } else {
+            for (const RecallSection& section : sections) {
+                body += section.text;
+            }
+        }
+    }
     if (body.empty()) return {};  // 零命中:不塞空脚手架
     return capability_header() + body + kRecallGuardTail;
 }
@@ -2585,6 +2706,7 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueJob(const std::str
         job["source_session"] = source_ref;
         if (!request->confidence.empty()) job["confidence"] = request->confidence;
         if (!request->expires_at.empty()) job["expires_at"] = request->expires_at;
+        if (!request->occurred_at.empty()) job["occurred_at"] = request->occurred_at;
         if (request->scope.level != "project" || request->scope.kind != "project" ||
             !request->scope.value.empty()) {
             job["scope"] = nlohmann::json{{"level", request->scope.level},
@@ -2712,6 +2834,7 @@ nlohmann::json CandidateToJson(const MemoryCandidate& candidate) {
         {"confidence", candidate.confidence},
         {"task_type", candidate.task_type},
         {"created_at", candidate.created_at},
+        {"occurred_at", candidate.occurred_at},
     };
 }
 
@@ -2728,6 +2851,9 @@ std::optional<MemoryCandidate> CandidateFromJson(const nlohmann::json& root) {
     candidate.confidence = root.value("confidence", std::string("inferred"));
     candidate.task_type = root.value("task_type", std::string("other"));
     candidate.created_at = root.value("created_at", std::string());
+    // 时间线锚点:旧候选无此键读空;形状不像日期按空(不造假)。
+    const std::string occurred = root.value("occurred_at", std::string());
+    if (LooksLikeDateOrIsoTime(occurred)) candidate.occurred_at = occurred;
     if (root.contains("keywords") && root["keywords"].is_array()) {
         for (const auto& item : root["keywords"]) {
             if (item.is_string()) candidate.keywords.push_back(item.get<std::string>());
@@ -2873,6 +2999,7 @@ std::expected<std::string, std::string> ProjectMemory::AcceptCandidate(const std
     request.keywords = candidate->keywords;
     request.paths = candidate->paths;
     request.confidence = candidate->confidence;
+    request.occurred_at = candidate->occurred_at;
     request.source_session = source_session_;
     // 候选的 paths 同时充当证据(schema 2:fact 须有可核验证据)。
     for (const std::string& path : candidate->paths) {

@@ -178,6 +178,78 @@ TEST_CASE("frontmatter: 手写 YAML 变体也能读(时间按字符串,不受隐
     CHECK(parsed->body == "正文。");
 }
 
+TEST_CASE("frontmatter: occurred_at 往返与旧条目兼容") {
+    // 带日期:写出成 occurred_at: <date>,读回一致,两次往返字节稳定。
+    memory::MemoryEntry entry = SampleEntry();
+    entry.occurred_at = "2023-05-08";
+    const std::string text = fm::BuildTopicText(entry, nlohmann::json::object(), "正文。");
+    CHECK(text.find("occurred_at: 2023-05-08\n") != std::string::npos);
+    auto parsed = fm::Parse(text);
+    REQUIRE(parsed.has_value());
+    CHECK(parsed->entry.occurred_at == "2023-05-08");
+    const std::string again = fm::BuildTopicText(parsed->entry, parsed->fingerprints, parsed->body);
+    CHECK(again == text);
+
+    // 空 = occurred_at: ~(yaml-cpp 的 Null 定型),读回为空。
+    memory::MemoryEntry bare = SampleEntry();
+    const std::string bare_text = fm::BuildTopicText(bare, nlohmann::json::object(), "正文。");
+    CHECK(bare_text.find("occurred_at: ~\n") != std::string::npos);
+    auto bare_parsed = fm::Parse(bare_text);
+    REQUIRE(bare_parsed.has_value());
+    CHECK(bare_parsed->entry.occurred_at.empty());
+
+    // 旧条目手写 YAML 没有 occurred_at 键:照常可读,读入为空不炸。
+    const std::string legacy =
+        "---\n"
+        "name: old-timeline\n"
+        "description: 老主题\n"
+        "metadata:\n"
+        "  schema: 3\n"
+        "  node_type: memory\n"
+        "  type: fact\n"
+        "  id: fact.old-timeline\n"
+        "  confidence: verified\n"
+        "  status: active\n"
+        "  scope: {level: project, kind: project, value: \"\"}\n"
+        "  origin_session_ids: []\n"
+        "  created: 2026-08-16\n"
+        "  modified: 2026-08-16\n"
+        "  last_verified: 2026-08-16\n"
+        "  expires: null\n"
+        "  keywords: []\n"
+        "  evidence: []\n"
+        "---\n\n# 老主题\n\n老正文。\n";
+    auto old = fm::Parse(legacy);
+    REQUIRE(old.has_value());
+    CHECK(old->entry.occurred_at.empty());
+
+    // 形状不像日期的值按空处理(不造假):相对时间、口语时间都进不来。
+    const std::string sloppy =
+        "---\n"
+        "name: sloppy-date\n"
+        "description: 草率日期\n"
+        "metadata:\n"
+        "  schema: 3\n"
+        "  node_type: memory\n"
+        "  type: fact\n"
+        "  id: fact.sloppy-date\n"
+        "  confidence: verified\n"
+        "  status: active\n"
+        "  scope: {level: project, kind: project, value: \"\"}\n"
+        "  origin_session_ids: []\n"
+        "  created: 2026-08-16\n"
+        "  modified: 2026-08-16\n"
+        "  last_verified: 2026-08-16\n"
+        "  expires: null\n"
+        "  occurred_at: 上周三\n"
+        "  keywords: []\n"
+        "  evidence: []\n"
+        "---\n\n# 草率日期\n\n正文。\n";
+    auto bad = fm::Parse(sloppy);
+    REQUIRE(bad.has_value());
+    CHECK(bad->entry.occurred_at.empty());
+}
+
 TEST_CASE("frontmatter: 老格式(schema 1/2)HTML 注释的剥壳") {
     const std::string legacy =
         "<!-- lubancode-memory\n"

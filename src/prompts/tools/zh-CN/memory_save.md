@@ -61,3 +61,7 @@ user-stated=用户明说的偏好；verified=已核验的事实；inferred=推�
 ## param.expires_at
 
 可选。临时规约的到期日(YYYY-MM-DD 或 ISO 时间);到期后不再召回
+
+## param.occurred_at
+
+可选。事实事件的发生时间(YYYY-MM-DD 或 ISO 时间)。只在材料里明确给出时填;提不出就省略,不许猜日期

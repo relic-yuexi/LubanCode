@@ -7,10 +7,10 @@
 只输出一个 JSON object,不加代码围栏、不加任何解释文字:
 
 ```
-{"task_type":"code|research|config|docs|other","summary":"不超过 120 字的回合总结","retrieval_terms":["下一轮检索用的关键词或同义改写,最多 8 个"],"candidates":[{"kind":"fact|preference|feedback","title":"短主题","summary":"一行摘要","content":"精炼正文,含 ## Why 小节写来龙去脉(没有根据就省略,不编故事)","keywords":["精确检索词"],"paths":["支撑证据的项目内相对路径"],"confidence":"user-stated|verified|inferred"}]}
+{"task_type":"code|research|config|docs|other","summary":"不超过 120 字的回合总结","retrieval_terms":["下一轮检索用的关键词或同义改写,最多 8 个"],"candidates":[{"kind":"fact|preference|feedback","title":"短主题","summary":"一行摘要","content":"精炼正文,含 ## Why 小节写来龙去脉(没有根据就省略,不编故事)","keywords":["精确检索词"],"paths":["支撑证据的项目内相对路径"],"occurred_at":"事件发生日期,材料里明确给出才填(YYYY-MM-DD 或 ISO 时间)","confidence":"user-stated|verified|inferred"}]}
 ```
 
-candidates 可以为空数组,最多 3 条。retrieval_terms 是给下一轮记忆检索用的扩展词:同义词、更标准的叫法、涉及的符号名/路径,不要放整句话。
+candidates 可以为空数组,最多 3 条。retrieval_terms 是给下一轮记忆检索用的扩展词:同义词、更标准的叫法、涉及的符号名/路径,不要放整句话。occurred_at 只认材料里明确写出的日期(如"5月8日发布""2023-07-01 上线");材料没写、只有"上周""前几天"这类相对说法时省略该字段,不许推算或猜测日期。
 
 ## 候选只收四类
 

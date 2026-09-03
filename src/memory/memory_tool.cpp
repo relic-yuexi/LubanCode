@@ -86,6 +86,10 @@ nlohmann::json MemorySaveTool::input_schema() const {
                              {"description", tools::ToolText("memory_save", "param.expires_at",
                                                       "可选。临时规约的到期日(YYYY-MM-DD 或 ISO 时间);"
                                                       "到期后不再召回")}}},
+             {"occurred_at", {{"type", "string"},
+                              {"description", tools::ToolText("memory_save", "param.occurred_at",
+                                                       "可选。事实事件的发生时间(YYYY-MM-DD 或 ISO 时间)。"
+                                                       "只在材料里明确给出时填;提不出就省略,不许猜日期")}}},
          }},
         {"required", {"kind", "title", "summary", "content"}},
     };
@@ -109,6 +113,7 @@ tools::Tool::Result MemorySaveTool::execute(const nlohmann::json& input) {
     request.content = input["content"].get<std::string>();
     request.confidence = input.value("confidence", std::string());
     request.expires_at = input.value("expires_at", std::string());
+    request.occurred_at = input.value("occurred_at", std::string());
     if (input.contains("scope") && input["scope"].is_object()) {
         request.scope.kind = input["scope"].value("kind", std::string("project"));
         request.scope.value = input["scope"].value("value", std::string());

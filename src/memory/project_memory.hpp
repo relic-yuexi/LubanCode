@@ -151,6 +151,9 @@ struct SaveRequest {
     MemoryScope scope;
     std::vector<MemoryEvidence> evidence;
     std::string expires_at;               // 空 = 永不过期;ISO 日期或日期时间
+    // 时间线锚点(记忆写入侧改进单):fact 事件发生时间,从材料里提——
+    // 提不出留空,不造假。注入侧带时间的多条召回按它排成时间线。
+    std::string occurred_at;              // 空 = 材料里没有时间;ISO 日期或日期时间
 };
 
 struct MemoryEntry {
@@ -171,6 +174,9 @@ struct MemoryEntry {
     std::vector<MemoryEvidence> evidence;
     std::string last_verified_at;
     std::string expires_at;  // 空 = 永不过期
+    // 时间线锚点(schema 3 演进,向后兼容):fact 事件发生时间,旧条目无此
+    // 字段读入为空,不参与时间排序。frontmatter 键 occurred_at,catalog 同名。
+    std::string occurred_at;
     // schema 3 新增:name 是文件 slug(层内唯一),id 去掉类型前缀便是;
     // created_at 记首次创建(旧主题读入时用 updated_at 补);schema 记这份
     // 主题当下的格式(1/2/3),经 upsert/verify 改写后一律成 3。
@@ -218,6 +224,11 @@ struct TraceTerm {
 // 之后要么归半角要么当分隔符,不再黏进中文二元词。
 std::string NormalizeForRetrieval(const std::string& text);
 
+// occurred_at/expires_at 的宽松日期形状(YYYY-MM-DD 起头,可带 ISO 时
+// 间;字典序即时间序)。写入校验与抽取侧清洗共用:模型给的日期不像样就
+// 落空,不造假也不拦整条保存。
+bool LooksLikeMemoryDate(const std::string& raw);
+
 // 标识符拆分 + 中英混排分词:camelCase/snake_case/kebab/路径段都拆
 // (BuildTurnContext -> build/turn/context),中文出双字片段;查询与
 // 索引共用同一套。
@@ -247,6 +258,7 @@ struct MemoryCandidate {
     std::string confidence;   // user-stated | verified | inferred
     std::string task_type;    // code | research | config | docs | other
     std::string created_at;
+    std::string occurred_at;  // 时间线锚点:材料里有才填,accept 时转正式条目
 };
 
 struct RuntimeStatus {

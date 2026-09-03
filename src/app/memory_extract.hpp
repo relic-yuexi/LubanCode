@@ -26,6 +26,7 @@ struct ProposedCandidate {
     std::vector<std::string> keywords;
     std::vector<std::string> paths;
     std::string confidence;   // user-stated | verified | inferred
+    std::string occurred_at;  // 事件发生时间:材料里明确给出才填,否则空(不造假)
 };
 
 struct MemoryExtraction {
