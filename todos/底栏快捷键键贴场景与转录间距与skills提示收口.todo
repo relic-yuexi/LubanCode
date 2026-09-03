@@ -1,6 +1,6 @@
 # 底栏键贴场景 + 转录空行 + /skills 提示收口
 
-- 状态：待修
+- 状态：已修（2026-09-04 接管工头落地，worktree-agent-ad337762d60651f3b 分支，先红后绿；P0/P1-1/P2 全验，P1-2 测试钉死+真终端复现留白；全量 376 册中 374 绿，另 2 册与本单无关——见文末落地记录）
 - 日期：2026-09-03
 - 类型：LubanCode 产品缺陷（交互 affordance + 转录间距）
 - 用户现场：四件并发现象，按编号独立可验；本单不分发，关 P0/P1/P2 一并立项
@@ -272,3 +272,27 @@ P1-2 的根因要 §三 P1-1 跑完才能完全定位——若 P1-1 引入共享
 - 子代理 D：P1-2（Subagent 工具卡间距）——等 P1-1 `role_of` 提交后开工
 
 聚焦测试：P0 + P1-1 + P2 同时开工；P1-2 等 P1-1 `role_of` 提交后再开。
+
+## 七、落地记录（2026-09-04，接管工头）
+
+四件全落，分支 `worktree-agent-ad337762d60651f3b`（未合 main）。单子基于 0.26.193 前版式，底栏项按当前 main 现状解读：速览行已是左右槽结构（`ChromeAssistRow`）、装配器已是 `BuildBottomChromeModel` 唯一口——P0 在此骨架上退化左槽，非重建。
+
+- **P0（底栏三键键贴场景）**：`BuildComposerAssistRow` 左槽清空（留白），右槽帮助入口保留；`Ctrl+G` 挪 composer 框内——新增 `BuildComposerGHint`（门槛 `kComposerGHintMinRows=4` 行或 `kComposerGHintMinChars=80` 字，常量入 `console_input_internal.hpp`；和弦走 `ChordFor(ChatExternalEditor)` 反查，改绑跟脚），装配器仅 Idle 填 `ComposerViewModel.g_hint`，布局贴 composer 框最末输入物理行右内角（`bottom_chrome.cpp`），Busy 不画（Busy 路无外部编辑器键，keymap 读侧纪律同款）；`Ctrl+R` 不新增面板行——现状搜索面板头行已反查 `SearchOlder`（Ctrl+R 更早）等键位（`test_history_search.cpp:272` 已钉），底栏不再出现；`Ctrl+O` 从底栏拿掉（角标贴工具卡头部归后续单，未做）。
+- **P1-1（主面板思考后空行）**：`RoleOf(TranscriptItem)` 提取到 `transcript.hpp/cpp` 公开，`FormatTranscriptItems` 内联 lambda 换用；`RenderTurnView` 主循环每条非首条 item 前按 `GapBetween(previous_role, RoleOf(item))` 垫空行，`previous_role` 跟随实际最后一条打印块，user 块后硬编码的 `UserPrompt->Thinking` 垫行删除（由下一条自决），step 换拍轻间隔与 GapBetween 触发时只走一条不双打，footer 前间距同吃 `previous_role`。黄金画面（`test_turn_view.cpp`）「同拍工具不垫空行」断言随版式并轨更新为「同拍恰一口」——单子 §2.2 已把「工具与工具之间没有第二口空行」明列病灶，旧断言是前一张单的版式遗留。
+- **P1-2（Subagent 工具卡间距）**：先写探因测试证实现状——当前 main 上同构渲染单已把 `FormatTranscriptItems` 收进间距表（printed_any+GapBetween），查看页路径已不挤（旧代码上探因用例绿）。本单补三景钉子守住口径：终态卡之间、Running 卡（无摘要行）之间、收定思考卡与工具卡之间都恰一口且不双打。**真终端复现留白**（本环境无真控制台，单子 §三 P1-2 步骤 1 与 §五 的截图验收欠着）。
+- **P2（skills 旁快捷键 hint）**：回归出处查实——0.29.x 收口审计单 §二 P1 删 `input.shortcuts_hint` 兜底路时把 skills 行旁帮助提示一并带走。本单按验收形态恢复：`BuildComposerModeLine` 加 `right_hint` 参（skills 右侧内联「`? 快捷键`」，窄屏整段放不下先丢 hint 段保 skills）；hint 原文由装配器 `BuildSkillsHintText` 从 `ChordFor(HelpShow)` 反查拼好传入（函数保持纯），**仅 Idle 拼**——footer 路在监听线程重画，ActiveKeymap 读侧纪律（keymap.hpp）不许它查表；「忙闲同源」用例把这一处立为显式场景差量（与速览行同类），skills 段两边仍一字不差。i18n 新增 `status.skills_hint`（zh 快捷键 / en keys）。单子原文的「Ctrl+K 技能面板」按现状弃用——Ctrl+K 实际是 agent.stop_all_confirm（面板停全部两段确认），非技能面板。
+
+### 验收账（先红后绿证据）
+
+| 件 | 先红（旧代码） | 后绿 |
+| --- | --- | --- |
+| P0 | `test_bottom_chrome.cpp` 1010/1015-1017/1094/1098/1181/1185（左槽三键在、Ctrl+G 不画、改绑不跟脚） | 全绿 |
+| P1-1 | `test_transcript.cpp` 921/939（思考行后无空行、工具卡间无空行）+ `test_turn_view.cpp` 663（同拍无空行） | 全绿 |
+| P1-2 | 探因用例在旧代码即绿（同构渲染单已修）；Running 卡首版断言红是文案笔误（search 走兜底 JSON 标题），修正后绿 | 绿（钉住） |
+| P2 | `test_bottom_chrome.cpp` 1127/1146（右槽无 hint） | 全绿 |
+
+聚焦册 8 册全绿（cli.transcript / cli.bottom_chrome / cli.keymap / cli.history_search / cli.render_boundaries / cli.transcript_controller / runtime.turn_view / app.agent_task_transcript）。全量 376 册 374 绿：`unit.app_server.app_server_domain_commands` 为 -j8 并行抖动（单跑过）；`unit.memory.memory_global_gate` 为 **main 基线既有红**（主树 exe 单跑同红，与本单改动面零交集，另行立项）。
+
+### 遗作吸收（orphan-wip a122b74a 对照）
+
+主会话四子代理遗作缝合版对照过：P1-1 的 turn_renderer 骨架与 RoleOf 签名吸收（本单实现等价、注释重写）；P0 的 g_hint 画法（composer 框最末物理行右内角）吸收，但构造器弃遗作的写死文案 `hint.composer.editor`、改 keymap 反查（与速览右槽同一把尺）；遗作 Busy 也画 g_hint，本单按单子「仅 Idle」不画。两处已知裁决：keymap 占键冲突——本单改绑用例用 alt+e（Composer 域无占用）；history_search「唤起」行——**不采纳**（面板头行现状已有反查键位，再挂「按 Ctrl+R 唤起」是废话），遗作该测试不搬。

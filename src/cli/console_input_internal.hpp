@@ -87,7 +87,11 @@ struct BoxChrome {
     const Theme* theme = nullptr;
     ConfirmMode mode = ConfirmMode::Confirm;
 };
-std::string BuildComposerModeLine(const BoxChrome& chrome, int skill_count, int max_width);
+// right_hint(可空):skills 右侧附的帮助入口小字(收口单 P2,和弦文本由
+// 装配器从 ActiveKeymap 反查拼好传入——本函数保持纯,不碰 keymap;Busy
+// 路传空)。右槽整段放不下时先丢 hint 段保 skills(窄屏折叠)。
+std::string BuildComposerModeLine(const BoxChrome& chrome, int skill_count, int max_width,
+                                  const std::string& right_hint = std::string());
 std::size_t SessionSkillCount();
 
 // ---------------------------------------------------------------------------
@@ -130,6 +134,15 @@ BottomChromeModel BuildBottomChromeModel(const BottomChromeScene& scene);
 // 场景没有帮助层与这些快捷键,不置速览行(是否显示由场景决定,不由翻译
 // 硬补)。读 ActiveKeymap,只在空闲主线程调。
 ChromeAssistRow BuildComposerAssistRow();
+
+// ---- Ctrl+G 键贴 composer 框(收口单 P0) ----------------------------------
+// 草稿够长才画「Ctrl+G 编辑器」小注(贴 composer 框右下角,和弦文本从
+// keymap 反查,改绑跟脚)。门槛:逻辑行数 >= kComposerGHintMinRows,或
+// 全文码点数 >= kComposerGHintMinChars——短草稿不添噪,真用得上编辑器的
+// 时候才露脸。未过门槛/无绑定给空串(调用方不画)。
+inline constexpr int kComposerGHintMinRows = 4;
+inline constexpr int kComposerGHintMinChars = 80;
+std::string BuildComposerGHint(const RenderState& editor);
 
 // 正式资料行构造器(收口审计单 §二 P0):输入框下横线之下的完整状态资料
 // (model/effort/cwd/branch/context/tokens/cache/REC/WT/tools/Plan/goal/
