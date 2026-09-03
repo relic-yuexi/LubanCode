@@ -4,6 +4,7 @@
 #include <fstream>
 #include <sstream>
 
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
 #include "workspace/storage_contracts.hpp"
 
@@ -14,23 +15,7 @@ namespace fs = std::filesystem;
 using platform::PathToUtf8;
 
 bool WriteTextFileAtomic(const fs::path& path, const std::string& content) {
-    fs::path tmp = path;
-    tmp += ".tmp";  // 纯 ASCII 后缀,窄口拼接不涉代码页
-    {
-        std::ofstream file(tmp, std::ios::binary | std::ios::trunc);
-        if (!file.is_open()) {
-            return false;
-        }
-        file.write(content.data(), static_cast<std::streamsize>(content.size()));
-        file.flush();
-        if (!file.good()) {
-            file.close();
-            std::error_code ignored;
-            fs::remove(tmp, ignored);
-            return false;
-        }
-    }
-    return platform::ReplaceFileAtomically(tmp, path).has_value();
+    return platform::AtomicWriteFile(path, content).has_value();
 }
 
 std::string ReadTextFile(const fs::path& path) {

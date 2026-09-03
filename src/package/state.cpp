@@ -10,6 +10,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
 
 namespace lubancode::package {
@@ -155,24 +156,11 @@ std::optional<std::string> PackageStateStore::Save() {
     }
     root["packages"] = std::move(packages);
 
-    // 原子写:先落临时文件再换名(平台层 ReplaceFileAtomically),照信任
-    // 账的同款惯例。
+    // 原子写,统一走 platform::AtomicWriteFile,照信任账的同款惯例。
     const std::filesystem::path target(reinterpret_cast<const char8_t*>(path_->c_str()));
-    std::filesystem::path temp = target;
-    temp += ".tmp";
-    {
-        std::ofstream out(temp, std::ios::binary | std::ios::trunc);
-        if (!out.is_open()) {
-            return "Package 启停账写不进去: " + *path_;
-        }
-        out << root.dump(2);
-        if (!out.good()) {
-            return "Package 启停账写一半失败: " + *path_;
-        }
-    }
-    const auto replaced = platform::ReplaceFileAtomically(temp, target);
-    if (!replaced.has_value()) {
-        return "Package 启停账落盘失败: " + replaced.error();
+    const auto written = platform::AtomicWriteFile(target, root.dump(2));
+    if (!written.has_value()) {
+        return "Package 启停账落盘失败: " + written.error().message;
     }
     dirty_ = false;
     return std::nullopt;
