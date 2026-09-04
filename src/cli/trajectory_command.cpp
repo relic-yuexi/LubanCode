@@ -11,6 +11,7 @@
 #include "platform/paths.hpp"
 #include "tools/path_utils.hpp"
 #include "trajectory/harness.hpp"
+#include "trajectory/harness_exporter.hpp"
 #include "trajectory/metrics.hpp"
 #include "trajectory/replay.hpp"
 #include "trajectory/safety.hpp"
@@ -130,11 +131,53 @@ int RunDoctor(const std::filesystem::path& workspace_dir, const std::string& key
     return 0;
 }
 
+// export --format harness-v1(One-shot 轨迹指定输出单 §七补导路):把
+// session 账投影成便携 JSONL,落 --output 点名的路径(缺省 session 目录
+// 下的 exports/harness-v1/)。退出码照 trajectory 命令族:0/1/2。
+int RunHarnessExport(const std::filesystem::path& root, const TrajectoryCommandArgs& args) {
+    if (args.session_id.empty()) {
+        std::cerr << "缺 session id: lubancode trajectory export <session-id>"
+                     " --format harness-v1 [--output <文件路径>]\n";
+        return 1;
+    }
+    const auto session_dir = FindSessionDir(root, args.session_id);
+    if (session_dir.empty()) {
+        std::cerr << "找不到 session " << args.session_id << "(在 " << platform::PathToUtf8(root)
+                  << " 的 workspaces/*/sessions/ 下没有)\n";
+        return 1;
+    }
+    const auto target = args.output_path.empty()
+                            ? session_dir / "exports" / "harness-v1" / "trajectory.jsonl"
+                            : tools::Utf8ToPath(args.output_path);
+    // 补导路不知道原进程退出码,给 null——诚实,不拿 0 冒充。
+    const trajectory::HarnessExportOptions options;
+    const auto report =
+        trajectory::ExportSessionHarnessV1(session_dir, target, options, std::nullopt);
+    if (!report.ok()) {
+        std::cerr << "harness-v1 导出未过(" << report.error_code << "): " << report.message
+                  << "\n";
+        return report.error_code == "export.no_session_dir" ||
+                       report.error_code == "export.no_streams"
+                   ? 1
+                   : 2;
+    }
+    // 收据行(与 one-shot --output 的 stderr 收据同一形状,机器可解析)。
+    std::cout << "[harness-export] schema=" << report.schema << " schema_version="
+              << report.schema_version << " session_id=" << report.session_id
+              << " records=" << report.records << " sha256=" << report.sha256
+              << " path=" << platform::PathToUtf8(report.target) << "\n";
+    return 0;
+}
+
 // export/export-workspace(P0-5 §十一/§十四):Journal 只读投影成 training-v1
 // 数据集。trajectory 关的会话没账可导——报空退 1,不造假。
 int RunExport(const std::filesystem::path& root, const TrajectoryCommandArgs& args) {
+    if (args.format == "harness-v1") {
+        // export --format harness-v1 走专门的便携 JSONL 投影(补导路)。
+        return RunHarnessExport(root, args);
+    }
     if (args.format != "training-v1") {
-        std::cerr << "只认 --format training-v1,不认 \"" << args.format << "\"\n";
+        std::cerr << "只认 --format training-v1 或 harness-v1,不认 \"" << args.format << "\"\n";
         return 1;
     }
     const trajectory::TrainingExportOptions options;  // 默认档:reasoning 剔除、

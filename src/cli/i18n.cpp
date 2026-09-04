@@ -1079,6 +1079,16 @@ const Entry kZhCN[] = {
     {"oneshot.ledger_open_failed", "轨迹账开张失败,单发不启动: "},
     {"oneshot.ledger_close_failed", "轨迹账收口失败: "},
     {"oneshot.ledger_note", "[tokens] 汇总行之外,细账(逐请求 usage/cache 分列/工具流水)已落轨迹会话 {0}"},
+    // ---- 单发 --output(Harbor Harness 派生 JSONL 单:早验与导出诊断;
+    //      收据行不进 i18n,稳定可解析)----
+    {"cli.output_mode_mismatch",
+     "--output 只在带任务正文的单发模式有效:lubancode --yes --output <文件路径> \"<任务正文>\";"
+     "交互模式、app-server 与各子命令都不认它"},
+    {"oneshot.output_invalid", "--output 路径解析不了: {0}({1})"},
+    {"oneshot.output_target_is_dir", "--output 的目标是目录,不是文件: {0}"},
+    {"oneshot.output_parent_unavailable", "--output 的父目录建不成/不可用: {0}({1})"},
+    {"oneshot.output_not_writable", "--output 的父目录不可写: {0}"},
+    {"oneshot.harness_export_failed", "[trajectory] --output 导出未过({0}): {1}"},
     {"stats.usage_not_reported", "(usage 未报告)"},
     {"stats.cache_not_reported", "(该 provider 未报缓存)"},
     {"stats.cache_disabled", "(服务端未启用前缀缓存)"},
@@ -3168,6 +3178,17 @@ const Entry kEn[] = {
     {"oneshot.ledger_close_failed", "trajectory ledger failed to close: "},
     {"oneshot.ledger_note",
      "[tokens] per-request detail (usage, cache split, tool trace) is in trajectory session {0}"},
+    // ---- one-shot --output (Harbor harness JSONL export; the receipt line
+    //      stays outside i18n so it remains machine-parseable) ----
+    {"cli.output_mode_mismatch",
+     "--output is only valid in one-shot mode with a task prompt: lubancode --yes --output "
+     "<file-path> \"<task instruction>\"; interactive mode, app-server and subcommands reject it"},
+    {"oneshot.output_invalid", "--output path cannot be resolved: {0} ({1})"},
+    {"oneshot.output_target_is_dir", "--output target is a directory, not a file: {0}"},
+    {"oneshot.output_parent_unavailable",
+     "--output parent directory cannot be created or reached: {0} ({1})"},
+    {"oneshot.output_not_writable", "--output parent directory is not writable: {0}"},
+    {"oneshot.harness_export_failed", "[trajectory] --output export failed ({0}): {1}"},
     {"cmd.sessions.oneshot_line", "      one-shot session (auditable, not resumable)"},
 
     // ---- pipe mode stable output ----

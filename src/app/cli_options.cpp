@@ -129,8 +129,9 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
         // P0-3 轨迹子命令:lubancode trajectory <verify|replay|harness-replay>
         // <session-id>;P0-4 增 usage|gc|doctor <workspace-key> 与 gc 的
         // --dry-run/--derived-only;P0-5 增 export/export-workspace 与
-        // --format training-v1。只认裸词打头且此前没有位置参数;形状
-        // 不对当场退用法。
+        // --format training-v1;Harbor Harness 派生 JSONL 单增 export 的
+        // --format harness-v1 与 --output <path>(补导路)。只认裸词打头且
+        // 此前没有位置参数;形状不对当场退用法。
         if (arg == "trajectory" && options.positional.empty()) {
             static const std::set<std::string> kVerbs = {
                 "verify", "replay", "harness-replay", "usage",
@@ -152,9 +153,9 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
             TrajectoryCliArgs trajectory;
             trajectory.verb = args[i + 1];
             trajectory.session_id = args[i + 2];
-            trajectory.format = "training-v1";  // 唯一实现的目标格式(§十四)
+            trajectory.format = "training-v1";  // 缺省格式(§十四)
             // 修饰词只能跟在 id 之后:gc 的 --dry-run/--derived-only 与
-            // export 的 --format <名>。
+            // export 的 --format <名> / --output <path>(harness-v1 专用)。
             for (std::size_t extra = i + 3; extra < args.size(); ++extra) {
                 if (args[extra] == "--dry-run") {
                     continue;  // 默认档,明写也认
@@ -167,24 +168,53 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                     if (extra + 1 >= args.size()) {
                         parsed.action = CliAction::BadTrajectory;
                         parsed.error_text = "trajectory " + trajectory.verb +
-                                            " 的 --format 需要一个值(当前只认 training-v1)";
+                                            " 的 --format 需要一个值(training-v1 | harness-v1)";
                         return parsed;
                     }
                     trajectory.format = args[++extra];
                     continue;
                 }
+                if (args[extra] == "--output") {
+                    if (extra + 1 >= args.size() || args[extra + 1].empty()) {
+                        parsed.action = CliAction::BadTrajectory;
+                        parsed.error_text =
+                            "trajectory export --format harness-v1 的 --output 需要一个文件路径";
+                        return parsed;
+                    }
+                    trajectory.output_path = args[++extra];
+                    continue;
+                }
                 parsed.action = CliAction::BadTrajectory;
                 parsed.error_text = "trajectory " + trajectory.verb + " 认不得参数 \"" + args[extra] +
-                                    "\":只认 --dry-run / --derived-only / --format <名>";
+                                    "\":只认 --dry-run / --derived-only / --format <名> / --output <路径>";
                 return parsed;
             }
-            if ((trajectory.verb == "export" || trajectory.verb == "export-workspace") &&
-                trajectory.format != "training-v1") {
-                parsed.action = CliAction::BadTrajectory;
-                parsed.error_text =
-                    "trajectory " + trajectory.verb + " 只认 --format training-v1,不认 \"" +
-                    trajectory.format + "\"";
-                return parsed;
+            if (trajectory.verb == "export") {
+                if (trajectory.format != "training-v1" && trajectory.format != "harness-v1") {
+                    parsed.action = CliAction::BadTrajectory;
+                    parsed.error_text = "trajectory export 只认 --format training-v1 或 "
+                                        "harness-v1,不认 \"" +
+                                        trajectory.format + "\"";
+                    return parsed;
+                }
+                if (!trajectory.output_path.empty() && trajectory.format != "harness-v1") {
+                    parsed.action = CliAction::BadTrajectory;
+                    parsed.error_text = "--output 只在 --format harness-v1 下有效";
+                    return parsed;
+                }
+            } else {
+                if (trajectory.format != "training-v1") {
+                    parsed.action = CliAction::BadTrajectory;
+                    parsed.error_text =
+                        "trajectory " + trajectory.verb + " 只认 --format training-v1,不认 \"" +
+                        trajectory.format + "\"";
+                    return parsed;
+                }
+                if (!trajectory.output_path.empty()) {
+                    parsed.action = CliAction::BadTrajectory;
+                    parsed.error_text = "--output 只在 trajectory export --format harness-v1 下有效";
+                    return parsed;
+                }
             }
             if (trajectory.session_id.rfind("-", 0) != 0 &&
                 trajectory.session_id.find("/") == std::string::npos &&
@@ -353,6 +383,22 @@ ParsedCliArgs ParseCliArgs(const std::vector<std::string>& args) {
                 return parsed;
             }
             options.package_dirs.push_back(args[++i]);
+            continue;
+        }
+        if (arg == "--output") {
+            // Harbor Harness 派生 JSONL 单:one-shot 收口后的轨迹导出落点。
+            // 缺值/空值当场退;值照单全收(与 --system-prompt 同规矩,下一
+            // 参数就是值,不猜它是不是旗标)。模式错配(交互/app-server/
+            // 子命令)归 RunCli 的门卫,解析层只管形状。
+            if (i + 1 >= args.size() || args[i + 1].empty()) {
+                parsed.action = CliAction::BadOutput;
+                parsed.error_text =
+                    "--output 需要一个文件路径(单发模式专用:lubancode --yes --output "
+                    "<文件路径> \"<任务正文>\")";
+                return parsed;
+            }
+            options.output_path = args[++i];
+            options.output_given = true;
             continue;
         }
         if (arg == "--reset-system-prompt") {

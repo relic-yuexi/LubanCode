@@ -21,9 +21,13 @@ struct TrajectoryCommandArgs {
     // gc 档:DryRun 只报账(默认);DerivedOnly 真删可重建/派生物(§12.2
     // 次序 temp→index→checkpoint→derived;canonical 与 artifacts 永不进候选)。
     bool gc_derived_only = false;
-    // export/export-workspace 档:目标格式(cli_options 已钉只认 training-v1,
-    // 这里再核一遍,双保险)。
+    // export/export-workspace 档:目标格式(cli_options 已钉只认 training-v1
+    // 与 harness-v1,这里再核一遍,双保险)。
     std::string format;
+    // export --format harness-v1 档:导出落点。空 = <session>/exports/
+    // harness-v1/trajectory.jsonl。补导路(one-shot 导出失败后按 session id
+    // 重导)由它把账重新递给外接 harness(One-shot 轨迹指定输出单 §七)。
+    std::string output_path;
 };
 
 // 返回进程退出码:0 = 过;1 = 用法/找不到;2 = 验账/replay/导出未过。

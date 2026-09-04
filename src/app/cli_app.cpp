@@ -465,6 +465,48 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
     return server.Run();
 }
 
+// 单发 --output 的发模型前早验(Harbor Harness 派生 JSONL 单 §三):缺值/
+// 空值已在解析层拦;这里查目标形状与父目录可达性——目标是目录、父目录
+// 建不成、不可写,均在发模型前尽早明报,不让模型白跑一趟。相对路径按
+// 当前工作目录解析(容器内 cwd)。回 nullopt = 可用(absolute 收回);
+// 有值即错误人话。
+std::optional<std::string> ValidateOneShotOutputTarget(const std::string& output_arg,
+                                                       std::filesystem::path* absolute_out) {
+    std::error_code ec;
+    const auto absolute = std::filesystem::absolute(lubancode::tools::Utf8ToPath(output_arg), ec);
+    if (ec || absolute.empty()) {
+        return trf("oneshot.output_invalid", output_arg, ec.message());
+    }
+    if (std::filesystem::is_directory(absolute, ec)) {
+        return trf("oneshot.output_target_is_dir", output_arg);
+    }
+    const auto parent = absolute.parent_path();
+    if (!parent.empty()) {
+        std::error_code mkdir_ec;
+        if (!std::filesystem::is_directory(parent, mkdir_ec)) {
+            std::filesystem::create_directories(parent, mkdir_ec);
+        }
+        if (!std::filesystem::is_directory(parent, mkdir_ec)) {
+            return trf("oneshot.output_parent_unavailable", PathToUtf8(parent), mkdir_ec.message());
+        }
+        // 可写探针:同目录开一枚探针文件(append 态,不截别人的文件);
+        // 开不动就是不可写(§三"父目录不可建或不可写")。
+        const auto probe = parent / "lubancode-output-probe.tmp";
+        const bool existed = std::filesystem::exists(probe, ec);
+        {
+            std::ofstream out(probe, std::ios::binary | std::ios::app);
+            if (!out.good()) {
+                return trf("oneshot.output_not_writable", PathToUtf8(parent));
+            }
+        }
+        if (!existed) {
+            std::filesystem::remove(probe, ec);
+        }
+    }
+    *absolute_out = absolute;
+    return std::nullopt;
+}
+
 // 真正的入口逻辑,跟平台无关:args[0] 是程序名,args[1..] 是实参。
 // Windows 下 argv 单独处理(见文件末尾的 wmain),是为了绕开 Windows
 // 那套"窄字符 argv 按系统 ANSI 代码页解码"的老规矩——命令行里的中文字符
@@ -500,6 +542,19 @@ int RunCli(const std::vector<std::string>& args) {
     // 继续启动。次序与旧的内联扫描一致——动作在 i18n 早初始化之后、配置
     // 加载之前当场退出。
     const ParsedCliArgs parsed_cli = ParseCliArgs(args);
+    // --output 模式门卫(Harbor Harness 派生 JSONL 单 §三):--output 只在
+    // 带任务正文的单发模式有效。交互模式、app-server、会话管理与其他
+    // 子命令带了它就明报 cli.output_mode_mismatch——不当普通位置参数吞,
+    // 更不悄悄拼进问题正文。子命令自家循环里认得的 --output(trajectory
+    // export 的补导路)走 TrajectoryCliArgs,不进这枚旗标,不受影响。
+    if (parsed_cli.options.output_given) {
+        const bool one_shot_mode =
+            parsed_cli.action == CliAction::Proceed && !parsed_cli.options.positional.empty();
+        if (!one_shot_mode) {
+            std::cerr << tr("cli.output_mode_mismatch") << "\n";
+            return 1;
+        }
+    }
     switch (parsed_cli.action) {
         case CliAction::RunPluginInit:
             return HandlePluginInitCommand(parsed_cli.plugin_init);
@@ -541,9 +596,14 @@ int RunCli(const std::vector<std::string>& args) {
             trajectory_args.session_id = parsed_cli.trajectory.session_id;
             trajectory_args.gc_derived_only = parsed_cli.trajectory.gc_derived_only;
             trajectory_args.format = parsed_cli.trajectory.format;
+            trajectory_args.output_path = parsed_cli.trajectory.output_path;
             return cli::RunTrajectoryCommand(trajectory_args);
         }
         case CliAction::BadTrajectory:
+            std::cerr << parsed_cli.error_text << "\n";
+            return 1;
+        case CliAction::BadOutput:
+            // Harbor Harness 派生 JSONL 单:--output 缺值/空值,明报退出。
             std::cerr << parsed_cli.error_text << "\n";
             return 1;
         case CliAction::RunGateway: {
@@ -790,6 +850,19 @@ int RunCli(const std::vector<std::string>& args) {
             return 1;
         }
         if (!cli_options.positional.empty()) {
+            // --output 早验(Harbor Harness 派生 JSONL 单 §三,发模型前):
+            // 目标是目录/父目录建不成/不可写就退 1;相对路径按当前工作目录
+            // 解析成绝对路径传下去(收据与导出都以绝对路径结算)。
+            std::string harness_output_absolute;
+            if (cli_options.output_given) {
+                std::filesystem::path output_absolute;
+                if (const auto output_error =
+                        ValidateOneShotOutputTarget(cli_options.output_path, &output_absolute)) {
+                    std::cerr << *output_error << "\n";
+                    return 1;
+                }
+                harness_output_absolute = PathToUtf8(output_absolute);
+            }
             // 单发模式/管道模式:不进向导(没有交互终端可问),缺配置直接
             // 报可读的错,指路三条配置途径。
             const auto configured_check = lubancode::config::RequireConfigured(*config_result);
@@ -819,7 +892,7 @@ int RunCli(const std::vector<std::string>& args) {
             return AskOnce(once_config, cli_options.positional, cli_options.auto_confirm, theme, persona,
                             spinner_enabled,
                             settings_local, catalog_apply.base_instructions, soul_content,
-                            cli_options.package_dirs);
+                            cli_options.package_dirs, harness_output_absolute);
         }
 
         // 交互模式缺连接时开欢迎页。用户可以直接添 provider，也可以明选
