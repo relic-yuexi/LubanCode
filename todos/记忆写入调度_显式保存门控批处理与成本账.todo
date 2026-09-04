@@ -1,0 +1,657 @@
+# 记忆写入调度：显式保存、零成本门控、批处理与成本账
+
+- 状态：待实施（2026-09-05）
+- 级别：P0（成本、交互延迟与写入语义）；自动归并按 P1 办
+- 范围：回合尾记忆抽取、显式保存、写入权限、抽取调度、候选动作、Token 与触发率账
+- 当前基线：`memory.enabled=false`；开启后 `learn=review`；每个有新增 history 的合格用户回合都同步跑一次抽取
+- 依赖：现有 `ProjectMemory`、`ModelRouterService`、Memory candidate/job/worker、BM25 召回与旁路 Token 账
+- 关联：`智能体记忆效果_个性化适配续接快照与在线评测.todo`、`LubanCode使用洞察_Token账本与Prompt审计设计.todo`
+- 不在本单：换向量库、云端同步、跨用户画像、重做召回排序、把 compact 摘要当记忆、自动静默硬删除
+
+## 一、先下断语
+
+眼下最贵的不是抽取模型，而是调用时机。
+
+现行写路只要看见本轮 history 增长，便同步请模型再审一遍。用户说“好”“继续”也可能
+走一遭。模型最后即便一条不存，请求照发，Token 照花，收尾照等。
+
+本单定案：
+
+1. 用户明确要求记住时，主回合直接保存，不另起抽取请求。
+2. 本轮已经成功写过或忘过记忆，回合尾抽取立即收手。
+3. 先用宿主里的确定性规则筛选；筛不过，不叫模型。
+4. 自动抽取攒批跑，不再默认每个有效用户回合各发一枪。
+5. “谁可以写”与“何时自动抽取”拆成两轴，不能再让 `learn=off` 一把锁死全部写路。
+6. 抽取前先用本地索引找旧主题，让模型选 `noop/create/update/merge/archive`，少生重复条目。
+7. 自动删除不落地。模型只可提 `archive` 候选，用户或既有安全闸裁决。
+8. 先量真实触发率，再谈节省比例。离线 272 发不能冒充线上分布。
+
+目标不是把 cheap 模型换得更 cheap。目标是大多数回合压根不调用它。
+
+## 二、现状证据（2026-09-05）
+
+### 2.1 回合尾只查“有没有新增 history”
+
+`src/app/commands/memory_commands.cpp::ExtractTurnMemory()` 眼下只有这些前置门：
+
+```text
+project_memory != nullptr
+generate_enabled() == true
+history_before < history.size()
+BuildTurnTranscript(...) 非空
+```
+
+随后便构造 prompt，调用 `ModelRouterService::Sample(MemoryExtract, ...)`。这里没有：
+
+- 最短用户正文；
+- 有效词数；
+- 本轮已保存记忆标记；
+- 距上次抽取的消息数；
+- 是否出现新偏好、新纠错或新证据；
+- idle/session-end/compact 批处理水位。
+
+抽取正文虽截到 24 KiB，调用本身仍是一轮模型请求。
+
+### 2.2 这条调用同步压在用户回合尾
+
+当前请求走 cheap 角色，没配 cheap_model 时回落 normal。单次输出上限 1500 token，超时
+45 秒。失败不会拖垮主回答，却会让交互收尾多等一段。
+
+`src/app/interactive_session.cpp` 在外层 turn 完成后直接调用 `ExtractTurnMemory()`。眼下没有
+后台 extraction queue，也没有 idle debounce。
+
+### 2.3 `learn` 把两件事绑在一起
+
+`ProjectMemory::generate_enabled()` 当前等于：
+
+```cpp
+global_allowed && enabled && learn != LearnMode::Off
+```
+
+它同时控制：
+
+- 回合尾自动抽取；
+- `memory_save` 是否进入工具表；
+- 工具运行时是否仍可执行；
+- `/memory remember` 是否能排写入 job；
+- candidate 是否能新增、接受。
+
+故 `learn=off` 不是“别自动学”，而是“本场谁也不许写”。用户亲口要求保存，也会收到
+“本场记忆写入未开启”。读路另由 `enabled/use` 控制，已有记忆仍可召回。
+
+### 2.4 主回合写过，尾部仍可能再抽
+
+`memory_save` 成功后只排 upsert job。外层 turn 没有一枚 `memory_mutated_this_turn` 状态，
+`ExtractTurnMemory()` 也不查此事。于是同一份用户意图可能经历两道判断：
+
+```text
+主模型 memory_save
+        +
+回合尾 memory_extract
+```
+
+这既多花一发，也可能添出重复候选。
+
+### 2.5 现有成本数据能算单价，不能算真实触发率
+
+`eval/locomo/summary_quality.md` 记着一轮真模型对照：272 个 session，各发一次新 prompt。
+
+```text
+requests       272
+failed retry     0
+input       430,733
+output       47,156
+```
+
+折到每发，约 1,584 input、173 output，合计约 1,757 token。聊天材料 272/272 没留下生产
+候选；调用成本却已经付清。
+
+这批试验故意“一 session 一发”，用来比较摘要质量。它没有量自然会话中多少回合应当启动
+抽取，也没报每条最终接受记忆摊了多少请求。不得把 272 当线上触发率。
+
+## 三、参照：Claude Code 2.1.220 值得借哪几刀
+
+核对材料：本机 `claude --version` 为 2.1.220；二进制里的 memory prompt 与公开文档只作
+设计参照，不当成本实测。
+
+### 3.1 显式意图走主回合
+
+用户说“记住，以后用 pnpm”，主 Claude 直接写。用户点名 `CLAUDE.md`，便改人工规则
+文件。显式保存不必再请 extraction subagent 猜一次。
+
+LubanCode 应保住两种保证：
+
+- `/memory remember ...` 是宿主级确定路径，不靠模型听懂；
+- 普通自然语言由主模型调用 `memory_save`，成功后写本轮账，尾部不再抽。
+
+首版不写一只脆弱的“记住”正则去截断主模型。中英混写、否定句、引用句很容易误判。
+
+### 3.2 模型前先放便宜的闸
+
+Claude 2.1.220 的调度会避开无足够用户正文的片段；当前会话若已直接写过，也不再启动
+后台整理。真正省钱的是少启动，不是把一次整理抠成几十 token。
+
+LubanCode 不必照抄“三个词”这个英文口径。中文没有天然空格，应实现统一的
+`MeaningfulTextStats`：
+
+```text
+unicode_scalar_count
+cjk_char_count
+latin_word_count
+code_token_count
+only_acknowledgement
+only_slash_command
+```
+
+门控结果须带稳定 reason，不能只给一枚 bool。
+
+### 3.3 攒一段再整理
+
+Claude 的 extraction prompt 处理“上次整理以来最近约 N 条消息”，且工具轮数有上限。
+这表明调度粒度不必等于用户回合粒度。
+
+LubanCode 可继续用短 transcript，却应按水位、compact、空闲与会话收口触发。批里每条
+消息仍须带 session/turn 来源，不能揉成一段后失去证据归属。
+
+### 3.4 先看旧记忆，再增改删
+
+Claude 的整理器会先读可能相关的旧文件，再决定新增、更新或删除。LubanCode 已有本地
+BM25 与 catalog，不必另请 selector 模型。抽取前取最相关 3 至 5 条元数据与短摘要即可。
+
+值得学的是“先查重再写”。不照抄静默删除。LubanCode 已有 review、证据和 archive，安全
+边界更硬，应保住。
+
+公开参照：
+
+- https://code.claude.com/docs/en/memory
+
+## 四、不可破的合同
+
+1. `memory.enabled=false` 仍是发行默认；仓库配置不能替用户打开全局记忆。
+2. `memory.use=false` 只关召回；不得暗中改写记忆库。
+3. 用户级记忆仍只认全局授权与用户主动命令；自动抽取不得写 user scope。
+4. 项目事实进 auto 仍须 `verified` 且带项目内证据路径。
+5. inferred 只进 review，不得直写。
+6. 模型猜出的 feedback 不得冒充 user-stated。
+7. 密钥、账号、网页/MCP 原文、整段工具输出仍不保存。
+8. 写入仍走 `EnqueueSave -> pending job -> worker -> 原子替换` 正门。
+9. 自动整理失败不撤销主回答，也不损坏旧 topic/catalog/index。
+10. 抽取调度不能把原始对话另抄一份永久保存。
+11. `/memory remember` 的确定性不得低于现状；配置迁移不能悄悄放宽写权限。
+12. 旧配置在兼容期内按旧语义运行，并给迁移提示；不得同名换义后装作无事。
+
+## 五、两轴配置
+
+### 5.1 目标配置
+
+把写权限与抽取时机拆开：
+
+```json
+{
+  "memory": {
+    "enabled": true,
+    "use": true,
+    "write": "manual",
+    "extract": {
+      "mode": "gated",
+      "batch_messages": 6,
+      "idle_min_messages": 2,
+      "idle_seconds": 60,
+      "max_input_bytes": 24576
+    }
+  }
+}
+```
+
+`write` 四档：
+
+| 档位 | `/memory remember` | 主模型 `memory_save` | 抽取候选 | 自动直写 |
+|---|---:|---:|---:|---:|
+| `off` | 否 | 否 | 否 | 否 |
+| `manual` | 是 | 仅用户明确要求时 | 否 | 否 |
+| `review` | 是 | 是 | 是，进候选箱 | 否 |
+| `auto` | 是 | 是 | 是 | 过现有证据闸后是 |
+
+`extract.mode` 四档：
+
+| 档位 | 行为 |
+|---|---|
+| `off` | 不启动 extraction；显式写仍按 `write` 档执行 |
+| `gated` | 先门控，再按批量水位、compact、idle 或 session-end 调度 |
+| `session_end` | 仅在优雅收口与 compact 前整理积压材料 |
+| `every_turn` | 保留现行路径，供兼容、诊断与 A/B 对照 |
+
+`write=manual + extract.mode=off` 才是“能照用户吩咐记，但不自动学”。这是现行
+`learn=off` 表达不了的一档。
+
+### 5.2 旧 `learn` 迁移
+
+首个版本不可直接改 `learn=off` 含义。建议分两步：
+
+```text
+仅出现旧 memory.learn：走 legacy 映射，行为不变
+出现 memory.write 或 memory.extract：走新合同，拒绝再混写 learn
+```
+
+兼容映射：
+
+| 旧值 | write | extract.mode |
+|---|---|---|
+| `off` | `off` | `off` |
+| `review` | `review` | `every_turn`，兼容期保持旧行为 |
+| `auto` | `auto` | `every_turn`，兼容期保持旧行为 |
+
+待门控评测过线后，只改新配置向导与文档推荐值为 `gated`。旧文件不暗改。再过一个明确
+弃用周期，方可商议移除 `learn`。
+
+## 六、本轮写入账
+
+### 6.1 状态
+
+外层用户 turn 建一份短命状态：
+
+```text
+MemoryTurnState
+  session_id
+  turn_id
+  user_text_stats
+  successful_save_ids[]
+  successful_forget_ids[]
+  accepted_candidate_ids[]
+  durable_signal_reasons[]
+  extraction_gate_decision
+  extraction_gate_reason
+```
+
+它只活在运行时与 typed event 里，不塞进用户 prompt。
+
+### 6.2 谁来记账
+
+- `/memory remember` 排 job 成功，记 `explicit_command_save`。
+- 主工具 `memory_save` 排 job 成功，记 `model_tool_save`。
+- `/memory forget` 成功，记 `explicit_forget`。
+- candidate accept 成功，记 `candidate_accept`。
+- job 只排队未成功执行时，状态写 `queued`；不得冒充已落盘。
+
+回合尾看见任一成功 save/forget/accept，默认 reason=`already_mutated`，不再启动抽取。若未来
+要补“同轮还有第二个无关主题”，须拿真实漏记数据证明，不能先为小概率多烧一发。
+
+## 七、零成本门控
+
+### 7.1 第一层：必跳
+
+下列情况直接跳过，不构造 prompt：
+
+- `write` 不容许候选，或 `extract.mode=off`；
+- 本轮已成功发起显式记忆变更；
+- 没有新增用户正文；
+- 只有空白、标点或 UI 合成消息；
+- 只有 `/memory`、`/help` 一类宿主命令；
+- 只有短确认、短否定、继续指令，且没有新工具证据；
+- 新增 transcript 去掉协议壳后为空。
+
+### 7.2 第二层：耐久信号
+
+通过最短正文门后，还须至少命中一项：
+
+- 用户明确给出跨回合偏好、禁忌或纠错；
+- 配置、依赖、构建、发布合同发生变更并有工具证据；
+- 测试或诊断得出以后仍有用的稳定结论；
+- 新的模块边界、命令入口或操作约束已由源码/运行结果坐实；
+- 用户明确要求稍后仍记得，但主回合未成功保存；
+- compact 将丢弃尚未检查的一段有效材料。
+
+规则只判断“值不值得送审”，不在宿主里写最终记忆正文。命中原因进入账本。
+
+首版规则宁可保守。新增规则须带正例、反例与触发率变化，不能靠堆关键词越写越宽。
+
+### 7.3 中文短文本
+
+不能用 `split(' ') >= 3` 生搬英文逻辑。建议初始门槛：
+
+```text
+cjk_char_count >= 8
+OR latin_word_count >= 3
+OR code_token_count >= 2 且伴随自然语言
+```
+
+“记住用 pnpm”字数虽短，却属显式意图，应由主回合直写，不落到普通长度门槛。
+
+## 八、批处理调度
+
+### 8.1 水位
+
+通过门控的 turn 先放进会话内存缓冲，记录消息引用、来源 turn 与裁剪账。满足任一条件才跑：
+
+- 累积 6 条有效消息；
+- 累积正文逼近 24 KiB；
+- compact 即将丢弃尚未整理的区间；
+- 优雅 session-end；
+- 已有至少 2 条有效消息，且交互空闲 60 秒。
+
+默认数值只是首轮实验起点，不是天条。须由真实分布调参。
+
+### 8.2 watermark
+
+每次整理记：
+
+```text
+last_considered_message_id
+last_successful_extract_message_id
+pending_message_ids[]
+```
+
+失败时不推进 successful watermark。重试按同一批 id 幂等，避免漏读与重复读。
+
+显式保存只跳过已覆盖的那一轮。批里更早的有效材料仍可在下一次调度时整理。
+
+### 8.3 前台与后台
+
+分两批落地：
+
+1. 先做同步 gated batch，钉准行为与账。
+2. 再搬到 idle worker，消掉用户可见尾延迟。
+
+异步版须先解决 ModelRouter、取消、Session 生命周期与输出 UI 归属。没解决前，不许从
+交互线程随手 detach 一根线程。
+
+进程异常退出时，可以漏掉尚未整理的自动候选；不能为了“一个也不漏”另存整段私密对话。
+若复用既有 session ledger，只存 message id 范围，不复制正文。
+
+## 九、抽取输入与动作协议
+
+### 9.1 输入
+
+一次抽取只给：
+
+- 本批通过门控的消息片段；
+- 每段来源 turn 与工具证据摘要；
+- 本地 BM25 找出的 3 至 5 个近邻 topic：`id/title/summary/kind/freshness`；
+- 写入边界与 JSON schema。
+
+不让整理器再搜源码或 Git。核验应在主任务发生时完成，抽取器只消费已经落在 transcript/
+trajectory 里的证据。若证据不足，降为 review 或 noop。
+
+### 9.2 输出
+
+首版结构：
+
+```text
+actions[]:
+  action = noop | create | update | merge | archive
+  target_ids[]
+  kind
+  title
+  summary
+  content
+  keywords[]
+  paths[]
+  confidence
+  evidence_refs[]
+  reason
+retrieval_terms[]
+```
+
+合同：
+
+- `update` 必须带现有 id；仍走 upsert 正门。
+- `merge` 产一条候选，列出来源 id；review 前不动原件。
+- `archive` 只能进 review，不自动执行。
+- `noop` 是正常结果，不算失败。
+- 每批最多 3 个非 noop 动作，免一次整理写成会议纪要。
+- 静态 prompt 与 schema 尽量保持稳定，便于前缀缓存。
+
+### 9.3 输出预算
+
+把默认 `max_tokens=1500` 降到 500 起步。若结构化输出截断率超过验收线，再凭账调高。
+不得先留 1500，只靠模型自觉少写。
+
+## 十、指标与成本账
+
+### 10.1 调度漏斗
+
+每场至少聚合：
+
+```text
+outer_user_turns
+history_grew_turns
+eligible_turns
+skipped_disabled
+skipped_short
+skipped_ack
+skipped_command
+skipped_already_mutated
+skipped_no_durable_signal
+buffered_turns
+extract_batches
+extract_failures
+```
+
+### 10.2 写入漏斗
+
+```text
+noop_batches
+create_candidates
+update_candidates
+merge_candidates
+archive_candidates
+auto_written
+review_accepted
+review_rejected
+duplicate_candidates
+stale_updates
+```
+
+### 10.3 成本与延迟
+
+```text
+input_tokens / output_tokens / cached_tokens
+extract_wall_ms P50/P95
+foreground_tail_ms P50/P95
+tokens_per_outer_turn
+tokens_per_candidate
+tokens_per_accepted_memory
+calls_per_100_user_turns
+```
+
+核心数看 `tokens_per_accepted_memory`。只报“单次便宜了 20%”，却多叫一倍，账仍是假的。
+
+Telemetry 默认只发计数、Token、时延与稳定 reason 枚举。用户正文、topic 正文、路径与候选
+内容不外发。
+
+## 十一、评测设计
+
+### 11.1 门控固定集
+
+至少 200 条中英混合 turn，逐条人工标：
+
+```text
+must_direct_save
+should_extract
+may_extract
+must_skip
+```
+
+样本须含：短确认、否定引用、用户纠错、明确偏好、源码结论、测试结果、临时任务进度、
+秘密、网页原文、同轮已保存、连续多轮才成形的事实。
+
+报：
+
+- must_direct_save 漏失率；
+- should_extract 召回率；
+- must_skip 误触率；
+- 每百回合预计调用数。
+
+### 11.2 轨迹重放
+
+从真实本地 trajectory 只抽经同意的脱敏样本，冻结三路：
+
+```text
+A: every_turn（现行基线）
+B: gated，每轮仍跑
+C: gated + batch
+```
+
+同模型、温度、prompt、预算。比较抽取调用、Token、最终接受记忆、重复率与漏记率。
+
+### 11.3 长期效果不能丢
+
+省钱不能靠不记。把 B/C 产出的最终记忆送进现有 retrieval eval，和 A 比：
+
+- Recall@1/3/5；
+- false-hit-rate；
+- stale/harmful rate；
+- 配对任务成功率；
+- 用户纠正次数。
+
+若调用降了，任务成功也掉了，不能算过门。
+
+### 11.4 首轮验收线
+
+冻结样本后再正式定数。建议起始门：
+
+- `calls_per_100_user_turns` 比 every_turn 降至少 70%；
+- must_direct_save 漏失为 0；
+- should_extract 召回率不低于 95%；
+- must_skip 误触率不高于 5%；
+- `tokens_per_accepted_memory` 至少下降 50%；
+- retrieval R@1 绝对回落不超过 0.02；
+- harmful-memory rate 不升；
+- gated 路前台 P95 不新增可见尾延迟。
+
+样本太少时同时报分子、分母与 bootstrap 区间，不只报百分数。
+
+## 十二、实施批次
+
+### P0：先把账补齐，不改行为
+
+- [ ] 新增 `MemoryTurnState` 与 typed 调度事件。
+- [ ] 给 `memory_save`、remember、forget、candidate accept 接成功/失败回执。
+- [ ] 给现行 every-turn 抽取补调度漏斗、Token 与前台尾延迟账。
+- [ ] 在一批真实脱敏轨迹上报当前 `calls_per_100_user_turns` 与 `tokens_per_accepted_memory`。
+
+验收：能答“哪类回合叫了模型、为何叫、花了多少、最后留下几条”，不靠猜。
+
+### P1：同轮去重与短文本门控
+
+- [ ] 本轮成功 save/forget/accept 后跳过尾部抽取。
+- [ ] 实现 Unicode/CJK 可用的 `MeaningfulTextStats`。
+- [ ] 实现稳定 gate reason 与正反例单测。
+- [ ] 增加 shadow 模式：只记 gate 判断，不改变现行调用，用来量漏判。
+
+验收：显式保存一轮只走一条写路；“好”“继续”“/help”不再触发模型；shadow 报告可复算。
+
+### P2：写权限与调度拆轴
+
+- [ ] 增加 `memory.write` 与 `memory.extract.mode` schema、解析、合并及 status 展示。
+- [ ] 保留旧 `learn` 映射；新旧字段混写时报清楚，不暗定优先级。
+- [ ] 让 `manual + extract.off` 支持 remember 与显式 `memory_save`，拒绝自动候选。
+- [ ] 更新中英文 prompt、配置文档、`/memory` 帮助与诊断输出。
+
+验收：用户能分别表达“全禁写”“只听我写”“候选待审”“证据过闸自动写”。
+
+### P3：gated batch
+
+- [ ] 建会话内 extraction buffer 与成功 watermark。
+- [ ] 接消息数、字节、compact、idle、session-end 五类触发器。
+- [ ] 批内保留 turn/evidence refs，失败重试幂等。
+- [ ] 先走同步实现，冻结取消、超时与 UI 文案。
+
+验收：六个有效回合可合成一发；失败不推进 watermark；compact 前不漏未审区间。
+
+### P4：近邻旧记忆与动作协议
+
+- [ ] 复用本地 BM25 取 3 至 5 个旧 topic 元数据，不新增 selector 模型调用。
+- [ ] 抽取 schema 改为 noop/create/update/merge/archive。
+- [ ] update 沿用 id；merge/archive 只进 review。
+- [ ] 增重复率、同主题更新率与 stale 修订测试。
+
+验收：同主题事实优先更新；模型无权静默删旧记忆；旧索引损坏时 fail closed。
+
+### P5：缩 prompt、降输出、移出前台
+
+- [ ] 抽取上限先降到 500，量截断与解析失败再调。
+- [ ] 稳定 system/schema 前缀，核对 provider cache usage；没回报便记 unknown。
+- [ ] 在 ModelRouter 生命周期允许后接 idle worker，不私自 detach。
+- [ ] 前台只显示可行动结果；noop 不刷屏。
+
+验收：gated 路不增加用户可见 P95 尾延迟；取消、退出、崩溃均不损旧库。
+
+### P6：评测、默认值与迁移裁决
+
+- [ ] 跑 fixed gate set、A/B/C 轨迹重放与长期召回对照。
+- [ ] 同报省下的调用与漏掉的有效记忆。
+- [ ] 过验收线后，新配置向导推荐 `gated`；旧 `learn` 文件仍按旧路。
+- [ ] 写 migration、rollback、CHANGELOG 与 Release 冒烟。
+
+验收：默认变化有数据托底，旧配置可回滚，发布文案不拿离线 272 发冒充线上触发率。
+
+## 十三、预计改动边界
+
+预计修改：
+
+- `src/config/config.hpp`
+- `src/config/config.cpp`
+- `src/app/interactive_session.cpp`
+- `src/app/interactive_session_controller.hpp`
+- `src/app/commands/memory_commands.cpp`
+- `src/app/memory_extract.hpp`
+- `src/app/memory_extract.cpp`
+- `src/app/tool_runtime.cpp`
+- `src/memory/project_memory.hpp`
+- `src/memory/project_memory.cpp`
+- `src/memory/memory_tool.cpp`
+- `src/accounting/` 下 purpose/聚合相关文件（若现有字段不够）
+- `src/trajectory/` 下 typed event schema（若现有事件不够）
+- `tests/unit/memory/`
+- `tests/unit/config/`
+- `docs/architecture/memory/flow.md`
+- `docs/architecture/memory/design.md`
+- `docs/reference/configuration.md`
+- `eval/memory_gate/`（新增固定集、runner 与报告）
+
+不得顺手改：召回 BM25 权重、workspace identity、存储目录、topic frontmatter 大版本、用户级
+授权边界。真有必要，另起单。
+
+## 十四、不采用的路
+
+### 14.1 只换更便宜模型
+
+不采用。它只降单价，不降调用数；没配 cheap 时还会回落 normal。
+
+### 14.2 每轮都抽，但把 prompt 再削短
+
+不采用作主方案。可以顺手省一截，却治不了 272/272 无候选仍照发的问题。
+
+### 14.3 用“记住”正则直接写正文
+
+不采用。否定、引用、转述、多语言都会误伤。宿主命令可确定保存；自然语言仍由主模型产
+结构化参数，再过现有写入闸。
+
+### 14.4 让整理器自己搜代码核实
+
+不采用。它会把一次小整理拖成第二场 Agent 任务。证据应由主回合留下，抽取器只整理。
+
+### 14.5 自动 `memory_delete`
+
+不采用。模型可提 archive，不能无声抹账。现有 archive 与 review 足够承接更新清理。
+
+### 14.6 为不漏候选另存整段原始聊天
+
+不采用。session 已有事实账便引用 message range；没有可靠来源时，宁可漏掉自动候选，不另
+造一份隐私副本。
+
+## 十五、最终验收门
+
+- [ ] 每次抽取都有 trigger reason、输入范围、Token、时延与结果账。
+- [ ] 每次跳过都有稳定 reason；同一冻结输入跨平台判断一致。
+- [ ] 显式记忆写入不再引出第二次尾部抽取。
+- [ ] `manual + extract.off` 真能“只听用户写，不自动学”。
+- [ ] 旧 `learn` 配置行为不变；新旧混写明确报错。
+- [ ] gated + batch 比 every_turn 少至少 70% 调用，且过质量门。
+- [ ] update/merge/archive 不绕过 review、证据、scope 与 worker 正门。
+- [ ] 自动抽取不静默删除，不新存整段聊天，不扩大 user memory 权限。
+- [ ] focused memory/config tests、全量 Release ctest 与三平台构建检查通过。
+- [ ] 文档、配置示例、`/memory status`、迁移说明与 CHANGELOG 同步。
+- [ ] 真模型报告逐请求可复算；没有线上触发率数据时，就明写“尚未测得”。
+
