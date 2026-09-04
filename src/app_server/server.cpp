@@ -22,6 +22,7 @@
 
 #include "agent/agent.hpp"  // Agent/AgentProfile/AgentWiring(批四自立门户)
 #include "agent/context.hpp"  // ContextPressure:压力通报的形状
+#include "agent/token_calibrator.hpp"  // DefaultTokenCalibrator:token 估算校准的进程级实例
 #include "config/config.hpp"  // HomeLubancodeDir:P0-1 身份裁决的全局件止步
 #include "runtime/id_authority.hpp"
 #include "runtime/session_command_service.hpp"
@@ -1072,6 +1073,9 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
         // TurnWiring,协议形状与旧手拼回调逐事件对得上。
         agent::TurnWiring wiring;
         wiring.events = &turn_events;
+        // token 估算校准(token 估算校准单):app-server 会话与终端主会话
+        // 共用进程级校准器,同一只 (provider,model) 桶。
+        wiring.token_calibrator = &agent::DefaultTokenCalibrator();
         // 接线(批四·病十二):压力钩进 AgentWiring。
         agent::AgentWiring loop_wiring;
         loop_wiring.on_context_pressure = [this, &thread_id, &turn_id](
