@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.202] - 2026-09-04
+
+- **token 估算自校准（用户提案落地）。** 每枚请求记 `(本地字节, 实报 token)` 一对，滚动窗 8 对取中位——会话两轮后本地估算自动贴上该模型的真实分词比率（BBPE 平均水准够用）。四护栏：坏账/小请求（<2048 估算）剔除、硬带 [0.2,5.0] 外弃、中位 ±40% 异常带外弃、连续两枚漂移清窗；`(provider,model)` 分桶，主会话/子代理/app-server/workflow 四路同享一只校准器。压缩双闸与 context 百分比自动吃到系数。`/context` 新增校准行——真机实测：默认尺对 ccmoon 该模型虚高 52%，校正 ×0.66 后 /context 估算与实报对齐。对账口径用完整输入（缓存只改计费不改计数），真机缓存链三轮对账分毫不差。381/381 全绿。
+
 ## [v0.26.201] - 2026-09-04
 
 - **one-shot 轨迹指定输出（Harness 接入口）。** `lubancode --yes --output /logs/trajectory.jsonl "<任务>"`——收口时把 Journal 投影成 `lubancode.harness.trajectory` v1 派生 JSONL（环境脱敏快照/消息序 user→assistant→tool 闭环/逐笔 usage+汇总/outcome+exit_code），stderr 打收据（schema/records/sha256/path）；导出失败 exit 3 带稳定码与补导命令，旧文件不动。`trajectory export <sid> --format harness-v1` 可补导，hash 与原导出一致。training/harness 共用中立投影层，training 行为零变化。真机 minimax 一轮双工具往返验证全链。380/380 全绿。
