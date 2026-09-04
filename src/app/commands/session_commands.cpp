@@ -10,6 +10,7 @@
 #include <ctime>
 #include <chrono>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <memory>
 #include <sstream>
@@ -85,6 +86,32 @@ std::size_t PressureEstimateTokens(lubancode::agent::Agent& loop,
         history, loop.context().structural_options(), scratch_stats, scratch_memo, /*store=*/nullptr));
 }
 
+// ---- /context 校准行(token 估算校准单)的三个小格式器 ------------------
+// trf 不接浮点(见 i18n.hpp),比率/系数/偏差的字符串在这里自己拼好。
+
+std::string FormatTokensPerByte(double tokens_per_byte) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(2) << tokens_per_byte;
+    return out.str();
+}
+
+std::string FormatCalibrationCoefficient(double coefficient) {
+    std::ostringstream out;
+    out << std::fixed << std::setprecision(2) << coefficient;
+    return out.str();
+}
+
+// 偏差符号按"默认尺相对真实"读:+25% = 默认尺比真实高 25%(估算要往下
+// 修);-20% = 默认尺比真实低 20%。正负的含义写进翻译模板,这里只出符号数。
+std::string FormatEstimateDeviation(int deviation_percent) {
+    if (deviation_percent == 0) {
+        return "±0%";
+    }
+    std::ostringstream out;
+    out << (deviation_percent > 0 ? "+" : "-") << std::abs(deviation_percent) << "%";
+    return out.str();
+}
+
 // P0-2 轨迹:compact 前后的 effective history 指纹(compact.applied 的
 // old/new state hash)。投影标记用——角色序 + 各块正文拼串再 hash,不是
 // 密码学真值;同一份历史两次算必然同值(确定性重放的锚点)。
@@ -141,7 +168,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const ContextLayersReport* layers,
                            const lubancode::agent::ModelRouteTable* roles_table,
                            int compact_partition_count,
-                           const DeferredToolModeSummary* deferred_tool_summary) {
+                           const DeferredToolModeSummary* deferred_tool_summary,
+                           const lubancode::agent::TokenCalibrationStatus* token_calibration) {
     if (args.empty()) {
         const auto lines = lubancode::cli::FormatContextBreakdown(
             sys_tokens, tools_tokens, history_tokens, context_tracker.last_cache_read_tokens(),
@@ -195,6 +223,22 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
             TermOut() << "\n" << tr("cmd.context.note.semantics") << "\n";
             if (context_tracker.usage_stale()) {
                 TermOut() << tr("cmd.context.note.stale") << "\n";
+            }
+        }
+
+        // token 估算校准行(token 估算校准单):上面三类估算数字的定盘星
+        //——多少对样本、tokens/byte 比率、默认尺偏差几何。样本不足两对
+        // 显示"未校准",估算全按默认口径,如实说破,不装准。
+        if (token_calibration != nullptr) {
+            if (token_calibration->calibrated) {
+                TermOut() << "  "
+                          << trf("cmd.context.calibration", token_calibration->sample_count,
+                                 FormatTokensPerByte(token_calibration->tokens_per_byte),
+                                 FormatEstimateDeviation(token_calibration->estimate_deviation_percent),
+                                 FormatCalibrationCoefficient(token_calibration->coefficient))
+                          << "\n";
+            } else {
+                TermOut() << "  " << tr("cmd.context.calibration_none") << "\n";
             }
         }
 
@@ -1020,10 +1064,21 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
     std::size_t sys_tokens = 0;
     std::size_t tools_tokens = 0;
     std::size_t history_tokens = 0;
+    // token 估算校准(token 估算校准单):三类估算乘会话校准系数——与 loop
+    // 的双闸/预检同一只 (provider,model) 桶、同一枚中位系数,/context 打的
+    // 数字与触发判定才是同一本账。状态行(样本数/比率/偏差)随占用卡片
+    // 交给 HandleContextCommand;没接线或样本不足时系数 1.0,行为照旧。
+    lubancode::agent::TokenCalibrator& calibrator = lubancode::agent::DefaultTokenCalibrator();
+    const double token_calibration =
+        calibrator.Coefficient(loop.provider(), loop.request_profile().model);
+    lubancode::agent::TokenCalibrationStatus token_calibration_status;
     if (args.empty()) {
-        sys_tokens = lubancode::agent::EstimateUtf8Tokens(lubancode::agent::AssembleSystemPrompt(*in.prompt_options)) +
-                     lubancode::agent::EstimateUtf8Tokens(*in.model_instructions) +
-                     lubancode::agent::EstimateUtf8Tokens(*in.soul);
+        sys_tokens = lubancode::agent::ApplyTokenCalibration(
+            lubancode::agent::EstimateUtf8Tokens(
+                lubancode::agent::AssembleSystemPrompt(*in.prompt_options)) +
+                lubancode::agent::EstimateUtf8Tokens(*in.model_instructions) +
+                lubancode::agent::EstimateUtf8Tokens(*in.soul),
+            token_calibration);
         for (const auto& tool : in.registry->All()) {
             if (!(*in.tool_filter)(*tool)) {
                 continue;  // 延迟未挂载:不在 tools 数组里,不算
@@ -1036,7 +1091,11 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
             tools_tokens += lubancode::agent::EstimateUtf8Tokens(
                 lubancode::tools::BuildDeferredToolsIndexSegment(*in.registry, *in.loaded_tools));
         }
-        history_tokens = lubancode::agent::EstimateHistoryTokens(loop.context().BuildPressureDryRunView());
+        tools_tokens = lubancode::agent::ApplyTokenCalibration(tools_tokens, token_calibration);
+        history_tokens = lubancode::agent::EstimateHistoryTokens(loop.context().BuildPressureDryRunView(),
+                                                                token_calibration);
+        token_calibration_status =
+            calibrator.StatusOf(loop.provider(), loop.request_profile().model);
     }
     // 分层占用 + 预算总账(第四期,规格"/context"节):视图各层
     // 枚数从决策台账数,预算从统一公式算,/context 打的就是
@@ -1063,15 +1122,18 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
                                           ? std::optional<std::size_t>(context_tracker.window_tokens())
                                           : std::nullopt;
         budget_inputs.stable_system_tokens = lubancode::agent::EstimateUtf8Tokens(
-            lubancode::agent::AssembleSystemPrompt(*in.prompt_options));
-        budget_inputs.model_instructions_tokens = lubancode::agent::EstimateUtf8Tokens(*in.model_instructions) +
-                                                   lubancode::agent::EstimateUtf8Tokens(*in.soul);
+            lubancode::agent::AssembleSystemPrompt(*in.prompt_options), token_calibration);
+        budget_inputs.model_instructions_tokens =
+            lubancode::agent::ApplyTokenCalibration(lubancode::agent::EstimateUtf8Tokens(*in.model_instructions) +
+                                                       lubancode::agent::EstimateUtf8Tokens(*in.soul),
+                                                   token_calibration);
         budget_inputs.tool_schemas_tokens = tools_tokens;
         budget_inputs.current_user_turn_tokens = lubancode::agent::EstimateHistoryTokens(
             std::vector<lubancode::api::Message>(loop.History().begin() +
                                                      static_cast<std::ptrdiff_t>(
                                                          lubancode::agent::HotZoneStartIndex(loop.History())),
-                                                 loop.History().end()));
+                                                 loop.History().end()),
+            token_calibration);
         budget_inputs.protected_hot_zone_tokens = lubancode::agent::kDefaultHotZoneTokens;
         budget_inputs.requested_output_reserve_tokens =
             static_cast<std::size_t>(loop.runtime_profile().max_output_tokens.value_or(
@@ -1110,7 +1172,8 @@ void RunContextCommand(const std::string& args, const ContextEstimateInputs& in,
     }
     HandleContextCommand(args, context_tracker, sys_tokens, tools_tokens, history_tokens, theme,
                          loop.cache_epoch(), &loop.runtime_profile(), in.usage_ledger, in.artifact_store, &layers,
-                         in.roles_table, in.compact_partition_count, deferred_tool_summary_ptr);
+                         in.roles_table, in.compact_partition_count, deferred_tool_summary_ptr,
+                         &token_calibration_status);
 }
 
 void RunCompactCommand(const std::string& args, const CompactSessionInputs& in) {

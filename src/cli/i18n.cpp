@@ -1372,6 +1372,12 @@ const Entry kZhCN[] = {
      "(context = 主会话最近一次请求的占用,不是累计花销,不含独立子代理的 token;状态栏的\"缓存命中 X(Y%)\"同样是"
      "最近一次模型请求的口径——一条用户输入触发工具循环时会连发多次模型请求,各次各自结算,不与\"会话累计\"混算)"},
     {"cmd.context.note.stale", "(最近一次请求未返回 usage,以上为再上一次的实测值;状态栏同款数字带 ~ 前缀)"},
+    // token 估算校准(真实 usage 反推 byte 比率单):占用卡片末尾的定盘星
+    // 行——估算数字乘没乘系数、乘的系数从哪来,一行说破。
+    {"cmd.context.calibration",
+     "token 估算校准:{0} 对样本 · 比率 {1} tokens/byte · 估算偏差 {2}(正=默认尺偏高,负=偏低) · 校正系数 ×{3}"},
+    {"cmd.context.calibration_none",
+     "token 估算校准:未校准(有效样本不足两对,以上估算按默认口径;发过两轮请求后自动校准)"},
     {"cmd.compact.empty", "当前没有对话历史,不用压缩。"},
     {"cmd.compact.failed", "压缩失败: {0}"},
     {"cmd.compact.result", "压缩前 ~{0} tokens → 压缩后 ~{1} tokens(统一估算口径)"},
@@ -3423,6 +3429,14 @@ const Entry kEn[] = {
      "(the most recent request returned no usage; figures above are from the last measured request. The "
      "status bar shows the same numbers with a ~ prefix)"},
     {"cmd.context.compact_turns", "compact turn strategy: {0} token-balanced partitions; first {1} mapped, last kept as the hot zone"},
+    // token estimate calibration (calibrated from real usage): pairs with the
+    // zh entries above per the house rule.
+    {"cmd.context.calibration",
+     "token estimate calibration: {0} samples · ratio {1} tokens/byte · estimate deviation {2} (positive = default "
+     "scale overestimates, negative = underestimates) · correction x{3}"},
+    {"cmd.context.calibration_none",
+     "token estimate calibration: not calibrated (fewer than two valid samples; figures above use the default "
+     "scale — it self-calibrates after two rounds of requests)"},
 
     // ---- compact (0.27.x): new layered-compaction keys, zh+en paired ----
     {"cmd.compact.window_unknown", "(compact model window unknown; no window check was performed this time)"},
