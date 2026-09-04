@@ -110,4 +110,5 @@ DOC architecture/gateway/contracts.md
 DOC architecture/gateway/audit-write-map.md
 DOC development/workspace-storage-v2/P0-0-contracts.md
 DOC development/workspace-storage-v2/P0-0-inventory.md
+DOC development/workspace-storage-v2/scale-baseline.md
 DOC features/telemetry/collector.md
