@@ -4,13 +4,13 @@
 # 默认 OFF)里被 add_subdirectory——默认构建与 CI 三腿不进这里,零新目标
 # 零新测试。打开后:
 #   cmake -B build/eval -DLUBANCODE_BUILD_EVAL=ON <源码根>
-#   cmake --build build/eval --target eval_smoke eval_tool_search_threshold
+#   cmake --build build/eval --target eval_smoke eval_tool_search_threshold eval_compact_position
 #   ctest --test-dir build/eval -L eval        (多配置生成器加 -C <cfg>)
 #
 # 目录即实验(单子 §五):
 #   tool_search_threshold/  实验 A:工具检索退化阈值(P0 = A2/disabled/T1)
 #   compaction_benefit/     实验 B2 备料 + collect(数据件,不编 C++)
-#   compact_position/       实验 B1:位置探针(collect 骨架,驱动后补)
+#   compact_position/       实验 B1:位置探针(造稿+三处理驱动+collect)
 #   subagent_failure/       实验 C:失败分布(collect 骨架,驱动后补)
 # 共用件:fake_backend.{hpp,cpp}(通用假后端)与 collect_common.py。
 
@@ -70,4 +70,32 @@ if(LUBANCODE_EVAL_PYTHON_EXECUTABLE)
     DEPENDS "eval.tool_search_threshold.a2_disabled_t1")
 else()
   message(STATUS "tests/eval: python 未找到,collect 步骤不注册(其余 eval 测试照跑)")
+endif()
+
+# ---- 实验 B1:compact 位置探针(首仗;假后端全链管道) ------------------------
+# 造稿(python)→ 三处理(FULL 原文 / microcompact 折叠 / compact 六栏摘要
+# 假后端替身)→ 确定性判卷 → 落账(JSONL)→ collect(位置-命中曲线 + 中段
+# 存活率 + 折叠分桶)。全链由 compact_position/pipeline.py 串成一个 ctest:
+#   eval.compact_position.pipeline
+# 判卷与管道的自检在驱动进程内(章法同 eval_smoke 的 RunFakeBackendSelfCheck),
+# 自检不过 exit 1,管道即红。真模型跑法见 compact_position/README.md(装置
+# 阶段不点炮)。
+add_executable(eval_compact_position compact_position/eval_driver.cpp)
+target_link_libraries(eval_compact_position PRIVATE eval_fake_backend)
+target_compile_features(eval_compact_position PRIVATE cxx_std_23)
+target_compile_definitions(eval_compact_position PRIVATE
+  LUBANCODE_EVAL_COMPACT_POSITION_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/compact_position"
+  LUBANCODE_GIT_COMMIT="${LUBANCODE_EVAL_GIT_COMMIT}")
+
+if(LUBANCODE_EVAL_PYTHON_EXECUTABLE)
+  add_test(NAME eval.compact_position.pipeline
+    COMMAND "${LUBANCODE_EVAL_PYTHON_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/compact_position/pipeline.py"
+            --python "${LUBANCODE_EVAL_PYTHON_EXECUTABLE}"
+            --driver "$<TARGET_FILE:eval_compact_position>"
+            --root "${CMAKE_CURRENT_SOURCE_DIR}/compact_position")
+  set_tests_properties(eval.compact_position.pipeline PROPERTIES
+    LABELS "eval;compact_position;eval.compact_position" TIMEOUT 600)
+else()
+  message(STATUS "tests/eval: python 未找到,compact_position 管道不注册")
 endif()
