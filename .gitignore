@@ -76,7 +76,8 @@ eval/deferred_quality/_run/
 # 进 git 的只有聚合报告(无原文无答案):retrieval_baseline.md / report.md
 # / retrieval_improved.md(改进前后对照,记忆检索与注入改进单)/
 # summary_quality.md(摘要质量双库对照,记忆写入侧改进单)与 E2 配对
-# 报告 paired_*.md(配对增益与区间分布,同单)。
+# 报告 paired_*.md(配对增益与区间分布,同单);paired_r1.md 是记忆幻觉
+# 根治单(adversarial 桶)的复跑报告。
 eval/locomo/*
 !eval/locomo/retrieval_baseline.md
 !eval/locomo/report.md
@@ -84,3 +85,4 @@ eval/locomo/*
 !eval/locomo/summary_quality.md
 !eval/locomo/paired_t1.md
 !eval/locomo/paired_five.md
+!eval/locomo/paired_r1.md
