@@ -11,16 +11,26 @@
     B(记忆在岗): memory.enabled=true,one_shot 走生产召回路注入记忆。
     同模型(ccmoon/gpt-5.6-sol)、温度 0、one_shot 每题新进程=新会话,
     不带对话上下文(写入与答题硬隔离,§2.2)。
-  判分:trajectory main.jsonl 里最后一条 assistant 文本抓选项号,对
-  perturbed 的 correct_choice_index(扰动不改位次)。答题流程永不读
-  ledger/answers——判分在跑完之后,由本脚本按 qid 查 answers.json。
+  判分(P1 重写,评测纠偏单):唯一事实源 = trajectory main.jsonl 里钉住的
+  最后一条 stop_reason=end_turn 的 model.output.completed 文本块,逻辑全在
+  scripts/eval_locomo_score.py(schema v2、run/turn 钉死、严格单数字、两条
+  end_turn 记 ambiguous 不挑)。stdout/stderr 只留诊断尾巴,永不参与判分
+  (旧版监听不存在的 model.response.completed 后回落 stdout 捞数字,是本单
+  作废旧 E2 结论的主因)。答题流程永不读 ledger/answers——判分在跑完之后,
+  由本脚本按 qid 查 answers.json。
 
 钥匙安全:真 config.json 拷进临时 USERPROFILE 下的 _run/home_X/.lubancode/,
-_run/ 整体 gitignore,绝不进 git。
+_run/ 整体 gitignore,绝不进 git。(此路是 P0 凭据排查的排查对象;P2 改白名单
+生成,不再复制真 config。)
+
+隔离门(评测纠偏单 P0"停止用旧 runner 烧模型"):答题 Agent 工具未隔离
+(能 search/read 评测目录与整座记忆库,§三 3.3/3.4),此形态下放量烧模型
+产出的账无效。真跑批须显式 --unsafe-allow-model-runs;--report-only 与
+离线判分回归不受限。
 
 用法:
-  python scripts/eval_locomo_runner.py --smoke          # 1 场每类 1 题,验管线
-  python scripts/eval_locomo_runner.py                  # 2 场 x 五类各 10 题
+  python scripts/eval_locomo_runner.py --report-only    # 只按已有账产报告
+  python scripts/eval_locomo_runner.py --smoke --unsafe-allow-model-runs
 """
 
 import argparse
@@ -33,6 +43,10 @@ import shutil
 import subprocess
 import sys
 import time
+
+# 判分器同目录,P1 拆出(离线可测:tests/eval/locomo_scorer/)。
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import eval_locomo_score as locomo_score
 
 HERE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 HERE_EVAL = os.environ.get("LOCOMO_EVAL_DIR") or os.path.join(HERE, "eval", "locomo")
@@ -210,46 +224,10 @@ def list_session_dirs(home: str) -> set:
     return out
 
 
-def last_assistant_text(main_jsonl: str) -> str:
-    text = ""
-    with open(main_jsonl, encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                evt = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if evt.get("kind") != "model.response.completed":
-                continue
-            payload = evt.get("payload") or {}
-            msg = payload.get("message") or payload.get("assistant_message") or {}
-            blocks = msg.get("content") or []
-            parts = [b.get("text", "") for b in blocks
-                     if isinstance(b, dict) and b.get("type") == "text"]
-            joined = "".join(parts).strip()
-            if joined:
-                text = joined
-    return text
-
-
-def extract_choice(text: str, n_choices: int) -> int:
-    m = re.search(r"\b(?:ANSWER|answer)\s*[:=]?\s*(\d+)\b", text)
-    if not m:
-        digits = re.findall(r"\b(\d{1,2})\b", text)
-        for d in digits:
-            if 0 <= int(d) < n_choices:
-                m = type("M", (), {"group": lambda self, x=None: d})()
-                break
-    if m:
-        v = int(m.group(1))
-        if 0 <= v < n_choices:
-            return v
-    return -1
-
-
 def ask_one(mode: str, home: str, ws_dir: str, question: str, choices: list) -> dict:
+    """跑一题。判分只走 trajectory(eval_locomo_score);stdout 只留诊断尾
+    巴,永不进判分。结果账字段见单子 §5.1(session/event/run/turn 逐题可
+    点回 trajectory,hash 锁档)。"""
     env = dict(os.environ)
     env["USERPROFILE"] = home
     env["PYTHONIOENCODING"] = "utf-8"
@@ -257,11 +235,14 @@ def ask_one(mode: str, home: str, ws_dir: str, question: str, choices: list) -> 
     prompt = build_prompt(question, choices)
     t0 = time.time()
     failure = ""
-    out_text = ""
+    diag_stdout_tail = ""
     try:
         proc = subprocess.run([EXE, "--yes", prompt], cwd=ws_dir, env=env,
                               capture_output=True, text=True, encoding="utf-8",
                               errors="replace", timeout=TASK_TIMEOUT_SECS)
+        # 诊断专用(单子 §四合同 3):判分器没有吃 stdout 的入口,这里也只
+        # 留尾巴排查用,不参与任何 choice 计算。
+        diag_stdout_tail = (proc.stdout or "")[-160:]
         if proc.returncode != 0:
             failure = f"exit={proc.returncode}: {(proc.stdout + proc.stderr)[-200:]}"
     except subprocess.TimeoutExpired:
@@ -269,13 +250,25 @@ def ask_one(mode: str, home: str, ws_dir: str, question: str, choices: list) -> 
     wall = time.time() - t0
     new = sorted(list_session_dirs(home) - before)
     main_jsonl = os.path.join(new[-1], "main.jsonl") if new else ""
-    if main_jsonl and not failure:
-        out_text = last_assistant_text(main_jsonl)
-    if not out_text and not failure:
-        out_text = proc.stdout or ""
-    choice = extract_choice(out_text, len(choices)) if out_text else -1
-    return {"raw_tail": (out_text or "")[-160:], "choice": choice,
-            "failure": failure, "wall": round(wall, 1)}
+    if main_jsonl:
+        r = locomo_score.score_session_file(main_jsonl, n_choices=len(choices),
+                                            rel_root=HERE_EVAL)
+    else:
+        r = locomo_score.unscored_record("no_session", n_choices=len(choices))
+    # 进程层失败盖过 trajectory 层:崩了/超时的跑批不给记 choice(与旧
+    # 版"failure 不判分"同语义;trajectory 字段仍留诊断)。
+    if failure:
+        r["failure_class"] = "timeout" if failure == "timeout" else "process_failure"
+        r["parsed_choice"] = None
+        r["parse_status"] = locomo_score.PARSE_INVALID
+    r["diag_stdout_tail"] = diag_stdout_tail
+    r["failure"] = failure
+    r["wall"] = round(wall, 1)
+    # choice 为旧账/报告脚本的兼容位:只有判分 ok 且进程无失败才给数。
+    r["choice"] = (r["parsed_choice"]
+                   if r["parse_status"] == locomo_score.PARSE_OK and not failure
+                   else -1)
+    return r
 
 
 # ---------------------------------------------------------------- 主流程
@@ -367,7 +360,15 @@ def main():
                     help="只跑这些 qid(逗号分隔,如 conv-49_q1,conv-49_q2);"
                          "抽样仍按 --convs/--seed 原口径定题集后再过滤——"
                          "单场续跑必须保持五场列表的 rng 顺序,不能只给单场")
+    ap.add_argument("--unsafe-allow-model-runs", action="store_true",
+                    help="隔离门(评测纠偏单 P0):答题 Agent 工具未隔离,此形态"
+                         "下烧模型产出的账无效。加此旗才允许真跑批;判分器已重写"
+                         "但工具封口(P2)未落地,放量前先过 P2-P4。")
     args = ap.parse_args()
+    if not args.report_only and not args.unsafe_allow_model_runs:
+        sys.exit("拒跑:答题工具未隔离(评测纠偏单 §三 3.3/3.4),此形态烧模型"
+                 "产出的账无效。离线报告用 --report-only;确要冒跑(如 P2 封口"
+                 "自检)加 --unsafe-allow-model-runs。")
     per_cat = 1 if args.smoke else args.per_category
     run_modes = tuple(m.strip() for m in args.modes.split(",") if m.strip())
     cats = [c.strip() for c in args.categories.split(",") if c.strip()] or None

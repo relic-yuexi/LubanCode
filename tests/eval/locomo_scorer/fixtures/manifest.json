@@ -1,0 +1,362 @@
+{
+ "note": "LoCoMo 判分器固定集(单子 §5.3/§十三 P1)。real/=真 session 脱敏件(信封逐字保留可溯源,载荷去题面/正文,末轮 end_turn 一字不动);synth/=手造形状。expected.n_choices 覆盖默认 10。",
+ "real": [
+  {
+   "file": "real/b_conv-41_q10_final4_old0_20260904-093706-EWVVEE.jsonl",
+   "origin": {
+    "session_id": "20260904-093706-EWVVEE",
+    "qid": "conv-41_q10",
+    "source_main_jsonl_sha256": "5825b17d2bcccaf05e57072fbf17067926399b44b1d042b92c74a9ddbd7e6bf4",
+    "old_runner_recorded_choice": 0
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "ok",
+    "parsed_choice": 4
+   }
+  },
+  {
+   "file": "real/b_conv-41_q122_final6_old5_20260904-093936-VMJEH0.jsonl",
+   "origin": {
+    "session_id": "20260904-093936-VMJEH0",
+    "qid": "conv-41_q122",
+    "source_main_jsonl_sha256": "cddbfe0dd82f3405392f419e540b7ea4e35163c97b30f48062ed1ebd37649c7b",
+    "old_runner_recorded_choice": 5
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "ok",
+    "parsed_choice": 6
+   }
+  },
+  {
+   "file": "real/b_conv-41_q45_dunno_old1_20260904-093756-2AUV6T.jsonl",
+   "origin": {
+    "session_id": "20260904-093756-2AUV6T",
+    "qid": "conv-41_q45",
+    "source_main_jsonl_sha256": "b54b0bdbaa181c096a5b53372703d282ff34e21882ea03188ce0b5e3270a789a",
+    "old_runner_recorded_choice": 1
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "refusal_unknown"
+   }
+  },
+  {
+   "file": "real/b_conv-41_q72_dunno_old1_20260904-093908-89XG6Z.jsonl",
+   "origin": {
+    "session_id": "20260904-093908-89XG6Z",
+    "qid": "conv-41_q72",
+    "source_main_jsonl_sha256": "91a8ef590b3579e97b9e4cde0e14ec5f97ac0bd7ede72d420f3a529f90ef0c42",
+    "old_runner_recorded_choice": 1
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "refusal_unknown"
+   }
+  },
+  {
+   "file": "real/b_conv-41_q93_dunno_old1_20260904-093900-6EMMBK.jsonl",
+   "origin": {
+    "session_id": "20260904-093900-6EMMBK",
+    "qid": "conv-41_q93",
+    "source_main_jsonl_sha256": "523d1ee765ad732cfa060a004a6dc9fb71802fd1a00f5752b4bac2de6f015d93",
+    "old_runner_recorded_choice": 1
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "refusal_unknown"
+   }
+  },
+  {
+   "file": "real/b_conv-43_q22_final2_old0_20260904-094148-5AGLZE.jsonl",
+   "origin": {
+    "session_id": "20260904-094148-5AGLZE",
+    "qid": "conv-43_q22",
+    "source_main_jsonl_sha256": "9e6bf2b3a4024e34ddc6f9ae93d21ac526dee06f42b12bd155a9ae7912bc68ba",
+    "old_runner_recorded_choice": 0,
+    "shape": "13 轮工具往返,工具结果(脱敏后仍是数字密集汤)里几百枚数字;末答只有最后一条 end_turn 的 2"
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "ok",
+    "parsed_choice": 2
+   }
+  },
+  {
+   "file": "real/b_conv-43_q50_dunno_old0_20260904-094107-3Y3DH4.jsonl",
+   "origin": {
+    "session_id": "20260904-094107-3Y3DH4",
+    "qid": "conv-43_q50",
+    "source_main_jsonl_sha256": "11ba1f2a5a5688add17e13323adaa5ef1896f6c2e1eb97cca48c3c2d36006301",
+    "old_runner_recorded_choice": 0
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "refusal_unknown"
+   }
+  },
+  {
+   "file": "real/b_conv-43_q68_final9_old0_20260904-094357-J4VZ84.jsonl",
+   "origin": {
+    "session_id": "20260904-094357-J4VZ84",
+    "qid": "conv-43_q68",
+    "source_main_jsonl_sha256": "4e9a254b6f6d442eaa89f81ca6e1829b746755dfff64e206478d5aaaf7c2044b",
+    "old_runner_recorded_choice": 0
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "ok",
+    "parsed_choice": 9
+   }
+  },
+  {
+   "file": "real/b_conv-43_q94_dunno_old1_20260904-094658-XG92JS.jsonl",
+   "origin": {
+    "session_id": "20260904-094658-XG92JS",
+    "qid": "conv-43_q94",
+    "source_main_jsonl_sha256": "b7a828c012b7efd27b530caac0510d3b8fd7957e921bcd06000867f13ce208c2",
+    "old_runner_recorded_choice": 1
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "refusal_unknown"
+   }
+  },
+  {
+   "file": "real/b_conv-43_q95_final4_old0_20260904-094641-QRQW3Y.jsonl",
+   "origin": {
+    "session_id": "20260904-094641-QRQW3Y",
+    "qid": "conv-43_q95",
+    "source_main_jsonl_sha256": "ce6dfbe55d443e60a777cd941d237ea6c155635209f9d212a3ccbc3a2bb687f5",
+    "old_runner_recorded_choice": 0
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "ok",
+    "parsed_choice": 4
+   }
+  },
+  {
+   "file": "real/b_conv-47_q17_dunno_old1_20260904-095226-OGV98G.jsonl",
+   "origin": {
+    "session_id": "20260904-095226-OGV98G",
+    "qid": "conv-47_q17",
+    "source_main_jsonl_sha256": "eb9ae818cdf9d1f7837af27d4880ff0903ac8761b77ada07a12bfb80bda8fd56",
+    "old_runner_recorded_choice": 1
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "refusal_unknown"
+   }
+  },
+  {
+   "file": "real/b_conv-47_q31_dunno_old1_20260904-095141-J34DVP.jsonl",
+   "origin": {
+    "session_id": "20260904-095141-J34DVP",
+    "qid": "conv-47_q31",
+    "source_main_jsonl_sha256": "dc0305fe42f11d004eff2d44c0a9270968b789381f31c56eecf78d3a0d489462",
+    "old_runner_recorded_choice": 1
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "refusal_unknown"
+   }
+  },
+  {
+   "file": "real/b_conv-47_q37_final5_old8_20260904-094955-6E9F1Q.jsonl",
+   "origin": {
+    "session_id": "20260904-094955-6E9F1Q",
+    "qid": "conv-47_q37",
+    "source_main_jsonl_sha256": "c9950646e0d425237a547f4fcc611d087dad4b81373eb491be9e7f0881719c1a",
+    "old_runner_recorded_choice": 8
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "ok",
+    "parsed_choice": 5
+   }
+  },
+  {
+   "file": "real/b_conv-47_q5_dunno_old1_20260904-094818-EL0GPU.jsonl",
+   "origin": {
+    "session_id": "20260904-094818-EL0GPU",
+    "qid": "conv-47_q5",
+    "source_main_jsonl_sha256": "76990a4d5da3e9632a5a204ada7e1fcfc3b0cd70a4965760dc83d803989d22a9",
+    "old_runner_recorded_choice": 1
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "refusal_unknown"
+   }
+  },
+  {
+   "file": "real/b_conv-47_q63_final1_old6_20260904-094916-1H6OQX.jsonl",
+   "origin": {
+    "session_id": "20260904-094916-1H6OQX",
+    "qid": "conv-47_q63",
+    "source_main_jsonl_sha256": "dc03592ca979f7761cc638d512e70d8f8cee0aa74810087b0a7d61317e71034d",
+    "old_runner_recorded_choice": 6
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "ok",
+    "parsed_choice": 1
+   }
+  },
+  {
+   "file": "real/b_conv-49_q12_final4_old2_20260904-100357-XZ6WUP.jsonl",
+   "origin": {
+    "session_id": "20260904-100357-XZ6WUP",
+    "qid": "conv-49_q12",
+    "source_main_jsonl_sha256": "b19565f4d64ba21104be89ff0f27a032c58e213db6a95bc5d267366238506c79",
+    "old_runner_recorded_choice": 2
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "ok",
+    "parsed_choice": 4
+   }
+  },
+  {
+   "file": "real/b_conv-49_q57_final4_old0_20260904-100516-8EUN18.jsonl",
+   "origin": {
+    "session_id": "20260904-100516-8EUN18",
+    "qid": "conv-49_q57",
+    "source_main_jsonl_sha256": "90854b35b89b0969c06419a47e75a41f489a35f13da268d09abbe61633f4c18e",
+    "old_runner_recorded_choice": 0
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "ok",
+    "parsed_choice": 4
+   }
+  },
+  {
+   "file": "real/b_conv-49_q70_dunno_old1_20260904-100334-LLR3ZJ.jsonl",
+   "origin": {
+    "session_id": "20260904-100334-LLR3ZJ",
+    "qid": "conv-49_q70",
+    "source_main_jsonl_sha256": "0a67dd9d0f158e6a7eb1892f8ed9102f43aa559af8bd9d4d8df97ef0a4b392e7",
+    "old_runner_recorded_choice": 1
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "refusal_unknown"
+   }
+  },
+  {
+   "file": "real/b_no_end_turn_20260904-095236-83DGB9.jsonl",
+   "origin": {
+    "session_id": "20260904-095236-83DGB9",
+    "qid": "conv-47_q7",
+    "source_main_jsonl_sha256": "7a6304ed166895fd2bad53bd184aab42818bf53de67bad96dd5637e16e2b86ad",
+    "shape": "7 轮 tool_use(含 Explore 子代理)后超时,从未出现 end_turn;旧账记 timeout(choice=-1)",
+    "old_runner_recorded_choice": -1
+   },
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "no_end_turn"
+   }
+  }
+ ],
+ "synth": [
+  {
+   "file": "synth/no_end_turn.jsonl",
+   "shape": "两轮 tool_use,从未 end_turn(§5.2'工具输出后没有最终 end_turn')",
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "no_end_turn"
+   }
+  },
+  {
+   "file": "synth/two_end_turns.jsonl",
+   "shape": "两条 end_turn(3 与 5),必须记 ambiguous,不擅自挑",
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "ambiguous_final_output"
+   }
+  },
+  {
+   "file": "synth/out_of_range_mc5.jsonl",
+   "shape": "单数字 7 但 n_choices=5,越界",
+   "expected": {
+    "n_choices": 5,
+    "parse_status": "invalid",
+    "failure_class": "out_of_range"
+   }
+  },
+  {
+   "file": "synth/v1_legacy.jsonl",
+   "shape": "整本 schema_version=1 的 legacy 账:认得出,不判分(fail closed)",
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "legacy_schema_v1"
+   }
+  },
+  {
+   "file": "synth/v3_unknown.jsonl",
+   "shape": "整本 schema_version=3 超前,版本不明 fail closed",
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "unknown_schema_version"
+   }
+  },
+  {
+   "file": "synth/missing_version.jsonl",
+   "shape": "信封缺 schema_version,fail closed",
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "unknown_schema_version"
+   }
+  },
+  {
+   "file": "synth/mixed_versions.jsonl",
+   "shape": "v2 与 v1 混在同一 stream,fail closed",
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "mixed_schema_version"
+   }
+  },
+  {
+   "file": "synth/wrong_schema_name.jsonl",
+   "shape": "schema 名不是 lubancode.trajectory.event",
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "invalid",
+    "failure_class": "schema_mismatch"
+   }
+  },
+  {
+   "file": "synth/truncated_last_line.jsonl",
+   "shape": "末行截断(半行 JSON)——完整可判事件只有 seq=8 的 4,malformed_lines=1 只作诊断;以实际可判事件为准",
+   "expected": {
+    "n_choices": 10,
+    "parse_status": "ok",
+    "parsed_choice": 4,
+    "malformed_lines": 1
+   }
+  },
+  {
+   "file": "synth/stdout_digit_soup.txt",
+   "shape": "终端杂字样本(行号/Token/秒数/进度,几十枚数字)。测试断言判分器 API 无 stdout 入口,该汤在时末答仍按 trajectory 记",
+   "expected": null
+  }
+ ]
+}

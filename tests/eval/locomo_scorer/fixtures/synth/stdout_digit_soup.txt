@@ -1,0 +1,16 @@
+-- Worked for 26s ----------
+read 345 lines, 67 matches, row 890
+tokens: in 1234 out 567, 291 requests, 2.58M cache
+exit 0 after 420s, progress 7/248
+-- Worked for 26s ----------
+read 345 lines, 67 matches, row 890
+tokens: in 1234 out 567, 291 requests, 2.58M cache
+exit 0 after 420s, progress 7/248
+-- Worked for 26s ----------
+read 345 lines, 67 matches, row 890
+tokens: in 1234 out 567, 291 requests, 2.58M cache
+exit 0 after 420s, progress 7/248
+-- Worked for 26s ----------
+read 345 lines, 67 matches, row 890
+tokens: in 1234 out 567, 291 requests, 2.58M cache
+exit 0 after 420s, progress 7/248

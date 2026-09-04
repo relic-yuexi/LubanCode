@@ -99,3 +99,24 @@ if(LUBANCODE_EVAL_PYTHON_EXECUTABLE)
 else()
   message(STATUS "tests/eval: python 未找到,compact_position 管道不注册")
 endif()
+
+# ---- LoCoMo 判分器固定集(LoCoMo 评测纠偏单 P1,离线零模型零钥匙) -----------
+# 旧 runner 监听不存在的 model.response.completed 后回落 stdout 捞数字,
+# E2 结论已作废(见 eval/locomo/*.md 失效框)。本段锁新判分器:
+#   scripts/eval_locomo_score.py(严格单数字、只认 schema v2 end_turn、
+#   stdout 永不进判分)对 tests/eval/locomo_scorer/fixtures/ 的固定集——
+# 19 件真源脱敏夹具(9 个 B mismatch + 9 个"不知道" + no_end_turn 工具场,
+#   溯源见 fixtures/manifest.json)+ 10 件合成形状,另含 runner 装配级
+#   断言(假 subprocess 塞数字汤,choice 仍按 trajectory 记)。
+# 夹具重建须本机原始账(make_fixtures.py --real),ctest 只读已提交件。
+if(LUBANCODE_EVAL_PYTHON_EXECUTABLE)
+  add_test(NAME eval.locomo_scorer.fixtures
+    COMMAND "${LUBANCODE_EVAL_PYTHON_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/locomo_scorer/test_locomo_scorer.py"
+            --scorer "${CMAKE_SOURCE_DIR}/scripts/eval_locomo_score.py"
+            --fixtures "${CMAKE_CURRENT_SOURCE_DIR}/locomo_scorer/fixtures")
+  set_tests_properties(eval.locomo_scorer.fixtures PROPERTIES
+    LABELS "eval;locomo_scorer;eval.locomo_scorer" TIMEOUT 120)
+else()
+  message(STATUS "tests/eval: python 未找到,locomo_scorer 固定集不注册")
+endif()
