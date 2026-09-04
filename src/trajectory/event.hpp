@@ -96,7 +96,8 @@ std::optional<Durability> DurabilityFromName(std::string_view name);
 
 // ---------------------------------------------------------------------------
 // 事件种类(§五全列 67 种 + v2 的 model.usage.recorded,再加存储 v2 的
-// context.injected 与 memory.save.* 三枚,共 72 种)
+// context.injected 与 memory.save.* 三枚、子代理空轨迹单 P0-B 一枚、
+// workflow 编排单十二枚,共 86 种)
 // ---------------------------------------------------------------------------
 
 enum class EventKind {
@@ -193,6 +194,22 @@ enum class EventKind {
     // stream_ref),不抄子 prompt 正文与敏感绝对路径——诊断要能跨进程留证,
     // 不靠终端滚屏。
     SubagentRunStartFailed,
+    // workflow 编排账(workflow 会话归属统一单,§3.6):编排 Journal 只记
+    // 编排事实——定义装载、node 派发/终态、branch/join、loop 轮次、
+    // checkpoint。node attempt 的模型请求/工具正文各落 nodes/<run>.jsonl,
+    // 不进这族;纯控制节点只记编排,不另开 node 文件。
+    WorkflowDefinitionLoaded,
+    WorkflowNodeDispatched,
+    WorkflowNodeRetrying,
+    WorkflowNodeWaiting,
+    WorkflowNodeCompleted,
+    WorkflowNodeFailed,
+    WorkflowNodeSkipped,
+    WorkflowBranchStarted,
+    WorkflowJoinCompleted,
+    WorkflowLoopIterationStarted,
+    WorkflowLoopIterationCompleted,
+    WorkflowCheckpointSaved,
 };
 
 const char* EventKindName(EventKind kind);

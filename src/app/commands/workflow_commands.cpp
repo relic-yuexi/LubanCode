@@ -1555,6 +1555,9 @@ std::string RunWorkflowById(const WorkflowCommandContext& context, const std::st
     options.event_sink = context.event_sink;
     options.thread_id = context.thread_id;
     options.id_authority = context.id_authority;
+    // 编排账(workflow 会话归属统一单):账本在场即接——run 起动开轨迹
+    // Journal,逐 attempt 开 node stream;开不出账 run 停在明确失败态。
+    options.trajectory_ledger = context.trajectory;
     if (context.home_lubancode.has_value()) {
         options.runs_root = *context.home_lubancode / "workflow-runs";
     }
@@ -1755,6 +1758,8 @@ std::string RunWorkflowFromTerminal(SlashDispatchContext& ctx,
     run_ctx.event_sink = &workflow_events;
     run_ctx.thread_id = ctx.session_runtime->thread_id();
     run_ctx.id_authority = &ctx.session_runtime->ids();
+    // 编排账:会话账本在场就递给 runtime(fail closed 由 runtime 落)。
+    run_ctx.trajectory = ctx.trajectory;
     // agent 子回合与 workflow 节点事件走同一扇分线器；面板账收全量,
     // 会话账经 main_view 滤网——节点内幕留在面板,main 不再倒原始 JSON。
     wf_exec.event_sink = &workflow_events;

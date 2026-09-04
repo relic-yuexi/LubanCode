@@ -301,7 +301,63 @@ def main():
         (out_dir / label).write_text("[exit %d]\n%s" % (probe.returncode,
                                                         probe.stdout or ""),
                                      encoding="utf-8")
-    return 0
+
+    # workflow 会话归属统一单:session 内的编排账(workflows/<run>/
+    # workflow.jsonl + nodes/*.jsonl)必须在场、收口齐全——这是本探针的
+    # 硬门槛,不只取证。
+    verdict = []
+    ok = True
+    verify_text = (out_dir / "verify.txt").read_text(encoding="utf-8")
+    if "[exit 0]" not in verify_text:
+        ok = False
+        verdict.append("trajectory verify 未过")
+    workflows_root = session / "workflows"
+    wf_runs = sorted(p for p in workflows_root.iterdir()) if workflows_root.exists() else []
+    if not wf_runs:
+        ok = False
+        verdict.append("session 里没有 workflows/<run>/ 编排账")
+    for run_dir in wf_runs:
+        orchestration = run_dir / "workflow.jsonl"
+        if not orchestration.exists():
+            ok = False
+            verdict.append("%s 缺 workflow.jsonl" % run_dir.name)
+            continue
+        kinds = []
+        for line in orchestration.read_text(encoding="utf-8").splitlines():
+            try:
+                kinds.append(json.loads(line).get("kind", ""))
+            except ValueError:
+                kinds.append("<bad>")
+        (out_dir / ("orchestration_%s.txt" % run_dir.name)).write_text(
+            "\n".join(kinds) + "\n", encoding="utf-8")
+        if not kinds or kinds[0] != "run.started":
+            ok = False
+            verdict.append("%s 编排账首行不是 run.started" % run_dir.name)
+        if not kinds or kinds[-1] not in ("run.completed", "run.failed", "run.cancelled"):
+            ok = False
+            verdict.append("%s 编排账未收口" % run_dir.name)
+        if "workflow.node.dispatched" not in kinds:
+            ok = False
+            verdict.append("%s 编排账没有 node 派发事实" % run_dir.name)
+        nodes_dir = run_dir / "nodes"
+        node_files = sorted(nodes_dir.glob("*.jsonl")) if nodes_dir.exists() else []
+        if not node_files:
+            ok = False
+            verdict.append("%s 没有 node attempt 账" % run_dir.name)
+        for node_file in node_files:
+            node_kinds = []
+            for line in node_file.read_text(encoding="utf-8").splitlines():
+                try:
+                    node_kinds.append(json.loads(line).get("kind", ""))
+                except ValueError:
+                    node_kinds.append("<bad>")
+            if not node_kinds or node_kinds[0] != "run.started" or \
+                    node_kinds[-1] not in ("run.completed", "run.failed", "run.cancelled"):
+                ok = False
+                verdict.append("%s node 账 %s 未收口" % (run_dir.name, node_file.name))
+    (out_dir / "result.txt").write_text(
+        ("通过\n" if ok else "未过\n") + "\n".join(verdict) + "\n", encoding="utf-8")
+    return 0 if ok else 1
 
 
 if __name__ == "__main__":

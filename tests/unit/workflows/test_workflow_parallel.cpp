@@ -451,15 +451,17 @@ edges:
 
     // body 三路并发,每路的 node_run_id 各带 -i<下标> 路号——面板与诊断
     // 账靠它分清谁是谁;不带路号时三路同 id,事件互踩(0.26.79 实翻)。
+    // 编排账单(workflow 会话归属统一)起 node_run_id 另带 -d<派发序号>
+    //(loop 重入防撞名),下标路号仍在,断言放宽到路号段。
     std::vector<std::string> body_ids;
     for (const std::string& id : recorder.started_run_ids) {
         if (id.find("-read_one-") != std::string::npos) body_ids.push_back(id);
     }
     std::sort(body_ids.begin(), body_ids.end());
     REQUIRE(body_ids.size() == 3);
-    CHECK(body_ids[0].find("-read_one-i0-a1") != std::string::npos);
-    CHECK(body_ids[1].find("-read_one-i1-a1") != std::string::npos);
-    CHECK(body_ids[2].find("-read_one-i2-a1") != std::string::npos);
+    CHECK(body_ids[0].find("-read_one-i0-d") != std::string::npos);
+    CHECK(body_ids[1].find("-read_one-i1-d") != std::string::npos);
+    CHECK(body_ids[2].find("-read_one-i2-d") != std::string::npos);
     // 三路互不相同:并发同跑不串线的基本盘。
     CHECK(body_ids[0] != body_ids[1]);
     CHECK(body_ids[1] != body_ids[2]);

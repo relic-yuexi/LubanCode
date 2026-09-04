@@ -101,7 +101,7 @@ constexpr std::array<std::pair<Durability, const char*>, 3> kDurabilityNames{{
 // 顺序与 EventKind 枚举声明一致,两处对不上会在启动断言里炸出来。
 // plane 归面照 §4.2:conversation=输入/宿主注入/模型输出/回喂结果;
 // execution=provider 请求与工具执行;evidence=验证与终裁;其余 control。
-constexpr std::array<EventKindInfo, 74> kKindInfos{{
+constexpr std::array<EventKindInfo, 86> kKindInfos{{
     {"run.started", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden, IdNeed::Forbidden, false},
     {"run.environment.captured", Plane::Execution, IdNeed::Optional, IdNeed::Optional, IdNeed::Forbidden,
      false},
@@ -248,10 +248,37 @@ constexpr std::array<EventKindInfo, 74> kKindInfos{{
     // hub 可能给不出 call_id,按在场与否如实带)。
     {"subagent.run.start_failed", Plane::Control, IdNeed::Optional, IdNeed::Optional,
      IdNeed::Optional, false},
+    // workflow 编排账(workflow 会话归属统一单,§3.6):编排事实族,只在
+    // workflows/<run>/workflow.jsonl 出现。编排决策是控制面(不含 provider
+    // 请求与工具执行的正文),三档 id 全禁——身份键在 payload。
+    {"workflow.definition.loaded", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden,
+     IdNeed::Forbidden, false},
+    {"workflow.node.dispatched", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden,
+     IdNeed::Forbidden, false},
+    {"workflow.node.retrying", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden,
+     IdNeed::Forbidden, false},
+    {"workflow.node.waiting", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden,
+     IdNeed::Forbidden, false},
+    {"workflow.node.completed", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden,
+     IdNeed::Forbidden, false},
+    {"workflow.node.failed", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden,
+     IdNeed::Forbidden, false},
+    {"workflow.node.skipped", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden,
+     IdNeed::Forbidden, false},
+    {"workflow.branch.started", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden,
+     IdNeed::Forbidden, false},
+    {"workflow.join.completed", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden,
+     IdNeed::Forbidden, false},
+    {"workflow.loop.iteration.started", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden,
+     IdNeed::Forbidden, false},
+    {"workflow.loop.iteration.completed", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden,
+     IdNeed::Forbidden, false},
+    {"workflow.checkpoint.saved", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden,
+     IdNeed::Forbidden, false},
 }};
 
-static_assert(kKindInfos.size() == 74, "kind 信息表与枚举须同长");
-static_assert(static_cast<std::size_t>(EventKind::SubagentRunStartFailed) + 1 == kKindInfos.size(),
+static_assert(kKindInfos.size() == 86, "kind 信息表与枚举须同长");
+static_assert(static_cast<std::size_t>(EventKind::WorkflowCheckpointSaved) + 1 == kKindInfos.size(),
               "kind 信息表顺序须与枚举声明一致");
 
 }  // namespace

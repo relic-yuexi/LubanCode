@@ -30,6 +30,7 @@
 #include "runtime/event_sink.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/interaction_broker.hpp"
+#include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger(编排账接线)
 #include "tools/registry.hpp"
 #include "tools/skill_loader.hpp"
 #include "workflow/catalog.hpp"
@@ -67,6 +68,10 @@ struct WorkflowCommandContext {
     lubancode::runtime::EventSink* event_sink = nullptr;
     std::string thread_id;
     lubancode::runtime::IdAuthority* id_authority = nullptr;
+    // 轨迹会话账(workflow 会话归属统一单):非空 = run 起动开编排 Journal、
+    // 逐 attempt 开 node stream(fail closed);空 = headless/旧装配,不落
+    // 轨迹账(旧 workflow-runs/ 路照旧)。
+    lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
 };
 
 // 拆好的 /workflow 子命令。Invalid 时 usage 打印兜底。

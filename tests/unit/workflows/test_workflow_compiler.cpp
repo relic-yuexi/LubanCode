@@ -343,9 +343,11 @@ result:
                 if (event.payload.contains("type")) {
                     event_types.push_back(event.payload["type"].get<std::string>());
                     if (event.payload["type"] == kEventNodeStarted) {
+                        // 编排账单起 node_run_id 带 -d<派发序号>(loop 重入
+                        // 防撞名),断言放宽到"-<节点>-d"段。
                         const std::string node_id = event.payload.value("node_id", std::string());
                         CHECK(event.payload.value("node_run_id", std::string()).find(
-                                  "-" + node_id + "-a1") != std::string::npos);
+                                  "-" + node_id + "-d") != std::string::npos);
                     }
                 }
             });
