@@ -1,7 +1,10 @@
-// search 工具 ripgrep 后端合同的单测(ripgrep 迁移单 P0-2/P0-3):
-//   - 定位器只认 ExecutableDir/libexec:PATH 前排放假 rg 也不被采用,
-//     LUBANCODE_RG_PATH 之类的环境变量不读(读工具不能借 PATH/env 变成
-//     任意执行口——本册最要紧的一条);
+// search 工具 ripgrep 后端合同的单测(ripgrep 迁移单 P0-2/P0-3 +
+// 搜索兜底单):
+//   - 定位器(BundledRipgrepPath,三层里的随包层)只拼 ExecutableDir/
+//     libexec:PATH 前排放假 rg 它也不采用,LUBANCODE_RG_PATH 之类的
+//     点名环境变量谁都不读(读工具不能借 env 变成任意执行口);
+//   - 搜索兜底单:三层发现(随包 → rg-stage → PATH)的顺序、exe 旁缺件
+//     自愈(直接用兜底路径,来源落账)、三层全缺报错带修复指引;
 //   - 缺件/不可执行/版本错/spawn fail 四路稳定错误,全走注入(fake
 //     filesystem + 假版本探针),不起真进程、不依赖真 rg;
 //   - argv 纯函数:基线逐元素钉、参数边界(`--`)、特殊字符逐项、flag 墙、
@@ -36,14 +39,21 @@ using lubancode::tools::BuildGrepArgv;
 using lubancode::tools::BuildObservationExcludes;
 using lubancode::tools::BuildSearchPolicy;
 using lubancode::tools::CheckRipgrepFile;
+using lubancode::tools::CollectRipgrepCandidates;
+using lubancode::tools::DiscoverRipgrep;
 using lubancode::tools::EscapeGlobLiteral;
+using lubancode::tools::FormatRipgrepAllMissingGuidance;
 using lubancode::tools::IRipgrepRunner;
 using lubancode::tools::IsNeverAllowedRipgrepFlag;
 using lubancode::tools::kBundledRipgrepVersion;
 using lubancode::tools::ObservationBoundary;
 using lubancode::tools::ParseRipgrepVersion;
 using lubancode::tools::PathToUtf8;
+using lubancode::tools::RipgrepCandidate;
+using lubancode::tools::RipgrepDiscovery;
 using lubancode::tools::RipgrepFileStatus;
+using lubancode::tools::RipgrepSource;
+using lubancode::tools::RipgrepTierStatus;
 using lubancode::tools::RipgrepInvocation;
 using lubancode::tools::RipgrepRunResult;
 using lubancode::tools::RipgrepSmokeResult;
@@ -457,20 +467,25 @@ TEST_CASE("ripgrep runner: smoke 每实例只做一次(缓存)") {
     CHECK(probe.calls == 1);  // 后两次走缓存,不再起进程/探针
 }
 
-TEST_CASE("ripgrep runner: 默认构造走生产唯一路径") {
-    // 不注入任何东西:定位只能来自 ExecutableDir/libexec。开发构建的运行
-    // 目录 libexec 通常无 rg -> 缺件;分期入位(CTest 目录里有 rg)时搜索
-    // 照常。这条钉的是"默认构造绝不改道 PATH/环境变量",两态都不冒充。
+TEST_CASE("ripgrep runner: 默认构造走生产三层发现") {
+    // 不注入任何东西:定位来自生产三层发现(随包 → rg-stage → PATH,
+    // 搜索兜底单)。本机任一层有货且过版本门即真搜一把;全缺如实
+    // BackendMissing;有件但形态坏/版本不合报对应的错——不冒充、不吞。
     BundledRipgrepRunner runner;
     const auto result = runner.Run(GrepRequest("x", std::filesystem::temp_directory_path()), SearchPolicy{},
                                    ToolExecutionContext{});
     if (result.has_value()) {
-        // rg 在位:真搜了一把(temp 目录里搜 "x"),成功即对。
+        // 命中层真搜了 temp 目录,成功即对;兜底层(rg-stage/PATH)命中
+        // 也是合法终态——单子的自愈路。
         CHECK(runner.smoke_result().status == RipgrepSmokeStatus::Ready);
         return;
     }
-    const bool honest_terminal_state = result.error().code == SearchBackendError::BackendMissing ||
-                                       result.error().code == SearchBackendError::NotExecutable;
+    const bool honest_terminal_state =
+        result.error().code == SearchBackendError::BackendMissing ||
+        result.error().code == SearchBackendError::NotExecutable ||
+        result.error().code == SearchBackendError::VersionMismatch ||
+        result.error().code == SearchBackendError::SpawnFailed ||
+        result.error().code == SearchBackendError::RunFailed;
     CHECK(honest_terminal_state);
 }
 
@@ -907,4 +922,191 @@ TEST_CASE("ObservationBoundary::ExcludedDirsSnapshot: 快照即登记账,线程�
     CHECK(snapshot[0] == std::filesystem::weakly_canonical(dir.Path()));
     ObservationBoundary::Instance().Reset();
     CHECK(ObservationBoundary::Instance().ExcludedDirsSnapshot().empty());
+}
+
+// ---------------------------------------------------------------------------
+// 搜索兜底单:三层发现、缺件自愈、全缺指引
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 本平台的 rg 可执行名(与生产 CollectRipgrepCandidates 同一款)。
+#ifdef _WIN32
+constexpr const char* kRgName = "rg.exe";
+#else
+constexpr const char* kRgName = "rg";
+#endif
+
+// 在 TempDir 的相对子路径上造一枚形态可执行的假 rg(POSIX 补执行位)。
+std::filesystem::path MakeFakeRgAt(const TempDir& dir, const std::string& child) {
+    dir.WriteFile(child, "fake rg payload");
+#ifndef _WIN32
+    dir.MakeExecutable(child);
+#endif
+    return dir.Path() / Utf8ToPath(child);
+}
+
+}  // namespace
+
+TEST_CASE("ripgrep 三层发现: 按序命中,第一枚形态可执行件赢") {
+    const TempDir dir;
+    const std::filesystem::path bundled =
+        dir.Path() / Utf8ToPath("pkg") / Utf8ToPath("libexec") / Utf8ToPath(kRgName);
+    const std::filesystem::path stage = dir.Path() / Utf8ToPath("home") / Utf8ToPath(".lubancode") /
+                                        Utf8ToPath("rg-stage") / Utf8ToPath("libexec") / Utf8ToPath(kRgName);
+    const std::filesystem::path on_path = dir.Path() / Utf8ToPath("bin") / Utf8ToPath(kRgName);
+
+    // 全缺:hit 空,逐层账全记 Missing。
+    {
+        const RipgrepDiscovery none = DiscoverRipgrep({{bundled, RipgrepSource::Bundled},
+                                                       {stage, RipgrepSource::UserStage},
+                                                       {on_path, RipgrepSource::Path}});
+        CHECK_FALSE(none.hit.has_value());
+        REQUIRE(none.tiers.size() == 3);
+        CHECK(none.tiers[0].status == RipgrepFileStatus::Missing);
+        CHECK(none.tiers[1].status == RipgrepFileStatus::Missing);
+        CHECK(none.tiers[2].status == RipgrepFileStatus::Missing);
+    }
+    // 只有 rg-stage 有货:exe 旁缺件,自愈命中第 2 层(不拷贝,路径即所出)。
+    {
+        MakeFakeRgAt(dir, "home/.lubancode/rg-stage/libexec/" + std::string(kRgName));
+        const RipgrepDiscovery healed = DiscoverRipgrep({{bundled, RipgrepSource::Bundled},
+                                                         {stage, RipgrepSource::UserStage},
+                                                         {on_path, RipgrepSource::Path}});
+        REQUIRE(healed.hit.has_value());
+        CHECK(healed.hit->source == RipgrepSource::UserStage);
+        CHECK(healed.hit->exe == stage);
+        CHECK(healed.tiers[0].status == RipgrepFileStatus::Missing);
+        CHECK(healed.tiers[1].status == RipgrepFileStatus::Ok);
+    }
+    // 随包在:永远是它赢,后面的层只进账(顺序优先级)。
+    {
+        MakeFakeRgAt(dir, "pkg/libexec/" + std::string(kRgName));
+        MakeFakeRgAt(dir, "bin/" + std::string(kRgName));
+        const RipgrepDiscovery bundled_wins = DiscoverRipgrep({{bundled, RipgrepSource::Bundled},
+                                                               {stage, RipgrepSource::UserStage},
+                                                               {on_path, RipgrepSource::Path}});
+        REQUIRE(bundled_wins.hit.has_value());
+        CHECK(bundled_wins.hit->source == RipgrepSource::Bundled);
+        CHECK(bundled_wins.hit->exe == bundled);
+        // 账仍走全量:三层态势 doctor 要看。
+        CHECK(bundled_wins.tiers.size() == 3);
+    }
+    // 只有 PATH 有:命中第 3 层。
+    {
+        const TempDir other;
+        const std::filesystem::path other_bundled =
+            other.Path() / Utf8ToPath("pkg") / Utf8ToPath("libexec") / Utf8ToPath(kRgName);
+        const std::filesystem::path other_stage = other.Path() / Utf8ToPath("home") / Utf8ToPath(".lubancode") /
+                                                  Utf8ToPath("rg-stage") / Utf8ToPath("libexec") /
+                                                  Utf8ToPath(kRgName);
+        const std::filesystem::path other_path = MakeFakeRgAt(other, "bin/" + std::string(kRgName));
+        const RipgrepDiscovery path_wins = DiscoverRipgrep({{other_bundled, RipgrepSource::Bundled},
+                                                            {other_stage, RipgrepSource::UserStage},
+                                                            {other_path, RipgrepSource::Path}});
+        REQUIRE(path_wins.hit.has_value());
+        CHECK(path_wins.hit->source == RipgrepSource::Path);
+        CHECK(path_wins.hit->exe == other_path);
+    }
+}
+
+TEST_CASE("ripgrep 候选清单: 随包→rg-stage→PATH 逐项展开(顺序与来源)") {
+    const TempDir dir;
+    const std::string fake_home = dir.Utf8Path("home");
+    const std::string fake_path_dir = dir.Utf8Path("bin");
+#ifdef _WIN32
+    const EnvGuard home_guard("USERPROFILE", fake_home);
+#else
+    const EnvGuard home_guard("HOME", fake_home);
+#endif
+    const EnvGuard path_guard("PATH", fake_path_dir);
+
+    const std::vector<RipgrepCandidate> candidates = CollectRipgrepCandidates();
+    REQUIRE_FALSE(candidates.empty());
+    // 随包层永远第一(测试进程的 exe 路径解析得到)。
+    CHECK(candidates.front().source == RipgrepSource::Bundled);
+    // rg-stage 恰在随包之后,路径逐段可预期。
+    REQUIRE(candidates.size() >= 3);
+    CHECK(candidates[1].source == RipgrepSource::UserStage);
+    CHECK(candidates[1].exe ==
+          Utf8ToPath(fake_home) / ".lubancode" / "rg-stage" / "libexec" / Utf8ToPath(kRgName));
+    // PATH 逐项展开:假目录里的 rg 候选在册,来源标 path。
+    const std::filesystem::path expected_on_path = Utf8ToPath(fake_path_dir) / Utf8ToPath(kRgName);
+    bool path_candidate_found = false;
+    for (const RipgrepCandidate& candidate : candidates) {
+        if (candidate.source == RipgrepSource::Path && candidate.exe == expected_on_path) {
+            path_candidate_found = true;
+        }
+    }
+    CHECK(path_candidate_found);
+}
+
+TEST_CASE("ripgrep runner: exe 旁缺件自愈走 rg-stage,来源落账") {
+    const TempDir dir;
+    // 随包层缺,rg-stage 层是形态可执行的假件:发现层应命中它,smoke 用
+    // 注入的假探针过版本门。起进程那步在假件上如实失败(Windows 非 PE 报
+    // spawn failed;POSIX 走 sh 回落报 run failed)——与既有"前置全过后真起
+    // 进程"册同一形状,这里钉的是发现与来源账。
+    const std::filesystem::path stage = MakeFakeRgAt(dir, "stage/libexec/" + std::string(kRgName));
+    const std::filesystem::path bundled =
+        dir.Path() / Utf8ToPath("absent") / Utf8ToPath("libexec") / Utf8ToPath(kRgName);
+    FakeProbe probe;
+    BundledRipgrepRunner::Overrides overrides;
+    overrides.candidates = {{bundled, RipgrepSource::Bundled}, {stage, RipgrepSource::UserStage}};
+    overrides.version_probe = probe.AsProbe();
+    BundledRipgrepRunner runner(overrides);
+    const auto result = runner.Run(GrepRequest("x", dir.Path()), SearchPolicy{}, ToolExecutionContext{});
+    REQUIRE_FALSE(result.has_value());
+    const bool honest_run_failure = result.error().code == SearchBackendError::SpawnFailed ||
+                                    result.error().code == SearchBackendError::RunFailed;
+    CHECK(honest_run_failure);
+    const RipgrepSmokeResult smoke = runner.smoke_result();
+    CHECK(smoke.status == RipgrepSmokeStatus::Ready);  // 发现 + 版本门都过了
+    CHECK(smoke.source == RipgrepSource::UserStage);   // 自愈来源落账
+    CHECK(smoke.exe == stage);
+    CHECK(probe.calls == 1);  // 探的就是兜底那枚
+}
+
+TEST_CASE("ripgrep runner: 三层全缺报 search_backend_missing,文案带修复指引") {
+    const TempDir dir;
+    BundledRipgrepRunner::Overrides overrides;
+    overrides.candidates = {
+        {dir.Path() / Utf8ToPath("a") / Utf8ToPath(kRgName), RipgrepSource::Bundled},
+        {dir.Path() / Utf8ToPath("b") / Utf8ToPath(kRgName), RipgrepSource::UserStage},
+        {dir.Path() / Utf8ToPath("c") / Utf8ToPath(kRgName), RipgrepSource::Path}};
+    BundledRipgrepRunner runner(overrides);
+    const auto result = runner.Run(GrepRequest("x", dir.Path()), SearchPolicy{}, ToolExecutionContext{});
+    REQUIRE_FALSE(result.has_value());
+    CHECK(result.error().code == SearchBackendError::BackendMissing);
+    CHECK(ToString(result.error().code) == "search_backend_missing");
+    // 文案带修复指引(doctor 与手动 stage 命令),不裸抛单枚路径。
+    CHECK(result.error().message.find("fetch_ripgrep.py") != std::string::npos);
+    CHECK(result.error().message.find("/doctor search") != std::string::npos);
+    CHECK(runner.smoke_result().status == RipgrepSmokeStatus::Missing);
+}
+
+TEST_CASE("ripgrep 全缺指引: 逐层聚账,PATH 计数,含不可执行标注") {
+    const TempDir dir;
+    const std::filesystem::path bundled =
+        dir.Path() / Utf8ToPath("pkg") / Utf8ToPath("libexec") / Utf8ToPath(kRgName);
+    const std::filesystem::path stage = dir.Path() / Utf8ToPath("home") / Utf8ToPath(".lubancode") /
+                                        Utf8ToPath("rg-stage") / Utf8ToPath("libexec") / Utf8ToPath(kRgName);
+    // PATH 上两枚:一枚不可执行(目录),一枚缺。
+    std::filesystem::create_directories(dir.Path() / Utf8ToPath("pathdir1"));
+    // rg-stage 层件在但不可执行:单独层如实标注;PATH 层聚成计数。
+    std::filesystem::create_directories(stage);
+    const std::vector<RipgrepTierStatus> tiers = {
+        {{bundled, RipgrepSource::Bundled}, RipgrepFileStatus::Missing},
+        {{stage, RipgrepSource::UserStage}, RipgrepFileStatus::NotExecutable},
+        {{dir.Path() / Utf8ToPath("pathdir1"), RipgrepSource::Path}, RipgrepFileStatus::NotExecutable},
+        {{dir.Path() / Utf8ToPath("pathdir2") / Utf8ToPath(kRgName), RipgrepSource::Path},
+         RipgrepFileStatus::Missing}};
+    const std::string text = FormatRipgrepAllMissingGuidance(tiers);
+    CHECK(text.find("三层全缺") != std::string::npos);
+    CHECK(text.find("fetch_ripgrep.py") != std::string::npos);  // 修复命令在场
+    CHECK(text.find("/doctor search") != std::string::npos);    // 诊断指引在场
+    CHECK(text.find("共 2 项") != std::string::npos);            // PATH 条目计数
+    CHECK(text.find("在,不可执行") != std::string::npos);       // 坏件如实标注
+    CHECK(text.find("不可用") != std::string::npos);            // PATH 坏件聚账
+    CHECK(text.find("自动兜底命中") != std::string::npos);      // 说清补齐即自愈
 }

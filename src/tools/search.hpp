@@ -12,11 +12,12 @@ namespace lubancode::tools {
 //   mode = "glob":按文件名通配(ripgrep globset 语法)找文件,返回相对路径列表。
 // 两种模式共用同一套策略(遵守 ignore 文件、硬排除 .git/build/node_modules/
 // .evidence、跳过二进制)与同一条后端执行路(随包 ripgrep,设计单迁移 P0-5
-// 切主路后唯一一条,无 fallback)。只读操作,不需要用户确认。
+// 切主路后唯一一条,无 fallback;定位三层发现——随包 libexec → 用户级
+// rg-stage → 系统 PATH,搜索兜底单)。只读操作,不需要用户确认。
 class SearchTool : public Tool {
 public:
-    // 默认构造即生产装配:持随包 BundledRipgrepRunner(定位只认
-    // exe-dir/libexec,缺件即稳定错 search_backend_missing,不退本地内核)。
+    // 默认构造即生产装配:持 BundledRipgrepRunner(定位三层发现,三层全缺
+    // 才报稳定错 search_backend_missing,不退本地内核)。
     SearchTool();
 
     // 装配注入口:生产传默认 runner(默认构造已带),单测传 fake。

@@ -22,6 +22,7 @@
 #include "app/commands/settings_commands.hpp"
 #include "cli/i18n.hpp"
 #include "config/config.hpp"
+#include "tools/path_utils.hpp"  // Utf8ToPath:FormatRipgrepDoctorSection 册的路径字面量
 
 using namespace lubancode;
 
@@ -642,4 +643,63 @@ TEST_CASE("CacheProbeVerdictLabel: 判词与分型对得上") {
           std::string::npos);
     CHECK(app::CacheProbeVerdictLabel(app::CacheProbeVerdict::NotReported).find("无法判定") !=
           std::string::npos);
+}
+
+TEST_CASE("FormatRipgrepDoctorSection: 三层账/命中层与版本/全缺指引") {
+    cli::SetLanguage("zh-CN");
+    using lubancode::tools::RipgrepCandidate;
+    using lubancode::tools::RipgrepDiscovery;
+    using lubancode::tools::RipgrepFileStatus;
+    using lubancode::tools::RipgrepSmokeResult;
+    using lubancode::tools::RipgrepSmokeStatus;
+    using lubancode::tools::RipgrepSource;
+    using lubancode::tools::RipgrepTierStatus;
+    using lubancode::tools::Utf8ToPath;
+
+    // 命中 rg-stage:三层逐层一行,第 2 层带实测版本,"当前用"指名层号。
+    {
+        RipgrepDiscovery discovery;
+        discovery.tiers.push_back(
+            {{Utf8ToPath("D:/pkg/libexec/rg.exe"), RipgrepSource::Bundled}, RipgrepFileStatus::Missing});
+        discovery.tiers.push_back({{Utf8ToPath("C:/home/.lubancode/rg-stage/libexec/rg.exe"),
+                                    RipgrepSource::UserStage},
+                                   RipgrepFileStatus::Ok});
+        discovery.tiers.push_back(
+            {{Utf8ToPath("C:/tools/rg.exe"), RipgrepSource::Path}, RipgrepFileStatus::Ok});
+        discovery.hit =
+            RipgrepCandidate{Utf8ToPath("C:/home/.lubancode/rg-stage/libexec/rg.exe"), RipgrepSource::UserStage};
+        RipgrepSmokeResult smoke;
+        smoke.status = RipgrepSmokeStatus::Ready;
+        smoke.found_version = "15.2.0";
+        smoke.source = RipgrepSource::UserStage;
+        const std::vector<std::string> lines = app::FormatRipgrepDoctorSection(discovery, smoke);
+        REQUIRE(lines.size() == 6);
+        CHECK(lines[0].find("15.2.0") != std::string::npos);  // 钉死版本
+        CHECK(lines[1].find("随包") != std::string::npos);
+        CHECK(lines[1].find("缺") != std::string::npos);      // exe 旁缺件如实报
+        CHECK(lines[2].find("命中") != std::string::npos);    // rg-stage 命中
+        CHECK(lines[2].find("15.2.0") != std::string::npos);  // 实测版本
+        CHECK(lines[2].find("ready") != std::string::npos);
+        CHECK(lines[3].find("可用") != std::string::npos);    // PATH 有货但命中在前层
+        CHECK(lines[4].find("第 2 层") != std::string::npos);
+        CHECK(lines[4].find("rg-stage") != std::string::npos);
+        CHECK(lines[5].find("fetch_ripgrep.py") == std::string::npos);  // 命中时不塞修复指引
+    }
+    // 三层全缺:当前用明说稳定错,修复指引带 stage 命令。
+    {
+        RipgrepDiscovery discovery;
+        discovery.tiers.push_back(
+            {{Utf8ToPath("D:/pkg/libexec/rg.exe"), RipgrepSource::Bundled}, RipgrepFileStatus::Missing});
+        discovery.tiers.push_back({{Utf8ToPath("C:/home/.lubancode/rg-stage/libexec/rg.exe"),
+                                    RipgrepSource::UserStage},
+                                   RipgrepFileStatus::Missing});
+        discovery.tiers.push_back(
+            {{Utf8ToPath("C:/tools/rg.exe"), RipgrepSource::Path}, RipgrepFileStatus::NotExecutable});
+        const std::vector<std::string> lines = app::FormatRipgrepDoctorSection(discovery, RipgrepSmokeResult{});
+        REQUIRE(lines.size() == 7);
+        CHECK(lines[2].find("缺") != std::string::npos);
+        CHECK(lines[3].find("不可执行") != std::string::npos);  // PATH 坏件如实标注
+        CHECK(lines[4].find("search_backend_missing") != std::string::npos);
+        CHECK(lines[5].find("fetch_ripgrep.py") != std::string::npos);  // 修复指引
+    }
 }

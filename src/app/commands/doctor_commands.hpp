@@ -38,6 +38,7 @@
 #include "runtime/trajectory_session.hpp"    // /doctor trajectory 的账本口(P0-4)
 #include "telemetry/service.hpp"  // /doctor telemetry 的状态面(T1)
 #include "tools/registry.hpp"
+#include "tools/search_ripgrep.hpp"  // RipgrepDiscovery/SmokeResult:/doctor search 的三层健康检查
 
 namespace lubancode::runtime {
 class TrajectorySessionLedger;
@@ -196,6 +197,13 @@ bool IsLoopbackUrl(const std::string& url);
 // error body 原文保留在截断窗内,密钥不该出现在服务端响应里,请求侧的
 // 正文本来就不进报告。
 std::string SanitizeProbeError(const std::string& message, std::size_t max_chars = 2000);
+
+// /doctor search 的 rg 健康检查行(搜索兜底单):三层逐层位置与状态、
+// 命中层与实测版本、三层全缺时的修复指引。discovery 来自生产三层发现,
+// hit_smoke 是命中层(若有)的 --version 冒烟结果——两样都是数据,这里
+// 只管排版;i18n 中英成对。纯函数,单测直接钉行。
+std::vector<std::string> FormatRipgrepDoctorSection(const lubancode::tools::RipgrepDiscovery& discovery,
+                                                    const lubancode::tools::RipgrepSmokeResult& hit_smoke);
 
 // ---------------- 执行(IO) ----------------
 

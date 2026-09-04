@@ -3,10 +3,13 @@
 // 纯函数构造器、观察边界→排除 glob 的策略构造器,与 P0-4 的流式分帧/
 // 解析合同(四道墙、JSONL/NUL 分帧、text/bytes 两路)。
 //
-// 生产定位只有一条:ExecutableDir()/libexec/rg(.exe)。不搜 PATH、不读
-// LUBANCODE_RG_PATH、不运行时下载——search 是免确认只读工具,能从 PATH
-// 或环境变量捡一枚任意程序,就等于开了一个不经确认的代码执行口。缺件即
-// 稳定错 search_backend_missing,不退回任何自研内核(迁移单一的红线)。
+// 生产定位是三层发现(搜索兜底单,2026-09):exe 旁 libexec(随包,首选)
+// → <home>/.lubancode/rg-stage/libexec(fetch_ripgrep.py 的既有 staging 位)
+// → 系统 PATH 的 rg。兜底不是免检:命中件照过版本 smoke 精确校
+// kBundledRipgrepVersion——PATH 上的冒牌件得先长得像钉死版本才被采用。
+// 仍不读 LUBANCODE_RG_PATH 之类点名环境变量、不运行时下载。三层全缺才
+// 报稳定错 search_backend_missing(文案带修复指引,不裸抛路径),也绝不
+// 退回任何自研内核(迁移单一的红线)。
 //
 // argv 约定(设计单 4.2/6.3/6.4):
 //   - argv 数组直起进程,不经过 cmd.exe/PowerShell//bin/sh,无转义层;
@@ -35,7 +38,7 @@ namespace lubancode::tools {
 // 本批先钉住缺件/不可执行/版本错/spawn 失败四路。
 
 enum class SearchBackendError {
-    BackendMissing,   // search_backend_missing:libexec 下没有 rg
+    BackendMissing,   // search_backend_missing:三层发现(随包/rg-stage/PATH)都没找到 rg
     NotExecutable,    // search_backend_not_executable:件在,不是可执行文件
     VersionMismatch,  // search_backend_version_mismatch:--version 对不上钉死版本
     SpawnFailed,      // search_backend_spawn_failed:起进程失败
@@ -125,17 +128,17 @@ public:
 // doctor 显示不一致时明报。
 inline constexpr std::string_view kBundledRipgrepVersion = "15.2.0";
 
-// 定位器:只认 ExecutableDir()/libexec/rg(.exe),一条路。
-//   - 不搜 PATH:PATH 前排放一枚假 rg 也轮不到它;
-//   - 不读 LUBANCODE_RG_PATH 或任何环境变量;
+// 定位器:第 1 层(随包)候选的生成器,只拼 ExecutableDir()/libexec/rg(.exe)。
+//   - 这一层自己不搜 PATH、不读 LUBANCODE_RG_PATH 或任何点名环境变量;
+//   - rg-stage/PATH 兜底在 CollectRipgrepCandidates 的第 2/3 层,不在这里;
 //   - 不运行时下载、不调系统包管理器。
 // 只拼路径,不查盘上是否存在——存在/可执行/版本的校验归 runner 与 doctor
 // smoke(见 CheckRipgrepFile / RunRipgrepSmoke)。
 class BundledRipgrepLocator {
 public:
-    // 生产唯一口:ExecutableDir()/libexec/rg.exe(Windows)/rg(POSIX)。
+    // 第 1 层生产口:ExecutableDir()/libexec/rg.exe(Windows)/rg(POSIX)。
     // ExecutablePath() 拿不到(极罕见:exe 路径解析失败)返回 nullopt,
-    // 调用方按缺件报,不猜 cwd、不退 PATH。
+    // 这层缺席由发现层往下兜,不猜 cwd。
     static std::optional<std::filesystem::path> BundledRipgrepPath();
 
     // 测试/特殊装配注入口:显式指 exe 路径(fake filesystem 效果)。
@@ -156,6 +159,48 @@ enum class RipgrepFileStatus {
 };
 
 RipgrepFileStatus CheckRipgrepFile(const std::filesystem::path& exe);
+
+// ---- 三层发现(搜索兜底单) --------------------------------------------------
+// 发现顺序(单子 §四层):随包(exe 旁 libexec)→ 用户级 rg-stage → 系统
+// PATH 的 rg。exe 旁缺件而 rg-stage 有货时直接用 rg-stage 路径(不拷贝),
+// 日志一行说明来源;三层全缺才报错,文案带修复指引。
+
+// 命中哪层(诊断与日志用;ToString 给 "bundled"/"rg-stage"/"path")。
+enum class RipgrepSource { Bundled, UserStage, Path };
+std::string_view ToString(RipgrepSource source);
+
+struct RipgrepCandidate {
+    std::filesystem::path exe;
+    RipgrepSource source = RipgrepSource::Bundled;
+};
+
+// 一层的探查账(命中与否都记,doctor 与全缺报错共用):
+struct RipgrepTierStatus {
+    RipgrepCandidate candidate;
+    RipgrepFileStatus status = RipgrepFileStatus::Missing;  // Ok = 这层可用
+};
+
+// 三层发现的结果:hit = 第一枚盘上形态可执行的件(全缺为空);tiers =
+// 逐层探查账(全量,不停在命中处——doctor 要看完整的三层态势)。
+struct RipgrepDiscovery {
+    std::optional<RipgrepCandidate> hit;
+    std::vector<RipgrepTierStatus> tiers;
+};
+
+// 生产候选清单(按发现顺序):随包 → rg-stage → PATH 逐项展开(同层按
+// PATH 顺序)。只拼路径,不碰盘;盘上校验归 DiscoverRipgrep。PATH 值按
+// 原字节当 UTF-8 解,非 ASCII 目录名解不动就自然错过——兜底层不追求完美。
+std::vector<RipgrepCandidate> CollectRipgrepCandidates();
+
+// 纯发现:按序过 CheckRipgrepFile,第一枚 Ok 即命中;全缺 hit 为空,
+// tiers 保留逐层账。不做版本校验(那要起进程,归 runner/doctor 的 smoke);
+// 命中层 smoke 不过(件坏/版本错)就报对应的错,不悄悄下探下一层——
+// 账在 doctor,自愈只治缺件。
+RipgrepDiscovery DiscoverRipgrep(const std::vector<RipgrepCandidate>& candidates);
+
+// 三层全缺时的报错文案(带修复指引:doctor 与手动 stage 命令,不裸抛
+// 路径):runner 的稳定错 message 与日志共用一份。
+std::string FormatRipgrepAllMissingGuidance(const std::vector<RipgrepTierStatus>& tiers);
 
 // ---- 版本 smoke(设计单 P0-2:启动/doctor 执行 --version 精确校版本) -------
 
@@ -184,6 +229,7 @@ struct RipgrepSmokeResult {
     std::string found_version;  // 实测解析出的版本(认不出为空),诊断显示用
     std::string message;        // 人话一句
     std::filesystem::path exe;  // 受检路径(诊断显示;hash 缩略归显示层)
+    RipgrepSource source = RipgrepSource::Bundled;  // 这枚件命中哪层(发现层填)
 };
 
 // 完整 smoke:存在性 -> 可执行 -> 起进程 -> 版本精确校验。probe 传空用默认
@@ -272,10 +318,22 @@ std::string TruncateUtf8Boundary(std::string_view text, std::size_t max_bytes);
 class BundledRipgrepRunner : public IRipgrepRunner {
 public:
     // exe_override/probe/limits 均为测试注入口(fake filesystem/假探针/小帽快测);
-    // 生产构造全默认:定位走 BundledRipgrepPath(),探针走真进程,帽走合同值。
+    // 生产构造全默认:定位走三层发现(CollectRipgrepCandidates),探针走真
+    // 进程,帽走合同值。
     explicit BundledRipgrepRunner(std::filesystem::path exe_override = {},
                                   RipgrepVersionProbe version_probe = nullptr,
                                   RipgrepStreamLimits limits = {});
+
+    // 搜索兜底单的整批判注入口:candidates 非空时走生产同一条三层发现路
+    //(测三层顺序/缺件自愈/全缺指引)。exe 与 candidates 互斥,exe 优先
+    //(旧合同:就这一枚,不回退)。
+    struct Overrides {
+        std::optional<std::filesystem::path> exe;
+        std::vector<RipgrepCandidate> candidates;
+        RipgrepVersionProbe version_probe;
+        RipgrepStreamLimits limits;
+    };
+    explicit BundledRipgrepRunner(const Overrides& overrides);
 
     std::expected<RipgrepRunResult, SearchBackendErrorInfo>
     Run(const SearchRequest& request, const SearchPolicy& policy,
@@ -289,6 +347,7 @@ private:
     void EnsureSmoke();
 
     std::optional<std::filesystem::path> exe_override_;
+    std::optional<std::vector<RipgrepCandidate>> candidates_override_;
     RipgrepVersionProbe version_probe_;
     RipgrepStreamLimits limits_;
     mutable std::mutex smoke_mutex_;

@@ -680,6 +680,93 @@ std::string SanitizeProbeError(const std::string& message, std::size_t max_chars
     return out;
 }
 
+std::vector<std::string> FormatRipgrepDoctorSection(const lubancode::tools::RipgrepDiscovery& discovery,
+                                                    const lubancode::tools::RipgrepSmokeResult& hit_smoke) {
+    using lubancode::tools::RipgrepFileStatus;
+    using lubancode::tools::RipgrepSource;
+    std::vector<std::string> lines;
+    lines.push_back(trf("doctor.search.pinned", std::string(lubancode::tools::kBundledRipgrepVersion)));
+
+    // 单层(随包/rg-stage)一行;PATH 聚一行——逐项倒出来是一屏噪声。
+    const auto single_tier_line = [&](int number, const char* tier_key, RipgrepSource source) {
+        const lubancode::tools::RipgrepTierStatus* tier = nullptr;
+        for (const auto& candidate_tier : discovery.tiers) {
+            if (candidate_tier.candidate.source == source) {
+                tier = &candidate_tier;
+                break;
+            }
+        }
+        std::string state;
+        if (tier == nullptr) {
+            state = tr("doctor.search.state.missing");  // 这层连候选都没生成(如 exe 路径解析不到)
+        } else if (tier->status == RipgrepFileStatus::Missing) {
+            state = tr("doctor.search.state.missing");
+        } else if (tier->status == RipgrepFileStatus::NotExecutable) {
+            state = tr("doctor.search.state.not_executable");
+        } else if (discovery.hit.has_value() && discovery.hit->source == source) {
+            state = trf("doctor.search.state.hit",
+                        hit_smoke.found_version.empty() ? std::string("-") : hit_smoke.found_version,
+                        std::string(lubancode::tools::ToString(hit_smoke.status)));
+        } else {
+            state = tr("doctor.search.state.usable_not_hit");
+        }
+        lines.push_back(std::to_string(number) + ". " + tr(tier_key) + ": " +
+                        (tier != nullptr ? lubancode::tools::PathToUtf8(tier->candidate.exe) : "-") + " —— " +
+                        state);
+    };
+    single_tier_line(1, "doctor.search.tier.bundled", RipgrepSource::Bundled);
+    single_tier_line(2, "doctor.search.tier.stage", RipgrepSource::UserStage);
+
+    // PATH 层:命中在前层时只报"另有可用 rg";全缺时报探过的条目数。
+    {
+        const lubancode::tools::RipgrepTierStatus* first_ok = nullptr;
+        const lubancode::tools::RipgrepTierStatus* first_present = nullptr;
+        std::size_t entries = 0;
+        for (const auto& tier : discovery.tiers) {
+            if (tier.candidate.source != RipgrepSource::Path) {
+                continue;
+            }
+            ++entries;
+            if (tier.status == RipgrepFileStatus::Ok && first_ok == nullptr) {
+                first_ok = &tier;
+            }
+            if (tier.status != RipgrepFileStatus::Missing && first_present == nullptr) {
+                first_present = &tier;
+            }
+        }
+        std::string path_text;
+        if (discovery.hit.has_value() && discovery.hit->source == RipgrepSource::Path) {
+            path_text = lubancode::tools::PathToUtf8(discovery.hit->exe) + " —— " +
+                        trf("doctor.search.state.hit",
+                            hit_smoke.found_version.empty() ? std::string("-") : hit_smoke.found_version,
+                            std::string(lubancode::tools::ToString(hit_smoke.status)));
+        } else if (first_ok != nullptr) {
+            path_text = lubancode::tools::PathToUtf8(first_ok->candidate.exe) + " —— " +
+                        tr("doctor.search.state.usable_not_hit");
+        } else if (first_present != nullptr) {
+            path_text = lubancode::tools::PathToUtf8(first_present->candidate.exe) + " —— " +
+                        tr("doctor.search.state.not_executable");
+        } else {
+            path_text = trf("doctor.search.state.path_none", entries);
+        }
+        lines.push_back("3. " + tr("doctor.search.tier.path") + ": " + path_text);
+    }
+
+    // 当前用哪层(或全缺)+ 修复指引。
+    if (discovery.hit.has_value()) {
+        const int tier_number = discovery.hit->source == RipgrepSource::Bundled    ? 1
+                                : discovery.hit->source == RipgrepSource::UserStage ? 2
+                                                                                    : 3;
+        lines.push_back(trf("doctor.search.current_hit", tier_number,
+                            std::string(lubancode::tools::ToString(discovery.hit->source))));
+    } else {
+        lines.push_back(tr("doctor.search.current_missing"));
+        lines.push_back(tr("doctor.search.fix"));
+    }
+    lines.push_back(tr("doctor.search.note"));
+    return lines;
+}
+
 // ---------------- 执行 ----------------
 
 namespace {
@@ -1368,30 +1455,26 @@ void HandleDoctorCommand(const std::string& args, const DoctorContext& context) 
         return;
     }
     if (subcommand == "search") {
-        // ripgrep 迁移单 P0-2(设计单 7.2):search 后端诊断。生产只认
-        // exe-dir/libexec 一条路——这里不查 PATH、不列 PATH 候选;smoke 真
-        // 起 rg --version 精确校版本(单次,doctest 不进这条路)。
-        TermOut() << context.theme.stats << "search 后端(内置 ripgrep):" << context.theme.reset << "\n";
-        const std::optional<std::filesystem::path> exe = lubancode::tools::BundledRipgrepLocator::BundledRipgrepPath();
-        if (!exe.has_value()) {
-            TermOut() << "  path: (解析不到可执行目录)\n  status: missing\n";
-        } else {
-            const lubancode::tools::RipgrepSmokeResult smoke = lubancode::tools::RunRipgrepSmoke(*exe);
-            TermOut() << "  search backend: bundled ripgrep " << lubancode::tools::kBundledRipgrepVersion << "\n";
-            TermOut() << "  path: " << lubancode::tools::PathToUtf8(*exe) << "\n";
-            TermOut() << "  status: " << lubancode::tools::ToString(smoke.status);
-            if (!smoke.found_version.empty()) {
-                TermOut() << " (实测 " << smoke.found_version << ")";
-            }
-            TermOut() << "\n";
-            if (smoke.status != lubancode::tools::RipgrepSmokeStatus::Ready) {
-                TermOut() << "  " << smoke.message << "\n";
-            }
+        // 搜索兜底单:rg 三层健康检查(当前位置、版本、命中哪层)。逐层
+        // 账来自生产三层发现;命中层真起 rg --version 精确校版本(单次,
+        // doctest 不进这条路,排版由 FormatRipgrepDoctorSection 单测钉)。
+        TermOut() << context.theme.stats << tr("doctor.search.header") << context.theme.reset << "\n";
+        const lubancode::tools::RipgrepDiscovery discovery =
+            lubancode::tools::DiscoverRipgrep(lubancode::tools::CollectRipgrepCandidates());
+        lubancode::tools::RipgrepSmokeResult hit_smoke;
+        if (discovery.hit.has_value()) {
+            hit_smoke = lubancode::tools::RunRipgrepSmoke(discovery.hit->exe);
+            hit_smoke.source = discovery.hit->source;
+        }
+        for (const std::string& line : FormatRipgrepDoctorSection(discovery, hit_smoke)) {
+            TermOut() << "  " << line << "\n";
+        }
+        if (discovery.hit.has_value() &&
+            hit_smoke.status != lubancode::tools::RipgrepSmokeStatus::Ready) {
+            TermOut() << "  " << hit_smoke.message << "\n";
         }
         TermOut() << "  regex: Rust regex (default engine)\n";
         TermOut() << "  ignore files: on\n";
-        TermOut() << "  注:生产只认随包 libexec/rg,不搜 PATH、不读环境变量;\n"
-                     "      search 已切随包 ripgrep 主路(无本地内核 fallback,缺件即稳定错)。\n";
         TermOut().flush();
         return;
     }

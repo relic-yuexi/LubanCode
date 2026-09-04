@@ -26,6 +26,7 @@
 
 #include <nlohmann/json.hpp>
 
+#include "platform/log_sink.hpp"        // LogSink:rg 兜底命中的来源一行
 #include "platform/process.hpp"         // ChildProcess/WaitForExit:流式执行底座
 #include "platform/text_encoding.hpp"   // SanitizeExternalText:bytes 路与 glob 路径的编码关口
 #include "tools/path_utils.hpp"         // PathToUtf8
@@ -432,11 +433,20 @@ BundledRipgrepRunner::BundledRipgrepRunner(std::filesystem::path exe_override,
                                            RipgrepStreamLimits limits)
     : version_probe_(std::move(version_probe)), limits_(std::move(limits)) {
     // 缺省实参 {} 是"空路径",不是"注入了空路径":空一律按"没注入"算,
-    // 走生产唯一路径(ExecutableDir/libexec)。不然默认构造会拿空路径去过
-    // 文件校验,永远报缺件——P0-2 起这枚暗雷就埋在缺省实参里,默认构造的
-    // 测试只断言"缺件也算诚实终态"没炸出来,P0-5 切主路才现形。
+    // 走生产三层发现。不然默认构造会拿空路径去过文件校验,永远报缺件——
+    // P0-2 起这枚暗雷就埋在缺省实参里,默认构造的测试只断言"缺件也算诚实
+    // 终态"没炸出来,P0-5 切主路才现形。
     if (!exe_override.empty()) {
         exe_override_ = std::move(exe_override);
+    }
+}
+
+BundledRipgrepRunner::BundledRipgrepRunner(const Overrides& overrides)
+    : version_probe_(std::move(overrides.version_probe)), limits_(std::move(overrides.limits)) {
+    if (overrides.exe.has_value() && !overrides.exe->empty()) {
+        exe_override_ = overrides.exe;
+    } else if (!overrides.candidates.empty()) {
+        candidates_override_ = std::move(overrides.candidates);
     }
 }
 
@@ -450,16 +460,35 @@ void BundledRipgrepRunner::EnsureSmoke() {
     if (smoke_done_) {
         return;  // 每实例只 smoke 一次(工具实例共享,别让并发调用各起一遍进程)
     }
-    // 定位:注入路径优先(测试),否则生产唯一路径。拿不到路径本身就是缺件。
-    const std::optional<std::filesystem::path> exe =
-        exe_override_.has_value() ? exe_override_ : BundledRipgrepLocator::BundledRipgrepPath();
-    if (!exe.has_value()) {
+    // 定位:单枚注入(测试,不回退)优先;否则整批候选(注入或生产)走
+    // 三层发现——随包 → rg-stage → PATH,命中件照过版本门。
+    if (exe_override_.has_value()) {
+        smoke_result_ = RunRipgrepSmoke(*exe_override_, version_probe_);
+        smoke_done_ = true;
+        return;
+    }
+    const std::vector<RipgrepCandidate> candidates =
+        candidates_override_.has_value() ? *candidates_override_ : CollectRipgrepCandidates();
+    const RipgrepDiscovery discovery = DiscoverRipgrep(candidates);
+    if (!discovery.hit.has_value()) {
+        // 三层全缺:稳定错照旧,文案升级成修复指引(不裸抛路径)。
         smoke_result_.status = RipgrepSmokeStatus::Missing;
         smoke_result_.code = SearchBackendError::BackendMissing;
-        smoke_result_.message = "解析不到本程序可执行目录,定位不了随包 ripgrep";
-        smoke_result_.exe = std::filesystem::path();
-    } else {
-        smoke_result_ = RunRipgrepSmoke(*exe, version_probe_);
+        smoke_result_.message = FormatRipgrepAllMissingGuidance(discovery.tiers);
+        smoke_result_.exe = discovery.tiers.empty() ? std::filesystem::path{}
+                                                    : discovery.tiers.front().candidate.exe;
+        smoke_done_ = true;
+        return;
+    }
+    smoke_result_ = RunRipgrepSmoke(discovery.hit->exe, version_probe_);
+    smoke_result_.source = discovery.hit->source;
+    if (discovery.hit->source != RipgrepSource::Bundled) {
+        // 自愈一行账(单子 §四层 2):exe 旁缺件,兜底层有货,直接用兜底
+        // 路径不拷贝。落 LogSink(默认 stderr,装配了文件 sink 落日志),
+        // 不进工具正文——正文只留搜索结果。
+        platform::LogSink::Instance().Warn(
+            "search", std::string("rg 兜底命中 ") + std::string(ToString(discovery.hit->source)) +
+                          " 层: " + PathToUtf8(discovery.hit->exe) + "(exe 旁 libexec 缺件;直接用该路径,不拷贝)");
     }
     smoke_done_ = true;
 }

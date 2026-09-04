@@ -230,8 +230,9 @@ std::string SearchTool::name() const {
 }
 
 SearchTool::SearchTool() : ripgrep_runner_(std::make_shared<BundledRipgrepRunner>()) {
-    // P0-5 起默认构造即生产装配:持随包 ripgrep runner(定位只认
-    // exe-dir/libexec,构造零动作,smoke 懒做)。没有第二条执行路。
+    // P0-5 起默认构造即生产装配:持 ripgrep runner(定位三层发现——随包
+    // libexec → 用户级 rg-stage → 系统 PATH,搜索兜底单;构造零动作,
+    // smoke 懒做)。没有第二条执行路。
 }
 
 SearchTool::SearchTool(std::shared_ptr<IRipgrepRunner> ripgrep_runner)

@@ -67,7 +67,19 @@ std::string_view ToString(RipgrepSmokeStatus status) {
     return "unknown";
 }
 
-// ---- 定位器(只认 ExecutableDir/libexec,一条路) ----------------------------
+std::string_view ToString(RipgrepSource source) {
+    switch (source) {
+        case RipgrepSource::Bundled:
+            return "bundled";
+        case RipgrepSource::UserStage:
+            return "rg-stage";
+        case RipgrepSource::Path:
+            return "path";
+    }
+    return "unknown";
+}
+
+// ---- 定位器(第 1 层:只拼 ExecutableDir/libexec,不搜 PATH 不读 env) --------
 
 std::optional<std::filesystem::path> BundledRipgrepLocator::BundledRipgrepPath() {
     // 唯一的一条:exe 同目录 libexec/ 下。不搜 PATH、不读任何环境变量、
@@ -115,6 +127,120 @@ RipgrepFileStatus CheckRipgrepFile(const std::filesystem::path& exe) {
     return access(native.c_str(), X_OK) == 0 ? RipgrepFileStatus::Ok
                                              : RipgrepFileStatus::NotExecutable;
 #endif
+}
+
+// ---- 三层发现(搜索兜底单) --------------------------------------------------
+
+namespace {
+
+// 本平台的 rg 可执行名(Windows 认 .exe 形态,POSIX 认裸名)。
+std::filesystem::path RipgrepExecutableName() {
+#ifdef _WIN32
+    return std::filesystem::path(L"rg.exe");
+#else
+    return std::filesystem::path("rg");
+#endif
+}
+
+}  // namespace
+
+std::vector<RipgrepCandidate> CollectRipgrepCandidates() {
+    std::vector<RipgrepCandidate> out;
+
+    // 第 1 层:随包(exe 旁 libexec)。exe 路径都解析不到时这层缺席,
+    // 不猜 cwd、不退环境变量。
+    if (const std::optional<std::filesystem::path> bundled = BundledRipgrepLocator::BundledRipgrepPath()) {
+        out.push_back({*bundled, RipgrepSource::Bundled});
+    }
+
+    // 第 2 层:用户级 rg-stage(scripts/fetch_ripgrep.py 的一次性产物,
+    // 全机共享;构建侧 CMake 早就在探同一路径当离线分期兜底)。
+    if (const std::optional<std::string> home = platform::HomeDir()) {
+        out.push_back({platform::Utf8ToPath(*home) / ".lubancode" / "rg-stage" / "libexec" /
+                           RipgrepExecutableName(),
+                       RipgrepSource::UserStage});
+    }
+
+    // 第 3 层:系统 PATH 的 rg,逐项展开(同层按 PATH 顺序)。空的 PATH
+    // 条目跳过;条目按原字节当 UTF-8 解,解不动的目录自然错过。
+    if (const std::optional<std::string> path_value = platform::GetEnvVar("PATH")) {
+#ifdef _WIN32
+        constexpr char kSeparator = ';';
+#else
+        constexpr char kSeparator = ':';
+#endif
+        std::size_t begin = 0;
+        while (begin <= path_value->size()) {
+            const std::size_t end = path_value->find(kSeparator, begin);
+            const std::string entry =
+                path_value->substr(begin, end == std::string::npos ? std::string::npos : end - begin);
+            if (!entry.empty()) {
+                out.push_back({platform::Utf8ToPath(entry) / RipgrepExecutableName(), RipgrepSource::Path});
+            }
+            if (end == std::string::npos) {
+                break;
+            }
+            begin = end + 1;
+        }
+    }
+    return out;
+}
+
+RipgrepDiscovery DiscoverRipgrep(const std::vector<RipgrepCandidate>& candidates) {
+    RipgrepDiscovery out;
+    for (const RipgrepCandidate& candidate : candidates) {
+        RipgrepTierStatus tier;
+        tier.candidate = candidate;
+        tier.status = CheckRipgrepFile(candidate.exe);
+        // 第一枚 Ok 记命中,但账照走全量——三层态势是 doctor 与全缺报错
+        // 的共同材料,stat 几十枚 PATH 条目不值一提。
+        if (tier.status == RipgrepFileStatus::Ok && !out.hit.has_value()) {
+            out.hit = candidate;
+        }
+        out.tiers.push_back(std::move(tier));
+    }
+    return out;
+}
+
+std::string FormatRipgrepAllMissingGuidance(const std::vector<RipgrepTierStatus>& tiers) {
+    // 逐层聚账:随包/rg-stage 各一行;PATH 聚一行(逐项倒出来是一屏噪声)。
+    auto describe = [&tiers](RipgrepSource source) {
+        std::string text;
+        std::size_t path_entries = 0;
+        std::size_t path_present = 0;
+        for (const RipgrepTierStatus& tier : tiers) {
+            if (tier.candidate.source != source) {
+                continue;
+            }
+            if (source == RipgrepSource::Path) {
+                ++path_entries;
+                if (tier.status != RipgrepFileStatus::Missing) {
+                    ++path_present;
+                }
+                continue;
+            }
+            if (!text.empty()) {
+                text += ";";
+            }
+            text += PathToUtf8(tier.candidate.exe);
+            text += tier.status == RipgrepFileStatus::Missing ? "(缺)"
+                    : tier.status == RipgrepFileStatus::NotExecutable ? "(在,不可执行)"
+                                                                      : "(可用)";
+        }
+        if (source == RipgrepSource::Path) {
+            return "系统 PATH 共 " + std::to_string(path_entries) + " 项," +
+                   std::to_string(path_present) + " 处有 rg 但不可用";
+        }
+        return text;
+    };
+
+    std::string out = "ripgrep 三层全缺,search 后端不可用。已探:随包 libexec " +
+                      describe(RipgrepSource::Bundled) + ";用户级 rg-stage " +
+                      describe(RipgrepSource::UserStage) + ";" + describe(RipgrepSource::Path) +
+                      "。修复:跑 /doctor search 看逐层诊断;或手动补一份用户级 staging(一次,全机共享):\n"
+                      "  python scripts/fetch_ripgrep.py --target <home>/.lubancode/rg-stage\n"
+                      "补齐后无需随包,search 自动兜底命中。";
+    return out;
 }
 
 // ---- 版本 smoke -------------------------------------------------------------
@@ -176,13 +302,13 @@ RipgrepSmokeResult RunRipgrepSmoke(const std::filesystem::path& exe, const Ripgr
     if (file_status == RipgrepFileStatus::Missing) {
         out.status = RipgrepSmokeStatus::Missing;
         out.code = SearchBackendError::BackendMissing;
-        out.message = "随包 ripgrep 缺件: " + PathToUtf8(exe);
+        out.message = "ripgrep 缺件: " + PathToUtf8(exe);
         return out;
     }
     if (file_status == RipgrepFileStatus::NotExecutable) {
         out.status = RipgrepSmokeStatus::NotExecutable;
         out.code = SearchBackendError::NotExecutable;
-        out.message = "随包 ripgrep 不可执行(安装损坏): " + PathToUtf8(exe);
+        out.message = "ripgrep 不可执行(安装损坏): " + PathToUtf8(exe);
         return out;
     }
 
@@ -208,12 +334,11 @@ RipgrepSmokeResult RunRipgrepSmoke(const std::filesystem::path& exe, const Ripgr
     if (*parsed != kBundledRipgrepVersion) {
         out.status = RipgrepSmokeStatus::VersionMismatch;
         out.code = SearchBackendError::VersionMismatch;
-        out.message = "随包 ripgrep 版本不合: 要 " + std::string(kBundledRipgrepVersion) + ",实得 " +
-                      *parsed;
+        out.message = "ripgrep 版本不合: 要 " + std::string(kBundledRipgrepVersion) + ",实得 " + *parsed;
         return out;
     }
     out.status = RipgrepSmokeStatus::Ready;
-    out.message = "随包 ripgrep " + *parsed + " 就绪";
+    out.message = "ripgrep " + *parsed + " 就绪";
     return out;
 }
 

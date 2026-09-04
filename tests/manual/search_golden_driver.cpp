@@ -302,6 +302,12 @@ nlohmann::json RunScenarioWithTool(const Scenario& sc, const fs::path& corpus_ro
     rec["path"] = sc.rel_path;
     rec["glob"] = sc.glob;
     rec["is_error"] = result.is_error;
+    // 失败时把给模型看的正文头部录进去(搜索兜底单):三层全缺的修复指引
+    // 在正文里,真机裸 exe 验收要看的就是这段字。比对仍按 hits/scalars,
+    // 这枚字段只作证据,不进比对集。
+    if (result.is_error) {
+        rec["error_head"] = result.content.substr(0, 400);
+    }
     rec["hit_count"] = hits.size();
     rec["truncated"] = truncated;
     rec["notice_present"] = notice_present;
