@@ -449,10 +449,16 @@ int main(int argc, char** argv) {
             item["recall_us"] = std::chrono::duration_cast<std::chrono::microseconds>(t1 - t0).count();
             json ranked = json::array();
             json injected = json::array();
+            json injected_weak = json::array();
+            json weak_dropped_ids = json::array();
             int below = 0, budget = 0, stale = 0, dup = 0, truncated = 0;
             for (const auto& e : trace.entries) {
                 ranked.push_back(e.id);
-                if (e.injected) injected.push_back(e.id);
+                if (e.injected) {
+                    injected.push_back(e.id);
+                    if (e.weak) injected_weak.push_back(e.id);
+                }
+                if (e.weak_dropped) weak_dropped_ids.push_back(e.id);
                 if (e.below_threshold) ++below;
                 if (e.budget_dropped) ++budget;
                 if (e.stale_blocked) ++stale;
@@ -461,6 +467,8 @@ int main(int argc, char** argv) {
             }
             item["ranked"] = ranked;
             item["injected"] = injected;
+            item["injected_weak"] = injected_weak;
+            item["weak_dropped"] = weak_dropped_ids;
             item["injected_bytes"] = trace.injected_bytes;
             item["injected_count"] = trace.injected_count;
             item["below_threshold"] = below;

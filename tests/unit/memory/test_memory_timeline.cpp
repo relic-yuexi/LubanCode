@@ -54,14 +54,18 @@ void EnqueueFact(memory::ProjectMemory& store, const std::string& id,
     REQUIRE(store.EnqueueSave(request).has_value());
 }
 
-// 注入正文里"## 召回: "段的 id 顺序。
+// 注入正文里"## 召回: "段的 id 顺序。弱相关档的段头带" [弱相关]"短标
+//(或英文档的 [weakly related]),剥掉再比——时间线排序只看条目本身。
 std::vector<std::string> SectionOrder(const std::string& context) {
     std::vector<std::string> order;
     std::size_t pos = 0;
     while ((pos = context.find("## 召回: ", pos)) != std::string::npos) {
         const std::size_t begin = pos + strlen("## 召回: ");
         const std::size_t end = context.find('\n', begin);
-        order.push_back(context.substr(begin, end - begin));
+        std::string id = context.substr(begin, end - begin);
+        const std::size_t marker = id.find(" [");
+        if (marker != std::string::npos) id.resize(marker);
+        order.push_back(std::move(id));
         pos = end;
     }
     return order;

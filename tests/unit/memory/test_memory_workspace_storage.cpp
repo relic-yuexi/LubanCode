@@ -182,10 +182,10 @@ TEST_CASE("P0-3: 召回快照经落账口出账,快照不稳本轮不注入") {
     CHECK(trace.workspace_key == rig.store->identity().workspace_key);
     // trace 落在新家:.state/recall-traces/trace-last.json,键名 workspace_key。
     // schema 4(记忆检索与注入改进单):条目加 content_hits/content_truncated/
-    // drop_reason。
+    // drop_reason;schema 5(记忆幻觉根治单):条目加 weak/cooccur/weak_dropped。
     const auto trace_json = nlohmann::json::parse(
         Read(rig.store->memory_dir() / ".state" / "recall-traces" / "trace-last.json"));
-    CHECK(trace_json.value("schema", 0) == 4);
+    CHECK(trace_json.value("schema", 0) == 5);
     CHECK(trace_json.value("workspace_key", std::string()) == rig.store->identity().workspace_key);
     CHECK(trace_json.contains("project_key") == false);
 }

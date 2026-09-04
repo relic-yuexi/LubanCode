@@ -261,9 +261,15 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             const std::string shown_id =
                 entry.layer == "user" ? entry.id + tr("cmd.memory.why.layer_user") : entry.id;
             if (entry.injected) {
-                TermOut() << trf("cmd.memory.why.hit", shown_id, entry.score, entry.hard_hits,
-                                 entry.term_hits, entry.bytes)
-                          << "\n";
+                if (entry.weak) {
+                    TermOut() << trf("cmd.memory.why.weak_hit", shown_id, entry.score,
+                                     entry.hard_hits, entry.term_hits, entry.bytes, entry.cooccur)
+                              << "\n";
+                } else {
+                    TermOut() << trf("cmd.memory.why.hit", shown_id, entry.score, entry.hard_hits,
+                                     entry.term_hits, entry.bytes)
+                              << "\n";
+                }
                 continue;
             }
             std::string reason;
@@ -273,6 +279,7 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             else if (entry.snapshot_failed) reason = tr("cmd.memory.why.snapshot_failed");
             else if (entry.layer_superseded) reason = tr("cmd.memory.why.superseded");
             else if (entry.duplicate_dropped) reason = tr("cmd.memory.why.duplicate");
+            else if (entry.weak_dropped) reason = tr("cmd.memory.why.weak_dropped");
             else if (entry.below_threshold) reason = tr("cmd.memory.why.below_threshold");
             else if (entry.budget_dropped) reason = tr("cmd.memory.why.budget");
             else reason = tr("cmd.memory.why.skipped");
