@@ -178,17 +178,26 @@ TEST_CASE("UiEventPump: 按帧节拍收批——滴流下渲染批次远少于 d
     // 期望全文:30 枚"字"(UTF-8 三字节,不能用 std::string(n,'字')——
     // 多字节字符字面量截成 char 会变垃圾)。
     std::string expected;
+    const auto drip_start = std::chrono::steady_clock::now();
     for (int i = 0; i < 30; ++i) {
         pump.PostDelta(MakeDelta("t1", "字"));
         expected += "字";
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    // ~300ms 的滴流,50ms 一帧:期望 5~8 批(首枚即画,其后每帧一批)。
-    // 上下界都放宽——计时测试不赌毫秒,只钉"远少于 30"与"不止一批"。
+    const auto drip_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                             std::chrono::steady_clock::now() - drip_start)
+                             .count();
     pump.StopAndDrain();
     const std::size_t batches = recorder.CountTag("delta:t1");
     CHECK(batches >= 2);
-    CHECK(batches <= 12 + 8); // 慢 runner(CI macOS 实翻)调度抖动折帧,上限放一档;下界才是本断言的钉
+    // 上界随实测滴流时长推导,不拍常数:批数被帧节拍钉住,约等于滴流时长
+    // /帧间隔——首枚即画 +1、停表尾批 +1、调度抖动 +2,故 +4。名义滴流
+    // 300ms ≈ 5~8 批;慢 runner(CI macOS 实翻 23 批,run 33873402016)上
+    // sleep_for 超睡、滴流拉到 ~1.1s,帧节拍照常工作,批数随帧数正比涨
+    // ——恒定上界 20 冤枉的是正常节拍。若帧节流真失效(短时长高批数),
+    // 此界照样抓红。下界"不止一批"才是本断言的钉;全文一字不丢另钉。
+    const long long frame_budget = drip_ms / kFrameMs + 4;
+    CHECK(static_cast<long long>(batches) <= frame_budget);
     CHECK(recorder.JoinedText("delta:t1") == expected);
 }
 
