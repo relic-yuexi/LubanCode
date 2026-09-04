@@ -88,8 +88,11 @@ private:
     std::condition_variable wake_;         // 投递即醒;谓词 stopped_||!pending_
     std::deque<runtime::ServerEvent> pending_;
     std::mutex render_mutex_;              // 画笔锁:串行化一切渲染
-    std::thread consumer_;
+    // stopped_ 须先于 consumer_ 声明:成员按声明序构造,消费线程一起跑就
+    // 会读 stopped_,读到一枚尚未初始化的原子是构造序竞态(栈槽复用时,
+    // 脏字节恰是上一只泵置过的 true,消费线程会假性收工)。
     std::atomic<bool> stopped_{false};
+    std::thread consumer_;
 };
 
 }  // namespace lubancode::app

@@ -55,24 +55,35 @@ UiEventPump::UiEventPump(Renderer renderer, std::chrono::milliseconds frame_inte
 UiEventPump::~UiEventPump() { StopAndDrain(); }
 
 void UiEventPump::PostDelta(const runtime::ServerEvent& event) {
-    if (stopped_.load(std::memory_order_acquire)) {
+    bool stopped_now = false;
+    {
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        // 停表检查收进队列锁:与 StopAndDrain 的置停互斥。锁外检查则有
+        // "查得 false、置停全套跑完、这里才入队"的窗口——余量成死账,
+        // 消费线程已收工,永不画。
+        if (stopped_.load(std::memory_order_acquire)) {
+            stopped_now = true;
+        } else {
+            // 合并:队尾是同 item 的同类 ItemDelta 就地拼接。正文与思考
+            // 各占一枚 item,思考块收束后正文另起 item,不会错拼到一起。
+            if (!pending_.empty() &&
+                pending_.back().kind == runtime::ServerEventKind::ItemDelta &&
+                event.kind == runtime::ServerEventKind::ItemDelta &&
+                pending_.back().item_id == event.item_id &&
+                pending_.back().item_kind == event.item_kind) {
+                pending_.back().text += event.text;
+            } else {
+                pending_.push_back(event);
+            }
+        }
+    }
+    if (stopped_now) {
         // 停表后的迟到流式事件(Stop 钩子续跑的正文):退化成就地画,
-        // 与老路一字不差。
+        // 与老路一字不差。画笔锁在队列锁外拿——锁序恒 render->queue,
+        // 两锁绝不 nested 反持。
         std::lock_guard<std::mutex> render(render_mutex_);
         renderer_(event);
         return;
-    }
-    {
-        std::lock_guard<std::mutex> lock(queue_mutex_);
-        // 合并:队尾是同 item 的同类 ItemDelta 就地拼接。正文与思考各占
-        // 一枚 item,思考块收束后正文另起 item,不会错拼到一起。
-        if (!pending_.empty() && pending_.back().kind == runtime::ServerEventKind::ItemDelta &&
-            event.kind == runtime::ServerEventKind::ItemDelta && pending_.back().item_id == event.item_id &&
-            pending_.back().item_kind == event.item_kind) {
-            pending_.back().text += event.text;
-        } else {
-            pending_.push_back(event);
-        }
     }
     // 投递即醒:消费线程醒了再决定要不要等帧边界(见 ConsumerMain)——
     // 稀疏节奏立刻画,洪峰自然并进下一帧。
@@ -86,7 +97,17 @@ void UiEventPump::DispatchInline(const runtime::ServerEvent& event) {
 }
 
 void UiEventPump::StopAndDrain() {
-    stopped_.store(true, std::memory_order_release);
+    {
+        // 置停收进队列锁:首等待的谓词检查在锁内、"入队+释锁"原子完成,
+        // 锁内置停便与二者必有序——store 晚于检查,则 notify_all 时等待者
+        // 必已入队,一定叫得醒;store 早于检查,谓词必见 true。若在锁外
+        // 置停+notify,存在"谓词已查过(false)、等待者尚未入队"的窗口,
+        // notify_all 空打,消费线程睡回无 deadline 的首等待,join 永等
+        // ——CI run 33887350246 ubuntu 腿 180s 挂死即此(栈:主线程 join,
+        // 消费线程 ui_event_pump.cpp 首等待)。
+        std::lock_guard<std::mutex> lock(queue_mutex_);
+        stopped_.store(true, std::memory_order_release);
+    }
     wake_.notify_all();
     if (consumer_.joinable()) {
         consumer_.join();
