@@ -24,6 +24,7 @@
 #include "agent/compact.hpp"
 #include "agent/loop.hpp"
 #include "agent/prompts.hpp"
+#include "agent/token_calibrator.hpp"  // DefaultTokenCalibrator:子代理共用的校准器实例
 #include "agent/turn_harness.hpp"
 #include "cli/i18n.hpp"  // trf:墙钟/预算文案(参数校验的错误文案发给模型看,不走 i18n)
 #include "cli/line_editor.hpp"  // DisplayWidthUtf8:标题宽度(纯逻辑编辑核的零流符号)
@@ -2211,6 +2212,9 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     std::string last_denial_hook_reason;
     bool last_denial_by_deny_prefix = false;
     agent::TurnWiring turn_wiring;
+    // token 估算校准(token 估算校准单):子代理与主会话共用进程级校准器,
+    // 同 (provider,model) 同桶——子代理的请求也是真样本,双闸同样吃系数。
+    turn_wiring.token_calibrator = &agent::DefaultTokenCalibrator();
     // MCP 富结果单:工具二进制 artifact 目录随派工下发,子代理的 MCP
     // 富二进制结果与主回合落同一份会话 artifact 目录。
     if (foreground_hooks != nullptr) {

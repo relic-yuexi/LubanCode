@@ -31,15 +31,22 @@ constexpr std::size_t kDefaultKeepRecentTurns = 3;
 // 不引分词依赖,够做预算与触发判定用;真实用量仍以 provider usage 为准。
 // ---------------------------------------------------------------------------
 
-// 一段 UTF-8 文本估多少 token(统一口径,见上)。
-std::size_t EstimateUtf8Tokens(const std::string& text);
+// 校准系数落进整数估算:四舍五入;空文本(0)不凭空造 token,非零估算
+// 校准后至少保 1——系数 <1 不把小文本抹成零。calibration == 1.0 原样
+// 返回,零开销。
+std::size_t ApplyTokenCalibration(std::size_t tokens, double calibration);
 
-// 一条消息估多少 token(各内容块文本按统一口径累加;图片按 base64 体积
-// 粗折,工具入参按 JSON dump 文本算)。
-std::size_t EstimateMessageTokens(const api::Message& message);
+// 一段 UTF-8 文本估多少 token(统一口径,见上)。calibration 是会话级
+// 校准系数(TokenCalibrator 按 (provider,model) 桶给,真实 usage 反推),
+// 缺省 1.0 = 默认尺,行为与从前一字不差。
+std::size_t EstimateUtf8Tokens(const std::string& text, double calibration = 1.0);
 
-// 一段历史估多少 token(逐条消息按统一口径累加)。
-std::size_t EstimateHistoryTokens(const std::vector<api::Message>& history);
+// 一条消息估多少 token(各内容块文本按统一口径累加;图片按像素折,
+// 工具入参按 JSON dump 文本算)。calibration 同上。
+std::size_t EstimateMessageTokens(const api::Message& message, double calibration = 1.0);
+
+// 一段历史估多少 token(逐条消息按统一口径累加)。calibration 同上。
+std::size_t EstimateHistoryTokens(const std::vector<api::Message>& history, double calibration = 1.0);
 
 // 粗略估算一段历史的字节账(所有文本/工具入参/工具结果的 UTF-8 字节数之
 // 和)。名字里的 Bytes 是明话:这是字节,不是字符数,更不是 token 数。

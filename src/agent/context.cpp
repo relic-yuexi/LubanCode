@@ -138,7 +138,16 @@ std::size_t EstimateHistoryBytes(const std::vector<api::Message>& history) {
     return total;
 }
 
-std::size_t EstimateUtf8Tokens(const std::string& text) {
+std::size_t ApplyTokenCalibration(std::size_t tokens, double calibration) {
+    if (tokens == 0 || calibration == 1.0) {
+        return tokens;
+    }
+    const double scaled = static_cast<double>(tokens) * calibration;
+    const std::size_t rounded = static_cast<std::size_t>(scaled + 0.5);
+    return rounded == 0 ? 1 : rounded;
+}
+
+std::size_t EstimateUtf8Tokens(const std::string& text, double calibration) {
     std::size_t ascii = 0;
     std::size_t codepoints = 0;  // 全部码点;非 ASCII 数 = codepoints - ascii
     for (const char c : text) {
@@ -152,10 +161,12 @@ std::size_t EstimateUtf8Tokens(const std::string& text) {
     }
     const std::size_t non_ascii = codepoints >= ascii ? codepoints - ascii : 0;
     // ASCII 4 字符 1 token;非 ASCII 3 token 折 2 字。不引分词器,预算够用。
-    return ascii / 4 + (non_ascii * 3) / 2;
+    // 校准系数只在总量上落一次(内部各段按默认尺累加),免得逐段四舍
+    // 五入把误差叠起来。
+    return ApplyTokenCalibration(ascii / 4 + (non_ascii * 3) / 2, calibration);
 }
 
-std::size_t EstimateMessageTokens(const api::Message& message) {
+std::size_t EstimateMessageTokens(const api::Message& message, double calibration) {
     std::size_t total = 0;
     for (const auto& block : message.content) {
         total += std::visit(
@@ -194,15 +205,15 @@ std::size_t EstimateMessageTokens(const api::Message& message) {
             },
             block);
     }
-    return total;
+    return ApplyTokenCalibration(total, calibration);
 }
 
-std::size_t EstimateHistoryTokens(const std::vector<api::Message>& history) {
+std::size_t EstimateHistoryTokens(const std::vector<api::Message>& history, double calibration) {
     std::size_t total = 0;
     for (const auto& message : history) {
         total += EstimateMessageTokens(message);
     }
-    return total;
+    return ApplyTokenCalibration(total, calibration);
 }
 
 bool IsUserTurnStart(const api::Message& message) {

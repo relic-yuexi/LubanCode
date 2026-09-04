@@ -18,6 +18,7 @@
 #include "agent/context_budget.hpp"
 #include "agent/agent.hpp"  // Agent/AgentProfile(批四自立门户)
 #include "agent/context.hpp"  // EstimateHistory*:token 估算
+#include "agent/token_calibrator.hpp"  // TokenCalibrationStatus:/context 的校准行材料
 #include "agent/loop.hpp"
 #include "agent/prompt_assembler.hpp"  // PromptOptions(/context 的系统提示估算)
 #include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger:P0-2 compact typed 状态机
@@ -112,7 +113,8 @@ void HandleContextCommand(const std::string& args, lubancode::cli::ContextTracke
                            const ContextLayersReport* layers = nullptr,
                            const lubancode::agent::ModelRouteTable* roles_table = nullptr,
                            int compact_partition_count = 0,
-                           const DeferredToolModeSummary* deferred_tool_summary = nullptr);
+                           const DeferredToolModeSummary* deferred_tool_summary = nullptr,
+                           const lubancode::agent::TokenCalibrationStatus* token_calibration = nullptr);
 
 // ---- /context 的会话现场收集(终端接线收尾单自大类搬出) ------------------
 //

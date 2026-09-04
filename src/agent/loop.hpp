@@ -49,6 +49,7 @@
 namespace lubancode::agent {
 
 struct ContextPressure;
+class TokenCalibrator;
 
 // OnRequestPrepared 随请求一并递的账(Token 账本单 A1)。purpose 是唯一
 // 恒有效的字段(AgentProfile.purpose 总有默认值,§6.2"调用方不知道用途
@@ -304,6 +305,15 @@ struct TurnWiring {
     // 2. 本批五枚 tool result 全收齐、合并的 user 消息刚入 history:装配层
     //    append+flush user 消息,再为每枚写 result_committed 栅栏。
     std::function<void(const std::string& batch_id, const api::Message& tool_result_message)> on_tool_results_committed;
+
+    // ---- token 估算校准(真实 usage 反推 byte 比率单)-----------------------
+    // 会话级校准器((provider,model) 分桶,进程内共享;装配层指到
+    // DefaultTokenCalibrator() 或自备实例)。非空时:每步请求前读当前校准
+    // 系数乘进压力/预检估算(A/B 双闸、preflight 三项账都吃),请求收口
+    // provider 明报 usage 后记一对 (本地估算+字节, 实报完整输入) 样本。
+    // 空 = 不校准不记账,行为与从前一字不差(单测/未接线路径)。不持有,
+    // 调用方保证存活到本轮收口。
+    TokenCalibrator* token_calibrator = nullptr;
 
     // ---- 显示出水口(唯一):事件流适配器 -----------------------------------
     // 正文/思考增量、工具起止(含服务端内置)、usage、step/批次边界,全
