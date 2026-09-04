@@ -127,7 +127,6 @@ TEST_CASE("父子求交按能力集合:交出什么档与声明序无关") {
 // ---------------------------------------------------------------------------
 
 TEST_CASE("权限裁定:公共五档直接进 PermissionContext,档义不随枚举换位") {
-    using rt = runtime::TurnRuntime;
     struct VerdictRow {
         ApprovalMode mode;
         tools::ApprovalClass approval_class;

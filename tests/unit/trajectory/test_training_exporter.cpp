@@ -128,19 +128,6 @@ std::string ReadFileText(const std::filesystem::path& path) {
     return buffer.str();
 }
 
-std::vector<nlohmann::json> ReadJsonl(const std::filesystem::path& path) {
-    std::vector<nlohmann::json> out;
-    std::ifstream in(path, std::ios::binary);
-    std::string line;
-    while (std::getline(in, line)) {
-        if (line.empty()) {
-            continue;
-        }
-        out.push_back(nlohmann::json::parse(line, nullptr, false));
-    }
-    return out;
-}
-
 // 拼一枚已收口的主会话 stream。行为旋钮:
 //   replay_level   环境快照档位("" = 不落环境事件)
 //   with_tool      一枚只读工具往返

@@ -86,7 +86,7 @@ TEST_CASE("AgentHealthHookBus:只读投递,坏钩子不杀总线不漏下一枚"
     std::vector<agent::AgentSupervisionEvent> received;
     std::atomic<int> thrower_hits{0};
 
-    bus.Subscribe([&](const agent::AgentSupervisionEvent& event) {
+    bus.Subscribe([&](const agent::AgentSupervisionEvent& /*event*/) {
         thrower_hits.fetch_add(1);
         throw std::runtime_error("bad hook");
     });

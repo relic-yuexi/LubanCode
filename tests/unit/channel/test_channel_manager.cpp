@@ -104,7 +104,7 @@ ChannelManagerOptions MakeOptions(const std::filesystem::path& root) {
 }
 
 // 起 account 到 Running,逐泵推进。
-ChannelManager::AddAccountResult AddAndStart(ChannelManager& manager, FakeChannelSidecar& sidecar,
+ChannelManager::AddAccountResult AddAndStart(ChannelManager& manager, FakeChannelSidecar& /*sidecar*/,
                                              FakeTransport& transport,
                                              const ChannelAccountUserConfig& config = OpenAccount()) {
     auto added = manager.AddAccount("qqbot", "main", config, &transport);

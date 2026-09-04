@@ -36,7 +36,6 @@ std::string DefaultRunId() {
     // run id 的形状不动(时间戳前缀是 ListRuns 倒序的排序键);钟批五起
     // 读 platform 统一墙钟(口径不变,只收源)。
     const std::int64_t ms = platform::WallClockNowMs();
-    const std::int64_t secs = ms / 1000;
     const int millis = static_cast<int>(ms % 1000);
     std::tm tm_buf{};
     const std::time_t tt = platform::WallClockToTimeT(ms);
@@ -735,7 +734,7 @@ std::string StripRefBraces(const std::string& path) {
 
 }  // namespace
 
-std::string WorkflowRuntime::EvaluateSwitch(const WorkflowDefinition& def, const WorkflowNode& node,
+std::string WorkflowRuntime::EvaluateSwitch(const WorkflowDefinition& /*def*/, const WorkflowNode& node,
                                             const Store& store) const {
     for (const auto& c : node.conditions) {
         const std::string ref = StripRefBraces(c.path);

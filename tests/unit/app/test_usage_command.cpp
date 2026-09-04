@@ -217,7 +217,8 @@ TEST_CASE("FormatUsageReport:空账不猜;--by purpose 分账表;缺口点名截
         model.session_id = "s";
         model.aggregate = lubancode::accounting::AggregateUsage(samples);
         for (int i = 0; i < 7; ++i) {
-            model.aggregate.warnings.push_back("usage.purpose_missing: req-" + std::to_string(i));
+            model.aggregate.warnings.push_back(std::string("usage.purpose_missing: req-") +
+                                               std::to_string(i));
         }
         const std::string text = Join(FormatUsageReport(model));
         CHECK(text.find("缺口点名") != std::string::npos);

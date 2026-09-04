@@ -56,20 +56,6 @@ private:
     std::string path_;
 };
 
-api::Message UserText(const std::string& text) {
-    api::Message message;
-    message.role = api::Role::User;
-    message.content.push_back(api::TextBlock{text});
-    return message;
-}
-
-api::Message AssistantText(const std::string& text) {
-    api::Message message;
-    message.role = api::Role::Assistant;
-    message.content.push_back(api::TextBlock{text});
-    return message;
-}
-
 class RecordingSink final : public rt::EventSink {
 public:
     void Emit(const rt::ServerEvent& event) override { events.push_back(event); }

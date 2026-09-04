@@ -18,12 +18,6 @@ namespace {
 
 const fs::path kFixturesRoot = fs::path(LUBANCODE_SOURCE_DIR) / "tests" / "fixtures" / "packages";
 
-void WriteFile(const fs::path& path, const std::string& content) {
-    fs::create_directories(path.parent_path());
-    std::ofstream file(path, std::ios::binary);
-    file << content;
-}
-
 ComponentSourceRoot MakeSource(const fs::path& package_root, ComponentKind kind,
                                const std::string& rel_path, const std::string& local_id,
                                const std::string& package_id) {

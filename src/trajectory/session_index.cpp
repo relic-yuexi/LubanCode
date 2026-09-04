@@ -330,17 +330,6 @@ struct WorkspaceIndex {
     std::vector<PromptHistoryLine> prompts;  // 场内时序;未截尾
 };
 
-// 旧索引文件里按 session_id 查标题(提问行回填展示标题用)。
-std::string TitleOfSession(const std::vector<WorkspaceSessionSummary>& sessions,
-                           const std::string& session_id) {
-    for (const auto& summary : sessions) {
-        if (summary.session_id == session_id) {
-            return summary.title;
-        }
-    }
-    return std::string();
-}
-
 // 核心:读 <ws>/indexes/sessions.json,对指纹,动了的重扫,变了就写回。
 WorkspaceIndex LoadOrRebuildIndex(const std::filesystem::path& workspace_dir,
                                   const std::string& workspace_key) {
@@ -815,7 +804,7 @@ std::string FormatMillisAsLocalTimestamp(std::int64_t ms) {
         return std::string();
     }
 #endif
-    char buffer[32];
+    char buffer[96];
     std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02d %02d:%02d:%02d", parts.tm_year + 1900,
                   parts.tm_mon + 1, parts.tm_mday, parts.tm_hour, parts.tm_min, parts.tm_sec);
     return std::string(buffer);

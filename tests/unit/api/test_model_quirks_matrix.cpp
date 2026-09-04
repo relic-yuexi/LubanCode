@@ -45,7 +45,7 @@ const config::ProviderCatalog& EmbeddedCatalog() {
     static const auto parsed = config::ParseProviderCatalogJson(
         config::embedded::kProviderCatalogJson, "<embedded>");
     REQUIRE(parsed.has_value());
-    static const config::ProviderCatalog catalog = std::move(*parsed);
+    static const config::ProviderCatalog catalog = *parsed;
     return catalog;
 }
 
@@ -148,7 +148,6 @@ TEST_CASE("矩阵 A1: catalog 扫掠——每只有推理档案的模型按声�
     const auto& catalog = EmbeddedCatalog();
     std::size_t swept_models = 0;
     std::size_t swept_cases = 0;
-    std::size_t verified_dialects = 0;
     for (const auto& provider : catalog.providers) {
         for (const auto& model : provider.models) {
             if (model.reasoning.empty()) {
@@ -158,7 +157,6 @@ TEST_CASE("矩阵 A1: catalog 扫掠——每只有推理档案的模型按声�
             // P1 迁移后的守门:catalog 里再无"只写 supports_toggle、serializer
             // 自猜字段"的推理模型——每只档案都得带方言。
             REQUIRE_FALSE(model.reasoning.dialect.empty());
-            if (model.reasoning.dialect.verified) ++verified_dialects;
             // 档位取声明值 ∪ {none}(去重,大小写不敏感)。
             std::vector<std::string> efforts;
             for (const auto& declared : model.reasoning.supported_efforts) {

@@ -447,8 +447,6 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       config_result(stack_.config_result),
       config(stack_.config_result.config),
       theme(options.theme),
-      transcript_ui_(theme),
-      agent_panel_presenter_(theme),
       auto_confirm(options.auto_confirm),
       persona(options.persona),
       spinner_enabled(options.spinner_enabled),
@@ -488,8 +486,10 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
       native_server_tool_search(stack_.native_server_tool_search),
       tool_search_threshold(stack_.tool_search_threshold),
       tool_search_token_floor(stack_.tool_search_token_floor),
+      // 列表序对齐声明序:两枚 UI 件声明在全部 stack_ 别名引用之后。
+      transcript_ui_(theme),
+      agent_panel_presenter_(theme),
       config_file_path(stack_.config_result.config_file_path),
-      always_allowed_tools(session_runtime_.always_allowed()),
       // P6:会话真账本体在 SessionRuntime(轨迹账本);wire_str 先落值,
       // runtime 的 Options 要吃它。P0-6:旧 sessions_dir 不再传。
       session_runtime_([&] {
@@ -522,6 +522,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
           runtime_options.trajectory_resume_at_launch = options.continue_last;
           return runtime_options;
       }()),
+      // 列表序对齐声明序(session_runtime_ 先、引用别名后——实际构造序
+      // 本就按声明序走,这里只是把列表写反的地方正过来)。
+      always_allowed_tools(session_runtime_.always_allowed()),
       wire_str(lubancode::config::ProviderWireName(config.wire)),
       session_start_ts(session_runtime_.start_ts()),
       // 两层标题的账(骨架拆解反弹·问题 2):绑本类标题活值与轨迹账本,

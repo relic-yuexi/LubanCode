@@ -29,7 +29,7 @@ struct FakeClock : SessionManagerClock {
     std::int64_t MonotonicNs() const override { return 1000LL + random_calls; }
     std::string Random6() const override {
         ++random_calls;
-        char buffer[8];
+        char buffer[16];
         std::snprintf(buffer, sizeof(buffer), "L%05d", random_calls);
         return buffer;
     }

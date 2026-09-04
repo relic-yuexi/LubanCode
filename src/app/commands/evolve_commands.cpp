@@ -502,8 +502,8 @@ void PrintEvalSummary(const lubancode::evolution::EvalSummary& summary, const ch
         TermOut() << "\n";
     }
     if (summary.has_baseline_metrics) {
-        const auto cost = [&summary](const lubancode::evolution::MetricDelta& delta,
-                                     const char* name) {
+        const auto cost = [](const lubancode::evolution::MetricDelta& delta,
+                             const char* name) {
             std::string text = name;
             text += " " + std::to_string(static_cast<std::int64_t>(delta.candidate)) + " 对 " +
                     std::to_string(static_cast<std::int64_t>(delta.baseline));

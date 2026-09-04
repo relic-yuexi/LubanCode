@@ -644,7 +644,6 @@ ParsedComponent ParsePromptProfileComponent(const ComponentSourceRoot& source) {
         out.issues.push_back(ComponentIssue{false, source.rel_path, -1, -1, "(dir)",
                                             "profile 目录没有任何文件,覆盖为空"});
     }
-    std::size_t md_count = 0;
     for (const auto& file : files) {
         const std::string rel = RelUtf8(source.package_root, file);
         if (!rel.ends_with(".md")) {
@@ -672,7 +671,6 @@ ParsedComponent ParsePromptProfileComponent(const ComponentSourceRoot& source) {
                                                 "未知模块树 " + module_root + "/,覆盖只认 core/features/platforms"});
         }
         out.profile_files.push_back(rel);
-        ++md_count;
     }
     out.ok = true;
     return out;

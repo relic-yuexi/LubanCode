@@ -185,7 +185,6 @@ std::string SummarizeSkillBody(const std::string& content) {
     std::istringstream stream(content);
     std::string line;
     std::string current_header;
-    std::size_t header_count = 0;
     std::vector<std::string> lines;
     bool in_frontmatter = false;
     bool first_line = true;
@@ -207,7 +206,6 @@ std::string SummarizeSkillBody(const std::string& content) {
         }
         if (line.rfind("## ", 0) == 0) {
             current_header = line.substr(3);
-            ++header_count;
             lines.push_back("节 " + current_header);
             continue;
         }

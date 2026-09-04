@@ -462,7 +462,6 @@ void AttachLoopSnapshotToCompact(const LoopWiring& wiring, nlohmann::json& metri
 }
 
 void FlushLoopEvents(const LoopWiring& wiring) {
-    auto& out = lubancode::cli::TermOut();
     if (wiring.scheduler == nullptr) {
         return;
     }

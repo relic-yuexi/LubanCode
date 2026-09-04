@@ -308,8 +308,8 @@ lubancode::app::CommandFlow HandleGoalCommand(const lubancode::cli::ParsedGoalCo
     return lubancode::app::CommandFlow::Continue;
 }
 
-void EmitGoalHook(const GoalWiring& wiring, lubancode::hooks::HookEvent event, nlohmann::json fields,
-                  const std::string& match_value) {
+void EmitGoalHook(const GoalWiring& /*wiring*/, lubancode::hooks::HookEvent event,
+                  nlohmann::json fields, const std::string& match_value) {
     // additionalContext(OutputCapabilities 已在 events.hpp 定死:没有
     // permission_decision、can_block 恒 false——Hook 不可直接写 Achieved,
     // GoalCompleted 失败不把 Achieved 改回 Active)。goal_id/revision 由
@@ -497,6 +497,11 @@ void NoteSubagentCompletionForGoal(const GoalWiring& wiring) {
                 break;
             case lubancode::tools::AgentTaskState::BudgetExhausted:
                 evidence.facts["state"] = "budget_exhausted";
+                break;
+            // 活态两枚不该出现在采证现场(终态采证);保持不写 facts["state"],
+            // 与改前无 case 时一致。
+            case lubancode::tools::AgentTaskState::WaitingChildren:
+            case lubancode::tools::AgentTaskState::Completing:
                 break;
         }
         evidence.content_sha256 = lubancode::hooks::Sha256Hex(detail->result);

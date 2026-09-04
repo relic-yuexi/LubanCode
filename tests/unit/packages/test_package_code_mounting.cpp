@@ -348,13 +348,14 @@ TEST_CASE("好包三件全进:两插件一 MCP,事务发布后 ToolRegistry 见 
     // ---- 发布段:与 ToolRuntime 构造同一形状 ----
     std::vector<lubancode::app::McpServerRuntime> runtimes;
     for (auto& staged : result.mcp_servers) {
-        lubancode::app::McpServerRuntime runtime;
+        // 就地 emplace 再填字段,不留"本地默认构造再 move 走"的形状——
+        // GCC 13 -O3 对那形状报 maybe-uninitialized(误报),顺手绕开。
+        lubancode::app::McpServerRuntime& runtime = runtimes.emplace_back();
         runtime.name = staged.wire_server_name;
         runtime.tools = std::move(staged.tools);
         runtime.package_origin = lubancode::tools::ToolOrigin{
             staged.package_id, staged.package_version, staged.canonical_id};
         runtime.client = std::move(staged.client);
-        runtimes.push_back(std::move(runtime));
     }
     lubancode::tools::ToolRegistry registry;
     lubancode::app::RegisterMcpTools(runtimes, registry);

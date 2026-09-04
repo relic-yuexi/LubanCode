@@ -17,19 +17,6 @@ namespace {
 constexpr std::string_view kOpenTag = "<proposed_plan>";
 constexpr std::string_view kCloseTag = "</proposed_plan>";
 
-// 引号外的空白剥掉(命令串归一用)。
-std::string TrimAscii(std::string s) {
-    std::size_t begin = 0;
-    while (begin < s.size() && std::isspace(static_cast<unsigned char>(s[begin])) != 0) {
-        ++begin;
-    }
-    std::size_t end = s.size();
-    while (end > begin && std::isspace(static_cast<unsigned char>(s[end - 1])) != 0) {
-        --end;
-    }
-    return s.substr(begin, end - begin);
-}
-
 std::string ToLower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });

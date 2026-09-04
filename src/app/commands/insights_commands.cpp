@@ -124,7 +124,7 @@ std::string NowYyyymmdd(const InsightsCommandContext& context) {
 #else
     localtime_r(&now, &local);
 #endif
-    char buffer[16];
+    char buffer[64];
     std::snprintf(buffer, sizeof(buffer), "%04d%02d%02d", local.tm_year + 1900,
                   local.tm_mon + 1, local.tm_mday);
     return buffer;
@@ -150,7 +150,7 @@ ClockStamp UtcStamp(const InsightsCommandContext& context) {
     stamp.file_stamp = context.file_stamp;
     stamp.generated_at = context.generated_at;
     if (stamp.generated_at.empty()) {
-        char buffer[32];
+        char buffer[96];
         std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02dT%02d:%02d:%02dZ",
                       utc.tm_year + 1900, utc.tm_mon + 1, utc.tm_mday, utc.tm_hour,
                       utc.tm_min, utc.tm_sec);

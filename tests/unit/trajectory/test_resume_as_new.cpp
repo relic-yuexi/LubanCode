@@ -38,7 +38,7 @@ struct FakeClock : SessionManagerClock {
     std::int64_t MonotonicNs() const override { return 7000LL + random_calls; }
     std::string Random6() const override {
         ++random_calls;
-        char buffer[8];
+        char buffer[16];
         std::snprintf(buffer, sizeof(buffer), "R%05d", random_calls);
         return buffer;
     }
@@ -71,16 +71,6 @@ RecordReceipt Put(TrajectoryRecorder& recorder, EventKind kind, EventScope scope
     request.payload = std::move(payload);
     request.links = std::move(links);
     return recorder.Record(std::move(request), durability);
-}
-
-std::optional<std::string> ReadFileText(const std::filesystem::path& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        return std::nullopt;
-    }
-    std::stringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
 }
 
 std::vector<nlohmann::json> Events(const std::filesystem::path& stream) {

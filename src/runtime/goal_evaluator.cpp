@@ -43,7 +43,7 @@ nlohmann::json GoalEvaluationOutputSchema() {
     return schema;
 }
 
-std::string BuildGoalEvaluationPrompt(const GoalEvaluationInput& input) {
+std::string BuildGoalEvaluationPrompt(const GoalEvaluationInput& /*input*/) {
     std::ostringstream out;
     out << "你是独立的目标验收 evaluator。执行模型刚跑完一轮,你来判:继续(continue)、"
            "达标(achieved)、碰墙(blocked)、需人(needs_user)。\n"

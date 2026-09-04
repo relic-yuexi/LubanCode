@@ -353,7 +353,7 @@ std::string TodayStamp() {
 #else
     localtime_r(&now, &local);
 #endif
-    char stamp[16];
+    char stamp[64];
     std::snprintf(stamp, sizeof(stamp), "%04d-%02d-%02d", local.tm_year + 1900, local.tm_mon + 1,
                   local.tm_mday);
     return stamp;

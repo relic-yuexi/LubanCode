@@ -84,16 +84,6 @@ std::function<void()>& TurnInterruptBroadcastSlot() {
     return hook;
 }
 
-// 状态行"后台任务"段的现折数据源(background 管理面单):BuildStatusLine
-// 每次组行前叫一声,拿最新段文本(应用层从 BackgroundTaskRegistry 折,
-// 空串 = 没任务,段收起)。空闲路在主线程、footer 路在 StdoutWriteMutex
-// 内被调——与 StatusDataSlot 的既有写纪律同款(圈边界主线程写,回合内
-// 锁内写),不加新锁。装 nullptr 回到"只用 StatusDataSlot 里存的那份"。
-std::function<std::string()>& BackgroundStatusProviderSlot() {
-    static std::function<std::string()> provider;
-    return provider;
-}
-
 // Ctrl+R 提问历史搜索的数据源槽(同一套会话级静态槽;主线程读写)。
 PromptHistoryProvider& PromptHistoryProviderSlot() {
     static PromptHistoryProvider provider;
@@ -308,7 +298,6 @@ void CollapseBoxOnSubmit(int frame_top, int prompt_width, int prev_body_row_coun
     // 折行宽度与 composer 一致(首行容 "> ",续行缩两格,容量同为
     // buffer_width - 1 - padding*2 - 2),提交前后不忽然换行。
     const std::string block_text = FormatUserPromptBlock(Utf32ToUtf8(state.line), theme, buffer_width);
-    const int block_rows = CountLines(block_text);
     const auto row_text = [&](std::size_t i) {
         return i == 0 ? prompt + Utf32ToUtf8(layout.rows[i].text)
                       : std::string(kContinuationIndent, ' ') + Utf32ToUtf8(layout.rows[i].text);

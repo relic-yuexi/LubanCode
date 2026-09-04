@@ -116,16 +116,6 @@ std::vector<api::StreamEvent> TextOnlyScript(const std::string& text) {
     };
 }
 
-std::vector<api::StreamEvent> ToolUseScript(const std::string& tool_id, const std::string& tool_name) {
-    return {
-        api::MessageStart{"msg", "model"},
-        api::ToolUseStart{0, tool_id, tool_name},
-        api::ToolUseInputDelta{0, "{}"},
-        api::ContentBlockDone{0},
-        api::MessageDone{"tool_use", api::Usage{}},
-    };
-}
-
 // 五枚工具一批的脚本。
 std::vector<api::StreamEvent> FiveToolScript(const std::vector<std::string>& ids, const std::string& name) {
     std::vector<api::StreamEvent> script{api::MessageStart{"msg", "model"}};

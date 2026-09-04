@@ -122,7 +122,10 @@ TEST_CASE("DumpRequestBody: 坏 UTF-8 不抛异常,按 U+FFFD 清洗后照发") 
 
     const std::string dumped = DumpRequestBody("test", body);
     CHECK(dumped.find("\xEF\xBF\xBD") != std::string::npos);  // U+FFFD 替换符
-    CHECK_NOTHROW(nlohmann::json::parse(dumped));              // 出口必须能重新解析
+    // 出口必须能重新解析:parse 带 warn_unused_result,结果得有人接(抛了
+    // 异常 doctest 自会判败,与 CHECK_NOTHROW 同效)。
+    const bool reparsed = !nlohmann::json::parse(dumped).is_discarded();
+    CHECK(reparsed);
     CHECK(dumped.find("中文夹一枚坏字节") != std::string::npos);  // 好字节原样保留
 }
 

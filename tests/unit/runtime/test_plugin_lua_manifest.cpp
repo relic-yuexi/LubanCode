@@ -61,11 +61,6 @@ void WriteFile(const fs::path& path, const std::string& content) {
     file << content;
 }
 
-std::string ReadFileText(const fs::path& path) {
-    std::ifstream file(path, std::ios::binary);
-    return std::string((std::istreambuf_iterator<char>(file)), std::istreambuf_iterator<char>());
-}
-
 // 假 resolver:计数 Resolve/Describe;按 id 发 FAKE_ 前缀假值(§13.2 的
 // 泄露扫描拿它当靶子)。
 class CountingResolver final : public SecretResolver {

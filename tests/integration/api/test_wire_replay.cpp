@@ -292,7 +292,7 @@ const config::ProviderCatalog& EmbeddedCatalog() {
     static const auto parsed = config::ParseProviderCatalogJson(
         config::embedded::kProviderCatalogJson, "<embedded>");
     REQUIRE(parsed.has_value());
-    static const config::ProviderCatalog catalog = std::move(*parsed);
+    static const config::ProviderCatalog catalog = *parsed;
     return catalog;
 }
 
@@ -404,8 +404,6 @@ TEST_CASE("wire 回环 anthropic: 思考+工具往返,第二轮 thinking 块带 
     const api::Message final_message = RunRound(backend, second, &final_stop);
     CHECK(final_stop == "end_turn");
     REQUIRE(received.size() == 2);
-    for (const auto& [name, value] : received[1].headers) {
-    }
     const auto body2 = nlohmann::json::parse(received[1].body);
     // 回传的 assistant content:thinking 块必须带 signature 键(空串也是键),
     // tool_use id 原样。

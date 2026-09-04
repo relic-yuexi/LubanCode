@@ -51,6 +51,10 @@ std::string ToString(TaskKind kind) {
             return "会话标题";
         case TaskKind::ResumeSummary:
             return "resume 摘要";
+        // 目标验收任务暂无专设文案:落到下方"普通对话"兜底(与改前无 case
+        // 时一致)。
+        case TaskKind::GoalEvaluate:
+            break;
     }
     return "普通对话";
 }

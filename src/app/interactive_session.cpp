@@ -1106,7 +1106,7 @@ void TerminalSessionController::Run() {
         const auto incoming_peer = peer_wiring_.TakeReadyMessage();
         if (incoming_peer.has_value() &&
             !SessionSteeringQueue().HasDeliverable(lubancode::cli::MessageTarget::Main())) {
-            const lubancode::peers::PeerEnvelope envelope = std::move(*incoming_peer);
+            const lubancode::peers::PeerEnvelope envelope = *incoming_peer;
             TermOut() << theme.stats
                       << trf("cmd.peers.incoming_notice", envelope.sender_name, envelope.sender_id) << theme.reset
                       << "\n";

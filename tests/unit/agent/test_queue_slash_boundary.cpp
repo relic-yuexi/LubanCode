@@ -161,7 +161,7 @@ TEST_CASE("忙碌排队的 /context:两个工具边界都不进请求,轮末留�
 }
 
 TEST_CASE("/help、/todos、/compact 与 /context 同规则:边界让路,轮末本地执行") {
-    for (const std::string& command : {"/help", "/todos", "/compact 重点保住清单"}) {
+    for (const std::string command : {"/help", "/todos", "/compact 重点保住清单"}) {
         CAPTURE(command);
         cli::SteeringQueue queue;
         queue.Enqueue(cli::MessageTarget::Main(), command);

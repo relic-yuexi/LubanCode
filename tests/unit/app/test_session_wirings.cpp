@@ -46,15 +46,14 @@ struct TempCwd {
     }
 };
 
-GoalSessionWiring::Host MakeGoalHost(lubancode::runtime::SessionRuntime& runtime,
-                                     std::string* evaluation_model) {
+GoalSessionWiring::Host MakeGoalHost(lubancode::runtime::SessionRuntime& /*runtime*/,
+                                     std::string* /*evaluation_model*/) {
     GoalSessionWiring::Host host;
     static lubancode::cli::Theme theme;
     host.theme = &theme;
     static lubancode::config::Config config;
     host.config = &config;
     host.current_model = std::make_shared<std::string>("test-model");
-    evaluation_model = nullptr;
     host.start_turn = [](const std::string&, bool* failed) {
         if (failed != nullptr) {
             *failed = false;

@@ -49,10 +49,6 @@ std::vector<std::string> ProjectSummaryLines(const lubancode::runtime::TurnItemV
         return {};
     }
     if (item.kind == TurnItemViewKind::Thinking) {
-        const double seconds =
-            item.ended_at_ms > item.started_at_ms
-                ? static_cast<double>(item.ended_at_ms - item.started_at_ms) / 1000.0
-                : 0.0;
         return {};
     }
     if (item.kind == TurnItemViewKind::Text) {

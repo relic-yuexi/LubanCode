@@ -22,6 +22,7 @@ const char* ActionName(lubancode::app::EvolveCommandAction action) {
         case lubancode::app::EvolveCommandAction::Use: return "Use";
         case lubancode::app::EvolveCommandAction::Promote: return "Promote";
         case lubancode::app::EvolveCommandAction::Rollback: return "Rollback";
+        case lubancode::app::EvolveCommandAction::Suggest: return "Suggest";
     }
     return "?";
 }

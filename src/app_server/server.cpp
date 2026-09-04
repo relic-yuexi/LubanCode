@@ -1681,15 +1681,6 @@ void Server::Shutdown() {
     // 在跑的回合一律按打断收口(与 WS 连接收线同一段),随后会话档句柄
     // 全收。
     InterruptRunningTurns();
-    std::vector<std::shared_ptr<ThreadRecord>> records;
-    {
-        std::lock_guard<std::mutex> lock(threads_mutex_);
-        for (const auto& [id, record] : threads_) {
-            records.push_back(record);
-        }
-    }
-    for (const std::shared_ptr<ThreadRecord>& record : records) {
-    }
 }
 
 // 单测直驱用的连接装配:HandleTurnStart 要经 connection_ 发事件,测试里

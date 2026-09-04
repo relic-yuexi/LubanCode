@@ -128,7 +128,7 @@ bool IsCanonicalPackagedWorkflowId(const std::string& id) {
         }
         const char c = package_id[i];
         const bool ok = (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '-';
-        if (!ok || i == segment_begin && c == '-') return false;  // 段首不许横线
+        if (!ok || (i == segment_begin && c == '-')) return false;  // 段首不许横线
         segment_ok = true;
     }
     return IsValidWorkflowId(id.substr(colon + 1));

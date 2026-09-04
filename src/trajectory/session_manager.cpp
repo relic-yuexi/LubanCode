@@ -687,7 +687,7 @@ std::string SessionManager::NextMainRunId() const {
             }
         }
     }
-    char buffer[16];
+    char buffer[32];
     std::snprintf(buffer, sizeof(buffer), "main-%04d", max_number + 1);
     return buffer;
 }

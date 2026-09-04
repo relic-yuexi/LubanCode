@@ -267,13 +267,11 @@ tools::Tool::Result PtcTool::execute(const nlohmann::json& input) {
     // 按工具聚合的账:次数 / 并发峰值 / 耗时。
     std::map<std::string, std::pair<int, int>> per_tool;  // name -> {次数, 错误数}
     int executed = 0;
-    int failed = 0;
     for (const auto& call : result.calls) {
         auto& entry = per_tool[call.tool];
         entry.first += 1;
         if (!call.ok || call.is_error) {
             entry.second += 1;
-            ++failed;
         } else {
             ++executed;
         }

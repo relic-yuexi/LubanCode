@@ -333,18 +333,6 @@ tools::Tool::Result RunOneTool(tools::ToolRegistry& registry, const api::ToolUse
         emit(std::move(event));
     };
 
-    // 钩子拦截的统一收尾:停在 Blocked 相位(不冒充"运行过又失败"),
-    // additionalContext 一并塞进 tool_result 给模型看。
-    const auto blocked = [&phase, &dispatch_done, &call](const std::string& reason,
-                                                          const std::vector<std::string>& extra_context) {
-        phase(runtime::ToolPhase::Blocked);
-        std::string content = reason;
-        for (const auto& ctx : extra_context) {
-            content += "\n[钩子附注] " + ctx;
-        }
-        return dispatch_done(call.id, call.name, tools::Tool::Result{content, true});
-    };
-
     if (wiring.events != nullptr) {
         wiring.events->OnToolStart(call.id, call.name, call.input, wiring.subordinate_stream);
     }

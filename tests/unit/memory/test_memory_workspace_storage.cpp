@@ -237,7 +237,10 @@ TEST_CASE("P0-3: worker 回执进 workspace lifecycle,重复 commit 幂等") {
     fs::directory_iterator after(lifecycle, ec);
     REQUIRE_FALSE(ec);
     std::size_t count = 0;
-    for (const auto& item : after) ++count;
+    for (const auto& item : after) {
+        (void)item;
+        ++count;
+    }
     CHECK(count == 2);
 
     // 崩溃续跑的重复 commit:同一文件名的 job 再投(operation_id 相同,

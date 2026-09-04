@@ -262,10 +262,13 @@ TEST_CASE("/send 与 /peerperm 状态账:off 档、空名册、权限档切换")
 
 namespace {
 
+// 只伺候 _WIN32 段(HomeEnvGuard 换 USERPROFILE 时把路径转 UTF-8)。
+#ifdef _WIN32
 std::string CmdPathUtf8(const std::filesystem::path& p) {
     const std::u8string u8 = p.u8string();
     return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
 }
+#endif
 
 // (P0-6:CmdWriteSession——旧档造场——已删;顶层 archive/delete 的
 // 用例走 WorkspaceSessionsFixture(trajectory 新账)。)

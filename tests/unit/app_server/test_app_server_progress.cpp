@@ -159,7 +159,7 @@ struct ProgressHarness {
     std::shared_ptr<std::atomic<int>> tool_calls = std::make_shared<std::atomic<int>>(0);
     std::vector<std::string> tool_names;
 
-    explicit ProgressHarness(std::vector<std::string> names, const std::string& sessions_dir = std::string(),
+    explicit ProgressHarness(std::vector<std::string> names, const std::string& /*sessions_dir*/ = std::string(),
                              std::size_t outbox_capacity = 4096, bool with_image_tool = false) {
         tool_names = std::move(names);
         app_server::ServerOptions options;

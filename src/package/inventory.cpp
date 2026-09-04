@@ -281,7 +281,7 @@ std::string NearMissStandardDir(std::string_view dir_name) {
     }
     std::string best;
     std::size_t best_distance = 3;  // 距离 > 2 不报
-    for (const std::string& candidate :
+    for (const std::string candidate :
          {"agents", "prompts", "skills", "workflows", "plugins", "mcp", "channels", "assets", "docs"}) {
         const std::size_t distance = EditDistance(lower, candidate);
         if (distance < best_distance) {

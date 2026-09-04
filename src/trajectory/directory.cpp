@@ -11,12 +11,6 @@
 namespace lubancode::trajectory {
 namespace {
 
-std::string TwoDigits(int value) {
-    char buffer[8];
-    std::snprintf(buffer, sizeof(buffer), "%02d", value);
-    return buffer;
-}
-
 bool WriteTextFileAtomic(const std::filesystem::path& path, const std::string& content) {
     // 统一原子写(审计 P1):替掉本文件自备的固定 .tmp 协议。
     return platform::AtomicWriteFile(path, content).has_value();

@@ -131,7 +131,13 @@ TEST_CASE("LayoutUserPromptBlock: CJK 长行按显示宽折行,不切半个宽�
     REQUIRE(single.rows.size() == 1);
     CHECK(single.content_width == 75);  // 79 - padding*2 - 提示符 2
 
-    const std::string wide(80, U'好');  // 80 个汉字 = 160 显示列,必折
+    // 80 个"好"(UTF-8 各 3 字节) = 160 显示列,必折。原先写成
+    // std::string(80, U'好')——char 拿 char32_t 初始化被逼窄成 '}',
+    // 从没真测过宽字,GCC -Woverflow 抓了正着。
+    std::string wide;
+    for (int i = 0; i < 80; ++i) {
+        wide += "好";
+    }
     const auto layout = LayoutUserPromptBlock(wide, BuiltinTheme("plain"), 80);
     REQUIRE(layout.rows.size() >= 2);
     // 每行 "> " 或 "  " 前缀(各两列) + 正文,正文显示宽不超容量。

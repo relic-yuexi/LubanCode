@@ -15,7 +15,7 @@ std::vector<lubancode::agent::ModelRoleSpec> BuildRoleSpecs(const lubancode::con
     const auto& config = config_result.config;
     const auto& sources = config_result.sources;
 
-    const auto build = [&config, &sources](const char* role_name, const std::string& shorthand,
+    const auto build = [](const char* role_name, const std::string& shorthand,
                                            const lubancode::config::ModelRoleRouteConfig& advanced,
                                            lubancode::config::Source shorthand_source,
                                            lubancode::config::Source advanced_source)

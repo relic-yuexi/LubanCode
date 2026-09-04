@@ -194,31 +194,6 @@ void TurnInputListener::ThreadMain() {
     bool delete_armed = false;
     std::chrono::steady_clock::time_point delete_armed_until{};
 
-    // 流式路查看帧的擦账(与空闲路 ReadLineKeyByKey 里那本同款规矩,各自
-    // 一份、只在本段读取内有效):真切会话前先按上一帧的缓冲顶行把旧查看
-    // 帧从可视区擦净再铺新帧。app 侧视图切换钩子只打印不擦(查看态完成
-    // 退场花屏单,2026-08-17)——擦账全程序只认"铺帧前现记的 console 侧
-    // 这一本",绝不并立第二本。
-    std::optional<int> view_body_top;
-    const auto erase_previous_view_body = [&]() {
-        if (!view_body_top.has_value()) {
-            return;
-        }
-        const std::optional<platform::ScreenInfo> info = platform::GetScreenInfo();
-        if (!info.has_value()) {
-            view_body_top.reset();
-            return;  // 拿不到屏幕信息:退回旧行为,不硬擦
-        }
-        int top = *view_body_top;
-        if (top < info->viewport_y) {
-            top = info->viewport_y;  // 只管当前 viewport,滚屏历史不动
-        }
-        for (int y = top; y < info->height; ++y) {
-            platform::ClearRowHardFrom(0, y, info->width);
-        }
-        platform::SetCursorPos(0, top);
-        view_body_top.reset();
-    };
     const auto print_view_frame = [&](int viewed_after) {
         // 流式期间也按 Panel 整页换源。先正式收掉 footer，再清可视内容区；
         // view hook 铺完目标会话后会把独立 footer 原样画回。
@@ -227,14 +202,10 @@ void TurnInputListener::ThreadMain() {
             std::lock_guard<std::mutex> stdout_lock(StdoutWriteMutex());
             EraseStreamFooterLocked();
             before = ClearVisibleAgentPanelLocked();
-            view_body_top.reset();
         }
         const auto& view_hook = AgentViewSwitchHookSlot();
         if (view_hook) {
             view_hook(viewed_after, /*tail_rows=*/0);
-        }
-        if (before.has_value()) {
-            view_body_top = before->cursor_y;
         }
         // 跨读取账同步(见 ReadLineKeyByKey 里那本的同款注释):流式期间切看
         // 的帧也记账——不过本轮流式正文还会继续写屏,RunTurn 收口(非静默)

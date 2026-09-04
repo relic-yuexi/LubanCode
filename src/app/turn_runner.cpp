@@ -699,8 +699,6 @@ RunTurnResult RunTurn(TurnContext ctx) {
     const std::string& thread_id_for_trace = ctx.thread_id_for_trace;
     const std::string& turn_id_for_trace = ctx.turn_id_for_trace;
     lubancode::runtime::TurnView* turn_view_out = ctx.turn_view_out;
-    const std::function<std::string(const std::string&, const nlohmann::json&)>& mode_gate = ctx.mode_gate;
-    const std::function<void(bool asked, bool allowed)>& approval_observer = ctx.approval_observer;
     lubancode::runtime::TurnEventAdapter* turn_events = ctx.turn_events;
 
     auto prepared_input = lubancode::cli::PrepareImageInput(user_input);

@@ -270,7 +270,6 @@ PtcRunResult PtcRunner::Run(const std::string& script, const std::string& stub_m
     bool terminal = false;      // done/fail 已到
     bool abort_sent = false;    // Esc 后已发过 abort 帧
     Clock::time_point cancel_deadline{};  // Esc 宽限线(过线杀树)
-    int reused_calls = 0;       // 同参只读去重命中数
     std::map<std::pair<std::string, std::string>, std::string> reuse_cache;  // (tool, input_hash) -> content
     const auto deadline = started_at + std::chrono::milliseconds(options.limits.wall_clock_ms);
 
@@ -407,7 +406,6 @@ PtcRunResult PtcRunner::Run(const std::string& script, const std::string& stub_m
                     record.result_hash = StableHashText(cached->second);
                     record.reused = true;
                     finish_call(std::move(record), true, "", 0);
-                    ++reused_calls;
                     continue;
                 }
             }

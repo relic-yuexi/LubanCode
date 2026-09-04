@@ -43,14 +43,6 @@ struct Fixture {
     std::vector<FixtureQuery> negative;
 };
 
-std::string TrimSpace(const std::string& value) {
-    std::size_t begin = 0;
-    std::size_t end = value.size();
-    while (begin < end && (value[begin] == ' ' || value[begin] == '\n')) ++begin;
-    while (end > begin && (value[end - 1] == ' ' || value[end - 1] == '\n')) --end;
-    return value.substr(begin, end - begin);
-}
-
 memory::MemoryEntry ParseFixtureEntry(const nlohmann::json& item) {
     memory::MemoryEntry entry;
     entry.id = item.value("id", std::string());

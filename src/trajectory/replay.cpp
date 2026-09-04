@@ -500,6 +500,21 @@ bool FoldEvent(const EventEnvelope& envelope, ReplayState* state, FoldIndex* ind
             // 纯控制/生命周期事件:不改 effective state(§14.2 只记 command
             // lifecycle 的不动 ReplayState)。schema 已验过形状。
             return true;
+        // workflow 全家 12 枚:replay 折叠暂不认,显式立案落到下方兜底
+        // (unsupported 明报),不吞进"纯控制事件"。
+        case EventKind::WorkflowDefinitionLoaded:
+        case EventKind::WorkflowNodeDispatched:
+        case EventKind::WorkflowNodeRetrying:
+        case EventKind::WorkflowNodeWaiting:
+        case EventKind::WorkflowNodeCompleted:
+        case EventKind::WorkflowNodeFailed:
+        case EventKind::WorkflowNodeSkipped:
+        case EventKind::WorkflowBranchStarted:
+        case EventKind::WorkflowJoinCompleted:
+        case EventKind::WorkflowLoopIterationStarted:
+        case EventKind::WorkflowLoopIterationCompleted:
+        case EventKind::WorkflowCheckpointSaved:
+            break;
     }
     // 新 kind 落了 enum 却没进折叠 switch:兜底明报 unsupported。
     *unsupported_reason = std::string("kind=") + EventKindName(envelope.kind) + " 未进折叠表";

@@ -619,7 +619,7 @@ TEST_CASE("共账:Stop 钩子续跑吃剩余额度不重置;remaining=0 时 back
         block_reason_seen = merged.block_reason;
         return merged;
     };
-    stop_options.final_text = [&loop]() { return std::string("结论。"); };
+    stop_options.final_text = []() { return std::string("结论。"); };
     agent::RunStopContinuation(loop, gated.wiring, stop_options, report);
     CHECK(emits >= 1);                       // 钩子被调了,理由留了痕
     CHECK(block_reason_seen == "还有遗漏");
@@ -654,7 +654,7 @@ TEST_CASE("共账:Stop 钩子在额度尚余时可以续跑一轮,消耗同一�
         merged.block_reason = "再收口一轮";
         return merged;
     };
-    stop_options.final_text = [&loop]() { return std::string("首轮。"); };
+    stop_options.final_text = []() { return std::string("首轮。"); };
     agent::RunStopContinuation(loop, wiring, stop_options, report);
     CHECK(backend.captured_requests.size() == 2);  // 续跑轮真发了 1 枚
     CHECK(gated.account.SnapshotLock().attempted == 2);

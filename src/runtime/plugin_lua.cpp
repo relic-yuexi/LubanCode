@@ -8,15 +8,6 @@
 
 namespace lubancode::runtime {
 
-namespace {
-
-std::string PathToUtf8Local(const std::filesystem::path& path) {
-    const std::u8string u8 = path.u8string();
-    return std::string(reinterpret_cast<const char*>(u8.data()), u8.size());
-}
-
-}  // namespace
-
 std::vector<std::string> EmbeddedLuaRuntime::LoadDirectory(const std::filesystem::path& dir,
                                                            const tools::LuaProfile& profile) {
     std::vector<std::string> warnings;

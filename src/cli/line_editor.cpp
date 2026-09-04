@@ -1280,6 +1280,11 @@ RenderState LineEditorCore::HandleKey(const KeyEvent& event) {
             }
             return state;
         }
+        // 尚未绑定行为的三枚:与改前无 case 时一致,落到下方整帧重绘。
+        case KeyKind::CtrlT:
+        case KeyKind::PageUp:
+        case KeyKind::PageDown:
+            break;
     }
 
     return BuildRenderState(false, false, false, false);

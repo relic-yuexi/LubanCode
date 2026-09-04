@@ -187,13 +187,6 @@ bool WaitUntilDead(unsigned long pid, int timeout_ms) {
 }
 #endif  // LUBANCODE_FAKE_RG_EXE
 
-#ifdef LUBANCODE_TEST_HAS_BUNDLED_RG
-// 真 rg 分期入位(生产同一条定位路:ExecutableDir/libexec)。
-BundledRipgrepRunner MakeRealRunner() {
-    return BundledRipgrepRunner();
-}
-#endif
-
 }  // namespace
 
 // ---------------------------------------------------------------------------

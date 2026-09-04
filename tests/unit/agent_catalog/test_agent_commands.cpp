@@ -28,7 +28,7 @@ public:
     std::string description() const override { return "fake"; }
     nlohmann::json input_schema() const override { return nlohmann::json::object(); }
     bool needs_confirm() const override { return false; }
-    Result execute(const nlohmann::json& input) override { return Result::Text("ok"); }
+    Result execute(const nlohmann::json& /*input*/) override { return Result::Text("ok"); }
 
 private:
     std::string name_;

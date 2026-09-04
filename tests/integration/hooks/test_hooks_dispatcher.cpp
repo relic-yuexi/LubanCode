@@ -589,6 +589,8 @@ bool InterpreterAvailable(const std::vector<std::string>& probe_args) {
     return !result.spawn_failed && result.exit_code == 0;
 }
 
+// 只伺候 _WIN32 段(Windows 管道逐字节比对用)。
+#ifdef _WIN32
 // 字节级比对前把 hook_run_id 抹平:它带时间戳与进程内计数,两次构造不可能相等。
 std::string StripHookRunId(const std::string& wire) {
     constexpr const char* kKey = "\"hook_run_id\":\"";
@@ -602,6 +604,7 @@ std::string StripHookRunId(const std::string& wire) {
     out.erase(value_begin, value_end - value_begin);
     return out;
 }
+#endif
 
 }  // namespace
 

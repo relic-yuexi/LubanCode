@@ -18,8 +18,7 @@ namespace lubancode::cli::keymap {
 
 namespace {
 
-// 大小写不敏感的 ASCII 字母判断/折算(和弦文本解析用;动作名同小写)。
-bool IsAsciiAlpha(char c) { return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z'); }
+// 大小写不敏感的 ASCII 折算(和弦文本解析用;动作名同小写)。
 char ToLowerAscii(char c) { return (c >= 'A' && c <= 'Z') ? static_cast<char>(c - 'A' + 'a') : c; }
 
 // 和弦文本里的"键名"词 -> 物理键(不含修饰键前缀)。返回 nullopt = 认不出。
@@ -193,6 +192,14 @@ std::optional<KeyChord> ChordFromKeyInput(const platform::KeyInput& input) {
         case platform::KeyInput::Kind::CtrlL: chord.key = KeyChord::Key::Char; chord.ch = U'l'; chord.ctrl = true; break;
         case platform::KeyInput::Kind::Esc: chord.key = KeyChord::Key::Esc; break;
         case platform::KeyInput::Kind::Delete: chord.key = KeyChord::Key::Delete; break;
+        // 其余组合/翻页键暂不映射:保持默认 KeyChord 落空(与改前无 case
+        // 时穿出 switch 的行为一致)。
+        case platform::KeyInput::Kind::CtrlT:
+        case platform::KeyInput::Kind::CtrlP:
+        case platform::KeyInput::Kind::CtrlN:
+        case platform::KeyInput::Kind::PageUp:
+        case platform::KeyInput::Kind::PageDown:
+            break;
     }
     return chord;
 }

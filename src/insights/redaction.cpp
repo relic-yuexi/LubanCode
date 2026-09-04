@@ -20,15 +20,6 @@ bool IsAlnum(char c) {
 bool IsWordChar(char c) {
     return IsAlnum(c) || c == '_' || c == '-';
 }
-std::string ToLower(std::string_view text) {
-    std::string out;
-    out.reserve(text.size());
-    for (char c : text) {
-        out.push_back(ToLowerAscii(c));
-    }
-    return out;
-}
-
 std::size_t FindCaseInsensitive(std::string_view haystack, std::string_view needle,
                                 std::size_t from) {
     if (needle.empty() || haystack.size() < needle.size()) {
@@ -47,13 +38,6 @@ std::size_t FindCaseInsensitive(std::string_view haystack, std::string_view need
         }
     }
     return std::string_view::npos;
-}
-
-// "word 前后不是 word 字符"的整词匹配。
-bool WordBoundary(std::string_view text, std::size_t at, std::size_t len) {
-    const bool left_ok = at == 0 || !IsWordChar(text[at - 1]);
-    const bool right_ok = at + len >= text.size() || !IsWordChar(text[at + len]);
-    return left_ok && right_ok;
 }
 
 // 命中行(到 '\n' 或串尾)。

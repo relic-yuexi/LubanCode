@@ -156,7 +156,7 @@ lubancode::cli::WizardIO MakeInteractiveWizardIO(const lubancode::cli::Theme& th
         }
         return lubancode::cli::WizardInputEvent{Kind::Submitted, lubancode::cli::WizardTrim(*line)};
     };
-    io.choose = [&theme, panel, panel_active](
+    io.choose = [&theme](
                     const std::vector<lubancode::cli::WizardChoiceItem>& items, std::size_t default_index,
                     const std::string& hint,
                     lubancode::cli::WizardInputEvent::Kind* cancel_kind) -> std::optional<std::size_t> {
@@ -665,7 +665,7 @@ void HandleThinkHistoryCommand(const std::string& value,
                                const std::shared_ptr<lubancode::api::ReasoningHistoryMode>& current_think_history,
                                const std::shared_ptr<std::string>& current_think,
                                const lubancode::config::ModelCatalogEntry* entry,
-                               lubancode::runtime::SessionRuntime* session_runtime) {
+                               lubancode::runtime::SessionRuntime* /*session_runtime*/) {
     const lubancode::api::ReasoningConfig empty_reasoning;
     const lubancode::api::ReasoningConfig& reasoning = entry != nullptr ? entry->reasoning : empty_reasoning;
     if (value.empty()) {

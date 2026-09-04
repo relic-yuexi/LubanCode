@@ -418,7 +418,7 @@ TEST_CASE("agent isolation: TaskSnapshot 基线与调用者 HEAD 不符时建房
     GitRepo repo;
     const std::string first = TrimGitOutput(repo.RunGit({"rev-parse", "HEAD"}).output);
     int head_reads = 0;
-    const cli::GitRunner drifting = [&repo, &head_reads, &first](const cli::GitCommand& command) {
+    const cli::GitRunner drifting = [&repo, &head_reads](const cli::GitCommand& command) {
         if (!command.args.empty() && command.args[0] == "rev-parse" && command.args.size() > 1 &&
             command.args[1] == "HEAD") {
             ++head_reads;

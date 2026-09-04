@@ -484,7 +484,6 @@ CompactCommandResult HandleCompactCommand(const std::string& args, lubancode::ag
     // 一把尺——拿未压缩全量估,重复工具结果全被虚算,压完的"瘦"是假瘦,
     // 反涨断言两边不可比。反涨闸本身见 RejectGrownCompactHistory。
     const std::size_t before_tokens = PressureEstimateTokens(loop, history);
-    const std::size_t old_size = history.size();
 
     lubancode::agent::CompactOptions run_options = options;
     run_options.focus = focus;
@@ -1380,7 +1379,6 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
         return false;
     }
 
-    const std::size_t old_size = loop.History().size();
     const auto& new_history = result->new_history;
     const std::size_t new_tokens = PressureEstimateTokens(loop, new_history);
     // 反涨断言(P1-1):压缩后的新历史必须明显小于压缩前,否则换账就是
@@ -1870,7 +1868,6 @@ CommandFlow HandleSlashExport(SlashDispatchContext& ctx, const lubancode::cli::P
 }
 
 CommandFlow HandleSlashTitle(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
-    const lubancode::cli::Theme& theme = *ctx.theme;
     // P0-2:标题真账走 control.title.changed(resume 折叠回
     // ReplayControlState.title);旧 SessionStore 的 title 事件行不再写。
     if (ctx.trajectory != nullptr) {

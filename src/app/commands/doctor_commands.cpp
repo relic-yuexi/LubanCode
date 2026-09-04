@@ -1330,7 +1330,7 @@ void PrintInsightsDoctor(const DoctorContext& context) {
 #else
         localtime_r(&now, &local);
 #endif
-        char buffer[16];
+        char buffer[64];
         std::snprintf(buffer, sizeof(buffer), "%04d%02d%02d", local.tm_year + 1900,
                       local.tm_mon + 1, local.tm_mday);
         input.now_yyyymmdd = buffer;

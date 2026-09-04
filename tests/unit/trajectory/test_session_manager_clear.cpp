@@ -33,7 +33,7 @@ struct FakeClock : SessionManagerClock {
     std::int64_t MonotonicNs() const override { return 7000LL + random_calls; }
     std::string Random6() const override {
         ++random_calls;
-        char buffer[8];
+        char buffer[16];
         std::snprintf(buffer, sizeof(buffer), "C%05d", random_calls);
         return buffer;
     }
@@ -363,6 +363,7 @@ TEST_CASE("clear 八步: 旧账封口新账开张,落盘次序与证据齐") {
     int op_dirs = 0;
     for (const auto& entry :
          std::filesystem::directory_iterator(fixture.manager->workspace_dir() / "lifecycle", ec)) {
+        (void)entry;
         ++op_dirs;
     }
     CHECK(op_dirs == 2);

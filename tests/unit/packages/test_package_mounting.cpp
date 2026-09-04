@@ -52,9 +52,6 @@ void WriteFile(const fs::path& path, const std::string& content) {
     file << content;
 }
 
-const char* kManifest = "schema: 1\nid: test.content-kit\nversion: 0.1.0\nname: Content Kit\n"
-                        "description: 内容包测试件。\n";
-
 const char* kAgentYaml = R"yaml(schema: 1
 name: reviewer
 description: 复核员。

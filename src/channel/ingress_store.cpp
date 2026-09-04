@@ -233,10 +233,8 @@ void ChannelIngressStore::ReplayLocked() {
     // 记录在账的 sid 集合:tr 行可能指到 evt 行之前(不可能——evt 先落);
     // 但半行 evt 之后的 tr 行仍要认(事件没落成,迁移行指空号,跳过)。
     std::string text_line;
-    int line_number = 0;
     int skipped = 0;
     while (std::getline(stream, text_line)) {
-        ++line_number;
         if (text_line.empty()) {
             continue;  // 尾部空行(最后崩溃前没写完换行)不算坏行
         }

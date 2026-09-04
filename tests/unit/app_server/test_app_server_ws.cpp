@@ -262,14 +262,6 @@ std::vector<api::StreamEvent> TextOnlyScript(const std::string& text) {
     };
 }
 
-std::string MakeTempDir(const char* name) {
-    const std::filesystem::path dir = std::filesystem::temp_directory_path() / name;
-    std::error_code ec;
-    std::filesystem::remove_all(dir, ec);
-    std::filesystem::create_directories(dir, ec);
-    return dir.string();
-}
-
 // 一台 WS 模式的测试服务:假后端 + 自持 transport,连接一条条喂。
 app_server::WsOptions WsOptionsFor(const std::string& token) {
     app_server::WsOptions ws;
@@ -414,7 +406,6 @@ TEST_CASE("ws 出帧:文本帧字节钉死(小/中/大三档长度)") {
 }
 
 TEST_CASE("ws 入帧:掩码解开,一条文本一条消息") {
-    static const std::uint8_t mask[4] = {0x37, 0xfa, 0x21, 0x3d};
     // RFC 6455 §5.7 的样例:掩码 "Hello"。
     const std::string frame = Bytes({0x81, 0x85, 0x37, 0xfa, 0x21, 0x3d, 0x7f, 0x9f, 0x4d, 0x51, 0x58});
     app_server::ws::FrameDecoder decoder;

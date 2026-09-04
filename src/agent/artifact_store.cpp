@@ -97,7 +97,9 @@ ArtifactContentKind DetectArtifactKind(const std::string& tool_name, const std::
     std::size_t first = content.find_first_not_of(" \t\r\n");
     if (first != std::string::npos && (content[first] == '{' || content[first] == '[')) {
         try {
-            (void)nlohmann::json::parse(content);
+            // 结果落名再弃:json::parse 带 warn_unused_result,(void) 压不住。
+            const auto parsed = nlohmann::json::parse(content);
+            (void)parsed;
             return ArtifactContentKind::Json;
         } catch (...) {
             // 解析不动:当普通文本。

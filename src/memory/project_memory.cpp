@@ -731,7 +731,7 @@ std::string BuildIndex(const std::vector<StoredEntry>& entries, const char* laye
     out << (layer == std::string_view("user") ? "# User Memory\n\n" : "# Project Memory\n\n")
         << "<!-- 此文件由 LubanCode 生成。请改主题文件，不要直接改索引。 -->\n\n";
     const bool user_layer = layer == std::string_view("user");
-    for (const auto [kind, heading] : {std::pair{MemoryKind::Fact, "Facts"},
+    for (const auto& [kind, heading] : {std::pair{MemoryKind::Fact, "Facts"},
                                        std::pair{MemoryKind::Preference, "Preferences"},
                                        std::pair{MemoryKind::Feedback, "Feedback"}}) {
         if (user_layer && kind == MemoryKind::Fact) continue;  // 用户层不放事实
@@ -773,21 +773,6 @@ std::string FileFingerprint(const fs::path& path) {
 
 std::string StripTopicMetadata(std::string text) {
     return frontmatter::StripTopicMetadata(std::move(text));
-}
-
-std::vector<std::string> Utf8Units(const std::string& text) {
-    std::vector<std::string> units;
-    for (std::size_t i = 0; i < text.size();) {
-        const unsigned char c = static_cast<unsigned char>(text[i]);
-        std::size_t length = 1;
-        if ((c & 0xE0) == 0xC0) length = 2;
-        else if ((c & 0xF0) == 0xE0) length = 3;
-        else if ((c & 0xF8) == 0xF0) length = 4;
-        if (i + length > text.size()) length = 1;
-        units.push_back(text.substr(i, length));
-        i += length;
-    }
-    return units;
 }
 
 // ---- 检索归一化与双路分词(中文检索瘦身单) ----

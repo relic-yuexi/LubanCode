@@ -52,16 +52,6 @@ private:
     fs::path dir_;
 };
 
-std::optional<std::string> ReadText(const fs::path& path) {
-    std::ifstream file(path, std::ios::binary);
-    if (!file.is_open()) {
-        return std::nullopt;
-    }
-    std::ostringstream buffer;
-    buffer << file.rdbuf();
-    return buffer.str();
-}
-
 bool WriteText(const fs::path& path, const std::string& content) {
     std::error_code ec;
     fs::create_directories(path.parent_path(), ec);

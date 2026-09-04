@@ -157,7 +157,7 @@ void CheckProfilesIdentical(const agent::ResolvedAgentProfile& a, const agent::R
             nlohmann::json input_schema() const override { return nlohmann::json::object(); }
             Result execute(const nlohmann::json&) override { return {"", false}; }
         };
-        for (const std::string& candidate :
+        for (const std::string candidate :
              {"read_file", "search", "run_command", "todo_write", "mcp__browser__navigate", "write_file"}) {
             NamedTool tool(candidate);
             CHECK(a.profile.tool_filter(tool) == b.profile.tool_filter(tool));

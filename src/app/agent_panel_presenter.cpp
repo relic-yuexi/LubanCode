@@ -154,6 +154,16 @@ std::string OutcomeReasonText(lubancode::tools::TaskOutcomeReason reason) {
             return tr("agent_status.reason_protocol_error");
         case R::None:
             return tr("agent_status.reason_unknown");
+        // 这些终态暂无专设文案:落到下方"未注明原因"(与改前无 case 时
+        // 一致)。
+        case R::NoMeaningfulProgress:
+        case R::OutputBudgetExhausted:
+        case R::InitializationFailed:
+        case R::ParentCancelled:
+        case R::SessionClosing:
+        case R::HookDenied:
+        case R::ShutdownTimeoutUnknown:
+            break;
     }
     return tr("agent_status.reason_unknown");
 }

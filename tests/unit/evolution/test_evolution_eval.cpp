@@ -157,8 +157,8 @@ std::string ComposeRichPlan(const std::string& candidate_id, const std::string& 
     plan += "                 \"wall_clock_ms\", \"permission_prompts\", \"workspace_writes\"],\n";
     plan += "    \"fixture\": \"" + baseline_fixture + "\"\n";
     plan += "  },\n";
-    plan += "  \"budget\": {\"max_tool_calls\": " + std::to_string(max_tool_calls) +
-             ", \"max_tokens\": 200000, \"timeout_ms\": 60000}\n";
+    plan += std::string("  \"budget\": {\"max_tool_calls\": ") + std::to_string(max_tool_calls) +
+            ", \"max_tokens\": 200000, \"timeout_ms\": 60000}\n";
     plan += "}\n";
     return plan;
 }

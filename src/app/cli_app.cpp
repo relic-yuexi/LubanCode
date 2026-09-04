@@ -645,6 +645,11 @@ int RunCli(const std::vector<std::string>& args) {
             return 0;
         }
         case CliAction::Proceed:
+        // app-server 两枚与 Proceed 同路穿出 switch:RunAppServer 在下游
+        // 走 RunAppServerMode;BadAppServerWs 的 error_text 在此不拦(改前
+        // 无 case 同样穿出,行为保持——要不要在此打错误退出,另立单说)。
+        case CliAction::RunAppServer:
+        case CliAction::BadAppServerWs:
             break;
         case CliAction::ManageSession: {
             // 会话管理子命令(archive/unarchive/delete):不进会话,打完

@@ -234,7 +234,7 @@ std::vector<std::string> DedupePreserveOrder(const std::vector<std::string>& ite
 }
 
 AgentDefinitionParseResult ParseAgentDefinitionYaml(const std::string& yaml_text,
-                                                    const std::string& file_label) {
+                                                    const std::string& /*file_label*/) {
     AgentDefinitionParseResult result;
     std::vector<AgentDefinitionIssue>& issues = result.issues;
     bool has_error = false;

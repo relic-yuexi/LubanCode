@@ -10,17 +10,6 @@
 
 namespace {
 
-const char* ActionName(lubancode::app::BackgroundCommandAction action) {
-    switch (action) {
-        case lubancode::app::BackgroundCommandAction::Invalid: return "Invalid";
-        case lubancode::app::BackgroundCommandAction::List: return "List";
-        case lubancode::app::BackgroundCommandAction::Show: return "Show";
-        case lubancode::app::BackgroundCommandAction::Logs: return "Logs";
-        case lubancode::app::BackgroundCommandAction::Stop: return "Stop";
-    }
-    return "?";
-}
-
 lubancode::tools::BackgroundTaskInfo MakeTask(const char* id, lubancode::tools::BackgroundTaskStatus status) {
     lubancode::tools::BackgroundTaskInfo info;
     info.task_id = id;

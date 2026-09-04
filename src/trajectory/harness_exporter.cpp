@@ -60,7 +60,7 @@ std::string NowUtcIso8601() {
 #else
     gmtime_r(&seconds, &tm);
 #endif
-    char buffer[32];
+    char buffer[96];
     std::snprintf(buffer, sizeof(buffer), "%04d-%02d-%02dT%02d:%02d:%02d.%03dZ",
                   tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec,
                   static_cast<int>(ms));
@@ -502,7 +502,6 @@ nlohmann::json BuildStreamHarnessRecord(const std::filesystem::path& session_dir
             const auto result_it = raw.tool_results.find(call_id);
             if (result_it != raw.tool_results.end()) {
                 nlohmann::json content = nlohmann::json::array();
-                bool truncated = false;
                 if (result_it->second.contains("content") &&
                     result_it->second["content"].is_array()) {
                     for (const auto& block : result_it->second["content"]) {

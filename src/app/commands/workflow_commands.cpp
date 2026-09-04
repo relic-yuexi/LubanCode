@@ -1415,6 +1415,10 @@ bool HandleWorkflowCommand(const std::string& args, const WorkflowCommandContext
             }
             break;
         }
+        // Invalid(解析失败)在进 switch 前的早退段已拦下;这里显式立案,
+        // 维持穿出 switch 的原行为。
+        case WorkflowCommandAction::Invalid:
+            break;
     }
     return true;
 }

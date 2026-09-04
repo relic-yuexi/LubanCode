@@ -203,7 +203,7 @@ TEST_CASE("时间线锚点: 注入按时间排线,时间行可见,锚行不重�
     CHECK(order[2] == "fact.timeline-jul");
 
     // 每段时间行可见,正文锚行不重复占段(骨架里已带"时间: "行)。
-    for (const std::string& date : {"2023-05-08", "2023-06-19", "2023-07-01"}) {
+    for (const std::string date : {"2023-05-08", "2023-06-19", "2023-07-01"}) {
         CHECK(context.find("时间: " + date) != std::string::npos);
         CHECK(context.find("【" + date + "】") == std::string::npos);
     }

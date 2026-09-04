@@ -48,11 +48,6 @@ void Write(const fs::path& path, const std::string& text) {
     file << text;
 }
 
-std::string Read(const fs::path& path) {
-    std::ifstream file(path, std::ios::binary);
-    return std::string(std::istreambuf_iterator<char>(file), std::istreambuf_iterator<char>());
-}
-
 struct Rig {
     fs::path root;
     fs::path repo;
@@ -123,7 +118,10 @@ TEST_CASE("P0-4: 非用户命令的 user 层请求一律拒(验收线)") {
         fs::directory_iterator it(rig_ptr->home / "memory-jobs" / "pending", ec);
         std::size_t pending = 0;
         if (!ec) {
-            for (const auto& item : it) ++pending;
+            for (const auto& item : it) {
+                (void)item;
+                ++pending;
+            }
         }
         CHECK(pending == 0);
         CHECK_FALSE(fs::exists(rig_ptr->home / "memory" / "user" / "preferences", ec));

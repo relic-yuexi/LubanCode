@@ -313,6 +313,12 @@ EventLayer LayerOf(const ServerEvent& event) {
         case ServerEventKind::QuestionRequested:
         case ServerEventKind::InteractionResolved:
             return EventLayer::Item;
+        // 新近加的三枚事件还没归层:先按现状落到 Thread 兜底(与改前
+        // 无 case 时的行为一致),归层有定论再挪。
+        case ServerEventKind::ModelStepStarted:
+        case ServerEventKind::ToolBatchStarted:
+        case ServerEventKind::ToolBatchFinished:
+            break;
     }
     return EventLayer::Thread;
 }

@@ -32,13 +32,6 @@ lubancode::runtime::PlanToolCapability Builtin(const char* name) {
     return capability;
 }
 
-lubancode::api::Message UserMessage(const std::string& text) {
-    lubancode::api::Message message;
-    message.role = lubancode::api::Role::User;
-    message.content.push_back(lubancode::api::TextBlock{text});
-    return message;
-}
-
 }  // namespace
 
 // ---------------------------------------------------------------------------

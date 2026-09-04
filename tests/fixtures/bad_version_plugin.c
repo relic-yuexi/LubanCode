@@ -26,5 +26,6 @@ __declspec(dllexport)
 #endif
 const void* luban_plugin_entry(void) {
     /* 借 int 数组当假 manifest:首字段就是 abi_tag,宿主读到这里就该停。 */
+    (void)k_tools; /* 错版 manifest 永不进工具表,但符号得有人认领(压 -Wunused-const-variable) */
     return (const void*)k_bad_tag;
 }

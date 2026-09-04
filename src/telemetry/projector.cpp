@@ -429,7 +429,7 @@ private:
 
     // usage 五项(v1 legacy 或 v2 canonical)进 request span 属性与 metric。
     void ApplyUsage(const nlohmann::json& usage, bool reported, OpenSpan* span,
-                    nlohmann::json& attributes) {
+                    nlohmann::json& /*attributes*/) {
         const char* names[] = {"input_tokens",  "output_tokens", "cache_read_tokens",
                                "cache_creation_tokens", "reasoning_tokens"};
         const char* kinds[] = {"input", "output", "cache_read", "cache_creation", "reasoning"};

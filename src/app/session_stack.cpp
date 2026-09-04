@@ -301,18 +301,18 @@ SessionStack::SessionStack(const InteractiveSessionOptions& options)
       // 跨轮保留(P1)起手 ProviderDefault:配置文件不掺和——它是模型
       // 能力档位的事,选了 all 切到不认的模型要重校验,全局写死反而害事。
       current_think_history(std::make_shared<lubancode::api::ReasoningHistoryMode>()),
-      artifact_store(std::make_shared<lubancode::agent::ContextArtifactStore>()),
       current_model_instructions(std::make_shared<std::string>()),
       current_soul_name(config_result.config.soul.empty() ? "default" : config_result.config.soul),
       current_soul(std::make_shared<std::string>(LoadSoulContentByName(current_soul_name, /*warn=*/true))),
+      artifact_store(std::make_shared<lubancode::agent::ContextArtifactStore>()),
       wrapped_backend(real_backend, options.theme, options.spinner_enabled),
       context_tracker(config_result.config.context_window_tokens),
+      detached_skills(skills),
+      detached_search(config_result.config.search),
       active_provider_write_path(
           config_result.sources.active_provider == lubancode::config::Source::ProjectConfigFile
               ? config_result.project_config_file_path
               : std::nullopt),
-      detached_skills(skills),
-      detached_search(config_result.config.search),
       frozen_backend_config(std::make_shared<const lubancode::config::Config>(config_result.config)) {}
 
 std::unique_ptr<SessionStack> BuildSessionStack(const InteractiveSessionOptions& options) {

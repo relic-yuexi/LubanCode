@@ -413,7 +413,6 @@ AnalyzedSession AnalyzeSession(const SessionRecord& record) {
 
     insights::SessionInsightSummary& summary = result.summary;
     summary.source.session_id = record.session_id;
-    std::size_t with_usage = 0;
     std::string last_outcome;
     for (auto& [run_id, envelopes] : streams) {
         auto projection = accounting::ProjectUsage(envelopes);
@@ -422,7 +421,6 @@ AnalyzedSession AnalyzeSession(const SessionRecord& record) {
             result.usage.samples.push_back(sample);
             summary.coverage.requests_total += 1;
             if (sample.usage.has_value()) {
-                with_usage += 1;
                 summary.usage.requests_with_usage += 1;
                 summary.usage.input_tokens += sample.usage->input_tokens;
                 summary.usage.cache_read_tokens += sample.usage->cache_read_tokens;

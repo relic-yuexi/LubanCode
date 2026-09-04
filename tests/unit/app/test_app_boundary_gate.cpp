@@ -186,7 +186,7 @@ TEST_CASE("守门:三叶子自身零标准流(i18n/theme/line_editor)") {
         if (root.empty()) {
             return out;
         }
-        for (const std::string& name : {"i18n", "theme", "line_editor"}) {
+        for (const std::string name : {"i18n", "theme", "line_editor"}) {
             const std::filesystem::path hpp = root / "src" / "cli" / (name + ".hpp");
             const std::filesystem::path cpp = root / "src" / "cli" / (name + ".cpp");
             if (std::filesystem::exists(hpp)) out.push_back(hpp);

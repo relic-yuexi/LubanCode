@@ -55,7 +55,7 @@ TEST_CASE("create 路:interval + prompt、默认间隔、裸敲") {
 
 TEST_CASE("interval 歪形状:明报不静默") {
     // 0m/8d/1h30m/30s/超大:Invalid + 人话提示。
-    for (const std::string& bad : {"0m", "8d", "1h30m", "30s", "999999999999m", "1.5h", "-5m"}) {
+    for (const std::string bad : {"0m", "8d", "1h30m", "30s", "999999999999m", "1.5h", "-5m"}) {
         const auto c = ParseLoopCommand(bad + " check");
         CHECK(c.action == LoopCommandAction::Invalid);
         CHECK_FALSE(c.error_hint.empty());

@@ -45,17 +45,6 @@ std::string IsoNowUtc() {
     return buffer;
 }
 
-bool WriteFileBytes(const std::filesystem::path& path, const std::string& content) {
-    std::error_code ec;
-    std::filesystem::create_directories(path.parent_path(), ec);
-    std::ofstream file(path, std::ios::binary | std::ios::trunc);
-    if (!file.is_open()) {
-        return false;
-    }
-    file << content;
-    return file.good();
-}
-
 bool AppendFileLine(const std::filesystem::path& path, const std::string& line) {
     std::error_code ec;
     std::filesystem::create_directories(path.parent_path(), ec);

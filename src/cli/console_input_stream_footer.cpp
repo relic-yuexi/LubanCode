@@ -160,11 +160,6 @@ void ForgetStreamFooterFrame(StreamFooterState& f) {
 // (`> ` + 已键入内容 / 空闲占位提示) + 下横线 + 状态行;有排队消息时再在
 // 上方加常驻队列区。上下横线复用 BoxRuleLine、状态行复用 BuildStatusLine,
 // 不重写一份画法。
-// 迁移注记(Composer 合流 P1):kStreamFooterBoxRows(基础 4 行的固定高度
-// 假设)已无引用——框高改由 BuildBottomChromeLayout 按真实物理行 + 留白
-// 报账。常量本体 P5 随收尾删除清单一并清走,在那之前不许再拿"框永远四行"
-// 当前提写新代码。
-constexpr int kStreamFooterBoxRows = 4;
 // synchronized output(DEC 私有模式 2026):写之前 h、写完 l,把一次重画钉成
 // 一帧提交,避免终端半途刷出"擦了一半/画了一半"的画面。已用 web 检索核实过
 // 假设:ECMA-48/xterm 的通用约定是私有模式号不认得就直接吞掉、不报错也不

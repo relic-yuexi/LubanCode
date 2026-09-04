@@ -131,14 +131,12 @@ std::map<std::string, int> EstimateTopoOrder(const WorkflowDefinition& def) {
         if (degree[node.id] == 0) ready.push_back(node.id);
     }
     int level = 0;
-    std::size_t visited = 0;
     while (!ready.empty()) {
         const std::size_t batch = ready.size();
         for (std::size_t i = 0; i < batch; ++i) {
             const std::string id = ready.front();
             ready.pop_front();
             order[id] = level;
-            ++visited;
             for (const auto& next : succ[id]) {
                 if (--degree[next] == 0) ready.push_back(next);
             }

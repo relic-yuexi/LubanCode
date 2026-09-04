@@ -74,11 +74,11 @@ TEST_CASE("重试白名单:瞬时网络错、指定 HTTP 状态与瞬时 Api cod
     for (const int status : {400, 401, 403, 404, 501}) {
         CHECK_FALSE(api::IsRetryableError(api::Error{api::ErrorKind::HttpStatus, "x", status}));
     }
-    for (const std::string& code : {"upstream_error", "server_error", "overloaded_error", "overloaded",
+    for (const std::string code : {"upstream_error", "server_error", "overloaded_error", "overloaded",
                                     "model_overloaded", "internal_error", "internal_server_error"}) {
         CHECK(api::IsRetryableError(api::Error{api::ErrorKind::Api, "x", 0, code}));
     }
-    for (const std::string& code : {"", "authentication_error", "invalid_request", "not_found", "permission"}) {
+    for (const std::string code : {"", "authentication_error", "invalid_request", "not_found", "permission"}) {
         CHECK_FALSE(api::IsRetryableError(api::Error{api::ErrorKind::Api, "x", 0, code}));
     }
     CHECK_FALSE(api::IsRetryableError(api::Error{api::ErrorKind::Parse, "x", 0}));
@@ -86,7 +86,7 @@ TEST_CASE("重试白名单:瞬时网络错、指定 HTTP 状态与瞬时 Api cod
 }
 
 TEST_CASE("恢复环:500 与 upstream_error 都会用满预算,任一后续成功即恢复") {
-    for (const api::Error error : {
+    for (const api::Error& error : {
              api::Error{api::ErrorKind::HttpStatus, "server failed", 500},
              api::Error{api::ErrorKind::Api, "Upstream request failed", 0, "upstream_error"},
          }) {
@@ -109,7 +109,7 @@ TEST_CASE("恢复环:500 与 upstream_error 都会用满预算,任一后续成�
 }
 
 TEST_CASE("恢复环:400/401 与确定性 Api code 零重试") {
-    for (const api::Error error : {
+    for (const api::Error& error : {
              api::Error{api::ErrorKind::HttpStatus, "bad request", 400},
              api::Error{api::ErrorKind::HttpStatus, "unauthorized", 401},
              api::Error{api::ErrorKind::Api, "invalid", 0, "invalid_request"},

@@ -492,24 +492,24 @@ TEST_CASE("EnumerateSkillLayers: 五处同名,遮蔽链逐级标注,胜者与 Lo
     REQUIRE(entries.size() == 5);
 
     // 胜者:项目原生(.lubancode),其余四份都被后到的高优先级层顶掉。
-    const auto& winner = FindEntry(entries, "shared-skill", "proj", ".lubancode");
+    const auto winner = FindEntry(entries, "shared-skill", "proj", ".lubancode");
     CHECK(winner.active);
     CHECK(winner.shadowed_by.empty());
     CHECK(winner.meta.description == "项目原生");
 
-    const auto& official = FindEntry(entries, "shared-skill", "official", "");
+    const auto official = FindEntry(entries, "shared-skill", "official", "");
     CHECK_FALSE(official.active);
     CHECK(official.shadowed_by == "agents 共享");
 
-    const auto& home_agent = FindEntry(entries, "shared-skill", "home", ".agents");
+    const auto home_agent = FindEntry(entries, "shared-skill", "home", ".agents");
     CHECK_FALSE(home_agent.active);
     CHECK(home_agent.shadowed_by == "主目录级");
 
-    const auto& home_native = FindEntry(entries, "shared-skill", "home", ".lubancode");
+    const auto home_native = FindEntry(entries, "shared-skill", "home", ".lubancode");
     CHECK_FALSE(home_native.active);
     CHECK(home_native.shadowed_by == "agents 共享");
 
-    const auto& proj_agent = FindEntry(entries, "shared-skill", "proj", ".agents");
+    const auto proj_agent = FindEntry(entries, "shared-skill", "proj", ".agents");
     CHECK_FALSE(proj_agent.active);
     CHECK(proj_agent.shadowed_by == "项目级");
 
@@ -529,10 +529,10 @@ TEST_CASE("EnumerateSkillLayers: 旧版播种的官方副本让位并标注;无�
     const auto entries =
         tools::EnumerateSkillLayers(root.BaseDir("proj"), root.BaseDir("home"), root.BaseDir("official"));
     REQUIRE(entries.size() == 2);
-    const auto& official = FindEntry(entries, "lubancode-config", "official", "");
+    const auto official = FindEntry(entries, "lubancode-config", "official", "");
     CHECK(official.active);
     CHECK(official.meta.description == "发行包新版");
-    const auto& legacy = FindEntry(entries, "lubancode-config", "home", ".lubancode");
+    const auto legacy = FindEntry(entries, "lubancode-config", "home", ".lubancode");
     CHECK_FALSE(legacy.active);
     CHECK(legacy.shadowed_by == "官方");
 

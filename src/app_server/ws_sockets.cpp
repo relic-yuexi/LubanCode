@@ -87,7 +87,7 @@ bool Startup(std::string& error) {
         return false;
     }
 #else
-    (void)0;
+    (void)error;  // POSIX 腿没有 WSAStartup,error 出参只在 Windows 分支写
 #endif
     return true;
 }
