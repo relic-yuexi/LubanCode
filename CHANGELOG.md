@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.201] - 2026-09-04
+
+- **one-shot 轨迹指定输出（Harness 接入口）。** `lubancode --yes --output /logs/trajectory.jsonl "<任务>"`——收口时把 Journal 投影成 `lubancode.harness.trajectory` v1 派生 JSONL（环境脱敏快照/消息序 user→assistant→tool 闭环/逐笔 usage+汇总/outcome+exit_code），stderr 打收据（schema/records/sha256/path）；导出失败 exit 3 带稳定码与补导命令，旧文件不动。`trajectory export <sid> --format harness-v1` 可补导，hash 与原导出一致。training/harness 共用中立投影层，training 行为零变化。真机 minimax 一轮双工具往返验证全链。380/380 全绿。
+
 ## [v0.26.200] - 2026-09-04
 
 - **记忆净增益钉死（E2 五场终版，22.3M token 实测）。** 五场 227 配对：四桶合计 **+0.097 [+0.022, +0.172]**（区间含正段——从首批 p=0.054 边缘显著到区间排除零），五场方向一致为正；single/multi/open 三桶各 +0.24~0.30。过程发现同样值钱：A 态裸底空推理超时长尾烧掉 2/3 机时（B 态 p50 仅 4.5s——**记忆把解题时间从 420s 拖到秒级**）。
