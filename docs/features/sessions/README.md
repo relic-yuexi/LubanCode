@@ -9,7 +9,7 @@ LubanCode 把三件事分开：**history** 是当前模型要看的对话，**se
 交互会话的持久账是 workspace trajectory Journal（P0-2 起唯一真账；旧平铺 JSONL 已随 P0-6 退场）：
 
 ```text
-meta
+run.started / session.json（场次 manifest）
 user / assistant message
 tool call / tool result
 usage
@@ -17,13 +17,11 @@ compact marker
 title
 ```
 
-逐行追加有两个好处：长会话不用反复重写整份 JSON；进程半途退出时，已 flush 的旧行仍可恢复。坏尾行可以报告并停在最后一条完整事件，不必让整场存档报废。
+每场会话一间目录：`~/.lubancode/workspaces/<workspace_key>/sessions/<session_id>/`，主账是 `main.jsonl`，子代理与 workflow 各有自己的 JSONL。逐行追加有两个好处：长会话不用反复重写整份 JSON；进程半途退出时，已 flush 的旧行仍可恢复。坏尾行可以报告并停在最后一条完整事件，不必让整场存档报废。
 
-## 当前目录怎样筛会话
+## 会话归哪间 workspace
 
-`/sessions` 按 meta.cwd 筛当前目录，并按时间倒序列最近 20 场。`/sessions all` 跨目录列。`--continue` 与裸 `/resume` 都优先找 cwd 对得上的存档。
-
-worktree 是独立路径，故 session 仍按各自 cwd 分开列；项目记忆则按 common git dir 合并。这是有意区分：会话讲“当时在哪干活”，记忆讲“这些目录是不是同一仓库”。
+身份由统一裁决器计算（Git 公共目录 → 显式 marker → 项目 config → 启动 cwd 四级）：`/sessions` 列当前 workspace 的场，`--continue` 与裸 `/resume` 也只在当前 workspace 里找。主仓与 linked worktree 解出同一个 common git dir，归同一间 workspace——在 worktree 里开的会话，回主仓也列得出、续得上；项目记忆同理同树。两份独立 clone 路径不同，默认各立各的 workspace。
 
 ## 恢复与重放
 
@@ -36,17 +34,12 @@ worktree 是独立路径，故 session 仍按各自 cwd 分开列；项目记忆
 裸 `/resume` 在真终端打开全屏会话台账：
 
 - **搜索**：输入即搜，命中标题、首句、session id 与目录；ASCII 不分大小写，中文按原字。搜索只筛内存，不因每敲一字重读盘。
-- **筛选与排序**：`Tab` 轮换 Search / Filter / Sort 焦点，`←/→` 改选项。Filter 认 `Cwd | All`；Sort 认 `Updated | Created`（Updated 取最后一条合法事件的 ts，缺了退文件 mtime；Created 取 meta.started_at，再缺退 id 时间）。
+- **筛选与排序**：`Tab` 轮换 Search / Filter / Sort 焦点，`←/→` 改选项。Filter 认 `Cwd | All`；Sort 认 `Updated | Created`。
 - **浏览**：`↑/↓` 移动，`PageUp/PageDown` 翻页，`Home/End` 到头尾。换筛选后按 id 留住选中项，它消失了才落到最近一行。
 - **查看态**：`Ctrl+T` 看所选会话的转录（大文件按需读、取头尾各一段，`Esc`/`Ctrl+T` 收起回原行）；`Ctrl+E` 摊开选中场的长标题、目录、id、模型、消息数与创建/更新时间；`Ctrl+O` 在紧凑行与舒展行间切换，只改画法，不动筛选与选中。
-- **恢复**：Enter 重放并接管原文件；Esc 原路返回，不改当前会话。台账里没有删除键——浏览不兼任碎纸机。
+- **恢复**：Enter 恢复所选场；Esc 原路返回，不改当前会话。台账里没有删除键——浏览不兼任碎纸机。
 
-恢复分两步：
-
-1. 读 JSONL，重建消息历史、标题、工具转录与最近 usage。
-2. 按原顺序把用户、助手 Markdown、工具摘要和压缩点画回终端。
-
-之后的新消息继续追加到原文件，不另开一场“看起来像续聊、实际断档”的 session。
+恢复是 **resume-as-new**：先验源场账（hash 链、父子边），折叠出有效对话与控制态，再开一间新 session（`start_reason=resume`，manifest 反指源场）接管对话。源场 Journal 永不重开追加——旧账封口存档，新账接着写，两边以事件引用互指，不存在“续写旧文件”的路径。崩溃在场半路（回合规了没收口、尾行撕裂）也按同一套规矩：验得过的前缀照折，悬空工具分档如实标注，不冒充执行过。
 
 ## 归档：日常收拾
 
@@ -54,14 +47,14 @@ worktree 是独立路径，故 session 仍按各自 cwd 分开列；项目记忆
 
 ```text
 lubancode archive <id|标题>    # 顶层命令,归档任意一场
-lubancode unarchive <id>       # 搬回 sessions 根
+lubancode unarchive <id>       # 取消归档,搬回可续聊状态
 /archive                       # 会话内:归档当前这场,成功后退出
 /sessions archived             # 只读列表,看归档了哪些
 ```
 
-- 归档按 session 状态图把场子转入 archived——id、标题、时间、消息一字不动。搬运用 rename（同盘原子），半路失败原文件仍在原地可用。
+- 归档按 session 状态图把场子转入 archived——只改 `session.json` 的 status，目录不搬、字节不动；lifecycle 记一笔 intent+result 回执。
 - 归档后 `--continue`、`/sessions`、裸 `/resume` 一概略过它；`/sessions archived` 看得见，想续聊先 `lubancode unarchive <id>`。
-- 会话内 `/archive` 先刷盘、关句柄，再搬、退出——Windows 上 append 句柄开着就动文件会吃 sharing violation，这条由生命周期服务统一收口。后台子代理还在跑时拒绝。
+- 会话内 `/archive` 先刷盘、封口再转态退出；后台子代理还在跑时拒绝。
 - 引用认完整 id、唯一 id 前缀或唯一命中的标题；重名便列出短 id 叫你点明，绝不猜一场。
 
 ## 永久删除：另开明路
@@ -76,7 +69,7 @@ lubancode delete <id|标题> --force   # 跳过确认——只给脚本,不可�
 
 - 确认屏写标题、完整 id、目录与「永久删除」；缺省取消，EOF、Esc、空答、别的答案都算取消，只有整行 `y`/`yes` 才动手。
 - 回合正在流、后台子代理还在跑时拒绝；等它们收尾再删。
-- 删除只碰验明位于 sessions 根或 archive 子目录里的那一份 `.jsonl`。路径越界、符号链接绕出根、后缀不对，一律拒绝。
+- 删除走 lifecycle 账：durable intent → 墓碑（`tombstones/<session_id>.json`，记末事件 hash 与原因）→ 删目录 → result 回执；活锁或 active session 拒绝。
 - context artifact 按 hash 共用，可能被别的会话引用——删除不连坐删 blob；引用计数与 GC 另做。
 - 归档不是删除，删除也不可逆。日常收拾先 archive。
 
@@ -197,7 +190,7 @@ lubancode delete <id|标题> --force   # 跳过确认——只给脚本,不可�
 | --- | --- | --- |
 | `/clear` | 当前内存 history 与当前屏面 | 磁盘 session、项目记忆、配置 |
 | `/memory forget` | 一条项目记忆移入 archive | 会话历史 |
-| `/archive`、`lubancode archive` | 一场会话移出默认列表（搬进 `sessions/archive/`，字节原样，unarchive 可回） | 会话内容本身、记忆 |
+| `/archive`、`lubancode archive` | 一场会话移出默认列表（`session.json` 转 archived，目录与字节不动，unarchive 可回） | 会话内容本身、记忆 |
 | `/delete`、`lubancode delete` | 一场磁盘会话（永久，先确认） | 其他会话、记忆、artifact blob |
 | `/worktree exit remove` | 工作树目录与分支（须满足安全条件） | 主仓库、共享项目记忆 |
 

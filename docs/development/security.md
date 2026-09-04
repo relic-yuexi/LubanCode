@@ -167,12 +167,13 @@ Windows 的 `~` 取 `%USERPROFILE%`，POSIX 取 `$HOME`；路径由宿主算，�
 
 ## 11. 会话、记忆与导出
 
-- session JSONL 会存用户消息、助手回答、工具事件、usage 与 compact 事件。
+- session JSONL（workspace Journal）会存用户消息、助手回答、工具事件、usage 与 compact 事件。
 - `/export` 会把会话写成可读 Markdown；导出前审一遍敏感内容。
-- 项目记忆住用户目录，只进本轮请求视图，不进 session，也不随 export 外带。
+- 项目记忆住 workspace 树（`workspaces/<key>/memory/`），只进本轮请求视图，不进 session 正文，也不随 export 外带；每次真正注入的正文另落内容寻址快照与 `context.injected` 事件，召回有账可查。
+- 全局记忆（`memory/user/`）写入口唯一：用户主动命令（`/memory remember global …`）且全局配置 `memory.user_enabled` 授权，缺一不可。模型工具（`memory_save` 的 `scope=user`）、回合尾抽取、候选 accept、Skill 指示一律拒（`memory.global_unauthorized`）；项目配置写 `user_enabled=true` 不生效（merge 层只认全局授权，项目级只能收窄成关）。
 - 记忆候选须过长度、敏感内容、证据与学习档闸门。
 - 日志、PID、临时端口、原始网页、密钥与个人数据不该进长期记忆。
-- 删除/forget 要说明是归档、拒收还是物理清除，不能含糊。
+- 删除/forget 要说明是归档、拒收还是物理清除，不能含糊。会话删除落墓碑（末事件 hash 与原因），lifecycle intent+result 回执齐全。
 
 ## 12. PTC
 

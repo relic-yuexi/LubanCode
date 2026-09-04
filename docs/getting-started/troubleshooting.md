@@ -132,9 +132,9 @@ git status --short
 
 ### `/resume` 找不到
 
-- 默认按 cwd 筛；用 `/sessions all` 看跨目录。
-- worktree 路径不同，会话也分开。
-- JSONL 坏尾行应停在最后完整事件；看解析告警。
+- 默认只列当前 workspace；用 `/sessions all` 跨 workspace 找，再 `/resume <id>`。
+- 主仓与 linked worktree 同属一间 workspace，两边都列得出；两份独立 clone 各是各的。
+- Journal 坏尾行按前缀恢复（验得过的部分照折），整份坏才报 corrupt；`lubancode trajectory verify <id>` 逐场验账。
 
 ### context 百分比怪
 
@@ -160,7 +160,7 @@ git status --short
 | 没生成候选 | `learn` 是否 `off`，回合抽取是否报错 |
 | 候选不自动写 | 默认 `review` 要人工 accept；`auto` 须全局授权且证据过闸 |
 | pending 不落盘 | worker 是否启动，`memory-jobs/failed/` 是否有坏 job |
-| worktree 不共享 | `/memory` 的 project key 与 common git dir |
+| 换目录记忆不见 | 身份裁决落在哪级：Git common dir / marker / config / cwd；独立 clone 不共享是预期 |
 
 `/memory why` 应优先给召回 trace，不要靠猜关键词。详见[项目记忆](../architecture/memory/design.md)。
 

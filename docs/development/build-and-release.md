@@ -70,12 +70,14 @@ CI 会显式传 `-DLUBANCODE_USE_CODELOAD=OFF` 走 GitHub 官方地址。本机�
 | `src/agent/` | 有状态 Agent、AgentLoop、上下文、compact、prompt 拼装 | 工具循环、历史视图、压缩 |
 | `src/api/` | 中立消息与四种 wire | 请求 JSON、SSE 事件、usage |
 | `src/runtime/` | 中立回合事件、调度器、goal/loop 服务 | 跨宿主回合语义、排程、重试 |
-| `src/sessions/` | 会话存档、目录与生命周期 | JSONL 写入、恢复、归档 |
+| `src/sessions/` | goal 会话纯函数（旧会话存档已退役） | goal 事件 |
 | `src/workflow/` | workflow 定义、编译、执行与 journal | 图校验、节点调度、恢复 |
 | `src/cli/` | 输入、footer、转录、Markdown、diff、i18n | 键位、布局、渲染 |
 | `src/config/` | 配置、Provider/模型目录、项目指令 | 字段、默认值、合并 |
 | `src/tools/` | 内置工具、子代理、插件桥 | schema、确认、执行 |
 | `src/hooks/` | Hook 事件、分派与归并 | 生命周期、决策协议 |
+| `src/trajectory/` | workspace Journal：会话账、目录、索引、恢复与验账 | JSONL 写入、resume、归档 |
+| `src/workspace/` | 身份裁决器与 workspace manifest | 四级裁决、开仓对账 |
 | `src/memory/` | 项目记忆、召回、候选与 worker | 索引、写入、审阅 |
 | `src/ptc/` | PTC stub、协议、runner、画像与基准 | 程序化工具调用 |
 | `src/mcp/`、`src/lsp/` | 外部进程协议客户端 | framing、生命周期 |
@@ -195,7 +197,17 @@ bash scripts/check_docs.sh
 
 `docs/` 与 `skills/` 是一对同版本资源。Windows 与便携安装把它们摆在程序旁；POSIX 前缀安装把它们摆进 `<prefix>/share/lubancode/`。`lubancode-config` 由 `../../docs` 找到同包文档。两边须一同复制，一同升级。
 
-## 11. 常见构建故障
+## 11. 发布与存储升级（存储 v2 收官）
+
+Workspace 统一存储（v2）落地后的升级语义，随包发布时照此说明：
+
+- 用户主目录的持久化只有一棵 `workspaces/` 树与全局 `memory/user/`；会话、项目记忆、lifecycle 回执、墓碑都长在 `workspaces/<key>/` 下（目录一览见[配置手册](../reference/configuration.md) §九）。
+- 不带迁移器。旧版的平铺会话目录、按项目 key 分账的记忆目录已随 P0-6 整件退场：升级安装遇到旧目录，零读零写、原样保留，新账在 `workspaces/` 全新开张（合同与盘点见 [workspace-storage-v2](workspace-storage-v2/P0-0-contracts.md)）。
+- 想把旧档迁进新树的走手工路：旧数据本来就不多（无老用户定案），必要时按 workspace key 手工归位后 `lubancode trajectory verify <id>` 逐场验账。
+- 全局记忆 `memory/user/` 路径不动，升级后照读照写；其写入只认用户主动命令 + 全局授权（安全模型 §11）。
+- 首启空主目录：`workspaces/` 惰性创建，第一条会话开仓时原子写 `workspace.json`；`lubancode trajectory usage|doctor|verify` 对空根给稳定错误码，不崩。
+
+## 12. 常见构建故障
 
 | 现象 | 先查 |
 | --- | --- |

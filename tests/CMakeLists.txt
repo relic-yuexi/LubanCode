@@ -381,6 +381,15 @@ add_executable(artifact_layout_dump EXCLUDE_FROM_ALL manual/artifact_layout_dump
 target_link_libraries(artifact_layout_dump PRIVATE lubancode_core)
 target_compile_features(artifact_layout_dump PRIVATE cxx_std_23)
 
+# Workspace 收官验收·量级基线驱动(不进 ctest,验收手动跑):
+#   workspace_scale_driver <输出.json> [--sessions 1,1000,10000]
+#       [--memories 1,1000,10000] [--root <临时根>]
+# 真 ledger/索引/召回/折叠跑 1/1k/10k 档,冷热分账,峰值内存记表;产出
+# JSON 由 scripts/workspace_scale_baseline.py 渲染成基线表进仓。
+add_executable(workspace_scale_driver EXCLUDE_FROM_ALL manual/workspace_scale_driver.cpp)
+target_link_libraries(workspace_scale_driver PRIVATE lubancode_app)
+target_compile_features(workspace_scale_driver PRIVATE cxx_std_23)
+
 # 0.17.0:集成验证用的刮屏驱动器(AllocConsole + WriteConsoleInput +
 # ReadConsoleOutput,真控制台专用),不进 ctest——要真钥匙、要弹控制台
 # 窗口,只在集成验证时手动跑:

@@ -33,9 +33,9 @@ lubancode delete <id|标题> [--force]
 
 ### 会话管理子命令
 
-- `lubancode archive <SESSION>`：把一场会话归档（状态图转入 archived，字节原样）。`SESSION` 认完整 id、唯一 id 前缀或唯一命中的标题；重名列短 id 叫你点明，绝不猜。归档后 `--continue`、`/sessions`、裸 `/resume` 略过它。
-- `lubancode unarchive <SESSION>`：取消归档，搬回 sessions 根，`/resume` 又能续聊。
-- `lubancode delete <SESSION>`：永久删除一场会话（根或归档里的都行）。交互终端先走确认屏（标题/完整 id/目录/「永久删除」，缺省取消，EOF、空答、别的答案都算取消）。`--force` 跳过确认——只给脚本显式使用，不可恢复。删除只碰目标那一份 `.jsonl`；artifact blob 按内容寻址、可能被别的会话引用，不连坐删。
+- `lubancode archive <SESSION>`：把一场会话归档（状态图转入 archived，目录与字节原样不动，lifecycle 记回执）。`SESSION` 认完整 id、唯一 id 前缀或唯一命中的标题；重名列短 id 叫你点明，绝不猜。归档后 `--continue`、`/sessions`、裸 `/resume` 略过它。
+- `lubancode unarchive <SESSION>`：取消归档（archived 转回 closed），`/resume` 又能续聊。
+- `lubancode delete <SESSION>`：永久删除一场会话。交互终端先走确认屏（标题/完整 id/目录/「永久删除」，缺省取消，EOF、空答、别的答案都算取消）。`--force` 跳过确认——只给脚本显式使用，不可恢复。删除走 lifecycle 账：intent → 墓碑（记末事件 hash 与原因）→ 删目录 → result；artifact blob 按内容寻址、可能被别的会话引用，不连坐删。
 
 ## 启动参数
 
@@ -187,11 +187,11 @@ Token 账本报告（只读，只摆事实）。裸敲看当前会话：coverage
 
 ### `/sessions [all|archived]`
 
-默认列 cwd 下最近 20 场；`all` 跨目录列；`archived` 只读列已归档的场子。列表含时间、标题、模型与 id。归档的在 `sessions/archive/` 下，字节原样；想续聊先 `lubancode unarchive <id>`。
+默认列当前 workspace 最近 20 场；`all` 跨 workspace 列；`archived` 只读列已归档的场子。列表含时间、标题、模型与 id，数据来自可重建索引（不为每次列表重放 Journal）。归档场 `session.json` 标 archived、目录不动；想续聊先 `lubancode unarchive <id>`。
 
 ### `/resume [编号|id]`
 
-裸敲打开全屏会话台账：输入即搜（标题/首句/id/目录），Tab 轮换 Search/Filter/Sort 焦点，左右键改筛选与排序，上下浏览、PageUp/PageDown 翻页。三种查看态：`Ctrl+T` 看所选会话的转录（大文件取头尾，Esc 收起回原行）；`Ctrl+E` 摊开选中场的标题、目录、id、模型、消息数与创建/更新时间；`Ctrl+O` 在紧凑行与舒展行间切换，只改画法不动筛选与选中。Enter 恢复时重放消息、工具摘要与压缩点，随后继续写回原 JSONL；Esc 原路返回不动盘。直接给编号或 id 可跳过台账。
+裸敲打开全屏会话台账：输入即搜（标题/首句/id/目录），Tab 轮换 Search/Filter/Sort 焦点，左右键改筛选与排序，上下浏览、PageUp/PageDown 翻页。三种查看态：`Ctrl+T` 看所选会话的转录（大文件取头尾，Esc 收起回原行）；`Ctrl+E` 摊开选中场的标题、目录、id、模型、消息数与创建/更新时间；`Ctrl+O` 在紧凑行与舒展行间切换，只改画法不动筛选与选中。Enter 恢复走 resume-as-new：验源场账、折叠对话，再开一间新 session 接管（源场 Journal 永不重开追加）；Esc 原路返回不动盘。直接给编号或 id 可跳过台账。
 
 ### `/archive`
 
@@ -203,7 +203,7 @@ Token 账本报告（只读，只摆事实）。裸敲看当前会话：coverage
 
 ### `/export [路径]`
 
-把当前会话导成 Markdown。默认写到 sessions 目录的 `<id>.md`；标题来自 `/title`，压缩点会留标记。
+把当前会话导成 Markdown。默认写到当前 session 目录的 exports/ 下 `<id>.md`；标题来自 `/title`，压缩点会留标记。
 
 ### `/title [标题]`
 

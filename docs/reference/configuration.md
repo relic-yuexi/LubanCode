@@ -530,14 +530,29 @@ GLM 模型档位已经写进 provider 目录。`glm-5.2` 认 `max/xhigh/high/med
     core/                             身份/干活方式/答话风格(默认人格)
     features/                         各工具方针段
     platforms/                        协议平台段
-  sessions/                           会话存档
-  projects/<项目key>/memory/          项目记忆正文、index 与可重建 catalog
-  memory-jobs/                        后台记忆任务的 pending/failed 队列
+  workspaces/                         项目持久化唯一根(存储 v2)
+    <workspace_key>/                  工作区钥匙目录:显示名-sha256 前 16 位
+      workspace.json                  workspace v2 manifest(首次开仓原子写)
+      sessions/<session_id>/          每场会话:session.json + main.jsonl
+        subagents/<agent_run_id>.jsonl
+        workflows/<workflow_run_id>/
+        artifacts/sha256/             内容寻址 blob(召回快照等)
+        checkpoints/ indexes/ exports/
+      memory/                         项目记忆正文(facts/preferences/feedback/
+                                       memory-candidates/)与 .state/(catalog、
+                                       recall-traces)——与 sessions 同树
+      lifecycle/<operation_id>/       管理操作回执(intent.json + result.json)
+      tombstones/<session_id>.json    已删场的墓碑
+  memory/user/                        全局记忆(跨项目,须全局授权;路径不动)
+    preferences/ feedback/ archive/ index.md .state/catalog.json
+  memory-jobs/                        后台记忆任务的 pending/running/failed 队列
   plugins/                            插件（*.dll/*.so/*.dylib、*.lua、plugin.json 目录）
   plugin-trust.json                   项目插件的内容指纹信任账
   skills/                            用户自装 Skill；同名时压过官方级
   languages/                          外部语言包(见 i18n.md)
 ```
+
+工作区钥匙由身份裁决器统一计算（Git 公共目录 → 显式 marker → 项目 config → 启动 cwd 四级，见 [workspace 存储 v2 合同](../development/workspace-storage-v2/P0-0-contracts.md)）；主仓与 linked worktree 共用同一间 workspace。旧版的平铺会话目录与按项目 key 分账的记忆目录已退场，新装只认 `workspaces/` 这棵树；升级安装不迁移旧档，旧目录原样保留、不再读写。
 
 项目级的 `.lubancode/`(在 `<cwd>` 下)能放 `config.json`(按字段压过全局)、`settings.local.json`(本地权限,不进版本库)与 `skills/`(同名技能时项目级压过主目录级)。
 
@@ -558,6 +573,7 @@ GLM 模型档位已经写进 provider 目录。`glm-5.2` 认 `max/xhigh/high/med
 | `/prompt` | 是 | 管理主目录 prompt 文件；重建系统提示 |
 | `/memory use on|off` | 是 | 不落盘，只改本场 |
 | `/memory learn off|review|auto` | 是 | 不落盘，只改本场；项目配置不能把全局 `review` 抬成 `auto` |
+| `/memory remember global <kind> 标题 :: 正文` | 是 | 全局记忆（`memory/user/`）唯一写入口：用户主动命令 + 全局配置 `memory.user_enabled` 授权，缺一不可；模型工具与自动抽取一律拒（`memory.global_unauthorized`） |
 | `/memory review|accept|edit|reject` | 是 | 读写项目 `memory-candidates/`；接受后写入项目记忆 |
 | `/memory stale|verify|refresh|why` | 是 | 检查、核验或解释项目记忆；`refresh` 会更新主题文件 |
 | 确认提示按 `a` | 是 | 用户同意后，可写项目 `settings.local.json` |
