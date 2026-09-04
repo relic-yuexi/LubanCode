@@ -1,0 +1,732 @@
+# LoCoMo 评测纠偏：判分修复、数据隔离与端到端重跑
+
+- 状态：待实施（2026-09-05 审计发现 P0 硬伤）
+- 级别：P0（现有 E2 结论失效；泄题面、判分与凭据处理须先收口）
+- 范围：LoCoMo-MC10 数据准备、E1 检索、摘要质量对照、E2 off/on 答题、轨迹判分、工具隔离、配置冻结、报告与证据归档
+- 当前裁决：E1 只算检索组件证据；摘要对照只算摘要词面证据；现有 E2 `B-A=+0.279` 作废，不得再当产品效果引用
+- 依赖：`ProjectMemory` 生产召回路、Trajectory schema v2、one-shot CLI、Memory worker、现有 LoCoMo 扰动器与逐题账
+- 关联：`智能体记忆效果_个性化适配续接快照与在线评测.todo`、`记忆写入调度_显式保存门控批处理与成本账.todo`、`AgentHarness评测回归与Benchmark平台设计.todo`
+- 不在本单：改 LoCoMo 原始答案、借重跑顺手调 prompt、把失败样本藏起来、追一个更好看的单点数字
+
+## 一、先下断语
+
+这批评测不是全假，也不是全真。
+
+E1 确实走了 LubanCode 的写入 worker、catalog、BM25、门槛、预算与
+`BuildTurnContext()`。它能证明检索组件变好，不能证明自动记忆闭环变好。
+
+摘要质量对照确实调用了 `RunMemoryExtraction()`。可 272/272 个 session 都没有产出可写
+fact candidate；driver 随后拿 `summary` 派生标题，再把原 session 正文拼回去强制灌库。
+它能证明摘要更利于词法检索，不能证明线上会保存这些记忆。
+
+E2 确实启动了真实 `lubancode.exe`，也确实让 B 态走了生产召回。可判分器读错 trajectory
+事件，又把整段终端输出当答案捞数字；答题 Agent 还能搜索评测目录和整座记忆库。现有
+`+0.279` 没法洗净，必须作废重跑。
+
+本单定案：
+
+1. 旧报告保留作事故证据，页首加失效声明，不删、不改写历史数字。
+2. 修判分器后先跑纯离线回归，不许立刻烧整批模型。
+3. 答题态禁用一切工具；memory 只能由生产召回包注入，不能让模型自己翻盘。
+4. 评测子进程看不见题库、答案、变换账、逐题账与源码仓。
+5. 不再复制用户真实 config；评测配置从白名单字段生成，密钥只走环境变量。
+6. 报告分 E1、E2-oracle、E2-auto 三栏，谁也不许冒充谁。
+7. 主指标按预先抽中的全题分母算；超时、拒答、格式错都算失败，另报原因。
+8. 每次结果须能从 manifest、逐题账和 trajectory hash 原样复算。
+
+## 二、现状评测地图
+
+### 2.1 E0：防作弊扰动
+
+`scripts/eval_locomo_perturb.py` 从 `locomo_mc10.json` 产：
+
+```text
+perturbed.jsonl   扰动后的 session、题目、选项与 answer_index
+ledger.json       实体替换、日期平移与题目改写账
+answers.json      qid -> correct_choice_index
+answers.sha256    答案表摘要
+```
+
+它按场替换人名和实体，平移日期，改写题面，轻扰选项文字但不换位置。答题 prompt 只应拿
+题面与选项。答案与 ledger 只能在模型完成后由 scorer 读取。
+
+这能压低字面污染，不能证明模型从未见过原数据。A/B 配对比绝对准确率更有解释力，前提是
+两态数据、工具、配置、版本、判分全都对称。
+
+### 2.2 E1：检索组件
+
+`tests/manual/locomo_retrieval_driver.cpp` 当前每场造临时 workspace，再逐 session 灌一条 fact：
+
+```text
+EnqueueSave
+  -> pending job
+  -> RunPendingMemoryJobs
+  -> topic Markdown/catalog/index
+  -> BuildTurnContext(question)
+  -> LastTrace()
+```
+
+这条链确实复用了生产代码。报告脚本再用答案文本去 session 正文/官方摘要中做精确子串
+定位，得到 evidence topic。
+
+现有 1986 题里只有 498 题可这样定位，约四分之一。Recall@k 的分母不是全题。driver 的
+`ranked` 还含未过门槛、未实际注入的条目；生产默认只注入最多 3 条，故 R@5 只是排序诊断。
+
+E1 正确表述：
+
+> 在 498 道可精确定位 evidence session 的题上，某版生产排序把正确 session 排进前 k 的比例。
+
+不得写：
+
+> LubanCode 在 LoCoMo 上达到 R@1 0.612。
+
+后一句会把不可定位题、注入门槛和真实作答全抹掉。
+
+### 2.3 摘要质量双库
+
+`--extract` 模式确实走 cheap route 和 `RunMemoryExtraction()`。旧、新 prompt 各处理 272 个
+session，再各建一座库，跑同一套 E1。
+
+现存原始账：
+
+```text
+旧 prompt: requests=274 failures=2 input=356724 output=44437
+新 prompt: requests=272 failures=0 input=430733 output=47156
+```
+
+新 prompt 分片账为 128 + 144 = 272。目录根下的 `trace.usage.json` 仍是一份 19 请求旧残片；
+报告虽用了正确分片总数，canonical 产物指向却不干净，须修 manifest。
+
+更要紧的是：
+
+```text
+from_candidate = 0
+from_summary   = 272
+fallback       = 0
+```
+
+driver 在没有 fact candidate 时，把 extraction summary 截成 title/summary，把完整 session
+转写塞进 content，再以 `user_initiated=true` 调 `EnqueueSave()`。这不是生产自动学习行为，
+只是一个“摘要检索成色”实验夹具。
+
+因此 `R@1 0.514 -> 0.600` 只许写成：
+
+> 在固定的合成落库映射下，新抽取摘要让可定位题的检索 R@1 提高 0.086。
+
+### 2.4 E2：真实 exe 答题
+
+`scripts/eval_locomo_runner.py` 当前做两态：
+
+```text
+A: memory.enabled=false
+B: memory.enabled=true
+```
+
+两边先预灌同一批 session topic，再逐题启动 `lubancode.exe --yes <prompt>`。每题新进程、新
+session。B 走生产召回，A 不注入。题后从 trajectory 或 stdout 取选项号，再对
+`answers.json`。
+
+这条路测试的是“预灌记忆在岗后的 Agent 作答”，不是“自动记忆写读闭环”。
+
+## 三、P0 审计发现
+
+### 3.1 判分器监听了不存在的事件名
+
+runner 的 `last_assistant_text()` 只认：
+
+```text
+model.response.completed
+```
+
+当前 Trajectory schema v2 与 248 个 B 态现存 session 实际都写：
+
+```text
+model.output.completed
+```
+
+审计结果：
+
+```text
+B session files                    248
+含 model.response.completed          0
+含 model.output.completed           248
+```
+
+这不是偶发漏记，是字段合同写错。
+
+### 3.2 fallback 会从终端杂字里捞数字
+
+trajectory 取不到文本后，runner 回落 `proc.stdout`。`extract_choice()` 再扫描整段文字，拿
+第一枚 0 到 9 的数字。终端输出里本就有：
+
+- 文件行号；
+- “读取 N 行”；
+- 搜索命中数；
+- Token 与请求数；
+- 秒数与进度统计。
+
+故模型最后明明答 `4`，账上也可能记成 `0` 或 `1`。
+
+对现存 248 个 B session 逐一读最后 `model.output.completed`：
+
+```text
+末答为单个数字             238
+与 e2_per_question_B_r1 不同   9
+其中本来答对却记错             8
+末答“不知道”                  9
+末答为空                       1
+```
+
+那 9 次“不知道”里，旧 runner 仍可能从终端杂字捞出合法选项；空答同理。A 态也走同一只
+parser。眼下只剩 40 个 A trajectory，可见 5 个 recorded choice 与真实末答不符；其余旧 A
+原始会话已被后续跑批覆盖，无法完整追算。
+
+结论：`paired_r1.md` 的准确率、B-A、只 A/B 对、幻觉率和 bootstrap 区间全部失效。
+
+### 3.3 答题 Agent 没有工具白名单
+
+one-shot 启动时挂着生产工具。现存 B 账中：
+
+```text
+有 search 行为的 session            12
+search 越到 D:/lubancode/eval/locomo  5
+```
+
+其中一题按完整题面搜索 `D:/lubancode/eval/locomo`，从单行巨大的 `perturbed.jsonl` 拿到
+整场 session 正文；另有模型继续读 `ledger.json`。虽未发现直接读取 `answers.json` 或
+`answer_index`，整场 haystack 已绕开 top-3 与 8 KiB 注入预算。
+
+B 态还会搜索、读取整座 `memory/facts`。这测到的是：
+
+```text
+生产召回注入 + 文件路径暴露 + Agent 自助搜索整库
+```
+
+不是纯粹的生产召回包效果。
+
+### 3.4 数据和源码对答题进程可见
+
+workspace 虽放在 `D:/locomo_e2_ws`，答题进程仍以当前用户权限运行。工具可传绝对路径，
+自然能读：
+
+```text
+D:/lubancode/eval/locomo/perturbed.jsonl
+D:/lubancode/eval/locomo/answers.json
+D:/lubancode/eval/locomo/ledger.json
+D:/lubancode/eval/locomo/e2_per_question_*.json
+```
+
+“prompt 没把答案传进去”不等于“Agent 看不见答案文件”。隔离须落在能力与文件边界上，
+不能靠模型自觉。
+
+### 3.5 runner 整份复制真实 config
+
+`build_home()` 当前读取用户 `~/.lubancode/config.json`，整份拷进 `_run/home_X`，只覆盖：
+
+- `active_provider`；
+- memory.enabled；
+- temperature；
+- reasoning effort。
+
+其余 provider、模型设置、实验开关与 inline credential 一并带入。风险有二：
+
+1. 评测不可复现，用户日常配置一变，下一批也跟着变。
+2. 凭据复制到大量临时目录；虽在 gitignore 下，仍可能被打包、备份或误传。
+
+若这些目录曾离机、上传或进入共享压缩包，须按凭据泄露流程轮换；不能只删文件了事。
+
+### 3.6 A/B 没有同批同构建闭合
+
+`paired_r1.md` 的 A 态直接复用上一批五场基线，B 态换新构建重跑。报告认定改动只触 B
+注入路，故 A 无须重跑。
+
+这可作开发期捷径，不能作最终发布账。模型服务会漂，配置会漂，系统 prompt 与工具表也
+可能受构建影响。最终 A/B/C 必须用同一 exe、同一冻结配置、同一时间窗跑完。
+
+### 3.7 失败不进主分母
+
+现报告只配对“两态都有合法 choice 且无 failure”的 qid。A 有 33 笔失败，B 有 1 笔失败，
+失败样本被排出主准确率。
+
+这会把“能否在预算内完成”从产品效果里摘掉。完整任务评测的主口径应按预抽全题集算；
+超时、崩溃、拒答、格式错均记 0。complete-case 配对可留作诊断副表。
+
+## 四、不可破的合同
+
+1. scorer 只读最后一条 `stop_reason=end_turn` 的 `model.output.completed` 文本块。
+2. 主答案必须严格匹配 `^[0-9]$`，并落在选项范围；否则记 invalid，不猜、不捞。
+3. stdout/stderr 只供诊断，永不参与判分。
+4. 答题 Agent 不挂 `search/read_file/shell/context_read` 或任何可读文件、网络、子代理的工具。
+5. B/C 态只通过 `BuildTurnContext()` 返回的召回包看见记忆；不得拿记忆目录路径作提示。
+6. 答题子进程无权读取 dataset、answers、ledger、旧报告、源码仓与其他态 workspace。
+7. A/B/C 只差实验变量；模型、provider、effort、温度、系统 prompt、工具表、题序、预算须同账。
+8. runner 不读真实 config，不复制 inline credential。
+9. QA 与 answer_index 永不进入记忆生成、catalog、召回 query 之外的上下文。
+10. E2-auto 没抽出记忆，就按空库答题；不得拿官方摘要或 session 正文补洞。
+11. 旧报告不删除；加 `INVALIDATED` 标头、原因、审计日期与替代报告链接。
+12. 任何提分必须同时报绝对分、配对差、失败率、置信区间、Token 与样本数。
+
+## 五、判分器重写
+
+### 5.1 唯一事实源
+
+每次 one-shot 完成后，runner 找到新增 session，再解析 `main.jsonl`：
+
+```text
+schema == lubancode.trajectory.event
+schema_version == 2
+kind == model.output.completed
+run_id == 主 run
+turn_id == 当前题 turn
+payload.stop_reason == end_turn
+payload.blocks 中 type=text
+```
+
+取符合条件的最后一条。若出现两条 end_turn，记 `ambiguous_final_output`，不擅自挑一条。
+
+结果账补：
+
+```text
+session_id
+main_jsonl_relpath
+main_jsonl_sha256
+event_id
+run_id
+turn_id
+request_id
+output_id
+raw_final_text
+parsed_choice
+parse_status
+failure_class
+```
+
+### 5.2 严格解析
+
+只接受去掉首尾空白后的单个 ASCII 数字。MC10 固定 0 到 9。
+
+以下全部 invalid：
+
+```text
+答案是 4
+4.
+Option 4
+不知道
+空串
+工具输出后没有最终 end_turn
+```
+
+prompt 可以要求单数字，scorer 不能替模型擦屁股。格式遵从本身也是 Agent 输出质量。
+
+### 5.3 parser 固定集
+
+至少补这些夹具：
+
+- 前十轮 tool result 含数百个数字，最终答 `7`，必须记 7；
+- reasoning/text 中有数字，最终 end_turn 答 `2`，必须记 2；
+- 只有 `model.output.completed`，不得回落 stdout；
+- 无 end_turn、空文本、两条 end_turn、越界数字、中文“不知道”均分型；
+- stdout 写满 Token/行号，trajectory 为空，必须 invalid；
+- v1/v2 trajectory 分开解析，版本不明 fail closed。
+
+## 六、答题沙箱与数据隔离
+
+### 6.1 工具归零
+
+E2 回答多选题不需要工具。评测 harness 给主 Agent 一份空工具表，或给一枚无文件能力的固定
+答题 profile。不得只在 prompt 里说“不要用工具”。
+
+若现有 CLI 没有可靠入口，优先做专用 eval harness，经同一套 prompt assembly、provider、
+trajectory 与 memory injection 入口发请求；不要给生产 CLI 添一枚长期隐蔽后门。若最终须加
+CLI 参数，名字、帮助、审计事件与 Release 可见性另过评审。
+
+启动前落 `visible_tools=[]`。模型请求 trace 若出现任何 tool definition 或 tool call，本题记
+`environment_violation`，整批 fail closed。
+
+### 6.2 文件边界
+
+把四类目录分开：
+
+```text
+controller/      runner 与 scorer；持有答案
+dataset-public/  当前题题面与选项；子进程无需目录，只收 stdin/argv
+workspace-A/B/C  仅项目身份与各态 memory
+artifacts/       trajectory、逐题账与 manifest
+```
+
+答题子进程环境不传 controller/dataset/artifacts 路径。Windows 侧若仍以同一 OS 用户运行，
+真正安全边界靠“无文件工具”；目录分离用来防误接与审计，不冒充 ACL 沙箱。
+
+### 6.3 配置白名单
+
+新增 eval config builder，只写：
+
+```text
+active_provider
+目标 provider 的 name/base_url/wire/model/context_window/max_output_tokens
+key_env
+temperature
+reasoning effort
+memory.enabled/use/learn
+trajectory.enabled
+language
+```
+
+禁止复制：
+
+- `api_key`；
+- 其他 provider；
+- 用户 SOUL、skills、plugins、MCP；
+- 用户 prompt 覆盖；
+- 与实验无关的 feature flag。
+
+密钥仅由父进程环境传入 provider 指定 `key_env`。manifest 只写环境变量名与
+`credential_present=true/false`，不写值、不写 hash。
+
+### 6.4 网络
+
+答题模型 API 是唯一许可网络出口。MCP、browser、web、远端 shell 与插件服务全部关闭。
+若宿主目前不能按目标限制出口，至少确保模型看不见相关工具，并把“网络未做进程级封锁”写进
+边界说明。
+
+## 七、三态评测
+
+### 7.1 A：memory off
+
+```text
+memory.enabled = false
+预抽题集全跑
+不预灌 topic
+```
+
+A 测同模型在题目和选项上的裸底。不得让 A workspace 留着 B/C 的 memory 文件，免模型或
+未来代码误读。
+
+### 7.2 B：oracle 预灌读路上限
+
+```text
+memory.enabled = true
+memory.use = true
+每个 session 一条 topic
+summary = LoCoMo 官方 session summary
+content = 扰动后 session 正文
+```
+
+B 可继续走 `EnqueueSave -> worker -> BuildTurnContext`。报告标题必须带 `oracle-ingest`。
+它回答的是：
+
+> 假定记忆已经按 session 完整保存，LubanCode 的生产召回和注入能带来多少帮助或伤害？
+
+它不回答自动写入能力。
+
+### 7.3 C：production-auto 写读闭环
+
+C 不读取官方 summary，不调用评测 fallback，不构造 `user_initiated=true` 假事实。
+
+逐 session 按冻结适配协议送进与交互回合一致的 history，再调用生产回合尾入口：
+
+```text
+BuildTurnTranscript
+ClassifyTaskType
+BuildExtractionSystemPrompt
+MemoryExtract cheap route
+候选证据闸
+review/auto 分流
+EnqueueSave
+worker
+BuildTurnContext
+答题
+```
+
+首版设 `learn=auto`，只让生产 auto 规则决定落库。没有候选就是 0 条，照实记。
+
+LoCoMo session 是两人聊天，不是天然的 user/assistant turn。C 必须冻结适配法，例如“每个
+session 作为一条带来源标记的用户提供 transcript”；A/B/C 全报告都写明这层外部有效性限制。
+不得悄悄把每句轮番伪装成真实用户对 LubanCode 的指令。
+
+C 回答的是：
+
+> 按冻结的 transcript 适配法，LubanCode 现行自动抽取究竟会保存多少、召回多少、答对多少？
+
+### 7.4 可选 D：人工显式保存
+
+若要测 `/memory remember` 或明确 `memory_save`，另列 D。D 只验证显式写入可靠性，不和
+C 混算“自动记忆”。
+
+## 八、E1 口径修正
+
+同一份 trace 同时报四层：
+
+```text
+all_questions                     1986
+evidence_localizable               498
+ranked_recall@1/3/5                 排序诊断
+eligible_recall@1/3                 过门槛后的候选
+injected_evidence_recall@1/3        真正进入 prompt
+zero_recall / below / budget_drop   丢失原因
+```
+
+R@5 明标 `ranking_only`。生产 `max_results=3` 时，不得把 R@5 写成召回给模型的事实。
+
+evidence 定位再补两档：
+
+- exact：答案文本精确命中；
+- annotated：人工或冻结规则标注的推理证据 session。
+
+主报告不可只报 exact 498 题后写“全量”。其余 1488 题须列为 unlocalized，不是自动忽略。
+
+## 九、摘要实验改名与拆账
+
+保留两种实验，文件名和报告标题分开：
+
+### 9.1 `summary_retrievability`
+
+允许固定映射：summary 派生 title、原 session 作 content。它只是检验 summary 的词面成色。
+报告必须写 `synthetic_projection=true`，并报 from_candidate/from_summary/fallback。
+
+### 9.2 `production_memory_generation`
+
+只接受生产 candidate 与生产 auto/review 规则。candidate 为空就不落库。不得拿 summary
+补成 fact。
+
+两者不共用一个“抽取提分”标题。
+
+## 十、主统计口径
+
+### 10.1 主表：intention-to-treat
+
+预先冻结 qid 后，全数进分母：
+
+```text
+correct choice       1
+wrong choice         0
+timeout              0
+provider failure     0
+invalid format       0
+refusal/不知道       0（另报 abstention）
+environment violation 整批无效，不当普通 0
+```
+
+逐题按 A/B/C 配对。主表报：
+
+- accuracy；
+- B-A、C-A、C-B；
+- paired bootstrap 95% CI；
+- 只左态对、只右态对；
+- failure/invalid/abstention；
+- adversarial 实选项率；
+- input/output/cache/请求数/墙钟。
+
+### 10.2 副表：complete-case
+
+只把各态都产合法选项的题放进来，用于诊断模型能力。标题明写 secondary，不能盖过主表。
+
+### 10.3 运行顺序
+
+按 qid 分块随机交错 A/B/C，种子冻结。不要先跑完 A 数小时，再过一天跑 B。provider 漂移、
+限流和时间段负载会因此偏到某一态。
+
+同一题各态不可共享模型上下文、prompt cache key 或 session。顺序账写进 manifest。
+
+## 十一、证据与 manifest
+
+每次 run 建只读 manifest：
+
+```text
+run_id
+started_at / finished_at
+git_commit / dirty_paths
+exe_path / exe_sha256 / version
+dataset_sha256 / answers_sha256 / ledger_sha256
+question_ids / sampling_seed / order_seed
+provider / model / wire / effort / temperature
+sanitized_config_sha256
+system_prompt_sha256 / memory_prompt_sha256
+visible_tools
+memory options
+timeout / retry policy
+runner_sha256 / scorer_sha256
+per-mode trajectory directory and hash list
+```
+
+逐题账必须指向对应 `session_id/event_id`。报告生成器先验 manifest 与文件 hash；缺一项便标
+`UNVERIFIED`，不得悄悄继续。
+
+原始 trajectory 与逐题账要么一并保留，要么一并宣布不可复算。不能像眼下这样，报告在，A
+原始 session 已被后续 `build_home()` 清掉。
+
+## 十二、旧报告处置
+
+这些文件页首加统一失效框：
+
+- `eval/locomo/report.md`
+- `eval/locomo/report_*.md`
+- `eval/locomo/paired_five.md`
+- `eval/locomo/paired_r1.md`
+- `eval/locomo/paired_t1.md`
+- `eval/locomo/paired_t2.md`
+
+文案须写：
+
+```text
+INVALIDATED 2026-09-05
+原因：trajectory event 名读取错误，stdout 数字误判；答题工具未隔离，存在评测目录越界读取。
+用途：仅保留历史开发记录，不得引用其中准确率、增益、幻觉率或置信区间。
+替代：待本单重跑报告。
+```
+
+E1 的 `retrieval_baseline.md`、`retrieval_improved.md` 与 `summary_quality.md` 不作废，但须补
+scope banner：组件评测、oracle/synthetic ingestion、localizable 分母、R@5 ranking-only。
+
+README、CHANGELOG、commit message 无法改写；仓库内若有正文引用旧 E2 数字，另加勘误链接。
+
+## 十三、实施批次
+
+### P0：冻结旧结论与凭据排查
+
+- [ ] 给全部旧 E2 报告加 INVALIDATED 标头。
+- [ ] 全仓搜旧 `+0.279`、`0.739`、幻觉 `0.180` 等引用，逐处加勘误。
+- [ ] 清点 `_run/home_*`、外部复跑目录与压缩包是否含复制的 inline credential。
+- [ ] 若含凭据的产物曾离机或共享，轮换对应密钥并留安全事件账。
+- [ ] 停止继续用旧 runner 烧模型。
+
+验收：没人再能从仓库正文误读旧 E2 为有效成绩；凭据去向有清单。
+
+### P1：parser 与 scorer
+
+- [ ] 改读 `model.output.completed`，钉 schema/run/turn/end_turn。
+- [ ] 删除 stdout 判分 fallback。
+- [ ] 严格单数字解析，invalid/abstention/failure 分开。
+- [ ] 逐题账补 trajectory 路径、hash 与 event id。
+- [ ] 用现存错例做回归夹具，覆盖 9 个 B mismatch 与“不知道”样本形状。
+
+验收：工具输出再多数字，也改不了最后 end_turn 的选项；无合法末答必为 invalid。
+
+### P2：评测环境封口
+
+- [ ] 建无工具答题 profile/harness，request 中 `tools=[]`。
+- [ ] 给 tool definition/call 加环境违例检测，发现即整批停。
+- [ ] 分开 controller、workspace、artifact 与 dataset 路径。
+- [ ] 从白名单生成 eval config，不复制真实 config、SOUL、skill、plugin、MCP。
+- [ ] 密钥只读环境变量；扫描产物确认无 key/token/cookie。
+
+验收：故意诱导模型搜索 `answers.json` 时，它没有工具可用；产物秘密扫描为零。
+
+### P3：E1 与摘要报告正名
+
+- [ ] E1 增报 ranked/eligible/injected 三层 Recall。
+- [ ] 首页显报 498/1986 localizable coverage。
+- [ ] R@5 标 ranking-only。
+- [ ] 摘要实验拆 `synthetic_projection` 与 `production_generation`。
+- [ ] canonical usage 从 manifest 汇总，拒绝根目录旧残片冒充整批账。
+
+验收：读者只看标题和首屏，也不会把组件指标认成端到端成绩。
+
+### P4：三态 smoke
+
+- [ ] 冻结 2 场、每类 2 题，共约 20 题的 A/B/C smoke。
+- [ ] A 不建库；B oracle 预灌；C 只走生产自动抽取。
+- [ ] 三态随机交错，同 exe、同配置、同 provider、同时间窗。
+- [ ] 人工抽验 prompt、visible tools、memory injection、末答事件与 scorer。
+- [ ] 故意放一题诱导文件搜索，确认无法越界。
+
+验收：20 题逐题证据全能点回 trajectory；任何一题无法点回，禁止放量。
+
+### P5：五场正式重跑
+
+- [ ] 预注册 qid、seed、主指标、超时与重试政策。
+- [ ] 同批跑 A/B/C，不复用旧 A。
+- [ ] 主表按全题 ITT；complete-case 只作副表。
+- [ ] 跑 bootstrap 区间、逐场异质、五类分桶与成本账。
+- [ ] 单列 C 的生成覆盖率：session 数、抽取调用、candidate、auto save、最终 topic。
+
+验收：新报告能同时回答“读路上限如何”“真实自动写路如何”“花了多少钱”。
+
+### P6：全量与发布裁决
+
+- [ ] 先看五场置信区间和异质性，再决定是否跑十场/1986 题。
+- [ ] 复跑至少一遍不同 order seed，查顺序与 provider 漂移。
+- [ ] 由独立脚本从 frozen artifacts 重生报告，diff 应为零。
+- [ ] 更新架构文档、评测手册与 CHANGELOG 勘误。
+- [ ] 对外只引用新 manifest 对应的 commit/exe/hash。
+
+验收：一条公开数字能顺藤摸到题集、配置、exe、末答事件和计分公式。
+
+## 十四、预计改动边界
+
+预计修改：
+
+- `scripts/eval_locomo_runner.py`
+- `scripts/eval_locomo_paired_report.py`
+- `scripts/eval_locomo_retrieval_report.py`
+- `tests/manual/locomo_retrieval_driver.cpp`
+- `tests/unit/trajectory/` 或新增 `tests/eval/` parser 固定集
+- `eval/locomo/*.md` 的失效/边界声明
+- `.gitignore`（只在新 artifact 目录需要时改）
+- `docs/` 下评测口径与复算说明
+
+可能新增：
+
+- `scripts/eval_locomo_manifest.py`
+- `scripts/eval_locomo_score.py`
+- `tests/fixtures/locomo_eval/trajectory/`
+- `eval/locomo/runs/<run-id>/manifest.json`（正文、答案与秘密仍不进 Git）
+- 专用无工具 eval harness（位置经实现审计后定）
+
+不得顺手修改：
+
+- `ProjectMemory` 排序权重；
+- memory prompt 与护栏文案；
+- provider 模型参数；
+- LoCoMo 题目、答案或选项；
+- timeout 以外的 Agent loop 行为。
+
+这些若与重跑一同变化，A/B/C 又会失去单变量。
+
+## 十五、不采用的路
+
+### 15.1 只把 9 个 B choice 手工改对
+
+不采用。A 也受 parser 影响，原始 A trajectory 又不全；工具越界与预灌口径仍没解决。
+
+### 15.2 从 raw_tail 最后一行重新猜答案
+
+不采用。raw_tail 混着 UI、Token 和工具输出，不是事实源。只认 typed trajectory event。
+
+### 15.3 留着工具，只在 prompt 里命令“不要搜索”
+
+不采用。评测隔离是宿主责任，不是模型品德测试。
+
+### 15.4 把 oracle 预灌 B 改名“自动记忆”
+
+不采用。B 是读路上限，C 才是自动写读闭环。
+
+### 15.5 C 没记住时用 summary 兜底
+
+不采用。没记住就是产品结果。兜底会把最该暴露的写入失败藏掉。
+
+### 15.6 失败题不进分母
+
+不采用作主口径。用户等到超时、拿到空答，本就是失败；不能从成功率里摘走。
+
+### 15.7 重跑时顺手继续调护栏
+
+不采用。先重建可信基线，再另起实验。边跑边调会把 test set 变开发集。
+
+## 十六、最终验收门
+
+- [ ] 旧 E2 报告全有失效声明，仓库引用全有勘误。
+- [ ] scorer 只认 schema v2 `model.output.completed` 的最终 end_turn。
+- [ ] stdout、工具输出、Token 行与文件行号不能影响 choice。
+- [ ] A/B/C 答题请求的 visible tools 均为空。
+- [ ] 子进程无法借 LubanCode 工具读取题库、答案、ledger、源码或整座 memory 目录。
+- [ ] eval config 不含 inline credential，不依赖用户日常配置。
+- [ ] A/B/C 同一构建、同一冻结配置、同一时间窗随机交错完成。
+- [ ] 主指标按预抽全题 ITT，失败与 invalid 不被移出分母。
+- [ ] B 报 `oracle-ingest`，C 报 `production-auto`，两者绝不混名。
+- [ ] C 不使用官方 summary、不强制 summary 落 fact、不传 `user_initiated=true` 伪装自动写入。
+- [ ] E1 显报 localizable coverage，并拆 ranked/eligible/injected Recall。
+- [ ] 每题可追到 session、event、trajectory hash；每批可追到 exe、commit、配置与数据 hash。
+- [ ] 独立复算脚本从冻结 artifact 重生报告，结果逐字一致。
+- [ ] focused parser/eval tests、Release 全量 ctest 与最小真模型 smoke 全绿。
+- [ ] 对外文案不再出现无 scope 的“LoCoMo 提分”四字。
