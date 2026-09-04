@@ -8,7 +8,8 @@
 //      才进得去;job 落用户层目录。
 //   3. 没有用户命令就永不新增全局主题(验收线:两条非命令路全拒)。
 //   4. 管理读口:list global 不看召回授权(user_enabled 关着也列得出)。
-//   5. CheckGlobalMemoryHealth:旧 projects/ 遗留被点名,failed job 有账。
+//   5. CheckGlobalMemoryHealth:failed job 有账,目录未建有数;旧 projects/
+//      遗留随迁移器退场(a069d06e)不再点名。
 
 #include <doctest/doctest.h>
 
@@ -167,10 +168,13 @@ TEST_CASE("P0-4: 管理读口 list global 不看召回授权") {
     REQUIRE(topic.has_value());
 }
 
-TEST_CASE("P0-4: CheckGlobalMemoryHealth 点名旧 projects/ 与 failed job") {
+TEST_CASE("P0-4: CheckGlobalMemoryHealth 报 failed job 积压,不再点名旧 projects/") {
     const fs::path root = TempRoot("health");
     const fs::path home = root / "home";
     fs::create_directories(home);
+    // 迁移器整件退场(a069d06e,无老用户):旧 projects/ 树没有挪移路,健康自检
+    // 随之不再点名;指旧树的存量 job 由 worker 拒办挪 failed,那笔账走下面的
+    // 失败积压。
     Write(home / "projects" / "old-key" / "memory" / "facts" / "x.md", "legacy\n");
     Write(home / "memory-jobs" / "failed" / "17000-1.json", "{\"schema\":1}\n");
     Write(home / "memory-jobs" / "failed" / "17000-1.json.error.txt", "memory.job_failed: x\n");
@@ -178,7 +182,7 @@ TEST_CASE("P0-4: CheckGlobalMemoryHealth 点名旧 projects/ 与 failed job") {
     const auto lines = memory::CheckGlobalMemoryHealth(home);
     std::string joined;
     for (const std::string& line : lines) joined += line + "\n";
-    CHECK(joined.find("projects/") != std::string::npos);
+    CHECK(joined.find("projects/") == std::string::npos);  // 迁移器退场,旧树诊断随之退役
     CHECK(joined.find("失败积压 1") != std::string::npos);
     CHECK(joined.find("尚未创建") != std::string::npos);  // user 目录还没建
 }
