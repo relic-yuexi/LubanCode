@@ -199,7 +199,10 @@ bool FoldEvent(const EventEnvelope& envelope, ReplayState* state, FoldIndex* ind
         case EventKind::MemorySaveRequested:
         case EventKind::MemorySaveCommitted:
         case EventKind::MemorySaveFailed:
-            // Memory 写入因果边:纯账目,不参与会话投影。
+        case EventKind::MemoryExtractionAssessed:
+        case EventKind::MemoryWriteReceipted:
+            // Memory 写入因果边与调度账(记忆写入调度单 P0):纯账目,
+            // 不参与会话投影。
             return true;
         case EventKind::ModelRequestPrepared: {
             ReplayRequestStep step;

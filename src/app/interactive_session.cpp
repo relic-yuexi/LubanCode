@@ -797,6 +797,12 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         // (普通 turn = normal 档);compact/抽取的后台采样在各自路径另记,
         // 不混进这里。
         trace_turn_id = session_runtime_.ids().NextTurnId();
+        // 记忆写入调度单 P0(§6.1):本轮写入账开张——用户正文统计与
+        // 回合号先落,写路回执与抽取调度随后进来。纯观测。
+        memory_turns_.BeginTurn(
+            session_runtime_.trajectory() != nullptr ? session_runtime_.trajectory()->session_id()
+                                                     : std::string(),
+            trace_turn_id, content);
         // 用户轮次登记(问题 5):turn_id 配一句人话标签(输入首行截断),
         // /context 的逐请求缓存表按它分组显示。只登记真实用户输入——
         // slash 命令在这层之上已分流,不会走到这。
@@ -869,6 +875,10 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         };
     }
     const lubancode::app::RunTurnResult turn_result = RunTurn(std::move(turn));
+    // 记忆写入调度单 P0(§10.3):前台尾延迟的起点——回合收尾(RunTurn
+    // 返回)到抽取返回的墙钟,量完在抽取调用后交给账本。
+    const auto memory_tail_started =
+        is_user_turn ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     if (is_user_turn) {
         // 轮次视图存档封顶(最近 N 轮,重铺够用;不无界攒)。
         if (turn_views_.size() > kMaxArchivedTurnViews) {
@@ -902,6 +912,11 @@ void TerminalSessionController::RunSessionTurn(lubancode::runtime::TurnIngress i
         // 前:首问建档当场起本地标题,精炼异步跑,轮末这条路不碰标题。)
         // 回合收尾总结与候选抽取(learn off 时是空操作)。
         lubancode::app::ExtractTurnMemory(MakeTailContext(), content, history_before);
+        // 记忆写入调度单 P0:回合账落袋(前台尾延迟 + 决策/Token/漏斗;
+        // trajectory 在场时落 memory.extraction.assessed)。
+        memory_turns_.FinishTurn(std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     std::chrono::steady_clock::now() - memory_tail_started)
+                                     .count());
     }
     // 排队账快照落档(路径二):轮内可能进过队/边界注入送走过,趁收尾把
     // 最新一份快照追进存档,/exit 或崩掉后 resume 接得回来。

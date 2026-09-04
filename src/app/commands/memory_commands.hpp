@@ -19,6 +19,7 @@
 #include "agent/agent.hpp"        // Agent(批四自立门户)
 #include "agent/artifact_store.hpp"  // ArtifactRef/ContextArtifactStore(按需摘要)
 #include "agent/model_router.hpp"  // TaskKind/ModelRole
+#include "app/memory_extract.hpp"  // MemoryTurnLedger(P0 调度账)
 
 namespace lubancode::memory {
 class ProjectMemory;
@@ -68,6 +69,9 @@ struct SessionTailContext {
     // 渠道名(与主 turn 桥同源)。
     lubancode::runtime::TrajectorySessionLedger* trajectory = nullptr;
     std::string trajectory_wire;
+    // 记忆写入调度单 P0:回合级调度账(漏斗/Token/尾延迟 + 写路回执)。
+    // 空 = 没开账(单测),抽取一切照旧。
+    lubancode::app::MemoryTurnLedger* memory_turns = nullptr;
 };
 
 // 回合收尾抽取:只看本轮增量,借 cheap 路由产严格 JSON;候选进待审区

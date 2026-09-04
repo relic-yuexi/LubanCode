@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <memory>
 #include <sstream>
 #include <utility>
@@ -376,7 +377,8 @@ void HandleMemoryCommand(const MemoryCommandContext& ctx, const std::string& raw
             TermOut() << tr("cmd.memory.global.cancelled") << "\n";
             return;
         }
-        const auto queued = project_memory->EnqueueSave(request, /*user_initiated=*/true);
+        const auto queued = project_memory->EnqueueSave(request, /*user_initiated=*/true,
+                                                        lubancode::memory::MemoryWriteSource::ExplicitCommandSave);
         TermOut() << (queued.has_value() ? trf("cmd.memory.queued", *queued)
                                          : trf("cmd.memory.queue_failed", queued.error()))
                   << "\n";
@@ -512,10 +514,24 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     lubancode::memory::ProjectMemory* project_memory = ctx.project_memory;
     const lubancode::cli::Theme& theme = *ctx.theme;
     lubancode::app::ModelRouterService& model_router = *ctx.model_router;
-    if (project_memory == nullptr || !project_memory->generate_enabled()) return;
+    lubancode::app::MemoryTurnLedger* memory_turns = ctx.memory_turns;
+    // 记忆写入调度单 P0:前置门的每个早退都记一笔稳定 reason(§10.1 漏斗
+    // 的 skipped_* 分子);纯观测,控制流一字不动。
+    if (project_memory == nullptr || !project_memory->generate_enabled()) {
+        if (memory_turns != nullptr) {
+            memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::Disabled);
+        }
+        return;
+    }
 
     const auto& history = ctx.agent->History();
-    if (history_before >= history.size()) return;
+    if (history_before >= history.size()) {
+        if (memory_turns != nullptr) {
+            memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::NoNewHistory);
+        }
+        return;
+    }
+    if (memory_turns != nullptr) memory_turns->NoteHistoryGrew();
     std::vector<api::Message> slice(history.begin() + static_cast<std::ptrdiff_t>(history_before),
                                     history.end());
 
@@ -529,11 +545,22 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
         }
     }
     const std::string turn_transcript = BuildTurnTranscript(slice, 24 * 1024);
-    if (turn_transcript.empty()) return;
+    if (turn_transcript.empty()) {
+        if (memory_turns != nullptr) {
+            memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::EmptyTranscript);
+        }
+        return;
+    }
 
     const std::string task_type = ClassifyTaskType(user_text, tool_names);
     const std::string system_prompt = BuildExtractionSystemPrompt(*ctx.prompts_dir, task_type);
-    if (system_prompt.empty()) return;
+    if (system_prompt.empty()) {
+        if (memory_turns != nullptr) {
+            memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::PromptMissing);
+        }
+        return;
+    }
+    if (memory_turns != nullptr) memory_turns->NoteExtractionCalled();
 
     // 抽取走 cheap 角色(模型分工第一期):低风险后台小活,配了 cheap_model
     // 用便宜的,没配回落 normal(与 main 同模型,行为与从前一致)。状态栏
@@ -566,8 +593,13 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
         sample_options.boundary_recorder = extract_recorder.get();
         sample_options.purpose = lubancode::accounting::RequestPurpose::MemoryExtract;
     }
+    // 记忆写入调度单 P0(§10.3):抽取墙钟——发起到采样返回的墙钟。
+    const auto extract_started = std::chrono::steady_clock::now();
     const auto sampled =
         model_router.Sample(lubancode::agent::TaskKind::MemoryExtract, sample_call, sample_options);
+    const std::int64_t extract_wall_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                             std::chrono::steady_clock::now() - extract_started)
+                                             .count();
     std::expected<MemoryExtraction, std::string> extraction;
     if (sampled.backend == nullptr) {
         // 路由落空:旧口径也记一笔零账(calls=1,零 token,"未报告"),不吞。
@@ -579,6 +611,18 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     }
     if (!extraction.has_value()) {
         TermOut() << theme.stats << trf("memory.extract.failed", extraction.error()) << theme.reset << "\n";
+        if (memory_turns != nullptr) {
+            lubancode::app::MemoryTurnLedger::ExtractOutcome outcome;
+            outcome.ok = false;
+            outcome.usage_reported = sampled.result.usage_reported;
+            outcome.input_tokens = sampled.result.usage.input_tokens;
+            outcome.output_tokens = sampled.result.usage.output_tokens;
+            outcome.cached_tokens = sampled.result.usage.cache_read_tokens +
+                                    sampled.result.usage.cache_creation_tokens;
+            outcome.extract_wall_ms = extract_wall_ms;
+            outcome.error_code = StableExtractErrorCode(extraction.error());
+            memory_turns->NoteExtractionOutcome(outcome);
+        }
         return;
     }
 
@@ -625,7 +669,9 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
             request.keywords = candidate.keywords;
             request.paths = candidate.paths;
             request.occurred_at = candidate.occurred_at;
-            if (project_memory->EnqueueSave(request).has_value()) {
+            if (project_memory->EnqueueSave(request, /*user_initiated=*/false,
+                                            lubancode::memory::MemoryWriteSource::AutoExtraction)
+                    .has_value()) {
                 ++written;
                 continue;
             }
@@ -636,6 +682,21 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     }
     if (queued + written > 0) {
         TermOut() << theme.stats << trf("memory.extract.done", queued, written) << theme.reset << "\n";
+    }
+    // 记忆写入调度单 P0(§10.2/§10.3):收口账——候选/直写计数与 Token。
+    // provider 没报 usage 时 token 三项整组缺席,不拿 0 顶上。
+    if (memory_turns != nullptr) {
+        lubancode::app::MemoryTurnLedger::ExtractOutcome outcome;
+        outcome.ok = true;
+        outcome.usage_reported = sampled.result.usage_reported;
+        outcome.input_tokens = sampled.result.usage.input_tokens;
+        outcome.output_tokens = sampled.result.usage.output_tokens;
+        outcome.cached_tokens =
+            sampled.result.usage.cache_read_tokens + sampled.result.usage.cache_creation_tokens;
+        outcome.extract_wall_ms = extract_wall_ms;
+        outcome.review_candidates = queued;
+        outcome.auto_written = written;
+        memory_turns->NoteExtractionOutcome(outcome);
     }
 }
 

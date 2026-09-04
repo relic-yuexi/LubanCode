@@ -101,7 +101,7 @@ constexpr std::array<std::pair<Durability, const char*>, 3> kDurabilityNames{{
 // 顺序与 EventKind 枚举声明一致,两处对不上会在启动断言里炸出来。
 // plane 归面照 §4.2:conversation=输入/宿主注入/模型输出/回喂结果;
 // execution=provider 请求与工具执行;evidence=验证与终裁;其余 control。
-constexpr std::array<EventKindInfo, 86> kKindInfos{{
+constexpr std::array<EventKindInfo, 88> kKindInfos{{
     {"run.started", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden, IdNeed::Forbidden, false},
     {"run.environment.captured", Plane::Execution, IdNeed::Optional, IdNeed::Optional, IdNeed::Forbidden,
      false},
@@ -275,10 +275,19 @@ constexpr std::array<EventKindInfo, 86> kKindInfos{{
      IdNeed::Forbidden, false},
     {"workflow.checkpoint.saved", Plane::Control, IdNeed::Forbidden, IdNeed::Forbidden,
      IdNeed::Forbidden, false},
+    // 记忆写入调度单 P0:抽取调度账与写路回执。control 面;envelope 三档
+    // id 全 Optional——assessed 落在主 turn 收口之后(turn 已闭,不能挂
+    // envelope turn_id,对账号进 payload),receipted 在回合内(工具)与
+    // 回合间(slash 命令)都可能出现,统一不挂 envelope id,turn 号进
+    // payload。
+    {"memory.extraction.assessed", Plane::Control, IdNeed::Optional, IdNeed::Optional,
+     IdNeed::Forbidden, false},
+    {"memory.write.receipted", Plane::Control, IdNeed::Optional, IdNeed::Optional,
+     IdNeed::Optional, false},
 }};
 
-static_assert(kKindInfos.size() == 86, "kind 信息表与枚举须同长");
-static_assert(static_cast<std::size_t>(EventKind::WorkflowCheckpointSaved) + 1 == kKindInfos.size(),
+static_assert(kKindInfos.size() == 88, "kind 信息表与枚举须同长");
+static_assert(static_cast<std::size_t>(EventKind::MemoryWriteReceipted) + 1 == kKindInfos.size(),
               "kind 信息表顺序须与枚举声明一致");
 
 }  // namespace

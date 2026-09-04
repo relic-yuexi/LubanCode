@@ -498,6 +498,42 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::WorkflowLoopIterationCompleted, "condition_met", "b", false},
     {EventKind::WorkflowCheckpointSaved, "at_seq", "u", true},
     {EventKind::WorkflowCheckpointSaved, "store_sha256", "s", false},
+    // 记忆写入调度单 P0(§六/§10):每外层用户回合一枚的抽取调度账。
+    // 只认稳定枚举与计数;正文/路径/标题不进这枚事件(§10.3 隐私线)。
+    // usage 三项(§10.3)只在 called 且 provider 真报了 usage 时必填、
+    // 没报时禁现——"没报"不许拿 0 顶上(与 model.usage.recorded 同口径),
+    // 条件硬约束在 ValidatePayloadWithVersion 逐条裁。
+    {EventKind::MemoryExtractionAssessed, "trigger", "s", true},
+    {EventKind::MemoryExtractionAssessed, "turn_id", "s", true},
+    {EventKind::MemoryExtractionAssessed, "decision", "s", true},
+    {EventKind::MemoryExtractionAssessed, "skip_reason", "s", false},
+    // §3.2 MeaningfulTextStats 的 P0 首批:unicode_scalar_count/
+    // cjk_char_count/latin_word_count(u);code_token_count/only_ack/
+    // only_command 由 P1 的门控判定补,P0 不落键。
+    {EventKind::MemoryExtractionAssessed, "user_text_stats", "o", true},
+    {EventKind::MemoryExtractionAssessed, "usage_reported", "b", false},
+    {EventKind::MemoryExtractionAssessed, "input_tokens", "i", false},
+    {EventKind::MemoryExtractionAssessed, "output_tokens", "i", false},
+    // cached_tokens = cache_read + cache_creation(§10.3 单字段口径)。
+    {EventKind::MemoryExtractionAssessed, "cached_tokens", "i", false},
+    {EventKind::MemoryExtractionAssessed, "extract_wall_ms", "i", false},
+    // 前台尾延迟(§10.3):回合收尾到抽取返回的墙钟,每回合必填。
+    {EventKind::MemoryExtractionAssessed, "foreground_tail_ms", "i", true},
+    {EventKind::MemoryExtractionAssessed, "extract_outcome", "s", false},
+    {EventKind::MemoryExtractionAssessed, "error_code", "s", false},
+    {EventKind::MemoryExtractionAssessed, "review_candidates", "u", false},
+    {EventKind::MemoryExtractionAssessed, "auto_written", "u", false},
+    // 记忆写入调度单 P0(§6.2):写路回执。outcome 只有 queued|rejected
+    // ——排队≠落盘,不冒充 committed。job_id 与 error_code 按 outcome
+    // 互斥,条件约束在 ValidatePayloadWithVersion。
+    {EventKind::MemoryWriteReceipted, "source", "s", true},
+    {EventKind::MemoryWriteReceipted, "operation", "s", true},
+    {EventKind::MemoryWriteReceipted, "outcome", "s", true},
+    {EventKind::MemoryWriteReceipted, "job_id", "s", false},
+    {EventKind::MemoryWriteReceipted, "error_code", "s", false},
+    {EventKind::MemoryWriteReceipted, "layer", "s", true},
+    {EventKind::MemoryWriteReceipted, "kind", "s", false},
+    {EventKind::MemoryWriteReceipted, "turn_id", "s", false},
 };
 
 }  // namespace
@@ -511,6 +547,80 @@ std::optional<SchemaError> ValidatePayloadWithVersion(int schema_version, EventK
     if (schema_version < kEnvelopeSchemaVersion || schema_version > kMaxEnvelopeSchemaVersion) {
         return SchemaError{"schema.unsupported_version",
                            "不支持的 schema_version: " + std::to_string(schema_version)};
+    }
+    // 记忆写入调度单 P0:两枚新事件的硬约束(版本无关——新 kind 在 v1/v2
+    // stream 都只按这套裁,不随 usage owner 的版本差异走)。
+    if (kind == EventKind::MemoryExtractionAssessed) {
+        const bool called = payload.at("decision").get<std::string>() == "called";
+        if (called && payload.contains("skip_reason")) {
+            return SchemaError{"schema.payload_forbidden_field",
+                               "decision=called 时不得带 skip_reason"};
+        }
+        if (!called && !payload.contains("skip_reason")) {
+            return SchemaError{"schema.payload_missing_field",
+                               "decision=skipped 时 skip_reason 必填"};
+        }
+        if (!called) {
+            // 没发请求就没有 Token/墙钟/结果可言,一律禁现。
+            static constexpr const char* kCallOnlyFields[] = {"usage_reported",  "input_tokens",
+                                                              "output_tokens",   "cached_tokens",
+                                                              "extract_wall_ms", "extract_outcome",
+                                                              "error_code",      "review_candidates",
+                                                              "auto_written"};
+            for (const char* name : kCallOnlyFields) {
+                if (payload.contains(name)) {
+                    return SchemaError{"schema.payload_forbidden_field",
+                                       std::string("decision=skipped 时不得带调用侧字段: ") + name};
+                }
+            }
+            return std::nullopt;
+        }
+        if (!payload.contains("extract_outcome")) {
+            return SchemaError{"schema.payload_missing_field",
+                               "decision=called 时 extract_outcome 必填(completed|failed)"};
+        }
+        const bool failed = payload.at("extract_outcome").get<std::string>() == "failed";
+        if (failed && !payload.contains("error_code")) {
+            return SchemaError{"schema.payload_missing_field", "抽取失败时 error_code 必填"};
+        }
+        if (!failed && payload.contains("error_code")) {
+            return SchemaError{"schema.payload_forbidden_field", "抽取成功时不得带 error_code"};
+        }
+        // usage 三项与 usage_reported 同进同出;provider 没报不得拿 0 顶上。
+        static constexpr const char* kUsageFields[] = {"usage_reported", "input_tokens",
+                                                       "output_tokens", "cached_tokens"};
+        const bool has_usage = payload.contains("usage_reported");
+        for (const char* name : kUsageFields) {
+            if (has_usage && !payload.contains(name)) {
+                return SchemaError{"schema.payload_missing_field",
+                                   std::string("带 usage 账时字段须齐: ") + name};
+            }
+            if (!has_usage && payload.contains(name)) {
+                return SchemaError{"schema.payload_forbidden_field",
+                                   std::string("provider 没报 usage 时不得拿 token 字段顶上: ") + name};
+            }
+        }
+        if (has_usage && !payload.at("usage_reported").get<bool>()) {
+            return SchemaError{"schema.payload_bad_type",
+                               "usage_reported=false 时不得出现 token 字段(整组缺席)"};
+        }
+        return std::nullopt;
+    }
+    if (kind == EventKind::MemoryWriteReceipted) {
+        const bool queued = payload.at("outcome").get<std::string>() == "queued";
+        if (queued && !payload.contains("job_id")) {
+            return SchemaError{"schema.payload_missing_field", "outcome=queued 时 job_id 必填"};
+        }
+        if (queued && payload.contains("error_code")) {
+            return SchemaError{"schema.payload_forbidden_field", "outcome=queued 时不得带 error_code"};
+        }
+        if (!queued && !payload.contains("error_code")) {
+            return SchemaError{"schema.payload_missing_field", "outcome=rejected 时 error_code 必填"};
+        }
+        if (!queued && payload.contains("job_id")) {
+            return SchemaError{"schema.payload_forbidden_field", "outcome=rejected 时不得带 job_id"};
+        }
+        return std::nullopt;
     }
     if (schema_version == kEnvelopeSchemaVersion) {
         // v1:usage 正文只认 completed.payload.usage(legacy);v2 新事件

@@ -522,6 +522,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
           runtime_options.trajectory_resume_at_launch = options.continue_last;
           return runtime_options;
       }()),
+      // 记忆写入调度单 P0:调度账本绑轨迹场(没开张 = 空,只记内存账)。
+      // 列表序对齐声明序(紧跟 session_runtime_)。
+      memory_turns_(session_runtime_.trajectory()),
       // 列表序对齐声明序(session_runtime_ 先、引用别名后——实际构造序
       // 本就按声明序走,这里只是把列表写反的地方正过来)。
       always_allowed_tools(session_runtime_.always_allowed()),
@@ -939,6 +942,9 @@ TerminalSessionController::TerminalSessionController(const InteractiveSessionOpt
             project_memory->set_accounting(memory_ledger_bridge_.get());
             project_memory->set_source_session(memory_ledger->session_id());
         }
+        // 记忆写入调度单 P0:写路回执收件口挂进调度账本(四路排队成败各
+        // 投一张;纯观测,不影响写路)。
+        project_memory->set_write_receipt_sink(&memory_turns_);
     }
 
     // --continue:等价开场自动 /resume 本目录最近一场;本目录没有存档就
