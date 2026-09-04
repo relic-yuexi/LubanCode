@@ -1,0 +1,15 @@
+# 搜索兜底：rg 缺件时的降级路与诊断
+
+- 状态：待修（2026-09-04 用户真机实录立案）
+- 级别：P1（搜索是模型主力工具，rg 缺一件就全瘫）
+- 现场实录：用户用独立路径的 exe（面试保命拷贝），`search` 报 `search_backend_missing: 随包 ripgrep 缺件: D:\lubancode\build\libexec\rg.exe`——**rg 按"exe 旁 libexec"单一位置找，拷到哪就得跟到哪，缺件即全瘫无兜底**。
+- 病根：rg 发现只有一条路（exe 旁 libexec），缺件直接报错；没有 PATH 兜底、没有用户级安装位兜底（`~/.lubancode/bin` 或 rg-stage）、没有自愈（顺手 stage 一份）。
+- 修法（三层兜底 + 自愈）：
+  1. 发现顺序：exe 旁 libexec → `~/.lubancode/rg-stage/libexec/`（已有的 staging 位）→ 系统 PATH 的 `rg` → 全缺才报错。
+  2. 自愈：exe 旁缺件但 rg-stage 有货时，顺手拷一份到 exe 旁（或直接用 rg-stage 路径，不拷贝），日志一行说明来源。
+  3. 报错升级：全缺时的错误文案带自愈指引（"跑 `lubancode doctor` 修复"或给出 stage 命令），不再裸抛路径。
+  4. `/doctor` 加 rg 健康检查项（当前位置、版本、兜底命中哪层）。
+- 验收：
+  - 单测：三层发现顺序、缺件自愈、全缺报错带指引。
+  - 真机形状：临时目录放裸 exe（无 libexec）跑 search——命中 rg-stage 或 PATH 兜底成功返回；三处全删才报错且文案含修复指引。
+- 不在本单：搜索算法本体、rg 版本升级、远程下载（离线环境不指望网络自愈）。
