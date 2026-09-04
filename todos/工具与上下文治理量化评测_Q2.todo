@@ -45,6 +45,7 @@
 - 曲线图 + 分桶表落 `docs/evaluation/compact_position.md`，数据在 `tests/eval/compact_position/`。
 - 单测 `tests/unit/eval/test_compact_position.cpp` 钉判卷与分桶公式。
 - 若 compact 中段存活率比 FULL 低超过 10 个百分点，**另立单**修提示词/结构——本单只量不修。
+- **进展（2026-09-05，装置 `ebd14e1b`，假后端全链 1200 案）**：判卷器与曲线已立。microcompact 初判（真语义、零模型）：折叠生死由**落段长度一票定**——短/中段 100% 存活、长段（>8192B）0%（段中段换头尾 256B 预览即真丢），与上下文位置无关；**stale 陷阱 18.5%**（旧版值活在短段、新版值被折掉，模型照旧值答即错）——够格另立单治。compact 臂管道全通、命中只来自热区尾部，语义待 luna 真跑（`--real` 已备未接线）。
 
 ### B2 真实对照（主实验）
 
