@@ -20,6 +20,8 @@
 
 要回答三件事：省了多少；关键事实剩多少；**事实丢在哪个位置丢的**。
 
+**实验模型钉死（2026-09-05 工头令）**：provider `ccmoon`、model `gpt-5.6-luna`（ccmoon 名下 luna/terra 两分身，取 luna；FULL/compact 配对与 compact 摘要请求全用这一只，结果账记模型 id 与 provider）。
+
 ### B1 位置探针（首仗——装置最薄、信号最快）
 
 **出处**：Liu et al., *Lost in the Middle: How Language Models Use Long Contexts*（TACL 2024）——多文档问答里把关键事实摆在受控深度，命中率随位置画 U 形（首尾高中段低）。**注意与 B2 主基准 Microsoft Lost in Conversation 是两码事，别混名**：前者借采样法，后者借任务集。
