@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.198] - 2026-09-04
+
+- **workflow 编排账并入轨迹 Journal（P0-6 遗留尾巴收口）。** 此前 workflow 跑动只有 workflow-runs/ 旧路，节点内模型请求/工具调用不进任何 Trajectory Journal。现 run 起动开编排 Journal（`workflow.*` 十二枚事件族：definition/dispatched/checkpoint/completed 全链）、每 node attempt 开独立 stream（P0-C 同款延迟开卷/独占创建/两级 fail closed）、main 账挂真 hash 边。真机 verify 编排账六行齐、父子边逐位对账；loop 重入同 attempt 撞名的暗坑（独占创建炸）以派发序号根治。旧 workflow-runs 照写照读不迁移。379 册两域 40 册全绿，唯一红为既有 drift。
+
 ## [v0.26.197] - 2026-09-04
 
 - **/skill list 四层对齐计数。** 此前右下角"5 skills"、列表只列 2 个——计数数的是全部加载实体（含 `.agents` 层与官方），列表只扫主目录/项目两层。现 `/skill list` 四段分列（项目级→agents 共享→主目录级→官方），头部报"N 个生效另有 M 个被遮蔽"，被遮条目带"被 X 遮蔽"——加载层新枚举口按与 LoadSkills 逐字同序的合并法则摊开五处根，计数口径不动（本就对）。沙盒布四层验证形状全对，4 册新单测钉死。
