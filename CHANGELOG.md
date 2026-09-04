@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.199] - 2026-09-04
+
+- **搜索不再因 rg 缺件全瘫。** 此前 rg 只认 exe 旁 libexec 一处，exe 拷到哪 rg 就得跟到哪，缺一件 `search` 直接报错（用户面试保命拷贝实录撞的坑）。现三层发现：exe 旁 → `~/.lubancode/rg-stage/`（命中直接用不拷贝，日志一行说明来源）→ 系统 PATH（照过版本门，冒牌件不采用）；三处全缺才报错，文案带逐层探查账与修复指引（`fetch_ripgrep.py` 一行命令）。`/doctor search` 新增三层健康检查（位置/版本/命中哪层）。真机裸 exe 三幕验证：rg-stage 命中 131 hits、PATH 命中、全缺 24 场景全报错带指引。
+
 ## [v0.26.198] - 2026-09-04
 
 - **workflow 编排账并入轨迹 Journal（P0-6 遗留尾巴收口）。** 此前 workflow 跑动只有 workflow-runs/ 旧路，节点内模型请求/工具调用不进任何 Trajectory Journal。现 run 起动开编排 Journal（`workflow.*` 十二枚事件族：definition/dispatched/checkpoint/completed 全链）、每 node attempt 开独立 stream（P0-C 同款延迟开卷/独占创建/两级 fail closed）、main 账挂真 hash 边。真机 verify 编排账六行齐、父子边逐位对账；loop 重入同 attempt 撞名的暗坑（独占创建炸）以派发序号根治。旧 workflow-runs 照写照读不迁移。379 册两域 40 册全绿，唯一红为既有 drift。
