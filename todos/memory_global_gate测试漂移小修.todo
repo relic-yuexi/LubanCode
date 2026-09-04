@@ -1,9 +1,0 @@
-# memory_global_gate 测试漂移小修
-
-- 状态：已修（2026-09-04 销单；裁决改测试不补实现，全量 379 册全绿）
-- 级别：P2（测试盯旧账——现行代码没有的路，测试还在断言）
-- 现状：`unit.memory.memory_global_gate` 全量跑红。工头排查：现行 `CheckGlobalMemoryHealth`（src/memory/project_memory.cpp）已没有报 `projects/` 的路，测试还盯着旧账断言。
-- 修法：对齐测试与现行合同——要么删过时断言、要么补回应有的诊断路（以 memory 域现行设计为准裁决，别为绿测试倒贴代码）。
-- 验收：全量 ctest 零回归，此册绿且断言与现行 `CheckGlobalMemoryHealth` 行为一一对应。
-- 裁决（2026-09-04）：改测试，不补实现。a069d06e 整件摘除迁移器（无老用户，旧格式退场收官），`projects/` 诊断本是给 `migrate-storage` 引路的，路没了留诊断即 dangling 建议；指旧树的存量 job 由 `ProcessJob` 拒办挪 failed，那笔账现行健康检查照报（失败积压）。测试旧断言反转为"不点名"，`失败积压 1`/`尚未创建` 两条与现行行为一一对应。
-- 留白（顺手账，未动）：三处残墨只记账不动行为——`project_memory.hpp` 合同注仍提"旧 projects/ 遗留"、`doctor_commands.cpp:1290` 注同病（app 域不越界）、`Workspace统一存储…迁移.todo:536` 是史册不改写。要清另立小单。
