@@ -19,11 +19,13 @@
 #include <thread>
 #include <utility>
 
+#include "hooks/hash.hpp"  // Sha256Hex:编排事实的 input/output 内容寻址
 #include "platform/paths.hpp"
 #include "platform/wall_clock.hpp"
 #include "runtime/budget_gate.hpp"
 #include "runtime/id_authority.hpp"
 #include "runtime/retry_backoff.hpp"
+#include "runtime/trajectory_session.hpp"  // 编排账桥(workflow 会话归属统一单)
 #include "workflow/validator.hpp"
 
 namespace lubancode::workflow {
@@ -310,14 +312,21 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
     if (ctx.nodes_mutex != nullptr) nodes_lock = std::unique_lock<std::mutex>(*ctx.nodes_mutex);
     NodeRunRecord& record = account.nodes[node.id];
     const std::string item_tag = item_index >= 0 ? "-i" + std::to_string(item_index) : std::string();
+    // 派发序号(workflow 会话归属统一单):loop 重入同一 body 节点时 attempt
+    // 恒从 1 起,无序号第二次派发撞名——node stream 独占创建当场失败。
+    // 一次 RunNode = 一次派发,重试 attempt 共享同一序号、以 -aN 区分。
+    const std::string dispatch_tag =
+        ctx.dispatch_seq != nullptr
+            ? "-d" + std::to_string(ctx.dispatch_seq->fetch_add(1) + 1)
+            : std::string();
+    const std::string node_run_id_base = account.run_id + "-" + node.id + item_tag + dispatch_tag;
     const auto emit_node_event = [&](const char* type, nlohmann::json payload) {
         const int event_attempt = payload.value("attempt", (std::max)(1, record.attempt));
         payload["node_id"] = node.id;
         payload["label"] = node.label;
         payload["kind"] = ToString(node.kind);
         payload["attempt"] = event_attempt;
-        payload["node_run_id"] =
-            account.run_id + "-" + node.id + item_tag + "-a" + std::to_string(event_attempt);
+        payload["node_run_id"] = node_run_id_base + "-a" + std::to_string(event_attempt);
         EmitRunEvent(account, type, std::move(payload));
     };
 
@@ -326,6 +335,11 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         record.state = NodeState::Failed;
         record.error_code = "no_executor";
         record.error_message = "节点种类 " + ToString(node.kind) + " 没配执行器";
+        if (ctx.trajectory != nullptr) {
+            (void)ctx.trajectory->RecordNodeFailed(node.id, node_run_id_base + "-a1", 1,
+                                                   record.error_code, record.error_message, 0, 0,
+                                                   std::string());
+        }
         emit_node_event(kEventNodeCompleted,
                         nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
         return "error";
@@ -335,6 +349,9 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
     record.state = NodeState::Ready;
     const int max_attempts = node.retry.has_value() ? std::max(1, node.retry->attempts) : 1;
     NodeExecResult result;
+    // 末次 attempt 的 node 账终态 hash(成功/失败收口都引用它;attempt 循环
+    // 外的 CommitOutput 段还要用)。
+    std::string node_terminal_hash;
     for (int attempt = 1; attempt <= max_attempts; ++attempt) {
         record.attempt = attempt;
         // 取消检查:每个 attempt 之前看一眼。
@@ -357,7 +374,7 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
         request.definition = ctx.definition;
         request.node = &node;
         request.run_id = account.run_id;
-        request.node_run_id = account.run_id + "-" + node.id + item_tag + "-a" + std::to_string(attempt);
+        request.node_run_id = node_run_id_base + "-a" + std::to_string(attempt);
         request.attempt = attempt;
         request.store = ctx.store;
         request.cancel = ctx.cancel;
@@ -372,11 +389,56 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                                                    {"code", record.error_code},
                                                    {"error", record.error_message}});
             }
+            if (ctx.trajectory != nullptr) {
+                (void)ctx.trajectory->RecordNodeFailed(node.id, request.node_run_id, attempt,
+                                                       record.error_code, record.error_message, 0,
+                                                       0, std::string());
+            }
             emit_node_event(kEventNodeCompleted,
                             nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
             return "error";
         }
         request.resolved_input = resolved_input->value;
+
+        // 编排账:node attempt 账 + 派发事实(§15.6)。fail closed——开不
+        // 出账的节点不执行,不一边断账一边调度(§3.6)。次序:先开卷再落
+        // 派发——派发事实带 child 引用,子文件在场才不造孤儿边;两步之间
+        // 崩溃时子账按后台派工核(有 parent_run_id、无 parent_call_id),
+        // 账不裂。
+        std::unique_ptr<runtime::TrajectoryWorkflowNodeBridge> node_trajectory;
+        if (ctx.trajectory != nullptr) {
+            auto spawned = ctx.trajectory->SpawnNodeStream(node.id, request.node_run_id, attempt,
+                                                           ToString(node.kind), item_index);
+            if (!spawned.has_value()) {
+                record.state = NodeState::Failed;
+                record.error_code = "trajectory_node_start_failed";
+                record.error_message =
+                    "node 账开张失败[" + spawned.error().stage + "]: " + spawned.error().error_code;
+                (void)ctx.trajectory->RecordNodeFailed(node.id, request.node_run_id, attempt,
+                                                       record.error_code, record.error_message, 0,
+                                                       0, std::string());
+                emit_node_event(kEventNodeCompleted,
+                                nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+                return "error";
+            }
+            node_trajectory = std::move(*spawned);
+            request.trajectory = node_trajectory.get();
+            if (!ctx.trajectory->RecordNodeDispatched(
+                    node.id, request.node_run_id, attempt, ToString(node.kind), item_index,
+                    hooks::Sha256Hex(request.resolved_input.dump()))) {
+                record.state = NodeState::Failed;
+                record.error_code = "trajectory_broken";
+                record.error_message = "编排账写不住派发事实,节点停跑(fail closed)";
+                const std::string broken_hash =
+                    node_trajectory->Finish(false, false, record.error_code);
+                (void)ctx.trajectory->RecordNodeFailed(node.id, request.node_run_id, attempt,
+                                                       record.error_code, record.error_message, 0,
+                                                       0, broken_hash);
+                emit_node_event(kEventNodeCompleted,
+                                nlohmann::json{{"outcome", "error"}, {"code", record.error_code}});
+                return "error";
+            }
+        }
 
         // 到这里，输入已解好、执行器也找着了；此刻才算真正交办。终端据
         // 这条回执告诉用户“中书省已经接到”，不拿预备状态冒充已发送。
@@ -385,6 +447,13 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                                        {"max_attempts", max_attempts},
                                        {"input", request.resolved_input}});
         result = executor.Execute(request);
+        // node attempt 账收口(在账本锁外;bridge 自带锁):终态 hash 回填
+        // 编排事实,verifier 据此逐位对账。
+        if (node_trajectory != nullptr) {
+            node_terminal_hash = node_trajectory->Finish(result.ok, /*cancelled=*/false,
+                                                         result.ok ? std::string()
+                                                                   : result.error_code);
+        }
         if (nodes_lock.owns_lock() == false && ctx.nodes_mutex != nullptr) {
             nodes_lock.lock();
         }
@@ -415,6 +484,12 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                                     nlohmann::json{{"code", result.error_code},
                                                    {"attempt", attempt},
                                                    {"max_attempts", max_attempts}});
+            }
+            // 编排账:重试是编排事实不是终态;本 attempt 的 node 账已自己
+            // 收成 run.failed(新 attempt 新开文件,§3.6)。
+            if (ctx.trajectory != nullptr) {
+                ctx.trajectory->RecordNodeRetrying(node.id, request.node_run_id, attempt,
+                                                   max_attempts, result.error_code);
             }
             emit_node_event(kEventNodeRetrying,
                             nlohmann::json{{"attempt", attempt},
@@ -450,6 +525,11 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                                                {"code", result.error_code},
                                                {"error", result.error_message}});
         }
+        if (ctx.trajectory != nullptr) {
+            (void)ctx.trajectory->RecordNodeFailed(
+                node.id, request.node_run_id, attempt, result.error_code, result.error_message,
+                result.duration_ms, result.tokens_used, node_terminal_hash);
+        }
         emit_node_event(kEventNodeCompleted,
                         nlohmann::json{{"outcome", "error"},
                                        {"code", result.error_code},
@@ -477,6 +557,12 @@ std::string WorkflowRuntime::RunNode(const ExecutionContext& ctx, const Workflow
                                                       {"duration_ms", result.duration_ms}};
             if (!result.agent_name.empty()) completed["agent"] = result.agent_name;
             ctx.journal->Append(kEventNodeCompleted, node.id, record.attempt, completed);
+        }
+        if (ctx.trajectory != nullptr) {
+            (void)ctx.trajectory->RecordNodeCompleted(
+                node.id, node_run_id_base + "-a" + std::to_string(record.attempt), record.attempt,
+                result.empty ? "empty" : "success", result.duration_ms, result.tokens_used,
+                result.agent_name, hooks::Sha256Hex(result.output.dump()), node_terminal_hash);
         }
         nlohmann::json event_payload = nlohmann::json{{"outcome", result.empty ? "empty" : "success"},
                                                       {"duration_ms", result.duration_ms},
@@ -509,6 +595,9 @@ std::string WorkflowRuntime::RunAsync(const ExecutionContext& ctx, const Workflo
                             nlohmann::json{{"kind", "async"}});
         ctx.journal->Append(kEventNodeWaiting, node.id, 1,
                             nlohmann::json{{"kind", "io"}, {"body", node.async_body}});
+    }
+    if (ctx.trajectory != nullptr) {
+        ctx.trajectory->RecordNodeWaiting(node.id, "io", node.async_body);
     }
 
     if (++*ctx.steps > ctx.definition->limits.max_steps) {
@@ -738,6 +827,9 @@ std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const Workflow
             ctx.journal->Append(kEventLoopIterationStarted, node.id, iteration,
                                 nlohmann::json{{"iteration", iteration}});
         }
+        if (ctx.trajectory != nullptr) {
+            ctx.trajectory->RecordLoopIterationStarted(node.id, iteration);
+        }
 
         nlohmann::json outputs = nlohmann::json::object();
         for (const auto& body_id : node.loop_body) {
@@ -815,6 +907,11 @@ std::string WorkflowRuntime::RunLoop(const ExecutionContext& ctx, const Workflow
                                                {"output", output}});
             ctx.journal->SaveCheckpoint(ctx.journal->last_seq(), ctx.store->ToJson());
         }
+        if (ctx.trajectory != nullptr) {
+            ctx.trajectory->RecordLoopIterationCompleted(node.id, iteration, condition_met);
+            (void)ctx.trajectory->RecordCheckpointSaved(
+                hooks::Sha256Hex(ctx.store->ToJson().dump()));
+        }
         if (condition_met && completed >= *min_iterations) {
             record.state = NodeState::Succeeded;
             record.ended_ms = options_.clock ? options_.clock->NowMs() : JournalClock().NowMs();
@@ -850,6 +947,9 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
     if (ctx.journal != nullptr) {
         ctx.journal->Append(kEventBranchStarted, node.id, 0,
                             nlohmann::json{{"branches", node.branches}, {"cap", effective_cap}});
+    }
+    if (ctx.trajectory != nullptr) {
+        ctx.trajectory->RecordBranchStarted(node.id, node.branches, effective_cap);
     }
 
     struct BranchOutcome {
@@ -953,6 +1053,10 @@ std::string WorkflowRuntime::RunParallel(const ExecutionContext& ctx, const Work
                                            {"succeeded", succeeded.load()},
                                            {"failed", failed.load()},
                                            {"unavailable", unavailable}});
+    }
+    if (ctx.trajectory != nullptr) {
+        ctx.trajectory->RecordJoinCompleted(node.id, ToString(node.join), succeeded.load(),
+                                            failed.load(), unavailable);
     }
 
     // join 政策(单子"并行与汇合规矩"五种)。
@@ -1292,6 +1396,11 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
     }
     account.state = RunState::Ready;
 
+    // 定义身份(旧路 journal 与编排账共用一份,两处不各算各的)。
+    const std::string content_hash = ContentHash(definition);
+    const std::string definition_json = BuildNormalizedJson(definition).dump();
+    const std::string cwd_text = lubancode::platform::PathToUtf8(std::filesystem::current_path());
+
     // journal(可选)。
     std::optional<RunJournal> journal;
     if (!options_.runs_root.empty()) {
@@ -1299,9 +1408,9 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
         info.run_id = account.run_id;
         info.workflow_id = definition.id;
         info.workflow_version = definition.version;
-        info.content_hash = ContentHash(definition);
-        info.cwd = lubancode::platform::PathToUtf8(std::filesystem::current_path());
-        info.definition_json = BuildNormalizedJson(definition).dump();
+        info.content_hash = content_hash;
+        info.cwd = cwd_text;
+        info.definition_json = definition_json;
         auto started = RunJournal::Start(options_.runs_root, info, options_.clock.get());
         if (started.has_value()) {
             journal.emplace(std::move(*started));
@@ -1310,15 +1419,51 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
         }
     }
 
+    // 编排账(workflow 会话归属统一单):run 起动经 ReserveWorkflowRun 开
+    // 轨迹 Journal。fail closed——开不出账,run 停在明确失败态,不回退
+    // 旧写口(§3.6"写不住时,workflow 必须停在明确失败态")。
+    std::unique_ptr<runtime::TrajectoryWorkflowRunBridge> trajectory_bridge;
+    if (options_.trajectory_ledger != nullptr) {
+        runtime::TrajectoryWorkflowRunBridge::DefinitionInfo def_info;
+        def_info.workflow_id = definition.id;
+        def_info.workflow_version = definition.version;
+        def_info.content_hash = content_hash;
+        def_info.cwd = cwd_text;
+        def_info.definition_json = definition_json;
+        auto spawned = options_.trajectory_ledger->SpawnWorkflowRun(account.run_id, def_info);
+        if (!spawned.has_value()) {
+            if (journal.has_value()) {
+                journal->Finish(
+                    "failed",
+                    nlohmann::json{{"error_code", "trajectory_start_failed"},
+                                   {"stage", spawned.error().stage}});
+            }
+            account.state = RunState::Failed;
+            account.error_code = "trajectory_start_failed";
+            account.error_message = "编排账开张失败[" + spawned.error().stage + "]: " +
+                                    spawned.error().error_code +
+                                    (spawned.error().detail.empty()
+                                         ? std::string()
+                                         : " (" + spawned.error().detail + ")");
+            account.duration_ms =
+                (options_.clock ? options_.clock->NowMs() : JournalClock().NowMs()) - started_ms;
+            return account;
+        }
+        trajectory_bridge = std::move(*spawned);
+    }
+
     account.state = RunState::Running;
     EmitRunEvent(account, kEventRunStarted, nlohmann::json{{"state", ToString(account.state)}});
 
     int steps = 0;
+    std::atomic<std::uint64_t> dispatch_seq{0};
     ExecutionContext ctx;
     ctx.definition = &definition;
     ctx.account = &account;
     ctx.store = &store;
     ctx.journal = journal.has_value() ? &*journal : nullptr;
+    ctx.trajectory = trajectory_bridge.get();
+    ctx.dispatch_seq = &dispatch_seq;
     ctx.cancel = cancel_token;
     ctx.steps = &steps;
     ctx.started_ms = started_ms;
@@ -1371,6 +1516,10 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
         if (node.kind == NodeKind::Checkpoint) {
             if (journal.has_value()) {
                 journal->SaveCheckpoint(journal->last_seq(), store.ToJson());
+            }
+            if (trajectory_bridge != nullptr) {
+                (void)trajectory_bridge->RecordCheckpointSaved(
+                    hooks::Sha256Hex(store.ToJson().dump()));
             }
             current = NextNodeFor(definition, node.id, "success");
             continue;
@@ -1606,6 +1755,19 @@ WorkflowRunSummary WorkflowRuntime::RunWithStore(const WorkflowDefinition& defin
                         nlohmann::json{{"result", account.result},
                                        {"tokens", account.tokens_used},
                                        {"duration_ms", account.duration_ms}});
+    }
+    if (trajectory_bridge != nullptr) {
+        // 终态 checkpoint 事实 + run terminal(编排账收口;hash 由调用方
+        // 酌情引用,这里至少把账关严)。等待态(waiting_*)不会走到这——
+        // 同步 Run 的出口只有成功/失败/取消/预算尽四态。
+        (void)trajectory_bridge->RecordCheckpointSaved(hooks::Sha256Hex(store.ToJson().dump()));
+        const bool ok = account.state == RunState::Succeeded;
+        const bool cancelled = account.state == RunState::Cancelled;
+        std::string reason;
+        if (!ok && !cancelled) {
+            reason = account.error_code + ": " + account.error_message;
+        }
+        (void)trajectory_bridge->Finish(ok, cancelled, reason);
     }
     return account;
 }

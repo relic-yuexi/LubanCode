@@ -39,6 +39,12 @@
 #include "workflow/journal.hpp"
 #include "workflow/store.hpp"
 
+namespace lubancode::runtime {
+class TrajectorySessionLedger;          // workflow 编排账(workflow 会话归属统一单)
+class TrajectoryWorkflowRunBridge;      // 同上:runtime.hpp 只持指针,实现在 runtime 层
+class TrajectoryWorkflowNodeBridge;     // 同上:node attempt 账,执行器经它落模型/工具事件
+}
+
 namespace lubancode::workflow {
 
 // ---------------------------------------------------------------------------
@@ -83,6 +89,10 @@ struct NodeExecRequest {
     nlohmann::json resolved_input = nlohmann::json::object();  // ResolveInputs 产物
     const Store* store = nullptr;
     const std::atomic<bool>* cancel = nullptr;  // 长活儿须合作检查
+    // node attempt 账(workflow 会话归属统一单):编排账开出的 scoped sink,
+    // agent/llm 节点把模型请求/工具事件落这(ownership 与子代理同款)。
+    // 空 = 没接轨迹(headless 测试),执行器照旧零挂账。
+    lubancode::runtime::TrajectoryWorkflowNodeBridge* trajectory = nullptr;
 };
 
 struct NodeExecResult {
@@ -154,6 +164,10 @@ struct RuntimeOptions {
     // 事件信封 seq 的发号局(批五):空 = 进程级 ProcessIdAuthority。
     // 从前是本文件里一只 static 计数器——发号局规矩"只此一家",收编。
     runtime::IdAuthority* id_authority = nullptr;
+    // 编排账(workflow 会话归属统一单):非空 = run 起动经
+    // ReserveWorkflowRun 开轨迹 Journal、逐 attempt 开 node stream(fail
+    // closed)。空 = 不落轨迹账(旧 workflow-runs/ 路照旧,兼容头less 测试)。
+    lubancode::runtime::TrajectorySessionLedger* trajectory_ledger = nullptr;
 };
 
 // 起跑入参。
@@ -196,6 +210,10 @@ private:
         WorkflowRunSummary* account = nullptr;
         Store* store = nullptr;
         RunJournal* journal = nullptr;
+        // 编排账(workflow 会话归属统一单):null = 本场不落轨迹账。
+        lubancode::runtime::TrajectoryWorkflowRunBridge* trajectory = nullptr;
+        // 派发序号(一场 run 一只,node_run_id 带 -d<N> 防 loop 重入撞名)。
+        std::atomic<std::uint64_t>* dispatch_seq = nullptr;
         const std::atomic<bool>* cancel = nullptr;
         int* steps = nullptr;  // 主图与 loop body 共用同一把 max_steps 尺
         std::int64_t started_ms = 0;  // async 等待也守整场 run 的总时限

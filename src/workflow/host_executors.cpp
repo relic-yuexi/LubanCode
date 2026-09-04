@@ -15,6 +15,7 @@
 #include "agent/tool_trace.hpp"  // kErrPermissionDeclined:旧稳定码的映射锚
 #include "agent/turn_harness.hpp"  // DriveTurn:agent 节点的 turn 推进入口
 #include "platform/wall_clock.hpp"  // trace 与批头事件须共用一枚墙钟
+#include "runtime/trajectory_session.hpp"  // node attempt 账(workflow 会话归属统一单)
 #include "runtime/turn_event_adapter.hpp"
 #include "tools/instruction_scope.hpp"  // 写前作用域闸(AGENTS.md 作用域单 P0)
 #include "tools/path_utils.hpp"         // Utf8ToPath:材料里的 cwd 串转路径
@@ -274,6 +275,23 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
     // ToolExecutor 的 trace 上下文同口径)。控制口(确认/钩子)原样走
     // TurnWiring。
     agent::TurnWiring wiring = options_.callbacks;
+    // node attempt 账(workflow 会话归属统一单):agent 节点的模型边界与
+    // 工具事件落本 attempt 的 node stream(ownership 与子代理同款:声明
+    // 才进、无主拒)。桥接管 boundary/trace/results 三口——父会话 sink 不
+    // 再旁听节点内幕,父子文件只传边界引用(§3.5/§15.6)。没接账
+    //(headless 测试)行为与从前一字不差。
+    runtime::TrajectoryTurnBridge* node_turn = nullptr;
+    if (request.trajectory != nullptr) {
+        node_turn = &request.trajectory->turn_bridge();
+        wiring.boundary_recorder = node_turn;
+        wiring.on_tool_trace = [node_turn](const agent::ToolTraceEvent& event) {
+            node_turn->OnToolTrace(event);
+        };
+        wiring.on_tool_results_committed = [node_turn](const std::string& batch_id,
+                                                       const api::Message& results) {
+            node_turn->OnToolResultsCommitted(batch_id, results);
+        };
+    }
     // ---- 写前作用域闸(AGENTS.md 作用域单 P0,§7.6)-----------------------
     // 每枚 agent 节点执行时自起一份已见指纹账(节点跑完即弃,不与兄弟
     // 节点或主会话共享);Resolver 与主代理/agent 工具同一只。基线按
@@ -412,6 +430,13 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
             return out;
         };
     }
+    // node 账开轮(§3.6:node attempt 的完整轨迹在 node JSONL):宿主编排
+    // 派工,scheduled_host 小 turn;task 正文记作主输入。prepared 记不住
+    // 时 DriveTurn 的模型边界自然停发(§7.4,fail closed)。
+    if (node_turn != nullptr) {
+        node_turn->BeginTurn("turn-1", "scheduled_host");
+        node_turn->RecordInput(task_input);
+    }
     const agent::DriveReport drive =
         agent::DriveTurn(task_agent, wiring, std::move(task_input), std::move(drive_options));
 
@@ -424,6 +449,13 @@ NodeExecResult AgentExecutor::Execute(const NodeExecRequest& request) {
                   : drive.cancelled ? runtime::Outcome::Cancelled
                                     : runtime::Outcome::Succeeded,
                   drive.ok ? std::string() : drive.error);
+    // node 账收轮:与事件流同一分型(agent_tool 路同款——悬空调用由桥自己
+    // 补 cancelled,不冒充执行过)。
+    if (node_turn != nullptr) {
+        const bool turn_ok =
+            drive.ok && !drive.hit_step_limit && !drive.hit_turn_limit && !empty_output;
+        node_turn->EndTurn(turn_ok, drive.cancelled, drive.ok ? std::string() : drive.error);
+    }
     result.tokens_used = tokens;
     if (!drive.ok) {
         result.error_code = "agent_error";
@@ -552,6 +584,19 @@ NodeExecResult LlmExecutor::ExecuteWithPrompt(const NodeExecRequest& request, co
 
     agent::SampleOptions sample_options;
     sample_options.cancel = request.cancel;
+    // node attempt 账(workflow 会话归属统一单):采样边界落本 attempt 的
+    // node stream。宿主派工开 scheduled_host 小 turn,首条 user 消息记作
+    // 主输入;prepared 记不住时 SampleModel 停在请求边界(§7.4,fail
+    // closed)。没接账(headless 测试)采样行为与从前一字不差。
+    runtime::TrajectoryTurnBridge* node_turn = nullptr;
+    if (request.trajectory != nullptr) {
+        node_turn = &request.trajectory->turn_bridge();
+        sample_options.boundary_recorder = node_turn;
+        node_turn->BeginTurn("turn-1", "scheduled_host");
+        if (!sample.messages.empty()) {
+            node_turn->RecordInput(sample.messages.front());
+        }
+    }
     std::string final_text;
     std::function<void()> inflight_restore;
     int round = 1;
@@ -573,6 +618,10 @@ NodeExecResult LlmExecutor::ExecuteWithPrompt(const NodeExecRequest& request, co
                               ? runtime::Outcome::Cancelled
                               : runtime::Outcome::Failed,
                           sampled.error.message);
+            if (node_turn != nullptr) {
+                node_turn->EndTurn(false, sampled.error.kind == api::ErrorKind::Cancelled,
+                                   sampled.error.message);
+            }
             result.error_code =
                 sampled.error.kind == api::ErrorKind::Cancelled ? "cancelled" : "api_error";
             result.error_message = sampled.error.message.substr(0, 500);
@@ -599,10 +648,16 @@ NodeExecResult LlmExecutor::ExecuteWithPrompt(const NodeExecRequest& request, co
 
         if (request.cancel != nullptr && request.cancel->load(std::memory_order_acquire)) {
             if (inflight_restore) inflight_restore();
+            if (node_turn != nullptr) {
+                node_turn->EndTurn(false, true, "用户取消");
+            }
             result.error_code = "cancelled";
             result.error_message = "用户取消";
             return result;
         }
+    }
+    if (node_turn != nullptr) {
+        node_turn->EndTurn(true, false, std::string());
     }
 
     nlohmann::json parsed = nlohmann::json::object();
