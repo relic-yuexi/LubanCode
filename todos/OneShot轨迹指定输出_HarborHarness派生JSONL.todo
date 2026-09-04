@@ -37,16 +37,16 @@ canonical Journal 仍在 LubanCode workspace 下 append + flush，照旧承担�
 
 ## 三、CLI 合同
 
-- [ ] one-shot 新增 `--output <path>`；只在带任务正文的单发模式生效。
-- [ ] 交互模式、`app-server`、session 管理与其他子命令带 `--output` 时明报
+- [x] one-shot 新增 `--output <path>`；只在带任务正文的单发模式生效。
+- [x] 交互模式、`app-server`、session 管理与其他子命令带 `--output` 时明报
   `cli.output_mode_mismatch`，不得把参数悄悄拼进问题正文。
-- [ ] `--output` 缺值、空值、目标是目录、父目录不可建或不可写，均在发模型前
+- [x] `--output` 缺值、空值、目标是目录、父目录不可建或不可写，均在发模型前
   尽早明报；路径按容器内当前工作目录解析相对路径。
-- [ ] stdout 仍只承载现有模型输出，stderr 仍承载诊断；导出文件不混进终端
+- [x] stdout 仍只承载现有模型输出，stderr 仍承载诊断；导出文件不混进终端
   转义、spinner、工具卡排版与 `[tokens]` 人眼摘要。
-- [ ] 用户显式点名目标，允许原子替换该一份文件；临时文件须与目标同目录，
+- [x] 用户显式点名目标，允许原子替换该一份文件；临时文件须与目标同目录，
   flush 成功后 rename，失败不留下冒充成品的半截 JSONL。
-- [ ] 成功时 stderr 打一行稳定、可解析的收据：schema、session_id、绝对输出路径、
+- [x] 成功时 stderr 打一行稳定、可解析的收据：schema、session_id、绝对输出路径、
   record 数与文件 SHA-256。失败返回稳定非零退出码与 error_code，同时打印
   session_id，方便 adapter 回原账补救。
 
@@ -79,14 +79,14 @@ thinking 按现有 trajectory 隐私策略投影：没有授权保存正文时�
 
 ## 五、复用现有 Exporter，不另造第二本历史
 
-- [ ] 从 `FoldStreamReplay` / `BuildSessionTrainingEpisodes` 抽可复用的中立 episode
+- [x] 从 `FoldStreamReplay` / `BuildSessionTrainingEpisodes` 抽可复用的中立 episode
   投影；harness exporter 与 training exporter 共用消息、工具、usage、outcome
   折叠逻辑。
-- [ ] training-v1 的四路筛选、训练授权与正文排除语义不得硬套给评测导出；
+- [x] training-v1 的四路筛选、训练授权与正文排除语义不得硬套给评测导出；
   harness-v1 即便失败或 partial 也要如实产出，靠 outcome 分型。
-- [ ] exporter 只读已封口或可验证前缀。正常 one-shot 路径先 `CloseSession`，再
+- [x] exporter 只读已封口或可验证前缀。正常 one-shot 路径先 `CloseSession`，再
   导出；close 失败或 stream 验链失败时不得产出 clean success。
-- [ ] 不直接复制 `main.jsonl`。内部事件 schema、blob 相对路径和多 stream 布局
+- [x] 不直接复制 `main.jsonl`。内部事件 schema、blob 相对路径和多 stream 布局
   都不该成为 Harbor adapter 的协议。
 
 ## 六、Harbor adapter 接法
@@ -105,26 +105,26 @@ stderr、进程退出码与 SHA-256 一并写回 Harbor `AgentContext`。
 
 ## 七、失败与恢复
 
-- [ ] 模型/API/工具失败但 canonical session 正常封口：仍导出一份 outcome=failed
+- [x] 模型/API/工具失败但 canonical session 正常封口：仍导出一份 outcome=failed
   或 partial 的 JSONL，LubanCode 退出码照原执行结果返回。
-- [ ] 导出自身失败：不得把成功执行冒充完整评测记录；返回导出失败码，stderr
+- [x] 导出自身失败：不得把成功执行冒充完整评测记录；返回导出失败码，stderr
   同时给 session_id 与补导命令。
-- [ ] 进程被 Harbor timeout 强杀：允许没有目标文件；canonical WAL 留下
+- [x] 进程被 Harbor timeout 强杀：允许没有目标文件；canonical WAL 留下
   incomplete，adapter 可在容器销毁前按 session id 补导 verified prefix。
-- [ ] 同一路径重试：只在新成品完整且 hash 已算出后原子替换；旧成品在此之前
+- [x] 同一路径重试：只在新成品完整且 hash 已算出后原子替换；旧成品在此之前
   保持可读。
 
 ## 八、验收
 
-- [ ] CLI 单测：one-shot 解析 `--output`，缺值/错模式不落进 positional；Windows
+- [x] CLI 单测：one-shot 解析 `--output`，缺值/错模式不落进 positional；Windows
   与 POSIX 路径各一册。
-- [ ] exporter 单测：纯文本、单工具、多工具、多 step、非零命令退出、工具超时、
+- [x] exporter 单测：纯文本、单工具、多工具、多 step、非零命令退出、工具超时、
   API 重试、thinking ref、usage 缺席/存在、partial 与子流关联。
-- [ ] 原子性单测：写失败保旧文件；成功替换无 `.tmp` 残件；目标路径只改用户
+- [x] 原子性单测：写失败保旧文件；成功替换无 `.tmp` 残件；目标路径只改用户
   点名文件。
-- [ ] 隐私单测：API key、Authorization、provider secret 与命中红线的 thinking
+- [x] 隐私单测：API key、Authorization、provider secret 与命中红线的 thinking
   正文不出 JSONL。
-- [ ] 回归：现有 canonical hash、resume、harness-replay、training-v1 字节与路由
+- [x] 回归：现有 canonical hash、resume、harness-replay、training-v1 字节与路由
   不变。
 - [ ] Linux 容器 E2E：上传配置，跑一题至少两轮工具调用，验证目标文件存在、
   每行 JSON 可 parse、tool call/result 成对、usage/outcome/exit code 齐，SHA-256

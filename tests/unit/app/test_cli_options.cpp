@@ -300,3 +300,89 @@ TEST_CASE("--app-server-ws:裸端口与 host:port 落位,坏值当场退") {
     CHECK(ParseCliArgs(Args({"lubancode", "app-server", "--app-server-ws-token"})).action ==
           CliAction::BadAppServerWs);
 }
+
+// ---------------------------------------------------------------------------
+// --output(Harbor Harness 派生 JSONL 单):单发模式专用;缺值/空值当场退;
+// 值不落 positional;Windows 与 POSIX 路径都照单全收
+// ---------------------------------------------------------------------------
+
+TEST_CASE("--output 吃掉下一个参数,缺值/空值退 BadOutput") {
+    const ParsedCliArgs ok =
+        ParseCliArgs(Args({"lubancode", "--yes", "--output", "out/t.jsonl", "干点活"}));
+    CHECK(ok.action == CliAction::Proceed);
+    CHECK(ok.options.output_given);
+    CHECK(ok.options.output_path == "out/t.jsonl");
+    CHECK(ok.options.positional == "干点活");  // 值不落 positional
+    CHECK(ok.options.auto_confirm);
+
+    CHECK(ParseCliArgs(Args({"lubancode", "--output"})).action == CliAction::BadOutput);
+    CHECK(ParseCliArgs(Args({"lubancode", "--output", ""})).action == CliAction::BadOutput);
+    CHECK(ParseCliArgs(Args({"lubancode", "--output", "", "问句"})).action == CliAction::BadOutput);
+}
+
+TEST_CASE("--output 照收 Windows 与 POSIX 路径,不改写不拼装") {
+    const ParsedCliArgs windows =
+        ParseCliArgs(Args({"lubancode", "--output", "D:\\logs\\trajectory.jsonl", "任务"}));
+    CHECK(windows.options.output_path == "D:\\logs\\trajectory.jsonl");
+    CHECK(windows.options.positional == "任务");
+
+    const ParsedCliArgs posix =
+        ParseCliArgs(Args({"lubancode", "--output", "/logs/trajectory.jsonl", "任务"}));
+    CHECK(posix.options.output_path == "/logs/trajectory.jsonl");
+    CHECK(posix.options.positional == "任务");
+}
+
+TEST_CASE("--output 混进别的路:解析层照收旗标,模式错配由 RunCli 门卫报") {
+    // 交互模式(positional 空)/app-server/会话管理:output_given 原样挂在
+    // 解析结果上,RunCli 的门卫据此明报 cli.output_mode_mismatch——解析层
+    // 不吞参数,也不把它拼进问题正文。
+    const ParsedCliArgs interactive = ParseCliArgs(Args({"lubancode", "--output", "x.jsonl"}));
+    CHECK(interactive.action == CliAction::Proceed);
+    CHECK(interactive.options.output_given);
+    CHECK(interactive.options.positional.empty());
+
+    const ParsedCliArgs app_server =
+        ParseCliArgs(Args({"lubancode", "app-server", "--output", "x.jsonl"}));
+    CHECK(app_server.options.app_server);
+    CHECK(app_server.options.output_given);
+
+    const ParsedCliArgs archive =
+        ParseCliArgs(Args({"lubancode", "--output", "x.jsonl", "archive", "20260901-000001-AAAA"}));
+    CHECK(archive.action == CliAction::ManageSession);
+    CHECK(archive.options.output_given);
+    // --output 的值没有漏进 session_ref。
+    CHECK(archive.session_command.session_ref == "20260901-000001-AAAA");
+}
+
+// ---------------------------------------------------------------------------
+// trajectory export --format harness-v1(补导路)与 --output
+// ---------------------------------------------------------------------------
+
+TEST_CASE("trajectory export 认 harness-v1 与 --output;training-v1 不认 --output") {
+    const ParsedCliArgs harness = ParseCliArgs(
+        Args({"lubancode", "trajectory", "export", "20260901-000001-AAAA",
+              "--format", "harness-v1", "--output", "C:/logs/t.jsonl"}));
+    CHECK(harness.action == CliAction::RunTrajectory);
+    CHECK(harness.trajectory.verb == "export");
+    CHECK(harness.trajectory.format == "harness-v1");
+    CHECK(harness.trajectory.output_path == "C:/logs/t.jsonl");
+
+    // 缺省格式仍是 training-v1;它带 --output 是用错地方。
+    const ParsedCliArgs training =
+        ParseCliArgs(Args({"lubancode", "trajectory", "export", "sid", "--output", "x.jsonl"}));
+    CHECK(training.action == CliAction::BadTrajectory);
+
+    // export-workspace 不认 harness-v1。
+    const ParsedCliArgs workspace = ParseCliArgs(
+        Args({"lubancode", "trajectory", "export-workspace", "key", "--format", "harness-v1"}));
+    CHECK(workspace.action == CliAction::BadTrajectory);
+
+    // harness-v1 的 --output 缺值当场退。
+    CHECK(ParseCliArgs(Args({"lubancode", "trajectory", "export", "sid", "--format", "harness-v1",
+                             "--output"}))
+              .action == CliAction::BadTrajectory);
+
+    // 认不得的格式仍拒。
+    CHECK(ParseCliArgs(Args({"lubancode", "trajectory", "export", "sid", "--format", "csv"}))
+              .action == CliAction::BadTrajectory);
+}

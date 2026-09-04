@@ -64,6 +64,7 @@
 #include "runtime/tool_trace_hub.hpp"    // ToolTraceHub:单发工具事件进轨迹的栅栏
 #include "runtime/trajectory_session.hpp"  // TrajectorySessionLedger:单发一场的账本
 #include "trajectory/event.hpp"          // TrainingPolicyFromName:单发训练档解析
+#include "trajectory/harness_exporter.hpp"  // --output 收口导出(Harbor 派生 JSONL)
 #include "workspace/identity.hpp"        // ResolveWorkspaceIdentity:单发同四级裁决
 #include "cli/markdown.hpp"
 #include "cli/provider_wizard.hpp"
@@ -144,7 +145,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
             const lubancode::cli::Theme& theme, const std::string& persona, bool spinner_enabled,
             const lubancode::config::SettingsLocal& settings_local,
             const std::string& model_instructions, const std::string& soul_content,
-            const std::vector<std::string>& package_dirs) {
+            const std::vector<std::string>& package_dirs, const std::string& harness_output) {
     // app-server 防守(app-server 单:绝不能把子命令当单发问题送进 AskOnce
     // ——那会在协议管线上打出一坨终端文案,搅坏 stdout 分帧)。旗标在
     // ParseCliArgs/RunCli 两层都拦了,这里守最后一道:问题正文恰是裸
@@ -524,6 +525,38 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
     // 补一行指路——细账(逐请求 usage、cache 分列、工具流水)在轨迹里,
     // stderr 出声,不污染被重定向的 stdout。
     std::cerr << lubancode::cli::trf("oneshot.ledger_note", oneshot_session_id) << "\n";
+    // --output 收口导出(Harbor Harness 派生 JSONL 单 §二/§七):canonical
+    // 账封完再做纯函数投影 + 原子写;导出失败绝不把成功执行冒充完整评测
+    // 记录——执行成(0)而导出败给稳定导出失败码 3;执行本来败就照原
+    // 退出码还(评测侧拿 outcome 分型,不靠退出码倒推)。close 没写成 run
+    // terminal 的,投影按 Journal 事实落 partial,不装 clean success。
+    if (!harness_output.empty()) {
+        const lubancode::trajectory::HarnessExportOptions harness_options;
+        const auto harness_report = lubancode::trajectory::ExportSessionHarnessV1(
+            oneshot_ledger->session_dir(), lubancode::tools::Utf8ToPath(harness_output),
+            harness_options, status);
+        if (harness_report.ok()) {
+            // 收据行:稳定可解析,不进 i18n(adapter 拿它对账 SHA-256 与落点)。
+            std::cerr << "[harness-export] schema=" << harness_report.schema
+                      << " schema_version=" << harness_report.schema_version
+                      << " session_id=" << harness_report.session_id
+                      << " records=" << harness_report.records
+                      << " sha256=" << harness_report.sha256
+                      << " path=" << lubancode::tools::PathToUtf8(harness_report.target) << "\n";
+        } else {
+            std::cerr << lubancode::cli::trf("oneshot.harness_export_failed",
+                                             harness_report.error_code, harness_report.message)
+                      << "\n";
+            std::cerr << "[harness-export] error_code=" << harness_report.error_code
+                      << " session_id=" << oneshot_session_id << "\n"
+                      << "[harness-export] retry: lubancode trajectory export "
+                      << oneshot_session_id << " --format harness-v1 --output " << harness_output
+                      << "\n";
+            if (status == 0) {
+                return 3;  // 稳定导出失败码:成功执行不得冒充完整评测记录
+            }
+        }
+    }
     return status;
 }
 

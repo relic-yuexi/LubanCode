@@ -33,6 +33,12 @@ struct CliOptions {
     // 目录下每个直接子目录是一只 Package,优先级最高(dev > project >
     // user > official)。只喂给 /package 的只读面,不挂任何组件。
     std::vector<std::string> package_dirs;
+    // Harbor Harness 派生 JSONL 单:--output <path>——one-shot 收口后把
+    // 轨迹导成便携 JSONL 落到用户点名的路径。只在带任务正文的单发模式
+    // 生效;其余模式(交互/app-server/子命令)带了它由 RunCli 明报
+    // cli.output_mode_mismatch。缺值/空值在解析层退 BadOutput。
+    std::string output_path;     // 空 = 没给
+    bool output_given = false;
 };
 
 // `lubancode plugin init <模板> [名字]` 子命令(plugins 单第 3 步:Python
@@ -71,7 +77,12 @@ struct TrajectoryCliArgs {
     std::string session_id;  // trajectory session id(usage/gc/doctor/export-workspace 档当
                              // workspace-key)
     bool gc_derived_only = false;  // gc --derived-only:真删可重建/派生物(默认 dry-run)
-    std::string format;             // export/export-workspace 的 --format;唯一认 training-v1
+    std::string format;             // export/export-workspace 的 --format:training-v1 |
+                                    // harness-v1(后者只 export 认,Harbor 派生 JSONL)
+    std::string output_path;        // export --format harness-v1 的 --output <path>:导出
+                                    // 落点(空 = <session>/exports/harness-v1/trajectory
+                                    // .jsonl)。补导路(one-shot 导出失败后按 session id
+                                    // 重导)与 Harbor adapter 收尾都用它。
 };
 
 // Gateway 子命令(总装单 G1):`lubancode gateway run|status|stop
@@ -102,6 +113,7 @@ enum class CliAction {
     BadEvolveTest,            // evolve test 参数不对:人话已塞进 error_text
     RunTrajectory,            // trajectory 子命令:verify/replay/harness-replay 后退(P0-3)
     BadTrajectory,            // trajectory 参数不对:人话已塞进 error_text
+    BadOutput,                // --output 缺值/空值:人话已塞进 error_text(Harbor JSONL 单)
     RunGateway,               // gateway 子命令:run/status/stop(总装单 G1)
     BadGateway,               // gateway 参数不对:人话已塞进 error_text
 };
