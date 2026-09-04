@@ -1317,6 +1317,19 @@ StreamScan ScanStream(const std::filesystem::path& session_dir, const std::files
                     dispatch.recorded_hash = GetString(*ref, "child_terminal_event_hash");
                 }
             }
+            // workflow 编排账的 node 终态(workflow 会话归属统一单):同样算
+            // 一次接受;hash 走 payload.child_terminal_event_hash(编排事实
+            // 不开 result_ref,键名直给)。
+            if ((envelope.kind == EventKind::WorkflowNodeCompleted ||
+                 envelope.kind == EventKind::WorkflowNodeFailed) &&
+                child->is_string()) {
+                dispatch.accepts += 1;
+                const auto hash = envelope.payload.find("child_terminal_event_hash");
+                if (hash != envelope.payload.end() && hash->is_string() &&
+                    !hash->get<std::string>().empty()) {
+                    dispatch.recorded_hash = hash->get<std::string>();
+                }
+            }
         }
         // 任务级 turn 账(§13.7,P1-1):sent 边界的 task_turn_index 逐枚收账,
         // 收口三态按 request_id 记终态——收尾一并核"不重号、不超 limit、

@@ -45,6 +45,11 @@ namespace lubancode::trajectory {
 std::string GenerateSessionId(int year, int month, int day, int hour, int minute, int second,
                               std::string_view random6);
 
+// 单段名安全判定(reserve 口的路径门):非空、≤128、[0-9a-zA-Z._-]、非
+// "."/".."。消费方在铸 stream 文件名前先问这道门(workflow 编排单:node
+// id 来自 YAML 定义,exotic 名要走内容寻址替代名)。
+bool IsValidSingleSegment(std::string_view name);
+
 // ---------------------------------------------------------------------------
 // session.json(§3.3)
 // ---------------------------------------------------------------------------

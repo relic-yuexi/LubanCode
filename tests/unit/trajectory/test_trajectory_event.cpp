@@ -41,7 +41,7 @@ EventEnvelope MakeValidEnvelope() {
 
 }  // namespace
 
-TEST_CASE("event: 全部 74 种 kind 名字往返") {
+TEST_CASE("event: 全部 86 种 kind 名字往返") {
     int count = 0;
     for (const EventKind kind : AllEventKinds()) {
         const char* name = EventKindName(kind);
@@ -52,7 +52,7 @@ TEST_CASE("event: 全部 74 种 kind 名字往返") {
         CHECK(*back == kind);
         ++count;
     }
-    CHECK(count == 74);
+    CHECK(count == 86);
     // 派工长任务最终预检三项账。
     CHECK(EventKindFromName("context.pressure.recorded") == EventKind::ContextPressureRecorded);
     CHECK(EventKindFromName("model.usage.recorded").has_value());
@@ -63,6 +63,21 @@ TEST_CASE("event: 全部 74 种 kind 名字往返") {
     CHECK(EventKindFromName("memory.save.failed").has_value());
     // 子代理空轨迹单 P0-B:子 run 开张失败的父侧 typed 事实。
     CHECK(EventKindFromName("subagent.run.start_failed") == EventKind::SubagentRunStartFailed);
+    // workflow 编排账(workflow 会话归属统一单):编排事实十二枚。
+    CHECK(EventKindFromName("workflow.definition.loaded") == EventKind::WorkflowDefinitionLoaded);
+    CHECK(EventKindFromName("workflow.node.dispatched") == EventKind::WorkflowNodeDispatched);
+    CHECK(EventKindFromName("workflow.node.retrying") == EventKind::WorkflowNodeRetrying);
+    CHECK(EventKindFromName("workflow.node.waiting") == EventKind::WorkflowNodeWaiting);
+    CHECK(EventKindFromName("workflow.node.completed") == EventKind::WorkflowNodeCompleted);
+    CHECK(EventKindFromName("workflow.node.failed") == EventKind::WorkflowNodeFailed);
+    CHECK(EventKindFromName("workflow.node.skipped") == EventKind::WorkflowNodeSkipped);
+    CHECK(EventKindFromName("workflow.branch.started") == EventKind::WorkflowBranchStarted);
+    CHECK(EventKindFromName("workflow.join.completed") == EventKind::WorkflowJoinCompleted);
+    CHECK(EventKindFromName("workflow.loop.iteration.started") ==
+          EventKind::WorkflowLoopIterationStarted);
+    CHECK(EventKindFromName("workflow.loop.iteration.completed") ==
+          EventKind::WorkflowLoopIterationCompleted);
+    CHECK(EventKindFromName("workflow.checkpoint.saved") == EventKind::WorkflowCheckpointSaved);
     CHECK_FALSE(EventKindFromName("no.such.kind").has_value());
     CHECK(EventKindName(static_cast<EventKind>(999))[0] == '\0');
 }

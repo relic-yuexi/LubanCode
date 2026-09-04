@@ -17,8 +17,16 @@ std::string TwoDigits(int value) {
     return buffer;
 }
 
+bool WriteTextFileAtomic(const std::filesystem::path& path, const std::string& content) {
+    // 统一原子写(审计 P1):替掉本文件自备的固定 .tmp 协议。
+    return platform::AtomicWriteFile(path, content).has_value();
+}
+
+}  // namespace
+
 // 单段名校验(§12.1):目录/文件名只认 [A-Za-z0-9._-],拒绝路径分隔符、
-// ".."、"。"盘符冒号一类可逃逸材料。
+// ".."、"。"盘符冒号一类可逃逸材料。workflow 编排单起 export 进头
+// (directory.hpp):消费方铸 stream 文件名前先问这道门。
 bool IsValidSingleSegment(std::string_view name) {
     if (name.empty() || name.size() > 128) {
         return false;
@@ -35,13 +43,6 @@ bool IsValidSingleSegment(std::string_view name) {
     }
     return true;
 }
-
-bool WriteTextFileAtomic(const std::filesystem::path& path, const std::string& content) {
-    // 统一原子写(审计 P1):替掉本文件自备的固定 .tmp 协议。
-    return platform::AtomicWriteFile(path, content).has_value();
-}
-
-}  // namespace
 
 std::string GenerateSessionId(int year, int month, int day, int hour, int minute, int second,
                               std::string_view random6) {
