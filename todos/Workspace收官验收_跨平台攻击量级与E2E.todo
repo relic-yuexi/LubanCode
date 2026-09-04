@@ -1,0 +1,27 @@
+# Workspace 收官验收：跨平台、攻击、量级与 E2E
+
+- 状态：待实施（2026-09-04 自《Workspace统一存储》拆出——主体七批 P0-0~P0-6 已落（2026-09-01/02，见 git 案底），本单收最后的验收尾巴）
+- 级别：P1（验收与基线批，无新开发）
+- 类型：LubanCode 验收（workspace/统一存储）
+- 原单批注：状态行旧记"Wave3×P0-2 合并态 16 册交叠红待缝"——已被后续消化（main 现 380 册全绿为证），不另处理。
+- 不在本单：新功能开发；分级 Memory 后续演进（原单未尽设想起另立）
+
+## 一、Windows 侧（本批主活，工头做）
+
+- [ ] 主会话 + 四只并行子代理 + 嵌套 child + workflow + Memory recall/save 的综合恢复测试（杀进程/断流后 resume/verify 全过；可仿 tests/manual 探针手法）。
+- [ ] linked worktree 共 Memory/共 workspace、session 各带 checkout 现场的测试。
+- [ ] 跨 workspace /worktree 切换、封旧开新与回执测试。
+- [ ] 全局 Memory 越权攻击：项目配置、恶意 marker、Hook、Skill、subagent、模型工具均不得写（P0-4 写通道闸的攻击面复验）。
+- [ ] 1/1k/10k session 与 1/1k/10k Memory 条目的 list/recall/replay 基线：冷/热耗时与峰值内存记表（`docs/` 或 eval/ 下），不拍脑袋填预算。
+- [ ] 更新配置、会话、Memory、安全、命令、故障排查、目录一览与发布迁移文档（以当前代码为准，别照抄原单设想）。
+- [ ] 空主目录 E2E、带旧数据升级 E2E（旧数据用夹具造，别碰真主目录）。
+
+## 二、跨平台腿（能做的做，做不了的如实标）
+
+- [ ] Windows/Linux：workspace identity、路径大小写、symlink/junction、锁与原子迁移测试（Linux 可 WSL/容器跑则跑，跑不了标注留 CI）。
+- [ ] macOS：由 CI 跑 identity/权限/锁/崩溃恢复/release 包；无环境处如实标 CI。
+
+## 三、验收
+
+- 全量 ctest 零回归；上述各测试的证据（命令/退出码/关键输出）记回本单。
+- 基线表与文档更新进仓。
