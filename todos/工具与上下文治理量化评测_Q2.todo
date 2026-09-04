@@ -65,7 +65,7 @@
 
 **指标**：`compaction_benefit_ratio`、三本账各记 key_fact_recall / false_retention / contradiction / evidence_attribution、`downstream_task_success` 配对差；按 ledger、kind、冷热区、距截点 turn 数分桶，中位数 + P95 + 95% bootstrap CI。
 
-**主基准**：Microsoft [Lost in Conversation](https://github.com/microsoft/lost_in_conversation)（600 条分片指令 + reference/tests，MIT）——任务拆多轮逐步补约束，末后看任务成没成，与 compact 设计问题同源。先每任务族 5 题 smoke，再每族 ≥30 题主报告；逐题沿用原 reference/tests 判卷，另标 UserContract 事实量约束漏失。论文分数只作背景，一律重跑。
+**主基准**：Microsoft [Lost in Conversation](https://github.com/microsoft/lost_in_conversation)（**657 条分片指令**：主文件 627 + translation 30，七族；reference/tests 判卷，MIT；备料实录见 `tests/eval/compaction_benefit/README.md`——判卷 code/database/actions/math 四族确定性、data2text/translation 走 BLEU、summary 独 LLM judge；code 族判卷 Unix-only 走 WSL，database 族另需 Spider 库二次 lock）——任务拆多轮逐步补约束，末后看任务成没成，与 compact 设计问题同源。先每任务族 5 题 smoke（集已定 `smoke_set.json`），再每族 ≥30 题主报告；逐题沿用原 reference/tests 判卷，另标 UserContract 事实量约束漏失。论文分数只作背景，一律重跑。
 
 **补充候选**（不进首批）：LongMemEval-V2（451 题 Agent 轨迹）、LongMemEval（只抽 knowledge-update/abstention）、LoCoMo（10 场，CC BY-NC 4.0，只作非商业评测，不得随商业发行包分发）。
 
