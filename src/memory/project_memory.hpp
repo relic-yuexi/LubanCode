@@ -202,10 +202,18 @@ struct ScoredEntry {
                            // 中的条目除摘要外要带正文相关段)
     double bm25 = 0.0;     // 本地 BM25 软分(词项按来源权重折算)
     int score = 0;         // 硬命中分 + cwd 排位加分 + BM25 折算分(排序用)
+    int core = 0;          // 硬命中分 + BM25 折算分(不含 cwd 排位加分;门槛
+                           // 与弱档地板判这个)
     bool qualifies = false;       // 过最低门槛,值得注入(调用方据此判)
     bool stale_blocked = false;   // 指纹漂移,只提示不注正文(由调用方判)
     bool expired = false;         // 已过 expires_at,不召回
     bool scope_blocked = false;   // scope 不符当前 cwd,不注入
+    // 相关性分级(记忆幻觉根治单 A 刀)材料:anchors 是硬命中的稳定实体
+    // 词面(关键词/标题/id——问题点名、条目自报的实体,归一化后);路径
+    // 与 symbol 硬命中单记 pinpoint_hit——问题点名了具体文件或符号,定位
+    // 精确,不再要行级共现背书。
+    std::vector<std::string> anchors;
+    bool pinpoint_hit = false;
 };
 
 // 检索词的来源、词路与权重(trace 报账用):source 说词从哪来(query 本体
@@ -234,16 +242,54 @@ bool LooksLikeMemoryDate(const std::string& raw);
 // 索引共用同一套。
 std::vector<std::string> TokenizeForRetrieval(const std::string& text);
 
+// ---- 相关性分级(记忆幻觉根治单 A 刀) ----
+// 词组:同源查询词组(整串与拆段、整词与内部二元同组),门槛计数同款
+// 口径(权重 >= 0.5 的词面才算数)。锚:硬命中的稳定实体(关键词/标题/
+// id),即"问题点名且条目自报"的实体。
+//
+// 判据(工头定形,五场 adversarial 数据上校准):
+//   强相关 = 路径/symbol 硬命中(问题点名具体文件或符号,pinpoint),
+//           或某一行里 >= 2 个词组与 >= 1 个锚同现(实体-动作-对象一句
+//           话说全,不是散在各行的词面重叠;问题本身不足两个词组时门槛
+//           收到 1——"部署节奏是什么"这类单实体问法,锚与唯一词组同行
+//           即算实质匹配),
+//           或条目无锚可用(没硬命中任何实体)时某一行 >= 3 个词组同现
+//           (纯内容匹配的实质共现兜底——中文内容命中的生产常态,别把没
+//           有实体词典的库全判弱;有锚时锚必须进同一行,否则英文长问题
+//           的闲聊行凑三个词就能混进强档)。
+//   其余只过检索门槛的命中 = 弱相关:词面重叠、话题沾边。adversarial 五
+//   场实测:top3 全弱率 28%(整段不注即回裸底),而可答四桶证据丢失仅
+//   0~6%——分级不是为了把弱档说死,是把不确定性如实传给模型。
+struct RelevanceGroup {
+    std::vector<std::string> terms;  // 该词组的归一化词面(去重)
+};
+
+struct RelevanceQuery {
+    std::vector<RelevanceGroup> groups;
+};
+
+struct RelevanceGrade {
+    bool strong = false;      // 强相关(判据见上)
+    int best_line_groups = 0; // 单行同现词组数上限(trace 审计用)
+};
+
+RelevanceGrade GradeRelevance(const std::string& topic_text, const std::string& summary,
+                              const RelevanceQuery& query, const std::vector<std::string>& anchors,
+                              bool pinpoint_hit);
+
 // 纯函数排级:硬命中(路径/关键词/symbol/标题/id 稳定实体,词边界匹配)
 // + BM25 软分(词项带权重)。返回有得分的条目(含没过门槛的,给 trace
 // 用),qualifies 标记是否过最低门槛(至少一次硬命中,或带整词的两次
 // 词项命中/三次纯二元命中,且核心分过线)。traced_terms 回填本轮查询词
-// 项(含来源与权重),供 trace 落盘。archived/conflict 不参与;过期/
-// scope 越区打标记由调用方拦。指纹漂移要摸项目文件,也由调用方判。
+// 项(含来源与权重),供 trace 落盘;relevance_query 回填查询词组(同源
+// 词组:标识符整串与拆段、词典整词与内部二元同组),供相关性分级用。
+// archived/conflict 不参与;过期/scope 越区打标记由调用方拦。指纹漂移要
+// 摸项目文件,也由调用方判。
 std::vector<ScoredEntry> RankEntries(const std::vector<MemoryEntry>& entries, const std::string& query,
                                      const std::string& cwd_relative,
                                      const std::vector<std::string>& hints = {},
-                                     std::vector<TraceTerm>* traced_terms = nullptr);
+                                     std::vector<TraceTerm>* traced_terms = nullptr,
+                                     RelevanceQuery* relevance_query = nullptr);
 
 // 待审候选(规格"候选审阅箱")。回合收尾抽取产出,先住待审区,用户
 // /memory accept|edit|reject 之后才动正式库。按项目 key 分账,耐退出。
@@ -305,8 +351,14 @@ struct RecallTraceEntry {
     bool snapshot_failed = false;
     // schema 4(预算选条规则):单条超预算截断只削正文,摘要保完整——此处
     // 记截断事实;drop_reason 是"拦了什么、为什么"的明细(max_results|
-    // budget_bytes|empty_payload),不静默。
+    // budget_bytes|empty_payload|weak_floor),不静默。
     bool content_truncated = false;
+    // 相关性分级(schema 5):weak=按弱相关档注入(垫尾+[弱相关]标注);
+    // cooccur=单行同现词组数上限(判据审计用);weak_dropped=弱档被
+    // "直接不注"处置拦下(kDropWeakRecalls/kWeakRecallFloor)。
+    bool weak = false;
+    int cooccur = 0;
+    bool weak_dropped = false;
     std::string drop_reason;
     std::size_t bytes = 0;
 };

@@ -1,0 +1,11 @@
+# CI 红修复：hooks_turn_identity 两 POSIX 腿同挂
+
+- 状态：待修（2026-09-04 CI 实录立案）
+- 级别：P0（CI 三平台门，两条腿一起红）
+- 现场实录：macOS-clang 与 ubuntu-gcc 两腿同红 `integration.hooks.hooks_turn_identity`（0.26.188 落的 Hook 身份集成册，Windows 腿绿）；ubuntu-gcc 另单红 `unit.app_server.app_server_browser`（单腿，需复现定性——app_server 系历史上有 -j8 抖动前科，CI 串行也红则是真病）。
+- 线索：册内 POSIX 分支（WriteHookScript .sh + cat）本身看着无害；两腿同挂指向共性——嫌疑：hooks/dispatcher 在 POSIX 的进程起法/回读路径（0.26.188 只在 Windows 验过）、钩子超时在 CI 冷机上的余量、或 loader 对 `sh "path"` 命令形态的解析差异。
+- 修法：
+  - WSL 复现 Linux 腿（build/wsl_repro.sh 复现场，复用 Windows 侧 _deps 源），拿到失败输出定位根因后修——别瞎猜瞎改。
+  - app_server_browser：WSL 同场复现定性——抖动则标记 CI 串行复跑观察，真病则修。
+- 验收：WSL 复现红→修→绿；下轮 CI 三腿全绿。
+- 不在本单：不看不改 CI 工作流配置（除非根因在 yml）。

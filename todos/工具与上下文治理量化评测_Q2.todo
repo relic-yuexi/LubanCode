@@ -1,0 +1,238 @@
+# 工具检索·长任务上下文·Subagent 通信的量化评测（Q2）
+
+- 状态：待实施（2026-09-04 立案）
+- 级别：P1（成本/可扩展性——量不清就不能再扩）
+- 类型：LubanCode Runtime 评测（工具检索阈值 / 上下文压缩收益 / Subagent 失败路径）
+- 范围：`src/tools/tool_search.{hpp,cpp}`、`src/tools/agent_tool.cpp`、`src/agent/compact.cpp`、`src/agent/microcompact.cpp`、`src/agent/context.cpp`、`src/agent/token_calibrator.cpp`、`src/tools/subagent_scheduler.{hpp,cpp}`、`src/tools/agent_task_coordinator.{hpp,cpp}`、`src/tools/turn_runtime.cpp`、`src/runtime/turn_runtime.{hpp,cpp}`
+- 依赖：`docs/architecture/extensions/tool-extension.md`、`docs/architecture/context/compaction.md`、`docs/architecture/agent-loop/reliability.md`、`todos/token估算校准_真实usage反推byte比率.todo`
+- 关联：`面试深挖导航`「工具调用与 JSON」「Context、长文本与 compact」「Session、重试与恢复」三节；不在本单：模型协议层、流式渲染、终端交互
+- 不在本单：tool_invoke 自身 schema 改造（已在 proxy_reference 单）；vector retrieval 改写（独立路线，本单只量 BM25 与硬命中当前形态）
+
+## 一、先下断语
+
+量化是工程的根。三个问题各有一个**最小可验收实验**——
+
+1. 工具检索：找到"不检索就开始退化"的真实工具数阈值，给出 token 账与首 token 时间账。
+2. 长任务上下文：给出 compact 触发前后的 input_tokens、命中率、待办守恒率与回滚率，证明分层压缩真省、不是空转。
+3. Subagent 通信：固定同任务对照，记录失败类型分布、回退路径占比与最终成功率，给出"派 vs 不派"的成本账。
+
+量化不做，工程就停在"看着对"。下面每一章都钉一份**实验计划 + 验收门槛**，做完才能填数。
+
+## 二、现状证据（先看真实现，不要拍脑袋）
+
+### 2.1 工具检索的当下机制（已读源码）
+
+`src/tools/tool_search.hpp`：
+
+- `DeferralEnabled(total, threshold)`：threshold 默认 20，> threshold 才启延迟。
+- `DeferralBudgetOk(decl_tokens, floor)`：P4-1 新增的 token 本金闸，floor 默认非 0。
+- `ShouldDeferTools(total, threshold, decl_tokens, floor)`：两闸都过才启。
+- 检索形态：`ToolSearchTool::execute` 走 legacy 或 proxy 两路：
+  - legacy：命中写 `loaded_` 集合，下一轮扩 schema 写回顶层 tools —— **cache-hostile**。
+  - proxy：命中只把结构化 schema/tool_ref 放进 tool result，附历史尾，**不破前缀 cache**。
+- 索引段：`BuildDeferredToolsIndexSegment` 只列 `name + 截断到 80 字符的 description`，不含 schema。
+- 失败兜底：legacy 找不到时给前缀匹配建议；proxy 给结构化空结果 + note。
+
+`src/tools/registry.cpp`：注册表 `ToolRegistry::All()` 是检索全集，不分核/外，只看 `deferred()`。
+
+### 2.2 长任务上下文的当下机制（已读源码）
+
+`src/agent/context.cpp`：热区冷区分账；热区最近若干轮不压缩。
+
+`src/agent/compact.cpp`：
+
+- `kMinSummaryChars = 40`：残次摘要拒收（防"压缩请求当续写"）。
+- `BuildCompactInstruction`：固定六栏 + JSON manifest（goal/constraints/open_items/next_action）。
+- `open_items` 守恒：`required_open_items` 非空时强制逐字收编。
+- map/reduce：`kMaxReducePasses = 4`（compact.md 自承的"四轮后不本地拒绝"是欠账）。
+- compact 走 `SampleRequest`，复用 `SampleModel` 原语采流、累 usage、走兜错。
+
+`src/agent/microcompact.cpp`：在请求视图折叠冷区重复只读结果，迟滞防抖（冷区不涨 50% 不再跑）。
+
+`src/agent/token_calibrator.cpp`：本地估算与真实 usage 反推比率，窗口 8 对、中位数、硬带 `[0.2, 5.0]`、异常带 ±40%、连续两枚超 `2×` 中位清窗。兜底样本：估算 < `kMinRequestEstimateTokens`、实报 ≤ 0、字节为 0 都弃。
+
+### 2.3 Subagent 通信的当下机制（已读源码）
+
+`src/tools/agent_tool.cpp`：
+
+- `DetachedRequestBackend`：后台子代理走同一只 backend 引用，调宿主 `send_stream`。
+- `RunTask(backend, registry, prompt, ...)`：每任务独立 `TurnHarness`、独立 `effective_registry`（含私有 `todo_write` + scoped `agent_message/agent_watch`）。
+- 调度：`SubagentScheduler::EvaluateAdmission(request, stats, governance)`，纯函数，无状态；事务里验 lineage/深度/上限。
+- 治理字段：`max_active=8`、`max_depth=3`、`max_children_per_task=0`、`max_tree_nodes=0`。
+- 失败路径：subagent 任务账开张失败 fail-closed（`trajectory.subagent_start_failed`）；I/O 类失败注 `retryable`。
+- 续投：失败介入信按批退回（`RestoreDrainedInbox`）。
+
+### 2.4 现存直接欠账（这三块都缺数）
+
+- 工具检索"不检索就开始退化"——只有阈值常量，**没有触发前后对照**。
+- compact 收益——题库 A 组第 1 题自承："没有同任务同模型同输入的 FULL/compact 多轮对照"，连一条都报不出。
+- subagent 失败率与回退路径——同样没量。
+
+## 三、外部依据与版本裁决
+
+外部基准两枚：
+
+1. Anthropic 在 2024-11 发布的 [Tool Search Tool](https://docs.claude.com/en/docs/agents-and-tools/tool-use/tool-search-tool) 文档，给"阈值附近退化"曲线原型。
+2. MemGPT/Letta 的 virtual-context 思路，**仅作思路对照**，不照抄（仓内不引外部依赖，纯本地启发式）。
+
+裁定：所有数字只取 LubanCode 自跑结果，不引别家模型横比。版本钉到 `0.26.x` 之后单测可复跑的本机 Release。
+
+## 四、不可破的合同
+
+量化实验必须守的边界：
+
+- 不动工具检索的产品语义（不增删工具、不改 schema）。
+- 不动 compact 守恒条件（manifest、open_items 不变）。
+- 不动 subagent 治理上限（不改 `max_depth/active` 默认值）。
+- 所有数据落 `tests/eval/<实验名>/`，带 commit 号、模型 id 与 provider。
+- 实验脚本只读会话 + 真模型 + 假 backend 两套：真模型带 opt-in 网，假 backend 默认跑。
+
+## 五、实验 A：工具检索的退化阈值
+
+### A.1 目标
+
+找出"不挂延迟就开始退化"的工具数；记录 token 节省与首 token 时间账。
+
+### A.2 实验装置
+
+固定假 backend（无网、确定性），准备五档工具表：
+
+| 档 | 总数 | 核心直挂 | 延迟挂载 |
+| --- | ---: | ---: | ---: |
+| A0 | 12 | 12 | 0 |
+| A1 | 22 | 12 | 10 |
+| A2 | 40 | 12 | 28 |
+| A3 | 70 | 12 | 58 |
+| A4 | 120 | 12 | 108 |
+
+每档分别跑：
+
+1. `disabled`（不延迟）：全量直挂。
+2. `legacy_expand`：legacy 检索。
+3. `proxy_reference`：proxy 检索。
+
+任务固定三类：
+
+- T1：单步调最常用 read_file（核内工具）。
+- T2：单步调 MCP 工具（延迟）。
+- T3：先 T2 不中，再换关键词搜到，再调（检索路径）。
+
+每档每模式每任务跑 5 次，记录：
+
+- 首 token 延迟（ms）
+- 单次请求 `tools` 字段字节数
+- 单次请求 `system` 字段字节数
+- 总请求字节数
+- 模型决策正确率（任务完成与否）
+
+### A.3 验收门槛
+
+- 至少有一档退化明显（≥ 30% 任一账变差），给出阈值。
+- proxy 与 legacy 两路各列一份对比表。
+- 落在 `tests/eval/tool_search_threshold/`，文档 `docs/evaluation/tool_search_threshold.md`。
+- 单测：`tests/unit/eval/test_tool_search_threshold.cpp` 用 fixture 钉 A2/T2 那一组数字。
+
+## 六、实验 B：长任务上下文的压缩收益
+
+### B.1 目标
+
+回答"compact 到底有没有省多少？"——给一份能上简历的真账。
+
+### B.2 实验装置
+
+准备 8 场真实长会话（dogfooding 留底），每场至少 50 step：
+
+- 冻结轮次：compactor 切走前后两版本 history。
+- 同模型同 provider：先发 FULL，再发 compact；两轮都发，看下一次 step 是否撞窗。
+
+记录：
+
+- pre_tokens、post_tokens（provider 实报）
+- compact 请求本身的 input_tokens / output_tokens
+- compact 失败率（manifest 拒收、open_items 守恒失败、纯文本长度不足）
+- 摘要后下一步的"任务一致性"：固定查询"上次未完成事项"是否能在摘要里找到
+
+### B.3 验收门槛
+
+- 至少 3 场成功，3 场失败案例；分析失败为何。
+- 给出 `compaction_benefit_ratio = pre_tokens / post_tokens` 中位数、P95、失败数。
+- 把 map 摘要误删待办率纳入报告（守恒失败的命中率）。
+- 落点：`docs/evaluation/compaction_benefit.md`，实验数据 `tests/eval/compaction_benefit/`。
+- 单测：`tests/unit/eval/test_compaction_benefit.cpp` 钉 8 场 fixture 的 success/failure 分桶。
+
+## 七、实验 C：Subagent 通信的失败分布
+
+### C.1 目标
+
+画出"派 vs 不派"的成本账；找出真正吃掉时长的失败类型。
+
+### C.2 实验装置
+
+固定 12 个任务（只读检索 4、改写 4、长命令 4），每任务对照：
+
+- 主代理单人跑（baseline）
+- 主代理派一只 Explore 子代理 + 主代理集成（subagent 1 只）
+- 主代理派三只 Explore 并行（subagent 3 只）
+
+记录：
+
+- 总墙钟、模型 token 总量、provider cost（用 `usage.cached` 与 `usage.uncached` 估算）
+- 失败类型：`background_unavailable`、`trajectory.subagent_start_failed`、`admission_depth_limit`、`admission_active_limit`、`hook_deny`、`tool_error`
+- 子代理空转指标：`AssistantMessageFingerprint` 不变的连续 step 数（无进展指纹）
+- 最终任务完成率（独立评审打分）
+
+### C.3 验收门槛
+
+- 给出 `派工价值 = (baseline_wall - subagent_wall) / baseline_wall` 与 `派工成本 = (subagent_tokens - baseline_tokens) / baseline_tokens` 两组中位数。
+- 失败类型分布饼图（落点 `docs/evaluation/subagent_failure_breakdown.md`）。
+- 单测：`tests/unit/eval/test_subagent_failure.cpp` 钉 admission 各码、retryable 标志的稳定文案。
+
+## 八、分期落地
+
+### P0：实验装置 + 数据落点
+
+- [ ] `tests/eval/` 目录建立，CMake 注册 eval 分组（CTest opt-in）。
+- [ ] 假 backend `FakeStreamingBackend` 抽到 `tests/eval/fake_backend.{hpp,cpp}`，通用化。
+- [ ] 三套数据落地脚本（Python）落 `tests/eval/<实验名>/collect.py`，输出 parquet + md 两件。
+
+验收：跑通 A2 档 disabled 模式单步 T1，落到 parquet。
+
+### P1：实验 A（工具检索阈值）
+
+- [ ] 五档工具表生成器。
+- [ ] 三模式对照跑脚本。
+- [ ] 报告 `docs/evaluation/tool_search_threshold.md`。
+
+验收：跨档退化曲线画出，threshold 真值与默认值差给出。
+
+### P2：实验 B（压缩收益）
+
+- [ ] 8 场 dogfooding fixture 整理（脱敏）。
+- [ ] compactor 切走对照脚本。
+- [ ] 报告 `docs/evaluation/compaction_benefit.md`。
+
+验收：8 场全部跑完，3 成功 3 失败案例入库。
+
+### P3：实验 C（Subagent 通信）
+
+- [ ] 12 任务 fixture。
+- [ ] 三对照跑脚本。
+- [ ] 报告 `docs/evaluation/subagent_failure_breakdown.md`。
+
+验收：失败类型分布画齐，给出"派工价值 vs 成本"曲线。
+
+## 九、改动边界（预计）
+
+- 实验装置与假 backend 走 `tests/eval/`，**不动产品代码**。
+- 报告与 fixture 走 `docs/evaluation/` 与 `tests/eval/<实验名>/`。
+- 若实验 A 给出新阈值（默认 20 需改），单走 `src/tools/tool_search.hpp` 默认常量变更。
+- 若实验 B 给出新 compact 终止条件，单走 compact.hpp 改 kMaxReducePasses 与本地说拒绝分支。
+- 若实验 C 给出新失败兜底，单走 subagent_scheduler.hpp 与 agent_tool.cpp 的失败收账段。
+
+## 十、不做什么
+
+- 不引向量库 / 不引外部 benchmark 库
+- 不改 compact 算法本身的语义
+- 不动 subagent 治理上限默认值
+- 不引别家模型的横比数字
+- 不把"省了多少"算成金额，只报 token 与墙钟

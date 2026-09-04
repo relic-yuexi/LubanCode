@@ -41,6 +41,7 @@
 #include "peers/peer_session.hpp"
 #include "agent/prompts.hpp"
 #include "agent/resolved_prompt_builder.hpp"
+#include "agent/token_calibrator.hpp"  // DefaultTokenCalibrator:workflow agent 节点共用的校准器实例
 #include "skills/workflow_recorder.hpp"
 #include "api/backend.hpp"
 #include "api/models.hpp"
@@ -307,6 +308,9 @@ lubancode::agent::TurnWiring TerminalSessionController::BuildWorkflowAgentCallba
     //(yolo/auto/预放行不问),真要问时 diff 预览 + 三档菜单 + "总是允许"
     // 落回会话账(always_allowed_tools 按引用进 ConfirmToolUse)都在里头。
     lubancode::agent::TurnWiring wiring;
+    // token 估算校准(token 估算校准单):workflow agent 节点与主会话共用
+    // 进程级校准器。
+    wiring.token_calibrator = &lubancode::agent::DefaultTokenCalibrator();
     auto approval_class_slot =
         std::make_shared<lubancode::tools::ApprovalClass>(lubancode::tools::ApprovalClass::None);
     wiring.on_permission_evaluate = [this, approval_class_slot](const std::string&, const std::string& name,

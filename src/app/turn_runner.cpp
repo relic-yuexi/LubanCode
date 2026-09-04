@@ -20,6 +20,7 @@
 
 #include "agent/compact.hpp"
 #include "agent/model_image_store.hpp"  // LandModelImage:on_model_image 落盘口的实现
+#include "agent/token_calibrator.hpp"  // DefaultTokenCalibrator:token 估算校准的进程级实例
 #include "agent/turn_harness.hpp"
 #include "app/hook_runtime.hpp"
 #include "app/terminal_turn_sink.hpp"
@@ -275,6 +276,11 @@ lubancode::agent::TurnWiring BuildTurnWiring(TurnContext& ctx, ToolDisplay& disp
     // P0-2 轨迹接线:loop 的模型边界(request/usage/output)进本轮边界桥。
     // 空 = flag 关的旧路,一处不设。
     wiring.boundary_recorder = trajectory_bridge;
+
+    // token 估算校准(token 估算校准单):主会话接进程级校准器——每请求
+    // 记一对 (默认尺估算+字节, 实报完整输入),双闸/预检估算乘中位系数。
+    // /context 的校准行读同一只实例,主会话与子代理同桶共享。
+    wiring.token_calibrator = &lubancode::agent::DefaultTokenCalibrator();
 
     // Plan 模式(只读研究硬闸单):ModePolicy 接到 RunOneTool 的
     // on_mode_policy 挂点。空 gate = 没装 Plan 闸(单测/子代理旧路)。

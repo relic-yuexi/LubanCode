@@ -20,6 +20,7 @@
 #include "agent/prefix.hpp"
 #include "agent/prompts.hpp"
 #include "agent/resolved_prompt_builder.hpp"  // Token 账本单 A1:三层后叠 + manifest 同一次解析
+#include "agent/token_calibrator.hpp"  // token 估算校准:真实 usage 反推的会话级系数
 #include "agent/tool_result_images.hpp"  // 工具结果图片回喂:请求出门前的 base64 重灌
 #include "api/assembler.hpp"
 #include "cli/i18n.hpp"
@@ -80,7 +81,9 @@ std::int64_t NowMsEpoch() {
 // 给“空白隔开的短词”逐枚托底。`a a a ...` 在常见 tokenizer 里几乎一词
 // 一 token，旧尺只按 4 ASCII/ token 会少算一半，正是 MiniCPM 真机越窗
 // 的那副形状。取 max，不把普通长英文按一字一 token 粗暴拦掉。
-std::size_t EstimateTextTokensForPreflight(const std::string& text) {
+// calibration(token 估算校准单):校准系数乘在取 max 之后的总量上——
+// 真实分词比率把两把尺同比例带偏,托底尺的"取最坏"语义不因校准失序。
+std::size_t EstimateTextTokensForPreflight(const std::string& text, double calibration = 1.0) {
     std::size_t whitespace_terms = 0;
     bool in_term = false;
     for (const unsigned char ch : text) {
@@ -90,10 +93,10 @@ std::size_t EstimateTextTokensForPreflight(const std::string& text) {
         }
         in_term = !separator;
     }
-    return std::max(EstimateUtf8Tokens(text), whitespace_terms);
+    return ApplyTokenCalibration(std::max(EstimateUtf8Tokens(text), whitespace_terms), calibration);
 }
 
-std::size_t EstimateMessageTokensForPreflight(const api::Message& message) {
+std::size_t EstimateMessageTokensForPreflight(const api::Message& message, double calibration = 1.0) {
     std::size_t total = 0;
     for (const auto& block : message.content) {
         total += std::visit(
@@ -136,23 +139,24 @@ std::size_t EstimateMessageTokensForPreflight(const api::Message& message) {
             },
             block);
     }
-    return total;
+    return ApplyTokenCalibration(total, calibration);
 }
 
-std::size_t EstimateRequestInputTokensForPreflight(const api::Request& request) {
+std::size_t EstimateRequestInputTokensForPreflight(const api::Request& request, double calibration = 1.0) {
     std::size_t total = EstimateTextTokensForPreflight(request.system);
     for (const auto& message : request.messages) total += EstimateMessageTokensForPreflight(message);
     for (const auto& tool : request.tools) {
         total += EstimateTextTokensForPreflight(tool.name) + EstimateTextTokensForPreflight(tool.description) +
                  EstimateTextTokensForPreflight(tool.input_schema.dump());
     }
-    return total;
+    return ApplyTokenCalibration(total, calibration);
 }
 
-std::size_t EstimateHistoryTokensForPreflight(const std::vector<api::Message>& messages) {
+std::size_t EstimateHistoryTokensForPreflight(const std::vector<api::Message>& messages,
+                                              double calibration = 1.0) {
     std::size_t total = 0;
     for (const auto& message : messages) total += EstimateMessageTokensForPreflight(message);
-    return total;
+    return ApplyTokenCalibration(total, calibration);
 }
 
 bool ExceedsContextWindow(std::size_t input_tokens, std::size_t output_tokens, std::size_t window_tokens) {
@@ -1009,15 +1013,25 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 每轮现拼:tool_search 可能刚在上一拍挂载新工具。压力预估与最终
         // 发送必须吃同一份定义，免得先估旧表、后发新表。
         request.tools = BuildToolDefinitions();
+        // token 估算校准(真实 usage 反推 byte 比率单):本步全部估算(固定
+        // 账预检、A/B 双闸、preflight 三项账)乘当前系数——(provider,model)
+        // 桶内最近 8 对 (默认尺估算, 实报完整输入) 样本的中位 real/est。
+        // 逐 step 取:上一请求的样本刚记完,系数可能已更新。没接线(单测/
+        // 旧路径)恒 1.0,行为与从前一字不差。
+        const double token_calibration =
+            wiring.token_calibrator != nullptr
+                ? wiring.token_calibrator->Coefficient(agent.profile_.provider, model_)
+                : 1.0;
         // 第一拍的新消息不可压。system、工具表与它自己已加输出预留越窗时，
         // 先报错，连自动 compact 回调都不叫；压旧历史救不了这笔固定账。
         if (step_index == 0 && profile_.context_window_tokens > 0 && !context_.request_history().empty()) {
-            std::size_t fixed_input_tokens = EstimateTextTokensForPreflight(request.system) +
-                                             EstimateMessageTokensForPreflight(context_.request_history().back());
+            std::size_t fixed_input_tokens =
+                EstimateTextTokensForPreflight(request.system, token_calibration) +
+                EstimateMessageTokensForPreflight(context_.request_history().back(), token_calibration);
             for (const auto& tool : request.tools) {
-                fixed_input_tokens += EstimateTextTokensForPreflight(tool.name) +
-                                      EstimateTextTokensForPreflight(tool.description) +
-                                      EstimateTextTokensForPreflight(tool.input_schema.dump());
+                fixed_input_tokens += EstimateTextTokensForPreflight(tool.name, token_calibration) +
+                                      EstimateTextTokensForPreflight(tool.description, token_calibration) +
+                                      EstimateTextTokensForPreflight(tool.input_schema.dump(), token_calibration);
             }
             const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
             const std::size_t output_tokens = static_cast<std::size_t>(output_budget.reserve_for_estimate());
@@ -1085,19 +1099,23 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // 真会占窗口的空间;防"下一轮工具结果再涨"也靠它,不再对整段
             // 历史做倍率虚算(重复结果的去重由工作视图的结构压缩负责)。
             const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
-            std::size_t projected = EstimateTextTokensForPreflight(request.system) +
-                                    EstimateHistoryTokensForPreflight(working_view.messages) +
-                                    static_cast<std::size_t>(output_budget.reserve_for_estimate());
+            std::size_t projected =
+                EstimateTextTokensForPreflight(request.system, token_calibration) +
+                EstimateHistoryTokensForPreflight(working_view.messages, token_calibration) +
+                static_cast<std::size_t>(output_budget.reserve_for_estimate());
             for (const auto& tool : request.tools) {
-                projected += EstimateTextTokensForPreflight(tool.name) +
-                             EstimateTextTokensForPreflight(tool.description) +
-                             EstimateTextTokensForPreflight(tool.input_schema.dump());
+                projected += EstimateTextTokensForPreflight(tool.name, token_calibration) +
+                             EstimateTextTokensForPreflight(tool.description, token_calibration) +
+                             EstimateTextTokensForPreflight(tool.input_schema.dump(), token_calibration);
             }
             // B 闸的真实水位:同一副工作视图,换日常尺(全库统一的
             // EstimateUtf8Tokens 口径,无逐词托底)——projected 那把托底尺
             // 量"最坏情况放不放得下"是对的,量"现在真实用了多少"会把
             // 短词密集的历史虚抬两倍;水位与 /context 同尺,账才对得上。
-            const std::size_t working_view_tokens = EstimateHistoryTokens(working_view.messages);
+            // 校准系数同一枚(token 估算校准单):双闸两把尺同乘,谁也不
+            // 单独偏科;没接线时 1.0,双闸既有单测的数字一字不动。
+            const std::size_t working_view_tokens =
+                EstimateHistoryTokens(working_view.messages, token_calibration);
             const std::size_t projected_line =
                 profile_.context_window_tokens * static_cast<std::size_t>(kProjectedOverflowPercent) / 100;
             const std::size_t real_line =
@@ -1167,6 +1185,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                                     " 字符),裁剪与截断后仍装不下,无法发送。请用 /compact 压缩历史,或开新会话。");
         }
 
+        // 校准样本的本地账(token 估算校准单),在下方硬闸(应急收窄可能往
+        // 尾部消息里注入收尾交代)与样本记录之间递:
+        std::size_t calibration_est_tokens = 0;
+        std::size_t calibration_request_bytes = 0;
+
         // token 窗口的最后一道硬闸。上面的压力回调已经有机会压缩；回来后
         // 仍是“输入估算 + 输出预留 + 协议余量 > 窗口”时,先试应急预留
         //(派工单 §四):当前消息自己装得下、只是常规预留太肥的,把本请求
@@ -1176,10 +1199,13 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 把同一份请求发给 provider 撞 500。
         if (profile_.context_window_tokens > 0) {
             const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
-            const std::size_t input_tokens = EstimateRequestInputTokensForPreflight(request);
+            const std::size_t input_tokens =
+                EstimateRequestInputTokensForPreflight(request, token_calibration);
             const std::size_t window_tokens = profile_.context_window_tokens;
-            const std::size_t current_turn_tokens =
-                request.messages.empty() ? 0 : EstimateMessageTokensForPreflight(request.messages.back());
+            const std::size_t current_turn_tokens = request.messages.empty()
+                                                        ? 0
+                                                        : EstimateMessageTokensForPreflight(request.messages.back(),
+                                                                                            token_calibration);
             std::size_t output_tokens = static_cast<std::size_t>(output_budget.reserve_for_estimate());
             // 三项账进可观测事件(派工单 §4.4):estimated_input + reserved_
             // output + protocol_margin,判定处当场发,不等问题发生后再翻账。
@@ -1239,6 +1265,25 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
                              : "。自动压缩后仍装不下；请开新会话、缩短输入，或调低输出上限。") +
                         " 现场不丢:已完成的工具结果与最后检查点已随任务保留,可据此续派同一任务。");
                 }
+            }
+        }
+
+        // 校准样本的本地账(token 估算校准单):请求已定形(应急收窄的收尾
+        // 交代并入、图片重灌完),上 wire 前现算。口径两条:估算走默认尺
+        // (不乘 token_calibration——系数的锚是默认尺,乘过再量就自我追尾);
+        // 字节按 system + messages + 工具定义的文本字节累,与实报完整输入
+        // (TotalInputTokens)同一份 prompt 对账。
+        if (wiring.token_calibrator != nullptr) {
+            calibration_est_tokens =
+                EstimateUtf8Tokens(request.system) + EstimateHistoryTokens(request.messages);
+            calibration_request_bytes = request.system.size() + EstimateHistoryBytes(request.messages);
+            for (const auto& tool : request.tools) {
+                const std::string schema_dump = tool.input_schema.dump();
+                calibration_est_tokens += EstimateUtf8Tokens(tool.name) +
+                                          EstimateUtf8Tokens(tool.description) +
+                                          EstimateUtf8Tokens(schema_dump);
+                calibration_request_bytes +=
+                    tool.name.size() + tool.description.size() + schema_dump.size();
             }
         }
 
@@ -1733,6 +1778,27 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             // 成本刹车(P2-6):token 硬线按"完整输入 + 输出"累计,与台账/
             // 面板同口径——provider 漏 usage 只会晚触发,不会把闸拆了。
             tokens_seen += api::TotalInputTokens(usage) + usage.output_tokens;
+        }
+
+        // token 估算校准(token 估算校准单):provider 明报了 usage 才记样本
+        //(A0 显式位;全零输入过不了 Record 的实报>0 护栏)。对账口径是完整
+        // 输入(TotalInputTokens = 非缓存 + 缓存读 + 缓存写):provider 的
+        // 分词器数的就是整份 prompt,缓存只改计费不改计数——拿非缓存
+        // input 对整份字节,cache 命中时必然虚低,样本全废,单子护栏点的
+        // 就是这个坑;个别 provider 缓存计数失真的,落在异常带外进不了窗。
+        // 漂移重置(分词口径真换了)打一行诊断,别让估算悄悄变了样。
+        if (wiring.token_calibrator != nullptr && assembler.usage_seen()) {
+            TokenCalibrationSample calibration_sample;
+            calibration_sample.request_bytes = calibration_request_bytes;
+            calibration_sample.estimated_tokens = calibration_est_tokens;
+            calibration_sample.reported_input_tokens = api::TotalInputTokens(assembler.usage());
+            const auto verdict =
+                wiring.token_calibrator->Record(agent.profile_.provider, model_, calibration_sample);
+            if (verdict == TokenCalibrator::RecordVerdict::WindowReset) {
+                platform::LogSink::Instance().Info(
+                    "loop", "[token-calibrator] 比率漂移超阈值,校准窗口已重置(provider=" +
+                                agent.profile_.provider + " model=" + model_ + ")");
+            }
         }
 
         if (wiring.events != nullptr) {
