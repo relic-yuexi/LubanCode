@@ -1,0 +1,73 @@
+# Q2 量化评测装置(工具与上下文治理量化评测单 P0)。
+#
+# 本文件只在 tests/CMakeLists.txt 的 opt-in 段(LUBANCODE_BUILD_EVAL=ON,
+# 默认 OFF)里被 add_subdirectory——默认构建与 CI 三腿不进这里,零新目标
+# 零新测试。打开后:
+#   cmake -B build/eval -DLUBANCODE_BUILD_EVAL=ON <源码根>
+#   cmake --build build/eval --target eval_smoke eval_tool_search_threshold
+#   ctest --test-dir build/eval -L eval        (多配置生成器加 -C <cfg>)
+#
+# 目录即实验(单子 §五):
+#   tool_search_threshold/  实验 A:工具检索退化阈值(P0 = A2/disabled/T1)
+#   compaction_benefit/     实验 B2 备料 + collect(数据件,不编 C++)
+#   compact_position/       实验 B1:位置探针(collect 骨架,驱动后补)
+#   subagent_failure/       实验 C:失败分布(collect 骨架,驱动后补)
+# 共用件:fake_backend.{hpp,cpp}(通用假后端)与 collect_common.py。
+
+# 原始账要带 commit 号(单子 §一合同),configure 时取一次。
+set(LUBANCODE_EVAL_GIT_COMMIT "unknown")
+execute_process(
+  COMMAND git rev-parse --short HEAD
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  OUTPUT_VARIABLE _eval_git_commit OUTPUT_STRIP_TRAILING_WHITESPACE
+  ERROR_QUIET TIMEOUT 10)
+if(_eval_git_commit)
+  set(LUBANCODE_EVAL_GIT_COMMIT "${_eval_git_commit}")
+endif()
+
+# ---- 通用假后端 --------------------------------------------------------------
+# FakeStreamingBackend:蓝本 test_loop.cpp 的脚本式 FakeBackend,通用化方向
+# (可编程脚本/注错断流/usage 记账)见 fake_backend.hpp 头注。只给 eval 驱动
+# 用,不进 lubancode_tests。
+add_library(eval_fake_backend STATIC fake_backend.cpp)
+target_link_libraries(eval_fake_backend PUBLIC lubancode_engine)
+target_compile_features(eval_fake_backend PRIVATE cxx_std_23)
+# 头与实现同目录,自身就要能 include "fake_backend.hpp"。
+target_include_directories(eval_fake_backend PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+
+# ---- 冒烟:假 backend 自检五案 -------------------------------------------------
+add_executable(eval_smoke eval_smoke.cpp)
+target_link_libraries(eval_smoke PRIVATE eval_fake_backend)
+target_compile_features(eval_smoke PRIVATE cxx_std_23)
+add_test(NAME eval.smoke COMMAND eval_smoke)
+set_tests_properties(eval.smoke PROPERTIES LABELS "eval;smoke" TIMEOUT 60)
+
+# ---- 实验 A P0:A2 档 disabled 模式单步 T1 -----------------------------------
+# 40 只工具(12 核心 + 28 延迟)全量直挂,假 backend 一轮(两步:调
+# read_file → 收口),逐次落 JSONL;collect 步骤出 csv+md 双件。
+add_executable(eval_tool_search_threshold tool_search_threshold/eval_driver.cpp)
+target_link_libraries(eval_tool_search_threshold PRIVATE eval_fake_backend)
+target_compile_features(eval_tool_search_threshold PRIVATE cxx_std_23)
+target_compile_definitions(eval_tool_search_threshold PRIVATE
+  LUBANCODE_EVAL_TOOL_SEARCH_ROOT="${CMAKE_CURRENT_SOURCE_DIR}/tool_search_threshold"
+  LUBANCODE_GIT_COMMIT="${LUBANCODE_EVAL_GIT_COMMIT}")
+add_test(NAME eval.tool_search_threshold.a2_disabled_t1
+  COMMAND eval_tool_search_threshold)
+set_tests_properties(eval.tool_search_threshold.a2_disabled_t1 PROPERTIES
+  LABELS "eval;tool_search_threshold;eval.tool_search_threshold" TIMEOUT 120)
+
+# collect:原始 JSONL → csv + md(本机 pandas/pyarrow 齐时顺手出 parquet)。
+# python 不在就只 STATUS 不注册,不给默认路添堵。
+find_program(LUBANCODE_EVAL_PYTHON_EXECUTABLE python)
+if(LUBANCODE_EVAL_PYTHON_EXECUTABLE)
+  add_test(NAME eval.tool_search_threshold.collect
+    COMMAND "${LUBANCODE_EVAL_PYTHON_EXECUTABLE}"
+            "${CMAKE_CURRENT_SOURCE_DIR}/tool_search_threshold/collect.py"
+            --raw "${CMAKE_CURRENT_SOURCE_DIR}/tool_search_threshold/results/raw_a2_disabled_t1.jsonl"
+            --out-dir "${CMAKE_CURRENT_SOURCE_DIR}/tool_search_threshold/results")
+  set_tests_properties(eval.tool_search_threshold.collect PROPERTIES
+    LABELS "eval;tool_search_threshold;eval.tool_search_threshold" TIMEOUT 120
+    DEPENDS "eval.tool_search_threshold.a2_disabled_t1")
+else()
+  message(STATUS "tests/eval: python 未找到,collect 步骤不注册(其余 eval 测试照跑)")
+endif()

@@ -492,3 +492,16 @@ if(WIN32)
   target_compile_features(title_wake_driver PRIVATE cxx_std_23)
   target_link_libraries(title_wake_driver PRIVATE ws2_32)
 endif()
+
+# ---- Q2 量化评测装置(工具与上下文治理量化评测单 P0,opt-in) ------------------
+# tests/eval/ 的实验装置与 ctest 注册全挂在这个缓存选项下,默认 OFF——
+# 默认构建与 CI 三腿零新目标零新测试(开关不开,eval/ 连 configure 都不进)。
+# 打开后 eval 目标/测试才出现,ctest 一键:
+#   cmake -B build/eval -DLUBANCODE_BUILD_EVAL=ON <源码根>
+#   cmake --build build/eval --target eval_smoke eval_tool_search_threshold
+#   ctest --test-dir build/eval -L eval   (多配置生成器加 -C <cfg>)
+option(LUBANCODE_BUILD_EVAL
+  "Build Q2 eval harnesses under tests/eval/ (adds ctest entries labelled 'eval')" OFF)
+if(LUBANCODE_BUILD_EVAL)
+  add_subdirectory(eval)
+endif()

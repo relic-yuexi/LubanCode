@@ -73,6 +73,10 @@ AGENT_HANDOFF.md
 # / README.md / smoke_set.json 四件;本体由脚本按锁拉到此目录。
 tests/eval/compaction_benefit/cache/
 
+# Q2 量化评测(P0 装置)原始账与 collect 产物:可重生成(ctest -L eval 一键),
+# 不进仓;进仓的只有装置与口径(README 记数据件约定)。
+tests/eval/*/results/
+
 # 质量对照跑批临时目录:含拷贝的真 config(带钥匙)与会话轨迹,绝不进 git
 eval/deferred_quality/_run/
 
