@@ -285,7 +285,7 @@ worker 在后台：
 | L1 与 artifact | `src/agent/context_events.cpp`、`artifact_store.cpp` | `tests/unit/api/test_context_events.cpp`、`test_artifact_store.cpp` |
 | L2 microcompact | `src/agent/microcompact.cpp` | `tests/unit/memory/test_microcompact.cpp` |
 | L3 compact | `src/agent/compact.cpp` | `tests/unit/agent/test_compact.cpp` |
-| session 回放 | `src/sessions/session_store.cpp` | `tests/unit/sessions/test_session_store.cpp` |
+| session 回放 | `src/trajectory/replay.cpp`（workspace Journal 折叠） | `tests/unit/trajectory/test_replay_state.cpp`、`test_harness_replay.cpp` |
 | 记忆召回与 worker | `src/memory/project_memory.cpp` | `tests/unit/memory/test_memory_retrieval.cpp`、`test_project_memory.cpp` |
 | 收尾抽取 | `src/app/memory_extract.cpp` | 记忆抽取与候选测试 |
 

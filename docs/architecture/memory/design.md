@@ -143,21 +143,16 @@ feedback 必须是用户明说的(`confidence: user-stated`)。模型推断出�
 
 记忆不能只按 cwd 分。用户从仓库根、子目录和 linked worktree 启动，理当看到同一份项目记忆。
 
-Git 项目按 common git dir 认身份：
+身份由 workspace 统一裁决器（`src/workspace/identity.cpp`）计算——记忆、会话、轨迹同吃这一把钥匙，不再各算各的。四级裁决，最近边界胜：
 
-1. 从 cwd 往上找 Git 项目。
-2. 普通仓库取 `.git` 归属；linked worktree 解出 common dir。
-3. 规范化绝对路径。Windows 再做大小写归一。
-4. 以 `git:<common-path>` 算稳定 64 位短哈希。
-5. 目录名取“仓库名 + 哈希”。
+1. 最近的 Git 仓库：普通仓库取 `.git` 目录；linked worktree 经 `.git` 文件解出 common dir。以 `git:<common-path>` 为种子。
+2. 不在 Git 内：最近的 `.lubancode/workspace.json`（marker）声明的稳定 `workspace_id` 定界，以 `marker:<id>` 为种子——同 id 的两处目录显式并账。
+3. 没有 marker：最近的 `.lubancode/config.json` 所在目录，以 `path:<root>` 为种子。
+4. 四处皆无：启动 cwd（不爬到用户主目录），同样 `path:` 种子。
 
-同一仓库的多个 worktree 共用 key。两份独立 clone 路径不同，默认不共享。
+key = `<安全显示名>-<SHA256 前 16 位>`；显示名里的非法字节折成 `-`，目录名出不了圈。规范化绝对路径统一正斜杠，Windows 再折叠 ASCII 大小写；POSIX 保留大小写。
 
-非 Git 目录按这条路认根：
-
-1. 向上找最近的 `.lubancode/config.json`。
-2. 找不到，就取启动 cwd。
-3. 以 `path:<root>` 算 key。
+同一仓库的多个 worktree 共用 key（common git dir 同源）。两份独立 clone 路径不同，默认不共享。
 
 工作目录经 `/worktree` 或其他流程变化时，运行对象会重新解析身份与记忆目录。
 
@@ -165,7 +160,6 @@ Git 项目按 common git dir 认身份：
 
 ```text
 ~/.lubancode/
-  sessions/                         会话存档，记忆不混进去
   memory/
     user/                           用户级记忆(跨项目,须全局授权)
       index.md                      给人看的短索引(User Memory),可重建
@@ -173,26 +167,23 @@ Git 项目按 common git dir 认身份：
       feedback/                     跨项目行事反馈
       archive/
       .state/catalog.json
-  workspaces/                     存储 v2 P0-3 起:session 与 memory 同树
+  workspaces/                       存储 v2 P0-3 起:session 与 memory 同树
     lubancode-4fd2c83a9e5b7a10/
       workspace.json                workspace v2 manifest(OpenOrRegisterWorkspace 原子写)
+      sessions/<session_id>/        会话账(与 memory 同树,见会话文档)
       memory/
         index.md                    给人看的短索引，可重建
         facts/                      事实主题(只住项目层)
           agent-loop-request-flow.md
         preferences/                项目偏好主题
+        feedback/                   项目层行事反馈
+        archive/                    已遗忘或被替代的旧主题
         memory-candidates/          review 档待审候选
           cand-*.json
           rejected.json             被拒主题短哈希与理由，不存正文
         .state/
-          catalog.json
-          recall-traces/trace-last.json   上一轮召回 trace(schema 3,键 workspace_key)
-          package-manager.md
-        feedback/                   项目层行事反馈
-        archive/                    已遗忘或被替代的旧主题
-        .state/
           catalog.json              机器检索元数据，可重建
-          trace-last.json           上一轮召回解释，不存完整问题与正文
+          recall-traces/trace-last.json   上一轮召回 trace(schema 4,键 workspace_key)
   memory-jobs/
     pending/                        等后台 worker 处理的 JSON
     failed/                         坏任务与错误说明
