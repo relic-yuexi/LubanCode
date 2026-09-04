@@ -16,6 +16,7 @@
 #include <atomic>
 #include <chrono>
 #include <map>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <utility>
@@ -69,14 +70,31 @@ public:
 // 取消,再走内嵌假件的记账路。
 class BlockingFakeTransport final : public BoundedHttpTransport {
 public:
+    // 一笔睡眠的起止账(steady_clock)。判"真并行/真串行"看两笔睡眠
+    // 区间是否重叠,不看墙钟总长:慢机的调度噪声吃得掉总时长差,吃
+    // 不掉区间重叠与否——sleep_for 只会睡多不会睡少,每笔区间至少
+    // block_ms 宽,重叠与否跟机器快慢不沾边。
+    struct SleepWindow {
+        std::chrono::steady_clock::time_point started;
+        std::chrono::steady_clock::time_point finished;
+    };
+
     std::chrono::milliseconds block_ms{150};
     FakeHttpTransport inner;
     int cancelled_observed = 0;  // 在途段亲眼看到旗子置位的次数
+    // 每笔 Execute 一枚。两路线程 join 完再读;记账本身自带锁——串行
+    // 册若 mutex 失守、两路真并睡了,记账也不许 UB。
+    std::vector<SleepWindow> sleep_windows;
 
     std::expected<HttpExchangeResponse, HttpTransportError> Execute(
         const HttpExchangeRequest& request, const EffectiveHttpLimits& limits,
         const std::atomic<bool>* cancel) override {
+        const auto started = std::chrono::steady_clock::now();
         std::this_thread::sleep_for(block_ms);
+        {
+            const std::lock_guard<std::mutex> lock(windows_mutex_);
+            sleep_windows.push_back({started, std::chrono::steady_clock::now()});
+        }
         if (cancel != nullptr && cancel->load()) {
             ++cancelled_observed;  // 取消路不走 inner 的记账,自己记
             HttpTransportError error;
@@ -86,7 +104,18 @@ public:
         }
         return inner.Execute(request, limits, cancel);
     }
+
+private:
+    std::mutex windows_mutex_;
 };
+
+// 两笔睡眠区间重叠 = 一路睡着的当口另一路也在睡:并行判据的语义本
+// 体。证并行用它(CHECK),证串行用它的反(CHECK_FALSE),跟墙钟
+// 精度、调度开销都不相干。
+bool SleepWindowsOverlap(const BlockingFakeTransport::SleepWindow& a,
+                         const BlockingFakeTransport::SleepWindow& b) {
+    return a.started < b.finished && b.started < a.finished;
+}
 
 // 一份最小 manifest 账:api.anysearch.com 的 GET/POST + api_key(optional)。
 PluginHttpCallSpec MakeSpec(BoundedHttpTransport* transport, SecretResolver* resolver,
@@ -895,12 +924,15 @@ TEST_CASE("同 state 串行:两路并发调用被 mutex 排队,不串结果") {
     b.join();
     const auto elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
-    // 两笔各睡 150ms,串行就是 300ms 上下;重叠了说明 mutex 没守住。
-    CHECK(elapsed_ms >= 260);
+    CAPTURE(elapsed_ms);  // 诊断留影:串行该在 300ms 上下,不作断言(墙钟扛不住慢机噪声)
+    // 证串行不靠总时长(那要拿墙钟精度扛调度开销):两笔睡眠区间不重
+    // 叠,才是"mutex 把两路排队"的语义本身。区间重叠即 mutex 失守。
+    REQUIRE(transport.sleep_windows.size() == 2);
+    CHECK_FALSE(SleepWindowsOverlap(transport.sleep_windows[0], transport.sleep_windows[1]));
     CHECK(transport.inner.call_count() == 2);
 }
 
-TEST_CASE("不同插件并行:各有 state,各睡各的,总时长不叠串行") {
+TEST_CASE("不同插件并行:各有 state,各睡各的,睡眠区间真重叠") {
     BlockingFakeTransport transport_a;
     BlockingFakeTransport transport_b;
     CountingResolver resolver;
@@ -937,10 +969,15 @@ TEST_CASE("不同插件并行:各有 state,各睡各的,总时长不叠串行") 
     b.join();
     const auto elapsed_ms =
         std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - started).count();
-    // 并行:一笔的睡眠盖住两路(150ms 上下;串行会是 300ms 上下)。慢
-    // runner(CI macOS 实翻)上调度能吃掉并行红利,帽放到串行线下方一档;
-    // 判"确实并行"的关键是没到 300ms 级,不是毫秒精度。
-    CHECK(elapsed_ms < 290);
+    CAPTURE(elapsed_ms);  // 诊断留影:并行该在 150ms 上下,不作断言(墙钟扛不住慢机噪声)
+    // 证并行不靠总时长:CI macOS 慢机(run 33920363083)上调度开销吃
+    // 掉并行红利,< 290 这类墙钟帽实翻过。换区间重叠检测——两笔睡眠
+    // 区间真重叠(a_start < b_end && b_start < a_end),才是"各有
+    // state、各睡各的"的语义本体。每笔区间至少 150ms 宽,只有一路
+    // 拖 150ms 以上才进不了重叠:那是真没并行,不是慢机误判。
+    REQUIRE(transport_a.sleep_windows.size() == 1);
+    REQUIRE(transport_b.sleep_windows.size() == 1);
+    CHECK(SleepWindowsOverlap(transport_a.sleep_windows[0], transport_b.sleep_windows[0]));
     CHECK(transport_a.inner.call_count() == 1);
     CHECK(transport_b.inner.call_count() == 1);
 }
