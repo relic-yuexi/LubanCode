@@ -515,6 +515,9 @@ add_library(lubancode_engine STATIC
   "${_lubancode_embedded_tool_text}"
   "${_lubancode_embedded_provider_catalog}"
   src/agent/context.cpp
+  # token 估算校准(真实 usage 反推 byte 比率单):会话级校准器,
+  # (provider,model) 分桶,滚动窗口中位系数供估算口乘。
+  src/agent/token_calibrator.cpp
   src/agent/context_events.cpp
   src/agent/artifact_store.cpp
   # ccmoon 真机巡检单 P0:模型输出图片(Responses image_generation_call)
