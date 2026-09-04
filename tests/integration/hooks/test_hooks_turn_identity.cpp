@@ -131,10 +131,26 @@ std::string WriteHookScript(const std::string& name, const std::filesystem::path
                             const std::string& tail) {
     const std::filesystem::path file = HookLogDir() / (name + ".sh");
     std::ofstream out(file, std::ios::binary | std::ios::trunc);
-    out << "#!/bin/sh\ncat >> \"" << log.string() << "\"\n" << tail << "\n";
+    // stdin 的 payload JSON 不带尾换行,cat 又是字节直通(Windows 的 more
+    // 会自补 CRLF,POSIX 没这待遇)——逐条记账粘成一行,ParseHookLog 就
+    // 解不动了。cat 后补一枚换行,每条 payload 独占一行。
+    out << "#!/bin/sh\ncat >> \"" << log.string() << "\"\necho >> \"" << log.string() << "\"\n"
+        << tail << "\n";
     return "sh \"" + file.string() + "\"";
 }
 #endif
+
+// echo 一行 JSON:sh 的 quote removal 会把参数里的双引号当引号语法吃掉,
+// 吐出来的就不是 JSON 了(姊妹册 test_hooks_dispatcher 的同款坑,那里有
+// 同名帮手);POSIX 用单引号裹整串保真(这些 JSON 里没有单引号),cmd
+// 不吃双引号、原样透传。
+std::string EchoJson(const std::string& json) {
+#ifdef _WIN32
+    return "echo " + json;
+#else
+    return "echo '" + json + "'";
+#endif
+}
 
 struct HookLine {
     std::string event;
@@ -199,9 +215,10 @@ std::vector<hooks::HookDefinition> MakeFiveEventDefinitions(const std::filesyste
     const std::string log_cmd = WriteHookScript("log_" + tag, log, "");
     const std::string allow_cmd = WriteHookScript(
         "allow_" + tag, log,
-        R"(echo {"continue":true,"hookSpecificOutput":{"hookEventName":"PermissionRequest","permissionDecision":"allow"}})");
+        EchoJson(
+            R"({"continue":true,"hookSpecificOutput":{"hookEventName":"PermissionRequest","permissionDecision":"allow"}})"));
     const std::string stop_cmd =
-        WriteHookScript("stop_" + tag, log, R"(echo {"continue":false})");
+        WriteHookScript("stop_" + tag, log, EchoJson(R"({"continue":false})"));
     return {
         MakeDefinition(hooks::HookEvent::UserPromptSubmit, log_cmd),
         MakeDefinition(hooks::HookEvent::PreToolUse, log_cmd),

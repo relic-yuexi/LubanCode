@@ -773,68 +773,79 @@ TEST_CASE("阶段B·暂停:Agent 动作受理不执行,用户动作照走,终态
 TEST_CASE("阶段B·让路:用户动作不排在 Agent 动作后头") {
     BrowserHarness harness;
     // 慢档:每笔 sidecar 调用悬 250ms——第一笔占住在途,后面的排队。
-    std::mutex order_mutex;
-    std::vector<std::string> sidecar_order;
-    const auto note = [&](const std::string& tag) {
-        std::lock_guard<std::mutex> lock(order_mutex);
-        sidecar_order.push_back(tag);
+    //
+    // 账本挂 shared_ptr、handler 按值捕获:本例早退拆栈时,在飞
+    // handler 脚下的账还活着(~BrowserHarness 先 join 工作线程、后拆
+    // sidecar 的 handler 表)——CI ubuntu 实翻过"CHECK 红+早退后
+    // SIGSEGV":账钉在测试栈上,工作线程还在 note() 里摸它。
+    //
+    // 轮询侧只在取值一瞬持锁、睡在锁外。抱着锁睡会把 glibc 非公平
+    // mutex 的 waiter 饿出几十秒(睡醒的抢不过热路径上立刻重抢的):
+    // 本地实测本案从 0.75s 拖到 9~66s,CI 慢机直接顶穿 60s 收齐门
+    // (ubuntu-gcc 腿单红即此;Windows/macOS 的锁实现没饿死而已)。
+    struct OrderLog {
+        std::mutex mutex;
+        std::vector<std::string> order;
+        void Note(const std::string& tag) {
+            std::lock_guard<std::mutex> lock(mutex);
+            order.push_back(tag);
+        }
+        std::size_t Size() {
+            std::lock_guard<std::mutex> lock(mutex);
+            return order.size();
+        }
+        std::vector<std::string> Take() {
+            std::lock_guard<std::mutex> lock(mutex);
+            return order;
+        }
     };
-    harness.sidecar.SetHandler("action", [&](const nlohmann::json& params) {
-        note(std::string("action:") + params.value("owner", std::string("?")));
+    const auto log = std::make_shared<OrderLog>();
+    harness.sidecar.SetHandler("action", [log](const nlohmann::json& params) {
+        log->Note(std::string("action:") + params.value("owner", std::string("?")));
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         return nlohmann::json{{"pageId", "p1"}};
     });
-    harness.sidecar.SetHandler("snapshot", [&](const nlohmann::json& params) {
-        note(std::string("snapshot:") + params.value("owner", std::string("?")));
+    harness.sidecar.SetHandler("snapshot", [log](const nlohmann::json& params) {
+        log->Note(std::string("snapshot:") + params.value("owner", std::string("?")));
         std::this_thread::sleep_for(std::chrono::milliseconds(250));
         return nlohmann::json{{"snapshotId", "p1-g1-s1"}, {"text", "- button \"x\" [ref=e1]"}};
     });
 
     // 在途:agent 快照(读动作,不过审批,但占着唯一的动作工位)。
-    // 首笔等待放 40s:慢 runner 上 2s 不够,而 REQUIRE 一 abort,handler
-    // 引用的栈账(sidecar_order/note)还在工作线程手里,拆栈即 SIGSEGV
-    // (CI ubuntu 实翻)。断言改 CHECK+早退,退场前先摘 handler 再拆栈。
+    // 首笔等待放 40s:慢 runner 上 2s 不够。断言 CHECK+早退(账在
+    // shared_ptr 里,早退不炸;REQUIRE-abort 会半途拆栈,不这么写)。
     harness.Feed(R"({"id":80,"method":"browser/snapshot","params":{"owner":"agent","threadId":"t-arb"}})");
     for (int i = 0; i < 8000; i++) {
-        std::lock_guard<std::mutex> lock(order_mutex);
-        if (!sidecar_order.empty()) {
+        if (log->Size() >= 1) {
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
     }
-    if ([&] {
-            std::lock_guard<std::mutex> lock(order_mutex);
-            return sidecar_order.size();
-        }() != 1) {
+    if (log->Size() != 1) {
         CHECK_MESSAGE(false, "首笔 agent 快照未在 40s 内进 sidecar(慢 runner 或 dispatch 病)");
-        return; // 早退不 REQUIRE-abort:留给析构安全收线
+        return; // 早退安全:账本 shared,析构先 join 工作线程
     }
 
     // 排队:agent 快照二号,再用户点击。用户点击必须先于 agent 二号跑。
     harness.Feed(R"({"id":81,"method":"browser/snapshot","params":{"owner":"agent","threadId":"t-arb"}})");
     harness.Feed(R"({"id":82,"method":"browser/action","params":{"kind":"click","ref":"e1"}})");
     for (int i = 0; i < 6000; i++) {
-        std::lock_guard<std::mutex> lock(order_mutex);
-        if (sidecar_order.size() == 3) {
+        if (log->Size() == 3) {
             break;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(10));
     }
-    std::vector<std::string> order;
-    {
-        std::lock_guard<std::mutex> lock(order_mutex);
-        order = sidecar_order;
-    }
+    const std::vector<std::string> order = log->Take();
     if (order.size() != 3) {
         CHECK_MESSAGE(false, "三笔未在 60s 内收齐");
-        return; // 早退,别 REQUIRE-abort
+        return; // 早退安全,同上
     }
     CHECK(order[0] == "snapshot:agent"); // 在途的让不了(串行底线)
     CHECK(order[1] == "action:user");    // 用户插队,排到 agent 二号前头
     CHECK(order[2] == "snapshot:agent"); // Agent 让路
 
-    // 等三笔都收口再退场:handler 引用的账在本例栈上,工作线程还有在途
-    // 调用就拆栈会撞空(teardown 与在途 handler 赛跑的旧坑)。
+    // 等三笔都收口再退场:在飞 handler 引用的账在 shared_ptr 里,
+    // 拆栈与在途调用不再赛跑(析构 join 工作线程兜底)。
     const auto action_id_of = [&](std::int64_t id) -> std::string {
         const auto reply = harness.FindResponse(id);
         REQUIRE(reply.has_value());
