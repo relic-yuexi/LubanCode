@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.205] - 2026-09-04
+
+- **CI 两 POSIX 腿红修复（均为测试夹具病，production 零改动）。** hooks_turn_identity：stdin payload 缺尾换行致 POSIX cat 记账粘行（补一枚换行）+ 表态 JSON 被 sh 剥引号（单引号裹整串保真）。app_server_browser：轮询循环 `lock_guard` 吞掉 `sleep_for`，glibc 非公平 mutex 下工作线程饿出 12~14s、CI 慢机过 60s 门即红，红后早退拆栈再踩 SIGSEGV——改为取值一瞬持锁、账本挪 `shared_ptr`，修后 16 轮钉死 0.75s（修前 9~66s 乱跳）、-j8 三轮全绿。两腿同治（macOS 腿同病灶只是没过线）。
+
 ## [v0.26.204] - 2026-09-04
 
 - **Workspace 统一存储收官验收批（验收与基线，无新开发）。** 五册集成新册：综合恢复（杀进程/断流后 resume/verify 全过、死锁不算活人、旧账一字不追加）、worktree 共享存储（同 key 同 workspace、记忆跟 common git dir 走）、全局 Memory 越权六路全拒（模型工具/四子代理并发/Skill 毒词/Lua 摸盘/项目配置提权全拦）、identity 跨平台（junction/symlink/锁/8 写手并发原子写）、旧家升级（旧根零读零写、v1 搬错家点名不冒充）。量级基线进仓：list 10k 冷 10.7s/热 0.66s、recall ~0.53s、replay 5.0ms、峰值 128 MiB（`docs/development/workspace-storage-v2/scale-baseline.md`）。八份存储文档对齐 v2 现行为。合并后全量 **387/387 全绿**；Linux/WSL 腿 17 册全绿；macOS 腿留 CI（无环境不伪造）。
