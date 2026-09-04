@@ -95,6 +95,9 @@ def build_home(mode: str) -> str:
     luban = os.path.join(home, ".lubancode")
     os.makedirs(luban, exist_ok=True)
     cfg = json.load(open(REAL_CONFIG, encoding="utf-8"))
+    # 钉死评测口径:active_provider 一并钉在评测 provider 上——用户真 config 的
+    # 默认 provider 日常会切(实测被切到 minimax 后,整批答题悄悄换了模型,账全废)。
+    cfg["active_provider"] = PROVIDER_NAME
     # A/B 唯一差异:memory.enabled。B 组 user 层不动(默认关),只开项目层。
     cfg["memory"] = dict(cfg.get("memory") or {})
     cfg["memory"]["enabled"] = (mode == "B")
@@ -360,6 +363,10 @@ def main():
     ap.add_argument("--max-attempts", type=int, default=0,
                     help=">0 时同一 qid 失败这么多次后熔断,不再重试(防断线续跑"
                          "在 hopeless 超时题上无限烧钟)")
+    ap.add_argument("--qids", default="",
+                    help="只跑这些 qid(逗号分隔,如 conv-49_q1,conv-49_q2);"
+                         "抽样仍按 --convs/--seed 原口径定题集后再过滤——"
+                         "单场续跑必须保持五场列表的 rng 顺序,不能只给单场")
     args = ap.parse_args()
     per_cat = 1 if args.smoke else args.per_category
     run_modes = tuple(m.strip() for m in args.modes.split(",") if m.strip())
@@ -379,6 +386,10 @@ def main():
     tasks = sample_questions(convs, per_cat, args.seed, cats)
     if args.limit:
         tasks = tasks[:args.limit]
+    if args.qids:
+        allow = {q.strip() for q in args.qids.split(",") if q.strip()}
+        tasks = [t for t in tasks if t[1]["qid"] in allow]
+        print(f"qid 白名单过滤: 剩 {len(tasks)} 题")
     print(f"题集: {len(tasks)} 题(每类 {per_cat},类别 {cats or '全部'}),本次态 {run_modes}")
 
     if not args.report_only:
