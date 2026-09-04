@@ -9,8 +9,11 @@
 ```text
 lubancode [options]
 lubancode "问题"
+lubancode --output <path> "问题"
 command | lubancode "补充要求"
 lubancode app-server
+lubancode trajectory <verb> <session-id|workspace-key>
+lubancode gateway <run|status|stop> [options]
 lubancode archive <id|标题>
 lubancode unarchive <id>
 lubancode delete <id|标题> [--force]
@@ -20,8 +23,11 @@ lubancode delete <id|标题> [--force]
 | --- | --- |
 | 无参数 | 进入交互会话；缺少模型配置时可直接添加 Provider，也可跳过后稍后配置。 |
 | 一个普通参数 | 作为单发问题；模型仍可调用适用工具。 |
+| 单发加 `--output <path>` | 回合收口后，把这一场派生为 Harness JSONL 写到指定路径；只认带任务正文的单发形态。 |
 | stdin 有管道数据 | 管道正文与命令行问题一同交给模型；输出降为 plain。 |
 | `app-server` | 无界面后台协议模式：stdin/stdout 上逐行 JSON-RPC，不碰终端、不画界面（见 [app-server 协议](../features/app-server/README.md)）。SSH 远程项目经 `ssh <host> lubancode app-server` 拉起。 |
+| `trajectory` | 验证、回放、用量、清理与导出本地 Trajectory；不发模型请求。 |
+| `gateway` | 前台运行、查询或停止 Gateway 骨架；当前只落 `run/status/stop`，后续运维面不冒充已成。 |
 | `archive` / `unarchive` / `delete` | 会话管理子命令，打完结果就退（见下）。 |
 | EOF | 交互模式退出；空行只重新显示提示符。 |
 
@@ -40,6 +46,7 @@ lubancode delete <id|标题> [--force]
 | `--help` | 打印运行方式、参数、配置与交互命令后退出。 |
 | `--yes` | 起手即用 `yolo`，自动放行所有需要确认的工具。 |
 | `--continue` | 进入交互界面前恢复本目录最近一场会话；没有便开新会话。 |
+| `--output <path>` | 单发模式结束后导出 Harness v1 JSONL；交互模式、app-server 与别的子命令带上会拒绝。常与脚本中的 `--yes` 合用。 |
 | `--config` | 打印最终配置、字段来源、权限摘要和模型目录命中情况；密钥打码。 |
 | `--system-prompt <file>` | 用 UTF-8 `.md/.txt` 替换人格段；运行所需环境与工具规则仍会追加。 |
 | `--reset-system-prompt` | 把 `~/.lubancode/system_prompt.md` 还原成内置版，旧文件留作 `.bak`。 |

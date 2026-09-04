@@ -4,6 +4,8 @@
 
 这里按用户眼中的功能分门。精确字段去参考手册；源码状态机去架构区。
 
+头一回来，先照[三分钟上手](../getting-started/quickstart.md)跑完一场任务。想知道为何用 C++、与 Claude Code、Codex CLI、Pi 各走哪条路，读[为什么是 LubanCode](../getting-started/why-lubancode.md)。
+
 | 模块 | 内容 |
 | --- | --- |
 | [会话](sessions/README.md) | history、session、恢复、导出、token 与缓存 |

@@ -2,7 +2,9 @@
 DOC README.md
 
 # 上手与排错
+DOC getting-started/quickstart.md
 DOC getting-started/troubleshooting.md
+DOC getting-started/why-lubancode.md
 
 # 功能模块
 DOC features/README.md

@@ -4,7 +4,7 @@
 
 <h1 align="center">LubanCode</h1>
 
-<p align="center"><strong>一把装在终端里的 AI 编程工具。C++23 写成，三协议接入，能读代码，也能动手干活。</strong></p>
+<p align="center"><strong>C++23 写成的轻量本地 Agent Harness。读代码，改文件，跑命令，派子代理；模型与端点都由你选。</strong></p>
 
 <p align="center">
   <strong>简体中文</strong> · <a href="README.en.md">English</a>
@@ -17,9 +17,13 @@
   <img src="https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-444444" alt="Windows, Linux and macOS">
 </p>
 
-LubanCode 原生支持 Anthropic Messages、OpenAI Responses 与 Chat Completions 兼容接口。模型能读文件、改代码、跑命令、查资料，也能调度子代理、MCP 与 LSP。75 家 Provider 预设装在目录里，搜到便可配置。流式正文、Markdown、diff、代理坞、消息队列、会话存档，也都在终端里铺开。
+LubanCode 把模型接到本地工具上。模型判断下一步，程序负责读写文件、执行命令、申请权限、调度子代理。每轮结束，会话、工具调用与 token 用量各自落盘，往后还能续接和核查。
+
+模型由你来选。LubanCode 原生接 Anthropic Messages、OpenAI Responses、OpenAI-compatible Chat Completions、Gemini Generate Content 四种协议。内置目录收了 68 家 Provider 预设，自建 vLLM 与兼容端点也能接。
 
 鲁班造物，先正绳墨，再下斧凿。LubanCode 也守这条规矩：先看清，再动手；改了什么，明明白白摆给你看。
+
+**[三分钟跑完第一场任务](docs/getting-started/quickstart.md)** · **[看 C++ 取舍与同类对照](docs/getting-started/why-lubancode.md)**
 
 > 源码版本只认 [`src/app/version.hpp`](src/app/version.hpp)。主分支代码改动会在 Windows、Ubuntu、macOS 三路编译并跑全量测试；结果以页首 CI badge 为准。
 
@@ -37,50 +41,78 @@ LubanCode 原生支持 Anthropic Messages、OpenAI Responses 与 Chat Completion
 </p>
 <p align="center"><sub>Markdown 标题、表格与代码块直接画在终端里。</sub></p>
 
-## 为什么是 LubanCode
+## 一场任务怎么跑
 
-五件事，先摆在桌上。
+你在仓库里唤起 `lubancode`，交代一件事。它先读项目指令，再把上下文与工具交给模型。模型要查，Harness 就查；要改，Harness 先过权限门；要跑测试，Harness 管住进程、超时与取消。回合结束，消息、工具、usage、轨迹各自落账，往后能续、能查、能导出。
 
-### 1. 下载即用，不用另装运行时
+```text
+你的任务 -> 项目指令 -> 模型 -> 工具/子代理/Workflow -> 验证 -> 会话与轨迹
+```
 
-不需要 Node.js。不需要 Python。不需要 `npm install`。Windows x64 Release 主程序约 8.2 MiB，一套免安装的原生发行包解压便能起跑。Windows 一行命令安装，Linux / macOS 解压即用。发行包除主程序外，还带 `libexec/rg`（内置 ripgrep 搜索后端，MIT 协议，`search` 工具就靠它）、官方 skills、文档与许可证（含第三方声明），离线环境装完即可搜。
+日常可拿它修 bug、补测试、审 diff。要接自己的前端，可用 app-server；要编排固定流程，可用强类型 Workflow；要研究 Agent 运行过程，可导出轨迹，也可给自建模型做兼容诊断。
 
-### 2. 忙时也能接着输入
+## 轻在哪儿
 
-模型还在思考，你照样可以键入下一条。回车一按，消息进队列；当前回合收口，下一条自己接上。子代理另有一片导航坞，谁在跑、跑了多久、用了几件工具，一眼便知。终端不是日志瀑布，是一张能办事的桌子。
+LubanCode 功能不少，安装和运行却尽量少背东西。Release 用原生程序，不要求 Node.js 或 Python。包里另带一只 `rg`，文件搜索开箱就能用。
 
-### 3. 魂/法分离的提示词系统
+普通交互会话按需启动外部组件。LSP 第一次调用时才拉起，闲久了会自行退出；MCP、插件等工具太多时，先留索引，模型搜到再挂进请求。Gateway 与渠道进程也不会因读到配置便暗自启动，只有显式命令才会拉起。
 
-两套提示词各管一段：
+输出重定向或接进管道时，终端界面会收起原地重画，退成 plain 文本。轻量在这里指依赖少、闲时少起进程、能力按需装入。仓库尚未做四款 CLI 的同机启动与内存测试，README 不报未经测量的快慢。
 
-- **法**（`~/.lubancode/system_prompt.md`）：行为骨架——工具调用、代码规范、工作流程的规矩。稳得住，不轻易动。
-- **魂**（`~/.lubancode/SOUL.md`）：风格叠加层——"只用文言文答话""回答控制在三句话内"。盖在法之上，随叫随切。
+## 终端也能说中文
 
-`/soul` 一键切换，`~/.lubancode/souls/` 下放多个备选魂文件。改风格不必碰行为逻辑，改行为不必重写人格。别的工具系统提示是一整坨，LubanCode 把它拆开了。
+让模型用中文回答不难。难的是程序自己也别满屏英文。LubanCode 把菜单、帮助、审批、常用状态与错误文案接进 i18n。它会认系统语言，内置简体中文与英文；会话里敲 `/language`，当场便能切。还嫌不够，就往 `~/.lubancode/languages/` 放一份 JSON，添一门语言不用改源码，也不用重编。
 
-### 4. 项目记忆
+这套 i18n 只管界面，不偷改系统提示、工具描述或模型回复。中文表覆盖全量键；英文表覆盖核心键，漏下的文案会回退中文。语言包也准许只翻一部分，余下照同一条链回退。细节见[界面多语言](docs/development/i18n.md)。
 
-LubanCode 会记住你的项目事实与偏好——构建命令、代码风格、踩过的坑。`/memory` 管理召回，后台自动整理。
+## 为什么偏用 C++
 
-一个细节：同一个 Git 仓库的主工作树和 linked worktree（`/worktree` 新建的隔离工作树）按 common git dir 归到同一身份，**共享同一份记忆**。你在主分支教过的东西，切到 worktree 里不用重教。
+选 C++，先看 LubanCode 天天碰什么：终端、HTTP 流、子进程、信号、超时、取消。Windows 还要处理 Job Object 与 UTF-16 路径，Linux 和 macOS 则要管 `fork/exec`、进程组与 `poll`。这些都由一只原生进程接住，上层只看统一结果。
 
-### 5. 终端 Markdown 与 LaTeX 渲染
+Release 不要求 Node.js 或 Python。包里带着 `rg`、官方 Skills、文档与许可证，解开就能跑。要接现成 C/C++ 库，还可走 C ABI 插件，省去一层 JavaScript 服务或 RPC。
 
-模型回答里的 Markdown 表格、代码块、列表、引用，LubanCode 在终端里原地渲染——不是糊一堆纯文本。LaTeX 公式按行内 `$...$` 和独立 `$$...$$` 渲染成终端可显示的形式。diff 有着色，工具输出有折叠，长粘贴有智能收纳。
+HTTP 流、子进程、终端帧与取消令牌都有明确寿命。长任务中途停下，程序要收好进程，也要写完已经确认的记录。这件事比一句“跑得快”难得多。
 
-终端不该是降级体验。
+C++ 也有成本。编译慢，跨平台细节多，内存安全要靠规矩、测试与审查守。写一枚小扩展，TypeScript 往往省事。LubanCode 用 C++，主要为了直接管理系统资源，并让 CLI、app-server、Workflow 与轨迹记录共用一套宿主代码。详见[为什么是 LubanCode](docs/getting-started/why-lubancode.md)。
+
+## 和 Claude Code、Codex CLI、Pi 差在哪
+
+四款工具都能读代码、改文件、跑命令。差别主要在模型来源、扩展方式、安全边界和产品形态。
+
+| 工具 | 主要路线 | 更适合谁 |
+| --- | --- | --- |
+| **Claude Code** | Claude 产品体系与多端协同。终端、IDE、桌面、Web、远程、团队能力一路贯通。 | 已在 Claude 生态里，要成熟产品面与跨端工作流。 |
+| **Codex CLI** | OpenAI Codex 的本地终端体验、沙箱与审批，也能接入 Codex 桌面、IDE、云端诸面。 | 用 ChatGPT / OpenAI 模型，重视原生沙箱与 OpenAI 全套体验。 |
+| **Pi** | 一颗很小的核心，加 TypeScript extensions、skills、prompts、themes 与 packages。 | 想拿 TypeScript 快速改 Harness，自己拼出工作台。 |
+| **LubanCode** | Provider 中立的 C++ 执行骨架，以及可回放、可核验的本地账。CLI、Workflow、app-server、轨迹与插件共用一套运行合同。 | 要接多协议或自建端点，研究 Agent Harness，或把原生执行与留账握在自己手里。 |
+
+Claude Code 与 Codex CLI 各有完整产品生态。Pi 用 TypeScript 写扩展，改起来更快。LubanCode 把多协议、自建端点、Workflow、轨迹与本地配置诊断放得更靠前。模型可以换，配置来源可以查，工具调用也能顺着源码与本地记录往下追。
+
+还有一处小差别：LubanCode 自带界面 i18n，能跟系统语言，也能用 `/language` 即时切换。模型会不会说中文，与 CLI 自己有没有中文菜单、审批和报错，是两回事。本次查阅的 Claude Code CLI 参考、Codex CLI 配置参考与 Pi TUI 文档，都没有列出同类界面语言开关；这只说明公开设置里未见，不等于断言它们永远只支持英语。
+
+对照口径截至 2026-09-04，取自 [Claude Code 官方概览](https://code.claude.com/docs/en/overview)、[Claude Code CLI reference](https://code.claude.com/docs/en/cli-reference)、[Codex CLI 官方文档](https://learn.chatgpt.com/docs/codex/cli)、[Codex CLI 配置参考](https://learn.chatgpt.com/docs/config-file/config-reference)与 [Pi TUI 文档](https://github.com/earendil-works/pi/blob/main/packages/coding-agent/docs/tui.md)。细表、边界与选择建议见[完整对照](docs/getting-started/why-lubancode.md)。
+
+## 力气花在哪儿
+
+- **一副能干活的终端。** 模型跑着，你照样输入；消息排队，子代理在望；Markdown、LaTeX、diff 与完整工具输出都看得见。
+- **法与魂分开。** `system_prompt.md` 管行为，`SOUL.md` 管口吻。换风格不必拆工作流的规矩。
+- **仓库级记忆。** 主工作树与 linked worktree 同一身份，教过的东西带得走；召回与写入都走 `/memory`。
+- **不止一份对话记录。** session 记对话，trajectory 记运行事实，usage 分 token，artifact 收大块内容。
+- **不止一条扩展路。** Skills、Workflow、MCP、LSP、Lua、进程插件与 C ABI 插件，各有各的边界。
 
 ## 一眼看懂
 
 | | 能力 |
 | --- | --- |
-| **模型接入** | Anthropic / Responses / Chat Completions 三协议；75 家 Provider 目录；多路连接随时切换并记住上次选择。 |
+| **模型接入** | Anthropic / Responses / Chat Completions / Gemini 四协议；68 家 Provider 目录；多路连接随时切换并记住上次选择。 |
 | **代码工具** | 读、写、容错编辑、搜索文件；前台或后台跑命令；改动先看 diff，再落盘。 |
 | **语义与外接工具** | LSP 定义、引用、符号、诊断；MCP stdio；联网搜索与网页抓取。 |
 | **代理工作流** | 子代理、三档角色模型、Plan 模式、待办清单、`ask_user`、`AGENTS.md`、隔离 worktree 与项目级权限。 |
 | **终端体验** | 分段 Markdown 渲染、动态工作状态、常驻消息队列、智能粘贴折叠、逐键编辑、折叠与聚焦、五档审批。 |
-| **上下文与存档** | token 占用分析、确定性裁面、可追回 artifact、按需局部摘要、会话恢复、标题、Markdown 导出。 |
-| **扩展与定制** | Skills、Lua 工具、C ABI DLL 插件、hooks、主题、i18n、soul 与 system prompt。 |
+| **提示词与记忆** | `system_prompt.md` 管行为，`SOUL.md` 管口吻；主工作树与 linked worktree 共用项目记忆。 |
+| **上下文与存档** | session 记对话，trajectory 记运行事实，usage 分 token，artifact 收大块内容；支持压缩、恢复与 Markdown 导出。 |
+| **界面语言** | 跟随系统；内置简体中文与英文；`/language` 即时切换；外部 JSON 语言包可添新语言。 |
+| **扩展与定制** | Skills、Workflow、MCP、LSP、Lua、进程插件、C ABI 插件、hooks、主题与 SOUL。 |
 
 ## 安装
 
@@ -176,7 +208,7 @@ lubancode --continue
 git diff --cached | lubancode "替我审一遍这份改动"
 ```
 
-若你管着多家模型服务，直接敲 `/provider add`。75 家预设会自动进搜索页；键入厂家名，选中，再填 Key。地址、协议、默认模型和推理参数由目录带上。全手填仍留在最后一项。手写配置也照旧可用：
+若你管着多家模型服务，直接敲 `/provider add`。68 家预设会自动进搜索页；键入厂家名，选中，再填 Key。地址、协议、默认模型和推理参数由目录带上。全手填仍留在最后一项。手写配置也照旧可用：
 
 ```json
 {
@@ -243,7 +275,7 @@ LubanCode 留了四扇门：
 1. **Skills**：一份标准 `SKILL.md`；可放 `.agents/skills` 跨客户端共享，也可放 `.lubancode/skills`。
 2. **MCP / LSP**：在配置里挂 stdio 服务与语言服务器。
 3. **Lua 插件**：一个 `.lua` 文件就是一件工具，适合轻量扩展。
-4. **C ABI 插件**：Windows DLL 同进程加载，适合原生能力与已有 C/C++ 库。
+4. **C ABI 插件**：原生动态库同进程加载（`.dll` / `.so` / `.dylib`），适合原生能力与已有 C/C++ 库。
 
 写法、目录、示例与安全边界，见 [扩展指南](docs/features/extensions/README.md)。
 
@@ -252,6 +284,8 @@ LubanCode 留了四扇门：
 | 文档 | 讲什么 |
 | --- | --- |
 | [文档首页](docs/README.md) | 阅读路线、版本状态、各页入口。 |
+| [三分钟上手](docs/getting-started/quickstart.md) | 安装、接模型、下任务、验结果。 |
+| [为什么是 LubanCode](docs/getting-started/why-lubancode.md) | C++ 取舍，与 Claude Code、Codex CLI、Pi 的完整对照。 |
 | [配置手册](docs/reference/configuration.md) | 配置优先级、项目记忆、providers、hooks、MCP、搜索、LSP、models.json。 |
 | [Provider 目录](docs/features/providers/catalog.md) | 常见厂家预设、在线更新、缓存、Schema 与安全边界。 |
 | [项目记忆设计](docs/architecture/memory/design.md) | 目录、召回、后台更新、安全边界与后续路数。 |

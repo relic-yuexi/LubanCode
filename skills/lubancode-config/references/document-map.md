@@ -4,6 +4,8 @@
 
 | 用户问题 | 先读 | 需要内部机理时再读 |
 | --- | --- | --- |
+| 第一次安装、配置与跑任务 | `getting-started/quickstart.md` | `reference/commands.md` |
+| 为何用 C++、与 Claude Code/Codex CLI/Pi 的差异 | `getting-started/why-lubancode.md` | `architecture/README.md` |
 | 配置来源、字段、环境变量、主题、目录 | `reference/configuration.md` | `architecture/README.md` |
 | 模型、Provider、目录、私有请求参数 | `reference/configuration.md`、`features/providers/catalog.md` | `architecture/providers/schema.md` |
 | 会话、恢复、compact、缓存、上下文 | `features/sessions/README.md`、`features/context/compaction.md` | `architecture/context/compaction.md` |

@@ -11,9 +11,12 @@
 | 交互会话 | `lubancode` | 完整：编辑器、菜单、确认、排队、聚焦 | 有 | 日常开发与长任务 |
 | 续接会话 | `lubancode --continue` | 同交互会话 | 续写原 JSONL | 接着本目录最近一场工作 |
 | 单发任务 | `lubancode "问题"` | 无逐键菜单；工具仍可调用 | 不落交互会话 | 脚本、短任务、CI 辅助 |
+| 单发 + Harness 输出 | `lubancode --output run.jsonl "问题"` | 同单发；收口后投影 Harness JSONL | Trajectory 运行账 + 指定输出 | 评测、回归与外接 Harness |
 | 管道输入 | `git diff | lubancode "审查"` | plain 输出；不能现场提问 | 不落交互会话 | 串接 shell 工作流 |
 | 无界面后台 | `lubancode app-server` | 双向 JSON-RPC：审批与提问走反向请求 | 有 | 富客户端与 SSH 远程项目 |
 | 诊断模式 | `--config`、`--help`、`--version`、`--check-update` | 不请求模型 | 无 | 排错、版本检查与自动化探测 |
+
+Gateway 另有 `lubancode gateway run|status|stop` 前台骨架。它尚未交齐系统服务、持久调度、可靠投递与真渠道，不能把当前 G1 说成完整常驻 Agent；现状与批次见 [Gateway 合同](../architecture/gateway/README.md)。
 
 ## 模型与协议
 

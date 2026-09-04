@@ -14,7 +14,8 @@
 
 | 想做什么 | 先读 | 再查 |
 | --- | --- | --- |
-| 安装、启动、排错 | [根 README](../README.md#安装) | [排错手册](getting-started/troubleshooting.md) |
+| 第一次安装并跑完一场任务 | [三分钟上手](getting-started/quickstart.md) | [排错手册](getting-started/troubleshooting.md) |
+| 看选型、C++ 取舍与同类差异 | [为什么是 LubanCode](getting-started/why-lubancode.md) | [功能总账](reference/feature-index.md) |
 | 看现有功能 | [功能目录](features/README.md) | [功能总账](reference/feature-index.md) |
 | 查命令、字段、工具参数 | [参考手册](reference/README.md) | [安全模型](development/security.md) |
 | 恢复、压缩或管理上下文 | [会话](features/sessions/README.md) | [压缩机制](features/context/compaction.md) |
@@ -27,7 +28,7 @@
 
 ```text
 docs/
-  getting-started/   安装后的第一步与排错
+  getting-started/   第一场任务、选型与排错
   features/          按功能模块写用户可见行为
   reference/         命令、配置、工具等精确契约
   architecture/      内部数据流、状态机与模块边界
