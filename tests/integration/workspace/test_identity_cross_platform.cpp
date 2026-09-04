@@ -1,10 +1,10 @@
 // Workspace 收官验收·跨平台身份与并发原语册(单子 §二 Windows/Linux 腿;
-// Windows 本机与 WSL/Linux 同一份册,平台差异用 #ifdef 分叉,环境缺项
-// (symlink 特权、junction)如实报 SKIP 不冒充通过。macOS 腿标 CI,不在
-// 本册管辖)。
+// Windows 本机与 WSL/Linux/macOS CI 同一份册,平台差异按运行时探测(路径
+// 大小写)或如实报 SKIP(symlink 特权、junction)分叉,不冒充通过)。
 //
-//   - 路径大小写:Windows 盘符/路径 ASCII 大小写折叠成同一把 key;POSIX
-//     大小写敏感,两把 key(两级各测各的,不硬编同一答案);
+//   - 路径大小写:敏感性运行时探测(临时根里造两个只有大小写不同的探测
+//     目录,实为一间则不敏感)——不敏感(Windows NTFS、macOS 默认 APFS)
+//     折叠同 key;敏感(WSL ext4、大小写敏感卷)两把 key;
 //   - symlink:经目录符号链接进出,身份跟规范路径走(同仓同 key);
 //   - junction(仅 Windows):目录 junction 进出的 git 仓库同 key;
 //   - 锁:同 session 第二只 writer 拒(lock.held_by_live_process),
@@ -55,30 +55,51 @@ fs::path TempRoot(const std::string& name) {
 
 void MakeRepo(const fs::path& repo) { fs::create_directories(repo / ".git"); }
 
+// 探测 root 所在盘的路径大小写敏感性:造两个只有大小写不同的目录,造完
+// 若实为同一目录(fs::equivalent)则盘不敏感——"Probe-Dir"与"probe-dir"
+// 一间房;两间则敏感。不按平台猜:Windows NTFS 与 macOS 默认 APFS 都不
+// 敏感,WSL ext4 敏感,macOS 又可格式化出敏感卷——盘说了算,平台代猜会
+// 冤枉人(CI run 33873402016 的 macOS 默认盘上"POSIX 必敏感"猜红)。
+bool ProbeCaseSensitive(const fs::path& root) {
+    const fs::path probe_upper = root / "Probe-Dir";
+    const fs::path probe_lower = root / "probe-dir";
+    std::error_code ec;
+    fs::create_directories(probe_upper, ec);
+    CHECK_MESSAGE(!ec, "探测目录造不出: " << ec.message());
+    if (ec) {
+        return true;  // 探不成:按敏感走,上面的 CHECK 已把病记下
+    }
+    // 不敏感盘上这一步造进的还是 probe_upper 那间(equivalent 自会揭穿)。
+    fs::create_directories(probe_lower, ec);
+    CHECK_MESSAGE(!ec, "探测目录(小写拼写)造不出: " << ec.message());
+    if (ec) {
+        return true;
+    }
+    const bool same_dir = fs::equivalent(probe_upper, probe_lower, ec);
+    CHECK_MESSAGE(!ec, "探测目录等价性查不出: " << ec.message());
+    return !same_dir || ec;
+}
+
 }  // namespace
 
-TEST_CASE("跨平台: 路径大小写——Windows 折叠同 key,POSIX 敏感两把 key") {
+TEST_CASE("跨平台: 路径大小写——不敏感盘折叠同 key,敏感盘两把 key") {
     const fs::path root = TempRoot("case");
-#ifdef _WIN32
+    const bool case_sensitive = ProbeCaseSensitive(root);
     const fs::path upper = root / "Demo-Repo";
     const fs::path lower = root / "demo-repo";
     MakeRepo(upper);
+    if (case_sensitive) {
+        MakeRepo(lower);  // 敏感盘:lower 另起一间房,各登记各的
+    }
     const auto a = workspace::ResolveWorkspaceIdentity(upper, {});
     const auto b = workspace::ResolveWorkspaceIdentity(lower, {});
     REQUIRE(a.has_value());
     REQUIRE(b.has_value());
-    CHECK(a->workspace_key == b->workspace_key);  // 大小写折叠,不裂成两间
-#else
-    const fs::path upper = root / "Demo-Repo";
-    const fs::path lower = root / "demo-repo";
-    MakeRepo(upper);
-    MakeRepo(lower);
-    const auto a = workspace::ResolveWorkspaceIdentity(upper, {});
-    const auto b = workspace::ResolveWorkspaceIdentity(lower, {});
-    REQUIRE(a.has_value());
-    REQUIRE(b.has_value());
-    CHECK(a->workspace_key != b->workspace_key);  // POSIX 大小写敏感,两间房
-#endif
+    if (case_sensitive) {
+        CHECK(a->workspace_key != b->workspace_key);  // 敏感:两间房两把 key
+    } else {
+        CHECK(a->workspace_key == b->workspace_key);  // 折叠:一间房一把 key
+    }
 }
 
 TEST_CASE("跨平台: 经目录 symlink 进仓,身份跟规范路径走") {
