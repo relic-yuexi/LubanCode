@@ -95,7 +95,7 @@ B1 的位置曲线直接指导 B2 布点：中段掉多少，定 must_retain 抽
 ## 五、装置与分期
 
 - **P0 装置**：`tests/eval/` 骨架 + CTest opt-in 注册；`FakeStreamingBackend` 抽 `tests/eval/fake_backend.{hpp,cpp}` 通用化；每实验一份 `collect.py`（parquet + md 两件）。验收：A2 档 disabled 单步 T1 跑通落 parquet。
-- **P1 B1 位置探针**（首仗）：造稿器 + 三处理对照 + 判卷脚本 + 曲线报告。验收：三处理位置-命中曲线出图，中段存活率有数。
+- **P1 B1 位置探针 + Lost in Conversation 备料**（首仗）：位置曲线造稿器 + 三处理对照 + 判卷脚本 + 曲线报告；**LiC 备料同步先行**——拉仓盘点（任务族/分片格式/判卷机制/许可）、适配器设计（分片→LubanCode 会话、FULL/compact 配对、reference/tests 判卷）、每族 5 题 smoke 集选定、`datasets.lock.json` 进仓、数据本体只进 gitignored 缓存。验收：三处理位置-命中曲线出图，中段存活率有数；LiC 备料四件套（lock/取数脚本/适配器规格/smoke 清单）进仓。
 - **P2 实验 A**：五档生成器 + 三模式对照脚本 + 报告。验收：退化曲线出图，阈值真值 vs 默认 20 有结论。
 - **P3 实验 B2**：8 场 fixture 脱敏 + 金账双标 + Lost in Conversation 适配器（smoke → 主报告）+ 配对续跑。验收：三本账、五探针、外部主基准、下游续跑全有可复算原始账。
 - **P4 实验 C**：12 任务三对照 + 报告。验收：失败分布画齐，派工价值/成本曲线给出。
