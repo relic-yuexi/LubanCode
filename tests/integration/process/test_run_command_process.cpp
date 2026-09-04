@@ -90,6 +90,8 @@ std::string ReadAllBytes(const std::string& path_utf8) {
     return ss.str();
 }
 
+// 只伺候下方 _WIN32 段的 PowerShell 目录探针测试,POSIX 腿不用。
+#ifdef _WIN32
 bool RefersToPath(const std::string& output_utf8, const std::filesystem::path& expected) {
     std::istringstream lines(output_utf8);
     for (std::string line; std::getline(lines, line);) {
@@ -106,6 +108,7 @@ bool RefersToPath(const std::string& output_utf8, const std::filesystem::path& e
     }
     return false;
 }
+#endif  // _WIN32
 
 }  // namespace
 

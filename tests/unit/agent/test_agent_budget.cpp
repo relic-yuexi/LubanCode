@@ -71,7 +71,7 @@ public:
     std::string description() const override { return "fake tool for test"; }
     nlohmann::json input_schema() const override { return nlohmann::json::object(); }
     bool needs_confirm() const override { return false; }
-    tools::Tool::Result execute(const nlohmann::json& input) override {
+    tools::Tool::Result execute(const nlohmann::json& /*input*/) override {
         ++call_count;
         return result_;
     }

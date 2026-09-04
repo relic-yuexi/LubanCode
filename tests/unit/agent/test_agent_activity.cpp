@@ -37,42 +37,9 @@
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
 
-#ifdef _WIN32
-#define WIN32_LEAN_AND_MEAN
-#include <winsock2.h>
-#include <ws2tcpip.h>
-#else
-#include <arpa/inet.h>
-#include <netinet/in.h>
-#include <sys/socket.h>
-#include <unistd.h>
-#endif
-
 using namespace lubancode;
 
 namespace {
-
-#ifdef _WIN32
-using socket_t = SOCKET;
-constexpr socket_t kInvalidSocket = INVALID_SOCKET;
-void CloseSocket(socket_t s) { ::closesocket(s); }
-#else
-using socket_t = int;
-constexpr socket_t kInvalidSocket = -1;
-void CloseSocket(socket_t s) { ::close(s); }
-#endif
-
-void EnsureSocketsReady() {
-#ifdef _WIN32
-    struct WinsockInit {
-        WinsockInit() {
-            WSADATA wsa;
-            ::WSAStartup(MAKEWORD(2, 2), &wsa);
-        }
-    };
-    static WinsockInit init;
-#endif
-}
 
 // 慢 streamed 假后端:按剧本吐事件,事件之间小睡,给测试留出"流式期间"
 // 的采样窗口;剧本吐完或用完返回。
@@ -172,52 +139,6 @@ bool WaitForSummary(tools::AgentTool& tool, Predicate predicate, int timeout_sec
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
     }
     return predicate(tool.TaskSummaries());
-}
-
-// 起一个 accept 后吐一帧 SSE 就装死 30 秒的假服务器(与 test_network_timeout
-// 同一套手艺),返回端口。P0-1 请求级恢复起,一次任务会对它连 3 次(首发 +
-// 2 次重试),故而每条连接各起一线伺候(连着装死),最多接 4 条。
-int StartStallingServer() {
-    EnsureSocketsReady();
-    socket_t listener = ::socket(AF_INET, SOCK_STREAM, 0);
-    REQUIRE(listener != kInvalidSocket);
-    sockaddr_in addr{};
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
-    addr.sin_port = 0;
-    REQUIRE(::bind(listener, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) == 0);
-    sockaddr_in bound{};
-    socklen_t bound_len = sizeof(bound);
-    REQUIRE(::getsockname(listener, reinterpret_cast<sockaddr*>(&bound), &bound_len) == 0);
-    const int port = ntohs(bound.sin_port);
-    REQUIRE(::listen(listener, 4) == 0);
-    std::thread([listener]() {
-        for (int accepted = 0; accepted < 4; ++accepted) {
-            sockaddr_in client_addr{};
-            socklen_t client_len = sizeof(client_addr);
-            const socket_t client = ::accept(listener, reinterpret_cast<sockaddr*>(&client_addr), &client_len);
-            if (client == kInvalidSocket) {
-                break;
-            }
-            std::thread([client]() {
-                char buf[4096];
-                ::recv(client, buf, sizeof(buf), 0);  // 排干请求
-                const std::string head =
-                    "HTTP/1.1 200 OK\r\n"
-                    "Content-Type: text/event-stream\r\n"
-                    "\r\n"
-                    "event: message_start\n"
-                    "data: {\"type\":\"message_start\",\"message\":{\"id\":\"msg_1\",\"model\":\"test\"}}\n"
-                    "\n";
-                ::send(client, head.data(), static_cast<int>(head.size()), 0);
-                std::this_thread::sleep_for(std::chrono::seconds(30));  // 装死:不再发也不再关
-                CloseSocket(client);
-            }).detach();
-        }
-        std::this_thread::sleep_for(std::chrono::seconds(35));  // 等各连接各自装死完
-        CloseSocket(listener);
-    }).detach();
-    return port;
 }
 
 std::string ReadFile(const std::filesystem::path& path) {

@@ -276,7 +276,7 @@ TEST_CASE("攻击 6: 项目 config 提权 user_enabled/enabled,merge 后仍关")
     const auto project_parsed =
             config::ParseFileConfigJson(project_json, "project/.lubancode/config.json");
     REQUIRE(project_parsed.has_value());
-    config::FileConfig project = std::move(*project_parsed);
+    config::FileConfig project = *project_parsed;
     REQUIRE(project.memory.has_value());
     REQUIRE(project.memory->enabled.has_value());
     REQUIRE(project.memory->user_enabled.has_value());

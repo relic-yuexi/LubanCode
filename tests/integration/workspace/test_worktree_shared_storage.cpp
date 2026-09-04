@@ -220,8 +220,9 @@ TEST_CASE("跨 workspace 切换: 封旧开新,回执两笔,旧账一字不搬") 
     REQUIRE(old_manifest.has_value());
     CHECK(old_manifest->status == "closed");
     bool ended_switch = false;
-    for (const std::string& line :
-         *trajectory::ReadJournalLines(first_session_dir / "main.jsonl")) {
+    const auto journal = trajectory::ReadJournalLines(first_session_dir / "main.jsonl");
+    REQUIRE(journal.has_value());
+    for (const std::string& line : *journal) {
         const auto event = nlohmann::json::parse(line, nullptr, false);
         if (event.is_discarded() ||
             (event.value("kind", std::string()) != "session.ended")) {

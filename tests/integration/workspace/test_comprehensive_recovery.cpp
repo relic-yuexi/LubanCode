@@ -215,20 +215,6 @@ memory::SaveRequest MakeFact() {
     return request;
 }
 
-std::vector<std::string> KindsOf(const fs::path& stream) {
-    std::vector<std::string> kinds;
-    const auto lines = trajectory::ReadJournalLines(stream);
-    if (!lines.has_value()) {
-        return kinds;
-    }
-    for (const std::string& line : *lines) {
-        const auto parsed = nlohmann::json::parse(line, nullptr, false);
-        kinds.push_back(parsed.is_discarded() ? std::string("<bad>")
-                                              : parsed.value("kind", std::string()));
-    }
-    return kinds;
-}
-
 // 死 PID 陈旧锁(与 unit/trajectory/test_session_lock.cpp 同款形状)。
 constexpr unsigned long kDeadPid = 4194303UL;
 void PlantStaleLock(const fs::path& session_dir) {
@@ -256,7 +242,9 @@ TEST_CASE("综合恢复: 全要素现场杀进程——recover/resume/verify 全
         bool saw_injected = false;
         std::string snapshot_ref;
         std::string snapshot_inline;
-        for (const std::string& line : *trajectory::ReadJournalLines(rig.session_dir / "main.jsonl")) {
+        const auto journal = trajectory::ReadJournalLines(rig.session_dir / "main.jsonl");
+        REQUIRE(journal.has_value());
+        for (const std::string& line : *journal) {
             const auto event = nlohmann::json::parse(line, nullptr, false);
             if (event.is_discarded() || event.value("kind", std::string()) != "context.injected") {
                 continue;
