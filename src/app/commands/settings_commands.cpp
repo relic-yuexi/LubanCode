@@ -15,6 +15,7 @@
 #include "runtime/trajectory_session.hpp"  // P0-3:/copy 读 ReplayState 投影
 
 #include <filesystem>
+#include <map>
 #include <memory>
 #include <optional>
 #include <set>
@@ -286,42 +287,102 @@ std::string JoinSkillNames(const std::vector<std::string>& names) {
     return out;
 }
 bool HandleSkillCommand(const std::string& args, const std::filesystem::path& global_skills_root,
-                        const std::filesystem::path& project_skills_root) {
+                        const std::filesystem::path& project_skills_root,
+                        const std::optional<std::string>& home_dir) {
     if (global_skills_root.empty()) {
         TermOut() << tr("cmd.skill.no_home") << "\n";
         return false;
     }
     const auto [verb, value] = SplitSkillCommandArgs(args);
     if (verb == "list") {
-        const auto global = lubancode::config::ListStoredSkills(global_skills_root);
-        const auto project = lubancode::config::ListStoredSkills(project_skills_root);
-        if (!global.has_value()) {
-            TermOut() << trf("cmd.skill.error", "/skill list", global.error()) << "\n";
-            return false;
+        // 四层全量账(官方/agents 共享/主目录级/项目级):与右下角计数同一套
+        // 加载法则(EnumerateSkillLayers 与 RefreshSkills 的 LoadSkills 同序
+        // 合并),被遮蔽的条目也亮出来并标谁遮的——旧版只扫 .lubancode 两层,
+        // 漏了 .agents 层与官方层,用户看着"数量不对"。
+        const auto entries = lubancode::tools::EnumerateSkillLayers(
+            CurrentDirUtf8(), home_dir, lubancode::platform::OfficialSkillsDir());
+
+        // 安装来源(远端 URL/装机时间)只有 .lubancode 两层的账本有;按目录
+        // 路径对回 StoredSkill 记录,对得上才标,对不上(官方/.agents/手放的)
+        // 不硬编"本地自建"。账本读坏了照旧报错返回,不静默吞。
+        std::map<std::string, lubancode::config::StoredSkill> stored_by_path;
+        for (const auto* root : {&global_skills_root, &project_skills_root}) {
+            const auto stored = lubancode::config::ListStoredSkills(*root);
+            if (!stored.has_value()) {
+                TermOut() << trf("cmd.skill.error", "/skill list", stored.error()) << "\n";
+                return false;
+            }
+            for (const auto& skill : *stored) {
+                stored_by_path.emplace(skill.dir_path, skill);
+            }
         }
-        if (!project.has_value()) {
-            TermOut() << trf("cmd.skill.error", "/skill list", project.error()) << "\n";
-            return false;
-        }
-        if (global->empty() && project->empty()) {
+
+        if (entries.empty()) {
             TermOut() << tr("cmd.skill.list_empty") << "\n";
             return false;
         }
 
-        TermOut() << tr("cmd.skill.list_header") << "\n";
-        const auto print_entries = [](const std::vector<lubancode::config::StoredSkill>& entries,
-                                      const std::string& scope) {
-            for (const auto& skill : entries) {
-                const std::string source =
-                    skill.source_url.has_value() ? trf("cmd.skill.remote", *skill.source_url,
-                                                       skill.installed_at.value_or(std::string()))
-                                                 : tr("cmd.skill.local");
-                TermOut() << "  - " << skill.name << " [" << scope << "; " << source << "]\n"
-                          << "      " << skill.dir_path << "\n";
+        // 枚举层标签(SkillMeta.source_level)到展示词的映射;.lubancode 两层
+        // 复用旧 scope 键,官方与 .agents 层新立两键。
+        const auto layer_label = [](const std::string& layer) -> std::string {
+            if (layer == "官方") return tr("cmd.skill.scope_official");
+            if (layer == "agents 共享") return tr("cmd.skill.scope_agents");
+            if (layer == "项目级") return tr("cmd.skill.scope_project");
+            if (layer == "主目录级") return tr("cmd.skill.scope_global");
+            return layer;
+        };
+
+        const std::size_t active_count = static_cast<std::size_t>(std::count_if(
+            entries.begin(), entries.end(), [](const lubancode::tools::SkillLayerEntry& e) { return e.active; }));
+        TermOut() << trf("cmd.skill.list_header", active_count)
+                  << (entries.size() > active_count
+                          ? trf("cmd.skill.shadowed_total", entries.size() - active_count)
+                          : std::string())
+                  << "\n";
+
+        // 分段次序按遮蔽优先级从高到低(与 /skills 的"项目级→主目录级→官方"
+        // 同一走向,.agents 层插在两头 LubanCode 原生层之间),段内按名排序。
+        const std::vector<std::string> preferred_order = {"项目级", "agents 共享", "主目录级", "官方"};
+        std::set<std::string> printed;
+        const auto print_group = [&](const std::string& layer) {
+            std::vector<const lubancode::tools::SkillLayerEntry*> group;
+            for (const auto& entry : entries) {
+                if (entry.meta.source_level == layer) group.push_back(&entry);
+            }
+            if (group.empty()) return;
+            printed.insert(layer);
+            std::sort(group.begin(), group.end(),
+                      [](const lubancode::tools::SkillLayerEntry* l,
+                         const lubancode::tools::SkillLayerEntry* r) { return l->meta.name < r->meta.name; });
+            TermOut() << "\n" << layer_label(layer) << " · " << group.size() << "\n";
+            for (const auto* entry : group) {
+                // 方括号里先说遮蔽、再说远端来源;两样都没有就不带括号。
+                std::vector<std::string> notes;
+                if (!entry->active) {
+                    notes.push_back(trf("cmd.skill.shadowed_by", layer_label(entry->shadowed_by)));
+                }
+                if (const auto stored = stored_by_path.find(entry->meta.dir_path);
+                    stored != stored_by_path.end() && stored->second.source_url.has_value()) {
+                    notes.push_back(trf("cmd.skill.remote", *stored->second.source_url,
+                                        stored->second.installed_at.value_or(std::string())));
+                }
+                TermOut() << "  - " << entry->meta.name;
+                if (!notes.empty()) {
+                    std::string joined;
+                    for (const std::string& note : notes) {
+                        if (!joined.empty()) joined += "; ";
+                        joined += note;
+                    }
+                    TermOut() << " [" << joined << "]";
+                }
+                TermOut() << "\n"
+                          << "      " << entry->meta.dir_path << "\n";
             }
         };
-        print_entries(*project, tr("cmd.skill.scope_project"));
-        print_entries(*global, tr("cmd.skill.scope_global"));
+        for (const auto& layer : preferred_order) print_group(layer);
+        for (const auto& entry : entries) {
+            if (printed.count(entry.meta.source_level) == 0) print_group(entry.meta.source_level);
+        }
         return false;
     }
     if (verb == "install") {
@@ -2340,7 +2401,7 @@ CommandFlow HandleSlashSkills(SlashDispatchContext& ctx, const lubancode::cli::P
 }
 
 CommandFlow HandleSlashSkill(SlashDispatchContext& ctx, const lubancode::cli::ParsedSlashCommand& parsed) {
-    if (HandleSkillCommand(parsed.args, *ctx.global_skills_root, *ctx.project_skills_root)) {
+    if (HandleSkillCommand(parsed.args, *ctx.global_skills_root, *ctx.project_skills_root, *ctx.home_dir)) {
         ctx.refresh_skills();
         TermOut() << tr("cmd.skill.refreshed") << "\n";
     }

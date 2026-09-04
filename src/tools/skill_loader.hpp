@@ -33,7 +33,9 @@ struct SkillMeta {
     std::string name;
     std::string description;
     std::string dir_path;      // 技能目录的绝对路径(UTF-8),SKILL.md 就在这个目录下
-    std::string source_level;  // "官方"、"项目级" 或 "主目录级",/skills 展示用
+    std::string source_level;  // 来源标签:LoadSkills 打"官方/项目级/主目录级"三
+                               // 级,/skills 展示用;EnumerateSkillLayers 打四层
+                               // 展示标签("agents 共享" 单立一段),/skill list 用
     bool managed_official_copy = false;  // 旧版播种进主目录的官方维护副本
     // 统一 Package 封装单阶段 3:来自 Package 的技能带包命名空间,name 是
     // canonical id("<包id>:<名>");standalone 照旧裸名,此字段为空。
@@ -75,6 +77,30 @@ bool IsValidAgentSkillName(const std::string& name);
 // 打一行警告,不影响其余技能。name 的格式或目录名不合规范时宽容加载,
 // 但也记警告,与 Agent Skills 客户端接入指南一致。
 std::vector<SkillMeta> ScanSkillsDir(const std::filesystem::path& skills_root, const std::string& source_level);
+
+// /skill list 的四层枚举账(列表漏层单):LoadSkills 只回每个名字的胜者,
+// 右下角计数与 /skills 展示都吃那份;这张账把五处 skills 根全数摊开——
+// 官方、<主目录>/.agents、<主目录>/.lubancode、<cwd>/.agents、
+// <cwd>/.lubancode——好让 /skill list 把被遮蔽的条目也亮出来、标谁遮的。
+// meta.source_level 打的是四层展示标签("官方"/"agents 共享"/"主目录级"/
+// "项目级",.agents 两处折进"agents 共享"一段),与 LoadSkills 打进
+// SkillMeta 的三级标签不是一套。遮蔽判定与 LoadSkills 的合并次序逐字
+// 对齐(active 的集合 == LoadSkills 会采纳的集合),但不再调 WarnCollision
+// ——启动扫描时已警告过,列表不重复刷屏。package 挂载根不进这张账:
+// /skill list 管散装四层,包内清单归 /package 盘点。
+struct SkillLayerEntry {
+    SkillMeta meta;          // source_level 即四层标签,dir_path 指到技能目录
+    bool active = true;      // LoadSkills 会采用这一条吗(同名逐层顶替后的胜者)
+    std::string shadowed_by; // active=false 时填遮蔽者所在的四层标签,胜者留空
+};
+
+// 枚举五处 skills 根的全体实体。根目录不存在原样跳过,单个 SKILL.md 坏
+// 了照 ScanSkillsDir 的规矩跳过那一份。返回顺序:官方 → 主目录 .agents →
+// 主目录 .lubancode → 项目 .agents → 项目 .lubancode,同根内按目录迭代
+// 序;要分组展示由调用方自己排。
+std::vector<SkillLayerEntry> EnumerateSkillLayers(const std::string& project_dir,
+                                                  const std::optional<std::string>& home_dir,
+                                                  const std::optional<std::string>& official_skills_dir = std::nullopt);
 
 // 主入口:official_skills_dir(发行包官方技能,可能没有)、home_dir(主目录,
 // 可能没有)与 project_dir(cwd)合并官方、.agents 与 .lubancode 五处。

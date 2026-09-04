@@ -75,8 +75,14 @@ std::pair<std::string, std::string> SplitSkillCommandArgs(const std::string& arg
 
 std::string JoinSkillNames(const std::vector<std::string>& names);
 
+// list 动词走 tools::EnumerateSkillLayers 的四层全量账(官方/agents 共享/
+// 主目录级/项目级,被遮蔽条目带标注),与右下角计数(RefreshSkills 的
+// LoadSkills)同一套加载法则;install/update/remove 照旧压
+// config::skill_store。home_dir 供枚举 <主目录>/.agents 与
+// <主目录>/.lubancode 两处根。
 bool HandleSkillCommand(const std::string& args, const std::filesystem::path& global_skills_root,
-                        const std::filesystem::path& project_skills_root);
+                        const std::filesystem::path& project_skills_root,
+                        const std::optional<std::string>& home_dir = std::nullopt);
 
 
 // /think(/effort 同义)命令:不带参数看当前档位,带参数切档位(本会话

@@ -1,8 +1,10 @@
-// M9:技能系统测试。三块:
+// M9:技能系统测试。四块:
 //   1) ParseSkillMarkdown —— 手写的 frontmatter 解析器,纯函数。
 //   2) LoadSkills/ScanSkillsDir —— 真在临时目录里造两级技能目录,验证扫描
 //      结果和"项目级覆盖主目录级"。
 //   3) SkillTool —— 命中/未命中两种情况下 execute() 的返回内容。
+//   4) EnumerateSkillLayers —— /skill list 的四层全量账:五处根摊开、四层
+//      标签、遮蔽标注,与 LoadSkills 的胜者口径对齐。
 
 #include <doctest/doctest.h>
 
@@ -426,4 +428,132 @@ TEST_CASE("SkillTool: 缺 name 参数报错") {
     tools::SkillTool tool({});
     const auto result = tool.execute(nlohmann::json::object());
     CHECK(result.is_error);
+}
+
+// ---------------------------------------------------------------------------
+// 4) EnumerateSkillLayers:/skill list 的四层全量账。
+// ---------------------------------------------------------------------------
+
+namespace {
+
+// 按名字 + 路径片段找枚举条目(.agents 两处与 .lubancode 两处可能同名,
+// 靠路径片段区分层)。分隔符跟现场走(Windows 反斜杠、POSIX 正斜杠),
+// 免得硬编码斜杠跨平台翻车。
+const tools::SkillLayerEntry& FindEntry(const std::vector<tools::SkillLayerEntry>& entries,
+                                        const std::string& name, const std::string& base_subdir,
+                                        const std::string& root_kind) {
+    std::string sep = "/";
+    if (!entries.empty() && entries.front().meta.dir_path.find('\\') != std::string::npos) {
+        sep = "\\";
+    }
+    const std::string needle =
+        root_kind.empty() ? (sep + base_subdir + sep) : (sep + base_subdir + sep + root_kind + sep);
+    const auto it = std::find_if(entries.begin(), entries.end(), [&](const tools::SkillLayerEntry& e) {
+        return e.meta.name == name && e.meta.dir_path.find(needle) != std::string::npos;
+    });
+    REQUIRE(it != entries.end());
+    return *it;
+}
+
+}  // namespace
+
+TEST_CASE("EnumerateSkillLayers: 五处根全数摊开,四层标签对号,无遮蔽全生效") {
+    TempSkillsRoot root;
+    root.WriteOfficialSkill("official-only", SkillContent("official-only", "官方技能", "正文\n"));
+    root.WriteAgentSkill("home", "home-agent", SkillContent("home-agent", "用户共享", "正文\n"));
+    root.WriteSkill("home", "home-native", SkillContent("home-native", "用户原生", "正文\n"));
+    root.WriteAgentSkill("proj", "proj-agent", SkillContent("proj-agent", "项目共享", "正文\n"));
+    root.WriteSkill("proj", "proj-native", SkillContent("proj-native", "项目原生", "正文\n"));
+
+    const auto entries = tools::EnumerateSkillLayers(root.BaseDir("proj"), root.BaseDir("home"),
+                                                     root.BaseDir("official"));
+    REQUIRE(entries.size() == 5);
+    for (const auto& entry : entries) {
+        CHECK(entry.active);
+        CHECK(entry.shadowed_by.empty());
+    }
+    CHECK(FindEntry(entries, "official-only", "official", "").meta.source_level == "官方");
+    CHECK(FindEntry(entries, "home-agent", "home", ".agents").meta.source_level == "agents 共享");
+    CHECK(FindEntry(entries, "home-native", "home", ".lubancode").meta.source_level == "主目录级");
+    CHECK(FindEntry(entries, "proj-agent", "proj", ".agents").meta.source_level == "agents 共享");
+    CHECK(FindEntry(entries, "proj-native", "proj", ".lubancode").meta.source_level == "项目级");
+}
+
+TEST_CASE("EnumerateSkillLayers: 五处同名,遮蔽链逐级标注,胜者与 LoadSkills 对齐") {
+    TempSkillsRoot root;
+    root.WriteOfficialSkill("shared-skill", SkillContent("shared-skill", "官方", "官方正文\n"));
+    root.WriteAgentSkill("home", "shared-skill", SkillContent("shared-skill", "用户共享", "正文\n"));
+    root.WriteSkill("home", "shared-skill", SkillContent("shared-skill", "用户原生", "正文\n"));
+    root.WriteAgentSkill("proj", "shared-skill", SkillContent("shared-skill", "项目共享", "正文\n"));
+    root.WriteSkill("proj", "shared-skill", SkillContent("shared-skill", "项目原生", "正文\n"));
+
+    const auto entries = tools::EnumerateSkillLayers(root.BaseDir("proj"), root.BaseDir("home"),
+                                                     root.BaseDir("official"));
+    REQUIRE(entries.size() == 5);
+
+    // 胜者:项目原生(.lubancode),其余四份都被后到的高优先级层顶掉。
+    const auto& winner = FindEntry(entries, "shared-skill", "proj", ".lubancode");
+    CHECK(winner.active);
+    CHECK(winner.shadowed_by.empty());
+    CHECK(winner.meta.description == "项目原生");
+
+    const auto& official = FindEntry(entries, "shared-skill", "official", "");
+    CHECK_FALSE(official.active);
+    CHECK(official.shadowed_by == "agents 共享");
+
+    const auto& home_agent = FindEntry(entries, "shared-skill", "home", ".agents");
+    CHECK_FALSE(home_agent.active);
+    CHECK(home_agent.shadowed_by == "主目录级");
+
+    const auto& home_native = FindEntry(entries, "shared-skill", "home", ".lubancode");
+    CHECK_FALSE(home_native.active);
+    CHECK(home_native.shadowed_by == "agents 共享");
+
+    const auto& proj_agent = FindEntry(entries, "shared-skill", "proj", ".agents");
+    CHECK_FALSE(proj_agent.active);
+    CHECK(proj_agent.shadowed_by == "项目级");
+
+    // 与 LoadSkills 同一套合并法则:唯一生效条目就是 LoadSkills 的那条。
+    const auto loaded = tools::LoadSkills(root.BaseDir("proj"), root.BaseDir("home"), root.BaseDir("official"));
+    REQUIRE(loaded.size() == 1);
+    CHECK(loaded[0].description == "项目原生");
+}
+
+TEST_CASE("EnumerateSkillLayers: 旧版播种的官方副本让位并标注;无新版时照常生效") {
+    TempSkillsRoot root;
+    root.WriteOfficialSkill("lubancode-config", SkillContent("lubancode-config", "发行包新版", "官方正文\n"));
+    root.WriteSkill("home", "lubancode-config",
+                    SkillContent("lubancode-config", "主目录旧版",
+                                 "<!-- lubancode 系统维护,随版本自动更新;自定义请另建技能 -->\n旧正文\n"));
+
+    const auto entries =
+        tools::EnumerateSkillLayers(root.BaseDir("proj"), root.BaseDir("home"), root.BaseDir("official"));
+    REQUIRE(entries.size() == 2);
+    const auto& official = FindEntry(entries, "lubancode-config", "official", "");
+    CHECK(official.active);
+    CHECK(official.meta.description == "发行包新版");
+    const auto& legacy = FindEntry(entries, "lubancode-config", "home", ".lubancode");
+    CHECK_FALSE(legacy.active);
+    CHECK(legacy.shadowed_by == "官方");
+
+    // 官方层没有同名新版时,副本不跟谁让位,照常生效。
+    TempSkillsRoot solo;
+    solo.WriteSkill("home", "lubancode-config",
+                    SkillContent("lubancode-config", "主目录旧版",
+                                 "<!-- lubancode 系统维护,随版本自动更新;自定义请另建技能 -->\n旧正文\n"));
+    const auto solo_entries = tools::EnumerateSkillLayers(solo.BaseDir("proj"), solo.BaseDir("home"));
+    REQUIRE(solo_entries.size() == 1);
+    CHECK(solo_entries[0].active);
+    CHECK(solo_entries[0].meta.description == "主目录旧版");
+}
+
+TEST_CASE("EnumerateSkillLayers: 主目录与官方缺位,只剩项目两处也照数") {
+    TempSkillsRoot root;
+    root.WriteSkill("proj", "proj-native", SkillContent("proj-native", "项目原生", "正文\n"));
+    root.WriteAgentSkill("proj", "proj-agent", SkillContent("proj-agent", "项目共享", "正文\n"));
+
+    const auto entries = tools::EnumerateSkillLayers(root.BaseDir("proj"), std::nullopt, std::nullopt);
+    REQUIRE(entries.size() == 2);
+    CHECK(FindEntry(entries, "proj-native", "proj", ".lubancode").meta.source_level == "项目级");
+    CHECK(FindEntry(entries, "proj-agent", "proj", ".agents").meta.source_level == "agents 共享");
 }

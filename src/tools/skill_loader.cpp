@@ -345,6 +345,48 @@ std::vector<SkillMeta> LoadSkills(const std::string& project_dir, const std::opt
     return out;
 }
 
+std::vector<SkillLayerEntry> EnumerateSkillLayers(const std::string& project_dir,
+                                                  const std::optional<std::string>& home_dir,
+                                                  const std::optional<std::string>& official_skills_dir) {
+    std::vector<SkillLayerEntry> out;
+    std::map<std::string, std::size_t> winner;  // 技能名 -> out 里现行胜者的下标
+
+    // 与 LoadSkills 的合并逐条对齐:后到的同名顶掉先到的(先把旧胜者翻成
+    // 被遮蔽)。唯一分岔是 <主目录>/.lubancode 里旧版播种的官方维护副本——
+    // 遇已有胜者就让位、不顶替,与 LoadSkills 的"让位"分支同款。
+    const auto absorb = [&](std::vector<SkillMeta> incoming, bool managed_copies_yield) {
+        for (auto& meta : incoming) {
+            SkillLayerEntry entry;
+            entry.meta = meta;
+            const auto previous = winner.find(meta.name);
+            if (managed_copies_yield && meta.managed_official_copy && previous != winner.end()) {
+                entry.active = false;
+                entry.shadowed_by = out[previous->second].meta.source_level;
+            } else {
+                if (previous != winner.end()) {
+                    out[previous->second].active = false;
+                    out[previous->second].shadowed_by = meta.source_level;
+                }
+                winner[meta.name] = out.size();
+            }
+            out.push_back(std::move(entry));
+        }
+    };
+
+    if (official_skills_dir.has_value()) {
+        absorb(ScanSkillsDir(Utf8ToPath(*official_skills_dir), "官方"), false);
+    }
+    if (home_dir.has_value()) {
+        const std::filesystem::path home = Utf8ToPath(*home_dir);
+        absorb(ScanSkillsDir(home / ".agents" / "skills", "agents 共享"), false);
+        absorb(ScanSkillsDir(home / ".lubancode" / "skills", "主目录级"), true);
+    }
+    const std::filesystem::path project_root = Utf8ToPath(project_dir);
+    absorb(ScanSkillsDir(project_root / ".agents" / "skills", "agents 共享"), false);
+    absorb(ScanSkillsDir(project_root / ".lubancode" / "skills", "项目级"), false);
+    return out;
+}
+
 std::string BuildSkillsPromptSegment(const std::vector<SkillMeta>& skills) {
     if (skills.empty()) {
         return std::string();
