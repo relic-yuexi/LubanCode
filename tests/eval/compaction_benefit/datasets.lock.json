@@ -1,0 +1,38 @@
+{
+  "meta": {
+    "purpose": "Q2 实验 B2 compact 主基准备料:外部数据集不原样进仓(Q2 单 §一合同),本文件钉死来源、revision、许可与哈希,fetch_datasets.py 按此取数。",
+    "lock_format": "1",
+    "fetched_at": "2026-09-04"
+  },
+  "datasets": [
+    {
+      "name": "lost_in_conversation",
+      "description": "Microsoft Lost in Conversation(LiC):多轮分片指令基准,论文 LLMs Get Lost in Multi-Turn Conversation(arXiv:2505.06120,ICLR 2026)。任务族/分片格式/判卷机制见同目录 README.md。",
+      "homepage": "https://github.com/microsoft/lost_in_conversation",
+      "revision": "c865793fe34a929d316119b0451d01bd9183bcfd",
+      "revision_kind": "git commit (tarball 无 .git,revision 取拉取当日 GitHub API main HEAD,archive URL 直接钉该 commit)",
+      "revision_date": "2026-06-09",
+      "urls": {
+        "primary": "https://codeload.github.com/microsoft/lost_in_conversation/tar.gz/c865793fe34a929d316119b0451d01bd9183bcfd",
+        "fallback": "https://github.com/microsoft/lost_in_conversation/archive/c865793fe34a929d316119b0451d01bd9183bcfd.tar.gz",
+        "mirror": "https://huggingface.co/datasets/Microsoft/lost_in_conversation"
+      },
+      "archive_sha256": "032e4f263630768d2faba5102324e44f5ec354beb5d79dcb9d613b48007ccae6",
+      "archive_bytes": 16532452,
+      "archive_kind": "tar.gz (top-level dir lost_in_conversation-<sha>,解包须 --strip-components=1)",
+      "license": "MIT",
+      "license_evidence": [
+        "archive 内 LICENSE:MIT License, Copyright (c) Microsoft Corporation",
+        "GitHub API repos/microsoft/lost_in_conversation license 字段: spdx_id MIT(2026-09-04 查)"
+      ],
+      "verify_files_after_extract": [
+        "LICENSE",
+        "data/sharded_instructions_600.json",
+        "data/sharded_translation.json",
+        "tasks/tasks.py"
+      ],
+      "dest": "cache/lost_in_conversation",
+      "fetched_via": "fallback URL 走本机代理 http://127.0.0.1:10808(primary codeload 直连 ~20KB/s 超时截断;两条 URL 内容同为该 commit 归档,哈希一致)"
+    }
+  ]
+}

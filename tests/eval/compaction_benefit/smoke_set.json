@@ -1,0 +1,255 @@
+{
+  "meta": {
+    "description": "LubanCode compact 评测(Q2 实验 B2)smoke 集:LiC 七族各 5 题共 35 题。只存 task_id 与选取理由,不含数据集正文(§一合同:外部数据不进仓)。数据本体由 fetch_datasets.py 按 datasets.lock.json 拉到 cache/lost_in_conversation/,凭本文件的 task_id+dataset_file 关联。",
+    "selection_rule": "族内按 task_id 排序后确定性选取:①最短分片 ②最长分片 ③中位分片;code 按 source(humaneval/lcb)、database 按 spider_difficulty(medium/hard/extra)、summary 按 domain(news/conv) 补齐组覆盖;不足 5 席再按四分位分片长度补齐。并列时取 task_id 字典序最小。可由缓存数据按本规则复算。",
+    "source_lock": "datasets.lock.json",
+    "generated_at": "2026-09-04"
+  },
+  "items": [
+    {
+      "task_id": "sharded-BFCL/parallel_109",
+      "family": "actions",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 4,
+      "reason": "族内最短分片(4 片),量分片长度下界"
+    },
+    {
+      "task_id": "sharded-BFCL/parallel_169",
+      "family": "actions",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 10,
+      "reason": "族内最长分片(10 片),量分片长度上界"
+    },
+    {
+      "task_id": "sharded-BFCL/parallel_103",
+      "family": "actions",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 6,
+      "reason": "族内中位分片(6 片)"
+    },
+    {
+      "task_id": "sharded-BFCL/parallel_0",
+      "family": "actions",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 5,
+      "reason": "下四分位分片(5 片),补长度分布覆盖"
+    },
+    {
+      "task_id": "sharded-BFCL/parallel_105",
+      "family": "actions",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 6,
+      "reason": "上四分位分片(6 片),补长度分布覆盖"
+    },
+    {
+      "task_id": "sharded-HumanEval/114",
+      "family": "code",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 4,
+      "reason": "族内最短分片(4 片),量分片长度下界"
+    },
+    {
+      "task_id": "sharded-HumanEval/109",
+      "family": "code",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 10,
+      "reason": "族内最长分片(10 片),量分片长度上界"
+    },
+    {
+      "task_id": "sharded-HumanEval/106",
+      "family": "code",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 7,
+      "reason": "族内中位分片(7 片)"
+    },
+    {
+      "task_id": "sharded-livecodebench/2785",
+      "family": "code",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 7,
+      "reason": "补齐组覆盖:source=lcb_easy(族内中位分片)"
+    },
+    {
+      "task_id": "sharded-livecodebench/2728",
+      "family": "code",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 8,
+      "reason": "补齐组覆盖:source=lcb_medium(族内中位分片)"
+    },
+    {
+      "task_id": "sharded-totto_-1142489329801708958",
+      "family": "data2text",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 6,
+      "reason": "族内最短分片(6 片),量分片长度下界"
+    },
+    {
+      "task_id": "sharded-totto_-3487325775237851124",
+      "family": "data2text",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 7,
+      "reason": "族内最长分片(7 片),量分片长度上界"
+    },
+    {
+      "task_id": "sharded-totto_-1200443185142546807",
+      "family": "data2text",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 6,
+      "reason": "族内中位分片(6 片)"
+    },
+    {
+      "task_id": "sharded-totto_-1262828512682672349",
+      "family": "data2text",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 6,
+      "reason": "下四分位分片(6 片),补长度分布覆盖"
+    },
+    {
+      "task_id": "sharded-totto_-1368446073372924912",
+      "family": "data2text",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 6,
+      "reason": "上四分位分片(6 片),补长度分布覆盖"
+    },
+    {
+      "task_id": "sharded-spider-val-1012-medium",
+      "family": "database",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 3,
+      "reason": "族内最短分片(3 片),量分片长度下界"
+    },
+    {
+      "task_id": "sharded-spider-val-419-medium",
+      "family": "database",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 7,
+      "reason": "族内最长分片(7 片),量分片长度上界"
+    },
+    {
+      "task_id": "sharded-spider-val-1020-medium",
+      "family": "database",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 4,
+      "reason": "族内中位分片(4 片)"
+    },
+    {
+      "task_id": "sharded-spider-val-129-extra",
+      "family": "database",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 4,
+      "reason": "补齐组覆盖:spider_difficulty=extra(族内中位分片)"
+    },
+    {
+      "task_id": "sharded-spider-val-257-hard",
+      "family": "database",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 4,
+      "reason": "补齐组覆盖:spider_difficulty=hard(族内中位分片)"
+    },
+    {
+      "task_id": "sharded-GSM8K/1058",
+      "family": "math",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 4,
+      "reason": "族内最短分片(4 片),量分片长度下界"
+    },
+    {
+      "task_id": "sharded-GSM8K/144",
+      "family": "math",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 12,
+      "reason": "族内最长分片(12 片),量分片长度上界"
+    },
+    {
+      "task_id": "sharded-GSM8K/1047",
+      "family": "math",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 5,
+      "reason": "族内中位分片(5 片)"
+    },
+    {
+      "task_id": "sharded-GSM8K/1066",
+      "family": "math",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 5,
+      "reason": "下四分位分片(5 片),补长度分布覆盖"
+    },
+    {
+      "task_id": "sharded-GSM8K/1019",
+      "family": "math",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 6,
+      "reason": "上四分位分片(6 片),补长度分布覆盖"
+    },
+    {
+      "task_id": "sharded-summary_0",
+      "family": "summary",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 6,
+      "reason": "族内最短分片(6 片),量分片长度下界"
+    },
+    {
+      "task_id": "sharded-summary_50",
+      "family": "summary",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 10,
+      "reason": "族内最长分片(10 片),量分片长度上界"
+    },
+    {
+      "task_id": "sharded-summary_10",
+      "family": "summary",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 7,
+      "reason": "族内中位分片(7 片)"
+    },
+    {
+      "task_id": "sharded-summary_1",
+      "family": "summary",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 6,
+      "reason": "下四分位分片(6 片),补长度分布覆盖"
+    },
+    {
+      "task_id": "sharded-summary_2",
+      "family": "summary",
+      "dataset_file": "data/sharded_instructions_600.json",
+      "n_shards": 8,
+      "reason": "上四分位分片(8 片),补长度分布覆盖"
+    },
+    {
+      "task_id": "wmt-news-24-de-en",
+      "family": "translation",
+      "dataset_file": "data/sharded_translation.json",
+      "n_shards": 3,
+      "reason": "族内最短分片(3 片),量分片长度下界"
+    },
+    {
+      "task_id": "wmt-news-0-de-en",
+      "family": "translation",
+      "dataset_file": "data/sharded_translation.json",
+      "n_shards": 5,
+      "reason": "族内最长分片(5 片),量分片长度上界"
+    },
+    {
+      "task_id": "wmt-news-1-de-en",
+      "family": "translation",
+      "dataset_file": "data/sharded_translation.json",
+      "n_shards": 5,
+      "reason": "族内中位分片(5 片)"
+    },
+    {
+      "task_id": "wmt-news-10-de-en",
+      "family": "translation",
+      "dataset_file": "data/sharded_translation.json",
+      "n_shards": 5,
+      "reason": "下四分位分片(5 片),补长度分布覆盖"
+    },
+    {
+      "task_id": "wmt-news-11-de-en",
+      "family": "translation",
+      "dataset_file": "data/sharded_translation.json",
+      "n_shards": 5,
+      "reason": "上四分位分片(5 片),补长度分布覆盖"
+    }
+  ]
+}

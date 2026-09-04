@@ -68,6 +68,11 @@ examples/shells/android/*.keystore
 # Agent 会话交接档:随机器走的临时产物,绝不入库(557c62e7 曾误入后移出)
 AGENT_HANDOFF.md
 
+# compact 评测(Q2 实验 B2)外部主基准缓存:Microsoft Lost in Conversation
+# 数据本体不进仓(Q2 单 §一合同),进仓的只有 datasets.lock.json / fetch_datasets.py
+# / README.md / smoke_set.json 四件;本体由脚本按锁拉到此目录。
+tests/eval/compaction_benefit/cache/
+
 # 质量对照跑批临时目录:含拷贝的真 config(带钥匙)与会话轨迹,绝不进 git
 eval/deferred_quality/_run/
 
