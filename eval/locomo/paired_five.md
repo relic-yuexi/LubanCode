@@ -1,3 +1,10 @@
+```
+INVALIDATED 2026-09-05
+原因：trajectory event 名读取错误，stdout 数字误判；答题工具未隔离，存在评测目录越界读取。
+用途：仅保留历史开发记录，不得引用其中准确率、增益、幻觉率或置信区间。
+替代：待本单重跑报告。
+```
+
 # LoCoMo-MC10 E2 五场放量终版报告(记忆写入侧改进单 §二)
 
 口径:五场 conv-26/41/43/47/49(每场五类各抽 10,conv-41 temporal 池仅 8)=248 题,双态;A=memory off 裸底,B=memory on 走生产召回路。模型 ccmoon/gpt-5.6-sol(温度 0,推理档 medium——A 组空推理 420s+ 不封顶,两组对称降档,口径可复现)。判分对扰动后 correct_choice_index。**评测期 runner 钉死 active_provider=ccmoon**(用户真 config 的默认 provider 日常会切,不钉死整批换模型,实测踩过);答题 exe 为本批自建产物(v0.26.196 源码,含时间线锚点与摘要要点化两刀)。

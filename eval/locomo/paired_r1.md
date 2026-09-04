@@ -1,3 +1,10 @@
+```
+INVALIDATED 2026-09-05
+原因：trajectory event 名读取错误，stdout 数字误判；答题工具未隔离，存在评测目录越界读取。
+用途：仅保留历史开发记录，不得引用其中准确率、增益、幻觉率或置信区间。
+替代：待本单重跑报告。
+```
+
 # LoCoMo-MC10 E2 复跑(记忆幻觉根治单:A+B 两刀后 B 态复测,A 态复用五场基线)
 
 口径:与五场终版(`paired_five.md`)同题集(conv-26/41/43/47/49,seed 20260903,五类各 10)、同模型(ccmoon/gpt-5.6-sol,温度 0,推理档 medium)、同判分(扰动后 correct_choice_index)。**A 态逐题账原样复用五场基线(e2_per_question_A_t2.json,拷贝为 _A_r1)——A=memory off,注入侧改动不触该路径**;B 态用本批自建 exe(相关性分级 + 包裹式护栏两刀,措辞走 20 题快测定形的硬指令档)。

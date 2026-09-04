@@ -1,3 +1,10 @@
+```
+INVALIDATED 2026-09-05
+原因：trajectory event 名读取错误，stdout 数字误判；答题工具未隔离，存在评测目录越界读取。
+用途：仅保留历史开发记录，不得引用其中准确率、增益、幻觉率或置信区间。
+替代：待本单重跑报告。
+```
+
 # LoCoMo-MC10 端到端配对(E2 抽样首批)
 
 题集: ['conv-26', 'conv-41'] x 五类各 10 = 98 题,双态; 模型 ccmoon/gpt-5.6-sol(温度 0,推理档 medium——日常 high 会让 A 组空推理 420s+ 不封顶,两组对称降档,口径可复现); A=memory off,B=memory on。判分对扰动后 correct_choice_index(扰动不改位次)。答题每题新进程新会话,只灌对话不灌题,记忆注入以 recall trace 落账(B 组 98 题每题注入 3 条/约 8.2KB,预算打满)。
