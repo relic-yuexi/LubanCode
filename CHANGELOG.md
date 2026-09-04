@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.206] - 2026-09-04
+
+- **CI 修复批：两 POSIX 腿四册红全根治 + 编译警告清零。** ubuntu 两册 SEGFAULT 根因是 `for (… : *ReadJournalLines(…))` 悬垂——C++23 P2718 range-for 延寿 MSVC/g++15 吃全、CI 的 GCC 13 没吃全，临时 optional 当场死；改写为先落变量+REQUIRE 再循环，g++-13 复现红→修后 5/5 绿。macOS 两册：identity 册 `#ifdef` 猜平台改成运行时探测（APFS 默认大小写不敏感不再误判，NTFS/ext4 两路本地实证）；ui_event_pump 帧节流上界从常数 20 改按实测滴流时长推导（慢机拉长不再冤枉正常节拍）。警告清扫：ubuntu 腿 127 处 + macos 独有 16 处、100 文件 +168/−377，g++-13 逐文件 `-c` 全编警告归零；顺手逮出两枚真 bug——CJK 折行测试 `std::string(80, U'好')` 窄化成 `'}'` 从没真测过宽字（改真"好"×80）、http_stream parse 结果落名；另清死码约 30 具（逐个 git -S 验来历）。
+
 ## [v0.26.205] - 2026-09-04
 
 - **CI 两 POSIX 腿红修复（均为测试夹具病，production 零改动）。** hooks_turn_identity：stdin payload 缺尾换行致 POSIX cat 记账粘行（补一枚换行）+ 表态 JSON 被 sh 剥引号（单引号裹整串保真）。app_server_browser：轮询循环 `lock_guard` 吞掉 `sleep_for`，glibc 非公平 mutex 下工作线程饿出 12~14s、CI 慢机过 60s 门即红，红后早退拆栈再踩 SIGSEGV——改为取值一瞬持锁、账本挪 `shared_ptr`，修后 16 轮钉死 0.75s（修前 9~66s 乱跳）、-j8 三轮全绿。两腿同治（macOS 腿同病灶只是没过线）。
