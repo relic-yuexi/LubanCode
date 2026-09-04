@@ -1,0 +1,8 @@
+# /skill list 漏层与计数口径对齐
+
+- 状态：待修（2026-09-04 用户真机实录立案）
+- 级别：P2（功能可用但显示不全，用户困惑"数量不对"）
+- 现场实录：右下角计数 `5 skills`，`/skill list` 只列 2 个（anysearch 项目级/monid 主目录级）——用户问"没识别对吗"。
+- 病根（已查明）：**计数与列表两处口径**——计数 `SetSessionSkillCount(skills.size())` 数的是 LoadSkills 全部实体（官方 2 + 项目 anysearch + `.agents` 层 humanizer + 主目录 monid = 5，遮蔽已扣）；`/skill list`（settings_commands.cpp:296-297）只扫 `global_skills_root`（~/.lubancode/skills）与 `project_skills_root`（.lubancode/skills）两层——**漏 `.agents/skills` 层与官方技能层**。计数是对的，列表漏显。
+- 修法：`/skill list` 补全四层来源分段显示——官方（lubancode-config/workflow 等，标"官方"）、项目级、`.agents` 层（标"agents 共享"）、主目录级；被遮蔽的标"被 X 遮蔽"。计数口径不动（实体数正确）。
+- 验收：真机 `/skill list` 列出 5 个与计数一致；被遮蔽条目可见有标注；单测钉四层枚举与遮蔽标注。

@@ -1,0 +1,13 @@
+# workflow 会话归属统一：编排账并入轨迹 Journal
+
+- 状态：待实施（2026-09-04 立单；P0-6 发布门工头收官时点名的遗留——"ReserveWorkflowRun/ReserveWorkflowNodeStream 至今无生产消费方，workflow 节点的模型请求不落轨迹 Journal，编排账在 workflow-runs/ 旧路——须另立单"）
+- 级别：P1（轨迹完整性合同：每个执行单元只认一本账）
+- 类型：LubanCode 产品改进（trajectory 完整性）
+- 关联：《P0新轨迹记录_可重放与训练投影设计.todo》（P0-6 已收官，本单是其 §一定案"每场 workflow 有自己的编排目录与 Journal；workflow 中真正执行的 node attempt 各写一份 node JSONL"的落地尾巴）
+- 现状：workflow 跑动时编排账落 `<home>/.lubancode/workflow-runs/<run>/{definition,manifest,events,checkpoints}`（旧路），main.jsonl 只落 `control.command.*` 边——**workflow 节点内的模型请求/工具调用不进任何 Trajectory Journal**；`ReserveWorkflowRun/ReserveWorkflowNodeStream`（trajectory directory 已备的口）无消费方。
+- 修法：
+  - workflow run 起动时经 `ReserveWorkflowRun` 开编排 Journal、每个 node attempt 经 `ReserveWorkflowNodeStream` 开 node stream（复用 P0-C 的延迟开卷/独占创建/fail closed 全套合同）
+  - 节点内模型请求/工具事件落各自 node Journal（与子代理同款 ownership：声明才进、无主拒）
+  - workflow-runs/ 旧路保留为兼容读（或迁移窗后退役，按既有迁移纪律）
+  - parallel/loop/retry 长跑场景验证账不裂
+- 验收：workflow 场景 `trajectory verify` 全过（编排账+node 账+main 边引用一致）；旧 workflow-runs 数据可读不迁移不炸；单测钉 reserve→consume 全链与 fail closed。
