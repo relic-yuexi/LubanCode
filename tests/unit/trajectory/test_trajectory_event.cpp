@@ -41,7 +41,7 @@ EventEnvelope MakeValidEnvelope() {
 
 }  // namespace
 
-TEST_CASE("event: 全部 86 种 kind 名字往返") {
+TEST_CASE("event: 全部 88 种 kind 名字往返") {
     int count = 0;
     for (const EventKind kind : AllEventKinds()) {
         const char* name = EventKindName(kind);
@@ -52,7 +52,7 @@ TEST_CASE("event: 全部 86 种 kind 名字往返") {
         CHECK(*back == kind);
         ++count;
     }
-    CHECK(count == 86);
+    CHECK(count == 88);
     // 派工长任务最终预检三项账。
     CHECK(EventKindFromName("context.pressure.recorded") == EventKind::ContextPressureRecorded);
     CHECK(EventKindFromName("model.usage.recorded").has_value());

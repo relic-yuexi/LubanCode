@@ -147,7 +147,9 @@ tools::Tool::Result MemorySaveTool::execute(const nlohmann::json& input) {
             target.push_back(item.get<std::string>());
         }
     }
-    auto queued = memory_->EnqueueSave(request);
+    // 记忆写入调度单 P0:回执按 model_tool_save 投(§6.2 四路之二)。
+    auto queued = memory_->EnqueueSave(request, /*user_initiated=*/false,
+                                       MemoryWriteSource::ModelToolSave);
     if (!queued.has_value()) return {queued.error(), true};
     return {"记忆已排进后台队列: " + *queued, false};
 }

@@ -97,7 +97,7 @@ std::optional<Durability> DurabilityFromName(std::string_view name);
 // ---------------------------------------------------------------------------
 // 事件种类(§五全列 67 种 + v2 的 model.usage.recorded,再加存储 v2 的
 // context.injected 与 memory.save.* 三枚、子代理空轨迹单 P0-B 一枚、
-// workflow 编排单十二枚,共 86 种)
+// workflow 编排单十二枚、记忆写入调度单 P0 两枚,共 88 种)
 // ---------------------------------------------------------------------------
 
 enum class EventKind {
@@ -210,6 +210,19 @@ enum class EventKind {
     WorkflowLoopIterationStarted,
     WorkflowLoopIterationCompleted,
     WorkflowCheckpointSaved,
+    // 记忆写入调度单 P0(§六/§10):先把账补齐,不改行为。两枚纯观测
+    // 事实——
+    //   memory.extraction.assessed:每外层用户回合一枚,抽取调度的
+    //     决策(called|skipped)、稳定 reason、Token、抽取墙钟与前台尾
+    //     延迟、本次产出的候选/直写数。漏斗(§10.1)按回合聚合可复算。
+    //   memory.write.receipted:四路写路(显式命令/模型工具/显式忘记/
+    //     候选接受,外加抽取 auto 直写)的排队回执——outcome 只有
+    //     queued|rejected,排队≠落盘,不冒充 committed(落盘回执是
+    //     worker 的 lifecycle 账)。
+    // 两枚都只认稳定枚举、计数与 id;正文、路径、标题不进 payload,
+    // telemetry 隐私线(§10.3)同此口径。
+    MemoryExtractionAssessed,
+    MemoryWriteReceipted,
 };
 
 const char* EventKindName(EventKind kind);

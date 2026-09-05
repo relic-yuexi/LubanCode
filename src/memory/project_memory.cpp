@@ -2348,6 +2348,51 @@ std::expected<LearnMode, std::string> ParseLearnMode(const std::string& raw) {
     return std::unexpected("learn 档位只认 off、review 或 auto");
 }
 
+// ---- 记忆写入调度单 P0(§6.2):写路回执的枚举名与稳定码 ---------------
+
+std::string MemoryWriteSourceName(MemoryWriteSource source) {
+    switch (source) {
+        case MemoryWriteSource::ExplicitCommandSave: return "explicit_command_save";
+        case MemoryWriteSource::ModelToolSave: return "model_tool_save";
+        case MemoryWriteSource::ExplicitForget: return "explicit_forget";
+        case MemoryWriteSource::CandidateAccept: return "candidate_accept";
+        case MemoryWriteSource::AutoExtraction: return "auto_extraction";
+    }
+    return "model_tool_save";
+}
+
+std::string MemoryWriteReceiptOutcomeName(MemoryWriteReceiptOutcome outcome) {
+    switch (outcome) {
+        case MemoryWriteReceiptOutcome::Queued: return "queued";
+        case MemoryWriteReceiptOutcome::Rejected: return "rejected";
+    }
+    return "rejected";
+}
+
+std::string StableWriteErrorCode(const std::string& error) {
+    // 前缀映射到 EnqueueXxx 系的固定文案(编译期字面量,跨平台一致);
+    // 文案改动只会降级成 other,不会错归因。
+    if (error.starts_with("本场记忆写入未开启")) return "write_disabled";
+    if (error.starts_with("本场记忆学习未开启")) return "write_disabled";
+    if (error.starts_with("本场记忆未开启")) return "memory_disabled";
+    if (error.starts_with("memory.global_unauthorized")) return "global_unauthorized";
+    if (error.starts_with("用户级记忆未在全局配置授权")) return "user_layer_unauthorized";
+    if (error.starts_with("找不到候选")) return "candidate_not_found";
+    if (error.starts_with("候选置信度是 inferred")) return "candidate_inferred";
+    if (error.starts_with("feedback 候选只收")) return "candidate_feedback_not_user_stated";
+    if (error.starts_with("fact 候选缺证据路径")) return "candidate_fact_no_evidence";
+    if (error.starts_with("记忆 id 不合法")) return "invalid_id";
+    if (error.starts_with("记忆标题") || error.starts_with("记忆正文") || error.starts_with("记忆摘要") ||
+        error.starts_with("记忆 paths") || error.starts_with("记忆元数据") ||
+        error.starts_with("keywords") || error.starts_with("evidence") ||
+        error.starts_with("confidence ") || error.starts_with("confidence 只认") ||
+        error.starts_with("scope.") || error.starts_with("scope=") || error.starts_with("用户级记忆")) {
+        return "invalid_request";
+    }
+    if (error.starts_with("feedback 只收用户明说的纠正")) return "feedback_requires_user_stated";
+    return "other";
+}
+
 ProjectMemory::ProjectMemory(ProjectIdentity identity, fs::path home_lubancode,
                              Options options, std::string executable)
     : identity_(std::move(identity)),
@@ -2857,7 +2902,17 @@ std::expected<void, std::string> ProjectMemory::set_learn(LearnMode mode) {
 }
 
 std::expected<std::string, std::string> ProjectMemory::EnqueueSave(const SaveRequest& request,
-                                                                    bool user_initiated) {
+                                                                    bool user_initiated,
+                                                                    MemoryWriteSource source) {
+    // 记忆写入调度单 P0:函数体一字未动(搬进 Impl),外壳只加回执投递。
+    const auto queued = EnqueueSaveImpl(request, user_initiated);
+    EmitWriteReceipt(source, "upsert", &request,
+                     request.scope.level == "user" ? "user" : "project", queued);
+    return queued;
+}
+
+std::expected<std::string, std::string> ProjectMemory::EnqueueSaveImpl(const SaveRequest& request,
+                                                                        bool user_initiated) {
     if (!generate_enabled()) return std::unexpected("本场记忆写入未开启");
     // 存储 v2 P0-4(§6.1):全局层只认用户主动命令——memory_save 工具、
     // 回合尾抽取、候选 accept 都不带 user_initiated,一律拒;项目配置也
@@ -2880,6 +2935,15 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueSave(const SaveReq
 
 std::expected<std::string, std::string> ProjectMemory::EnqueueForget(const std::string& id,
                                                                       const std::string& layer) {
+    // forget 恒为用户命令口(§6.4),回执按 explicit_forget 投。
+    const auto queued = EnqueueForgetImpl(id, layer);
+    EmitWriteReceipt(MemoryWriteSource::ExplicitForget, "forget", nullptr,
+                     layer == "user" ? "user" : "project", queued);
+    return queued;
+}
+
+std::expected<std::string, std::string> ProjectMemory::EnqueueForgetImpl(const std::string& id,
+                                                                          const std::string& layer) {
     if (!options_.global_allowed || !options_.enabled) return std::unexpected("本场记忆未开启");
     if (!IsValidId(id)) return std::unexpected("记忆 id 不合法");
     // 显式层(P0-4 的 forget global|project)路由到指定层;没给层的旧写法
@@ -2896,6 +2960,28 @@ std::expected<std::string, std::string> ProjectMemory::EnqueueForget(const std::
         extra["memory_dir"] = PathUtf8(user_memory_dir());
     }
     return EnqueueJob("forget", nullptr, id, extra, /*user_initiated=*/true);
+}
+
+// 记忆写入调度单 P0(§6.2):排队成败的当口投一张回执。sink 空 = 没人
+// 收,纯空操作。queued 有值 = job 已进 pending(outcome=queued,不冒充
+// 落盘);否则 rejected + 稳定码。
+void ProjectMemory::EmitWriteReceipt(MemoryWriteSource source, const std::string& operation,
+                                     const SaveRequest* request, const std::string& layer,
+                                     const std::expected<std::string, std::string>& queued) {
+    if (write_receipt_sink_ == nullptr) return;
+    MemoryWriteReceipt receipt;
+    receipt.source = source;
+    receipt.operation = operation;
+    receipt.layer = layer;
+    if (request != nullptr) receipt.kind = MemoryKindName(request->kind);
+    if (queued.has_value()) {
+        receipt.outcome = MemoryWriteReceiptOutcome::Queued;
+        receipt.job_id = *queued;
+    } else {
+        receipt.outcome = MemoryWriteReceiptOutcome::Rejected;
+        receipt.error_code = StableWriteErrorCode(queued.error());
+    }
+    write_receipt_sink_->OnMemoryWriteReceipt(receipt);
 }
 
 std::expected<std::string, std::string> ProjectMemory::EnqueueRebuild() {
@@ -3269,21 +3355,45 @@ std::expected<std::string, std::string> ProjectMemory::AddCandidate(MemoryCandid
 }
 
 std::expected<std::string, std::string> ProjectMemory::AcceptCandidate(const std::string& id) {
-    if (!generate_enabled()) return std::unexpected("本场记忆学习未开启");
+    // 记忆写入调度单 P0:accept 的早失败也投 candidate_accept 回执
+    //(rejected + 稳定码);排队成功经 EnqueueSave 投(source=accept)。
+    const auto reject_receipt = [&](const std::string& error) {
+        MemoryWriteReceipt receipt;
+        receipt.source = MemoryWriteSource::CandidateAccept;
+        receipt.operation = "upsert";
+        receipt.outcome = MemoryWriteReceiptOutcome::Rejected;
+        receipt.layer = "project";
+        receipt.error_code = StableWriteErrorCode(error);
+        if (write_receipt_sink_ != nullptr) write_receipt_sink_->OnMemoryWriteReceipt(receipt);
+    };
+    if (!generate_enabled()) {
+        reject_receipt("本场记忆学习未开启");
+        return std::unexpected("本场记忆学习未开启");
+    }
     auto candidate = GetCandidate(id);
-    if (!candidate.has_value()) return std::unexpected("找不到候选: " + id);
+    if (!candidate.has_value()) {
+        const std::string error = "找不到候选: " + id;
+        reject_receipt(error);
+        return std::unexpected(error);
+    }
 
     // inferred 不准入正式库(规格:inferred 只进候选区)。
     if (candidate->confidence == "inferred") {
-        return std::unexpected("候选置信度是 inferred,先 /memory edit 改实或直接 reject");
+        const std::string error = "候选置信度是 inferred,先 /memory edit 改实或直接 reject";
+        reject_receipt(error);
+        return std::unexpected(error);
     }
     // feedback 只收用户明说的纠正(规格:模型推断不得直写 feedback)。
     if (candidate->kind == MemoryKind::Feedback && candidate->confidence != "user-stated") {
-        return std::unexpected("feedback 候选只收用户明说的纠正(confidence 须为 user-stated)");
+        const std::string error = "feedback 候选只收用户明说的纠正(confidence 须为 user-stated)";
+        reject_receipt(error);
+        return std::unexpected(error);
     }
     // fact 须有可核验证据。
     if (candidate->kind == MemoryKind::Fact && candidate->paths.empty()) {
-        return std::unexpected("fact 候选缺证据路径,先 /memory edit 补 paths 或直接 reject");
+        const std::string error = "fact 候选缺证据路径,先 /memory edit 补 paths 或直接 reject";
+        reject_receipt(error);
+        return std::unexpected(error);
     }
 
     SaveRequest request;
@@ -3300,7 +3410,8 @@ std::expected<std::string, std::string> ProjectMemory::AcceptCandidate(const std
     for (const std::string& path : candidate->paths) {
         request.evidence.push_back(MemoryEvidence{path, std::string()});
     }
-    auto queued = EnqueueSave(request);
+    auto queued = EnqueueSave(request, /*user_initiated=*/false,
+                              MemoryWriteSource::CandidateAccept);
     if (!queued.has_value()) return queued;
 
     std::error_code ec;

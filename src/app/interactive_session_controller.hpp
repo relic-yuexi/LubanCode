@@ -256,6 +256,8 @@ private:
         // Token 账本单 A1:回合收尾的抽取/按需摘要走旁路桥落轨迹。
         tail.trajectory = session_runtime_.trajectory();
         tail.trajectory_wire = session_runtime_.wire_name();
+        // 记忆写入调度单 P0:抽取前置门与收口都向这本账报数。
+        tail.memory_turns = &memory_turns_;
         return tail;
     }
     void EnsureMemoryTool();
@@ -420,6 +422,10 @@ private:
     std::unique_ptr<lubancode::telemetry::TelemetryService> telemetry_service_;
     // runtime 声明在前(先析构引用别名,本体后析构),引用一律指它。
     lubancode::runtime::SessionRuntime session_runtime_;
+    // 记忆写入调度单 P0:回合级调度账(漏斗/Token/尾延迟 + 四路写路
+    // 回执)。声明在 session_runtime_ 之后——构造时账本已开张(或确定
+    // 没开);装配尾声把收件口挂进 project_memory。
+    lubancode::app::MemoryTurnLedger memory_turns_;
     // P6:本体在 SessionRuntime.always_allowed(),这里引用别名(按 a 落
     // 进来的同一本账,远端审批 accept_for_session 也写它)。声明在
     // session_runtime_ 之后——构造序先本体后引用,别名绑的是活对象

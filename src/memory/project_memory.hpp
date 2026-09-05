@@ -113,6 +113,57 @@ public:
     virtual std::string current_session_id() const { return std::string(); }
 };
 
+// ---------------------------------------------------------------------------
+// 记忆写入调度单 P0(§6.2):写路回执。纯观测——不改任何控制流,sink
+// 默认空,一切行为与从前逐字节一致。四路显式写路(显式命令保存/模型
+// 工具保存/显式忘记/候选接受)外加回合尾抽取的 auto 直写,在 job 排队
+// 成败的当口各投一张回执。
+//
+// outcome 诚实两态:queued(job 已排进 pending,尚未落盘)/rejected(没
+// 排进去)。落盘与否是 worker 的 lifecycle 账,P0 不冒充 committed——
+// "job 只排队未执行须记 queued,不得冒充已落盘"。
+//
+// 枚举线上名稳定(§15:同一冻结输入跨平台判断一致),改名即改合同。
+// ---------------------------------------------------------------------------
+
+// 写入来源五路:§6.2 的四路 + 抽取 auto 直写(§10.2 auto_written 的分子)。
+enum class MemoryWriteSource {
+    ExplicitCommandSave,  // /memory remember(§6.2 explicit_command_save)
+    ModelToolSave,        // 主模型 memory_save 工具(§6.2 model_tool_save)
+    ExplicitForget,       // /memory forget(§6.2 explicit_forget)
+    CandidateAccept,      // /memory accept(§6.2 candidate_accept)
+    AutoExtraction,       // 回合尾抽取的 auto 档直写(§10.2 auto_written)
+};
+std::string MemoryWriteSourceName(MemoryWriteSource source);
+
+// 排队成败两态(§6.2)。不叫 MemoryWriteOutcome——worker 落盘回执的
+// 四件套同文件另有同名结构,撞名会让 TU 内的裸引用歧义。
+enum class MemoryWriteReceiptOutcome { Queued, Rejected };
+std::string MemoryWriteReceiptOutcomeName(MemoryWriteReceiptOutcome outcome);
+
+// 一张回执。只带稳定枚举、job id 与稳定错误码;标题、正文、路径不进
+// 回执(§10.3 隐私线:本地 typed event 与 telemetry 同此口径)。
+struct MemoryWriteReceipt {
+    MemoryWriteSource source = MemoryWriteSource::ModelToolSave;
+    MemoryWriteReceiptOutcome outcome = MemoryWriteReceiptOutcome::Queued;
+    std::string operation;  // upsert | forget
+    std::string job_id;     // queued 时的 job 文件名;rejected 空
+    std::string error_code; // rejected 时的稳定码(StableWriteErrorCode)
+    std::string layer;      // project | user
+    std::string kind;       // fact | preference | feedback(空 = forget)
+};
+
+// 回执收件口。实现方自己管线程安全(写路可能在回合内的工具执行里)。
+class MemoryWriteReceiptSink {
+public:
+    virtual ~MemoryWriteReceiptSink() = default;
+    virtual void OnMemoryWriteReceipt(const MemoryWriteReceipt& receipt) = 0;
+};
+
+// 把 EnqueueXxx 的拒绝人话折成稳定码。认不出的落 "other",不猜——
+// 错误文案改动只会降级成 other,不会错归因。
+std::string StableWriteErrorCode(const std::string& error);
+
 // fact=可核验的项目事实;preference=用户主动选定的项目技术偏好;
 // feedback=用户对 LubanCode 行事方式的明确纠正(版本节奏、验收习惯、提交
 // 规矩),只收 user-stated,模型推断不得直写。
@@ -404,6 +455,9 @@ public:
     // 场合(单发/单测),一笔不落,行为与从前一致。归装配层所有,这里只
     // 借指针,不接管寿命。
     void set_accounting(MemoryAccounting* accounting) { accounting_ = accounting; }
+    // 记忆写入调度单 P0:写路回执收件口挂接。空(默认)= 没人收,写路
+    // 一切照旧。纯观测,不接管寿命。
+    void set_write_receipt_sink(MemoryWriteReceiptSink* sink) { write_receipt_sink_ = sink; }
 
     const ProjectIdentity& identity() const { return identity_; }
     const std::filesystem::path& memory_dir() const { return memory_dir_; }
@@ -512,8 +566,11 @@ public:
     // user_initiated=true 只服务显式用户命令(/memory remember):因果边
     // (memory.save.requested)按 user 记;模型工具与回合尾抽取走默认 false。
     // P0-4 起全局层写入也只认 user_initiated=true 的路。
+    // 记忆写入调度单 P0:source 只喂写路回执(§6.2),不碰 user_initiated
+    // 的既有语义与因果边——默认值保持老调用方的口径(model_tool)。
     std::expected<std::string, std::string> EnqueueSave(const SaveRequest& request,
-                                                        bool user_initiated = false);
+                                                        bool user_initiated = false,
+                                                        MemoryWriteSource source = MemoryWriteSource::ModelToolSave);
     // P0-4:显式层路由——layer 为 "user"/"project" 时按命令指定的层动
     // (forget global 的删除边界 §6.4:只认用户命令,本口即命令口);空串
     // 保持旧写法(按 id 自动认层)。
@@ -562,6 +619,18 @@ private:
     std::string executable_;
     std::string source_session_;
     MemoryAccounting* accounting_ = nullptr;  // P0-3:装配层挂的落账口
+    // 记忆写入调度单 P0:写路回执收件口(装配层挂;空 = 没人收)。
+    MemoryWriteReceiptSink* write_receipt_sink_ = nullptr;
+    // EnqueueSave/EnqueueForget 的原函数体(逻辑一字不动),public 口只加
+    // 回执投递。
+    std::expected<std::string, std::string> EnqueueSaveImpl(const SaveRequest& request,
+                                                            bool user_initiated);
+    std::expected<std::string, std::string> EnqueueForgetImpl(const std::string& id,
+                                                              const std::string& layer);
+    // EnqueueSave/EnqueueForget 的回执投递(源语义见 struct 注释)。
+    void EmitWriteReceipt(MemoryWriteSource source, const std::string& operation,
+                          const SaveRequest* request, const std::string& layer,
+                          const std::expected<std::string, std::string>& queued);
     // 回合总结产出的检索扩展词(下一轮 BuildTurnContext 合并进查询)。
     std::vector<std::string> retrieval_hints_;
 };
