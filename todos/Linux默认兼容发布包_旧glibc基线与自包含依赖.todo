@@ -1,7 +1,7 @@
 # Linux 默认兼容发布包：旧 glibc 基线与自包含依赖
 
-- 状态：待实现；本单只记录方案，尚未构建兼容包。
-- 日期：2026-09-05
+- 状态：**路线定稿并落地 CI（2026-09-06）**——manylinux_2_28 容器 + gcc-toolset-14 + 静链 libstdc++/libgcc/OpenSSL 3.3.2 + `-ldl`，产物在 Debian 11 / Debian 12 / Ubuntu 24.04 三发行版裸容器**真跑全绿**（试炼 run 33980051850）。ci.yml Linux 腿已换 manylinux 容器（编译+全量测试）+ 三发行版运行矩阵；release.yml Linux 包同配方。P0-1 的 Debian 11 自建 GCC 路线（snapshot 源护甲 + 40 分钟 GCC 编译）**退役**：GCC 13.3 在 bullseye 编通有实证（run 33976205782）但 manylinux 路免自建、基线更老（2.28<2.31）、维护转嫁 PyPA。剩余收口见 P0-2/P0-3 改注。
+- 日期：2026-09-05 立单；2026-09-06 路线定稿
 - 级别：P0（Linux 发布包可运行）
 - 范围：Linux x86-64 工具链、依赖链接、打包、安装与升级、旧系统和 Harbor 验收。
 - 关联：`AgentHarness性能SLO_稳定性与发布安全门设计.todo`；本单实现 Linux 二进制兼容专项，证据交给总发布门。

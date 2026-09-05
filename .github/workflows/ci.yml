@@ -37,8 +37,6 @@ jobs:
         include:
           - name: windows-msvc
             os: windows-latest
-          - name: ubuntu-gcc
-            os: ubuntu-latest
           - name: macos-clang
             os: macos-latest
 
@@ -61,7 +59,6 @@ jobs:
         run: |
           case "${{ matrix.name }}" in
             windows-msvc) platform=windows-x64 ;;
-            ubuntu-gcc)   platform=linux-x64 ;;
             macos-clang)  platform=macos-arm64 ;;
           esac
           bash scripts/fetch_ripgrep.sh --target rg-stage --platform "$platform" --cache rg-cache
@@ -132,3 +129,163 @@ jobs:
             failure_detail="${failure_detail//$'\n'/'%0A'}"
             echo "::error title=CTest failure details::$failure_detail"
           fi
+
+  # Linux 腿(2026-09-06 定稿):manylinux_2_28 容器(glibc 2.28 基线)+ 自带
+  # gcc-toolset-14 编译,静链 libstdc++/libgcc/OpenSSL 3.3.2——产物即"一份
+  # 包吃遍 glibc>=2.28"的通用 Linux 形态,"测的就是发的东西"。旧 ubuntu-gcc
+  # 腿退役:ubuntu-latest 编出的 GLIBC_2.38 符号需求压死 Debian 11/12,
+  # 见 todos/Linux默认兼容发布包 单。编译+全量测试后,产物交三发行版运行
+  # 矩阵(debian11/debian12/ubuntu2404)真跑把关。
+  linux-manylinux:
+    name: linux-manylinux
+    runs-on: ubuntu-latest
+    container:
+      image: quay.io/pypa/manylinux_2_28:latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Enable gcc-toolset-14 and base deps
+        run: |
+          set -e
+          set +u; . /opt/rh/gcc-toolset-14/enable 2>/dev/null || true; set -u
+          g++ --version | sed -n '1p'
+          g++ -dumpversion
+          echo "CXX=$(command -v g++)" >> "$GITHUB_ENV"
+          echo "CC=$(command -v gcc)" >> "$GITHUB_ENV"
+          dnf install -y git perl-IPC-Cmd || microdnf install -y git perl-IPC-Cmd
+
+      - uses: actions/checkout@v7
+
+      - name: Check release metadata
+        run: bash scripts/check_release.sh
+
+      - name: Fetch bundled ripgrep (manifest-pinned)
+        run: bash scripts/fetch_ripgrep.sh --target rg-stage --platform linux-x64 --cache rg-cache
+
+      - name: Cache static OpenSSL
+        uses: actions/cache@v4
+        with:
+          path: /opt/openssl-static
+          key: openssl-static-3.3.2-manylinux228-v1
+
+      # RHEL 系 openssl-devel 不带 .a,源码 no-shared 自编(首轮约两三分钟,
+      # 缓存后秒过)。动态链 Alma 的 libssl.so.1.1 会压死 Debian 12/Ubuntu
+      # 22.04+(只有 libssl3),静链是"一份包吃遍"的必要条件。
+      - name: Build static OpenSSL 3.3.2 (if not cached)
+        run: |
+          set -e
+          if [ -f /opt/openssl-static/lib/libssl.a ]; then
+            echo "openssl cache hit"; exit 0
+          fi
+          curl -fL -o /tmp/openssl.tar.gz \
+            https://github.com/openssl/openssl/releases/download/openssl-3.3.2/openssl-3.3.2.tar.gz
+          tar xzf /tmp/openssl.tar.gz -C /tmp
+          cd /tmp/openssl-3.3.2
+          ./Configure linux-x86_64 no-shared no-tests --prefix=/opt/openssl-static --libdir=lib
+          make -j"$(nproc)" >/dev/null
+          make install_sw >/dev/null
+          ls /opt/openssl-static/lib/libssl.a /opt/openssl-static/lib/libcrypto.a
+
+      - name: Configure
+        run: |
+          set -e
+          cmake -B build -S . \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DBUILD_TESTING=ON \
+            -DLUBANCODE_USE_CODELOAD=OFF \
+            -DLUBANCODE_BUNDLED_RG_DIR="$PWD/rg-stage/libexec" \
+            -DCMAKE_C_COMPILER="$CC" \
+            -DCMAKE_CXX_COMPILER="$CXX" \
+            -DCMAKE_CXX_STANDARD=23 \
+            -DCMAKE_EXE_LINKER_FLAGS="-static-libstdc++ -static-libgcc -ldl" \
+            -DOPENSSL_ROOT_DIR=/opt/openssl-static
+        env:
+          CC: ${{ env.CC }}
+          CXX: ${{ env.CXX }}
+
+      - name: Build
+        run: |
+          set -e
+          cmake --build build --target lubancode -j "$(nproc)"
+          cmake --build build --target lubancode_tests -j "$(nproc)"
+
+      - name: Test
+        id: test
+        run: ctest --test-dir build -C Release --parallel "$(nproc)" --output-on-failure --no-tests=error
+
+      - name: Upload linux binary for run matrix
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-manylinux-bin
+          path: build/lubancode
+          if-no-files-found: error
+
+      - name: Report failed CTest cases
+        if: ${{ failure() && steps.test.outcome == 'failure' }}
+        run: |
+          failed_log="build/Testing/Temporary/LastTestsFailed.log"
+          if [ -f "$failed_log" ]; then
+            failed_cases="$(tr '\n' ';' < "$failed_log")"
+            echo "::error title=Failed CTest cases::$failed_cases"
+            cat "$failed_log"
+          fi
+
+  # 运行矩阵:manylinux 产物在三发行版裸容器里真跑。全绿才算过——
+  # "都能跑"是验收,不是观察项(2026-09-06 用户定稿)。
+  run-on-debian11:
+    name: run-on-debian11
+    runs-on: ubuntu-latest
+    needs: linux-manylinux
+    container:
+      image: debian:11-slim
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-manylinux-bin
+      - name: Run on Debian 11
+        shell: bash
+        run: |
+          set -e
+          cat /etc/debian_version
+          chmod +x lubancode
+          ./lubancode --version
+          ./lubancode --help | sed -n '1,3p'
+
+  run-on-debian12:
+    name: run-on-debian12
+    runs-on: ubuntu-latest
+    needs: linux-manylinux
+    container:
+      image: debian:12-slim
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-manylinux-bin
+      - name: Run on Debian 12
+        shell: bash
+        run: |
+          set -e
+          cat /etc/debian_version
+          chmod +x lubancode
+          ./lubancode --version
+          ./lubancode --help | sed -n '1,3p'
+
+  run-on-ubuntu2404:
+    name: run-on-ubuntu2404
+    runs-on: ubuntu-latest
+    needs: linux-manylinux
+    container:
+      image: ubuntu:24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-manylinux-bin
+      - name: Run on Ubuntu 24.04
+        shell: bash
+        run: |
+          set -e
+          grep VERSION_ID /etc/os-release
+          chmod +x lubancode
+          ./lubancode --version
+          ./lubancode --help | sed -n '1,3p'
