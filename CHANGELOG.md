@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.209] - 2026-09-05
+
+- **评测装置与测试稳健批（产品行为零变更）。** B1 位置探针换问答驱动判卷——compact 臂成绩只认模型作答、needle 分合同/证据两层、触发条件贴生产默认（量"真 compact"的装置就位）；假 rg marker 断言竞速窗从 300ms 拉宽到 30 秒可调（CI macos 机器池慢导致稳定冤红的根治，正常路零开销）；LubanCore 可嵌入 Agent SDK 设计翻新立档（设计待实现）。
+
 ## [v0.26.208] - 2026-09-05
 
 - **记忆写入调度 P0 账本（纯 instrumentation，行为零变更）。** `MemoryTurnLedger` 回合级记账 + 两枚 typed 事件（`memory.extraction.assessed`/`memory.write.receipted`），五路写入（remember/memory_save/forget/candidate accept/自动抽取）全接 queued/rejected 回执——排队不冒充落盘。真实轨迹离线实测：生产全在 `memory.enabled=false` 默认态（245 场真抽取 0 发）；现行"history 有增长就请模型"判据重放 **88.2/100 放行**——基本不筛；按单子 §7.3 门槛投影 35.5/100。token/accepted_memory 如实记"尚未测得"。另清六份含明文钥匙的评测 config 复制品。
