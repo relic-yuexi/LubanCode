@@ -1,10 +1,10 @@
 # 工具检索·上下文压缩·Subagent 通信的量化评测（Q2）
 
-- 状态：待实施（2026-09-04 立案；同日工头令重排——**compact 先行**，B1 位置探针立为首仗）
+- 状态：待实施（2026-09-04 立案；2026-09-05 重排：**B2 配对续跑先行**，B1 位置探针降为查漏辅助；旧假后端装置不算主实验验收）
 - 级别：P1（成本/可扩展性——量不清就不能再扩）
 - 类型：LubanCode Runtime 评测
 - **主线就三个实验**：A 工具检索退化阈值、B compact 机制研究（最大重点）、C Subagent 失败分布。
-- 优先级：P0 装置 → P1 **B1 位置探针** → P2 实验 A → P3 实验 B 主对照 → P4 实验 C
+- 优先级：P0 配对续跑装置 → P1 **B2 小批真跑** → P2 B2 主报告 → P3 实验 A → P4 实验 C；B1 按需辅助，不挡主线
 - 范围（源码只读锚点）：`src/tools/tool_search.*`、`src/agent/compact.cpp`、`src/agent/microcompact.cpp`、`src/agent/context.cpp`、`src/agent/token_calibrator.cpp`、`src/tools/agent_tool.cpp`、`src/tools/subagent_scheduler.*`
 - 不在本单：模型协议层、流式渲染、终端交互、tool_invoke schema 改造（proxy_reference 单）、向量检索改写、**compact 算法语义变更**（本单只量；量出病另立单修）
 
@@ -18,28 +18,31 @@
 
 ## 二、实验 B：compact 机制研究（最大重点）
 
-要回答三件事：省了多少；关键事实剩多少；**事实丢在哪个位置丢的**。
+**主问题（2026-09-05 用户定稿）**：同一任务干到一半，从同一截点分两路：一路不做全局 compact，一路走当前生产 compact，再接着干。看有效要求有没有丢、旧要求有没有复活、已完成动作有没有无故重做，最后能不能通过验收。
+
+先量续跑结果，再查丢失原因，最后报 token 与墙钟。取消“compact 反救中段”目标，不预设 FULL 出 U 形，也不拿位置曲线替代任务验收。只记用户需求不够：还要带上工作状态与近期现场。
 
 **实验模型钉死（2026-09-05 工头令）**：provider `ccmoon`、model `gpt-5.6-luna`（ccmoon 名下 luna/terra 两分身，取 luna；FULL/compact 配对与 compact 摘要请求全用这一只，结果账记模型 id 与 provider）。
 
-### B1 位置探针（首仗——装置最薄、信号最快）
+### B1 位置探针（辅助查漏，不作主验收）
 
-**出处**：Liu et al., *Lost in the Middle: How Language Models Use Long Contexts*（TACL 2024）——多文档问答里把关键事实摆在受控深度，命中率随位置画 U 形（首尾高中段低）。**注意与 B2 主基准 Microsoft Lost in Conversation 是两码事，别混名**：前者借采样法，后者借任务集。
+**出处**：Liu et al., *Lost in the Middle: How Language Models Use Long Contexts*（TACL 2024）——借用受控位置采样法，不预设本次模型出现论文中的 U 形。**注意与 B2 外部补充基准 Microsoft Lost in Conversation 是两码事，别混名**：前者借采样法，后者借任务集。
 
 **装置**：仿真实会话视图造一段长上下文（填充材料用仿 tool result/文档段）：
 
 - K 条关键事实（needle）按受控深度插入：位置比例 `{0, 5, …, 95}%` 共 20 档。
 - 每档每处理 5 次重复；事实措辞中英各一形，防判卷吃措辞。
-- 三处理对照：**FULL** 原文直发 / **microcompact** 折叠后 / **compact** 六栏摘要后——同一份底稿，只换压缩路。
+- 三处理诊断：原文视图 / 结构折叠视图 / 当前生产 compact 视图。同一份底稿，只换处理路；compact 必须走 `CompactTurnPartitioned()`，禁止拿旧六栏 `Compact()` 代替。这里的原文视图不等于 B2 的生产 FULL 基线。
 - 探针两类：直接召回（问 needle 本身）；更新冲突（同一事实两版值，旧版必须判 superseded 不作答）。
-- 判卷确定性（归一化匹配/正则）；LLM judge 只补同义表达，固定模型与 prompt，原始裁决留档。
+- 键和值随机生成，不能按编号推算；同一事实轮换位置，平衡段长与新旧间距。记录最终请求中的实际 token 深度，不能拿段序号冒充上下文位置。
+- 判卷要求单个规范值或结构化 answer，解析后归一化精确比较；否定正确值、倒置新旧、罗列候选都不得靠子串命中过关。增加删去目标事实的对照，检查猜答案造成的假命中。
 
 **记账**：
 
 - **判卷必须问答驱动（2026-09-05 工头令改）**：同一只实验模型读三版视图（FULL/折叠/摘要）答 needle 题，判**答对与否**；禁止"视图内找原词"的子串判卷充当 compact 臂成绩——摘要本分就是换说法，子串判卷把好摘要冤枉死（LoCoMo 案同族病：量尺子不量东西）。答案设计为短规范值（版本号/名字/命令名）保判卷确定性；问答模型 = 实验模型，这正是生产形态（压缩后读上下文的就是下一轮模型）。
 - **触发条件贴生产**：热冷区切分与阈值用产品默认值，驱动不得自设——否则测的是不存在的配置。
-- **needle 分层**：合同类（应进 manifest 逐字收编）与证据类（本分是被摘要）分开记账——位置曲线里"设计如此"与"意外丢失"不许混锅。
-- 各处理 × 各位置 × 各层命中率 → **位置-命中曲线**。FULL 预期 U 形；核心数是 compact/microcompact 把曲线压成什么样——**中段存活率**。另单列一问：摘要落点固定在上下文尾部（注意力好区），compact 是否**反救中段**——子串判卷对此全瞎，问答判卷才可见。
+- **needle 分层**：合同类检查有效要求及覆盖关系，证据类检查事实与来源。允许保义改写；活动待办另按产品守恒规则核对，不把全部用户约定都当成逐字保留合同。
+- 各处理 × 各实际位置 × 各层出命中率及分桶表，只帮助定位丢失。摘要实际位于保留热区之前，不作“尾部注意力救回中段”的归因。
 - 附加分桶：事实落冷区/热区、距截点 turn 数、microcompact 折叠掉的具体段。
 - 零分母写 `unavailable`，不填 0。
 
@@ -47,44 +50,63 @@
 
 - 曲线图 + 分桶表落 `docs/evaluation/compact_position.md`，数据在 `tests/eval/compact_position/`。
 - 单测 `tests/unit/eval/test_compact_position.cpp` 钉判卷与分桶公式。
-- 若 compact 中段存活率比 FULL 低超过 10 个百分点，**另立单**修提示词/结构——本单只量不修。
-- **进展（2026-09-05，装置 `ebd14e1b`，假后端全链 1200 案）**：判卷器与曲线已立。microcompact 初判（真语义、零模型）：折叠生死由**落段长度一票定**——短/中段 100% 存活、长段（>8192B）0%（段中段换头尾 256B 预览即真丢），与上下文位置无关；**stale 陷阱 18.5%**（旧版值活在短段、新版值被折掉，模型照旧值答即错）——够格另立单治。compact 臂管道全通、命中只来自热区尾部，语义待 luna 真跑（`--real` 已备未接线）。
+- 辅助结果只记待查问题；是否伤及任务，回到 B2 续跑与轨迹核对。确需改产品时另立单。
+- **现状与欠账（2026-09-05 复核）**：现有造稿器默认 10 份底稿、800 道探针、2400 条三处理判卷账；问答方仍是按原词在场选答案的假后端，compact 仍走旧六栏入口，`--real` 明确报错退出。旧 1200 案与 stale 比例只属历史装置读数，不作当前产品语义结论。上列随机化、位置、判卷与生产入口要求均待落实；不直接启动旧装置付费全量跑。
 
-### B2 真实对照（主实验）
+### B2 同一截点配对续跑（主实验，优先实施）
 
-8 场 dogfooding 长会话（每场 ≥50 step，脱敏）：
+先选 2 场小批真跑，装置核对通过后扩到 8 场 dogfooding 长会话（每场截点前 ≥50 step，脱敏）。每场选定一处任务尚未完成的截点；覆盖多轮需求修订、已完成改动、失败尝试、待办与可观察副作用。截点与验收题预先冻结，不按压缩成绩挑样本。
 
-- FULL 与 compact 从同一 workspace 快照、同一 history 截点起跑；温度、seed、工具表、系统提示、输出预算钉死；每组 ≥5 次。
-- gold、探针答案、grader 配置不进 compactor 输入，也不让续跑 Agent 看见。
+- **FULL 臂**：保留截点历史，关闭全局自动 compact 及会改写历史的硬裁剪；其余生产请求拼装、结构折叠、artifact 回读与工具能力照常。基线是“生产工作视图不做全局 compact”，不是把工具输出全量直塞模型。
+- **compact 臂**：从同一截点调用当前生产 `CompactTurnPartitioned()`，使用生产预算解析、结构配置、双账校验与反涨闸；采用其 `new_history`，即双账 + 末分区热区，不另造固定 12000-token 热区或只留最新用户一句话。
+- **隔离快照**：两臂分别恢复 workspace（含未提交改动）、history、活动待办、artifact/blob 与引用、执行账以及任务所需外部状态。原件只读，两臂各用独立副本；数据库、服务及副作用落可重置沙箱，不共写真实外部对象。
+- **安全截点**：选在已收到工具结果、尚未决定下一步的位置，调用与结果成对；未结束后台任务须能独立恢复并核对句柄/状态，否则另列续接专项，不塞进首批可比样本。
+- **固定条件**：续跑模型、provider、reasoning effort、系统提示、工具表与每请求输出预算相同；温度/seed 仅在模型支持时固定，不支持则如实记。每场 ≥5 对独立重复，每对重新压缩，不把同一摘要重复问答当独立压缩样本；两臂执行顺序交错。
+- **窗口边界**：预留足够窗口完成共同续跑预算，两臂续跑阶段都不再全局压缩或硬裁剪。FULL 真遇超窗则记 `context_limit`，不得暗中截断或排除失败；这类案例单列容量结果，不混入“压缩是否丢语义”的结论。原矩阵仍完整报告。
+- **输入隔离**：gold、探针答案、隐藏 grader 配置不进 compactor，也不让续跑 Agent 看见。两臂收到同一续跑指令；后续用户补充按冻结顺序、同一触发规则注入，不能按哪臂失败临时提示答案。
 
-**三本账金账**（每场先从 FULL history 标 `key_facts.jsonl`，一条事实只落一本）：
+**三类金账**（每场先从截点原始 history 与现场证据标 `key_facts.jsonl`，一条事实只落一类；这是评测分类，产品仍是 UserContract / WorkState 双账）：
 
 1. `UserContract`：目标、活动约束、验收条件、用户补充、已废止要求、待澄清问题。
 2. `WorkState`：已证实事实、文件与改动、失败尝试及原因、未完成事项、下一步。
 3. `ToolEvidence`：关键工具参数、退出码/结构化结果、副作用、artifact id/hash、tool_use 与 result 配对。
 
+用户要求按各轮有效信息归并：后轮明确改约才废止旧约，未涉及的早先约束继续有效；冲突未解进待澄清。模型推测及助手自选方案不能写成用户命令。金账冻结在续跑之前，后续用户改约另有版本与来源。
+
 统一字段：`fact_id / ledger / kind（constraint|acceptance|superseded|verified_fact|failed_attempt|open_item|next_action|tool_result|side_effect）/ canonical_value / source_turn_ids / evidence_refs / status（active|superseded|resolved）/ must_retain / probe_ids`。双人背对背标，匹配后 span/fact F1 与字段 kappa 任一低于 0.8 不入正式集；语义判卷，同义改写可过，来源、数值、否定词、新旧状态不可漂。
 
-**五类探针**（每场至少各一题）：直接召回 / 更新冲突 / 证据归因（结论出自哪次调用哪个文件）/ 失败接力（旧路为何败、下一步走哪）/ 拒答陷阱（history 没有的不许编）。
+**五类诊断探针**（每场至少各一题）：直接召回 / 更新冲突 / 证据归因（结论出自哪次调用哪个文件）/ 失败接力（旧路为何败、下一步走哪）/ 拒答陷阱（history 没有的不许编）。探针只在另建的只读副本上问，问答不回灌续跑历史；不以探针答对作为续跑准入门槛，压缩后答错的案例照样纳入主实验。
 
-**下游续跑**：问答过门后，FULL 与 compact 两截点各续跑 3–5 step 执行同一未完任务；仓内测试、文件 hash、结构化验收判 `task_success`——Agent 自称完成不算。
+**下游续跑与判卷**：两臂一直做到任务终态，或达到预先冻结的相同步数/token/墙钟上限；3–5 step 只用于装置 smoke，不算任务验收。预算耗尽记未完成，基础设施故障单列；压缩拒收按生产行为保留旧史并继续，记 `compact_applied=false`，不能删样本或冒充成功压缩。
 
-**指标**：`compaction_benefit_ratio`、三本账各记 key_fact_recall / false_retention / contradiction / evidence_attribution、`downstream_task_success` 配对差；按 ledger、kind、冷热区、距截点 turn 数分桶，中位数 + P95 + 95% bootstrap CI。
+- `task_success`：仓内测试、结构化验收、输出内容及副作用状态共同判定；文件 hash 用于快照/固定产物核对，不要求不同正确实现字节相同。Agent 自称完成不算。
+- `active_requirement_loss`：有效要求在续跑产物或动作中遭违反/遗漏；仅未复述不算丢失，探针失答另记。
+- `superseded_requirement_revival`：明确废止的要求重新支配动作或产物；提到旧要求并说明已废止不算复活。
+- `unnecessary_action_repeat`：结合截点执行账与续跑轨迹，判已完成动作是否无故再做，尤其重复副作用；必要复查、重读文件、修改后重跑测试不算。含糊案例留证据人工复核。
+- 标出已知失败是否重踩、关键证据能否回读、待办是否漏办，并记录首次偏离处。开放文本疑难项盲审，不向评审暴露处理臂；自动判分保留原始裁决与依据。
 
-**主基准**：Microsoft [Lost in Conversation](https://github.com/microsoft/lost_in_conversation)（**657 条分片指令**：主文件 627 + translation 30，七族；reference/tests 判卷，MIT；备料实录见 `tests/eval/compaction_benefit/README.md`——判卷 code/database/actions/math 四族确定性、data2text/translation 走 BLEU、summary 独 LLM judge；code 族判卷 Unix-only 走 WSL，database 族另需 Spider 库二次 lock）——任务拆多轮逐步补约束，末后看任务成没成，与 compact 设计问题同源。先每任务族 5 题 smoke（集已定 `smoke_set.json`），再每族 ≥30 题主报告；逐题沿用原 reference/tests 判卷，另标 UserContract 事实量约束漏失。论文分数只作背景，一律重跑。
+**指标与配对**：
+
+- 主指标：`task_success` 配对差、有效要求丢失率、旧要求复活率、无故重复动作率、`compact_applied`/拒收率。按 task_id / checkpoint_id / repeat_id 配齐两臂，缺失、重复及故障必须显式核对。
+- 同时报“两臂都成功 / 仅 FULL 成功 / 仅 compact 成功 / 两臂都失败”，不能只减两组独立均值。报告全体分支结果及成功应用压缩的子集，拒收/超窗/故障各有分母与明细。
+- 辅助指标：三类金账 key_fact_recall / false_retention / contradiction / evidence_attribution；按 ledger、kind、冷热区、距截点 turn 数分桶。零分母 `unavailable`。
+- 成本账：截点压缩前后工作视图 token 数、压缩阶段全部请求（含重试与失败）+ 续跑阶段 token、cache usage、墙钟。省量按同口径工作视图计算，另报含压缩开销的总量；不把缓存估计当实测。
+- 成功率/错误率报分子分母、配对差与 95% CI；按任务成组 bootstrap，保留组内重复与配对，不把同稿多探针当独立任务。token/墙钟报中位数及 P95，标明样本数；8 场只能作探索性结果，证据不足就不下保质结论。
+
+**外部补充基准**：Microsoft [Lost in Conversation](https://github.com/microsoft/lost_in_conversation)（既有备料记录：**657 条分片指令**，主文件 627 + translation 30，七族；reference/tests 判卷，MIT；见 `tests/eval/compaction_benefit/README.md`；正式取数以 lock 复核）——补充多轮指令与需求修订覆盖，不替代真实任务中途续跑。先每族 5 题 smoke，再每族 ≥30 题；适配器必须先生成可恢复的中途截点，两臂接收相同后续分片，逐题沿用原 reference/tests 判卷，另记需求漏失。code 族走 WSL，database 族另锁 Spider 库；BLEU/LLM judge 分数按原任务单列，不冒充确定性任务成功。论文分数只作背景，一律重跑。
 
 **补充候选**（不进首批）：LongMemEval-V2（451 题 Agent 轨迹）、LongMemEval（只抽 knowledge-update/abstention）、LoCoMo（10 场，CC BY-NC 4.0，只作非商业评测，不得随商业发行包分发）。
 
 **验收门槛**：
 
-- 8 场全跑，3 成功 3 失败案例入库并析因。
+- 先完成 2 场小批真跑与请求/快照/判卷审计，再跑 8 场 × 每场至少 5 对主矩阵，全部案例有记录。选取实际出现的成功、失败与分歧案例析因；某类不足 3 例如实说明，不为凑数造失败或改样本。
 - `UserContract` 与 `WorkState` must-retain recall 各 ≥95%；active todo 100%。任一旧要求误当 active 或关键副作用/失败证据丢失，本场记 semantic failure。
-- downstream 相对 FULL 下降超 5 个百分点（或 CI 不能排除下降超 5 点），不得写"压缩不伤任务质量"。
+- `task_success` 相对 FULL 下降超 5 个百分点（或配对 CI 不能排除下降超 5 点），不得写"压缩不伤任务质量"。任务成功也不能冲销旧约复活或重复副作用，须分别披露。
 - 报告 `docs/evaluation/compaction_benefit.md`；单测 `tests/unit/eval/test_compaction_benefit.cpp` 钉公式、零分母、superseded 判定。
 
-### B1 → B2 接力
+### B2 → B1 查漏
 
-B1 的位置曲线直接指导 B2 布点：中段掉多少，定 must_retain 抽查密度与冷区探针配额；B1 若发现 microcompact 折叠即丢中段事实，B2 的 ToolEvidence 探针优先打折叠区。
+B2 先找续跑偏离，再按原始轨迹定位需求、工作状态或工具证据在哪步丢失；必要时用 B1 控制位置、段长与新旧间距复现。B1 结论只解释原因，不反过来筛掉 B2 失败样本，也不决定主实验能否开跑。
 
 ## 三、实验 A：工具检索退化阈值
 
@@ -100,10 +122,10 @@ B1 的位置曲线直接指导 B2 布点：中段掉多少，定 must_retain 抽
 
 ## 五、装置与分期
 
-- **P0 装置**：`tests/eval/` 骨架 + CTest opt-in 注册；`FakeStreamingBackend` 抽 `tests/eval/fake_backend.{hpp,cpp}` 通用化；每实验一份 `collect.py`（parquet + md 两件）。验收：A2 档 disabled 单步 T1 跑通落 parquet。
-- **P1 B1 位置探针 + Lost in Conversation 备料**（首仗）：位置曲线造稿器 + 三处理对照 + 判卷脚本 + 曲线报告；**LiC 备料同步先行**——拉仓盘点（任务族/分片格式/判卷机制/许可）、适配器设计（分片→LubanCode 会话、FULL/compact 配对、reference/tests 判卷）、每族 5 题 smoke 集选定、`datasets.lock.json` 进仓、数据本体只进 gitignored 缓存。验收：三处理位置-命中曲线出图，中段存活率有数；LiC 备料四件套（lock/取数脚本/适配器规格/smoke 清单）进仓。
-- **P2 实验 A**：五档生成器 + 三模式对照脚本 + 报告。验收：退化曲线出图，阈值真值 vs 默认 20 有结论。
-- **P3 实验 B2**：8 场 fixture 脱敏 + 金账双标 + Lost in Conversation 适配器（smoke → 主报告）+ 配对续跑。验收：三本账、五探针、外部主基准、下游续跑全有可复算原始账。
+- **P0 B2 装置**：复用 `tests/eval/` 与假后端骨架；实现隔离快照、当前生产 compact 接入、两臂续跑、独立诊断副本及配对 collect。验收：假后端 smoke 跑通；负例钉住旧约复活、需求漏失、重复副作用、压缩拒收、窗口超限、配对缺失与 gold 泄漏。假后端 FULL 全对等断言不得套在真模型上。产出原始 JSONL、表与 Markdown 报告。
+- **P1 B2 小批真跑**：2 场真实中途截点，每场至少 5 对；审计两臂实际请求、快照一致性、压缩应用情况、输出判卷与 token 账。验收看任务终态，不能只跑 3–5 step 或只问探针；实现与口径通过审计后再扩全量。
+- **P2 B2 主报告**：8 场 fixture 脱敏 + 金账双标 + 完整配对续跑与分歧析因。LiC 备料复核及适配器作为外部补充，不挡本地主线；数据只进 gitignored 缓存。验收：任务结果、三类金账、轨迹错误、成本和配对 CI 均可复算。
+- **P3 实验 A**：五档生成器 + 三模式对照脚本 + 报告。验收：退化曲线出图，阈值真值 vs 默认 20 有结论。
 - **P4 实验 C**：12 任务三对照 + 报告。验收：失败分布画齐，派工价值/成本曲线给出。
 
 ## 六、改动边界
@@ -114,7 +136,7 @@ B1 的位置曲线直接指导 B2 布点：中段掉多少，定 must_retain 抽
 ## 附：现状机制速览（实现者先读）
 
 - 工具检索：`DeferralEnabled(total, threshold)` 默认 20；P4-1 token 本金闸 `DeferralBudgetOk`；legacy 命中写回顶层 tools（cache-hostile），proxy 命中只进 tool result（不破前缀 cache）；索引段只列 name + 80 字符 description。
-- compact：`kMinSummaryChars=40` 残次摘要拒收；六栏 + JSON manifest；`required_open_items` 逐字收编；map/reduce `kMaxReducePasses=4`（四轮后不本地拒绝是已知欠账）；走 `SampleRequest` 复用采流与兜错。
-- microcompact：冷区重复只读结果折叠，迟滞防抖（冷区不涨 50% 不再跑）。
+- compact：当前手动/自动路均调用 `CompactTurnPartitioned()`（`src/app/commands/session_commands.cpp`）。按 turn 分区，前分区 map，旧账 + 小结 + 热区工作视图 reduce 成 `UserContract` / `WorkState`，校验来源、覆盖关系及活动待办，生产反涨闸过后才换历史；保留末分区原文，双账并入热区首条消息。旧六栏 `Compact()` 不是当前生产主入口。
+- 结构折叠与 microcompact 分开：`CompressWorkingView()` 长结果首次定形为预览/artifact 引用，默认阈值 8192B、头尾预览各 256B，已无冷热豁免；`RunMicrocompact()` 从 artifact 原文生成按需局部摘要。B2 两臂都保留生产回读能力，不能凭预览里找不到原词就认定任务必败。
 - token 校准：窗口 8 对取中位、硬带 [0.2,5.0]、异常带 ±40%、连漂清窗。
 - subagent：`SubagentScheduler::EvaluateAdmission` 纯函数；治理 `max_active=8 / max_depth=3`；开张失败 fail-closed，I/O 类注 retryable，失败介入信按批退回 `RestoreDrainedInbox`。
