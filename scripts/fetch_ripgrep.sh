@@ -103,8 +103,18 @@ case "$FORMAT" in
     if command -v dpkg-deb >/dev/null 2>&1; then
       dpkg-deb -x "$ARCHIVE_PATH" "$WORK/root"
       cp "$WORK/root/$MEMBER" "$EXE"
+    elif command -v ar >/dev/null 2>&1; then
+      # RPM 系(如 manylinux_2_28 容器)无 dpkg-deb:.deb 是 ar 档,内含
+      # data.tar.*(tar 自动识别压缩)。抽整档再拷成员,与 dpkg-deb 路同效。
+      (cd "$WORK" && ar x "$ARCHIVE_PATH")
+      data_tar=""
+      for f in "$WORK"/data.tar.*; do data_tar="$f"; break; done
+      [ -n "$data_tar" ] || fail "no data.tar.* inside deb (ar fallback)"
+      mkdir -p "$WORK/root"
+      tar -xf "$data_tar" -C "$WORK/root"
+      cp "$WORK/root/$MEMBER" "$EXE"
     else
-      fail "deb extraction needs dpkg-deb (linux only)"
+      fail "deb extraction needs dpkg-deb or ar (linux only)"
     fi
     ;;
   *) fail "unknown archive_format: $FORMAT" ;;
