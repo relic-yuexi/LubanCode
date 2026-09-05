@@ -87,6 +87,7 @@ jobs:
           cp README.md dist/lubancode/
           cp README.en.md dist/lubancode/
           cp LICENSE dist/lubancode/
+          cp THIRD_PARTY_NOTICES.md dist/lubancode/
           cp -R docs dist/lubancode/
           cp -R skills dist/lubancode/
           # 装/卸载脚本跟 exe 平级放进包根,Windows 走 ps1 一对,Linux/macOS 走 install.sh
