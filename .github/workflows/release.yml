@@ -21,6 +21,7 @@ permissions:
 
 jobs:
   build:
+    if: startsWith(github.ref, 'refs/tags/v')
     name: package-${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     container: ${{ matrix.container }}
@@ -33,7 +34,6 @@ jobs:
             exe: build/Release/lubancode.exe
             archive: lubancode-${{ github.ref_name }}-windows-x64.zip
             container: null
-            notes: true
             notes: true
           - name: linux-x64
             os: ubuntu-latest
