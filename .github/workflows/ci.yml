@@ -11,24 +11,54 @@ name: ci
 on:
   push:
     branches: [main]
-    paths-ignore:
-      - "todos/**"
-      - "docs/**"
-      - "README.md"
-      - "README.en.md"
   pull_request:
-    paths-ignore:
-      - "todos/**"
-      - "docs/**"
-      - "README.md"
-      - "README.en.md"
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
+  # 门房:先判这轮改没改真东西。纯 chore(版本号/CHANGELOG/docs/todos)在
+  # 此一鞠躬,重腿全跳,整场一分钟收工;src/tests/CMake/依赖脚本/ci.yml
+  # 任一变动才放行三腿全量。基点取不到(新分支/强推)保险起见全跑。
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      code: ${{ steps.c.outputs.code }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - name: Classify changed files
+        id: c
+        shell: bash
+        run: |
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            BASE="${{ github.event.pull_request.base.sha }}"
+          else
+            BASE="${{ github.event.before }}"
+          fi
+          if ! git cat-file -e "$BASE" 2>/dev/null; then
+            echo "base unreachable, run full" >&2
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          code=false
+          while IFS= read -r f; do
+            [ -z "$f" ] && continue
+            case "$f" in
+              src/*|tests/*|cmake/*|CMakeLists.txt|*/CMakeLists.txt|vcpkg.json|third_party/*|scripts/*|skills/*|.github/workflows/ci.yml)
+                case "$f" in
+                  src/app/version.hpp) ;;  # 纯版本号:发布流水线自会全量验证
+                  *) code=true ;;
+                esac ;;
+            esac
+          done <<< "$(git diff --name-only "$BASE" "$GITHUB_SHA")"
+          echo "code=$code" >> "$GITHUB_OUTPUT"
+
   build-test:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
@@ -63,6 +93,16 @@ jobs:
           esac
           bash scripts/fetch_ripgrep.sh --target rg-stage --platform "$platform" --cache rg-cache
 
+      # 依赖缓存:_deps(FetchContent 源码+已编产物)按依赖清单指纹钉住,清单
+      # 不变即秒恢复——win/mac 两腿依赖编译是 Build 34 分钟的大头(实测走
+      # FetchContent 后备)。跨 runner 绝对路径恒定,产物可直接复用。
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ matrix.name }}-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
+          restore-keys: deps-${{ matrix.name }}-
+
       # vcpkg manifest 优先:runner 自带的 vcpkg 在 VCPKG_INSTALLATION_ROOT。
       # configure 失败(vcpkg 缺包/版本冲突等)就清掉构建目录、去掉工具链
       # 回退 FetchContent 源码构建——顶层 CMakeLists 对两条路都支持。
@@ -78,7 +118,9 @@ jobs:
             echo "configured with vcpkg"
           else
             echo "vcpkg configure failed or unavailable, falling back to FetchContent"
-            rm -rf build
+            # 只清 CMake 账本不动 _deps:上面恢复的依赖缓存要是被 rm -rf
+            # build 刨了,缓存就成了摆设。
+            rm -rf build/CMakeCache.txt build/CMakeFiles
             cmake -B build -S . $COMMON_FLAGS
           fi
 
@@ -137,6 +179,8 @@ jobs:
   # 见 todos/Linux默认兼容发布包 单。编译+全量测试后,产物交三发行版运行
   # 矩阵(debian11/debian12/ubuntu2404)真跑把关。
   linux-manylinux:
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
     name: linux-manylinux
     runs-on: ubuntu-latest
     container:
@@ -162,6 +206,13 @@ jobs:
 
       - name: Fetch bundled ripgrep (manifest-pinned)
         run: bash scripts/fetch_ripgrep.sh --target rg-stage --platform linux-x64 --cache rg-cache
+
+      - name: Cache FetchContent deps
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-linux-manylinux-${{ hashFiles('CMakeLists.txt', 'vcpkg.json') }}-v1
+          restore-keys: deps-linux-manylinux-
 
       - name: Cache static OpenSSL
         uses: actions/cache@v4
@@ -236,7 +287,8 @@ jobs:
   run-on-debian11:
     name: run-on-debian11
     runs-on: ubuntu-latest
-    needs: linux-manylinux
+    needs: [changes, linux-manylinux]
+    if: needs.changes.outputs.code == 'true'
     container:
       image: debian:11-slim
     steps:
@@ -255,7 +307,8 @@ jobs:
   run-on-debian12:
     name: run-on-debian12
     runs-on: ubuntu-latest
-    needs: linux-manylinux
+    needs: [changes, linux-manylinux]
+    if: needs.changes.outputs.code == 'true'
     container:
       image: debian:12-slim
     steps:
@@ -274,7 +327,8 @@ jobs:
   run-on-ubuntu2404:
     name: run-on-ubuntu2404
     runs-on: ubuntu-latest
-    needs: linux-manylinux
+    needs: [changes, linux-manylinux]
+    if: needs.changes.outputs.code == 'true'
     container:
       image: ubuntu:24.04
     steps:
