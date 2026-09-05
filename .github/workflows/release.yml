@@ -77,8 +77,7 @@ jobs:
       - name: Fetch bundled ripgrep (manifest-pinned)
         shell: bash
         run: |
-          python3 scripts/fetch_ripgrep.sh --target dist/lubancode --platform ${{ matrix.name }} --cache build/rg-cache \
-            || python scripts/fetch_ripgrep.sh --target dist/lubancode --platform ${{ matrix.name }} --cache build/rg-cache
+          bash scripts/fetch_ripgrep.sh --target dist/lubancode --platform ${{ matrix.name }} --cache build/rg-cache
 
       - name: Package
         shell: bash
