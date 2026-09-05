@@ -72,14 +72,17 @@ else()
   message(STATUS "tests/eval: python 未找到,collect 步骤不注册(其余 eval 测试照跑)")
 endif()
 
-# ---- 实验 B1:compact 位置探针(首仗;假后端全链管道) ------------------------
-# 造稿(python)→ 三处理(FULL 原文 / microcompact 折叠 / compact 六栏摘要
-# 假后端替身)→ 确定性判卷 → 落账(JSONL)→ collect(位置-命中曲线 + 中段
-# 存活率 + 折叠分桶)。全链由 compact_position/pipeline.py 串成一个 ctest:
+# ---- 实验 B1:compact 位置探针(首仗;假后端全链管道,问答判卷) -----------
+# 造稿(python,needle 分层 contract/evidence 各半)→ 三处理(FULL 原文 /
+# microcompact 折叠 / compact 六栏摘要假后端替身,阈值全用产品默认)→
+# 问答判卷(grounded 假后端读三版视图作答,判卷比对模型回答,不再扫视图
+# 找原词;视图级子串在场仅作 FULL/microcompact 辅助诊断列)→ 落账(JSONL)
+# → collect(位置-命中曲线分层 + 中段存活率 + compact 反救中段 + 折叠分桶)。
+# 全链由 compact_position/pipeline.py 串成一个 ctest:
 #   eval.compact_position.pipeline
-# 判卷与管道的自检在驱动进程内(章法同 eval_smoke 的 RunFakeBackendSelfCheck),
-# 自检不过 exit 1,管道即红。真模型跑法见 compact_position/README.md(装置
-# 阶段不点炮)。
+# 问答判卷(含失败注入负路径:答旧值=stale、答不出=lost)与管道的自检在
+# 驱动进程内(章法同 eval_smoke 的 RunFakeBackendSelfCheck),自检不过
+# exit 1,管道即红。真模型跑法见 compact_position/README.md(装置阶段不点炮)。
 add_executable(eval_compact_position compact_position/eval_driver.cpp)
 target_link_libraries(eval_compact_position PRIVATE eval_fake_backend)
 target_compile_features(eval_compact_position PRIVATE cxx_std_23)

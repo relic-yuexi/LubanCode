@@ -1,34 +1,49 @@
-// 实验 B1(compact 位置探针,Q2 量化评测单 §二 B1 首仗)的三处理驱动:
-// 同一份底稿(造稿器 generate.py 落 results/drafts/),三种处理各出一版
-// "请求视图",对视图做确定性判卷,逐 needle 落一行 JSONL 原始账。
+// 实验 B1(compact 位置探针,Q2 量化评测单 §二 B1)的三处理驱动 + 问答判卷。
 //
-// 三处理(单子 §二 B1):
-//   FULL         原文直发(零处理,对照基线)。视图判卷阶段 FULL 应全存活
-//                ——U 形是模型现象,留给真模型问答阶段;这里它是装置的
-//                完整性锚(任一 recall 判失即装置坏了,exit 1)。
-//   microcompact 喂产品的无损结构压缩折叠路 agent::CompressWorkingView
-//                (in-process,零模型,默认参数 long_result_bytes=8192/
-//                preview_bytes=256)。超长 read 结果被换成头尾 256B 预览,
-//                落在段中段的 needle 真丢——这是本装置第一笔真语义信号,
-//                与位置档无关、与段内深度有关,分桶表(fold_survival)记账。
-//                冲突类 needle 的新旧两版刻意同 path 再读(同键不同 hash),
-//                正好踩折叠路的"文件改版"(NewVersion)分支。
-//   compact      喂六栏摘要路 agent::Compact + BuildCompactedHistory。
-//                真模型才跑得动,装置阶段用 FakeStreamingBackend 回一份
-//                固定形态的六栏摘要 + JSON manifest 替身——摘要内容是假的,
-//                只验管道(采样→三道验收→archive→热区保留);语义待真跑,
-//                账里 summary_fake=true 如实标注。热区保留是真实行为
-//                (kDefaultHotZoneTokens=12000),needle 存活只可能来自热区。
+// 三铁律(单子 §二 B1 记账段,2026-09-05 工头令):
+//   1) 问答驱动判卷:同一份底稿出三版"请求视图"(FULL/microcompact/compact),
+//      对每枚 needle 提一问,判卷只看**模型答没答对**(归一化后比对回答与
+//      期望值/冲突旧值)——不再扫视图找原词充当 compact 臂成绩(摘要本分
+//      就是换说法,子串判卷把好摘要冤枉死)。装置阶段问答方是脚本化假后端
+//      fake-grounded:忠实于视图作答(看见新值答新值、只见旧值答旧值、
+//      都不见答"未提及"),验管道与判卷逻辑;真跑路 --real 见 README
+//      (问答模型 = 实验模型 ccmoon/gpt-5.6-luna,装置阶段零真请求)。
+//   2) 触发条件贴生产:三处理阈值全用产品默认——microcompact 走
+//      StructuralCompressionOptions{} 默认(long_result_bytes=8192 /
+//      preview_bytes=256 / min_compressible_bytes=512);compact 走
+//      CompactOptions{} 默认 + kDefaultHotZoneTokens=12000,预算窗口
+//      nullopt 与生产 BuildCompactOptions 在"路由与模型目录都查不到窗口"
+//      时的形态一致(账里 budget_window_tokens=null 如实记)。驱动不自设
+//      任何新数。
+//   3) needle 分层:金账 layer=contract(用户约定,落 user 消息,按产品
+//      设计该进 manifest 逐字收编)与 evidence(工具输出里的事实,本分是
+//      被摘要)分开记账,"设计如此"与"意外丢失"不混锅。
+//
+// 三处理:
+//   FULL         原文直发(零处理,对照基线)。grounded 满分问答在 FULL 上
+//                应全 hit——装置完整性锚(任一 miss 即装置坏,exit 1)。
+//   microcompact 产品无损结构压缩折叠路 agent::CompressWorkingView:
+//                超长 read 结果被换成头尾 256B 预览,长段中段 needle 真丢,
+//                grounded 模型答不出(lost);旧值活在短段而新值被折掉时,
+//                模型照旧值作答(stale 陷阱)。视图级子串在场在此臂(与
+//                FULL 臂)只作辅助诊断列——折叠是机械截断,原词在场确实是
+//                好信号;但成绩只认问答。
+//   compact      六栏摘要路 agent::Compact + BuildCompactedHistory。装置
+//                阶段摘要采样用 FakeStreamingBackend 替身(固定形态六栏 +
+//                manifest,过四道验收),summary_fake=true 如实标注;问答
+//                判卷照常跑(grounded 模型在假摘要视图上只见热区),该臂
+//                装置数字只证管道,语义命中率待真模型。
 //
 // 判卷(确定性,独立自检):
-//   归一化(ASCII 小写、剥空白/全角空格/零宽)后做子串匹配。
-//   recall: 期望值在视图 → hit,否则 lost。
-//   conflict(更新冲突): 新值在 → hit;新值不在而旧值在 → stale
-//            (旧值已 superseded,拿它作答就是错——"不作答也不算对");
-//            两值都不在 → lost。
+//   归一化(ASCII 小写、剥空白/全角空格/零宽)后子串比对**模型回答**:
+//   recall:   回答含期望值 → hit;不含 → lost。
+//   conflict: 回答含新值 → hit(回答顺带提及旧值不算错,与"新值声明里
+//             提及旧值"同骨);不含新值而含旧值 → stale(superseded 旧值
+//             不得作答);两值都不含 → lost。
 //
 // 用法:
 //   eval_compact_position [--drafts <dir>] [--results <dir>] [--self-check]
+//   (--real 为真跑路预留,装置阶段未接线:零真请求、零真钥匙。)
 // 缺省取编译期 LUBANCODE_EVAL_COMPACT_POSITION_ROOT(源码树
 //   tests/eval/compact_position),底稿在其 results/drafts/,原始账落其
 //   results/raw_position_probe.jsonl,三处理视图落 results/views/(审计用)。
@@ -68,6 +83,8 @@ using lubancode_eval::FakeStreamingBackend;
 constexpr const char* kExperiment = "compact_position";
 constexpr const char* kFakeModel = "fake-eval-model";
 constexpr const char* kFakeProvider = "fake";
+// 装置问答方:脚本化 grounded 假后端(读视图作答,零真请求)。
+constexpr const char* kAnsweringModel = "fake-grounded-v1";
 
 std::string PathToUtf8(const fs::path& path) {
     const std::u8string u8 = path.u8string();
@@ -96,14 +113,25 @@ struct SegmentDef {
     std::string length_class;
 };
 
+struct UserTurnDef {
+    int slot = 0;
+    std::string text;
+};
+
 struct NeedleDef {
     std::string fact_id;
+    std::string layer;       // contract | evidence(分层铁律 3)
     std::string probe_kind;  // recall | conflict
+    std::string carrier;     // tool_result | user_turn
     std::string lang;
+    std::string key;         // 配置项键(问题面)
+    std::string question;    // 问题(金账同款,判卷题面)
     int position_pct = 0;
     double actual_position_pct = 0.0;
-    int seg_index = 0;
+    int seg_index = -1;      // evidence:落段
     int old_seg_index = -1;
+    int slot = -1;           // contract:落 user 消息序位
+    int old_slot = -1;
     double offset_pct_in_seg = 0.0;
     std::string seg_length_class;
     std::string expected_value;
@@ -116,6 +144,7 @@ struct Draft {
     int repeat = 0;
     long long seed = 0;
     std::vector<SegmentDef> segments;
+    std::vector<UserTurnDef> user_turns;
     std::vector<NeedleDef> needles;
 };
 
@@ -166,15 +195,29 @@ Draft LoadDraft(const fs::path& path) {
         def.length_class = StringOr(seg, "length_class");
         draft.segments.push_back(std::move(def));
     }
+    if (root.contains("user_turns")) {
+        for (const auto& turn : root.at("user_turns")) {
+            UserTurnDef def;
+            def.slot = IntOr(turn, "slot", 0);
+            def.text = StringOr(turn, "text");
+            draft.user_turns.push_back(std::move(def));
+        }
+    }
     for (const auto& needle : root.at("needles")) {
         NeedleDef def;
         def.fact_id = StringOr(needle, "fact_id");
+        def.layer = StringOr(needle, "layer");
         def.probe_kind = StringOr(needle, "probe_kind");
+        def.carrier = StringOr(needle, "carrier");
         def.lang = StringOr(needle, "lang");
+        def.key = StringOr(needle, "key");
+        def.question = StringOr(needle, "question");
         def.position_pct = IntOr(needle, "position_pct", 0);
         def.actual_position_pct = DoubleOr(needle, "actual_position_pct", 0.0);
-        def.seg_index = IntOr(needle, "seg_index", 0);
+        def.seg_index = IntOr(needle, "seg_index", -1);
         def.old_seg_index = IntOr(needle, "old_seg_index", -1);
+        def.slot = IntOr(needle, "slot", -1);
+        def.old_slot = IntOr(needle, "old_slot", -1);
         def.offset_pct_in_seg = DoubleOr(needle, "offset_pct_in_seg", 0.0);
         def.seg_length_class = StringOr(needle, "seg_length_class");
         def.expected_value = StringOr(needle, "expected_value");
@@ -192,13 +235,15 @@ Draft LoadDraft(const fs::path& path) {
 // 形状仿真实长会话:user 开工 → [assistant tool_use(read_file) → user
 // tool_result] × N(每 4 段一条 assistant 收口 + user 续读,开新 turn——
 // turn 粒度取小,compact 的 12k-token 热区才装得下尾部两三 turn,位置轴
-// 才有区分度;20 段一大 turn 时热区只剩末轮问话,compact 臂全线零存活,
-// 量不出"曲线压成什么样")→ assistant 收口 → user 终问(热区锚点)。
-// tool_use/tool_result 紧邻配对,与 BuildEventLedger 的原子配对形状一致。
+// 才有区分度)→ assistant 收口 → user 终问(热区锚点)。tool_use/
+// tool_result 紧邻配对,与 BuildEventLedger 的原子配对形状一致。user 开工
+// 与续读的正文来自底稿 user_turns(contract needle 嵌在这里)。
 
 struct HistoryLayout {
-    // 每段 read 结果所在的 user 消息下标(hot_kept 判定用)。
+    // 每段 read 结果所在的 user 消息下标(evidence needle 的 hot_kept 判定)。
     std::vector<std::size_t> result_message_of_segment;
+    // 每 slot 的 user 文本消息下标(contract needle 的 hot_kept 判定)。
+    std::vector<std::size_t> user_message_of_slot;
     std::size_t message_count = 0;
 };
 
@@ -207,14 +252,28 @@ std::vector<Message> BuildHistory(const Draft& draft, HistoryLayout* layout) {
     history.reserve(draft.segments.size() * 2 + 8);
     const bool zh = draft.lang == "zh";
 
+    auto user_text_of_slot = [&](std::size_t slot) -> std::string {
+        for (const UserTurnDef& turn : draft.user_turns) {
+            if (static_cast<std::size_t>(turn.slot) == slot) {
+                return turn.text;
+            }
+        }
+        // 兜底(手造底稿没给全):沿用造稿器默认文案。
+        return slot == 0 ? (zh ? "任务:通读 docs/draft/ 下的工程文档,整理其中的关键配置项与变更记录。"
+                               : "Task: read through the engineering docs and collect key settings.")
+                         : (zh ? "继续,留意配置项的变更记录。" : "Continue; watch for setting changes.");
+    };
+
     Message open;
     open.role = lubancode::api::Role::User;
-    open.content.push_back(lubancode::api::TextBlock{
-        zh ? "任务:通读 docs/draft/ 下的工程文档,整理其中的关键配置项与变更记录。"
-           : "Task: read through the engineering docs under docs/draft/ and collect key settings and changes."});
+    open.content.push_back(lubancode::api::TextBlock{user_text_of_slot(0)});
     history.push_back(std::move(open));
+    if (layout != nullptr) {
+        layout->user_message_of_slot.push_back(0);
+    }
 
     constexpr std::size_t kBatch = 4;
+    std::size_t turn_slot = 1;
     for (std::size_t i = 0; i < draft.segments.size(); ++i) {
         const SegmentDef& seg = draft.segments[i];
         if (i > 0 && i % kBatch == 0) {
@@ -225,9 +284,12 @@ std::vector<Message> BuildHistory(const Draft& draft, HistoryLayout* layout) {
             history.push_back(std::move(close));
             Message next;
             next.role = lubancode::api::Role::User;
-            next.content.push_back(lubancode::api::TextBlock{
-                zh ? "继续,留意配置项的变更记录。" : "Continue; watch for setting changes."});
+            next.content.push_back(lubancode::api::TextBlock{user_text_of_slot(turn_slot)});
             history.push_back(std::move(next));
+            if (layout != nullptr) {
+                layout->user_message_of_slot.push_back(history.size() - 1);
+            }
+            ++turn_slot;
         }
         Message call;
         call.role = lubancode::api::Role::Assistant;
@@ -269,7 +331,7 @@ std::vector<Message> BuildHistory(const Draft& draft, HistoryLayout* layout) {
 }
 
 // 视图 → 判卷文本投影(TextBlock 与 ToolResultBlock 正文;工具入参 JSON
-// 不进——事实值只出现在结果正文里)。
+// 不进——事实值只出现在结果正文与 user 消息里)。
 std::string ViewText(const std::vector<Message>& view) {
     std::string out;
     for (const auto& message : view) {
@@ -290,7 +352,7 @@ std::size_t HistoryBytes(const std::vector<Message>& history) {
     return ViewText(history).size();
 }
 
-// ---- 判卷(确定性) -----------------------------------------------------------
+// ---- 归一化与匹配(问答判卷的底座) -------------------------------------------
 
 // 归一化:ASCII 小写;剥 ASCII 空白、全角空格 U+3000、不换行空格 U+00A0、
 // 零宽空格 U+200B。两侧同规则,匹配不受措辞排版影响。
@@ -332,37 +394,73 @@ bool ContainsValue(const std::string& normalized_haystack, const std::string& va
     return normalized_haystack.find(NormalizeForMatch(value)) != std::string::npos;
 }
 
-// 判卷结果:verdict ∈ hit | stale | lost。
-//   recall:   期望值在 → hit;不在 → lost。
-//   conflict: 新值在 → hit;新值不在而旧值在 → stale(superseded 旧值不得
-//             作答,装置口径:拿旧值答与答不出同记 miss,stale 单列);
-//             两值都不在 → lost。
-struct NeedleVerdict {
+// ---- 问答判卷(铁律 1:只看模型回答) ------------------------------------------
+
+// 判卷结果:verdict ∈ hit | stale | lost。比对对象是**模型回答**,不是视图。
+//   recall:   回答含期望值 → hit;不含 → lost。
+//   conflict: 回答含新值 → hit(回答顺带提及旧值不算错——新值声明本就
+//             "已由旧变更为新");不含新值而含旧值 → stale(superseded 旧值
+//             不得作答,拿旧值答与答不出同记 miss,stale 单列);
+//             两值都不含 → lost。
+struct AnswerVerdict {
     bool hit = false;
-    bool new_present = false;
-    bool old_present = false;
     const char* verdict = "lost";
+    bool answer_has_new = false;
+    bool answer_has_old = false;
 };
 
-NeedleVerdict GradeNeedle(const std::string& normalized_view, const NeedleDef& needle) {
-    NeedleVerdict out;
-    out.new_present = ContainsValue(normalized_view, needle.expected_value);
-    out.old_present = !needle.old_value.empty() && ContainsValue(normalized_view, needle.old_value);
+AnswerVerdict GradeAnswer(const std::string& normalized_answer, const NeedleDef& needle) {
+    AnswerVerdict out;
+    out.answer_has_new = ContainsValue(normalized_answer, needle.expected_value);
+    out.answer_has_old =
+        !needle.old_value.empty() && ContainsValue(normalized_answer, needle.old_value);
     if (needle.probe_kind == "conflict") {
-        if (out.new_present) {
+        if (out.answer_has_new) {
             out.hit = true;
             out.verdict = "hit";
-        } else if (out.old_present) {
-            out.verdict = "stale";  // 旧值活着、新值没了:照旧值答就是错
+        } else if (out.answer_has_old) {
+            out.verdict = "stale";  // 照旧值作答:错,单列
         }
         return out;
     }
-    out.hit = out.new_present;
-    out.verdict = out.new_present ? "hit" : "lost";
+    out.hit = out.answer_has_new;
+    out.verdict = out.answer_has_new ? "hit" : "lost";
     return out;
 }
 
-// ---- 三处理 -----------------------------------------------------------------
+// ---- 装置问答方:脚本化 grounded 假后端 ---------------------------------------
+//
+// 形态:忠实于所见视图的"满分模型"——看见新值答新值(整句,带措辞噪声,
+// 判卷归一化后抽值)、只见旧值答旧值、都不见答"未提及"(句中绝不出现
+// 任何值)。不发请求、不读钥匙;真跑时换实验模型(ccmoon/gpt-5.6-luna)
+// 读视图答题,判卷器不动。
+struct ViewPresence {
+    bool new_in_view = false;
+    bool old_in_view = false;
+};
+
+ViewPresence CheckViewPresence(const std::string& normalized_view, const NeedleDef& needle) {
+    ViewPresence out;
+    out.new_in_view = ContainsValue(normalized_view, needle.expected_value);
+    out.old_in_view =
+        !needle.old_value.empty() && ContainsValue(normalized_view, needle.old_value);
+    return out;
+}
+
+std::string AskGroundedFake(const NeedleDef& needle, const ViewPresence& presence) {
+    const bool zh = needle.lang == "zh";
+    const std::string& value = presence.new_in_view   ? needle.expected_value
+                               : presence.old_in_view ? needle.old_value
+                                                      : std::string();
+    if (!value.empty()) {
+        return zh ? "看记录,配置项 " + needle.key + " 的取值为 " + value + "。"
+                  : "Per the records, the value of '" + needle.key + "' is " + value + ".";
+    }
+    return zh ? "记录里没有提到这个取值,我答不上来。"
+              : "I cannot find that value anywhere in the records.";
+}
+
+// ---- 三处理(铁律 2:全用产品默认,驱动不自设新数) ---------------------------
 
 struct TreatmentOutput {
     std::string name;  // FULL | microcompact | compact
@@ -374,18 +472,22 @@ struct TreatmentOutput {
     std::size_t duplicate_groups = 0;
     std::size_t superseded_observations = 0;
     std::size_t offloaded_saved_bytes = 0;
-    // compact 管道账
+    // compact 管道账(预算参数如实记:生产默认形态)
     bool summary_fake = false;
     std::size_t compact_requests = 0;
     std::size_t kept_messages = 0;
     std::vector<std::size_t> kept_indices;
+    // compact 预算窗口:nullopt = 窗口未知(生产 BuildCompactOptions 在路由
+    // 与模型目录都查不到窗口时同样留空;fake 模型无目录条目,即此形态)。
+    bool budget_window_known = false;
+    std::size_t budget_window_tokens = 0;
     bool ok = false;
     std::string error;
 };
 
 // compact 假后端替身:固定形态的六栏摘要 + 末尾 ```json manifest。内容是假
-// 的(不取自底稿),只保证过 Compact 的三道验收(≥40 码点、manifest 可解析、
-// goal 非空)与第四道(历史比摘要大)。语义待真模型跑。
+// 的(不取自底稿),只保证过 Compact 的四道验收(≥40 码点、manifest 可解析、
+// goal 非空、历史比摘要大)。语义待真模型跑。
 std::string FakeSixColumnSummary() {
     return "## 任务目标\n"
            "(装置假摘要)通读示例工程文档,整理关键配置项与变更记录。\n"
@@ -441,7 +543,15 @@ TreatmentOutput ApplyTreatment(const std::string& name, const std::vector<Messag
         FakeStreamingBackend backend;
         backend.scripts = {lubancode_eval::TextScript(
             FakeSixColumnSummary(), lubancode::api::Usage{5120, 384, 0, 0, 0})};
-        lubancode::agent::CompactOptions options;  // window_tokens=nullopt:装置未按窗口校验
+        // 生产默认形态:CompactOptions{} 的预算窗口是 nullopt(窗口未知,
+        // 不做拦截、如实记"未按窗口校验");output_reserve_tokens=4096 与
+        // protocol_headroom_tokens=2048 用 CompactBudget 默认——生产路
+        // BuildCompactOptions 仅在窗口已知时才按 BuildContextBudgetPlan 重算
+        // headroom,窗口未知即默认值,与本处同形。真跑路(--real)接真后端
+        // 工厂时应照生产路由查模型目录窗口(README 写明)。
+        lubancode::agent::CompactOptions options;
+        out.budget_window_known = options.budget.window_tokens.has_value();
+        out.budget_window_tokens = options.budget.window_tokens.value_or(0);
         const auto summary = lubancode::agent::Compact(backend, kFakeModel, history, options);
         if (!summary.has_value()) {
             out.error = "compact 假后端路失败(装置坏): " + summary.error().message;
@@ -465,7 +575,7 @@ TreatmentOutput ApplyTreatment(const std::string& name, const std::vector<Messag
     return out;
 }
 
-// ---- 自检(判卷与管道的单测,eval 冒烟章法:进程内断言) ----------------------
+// ---- 自检(问答判卷单测 + 失败注入负路径 + 管道;eval 冒烟章法) ---------------
 
 bool RunSelfChecks(std::string* error) {
     const auto fail = [error](const std::string& what) {
@@ -483,70 +593,133 @@ bool RunSelfChecks(std::string* error) {
         return fail("NormalizeForMatch 全角空格没剥掉");
     }
 
-    // 2) recall 判卷:在 → hit;不在 → lost。
+    // 2) 问答判卷:比对对象是模型回答。
     {
         NeedleDef needle;
+        needle.layer = "evidence";
         needle.probe_kind = "recall";
         needle.expected_value = "青梧-1009";
-        NeedleVerdict hit = GradeNeedle(NormalizeForMatch("正文里写着:配置项核定为 青梧-1009,以此为准。"), needle);
-        if (!hit.hit || std::string(hit.verdict) != "hit") {
-            return fail("recall 应判 hit");
+        // 整句作答(带措辞噪声)→ 归一化抽值 → hit。
+        const AnswerVerdict hit = GradeAnswer(
+            NormalizeForMatch("看记录,配置项 runtime.knob_00 的取值为 青梧-1009,以此为准。"), needle);
+        if (!hit.hit || std::string(hit.verdict) != "hit" || !hit.answer_has_new) {
+            return fail("recall 整句作答应判 hit");
         }
-        NeedleVerdict lost = GradeNeedle(NormalizeForMatch("正文里没有事实值。"), needle);
-        if (lost.hit || std::string(lost.verdict) != "lost") {
-            return fail("recall 应判 lost");
-        }
+        // 大小写与空格变形回答 → hit。
         NeedleDef en_needle;
+        en_needle.layer = "evidence";
         en_needle.probe_kind = "recall";
         en_needle.expected_value = "Qingwu-1009";
-        NeedleVerdict spaced = GradeNeedle(NormalizeForMatch("value is  QINGWU-1009  today"), en_needle);
+        const AnswerVerdict spaced = GradeAnswer(
+            NormalizeForMatch("The value is  QINGWU-1009  per the records."), en_needle);
         if (!spaced.hit) {
-            return fail("recall 值应能匹配(空格与大小写不吃措辞)");
+            return fail("recall 回答大小写/空格变形应仍判 hit");
+        }
+        // 失败注入:答"未提及" → lost;答别的值 → lost。
+        const AnswerVerdict absent = GradeAnswer(
+            NormalizeForMatch("记录里没有提到这个取值,我答不上来。"), needle);
+        if (absent.hit || std::string(absent.verdict) != "lost" || absent.answer_has_new) {
+            return fail("recall 注入'答不出'应判 lost(负路径)");
+        }
+        const AnswerVerdict wrong = GradeAnswer(NormalizeForMatch("取值为 青梧-4242。"), needle);
+        if (wrong.hit || std::string(wrong.verdict) != "lost") {
+            return fail("recall 注入'答错值'应判 lost(负路径)");
         }
     }
-
-    // 3) conflict 判卷:新值在 → hit;仅旧值在 → stale(不作答也不算对);
-    //    两不在 → lost。注意新值声明里也提及旧值——新值在时旧值串在场
-    //    属正常,verdict 只看新值。
     {
         NeedleDef needle;
+        needle.layer = "evidence";
         needle.probe_kind = "conflict";
         needle.expected_value = "玄序-6100";
         needle.old_value = "玄序-3100";
-        const NeedleVerdict hit = GradeNeedle(
-            NormalizeForMatch("【配置变更】已由 玄序-3100 变更为 玄序-6100,以本条为准。"), needle);
-        if (!hit.hit || !hit.new_present || !hit.old_present) {
-            return fail("conflict 新值在场应判 hit");
+        // 答新值 → hit;回答顺带提及旧值("已由旧变更为新")→ 仍 hit。
+        const AnswerVerdict hit = GradeAnswer(
+            NormalizeForMatch("配置项取值为 玄序-6100。"), needle);
+        if (!hit.hit || !hit.answer_has_new) {
+            return fail("conflict 答新值应判 hit");
         }
-        const NeedleVerdict stale = GradeNeedle(
-            NormalizeForMatch("【配置基线】初始设定为 玄序-3100。"), needle);
-        if (stale.hit || std::string(stale.verdict) != "stale" || !stale.old_present) {
-            return fail("conflict 仅旧值在场应判 stale 且不算 hit");
+        const AnswerVerdict mention_old = GradeAnswer(
+            NormalizeForMatch("该配置项已由 玄序-3100 变更为 玄序-6100,现为 玄序-6100。"), needle);
+        if (!mention_old.hit || !mention_old.answer_has_old) {
+            return fail("conflict 回答含新值(顺带提旧值)应判 hit");
         }
-        const NeedleVerdict lost = GradeNeedle(NormalizeForMatch("别的正文。"), needle);
-        if (lost.hit || std::string(lost.verdict) != "lost") {
-            return fail("conflict 两值都不在应判 lost");
+        // 失败注入:答旧值 → stale(hit 必须为 false);答未提及 → lost;
+        // 答无关值 → lost。
+        const AnswerVerdict stale = GradeAnswer(
+            NormalizeForMatch("看记录,配置项的取值为 玄序-3100。"), needle);
+        if (stale.hit || std::string(stale.verdict) != "stale" || !stale.answer_has_old) {
+            return fail("conflict 注入'答旧值'应判 stale 且不算 hit(负路径)");
+        }
+        const AnswerVerdict absent = GradeAnswer(
+            NormalizeForMatch("记录里没有提到这个取值,我答不上来。"), needle);
+        if (absent.hit || std::string(absent.verdict) != "lost") {
+            return fail("conflict 注入'答不出'应判 lost(负路径)");
+        }
+        const AnswerVerdict wrong = GradeAnswer(NormalizeForMatch("取值为 玄序-9999。"), needle);
+        if (wrong.hit || std::string(wrong.verdict) != "lost") {
+            return fail("conflict 注入'答无关值'应判 lost(负路径)");
         }
     }
 
-    // 4) 微型管道:一段超长(needle 居中)+ 一段短(needle 在场)+ 一对同
-    //    path 新旧读取。FULL 全存活;microcompact 折掉长段中段 needle、
-    //    短段 needle 活、同 path 新版声明触发 NewVersion 分支。
+    // 3) grounded 假问答后端:忠实于视图作答,三类回答与判卷闭环。
+    {
+        NeedleDef needle;
+        needle.layer = "evidence";
+        needle.probe_kind = "conflict";
+        needle.lang = "zh";
+        needle.key = "deploy.baseline_00";
+        needle.expected_value = "玄序-6100";
+        needle.old_value = "玄序-3100";
+        // 视图含新值 → 回答含新值 → hit。
+        ViewPresence both;
+        both.new_in_view = true;
+        both.old_in_view = true;
+        const std::string answer_new = AskGroundedFake(needle, both);
+        const AnswerVerdict v_new = GradeAnswer(NormalizeForMatch(answer_new), needle);
+        if (!v_new.hit) {
+            return fail("grounded:视图含新值时回答应判 hit");
+        }
+        // 视图仅含旧值 → 回答含旧值不含新 → stale(主链 stale 陷阱的机理)。
+        ViewPresence only_old;
+        only_old.old_in_view = true;
+        const std::string answer_old = AskGroundedFake(needle, only_old);
+        if (ContainsValue(NormalizeForMatch(answer_old), needle.expected_value)) {
+            return fail("grounded:只见旧值时回答不得含新值");
+        }
+        const AnswerVerdict v_old = GradeAnswer(NormalizeForMatch(answer_old), needle);
+        if (v_old.hit || std::string(v_old.verdict) != "stale") {
+            return fail("grounded:只见旧值时应答旧值、判卷 stale");
+        }
+        // 视图两值都无 → 回答不含任何值 → lost。
+        ViewPresence none;
+        const std::string answer_none = AskGroundedFake(needle, none);
+        if (ContainsValue(NormalizeForMatch(answer_none), needle.expected_value) ||
+            ContainsValue(NormalizeForMatch(answer_none), needle.old_value)) {
+            return fail("grounded:'未提及'回答里不得出现任何值");
+        }
+        const AnswerVerdict v_none = GradeAnswer(NormalizeForMatch(answer_none), needle);
+        if (v_none.hit || std::string(v_none.verdict) != "lost") {
+            return fail("grounded:两值都不见时应判 lost");
+        }
+    }
+
+    // 4) 微型管道:一段超长(needle 居中)+ 一段短(needle 在场)+ 同
+    //    path 新旧读取两对(medium 对验 NewVersion;短旧长新对验 stale
+    //    陷阱)+ user 消息里的 contract needle 一对。全程走"grounded 作答
+    //    → 问答判卷",与主链同一条路。
     {
         Draft mini;
         mini.draft_id = "mini";
         mini.lang = "zh";
+        const std::string filler_line = "构建日志:模块 042 编译完成,警告 3 条,耗时 217 毫秒。\n";
+        const std::string pad_line = "巡检记录:节点 041 的磁盘水位 38%,仍在安全带内。\n";
         SegmentDef long_seg;
         long_seg.tool_use_id = "u_long";
         long_seg.path = "docs/mini/long.md";
         long_seg.length_class = "long";
         {
-            std::string filler_line = "构建日志:模块 042 编译完成,警告 3 条,耗时 217 毫秒。\n";
-            std::size_t lines = 0;
-            long_seg.text.reserve(10 * 1024);
             while (long_seg.text.size() < 10 * 1024) {
                 long_seg.text += filler_line;
-                ++lines;
             }
             const std::size_t mid = long_seg.text.size() / 2;
             long_seg.text.insert(mid, "【关键事实】配置项 mini.long 的取值核定为 青梧-9001,以此为准。\n");
@@ -557,6 +730,7 @@ bool RunSelfChecks(std::string* error) {
         short_seg.length_class = "short";
         short_seg.text = "巡检记录:节点 007 的磁盘水位 41%,仍在安全带内。\n"
                          "【关键事实】配置项 mini.short 的取值核定为 青梧-9002,以此为准。\n";
+        // conflict 对 A:同 path 两版 medium(都 ≥512B),新版全文在场。
         SegmentDef old_seg;
         old_seg.tool_use_id = "u_old";
         old_seg.path = "config/mini.toml";
@@ -569,44 +743,116 @@ bool RunSelfChecks(std::string* error) {
         new_seg.text = "【配置变更】配置项 mini.port 已由 玄序-3100 变更为 玄序-6100,以本条为准。\n";
         // NewVersion 判据要求正文 ≥ min_compressible_bytes(512B):给同 path
         // 的新旧两版各垫足上下文,让"文件改版"分支真触发。
-        const std::string pad_line = "巡检记录:节点 041 的磁盘水位 38%,仍在安全带内。\n";
         for (std::size_t pad = 0; pad < 24; ++pad) {
             old_seg.text += pad_line;
             new_seg.text += pad_line;
         }
-        mini.segments = {long_seg, short_seg, old_seg, new_seg};
+        // conflict 对 B:旧版短段(≥512B 不折,旧值活)、新版长段(needle
+        // 居中,折叠丢新值)——grounded 模型只见旧值,照旧值作答 → stale。
+        SegmentDef old_short_seg;
+        old_short_seg.tool_use_id = "u_old_b";
+        old_short_seg.path = "config/mini_b.toml";
+        old_short_seg.length_class = "short";
+        old_short_seg.text = "【配置基线】配置项 mini.gate 初始设定为 白鹭-7600。\n";
+        while (old_short_seg.text.size() < 600) {
+            old_short_seg.text += pad_line;
+        }
+        SegmentDef new_long_seg;
+        new_long_seg.tool_use_id = "u_new_b";
+        new_long_seg.path = "config/mini_b.toml";
+        new_long_seg.length_class = "long";
+        {
+            std::string body;
+            while (body.size() < 10 * 1024) {
+                body += filler_line;
+            }
+            const std::size_t mid = body.size() / 2;
+            body.insert(mid, "【配置变更】配置项 mini.gate 已由 白鹭-7600 变更为 白鹭-8600,以本条为准。\n");
+            new_long_seg.text = body;
+        }
+        mini.segments = {long_seg, short_seg, old_seg, new_seg, old_short_seg, new_long_seg};
 
-        NeedleDef long_needle;
-        long_needle.fact_id = "MINI-L";
-        long_needle.probe_kind = "recall";
-        long_needle.expected_value = "青梧-9001";
-        long_needle.seg_index = 0;
-        NeedleDef short_needle;
-        short_needle.fact_id = "MINI-S";
-        short_needle.probe_kind = "recall";
-        short_needle.expected_value = "青梧-9002";
-        short_needle.seg_index = 1;
-        NeedleDef conflict_needle;
-        conflict_needle.fact_id = "MINI-C";
-        conflict_needle.probe_kind = "conflict";
-        conflict_needle.expected_value = "玄序-6100";
-        conflict_needle.old_value = "玄序-3100";
-        conflict_needle.seg_index = 3;
-        conflict_needle.old_seg_index = 2;
-        mini.needles = {long_needle, short_needle, conflict_needle};
+        // user 消息:6 段 → 2 个 slot(开工 + 段 4 前续读)。contract recall
+        // 与 conflict 旧约落 slot 0,conflict 新约落 slot 1。
+        UserTurnDef open_turn;
+        open_turn.slot = 0;
+        open_turn.text = "任务:通读 docs/mini/ 下的工程文档,整理关键配置项与变更记录。\n"
+                         "【用户约定】配置项 mini.style 的取值,由用户定死为 承影-4400,全程照此执行,不得偏离。\n"
+                         "【用户约定】配置项 mini.log 的取值,用户起初定为 白鹭-7700。\n";
+        UserTurnDef next_turn;
+        next_turn.slot = 1;
+        next_turn.text = "继续,留意配置项的变更记录。\n"
+                         "【用户约定变更】配置项 mini.log 的取值,用户已从 白鹭-7700 改定为 白鹭-8700,以本条约定为准,先前约定作废。\n";
+        mini.user_turns = {open_turn, next_turn};
+
+        auto make_needle = [](const char* id, const char* layer, const char* kind,
+                              const char* carrier, const char* lang, const char* key,
+                              std::string expected, std::string old_value, int seg_index,
+                              int old_seg_index, int slot, int old_slot) {
+            NeedleDef def;
+            def.fact_id = id;
+            def.layer = layer;
+            def.probe_kind = kind;
+            def.carrier = carrier;
+            def.lang = lang;
+            def.key = key;
+            def.question = std::string("问 ") + key + "?";
+            def.expected_value = std::move(expected);
+            def.old_value = std::move(old_value);
+            def.seg_index = seg_index;
+            def.old_seg_index = old_seg_index;
+            def.slot = slot;
+            def.old_slot = old_slot;
+            return def;
+        };
+        NeedleDef long_needle = make_needle("MINI-L", "evidence", "recall", "tool_result", "zh",
+                                            "mini.long", "青梧-9001", "", 0, -1, -1, -1);
+        NeedleDef short_needle = make_needle("MINI-S", "evidence", "recall", "tool_result", "zh",
+                                             "mini.short", "青梧-9002", "", 1, -1, -1, -1);
+        NeedleDef conflict_a = make_needle("MINI-CA", "evidence", "conflict", "tool_result", "zh",
+                                           "mini.port", "玄序-6100", "玄序-3100", 3, 2, -1, -1);
+        NeedleDef conflict_b = make_needle("MINI-CB", "evidence", "conflict", "tool_result", "zh",
+                                           "mini.gate", "白鹭-8600", "白鹭-7600", 5, 4, -1, -1);
+        NeedleDef contract_recall = make_needle("MINI-KR", "contract", "recall", "user_turn", "zh",
+                                                "mini.style", "承影-4400", "", -1, -1, 0, -1);
+        NeedleDef contract_conflict = make_needle("MINI-KC", "contract", "conflict", "user_turn",
+                                                  "zh", "mini.log", "白鹭-8700", "白鹭-7700",
+                                                  -1, -1, 1, 0);
+        mini.needles = {long_needle, short_needle, conflict_a, conflict_b, contract_recall,
+                        contract_conflict};
+
+        // 一臂问答:视图 → grounded 作答 → 判卷,逐 needle 回 verdict。
+        const auto grade_arm = [&](const TreatmentOutput& output,
+                                   const NeedleDef& needle) -> AnswerVerdict {
+            const std::string normalized_view = NormalizeForMatch(ViewText(output.view));
+            const ViewPresence presence = CheckViewPresence(normalized_view, needle);
+            return GradeAnswer(NormalizeForMatch(AskGroundedFake(needle, presence)), needle);
+        };
+        // 诊断列(子串在场)自检:与问答口径分开。
+        const auto presence_of = [&](const TreatmentOutput& output,
+                                     const NeedleDef& needle) -> ViewPresence {
+            return CheckViewPresence(NormalizeForMatch(ViewText(output.view)), needle);
+        };
 
         const std::vector<Message> history = BuildHistory(mini, nullptr);
 
+        // FULL:零处理,grounded 满分问答必须六案全 hit(完整性锚)。
         const TreatmentOutput full = ApplyTreatment("FULL", history);
         if (!full.ok || full.view.size() != history.size()) {
             return fail("微型管道 FULL 失败");
         }
-        const std::string full_text = NormalizeForMatch(ViewText(full.view));
-        if (!GradeNeedle(full_text, long_needle).hit || !GradeNeedle(full_text, short_needle).hit ||
-            std::string(GradeNeedle(full_text, conflict_needle).verdict) != "hit") {
-            return fail("微型管道 FULL 应三案全存活");
+        for (const NeedleDef& needle : mini.needles) {
+            const AnswerVerdict verdict = grade_arm(full, needle);
+            if (!verdict.hit) {
+                return fail(std::string("微型管道 FULL 应六案全 hit(装置完整性锚): ") +
+                            needle.fact_id + " -> " + verdict.verdict);
+            }
         }
 
+        // microcompact:长段 needle 折丢 → grounded 答不出 → lost;短段 → hit;
+        // conflict A(新版 medium 全文)→ hit + NewVersion;conflict B(新值
+        // 折丢旧值活)→ grounded 答旧值 → stale;contract needle(user 消息
+        // 不折叠)→ hit。三类分型在管道里齐现,负路径(stale/lost)真红。
         const TreatmentOutput folded = ApplyTreatment("microcompact", history);
         if (!folded.ok) {
             return fail("微型管道 microcompact 失败: " + folded.error);
@@ -617,22 +863,33 @@ bool RunSelfChecks(std::string* error) {
         if (folded.view_bytes >= folded.original_bytes) {
             return fail("微型管道 microcompact 折完没变小");
         }
-        const std::string folded_text = NormalizeForMatch(ViewText(folded.view));
-        if (GradeNeedle(folded_text, long_needle).hit) {
-            return fail("长段中段 needle 在折叠视图里竟然还活着——真语义信号失灵");
+        if (grade_arm(folded, long_needle).hit ||
+            std::string(grade_arm(folded, long_needle).verdict) != "lost") {
+            return fail("长段中段 needle 折丢后,grounded 问答应判 lost");
         }
-        if (!GradeNeedle(folded_text, short_needle).hit) {
-            return fail("短段 needle 在折叠视图里不该死");
+        if (!grade_arm(folded, short_needle).hit) {
+            return fail("短段 needle 在折叠视图里问答应判 hit");
         }
-        const NeedleVerdict conflict_folded = GradeNeedle(folded_text, conflict_needle);
-        if (!conflict_folded.hit) {
-            return fail("同 path 新版声明(短正文)在折叠视图里应全文在场");
+        if (!grade_arm(folded, conflict_a).hit) {
+            return fail("同 path 新版声明(medium)折叠后问答应判 hit");
+        }
+        const AnswerVerdict cb = grade_arm(folded, conflict_b);
+        if (cb.hit || std::string(cb.verdict) != "stale" || !cb.answer_has_old) {
+            return fail("conflict 新值折丢旧值在场:grounded 应答旧值、判卷 stale(stale 陷阱)");
+        }
+        if (!presence_of(folded, conflict_b).old_in_view ||
+            presence_of(folded, conflict_b).new_in_view) {
+            return fail("conflict B 的视图诊断列与问答判定矛盾(旧应在场、新不在)");
+        }
+        if (!grade_arm(folded, contract_recall).hit || !grade_arm(folded, contract_conflict).hit) {
+            return fail("contract needle 落 user 消息,折叠后问答应全 hit");
         }
         if (ViewText(folded.view).find("此读取替代事件") == std::string::npos) {
             return fail("同 path 新旧读取没触发折叠路的 NewVersion 分支");
         }
 
-        // compact 假后端路:微型史也要能过四道验收并出 archive+热区。
+        // compact 假后端路:微型史也要能过四道验收并出 archive+热区;问答
+        // 判卷照常跑(假摘要视图,装置只证管道)。
         const TreatmentOutput compacted = ApplyTreatment("compact", history);
         if (!compacted.ok) {
             return fail("微型管道 compact 失败: " + compacted.error);
@@ -643,6 +900,14 @@ bool RunSelfChecks(std::string* error) {
         }
         if (ViewText(compacted.view).find("## 任务目标") == std::string::npos) {
             return fail("compact 视图里应并入假六栏存档");
+        }
+        if (compacted.budget_window_known) {
+            return fail("compact 预算窗口装置阶段应为未知(nullopt,生产同形)");
+        }
+        for (const NeedleDef& needle : mini.needles) {
+            // 只要求判卷器对每案出 verdict(管道通);热区保留是真实行为,
+            // 命中多少不设断言(假摘要,语义待真跑)。
+            (void)grade_arm(compacted, needle);
         }
 
         // 确定性:同史两次折叠逐字节一致。
@@ -717,8 +982,10 @@ int RunPipeline(const DriverPaths& paths, const std::string& commit) {
     const char* treatments[] = {"FULL", "microcompact", "compact"};
     const std::string now = NowIso8601Utc();
     std::size_t rows = 0;
-    std::size_t full_recall_misses = 0;
+    std::size_t full_misses = 0;
     std::size_t microcompact_lost_long = 0;
+    std::size_t stale_count = 0;
+    std::size_t lost_count = 0;
     bool folding_engaged = false;
 
     for (const fs::path& draft_file : draft_files) {
@@ -745,17 +1012,45 @@ int RunPipeline(const DriverPaths& paths, const std::string& commit) {
             }
 
             const std::string view_text = ViewText(output.view);
-            const std::string normalized = NormalizeForMatch(view_text);
+            const std::string normalized_view = NormalizeForMatch(view_text);
             std::set<std::size_t> kept(output.kept_indices.begin(), output.kept_indices.end());
 
             for (const NeedleDef& needle : draft.needles) {
-                const NeedleVerdict verdict = GradeNeedle(normalized, needle);
-                if (std::string(treatment) == "FULL" && needle.probe_kind == "recall" && !verdict.hit) {
-                    ++full_recall_misses;  // FULL 全存活是装置完整性锚,循环后断言
+                // 问答判卷(铁律 1):grounded 假后端读视图作答 → 判卷比对回答。
+                const ViewPresence presence = CheckViewPresence(normalized_view, needle);
+                const std::string model_answer = AskGroundedFake(needle, presence);
+                const AnswerVerdict verdict =
+                    GradeAnswer(NormalizeForMatch(model_answer), needle);
+                if (verdict.verdict == std::string("stale")) {
+                    ++stale_count;
+                }
+                if (verdict.verdict == std::string("lost")) {
+                    ++lost_count;
+                }
+                if (std::string(treatment) == "FULL" && !verdict.hit) {
+                    ++full_misses;  // FULL 全 hit 是装置完整性锚,循环后断言
                 }
                 if (std::string(treatment) == "microcompact" && !verdict.hit &&
                     needle.seg_length_class == "long") {
                     ++microcompact_lost_long;
+                }
+                // hot_kept:evidence 看落段消息,contract 看落 user 消息。
+                json hot_kept = nullptr;
+                if (!output.kept_indices.empty()) {
+                    const std::size_t message_index =
+                        needle.carrier == "user_turn"
+                            ? (needle.slot >= 0 &&
+                                       static_cast<std::size_t>(needle.slot) <
+                                           layout.user_message_of_slot.size()
+                                   ? layout.user_message_of_slot[static_cast<std::size_t>(needle.slot)]
+                                   : 0)
+                            : (needle.seg_index >= 0 &&
+                                       static_cast<std::size_t>(needle.seg_index) <
+                                           layout.result_message_of_segment.size()
+                                   ? layout.result_message_of_segment[static_cast<std::size_t>(
+                                         needle.seg_index)]
+                                   : 0);
+                    hot_kept = json(kept.count(message_index) > 0);
                 }
                 json record;
                 record["experiment"] = kExperiment;
@@ -764,26 +1059,37 @@ int RunPipeline(const DriverPaths& paths, const std::string& commit) {
                 record["repeat"] = draft.repeat;
                 record["seed"] = draft.seed;
                 record["treatment"] = treatment;
+                record["layer"] = needle.layer;
                 record["probe_kind"] = needle.probe_kind;
+                record["carrier"] = needle.carrier;
                 record["fact_id"] = needle.fact_id;
+                record["key"] = needle.key;
                 record["position_pct"] = needle.position_pct;
                 record["actual_position_pct"] = needle.actual_position_pct;
-                record["seg_index"] = needle.seg_index;
-                record["seg_length_class"] = needle.seg_length_class;
+                record["seg_index"] = needle.seg_index >= 0 ? json(needle.seg_index) : json(nullptr);
+                record["seg_length_class"] = needle.seg_length_class.empty()
+                                                 ? json(nullptr)
+                                                 : json(needle.seg_length_class);
+                record["slot"] = needle.slot >= 0 ? json(needle.slot) : json(nullptr);
                 record["offset_pct_in_seg"] = needle.offset_pct_in_seg;
                 record["expected_value"] = needle.expected_value;
                 record["old_value"] = needle.old_value.empty() ? json(nullptr) : json(needle.old_value);
-                record["hit"] = verdict.hit;
+                // 问答判卷三件:题面、模型回答、判定。
+                record["question"] = needle.question;
+                record["model_answer"] = model_answer;
                 record["verdict"] = verdict.verdict;
-                record["new_present"] = verdict.new_present;
-                record["old_present"] = verdict.old_present;
-                record["hot_kept"] = output.kept_indices.empty()
-                                         ? json(nullptr)
-                                         : json(kept.count(layout.result_message_of_segment[
-                                                   static_cast<std::size_t>(needle.seg_index)]) > 0);
+                record["hit"] = verdict.hit;
+                record["answer_has_new"] = verdict.answer_has_new;
+                record["answer_has_old"] = verdict.answer_has_old;
+                // 视图级子串在场:辅助诊断列(FULL/microcompact 机械性信号;
+                // compact 臂不据此记成绩)。
+                record["new_in_view"] = presence.new_in_view;
+                record["old_in_view"] = presence.old_in_view;
+                record["hot_kept"] = hot_kept;
                 record["view_bytes"] = output.view_bytes;
                 record["original_bytes"] = output.original_bytes;
                 record["summary_fake"] = output.summary_fake;
+                record["answering_model"] = kAnsweringModel;
                 record["commit"] = commit;
                 record["model"] = kFakeModel;
                 record["provider"] = kFakeProvider;
@@ -811,6 +1117,10 @@ int RunPipeline(const DriverPaths& paths, const std::string& commit) {
             stat["offloaded_saved_bytes"] = output.offloaded_saved_bytes;
             stat["compact_requests"] = output.compact_requests;
             stat["summary_fake"] = output.summary_fake;
+            // compact 预算形态如实记(生产默认:窗口未知,nullopt 不做拦截)。
+            stat["budget_window_tokens"] =
+                output.budget_window_known ? json(output.budget_window_tokens) : json(nullptr);
+            stat["answering_model"] = kAnsweringModel;
             stat["commit"] = commit;
             stat["model"] = kFakeModel;
             stat["provider"] = kFakeProvider;
@@ -822,11 +1132,11 @@ int RunPipeline(const DriverPaths& paths, const std::string& commit) {
     }
 
     // ---- 装置完整性断言(不是判卷账) ----
-    if (full_recall_misses != 0) {
+    if (full_misses != 0) {
         std::fprintf(stderr,
-                     "eval_compact_position: FULL 视图里 recall 判失 %zu 案——FULL 是零处理"
-                     "基线,判失即装置坏(判卷或造稿出了错)\n",
-                     full_recall_misses);
+                     "eval_compact_position: FULL 问答判失 %zu 案——FULL 是零处理基线,"
+                     "grounded 满分模型答不对即装置坏(判卷/造稿/视图投影出了错)\n",
+                     full_misses);
         return 1;
     }
     if (!folding_engaged) {
@@ -841,11 +1151,19 @@ int RunPipeline(const DriverPaths& paths, const std::string& commit) {
                      "首笔真语义信号缺位,查造稿长度分布\n");
         return 1;
     }
+    if (stale_count == 0 || lost_count == 0) {
+        std::fprintf(stderr,
+                     "eval_compact_position: 问答判卷三型未齐现(stale=%zu lost=%zu)——"
+                     "失败注入没在管道里真红过,判卷器或 grounded 作答器退化\n",
+                     stale_count, lost_count);
+        return 1;
+    }
 
     std::printf("eval_compact_position: %zu 份底稿 x 3 处理 -> %zu 案落 %s\n",
                 draft_files.size(), rows, PathToUtf8(raw_path).c_str());
-    std::printf("eval_compact_position: microcompact 折掉 long 档 needle %zu 案(真语义信号)\n",
-                microcompact_lost_long);
+    std::printf("eval_compact_position: 问答判卷三型齐现——hit %zu 案,stale %zu 案,lost %zu 案"
+                "(microcompact 折丢 long 档 needle %zu 案;负路径主链实证)\n",
+                rows - stale_count - lost_count, stale_count, lost_count, microcompact_lost_long);
     return 0;
 }
 
@@ -863,6 +1181,12 @@ int main(int argc, char** argv) {
             drafts = fs::path(argv[++i]);
         } else if (arg == "--results" && i + 1 < argc) {
             results = fs::path(argv[++i]);
+        } else if (arg == "--real") {
+            std::fprintf(stderr,
+                         "eval_compact_position: --real 真跑路未接线(装置阶段零真请求、"
+                         "零真钥匙);真跑三条命令见 README,接线时假后端替身换真后端工厂、"
+                         "问答方换实验模型 ccmoon/gpt-5.6-luna\n");
+            return 2;
         } else {
             std::fprintf(stderr, "用法: eval_compact_position [--drafts <dir>] [--results <dir>] "
                                  "[--self-check]\n");
@@ -889,7 +1213,8 @@ int main(int argc, char** argv) {
         return 1;
     }
     if (self_check_only) {
-        std::printf("eval_compact_position: 自检全过(归一化/判卷/微型管道/确定性)\n");
+        std::printf("eval_compact_position: 自检全过(归一化/问答判卷+失败注入/grounded 作答/"
+                    "微型管道/确定性)\n");
         return 0;
     }
     if (PathToUtf8(root).empty() && PathToUtf8(drafts).empty()) {

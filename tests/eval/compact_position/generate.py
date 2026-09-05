@@ -1,10 +1,14 @@
-"""实验 B1(compact 位置探针)造稿器:长上下文底稿 + needle 金账。
+"""实验 B1(compact 位置探针)造稿器:长上下文底稿 + 分层 needle 金账。
 
-Q2 单 §二 B1(首仗):仿真实会话视图造一段长上下文——N 段填充材料
-(仿 read_file 的 tool result/文档段,中英混排,长度分三档)+ K 条关键事实
-(needle)按受控深度({0,5,...,95}% 共 20 档)插入。同一份底稿喂三处理
-(FULL / microcompact 折叠 / compact 六栏摘要),底稿是三处理唯一的输入,
-所以它只描述"事实",不掺任何处理侧的东西。
+Q2 单 §二 B1(2026-09-05 工头令改判卷三铁律):
+  1) 问答驱动判卷——needle 答案是短规范值(名字-号码形),判卷只看模型
+     答没答对;造稿器把每 needle 的"问题"一并写进金账,判卷口径全在账上;
+  2) 触发条件贴生产——热冷区切分与阈值全用产品默认,造稿只管"事实",
+     不掺任何处理侧的东西;
+  3) needle 分层——金账带 layer 字段:contract(合同类:用户约定/偏好,
+     落 user 消息,按产品设计该进 manifest 逐字收编)与 evidence(证据类:
+     工具输出里的事实,落 read_file 结果段,本分是被摘要)。两类各半,
+     "设计如此"与"意外丢失"不许混锅。
 
 底稿形状(驱动 eval_driver.cpp 按此拼 api::Message 历史):
   - 段(segment)= 一次 read_file 的结果正文;tool_use_id/path 逐段唯一,
@@ -14,22 +18,30 @@ Q2 单 §二 B1(首仗):仿真实会话视图造一段长上下文——N 段填
     分布 30%/45%/25%)。long 段超过产品默认 long_result_bytes=8192,
     microcompact 折叠时会被换成头尾各 256B 的 artifact 预览——needle 放
     段中段(插入带 25%-75%,long 段再保证离头尾各 ≥384B),折掉就是真丢。
-  - 两类探针:recall(直接召回,一段一句事实)与 conflict(更新冲突,
-    同一配置项新旧两版值,旧版在前新版在后;金账记期望答案=新值,
-    判卷规则见 eval_driver.cpp——旧值单独在场判 stale,不作答也不算对)。
+  - 探针两类 × 层两类 = 每档四枚 needle:
+      evidence/recall     直接召回(段中一句事实,答值即对);
+      evidence/conflict   更新冲突(同一配置项旧值在前、新值在后、同 path
+                           再读;答新值=hit,答旧值=stale,答不出=lost);
+      contract/recall     用户约定(user 消息正文里一句"定死为 X");
+      contract/conflict   用户改约(旧约在前 user 消息、新约在后 user 消息)。
+  - user 消息(user_turns):开工 1 条 + 每 4 段续读 1 条,正文由造稿器
+    出(默认语 + 嵌进去的 contract needle 句);contract needle 的位置档
+    按 user 消息在会话里的序位(位置轴与 evidence 同口径)。
   - 中英两形:zh/en 两套底稿,同一 fact_id 两个措辞形,防判卷吃措辞。
 
-金账 needle_gold.jsonl 一行一 needle:fact_id / 位置档(designed) /
-实际位置档(actual)/ 措辞形 / 期望答案 / 旧值 / source 段引用(seg_index、
-path、tool_use_id、段内偏移)/ 段长档 / seed。底稿落 results/drafts/
-(gitignored,可由 seed 复现)。
+金账 needle_gold.jsonl 一行一 needle:fact_id / layer / probe_kind /
+carrier(tool_result|user_turn)/ 位置档(designed)/ 实际位置档(actual)/
+措辞形 / 问题 question / 期望答案 / 旧值 / source 引用(段:seg_index、
+path、tool_use_id、段内偏移;user 消息:slot、old_slot)/ 段长档 / seed。
+底稿落 results/drafts/(gitignored,可由 seed 复现)。
 
 生成器自带断言(每次都跑,--self-check 另跑一轮小矩阵):
-  1. 期望值唯一性:每个 value 在本底稿全文出现次数恰为期望值
-     (recall=1;conflict 新值=1,旧值=2——旧版声明一次+新版声明里提一次),
-     绝不出现在别的段或别的 needle 里;
-  2. needle 落段中段(插入带 25%-75%),long 段离头尾各 ≥384B;
-  3. conflict 旧段严格在新段之前;
+  1. 期望值唯一性:每个 value 在本底稿全文(段 + user 消息)出现次数恰为
+     期望值(recall=1;conflict 新值=1,旧值=2——旧声明一次+新声明里提一次),
+     绝不出现在别的段、别的消息或别的 needle 里;
+  2. evidence needle 落段中段(插入带 25%-75%),long 段离头尾各 ≥384B;
+  3. conflict 旧声明严格在新声明之前(段:old_seg_index < seg_index;
+     user 消息:old_slot < slot);
   4. 位置档表全覆盖,一档不缺;
   5. 同 seed 两次生成逐字节一致(确定性,sha256 对账)。
 
@@ -66,10 +78,14 @@ SHORT_MAX = 1280
 CLASS_BOUNDS = {"short": (380, 760), "medium": (1400, 2600), "long": (8992, 10792)}
 CLASS_DISTRIBUTION = [("short", 0.30), ("medium", 0.45), ("long", 0.25)]
 
-# 事实值前缀与号码:号码区间互不重叠(1009-2738 / 3100-4107 / 6100-7373),
-# 填充材料里的数字一律 ≤999 或带小数点,从根上杜绝串号。
+# 事实值前缀与号码:四族号码区间互不重叠(evidence recall 1009-2738 /
+# contract recall 4400-5293 / evidence conflict 旧 3100-4107 新 6100-7373 /
+# contract conflict 旧 7600-8417 新 8600-9721),填充材料里的数字一律
+# ≤999 或带小数点,从根上杜绝串号。
 RECALL_PREFIX = {"zh": "青梧", "en": "Qingwu"}
 CONFLICT_PREFIX = {"zh": "玄序", "en": "Xuanxu"}
+CONTRACT_RECALL_PREFIX = {"zh": "承影", "en": "Chengying"}
+CONTRACT_CONFLICT_PREFIX = {"zh": "白鹭", "en": "Egret"}
 
 
 def recall_num(step_index: int, sub: int) -> int:
@@ -84,12 +100,32 @@ def conflict_new_num(step_index: int) -> int:
     return 6100 + 67 * step_index
 
 
+def contract_recall_num(step_index: int) -> int:
+    return 4400 + 47 * step_index
+
+
+def contract_conflict_old_num(step_index: int) -> int:
+    return 7600 + 43 * step_index
+
+
+def contract_conflict_new_num(step_index: int) -> int:
+    return 8600 + 59 * step_index
+
+
 def recall_key(step_index: int) -> str:
     return f"runtime.knob_{step_index:02d}"
 
 
 def conflict_key(step_index: int) -> str:
     return f"deploy.baseline_{step_index:02d}"
+
+
+def contract_recall_key(step_index: int) -> str:
+    return f"prefs.mode_{step_index:02d}"
+
+
+def contract_conflict_key(step_index: int) -> str:
+    return f"prefs.limit_{step_index:02d}"
 
 
 # ---- 填充行(中英混排;数字全部 ≤999 或带小数点,不与事实值串号) ----------
@@ -157,7 +193,7 @@ def build_filler(rng: random.Random, target_bytes: int) -> str:
     return "\n".join(lines) + "\n"
 
 
-# ---- needle 造句 ------------------------------------------------------------
+# ---- needle 造句与问题 --------------------------------------------------------
 
 RECALL_SENTENCE = {
     "zh": "【关键事实】配置项 {key} 的取值核定为 {value},后续工作以此为准。",
@@ -170,6 +206,48 @@ CONFLICT_OLD_SENTENCE = {
 CONFLICT_NEW_SENTENCE = {
     "zh": "【配置变更】配置项 {key} 已由 {old} 变更为 {value},以本条为准,先前取值作废。",
     "en": "[CHANGE] The setting '{key}' has been changed from {old} to {value}; this record supersedes the earlier value.",
+}
+CONTRACT_RECALL_SENTENCE = {
+    "zh": "【用户约定】配置项 {key} 的取值,由用户定死为 {value},全程照此执行,不得偏离。",
+    "en": "[USER CONTRACT] The setting '{key}' is fixed by the user at {value}; follow it throughout.",
+}
+CONTRACT_OLD_SENTENCE = {
+    "zh": "【用户约定】配置项 {key} 的取值,用户起初定为 {value}。",
+    "en": "[USER CONTRACT] The setting '{key}' was initially agreed by the user as {value}.",
+}
+CONTRACT_NEW_SENTENCE = {
+    "zh": "【用户约定变更】配置项 {key} 的取值,用户已从 {old} 改定为 {value},以本条约定为准,先前约定作废。",
+    "en": "[USER CONTRACT CHANGE] The setting '{key}' is re-agreed by the user from {old} to {value}; this supersedes the earlier agreement.",
+}
+
+# 问题模板:答案都是短规范值(判卷确定性),conflict 问"最新为准"。
+QUESTIONS = {
+    ("evidence", "recall"): {
+        "zh": "配置项 {key} 的取值是什么?",
+        "en": "What is the value of the setting '{key}'?",
+    },
+    ("evidence", "conflict"): {
+        "zh": "配置项 {key} 当前的取值是什么(以最新变更后的为准)?",
+        "en": "What is the current value of the setting '{key}' (latest change wins)?",
+    },
+    ("contract", "recall"): {
+        "zh": "用户为配置项 {key} 定下的取值是什么?",
+        "en": "What value did the user fix for the setting '{key}'?",
+    },
+    ("contract", "conflict"): {
+        "zh": "用户对配置项 {key} 的最新约定取值是什么(以最后一次约定为准)?",
+        "en": "What is the user's latest agreed value for the setting '{key}' (last agreement wins)?",
+    },
+}
+
+# user 消息默认正文(开工 / 续读;contract needle 句逐行追加在其后)。
+DEFAULT_OPEN_TEXT = {
+    "zh": "任务:通读 docs/draft/ 下的工程文档,整理其中的关键配置项与变更记录。",
+    "en": "Task: read through the engineering docs under docs/draft/ and collect key settings and changes.",
+}
+DEFAULT_TURN_TEXT = {
+    "zh": "继续,留意配置项的变更记录。",
+    "en": "Continue; watch for setting changes.",
 }
 
 # 同段多枚 needle 的插入带(段内字节百分比),错开防叠句。
@@ -215,6 +293,31 @@ def position_index(step: int, positions: list[int], n_segments: int) -> int:
     return min(n_segments - 1, int(step / 100.0 * (n_segments - 1) + 0.5))
 
 
+def user_slot_count(n_segments: int) -> int:
+    """user 文本消息数(开工 1 + 每 4 段续读 1):contract needle 的位置轴。
+
+    >>> user_slot_count(96)
+    24
+    >>> user_slot_count(24)
+    6
+    """
+    return 1 + (n_segments - 1) // 4
+
+
+def user_slot_for(step_index: int, positions: list[int], n_slots: int) -> int:
+    """位置档 → user 消息序位(与 evidence 的位置轴同口径)。
+
+    >>> user_slot_for(0, DEFAULT_POSITIONS, 24)
+    0
+    >>> user_slot_for(19, DEFAULT_POSITIONS, 24)
+    23
+    >>> user_slot_for(9, DEFAULT_POSITIONS, 24)
+    11
+    """
+    span = max(1, len(positions) - 1)
+    return min(n_slots - 1, int(step_index / span * (n_slots - 1) + 0.5))
+
+
 def pick_length_class(rng: random.Random) -> str:
     roll = rng.random()
     acc = 0.0
@@ -255,6 +358,7 @@ def generate_draft(lang: str, repeat: int, seed: int, positions: list[int],
                    long_result_bytes: int) -> dict:
     rng = random.Random(seed)
     draft_id = f"draft_{lang}_r{repeat}"
+    n_slots = user_slot_count(n_segments)
 
     # 1) 段落骨架:逐段定长度档与填充正文。
     segments: list[dict] = []
@@ -271,6 +375,12 @@ def generate_draft(lang: str, repeat: int, seed: int, positions: list[int],
             "insertions": 0,
             "conflict_claimed": False,
         })
+
+    # user 消息骨架(开工 + 续读;contract needle 落这里)。
+    user_turns: list[dict] = []
+    for k in range(n_slots):
+        default_text = DEFAULT_OPEN_TEXT[lang] if k == 0 else DEFAULT_TURN_TEXT[lang]
+        user_turns.append({"slot": k, "text": default_text, "insertions": 0})
 
     conflict_claimed: set[int] = set()
 
@@ -294,29 +404,64 @@ def generate_draft(lang: str, repeat: int, seed: int, positions: list[int],
 
     needles: list[dict] = []
 
-    def plant(step: int, fact_id: str, kind: str, sentence: str, expected: str,
-              old_value: str | None, seg: dict, old_seg: dict | None = None) -> None:
+    def plant(step: int, fact_id: str, layer: str, kind: str, sentence: str, key: str,
+              expected: str, old_value: str | None, seg: dict, old_seg: dict | None = None) -> None:
         long_seg = seg["length_class"] == "long"
         seg["text"], offset = insert_sentence(seg["text"], sentence, seg["insertions"], long_seg)
         seg["insertions"] += 1
         needles.append({
             "fact_id": fact_id,
+            "layer": layer,
             "probe_kind": kind,
+            "carrier": "tool_result",
             "lang": lang,
             "position_pct": step,
             "actual_position_pct": round(seg["index"] / (n_segments - 1) * 100.0, 1),
             "seg_index": seg["index"],
             "offset_pct_in_seg": offset,
+            "key": key,
+            "question": QUESTIONS[(layer, kind)][lang].format(key=key),
             "expected_value": expected,
             "old_value": old_value,
             "old_seg_index": old_seg["index"] if old_seg is not None else None,
+            "slot": None,
+            "old_slot": None,
             # path/tool_use_id/seg_length_class 在收尾统一从段上回填,
             # 免得冲突对后改 path 把先记的 recall 行带歪。
         })
 
-    # 2) conflict needle 先种(它们认领段、改 path):每位置档一枚;旧值在
-    #    约 9 段之前,与新版共用同一 path 再读一次——同键不同 hash,正好
-    #    踩 microcompact 折叠路的“文件改版”(NewVersion)分支。档 0 没有
+    def plant_contract(step: int, fact_id: str, kind: str, sentence: str, key: str,
+                       expected: str, old_value: str | None, slot: int,
+                       old_slot: int | None = None) -> None:
+        """contract needle:句落 user 消息正文末(独立行),判卷单元同 recall/conflict。"""
+        turn = user_turns[slot]
+        turn["text"] = turn["text"] + "\n" + sentence
+        turn["insertions"] += 1
+        needles.append({
+            "fact_id": fact_id,
+            "layer": "contract",
+            "probe_kind": kind,
+            "carrier": "user_turn",
+            "lang": lang,
+            "position_pct": step,
+            "actual_position_pct": round(slot / max(1, n_slots - 1) * 100.0, 1),
+            "seg_index": None,
+            "offset_pct_in_seg": None,
+            "key": key,
+            "question": QUESTIONS[("contract", kind)][lang].format(key=key),
+            "expected_value": expected,
+            "old_value": old_value,
+            "old_seg_index": None,
+            "slot": slot,
+            "old_slot": old_slot,
+            "path": None,
+            "tool_use_id": None,
+            "seg_length_class": None,
+        })
+
+    # 2) evidence/conflict needle 先种(它们认领段、改 path):每位置档一枚;
+    #    旧值在约 9 段之前,与新版共用同一 path 再读一次——同键不同 hash,
+    #    正好踩 microcompact 折叠路的"文件改版"(NewVersion)分支。档 0 没有
     #    更早的空间:旧值落 0 段、新值挪到第 4 段,实际位置档进金账,
     #    曲线仍按设计档记。
     for step_index, step in enumerate(positions):
@@ -351,24 +496,59 @@ def generate_draft(lang: str, repeat: int, seed: int, positions: list[int],
         conflict_claimed.add(old_seg["index"])
         conflict_claimed.add(new_seg["index"])
         # 新版声明 needle 化(判卷单元);旧版声明只种进旧段,金账 old_seg_index 指路。
-        plant(step, fact_id, "conflict", new_sentence, new_value, old_value, new_seg, old_seg)
+        plant(step, fact_id, "evidence", "conflict", new_sentence, conflict_key(step_index),
+              new_value, old_value, new_seg, old_seg)
         old_long = old_seg["length_class"] == "long"
         old_seg["text"], old_offset = insert_sentence(
             old_seg["text"], old_sentence, old_seg["insertions"], old_long)
         old_seg["insertions"] += 1
         needles[-1]["old_offset_pct_in_seg"] = old_offset
 
-    # 3) recall needle:每位置档 needles_per_position 枚,避开冲突对认领的段。
+    # 3) evidence/recall needle:每位置档 needles_per_position 枚,避开冲突对认领的段。
     for step_index, step in enumerate(positions):
         for sub in range(needles_per_position):
             fact_id = f"R{step_index:02d}" + (chr(ord("a") + sub) if needles_per_position > 1 else "")
             value = f"{RECALL_PREFIX[lang]}-{recall_num(step_index, sub)}"
             sentence = RECALL_SENTENCE[lang].format(key=recall_key(step_index), value=value)
             seg = seg_for(position_index(step, positions, n_segments), avoid_claimed=True)
-            plant(step, fact_id, "recall", sentence, value, None, seg)
+            plant(step, fact_id, "evidence", "recall", sentence, recall_key(step_index),
+                  value, None, seg)
 
-    # 4) 收尾:段引用回填 + 临时键出清。
+    # 4) contract needle(分层铁律 3):落 user 消息,每档 recall+conflict
+    #    各一。conflict 旧约 slot 在新约前约 4 条消息;档 0 没有更早的空间:
+    #    旧约落 slot 0、新约挪 slot 2,实际序位进金账,曲线仍按设计档记。
+    for step_index, step in enumerate(positions):
+        new_slot = user_slot_for(step_index, positions, n_slots)
+        old_slot = max(0, new_slot - 4)
+        if new_slot <= old_slot:
+            new_slot = min(n_slots - 1, old_slot + 2)
+            if new_slot <= old_slot:
+                raise AssertionError(f"{draft_id} user 消息太少,contract 冲突对没处放")
+        fact_id = f"KC{step_index:02d}"
+        old_value = f"{CONTRACT_CONFLICT_PREFIX[lang]}-{contract_conflict_old_num(step_index)}"
+        new_value = f"{CONTRACT_CONFLICT_PREFIX[lang]}-{contract_conflict_new_num(step_index)}"
+        old_sentence = CONTRACT_OLD_SENTENCE[lang].format(
+            key=contract_conflict_key(step_index), value=old_value)
+        new_sentence = CONTRACT_NEW_SENTENCE[lang].format(
+            key=contract_conflict_key(step_index), old=old_value, value=new_value)
+        # 新约 needle 化;旧约只种进旧 slot 的正文,金账 old_slot 指路。
+        plant_contract(step, fact_id, "conflict", new_sentence, contract_conflict_key(step_index),
+                       new_value, old_value, new_slot, old_slot)
+        user_turns[old_slot]["text"] += "\n" + old_sentence
+        user_turns[old_slot]["insertions"] += 1
+
+    for step_index, step in enumerate(positions):
+        fact_id = f"KR{step_index:02d}"
+        value = f"{CONTRACT_RECALL_PREFIX[lang]}-{contract_recall_num(step_index)}"
+        sentence = CONTRACT_RECALL_SENTENCE[lang].format(
+            key=contract_recall_key(step_index), value=value)
+        plant_contract(step, fact_id, "recall", sentence, contract_recall_key(step_index),
+                       value, None, user_slot_for(step_index, positions, n_slots))
+
+    # 5) 收尾:段引用回填 + 临时键出清。
     for needle in needles:
+        if needle["carrier"] != "tool_result":
+            continue
         seg = segments[needle["seg_index"]]
         needle["path"] = seg["path"]
         needle["tool_use_id"] = seg["tool_use_id"]
@@ -376,6 +556,8 @@ def generate_draft(lang: str, repeat: int, seed: int, positions: list[int],
     for seg in segments:
         seg.pop("insertions")
         seg.pop("conflict_claimed")
+    for turn in user_turns:
+        turn.pop("insertions")
 
     return {
         "experiment": "compact_position",
@@ -389,8 +571,10 @@ def generate_draft(lang: str, repeat: int, seed: int, positions: list[int],
             "needles_per_position": needles_per_position,
             "long_result_bytes": long_result_bytes,
             "class_distribution": {name: weight for name, weight in CLASS_DISTRIBUTION},
+            "user_turns": len(user_turns),
         },
         "segments": segments,
+        "user_turns": user_turns,
         "needles": needles,
     }
 
@@ -400,35 +584,65 @@ def generate_draft(lang: str, repeat: int, seed: int, positions: list[int],
 
 def verify_draft(draft: dict, positions: list[int], needles_per_position: int) -> None:
     segments = draft["segments"]
+    user_turns = draft["user_turns"]
     needles = draft["needles"]
-    full_text = "\n".join(seg["text"] for seg in segments)
+    n_slots = len(user_turns)
+    full_text = "\n".join(seg["text"] for seg in segments) + "\n" + \
+        "\n".join(turn["text"] for turn in user_turns)
 
-    # 位置档全覆盖。
+    # 位置档全覆盖 + 分层计数(每档:evidence recall npp + evidence conflict 1
+    # + contract recall 1 + contract conflict 1)。
     designed = sorted({n["position_pct"] for n in needles})
     assert designed == sorted(positions), f"位置档缺失: {designed}"
-    recalls = [n for n in needles if n["probe_kind"] == "recall"]
-    conflicts = [n for n in needles if n["probe_kind"] == "conflict"]
-    assert len(recalls) == len(positions) * needles_per_position, "recall 数不对"
-    assert len(conflicts) == len(positions), "conflict 数不对"
+    recalls = [n for n in needles if n["probe_kind"] == "recall" and n["layer"] == "evidence"]
+    conflicts = [n for n in needles if n["probe_kind"] == "conflict" and n["layer"] == "evidence"]
+    assert len(recalls) == len(positions) * needles_per_position, "evidence recall 数不对"
+    assert len(conflicts) == len(positions), "evidence conflict 数不对"
+    contract_recalls = [n for n in needles if n["layer"] == "contract" and n["probe_kind"] == "recall"]
+    contract_conflicts = [n for n in needles if n["layer"] == "contract" and n["probe_kind"] == "conflict"]
+    assert len(contract_recalls) == len(positions), "contract recall 数不对"
+    assert len(contract_conflicts) == len(positions), "contract conflict 数不对"
 
-    # 值出现次数:recall=1;conflict 新值=1、旧值=2(旧声明一次+新声明提一次)。
+    # carrier 与 source 字段自洽:evidence 带段引用、contract 带消息序位。
     for needle in needles:
-        expected_count = 1 if needle["probe_kind"] == "recall" else 2
-        value = needle["expected_value"] if needle["probe_kind"] == "recall" else needle["old_value"]
+        if needle["layer"] == "evidence":
+            assert needle["carrier"] == "tool_result", "evidence needle 必落 tool result"
+            assert needle["slot"] is None and 0 <= needle["seg_index"] < len(segments)
+        else:
+            assert needle["carrier"] == "user_turn", "contract needle 必落 user 消息"
+            assert needle["seg_index"] is None and 0 <= needle["slot"] < n_slots
+
+    # 值出现次数(recall=1;conflict 新值=1、旧值=2)——全文含 user 消息。
+    for needle in needles:
+        is_recall = needle["probe_kind"] == "recall"
+        expected_count = 1 if is_recall else 2
+        value = needle["expected_value"] if is_recall else needle["old_value"]
         count = full_text.count(value)
         assert count == expected_count, (
             f"{draft['draft_id']} {needle['fact_id']}: 值 {value} 出现 {count} 次,期望 {expected_count}")
-        if needle["probe_kind"] == "conflict":
+        if not is_recall:
             assert full_text.count(needle["expected_value"]) == 1, (
                 f"{draft['draft_id']} {needle['fact_id']}: 新值应恰好出现一次")
 
-    # conflict 旧段严格在新段之前。
+    # needle 句在场:值唯一性已保证,这里再钉"句本身完整在场"。
+    for needle in needles:
+        if needle["layer"] == "contract" and needle["probe_kind"] == "conflict":
+            carrier = user_turns[needle["old_slot"]]["text"]
+            assert needle["old_value"] in carrier, (
+                f"{draft['draft_id']} {needle['fact_id']}: 旧约不在 old_slot 正文里")
+
+    # conflict 旧声明严格在新声明之前(段下标或消息序位)。
     for needle in conflicts:
         assert needle["old_seg_index"] is not None and needle["old_seg_index"] < needle["seg_index"], (
             f"{draft['draft_id']} {needle['fact_id']}: 旧段不在新段之前")
+    for needle in contract_conflicts:
+        assert needle["old_slot"] is not None and needle["old_slot"] < needle["slot"], (
+            f"{draft['draft_id']} {needle['fact_id']}: 旧约消息不在新约之前")
 
-    # 插入带与余量。
+    # 插入带与余量(evidence 段内)。
     for needle in needles:
+        if needle["carrier"] != "tool_result":
+            continue
         assert 20.0 <= needle["offset_pct_in_seg"] <= 80.0, (
             f"{draft['draft_id']} {needle['fact_id']}: 插入偏移 {needle['offset_pct_in_seg']}% 出带")
         if needle["seg_length_class"] == "long":
@@ -440,10 +654,15 @@ def verify_draft(draft: dict, positions: list[int], needles_per_position: int) -
         assert seg["length_class"] == class_for_size(byte_len(seg["text"]), draft["params"]["long_result_bytes"]), (
             f"{draft['draft_id']} seg{seg['index']}: 长度档与实际字节数不符")
 
-    # 冲突对同 path(折叠路 NewVersion 的前提)。
+    # evidence 冲突对同 path(折叠路 NewVersion 的前提)。
     for needle in conflicts:
         assert segments[needle["old_seg_index"]]["path"] == needle["path"], (
             f"{draft['draft_id']} {needle['fact_id']}: 冲突对新旧段 path 不一致")
+
+    # 问题非空(问答判卷的题面全在金账上)。
+    for needle in needles:
+        assert needle["key"] and needle["key"] in needle["question"], (
+            f"{draft['draft_id']} {needle['fact_id']}: 问题缺 key")
 
 
 def draft_digest(draft: dict) -> str:
@@ -483,7 +702,7 @@ def run(out_dir: Path, segments: int, repeats: int, langs: list[str], positions:
 
 
 def self_check() -> int:
-    # doctest(位置换算与档位判定的口径先钉住)。
+    # doctest(位置换算、消息序位与档位判定的口径先钉住)。
     failures = doctest.testmod().failed
     assert failures == 0, f"doctest 挂了 {failures} 条"
     # 小矩阵:4 档位置 × 1 repeat × zh,en 两种措辞都造。
@@ -514,7 +733,7 @@ def parse_args(argv: list[str] | None) -> argparse.Namespace:
     parser.add_argument("--positions", default=",".join(str(p) for p in DEFAULT_POSITIONS),
                         help="位置档表,逗号分隔(0-95)")
     parser.add_argument("--needles-per-position", type=int, default=DEFAULT_NEEDLES_PER_POSITION,
-                        help="每位置档 recall needle 数")
+                        help="每位置档 evidence recall needle 数")
     parser.add_argument("--seed-base", type=int, default=DEFAULT_SEED_BASE, help="种子基")
     parser.add_argument("--long-result-bytes", type=int, default=DEFAULT_LONG_RESULT_BYTES,
                         help="long 档下限(与产品 long_result_bytes 对齐)")
