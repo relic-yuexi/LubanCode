@@ -459,8 +459,11 @@ TEST_CASE("runner 假 rg: 满 100 条主动停树,marker 证明没跑完全程")
         REQUIRE(result.has_value());
         CHECK(result->hits.size() == 100);  // 全局 100 条,不是 rg 的每文件 100
         CHECK(result->truncated);
-        // marker 是假 rg 吐完 250 条再睡 300ms 后才写的:满额收树把它截在
-        // 半路,marker 不存在 = 真的提前停了,没有遍历余下 150 条。
+        // marker 是假 rg 吐完 250 条再睡 30 秒(默认,可经
+        // LUBANCODE_FAKE_RG_MARKER_DELAY_MS 调)后才写的:满额收树把它截在
+        // 半路,marker 不存在 = 真的提前停了,没有遍历余下 150 条。窗宽只
+        // 是收树余量——慢机上收树慢半拍也掐在 marker 之前(CI run
+        // 33944110255 的冤红即 300ms 窗掐不完所致)。
         CHECK_FALSE(std::filesystem::exists(marker));
     }
 }

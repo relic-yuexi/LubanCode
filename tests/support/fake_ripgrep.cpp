@@ -9,9 +9,10 @@
 //   @exit7            吐一条 match 后退出 7(进程半途死,不冒充无命中)
 //   @bad-json         吐一行不是 JSON 的东西(协议错收树)
 //   @big-frame        吐 2 MiB 无换行字节(1 MiB 未完成帧超帽)
-//   @many-hits:N      吐 N 条 match(逐条冲刷),再睡 300ms 后写 marker 文件
-//                     退出 0——满额主动收树的测试看 marker 在不在:在=rg 跑
-//                     完了全程(没提前停),不在=第 N 条就被杀
+//   @many-hits:N      吐 N 条 match(逐条冲刷),再睡 MarkerDelayMs()(默认
+//                     30 秒)后写 marker 文件,退出 0——满额主动收树的测试看
+//                     marker 在不在:在=rg 跑完了全程(没提前停),不在=第 N
+//                     条就被杀
 //   @wide-lines:N     吐 N 条各 2 万字符正文的 match(16 KiB 单行截断与
 //                     512 KiB 总量墙的原料)
 //   @never-exit       吐一条 match 后睡 30 秒(cancel/timeout 的靶子)
@@ -22,9 +23,12 @@
 //                     孩子 Job Object 连坐,POSIX 侧进程组连坐
 //   @child-sleep      (内部)把 PID 写进 marker 睡 30 秒,@spawn-child 的孩子
 //
-// marker 文件路径从环境变量 LUBANCODE_FAKE_RG_MARKER 读(ChildProcess 默认
-// 继承宿主环境)。输出全部行级冲刷——流式 runner 的满额判断依赖"读到的
-// 每一条都已到管道"。
+// marker 文件路径从环境变量 LUBANCODE_FAKE_RG_MARKER 读;吐完场景写 marker
+// 前的睡窗从 LUBANCODE_FAKE_RG_MARKER_DELAY_MS 读(默认 30000 毫秒)。窗宽
+// 只为给宿主收树留余量:marker 只会在脚本自然跑完时落地,宿主正常早掐则
+// 秒过不付窗;压到 0 可让脚本秒完成,供负路径自证"marker 不存在"的断言
+// 仍咬人(ChildProcess 默认继承宿主环境,两个变量都随测试进程传下来)。
+// 输出全部行级冲刷——流式 runner 的满额判断依赖"读到的每一条都已到管道"。
 
 #include <cstdio>
 #include <cstdlib>
@@ -62,6 +66,21 @@ void WriteMarker(const std::string& content) {
 
 void SleepMs(int ms) {
     std::this_thread::sleep_for(std::chrono::milliseconds(ms));
+}
+
+// 吐完场景与写 marker 之间的睡窗,默认 30 秒。语义:marker 只在脚本自然
+// 跑完时落地——宿主满额收树把它掐在半路,窗口再宽 marker 也写不出来;
+// 只有宿主真失手(没收住树)才付满这窗,然后测试红,红的应当红。当年的
+// 300ms 是逼宿主"吐完 250 条后 300ms 内掐死子进程",满负荷的机器上收树
+// 慢半拍,marker 落了地,好人蒙冤(CI run 33944110255,时序家族第四案)。
+// 负路径自证/本地调试经 LUBANCODE_FAKE_RG_MARKER_DELAY_MS 把窗压到 0。
+int MarkerDelayMs() {
+    const char* raw = std::getenv("LUBANCODE_FAKE_RG_MARKER_DELAY_MS");
+    if (raw == nullptr || *raw == '\0') {
+        return 30'000;
+    }
+    const int ms = std::atoi(raw);
+    return ms > 0 ? ms : 0;
 }
 
 long OwnPid() {
@@ -225,9 +244,11 @@ int main(int argc, char** argv) {
         for (int i = 0; i < n; ++i) {
             Emit(MatchEvent("f" + std::to_string(i) + ".txt", 1, "hit line\n"));
         }
-        // 满额停树的铁证:睡 300ms 再写 marker。宿主在第 100 条(或注入的
-        // 小帽)就收树的话,这行永远执行不到。
-        SleepMs(300);
+        // 满额停树的铁证:睡 MarkerDelayMs()(默认 30 秒)再写 marker。宿主
+        // 在第 100 条(或注入的小帽)就收树的话,这行永远执行不到;窗从
+        // 300ms 拉到 30 秒,宿主收树慢几拍也仍掐在 marker 之前——判停语义
+        // 一寸没改,只是收树余量放宽。
+        SleepMs(MarkerDelayMs());
         WriteMarker("completed\n");
         return 0;
     }
@@ -237,7 +258,7 @@ int main(int argc, char** argv) {
         for (int i = 0; i < n; ++i) {
             Emit(MatchEvent("w" + std::to_string(i) + ".txt", 1, wide + "\n"));  // 真实换行由 JsonEscape 转义
         }
-        SleepMs(300);
+        SleepMs(MarkerDelayMs());
         WriteMarker("completed\n");
         return 0;
     }
@@ -251,7 +272,7 @@ int main(int argc, char** argv) {
     }
     if (pattern.rfind("@glob-many:", 0) == 0) {
         // glob 模式:NUL 分帧吐 N 条路径(最后一条不带尾 NUL,顺带考尾帧),
-        // 睡 300ms 后写 marker——glob 的满额停树同 @many-hits 的口径。
+        // 睡 MarkerDelayMs() 后写 marker——glob 的满额停树同 @many-hits 的口径。
         const int n = std::atoi(pattern.c_str() + std::strlen("@glob-many:"));
         for (int i = 0; i < n; ++i) {
             std::fputs(("dir/f" + std::to_string(i) + ".txt").c_str(), stdout);
@@ -260,7 +281,7 @@ int main(int argc, char** argv) {
             }
         }
         std::fflush(stdout);
-        SleepMs(300);
+        SleepMs(MarkerDelayMs());
         WriteMarker("completed\n");
         return 0;
     }
