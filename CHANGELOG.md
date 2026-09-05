@@ -2,6 +2,12 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.211] - 2026-09-06
+
+- **Linux 发布包换代：manylinux_2_28 通用配方。** Linux 包改在 manylinux_2_28 容器（glibc 2.28 基线）+ gcc-toolset-14 编译，静链 libstdc++/libgcc/OpenSSL 3.3.2——**一份包吃遍 glibc ≥ 2.28 的所有发行版**（Debian 11/12、Ubuntu 24.04 裸容器真跑全绿），旧 ubuntu 直编的 GLIBC_2.38 需求退役。CI 同步换血：Linux 腿进 manylinux 容器编译并跑全量测试（"测的就是发的东西"），后挂三发行版运行矩阵硬门。
+- **IsProcessAlive 僵尸判死（容器实翻）。** GitHub 容器 PID 1 不收尸，被 SIGKILL 的孤儿成僵尸后 `kill(pid,0)` 误判活人——收树测试冤红。修为 `/proc` 状态查证（Z 判死），macOS 无 `/proc` 保持老语义。
+- 附件修：`fetch_ripgrep` 加 ar+tar 后备解 deb（RPM 系无 dpkg-deb）；GitHub Release 正文执笔人归一（三 job 各写一遍致 Full Changelog 三连重）；release 工作流加非 tag 铁闸。
+
 ## [v0.26.210] - 2026-09-05
 
 - **记忆写入调度 P1：同轮去重与零成本门控（首批行为变更）。** 本轮已成功保存/忘却/接受候选后，回合尾抽取立即收手（`already_mutated`）——显式保存一轮只走一条写路；"好""继续""/help"一类短确认/纯命令回合不再请模型（必跳层七条稳定 reason）；中文短文本门槛 `cjk>=8 OR 拉丁词>=3 OR (代码>=2 且伴随自然语言)`。耐久信号层 shadow 模式（`LUBANCODE_MEMORY_GATE_SHADOW`）只记判断不拦调用。新册 12 案 83 断言；中途顺手捉掉分节死循环与空指针段错误两枚真 bug。
