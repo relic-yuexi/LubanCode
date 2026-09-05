@@ -24,6 +24,7 @@
 #include <cerrno>
 #include <chrono>
 #include <csignal>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -1473,7 +1474,30 @@ bool IsProcessAlive(unsigned long pid) {
         return true;
     }
     // kill(pid, 0):0 = 活着;EPERM = 活着但没权限;ESRCH = 不在了。
-    return ::kill(static_cast<pid_t>(pid), 0) == 0 || errno == EPERM;
+    if (::kill(static_cast<pid_t>(pid), 0) != 0 && errno != EPERM) {
+        return false;
+    }
+    // 僵尸不算活人:进程已死、只是父辈没人收尸(容器世界的常态——GitHub
+    // Actions 容器的 PID 1 不 reap 孤儿,收树测试在 manylinux 腿实翻)。
+    // 占个 pid 坑位、不再执行任何代码,对"进程树收割不留孤儿"的语义而言
+    // 它已经死了。/proc 不存在的平台(macOS)保持 kill(0) 老语义——那边
+    // init 勤快收尸,僵尸活不过探测。
+    FILE* stat = std::fopen(("/proc/" + std::to_string(pid) + "/stat").c_str(), "r");
+    if (stat != nullptr) {
+        char buf[256] = {};
+        const size_t n = std::fread(buf, 1, sizeof(buf) - 1, stat);
+        std::fclose(stat);
+        if (n > 0) {
+            buf[n] = '\0';
+            // stat 形如 "pid (comm) S ..."——comm 可能含空格/括号,取最后
+            // 一枚右括号后的首字符即进程状态。
+            const char* rparen = std::strrchr(buf, ')');
+            if (rparen != nullptr && rparen[1] == ' ') {
+                return rparen[2] != 'Z';
+            }
+        }
+    }
+    return true;
 }
 
 unsigned long CurrentProcessId() { return static_cast<unsigned long>(::getpid()); }
