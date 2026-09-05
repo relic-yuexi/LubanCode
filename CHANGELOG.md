@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.208] - 2026-09-05
+
+- **记忆写入调度 P0 账本（纯 instrumentation，行为零变更）。** `MemoryTurnLedger` 回合级记账 + 两枚 typed 事件（`memory.extraction.assessed`/`memory.write.receipted`），五路写入（remember/memory_save/forget/candidate accept/自动抽取）全接 queued/rejected 回执——排队不冒充落盘。真实轨迹离线实测：生产全在 `memory.enabled=false` 默认态（245 场真抽取 0 发）；现行"history 有增长就请模型"判据重放 **88.2/100 放行**——基本不筛；按单子 §7.3 门槛投影 35.5/100。token/accepted_memory 如实记"尚未测得"。另清六份含明文钥匙的评测 config 复制品。
+
 ## [v0.26.207] - 2026-09-05
 
 - **UiEventPump 停表丢醒挂死根治（生产码竞态）。** `StopAndDrain` 锁外置停+唤醒，消费线程恰卡在"谓词查毕未入睡"窗口即永睡（首等待无死线，join 永等）——CI ubuntu 腿 180s 超时挂死（33887350246，上轮同码绿，稀有竞态）。修三处：置停收进队列锁（两种交错全封死）、`PostDelta` 停表检查收锁内（顺带堵死信窗口）、`stopped_` 声明挪到线程成员之前（构造序 UB）。WSL 实证：修前 ~1/70 挂死（900 轮 11 中，gdb 拿双线程栈定罪），修后 8 并发 2984 轮零挂、TSan 100 轮干净。
