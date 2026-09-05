@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <expected>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -78,23 +79,22 @@ std::expected<MemoryExtraction, std::string> RunMemoryExtraction(api::Backend& b
 std::expected<MemoryExtraction, std::string> FinishMemoryExtraction(const agent::SampleResult& sampled);
 
 // ---------------------------------------------------------------------------
-// 记忆写入调度单 P0(§六/§10):调度账。纯 instrumentation——以下每个
-// 枚举、计数、事件都不改现行 every-turn 路一个字节的控制流;门控判定
-// (§7)是 P1 的活,P0 只把枚举表立对。
+// 记忆写入调度单 P0(§六/§10):调度账。P0 批纯 instrumentation——
+// 枚举、计数、事件不改现行 every-turn 路一个字节的控制流;P1 批起
+// §7 门控上线(必跳层 + 同轮去重是真闸,§7.2 耐久信号走 shadow)。
 // ---------------------------------------------------------------------------
 
-// 用户正文的有效成分统计(§3.2 MeaningfulTextStats 的首折)。中文没有
-// 天然空格,不能照抄 split(' ')>=3 的英文口径;P0 先立三项易得计数,
-// code_token_count/only_acknowledgement/only_slash_command 留给 P1 的
-// 门控判定。纯函数,UTF-8 感知。
+// 用户正文的有效成分统计(§3.2 MeaningfulTextStats)。中文没有天然
+// 空格,不能照抄 split(' ')>=3 的英文口径。P0 立三项计数,P1 补全后三
+// 项(代码记号/纯确认/纯命令),六项一并算齐、一并落账。纯函数,
+// UTF-8 感知,同一冻结输入跨平台一致(§15)。
 struct MeaningfulTextStats {
     std::uint64_t unicode_scalar_count = 0;  // UTF-8 码点数(不含续字节)
     std::uint64_t cjk_char_count = 0;        // CJK 统一表意(含 Ext-A/兼容区)
     std::uint64_t latin_word_count = 0;      // ASCII 字母/数字连成的词数
-    // P1 门控判定接线后才填(P0 恒缺省,typed event 不落键)。
-    std::uint64_t code_token_count = 0;
-    bool only_acknowledgement = false;
-    bool only_slash_command = false;
+    std::uint64_t code_token_count = 0;      // 反引号段 + 带代码记号的裸词
+    bool only_acknowledgement = false;       // 整段只是确认/否定/继续短语
+    bool only_slash_command = false;         // 整段以 '/' 起头(宿主命令)
 };
 MeaningfulTextStats ComputeMeaningfulTextStats(const std::string& text);
 
@@ -116,22 +116,65 @@ enum class ExtractionDecision { Skipped, Called };
 const char* ExtractionDecisionName(ExtractionDecision decision);
 
 // 跳过原因(§7 的稳定 reason,§15 跨平台一致)。P0 在线的四条是现行
-// ExtractTurnMemory 的既有前置门;P1/P3 的枚举名先冻结、判定后接。
+// ExtractTurnMemory 的既有前置门;P1 起又接了四条(同轮去重/短文本/
+// 纯确认/纯命令);NoDurableSignal 的判定在 shadow 里记账,P3 的 gated
+// 模式才拿它拦调用;ExtractModeOff 留给 P2 的 extract.mode 轴。
 enum class ExtractionSkipReason {
     // P0 在线(现行前置门,§2.1):
     Disabled,         // project_memory 空 / generate_enabled=false(§10.1 skipped_disabled)
     NoNewHistory,     // 本轮 history 没增长(§10.1 history_grew 的补集)
     EmptyTranscript,  // 增量转写去协议壳后为空
     PromptMissing,    // 抽取系统提示词拼不出(prompts 目录缺模块)
-    // P1 起(§7 门控;P0 只立名,不产值):
-    ExtractModeOff,
-    AlreadyMutated,
-    ShortText,
-    AcknowledgementOnly,
-    SlashCommandOnly,
-    NoDurableSignal,
+    // P1 在线(§7.1 必跳层 + §7.3 门槛):
+    AlreadyMutated,   // 本轮已有成功 save/forget/accept(§7.1 案二·同轮去重)
+    ShortText,        // 无正文/空白标点/门槛不过(§7.1 案三案四 + §7.3)
+    AcknowledgementOnly,  // 纯确认/否定/继续且无工具证据(§7.1 案六)
+    SlashCommandOnly,     // 纯宿主命令(§7.1 案五)
+    // 冻结待接:
+    ExtractModeOff,   // P2 的 extract.mode=off(现行配置口径落 Disabled)
+    NoDurableSignal,  // §7.2 判空;P1 只在 shadow 账里记,P3 gated 才拦
 };
 const char* ExtractionSkipReasonName(ExtractionSkipReason reason);
+
+// ---------------------------------------------------------------------------
+// 记忆写入调度单 P1(§7):零成本门控。必跳层与最短正文门是真闸
+//(拦下就不构造 prompt);"耐久信号"层是 shadow——只记判断不拦调用,
+// 量漏判用。全部纯函数,词法判定,不打请求。
+// ---------------------------------------------------------------------------
+
+// §7.3 最短正文门:cjk>=8 OR 拉丁词>=3 OR(代码记号>=2 且伴随自然语言)。
+// "伴随自然语言" = 至少一个 CJK 字或一个拉丁词——纯符号堆不算。
+bool PassesMinimumTextGate(const MeaningfulTextStats& stats);
+
+// §7.1 必跳层的文本侧判定(案三至案六)。上下文侧的案一(write 关/
+// extract 关,现行配置口径即 Disabled)、NoNewHistory 与案七(转写去协议
+// 壳为空)由调用点按现场判,不在纯函数里。判定次序照 §7.1:
+//   案五 纯宿主命令 → slash_command_only
+//   案六 纯确认/否定/继续且无工具证据 → acknowledgement_only
+//   案三/案四 无正文、纯空白标点、UI 合成、门槛不过 → short_text
+// 纯确认但带工具证据的,案六不拦(§7.1 的"且没有新工具证据"),落到
+// 门槛上按 short_text 拦——确认短语天然过不了最短正文门。
+// 返回被拦的稳定 reason;空 = 过门,可构造 prompt。
+std::optional<ExtractionSkipReason> EvaluateMustSkipTextGate(const MeaningfulTextStats& stats,
+                                                             bool has_tool_evidence);
+
+// §7.2 耐久信号(P1 shadow 首折,宁可保守):过门后"值不值得送审"的
+// 词法判断。命中项的名字进账本(shadow 报告逐回合可复算);P1 不用它
+// 拦调用,gated 模式(P3 起)才接进控制流。名字冻结名单:
+//   preference_or_correction   跨回合偏好/禁忌/纠错(案一)
+//   config_or_build_change     配置/依赖/构建/发布合同变更,须有工具证据(案二)
+//   test_conclusion            测试/诊断的稳定结论,须有工具证据(案三)
+//   module_boundary_or_entry   模块边界/命令入口/操作约束,须有工具证据(案四)
+//   explicit_remember_unsaved  用户点名要记、主回合未存成(案五)
+//   compact_pending_material   compact 未审材料(P3 有缓冲区才评,P1 恒不命中)
+std::vector<std::string> EvaluateDurableSignals(const std::string& user_text,
+                                                const MeaningfulTextStats& stats,
+                                                bool has_tool_evidence, bool turn_mutated);
+
+// shadow 开关(§7.2):环境变量 LUBANCODE_MEMORY_GATE_SHADOW 置
+// 1/true/on 才评耐久信号,默认关——typed event 与 P0 同形,要量漏判再
+// 开。配置文件轴是 P2 的活,这里只认环境变量。
+bool MemoryGateShadowEnabled();
 
 // 抽取失败的稳定码(§10.3 时延/失败账的 reason 枚举)。
 std::string StableExtractErrorCode(const std::string& error);
@@ -200,6 +243,17 @@ public:
     // ---- 抽取观测点(ExtractTurnMemory 的前置门与收口;纯记账) ----
     void NoteExtractionSkipped(ExtractionSkipReason reason);
     void NoteHistoryGrew();  // 过了 history 前置门(§10.1 history_grew_turns)
+    // P1(§7.1 案二):本轮是否已有成功的 save/forget/accept(§6.2 回执
+    // 账)。ExtractTurnMemory 照它收手——同轮去重是 P1 的实时行为变更,
+    // 这只读口是判定的唯一依据。
+    bool turn_mutated() const;
+    // P1(§7.1):本轮增量里有没有工具证据(工具调用或工具结果)。随
+    // 转写扫描顺手记,进 assessed 事件——ack 门与耐久信号的"须有工具
+    // 证据"靠它离线复算。
+    void NoteGateContext(bool has_tool_evidence);
+    // P1(§7.2 shadow):耐久信号判断落账。空表也标记"评过了"(shadow
+    // 开着、一条没命中);只记账,不改任何控制流。
+    void NoteDurableSignals(const std::vector<std::string>& reasons);
     void NoteExtractionCalled();
     struct ExtractOutcome {
         bool ok = false;
@@ -232,6 +286,12 @@ private:
     // called 之后的收口材料(FinishTurn 落袋)。
     bool extraction_called_ = false;
     ExtractOutcome pending_outcome_;
+    // P1 门控观测:工具证据在场否(进 assessed 事件,复算用)。
+    bool gate_context_noted_ = false;
+    bool turn_has_tool_evidence_ = false;
+    // P1 shadow:耐久信号评过了没(评过才落 shadow_gate 键;关着不落,
+    // 事件与 P0 同形)。
+    bool shadow_evaluated_ = false;
     ExtractionFunnel funnel_;
 };
 

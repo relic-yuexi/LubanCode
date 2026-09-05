@@ -507,10 +507,16 @@ constexpr PayloadField kPayloadFields[] = {
     {EventKind::MemoryExtractionAssessed, "turn_id", "s", true},
     {EventKind::MemoryExtractionAssessed, "decision", "s", true},
     {EventKind::MemoryExtractionAssessed, "skip_reason", "s", false},
-    // §3.2 MeaningfulTextStats 的 P0 首批:unicode_scalar_count/
-    // cjk_char_count/latin_word_count(u);code_token_count/only_ack/
-    // only_command 由 P1 的门控判定补,P0 不落键。
+    // §3.2 MeaningfulTextStats 的载体对象:P0 落三项计数,P1 补全
+    // code_token_count/only_acknowledgement/only_slash_command,六项齐。
     {EventKind::MemoryExtractionAssessed, "user_text_stats", "o", true},
+    // P1(§7.1):本轮增量有无工具证据(转写扫描到才落;ack 门与耐久
+    // 信号的"须有工具证据"离线复算靠它)。
+    {EventKind::MemoryExtractionAssessed, "has_tool_evidence", "b", false},
+    // P1(§7.2 shadow):耐久信号判断(durable_signal=hit|none + signals
+    // 名单)。开着 LUBANCODE_MEMORY_GATE_SHADOW 且抽取真到"叫模型"那步
+    // 才落;内洽约束在 ValidatePayloadWithVersion。
+    {EventKind::MemoryExtractionAssessed, "shadow_gate", "o", false},
     {EventKind::MemoryExtractionAssessed, "usage_reported", "b", false},
     {EventKind::MemoryExtractionAssessed, "input_tokens", "i", false},
     {EventKind::MemoryExtractionAssessed, "output_tokens", "i", false},
@@ -573,6 +579,11 @@ std::optional<SchemaError> ValidatePayloadWithVersion(int schema_version, EventK
                                        std::string("decision=skipped 时不得带调用侧字段: ") + name};
                 }
             }
+            // shadow 只在"真要叫模型"那步评(P1):被拦下的回合不落。
+            if (payload.contains("shadow_gate")) {
+                return SchemaError{"schema.payload_forbidden_field",
+                                   "decision=skipped 时不得带 shadow_gate"};
+            }
             return std::nullopt;
         }
         if (!payload.contains("extract_outcome")) {
@@ -603,6 +614,35 @@ std::optional<SchemaError> ValidatePayloadWithVersion(int schema_version, EventK
         if (has_usage && !payload.at("usage_reported").get<bool>()) {
             return SchemaError{"schema.payload_bad_type",
                                "usage_reported=false 时不得出现 token 字段(整组缺席)"};
+        }
+        // P1 shadow(§7.2):落了 shadow_gate 就须内洽——durable_signal 只认
+        // hit|none,hit 必有命中名单,none 名单必空。漏判账靠它复算,字段
+        // 自相矛盾的行不许过。
+        if (payload.contains("shadow_gate")) {
+            const auto& shadow = payload.at("shadow_gate");
+            if (!shadow.is_object() || !shadow.contains("durable_signal") ||
+                !shadow.at("durable_signal").is_string()) {
+                return SchemaError{"schema.payload_bad_type",
+                                   "shadow_gate 须是对象且带 durable_signal 字符串"};
+            }
+            const std::string verdict = shadow.at("durable_signal").get<std::string>();
+            if (verdict != "hit" && verdict != "none") {
+                return SchemaError{"schema.payload_bad_value",
+                                   "shadow_gate.durable_signal 只认 hit|none: " + verdict};
+            }
+            if (!shadow.contains("signals") || !shadow.at("signals").is_array()) {
+                return SchemaError{"schema.payload_bad_type", "shadow_gate 须带 signals 数组"};
+            }
+            const std::size_t signal_count = shadow.at("signals").size();
+            if ((verdict == "hit") != (signal_count > 0)) {
+                return SchemaError{"schema.payload_inconsistent",
+                                   "shadow_gate.durable_signal 与 signals 名单须同进同退"};
+            }
+            for (const auto& signal : shadow.at("signals")) {
+                if (!signal.is_string()) {
+                    return SchemaError{"schema.payload_bad_type", "shadow_gate.signals 须是字符串数组"};
+                }
+            }
         }
         return std::nullopt;
     }

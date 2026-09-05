@@ -1,23 +1,36 @@
 // 记忆写入调度单 P0:调度账的册——文本统计、稳定枚举、写路回执、
 // 漏斗计数与两枚 typed event(memory.extraction.assessed /
-// memory.write.receipted)的端到端。全部离线:假收件口 + 临时目录,
-// 零网络零真模型。
+// memory.write.receipted)的端到端。P1 批添:turn_mutated(同轮去重的
+// 判定位)、必跳层与 shadow 在 ExtractTurnMemory 真路径上的端到端。
+// 全部离线:假收件口 + 假后端 + 临时目录,零网络零真模型。
 
 #include <doctest/doctest.h>
 
+#include <atomic>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include <nlohmann/json.hpp>
 
+#include "agent/agent.hpp"
+#include "agent/loop.hpp"
+#include "api/backend.hpp"
+#include "app/commands/memory_commands.hpp"
 #include "app/memory_extract.hpp"
+#include "app/model_router.hpp"
+#include "cli/theme.hpp"
+#include "config/config.hpp"
 #include "memory/memory_tool.hpp"
 #include "memory/project_memory.hpp"
 #include "runtime/trajectory_session.hpp"
+#include "runtime/turn_event_adapter.hpp"
+#include "tools/registry.hpp"
 #include "trajectory/journal.hpp"
 #include "trajectory/schema.hpp"
 #include "workspace/identity.hpp"
@@ -86,6 +99,101 @@ std::vector<nlohmann::json> EventsOfKind(const fs::path& stream, const std::stri
         if (event.value("kind", std::string()) == kind) found.push_back(event);
     }
     return found;
+}
+
+// P1 e2e 的假后端:每次调用都吐同一份合法抽取 JSON(当正文回复用也无
+// 妨),关键是数调用次数——cheap 未配回落 normal,主 turn 与抽取共用它。
+class CountingBackend final : public api::Backend {
+public:
+    int calls = 0;
+    std::expected<void, api::Error> send_stream(
+        const api::Request&,
+        const std::function<void(const api::StreamEvent&)>& on_event,
+        const std::atomic<bool>*) override {
+        ++calls;
+        on_event(api::MessageStart{"msg", "test-model"});
+        on_event(api::TextDelta{
+            R"({"task_type":"other","summary":"无事可记","retrieval_terms":[],"candidates":[]})"});
+        on_event(api::ContentBlockDone{0});
+        on_event(api::MessageDone{"end_turn", api::Usage{}});
+        return {};
+    }
+};
+
+// 最小回合接线(同 test_agent_recovery 的形状):文本回合够用。
+struct FakeTurn {
+    runtime::IdAuthority ids;
+    runtime::TurnEventAdapter adapter;
+    FakeTurn() : adapter("test", ids) { adapter.Start(); }
+};
+
+lubancode::config::ConfigResult RouterConfig() {
+    const auto parsed = lubancode::config::ParseFileConfigJson(R"({
+        "providers": [{"name": "local", "base_url": "http://localhost:1", "wire": "anthropic",
+                       "model": "n1"}],
+        "active_provider": "local"
+    })",
+                                                               "test.json");
+    REQUIRE(parsed.has_value());
+    const auto merged = lubancode::config::MergeConfig(lubancode::config::LubancodeEnvValues{},
+                                                       std::optional<lubancode::config::FileConfig>{*parsed});
+    REQUIRE(merged.has_value());
+    return *merged;
+}
+
+// 环境变量临时改写:出了作用域还原。
+class EnvGuard final {
+public:
+    EnvGuard(const char* name, const char* value) : name_(name) {
+        const char* old = std::getenv(name);
+        if (old != nullptr) old_ = old;
+        had_value_ = old != nullptr;
+#ifdef _WIN32
+        _putenv_s(name, value);
+#else
+        setenv(name, value, /*replace=*/1);
+#endif
+    }
+    ~EnvGuard() {
+#ifdef _WIN32
+        _putenv_s(name_, had_value_ ? old_.c_str() : "");
+#else
+        if (had_value_) {
+            setenv(name_, old_.c_str(), /*replace=*/1);
+        } else {
+            unsetenv(name_);
+        }
+#endif
+    }
+
+private:
+    const char* name_;
+    std::string old_;
+    bool had_value_ = false;
+};
+
+std::shared_ptr<memory::ProjectMemory> MakeMemory(const fs::path& root,
+                                                  memory::MemoryWriteReceiptSink* sink) {
+    const fs::path repo = root / "repo";
+    const fs::path home = root / "home";
+    fs::create_directories(repo);
+    fs::create_directories(home);
+    auto identity = memory::ResolveProjectIdentity(repo, home);
+    REQUIRE(identity.has_value());
+    auto store = std::make_shared<memory::ProjectMemory>(std::move(*identity), home, EnabledOptions());
+    store->set_write_receipt_sink(sink);
+    return store;
+}
+
+nlohmann::json SaveToolInput() {
+    nlohmann::json input;
+    input["kind"] = "fact";
+    input["title"] = "部署命令";
+    input["summary"] = "部署命令";
+    input["content"] = "部署走 build.sh,先 bump 版本号。";
+    input["paths"] = nlohmann::json::array({"build.sh"});
+    input["confidence"] = "verified";
+    return input;
 }
 
 }  // namespace
@@ -594,5 +702,263 @@ TEST_CASE("schema: assessed/receipted 的互斥约束拒越界") {
     rejected["outcome"] = "rejected";
     rejected["error_code"] = "write_disabled";
     CHECK(trajectory::ValidatePayloadWithVersion(2, trajectory::EventKind::MemoryWriteReceipted, rejected)
+              .has_value());
+}
+
+// ---------------------------------------------------------------------------
+// P1:turn_mutated(§7.1 案二的判定位)——回执账翻真,拒绝不算变更。
+// ---------------------------------------------------------------------------
+TEST_CASE("MemoryTurnLedger P1: turn_mutated 随成功回执翻真") {
+    app::MemoryTurnLedger ledger(nullptr);
+    ledger.BeginTurn("sess-1", "turn-m1", "正文");
+    CHECK_FALSE(ledger.turn_mutated());
+
+    // 被拒的写路不算变更(没写进去就没有"已走一条写路")。
+    memory::MemoryWriteReceipt rejected;
+    rejected.source = memory::MemoryWriteSource::ModelToolSave;
+    rejected.outcome = memory::MemoryWriteReceiptOutcome::Rejected;
+    rejected.operation = "upsert";
+    rejected.error_code = "feedback_requires_user_stated";
+    rejected.layer = "project";
+    ledger.OnMemoryWriteReceipt(rejected);
+    CHECK_FALSE(ledger.turn_mutated());
+
+    // 成功的 save 翻位;forget/accept 同账(见 P0 册)。
+    memory::MemoryWriteReceipt save;
+    save.source = memory::MemoryWriteSource::ModelToolSave;
+    save.outcome = memory::MemoryWriteReceiptOutcome::Queued;
+    save.operation = "upsert";
+    save.job_id = "job-m1.json";
+    save.layer = "project";
+    save.kind = "fact";
+    ledger.OnMemoryWriteReceipt(save);
+    CHECK(ledger.turn_mutated());
+
+    // 回合收口后落回 false:回合间的回执(slash 命令)不归下一轮。
+    ledger.FinishTurn(2);
+    CHECK_FALSE(ledger.turn_mutated());
+}
+
+// ---------------------------------------------------------------------------
+// P1 e2e:同轮去重与必跳层在 ExtractTurnMemory 真路径上拦得住——假后端
+// 数调用,主回合真跑,memory_save 工具真排队,漏斗对得上账。
+// ---------------------------------------------------------------------------
+TEST_CASE("P1 e2e: ExtractTurnMemory 的同轮去重与必跳层") {
+    const fs::path root = TempRoot("e2e-gate");
+
+    CountingBackend backend;
+    auto current_model = std::make_shared<std::string>("test-model");
+    std::string active_provider = "local";
+    const auto config = RouterConfig();
+    app::ModelRouterService router(config, backend, current_model, active_provider);
+    tools::ToolRegistry registry;
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "system"});
+    FakeTurn turn;
+    agent::TurnWiring wiring;
+    wiring.events = &turn.adapter;
+    wiring.wait_request_backoff = [](std::chrono::milliseconds, const std::atomic<bool>*) {
+        return true;
+    };
+    const cli::Theme theme;
+    std::string prompts_dir;
+
+    SUBCASE("主回合 memory_save 成功:回合尾 already_mutated,一发不多发") {
+        app::MemoryTurnLedger ledger(nullptr);
+        auto store = MakeMemory(root / "dedup", &ledger);
+
+        // 回合开张,主回合里模型调了 memory_save(工具真排队,回执进账)。
+        const std::string text = "记住，这个项目以后部署都走 build.sh，发布前先把版本号 bump 一遍";
+        ledger.BeginTurn(std::string(), "turn-e2e-dedup", text);
+        memory::MemorySaveTool save_tool(store);
+        CHECK_FALSE(save_tool.execute(SaveToolInput()).is_error);
+        CHECK(ledger.turn_mutated());
+
+        // 主回合正文跑完(纯文本回复,history 增长)。
+        const auto run = loop.Run(text, wiring);
+        REQUIRE(run.has_value());
+        const int main_calls = backend.calls;
+        REQUIRE(main_calls >= 1);
+
+        app::SessionTailContext tail;
+        tail.project_memory = store.get();
+        tail.agent = &loop;
+        tail.model_router = &router;
+        tail.prompts_dir = &prompts_dir;
+        tail.theme = &theme;
+        tail.memory_turns = &ledger;
+        app::ExtractTurnMemory(tail, text, /*history_before=*/0);
+
+        // 同轮去重收手:抽取一发没发,漏斗对账。
+        CHECK(backend.calls == main_calls);
+        CHECK(ledger.funnel().outer_user_turns == 1);
+        CHECK(ledger.funnel().history_grew_turns == 1);
+        CHECK(ledger.funnel().skipped_already_mutated == 1);
+        CHECK(ledger.funnel().extract_batches == 0);
+        // 正文本身过得了文本门(22 个 CJK),拦它的必是同轮去重,不是短文本。
+        CHECK(ledger.funnel().skipped_short == 0);
+        CHECK(ledger.funnel().skipped_ack == 0);
+        ledger.FinishTurn(3);
+    }
+
+    SUBCASE("纯确认回合:acknowledgement_only,模型一次不叫") {
+        app::MemoryTurnLedger ledger(nullptr);
+        auto store = MakeMemory(root / "ack", &ledger);
+
+        ledger.BeginTurn(std::string(), "turn-e2e-ack", "好");
+        const auto run = loop.Run("好", wiring);
+        REQUIRE(run.has_value());
+        const int main_calls = backend.calls;
+        REQUIRE(main_calls == 1);
+
+        app::SessionTailContext tail;
+        tail.project_memory = store.get();
+        tail.agent = &loop;
+        tail.model_router = &router;
+        tail.prompts_dir = &prompts_dir;
+        tail.theme = &theme;
+        tail.memory_turns = &ledger;
+        app::ExtractTurnMemory(tail, "好", /*history_before=*/0);
+
+        CHECK(backend.calls == main_calls);  // "好"不再触发抽取
+        CHECK(ledger.funnel().skipped_ack == 1);
+        CHECK(ledger.funnel().extract_batches == 0);
+        ledger.FinishTurn(1);
+    }
+
+    SUBCASE("过门回合照发 + shadow 开着:判断逐回合落账可复算") {
+        EnvGuard shadow_on("LUBANCODE_MEMORY_GATE_SHADOW", "1");
+
+        runtime::TrajectorySessionLedger::Options ledger_options;
+        ledger_options.workspaces_root = root / "workspaces";
+        ledger_options.workspace_root = root / "repo";
+        ledger_options.workspace_identity = workspace::MakeFallbackIdentity(root / "repo");
+        ledger_options.lubancode_version = "test";
+        auto session = runtime::TrajectorySessionLedger::Open(ledger_options);
+        REQUIRE(session.has_value());
+
+        app::MemoryTurnLedger ledger(&*session);
+        auto store = MakeMemory(root / "shadow", &ledger);
+
+        const std::string text = "以后统一用 pnpm 装依赖，别再用 npm 了，把 README 的安装段也修一下";
+        ledger.BeginTurn(session->session_id(), "turn-e2e-shadow", text);
+        const auto run = loop.Run(text, wiring);
+        REQUIRE(run.has_value());
+        const int main_calls = backend.calls;
+        REQUIRE(main_calls == 1);
+
+        app::SessionTailContext tail;
+        tail.project_memory = store.get();
+        tail.agent = &loop;
+        tail.model_router = &router;
+        tail.prompts_dir = &prompts_dir;
+        tail.theme = &theme;
+        tail.memory_turns = &ledger;
+        app::ExtractTurnMemory(tail, text, /*history_before=*/0);
+
+        // 过了门:真发一枪(现行路不因 shadow 改一字)。
+        CHECK(backend.calls == main_calls + 1);
+        CHECK(ledger.funnel().extract_batches == 1);
+        ledger.FinishTurn(9);
+
+        const fs::path main_stream = session->session_dir() / "main.jsonl";
+        // 全链逐行过 schema(P1 新键在内,新事件不许破坏整链)。
+        for (const auto& event : ReadEvents(main_stream)) {
+            trajectory::EventEnvelope envelope;
+            const auto error = trajectory::ParseAndValidateEventLine(event, &envelope);
+            if (error.has_value()) {
+                const std::string detail = "schema 拒收: " + error->error_code + " " + error->message +
+                                           " kind=" + event.value("kind", std::string());
+                FAIL(detail.c_str());
+            }
+        }
+
+        const auto assessed = EventsOfKind(main_stream, "memory.extraction.assessed");
+        REQUIRE(assessed.size() == 1);
+        const auto& payload = assessed[0]["payload"];
+        CHECK(payload.value("decision", std::string()) == "called");
+        CHECK(payload.value("has_tool_evidence", true) == false);
+        // 六键统计齐(§3.2 补全的三项在内),门槛判定离线可复算。
+        CHECK(payload["user_text_stats"].contains("unicode_scalar_count"));
+        CHECK(payload["user_text_stats"].contains("cjk_char_count"));
+        CHECK(payload["user_text_stats"].contains("latin_word_count"));
+        CHECK(payload["user_text_stats"].contains("code_token_count"));
+        CHECK(payload["user_text_stats"].contains("only_acknowledgement"));
+        CHECK(payload["user_text_stats"].contains("only_slash_command"));
+        // shadow 判断落账:偏好案命中(词法上"以后"必中)。
+        REQUIRE(payload.contains("shadow_gate"));
+        const auto& shadow = payload.at("shadow_gate");
+        CHECK(shadow.value("durable_signal", std::string()) == "hit");
+        bool has_preference = false;
+        for (const auto& signal : shadow.at("signals")) {
+            if (signal == "preference_or_correction") has_preference = true;
+        }
+        CHECK(has_preference);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// P1 schema:shadow_gate 的内洽裁——自相矛盾的行不许过(漏判账靠它复算)。
+// ---------------------------------------------------------------------------
+TEST_CASE("schema: shadow_gate 内洽裁与互斥约束") {
+    const auto base = [] {
+        nlohmann::json called;
+        called["trigger"] = "every_turn";
+        called["turn_id"] = "t-1";
+        called["decision"] = "called";
+        called["user_text_stats"] = nlohmann::json::object();
+        called["foreground_tail_ms"] = 1;
+        called["extract_outcome"] = "completed";
+        called["extract_wall_ms"] = 5;
+        called["review_candidates"] = std::uint64_t{0};
+        called["auto_written"] = std::uint64_t{0};
+        return called;
+    };
+    // 合法 hit:verdict 与名单同进。
+    auto hit = base();
+    hit["shadow_gate"] = nlohmann::json{{"durable_signal", "hit"},
+                                        {"signals", nlohmann::json::array({"preference_or_correction"})}};
+    CHECK_FALSE(
+        trajectory::ValidatePayloadWithVersion(2, trajectory::EventKind::MemoryExtractionAssessed, hit)
+            .has_value());
+    // 合法 none:评过、一条没中。
+    auto none = base();
+    none["shadow_gate"] = nlohmann::json{{"durable_signal", "none"}, {"signals", nlohmann::json::array()}};
+    CHECK_FALSE(
+        trajectory::ValidatePayloadWithVersion(2, trajectory::EventKind::MemoryExtractionAssessed, none)
+            .has_value());
+    // hit 却空名单:拒。
+    auto hollow = hit;
+    hollow["shadow_gate"]["signals"] = nlohmann::json::array();
+    CHECK(trajectory::ValidatePayloadWithVersion(2, trajectory::EventKind::MemoryExtractionAssessed, hollow)
+              .has_value());
+    // none 却带名单:拒。
+    auto stuffed = none;
+    stuffed["shadow_gate"]["signals"] = nlohmann::json::array({"test_conclusion"});
+    CHECK(
+        trajectory::ValidatePayloadWithVersion(2, trajectory::EventKind::MemoryExtractionAssessed, stuffed)
+            .has_value());
+    // 野 verdict:拒。
+    auto wild = hit;
+    wild["shadow_gate"]["durable_signal"] = "maybe";
+    CHECK(trajectory::ValidatePayloadWithVersion(2, trajectory::EventKind::MemoryExtractionAssessed, wild)
+              .has_value());
+    // skipped 却带 shadow_gate:拒(shadow 只在真叫模型那步评)。
+    nlohmann::json skipped;
+    skipped["trigger"] = "every_turn";
+    skipped["turn_id"] = "t-1";
+    skipped["decision"] = "skipped";
+    skipped["skip_reason"] = "short_text";
+    skipped["user_text_stats"] = nlohmann::json::object();
+    skipped["foreground_tail_ms"] = 1;
+    skipped["has_tool_evidence"] = false;
+    CHECK_FALSE(trajectory::ValidatePayloadWithVersion(
+                    2, trajectory::EventKind::MemoryExtractionAssessed, skipped)
+                    .has_value());
+    auto skipped_shadowed = skipped;
+    skipped_shadowed["shadow_gate"] =
+        nlohmann::json{{"durable_signal", "none"}, {"signals", nlohmann::json::array()}};
+    CHECK(trajectory::ValidatePayloadWithVersion(
+              2, trajectory::EventKind::MemoryExtractionAssessed, skipped_shadowed)
               .has_value());
 }

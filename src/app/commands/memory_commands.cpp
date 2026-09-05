@@ -516,7 +516,9 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     lubancode::app::ModelRouterService& model_router = *ctx.model_router;
     lubancode::app::MemoryTurnLedger* memory_turns = ctx.memory_turns;
     // 记忆写入调度单 P0:前置门的每个早退都记一笔稳定 reason(§10.1 漏斗
-    // 的 skipped_* 分子);纯观测,控制流一字不动。
+    // 的 skipped_* 分子)。P1 起前置门添了真闸:同轮去重(§7.1 案二)与
+    // 必跳层文本门(案三至案六 + §7.3 门槛)——这两处拦下就真不发请求,
+    // 不只是记账;§7.2 耐久信号仍只走 shadow。
     if (project_memory == nullptr || !project_memory->generate_enabled()) {
         if (memory_turns != nullptr) {
             memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::Disabled);
@@ -535,15 +537,40 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
     std::vector<api::Message> slice(history.begin() + static_cast<std::ptrdiff_t>(history_before),
                                     history.end());
 
-    // 工具名清单喂给分型器;转写压缩后整段不超 24 KiB。
+    // 工具名清单喂给分型器;转写压缩后整段不超 24 KiB。顺手记一枚
+    // P1(§7.1)的工具证据位:工具调用或工具结果任一在场即算——ack 门
+    // 与耐久信号都看它。
     std::vector<std::string> tool_names;
+    bool has_tool_evidence = false;
     for (const auto& message : slice) {
         for (const auto& block : message.content) {
             if (const auto* use = std::get_if<api::ToolUseBlock>(&block)) {
                 tool_names.push_back(use->name);
+                has_tool_evidence = true;
+            } else if (std::get_if<api::ToolResultBlock>(&block) != nullptr) {
+                has_tool_evidence = true;
             }
         }
     }
+    if (memory_turns != nullptr) memory_turns->NoteGateContext(has_tool_evidence);
+
+    // 记忆写入调度单 P1(§7.1 案二·同轮去重):本轮已有成功的 save/forget/
+    // accept(§6.2 回执账,P0 起就在记),回合尾立即收手——显式保存一轮
+    // 只走一条写路。放在文本门之前:§7.1 的次序里案二压过案三至案六。
+    // (存过东西的回合 history 必然增长过,与 no_new_history 无冲突。)
+    if (memory_turns != nullptr && memory_turns->turn_mutated()) {
+        memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::AlreadyMutated);
+        return;
+    }
+
+    // P1(§7.1 案三至案六 + §7.3 门槛):必跳层的文本侧判定。纯词法、
+    // 不构造 prompt——"好""继续""/help"一类不再叫模型。
+    const MeaningfulTextStats text_stats = ComputeMeaningfulTextStats(user_text);
+    if (const auto blocked = EvaluateMustSkipTextGate(text_stats, has_tool_evidence)) {
+        if (memory_turns != nullptr) memory_turns->NoteExtractionSkipped(*blocked);
+        return;
+    }
+
     const std::string turn_transcript = BuildTurnTranscript(slice, 24 * 1024);
     if (turn_transcript.empty()) {
         if (memory_turns != nullptr) {
@@ -559,6 +586,14 @@ void ExtractTurnMemory(const SessionTailContext& ctx, const std::string& user_te
             memory_turns->NoteExtractionSkipped(lubancode::app::ExtractionSkipReason::PromptMissing);
         }
         return;
+    }
+    // P1(§7.2 shadow):耐久信号只记判断、不拦调用——开着环境变量才评,
+    // 评过与命中逐回合落 assessed 事件,离线重放可复算漏判。到这一步
+    // 必未同轮变更(案二已收手),turn_mutated 恒 false。
+    if (memory_turns != nullptr && MemoryGateShadowEnabled()) {
+        memory_turns->NoteDurableSignals(EvaluateDurableSignals(user_text, text_stats,
+                                                                has_tool_evidence,
+                                                                /*turn_mutated=*/false));
     }
     if (memory_turns != nullptr) memory_turns->NoteExtractionCalled();
 
