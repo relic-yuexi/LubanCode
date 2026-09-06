@@ -521,12 +521,17 @@ TEST_CASE("第 2/4 步: checkpoint 高水位与悬空工具分档") {
         // 不封口:manager 析构放锁走人(崩溃现场:账完整、run 未终)。
     }
 
-    // 找回 session id(session.json 还在)。
+    // 找回 session id(session.json 还在)。账本制:workspaces 下还有
+    // index.json 文件,只钻目录。
     std::string source_id;
     {
         const auto sessions = std::filesystem::temp_directory_path() /
                               "lubancode-traj-resume-dangling" / "workspaces";
         for (const auto& workspace : std::filesystem::directory_iterator(sessions)) {
+            std::error_code dir_ec;
+            if (!workspace.is_directory(dir_ec) || dir_ec) {
+                continue;
+            }
             for (const auto& session : std::filesystem::directory_iterator(workspace.path() / "sessions")) {
                 source_id = session.path().filename().generic_string();
             }

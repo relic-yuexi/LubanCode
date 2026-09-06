@@ -510,7 +510,7 @@ TEST_CASE("目录制: workspace_key、session 树、session.json 原子写、占
         const auto key = identity.workspace_key;
         // 账本制:房门是门牌(≠key),从开房口拿,不拿 key 拼。
         const std::filesystem::path room = workspace->workspace_dir();
-        CHECK(room.parent_path() == std::filesystem::weakly_canonical(root));
+        CHECK(room.parent_path() == root);  // macOS 临时目录经软链,比原拼法不比规范形
         CHECK(room.filename() != std::filesystem::path(key));
         CHECK(std::filesystem::exists(room / "workspace.json"));
         CHECK(std::filesystem::exists(room / "sessions"));

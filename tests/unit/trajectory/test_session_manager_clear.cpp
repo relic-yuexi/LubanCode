@@ -203,7 +203,13 @@ TEST_CASE("开场: preparing->running,run.started(process_launch),lifecycle 齐"
     const ActiveSession* active = fixture.manager->active();
     REQUIRE(active != nullptr);
     CHECK(active->status == SessionStatus::Running);
-    CHECK(fixture.manager->workspace_dir().filename().string().rfind("ws-", 0) == 0);
+    // 账本制:房门是门牌(≠key),尾巴带 key 的哈希段(尾 16 hex 的前 8)。
+    {
+        const std::string key = fixture.manager->workspace_key();
+        const std::string door = fixture.manager->workspace_dir().filename().string();
+        CHECK(door != key);
+        CHECK(door.ends_with("-" + key.substr(key.size() - 16, 8)));
+    }
 
     const auto manifest = ReadSessionJson(active->session_dir());
     REQUIRE(manifest.has_value());

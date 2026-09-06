@@ -108,6 +108,10 @@ TEST_CASE("--continue 启动路: resume_at_launch 开新场,history 投影可取
     {
         const auto workspaces = root / "workspaces";
         for (const auto& workspace : std::filesystem::directory_iterator(workspaces)) {
+            std::error_code dir_ec;
+            if (!workspace.is_directory(dir_ec) || dir_ec) {
+                continue;  // 账本制:index.json 是文件,不是房
+            }
             for (const auto& session : std::filesystem::directory_iterator(workspace.path() / "sessions")) {
                 if (session.path().filename().generic_string() == source_id) {
                     main_path = session.path() / "main.jsonl";
@@ -182,6 +186,10 @@ TEST_CASE("ResumeInteractive: 旧场封口 + 新场七步 + 跨 session command"
     {
         const auto workspaces = root / "workspaces";
         for (const auto& workspace : std::filesystem::directory_iterator(workspaces)) {
+            std::error_code dir_ec;
+            if (!workspace.is_directory(dir_ec) || dir_ec) {
+                continue;  // 账本制:index.json 是文件,不是房
+            }
             for (const auto& session : std::filesystem::directory_iterator(workspace.path() / "sessions")) {
                 if (session.path().filename().generic_string() != current_id) {
                     continue;

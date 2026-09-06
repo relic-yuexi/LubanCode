@@ -58,8 +58,9 @@ TEST_CASE("manifest:首仓原子写 v2,字段照冻结合同") {
     REQUIRE(manifest->checkouts.size() == 1);
     CHECK(manifest->checkouts[0].first_seen_at_ms == 1000);
 
-    // 账本制:房门是门牌(≠ workspace_key),目录名不撞身份串。
-    CHECK(opened_dir.parent_path() == fs::weakly_canonical(root / "workspaces"));
+    // 账本制:房门是门牌(≠ workspace_key),目录名不撞身份串。房门就开
+    // 在调用方递来的根下(macOS 临时目录经软链,比原拼法不比规范形)。
+    CHECK(opened_dir.parent_path() == root / "workspaces");
     CHECK(opened_dir.filename() != fs::path(identity.workspace_key));
     CHECK(opened_dir.filename() ==
           fs::path(workspace::index::MakeWorkspaceDirName(identity)));

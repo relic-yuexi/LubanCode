@@ -173,18 +173,33 @@ TEST_CASE("账本制: 门牌生成——slug 变换逐字,哈希段取 seed 前 
     CHECK(workspace::index::PathSlug("com3") == "_com3");
     CHECK(workspace::index::PathSlug("D:/normal") != "_D--normal");  // 常规名不误伤
 
-    // 门牌 = slug + '-' + key 尾 16 hex 的前 8(identity 的真形状)。
+    // 门牌 = slug + '-' + key 尾 16 hex 的前 8(identity 的真形状)。slug 源
+    // 是真实绝对路径(POSIX 会把 "D:/x" 当相对串接 cwd,不能用裸样例造
+    // identity);源文本与实现同一机械(绝对 + 规范 + 正斜杠 + 去尾),测试
+    // 侧镜像这五步。
+    const fs::path proj = TempRoot("plaque") / "proj-x";
     workspace::WorkspaceIdentity identity;
     identity.identity_kind = "cwd_fallback";
-    identity.project_root = platform::Utf8ToPath("D:/MinerU/2604.10547v2");
-    identity.checkout_root = identity.project_root;
-    identity.identity_root = identity.project_root;
-    identity.launch_cwd = identity.project_root;
+    identity.project_root = proj;
+    identity.checkout_root = proj;
+    identity.identity_root = proj;
+    identity.launch_cwd = proj;
     identity.workspace_key =
-        workspace::ComputeWorkspaceKeyFromSeed("path:d:/mineru/2604.10547v2", "2604.10547v2");
+        workspace::ComputeWorkspaceKeyFromSeed("path:" + workspace::NormalizeIdentityPathText(proj),
+                                               "proj-x");
+    std::string slug_source = platform::PathToUtf8(fs::absolute(proj).lexically_normal());
+    for (char& c : slug_source) {
+        if (c == '\\') {
+            c = '/';
+        }
+    }
+    if (slug_source.size() > 1 && slug_source.back() == '/') {
+        slug_source.pop_back();
+    }
     const std::string plaque = workspace::index::MakeWorkspaceDirName(identity);
-    CHECK(plaque == "D--MinerU-2604-10547v2-" +
+    CHECK(plaque == workspace::index::PathSlug(slug_source) + "-" +
                         identity.workspace_key.substr(identity.workspace_key.size() - 16, 8));
+    CHECK(plaque != identity.workspace_key);
     // 纯函数:同 identity 恒同名。
     CHECK(workspace::index::MakeWorkspaceDirName(identity) == plaque);
 }

@@ -79,7 +79,9 @@ TEST_CASE("SessionManager:冻结身份递进,workspace 目录与 manifest 同 ke
     options.identity = identity;
     trajectory::SessionManager manager(options);
     CHECK(manager.workspace_key() == identity.workspace_key);
-    CHECK(manager.workspace_dir().filename().generic_string() == identity.workspace_key);
+    // 账本制:房门是门牌(≠key),构造期占名与最终房名同为门牌纯函数。
+    CHECK(manager.workspace_dir().filename().generic_string() ==
+          workspace::index::MakeWorkspaceDirName(identity));
 
     REQUIRE(manager.LaunchSession().has_value());
     const auto read = workspace::ReadWorkspaceManifest(manager.workspace_dir());
