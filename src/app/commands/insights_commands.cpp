@@ -22,6 +22,8 @@
 #include "insights/report_store.hpp"
 #include "platform/paths.hpp"
 #include "trajectory/directory.hpp"  // ReadSessionJson(workspace readable name)
+#include "workspace/index.hpp"       // 账本制:逐房 manifest 自描述
+#include "workspace/manifest.hpp"
 
 namespace lubancode::app {
 namespace {
@@ -38,29 +40,21 @@ std::string FormatBytes(std::uintmax_t bytes) {
     return out.str();
 }
 
-// workspace.json 的 readable_name(读不到回落 key;只显名与 key 短码,
+// workspace.json 的 display_name(读不到回落 key;只显名与 key 短码,
 // 绝对路径默认不进终端,§9.1)。
 std::string ReadWorkspaceReadableName(const std::filesystem::path& workspace_dir,
                                       const std::string& key) {
-    std::error_code ec;
-    const std::filesystem::path manifest = workspace_dir / "workspace.json";
-    if (!std::filesystem::is_regular_file(manifest, ec)) {
+    const auto read = workspace::ReadWorkspaceManifest(workspace_dir);
+    if (read.status != workspace::ManifestRead::Status::Ok ||
+        read.manifest.display_name.empty()) {
         return key;
     }
-    std::ifstream in(manifest, std::ios::binary);
-    if (!in) {
-        return key;
-    }
-    std::ostringstream buffer;
-    buffer << in.rdbuf();
-    const auto parsed = nlohmann::json::parse(buffer.str(), nullptr, false);
-    if (parsed.is_discarded() || !parsed.is_object()) {
-        return key;
-    }
-    return parsed.value("readable_name", key);
+    return read.manifest.display_name;
 }
 
-// 当前 workspace 的 sessions 根与 ref(从轨迹账本折)。
+// 当前 workspace 的 sessions 根与 ref(从轨迹账本折)。账本制:目录名是
+// 门牌不是 key,钥匙从房里的 workspace.json 读;读不出(manifest 缺/坏)
+// 才拿门牌当 key 兜底显示。
 std::optional<lubancode::insights::InsightsWorkspaceRef> CurrentWorkspaceRef(
     lubancode::runtime::TrajectorySessionLedger* trajectory) {
     if (trajectory == nullptr) {
@@ -74,12 +68,18 @@ std::optional<lubancode::insights::InsightsWorkspaceRef> CurrentWorkspaceRef(
     }
     lubancode::insights::InsightsWorkspaceRef ref;
     ref.workspace_key = lubancode::platform::PathToUtf8(workspace_dir.filename());
+    if (const auto read = workspace::ReadWorkspaceManifest(workspace_dir);
+        read.status == workspace::ManifestRead::Status::Ok &&
+        !read.manifest.workspace_key.empty()) {
+        ref.workspace_key = read.manifest.workspace_key;
+    }
     ref.readable_name = ReadWorkspaceReadableName(workspace_dir, ref.workspace_key);
     ref.sessions_root = sessions_root;
     return ref;
 }
 
-// --all-workspaces:trajectories 根下逐仓一枚(workspaces/<key>/sessions)。
+// --all-workspaces:workspaces 根下逐仓一枚(<门牌>/sessions)。账本制:
+// 钥匙从各房 workspace.json 读,manifest 读不出的房(坏房/外来目录)不进。
 std::vector<lubancode::insights::InsightsWorkspaceRef> AllWorkspaceRefs(
     lubancode::runtime::TrajectorySessionLedger* trajectory) {
     std::vector<lubancode::insights::InsightsWorkspaceRef> refs;
@@ -94,19 +94,17 @@ std::vector<lubancode::insights::InsightsWorkspaceRef> AllWorkspaceRefs(
         refs.push_back(*current);
         return refs;
     }
-    for (const auto& entry : std::filesystem::directory_iterator(workspaces_root, ec)) {
-        std::error_code dir_ec;
-        if (!entry.is_directory(dir_ec) || dir_ec) {
-            continue;
-        }
-        const std::filesystem::path sessions = entry.path() / "sessions";
+    for (const workspace::index::WorkspaceRoom& room : workspace::index::ScanRooms(workspaces_root)) {
+        const std::filesystem::path dir = workspaces_root /
+                                          lubancode::platform::Utf8ToPath(room.dir);
+        const std::filesystem::path sessions = dir / "sessions";
         std::error_code sessions_ec;
         if (!std::filesystem::is_directory(sessions, sessions_ec)) {
             continue;
         }
         lubancode::insights::InsightsWorkspaceRef ref;
-        ref.workspace_key = lubancode::platform::PathToUtf8(entry.path().filename());
-        ref.readable_name = ReadWorkspaceReadableName(entry.path(), ref.workspace_key);
+        ref.workspace_key = room.manifest.workspace_key;
+        ref.readable_name = ReadWorkspaceReadableName(dir, ref.workspace_key);
         ref.sessions_root = sessions;
         refs.push_back(std::move(ref));
     }

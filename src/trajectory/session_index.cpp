@@ -16,6 +16,7 @@
 #include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
 #include "trajectory/directory.hpp"
+#include "workspace/index.hpp"  // 账本制:房门按 key 反查各房 manifest
 #include "trajectory/safety.hpp"
 #include "trajectory/session_manager.hpp"  // SessionStatusName(索引行状态)
 
@@ -492,20 +493,17 @@ WorkspaceIndex LoadOrRebuildIndex(const std::filesystem::path& workspace_dir,
 }
 
 std::vector<std::string> ListWorkspaceKeys(const std::filesystem::path& workspaces_root) {
+    // 账本制:目录名是门牌不是 key——逐房读 workspace.json 取真钥匙,
+    // 门牌与钥匙从此两清。坏房/外来目录不进列表。
     std::vector<std::string> keys;
-    std::error_code ec;
-    if (!std::filesystem::exists(workspaces_root, ec)) {
-        return keys;
-    }
-    for (const auto& entry : std::filesystem::directory_iterator(workspaces_root, ec)) {
-        if (!entry.is_directory()) {
-            continue;
-        }
-        const std::string key = platform::PathToUtf8(entry.path().filename());
+    for (const workspace::index::WorkspaceRoom& room : workspace::index::ScanRooms(workspaces_root)) {
+        const std::string& key = room.manifest.workspace_key;
         if (!IsSafeSingleSegment(key)) {
             continue;  // 非法段名不进列表(§12.1)
         }
-        keys.push_back(key);
+        if (std::find(keys.begin(), keys.end(), key) == keys.end()) {
+            keys.push_back(key);
+        }
     }
     std::sort(keys.begin(), keys.end());
     return keys;
@@ -536,8 +534,13 @@ SessionIndexPage QueryWorkspaceSessions(const std::filesystem::path& workspaces_
     }
     std::vector<WorkspaceSessionSummary> all;
     for (const std::string& key : keys) {
-        const WorkspaceIndex index =
-            LoadOrRebuildIndex(workspaces_root / platform::Utf8ToPath(key), key);
+        // 账本制:key → 房门走 manifest 反查(目录名是门牌)。反查不到的
+        // key(房被手删)跳过,不冒充。
+        const auto room = workspace::index::ResolveDirByWorkspaceKey(workspaces_root, key);
+        if (!room.has_value()) {
+            continue;
+        }
+        const WorkspaceIndex index = LoadOrRebuildIndex(*room, key);
         all.reserve(all.size() + index.sessions.size());
         for (const auto& summary : index.sessions) {
             if (query.archived_only) {
@@ -589,8 +592,11 @@ std::vector<PromptHistoryLine> ReadWorkspacePromptHistory(const std::filesystem:
     if (workspace_key.empty() || !IsSafeSingleSegment(workspace_key)) {
         return {};
     }
-    const WorkspaceIndex index =
-        LoadOrRebuildIndex(workspaces_root / platform::Utf8ToPath(workspace_key), workspace_key);
+    const auto room = workspace::index::ResolveDirByWorkspaceKey(workspaces_root, workspace_key);
+    if (!room.has_value()) {
+        return {};
+    }
+    const WorkspaceIndex index = LoadOrRebuildIndex(*room, workspace_key);
     std::vector<PromptHistoryLine> lines = index.prompts;
     // 新→新在场在后;消费侧要"最新优先"就倒着走,这里保持时间升序返回,
     // 与旧 ExtractPromptHistory 的口径一致(旧→新)。

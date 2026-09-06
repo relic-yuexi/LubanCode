@@ -63,16 +63,19 @@ ManifestRead ReadWorkspaceManifest(const std::filesystem::path& workspace_dir);
 std::expected<void, std::string> WriteWorkspaceManifestAtomic(const std::filesystem::path& workspace_dir,
                                                               const WorkspaceManifest& manifest);
 
-// 开仓或对账登记(P0-1 装配层的统一口):
-//   - 目录/manifest 不存在:建目录,首仓 v2 原子写(created_at=now,
-//     checkouts=[当前 checkout])。
+// 开仓或对账登记(P0-1 装配层的统一口;账本制起目录名走门牌,不推 key):
+//   - 目录/manifest 不存在:按账本查门(账本制三步:查账→miss 生门牌→
+//     开房记账),建目录,首仓 v2 原子写(created_at=now,checkouts=[当前
+//     checkout]),记账进 workspaces/index.json。
 //   - 已存在:版本协商(>2 拒)、key 对账(与 identity 重算不合即
 //     identity.key_mismatch,不自动改名),过了更新 last_opened_at_ms 并
 //     upsert checkout(按规范化 root 匹配;同 root 只更新 last_seen)。
-// created_out 非空时回填是否首仓。
+// created_out 非空时回填是否首仓;workspace_dir_out 非空时回填实际房门
+// (门牌目录,消费方不得再拿 workspace_key 拼目录)。
 std::expected<WorkspaceManifest, std::string> OpenOrRegisterWorkspace(
     const std::filesystem::path& workspaces_root, const WorkspaceIdentity& identity,
-    std::int64_t now_ms, bool* created_out = nullptr);
+    std::int64_t now_ms, bool* created_out = nullptr,
+    std::filesystem::path* workspace_dir_out = nullptr);
 
 // doctor 对账:manifest 的 identity_kind/identity_root 重算 key,与
 // workspace_key 逐字比。不合回 identity.key_mismatch;kind/root 缺失回

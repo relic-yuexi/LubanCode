@@ -54,6 +54,7 @@
 #include "runtime/session_command_service.hpp"
 // P0-3 轨迹:clear 八步换账 / resume 七步 / export 读 ReplayState 的账本口。
 #include "runtime/trajectory_session.hpp"
+#include "workspace/index.hpp"  // 账本制:archive/delete 按 key 反查房门
 
 namespace lubancode::app {
 
@@ -918,8 +919,15 @@ int HandleSessionManagementCommand(const std::filesystem::path& workspaces_root,
     const std::int64_t now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                                     std::chrono::system_clock::now().time_since_epoch())
                                     .count();
+    // 账本制:目录名是门牌不是 key,按各房 manifest 反查(owner key 刚从
+    // 索引来,房必在;反查不到按找不到处置,不猜)。
     const std::filesystem::path workspace_dir =
-        workspaces_root / lubancode::tools::Utf8ToPath(owner_workspace_key);
+        workspace::index::ResolveDirByWorkspaceKey(workspaces_root, owner_workspace_key)
+            .value_or(std::filesystem::path());
+    if (workspace_dir.empty()) {
+        TermOut() << tr("cmd.sessions.dir_unknown") << "\n";
+        return 1;
+    }
 
     if (is_delete) {
         const std::string label = !title.empty()

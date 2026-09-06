@@ -1,6 +1,7 @@
 // Trajectory 目录制(P0 新轨迹记录单 §三):workspace -> session 两层。
 //
-//   <workspaces_root>/<workspace_key>/
+//   <workspaces_root>/<门牌>/(账本制:目录名是门牌 = 路径slug+seed哈希
+//     前 8,≠workspace_key;查找走 workspaces/index.json,见 workspace/index.hpp)
 //     workspace.json  lifecycle/  tombstones/  sessions/<session_id>/...
 //
 // P0-2(Workspace 统一存储)起 workspaces_root 是唯一项目持久化根
@@ -104,15 +105,16 @@ class TrajectoryDirectory {
 public:
     TrajectoryDirectory() = default;
 
-    // 建 workspace 层:workspaces_root/<identity.workspace_key>/ +
-    // workspace.json(v2 manifest,由 workspace::OpenOrRegisterWorkspace 首仓
-    // 原子写/开仓登记)+ sessions/ + lifecycle/ + tombstones/。已存在的
-    // manifest 只更新 last_opened 与 checkout 登记,首次创建时间以旧账为准。
+    // 建 workspace 层:房门由 workspace::OpenOrRegisterWorkspace 按账本制定
+    //(查账→miss 生门牌→开房记账)+ workspace.json(v2 manifest 首仓原子写/
+    // 开仓登记)+ sessions/ + lifecycle/ + tombstones/。已存在的 manifest 只
+    // 更新 last_opened 与 checkout 登记,首次创建时间以旧账为准。
     static std::expected<TrajectoryDirectory, std::string> CreateWorkspace(
         const std::filesystem::path& workspaces_root, const workspace::WorkspaceIdentity& identity,
         std::int64_t now_ms);
 
     // 建 session 层:§3.1 全目录树 + session.json(status=preparing)。
+    // workspace_key 按 workspaces/index.json 与各房 manifest 反查房门。
     // session_id 已存在即失败(绝不复用,§3.3)。
     static std::expected<TrajectoryDirectory, std::string> CreateSession(
         const std::filesystem::path& workspaces_root, const std::string& workspace_key,

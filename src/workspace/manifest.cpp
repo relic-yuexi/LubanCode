@@ -6,6 +6,7 @@
 
 #include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
+#include "workspace/index.hpp"  // 账本制:查账/记账/门牌
 #include "workspace/storage_contracts.hpp"
 
 namespace lubancode::workspace {
@@ -158,11 +159,27 @@ std::expected<void, std::string> WriteWorkspaceManifestAtomic(const fs::path& wo
 
 std::expected<WorkspaceManifest, std::string> OpenOrRegisterWorkspace(
     const fs::path& workspaces_root, const WorkspaceIdentity& identity, std::int64_t now_ms,
-    bool* created_out) {
+    bool* created_out, fs::path* workspace_dir_out) {
     if (!identity.valid()) {
         return std::unexpected("identity.path_invalid: 身份没裁决出 workspace_key");
     }
-    const fs::path workspace_dir = workspaces_root / platform::Utf8ToPath(identity.workspace_key);
+    // 账本制找门三步(账本制单子 §一):查账→miss 生门牌→开房记账。
+    // 门牌 ≠ workspace_key:目录名是装饰,身份仍在 manifest/session.json;
+    // 消费方一律经 workspace_dir_out/账本取房门,不得拿 key 拼目录。
+    const std::string index_key = index::CanonicalIndexKey(identity);
+    std::string dir_name;
+    if (const auto hit = index::LookupWorkspaceDir(workspaces_root, index_key)) {
+        std::error_code hit_ec;
+        if (fs::is_directory(workspaces_root / platform::Utf8ToPath(*hit), hit_ec) && !hit_ec) {
+            dir_name = *hit;  // 账上有门,房也在盘上
+        }
+    }
+    if (dir_name.empty()) {
+        // miss(新项目/账本丢账/房被手删):门牌是纯函数,同 identity 恒同
+        // 名——重算即回原房,不裂房;真新项目才开新房。
+        dir_name = index::MakeWorkspaceDirName(identity);
+    }
+    const fs::path workspace_dir = workspaces_root / platform::Utf8ToPath(dir_name);
     std::error_code ec;
     fs::create_directories(workspace_dir, ec);
     if (ec) {
@@ -225,6 +242,12 @@ std::expected<WorkspaceManifest, std::string> OpenOrRegisterWorkspace(
     if (const auto written = WriteWorkspaceManifestAtomic(workspace_dir, manifest);
         !written.has_value()) {
         return std::unexpected(written.error());
+    }
+    // 记账:房已开门、manifest 落盘,账本并这一笔(原子写)。失败不拦
+    // 开张——账本是可重建缓存,房自描述在盘上,丢了靠重建/下次开张自愈。
+    index::RecordWorkspaceEntry(workspaces_root, index_key, dir_name, manifest.created_at_ms);
+    if (workspace_dir_out != nullptr) {
+        *workspace_dir_out = workspace_dir;
     }
     return manifest;
 }

@@ -2291,15 +2291,18 @@ std::expected<ProjectIdentity, std::string> ResolveProjectIdentity(
     identity.display_name = resolved->display_name;
     identity.workspace_key = resolved->workspace_key;
     const fs::path home = AbsoluteNormal(home_lubancode);
-    identity.workspace_dir = home / "workspaces" / Utf8Path(identity.workspace_key);
     // 首仓原子写/开仓对账与 trajectory 侧同一只口:同 key 幂等,manifest
     // 与算法不合会报错(不自动改名并账)。memory 单独跑(单发/worker 命中
-    // 新仓)时也要有 manifest,session 开张时不重复造。
+    // 新仓)时也要有 manifest,session 开张时不重复造。账本制起目录名走
+    // 门牌,房门从注册口回填,不再拿 workspace_key 拼目录。
+    fs::path workspace_dir;
     const auto registered = workspace::OpenOrRegisterWorkspace(
         home / "workspaces", *resolved, std::chrono::duration_cast<std::chrono::milliseconds>(
                                             std::chrono::system_clock::now().time_since_epoch())
-                                            .count());
+                                            .count(),
+        nullptr, &workspace_dir);
     if (!registered.has_value()) return std::unexpected(registered.error());
+    identity.workspace_dir = workspace_dir;
     return identity;
 }
 

@@ -17,6 +17,7 @@
 #include "trajectory/safety.hpp"
 #include "trajectory/training_exporter.hpp"
 #include "trajectory/usage_gc.hpp"
+#include "workspace/index.hpp"  // 账本制:key 反查房门
 
 namespace lubancode::cli {
 
@@ -50,17 +51,13 @@ std::filesystem::path FindSessionDir(const std::filesystem::path& root, const st
 }  // namespace
 
 // §12.2 容量/CI 档:usage / gc / doctor 吃 workspace-key(单段名,先过
-// 安全校验再拼路径)。<key> 找不到给空。
+// 安全校验)。<key> 找不到给空。账本制:目录名是门牌不是 key,按各房
+// workspace.json 反查。
 std::filesystem::path FindWorkspaceDir(const std::filesystem::path& root, const std::string& key) {
     if (!trajectory::IsSafeSingleSegment(key)) {
         return {};
     }
-    std::error_code ec;
-    const auto candidate = root / platform::Utf8ToPath(key);
-    if (std::filesystem::is_directory(candidate, ec)) {
-        return candidate;
-    }
-    return {};
+    return workspace::index::ResolveDirByWorkspaceKey(root, key).value_or(std::filesystem::path());
 }
 
 // usage:workspace 四笔容量账逐 session 报(只报账,不动文件系统)。

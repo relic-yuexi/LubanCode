@@ -6,7 +6,9 @@
 
 #include "platform/atomic_write.hpp"  // 统一原子写(审计 P1)
 #include "platform/paths.hpp"
+#include "workspace/index.hpp"  // 账本制:key 反查房门
 #include "workspace/manifest.hpp"
+#include "workspace/storage_contracts.hpp"  // 稳定错误码(workspace.not_found)
 
 namespace lubancode::trajectory {
 namespace {
@@ -154,8 +156,15 @@ std::expected<TrajectoryDirectory, std::string> TrajectoryDirectory::CreateWorks
     if (!identity.valid()) {
         return std::unexpected("identity.path_invalid: 身份没裁决出 workspace_key");
     }
-    const std::string key = identity.workspace_key;
-    const std::filesystem::path workspace_dir = workspaces_root / platform::Utf8ToPath(key);
+    // 账本制:房门由注册口定(查账→miss 生门牌→开房记账),这里不推目录
+    // 名——门牌 ≠ workspace_key,先开账再建子树,单门单源。
+    std::filesystem::path workspace_dir;
+    if (const auto registered =
+            workspace::OpenOrRegisterWorkspace(workspaces_root, identity, now_ms, nullptr,
+                                               &workspace_dir);
+        !registered.has_value()) {
+        return std::unexpected(registered.error());
+    }
     std::error_code ec;
     for (const char* sub : {"sessions", "lifecycle", "tombstones"}) {
         std::filesystem::create_directories(workspace_dir / sub, ec);
@@ -165,11 +174,8 @@ std::expected<TrajectoryDirectory, std::string> TrajectoryDirectory::CreateWorks
         }
     }
     // P0-1:manifest 换 v2 合同(workspace::manifest 管读写)。首仓原子写;
-    // 已存在则 key 对账 + last_opened/checkout 登记,创建时间以旧账为准。
-    if (const auto registered = workspace::OpenOrRegisterWorkspace(workspaces_root, identity, now_ms);
-        !registered.has_value()) {
-        return std::unexpected(registered.error());
-    }
+    // 已存在则 key 对账 + last_opened/checkout 登记,创建时间以旧账为准
+    //(OpenOrRegisterWorkspace 内已办)。
     TrajectoryDirectory directory;
     directory.workspace_dir_ = workspace_dir;
     return directory;
@@ -184,8 +190,15 @@ std::expected<TrajectoryDirectory, std::string> TrajectoryDirectory::CreateSessi
     if (manifest.session_id.size() < 8 || manifest.session_id.find('-') == std::string::npos) {
         return std::unexpected("session_id 形状不合(YYYYMMDD-HHMMSS-XXXXXX)");
     }
-    const std::filesystem::path workspace_dir =
-        workspaces_root / platform::Utf8ToPath(workspace_key);
+    // 账本制:房门按 workspace_key 反查各房 manifest(目录名是门牌,不是
+    // key)。找不到 = 没开过房,先 CreateWorkspace/OpenOrRegisterWorkspace。
+    const auto room = workspace::index::ResolveDirByWorkspaceKey(workspaces_root, workspace_key);
+    if (!room.has_value()) {
+        return std::unexpected(std::string(workspace::contracts::kErrWorkspaceNotFound) +
+                               ": 账本与各房 manifest 都找不到 workspace_key=" + workspace_key +
+                               ",session 不能凭空开房");
+    }
+    const std::filesystem::path workspace_dir = *room;
     const std::filesystem::path session_dir =
         workspace_dir / "sessions" / platform::Utf8ToPath(manifest.session_id);
     std::error_code ec;

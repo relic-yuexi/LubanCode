@@ -3060,8 +3060,8 @@ trajectory::WorkspaceUsageReport TrajectorySessionLedger::WorkspaceUsage() const
         return trajectory::WorkspaceUsageReport{};
     }
     const std::filesystem::path workspace_dir = impl_->active->directory.workspace_dir();
-    return trajectory::ScanWorkspaceUsage(workspace_dir / "sessions",
-                                          workspace_dir.filename().string());
+    // 账本制:目录名是门牌不是 key,报表钉真钥匙。
+    return trajectory::ScanWorkspaceUsage(workspace_dir / "sessions", workspace_key());
 }
 
 trajectory::WorkspaceDoctorReport TrajectorySessionLedger::BuildDoctorReport() const {
@@ -3070,8 +3070,8 @@ trajectory::WorkspaceDoctorReport TrajectorySessionLedger::BuildDoctorReport() c
     }
     const trajectory::TrajectoryDirectory& directory = impl_->active->directory;
     return trajectory::BuildWorkspaceDoctorReport(
-        directory.workspace_dir().parent_path(), directory.workspace_dir(),
-        directory.workspace_dir().filename().string(), impl_->active->session_id(), io_errors_);
+        directory.workspace_dir().parent_path(), directory.workspace_dir(), workspace_key(),
+        impl_->active->session_id(), io_errors_);
 }
 
 std::vector<std::string> TrajectorySessionLedger::recent_io_errors() const {

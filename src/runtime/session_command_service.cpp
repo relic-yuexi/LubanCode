@@ -11,6 +11,7 @@
 #include "tools/path_utils.hpp"
 #include "trajectory/session_index.hpp"
 #include "trajectory/session_manager.hpp"
+#include "workspace/index.hpp"  // 账本制:key 反查房门
 
 namespace lubancode::runtime {
 
@@ -75,7 +76,10 @@ std::optional<trajectory::WorkspaceSessionSummary> LocateSession(
 
 std::filesystem::path WorkspaceDirOf(const std::filesystem::path& workspaces_root,
                                      const std::string& workspace_key) {
-    return workspaces_root / tools::Utf8ToPath(workspace_key);
+    // 账本制:目录名是门牌不是 key,按各房 manifest 反查;反查不到给空,
+    // 调用方按 not_found 处置,不猜。
+    const auto room = workspace::index::ResolveDirByWorkspaceKey(workspaces_root, workspace_key);
+    return room.value_or(std::filesystem::path());
 }
 
 SessionCommandOutcome FromAdminOutcome(const trajectory::SessionAdminOutcome& outcome,

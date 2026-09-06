@@ -15,6 +15,7 @@
 #include "platform/process.hpp"
 #include "trajectory/safety.hpp"
 #include "workspace/identity.hpp"
+#include "workspace/index.hpp"     // 账本制:构造期房门的初判
 #include "workspace/manifest.hpp"  // P0-1:RegisterCheckout 的登记体
 
 namespace lubancode::trajectory {
@@ -630,7 +631,18 @@ SessionManager::SessionManager(SessionManagerOptions options, SessionManagerCloc
         options_.identity = workspace::MakeFallbackIdentity(options_.workspace_root);
     }
     workspace_key_ = options_.identity.workspace_key;
-    workspace_dir_ = options_.workspaces_root / platform::Utf8ToPath(workspace_key_);
+    // 账本制:房门不再由 key 拼。已有房按 manifest 反查;没有(新进程第
+    // 一次开张前)先按门牌纯函数占个名——与开房路算出的必然同名,真正
+    // 的房门以 EnsureWorkspace 的注册口为准。
+    if (const auto room = workspace::index::ResolveDirByWorkspaceKey(options_.workspaces_root,
+                                                                     workspace_key_);
+        room.has_value()) {
+        workspace_dir_ = *room;
+    } else {
+        workspace_dir_ = options_.workspaces_root / platform::Utf8ToPath(
+                                                        workspace::index::MakeWorkspaceDirName(
+                                                            options_.identity));
+    }
 }
 
 SessionManager::~SessionManager() = default;
@@ -2162,7 +2174,14 @@ SessionAdminOutcome RunDirLifecycleOp(const std::filesystem::path& workspace_dir
     intent.operation_id = std::string(LifecycleOperationName(operation)) + "-" + session_id + "-" +
                           std::to_string(now_ms);
     intent.operation = LifecycleOperationName(operation);
+    // 账本制:目录名是门牌不是 key,intent 记真钥匙(房 manifest 自描述);
+    // manifest 读不出(坏房)才退门牌,审计仍可对号。
     intent.workspace_key = platform::PathToUtf8(workspace_dir.filename());
+    if (const auto read = workspace::ReadWorkspaceManifest(workspace_dir);
+        read.status == workspace::ManifestRead::Status::Ok &&
+        !read.manifest.workspace_key.empty()) {
+        intent.workspace_key = read.manifest.workspace_key;
+    }
     intent.session_id = session_id;
     intent.requested_at_ms = now_ms;
     intent.parameters = parameters;
