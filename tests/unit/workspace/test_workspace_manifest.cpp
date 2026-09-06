@@ -11,6 +11,7 @@
 
 #include "trajectory/metrics.hpp"
 #include "workspace/identity.hpp"
+#include "workspace/index.hpp"  // 账本制:门牌与房门反查
 #include "workspace/manifest.hpp"
 #include "workspace/storage_contracts.hpp"
 
@@ -46,7 +47,9 @@ TEST_CASE("manifest:首仓原子写 v2,字段照冻结合同") {
     const fs::path root = TempRoot("first");
     const auto identity = workspace::MakeFallbackIdentity(root / "proj");
     bool created = false;
-    auto manifest = workspace::OpenOrRegisterWorkspace(root / "workspaces", identity, 1000, &created);
+    fs::path opened_dir;
+    auto manifest = workspace::OpenOrRegisterWorkspace(root / "workspaces", identity, 1000, &created,
+                                                       &opened_dir);
     REQUIRE(manifest.has_value());
     CHECK(created);
     CHECK(manifest->workspace_key == identity.workspace_key);
@@ -55,9 +58,14 @@ TEST_CASE("manifest:首仓原子写 v2,字段照冻结合同") {
     REQUIRE(manifest->checkouts.size() == 1);
     CHECK(manifest->checkouts[0].first_seen_at_ms == 1000);
 
+    // 账本制:房门是门牌(≠ workspace_key),目录名不撞身份串。
+    CHECK(opened_dir.parent_path() == fs::weakly_canonical(root / "workspaces"));
+    CHECK(opened_dir.filename() != fs::path(identity.workspace_key));
+    CHECK(opened_dir.filename() ==
+          fs::path(workspace::index::MakeWorkspaceDirName(identity)));
+
     // 盘上的 JSON 带 schema/version 双键,身份四件齐。
-    const auto json = nlohmann::json::parse(
-        ReadAll(root / "workspaces" / identity.workspace_key / "workspace.json"), nullptr, false);
+    const auto json = nlohmann::json::parse(ReadAll(opened_dir / "workspace.json"), nullptr, false);
     REQUIRE_FALSE(json.is_discarded());
     CHECK(json["schema"] == std::string(workspace::contracts::kWorkspaceSchemaName));
     CHECK(json["version"] == workspace::contracts::kWorkspaceSchemaVersion);
@@ -104,7 +112,9 @@ TEST_CASE("manifest:二次开仓不覆盖首仓账,checkout upsert 各记各的"
 TEST_CASE("manifest:版本协商——version 超限整份拒读,不猜不降级") {
     const fs::path root = TempRoot("version");
     const auto identity = workspace::MakeFallbackIdentity(root / "proj");
-    const fs::path dir = root / "workspaces" / identity.workspace_key;
+    // 账本制:手植的房得摆在门牌名下,开房路查账/重算门牌才会撞见它。
+    const fs::path dir = root / "workspaces" /
+                         fs::path(workspace::index::MakeWorkspaceDirName(identity));
     Write(dir / "workspace.json",
           nlohmann::json{{"schema", "lubancode.workspace"},
                          {"version", 3},
@@ -125,8 +135,10 @@ TEST_CASE("manifest:版本协商——version 超限整份拒读,不猜不降级
 TEST_CASE("manifest:key 对账——与算法重算不合即 identity.key_mismatch 隔离") {
     const fs::path root = TempRoot("mismatch");
     const auto identity = workspace::MakeFallbackIdentity(root / "proj");
-    const fs::path dir = root / "workspaces" / identity.workspace_key;
-    // 伪造:目录名与 manifest key 不合(路径搬家后同名目录)。
+    // 账本制:手植的房摆在门牌名下,开房路才会进这间。
+    const fs::path dir = root / "workspaces" /
+                         fs::path(workspace::index::MakeWorkspaceDirName(identity));
+    // 伪造:房里的 manifest key 与算法重算不合(路径搬家后的旧账)。
     Write(dir / "workspace.json",
           nlohmann::json{{"schema", "lubancode.workspace"},
                          {"version", 2},
@@ -183,11 +195,10 @@ TEST_CASE("doctor 报表:manifest 对账进 /doctor trajectory 的账") {
     const fs::path root = TempRoot("doctor");
     const auto identity = workspace::MakeFallbackIdentity(root / "proj");
     bool created = false;
+    fs::path workspace_dir;
     REQUIRE(workspace::OpenOrRegisterWorkspace(root / "trajectories" / "workspaces", identity, 1000,
-                                               &created)
+                                               &created, &workspace_dir)
                 .has_value());
-    const fs::path workspace_dir =
-        root / "trajectories" / "workspaces" / identity.workspace_key;
 
     auto report = trajectory::BuildWorkspaceDoctorReport(
         root / "trajectories", workspace_dir, identity.workspace_key, std::nullopt, {});

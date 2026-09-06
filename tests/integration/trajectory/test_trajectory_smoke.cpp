@@ -508,14 +508,20 @@ TEST_CASE("目录制: workspace_key、session 树、session.json 原子写、占
         auto workspace = TrajectoryDirectory::CreateWorkspace(root, identity, 1000);
         REQUIRE(workspace.has_value());
         const auto key = identity.workspace_key;
-        CHECK(std::filesystem::exists(root / key / "workspace.json"));
-        CHECK(std::filesystem::exists(root / key / "sessions"));
-        CHECK(std::filesystem::exists(root / key / "lifecycle"));
-        CHECK(std::filesystem::exists(root / key / "tombstones"));
-        // 二次创建不覆盖首仓(created_at 以旧账为准),只更新登记。
+        // 账本制:房门是门牌(≠key),从开房口拿,不拿 key 拼。
+        const std::filesystem::path room = workspace->workspace_dir();
+        CHECK(room.parent_path() == std::filesystem::weakly_canonical(root));
+        CHECK(room.filename() != std::filesystem::path(key));
+        CHECK(std::filesystem::exists(room / "workspace.json"));
+        CHECK(std::filesystem::exists(room / "sessions"));
+        CHECK(std::filesystem::exists(room / "lifecycle"));
+        CHECK(std::filesystem::exists(room / "tombstones"));
+        // 二次创建不覆盖首仓(created_at 以旧账为准),只更新登记;
+        // 查账同门,门牌不漂。
         auto again = TrajectoryDirectory::CreateWorkspace(root, identity, 2000);
         REQUIRE(again.has_value());
-        const auto manifest_again = lubancode::workspace::ReadWorkspaceManifest(root / key);
+        CHECK(again->workspace_dir() == room);
+        const auto manifest_again = lubancode::workspace::ReadWorkspaceManifest(room);
         REQUIRE(manifest_again.status == lubancode::workspace::ManifestRead::Status::Ok);
         CHECK(manifest_again.manifest.created_at_ms == 1000);
         CHECK(manifest_again.manifest.last_opened_at_ms == 2000);
@@ -585,6 +591,20 @@ TEST_CASE("占位流上起 recorder,子流独立收口") {
     std::error_code ec;
     std::filesystem::remove_all(root, ec);
     const auto key = "demo-000000000000";
+    // 账本制:CreateSession 按 key 反查房门,先开一间房(manifest 记这枚
+    // key)再开 session。手造身份的 key 尾 16 hex 即门牌哈希段,形状照旧。
+    {
+        lubancode::workspace::WorkspaceIdentity identity;
+        identity.workspace_key = key;
+        identity.display_name = "demo";
+        identity.identity_kind = "cwd_fallback";
+        identity.project_root = root;
+        identity.checkout_root = root;
+        identity.identity_root = root;
+        identity.launch_cwd = root;
+        auto workspace = TrajectoryDirectory::CreateWorkspace(root, identity, 1000);
+        REQUIRE(workspace.has_value());
+    }
     SessionManifest manifest;
     manifest.workspace_key = key;
     manifest.session_id = "20260830-031522-7K4M2P";

@@ -16,6 +16,7 @@
 #include "trajectory/session_manager.hpp"
 #include "platform/paths.hpp"  // PathToUtf8:cwd 事件文本口径
 #include "workspace/identity.hpp"
+#include "workspace/index.hpp"  // 账本制:key 反查房门
 #include "workspace/manifest.hpp"
 
 using namespace lubancode;
@@ -144,7 +145,7 @@ TEST_CASE("HandleCwdChange:同 workspace 落 cwd.changed,跨 workspace 不写旧
     CHECK(MainJsonlHasCwdEvent(first_session_dir,
                                platform::PathToUtf8(wt_identity.launch_cwd)));
     const auto read = workspace::ReadWorkspaceManifest(
-        root / "workspaces" / identity.workspace_key);
+        *workspace::index::ResolveDirByWorkspaceKey(root / "workspaces", identity.workspace_key));
     REQUIRE(read.status == workspace::ManifestRead::Status::Ok);
     REQUIRE(read.manifest.checkouts.size() == 2);
     CHECK(ledger->session_id() == first_session_id);  // session 不换
@@ -172,8 +173,8 @@ TEST_CASE("SessionRuntime:跨 workspace 切换封旧场开新场,旧账留旧房
     runtime::SessionRuntime session(options);
     REQUIRE(session.trajectory() != nullptr);
     const fs::path first_session_dir = session.trajectory()->session_dir();
-    const fs::path workspace_a_dir = root / "workspaces" /
-                                     identity_a.workspace_key;
+    const fs::path workspace_a_dir =
+        *workspace::index::ResolveDirByWorkspaceKey(root / "workspaces", identity_a.workspace_key);
 
     // 同 workspace 换 cwd(进子目录):不换场。
     fs::create_directories(root / "repo-a" / "src");
@@ -185,7 +186,8 @@ TEST_CASE("SessionRuntime:跨 workspace 切换封旧场开新场,旧账留旧房
     const fs::path second_session_dir = session.trajectory()->session_dir();
     CHECK(second_session_dir != first_session_dir);
     CHECK(second_session_dir.parent_path().parent_path() ==
-          root / "workspaces" / identity_b.workspace_key);
+          *workspace::index::ResolveDirByWorkspaceKey(root / "workspaces",
+                                                      identity_b.workspace_key));
 
     // 旧场的账留在旧 workspace,可查(封口后的 session.json 落 closed)。
     const auto first_manifest = trajectory::ReadSessionJson(first_session_dir);
@@ -193,7 +195,8 @@ TEST_CASE("SessionRuntime:跨 workspace 切换封旧场开新场,旧账留旧房
     CHECK(first_manifest->status == "closed");
     // 新 workspace 的 manifest 也开出来了。
     const auto read_b = workspace::ReadWorkspaceManifest(
-        root / "workspaces" / identity_b.workspace_key);
+        *workspace::index::ResolveDirByWorkspaceKey(root / "workspaces",
+                                                    identity_b.workspace_key));
     REQUIRE(read_b.status == workspace::ManifestRead::Status::Ok);
     CHECK(read_b.manifest.workspace_key == identity_b.workspace_key);
 

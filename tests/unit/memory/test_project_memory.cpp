@@ -18,6 +18,7 @@
 #include "memory/memory_tool.hpp"
 #include "memory/project_memory.hpp"
 #include "tools/registry.hpp"
+#include "workspace/manifest.hpp"  // 账本制:房的自描述对钥匙
 
 using namespace lubancode;
 
@@ -78,9 +79,13 @@ TEST_CASE("ProjectIdentity: Git 子目录归到仓库根") {
     CHECK(identity->git);
     CHECK(identity->project_root == fs::weakly_canonical(repo));
     CHECK(identity->identity_root == fs::weakly_canonical(repo / ".git"));
-    // P0-3:记忆根进 workspace 树——<home>/workspaces/<workspace_key>/。
+    // P0-3+账本制:记忆根进 workspace 树 <home>/workspaces/<门牌>/;目录名
+    // 是门牌(≠key),房里 manifest 的钥匙仍是身份串——自描述在,账本可重建。
     CHECK(identity->workspace_dir.parent_path() == fs::weakly_canonical(root / "home") / "workspaces");
-    CHECK(identity->workspace_dir.filename() == fs::path(identity->workspace_key));
+    CHECK(identity->workspace_dir.filename() != fs::path(identity->workspace_key));
+    const auto manifest = workspace::ReadWorkspaceManifest(identity->workspace_dir);
+    REQUIRE(manifest.status == workspace::ManifestRead::Status::Ok);
+    CHECK(manifest.manifest.workspace_key == identity->workspace_key);
 }
 
 TEST_CASE("ProjectIdentity: 主目录与 linked worktree 共用 key") {

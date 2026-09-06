@@ -26,6 +26,7 @@
 #include "runtime/trajectory_session.hpp"
 #include "trajectory/session_index.hpp"
 #include "workspace/identity.hpp"
+#include "workspace/index.hpp"  // 账本制:key 反查房门
 
 using namespace lubancode;
 
@@ -181,8 +182,10 @@ TEST_CASE("升级: v1 session.json 搬错家进新根 = 坏档,索引点名,不�
         auto ledger = runtime::TrajectorySessionLedger::Open(std::move(options));
         REQUIRE(ledger.has_value());
     }
-    const fs::path sessions = home / "workspaces" /
-                              std::filesystem::path(identity.workspace_key) / "sessions";
+    // 账本制:房门按 key 反查(目录名是门牌,不是 key)。
+    const fs::path sessions = *workspace::index::ResolveDirByWorkspaceKey(home / "workspaces",
+                                                                          identity.workspace_key) /
+                              "sessions";
     const fs::path misplaced = sessions / "20200101-000000-V1OLD0";
     fs::create_directories(misplaced);
     {

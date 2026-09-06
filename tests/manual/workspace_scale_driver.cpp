@@ -349,11 +349,11 @@ int main(int argc, char** argv) {
     const std::size_t template_events =
             std::count(template_main.begin(), template_main.end(), '\n');
     // 封口模板场(克隆的是终态形状)。
+    // 账本制:房门从模板场目录上折(sessions 的上两层),不拿 key 拼目录。
+    const fs::path workspace_dir = template_dir.parent_path().parent_path();
+    const auto identity = workspace::ResolveWorkspaceIdentity(repo, {}).value();
     ledger->CloseSession("exit");
     ledger.reset();
-    const auto identity = workspace::ResolveWorkspaceIdentity(repo, {}).value();
-    const fs::path workspace_dir = home / "workspaces" /
-                                   std::filesystem::path(identity.workspace_key);
     report["template"] = nlohmann::json{
         {"session_id", template_session_id},
         {"main_events", template_events},

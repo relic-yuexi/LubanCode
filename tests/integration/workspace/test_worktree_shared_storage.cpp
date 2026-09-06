@@ -30,6 +30,7 @@
 #include "trajectory/journal.hpp"
 #include "trajectory/session_index.hpp"
 #include "workspace/identity.hpp"
+#include "workspace/index.hpp"  // 账本制:key 反查房门
 #include "workspace/manifest.hpp"
 
 using namespace lubancode;
@@ -131,9 +132,9 @@ TEST_CASE("worktree 共享: 同 key 同 workspace.json,checkouts 双登记,sessi
     REQUIRE(wt_ledger.has_value());
     const fs::path wt_session_dir = wt_ledger->session_dir();
 
-    // 两场落在同一间 workspace。
-    const fs::path workspace_dir = home / "workspaces" /
-                                   std::filesystem::path(main_identity.workspace_key);
+    // 两场落在同一间 workspace(账本制:房门按 key 反查,目录名是门牌)。
+    const fs::path workspace_dir = *workspace::index::ResolveDirByWorkspaceKey(
+        home / "workspaces", main_identity.workspace_key);
     CHECK(main_session_dir.parent_path() == workspace_dir / "sessions");
     CHECK(wt_session_dir.parent_path() == workspace_dir / "sessions");
 
@@ -204,15 +205,15 @@ TEST_CASE("跨 workspace 切换: 封旧开新,回执两笔,旧账一字不搬") 
     REQUIRE(session.trajectory() != nullptr);
     const fs::path first_session_dir = session.trajectory()->session_dir();
     const std::string first_session_id = session.trajectory()->session_id();
-    const fs::path workspace_a = root / "workspaces" /
-                                 std::filesystem::path(identity_a.workspace_key);
+    const fs::path workspace_a =
+        *workspace::index::ResolveDirByWorkspaceKey(root / "workspaces", identity_a.workspace_key);
 
     // 切到 repo-b:封旧开新。
     REQUIRE(session.NoteWorkingDirectoryChanged(repo_b).empty());
     const fs::path second_session_dir = session.trajectory()->session_dir();
     CHECK(second_session_dir != first_session_dir);
-    const fs::path workspace_b = root / "workspaces" /
-                                 std::filesystem::path(identity_b.workspace_key);
+    const fs::path workspace_b =
+        *workspace::index::ResolveDirByWorkspaceKey(root / "workspaces", identity_b.workspace_key);
     CHECK(second_session_dir.parent_path() == workspace_b / "sessions");
 
     // 旧场:closed + workspace_switch 收口,留在旧房。
