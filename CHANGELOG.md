@@ -2,6 +2,10 @@
 
 这里只记用户看得见的变化。每个版本留三条，细处可点版本标题查看提交差异。
 
+## [v0.26.214] - 2026-09-07
+
+- **workspace 目录账本制：目录名说人话了。** `~/.lubancode/workspaces/` 下不再是 `lubancode-4d7a...` 式天书，而是 `D--lubancode-a1b2c3d4`（路径 slug + 哈希尾巴）——哪台盘哪条路径一眼可辨，异地同名仓库靠哈希分家，Claude Code 纯拍扁撞车的病根先天免疫。查找走 `index.json` 账本（键=canonical 路径，值=门牌）：O(1) 查账、原子记账、账本损毁扫各房自描述重建、并发开房丢账自愈；worktree 经 git common dir 同键同房不裂。门牌帽平台分档（Windows 49/POSIX 89 字节）——首版 89 字节在 Windows MAX_PATH 下五册连爆（会话巢最深处爆线），深根长径边界册钉死 OS 预算边界。顺手捉一只真虫：UTF-8 截断留残码点会造非法文件名，改整段剥。
+
 ## [v0.26.213] - 2026-09-06
 
 - **扫荡清理批：三真冲突根治 + 三死账清零 + 镜像常量立哨。** app-server 的 32 步黑闸接配置正主——`max_steps_per_turn` 写 64 吃 64、写 10 吃 10、显式 0 不限，不再自造默认偷改；config 域与 Agent Definition 域"此 max_turns 非彼 max_turns"四处注释+两份文档互注防混；`features.trajectory` 死键改读到即忽略（旧档任何垃圾值不再拦门）。死账：`EstimateHistoryChars` 旧尺残尸删除、`LUBANCODE_TRAJECTORY` 死环境变量三处测试烧香清零、turn_runner 假 TODO 摘帽。新册：镜像常量对数（8192×3/分区×2/余量×2/续跑默认×2/80%线×2 五组立哨，谁改漏一处红灯）。
