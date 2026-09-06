@@ -26,6 +26,13 @@ inline constexpr std::string_view kWorkspaceSchemaName = "lubancode.workspace";
 inline constexpr int kWorkspaceSchemaVersion = 2;
 inline constexpr int kWorkspaceMinReaderVersion = 2;
 
+// workspace 目录账本(workspaces/index.json,账本制:路径为键、漂亮门牌
+// 为值的索引查找)。账本是可重建缓存,不是真账——各房 workspace.json 自
+// 描述才是;账本缺/坏一律扫房重建,不走兼容路。
+inline constexpr std::string_view kWorkspaceIndexSchemaName = "lubancode.workspace-index";
+inline constexpr int kWorkspaceIndexSchemaVersion = 1;
+inline constexpr int kWorkspaceIndexMinReaderVersion = 1;
+
 // session.json(轨迹场 manifest)。v1 是 trajectories 时代的形状;新根
 // ~/.lubancode/workspaces 下读到 v1 = 旧档搬错了家,doctor 报 corrupt。
 inline constexpr int kSessionManifestSchemaVersion = 2;

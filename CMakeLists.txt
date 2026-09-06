@@ -569,6 +569,9 @@ add_library(lubancode_engine STATIC
   # trajectory 同层(依赖 platform/hooks,不 include app/cli/runtime)。
   src/workspace/identity.cpp
   src/workspace/manifest.cpp
+  # 账本制(workspaces/index.json):路径为键、漂亮门牌为值的索引查找;
+  # 查账→miss 开房记账→账坏扫房重建。门牌=路径slug+seed哈希前8。
+  src/workspace/index.cpp
   # P0 新轨迹记录单(P0-1 核心半场):trajectory 事实仓底座——事件合同、
   # schema 强校验、canonical JSON、内容寻址 blob、journal/hash chain、
   # 单写者 recorder 与目录制。纯库,不 include app/cli/runtime;依赖方向
