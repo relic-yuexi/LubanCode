@@ -66,10 +66,14 @@ std::size_t ToolResultBlockTokens(const api::ToolResultBlock& block, double cali
 
 // token 预算内最长前缀的字节长度(码点边界对齐):逐码点扫,ASCII/非 ASCII
 // 分开计数,按统一口径折 token,再进一个码点就要超预算即停。估算随前缀
-// 单调不减,扫描即准;续字节不单独折算,天然不劈多字节字符。
-std::size_t Utf8PrefixBytesWithinTokens(const std::string& text, std::size_t token_budget, double calibration) {
-    std::size_t ascii = 0;
-    std::size_t non_ascii = 0;
+// 单调不减,扫描即准;续字节不单独折算,天然不劈多字节字符。seed_ascii/
+// seed_non_ascii 是"正文之外还要拼进同一份估算的固定字符"(尾部标注),
+// 预置进账里再扫——截完的整串(正文+标注)才精确落回预算内,不会因整串
+// 除法桶合并差出一两个 token。
+std::size_t Utf8PrefixBytesWithinTokens(const std::string& text, std::size_t token_budget, double calibration,
+                                        std::size_t seed_ascii = 0, std::size_t seed_non_ascii = 0) {
+    std::size_t ascii = seed_ascii;
+    std::size_t non_ascii = seed_non_ascii;
     std::size_t bytes = 0;
     for (std::size_t i = 0; i < text.size(); ++i) {
         const auto byte = static_cast<unsigned char>(text[i]);
@@ -92,7 +96,7 @@ std::size_t Utf8PrefixBytesWithinTokens(const std::string& text, std::size_t tok
 }
 
 // 把一段文本截进 token 预算:尾部打标注,至少留 kMinKeepBytes。本来就
-// 线内或已是最小保留量(截不动)返回 false。预算先扣掉标注自身的 token,
+// 线内或已是最小保留量(截不动)返回 false。标注的字符账预置进扫描器,
 // 截完(id + 正文 + 标注)精确落回线内,不靠"差几个 token 也算过"。刀口
 // 先对齐码点边界再砍——裸按字节 resize,砍进三字节汉字的腰上,末尾悬半个
 // 字,合法 UTF-8 也会被截成非法,请求体 dump 当场 type_error.316,整场会
@@ -102,9 +106,21 @@ bool TruncateTextToTokenBudget(std::string& text, std::size_t token_budget, doub
     if (text.size() <= kMinKeepBytes + mark_size) {
         return false;  // 小于最少保留量:没得裁
     }
-    const std::size_t mark_tokens = EstimateUtf8Tokens(kResultTruncateMark, calibration);
-    const std::size_t body_budget = token_budget > mark_tokens ? token_budget - mark_tokens : 0;
-    std::size_t keep = Utf8PrefixBytesWithinTokens(text, body_budget, calibration);
+    // 标注自身的字符账(ASCII/非 ASCII 分开),预置进扫描。
+    std::size_t mark_ascii = 0;
+    std::size_t mark_non_ascii = 0;
+    for (std::size_t i = 0; i < mark_size; ++i) {
+        const auto byte = static_cast<unsigned char>(kResultTruncateMark[i]);
+        if ((byte & 0xC0) == 0x80) {
+            continue;  // 续字节:码点账在首字节处记
+        }
+        if (byte < 0x80) {
+            ++mark_ascii;
+        } else {
+            ++mark_non_ascii;
+        }
+    }
+    std::size_t keep = Utf8PrefixBytesWithinTokens(text, token_budget, calibration, mark_ascii, mark_non_ascii);
     if (keep < kMinKeepBytes) {
         keep = kMinKeepBytes;  // 最少保留量托底
     }

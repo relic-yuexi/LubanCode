@@ -321,11 +321,13 @@ TEST_CASE("整回合:thread/start -> turn/start -> 文本流 -> turn/completed")
     CHECK(completed["usage"]["outputTokens"] == 5);
     CHECK(completed["stepsUsed"] == 1);
 
-    // 事件账:turn/started 在前,item/started -> item/delta -> item/completed
-    // 中间,turn/usage(MessageDone 时刻)与 turn/completed 唯一终态在尾。
-    // 顺序逐条查(stdout 逐行可解析的纪律就在这里钉:每一行都 parse)。
+    // 事件账:turn/started 在前;窗口未知自字节轴拆除后按 128k 兜底评估,
+    // PreRequest 的 turn/context 必发(不触发压缩也会通报水位);随后
+    // item/started -> item/delta -> item/completed 中间,turn/usage(MessageDone
+    // 时刻)与 turn/completed 唯一终态在尾。顺序逐条查(stdout 逐行可解析的
+    // 纪律就在这里钉:每一行都 parse)。
     const std::vector<std::string> lines = harness.DrainWritten();
-    REQUIRE(lines.size() == 6);
+    REQUIRE(lines.size() == 7);
 
     std::vector<std::string> methods;
     for (const std::string& line : lines) {
@@ -335,15 +337,21 @@ TEST_CASE("整回合:thread/start -> turn/start -> 文本流 -> turn/completed")
     }
     INFO("actual methods: ", nlohmann::json(methods).dump());
     // usage 在 MessageDone 时刻报,早于正文条目的收尾回调——顺序即此。
-    CHECK(methods == std::vector<std::string>{"turn/started", "item/started", "item/delta",
+    CHECK(methods == std::vector<std::string>{"turn/started", "turn/context", "item/started", "item/delta",
                                               "turn/usage", "item/completed", "turn/completed"});
 
+    // 上下文通报:PreRequest 相位,带兜底窗口数,未触发压缩。
+    const nlohmann::json turn_context = nlohmann::json::parse(lines[1]);
+    CHECK(turn_context["params"]["context"]["phase"] == "pre_request");
+    CHECK(turn_context["params"]["context"]["windowTokens"] == 128000);
+    CHECK(turn_context["params"]["context"]["projectedOverflow"] == false);
+
     // 条目字段:正文条目、增量内容。
-    const nlohmann::json item_started = nlohmann::json::parse(lines[1]);
+    const nlohmann::json item_started = nlohmann::json::parse(lines[2]);
     CHECK(item_started["params"]["item"]["type"] == "text");
     CHECK(item_started["params"]["threadId"] == thread_id);
     CHECK(item_started["params"]["turnId"] == completed["turnId"]);
-    const nlohmann::json item_delta = nlohmann::json::parse(lines[2]);
+    const nlohmann::json item_delta = nlohmann::json::parse(lines[3]);
     CHECK(item_delta["params"]["delta"] == "你好,远方。");
     CHECK(item_delta["params"]["itemId"] == item_started["params"]["item"]["id"]);
 
@@ -361,7 +369,7 @@ TEST_CASE("整回合:thread/start -> turn/start -> 文本流 -> turn/completed")
         last_seq = seq;
     }
     CHECK(seq_monotonic);
-    const nlohmann::json usage_event = nlohmann::json::parse(lines[3]);
+    const nlohmann::json usage_event = nlohmann::json::parse(lines[4]);
     CHECK(usage_event["params"]["usage"]["inputTokens"] == 10);
     CHECK(usage_event["params"]["usage"]["outputTokens"] == 5);
     CHECK(usage_event["params"]["model"] == "fake-model");
