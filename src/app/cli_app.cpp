@@ -394,6 +394,10 @@ int RunAppServerMode(const lubancode::config::ConfigResult& config_result,
             break;
     }
     options.session_model = config_result.config.model;
+    // 步数闸接配置轴(清理批):max_steps_per_turn 走终端同一条四级合并,
+    // 用户写了就吃什么;哪级都没写(Default)才落协议宿主自己的缺省闸
+    // 32——协议前端没有 ESC 可打断,显式 0(不限)是用户自己的选择,照吃。
+    options.max_steps_per_turn = app_server::ResolveMaxStepsPerTurn(config_result);
     // P0-2(Trajectory 升为唯一 Session):feature/env 开关已删,thread 恒走
     // Trajectory 账(P0-6:features.trajectory 开关与 server 侧字段随之退役)。
     // 浏览器面(可见调试阶段 3):sidecar 命令解析——环境变量

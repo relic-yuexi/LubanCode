@@ -22,6 +22,7 @@
 #include "app_server/protocol.hpp"
 #include "app_server/schema.hpp"
 #include "app_server/server.hpp"
+#include "config/config.hpp"
 #include "tools/path_utils.hpp"
 #include "tools/registry.hpp"
 #include "tools/tool.hpp"
@@ -66,6 +67,18 @@ std::vector<api::StreamEvent> ErrorScript() {
             api::MessageDone{"error", api::Usage{}}};
 }
 
+// 永不收口的脚本:stop_reason 报 tool_use 但一个 tool_use 块都没有——
+// loop 信帧走下一杆(信块不信帧的镜像面:帧说还有活),零工具可跑,直接
+// 发下一次请求。步数闸的册子拿它逼出"预算用满才收场"的确定形状。
+std::vector<api::StreamEvent> NeverEndingScript() {
+    return {
+        api::MessageStart{"msg", "fake-model"},
+        api::TextDelta{"再走一步。"},
+        api::ContentBlockDone{0},
+        api::MessageDone{"tool_use", api::Usage{10, 5, 0, 0, 0}},
+    };
+}
+
 // 假 IO(与 dispatch 测试同款)。
 struct ScriptedIo {
     std::vector<std::string> written;
@@ -84,16 +97,20 @@ struct ScriptedIo {
 };
 
 // 一台测试用 Server:假 backend 注入,sessions_dir 指临时目录。
+// max_steps_per_turn >= 0 时把步数闸注成该值(-1 = 不动,用缺省闸)。
 struct TestHarness {
     std::shared_ptr<FakeBackend> backend = std::make_shared<FakeBackend>();
     ScriptedIo io;
     std::unique_ptr<app_server::Server> server;
 
-    explicit TestHarness(const std::string& sessions_dir) {
+    explicit TestHarness(const std::string& sessions_dir, int max_steps_per_turn = -1) {
         app_server::ServerOptions options;
         options.workspaces_dir = sessions_dir + "/workspaces";  // P0-2:会话账根
         options.cwd = "/test/cwd";
         options.outbox_capacity = 256;
+        if (max_steps_per_turn >= 0) {
+            options.max_steps_per_turn = max_steps_per_turn;
+        }
         server = std::make_unique<app_server::Server>(
             std::move(options),
             [this]() -> std::unique_ptr<api::Backend> {
@@ -498,4 +515,80 @@ TEST_CASE("同一 thread 同拍两轮:协议明拒 kErrTurnAlreadyRunning 的口
     REQUIRE(outcome.outbound.size() == 1);
     const nlohmann::json response = nlohmann::json::parse(outcome.outbound[0]);
     CHECK(response["error"]["code"] == app_server::kErrInvalidParams); // thread 不存在走参数错
+}
+
+// ---------------------------------------------------------------------------
+// 步数闸(清理批:app-server 32 步黑闸接配置轴 max_steps_per_turn)
+// ---------------------------------------------------------------------------
+
+TEST_CASE("步数闸配置解析:哪级写了吃什么,缺省才落 32") {
+    // 什么都没写:四级合并落 Default → 协议宿主自己的缺省闸 32。
+    const auto nothing = config::MergeConfig(config::LubancodeEnvValues{}, std::nullopt);
+    REQUIRE(nothing.has_value());
+    CHECK(app_server::ResolveMaxStepsPerTurn(*nothing) == app_server::kAppServerDefaultMaxStepsPerTurn);
+    CHECK(app_server::kAppServerDefaultMaxStepsPerTurn == 32);
+
+    // 配置写了 64:原样吃(sources 已非 Default)。
+    config::FileConfig file64;
+    file64.max_steps_per_turn = 64;
+    file64.source_path = "/tmp/.lubancode.json";
+    const auto with64 = config::MergeConfig(config::LubancodeEnvValues{}, file64);
+    REQUIRE(with64.has_value());
+    CHECK(app_server::ResolveMaxStepsPerTurn(*with64) == 64);
+
+    // 配置写了 10:同上,写几吃几。
+    config::FileConfig file10;
+    file10.max_steps_per_turn = 10;
+    file10.source_path = "/tmp/.lubancode.json";
+    const auto with10 = config::MergeConfig(config::LubancodeEnvValues{}, file10);
+    REQUIRE(with10.has_value());
+    CHECK(app_server::ResolveMaxStepsPerTurn(*with10) == 10);
+
+    // 显式 0(不限):来源非 Default,用户自己的选择,照吃——不冒充缺省 32。
+    config::FileConfig file0;
+    file0.max_steps_per_turn = 0;
+    file0.source_path = "/tmp/.lubancode.json";
+    const auto with0 = config::MergeConfig(config::LubancodeEnvValues{}, file0);
+    REQUIRE(with0.has_value());
+    CHECK(with0->sources.max_steps_per_turn == config::Source::ProjectConfigFile);
+    CHECK(app_server::ResolveMaxStepsPerTurn(*with0) == 0);
+}
+
+TEST_CASE("步数闸行为:options 折进 profile,预算用满即收场,不多跑一步") {
+    const std::string sessions_dir = MakeTempDir("lubancode_test_app_server_step_gate");
+    // 闸注 2,脚本永不收口(5 份用不完):真吃了 options 的值就该恰好两步。
+    TestHarness harness(sessions_dir, /*max_steps_per_turn=*/2);
+    harness.backend->scripts = {NeverEndingScript(), NeverEndingScript(), NeverEndingScript(),
+                                NeverEndingScript(), NeverEndingScript()};
+
+    std::string error_code;
+    const nlohmann::json start_result = harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());
+    const std::string thread_id = start_result["threadId"];
+
+    const nlohmann::json completed = harness.server->HandleTurnStart(thread_id, "跑两步", {}, error_code);
+    REQUIRE(error_code.empty());
+
+    // 步数预算用满不是错误:success 终态,stepsUsed 恰为闸值。
+    CHECK(completed["status"] == "success");
+    CHECK(completed["stepsUsed"] == 2);
+    // 没吃满脚本(5 份只烧了 2 份):闸真拦的,不是脚本跑完了。
+    CHECK(harness.backend->call_count == 2);
+
+    // 缺省闸不设 options 时为 32:同款形状粗验一杆(1 步收口脚本,
+    // 闸不该挡正常收口——32 只在"确实想要"时存在)。
+    TestHarness default_harness(sessions_dir);
+    default_harness.backend->scripts = {TextOnlyScript("一步就收。")};
+    const nlohmann::json start2 = default_harness.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());
+    const nlohmann::json completed2 =
+        default_harness.server->HandleTurnStart(start2["threadId"], "打个招呼", {}, error_code);
+    REQUIRE(error_code.empty());
+    CHECK(completed2["status"] == "success");
+    CHECK(completed2["stepsUsed"] == 1);
+
+    harness.server->HandleThreadStop(thread_id, error_code);
+    default_harness.server->HandleThreadStop(start2["threadId"], error_code);
+    std::error_code cleanup_ec;
+    std::filesystem::remove_all(lubancode::tools::Utf8ToPath(sessions_dir), cleanup_ec);
 }

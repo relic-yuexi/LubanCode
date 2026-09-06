@@ -38,6 +38,7 @@
 #include "app_server/outbox.hpp"
 #include "app_server/ws_transport.hpp"
 #include "app/version.hpp"
+#include "config/config.hpp"
 #include "runtime/command_service.hpp"
 #include "runtime/goal_coordinator.hpp"
 #include "runtime/interaction_broker.hpp"
@@ -51,6 +52,18 @@ namespace lubancode::app_server {
 
 // 服务进程的平台标识(initialize 结果里的 platform 字段)。
 std::string PlatformId();
+
+// 配置缺省(哪一级都没写 max_steps_per_turn)时 app-server 回合的步数默认
+// 闸。协议前端没有 ESC 可打断,不设闸会真跑飞,故缺省给正数——终端主会话
+// 的对应默认是 0(不限,防跑飞靠用户打断),协议宿主没有这层保险。用户在
+// 任何一级写了就吃什么,含显式 0(不限,那是用户自己的选择)。
+inline constexpr int kAppServerDefaultMaxStepsPerTurn = 32;
+
+// 步数闸的配置解析(装配层与单测共用同一份):sources 落 Default(四级合并
+// 谁都没给)时用 kAppServerDefaultMaxStepsPerTurn,否则原样吃
+// config.max_steps_per_turn——与终端主会话(app/runtime_profile 的
+// BuildMainRuntimeProfile)同一条解析轴,不再自造默认硬盖。
+int ResolveMaxStepsPerTurn(const config::ConfigResult& config_result);
 
 // 一场 thread(协议层的一个会话)在服务侧的全部家当。
 struct ThreadRecord {
@@ -123,6 +136,10 @@ struct ServerOptions {
     // 的 features.goals/features.loop 缺省一致,装配层显式开)。
     bool features_goal = false;
     bool features_loop = false;
+    // 回合步数闸:装配层经 ResolveMaxStepsPerTurn 把配置轴
+    // max_steps_per_turn 折进来(用户写了就吃什么);缺省
+    // kAppServerDefaultMaxStepsPerTurn。单测直设此值注小闸验回路。
+    int max_steps_per_turn = kAppServerDefaultMaxStepsPerTurn;
     // 浏览器面(阶段 3):sidecar 命令与参数、截图 artifact 目录。
     // sidecar_command 空 = browser/* 方法回 browser.not_configured(不冒充)。
     std::string browser_sidecar_command;
