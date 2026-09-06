@@ -14,7 +14,8 @@
 ```text
 ~/.lubancode/
   workspaces/                        # 唯一项目持久化根
-    <workspace_key>/
+    index.json                       # 目录账本(见下;可重建缓存,非真账)
+    <门牌>/                          # 目录名 = 路径slug + seed哈希前8,≠workspace_key
       workspace.json                 # 见 §二(v2 manifest)
       sessions/
         <session_id>/
@@ -45,9 +46,39 @@
       {intent.json, progress.json, result.json}
 ```
 
+### 目录账本(`workspaces/index.json`,账本制)
+
+目录名是**门牌**(装饰),查找走账本——路径为键、门牌为值:
+
+```json
+{
+  "schema": "lubancode.workspace-index",
+  "version": 1,
+  "workspaces": {
+    "d:/work/demo-repo/.git":  { "dir": "D--work-demo-repo-3f2a9c1b", "created": 1767225600000 },
+    "d:/mineru/2604.10547v2":  { "dir": "D--MinerU-2604-10547v2-e5f6a7b8", "created": 1767312000000 }
+  }
+}
+```
+
+- **键**:canonical 路径串——identity 现行 seed 归一(正斜杠、去尾斜杠、
+  Windows 折 ASCII 小写),git 身份取 common git dir(主树与 linked
+  worktree 同键同房);
+- **值**:`dir` = 漂亮门牌 + `created` epoch 毫秒;
+- **找门三步**:查账 → miss 生门牌开房(各房 `workspace.json` 照写,自
+  描述保留)→ 记账(原子写);账本缺/坏 → 扫各房 `workspace.json` 自描述
+  重建,不走兼容路;
+- 门牌 = `<路径slug(≤80字节)>-<seed 的 SHA-256 前 8 hex>`。slug:盘符
+  `D:` → `D--`;分隔符与 `.`、空格 → `-`;非法字符 `:*?"<>|` 与控制符 →
+  `_`;中文/Unicode 原样保留;超 80 字节截断(UTF-8 边界回退);Windows
+  保留名(CON/PRN/NUL/COM1-9…)前缀 `_`。哈希段保唯一——不同 seed 必不同
+  门牌;
+- 身份仍是 `workspace_key`(manifest/session.json 里的那枚),门牌不参与
+  裁决;按 key 反查房门走扫房 manifest 自描述,不靠目录名。
+
 硬规矩(单子 §三):`sessions/`、`trajectories/`、`projects/` 三个生产目录
-退出;索引/导出/摘要可重建;Journal、Memory Markdown 正文、用户确认过的
-迁移回执才是真本。
+退出;索引/导出/摘要可重建;账本同属可重建;Journal、Memory Markdown
+正文、用户确认过的迁移回执才是真本。
 
 ## 二、workspace v2 manifest(`workspace.json`)
 

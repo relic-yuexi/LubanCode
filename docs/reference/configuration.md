@@ -533,8 +533,9 @@ GLM 模型档位已经写进 provider 目录。`glm-5.2` 认 `max/xhigh/high/med
     features/                         各工具方针段
     platforms/                        协议平台段
   workspaces/                         项目持久化唯一根(存储 v2)
-    <workspace_key>/                  工作区钥匙目录:显示名-sha256 前 16 位
-      workspace.json                  workspace v2 manifest(首次开仓原子写)
+    index.json                        目录账本:canonical 路径 → 门牌索引(可重建)
+    <门牌>/                           工作区目录:路径 slug-sha256 前 8 位(≠workspace_key)
+      workspace.json                  workspace v2 manifest(首次开仓原子写,自描述)
       sessions/<session_id>/          每场会话:session.json + main.jsonl
         subagents/<agent_run_id>.jsonl
         workflows/<workflow_run_id>/
@@ -554,7 +555,7 @@ GLM 模型档位已经写进 provider 目录。`glm-5.2` 认 `max/xhigh/high/med
   languages/                          外部语言包(见 i18n.md)
 ```
 
-工作区钥匙由身份裁决器统一计算（Git 公共目录 → 显式 marker → 项目 config → 启动 cwd 四级，见 [workspace 存储 v2 合同](../development/workspace-storage-v2/P0-0-contracts.md)）；主仓与 linked worktree 共用同一间 workspace。旧版的平铺会话目录与按项目 key 分账的记忆目录已退场，新装只认 `workspaces/` 这棵树；升级安装不迁移旧档，旧目录原样保留、不再读写。
+工作区钥匙由身份裁决器统一计算（Git 公共目录 → 显式 marker → 项目 config → 启动 cwd 四级，见 [workspace 存储 v2 合同](../development/workspace-storage-v2/P0-0-contracts.md)）；主仓与 linked worktree 共用同一间 workspace。目录名只是门牌（路径 slug + seed 哈希前 8 位，给人看），查找走 `index.json` 账本——查账 → 新项目开房记账 → 账本坏了扫各房 `workspace.json` 自描述重建。旧版的平铺会话目录与按项目 key 分账的记忆目录已退场，新装只认 `workspaces/` 这棵树；升级安装不迁移旧档，旧目录原样保留、不再读写。
 
 项目级的 `.lubancode/`(在 `<cwd>` 下)能放 `config.json`(按字段压过全局)、`settings.local.json`(本地权限,不进版本库)与 `skills/`(同名技能时项目级压过主目录级)。
 

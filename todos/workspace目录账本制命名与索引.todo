@@ -1,6 +1,6 @@
 # workspace 目录账本制：路径为键、漂亮名为值的索引查找
 
-- 状态：待实施（2026-09-06 设计定稿；工头令：无历史包袱，老目录已清空，一步到位）
+- 状态：已实施（2026-09-06；worktree 账本模块 src/workspace/index.{hpp,cpp} + 开门路改查账 + 边界册 test_workspace_index_ledger，待 CI 验收）
 - 级别：P1（可读性/可运维性；不迁不破）
 - 类型：LubanCode workspace 存储（目录命名与查找机制）
 - 关联：`Compact重构前置研究_Context管理Token估算与超限兜底.todo`（同碰 context/存储域，改前对一下）、`docs/development/workspace-storage-v2/P0-0-contracts.md`（存储合同）
