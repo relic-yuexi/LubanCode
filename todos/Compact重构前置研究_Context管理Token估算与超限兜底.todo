@@ -1,0 +1,206 @@
+# Compact 重构前置研究：Context 管理、Token 估算与超限兜底
+
+- 状态：设计收集，仍在实验；尚未定稿，未按本单改实现。
+- 日期：2026-09-06。
+- 级别：待实验后排期；先记边界与候选方案。
+- 范围：模型上下文投影、compact、token 估算、请求预算、provider 错误与结束状态、usage 与恢复。
+- 关联：[工具与上下文治理量化评测_Q2.todo](工具与上下文治理量化评测_Q2.todo)、[LubanCode使用洞察_Token账本与Prompt审计设计.todo](LubanCode使用洞察_Token账本与Prompt审计设计.todo)。
+- 本次交付：整理用户提供的材料，参考 kc-mini 五份设计文档，核对部分官方协议。未跑模型、未验账单、未启动重构。
+
+## 一、先记住这条主线
+
+要重构的是 context 管理。compact 只是其中一环，token 估算也要重看。服务端超限报错属于最后兜底，不能等请求撞墙才开始治理历史。
+
+后续设计围绕这条链展开：
+
+```text
+会话事实与执行状态
+  -> 本次模型可见投影
+  -> 最终请求预算（输入、输出预留、额外余量、请求体字节）
+  -> 必要时 compact，校验后提交新投影
+  -> 发送任务请求
+  -> 识别错误、截断、取消和正常结束
+  -> 记录实报 usage，更新估算与恢复状态
+```
+
+先守住有效要求、执行事实与恢复一致，再量窗口、缓存和费用。80% 触发、压到 50%、分几区、留几轮、用哪种摘要，都先当候选，不在本单锁死。
+
+## 二、当前落点与参考范围
+
+本次读取时，LubanCode HEAD 为 `9f795d74`，kc-mini HEAD 为 `26d525c`。下列只算静态源码和文档证据，不能冒充运行验收。
+
+| 落点 | 已读到什么 | 重构时要追什么 |
+|---|---|---|
+| `src/agent/context.hpp`、`context.cpp` | UTF-8/消息估算、turn 切分、超大工具结果处理、上下文压力结构 | 最终请求与历史估算是否同口径；字节上限与 token 窗口分开 |
+| `src/agent/token_calibrator.hpp`、`token_calibrator.cpp` | 按 provider/model 分桶，依据整份请求实报与估算比率校准 | 和 kc-mini 增量估算比较；端点、配置、内容突变如何隔离 |
+| `src/agent/loop.cpp` | 请求前预检、输出预留调整、usage 校准接线 | 统一预算来源，追清失败、取消和恢复路径 |
+| `src/app/commands/session_commands.cpp`、`src/agent/compact.cpp` | 手动/自动路径调用 `CompactTurnPartitioned()`，有压后反涨检查 | 新方案接哪一层；不能拿旧 `Compact()` 当当前生产基线 |
+| `src/tools/agent_tool.cpp` | 子代理也调用 `CompactTurnPartitioned()` | 主会话、子代理各自预算与错误恢复是否一致 |
+| `src/api/types.hpp`、`types.cpp` | `TotalInputTokens()` 统一内部输入口径；部分错误文案按文本转译 | 展示文案与机器分类分开，原始协议证据保留 |
+| `src/api/responses/events.cpp` | `DoneFromResponseObject()` 将 `status=incomplete` 归为 `max_tokens` | 后续要保留 `incomplete_details.reason`，区分预算、过滤与未知原因 |
+| `src/api/chat/events.cpp`、`src/api/anthropic/events.cpp` | 接入各自结束字段 | HTTP、SSE、模型结束原因不能压成同一种成功/失败 |
+
+kc-mini 参考文件均已阅读相关正文；其中实现状态按文档自述，不等于本次已审其代码或跑其测试：
+
+- [compact-design.md](../../kc-mini-for-interview/docs/compact-design.md)：事实源、模型投影、宿主控制状态、代际与恢复。
+- [compact-flow.md](../../kc-mini-for-interview/docs/compact-flow.md)：摘要读取范围与替换范围、两类请求预算、提交事务、有限重试。
+- [compact-corner-cases.md](../../kc-mini-for-interview/docs/compact-corner-cases.md)：长 turn、闭合工具组、非连续保留清单、并发与崩溃恢复。
+- [compact-prompt.md](../../kc-mini-for-interview/docs/compact-prompt.md)：有效要求与工作状态分账，保留撤销、失败、未知和证据范围。
+- [token-estimation.md](../../kc-mini-for-interview/docs/token-estimation.md)：usage 锚、新增 wire bytes、单侧误差余量、校准日志重放。
+
+## 三、Context 管理值得借用的设计
+
+### 3.1 分清三份东西
+
+- 会话事实：日志只追加，回答发生过什么。compact 不删原始事实。
+- 模型投影：回答本次实际送了什么。只拼当前 checkpoint、保留原文与新尾巴，不把旧冷区从日志重新展开。
+- 宿主控制状态：目标状态、执行账与取消信号由宿主归约。摘要不替宿主决定动作是否成功、任务是否结束。
+
+kc-mini 写成 `S / F / C / H`：S 是宿主控制状态；F 是固定提示与工具定义；C 是当前 checkpoint；H 是保留原文及后续追加。模型逻辑输入为 `F + C + H`，工具仍按协议放在顶层字段。
+
+两次 compact 之间尽量只追加，保住实际序列化前缀。切模型、换工具表、改配置或改投影时，显式换代并记录原因。缓存只能实测，不能拿本地前缀相同当命中证据。现有 microcompact、artifact 投影与硬截断如何纳入这条规则，另作迁移审计。
+
+### 3.2 读取范围不等于移除范围
+
+摘要要看见后续纠正，才能知道旧要求已经撤销。kc-mini 候选方案读取整个当前视图，替换选中旧区，近期原文仍按原序保留；更早已退出视图的原文不重新展开。
+
+LubanCode 当前走分区 map/reduce。要不要改成完整视图摘要、怎样把后续纠正传给各阶段，留待实验。两者不能直接视为同一种机制。
+
+新摘要替换旧 checkpoint，不能把 C1、C2、C3 不断叠加。摘要独立请求，不执行历史工具指令；若保留工具定义供理解，也须关闭实际工具执行并验证响应。
+
+### 3.3 长 turn 与工具组
+
+优先压完整旧 turn。若单个 turn 持续很多 step，可研究第二级：压早期已闭合工具组，保留用户原文、后续用户纠正、最近完整工具组；已完成长 turn 还保留最终回答。
+
+一条 assistant 及其全部调用、全部对应结果构成整组。组内 reasoning/signature 按协议保留，不单删。结果齐全只代表协议闭合，失败仍是失败，未知仍是未知。
+
+非连续保留不能只记截止序号。候选事件需表达 `readThroughSeq`、完整 `retainedMessageIds`、本次 `removedMessageIds` 与边界模式；检查无重复、无交集、覆盖当前原文全集、顺序不乱、工具组不拆。字段名可改，约束须保留。
+
+### 3.4 事务与恢复
+
+冻结当前投影和读取水位，生成候选，校验来源、结构、预算及收益，持久化提交后才换视图。摘要期间有新用户纠正、工具结果或配置变化，须排队或废弃旧候选；单纯新增费用记录不必使候选失效。
+
+摘要失败、取消、超长或落盘失败，保留旧投影。恢复只读已提交 checkpoint 与保留清单，再接读取水位后的新尾巴。不能因候选曾生成、控制台曾显示成功，就当提交完成。
+
+摘要记清：有效要求、撤销范围、已尝试、已完成、已验证、失败、结果未知、剩余工作。建议下一步不等于用户授权；摘要中的完成陈述不替代执行账。
+
+## 四、Token 估算重构候选
+
+### 4.1 先统一量什么
+
+量最终入模请求，包括 system/developer、当前摘要、历史、动态注入、工具 schema、调用参数、结果及多模态内容。协议转换、内容降级或隐式服务端历史会改变口径，不能只数文本，也不能用全部 JSONL 代替当前投影。
+
+至少分开记录：输入估算 E、输入实报、输出实报、下一次输出预留 R、额外协议余量 P、wire UTF-8 bytes、窗口 W、缓存读写明细。E 内若已加估算误差余量，P 不再重复加同一笔。
+
+普通请求可研究保守策略 `E + R + P <= W`。这属于本地预算策略，不是所有 provider 共用的入口校验公式。摘要请求也要单独算；采用 map/reduce 时，每个 map、reduce 请求分别检查。
+
+输出上限按协议和模型适配：Chat 可能用 `max_completion_tokens` 或兼容端点的 `max_tokens`；Responses 用 `max_output_tokens`；Anthropic 用 `max_tokens`。thinking 若已计入输出上限，不再重复预留。可研究：
+
+```text
+R_effective = min(期望输出, 模型输出上限, W - E - P)
+```
+
+剩余空间非正、低于模型最小值或任务最低需求时，转 compact 或停止；不能发负数，也不能缩成几 token 却宣称还能完成任务。预留多少不等于实际生成多少，更不等于提前收取这些输出费用。
+
+### 4.2 借鉴增量锚，不照搬公式
+
+kc-mini 在兼容条件成立时用：`base = 上次实际 input + output`，只估对应 assistant 之后新增的 user/tool wire bytes，再加消息开销和单侧残差余量。先落预测，收到 usage 后才学样本；禁止用本次真值回填本次预测。
+
+迁到四套协议前，要验证上次 output 是否确实原样进入下一次输入。隐藏 reasoning、服务端剥离 thinking、签名块、Responses 隐式历史或转换模板，都可能破坏这个等式。usage 锚是条件成立后的估计基准，不是跨协议恒等式。
+
+- scope 至少区分端点、wire、模型、固定提示、工具定义和 thinking 等输入相关配置；锚另绑定 context 代际、请求前缀及对应回复指纹。
+- compact 后旧锚失效；同 scope 校准样本能否保留，单独验证。摘要 usage 不充当任务上下文锚。
+- 纯 user、纯 tool、混合及其他尾段分组；长中文、代码、日志和多模态另查误差，不靠全历史平均密度硬套新增内容。
+- 缺 usage 不补造真值；有实际 input 但响应不可接纳时，可研究只学本次输入误差，不能用未入主线的 output 建下次锚。
+- 经验 95% 分位数、1 token/byte、固定 20% 余量均非覆盖保证。图片、PDF 等更不能靠 JSON 字节比例推断实际输入量。
+- 日志保留预测时可用样本、锚引用、实际 usage 与误差；重启按顺序重放。恢复校验须对当前投影，不能用全日志消息数误拒压后计量。
+
+kc-mini 的 64 样本窗口、8 样本起学、残差峰值衰减等只作实验参考。本项目先比较误差分布、低估尾部、误触发 compact 次数与估算耗时，再定参数。
+
+### 4.3 远端计数可插拔
+
+OpenAI Responses 官方已有 `POST /v1/responses/input_tokens`，不能把 OpenAI 方案只写成 tiktoken。[S1] Anthropic 有 messages token counting，但官方明确称其为估算，实际请求可能略有差异。[S2]
+
+Kimi 的 `/v1/tokenizers/estimate-token-count` 保留为候选接口；本次检索到官方索引，正文未成功取回，端点支持的字段、模型和费用仍待核。Moonshot 开放平台与 Kimi Code 要分别查，兼容协议不代表能力相同。[S6]
+
+本地 tokenizer、远端计数、usage 增量校准各有成本与盲区。接口应返回来源、覆盖范围和误差状态；计数服务超时或限流时，走有标记的保守估算或停止，不能把失败当零。
+
+## 五、Provider 报错与结束状态：最后兜底
+
+### 5.1 分开识别
+
+以下表格用于设计分类器。OpenAI/Kimi 错误样本来自用户材料，尚未逐端点真机确认；Anthropic 形状与超窗行为已核对官方文档。[S3][S4]
+
+| 协议 | 入口拒绝线索 | 已生成后的结束信号 | 处理边界 |
+|---|---|---|---|
+| OpenAI Chat Completions | 常见 `error:{message,type,param,code}`；有 `code=context_length_exceeded` 时优先读 code | `finish_reason=length` | length 是截断线索，不能据此断言输入单独超窗；字段缺失须能处理 |
+| OpenAI Responses | HTTP 错误对象与响应对象自身 `error`、SSE error 分开解析；具体 code 留样核验 | `status=incomplete` 与 `incomplete_details.reason` | 不能把所有 incomplete 都当输出预算耗尽；还需检查失败状态与流终态 |
+| Anthropic Messages | `type:error`，内层 `error.type/message`，通常带 request_id；400 `invalid_request_error` 是宽泛错误类 | `stop_reason=model_context_window_exceeded`；另分 `max_tokens` 等 | 不能只靠 400 + type 唯一识别超窗；错误 schema 没有通用专属 context code |
+| Kimi OpenAI 兼容端点 | 用户样本有 `error.type/message`，code 可能缺失 | 按实际端点结束字段核验 | 不能一边写 code 缺失，一边要求统一匹配 code；开放平台与 Code 分开建档 |
+
+Anthropic 官方说明：输入本身超窗时，返回 400；Claude 4.5 及以后，输入加 max_tokens 超窗仍可接受，生成触及窗口才以 `model_context_window_exceeded` 停止。旧模型可通过文档指定 beta 启用该行为。实际型号、版本与 header 须记录。[S3]
+
+分类优先读结构化专属信号。只有宽泛类型时，保持“未判定”；确需文本兜底，只在已知端点适配器中维护窄规则、版本与脱敏样本，标明弱证据，不让全局模糊匹配擅自触发删历史。
+
+### 5.2 字节超限单列
+
+Anthropic Messages 与 Token Counting 当前文档都列 32 MB 请求体上限，超出可返回 413；直连 Claude API 由 Cloudflare 在进入 API 服务器前拦截。这与 token 窗口不同。[S4]
+
+用户材料里的 Kimi Code 2 MiB 限制只记为待复核线索，不能写成所有 Kimi 端点通用上限。检查序列化字节，不拿字符数或 token 数替代；边界网关可能返回非标准 JSON，解析也要兜住。
+
+### 5.3 恢复有次数，动作有账
+
+- 明确入口超窗：先核对窗口、固定开销、最新用户输入及输出预留；存在可压区才尝试 compact。成功后重新拼请求、重估；原样重发不会解决问题。
+- 已生成后截断：保留诊断和实际 usage，检查工具参数与协议终态；不执行半截工具调用，不把 turn 当正常完成，也不盲目重放整次生成。
+- 取消、超时、SSE 中途错误：记录已知结果与未知部分，沿客户端、runtime、transport 向 provider 传播取消。取消发出不等于服务端已停。
+- 401、429、普通参数错误、413 与内容过滤分别走各自路径，不能一律 compact。
+- 可借 kc-mini 的候选限额：同一待发任务请求，预检与超窗恢复共享最多一次 compact 事务，事务内摘要调用有上限；明确超窗后的任务请求最多补发一次。具体次数待定，SDK、网关与宿主重试必须合并记账，避免次数相乘。
+- 模型请求重试不包含重跑已有副作用的工具。结果未知先核实，不能靠补一次执行求安心。
+
+单条用户输入、固定提示或最新受保护工具组已经装不下时，压旧历史未必有用。工具输出在入模前的整批预算、artifact 存储与按需回读需另设计。选入冷区也不代表摘要请求就装得下；map/reduce 同样要检查单个大块。
+
+## 六、费用边界与原材料纠偏
+
+“模型跑没跑”有助于区分前置拒绝与已生成截断，但客户端未必知道服务端执行到哪。费用仍要看具体服务条款、实报 usage 和账单，不能把这句话直接编成计费规则。
+
+| 原说法 | 本单采用的口径 |
+|---|---|
+| 超窗在 tokenizer 之前拦截，一个 token 都没编码 | 无此证据。服务端可能先分词或估算再拒绝；tokenization 与模型生成也不是一回事 |
+| 400 不收费，200 收费 | HTTP 状态不够。SSE 可在 200 后报错；网关、取消、超时等需单独对账 |
+| context_length_exceeded 在所有服务都免费 | 前置拒绝通常没有生成 usage，但本次未核实各家账单承诺；不能硬记为已确认零费用 |
+| input 一律全价，缓存命中不再计费 | 缓存仍占窗口；读写可能按不同价格计费，命中不等于免费。[S3][S5] |
+| Anthropic count_tokens 完全精确 | 官方明确称 estimate，保留余量。[S2] |
+| 输入 + max_tokens 超窗必报 400 | 不是通则；按模型和协议区分，Anthropic 上述行为就是反例。[S3] |
+| 流断开后固定多生成 5~30 token | 仅作用户材料中的经验线索，不作为固定常数或费用算法 |
+| 五个函数固定占 500~2500 token | 只作提醒；按真实工具 schema、序列化与模型计量 |
+
+窗口账使用完整输入。内部 `TotalInputTokens()` 面向已归一化 usage；不能直接拿它的加法套原始 OpenAI usage，再把已包含的缓存重复相加。
+
+每笔任务、摘要、重试单独留 request id、端点/模型、状态、实报 usage、缓存明细、取消时刻与估算费用依据。无 usage 记“未报/未知”，不填零。即使摘要失败、候选弃用或响应不进主线，已知用量仍入账。Azure、转发网关与直连分别核验，本单不移植用户材料中的收费承诺。
+
+## 七、下一步实验与待裁定项
+
+- [ ] 画清当前生产链：事实日志 -> 工作视图 -> provider wire -> 估算 -> compact -> usage -> 恢复；覆盖主会话和子代理，列出会改旧前缀的处理。
+- [ ] 对比当前校准、kc-mini 增量方案、可用 tokenizer/计数接口。固定请求，先预测后揭示实报，覆盖中英文、代码、日志、工具 schema、thinking、多模态与缓存。
+- [ ] 明确摘要读全视图还是分区；测后续纠正能否覆盖旧要求，并检查每笔摘要请求自身预算。
+- [ ] 收集四套协议的脱敏原始错误与终态样本：code 缺失、通用 400、413、200 内截断、过滤、SSE 错误、usage 缺失、取消与超时；记具体端点及版本。
+- [ ] 裁定长 turn 分段、最小原文保护、非连续投影与恢复事件；覆盖用户撤销、未闭合工具组、未知副作用、第二次 compact 和压后计量。
+- [ ] 测来源变化、摘要失败、落盘失败、提交后崩溃、坏尾行恢复；确认旧冷区不复活、用户原文不重复、已执行动作不重跑。
+- [ ] 裁定软触发、压后目标、最低输出、估算余量与共享重试预算；单个巨型输入无法处理时明确停止。
+- [ ] 沿 Q2 单的 B2 方法，从同一任务中途截点配对 FULL/当前生产 compact，再研究候选方案。分别看有效要求丢失、旧要求复活、无故重做、最终验收、token 与墙钟；假 fixture 只验处理逻辑。
+- [ ] 如需比较费用，另用实际 usage 和账单核对任务、摘要、失败与重试成本，区分缓存读写；不拿状态码推算金额。
+
+本单先保留这些问题。实验结果出来后，再定正式重构方案、迁移次序和验收门；现有代码行为与参考文档里的默认参数均不因这份备忘自动变更。
+
+## 八、官方资料与核验边界
+
+核验日期：2026-09-06。官方页面会更新，实施前按实际 endpoint、wire、model、API 版本和 beta headers 复查。
+
+- [S1 OpenAI Counting tokens](https://developers.openai.com/api/docs/guides/token-counting)：已打开正文，确认 Responses 输入计数接口。
+- [S2 Anthropic Token counting](https://platform.claude.com/docs/en/build-with-claude/token-counting)：已打开正文，确认计数为估算，支持结构化输入。
+- [S3 Anthropic Context windows](https://platform.claude.com/docs/en/build-with-claude/context-windows)：已打开正文，确认超窗结束行为及缓存仍占窗口。
+- [S4 Anthropic API errors](https://platform.claude.com/docs/en/api/errors)：已打开正文，确认错误形状、413 字节限制和 200 后流式错误。
+- [S5 OpenAI Prompt caching](https://developers.openai.com/api/docs/guides/prompt-caching)：已打开正文，确认缓存计费须按 usage 与模型价格分别计算。
+- [S6 Kimi 计算 Token](https://platform.kimi.com/docs/api/estimate)：官方检索索引出现 estimate-token-count；正文抓取失败，只留线索，未确认完整接口契约。
+
+OpenAI 两套错误对象的字段完备性、Responses truncation 配置、Kimi Code 2 MiB 上限，以及各家失败/取消收费细则，本次未取得充分一手依据或账单证据。相关内容只作为后续协议核验项，不作为已经验过的合同。
