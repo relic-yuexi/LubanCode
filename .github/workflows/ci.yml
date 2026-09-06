@@ -47,9 +47,11 @@ jobs:
           while IFS= read -r f; do
             [ -z "$f" ] && continue
             case "$f" in
-              src/*|tests/*|cmake/*|CMakeLists.txt|*/CMakeLists.txt|vcpkg.json|third_party/*|scripts/*|skills/*|.github/workflows/ci.yml)
+              src/*|tests/*|cmake/*|CMakeLists.txt|*/CMakeLists.txt|third_party/*|scripts/*|skills/*|.github/workflows/ci.yml)
                 case "$f" in
-                  src/app/version.hpp) ;;  # 纯版本号:发布流水线自会全量验证
+                  # 纯版本号三件套:发布流水线自会全量验证;依赖真变动伴着
+                  # CMakeLists.txt 改动,那道网仍在
+                  src/app/version.hpp|vcpkg.json|CHANGELOG.md) ;;
                   *) code=true ;;
                 esac ;;
             esac
