@@ -957,10 +957,6 @@ int wmain(int argc, wchar_t** argv) {
     SetConsoleWindowInfo(g_conout, TRUE, &window);
     FlushConsoleInputBuffer(g_conin);
     Log("INFO: console buffer " + std::to_string(BufferWidth()) + " cols, window 30 rows");
-    // 关轨迹账(观察系统):本 driver 验的是终端渲染,而轨迹账本在工具边界
-    // 送达的 turn 上有既有的 turn_overlap 偶发(基线取证全幕同样报"轨迹账
-    // 写盘失败"并连带队列回队),开着它全幕结果非确定。渲染验收不依赖它。
-    SetEnvVar(L"LUBANCODE_TRAJECTORY", L"0");
 
     // g0 单跑模式:假服务思考剧本,只跑高频光标轨迹幕(沙箱/二轮灵敏度
     // 验证用,不碰真后端)。

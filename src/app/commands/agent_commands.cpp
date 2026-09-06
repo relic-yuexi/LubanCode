@@ -282,6 +282,10 @@ std::vector<std::string> FormatAgentDoctorReport(const lubancode::agent::AgentCa
     // 入参与配置默认两级,见 AgentProfileResolver)。显式与否如实标——
     // "继承"就是落父值,不猜数。P1-0(turn 预算单 §5.2/§11.3)起 max_turns
     // 一并登,并列明生效的是任务级 turn 预算还是 legacy per-run step 预算。
+    // 同名防混(清理批):这里登的 max_turns 是 Agent Definition 域的任务
+    // 总 turn;配置文件顶层同名旧键 max_turns(config.hpp)是
+    // max_steps_per_turn(每输入轮步数)的弃用别名——两域极性相反,诊断
+    // 文案必须带上下文,别裸写 max_turns。
     std::string runtime = "runtime: max_output_tokens=";
     runtime += def.max_output_tokens.has_value()
                    ? std::to_string(*def.max_output_tokens) + "(YAML 显式,视同 config 级)"

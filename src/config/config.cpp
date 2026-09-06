@@ -1902,11 +1902,11 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
             config.features_loop = field["loop"].get<bool>();
         }
         if (field.contains("trajectory")) {
-            if (!field["trajectory"].is_boolean()) {
-                return std::unexpected("配置文件 " + file_path_for_error +
-                                       " 里的 features.trajectory 必须是布尔值");
-            }
-            config.features_trajectory = field["trajectory"].get<bool>();
+            // features.trajectory 已死(P0-6:Session 即 Trajectory,恒开,
+            // 没有"关闭态"):任何值类型都吞下不拦门——旧档写 true/false/
+            // "yes"/1/垃圾值照样加载,值 dump 成串只当弃用告警的由头。
+            // 过一两个版本连吞带删(键、影子位与告警一并收走)。
+            config.features_trajectory_raw = field["trajectory"].dump();
         }
         if (field.contains("telemetry")) {
             if (!field["telemetry"].is_boolean()) {
@@ -2560,6 +2560,9 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
     // 阶段被过滤(不会落进 FileConfig/LubancodeEnvValues),0(显式无上限)是
     // 合法值,这里只管按优先级挑;都没配到时默认值 kDefaultMaxStepsPerTurn
     // 本身也是 0(无上限)。 ----
+    // 同名防混:这里的旧名 max_turns 是"每输入轮步数"的别名;Agent
+    // Definition 域(agent_definition.cpp 解析 runtime.max_turns)那枚同
+    // 名键是任务总 turn 预算——两域极性相反,各自解析,互不相干。 ----
     //
     // 兼容期双读(命名规范第二批):新名优先;新旧同现同值按新名收账并提
     // 示弃用;同现异值明报冲突(仍取新名,但把两个值都摆出来,不暗取);
@@ -2929,15 +2932,21 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         if (loop_file != nullptr) {
             result.config.features_loop = *loop_file->features_loop;
         }
-        // P0-2 轨迹:同一待遇(项目级压全局,环境变量在
-        // runtime::ResolveTrajectoryEnabled 里合成)。
+        // features.trajectory(已死键,P0-6 轨迹恒开):哪一级写了就说哪一
+        // 级,值不生效、不拦加载——任何值类型都吞,只打一行弃用告警(max_
+        // context_chars 的死法同款)。过一两个版本连吞带删。
         const FileConfig* trajectory_file =
-            project_ptr != nullptr && project_ptr->features_trajectory.has_value()
+            project_ptr != nullptr && project_ptr->features_trajectory_raw.has_value()
                 ? project_ptr
-                : (global_ptr != nullptr && global_ptr->features_trajectory.has_value() ? global_ptr
-                                                                                       : nullptr);
+                : (global_ptr != nullptr && global_ptr->features_trajectory_raw.has_value() ? global_ptr
+                                                                                            : nullptr);
         if (trajectory_file != nullptr) {
-            result.config.features_trajectory = *trajectory_file->features_trajectory;
+            const std::string origin =
+                (trajectory_file == project_ptr ? "项目级配置 " : "全局配置 ") + trajectory_file->source_path;
+            result.deprecation_notices.push_back(
+                "[配置] " + origin + " 里 features.trajectory=" + *trajectory_file->features_trajectory_raw +
+                " 已失效:轨迹账恒开,该开关不再起作用,任何值都不拦加载。请删掉这个键"
+                "(再过一两个版本连忽略一并移除)。");
         }
         // 端云协同可观测单 T0:同一待遇(项目级压全局,环境变量在
         // telemetry::ResolveTelemetryActivation 里合成)。

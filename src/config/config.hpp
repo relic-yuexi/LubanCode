@@ -741,9 +741,10 @@ struct Config {
     // LOOP=1 是总闸,装配层读(只关功能不改存档,不开第二只来源)。
     bool features_loop = false;
     // P0-6:features.trajectory 开关已删——Trajectory Journal 是唯一
-    // Session 真账,恒开,没有"关闭态"。字段保留只为吞下旧配置文件里
-    // 的这个键(读而不用),不再出现在任何 UI/文档。
-    bool features_trajectory = false;
+    // Session 真账,恒开,没有"关闭态"。连"读而不用"的吞键位也拆了
+    //(清理批):解析层对旧档里的这个键读到即忽略并打一行弃用告警
+    //(任何值类型都不拦门),合并层不再产出任何配置结果。
+    // features_telemetry 的激活判定不认它(事实源看轨迹账是否装配)。
     // 端云协同可观测单 T0:features.telemetry(默认 false,内部预览)。
     // 只从配置文件来(项目级压全局),环境变量 LUBANCODE_TELEMETRY=1/0
     // 显式压一头(telemetry::ResolveTelemetryActivation 合成);紧急总闸
@@ -885,6 +886,9 @@ struct FileConfig {
     // 类型不对,ParseFileConfigJson 静默跳过(留 nullopt),不报错——
     // "救命阀"字段,配置写错不该拦住用户开工。两键同现同值按新名收账;
     // 同现异值在 MergeConfig 明报冲突(新名优先)并打弃用提示。
+    // 同名防混(turn 预算单):这里的 max_turns 是"每输入轮步数"的弃用
+    // 别名;Agent Definition 域的 runtime.max_turns 是任务总 turn 预算
+    //(agent_definition.hpp),同名不同物,两域各自解析、互不串扰。
     std::optional<int> max_steps_per_turn;  // 新键 "max_steps_per_turn"
     std::optional<int> max_turns;           // 旧键 "max_turns"(弃用,至少跨一个明确版本窗后再删)
     std::optional<std::string> theme;               // dark / light / plain
@@ -967,8 +971,10 @@ struct FileConfig {
     // 持久目标单:features.goals(布尔)与 goals 段(整段回退)。
     std::optional<bool> features_goals;
     std::optional<bool> features_loop;
-    // P0-2 轨迹:features.trajectory(布尔)。
-    std::optional<bool> features_trajectory;
+    // 已死键 features.trajectory 的影子位(P0-6 轨迹恒开):任何值类型都
+    // 吞下不拦门(值 dump 成串,只当弃用告警的由头),不参与任何合并、
+    // 不产配置结果。过一两个版本连吞带删——键、影子位与告警一并收走。
+    std::optional<std::string> features_trajectory_raw;
     // 端云协同可观测单 T0:features.telemetry(布尔)。
     std::optional<bool> features_telemetry;
     // 端云协同可观测单 T2:telemetry{} 段(整段回退,项目级压全局)。

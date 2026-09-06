@@ -1249,11 +1249,13 @@ RunTurnResult RunTurn(TurnContext ctx) {
         }
     }
 
-    // TODO 未收口提醒(P3-4):回合正常收口(没被打断、没撞预算)而清单里
+    // 未收口提醒(P3-4,已落地):回合正常收口(没被打断、没撞预算)而清单里
     // 仍有 in_progress 项时,宿主给模型递一条提醒——经 InjectIncoming 落双账
     // (末条是 assistant 就另起一条 user;末条是 user 就并进去,三种 wire 都
     // 安全),模型在下一份请求里看得见;会话层的 PersistNewMessages 随后照常
     // 落盘。打断/失败轮不催——那轮本就没收完账,催了也是噪声。
+    // 设计注记(清理批):实现就在下头 if 里(BuildUnclosedTodoReminder →
+    // InjectIncoming),当初的 TODO 是许愿口,活早已干完——别再当欠账看。
     if (!out.cancelled && !turn_failed && todo_state != nullptr) {
         if (const auto reminder = lubancode::tools::BuildUnclosedTodoReminder(*todo_state);
             reminder.has_value()) {

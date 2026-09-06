@@ -294,6 +294,48 @@ TEST_CASE("MergeConfig: 哪级都没写 max_context_chars 时,零弃用提示") 
 }
 
 // ---------------------------------------------------------------------------
+// features.trajectory(已死键,P0-6 轨迹恒开):任何值类型都吞下不拦门,
+// 只打一行弃用提示(哪一级写了就说哪一级)——旧档写 true/false/"yes"/1/
+// 垃圾值照样加载。过一两个版本连吞带删。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("features.trajectory 旧布尔值:不拦加载,只打弃用提示") {
+    const auto file = config::ParseFileConfigJson(R"({"features": {"trajectory": true}})", "x.json");
+    REQUIRE(file.has_value());
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), *file);
+    REQUIRE(result.has_value());
+    REQUIRE(result->deprecation_notices.size() == 1);
+    CHECK(result->deprecation_notices[0].find("features.trajectory=true") != std::string::npos);
+    CHECK(result->deprecation_notices[0].find("x.json") != std::string::npos);
+    CHECK(result->deprecation_notices[0].find("恒开") != std::string::npos);
+}
+
+TEST_CASE("features.trajectory 垃圾值(\"yes\"/1/对象/数组):全不拦加载,告警照打") {
+    for (const std::string& raw : {std::string(R"({"features": {"trajectory": "yes"}})"),
+                                   std::string(R"({"features": {"trajectory": 1}})"),
+                                   std::string(R"({"features": {"trajectory": {"junk": 1}}})"),
+                                   std::string(R"({"features": {"trajectory": ["on"]}})"),
+                                   std::string(R"({"features": {"trajectory": null}})")}) {
+        CAPTURE(raw);
+        // 旧严格校验在这里就拦门(必须是布尔);放宽后任何值类型都吞。
+        const auto file = config::ParseFileConfigJson(raw, "x.json");
+        REQUIRE(file.has_value());
+        const auto result = config::MergeConfig(EmptyLubancodeEnv(), *file);
+        REQUIRE(result.has_value());
+        REQUIRE(result->deprecation_notices.size() == 1);
+        CHECK(result->deprecation_notices[0].find("features.trajectory=") != std::string::npos);
+    }
+}
+
+TEST_CASE("MergeConfig: 哪级都没写 features.trajectory 时,零弃用提示") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
+    REQUIRE(result.has_value());
+    for (const auto& notice : result->deprecation_notices) {
+        CHECK(notice.find("features.trajectory") == std::string::npos);
+    }
+}
+
+// ---------------------------------------------------------------------------
 // max_steps_per_turn(旧名 max_turns):待遇跟上面 max_context_chars 的旧写法一样(专属
 // env / 配置文件 / 默认值三级,没有通用 env)。语义:不配、或者显式配 0,
 // 都是无上限;配正整数才是硬上限。负数/非法值不报错,静默忽略落到下一级。

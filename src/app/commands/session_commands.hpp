@@ -46,9 +46,7 @@ using lubancode::cli::trf;
 // 粗略估算一段历史占用了多少"token"——统一口径在 agent/context.hpp
 // (ASCII 4 字符 1 token,非 ASCII 1.5 token/字);这里只是转发,老调用点
 // (/context 分类明细)不必各认一遍。数字带 ~ 提醒是估算值,真实用量以
-// provider usage 为准。
-std::size_t EstimateHistoryChars(const std::vector<lubancode::api::Message>& history);
-
+// provider usage 为准。(字节账的转发 EstimateHistoryChars 零调用已拆。)
 std::size_t EstimateHistoryTokens(const std::vector<lubancode::api::Message>& history);
 
 // 压力口径估算(P1-1,手工/自动压缩共用):任意一份 history 过一遍 L1 无损
