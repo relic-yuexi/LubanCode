@@ -187,7 +187,6 @@ def main():
 
     env = dict(os.environ)
     env["USERPROFILE"] = str(home)
-    env["LUBANCODE_TRAJECTORY"] = "1"  # 死开关:设了也无人认(发布门已删 env 选路)
     for key in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY",
                 "ALL_PROXY"):
         env.pop(key, None)

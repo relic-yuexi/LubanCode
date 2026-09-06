@@ -27,9 +27,9 @@
 namespace lubancode::runtime {
 
 // 发布门(P0-2 切换、P0-6 真机门收口):Session 即 Trajectory,没有
-// feature/env 选路。P0-2 删开关时这段留着 LUBANCODE_TRAJECTORY 的
-// env 解读函数成了死码,P0-6 连尸首一并收走——配置键 features.trajectory
-// 仍被 config 层吞下(读而不用),env 变量从此无人认领。
+// feature/env 选路。开关的尸首已收干净——env 变量 LUBANCODE_TRAJECTORY
+// 从此无人认领;配置键 features.trajectory 在 config 层读到即忽略并打
+// 一行弃用告警(任何值类型都不拦门,过一两个版本连吞带删)。
 
 // §12.2/§13 journal emergency reserve 首版起始值(16 MiB)。配置面
 //(trajectory.journal_emergency_reserve_bytes)尚未落:reserve 目前是

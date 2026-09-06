@@ -163,7 +163,6 @@ def run_scenario(exe, out_root, name):
 
         env = dict(os.environ)
         env["USERPROFILE"] = str(home)
-        env["LUBANCODE_TRAJECTORY"] = "1"
         # 本机代理不许劫持回环假服务:全部直连。
         for key in ("http_proxy", "https_proxy", "all_proxy", "HTTP_PROXY", "HTTPS_PROXY",
                     "ALL_PROXY"):
