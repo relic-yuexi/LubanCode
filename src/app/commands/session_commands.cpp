@@ -64,11 +64,9 @@ using lubancode::cli::TermErr;
 using lubancode::cli::tr;
 using lubancode::cli::trf;
 
-// 字节账与 token 估算都收口到 agent/context.hpp 的统一口径(/context 的
-// "字符数"分类明细按字节报,压缩报告按统一 token 口径报)。
-std::size_t EstimateHistoryChars(const std::vector<lubancode::api::Message>& history) {
-    return lubancode::agent::EstimateHistoryBytes(history);
-}
+// token 估算收口到 agent/context.hpp 的统一口径(/context 的"字符数"分类
+// 明细按字节报,压缩报告按统一 token 口径报)。曾经的字节账转发
+// EstimateHistoryChars 全仓零调用,清理批拆除。
 std::size_t EstimateHistoryTokens(const std::vector<lubancode::api::Message>& history) {
     return lubancode::agent::EstimateHistoryTokens(history);
 }
