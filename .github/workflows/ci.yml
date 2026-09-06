@@ -56,21 +56,37 @@ jobs:
           done <<< "$(git diff --name-only "$BASE" "$GITHUB_SHA")"
           echo "code=$code" >> "$GITHUB_OUTPUT"
 
-  build-test:
+  # 腿单预备(2026-09-06):job 级 if 不认 matrix 上下文(GitHub 上下文可用
+  # 表没有它,写在 jobs.<id>.if 里整炉 0 秒死于 workflow file issue——
+  # 5daf4989 在 main 上就是这么翻的),按事件现挑腿单,build-test 用
+  # fromJSON 接。分支快车道(agent/ci 分支)只烧 macos 一腿最快出信号;
+  # main 与 PR 烧全腿。
+  lane:
     needs: changes
-    # 分支快车道(2026-09-06 用户定稿):agent/ci 分支只烧 macos 一腿最快出
-    # 信号;main 与 PR 才烧全腿。
-    if: needs.changes.outputs.code == 'true' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main' || matrix.name == 'macos-clang')
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    outputs:
+      legs: ${{ steps.pick.outputs.legs }}
+    steps:
+      - name: Pick legs
+        id: pick
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" || "${{ github.ref }}" == "refs/heads/main" ]]; then
+            echo 'legs=[{"name":"windows-msvc","os":"windows-latest"},{"name":"macos-clang","os":"macos-latest"}]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'legs=[{"name":"macos-clang","os":"macos-latest"}]' >> "$GITHUB_OUTPUT"
+          fi
+
+  build-test:
+    needs: [changes, lane]
+    if: needs.changes.outputs.code == 'true'
     name: ${{ matrix.name }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - name: windows-msvc
-            os: windows-latest
-          - name: macos-clang
-            os: macos-latest
+        include: ${{ fromJSON(needs.lane.outputs.legs) }}
 
     steps:
       - uses: actions/checkout@v7
@@ -290,7 +306,7 @@ jobs:
     name: run-on-debian11
     runs-on: ubuntu-latest
     needs: [changes, linux-manylinux]
-    if: needs.changes.outputs.code == 'true' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main') && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
+    if: needs.changes.outputs.code == 'true' && (github.event_name == 'pull_request' || github.ref == 'refs/heads/main')
     container:
       image: debian:11-slim
     steps:
