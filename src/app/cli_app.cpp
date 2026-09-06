@@ -179,8 +179,8 @@ void PrintHelp() {
         std::cout << line << "\n";
     }
     std::cout << tr("help.keys")
-              << trf("help.config", lubancode::config::kDefaultMaxContextChars,
-                     lubancode::config::kDefaultTheme, lubancode::config::kDefaultContextWindowTokens);
+              << trf("help.config", lubancode::config::kDefaultTheme,
+                     lubancode::config::kDefaultContextWindowTokens);
 }
 
 // /tools 命令:列工具三态——核心(恒在)/已加载的延迟工具/延迟未加载,

@@ -166,7 +166,6 @@ requires:
 runtime:
   max_output_tokens: 8192
   max_turns: 24
-  max_context_chars: 600000
   context_window_tokens: 0
   length_continuations: 1
   execution_mode: auto
@@ -302,8 +301,8 @@ MCP 工具用 `mcp__<server>__<tool>`，插件工具用 `plugin__<plugin>__<tool
 | `max_output_tokens` | 否 | 正整数 | 继承三级解析 | 显式声明输出上限 |
 | `max_turns` | 否 | 非负整数 | 走宿主默认（`subagent.default_max_turns`，未设 = `0` 不限） | **任务总 turn**：从接到任务到交回终态，最多准入几次逻辑模型请求；父代理补话、孩子回信、Stop 钩子续跑共一本账，`0` = 不限 |
 | `max_steps_per_turn` | 否 | 非负整数 | 继承父 | **已弃用**（legacy）：每个 input round （一次 `Agent::Run()`）各自的模型请求数上限，续投会重领额度；单独使用仍按旧义生效并给 `agent.legacy_step_budget` 警告，与 `max_turns` 同现按 `agent.turn_budget_conflict` 拒载 |
-| `max_context_chars` | 否 | 正整数 | `600000` | history 字符安全网 |
-| `context_window_tokens` | 否 | 非负整数 | 继承父 | 上下文窗口 token 数，`0` = 未知 |
+| `max_context_chars` | 否 | 正整数 | （已拆除） | 旧的 history 字节安全网,已随字节轴裁剪一起移除。键仍可读入(旧定义不废),读到只发 `agent.legacy_max_context_chars` 弃用警告,值不生效;窗口预算用 `context_window_tokens` |
+| `context_window_tokens` | 否 | 非负整数 | 继承父 | 上下文窗口 token 数，`0` = 未知(运行时按 128k 兜底窗口评估) |
 | `length_continuations` | 否 | 非负整数 | `1` | max_tokens 打断在思考段时的续跑次数，`0` = 不续 |
 | `execution_mode` | 否 | 字符串 | `auto` | `auto`、`foreground`、`background` |
 | `isolation` | 否 | 字符串 | `none` | `none`、`worktree` |
@@ -481,7 +480,7 @@ Agent 定义不写进会话历史正文。历史只记稳定 `name`、定义来�
 | `runtime.max_output_tokens` | `AgentRuntimeProfile::max_output_tokens`（配 `max_output_tokens_source`） | `src/agent/runtime_profile.hpp` |
 | `runtime.max_turns` | `AgentTurnBudgetProfile::max_turns`（Resolver 合并；任务注册时冻进 `TaskRecord::turn_account`） | `src/agent/turn_budget.hpp`、`src/tools/task_ledger.hpp` |
 | `runtime.max_steps_per_turn` | `AgentRuntimeProfile::max_steps_per_turn`（legacy；`AgentTurnBudgetProfile::legacy_max_steps_per_input` 另记一笔） | 同上 |
-| `runtime.max_context_chars` | `AgentRuntimeProfile::max_context_chars` | 同上 |
+| `runtime.max_context_chars` | （已拆除:读到只发弃用警告,无运行时字段） | `src/agent/agent_definition.cpp` |
 | `runtime.context_window_tokens` | `AgentRuntimeProfile::context_window_tokens` | 同上 |
 | `runtime.length_continuations` | `AgentRuntimeProfile::length_continuations` | 同上 |
 | `runtime.execution_mode` | `agent` 工具 `execution_mode` 参数（`auto`/`foreground`/`background`） | `src/tools/agent_tool.cpp` |
@@ -498,7 +497,8 @@ Agent 定义不写进会话历史正文。历史只记稳定 `name`、定义来�
   配置推导，首版不开放 YAML 直写。
 
 合并档（阶段 3，`AgentProfileResolver` 是唯一权威，AgentTool 派发与 Workflow
-绑定同一口进）：runtime 五枚预算字段各按
+绑定同一口进）：runtime 预算字段（`max_output_tokens`、`context_window_tokens`、
+`length_continuations`,步数另有三级）各按
 **入参显式 > YAML runtime > 父值/配置默认**落档；`max_output_tokens` 的 YAML
 显式值视同 config 级声明（来源标 `ConfigFile`），YAML 缺席时父值连同来源枚举
 原样继承；`context_window_tokens` 在父值之前另有一级"会话同步的窗口"（发轮
@@ -511,9 +511,9 @@ Agent 定义不写进会话历史正文。历史只记稳定 `name`、定义来�
 1. 工具名对齐现有注册表：命令工具叫 `run_command`（不叫 `shell`）；待办工具
    只有 `todo_write`，没有 `todo_read`。
 2. `permissions.mode: read_only` 不进首版。现有权限档为 `default` / `accept_edits` / `yolo` / `auto` / `dont_ask`（另有 `inherit`）；只读限制用 `tools.allow` 表达。
-3. `runtime` 补全 `AgentRuntimeProfile` 全部字段（`max_output_tokens`、
-   `max_context_chars`、`context_window_tokens`、`length_continuations`），
-   名字与 C++ 一字不差。
+3. `runtime` 补全 `AgentRuntimeProfile` 预算字段（`max_output_tokens`、
+   `context_window_tokens`、`length_continuations`），
+   名字与 C++ 一字不差（旧 `max_context_chars` 已随字节轴裁剪拆除）。
 
 ## 9. 诊断一览
 

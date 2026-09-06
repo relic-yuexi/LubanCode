@@ -3,16 +3,16 @@
 // 权限产出 AgentProfile 是阶段 3 的 AgentProfileResolver 的事,这里碰都不碰。
 //
 // 字段名与现有代码的对齐(阶段 0 契约;契约 docs/reference/agents.md §4.8
-// 定的是 AgentRuntimeProfile 全套,runtime 五个预算字段与
+// 定的是 AgentRuntimeProfile 全套,runtime 预算字段与
 // src/agent/runtime_profile.hpp 一字不差):
 //   - runtime.max_output_tokens <-> AgentRuntimeProfile.max_output_tokens
 //     (正整数;空 = 走三级解析:config > provider > 模型目录)。
 //   - runtime.max_steps_per_turn <-> AgentRuntimeProfile.max_steps_per_turn
 //     (src/agent/runtime_profile.hpp,同名同义:一个 turn 内的步数上限)。
-//   - runtime.max_context_chars <-> AgentRuntimeProfile.max_context_chars
-//     (正整数;空 = 继承,默认 600000)。
+//   - runtime.max_context_chars:已随字节轴裁剪拆除——YAML 键仍认,出现
+//     即发 agent.legacy_max_context_chars 弃用警告,值不采用。
 //   - runtime.context_window_tokens <-> AgentRuntimeProfile.context_window_tokens
-//     (非负整数;0 = 未知,不做 mid-turn 评估)。
+//     (非负整数;0 = 未知,走 EffectiveContextWindowTokens 兜底)。
 //   - runtime.length_continuations <-> AgentRuntimeProfile.length_continuations
 //     (非负整数;0 = 不续跑,默认 1)。
 //   - runtime.execution_mode <-> agent 工具的 execution_mode 三态
@@ -102,8 +102,9 @@ struct AgentDefinition {
     // input round"的旧义,单独出现给 agent.legacy_step_budget 弃用警告)
     // 分家;新旧同现明拒 agent.turn_budget_conflict(P1-0 兼容批已落)。
     std::optional<int> max_turns;
-    std::optional<std::size_t> max_context_chars;      // 正整数;空 = 继承(默认 600000)
-    std::optional<std::size_t> context_window_tokens;  // 非负整数;空 = 继承(0 = 未知)
+    // (旧 runtime.max_context_chars 字段已随字节轴裁剪拆除:YAML 键仍认,
+    // 出现即发 agent.legacy_max_context_chars 弃用警告,值不采用。)
+    std::optional<std::size_t> context_window_tokens;  // 非负整数;空 = 继承(0 = 未知,走兜底窗口)
     std::optional<int> length_continuations;   // 非负整数;空 = 继承(默认 1,0 = 不续)
     std::string execution_mode;                // auto/foreground/background;空 = auto
     std::string isolation;                     // none/worktree;空 = none

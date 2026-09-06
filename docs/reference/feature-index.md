@@ -99,7 +99,7 @@ Gateway 另有 `lubancode gateway run|status|stop` 前台骨架。它尚未交�
 | 自动压缩 | 接近窗口时压缩旧历史，保留最近消息与压缩摘要。 |
 | 手工压缩 | `/compact [重点]` 可补一句本次压缩必须保住的内容。 |
 | 独立压缩模型 | `compact_model` 留空则沿用会话模型。 |
-| 字符硬限 | `max_context_chars` 是 token 窗口之外的第二道安全网。 |
+| 保命索截断 | 单条工具结果超估算窗口 25% 即尾部截断（token 轴口径）；旧的 `max_context_chars` 字节安全网已拆除。 |
 | JSONL 存档 | 会话事件逐行追加，含 meta、消息、工具、usage、标题与压缩点。 |
 | 会话台账 | 裸 `/resume` 打全屏台账：搜索、Cwd/All 筛选、Updated/Created 排序、翻页与三种查看态（转录 / 展开 / 舒展）。 |
 | 列出与恢复 | `/sessions`、`/resume`；按 cwd 筛选，恢复后继续写回原文件。 |

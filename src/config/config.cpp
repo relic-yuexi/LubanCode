@@ -1604,6 +1604,8 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
         config.soul = parsed["soul"].get<std::string>();
     }
     if (parsed.contains("max_context_chars")) {
+        // 已死字段(字节轴裁剪拆除):类型照旧校验(防手滑写错埋雷),值只
+        // 落进影子位——MergeConfig 拿它打弃用提示,不参与任何合并。
         const auto& field = parsed["max_context_chars"];
         if (!field.is_number_integer() && !field.is_number_unsigned()) {
             return std::unexpected("配置文件 " + file_path_for_error + " 里的 max_context_chars 字段必须是正整数");
@@ -1616,7 +1618,7 @@ std::expected<FileConfig, std::string> ParseFileConfigJson(const std::string& js
     }
     // 主预算键双读(命名规范第二批):新名 max_steps_per_turn 优先,旧名
     // max_turns 兼容。两键同现的取舍与提示在 MergeConfig 统一判定,这里
-    // 只管把各自的值读出来。跟其余字段(比如 max_context_chars)不一样:
+    // 只管把各自的值读出来。跟其余预算字段(比如 max_context_chars)不一样:
     // 不报错,类型不对或者是负数都静默跳过(留 nullopt,MergeConfig 那一级
     // 就当没写,往下一级/默认值找)。0 是合法值——显式声明"无上限"(跟
     // 不写这个字段效果一样);只有负数才当手滑写错。这是条"救命阀"字段,
@@ -2535,23 +2537,26 @@ std::expected<ConfigResult, std::string> MergeConfig(const LubancodeEnvValues& l
         result.sources.auth_token = Source::Default;
     }
 
-    // ---- max_context_chars:env > 项目级 > 全局 > 默认值,没有通用 env 这一级 ----
+    // ---- max_context_chars(已死字段):按字节裁历史的独立安全网已拆除,
+    // 合并层不再有这只字段。旧配置文件/环境变量里的同名键读入后只打一条
+    // 弃用提示(哪一级写了就说哪一级),值不生效——上下文保护统一按
+    // token 窗口(context_window),超大工具结果由内置保命索兜底。----
+    const auto legacy_max_context_notice = [&result](const std::string& origin, std::size_t value) {
+        result.deprecation_notices.push_back(
+            "[配置] " + origin + " 里 max_context_chars=" + std::to_string(value) +
+            " 已失效:按字节裁历史的独立安全网已拆除,该字段不再生效;上下文保护统一按 token 窗口"
+            "(context_window),超大工具结果由内置保命索兜底。请删掉这个字段。");
+    };
     if (lubancode_env.max_context_chars.has_value()) {
-        result.config.max_context_chars = *lubancode_env.max_context_chars;
-        result.sources.max_context_chars = Source::LubancodeEnv;
+        legacy_max_context_notice("环境变量 LUBANCODE_MAX_CONTEXT", *lubancode_env.max_context_chars);
     } else if (project_file.has_value() && project_file->max_context_chars.has_value()) {
-        result.config.max_context_chars = *project_file->max_context_chars;
-        result.sources.max_context_chars = Source::ProjectConfigFile;
+        legacy_max_context_notice("项目级配置 " + project_file->source_path, *project_file->max_context_chars);
     } else if (global_file.has_value() && global_file->max_context_chars.has_value()) {
-        result.config.max_context_chars = *global_file->max_context_chars;
-        result.sources.max_context_chars = Source::GlobalConfigFile;
-    } else {
-        result.config.max_context_chars = kDefaultMaxContextChars;
-        result.sources.max_context_chars = Source::Default;
+        legacy_max_context_notice("全局配置 " + global_file->source_path, *global_file->max_context_chars);
     }
 
     // ---- max_steps_per_turn(旧名 max_turns):env > 项目级 > 全局 > 默认值,
-    // 没有通用 env 这一级(待遇同 max_context_chars)。负数/非法值已经在解析
+    // 没有通用 env 这一级。负数/非法值已经在解析
     // 阶段被过滤(不会落进 FileConfig/LubancodeEnvValues),0(显式无上限)是
     // 合法值,这里只管按优先级挑;都没配到时默认值 kDefaultMaxStepsPerTurn
     // 本身也是 0(无上限)。 ----
@@ -3469,7 +3474,7 @@ std::expected<std::string, std::string> SaveConfigFile(const Config& config) {
     j["base_url"] = config.base_url;
     j["api_key"] = config.auth_token;
     j["model"] = config.model;
-    j["max_context_chars"] = config.max_context_chars;
+    // max_context_chars 已死:不再写盘(旧文件里的该键读入时打弃用提示)。
     if (!config.active_provider.empty()) {
         j["active_provider"] = config.active_provider;
     }
@@ -4080,15 +4085,15 @@ std::expected<ConfigResult, std::string> LoadFromEnv() {
     lubancode_env.think = GetEnv("LUBANCODE_THINK");
     lubancode_env.soul = GetEnv("LUBANCODE_SOUL");
     if (const auto raw = GetEnv("LUBANCODE_MAX_CONTEXT"); raw.has_value()) {
+        // 已死变量(字节轴裁剪拆除):读进来只为给 MergeConfig 打弃用提示
+        // 留记号,值不参与合并;解析失败当没设置,不报错。
         try {
             const long long parsed = std::stoll(*raw);
             if (parsed > 0) {
                 lubancode_env.max_context_chars = static_cast<std::size_t>(parsed);
             }
-            // 解析出来但 <= 0:当没设置处理,往下一级找,不报错。
         } catch (...) {
-            // 不是合法数字:同样当没设置处理,不报错(跟原来的
-            // agent::MaxContextCharsFromEnv 行为保持一致)。
+            // 不是合法数字:当没设置处理,不报错。
         }
     }
     // 步数上限双读(命名规范第二批):新名 LUBANCODE_MAX_STEPS_PER_TURN

@@ -1370,7 +1370,7 @@ bool TryRunCompact(bool midturn, const CompactSessionInputs& in) {
             in.trajectory->RecordCompactFailed(result.error().message);
         }
         // 失败也收滞回账:本 turn 的压缩尝试到此为止——同一段历史反复发
-        // 摘要请求,烧的是几分钟一轮的压缩费,循环比失败更伤。字符安全网
+        // 摘要请求,烧的是几分钟一轮的压缩费,循环比失败更伤。保命索
         // 仍兜底,回执已在上面给了。
         if (in.hysteresis != nullptr) {
             in.hysteresis->armed = true;
@@ -1455,11 +1455,10 @@ void HandleContextPressure(const lubancode::agent::ContextPressure& pressure, co
         }
         return;
     }
-    // AfterHardTrim:字符安全网这次真丢了东西。显式告警,不许静默降级——
-    // 用户须知道模型眼下已经看不到那段原文;完整流水仍在存档,/export 可查。
-    if (pressure.hard_trimmed_turns) {
-        out << theme.error << trf("compact.hard_trim_turns", pressure.hard_dropped_messages) << theme.reset << "\n";
-    } else if (pressure.hard_truncated_results) {
+    // AfterHardTrim:保命索这次真截了单条巨肥工具结果。显式告警,不许静默
+    // 降级——用户须知道模型眼下已经看不到那段原文;完整流水仍在存档,
+    // /export 可查。
+    if (pressure.hard_truncated_results) {
         out << theme.error << tr("compact.hard_trim_results") << theme.reset << "\n";
     }
 }

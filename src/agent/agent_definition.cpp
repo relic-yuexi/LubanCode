@@ -424,10 +424,19 @@ AgentDefinitionParseResult ParseAgentDefinitionYaml(const std::string& yaml_text
         } else if (value.has_value()) {
             def.max_turns = static_cast<int>(*value);
         }
-        if (!IntField(runtime, "max_context_chars", "runtime.", 1, kSizeFieldMax, value, issues)) {
-            has_error = true;
-        } else if (value.has_value()) {
-            def.max_context_chars = static_cast<std::size_t>(*value);
+        // max_context_chars(字节轴裁剪的旧阈值):轴已拆,字段不再生效。键
+        // 仍认——旧定义文件不该因它报"未知字段"而废掉;出现即发弃用警告,
+        // 值不校验不采用(上下文保护统一走 token 窗口,单条巨肥工具结果由
+        // 内置保命索兜底,见 agent/context.hpp)。稳定码
+        // agent.legacy_max_context_chars。
+        if (const YAML::Node legacy = runtime["max_context_chars"]; legacy) {
+            const YAML::Mark mark = legacy.Mark();
+            issues.push_back(AgentDefinitionIssue{
+                "runtime.max_context_chars",
+                "runtime.max_context_chars 已弃用:按字节裁历史的独立裁剪轴已拆除,"
+                "该字段不再生效;上下文保护统一按 token 窗口(runtime.context_window_tokens),"
+                "超大工具结果由内置保命索兜底。请删掉这个字段",
+                mark.line + 1, mark.column + 1, /*warning=*/true, "agent.legacy_max_context_chars"});
         }
         if (!IntField(runtime, "context_window_tokens", "runtime.", 0, kSizeFieldMax, value, issues)) {
             has_error = true;

@@ -731,17 +731,34 @@ TEST_CASE("守护:压缩前后 AgentLoop 发出的 system 逐字节不变") {
 // 0.31.x:AgentLoop mid-turn 压力通报
 // ---------------------------------------------------------------------------
 
-TEST_CASE("AgentLoop: 窗口未知或没设回调时,请求前不做任何通报(行为不变)") {
-    FakeBackend backend;
-    backend.script = SummaryScript("普通回答,凑够字数,不触发任何压缩门槛。");
-    tools::ToolRegistry registry;
-    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "sys"});
-    int calls = 0;
-    agent::AgentWiring wiring;
-    wiring.on_context_pressure = [&calls](const agent::ContextPressure&) { ++calls; };
-    loop.SetWiring(std::move(wiring));
-    REQUIRE(loop.Run("第一问 " + std::string(2400, 'x'), agent::TurnWiring{}).has_value());
-    CHECK(calls == 0);  // 窗口 0 = 未知,不评估
+TEST_CASE("AgentLoop: 没设回调时不评估;窗口未知落 128k 兜底,通报带兜底窗口") {
+    // 没设回调:拼视图、发请求,一切照常,没有通报可发。
+    {
+        FakeBackend backend;
+        backend.script = SummaryScript("普通回答,凑够字数,不触发任何压缩门槛。");
+        tools::ToolRegistry registry;
+        agent::Agent loop(backend, registry,
+                          agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "sys"});
+        REQUIRE(loop.Run("第一问 " + std::string(2400, 'x'), agent::TurnWiring{}).has_value());
+    }
+    // 窗口未知(0):字节轴拆除后不许裸奔——评估照做,窗口按 128k 兜底
+    //(这笔输入线内,不触发压缩;通报本身带兜底窗口数)。
+    {
+        FakeBackend backend;
+        backend.script = SummaryScript("普通回答,凑够字数,不触发任何压缩门槛。");
+        tools::ToolRegistry registry;
+        agent::Agent loop(backend, registry,
+                          agent::AgentProfile{.request{.model = "test-model"}, .system_prompt = "sys"});
+        std::vector<agent::ContextPressure> seen;
+        agent::AgentWiring wiring;
+        wiring.on_context_pressure = [&](const agent::ContextPressure& pressure) { seen.push_back(pressure); };
+        loop.SetWiring(std::move(wiring));
+        REQUIRE(loop.Run("第一问 " + std::string(2400, 'x'), agent::TurnWiring{}).has_value());
+        REQUIRE_FALSE(seen.empty());
+        REQUIRE(seen.front().phase == agent::ContextPressure::Phase::PreRequest);
+        CHECK(seen.front().window_tokens == agent::kFallbackContextWindowTokens);
+        CHECK_FALSE(seen.front().projected_overflow);
+    }
 }
 
 TEST_CASE("AgentLoop: projected overflow 在请求前通报,回调里压缩后请求换短史") {
@@ -751,8 +768,7 @@ TEST_CASE("AgentLoop: projected overflow 在请求前通报,回调里压缩后�
     tools::ToolRegistry registry;
     agent::Agent loop(backend, registry,
                       agent::AgentProfile{.request{.model = "test-model"},
-                                          .runtime{.max_output_tokens = 8192,
-                                                   .max_context_chars = 200000},
+                                          .runtime{.max_output_tokens = 8192},
                                           .system_prompt = "sys"});
     api::Message old_user;
     old_user.role = api::Role::User;
@@ -833,7 +849,7 @@ TEST_CASE("AgentLoop: 预估虚算单独不触发 midturn 压缩——真实水�
     tools::ToolRegistry registry;
     agent::Agent loop(backend, registry,
                       agent::AgentProfile{.request{.model = "test-model"},
-                                          .runtime{.max_output_tokens = 65536, .max_context_chars = 600000},
+                                          .runtime{.max_output_tokens = 65536},
                                           .system_prompt = "sys"});
     // 20 组 run_command 工具来回:每组 7500 个短词(15000 字节),托底尺
     // 记 7500、日常尺只记 3750——虚算恰是真实水位的两倍。
@@ -933,39 +949,53 @@ TEST_CASE("AgentLoop: 真实水位 ≥80% 该触发仍触发(双闸同开)") {
     CHECK(seen.front().projected_overflow);
 }
 
-TEST_CASE("AgentLoop: TrimHistory 兜底真丢东西时,AfterHardTrim 通报") {
+TEST_CASE("AgentLoop: 保命索真截了单条巨肥工具结果时,AfterHardTrim 通报") {
     FakeBackend backend;
     backend.script = SummaryScript("回答正文,凑够字数,免得跟压缩门槛混淆。");
     tools::ToolRegistry registry;
-    // max_context_chars 设得很小:第五轮起(轮数盖过 keep_recent_turns+1)
-    // 必触发轮级裁剪。
-    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 0, .max_context_chars = 2600}, .system_prompt = "sys"});
-    loop.SetContextWindowTokens(0);  // 不做 projected 评估,单测硬裁线
+    agent::Agent loop(backend, registry,
+                      agent::AgentProfile{.request{.model = "test-model"},
+                                          .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 0},
+                                          .system_prompt = "sys"});
+    loop.SetContextWindowTokens(32768);  // 25% 线 = 8192 token
+
+    // 一轮带巨肥 run_command 结果的历史:60000 词 = 日常尺 30000 token,远超
+    // 线;run_command 是副作用工具,结构压缩永远全文,保命索接手截尾。
+    std::vector<api::Message> history{UserText("跑构建")};
+    std::string fat;
+    fat.reserve(120000);
+    for (int i = 0; i < 60000; ++i) fat += "a ";
+    history.push_back(AssistantToolUse("toolu_big", "run_command"));
+    history.push_back(UserToolResult("toolu_big", fat));
+    loop.ReplaceHistory(std::move(history));
 
     std::vector<agent::ContextPressure> seen;
     agent::AgentWiring wiring;
     wiring.on_context_pressure = [&seen](const agent::ContextPressure& pressure) { seen.push_back(pressure); };
     loop.SetWiring(std::move(wiring));
 
-    // 前四轮:轮数不够裁,没有通报。
-    for (int i = 0; i < 4; ++i) {
-        REQUIRE(loop.Run("第" + std::to_string(i) + "问" + std::string(500, 'x'), agent::TurnWiring{}).has_value());
-    }
-    CHECK(seen.empty());
-
-    // 第五轮:轮数盖过 keep_recent_turns + 1,中间轮被整轮丢掉,请求发出去
-    // 之前必须通报——静默降级不许再有。
-    REQUIRE(loop.Run("第5问" + std::string(500, 'x'), agent::TurnWiring{}).has_value());
-    REQUIRE_FALSE(seen.empty());
+    REQUIRE(loop.Run("新问题", agent::TurnWiring{}).has_value());
     bool saw_hard_trim = false;
     for (const auto& pressure : seen) {
         if (pressure.phase == agent::ContextPressure::Phase::AfterHardTrim) {
             saw_hard_trim = true;
-            CHECK(pressure.hard_trimmed_turns);
-            CHECK(pressure.hard_dropped_messages > 0);
+            CHECK(pressure.hard_truncated_results);
         }
     }
-    CHECK(saw_hard_trim);
+    CHECK(saw_hard_trim);  // 有损截断不许静默降级
+    // 发出去的请求里那条结果确实被截短了。
+    REQUIRE_FALSE(backend.captured_requests.empty());
+    bool saw_truncated = false;
+    for (const auto& message : backend.captured_requests.front().messages) {
+        for (const auto& block : message.content) {
+            const auto* result = std::get_if<api::ToolResultBlock>(&block);
+            if (result != nullptr && result->content.find("[内容过长已截断]") != std::string::npos) {
+                saw_truncated = true;
+                CHECK(result->content.size() < fat.size());
+            }
+        }
+    }
+    CHECK(saw_truncated);
 }
 
 // ---------------------------------------------------------------------------

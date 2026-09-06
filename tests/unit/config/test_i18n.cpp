@@ -70,9 +70,10 @@ TEST_CASE("TrFormat: {0}/{1} 按序替换,JSON 花括号不受牵连,缺实参�
     CHECK(cli::trf("transcript.added_removed", 3, 5) == "新增 3 行,删除 5 行");
     // help.config 里有 {"mcpServers": ...} 这类 JSON 示例,TrFormat 只认
     // {数字},别的花括号原样保留。
-    const std::string help = cli::trf("help.config", 1, "dark", 2);
+    const std::string help = cli::trf("help.config", "dark", 2);
     CHECK(help.find("{\"command\"") != std::string::npos);
-    CHECK(help.find("max_context_chars=1") != std::string::npos);
+    CHECK(help.find("theme=dark") != std::string::npos);
+    CHECK(help.find("context_window=2") != std::string::npos);
     // 缺实参:占位符原样保留,好排查。
     CHECK(cli::trf("transcript.added_removed", 3) == "新增 3 行,删除 {1} 行");
 }

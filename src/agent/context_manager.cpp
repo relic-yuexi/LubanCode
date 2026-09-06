@@ -60,11 +60,11 @@ void ContextManager::ReplaceHistory(std::vector<api::Message> new_history) {
     pending_epoch_break_reason_ = "history_compacted";
     last_prefix_.reset();
     last_wire_dump_.clear();  // 新 epoch:上一份 wire 文本不再可比,清掉
-    // 新 epoch,压缩决策与 sticky 视图一并翻篇:compact 是唯一常规的全量
-    // 重写点,重写后的视图从头定形(前缀缓存守恒单第六期)。
+    // 新 epoch,压缩决策与截断通报一并翻篇:compact 是唯一常规的全量重写
+    // 点,重写后的视图从头定形(前缀缓存守恒单第六期);热区若仍带超线
+    // 原文,下一请求的截断按新发生重新通报。
     result_view_memo_.decisions.clear();
-    sticky_view_.reset();
-    sticky_base_history_size_ = 0;
+    truncation_announced_in_epoch_ = false;
 }
 
 ContextWorkingView ContextManager::BuildWorkingView(const ContextViewBudget& budget) {
@@ -72,7 +72,7 @@ ContextWorkingView ContextManager::BuildWorkingView(const ContextViewBudget& bud
     // tool result 第一次进请求视图时定形(短则全文、超长首次即 artifact
     // 预览、重复自述指回、新版本自述替代),决策台账 epoch 内钉死,绝不
     // 追改已经发过的表示。活历史与 session JSONL 一字不动,tool use/
-    // result 配对天然不破。压完的视图更小,后面字符安全网也更少真开刀。
+    // result 配对天然不破。压完的视图更小,后面保命索也更少真开刀。
     // 第二期:带仓时 Artifact 决策先落盘,视图带稳定 artifact_id。
     std::vector<api::Message> view_source;
     if (structural_compression_enabled_) {
@@ -82,35 +82,20 @@ ContextWorkingView ContextManager::BuildWorkingView(const ContextViewBudget& bud
         view_source = request_history_;
     }
 
-    // 字符安全网 + sticky 视图:还没动手裁过,就按老规矩裁;真动手裁了
-    // (丢轮/截结果),把裁过的视图钉住,后续只往尾部追加新消息——不再
-    // 每请求重算"第一轮 + 最近 N 轮"让窗口一路滑(窗口滑就是追改已发
-    // 前缀)。全量 JSONL 照旧保留,sticky 只是模型眼下那本账。
+    // 保命索(单条巨肥工具结果的尾部截断,token 轴口径):截断按结果自身
+    // 的 token 账算,确定性——同一份历史每请求截出同一副形状,旧消息不因
+    // 历史增长被追改(旧字节轴按全量 overage 截会滑窗,须 sticky 钉住;
+    // 那条轴拆了,sticky 随之退场)。真"新发生"的截断(本 epoch 首次)才
+    // 进 trim 报告,loop 拿去打 AfterHardTrim 通报并给前缀账点名;重复截
+    // 同一副形状不是新动作,不反复刷告警。全量 JSONL 照旧保留。
     ContextWorkingView out;
-    if (sticky_view_.has_value() && view_source.size() >= sticky_base_history_size_) {
-        std::vector<api::Message> pinned = *sticky_view_;
-        pinned.insert(pinned.end(), view_source.begin() + static_cast<std::ptrdiff_t>(sticky_base_history_size_),
-                      view_source.end());
-        if (EstimateHistoryBytes(pinned) > budget.max_context_chars) {
-            // 钉住的视图也装不下了(长会话总会到这一步):重裁一次,换一副
-            // 新形状并重新钉住——这是一次明确的 epoch break,下面的
-            // trim 报告会把它记上(hard_trim)。
-            pinned = TrimHistory(std::move(pinned), budget.max_context_chars, kDefaultKeepRecentTurns,
-                                 &out.trim);
-            sticky_view_ = pinned;
-            sticky_base_history_size_ = view_source.size();
-        }
-        out.messages = std::move(pinned);
-        return out;
+    out.messages = ShrinkOversizedToolResults(std::move(view_source), budget.window_tokens,
+                                              budget.token_calibration, &out.trim);
+    if (out.trim.truncated_results && truncation_announced_in_epoch_) {
+        out.trim.truncated_results = false;  // 老现象,本 epoch 已通报过
+    } else if (out.trim.truncated_results) {
+        truncation_announced_in_epoch_ = true;
     }
-    std::vector<api::Message> trimmed =
-        TrimHistory(view_source, budget.max_context_chars, kDefaultKeepRecentTurns, &out.trim);
-    if (out.trim.trimmed_turns || out.trim.truncated_results) {
-        // 第一次真动手裁:钉住,开新 epoch 的账由 hard_trim 记。
-        sticky_view_ = trimmed;
-        sticky_base_history_size_ = view_source.size();
-    }
-    out.messages = std::move(trimmed);
     return out;
 }
 

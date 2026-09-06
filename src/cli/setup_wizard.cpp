@@ -390,7 +390,6 @@ std::optional<WizardOutcome> RunSetupWizard(WizardIO& io) {
     cfg.auth_token = api_key;
     cfg.model = model;
     cfg.language = language;
-    cfg.max_context_chars = config::kDefaultMaxContextChars;
 
     return WizardOutcome{cfg, save};
 }

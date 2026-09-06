@@ -11,15 +11,21 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
 
 namespace lubancode::agent {
 
-// max_context_chars 的 agent 层默认值:与 config::kDefaultMaxContextChars
-// 数值一致、各自单独定义(依赖只许单向,见 config.hpp 同款注释)。
-inline constexpr std::size_t kProfileDefaultMaxContextChars = 600000;
+// 窗口未知(context_window_tokens == 0)时的 token 轴兜底窗口。依据:取
+// 2026 年在售主力模型窗口的下限——GPT 系 128k 起、Claude 系 200k 起、
+// Gemini 系 1M,本地开源模型按 rope 缩放常态也配 128k。兜底取"主流下限"
+// 而不是中位:兜底偏小只会让保护早触发(多压一次,安全侧);偏大会让
+// 保护晚触发(真撞墙,危险侧)——窗口未知时宁可保守。字节轴裁剪拆除后,
+// 模型不在目录、窗口查不到的会话不能再裸奔,mid-turn 评估、预检硬闸与
+// 保命索全按这只口取窗口。
+inline constexpr std::size_t kFallbackContextWindowTokens = 128000;
 
 // 输出上限 unset 时的 projected 估算值(仅用于"下一请求放不放得下"的
 // 上下文压力估算,不发请求):unset 交服务端默认,服务端默认多半比这个
@@ -108,9 +114,8 @@ struct AgentRuntimeProfile {
     OutputBudgetSource max_output_tokens_source = OutputBudgetSource::Unset;
     // 一个 turn 内的步数上限(0 = 不限步)。
     int max_steps_per_turn = 0;
-    // history 字符安全网(裁剪阈值)。
-    std::size_t max_context_chars = kProfileDefaultMaxContextChars;
-    // 上下文窗口 token 数(0 = 未知,不做 mid-turn 评估)。
+    // 上下文窗口 token 数(0 = 未知;有效值经 EffectiveContextWindowTokens
+    // 落兜底,见上)。token 轴是唯一的上下文裁剪决策者。
     std::size_t context_window_tokens = 0;
     // max_tokens 打断在思考段时的自动续跑次数(规格根因四;0 = 不续)。
     int length_continuations = kDefaultLengthContinuations;
@@ -144,6 +149,13 @@ inline std::int64_t BudgetSoftLine(std::int64_t hard, int percent) {
     }
     const std::int64_t line = hard * percent / 100;
     return line < 1 ? 1 : line;
+}
+
+// 有效窗口:profile 声明了用声明值,0(未知)落 kFallbackContextWindowTokens
+// 兜底。loop 的 mid-turn 评估、token 预检硬闸与 ShrinkOversizedToolResults
+// 保命索全走这一只口,不许各拿各的魔数。
+inline std::size_t EffectiveContextWindowTokens(const AgentRuntimeProfile& profile) {
+    return profile.context_window_tokens != 0 ? profile.context_window_tokens : kFallbackContextWindowTokens;
 }
 
 }  // namespace lubancode::agent

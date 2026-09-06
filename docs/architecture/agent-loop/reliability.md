@@ -71,7 +71,7 @@ sequenceDiagram
 3. 若步数快见底，往末条消息添一次收束提醒。
 4. 估 `system + tools + history + 输出预留`。到压力线，先请上层 compact。
 5. 从 `request_history_` 派生结构压缩视图。
-6. 若仍超字符上限，走 sticky hard trim。
+6. 保命索截掉超估算窗口 25% 的单条巨肥工具结果（token 轴口径；旧的字符上限整轮删裁已拆除）。
 7. 重建工具定义。`tool_search` 可能在上一 step 新挂工具。
 8. 做最终硬限检查。仍装不下便拒绝，不发请求。
 9. 发一枚流式请求，assembler 收正文、thinking、工具块、usage 与 stop reason。

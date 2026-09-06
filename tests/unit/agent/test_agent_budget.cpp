@@ -616,7 +616,6 @@ TEST_CASE("自定义 Agent:YAML runtime 预算四字段并流——给了压父�
         agent_tool.SetRuntimeProfile(parent);
         tools::CustomAgentMaterial material = ReviewerMaterial();
         material.definition.max_output_tokens = 1234;
-        material.definition.max_context_chars = 555555;
         material.definition.context_window_tokens = 32000;
         material.definition.length_continuations = 4;
         agent_tool.SetCustomAgentResolver(

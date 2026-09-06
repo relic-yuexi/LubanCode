@@ -851,19 +851,25 @@ TEST_CASE("防御:stop_reason 不是 tool_use(帧丢了/说成 end_turn)但消�
     CHECK(std::get<api::ToolResultBlock>(loop.history()[2].content[0]).tool_use_id == "toolu_x");
 }
 
-TEST_CASE("上下文硬上限:裁剪与截断后仍超限(单条用户输入就超大),报错不发请求") {
+TEST_CASE("窗口未知走兜底:单条超大输入按 128k 兜底窗口拦下,报错不发请求") {
     FakeBackend backend;
     backend.scripts = {TextOnlyScript("不该走到这里")};
     tools::ToolRegistry registry;
 
-    // max_context_chars 压到 200,用户输入 10 倍于此——裁不动也截不动
-    // (截断只动 tool_result),该明确报错,不能把超大请求发出去。
-    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 25, .max_context_chars = 200}, .system_prompt = "system prompt"});
+    // 窗口未知(0):字节轴拆除后不许裸奔,token 轴落 128k 兜底——单条用户
+    // 输入装不下就明确报错,不能把超大请求发出去。
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 25}, .system_prompt = "system prompt"});
     agent::TurnWiring callbacks;
-    const auto result = loop.Run(std::string(2000, 'x'), callbacks);
+    std::string input;
+    input.reserve(700000);
+    for (int i = 0; i < 350000; ++i) {
+        input += "a ";
+    }
+    const auto result = loop.Run(input, callbacks);
 
     REQUIRE_FALSE(result.has_value());
-    CHECK(result.error().find("上下文") != std::string::npos);
+    CHECK(result.error().find("上下文预检未通过") != std::string::npos);
+    CHECK(result.error().find("当前消息本身已装不下") != std::string::npos);
     CHECK(backend.captured_requests.empty());  // 一次请求都没发出去
 }
 
@@ -876,7 +882,6 @@ TEST_CASE("token 窗口预检:短词长串加输出预留越窗,本机拦下且�
         agent::AgentProfile{.request{.model = "test-model"},
                             .runtime{.max_output_tokens = 8192,
                                      .max_steps_per_turn = 25,
-                                     .max_context_chars = 200000,
                                      .context_window_tokens = 32768},
                             .system_prompt = "sys"});
 
@@ -905,7 +910,6 @@ TEST_CASE("token 窗口预检:短词输入在线内不过度拦截") {
         agent::AgentProfile{.request{.model = "test-model"},
                             .runtime{.max_output_tokens = 8192,
                                      .max_steps_per_turn = 25,
-                                     .max_context_chars = 200000,
                                      .context_window_tokens = 32768},
                             .system_prompt = "sys"});
     std::string input;
@@ -928,7 +932,6 @@ TEST_CASE("token 窗口预检:大尺寸截图按像素折账,不再按 base64 �
         agent::AgentProfile{.request{.model = "test-model"},
                             .runtime{.max_output_tokens = 8192,
                                      .max_steps_per_turn = 25,
-                                     .max_context_chars = 200000,
                                      .context_window_tokens = 32768},
                             .system_prompt = "sys"});
     api::Message image_message;
@@ -953,7 +956,6 @@ TEST_CASE("token 窗口预检:CJK、代码长串与 base64 图片都计入固定
             agent::AgentProfile{.request{.model = "test-model"},
                                 .runtime{.max_output_tokens = 8192,
                                          .max_steps_per_turn = 25,
-                                         .max_context_chars = 300000,
                                          .context_window_tokens = 32768},
                                 .system_prompt = "sys"});
         const auto result = loop.Run(std::move(message), agent::TurnWiring{});
@@ -1040,7 +1042,6 @@ TEST_CASE("预检应急预留: 常规预留装不下时收窄放行,注入一次
                       agent::AgentProfile{.request{.model = "test-model"},
                                           .runtime{.max_output_tokens = 16384,
                                                    .max_steps_per_turn = 25,
-                                                   .max_context_chars = 400000,
                                                    .context_window_tokens = 32768},
                                           .system_prompt = "sys"});
     int preflight_events = 0;
@@ -1117,7 +1118,6 @@ TEST_CASE("预检应急预留: 应急也装不下时稳定报错,文案带现场
                       agent::AgentProfile{.request{.model = "test-model"},
                                           .runtime{.max_output_tokens = 16384,
                                                    .max_steps_per_turn = 25,
-                                                   .max_context_chars = 400000,
                                                    .context_window_tokens = 32768},
                                           .system_prompt = "sys"});
     class RejectPressureRecorder final : public agent::LoopBoundaryRecorder {

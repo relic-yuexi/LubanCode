@@ -6,11 +6,12 @@
 //
 // 合并次序(定死,测试钉):
 //   1. runtime 预算:base = 父皮 runtime(三级解析已在父处算完);
-//      五字段各有两级——max_steps_per_turn 走 入参显式 > YAML > 配置默认,
-//      其余四枚(max_output_tokens/max_context_chars/context_window_tokens/
-//      length_continuations)走 YAML 显式 > 父值(单子定死:子代理只该收窄,
-//      不自开预算口子——YAML 显式给了就按给的上,没给落父值);
+//      max_steps_per_turn 走 入参显式 > YAML > 配置默认,其余三枚
+//      (max_output_tokens/context_window_tokens/length_continuations)走
+//      YAML 显式 > 父值(单子定死:子代理只该收窄,不自开预算口子——
+//      YAML 显式给了就按给的上,没给落父值);
 //      max_output_tokens 视同 config 级显式声明(来源标 ConfigFile)。
+//      (旧 max_context_chars 已随字节轴裁剪拆除,不再并流。)
 //   2. 模型角色:role 空/inherit 照抄父;cheap/normal/lao 按回落链解析
 //      (normal ?? 父模型;cheap ?? normal;lao ?? normal)。effort 同理,
 //      给了且 provider 声明了思考档表而不含它,报 agent.effort_not_supported。

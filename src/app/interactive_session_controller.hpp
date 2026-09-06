@@ -313,7 +313,7 @@ private:
     // 压缩 → 校验 → 换历史 → 落盘事件 → 报数。midturn=true 时先补落盘再换
     // 史,这一轮攒下的消息先全量进 JSONL,真账一字不丢。
     // AgentLoop 每次模型请求前的压力通报:projected overflow 在安全点收一
-    // 次历史;TrimHistory 真丢了东西就显式告警,不静默降级。
+    // 次历史;保命索真截了单条巨肥工具结果就显式告警,不静默降级。
     SessionCommandState MakeSessionCommandState();
     // hooks 框架第四五步:会话级事件发射(SessionStart 各来源/SessionEnd
     // 各原因/Pre/PostCompact)。没配该事件的 hooks 就空操作。

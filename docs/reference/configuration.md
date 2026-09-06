@@ -31,7 +31,6 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
   "think": "medium",
   "context_window": "256k",
   "compact_model": "",
-  "max_context_chars": 600000,
   "max_steps_per_turn": 0,
   "tool_search_threshold": 20,
   "tool_search_token_floor": 1500,
@@ -127,7 +126,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `compact_partition_count` | 整数,`2..8` | `4` | compact 触发后把原始 turns 切成几份:按 L1 工作视图 token 平衡切分,边界只落完整 turn 之间,前 `n-1` 份各 map 一次,末份保留热区原文。越界报错、不静默夹值;`/context` 的 "compact turn 策略" 行与 `/compact --dry-run` 的分区计划都按它算。 |
 | `normal_model` / `cheap_model` / `lao_model` | 字符串,可留空 | 空串 | 三档模型角色的简写，只换模型名并沿用当前 provider；未配置的 cheap/lao 回落 normal。 |
 | `model_roles` | JSON object | 空 object | 三档模型角色的完整路由，可分别指定 provider、model、effort、context window 与输出上限。见下节。 |
-| `max_context_chars` | 正整数 | `600000` | 旧的按字节硬切安全网,跟 `context_window` 不是一回事,两条防线互不依赖;真触发时终端打有损裁剪告警。 |
+| `max_context_chars` | 正整数 | (已拆除) | 旧的按字节硬切安全网,已随字节轴裁剪一起移除——两套口径松紧随语言漂移(英文裁早、中文失守),保护收敛到 token 窗口一条轴。旧配置文件里写了这个键,读入时只打一条弃用提示,不再生效;上下文保护统一看 `context_window`。 |
 | `max_steps_per_turn` | 非负整数 | `0`(无上限) | **主回合局部保险**(turn 预算单 §4.4 的正名):主会话一次用户输入内,agent 主循环最多走几次模型请求——一步 = 一次模型请求,一步可含多枚工具调用。它不是子代理的任务总预算;子代理的任务总量走 `subagent.default_max_turns` 与 Agent YAML 的 `runtime.max_turns`(见下节"两道预算闸")。不配或配 `0` = 不设上限,防跑飞靠 ESC/Ctrl+C;配正整数才是硬上限。负数或非法值静默忽略。旧名 `max_turns` 仍可读入(兼容期,读到会打弃用提示);两者同现且值不同会明报冲突并采用新名。 |
 | `system_prompt_file` | 字符串,UTF-8 文本路径 | 无 | 人格段文件路径;没配就用内置人格,`--system-prompt` 命令行参数会压过它。 |
 | `tool_search_threshold` | 非负整数 | `20` | 注册工具总数超过此数才启用延迟挂载(工具搜索);`0` 永不延迟。 |
@@ -305,7 +304,7 @@ Git 主工作树与 linked worktree 按 common git dir 共用一份记忆。正�
 | `LUBANCODE_BASE_URL` | `base_url` | 模型服务根地址。 |
 | `LUBANCODE_API_KEY` | `api_key` | 模型服务认证值。 |
 | `LUBANCODE_MODEL` | `model` | 模型名。 |
-| `LUBANCODE_MAX_CONTEXT` | `max_context_chars` | 正整数;无效或不大于零时当没设。 |
+| `LUBANCODE_MAX_CONTEXT` | (已拆除) | 旧的字节轴裁剪阈值。设了只打一条弃用提示,不再生效;上下文窗口走 `LUBANCODE_CONTEXT_WINDOW`。 |
 | `LUBANCODE_MAX_STEPS_PER_TURN` | `max_steps_per_turn` | 非负整数;`0` = 不设上限,负数或无效值当没设。旧名 `LUBANCODE_MAX_TURNS` 仍可读入(兼容期);两者同设且值不同会明报冲突并采用新名。 |
 | `LUBANCODE_THEME` | `theme` | `dark`、`light` 或 `plain`。 |
 | `LUBANCODE_LANG` | `language` | `zh-CN`/`en`/语言包语言码;空 = 跟系统。 |
@@ -624,7 +623,7 @@ lubancode --config
 
 ### 自动压缩太早或太晚
 
-`context_window` 管 token 百分比；`max_context_chars` 是独立字节安全网。前者有两条触发线：回合前按服务端 usage 实测（80%），回合中按统一估算口径的 projected（系统提示+工具定义+历史+输出预留，80%）。后者防极端大历史。两项都要看。token 估算全库一把尺：ASCII 4 字符约 1 token，非 ASCII 每字约 1.5 token。
+上下文保护只有 token 一条轴（旧的 `max_context_chars` 字节安全网已拆除）。`context_window` 有两条触发线：回合前按服务端 usage 实测（80%），回合中按统一估算口径的 projected（系统提示+工具定义+历史+输出预留，80%）。另有两条独立保险：单条工具结果超过估算窗口的 25% 时尾部截断（防 read_file 吞大文件把 compact 摘要请求也撑爆）；模型不在目录、窗口查不到时按 128k 兜底窗口评估（主流模型窗口下限，宁早压不撞墙）。token 估算全库一把尺：ASCII 4 字符约 1 token，非 ASCII 每字约 1.5 token。
 
 ### 项目记忆开不起来
 

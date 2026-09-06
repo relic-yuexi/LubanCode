@@ -106,7 +106,6 @@ const Entry kZhCN[] = {
      "       LUBANCODE_BASE_URL      API 地址\n"
      "       LUBANCODE_API_KEY       认证令牌\n"
      "       LUBANCODE_MODEL         模型名\n"
-     "       LUBANCODE_MAX_CONTEXT   history 裁剪阈值(字符数,老的硬安全网)\n"
      "       LUBANCODE_THEME         终端配色主题,dark / light / plain\n"
      "       LUBANCODE_LANG          界面语言,zh-CN / en / languages/ 里的语言码;空 = 跟系统\n"
      "       LUBANCODE_SYSTEM_PROMPT_FILE  人格文件路径,同 --system-prompt(命令行参数压过这个)\n"
@@ -118,8 +117,8 @@ const Entry kZhCN[] = {
      "  2) 配置文件(第一个找到的生效,查找顺序:cwd 的 .lubancode/config.json → 主目录的\n"
      "     .lubancode/config.json → cwd 的旧位置 .lubancode.json → 主目录的旧位置\n"
      "     .lubancode.json;读到旧位置会自动挪到新位置)。字段:wire / base_url / api_key / model /\n"
-     "     max_context_chars / theme / language / system_prompt_file / context_window / compact_model /\n"
-     "     think,全部可选。providers 也是配置文件整段:每项写 name / base_url / wire / key_env / model / context_window,\n"
+     "     theme / language / system_prompt_file / context_window / compact_model /\n"
+     "     think,全部可选(旧字段 max_context_chars 已拆除,读了只提示不生效)。providers 也是配置文件整段:每项写 name / base_url / wire / key_env / model / context_window,\n"
      "     key_env 只记环境变量名,不存密钥;项目级 providers 整段压过全局。另有 hooks / mcpServers / search 三段(只从配置文件读,没有环境变量、没有内置默认值):\n"
      "       \"mcpServers\": {\"服务器名\": {\"command\": \"...\", \"args\": [...], \"env\": {...}}}\n"
      "       起进程握手成功后,工具以 mcp__服务器名__工具名 挂进工具表,/mcp 看状态\n"
@@ -130,7 +129,7 @@ const Entry kZhCN[] = {
      "                \"idle_minutes\": 10}}\n"
      "       配了才注册 lsp 工具(definition/references/symbols/diagnostics 语义查询),懒启动、\n"
      "       闲置自动关停,/lsp 看各语言服务器状态\n"
-     "  3) 内置默认值:wire=anthropic、max_context_chars={0}、theme={1}、context_window={2}。\n"
+     "  3) 内置默认值:wire=anthropic、theme={0}、context_window={1}。\n"
      "     base_url/api_key/model/system_prompt_file/compact_model/think 不绑死任何一家模型服务,\n"
      "     没有内置默认值——以上各级都没配到,交互模式会自动走初次配置向导;单发模式/管道模式会直接\n"
      "     报错,提示三条配置途径。用 --config 能看到当前实际生效的配置和每个字段的来源。\n"},
@@ -1408,10 +1407,9 @@ const Entry kZhCN[] = {
     {"compact.midturn_start", "[compact] 工具循环中途,预计下一次请求将超出窗口,先收一次历史..."},
     {"compact.midturn_done", "[compact] mid-turn 压缩完成,工具循环继续。"},
     {"compact.done_stats", "[compact] 历史 ~{0} tokens;manifest 守住约束 {1} 条 / 待办 {2} 条"},
-    {"compact.hard_trim_turns", "[警告] 上下文发生有损硬裁剪:中间 {0} 条消息被丢弃(字符安全网兜底,不是语义压缩)。模型已看不到那段原文;完整流水仍在会话存档,可 /export 查看、/compact 重建摘要。"},
-    {"compact.hard_trim_results", "[警告] 上下文发生有损硬裁剪:超大工具结果被截尾(字符安全网兜底,不是语义压缩)。模型已看不到被截内容;完整流水仍在会话存档,可 /export 查看。"},
+    {"compact.hard_trim_results", "[警告] 上下文发生有损截断:单条工具结果超过估算窗口的四分之一,被保命索截尾(不是语义压缩)。模型已看不到被截内容;完整流水仍在会话存档,可 /export 查看。"},
     {"compact.hysteresis_skip", "[compact] 跳过这次自动压缩:当前 ~{0} tokens,距上次压缩收口(~{1})没有足够新内容。"},
-    {"compact.hysteresis_skip_tail", "(同一轮里反复压同一副历史榨不出空间;等新内容攒足再收,字符安全网仍兜底。若当前工具循环本身过大,可 /compact 手动收束或开新会话。)"},
+    {"compact.hysteresis_skip_tail", "(同一轮里反复压同一副历史榨不出空间;等新内容攒足再收,超大工具结果的保命索仍兜底。若当前工具循环本身过大,可 /compact 手动收束或开新会话。)"},
     {"compact.grew_rejected", "[compact] 压缩结果 {0} → {1} 不降反升,已拒收,历史未动。"},
     {"compact.grew_rejected_tail", "(当前轮占大头,摘要换不瘦;继续按原历史发送,同一轮不再自动重试。完整流水在会话存档,可 /export 查看。)"},
 
@@ -2035,7 +2033,6 @@ const Entry kEn[] = {
      "       LUBANCODE_BASE_URL      API address\n"
      "       LUBANCODE_API_KEY       auth token\n"
      "       LUBANCODE_MODEL         model name\n"
-     "       LUBANCODE_MAX_CONTEXT   history trim threshold (characters, the old hard safety net)\n"
      "       LUBANCODE_THEME         terminal theme, dark / light / plain\n"
      "       LUBANCODE_LANG          UI language, zh-CN / en / a code from languages/; empty = system\n"
      "       LUBANCODE_SYSTEM_PROMPT_FILE  persona file path, same as --system-prompt (CLI wins)\n"
@@ -2047,8 +2044,8 @@ const Entry kEn[] = {
      "  2) config file (first found wins, search order: cwd .lubancode/config.json -> home\n"
      "     .lubancode/config.json -> cwd legacy .lubancode.json -> home legacy .lubancode.json;\n"
      "     legacy locations are migrated automatically). Fields: wire / base_url / api_key / model /\n"
-     "     max_context_chars / theme / language / system_prompt_file / context_window / compact_model /\n"
-     "     think, all optional. providers is also a whole config-file section: each entry has name / base_url / wire /\n"
+     "     theme / language / system_prompt_file / context_window / compact_model /\n"
+     "     think, all optional (the old max_context_chars field is gone; reading it only prints a notice). providers is also a whole config-file section: each entry has name / base_url / wire /\n"
      "     key_env / model / context_window; key_env stores an environment variable name, never a key. Project providers\n"
      "     replace the global list. Plus hooks / mcpServers / search sections (config-file only):\n"
      "       \"mcpServers\": {\"name\": {\"command\": \"...\", \"args\": [...], \"env\": {...}}}\n"
@@ -2060,7 +2057,7 @@ const Entry kEn[] = {
      "                \"idle_minutes\": 10}}\n"
      "       registers the lsp tool (definition/references/symbols/diagnostics), lazy-started and\n"
      "       auto-stopped when idle; see /lsp for status\n"
-     "  3) built-in defaults: wire=anthropic, max_context_chars={0}, theme={1}, context_window={2}.\n"
+     "  3) built-in defaults: wire=anthropic, theme={0}, context_window={1}.\n"
      "     base_url/api_key/model/system_prompt_file/compact_model/think have no built-in defaults -\n"
      "     if nothing is configured, interactive mode runs the setup wizard; one-shot/pipe mode fails\n"
      "     with a readable error listing the three configuration paths. Use --config to inspect.\n"},
@@ -3466,10 +3463,9 @@ const Entry kEn[] = {
     {"compact.midturn_start", "[compact] mid-tool-loop: next request projected to overflow the window; compacting history first..."},
     {"compact.midturn_done", "[compact] mid-turn compaction done; tool loop continues."},
     {"compact.done_stats", "[compact] history ~{0} tokens; manifest kept {1} constraints / {2} open items"},
-    {"compact.hard_trim_turns", "[warning] Lossy hard trim: {0} mid-history messages were dropped (character safety net, not semantic compaction). The model can no longer see that text; the full ledger is still in the session file (/export to view, /compact to rebuild the summary)."},
-    {"compact.hard_trim_results", "[warning] Lossy hard trim: oversized tool results were truncated (character safety net, not semantic compaction). The model can no longer see the cut text; the full ledger is still in the session file (/export to view)."},
+    {"compact.hard_trim_results", "[warning] Lossy truncation: a single tool result exceeded a quarter of the estimated context window and was truncated by the safety net (not semantic compaction). The model can no longer see the cut text; the full ledger is still in the session file (/export to view)."},
     {"compact.hysteresis_skip", "[compact] Skipping this auto-compaction: ~{0} tokens now, not enough new content since the last compaction settled (~{1})."},
-    {"compact.hysteresis_skip_tail", "(Re-compacting the same history within one turn yields no room; wait for new content. The character safety net still applies. If the current tool loop itself is oversized, /compact manually or start a new session.)"},
+    {"compact.hysteresis_skip_tail", "(Re-compacting the same history within one turn yields no room; wait for new content. The oversized-tool-result safety net still applies. If the current tool loop itself is oversized, /compact manually or start a new session.)"},
     {"compact.grew_rejected", "[compact] Compaction would grow history {0} -> {1}; rejected, history untouched."},
     {"compact.grew_rejected_tail", "(The current turn dominates, so a summary cannot shrink it; continuing with the original history, no auto retry within this turn. Full ledger in the session file via /export.)"},
 

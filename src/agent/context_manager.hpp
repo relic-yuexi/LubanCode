@@ -3,14 +3,13 @@
 //   - 双历史:history_(可持久、可 compact 的真历史)与 request_history_
 //     (模型视图,另含每轮动态上下文);
 //   - 前缀指纹与 cache epoch(agent/prefix.hpp):追加律逐请求记账;
-//   - hard trim 的 sticky 工作视图:裁过一次就钉住,只往尾部追加;
 //   - 无损结构压缩的开关、选项、台账(agent/context_events.hpp);
 //   - 可追回 artifact 仓(agent/artifact_store.hpp)。
 //
 // 账本规矩全在原主(前缀缓存守恒单、分层压缩单),这里只搬家不改判:
-// ReplaceHistory(压缩/重建)显式开新 epoch、清台账、翻 sticky;hard trim
-// 真丢了东西先记 pending_epoch_break_reason,下一份请求的追加律判定用它
-// 点名(指纹 diff 只能报 old_message_changed,这里的因更准)。
+// ReplaceHistory(压缩/重建)显式开新 epoch、清台账;保命索真截了东西先记
+// pending_epoch_break_reason,下一份请求的追加律判定用它点名(指纹 diff
+// 只能报 old_message_changed,这里的因更准)。
 
 #pragma once
 
@@ -27,9 +26,12 @@
 
 namespace lubancode::agent {
 
-// 一次请求的工作视图预算(Agent 从运行档案里现折):字符安全网阈值。
+// 一次请求的工作视图预算(Agent 从运行档案里现折):token 轴口径。
+// window_tokens 传有效窗口(0 = 未知,保命索内部落兜底);token_calibration
+// 是会话级估算校准系数(loop 每步现取,1.0 = 默认尺)。
 struct ContextViewBudget {
-    std::size_t max_context_chars = 0;
+    std::size_t window_tokens = 0;
+    double token_calibration = 1.0;
 };
 
 // BuildWorkingView 的产物:发上 wire 的那份消息视图 + 这次有没有真丢东西。
@@ -78,8 +80,8 @@ public:
     const ResultViewMemo& result_view_memo() const { return result_view_memo_; }
 
     // 拼下一份请求的工作视图:无损结构压缩(首次定形,epoch 内不追改)
-    // -> 字符安全网 + sticky 钉住。真裁了东西的因记进 pending_epoch_break_
-    // reason,随 AccountRequest 一并点名。
+    // -> 单条巨肥工具结果的保命索(token 轴口径)。真截了东西的因记进
+    // pending_epoch_break_reason,随 AccountRequest 一并点名。
     ContextWorkingView BuildWorkingView(const ContextViewBudget& budget);
 
     // 压力/触发线专用的 dry-run 视图(P1-1 口径统一):与 BuildWorkingView
@@ -88,8 +90,8 @@ public:
     // 长什么样"。/context 与压缩前后账拿这一本,不该拿未压缩的全量
     // history(真机 189k 的估账对 47k 的真实请求,就是两把尺分家的账)。
     // 注意:midturn 触发线自压缩触发失衡单起不再用这本——loop 直接拿
-    // BuildWorkingView 的真视图估(连字符安全网与 sticky 的形状都一致),
-    // 这本只剩显示/预算侧的用户。
+    // BuildWorkingView 的真视图估(连保命索的形状都一致),这本只剩
+    // 显示/预算侧的用户。
     std::vector<api::Message> BuildPressureDryRunView() const;
 
     // ---- 前缀账(agent/prefix.hpp)-----------------------------------------
@@ -161,12 +163,11 @@ private:
     StructuralCompressionOptions structural_options_{};
     StructuralCompressionStats structural_stats_{};  // 最近一次请求的压缩账(观测用)
     ContextArtifactStore* artifact_store_ = nullptr;  // 空 = 没仓,退回旧行为
-    // hard trim 的 sticky 工作视图:第一次真动手裁(丢轮/截结果)后把裁过
-    // 的视图钉住,后续请求只往它尾部追加新消息——不再每请求拿全量 history
-    // 重算"第一轮 + 最近 N 轮",裁剪窗口一路滑。sticky_base_history_size_
-    // 记钉住那一刻全量视图的长度,追加时按它切尾。ReplaceHistory 时翻篇。
-    std::optional<std::vector<api::Message>> sticky_view_;
-    std::size_t sticky_base_history_size_ = 0;
+    // 保命索的截断是确定性的:同一份超线结果每个请求都会再截一次。真通报
+    // 只打第一次(本 epoch 内),后续请求形状不变,不是新发生的有损动作——
+    // 不去重会每请求刷一条告警。ReplaceHistory 开新 epoch 时复位,压缩后
+    // 热区里若还留着超线原文,下一请求重新通报。
+    bool truncation_announced_in_epoch_ = false;
 };
 
 }  // namespace lubancode::agent

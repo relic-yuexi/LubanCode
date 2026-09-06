@@ -3,7 +3,7 @@
 //     另收每轮动态上下文;两账的公共前缀逐条相等、条数只差动态块;
 //   - cache epoch 账:追加律判定的断因点名(model_changed /
 //     history_compacted / hard_trim),epoch 只增不减;
-//   - sticky 工作视图:真裁过一次后钉住,后续只在尾部追加。
+//   - 工作视图:保命索(token 轴口径)截断确定性稳定,通报按 epoch 去重。
 #include <doctest/doctest.h>
 
 #include <string>
@@ -137,35 +137,47 @@ TEST_CASE("epoch 账:hard trim 的显式因优先于指纹反推") {
     (void)trimmed;
 }
 
-TEST_CASE("sticky 工作视图:真裁一次后钉住,后续只在尾部追加") {
+TEST_CASE("工作视图:保命索截断确定性稳定,通报按 epoch 去重") {
     agent::ContextManager context;
-    // 五轮长历史,每轮塞 400 字节,把 max_context_chars 压到 1000 触发轮级裁剪。
-    for (int i = 0; i < 5; ++i) {
-        api::Message user = UserMessage("第" + std::to_string(i) + "问 " + std::string(400, 'x'));
-        context.PushUserTurn(user, user);
-        context.PushMessage(AssistantMessage("答 " + std::string(100, 'y')));
-    }
+    // 一轮带巨肥工具结果的历史:200000 ASCII = 50000 token;窗口 100000 的
+    // 25% 线是 25000,单条结果越线(无 artifact 仓,结构压缩不外置)。
+    api::Message user = UserMessage("读大文件");
+    context.PushUserTurn(user, user);
+    api::Message use;
+    use.role = api::Role::Assistant;
+    // 用副作用工具名(空判重键):结构压缩对它永远全文,保命索才有得接
+    // (read_file 一类只读工具的超长结果在结构压缩层就外置成预览了)。
+    use.content.push_back(api::ToolUseBlock{"toolu_big", "run_command", nlohmann::json::object()});
+    context.PushMessage(use);
+    api::Message fat;
+    fat.role = api::Role::User;
+    fat.content.push_back(api::ToolResultBlock{"toolu_big", std::string(200000, 'x'), false});
+    context.PushMessage(fat);
 
-    const agent::ContextViewBudget budget{2400};
+    const agent::ContextViewBudget budget{100000, 1.0};
     auto first = context.BuildWorkingView(budget);
-    CHECK(first.trim.trimmed_turns);  // 真动手裁了:中间整轮被丢
+    CHECK(first.trim.truncated_results);  // 首次真动手:通报
+    REQUIRE(first.messages.size() == 3);
+    REQUIRE(std::holds_alternative<api::ToolResultBlock>(first.messages[2].content[0]));
+    const std::string truncated_once =
+        std::get<api::ToolResultBlock>(first.messages[2].content[0]).content;
+    CHECK(truncated_once.size() < 200000);
 
-    // 再来一轮:追加进钉住的视图,不再重算"第一轮 + 最近 N 轮"。
-    api::Message more = UserMessage("第六问 " + std::string(200, 'z'));
+    // 再来一轮:同一份结果照旧被截(确定性),但不是新动作——不重复通报;
+    // 旧消息的截断形状与上次一字不差(追加律的地基,旧字节轴滑窗病已除)。
+    api::Message more = UserMessage("再问一句");
     context.PushUserTurn(more, more);
+    context.PushMessage(AssistantMessage("答"));
     auto second = context.BuildWorkingView(budget);
-    CHECK_FALSE(second.trim.trimmed_turns);  // 余量内:这轮没再真裁
-    // 钉住的视图尾部带上了新消息。
-    bool saw_new = false;
-    for (const auto& message : second.messages) {
-        for (const auto& block : message.content) {
-            if (const auto* text = std::get_if<api::TextBlock>(&block);
-                text != nullptr && text->text.find("第六问") != std::string::npos) {
-                saw_new = true;
-            }
-        }
-    }
-    CHECK(saw_new);
+    CHECK_FALSE(second.trim.truncated_results);
+    REQUIRE(second.messages.size() == first.messages.size() + 2);
+    CHECK(std::get<api::ToolResultBlock>(second.messages[2].content[0]).content == truncated_once);
+
+    // 压缩换史开新 epoch:热区若仍带超线原文,下一请求按新发生重新通报。
+    context.ReplaceHistory(context.durable_history());
+    auto third = context.BuildWorkingView(budget);
+    CHECK(third.trim.truncated_results);
+    CHECK(std::get<api::ToolResultBlock>(third.messages[2].content[0]).content == truncated_once);
 }
 
 // ---------------------------------------------------------------------------

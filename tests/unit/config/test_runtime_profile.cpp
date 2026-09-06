@@ -56,7 +56,6 @@ TEST_CASE("BuildMainRuntimeProfile:从 config+目录折出 main 的有效份") {
     config.wire = config::Wire::ChatCompletions;
     config.model = "qwen3.8-27b";
     config.max_steps_per_turn = 0;
-    config.max_context_chars = 123456;
     config.context_window_tokens = 262144;
 
     config::ModelCatalog catalog;
@@ -70,7 +69,6 @@ TEST_CASE("BuildMainRuntimeProfile:从 config+目录折出 main 的有效份") {
     CHECK(*main_profile.max_output_tokens == 32768);
     CHECK(main_profile.max_output_tokens_source == agent::OutputBudgetSource::ModelCatalog);
     CHECK(main_profile.max_steps_per_turn == 0);
-    CHECK(main_profile.max_context_chars == 123456);
     CHECK(main_profile.context_window_tokens == 262144);
     CHECK(main_profile.length_continuations == config::kDefaultLengthContinuations);
 
@@ -100,7 +98,6 @@ TEST_CASE("main 与 general-purpose 子代理的有效输出上限相同(规格\
     CHECK(main_unset.max_output_tokens == std::nullopt);
     CHECK(sub_unset.max_output_tokens == main_unset.max_output_tokens);
     CHECK(sub_unset.max_output_tokens != 4096);
-    CHECK(sub_unset.max_context_chars == main_unset.max_context_chars);
     CHECK(sub_unset.length_continuations == main_unset.length_continuations);
     CHECK(sub_unset.max_steps_per_turn == main_unset.max_steps_per_turn);
 
@@ -121,8 +118,7 @@ TEST_CASE("main 与 general-purpose 子代理的有效输出上限相同(规格\
     REQUIRE(sub_override.max_output_tokens.has_value());
     CHECK(*sub_override.max_output_tokens == 2048);
     CHECK(sub_override.max_output_tokens_source == agent::OutputBudgetSource::ConfigFile);
-    // 覆盖只动输出上限:步数/窗口/字符安全网/续跑次数照旧继承 main。
-    CHECK(sub_override.max_context_chars == main_set.max_context_chars);
+    // 覆盖只动输出上限:步数/窗口/续跑次数照旧继承 main。
     CHECK(sub_override.context_window_tokens == main_set.context_window_tokens);
     CHECK(sub_override.length_continuations == main_set.length_continuations);
 }
@@ -132,7 +128,6 @@ TEST_CASE("InheritForSubagent:整份继承,不暗自缩小(规格\"产品不变�
     main_profile.max_output_tokens = 16384;
     main_profile.max_output_tokens_source = agent::OutputBudgetSource::ProviderDeclared;
     main_profile.max_steps_per_turn = 7;
-    main_profile.max_context_chars = 999999;
     main_profile.context_window_tokens = 131072;
     main_profile.length_continuations = 2;
 
@@ -140,9 +135,20 @@ TEST_CASE("InheritForSubagent:整份继承,不暗自缩小(规格\"产品不变�
     CHECK(sub.max_output_tokens == main_profile.max_output_tokens);
     CHECK(sub.max_output_tokens_source == main_profile.max_output_tokens_source);
     CHECK(sub.max_steps_per_turn == main_profile.max_steps_per_turn);
-    CHECK(sub.max_context_chars == main_profile.max_context_chars);
     CHECK(sub.context_window_tokens == main_profile.context_window_tokens);
     CHECK(sub.length_continuations == main_profile.length_continuations);
+}
+
+// 窗口未知(0)的兜底:字节轴裁剪拆除后,token 轴不许在"模型不在目录/窗口
+// 查不到"时裸奔——mid-turn 评估、预检硬闸与保命索全按有效窗口取数。
+TEST_CASE("EffectiveContextWindowTokens:声明了用声明值,0(未知)落 128k 兜底") {
+    agent::AgentRuntimeProfile profile;
+    profile.context_window_tokens = 0;
+    CHECK(agent::EffectiveContextWindowTokens(profile) == agent::kFallbackContextWindowTokens);
+    CHECK(agent::kFallbackContextWindowTokens == 128000);  // 主流模型窗口下限,宁早压不撞墙
+
+    profile.context_window_tokens = 262144;
+    CHECK(agent::EffectiveContextWindowTokens(profile) == 262144);
 }
 
 TEST_CASE("子任务输出预留受控上限(派工单 §四):能力声明超窗收窄,显式配置不收") {
@@ -174,9 +180,8 @@ TEST_CASE("子任务输出预留受控上限(派工单 §四):能力声明超窗
     REQUIRE(sub.max_output_tokens.has_value());
     CHECK(*sub.max_output_tokens == 32768);
     CHECK(sub.max_output_tokens_source == agent::OutputBudgetSource::SubagentDefault);
-    // 收窄只动输出上限:窗口/字符网/续跑次数照旧继承。
+    // 收窄只动输出上限:窗口/续跑次数照旧继承。
     CHECK(sub.context_window_tokens == main_profile.context_window_tokens);
-    CHECK(sub.max_context_chars == main_profile.max_context_chars);
     CHECK(sub.length_continuations == main_profile.length_continuations);
 
     // 显式配置(用户手笔)哪怕超上限也不收。

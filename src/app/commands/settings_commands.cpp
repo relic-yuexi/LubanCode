@@ -1825,8 +1825,6 @@ void PrintConfigDiagnostics(const lubancode::config::ConfigResult& result,
     if (lubancode::config::EnvironmentOverridesActiveProvider(config, sources, config.active_provider)) {
         TermOut() << "  provider_binding   = env override / unbound\n";
     }
-    TermOut() << "  max_context_chars  = " << config.max_context_chars << "  ["
-              << lubancode::config::ToString(sources.max_context_chars) << "]\n";
     TermOut() << "  max_steps_per_turn = " << config.max_steps_per_turn
               << (config.max_steps_per_turn == 0 ? tr("config.steps.unlimited") : "") << "  ["
               << lubancode::config::ToString(sources.max_steps_per_turn) << "]\n";

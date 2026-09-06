@@ -514,22 +514,25 @@ TEST_CASE("前缀: 长工具结果首次即预览,由热转冷不再追改旧消
 }
 
 // ---------------------------------------------------------------------------
-// 断裂源五(已修):hard trim 第一次真动手裁之后,裁过的视图钉住(sticky
-// view),后续只往尾部追加——裁剪窗口不再随新回合一路滑。
+// 断裂源五(已修):保命索截断是确定性的——首次真截那条巨肥工具结果之后,
+// 同一份历史每个请求截出同一副形状,旧消息不再被追改(旧字节轴按全量
+// overage 截会随历史增长滑窗,须 sticky 钉住;那条轴拆了,确定性取代钉住)。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("前缀: hard trim 后 sticky view 钉住,后续请求不再滑窗") {
+TEST_CASE("前缀: 保命索截断确定性,巨肥结果首进视图即截,后续旧消息一字不改") {
     CaptureBackend backend;
     backend.scripts = {
-        TextScript("答一"), TextScript("答二"), TextScript("答三"),
-        TextScript("答四"), TextScript("答五"), TextScript("答六"),
-        TextScript("答七"),
+        ToolUseScript("toolu_1", "run_command"), TextScript("答一"),
+        TextScript("答二"),
     };
     tools::ToolRegistry registry;
-    // 7 轮每轮 ~1000 字符;上限 6000:第 6 轮起 TrimHistory 开始丢中间轮
-    // (留第一轮 + 最近 3 轮,约 4000 字符,给后续追加留了余量——余量内
-    // sticky 不再动手,余量耗尽再裁一次是新的明确 epoch break)。
-    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 0, .max_context_chars = 6000}, .system_prompt = "system prompt"});
+    // run_command 是副作用工具:结构压缩永远全文,巨肥结果由保命索接手。
+    // 60000 词 = 日常尺 30000 token;窗口 32768 的 25% 线是 8192,必截。
+    std::string fat;
+    fat.reserve(120000);
+    for (int i = 0; i < 60000; ++i) fat += "a ";
+    registry.Register(std::make_unique<FixedTool>("run_command", fat));
+    agent::Agent loop(backend, registry, agent::AgentProfile{.request{.model = "test-model"}, .runtime{.max_output_tokens = 4096, .max_steps_per_turn = 0, .context_window_tokens = 32768}, .system_prompt = "system prompt"});
     agent::TurnWiring callbacks;
     lubancode::test::RecordedTurn turn;
     callbacks.events = &turn.adapter;
@@ -537,40 +540,40 @@ TEST_CASE("前缀: hard trim 后 sticky view 钉住,后续请求不再滑窗") {
     // 载荷里还原,身份(cache_epoch/追加律)齐。
     const std::vector<api::UsageReport>& reports = turn.recorder.usage_reports;
 
-    for (int turn = 1; turn <= 7; ++turn) {
-        const std::string prompt(1000, static_cast<char>('a' + turn));
-        REQUIRE(loop.Run(prompt, callbacks).has_value());
-    }
-    REQUIRE(backend.captured.size() == 7);
+    REQUIRE(loop.Run("第一问", callbacks).has_value());
+    REQUIRE(loop.Run("第二问", callbacks).has_value());
+    REQUIRE(backend.captured.size() == 3);
 
-    // 找到第一份真正动手裁的请求(第 6 轮):hard_trim 记账。
-    std::size_t first_trimmed = 0;
-    bool saw_trim_reason = false;
-    for (std::size_t i = 0; i < reports.size(); ++i) {
-        if (reports[i].epoch_break_reason == "hard_trim") {
-            first_trimmed = i;
-            saw_trim_reason = true;
-            break;
-        }
-    }
-    REQUIRE(saw_trim_reason);
-    CHECK(first_trimmed == 5);  // 第 6 轮(0-based 下标 5)
-    CHECK(reports[first_trimmed].cache_epoch == 2);
-
-    // trim 前的追加律照旧(trim 那次除外)。
-    for (std::size_t i = 1; i < first_trimmed; ++i) {
+    // 三份请求追加律全部成立:巨肥结果第一次进请求视图就是截后的形状,
+    // "已发出的旧消息"从未被追改(旧字节轴首裁必断一次 epoch,已随之拆除)。
+    for (std::size_t i = 1; i < backend.captured.size(); ++i) {
         CHECK(IsAppendOnlySuccessor(backend.captured[i - 1], backend.captured[i]));
     }
+    for (const auto& report : reports) {
+        CHECK(report.epoch_break_reason.empty());
+    }
 
-    // trim 之后:视图钉住,下一轮只是尾部追加——旧消息不再被追改、窗口
-    // 不再滑。全量 JSONL 仍照旧保留,sticky 只是模型眼下那本账。
-    REQUIRE(first_trimmed + 1 < backend.captured.size());
-    CHECK(IsAppendOnlySuccessor(backend.captured[first_trimmed], backend.captured[first_trimmed + 1]));
-    const agent::PrefixDiff diff =
-        agent::DiffRequests(backend.captured[first_trimmed], backend.captured[first_trimmed + 1]);
-    CHECK(diff.appended_messages == 2);
-    CHECK(reports[first_trimmed + 1].epoch_break_reason.empty());
-    CHECK(reports[first_trimmed + 1].prefix_append_only);
+    // 截断形状跨请求逐字节一致:第 2、3 份请求里那条 run_command 结果是
+    // 同一副截后模样(标注在,长度远小于原文)。全量 JSONL 仍照旧保留,
+    // 截断只活在请求视图里。
+    std::string first_seen;
+    std::string second_seen;
+    for (const auto& block : backend.captured[1].messages.back().content) {
+        if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+            first_seen = result->content;
+        }
+    }
+    for (const auto& message : backend.captured[2].messages) {
+        for (const auto& block : message.content) {
+            if (const auto* result = std::get_if<api::ToolResultBlock>(&block)) {
+                second_seen = result->content;
+            }
+        }
+    }
+    REQUIRE_FALSE(first_seen.empty());
+    CHECK(first_seen.find("[内容过长已截断]") != std::string::npos);
+    CHECK(first_seen.size() < fat.size());
+    CHECK(second_seen == first_seen);
 }
 
 // ---------------------------------------------------------------------------

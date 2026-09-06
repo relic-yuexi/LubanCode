@@ -24,7 +24,6 @@ agent::AgentRuntimeProfile BuildMainRuntimeProfile(const config::Config& config,
     profile.max_output_tokens = budget.tokens;
     profile.max_output_tokens_source = budget.source;
     profile.max_steps_per_turn = config.max_steps_per_turn;
-    profile.max_context_chars = config.max_context_chars;
     profile.context_window_tokens = config.context_window_tokens;
     profile.length_continuations = config.agent.length_continuations;
     return profile;

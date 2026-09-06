@@ -1,8 +1,9 @@
 // AgentProfileResolver 的单测(自定义 Agent 单阶段 3)。四笔账:
-//   - 预算并流:runtime 四字段(max_output_tokens/max_context_chars/
-//     context_window_tokens/length_continuations)按"YAML 显式 > 父值"合并;
+//   - 预算并流:runtime 三字段(max_output_tokens/context_window_tokens/
+//     length_continuations)按"YAML 显式 > 父值"合并;
 //     max_steps_per_turn 按"入参显式 > YAML > 配置默认";max_output_tokens
 //     的来源枚举四级(YAML=ConfigFile / provider / 目录 / unset)各钉一档。
+//     (旧 max_context_chars 已随字节轴裁剪拆除,不再并流。)
 //   - 权限只可收窄:inherit 同父、收窄放行、放宽报 agent.permission_widening。
 //   - 缺依赖结构化错误:requires.tools / mcp_servers / skills.preload 缺项报
 //     agent.missing_dependency;allow 越权报 agent.tool_not_granted;effort
@@ -83,7 +84,6 @@ agent::AgentProfile MakeParentProfile() {
     parent.runtime.max_output_tokens = 4096;
     parent.runtime.max_output_tokens_source = agent::OutputBudgetSource::ProviderDeclared;
     parent.runtime.max_steps_per_turn = 12;
-    parent.runtime.max_context_chars = 300000;
     parent.runtime.context_window_tokens = 128000;
     parent.runtime.length_continuations = 2;
     parent.prompt_sections.mcp = true;
@@ -118,7 +118,6 @@ void CheckProfilesIdentical(const agent::ResolvedAgentProfile& a, const agent::R
     CHECK(a.profile.runtime.max_output_tokens == b.profile.runtime.max_output_tokens);
     CHECK(a.profile.runtime.max_output_tokens_source == b.profile.runtime.max_output_tokens_source);
     CHECK(a.profile.runtime.max_steps_per_turn == b.profile.runtime.max_steps_per_turn);
-    CHECK(a.profile.runtime.max_context_chars == b.profile.runtime.max_context_chars);
     CHECK(a.profile.runtime.context_window_tokens == b.profile.runtime.context_window_tokens);
     CHECK(a.profile.runtime.length_continuations == b.profile.runtime.length_continuations);
     CHECK(a.profile.runtime.max_wall_secs == b.profile.runtime.max_wall_secs);
@@ -168,14 +167,13 @@ void CheckProfilesIdentical(const agent::ResolvedAgentProfile& a, const agent::R
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// 预算并流:四字段 YAML 显式 > 父值;steps 入参 > YAML > 配置默认
+// 预算并流:三字段 YAML 显式 > 父值;steps 入参 > YAML > 配置默认
 // ---------------------------------------------------------------------------
 
-TEST_CASE("预算并流:YAML 四字段显式给就按给的上,没给落父值") {
+TEST_CASE("预算并流:YAML 三字段显式给就按给的上,没给落父值") {
     const agent::AgentDefinition with_yaml = ParseOrThrow(BudgetYaml(
         "  max_output_tokens: 8192\n"
         "  max_steps_per_turn: 24\n"
-        "  max_context_chars: 600000\n"
         "  context_window_tokens: 200000\n"
         "  length_continuations: 3\n"));
     const agent::AgentDefinition without_yaml = ParseOrThrow(BudgetYaml("  max_steps_per_turn: 24\n"));
@@ -189,7 +187,6 @@ TEST_CASE("预算并流:YAML 四字段显式给就按给的上,没给落父值")
     // 父值原样继承(父的来源也照抄,不重算三级)。
     CHECK(resolved.profile.runtime.max_output_tokens == 4096);
     CHECK(resolved.profile.runtime.max_output_tokens_source == agent::OutputBudgetSource::ProviderDeclared);
-    CHECK(resolved.profile.runtime.max_context_chars == 300000);
     CHECK(resolved.profile.runtime.context_window_tokens == 128000);
     CHECK(resolved.profile.runtime.length_continuations == 2);
     CHECK(resolved.profile.runtime.max_steps_per_turn == 9);  // YAML 没给,落配置默认
@@ -199,7 +196,6 @@ TEST_CASE("预算并流:YAML 四字段显式给就按给的上,没给落父值")
     CHECK(resolved.ok());
     CHECK(resolved.profile.runtime.max_output_tokens == 8192);
     CHECK(resolved.profile.runtime.max_output_tokens_source == agent::OutputBudgetSource::ConfigFile);
-    CHECK(resolved.profile.runtime.max_context_chars == 600000);
     CHECK(resolved.profile.runtime.context_window_tokens == 200000);
     CHECK(resolved.profile.runtime.length_continuations == 3);
     CHECK(resolved.profile.runtime.max_steps_per_turn == 24);  // YAML 压过配置默认

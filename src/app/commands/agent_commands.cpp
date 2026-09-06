@@ -294,9 +294,6 @@ std::vector<std::string> FormatAgentDoctorReport(const lubancode::agent::AgentCa
     runtime += def.max_turns.has_value()
                    ? std::to_string(*def.max_turns) + "(任务总 turn;override > YAML > subagent.default_max_turns)"
                    : std::string("继承(配置 subagent.default_max_turns,未设 = 0 不限)");
-    runtime += " · max_context_chars=";
-    runtime += def.max_context_chars.has_value() ? std::to_string(*def.max_context_chars)
-                                                 : std::string("继承");
     runtime += " · context_window_tokens=";
     runtime += def.context_window_tokens.has_value() ? std::to_string(*def.context_window_tokens)
                                                      : std::string("继承");
@@ -399,9 +396,6 @@ std::vector<std::string> FormatAgentInspectReport(const lubancode::agent::AgentC
         if (def.max_turns.has_value()) {
             append("max_turns", std::to_string(*def.max_turns) + "(任务总 turn)");
         }
-        if (def.max_context_chars.has_value()) {
-            append("max_context_chars", std::to_string(*def.max_context_chars));
-        }
         if (def.context_window_tokens.has_value()) {
             append("context_window_tokens", std::to_string(*def.context_window_tokens));
         }
@@ -409,7 +403,7 @@ std::vector<std::string> FormatAgentInspectReport(const lubancode::agent::AgentC
             append("length_continuations", std::to_string(*def.length_continuations));
         }
         lines.push_back("runtime 并流: " +
-                        (declared.empty() ? std::string("定义未显式声明预算字段,五枚全落父值")
+                        (declared.empty() ? std::string("定义未显式声明预算字段,四枚全落父值")
                                           : ("显式声明 " + declared + ";其余落父值")));
     }
     // ---- 迁移片段(turn 预算单 §5.2 阶段 B,P1-0):旧字段还在用的定义给

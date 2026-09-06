@@ -1,7 +1,8 @@
-// 历史裁剪:上下文超限时,把中间的老消息整轮扔掉,只留最早一轮(含最早
-// 那条 user 消息)和最近几轮完整对话。system 提示词不在 history 里
-// (Request::system 单独传),这里不用管。裁剪只影响"发给模型看"的那份
-// messages,AgentLoop 自己存的完整历史(history())不受影响。
+// 上下文保护(token 轴唯一裁剪,字节轴已拆):语义压缩(compact)是主
+// 防线;这里只留两条纯函数支撑——统一 token 估算尺,和一条"单条巨肥工具
+// 结果"的保命索。旧的按字节整轮删裁(TrimHistory,600k 字符线)已删:
+// 两把尺松紧随语言漂移(英文裁早、中文失守),互相打架,保护收敛到 token
+// 轴一户。
 
 #pragma once
 
@@ -11,14 +12,6 @@
 #include "api/types.hpp"
 
 namespace lubancode::agent {
-
-// 默认的裁剪阈值(字节账:消息里所有文本/工具入参/工具结果的 UTF-8 字节
-// 数之和;对中文按字节算,不是按字数算)。环境变量 LUBANCODE_MAX_CONTEXT
-// 可以覆盖这个数。
-constexpr std::size_t kDefaultMaxContextChars = 600000;
-
-// 默认保留最近几轮完整对话不裁。
-constexpr std::size_t kDefaultKeepRecentTurns = 3;
 
 // ---------------------------------------------------------------------------
 // 统一 token 估算口径(全库唯一一把尺)
@@ -51,7 +44,8 @@ std::size_t EstimateHistoryTokens(const std::vector<api::Message>& history, doub
 // 粗略估算一段历史的字节账(所有文本/工具入参/工具结果的 UTF-8 字节数之
 // 和)。名字里的 Bytes 是明话:这是字节,不是字符数,更不是 token 数。
 // 旧名 EstimateChars 的实际行为就是它——名字里叫 chars 算的是字节,这账
-// 改准了名字。
+// 改准了名字。字节轴裁剪拆除后它只剩计量用途:/context 显示、校准样本的
+// 请求字节数——不做任何裁剪决策。
 std::size_t EstimateHistoryBytes(const std::vector<api::Message>& history);
 
 // ---------------------------------------------------------------------------
@@ -78,35 +72,54 @@ bool IsUserTurnStart(const api::Message& message);
 // 由调用方自行处置;一条用户输入都没有时返回空表。
 std::vector<std::pair<std::size_t, std::size_t>> SplitIntoTurns(const std::vector<api::Message>& history);
 
-// 从环境变量 LUBANCODE_MAX_CONTEXT 读裁剪阈值,没设置、或者设置的不是合法
-// 正整数,就用默认值 kDefaultMaxContextChars。
-std::size_t MaxContextCharsFromEnv();
+// ---------------------------------------------------------------------------
+// 保命索:单条巨肥工具结果的尾部截断(挂 token 轴)
+//
+// 防的是另一种死法:单条工具结果巨肥(read_file 吞大文件一类)时,compact
+// 的摘要请求本身就会超窗——历史压多少遍,腾出来的空间都不够装下这条结果
+// 自己所在的分块,压缩与请求一起死循环。旧的字节轴整轮删裁(TrimHistory)
+// 已拆,这条保险改挂 token 轴口径:按真实 token 估算(含校准系数)判,
+// 不按固定字节数。
+// ---------------------------------------------------------------------------
 
-// 硬裁剪报告:TrimHistory 这一次有没有丢东西、丢了多少。上层(UI)拿到
-// 报告须向用户明说发生了有损裁剪——静默降级会让用户以为语义压缩已成功,
-// 模型其实已经看不到那段原文了。
+// 单条工具结果的窗口占比线:一条 ToolResultBlock 的估算 token 超过估算
+// 窗口的 25% 即动手截尾,截到落回线内。25% 的依据:compact 的 map 输入
+// 按 turn 分块,单条结果就要吃掉窗口四分之一时,它所在的 turn 分块加上
+// 压缩指令与输出预留,大概率已超压缩模型的单次输入预算——摘要请求装不下
+// 历史,也装不下自己;四条这样的结果就能塞满整窗,系统提示与工具表无处
+// 安放。25% 在"单条结果还留得下足够原文(128k 窗口下约 32k token)"与
+// "给其余历史留足四分之三"之间取的保守线。
+constexpr int kOversizedToolResultWindowPercent = 25;
+
+// 硬裁剪报告:保命索这一次有没有真动手。上层(UI)拿到报告须向用户明说
+// 发生了有损截断——静默降级会让用户以为语义压缩已成功,模型其实已经看
+// 不到那段原文了。截断是确定性的(同一份超线结果每请求都会再截一次),
+// ContextManager 按 epoch 去重:只有"本 epoch 首次发生"才置真,重复截
+// 同一副形状不算新动作,不反复刷告警。
 struct TrimReport {
-    bool trimmed_turns = false;        // 丢了中间整轮(换成了占位说明)
-    std::size_t dropped_messages = 0;  // 丢掉的消息条数(不含占位合并的那条)
-    bool truncated_results = false;    // 有超大工具结果被截尾
+    bool truncated_results = false;  // 有超大工具结果被截尾(本 epoch 首次)
 };
 
-// 裁剪历史:
-//   - EstimateHistoryBytes(history) 不超过 max_chars 时,原样返回,一条不动。
-//   - 超过时,把历史按"轮"切开(一轮 = 一条真正的用户输入消息,加上后面
-//     跟着的所有 assistant/tool_result 消息,直到下一条用户输入消息之前),
-//     保留最早一轮(含最早那条 user 消息)和最近 keep_recent_turns 轮,
-//     中间的轮次整轮扔掉,换成一条 "[早前对话已裁剪]" 的占位 user 消息。
-//   - 因为永远按"轮"的边界切,一轮内部的 tool_use 和它对应的 tool_result
-//     永远同进同退,不会出现只有 tool_use 没有 tool_result(或反过来)的
-//     情况——那样喂给 API 会直接报错。
-//   - 轮数本来就不够裁(第一轮和最近 N 轮已经覆盖/重叠了全部历史)时,
-//     原样返回(超大工具结果的截尾兜底仍会做)。
-//   - report 非空时,把本次实际发生的丢失填进去(没丢就保持全默认假)。
-std::vector<api::Message> TrimHistory(const std::vector<api::Message>& history,
-                                       std::size_t max_chars = kDefaultMaxContextChars,
-                                       std::size_t keep_recent_turns = kDefaultKeepRecentTurns,
-                                       TrimReport* report = nullptr);
+// 截断保命索(纯函数):
+//   - 逐条扫 ToolResultBlock:估算 token(EstimateMessageTokens 同一把尺,
+//     含校准系数 calibration)不超过 window_tokens * 25% 的原样放行;
+//   - 超线的从尾部截短,截到结果自身落回 25% 线内,尾部打
+//     "[内容过长已截断]" 标注;至少保留 kMinKeepBytes 字节,免得截成
+//     空壳,模型连是什么工具的结果都看不出;
+//   - 富块结果(MCP blocks)只裁 TextContent 的 text(从最后一块起倒着
+//     裁),图片/音频/资源引用与 structuredContent 一概不动,裁完按真账
+//     重算投影;
+//   - 只动 tool_result 的 content/blocks,消息条数、tool_use/tool_result
+//     配对关系一概不碰;
+//   - 截断按内容自身算,确定性的:同一份历史每请求截出同一副形状,追加律
+//     不受牵连(旧的按全量 overage 截会随历史增长滑窗,已随之退场);
+//   - report 非空时把本次实际发生的截断填进去(没截就保持全默认假)。
+// window_tokens 传 0(窗口未知)时按 kFallbackContextWindowTokens 兜底,
+// 不裸奔。返回处理后的消息(没动就是原样拷贝)。
+std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> messages,
+                                                     std::size_t window_tokens,
+                                                     double calibration = 1.0,
+                                                     TrimReport* report = nullptr);
 
 // ---------------------------------------------------------------------------
 // mid-turn 上下文安全点(0.27.x 分层压缩第一期;骨架拆解批四从 loop.hpp
@@ -140,9 +153,9 @@ constexpr int kRealOverflowPercent = 60;
 //                     Run() 用(可能已换短的)history 重新拼请求。
 //                     (压缩触发失衡单后是双闸:projected 过参考线之外,
 //                     真实水位也须过 kRealOverflowPercent——见下。)
-//   AfterHardTrim —— TrimHistory 字符安全网这次真丢了东西(丢轮/截结果)。
-//                     纯通报:上层必须向用户显式告警"发生了有损硬裁",
-//                     不许静默降级;此时再压缩也救不回这一次的请求。
+//   AfterHardTrim —— 保命索这次真动了手(单条巨肥工具结果被截尾)。纯通
+//                     报:上层必须向用户显式告警"发生了有损截断",不许静
+//                     默降级;此时再压缩也救不回这一次的请求。
 //   PreflightExceeded —— token 预检的最终闸判定(派工单 §4.4)。三项账
 //                     (estimated_input + reserved_output + protocol_margin)
 //                     从这里进可观测事件;reserve_clamped = 常规预留装不下、
@@ -163,8 +176,6 @@ struct ContextPressure {
     // 一把尺。working_view_overflow:它过没过 kRealOverflowPercent 线。
     std::size_t working_view_tokens = 0;
     bool working_view_overflow = false;
-    bool hard_trimmed_turns = false;   // 丢了中间整轮
-    std::size_t hard_dropped_messages = 0;
     bool hard_truncated_results = false;  // 截了超大工具结果
     // ---- 预检三项账(派工单 §4.4;phase == PreflightExceeded 时填)--------
     std::size_t estimated_input_tokens = 0;

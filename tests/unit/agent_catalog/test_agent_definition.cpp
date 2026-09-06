@@ -89,12 +89,15 @@ permissions:
 )yaml";
     const auto result = agent::ParseAgentDefinitionYaml(yaml, "browser-tester.yaml");
     REQUIRE(result.definition.has_value());
-    // 旧字段单独出现:定义可用,但带一条 agent.legacy_step_budget 弃用警告
-    //(turn 预算单 §5.2 阶段 A,P1-0)——不偷换语义,也不悄悄放过。
-    REQUIRE(result.issues.size() == 1);
+    // 旧字段单独出现:定义可用,但各带一条弃用警告——max_steps_per_turn 是
+    // turn 预算单 §5.2 阶段 A 的 agent.legacy_step_budget;max_context_chars
+    // 随字节轴裁剪拆除,发 agent.legacy_max_context_chars(值不采用)。
+    REQUIRE(result.issues.size() == 2);
+    for (const auto& issue : result.issues) {
+        CHECK(issue.warning);
+    }
     REQUIRE(HasIssueOn(result, "runtime.max_steps_per_turn"));
-    CHECK(result.issues[0].warning);
-    CHECK(result.issues[0].code == "agent.legacy_step_budget");
+    REQUIRE(HasIssueOn(result, "runtime.max_context_chars"));
     CHECK(ErrorCount(result) == 0);
     const auto& def = *result.definition;
     CHECK(def.schema == 1);
@@ -111,13 +114,12 @@ permissions:
     CHECK(def.tools.deny == std::vector<std::string>{"shell"});
     CHECK(def.mcp_servers == std::vector<std::string>{"browser"});
     CHECK(def.requires_tools == std::vector<std::string>{"mcp__browser__navigate"});
-    // 契约 4.8:五个预算字段与 AgentRuntimeProfile 同名同义,逐一对账。
+    // 契约 4.8:预算字段与 AgentRuntimeProfile 同名同义,逐一对账
+    //(max_context_chars 已死,只剩弃用警告,不进定义)。
     REQUIRE(def.max_output_tokens.has_value());
     CHECK(*def.max_output_tokens == 8192);
     REQUIRE(def.max_steps_per_turn.has_value());
     CHECK(*def.max_steps_per_turn == 24);
-    REQUIRE(def.max_context_chars.has_value());
-    CHECK(*def.max_context_chars == 600000);
     REQUIRE(def.context_window_tokens.has_value());
     CHECK(*def.context_window_tokens == 0);  // 0 = 未知,合法值
     REQUIRE(def.length_continuations.has_value());
@@ -145,7 +147,6 @@ TEST_CASE("最小合法 YAML:三样必填之外全走默认(继承)") {
     CHECK(def.requires_tools.empty());
     CHECK_FALSE(def.max_output_tokens.has_value());
     CHECK_FALSE(def.max_steps_per_turn.has_value());
-    CHECK_FALSE(def.max_context_chars.has_value());
     CHECK_FALSE(def.context_window_tokens.has_value());
     CHECK_FALSE(def.length_continuations.has_value());
     CHECK(def.execution_mode.empty());  // 空 = auto,由 resolver 落默认
@@ -205,7 +206,7 @@ TEST_CASE("类型错:runtime.max_steps_per_turn 给字符串,报行列") {
     }
 }
 
-TEST_CASE("runtime 五预算键(契约 4.8):正例与 tests/fixtures/agents/complete.yaml 同款") {
+TEST_CASE("runtime 预算键(契约 4.8):正例与 tests/fixtures/agents/complete.yaml 同款") {
     // 与夹具同款的 runtime 段全键过一遍——名字与 AgentRuntimeProfile 一字不差。
     const std::string yaml = R"yaml(schema: 1
 name: budget-probe
@@ -219,18 +220,26 @@ runtime:
 )yaml";
     const auto result = agent::ParseAgentDefinitionYaml(yaml, "budget-probe.yaml");
     REQUIRE(result.definition.has_value());
-    // max_steps_per_turn 单独出现:值照收 + 一条 legacy 弃用警告(§5.2)。
-    REQUIRE(result.issues.size() == 1);
-    CHECK(result.issues[0].warning);
-    CHECK(result.issues[0].code == "agent.legacy_step_budget");
+    // max_steps_per_turn 单独出现:值照收 + legacy 弃用警告(§5.2);
+    // max_context_chars 已死:弃用警告一条,值不进定义。
+    REQUIRE(result.issues.size() == 2);
+    for (const auto& issue : result.issues) {
+        CHECK(issue.warning);
+    }
+    bool saw_step_legacy = false;
+    bool saw_chars_legacy = false;
+    for (const auto& issue : result.issues) {
+        saw_step_legacy = saw_step_legacy || issue.code == "agent.legacy_step_budget";
+        saw_chars_legacy = saw_chars_legacy || issue.code == "agent.legacy_max_context_chars";
+    }
+    CHECK(saw_step_legacy);
+    CHECK(saw_chars_legacy);
     CHECK(ErrorCount(result) == 0);
     const auto& def = *result.definition;
     REQUIRE(def.max_output_tokens.has_value());
     CHECK(*def.max_output_tokens == 4096);
     REQUIRE(def.max_steps_per_turn.has_value());
     CHECK(*def.max_steps_per_turn == 0);  // 0 = 不限步,合法(legacy 语义不动)
-    REQUIRE(def.max_context_chars.has_value());
-    CHECK(*def.max_context_chars == 200000);
     REQUIRE(def.context_window_tokens.has_value());
     CHECK(*def.context_window_tokens == 256000);
     REQUIRE(def.length_continuations.has_value());
@@ -247,8 +256,6 @@ runtime:
     CHECK(from_file.issues.empty());
     REQUIRE(from_file.definition->max_output_tokens.has_value());
     CHECK(*from_file.definition->max_output_tokens == 8192);
-    REQUIRE(from_file.definition->max_context_chars.has_value());
-    CHECK(*from_file.definition->max_context_chars == 600000);
     REQUIRE(from_file.definition->context_window_tokens.has_value());
     CHECK(*from_file.definition->context_window_tokens == 0);
     REQUIRE(from_file.definition->length_continuations.has_value());
@@ -259,15 +266,11 @@ runtime:
     CHECK_FALSE(from_file.definition->max_steps_per_turn.has_value());
 }
 
-TEST_CASE("runtime 五预算键:下界与类型各报一处,行列指得到") {
+TEST_CASE("runtime 预算键:下界与类型各报一处,行列指得到") {
     // max_output_tokens 要正整数:0 报错(契约 4.8"正整数")。
     CHECK(HasIssueOn(agent::ParseAgentDefinitionYaml(
                          "schema: 1\nname: a\ndescription: d\nruntime:\n  max_output_tokens: 0\n", "a.yaml"),
                      "runtime.max_output_tokens"));
-    // max_context_chars 要正整数:0 报错。
-    CHECK(HasIssueOn(agent::ParseAgentDefinitionYaml(
-                         "schema: 1\nname: a\ndescription: d\nruntime:\n  max_context_chars: 0\n", "a.yaml"),
-                     "runtime.max_context_chars"));
     // 负数:stoull 不收负号,按类型错报。
     CHECK(HasIssueOn(agent::ParseAgentDefinitionYaml(
                          "schema: 1\nname: a\ndescription: d\nruntime:\n  length_continuations: -1\n", "a.yaml"),
@@ -285,14 +288,30 @@ TEST_CASE("runtime 五预算键:下界与类型各报一处,行列指得到") {
     }
     // 超上限(size_t 键的 1 TiB 帽):写一串离谱的数,报"超上限"不截断装小。
     const auto overflow = agent::ParseAgentDefinitionYaml(
-        "schema: 1\nname: a\ndescription: d\nruntime:\n  max_context_chars: 9999999999999999\n", "a.yaml");
+        "schema: 1\nname: a\ndescription: d\nruntime:\n  context_window_tokens: 9999999999999999\n", "a.yaml");
     CHECK_FALSE(overflow.definition.has_value());
-    REQUIRE(HasIssueOn(overflow, "runtime.max_context_chars"));
+    REQUIRE(HasIssueOn(overflow, "runtime.context_window_tokens"));
     for (const auto& issue : overflow.issues) {
-        if (issue.field == "runtime.max_context_chars") {
+        if (issue.field == "runtime.context_window_tokens") {
             CHECK(issue.message.find("超上限") != std::string::npos);
         }
     }
+}
+
+// max_context_chars(字节轴裁剪的旧阈值)已随该轴拆除:键仍认(旧定义文件
+// 不因它废掉),出现即发 agent.legacy_max_context_chars 弃用警告,值不校验
+// 不采用——裁剪保护统一走 token 窗口(runtime.context_window_tokens)。
+TEST_CASE("runtime.max_context_chars(已死键):出现即弃用警告,值不采用、定义可用") {
+    // 值离谱(旧口径的超上限)也不拦加载:字段已死,警告说清去向即可。
+    const auto result = agent::ParseAgentDefinitionYaml(
+        "schema: 1\nname: a\ndescription: d\nruntime:\n  max_context_chars: 9999999999999999\n", "a.yaml");
+    REQUIRE(result.definition.has_value());
+    REQUIRE(result.issues.size() == 1);
+    REQUIRE(HasIssueOn(result, "runtime.max_context_chars"));
+    CHECK(result.issues[0].warning);
+    CHECK(result.issues[0].code == "agent.legacy_max_context_chars");
+    CHECK(result.issues[0].line == 5);  // 行列指得到,doctor 好带路
+    CHECK(ErrorCount(result) == 0);
 }
 
 TEST_CASE("runtime.max_turns(任务总 turn,turn 预算单 §4.1):正例、0、负数、错型、超帽") {

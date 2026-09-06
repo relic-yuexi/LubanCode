@@ -63,11 +63,12 @@ ResolvedAgentProfile ResolveAgentProfile(const AgentProfileResolveRequest& reque
         request.environment.has_value() ? *request.environment : empty_env;
     const bool has_env = request.environment.has_value();
 
-    // ---- 1. runtime 预算:base = 父皮,五字段按各自的级差覆盖 ----------------
+    // ---- 1. runtime 预算:base = 父皮,各字段按各自的级差覆盖 ----------------
     // 次序(单子阶段 3 定死,对账测试钉):入参显式 > YAML runtime > 父值/
-    // 配置默认。四枚预算字段的继承语义照 AgentRuntimeProfile 的注释——
-    // 子代理只该收窄,不自开预算口子:YAML 显式给了就按给的上,没给落
-    // 父值(父值在父处已走完三级解析,来源照抄,不重算)。
+    // 配置默认。预算字段的继承语义照 AgentRuntimeProfile 的注释——子代理
+    // 只该收窄,不自开预算口子:YAML 显式给了就按给的上,没给落父值(父值
+    // 在父处已走完三级解析,来源照抄,不重算)。旧 max_context_chars 已随
+    // 字节轴裁剪拆除,不再并流(定义里的旧键由解析层发弃用警告)。
     AgentRuntimeProfile runtime = parent.runtime;
     runtime.max_output_tokens = definition.max_output_tokens.has_value()
                                     ? definition.max_output_tokens
@@ -75,8 +76,6 @@ ResolvedAgentProfile ResolveAgentProfile(const AgentProfileResolveRequest& reque
     runtime.max_output_tokens_source =
         definition.max_output_tokens.has_value() ? OutputBudgetSource::ConfigFile  // 视同 config 级显式
                                                  : parent.runtime.max_output_tokens_source;
-    runtime.max_context_chars =
-        definition.max_context_chars.value_or(parent.runtime.max_context_chars);
     runtime.context_window_tokens = definition.context_window_tokens.value_or(
         request.context_window_tokens > 0 ? request.context_window_tokens
                                           : parent.runtime.context_window_tokens);

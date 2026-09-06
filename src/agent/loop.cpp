@@ -1010,9 +1010,13 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             wiring.token_calibrator != nullptr
                 ? wiring.token_calibrator->Coefficient(agent.profile_.provider, model_)
                 : 1.0;
+        // 有效窗口(token 轴唯一裁剪的基准):profile 声明了用声明值,0(模型
+        // 不在目录/窗口查不到)落 kFallbackContextWindowTokens 兜底——字节轴
+        // 裁剪拆除后,窗口未知不许再裸奔,下面的预检与保命索全按这只口。
+        const std::size_t window_tokens = EffectiveContextWindowTokens(profile_);
         // 第一拍的新消息不可压。system、工具表与它自己已加输出预留越窗时，
         // 先报错，连自动 compact 回调都不叫；压旧历史救不了这笔固定账。
-        if (step_index == 0 && profile_.context_window_tokens > 0 && !context_.request_history().empty()) {
+        if (step_index == 0 && !context_.request_history().empty()) {
             std::size_t fixed_input_tokens =
                 EstimateTextTokensForPreflight(request.system, token_calibration) +
                 EstimateMessageTokensForPreflight(context_.request_history().back(), token_calibration);
@@ -1023,12 +1027,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
             const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
             const std::size_t output_tokens = static_cast<std::size_t>(output_budget.reserve_for_estimate());
-            if (ExceedsContextWindow(fixed_input_tokens, output_tokens, profile_.context_window_tokens)) {
+            if (ExceedsContextWindow(fixed_input_tokens, output_tokens, window_tokens)) {
                 return std::unexpected(
                     "上下文预检未通过:当前消息与固定提示约 " + std::to_string(fixed_input_tokens) +
                     " token + 输出预留 " + std::to_string(output_tokens) + " + 协议余量 " +
                     std::to_string(kContextPreflightHeadroomTokens) + "，超过窗口 " +
-                    std::to_string(profile_.context_window_tokens) +
+                    std::to_string(window_tokens) +
                     "。当前消息本身已装不下，压缩旧历史也无济于事；请缩短输入或调低输出上限。");
             }
         }
@@ -1062,11 +1066,11 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         }
 
         // mid-turn 安全点:先拼好真请求要发的那副工作视图(无损结构压缩 +
-        // 字符安全网 + sticky,全在 ContextManager;真丢了东西的因它自己记
-        // 进前缀账),projected 就拿这副视图估——口径归一(压缩触发失衡单
+        // 保命索,全在 ContextManager;真截了东西的因它自己记进前缀账),
+        // projected 就拿这副视图估——口径归一(压缩触发失衡单
         // §二.A):估的和发的是同一副牌,不再走 BuildPressureDryRunView 单独
         // 虚算。旧路的两笔账分家:P1-1 之前拿未压缩全量估(真请求 47k 估出
-        // 189k);P1-1 之后虽与工作视图同样去重,但不走字符安全网与 sticky,
+        // 189k);P1-1 之后虽与工作视图同样去重,但不走保命索,
         // 且量它的尺是"临出门"的保守托底尺——短词密集的工具输出(副作用
         // 工具的重复结果判重不开门,结构压缩收不走)逐词计数能虚出日常尺
         // 两倍,叠加按真实口径标定的 80% 参考线,触发线实际落在真实水位
@@ -1077,10 +1081,10 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 显示同一把)也须过 kRealOverflowPercent——虚算单独不触发;真实
         // 水位真到线上,该压的仍压。上层回调里可以同步做一次语义压缩
         // (ReplaceHistory 开新 epoch),返回后 epoch 断了就按新史重拼——
-        // 发出去的仍是(可能已换短的)那份请求视图。窗口未知(0)或没设
-        // 回调时只拼视图不评估,行为与从前一致——这一步不发出任何请求。
-        ContextWorkingView working_view = context_.BuildWorkingView({profile_.max_context_chars});
-        if (profile_.context_window_tokens > 0 && wiring_.on_context_pressure) {
+        // 发出去的仍是(可能已换短的)那份请求视图。没设回调时只拼视图
+        // 不评估——这一步不发出任何请求。窗口未知走上面的兜底,不裸奔。
+        ContextWorkingView working_view = context_.BuildWorkingView({window_tokens, token_calibration});
+        if (wiring_.on_context_pressure) {
             // 输出上限纳入 projected 计算(规格根因一):声明了用声明值,
             // unset 用保守估计(kUnsetOutputReserveEstimateTokens)——服务端
             // 默认上限拿不到准数,宁可早压不撞墙。输出预留单独保留:那是
@@ -1105,13 +1109,13 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             const std::size_t working_view_tokens =
                 EstimateHistoryTokens(working_view.messages, token_calibration);
             const std::size_t projected_line =
-                profile_.context_window_tokens * static_cast<std::size_t>(kProjectedOverflowPercent) / 100;
+                window_tokens * static_cast<std::size_t>(kProjectedOverflowPercent) / 100;
             const std::size_t real_line =
-                profile_.context_window_tokens * static_cast<std::size_t>(kRealOverflowPercent) / 100;
+                window_tokens * static_cast<std::size_t>(kRealOverflowPercent) / 100;
             ContextPressure pressure;
             pressure.phase = ContextPressure::Phase::PreRequest;
             pressure.projected_tokens = projected;
-            pressure.window_tokens = profile_.context_window_tokens;
+            pressure.window_tokens = window_tokens;
             pressure.working_view_tokens = working_view_tokens;
             pressure.working_view_overflow = working_view_tokens >= real_line;
             pressure.projected_overflow = projected >= projected_line && pressure.working_view_overflow;
@@ -1119,9 +1123,9 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             wiring_.on_context_pressure(pressure);
             if (context_.cache_epoch() != epoch_before) {
                 // 回调里真换了史(midturn compact 走 ReplaceHistory):按新史
-                // 重拼工作视图——ReplaceHistory 已清决策台账与 sticky,重拼
-                // 从头定形,与旧时序(压完再 BuildWorkingView)同一副牌。
-                working_view = context_.BuildWorkingView({profile_.max_context_chars});
+                // 重拼工作视图——ReplaceHistory 已清决策台账,重拼从头定形,
+                // 与旧时序(压完再 BuildWorkingView)同一副牌。
+                working_view = context_.BuildWorkingView({window_tokens, token_calibration});
             }
         }
         request.messages = working_view.messages;
@@ -1150,27 +1154,19 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
             }
         }
         request.max_tokens = profile_.max_output_tokens;  // nullopt = unset,交服务端默认
-        // 有损硬裁发生了(丢轮/截结果),显式通报——静默降级会让用户以为语
-        // 义压缩已成功,模型其实已经看不到那段原文了。
-        if ((trim_report.trimmed_turns || trim_report.truncated_results) && wiring_.on_context_pressure) {
+        // 有损截断发生了(保命索真截了单条巨肥工具结果),显式通报——静默
+        // 降级会让用户以为语义压缩已成功,模型其实已经看不到那段原文了。
+        if (trim_report.truncated_results && wiring_.on_context_pressure) {
             ContextPressure pressure;
             pressure.phase = ContextPressure::Phase::AfterHardTrim;
-            pressure.hard_trimmed_turns = trim_report.trimmed_turns;
-            pressure.hard_dropped_messages = trim_report.dropped_messages;
             pressure.hard_truncated_results = trim_report.truncated_results;
-            pressure.window_tokens = profile_.context_window_tokens;
+            pressure.window_tokens = window_tokens;
             wiring_.on_context_pressure(pressure);
         }
-        // 有损硬裁真出手了:下一份请求的工作视图换了裁剪形状,前缀记账给
-        // 它点名(指纹 diff 只能报 old_message_changed,这里的因更准)。
-        if (trim_report.trimmed_turns || trim_report.truncated_results) {
+        // 有损截断真出手了:下一份请求的工作视图换了形状,前缀记账给它
+        // 点名(指纹 diff 只能报 old_message_changed,这里的因更准)。
+        if (trim_report.truncated_results) {
             context_.NotePendingEpochBreak("hard_trim");
-        }
-        // 硬上限:轮级裁剪 + 工具结果截断都做完还是装不下(比如单条用户输入
-        // 就超大),明确报错,不把一份注定被拒的超大请求发出去。
-        if (EstimateHistoryBytes(request.messages) > profile_.max_context_chars) {
-            return std::unexpected("上下文超过上限(" + std::to_string(profile_.max_context_chars) +
-                                    " 字符),裁剪与截断后仍装不下,无法发送。请用 /compact 压缩历史,或开新会话。");
         }
 
         // 校准样本的本地账(token 估算校准单),在下方硬闸(应急收窄可能往
@@ -1184,12 +1180,12 @@ std::expected<RunOutcome, std::string> AgentLoop::Run(Agent& agent, api::Message
         // 的输出上限收窄到一个小而正的值放行——同任务继续跑,并注入一次
         // 收尾交代。应急也装不下(当前消息本身过大/历史真满了)才就地报错。
         // 尤其是当前单条用户消息本身过大时，摘要压多少遍也救不了，不能再
-        // 把同一份请求发给 provider 撞 500。
-        if (profile_.context_window_tokens > 0) {
+        // 把同一份请求发给 provider 撞 500。窗口按上面的有效窗口算(未知
+        // 落兜底),永不跳过。
+        {
             const OutputBudget output_budget{profile_.max_output_tokens, profile_.max_output_tokens_source};
             const std::size_t input_tokens =
                 EstimateRequestInputTokensForPreflight(request, token_calibration);
-            const std::size_t window_tokens = profile_.context_window_tokens;
             const std::size_t current_turn_tokens = request.messages.empty()
                                                         ? 0
                                                         : EstimateMessageTokensForPreflight(request.messages.back(),

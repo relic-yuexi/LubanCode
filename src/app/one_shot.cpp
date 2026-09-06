@@ -290,7 +290,7 @@ int AskOnce(const lubancode::config::Config& config, const std::string& question
         subagent_profile.prompt_sections.lsp = !config.lsp_servers.empty();
         subagent_profile.prompt_sections.wire = lubancode::config::ProviderWireName(config.wire);
         // 运行策略同级(规格根因一):单发模式的子代理也吃 main 的有效
-        // profile 派生份——输出上限/字符安全网/续跑次数同一份,不落回
+        // profile 派生份——输出上限/上下文窗口/续跑次数同一份,不落回
         // 环境默认。main 的 profile 在下面算,这里先建一份同源的。
         subagent_profile.runtime = lubancode::app::BuildSubagentRuntimeProfile(
             lubancode::app::BuildMainRuntimeProfile(config, &once_catalog, config.model), config);

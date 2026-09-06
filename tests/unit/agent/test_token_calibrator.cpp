@@ -212,7 +212,7 @@ std::unique_ptr<agent::Agent> MakeAgent(api::Backend& backend, tools::ToolRegist
         backend, registry,
         agent::AgentProfile{.provider = "fake",
                             .request{.model = "calib-model"},
-                            .runtime{.max_output_tokens = 2048, .max_context_chars = 600000},
+                            .runtime{.max_output_tokens = 2048},
                             .system_prompt = "sys"});
 }
 

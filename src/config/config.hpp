@@ -77,19 +77,14 @@ bool EnvironmentOverridesActiveProvider(const Config& config, const ConfigSource
 // 只要有一件对不上就不冒认。请求画像、模型目录与会话路由共用。
 std::string BoundProviderName(const Config& config, const std::string& active_provider);
 
-// max_context_chars 的内置默认值(字符数)。跟 agent::kDefaultMaxContextChars
-// 数值上保持一致,但 config 层不依赖 agent 层(依赖只许单向,cli -> agent ->
-// api/tools;config 不该反过来牵扯 agent),所以这里单独定义一份。
-constexpr std::size_t kDefaultMaxContextChars = 600000;
-
 // theme 字段的内置默认值:三套内置调色板见 cli/theme.hpp,这里只存名字
 // (字符串),不依赖 cli 层(依赖只许单向,config 不该反过来牵扯 cli)。
 constexpr const char* kDefaultTheme = "dark";
 
 // context_window(上下文窗口 token 数)的内置默认值:256k,decimal 换算
 // (k=1000,m=1,000,000,见 ParseContextWindowTokens 注释)。M6.6 新增,是
-// /context、/compact 自动触发用的"窗口大小"依据,跟 max_context_chars
-// (字符数、老的硬安全网,单位不同、语义也不同)是两回事。
+// /context、/compact 自动触发用的"窗口大小"依据。字节轴裁剪(max_context_chars,
+// 老的按字符硬切安全网)拆除后,token 窗口是上下文保护唯一的裁剪依据。
 constexpr std::size_t kDefaultContextWindowTokens = 256000;
 
 // compact_partition_count(compact 触发后把原始 turns 切成几份,末份热区)
@@ -102,8 +97,7 @@ constexpr int kMaxCompactPartitionCount = 8;
 
 // max_steps_per_turn(agent 主循环一个 turn 内跟模型来回的步数上限;旧配置
 // 名 max_turns)的内置默认值。数值上跟 agent::Agent 构造函数的默认参数
-// 保持一致,但 config 层不依赖 agent 层(同 kDefaultMaxContextChars 的理由,
-// 依赖只许单向)。
+// 保持一致,但 config 层不依赖 agent 层(依赖只许单向)。
 //
 // 默认 0 = 无上限。曾经先后是 25、100——但硬闸这个思路本身就旧了:现在的
 // 模型常态是跑十几个小时的长程任务,不管定多高的数字,总有正常任务会撞
@@ -659,10 +653,11 @@ struct Config {
     // 不加任何东西)。
     nlohmann::json extra_body = nlohmann::json::object();
     std::map<std::string, std::string> extra_headers;
-    std::size_t max_context_chars = kDefaultMaxContextChars;
+    // (旧字段 max_context_chars 已随字节轴裁剪拆除:合并层不再有这只字段,
+    // 旧配置文件/环境变量里的同名键读入后只打弃用提示,不生效。)
     // max_steps_per_turn(旧名 max_turns):agent 主循环一次 Run() 最多跟
     // 模型来回几步(一步一次模型请求)。只从"专属 env / 配置文件 / 默认值"
-    // 三级来,没有通用 env 这一级(待遇同 max_context_chars)。语义:不配、
+    // 三级来,没有通用 env 这一级。语义:不配、
     // 或者显式配 0,都是无上限;配正整数才是硬上限(超过就报错停止)。
     // 负数、非法值在解析阶段就被忽略,落到下一级/默认值,不报错——这是条
     // "救命阀"字段,配置写错不该拦住用户开工。
@@ -806,7 +801,6 @@ struct ConfigSources {
     Source base_url = Source::Default;
     Source auth_token = Source::Default;
     Source model = Source::Default;
-    Source max_context_chars = Source::Default;
     Source max_steps_per_turn = Source::Default;
     Source theme = Source::Default;
     Source language = Source::Default;  // i18n:界面语言
@@ -882,6 +876,9 @@ struct FileConfig {
     std::optional<std::string> base_url;
     std::optional<std::string> api_key;
     std::optional<std::string> model;
+    // 已死字段 max_context_chars 的影子位:字节轴裁剪拆除后配置不再生效,
+    // 这里只为"旧配置文件里写了这个键"留个记号,MergeConfig 拿它打一条
+    // 弃用提示。类型照旧校验(正整数),值不参与任何合并。
     std::optional<std::size_t> max_context_chars;
     // max_steps_per_turn / max_turns(旧):同一预算的新旧两个键,兼容期
     // 双读。非负整数才落进字段(0 = 显式无上限,是合法值);负数或者字段
@@ -1003,6 +1000,8 @@ struct LubancodeEnvValues {
     std::optional<std::string> base_url;
     std::optional<std::string> api_key;
     std::optional<std::string> model;
+    // 已死字段 max_context_chars(LUBANCODE_MAX_CONTEXT)的影子位:字节轴
+    // 裁剪拆除后不再生效,只为 MergeConfig 打弃用提示留记号,值不参与合并。
     std::optional<std::size_t> max_context_chars;
     std::optional<int> max_steps_per_turn;  // LUBANCODE_MAX_STEPS_PER_TURN,非负整数(0 = 无上限),负数忽略
     std::optional<int> max_turns;           // LUBANCODE_MAX_TURNS(旧名,兼容读入),非负整数(0 = 无上限),负数忽略

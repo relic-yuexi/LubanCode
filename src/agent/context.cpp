@@ -1,10 +1,10 @@
 #include "agent/context.hpp"
 
-#include <cstdlib>
 #include <string>
 #include <type_traits>
 #include <variant>
 
+#include "agent/runtime_profile.hpp"   // kFallbackContextWindowTokens:窗口未知时的兜底
 #include "agent/tool_result_images.hpp"  // EstimateImageTokensForPreflight:图片 token 的像素口径公共尺
 #include "platform/text_encoding.hpp"    // Utf8PrefixBoundary:截短不劈半个字
 
@@ -41,91 +41,80 @@ std::size_t MessageChars(const api::Message& message) {
     return total;
 }
 
-// (IsUserTurnStart 的私有拷贝已删:判定收拢到本文件下方的公共
-// IsUserTurnStart/SplitIntoTurns,见 context.hpp 注释。旧版把空内容 user
-// 消息防御性地当轮头,新定义按 §二 不认空壳——没有 text/image 不开 turn,
-// 免得插在 tool_use/tool_result 之间的空壳把工具原子组劈开。)
+// ---------------------------------------------------------------------------
+// 保命索的私有账(公开口径见 context.hpp 的 ShrinkOversizedToolResults)
+// ---------------------------------------------------------------------------
 
+// 截断下限(字节,同旧字符轴时代的 kMinKeepChars 值):每条结果至少留这
+// 么多原文,免得截成空壳,模型连是什么工具的结果都看不出。
+constexpr std::size_t kMinKeepBytes = 1024;
+constexpr const char kResultTruncateMark[] = "\n[内容过长已截断]";
 
-
-// 硬上限兜底:轮级裁剪之后仍旧超限(往往是单条工具结果就大得离谱),把
-// 超大的 ToolResultBlock 内容从尾部截短、打上标注。只动 tool_result 的
-// content 字符串,消息条数、tool_use/tool_result 的配对关系一概不碰。
-// 每条至少留 kMinKeepChars,免得截成空壳,模型连是什么工具的结果都看不出。
-// 截尾兜底带报告:截了哪些工具结果,给上层一句实话。
-std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> messages, std::size_t max_chars,
-                                                     TrimReport* report) {
-    constexpr std::size_t kMinKeepChars = 1024;
-    const char kMark[] = "\n[内容过长已截断]";
-    const std::size_t mark_size = sizeof(kMark) - 1;
-
-    std::size_t total = EstimateHistoryBytes(messages);
-    if (total <= max_chars) {
-        return messages;
-    }
-
-    for (auto& message : messages) {
-        for (auto& block : message.content) {
-            if (total <= max_chars) {
-                return messages;
-            }
-            if (!std::holds_alternative<api::ToolResultBlock>(block)) {
-                continue;
-            }
-            auto& tool_result = std::get<api::ToolResultBlock>(block);
-            // MCP 富结果单 P0.3:富块在身的结果只裁文本(TextContent 的
-            // text,从最后一块起倒着裁),图片/音频/资源引用与
-            // structuredContent 一概不动——裁文本不许顺手删图与结构化结果;
-            // 裁完 content 按真账重算投影,缓存与权威不失步。
-            if (!tool_result.blocks.empty()) {
-                bool reduced = false;
-                for (auto it = tool_result.blocks.rbegin(); it != tool_result.blocks.rend() && total > max_chars;
-                     ++it) {
-                    auto* text_block = std::get_if<tools::TextContent>(&*it);
-                    if (text_block == nullptr || text_block->text.size() <= kMinKeepChars + mark_size) {
-                        continue;
-                    }
-                    const std::size_t overage = total - max_chars;
-                    const std::size_t reducible = text_block->text.size() - kMinKeepChars - mark_size;
-                    const std::size_t cut = overage < reducible ? overage + mark_size : reducible + mark_size;
-                    const std::size_t keep =
-                        platform::Utf8PrefixBoundary(text_block->text, text_block->text.size() - cut);
-                    text_block->text.resize(keep);
-                    text_block->text += kMark;
-                    reduced = true;
-                    {
-                        tools::ToolResultPayload payload;
-                        payload.content = tool_result.blocks;
-                        payload.structured_content = tool_result.structured_content;
-                        tool_result.content = tools::TextProjection(payload);
-                    }
-                    total = EstimateHistoryBytes(messages);
-                }
-                if (reduced && report != nullptr) {
-                    report->truncated_results = true;
-                }
-                continue;
-            }
-            if (tool_result.content.size() <= kMinKeepChars + mark_size) {
-                continue;
-            }
-            const std::size_t overage = total - max_chars;
-            const std::size_t reducible = tool_result.content.size() - kMinKeepChars - mark_size;
-            const std::size_t cut = overage < reducible ? overage + mark_size : reducible + mark_size;
-            // 刀口先对齐码点边界再砍:裸按字节 resize,砍进三字节汉字的腰上,
-            // 末尾悬半个字,合法 UTF-8 也会被截成非法——请求体 dump 当场
-            // type_error.316,整场会话每回合必挂(真机上掐死过)。
-            const std::size_t keep =
-                platform::Utf8PrefixBoundary(tool_result.content, tool_result.content.size() - cut);
-            tool_result.content.resize(keep);
-            tool_result.content += kMark;
-            if (report != nullptr) {
-                report->truncated_results = true;
-            }
-            total = EstimateHistoryBytes(messages);
+// 一条 ToolResultBlock 估多少 token:与 EstimateMessageTokens 的
+// ToolResultBlock 分支同一把尺(tool_use_id + content 投影 + 富块图片按
+// 像素折)——判线、显示与预检不各拿各的账。
+std::size_t ToolResultBlockTokens(const api::ToolResultBlock& block, double calibration) {
+    std::size_t image_tokens = 0;
+    for (const auto& rich : block.blocks) {
+        if (const auto* image = std::get_if<tools::ImageContent>(&rich); image != nullptr) {
+            image_tokens += EstimateImageTokensForPreflight(image->width, image->height, image->wire_base64);
         }
     }
-    return messages;
+    return ApplyTokenCalibration(
+        EstimateUtf8Tokens(block.tool_use_id) + EstimateUtf8Tokens(block.content) + image_tokens, calibration);
+}
+
+// token 预算内最长前缀的字节长度(码点边界对齐):逐码点扫,ASCII/非 ASCII
+// 分开计数,按统一口径折 token,再进一个码点就要超预算即停。估算随前缀
+// 单调不减,扫描即准;续字节不单独折算,天然不劈多字节字符。
+std::size_t Utf8PrefixBytesWithinTokens(const std::string& text, std::size_t token_budget, double calibration) {
+    std::size_t ascii = 0;
+    std::size_t non_ascii = 0;
+    std::size_t bytes = 0;
+    for (std::size_t i = 0; i < text.size(); ++i) {
+        const auto byte = static_cast<unsigned char>(text[i]);
+        if ((byte & 0xC0) == 0x80) {
+            ++bytes;  // UTF-8 续字节:码点账在其首字节处已记
+            continue;
+        }
+        const std::size_t ascii_if_taken = ascii + (byte < 0x80 ? 1 : 0);
+        const std::size_t non_ascii_if_taken = non_ascii + (byte < 0x80 ? 0 : 1);
+        const std::size_t tokens_if_taken =
+            ApplyTokenCalibration(ascii_if_taken / 4 + non_ascii_if_taken * 3 / 2, calibration);
+        if (tokens_if_taken > token_budget) {
+            break;  // 这个码点进不来:前缀到此为止
+        }
+        ascii = ascii_if_taken;
+        non_ascii = non_ascii_if_taken;
+        ++bytes;
+    }
+    return bytes;
+}
+
+// 把一段文本截进 token 预算:尾部打标注,至少留 kMinKeepBytes。本来就
+// 线内或已是最小保留量(截不动)返回 false。预算先扣掉标注自身的 token,
+// 截完(id + 正文 + 标注)精确落回线内,不靠"差几个 token 也算过"。刀口
+// 先对齐码点边界再砍——裸按字节 resize,砍进三字节汉字的腰上,末尾悬半个
+// 字,合法 UTF-8 也会被截成非法,请求体 dump 当场 type_error.316,整场会
+// 话每回合必挂(真机上掐死过)。
+bool TruncateTextToTokenBudget(std::string& text, std::size_t token_budget, double calibration) {
+    const std::size_t mark_size = sizeof(kResultTruncateMark) - 1;
+    if (text.size() <= kMinKeepBytes + mark_size) {
+        return false;  // 小于最少保留量:没得裁
+    }
+    const std::size_t mark_tokens = EstimateUtf8Tokens(kResultTruncateMark, calibration);
+    const std::size_t body_budget = token_budget > mark_tokens ? token_budget - mark_tokens : 0;
+    std::size_t keep = Utf8PrefixBytesWithinTokens(text, body_budget, calibration);
+    if (keep < kMinKeepBytes) {
+        keep = kMinKeepBytes;  // 最少保留量托底
+    }
+    keep = platform::Utf8PrefixBoundary(text, keep);
+    if (keep + mark_size >= text.size()) {
+        return false;  // 预算装得下全文:不动
+    }
+    text.resize(keep);
+    text += kResultTruncateMark;
+    return true;
 }
 
 }  // namespace
@@ -136,6 +125,70 @@ std::size_t EstimateHistoryBytes(const std::vector<api::Message>& history) {
         total += MessageChars(message);
     }
     return total;
+}
+
+std::vector<api::Message> ShrinkOversizedToolResults(std::vector<api::Message> messages,
+                                                     std::size_t window_tokens, double calibration,
+                                                     TrimReport* report) {
+    if (window_tokens == 0) {
+        // 窗口未知不裸奔:token 轴有兜底窗口(依据见 runtime_profile.hpp)。
+        window_tokens = kFallbackContextWindowTokens;
+    }
+    const std::size_t per_result_budget =
+        window_tokens * static_cast<std::size_t>(kOversizedToolResultWindowPercent) / 100;
+    for (auto& message : messages) {
+        for (auto& block : message.content) {
+            if (!std::holds_alternative<api::ToolResultBlock>(block)) {
+                continue;
+            }
+            auto& tool_result = std::get<api::ToolResultBlock>(block);
+            // while 而非 if:富块结果一次截一块(从最后一块文本起倒着),
+            // 截完按真账重估,不估"截多少正好"的一次到位账——图片等不可裁
+            // 的分量混在里头,精确账算不出,重估最诚实。
+            while (ToolResultBlockTokens(tool_result, calibration) > per_result_budget) {
+                bool reduced = false;
+                if (!tool_result.blocks.empty()) {
+                    // MCP 富结果(P0.3 规矩):只裁 TextContent 的 text,
+                    // 图片/音频/资源引用与 structuredContent 一概不动;裁完
+                    // content 按真账重算投影,缓存与权威不失步。
+                    for (auto it = tool_result.blocks.rbegin(); it != tool_result.blocks.rend(); ++it) {
+                        auto* text_block = std::get_if<tools::TextContent>(&*it);
+                        if (text_block == nullptr) {
+                            continue;
+                        }
+                        // 这块得缩到多少,整条结果才落回线内:线内预算减去
+                        // "本条结果里这块以外的一切"(id、别的文本块、图片)。
+                        const std::size_t total_tokens = ToolResultBlockTokens(tool_result, calibration);
+                        const std::size_t block_tokens = EstimateUtf8Tokens(text_block->text, calibration);
+                        const std::size_t others = total_tokens > block_tokens ? total_tokens - block_tokens : 0;
+                        const std::size_t target = per_result_budget > others ? per_result_budget - others : 0;
+                        if (!TruncateTextToTokenBudget(text_block->text, target, calibration)) {
+                            continue;  // 这块已线内/已到下限:换前一块
+                        }
+                        {
+                            tools::ToolResultPayload payload;
+                            payload.content = tool_result.blocks;
+                            payload.structured_content = tool_result.structured_content;
+                            tool_result.content = tools::TextProjection(payload);
+                        }
+                        reduced = true;
+                        break;  // 重估整条结果
+                    }
+                } else {
+                    const std::size_t id_tokens = EstimateUtf8Tokens(tool_result.tool_use_id, calibration);
+                    const std::size_t target = per_result_budget > id_tokens ? per_result_budget - id_tokens : 0;
+                    reduced = TruncateTextToTokenBudget(tool_result.content, target, calibration);
+                }
+                if (!reduced) {
+                    break;  // 没有可裁的文本(纯图片/全到下限):放行
+                }
+                if (report != nullptr) {
+                    report->truncated_results = true;
+                }
+            }
+        }
+    }
+    return messages;
 }
 
 std::size_t ApplyTokenCalibration(std::size_t tokens, double calibration) {
@@ -239,108 +292,6 @@ std::vector<std::pair<std::size_t, std::size_t>> SplitIntoTurns(const std::vecto
         }
     }
     return turns;
-}
-
-std::size_t MaxContextCharsFromEnv() {
-    std::string value;
-#ifdef _WIN32
-    char* buffer = nullptr;
-    std::size_t size = 0;
-    const errno_t err = _dupenv_s(&buffer, &size, "LUBANCODE_MAX_CONTEXT");
-    if (err != 0 || buffer == nullptr) {
-        return kDefaultMaxContextChars;
-    }
-    value = buffer;
-    std::free(buffer);
-#else
-    const char* raw = std::getenv("LUBANCODE_MAX_CONTEXT");
-    if (raw == nullptr || raw[0] == '\0') {
-        return kDefaultMaxContextChars;
-    }
-    value = raw;
-#endif
-    if (value.empty()) {
-        return kDefaultMaxContextChars;
-    }
-    try {
-        const long long parsed = std::stoll(value);
-        if (parsed <= 0) {
-            return kDefaultMaxContextChars;
-        }
-        return static_cast<std::size_t>(parsed);
-    } catch (...) {
-        return kDefaultMaxContextChars;
-    }
-}
-
-std::vector<api::Message> TrimHistory(const std::vector<api::Message>& history, std::size_t max_chars,
-                                       std::size_t keep_recent_turns, TrimReport* report) {
-    if (history.empty()) {
-        return history;
-    }
-    if (EstimateHistoryBytes(history) <= max_chars) {
-        return history;
-    }
-
-    // 把 history 切成"轮":turns[i] = [start, end),含一条 user 输入消息
-    // 和紧跟其后的所有消息,直到下一条 user 输入消息之前。切法收拢在
-    // SplitIntoTurns(§二 唯一定义),不再自带一份轮界循环。
-    const std::vector<std::pair<std::size_t, std::size_t>> turns = SplitIntoTurns(history);
-
-    if (turns.empty()) {
-        // 找不到任何一条"真正的用户输入"消息(不应该发生,history 总是从
-        // 用户消息开始),没法安全地按轮裁剪,只做工具结果截断兜底。
-        return ShrinkOversizedToolResults(history, max_chars, report);
-    }
-
-    if (turns.size() <= keep_recent_turns + 1) {
-        // 第一轮 + 最近 N 轮已经盖住了全部历史,没有中间可丢的。
-        return ShrinkOversizedToolResults(history, max_chars, report);
-    }
-
-    const std::size_t first_turn_end = turns.front().second;
-    const std::size_t recent_start_idx = turns.size() - keep_recent_turns;
-    const std::size_t recent_start = turns[recent_start_idx].first;
-
-    if (recent_start <= first_turn_end) {
-        // 保留区间已经衔接甚至重叠,没有中间段可丢。
-        return ShrinkOversizedToolResults(history, max_chars, report);
-    }
-
-    std::vector<api::Message> trimmed;
-    trimmed.reserve(first_turn_end + (history.size() - recent_start));
-
-    for (std::size_t i = 0; i < first_turn_end; ++i) {
-        trimmed.push_back(history[i]);
-    }
-
-    // 裁剪说明并入保留区间第一条 user 消息的开头,不单独插一条 user 消息——
-    // 独立插会跟紧随其后的 user 输入连成相邻两条 user,违反 Anthropic 的
-    // 角色交替要求(标准端点直接 400;MiniMax 宽容,才一直没炸)。
-    api::Message merged = history[recent_start];
-    bool merged_into_text = false;
-    for (auto& block : merged.content) {
-        if (std::holds_alternative<api::TextBlock>(block)) {
-            auto& text_block = std::get<api::TextBlock>(block);
-            text_block.text = "[早前对话已裁剪]\n\n" + text_block.text;
-            merged_into_text = true;
-            break;
-        }
-    }
-    if (!merged_into_text) {
-        merged.content.push_back(api::TextBlock{"[早前对话已裁剪]"});
-    }
-    trimmed.push_back(std::move(merged));
-
-    for (std::size_t i = recent_start + 1; i < history.size(); ++i) {
-        trimmed.push_back(history[i]);
-    }
-
-    if (report != nullptr) {
-        report->trimmed_turns = true;
-        report->dropped_messages = recent_start - first_turn_end;
-    }
-    return ShrinkOversizedToolResults(std::move(trimmed), max_chars, report);
 }
 
 void InjectIncomingMessage(std::vector<api::Message>& history, api::Message incoming) {

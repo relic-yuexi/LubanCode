@@ -1092,8 +1092,6 @@ void Server::RunTurnToCompletion(const std::shared_ptr<ThreadRecord>& record, co
             context["projectedTokens"] = pressure.projected_tokens;
             context["windowTokens"] = pressure.window_tokens;
             context["projectedOverflow"] = pressure.projected_overflow;
-            context["hardTrimmedTurns"] = pressure.hard_trimmed_turns;
-            context["hardDroppedMessages"] = pressure.hard_dropped_messages;
             context["hardTruncatedResults"] = pressure.hard_truncated_results;
             if (pressure.phase == agent::ContextPressure::Phase::PreflightExceeded) {
                 context["estimatedInputTokens"] = pressure.estimated_input_tokens;

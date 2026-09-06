@@ -111,7 +111,7 @@ private:
 // 环境变量优先级与通名退役。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("MergeConfig: 什么都没设置时,wire/max_context_chars 走内置默认值,base_url/model/api_key 留空") {
+TEST_CASE("MergeConfig: 什么都没设置时,wire 走内置默认值,base_url/model/api_key 留空") {
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
     REQUIRE(result.has_value());
 
@@ -120,13 +120,11 @@ TEST_CASE("MergeConfig: 什么都没设置时,wire/max_context_chars 走内置�
     CHECK(result->config.base_url.empty());
     CHECK(result->config.model.empty());
     CHECK(result->config.auth_token.empty());
-    CHECK(result->config.max_context_chars == config::kDefaultMaxContextChars);
 
     CHECK(result->sources.wire == config::Source::Default);
     CHECK(result->sources.base_url == config::Source::Default);
     CHECK(result->sources.model == config::Source::Default);
     CHECK(result->sources.auth_token == config::Source::Default);
-    CHECK(result->sources.max_context_chars == config::Source::Default);
 }
 
 TEST_CASE("MergeConfig: LUBAN 三字段优先于 LUBANCODE 同字段并准确标来源") {
@@ -253,21 +251,25 @@ TEST_CASE("RequireApiKey: 各级都没有 api_key 时报错,只提示自家变�
 }
 
 // ---------------------------------------------------------------------------
-// max_context_chars:只有专属 env / 配置文件 / 默认值三级,没有通用 env 这一级。
+// max_context_chars(已死字段):按字节裁历史的独立安全网已拆除,配置不再
+// 生效。旧键在专属 env / 配置文件任何一级出现,都只打一条弃用提示(哪一
+// 级写了就说哪一级),不产生任何配置结果。
 // ---------------------------------------------------------------------------
 
-TEST_CASE("MergeConfig: max_context_chars 配置文件压过默认值") {
+TEST_CASE("MergeConfig: 配置文件里写 max_context_chars 只打弃用提示,不生效") {
     config::FileConfig file;
     file.max_context_chars = 777;
     file.source_path = "/tmp/.lubancode.json";
 
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), file);
     REQUIRE(result.has_value());
-    CHECK(result->config.max_context_chars == 777);
-    CHECK(result->sources.max_context_chars == config::Source::ProjectConfigFile);
+    REQUIRE(result->deprecation_notices.size() == 1);
+    CHECK(result->deprecation_notices[0].find("max_context_chars=777") != std::string::npos);
+    CHECK(result->deprecation_notices[0].find("/tmp/.lubancode.json") != std::string::npos);
+    CHECK(result->deprecation_notices[0].find("context_window") != std::string::npos);  // 指明新路
 }
 
-TEST_CASE("MergeConfig: max_context_chars 专属 env 压过配置文件") {
+TEST_CASE("MergeConfig: 专属 env 的 max_context_chars 也只打弃用提示") {
     config::LubancodeEnvValues lubancode_env;
     lubancode_env.max_context_chars = 555;
 
@@ -277,12 +279,22 @@ TEST_CASE("MergeConfig: max_context_chars 专属 env 压过配置文件") {
 
     const auto result = config::MergeConfig(lubancode_env, file);
     REQUIRE(result.has_value());
-    CHECK(result->config.max_context_chars == 555);
-    CHECK(result->sources.max_context_chars == config::Source::LubancodeEnv);
+    // env 一级先报(只报一条,不叠账)。
+    REQUIRE(result->deprecation_notices.size() == 1);
+    CHECK(result->deprecation_notices[0].find("LUBANCODE_MAX_CONTEXT") != std::string::npos);
+    CHECK(result->deprecation_notices[0].find("555") != std::string::npos);
+}
+
+TEST_CASE("MergeConfig: 哪级都没写 max_context_chars 时,零弃用提示") {
+    const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt);
+    REQUIRE(result.has_value());
+    for (const auto& notice : result->deprecation_notices) {
+        CHECK(notice.find("max_context_chars") == std::string::npos);
+    }
 }
 
 // ---------------------------------------------------------------------------
-// max_steps_per_turn(旧名 max_turns):待遇跟 max_context_chars 一样(专属
+// max_steps_per_turn(旧名 max_turns):待遇跟上面 max_context_chars 的旧写法一样(专属
 // env / 配置文件 / 默认值三级,没有通用 env)。语义:不配、或者显式配 0,
 // 都是无上限;配正整数才是硬上限。负数/非法值不报错,静默忽略落到下一级。
 // ---------------------------------------------------------------------------
@@ -2246,15 +2258,12 @@ TEST_CASE("MergeConfig 分层: 项目级缺的字段回退全局") {
 TEST_CASE("MergeConfig 分层: 只有全局有这份文件,字段来源记全局") {
     config::FileConfig global;
     global.theme = "plain";
-    global.max_context_chars = 4242;
     global.source_path = "/home/.lubancode/config.json";
 
     const auto result = config::MergeConfig(EmptyLubancodeEnv(), std::nullopt, global);
     REQUIRE(result.has_value());
     CHECK(result->config.theme == "plain");
     CHECK(result->sources.theme == config::Source::GlobalConfigFile);
-    CHECK(result->config.max_context_chars == 4242);
-    CHECK(result->sources.max_context_chars == config::Source::GlobalConfigFile);
 }
 
 TEST_CASE("MergeConfig 分层: 两级都没这字段,回退内置默认") {

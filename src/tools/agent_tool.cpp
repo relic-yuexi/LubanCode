@@ -2001,7 +2001,7 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
     const std::string task_model = detached != nullptr && !detached->request_profile.model.empty()
                                        ? detached->request_profile.model
                                        : model_;
-    // 运行策略与 main 同一份(规格根因一):输出上限、字符安全网、续跑
+    // 运行策略与 main 同一份(规格根因一):输出上限、上下文窗口、续跑
     // 次数从 runtime_profile_ 继承,步数用派出时的预算。成本刹车(P2-6):
     // 时间/token 硬线与软线百分比一并落进运行档案,AgentLoop 在步顶执法。
     // main 的 budget_soft_percent 默认 0(不催),子代理派发一律带软线。
@@ -2144,7 +2144,8 @@ Tool::Result AgentTool::RunTask(api::Backend& backend, ToolRegistry& task_regist
                     ledger().AppendEventLocked(task, std::move(event));
                 }
             }
-            // 压缩失败:旧历史原样不动,字符安全网(TrimHistory)仍在,不硬塞。
+            // 压缩失败:旧历史原样不动,超大工具结果的保命索(token 轴口径)
+            // 仍在,不硬塞。
         };
     }
 
