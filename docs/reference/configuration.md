@@ -127,6 +127,7 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 | `normal_model` / `cheap_model` / `lao_model` | 字符串,可留空 | 空串 | 三档模型角色的简写，只换模型名并沿用当前 provider；未配置的 cheap/lao 回落 normal。 |
 | `model_roles` | JSON object | 空 object | 三档模型角色的完整路由，可分别指定 provider、model、effort、context window 与输出上限。见下节。 |
 | `max_context_chars` | 正整数 | (已拆除) | 旧的按字节硬切安全网,已随字节轴裁剪一起移除——两套口径松紧随语言漂移(英文裁早、中文失守),保护收敛到 token 窗口一条轴。旧配置文件里写了这个键,读入时只打一条弃用提示,不再生效;上下文保护统一看 `context_window`。 |
+| `features.trajectory` | 任意(已死) | (不生效) | 轨迹账恒开(会话真账只有 Trajectory Journal 一种,没有"关闭态"),开关已删。旧配置里写了这个键——`true`/`false`/`"yes"`/`1`/任意垃圾值——都不拦加载,读到只打一条弃用提示;再过一两个版本连忽略一并移除,别再写。 |
 | `max_steps_per_turn` | 非负整数 | `0`(无上限) | **主回合局部保险**(turn 预算单 §4.4 的正名):主会话一次用户输入内,agent 主循环最多走几次模型请求——一步 = 一次模型请求,一步可含多枚工具调用。它不是子代理的任务总预算;子代理的任务总量走 `subagent.default_max_turns` 与 Agent YAML 的 `runtime.max_turns`(见下节"两道预算闸")。不配或配 `0` = 不设上限,防跑飞靠 ESC/Ctrl+C;配正整数才是硬上限。负数或非法值静默忽略。旧名 `max_turns` 仍可读入(兼容期,读到会打弃用提示);两者同现且值不同会明报冲突并采用新名。 |
 | `system_prompt_file` | 字符串,UTF-8 文本路径 | 无 | 人格段文件路径;没配就用内置人格,`--system-prompt` 命令行参数会压过它。 |
 | `tool_search_threshold` | 非负整数 | `20` | 注册工具总数超过此数才启用延迟挂载(工具搜索);`0` 永不延迟。 |
@@ -156,6 +157,8 @@ lubancode 要跟大模型对话,得知道 `wire`(协议)、`base_url`、`api_key
 - **主回合局部保险**——顶层 `max_steps_per_turn`:只管主会话一次用户输入内的模型请求数。这是本地保险,不是任务预算;后续若改名,候选名 `max_model_calls_per_input`,另立兼容单。
 - **子代理任务总账**——`subagent.default_max_turns`(非负整数,默认未设 = `0` 不限):一只子代理任务从注册到终态,最多准入几次逻辑模型请求;父代理补话、孩子回信、Stop 钩子续跑共一本账,不会每轮重领。自定义 Agent 在 YAML `runtime.max_turns` 里自带预算时压过它;宿主 typed override 只能收窄。解析链:override > Agent 定义 > `subagent.default_max_turns` > 0(不限)。
 - `subagent.max_steps_per_turn`(旧名 `subagent.max_turns`)是 legacy 每输入轮步数,兼容窗内照旧生效,新配置别再写。
+
+**同名防混**:`max_turns` 这三个字在两个域里是两码事——**配置文件顶层**的 `max_turns` 是 `max_steps_per_turn`(每输入轮步数)的弃用别名;**Agent YAML `runtime.max_turns`**([agents.md](agents.md) 的 runtime 段)是任务总 turn 预算,跟 `subagent.default_max_turns` 同一层。两域同名不同物、极性相反(配置域里"新名是 steps、旧名 turns";Agent 定义域里"新名是 turns、旧名 steps"),各自解析互不串扰;写配置、读诊断都必须带上下文,别裸写 `max_turns`。
 
 `/doctor agents` 列明两层各自的生效值与来源。
 

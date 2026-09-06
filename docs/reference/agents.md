@@ -319,6 +319,13 @@ MCP 工具用 `mcp__<server>__<tool>`，插件工具用 `plugin__<plugin>__<tool
 不静默选边。`/agent doctor <名字>` 列明当前生效路并给迁移建议，
 `/agent inspect <名字>` 给可复制的迁移片段。
 
+**同名防混**：这里的 `runtime.max_turns` 与**配置文件顶层**的同名旧键
+`max_turns`（[configuration.md](configuration.md)）不是一回事——那枚是
+`max_steps_per_turn`（每输入轮步数）的弃用别名，这枚是任务总 turn。两个域
+同名不同物、极性相反（配置域里旧名 `max_turns` 指 steps；Agent 定义域里新名
+`max_turns` 指 turns），各自解析互不串扰；文档与诊断必须带上下文，别裸写
+`max_turns`。
+
 `execution_mode` 是这份定义的**缺省执行档**：调用方（`agent` 工具、Workflow
 节点）显式给值时压过它。取值与 `agent` 工具现有参数一致。
 

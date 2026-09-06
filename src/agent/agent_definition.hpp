@@ -101,6 +101,9 @@ struct AgentDefinition {
     // 续跑都吃同一本累计账。与 max_steps_per_turn(兼容窗内仍是"每个
     // input round"的旧义,单独出现给 agent.legacy_step_budget 弃用警告)
     // 分家;新旧同现明拒 agent.turn_budget_conflict(P1-0 兼容批已落)。
+    // 同名防混:这枚 max_turns 与配置文件顶层(config.hpp 的 FileConfig)
+    // 的旧键 max_turns 同名不同物——那枚是 max_steps_per_turn(每输入轮
+    // 步数)的弃用别名,这枚是任务总 turn;两域各自解析,互不串扰。
     std::optional<int> max_turns;
     // (旧 runtime.max_context_chars 字段已随字节轴裁剪拆除:YAML 键仍认,
     // 出现即发 agent.legacy_max_context_chars 弃用警告,值不采用。)
