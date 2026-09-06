@@ -1,0 +1,46 @@
+# workspace 目录账本制：路径为键、漂亮名为值的索引查找
+
+- 状态：待实施（2026-09-06 设计定稿；工头令：无历史包袱，老目录已清空，一步到位）
+- 级别：P1（可读性/可运维性；不迁不破）
+- 类型：LubanCode workspace 存储（目录命名与查找机制）
+- 关联：`Compact重构前置研究_Context管理Token估算与超限兜底.todo`（同碰 context/存储域，改前对一下）、`docs/development/workspace-storage-v2/P0-0-contracts.md`（存储合同）
+- 不在本单：四级身份裁决语义（marker>config>git common dir>cwd 一概不动）、workspace.json 内部字段、memory 体系
+
+## 一、设计定稿
+
+现行：目录名 = workspace_key（推导制，名字即身份证）。改：**账本制**——查找走索引，目录名降级为装饰。
+
+### 账本
+
+`~/.lubancode/workspaces/index.json`：
+
+```json
+{ "workspaces": {
+    "d:/lubancode":           { "dir": "D--lubancode-a1b2c3d4", "created": "..." },
+    "d:/mineru/2604.10547v2": { "dir": "D--MinerU-2604-10547v2-e5f6a7b8" }
+} }
+```
+
+- **键**：canonical 路径串（identity 现行 seed 归一：正斜杠、去尾斜杠、Windows 折 ASCII 小写——同一机械，不另造尺）
+- **值**：`dir` = 漂亮门牌（见下）+ `created` 时间戳
+- 写入走既有原子替换机械（workspace.json 并发原子写已有 8 写手×40 轮册背书）
+
+### 漂亮门牌生成
+
+`<路径slug>-<seed的SHA-256前8位>`
+
+- slug 规则：盘符 `D:` → `D--`；分隔符 `\`/`/` → `-`；非法字符 `:*?"<>|` 与控制符 → `_`；中文/Unicode **原样保留**；slug 超 80 字节截断再接哈希；Windows 保留名（CON/PRN/NUL/COM1…）与尾点尾空格前缀 `_`/剥尾
+- 哈希取 seed 的 SHA-256 前 8 hex——唯一性保险（Claude Code 纯拍扁撞车的病根），不同 canonical 路径必不同门牌
+
+### 找门三步
+
+1. canonical 路径 → **查账本** → 门牌 → 开门（O(1)）
+2. miss（新项目）→ 生成门牌 → 开房（workspace.json 照写，自描述保留）→ **记账**（原子写）
+3. 账本缺/坏 → **扫各房 workspace.json 自描述重建**（每房存身份，房在账可回；并发开房挤掉账目也靠这手自愈）
+
+## 二、实施要点
+
+- 落点：`src/workspace/identity.cpp`（seed/canonical 机械不动，复用）、`manifest.cpp` 与 `trajectory/directory.cpp` 的开门路（推导改查账）、新账本模块（读写/原子写/重建扫描）
+- 既有 workspace 册凡断言目录名的改判到账本制；新增边界册：异地同名仓库（不同父目录同名，门牌必不同）、账本损坏/删除后重建、并发开房丢账自愈、大小写折叠同房、junction 进出同房、超长路径截断、Windows 保留名、中文路径
+- 无历史包袱：不写任何老格式兼容/改名逻辑（工头令，老目录已清）
+- 文档：configuration.md §九目录一览、workspace-storage-v2 合同页同步账本制
