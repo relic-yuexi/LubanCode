@@ -12,9 +12,13 @@
 //   - 账本键 = NormalizeIdentityPathText(identity.identity_root)——与算
 //     workspace_key 的 seed 归一是同一把尺(identity.cpp 现行机械,不另造)。
 //     git 取 common git dir,主树与 linked worktree 同键同房;
-//   - 门牌 = <路径slug(≤80字节)>-<seed SHA-256 前 8 hex>。slug 保大小写、
-//     中文/Unicode 原样;哈希段保唯一(不同 seed 必不同门牌)。门牌只是
-//     装饰,身份仍是 workspace_key(manifest/session.json 里的那枚)。
+//   - 门牌 = <路径slug(POSIX ≤80 / Windows ≤40 字节)>-<seed SHA-256 前
+//     8 hex>。slug 保大小写、中文/Unicode 原样;哈希段保唯一(不同 seed
+//     必不同门牌)。Windows 档把门牌压到 ≤49:MAX_PATH(文件 259/目录
+//     247)要给 session/artifacts 深巢(~126 字符)与 home 根深度留预算,
+//     89 字节门牌在深 home 下会让巢底文件全数打不开(2026-09 Windows 五红
+//     共根)。门牌只是装饰,身份仍是 workspace_key(manifest/session.json
+//     里的那枚)。
 //
 // 硬规矩:
 //   - 写入走 platform::AtomicWriteFile(workspace.json 并发原子写同款);
@@ -103,9 +107,9 @@ std::string MakeWorkspaceDirName(const WorkspaceIdentity& identity);
 
 // slug 变换:分隔符 \ / 与 : . 空格 → '-';非法字符 * ? " < > | 与控制符
 // → '_';其余 ASCII 标点折 '-';[A-Za-z0-9_-] 与多字节(中文/Unicode)
-// 原样。超 80 字节截断(UTF-8 序列边界回退);Windows 保留名(CON/PRN/
-// NUL/COM1-9/LPT1-9,大小写不敏感)前缀 '_';剥尾点尾空格;空串回
-// "project"。
+// 原样。超平台帽(POSIX 80 / Windows 40 字节)截断(UTF-8 序列边界回退);
+// Windows 保留名(CON/PRN/NUL/COM1-9/LPT1-9,大小写不敏感)前缀 '_';
+// 剥尾点尾空格;空串回 "project"。
 std::string PathSlug(std::string_view path_text);
 
 // 账本键:identity_root 过 identity 的归一机械(正斜杠/去尾斜杠/Windows

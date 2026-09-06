@@ -68,11 +68,14 @@
 - **找门三步**:查账 → miss 生门牌开房(各房 `workspace.json` 照写,自
   描述保留)→ 记账(原子写);账本缺/坏 → 扫各房 `workspace.json` 自描述
   重建,不走兼容路;
-- 门牌 = `<路径slug(≤80字节)>-<seed 的 SHA-256 前 8 hex>`。slug:盘符
-  `D:` → `D--`;分隔符与 `.`、空格 → `-`;非法字符 `:*?"<>|` 与控制符 →
-  `_`;中文/Unicode 原样保留;超 80 字节截断(UTF-8 边界回退);Windows
-  保留名(CON/PRN/NUL/COM1-9…)前缀 `_`。哈希段保唯一——不同 seed 必不同
-  门牌;
+- 门牌 = `<路径slug(POSIX ≤80 / Windows ≤40 字节)>-<seed 的 SHA-256 前
+  8 hex>`。slug:盘符 `D:` → `D--`;分隔符与 `.`、空格 → `-`;非法字符
+  `:*?"<>|` 与控制符 → `_`;中文/Unicode 原样保留;超平台帽截断(UTF-8
+  边界回退);Windows 保留名(CON/PRN/NUL/COM1-9…)前缀 `_`。哈希段保
+  唯一——不同 seed 必不同门牌。Windows 档门牌 ≤49:MAX_PATH(文件 259/
+  目录 247)要给 session/artifacts 深巢(~126 字符)与 home 根深度留
+  预算,89 字节门牌在深 home(CI 临时根、长用户名)下必爆顶(2026-09
+  Windows 五红共根,fix/workspace-ledger-win);
 - 身份仍是 `workspace_key`(manifest/session.json 里的那枚),门牌不参与
   裁决;按 key 反查房门走扫房 manifest 自描述,不靠目录名。
 

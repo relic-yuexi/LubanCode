@@ -21,8 +21,22 @@ namespace fs = std::filesystem;
 using platform::PathToUtf8;
 using platform::Utf8ToPath;
 
-// slug 上限(字节;接哈希后门牌 ≤ 89 字节,离单段名 128 帽还有余量)。
-constexpr std::size_t kSlugMaxBytes = 80;
+// slug 上限(字节),接哈希后门牌 ≤ 帽+9,离单段名 128 帽都有余量。
+// 两平台分档:
+//   - POSIX 80:文件系统无 260 之虞,门牌漂亮优先;
+//   - Windows 40:门牌 ≤ 49——MAX_PATH 的账要算清:文件 ≤259、目录 ≤247
+//     (留尾斜杠一格),session 巢最深一段(sessions/<21>/artifacts/sha256/
+//     <2>/<64hex>.tmp-N)还要吃 ~126 字符,再扣 home 根深度。89 字节门牌
+//     在深 home(CI 临时根、长用户名)下必爆顶——账本制批 Windows 五红
+//     共根于此(2026-09 CI run 34046281141)。
+// 门牌只是装饰:账本在,旧房照住(查账走账本,不重算门牌);纯函数恒定,
+// 同版内重算即回,新房不裂。
+constexpr std::size_t kSlugMaxBytes =
+#ifdef _WIN32
+    40;
+#else
+    80;
+#endif
 
 std::string ReadTextFile(const fs::path& path) {
     std::ifstream file(path, std::ios::binary);

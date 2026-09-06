@@ -28,6 +28,8 @@
 
 #include "platform/paths.hpp"
 #include "runtime/trajectory_session.hpp"
+#include "trajectory/blob_store.hpp"
+#include "trajectory/directory.hpp"
 #include "trajectory/session_index.hpp"
 #include "workspace/identity.hpp"
 #include "workspace/index.hpp"
@@ -204,8 +206,16 @@ TEST_CASE("账本制: 门牌生成——slug 变换逐字,哈希段取 seed 前 
     CHECK(workspace::index::MakeWorkspaceDirName(identity) == plaque);
 }
 
-TEST_CASE("账本制: 超长路径截断——slug ≤80,哈希段保唯一") {
-    // 两条只差末段的长路径:slug 同样截到 80 字节,门牌靠哈希段分家。
+TEST_CASE("账本制: 超长路径截断——slug 守平台帽,哈希段保唯一") {
+    // 两条只差末段的长路径:slug 同样截到平台帽,门牌靠哈希段分家。帽分
+    // 两档(见 index.cpp kSlugMaxBytes):POSIX 80——无 MAX_PATH 之虞,漂亮
+    // 优先;Windows 40——门牌 ≤49,给 session/artifacts 深巢留 MAX_PATH
+    //(文件 259/目录 247)预算。
+#ifdef _WIN32
+    constexpr std::size_t kSlugCap = 40;
+#else
+    constexpr std::size_t kSlugCap = 80;
+#endif
     const std::string long_head(140, 'x');
     workspace::WorkspaceIdentity a;
     a.identity_kind = "cwd_fallback";
@@ -223,14 +233,77 @@ TEST_CASE("账本制: 超长路径截断——slug ≤80,哈希段保唯一") {
 
     const std::string plaque_a = workspace::index::MakeWorkspaceDirName(a);
     const std::string plaque_b = workspace::index::MakeWorkspaceDirName(b);
-    REQUIRE(plaque_a.size() <= 80 + 1 + 8);
-    REQUIRE(plaque_b.size() <= 80 + 1 + 8);
+    REQUIRE(plaque_a.size() <= kSlugCap + 1 + 8);
+    REQUIRE(plaque_b.size() <= kSlugCap + 1 + 8);
     CHECK(plaque_a != plaque_b);  // 截断撞 slug,哈希段拆开
     // 截断不落进 UTF-8 序列中间:字节串合法(连续字节必成对有头)。
     const std::string chinese_tail(60, '\xe4');  // 每字节都是 UTF-8 连续位
     const std::string slug = workspace::index::PathSlug("D:/" + chinese_tail);
-    CHECK(slug.size() <= 80);
+    CHECK(slug.size() <= kSlugCap);
     CHECK(slug.find_first_not_of("D-\xe4") == std::string::npos);  // 只剩合法材料
+}
+
+TEST_CASE("账本制: 深根长径——门牌守平台预算,巢底三样落得下") {
+    // 账本制批 Windows 五红的回归面(2026-09 CI 34046281141):门牌帽没给
+    // MAX_PATH 留预算时,深 home + 长项目路径会让 session 巢底三样全数
+    // 打不开——workflow run 目录链(create_directories 撞目录 247 顶)、
+    // blob 临时文件(_wfsopen 撞文件 259 顶)、node 账文件。本册造一只
+    // 深 home + 超帽长路径项目,把三样各落一次;帽回涨或巢再加深,这里
+    // 当场翻红。
+    //
+    // 夹具根要贴着 CI 真实深度(临时根到 workspaces ~69 字符),不比它
+    // 更深:产品保证的是门牌 ≤49 + 帽后预算放得下 CI 级深根;根比这更深
+    // 爆的是 OS 的 260 硬顶,不是门牌帽的账——那种现场只能靠长路径支持,
+    // 不在本册钉的范围。故不用共享 TempRoot(前缀长),另起短根。
+    static int budget_sequence = 0;
+    static const auto budget_run_id =
+        std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    const fs::path root =
+        fs::temp_directory_path() / ("lws-" + std::to_string(budget_run_id % 100000) + "-budget-" +
+                                     std::to_string(++budget_sequence));
+    std::error_code root_ec;
+    fs::remove_all(root, root_ec);
+    fs::create_directories(root, root_ec);
+    const std::string deep_segment(60, 'd');
+    const fs::path repo =
+        root / "very-deep-home-tree" / deep_segment / "a-project-with-a-long-name";
+    MakeRepo(repo);
+
+    runtime::TrajectorySessionLedger::Options options;
+    options.workspaces_root = root / "workspaces";
+    options.workspace_root = repo;
+    options.launch_cwd = repo.generic_string();
+    options.lubancode_version = "index-test";
+    auto ledger = runtime::TrajectorySessionLedger::Open(std::move(options));
+    REQUIRE(ledger.has_value());
+
+    // 门牌守帽:POSIX ≤89,Windows ≤49(slug 帽 40 + 连字符 + 哈希 8)。
+    const auto identity = workspace::ResolveWorkspaceIdentity(repo, {}).value();
+    const std::string plaque = workspace::index::MakeWorkspaceDirName(identity);
+    constexpr std::size_t kPlaqueCap =
+#ifdef _WIN32
+        49;
+#else
+        89;
+#endif
+    CHECK(plaque.size() <= kPlaqueCap);
+    CHECK(plaque.size() > 9);  // 不是光杆哈希:slug 面子还在
+
+    // 巢底三样全落得下(Windows 上任何一样超预算都会当场报错)。
+    auto directory = trajectory::TrajectoryDirectory::OpenExisting(ledger->session_dir());
+    const auto run_stream = directory.ReserveWorkflowRun("wf-run-0001");
+    REQUIRE(run_stream.has_value());
+    CHECK(fs::exists(run_stream->parent_path() / "checkpoints"));
+    const auto node_stream =
+        directory.ReserveWorkflowNodeStream("wf-run-0001", "wf-run-0001-setup-d1-a1");
+    REQUIRE(node_stream.has_value());
+    trajectory::BlobStore blobs(ledger->session_dir() / "artifacts");
+    const std::string body(700, 'x');
+    const auto stored = blobs.Store(body, "text/plain", trajectory::Durability::ProcessCrash);
+    REQUIRE(stored.has_value());
+    const auto read_back = blobs.ReadVerified(*stored);
+    REQUIRE(read_back.has_value());
+    CHECK(*read_back == body);
 }
 
 TEST_CASE("账本制: 账本删除/写坏——扫房自愈,会话照常恢复") {
