@@ -569,11 +569,23 @@ TEST_CASE("步数闸行为:options 折进 profile,预算用满即收场,不多�
     const nlohmann::json completed = harness.server->HandleTurnStart(thread_id, "跑两步", {}, error_code);
     REQUIRE(error_code.empty());
 
-    // 步数预算用满不是错误:success 终态,stepsUsed 恰为闸值。
+    // 步数预算用满不是错误:success 终态,stepsUsed 恰为闸值(stepsUsed 数的
+    // 就是模型请求数)。
     CHECK(completed["status"] == "success");
     CHECK(completed["stepsUsed"] == 2);
-    // 没吃满脚本(5 份只烧了 2 份):闸真拦的,不是脚本跑完了。
-    CHECK(harness.backend->call_count == 2);
+
+    // 对照杆:同款永不收口脚本,闸注 3 就该走 3 步——拦的是闸,不是脚本
+    // 形状恰好收口(脚本轮空会走 error 终态,这里恒 success)。
+    TestHarness gate3(sessions_dir + "-gate3", /*max_steps_per_turn=*/3);
+    gate3.backend->scripts = {NeverEndingScript(), NeverEndingScript(), NeverEndingScript(),
+                              NeverEndingScript(), NeverEndingScript()};
+    const nlohmann::json start3 = gate3.server->HandleThreadStart(nlohmann::json::object(), error_code);
+    REQUIRE(error_code.empty());
+    const nlohmann::json completed3 =
+        gate3.server->HandleTurnStart(start3["threadId"], "跑三步", {}, error_code);
+    REQUIRE(error_code.empty());
+    CHECK(completed3["status"] == "success");
+    CHECK(completed3["stepsUsed"] == 3);
 
     // 缺省闸不设 options 时为 32:同款形状粗验一杆(1 步收口脚本,
     // 闸不该挡正常收口——32 只在"确实想要"时存在)。
@@ -588,7 +600,9 @@ TEST_CASE("步数闸行为:options 折进 profile,预算用满即收场,不多�
     CHECK(completed2["stepsUsed"] == 1);
 
     harness.server->HandleThreadStop(thread_id, error_code);
+    gate3.server->HandleThreadStop(start3["threadId"], error_code);
     default_harness.server->HandleThreadStop(start2["threadId"], error_code);
     std::error_code cleanup_ec;
     std::filesystem::remove_all(lubancode::tools::Utf8ToPath(sessions_dir), cleanup_ec);
+    std::filesystem::remove_all(lubancode::tools::Utf8ToPath(sessions_dir + "-gate3"), cleanup_ec);
 }
