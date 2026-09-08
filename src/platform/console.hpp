@@ -13,10 +13,13 @@
 // 上滚,调用方(EnsureRoomForRows 那套账)自己滚够、自己修正锚点。
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 #include <mutex>
 #include <optional>
 #include <string>
+
+#include "platform/input_recovery.hpp"  // SurrogatePairState:逐键 UTF-16 代理对配对(纯状态机)
 
 #ifndef _WIN32
 #include <termios.h>
@@ -246,6 +249,10 @@ struct KeyInput {
     char32_t ch = 0;
     std::string text;
     std::size_t replace_before = 0;  // Paste:先撤掉光标前多少个码点，再放附件
+    // Paste 专用(Unicode/emoji 治理单 §3.5/§9.3):这枚粘贴没等到结束标记
+    // (总时限/空闲期限/大小上限/停止请求所致),已收正文保留交付,调用方
+    // 据此打一行截断告知。不自动提交——提交永远走用户自己的 Enter。
+    bool truncated = false;
     // 修饰键标志(交互抛光总账:keymap 和弦层)。只对 Kind::Char 有意义:
     // 平台层把 Ctrl+字母/Alt+字母 这类"没有专枚举"的组合按 Char 送出并
     // 置位修饰键;编辑器核心对带修饰的 Char 一律不当正文插入,键位分发层
@@ -288,10 +295,21 @@ private:
 // 逻辑(一次 ReadLine 调用、一条监听线程)各建各的实例。
 class KeyReader {
 public:
+    // 停止口径(Unicode/emoji 治理单 §9.3):监听线程 Stop() 置旗后 join,
+    // 长等待路径(bracketed paste 半包)每个等待切片看一眼这枚旗,见旗即
+    // 弃等待、按截断收场返回——join 不必干等满期限。空指针 = 无停止口径
+    // (空闲 composer 等读取照旧,等待本身也有上限)。
+    void set_cancel_flag(const std::atomic<bool>* flag) { cancel_flag_ = flag; }
+
     std::optional<KeyInput> ReadOne();
 
+    bool CancelRequested() const {
+        return cancel_flag_ != nullptr && cancel_flag_->load(std::memory_order_acquire);
+    }
+
 private:
-    std::optional<char32_t> pending_high_surrogate_;  // 仅 Windows 用;POSIX 下闲置无害
+    SurrogatePairState surrogate_pair_;  // 逐键 UTF-16 代理对账;POSIX 下闲置
+    const std::atomic<bool>* cancel_flag_ = nullptr;
     std::wstring rapid_text_run_;                     // Windows:高速到达、尚未遇到编辑键的正文
 #ifdef _WIN32
     // 仅 console_win.cpp 用;POSIX 下编译掉——平凡类型闲置会报

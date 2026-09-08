@@ -159,7 +159,7 @@ std::optional<std::wstring> MatchingMultilineClipboard(const std::wstring& prefi
     return clipboard;
 }
 
-std::optional<KeyInput> TryReadBracketedPaste() {
+std::optional<KeyInput> TryReadBracketedPaste(const std::atomic<bool>* cancel_flag) {
     constexpr std::wstring_view kStart = L"[200~";
     std::vector<INPUT_RECORD> probe;
     for (const wchar_t expected : kStart) {
@@ -170,12 +170,32 @@ std::optional<KeyInput> TryReadBracketedPaste() {
         }
     }
 
-    constexpr std::wstring_view kEnd = L"\x1b[201~";
-    std::wstring pasted;
-    while (true) {
-        INPUT_RECORD record{};
-        if (!ReadInputRecord(record)) {
+    // §3.5/§9.3:过去这圈 ReadInputRecord 默认 INFINITE——丢了 ESC[201~ 就
+    // 把后续输入全当粘贴正文永远等下去,监听线程 Stop() 的 join() 也打不断。
+    // 三笔界分开:总时限(kBracketedPasteTotalMs)、空闲期限
+    // (kBracketedPasteIdleMs)、大小上限(kMaxPasteUnits);等待拆成
+    // kPasteCancelSliceMs 的片,片间看一眼停止请求。超限/停止退出后已收
+    // 正文保留交付并标 truncated,不自动提交。
+    PasteWideAccumulator pasted;
+    pasted.end_marker = kBracketedPasteEnd;
+    const ULONGLONG start = GetTickCount64();
+    const ULONGLONG deadline = start + static_cast<ULONGLONG>(kBracketedPasteTotalMs);
+    ULONGLONG last_activity = start;
+    while (!pasted.finished()) {
+        if (cancel_flag != nullptr && cancel_flag->load(std::memory_order_acquire)) {
             break;
+        }
+        const ULONGLONG now = GetTickCount64();
+        if (now >= deadline || now - last_activity >= static_cast<ULONGLONG>(kBracketedPasteIdleMs)) {
+            break;
+        }
+        const ULONGLONG idle_left =
+            static_cast<ULONGLONG>(kBracketedPasteIdleMs) - (now - last_activity);
+        const ULONGLONG wait = (std::min)((std::min)<ULONGLONG>(idle_left, deadline - now),
+                                          static_cast<ULONGLONG>(kPasteCancelSliceMs));
+        INPUT_RECORD record{};
+        if (!ReadInputRecord(record, static_cast<DWORD>(wait))) {
+            continue;  // 这一片没等到:回圈头查取消/总时限/空闲
         }
         if (record.EventType != KEY_EVENT || record.Event.KeyEvent.bKeyDown == FALSE ||
             record.Event.KeyEvent.uChar.UnicodeChar == 0) {
@@ -183,19 +203,20 @@ std::optional<KeyInput> TryReadBracketedPaste() {
         }
         const KEY_EVENT_RECORD& key = record.Event.KeyEvent;
         const unsigned repeat = (std::max)(1U, static_cast<unsigned>(key.wRepeatCount));
-        for (unsigned i = 0; i < repeat; ++i) {
-            pasted.push_back(key.uChar.UnicodeChar);
+        for (unsigned i = 0; i < repeat && !pasted.finished(); ++i) {
+            pasted.Feed(key.uChar.UnicodeChar);
         }
-        if (pasted.size() >= kEnd.size() &&
-            pasted.compare(pasted.size() - kEnd.size(), kEnd.size(), kEnd) == 0) {
-            pasted.resize(pasted.size() - kEnd.size());
-            break;
-        }
+        last_activity = GetTickCount64();
     }
 
+    if (!pasted.done && pasted.text.empty()) {
+        // 半包一枚正文都没收到:当这趟粘贴没来过(Esc 键照常交付)。
+        return std::nullopt;
+    }
     KeyInput out;
     out.kind = KeyInput::Kind::Paste;
-    out.text = WideToUtf8(NormalizeNewlines(pasted));
+    out.text = WideToUtf8(NormalizeNewlines(pasted.text));
+    out.truncated = !pasted.done;
     return out;
 }
 
@@ -252,7 +273,7 @@ bool AppendNativePasteKey(const INPUT_RECORD& record, std::wstring& text, bool& 
 // paste 拆成几批，第一批还偏生停在换行上；一见换行便留 60ms 的空闲窗口
 // 续收，直到整批安静下来。普通打字只在按 Enter 时多等这一小拍，换行后
 // 没正文仍按提交处理；方向键、Ctrl/Alt 等编辑键一混进来也整批原样放回。
-std::optional<KeyInput> TryReadNativePasteBurst(const INPUT_RECORD& first) {
+std::optional<KeyInput> TryReadNativePasteBurst(const INPUT_RECORD& first, SurrogatePairState& surrogate) {
     std::vector<INPUT_RECORD> tail;
     INPUT_RECORD record{};
     while (ReadInputRecord(record, 0)) {
@@ -332,9 +353,16 @@ std::optional<KeyInput> TryReadNativePasteBurst(const INPUT_RECORD& first) {
         return std::nullopt;
     }
 
+    // §9.1:这批粘贴尾若停在半个代理对上(续批在空闲窗内没跟上),尾高
+    // 代理剥出来留 pending 跨批;上一枚逐键高代理若还 pending,遇上本批
+    // 领头低代理先拼回。剪贴板逐字核对那条路(text == *clipboard)是精确
+    // 匹配,不动。净结果交 ReadOne 收尾(它管 pending 的快照/复位次序)。
+    const SurrogateCarry carry = ApplySurrogateCarry(std::move(text), surrogate.pending_high);
+    surrogate.pending_high = carry.pending_high;
+
     KeyInput out;
     out.kind = KeyInput::Kind::Paste;
-    out.text = WideToUtf8(text);
+    out.text = WideToUtf8(carry.text);
     return out;
 }
 
@@ -350,7 +378,8 @@ std::optional<KeyInput> TryReadNativePasteBurst(const INPUT_RECORD& first) {
 // 只当这一枚没来过,交付路径一字不改。
 std::optional<KeyInput> TryReadCoalescedTextBurst(const INPUT_RECORD& first,
                                                   const std::wstring& prior_text,
-                                                  std::size_t prior_chars) {
+                                                  std::size_t prior_chars,
+                                                  SurrogatePairState& surrogate) {
     std::vector<INPUT_RECORD> tail;
     INPUT_RECORD record{};
     while (ReadInputRecord(record, 0)) {
@@ -378,9 +407,17 @@ std::optional<KeyInput> TryReadCoalescedTextBurst(const INPUT_RECORD& first,
             std::vector<INPUT_RECORD>(tail.begin() + static_cast<std::ptrdiff_t>(consumed), tail.end()));
     }
 
+    // §9.1 合批边界:阈值按 UTF-16 单元数算,批次恰好停在半个代理对上时,
+    // 不许整批 WideToUtf8 把尾高代理变成替换符——剥出来留 pending 跨批
+    // (受控反例:第一批 15×'a'+D83D,第二批 DE00,要还原成 😀)。上一
+    // 批留下的高代理遇上本批领头低代理,先拼回再转码。净结果交 ReadOne
+    // 收尾(它管 pending 的快照/复位次序)。
+    const SurrogateCarry carry = ApplySurrogateCarry(prior_text + decision.text, surrogate.pending_high);
+    surrogate.pending_high = carry.pending_high;
+
     KeyInput out;
     out.kind = KeyInput::Kind::Paste;
-    out.text = WideToUtf8(NormalizeNewlines(prior_text + decision.text));
+    out.text = WideToUtf8(NormalizeNewlines(carry.text));
     out.replace_before = prior_chars;
     return out;
 }
@@ -839,19 +876,35 @@ RawInputScope::~RawInputScope() {
 }
 
 std::optional<KeyInput> KeyReader::ReadOne() {
-    const auto reset_text_run = [this]() {
+    // 快打账清零,代理 pending 不动——慢速拆半的代理对(高、低两枚事件隔
+    // 了超过 kRapidTextGapMs)仍要拼成一个码点,50ms 的快打间隔不判它死刑。
+    const auto clear_rapid_run = [this]() {
         rapid_text_run_.clear();
         rapid_char_count_ = 0;
         last_text_tick_ = 0;
     };
+    // 编辑键/取消/EOF/粘贴收尾的口径:快打账连同陈旧的半个代理对一并
+    // 勾销,不带账进下一笔输入(§6.3)。半截代理对本来就没进过编辑器。
+    const auto reset_text_run = [this, &clear_rapid_run]() {
+        clear_rapid_run();
+        surrogate_pair_.Reset();
+    };
+    if (CancelRequested()) {
+        return KeyInput{};  // 停止请求已到:不开新的解析/粘贴等待,调用方自会收口
+    }
     INPUT_RECORD record{};
     if (!ReadInputRecord(record)) {
+        surrogate_pair_.Reset();  // EOF/读失败:陈旧代理账一并清(§6.3)
         return std::nullopt;
     }
     if (record.EventType != KEY_EVENT || record.Event.KeyEvent.bKeyDown == FALSE) {
         return KeyInput{};  // None
     }
-    if (auto paste = TryReadNativePasteBurst(record); paste.has_value()) {
+    if (auto paste = TryReadNativePasteBurst(record, surrogate_pair_); paste.has_value()) {
+        // burst 可能在批尾剥了一枚高代理 pending 跨批:reset 前快照、复位后
+        // 摆回。剪贴板整对(completion)那条路交付的是剪贴板原文,pending
+        // 不得再带(那半枚已含在剪贴板原文里),不复位回去。
+        const std::optional<wchar_t> carry = surrogate_pair_.pending_high;
         if (!rapid_text_run_.empty()) {
             std::wstring combined = rapid_text_run_ + Utf8ToWide(paste->text);
             if (combined.find(L'\n') != std::wstring::npos) {
@@ -863,6 +916,7 @@ std::optional<KeyInput> KeyReader::ReadOne() {
             }
         }
         reset_text_run();
+        surrogate_pair_.pending_high = carry;
         return paste;
     }
     const KEY_EVENT_RECORD& ke = record.Event.KeyEvent;
@@ -961,7 +1015,7 @@ std::optional<KeyInput> KeyReader::ReadOne() {
         reset_text_run();
         out.kind = (shift || alt) ? KeyInput::Kind::NewLine : KeyInput::Kind::Enter;
     } else if (ke.wVirtualKeyCode == VK_ESCAPE) {
-        if (auto paste = TryReadBracketedPaste(); paste.has_value()) {
+        if (auto paste = TryReadBracketedPaste(cancel_flag_); paste.has_value()) {
             reset_text_run();
             return paste;
         }
@@ -994,44 +1048,53 @@ std::optional<KeyInput> KeyReader::ReadOne() {
             // bracketed paste 的开头探一遍,标记字符紧跟着就到;探不到,
             // 它就是一枚普通的 Esc 键。旧路把 0x1b 静默丢弃,后面的
             // "[200~"便逐字漏进编辑器——正是实测里"标记也被逐字渲染"
-            // 的病根。
-            if (auto paste = TryReadBracketedPaste(); paste.has_value()) {
+            // 的病根。粘贴收尾即协议完整,不带代理账;半包则按截断收场。
+            if (auto paste = TryReadBracketedPaste(cancel_flag_); paste.has_value()) {
                 reset_text_run();
-                pending_high_surrogate_.reset();
                 return paste;
             }
             reset_text_run();
-            pending_high_surrogate_.reset();
             out.kind = KeyInput::Kind::Esc;
             return out;
         }
         constexpr ULONGLONG kRapidTextGapMs = 50;
         const ULONGLONG now = GetTickCount64();
         if (!rapid_text_run_.empty() && now - last_text_tick_ > kRapidTextGapMs) {
-            reset_text_run();
+            clear_rapid_run();
         }
-        if (auto burst = TryReadCoalescedTextBurst(record, rapid_text_run_, rapid_char_count_);
+        if (auto burst =
+                TryReadCoalescedTextBurst(record, rapid_text_run_, rapid_char_count_, surrogate_pair_);
             burst.has_value()) {
+            // burst 可能在批尾剥了一枚高代理 pending 跨批(§9.1):快照、
+            // 复位、摆回——下一批的领头低代理靠它拼回完整码点。
+            const std::optional<wchar_t> carry = surrogate_pair_.pending_high;
             reset_text_run();
-            pending_high_surrogate_.reset();
+            surrogate_pair_.pending_high = carry;
             return burst;
+        }
+        // 逐键代理对账(§3.4/§9.1):高代理只与紧邻合法低代理配对;孤立
+        // 低代理、高代理后插入普通字符按 U+FFFD 可解释交付,后续键不吞。
+        const SurrogateFeedResult fed = surrogate_pair_.Feed(wc);
+        if (fed.kind == SurrogateFeedResult::Kind::Pending) {
+            rapid_text_run_.push_back(wc);
+            last_text_tick_ = now;
+            return KeyInput{};  // 高代理项,等低代理项凑成一个完整码点再交
+        }
+        if (fed.kind == SurrogateFeedResult::Kind::ReplacementWithRetry) {
+            // 高代理后插入的普通字符还没被消费:原样还回队列,下一趟照常
+            // 交付(这一趟的账是 U+FFFD)。
+            RestoreInputRecords({record});
+            ++rapid_char_count_;
+            out.kind = KeyInput::Kind::Char;
+            out.ch = fed.cp;
+            return out;
         }
         rapid_text_run_.push_back(wc);
         last_text_tick_ = now;
-        if (wc >= 0xD800 && wc <= 0xDBFF) {
-            pending_high_surrogate_ = static_cast<char32_t>(wc);
-            return KeyInput{};  // 高代理项,等低代理项凑成一个完整码点再交
-        }
-        char32_t cp = static_cast<char32_t>(wc);
-        if (wc >= 0xDC00 && wc <= 0xDFFF && pending_high_surrogate_.has_value()) {
-            const char32_t high = *pending_high_surrogate_;
-            pending_high_surrogate_.reset();
-            cp = 0x10000 + ((high - 0xD800) << 10) + (static_cast<char32_t>(wc) - 0xDC00);
-        }
-        if (cp >= 0x20) {  // 过滤掉控制字符(Esc、独立的 Tab 已经在上面单独处理)
+        if (fed.cp >= 0x20) {  // 过滤掉控制字符(Esc、独立的 Tab 已经在上面单独处理)
             ++rapid_char_count_;
             out.kind = KeyInput::Kind::Char;
-            out.ch = cp;
+            out.ch = fed.cp;
         }
     }
     return out;
