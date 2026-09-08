@@ -1173,6 +1173,32 @@ TEST_CASE("模式行 skills hint:右槽「N skills · ? 快捷键」,窄屏先�
 }
 
 // ---------------------------------------------------------------------------
+// 帮助入口不叠画:速览行与模式行 hint 互斥。速览行只在空 composer 出现,
+// 模式行 hint 是打字后速览行让位时接班的门——空 composer 若两处都画,
+// 右缘一列扫下来便是两扇重门(同列合同见上文速览行册)。
+// ---------------------------------------------------------------------------
+
+TEST_CASE("帮助入口不叠画:空 composer 只画速览行,打字后 hint 接班") {
+    SetLanguage("zh-CN");
+    // 空 composer、空闲、无面板:帮助入口只在速览行,模式行右端止于 skills。
+    BottomChromeScene idle_empty = CommonScene(ComposerState({U""}, 0, 0));
+    idle_empty.mode = ComposerMode::Idle;
+    const BottomChromeModel empty_model = BuildBottomChromeModel(idle_empty);
+    REQUIRE(empty_model.status_rows.size() == 1);
+    CHECK(empty_model.assist_row.right.find("?") != std::string::npos);  // 速览行带门
+    CHECK(Contains(empty_model.status_rows[0], "skills"));
+    CHECK(empty_model.status_rows[0].find("快捷键") == std::string::npos);  // 模式行不叠
+
+    // 打字后速览行让位,模式行 hint 接班——门仍是那扇,只是挪了行。
+    BottomChromeScene idle_filled = CommonScene(ComposerState({U"打了几个字"}, 0, 5));
+    idle_filled.mode = ComposerMode::Idle;
+    const BottomChromeModel filled_model = BuildBottomChromeModel(idle_filled);
+    REQUIRE(filled_model.status_rows.size() == 1);
+    CHECK(filled_model.assist_row.empty());
+    CHECK(Contains(filled_model.status_rows[0], "快捷键"));
+}
+
+// ---------------------------------------------------------------------------
 // 快捷键提示的 keymap 驱动(收口审计单 §二 P2):帮助入口只认
 // ChordFor(HelpShow)与一枚标签——改绑后速览行(空闲)、帮助层、搜索层
 // 一齐跟脚;运行中没有写死 "?" 的兜底(input.shortcuts_hint 兜底生产路

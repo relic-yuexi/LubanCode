@@ -679,10 +679,13 @@ BottomChromeModel BuildBottomChromeModel(const BottomChromeScene& scene) {
         // 反查拼好传入(BuildComposerModeLine 本身保持纯,不碰 keymap)。
         // 仅 Idle 拼——footer 路(Busy)在监听线程重画,ActiveKeymap 的读侧
         // 纪律不许它查表(keymap.hpp);忙时速览行本就没有,skills 旁的
-        // 帮助入口也无需再画。
+        // 帮助入口也无需再画。速览行在场(空 composer)时不拼:那行已带
+        // 帮助入口,模式行右端止于 skills,右缘一列扫下来不重门(同列合同
+        // 见 test_bottom_chrome 的速览行册)。
+        const bool assist_row_drawn = !model.assist_row.empty();
         model.status_rows = {BuildComposerModeLine(chrome, static_cast<int>(SessionSkillCount()),
                                                    row_width,
-                                                   scene.mode == ComposerMode::Idle
+                                                   scene.mode == ComposerMode::Idle && !assist_row_drawn
                                                        ? BuildSkillsHintText()
                                                        : std::string())};
         if (const std::string info_row = BuildStatusLine(chrome, row_width); !info_row.empty()) {
