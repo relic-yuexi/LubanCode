@@ -1,6 +1,12 @@
 # Unicode / Emoji 交互卡顿调查：字素编辑、显示宽度与输入等待治理
 
 - 状态：调查已落单，待复现与实现；本轮未修改生产代码。
+  P1 已实施(2026-09-09,worktree-agent-emoji-width):共享 EGC 分段器
+  src/cli/grapheme.{hpp,cpp}(内嵌 Unicode 15.1 紧凑表)落地,line_editor/
+  bottom_chrome/terminal_frame/markdown/transcript/format_utils 全部迁到
+  同一把尺;Delete 补齐(§9.4);native cells 编码映射与 lossy 退路修毕
+  (§9.2);§9.5 第一条补了计数型扫描账断言(scanned_pending_bytes)。
+  真机验证(Windows Terminal 实测、用户样本复现)与 P0/P2/P3 其余项未做。
 - 日期：2026-09-08
 - 级别：P1（终端输入与显示正确性）；若真机证实无法取消的输入阻塞，再将对应修复提升为 P0。
 - 调查基线：本地 `main`，`0de369ae`。
@@ -177,7 +183,7 @@ UTF-8 字节、Unicode scalar value、扩展字素簇（EGC）、终端 cell 不
 ### P0：复现与测量
 
 - [ ] 获取最小触发样本及终端信息，区分视觉卡住、有限延迟、粘贴等待与死锁。
-- [ ] 为上表组合表情补当前行为反例，使用独立预期值，不再用同一量宽函数自证。
+- [x] 为上表组合表情补当前行为反例，使用独立预期值，不再用同一量宽函数自证。(P1 一并落:test_grapheme.cpp 逐条钉 §3.1 表,test_render_boundaries.cpp 的"独立列宽断言"期望值全部手写常数)
 - [ ] 建立 Windows 输入记录可重放测试和缺失结束标记的受控测试，设置外部超时避免测试自身挂死。
 - [ ] 测量输入到重画延迟、输出背压与锁等待，记录产物版本；不得拿既有测试产物冒充当前源码构建结果。
 
@@ -185,10 +191,10 @@ UTF-8 字节、Unicode scalar value、扩展字素簇（EGC）、终端 cell 不
 
 ### P1：字素与列宽基础
 
-- [ ] 定案 Unicode 数据/库、固定版本与许可，补充分段和终端策略差异说明。
-- [ ] 实现共享字素边界及列宽策略，补 ZWJ、VS15/16、肤色、旗帜、keycap、组合重音用例。
-- [ ] 修正左右移动、Backspace/Delete、软换行与截断的边界，并保持 paste 占位符和历史原文语义。
-- [ ] 核实 ANSI、composer/footer、markdown 和其他逐码点消费者，按需迁移到共享规则。
+- [x] 定案 Unicode 数据/库、固定版本与许可，补充分段和终端策略差异说明。(不加第三方依赖;src/cli/grapheme.{hpp,cpp} 内嵌 Unicode 15.1 紧凑区间表,覆盖边界与回退口径写进文件头;终端策略差异进 docs/features/terminal/README.md §2)
+- [x] 实现共享字素边界及列宽策略，补 ZWJ、VS15/16、肤色、旗帜、keycap、组合重音用例。(test_grapheme.cpp 全套夹具 + test_line_editor/terminal_frame/render_boundaries 扩册)
+- [x] 修正左右移动、Backspace/Delete、软换行与截断的边界，并保持 paste 占位符和历史原文语义。(Delete 由 no-op 补齐为整簇向前删,§9.4;ASCII 对照测试区分"按键没实现"与"Unicode 边界")
+- [x] 核实 ANSI、composer/footer、markdown 和其他逐码点消费者，按需迁移到共享规则。(ClampAnsiRowToWidth/LayoutComposerRows/BuildNativeRowCells/SplitUtf8Glyphs/WrapPreviewLine/WrapStatusRows 全迁;live_transcript 不量宽,仅补扫描计数)
 
 验收：完整字素不被拆开；光标、布局与支持终端一致；原文提交字节未被规范化或丢失。
 
@@ -248,9 +254,9 @@ UTF-8 字节、Unicode scalar value、扩展字素簇（EGC）、终端 cell 不
 
 P1 增加任务：
 
-- [ ] 修正 native 输出中 Unicode 编码单元与终端 cell 的映射，覆盖窄非 BMP、常规 emoji、旗帜与组合序列。
-- [ ] 在 `tests/unit/cli/test_terminal_frame.cpp` 及平台输出测试中检查实际 UTF-16 合法性，不只断言 cell 数量。
-- [ ] 覆盖 `LayoutComposerRows()` 恰好填满一行后的附标；不能仅把附标宽度归零后继续在容量到达时立即断行。
+- [x] 修正 native 输出中 Unicode 编码单元与终端 cell 的映射，覆盖窄非 BMP、常规 emoji、旗帜与组合序列。(BuildNativeRowCells:非 BMP 恒 leading/trailing 双格打代理对——CHAR_INFO 单格单 UTF-16 码元的编码硬约束;多码点簇/孤立零宽/坏代理报 utf16_lossy 出参,PaintInlineFrameNativeRows 见 lossy 返 false 退 legacy 字节流路,不静默丢附标)
+- [x] 在 `tests/unit/cli/test_terminal_frame.cpp` 及平台输出测试中检查实际 UTF-16 合法性，不只断言 cell 数量。(CellsToUtf16 按 WriteNativeRow 现行语义重组码元流,Utf16WellFormed 验代理配对;含旗帜/窄非 BMP U+1D11E/混排/坏代理用例)
+- [x] 覆盖 `LayoutComposerRows()` 恰好填满一行后的附标；不能仅把附标宽度归零后继续在容量到达时立即断行。(按簇装行,恰满后零宽跟随者随基础字同行;test_terminal_frame"恰满一行后的零宽附标不挤丢"钉死)
 
 ### 9.3 粘贴半包不仅影响输入，还可能阻止监听器停止
 
