@@ -201,3 +201,17 @@ TEST_CASE("子任务输出预留受控上限(派工单 §四):能力声明超窗
     CHECK(*sub_small.max_output_tokens == 16384);
     CHECK(sub_small.max_output_tokens_source == agent::OutputBudgetSource::ModelCatalog);
 }
+
+TEST_CASE("主会话预检估算用的输出预留封顶(主会话输出预留占坑单 §4.1):与子代理同尺") {
+    // 尺子同一把:窗口未知与大窗封 32k;中窗按 window/8;小窗托底 8k。
+    // 用法有别——这顶帽只戴在 loop 预检的"估算用的预留"上(BuildMain
+    // RuntimeProfile 构造出的 main profile 不动,能力声明原值保留,见
+    // 上一案 *main_profile.max_output_tokens == 128000);实发 max_tokens
+    // 的优雅降级与 ConfigFile 例外发生在 loop 的最终硬闸,由
+    // tests/unit/agent/test_loop.cpp 的预检三态册钉。
+    CHECK(agent::MainSessionOutputReserveCap(0) == 32768);
+    CHECK(agent::MainSessionOutputReserveCap(262144) == 32768);
+    CHECK(agent::MainSessionOutputReserveCap(256000) == 32000);  // 事故形状:256k 窗 → 32k 帽
+    CHECK(agent::MainSessionOutputReserveCap(65536) == 8192);
+    CHECK(agent::MainSessionOutputReserveCap(16384) == 8192);  // window/8=2048,托底 8k
+}

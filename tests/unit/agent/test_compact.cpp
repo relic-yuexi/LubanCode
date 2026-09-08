@@ -851,13 +851,15 @@ TEST_CASE("AgentLoop: 预估虚算单独不触发 midturn 压缩——真实水�
                       agent::AgentProfile{.request{.model = "test-model"},
                                           .runtime{.max_output_tokens = 65536},
                                           .system_prompt = "sys"});
-    // 20 组 run_command 工具来回:每组 7500 个短词(15000 字节),托底尺
-    // 记 7500、日常尺只记 3750——虚算恰是真实水位的两倍。
+    // 25 组 run_command 工具来回:每组 7500 个短词(15000 字节),托底尺
+    // 记 7500、日常尺只记 3750——虚算恰是真实水位的两倍。组数按封顶后
+    // 的预留(65536 声明 → 32k 帽)取齐:projected 仍须过 80% 参考线,
+    // 真实水位远在 60% 线下。
     std::vector<api::Message> history{UserText("跑构建")};
     std::string short_terms;
     short_terms.reserve(15000);
     for (int i = 0; i < 7500; ++i) short_terms += "a ";
-    for (int i = 0; i < 20; ++i) {
+    for (int i = 0; i < 25; ++i) {
         const std::string id = "cmd_" + std::to_string(i);
         history.push_back(AssistantToolUse(id, "run_command"));
         history.push_back(UserToolResult(id, short_terms));
