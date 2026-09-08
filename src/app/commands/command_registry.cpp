@@ -55,6 +55,9 @@ const std::vector<SlashCommandSpec>& SlashCommandTable() {
         {lubancode::cli::SlashCommand::Worktree, "worktree", HandleSlashWorktree, false, false},
         {lubancode::cli::SlashCommand::Clear, "clear", HandleSlashClear, false, false},
         {lubancode::cli::SlashCommand::Context, "context", HandleSlashContext, false, false},
+        // ContextWindow 交互面板单:同屏调当前模型窗口与思考强度(本会话)。
+        {lubancode::cli::SlashCommand::ContextWindow, "context-window", HandleSlashContextWindow,
+         false, false},
         {lubancode::cli::SlashCommand::Usage, "usage", HandleSlashUsage, false, false},
         {lubancode::cli::SlashCommand::Insights, "insights", HandleSlashInsights, false, false},
         {lubancode::cli::SlashCommand::Compact, "compact", HandleSlashCompact, false, false},
@@ -132,7 +135,8 @@ const char* CoarseEffectClass(const std::string& name) {
     static const std::set<std::string> kSessionState = {
         "model",     "provider", "think",  "context", "plan",       "soul",     "prompt",
         "language",  "title",    "keymap", "init",    "worktree",   "config",   "hooks",
-        "compact",   "record",   "memory", "todos",   "instructions"};
+        "compact",   "record",   "memory", "todos",   "instructions",
+        "context-window"};
     static const std::set<std::string> kExternalWrite = {"skill", "plugin", "package", "send", "peerperm",
                                                          "evolve"};
     static const std::set<std::string> kSpawnRun = {"agent", "workflow", "goal", "loop", "background",
