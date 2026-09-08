@@ -1,0 +1,238 @@
+# /context-window：当前模型上下文窗口与思考强度面板
+
+- 状态：待实现（本轮只落设计文档，不改生产代码）
+- 日期：2026-09-08
+- 级别：P1（模型配置体验与生效一致性）
+- 范围：slash 注册与派发、终端设置面板、当前模型能力解析、会话设置应用、测试与命令文档。
+- 依赖：现有 `/context`、`/think`（`/effort`）、`/model`，模型目录与 ReasoningConfig。
+- 不在本单：扩大模型实际能力、改模型协议参数体系、重写 compact、批量改模型目录、重构通用终端框架。
+
+## 一、先下断语
+
+新增 `/context-window`，命令描述为 `Set context window for the current model`。裸命令打开一个交互界面，同屏调整当前模型的 Context Window 和 Thinking Effort；不是让用户背两个命令，也不是弹出两层独立选择器。
+
+Context Window 常用预设为 200K、400K、1M。Thinking Effort 根据当前 provider/model 的实际声明生成，不能把 Disabled、Low、Medium、High、Xhigh 全套硬塞给所有模型。
+
+面板必须显示当前真正生效的值。左右操作先改草稿，确认后统一应用；取消不影响会话。`Xhigh (Default)` 只是展示示例，不能当作所有模型的默认值。
+
+本单先写设计。用户已明确要求“先写文档，写到 todos 目录里面去”；下文实现项均未完成。
+
+## 二、需求与拟定方案的边界
+
+### 用户已明确的需求
+
+- 命令名 `/context-window`，描述 `Set context window for the current model`。
+- 左上角 `Model: xxx模型`，下面空一行。
+- 第一项 Context Window，说明 `Maximum context length the model reads at once.`。
+- 窗口值以 `< 200K >` 一类样式展示，左右切换，常用 200K、400K、1M 三档。
+- 第二项 Thinking Effort，说明思考强度，值如 `< Xhigh (Default) >`。
+- 思考档位按不同模型真实情况变化，例如 Disabled、Low、Medium。
+- 下方展示当前选择，最后显示上下、左右等操作说明。
+
+### 本单建议，实施前应确认
+
+- 上下选择设置项，左右循环切换该项的值；Enter 保存，Esc 取消，Ctrl+C 按面板取消处理而非退出程序。
+- 第一版只改当前会话、当前主模型，不自动写用户或项目配置；切换模型后遵循既有模型切换规则，不新增跨模型偏好库。
+- 窗口预设按可信模型上限过滤，补上非标准的实际上限和当前值，不强迫所有模型只有三档。
+- 模型能力未知时保守展示，不凭名字猜档位；可指向已有命令和配置入口，不在第一版增加自定义输入框。
+
+若用户希望关闭程序后仍记住选择，需要另定 provider + model 维度的持久化位置、覆盖优先级、恢复默认与切换行为，不能偷偷写成全局设置。
+
+## 三、界面与操作
+
+建议布局（英文文案为需求示意，实现时接入已有国际化）：
+
+```text
+Model: xxx
+
+> Context Window
+  Maximum context length the model reads at once.
+  < 200K >
+
+  Thinking Effort
+  How much the model thinks before replying.
+  < Xhigh (Default) >
+
+Selected: 200K context · Xhigh thinking
+
+↑↓ Select setting   ←→ Change value
+Enter Save          Esc Cancel
+```
+
+- 默认焦点在 Context Window，`>` 跟随焦点。高亮配合文本标记，不能只靠颜色表达选中。
+- 进入时从运行态读取窗口与 effort；未操作时 Selected 必须与当前生效值相同。变更后 Selected 表示草稿，增加 `Unsaved` 或本地化等价提示，避免误称已生效。
+- `Model:` 优先用展示名；不同 provider 同名模型须能辨识，可另附 provider 或模型 ID，不让用户调错端点。
+- 上下在两项间切换；左右按顺序循环，只有一个候选值时不改变状态。
+- 不可调节项仍保留说明，例如 `Not supported`、`Always enabled`、`Capabilities unknown`；禁止画出暗示可切换的活动箭头。
+- Enter 先校验两项，再应用；无变更则正常关闭。Esc、取消及输入结束均丢弃草稿。
+- 保存失败要明确说明失败原因，不显示成功，也不能只保存一半却不告诉用户。
+- 窄终端按宽度折行或省略长模型名；不用 emoji 的显示宽度作为布局依据。方向箭头不可用时用 Up/Down、Left/Right 文本回退。
+- 非交互环境不读键、不挂起，返回简短说明并指向 `/context <tokens>`、`/think <level>`。
+
+## 四、窗口档位合同
+
+### 4.1 本地预算不是服务端扩容
+
+这里设置的是 LubanCode 对当前主模型使用的上下文窗口预算，供占用显示、上下文压力与压缩判断使用。将值调到 1M 并不意味着服务端自动获得 1M 能力，也不等于每次请求都会读入 1M token。
+
+不能把 `context_window` 与 `max_output_tokens` 混为一谈；输出预留与压缩阈值继续走既有算法。若某模型的长上下文需要协议参数、资格或特别计费，须按已有端点声明核实，不能靠 UI 开一个更大的数宣称支持。
+
+### 4.2 候选值生成建议
+
+1. 使用现有 token 解析口径：K=1000，M=1000000；200K=200000，400K=400000，1M=1000000。
+2. 取常用集合 `{200000, 400000, 1000000}`，按已知模型上限过滤。
+3. 补充非标准的模型声明值与运行态当前值，排序、去重；例如 128K 模型至少能显示自己的 128K，不能出现空列表。
+4. 必须区分“运行态用户预算”与“模型声明上限”。现有字段是否承载两种语义要先核实，不能拿用户上次调大的预算反证模型支持这么大。
+5. 当前值若高于已知上限，照实显示并标记异常，不能悄悄夹到最近一档。未改该项可保留既有值；重新选择窗口时不得新增超限选择。
+6. 能力未知时保留当前值并标注未验证，第一版不提供凭猜测新增的高档位。
+7. 不为了统一外观把 1,048,576 或 1,050,000 等真实数值直接改成 1,000,000；若显示缩写有歧义，补精确 token 数或使用不同标签。
+
+示例（拟定规则，不是厂商规格表）：
+
+| 已知模型上限 | 常规可选值（另按需补当前值） |
+| --- | --- |
+| 128000 | 128K |
+| 200000 | 200K |
+| 400000 | 200K、400K |
+| 1000000 | 200K、400K、1M |
+| 未知 | 当前值，标注未验证 |
+
+缩小窗口后若当前占用已超过预算，应提示下一次请求可能触发既有压缩流程。保存设置本身不清空历史、不立即调用模型、不另起一次付费压缩。
+
+## 五、Thinking Effort 档位合同
+
+### 5.1 数据来源
+
+基于当前 provider/model 已解析的目录与配置生成候选值，复用现有能力解析的优先级。现有入口可见：
+
+- `ModelCatalogEntry::default_think`、`supported_think_levels`、`reasoning`。
+- `ReasoningConfig::supported_efforts`、`supports_effort`、`supports_toggle`、预算声明、`dialect`、`declined`。
+- `/think` 的 provider 档位回退与关闭能力分类。
+
+不能只按模型名中的 GPT、Claude、Kimi 字符串臆造能力；中转端不能无条件继承官方端的“已验证”标签。上述字段有重复或冲突时，要核实目前合并链路，集中在一个解析函数裁决，面板不自己拼两张平级表。
+
+### 5.2 展示值与请求值分开
+
+- `low` 可展示为 Low，`xhigh` 展示为 Xhigh；提交使用现有规范值，不把展示字符串发给 API。
+- Disabled 仅在声明可关闭且现有请求构造器能表达关闭时可选；复用 `ReasoningEffortIsOff` 等语义，不把 `minimal`、低预算或空串当作关闭。
+- 明确关不掉的模型不提供 Disabled；只支持开关的模型显示真实开关选项，不伪造 Low/Medium/High。
+- 只支持预算的模型：若已有受支持的强度映射则复用，否则说明限制，不新编档位与 token 映射。
+- 明确不支持推理参数的模型显示不可调节；“未声明能力”和“不支持”必须分开。
+- 当前值不在声明列表时，仍以当前/未验证状态展示，不偷偷换档；用户改选时只给可用候选。
+- 未知能力时，不因为旧 `/think` 允许透传任意字符串就把这些字符串标为真实支持。
+
+### 5.3 Default 的含义
+
+只有解析得到明确默认档位，才能在对应选项显示 `(Default)`。默认可能是 High、Xhigh 或其他档，不做全局假设。
+
+当前 effort 为空时必须保留“未发送参数 / Provider default”状态，而不是自动补成某档。服务端未公开默认值时显示 `Provider default`，不能显示臆测的 `Xhigh (Default)`。内部区分默认/未设置状态与 Disabled。
+
+切换 effort 还须检查已有 `/think history all` 的兼容关系，复用历史思考校验机制；不得在关闭思考时继续对用户宣称跨轮保留生效。冲突若需连带修改，应明确提示，不暗改额外选项。
+
+## 六、已查明的代码落点
+
+以下是 2026-09-08 的只读调查结果，不代表已经实现：
+
+- `src/app/commands/session_commands.cpp`：`HandleContextCommand`，约 161 行；约 367–373 行解析窗口并写入 `ContextTracker`。裸 `/context` 保持占用分析语义，不被新面板取代。
+- `src/app/commands/settings_commands.cpp`：`HandleThinkCommand`，约 452 行起；现有 `/think`/`/effort` 是本会话调整，目录外参数允许发送但提示未验证。新面板不能顺手收紧原命令兼容行为。
+- 同文件 `DecideThinkHistorySwitch`、`RevalidateThinkHistoryMode`，约 550、614 行起：历史思考与关闭状态的兼容规则。
+- `src/config/model_catalog.hpp`：`ModelCatalogEntry`，约 47 行起，含模型显示名、默认思考、档位、reasoning、窗口与输出上限。
+- `src/api/reasoning.hpp`：`ReasoningConfig`，约 88 行起；`src/config/model_catalog.cpp` 有 `ClassifyThinkOffDeclaration`。
+- `src/config/config.cpp`：`ParseContextWindowTokens`，约 605 行起。
+- `src/runtime/command_service.cpp`：模型配置应用已有 `apply_context_window` 回调；`src/app/commands/model_commands.cpp` 有接线。新增面板不应成为与现有状态割裂的第二套配置系统。
+- `src/app/interactive_session.cpp`、`src/app/interactive_session_assembly.cpp`：已有主 Agent 的 `SetContextWindowTokens` 同步点。实现时核实新设置能否在下一次请求前同步，不能只改显示值。
+
+### 6.1 Slash 与终端入口补充（只读子代理调查）
+
+- `src/cli/slash_commands.hpp` 的 `SlashCommand` 枚举，以及 `src/cli/slash_commands.cpp` 的 `ParseSlashCommand()`、`AllSlashCommands()`：新增独立命令。帮助 `FormatSlashCommandListLines()` 与 `src/cli/console_input.cpp` 的 `BuildSlashCompletionCandidates()` 消费同一命令表，不另造帮助或补全名单。
+- `src/app/commands/command_registry.cpp` 的 `SlashCommandTable()`、`DispatchSessionSlashCommand()`、`CoarseEffectClass()`：登记 handler 与 session-state 效果分类。`SlashDispatchContext` 已提供当前模型、effort、history 与 context tracker。
+- 调查发现 `SlashCommandSpec::needs_console/needs_idle` 元数据当前未由派发函数执行检查；不能只填写字段就宣称实现交互/空闲限制。忙时门禁另在 `src/cli/queue_model.cpp` 的 `SlashCommandQueueableDuringBusy()`，新面板保持忙时拒绝，并添加回归测试。
+- `src/app/commands/settings_commands.cpp` 的 `HandleSlashThink()`（约 2301 行起）：复用 history 冲突检查，并注意 effort 变更后调用 `ctx.sync_request_policy()`，避免界面更新而下一份请求仍使用旧值。
+- `src/cli/provider_switch.cpp` 的 `ProviderSwitchCore::HandleKey()`、`RunProviderSwitchPicker()`：参考纯状态机与小型原地重绘生命周期。其按键映射没有左右键，不能整份照搬。
+- `src/cli/session_picker_panel.cpp` 的 `MapPickerKey()`、`RunSessionPickerPanel()`：参考左右键映射、纯 core 与 TTY 封装分层。
+- 复用 `ConsoleReadMutex()`、`StdoutWriteMutex()`、`RawInputScope`、`TermOut()`、`TruncateUtf8ToDisplayWidth()`；取消、EOF 与异常均清场恢复输入。临时面板不写入永久 transcript。
+- `src/cli/i18n.cpp`：命令描述与面板提示走现有中英文文案入口。
+
+优先复用现有终端框架，但双行左右调值的语义不能硬塞成一个普通单选列表。可按现有 core/panel 分层增加小组件，是否新增独立文件由实施时根据已有结构决定，不为本功能搭大型通用设置框架。
+
+### 6.2 测试与构建入口补充
+
+- `tests/unit/cli/test_slash_commands.cpp`：命令解析与帮助列表。
+- `tests/unit/app/test_command_registry.cpp`：命令枚举覆盖；调查时存在 `table.size() == 57` 的数量断言，新增命令须同步核实并更新。
+- `tests/unit/agent/test_queue_slash_boundary.cpp`：忙时禁止进入交互面板。
+- `tests/unit/config/test_provider_switch.cpp`、`tests/unit/sessions/test_session_picker.cpp`：参考纯状态机测试。
+- 建议候选测试文件：`tests/unit/cli/test_context_window.cpp` 与 `tests/unit/app/test_context_window_command.cpp`；尚未创建。
+- `CMakeLists.txt`：核心和 app 源码使用显式清单，新增源文件必须入正确目标；现有 session picker 的 TTY 面板归 `lubancode_app`，纯状态机可参考 `lubancode_core` 的层次。
+- `tests/CMakeLists.txt`：递归收集测试，统一 `lubancode_tests`，按源码测试册生成 `unit.<目录>.<文件名去掉test_>` 的 CTest 条目。
+- `CMakePresets.json`：已定位 Windows release 构建预设；本轮不运行 configure、build 或 ctest。实施时先检查现有构建状态，跑最小相关测试；涉及用户配置的测试使用临时用户目录，不能污染真实配置。
+
+以上入口供实施定位，行号与硬编码数量可能随仓库变化，应在动手前重读对应文件。
+
+## 七、实现结构建议
+
+1. 能力解析：输入当前模型/端点的已合并配置及运行态，输出窗口候选、思考候选、默认标记、可信度及不可调原因。纯函数可单测。
+2. 面板状态：持有打开时 provider/model 身份快照、原始值、草稿值、焦点、未保存状态；键盘只改变草稿。
+3. 渲染：读取面板状态并生成现有终端可绘制内容，不直接写配置或调用模型。
+4. 确认应用：重新校验模型身份与候选值，两项一起校验后走既有会话设置入口。若面板打开期间模型/配置改变，刷新或拒绝提交，不能给新模型写旧选项。
+5. 生效同步：窗口显示、`/context`、主 Agent 预算、下一次请求的 effort 必须一致；不向已有子代理广播修改，不改独立角色模型的预算。
+6. 命令壳：注册 `/context-window`、帮助与补全，进入/退出面板走现有输入所有权管理。已有 `/context`、`/think`、`/effort` 原样可用。
+
+不要拼接 slash 字符串递归执行作为核心逻辑。优先复用或提炼已有设置应用函数，避免先改窗口后 effort 校验失败留下半笔状态。
+
+## 八、分期落地
+
+### P0：核实与定案
+
+- [ ] 确认保存范围：本会话，还是按 provider/model 持久化；明确模型切换与会话恢复行为。
+- [ ] 确认窗口规则：按声明上限过滤并补非标准当前值，未知能力时保守展示。
+- [ ] 核实目录、provider、环境配置与运行态的窗口和 effort 优先级，分清预算与能力上限。
+- [ ] 定位 slash、补全、帮助、输入所有权、现有设置面板与测试构建入口。
+
+验收：待确认行为有明确结论，写明真实生效链路和改动文件，不以本单建议冒充用户批准。
+
+### P1：候选生成与设置应用
+
+- [ ] 实现窗口候选生成、去重、非标准值与未知能力处理。
+- [ ] 实现思考候选生成、Default/Disabled/未验证状态、历史思考冲突校验。
+- [ ] 实现两项统一校验与会话应用，不改变旧命令的兼容行为。
+- [ ] 添加纯函数与应用层测试。
+
+验收：不同模型只出现合法候选，当前值不丢，取消无副作用，确认后主请求与状态显示一致。
+
+### P2：终端面板与 slash 接线
+
+- [ ] 注册 `/context-window`，补全及帮助显示指定描述。
+- [ ] 实现 Model 标题、两项说明、左右值选择、Selected 与底部操作说明。
+- [ ] 实现上下/左右、Enter、Esc、Ctrl+C、输入结束与窄终端处理。
+- [ ] 接入主题、国际化与终端重绘机制；非 TTY 拒绝进入交互读键。
+- [ ] 添加按键状态与渲染测试。
+
+验收：面板可连续打开与退出，无残留焦点或重复输入，导航不泄漏给聊天输入框。
+
+### P3：回归与文档
+
+- [ ] 更新现有命令参考和终端功能说明，写清本地预算不等于服务端扩容。
+- [ ] 验证 `/context`、`/think`、`/effort`、`/model` 行为兼容。
+- [ ] 运行相关单元测试与最小必要构建，再做交互终端冒烟。
+- [ ] 检查下一次请求确实使用所选 effort 和窗口预算；用测试替身或脱敏请求断言，未经授权不额外发付费真机请求。
+
+验收：自动化结果与人工冒烟分开记录；没有测的终端、平台、模型明确标“未验”。
+
+## 九、验收矩阵
+
+- 200K/400K/1M 能力模型，128K 等非标准上限，未知窗口，以及当前值超出目录上限。
+- 默认 Xhigh 的模型、默认非 Xhigh 的模型、未发送 effort 的状态；不会全局写死 Xhigh。
+- 支持关闭、关不掉、只支持开关、预算型、不支持推理、能力未知的模型。
+- 同名不同 provider、目录与 provider 档位冲突、当前非标准 effort、面板期间模型切换。
+- 上下切项、左右循环、单候选无动作、Enter 保存、Esc/Ctrl+C 取消、无更改退出、重复打开。
+- 缩小至当前用量以下只提示压力；不删历史、不立即发压缩请求。
+- 设置成功后面板重开、`/context`、`/think` 与下一次主请求一致；取消后三者不变。
+- 长模型名、窄终端、Unicode 回退、无颜色主题、非交互输入不挂起。
+
+## 十、改动边界与当前交付
+
+预计改动限于现有 slash/终端面板模块、`src/app/commands/`、必要的配置能力解析与会话设置接口、相关测试及已有命令文档。优先改现有文件；只有现有面板结构确实容不下时才增加专用组件。不新增依赖，不批量改目录规格，不重构无关输入逻辑。
+
+调查时工作区已有 `src/cli/console_input.cpp`、`tests/unit/cli/test_bottom_chrome.cpp` 的未提交修改。本轮不碰它们；实施时先重读并保留，不能覆盖用户或其他任务的改动。
+
+本轮交付只包含本设计文档；功能代码、构建、测试与真机交互验证均未执行。
