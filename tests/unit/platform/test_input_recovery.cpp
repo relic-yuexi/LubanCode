@@ -101,7 +101,8 @@ TEST_CASE("代理对配对:Reset 勾销陈旧 pending,半截代理对不污染�
 TEST_CASE("代理对配对:emoji 面板拆半逐键重放,码点流保真") {
     // 流:D83D DE00 | 'a' | D83D 'b' | D83D D83E DE00 | 孤立 DD2A
     // 账:😀(U+1F600) 一次、'a' 一次、孤立高 FFFD 后 'b' 重放、孤立高
-    //     FFFD 后 D83E DE00 的配对值(U+1F800)一次、孤立低 FFFD。
+    //     FFFD 后 D83E DE00 的配对值(U+1FA00:0x10000+(0x3E<<10)+0x200)
+    //     一次、孤立低 FFFD。
     const std::vector<wchar_t> stream = {
         kHighD83D, kLowDE00, U'a', kHighD83D, U'b', kHighD83D, kHighD83E, kLowDE00, kLowDD2A,
     };
@@ -121,7 +122,7 @@ TEST_CASE("代理对配对:emoji 面板拆半逐键重放,码点流保真") {
     }
     const std::vector<char32_t> expected = {
         U'\x1F600', U'a', kReplacementCodePoint, U'b',
-        kReplacementCodePoint, U'\x1F800', kReplacementCodePoint,
+        kReplacementCodePoint, U'\x1FA00', kReplacementCodePoint,
     };
     REQUIRE(delivered.size() == expected.size());
     for (std::size_t i = 0; i < expected.size(); ++i) {
