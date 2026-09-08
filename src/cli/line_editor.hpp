@@ -185,12 +185,12 @@ struct CompletionCandidate {
 // std::vector<CompletionCandidate>,空闲 SharedEditor() 与流式监听线程的
 // 本地编辑器共用,核心层自己不认得任何具体命令名字,不写第二份命令清单。
 
-// 简易 East Asian Width 判定:>= 0x1100 起,常用的 CJK 统一表意文字、
-// 假名、韩文音节、全角标点这些区段按显示宽度 2 算,其余按 1 算。UI-A
-// (0.11.0)补上了常用 emoji 区段(U+1F300 起那几段,终端都按两列画)。
-// 仍不是一份完整的 Unicode East Asian Width 表(生僻扩展区没覆盖),对
-// 日常中文/日文/韩文/emoji 终端交互场景够用——这是刻意的取舍:真要做全,
-// 该去啃 Unicode UAX #11 那张完整宽度表,对一个 CLI 的光标定位需求性价比不高。
+// 单码点显示宽(Unicode emoji 治理单 P1 起由 grapheme.cpp 的共享表供数,
+// 内嵌 Unicode 15.1 紧凑区间):CJK 统一表意、假名、韩文音节、全角标点、
+// emoji 呈现区段按 2 列;组合附标/VS15/VS16/ZWJ/肤色修饰按 0 列(零宽跟
+// 随者);孤立区域指示符按 1 列;其余按 1 列。注意:字素簇整簇列宽(旗帜
+// 配对两列、keycap 两列、VS16 升两列)不是成员单宽之和,整簇量宽必须用
+// DisplayWidth/ClusterDisplayWidth,不许拿本函数逐码点自算。
 int CharDisplayWidth(char32_t codepoint);
 std::size_t DisplayWidth(const std::u32string& text);
 
@@ -209,10 +209,11 @@ std::string Utf32ToUtf8(const std::u32string& text);
 // TruncateUtf8ToDisplayWidth 的取舍一致。
 std::u32string Utf8ToUtf32(const std::string& text);
 
-// 按显示宽度截断:从头开始累加每个字符的显示宽度,一旦下一个字符会让
-// 累计宽度超过 max_width 就整个不要那个字符——绝不会把一个占 2 列的宽字符
-// 切成半个字宽。max_width <= 0 给空串。终端层"保证物理上永不折行"的截断
-// 落在这个纯函数上,可以脱离控制台单测。
+// 按显示宽度截断:从头开始按字素簇累加显示宽度,一旦下一簇会让累计宽度
+// 超过 max_width 就整簇不要——绝不把一个占 2 列的宽字符切成半个字宽,
+// 也不在组合序列(ZWJ/肤色/附标)中间下刀、不留孤儿零宽在尾巴。
+// max_width <= 0 给空串。终端层"保证物理上永不折行"的截断落在这个纯
+// 函数上,可以脱离控制台单测。
 std::u32string TruncateToDisplayWidth(const std::u32string& text, int max_width);
 
 // UTF-8 版本:内部解码成码点、按上面那个函数截断、再编码回 UTF-8。专给
@@ -221,9 +222,10 @@ std::u32string TruncateToDisplayWidth(const std::u32string& text, int max_width)
 // 的字符串够用,不是给外部不可信输入准备的严格校验器。
 std::string TruncateUtf8ToDisplayWidth(const std::string& utf8, int max_width);
 
-// 按显示宽度折行(软换行):逐字累加显示宽(复用 CharDisplayWidth),下一个
-// 字会让本行累计宽超过 max_width 就断开另起一行——绝不切半个宽字(同
-// TruncateToDisplayWidth 的规矩);遇到 '\n' 强制断。字符级断(CJK 友好),
+// 按显示宽度折行(软换行):逐字素簇累加显示宽,下一簇会让本行累计宽
+// 超过 max_width 就断开另起一行——绝不切半个宽字、不拆组合序列(同
+// TruncateToDisplayWidth 的规矩);遇到 '\n' 强制断。恰满一行之后的零宽
+// 附标仍收进当前行,不会被挤到下一行拆开簇。字符级断(CJK 友好),
 // 不做英文单词边界这类启发式。返回的每段显示宽度都 <= max_width;唯一例外
 // 是单个字符本身就比 max_width 宽(比如 max_width=1 碰上个 CJK 字),那种
 // 情形该字独占一行(宽度可能略超 max_width),已是保内容不丢的最小代价。

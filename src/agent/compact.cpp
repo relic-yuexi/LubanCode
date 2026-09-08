@@ -16,6 +16,7 @@
 #include "accounting/purpose.hpp"  // RequestPurpose(Token 账本单 A1:compact 子请求的 purpose)
 #include "agent/context.hpp"       // 统一 token 估算口径
 #include "agent/context_events.hpp"  // 事件账:evidence_refs 的来源区间
+#include "agent/prompt_assembler.hpp"  // ModuleTextByPath:压缩指令正文取提示词模块
 #include "agent/sample_model.hpp"  // SampleModel 原语:两处采样的公共路(批一·病四)
 #include "platform/text_encoding.hpp"  // SanitizeExternalText:摘要文本进历史前的编码关口
 
@@ -72,20 +73,17 @@ std::size_t CountUtf8Chars(const std::string& text) {
 // manifest 解析与守恒校验。
 constexpr std::size_t kMinSummaryChars = 40;
 
-// 压缩指令(固定栏目头 + manifest 要求)。required_open_items 非空时追加
-// "逐字收编"一节。
+// 单发压缩指令:正文指引来自 src/prompts/features/compact-handoff.md
+// (编译期嵌入;options.prompts_dir 非空时先读用户覆盖——与 memory-summary
+// 同一条 ModuleTextByPath 路,播种进 ~/.lubancode/prompts/ 后用户可改)。
+// 机器合同(manifest JSON + 守恒待办 + 重点保留)在正文之后追加:代码解析
+// 的只有那枚 ```json 块,正文结构([用户任务]/[工作状态])归模块管。
+// 分卷 map/reduce 的指令仍走本文件下方的局部小结/归并合同——大史的中间
+// 格式,reduce 终稿同样受 manifest 校验收口。
 std::string BuildCompactInstruction(const CompactOptions& options) {
-    std::string instruction =
-        "以上是到目前为止的对话历史。请把它压缩成一份存档,按以下栏目输出,栏目头逐字照写:\n"
-        "## 任务目标\n"
-        "## 已证实的事实\n"
-        "## 关键决策\n"
-        "## 涉及文件与符号\n"
-        "## 关键命令与结果\n"
-        "## 未完成事项\n"
-        "只写对话里确证过的内容,不许猜补;某栏没有内容就写\"(无)\"。闲聊和过程细节"
-        "(工具调用的中间试错、无关寒暄)可以舍弃。\n"
-        "存档正文之后,另起一行输出一枚 JSON 代码块(```json 围栏),键名逐字照写:\n"
+    std::string instruction = ModuleTextByPath(options.prompts_dir, "features/compact-handoff.md");
+    instruction +=
+        "\n\n交接摘要正文之后,另起一行输出一枚 JSON 代码块(```json 围栏),键名逐字照写:\n"
         "```json\n"
         "{\"goal\": \"当前任务目标一句话\", \"constraints\": [\"用户明示的约束或禁止\"], "
         "\"open_items\": [\"未完成事项\"], \"next_action\": \"下一步该做的具体动作\"}\n"
@@ -101,7 +99,7 @@ std::string BuildCompactInstruction(const CompactOptions& options) {
         }
     }
     if (!options.focus.empty()) {
-        instruction += "\n另加一栏\"## 重点保留\",重点保留:" + options.focus;
+        instruction += "\n重点保留:" + options.focus;
     }
     return instruction;
 }

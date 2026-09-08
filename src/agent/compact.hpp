@@ -89,6 +89,10 @@ std::optional<CompactManifest> ParseCompactManifest(const std::string& summary_t
 // 压缩参数。
 struct CompactOptions {
     std::string focus;  // /compact <重点>:额外重点保留一段
+    // 单发压缩指令的正文来自 src/prompts/features/compact-handoff.md
+    // (编译期嵌入);prompts_dir 非空时先读用户覆盖(与 memory-summary
+    // 同一条 ModuleTextByPath 路)。空 = 只用嵌入版(单测/无会话场景)。
+    std::string prompts_dir;
     CompactBudget budget{};
     // 必须守恒的未完成事项(活动 todo 的 pending/in_progress 条目原文)。
     // 空表 = 没有可钉的待办,manifest 只做结构校验。

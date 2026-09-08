@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdlib>
 
+#include "cli/grapheme.hpp"
 #include "cli/line_editor.hpp"
 
 namespace lubancode::cli {
@@ -23,26 +24,32 @@ WrappedComposerLayout LayoutComposerRows(const std::vector<std::u32string>& logi
         if (line.empty()) {
             layout.rows.push_back(WrappedComposerRow{{}, logical, 0, 0, 0});
         } else {
-            std::size_t begin = 0;
-            while (begin < line.size()) {
+            // 按字素簇装行(Unicode emoji 治理单 P1):ZWJ 序列/肤色/附标跟
+            // 基础字同一物理行,恰满一行后的零宽附标照收(不会在容量到
+            // 点时被挤到下一行拆簇,§9.2 第三条)。每簇至少一码点,循环
+            // 必前进。整簇比 capacity 还宽时独占一行(保内容不丢)。
+            const std::vector<GraphemeCluster> clusters = SplitGraphemes(line);
+            std::size_t cluster_idx = 0;
+            while (cluster_idx < clusters.size()) {
                 const bool first_physical_row = layout.rows.empty();
                 const int capacity = (std::max)(1, first_physical_row ? first_width : continuation_width);
+                std::size_t begin = clusters[cluster_idx].begin;
                 std::size_t end = begin;
                 int width = 0;
-                while (end < line.size()) {
-                    const int char_width = CharDisplayWidth(line[end]);
-                    if (end > begin && width + char_width > capacity) {
+                while (cluster_idx < clusters.size()) {
+                    const GraphemeCluster& cluster = clusters[cluster_idx];
+                    if (end > begin && width + cluster.width > capacity) {
                         break;
                     }
-                    width += char_width;
-                    ++end;
+                    width += cluster.width;
+                    end = cluster.end;
+                    ++cluster_idx;
                     if (width >= capacity) {
                         break;
                     }
                 }
                 layout.rows.push_back(
                     WrappedComposerRow{line.substr(begin, end - begin), logical, begin, end, width});
-                begin = end;
             }
         }
         row_ranges[logical] = {first_row, layout.rows.size()};
@@ -341,8 +348,12 @@ InlineFrameDiffStats QueueInlineFrameDiff(platform::TerminalBatch& batch,
     return stats;
 }
 
-std::vector<platform::NativeRowCell> BuildNativeRowCells(std::string_view utf8_text, int cell_count) {
+std::vector<platform::NativeRowCell> BuildNativeRowCells(std::string_view utf8_text, int cell_count,
+                                                         bool* utf16_lossy) {
     std::vector<platform::NativeRowCell> cells;
+    if (utf16_lossy != nullptr) {
+        *utf16_lossy = false;
+    }
     if (cell_count <= 0) {
         return cells;
     }
@@ -350,6 +361,11 @@ std::vector<platform::NativeRowCell> BuildNativeRowCells(std::string_view utf8_t
     std::uint16_t attr = 0;  // 默认属性记号
     bool bold = false;
     bool dim = false;
+    const auto mark_lossy = [utf16_lossy] {
+        if (utf16_lossy != nullptr) {
+            *utf16_lossy = true;
+        }
+    };
     std::size_t i = 0;
     while (i < utf8_text.size() && static_cast<int>(cells.size()) < cell_count) {
         if (utf8_text[i] == '\x1b' && i + 1 < utf8_text.size() && utf8_text[i + 1] == '[') {
@@ -371,37 +387,65 @@ std::vector<platform::NativeRowCell> BuildNativeRowCells(std::string_view utf8_t
             i = j;
             continue;
         }
-        // UTF-8 码点解码。
-        const unsigned char lead = static_cast<unsigned char>(utf8_text[i]);
-        std::size_t len = 1;
-        char32_t cp = lead;
-        if ((lead & 0xE0U) == 0xC0U) {
-            cp = lead & 0x1FU;
-            len = 2;
-        } else if ((lead & 0xF0U) == 0xE0U) {
-            cp = lead & 0x0FU;
-            len = 3;
-        } else if ((lead & 0xF8U) == 0xF0U) {
-            cp = lead & 0x07U;
-            len = 4;
+        // 纯文本段(到下一个 CSI 或串尾)按字素簇产格。样式段天然是簇
+        // 边界——调用方拼行时样式总在词边界,极端输入下"样式插进簇中间"
+        // 会把簇割开按两簇算,注释见头文件。
+        const std::size_t seg_end = utf8_text.find("\x1b[", i + 1);
+        const std::size_t seg_len = (seg_end == std::string_view::npos ? utf8_text.size() : seg_end) - i;
+        const std::string_view seg = utf8_text.substr(i, seg_len);
+        for (const Utf8Grapheme& glyph : SplitUtf8Graphemes(seg)) {
+            // 簇首码点解码(占格的那一位);簇字节数比簇首序列长就是
+            // 多码点簇(ZWJ/肤色/附标跟随),cell 模型装不下,报 lossy。
+            const unsigned char lead = static_cast<unsigned char>(seg[glyph.begin]);
+            std::size_t len = 1;
+            char32_t cp = lead;
+            if ((lead & 0xE0U) == 0xC0U) {
+                cp = lead & 0x1FU;
+                len = 2;
+            } else if ((lead & 0xF0U) == 0xE0U) {
+                cp = lead & 0x0FU;
+                len = 3;
+            } else if ((lead & 0xF8U) == 0xF0U) {
+                cp = lead & 0x07U;
+                len = 4;
+            }
+            for (std::size_t k = 1; k < len && glyph.begin + k < seg.size(); ++k) {
+                cp = (cp << 6) | (static_cast<unsigned char>(seg[glyph.begin + k]) & 0x3FU);
+            }
+            if (glyph.len > len) {
+                mark_lossy();  // 跟随码点进不了 cell:调用方应退 VT 字节流路
+            }
+            if ((cp >= 0xD800 && cp <= 0xDFFF) || cp > 0x10FFFF) {
+                cp = 0xFFFD;  // 孤立代理/超范围:替换,保住 UTF-16 合法性
+                mark_lossy();
+            }
+            if (glyph.width <= 0) {
+                // 孤立零宽簇:不静默丢(§9.2)——占一格画可见回退,但几何
+                // 与共享量宽分叉,报 lossy 让调用方退 VT 路。
+                mark_lossy();
+                if (static_cast<int>(cells.size()) + 1 > cell_count) {
+                    break;
+                }
+                cells.push_back(platform::NativeRowCell{cp, attr});
+                continue;
+            }
+            // 非 BMP 恒两格打代理对(编码硬约束,头文件注释);量宽两列的
+            // 簇也是两格。量宽一列的非 BMP 在原生路多占一格,与 VT 路差
+            // 一列,是 cell 模型的已知差异,文档记档。
+            const int cell_width = (glyph.width >= 2 || cp >= 0x10000) ? 2 : 1;
+            if (static_cast<int>(cells.size()) + cell_width > cell_count) {
+                break;  // 放不下整簇就截断,不劈半个宽字
+            }
+            if (cell_width == 2) {
+                cells.push_back(platform::NativeRowCell{
+                    cp, static_cast<std::uint16_t>(attr | platform::kNativeCellLeading)});
+                cells.push_back(platform::NativeRowCell{
+                    cp, static_cast<std::uint16_t>(attr | platform::kNativeCellTrailing)});
+            } else {
+                cells.push_back(platform::NativeRowCell{cp, attr});
+            }
         }
-        for (std::size_t k = 1; k < len && i + k < utf8_text.size(); ++k) {
-            cp = (cp << 6) | (static_cast<unsigned char>(utf8_text[i + k]) & 0x3FU);
-        }
-        i += len;
-        const int width = CharDisplayWidth(cp);
-        if (width <= 0) {
-            continue;  // 零宽字符(组合附标一类)不占格
-        }
-        if (static_cast<int>(cells.size()) + width > cell_count) {
-            break;  // 放不下整个宽字就截断,不劈半个宽字
-        }
-        if (width == 2) {
-            cells.push_back(platform::NativeRowCell{cp, static_cast<std::uint16_t>(attr | platform::kNativeCellLeading)});
-            cells.push_back(platform::NativeRowCell{cp, static_cast<std::uint16_t>(attr | platform::kNativeCellTrailing)});
-        } else {
-            cells.push_back(platform::NativeRowCell{cp, attr});
-        }
+        i += seg_len;
     }
     // 尾部补默认属性空格铺满清写宽度——直写整行(新文本 + 残段清空)一发
     // 落盘,这就是"擦行 + 落字"合并成一次 WriteConsoleOutput 的那一步。
@@ -442,8 +486,16 @@ bool PaintInlineFrameNativeRows(const InlineFrame* previous, const InlineFrame& 
                 return false;
             }
         }
+        // 行文本含多码点字素簇/孤立零宽/坏代理时,cell 模型装不下整簇
+        // (BuildNativeRowCells 报 lossy):整帧退 legacy 字节流路——那边
+        // UTF-8 原文全保真,支持合成渲染的终端自己画,不静默丢附标
+        // (Unicode emoji 治理单 §9.2)。
+        bool lossy = false;
         const std::vector<platform::NativeRowCell> cells =
-            BuildNativeRowCells(change.text, change.clear_end - change.write_x);
+            BuildNativeRowCells(change.text, change.clear_end - change.write_x, &lossy);
+        if (lossy) {
+            return false;
+        }
         if (!platform::WriteNativeRow(change.write_x, y, cells.data(), static_cast<int>(cells.size()))) {
             return false;
         }

@@ -11,6 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <mutex>
 #include <optional>
@@ -532,6 +533,12 @@ struct BodyScanState {
     //   头第一块),空行还在屏上或压根没有,不带,免得凭空多出空白。
     bool blank_run = true;
     bool rendered_before = false;
+    // Unicode emoji 治理单 §9.5 的计数型性能账(不做时间型断言,会 flaky):
+    // 本状态机累计扫过的 pending 字节数。每笔 delta 至少对 pending 全量
+    // 扫一遍换行与标记,块超预算(16 KiB/48 行)后只是不再重画,扫描量
+    // 仍是 O(delta 数 × 块字节);这枚计数器把"扫描账"摆到台面上,测试
+    // 拿它钉上限(而不是只看"重画停了")。纯计数,不改任何行为。
+    std::uint64_t scanned_pending_bytes = 0;
 };
 
 // 增量重画的防洪峰预算:块高/块宽超过这份就不再逐行重画(整块重画的账
@@ -609,6 +616,7 @@ inline std::vector<BodyDeltaStep> ScanBodyDelta(BodyScanState& state, const std:
     // 照常继续攒。空行收束刚画过的空块(pending 为空)不触发。
     const std::string pending = projected + piece;
     if (!pending.empty()) {
+        state.scanned_pending_bytes += pending.size();  // §9.5 计数型扫描账
         int newlines = 0;
         for (const char c : pending) {
             newlines += c == '\n' ? 1 : 0;
