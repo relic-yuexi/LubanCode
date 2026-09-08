@@ -191,7 +191,10 @@ std::optional<KeyInput> TryReadBracketedPaste(const std::atomic<bool>* cancel_fl
         }
         const ULONGLONG idle_left =
             static_cast<ULONGLONG>(kBracketedPasteIdleMs) - (now - last_activity);
-        const ULONGLONG wait = (std::min)((std::min)<ULONGLONG>(idle_left, deadline - now),
+        // 注意写法:不带显式模板实参。MSVC 不认"(std::min)<ULONGLONG>(...)"
+        // ——括起来的函数名后跟 <类型> 会被当比较表达式(C2275);两操作数
+        // 本就同为 ULONGLONG,推导不需要显式实参。
+        const ULONGLONG wait = (std::min)((std::min)(idle_left, deadline - now),
                                           static_cast<ULONGLONG>(kPasteCancelSliceMs));
         INPUT_RECORD record{};
         if (!ReadInputRecord(record, static_cast<DWORD>(wait))) {
