@@ -1186,16 +1186,19 @@ TEST_CASE("预检封顶(§4.1): 肥预留+半窗输入放行,实发 max_tokens �
 }
 
 TEST_CASE("预检应急(§4.1 收紧): 封顶后仍装不下才进应急,收尾交代恰一道") {
-    // 历史真满的那一支:窗 32768、声明 16384(封顶到 8192),工具结果
-    // 25000 token——第二份请求 25000 + 8192 + 512 越窗(封顶也救不了),
+    // 历史真满的那一支:窗 32768、声明 16384(封顶到 8192),两轮工具各
+    // 13000 词——第三份请求约 26000 + 8192 + 512 越窗(封顶也救不了),
     // 应急预留 2048(32768/16)装得下:请求照发,max_tokens 收窄,尾消息
     // 带收尾交代(本 Run 恰一道)。肥预留的形状在上一案已化解,这里进的
-    // 才是"历史真满"的应急支。
+    // 才是"历史真满"的应急支。要两条各半攒:保命索按日常尺把单条超
+    // 25% 窗(8192)的工具结果截尾,单条 25000 词根本活不到预检;两条
+    // 各 13000 词(日常尺 6500,线内)原样进账。
     FakeBackend backend;
-    backend.scripts = {ToolUseScript("t1", "growing_tool"), TextOnlyScript("短交接:已查完,结论如上")};
+    backend.scripts = {ToolUseScript("t1", "growing_tool"), ToolUseScript("t2", "growing_tool"),
+                       TextOnlyScript("短交接:已查完,结论如上")};
     tools::ToolRegistry registry;
     auto tool = std::make_unique<GrowingResultTool>();
-    tool->results = {WordyText(25000)};
+    tool->results = {WordyText(13000), WordyText(13000)};
     registry.Register(std::move(tool));
 
     agent::Agent loop(backend, registry,
@@ -1242,11 +1245,15 @@ TEST_CASE("预检应急(§4.1 收紧): 封顶后仍装不下才进应急,收尾�
 
     const auto result = loop.Run("查一查", std::move(turn_wiring));
     REQUIRE(result.has_value());  // 没死,收窄续跑
-    REQUIRE(backend.captured_requests.size() == 2);
+    REQUIRE(backend.captured_requests.size() == 3);
+    // 前两份请求装得下(第二份 13000 + 8192 + 512 线内,声明 16384 也装得
+    // 下——原值照发);第三份历史真满,应急收窄到 2048。
     REQUIRE(backend.captured_requests[1].max_tokens.has_value());
-    CHECK(*backend.captured_requests[1].max_tokens == 2048);
-    // 收尾交代进了第二份请求的尾消息(也随 durable history 留住)。
-    const auto& last_message = backend.captured_requests[1].messages.back();
+    CHECK(*backend.captured_requests[1].max_tokens == 16384);
+    REQUIRE(backend.captured_requests[2].max_tokens.has_value());
+    CHECK(*backend.captured_requests[2].max_tokens == 2048);
+    // 收尾交代进了第三份请求的尾消息(也随 durable history 留住)。
+    const auto& last_message = backend.captured_requests[2].messages.back();
     bool has_nudge = false;
     for (const auto& block : last_message.content) {
         if (const auto* text = std::get_if<api::TextBlock>(&block); text != nullptr &&
