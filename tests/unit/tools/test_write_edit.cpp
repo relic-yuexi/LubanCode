@@ -289,12 +289,15 @@ TEST_CASE("write_file 不观测取消旗:cancel 升着也整篇写完(空文件�
     // 那是崩溃级原子的另一档事,修复另立小单(见 write_file.cpp 的标记)。
     TempDir dir;
     WriteFileTool tool;
+    // 走基类引用调两参 execute(派生类的单参声明会把基类重载藏起来):
+    // 与 loop 的 RunOneTool 同一条路,cancel 旗随上下文递到工具门口。
+    lubancode::tools::Tool& tool_face = tool;
     std::atomic<bool> cancel{true};  // 旗预先升着:工具体照样整篇落盘
     nlohmann::json input;
     input["path"] = dir.Utf8Path("todo_pin.md");
     const std::string body = "# 设计单" + std::string(1, '\n') + "正文一枚,足够长以示完整。" + std::string(1, '\n');
     input["content"] = body;
-    const Tool::Result result = tool.execute(input, lubancode::tools::ToolExecutionContext{&cancel, ""});
+    const Tool::Result result = tool_face.execute(input, lubancode::tools::ToolExecutionContext{&cancel, ""});
     CHECK_FALSE(result.is_error);
     std::ifstream in(Utf8ToPath(dir.Utf8Path("todo_pin.md")), std::ios::binary);
     std::ostringstream buffer;
