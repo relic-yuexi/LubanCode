@@ -1615,6 +1615,10 @@ SessionCommandState TerminalSessionController::MakeSessionCommandState() {
 
 lubancode::agent::CompactOptions TerminalSessionController::BuildCompactOptions() {
     lubancode::agent::CompactOptions options;
+    // 单发压缩指令的正文模块:prompts_dir 非空时用户可经
+    // ~/.lubancode/prompts/features/compact-handoff.md 覆盖(与 memory-summary
+    // 同一条路);空目录回落编译期嵌入版。
+    options.prompts_dir = prompts_dir;
     // 窗口预算认压缩路由自己的声明:高级段 model_roles 声明了 context_
     // window 就用它;没有再查模型目录条目;目录里也查不到(自定义模型、
     // 中转起名)就留空——Compact() 不做窗口拦截,但输出会明说"窗口未知,
