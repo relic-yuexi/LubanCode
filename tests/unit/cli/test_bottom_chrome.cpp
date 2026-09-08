@@ -1248,7 +1248,6 @@ TEST_CASE("帮助入口改绑跟脚:速览右槽与帮助层同拍换键,流式�
     CHECK(tr("input.shortcuts_hint") == "input.shortcuts_hint");
 }
 
-
 // ---------------------------------------------------------------------------
 // Unicode emoji 治理单 P1:footer 的 ANSI 安全截断与 composer/footer 同几何。
 // 期望列宽全部手写,不拿 DisplayWidthUtf8 自证。
@@ -1260,7 +1259,7 @@ namespace {
 std::string StripAnsiLocal(const std::string& line) {
     std::string plain;
     for (std::size_t i = 0; i < line.size();) {
-        if (line[i] == '' && i + 1 < line.size() && line[i + 1] == '[') {
+        if (line[i] == '\x1b' && i + 1 < line.size() && line[i + 1] == '[') {
             i += 2;
             while (i < line.size()) {
                 const unsigned char ch = static_cast<unsigned char>(line[i++]);
@@ -1285,9 +1284,9 @@ int TestVisibleWidth(const std::string& line) {
     return width;
 }
 
-// 截断不拆簇的测试侧判据:剥 ANSI 后整串能被字素分段完整覆盖(每簇
-// 逐字节落在串内,没有半途劈开的残段)——分段器对坏字节按独立簇回退,
-// 劈开的簇会以"坏字节簇"或"孤儿跟随者开头"现形。
+// 孤儿跟随者的字节签名:ZWJ(E2 80 8D)、组合附标(CC 8x)、
+// VS15/16(EF B8 8E/8F)、肤色修饰(F0 9F 8F BB..BF)。截断/折行按整簇
+// 下刀后,纯文本不会以这些开头。
 bool StartsWithOrphanFollower(const std::string& plain) {
     const auto b = [&plain](std::size_t i) {
         return i < plain.size() ? static_cast<unsigned char>(plain[i]) : 0;
@@ -1305,17 +1304,17 @@ TEST_CASE("footer ANSI 截断: emoji 序列整簇下刀,截后不越界不劈簇
     BottomChromeModel model;
     // 状态行带主题色 + 四枚 👩‍💻(每簇 2 列,共 8 列):8 列窄窗 limit=7,
     // 第四枚整簇截掉,截断记号 "." 落在 7 列内。
-    const std::string tech = "ð©âð»";
+    const std::string tech = "\xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x92\xBB";
     model.composer.prompt = "> ";
     model.composer.editor = ComposerState({U""}, 0, 0);
     model.composer.mode = ComposerMode::BusyQueue;
-    model.status_rows = {std::string("[36m") + tech + tech + tech + tech +
-                         std::string("[0m")};
+    model.status_rows = {std::string("\x1b[36m") + tech + tech + tech + tech +
+                         std::string("\x1b[0m")};
     const BottomChromeLayout layout = BuildBottomChromeLayout(model, BuiltinTheme("plain"), 8);
     // 找带色的那行状态行(行序上在横线之上,不假定具体下标)。
     const std::string* status = nullptr;
     for (const auto& row : layout.frame.rows) {
-        if (row.text.find("[36m") != std::string::npos) {
+        if (row.text.find("\x1b[36m") != std::string::npos) {
             status = &row.text;
             break;
         }
@@ -1335,18 +1334,18 @@ TEST_CASE("footer ANSI 截断: emoji 序列整簇下刀,截后不越界不劈簇
 
 TEST_CASE("footer 与 composer 同几何: 同一段 emoji 两处量宽一致(写死列宽)") {
     BottomChromeModel model;
-    const std::string tech = "ð©âð»";
+    const std::string tech = "\xF0\x9F\x91\xA9\xE2\x80\x8D\xF0\x9F\x92\xBB";
     model.composer.prompt = "> ";
     model.composer.editor =
         ComposerState({U"x" + std::u32string{0x1F469, 0x200D, 0x1F4BB} + U"y"}, 0, 5);
     model.composer.mode = ComposerMode::Idle;
-    model.status_rows = {std::string("[36m") + "x" + tech + "y" + std::string("[0m")};
+    model.status_rows = {std::string("\x1b[36m") + "x" + tech + "y" + std::string("\x1b[0m")};
     const BottomChromeLayout layout = BuildBottomChromeLayout(model, BuiltinTheme("plain"), 40);
     int status_width = -1;
     int composer_width = -1;
     for (const auto& row : layout.frame.rows) {
         const std::string& text = row.text;
-        if (text.find("[36m") != std::string::npos) {
+        if (text.find("\x1b[36m") != std::string::npos) {
             status_width = TestVisibleWidth(text);
         }
         if (text.rfind("> x", 0) == 0) {
@@ -1364,10 +1363,9 @@ TEST_CASE("composer 软换行: emoji 组合序列窄窗不拆(经 chrome 全链)
     model.composer.editor = ComposerState({family + family}, 0, family.size() * 2);
     model.composer.mode = ComposerMode::Idle;
     const BottomChromeLayout layout = BuildBottomChromeLayout(model, BuiltinTheme("plain"), 8);
-    // 8 列:首行 "> "(2)后容 5 列,装一枚家庭组合(2)后第二枚(2)也装
-    // 得下(共 4);这里钉的是每行守界与不出现孤儿跟随者。
+    // 8 列:每行守界,且纯文本不以孤儿跟随者开头。
     for (const auto& row : layout.frame.rows) {
-        if (row.text.find("ð") == std::string::npos) {
+        if (row.text.find("\xF0\x9F") == std::string::npos) {
             continue;
         }
         CHECK(TestVisibleWidth(row.text) <= 7);

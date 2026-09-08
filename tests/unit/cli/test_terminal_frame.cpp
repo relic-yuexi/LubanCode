@@ -580,15 +580,24 @@ TEST_CASE("LayoutComposerRows: 旗帜与家庭组合按整簇宽度折行") {
 
 TEST_CASE("native row cells: 旗帜双格打代理对,落盘 UTF-16 合法(§9.2 缺口)") {
     using namespace lubancode::platform;
-    // 旧实现把区域指示符量成一列:单格、无 trailing 旗标,WriteNativeRow
-    // 只写高代理 → 落盘 UTF-16 非法。现在非 BMP 恒双格配对。
+    // 旧实现把每枚区域指示符量成一列:各占单格、无 trailing 旗标,
+    // WriteNativeRow 每格只写高代理 → 落盘两枚孤立高代理,UTF-16 非法。
+    // 现在旗帜整簇两格、ch=簇首指示符、leading/trailing 打一对代理——
+    // 合法配对(第二枚指示符不占独立格,是多码点簇在 cell 模型里的已知
+    // 显示降级,lossy 出参告发,调用方退 legacy 字节流路保真)。
     const auto cells = BuildNativeRowCells("\xF0\x9F\x87\xA8\xF0\x9F\x87\xB3", 2);  // 🇨🇳
     REQUIRE(cells.size() == 2);
     CHECK((cells[0].attr & kNativeCellLeading) != 0);
     CHECK((cells[1].attr & kNativeCellTrailing) != 0);
     const std::u16string utf16 = CellsToUtf16(cells);
     CHECK(Utf16WellFormed(utf16));
-    CHECK(utf16.size() == 4);  // 两枚指示符各一对代理
+    REQUIRE(utf16.size() == 2);  // 恰一对代理:高 D83C + 低 DDE8
+    CHECK(utf16[0] == 0xD83C);
+    CHECK(utf16[1] == 0xDDE8);
+    // 多码点簇(旗帜两码点)如实报 lossy。
+    bool lossy = false;
+    (void)BuildNativeRowCells("\xF0\x9F\x87\xA8\xF0\x9F\x87\xB3", 2, &lossy);
+    CHECK(lossy);
 }
 
 TEST_CASE("native row cells: 窄非 BMP 也双格,不再只写高代理") {

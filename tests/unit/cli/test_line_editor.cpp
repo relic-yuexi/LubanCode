@@ -2039,16 +2039,19 @@ TEST_CASE("paste 占位符原子: 折叠后左右键整枚跳、退格整段删,
     const std::string large(kLargePasteCharThreshold + 1, 'x');
     const RenderState state = editor.HandleKey(KeyEvent::Paste(large));
     REQUIRE(state.lines.size() == 1);
-    // 缓冲里只有一枚 token 码点(整段粘贴折叠成原子对象):光标紧跟其后,
-    // 兼容字段 line 展开成完整原文。
-    CHECK(state.cursor == 1);
+    // 缓冲里只有一枚 token 码点(整段粘贴折叠成原子对象);兼容字段
+    // cursor/line 都是展开后的语义(光标落在展开全文的末尾)。
+    CHECK(state.cursor == kLargePasteCharThreshold + 1);
     REQUIRE(state.line.size() == kLargePasteCharThreshold + 1);
+    // 展示行是折叠后的占位文本(不含正文),一枚 token 一个原子对象。
+    CHECK(Utf32ToUtf8(state.lines[0]).find("xxx") == std::string::npos);
 
-    // token 是单码点,自成一体:左右移动整枚跳(光标 0 <-> 1)。
+    // token 是单码点,自成一体:左右移动整枚跳。展开语义下光标从 1001
+    // (token 后)回到 0(token 前),不落在"半个 token"上。
     editor.HandleKey(KeyEvent::Simple(KeyKind::Left));
     CHECK(editor.CurrentRenderState().cursor == 0);
     editor.HandleKey(KeyEvent::Simple(KeyKind::Right));
-    CHECK(editor.CurrentRenderState().cursor == 1);
+    CHECK(editor.CurrentRenderState().cursor == kLargePasteCharThreshold + 1);
 
     // 退格一次:整枚 token 连同整段粘贴内容一起删掉。
     const RenderState backspaced = editor.HandleKey(KeyEvent::Simple(KeyKind::Backspace));
