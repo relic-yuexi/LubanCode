@@ -5,6 +5,7 @@
 #include <vector>
 
 #include "cli/console_input.hpp"
+#include "cli/i18n.hpp"  // /context-window 描述词条对账(ContextWindow 单)
 #include "cli/slash_commands.hpp"
 
 using namespace lubancode;
