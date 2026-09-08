@@ -92,6 +92,10 @@ ParsedSlashCommand ParseSlashCommand(const std::string& input) {
         parsed.command = SlashCommand::Exit;
     } else if (lower == "/context") {
         parsed.command = SlashCommand::Context;
+    } else if (lower == "/context-window") {
+        // ContextWindow 交互面板单:裸敲开面板,同屏调当前模型的窗口预算
+        // 与思考强度;与 /context(占用分析/一行式改窗口)并存,不取代它。
+        parsed.command = SlashCommand::ContextWindow;
     } else if (lower == "/usage") {
         // Token 账本单 A2:/usage 只认词,二级参数(session/--by/--json)在
         // ParseUsageCommand(app/commands/usage_commands)拆。
@@ -915,6 +919,7 @@ const std::vector<SlashCommandInfo>& AllSlashCommands() {
             {"/clear", tr("slash.desc.clear")},
             {"/exit", tr("slash.desc.exit")},
             {"/context", tr("slash.desc.context")},
+            {"/context-window", tr("slash.desc.context_window")},
             {"/usage", tr("slash.desc.usage")},
             {"/insights", tr("slash.desc.insights")},
             {"/compact", tr("slash.desc.compact")},

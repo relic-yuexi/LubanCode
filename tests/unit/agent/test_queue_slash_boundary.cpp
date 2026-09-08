@@ -250,3 +250,15 @@ TEST_CASE("混排各走各:文字按序在边界注入,slash 留到轮末,互不
     REQUIRE(snapshot.size() == 1);
     CHECK(snapshot[0].text == "/context");
 }
+
+TEST_CASE("/context-window 忙时不排队:交互面板归空闲,提交门明拒(ContextWindow 单回归)") {
+    // 面板要独占终端读键,回合跑着时不许从队列里弹出来开面板——
+    // SlashCommandQueueableDuringBusy 对它保持默认拒绝(菜单/向导类),
+    // 与 /model、/provider 同一待遇。
+    CHECK_FALSE(cli::SlashCommandQueueableDuringBusy(cli::SlashCommand::ContextWindow));
+    // 排队文本层面的门(QueueTextAdmittedDuringBusy)同口径:明拒。
+    CHECK_FALSE(cli::QueueTextAdmittedDuringBusy("/context-window", cli::MessageTarget::Main()));
+    // 对照:同为会话内维护的 /context、/think 照旧可排队(行为不变)。
+    CHECK(cli::SlashCommandQueueableDuringBusy(cli::SlashCommand::Context));
+    CHECK(cli::SlashCommandQueueableDuringBusy(cli::SlashCommand::Think));
+}

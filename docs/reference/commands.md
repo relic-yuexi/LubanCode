@@ -177,6 +177,14 @@ AGENTS.md 指令链的逐 source 账：项目根、目标、上限、每份文�
 
 裸敲展示系统提示、工具 schema、历史与总占用。带 `256k`、`512k`、`1m` 或正整数时，只改本场 token 窗口。
 
+### `/context-window`
+
+裸命令打开交互面板，同屏调整当前模型的上下文窗口与思考强度（Thinking Effort）。上下选择设置项，左右循环切值，Enter 保存、Esc/Ctrl+C 取消；未保存前只改面板草稿，确认后两项一起校验、一起应用。
+
+窗口候选按模型目录声明的上限过滤（常用 200K/400K/1M），补上非标准声明值与当前值；能力未知的模型只显示当前值并标注未验证；当前值超出声明上限时照实显示并标异常。思考档位按目录与 provider 声明生成，`(Default)` 只在解析得明确默认时标注，`Disabled` 仅在声明可关闭时可选，目录声明关不掉的模型不提供。
+
+注意：这里设置的是 LubanCode 对当前主模型的**本地上下文预算**，供占用显示、压力判断与压缩触发使用——调到 1M 不代表服务端自动获得 1M 能力，也不等于每次请求都读入 1M token；模型的真实能力以端点声明为准。全部改动只对当前会话生效，不写任何持久化配置；切模型后按既有模型切换规则走。非交互终端不开面板，改用 `/context <窗口>` 与 `/think <档位>`。回合进行中不排队（面板要独占终端读键），空闲后再敲。
+
 ### `/usage [session <id>] [--by model|purpose|run|outcome] [--json]`
 
 Token 账本报告（只读，只摆事实）。裸敲看当前会话：coverage（几笔有 provider usage、几笔 unknown）、输入与 cache 读写、输出（reasoning 注明已含在内）、按模型/用途的 token 占比、估算费用、cache 行为观察与账的成色。`session <id>` 看同 workspace 的指定场；`--by` 换分账表；`--json` 出机器可读账（`lubancode.usage.report` v1）。当前会话恒标 `provisional`（未封口，读已提交高水位）。费用来自 `~/.lubancode/pricing.json` 价格表（没配则 token 照报、费用 `not_priced`；本地估算，非账单）。`features.trajectory` 关时账未开：明说之后降级给内存角色粗账并注明口径差异。`day`/`week`/`workspace`/`all` 跨场汇总属后续批次。累计账与 `/context` 的"下一请求快照"是两本账，不混。
