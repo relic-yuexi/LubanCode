@@ -1,0 +1,160 @@
+# Session / Turn / Step / Action 四层生命周期与分层 Hooks 设计
+
+- 状态：待实现（本轮只落设计文档，不改生产代码）
+- 日期：2026-09-09
+- 级别：P1（执行模型的名词地基，牵动预算、队列、Hooks、usage 与轨迹多层账目）
+- 范围：agent loop 与 turn runtime 的层级语义、hooks 事件体系分层、steering 队列的 steer/followup 显式化、usage/trajectory 归属、术语词表立法、相关测试与文档。
+- 依赖：现有 `Agent::Run`、`turn_budget.hpp` 术语词表、`StepUsageRecord`、会话级 `SteeringQueue`、`Pre/PostToolUse` 事件、ExtensionRuntime 单（插件侧复用，不另造）。
+- 不在本单：并行工具执行（现有批次串行，不顺带引入）、async hook 真落地（现状 `async=true` 跳过，本单只如实记录）、compact 流程重写、loop/workflow 体系重构、子代理调度策略变更。
+
+## 一、先下断语
+
+四层自上而下：
+
+- **Session**：一次会话的完整寿命。resume、clear、compact 都不新开 Session——它们是同一 Session 内的重整，不是重生。
+- **Turn**：用户的一轮对话，`user, assistant, tool, tool, assistant` 这段——从用户输入被接受起，到本轮最终 assistant 回复落定（其后无待执行的 Action、无续跑）止。Stop 钩子要求继续、接力触发等把多次 `Agent::Run` 缝进同一只 Turn。
+- **Step**：每次 API 发送、收到 assistant 的那一段，即一次逻辑模型请求及其响应。usage、stop reason、API 耗时、attempts 都记在这一层。
+- **Action**：tool 的抽象。一次工具调用一只 Action，因果上归属生成它的 Step，执行上独立计时。
+
+每层配 `PreXxxHook` / `PostXxxHook`（`PreSessionHook`、`PostSessionHook`、`PreTurnHook`、`PostTurnHook`、`PreStepHook`、`PostStepHook`、`PreActionHook`、`PostActionHook`）。`Pre` 有决策权（可否决、可改入参），`Post` 只观察记账（不许回滚已发生的事）。
+
+`steer()` 在当前 Turn 的**下一个 Step 之前**插入排队消息（注入后随下一次请求发送）；`followup()` 在**本轮 Turn 结束之后**启动新 Turn。两者同走会话级队列，但意图、截止与归宿必须显式分开，不共享一条糊涂账。
+
+本单只写设计。引证均为 2026-09-09 只读复核结果，行号随仓库漂移，动手前重读。
+
+## 二、四层语义合同：与既有词表的映射
+
+`src/agent/turn_budget.hpp:6-27` 已立过"轮"字辈口径（task / input round / model turn），全库以此为准。本单是第三次正名，办法是**扩词表**，不是推翻它：
+
+| 本单新词 | 既有词（turn_budget 词表） | 关系说明 |
+| --- | --- | --- |
+| Session | 会话（interactive session；子代理侧是其 task 的宿主侧投影） | Session 对主会话；子代理整条 task 各自独立成账，经父 Action 关联（§六.5） |
+| Turn | 跨 input round 的用户回合 | 一只 Turn ⊇ 一或多次 input round（`Agent::Run`）。Stop 续跑、接力触发都在 Turn 内。**不得以 Run 起止触发 Pre/PostTurn** |
+| Step | model turn | 严格同义：一次宿主准入的逻辑模型请求，对应至多一条 assistant message；并行十枚工具只算一 Step；provider 网络重试不另算。`src/runtime/turn_runtime.hpp:127` 的 `StepUsageRecord` 名实相符，正名沿用 |
+| Action | 工具调用（tool use） | 既有 `Pre/PostToolUse` 的对象升格正名，旧事件名留作永久别名 |
+
+必须立法消掉的既有歧义：旧键 `max_steps_per_turn` 的 "step" 指 **input round**（兼容窗内保留旧义），与本单 Step 不是一层。词表补三条新词条并加互注，防第四次混战。
+
+### 2.1 各层起止判定
+
+- **Session 起**：会话实体创建（新会话/首次启动）。**Session 终**：会话真正关闭。既有 `SessionStart` 在 resume/clear/compact 也会重发（`src/hooks/events.hpp:15` 一族），**不能**把它直接当 PreSession 用。
+- **Turn 起**：用户输入经准入（`UserPromptSubmit` 之后、首个 Step 请求构建之前）。**Turn 终**：最终 assistant 落定且无续跑裁决。既有 `Stop`（`events.hpp:25`，注释在 28-29 行）是每拍末尾**可要求继续**的结束裁决——Stop 判续跑，Turn 就没完；PostTurn 只在终局触发，且恰好一次。
+- **Step 起**：逻辑请求开始构建（含 steer 注入合批）。**Step 终**：assistant 响应落账（消息入史、usage 记账完毕）。物理重试 attempt 全程在一只 Step 肚里。
+- **Action 起**：工具调用经准入（权限检查、改参复检通过）并 durable started。**Action 终**：结果提交入史。Post 失败不回滚、不重跑工具。
+
+## 三、ID 与账目
+
+1. **稳定 ID**：引入 `turn_id` / `step_id` / `action_id`（会话内单调递增，续跑跨 `Agent::Run` 不裂不重号）。Run 内局部 `step_index` 保留作展示，不作身份。continuation 时局部序号重号是既有病（调查确认），ID 是药。
+2. **Step 记录**：在 `StepUsageRecord` 基础上补 `step_id`、`turn_id`、attempts 明细（每次物理重试的起止与终态）、API 耗时、stop reason。usage 汇总维持"从记录求和"的既有口径（`turn_runtime.hpp:158-162`）。
+3. **usage 归属链**：logical request ↔ attempt ↔ trajectory request ↔ Step ↔ usage owner 串成一条链。unknown usage 记 unknown，**不写零**；同一场不重复计费统计。
+4. **耗时分账**：Step 的 API 耗时与 Action 的工具耗时分开统计——这正是 PostStep 定在"响应落账后、Action 执行前"的红利。
+5. **子代理与后台任务**：独立 run/Turn/usage，各记各账；父侧经发起它的那只 Action 关联溯源，不并账。
+
+## 四、Hook 分层设计
+
+### 4.1 能力矩阵
+
+| Hook | 触发时机 | 载荷要点 | 决策权 |
+| --- | --- | --- | --- |
+| PreSessionHook | 会话实体创建后、首输入准入前 | session_id、配置快照 | 可注入会话级上下文；可否决开张 |
+| PostSessionHook | 会话真正关闭时 | 会话统计（Turn/Step/usage 汇总） | 只观察 |
+| PreTurnHook | 用户输入被接受后、首个 Step 构建前 | turn_id、用户输入、会话状态 | 可改输入、可否决本 Turn（连同既有 `UserPromptSubmit` 的改参能力收口到这层） |
+| PostTurnHook | 终局：最终 assistant 落定且无续跑 | turn_id、最终回复、整 Turn 汇总（Step 数、Action 数、usage 合计、时长） | 只观察 |
+| PreStepHook | 每次 Step 请求构建前（steer 注入合批之后） | step_id、turn_id、请求摘要 | 可注入上下文、可否决本 Step（否决语义 = 终止本 Turn，不是跳过继续） |
+| PostStepHook | assistant 响应落账后、其派生 Action 执行前 | step_id、响应摘要、usage、attempts | 只观察（要干预走下一层 PreAction） |
+| PreActionHook | 工具调用准入处 | action_id、step_id、工具名与参数 | 沿既有 `PreToolUse` 决策权（allow/deny/ask、改参） |
+| PostActionHook | 结果提交入史后 | action_id、结果、工具耗时 | 沿既有 `PostToolUse`：只观察，失败不回滚 |
+
+### 4.2 与现有事件的映射
+
+- `PreToolUse` / `PostToolUse`：升格为 `PreActionHook` / `PostActionHook`，**旧事件名永久别名**（wire 命名规范同款办法），既有配置零迁移成本。
+- `UserPromptSubmit`：保留为观察事件；改输入的决策权归 `PreTurnHook`，两不发昏。
+- `Stop`：保留原位原义（每拍末尾的续跑裁决）；`PostTurnHook` 只在终局触发。顺序：Stop 先跑，判续跑则 Turn 继续、PostTurn 不触发。
+- `SessionStart` / `SessionEnd`：保留原触发面（resume/clear/compact 照发，兼容既有用户）；`Pre/PostSessionHook` 另立严格口径。P0 复核 `SessionEnd` 的实际触发面后定映射，不臆测。
+- `SubagentStop`、`LoopTaskStop`、`PreCompact`：不动。
+
+### 4.3 执行与可靠性合同
+
+- 同步 handlers 并发运行、按定义顺序归并（既有行为，写进合同测试钉死）。`async=true` 现状是跳过，文档如实记"未支持"，本单不实现。
+- **可靠 Post**：durable outbox/ack 模式——事件先落 outbox，handler ack 后销账；幂等键 `(event_id, handler_definition_hash)`。对外部副作用承诺 at-least-once，**不承诺 exactly-once**，文档写明。
+- `failure_policy=deny` 既有行为：并非所有失败都压过此前 allow（调查确认）。迁移时列兼容风险清单，不悄悄改语义。
+
+## 五、steer 与 followup
+
+现状：会话级 `SteeringQueue`（`src/cli/queue_model.hpp:122` 起，`SessionSteeringQueue()` 见 219-221 行）按 `MessageTarget` 定向；注入缝在 `src/app/interactive_session_assembly.cpp:995-1042`——工具结果之后、下一次模型请求之前，先回显再合批注入。队列条目当前**没有** steer/followup 之分。
+
+改造合同：
+
+1. **intent 显式**：条目加 `intent`（`steer` / `followup`）、`target_turn`、`deadline`（截止序号：steer 到"下一 Step 构建前"为止，followup 到"Turn 终局"为止）。
+2. **状态机**：`queued → claimed`（取走待注入）`→ committed`（随已发请求真正进史）/ `→ returned`（没赶上，回队列或退回）。与持久 history 关联完成才算消费——不是"取走了"就算。
+3. **steer()**：注入当前 Turn 的下一 Step（既有注入缝就是正门）；committed 的证据是它出现在某次已发请求的消息列表里。
+4. **followup()**：PostTurn 之后、作为新 Turn 的种子输入启动下一轮。取消发生后**默认不自动启动** followup 轮，须显式策略放行。
+5. **未消费 steer 的归宿**：Turn 终局仍有 queued/claimed 的 steer，**不得悄悄改道成 followup**——保持 queued、标注过期原因、向用户明示，由用户决定去留（与"取消后不自动续轮"同一脾气：不替用户拿主意）。
+6. **竞态**：注入缝在请求构建前合批，claimed 与请求发送之间的窗口以状态机+持久化交接兜底；断线恢复后按持久账对齐，不重发已 committed 条目。
+
+## 六、预算与兼容
+
+1. `runtime.max_turns` / `turn_limit` / `subagent.default_max_turns` 计数的是 model turn = 本单 Step。**旧键一律保留原名、原计数、原作用域**（作用域：task 级，见词表）；新文档与新配置面可用 `max_steps` 一类别名，同值同义，绝不放大预算。
+2. 旧键 `max_steps_per_turn`（input round 义）兼容窗保留；对外文档提它必须写全 input round，且必须互注"非本单 Step"。
+3. 迁移测试：同一会话、同一输入序列下，新旧键读法预算消耗逐 Step 对数相等；改名不改账，一档都不许多。
+4. Stop 续跑、接力触发的额外 Step 是否入预算、入哪只预算，按既有 task 级作用域执行，不因分层改名改变归属。
+
+## 七、分期实施
+
+### P0：定案与盘点（只读）
+
+- [ ] 复核 `SessionEnd` 实际触发面，定 `PostSessionHook` 映射。
+- [ ] 词表立法：turn_budget.hpp 词条扩 Session/Turn/Step/Action 四条 + 旧 "step"（input round 义）互注。
+- [ ] ID 方案定案：字段形状、持久化位置、断线恢复对齐规则。
+- [ ] 队列条目现状盘点：哪些入口会入队，今日有无事实上的 followup 用法。
+- [ ] Hook 能力矩阵逐行对既有 types.hpp 落差清单。
+
+验收：每项有书面结论与真实生效链路，不以本单建议冒充用户批准。
+
+### P1：ID 与账目
+
+- [ ] `turn_id` / `step_id` / `action_id` 落地，续跑跨 Run 不裂不重号。
+- [ ] `StepUsageRecord` 扩展（§三.2），usage 归属链串通，unknown 不写零、不重复计。
+- [ ] Step 的 API 耗时与 Action 的工具耗时分账入账。
+
+验收：continuation 场景 ID 稳定；usage 汇总与逐条记录对得上；计费统计无重无漏。
+
+### P2：Hook 分层
+
+- [ ] 八枚 Hook 按 §四矩阵落地；`Pre/PostToolUse` 别名兼容，旧配置零迁移。
+- [ ] Stop 与 PostTurn 边界：Stop 判续跑则 PostTurn 不触发，终局恰好一次。
+- [ ] `Pre/PostSession` 严格口径与旧 `SessionStart/End` 并存不串台。
+- [ ] durable outbox/ack 与幂等键；failure_policy 兼容风险清单落文档。
+
+验收：能力矩阵逐行有合同测试；幂等重放只记一次；deny 语义与旧版逐案对表。
+
+### P3：steer/followup 显式化与文档
+
+- [ ] 队列条目 intent/target_turn/deadline 与状态机（§五）。
+- [ ] 未消费 steer 的 returned 处置与用户明示；取消后不自动续轮。
+- [ ] 文档：术语词表、hooks 参考、配置手册（预算键兼容窗）同步。
+- [ ] 既有 steer 注入路径回归（回显+合批行为不变）。
+
+验收：§八矩阵相关行全绿；既有注入行为回归零变化。
+
+## 八、验收矩阵
+
+- Turn 跨多次 Run（Stop 续跑/接力）：turn_id 不裂、step_id 不重号、PostTurn 恰好一次。
+- Stop 要求继续：PostTurn 不触发；终局才触发。
+- resume/clear/compact：不触发 Pre/PostSession；旧 SessionStart 照发（兼容）。
+- 预算：新旧键同场景逐 Step 对数相等；task 级作用域不因改名漂移。
+- steer：下一 Step 前注入 committed；Turn 终局未消费的保持 queued + 过期标注 + 用户明示，不变 followup。
+- followup：PostTurn 后开新 Turn；取消后默认不自动开。
+- PostStep：在 usage 落账后、Action 前（API 耗时与工具耗时分账可证）。
+- PreAction deny 拦截生效；PostAction 失败不回滚不重跑。
+- outbox 幂等：同 `(event_id, handler_definition_hash)` 重放只记一次。
+- 子代理/后台任务：独立 Turn 各记各账，父 Action 可单向溯源。
+- 既有 `Pre/PostToolUse` 配置：别名路径行为逐案等价。
+
+## 九、改动边界
+
+预计改动：`src/agent/`（词表与 loop 层级语义）、`src/runtime/`（StepUsageRecord 与 ID）、`src/hooks/`（事件分层与 outbox）、`src/cli/queue_model.*` 与注入缝、`src/app/interactive_session_assembly.cpp`、相关测试（hooks/queue/turn_runtime 册）与文档（architecture/agent-loop、features/extensions/hooks、configuration 的预算键）。不新增第三方依赖；不动插件体系骨架（复用 ExtensionRuntime 单）；不顺带引入并行工具或 async hook。
+
+## 十、本轮交付与调查来源
+
+只交付本设计文档。调查起步自 2026-09-08 LubanCode 自家会话（两只只读子代理：执行层级与轨迹、队列注入与钩子），该会话中途因宿主上下文收口断裂、未产出文档；其结论经 Claude 会话逐条只读复核（turn_budget 词表、StepUsageRecord、events 枚举、SteeringQueue、注入缝五处引证核实无误）后落成本单。未改生产代码、未建测试、未编译、未推送。
